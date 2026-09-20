@@ -1,8 +1,7 @@
-
-from __future__ import annotations
-
 # LLM: 用户插话与直属孩子事件在安全点注入；按 canonical 身份隔离，不解析正文决定调度。
 # 模块用途: 让工作的代理及时看到新消息与孩子交接，保持前缀稳定并在模型接受后确认投递。
+from __future__ import annotations
+
 import json
 from typing import Any
 
@@ -232,9 +231,11 @@ def acknowledge_injected_turn_input(
             turn_id = str(getattr(params, "request_id", "") or "").strip() or durable_task_id(
                 params
             )
+            # LLM: 宿主转换锁内确认模型实际接收的精确批次；交由 acknowledgements 提交与修复回执。
+            # 函数用途: 记录模型对当前插话批次的消费确认。
             def consume() -> list[str]:
                 return list(
-                    store.consume_submitted_guidance_for_turn(
+                    store.guidance.acknowledgements.consume_submitted(
                         turn_id,
                         acknowledged_entries,
                         provider_call_id=str(
@@ -272,7 +273,7 @@ def acknowledge_injected_turn_input(
         else []
     )
     for event_id in event_ids:
-        store.mark_wake_signal_handled(event_id, now=now)
+        store.wakes.mark_handled(event_id, now=now)
     if isinstance(event_pending, set):
         event_pending.difference_update(event_ids)
     acknowledged += len(event_ids)
@@ -350,9 +351,11 @@ def mark_injected_turn_input_submitted(
         or str(getattr(params, "run_id", "") or "").strip()
         or turn_id
     )
+    # LLM: 运行循环在宿主转换锁内提交精确模型批次；必须沿 submissions 标记，不能把预留当消费。
+    # 函数用途: 提交已注入消息的批次并记录本次模型调用身份。
     def submit() -> int:
         count = len(
-            store.mark_guidance_entries_submitted(
+            store.guidance.submissions.mark_submitted(
                 turn_id,
                 submitted_entries,
                 attempt_id=attempt_id,
@@ -397,9 +400,11 @@ def restore_injected_turn_input_for_provider_retry(agent: object, params: object
         or turn_id
     )
     provider_call_id = str(state.get("_guidance_submission_id") or "").strip()
+    # LLM: 模型结构化拒绝后仍在宿主转换锁内恢复同批预留；不能重放网络结果不明的消息。
+    # 函数用途: 把已拒绝的模型请求内插话恢复到本尝试可重试状态。
     def restore() -> int:
         return len(
-            store.restore_submitted_guidance_for_retry(
+            store.guidance.submissions.restore_for_retry(
                 turn_id,
                 prepared,
                 attempt_id=attempt_id,
@@ -413,7 +418,7 @@ def restore_injected_turn_input_for_provider_retry(agent: object, params: object
     return restored
 
 
-# LLM: A compact continuation starts a fresh execution attempt. After the old attempt has returned,
+# LLM: 插话持久操作经 guidance 领域组件； A compact continuation starts a fresh execution attempt. After the old attempt has returned,
 # reserved rows are provably pre-provider and must go back to pending instead of carrying bare text.
 # 函数用途: 在 Compact 重开模型循环前释放本尝试未提交的补充消息，并返回其结构化 ID。
 def release_reserved_turn_input_after_attempt(
@@ -433,7 +438,7 @@ def release_reserved_turn_input_after_attempt(
     if not guidance_ids:
         return ()
     store = getattr(agent, "conversation_store", None)
-    release = getattr(store, "release_reserved_guidance_for_turn", None)
+    release = getattr(getattr(getattr(store, 'guidance', None), 'recovery', None), 'release_reserved', None)
     if not callable(release):
         return ()
     turn_id = str(getattr(params, "request_id", "") or "").strip() or durable_task_id(params)
@@ -453,7 +458,7 @@ def release_reserved_turn_input_after_attempt(
     return tuple(_run_active_turn_transition(params, "release", release_reserved))
 
 
-# LLM: All guidance lookups share exact agent mailboxes; child task_id may carry root lineage but must never grant the root's inbox.
+# LLM: 插话持久操作经 guidance 领域组件； All guidance lookups share exact agent mailboxes; child task_id may carry root lineage but must never grant the root's inbox.
 # 函数用途: 读取当前代理的未读补充；主代理用自己的持久任务，子代理仅用自身 run 和 agent_thread。
 def _pending_guidance_for_current_agent(store, params, *, limit):
     request_id = str(getattr(params, "request_id", "") or "").strip()
@@ -464,20 +469,20 @@ def _pending_guidance_for_current_agent(store, params, *, limit):
         return [], "", None
     entries = []
     if request_id:
-        entries.extend(store.pending_guidance("request", request_id, limit=limit))
+        entries.extend(store.guidance.pending("request", request_id, limit=limit))
     if not child and task_id and task_id != request_id:
-        entries.extend(store.pending_guidance("request", task_id, limit=limit))
+        entries.extend(store.guidance.pending("request", task_id, limit=limit))
     if run_id:
-        entries.extend(store.pending_guidance("agent_run", run_id, limit=limit))
+        entries.extend(store.guidance.pending("agent_run", run_id, limit=limit))
     if task_id:
-        entries.extend(store.pending_guidance("task", task_id, limit=limit))
+        entries.extend(store.guidance.pending("task", task_id, limit=limit))
     if child:
         attrs = getattr(params, "task_attributes", None) or {}
         thread_id, warning = str(attrs.get("agent_thread_id") or ""), None
     else:
         thread_id, warning = _thread_id_for_task(store, task_id)
     if thread_id:
-        entries.extend(store.pending_guidance("thread", thread_id, limit=limit))
+        entries.extend(store.guidance.pending("thread", thread_id, limit=limit))
     return entries, task_id, warning
 
 
@@ -499,8 +504,10 @@ def inject_pending_guidance(agent: object, params: object, *, now: float | None 
             or str(getattr(params, "run_id", "") or "").strip()
             or turn_id
         )
+        # LLM: 外层宿主转换与内层回合锁覆盖认领和提示变更；修改须联测终态竞争。
+        # 函数用途: 原子认领待处理插话并注入当前模型提示。
         def reserve_and_inject() -> list[Any]:
-            with store.guidance_turn_transition_guard(turn_id):
+            with store.guidance.ledger.turn_guard(turn_id):
                 claimed = _claim_guidance_for_active_turn(
                     store,
                     entries,
@@ -562,7 +569,7 @@ def _inject_claimed_guidance(
     _queue_guidance_ack(params, entries)
 
 
-# LLM: Pending checks and injection must use the same exact-agent mailboxes, including direct child guidance.
+# LLM: 插话持久操作经 guidance 领域组件； Pending checks and injection must use the same exact-agent mailboxes, including direct child guidance.
 # 函数用途: 检查本代理的新消息；子代理插话也能阻止旧响应直接结束，父级插话不能打断子代理。
 def has_pending_request_guidance(agent: object, params: object) -> bool:
     store = getattr(agent, "conversation_store", None)
@@ -575,14 +582,14 @@ def has_pending_request_guidance(agent: object, params: object) -> bool:
         candidates = _guidance_not_yet_injected(params, _dedupe_guidance(entries))
         turn_id = request_id or task_id
         return any(
-            store.guidance_available_for_turn(entry, expected_turn_id=turn_id)
+            store.guidance.available_for_turn(entry, expected_turn_id=turn_id)
             for entry in candidates
         )
     except Exception:
         return False
 
 
-# LLM: Claim is the durable equivalent of 会话运行时 appending into the exact active turn_state under
+# LLM: 插话持久操作经 guidance 领域组件； Claim is the durable equivalent of 会话运行时 appending into the exact active turn_state under
 # its active-turn lock. Rejected or stale-turn receipts are filtered before any prompt mutation.
 # 函数用途: 在模型安全点原子认领属于当前精确回合的补充消息。
 def _claim_guidance_for_active_turn(
@@ -593,7 +600,7 @@ def _claim_guidance_for_active_turn(
 ) -> list[Any]:
     claimed: list[Any] = []
     for entry in entries:
-        if store.claim_guidance_once_for_turn(
+        if store.guidance.claim_for_turn(
             entry,
             expected_turn_id=turn_id,
             attempt_id=attempt_id,
@@ -715,7 +722,7 @@ def _pending_task_events(agent: object, params: object) -> list[WakeSignal]:
     try:
         # Filter by the exact durable task before applying the prompt batch cap;
         # another task's backlog must not hide this turn's event behind a global limit.
-        signals, load_errors = store.pending_wake_signals_report(limit=0)
+        signals, load_errors = store.wakes.pending_report(limit=0)
     except Exception:
         return []
     if load_errors:
@@ -923,11 +930,11 @@ def _forget_guidance_ack_entries(state: dict[str, object], guidance_ids: list[st
         entries.pop(guidance_id, None)
 
 
-# LLM: ConversationStore owns the idempotent transcript projection so runtime and crash repair share
+# LLM: 插话持久操作经 guidance 领域组件； ConversationStore owns the idempotent transcript projection so runtime and crash repair share
 # one implementation; this wrapper only preserves the runtime call boundary.
 # 函数用途: 请求会话存储补写一条已消费 guidance 的用户消息投影。
 def _persist_guidance_transcript(store: object, entry: Any) -> bool:
-    projector = getattr(store, "_project_guidance_transcript", None)
+    projector = getattr(getattr(getattr(store, 'guidance', None), 'acknowledgements', None), 'project_transcript', None)
     if entry is None or not callable(projector):
         return False
     return bool(projector(entry))
@@ -937,7 +944,7 @@ def _thread_id_for_task(store: object, task_id: str) -> tuple[str, dict[str, obj
     if not task_id:
         return "", None
     try:
-        thread = store.thread_for_task(task_id)
+        thread = store.tasks.thread_for(task_id)
     except Exception as exc:
         return "", runtime_error_report(exc, context="runtime_guidance.thread_for_task")
     return str(getattr(thread, "thread_id", "") or ""), None

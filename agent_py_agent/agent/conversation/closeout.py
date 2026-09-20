@@ -2,7 +2,7 @@
 
 工具循环停下后,"下一步是什么"由 decide_closeout 这一个纯函数决定——CLI
 resume_loop 与 gateway 调度器共用, 停止原因采集方(_final_response_after_*)
-只报因不再各自决定命运。白名单 gate(should_continue_task)保持原处, 其判定
+只报因不再各自决定命运。技术续跑判据使用 turn_end.should_continue_task，其判定
 结果以 continuable 事实输入; goal 授权(EXEC-39)以 active_goal 事实输入;
 本模块不读 store、不读 policy、不发事件、不改状态——纯组合器, 便于穷举
 单测与两侧复用。改动契约: 新增事实/终态必须同步更新 truth table 测试与

@@ -3,6 +3,7 @@
 # LLM: This module is the bounded incremental bridge between a child runner
 # subprocess and owner-facing clients; completed public blocks also live in the canonical conversation ledger.
 # ConversationThread, SubAgentTask, guidance, cancellation, and lifecycle remain authoritative.
+# 尾部 JSONL 读取复用 store_io，不加载存储组装或拥有第二份账本。
 # 模块用途: 写入子代理有界增量流供实时查看；裁剪该流不删除同thread已保存的完整公开过程。
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ from .background_transcript import (
     BACKGROUND_TRANSCRIPT_EVENT_PHASES,
     BACKGROUND_TRANSCRIPT_SCHEMA,
 )
-from .store import read_jsonl_tail_report
+from .store_io import read_jsonl_tail_report
 
 AGENT_TRANSCRIPT_MAX_EVENTS = 1024
 AGENT_TRANSCRIPT_MAX_BYTES = 8 * 1024 * 1024
@@ -33,7 +34,7 @@ AGENT_TRANSCRIPT_MAX_BYTES = 8 * 1024 * 1024
 def agent_transcript_path(agent: object, run_id: str) -> Path:
     selected = validate_opaque_id(run_id, kind="run_id")
     store = getattr(agent, "conversation_store", None)
-    root = getattr(store, "root", None)
+    root = getattr(getattr(store, "storage", None), "root", None)
     if root is None:
         raise RuntimeError("agent transcript requires ConversationStore")
     return Path(root) / "agent_transcript_events" / f"{selected}.jsonl"

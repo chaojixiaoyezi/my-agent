@@ -41,11 +41,11 @@ def current_goal_scope_prompt(agent: object, params: object) -> str:
     store = getattr(agent, "conversation_store", None)
     if not thread_id or not task_id or store is None:
         return ""
-    goal = store.load_goal(thread_id, task_id=task_id, goal_id=goal_id)
+    goal = store.goals.load(thread_id, task_id=task_id, goal_id=goal_id)
     if goal is None or goal.task_id != task_id:
         return ""
     attrs["thread_goal_revision"] = goal.revision
-    scope = goal_execution_scope(goal, tuple(store.load_goals(thread_id)))
+    scope = goal_execution_scope(goal, tuple(store.goals.list(thread_id)))
     return (
         "[current-goal-scope]\n" + json.dumps(scope, ensure_ascii=False)
         + "\n当前代理只有一个未结束 Goal，围绕 current_goal 推进；历史目标不是新任务。"

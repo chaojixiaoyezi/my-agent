@@ -115,12 +115,12 @@ def observe_runner_activity(worker: Any, run_id: str) -> None:
 # LLM: 仅在工具长等待已触发时读同 root 的 canonical 审批账，不每个心跳扫文件，不推断授权决定。
 # 函数用途: 区分等待审批和正在运行工具，只暴露审批 ID，不把工具参数或私密内容带入提醒。
 def _include_pending_approval(worker: Any, task: Any, sample: dict[str, Any]) -> None:
-    from ...conversation.agent_tool_approval import list_pending_subagent_tool_approvals
+    from ...conversation.agent_tool_approval import list_pending_agent_tool_approvals
 
     root_id = str(getattr(task, "root_id", "") or "")
     if not root_id:
         return
-    for row in list_pending_subagent_tool_approvals(worker, root_task_id=root_id):
+    for row in list_pending_agent_tool_approvals(worker, root_task_id=root_id):
         if str(row.get("run_id") or "") == str(task.id):
             sample["phase"] = "approval_wait"
             sample["permission_id"] = str(row["request"]["permission_id"])

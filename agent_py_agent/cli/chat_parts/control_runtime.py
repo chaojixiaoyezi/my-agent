@@ -1,3 +1,5 @@
+# LLM: TUI 控制沿持久控制回执执行；显式工作目录复用普通消息投影，权限仍由 Gateway 裁决。
+# 模块用途: 把终端控制命令交给共享协议，保留会话身份、目录和可重试的消息编号。
 from __future__ import annotations
 
 """CLI adapter for the shared ordinary-conversation control protocol.
@@ -46,7 +48,7 @@ class ChatControlExecution:
 
 # LLM: CLI dispatch preserves the shared command contract while swapping only its runtime backend;
 # an optional manual-Compact target is transport metadata and never parsed from command prose.
-# 函数用途：按本地或 Gateway 模式执行控制命令，并可携带精确 Compact 停止目标。
+# 函数用途:按本地或 Gateway 模式执行控制命令，并可携带精确 Compact 停止目标。
 def execute_chat_control(
     execution: ChatControlExecution,
     command: ConversationControlCommand,
@@ -66,9 +68,8 @@ def execute_chat_control(
     return _execute_local_control(execution, command)
 
 
-# LLM: Gateway CLI controls use the thin client's sole HTTP writer when available, preserving
-# scoped owner identity and an optional exact Compact target in typed metadata across retries.
-# 函数用途：向本机 Gateway 提交即时控制，保证多用户身份和精确停止目标不在传输层漂移。
+# LLM: 控制请求通过同一客户端写入；目录只投影一次，重试必须保持身份、目录与精确 Compact 目标不变。
+# 函数用途:向本机 Gateway 提交即时控制，保证多用户身份和精确停止目标不在传输层漂移。
 def _execute_gateway_control(
     execution: ChatControlExecution,
     command: ConversationControlCommand,
@@ -96,6 +97,13 @@ def _execute_gateway_control(
         },
     }
     selected_control_target = str(target_control_message_id or "").strip()
+    from .gateway_client import _gateway_submit_workspace
+
+    workspace = _gateway_submit_workspace(
+        execution.agent, workspace_root=None, workspace_roots=None,
+    )
+    if workspace.get("cwd"):
+        payload["workspace"] = workspace
     if selected_control_target:
         payload["metadata"]["target_control_message_id"] = selected_control_target
     timeout = _gateway_control_timeout(execution, command)
@@ -332,8 +340,8 @@ def _http_error_body(exc: urllib.error.HTTPError) -> dict[str, object]:
     return result
 
 
-# LLM: Local control targets only the exact run currently mounted in this chat window.
-# 函数用途：在不启动 Gateway 的终端聊天里查询、纠偏或停止当前执行轮。
+# LLM: 插话持久操作经 guidance 领域组件； Local control targets only the exact run currently mounted in this chat window.
+# 函数用途:在不启动 Gateway 的终端聊天里查询、纠偏或停止当前执行轮。
 def _execute_local_control(
     execution: ChatControlExecution,
     command: ConversationControlCommand,
@@ -384,7 +392,7 @@ def _execute_local_control(
                 "当前没有运行中的内容，补充要求未保存。",
             )
         try:
-            execution.agent.conversation_store.append_guidance(
+            execution.agent.conversation_store.guidance.append(
                 {
                     "target_type": "request",
                     "target_id": request_id,
@@ -417,26 +425,26 @@ def _execute_local_control(
     )
 
 
-# LLM: Local stop retires only the interrupted request's pending steer inputs.
-# 函数用途：防止本地窗口停止后，旧 `/btw` 在后续新一轮里意外生效。
+# LLM: 插话持久操作经 guidance 领域组件； Local stop retires only the interrupted request's pending steer inputs.
+# 函数用途:防止本地窗口停止后，旧 `/btw` 在后续新一轮里意外生效。
 def _retire_local_guidance(agent: object, request_id: str) -> None:
     try:
         store = agent.conversation_store
-        entries = store.pending_guidance("request", request_id, limit=0)
-        store.mark_guidance_delivered([entry.guidance_id for entry in entries])
+        entries = store.guidance.pending("request", request_id, limit=0)
+        store.guidance.ledger.mark_delivered([entry.guidance_id for entry in entries])
     except Exception:
         return
 
 
 # LLM: Local verbose persists the same per-thread setting as Gateway without opening a model turn.
-# 函数用途：在本地直跑窗口读取或修改过程显示档位，并直接返回系统回执。
+# 函数用途:在本地直跑窗口读取或修改过程显示档位，并直接返回系统回执。
 def _execute_local_verbose(
     execution: ChatControlExecution,
     command: ConversationControlCommand,
 ) -> ConversationControlResult:
     try:
         store = execution.agent.conversation_store
-        thread = store.get_or_create_thread(
+        thread = store.threads.get_or_create(
             {
                 "canonical_user_id": "local-agent",
                 "channel": "chat",
@@ -446,7 +454,7 @@ def _execute_local_verbose(
             }
         )
         if command.value:
-            thread = store.update_verbose_level(thread.thread_id, command.value)
+            thread = store.threads.update_verbose_level(thread.thread_id, command.value)
         return ConversationControlResult(
             "verbose",
             True,
@@ -464,7 +472,7 @@ def _execute_local_verbose(
 
 
 # LLM: Local /status renders only facts already held by the chat worker and configured model.
-# 函数用途：生成本地直跑任务的即时状态快照。
+# 函数用途:生成本地直跑任务的即时状态快照。
 def _local_status(execution: ChatControlExecution) -> ConversationTaskStatus:
     state = execution.state
     status = "running" if state.running else "queued" if state.queued_count else "idle"
@@ -485,7 +493,7 @@ def _local_status(execution: ChatControlExecution) -> ConversationTaskStatus:
 
 
 # LLM: Subagent teardown stays asynchronous so a local stop acknowledgement is immediate.
-# 函数用途：后台回收本地当前请求派生的子代理树。
+# 函数用途:后台回收本地当前请求派生的子代理树。
 def _cancel_local_subagents(agent: object, request_id: str) -> None:
     try:
         run_ids = agent.subagent_run_ids_for_request(request_id)

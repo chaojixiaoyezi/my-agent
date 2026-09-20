@@ -50,7 +50,7 @@ def load_gateway_chat_history(
     if not selected_session_id or store is None:
         return GatewayChatHistorySnapshot()
     try:
-        thread, thread_error = store.resolve_thread_report(
+        thread, thread_error = store.threads.resolve_report(
             channel=LOCAL_CHAT_CHANNEL,
             channel_conversation_id=selected_session_id,
             channel_user_id=LOCAL_AGENT_USER_ID,
@@ -63,7 +63,7 @@ def load_gateway_chat_history(
         return GatewayChatHistorySnapshot()
     thread_id = str(getattr(thread, "thread_id", "") or "")
     try:
-        page = store.history_page_report(
+        page = store.messages.history_page_report(
             thread_id,
             before=before_message_cursor,
             limit=max(16, max(1, int(max_turns or 1)) * 4),

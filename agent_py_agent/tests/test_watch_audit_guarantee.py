@@ -3999,7 +3999,7 @@ def test_source_worker_finding_is_bound_to_acked_source_ref_and_idempotent(
     persist_state(state)
     tool = _tool(owner_home, source)
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "u-test",
             "channel": "internal",
@@ -4007,7 +4007,7 @@ def test_source_worker_finding_is_bound_to_acked_source_ref_and_idempotent(
             "channel_user_id": "u-test",
         }
     )
-    store.bind_task(
+    store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": "audit-finding",
@@ -4118,7 +4118,7 @@ def test_source_worker_finding_is_bound_to_acked_source_ref_and_idempotent(
     ]
     assert rows[0]["id"] == rows[1]["id"] == first["finding_id"]
     assert [row["revision"] for row in rows] == [1, 2]
-    signals = store.pending_wake_signals()
+    signals = store.wakes.pending()
     assert len(signals) == 2
     assert all(signal.reason == "audit_finding" for signal in signals)
     assert {signal.metadata["finding_id"] for signal in signals} == {

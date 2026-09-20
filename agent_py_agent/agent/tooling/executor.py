@@ -692,6 +692,9 @@ def _handler_arguments(
     return payload
 
 
+# LLM: 身份与 owner 地址只由宿主请求覆盖；canonical owner home 不随 Full Access 的路径墙清空，
+# 不能接受模型参数或旧 run_scope 覆盖。修改时同步进程、PTY 与跨会话权限回归。
+# 函数用途: 为工具冻结本轮真实身份和持久状态地址；此地址不授予额外文件访问权限。
 def _handler_run_scope(
     request: ToolExecutorRequest,
     call: ToolCall,
@@ -705,6 +708,8 @@ def _handler_run_scope(
     supplied.update(
         {
             "owner_id": request.operation_owner_id,
+            "owner_home": str((request.write_boundary or {}).get("canonical_owner_home_root")
+                              or request.owner_scope_root or ""),
             "run_id": call.run_id,
             "task_id": _task_id(request),
             "attempt_id": call.attempt_id,

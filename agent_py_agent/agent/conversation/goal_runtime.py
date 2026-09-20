@@ -30,7 +30,7 @@ def raise_goal_continuation_wake(
     }
     if now is not None:
         request["now"] = now
-    return store.raise_wake_signal(request)
+    return store.wakes.raise_signal(request)
 
 
 __all__ = ["raise_goal_continuation_wake"]

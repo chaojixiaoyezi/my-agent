@@ -77,6 +77,19 @@ def gateway_paths_from_root(root: Path) -> GatewayPaths:
     )
 
 
+# LLM: 路径跟随已认领的权威队列记录，不能按执行 Agent 的 owner root 重新派生；同步恢复/轮询测试。
+# 函数用途: 为正常执行和恢复取得同一 chunk 文件地址，使多用户客户端能读到真实过程。
+def claimed_request_chunk_path(request_path: Path, request_id: str) -> Path:
+    """Keep live chunks beside the authoritative claimed queue record.
+
+    The request worker claims records in the base Gateway queue even when the
+    actual run uses an owner-scoped agent.  HTTP progress polling and final
+    archival both follow that claimed record, so deriving this path from the
+    owner agent root would make per-user progress invisible to the adapter.
+    """
+    return request_path.with_name(f"{request_id}.chunks.jsonl")
+
+
 def gateway_chunk_path(paths: GatewayPaths, request_id: str) -> Path:
     return paths.processing / f"{request_id}.chunks.jsonl"
 

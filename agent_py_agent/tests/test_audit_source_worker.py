@@ -170,7 +170,7 @@ def _bind_audit_workspace(
     root = audit_workspace_path(owner_home, audit_id)
     root.mkdir(parents=True, exist_ok=True)
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "owner-a",
             "channel": "internal",
@@ -178,7 +178,7 @@ def _bind_audit_workspace(
             "channel_user_id": "owner-a",
         }
     )
-    store.bind_task(
+    store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": audit_id,
@@ -216,7 +216,7 @@ def test_active_named_audit_lineage_reports_only_current_run_epoch(tmp_path: Pat
         tmp_path,
     )
     audit_id = "audit-current-epoch-lineage"
-    thread = agent.conversation_store.get_or_create_thread(
+    thread = agent.conversation_store.threads.get_or_create(
         {
             "canonical_user_id": "owner-a",
             "channel": "internal",
@@ -224,7 +224,7 @@ def test_active_named_audit_lineage_reports_only_current_run_epoch(tmp_path: Pat
             "channel_user_id": "owner-a",
         }
     )
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": audit_id,
@@ -275,10 +275,7 @@ def test_expired_active_parent_remains_authorized_while_durable_backlog_drains(
         work_kind="audit",
         expires_at=99.0,
     )
-    store = SimpleNamespace(
-        thread_for_task=lambda _task_id: SimpleNamespace(thread_id="thread-expired"),
-        task_links=lambda _thread_id: [link],
-    )
+    store = SimpleNamespace(tasks=SimpleNamespace(thread_for=lambda _task_id: SimpleNamespace(thread_id="thread-expired"), list=lambda _thread_id: [link]))
     agent = SimpleNamespace(conversation_store=store)
     monkeypatch.setattr(source_worker_module.time, "time", lambda: 100.0)
 
@@ -1211,7 +1208,7 @@ def test_restart_reconcile_skips_terminal_named_audit_with_pending_watch(
     agent, owner_home = _agent(tmp_path, audit_id=audit_id)
     _watch(owner_home, audit_id, 1)
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "owner-a",
             "channel": "internal",
@@ -1219,7 +1216,7 @@ def test_restart_reconcile_skips_terminal_named_audit_with_pending_watch(
             "channel_user_id": "owner-a",
         }
     )
-    store.bind_task(
+    store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": audit_id,
@@ -1262,7 +1259,7 @@ def test_terminal_parent_closes_watch_and_cancels_existing_source_worker(
     created = ensure_audit_source_worker(agent, state)
     run_id = str(created["run_id"])
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "owner-a",
             "channel": "internal",
@@ -1270,7 +1267,7 @@ def test_terminal_parent_closes_watch_and_cancels_existing_source_worker(
             "channel_user_id": "owner-a",
         }
     )
-    store.bind_task(
+    store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": audit_id,
@@ -1309,7 +1306,7 @@ def test_restart_reconcile_creates_worker_for_exact_active_named_audit(
     agent, owner_home = _agent(tmp_path, audit_id=audit_id)
     _watch(owner_home, audit_id, 1)
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "owner-a",
             "channel": "internal",
@@ -1317,7 +1314,7 @@ def test_restart_reconcile_creates_worker_for_exact_active_named_audit(
             "channel_user_id": "owner-a",
         }
     )
-    store.bind_task(
+    store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": audit_id,
@@ -1354,7 +1351,7 @@ def test_restart_reconcile_keeps_replacement_in_parent_audit_workspace(
     task_root = audit_workspace_path(owner_home, audit_id)
     task_root.mkdir(parents=True)
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "owner-a",
             "channel": "internal",
@@ -1362,7 +1359,7 @@ def test_restart_reconcile_keeps_replacement_in_parent_audit_workspace(
             "channel_user_id": "owner-a",
         }
     )
-    store.bind_task(
+    store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": audit_id,
@@ -1408,7 +1405,7 @@ def test_restart_reconcile_migrates_idle_legacy_worker_to_parent_audit_workspace
     task_root = audit_workspace_path(owner_home, audit_id)
     task_root.mkdir(parents=True)
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "owner-a",
             "channel": "internal",
@@ -1416,7 +1413,7 @@ def test_restart_reconcile_migrates_idle_legacy_worker_to_parent_audit_workspace
             "channel_user_id": "owner-a",
         }
     )
-    store.bind_task(
+    store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": audit_id,
@@ -1689,15 +1686,13 @@ def test_active_audit_revision_syncs_into_next_source_worker_slice(
         validated_notes="下一批采用新的共享要求。",
         user_prepare_history="完整用户历史只保存在命名 Audit。",
     )
-    store = SimpleNamespace(
-        load_task_link=lambda selected: SimpleNamespace(
+    store = SimpleNamespace(tasks=SimpleNamespace(load=lambda selected: SimpleNamespace(
             task_id=selected,
             work_kind="audit",
             status="active",
             goal=new_goal,
             run_prompt="本次运行增加复核要求。",
-        )
-    )
+        )))
     agent.conversation_store = store
 
     assert audit_runtime_requirement_for_task(store, audit_id) == ("下一批采用新的共享要求。")
@@ -1773,8 +1768,7 @@ def test_active_audit_transport_revision_preserves_progress_and_appends_next_sli
             ]
         )[0]
     )
-    agent.conversation_store = SimpleNamespace(
-        load_task_link=lambda selected: SimpleNamespace(
+    agent.conversation_store = SimpleNamespace(tasks=SimpleNamespace(load=lambda selected: SimpleNamespace(
             task_id=selected,
             work_kind="audit",
             status="active",
@@ -1784,8 +1778,7 @@ def test_active_audit_transport_revision_preserves_progress_and_appends_next_sli
             ),
             run_prompt="继续同一轮监控。",
             effective_source_bindings=(binding,),
-        )
-    )
+        )))
 
     assert _sync_source_worker_runtime_context(agent, state, task) is True
 
@@ -1986,7 +1979,7 @@ def test_recovery_projects_persisted_finding_outbox_once(
     audit_id = "audit-finding-recovery"
     agent, owner_home = _agent(tmp_path, audit_id=audit_id)
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "owner-a",
             "channel": "internal",
@@ -1994,7 +1987,7 @@ def test_recovery_projects_persisted_finding_outbox_once(
             "channel_user_id": "owner-a",
         }
     )
-    store.bind_task(
+    store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": audit_id,
@@ -2052,7 +2045,7 @@ def test_recovery_projects_persisted_finding_outbox_once(
     assert recovered["state"] == "caught_up", recovered
     assert recovered["published"] == 1
     assert duplicate["published"] == 0
-    signals = store.pending_wake_signals()
+    signals = store.wakes.pending()
     assert len(signals) == 1
     assert signals[0].metadata["finding_id"] == "af-recovery"
     assert signals[0].metadata["requires_llm_report"] is True
@@ -2064,9 +2057,9 @@ def test_recovery_projects_persisted_finding_outbox_once(
     # queue row without a sent delivery receipt. The durable finding outbox
     # must recreate that exact event instead of declaring it delivered.
     first_signal_id = signals[0].wake_signal_id
-    store.mark_wake_signal_handled(first_signal_id)
+    store.wakes.mark_handled(first_signal_id)
     repaired = reconcile_audit_finding_outbox(agent, task.id)
-    replayed = store.pending_wake_signals()
+    replayed = store.wakes.pending()
     assert repaired["owner_delivery_replay"]["requeued"] == 1
     assert len(replayed) == 1
     assert replayed[0].wake_signal_id != first_signal_id
@@ -2127,7 +2120,7 @@ def test_finding_delivery_receipt_uses_verdict_ref_not_supplementary_evidence(
     audit_id = "audit-finding-mixed-evidence"
     agent, owner_home = _agent(tmp_path, audit_id=audit_id)
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "owner-a",
             "channel": "internal",
@@ -2135,7 +2128,7 @@ def test_finding_delivery_receipt_uses_verdict_ref_not_supplementary_evidence(
             "channel_user_id": "owner-a",
         }
     )
-    store.bind_task(
+    store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": audit_id,
@@ -2199,7 +2192,7 @@ def test_finding_delivery_receipt_uses_verdict_ref_not_supplementary_evidence(
     )
     assert replay == {"ok": True, "state": "caught_up", "requeued": 0}
     assert checked == [(canonical,), (canonical,)]
-    assert store.pending_wake_signals() == []
+    assert store.wakes.pending() == []
 
 
 def test_audit_terminal_receipt_check_reads_each_watch_once(
@@ -2275,7 +2268,7 @@ def test_recovery_projects_inline_verdict_finding_after_crash_once(
     audit_id = "audit-inline-finding-recovery"
     agent, owner_home = _agent(tmp_path, audit_id=audit_id)
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "owner-a",
             "channel": "internal",
@@ -2283,7 +2276,7 @@ def test_recovery_projects_inline_verdict_finding_after_crash_once(
             "channel_user_id": "owner-a",
         }
     )
-    store.bind_task(
+    store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": audit_id,
@@ -2355,7 +2348,7 @@ def test_recovery_projects_inline_verdict_finding_after_crash_once(
     assert finding_rows[0]["source_refs"] == [source_ref]
     assert finding_rows[0]["audit_run_epoch"] == 7
     assert finding_rows[0]["ingest_run_epoch"] == 6
-    signals = store.pending_wake_signals()
+    signals = store.wakes.pending()
     assert len(signals) == 1
     assert signals[0].metadata["delivery_evidence_refs"] == [source_ref]
     assert signals[0].metadata["audit_run_epoch"] == 7
@@ -2379,7 +2372,7 @@ def test_nonreport_finding_is_durable_without_waking_owner_model(
     audit_id = "audit-finding-no-report"
     agent, owner_home = _agent(tmp_path, audit_id=audit_id)
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "owner-a",
             "channel": "internal",
@@ -2387,7 +2380,7 @@ def test_nonreport_finding_is_durable_without_waking_owner_model(
             "channel_user_id": "owner-a",
         }
     )
-    store.bind_task(
+    store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": audit_id,
@@ -2421,8 +2414,8 @@ def test_nonreport_finding_is_durable_without_waking_owner_model(
     assert published["ok"] is True
     assert published["report_requested"] is False
     assert published["wake_signal_id"] == ""
-    assert store.pending_wake_signals() == []
-    observations = store.recent_observations(thread.thread_id)
+    assert store.wakes.pending() == []
+    observations = store.observations.recent(thread.thread_id)
     assert len(observations) == 1
     assert observations[0].requires_main_agent is False
     assert observations[0].requires_llm_report is False
@@ -3287,7 +3280,7 @@ def test_capacity_alert_publishes_edge_and_recovery_once(
     agent, owner_home = _agent(tmp_path, audit_id=audit_id)
     store = ConversationStore(tmp_path / "conversations")
     agent.conversation_store = store
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "owner-a",
             "channel": "internal",
@@ -3295,7 +3288,7 @@ def test_capacity_alert_publishes_edge_and_recovery_once(
             "channel_user_id": "owner-a",
         }
     )
-    store.bind_task(
+    store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": audit_id,
@@ -3347,8 +3340,8 @@ def test_capacity_alert_publishes_edge_and_recovery_once(
     assert first["source_count"] == 10
     assert first["alert_source_count"] == 10
     assert duplicate["published"] == 0
-    assert len(store.pending_wake_signals()) == 1
-    wake = store.pending_wake_signals()[0]
+    assert len(store.wakes.pending()) == 1
+    wake = store.wakes.pending()[0]
     assert wake.metadata["schema_version"] == "audit-capacity-event.v2"
     assert wake.metadata["source_count"] == 10
     assert wake.metadata["active_worker_count"] == 10
@@ -3381,8 +3374,8 @@ def test_capacity_alert_publishes_edge_and_recovery_once(
     )
 
     assert recovery["published"] == 1
-    assert len(store.pending_wake_signals()) == 2
-    recovery_wake = store.pending_wake_signals()[1]
+    assert len(store.wakes.pending()) == 2
+    recovery_wake = store.wakes.pending()[1]
     assert recovery_wake.metadata["capacity_state"] == "recovered"
     assert recovery_wake.metadata["pending"] == 0
 

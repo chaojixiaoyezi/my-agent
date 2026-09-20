@@ -18,9 +18,9 @@ from agent_py_agent.agent.conversation.agent_control import (
     stop_agent,
 )
 from agent_py_agent.agent.conversation.agent_tool_approval import (
-    list_pending_subagent_tool_approvals,
-    publish_subagent_tool_approval,
-    wait_for_subagent_tool_approval,
+    list_pending_agent_tool_approvals,
+    publish_agent_tool_approval,
+    wait_for_agent_tool_approval,
 )
 from agent_py_agent.agent.conversation.background_transcript import (
     BackgroundTranscriptSink,
@@ -50,7 +50,7 @@ def _bound_agent_tree(tmp_path):
         tmp_path / "workspace",
     )
     store = agent.conversation_store
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "local-agent",
             "channel": "chat",
@@ -59,7 +59,7 @@ def _bound_agent_tree(tmp_path):
         }
     )
     root_id = "task-root"
-    store.bind_task(
+    store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": root_id,
@@ -69,7 +69,7 @@ def _bound_agent_tree(tmp_path):
             "now": time.time(),
         }
     )
-    store.select_workspace_task(
+    store.tasks.select_workspace_task(
         {
             "thread_id": thread.thread_id,
             "task_id": root_id,
@@ -199,7 +199,7 @@ def test_owner_can_view_steer_stop_and_reopen_terminal_child(tmp_path) -> None:
     assert accepted["guidance_id"] == replay["guidance_id"]
     assert replay["delivery"] == "queued"
     assert replay["status"] == "pending"
-    entries = agent.conversation_store.recent_guidance("agent_run", child.id)
+    entries = agent.conversation_store.guidance.recent("agent_run", child.id)
     assert len(entries) == 1
     entry = entries[0]
     expected_turn_id = str(entry.metadata["expected_turn_id"])
@@ -207,21 +207,21 @@ def test_owner_can_view_steer_stop_and_reopen_terminal_child(tmp_path) -> None:
     assert entry.metadata["record_in_transcript"] is True
     assert entry.metadata["thread_id"] == child.agent_thread_id
     assert entry.metadata["agent_run_id"] == child.id
-    assert agent.conversation_store.claim_guidance_once_for_turn(
+    assert agent.conversation_store.guidance.claim_for_turn(
         entry,
         expected_turn_id=expected_turn_id,
         attempt_id=expected_turn_id,
     ) is True
-    assert agent.conversation_store.mark_guidance_entries_submitted(
+    assert agent.conversation_store.guidance.submissions.mark_submitted(
         expected_turn_id,
         [entry],
         attempt_id=expected_turn_id,
     ) == (entry.guidance_id,)
-    assert agent.conversation_store.consume_submitted_guidance_for_turn(
+    assert agent.conversation_store.guidance.acknowledgements.consume_submitted(
         expected_turn_id,
         [entry],
     ) == (entry.guidance_id,)
-    child_messages = agent.conversation_store.recent_messages(
+    child_messages = agent.conversation_store.messages.recent(
         child.agent_thread_id,
         limit=10,
     )
@@ -229,9 +229,9 @@ def test_owner_can_view_steer_stop_and_reopen_terminal_child(tmp_path) -> None:
     assert child_messages[-1].content == "请先运行完整测试"
     assert child_messages[-1].metadata["agent_run_id"] == child.id
 
-    root_thread = agent.conversation_store.thread_for_task("task-root")
+    root_thread = agent.conversation_store.tasks.thread_for("task-root")
     assert root_thread is not None
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": root_thread.thread_id,
             "task_id": child.id,
@@ -258,7 +258,7 @@ def test_owner_can_view_steer_stop_and_reopen_terminal_child(tmp_path) -> None:
     assert child_authority["status"] == "cancelled"
     assert grandchild_authority["status"] == "cancelled"
     assert stopped["result"]["parent_delivery"]["status"] == "delivered"
-    signals = agent.conversation_store.pending_wake_signals(limit=0)
+    signals = agent.conversation_store.wakes.pending(limit=0)
     assert len(signals) == 1
     assert signals[0].reason == "subagent_runner_finished"
     assert signals[0].source_agent_id == child.id
@@ -325,7 +325,7 @@ def test_owner_stop_grandchild_immediately_resumes_waiting_direct_parent(
     assert delivery["status"] == "delivered"
     assert delivery["parent_run_id"] == parent.id
     assert delivery["resume_requested"] is True
-    assert agent.conversation_store.pending_wake_signals(limit=0) == []
+    assert agent.conversation_store.wakes.pending(limit=0) == []
 
 
 def test_owner_stop_grandchild_resumes_parent_while_sibling_keeps_running(
@@ -420,9 +420,9 @@ def test_interactive_stop_acknowledges_before_slow_canonical_closeout(
 
 def test_interactive_stop_eventually_wakes_root_parent(tmp_path) -> None:
     agent, scope, child = _bound_agent_tree(tmp_path)
-    root_thread = agent.conversation_store.thread_for_task("task-root")
+    root_thread = agent.conversation_store.tasks.thread_for("task-root")
     assert root_thread is not None
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": root_thread.thread_id,
             "task_id": child.id,
@@ -442,7 +442,7 @@ def test_interactive_stop_eventually_wakes_root_parent(tmp_path) -> None:
     deadline = time.monotonic() + 2.0
     signals = []
     while time.monotonic() < deadline:
-        signals = agent.conversation_store.pending_wake_signals(limit=0)
+        signals = agent.conversation_store.wakes.pending(limit=0)
         if agent.subagents.load(child.id).status == "CANCELLED" and signals:
             break
         time.sleep(0.01)
@@ -513,7 +513,7 @@ def test_agent_guidance_rejects_nonterminal_task_without_active_attempt(tmp_path
         )
 
     assert exc_info.value.error_code == "AGENT_NOT_RUNNING"
-    assert agent.conversation_store.recent_guidance("agent_run", child.id) == []
+    assert agent.conversation_store.guidance.recent("agent_run", child.id) == []
 
 
 def test_consumed_guidance_http_replay_does_not_queue_another_attempt(tmp_path) -> None:
@@ -525,19 +525,19 @@ def test_consumed_guidance_http_replay_does_not_queue_another_attempt(tmp_path) 
         message="确认收到后继续等待。",
         message_id="agent-steer-consumed-replay",
     )
-    entry = agent.conversation_store.recent_guidance("agent_run", child.id)[0]
+    entry = agent.conversation_store.guidance.recent("agent_run", child.id)[0]
     turn_id = str(entry.metadata["expected_turn_id"])
-    assert agent.conversation_store.claim_guidance_once_for_turn(
+    assert agent.conversation_store.guidance.claim_for_turn(
         entry,
         expected_turn_id=turn_id,
         attempt_id=turn_id,
     ) is True
-    assert agent.conversation_store.mark_guidance_entries_submitted(
+    assert agent.conversation_store.guidance.submissions.mark_submitted(
         turn_id,
         [entry],
         attempt_id=turn_id,
     ) == (entry.guidance_id,)
-    assert agent.conversation_store.consume_submitted_guidance_for_turn(
+    assert agent.conversation_store.guidance.acknowledgements.consume_submitted(
         turn_id,
         [entry],
     ) == (entry.guidance_id,)
@@ -628,7 +628,7 @@ def test_agent_guidance_wakes_waiting_parent_on_same_run_once(
     assert starts == [child.id]
     assert parent_wait_blocks_dispatch(agent.subagents.load(child.id)) is False
     assert agent.subagents.load(grandchild.id).status == "PLANNING"
-    entries = agent.conversation_store.recent_guidance("agent_run", child.id)
+    entries = agent.conversation_store.guidance.recent("agent_run", child.id)
     assert len(entries) == 1
     assert entries[0].metadata["expected_turn_id"] == successor["attempt_id"]
 
@@ -693,7 +693,7 @@ def test_concurrent_waiting_parent_guidance_starts_one_runner(
     assert failures == []
     assert len(responses) == 2
     assert starts == [child.id]
-    assert len(agent.conversation_store.recent_guidance("agent_run", child.id)) == 2
+    assert len(agent.conversation_store.guidance.recent("agent_run", child.id)) == 2
 
 
 def test_waiting_parent_guidance_retries_launch_without_duplicate_message(
@@ -728,7 +728,7 @@ def test_waiting_parent_guidance_retries_launch_without_duplicate_message(
             message_id="agent-steer-retry-launch",
         )
     assert first_error.value.error_code == "AGENT_RESUME_UNAVAILABLE"
-    assert len(agent.conversation_store.recent_guidance("agent_run", child.id)) == 1
+    assert len(agent.conversation_store.guidance.recent("agent_run", child.id)) == 1
 
     accepted = send_agent_guidance(
         agent,
@@ -740,7 +740,7 @@ def test_waiting_parent_guidance_retries_launch_without_duplicate_message(
 
     assert accepted["resume"]["status"] == "started"
     assert starts == 2
-    assert len(agent.conversation_store.recent_guidance("agent_run", child.id)) == 1
+    assert len(agent.conversation_store.guidance.recent("agent_run", child.id)) == 1
 
 
 def test_agent_guidance_rejects_runtime_attempt_before_task_projection_commits(tmp_path) -> None:
@@ -759,7 +759,7 @@ def test_agent_guidance_rejects_runtime_attempt_before_task_projection_commits(t
         )
 
     assert exc_info.value.error_code == "AGENT_NOT_RUNNING"
-    assert agent.conversation_store.recent_guidance("agent_run", child.id) == []
+    assert agent.conversation_store.guidance.recent("agent_run", child.id) == []
 
 
 def test_agent_control_rejects_run_outside_conversation_root(tmp_path) -> None:
@@ -850,7 +850,7 @@ def test_owner_tui_decision_resumes_exact_child_approval(tmp_path) -> None:
     pending: list[dict[str, object]] = []
     deadline = time.monotonic() + 1.0
     while not pending and time.monotonic() < deadline:
-        pending = list_pending_subagent_tool_approvals(
+        pending = list_pending_agent_tool_approvals(
             agent,
             root_task_id=child.root_id,
         )
@@ -888,7 +888,7 @@ def test_owner_tui_decision_resumes_exact_child_approval(tmp_path) -> None:
     assert written["ok"] is True
     assert result["decision"] == "approved"
     assert result["feedback"] == "只执行这一次"
-    assert list_pending_subagent_tool_approvals(
+    assert list_pending_agent_tool_approvals(
         agent,
         root_task_id=child.root_id,
     ) == []
@@ -897,14 +897,14 @@ def test_owner_tui_decision_resumes_exact_child_approval(tmp_path) -> None:
 def test_child_approval_without_interactive_consumer_fails_closed(tmp_path) -> None:
     agent, _scope, child = _bound_agent_tree(tmp_path)
     request = _child_approval_request(child.id, "attempt-no-consumer")
-    handle = publish_subagent_tool_approval(
+    handle = publish_agent_tool_approval(
         agent,
         run_id=child.id,
         thread_id=child.agent_thread_id,
         request_value=request,
     )
 
-    decision = wait_for_subagent_tool_approval(
+    decision = wait_for_agent_tool_approval(
         handle,
         poll_seconds=0.01,
         discovery_seconds=0.01,
@@ -912,7 +912,7 @@ def test_child_approval_without_interactive_consumer_fails_closed(tmp_path) -> N
     )
 
     assert decision.decision == "unavailable"
-    assert list_pending_subagent_tool_approvals(
+    assert list_pending_agent_tool_approvals(
         agent,
         root_task_id=child.root_id,
     ) == []
@@ -942,7 +942,7 @@ def test_child_session_approval_reuses_same_sink_and_args(tmp_path) -> None:
     pending: list[dict[str, object]] = []
     deadline = time.monotonic() + 1.0
     while not pending and time.monotonic() < deadline:
-        pending = list_pending_subagent_tool_approvals(
+        pending = list_pending_agent_tool_approvals(
             agent,
             root_task_id=child.root_id,
         )
@@ -967,7 +967,7 @@ def test_child_session_approval_reuses_same_sink_and_args(tmp_path) -> None:
     assert not thread.is_alive()
     assert first_result["decision"] == "approved_session"
     assert second_result["decision"] == "approved"
-    assert list_pending_subagent_tool_approvals(
+    assert list_pending_agent_tool_approvals(
         agent,
         root_task_id=child.root_id,
     ) == []

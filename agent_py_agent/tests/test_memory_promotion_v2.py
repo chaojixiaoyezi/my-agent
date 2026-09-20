@@ -74,7 +74,7 @@ def _runtime(
     for name in ("SOUL.md", "USER.md", "AGENTS.md"):
         (owner / name).write_text(f"# {name}\n", encoding="utf-8")
     conversations = ConversationStore(tmp_path / "conversations")
-    thread = conversations.get_or_create_thread(
+    thread = conversations.threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "channel": "internal",
@@ -127,7 +127,7 @@ def _explicit(
     duplicate_generic_evidence: bool = False,
     source_tool_refs: tuple[dict[str, object], ...] = (),
 ):
-    message = conversations.append_message(
+    message = conversations.messages.append(
         {
             "thread_id": thread.thread_id,
             "role": "user",

@@ -44,7 +44,7 @@ def test_runner_recovery_rebinds_pending_user_guidance_to_new_attempt(tmp_path):
     task = manager.create_run(goal="长任务", thought="", plan=["继续"])
     first = manager.lifecycle.prepare_runner_attempt(task.id)
     first_attempt = first.runner_active_attempt_id
-    entry = agent.conversation_store.append_guidance_once(
+    entry = agent.conversation_store.guidance.append_once(
         {
             "target_type": "agent_run",
             "target_id": task.id,
@@ -65,7 +65,7 @@ def test_runner_recovery_rebinds_pending_user_guidance_to_new_attempt(tmp_path):
     recovered = manager.lifecycle.prepare_runner_attempt(task.id, retry_reason="gateway_restart")
 
     assert recovered.runner_active_attempt_id != first_attempt
-    pending = agent.conversation_store.pending_guidance("agent_run", task.id)
+    pending = agent.conversation_store.guidance.pending("agent_run", task.id)
     assert [item.guidance_id for item in pending] == [entry.guidance_id]
     assert pending[0].metadata["expected_turn_id"] == recovered.runner_active_attempt_id
     recovery = recovered.attributes["guidance_recovery"]

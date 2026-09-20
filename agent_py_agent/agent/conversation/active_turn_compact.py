@@ -389,7 +389,7 @@ def _load_authoritative_thread(agent: object, task_attributes: object) -> Conver
     store = getattr(agent, "conversation_store", None)
     if not thread_id or store is None:
         raise OSError("authoritative active turn has no conversation thread store")
-    thread, load_error = store.load_thread_report(thread_id)
+    thread, load_error = store.threads.load_report(thread_id)
     if load_error is not None or thread is None:
         raise OSError("authoritative active turn conversation thread is unavailable")
     return thread

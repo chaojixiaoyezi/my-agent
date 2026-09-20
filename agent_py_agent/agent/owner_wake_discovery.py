@@ -1145,22 +1145,22 @@ def _project_task_ledger_terminal(
     from .conversation.store import ConversationStore
 
     store = ConversationStore(link_path.parent.parent, initialize=False)
-    with store.task_transition_guard(task_id):
+    with store.tasks.transition_guard(task_id):
         current = repo.main_agent_run_for_task(task_id)
         if current is None:
             return False
         fields = ("agent_run_id", "current_attempt_id", "current_attempt_generation", "status")
         if any(current[key] != run_row[key] for key in fields):
             return True  # 旧快照已失效；新执行负责后续投影。
-        link = store.load_task_link(task_id)
+        link = store.tasks.load(task_id)
         if link is None:
             return False
         if link.status == "interrupted":
             return True  # 用户可恢复中断不是取消任务。
         try:
             goal = (
-                store.load_goal(link.thread_id, task_id=task_id)
-                if store._goal_path(link.thread_id).is_file() else None
+                store.goals.load(link.thread_id, task_id=task_id)
+                if store.storage.goal_path(link.thread_id).is_file() else None
             )
         except (KeyError, ValueError, OSError):
             return False  # Goal 记录存在但不可核对，不能把它猜成普通取消任务。

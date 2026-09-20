@@ -23,8 +23,10 @@ def test_shipped_system_prompt_matches_schema_default() -> None:
     assert "不要输出多选菜单来代替工作" in shipped
     assert "任务规模大、耗时长或仅仅有可澄清之处，都不等于阻塞" in shipped
     assert shipped.index("自主决策：") < shipped.index("执行纪律：")
-    assert "只要当前用户目标仍有你已知的未完成部分" in shipped
-    assert "委派只是分工，不会缩小用户原始目标" in shipped
+    assert "只要本轮负责的目标仍有你已知的未完成部分" in shipped
+    assert "本轮自己创建的普通子代理只是分工，仍需接收结果、整合验证和交付" in shipped
+    assert "运行时存在 current_goal 时，本轮负责该目标的完整要求" in shipped
+    assert "主子代理目标各自独立，不能替未结束的下级宣布完成" in shipped
     assert "create_subagents 对应 item 必须原样复制该项 id 到 covers" in shipped
     assert "未绑定 child 不会关闭原 Todo" in shipped
     assert "清单只是模型自查，不是宿主机器验收" in shipped

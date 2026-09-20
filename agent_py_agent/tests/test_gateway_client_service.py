@@ -5,6 +5,7 @@ import socket
 import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
+from types import SimpleNamespace as _StoreDomain
 
 from agent_py_agent.agent.gateway_parts import client_service
 from agent_py_agent.agent.gateway_parts.client_service import (
@@ -129,11 +130,15 @@ def test_gateway_client_history_returns_only_complete_foreground_turns(monkeypat
         row.thread_id = "thread-1"
 
     class Store:
-        def resolve_thread_report(self, **kwargs):
+        def __init__(self, *args, **kwargs):
+            self.threads = _StoreDomain(resolve_report=self._fake_resolve_thread_report)
+            self.messages = _StoreDomain(history_page_report=self._fake_history_page_report)
+
+        def _fake_resolve_thread_report(self, **kwargs):
             assert kwargs["channel_conversation_id"] == "sess-test"
             return SimpleNamespace(thread_id="thread-1"), None
 
-        def history_page_report(self, thread_id, *, before, limit):
+        def _fake_history_page_report(self, thread_id, *, before, limit):
             assert thread_id == "thread-1"
             assert limit == 16
             assert before is None

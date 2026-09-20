@@ -1550,7 +1550,7 @@ def test_tool_round_limit_does_not_schedule_ordinary_task_resume(tmp_path):
         tmp_path,
     )
     agent.backend = MaxToolRoundBackend()
-    thread = agent.conversation_store.get_or_create_thread(
+    thread = agent.conversation_store.threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "channel": "internal",
@@ -1558,7 +1558,7 @@ def test_tool_round_limit_does_not_schedule_ordinary_task_resume(tmp_path):
             "channel_user_id": "user-1",
         }
     )
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": "task-limit",
@@ -1583,11 +1583,11 @@ def test_tool_round_limit_does_not_schedule_ordinary_task_resume(tmp_path):
     assert result.runtime_reason == "TOOL_ROUND_LIMIT_REACHED"
     link = next(
         item
-        for item in agent.conversation_store.task_links(thread.thread_id)
+        for item in agent.conversation_store.tasks.list(thread.thread_id)
         if item.task_id == "task-limit"
     )
     assert link.status == "active"
-    assert agent.conversation_store.list_progress_policies(enabled_only=True) == []
+    assert agent.conversation_store.progress.list(enabled_only=True) == []
 
 
 def test_active_goal_continuation_ignores_legacy_ordinary_policy(tmp_path):
@@ -1603,7 +1603,7 @@ def test_active_goal_continuation_ignores_legacy_ordinary_policy(tmp_path):
         _text_agent_config(enable_tools=True, memory_path="memory.jsonl"),
         tmp_path,
     )
-    thread = agent.conversation_store.get_or_create_thread(
+    thread = agent.conversation_store.threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "channel": "internal",
@@ -1611,7 +1611,7 @@ def test_active_goal_continuation_ignores_legacy_ordinary_policy(tmp_path):
             "channel_user_id": "user-1",
         }
     )
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": "task-resume-signal",
@@ -1646,7 +1646,7 @@ def test_active_goal_continuation_ignores_legacy_ordinary_policy(tmp_path):
     # 生产语义:同一任务同一时刻只有一个 ordinary_task_resume policy(创建后每次
     # 收口 expedite 复用),预算随 metadata 递增——这里用 mark_progress_reported
     # 更新同一 policy 模拟真实状态。
-    policy = agent.conversation_store.set_progress_policy(
+    policy = agent.conversation_store.progress.create(
         {
             "thread_id": thread.thread_id,
             "task_id": "task-resume-signal",
@@ -1662,15 +1662,15 @@ def test_active_goal_continuation_ignores_legacy_ordinary_policy(tmp_path):
         }
     )
     assert _active_goal_continuation_available(agent, params()) is False
-    agent.conversation_store.mark_progress_reported(
+    agent.conversation_store.progress.mark_reported(
         policy.policy_id, metadata_updates={"resume_used": 2}
     )
     assert _active_goal_continuation_available(agent, params()) is False
-    agent.conversation_store.mark_progress_reported(
+    agent.conversation_store.progress.mark_reported(
         policy.policy_id, metadata_updates={"resume_used": 3}
     )
     assert _active_goal_continuation_available(agent, params()) is False
-    agent.conversation_store.disable_progress_policy(policy.policy_id)
+    agent.conversation_store.progress.disable(policy.policy_id)
     assert (
         _active_goal_continuation_available(agent, params()) is False
     )
@@ -1690,7 +1690,7 @@ def test_cli_tool_limit_promise_requires_exact_active_goal(tmp_path):
         _text_agent_config(enable_tools=True, memory_path="memory.jsonl"),
         tmp_path,
     )
-    thread = agent.conversation_store.get_or_create_thread(
+    thread = agent.conversation_store.threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "channel": "cli",
@@ -1715,7 +1715,7 @@ def test_cli_tool_limit_promise_requires_exact_active_goal(tmp_path):
     # 无 goal: EXEC-39 停即停, 承诺文案必须是「已暂停」。
     assert _active_goal_continuation_available(agent, params()) is False
     # exact active Goal 授权成立。
-    agent.conversation_store.create_goal(
+    agent.conversation_store.goals.create(
         {
             "thread_id": thread.thread_id,
             "objective": "继续推进任务直到完成",
@@ -1724,8 +1724,8 @@ def test_cli_tool_limit_promise_requires_exact_active_goal(tmp_path):
     )
     assert _active_goal_continuation_available(agent, params()) is True
     # goal 变非 active(complete) → 不承诺续跑。
-    goal = agent.conversation_store.load_goal(thread.thread_id, task_id="task-cli-signal")
-    agent.conversation_store.update_goal(
+    goal = agent.conversation_store.goals.load(thread.thread_id, task_id="task-cli-signal")
+    agent.conversation_store.goals.update(
         {
             "thread_id": thread.thread_id,
             "goal_id": goal.goal_id,
@@ -1747,7 +1747,7 @@ def test_legacy_ordinary_task_resume_policy_is_retired_without_running(tmp_path)
         tmp_path,
     )
     agent.backend = MaxToolRoundBackend()
-    thread = agent.conversation_store.get_or_create_thread(
+    thread = agent.conversation_store.threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "channel": "internal",
@@ -1758,7 +1758,7 @@ def test_legacy_ordinary_task_resume_policy_is_retired_without_running(tmp_path)
     # 进度账本可以按 task-path 跨 turn 复用，但自动续跑 policy 必须按真实
     # conversation task 寻址；两类身份不能再合并成一个 key。
     task_path = str(tmp_path / "task-limit-workspace")
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": "task-limit",
@@ -1767,7 +1767,7 @@ def test_legacy_ordinary_task_resume_policy_is_retired_without_running(tmp_path)
             "task_path": task_path,
         }
     )
-    policy = agent.conversation_store.set_progress_policy(
+    policy = agent.conversation_store.progress.create(
         {
             "thread_id": thread.thread_id,
             "task_id": "task-limit",
@@ -1802,10 +1802,10 @@ def test_legacy_ordinary_task_resume_policy_is_retired_without_running(tmp_path)
         now=policy.next_due_at + 1,
         agent=agent,
     )
-    policies = agent.conversation_store.list_progress_policies(enabled_only=False)
+    policies = agent.conversation_store.progress.list(enabled_only=False)
     assert len(policies) == 1
     assert not policies[0].enabled
-    assert agent.conversation_store.list_progress_policies(enabled_only=True) == []
+    assert agent.conversation_store.progress.list(enabled_only=True) == []
 
 
 def test_background_main_agent_no_ordinary_resume_policy(tmp_path):
@@ -1820,7 +1820,7 @@ def test_background_main_agent_no_ordinary_resume_policy(tmp_path):
         tmp_path,
     )
     agent.backend = MaxToolRoundBackend()
-    thread = agent.conversation_store.get_or_create_thread(
+    thread = agent.conversation_store.threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "channel": "internal",
@@ -1828,7 +1828,7 @@ def test_background_main_agent_no_ordinary_resume_policy(tmp_path):
             "channel_user_id": "user-1",
         }
     )
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": "task-limit",
@@ -1849,9 +1849,9 @@ def test_background_main_agent_no_ordinary_resume_policy(tmp_path):
     )
 
     assert result.runtime_status == "unfinished"
-    assert agent.conversation_store.list_progress_policies(enabled_only=False) == []
-    assert agent.conversation_store.load_goals(thread.thread_id) == []
-    assert agent.conversation_store.pending_wake_signals() == []
+    assert agent.conversation_store.progress.list(enabled_only=False) == []
+    assert agent.conversation_store.goals.list(thread.thread_id) == []
+    assert agent.conversation_store.wakes.pending() == []
 
 
 def test_explicit_goal_turn_finishes_without_todo_overriding_goal(tmp_path):
@@ -1892,7 +1892,7 @@ def test_explicit_goal_turn_finishes_without_todo_overriding_goal(tmp_path):
             return ModelResponse(text="文件已经读取，但验证项仍未完成。", backend=self.name)
 
     agent.backend = OpenProgressBackend()
-    thread = agent.conversation_store.get_or_create_thread(
+    thread = agent.conversation_store.threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "channel": "internal",
@@ -1904,7 +1904,7 @@ def test_explicit_goal_turn_finishes_without_todo_overriding_goal(tmp_path):
     # = task-path:<sha256(task_path)>,账本必须立在同一个 key 上(task_progress_tool
     # 产品写侧在 run 内 materialize 之后始终按此 key 记账)。
     task_path = str(tmp_path / "goal-workspace")
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": "task-open-progress",
@@ -1913,7 +1913,7 @@ def test_explicit_goal_turn_finishes_without_todo_overriding_goal(tmp_path):
             "task_path": task_path,
         }
     )
-    goal = agent.conversation_store.create_goal(
+    goal = agent.conversation_store.goals.create(
         {
             "thread_id": thread.thread_id,
             "task_id": "task-open-progress",
@@ -1943,10 +1943,10 @@ def test_explicit_goal_turn_finishes_without_todo_overriding_goal(tmp_path):
     assert result.response.startswith("文件已经读取，但验证项仍未完成")
     assert result.runtime_status == "ok"
     assert result.runtime_reason != "TASK_PROGRESS_OPEN"
-    current = agent.conversation_store.load_thread(thread.thread_id)
+    current = agent.conversation_store.threads.load(thread.thread_id)
     assert current is not None and current.active_task_ids == ("task-open-progress",)
-    assert agent.conversation_store.list_progress_policies(enabled_only=True) == []
-    pending = agent.conversation_store.pending_wake_signals()
+    assert agent.conversation_store.progress.list(enabled_only=True) == []
+    pending = agent.conversation_store.wakes.pending()
     assert len(pending) == 1 and pending[0].root_task_id == "task-open-progress"
     assert pending[0].reason == "thread_goal_continue"
 
@@ -1984,7 +1984,7 @@ def test_ordinary_task_open_progress_gets_one_same_turn_reconciliation(
 
     backend = OrdinaryTaskBackend()
     agent.backend = backend
-    thread = agent.conversation_store.get_or_create_thread(
+    thread = agent.conversation_store.threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "channel": "internal",
@@ -1994,7 +1994,7 @@ def test_ordinary_task_open_progress_gets_one_same_turn_reconciliation(
     )
     task_path = tmp_path / "ordinary-open-progress-workspace"
     task_path.mkdir()
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": "task-ordinary-open-progress",
@@ -2034,8 +2034,8 @@ def test_ordinary_task_open_progress_gets_one_same_turn_reconciliation(
     assert result.runtime_status == "ok"
     assert result.runtime_reason == ""
     assert result.runtime_source == ""
-    current = agent.conversation_store.load_thread(thread.thread_id)
+    current = agent.conversation_store.threads.load(thread.thread_id)
     assert current is not None and current.active_task_ids == ()
-    links = agent.conversation_store.task_links(thread.thread_id)
+    links = agent.conversation_store.tasks.list(thread.thread_id)
     assert len(links) == 1 and links[0].status == "completed"
-    assert agent.conversation_store.list_progress_policies(enabled_only=True) == []
+    assert agent.conversation_store.progress.list(enabled_only=True) == []

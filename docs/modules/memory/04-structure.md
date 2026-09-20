@@ -1,5 +1,11 @@
 # Memory Structure
 
+## 会话存储读取边界
+
+`curator_inputs.py` 只从同一 ConversationStore 的 `threads` 元数据和 `messages` 增量读取能力收集输入。
+`promotion.py` 使用 `messages.by_id_report` 核对精确消息证据；文件布局仍由 `store.storage` 唯一管理。
+领域接口改名不移动游标、不改消息内容或正式记忆提交；缺少能力或坏账沿原错误合同处理。
+
 ## 缓存前缀诊断
 
 `backends/cache_diagnostics.py` 在 HTTP 实际出站处生成摘要，`ModelCallLedger` 按同 thread 比较。

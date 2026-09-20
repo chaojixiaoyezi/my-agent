@@ -177,9 +177,10 @@ def _validate_command(command: str) -> str:
     return text
 
 
-# LLM: 这里只转换空输入的参数错误；不执行命令、不截断或代写脚本，后续策略仍校验完整文本。
-# 函数用途: 将输入校验结果交给命令执行入口，缺少命令时明确返回参数问题。
-def _parsed_command_or_error(tool_name: str, raw_command: object) -> str | ToolHandlerOutcome:
+# LLM: 普通 Shell 与 PTY 共用此解析合同，修改时同步两个工具的测试；这里只转换空输入错误，
+# 不执行命令、不截断或代写脚本，后续策略仍校验完整文本。
+# 函数用途: 为普通命令和交互终端提供同一输入校验入口，缺少命令时返回明确参数问题。
+def parse_shell_command(tool_name: str, raw_command: object) -> str | ToolHandlerOutcome:
     try:
         return _validate_command(str(raw_command or ""))
     except ValueError as exc:
@@ -845,13 +846,13 @@ def _record_background_job(
 
 
 # LLM: Durable registration is a fail-closed boundary. Production scopes receive
-# one protected cross-process authority record; an unbound internal/test call stays
+# one protected cross-process authority record addressed by access_scope.owner_home,
+# independent of the Full Access sandbox wall; an unbound internal/test call stays
 # process-local. If persistence fails, the exact managed host tree is terminated.
-# 函数用途: 登记托管后台进程及宿主冻结的通知地址、写辅助观测；失败立即回收，避免失管服务。
+# 函数用途: 按真实用户地址登记后台进程及通知目标、写辅助观测；失败立即回收，避免失管服务。
 def _register_hosted_background_process(
     *,
     workspace_root: Path,
-    owner_scope_root: object,
     log_path: Path,
     command: str,
     target: Path,
@@ -860,7 +861,7 @@ def _register_hosted_background_process(
     completion_target: dict[str, str] | None = None,
 ) -> BackgroundProcess:
     store_root = (
-        process_session_store_root(workspace_root, owner_scope_root)
+        process_session_store_root(workspace_root, access_scope.owner_home)
         if access_scope.is_bound()
         else None
     )
@@ -1107,7 +1108,7 @@ class ShellTool(BaseTool):
     # LLM: shell 自带 & 不得进入执行；deadline 已过等前置拒绝必须声明 not_started，不能遗留 UNKNOWN。
     # 函数用途: 校验并执行命令，未启动与执行后失败分账；长期进程统一登记为受管后台会话。
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
-        command_result = _parsed_command_or_error(self.model_spec.name, params.get("command", ""))
+        command_result = parse_shell_command(self.model_spec.name, params.get("command", ""))
         if isinstance(command_result, ToolHandlerOutcome):
             return command_result
         command = command_result
@@ -1299,7 +1300,8 @@ class ShellTool(BaseTool):
 
     # LLM: Background execution is owned by a detached managed host, not the
     # one-shot agent runner. Model output exposes only the stable session handle;
-    # completion target is host-injected and immutable; host and command-entry PIDs remain private because later
+    # completion target and canonical owner address are host-injected and immutable;
+    # host and command-entry PIDs remain private because later
     # descendants may own the actual resource. Exact scope is persisted first.
     # stdin remains unsupported here because interactive processes belong to PTY.
     # 函数用途: 把命令放到当前用户会话的后台，马上返回，不堵住模型工具循环。
@@ -1353,7 +1355,6 @@ class ShellTool(BaseTool):
         try:
             record = _register_hosted_background_process(
                 workspace_root=self.workspace_root,
-                owner_scope_root=self.path_access_policy.owner_scope_root,
                 log_path=log_path,
                 command=command,
                 target=target,

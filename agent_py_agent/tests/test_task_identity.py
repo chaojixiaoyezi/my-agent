@@ -9,6 +9,7 @@ req_2 上;后续请求按新 conversation_task_id 读账本=读错位=0 pending=
 from __future__ import annotations
 
 from types import SimpleNamespace
+from types import SimpleNamespace as _StoreDomain
 
 from agent_py_agent.agent.agent_core.runtime.task_identity import (
     conversation_task_progress_ledger_id,
@@ -25,8 +26,9 @@ class _Store:
     def __init__(self, task_paths: dict[str, str]) -> None:
         self._task_paths = task_paths
         self.loaded: list[str] = []
+        self.tasks = _StoreDomain(load=self._fake_load_task_link)
 
-    def load_task_link(self, task_id: str) -> SimpleNamespace | None:
+    def _fake_load_task_link(self, task_id: str) -> SimpleNamespace | None:
         self.loaded.append(task_id)
         path = self._task_paths.get(task_id)
         return _link(path) if path is not None else None
@@ -119,7 +121,10 @@ def test_no_store_falls_back_to_conversation_task_id() -> None:
 
 def test_loader_exception_falls_back_to_conversation_task_id() -> None:
     class _BrokenStore:
-        def load_task_link(self, task_id: str) -> SimpleNamespace:
+        def __init__(self, *args, **kwargs):
+            self.tasks = _StoreDomain(load=self._fake_load_task_link)
+
+        def _fake_load_task_link(self, task_id: str) -> SimpleNamespace:
             raise RuntimeError("boom")
 
     key = progress_ledger_id(_agent(_BrokenStore()), _params(conversation_task_id="req_2"))

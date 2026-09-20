@@ -109,11 +109,11 @@ def _raise_grant_wake_signals(agent: Any, records: list) -> None:
 def _raise_grant_wake_signal_for_run(agent: Any, store: Any, run_id: str) -> None:
     try:
         task = agent.subagents.load(run_id)
-        thread = store.thread_for_task(run_id)
+        thread = store.tasks.thread_for(run_id)
         if thread is None:
             return
-        observation = store.append_observation(_grant_wake_observation(thread, task, run_id))
-        signal = store.raise_wake_signal(_grant_wake_signal_request(thread, task, run_id, observation))
+        observation = store.observations.append(_grant_wake_observation(thread, task, run_id))
+        signal = store.wakes.raise_signal(_grant_wake_signal_request(thread, task, run_id, observation))
         _record_grant_wake(agent, task, signal.wake_signal_id)
     except Exception as exc:
         _record_grant_wake_error(agent, run_id, exc)

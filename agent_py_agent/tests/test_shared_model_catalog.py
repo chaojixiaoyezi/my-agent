@@ -167,8 +167,8 @@ def test_revoked_legacy_default_can_be_replaced_and_is_not_shown_as_default(tmp_
     set_shared_profile(admin, key, True)
     execute_model_profile_operation(alice, "set_default", {"profile_id": "shared:" + key})
     one = execute_local_model_operation(alice, "one", "list", {})
-    thread = alice.conversation_store.load_thread(one["thread_id"])
-    alice.conversation_store._update_thread_atomic(thread.thread_id, lambda current: replace(current, model_profile_id=""))
+    thread = alice.conversation_store.threads.load(one["thread_id"])
+    alice.conversation_store.threads.update_atomic(thread.thread_id, lambda current: replace(current, model_profile_id=""))
     set_shared_profile(admin, key, False)
     unavailable = execute_local_model_operation(alice, "one", "list", {})
     assert unavailable["ok"] and not unavailable["selection_available"]

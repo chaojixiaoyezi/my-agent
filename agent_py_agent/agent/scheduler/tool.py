@@ -364,7 +364,7 @@ def _conversation_scope(agent: object) -> tuple[str, str]:
     store = getattr(agent, "conversation_store", None)
     if not task_id or store is None:
         return "", task_id
-    thread, error = store.thread_for_task_report(task_id)
+    thread, error = store.tasks.thread_for_report(task_id)
     return (
         str(getattr(thread, "thread_id", "") or "") if error is None and thread else ""
     ), task_id

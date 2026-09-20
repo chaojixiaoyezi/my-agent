@@ -38,7 +38,7 @@ def handle_client_models(handler, server) -> None:
         config_host = SimpleNamespace(home_paths=scoped_home, config=server.agent.config)
         store = _model_conversation_store(server.agent, scoped_home)
         config_host.conversation_store = store
-        thread = store.get_or_create_thread({
+        thread = store.threads.get_or_create({
             "canonical_user_id": scope.user_id, "owner_id": scoped_home.owner_id,
             "owner_home": str(scoped_home.owner_home_dir), "channel": scope.channel,
             "channel_conversation_id": scope.conversation_id, "channel_user_id": scope.user_id,

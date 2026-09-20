@@ -24,6 +24,8 @@ from agent_py_agent.agent.conversation import (
     BackgroundMainAgentRuntime,
     BackgroundMainAgentScheduler,
 )
+from agent_py_agent.agent.conversation import background_delivery as delivery_module
+from agent_py_agent.agent.conversation import background_history_seed as history_module
 from agent_py_agent.agent.conversation.channels import DeliveryContext, ReplyEnvelope
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.delivery import DeliveryService, build_default_channel_registry
@@ -127,11 +129,24 @@ def _agent(tmp_path, backend_text: str = "最终报告已生成：architecture_c
     return agent, backend
 
 
+
+# LLM: 测试直接调用独立交付入口；任务状态仍读原 runtime 查询，不能用常量替代取消与终态守卫。
+# 函数用途: 为已有后台场景绑定同一个 Agent、store、渠道和状态读取能力。
+def _delivery_dependencies(runtime):
+    from functools import partial
+
+    from agent_py_agent.agent.conversation.runtime import _background_task_link_status
+
+    return delivery_module.BackgroundDeliveryDependencies(
+        agent=runtime.agent, store=runtime.store, channels=runtime.channels,
+        task_status=partial(_background_task_link_status, runtime.agent, store=runtime.store),
+    )
+
 def test_unregistered_identity_route_still_records_reply_in_canonical_thread(tmp_path) -> None:
     """未注册渠道必须仍然留住模型答复：canonical 记录不依赖 transport 能力。"""
     agent, _backend = _agent(tmp_path)
     store = agent.conversation_store
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "owner-rv",
             "channel": UNREGISTERED_IDENTITY,
@@ -156,7 +171,7 @@ def test_unregistered_identity_route_still_records_reply_in_canonical_thread(tmp
     assert report.delivery_status == "not_applicable"
     assert report.commit_kind == "canonical_record"
     assert report.route_ownership == "undeclared", "报告必须带结构化路线归属供排障区分"
-    rows = store.recent_messages(thread.thread_id, limit=0)
+    rows = store.messages.recent(thread.thread_id, limit=0)
     native = [row for row in rows if row.metadata.get("assistant_part_id") == "native"]
     assert len(native) == 1 and native[0].content == ""
     assert native[0].metadata["canonical_native_messages"]["schema"] == "conversation_native_messages.v1"
@@ -193,7 +208,7 @@ def test_undelivered_reply_stays_pending_and_redelivers_without_model_turn(tmp_p
     """欠外发却没送达的答复：唤醒不确认、正文被冻结，重投只发正文不重跑业务。"""
     agent, backend = _agent(tmp_path, "阶段汇报：已核对任务树，等待最后一个子代理。")
     store = agent.conversation_store
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "owner-im",
             "channel": "feishu",
@@ -209,7 +224,7 @@ def test_undelivered_reply_stays_pending_and_redelivers_without_model_turn(tmp_p
             "store": store,
         }
     )
-    signal = store.raise_wake_signal(
+    signal = store.wakes.raise_signal(
         {
             "thread_id": thread.thread_id,
             "reason": "scheduled_progress_report",
@@ -220,13 +235,13 @@ def test_undelivered_reply_stays_pending_and_redelivers_without_model_turn(tmp_p
 
     assert scheduler.tick(now=20.0) == []
     assert len(backend.prompts) == 1
-    pending = store.pending_wake_signal(signal.wake_signal_id)
+    pending = store.wakes.pending_one(signal.wake_signal_id)
     assert pending is not None
     frozen = pending.metadata["owner_delivery"]
     assert frozen["schema_version"] == "wake-owner-delivery.v2"
     assert frozen["content"] == "阶段汇报：已核对任务树，等待最后一个子代理。"
     # 欠外发路线不保存公开 final；原生执行事实独立保留，不冒充成功投递。
-    rows = store.recent_messages(thread.thread_id, limit=0)
+    rows = store.messages.recent(thread.thread_id, limit=0)
     assert len(rows) == 1 and rows[0].content == ""
     assert rows[0].metadata["assistant_part_id"] == "native"
     native_request = rows[0].metadata["conversation_request_id"]
@@ -239,8 +254,8 @@ def test_undelivered_reply_stays_pending_and_redelivers_without_model_turn(tmp_p
     assert [item.delivery_status for item in report] == ["sent"]
     assert report[0].wake_handled is True
     assert report[0].delivery_reason == "cached_owner_delivery_retry"
-    assert store.pending_wake_signal(signal.wake_signal_id) is None
-    final_rows = [row for row in store.recent_messages(thread.thread_id, limit=0) if row.content]
+    assert store.wakes.pending_one(signal.wake_signal_id) is None
+    final_rows = [row for row in store.messages.recent(thread.thread_id, limit=0) if row.content]
     assert len(final_rows) == 1
     assert final_rows[0].metadata["conversation_request_id"] == native_request
 
@@ -255,7 +270,7 @@ def test_audit_finding_failed_external_send_never_claims_transcript_receipt(
 
     agent, _backend = _agent(tmp_path, "发现一项高风险事件。")
     store = agent.conversation_store
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "owner-audit",
             "channel": "feishu",
@@ -293,7 +308,7 @@ def test_audit_finding_failed_external_send_never_claims_transcript_receipt(
             },
         },
     )
-    commit = runtime._record_response(
+    commit = delivery_module.record_background_response(_delivery_dependencies(runtime),
         request,
         DeliveryContext(
             channel="feishu",
@@ -309,7 +324,7 @@ def test_audit_finding_failed_external_send_never_claims_transcript_receipt(
     assert commit.delivery_status == "failed"
     assert commit.persisted is False
     assert recorded == []
-    assert store.recent_messages(thread.thread_id, limit=0) == []
+    assert store.messages.recent(thread.thread_id, limit=0) == []
 
 
 def test_background_report_log_carries_real_delivery_facts(tmp_path, monkeypatch) -> None:
@@ -361,7 +376,7 @@ def test_old_implementation_would_have_lost_the_reply(tmp_path) -> None:
 
     agent, _backend = _agent(tmp_path)
     store = agent.conversation_store
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "owner-rv",
             "channel": UNREGISTERED_IDENTITY,
@@ -377,7 +392,7 @@ def test_old_implementation_would_have_lost_the_reply(tmp_path) -> None:
         reason="subagent_runner_finished",
         wake_signal={"wake_signal_id": "wake-rv"},
     )
-    commit = runtime._record_response(
+    commit = delivery_module.record_background_response(_delivery_dependencies(runtime),
         request,
         DeliveryContext(
             channel=UNREGISTERED_IDENTITY,
@@ -395,7 +410,7 @@ def test_old_implementation_would_have_lost_the_reply(tmp_path) -> None:
     assert commit.persisted is True
     assert commit.commit_kind == "canonical_record"
     assert (
-        runtime_module._background_owner_delivery_committed(
+        delivery_module.background_owner_delivery_committed(
             request,
             target="r277-multi",
             ownership="undeclared",
@@ -413,7 +428,7 @@ def test_frozen_payload_survives_a_repeated_failure(tmp_path) -> None:
     """重投再次失败时正文必须仍然留在唤醒上，不允许退化成重新跑模型。"""
     agent, backend = _agent(tmp_path, "阶段汇报：还需要一个子代理收口。")
     store = agent.conversation_store
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "owner-im",
             "channel": "feishu",
@@ -429,7 +444,7 @@ def test_frozen_payload_survives_a_repeated_failure(tmp_path) -> None:
             "store": store,
         }
     )
-    signal = store.raise_wake_signal(
+    signal = store.wakes.raise_signal(
         {
             "thread_id": thread.thread_id,
             "reason": "scheduled_progress_report",
@@ -440,7 +455,7 @@ def test_frozen_payload_survives_a_repeated_failure(tmp_path) -> None:
 
     assert scheduler.tick(now=20.0) == []
     assert scheduler.tick(now=51.0) == []
-    pending = store.pending_wake_signal(signal.wake_signal_id)
+    pending = store.wakes.pending_one(signal.wake_signal_id)
     assert pending is not None
     assert pending.metadata["owner_delivery"]["content"] == "阶段汇报：还需要一个子代理收口。"
     assert len(backend.prompts) == 1, "反复失败的唤醒只能重投，不能再次调用模型"
@@ -456,9 +471,9 @@ def test_frozen_payload_survives_a_repeated_failure(tmp_path) -> None:
 
 def test_declared_transport_keeps_obligation_while_adapter_unavailable(tmp_path) -> None:
     """声明过的外发通道即使当前不可用，也仍然欠 owner 一次外送，不能确认唤醒。"""
-    from agent_py_agent.agent.conversation.runtime import (
-        _ROUTE_EXTERNAL,
-        _background_route_ownership,
+    from agent_py_agent.agent.conversation.background_delivery import (
+        ROUTE_EXTERNAL,
+        background_route_ownership,
     )
 
     agent, _backend = _agent(tmp_path)
@@ -466,12 +481,12 @@ def test_declared_transport_keeps_obligation_while_adapter_unavailable(tmp_path)
     real = DeliveryService(build_default_channel_registry(agent.config))
     assert real.declares_channel("feishu") is True
     assert real.declared_proactive("feishu") is True
-    assert _background_route_ownership(real, "feishu") == _ROUTE_EXTERNAL
+    assert background_route_ownership(real, "feishu") == ROUTE_EXTERNAL
     # 未注册渠道仍然 fail-closed。
     assert real.declares_channel(UNREGISTERED_IDENTITY) is False
 
     store = agent.conversation_store
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "owner-im",
             "channel": "feishu",
@@ -489,7 +504,7 @@ def test_declared_transport_keeps_obligation_while_adapter_unavailable(tmp_path)
             "store": store,
         }
     )
-    signal = store.raise_wake_signal(
+    signal = store.wakes.raise_signal(
         {
             "thread_id": thread.thread_id,
             "reason": "scheduled_progress_report",
@@ -500,7 +515,7 @@ def test_declared_transport_keeps_obligation_while_adapter_unavailable(tmp_path)
 
     assert scheduler.tick(now=20.0) == []
     assert len(_backend.prompts) == 1, "首次唤醒会跑一片模型"
-    pending = store.pending_wake_signal(signal.wake_signal_id)
+    pending = store.wakes.pending_one(signal.wake_signal_id)
     assert pending is not None, "外发未完成时唤醒必须留在队列里"
     assert pending.metadata["owner_delivery"]["external_sent"] is False
     assert pending.metadata["owner_delivery"]["ownership"] == "external"
@@ -511,7 +526,7 @@ def test_declared_transport_keeps_obligation_while_adapter_unavailable(tmp_path)
     assert len(_backend.prompts) == 1, "重投不得再花一次模型轮"
     assert [item.delivery_status for item in report] == ["sent"]
     assert report[0].wake_handled is True
-    assert store.pending_wake_signal(signal.wake_signal_id) is None
+    assert store.wakes.pending_one(signal.wake_signal_id) is None
 
 
 def test_attachment_envelope_is_frozen_and_redelivered_intact(tmp_path) -> None:
@@ -520,7 +535,7 @@ def test_attachment_envelope_is_frozen_and_redelivered_intact(tmp_path) -> None:
 
     agent, _backend = _agent(tmp_path)
     store = agent.conversation_store
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "owner-im",
             "channel": "feishu",
@@ -538,7 +553,7 @@ def test_attachment_envelope_is_frozen_and_redelivered_intact(tmp_path) -> None:
         "ok": True,
         "size_bytes": 12,
     }
-    wake = store.raise_wake_signal(
+    wake = store.wakes.raise_signal(
         {
             "thread_id": thread.thread_id,
             "reason": "scheduled_progress_report",
@@ -559,7 +574,7 @@ def test_attachment_envelope_is_frozen_and_redelivered_intact(tmp_path) -> None:
         thread_id=thread.thread_id,
         task_id="task-attach",
     )
-    commit = runtime._record_response(
+    commit = delivery_module.record_background_response(_delivery_dependencies(runtime),
         request,
         context,
         "报告已生成，见附件。",
@@ -571,7 +586,7 @@ def test_attachment_envelope_is_frozen_and_redelivered_intact(tmp_path) -> None:
     assert commit.delivery_status == "failed"
     assert commit.persisted is False
 
-    pending = store.pending_wake_signal(wake.wake_signal_id)
+    pending = store.wakes.pending_one(wake.wake_signal_id)
     assert pending is not None
     frozen = pending.metadata["owner_delivery"]
     assert frozen["delivery_artifacts"] == [artifact]
@@ -595,7 +610,7 @@ def test_attachments_only_reply_is_frozen_and_redelivered(tmp_path) -> None:
 
     agent, _backend = _agent(tmp_path)
     store = agent.conversation_store
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "owner-im",
             "channel": "feishu",
@@ -612,7 +627,7 @@ def test_attachments_only_reply_is_frozen_and_redelivered(tmp_path) -> None:
         "ok": True,
         "size_bytes": 4,
     }
-    wake = store.raise_wake_signal(
+    wake = store.wakes.raise_signal(
         {
             "thread_id": thread.thread_id,
             "reason": "scheduled_progress_report",
@@ -626,7 +641,7 @@ def test_attachments_only_reply_is_frozen_and_redelivered(tmp_path) -> None:
         reason="scheduled_progress_report",
         wake_signal={"wake_signal_id": wake.wake_signal_id, "root_task_id": "task-only"},
     )
-    commit = runtime._record_response(
+    commit = delivery_module.record_background_response(_delivery_dependencies(runtime),
         request,
         DeliveryContext(
             channel="feishu",
@@ -641,7 +656,7 @@ def test_attachments_only_reply_is_frozen_and_redelivered(tmp_path) -> None:
         delivery_reason="non_subagent_completion",
     )
     assert commit.delivery_status == "failed"
-    pending = store.pending_wake_signal(wake.wake_signal_id)
+    pending = store.wakes.pending_one(wake.wake_signal_id)
     assert pending is not None, "纯附件回复也必须进入冻结重投"
     assert pending.metadata["owner_delivery"]["content"] == ""
 
@@ -659,7 +674,7 @@ def test_delivered_but_uncommitted_retry_does_not_send_twice(tmp_path) -> None:
 
     agent, _backend = _agent(tmp_path)
     store = agent.conversation_store
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "owner-tui",
             "channel": "tui",
@@ -669,7 +684,7 @@ def test_delivered_but_uncommitted_retry_does_not_send_twice(tmp_path) -> None:
     )
     channels = _ScriptedDelivery(proactive=True, status="sent")
     runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=channels)
-    wake = store.raise_wake_signal(
+    wake = store.wakes.raise_signal(
         {
             "thread_id": thread.thread_id,
             "reason": "scheduled_progress_report",
@@ -678,7 +693,7 @@ def test_delivered_but_uncommitted_retry_does_not_send_twice(tmp_path) -> None:
         }
     )
     # 模拟"外发成功但本地落账失败"：冻结载荷记录 external_sent=True。
-    store.cache_pending_wake_delivery(
+    store.wakes.cache_delivery(
         wake.wake_signal_id,
         {
             "schema_version": "wake-owner-delivery.v2",
@@ -691,7 +706,7 @@ def test_delivered_but_uncommitted_retry_does_not_send_twice(tmp_path) -> None:
             "created_at": time.time(),
         },
     )
-    pending = store.pending_wake_signal(wake.wake_signal_id)
+    pending = store.wakes.pending_one(wake.wake_signal_id)
     assert pending is not None
     report = runtime.redeliver_cached_wake(
         pending, channel="tui", target="session-tui", now=time.time()
@@ -699,7 +714,7 @@ def test_delivered_but_uncommitted_retry_does_not_send_twice(tmp_path) -> None:
 
     assert report is not None and report.wake_handled is True
     assert channels.sent == [], "重投不得再次外发"
-    rows = store.recent_messages(thread.thread_id, limit=0)
+    rows = store.messages.recent(thread.thread_id, limit=0)
     assert [row.content for row in rows] == ["外发已经成功过的正文。"]
 
 
@@ -709,7 +724,7 @@ def test_legacy_v1_frozen_payload_still_redelivers(tmp_path) -> None:
 
     agent, _backend = _agent(tmp_path)
     store = agent.conversation_store
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "owner-tui",
             "channel": "tui",
@@ -719,7 +734,7 @@ def test_legacy_v1_frozen_payload_still_redelivers(tmp_path) -> None:
     )
     channels = _ScriptedDelivery(proactive=False, status="not_applicable", channel="tui")
     runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=channels)
-    wake = store.raise_wake_signal(
+    wake = store.wakes.raise_signal(
         {
             "thread_id": thread.thread_id,
             "reason": "scheduled_progress_report",
@@ -727,7 +742,7 @@ def test_legacy_v1_frozen_payload_still_redelivers(tmp_path) -> None:
             "now": 3.0,
         }
     )
-    store.cache_pending_wake_delivery(
+    store.wakes.cache_delivery(
         wake.wake_signal_id,
         {
             "schema_version": "wake-owner-delivery.v1",
@@ -738,14 +753,14 @@ def test_legacy_v1_frozen_payload_still_redelivers(tmp_path) -> None:
             "created_at": time.time(),
         },
     )
-    pending = store.pending_wake_signal(wake.wake_signal_id)
+    pending = store.wakes.pending_one(wake.wake_signal_id)
     assert pending is not None
     report = runtime.redeliver_cached_wake(
         pending, channel="tui", target="session-tui", now=time.time()
     )
 
     assert report is not None and report.wake_handled is True
-    assert [row.content for row in store.recent_messages(thread.thread_id, limit=0)] == [
+    assert [row.content for row in store.messages.recent(thread.thread_id, limit=0)] == [
         "老版本冻结的正文。"
     ]
     assert BackgroundRunRequest is not None
@@ -761,7 +776,7 @@ def _seed_agent(tmp_path, *, thread_channel: str = "tui"):
 
     agent, _backend = _agent(tmp_path)
     store = agent.conversation_store
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "owner-seed",
             "channel": thread_channel,
@@ -784,7 +799,7 @@ def test_background_history_seed_distinguishes_empty_from_unreadable(tmp_path, m
     )
 
     # ① 正常空历史：合法空，不报错。
-    empty = runtime_module._background_conversation_history_seed(agent, store, thread, request)
+    empty = history_module.background_conversation_history_seed(agent, store, thread, request)
     assert empty.status == "ready"
     assert empty.seed is not None and empty.seed.messages == ()
 
@@ -792,21 +807,21 @@ def test_background_history_seed_distinguishes_empty_from_unreadable(tmp_path, m
     def boom(_thread):
         raise OSError("disk read failed")
 
-    monkeypatch.setattr(store, "messages_after_compact_report", boom, raising=False)
-    unreadable = runtime_module._background_conversation_history_seed(agent, store, thread, request)
+    monkeypatch.setattr(store.messages, 'after_compact_report', boom, raising=False)
+    unreadable = history_module.background_conversation_history_seed(agent, store, thread, request)
     assert unreadable.status == "unreadable"
     assert unreadable.seed is None
     assert unreadable.load_errors, "读取失败必须带结构化 load_errors"
     monkeypatch.undo()
 
     # ③ 坏 JSON 行：load_errors 非空 → 同样按 unreadable 处理，不静默降级。
-    messages_dir = store.messages_dir
+    messages_dir = store.storage.messages_dir
     messages_dir.mkdir(parents=True, exist_ok=True)
     (messages_dir / f"{thread.thread_id}.jsonl").write_text(
         '{"role": "user", "content": "ok"}\n{"role": "user", "content": \n',
         encoding="utf-8",
     )
-    broken = runtime_module._background_conversation_history_seed(agent, store, thread, request)
+    broken = history_module.background_conversation_history_seed(agent, store, thread, request)
     assert broken.status == "unreadable"
     assert broken.load_errors
 
@@ -816,7 +831,7 @@ def test_background_history_seed_keeps_detached_named_task_scope(tmp_path) -> No
     from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest
 
     runtime_module, agent, store, thread = _seed_agent(tmp_path)
-    store.append_message(
+    store.messages.append(
         {
             "thread_id": thread.thread_id,
             "role": "user",
@@ -826,7 +841,7 @@ def test_background_history_seed_keeps_detached_named_task_scope(tmp_path) -> No
             "now": 50.0,
         }
     )
-    store.bind_task(
+    store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": "task-A",
@@ -838,7 +853,7 @@ def test_background_history_seed_keeps_detached_named_task_scope(tmp_path) -> No
             "now": 100.0,
         }
     )
-    store.append_message(
+    store.messages.append(
         {
             "thread_id": thread.thread_id,
             "role": "user",
@@ -849,7 +864,7 @@ def test_background_history_seed_keeps_detached_named_task_scope(tmp_path) -> No
         }
     )
 
-    result = runtime_module._background_conversation_history_seed(
+    result = history_module.background_conversation_history_seed(
         agent,
         store,
         thread,
@@ -876,7 +891,7 @@ def test_background_history_seed_keeps_full_uncompacted_history(tmp_path, row_co
 
     runtime_module, agent, store, thread = _seed_agent(tmp_path)
     for index in range(row_count):
-        store.append_message(
+        store.messages.append(
             {
                 "thread_id": thread.thread_id,
                 "role": "user",
@@ -887,7 +902,7 @@ def test_background_history_seed_keeps_full_uncompacted_history(tmp_path, row_co
             }
         )
 
-    result = runtime_module._background_conversation_history_seed(
+    result = history_module.background_conversation_history_seed(
         agent,
         store,
         thread,
@@ -908,7 +923,7 @@ def test_background_history_seed_ignores_display_rows_when_scoping(tmp_path) -> 
 
     runtime_module, agent, store, thread = _seed_agent(tmp_path)
     for index in range(40):
-        store.append_message(
+        store.messages.append(
             {
                 "thread_id": thread.thread_id,
                 "role": "user",
@@ -918,7 +933,7 @@ def test_background_history_seed_ignores_display_rows_when_scoping(tmp_path) -> 
                 "now": 2000.0 + index,
             }
         )
-        store.append_message(
+        store.messages.append(
             {
                 "thread_id": thread.thread_id,
                 "role": "display",
@@ -929,7 +944,7 @@ def test_background_history_seed_ignores_display_rows_when_scoping(tmp_path) -> 
             }
         )
 
-    result = runtime_module._background_conversation_history_seed(
+    result = history_module.background_conversation_history_seed(
         agent,
         store,
         thread,
@@ -946,11 +961,9 @@ def test_background_history_seed_ignores_display_rows_when_scoping(tmp_path) -> 
 # 确实是 detached named 时才应用锚点/lineage。历史里恰好存在旧 Goal 不能改变普通轮的范围。
 # 函数用途: 覆盖 无task+旧Goal / 普通task+旧Goal / 两个detached乱序 / A不含B未来消息 / 普通轮保留today。
 def test_history_scope_rows_uses_exact_current_task_only() -> None:
+    from agent_py_agent.agent.conversation.background_context import TaskScopeDecision
+    from agent_py_agent.agent.conversation.background_history_seed import history_scope_rows
     from agent_py_agent.agent.conversation.models import MessageLogEntry
-    from agent_py_agent.agent.conversation.runtime import (
-        _history_scope_rows,
-        _TaskScopeDecision,
-    )
 
     def _row(message_id: str, created_at: float, task_id: str = "") -> MessageLogEntry:
         metadata = {"conversation_task_id": task_id} if task_id else {}
@@ -974,16 +987,16 @@ def test_history_scope_rows_uses_exact_current_task_only() -> None:
     }
 
     # ① 无 task 的普通事件：bundle 里恰有旧 detached Goal，也必须两条全留。
-    plain = _TaskScopeDecision("", frozenset(), None, False)
-    assert [row.message_id for row in _history_scope_rows(plain, rows)] == ["before", "today"]
+    plain = TaskScopeDecision("", frozenset(), None, False)
+    assert [row.message_id for row in history_scope_rows(plain, rows)] == ["before", "today"]
 
     # ② 本轮是普通 task（非 detached）：同样完整继承。
-    ordinary = _TaskScopeDecision("plain-task", frozenset({"plain-task"}), {"task_id": "plain-task"}, False)
-    assert [row.message_id for row in _history_scope_rows(ordinary, rows)] == ["before", "today"]
+    ordinary = TaskScopeDecision("plain-task", frozenset({"plain-task"}), {"task_id": "plain-task"}, False)
+    assert [row.message_id for row in history_scope_rows(ordinary, rows)] == ["before", "today"]
 
     # ③ 本轮 exact task 是 detached A：按锚点只保留创建前历史。
-    current_a = _TaskScopeDecision("detached-A", frozenset({"detached-A"}), detached_a, True)
-    assert [row.message_id for row in _history_scope_rows(current_a, rows)] == ["before"]
+    current_a = TaskScopeDecision("detached-A", frozenset({"detached-A"}), detached_a, True)
+    assert [row.message_id for row in history_scope_rows(current_a, rows)] == ["before"]
 
     # ④ 换顺序/换身份不改变结果（不做"第一个 detached"猜测）。
     detached_b = {
@@ -994,19 +1007,17 @@ def test_history_scope_rows_uses_exact_current_task_only() -> None:
         "created_at": 1000.0,
         "context_anchor_message_id": "today",
     }
-    current_b = _TaskScopeDecision("detached-B", frozenset({"detached-B"}), detached_b, True)
-    assert [row.message_id for row in _history_scope_rows(current_b, rows)] == ["before", "today"]
-    assert [row.message_id for row in _history_scope_rows(current_a, rows)] == ["before"]
+    current_b = TaskScopeDecision("detached-B", frozenset({"detached-B"}), detached_b, True)
+    assert [row.message_id for row in history_scope_rows(current_b, rows)] == ["before", "today"]
+    assert [row.message_id for row in history_scope_rows(current_a, rows)] == ["before"]
 
 
 # LLM: 当前 detached A 不得吞入后来属于 B 的消息；A 自己的 lineage 行仍保留。
 # 函数用途: 验证 lineage 过滤按当前 task 身份生效。
 def test_history_scope_rows_keeps_current_task_lineage_only() -> None:
+    from agent_py_agent.agent.conversation.background_context import TaskScopeDecision
+    from agent_py_agent.agent.conversation.background_history_seed import history_scope_rows
     from agent_py_agent.agent.conversation.models import MessageLogEntry
-    from agent_py_agent.agent.conversation.runtime import (
-        _history_scope_rows,
-        _TaskScopeDecision,
-    )
 
     def _row(message_id: str, created_at: float, task_id: str = "") -> MessageLogEntry:
         metadata = {"conversation_task_id": task_id} if task_id else {}
@@ -1032,8 +1043,8 @@ def test_history_scope_rows_keeps_current_task_lineage_only() -> None:
         "created_at": 100.0,
         "context_anchor_message_id": "before",
     }
-    decision = _TaskScopeDecision("detached-A", frozenset({"detached-A"}), link_a, True)
+    decision = TaskScopeDecision("detached-A", frozenset({"detached-A"}), link_a, True)
 
-    ids = [row.message_id for row in _history_scope_rows(decision, rows)]
+    ids = [row.message_id for row in history_scope_rows(decision, rows)]
     assert ids == ["before", "a-work"], ids
     assert "b-future" not in ids

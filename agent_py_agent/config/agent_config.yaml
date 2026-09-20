@@ -529,7 +529,7 @@ background_completion_coalesce_seconds: 5
 cli_resume_max_rounds: 8
 subagent_watch_interval_seconds: 120
 # 后台主代理唤醒时允许看到和调用的控制工具。
-# - 留空表示使用默认控制工具 profile。
+# - 留空表示使用默认控制工具 profile，包含命令、后台进程与交互终端的完整操作入口。
 # - 写了列表就只暴露列表里的工具；执行参数和 prompt 说明共用这一份。
 # - 这是唤醒场景的工具上限，不会给主代理或子代理额外提权。
 background_main_agent_allowed_tools: []

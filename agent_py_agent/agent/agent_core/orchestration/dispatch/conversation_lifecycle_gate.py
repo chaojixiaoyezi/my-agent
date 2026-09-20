@@ -96,7 +96,7 @@ def conversation_lifecycle_decisions(
     """Resolve a batch once per thread; missing structured authority fails closed."""
     decisions, scoped = _partition_task_scopes(tasks, resume_run_ids=resume_run_ids)
     store = getattr(agent, "conversation_store", None)
-    report = getattr(store, "task_links_report", None)
+    report = getattr(getattr(store, 'tasks', None), 'list_report', None)
     for thread_id, scopes in scoped.items():
         if not callable(report):
             _hold_scopes(decisions, scopes, "conversation_store_unavailable")

@@ -196,7 +196,7 @@ def _exact_audit_link(
     include_terminal: bool = False,
 ) -> tuple[object | None, str]:
     try:
-        links, errors = request.store.task_links_report(
+        links, errors = request.store.tasks.list_report(
             str(getattr(request.thread, "thread_id", "") or "")
         )
     except Exception:

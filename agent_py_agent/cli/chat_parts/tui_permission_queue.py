@@ -1,9 +1,6 @@
 """One serialized permission queue shared by foreground and delegated turns."""
 
-# LLM: The queue is TUI display/control plumbing only. Controllers still own
-# typed ToolApprovalRequest/Decision objects, while Gateway/subagent stores own
-# authorization. This module prevents concurrent requests from replacing one
-# another in the single bottom-pane overlay.
+# LLM: 队列只负责 TUI 展示与控制，原服务端账本拥有授权；控制器保留 typed 请求/决定，不能让并发请求替换当前面板。
 # 模块用途: 将主代理和多个子代理同时出现的工具审批排成一列，逐个显示和精确回写。
 
 from __future__ import annotations
@@ -18,28 +15,24 @@ from ...agent.contracts.tool_approval import ToolApprovalDecision, ToolApprovalR
 _RESOLVED_EXTERNAL_LIMIT = 512
 
 
-# LLM: This owner satisfies the same permission-controller surface as a turn
-# adapter without creating a fake model turn, spinner, transcript, or lifecycle.
-# 类用途: 给外部子代理审批提供纯 UI 归属，不伪造主代理回合。
+# LLM: 宿主复用回合适配器的审批接口，不创建模型回合、正文或生命周期；真实归属保留在服务端原请求。
+# 类用途: 给主/子后台审批提供纯 UI 宿主，不伪造前台回合。
 class ExternalTuiPermissionOwner:
-    # LLM: Runtime and request id are display routing facts only; the canonical
-    # child request remains separately captured by the decision writer.
+    # LLM: runtime 与 request id 只路由显示；服务端原请求由决定回写闭包另行冻结，不以界面编号授权。
     # 函数用途: 创建一个不带模型输出的审批面板宿主。
     def __init__(self, runtime: object, request_id: str) -> None:
         self.runtime = runtime
         self.request_id = str(request_id or "external-permission")
         self._lock = threading.RLock()
 
-    # LLM: External approvals have no assistant candidate to freeze; this no-op
-    # intentionally prevents a synthetic child request from touching transcript.
+    # LLM: 外部审批没有正文候选可冻结；空操作保留控制器接口，并阻止面板修改真实 transcript。
     # 函数用途: 兼容普通回合审批控制器的边界回调。
     def _complete_active_assistant(self, *, process: bool = False) -> None:
         del process
 
 
-# LLM: Each entry keeps the exact server-projected request separate from the
-# title-decorated display request held by its controller.
-# 类用途: 保存一个等待排队显示的子代理审批及真实回写身份。
+# LLM: 条目保存服务端原请求，控制器只持有装饰过标题的显示请求；回写不能交换两者。
+# 类用途: 保存一条等待排队显示的主/子后台审批及真实回写身份。
 @dataclass(frozen=True)
 class _ExternalPermissionEntry:
     key: str
@@ -48,10 +41,8 @@ class _ExternalPermissionEntry:
     controller: object
 
 
-# LLM: One coordinator belongs to one root TuiRuntime. It serializes every
-# controller, owns external-request dedupe, and never creates or validates an
-# approval binding itself.
-# 类用途: 管理当前显示的审批、后续等待队列和子代理审批同步。
+# LLM: 每个 root TuiRuntime 仅一个协调器，负责控制器排队和外部请求显示去重，不创建或批准 binding。
+# 类用途: 管理当前审批、后续队列和主/子后台审批同步。
 class TuiPermissionCoordinator:
     # LLM: The runtime lock is the sole queue lock, matching TuiRuntime event
     # ordering and avoiding a second independently synchronized UI state.
@@ -115,9 +106,7 @@ class TuiPermissionCoordinator:
         with self.runtime._lock:
             return self._active is controller
 
-    # LLM: Synchronization accepts only server-projected mappings. New requests
-    # receive a display owner and exact writer; vanished requests are dismissed
-    # locally without sending a stale cancellation back to the child.
+    # LLM: 同步只接受服务端投影，每项绑定原请求回写；消失项仅本地收起，不能向原主/子执行写迟到取消。
     # 函数用途: 把一次 Gateway 待审批列表同步进 TUI 全局审批队列。
     def sync_external(
         self,
@@ -152,9 +141,8 @@ class TuiPermissionCoordinator:
                 continue
             display_request = _display_request(request, label)
 
-            # LLM: The closure ignores the decorated display request and writes
-            # the original exact server request plus the typed decision.
-            # 函数用途: 将当前面板的选择精确回写到对应子代理记录。
+            # LLM: 回写只使用闭包冻结的服务端原始请求与 typed 决定，不能用装饰过的标题或前台回合代换身份。
+            # 函数用途: 将当前面板的选择精确回写到对应主/子后台审批记录。
             def write_decision(
                 _display: ToolApprovalRequest,
                 decision: ToolApprovalDecision,
@@ -164,7 +152,7 @@ class TuiPermissionCoordinator:
             ) -> None:
                 result = decision_writer(selected_run, canonical, decision)
                 if not isinstance(result, Mapping) or result.get("ok") is not True:
-                    raise OSError("subagent approval decision was not confirmed")
+                    raise OSError("agent approval decision was not confirmed")
 
             configure(write_decision)
             entry = _ExternalPermissionEntry(key, run_id, request, controller)
@@ -201,7 +189,7 @@ class TuiPermissionCoordinator:
 
     # LLM: Resolved external ids are bounded UI dedupe only. They cannot grant
     # future calls because every decision still requires a live server record.
-    # 函数用途: 记住本次 TUI 生命周期已收口的子代理审批，避免短暂重放。
+    # 函数用途: 记住本次 TUI 生命周期已收口的外部审批，避免短暂重放。
     def _remember_resolved_locked(self, key: str) -> None:
         if key in self._resolved_external:
             return
@@ -257,9 +245,8 @@ class TuiPermissionRuntimeMixin:
         ) if callable(resolver) else False
 
 
-# LLM: Input normalization re-enters ToolApprovalRequest validation and keys
-# each row by exact run plus permission id; malformed rows are silently omitted.
-# 函数用途: 清洗 Gateway 返回的子代理审批列表。
+# LLM: 每行重新校验共享合同，按 run/permission 去重；代理类型只生成显示标签，不能改变请求或审批归属。
+# 函数用途: 清洗 Gateway 返回的主/子后台审批列表。
 def _external_rows(
     value: object,
 ) -> list[tuple[str, str, str, ToolApprovalRequest]]:
@@ -279,18 +266,18 @@ def _external_rows(
             continue
         if request.binding.get("run_id") != run_id:
             continue
-        label = str(item.get("agent_name") or run_id).strip()[:96]
+        name = str(item.get("agent_name") or run_id).strip()[:96]
+        label = "主代理" if item.get("agent_kind") == "main" else f"子代理 {name}"
         rows.append((f"{run_id}:{request.permission_id}", run_id, label, request))
     rows.sort(key=lambda row: (row[3].requested_at, row[0]))
     return rows
 
 
-# LLM: Only title/description are decorated for owner comprehension. Binding,
-# ids, options, and timestamps remain byte-for-byte contract values.
-# 函数用途: 给审批面板加上“哪个子代理”的短标签。
+# LLM: 标签只装饰显示标题和说明，绑定、编号、选项及时间保持原合同；回写必须使用未装饰的原请求。
+# 函数用途: 给审批面板标明请求来自主代理还是某个子代理。
 def _display_request(request: ToolApprovalRequest, label: str) -> ToolApprovalRequest:
     payload = request.to_dict()
-    payload["title"] = f"子代理 {label} · {request.title}"
+    payload["title"] = f"{label} · {request.title}"
     payload["description"] = f"{label}: {request.description}"
     return ToolApprovalRequest.from_mapping(payload)
 

@@ -146,6 +146,19 @@ def test_missing_process_identity_does_not_prove_exit(monkeypatch):
     assert module._process_instance_terminated(99999999, "original-birth") is False
 
 
+@pytest.mark.parametrize("state,code,expected", [("Z+", 0, True), ("S", 0, False), ("Z", 1, False), ("", 0, False)])
+def test_posix_without_proc_uses_kernel_state_without_reaping(monkeypatch, state, code, expected):
+    from agent_py_agent.agent.tooling import process_registry as module
+
+    monkeypatch.setattr(module, "_IS_WINDOWS", False)
+    monkeypatch.setattr(module.Path, "is_dir", lambda self: False)
+    monkeypatch.setattr(
+        module.subprocess, "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], code, stdout=state),
+    )
+    assert module._process_is_zombie(12345) is expected
+
+
 def test_termination_does_not_resnapshot_reused_root_pid(monkeypatch):
     from unittest.mock import Mock
 

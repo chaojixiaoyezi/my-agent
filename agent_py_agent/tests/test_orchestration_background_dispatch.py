@@ -240,7 +240,7 @@ def test_worker_recovers_child_model_without_dispatch_backend(tmp_path, monkeypa
                                    backend_override=_captured_backend_override(host))
     worker = _build_worker_agent(Worker, params)
     assert worker.config.model_name == worker.backend.name == "child-A"
-    host.conversation_store._write_thread(ConversationThread("child-thread", "alice", owner_id="alice", model_profile_id=b))
+    host.conversation_store.threads.write(ConversationThread("child-thread", "alice", owner_id="alice", model_profile_id=b))
     execute_model_profile_operation(host, "set_default", {"profile_id": "default"})
     recovered = _build_worker_agent(Worker, replace(params, backend_override=_captured_backend_override(host)))
     assert recovered.config.model_name == recovered.backend.name == "child-B"

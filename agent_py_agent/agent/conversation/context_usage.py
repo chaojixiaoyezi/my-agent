@@ -58,7 +58,7 @@ def record_model_context_usage(agent: object, params: object, usage: object) -> 
     attrs = attrs if isinstance(attrs, Mapping) else {}
     thread_id = str(attrs.get("agent_thread_id") or attrs.get("conversation_thread_id") or "").strip()
     store = getattr(agent, "conversation_store", None)
-    loader = getattr(store, "load_thread_report", None)
+    loader = getattr(getattr(store, 'threads', None), 'load_report', None)
     public = public_context_usage(usage)
     if not thread_id or not public or not callable(loader):
         return False
@@ -74,9 +74,10 @@ def record_model_context_usage(agent: object, params: object, usage: object) -> 
 
 # LLM: Shared preflight/Compact display persistence uses an already resolved owner-local thread
 # and its captured generation; telemetry errors must not change execution, history or costs.
+# model_usage 领域通过原线程锁更新；调用方不能自己写线程或绕过 generation CAS。
 # 函数用途: 主子调用和压缩预检查共用一个数值保存入口；旧代拒绝写回，写失败仅记录告警。
 def save_context_usage_snapshot(store: object, thread: object, usage: object) -> bool:
-    updater = getattr(store, "update_model_context_usage", None)
+    updater = getattr(getattr(store, "model_usage", None), "update_context_usage", None)
     public = public_context_usage(usage)
     if thread is None or not public or not callable(updater):
         return False

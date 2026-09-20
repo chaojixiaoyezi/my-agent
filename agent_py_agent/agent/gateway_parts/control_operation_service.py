@@ -1,3 +1,5 @@
+# LLM: 控制副作用之前先冻结 owner、输入和版本化摘要；显式目录进入 v3，旧回执不能承载未签名字段。
+# 模块用途: 保存唯一控制回执并处理安全重试，目录、目标或命令变化不能借用原消息编号执行。
 from __future__ import annotations
 
 """LLM: Persist one authenticated slash-control operation before any side effect.
@@ -38,9 +40,11 @@ from .paths import GatewayPaths
 
 _CONTROL_OPERATION_SCHEMA = "gateway_control_operation.v2"
 _CONTROL_INPUT_DIGEST_LEGACY_VERSION = 1
-_CONTROL_INPUT_DIGEST_CURRENT_VERSION = 2
+_CONTROL_INPUT_DIGEST_TARGET_VERSION = 2
+_CONTROL_INPUT_DIGEST_CURRENT_VERSION = 3
 _CONTROL_INPUT_DIGEST_VERSIONS = {
     _CONTROL_INPUT_DIGEST_LEGACY_VERSION,
+    _CONTROL_INPUT_DIGEST_TARGET_VERSION,
     _CONTROL_INPUT_DIGEST_CURRENT_VERSION,
 }
 _CONTROL_OPERATION_STATES = {
@@ -77,6 +81,7 @@ class GatewayControlOperationConflict(ValueError):
 # LLM: This file is the sole transport-level fact for one control operation. It freezes an exact
 # turn or manual-Compact target when present; command-specific stores remain effect authority and
 # ``terminal_unknown`` never claims that an effect failed.
+# 显式 workspace 与命令一起冻结并签入 v3 摘要，不能由重试或当前 HTTP 请求替换。
 # 类用途: 保存控制命令的固定身份、精确目标、执行阶段、结果和无法确认的错误事实。
 @dataclass(frozen=True)
 class GatewayControlOperationReceipt:
@@ -102,9 +107,9 @@ class GatewayControlOperationReceipt:
     result: dict[str, Any] = field(default_factory=dict)
     error: dict[str, Any] = field(default_factory=dict)
     updated_at: float = 0.0
+    workspace: object = None
 
-    # LLM: The persisted projection carries every authenticated fact needed for read-only steer
-    # reconciliation; no HTTP body is consulted again after the first prepare.
+    # LLM: 保存固定身份、可选目录与摘要版本；准备后执行和对账只能读回执，不重读当前 HTTP 输入。
     # 函数用途: 把控制操作回执转换为可原子写入的 JSON 字典。
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -134,10 +139,11 @@ class GatewayControlOperationReceipt:
             payload["result"] = dict(self.result)
         if self.error:
             payload["error"] = dict(self.error)
+        if self.workspace is not None:
+            payload["workspace"] = self.workspace
         return payload
 
-    # LLM: Reads recompute both the stable operation id and content digest. A syntactically valid
-    # but altered file is corruption and must never be replayed as a trusted control result.
+    # LLM: 读取时重算身份与对应版本的摘要；目录篡改或旧版未签名目录都必须当作账本损坏拒绝。
     # 函数用途: 从磁盘字典恢复并完整校验一条控制操作回执。
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> GatewayControlOperationReceipt:
@@ -188,6 +194,7 @@ class GatewayControlOperationReceipt:
             result=dict(data.get("result")) if isinstance(data.get("result"), dict) else {},
             error=dict(data.get("error")) if isinstance(data.get("error"), dict) else {},
             updated_at=_control_operation_timestamp(data.get("updated_at")),
+            workspace=data.get("workspace"),
         )
         matched_digest_version = _validate_control_operation_receipt(receipt)
         return (
@@ -228,6 +235,7 @@ def try_gateway_control_operation_transition(paths: GatewayPaths, operation_id: 
 
 # LLM: Identity is based only on authenticated scope plus the opaque provider/client message id;
 # command content belongs to the separate digest so same-id/different-input conflicts deterministically.
+# 目录沿对应摘要版本签名，不能因相同命令正文而忽略重试时的路径变化。
 # 函数用途: 为一条可重试控制命令生成稳定操作 ID 和服务端内容指纹。
 def gateway_control_operation_identity(
     scope: GatewayControlScope,
@@ -244,7 +252,7 @@ def gateway_control_operation_identity(
     input_digest = _control_operation_input_digest(
         scope,
         command_text,
-        version=_CONTROL_INPUT_DIGEST_CURRENT_VERSION,
+        version=_control_input_version(scope),
     )
     return operation_id, input_digest
 
@@ -513,6 +521,7 @@ def _reconcile_control_operation_locked(
 
 # LLM: Prepare validates a same-id retry before any effect. This function is called only under
 # the operation transition and writes exactly one canonical receipt file.
+# 目录声明与命令共同冻结，显式目录使用 v3，其余输入保留 v2 重试身份。
 # 函数用途: 读取或首次写入 prepared 控制回执，并拒绝同 ID 不同命令。
 def _load_or_prepare_control_operation_locked(
     paths: GatewayPaths,
@@ -552,6 +561,8 @@ def _load_or_prepare_control_operation_locked(
             scope.metadata.get("target_control_message_id") or ""
         ).strip(),
         all_user_access=bool(scope.all_user_access),
+        workspace=scope.workspace,
+        input_digest_version=_control_input_version(scope),
         state="prepared",
         updated_at=time.time(),
     )
@@ -560,8 +571,7 @@ def _load_or_prepare_control_operation_locked(
     return receipt
 
 
-# LLM: Persisted authenticated facts reconstruct only the owner/turn lookup needed for read-only
-# steer receipt reconciliation; current HTTP headers cannot redirect an old operation.
+# LLM: 从已校验回执恢复首次身份、目录和目标，供执行及只读对账；当前 HTTP 输入不能重定向旧操作。
 # 函数用途: 从控制回执恢复最小、固定的 Gateway 控制作用域。
 def _receipt_scope(receipt: GatewayControlOperationReceipt) -> GatewayControlScope:
     return GatewayControlScope(
@@ -577,12 +587,13 @@ def _receipt_scope(receipt: GatewayControlOperationReceipt) -> GatewayControlSco
         },
         all_user_access=receipt.all_user_access,
         resolved_owner=_receipt_owner_identity(receipt),
+        workspace=receipt.workspace,
     )
 
 
 # LLM: Every read recomputes the versioned id/digest used at prepare time and enforces state/result
 # invariants. Rows written before exact Compact targets existed may use legacy digest v1 only when
-# the target remains empty; field expansion can never weaken tamper detection.
+# the target remains empty；v3 之前不能携带未签名的 workspace，字段扩展不能削弱旧账防篡改。
 # 函数用途: 检查控制回执身份、版本化摘要、时间和终态字段，并返回匹配的摘要版本。
 def _validate_control_operation_receipt(receipt: GatewayControlOperationReceipt) -> int:
     if not all(
@@ -610,13 +621,12 @@ def _validate_control_operation_receipt(receipt: GatewayControlOperationReceipt)
     candidate_versions = (
         (receipt.input_digest_version,)
         if receipt.input_digest_version in _CONTROL_INPUT_DIGEST_VERSIONS
-        else (
-            _CONTROL_INPUT_DIGEST_CURRENT_VERSION,
-            _CONTROL_INPUT_DIGEST_LEGACY_VERSION,
-        )
+        else tuple(sorted(_CONTROL_INPUT_DIGEST_VERSIONS, reverse=True))
     )
     matched_digest_version = 0
     for version in candidate_versions:
+        if version < 3 and receipt.workspace is not None:
+            continue
         if (
             version == _CONTROL_INPUT_DIGEST_LEGACY_VERSION
             and receipt.target_control_message_id
@@ -690,8 +700,7 @@ def _control_operation_identity_payload(
     }
 
 
-# LLM: Digest versions freeze exact signed fields. Version 1 predates manual-Compact target
-# identity; version 2 signs that target. Never silently add fields to an existing version again.
+# LLM: v1 不含 Compact 目标，v2 签入目标，v3 再签入 workspace；已发布版本的签名字段不可改变。
 # 函数用途: 按指定合同版本计算控制输入摘要，保证升级后仍能读旧账且新字段不能被篡改。
 def _control_operation_input_digest(
     scope: GatewayControlScope,
@@ -712,11 +721,23 @@ def _control_operation_input_digest(
         "channel_chat_id": str(scope.metadata.get("channel_chat_id") or "").strip(),
         "all_user_access": bool(scope.all_user_access),
     }
-    if version >= _CONTROL_INPUT_DIGEST_CURRENT_VERSION:
+    if version >= _CONTROL_INPUT_DIGEST_TARGET_VERSION:
         operation_input["target_control_message_id"] = str(
             scope.metadata.get("target_control_message_id") or ""
         ).strip()
+    if version >= 3:
+        operation_input["workspace"] = scope.workspace
     return hashlib.sha256(_canonical_json(operation_input).encode("utf-8")).hexdigest()
+
+
+# LLM: 没有目录声明的输入继续使用 v2，保证既有回执可重试；显式目录必须使用 v3 并冻结原值。
+# 函数用途: 按结构化输入选择摘要合同版本，避免新字段绕过回执完整性检查。
+def _control_input_version(scope: GatewayControlScope) -> int:
+    return (
+        _CONTROL_INPUT_DIGEST_CURRENT_VERSION
+        if scope.workspace is not None
+        else _CONTROL_INPUT_DIGEST_TARGET_VERSION
+    )
 
 
 # LLM: Owner refs use a separate integrity digest so authenticated client input can be replayed

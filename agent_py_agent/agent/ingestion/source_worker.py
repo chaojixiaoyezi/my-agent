@@ -876,7 +876,7 @@ def _sync_source_worker_runtime_context(
 
     store = getattr(agent, "conversation_store", None)
     link = None
-    loader = getattr(store, "load_task_link", None)
+    loader = getattr(getattr(store, 'tasks', None), 'load', None)
     if callable(loader):
         try:
             link = loader(state.audit_root_task_id)
@@ -1585,7 +1585,7 @@ def _publish_audit_capacity_event(
     sequence: int,
 ) -> dict[str, object]:
     store = getattr(agent, "conversation_store", None)
-    if store is None or not callable(getattr(store, "append_observation_with_wake", None)):
+    if store is None or not callable(getattr(getattr(store, 'wakes', None), 'append_observation', None)):
         return _outbox_pending("conversation_event_store_unavailable")
     thread_id = _thread_id_for_task(agent, audit_id)
     if not thread_id:
@@ -1629,7 +1629,7 @@ def _publish_audit_capacity_event(
     )
     source_agent_id = source_agent_ids[0] if source_agent_ids else ""
     try:
-        observation, signal = store.append_observation_with_wake(
+        observation, signal = store.wakes.append_observation(
             {
                 "thread_id": thread_id,
                 "event_type": "audit_capacity_alert",
@@ -1680,19 +1680,19 @@ def audit_parent_reconcile_state(
         # Standalone/internal agents without a conversation store retain the
         # pre-existing direct worker lifecycle.
         return True, "unscoped"
-    if not selected or not callable(getattr(store, "thread_for_task", None)):
+    if not selected or not callable(getattr(getattr(store, 'tasks', None), 'thread_for', None)):
         return False, "unavailable"
     try:
-        thread = store.thread_for_task(selected)
+        thread = store.tasks.thread_for(selected)
         thread_id = str(getattr(thread, "thread_id", "") or "").strip()
         if not thread_id:
             return False, "inactive"
-        if callable(getattr(store, "task_links_report", None)):
-            links, errors = store.task_links_report(thread_id)
+        if callable(getattr(getattr(store, 'tasks', None), 'list_report', None)):
+            links, errors = store.tasks.list_report(thread_id)
             if errors:
                 return False, "unavailable"
         else:
-            links = store.task_links(thread_id)
+            links = store.tasks.list(thread_id)
     except Exception:
         return False, "unavailable"
     matches = [
@@ -1720,7 +1720,7 @@ def _source_state_matches_current_audit_epoch(
     """Fence old-run source attempts after the same named Audit is restarted."""
 
     store = getattr(agent, "conversation_store", None)
-    loader = getattr(store, "load_task_link", None)
+    loader = getattr(getattr(store, 'tasks', None), 'load', None)
     if not callable(loader):
         return True
     try:
@@ -1992,7 +1992,7 @@ def _pending_finding_delivery_keys(
     audit_id: str,
 ) -> set[tuple[str, int]] | None:
     try:
-        signals = store.pending_wake_signals(limit=0)
+        signals = store.wakes.pending(limit=0)
     except Exception:
         return None
     keys: set[tuple[str, int]] = set()
@@ -2334,14 +2334,14 @@ def _publish_audit_finding_event(
     row: dict[str, Any],
 ) -> dict[str, object]:
     store = getattr(agent, "conversation_store", None)
-    if store is None or not callable(getattr(store, "append_observation_with_wake", None)):
+    if store is None or not callable(getattr(getattr(store, 'wakes', None), 'append_observation', None)):
         return _outbox_pending("conversation_event_store_unavailable")
     attrs = getattr(task, "attributes", {}) or {}
     audit_id = str(attrs.get(CONVERSATION_REQUEST_ID_ATTR) or "").strip()
     thread_id = str(attrs.get("conversation_thread_id") or "").strip()
-    if not thread_id and callable(getattr(store, "thread_for_task", None)):
+    if not thread_id and callable(getattr(getattr(store, 'tasks', None), 'thread_for', None)):
         try:
-            thread = store.thread_for_task(audit_id)
+            thread = store.tasks.thread_for(audit_id)
         except Exception as exc:
             return _outbox_pending(f"thread_lookup_failed:{type(exc).__name__}")
         thread_id = str(getattr(thread, "thread_id", "") or "").strip()
@@ -2360,12 +2360,12 @@ def _publish_audit_finding_event(
     assert isinstance(observation_payload, dict)
     try:
         if isinstance(wake_payload, dict):
-            observation, signal = store.append_observation_with_wake(
+            observation, signal = store.wakes.append_observation(
                 observation_payload,
                 wake_payload,
             )
         else:
-            observation = store.append_observation(observation_payload)
+            observation = store.observations.append(observation_payload)
             signal = None
     except Exception as exc:
         return _outbox_pending(f"event_publish_failed:{type(exc).__name__}")
@@ -2968,8 +2968,8 @@ def _audit_task_workspace(agent: object, state: WatchState) -> str:
     store = getattr(agent, "conversation_store", None)
     if store is None:
         return ""
-    thread_for_task = getattr(store, "thread_for_task", None)
-    task_links = getattr(store, "task_links", None)
+    thread_for_task = getattr(getattr(store, 'tasks', None), 'thread_for', None)
+    task_links = getattr(getattr(store, 'tasks', None), 'list', None)
     if not callable(thread_for_task) or not callable(task_links):
         return ""
     try:
@@ -3546,10 +3546,10 @@ def _unjudged_backlog(state: WatchState) -> int:
 
 def _thread_id_for_task(agent: object, task_id: str) -> str:
     store = getattr(agent, "conversation_store", None)
-    if store is None or not callable(getattr(store, "thread_for_task", None)):
+    if store is None or not callable(getattr(getattr(store, 'tasks', None), 'thread_for', None)):
         return ""
     try:
-        thread = store.thread_for_task(task_id)
+        thread = store.tasks.thread_for(task_id)
     except Exception:
         return ""
     return str(getattr(thread, "thread_id", "") or getattr(thread, "id", "") or "").strip()

@@ -19,7 +19,6 @@ from agent_py_agent.agent.agent_core.orchestration.create_policy import (
     create_run_params,
 )
 from agent_py_agent.agent.agent_core.run_task_workspace_writer import (
-    register_saved_run_task_ref,
     write_run_task_workspace_if_needed,
 )
 from agent_py_agent.agent.agent_core.runner.context import (
@@ -64,38 +63,47 @@ from agent_py_agent.agent.conversation.task_promotion import (
     promote_current_conversation_task,
 )
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.gateway_parts import request_history
 from agent_py_agent.agent.gateway_parts.io import write_json_file, write_json_file_atomic
 from agent_py_agent.agent.gateway_parts.paths import gateway_paths
+from agent_py_agent.agent.gateway_parts.request_binding import (
+    GatewayActiveTurnTransition,
+    GatewayTaskBindingWriter,
+    gateway_message_work_scope,
+)
+from agent_py_agent.agent.gateway_parts.request_context import (
+    GatewayAskRunContext,
+    GatewayConversationContext,
+    GatewayConversationLoadRequest,
+    GatewayWorkspaceSelection,
+    gateway_conversation_context,
+)
 from agent_py_agent.agent.gateway_parts.request_errors import (
     ConversationPersistenceError,
     UserReplyUnavailableError,
 )
 from agent_py_agent.agent.gateway_parts.request_execution import (
-    BufferedChunkStreamWriter,
-    GatewayWorkspaceScopeError,
-    _append_gateway_conversation_message,
-    _gateway_conversation_context,
-    _gateway_conversation_history_seed,
-    _gateway_injections,
-    _gateway_message_work_scope,
     _gateway_recovered_active_turn_tool_calls,
     _gateway_run_params,
     _gateway_run_task_attributes,
     _gateway_task_attributes,
-    _GatewayActiveTurnTransition,
-    _GatewayAskRunContext,
-    _GatewayAssistantTurn,
-    _GatewayConversationContext,
-    _GatewayConversationLoadRequest,
     _GatewayRunParamsRequest,
-    _GatewayTaskBindingWriter,
-    _GatewayWorkspaceSelection,
     _register_named_system_task,
     _run_gateway_ask,
     _run_gateway_turn_with_conversation_compact,
     _update_response_from_result,
 )
+from agent_py_agent.agent.gateway_parts.request_history import (
+    GatewayAssistantTurn,
+    append_gateway_conversation_message,
+)
+from agent_py_agent.agent.gateway_parts.request_prompt import (
+    gateway_conversation_history_seed,
+    gateway_injections,
+)
 from agent_py_agent.agent.gateway_parts.request_worker import GatewayAskParams, submit_gateway_ask
+from agent_py_agent.agent.gateway_parts.stream_writer import BufferedChunkStreamWriter
+from agent_py_agent.agent.gateway_parts.workspace_scope import GatewayWorkspaceScopeError
 from agent_py_agent.agent.memory_archive.tool_output_externalizer import (
     ExternalizeToolOutputRequest,
     externalize_tool_output_record,
@@ -353,16 +361,16 @@ def test_gateway_final_persists_typed_model_failure_including_repair(tmp_path, m
 
     agent = SimpleAgent(AgentConfig(model_backend="echo", enable_tools=False), tmp_path)
     store = agent.conversation_store
-    thread = store.get_or_create_thread({
+    thread = store.threads.get_or_create({
         "canonical_user_id": "local-agent", "channel": "chat",
         "channel_conversation_id": "length-session", "channel_user_id": "local-agent",
     })
-    conversation = _GatewayConversationContext(thread_id=thread.thread_id)
-    context = _GatewayAskRunContext(
+    conversation = GatewayConversationContext(thread_id=thread.thread_id)
+    context = GatewayAskRunContext(
         agent=agent, request={"metadata": {"channel": "chat"}},
         request_id="req-length", request_path=tmp_path / "request.json",
         response_path=tmp_path / "response.json",
-        on_chunk=module.BufferedChunkStreamWriter(tmp_path / "chunks.jsonl", rich_transcript=True) if rich else None,
+        on_chunk=BufferedChunkStreamWriter(tmp_path / "chunks.jsonl", rich_transcript=True) if rich else None,
     )
     if rich:
         module._configure_gateway_main_activity(context, conversation)
@@ -374,7 +382,7 @@ def test_gateway_final_persists_typed_model_failure_including_repair(tmp_path, m
         assistant_commentary_messages=["我在核对现有代码"],
         canonical_native_messages=[{"role": "assistant", "content": body or [{"type": "thinking", "thinking": "尚未完成"}]}],
     )
-    append = store.append_message
+    append = store.messages.append
 
     # LLM: 只在 pytest 临时存储模拟 final 写入失败，commentary 正常；生产 repair 负责后续补交。
     # 函数用途: 核对同一结束原因在瞬时写盘失败后仍能随原消息完整恢复。
@@ -385,14 +393,14 @@ def test_gateway_final_persists_typed_model_failure_including_repair(tmp_path, m
 
     with monkeypatch.context() as patch:
         if deferred:
-            patch.setattr(store, "append_message", fail_final)
-        module._persist_gateway_assistant_result(context, conversation, result)
+            patch.setattr(store.messages, 'append', fail_final)
+        request_history.persist_gateway_assistant_result(context, conversation, result)
     if deferred:
         assert result.conversation_persist_degraded
         errors = []
-        module._repair_gateway_conversation_messages(store, thread.thread_id, errors)
+        request_history.repair_gateway_conversation_messages(store, thread.thread_id, errors)
         assert errors == []
-    rows = store.recent_messages(thread.thread_id, limit=0)
+    rows = store.messages.recent(thread.thread_id, limit=0)
     assert [row.content for row in rows] == ["我在核对现有代码", body]
     assert "turn_end_reason" not in rows[0].metadata
     assert rows[-1].metadata["turn_end_reason"] == end
@@ -413,21 +421,20 @@ def test_gateway_final_persists_typed_model_failure_including_repair(tmp_path, m
             assert snapshot["live_final_block_id"].startswith(snapshot["request_id"] + ":assistant:")
         else:
             assert "live_final_block_id" not in snapshot
-    before = store._message_path(thread.thread_id).read_bytes()
-    module._persist_gateway_assistant_result(context, conversation, result)
-    assert store._message_path(thread.thread_id).read_bytes() == before
+    before = store.storage.message_path(thread.thread_id).read_bytes()
+    request_history.persist_gateway_assistant_result(context, conversation, result)
+    assert store.storage.message_path(thread.thread_id).read_bytes() == before
 
 
 @pytest.mark.parametrize("deferred", [False, True])
 def test_gateway_stop_keeps_native_history_without_public_reply(tmp_path, monkeypatch, deferred):
     from agent_py_agent.agent.conversation.native_history import provider_history_messages_from_rows
-    from agent_py_agent.agent.gateway_parts import request_execution as module
 
     agent = SimpleAgent(AgentConfig(model_backend="echo", enable_tools=False), tmp_path)
     store = agent.conversation_store
-    thread = store.get_or_create_thread({"channel": "chat", "channel_conversation_id": "stop-history"})
-    conversation = _GatewayConversationContext(thread_id=thread.thread_id)
-    context = _GatewayAskRunContext(
+    thread = store.threads.get_or_create({"channel": "chat", "channel_conversation_id": "stop-history"})
+    conversation = GatewayConversationContext(thread_id=thread.thread_id)
+    context = GatewayAskRunContext(
         agent=agent, request={"metadata": {"channel": "chat"}}, request_id="req-stop-native",
         request_path=tmp_path / "request.json", response_path=tmp_path / "response.json", on_chunk=None,
     )
@@ -437,25 +444,25 @@ def test_gateway_stop_keeps_native_history_without_public_reply(tmp_path, monkey
         {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "done-read", "content": "已经读过的事实"}]},
     ]
     result = SimpleNamespace(response="", runtime_status="cancelled", runtime_reason="user_stop", canonical_native_messages=native)
-    module._append_gateway_conversation_message(agent, context.request, conversation,
+    request_history.append_gateway_conversation_message(agent, context.request, conversation,
         request_id=context.request_id, role="user", content="原任务")
     with monkeypatch.context() as patch:
         if deferred:
-            patch.setattr(store, "append_message", lambda _payload: (_ for _ in ()).throw(OSError("test disk failure")))
-        module._persist_gateway_assistant_result(context, conversation, result)
+            patch.setattr(store.messages, 'append', lambda _payload: (_ for _ in ()).throw(OSError("test disk failure")))
+        request_history.persist_gateway_assistant_result(context, conversation, result)
     if deferred:
         assert result.conversation_persist_degraded
         errors = []
-        module._repair_gateway_conversation_messages(store, thread.thread_id, errors)
+        request_history.repair_gateway_conversation_messages(store, thread.thread_id, errors)
         assert not errors
-    rows = store.recent_messages(thread.thread_id, limit=0)
+    rows = store.messages.recent(thread.thread_id, limit=0)
     assert [r.content for r in rows] == ["原任务", ""]
     assert rows[-1].metadata["turn_end_reason"] == "aborted"
     assert list(provider_history_messages_from_rows(rows)) == native
     assert result.channel_delivery["content"] == ""
     assert result.channel_delivery["projection_status"] == "suppressed_user_stop"
-    module._persist_gateway_assistant_result(context, conversation, result)
-    assert len(store.recent_messages(thread.thread_id, limit=0)) == 2
+    request_history.persist_gateway_assistant_result(context, conversation, result)
+    assert len(store.messages.recent(thread.thread_id, limit=0)) == 2
 
 
 def test_gateway_chat_reuses_thread_but_does_not_auto_bind_task(tmp_path):
@@ -473,8 +480,8 @@ def test_gateway_chat_reuses_thread_but_does_not_auto_bind_task(tmp_path):
 
     first = _conversation_context(agent, request, "gw-first", "你好，我叫小叶子")
     assert first.thread_id
-    assert agent.conversation_store.thread_for_task("gw-first") is None
-    _append_gateway_conversation_message(
+    assert agent.conversation_store.tasks.thread_for("gw-first") is None
+    append_gateway_conversation_message(
         agent,
         {"metadata": {"channel": "chat", "message_id": "m1"}},
         first,
@@ -482,14 +489,14 @@ def test_gateway_chat_reuses_thread_but_does_not_auto_bind_task(tmp_path):
         role="user",
         content="你好，我叫小叶子",
     )
-    _append_gateway_conversation_message(
+    append_gateway_conversation_message(
         agent,
         {"metadata": {"channel": "chat"}},
         first,
         request_id="gw-first",
         role="assistant",
         content="你好，小叶子。",
-        assistant_turn=_GatewayAssistantTurn(native_messages=[
+        assistant_turn=GatewayAssistantTurn(native_messages=[
             {
                 "role": "user",
                 "content": [{"type": "text", "text": "# User Task\n你好，我叫小叶子"}],
@@ -524,9 +531,9 @@ def test_gateway_chat_reuses_thread_but_does_not_auto_bind_task(tmp_path):
     )
     second = _conversation_context(agent, request, "gw-second", "我叫什么？")
     assert second.thread_id == first.thread_id
-    assert agent.conversation_store.thread_for_task("gw-second") is None
-    section = _gateway_injections({"inject": []}, second)[0]
-    history_seed = _gateway_conversation_history_seed(second)
+    assert agent.conversation_store.tasks.thread_for("gw-second") is None
+    section = gateway_injections({"inject": []}, second)[0]
+    history_seed = gateway_conversation_history_seed(second)
     assert history_seed is not None
     assert ("user", "你好，我叫小叶子") in history_seed.messages
     assert ("assistant", "你好，小叶子。") in history_seed.messages
@@ -567,10 +574,10 @@ def test_interleaved_named_audit_prepare_history_keeps_exact_scope(tmp_path):
                 },
             },
         }
-        initial = _gateway_conversation_context(
-            _GatewayConversationLoadRequest(agent, request, request_id, prompt)
+        initial = gateway_conversation_context(
+            GatewayConversationLoadRequest(agent, request, request_id, prompt)
         )
-        context = _GatewayAskRunContext(
+        context = GatewayAskRunContext(
             agent,
             request,
             tmp_path / f"{request_id}.json",
@@ -582,7 +589,7 @@ def test_interleaved_named_audit_prepare_history_keeps_exact_scope(tmp_path):
         return request, initial
 
     request_a, conversation = prepare_request("审计A", "prepare-a-1", "A 的确认条件是 alpha")
-    _append_gateway_conversation_message(
+    append_gateway_conversation_message(
         agent,
         request_a,
         conversation,
@@ -590,7 +597,7 @@ def test_interleaved_named_audit_prepare_history_keeps_exact_scope(tmp_path):
         role="user",
         content="A 的确认条件是 alpha",
     )
-    _append_gateway_conversation_message(
+    append_gateway_conversation_message(
         agent,
         request_a,
         conversation,
@@ -600,7 +607,7 @@ def test_interleaved_named_audit_prepare_history_keeps_exact_scope(tmp_path):
     )
 
     request_b, _ = prepare_request("审计B", "prepare-b-1", "B 的确认条件是 beta")
-    _append_gateway_conversation_message(
+    append_gateway_conversation_message(
         agent,
         request_b,
         conversation,
@@ -608,7 +615,7 @@ def test_interleaved_named_audit_prepare_history_keeps_exact_scope(tmp_path):
         role="user",
         content="B 的确认条件是 beta",
     )
-    _append_gateway_conversation_message(
+    append_gateway_conversation_message(
         agent,
         request_b,
         conversation,
@@ -616,7 +623,7 @@ def test_interleaved_named_audit_prepare_history_keeps_exact_scope(tmp_path):
         role="assistant",
         content="B 已记录 beta",
     )
-    _append_gateway_conversation_message(
+    append_gateway_conversation_message(
         agent,
         {"metadata": {"channel": "feishu"}},
         conversation,
@@ -626,8 +633,8 @@ def test_interleaved_named_audit_prepare_history_keeps_exact_scope(tmp_path):
     )
 
     request_a2, _ = prepare_request("审计A", "prepare-a-2", "继续完善 A")
-    current_a = _gateway_conversation_context(
-        _GatewayConversationLoadRequest(agent, request_a2, "prepare-a-2", "继续完善 A")
+    current_a = gateway_conversation_context(
+        GatewayConversationLoadRequest(agent, request_a2, "prepare-a-2", "继续完善 A")
     )
     history_a = "\n".join(content for _role, content in current_a.history)
     assert "A 的确认条件是 alpha" in history_a
@@ -636,7 +643,7 @@ def test_interleaved_named_audit_prepare_history_keeps_exact_scope(tmp_path):
     assert "B 的确认条件是 beta" not in history_a
     assert "B 已记录 beta" not in history_a
 
-    rows = agent.conversation_store.recent_messages(conversation.thread_id, limit=20)
+    rows = agent.conversation_store.messages.recent(conversation.thread_id, limit=20)
     row_a = next(row for row in rows if row.metadata.get("gateway_request_id") == "prepare-a-1")
     row_b = next(row for row in rows if row.metadata.get("gateway_request_id") == "prepare-b-1")
     assert row_a.metadata["conversation_task_id"] != row_b.metadata["conversation_task_id"]
@@ -644,8 +651,8 @@ def test_interleaved_named_audit_prepare_history_keeps_exact_scope(tmp_path):
     assert row_b.metadata["conversation_work_name"] == "审计B"
     assert row_a.metadata["conversation_audit_prepare"] is True
 
-    ordinary = _gateway_conversation_context(
-        _GatewayConversationLoadRequest(
+    ordinary = gateway_conversation_context(
+        GatewayConversationLoadRequest(
             agent,
             {"conversation": conversation_spec},
             "ordinary-after-audits",
@@ -658,14 +665,14 @@ def test_interleaved_named_audit_prepare_history_keeps_exact_scope(tmp_path):
 
 
 def test_audit_prepare_projection_does_not_use_global_compact_or_sibling_artifacts() -> None:
-    conversation = _GatewayConversationContext(
+    conversation = GatewayConversationContext(
         thread_id="thread-audit-scope",
         compact_summary="旧 Audit 的 captured 规则",
         compact_operation_evidence={"events": [{"tool": "publish_audit_update"}]},
         recent_operation_evidence={"events": [{"tool": "publish_audit_update"}]},
         history=(("user", "当前 Audit 自己的普通上下文"),),
         recent_artifacts=({"path": "/tmp/old-audit-profile.md"},),
-        workspace_task=_GatewayWorkspaceSelection(
+        workspace_task=GatewayWorkspaceSelection(
             task_id="ordinary-task",
             status="completed",
             goal="旧普通任务",
@@ -694,10 +701,10 @@ def test_audit_prepare_projection_does_not_use_global_compact_or_sibling_artifac
         },
     }
 
-    section = _gateway_injections(request, conversation)[0]
-    history_seed = _gateway_conversation_history_seed(
+    section = gateway_injections(request, conversation)[0]
+    history_seed = gateway_conversation_history_seed(
         conversation,
-        work_scope=_gateway_message_work_scope(request),
+        work_scope=gateway_message_work_scope(request),
     )
     assert history_seed is not None
     assert history_seed.messages == (("user", "当前 Audit 自己的普通上下文"),)
@@ -726,7 +733,7 @@ def _completion_followup_fixture(tmp_path: Path) -> tuple[SimpleAgent, dict, str
     workspace = tmp_path / "root-workspace"
     (workspace / "output").mkdir(parents=True)
     (workspace / "work").mkdir()
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": first.thread_id,
             "task_id": "root-task",
@@ -735,7 +742,7 @@ def _completion_followup_fixture(tmp_path: Path) -> tuple[SimpleAgent, dict, str
             "task_path": str(workspace),
         }
     )
-    agent.conversation_store.select_workspace_task(
+    agent.conversation_store.tasks.select_workspace_task(
         {"thread_id": first.thread_id, "task_id": "root-task"}
     )
     return agent, request, first.thread_id
@@ -752,7 +759,7 @@ def _append_completion_observation(
     message: str,
     now: float,
 ) -> None:
-    agent.conversation_store.append_observation(
+    agent.conversation_store.observations.append(
         {
             "thread_id": thread_id,
             "event_type": "subagent_runner_finished",
@@ -786,7 +793,7 @@ def test_gateway_followup_with_workspace_and_no_observations_stays_available(tmp
     assert followup.workspace_task is not None
     assert followup.subagent_completions == {}
     assert followup.load_errors == ()
-    assert not agent.conversation_store._observation_path(thread_id).exists()
+    assert not agent.conversation_store.storage.observation_path(thread_id).exists()
 
 
 def test_gateway_followup_receives_exact_root_child_completion_inputs(tmp_path):
@@ -832,7 +839,7 @@ def test_gateway_followup_receives_exact_root_child_completion_inputs(tmp_path):
         message="其它根任务内容不能串入",
         now=30.0,
     )
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": thread_id,
             "task_id": "followup-task",
@@ -841,16 +848,16 @@ def test_gateway_followup_receives_exact_root_child_completion_inputs(tmp_path):
             "task_path": str(tmp_path / "root-workspace"),
         }
     )
-    agent.conversation_store.update_task_status(
+    agent.conversation_store.tasks.update_status(
         {"task_id": "root-task", "status": "completed"}
     )
-    agent.conversation_store.select_workspace_task(
+    agent.conversation_store.tasks.select_workspace_task(
         {"thread_id": thread_id, "task_id": "followup-task"}
     )
 
     followup = _conversation_context(agent, request, "gw-followup", "汇总子代理结果")
     completion_context = followup.subagent_completions
-    section = _gateway_injections({"inject": []}, followup)[0]
+    section = gateway_injections({"inject": []}, followup)[0]
 
     assert completion_context["schema"] == "conversation-subagent-completions.v1"
     assert completion_context["workspace_task_id"] == "followup-task"
@@ -918,7 +925,7 @@ def test_gateway_run_persists_user_and_assistant_for_next_turn(tmp_path):
         "conversation": conversation,
     }
     _run_claimed_gateway_ask(
-        _GatewayAskRunContext(
+        GatewayAskRunContext(
             agent,
             first_request,
             tmp_path / "req-1.json",
@@ -935,7 +942,7 @@ def test_gateway_run_persists_user_and_assistant_for_next_turn(tmp_path):
     )
     assert any(role == "user" and "简短回答" in content for role, content in second.history)
     assert any(role == "assistant" for role, _content in second.history)
-    rows = agent.conversation_store.recent_messages(second.thread_id, limit=10)
+    rows = agent.conversation_store.messages.recent(second.thread_id, limit=10)
     assert [(row.role, row.metadata["gateway_request_id"]) for row in rows] == [
         ("user", "gw-1"),
         ("assistant", "gw-1"),
@@ -982,7 +989,7 @@ def test_gateway_public_reply_redacts_structured_ids_but_keeps_internal_transcri
         "req-private-seed",
         "建立监控",
     )
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": seeded.thread_id,
             "task_id": "audit-private-012",
@@ -1004,7 +1011,7 @@ def test_gateway_public_reply_redacts_structured_ids_but_keeps_internal_transcri
     )
 
     result = _run_claimed_gateway_ask(
-        _GatewayAskRunContext(
+        GatewayAskRunContext(
             agent,
             {"prompt": "告诉我归属", "conversation": conversation},
             tmp_path / "req-private.json",
@@ -1021,13 +1028,13 @@ def test_gateway_public_reply_redacts_structured_ids_but_keeps_internal_transcri
     assert "audit-private-012" not in public
     assert "当前监控" in public
     assert "普通项目名 alpha 不变" in public
-    thread = agent.conversation_store.resolve_thread(
+    thread = agent.conversation_store.threads.resolve(
         channel="feishu",
         channel_conversation_id="oc_group_private_456",
         channel_user_id="ou_member_private_123",
     )
     assert thread is not None
-    rows = agent.conversation_store.recent_messages(thread.thread_id, limit=10)
+    rows = agent.conversation_store.messages.recent(thread.thread_id, limit=10)
     assert rows[-1].content == public
     assert "audit-private-012" not in rows[-1].content
 
@@ -1072,7 +1079,7 @@ def test_gateway_persists_same_redacted_runtime_tool_identifier_as_delivery(
     )
 
     result = _run_claimed_gateway_ask(
-        _GatewayAskRunContext(
+        GatewayAskRunContext(
             agent,
             {"prompt": "打开来源", "conversation": conversation},
             tmp_path / "req-runtime-id.json",
@@ -1084,13 +1091,13 @@ def test_gateway_persists_same_redacted_runtime_tool_identifier_as_delivery(
 
     public = result.channel_delivery["content"]
     assert public == "来源已经打开，内部读取编号 当前来源读取，可以继续。"
-    thread = agent.conversation_store.resolve_thread(
+    thread = agent.conversation_store.threads.resolve(
         channel="cli",
         channel_conversation_id="cli_runtime_identifier_conversation",
         channel_user_id="cli_runtime_identifier_user",
     )
     assert thread is not None
-    rows = agent.conversation_store.recent_messages(thread.thread_id, limit=10)
+    rows = agent.conversation_store.messages.recent(thread.thread_id, limit=10)
     assert rows[-1].content == public
     assert "ws-private-runtime-012" not in rows[-1].content
 
@@ -1120,7 +1127,7 @@ def test_scoped_local_tui_preserves_paths_in_final_stream_and_history(tmp_path, 
     from agent_py_agent.agent.conversation.history_display import (
         conversation_history_display_events,
     )
-    from agent_py_agent.agent.gateway_parts.request_execution import _gateway_request_channel
+    from agent_py_agent.agent.gateway_parts.request_history import gateway_request_channel
 
     agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
     request = {
@@ -1136,19 +1143,19 @@ def test_scoped_local_tui_preserves_paths_in_final_stream_and_history(tmp_path, 
     monkeypatch.setattr(agent, "run", lambda *_args, **_kwargs: SimpleNamespace(
         response=raw, runtime_status="ok", delivery_artifacts=[],
     ))
-    result = _run_claimed_gateway_ask(_GatewayAskRunContext(
+    result = _run_claimed_gateway_ask(GatewayAskRunContext(
         agent, request, tmp_path / "req.json", tmp_path / "resp.json", "req-path-test", lambda _chunk: None,
     ))
     assert result.channel_delivery["content"] == expected
-    thread = agent.conversation_store.resolve_thread(
+    thread = agent.conversation_store.threads.resolve(
         channel=provider, channel_conversation_id="local-session", channel_user_id="example-user",
     )
-    rows = agent.conversation_store.recent_messages(thread.thread_id, limit=10)
+    rows = agent.conversation_store.messages.recent(thread.thread_id, limit=10)
     assert rows[-1].content == expected
     events = conversation_history_display_events(rows)
     assert any(event.get("payload", {}).get("text") == expected for event in events)
     assert request["metadata"]["channel"] == provider
-    writer = BufferedChunkStreamWriter(tmp_path / "chunks.jsonl", delivery_channel=_gateway_request_channel(request))
+    writer = BufferedChunkStreamWriter(tmp_path / "chunks.jsonl", delivery_channel=gateway_request_channel(request))
     writer.set_identifier_redactions((("providers/sample-provider/users/example-user", "当前空间"),
                                      ("example-user", "当前用户"), ("req-path-test", "当前请求")))
     writer.write_model(raw)
@@ -1195,7 +1202,7 @@ def test_gateway_compacts_and_retries_internal_context_pressure_inline(tmp_path,
     )
     for index in range(2):
         for role in ("user", "assistant"):
-            assert _append_gateway_conversation_message(
+            assert append_gateway_conversation_message(
                 agent,
                 {"metadata": {"channel": "feishu"}},
                 existing,
@@ -1237,7 +1244,7 @@ def test_gateway_compacts_and_retries_internal_context_pressure_inline(tmp_path,
 
     monkeypatch.setattr(agent, "run", pressure_then_answer)
     result = _run_claimed_gateway_ask(
-        _GatewayAskRunContext(
+        GatewayAskRunContext(
             agent,
             {"prompt": "继续聊", "conversation": conversation},
             tmp_path / "req-compact.json",
@@ -1246,8 +1253,8 @@ def test_gateway_compacts_and_retries_internal_context_pressure_inline(tmp_path,
             lambda _chunk: None,
         )
     )
-    thread = agent.conversation_store.load_thread(existing.thread_id)
-    rows = agent.conversation_store.recent_messages(existing.thread_id, limit=20)
+    thread = agent.conversation_store.threads.load(existing.thread_id)
+    rows = agent.conversation_store.messages.recent(existing.thread_id, limit=20)
 
     assert len(calls) == 2
     assert all(call.context_scope == "conversation" for call in calls)
@@ -1283,7 +1290,7 @@ def test_same_gateway_request_keeps_task_turn_authority_after_inline_compact(
     request_path = tmp_path / "gateway" / "processing" / f"{request_id}.json"
     request_path.parent.mkdir(parents=True)
     write_json_file(request_path, request)
-    context = _GatewayAskRunContext(
+    context = GatewayAskRunContext(
         agent,
         request,
         request_path,
@@ -1310,7 +1317,7 @@ def test_same_gateway_request_keeps_task_turn_authority_after_inline_compact(
     }
     stored_request = json.loads(request_path.read_text(encoding="utf-8"))
     assert stored_request["conversation_runtime"] == runtime
-    policy = agent.conversation_store.set_progress_policy(
+    policy = agent.conversation_store.progress.create(
         {
             "thread_id": conversation.thread_id,
             "task_id": link.task_id,
@@ -1341,8 +1348,8 @@ def test_same_gateway_request_keeps_task_turn_authority_after_inline_compact(
         retry_attrs,
         source="gateway",
     )
-    assert agent.conversation_store.load_task_link(link.task_id).status == "completed"
-    assert agent.conversation_store.get_progress_policy(policy.policy_id).enabled is False
+    assert agent.conversation_store.tasks.load(link.task_id).status == "completed"
+    assert agent.conversation_store.progress.load(policy.policy_id).enabled is False
 
 
 def test_gateway_same_turn_can_cross_pressure_twice_without_recompacting_transcript(
@@ -1372,7 +1379,7 @@ def test_gateway_same_turn_can_cross_pressure_twice_without_recompacting_transcr
     )
     for index in range(2):
         for role in ("user", "assistant"):
-            assert _append_gateway_conversation_message(
+            assert append_gateway_conversation_message(
                 agent,
                 {"metadata": {"channel": "feishu"}},
                 existing,
@@ -1420,7 +1427,7 @@ def test_gateway_same_turn_can_cross_pressure_twice_without_recompacting_transcr
 
     monkeypatch.setattr(agent, "run", pressure_twice_then_answer)
     result = _run_claimed_gateway_ask(
-        _GatewayAskRunContext(
+        GatewayAskRunContext(
             agent,
             {"prompt": "继续长任务", "conversation": conversation},
             tmp_path / "req-compact-twice.json",
@@ -1429,7 +1436,7 @@ def test_gateway_same_turn_can_cross_pressure_twice_without_recompacting_transcr
             lambda _chunk: None,
         )
     )
-    thread = agent.conversation_store.load_thread(existing.thread_id)
+    thread = agent.conversation_store.threads.load(existing.thread_id)
 
     assert len(calls) == 3
     assert calls[1].carried_archive_tool_calls == [first_tool]
@@ -1463,7 +1470,7 @@ def test_gateway_same_turn_pressure_without_new_structured_progress_stops(tmp_pa
         "开始",
     )
     for role in ("user", "assistant"):
-        assert _append_gateway_conversation_message(
+        assert append_gateway_conversation_message(
             agent,
             {"metadata": {"channel": "feishu"}},
             existing,
@@ -1493,7 +1500,7 @@ def test_gateway_same_turn_pressure_without_new_structured_progress_stops(tmp_pa
     monkeypatch.setattr(agent, "run", pressure_without_progress)
     with pytest.raises(ConversationPersistenceError, match="无法继续压缩"):
         _run_claimed_gateway_ask(
-            _GatewayAskRunContext(
+            GatewayAskRunContext(
                 agent,
                 {"prompt": "继续长任务", "conversation": conversation},
                 tmp_path / "req-compact-no-progress.json",
@@ -1506,7 +1513,7 @@ def test_gateway_same_turn_pressure_without_new_structured_progress_stops(tmp_pa
     # 第一次 overflow 压 transcript，第二次才把尚未覆盖的 active-turn tool
     # archive 提交为另一代；第三次完全相同且无新 source id 时 fail closed。
     assert calls == 3
-    thread = agent.conversation_store.load_thread(existing.thread_id)
+    thread = agent.conversation_store.threads.load(existing.thread_id)
     assert thread is not None and thread.compact_generation == 2
 
 
@@ -1530,9 +1537,9 @@ def test_gateway_foreground_turn_holds_shared_conversation_execution_lane(tmp_pa
 
     def guarded_run(prompt, *, params=None, **kwargs):
         thread_id = str(params.task_attributes["conversation_thread_id"])
-        claim = agent.conversation_store.load_background_run_claim(thread_id)
+        claim = agent.conversation_store.claims.load(thread_id)
         observed["claim"] = claim
-        observed["second_executor"] = agent.conversation_store.claim_background_run(
+        observed["second_executor"] = agent.conversation_store.claims.acquire(
             {
                 "thread_id": thread_id,
                 "task_id": "same-task-background-wake",
@@ -1544,7 +1551,7 @@ def test_gateway_foreground_turn_holds_shared_conversation_execution_lane(tmp_pa
 
     monkeypatch.setattr(agent, "run", guarded_run)
     _run_claimed_gateway_ask(
-        _GatewayAskRunContext(
+        GatewayAskRunContext(
             agent,
             {"prompt": "继续当前工作", "conversation": conversation},
             tmp_path / "req-lane.json",
@@ -1559,7 +1566,7 @@ def test_gateway_foreground_turn_holds_shared_conversation_execution_lane(tmp_pa
     assert claim["reason"] == "gateway_foreground_turn"
     assert claim["task_id"] == "gateway:gw-lane"
     assert observed["second_executor"] is None
-    finished = agent.conversation_store.load_background_run_claim(claim["thread_id"])
+    finished = agent.conversation_store.claims.load(claim["thread_id"])
     assert finished["status"] == "finished"
     assert finished["last_runtime_facts"] == {
         "execution_source": "gateway",
@@ -1588,7 +1595,7 @@ def test_gateway_foreground_turn_waits_for_existing_conversation_lane(tmp_path, 
         "gw-before-wait",
         "后台正在收口",
     )
-    claim = agent.conversation_store.claim_background_run(
+    claim = agent.conversation_store.claims.acquire(
         {
             "thread_id": current.thread_id,
             "task_id": "task-background",
@@ -1609,7 +1616,7 @@ def test_gateway_foreground_turn_waits_for_existing_conversation_lane(tmp_path, 
 
     def release_background_lane() -> None:
         time.sleep(0.12)
-        _append_gateway_conversation_message(
+        append_gateway_conversation_message(
             agent,
             {"metadata": {"channel": "feishu"}},
             current,
@@ -1617,7 +1624,7 @@ def test_gateway_foreground_turn_waits_for_existing_conversation_lane(tmp_path, 
             role="assistant",
             content="后台上一轮刚刚写入的最终事实",
         )
-        agent.conversation_store.finish_background_run(
+        agent.conversation_store.claims.finish(
             {
                 "thread_id": current.thread_id,
                 "claim_id": claim["claim_id"],
@@ -1631,7 +1638,7 @@ def test_gateway_foreground_turn_waits_for_existing_conversation_lane(tmp_path, 
     started = time.monotonic()
     try:
         result = _run_claimed_gateway_ask(
-            _GatewayAskRunContext(
+            GatewayAskRunContext(
                 agent,
                 {"prompt": "等上一轮结束后继续", "conversation": conversation},
                 tmp_path / "req-wait.json",
@@ -1649,7 +1656,7 @@ def test_gateway_foreground_turn_waits_for_existing_conversation_lane(tmp_path, 
         "assistant",
         "后台上一轮刚刚写入的最终事实",
     ) in observed["history"]
-    latest = agent.conversation_store.load_background_run_claim(current.thread_id)
+    latest = agent.conversation_store.claims.load(current.thread_id)
     assert latest["status"] == "finished"
     assert latest["task_id"] == "gateway:gw-after-wait"
 
@@ -1692,7 +1699,7 @@ def test_two_gateway_foreground_turns_share_one_lane_and_fresh_history(tmp_path,
     def invoke(prompt: str, request_id: str) -> None:
         try:
             _run_claimed_gateway_ask(
-                _GatewayAskRunContext(
+                GatewayAskRunContext(
                     agent,
                     {"prompt": prompt, "conversation": conversation},
                     tmp_path / f"{request_id}.json",
@@ -1721,7 +1728,7 @@ def test_two_gateway_foreground_turns_share_one_lane_and_fresh_history(tmp_path,
     assert second_entered.is_set()
     assert ("user", "第一轮先运行") in second_history
     thread = _conversation_context(agent, {"conversation": conversation}, "inspect", "检查")
-    rows = agent.conversation_store.recent_messages(thread.thread_id, limit=10)
+    rows = agent.conversation_store.messages.recent(thread.thread_id, limit=10)
     assert [row.metadata["gateway_request_id"] for row in rows] == [
         "gw-concurrent-1",
         "gw-concurrent-1",
@@ -1748,7 +1755,7 @@ def test_gateway_model_history_keeps_complete_long_message_until_compact(tmp_pat
         }
     }
     first = _conversation_context(agent, request, "gw-long-1", "长内容")
-    _append_gateway_conversation_message(
+    append_gateway_conversation_message(
         agent,
         {"metadata": {"channel": "feishu", "message_id": "om-long"}},
         first,
@@ -1780,7 +1787,7 @@ def test_gateway_history_keeps_typed_commentary_and_final_from_same_request(tmp_
         }
     }
     current = _conversation_context(agent, request, "gw-parts-1", "开始")
-    assert _append_gateway_conversation_message(
+    assert append_gateway_conversation_message(
         agent,
         {"metadata": {"channel": "cli"}},
         current,
@@ -1789,7 +1796,7 @@ def test_gateway_history_keeps_typed_commentary_and_final_from_same_request(tmp_
         content="我先检查已有实现。",
         assistant_part_id="commentary:1",
     )
-    assert _append_gateway_conversation_message(
+    assert append_gateway_conversation_message(
         agent,
         {"metadata": {"channel": "cli"}},
         current,
@@ -1818,7 +1825,7 @@ def test_gateway_ordinary_history_excludes_detached_audit_deliveries(tmp_path):
         }
     }
     context = _conversation_context(agent, request, "gw-create", "开始")
-    agent.conversation_store.append_message(
+    agent.conversation_store.messages.append(
         {
             "thread_id": context.thread_id,
             "role": "assistant",
@@ -1832,7 +1839,7 @@ def test_gateway_ordinary_history_excludes_detached_audit_deliveries(tmp_path):
             },
         }
     )
-    agent.conversation_store.append_message(
+    agent.conversation_store.messages.append(
         {
             "thread_id": context.thread_id,
             "role": "assistant",
@@ -1845,7 +1852,7 @@ def test_gateway_ordinary_history_excludes_detached_audit_deliveries(tmp_path):
     followup = _conversation_context(agent, request, "gw-follow", "继续聊天")
     history_text = "\n".join(content for _role, content in followup.history)
     stored_text = "\n".join(
-        row.content for row in agent.conversation_store.recent_messages(context.thread_id, limit=0)
+        row.content for row in agent.conversation_store.messages.recent(context.thread_id, limit=0)
     )
 
     assert "旧 Audit 的新受益人事件正文" not in history_text
@@ -1882,7 +1889,7 @@ def test_natural_reply_and_structured_artifact_are_reused_without_rerunning(tmp_
     assert projection.content == f"周报已整理好，文件是 {artifact.rsplit('/', 1)[-1]}。"
     assert "MAIN_AGENT" not in projection.content
     assert artifact not in projection.content
-    _append_gateway_conversation_message(
+    append_gateway_conversation_message(
         agent,
         {"metadata": {"channel": "feishu"}},
         first,
@@ -1893,7 +1900,7 @@ def test_natural_reply_and_structured_artifact_are_reused_without_rerunning(tmp_
     )
 
     followup = _conversation_context(agent, request, "gw-delivery-2", "发我")
-    section = _gateway_injections({"inject": []}, followup)[0]
+    section = gateway_injections({"inject": []}, followup)[0]
 
     assert followup.history[-1] == ("assistant", projection.content)
     assert followup.recent_artifacts[0]["artifact_id"] == "weekly_report"
@@ -2077,7 +2084,7 @@ def test_gateway_chat_history_isolated_by_real_conversation_id(tmp_path):
         }
     }
     first = _conversation_context(agent, request, "gw-first", "只属于会话一")
-    _append_gateway_conversation_message(
+    append_gateway_conversation_message(
         agent,
         {"metadata": {"channel": "chat", "message_id": "m1"}},
         first,
@@ -2108,7 +2115,7 @@ def test_gateway_conversation_turns_do_not_leak_into_owner_global_memory(tmp_pat
         "canonical_user_id": "ou_user1",
     }
     _run_claimed_gateway_ask(
-        _GatewayAskRunContext(
+        GatewayAskRunContext(
             agent,
             {
                 "prompt": "项目代号海棠",
@@ -2144,8 +2151,8 @@ def test_gateway_fails_closed_before_model_when_user_turn_cannot_persist(tmp_pat
         tmp_path,
     )
     monkeypatch.setattr(
-        agent.conversation_store,
-        "append_message",
+        agent.conversation_store.messages,
+        'append',
         lambda _request: (_ for _ in ()).throw(OSError("disk full")),
     )
     request = {
@@ -2160,7 +2167,7 @@ def test_gateway_fails_closed_before_model_when_user_turn_cannot_persist(tmp_pat
 
     with pytest.raises(ConversationPersistenceError):
         _run_claimed_gateway_ask(
-            _GatewayAskRunContext(
+            GatewayAskRunContext(
                 agent,
                 request,
                 tmp_path / "req-fail.json",
@@ -2193,16 +2200,16 @@ def test_gateway_ordinary_chat_accepts_legacy_cleared_goal_tombstone(tmp_path) -
         "gw-before-upgrade",
         "旧版本目标",
     )
-    goal = agent.conversation_store.create_goal(
+    goal = agent.conversation_store.goals.create(
         {"thread_id": current.thread_id, "objective": "旧版本目标"}
     )
-    path = agent.conversation_store._goal_path(current.thread_id)
+    path = agent.conversation_store.storage.goal_path(current.thread_id)
     payload = goal.to_dict()
     payload["status"] = "cleared"
     path.write_text(json.dumps(payload), encoding="utf-8")
 
     result = _run_claimed_gateway_ask(
-        _GatewayAskRunContext(
+        GatewayAskRunContext(
             agent,
             {"prompt": "继续普通聊天", "conversation": conversation},
             tmp_path / "req-legacy-goal.json",
@@ -2213,8 +2220,8 @@ def test_gateway_ordinary_chat_accepts_legacy_cleared_goal_tombstone(tmp_path) -
     )
 
     assert "继续普通聊天" in result.response
-    assert agent.conversation_store.load_goal(current.thread_id) is None
-    rows = agent.conversation_store.recent_messages(current.thread_id, limit=10)
+    assert agent.conversation_store.goals.load(current.thread_id) is None
+    rows = agent.conversation_store.messages.recent(current.thread_id, limit=10)
     assert [(row.role, row.content) for row in rows] == [
         ("user", "继续普通聊天"),
         ("assistant", result.response),
@@ -2244,7 +2251,7 @@ def test_gateway_does_not_report_success_for_empty_unavailable_model_reply(tmp_p
 
     with pytest.raises(UserReplyUnavailableError):
         _run_claimed_gateway_ask(
-            _GatewayAskRunContext(
+            GatewayAskRunContext(
                 agent,
                 {"prompt": "继续原任务", "conversation": conversation},
                 tmp_path / "req-empty.json",
@@ -2260,10 +2267,10 @@ def test_gateway_does_not_report_success_for_empty_unavailable_model_reply(tmp_p
         "gw-next",
         "还在吗？",
     )
-    rows = agent.conversation_store.recent_messages(thread.thread_id, limit=10)
+    rows = agent.conversation_store.messages.recent(thread.thread_id, limit=10)
     assert [(row.role, row.content) for row in rows] == [("user", "继续原任务")]
     assert not (
-        agent.conversation_store.root / "message_repairs" / "gw-empty-assistant.json"
+        agent.conversation_store.storage.root / "message_repairs" / "gw-empty-assistant.json"
     ).exists()
 
 
@@ -2290,7 +2297,7 @@ def test_gateway_does_not_report_done_for_any_empty_model_reply(tmp_path, monkey
 
     with pytest.raises(UserReplyUnavailableError):
         _run_claimed_gateway_ask(
-            _GatewayAskRunContext(
+            GatewayAskRunContext(
                 agent,
                 {"prompt": "完成后告诉我", "conversation": conversation},
                 tmp_path / "req-empty-done.json",
@@ -2308,7 +2315,7 @@ def test_gateway_returns_answer_and_repairs_assistant_transcript_on_next_turn(
         AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), prompt_files=[]),
         tmp_path,
     )
-    original_append = agent.conversation_store.append_message
+    original_append = agent.conversation_store.messages.append
     calls = {"count": 0}
 
     def flaky_append(request):
@@ -2317,7 +2324,7 @@ def test_gateway_returns_answer_and_repairs_assistant_transcript_on_next_turn(
             raise OSError("temporary assistant ledger failure")
         return original_append(request)
 
-    monkeypatch.setattr(agent.conversation_store, "append_message", flaky_append)
+    monkeypatch.setattr(agent.conversation_store.messages, 'append', flaky_append)
     conversation = {
         "channel": "feishu",
         "channel_conversation_id": "oc_repair",
@@ -2353,7 +2360,7 @@ def test_gateway_returns_answer_and_repairs_assistant_transcript_on_next_turn(
         ),
     )
     result = _run_claimed_gateway_ask(
-        _GatewayAskRunContext(
+        GatewayAskRunContext(
             agent,
             {"prompt": "请记住海棠", "conversation": conversation},
             tmp_path / "req-repair.json",
@@ -2364,21 +2371,21 @@ def test_gateway_returns_answer_and_repairs_assistant_transcript_on_next_turn(
     )
     assert result.response
     assert result.conversation_persist_degraded is True
-    repair_path = agent.conversation_store.root / "message_repairs" / "gw-repair-assistant.json"
+    repair_path = agent.conversation_store.storage.root / "message_repairs" / "gw-repair-assistant.json"
     assert repair_path.exists()
     repair_payload = json.loads(repair_path.read_text(encoding="utf-8"))
     repair_verification = repair_payload["metadata"]["operation_verification"]
     assert repair_verification["groups"][0]["label"] == "remember/add"
     assert "private-call" not in json.dumps(repair_verification)
 
-    monkeypatch.setattr(agent.conversation_store, "append_message", original_append)
+    monkeypatch.setattr(agent.conversation_store.messages, 'append', original_append)
     next_turn = _conversation_context(
         agent,
         {"conversation": conversation},
         "gw-next",
         "刚才说了什么？",
     )
-    rows = agent.conversation_store.recent_messages(next_turn.thread_id, limit=10)
+    rows = agent.conversation_store.messages.recent(next_turn.thread_id, limit=10)
     assert [(row.role, row.metadata["gateway_request_id"]) for row in rows] == [
         ("user", "gw-repair"),
         ("assistant", "gw-repair"),
@@ -2475,12 +2482,12 @@ def test_gateway_thread_does_not_expose_internal_run_candidates_to_model(tmp_pat
     }
 
     first = _conversation_context(agent, request, "gw-first", "普通聊天")
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {"thread_id": first.thread_id, "task_id": "task-old", "goal": "旧任务", "status": "active"}
     )
     second = _conversation_context(agent, request, "gw-second", "滴滴滴")
     assert second.thread_id == first.thread_id
-    section = _gateway_injections({"inject": []}, second)[0]
+    section = gateway_injections({"inject": []}, second)[0]
     assert "Resumable Work Candidates" not in section
     assert "Recent Completed Work" not in section
     assert "task-old" not in section
@@ -2504,7 +2511,7 @@ def test_current_turn_automatically_binds_sticky_workspace_without_overwriting_g
     workspace = Path(agent.home_paths.owner_home_dir) / "tasks" / "existing-task"
     (workspace / "output").mkdir(parents=True)
     (workspace / "work").mkdir()
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": conversation.thread_id,
             "task_id": "task-old",
@@ -2557,7 +2564,7 @@ def test_live_claim_is_not_an_extra_filesystem_gate(tmp_path):
         }
     }
     first = _conversation_context(agent, request, "gw-first", "开始长任务")
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": first.thread_id,
             "task_id": "task-claimed",
@@ -2565,7 +2572,7 @@ def test_live_claim_is_not_an_extra_filesystem_gate(tmp_path):
             "status": "active",
         }
     )
-    claim = agent.conversation_store.claim_background_run(
+    claim = agent.conversation_store.claims.acquire(
         {
             "thread_id": first.thread_id,
             "task_id": "task-claimed",
@@ -2591,7 +2598,7 @@ def test_live_claim_is_not_an_extra_filesystem_gate(tmp_path):
         delattr(agent, "_current_run_params")
 
     assert selected is None
-    assert agent.conversation_store.task_links(first.thread_id)[0].status == "active"
+    assert agent.conversation_store.tasks.list(first.thread_id)[0].status == "active"
 
 
 def test_wait_policy_alone_does_not_block_orchestration_tools(tmp_path):
@@ -2612,7 +2619,7 @@ def test_wait_policy_alone_does_not_block_orchestration_tools(tmp_path):
         }
     }
     first = _conversation_context(agent, request, "gw-wait-policy", "开始长任务")
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": first.thread_id,
             "task_id": "task-waiting",
@@ -2620,7 +2627,7 @@ def test_wait_policy_alone_does_not_block_orchestration_tools(tmp_path):
             "status": "active",
         }
     )
-    agent.conversation_store.set_progress_policy(
+    agent.conversation_store.progress.create(
         {
             "thread_id": first.thread_id,
             "task_id": "task-waiting",
@@ -2666,7 +2673,7 @@ def test_wait_policy_alone_does_not_block_workspace_write(tmp_path):
         }
     }
     first = _conversation_context(agent, request, "gw-wait-policy-write", "开始长任务")
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": first.thread_id,
             "task_id": "task-waiting-write",
@@ -2674,7 +2681,7 @@ def test_wait_policy_alone_does_not_block_workspace_write(tmp_path):
             "status": "active",
         }
     )
-    agent.conversation_store.set_progress_policy(
+    agent.conversation_store.progress.create(
         {
             "thread_id": first.thread_id,
             "task_id": "task-waiting-write",
@@ -2713,7 +2720,7 @@ def test_file_promotion_does_not_query_unrelated_background_state(tmp_path, monk
         }
     }
     first = _conversation_context(agent, request, "gw-first", "开始长任务")
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": first.thread_id,
             "task_id": "task-state-error",
@@ -2722,8 +2729,8 @@ def test_file_promotion_does_not_query_unrelated_background_state(tmp_path, monk
         }
     )
     monkeypatch.setattr(
-        agent.conversation_store,
-        "load_background_run_claim_report",
+        agent.conversation_store.claims,
+        "load_report",
         lambda _thread_id: ({"task_id": "task-state-error", "expires_at": "bad"}, None),
     )
     params = RunParams(
@@ -2760,7 +2767,7 @@ def test_background_promotion_reuses_link_workspace_without_synthetic_wake_direc
     workspace = tmp_path / "home" / "owners" / "users" / "ou_user1" / "tasks" / "图书馆运营方案"
     (workspace / "output").mkdir(parents=True)
     (workspace / "work").mkdir()
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": conversation.thread_id,
             "task_id": "task-library",
@@ -2788,7 +2795,7 @@ def test_background_promotion_reuses_link_workspace_without_synthetic_wake_direc
     assert reused is not None
     assert params.task_attributes["run_workspace"]["task_root"] == str(workspace)
     assert agent._current_run_task_workspace == str(workspace)
-    stored = agent.conversation_store.active_task_links_report(conversation.thread_id)[0][0]
+    stored = agent.conversation_store.tasks.active_report(conversation.thread_id)[0][0]
     assert stored.goal == "做图书馆运营方案"
     assert stored.task_path == str(workspace)
     assert not any("定时唤醒" in path.name for path in workspace.parent.iterdir())
@@ -2807,7 +2814,7 @@ def test_current_conversation_workspace_is_inherited_by_new_subagents(tmp_path):
         }
     }
     conversation = _conversation_context(agent, request, "gw-chat", "普通聊天")
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": conversation.thread_id,
             "task_id": "task-old",
@@ -2855,7 +2862,7 @@ def test_completed_run_stays_internal_and_does_not_become_a_model_task_menu(tmp_
         }
     }
     first = _conversation_context(agent, request, "gw-work", "帮我做一份报告")
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": first.thread_id,
             "task_id": "task-done",
@@ -2869,10 +2876,10 @@ def test_completed_run_stays_internal_and_does_not_become_a_model_task_menu(tmp_
         CONVERSATION_TASK_TURN_ACTIVE_ATTR: True,
     }
     assert complete_current_conversation_task(agent, attrs, source="gateway") is True
-    thread = agent.conversation_store.load_thread(first.thread_id)
+    thread = agent.conversation_store.threads.load(first.thread_id)
     assert thread is not None and "task-done" not in thread.active_task_ids
     second = _conversation_context(agent, request, "gw-next", "聊点别的")
-    section = _gateway_injections({"inject": []}, second)[0]
+    section = gateway_injections({"inject": []}, second)[0]
     assert "Recent Completed Work" not in section
     assert "task-done" not in section
     assert "做一份报告" not in section
@@ -2892,7 +2899,7 @@ def test_named_audit_turn_cannot_complete_before_its_typed_deadline(tmp_path):
         }
     }
     conversation = _conversation_context(agent, request, "gw-audit", "持续检查数据")
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": conversation.thread_id,
             "task_id": "audit-live",
@@ -2911,7 +2918,7 @@ def test_named_audit_turn_cannot_complete_before_its_typed_deadline(tmp_path):
     }
 
     assert complete_current_conversation_task(agent, attrs, source="gateway") is False
-    link = agent.conversation_store.task_links(conversation.thread_id)[0]
+    link = agent.conversation_store.tasks.list(conversation.thread_id)[0]
     assert link.status == "active"
 
 
@@ -2976,7 +2983,7 @@ def test_named_audit_terminal_turn_closes_only_its_exact_sources(
         "gw-audit-complete",
         "持续检查数据",
     )
-    link = agent.conversation_store.bind_task(
+    link = agent.conversation_store.tasks.bind(
         {
             "thread_id": conversation.thread_id,
             "task_id": "audit-complete",
@@ -3011,7 +3018,7 @@ def test_named_audit_terminal_turn_closes_only_its_exact_sources(
 
     assert complete_current_conversation_task(agent, attrs, source="gateway") is True
     assert closed_tasks == [("audit-complete", "audit_window_settled")]
-    completed = agent.conversation_store.task_links(conversation.thread_id)[0]
+    completed = agent.conversation_store.tasks.list(conversation.thread_id)[0]
     assert completed.status == "completed"
 
 
@@ -3024,7 +3031,7 @@ def test_named_audit_waits_for_owner_event_receipt_before_structural_close(
         tmp_path,
     )
     store = agent.conversation_store
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "ou_user1",
             "channel": "internal",
@@ -3032,7 +3039,7 @@ def test_named_audit_waits_for_owner_event_receipt_before_structural_close(
             "channel_user_id": "ou_user1",
         }
     )
-    link = store.bind_task(
+    link = store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": "audit-owner-delivery",
@@ -3063,7 +3070,7 @@ def test_named_audit_waits_for_owner_event_receipt_before_structural_close(
         "agent_py_agent.agent.conversation.named_work.close_named_audit_watches",
         lambda _agent, _task_id, *, reason="": (),
     )
-    signal = store.raise_wake_signal(
+    signal = store.wakes.raise_signal(
         {
             "thread_id": thread.thread_id,
             "reason": "audit_finding",
@@ -3078,11 +3085,11 @@ def test_named_audit_waits_for_owner_event_receipt_before_structural_close(
     )
 
     assert complete_named_audit_task_if_settled(agent, link.task_id) is False
-    assert store.load_task_link(link.task_id).status == "active"
+    assert store.tasks.load(link.task_id).status == "active"
 
-    store.mark_wake_signal_handled(signal.wake_signal_id)
+    store.wakes.mark_handled(signal.wake_signal_id)
     assert complete_named_audit_task_if_settled(agent, link.task_id) is True
-    assert store.load_task_link(link.task_id).status == "completed"
+    assert store.tasks.load(link.task_id).status == "completed"
 
 
 def test_cancel_wins_completion_status_race(tmp_path, monkeypatch):
@@ -3098,7 +3105,7 @@ def test_cancel_wins_completion_status_race(tmp_path, monkeypatch):
         }
     }
     conversation = _conversation_context(agent, request, "gw-race", "完成一个长任务")
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": conversation.thread_id,
             "task_id": "task-race",
@@ -3111,7 +3118,7 @@ def test_cancel_wins_completion_status_race(tmp_path, monkeypatch):
         "conversation_task_id": "task-race",
         CONVERSATION_TASK_TURN_ACTIVE_ATTR: True,
     }
-    real_update = agent.conversation_store.update_task_status
+    real_update = agent.conversation_store.tasks.update_status
 
     def cancel_before_completion(payload):
         if payload.get("status") == "completed":
@@ -3124,10 +3131,10 @@ def test_cancel_wins_completion_status_race(tmp_path, monkeypatch):
             )
         return real_update(payload)
 
-    monkeypatch.setattr(agent.conversation_store, "update_task_status", cancel_before_completion)
+    monkeypatch.setattr(agent.conversation_store.tasks, 'update_status', cancel_before_completion)
 
     assert complete_current_conversation_task(agent, attrs, source="gateway") is False
-    link = agent.conversation_store.task_links(conversation.thread_id)[0]
+    link = agent.conversation_store.tasks.list(conversation.thread_id)[0]
     assert link.status == "cancelled"
 
 
@@ -3144,7 +3151,7 @@ def test_pending_task_guidance_keeps_current_task_open(tmp_path):
         }
     }
     conversation = _conversation_context(agent, request, "gw-guidance", "完成一个长任务")
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": conversation.thread_id,
             "task_id": "task-guidance",
@@ -3152,7 +3159,7 @@ def test_pending_task_guidance_keeps_current_task_open(tmp_path):
             "status": "active",
         }
     )
-    agent.conversation_store.append_guidance(
+    agent.conversation_store.guidance.append(
         {
             "target_type": "task",
             "target_id": "task-guidance",
@@ -3167,7 +3174,7 @@ def test_pending_task_guidance_keeps_current_task_open(tmp_path):
     }
 
     assert complete_current_conversation_task(agent, attrs, source="gateway") is False
-    link = agent.conversation_store.task_links(conversation.thread_id)[0]
+    link = agent.conversation_store.tasks.list(conversation.thread_id)[0]
     assert link.status == "active"
 
 
@@ -3184,10 +3191,10 @@ def test_active_thread_goal_is_not_closed_by_one_delivery_complete_turn(tmp_path
         }
     }
     conversation = _conversation_context(agent, request, "gw-goal", "持续整理项目资料")
-    goal = agent.conversation_store.create_goal(
+    goal = agent.conversation_store.goals.create(
         {"thread_id": conversation.thread_id, "objective": "持续整理项目资料"}
     )
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": conversation.thread_id,
             "task_id": goal.task_id,
@@ -3202,9 +3209,9 @@ def test_active_thread_goal_is_not_closed_by_one_delivery_complete_turn(tmp_path
     }
 
     assert complete_current_conversation_task(agent, attrs, source="gateway") is False
-    loaded_goal = agent.conversation_store.load_goal(conversation.thread_id)
+    loaded_goal = agent.conversation_store.goals.load(conversation.thread_id)
     assert loaded_goal is not None and loaded_goal.status == "active"
-    link = agent.conversation_store.task_links(conversation.thread_id)[0]
+    link = agent.conversation_store.tasks.list(conversation.thread_id)[0]
     assert link.task_id == goal.task_id and link.status == "active"
 
 
@@ -3222,10 +3229,10 @@ def test_active_goal_without_materialized_workspace_allows_followup_turn(tmp_pat
         }
     }
     first = _conversation_context(agent, request, "gw-goal-first", "持续等待后续消息")
-    goal = agent.conversation_store.create_goal(
+    goal = agent.conversation_store.goals.create(
         {"thread_id": first.thread_id, "objective": "持续等待后续消息"}
     )
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": first.thread_id,
             "task_id": goal.task_id,
@@ -3241,7 +3248,7 @@ def test_active_goal_without_materialized_workspace_allows_followup_turn(tmp_pat
     assert followup.thread_goal is not None
     assert followup.thread_goal["task_id"] == goal.task_id
     result = _run_claimed_gateway_ask(
-        _GatewayAskRunContext(
+        GatewayAskRunContext(
             agent,
             {"prompt": "现在回复我", **request},
             tmp_path / "req-goal-followup.json",
@@ -3268,7 +3275,7 @@ def test_sticky_workspace_with_missing_configured_path_still_fails_closed(tmp_pa
     first = _conversation_context(agent, request, "gw-missing-first", "建立任务")
     missing = Path(agent.home_paths.owner_tasks_dir) / "2026-09-01" / "removed-workspace" / "work"
     missing.mkdir(parents=True)
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": first.thread_id,
             "task_id": "task-missing-workspace",
@@ -3277,7 +3284,7 @@ def test_sticky_workspace_with_missing_configured_path_still_fails_closed(tmp_pa
             "status": "active",
         }
     )
-    agent.conversation_store.select_workspace_task(
+    agent.conversation_store.tasks.select_workspace_task(
         {"thread_id": first.thread_id, "task_id": "task-missing-workspace"}
     )
     missing.rmdir()
@@ -3293,7 +3300,7 @@ def test_sticky_workspace_with_missing_configured_path_still_fails_closed(tmp_pa
 # 函数用途: 构造旧版第二个命名目标，让兼容回归继续验证旧用户数据不会丢失或串入普通聊天。
 def _persist_legacy_second_goal(store, first, *, name, objective):
     second = replace(first, goal_id="goal-legacy-other", task_id="task-legacy-other", name=name, objective=objective)
-    path = store.goals_dir / f"{first.thread_id}.json"
+    path = store.storage.goals_dir / f"{first.thread_id}.json"
     payload = json.loads(path.read_text(encoding="utf-8"))
     payload["goals"].append(second.to_dict())
     write_json_file_atomic(path, payload)
@@ -3315,10 +3322,10 @@ def test_legacy_multiple_named_goals_expose_only_management_facts_to_an_ordinary
     }
     conversation = _conversation_context(agent, request, "gw-first", "普通聊天")
     store = agent.conversation_store
-    first = store.create_goal({"thread_id": conversation.thread_id, "name": "周报整理", "objective": "持续整理周报"})
+    first = store.goals.create({"thread_id": conversation.thread_id, "name": "周报整理", "objective": "持续整理周报"})
     second = _persist_legacy_second_goal(store, first, name="依赖升级", objective="持续检查依赖")
     for goal in (first, second):
-        agent.conversation_store.bind_task(
+        agent.conversation_store.tasks.bind(
             {
                 "thread_id": conversation.thread_id,
                 "task_id": goal.task_id,
@@ -3331,7 +3338,7 @@ def test_legacy_multiple_named_goals_expose_only_management_facts_to_an_ordinary
         )
 
     followup = _conversation_context(agent, request, "gw-chat", "我们聊点别的")
-    injection = _gateway_injections({"inject": []}, followup)[0]
+    injection = gateway_injections({"inject": []}, followup)[0]
 
     assert followup.load_errors == ()
     assert followup.thread_goal is None
@@ -3363,7 +3370,7 @@ def test_detached_named_work_never_occupies_the_foreground_sticky_workspace(
     audit_workspace = Path(agent.home_paths.owner_home_dir) / "audits" / "audit-1"
     (audit_workspace / "output").mkdir(parents=True)
     (audit_workspace / "work").mkdir()
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": conversation.thread_id,
             "task_id": "audit-1",
@@ -3375,10 +3382,10 @@ def test_detached_named_work_never_occupies_the_foreground_sticky_workspace(
             "cancellation_scope": "detached",
         }
     )
-    agent.conversation_store.select_workspace_task(
+    agent.conversation_store.tasks.select_workspace_task(
         {"thread_id": conversation.thread_id, "task_id": "audit-1"}
     )
-    agent.conversation_store.set_progress_policy(
+    agent.conversation_store.progress.create(
         {
             "thread_id": conversation.thread_id,
             "task_id": "audit-1",
@@ -3411,7 +3418,7 @@ def test_detached_named_work_never_occupies_the_foreground_sticky_workspace(
     assert selected.task_path != str(audit_workspace)
     audit = next(
         link
-        for link in agent.conversation_store.task_links(conversation.thread_id)
+        for link in agent.conversation_store.tasks.list(conversation.thread_id)
         if link.task_id == "audit-1"
     )
     assert audit.status == "active"
@@ -3431,7 +3438,7 @@ def test_internal_child_links_never_appear_in_model_conversation_context(tmp_pat
     }
     conversation = _conversation_context(agent, request, "gw-first", "做一个项目")
     for task_id, status in (("subagent-child", "active"), ("bg-main-child", "completed")):
-        agent.conversation_store.bind_task(
+        agent.conversation_store.tasks.bind(
             {
                 "thread_id": conversation.thread_id,
                 "task_id": task_id,
@@ -3440,10 +3447,10 @@ def test_internal_child_links_never_appear_in_model_conversation_context(tmp_pat
             }
         )
         if status == "completed":
-            agent.conversation_store.update_task_status({"task_id": task_id, "status": status})
+            agent.conversation_store.tasks.update_status({"task_id": task_id, "status": status})
 
     loaded = _conversation_context(agent, request, "gw-next", "继续")
-    section = _gateway_injections({"inject": []}, loaded)[0]
+    section = gateway_injections({"inject": []}, loaded)[0]
     assert "subagent-child" not in section
     assert "bg-main-child" not in section
 
@@ -3468,7 +3475,7 @@ def test_next_turn_starts_fresh_workspace_after_terminal_ordinary_task(
     workspace = Path(agent.home_paths.owner_home_dir) / "tasks" / "completed-task"
     (workspace / "output").mkdir(parents=True)
     (workspace / "work").mkdir()
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": conversation.thread_id,
             "task_id": "task-completed",
@@ -3477,10 +3484,10 @@ def test_next_turn_starts_fresh_workspace_after_terminal_ordinary_task(
             "task_path": str(workspace),
         }
     )
-    agent.conversation_store.update_task_status(
+    agent.conversation_store.tasks.update_status(
         {"task_id": "task-completed", "status": prior_status}
     )
-    agent.conversation_store.select_workspace_task(
+    agent.conversation_store.tasks.select_workspace_task(
         {"thread_id": conversation.thread_id, "task_id": "task-completed"}
     )
     followup = _conversation_context(agent, request, "gw-followup", "继续做第二步")
@@ -3508,7 +3515,7 @@ def test_next_turn_starts_fresh_workspace_after_terminal_ordinary_task(
     assert agent._current_run_task_workspace == str(new_workspace)
     links = {
         link.task_id: (link.status, link.goal)
-        for link in agent.conversation_store.task_links(conversation.thread_id)
+        for link in agent.conversation_store.tasks.list(conversation.thread_id)
     }
     assert links["task-completed"] == (prior_status, "校园交易网站第一步")
     assert links["gw-followup"] == ("active", "继续做第二步")
@@ -3530,7 +3537,7 @@ def test_terminal_workspace_successor_fails_closed_without_current_prompt(tmp_pa
     workspace = Path(agent.home_paths.owner_home_dir) / "tasks" / "completed-task"
     (workspace / "output").mkdir(parents=True)
     (workspace / "work").mkdir()
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": conversation.thread_id,
             "task_id": "task-completed",
@@ -3539,10 +3546,10 @@ def test_terminal_workspace_successor_fails_closed_without_current_prompt(tmp_pa
             "task_path": str(workspace),
         }
     )
-    agent.conversation_store.update_task_status(
+    agent.conversation_store.tasks.update_status(
         {"task_id": "task-completed", "status": "completed"}
     )
-    agent.conversation_store.select_workspace_task(
+    agent.conversation_store.tasks.select_workspace_task(
         {"thread_id": conversation.thread_id, "task_id": "task-completed"}
     )
     request.update(
@@ -3575,7 +3582,7 @@ def test_terminal_workspace_successor_fails_closed_without_current_prompt(tmp_pa
         delattr(agent, "_current_run_params")
 
     assert selected is None
-    links = agent.conversation_store.task_links(conversation.thread_id)
+    links = agent.conversation_store.tasks.list(conversation.thread_id)
     assert [(link.task_id, link.status, link.goal) for link in links] == [
         ("task-completed", "completed", "不得复制的旧目标")
     ]
@@ -3594,7 +3601,7 @@ def test_progress_update_binds_current_turn_without_old_task_ceremony(tmp_path):
         }
     }
     conversation = _conversation_context(agent, request, "gw-first", "先做一期")
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": conversation.thread_id,
             "task_id": "task-old",
@@ -3602,7 +3609,7 @@ def test_progress_update_binds_current_turn_without_old_task_ceremony(tmp_path):
             "status": "active",
         }
     )
-    agent.conversation_store.update_task_status({"task_id": "task-old", "status": "completed"})
+    agent.conversation_store.tasks.update_status({"task_id": "task-old", "status": "completed"})
     params = RunParams(
         request_id="gw-new",
         run_id="gw-new",
@@ -3680,7 +3687,7 @@ def test_gateway_terminal_workspace_starts_new_directory_at_first_work_tool(
     workspace = Path(agent.home_paths.owner_home_dir) / "tasks" / "original-project"
     (workspace / "output").mkdir(parents=True)
     (workspace / "work").mkdir()
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": first.thread_id,
             "task_id": "task-original",
@@ -3689,16 +3696,16 @@ def test_gateway_terminal_workspace_starts_new_directory_at_first_work_tool(
             "task_path": str(workspace),
         }
     )
-    agent.conversation_store.select_workspace_task(
+    agent.conversation_store.tasks.select_workspace_task(
         {"thread_id": first.thread_id, "task_id": "task-original"}
     )
-    agent.conversation_store.update_task_status(
+    agent.conversation_store.tasks.update_status(
         {"task_id": "task-original", "status": prior_status}
     )
 
     followup = _conversation_context(agent, request, "gw-followup", "这一句不参与机器判断")
     attrs = _gateway_task_attributes(followup)
-    before = agent.conversation_store.task_links(first.thread_id)[0]
+    before = agent.conversation_store.tasks.list(first.thread_id)[0]
 
     assert attrs is not None
     assert CONVERSATION_WORKSPACE_TASK_ID_ATTR not in attrs
@@ -3743,8 +3750,8 @@ def test_gateway_terminal_workspace_starts_new_directory_at_first_work_tool(
     assert promoted is None
     assert attrs[CONVERSATION_TASK_TURN_ACTIVE_ATTR] is True
     assert attrs["conversation_task_id"] == "gw-followup"
-    links = {link.task_id: link for link in agent.conversation_store.task_links(first.thread_id)}
-    thread = agent.conversation_store.load_thread(first.thread_id)
+    links = {link.task_id: link for link in agent.conversation_store.tasks.list(first.thread_id)}
+    thread = agent.conversation_store.threads.load(first.thread_id)
     assert links["task-original"].status == prior_status
     assert links["gw-followup"].status == "active"
     # 普通终态 task 只留作历史；本轮直到第一个工作工具才建立自己的目录。
@@ -3770,7 +3777,7 @@ def test_stopped_gateway_turn_cannot_create_a_continuation_during_tool_promotion
         AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
         tmp_path,
     )
-    thread = agent.conversation_store.get_or_create_thread(
+    thread = agent.conversation_store.threads.get_or_create(
         {
             "canonical_user_id": "local-agent",
             "channel": "gateway-cli",
@@ -3781,7 +3788,7 @@ def test_stopped_gateway_turn_cannot_create_a_continuation_during_tool_promotion
     workspace = Path(agent.home_paths.owner_home_dir) / "tasks" / "stopped-race"
     (workspace / "output").mkdir(parents=True)
     (workspace / "work").mkdir()
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": "task-before-stop",
@@ -3790,10 +3797,10 @@ def test_stopped_gateway_turn_cannot_create_a_continuation_during_tool_promotion
             "task_path": str(workspace),
         }
     )
-    agent.conversation_store.select_workspace_task(
+    agent.conversation_store.tasks.select_workspace_task(
         {"thread_id": thread.thread_id, "task_id": "task-before-stop"}
     )
-    agent.conversation_store.update_task_status(
+    agent.conversation_store.tasks.update_status(
         {"task_id": "task-before-stop", "status": "interrupted"}
     )
 
@@ -3822,12 +3829,12 @@ def test_stopped_gateway_turn_cannot_create_a_continuation_during_tool_promotion
         source="gateway",
         root_user_prompt="继续派子代理",
         task_attributes=attrs,
-        active_turn_transition_callback=_GatewayActiveTurnTransition(
+        active_turn_transition_callback=GatewayActiveTurnTransition(
             request_path,
             request_id,
             attempt_id,
         ),
-        conversation_task_binding_callback=_GatewayTaskBindingWriter(
+        conversation_task_binding_callback=GatewayTaskBindingWriter(
             request_path,
             request_id,
         ),
@@ -3839,7 +3846,7 @@ def test_stopped_gateway_turn_cannot_create_a_continuation_during_tool_promotion
         delattr(agent, "_current_run_params")
 
     assert outcome is not None and outcome.error_code == "CANCELLED"
-    links = agent.conversation_store.task_links(thread.thread_id)
+    links = agent.conversation_store.tasks.list(thread.thread_id)
     assert [(link.task_id, link.status) for link in links] == [("task-before-stop", "interrupted")]
     payload = json.loads(request_path.read_text(encoding="utf-8"))
     assert "conversation_runtime" not in payload
@@ -4111,7 +4118,7 @@ def test_new_ordinary_turn_does_not_reuse_completed_sticky_workspace(tmp_path):
     old_workspace = Path(agent.home_paths.owner_home_dir) / "tasks" / "old-project"
     (old_workspace / "output").mkdir(parents=True)
     (old_workspace / "work").mkdir()
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": first.thread_id,
             "task_id": "task-old",
@@ -4120,10 +4127,10 @@ def test_new_ordinary_turn_does_not_reuse_completed_sticky_workspace(tmp_path):
             "task_path": str(old_workspace),
         }
     )
-    agent.conversation_store.select_workspace_task(
+    agent.conversation_store.tasks.select_workspace_task(
         {"thread_id": first.thread_id, "task_id": "task-old"}
     )
-    agent.conversation_store.update_task_status({"task_id": "task-old", "status": "completed"})
+    agent.conversation_store.tasks.update_status({"task_id": "task-old", "status": "completed"})
     followup = _conversation_context(agent, request, "gw-new", "普通用户说的一句话")
     attrs = _gateway_task_attributes(followup)
     params = RunParams(
@@ -4141,9 +4148,9 @@ def test_new_ordinary_turn_does_not_reuse_completed_sticky_workspace(tmp_path):
     finally:
         delattr(agent, "_current_run_params")
 
-    thread = agent.conversation_store.load_thread(first.thread_id)
+    thread = agent.conversation_store.threads.load(first.thread_id)
     links = {
-        link.task_id: link.status for link in agent.conversation_store.task_links(first.thread_id)
+        link.task_id: link.status for link in agent.conversation_store.tasks.list(first.thread_id)
     }
     assert started.ok is True
     assert thread is not None and thread.workspace_task_id == "gw-new"
@@ -4185,7 +4192,7 @@ def test_new_turn_projects_completed_workspace_candidates_without_selecting_them
         ("task-internal", "执行记录不是业务项目", internal_run, 4.5, "foreground"),
     )
     for task_id, goal, path, now, cancellation_scope in rows:
-        agent.conversation_store.bind_task(
+        agent.conversation_store.tasks.bind(
             {
                 "thread_id": first.thread_id,
                 "task_id": task_id,
@@ -4196,10 +4203,10 @@ def test_new_turn_projects_completed_workspace_candidates_without_selecting_them
                 "now": now,
             }
         )
-        agent.conversation_store.update_task_status(
+        agent.conversation_store.tasks.update_status(
             {"task_id": task_id, "status": "completed", "now": now + 0.1}
         )
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": first.thread_id,
             "task_id": "task-missing",
@@ -4209,7 +4216,7 @@ def test_new_turn_projects_completed_workspace_candidates_without_selecting_them
             "now": 5.0,
         }
     )
-    agent.conversation_store.update_task_status(
+    agent.conversation_store.tasks.update_status(
         {"task_id": "task-missing", "status": "completed", "now": 5.1}
     )
 
@@ -4219,7 +4226,7 @@ def test_new_turn_projects_completed_workspace_candidates_without_selecting_them
         "gw-return",
         "回到星河日志分析器，增加 CSV 导出",
     )
-    injection = _gateway_injections({"inject": []}, followup)[0]
+    injection = gateway_injections({"inject": []}, followup)[0]
     attrs = _gateway_task_attributes(followup)
 
     assert followup.workspace_task is None
@@ -4269,7 +4276,7 @@ def test_sticky_workspace_superseded_falls_back_to_reusable_task(tmp_path):
     (workspace / "output").mkdir(parents=True)
     (workspace / "work").mkdir()
     for task_id in ("task-prev", "task-old"):
-        agent.conversation_store.bind_task(
+        agent.conversation_store.tasks.bind(
             {
                 "thread_id": first.thread_id,
                 "task_id": task_id,
@@ -4279,10 +4286,10 @@ def test_sticky_workspace_superseded_falls_back_to_reusable_task(tmp_path):
             }
         )
     # sticky 指向 task-old,然后它被标记 superseded(sticky 仍指向它)
-    agent.conversation_store.select_workspace_task(
+    agent.conversation_store.tasks.select_workspace_task(
         {"thread_id": first.thread_id, "task_id": "task-old"}
     )
-    agent.conversation_store.update_task_status({"task_id": "task-old", "status": "superseded"})
+    agent.conversation_store.tasks.update_status({"task_id": "task-old", "status": "superseded"})
 
     followup = _conversation_context(agent, request, "gw-new", "继续写解析器")
     attrs = _gateway_task_attributes(followup)
@@ -4319,7 +4326,7 @@ def test_multi_active_workspace_candidates_do_not_guess_from_artifact_count(tmp_
     (shell / "work").mkdir()
     # 绑定顺序:先有产物的任务,后空壳任务(空壳为最近创建)
     for task_id, path in (("task-populated", populated), ("task-shell", shell)):
-        agent.conversation_store.bind_task(
+        agent.conversation_store.tasks.bind(
             {
                 "thread_id": first.thread_id,
                 "task_id": task_id,
@@ -4354,7 +4361,7 @@ def test_interrupted_workspace_requires_exact_selection_before_reuse(tmp_path):
     workspace = Path(agent.home_paths.owner_home_dir) / "tasks" / "original-task"
     (workspace / "output").mkdir(parents=True)
     (workspace / "work").mkdir()
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": conversation.thread_id,
             "task_id": "task-interrupted",
@@ -4363,14 +4370,14 @@ def test_interrupted_workspace_requires_exact_selection_before_reuse(tmp_path):
             "task_path": str(workspace),
         }
     )
-    agent.conversation_store.update_task_status(
+    agent.conversation_store.tasks.update_status(
         {"task_id": "task-interrupted", "status": "interrupted"}
     )
-    agent.conversation_store.select_workspace_task(
+    agent.conversation_store.tasks.select_workspace_task(
         {"thread_id": conversation.thread_id, "task_id": "task-interrupted"}
     )
     followup = _conversation_context(agent, request, "gw-followup", "继续")
-    section = _gateway_injections({"inject": []}, followup)[0]
+    section = gateway_injections({"inject": []}, followup)[0]
     assert "task-interrupted" not in section
     assert "## Current Task Runtime" not in section
     assert str(workspace) not in section
@@ -4411,7 +4418,7 @@ def test_bound_request_resumes_interrupted_workspace_by_exact_identity(tmp_path)
     workspace = Path(agent.home_paths.owner_home_dir) / "tasks" / "original-task"
     (workspace / "output").mkdir(parents=True)
     (workspace / "work").mkdir()
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": conversation.thread_id,
             "task_id": "task-interrupted",
@@ -4420,7 +4427,7 @@ def test_bound_request_resumes_interrupted_workspace_by_exact_identity(tmp_path)
             "task_path": str(workspace),
         }
     )
-    agent.conversation_store.update_task_status(
+    agent.conversation_store.tasks.update_status(
         {"task_id": "task-interrupted", "status": "interrupted"}
     )
     request.update(
@@ -4472,7 +4479,7 @@ def test_exact_file_target_does_not_select_or_supersede_task(tmp_path):
     (original / "work").mkdir()
     target = original / "output" / "project" / "app.py"
     target.write_text("value = 1\n", encoding="utf-8")
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": conversation.thread_id,
             "task_id": "task-completed-older",
@@ -4482,10 +4489,10 @@ def test_exact_file_target_does_not_select_or_supersede_task(tmp_path):
             "now": 1.0,
         }
     )
-    agent.conversation_store.update_task_status(
+    agent.conversation_store.tasks.update_status(
         {"task_id": "task-completed-older", "status": "completed", "now": 2.0}
     )
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": conversation.thread_id,
             "task_id": "task-completed",
@@ -4495,13 +4502,13 @@ def test_exact_file_target_does_not_select_or_supersede_task(tmp_path):
             "now": 3.0,
         }
     )
-    agent.conversation_store.update_task_status(
+    agent.conversation_store.tasks.update_status(
         {"task_id": "task-completed", "status": "completed", "now": 4.0}
     )
     placeholder = tmp_path / "placeholder"
     (placeholder / "output").mkdir(parents=True)
     (placeholder / "work").mkdir()
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": conversation.thread_id,
             "task_id": "gw-followup",
@@ -4545,7 +4552,7 @@ def test_exact_file_target_does_not_select_or_supersede_task(tmp_path):
     assert params.task_attributes["conversation_task_id"] == "gw-followup"
     assert params.task_attributes["run_workspace"]["task_root"] == str(placeholder)
     assert "conversation_rebase_from_task_root" not in params.task_attributes
-    links = {link.task_id: link.status for link in agent.conversation_store.task_links(conversation.thread_id)}
+    links = {link.task_id: link.status for link in agent.conversation_store.tasks.list(conversation.thread_id)}
     assert links == {"task-completed-older": "completed", "task-completed": "completed", "gw-followup": "active"}
 
 
@@ -4568,7 +4575,7 @@ def test_editing_old_files_keeps_current_progress_and_old_plan_separate(tmp_path
     (original / "work").mkdir()
     target = original / "app.py"
     target.write_text("value = 1\n", encoding="utf-8")
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": conversation.thread_id,
             "task_id": "task-completed",
@@ -4577,13 +4584,13 @@ def test_editing_old_files_keeps_current_progress_and_old_plan_separate(tmp_path
             "task_path": str(original),
         }
     )
-    agent.conversation_store.update_task_status(
+    agent.conversation_store.tasks.update_status(
         {"task_id": "task-completed", "status": "completed"}
     )
     placeholder = Path(agent.home_paths.owner_home_dir) / "tasks" / "placeholder"
     (placeholder / "output").mkdir(parents=True)
     (placeholder / "work").mkdir()
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": conversation.thread_id,
             "task_id": "gw-followup",
@@ -4592,7 +4599,7 @@ def test_editing_old_files_keeps_current_progress_and_old_plan_separate(tmp_path
             "task_path": str(placeholder),
         }
     )
-    agent.conversation_store.select_workspace_task(
+    agent.conversation_store.tasks.select_workspace_task(
         {"thread_id": conversation.thread_id, "task_id": "gw-followup"}
     )
     attrs = {
@@ -4684,7 +4691,7 @@ def test_old_file_access_keeps_private_run_and_user_files(tmp_path):
     (original / "work").mkdir()
     target = original / "app.py"
     target.write_text("value = 1\n", encoding="utf-8")
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": conversation.thread_id,
             "task_id": "task-completed",
@@ -4693,7 +4700,7 @@ def test_old_file_access_keeps_private_run_and_user_files(tmp_path):
             "task_path": str(original),
         }
     )
-    agent.conversation_store.update_task_status(
+    agent.conversation_store.tasks.update_status(
         {"task_id": "task-completed", "status": "completed"}
     )
     followup = _conversation_context(agent, request, "gw-followup", "回到原项目追加功能")
@@ -4735,7 +4742,7 @@ def test_old_file_access_keeps_private_run_and_user_files(tmp_path):
     assert "conversation_placeholder_workspace_cleanup" not in params.task_attributes
     assert placeholder.is_relative_to(agent.home_paths.owner_runs_dir)
     assert placeholder.is_dir() and target.read_text(encoding="utf-8") == "value = 1\n"
-    link = agent.conversation_store.load_task_link("gw-followup")
+    link = agent.conversation_store.tasks.load("gw-followup")
     assert link is not None and link.status == "active"
 
 
@@ -4759,7 +4766,7 @@ def test_owner_relative_file_target_does_not_rebind_runtime(tmp_path):
     (original / "work").mkdir()
     target = original / "output" / "project" / "app.py"
     target.write_text("value = 1\n", encoding="utf-8")
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": conversation.thread_id,
             "task_id": "task-completed",
@@ -4768,13 +4775,13 @@ def test_owner_relative_file_target_does_not_rebind_runtime(tmp_path):
             "task_path": str(original),
         }
     )
-    agent.conversation_store.update_task_status(
+    agent.conversation_store.tasks.update_status(
         {"task_id": "task-completed", "status": "completed"}
     )
     placeholder = owner_home / "tasks" / "2026-07-25" / "placeholder"
     (placeholder / "output").mkdir(parents=True)
     (placeholder / "work").mkdir()
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": conversation.thread_id,
             "task_id": "gw-followup",
@@ -4817,7 +4824,7 @@ def test_owner_relative_file_target_does_not_rebind_runtime(tmp_path):
     assert result is None
     assert params.task_attributes["conversation_task_id"] == "gw-followup"
     assert "conversation_continued_from_task_id" not in params.task_attributes
-    links = {link.task_id: link.status for link in agent.conversation_store.task_links(conversation.thread_id)}
+    links = {link.task_id: link.status for link in agent.conversation_store.tasks.list(conversation.thread_id)}
     assert links == {"task-completed": "completed", "gw-followup": "active"}
 
 
@@ -4839,7 +4846,7 @@ def test_child_file_target_does_not_change_cwd_or_parent_identity(tmp_path):
     (original / "work").mkdir()
     target = original / "output" / "project" / "app.py"
     target.write_text("value = 1\n", encoding="utf-8")
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": conversation.thread_id,
             "task_id": "task-original",
@@ -4851,7 +4858,7 @@ def test_child_file_target_does_not_change_cwd_or_parent_identity(tmp_path):
     parent = tmp_path / "new-parent-task"
     (parent / "output").mkdir(parents=True)
     (parent / "work").mkdir()
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": conversation.thread_id,
             "task_id": "gw-parent",
@@ -4908,7 +4915,7 @@ def test_child_file_target_does_not_change_cwd_or_parent_identity(tmp_path):
     assert "conversation_subagent_workspace_rebase" not in attrs
     links = {
         link.task_id: link.status
-        for link in agent.conversation_store.task_links(conversation.thread_id)
+        for link in agent.conversation_store.tasks.list(conversation.thread_id)
     }
     assert links == {"task-original": "active", "gw-parent": "active"}
 
@@ -4926,7 +4933,7 @@ def test_subagent_completion_cannot_close_parent_conversation_task(tmp_path):
         }
     }
     conversation = _conversation_context(agent, request, "gw-parent", "帮我完成一个需要分工的项目")
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": conversation.thread_id,
             "task_id": "task-parent",
@@ -4947,9 +4954,9 @@ def test_subagent_completion_cannot_close_parent_conversation_task(tmp_path):
         )
         is False
     )
-    thread = agent.conversation_store.load_thread(conversation.thread_id)
+    thread = agent.conversation_store.threads.load(conversation.thread_id)
     assert thread is not None and "task-parent" in thread.active_task_ids
-    links = agent.conversation_store.active_task_links_report(conversation.thread_id)[0]
+    links = agent.conversation_store.tasks.active_report(conversation.thread_id)[0]
     assert links[0].status == "active"
 
 
@@ -4967,7 +4974,7 @@ def test_subagent_completion_can_close_its_exact_own_conversation_link(tmp_path)
     }
     conversation = _conversation_context(agent, request, "gw-parent", "完成一个需要分工的项目")
     child_id = "subagent-child-1"
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": conversation.thread_id,
             "task_id": child_id,
@@ -4986,7 +4993,7 @@ def test_subagent_completion_can_close_its_exact_own_conversation_link(tmp_path)
         source="subagent_run_model_turn",
         current_task_id=child_id,
     )
-    links = agent.conversation_store.active_task_links_report(conversation.thread_id)[0]
+    links = agent.conversation_store.tasks.active_report(conversation.thread_id)[0]
     assert all(link.task_id != child_id for link in links)
 
 
@@ -5019,9 +5026,9 @@ def test_structured_task_tool_promotes_natural_language_chat_internally(tmp_path
         delattr(agent, "_current_run_params")
     assert link is not None and link.task_id == "gw-work"
     assert params.task_attributes["conversation_task_id"] == "gw-work"
-    stored = agent.conversation_store.thread_for_task("gw-work")
+    stored = agent.conversation_store.tasks.thread_for("gw-work")
     assert stored.thread_id == conversation.thread_id
-    link = agent.conversation_store.active_task_links_report(conversation.thread_id)[0][0]
+    link = agent.conversation_store.tasks.active_report(conversation.thread_id)[0][0]
     assert link.task_path
     assert params.task_attributes["run_workspace"]["task_root"] == link.task_path
     assert agent._current_run_task_workspace == link.task_path
@@ -5085,7 +5092,7 @@ def test_background_child_archive_cannot_overwrite_parent_goal_workspace_or_inde
     workspace = tmp_path / "home" / "owners" / "users" / "ou_user1" / "tasks" / "图书馆运营方案"
     (workspace / "output").mkdir(parents=True)
     (workspace / "work").mkdir()
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": conversation.thread_id,
             "task_id": "task-library",
@@ -5119,7 +5126,7 @@ def test_background_child_archive_cannot_overwrite_parent_goal_workspace_or_inde
     )
 
     assert written == str(workspace)
-    stored = agent.conversation_store.active_task_links_report(conversation.thread_id)[0][0]
+    stored = agent.conversation_store.tasks.active_report(conversation.thread_id)[0][0]
     assert stored.goal == "做图书馆运营方案"
     assert stored.task_path == str(workspace)
     refs = latest_task_refs(agent.home_paths, owner_id=agent.home_paths.owner_id)
@@ -5152,9 +5159,9 @@ def test_named_foreground_goal_followup_can_guide_original_child(tmp_path, goal_
     assert created.ok
     if legacy_background_goal:
         store = agent.conversation_store
-        first = store.load_goal(conversation.thread_id, task_id=link.task_id)
+        first = store.goals.load(conversation.thread_id, task_id=link.task_id)
         second = _persist_legacy_second_goal(store, first, name="独立评审", objective="另一项后台工作")
-        store.bind_task({"thread_id": conversation.thread_id, "task_id": second.task_id,
+        store.tasks.bind({"thread_id": conversation.thread_id, "task_id": second.task_id,
                          "goal": second.objective, "status": "active", "work_kind": "goal",
                          "work_name": second.name, "cancellation_scope": "detached"})
     child = agent.subagents.create_run(
@@ -5173,7 +5180,7 @@ def test_named_foreground_goal_followup_can_guide_original_child(tmp_path, goal_
     )
     result = SendGuidanceTool(agent).execute({"target": child.id, "message": "汇总时补上原因和影响"})
     assert result.ok, result.output
-    pending = agent.conversation_store.pending_guidance("agent_run", child.id)
+    pending = agent.conversation_store.guidance.pending("agent_run", child.id)
     assert len(pending) == 1 and pending[0].sender == link.task_id
 
 
@@ -5501,7 +5508,7 @@ def test_gateway_recovery_rehydrates_exact_active_turn_tool_history(
             "agent_run_id": authority["agent_run_id"],
             "attempt_id": authority["attempt_id"],
         }
-    context = _GatewayAskRunContext(
+    context = GatewayAskRunContext(
         agent=agent,
         request=request,
         request_id=request_id,
@@ -5527,7 +5534,7 @@ def test_gateway_recovery_rehydrates_exact_active_turn_tool_history(
     result, _conversation = _run_gateway_turn_with_conversation_compact(
         context,
         request["prompt"],
-        _GatewayConversationContext(),
+        GatewayConversationContext(),
     )
 
     assert result.runtime_status == "ok"
@@ -5563,7 +5570,7 @@ def test_gateway_overflow_without_transcript_commits_active_turn_compact(tmp_pat
         },
     }
     conversation = _conversation_context(agent, request, request_id, prompt)
-    context = _GatewayAskRunContext(
+    context = GatewayAskRunContext(
         agent=agent,
         request=request,
         request_id=request_id,
@@ -5611,7 +5618,7 @@ def test_gateway_overflow_without_transcript_commits_active_turn_compact(tmp_pat
         "overflow-3",
         "overflow-4",
     ]
-    stored = agent.conversation_store.load_thread(conversation.thread_id)
+    stored = agent.conversation_store.threads.load(conversation.thread_id)
     assert stored is not None and stored.compact_generation == 1
     assert stored.compact_source_tool_pairs == 1
     from agent_py_agent.agent.conversation.active_turn_compact import (
@@ -5637,7 +5644,7 @@ def test_gateway_recovery_marker_cannot_replay_another_request_history(tmp_path)
         AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
         tmp_path,
     )
-    context = _GatewayAskRunContext(
+    context = GatewayAskRunContext(
         agent=agent,
         request={
             "id": "gw-current",
@@ -5659,7 +5666,7 @@ def test_gateway_recovery_marker_cannot_replay_another_request_history(tmp_path)
 
 @pytest.mark.parametrize("mode", ["current", "recovered", "request", "transport", "marker_schema", "missing_id", "malformed"])
 def test_gateway_runtime_authority_is_exact_and_structured(mode):
-    from agent_py_agent.agent.gateway_parts.request_execution import _gateway_runtime_authority
+    from agent_py_agent.agent.gateway_parts.request_binding import gateway_runtime_authority
 
     binding = {
         "schema_version": "gateway_runtime_authority.v1", "request_id": "request",
@@ -5682,10 +5689,10 @@ def test_gateway_runtime_authority_is_exact_and_structured(mode):
     elif mode == "malformed":
         binding["gateway_execution_attempt_id"] = []
     if mode in {"current", "recovered"}:
-        assert _gateway_runtime_authority(request, "request") == binding
+        assert gateway_runtime_authority(request, "request") == binding
     else:
         with pytest.raises(ConversationPersistenceError):
-            _gateway_runtime_authority(request, "request")
+            gateway_runtime_authority(request, "request")
 
 
 @pytest.mark.parametrize("fence", ["open", "closing", "cancelled", "new_attempt", "terminal"])
@@ -5710,7 +5717,7 @@ def test_gateway_runtime_binding_writer_preserves_queue_and_respects_lease(tmp_p
         terminal.write_text("{}", encoding="utf-8")
     path.write_text(json.dumps(request), encoding="utf-8")
     live = dict(request)
-    writer = _GatewayTaskBindingWriter(path, "request", live, "transport-1")
+    writer = GatewayTaskBindingWriter(path, "request", live, "transport-1")
     binding = {
         "invocation_run_id": "request", "task_id": "actual-task", "run_id": "actual-run",
         "agent_run_id": "agent-run", "attempt_id": "runtime-attempt",
@@ -5759,8 +5766,8 @@ def _run_claimed_gateway_ask(context):
 
 
 def _conversation_context(agent: SimpleAgent, request: dict, request_id: str, prompt: str):
-    return _gateway_conversation_context(
-        _GatewayConversationLoadRequest(agent, request, request_id, prompt)
+    return gateway_conversation_context(
+        GatewayConversationLoadRequest(agent, request, request_id, prompt)
     )
 
 
@@ -5774,7 +5781,7 @@ def test_finalize_gateway_response_releases_unclaimed_turn_guidance(tmp_path):
 
     store = ConversationStore(tmp_path)
     turn = "gwreq-turn-under-test"
-    pending = store.append_guidance_once(
+    pending = store.guidance.append_once(
         {
             "message": "插话：给我绝对路径",
             "sender": "local-agent",
@@ -5791,7 +5798,7 @@ def test_finalize_gateway_response_releases_unclaimed_turn_guidance(tmp_path):
         },
         dedupe_key="steer-key-1",
     )
-    submitted = store.append_guidance_once(
+    submitted = store.guidance.append_once(
         {
             "message": "插话：已经进了提示",
             "sender": "local-agent",
@@ -5808,18 +5815,18 @@ def test_finalize_gateway_response_releases_unclaimed_turn_guidance(tmp_path):
         },
         dedupe_key="steer-key-2",
     )
-    assert store.claim_guidance_once_for_turn(
+    assert store.guidance.claim_for_turn(
         submitted, expected_turn_id=turn, attempt_id="attempt-1"
     ) is True
-    store.mark_guidance_entries_submitted(
+    store.guidance.submissions.mark_submitted(
         turn, [submitted], attempt_id="attempt-1", provider_call_id="call-1"
     )
 
-    released = store.release_unclaimed_guidance_for_turn(turn)
+    released = store.guidance.recovery.release_unclaimed(turn)
     assert released == 1
 
-    pending_receipt = store.guidance_once_receipt("steer-key-1")
-    submitted_receipt = store.guidance_once_receipt("steer-key-2")
+    pending_receipt = store.guidance.receipt("steer-key-1")
+    submitted_receipt = store.guidance.receipt("steer-key-2")
     # 释放只记在回执的 migration 上：entry metadata 参与回执/投影一致性与正文指纹，不能改。
     assert pending_receipt.migration.get("released_turn_ids") == [turn]
     assert str(pending_receipt.entry.metadata.get("expected_turn_id") or "") == turn
@@ -5829,10 +5836,10 @@ def test_finalize_gateway_response_releases_unclaimed_turn_guidance(tmp_path):
     assert submitted_receipt.status == "submitted"
 
     # 释放之后，下一轮（不同 turn id）可以认领它。
-    assert store.claim_guidance_once_for_turn(
+    assert store.guidance.claim_for_turn(
         pending_receipt.entry, expected_turn_id="gwreq-next-turn", attempt_id="attempt-2"
     ) is True
     # 未释放的回执仍然拒绝跨轮认领：插话只属于当时的活动轮次。
-    assert store.claim_guidance_once_for_turn(
+    assert store.guidance.claim_for_turn(
         submitted_receipt.entry, expected_turn_id="gwreq-next-turn", attempt_id="attempt-3"
     ) is False

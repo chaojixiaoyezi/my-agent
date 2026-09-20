@@ -111,7 +111,7 @@ def read_gateway_client_history(
     try:
         owner_agent = resolve_gateway_scope_agent(base_agent, scope)
         store = owner_agent.conversation_store
-        thread, thread_error = store.resolve_thread_report(
+        thread, thread_error = store.threads.resolve_report(
             channel=scope.channel,
             channel_conversation_id=scope.conversation_id,
             channel_user_id=scope.user_id,
@@ -128,7 +128,7 @@ def read_gateway_client_history(
     thread_id = str(getattr(thread, "thread_id", "") or "")
     limit = _bounded_limit(max_turns, maximum=200)
     try:
-        page = store.history_page_report(
+        page = store.messages.history_page_report(
             thread_id,
             before=before_message_cursor,
             limit=max(16, limit * 4),

@@ -21,7 +21,7 @@ from ..runtime_errors import DataCorruptionError, runtime_error_report
 from ..subagents.authorization_gate import OperationRequest, authorize_operation
 from ..subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
 from .agent_activity import conversation_agent_view
-from .agent_tool_approval import resolve_subagent_tool_approval
+from .agent_tool_approval import resolve_agent_tool_approval
 from .store import ConversationStore
 
 MAX_AGENT_GUIDANCE_CHARS = 1 << 20
@@ -225,12 +225,12 @@ def _reload_guidance_task(agent: object, task: object) -> object:
     return task
 
 
-# LLM: Receipt lookup is fail-closed because an unreadable existing stable id
+# LLM: 插话持久操作经 guidance 领域组件； Receipt lookup is fail-closed because an unreadable existing stable id
 # makes first-delivery versus replay unknowable. No attempt may be reserved.
 # 函数用途: 读取稳定消息 ID 的已有回执；存储不可读时明确返回未知而不重复投递。
 def _read_guidance_receipt(submission: _AgentGuidanceSubmission) -> object | None:
     try:
-        return submission.store.guidance_once_receipt(submission.dedupe_key)
+        return submission.store.guidance.receipt(submission.dedupe_key)
     except (DataCorruptionError, OSError) as exc:
         raise AgentControlError(
             503,
@@ -308,7 +308,7 @@ def _reserve_guidance_turn(
     return turn, expected_turn_id
 
 
-# LLM: One builder and one store append path enforce the same stable-id payload
+# LLM: 插话持久操作经 guidance 领域组件； One builder and one store append path enforce the same stable-id payload
 # contract for first delivery and replay. Conflicts never become another row.
 # 函数用途: 按稳定消息 ID 写入子代理消息箱，并把冲突和磁盘错误转成统一控制错误。
 def _append_guidance_entry(
@@ -316,7 +316,7 @@ def _append_guidance_entry(
     expected_turn_id: str,
 ) -> object:
     try:
-        return submission.store.append_guidance_once(
+        return submission.store.guidance.append_once(
             _agent_guidance_request(
                 scope=submission.scope,
                 thread=submission.thread,
@@ -398,7 +398,7 @@ def _agent_guidance_request(
     }
 
 
-# LLM: A stable client id is authoritative across HTTP timeout and attempt
+# LLM: 插话持久操作经 guidance 领域组件； A stable client id is authoritative across HTTP timeout and attempt
 # transitions. Consumed/submitted/reserved receipts are acknowledged exactly as
 # recorded and never start another turn. Pending receipts may resume/rebind only
 # through proven same-AgentRun attempt ancestry.
@@ -447,7 +447,7 @@ def _replay_agent_guidance(
                 task=submission.task,
                 expected_turn_id=expected_turn_id,
             )
-            refreshed = submission.store.guidance_once_receipt(submission.dedupe_key)
+            refreshed = submission.store.guidance.receipt(submission.dedupe_key)
         except AgentControlError:
             raise
         except Exception as exc:
@@ -471,7 +471,7 @@ def _replay_agent_guidance(
     }
 
 
-# LLM: Only a pending receipt can cross this recovery edge. It either resumes
+# LLM: 插话持久操作经 guidance 领域组件； Only a pending receipt can cross this recovery edge. It either resumes
 # its exact current pending turn, or is atomically rebound from a proven dead
 # attempt to the current/new pending attempt on the same AgentRun.
 # 函数用途: 首次启动失败或回执丢失后，安全续起仍未提交模型的同一条子代理消息。
@@ -507,7 +507,7 @@ def _resume_pending_guidance_replay(
                 "AGENT_ATTEMPT_UNAVAILABLE",
                 "子代理消息的旧执行轮尚不能安全接续；系统会按同一消息重试。",
             )
-        summary = store.rebind_unsubmitted_guidance_for_recovered_turn(
+        summary = store.guidance.recovery.rebind_unsubmitted(
             "agent_run",
             str(getattr(task, "id", "") or ""),
             dead_turn_ids=[expected_turn_id],
@@ -836,10 +836,8 @@ def _deliver_stopped_agent_to_parent(
         }
 
 
-# LLM: A child approval decision reuses the exact conversation subtree gate and
-# canonical pending record. The client cannot approve by row index, tool label,
-# or a binding that differs from the child-published ToolApprovalRequest.
-# 函数用途: 将 TUI/Web 对某个子代理具体工具调用的批准或拒绝写回等待中的原调用。
+# LLM: 主/子审批决定先过 owner/conversation/root 门，再比对原请求与当前执行；标签、行号和客户端片段不能授权。
+# 函数用途: 将 TUI/Web 对主/子后台具体工具调用的批准或拒绝写回原等待记录。
 def resolve_agent_permission(
     agent: object,
     *,
@@ -848,22 +846,23 @@ def resolve_agent_permission(
     request: Mapping[str, object],
     decision: Mapping[str, object],
 ) -> dict[str, object]:
-    _store, _thread, task = _authorized_agent_target(
+    _store, thread, task = _authorized_agent_target(
         agent,
         scope=scope,
         run_id=run_id,
         operation="resolve_tool_approval",
     )
-    if _task_is_terminal(task):
+    is_main = str(run_id or "").strip() == str(thread.workspace_task_id or "")
+    if not is_main and _task_is_terminal(task):
         raise AgentControlError(
             409,
             "AGENT_ALREADY_TERMINAL",
             "这个子代理已经结束；迟到的工具决定不会生效。",
         )
     try:
-        return resolve_subagent_tool_approval(
+        return resolve_agent_tool_approval(
             agent,
-            run_id=str(getattr(task, "id", "") or ""),
+            run_id=str(run_id).strip() if is_main else str(getattr(task, "id", "") or ""),
             request_value=request,
             decision_value=decision,
         )
@@ -887,11 +886,8 @@ def resolve_agent_permission(
         ) from exc
 
 
-# LLM: Scope resolution first applies historical read authorization to prove
-# exact owner/root ancestry. A live mutation then applies its stronger current
-# attempt/binding gate; terminal targets stay readable so callers can return a
-# deterministic read-only or already-terminal result instead of a false denial.
-# 函数用途: 解析用户当前会话并确认目标 run 真属于这棵主任务树，运行中写操作再加一层权威运行门。
+# LLM: 先解析认证会话与 canonical root；仅工具审批允许 root 自身。下级先过历史读取授权，运行中写操作再校验当前 attempt。
+# 函数用途: 校验用户可操作的精确代理范围，不因增加主代理审批而放开子代理查看、插话或停止入口。
 def _authorized_agent_target(
     agent: object,
     *,
@@ -908,7 +904,7 @@ def _authorized_agent_target(
     if not conversation_id or not user_id or not channel:
         raise AgentControlError(400, "AGENT_SCOPE_INVALID", "当前会话身份不完整。")
     try:
-        thread, load_error = store.resolve_thread_report(
+        thread, load_error = store.threads.resolve_report(
             channel=channel,
             channel_conversation_id=conversation_id,
             channel_user_id=user_id,
@@ -919,7 +915,7 @@ def _authorized_agent_target(
         raise AgentControlError(404, "AGENT_THREAD_NOT_FOUND", "当前会话还没有可查看的代理任务。")
     root_id = str(getattr(thread, "workspace_task_id", "") or "").strip()
     try:
-        link, link_error = store.load_task_link_report(root_id)
+        link, link_error = store.tasks.load_report(root_id)
     except Exception as exc:
         raise AgentControlError(503, "AGENT_ROOT_UNAVAILABLE", "当前主任务状态暂时不可读取。") from exc
     if (
@@ -930,6 +926,8 @@ def _authorized_agent_target(
         != str(getattr(thread, "thread_id", "") or "").strip()
     ):
         raise AgentControlError(404, "AGENT_ROOT_NOT_FOUND", "当前会话没有可操作的主任务树。")
+    if operation == "resolve_tool_approval" and str(run_id or "").strip() == root_id:
+        return store, thread, link
     manager = getattr(agent, "subagents", None)
     if manager is None:
         raise AgentControlError(503, "AGENT_MANAGER_UNAVAILABLE", "子代理管理器不可用。")

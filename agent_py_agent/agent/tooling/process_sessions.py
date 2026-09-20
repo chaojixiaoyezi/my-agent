@@ -146,7 +146,8 @@ class ProcessSessionTool(BaseTool):
         self.owner_scope_root = str(owner_scope_root or "")
         self.workspace_root = str(workspace_root or ".")
 
-    # LLM: action 只分派到 registry 的 scope-aware 方法；未知、越界与不存在记录均
+    # LLM: action 只分派到 registry 的 scope-aware 方法；持久地址与 shell 同读可信 scope.owner_home，
+    # 不能由可变路径权限或 cwd 决定。未知、越界与不存在记录均
     # 返回稳定错误，不泄露其他会话是否存在；stop 沿用 registry 终止回执，status/wait 附宿主进展观测。
     # 函数用途: 执行后台进程控制；未确认的停止结果明确 UNKNOWN，保留结果供核对。
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
@@ -158,7 +159,7 @@ class ProcessSessionTool(BaseTool):
             )
         store_root = process_session_store_root(
             self.workspace_root,
-            self.owner_scope_root,
+            scope.owner_home,
         )
         action = str(params.get("action") or "").strip().lower()
         if action == "list":

@@ -158,7 +158,7 @@ def stop_named_conversation_work(
         # durable authority for the loser to observe; a late source cannot
         # escape the watch-close snapshot after its parent was cancelled.
         # 函数用途: 串行化命名任务终止与来源正式启用，堵住 clear 同时 open 的漏网子代理。
-        with store.task_transition_guard(task_id):
+        with store.tasks.transition_guard(task_id):
             _cancel_task_projection(store, task_id)
             _disable_task_policies(store, task_id)
             stop_named_work_runtime(
@@ -181,14 +181,14 @@ def _resolve_named_work_kind(
     thread_id: str,
     name: str,
 ) -> tuple[str, str]:
-    goals = store.load_goals(thread_id)
+    goals = store.goals.list(thread_id)
     goal_matches = [
         goal
         for goal in goals
         if str(getattr(goal, "name", "") or "").casefold() == name.casefold()
         and str(getattr(goal, "status", "") or "") != "complete"
     ]
-    links, errors = store.task_links_report(thread_id)
+    links, errors = store.tasks.list_report(thread_id)
     if errors:
         return "", "CONVERSATION_TASK_STATE_UNAVAILABLE"
     audit_matches = [
@@ -209,8 +209,8 @@ def _resolve_named_work_kind(
 
 
 def _remove_named_goal(store: object, thread_id: str, name: str) -> tuple[str, str]:
-    with store.goal_transition_guard(thread_id):
-        goals = store.load_goals(thread_id)
+    with store.goals.transition_guard(thread_id):
+        goals = store.goals.list(thread_id)
         matching = [
             goal
             for goal in goals
@@ -222,7 +222,7 @@ def _remove_named_goal(store: object, thread_id: str, name: str) -> tuple[str, s
         if not matching:
             return "", "NAMED_WORK_NOT_FOUND"
         goal = matching[0]
-        deleted = store.delete_goal(thread_id, expected_goal_id=goal.goal_id)
+        deleted = store.goals.delete(thread_id, expected_goal_id=goal.goal_id)
         return (
             (str(getattr(deleted, "task_id", "") or ""), "")
             if deleted is not None
@@ -231,7 +231,7 @@ def _remove_named_goal(store: object, thread_id: str, name: str) -> tuple[str, s
 
 
 def _select_named_audit(store: object, thread_id: str, name: str) -> tuple[str, str]:
-    links, errors = store.task_links_report(thread_id)
+    links, errors = store.tasks.list_report(thread_id)
     if errors:
         return "", "CONVERSATION_TASK_STATE_UNAVAILABLE"
     matching = [
@@ -252,13 +252,13 @@ def _select_named_audit(store: object, thread_id: str, name: str) -> tuple[str, 
 
 
 def _cancel_task_projection(store: object, task_id: str) -> None:
-    store.update_task_status({"task_id": task_id, "status": "cancelled"})
+    store.tasks.update_status({"task_id": task_id, "status": "cancelled"})
 
 
 def _disable_task_policies(store: object, task_id: str) -> None:
-    for policy in store.list_progress_policies(enabled_only=True):
+    for policy in store.progress.list(enabled_only=True):
         if str(getattr(policy, "task_id", "") or "") == task_id:
-            store.disable_progress_policy(policy.policy_id)
+            store.progress.disable(policy.policy_id)
 
 
 def _interrupt_registry(agent: object, task_id: str) -> None:

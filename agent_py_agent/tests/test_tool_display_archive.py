@@ -28,8 +28,8 @@ from agent_py_agent.tests.test_tool_round_execution import _canonical_calls, _ro
 # 函数用途: 建立可验证源快照与页式归档的工具结果夹具。
 def _event(tmp_path, display=None, output="done", *, child=False):
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread({"canonical_user_id": "owner"})
-    child_thread = store.ensure_agent_thread({"thread_id": "child", "canonical_user_id": "owner",
+    thread = store.threads.get_or_create({"canonical_user_id": "owner"})
+    child_thread = store.threads.ensure_agent({"thread_id": "child", "canonical_user_id": "owner",
         "agent_run_id": "child-run", "parent_agent_thread_id": thread.thread_id,
         "root_agent_thread_id": thread.thread_id}) if child else thread
     agent = SimpleNamespace(conversation_store=store)
@@ -62,7 +62,7 @@ def test_tool_original_is_complete_immutable_public_and_events_remain_bounded(tm
     assert event.result.output == "done"
     sink = BackgroundTranscriptSink(event.request.agent, thread_id=thread.thread_id, task_id="task")
     sink.write_progress(payload)
-    history, _, _ = event.request.agent.conversation_store.message_page_after_offset_report(thread.thread_id, after=0)
+    history, _, _ = event.request.agent.conversation_store.messages.page_after_offset_report(thread.thread_id, after=0)
     recovered = display_checkpoint_events(history)
     assert any(row["payload"].get("display_archive_ref") == ref for row in recovered)
 
@@ -98,7 +98,7 @@ def test_long_thinking_checkpoint_has_complete_original_archive(tmp_path):
     sink = BackgroundTranscriptSink(event.request.agent, thread_id=thread.thread_id, task_id="task")
     text = "\n".join(f"想法{index}" for index in range(5000))
     sink.write_thinking(text)
-    history, _, _ = event.request.agent.conversation_store.message_page_after_offset_report(thread.thread_id, after=0)
+    history, _, _ = event.request.agent.conversation_store.messages.page_after_offset_report(thread.thread_id, after=0)
     payload = next(row["payload"] for row in display_checkpoint_events(history) if row["kind"] == "thinking_completed")
     assert len(payload["text"]) < len(text)
     ref = payload["display_archive_ref"]
@@ -189,7 +189,7 @@ def test_actual_capture_limit_is_explicit_in_archive_and_history(tmp_path):
     assert _tool_payload(payload)["history_incomplete"] is True
     sink = BackgroundTranscriptSink(event.request.agent, thread_id=thread.thread_id, task_id="task")
     sink.write_progress(payload)
-    history, _, _ = event.request.agent.conversation_store.message_page_after_offset_report(thread.thread_id, after=0)
+    history, _, _ = event.request.agent.conversation_store.messages.page_after_offset_report(thread.thread_id, after=0)
     assert any(row["payload"].get("history_incomplete") is True for row in display_checkpoint_events(history))
 
 

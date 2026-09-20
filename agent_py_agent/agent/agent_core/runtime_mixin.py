@@ -396,7 +396,7 @@ def _bind_main_agent_authority(agent, params: RunParams) -> RunParams:
 _RUN_STATUS_ALIASES = {"ok": "done", "user_stop": "cancelled", "conversation_control": "cancelled"}
 
 
-# LLM: 收口按本轮权威 attempt 定位 AgentRun；前台请求和后台唤醒的临时 run_id 不得造成漏记或误关别人的轮次。
+# LLM: 收口按权威 attempt 定位 AgentRun，技术续跑共用 turn_end；临时 run_id 不得导致漏记或误关别人的轮次。
 # 函数用途: 结束精确执行代次并释放执行权；旧 attempt 的 CAS 不能覆盖新 attempt。
 def _settle_main_agent_run_status(
     agent,
@@ -446,7 +446,7 @@ def _settle_main_agent_run_status(
         # UNKNOWN, 共享 gate 判定 False)才 one-shot 兜底 failed(问题C同族
         # 兜底保留)。续跑轮非终态一律不落账。
         if cli_one_shot and runtime_status and int(continuation_seq or 0) <= 0:
-            from ..conversation.runtime import should_continue_task
+            from ..turn_end import should_continue_task
 
             # 共享 gate: 可续跑族(True) → 不落 failed(保留任务级非终态);
             # 不可续跑族(False) → 兜底 failed。
@@ -562,7 +562,7 @@ def _settle_terminal_conversation_task_run(agent: object, params: object) -> Non
         if task_run is None:
             return
         canonical_task_id = str(task_run["task_id"] or "").strip()
-        link = store.load_task_link(canonical_task_id)
+        link = store.tasks.load(canonical_task_id)
         link_status = str(getattr(link, "status", "") or "").strip().lower()
         if link is None or not conversation_task_link_is_terminal(link_status):
             return
@@ -589,23 +589,29 @@ def _settle_main_agent_run_exception(agent, params: RunParams, exc: BaseExceptio
     _settle_terminal_conversation_task_run(agent, params)
 
 
-# LLM: Authority binding replaces the transport attempt id with the RuntimeDB attempt id;
-# every caller must retain the returned params through execution, exception closeout,
-# Compact continuation, and final closeout.  Dropping the replacement recreates a stale-attempt
-# closeout and leaves the root active forever.
-# LLM: 与终态扫描投影共用任务换代锁；原执行权与 attempt CAS 仍是准入门，不能用此锁绕过。
-# 函数用途: 原子选定归档并绑定新 attempt，防止中途被旧取消快照覆盖；返回值须贯穿整轮。
+# LLM: 先绑定 canonical run/新 attempt 再写归档，request 仍是消息身份；返回参数贯穿 Compact 与收尾。
+# 与终态扫描共用换代锁，归档失败只结算本次新 attempt；修改时核对复用 run 和归档准备失败测试。
+# 函数用途: 在同一锁内确定执行身份并准备运行目录，防止续做归档与收尾使用不同 run；失败不遗留新执行权。
 def _bind_main_agent_turn_params(
     agent,
     user_prompt: str,
     params: RunParams,
 ) -> RunParams:
     store = getattr(agent, "conversation_store", None)
-    guard = getattr(store, "task_transition_guard", None)
+    guard = getattr(getattr(store, 'tasks', None), 'transition_guard', None)
     task_id = str(params.task_id or params.run_id or "")
     with guard(task_id) if task_id and callable(guard) else nullcontext():
-        attached = attach_run_task_workspace_context(agent, params, user_prompt)
-        return _bind_main_agent_authority(agent, attached)
+        bound = _bind_main_agent_authority(agent, params)
+        try:
+            return attach_run_task_workspace_context(agent, bound, user_prompt)
+        except Exception as exc:
+            if bound.attempt_id and bound.attempt_id != params.attempt_id:
+                _settle_main_agent_run_status(
+                    agent, run_id=bound.run_id, attempt_id=bound.attempt_id,
+                    runtime_status="cancelled" if isinstance(exc, InterruptedError) else "failed",
+                    runtime_reason="workspace_preparation_failed",
+                )
+            raise
 
 
 # LLM: 顶层运行和所有自动 Compact 续接共用这一返回缝隙；只有最终不再续接时才能投影 standalone 终态。

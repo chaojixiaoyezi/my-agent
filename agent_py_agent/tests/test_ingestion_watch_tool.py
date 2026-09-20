@@ -250,7 +250,7 @@ def _named_audit_tool(
 
     audit_id = "audit-open-transition"
     store = ConversationStore(owner_home / "conversation")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "u-test",
             "channel": "internal",
@@ -258,7 +258,7 @@ def _named_audit_tool(
             "channel_user_id": "u-test",
         }
     )
-    store.bind_task(
+    store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": audit_id,
@@ -336,9 +336,9 @@ def _reactivate_named_audit_tool(agent: object, audit_id: str, *, source_goal: s
     )
     from agent.conversation.authority import CONVERSATION_REQUEST_ID_ATTR
 
-    current = agent.conversation_store.load_task_link(audit_id)
+    current = agent.conversation_store.tasks.load(audit_id)
     assert current is not None
-    terminal = agent.conversation_store.update_task_status(
+    terminal = agent.conversation_store.tasks.update_status(
         {
             "task_id": audit_id,
             "status": "completed",
@@ -346,7 +346,7 @@ def _reactivate_named_audit_tool(agent: object, audit_id: str, *, source_goal: s
         }
     )
     assert terminal is not None
-    active = agent.conversation_store.reactivate_audit(
+    active = agent.conversation_store.audits.reactivate(
         {
             "task_id": audit_id,
             "goal": "第二轮继续处理新到记录",

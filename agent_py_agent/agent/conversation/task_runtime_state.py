@@ -174,11 +174,11 @@ def _task_link(
     load_errors: list[dict[str, Any]],
 ) -> object | None:
     try:
-        if callable(getattr(store, "task_links_report", None)):
-            links, errors = store.task_links_report(thread_id)
+        if callable(getattr(getattr(store, 'tasks', None), 'list_report', None)):
+            links, errors = store.tasks.list_report(thread_id)
             load_errors.extend(item for item in errors if isinstance(item, dict))
         else:
-            links = store.task_links(thread_id)
+            links = store.tasks.list(thread_id)
     except Exception as exc:
         load_errors.append(runtime_error_report(exc, context="task_runtime_state.task_link"))
         return None

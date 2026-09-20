@@ -856,3 +856,74 @@ def test_http_control_requires_stable_id_and_exposes_pollable_receipt(tmp_path) 
     assert conflict_error.value.code == 409
     assert polled["operation_id"] == submitted["operation_id"]
     assert polled["message"] == submitted["message"]
+
+
+def test_first_http_goal_preserves_workspace_through_control_receipt(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False), tmp_path,
+    )
+    project = agent.home_paths.owner_home_dir / "project"
+    project.mkdir()
+    store = agent.conversation_store
+    thread = store.threads.get_or_create({
+        "channel": "chat", "channel_conversation_id": "first-goal",
+        "channel_user_id": "local-agent", "canonical_user_id": "local-agent",
+    })
+    assert thread.cwd == ""
+    port = _free_port()
+    server = GatewayHTTPServer(port, gateway_paths(agent), params=GatewayHTTPServerParams(agent=agent))
+    server.start()
+    try:
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/control",
+            data=json.dumps({
+                "command": "/goal 在当前目录记录", "user_id": "local-agent", "channel": "chat",
+                "conversation_id": "first-goal", "metadata": {"message_id": "first-goal-create"},
+                "workspace": {"cwd": str(project), "roots": [str(project)]},
+            }).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            result = json.loads(response.read())
+    finally:
+        server.stop()
+    assert result["ok"] is True
+    current = store.threads.load(thread.thread_id)
+    assert current.cwd == str(project)
+    assert current.runtime_workspace_roots == (str(project),)
+    assert store.goals.load(thread.thread_id).status == "active"
+
+
+def test_control_workspace_is_signed_and_replay_cannot_change_it(tmp_path, monkeypatch) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    paths = gateway_paths(agent)
+    seen = []
+    def execute(_agent, _paths, _command, scope):
+        seen.append(scope.workspace)
+        return ConversationControlResult("goal", True, "created")
+    monkeypatch.setattr(
+        "agent_py_agent.agent.gateway_parts.control_operation_service.execute_gateway_conversation_control",
+        execute,
+    )
+    workspace = {"cwd": str(tmp_path / "first"), "roots": [str(tmp_path)]}
+    scope = replace(_scope(message_id="workspace-create"), workspace=workspace)
+    first = execute_gateway_control_operation(agent, paths, _command("/goal 整理"), scope, command_text="/goal 整理")
+    replay = execute_gateway_control_operation(agent, paths, _command("/goal 整理"), scope, command_text="/goal 整理")
+    assert seen == [workspace]
+    assert replay.operation_id == first.operation_id
+    assert first.input_digest_version == 3
+    changed = replace(scope, workspace={"cwd": str(tmp_path / "second"), "roots": [str(tmp_path)]})
+    with pytest.raises(GatewayControlOperationConflict):
+        execute_gateway_control_operation(agent, paths, _command("/goal 整理"), changed, command_text="/goal 整理")
+    payload = first.to_dict()
+    payload["workspace"] = changed.workspace
+    with pytest.raises(DataCorruptionError, match="digest conflicts"):
+        GatewayControlOperationReceipt.from_dict(payload)
+    old = execute_gateway_control_operation(agent, paths, _command("/goal 整理"), _scope(message_id="v2"), command_text="/goal 整理")
+    assert old.input_digest_version == 2
+    payload = old.to_dict()
+    payload.pop("input_digest_version")
+    assert GatewayControlOperationReceipt.from_dict(payload).input_digest_version == 2
+    payload["workspace"] = workspace
+    with pytest.raises(DataCorruptionError, match="digest conflicts"):
+        GatewayControlOperationReceipt.from_dict(payload)

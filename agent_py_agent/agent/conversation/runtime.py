@@ -1,5 +1,6 @@
 # LLM: 后台稳定 task 身份与逐轮请求分离；唤醒共用 coordinator 软指导，不能生成永久禁写或额外授权。
-# 模块用途: 处理后台事件、上下文和投递；原生执行历史独立于公开回复保存，截断与中断保留真实原因。
+# 上下文和历史准备通过独立模块调用，修改执行顺序时同步后台历史、取消、Compact 和投递回归。
+# 模块用途: 编排后台唤醒和工作片；执行、交付、策略、上下文和历史种子各有独立实现。
 from __future__ import annotations
 
 import hashlib
@@ -11,6 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from ..agent_core.agent_tree.status import agent_tree_status_payload
 from ..agent_core.orchestration.coordinator_policy import coordinator_tool_boundary_text
 from ..backends.errors import (
     is_provider_quota_exhausted_error,
@@ -18,19 +20,10 @@ from ..backends.errors import (
     is_provider_usage_limit_error,
 )
 from ..concurrency.interrupt import is_interrupted, register_interruptible
-from ..contracts.subagent_completion import (
-    DEFAULT_VISIBLE_SUBAGENT_COMPLETIONS,
-    subagent_completion_context_from_observations,
-)
-from ..runtime_errors import compact_error_message, runtime_error_report
+from ..runtime_errors import compact_error_message
 from ..settings.config import DEFAULT_EXECUTION_PERSISTENCE
 from ..settings.runtime_guard_config import runtime_guard_int
 from ..settings.thread_model_selection import is_model_configuration_unavailable
-from ..subagents.role_templates import active_model_subagent_tools
-from .agent_activity import (
-    BackgroundMainActivitySink,
-    task_progress_projection_for_task,
-)
 from .authority import (
     CONVERSATION_BACKGROUND_EVENT_REASON_ATTR,
     CONVERSATION_BACKGROUND_SUBAGENT_PHASE_ATTR,
@@ -42,19 +35,50 @@ from .authority import (
     CONVERSATION_TASK_TURN_ACTIVE_ATTR,
     CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR,
 )
+from .background_context import (
+    is_narrow_audit_event,
+    policy_snapshot_from_request,
+)
+from .background_delivery import (
+    ROUTE_EXTERNAL,
+    BackgroundDeliveryDependencies,
+    audit_finding_payload_delivery_refs,
+    audit_finding_report_event,
+    background_delivery_evidence_refs,
+    background_delivery_idempotency_key,
+    background_owner_delivery_committed,
+    background_route_ownership,
+    cached_owner_delivery,
+    channel_supports_transcript,
+    frozen_owner_delivery,
+    message_tool_delivery_reason,
+    message_tool_delivery_satisfied,
+    mirror_message_tool_deliveries,
+    record_background_response,
+)
+from .background_execution import (
+    BackgroundCompactSliceYield,
+    BackgroundExecutionDependencies,
+    BackgroundExecutionResult,
+    collect_background_execution_result,
+    invoke_background_turn,
+)
+from .background_tool_policy import (
+    SCHEDULED_WAKE_REASONS,
+    BackgroundToolPolicyRequest,
+    background_allowed_tools,
+)
 from .control_commands import conversation_request_interrupt_name
 from .models import (
     SUBAGENT_LIFECYCLE_WAKE_REASONS,
     THREAD_TASK_LINK_ACTIVE_STATUS,
     ConversationThread,
-    MessageLogEntry,
     ObservationEvent,
     WakeSignal,
     new_id,
 )
 from .run_claim import ConversationRunClaimHeartbeat, claim_heartbeat_interval_seconds
 from .store import ConversationStore
-from .task_runtime_state import task_runtime_state
 
 
 # Scheduled wakes resume the same Agent with typed state.  Runtime boundaries
@@ -266,7 +290,7 @@ def background_prompt(
         return _AUDIT_CAPACITY_REPORT_PROMPT
     if normalized_reason in SUBAGENT_LIFECYCLE_WAKE_REASONS:
         return _SUBAGENT_INTEGRATION_WAKE_PROMPT + f"\n唤醒原因:{reason}"
-    if normalized_reason in _SCHEDULED_WAKE_REASONS:
+    if normalized_reason in SCHEDULED_WAKE_REASONS:
         return _scheduled_continuation_prompt(reason)
     return (
         "The same Agent was resumed by a structured background event. Use the "
@@ -287,44 +311,10 @@ def default_route_target(thread: ConversationThread, route_channel: str) -> str:
     )
 
 
-def json_block(value: Any) -> str:
-    return "```json\n" + json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n```"
-
-
-def pending_wake_payload(
-    store: ConversationStore, thread_id: str, *, limit: int
-) -> list[dict[str, Any]]:
-    return [
-        item.to_dict()
-        for item in store.pending_wake_signals(limit=limit)
-        if item.thread_id == thread_id
-    ]
-
-
 def wake_signal_payload(signal: WakeSignal | dict[str, Any] | None) -> dict[str, Any] | None:
     if isinstance(signal, WakeSignal):
         return signal.to_dict()
     return dict(signal) if isinstance(signal, dict) else None
-
-
-# LLM: 持久 wake 账本可以保留旧策略快照用于审计，但投给模型的副本必须删掉
-# 已退役控制工具，避免模型从 Active/Pending Wake Signal 里重新学会轮询或手工派工。
-# 函数用途: 生成不含退役子代理工具名的模型可见 wake signal 副本。
-def _model_visible_wake_signal(signal: object) -> dict[str, Any] | None:
-    if not isinstance(signal, dict):
-        return None
-    payload = dict(signal)
-    snapshot = payload.get("policy_snapshot")
-    if not isinstance(snapshot, dict):
-        return payload
-    visible_snapshot = dict(snapshot)
-    for key in ("allowed_tools", "disabled_tools"):
-        if key in visible_snapshot:
-            visible_snapshot[key] = active_model_subagent_tools(
-                tool_names(visible_snapshot.get(key))
-            )
-    payload["policy_snapshot"] = visible_snapshot
-    return payload
 
 
 # LLM: observation 批次身份必须同时包含 thread 与 root task；同线程旧任务的
@@ -358,7 +348,7 @@ class ChannelMessageRuntime:
 
     def receive(self, request: dict) -> ConversationThread:
         current = now(request.get("now"))
-        thread = self.store.get_or_create_thread(
+        thread = self.store.threads.get_or_create(
             {
                 "canonical_user_id": request.get("canonical_user_id", ""),
                 "channel": request.get("channel", ""),
@@ -370,7 +360,7 @@ class ChannelMessageRuntime:
                 "now": current,
             }
         )
-        self.store.append_message(
+        self.store.messages.append(
             {
                 "thread_id": thread.thread_id,
                 "role": "user",
@@ -389,7 +379,7 @@ class ChannelMessageRuntime:
                     "now": current,
                 }
             )
-        latest = self.store.load_thread(thread.thread_id)
+        latest = self.store.threads.load(thread.thread_id)
         if latest is None:
             raise KeyError(f"unknown conversation thread: {thread.thread_id}")
         return latest
@@ -403,265 +393,6 @@ def _agent_owner_id(agent: object) -> str:
 def _agent_owner_home(agent: object) -> str:
     home_paths = getattr(agent, "home_paths", None)
     return str(getattr(home_paths, "owner_home_dir", "") or "")
-
-
-# Conversation runtime tool policy
-"""Background main-agent tool policy helpers."""
-
-
-from dataclasses import dataclass
-
-# Background wake turns are normal continuations of the same Agent.  This is
-# the common capability surface before owner/task policy applies reductions.
-_BACKGROUND_WORK_TOOLS = (
-    "skill_search",
-    "remember",
-    "update_persona",
-    "read_file",
-    "list_files",
-    "search_text",
-    "write_file",
-    "edit_file",
-    "run_command",
-    "process_session",
-    "watch_stream",
-    "task_progress",
-    "resolve_capability_requests",
-    "cancel_subagents",
-)
-
-DEFAULT_BACKGROUND_ALLOWED_TOOLS = (
-    "send_guidance",
-    "create_subagents",
-    *_BACKGROUND_WORK_TOOLS,
-)
-
-# A typed finding is already durable before it wakes the owner Agent.  The
-# reporting turn may inspect, coordinate, investigate and deliver it, but does
-# not get a persistence tool: the producer owns persistence, the consumer owns
-# acknowledgement and presentation.  Proactive delivery uses the common typed
-# send_message receipt; final text is internal coordination output.
-AUDIT_FINDING_ALLOWED_TOOLS = (
-    *DEFAULT_BACKGROUND_ALLOWED_TOOLS,
-    "send_message",
-)
-
-# Wake reason changes context, not capability. Owner/task policy still performs
-# the authoritative capability reduction.
-SCHEDULED_BACKGROUND_ALLOWED_TOOLS = DEFAULT_BACKGROUND_ALLOWED_TOOLS
-
-GOAL_BACKGROUND_ALLOWED_TOOLS = (
-    *DEFAULT_BACKGROUND_ALLOWED_TOOLS,
-    "get_goal",
-    "update_goal",
-)
-
-SUBAGENT_INTEGRATION_ALLOWED_TOOLS = DEFAULT_BACKGROUND_ALLOWED_TOOLS
-GOAL_SUBAGENTS_ACTIVE_ALLOWED_TOOLS = GOAL_BACKGROUND_ALLOWED_TOOLS
-GOAL_SUBAGENTS_TERMINAL_ALLOWED_TOOLS = GOAL_BACKGROUND_ALLOWED_TOOLS
-
-CONTROL_ACTION_DESCRIPTIONS = {
-    "skill_search": "检索或读取当前轮已经授权的 Skill 正文。",
-    "remember": "把当前 owner 的长期事实写入其隔离记忆。",
-    "update_persona": "维护当前 owner 的 USER/AGENTS 人格约定；SOUL 仍需用户确认。",
-    "send_guidance": "给正在运行的代理追加软提示。",
-    "create_subagents": "创建并启动新的下级代理。",
-    "read_file": "读取子代理产出的文件/产物,用于整合与验收。",
-    "list_files": "查看子代理在工作区写了哪些产物。",
-    "search_text": "在子代理产物里检索内容。",
-    "write_file": "写最终交付物,或把子代理产物整合成成品。",
-    "edit_file": "修订/整合已有交付文件。",
-    "run_command": "运行 import/测试做交付前自检。",
-    "process_session": "查询、有界等待或停止当前用户会话启动的后台命令。",
-    "watch_stream": "读取有持久游标和覆盖账的数据源；Audit 模式按完整记录和 ack/source_ref 对账。",
-    "task_progress": "更新任务清单进展。",
-    "resolve_capability_requests": "批准或拒绝子代理的能力申请,让它能继续干。",
-    "cancel_subagents": "打断并结束一个不应继续运行的直属子代理；它不负责轮询、推动或验收。",
-    "send_message": "向当前 owner 的已绑定通道发送一条模型撰写的消息；证据型后台事件必须原样携带其 evidence_refs。",
-    "get_goal": "读取当前 /goal 持续目标及其权威状态。",
-    "update_goal": "仅在持续目标真正完成或确实阻塞时写入 complete/blocked 终态。",
-}
-
-
-@dataclass(frozen=True)
-class BackgroundToolPolicyRequest:
-    """Facts used to choose the background main-agent control tool profile."""
-
-    reason: str = ""
-    wake_signal: dict[str, Any] | None = None
-    config: object | None = None
-    owner_policy: object | None = None
-    policy_snapshot: dict[str, Any] | None = None
-    # These fields come only from the persisted goal/task/subagent records. They
-    # never depend on model prose or natural-language intent classification.
-    active_goal: bool = False
-    goal_subagent_phase: str = ""
-    # Resolved before model execution. False means the current owner route has
-    # no provider receipt path, so send_message must not appear in schemas,
-    # tool search, or final execution. None preserves standalone policy probes.
-    proactive_delivery_available: bool | None = None
-
-
-@dataclass(frozen=True)
-class BackgroundToolPolicyDecision:
-    """Final background tool list plus where each restriction came from."""
-
-    allowed_tools: tuple[str, ...]
-    profile: str
-    sources: tuple[str, ...]
-    removed_tools: tuple[str, ...] = ()
-
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "schema_version": "background-tool-policy.v1",
-            "profile": self.profile,
-            "allowed_tools": list(self.allowed_tools),
-            "sources": list(self.sources),
-            "removed_tools": list(self.removed_tools),
-        }
-
-
-def background_allowed_tools(
-    config: object | None = None,
-    request: BackgroundToolPolicyRequest | None = None,
-) -> list[str]:
-    return list(background_tool_policy_decision(config, request=request).allowed_tools)
-
-
-# LLM: 后台轮工具表必须先淘汰旧子代理控制面，再套 owner/task/delivery 减法；
-# 存量配置不能把已注销工具重新带回模型 prompt。
-# 函数用途: 根据唤醒类型和结构化策略计算后台主代理本轮可见工具。
-def background_tool_policy_decision(
-    config: object | None = None,
-    request: BackgroundToolPolicyRequest | None = None,
-) -> BackgroundToolPolicyDecision:
-    if request is None:
-        request = BackgroundToolPolicyRequest(config=config)
-    config = request.config if request.config is not None else config
-    configured = tool_names(getattr(config, "background_main_agent_allowed_tools", None))
-    if configured:
-        tools = configured
-        profile = "configured"
-        sources = ["agent_config.background_main_agent_allowed_tools"]
-    else:
-        profile, default_tools = _default_profile_for_request(request)
-        tools = list(default_tools)
-        sources = [f"default_profile:{profile}"]
-    tools = active_model_subagent_tools(tools)
-    tools, removed = _apply_policy_limits(tools, request)
-    if removed:
-        sources.append("owner_or_task_policy")
-    if request.proactive_delivery_available is False and "send_message" in tools:
-        tools = [tool for tool in tools if tool != "send_message"]
-        removed = [*removed, "send_message"]
-        sources.append("delivery_route_capability")
-    return BackgroundToolPolicyDecision(
-        allowed_tools=tuple(tools),
-        profile=profile,
-        sources=tuple(sources),
-        removed_tools=tuple(removed),
-    )
-
-
-def background_control_action_lines(
-    config: object | None = None,
-    request: BackgroundToolPolicyRequest | None = None,
-) -> list[str]:
-    lines: list[str] = []
-    for name in background_allowed_tools(config, request=request):
-        description = CONTROL_ACTION_DESCRIPTIONS.get(name)
-        if description:
-            lines.append(f"- {name}: {description}")
-    return lines
-
-
-def tool_names(value: object) -> list[str]:
-    if isinstance(value, str):
-        raw_items = value.split(",")
-    elif isinstance(value, (list, tuple)):
-        raw_items = value
-    else:
-        return []
-    return list(dict.fromkeys(str(item).strip() for item in raw_items if str(item).strip()))
-
-
-def _default_profile_for_request(
-    request: BackgroundToolPolicyRequest,
-) -> tuple[str, tuple[str, ...]]:
-    # Structured state selects context/profile labels, not a required workflow.
-    reason = str(request.reason or "").strip().lower()
-    if request.active_goal and (
-        reason == "thread_goal_continue" or reason in SUBAGENT_LIFECYCLE_WAKE_REASONS
-    ):
-        if request.goal_subagent_phase == "subagents_active":
-            return "thread_goal_subagents_active", GOAL_SUBAGENTS_ACTIVE_ALLOWED_TOOLS
-        if request.goal_subagent_phase == "subagents_terminal":
-            return "thread_goal_subagents_terminal", GOAL_SUBAGENTS_TERMINAL_ALLOWED_TOOLS
-    if reason == "thread_goal_continue":
-        return "thread_goal", GOAL_BACKGROUND_ALLOWED_TOOLS
-    if reason == "audit_finding":
-        return "audit_finding", AUDIT_FINDING_ALLOWED_TOOLS
-    if _is_subagent_lifecycle_wake(request):
-        return "subagent_integration", SUBAGENT_INTEGRATION_ALLOWED_TOOLS
-    if _is_urgent_wake(request):
-        return "urgent", DEFAULT_BACKGROUND_ALLOWED_TOOLS
-    if _is_scheduled_progress(request):
-        return "scheduled_progress", SCHEDULED_BACKGROUND_ALLOWED_TOOLS
-    return "default", DEFAULT_BACKGROUND_ALLOWED_TOOLS
-
-
-def _apply_policy_limits(
-    tools: list[str],
-    request: BackgroundToolPolicyRequest,
-) -> tuple[list[str], list[str]]:
-    allowed = list(dict.fromkeys(tools))
-    task_policy = request.policy_snapshot if isinstance(request.policy_snapshot, dict) else {}
-    task_allowed = tool_names(task_policy.get("allowed_tools"))
-    if task_allowed:
-        allowed = [tool for tool in allowed if tool in set(task_allowed)]
-    disabled = set(_disabled_tools_from_owner(request.owner_policy))
-    disabled.update(tool_names(task_policy.get("disabled_tools")))
-    filtered = [tool for tool in allowed if tool not in disabled]
-    removed = [tool for tool in allowed if tool not in filtered]
-    return filtered, removed
-
-
-def _disabled_tools_from_owner(owner_policy: object | None) -> list[str]:
-    return tool_names(getattr(owner_policy, "disabled_tools", ()))
-
-
-def _is_urgent_wake(request: BackgroundToolPolicyRequest) -> bool:
-    wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
-    urgency = str(wake.get("urgency") or "").strip().lower()
-    reason = str(request.reason or wake.get("reason") or "").strip().lower()
-    # observation_requires_main_agent = 宿主写入的真实观察事件把主代理叫回。
-    # 真机根 bug:它原来不在此集 → 落 default 分支拿到含 create_subagents 的工具集 → 主代理不上报、
-    # 反去重派工(真事件永远不发用户)。它语义就是"紧急事件待上报",归入 urgent → 走上报提示词分支。
-    return urgency == "urgent" or reason in {
-        "urgent_wake_signal",
-        "wake_signal",
-        "observation_requires_main_agent",
-    }
-
-
-# 定时类唤醒 reason 的权威名单:工具策略(_is_scheduled_progress)与提示词分支
-#   (background_prompt → _scheduled_continuation_prompt)共用,防两处漂移。
-_SCHEDULED_WAKE_REASONS = frozenset(
-    {"scheduled_progress_report", "progress_policy_due", "due_progress_policy", "scheduled_job_due"}
-)
-
-
-def _is_scheduled_progress(request: BackgroundToolPolicyRequest) -> bool:
-    return str(request.reason or "").strip().lower() in _SCHEDULED_WAKE_REASONS
-
-
-# 子代理→主代理的"生命周期"推送:完成/卡住/失败(subagent_runner_finished)、申请能力
-# (subagent_capability_request_open)、能力获批可续跑(subagent_capability_granted)。
-# 这些唤醒叫回主代理是为了真整合收口/批能力,所以要给整合工具集(见 SUBAGENT_INTEGRATION_ALLOWED_TOOLS)。
-def _is_subagent_lifecycle_wake(request: BackgroundToolPolicyRequest) -> bool:
-    wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
-    reason = str(request.reason or wake.get("reason") or "").strip().lower()
-    return reason in SUBAGENT_LIFECYCLE_WAKE_REASONS
 
 
 # Conversation runtime worker
@@ -697,12 +428,6 @@ class BackgroundRunRequest:
     conversation_turn_id: str = field(default_factory=lambda: new_id("background-turn"))
 
 
-# LLM: This private control signal means a healthy background turn exhausted its bounded Compact
-# slice after every attempt advanced canonical generation. It must be caught before generic runtime
-# failures so the durable wake stays pending and the next scheduler slice resumes from checkpoints.
-# 类用途: 表示一次超长后台任务已完成本片压缩配额，需要公平让出线程后继续；它不是任务失败。
-class _BackgroundCompactSliceYield(RuntimeError):
-    pass
 
 
 # LLM: 一次采样冻结精确目标、兄弟目标状态与 child phase；兄弟目标不是本回合的执行范围。
@@ -717,34 +442,6 @@ class GoalRuntimeContext:
     other_goals: tuple[object, ...] = ()
 
 
-def _material_tool_success_count(
-    agent: object,
-    calls: list[dict[str, object]],
-) -> int:
-    """Count successful state-changing calls from the run-time policy, never prose."""
-    from ..tooling.models import tool_effect_for_runtime_policy
-
-    registry = getattr(agent, "tools", None)
-    if registry is None or not hasattr(registry, "runtime_snapshot"):
-        return 0
-    snapshot = registry.runtime_snapshot()
-    count = 0
-    for record in calls:
-        if record.get("ok") is not True:
-            continue
-        tool_name = str(record.get("tool") or "").strip()
-        runtime = snapshot.runtime(tool_name)
-        if runtime is None:
-            continue
-        raw = record.get("parameters")
-        arguments = dict(raw) if isinstance(raw, dict) else {}
-        arguments.pop("tool", None)
-        if tool_effect_for_runtime_policy(runtime.runtime_policy, arguments) in {
-            "mutating",
-            "dangerous",
-        }:
-            count += 1
-    return count
 
 
 # LLM: 同一后台轮冻结 Goal/child phase；Goal 的持久任务编号不是普通用户请求编号，先按本线程事实解析归属。
@@ -772,7 +469,7 @@ def _goal_runtime_context(
     try:
         wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
         metadata = wake.get("metadata") if isinstance(wake.get("metadata"), dict) else {}
-        goal = store.load_goal(request.thread_id, goal_id=str(metadata.get("goal_id") or ""), task_id=task_id)
+        goal = store.goals.load(request.thread_id, goal_id=str(metadata.get("goal_id") or ""), task_id=task_id)
     except Exception:
         return GoalRuntimeContext(
             task_objective=task_objective,
@@ -802,7 +499,7 @@ def _goal_runtime_context(
         )
     if not phase and not state_error:
         phase, state_error = _goal_subagent_phase(agent, task_id)
-    goals, goals_error = store.load_goals_report(request.thread_id)
+    goals, goals_error = store.goals.list_report(request.thread_id)
     return GoalRuntimeContext(
         goal=goal,
         task_objective=str(goal.objective),
@@ -822,7 +519,7 @@ def _background_task_continuation_fields(
     task_id: str,
 ) -> tuple[str, str, str]:
     try:
-        link, load_error = store.load_task_link_report(task_id)
+        link, load_error = store.tasks.load_report(task_id)
     except Exception:
         return "", "", "task_link_load_error"
     if load_error is not None:
@@ -861,7 +558,7 @@ def _background_request_objective(
     selected: list[str] = []
     before: int | None = None
     while pending:
-        page = store.history_page_report(request.thread_id, before=before, limit=80)
+        page = store.messages.history_page_report(request.thread_id, before=before, limit=80)
         if page.errors:
             raise DataCorruptionError("background request transcript is unreadable")
         for row in reversed(page.rows):
@@ -893,7 +590,6 @@ class _BackgroundSlicePlan:
     response: str
     deliver: bool
     delivery_reason: str
-    route_supports_proactive: bool = False
     route_supports_transcript: bool = False
     route_ownership: str = ""
     delivery_artifacts: tuple[dict[str, object], ...] = ()
@@ -904,26 +600,26 @@ class _BackgroundSlicePlan:
     counters: tuple[int, int, int] = (0, 0, 0)
 
 
-# LLM: 交付收口只有一条路径：能自己外发的走 message-tool 直投镜像，其余走 _record_response 的
-# canonical 落账 + 冻结重投；唤醒确认只读结构化提交事实。禁止在这里新增按渠道名的分支。
+# LLM: 交付收口只有一条路径：能自己外发的走 message-tool 直投镜像，其余交给独立交付入口完成
+# canonical 落账与冻结重投；唤醒确认只读结构化提交事实。禁止在这里新增按渠道名的分支。
 # 函数用途: 把一片后台模型产出交付给 owner，并返回结构化报告。
 def _complete_background_slice(
     runtime: BackgroundMainAgentRuntime,
     plan: _BackgroundSlicePlan,
 ) -> BackgroundMainAgentReport:
     request = plan.request
-    if _message_tool_delivery_satisfied(request, plan.message_tool_deliveries):
+    if message_tool_delivery_satisfied(request, plan.message_tool_deliveries):
         # 通道运行时's cron runner treats committed message-tool delivery as the
         # source reply and skips its announce fallback. Mirror the payload into
         # the same transcript, but never call the channel a second time.
-        reported_content = _mirror_message_tool_deliveries(
+        reported_content = mirror_message_tool_deliveries(
             runtime.store,
             request,
             plan.delivery_context,
             plan.message_tool_deliveries,
         )
         delivery_status = "sent"
-        delivery_reason = _message_tool_delivery_reason(request)
+        delivery_reason = message_tool_delivery_reason(request)
         commit = BackgroundDeliveryCommit(
             content=reported_content,
             delivery_status=delivery_status,
@@ -932,7 +628,11 @@ def _complete_background_slice(
             transcript_route=plan.route_supports_transcript,
         )
     else:
-        commit = runtime._record_response(
+        commit = record_background_response(
+            BackgroundDeliveryDependencies(
+                agent=runtime.agent, store=runtime.store, channels=runtime.channels,
+                task_status=partial(_background_task_link_status, runtime.agent, store=runtime.store),
+            ),
             request,
             plan.delivery_context,
             plan.response,
@@ -949,11 +649,11 @@ def _complete_background_slice(
         delivery_reason = plan.delivery_reason
     # 唤醒只有在答复真的落到某个权威位置（外发成功或 canonical 记录）时才确认；
     # 有外发义务却未送达的路线留给冻结重投，绝不重跑业务。
-    wake_handled = _background_owner_delivery_committed(
+    wake_handled = background_owner_delivery_committed(
         request,
         target=plan.target,
         ownership=plan.route_ownership,
-        canonical_record=bool(plan.route_supports_transcript or plan.route_ownership != _ROUTE_EXTERNAL),
+        canonical_record=bool(plan.route_supports_transcript or plan.route_ownership != ROUTE_EXTERNAL),
         commit=commit,
     )
     tool_call_count, tool_success_count, material_progress_count = plan.counters
@@ -979,7 +679,11 @@ def _complete_background_slice(
     )
 
 
+# LLM: 唤醒准备与投递共用唯一 store；执行委托独立工作片模块，修改时核对历史和外发事务回归。
+# 类用途: 连接一次后台请求、模型执行与原有收口投递，不拥有调度租约。
 class BackgroundMainAgentRuntime:
+    # LLM: 绑定唯一会话存储，可能更新 Agent 的 store 引用；不能在执行/投递时另建状态源。
+    # 函数用途: 装配后台编排所需的 Agent、会话账和渠道投递能力。
     def __init__(
         self,
         *,
@@ -989,23 +693,21 @@ class BackgroundMainAgentRuntime:
     ):
         self.agent = agent
         self.store = store
-        # The runtime store is the one durable thread authority. Finalization,
-        # goal tools, transcript writes, and scheduler reconciliation must not
-        # silently use a second ConversationStore instance.
+        # 收口、Goal 工具、原生历史与调度对账必须使用这一个会话存储。
         if getattr(agent, "conversation_store", None) is not store:
             agent.conversation_store = store
         self.channels = channels or FakeDeliveryService()
 
     # LLM: 后台轮先冻结目标/子树阶段；完整展示快照随 canonical final 提交，不参与投递或生命周期裁决。
-    # 函数用途: 执行一次结构化后台唤醒，并按会话渠道记录或发送模型回复。
+    # 函数用途: 准备一次后台唤醒，消费具名执行结果，并沿原事务记录或发送模型回复。
     def run_once(self, params: dict) -> BackgroundMainAgentReport:
         request = _run_request(params)
-        if callable(getattr(self.store, "load_thread_report", None)):
-            thread, load_error = self.store.load_thread_report(request.thread_id)
+        if callable(getattr(getattr(self.store, 'threads', None), 'load_report', None)):
+            thread, load_error = self.store.threads.load_report(request.thread_id)
             if load_error is not None:
                 raise DataCorruptionError(str(load_error))
         else:
-            thread = self.store.load_thread(request.thread_id)
+            thread = self.store.threads.load(request.thread_id)
         if thread is None:
             raise KeyError(f"unknown conversation thread: {request.thread_id}")
         channel, target = _resolve_delivery_route(
@@ -1014,21 +716,11 @@ class BackgroundMainAgentRuntime:
             supports_proactive=getattr(self.channels, "supports_proactive", None),
         )
         route_supports_proactive = bool(target and self.channels.supports_proactive(channel))
-        route_supports_transcript = _route_supports_transcript(self.channels, channel)
+        route_supports_transcript = channel_supports_transcript(self.channels, channel)
         # 归属只读声明级事实：外发能力此刻是否可用不改变这条路线欠不欠一次真实外送。
-        route_ownership = _background_route_ownership(self.channels, channel)
+        route_ownership = background_route_ownership(self.channels, channel)
         goal_context = _goal_runtime_context(self.agent, self.store, request)
-        (
-            response,
-            tool_call_count,
-            tool_success_count,
-            material_progress_count,
-            delivery_artifacts,
-            message_tool_deliveries,
-            operation_verification,
-            assistant_commentaries,
-            display_snapshot,
-        ) = self._run_agent(
+        execution_result = self._run_agent(
             thread,
             request,
             goal_context=goal_context,
@@ -1041,7 +733,7 @@ class BackgroundMainAgentRuntime:
             mode="proactive",
             thread_id=request.thread_id,
             task_id=request.task_id,
-            idempotency_key=_background_delivery_idempotency_key(request),
+            idempotency_key=background_delivery_idempotency_key(request),
         )
         deliver, delivery_reason = _background_delivery_decision(
             self.agent,
@@ -1058,21 +750,26 @@ class BackgroundMainAgentRuntime:
                 delivery_context=delivery_context,
                 channel=channel,
                 target=target,
-                response=response,
-                delivery_artifacts=delivery_artifacts,
-                message_tool_deliveries=message_tool_deliveries,
-                operation_verification=operation_verification,
-                assistant_commentaries=assistant_commentaries,
-                display_snapshot=display_snapshot,
+                response=execution_result.response,
+                delivery_artifacts=execution_result.delivery_artifacts,
+                message_tool_deliveries=execution_result.message_tool_deliveries,
+                operation_verification=execution_result.operation_verification,
+                assistant_commentaries=execution_result.assistant_commentaries,
+                display_snapshot=execution_result.display_snapshot,
                 deliver=deliver,
                 delivery_reason=delivery_reason,
-                route_supports_proactive=route_supports_proactive,
                 route_supports_transcript=route_supports_transcript,
                 route_ownership=route_ownership,
-                counters=(tool_call_count, tool_success_count, material_progress_count),
+                counters=(
+                    execution_result.tool_call_count,
+                    execution_result.tool_success_count,
+                    execution_result.material_progress_count,
+                ),
             ),
         )
 
+    # LLM: 只重投原冻结信封，不运行模型；任务状态由独立交付模块在原抑制位置回读，确认仍以实际提交事实为准。
+    # 函数用途: 为待发送唤醒补外发或本地落账，保持原回合身份、附件、过程回复与去重键。
     def redeliver_cached_wake(
         self,
         signal: WakeSignal,
@@ -1081,9 +778,7 @@ class BackgroundMainAgentRuntime:
         target: str,
         now: float,
     ) -> BackgroundMainAgentReport | None:
-        """Retry one frozen owner payload without spending another model turn."""
-
-        prepared = _cached_owner_delivery(signal)
+        prepared = cached_owner_delivery(signal)
         if prepared is None:
             return None
         request = BackgroundRunRequest(
@@ -1101,12 +796,16 @@ class BackgroundMainAgentRuntime:
             mode="proactive",
             thread_id=signal.thread_id,
             task_id=signal.root_task_id,
-            idempotency_key=_background_delivery_idempotency_key(request),
+            idempotency_key=background_delivery_idempotency_key(request),
         )
-        route_supports_transcript = _route_supports_transcript(self.channels, channel)
-        ownership = _background_route_ownership(self.channels, channel)
-        frozen = _frozen_owner_delivery(prepared)
-        commit = self._record_response(
+        route_supports_transcript = channel_supports_transcript(self.channels, channel)
+        ownership = background_route_ownership(self.channels, channel)
+        frozen = frozen_owner_delivery(prepared)
+        commit = record_background_response(
+            BackgroundDeliveryDependencies(
+                agent=self.agent, store=self.store, channels=self.channels,
+                task_status=partial(_background_task_link_status, self.agent, store=self.store),
+            ),
             request,
             delivery_context,
             frozen.content,
@@ -1117,11 +816,11 @@ class BackgroundMainAgentRuntime:
             route_supports_transcript=route_supports_transcript,
             frozen_retry=frozen,
         )
-        wake_handled = _background_owner_delivery_committed(
+        wake_handled = background_owner_delivery_committed(
             request,
             target=target,
             ownership=ownership,
-            canonical_record=bool(route_supports_transcript or ownership != _ROUTE_EXTERNAL),
+            canonical_record=bool(route_supports_transcript or ownership != ROUTE_EXTERNAL),
             commit=commit,
         )
         return BackgroundMainAgentReport(
@@ -1143,7 +842,7 @@ class BackgroundMainAgentRuntime:
         )
 
     # LLM: GoalRuntimeContext 是唯一采样；返回的显示快照只供 final 持久化，不能注入模型或改变 child phase。
-    # 函数用途: 用冻结的后台上下文调用主代理，并整理工具、产物与投递结果。
+    # 函数用途: 准备冻结上下文并调用独立执行器，以具名字段交接工具、产物与显示结果。
     def _run_agent(
         self,
         thread,
@@ -1152,17 +851,7 @@ class BackgroundMainAgentRuntime:
         goal_context: GoalRuntimeContext | None = None,
         proactive_delivery_available: bool | None = None,
         transcript_delivery_available: bool | None = None,
-    ) -> tuple[
-        str,
-        int,
-        int,
-        int,
-        tuple[dict[str, object], ...],
-        tuple[dict[str, object], ...],
-        dict[str, object],
-        tuple[str, ...],
-        dict[str, object],
-    ]:
+    ) -> BackgroundExecutionResult:
         resolved_goal_context = goal_context or _goal_runtime_context(
             self.agent,
             self.store,
@@ -1175,360 +864,7 @@ class BackgroundMainAgentRuntime:
             resolved_goal_context,
             (proactive_delivery_available, transcript_delivery_available),
         )
-        calls = [
-            item
-            for item in (getattr(result, "archive_tool_calls", None) or [])
-            if isinstance(item, dict)
-        ]
-        successes = sum(1 for item in calls if item.get("ok") is True)
-        material_progress = _material_tool_success_count(self.agent, calls)
-        artifacts = tuple(
-            dict(item)
-            for item in (getattr(result, "delivery_artifacts", None) or [])
-            if isinstance(item, dict)
-        )
-        deliveries = tuple(
-            dict(item)
-            for item in (getattr(result, "message_tool_deliveries", None) or [])
-            if isinstance(item, dict)
-        )
-        operation_verification = _public_result_operation_verification(result)
-        assistant_commentaries = tuple(
-            text
-            for value in (getattr(result, "assistant_commentary_messages", None) or ())
-            if (text := str(value or "").strip())
-        )
-        return (
-            str(getattr(result, "response", "") or ""),
-            len(calls),
-            successes,
-            material_progress,
-            artifacts,
-            deliveries,
-            operation_verification,
-            assistant_commentaries,
-            display_snapshot,
-        )
-
-    # LLM: canonical 记录与外部投递是两条独立事实：正文归属看路线归属（声明级），外发成功与否只看回执。
-    # 未送达但有外发义务的正文必须整封冻结在唤醒上重投，不能在无记录的情况下确认唤醒；
-    # frozen_retry 非空表示这是重投：整封 envelope（正文/附件/过程/metadata）都来自冻结载荷。
-    # 函数用途: 处理渠道投递，并把真实正文和本工作片显示交给唯一会话提交层。
-    def _record_response(
-        self,
-        request: BackgroundRunRequest,
-        delivery_context: DeliveryContext,
-        internal_content: str,
-        *,
-        delivery_artifacts: tuple[dict[str, object], ...] = (),
-        operation_verification: dict[str, object] | None = None,
-        assistant_commentaries: tuple[str, ...] = (),
-        display_snapshot: dict[str, object] | None = None,
-        deliver: bool,
-        delivery_reason: str,
-        route_supports_proactive: bool | None = None,
-        route_supports_transcript: bool | None = None,
-        frozen_retry: _FrozenOwnerDelivery | None = None,
-    ) -> BackgroundDeliveryCommit:
-        # 内部协议仍交给真实 DeliveryService 做主动消息抑制，但普通 transcript/report
-        # 只能保存用户投影，否则下一轮 compact 和 owner-local 搜索会被机器协议污染。
-        projection = project_user_reply(internal_content)
-        if _background_reply_suppressed(
-            self,
-            request,
-            delivery_reason=delivery_reason,
-            deliver=deliver,
-            projection_content=projection.content,
-            has_attachments=bool(_channel_attachments(delivery_artifacts)),
-        ):
-            return _uncommitted_delivery(projection.content if deliver else "", "suppressed")
-        # ReplyEnvelope is a user-content envelope, not an internal protocol carrier.
-        # Sending the already projected text also keeps the real DeliveryService from
-        # having to distinguish a valid completion signal from other internal signals.
-        attachments = _channel_attachments(delivery_artifacts)
-        evidence_refs = (
-            frozen_retry.evidence_refs
-            if frozen_retry is not None and frozen_retry.evidence_refs
-            else (
-                _background_delivery_evidence_refs(request)
-                if _audit_finding_report_event(request)
-                else _background_evidence_refs(request)
-            )
-        )
-        # 重投路径由 redeliver_cached_wake 把冻结载荷的 delivery_artifacts 当作 delivery_artifacts
-        # 传进来，因此附件与过程回复必须继续从参数推导；重投只额外接管 metadata 与"是否已外发"。
-        envelope = ReplyEnvelope(
-            content=projection.content,
-            attachments=attachments,
-            evidence_refs=evidence_refs,
-        )
-        message_metadata = _background_owner_message_metadata(
-            request,
-            delivery_reason=delivery_reason,
-            projection_status=projection.projection_status,
-            delivery_artifacts=delivery_artifacts,
-            evidence_refs=evidence_refs,
-            operation_verification=operation_verification,
-            frozen_retry=frozen_retry,
-        )
-        if display_snapshot is not None and frozen_retry is None:
-            message_metadata["goal_continuation_allowed"] = display_snapshot.get("goal_continuation_allowed") is True
-        wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
-        wake_signal_id = str(wake.get("wake_signal_id") or "").strip()
-        route = _background_delivery_route(
-            self.channels,
-            delivery_context,
-            route_supports_transcript=route_supports_transcript,
-        )
-        receipt, delivery_status = _background_external_delivery(
-            self,
-            delivery_context,
-            envelope,
-            frozen_retry=frozen_retry,
-        )
-        # The delivery service owns final user-boundary redaction.  Persist the
-        # exact content recorded by its receipt so external IM and local
-        # transcript never diverge; simple test/legacy receipts without content
-        # retain the already-sanitized projection as a compatibility fallback.
-        committed_content = str(getattr(receipt, "content", projection.content) or "")
-        commit = _commit_background_response(
-            self,
-            request,
-            delivery_context,
-            receipt=receipt,
-            delivery_status=delivery_status,
-            committed_content=committed_content,
-            canonical_record=route.canonical_record,
-            transcript_route=route.transcript_route,
-            evidence_refs=evidence_refs,
-            message_metadata=message_metadata,
-            assistant_commentaries=assistant_commentaries,
-            display_snapshot=display_snapshot,
-            audit_refs_settled=bool(frozen_retry is not None and frozen_retry.external_sent),
-        )
-        frozen_now = _freeze_pending_owner_delivery(
-            self.store,
-            _OwnerDeliveryFreeze(
-                request=request,
-                wake_signal_id=wake_signal_id,
-                content=projection.content,
-                delivery_artifacts=delivery_artifacts,
-                assistant_commentaries=assistant_commentaries,
-                evidence_refs=evidence_refs,
-                message_metadata=message_metadata,
-                delivery_status=delivery_status,
-                receipt_id=str(getattr(receipt, "receipt_id", "") or ""),
-                target=delivery_context.target,
-                ownership=route.ownership,
-                canonical_record=route.canonical_record,
-                persisted=commit.persisted,
-            ),
-        )
-        return replace(commit, outbox_frozen=frozen_now) if frozen_now else commit
-
-
-# LLM: 重投载荷必须是整封 owner envelope 的不可变快照：正文、附件（delivery_artifacts）、
-# 过程回复、审计引用、canonical metadata、以及"外发是否已经成功"这一事实。
-# 只存正文会让重投丢附件/丢过程/重复外发；只存状态会让重投无从重建消息。
-# 类用途: 承载一条已冻结的 owner 交付载荷（v1/v2 载荷统一投影）。
-@dataclass(frozen=True)
-class _FrozenOwnerDelivery:
-    content: str
-    delivery_artifacts: tuple[dict[str, object], ...] = ()
-    assistant_commentaries: tuple[str, ...] = ()
-    evidence_refs: tuple[str, ...] = ()
-    message_metadata: dict[str, object] = field(default_factory=dict)
-    external_sent: bool = False
-    receipt_id: str = ""
-    ownership: str = ""
-
-
-# LLM: 冻结判定所需的全部事实；target 必须用已解析的投递目标，不能回读 request.route_target。
-# 类用途: 承载“这条答复是否要整封冻结在唤醒上”的结构化输入。
-@dataclass(frozen=True)
-class _OwnerDeliveryFreeze:
-    request: BackgroundRunRequest
-    wake_signal_id: str
-    content: str
-    delivery_artifacts: tuple[dict[str, object], ...]
-    assistant_commentaries: tuple[str, ...]
-    evidence_refs: tuple[str, ...]
-    message_metadata: dict[str, object]
-    delivery_status: str
-    target: str
-    ownership: str
-    canonical_record: bool
-    persisted: bool
-    receipt_id: str = ""
-
-
-# LLM: 冻结的触发条件只有两条，都是"答复还没落到任何权威位置"：
-# ① 归属外部、有 target、但这次没送达（欠一次真实外发）；
-# ② 这条路线本来要靠 canonical 承担交付，但 canonical 没落账（例如外发成功后本地写失败）。
-# 附件与纯附件回复同样必须冻结——以前直接跳过附件，重投就只能重跑模型并丢掉附件。
-# 撤销/静默（suppressed）与空载荷永不冻结。
-# 函数用途: 把未完成的 owner 交付整封冻结到待处理唤醒上，返回是否已冻结。
-def _freeze_pending_owner_delivery(
-    store: ConversationStore,
-    freeze: _OwnerDeliveryFreeze,
-) -> bool:
-    if not freeze.wake_signal_id:
-        return False
-    if not (str(freeze.content or "").strip() or freeze.delivery_artifacts):
-        return False
-    status = str(freeze.delivery_status or "").strip().lower()
-    if status == "suppressed":
-        return False
-    obligation = _background_delivery_obligation(
-        target=freeze.target,
-        ownership=freeze.ownership,
-    )
-    external_pending = bool(obligation and status != "sent")
-    canonical_pending = bool(freeze.canonical_record and not freeze.persisted)
-    if not (
-        external_pending
-        or canonical_pending
-        or _audit_capacity_report_event(freeze.request)
-    ):
-        return False
-    # 冻结成功与否必须来自 store 的真实写入结果：唤醒不存在/已不是 pending 时
-    # 载荷不会落盘，此时不能对外声称"已冻结、可重投"。
-    cached = store.cache_pending_wake_delivery(
-        freeze.wake_signal_id,
-        {
-            "schema_version": "wake-owner-delivery.v2",
-            "reason": freeze.request.reason,
-            "task_id": freeze.request.task_id,
-            "content": freeze.content,
-            "delivery_artifacts": [dict(item) for item in freeze.delivery_artifacts],
-            "assistant_commentaries": list(freeze.assistant_commentaries),
-            "evidence_refs": list(freeze.evidence_refs),
-            "message_metadata": dict(freeze.message_metadata),
-            "external_sent": bool(status == "sent"),
-            "receipt_id": freeze.receipt_id,
-            "ownership": freeze.ownership,
-            "last_delivery_status": status,
-            "created_at": time.time(),
-        },
-    )
-    return cached is not None
-
-
-# LLM: 冻结载荷的读取必须 fail-closed：schema/reason/task_id 任一不匹配都不重投，
-# 载荷既可以是 v2（整封 envelope），也要能读旧 v1（只有正文）而不丢已冻结的答复。
-# 函数用途: 把唤醒上的冻结载荷投影成 _FrozenOwnerDelivery。
-def _frozen_owner_delivery(payload: dict[str, object]) -> _FrozenOwnerDelivery | None:
-    artifacts = payload.get("delivery_artifacts")
-    commentaries = payload.get("assistant_commentaries")
-    refs = payload.get("evidence_refs")
-    metadata = payload.get("message_metadata")
-    return _FrozenOwnerDelivery(
-        content=str(payload.get("content") or ""),
-        delivery_artifacts=tuple(
-            dict(item) for item in artifacts if isinstance(item, dict)
-        )
-        if isinstance(artifacts, list)
-        else (),
-        assistant_commentaries=tuple(
-            str(item) for item in commentaries if str(item or "").strip()
-        )
-        if isinstance(commentaries, list)
-        else (),
-        evidence_refs=tuple(str(item) for item in refs if isinstance(item, str) and item.strip())
-        if isinstance(refs, list)
-        else (),
-        message_metadata=dict(metadata) if isinstance(metadata, dict) else {},
-        external_sent=payload.get("external_sent") is True,
-        receipt_id=str(payload.get("receipt_id") or ""),
-        ownership=str(payload.get("ownership") or ""),
-    )
-
-
-# LLM: canonical 行 metadata 只能在这里构造：重投时 frozen metadata 是权威，
-# 只补齐本次重投的时间无关字段，避免重投把原始 task/refs/过程信息覆盖成重投时的值。
-# 函数用途: 组装后台公开消息 metadata，与本片原生历史关联；重投保留原编号，不重复写入模型事实。
-def _background_owner_message_metadata(
-    request: BackgroundRunRequest,
-    *,
-    delivery_reason: str,
-    projection_status: str,
-    delivery_artifacts: tuple[dict[str, object], ...],
-    evidence_refs: tuple[str, ...],
-    operation_verification: dict[str, object] | None,
-    frozen_retry: _FrozenOwnerDelivery | None,
-) -> dict[str, object]:
-    if frozen_retry is not None and frozen_retry.message_metadata:
-        return {
-            **frozen_retry.message_metadata,
-            "background_delivery_retry_reason": delivery_reason,
-        }
-    metadata: dict[str, object] = {
-        "conversation_request_id": request.conversation_turn_id,
-        "reason": request.reason,
-        "task_id": request.task_id,
-        "delivery_artifacts": [dict(item) for item in delivery_artifacts],
-        "projection_status": projection_status,
-        "background_delivery_reason": delivery_reason,
-        "evidence_refs": list(evidence_refs),
-    }
-    if operation_verification is not None:
-        metadata["operation_verification"] = operation_verification
-    return metadata
-
-
-# LLM: 外部发送只有这一个出口：重投时若冻结载荷已证明外发成功，就绝不能再次外发
-# （只补本地 canonical），否则会对真实用户重复发消息。
-# 函数用途: 执行本次外部投递或复用冻结的外发事实，返回 (回执, 投递状态)。
-def _background_external_delivery(
-    runtime: BackgroundMainAgentRuntime,
-    delivery_context: DeliveryContext,
-    envelope: ReplyEnvelope,
-    *,
-    frozen_retry: _FrozenOwnerDelivery | None,
-) -> tuple[object, str]:
-    if frozen_retry is not None and frozen_retry.external_sent:
-        return (
-            SimpleNamespace(
-                delivery_status="sent",
-                channel=delivery_context.channel,
-                target=delivery_context.target,
-                content=envelope.content,
-                evidence_refs=envelope.evidence_refs,
-                receipt_id=frozen_retry.receipt_id,
-                replayed=True,
-            ),
-            "sent",
-        )
-    receipt = runtime.channels.deliver(delivery_context, envelope)
-    return receipt, str(getattr(receipt, "delivery_status", "") or "sent")
-
-
-# LLM: 投递前的三道抑制判定必须同源：未授权投递、任务已终态、没有可交付正文。它们都表示
-# “这片回复不面向 owner”，因此不外发也不保存公开正文；原生执行历史独立保留，goal 终态交付是例外。
-# 函数用途: 判断这片后台回复是否在调用投递服务之前就应被抑制。
-def _background_reply_suppressed(
-    runtime: BackgroundMainAgentRuntime,
-    request: BackgroundRunRequest,
-    *,
-    delivery_reason: str,
-    deliver: bool,
-    projection_content: str,
-    has_attachments: bool,
-) -> bool:
-    if not deliver:
-        return True
-    terminal_status = _background_task_link_status(runtime.agent, request, store=runtime.store)
-    goal_terminal_delivery = delivery_reason in {
-        "thread_goal_blocked",
-        "thread_goal_budget_limited",
-        "thread_goal_usage_limited",
-    }
-    if (
-        terminal_status in {"abandoned", "cancelled", "interrupted", "superseded"}
-        and not goal_terminal_delivery
-    ):
-        return True
-    return not str(projection_content or "").strip() and not has_attachments
+        return collect_background_execution_result(self.agent, result, display_snapshot)
 
 
 # LLM: 后台按 canonical thread 的模型引用冻结一次配置，再交接 typed turn-end；不重读 owner 选择或改生命周期。
@@ -1570,266 +906,19 @@ def _invoke_background_main_agent_with_model(
         task_objective=goal_context.task_objective,
         wake_prompt=wake_prompt,
     )
-    activity_sink = BackgroundMainActivitySink(
-        runtime.agent,
-        thread_id=thread.thread_id,
-        task_id=request.task_id,
-    )
-    try:
-        result = _run_background_main_turn_with_compact(
-            runtime,
-            thread,
-            request,
-            goal_context,
-            user_prompt=user_prompt,
-            continuation_injection=continuation_injection,
+    execution = BackgroundExecutionDependencies(
+        agent=runtime.agent,
+        store=runtime.store,
+        prepare_run=partial(
+            _run_params, request=request, agent=runtime.agent, goal_context=goal_context,
             proactive_delivery_available=proactive_delivery_available,
-            activity_sink=activity_sink,
-        )
-    except _BackgroundCompactSliceYield:
-        activity_sink.finish()
-        raise
-    except Exception:
-        activity_sink.fail()
-        raise
-    activity_sink.finish()
-    from ..turn_end import result_turn_end_reason
-
-    snapshot = activity_sink.display_history_snapshot()
-    snapshot["turn_end_reason"] = result_turn_end_reason(result)
-    snapshot["goal_continuation_allowed"] = (
-        snapshot["turn_end_reason"] == "completed" or should_continue_task(result)[0]
-    )
-    return result, snapshot
-
-
-# LLM: Background lifecycle wakes continue the same authoritative active turn. Like foreground
-# Gateway and child runners, context overflow must compact the durable transcript and retry while
-# carrying typed tool and steering state; a new scheduler slice must not be the retry mechanism.
-# 函数用途: 后台主代理在同片压缩并续跑；正常/异常原生历史写回原会话，工具显示批次不改变执行身份。
-def _run_background_main_turn_with_compact(
-    runtime: BackgroundMainAgentRuntime,
-    thread: ConversationThread,
-    request: BackgroundRunRequest,
-    goal_context: GoalRuntimeContext,
-    *,
-    user_prompt: str,
-    continuation_injection: list[str],
-    proactive_delivery_available: bool | None,
-    activity_sink: BackgroundMainActivitySink,
-) -> object:
-    current = thread
-    carried_archive_tool_calls: list[dict[str, object]] | None = None
-    carried_active_turn_user_inputs: list[dict[str, object]] = []
-    for _attempt in range(8):
-        history_seed = _background_history_seed_or_raise(
-            runtime.agent,
-            runtime.store,
-            current,
-            request,
-            proactive_delivery_available=proactive_delivery_available,
-        )
-        run_params = _run_params(
-            current.thread_id,
-            request,
-            runtime.agent,
-            goal_context=goal_context,
-            proactive_delivery_available=proactive_delivery_available,
-            thread=current,
-            history_seed=history_seed,
-        )
-        if carried_archive_tool_calls is None:
-            carried_archive_tool_calls = list(run_params.carried_archive_tool_calls or [])
-        else:
-            run_params.carried_archive_tool_calls = list(carried_archive_tool_calls)
-        run_params.carried_active_turn_user_inputs = list(carried_active_turn_user_inputs)
-        run_params.inject = [
-            context_markdown(
-                agent=runtime.agent,
-                store=runtime.store,
-                thread=current,
-                request=request,
-                proactive_delivery_available=proactive_delivery_available,
-                # 已经带上 canonical 历史时不再重复注入最近消息副本：
-                # 两份历史会重复计费、并且摘要副本没有工具细节。
-                include_recent_messages=history_seed is None,
-            ),
-            *continuation_injection,
-        ]
-        run_params.on_chunk = activity_sink
-        run_params.partial_turn_callback = partial(_persist_background_native_turn, runtime.store, request)
-        activity_sink.begin_model_attempt(_attempt + 1)
-        result = runtime.agent.run(user_prompt, params=run_params)
-        if str(getattr(result, "runtime_status", "") or "").strip().lower() != ("context_overflow"):
-            _persist_background_native_turn(runtime.store, request, result)
-            return result
-        (
-            carried_archive_tool_calls,
-            carried_active_turn_user_inputs,
-        ) = _next_background_overflow_carry(
-            runtime.agent,
-            run_params,
-            result,
-            carried_archive_tool_calls,
-            carried_active_turn_user_inputs,
-        )
-        refreshed = _compact_background_main_thread(
-            runtime,
-            current,
-            current_prompt=user_prompt,
-            activity_sink=activity_sink,
-            run_params=run_params,
-            carried_archive_tool_calls=carried_archive_tool_calls,
-        )
-        if refreshed.compact_generation <= current.compact_generation:
-            refreshed = _compact_background_active_turn(
-                runtime, refreshed, run_params, carried_archive_tool_calls,
-                task_id=request.task_id, user_prompt=user_prompt, activity_sink=activity_sink,
-            )
-        current = refreshed
-    raise _BackgroundCompactSliceYield(
-        "background main compact slice advanced eight generations and will resume"
-    )
-
-
-# LLM: 已结束历史无压缩进展时仅压缩本活动轮归档；沿原 CAS 与取消合同提交，不凭输出正文判定可继续。
-# 函数用途: 缩减后台当前轮的工具上下文并确认真正推进，失败时保留原错误而不空转重试。
-def _compact_background_active_turn(
-    runtime: BackgroundMainAgentRuntime,
-    thread: ConversationThread,
-    run_params: RunParams,
-    archive: list[dict[str, object]],
-    *,
-    task_id: str,
-    user_prompt: str,
-    activity_sink: BackgroundMainActivitySink,
-) -> ConversationThread:
-    from .active_turn_compact import (
-        ActiveTurnArchiveCompactRequest,
-        compact_carried_active_turn_archive,
-    )
-
-    result = compact_carried_active_turn_archive(
-        runtime.agent, runtime.store, thread, archive,
-        ActiveTurnArchiveCompactRequest(
-            task_attributes=run_params.task_attributes,
-            request_id=str(run_params.request_id or task_id or ""),
-            attempt_id=str(run_params.attempt_id or run_params.request_id or ""),
-            task_prompt=user_prompt,
-            progress_callback=activity_sink.write_conversation_compact_progress,
-            interrupt_check=is_interrupted,
         ),
     )
-    if not result.compacted:
-        raise RuntimeError("background main thread cannot compact the overflowing active turn")
-    return result.thread
-
-
-# LLM: 原生信封只进入当前 store/thread 的同一 transcript；与公开 final 按宿主回合编号去重，不发消息或修改 wake 生命周期。
-# 函数用途: 保存后台正常、静默让出或异常前的工具历史，外发被抑制时也不丢记录；写盘失败不能冒充保存成功。
-def _persist_background_native_turn(store: ConversationStore, request: BackgroundRunRequest, result: object) -> None:
-    from ..turn_end import result_turn_end_reason
-    from .native_history import (
-        CANONICAL_NATIVE_MESSAGES_METADATA_KEY,
-        canonical_native_messages_envelope,
+    return invoke_background_turn(
+        execution, thread, request, user_prompt=user_prompt,
+        continuation_injection=continuation_injection,
+        proactive_delivery_available=proactive_delivery_available,
     )
-
-    # 窄范围审计事件不是普通会话续接，沿原隔离合同保存，不把内部事件写入用户模型历史。
-    if _narrow_audit_event_reason(request.reason):
-        return
-    native = canonical_native_messages_envelope(getattr(result, "canonical_native_messages", None))
-    if not native:
-        return
-    store.append_message_once({
-        "thread_id": request.thread_id, "role": "assistant", "content": "", "channel": request.route_channel,
-        "metadata": {
-            "conversation_request_id": request.conversation_turn_id,
-            "assistant_part_id": "native", "task_id": request.task_id,
-            "turn_end_reason": result_turn_end_reason(result),
-            CANONICAL_NATIVE_MESSAGES_METADATA_KEY: native,
-        },
-    }, dedupe_key=f"background-native:{request.conversation_turn_id}")
-
-
-# LLM: Compact retry carry contains only structured runtime records. It never reconstructs work
-# from assistant prose, and released pre-provider steering ids return to their canonical mailbox.
-# 函数用途: 合并后台超限轮已经完成的工具与插话，供压缩后的同一轮安全续做。
-def _next_background_overflow_carry(
-    agent: object,
-    run_params: RunParams,
-    result: object,
-    carried_archive_tool_calls: list[dict[str, object]],
-    carried_active_turn_user_inputs: list[dict[str, object]],
-) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
-    from ..agent_core.runtime_mixin import release_active_turn_inputs_for_compact
-    from .active_turn_input import (
-        exclude_active_turn_user_input_ids,
-        merge_active_turn_user_inputs,
-    )
-
-    released_input_ids = release_active_turn_inputs_for_compact(agent, run_params)
-    result_archive = [
-        dict(item)
-        for item in list(getattr(result, "archive_tool_calls", None) or [])
-        if isinstance(item, dict)
-    ]
-    next_archive = result_archive or carried_archive_tool_calls
-    next_inputs = exclude_active_turn_user_input_ids(
-        merge_active_turn_user_inputs(
-            carried_active_turn_user_inputs,
-            getattr(result, "active_turn_user_inputs", None),
-        ),
-        released_input_ids,
-    )
-    return next_archive, next_inputs
-
-
-# LLM: The latest ConversationThread and canonical Compact CAS are the only retry authority. The
-# tooling's pure archive reducer supplies pending one-call tools; interrupt crosses summary/commit, display does not.
-# 函数用途: 以后台主代理已完成历史和当前工具归档可中断地压缩，并返回同一轮继续用的最新线程。
-def _compact_background_main_thread(
-    runtime: BackgroundMainAgentRuntime,
-    current: ConversationThread,
-    *,
-    current_prompt: str,
-    activity_sink: BackgroundMainActivitySink,
-    run_params: RunParams,
-    carried_archive_tool_calls: list[dict[str, object]],
-) -> ConversationThread:
-    from ..tooling.tool_search_state import pending_carried_loaded_tool_names
-    from .compact import ConversationCompactOptions, prepare_conversation_context
-    from .compact_provider_surface import ConversationCompactModelSurface
-
-    latest, load_error = runtime.store.load_thread_report(current.thread_id)
-    if load_error is not None or latest is None:
-        raise RuntimeError("background main conversation thread could not be reloaded")
-    compact = prepare_conversation_context(
-        runtime.agent,
-        runtime.store,
-        latest,
-        options=ConversationCompactOptions(
-            current_prompt=str(current_prompt or ""),
-            force=True,
-            progress_callback=activity_sink.write_conversation_compact_progress,
-            interrupt_check=is_interrupted,
-            model_surface=ConversationCompactModelSurface(
-                allowed_tools=(
-                    tuple(run_params.allowed_tools)
-                    if run_params.allowed_tools is not None
-                    else None
-                ),
-                prompt_files=tuple(run_params.prompt_files or ()),
-                system_prompt_override=run_params.system_prompt_override,
-                context_scope=str(run_params.context_scope or "conversation"),
-                loaded_tool_names=tuple(
-                    sorted(
-                        pending_carried_loaded_tool_names(carried_archive_tool_calls)
-                    )
-                ),
-            ),
-        ),
-    )
-    return compact.thread
 
 
 # LLM: 会话运行时 keeps child completion inside the originating active turn. When an exact task
@@ -1860,453 +949,6 @@ def _is_active_turn_lifecycle_continuation(
         and str(request.reason or "").strip().lower() in SUBAGENT_LIFECYCLE_WAKE_REASONS
         and not _wake_payload_is_audit_provider_quota(request.wake_signal)
     )
-
-
-# LLM: canonical final 保存正文、过程和 host-owned turn-end；commentary 不携带终态，缺失原因不从文字补造。
-# 外发结果只作为 metadata 事实，不参与“要不要给 owner 留下这条回复”的判定。
-# 函数用途: 幂等保存后台回复及长度限制原因，并返回结构化落账结果。
-def _commit_background_response(
-    runtime: BackgroundMainAgentRuntime,
-    request: BackgroundRunRequest,
-    delivery_context: DeliveryContext,
-    *,
-    receipt: object,
-    delivery_status: str,
-    committed_content: str,
-    canonical_record: bool,
-    transcript_route: bool,
-    evidence_refs: tuple[str, ...],
-    message_metadata: dict[str, object],
-    assistant_commentaries: tuple[str, ...] = (),
-    display_snapshot: dict[str, object] | None = None,
-    outbox_frozen: bool = False,
-    audit_refs_settled: bool = False,
-) -> BackgroundDeliveryCommit:
-    """Persist one owner-visible reply, independently of its transport outcome."""
-
-    status = str(delivery_status or "").strip().lower()
-    has_body = bool(str(committed_content or "").strip()) or bool(
-        message_metadata.get("delivery_artifacts")
-    )
-    if status == "suppressed":
-        # 投递层判定这是内部协议正文：既不外发，也不能落成用户消息。
-        return BackgroundDeliveryCommit(
-            content=committed_content,
-            delivery_status=status,
-            persisted=False,
-            commit_kind="suppressed",
-            transcript_route=transcript_route,
-            outbox_frozen=outbox_frozen,
-        )
-    if status != "sent" and (not canonical_record or not has_body):
-        # 没有可交付正文，或这条路线既不能外发也没有本地归属：只保留冻结重投事实。
-        return BackgroundDeliveryCommit(
-            content=committed_content,
-            delivery_status=status,
-            persisted=False,
-            commit_kind="outbox_pending" if outbox_frozen else "none",
-            transcript_route=transcript_route,
-            outbox_frozen=outbox_frozen,
-        )
-    if display_snapshot:
-        message_metadata = {
-            **message_metadata,
-            "background_transcript_request_id": display_snapshot.get("request_id", ""),
-        }
-    from ..turn_end import normalize_turn_end_reason
-
-    end_reason = normalize_turn_end_reason((display_snapshot or {}).get("turn_end_reason"))
-    delivery_key = _background_delivery_idempotency_key(request)
-    _append_owner_commentaries(
-        runtime.store,
-        request,
-        delivery_context,
-        message_metadata=message_metadata,
-        delivery_key=delivery_key,
-        assistant_commentaries=assistant_commentaries,
-    )
-    message_request = {
-        "thread_id": request.thread_id,
-        "role": "assistant",
-        "content": committed_content,
-        "channel": delivery_context.channel,
-        "metadata": {
-            **message_metadata, "assistant_part_id": "final",
-            **({"background_display_turn": display_snapshot} if display_snapshot else {}),
-            **({"turn_end_reason": end_reason} if end_reason else {}),
-        },
-    }
-    if delivery_key:
-        message_entry = runtime.store.append_message_once(
-            message_request,
-            dedupe_key=f"owner_delivery:{delivery_key}",
-        )
-    else:
-        message_entry = runtime.store.append_message(message_request)
-    if audit_refs_settled:
-        # 这次只是补本地落账：审计交付回执在真正外发成功时已经记过，绝不能重复记一遍。
-        pass
-    elif status == "sent":
-        _record_delivered_audit_refs(runtime.agent, receipt)
-    elif transcript_route and _audit_finding_report_event(request):
-        # CLI/Gateway transcript routes have no provider receipt. Their local
-        # transcript append is the durable commit and therefore the receipt.
-        # 外发路线失败时绝不能冒领这条回执：审计台账只认真正的本地权威交付面。
-        _record_transcript_audit_refs(
-            runtime.agent,
-            evidence_refs,
-            message_entry=message_entry,
-            channel=delivery_context.channel,
-        )
-    return BackgroundDeliveryCommit(
-        content=committed_content,
-        delivery_status=status,
-        persisted=True,
-        message_id=str(getattr(message_entry, "message_id", "") or ""),
-        commit_kind="external_delivery" if status == "sent" else "canonical_record",
-        transcript_route=transcript_route,
-        outbox_frozen=outbox_frozen,
-    )
-
-
-# LLM: 过程回复与 final 共享同一批 metadata 和同一份投递幂等键；重投时必须逐条去重，
-# 不能因为重放而把 commentary 追加第二遍。
-# 函数用途: 按 typed part 顺序幂等追加一片后台工作的过程回复。
-def _append_owner_commentaries(
-    store: ConversationStore,
-    request: BackgroundRunRequest,
-    delivery_context: DeliveryContext,
-    *,
-    message_metadata: dict[str, object],
-    delivery_key: str,
-    assistant_commentaries: tuple[str, ...],
-) -> None:
-    for index, commentary in enumerate(assistant_commentaries, start=1):
-        text = str(commentary or "").strip()
-        if not text:
-            continue
-        commentary_request = {
-            "thread_id": request.thread_id,
-            "role": "assistant",
-            "content": text,
-            "channel": delivery_context.channel,
-            "metadata": {
-                **message_metadata,
-                "assistant_part_id": f"commentary:{index}",
-                "process": True,
-            },
-        }
-        if delivery_key:
-            store.append_message_once(
-                commentary_request,
-                dedupe_key=f"owner_delivery:{delivery_key}:commentary:{index}",
-            )
-        else:
-            store.append_message(commentary_request)
-
-
-def _background_evidence_refs(
-    request: BackgroundRunRequest,
-) -> tuple[str, ...]:
-    wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
-    refs = wake.get("evidence_refs")
-    if not isinstance(refs, list):
-        return ()
-    return tuple(
-        dict.fromkeys(
-            str(item).strip() for item in refs if isinstance(item, str) and str(item).strip()
-        )
-    )
-
-
-def _background_delivery_evidence_refs(
-    request: BackgroundRunRequest,
-) -> tuple[str, ...]:
-    wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
-    return _audit_finding_payload_delivery_refs(wake)
-
-
-def _audit_finding_payload_delivery_refs(
-    wake: dict[str, Any],
-) -> tuple[str, ...]:
-    metadata = wake.get("metadata") if isinstance(wake.get("metadata"), dict) else {}
-    typed = metadata.get("delivery_evidence_refs")
-    if isinstance(typed, list):
-        refs = tuple(
-            dict.fromkeys(
-                str(item).strip() for item in typed if isinstance(item, str) and str(item).strip()
-            )
-        )
-        if refs:
-            return refs
-
-    # Compatibility for durable wakes created before the typed delivery field
-    # existed.  Only exact Audit refs for this finding's own watch may acquire
-    # delivery authority; event ids, paths and URLs stay explanatory evidence.
-    watch_id = str(metadata.get("watch_id") or "").strip()
-    refs = wake.get("evidence_refs")
-    if not watch_id or not isinstance(refs, list):
-        return ()
-    from ..ingestion.harvester import parse_audit_source_ref
-
-    selected: list[str] = []
-    for item in refs:
-        source_ref = str(item).strip() if isinstance(item, str) else ""
-        parsed = parse_audit_source_ref(source_ref)
-        if parsed is not None and parsed[0] == watch_id:
-            selected.append(source_ref)
-    return tuple(dict.fromkeys(selected))
-
-
-def _background_delivery_idempotency_key(request: BackgroundRunRequest) -> str:
-    """Return the stable runtime identity for one background delivery attempt."""
-    wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
-    wake_signal_id = str(wake.get("wake_signal_id") or "").strip()
-    if wake_signal_id:
-        return f"background-wake:{wake_signal_id}"
-    metadata = wake.get("metadata") if isinstance(wake.get("metadata"), dict) else {}
-    scheduler_run_id = str(metadata.get("scheduler_run_id") or "").strip()
-    if scheduler_run_id:
-        return f"scheduler-run:{scheduler_run_id}"
-    return ""
-
-
-def _record_delivered_audit_refs(agent: object, receipt: object) -> None:
-    refs = tuple(getattr(receipt, "evidence_refs", ()) or ())
-    owner_home = str(
-        getattr(getattr(agent, "home_paths", None), "owner_home_dir", "") or ""
-    ).strip()
-    receipt_id = str(getattr(receipt, "receipt_id", "") or "").strip()
-    if not refs or not owner_home or not receipt_id:
-        return
-    from ..ingestion.harvester import record_audit_delivery_refs
-
-    record_audit_delivery_refs(
-        Path(owner_home),
-        refs,
-        receipt_id=receipt_id,
-        channel=str(getattr(receipt, "channel", "") or ""),
-    )
-
-
-def _record_transcript_audit_refs(
-    agent: object,
-    refs: tuple[str, ...],
-    *,
-    message_entry: object,
-    channel: str,
-) -> None:
-    """Commit exact Audit refs after an owner-visible local transcript write."""
-
-    owner_home = str(
-        getattr(getattr(agent, "home_paths", None), "owner_home_dir", "") or ""
-    ).strip()
-    message_id = str(getattr(message_entry, "message_id", "") or "").strip()
-    if not refs or not owner_home or not message_id:
-        return
-    from ..ingestion.harvester import record_audit_delivery_refs
-
-    record_audit_delivery_refs(
-        Path(owner_home),
-        refs,
-        receipt_id=message_id,
-        channel=str(channel or "internal"),
-    )
-
-
-# LLM: 后台轮与前台轮必须复用同一个 public operation projection；不得在会话层重算工具终态。
-# 函数用途: 从 AgentRunResult 提取已由 canonical operation ledger 生成的安全公开核验摘要。
-def _public_result_operation_verification(result: object) -> dict[str, object]:
-    from ..tooling.operation_verification import public_operation_verification
-
-    projected = public_operation_verification(getattr(result, "operation_verification", None))
-    return projected
-
-
-def _message_tool_delivery_satisfied(
-    request: BackgroundRunRequest,
-    deliveries: tuple[dict[str, object], ...],
-) -> bool:
-    """A proactive turn needs one request-bound typed delivery path."""
-    return any(_delivery_satisfies_request(request, item) for item in deliveries)
-
-
-def _audit_finding_report_event(request: BackgroundRunRequest) -> bool:
-    if str(request.reason or "").strip().lower() != "audit_finding":
-        return False
-    wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
-    metadata = wake.get("metadata") if isinstance(wake.get("metadata"), dict) else {}
-    return (
-        str(metadata.get("schema_version") or "") == "audit-finding-event.v1"
-        and metadata.get("requires_llm_report") is True
-        and bool(str(metadata.get("finding_id") or "").strip())
-        and bool(_background_delivery_evidence_refs(request))
-    )
-
-
-def _audit_capacity_report_event(request: BackgroundRunRequest) -> bool:
-    if str(request.reason or "").strip().lower() != "audit_capacity_alert":
-        return False
-    wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
-    metadata = wake.get("metadata") if isinstance(wake.get("metadata"), dict) else {}
-    return (
-        str(metadata.get("schema_version") or "") == "audit-capacity-event.v2"
-        and bool(str(metadata.get("audit_id") or "").strip())
-        and str(metadata.get("capacity_state") or "").strip().lower() in {"alert", "recovered"}
-    )
-
-
-def _audit_owner_report_event(request: BackgroundRunRequest) -> bool:
-    """Return whether this wake is complete only after owner delivery commits."""
-
-    return _audit_finding_report_event(request) or _audit_capacity_report_event(request)
-
-
-# LLM: 冻结载荷的读取必须 fail-closed：只接受本协议 schema、reason/task_id 与唤醒完全一致、
-# 且"有正文或有附件"的载荷（纯附件回复同样合法）。v1 只有正文，v2 才有整封 envelope。
-# 函数用途: 读取一条唤醒上已冻结的 owner 交付载荷，不匹配返回 None。
-def _cached_owner_delivery(signal: WakeSignal) -> dict[str, object] | None:
-    raw_metadata = getattr(signal, "metadata", None)
-    metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
-    delivery = metadata.get("owner_delivery")
-    if not isinstance(delivery, dict):
-        return None
-    if (
-        str(delivery.get("schema_version") or "")
-        not in {"wake-owner-delivery.v1", "wake-owner-delivery.v2"}
-        or str(delivery.get("reason") or "") != str(signal.reason or "")
-        or str(delivery.get("task_id") or "") != str(signal.root_task_id or "")
-    ):
-        return None
-    has_body = bool(str(delivery.get("content") or "").strip())
-    artifacts = delivery.get("delivery_artifacts")
-    has_attachments = bool(
-        [item for item in artifacts if isinstance(item, dict)] if isinstance(artifacts, list) else []
-    )
-    if not has_body and not has_attachments:
-        return None
-    return dict(delivery)
-
-
-def _delivery_satisfies_request(
-    request: BackgroundRunRequest,
-    delivery: dict[str, object],
-) -> bool:
-    if (
-        str(delivery.get("delivery_status") or "").strip().lower() != "sent"
-        or delivery.get("source_owner_delivery") is not True
-        or not str(delivery.get("receipt_id") or "").strip()
-    ):
-        return False
-    reason = str(request.reason or "").strip().lower()
-    if reason == "scheduled_job_due":
-        return True
-    if reason != "audit_finding" or not _audit_finding_report_event(request):
-        return False
-    delivered_refs = tuple(
-        dict.fromkeys(
-            str(ref).strip()
-            for ref in (
-                delivery.get("evidence_refs")
-                if isinstance(delivery.get("evidence_refs"), list)
-                else []
-            )
-            if str(ref).strip()
-        )
-    )
-    required_refs = _background_delivery_evidence_refs(request)
-    return (
-        bool(str(delivery.get("content") or "").strip())
-        and len(delivered_refs) == len(required_refs)
-        and set(delivered_refs) == set(required_refs)
-    )
-
-
-def _message_tool_delivery_reason(request: BackgroundRunRequest) -> str:
-    if str(request.reason or "").strip().lower() == "audit_finding":
-        return "audit_finding_report"
-    return "scheduled_message_tool_delivery"
-
-
-def _mirror_message_tool_deliveries(
-    store: ConversationStore,
-    request: BackgroundRunRequest,
-    delivery_context: DeliveryContext,
-    deliveries: tuple[dict[str, object], ...],
-) -> str:
-    """Mirror already-sent source replies exactly once without re-delivering them."""
-    rendered: list[str] = []
-    for item in deliveries:
-        if not _delivery_satisfies_request(request, item):
-            continue
-        receipt_id = str(item.get("receipt_id") or "").strip()
-        if not receipt_id:
-            continue
-        content = str(item.get("content") or "")
-        attachments = [
-            dict(ref)
-            for ref in (
-                item.get("attachments") if isinstance(item.get("attachments"), list) else []
-            )
-            if isinstance(ref, dict)
-        ]
-        store.append_message_once(
-            {
-                "thread_id": request.thread_id,
-                "role": "assistant",
-                "content": content,
-                "channel": str(item.get("channel") or delivery_context.channel),
-                "metadata": {
-                    "reason": request.reason,
-                    "task_id": request.task_id,
-                    "delivery_artifacts": attachments,
-                    "background_delivery_reason": _message_tool_delivery_reason(request),
-                    "evidence_refs": [
-                        str(ref).strip()
-                        for ref in (
-                            item.get("evidence_refs")
-                            if isinstance(item.get("evidence_refs"), list)
-                            else []
-                        )
-                        if str(ref).strip()
-                    ],
-                    "message_tool_delivery": {
-                        "receipt_id": receipt_id,
-                        "delivery_status": "sent",
-                        "deduplicated": item.get("deduplicated") is True,
-                    },
-                },
-            },
-            dedupe_key=f"message_tool_delivery:{receipt_id}",
-        )
-        if content.strip():
-            rendered.append(content)
-    return "\n\n".join(rendered)
-
-
-def _channel_attachments(
-    artifacts: tuple[dict[str, object], ...],
-) -> tuple[ChannelAttachment, ...]:
-    attachments: list[ChannelAttachment] = []
-    for item in artifacts:
-        path = str(item.get("path") or "").strip()
-        if not path or item.get("ok") is not True:
-            continue
-        try:
-            size_bytes = max(0, int(item.get("size_bytes") or 0))
-        except (TypeError, ValueError):
-            size_bytes = 0
-        attachments.append(
-            ChannelAttachment(
-                artifact_id=str(item.get("artifact_id") or ""),
-                path=path,
-                name=str(item.get("name") or Path(path).name),
-                kind=str(item.get("kind") or "file"),
-                sha256=str(item.get("sha256") or ""),
-                size_bytes=size_bytes,
-            )
-        )
-    return tuple(attachments)
 
 
 # LLM: Goal continuation is a real 会话运行时 turn, so its terminal assistant message must enter
@@ -2364,7 +1006,7 @@ def _background_delivery_decision(
         # guidance is an internal continuation; a second model status paragraph is
         # noisy and can be stale before the next task checkpoint.
         return False, "user_guidance_applied_internal"
-    if reason in _SCHEDULED_WAKE_REASONS and _internal_subagent_continuation(request):
+    if reason in SCHEDULED_WAKE_REASONS and _internal_subagent_continuation(request):
         # wait/自动巡场只是内部续推面，不是用户通知面。即使最后一个 child 恰好在本轮
         # 结束前转为终态，也不能把模型的调度碎碎念送进普通聊天；runner completion
         # 的 wake（或 observation fallback）才是首选整合入口。只有本轮 runtime 已把
@@ -2373,12 +1015,7 @@ def _background_delivery_decision(
             return True, "internal_scheduled_completion"
         return False, "internal_scheduled_continuation"
     if reason == "audit_finding":
-        valid_report_event = (
-            str(metadata.get("schema_version") or "") == "audit-finding-event.v1"
-            and metadata.get("requires_llm_report") is True
-            and bool(str(metadata.get("finding_id") or "").strip())
-            and bool(_background_delivery_evidence_refs(request))
-        )
+        valid_report_event = audit_finding_report_event(request)
         transcript_route = (
             bool(
                 resolved_channel is not None
@@ -2452,148 +1089,6 @@ def _terminal_subagent_delivery_decision(
     )
 
 
-# LLM: 后台路线的归属只由"部署声明了什么"决定，不由"此刻能不能发"决定。
-# - local: 权威会话就是 owner 的读取面（transcript 路线），canonical 提交即交付；
-# - external: 部署声明过该通道且声明它支持 proactive 外发 ⇒ 这条路线欠 owner 一次真实外送，
-#   adapter 掉线/凭据缺失/工厂失败都只影响"这次能不能发"，不能抹掉义务；
-# - undeclared: 部署没有声明过这个通道 ⇒ 永不外发（fail-closed），canonical 是唯一归属。
-_ROUTE_LOCAL = "local"
-_ROUTE_EXTERNAL = "external"
-_ROUTE_UNDECLARED = "undeclared"
-
-
-# LLM: 声明与可用分离是本模块的硬边界：能力探测（supports_proactive）会被 adapter 生命周期影响，
-# 归属判定必须读声明（declares_channel + declared_proactive）。改这里要同步检查
-# delivery/registry.py::declares_channel 与 delivery/service.py 的同名投影。
-# 函数用途: 判断一条后台路线的归属类别（本地/外部/未声明）。
-def _background_route_ownership(channels: object, channel: str) -> str:
-    key = str(channel or "").strip().lower()
-    if not key or _route_supports_transcript(channels, key):
-        return _ROUTE_LOCAL
-    if not _channel_declares_transport(channels, key):
-        return _ROUTE_UNDECLARED
-    return _ROUTE_EXTERNAL if _channel_declares_proactive(channels, key) else _ROUTE_UNDECLARED
-
-
-# LLM: 一条路线只有在"归属外部 + 有真实目标"时才欠用户一次外发。未声明通道、
-# 无 target 的本地路线都不在此列，也不得被当成 IM 通道打开。
-# 函数用途: 判断当前后台路线是否必须真正外发才算完成。
-def _background_delivery_obligation(*, target: str, ownership: str) -> bool:
-    return bool(str(target or "").strip() and ownership == _ROUTE_EXTERNAL)
-
-
-# LLM: 一条答复的落账归属：transcript 路线或未声明通道由 canonical 承担交付，
-# 只有"声明外发 + 有目标"的路线才把 canonical 让给外发（靠冻结重投防丢失）。
-# 类用途: 承载一次后台投递的路线事实。
-@dataclass(frozen=True)
-class _OwnerDeliveryRoute:
-    transcript_route: bool
-    ownership: str
-    obligation: bool
-    canonical_record: bool
-
-
-# LLM: 路线事实只能由"投递边界声明 + 可信 context"推出；禁止在调用点各自推算，
-# 否则 canonical 归属、冻结触发和唤醒确认会各算一套。
-# 函数用途: 解析一次后台投递的路线事实。
-def _background_delivery_route(
-    channels: object,
-    delivery_context: DeliveryContext,
-    *,
-    route_supports_transcript: bool | None = None,
-) -> _OwnerDeliveryRoute:
-    transcript_route = bool(
-        supports_transcript_delivery(delivery_context.channel)
-        if route_supports_transcript is None
-        else route_supports_transcript
-    )
-    ownership = _background_route_ownership(channels, delivery_context.channel)
-    obligation = _background_delivery_obligation(
-        target=delivery_context.target,
-        ownership=ownership,
-    )
-    return _OwnerDeliveryRoute(
-        transcript_route=transcript_route,
-        ownership=ownership,
-        obligation=obligation,
-        canonical_record=bool(transcript_route or not obligation),
-    )
-
-
-# LLM: 没有可落账正文时的统一结果：正文只是给上层的投影，persisted 必须为 False。
-# 函数用途: 构造一条未提交的投递结果（内部抑制/空正文/终态任务）。
-def _uncommitted_delivery(content: str, delivery_status: str) -> BackgroundDeliveryCommit:
-    return BackgroundDeliveryCommit(
-        content=str(content or ""),
-        delivery_status=delivery_status,
-        persisted=False,
-        commit_kind=delivery_status if delivery_status == "suppressed" else "none",
-    )
-
-
-# LLM: 唤醒确认是结构化事实判断，不再按事件类型默认放行：只有“外发成功”或“答复已经
-# 落到自己的权威记录且这条路线本来就不欠外发”才算处理完成。既没送达也没记账的唤醒必须
-# 留在队列里，由冻结重投路径补发正文，绝不重新调用模型。
-# 函数用途: 判断一条后台唤醒是否已经真正完成了对 owner 的交付。
-def _background_owner_delivery_committed(
-    request: BackgroundRunRequest,
-    *,
-    target: str,
-    ownership: str,
-    commit: BackgroundDeliveryCommit,
-    canonical_record: bool = False,
-) -> bool:
-    """Acknowledge owner-facing wakes only after their real delivery commit."""
-
-    status = str(commit.delivery_status or "").strip().lower()
-    if status == "sent":
-        # 外发成功但这条路线本来要靠 canonical 承担交付时，本地落账失败同样不能确认：
-        # 否则"用户读过的那份记录"永远缺一条，而且没人会再补。
-        return bool(commit.persisted) or not canonical_record
-    if status == "suppressed":
-        # 投递层显式判定这是内部协议内容：交付义务归零，重投只会得到同样结论。
-        # 审计类唤醒沿用原有更严格判定，避免未上报的发现被静默吞掉。
-        return not _audit_owner_report_event(request)
-    if _background_delivery_obligation(target=target, ownership=ownership):
-        # 欠 owner 一次真实外发：canonical 记录只是安全网，不能替代送达。
-        # 这里必须能"欠着不确认"，即使 adapter 当前不可用。
-        return False
-    if commit.persisted:
-        return True
-    # 既没有外发义务，也没有留下任何权威记录：唤醒不能确认，否则答复会静默消失。
-    return False
-
-
-# LLM: 生产与测试投递服务应显式声明 transcript 能力；旧测试替身没有该
-# 方法时只回退到同一份内置路由声明，绝不从模型正文或 adapter 失败推断。
-# 函数用途: 读取当前投递边界对本地权威会话交付的结构化能力。
-def _route_supports_transcript(channels: object, channel: str) -> bool:
-    probe = getattr(channels, "supports_transcript", None)
-    if callable(probe):
-        return bool(probe(channel))
-    return supports_transcript_delivery(channel)
-
-
-# LLM: 归属用的"部署声明"探测：优先问投递服务的 declares_channel；测试替身没有该方法时
-# 回退到内置的 proactive 推送通道声明表，仍然只读声明、不探测 adapter 是否在线。
-# 函数用途: 判断投递边界是否声明过该外发通道。
-def _channel_declares_transport(channels: object, channel: str) -> bool:
-    probe = getattr(channels, "declares_channel", None)
-    if callable(probe):
-        return bool(probe(channel))
-    return str(channel or "").strip().lower() in PROACTIVE_PUSH_CHANNELS
-
-
-# LLM: 声明能力与可用性分离：declared_proactive 读注册表里的能力声明，adapter 当前是否
-# 构建成功、健康与否都不改变它。
-# 函数用途: 判断该通道被声明为支持 proactive 外发。
-def _channel_declares_proactive(channels: object, channel: str) -> bool:
-    probe = getattr(channels, "declared_proactive", None)
-    if callable(probe):
-        return bool(probe(channel))
-    return str(channel or "").strip().lower() in PROACTIVE_PUSH_CHANNELS
-
-
 # LLM: 读取 exact wake goal/task；冲突和损坏是未知状态，不得当作没有目标或推断完成。
 # 函数用途: 为后台结果投影读取真实目标状态，不修改生命周期。
 def _matching_goal_status(
@@ -2605,7 +1100,7 @@ def _matching_goal_status(
     try:
         wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
         metadata = wake.get("metadata") if isinstance(wake.get("metadata"), dict) else {}
-        goal = store.load_goal(request.thread_id, goal_id=str(metadata.get("goal_id") or ""), task_id=str(request.task_id or "").strip())
+        goal = store.goals.load(request.thread_id, goal_id=str(metadata.get("goal_id") or ""), task_id=str(request.task_id or "").strip())
     except Exception:
         return "state_conflict"
     if goal is None:
@@ -2627,7 +1122,7 @@ def _background_task_link_status(
     if not task_id or selected_store is None:
         return ""
     try:
-        links, load_errors = selected_store.task_links_report(request.thread_id)
+        links, load_errors = selected_store.tasks.list_report(request.thread_id)
     except Exception:
         return ""
     if load_errors:
@@ -2678,7 +1173,7 @@ def _wake_signal_is_stale(
     if reason == "thread_goal_continue":
         metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
         try:
-            goal = store.load_goal(
+            goal = store.goals.load(
                 signal.thread_id,
                 goal_id=str(metadata.get("goal_id") or "").strip(),
             )
@@ -2693,7 +1188,7 @@ def _wake_signal_is_stale(
         )
     if not task_id:
         return False
-    if reason in _SCHEDULED_WAKE_REASONS or reason == "task_ledger_resume":
+    if reason in SCHEDULED_WAKE_REASONS or reason == "task_ledger_resume":
         return _signal_task_link_is_terminal(agent, store, signal, reason)
     if reason not in SUBAGENT_LIFECYCLE_WAKE_REASONS:
         return False
@@ -2759,6 +1254,8 @@ def _signal_task_link_is_terminal(
     return status.upper() in _TASK_LINK_TERMINAL_STATUSES
 
 
+# LLM: 调度器仅按精确 Goal 唤醒、未读插话和子代理状态决定等待；修改须联测父子能力申请与恢复。
+# 函数用途: 有子代理继续执行时抑制空转，有插话或待处理能力申请时放行父级。
 def _goal_wake_waits_for_child_event(
     agent: object,
     store: ConversationStore,
@@ -2773,7 +1270,7 @@ def _goal_wake_waits_for_child_event(
         return False
     task_id = str(getattr(signal, "root_task_id", "") or "").strip()
     try:
-        if store.pending_guidance("task", task_id, limit=1):
+        if store.guidance.pending("task", task_id, limit=1):
             return False
     except Exception:
         return False
@@ -2980,14 +1477,6 @@ def _is_internal_audit_source_worker_lifecycle_signal(
     )
 
 
-def _is_audit_source_worker_lifecycle_signal(signal: WakeSignal) -> bool:
-    return _is_audit_source_worker_lifecycle_metadata(
-        reason=str(getattr(signal, "reason", "") or ""),
-        root_task_id=str(getattr(signal, "root_task_id", "") or ""),
-        metadata=getattr(signal, "metadata", None),
-    )
-
-
 def _is_legacy_per_source_audit_capacity_signal(signal: WakeSignal) -> bool:
     """Retire pre-aggregate capacity wakes already persisted by the candidate."""
     if str(getattr(signal, "reason", "") or "").strip().lower() != "audit_capacity_alert":
@@ -3104,209 +1593,6 @@ def _run_request(kwargs: dict[str, Any]) -> BackgroundRunRequest:
     )
 
 
-# LLM: 后台轮的 run_id 必须优先绑定明确 task_id；线程级兜底身份只能用于无任务事件，
-# 否则同一 thread 的后续任务会误复用上一任务的 AgentRun 权威链。
-# 函数用途: 把一次后台唤醒转换成主代理运行参数，并保留任务、工具和投递边界。
-# LLM: 会话历史的"范围裁决"与"展示摘要"必须分开：
-# - 权威历史 = store 里全部未压缩 canonical 行（长会话不能被展示索引截短）；
-# - 范围裁决只对 **显式 detached named task** 生效，规则完全复用既有创建锚点 + 精确 lineage；
-# - context_bundle 的 recent_limit 只是有界 operational 展示，绝不作为"哪些历史有资格进模型"的白名单。
-# 关键：裁决输入必须来自**已经读成功的同一份 scope 事实**（scoped["tasks"]），不得再单独读一次
-# task link——那次读失败会被当成"没有 detached task"而放行全部历史（fail-open），把读取失败洗成普通会话。
-# 普通连续会话（无 task / 非 detached）完整继承未压缩历史。
-# 函数用途: 用已加载的 scope 事实过滤权威未压缩行，返回可进入模型的历史行。
-def _history_scope_rows(
-    decision: _TaskScopeDecision,
-    rows: list[MessageLogEntry],
-) -> list[MessageLogEntry]:
-    if not rows:
-        return []
-    # 只有"本轮 exact task 确实是 detached named"才应用锚点/lineage；
-    # 普通轮、无 task 轮（含 bundle 里恰好存在旧 Goal）必须完整继承历史。
-    if not decision.detached or not decision.exact_link:
-        return list(rows)
-    # 同一份算法：把权威行投影成 dict 交给既有 detached 行选择器，再按 message_id 映射回对象，
-    # 避免 operational 摘要与 native seed 各维护一份锚点/lineage 规则而长期漂移。
-    by_id = {str(getattr(row, "message_id", "") or ""): row for row in rows}
-    payload = [row.to_dict() for row in rows]
-    selected_ids = {
-        str(row.get("message_id") or "")
-        for row in _detached_task_rows(payload, dict(decision.exact_link), set(decision.task_ids))
-    }
-    return [row for message_id, row in by_id.items() if message_id in selected_ids]
-
-
-# LLM: 解析种子并把"历史读不到"升级成 typed 错误：读不到时不许退回有界摘要继续跑模型，
-# 那会把"读取失败"伪装成"上下文骤降"，让模型在缺历史时作答。抛错 → 本片失败、唤醒不确认、可重试。
-# 函数用途: 取得本片可用的历史种子，或抛出 BackgroundHistoryUnavailableError。
-def _background_history_seed_or_raise(
-    agent: object,
-    store: ConversationStore | None,
-    thread: ConversationThread | None,
-    request: BackgroundRunRequest,
-    *,
-    proactive_delivery_available: bool | None = None,
-) -> object | None:
-    result = _background_conversation_history_seed(
-        agent,
-        store,
-        thread,
-        request,
-        _tool_policy_request(
-            agent,
-            request,
-            proactive_delivery_available=proactive_delivery_available,
-        ),
-    )
-    if result.status == "unreadable":
-        raise BackgroundHistoryUnavailableError(
-            "background conversation history is unreadable",
-            load_errors=list(result.load_errors),
-            detail=result.detail,
-        )
-    return result.seed
-
-
-# LLM: 后台历史不可读是可恢复的运行事实，不是"空历史"。抛这个 typed 错误让上层：
-# ① 不确认唤醒（保留 pending，可重试）；② 把 load_errors 写进失败诊断；③ 绝不带缺失历史继续调用模型。
-# 类用途: 表示后台工作片所需的会话历史读取/解析失败。
-class BackgroundHistoryUnavailableError(RuntimeError):
-    # LLM: 错误码与结构化 load_errors 必须可被上层读取，禁止只留一句自然语言。
-    # 函数用途: 构造一个带 load_errors 与细节的后台历史不可用错误。
-    def __init__(
-        self,
-        message: str,
-        *,
-        load_errors: list[dict[str, Any]] | None = None,
-        detail: str = "",
-    ) -> None:
-        super().__init__(message)
-        self.error_code = "BACKGROUND_HISTORY_UNAVAILABLE"
-        self.load_errors = list(load_errors or [])
-        self.detail = str(detail or "")
-
-
-# LLM: 后台历史种子的结果必须区分三态，不能把"读不到"和"确实没有"混成同一个 None：
-# - ready: 拿到权威行并投影成功（可能为空历史，那是合法空）；
-# - unreadable: 历史读取/解析失败（load_errors 非空或抛错）→ 调用方必须按 typed 错误处理，
-#   保留可恢复状态（唤醒不确认、可重试），**不得**退回有界摘要继续跑模型——那会把"历史读取失败"
-#   伪装成"上下文骤降"；
-# - disabled: 窄范围审计事件等按设计不使用会话历史。
-# 调用方（_run_background_main_turn_with_compact）读 status 决定是否继续，load_errors 一路带出去。
-# 类用途: 承载后台历史种子的三态结果与结构化读取错误。
-@dataclass(frozen=True)
-class _BackgroundHistorySeedResult:
-    status: str
-    seed: object | None = None
-    load_errors: tuple[dict[str, Any], ...] = ()
-    detail: str = ""
-
-
-# LLM: 后台工作片必须与前台共用同一份 canonical 历史投影与同一个 Compact 权威：
-# Gateway 走 conversation_history_seed（任务范围行 + provider 消息投影），后台之前不带 seed，
-# _native_provider_history_messages 直接得到空历史，只剩一份有界摘要副本——那不是"续接同一会话"，
-# 而是换了套丢工具细节的摘要。这里复用同一实现，同时：
-#   ① 行选择必须复用既有结构化任务范围（detached named task 的创建锚点 + 精确 lineage），
-#      不能直接吞全 thread 未压缩行（会把后来别的任务的消息带进 detached 工作）；
-#   ② 读取失败给 typed 结果，绝不静默退回摘要；
-#   ③ 只读：不在后台切片里另起一次压缩（压缩由本片 context_overflow 路径与前台 Compact 负责）。
-# 函数用途: 为后台工作片构造与前台同源的会话历史种子（三态结果）。
-def _background_conversation_history_seed(
-    agent: object,
-    store: ConversationStore | None,
-    thread: ConversationThread | None,
-    request: BackgroundRunRequest,
-    policy_request: BackgroundToolPolicyRequest | None = None,
-) -> _BackgroundHistorySeedResult:
-    if store is None or thread is None:
-        return _BackgroundHistorySeedResult("unreadable", detail="conversation store unavailable")
-    thread_id = str(getattr(thread, "thread_id", "") or "").strip()
-    if not thread_id:
-        return _BackgroundHistorySeedResult("unreadable", detail="thread identity unavailable")
-    # 窄范围审计事件（finding/capacity）是"一条结构化事件"，不是会话续接：
-    # 它们必须只看到事件事实与审计目标，不能把 owner 的旧聊天历史带进模型输入。
-    if _narrow_audit_event_reason(getattr(request, "reason", "")):
-        return _BackgroundHistorySeedResult("disabled", detail="narrow audit event")
-    load_errors: list[dict[str, Any]] = []
-    scope_state = _BackgroundContextLoad(
-        agent,
-        store,
-        thread,
-        str(getattr(request, "task_id", "") or "").strip(),
-        getattr(agent, "config", None),
-        policy_request,
-        load_errors,
-    )
-    try:
-        scoped = _context_bundle(scope_state)
-    except Exception as exc:
-        load_errors.append(runtime_error_report(exc, context="background_history.scope"))
-        return _BackgroundHistorySeedResult(
-            "unreadable",
-            load_errors=tuple(load_errors),
-            detail=f"context bundle failed: {type(exc).__name__}",
-        )
-    if load_errors:
-        # 读取/解析错误必须上报，不得被"空历史"掩盖。
-        return _BackgroundHistorySeedResult(
-            "unreadable",
-            load_errors=tuple(load_errors),
-            detail="conversation context reported load errors",
-        )
-    try:
-        from ..agent_core.runtime.context_compactor import runtime_compact_policy
-        from ..gateway_parts.request_execution import _gateway_conversation_history_rows
-        from .compact import _uncompacted_conversation_rows
-        from .models import ConversationHistorySeed
-        from .native_history import provider_history_messages_from_rows
-
-        rows = _uncompacted_conversation_rows(store, thread)
-        # 权威历史 = 全部未压缩行；范围裁决用与 operational 摘要**同一份** decision
-        # （来自本轮显式 task 身份 + 已加载 bundle），既不重读盘、也不按第几个 task 猜身份。
-        scoped_rows = _history_scope_rows(
-            _task_scope_decision(scope_state, scoped),
-            rows,
-        )
-        budget = int(getattr(runtime_compact_policy(agent), "trigger_tokens", 0) or 0)
-        # 只用历史投影两步（行选择 + provider 消息），不牵入 recent_artifacts 等与续接无关的投影。
-        selected_rows = _gateway_conversation_history_rows(
-            agent,
-            thread_id,
-            "",
-            load_errors,
-            rows=tuple(scoped_rows),
-            token_budget=budget,
-        )
-        history = tuple((row.role, row.content) for row in selected_rows)
-        canonical_history = provider_history_messages_from_rows(selected_rows)
-    except InterruptedError:
-        raise
-    except Exception as exc:
-        load_errors.append(runtime_error_report(exc, context="background_history.projection"))
-        return _BackgroundHistorySeedResult(
-            "unreadable",
-            load_errors=tuple(load_errors),
-            detail=f"history projection failed: {type(exc).__name__}",
-        )
-    if load_errors:
-        return _BackgroundHistorySeedResult(
-            "unreadable",
-            load_errors=tuple(load_errors),
-            detail="history projection reported load errors",
-        )
-    scoped_thread = scoped.get("thread") if isinstance(scoped.get("thread"), dict) else {}
-    return _BackgroundHistorySeedResult(
-        "ready",
-        seed=ConversationHistorySeed(
-            # detached named task 的 summary/代次按既有投影口径（创建锚点之前的摘要才继承）。
-            compact_summary=str(scoped_thread.get("summary") or ""),
-            compact_generation=max(0, int(scoped_thread.get("compact_generation", 0) or 0)),
-            messages=tuple(history),
-            canonical_messages=tuple(canonical_history),
-        ),
-    )
-
-
 # LLM: 后台执行使用精确持久任务作为输入回合编号；定时任务保留自己的 run ID，attempt 仍逐次独立。
 # 函数用途: 构造后台模型执行参数，让普通插话、消费回执、归档和续跑共享同一任务身份。
 def _run_params(
@@ -3368,7 +1654,7 @@ def _run_params(
                 wake_signal=request.wake_signal,
                 config=config,
                 owner_policy=getattr(agent, "owner_policy", None),
-                policy_snapshot=_policy_snapshot_from_request(request),
+                policy_snapshot=policy_snapshot_from_request(request),
                 active_goal=resolved_goal_context.goal is not None,
                 goal_subagent_phase=resolved_goal_context.subagent_phase,
                 proactive_delivery_available=proactive_delivery_available,
@@ -3470,13 +1756,13 @@ def _background_lifecycle_wake_snapshot_ids(
     if store is None or not selected:
         return ()
     try:
-        loader = getattr(store, "pending_wake_signals_report", None)
+        loader = getattr(getattr(store, 'wakes', None), 'pending_report', None)
         if callable(loader):
             signals, load_errors = loader(limit=0)
             if load_errors:
                 return ()
         else:
-            signals = store.pending_wake_signals(limit=0)
+            signals = store.wakes.pending(limit=0)
     except Exception:
         return ()
     return tuple(
@@ -3572,22 +1858,20 @@ def _background_task_attributes(
     task_id = str(request.task_id or "").strip()
     lifecycle_reason = str(request.reason or "").strip().lower()
     _apply_internal_background_tool_budget(attributes, request, agent)
-    if _narrow_audit_event_reason(request.reason):
+    if is_narrow_audit_event(request.reason):
         attributes[CONVERSATION_BACKGROUND_EVENT_REASON_ATTR] = (
             str(request.reason or "").strip().lower()
         )
     if thread_id and (task_id or scheduler_run_id):
         attributes["conversation_thread_id"] = str(thread_id).strip()
     _apply_background_wake_attributes(attributes, request, agent)
-    if _audit_finding_report_event(request):
+    if audit_finding_report_event(request):
         attributes["background_delivery_evidence_refs"] = list(
-            _background_delivery_evidence_refs(request)
+            background_delivery_evidence_refs(request)
         )
     if task_id:
-        # Background slices commit their model-authored commentary/final through
-        # _commit_background_response instead of Agent.run(save=True).  They still
-        # own the exact ConversationThread and must advance its canonical Compact
-        # generation while working; save=False only avoids a duplicate reply write.
+        # 过程和 final 由 background_delivery 提交，save=False 仅避免重复写回复；
+        # 本片仍归属原线程，执行期间的 Compact 必须推进同一 canonical 代次。
         attributes[CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR] = True
         active_turn_request_ids = _background_active_turn_request_ids(request)
         attributes.update(
@@ -3785,7 +2069,7 @@ def _background_conversation_task_link(agent: object | None, thread_id: str, tas
     if store is None or not thread_id or not task_id:
         return None
     try:
-        links, errors = store.task_links_report(thread_id)
+        links, errors = store.tasks.list_report(thread_id)
     except Exception:
         return None
     if errors:
@@ -3824,791 +2108,6 @@ def ledger_open_progress_item_count(agent: object | None, task_id: str) -> int:
         return max(open_items, open_targets)
     except Exception:
         return 0
-
-
-def _policy_snapshot_from_request(request: BackgroundRunRequest) -> dict[str, Any]:
-    wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
-    snapshot = wake.get("policy_snapshot")
-    return dict(snapshot) if isinstance(snapshot, dict) else {}
-
-
-# Conversation runtime context
-from dataclasses import dataclass
-
-from ..agent_core.agent_tree.status import agent_tree_status_payload
-from ..artifacts.registry import latest_artifact_records
-from ..settings.defaults import default_config_value
-from .context_budget import (
-    BackgroundContextPayloadRequest,
-    background_context_budget_from_config,
-    bounded_background_context_payload,
-)
-
-
-@dataclass(frozen=True)
-class _BackgroundContextLoad:
-    agent: object
-    store: ConversationStore
-    thread: ConversationThread
-    task_id: str
-    config: object | None
-    policy_request: BackgroundToolPolicyRequest
-    load_errors: list[dict[str, Any]]
-
-
-# LLM: 后台上下文会投给模型，active/pending wake 必须先做模型可见净化；
-# 原始持久事件仍留在 ConversationStore，不能在这里改写权威账本。
-# 函数用途: 组装一次后台唤醒轮的有界 Markdown 上下文。
-def context_markdown(
-    *,
-    agent: object,
-    store: ConversationStore,
-    thread: ConversationThread,
-    request,
-    proactive_delivery_available: bool | None = None,
-    include_recent_messages: bool = True,
-) -> str:
-    policy_request = _tool_policy_request(
-        agent,
-        request,
-        proactive_delivery_available=proactive_delivery_available,
-    )
-    task_id = str(getattr(request, "task_id", "") or "").strip()
-    active_wake_signal = _model_visible_wake_signal(getattr(request, "wake_signal", None))
-    bounded = _bounded_context(
-        agent,
-        store,
-        thread,
-        task_id,
-        policy_request,
-        active_wake_signal=active_wake_signal,
-    )
-    policy_decision = background_tool_policy_decision(
-        getattr(agent, "config", None), request=policy_request
-    )
-    sections = [
-        ("Active Wake Signal", bounded.get("active_wake_signal") or {}),
-        (
-            "Subagent Completion Inputs",
-            bounded.get("subagent_completions") or {},
-        ),
-        ("Conversation Thread", bounded.get("thread") or {}),
-        ("Runtime Load Errors", bounded.get("load_errors") or []),
-        ("Task Runtime State", bounded.get("task_runtime_state") or {}),
-        ("Bound Tasks", bounded.get("tasks") or []),
-        ("Channel Bindings", bounded.get("channel_bindings") or []),
-        ("Recent Observations", bounded.get("observations") or []),
-        ("Guidance", bounded.get("guidance") or []),
-        ("Pending Wake Signals", bounded.get("pending_wake_signals") or []),
-        ("Recovery Snapshot", bounded.get("recovery_snapshot") or {}),
-        ("Agent Tree Snapshot", bounded.get("agent_tree") or {}),
-        ("Background Context Projection", bounded.get("_projection") or {}),
-        ("Control Action Policy", policy_decision.to_dict()),
-    ]
-    if include_recent_messages:
-        # 只有"没有 canonical 历史种子"的历史遗留路径才需要这份有界摘要副本。
-        sections.insert(5, ("Recent Messages", bounded.get("messages") or []))
-    if _narrow_audit_event_reason(getattr(request, "reason", "")):
-        # A finding or capacity wake is one exact owner-facing event, not a
-        # general supervision tick. Giving the model sibling counts, old chat
-        # turns or the full task ledger can override the current typed facts.
-        # Project only the authoritative event plus the exact Audit objective;
-        # durable ledgers remain available through tools.
-        sections = [
-            ("Active Wake Signal", bounded.get("active_wake_signal") or {}),
-            (
-                "Audit Task Objective",
-                _audit_event_task_objective(
-                    bounded.get("tasks"),
-                    task_id=task_id,
-                    wake_signal=bounded.get("active_wake_signal"),
-                ),
-            ),
-            ("Runtime Load Errors", bounded.get("load_errors") or []),
-            (
-                "Background Context Projection",
-                bounded.get("_projection") or {},
-            ),
-            ("Control Action Policy", policy_decision.to_dict()),
-        ]
-    lines = _context_header(request, thread)
-    for title, payload in sections:
-        lines.extend(["", f"## {title}", json_block(payload)])
-    lines.extend(
-        [
-            "",
-            "## Available Control Actions",
-            *background_control_action_lines(
-                getattr(agent, "config", None), request=policy_request
-            ),
-            "[/background-main-agent-context]",
-        ]
-    )
-    return "\n".join(lines)
-
-
-def _narrow_audit_event_reason(reason: object) -> bool:
-    return str(reason or "").strip().lower() in {
-        "audit_finding",
-        "audit_capacity_alert",
-    }
-
-
-def _audit_event_task_objective(
-    tasks: object,
-    *,
-    task_id: str,
-    wake_signal: object = None,
-) -> dict[str, object]:
-    """Project exact run and source facts without a stale cross-source summary."""
-
-    selected_id = str(task_id or "").strip()
-    if not selected_id:
-        return {}
-    for row in _dict_rows(tasks):
-        if str(row.get("task_id") or "").strip() != selected_id:
-            continue
-        projected = {
-            key: row[key]
-            for key in (
-                "task_id",
-                "work_kind",
-                "work_name",
-                "run_prompt",
-                "effective_revision",
-                "created_at",
-            )
-            if key in row
-        }
-        source_ids = _audit_event_source_ids(wake_signal)
-        bindings = [
-            dict(item)
-            for item in _dict_rows(row.get("effective_source_bindings"))
-            if str(item.get("source_id") or "").strip() in source_ids
-        ]
-        if bindings:
-            projected["active_source_bindings"] = bindings
-        return projected
-    return {"task_id": selected_id}
-
-
-def _audit_event_source_ids(wake_signal: object) -> set[str]:
-    wake = dict(wake_signal) if isinstance(wake_signal, dict) else {}
-    metadata = wake.get("metadata") if isinstance(wake.get("metadata"), dict) else {}
-    source_ids = {
-        str(metadata.get("source_id") or "").strip(),
-    }
-    findings = metadata.get("findings") if isinstance(metadata.get("findings"), list) else []
-    for row in findings:
-        if not isinstance(row, dict):
-            continue
-        item_metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
-        source_ids.add(str(item_metadata.get("source_id") or "").strip())
-    source_ids.discard("")
-    return source_ids
-
-
-def _bounded_context(
-    agent: object,
-    store: ConversationStore,
-    thread: ConversationThread,
-    task_id: str,
-    policy_request: BackgroundToolPolicyRequest,
-    *,
-    active_wake_signal: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    config = getattr(agent, "config", None)
-    load_errors: list[dict[str, Any]] = []
-    state = _BackgroundContextLoad(
-        agent, store, thread, task_id, config, policy_request, load_errors
-    )
-    narrow_audit_event = _narrow_audit_event_reason(policy_request.reason)
-    visible_run_ids = [] if narrow_audit_event else _thread_active_task_ids(state)
-    agent_tree = {} if narrow_audit_event else _agent_tree_payload(state, visible_run_ids)
-    bundle = _context_bundle(state)
-    if narrow_audit_event:
-        bundle = _narrow_audit_event_bundle(bundle, task_id=task_id)
-    pending_wake_signals = [] if narrow_audit_event else _pending_wake_signals(state)
-    recovery_snapshot = (
-        {} if narrow_audit_event else _safe_recovery_snapshot(state, visible_run_ids)
-    )
-    task_state = (
-        {}
-        if narrow_audit_event
-        else task_runtime_state(
-            agent=agent,
-            store=store,
-            thread_id=thread.thread_id,
-            task_id=task_id,
-            load_errors=load_errors,
-        )
-    )
-    subagent_completions = (
-        {} if narrow_audit_event else _background_subagent_completion_context(state)
-    )
-    return bounded_background_context_payload(
-        BackgroundContextPayloadRequest(
-            bundle=bundle,
-            active_wake_signal=active_wake_signal,
-            subagent_completions=subagent_completions,
-            pending_wake_signals=pending_wake_signals,
-            task_runtime_state=task_state,
-            agent_tree=agent_tree,
-            recovery_snapshot=recovery_snapshot,
-            load_errors=load_errors,
-            budget=background_context_budget_from_config(config),
-        )
-    )
-
-
-# LLM: 会话运行时 keeps each child final answer in the parent session history. This runtime adapts that
-# contract to the durable observation ledger: every later background slice for the same exact root
-# gets the current direct-child completion projection, not only the one lifecycle wake that arrived.
-# 函数用途: 读取当前根任务的直属子代理完成信封，供定时进度轮和恢复轮继续整合精确结果。
-def _background_subagent_completion_context(
-    state: _BackgroundContextLoad,
-) -> dict[str, object]:
-    task_id = str(state.task_id or "").strip()
-    if not task_id:
-        return {}
-    try:
-        observations, load_errors = state.store.recent_observations_report(
-            state.thread.thread_id,
-            limit=0,
-            include_handled=True,
-        )
-        state.load_errors.extend(load_errors)
-    except Exception as exc:
-        state.load_errors.append(
-            runtime_error_report(
-                exc,
-                context="background_context.subagent_completions",
-            )
-        )
-        return {}
-    context, issues = subagent_completion_context_from_observations(
-        observations,
-        root_task_ids={task_id},
-        workspace_task_id=task_id,
-        visible_limit=DEFAULT_VISIBLE_SUBAGENT_COMPLETIONS,
-    )
-    state.load_errors.extend(
-        runtime_error_report(
-            ValueError(issue),
-            context="background_context.subagent_completions",
-        )
-        for issue in issues
-    )
-    return context
-
-
-def _narrow_audit_event_bundle(
-    bundle: object,
-    *,
-    task_id: str,
-) -> dict[str, object]:
-    """Keep stale conversation prose out of one typed Audit event turn.
-
-    The total-context reducer budgets the full bundle before ``context_markdown``
-    chooses visible sections.  Merely hiding Recent Messages at render time can
-    therefore still shrink the current wake metadata.  Build the narrow bundle
-    before budgeting so current structured facts keep priority over history.
-    """
-
-    row = dict(bundle) if isinstance(bundle, dict) else {}
-    selected_id = str(task_id or "").strip()
-    tasks = [
-        item
-        for item in _dict_rows(row.get("tasks"))
-        if str(item.get("task_id") or "").strip() == selected_id
-    ]
-    return {
-        "thread": row.get("thread") or {},
-        "messages": [],
-        "tasks": tasks,
-        "channel_bindings": [],
-        "observations": [],
-        "guidance": [],
-    }
-
-
-def _context_bundle(state: _BackgroundContextLoad) -> dict[str, Any]:
-    """Load one authoritative thread ledger and project the current task view."""
-    try:
-        if callable(getattr(state.store, "context_bundle_report", None)):
-            bundle, load_errors = state.store.context_bundle_report(
-                state.thread.thread_id,
-                recent_limit=_config_int(state.config, "conversation_context_recent_limit"),
-            )
-            state.load_errors.extend(load_errors)
-        else:
-            bundle = state.store.context_bundle(
-                state.thread.thread_id,
-                recent_limit=_config_int(state.config, "conversation_context_recent_limit"),
-            )
-        return _task_scoped_operational_context(state, bundle)
-    except Exception as exc:
-        state.load_errors.append(
-            runtime_error_report(exc, context="background_context.context_bundle")
-        )
-        return _minimal_context_bundle(state.thread)
-
-
-# LLM: 任务范围裁决只能由"本轮显式 task 身份 + 已加载的同一份 bundle"形成一次，
-# 供 operational 摘要与 native 历史种子共用。禁止按"第几个/最新一个 task"猜身份，
-# 也禁止把全部 scoped task 的父/root id 无差别并成 lineage（那会放宽范围）。
-# 类用途: 承载一次任务范围裁决的结构化事实。
-@dataclass(frozen=True)
-class _TaskScopeDecision:
-    task_id: str
-    task_ids: frozenset[str]
-    exact_link: dict[str, Any] | None
-    detached: bool
-
-
-# LLM: exact_link 必须按本轮 task_id 精确匹配；无 task_id 的普通事件不做任何范围收缩。
-# 函数用途: 用已加载的 bundle 与本轮 task_id 形成唯一范围裁决。
-def _task_scope_decision(
-    state: _BackgroundContextLoad,
-    bundle: dict[str, Any],
-) -> _TaskScopeDecision:
-    task_id = str(state.task_id or "").strip()
-    task_rows = _dict_rows(bundle.get("tasks"))
-    if not task_id:
-        return _TaskScopeDecision("", frozenset(), None, False)
-    exact_link = next(
-        (row for row in task_rows if str(row.get("task_id") or "").strip() == task_id),
-        None,
-    )
-    return _TaskScopeDecision(
-        task_id=task_id,
-        task_ids=frozenset(_task_context_ids(state)),
-        exact_link=exact_link,
-        detached=_is_detached_named_task_link(exact_link),
-    )
-
-
-def _task_scoped_operational_context(
-    state: _BackgroundContextLoad,
-    bundle: dict[str, Any],
-) -> dict[str, Any]:
-    """Project one task from the shared ledger using only persisted identities.
-
-    Ordinary foreground work keeps the continuous conversation history.  A
-    detached named Audit/Goal is different: like a 会话运行时/模型助手 background
-    fork, it may see the conversation that existed when it was created and
-    later rows attributed to its exact task lineage, but not unrelated future
-    user turns.  This remains one transcript and one compact authority; the
-    projection neither copies history nor classifies natural-language text.
-    """
-    decision = _task_scope_decision(state, bundle)
-    if not decision.task_id:
-        return bundle
-    task_ids = set(decision.task_ids)
-    task_rows = _dict_rows(bundle.get("tasks"))
-    scoped = dict(bundle)
-    scoped["tasks"] = [row for row in task_rows if _context_row_matches_task_ids(row, task_ids)]
-    scoped["observations"] = [
-        row
-        for row in _dict_rows(bundle.get("observations"))
-        if _context_row_matches_task_ids(row, task_ids)
-    ]
-    scoped["goals"] = [
-        row
-        for row in _dict_rows(bundle.get("goals"))
-        if _context_row_matches_task_ids(row, task_ids)
-    ]
-    if decision.detached:
-        return _detached_named_task_context(state, scoped, decision.exact_link or {}, task_ids)
-    return scoped
-
-
-def _is_detached_named_task_link(link: dict[str, Any] | None) -> bool:
-    if not isinstance(link, dict):
-        return False
-    return (
-        str(link.get("cancellation_scope") or "").strip().lower() == "detached"
-        and str(link.get("work_kind") or "").strip().lower() in {"audit", "goal"}
-        and bool(str(link.get("work_name") or "").strip())
-    )
-
-
-def _detached_named_task_context(
-    state: _BackgroundContextLoad,
-    scoped: dict[str, Any],
-    link: dict[str, Any],
-    task_ids: set[str],
-) -> dict[str, Any]:
-    """Return the creation snapshot plus exact later task traffic.
-
-    Raw messages stay append-only in the shared thread.  Reading the ledger and
-    applying its persisted anchor/task ids is intentionally fail-closed: if an
-    old anchor cannot be found, only rows explicitly attributed to this task are
-    exposed.
-    """
-    projected = dict(scoped)
-    projected["messages"] = _detached_task_messages(state, link, task_ids)
-    projected["guidance"] = _detached_task_rows(
-        _dict_rows(scoped.get("guidance")),
-        link,
-        task_ids,
-    )
-    thread = dict(scoped.get("thread")) if isinstance(scoped.get("thread"), dict) else {}
-    if not _detached_summary_precedes_task(thread, link):
-        for key, empty in (
-            ("summary", ""),
-            ("compact_operation_evidence", {}),
-            ("compacted_through_message_id", ""),
-            ("compacted_through_byte_offset", 0),
-            ("compact_generation", 0),
-            ("compact_updated_at", 0.0),
-            ("compact_source_messages", 0),
-            ("compact_checkpoint_id", ""),
-        ):
-            thread[key] = empty
-    thread["task_ids"] = [state.task_id]
-    thread["active_task_ids"] = (
-        [state.task_id] if str(link.get("status") or "").strip().lower() == "active" else []
-    )
-    if str(thread.get("workspace_task_id") or "").strip() != state.task_id:
-        thread["workspace_task_id"] = ""
-    projected["thread"] = thread
-    return projected
-
-
-def _detached_task_messages(
-    state: _BackgroundContextLoad,
-    link: dict[str, Any],
-    task_ids: set[str],
-) -> list[dict[str, Any]]:
-    try:
-        rows, errors = state.store.recent_messages_report(
-            state.thread.thread_id,
-            limit=0,
-        )
-        state.load_errors.extend(errors)
-        payload = [row.to_dict() for row in rows]
-    except Exception as exc:
-        state.load_errors.append(
-            runtime_error_report(exc, context="background_context.detached_messages")
-        )
-        payload = []
-    selected = _detached_task_rows(payload, link, task_ids)
-    limit = _config_int(state.config, "conversation_context_recent_limit")
-    return selected if limit <= 0 else selected[-limit:]
-
-
-def _detached_task_rows(
-    rows: list[dict[str, Any]],
-    link: dict[str, Any],
-    task_ids: set[str],
-) -> list[dict[str, Any]]:
-    anchor_id = str(link.get("context_anchor_message_id") or "").strip()
-    if not any(str(row.get("message_id") or "").strip() for row in rows):
-        anchor_id = ""
-    try:
-        created_at = float(link.get("created_at") or 0.0)
-    except (TypeError, ValueError):
-        created_at = 0.0
-    before_anchor = bool(anchor_id)
-    anchor_found = not anchor_id
-    selected: list[dict[str, Any]] = []
-    for row in rows:
-        exact_task_row = _context_row_matches_task_ids(row, task_ids)
-        snapshot_row = False
-        if anchor_id and before_anchor:
-            snapshot_row = True
-            if str(row.get("message_id") or "").strip() == anchor_id:
-                before_anchor = False
-                anchor_found = True
-        elif not anchor_id:
-            try:
-                snapshot_row = float(row.get("created_at") or 0.0) <= created_at
-            except (TypeError, ValueError):
-                snapshot_row = False
-        if exact_task_row or snapshot_row:
-            selected.append(row)
-    if anchor_id and not anchor_found:
-        return [row for row in rows if _context_row_matches_task_ids(row, task_ids)]
-    return selected
-
-
-def _detached_summary_precedes_task(
-    thread: dict[str, Any],
-    link: dict[str, Any],
-) -> bool:
-    if not str(thread.get("summary") or "").strip():
-        return True
-    try:
-        task_created_at = float(link.get("created_at") or 0.0)
-        compact_updated_at = float(thread.get("compact_updated_at") or 0.0)
-        thread_updated_at = float(thread.get("updated_at") or 0.0)
-    except (TypeError, ValueError):
-        return False
-    summary_updated_at = compact_updated_at if compact_updated_at > 0 else thread_updated_at
-    return task_created_at > 0 and 0 < summary_updated_at <= task_created_at
-
-
-def _dict_rows(value: object) -> list[dict[str, Any]]:
-    if not isinstance(value, list):
-        return []
-    return [dict(row) for row in value if isinstance(row, dict)]
-
-
-_TASK_CONTEXT_ID_KEYS = (
-    "task_id",
-    "root_task_id",
-    "conversation_task_id",
-    "gateway_request_id",
-)
-
-
-def _context_row_matches_task_ids(row: dict[str, Any], task_ids: set[str]) -> bool:
-    if any(str(row.get(key) or "").strip() in task_ids for key in _TASK_CONTEXT_ID_KEYS):
-        return True
-    metadata = row.get("metadata")
-    if not isinstance(metadata, dict):
-        return False
-    if any(str(metadata.get(key) or "").strip() in task_ids for key in _TASK_CONTEXT_ID_KEYS):
-        return True
-    attributes = metadata.get("task_attributes")
-    return isinstance(attributes, dict) and any(
-        str(attributes.get(key) or "").strip() in task_ids for key in _TASK_CONTEXT_ID_KEYS
-    )
-
-
-def _task_context_ids(state: _BackgroundContextLoad) -> set[str]:
-    """Resolve one task's persisted subagent lineage without using prompt text."""
-    task_id = str(state.task_id or "").strip()
-    if not task_id:
-        return set()
-    task_ids = {task_id}
-    manager = getattr(state.agent, "subagents", None)
-    if manager is None:
-        return task_ids
-    try:
-        current = manager.load(task_id)
-    except Exception:
-        current = None
-    root_id = str(getattr(current, "root_id", "") or "").strip() or task_id
-    task_ids.add(root_id)
-    try:
-        runs = manager.list_runs()
-    except Exception:
-        return task_ids
-    for run in runs:
-        run_id = str(getattr(run, "id", "") or "").strip()
-        run_root_id = str(getattr(run, "root_id", "") or "").strip()
-        if run_id and (run_id == root_id or run_root_id == root_id):
-            task_ids.add(run_id)
-    return task_ids
-
-
-# LLM: pending wake 读取失败要留 load_error；成功行只净化模型视图，不改原事件。
-# 函数用途: 读取当前线程待处理唤醒，并剔除其它 task 和已退役工具提示。
-def _pending_wake_signals(state: _BackgroundContextLoad) -> list[dict[str, Any]]:
-    try:
-        if callable(getattr(state.store, "pending_wake_signals_report", None)):
-            signals, load_errors = state.store.pending_wake_signals_report(
-                limit=_config_int(state.config, "background_pending_wake_prompt_limit"),
-            )
-            state.load_errors.extend(load_errors)
-            payload = [
-                _model_visible_wake_signal(item.to_dict()) or {}
-                for item in signals
-                if item.thread_id == state.thread.thread_id
-            ]
-        else:
-            payload = [
-                _model_visible_wake_signal(item) or {}
-                for item in pending_wake_payload(
-                    state.store,
-                    state.thread.thread_id,
-                    limit=_config_int(
-                        state.config,
-                        "background_pending_wake_prompt_limit",
-                    ),
-                )
-            ]
-        if not state.task_id:
-            return payload
-        task_ids = _task_context_ids(state)
-        return [row for row in payload if _context_row_matches_task_ids(row, task_ids)]
-    except Exception as exc:
-        state.load_errors.append(
-            runtime_error_report(exc, context="background_context.pending_wake_signals")
-        )
-        return []
-
-
-def _agent_tree_payload(
-    state: _BackgroundContextLoad,
-    visible_run_ids: list[str],
-) -> dict[str, Any]:
-    try:
-        return agent_tree_status_payload(
-            state.agent,
-            {
-                "visible_run_ids": visible_run_ids,
-                "allowed_tools": background_allowed_tools(
-                    state.config, request=state.policy_request
-                ),
-            },
-        )
-    except Exception as exc:
-        report = runtime_error_report(exc, context="background_context.agent_tree")
-        state.load_errors.append(report)
-        return {
-            "schema_version": "agent_tree_status.v1",
-            "effect": "read_only",
-            "nodes": [],
-            "edges": [],
-            "warnings": ["agent_tree_load_error"],
-            "load_error": report,
-        }
-
-
-def _safe_recovery_snapshot(
-    state: _BackgroundContextLoad,
-    visible_run_ids: list[str],
-) -> dict[str, Any]:
-    try:
-        return _recovery_snapshot(state.agent, state.store, state.thread.thread_id, visible_run_ids)
-    except Exception as exc:
-        report = runtime_error_report(exc, context="background_context.recovery_snapshot")
-        state.load_errors.append(report)
-        return {
-            "schema_version": "background_recovery_snapshot.v1",
-            "effect": "read_only",
-            "does_not_block": True,
-            "load_error": report,
-        }
-
-
-def _tool_policy_request(
-    agent: object,
-    request: object,
-    *,
-    proactive_delivery_available: bool | None = None,
-) -> BackgroundToolPolicyRequest:
-    return BackgroundToolPolicyRequest(
-        reason=str(getattr(request, "reason", "") or ""),
-        wake_signal=getattr(request, "wake_signal", None),
-        config=getattr(agent, "config", None),
-        owner_policy=getattr(agent, "owner_policy", None),
-        policy_snapshot=_policy_snapshot_from_request(request),
-        proactive_delivery_available=proactive_delivery_available,
-    )
-
-
-def _policy_snapshot_from_request(request: object) -> dict[str, Any]:
-    wake = getattr(request, "wake_signal", None)
-    if isinstance(wake, dict) and isinstance(wake.get("policy_snapshot"), dict):
-        return dict(wake["policy_snapshot"])
-    return {}
-
-
-def _config_int(config: object | None, key: str) -> int:
-    if config is None:
-        return max(0, int(default_config_value(key)))
-    try:
-        return max(0, int(getattr(config, key)))
-    except (TypeError, ValueError):
-        return max(0, int(default_config_value(key)))
-
-
-def _context_header(request, thread: ConversationThread) -> list[str]:
-    return [
-        "[background-main-agent-context]",
-        f"reason: {request.reason}",
-        f"thread_id: {thread.thread_id}",
-        f"task_id: {request.task_id or ''}",
-        (
-            "authority: current typed runtime state and current tool results "
-            "override earlier assistant, child, summary, and artifact prose"
-        ),
-    ]
-
-
-def _thread_active_task_ids(state: _BackgroundContextLoad) -> list[str]:
-    if state.task_id:
-        return sorted(_task_context_ids(state))
-    latest = _latest_thread_with_load_error(state)
-    source = latest or state.thread
-    return [str(item or "").strip() for item in source.active_task_ids if str(item or "").strip()]
-
-
-def _latest_thread_with_load_error(state: _BackgroundContextLoad) -> ConversationThread | None:
-    try:
-        if not callable(getattr(state.store, "load_thread_report", None)):
-            return state.store.load_thread(state.thread.thread_id)
-        latest, load_error = state.store.load_thread_report(state.thread.thread_id)
-        if load_error is not None:
-            load_error["consumer_context"] = "background_context.thread_active_tasks"
-            state.load_errors.append(load_error)
-        return latest
-    except Exception as exc:
-        state.load_errors.append(
-            runtime_error_report(exc, context="background_context.thread_active_tasks")
-        )
-        return None
-
-
-# LLM: 最小模型上下文与完整 bundle 使用相同的显示排除边界；读取失败不能把 UI 遥测写进 prompt。
-# 函数用途: 提供缺少其它会话材料时的最小运行上下文，不包含 Context 展示数字。
-# LLM: 精简模型上下文与完整上下文同样排除纯显示遥测，避免每次数字刷新破坏缓存前缀。
-# 函数用途: 构造无历史时的会话上下文，不把终端统计条传给模型。
-def _minimal_context_bundle(thread: ConversationThread) -> dict[str, Any]:
-    thread_payload = thread.to_dict()
-    thread_payload.pop("model_context_usage", None)
-    thread_payload.pop("model_metrics", None)
-    return {
-        "thread": thread_payload,
-        "messages": [],
-        "tasks": [],
-        "channel_bindings": [item.to_dict() for item in thread.channel_bindings],
-        "observations": [],
-        "guidance": [],
-    }
-
-
-def _recovery_snapshot(
-    agent: object, store: ConversationStore, thread_id: str, visible_run_ids: list[str]
-) -> dict[str, Any]:
-    claim = store.load_background_run_claim(thread_id)
-    previous = claim.get("previous_claim") if isinstance(claim.get("previous_claim"), dict) else {}
-    tree = agent_tree_status_payload(agent, {"visible_run_ids": visible_run_ids})
-    records = latest_artifact_records(getattr(agent, "root", "."))
-    payload = {
-        "schema_version": "background_recovery_snapshot.v1",
-        "effect": "read_only",
-        "does_not_block": True,
-        "current_claim_status": str(claim.get("status") or ""),
-        "current_claim_id": str(claim.get("claim_id") or ""),
-        "current_claim_reason": str(claim.get("reason") or ""),
-        "previous_claim_status": str(previous.get("status") or ""),
-        "previous_claim_error": previous.get("last_error")
-        if isinstance(previous.get("last_error"), dict)
-        else {},
-        "takeover": claim.get("takeover") if isinstance(claim.get("takeover"), dict) else {},
-        "tree_status_buckets": tree.get("status_buckets")
-        if isinstance(tree.get("status_buckets"), dict)
-        else {},
-        "artifact_registry_count": len(records),
-        "artifact_registry_status_counts": _artifact_status_counts(records),
-        "takeover_advice": "接手前先核对 claim、任务树和产物登记；不要把模型文本里的完成声明当成事实。",
-    }
-    if isinstance(claim.get("load_error"), dict):
-        payload["claim_load_error"] = claim["load_error"]
-    return payload
-
-
-def _artifact_status_counts(records: dict[str, object]) -> dict[str, int]:
-    counts: dict[str, int] = {}
-    for record in records.values():
-        status = str(getattr(record, "status", "") or "unknown")
-        counts[status] = counts.get(status, 0) + 1
-    return counts
 
 
 # Conversation runtime scheduler
@@ -4667,7 +2166,7 @@ _POLICY_FAILURE_MAX_BACKOFF_SECONDS = 3600
 _POLICY_FAILURE_RETIRE_AFTER = 3
 
 if TYPE_CHECKING:
-    from ..collaboration import CollaborationStore
+    pass
 
 
 # 供应断供的 tick 层长退避(治真机"429 限流断供把后台消费永久冻死"):短期限流在
@@ -4794,7 +2293,7 @@ def _consume_pending_wake_signals(
     wake_limit = scheduler._config_limit("conversation_pending_wake_limit")
     # Store 本来就会读取全部 pending 后再切片；这里保留完整队列，令前排被
     # recovery block 保留的旧事件不占掉新任务的消费窗口。
-    wake_signals = scheduler.store.pending_wake_signals(limit=0)
+    wake_signals = scheduler.store.wakes.pending(limit=0)
     for signal in wake_signals:
         if target_thread_id and signal.thread_id != target_thread_id:
             continue
@@ -4952,8 +2451,10 @@ def _wake_survives_inactive_root(signal: WakeSignal) -> bool:
     return _typed_audit_finding_signal(signal)
 
 
+# LLM: 调度与交付共用精确来源判据，不能将解释性 refs 或模型文字变成已报告证据。
+# 函数用途: 从持久唤醒提取可对账的审计交付引用。
 def _audit_finding_signal_delivery_refs(signal: WakeSignal) -> tuple[str, ...]:
-    return _audit_finding_payload_delivery_refs(signal.to_dict())
+    return audit_finding_payload_delivery_refs(signal.to_dict())
 
 
 def _reported_audit_finding_wake(
@@ -4976,13 +2477,15 @@ def _reported_audit_finding_wake(
     )
 
 
+# LLM: 只合并同一 thread/task/audit/epoch；已有冻结交付的唤醒必须独立重投，不能再次采样模型。
+# 函数用途: 判断两个审计发现能否共享一次后台报告工作片，不改变各自持久身份。
 def _same_audit_finding_batch(primary: WakeSignal, sibling: WakeSignal) -> bool:
     if not _typed_audit_finding_signal(primary) or not _typed_audit_finding_signal(sibling):
         return False
     if (
         primary.thread_id != sibling.thread_id
         or primary.root_task_id != sibling.root_task_id
-        or _cached_owner_delivery(sibling) is not None
+        or cached_owner_delivery(sibling) is not None
     ):
         return False
     primary_metadata = primary.metadata if isinstance(primary.metadata, dict) else {}
@@ -5005,6 +2508,8 @@ def _nonnegative_int(value: object) -> int:
         return -1
 
 
+# LLM: 批次保留每条唤醒身份和完整载荷，沿既有条数与 token 预算准入；冻结交付不参与模型批次。
+# 函数用途: 从待处理审计发现选择有界的同范围批次，未入选项留在原队列。
 def _select_audit_finding_batch(
     scheduler: BackgroundMainAgentScheduler,
     primary: WakeSignal,
@@ -5019,7 +2524,7 @@ def _select_audit_finding_batch(
     batch; this adds no Audit-specific semantic classification.
     """
 
-    if not _typed_audit_finding_signal(primary) or _cached_owner_delivery(primary) is not None:
+    if not _typed_audit_finding_signal(primary) or cached_owner_delivery(primary) is not None:
         return (primary,)
     config = getattr(getattr(scheduler.runtime, "agent", None), "config", None)
     item_limit = _agent_config_int(config, "background_pending_wake_prompt_limit") or 20
@@ -5105,9 +2610,9 @@ def _select_successful_completion_batch(
     return tuple(selected)
 
 
+# LLM: 只读同任务的结构化事件类型；审计专属批次及已冻结交付沿各自路径，不按正文合并。
+# 函数用途: 判断普通唤醒能否共同消费，避免把重投或无关事件混进一个工作片。
 def _same_reason_wake_batch(primary: WakeSignal, sibling: WakeSignal) -> bool:
-    """Batch only typed queue events proved to share one task and reason."""
-
     reason = str(primary.reason or "").strip().lower()
     if (
         not reason
@@ -5116,8 +2621,8 @@ def _same_reason_wake_batch(primary: WakeSignal, sibling: WakeSignal) -> bool:
         or primary.thread_id != sibling.thread_id
         or primary.root_task_id != sibling.root_task_id
         or reason != str(sibling.reason or "").strip().lower()
-        or _cached_owner_delivery(primary) is not None
-        or _cached_owner_delivery(sibling) is not None
+        or cached_owner_delivery(primary) is not None
+        or cached_owner_delivery(sibling) is not None
     ):
         return False
     return not _typed_audit_finding_signal(primary) and not _typed_audit_finding_signal(sibling)
@@ -5344,7 +2849,7 @@ def _wake_signal_root_is_inactive(store: object, signal: WakeSignal) -> bool:
     if not root_task_id:
         return False
     try:
-        links, _load_errors = store.task_links_report(signal.thread_id)
+        links, _load_errors = store.tasks.list_report(signal.thread_id)
     except Exception:
         return False
     return any(
@@ -5366,7 +2871,7 @@ def _consume_observation_batches(
     target_thread_id: str = "",
 ) -> None:
     observation_limit = scheduler._config_limit("conversation_unhandled_observation_limit")
-    pending_observations = scheduler.store.unhandled_observations_requiring_main(limit=0)
+    pending_observations = scheduler.store.observations.unhandled_requiring_main(limit=0)
     pending_observations = [
         observation
         for observation in pending_observations
@@ -5414,7 +2919,7 @@ def _observation_waits_for_linked_wake(
     wake_signal_id = str(getattr(observation, "wake_signal_id", "") or "").strip()
     if not wake_signal_id:
         return False
-    loader = getattr(store, "pending_wake_signal", None)
+    loader = getattr(getattr(store, 'wakes', None), 'pending_one', None)
     if not callable(loader):
         return True
     try:
@@ -5436,7 +2941,7 @@ def _consume_due_policies(
     *,
     target_thread_id: str = "",
 ) -> None:
-    enabled, load_errors = scheduler.store.list_progress_policies_report(enabled_only=True)
+    enabled, load_errors = scheduler.store.progress.list_report(enabled_only=True)
     scheduler.last_progress_policy_load_errors = load_errors
     scheduler.last_progress_policy_suppressed = []
     policies = [
@@ -5500,17 +3005,17 @@ def _ready_background_thread_ids(
         seen.add(normalized)
         ready.append(normalized)
 
-    for signal in scheduler.store.pending_wake_signals(limit=0):
+    for signal in scheduler.store.wakes.pending(limit=0):
         if current < scheduler._wake_retry_after.get(signal.wake_signal_id, 0.0):
             continue
         if _successful_completion_waiting_for_batch(scheduler, signal, current):
             continue
         append(signal.thread_id, signal.root_task_id)
-    for observation in scheduler.store.unhandled_observations_requiring_main(limit=0):
+    for observation in scheduler.store.observations.unhandled_requiring_main(limit=0):
         if _observation_waits_for_linked_wake(scheduler.store, observation):
             continue
         append(observation.thread_id, observation.root_task_id)
-    enabled, _load_errors = scheduler.store.list_progress_policies_report(enabled_only=True)
+    enabled, _load_errors = scheduler.store.progress.list_report(enabled_only=True)
     due = [policy for policy in enabled if policy.next_due_at <= current]
     runnable, _suppressed = _runnable_due_policies(
         scheduler.store,
@@ -5747,7 +3252,7 @@ class _BackgroundSchedulerTickMixin:
                 if not task_id or not wake_id:
                     continue
                 try:
-                    thread = self.store.thread_for_task(task_id)
+                    thread = self.store.tasks.thread_for(task_id)
                     if thread is None:
                         # 档案没了(任务已终结/未挂线程) → 清字条, 不唤醒
                         repo.complete_wake(wake_id)
@@ -5758,7 +3263,7 @@ class _BackgroundSchedulerTickMixin:
                         # 终态后直接作废, 不能复活任务。
                         repo.complete_wake(wake_id)
                         continue
-                    self.store.raise_wake_signal(
+                    self.store.wakes.raise_signal(
                         {
                             "thread_id": thread.thread_id,
                             "urgency": "normal",
@@ -5826,10 +3331,10 @@ class _BackgroundSchedulerTickMixin:
     def _task_has_active_goal(self, task_id: str) -> bool:
         """EXEC-39 同源: 任务是否持有 active goal(自动续跑授权)。"""
         try:
-            thread = self.store.thread_for_task(task_id)
+            thread = self.store.tasks.thread_for(task_id)
             if thread is None:
                 return False
-            goal = self.store.load_goal(thread.thread_id, task_id=task_id)
+            goal = self.store.goals.load(thread.thread_id, task_id=task_id)
             return (
                 goal is not None
                 and str(getattr(goal, "status", "") or "").strip().lower() == "active"
@@ -5840,10 +3345,10 @@ class _BackgroundSchedulerTickMixin:
     def _task_work_kind(self, task_id: str) -> str:
         """任务的 work_kind(link 权威); 读不到返回空串(fail-open 补字条)。"""
         try:
-            thread = self.store.thread_for_task(task_id)
+            thread = self.store.tasks.thread_for(task_id)
             if thread is None:
                 return ""
-            links, _errors = self.store.task_links_report(thread.thread_id)
+            links, _errors = self.store.tasks.list_report(thread.thread_id)
             for link in links:
                 if str(getattr(link, "task_id", "") or "") == task_id:
                     return str(getattr(link, "work_kind", "") or "").strip().lower()
@@ -5860,7 +3365,7 @@ class _BackgroundSchedulerTickMixin:
         失败)不在这里作废, 唤醒信号照发, 由消费链 _wake_signal_root_is_
         inactive 再核(fail-open, 读失败不丢闹钟)。"""
         try:
-            links, _errors = self.store.task_links_report(thread_id)
+            links, _errors = self.store.tasks.list_report(thread_id)
         except Exception:  # noqa: BLE001
             return "unknown"
         status = None
@@ -5978,7 +3483,7 @@ def _claim_scheduler_wake(
         now=now,
     )
     if result.status == "stale":
-        scheduler.store.mark_wake_signal_handled(signal.wake_signal_id, now=now)
+        scheduler.store.wakes.mark_handled(signal.wake_signal_id, now=now)
         return _WakeClaimState(stop=True)
     if result.status != "claimed" or result.claim is None:
         return _WakeClaimState(stop=True)
@@ -5990,6 +3495,8 @@ def _claim_scheduler_wake(
     return _WakeClaimState(claim=result.claim, heartbeat=heartbeat)
 
 
+# LLM: 冻结交付先于业务执行分支，重投不调用模型；跳过、消费、租约释放均沿原持久事实和顺序。
+# 函数用途: 为一条已选唤醒执行清理、交付恢复或新的后台工作片。
 def _execute_wake_signal(
     scheduler: BackgroundMainAgentScheduler,
     signal: WakeSignal,
@@ -6007,15 +3514,15 @@ def _execute_wake_signal(
     ):
         if claim is not None:
             scheduler.scheduler_service.release(claim, now=now)
-        scheduler.store.mark_wake_signal_handled(signal.wake_signal_id, now=now)
+        scheduler.store.wakes.mark_handled(signal.wake_signal_id, now=now)
         return _WakeExecution(terminal=True)
     if _is_legacy_per_source_audit_capacity_signal(signal):
-        scheduler.store.mark_wake_signal_handled(signal.wake_signal_id, now=now)
+        scheduler.store.wakes.mark_handled(signal.wake_signal_id, now=now)
         return _WakeExecution(terminal=True)
     if signal.wake_signal_id in scheduler._quota_fallback_wakes:
         return _WakeExecution(_provider_quota_fallback_report(scheduler, signal, now=now))
     scheduler._pre_wake_capability_sweep(lifecycle_reason, signal)
-    cached = _cached_owner_delivery(signal)
+    cached = cached_owner_delivery(signal)
     if cached is not None:
         channel, target = scheduler._observation_route(signal.thread_id)
         return _WakeExecution(
@@ -6036,7 +3543,7 @@ def _execute_wake_signal(
             scheduler.runtime.agent,
             str(signal.root_task_id or "").strip(),
         )
-        scheduler.store.mark_wake_signal_handled(signal.wake_signal_id, now=now)
+        scheduler.store.wakes.mark_handled(signal.wake_signal_id, now=now)
         return _WakeExecution(terminal=True)
     channel, target = scheduler._observation_route(signal.thread_id)
     _HEARTBEAT_LOGGER.info(
@@ -6104,7 +3611,7 @@ def _handle_nonquota_wake_error(
                 now=observed_at,
             )
             if terminal is not None:
-                scheduler.store.mark_wake_signal_handled(
+                scheduler.store.wakes.mark_handled(
                     signal.wake_signal_id,
                     now=observed_at,
                 )
@@ -6112,7 +3619,7 @@ def _handle_nonquota_wake_error(
         return
     status = "usage_limited" if is_provider_usage_limit_error(error) else "blocked"
     scheduler._stop_thread_goal_after_error(signal, status=status)
-    scheduler.store.mark_wake_signal_handled(signal.wake_signal_id, now=observed_at)
+    scheduler.store.wakes.mark_handled(signal.wake_signal_id, now=observed_at)
 
 
 def _finish_scheduler_wake_claim(
@@ -6167,7 +3674,7 @@ def _complete_wake_report(
         return None
     scheduler._quota_fallback_wakes.discard(signal.wake_signal_id)
     scheduler._wake_retry_after.pop(signal.wake_signal_id, None)
-    scheduler.store.mark_wake_signal_handled(signal.wake_signal_id, now=now)
+    scheduler.store.wakes.mark_handled(signal.wake_signal_id, now=now)
     if lifecycle_reason in {"audit_finding", "audit_capacity_alert"}:
         from .task_promotion import complete_named_audit_task_if_settled
 
@@ -6238,7 +3745,7 @@ def _quota_audit_work_name(
     signal: WakeSignal,
 ) -> str:
     try:
-        link = scheduler.store.load_task_link(str(signal.root_task_id or ""))
+        link = scheduler.store.tasks.load(str(signal.root_task_id or ""))
     except Exception:
         link = None
     return str(getattr(link, "work_name", "") or "").strip()
@@ -6298,7 +3805,7 @@ def _record_quota_fallback_message(
     content: str,
     channel: str,
 ) -> None:
-    scheduler.store.append_message(
+    scheduler.store.messages.append(
         {
             "thread_id": signal.thread_id,
             "role": "assistant",
@@ -6319,11 +3826,12 @@ class _BackgroundSchedulerGoalMixin:
     """Goal continuation, lifecycle preprocessing, and owner delivery routing."""
 
     # LLM: Turn errors and typed provider usage limits are system-owned goal stops, matching 会话运行时.
+    # 停止前从同源 goal_clock 结算一次活跃秒数，再在原 Goal 事务中更新状态。
     # 函数用途: 目标后台轮异常时原子停住同一目标与任务，等待用户恢复。
     def _stop_thread_goal_after_error(self, signal: WakeSignal, *, status: str) -> None:
         metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
-        with self.store.goal_transition_guard(signal.thread_id):
-            goal = self.store.load_goal(
+        with self.store.goals.transition_guard(signal.thread_id):
+            goal = self.store.goals.load(
                 signal.thread_id,
                 goal_id=str(metadata.get("goal_id") or "").strip(),
             )
@@ -6334,10 +3842,10 @@ class _BackgroundSchedulerGoalMixin:
                 or goal.task_id != str(signal.root_task_id or "")
             ):
                 return
-            elapsed = self.store.take_goal_elapsed_seconds(goal)
+            elapsed = self.store.goal_clock.take_elapsed_seconds(goal)
             if elapsed:
                 goal = (
-                    self.store.account_goal_usage(
+                    self.store.goals.account_usage(
                         {
                             "thread_id": goal.thread_id,
                             "goal_id": goal.goal_id,
@@ -6347,7 +3855,7 @@ class _BackgroundSchedulerGoalMixin:
                     )
                     or goal
                 )
-            updated = self.store.update_goal(
+            updated = self.store.goals.update(
                 {
                     "thread_id": goal.thread_id,
                     "goal_id": goal.goal_id,
@@ -6357,7 +3865,7 @@ class _BackgroundSchedulerGoalMixin:
             )
             if updated is None:
                 return
-            self.store.update_task_status({"task_id": goal.task_id, "status": "interrupted"})
+            self.store.tasks.update_status({"task_id": goal.task_id, "status": "interrupted"})
             registry = getattr(
                 getattr(getattr(self.runtime, "agent", None), "local_store", None),
                 "task_registry",
@@ -6380,7 +3888,7 @@ class _BackgroundSchedulerGoalMixin:
             return
         try:
             metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
-            goal = self.store.load_goal(
+            goal = self.store.goals.load(
                 signal.thread_id,
                 goal_id=str(metadata.get("goal_id") or "").strip(),
             )
@@ -6401,7 +3909,7 @@ class _BackgroundSchedulerGoalMixin:
             )
             if goal.status != "active":
                 if goal.status in {"blocked", "usage_limited", "budget_limited"}:
-                    self.store.update_task_status(
+                    self.store.tasks.update_status(
                         {"task_id": goal.task_id, "status": "interrupted"}
                     )
                 return
@@ -6473,7 +3981,7 @@ class _BackgroundSchedulerGoalMixin:
             }
         )
         if report is not None:
-            self.store.mark_observations_handled(
+            self.store.observations.mark_handled(
                 [item.observation_id for item in observations], now=now
             )
         return report
@@ -6491,7 +3999,7 @@ class _BackgroundSchedulerGoalMixin:
         ⚠️ ①在②之前:owner_id 是 provider 的 user_id,生产环境恰等于 open_id,但概念上不等于线程
            binding 的 channel_user_id;②排前面会让已绑定线程错发到 owner_id 而非 open_id(实锤)。"""
         try:
-            thread = self.store.load_thread(thread_id)
+            thread = self.store.threads.load(thread_id)
         except Exception:
             thread = None
         bindings = list(getattr(thread, "channel_bindings", ()) or ())
@@ -6555,12 +4063,12 @@ def _background_claim_scope_id(
     if not selected_thread or not selected_task:
         return ""
     try:
-        if callable(getattr(store, "task_links_report", None)):
-            links, errors = store.task_links_report(selected_thread)
+        if callable(getattr(getattr(store, 'tasks', None), 'list_report', None)):
+            links, errors = store.tasks.list_report(selected_thread)
             if errors:
                 return ""
         else:
-            links = store.task_links(selected_thread)
+            links = store.tasks.list(selected_thread)
     except Exception:
         return ""
     link = next(
@@ -6631,7 +4139,7 @@ class _BackgroundSchedulerExecutionMixin:
             ensure_goal_progress_continuation(
                 self.runtime.agent, task_id=policy.task_id, thread_id=policy.thread_id, store=self.store, now=now,
             )
-            self.store.disable_progress_policy(policy.policy_id)
+            self.store.progress.disable(policy.policy_id)
             return None
         if str(metadata.get("kind") or "") == "subagent_progress_watch":
             watched = str(metadata.get("watch_run_id") or "").strip()
@@ -6655,7 +4163,7 @@ class _BackgroundSchedulerExecutionMixin:
                 )
                 if status.upper() in _POLICY_RETIRE_TERMINAL_STATUSES:
                     try:
-                        self.store.disable_progress_policy(policy.policy_id)
+                        self.store.progress.disable(policy.policy_id)
                     except Exception:
                         pass
                     return None
@@ -6675,7 +4183,7 @@ class _BackgroundSchedulerExecutionMixin:
             # 问题6:成功 run 清零失败账(failure_count=0),退避/退休账目复原——
             # 一旦恢复,policy 回正常 interval,绝不带着旧失败历史继续减速。
             metadata_updates["failure_count"] = 0
-            self.store.mark_progress_reported(
+            self.store.progress.mark_reported(
                 policy.policy_id,
                 now=now,
                 no_progress_streak=_next_no_progress_streak(policy, report),
@@ -6697,7 +4205,7 @@ class _BackgroundSchedulerExecutionMixin:
             str(kwargs.get("thread_id") or ""),
             str(kwargs.get("task_id") or ""),
         )
-        claim = self.store.claim_background_run(
+        claim = self.store.claims.acquire(
             {
                 "thread_id": kwargs.get("thread_id", ""),
                 "claim_scope_id": claim_scope_id,
@@ -6771,7 +4279,7 @@ class _BackgroundSchedulerExecutionMixin:
             # run that recovery code may try to take over.
             status = "cancelled"
             return None
-        except _BackgroundCompactSliceYield:
+        except BackgroundCompactSliceYield:
             # The exact wake/observation/policy remains unhandled. Closing only this bounded
             # execution claim lets the next scheduler slice resume from canonical checkpoints
             # without logging a fake crash or incrementing policy failure counters.
@@ -6782,7 +4290,7 @@ class _BackgroundSchedulerExecutionMixin:
             raise
         finally:
             heartbeat.stop()
-            self.store.finish_background_run(
+            self.store.claims.finish(
                 {
                     "thread_id": kwargs["thread_id"],
                     "claim_scope_id": claim_scope_id,
@@ -6821,7 +4329,7 @@ class _BackgroundSchedulerExecutionMixin:
                 policy_id = str(getattr(wake, "policy_id", "") or "")
             if not policy_id:
                 return
-            policy = self.store.get_progress_policy(policy_id)
+            policy = self.store.progress.load(policy_id)
             if policy is None:
                 return
             metadata = policy.metadata if isinstance(policy.metadata, dict) else {}
@@ -6833,7 +4341,7 @@ class _BackgroundSchedulerExecutionMixin:
                 recorded_at = float(kwargs.get("now") or 0.0) or now()
             except (TypeError, ValueError):
                 recorded_at = now()
-            self.store.mark_progress_failed(
+            self.store.progress.mark_failed(
                 policy_id,
                 now=recorded_at,
                 backoff_seconds=backoff,
@@ -6848,7 +4356,7 @@ class _BackgroundSchedulerExecutionMixin:
                     backoff,
                 )
         except Exception:
-            # 记账失败绝不能让主流程连带崩:失败本身已由 finish_background_run 记录,
+            # 记账失败绝不能让主流程连带崩:失败本身已由 claims.finish 记录,
             # 这里只是补 policy 退避账,最坏情况退回旧行为(下次仍 due)。
             _HEARTBEAT_LOGGER.warning("record policy failure failed", exc_info=True)
 
@@ -6873,7 +4381,7 @@ class _BackgroundSchedulerExecutionMixin:
         return heartbeat
 
     def _mark_signal(self, signal: WakeSignal, current: float, handled: set[str]) -> None:
-        self.store.mark_wake_signal_handled(signal.wake_signal_id, now=current)
+        self.store.wakes.mark_handled(signal.wake_signal_id, now=current)
         handled.add(signal.wake_signal_id)
 
     # LLM: sampled_at 是本次模型轮开始的结构化时刻；晚于它创建的 sibling 是新事实，
@@ -7099,7 +4607,7 @@ def ensure_goal_progress_continuation(
     if not thread_id:
         return False
     try:
-        goal = selected_store.load_goal(thread_id, goal_id=goal_id, task_id=task_id)
+        goal = selected_store.goals.load(thread_id, goal_id=goal_id, task_id=task_id)
     except Exception:
         return False
     if (
@@ -7122,7 +4630,7 @@ def ensure_goal_progress_continuation(
 
 def _thread_id_for_task(store: ConversationStore, task_id: str) -> str:
     try:
-        thread = store.thread_for_task(task_id)
+        thread = store.tasks.thread_for(task_id)
     except Exception:
         return ""
     return str(getattr(thread, "thread_id", "") or "").strip()
@@ -7247,7 +4755,7 @@ def _is_running_durable_audit_root_policy(store: object, policy: ProgressPolicy)
     window, and effective source bindings must all be present.
     """
 
-    loader = getattr(store, "load_task_link", None)
+    loader = getattr(getattr(store, 'tasks', None), 'load', None)
     if not callable(loader):
         return False
     try:
@@ -7269,7 +4777,7 @@ def _policy_task_link_is_terminal(store, policy: ProgressPolicy) -> bool:
     if not policy.task_id:
         return False
     try:
-        links = store.task_links(policy.thread_id)
+        links = store.tasks.list(policy.thread_id)
     except Exception:
         return False
     for link in links:
@@ -7370,7 +4878,7 @@ def _finish_nonexecuted_background_claim(
     runtime_facts: dict[str, object] = {"admission": admission}
     if recovery_block is not None:
         runtime_facts["recovery_block"] = dict(recovery_block)
-    store.finish_background_run(
+    store.claims.finish(
         {
             "thread_id": kwargs.get("thread_id", ""),
             "claim_scope_id": claim_scope_id,
@@ -7406,7 +4914,7 @@ def _retire_terminal_background_source(store: object, kwargs: dict) -> None:
     wake = kwargs.get("wake_signal")
     if isinstance(wake, WakeSignal):
         try:
-            store.mark_wake_signal_handled(wake.wake_signal_id, now=now())
+            store.wakes.mark_handled(wake.wake_signal_id, now=now())
         except Exception:
             pass
         return
@@ -7416,7 +4924,7 @@ def _retire_terminal_background_source(store: object, kwargs: dict) -> None:
     if not policy_id:
         return
     try:
-        store.disable_progress_policy(policy_id, now=now())
+        store.progress.disable(policy_id, now=now())
     except Exception:
         pass
 
@@ -7459,9 +4967,9 @@ def _suppressed_policy_action(agent: object | None, policy: ProgressPolicy, reas
 def _apply_suppressed_policy(store, policy: ProgressPolicy, action: str, *, now: float) -> None:
     try:
         if action == "retire":
-            store.disable_progress_policy(policy.policy_id, now=now)
+            store.progress.disable(policy.policy_id, now=now)
         else:
-            store.mark_progress_reported(policy.policy_id, now=now)
+            store.progress.mark_reported(policy.policy_id, now=now)
     except Exception:
         pass
 
@@ -7529,57 +5037,3 @@ def resume_prompt_for(*, continuation_reason: str, continuation_seq: int, user_t
         f"【系统续跑 #{continuation_seq}】上一轮因 {continuation_reason} 收口，"
         f"任务尚未完成。请基于已有进度继续推进原任务：{user_task}"
     )
-
-
-CONTINUABLE_REASONS = frozenset(
-    {
-        "TASK_PROGRESS_OPEN",
-        "TOOL_ROUND_LIMIT_REACHED",
-        "REPEATED_TOOL_FAILURE",
-        # 2026-08-15 3×3 真机: 模型输出未闭合 [TOOL_CALL] 纯格式错误——
-        # 整轮零执行已保证安全(J.5 不变), 任务级允许续跑(重发完整工具块);
-        # 仅 response_decision 对全 TOOL_CALL_UNCLOSED violations 产生此
-        # reason, 其他协议违规仍 blocked fail-closed。
-        "TOOL_CALL_UNCLOSED",
-        # 只有工具轮硬边界、协议截断或上下文溢出这类宿主无法自然完成的工作片
-        # 才能自动续跑。单个工具失败已经作为 typed result 返回同一模型；模型给出
-        # plain final 后不得再由机器覆盖结论或另起返工轮。
-        "MODEL_RESPONSE_TRUNCATED",
-        # EXEC-28 阶段二 ma-b 真机: 写码 92 轮后工具上下文 398K 字符溢出,
-        # preflight 收口 context_overflow RC=2 不在白名单 → 直接退出, 已写
-        # 20 文件白费。对照 会话运行时 自动 compact 后任务继续。上下文溢出同属
-        # 返工门(compact→续跑), 应自动续跑。
-        "CONTEXT_OVERFLOW",
-    }
-)
-
-
-def should_continue_task(final_response: object) -> tuple[bool, str]:
-    """判断一次收口是否允许由 Goal 或显式 resume 继续(结构化)。
-
-    返回 (should, reason): should=True 只表示技术上可继续，不代表普通任务会
-    自动调度。blocked/协议违规/UNKNOWN effect 等一律 False。
-
-    显式 Goal 的 finalization 与 CLI 手动/Goal 驱动共用这条精确条件。
-    """
-    reason = str(getattr(final_response, "runtime_reason", "") or "").strip().upper()
-    source = str(getattr(final_response, "runtime_source", "") or "").strip()
-    status = str(getattr(final_response, "runtime_status", "") or "").strip().lower()
-    if reason in CONTINUABLE_REASONS:
-        # 双席 seq1989 结构门: TOOL_CALL_UNCLOSED 只由协议适配器在
-        # unfinished 收口产生——补 source/status 精确约束, 防其他路径误标
-        # 同一 reason 被放行续跑(生产路径由 host 结构化赋值, 此处防御性)。
-        if reason == "TOOL_CALL_UNCLOSED" and not (
-            source == "tool_protocol_adapter" and status == "unfinished"
-        ):
-            return False, reason or "not_continuable"
-        if reason == "MODEL_RESPONSE_TRUNCATED" and not (
-            source == "tool_loop" and status == "unfinished"
-        ):
-            return False, reason or "not_continuable"
-        if reason == "CONTEXT_OVERFLOW" and not (
-            source == "preflight" and status == "context_overflow"
-        ):
-            return False, reason or "not_continuable"
-        return True, reason
-    return False, reason or "not_continuable"

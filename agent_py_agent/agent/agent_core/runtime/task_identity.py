@@ -46,7 +46,7 @@ def conversation_task_progress_ledger_id(store: object, task_id: object) -> str:
     selected = str(task_id or "").strip()
     if not selected:
         return ""
-    loader = getattr(store, "load_task_link", None) if store is not None else None
+    loader = getattr(getattr(store, 'tasks', None), 'load', None) if store is not None else None
     if not callable(loader):
         return selected
     try:

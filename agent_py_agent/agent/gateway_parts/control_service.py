@@ -1,3 +1,6 @@
+# LLM: 控制状态沿 owner/thread 和持久回执处理；首次 Goal 目录共用请求校验，不改变已有执行目录。
+# Goal 状态页只读共享 goal_clock，不持有独立计时或用量状态。
+# 模块用途: 将显式控制命令应用到当前会话，保持任务、历史、权限和中断边界。
 from __future__ import annotations
 
 """Conversation task controls backed by request and durable task ledgers.
@@ -56,6 +59,7 @@ from .audit_control_service import AuditControlRequest, execute_audit_control_op
 from .goal_control_service import GoalControlRequest, execute_goal_control_operation
 from .io import gateway_turn_transition, read_json_file_report, update_json_file_atomic
 from .paths import GatewayPaths, gateway_chunk_path, gateway_paths_from_root
+from .workspace_scope import GatewayWorkspaceScopeError, gateway_request_workspace_scope
 
 _ACTIVE_SUBAGENT_STATUSES = {
     "PLANNING",
@@ -69,6 +73,7 @@ _DONE_SUBAGENT_STATUSES = {"DONE", "CANCELLED"}
 
 # LLM: Authenticated issuer facts and a once-resolved owner are separate. Durable control receipts
 # persist both; callers must never derive owner authority from command text or a later config read.
+# workspace 是未校验的客户端 JSON，必须经过共享目录校验才可写入线程，不能据此取得权限。
 # 类用途: 保存一条控制命令的可信来源、会话定位和可选的固定 owner 身份。
 @dataclass(frozen=True)
 class GatewayControlScope:
@@ -78,6 +83,7 @@ class GatewayControlScope:
     metadata: dict[str, object] = field(default_factory=dict)
     all_user_access: bool = False
     resolved_owner: OwnerIdentity | None = None
+    workspace: object = None
 
 
 @dataclass(frozen=True)
@@ -162,7 +168,7 @@ def _active_turn_request_id(active: _GatewayRequestRecord | None) -> str:
     return _record_id(active)
 
 
-# LLM: Receipt lookup resolves the same owner/thread store as control routing and validates all
+# LLM: 插话持久操作经 guidance 领域组件； Receipt lookup resolves the same owner/thread store as control routing and validates all
 # available ingress facts. It never scans another owner's files or infers identity from content.
 # 函数用途: 查询一条补充消息是否已经有持久化投递结果。
 def _active_turn_steer_receipt(
@@ -175,7 +181,7 @@ def _active_turn_steer_receipt(
         return None
     owner_agent = _request_agent_for_scope(base_agent, scope)
     store = owner_agent.conversation_store
-    thread = store.resolve_thread(
+    thread = store.threads.resolve(
         channel=scope.channel,
         channel_conversation_id=scope.conversation_id,
         channel_user_id=scope.user_id,
@@ -183,10 +189,10 @@ def _active_turn_steer_receipt(
     if thread is None:
         return None
     key = active_turn_guidance_dedupe_key(scope)
-    receipt = store.guidance_once_receipt(key)
+    receipt = store.guidance.receipt(key)
     if receipt is None:
         legacy_key = _legacy_active_turn_guidance_dedupe_key(thread.thread_id, message_id)
-        receipt = store.guidance_once_receipt(legacy_key)
+        receipt = store.guidance.receipt(legacy_key)
         if receipt is not None:
             key = legacy_key
     if receipt is None:
@@ -306,8 +312,8 @@ def reconcile_gateway_steer_delivery(
     return _reconcile_existing_steer_receipt(paths, scope, receipt, turn_id)
 
 
-# LLM: 每个通道使用同一结构化控制；interrupt 保留 active Goal，普通 stop 才暂停，不解析聊天正文。
-# 函数用途：执行即时命令并返回确认，目标续接仍受同一会话执行锁保护。
+# LLM: Goal 调度、当前回合中断、任务资源停止是三个边界；仅明确 stop 才组合后两者并暂停续跑。
+# 函数用途: 分派结构化控制，避免已暂停 Goal 或普通任务的 interrupt 落入资源停止。
 def execute_gateway_conversation_control(
     agent: object,
     paths: GatewayPaths,
@@ -475,8 +481,8 @@ def _execute_audit_control(
                 continue
             stopped_request_ids.append(request_id)
             interrupt_by_name(conversation_request_interrupt_name(request_id))
-            _cancel_request_subagents_async(owner_agent, request_id)
-        thread = store.get_or_create_thread(
+            _cancel_request_execution(owner_agent, request_id)
+        thread = store.threads.get_or_create(
             {
                 "canonical_user_id": scope.user_id,
                 "owner_id": str(
@@ -544,7 +550,7 @@ def _pending_exact_audit_requests(
 
 
 # LLM: 普通输入复用精确回合投递；后台执行须有同任务的 running claim，单有活动链接不能冒充执行权。
-# 函数用途：把前台或后台正在执行时的补充消息交给当前代理，不让后台 Goal 的插话排到整个任务之后。
+# 函数用途:把前台或后台正在执行时的补充消息交给当前代理，不让后台 Goal 的插话排到整个任务之后。
 def steer_active_conversation_if_running(
     agent: object,
     paths: GatewayPaths,
@@ -604,14 +610,14 @@ def _running_background_input_target(
         return None
     store = _request_agent_for_scope(agent, scope).conversation_store
     thread_id = str(active.payload.get("conversation_thread_id") or "")
-    claim = store.load_background_run_claim(thread_id)
+    claim = store.claims.load(thread_id)
     if (claim.get("load_error") or claim.get("status") != "running"
             or str(claim.get("task_id") or "") != _record_id(active)):
         return None
     return active
 
 
-# LLM: Resolve authority from trusted scope, then delegate lifecycle semantics to the single goal service.
+# LLM: 先解析可信 owner；首次创建时共用请求目录校验，仅初始化空 cwd，不能重定向已绑定任务。
 # 函数用途: 为显式 `/goal` 命令解析当前 owner/thread 并执行目标操作。
 def _execute_goal_control(
     base_agent: object,
@@ -622,7 +628,10 @@ def _execute_goal_control(
     try:
         owner_agent = _request_agent_for_scope(base_agent, scope)
         store = owner_agent.conversation_store
-        thread = store.get_or_create_thread(
+        cwd, roots = "", ()
+        if command.operation == "create" and scope.workspace is not None:
+            cwd, roots = gateway_request_workspace_scope(owner_agent, {"workspace": scope.workspace})
+        thread = store.threads.get_or_create(
             {
                 "canonical_user_id": scope.user_id,
                 "owner_id": str(getattr(getattr(owner_agent, "home_paths", None), "owner_id", "") or ""),
@@ -642,16 +651,19 @@ def _execute_goal_control(
                 thread=thread,
                 command=command,
                 scope=scope,
-                interrupt_goal=lambda goal: _interrupt_goal_task(owner_agent, goal),
+                initial_cwd=cwd,
+                initial_workspace_roots=roots,
                 resume_registry=lambda task_id: _resume_task_registry_record(owner_agent, task_id),
             )
         )
+    except GatewayWorkspaceScopeError as exc:
+        return ConversationControlResult("goal", False, str(exc), error_code=exc.error_code)
     except Exception:
         return ConversationControlResult("goal", False, "持续目标状态暂时不可用，请稍后重试。")
 
 
 # LLM: Verbose is a per-thread control setting; the command text never enters a model turn.
-# 函数用途：在精确 owner/thread 上读取或修改过程显示档位，并返回确定性系统回执。
+# 函数用途:在精确 owner/thread 上读取或修改过程显示档位，并返回确定性系统回执。
 def _execute_verbose_control(
     base_agent: object,
     command: ConversationControlCommand,
@@ -660,7 +672,7 @@ def _execute_verbose_control(
     try:
         owner_agent = _request_agent_for_scope(base_agent, scope)
         store = owner_agent.conversation_store
-        thread = store.get_or_create_thread(
+        thread = store.threads.get_or_create(
             {
                 "canonical_user_id": scope.user_id,
                 "owner_id": str(
@@ -676,7 +688,7 @@ def _execute_verbose_control(
             }
         )
         if command.value:
-            thread = store.update_verbose_level(thread.thread_id, command.value)
+            thread = store.threads.update_verbose_level(thread.thread_id, command.value)
         level = str(getattr(thread, "verbose_level", "off") or "off")
         return ConversationControlResult(
             "verbose",
@@ -786,7 +798,7 @@ def _execute_registered_compact_control(
         from ..settings.model_scope import selected_model_scope
 
         with _manual_compact_lane(owner_agent, store, thread.thread_id), selected_model_scope(owner_agent, thread_id=thread.thread_id):
-            refreshed = store.load_thread(thread.thread_id)
+            refreshed = store.threads.load(thread.thread_id)
             if refreshed is None:
                 raise OSError("conversation thread disappeared before manual compact")
             before = inspect_conversation_context(owner_agent, store, refreshed)
@@ -980,22 +992,11 @@ def _execute_effort_control(
 # compact must not create a new thread as a side effect or fall back to another conversation.
 # 函数用途: 按用户、通道和会话 id 读取当前唯一 thread，找不到就返回空。
 def _conversation_thread_for_scope(store: object, scope: GatewayControlScope):
-    return store.resolve_thread(
+    return store.threads.resolve(
         channel=scope.channel,
         channel_conversation_id=scope.conversation_id,
         channel_user_id=scope.user_id,
     )
-
-
-# LLM: Pause/clear interrupts the current goal turn and descendants while preserving its durable task workspace.
-# 函数用途: 停止持续目标当前执行域与子代理，但不删除目标现场。
-def _interrupt_goal_task(owner_agent: object, goal: object) -> None:
-    task_id = str(getattr(goal, "task_id", "") or "")
-    store = owner_agent.conversation_store
-    store.update_task_status({"task_id": task_id, "status": "interrupted"})
-    _interrupt_task_registry_record(owner_agent, task_id)
-    interrupt_by_name(conversation_request_interrupt_name(task_id))
-    _cancel_request_subagents_async(owner_agent, task_id)
 
 
 # LLM: Resume updates the existing task projection; it never registers a second task identity.
@@ -1018,7 +1019,7 @@ def _resume_task_registry_record(owner_agent: object, task_id: str) -> None:
 
 
 # LLM: Durable task selection wins over a transient chat request and uses only owner/thread links.
-# 函数用途：先找会话仍活跃的根任务；尚未晋升时才回落 processing 请求。
+# 函数用途:先找会话仍活跃的根任务；尚未晋升时才回落 processing 请求。
 def _active_control_target(
     base_agent: object,
     paths: GatewayPaths,
@@ -1056,7 +1057,7 @@ def _linked_active_task_record(
 
 
 # LLM: Request selection uses structured owner/channel/conversation facts and never message text.
-# 函数用途：找到当前会话唯一的 processing 请求；同会话单飞时通常只有一个。
+# 函数用途:找到当前会话唯一的 processing 请求；同会话单飞时通常只有一个。
 def _active_request(paths: GatewayPaths, scope: GatewayControlScope) -> _GatewayRequestRecord | None:
     records = [
         record
@@ -1137,14 +1138,14 @@ def _active_conversation_task(
     try:
         owner_agent = _request_agent_for_scope(base_agent, scope)
         store = owner_agent.conversation_store
-        thread = store.resolve_thread(
+        thread = store.threads.resolve(
             channel=scope.channel,
             channel_conversation_id=scope.conversation_id,
             channel_user_id=scope.user_id,
         )
         if thread is None:
             return None
-        links, load_errors = store.task_links_report(thread.thread_id)
+        links, load_errors = store.tasks.list_report(thread.thread_id)
     except Exception:
         return None
     if load_errors:
@@ -1311,7 +1312,7 @@ def _linked_conversation_task_id(record: _GatewayRequestRecord | None) -> str:
 
 
 # LLM: Corrupt request records cannot prove ownership and are therefore excluded fail-closed.
-# 函数用途：读取目录中属于当前用户会话的请求记录。
+# 函数用途:读取目录中属于当前用户会话的请求记录。
 def _matching_requests(folder: Path, scope: GatewayControlScope) -> list[_GatewayRequestRecord]:
     records: list[_GatewayRequestRecord] = []
     try:
@@ -1329,7 +1330,7 @@ def _matching_requests(folder: Path, scope: GatewayControlScope) -> list[_Gatewa
 
 
 # LLM: Even administrators get conversation-scoped selection unless they explicitly omit a user fact.
-# 函数用途：比较请求里的结构化渠道、会话和用户身份。
+# 函数用途:比较请求里的结构化渠道、会话和用户身份。
 def _request_matches_scope(payload: dict[str, object], scope: GatewayControlScope) -> bool:
     conversation = payload.get("conversation")
     conversation = conversation if isinstance(conversation, dict) else {}
@@ -1353,8 +1354,8 @@ def _request_matches_scope(payload: dict[str, object], scope: GatewayControlScop
     return bool(scope.conversation_id or (scope.all_user_access and scope.user_id))
 
 
-# LLM: Steering targets exactly one active request or durable root task, never a later chat turn.
-# 函数用途：把用户补充写入当前 owner 的当前任务引导收件箱。
+# LLM: 插话持久操作经 guidance 领域组件； Steering targets exactly one active request or durable root task, never a later chat turn.
+# 函数用途:把用户补充写入当前 owner 的当前任务引导收件箱。
 def _steer_active_request(
     base_agent: object,
     paths: GatewayPaths,
@@ -1410,9 +1411,9 @@ def _steer_active_request(
             thread_id = _control_thread_id(store, active, scope)
             if not thread_id:
                 raise ValueError("conversation thread is unavailable")
-            with store.guidance_turn_transition_guard(turn_id):
+            with store.guidance.ledger.turn_guard(turn_id):
                 if target_type == "task":
-                    with store.task_transition_guard(request_id):
+                    with store.tasks.transition_guard(request_id):
                         if not _durable_task_is_current(owner_agent, active):
                             return ConversationControlResult(
                                 "steer",
@@ -1492,6 +1493,8 @@ def _load_open_exact_turn(
     return payload
 
 
+# LLM: Gateway 控制入口以明确目标和回合写入 guidance；稳定消息 ID 决定幂等路径，联测重复控制请求。
+# 函数用途: 构造补充消息及宿主元数据，写入原插话回执和队列。
 def _append_control_guidance(
     store: object,
     target_type: str,
@@ -1523,14 +1526,14 @@ def _append_control_guidance(
         },
     }
     if channel_message_id:
-        return store.append_guidance_once(
+        return store.guidance.append_once(
             payload,
             dedupe_key=active_turn_guidance_dedupe_key(scope),
         )
-    return store.append_guidance(payload)
+    return store.guidance.append(payload)
 
 
-# LLM: The Gateway writes a terminal receipt before returning or retiring the guidance row.
+# LLM: 插话持久操作经 guidance 领域组件； The Gateway writes a terminal receipt before returning or retiring the guidance row.
 # Missing dedupe metadata denotes an internal non-idempotent caller; rejection must still retire its
 # legacy queue row so a later task cannot consume input that lost the exact-task race.
 # 函数用途: 将已写入的补充消息回执确定为接收或拒绝。
@@ -1538,9 +1541,9 @@ def _mark_control_guidance_result(store: object, entry: GuidanceEntry, status: s
     metadata = entry.metadata if isinstance(entry.metadata, dict) else {}
     dedupe_key = str(metadata.get("dedupe_key") or "").strip()
     if dedupe_key:
-        return store.mark_guidance_once_status(dedupe_key, status)
+        return store.guidance.mark_status(dedupe_key, status)
     if status == "rejected":
-        store.mark_guidance_delivered([entry.guidance_id])
+        store.guidance.ledger.mark_delivered([entry.guidance_id])
     return None
 
 
@@ -1578,7 +1581,7 @@ def _control_result_for_guidance_winner(winner: object, request_id: str) -> Conv
     )
 
 
-# LLM: Existing guidance is bound to its receipt's exact turn, never the current active projection.
+# LLM: 插话持久操作经 guidance 领域组件； Existing guidance is bound to its receipt's exact turn, never the current active projection.
 # T and the store mailbox guard stay held through terminal rejection, matching provider admission's
 # T-to-M lock order; missing or corrupt lifecycle evidence remains UNKNOWN instead of losing input.
 # 函数用途: 按回执首次绑定的回合对账补充消息，只在锁内证明该回合终态时拒绝尚未认领的记录。
@@ -1595,8 +1598,8 @@ def _reconcile_existing_steer_receipt(
         lifecycle = _exact_gateway_turn_lifecycle_locked(paths, scope, turn_id)
         if lifecycle != "terminal":
             return _unknown_existing_steer_result(receipt, turn_id)
-        with receipt.store.guidance_turn_transition_guard(turn_id):
-            winner = receipt.store.mark_guidance_once_status(
+        with receipt.store.guidance.ledger.turn_guard(turn_id):
+            winner = receipt.store.guidance.mark_status(
                 receipt.dedupe_key,
                 "rejected",
             )
@@ -1692,13 +1695,13 @@ def _control_thread_id(
         direct = str(runtime.get("thread_id") or "").strip()
         if direct:
             return direct
-    thread = store.resolve_thread(
+    thread = store.threads.resolve(
         channel=scope.channel,
         channel_conversation_id=scope.conversation_id,
         channel_user_id=scope.user_id,
     )
     if thread is None:
-        thread = store.get_or_create_thread(
+        thread = store.threads.get_or_create(
             {
                 "canonical_user_id": scope.user_id,
                 "channel": scope.channel,
@@ -1730,7 +1733,7 @@ def _durable_task_is_current(owner_agent: object, active: _GatewayRequestRecord)
         # still rejects a real task switch.
     thread_id = str(active.payload.get("conversation_thread_id") or "").strip()
     try:
-        links, load_errors = owner_agent.conversation_store.task_links_report(thread_id)
+        links, load_errors = owner_agent.conversation_store.tasks.list_report(thread_id)
     except Exception:
         return False
     if load_errors:
@@ -1771,7 +1774,7 @@ def _linked_request_target_state(linked: _GatewayRequestRecord, task_id: str) ->
 
 
 # LLM: Publish a wake only when no linked live execution turn exists; live turns consume the durable FIFO guidance in place.
-# 函数用途：只唤醒当前没有执行线的持久任务，避免 `/btw` 为同一任务启动第二个主执行器。
+# 函数用途:只唤醒当前没有执行线的持久任务，避免 `/btw` 为同一任务启动第二个主执行器。
 def _wake_for_task_guidance(
     owner_agent: object,
     active: _GatewayRequestRecord,
@@ -1798,7 +1801,7 @@ def _wake_for_task_guidance(
             "channel": scope.channel,
             "conversation_id": scope.conversation_id,
         }
-        goal = owner_agent.conversation_store.load_goal(
+        goal = owner_agent.conversation_store.goals.load(
             thread_id,
             task_id=_record_id(active),
         )
@@ -1809,7 +1812,7 @@ def _wake_for_task_guidance(
         ):
             reason = "thread_goal_continue"
             metadata["goal_id"] = goal.goal_id
-        owner_agent.conversation_store.raise_wake_signal(
+        owner_agent.conversation_store.wakes.raise_signal(
             {
                 "thread_id": thread_id,
                 "root_task_id": _record_id(active),
@@ -1825,7 +1828,7 @@ def _wake_for_task_guidance(
 
 
 # LLM: Stop persists run interruption before signalling workers; it must preserve the durable task/workspace for an explicit later resume.
-# 函数用途：中断当前执行轮并异步回收其子代理进程，但不删除会话、任务或工作目录。
+# 函数用途:中断当前执行轮并异步回收其子代理进程，但不删除会话、任务或工作目录。
 def _stop_active_request(
     base_agent: object,
     active: _GatewayRequestRecord,
@@ -1848,7 +1851,7 @@ def _stop_active_request(
     except Exception:
         owner_agent = None
     if owner_agent is not None:
-        _cancel_request_subagents_async(owner_agent, request_id)
+        _cancel_request_execution(owner_agent, request_id)
     return ConversationControlResult(
         "stop",
         True,
@@ -1857,8 +1860,8 @@ def _stop_active_request(
     )
 
 
-# LLM: 只停止精确活动请求；interrupt_only 传给持久任务控制，不能在传输中丢失而暂停 Goal。
-# 函数用途：先中断本窗口当前执行轮，再按控制语义处理目标和子代理。
+# LLM: interrupt_only 在无持久任务和 paused Goal 下也不能关闭资源；只对精确当前请求发中断。
+# 函数用途: 中断窗口当前执行链，明确 stop 时才继续走任务与子树收口。
 def _stop_live_window_request(
     base_agent: object,
     paths: GatewayPaths,
@@ -1877,7 +1880,7 @@ def _stop_live_window_request(
     with gateway_turn_transition(paths, request_id):
         marked, failure_message = _mark_request_stopping_locked(live_request, scope)
         if marked and store is not None:
-            store.reject_pending_guidance_for_turn(request_id)
+            store.guidance.recovery.reject_pending(request_id)
     interrupted = interrupt_by_name(conversation_request_interrupt_name(request_id))
     if not interrupted and not marked:
         return ConversationControlResult(
@@ -1911,8 +1914,8 @@ def _stop_live_window_request(
         if interrupt_only:
             return result
     else:
-        if owner_agent is not None:
-            _cancel_request_subagents_async(owner_agent, request_id)
+        if owner_agent is not None and not interrupt_only:
+            _cancel_request_execution(owner_agent, request_id)
     return ConversationControlResult(
         "stop",
         True,
@@ -1982,8 +1985,8 @@ def _mark_request_stopping_locked(
     return True, ""
 
 
-# LLM: 控制 owner 已冻结；本轮中断保留活动 Goal 及其子树，明确 stop 才暂停并回收。续接复用同一 wake/claim。
-# 函数用途: 区分中断一轮和暂停整项工作，旧执行退出前不另起执行器。
+# LLM: interrupt 不改变任何 Goal/任务状态或资源；仅已中断的 active Goal 可沿同一 wake/claim 续跑。
+# 函数用途: 将当前回合中断与明确任务停止分支隔离，旧执行退出前不另起执行器。
 def _stop_active_task(
     base_agent: object,
     active: _GatewayRequestRecord,
@@ -1999,12 +2002,16 @@ def _stop_active_task(
     else:
         linked_request_id, linked_marked = _stop_linked_live_request(active, scope)
     task_interrupted = interrupt_by_name(conversation_request_interrupt_name(task_id))
-    if interrupt_only and _continue_goal_after_turn_interrupt(base_agent, active, scope):
+    if interrupt_only:
         if linked_request_id:
             interrupt_by_name(conversation_request_interrupt_name(linked_request_id))
+        if not (task_interrupted or linked_marked):
+            return ConversationControlResult("stop", False, "当前没有执行中的回合，无需中断。", request_id=task_id)
+        continuing = _continue_goal_after_turn_interrupt(base_agent, active, scope)
         return ConversationControlResult(
             "stop", True,
-            "已中断本轮；目标仍在进行，当前执行退出后继续。暂停目标请用 /goal pause 或 /stop。",
+            ("已中断本轮；目标仍在进行，当前执行退出后继续。/goal pause 只暂停自动续跑，/stop 停止任务资源。"
+             if continuing else "已中断当前回合；目标状态和已启动的独立任务资源保留。"),
             request_id=task_id,
         )
     try:
@@ -2034,7 +2041,7 @@ def _stop_active_task(
     run_ids = _related_control_run_ids(owner_agent, task_id, linked_request_id)
     for run_id in run_ids:
         try:
-            store.update_task_status(
+            store.tasks.update_status(
                 {"task_id": run_id, "status": "cancelled", "expected_status": "active"}
             )
         except Exception:
@@ -2043,7 +2050,7 @@ def _stop_active_task(
         _interrupt_task_registry_record(owner_agent, task_id)
     if linked_request_id:
         interrupt_by_name(conversation_request_interrupt_name(linked_request_id))
-    _cancel_request_subagents_async(
+    _cancel_request_execution(
         owner_agent,
         task_id,
         run_ids=run_ids,
@@ -2066,8 +2073,8 @@ def _continue_goal_after_turn_interrupt(
     store = _request_agent_for_scope(base_agent, scope).conversation_store
     task_id = _record_id(active)
     thread_id = str(active.payload.get("conversation_thread_id") or "")
-    with store.goal_transition_guard(thread_id):
-        goal = store.load_goal(thread_id, task_id=task_id)
+    with store.goals.transition_guard(thread_id):
+        goal = store.goals.load(thread_id, task_id=task_id)
         if goal is None or goal.task_id != task_id or goal.status != "active":
             return False
         raise_goal_continuation_wake(
@@ -2091,8 +2098,8 @@ def _interrupt_active_task_link(
     expected_status = str(
         active.payload.get("conversation_task_link_status") or "active"
     ).strip().lower()
-    with store.task_transition_guard(task_id):
-        stopped = store.update_task_status(
+    with store.tasks.transition_guard(task_id):
+        stopped = store.tasks.update_status(
             {
                 "task_id": task_id,
                 "status": "interrupted",
@@ -2134,11 +2141,11 @@ def _pause_goal_for_stopped_task(store: object, task_link: object) -> None:
     thread_id = str(getattr(task_link, "thread_id", "") or "")
     task_id = str(getattr(task_link, "task_id", "") or "")
     try:
-        with store.goal_transition_guard(thread_id):
-            goal = store.load_goal(thread_id, task_id=task_id)
+        with store.goals.transition_guard(thread_id):
+            goal = store.goals.load(thread_id, task_id=task_id)
             if goal is None or goal.status != "active" or goal.task_id != task_id:
                 return
-            store.update_goal(
+            store.goals.update(
                 {
                     "thread_id": thread_id,
                     "goal_id": goal.goal_id,
@@ -2151,7 +2158,7 @@ def _pause_goal_for_stopped_task(store: object, task_link: object) -> None:
 
 
 # LLM: The global task projection records an interrupt as resumable, never as terminal cancellation.
-# 函数用途：同步任务索引中的中断状态，后续明确续接时可以恢复为 running。
+# 函数用途:同步任务索引中的中断状态，后续明确续接时可以恢复为 running。
 def _interrupt_task_registry_record(owner_agent: object, task_id: str) -> None:
     try:
         registry = owner_agent.local_store.task_registry
@@ -2163,16 +2170,26 @@ def _interrupt_task_registry_record(owner_agent: object, task_id: str) -> None:
         return
 
 
-# LLM: Child cancellation stays off the HTTP callback thread so the stop ACK remains immediate.
-# It must wait for the same owner-local creation transaction and resolve lineage inside that guard;
-# otherwise a create_subagents call already in flight can publish children after an empty snapshot.
-# 函数用途：等待在途派工落盘后重新读取真实谱系，再后台取消当前请求派生的全部活跃子代理和进程。
-def _cancel_request_subagents_async(
+# LLM: 终端在当前控制调用内冻结精确句柄，避免旧停止误伤恢复轮；子树在 creation_guard 内复读。
+# 实际终止留在线程外完成，不阻塞控制应答，不将发出请求冒充进程已退出。
+# 函数用途: 按持久任务归属收回终端，并后台取消当前请求派生的子代理和进程。
+def _cancel_request_execution(
     owner_agent: object,
     request_id: str,
     *,
     run_ids: list[str] | None = None,
 ) -> None:
+    from ..tooling.pty_sessions import pty_session_registry
+
+    store = getattr(owner_agent, "conversation_store", None)
+    loader = getattr(getattr(store, "tasks", None), "load", None)
+    task = loader(request_id) if callable(loader) else None
+    owner_home = getattr(getattr(owner_agent, "home_paths", None), "owner_home_dir", "")
+    if task is not None:
+        pty_session_registry.request_stop(
+            owner_home=owner_home, thread_id=str(task.thread_id), task_id=request_id,
+        )
+
     def cancel() -> None:
         try:
             supplied = [str(item).strip() for item in list(run_ids or []) if str(item).strip()]
@@ -2209,7 +2226,7 @@ def _cancel_request_subagents_async(
 
 
 # LLM: 状态仅投影当前请求事实；空闲时读同 owner 的当前模型选择，不把 Gateway 启动占位配置当真实模型。
-# 函数用途：汇总当前请求、排队数、最近阶段、子代理和压缩状态；读取模型设置不发请求或写配置。
+# 函数用途:汇总当前请求、排队数、最近阶段、子代理和压缩状态；读取模型设置不发请求或写配置。
 def _gateway_task_status(
     base_agent: object,
     paths: GatewayPaths,
@@ -2299,7 +2316,7 @@ def _named_durable_statuses(
 ) -> tuple[NamedConversationWorkStatus, ...]:
     try:
         store = owner_agent.conversation_store
-        thread = store.resolve_thread(
+        thread = store.threads.resolve(
             channel=scope.channel,
             channel_conversation_id=scope.conversation_id,
             channel_user_id=scope.user_id,
@@ -2307,8 +2324,8 @@ def _named_durable_statuses(
         if thread is None:
             links, goals = [], []
         else:
-            links, link_errors = store.task_links_report(thread.thread_id)
-            goals = store.load_goals(thread.thread_id)
+            links, link_errors = store.tasks.list_report(thread.thread_id)
+            goals = store.goals.list(thread.thread_id)
             if link_errors:
                 return ()
     except Exception:
@@ -2380,7 +2397,7 @@ def _named_durable_statuses(
                 kind="goal",
                 name=name,
                 status=_named_work_status_label(status),
-                elapsed_seconds=float(store.current_goal_time_seconds(goal)),
+                elapsed_seconds=float(store.goal_clock.current_time_seconds(goal)),
             )
         )
     return tuple(
@@ -2431,7 +2448,7 @@ def _named_work_status_label(status: str) -> str:
 
 
 # LLM: A durable task is resumable conversation state, not proof that an executor is live.
-# 函数用途：只按 processing 记录、活跃子代理和持久执行台账判断当前任务是否真在运行。
+# 函数用途:只按 processing 记录、活跃子代理和持久执行台账判断当前任务是否真在运行。
 def _control_record_is_executing(
     owner_agent: object,
     active: _GatewayRequestRecord,
@@ -2461,7 +2478,7 @@ def _control_record_is_executing(
 
 
 # LLM: Owner resolution reuses the request worker's fail-closed multi-user boundary.
-# 函数用途：按请求身份取得与真实执行相同的 owner-scoped agent。
+# 函数用途:按请求身份取得与真实执行相同的 owner-scoped agent。
 def _request_agent(base_agent: object, payload: dict[str, object]):
     from .request_worker import _resolve_request_agent
 
@@ -2495,7 +2512,7 @@ def _request_agent_for_scope(base_agent: object, scope: GatewayControlScope):
 
 
 # LLM: Read-only status may degrade to base model facts when an idle owner cannot be materialized.
-# 函数用途：状态查询尽量解析 owner；失败时只返回基础 agent，不扩大写权限。
+# 函数用途:状态查询尽量解析 owner；失败时只返回基础 agent，不扩大写权限。
 def _request_agent_or_base(base_agent: object, payload: dict[str, object]):
     try:
         return _request_agent(base_agent, payload)
@@ -2504,7 +2521,7 @@ def _request_agent_or_base(base_agent: object, payload: dict[str, object]):
 
 
 # LLM: Thread profile is resolved by the same structured channel binding as ordinary conversation history.
-# 函数用途：读取当前会话已压缩次数和过程显示档位；未知时明确省略。
+# 函数用途:读取当前会话已压缩次数和过程显示档位；未知时明确省略。
 def _conversation_profile(agent: object, payload: dict[str, object]) -> tuple[int | None, str]:
     conversation = payload.get("conversation")
     if not isinstance(conversation, dict):
@@ -2513,7 +2530,7 @@ def _conversation_profile(agent: object, payload: dict[str, object]) -> tuple[in
     if store is None:
         return None, ""
     try:
-        thread = store.resolve_thread(
+        thread = store.threads.resolve(
             channel=str(conversation.get("channel") or ""),
             channel_conversation_id=str(conversation.get("channel_conversation_id") or ""),
             channel_user_id=str(conversation.get("channel_user_id") or ""),
@@ -2528,7 +2545,7 @@ def _conversation_profile(agent: object, payload: dict[str, object]) -> tuple[in
 
 
 # LLM: Subagent counts are derived from durable parent/root ids, never from streamed chatter.
-# 函数用途：统计当前主请求派生子代理的运行、完成和异常数量。
+# 函数用途:统计当前主请求派生子代理的运行、完成和异常数量。
 def _subagent_status(agent: object, request_ids: list[str]) -> tuple[int, int, int, int]:
     selected_ids = list(dict.fromkeys(item for item in request_ids if item))
     if not selected_ids:
@@ -2550,7 +2567,7 @@ def _subagent_status(agent: object, request_ids: list[str]) -> tuple[int, int, i
 
 
 # LLM: Progress summarizes typed phase/ok only; display text and raw tool data never drive /status.
-# 函数用途：从最近一条 typed 工具事件生成不泄露内部执行细节的阶段描述。
+# 函数用途:从最近一条 typed 工具事件生成不泄露内部执行细节的阶段描述。
 def _recent_progress(paths: GatewayPaths, request_id: str) -> str:
     if not request_id:
         return ""
@@ -2570,7 +2587,7 @@ def _recent_progress(paths: GatewayPaths, request_id: str) -> str:
 
 
 # LLM: The tail reader is byte-bounded so /status cannot load an unbounded stream file into memory.
-# 函数用途：读取进度文件末尾至多 64 KiB 的 JSON 行。
+# 函数用途:读取进度文件末尾至多 64 KiB 的 JSON 行。
 def _tail_json_rows(path: Path, max_bytes: int = 64 * 1024) -> list[dict[str, object]]:
     try:
         with path.open("rb") as handle:
@@ -2594,7 +2611,7 @@ def _tail_json_rows(path: Path, max_bytes: int = 64 * 1024) -> list[dict[str, ob
 
 
 # LLM: Synthetic idle status facts preserve the same owner and conversation schema as /ask.
-# 函数用途：没有活跃请求时，根据控制请求身份构造只读会话定位信息。
+# 函数用途:没有活跃请求时，根据控制请求身份构造只读会话定位信息。
 def _scope_request_payload(scope: GatewayControlScope) -> dict[str, object]:
     # `/ask` and control commands must resolve the same owner for every
     # channel, including trusted local/CLI channels.  The authenticated scope
@@ -2653,7 +2670,7 @@ def resolve_loaded_gateway_scope_agent(
 
 
 # LLM: Request ids are taken only from the claimed record or its filename.
-# 函数用途：读取请求记录的稳定 id。
+# 函数用途:读取请求记录的稳定 id。
 def _record_id(record: _GatewayRequestRecord | None) -> str:
     if record is None:
         return ""
@@ -2662,7 +2679,7 @@ def _record_id(record: _GatewayRequestRecord | None) -> str:
 
 
 # LLM: Timestamp ordering uses durable queue/lease fields with a zero fallback.
-# 函数用途：取得请求排序时间。
+# 函数用途:取得请求排序时间。
 def _request_timestamp(payload: dict[str, object]) -> float:
     for key in ("lease_started_at", "created_at", "submitted_at"):
         try:
@@ -2674,7 +2691,7 @@ def _request_timestamp(payload: dict[str, object]) -> float:
 
 
 # LLM: Elapsed time starts at the claimed lease, not user-controlled prompt metadata.
-# 函数用途：取得任务实际开始时间。
+# 函数用途:取得任务实际开始时间。
 def _request_started_at(payload: dict[str, object]) -> float:
     try:
         return float(payload.get("lease_started_at") or payload.get("updated_at") or 0.0)
@@ -2683,7 +2700,7 @@ def _request_started_at(payload: dict[str, object]) -> float:
 
 
 # LLM: Status exposes a bounded user prompt only; internal injection and tool plans are excluded.
-# 函数用途：读取用户提交的任务正文。
+# 函数用途:读取用户提交的任务正文。
 def _request_prompt(payload: dict[str, object]) -> str:
     return str(payload.get("prompt") or payload.get("goal") or "").strip()
 

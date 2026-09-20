@@ -201,7 +201,7 @@ def _service(
 
 def _conversation(tmp_path: Path):
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "channel": "internal",
@@ -210,7 +210,7 @@ def _conversation(tmp_path: Path):
             "now": 10.0,
         }
     )
-    message = store.append_message(
+    message = store.messages.append(
         {
             "thread_id": thread.thread_id,
             "role": "user",
@@ -1474,7 +1474,7 @@ def test_reinjection_chain_never_grows_formal_memory(tmp_path: Path) -> None:
     """
     store, thread, message = _conversation(tmp_path)
     # 模型回复逐字复述注入内容(会进对话,是真实发生的话)。
-    echoed = store.append_message(
+    echoed = store.messages.append(
         {
             "thread_id": thread.thread_id,
             "role": "assistant",

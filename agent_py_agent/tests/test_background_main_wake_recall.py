@@ -242,7 +242,7 @@ def test_wake_summary_delivered_to_feishu(tmp_path) -> None:
     adapter = _RecordingFeishuAdapter()
     _register_recording_adapter(service, adapter)
     runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=service)
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {"canonical_user_id": "u1", "channel": "feishu", "channel_conversation_id": "chat-1", "channel_user_id": "ou_open_id_1", "now": 10.0}
     )
 
@@ -276,13 +276,13 @@ def test_supervisor_ticks_scoped_owner_wake_and_delivers(tmp_path) -> None:
     owner = OwnerIdentity.provider_user("feishu", "u1")
     scoped = _owner_pool(base_agent).get(owner)
     scoped.backend = _CapturingBackend()
-    sthread = scoped.conversation_store.get_or_create_thread(
+    sthread = scoped.conversation_store.threads.get_or_create(
         {"canonical_user_id": "u1", "channel": "feishu", "channel_conversation_id": "chat-1", "channel_user_id": "ou_open_id_1", "now": 10.0}
     )
-    observation = scoped.conversation_store.append_observation(
+    observation = scoped.conversation_store.observations.append(
         {"thread_id": sthread.thread_id, "event_type": "subagent_runner_finished", "summary": "子代理已完成，请整合。", "urgency": "normal", "requires_main_agent": True, "now": 11.0}
     )
-    scoped.conversation_store.raise_wake_signal(
+    scoped.conversation_store.wakes.raise_signal(
         {"thread_id": sthread.thread_id, "observation": observation, "reason": "subagent_runner_finished", "now": 11.0}
     )
     # 请求路会把活跃 owner 登记进共享表;这里手动模拟(context.agent 即 base_agent)。
@@ -294,7 +294,7 @@ def test_supervisor_ticks_scoped_owner_wake_and_delivers(tmp_path) -> None:
         config_path=tmp_path / "config.yaml",
     )
 
-    assert scoped.conversation_store.pending_wake_signals()  # 修前:这条唤醒 base 调度器看不到
+    assert scoped.conversation_store.wakes.pending()  # 修前:这条唤醒 base 调度器看不到
     supervisor = _BackgroundMainSupervisor(context)
     adapter = _RecordingFeishuAdapter()
     _register_recording_adapter(supervisor._channels, adapter)  # 替身,免真发飞书
@@ -305,7 +305,7 @@ def test_supervisor_ticks_scoped_owner_wake_and_delivers(tmp_path) -> None:
     ran = supervisor.tick()  # 下一轮 tick 收割完成的 owner 整合报告
 
     assert ran is True  # 收割到 owner 整合报告
-    assert not scoped.conversation_store.pending_wake_signals()  # 断裂A:scoped owner 唤醒被消费
+    assert not scoped.conversation_store.wakes.pending()  # 断裂A:scoped owner 唤醒被消费
     assert adapter.sent and adapter.sent[0][0] == "ou_open_id_1"  # 断裂B:汇总主动外呼到该飞书用户
 
 
@@ -494,19 +494,26 @@ def test_scheduler_plans_each_pending_conversation_as_an_independent_lane() -> N
     """Durable wakes from one owner retain both thread identities before submission."""
 
     class Store:
+        def __init__(self):
+            self.wakes = SimpleNamespace(pending=self._fake_wakes_pending)
+            self.observations = SimpleNamespace(
+                unhandled_requiring_main=self._fake_observations_unhandled_requiring_main
+            )
+            self.progress = SimpleNamespace(list_report=self._fake_progress_list_report)
+
         @staticmethod
-        def pending_wake_signals(limit=0):
+        def _fake_wakes_pending(limit=0):
             return [
                 WakeSignal(wake_signal_id="wake-a", thread_id="thread-a", reason="manual"),
                 WakeSignal(wake_signal_id="wake-b", thread_id="thread-b", reason="manual"),
             ]
 
         @staticmethod
-        def unhandled_observations_requiring_main(limit=0):
+        def _fake_observations_unhandled_requiring_main(limit=0):
             return []
 
         @staticmethod
-        def list_progress_policies_report(enabled_only=True):
+        def _fake_progress_list_report(enabled_only=True):
             return [], []
 
     scheduler = BackgroundMainAgentScheduler(
@@ -548,16 +555,23 @@ def test_scheduler_does_not_plan_removed_polling_policy_as_a_thread_lane() -> No
     """Retired model-poll policies cannot repeatedly occupy per-owner slots."""
 
     class Store:
+        def __init__(self):
+            self.wakes = SimpleNamespace(pending=self._fake_wakes_pending)
+            self.observations = SimpleNamespace(
+                unhandled_requiring_main=self._fake_observations_unhandled_requiring_main
+            )
+            self.progress = SimpleNamespace(list_report=self._fake_progress_list_report)
+
         @staticmethod
-        def pending_wake_signals(limit=0):
+        def _fake_wakes_pending(limit=0):
             return []
 
         @staticmethod
-        def unhandled_observations_requiring_main(limit=0):
+        def _fake_observations_unhandled_requiring_main(limit=0):
             return []
 
         @staticmethod
-        def list_progress_policies_report(enabled_only=True):
+        def _fake_progress_list_report(enabled_only=True):
             return [
                 ProgressPolicy(
                     policy_id="removed-poll",
@@ -618,7 +632,7 @@ def test_real_scheduler_runs_two_background_threads_for_same_owner(tmp_path) -> 
     agent.backend = BlockingFirstBackend()
     store = agent.conversation_store
     for suffix in ("a", "b"):
-        thread = store.get_or_create_thread(
+        thread = store.threads.get_or_create(
             {
                 "canonical_user_id": "local",
                 "channel": "cli_chat",
@@ -627,7 +641,7 @@ def test_real_scheduler_runs_two_background_threads_for_same_owner(tmp_path) -> 
                 "now": 10.0,
             }
         )
-        observation = store.append_observation(
+        observation = store.observations.append(
             {
                 "thread_id": thread.thread_id,
                 "event_type": "manual_wake",
@@ -636,7 +650,7 @@ def test_real_scheduler_runs_two_background_threads_for_same_owner(tmp_path) -> 
                 "now": 11.0,
             }
         )
-        store.raise_wake_signal(
+        store.wakes.raise_signal(
             {
                 "thread_id": thread.thread_id,
                 "observation": observation,
@@ -731,18 +745,18 @@ def test_worker_and_supervisor_pools_resolve_identical_conversation_store_root(t
     scoped_super = _owner_pool(base_super).get(owner)
 
     assert scoped_worker is not scoped_super  # 不同实例(线程隔离)
-    worker_root = Path(scoped_worker.conversation_store.root).resolve()
-    super_root = Path(scoped_super.conversation_store.root).resolve()
+    worker_root = Path(scoped_worker.conversation_store.storage.root).resolve()
+    super_root = Path(scoped_super.conversation_store.storage.root).resolve()
     assert worker_root == super_root  # 同一磁盘会话库
 
     # worker 建线程 + claim;supervisor 池(独立实例、同磁盘根)看得见并能跨池续租,全程无 KeyError。
     worker_store = scoped_worker.conversation_store
     super_store = scoped_super.conversation_store
-    thread = worker_store.get_or_create_thread(
+    thread = worker_store.threads.get_or_create(
         {"canonical_user_id": "u1", "channel": "feishu", "channel_conversation_id": "chat-1", "channel_user_id": "ou_open_id_1", "now": 10.0}
     )
-    assert super_store.load_thread(thread.thread_id) is not None
-    claim = super_store.claim_background_run({"thread_id": thread.thread_id, "reason": "wake_signal", "lease_seconds": 30, "now": 20.0})
+    assert super_store.threads.load(thread.thread_id) is not None
+    claim = super_store.claims.acquire({"thread_id": thread.thread_id, "reason": "wake_signal", "lease_seconds": 30, "now": 20.0})
     assert claim is not None
-    renewed = super_store.renew_background_run_claim({"thread_id": thread.thread_id, "claim_id": claim["claim_id"], "lease_seconds": 30, "now": 21.0})
+    renewed = super_store.claims.renew({"thread_id": thread.thread_id, "claim_id": claim["claim_id"], "lease_seconds": 30, "now": 21.0})
     assert renewed is not None

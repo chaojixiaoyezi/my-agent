@@ -64,7 +64,7 @@ class _StaticStructuredBackend:
 
 
 def _conversation(store: ConversationStore, now: float = 10.0):
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "channel": "internal",
@@ -73,7 +73,7 @@ def _conversation(store: ConversationStore, now: float = 10.0):
             "now": now,
         }
     )
-    message = store.append_message(
+    message = store.messages.append(
         {
             "thread_id": thread.thread_id,
             "role": "user",

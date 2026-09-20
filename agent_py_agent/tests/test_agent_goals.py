@@ -37,40 +37,40 @@ def test_goal_editor_displays_structured_http_conflict_without_losing_code():
 def test_one_unfinished_goal_per_agent_even_with_a_new_name_or_task(tmp_path, status):
     agent, thread, first = _goal_agent(tmp_path)
     store = agent.conversation_store
-    store.update_goal({"thread_id": thread.thread_id, "goal_id": first.goal_id, "status": status})
+    store.goals.update({"thread_id": thread.thread_id, "goal_id": first.goal_id, "status": status})
     with pytest.raises(ValueError, match="unfinished goal"):
-        store.create_goal({"thread_id": thread.thread_id, "task_id": "other-task", "name": "另一个", "objective": "另一项工作"})
-    store.update_goal({"thread_id": thread.thread_id, "goal_id": first.goal_id, "status": "complete"})
-    second = store.create_goal({"thread_id": thread.thread_id, "objective": "下一项工作"})
-    assert len(store.load_goals(thread.thread_id)) == 2
+        store.goals.create({"thread_id": thread.thread_id, "task_id": "other-task", "name": "另一个", "objective": "另一项工作"})
+    store.goals.update({"thread_id": thread.thread_id, "goal_id": first.goal_id, "status": "complete"})
+    second = store.goals.create({"thread_id": thread.thread_id, "objective": "下一项工作"})
+    assert len(store.goals.list(thread.thread_id)) == 2
     assert second.goal_id != first.goal_id
 
 
 def test_user_goal_draft_cas_preserves_usage_and_paused_status(tmp_path):
     agent, scope, child = _bound_agent_tree(tmp_path)
     store = agent.conversation_store
-    goal = store.create_goal({"thread_id": child.agent_thread_id, "task_id": child.id, "objective": "原始目标"})
-    store.account_goal_usage({"thread_id": goal.thread_id, "goal_id": goal.goal_id, "token_delta": 100, "time_delta_seconds": 2})
+    goal = store.goals.create({"thread_id": child.agent_thread_id, "task_id": child.id, "objective": "原始目标"})
+    store.goals.account_usage({"thread_id": goal.thread_id, "goal_id": goal.goal_id, "token_delta": 100, "time_delta_seconds": 2})
     request = {"run_id": child.id, "goal_id": goal.goal_id, "operation": "save", "objective": "用户纠正目标", "expected_revision": goal.revision}
     saved = execute_agent_goal_control(agent, scope=scope, payload=request)
     assert saved["goal"]["tokensUsed"] == 100
     assert saved["goal"]["revision"] == goal.revision + 1
-    assert len(store.pending_guidance("agent_run", child.id)) == 1
+    assert len(store.guidance.pending("agent_run", child.id)) == 1
     with pytest.raises(AgentControlError, match="草稿已保留"):
         execute_agent_goal_control(agent, scope=scope, payload={**request, "objective": "过期草稿"})
-    assert len(store.pending_guidance("agent_run", child.id)) == 1
-    paused = store.update_goal({"thread_id": goal.thread_id, "goal_id": goal.goal_id, "status": "paused"})
+    assert len(store.guidance.pending("agent_run", child.id)) == 1
+    paused = store.goals.update({"thread_id": goal.thread_id, "goal_id": goal.goal_id, "status": "paused"})
     saved = execute_agent_goal_control(agent, scope=scope, payload={**request, "expected_revision": paused.revision})
     assert saved["goal"]["status"] == "paused"
-    assert not store.pending_wake_signals()
-    assert store.load_goal(goal.thread_id).task_id == child.id
+    assert not store.wakes.pending()
+    assert store.goals.load(goal.thread_id).task_id == child.id
     assert read_agent_view(agent, scope=scope, run_id=child.id)["goals"][0]["revision"] == saved["goal"]["revision"]
 
 
 def test_goal_editor_rejects_other_session_and_other_goal(tmp_path):
     agent, scope, child = _bound_agent_tree(tmp_path)
     store = agent.conversation_store
-    goal = store.create_goal({"thread_id": child.agent_thread_id, "task_id": child.id, "objective": "私有目标"})
+    goal = store.goals.create({"thread_id": child.agent_thread_id, "task_id": child.id, "objective": "私有目标"})
     with pytest.raises(AgentControlError):
         execute_agent_goal_control(agent, scope=SimpleNamespace(channel="chat", user_id="stranger", conversation_id="other"),
                                    payload={"run_id": child.id, "goal_id": goal.goal_id})
@@ -81,8 +81,8 @@ def test_goal_editor_rejects_other_session_and_other_goal(tmp_path):
 def test_child_goal_tools_and_accounting_do_not_use_parent_goal(tmp_path):
     agent, scope, child = _bound_agent_tree(tmp_path)
     store = agent.conversation_store
-    root, _ = store.resolve_thread_report(channel=scope.channel, channel_user_id=scope.user_id, channel_conversation_id=scope.conversation_id)
-    parent_goal = store.create_goal({"thread_id": root.thread_id, "task_id": child.root_id, "objective": "父级目标"})
+    root, _ = store.threads.resolve_report(channel=scope.channel, channel_user_id=scope.user_id, channel_conversation_id=scope.conversation_id)
+    parent_goal = store.goals.create({"thread_id": root.thread_id, "task_id": child.root_id, "objective": "父级目标"})
     attrs = {"conversation_thread_id": root.thread_id, "conversation_task_id": child.root_id,
              "thread_goal_id": parent_goal.goal_id, "agent_thread_id": child.agent_thread_id}
     agent._current_run_params = RunParams(task_attributes=attrs, context_scope="task_local")
@@ -90,14 +90,14 @@ def test_child_goal_tools_and_accounting_do_not_use_parent_goal(tmp_path):
     try:
         made = agent.tools.tools["create_goal"].execute({"objective": "直属目标"})
         assert made.ok, made.output
-        goal = store.load_goal(child.agent_thread_id, task_id=child.id)
+        goal = store.goals.load(child.agent_thread_id, task_id=child.id)
         response = ModelResponse(text="", backend="fake", usage={"prompt_tokens": 23, "completion_tokens": 7})
         account_goal_model_response(agent, agent._current_run_params, response)
-        assert store.load_goal(root.thread_id).tokens_used == 0
-        assert store.load_goal(child.agent_thread_id).tokens_used == 30
+        assert store.goals.load(root.thread_id).tokens_used == 0
+        assert store.goals.load(child.agent_thread_id).tokens_used == 30
         assert agent.tools.tools["update_goal"].execute({"status": "complete"}).ok
-        assert store.load_goal(root.thread_id).status == "active"
-        assert store.load_goal(child.agent_thread_id).goal_id == goal.goal_id
+        assert store.goals.load(root.thread_id).status == "active"
+        assert store.goals.load(child.agent_thread_id).goal_id == goal.goal_id
     finally:
         restore_current_subagent_context(agent, previous)
 
@@ -105,25 +105,25 @@ def test_child_goal_tools_and_accounting_do_not_use_parent_goal(tmp_path):
 def test_parent_can_revise_direct_child_goal_without_changing_its_own(tmp_path):
     agent, scope, child = _bound_agent_tree(tmp_path)
     store = agent.conversation_store
-    root, _ = store.resolve_thread_report(channel=scope.channel, channel_user_id=scope.user_id, channel_conversation_id=scope.conversation_id)
-    parent = store.create_goal({"thread_id": root.thread_id, "task_id": child.root_id, "objective": "父级目标"})
-    goal = store.create_goal({"thread_id": child.agent_thread_id, "task_id": child.id, "objective": "原子目标"})
+    root, _ = store.threads.resolve_report(channel=scope.channel, channel_user_id=scope.user_id, channel_conversation_id=scope.conversation_id)
+    parent = store.goals.create({"thread_id": root.thread_id, "task_id": child.root_id, "objective": "父级目标"})
+    goal = store.goals.create({"thread_id": child.agent_thread_id, "task_id": child.id, "objective": "原子目标"})
     agent._current_run_params = RunParams(task_attributes={"conversation_thread_id": root.thread_id, "conversation_task_id": child.root_id})
     result = agent.tools.tools["update_goal"].execute({"target_run_id": child.id, "objective": "改为新的子目标", "expected_revision": goal.revision})
     assert result.ok, result.output
-    assert store.load_goal(root.thread_id).objective == parent.objective
-    assert store.load_goal(child.agent_thread_id).objective == "改为新的子目标"
-    assert store.pending_guidance("agent_run", child.id)
+    assert store.goals.load(root.thread_id).objective == parent.objective
+    assert store.goals.load(child.agent_thread_id).objective == "改为新的子目标"
+    assert store.guidance.pending("agent_run", child.id)
 
 
 def test_model_cannot_complete_an_objective_edited_since_its_request(tmp_path):
     agent, thread, goal = _goal_agent(tmp_path)
     current_goal_scope_prompt(agent, agent._current_run_params)
-    agent.conversation_store.update_goal({"thread_id": thread.thread_id, "goal_id": goal.goal_id,
+    agent.conversation_store.goals.update({"thread_id": thread.thread_id, "goal_id": goal.goal_id,
                                            "objective": "刚补充的完整新要求"})
     stale = agent.tools.tools["update_goal"].execute({"status": "complete"})
     assert not stale.ok and stale.error_code == "GOAL_STATE_CONFLICT"
-    assert agent.conversation_store.load_goal(thread.thread_id).status == "active"
+    assert agent.conversation_store.goals.load(thread.thread_id).status == "active"
     current_goal_scope_prompt(agent, agent._current_run_params)
     assert agent.tools.tools["update_goal"].execute({"status": "complete"}).ok
 
@@ -132,17 +132,17 @@ def test_stop_child_pauses_only_its_own_goal(tmp_path):
     from agent_py_agent.agent.conversation.agent_control import stop_agent
 
     agent, scope, child = _bound_agent_tree(tmp_path)
-    goal = agent.conversation_store.create_goal({"thread_id": child.agent_thread_id,
+    goal = agent.conversation_store.goals.create({"thread_id": child.agent_thread_id,
                                                 "task_id": child.id, "objective": "子代理的长目标"})
     stopped = stop_agent(agent, scope=scope, run_id=child.id, operation_id="stop-child-goal")
     assert stopped["ok"] is True
-    assert agent.conversation_store.load_goal(goal.thread_id).status == "paused"
+    assert agent.conversation_store.goals.load(goal.thread_id).status == "paused"
 
 
 def test_child_goal_does_not_grant_sibling_edit_authority(tmp_path):
     agent, _scope, child = _bound_agent_tree(tmp_path)
     sibling = agent.subagents.create_run(goal="兄弟任务", root_id=child.root_id, parent_id=child.parent_id)
-    goal = agent.conversation_store.create_goal({"thread_id": sibling.agent_thread_id,
+    goal = agent.conversation_store.goals.create({"thread_id": sibling.agent_thread_id,
                                                 "task_id": sibling.id, "objective": "兄弟目标"})
     attrs = {"agent_thread_id": child.agent_thread_id}
     agent._current_run_params = RunParams(task_attributes=attrs, context_scope="task_local")
@@ -151,7 +151,7 @@ def test_child_goal_does_not_grant_sibling_edit_authority(tmp_path):
         denied = agent.tools.tools["update_goal"].execute({"target_run_id": sibling.id,
                     "objective": "不该被改", "expected_revision": goal.revision})
         assert not denied.ok
-        assert agent.conversation_store.load_goal(goal.thread_id).objective == "兄弟目标"
+        assert agent.conversation_store.goals.load(goal.thread_id).objective == "兄弟目标"
     finally:
         restore_current_subagent_context(agent, previous)
 
@@ -166,21 +166,21 @@ def test_saved_goal_guidance_reaches_its_agent_and_can_cross_provider_boundary(t
 
     agent, scope, child = _bound_agent_tree(tmp_path)
     store = agent.conversation_store
-    root = store.resolve_thread(channel=scope.channel, channel_user_id=scope.user_id, channel_conversation_id=scope.conversation_id)
-    goal = store.create_goal({"thread_id": root.thread_id, "task_id": child.root_id, "objective": "父级原目标"})
+    root = store.threads.resolve(channel=scope.channel, channel_user_id=scope.user_id, channel_conversation_id=scope.conversation_id)
+    goal = store.goals.create({"thread_id": root.thread_id, "task_id": child.root_id, "objective": "父级原目标"})
     execute_agent_goal_control(agent, scope=scope, payload={"operation": "save", "goal_id": goal.goal_id,
                                "objective": "仅属于父级的新要求", "expected_revision": goal.revision})
     child_params = _tool_loop_params(context_scope="task_local", run_id=child.id, task_id=child.root_id,
                     request_id="child-attempt", attempt_id="child-attempt", task_attributes={"agent_thread_id": child.agent_thread_id})
     assert has_pending_request_guidance(agent, child_params) is False
     assert inject_pending_guidance(agent, child_params) is False
-    assert store.pending_guidance("task", child.root_id)
+    assert store.guidance.pending("task", child.root_id)
     main_params = _tool_loop_params(run_id=child.root_id, task_id=child.root_id, request_id="main-turn", attempt_id="main-attempt")
     assert inject_pending_guidance(agent, main_params)
     assert mark_injected_turn_input_submitted(agent, main_params, provider_call_id="main-call") == 1
     assert acknowledge_injected_turn_input(agent, main_params) == 1
-    assert not store.pending_guidance("task", child.root_id)
-    child_goal = store.create_goal({"thread_id": child.agent_thread_id, "task_id": child.id, "objective": "子级原目标"})
+    assert not store.guidance.pending("task", child.root_id)
+    child_goal = store.goals.create({"thread_id": child.agent_thread_id, "task_id": child.id, "objective": "子级原目标"})
     execute_agent_goal_control(agent, scope=scope, payload={"operation": "save", "run_id": child.id,
                 "goal_id": child_goal.goal_id, "objective": "仅属于子级的新要求", "expected_revision": child_goal.revision})
     assert has_pending_request_guidance(agent, main_params) is False
@@ -188,7 +188,7 @@ def test_saved_goal_guidance_reaches_its_agent_and_can_cross_provider_boundary(t
     assert inject_pending_guidance(agent, child_params)
     assert mark_injected_turn_input_submitted(agent, child_params, provider_call_id="child-call") == 1
     assert acknowledge_injected_turn_input(agent, child_params) == 1
-    assert not store.pending_guidance("agent_run", child.id)
+    assert not store.guidance.pending("agent_run", child.id)
 
 
 @pytest.mark.parametrize("overflow_after_first_goal_turn", [False, True])
@@ -221,10 +221,10 @@ def test_child_goal_continues_in_same_run_with_distinct_history_turns(tmp_path, 
     assert result.ok, result.message
     assert backend.calls == 3 + int(overflow_after_first_goal_turn)
     assert bool(backend.summary_prompts) is overflow_after_first_goal_turn
-    goal = agent.conversation_store.load_goal(task.agent_thread_id)
+    goal = agent.conversation_store.goals.load(task.agent_thread_id)
     assert goal.status == "complete"
     assert goal.task_id == task.id
-    rows = agent.conversation_store.recent_messages(task.agent_thread_id, limit=20)
+    rows = agent.conversation_store.messages.recent(task.agent_thread_id, limit=20)
     finals = [r for r in rows if r.role == "assistant" and r.metadata.get("assistant_part_id") == "final"]
     assert len(finals) == 2
     assert len({r.metadata["conversation_request_id"] for r in finals}) == 2
@@ -235,5 +235,18 @@ def test_child_goal_continues_in_same_run_with_distinct_history_turns(tmp_path, 
 @pytest.mark.parametrize("reason", ["blocked", "error", "max-tokens", "interrupted", "aborted"])
 def test_goal_never_retries_non_normal_child_end(tmp_path, reason):
     agent, _scope, child = _bound_agent_tree(tmp_path)
-    agent.conversation_store.create_goal({"thread_id": child.agent_thread_id, "task_id": child.id, "objective": "持续目标"})
+    agent.conversation_store.goals.create({"thread_id": child.agent_thread_id, "task_id": child.id, "objective": "持续目标"})
     assert active_delegated_goal_after_turn(agent, child, SimpleNamespace(turn_end_reason=reason)) is None
+
+
+def test_paused_child_goal_does_not_relabel_completed_turn_as_interrupted(tmp_path):
+    agent, _scope, child = _bound_agent_tree(tmp_path)
+    goal = agent.conversation_store.goals.create({
+        "thread_id": child.agent_thread_id, "task_id": child.id, "objective": "持续目标",
+    })
+    agent.conversation_store.goals.update({
+        "thread_id": child.agent_thread_id, "goal_id": goal.goal_id, "status": "paused",
+    })
+    result = SimpleNamespace(turn_end_reason="completed", runtime_status="ok", runtime_reason="")
+    assert active_delegated_goal_after_turn(agent, child, result) is None
+    assert vars(result) == {"turn_end_reason": "completed", "runtime_status": "ok", "runtime_reason": ""}

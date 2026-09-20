@@ -84,6 +84,7 @@ def test_saved_run_creates_home_task_workspace(tmp_path: Path):
     repo = tmp_path / "repo"
     home = tmp_path / "home"
     cfg = AgentConfig(
+        model_backend="echo",
         my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
     )
     agent = SimpleAgent(cfg, repo)
@@ -116,6 +117,7 @@ def test_saved_run_uses_opaque_identity_when_only_machine_ids_are_available(tmp_
     repo = tmp_path / "repo"
     home = tmp_path / "home"
     cfg = AgentConfig(
+        model_backend="echo",
         my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
     )
     agent = SimpleAgent(cfg, repo)
@@ -140,6 +142,7 @@ def test_same_prompt_new_run_keeps_independent_identity_and_timeline(tmp_path: P
     repo = tmp_path / "repo"
     home = tmp_path / "home"
     cfg = AgentConfig(
+        model_backend="echo",
         my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
     )
     agent = SimpleAgent(cfg, repo)
@@ -169,10 +172,11 @@ def test_same_prompt_new_run_keeps_independent_identity_and_timeline(tmp_path: P
         ]
 
 
-def test_same_task_resume_refreshes_run_identity_without_losing_workspace_facts(tmp_path: Path):
+def test_same_task_resume_keeps_canonical_run_and_refreshes_request_without_losing_workspace_facts(tmp_path: Path):
     repo = tmp_path / "repo"
     home = tmp_path / "home"
     cfg = AgentConfig(
+        model_backend="echo",
         my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
     )
     agent = SimpleAgent(cfg, repo)
@@ -199,13 +203,20 @@ def test_same_task_resume_refreshes_run_identity_without_losing_workspace_facts(
 
     resumed_state = json.loads(state_path.read_text(encoding="utf-8"))
     resumed_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    resumed_workspace = json.loads((task_root / "work" / "run_workspace.json").read_text())
+    authority = agent.subagents.runtime_db.main_agent_run_for_task("goal-one")
+    assert authority["run_id"] == "run-one"
+    assert len(agent.subagents.runtime_db.attempts_for_run(authority["agent_run_id"])) == 2
     assert resumed_state["task_id"] == "goal-one"
-    assert resumed_state["primary_run_id"] == "run-two"
+    assert resumed_state["primary_run_id"] == authority["run_id"]
+    assert resumed_state["terminal_run_id"] == authority["run_id"]
     assert resumed_state["status"] == "DONE"
     assert resumed_state["progress"] == 1.0
     assert resumed_state["evidence_refs"] == ["output/report.md"]
     assert resumed_manifest["request_id"] == "req-two"
-    assert resumed_manifest["run_id"] == "run-two"
+    assert resumed_manifest["run_id"] == authority["run_id"]
+    assert resumed_workspace["run_id"] == authority["run_id"]
+    assert resumed_workspace["request_id"] == "req-two"
     assert resumed_manifest["artifacts"] == [{"path": "output/report.md"}]
     assert len(list(agent.home_paths.owner_runs_dir.glob("*/*/work/run_workspace.json"))) == 1
 
@@ -226,6 +237,7 @@ def test_workspace_identity_does_not_reuse_old_state_json(tmp_path: Path):
         encoding="utf-8",
     )
     cfg = AgentConfig(
+        model_backend="echo",
         my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
     )
     agent = SimpleAgent(cfg, repo)
@@ -244,6 +256,7 @@ def test_long_project_prompt_labels_archive_without_selecting_its_path(tmp_path:
     repo = tmp_path / "repo"
     home = tmp_path / "home"
     cfg = AgentConfig(
+        model_backend="echo",
         my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
     )
     agent = SimpleAgent(cfg, repo)
@@ -269,6 +282,7 @@ def test_two_provider_owners_write_separate_task_workspaces(tmp_path: Path):
     home = tmp_path / "home"
     feishu = SimpleAgent(
         AgentConfig(
+            model_backend="echo",
             my_agent_home=str(home),
             my_agent_owner_provider="feishu",
             my_agent_owner_kind="user",
@@ -280,6 +294,7 @@ def test_two_provider_owners_write_separate_task_workspaces(tmp_path: Path):
     )
     wechat = SimpleAgent(
         AgentConfig(
+            model_backend="echo",
             my_agent_home=str(home),
             my_agent_owner_provider="wechat",
             my_agent_owner_kind="user",
@@ -306,6 +321,7 @@ def test_saved_run_writes_main_context_bundle_v1(tmp_path: Path):
     repo = tmp_path / "repo"
     home = tmp_path / "home"
     cfg = AgentConfig(
+        model_backend="echo",
         my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
     )
     agent = SimpleAgent(cfg, repo)
@@ -357,6 +373,7 @@ def test_no_save_run_keeps_main_context_bundle_ephemeral(tmp_path: Path):
     repo = tmp_path / "repo"
     home = tmp_path / "home"
     cfg = AgentConfig(
+        model_backend="echo",
         my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
     )
     agent = SimpleAgent(cfg, repo)
@@ -377,6 +394,7 @@ def test_task_local_run_does_not_inject_main_context_bundle(tmp_path: Path):
     run_home = tmp_path / "task" / "work" / "agents" / "run-local"
     run_home.mkdir(parents=True)
     cfg = AgentConfig(
+        model_backend="echo",
         my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
     )
     agent = SimpleAgent(cfg, repo)
@@ -399,6 +417,7 @@ def test_no_save_run_does_not_create_task_workspace_or_daily_memory(tmp_path: Pa
     repo = tmp_path / "repo"
     home = tmp_path / "home"
     cfg = AgentConfig(
+        model_backend="echo",
         my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
     )
     agent = SimpleAgent(cfg, repo)

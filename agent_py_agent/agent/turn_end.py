@@ -1,3 +1,5 @@
+# LLM: 统一技术结束与续跑事实，不调度任务、不读取自然语言；新增状态须同步 CLI、后台、子代理和收口回归。
+# 模块用途: 为执行、持久化和前端提供唯一结束协议与技术续跑判据。
 """模块用途: 统一一轮 Agent 运行为什么结束的结构化协议。
 
 LLM: 本模块只归一化宿主已经掌握的运行事实，不能读取模型正文、产物、测试或
@@ -111,9 +113,48 @@ def subagent_outcome_for_turn_end(reason: object) -> tuple[str, str, bool]:
     return "FAILED", "runner_error", False
 
 
+# LLM: 这些是宿主技术结束原因；普通 final 不据此自动调度，续跑仍要求 Goal 或显式 resume 授权。
+# 只承接原有状态判据，不用任务质量、回复正文或工具名称推测续跑。
+CONTINUABLE_REASONS = frozenset({
+    "TASK_PROGRESS_OPEN", "TOOL_ROUND_LIMIT_REACHED", "REPEATED_TOOL_FAILURE",
+    "TOOL_CALL_UNCLOSED", "MODEL_RESPONSE_TRUNCATED", "CONTEXT_OVERFLOW",
+})
+
+
+# LLM: 读取精确 reason/source/status；TOOL_CALL_UNCLOSED、截断与超窗必须匹配各自宿主来源，不能放宽为仅原因匹配。
+# 函数用途: 统一 CLI、finalization 与后台的技术续跑判据，只返回事实，不安排下一轮或改任务状态。
+def should_continue_task(final_response: object) -> tuple[bool, str]:
+    """判断一次收口是否允许由 Goal 或显式 resume 继续(结构化)。
+
+    返回 (should, reason): should=True 只表示技术上可继续，不代表普通任务会
+    自动调度。blocked/协议违规/UNKNOWN effect 等一律 False。
+
+    显式 Goal 的 finalization 与 CLI 手动/Goal 驱动共用这条精确条件。
+    """
+    reason = str(getattr(final_response, "runtime_reason", "") or "").strip().upper()
+    source = str(getattr(final_response, "runtime_source", "") or "").strip()
+    status = str(getattr(final_response, "runtime_status", "") or "").strip().lower()
+    if reason in CONTINUABLE_REASONS:
+        if reason == "TOOL_CALL_UNCLOSED" and not (
+            source == "tool_protocol_adapter" and status == "unfinished"
+        ):
+            return False, reason or "not_continuable"
+        if reason == "MODEL_RESPONSE_TRUNCATED" and not (
+            source == "tool_loop" and status == "unfinished"
+        ):
+            return False, reason or "not_continuable"
+        if reason == "CONTEXT_OVERFLOW" and not (
+            source == "preflight" and status == "context_overflow"
+        ):
+            return False, reason or "not_continuable"
+        return True, reason
+    return False, reason or "not_continuable"
+
+
 __all__ = [
     "TURN_END_REASONS",
     "TurnEndReason",
+    "should_continue_task",
     "infer_turn_end_reason",
     "normalize_turn_end_reason",
     "result_turn_end_reason",

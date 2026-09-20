@@ -1,16 +1,12 @@
-"""Conversation-owned approval bridge for one exact delegated-agent tool call."""
-
-# LLM: This module is the sole durable authority for child-to-owner tool approval
-# handoff. One JSON record owns pending/decided state; TUI/Web projections may
-# read it, but only an owner-authorized control service may write a decision.
-# 模块用途: 让子代理把具体工具审批上送给所属用户界面，等待精确决定后原地续跑同一次调用。
+# LLM: 主/子后台调用共用原耐久审批账本；main 额外绑定精确 claim，旧路径/schema 保持，展示文案不能授权。
+# 模块用途: 把具体工具审批交给所属用户界面；批准、拒绝、取消和失联都回到原调用，不另建审批状态源。
 
 from __future__ import annotations
 
 import hashlib
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 
@@ -21,39 +17,40 @@ from ..common.json_io import (
 )
 from ..common.opaque_id import validate_opaque_id
 from ..contracts.tool_approval import ToolApprovalDecision, ToolApprovalRequest
-from ..subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
+from .tool_approval_scope import (
+    ToolApprovalScope,
+    tool_approval_scope,
+    tool_approval_scope_is_current,
+)
 
-SUBAGENT_TOOL_APPROVAL_SCHEMA = "subagent_tool_approval.v1"
-SUBAGENT_TOOL_APPROVAL_CONSUMER_SCHEMA = "subagent_tool_approval_consumer.v1"
-SUBAGENT_TOOL_APPROVAL_DISCOVERY_SECONDS = 1.5
-SUBAGENT_TOOL_APPROVAL_CONSUMER_LEASE_SECONDS = 15.0
-SUBAGENT_TOOL_APPROVAL_POLL_SECONDS = 0.05
-SUBAGENT_TOOL_APPROVAL_MAX_PENDING = 32
+AGENT_TOOL_APPROVAL_SCHEMA = "subagent_tool_approval.v1"
+AGENT_TOOL_APPROVAL_CONSUMER_SCHEMA = "subagent_tool_approval_consumer.v1"
+AGENT_TOOL_APPROVAL_DISCOVERY_SECONDS = 1.5
+AGENT_TOOL_APPROVAL_CONSUMER_LEASE_SECONDS = 15.0
+AGENT_TOOL_APPROVAL_POLL_SECONDS = 0.05
+AGENT_TOOL_APPROVAL_MAX_PENDING = 32
 
 
-# LLM: The handle freezes canonical root/run/path/request identity before any
-# waiting starts; callers cannot swap a later request into an existing record.
-# 类用途: 保存一条已发布子代理审批请求的精确等待句柄。
+# LLM: 句柄冻结 canonical 归属、完整请求与 main claim；等待及决定必须核对同一记录，不能换成后续执行。
+# 类用途: 保存一条主/子后台审批请求的等待句柄。
 @dataclass(frozen=True)
-class SubagentToolApprovalHandle:
-    root_task_id: str
-    run_id: str
+class AgentToolApprovalHandle:
+    scope: ToolApprovalScope
     path: Path
     request: ToolApprovalRequest
     created_at: float
+    scope_valid: Callable[[], bool] = field(repr=False, compare=False)
 
 
-# LLM: The mixin is attached only to child/background model sinks. It publishes
-# one exact request through this module and blocks the original ToolCall until a
-# typed owner decision, cancellation, or missing interactive consumer resolves it.
-# 类用途: 给子代理模型回调补上工具审批入口，不在展示类里复制跨进程控制逻辑。
-class SubagentToolApprovalSinkMixin:
+# LLM: 主/子后台模型 sink 共用精确审批入口；会话缓存也先校验 canonical 归属，不允许缓存跨 run 或 claim 扩权。
+# 类用途: 把审批请求发布到原会话账本，并等待决定、取消或接收方失联。
+class AgentToolApprovalSinkMixin:
     agent: object
     thread_id: str
     task_id: str
 
-    # LLM: 子代理沿用同 owner 的显式自主策略；当前挂起请求可原地续跑，异常返回 unavailable，不能放宽权限根。
-    # 函数用途: 默认确认时上送精确审批；用户切自主后不用逐个点子代理审批。
+    # LLM: 先冻结归属再查同作用域缓存；挂起期间租约变化、取消和权限拒绝不能由自主模式覆盖。
+    # 函数用途: 上送精确主/子审批，等待原调用的用户决定或同 owner 显式权限模式变化。
     def request_permission(
         self,
         request_value: Mapping[str, object],
@@ -64,20 +61,23 @@ class SubagentToolApprovalSinkMixin:
             from ..user_space.approval_mode import autonomous_tool_decision
 
             request = ToolApprovalRequest.from_mapping(request_value)
-            session_key = _approval_session_key(request)
-            approved_keys = getattr(self, "_subagent_approved_session_keys", set())
+            if _cancelled(cancellation_token):
+                return ToolApprovalDecision(request.permission_id, "cancelled").to_dict()
+            scope = _request_scope(self.agent, self.task_id, self.thread_id, request)
+            session_key = f"{scope.run_id}:{scope.claim_id}:{_approval_session_key(request)}"
+            approved_keys = getattr(self, "_approved_session_keys", set())
             if session_key and session_key in approved_keys:
                 return ToolApprovalDecision(
                     request.permission_id,
                     "approved",
                 ).to_dict()
-            handle = publish_subagent_tool_approval(
+            handle = publish_agent_tool_approval(
                 self.agent,
                 run_id=self.task_id,
                 thread_id=self.thread_id,
                 request_value=request,
             )
-            decision = wait_for_subagent_tool_approval(
+            decision = wait_for_agent_tool_approval(
                 handle,
                 cancellation_token=cancellation_token,
                 mode_decision_provider=partial(autonomous_tool_decision, self.agent),
@@ -85,7 +85,7 @@ class SubagentToolApprovalSinkMixin:
             if decision.decision == "approved_session" and session_key:
                 approved_keys = set(approved_keys)
                 approved_keys.add(session_key)
-                self._subagent_approved_session_keys = approved_keys
+                self._approved_session_keys = approved_keys
         except (FileNotFoundError, OSError, RuntimeError, TypeError, ValueError):
             permission_id = str(request_value.get("permission_id") or "").strip()
             if not permission_id:
@@ -94,30 +94,20 @@ class SubagentToolApprovalSinkMixin:
         return decision.to_dict()
 
 
-# LLM: Publication validates the child's canonical task/root and exact request
-# binding, then atomically creates or idempotently reuses one pending record.
-# 函数用途: 发布一条子代理工具审批请求，供所属用户界面发现。
-def publish_subagent_tool_approval(
+# LLM: 发布先验证 canonical run/thread/root 与有效执行，再原子创建完整请求；main claim 随记录冻结，不更换旧审批身份。
+# 函数用途: 发布一条主/子后台工具审批，供所属用户界面发现。
+def publish_agent_tool_approval(
     agent: object,
     *,
     run_id: str,
     thread_id: str,
     request_value: ToolApprovalRequest | Mapping[str, object],
-) -> SubagentToolApprovalHandle:
-    task, root_task_id = _task_and_root(agent, run_id)
+) -> AgentToolApprovalHandle:
     request = _approval_request(request_value)
-    selected = str(getattr(task, "id", "") or "")
-    if request.binding.get("run_id") != selected:
-        raise ValueError("subagent approval binding run mismatch")
-    path = _approval_path(agent, root_task_id, selected, request.permission_id)
+    scope = _request_scope(agent, run_id, thread_id, request)
+    path = _approval_path(agent, scope, request.permission_id)
     created_at = request.requested_at or time.time()
-    payload = _pending_payload(
-        root_task_id,
-        selected,
-        str(thread_id or "").strip(),
-        request,
-        created_at,
-    )
+    payload = _pending_payload(scope, request, created_at)
     with locked_json_path(_transition_path(path)):
         report = read_json_object_report(path, context="subagent.tool_approval.publish")
         if report.load_error is not None:
@@ -126,27 +116,31 @@ def publish_subagent_tool_approval(
             raise ValueError("subagent approval identity conflict")
         if not report.payload:
             write_json_file_atomic(path, payload)
-    return SubagentToolApprovalHandle(root_task_id, selected, path, request, created_at)
+    return AgentToolApprovalHandle(
+        scope, path, request, created_at,
+        partial(tool_approval_scope_is_current, agent, scope),
+    )
 
 
-# LLM: Waiting accepts the exact record or an owner-bound mode provider. A structured
-# cancellation wins, while an absent interactive consumer fails closed instead
-# of leaving an IM/background child permanently blocked.
-# 函数用途: 等待精确决定或用户切换自主模式；后者不依赖界面持续在线，取消优先。
-def wait_for_subagent_tool_approval(
-    handle: SubagentToolApprovalHandle,
+# LLM: 取消优先，执行归属失效先于任何批准；无交互 consumer 关闭式失败，不让后台永久等待或自行放行。
+# 函数用途: 等待精确决定或同 owner 模式变化，同时收口取消、换轮与接收方离线。
+def wait_for_agent_tool_approval(
+    handle: AgentToolApprovalHandle,
     *,
     cancellation_token: object | None = None,
-    poll_seconds: float = SUBAGENT_TOOL_APPROVAL_POLL_SECONDS,
-    discovery_seconds: float = SUBAGENT_TOOL_APPROVAL_DISCOVERY_SECONDS,
-    consumer_lease_seconds: float = SUBAGENT_TOOL_APPROVAL_CONSUMER_LEASE_SECONDS,
+    poll_seconds: float = AGENT_TOOL_APPROVAL_POLL_SECONDS,
+    discovery_seconds: float = AGENT_TOOL_APPROVAL_DISCOVERY_SECONDS,
+    consumer_lease_seconds: float = AGENT_TOOL_APPROVAL_CONSUMER_LEASE_SECONDS,
     mode_decision_provider: Callable[[ToolApprovalRequest], ToolApprovalDecision | None] | None = None,
 ) -> ToolApprovalDecision:
-    interval = max(0.01, float(poll_seconds or SUBAGENT_TOOL_APPROVAL_POLL_SECONDS))
+    interval = max(0.01, float(poll_seconds or AGENT_TOOL_APPROVAL_POLL_SECONDS))
     while True:
         if _cancelled(cancellation_token):
             _remove_exact_record(handle)
             return ToolApprovalDecision(handle.request.permission_id, "cancelled")
+        if not handle.scope_valid():
+            _remove_exact_record(handle)
+            return ToolApprovalDecision(handle.request.permission_id, "unavailable")
         report = read_json_object_report(handle.path, context="subagent.tool_approval.wait")
         if report.load_error is not None or not report.payload:
             return ToolApprovalDecision(handle.request.permission_id, "unavailable")
@@ -160,7 +154,7 @@ def wait_for_subagent_tool_approval(
                 _remove_exact_record(handle)
                 return decision
         now = time.time()
-        lease_seen_at = _consumer_seen_at(handle.path.parent, handle.root_task_id)
+        lease_seen_at = _consumer_seen_at(handle.path.parent, handle.scope.root_task_id)
         lease_fresh = now - lease_seen_at <= max(1.0, float(consumer_lease_seconds))
         if not lease_fresh and now - handle.created_at >= max(0.0, float(discovery_seconds)):
             _remove_exact_record(handle)
@@ -168,10 +162,9 @@ def wait_for_subagent_tool_approval(
         time.sleep(interval)
 
 
-# LLM: Consumer renewal is an explicit interactive-client capability lease for
-# one root task. It is not a user approval and cannot decide any pending call.
-# 函数用途: 记录当前会话的 TUI/Web 正在接收子代理审批请求。
-def renew_subagent_tool_approval_consumer(
+# LLM: 接收方续租只声明一个 root 的交互能力，不是用户批准，不能决定任何挂起调用。
+# 函数用途: 记录当前会话的 TUI/Web 正在接收主/子后台审批请求。
+def renew_agent_tool_approval_consumer(
     agent: object,
     *,
     root_task_id: str,
@@ -183,7 +176,7 @@ def renew_subagent_tool_approval_consumer(
     write_json_file_atomic(
         target,
         {
-            "schema_version": SUBAGENT_TOOL_APPROVAL_CONSUMER_SCHEMA,
+            "schema_version": AGENT_TOOL_APPROVAL_CONSUMER_SCHEMA,
             "root_task_id": root,
             "seen_at": max(0.0, float(seen_at if seen_at is not None else time.time())),
         },
@@ -191,14 +184,13 @@ def renew_subagent_tool_approval_consumer(
     return target
 
 
-# LLM: Listing is a bounded owner projection over one exact root directory. It
-# validates every record and returns public request fields plus agent labels only.
-# 函数用途: 列出当前主任务树里等待用户处理的子代理工具审批。
-def list_pending_subagent_tool_approvals(
+# LLM: 有界列表只投影 owner 的一个 root 目录；每行重验原始请求及当前归属，返回公开字段与展示标签。
+# 函数用途: 列出当前主任务树里等待用户处理的主/子后台工具审批。
+def list_pending_agent_tool_approvals(
     agent: object,
     *,
     root_task_id: str,
-    limit: int = SUBAGENT_TOOL_APPROVAL_MAX_PENDING,
+    limit: int = AGENT_TOOL_APPROVAL_MAX_PENDING,
 ) -> list[dict[str, object]]:
     root = validate_opaque_id(root_task_id, kind="root_task_id")
     directory = _approval_root(agent, root)
@@ -217,30 +209,29 @@ def list_pending_subagent_tool_approvals(
     return rows[: max(1, int(limit or 1))]
 
 
-# LLM: Resolution reloads the canonical record under its transition lock and
-# compares the full ToolApprovalRequest before writing a typed decision. Labels,
-# row positions, and client-supplied binding fragments never authorize a call.
-# 函数用途: 将用户对指定子代理工具调用的决定原子写回等待记录。
-def resolve_subagent_tool_approval(
+# LLM: 决定写回在原记录锁内重读归属与完整请求；main 的 claim 换轮使旧决定失效，文案和行号不授予权限。
+# 函数用途: 将用户对主/子后台原调用的决定原子写回同一等待记录。
+def resolve_agent_tool_approval(
     agent: object,
     *,
     run_id: str,
     request_value: ToolApprovalRequest | Mapping[str, object],
     decision_value: ToolApprovalDecision | Mapping[str, object],
 ) -> dict[str, object]:
-    _task, root_task_id = _task_and_root(agent, run_id)
+    scope = tool_approval_scope(agent, run_id)
     request = _approval_request(request_value)
     decision = _approval_decision(decision_value)
     selected = validate_opaque_id(run_id, kind="run_id")
     if request.binding.get("run_id") != selected or decision.permission_id != request.permission_id:
         raise ValueError("subagent approval decision binding mismatch")
-    path = _approval_path(agent, root_task_id, selected, request.permission_id)
+    path = _approval_path(agent, scope, request.permission_id)
     with locked_json_path(_transition_path(path)):
+        if not tool_approval_scope_is_current(agent, scope):
+            raise FileNotFoundError("tool approval execution is no longer active")
         report = read_json_object_report(path, context="subagent.tool_approval.resolve")
         if report.load_error is not None or not _record_matches(
             report.payload,
-            root_task_id,
-            selected,
+            scope,
             request,
         ):
             raise FileNotFoundError("pending subagent approval not found")
@@ -261,64 +252,53 @@ def resolve_subagent_tool_approval(
     }
 
 
-# LLM: Paths derive only from validated root/run ids and a permission hash; the
-# permission id itself never becomes a filesystem component.
+# LLM: 路径只来自已校验归属与 permission 哈希；main/child 沿同一历史目录，公开 permission ID 不成为路径分量。
 # 函数用途: 生成一条审批记录的唯一安全路径。
-def _approval_path(agent: object, root_task_id: str, run_id: str, permission_id: str) -> Path:
-    root = validate_opaque_id(root_task_id, kind="root_task_id")
-    selected = validate_opaque_id(run_id, kind="run_id")
+def _approval_path(agent: object, scope: ToolApprovalScope, permission_id: str) -> Path:
     digest = hashlib.sha256(str(permission_id or "").encode("utf-8")).hexdigest()[:24]
-    return _approval_root(agent, root) / f"{selected}.{digest}.json"
+    return _approval_root(agent, scope.root_task_id) / f"{scope.run_id}.{digest}.json"
 
 
-# LLM: ConversationStore is the one owner-scoped durable root shared by Gateway
-# and child runners; no task workspace or display transcript may replace it.
+# LLM: ConversationStore 是 Gateway 与主/子 runner 共用的唯一 owner 审批根；原持久路径保留，工作区和正文不能替代它。
 # 函数用途: 返回某棵主任务树审批账本的目录。
 def _approval_root(agent: object, root_task_id: str) -> Path:
     store = getattr(agent, "conversation_store", None)
-    root = getattr(store, "root", None)
+    root = getattr(getattr(store, "storage", None), "root", None)
     if root is None:
         raise RuntimeError("subagent approval requires ConversationStore")
     return Path(root) / "subagent_tool_approvals" / root_task_id
 
 
-# LLM: Task loading provides canonical root membership; request text and caller
-# path guesses are never used to place or authorize a record.
-# 函数用途: 加载指定子代理并返回它真实所属的主任务 ID。
-def _task_and_root(agent: object, run_id: str) -> tuple[object, str]:
-    selected = validate_opaque_id(run_id, kind="run_id")
-    manager = getattr(agent, "subagents", None)
-    if manager is None:
-        raise RuntimeError("subagent manager unavailable")
-    task = manager.load(selected)
-    root = validate_opaque_id(str(getattr(task, "root_id", "") or ""), kind="root_task_id")
-    return task, root
+# LLM: 发布和缓存使用同一归属校验；明确 thread/run 与 canonical 状态冲突时拒绝，不能猜测或代换身份。
+# 函数用途: 核对当前 sink 是否有资格为这一次调用发起审批。
+def _request_scope(agent: object, run_id: str, thread_id: str, request: ToolApprovalRequest) -> ToolApprovalScope:
+    scope = tool_approval_scope(agent, run_id)
+    if not scope.active or scope.thread_id != thread_id or request.binding.get("run_id") != scope.run_id:
+        raise ValueError("tool approval execution scope mismatch")
+    return scope
 
 
-# LLM: Pending payload copies the already-sanitized approval contract and exact
-# structural ids; it contains no raw tool arguments or credentials.
+# LLM: 记录只复制已脱敏合同与 canonical 身份；main 额外冻结 claim，原 child schema/路径及字段含义保持。
 # 函数用途: 构造一条尚未决定的审批记录。
 def _pending_payload(
-    root_task_id: str,
-    run_id: str,
-    thread_id: str,
+    scope: ToolApprovalScope,
     request: ToolApprovalRequest,
     created_at: float,
 ) -> dict[str, object]:
     return {
-        "schema_version": SUBAGENT_TOOL_APPROVAL_SCHEMA,
+        "schema_version": AGENT_TOOL_APPROVAL_SCHEMA,
         "status": "pending",
-        "root_task_id": root_task_id,
-        "run_id": run_id,
-        "thread_id": thread_id,
+        "root_task_id": scope.root_task_id,
+        "run_id": scope.run_id,
+        "thread_id": scope.thread_id,
         "request": request.to_dict(),
         "created_at": created_at,
+        **({"claim_id": scope.claim_id} if scope.claim_id else {}),
     }
 
 
-# LLM: Public projection revalidates task ancestry and hides decided/corrupt
-# records. Agent name/role are bounded display fields, not decision authority.
-# 函数用途: 将一条合法等待记录转换成 TUI/Web 可展示对象。
+# LLM: 投影重新验证归属和 main claim，隐藏终态/旧轮/坏账；代理类型与名称只用于展示，不能授权。
+# 函数用途: 将仍属于当前执行的等待记录转换成主/子代理共用的 TUI/Web 行。
 def _public_pending_record(
     agent: object,
     root_task_id: str,
@@ -329,31 +309,27 @@ def _public_pending_record(
     try:
         run_id = validate_opaque_id(str(payload.get("run_id") or ""), kind="run_id")
         request = _approval_request(payload.get("request") if isinstance(payload.get("request"), Mapping) else {})
-        task, actual_root = _task_and_root(agent, run_id)
+        scope = tool_approval_scope(agent, run_id)
     except (FileNotFoundError, OSError, RuntimeError, TypeError, ValueError):
         return None
-    if actual_root != root_task_id or not _record_matches(payload, root_task_id, run_id, request):
-        return None
-    if task_status_in(
-        str(getattr(task, "status", "") or ""),
-        SUBAGENT_ENDED_STATUSES,
+    if not scope.active or scope.root_task_id != root_task_id or not _record_matches(
+        payload, scope, request,
     ):
         return None
     return {
         "run_id": run_id,
-        "agent_name": str(getattr(task, "name", "") or getattr(task, "role", "") or run_id)[:96],
+        "agent_name": scope.agent_name,
+        "agent_kind": scope.agent_kind,
         "request": request.to_dict(),
         "requested_at": request.requested_at,
     }
 
 
-# LLM: Record comparison requires exact schema/root/run/request equality; a
-# matching permission id alone is insufficient authorization.
-# 函数用途: 核验账本记录是否精确对应当前审批请求。
+# LLM: 记录比较要求 schema/root/run/request 及 main claim 全部一致；单独相同 permission ID 不构成授权。
+# 函数用途: 核验等待记录是否精确对应原调用及原执行租约。
 def _record_matches(
     payload: object,
-    root_task_id: str,
-    run_id: str,
+    scope: ToolApprovalScope,
     request: ToolApprovalRequest,
 ) -> bool:
     if not isinstance(payload, Mapping):
@@ -364,9 +340,11 @@ def _record_matches(
     except (TypeError, ValueError):
         return False
     return bool(
-        payload.get("schema_version") == SUBAGENT_TOOL_APPROVAL_SCHEMA
-        and str(payload.get("root_task_id") or "") == root_task_id
-        and str(payload.get("run_id") or "") == run_id
+        payload.get("schema_version") == AGENT_TOOL_APPROVAL_SCHEMA
+        and str(payload.get("root_task_id") or "") == scope.root_task_id
+        and str(payload.get("run_id") or "") == scope.run_id
+        and str(payload.get("thread_id") or "") == scope.thread_id
+        and str(payload.get("claim_id") or "") == scope.claim_id
         and stored == request
     )
 
@@ -382,17 +360,15 @@ def _same_pending_record(current: object, expected: Mapping[str, object]) -> boo
     )
 
 
-# LLM: A decided record must still match the handle's exact request before its
-# typed decision can wake the child runner.
+# LLM: 决定必须匹配句柄冻结的完整归属和请求，才能唤醒原主/子调用；不是当前作用域的记录保持不可用。
 # 函数用途: 从当前账本行提取已核验决定，尚未决定时返回 None。
 def _record_decision(
-    handle: SubagentToolApprovalHandle,
+    handle: AgentToolApprovalHandle,
     payload: object,
 ) -> ToolApprovalDecision | None:
     if not _record_matches(
         payload,
-        handle.root_task_id,
-        handle.run_id,
+        handle.scope,
         handle.request,
     ):
         return ToolApprovalDecision(handle.request.permission_id, "unavailable")
@@ -425,7 +401,7 @@ def _consumer_seen_at(directory: Path, root_task_id: str) -> float:
     payload = report.payload
     if (
         report.load_error is not None
-        or payload.get("schema_version") != SUBAGENT_TOOL_APPROVAL_CONSUMER_SCHEMA
+        or payload.get("schema_version") != AGENT_TOOL_APPROVAL_CONSUMER_SCHEMA
         or str(payload.get("root_task_id") or "") != root_task_id
     ):
         return 0.0
@@ -435,13 +411,12 @@ def _consumer_seen_at(directory: Path, root_task_id: str) -> float:
         return 0.0
 
 
-# LLM: Cleanup holds the same record transition lock and deletes only when the
-# stored full identity still matches this waiter.
+# LLM: 清理持有原记录锁，只删除与本等待者完整归属、claim 和请求相同的记录，不回收后续轮审批。
 # 函数用途: 消费、取消或无人接收后移除这一条精确临时审批记录。
-def _remove_exact_record(handle: SubagentToolApprovalHandle) -> None:
+def _remove_exact_record(handle: AgentToolApprovalHandle) -> None:
     with locked_json_path(_transition_path(handle.path)):
         report = read_json_object_report(handle.path, context="subagent.tool_approval.remove")
-        if _record_matches(report.payload, handle.root_task_id, handle.run_id, handle.request):
+        if _record_matches(report.payload, handle.scope, handle.request):
             try:
                 handle.path.unlink()
             except OSError:
@@ -455,9 +430,8 @@ def _transition_path(path: Path) -> Path:
     return path.with_name(f".{path.name}.transition")
 
 
-# LLM: Cancellation reads only a structured token field/method; exception text
-# and user prose never stop or approve a tool.
-# 函数用途: 判断子代理等待审批期间是否收到真实取消信号。
+# LLM: 取消只读结构化令牌字段/方法；Goal paused、异常正文和用户普通文字不能取消或批准工具。
+# 函数用途: 判断主/子后台等待审批期间是否收到当前回合的真实取消信号。
 def _cancelled(token: object | None) -> bool:
     if token is None:
         return False
@@ -465,10 +439,8 @@ def _cancelled(token: object | None) -> bool:
     return bool(checker()) if callable(checker) else bool(getattr(token, "cancelled", False))
 
 
-# LLM: Session approval scope mirrors the foreground Gateway key: exact tool
-# name plus normalized argument hash. It remains sink/attempt-local and cannot
-# approve another child or differently parameterized call.
-# 函数用途: 生成子代理本次执行尝试内“始终允许同一调用”的缓存键。
+# LLM: 缓存沿前台的精确工具名与参数哈希，并由调用方加 run/claim 隔离；不跨 sink、执行或参数扩权。
+# 函数用途: 生成本次执行内“始终允许同一调用”的参数缓存键。
 def _approval_session_key(request: ToolApprovalRequest) -> str:
     tool_name = str(request.binding.get("tool_name") or "").strip()
     args_hash = str(request.binding.get("args_hash") or "").strip()
@@ -488,12 +460,12 @@ def _approval_decision(value: ToolApprovalDecision | Mapping[str, object]) -> To
 
 
 __all__ = [
-    "SUBAGENT_TOOL_APPROVAL_CONSUMER_LEASE_SECONDS",
-    "SubagentToolApprovalHandle",
-    "SubagentToolApprovalSinkMixin",
-    "list_pending_subagent_tool_approvals",
-    "publish_subagent_tool_approval",
-    "renew_subagent_tool_approval_consumer",
-    "resolve_subagent_tool_approval",
-    "wait_for_subagent_tool_approval",
+    "AGENT_TOOL_APPROVAL_CONSUMER_LEASE_SECONDS",
+    "AgentToolApprovalHandle",
+    "AgentToolApprovalSinkMixin",
+    "list_pending_agent_tool_approvals",
+    "publish_agent_tool_approval",
+    "renew_agent_tool_approval_consumer",
+    "resolve_agent_tool_approval",
+    "wait_for_agent_tool_approval",
 ]

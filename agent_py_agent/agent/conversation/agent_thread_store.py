@@ -1,3 +1,5 @@
+# LLM: 子代理精确线程通过 ThreadStore 写入原目录；不建通道/用户索引，不反向加载存储组装入口。
+# 模块用途: 按稳定运行身份创建或恢复子代理线程，保留原 owner、谱系和目录冲突校验。
 """Agent ConversationThread exact-id materialization and collision checks."""
 
 from __future__ import annotations
@@ -8,21 +10,13 @@ from typing import TYPE_CHECKING, Any
 from ..gateway_parts.io import locked_file_transition
 from ..runtime_errors import DataCorruptionError
 from .models import ConversationThread
-from .store import (
-    _read_json_object_report,
+from .store_io import now, read_json_object_report, safe_file_stem
+from .store_threads import (
     normalized_runtime_workspace_roots,
-    now,
-    safe_file_stem,
 )
 
 if TYPE_CHECKING:
-    from .store import ConversationThreadStore
-
-
-# LLM: This module owns exact-id agent thread creation separately from the channel-bound
-# ConversationThreadStore class. Keep lineage/owner/workspace collision checks fail-closed;
-# never create channel or user indexes for child/grandchild agent threads.
-# 模块用途: 按稳定运行身份创建或恢复子代理独立会话线程，并阻止它与用户聊天线程串线。
+    from .store_threads import ThreadStore
 
 
 # LLM: Agent threads use a host-generated exact id and no channel/user indexes. Existing
@@ -30,7 +24,7 @@ if TYPE_CHECKING:
 # child/grandchild transcript Compact and resume.
 # 函数用途: 为一个确定的子代理运行创建或校验独立会话线程，不把它绑定成用户聊天会话。
 def ensure_agent_thread_record(
-    store: ConversationThreadStore,
+    store: ThreadStore,
     request: dict[str, Any],
 ) -> ConversationThread:
     thread_id = str(request.get("thread_id") or "").strip()
@@ -39,7 +33,7 @@ def ensure_agent_thread_record(
         raise ValueError("agent thread_id must be a safe exact identifier")
     if not agent_run_id:
         raise ValueError("agent_run_id is required")
-    path = store._thread_path(thread_id)
+    path = store.storage.thread_path(thread_id)
     transition = path.with_name(f".{path.name}.agent-thread")
     current = now(request.get("now"))
     expected_metadata = {
@@ -54,7 +48,7 @@ def ensure_agent_thread_record(
         "agent_depth": max(0, int(request.get("agent_depth") or 0)),
     }
     with locked_file_transition(transition):
-        payload, error = _read_json_object_report(
+        payload, error = read_json_object_report(
             path,
             context="conversation.agent_thread.read",
         )
@@ -85,7 +79,7 @@ def ensure_agent_thread_record(
             ),
             metadata=expected_metadata,
         )
-        store._write_thread(thread)
+        store.write(thread)
         return thread
 
 
@@ -94,7 +88,7 @@ def ensure_agent_thread_record(
 # collision and must never be silently converted into the requested child thread.
 # 函数用途: 校验已存在的子代理线程身份，并只补齐旧记录缺失的目录和元数据。
 def _ensure_existing_agent_thread(
-    store: ConversationThreadStore,
+    store: ThreadStore,
     payload: dict[str, Any],
     *,
     request: dict[str, Any],
@@ -171,5 +165,5 @@ def _ensure_existing_agent_thread(
         updated_at=max(thread.updated_at, current),
     )
     if updated != thread:
-        store._write_thread(updated)
+        store.write(updated)
     return updated

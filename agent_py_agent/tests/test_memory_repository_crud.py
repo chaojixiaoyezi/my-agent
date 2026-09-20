@@ -132,7 +132,7 @@ def test_remember_tool_crud_uses_stable_ids(tmp_path: Path) -> None:
         AgentConfig(my_agent_home=str(tmp_path / "home"), prompt_files=[]),
         tmp_path / "workspace",
     )
-    thread = agent.conversation_store.get_or_create_thread(
+    thread = agent.conversation_store.threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "channel": "internal",
@@ -142,7 +142,7 @@ def test_remember_tool_crud_uses_stable_ids(tmp_path: Path) -> None:
     )
 
     def bind_user_message(request_id: str, content: str) -> None:
-        agent.conversation_store.append_message(
+        agent.conversation_store.messages.append(
             {
                 "thread_id": thread.thread_id,
                 "role": "user",

@@ -22,7 +22,7 @@ from agent_py_agent.agent.gateway_parts.display_archive_service import read_gate
 # 函数用途: 生成测试专用会话和存储，不加载模型或访问真实用户资料。
 def _owner(root, *, session="session", user="user"):
     store = ConversationStore(root)
-    thread = store.get_or_create_thread({
+    thread = store.threads.get_or_create({
         "canonical_user_id": user, "channel": "chat",
         "channel_conversation_id": session, "channel_user_id": user,
     })
@@ -78,11 +78,11 @@ def test_path_like_and_unknown_refs_rejected_before_owner_lookup(tmp_path, monke
 def test_scope_accepts_own_root_and_descendants_not_other_sessions_or_owners(tmp_path, monkeypatch):
     agent, thread = _owner(tmp_path / "owner-a")
     other, other_thread = _owner(tmp_path / "owner-b")
-    second = agent.conversation_store.get_or_create_thread({
+    second = agent.conversation_store.threads.get_or_create({
         "canonical_user_id": "user", "channel": "chat", "channel_user_id": "user",
         "channel_conversation_id": "different-session",
     })
-    child = agent.conversation_store.ensure_agent_thread({
+    child = agent.conversation_store.threads.ensure_agent({
         "thread_id": "agent-child", "agent_run_id": "run-child", "canonical_user_id": "user",
         "parent_agent_thread_id": thread.thread_id, "root_agent_thread_id": thread.thread_id,
     })
@@ -119,7 +119,7 @@ def test_manifest_counts_are_authoritative_and_missing_archive_is_explicit(tmp_p
 def test_symlink_archive_paths_are_rejected(tmp_path, level):
     agent, thread = _owner(tmp_path / "store")
     ref = archive_display_rows(agent, thread_id=thread.thread_id, rows=[{"text": "x"}])
-    root = agent.conversation_store.root / "display_archives"
+    root = agent.conversation_store.storage.root / "display_archives"
     path = root if level == "root" else root / ref["archive_id"]
     if level == "file":
         path = path / "0.json"
@@ -133,7 +133,7 @@ def test_symlink_archive_paths_are_rejected(tmp_path, level):
 def test_corrupt_oversized_or_invalid_page_is_rejected(tmp_path):
     agent, thread = _owner(tmp_path)
     ref = archive_display_rows(agent, thread_id=thread.thread_id, rows=[])
-    path = agent.conversation_store.root / "display_archives" / ref["archive_id"] / "0.json"
+    path = agent.conversation_store.storage.root / "display_archives" / ref["archive_id"] / "0.json"
     for value in ("x" * 300000, json.dumps({"rows": [{"text": "x"}]})):
         path.write_text(value)
         with pytest.raises(DisplayArchiveError):

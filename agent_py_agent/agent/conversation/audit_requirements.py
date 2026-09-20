@@ -214,7 +214,7 @@ def audit_runtime_requirement_for_task(
     """Resolve one active named Audit's current worker projection."""
 
     selected = str(task_id or "").strip()
-    loader = getattr(store, "load_task_link", None)
+    loader = getattr(getattr(store, 'tasks', None), 'load', None)
     if not selected or not callable(loader):
         return audit_runtime_requirement_text(fallback)
     try:

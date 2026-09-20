@@ -84,7 +84,7 @@ def bind_cli_run_conversation(agent: object, params: object, user_prompt: str):
         getattr(params, "continuation_root_request_id", "") or request_id
     ).strip()
     try:
-        thread = store.get_or_create_thread(
+        thread = store.threads.get_or_create(
             {
                 "canonical_user_id": _CLI_RUN_USER_ID,
                 "channel": _CLI_RUN_CHANNEL,
@@ -106,7 +106,7 @@ def bind_cli_run_conversation(agent: object, params: object, user_prompt: str):
             metadata["continuation_parent_attempt_id"] = str(
                 getattr(params, "continuation_parent_attempt_id", "") or ""
             )
-        entry = store.append_message_once(
+        entry = store.messages.append_once(
             {
                 "thread_id": thread.thread_id,
                 "role": role,
@@ -166,7 +166,7 @@ def persist_cli_run_assistant(agent: object, params: object, result: object) -> 
         getattr(result, "operation_verification", None)
     )
     try:
-        entry = store.append_message_once(
+        entry = store.messages.append_once(
             {
                 "thread_id": thread_id,
                 "role": "assistant",

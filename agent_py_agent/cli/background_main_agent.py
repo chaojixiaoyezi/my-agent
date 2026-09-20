@@ -115,7 +115,7 @@ def cmd_background_main_agent_message(args) -> int:
     payload = {
         "thread_id": thread.thread_id,
         "canonical_user_id": thread.canonical_user_id,
-        "message_count": len(agent.conversation_store.recent_messages(thread.thread_id, limit=0)),
+        "message_count": len(agent.conversation_store.messages.recent(thread.thread_id, limit=0)),
         "ran_background": bool(args.run_background),
     }
     _print_payload(payload, json_output=bool(args.json))
@@ -125,11 +125,11 @@ def cmd_background_main_agent_message(args) -> int:
 def cmd_background_main_agent_bind_task(args) -> int:
     agent = make_agent(args)
     now = _optional_float(args.now)
-    link = agent.conversation_store.bind_task({'thread_id': str(args.thread_id), 'task_id': str(args.task_id), 'goal': str(args.goal), 'now': now})
+    link = agent.conversation_store.tasks.bind({'thread_id': str(args.thread_id), 'task_id': str(args.task_id), 'goal': str(args.goal), 'now': now})
     policy_id = ""
     interval = int(args.progress_interval_seconds or 0)
     if interval > 0:
-        policy = agent.conversation_store.set_progress_policy({'thread_id': str(args.thread_id), 'task_id': str(args.task_id), 'interval_seconds': interval, 'route_channel': str(args.route_channel or "internal"), 'route_target': str(args.route_target or ""), 'now': now})
+        policy = agent.conversation_store.progress.create({'thread_id': str(args.thread_id), 'task_id': str(args.task_id), 'interval_seconds': interval, 'route_channel': str(args.route_channel or "internal"), 'route_target': str(args.route_target or ""), 'now': now})
         policy_id = policy.policy_id
     payload = {
         "thread_id": link.thread_id,
@@ -158,11 +158,11 @@ def cmd_background_main_agent_tick(args) -> int:
 def cmd_background_main_agent_status(args) -> int:
     agent = make_agent(args)
     store = agent.conversation_store
-    threads = store.list_threads(limit=0)
-    task_links = [link for thread in threads for link in store.task_links(thread.thread_id)]
-    pending_wakes = store.pending_wake_signals(limit=0)
-    unhandled = store.unhandled_observations_requiring_main(limit=0)
-    policies = store.list_progress_policies()
+    threads = store.threads.list(limit=0)
+    task_links = [link for thread in threads for link in store.tasks.list(thread.thread_id)]
+    pending_wakes = store.wakes.pending(limit=0)
+    unhandled = store.observations.unhandled_requiring_main(limit=0)
+    policies = store.progress.list()
     payload = {
         "ok": True,
         "schema_version": "background_main_agent_status.v1",
@@ -203,19 +203,19 @@ def _thread_id_for_observe(store, args, task_id: str) -> str:
     thread_id = str(getattr(args, "thread_id", "") or "").strip()
     if thread_id or not task_id:
         return thread_id
-    thread = store.thread_for_task(task_id)
+    thread = store.tasks.thread_for(task_id)
     return thread.thread_id if thread is not None else ""
 
 
 def _append_cli_observation(store, args, thread_id: str, task_id: str):
-    return store.append_observation({'thread_id': thread_id, 'event_type': str(getattr(args, "event_type", "") or "observation"), 'summary': str(args.summary), 'urgency': str(getattr(args, "urgency", "") or "normal"), 'severity': str(getattr(args, "severity", "") or ""), 'source_agent_id': str(getattr(args, "source_agent_id", "") or ""), 'parent_agent_id': str(getattr(args, "parent_agent_id", "") or ""), 'root_task_id': str(getattr(args, "root_task_id", "") or task_id), 'evidence_refs': list(getattr(args, "evidence_ref", []) or []), 'requires_main_agent': bool(getattr(args, "requires_main_agent", False)), 'requires_llm_report': bool(getattr(args, "requires_llm_report", False)), 'now': _optional_float(getattr(args, "now", None))})
+    return store.observations.append({'thread_id': thread_id, 'event_type': str(getattr(args, "event_type", "") or "observation"), 'summary': str(args.summary), 'urgency': str(getattr(args, "urgency", "") or "normal"), 'severity': str(getattr(args, "severity", "") or ""), 'source_agent_id': str(getattr(args, "source_agent_id", "") or ""), 'parent_agent_id': str(getattr(args, "parent_agent_id", "") or ""), 'root_task_id': str(getattr(args, "root_task_id", "") or task_id), 'evidence_refs': list(getattr(args, "evidence_ref", []) or []), 'requires_main_agent': bool(getattr(args, "requires_main_agent", False)), 'requires_llm_report': bool(getattr(args, "requires_llm_report", False)), 'now': _optional_float(getattr(args, "now", None))})
 
 
 def _maybe_raise_cli_wake_signal(store, args, thread_id: str, observation) -> str:
     urgency = str(getattr(args, "urgency", "") or "").lower()
     if not bool(getattr(args, "wake", False)) and urgency != "urgent":
         return ""
-    signal = store.raise_wake_signal({'thread_id': thread_id, 'observation': observation, 'urgency': str(getattr(args, "urgency", "") or "urgent"), 'reason': str(getattr(args, "event_type", "") or "observation"), 'dedupe_key': str(getattr(args, "dedupe_key", "") or ""), 'now': _optional_float(getattr(args, "now", None))})
+    signal = store.wakes.raise_signal({'thread_id': thread_id, 'observation': observation, 'urgency': str(getattr(args, "urgency", "") or "urgent"), 'reason': str(getattr(args, "event_type", "") or "observation"), 'dedupe_key': str(getattr(args, "dedupe_key", "") or ""), 'now': _optional_float(getattr(args, "now", None))})
     return signal.wake_signal_id
 
 
@@ -260,10 +260,10 @@ def _thread_status_row(store, thread) -> dict[str, Any]:
         "canonical_user_id": thread.canonical_user_id,
         "title": thread.title,
         "active_task_count": len(thread.active_task_ids),
-        "message_count": len(store.recent_messages(thread.thread_id, limit=0)),
-        "observation_count": len(store.recent_observations(thread.thread_id, limit=0)),
+        "message_count": len(store.messages.recent(thread.thread_id, limit=0)),
+        "observation_count": len(store.observations.recent(thread.thread_id, limit=0)),
         "bindings": [item.to_dict() for item in thread.channel_bindings],
-        "tasks": [item.to_dict() for item in store.task_links(thread.thread_id)],
+        "tasks": [item.to_dict() for item in store.tasks.list(thread.thread_id)],
     }
 
 
@@ -295,7 +295,7 @@ def _wait_for_service_interval(agent: object, *, interval: float, stop_file: Pat
     while time.monotonic() < deadline:
         if stop_file is not None and stop_file.exists():
             return "stop_file"
-        if agent.conversation_store.pending_wake_signals(limit=1):
+        if agent.conversation_store.wakes.pending(limit=1):
             return "wake_signal"
         time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
     return "interval_elapsed"

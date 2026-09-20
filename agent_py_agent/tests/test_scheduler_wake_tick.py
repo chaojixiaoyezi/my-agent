@@ -51,7 +51,7 @@ def _call_enqueue(agent: SimpleAgent, *, now: float = 100.0) -> None:
 
 
 def _new_thread(agent: SimpleAgent) -> object:
-    return agent.conversation_store.get_or_create_thread(
+    return agent.conversation_store.threads.get_or_create(
         {
             "canonical_user_id": "u1",
             "channel": "unknown",
@@ -63,13 +63,13 @@ def _new_thread(agent: SimpleAgent) -> object:
 
 
 def _bind(agent: SimpleAgent, thread_id: str, task_id: str, **extra) -> None:
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {"thread_id": thread_id, "task_id": task_id, "now": 20.0, **extra}
     )
 
 
 def _create_goal(agent: SimpleAgent, thread_id: str, task_id: str) -> None:
-    agent.conversation_store.create_goal(
+    agent.conversation_store.goals.create(
         {
             "thread_id": thread_id,
             "objective": "持续推进直到完成",
@@ -91,7 +91,7 @@ def test_due_sleep_note_raises_wake_queue_signal(tmp_path) -> None:
 
     _call_enqueue(agent, now=100.0)
 
-    pending = agent.conversation_store.pending_wake_signals()
+    pending = agent.conversation_store.wakes.pending()
     assert len(pending) == 1
     assert pending[0].reason == "wake_queue_due"
     assert pending[0].root_task_id == task_id
@@ -110,7 +110,7 @@ def test_due_note_without_thread_link_completed_not_woken(tmp_path) -> None:
 
     _call_enqueue(agent, now=100.0)
 
-    assert agent.conversation_store.pending_wake_signals() == []
+    assert agent.conversation_store.wakes.pending() == []
     assert agent.subagents.runtime_db.list_pending_wakes() == []
 
 
@@ -135,7 +135,7 @@ def test_reconcile_upserts_goal_tick_only_for_active_goal_tasks(tmp_path) -> Non
     assert pending_notes[0]["root_task_id"] == goal_task
     assert pending_notes[0]["kind"] == "goal_tick"
     # 对账只落字条(冷却后到期), 不立即 raise wake
-    assert agent.conversation_store.pending_wake_signals() == []
+    assert agent.conversation_store.wakes.pending() == []
     assert pending_notes[0]["next_due_at"] > 1000.0
 
 
@@ -169,7 +169,7 @@ def test_reconcile_cancels_stale_notes_for_terminal_tasks(tmp_path) -> None:
     agent.subagents.runtime_db.upsert_wake(
         root_task_id=task_id, next_due_at=50.0, kind="sleep",
     )
-    agent.conversation_store.update_task_status(
+    agent.conversation_store.tasks.update_status(
         {"task_id": task_id, "status": "done", "now": 25.0}
     )
     _write_task(
@@ -179,7 +179,7 @@ def test_reconcile_cancels_stale_notes_for_terminal_tasks(tmp_path) -> None:
     _call_enqueue(agent, now=1000.0)
 
     assert agent.subagents.runtime_db.list_pending_wakes() == []
-    assert agent.conversation_store.pending_wake_signals() == []
+    assert agent.conversation_store.wakes.pending() == []
 
 
 def test_reconcile_skips_audit_work_kind_tasks(tmp_path) -> None:
@@ -200,7 +200,7 @@ def test_reconcile_skips_audit_work_kind_tasks(tmp_path) -> None:
     _call_enqueue(agent, now=1000.0)
 
     assert agent.subagents.runtime_db.list_pending_wakes() == []
-    assert agent.conversation_store.pending_wake_signals() == []
+    assert agent.conversation_store.wakes.pending() == []
 
 
 def test_goal_tick_note_pops_after_cooldown_and_wakes(tmp_path) -> None:
@@ -215,13 +215,13 @@ def test_goal_tick_note_pops_after_cooldown_and_wakes(tmp_path) -> None:
     _write_task(Path(agent.home_paths.owner_home_dir), "2026-08-08", "celery", task_id, "RUNNING")
 
     _call_enqueue(agent, now=1000.0)  # 对账: goal_tick 到期 at 1000+900=1900
-    assert agent.conversation_store.pending_wake_signals() == []
+    assert agent.conversation_store.wakes.pending() == []
 
     _call_enqueue(agent, now=1500.0)  # 冷却内: 字条未到期, 不唤醒
-    assert agent.conversation_store.pending_wake_signals() == []
+    assert agent.conversation_store.wakes.pending() == []
 
     _call_enqueue(agent, now=1901.0)  # 到期: 弹出并唤醒
-    pending = agent.conversation_store.pending_wake_signals()
+    pending = agent.conversation_store.wakes.pending()
     assert len(pending) == 1
     assert pending[0].reason == "wake_queue_due"
     assert pending[0].root_task_id == task_id

@@ -298,12 +298,13 @@ class ConversationMessageEvidenceVerifier:
     def __init__(self, conversation_store: object) -> None:
         self.conversation_store = conversation_store
 
-    # LLM: 候选 claim 必须与权威消息的 thread/role/hash/quote 全部匹配，且只返回最小证据字段。
+    # LLM: 通过同一 Store 的 messages.by_id_report 核对权威消息的 thread/role/hash/quote，且只返回最小证据字段。
+    # 不回退到旧 Store 方法或展示投影；领域拆分不能改变正式记忆的证据来源。
     # 函数用途: 核验一条 user_explicit 引用并返回规范证据。
     def verify(self, ref: dict[str, object]) -> dict[str, object] | None:
         thread_id = str(ref.get("thread_id") or "").strip()
         message_id = str(ref.get("message_id") or "").strip()
-        reader = getattr(self.conversation_store, "message_by_id_report", None)
+        reader = getattr(getattr(self.conversation_store, 'messages', None), 'by_id_report', None)
         if not thread_id or not message_id or not callable(reader):
             return None
         message, errors = reader(thread_id, message_id)

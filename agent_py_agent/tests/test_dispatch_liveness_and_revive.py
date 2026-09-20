@@ -1218,7 +1218,7 @@ def test_stream_incomplete_same_attempt_closes_authoritative_run(tmp_path: Path)
 
     # 直属父级唤醒：诊断事件不等于父级收到；接上父会话后用**当前代** attempt 重放失败结果。
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "owner-parent",
             "channel": "tui",
@@ -1229,7 +1229,7 @@ def test_stream_incomplete_same_attempt_closes_authoritative_run(tmp_path: Path)
     parent = manager.create_run(goal="parent waits for child", thought="", plan=["wait"], depth=1)
     manager.conversation_store = store
     # 直属父级唤醒按"孩子的 task → thread"绑定解析（store.thread_for_task），先建立该绑定。
-    store.bind_task(
+    store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": task.id,
@@ -1340,7 +1340,7 @@ def _closeout_fixture(tmp_path: Path, *, owner: str):
     )
     store = ConversationStore(tmp_path / "conversations")
     manager.conversation_store = store
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": f"{owner}-parent",
             "channel": "tui",
@@ -1351,7 +1351,7 @@ def _closeout_fixture(tmp_path: Path, *, owner: str):
     task = manager.create_run(goal="recoverable closeout", thought="", plan=["finish"], depth=1)
     prepared = manager.lifecycle.prepare_runner_attempt(task.id)
     attempt_id = prepared.runner_active_attempt_id
-    store.bind_task(
+    store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": task.id,

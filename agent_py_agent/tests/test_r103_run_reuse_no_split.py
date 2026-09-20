@@ -120,6 +120,23 @@ def test_cross_identity_resume_does_not_split_run_tree(repo):
     assert bound.attempt_id  # 续挂 attempt 已就位
 
 
+@pytest.mark.parametrize("failure", [OSError("archive unavailable"), InterruptedError("cancelled")])
+def test_workspace_preparation_failure_closes_new_attempt_before_model(repo, monkeypatch, failure):
+    def fail_preparation(_agent, _params, _prompt):
+        raise failure
+
+    monkeypatch.setattr(runtime_mixin, "attach_run_task_workspace_context", fail_preparation)
+    params = RunParams(request_id="request-one", run_id="run-one", task_id="task-one")
+    with pytest.raises(type(failure)):
+        runtime_mixin._bind_main_agent_turn_params(_agent(repo), "准备任务", params)
+
+    run = repo.main_agent_run_for_task("task-one")
+    attempt = repo.current_attempt(run["agent_run_id"])
+    assert attempt["status"] == ("cancelled" if isinstance(failure, InterruptedError) else "failed")
+    assert attempt["ended_at"] > 0
+    assert repo.classify_attempt_closeout(attempt["attempt_id"]) == "cancelled"
+
+
 @pytest.mark.parametrize("source", ["gateway", "background_main_agent"])
 def test_followup_tool_scope_uses_bound_run_and_preserves_message_identity(repo, source):
     """等待子代理时普通追问沿原执行树使用工具，消息编号不冒充执行编号。"""

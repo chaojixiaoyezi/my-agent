@@ -7,27 +7,34 @@ from agent_py_agent.agent.conversation import ConversationStore
 
 
 class _BrokenBackgroundContextStore(ConversationStore):
+    def __init__(self, root):
+        super().__init__(root)
+        self.claims.load = self._fail_claim_read
+        self.wakes = SimpleNamespace(
+            pending=self._fake_wakes_pending, pending_report=self._fake_wakes_pending_report
+        )
+
     def context_bundle(self, thread_id: str, *, recent_limit: int = 20):
         raise OSError("context bundle unreadable")
 
     def context_bundle_report(self, thread_id: str, *, recent_limit: int = 20):
         raise OSError("context bundle unreadable")
 
-    def pending_wake_signals(self, *, limit: int = 100, include_normal: bool = True):
+    def _fake_wakes_pending(self, *, limit: int = 100, include_normal: bool = True):
         raise OSError("wake queue unreadable")
 
-    def pending_wake_signals_report(self, *, limit: int = 100, include_normal: bool = True):
+    def _fake_wakes_pending_report(self, *, limit: int = 100, include_normal: bool = True):
         raise OSError("wake queue unreadable")
 
-    def load_background_run_claim(self, thread_id: str):
+    def _fail_claim_read(self, thread_id: str):
         raise ValueError("claim json corrupt")
 
 
 def test_background_context_reports_load_errors_without_hiding_state(tmp_path):
-    from agent_py_agent.agent.conversation.runtime import context_markdown
+    from agent_py_agent.agent.conversation.background_context import context_markdown
 
     store = _BrokenBackgroundContextStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "channel": "internal",
             "channel_conversation_id": "thread-1",
@@ -49,28 +56,28 @@ def test_background_context_reports_load_errors_without_hiding_state(tmp_path):
 
 
 def test_background_context_reports_corrupt_jsonl_rows_without_dropping_good_rows(tmp_path):
-    from agent_py_agent.agent.conversation.runtime import context_markdown
+    from agent_py_agent.agent.conversation.background_context import context_markdown
 
     store = ConversationStore(tmp_path / "conversations")
     thread = _thread(store)
-    store.append_message({"thread_id": thread.thread_id, "role": "user", "content": "这条消息应该保留"})
-    store.append_observation(
+    store.messages.append({"thread_id": thread.thread_id, "role": "user", "content": "这条消息应该保留"})
+    store.observations.append(
         {
             "thread_id": thread.thread_id,
             "event_type": "progress",
             "summary": "这条观察应该保留",
         }
     )
-    store.append_guidance(
+    store.guidance.append(
         {
             "target_type": "thread",
             "target_id": thread.thread_id,
             "message": "这条运行中提示应该保留",
         }
     )
-    _append_bad_jsonl_rows(store._message_path(thread.thread_id))
-    _append_bad_jsonl_rows(store._observation_path(thread.thread_id))
-    _append_bad_jsonl_rows(store._guidance_path("thread", thread.thread_id))
+    _append_bad_jsonl_rows(store.storage.message_path(thread.thread_id))
+    _append_bad_jsonl_rows(store.storage.observation_path(thread.thread_id))
+    _append_bad_jsonl_rows(store.storage.guidance_path("thread", thread.thread_id))
 
     prompt = _context_prompt(store, thread, tmp_path)
 
@@ -86,14 +93,14 @@ def test_background_context_reports_corrupt_jsonl_rows_without_dropping_good_row
 def test_background_context_reports_corrupt_wake_signal_without_dropping_good_signal(tmp_path):
     store = ConversationStore(tmp_path / "conversations")
     thread = _thread(store)
-    store.raise_wake_signal(
+    store.wakes.raise_signal(
         {
             "thread_id": thread.thread_id,
             "summary": "这条唤醒应该保留",
             "reason": "agent_event",
         }
     )
-    (store.wake_queue_dir / "urgent" / "bad.json").write_text("[]", encoding="utf-8")
+    (store.storage.wake_queue_dir / "urgent" / "bad.json").write_text("[]", encoding="utf-8")
 
     prompt = _context_prompt(store, thread, tmp_path)
 
@@ -105,9 +112,9 @@ def test_background_context_reports_corrupt_wake_signal_without_dropping_good_si
 def test_background_context_reports_corrupt_task_link_without_dropping_good_task(tmp_path):
     store = ConversationStore(tmp_path / "conversations")
     thread = _thread(store)
-    store.bind_task({"thread_id": thread.thread_id, "task_id": "task-good", "goal": "正常任务"})
-    store.bind_task({"thread_id": thread.thread_id, "task_id": "task-bad", "goal": "坏链接任务"})
-    store._task_path("task-bad").write_text("not-json", encoding="utf-8")
+    store.tasks.bind({"thread_id": thread.thread_id, "task_id": "task-good", "goal": "正常任务"})
+    store.tasks.bind({"thread_id": thread.thread_id, "task_id": "task-bad", "goal": "坏链接任务"})
+    store.storage.task_path("task-bad").write_text("not-json", encoding="utf-8")
 
     prompt = _context_prompt(store, thread, tmp_path)
 
@@ -120,7 +127,7 @@ def test_background_context_reports_corrupt_task_link_without_dropping_good_task
 def test_background_context_reports_corrupt_background_claim(tmp_path):
     store = ConversationStore(tmp_path / "conversations")
     thread = _thread(store)
-    store._background_claim_path(thread.thread_id).write_text("not-json", encoding="utf-8")
+    store.storage.background_claim_path(thread.thread_id).write_text("not-json", encoding="utf-8")
 
     prompt = _context_prompt(store, thread, tmp_path)
 
@@ -131,7 +138,7 @@ def test_background_context_reports_corrupt_background_claim(tmp_path):
 def test_background_context_reports_corrupt_current_thread_file(tmp_path):
     store = ConversationStore(tmp_path / "conversations")
     thread = _thread(store)
-    store._thread_path(thread.thread_id).write_text("not-json", encoding="utf-8")
+    store.storage.thread_path(thread.thread_id).write_text("not-json", encoding="utf-8")
 
     prompt = _context_prompt(store, thread, tmp_path)
 
@@ -144,7 +151,7 @@ def test_background_context_includes_exact_task_runtime_progress_without_second_
     from agent_py_agent.agent.agent_core.runtime.task_identity import (
         task_path_progress_ledger_id,
     )
-    from agent_py_agent.agent.conversation.runtime import context_markdown
+    from agent_py_agent.agent.conversation.background_context import context_markdown
     from agent_py_agent.agent.task_progress import (
         read_task_progress_report,
         write_task_progress,
@@ -160,7 +167,7 @@ def test_background_context_includes_exact_task_runtime_progress_without_second_
         '{"task_id":"task-demo","status":"RUNNING","progress":0.5}\n',
         encoding="utf-8",
     )
-    store.bind_task(
+    store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": "task-demo",
@@ -238,12 +245,12 @@ def test_background_context_includes_exact_task_runtime_progress_without_second_
 
 
 def test_background_context_hides_unrelated_operational_tasks_but_keeps_thread_history(tmp_path):
-    from agent_py_agent.agent.conversation.runtime import context_markdown
+    from agent_py_agent.agent.conversation.background_context import context_markdown
 
     owner_root = tmp_path / "owner"
     store = ConversationStore(owner_root / "conversations")
     thread = _thread(store)
-    store.append_message(
+    store.messages.append(
         {
             "thread_id": thread.thread_id,
             "role": "user",
@@ -251,14 +258,14 @@ def test_background_context_hides_unrelated_operational_tasks_but_keeps_thread_h
             "metadata": {"gateway_request_id": "old-task"},
         }
     )
-    store.bind_task(
+    store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": "old-task",
             "goal": "不相关的旧项目",
         }
     )
-    store.append_observation(
+    store.observations.append(
         {
             "thread_id": thread.thread_id,
             "event_type": "progress",
@@ -266,14 +273,14 @@ def test_background_context_hides_unrelated_operational_tasks_but_keeps_thread_h
             "root_task_id": "old-task",
         }
     )
-    store.bind_task(
+    store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": "current-task",
             "goal": "当前精确目标",
         }
     )
-    store.append_observation(
+    store.observations.append(
         {
             "thread_id": thread.thread_id,
             "event_type": "progress",
@@ -281,14 +288,14 @@ def test_background_context_hides_unrelated_operational_tasks_but_keeps_thread_h
             "root_task_id": "current-task",
         }
     )
-    store.bind_task(
+    store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": "child-task",
             "goal": "当前任务的子代理目标",
         }
     )
-    store.append_observation(
+    store.observations.append(
         {
             "thread_id": thread.thread_id,
             "event_type": "progress",
@@ -327,7 +334,7 @@ def test_background_context_hides_unrelated_operational_tasks_but_keeps_thread_h
 
 
 def _thread(store: ConversationStore):
-    return store.get_or_create_thread(
+    return store.threads.get_or_create(
         {
             "channel": "internal",
             "channel_conversation_id": "thread-1",
@@ -338,7 +345,7 @@ def _thread(store: ConversationStore):
 
 
 def _context_prompt(store: ConversationStore, thread, root) -> str:
-    from agent_py_agent.agent.conversation.runtime import context_markdown
+    from agent_py_agent.agent.conversation.background_context import context_markdown
 
     agent = SimpleNamespace(config=None, root=root)
     request = SimpleNamespace(reason="scheduled_progress_report", task_id="", wake_signal=None)

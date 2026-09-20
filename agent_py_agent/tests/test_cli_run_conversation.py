@@ -117,8 +117,8 @@ def test_run_exception_preserves_completed_tool_history(tmp_path, error_type):
     with pytest.raises(error_type):
         agent.run("读取资料后继续分析", source="cli_run", request_id="req-partial-cli",
                   run_id="run-partial-cli", task_id="task-partial-cli", allowed_tools=["read_file"])
-    thread = agent.conversation_store.list_threads()[0]
-    rows = agent.conversation_store.recent_messages(thread.thread_id, limit=0)
+    thread = agent.conversation_store.threads.list()[0]
+    rows = agent.conversation_store.messages.recent(thread.thread_id, limit=0)
     assert [row.role for row in rows] == ["user", "assistant"]
     assert rows[-1].content == ""
     native = provider_history_messages_from_rows(rows)
@@ -149,15 +149,15 @@ def test_cli_run_user_message_is_authoritative_before_remember(tmp_path) -> None
     assert candidate.source_message_refs[0]["role"] == "user"
     assert len(agent.memory.all()) == 1
 
-    threads = agent.conversation_store.list_threads(limit=0)
+    threads = agent.conversation_store.threads.list(limit=0)
     assert len(threads) == 1
-    rows = agent.conversation_store.recent_messages(threads[0].thread_id, limit=0)
+    rows = agent.conversation_store.messages.recent(threads[0].thread_id, limit=0)
     assert [row.role for row in rows] == ["user", "assistant"]
     assert [row.metadata["gateway_request_id"] for row in rows] == [
         "request-cli-memory",
         "request-cli-memory",
     ]
-    assert agent.conversation_store.task_links(threads[0].thread_id) == []
+    assert agent.conversation_store.tasks.list(threads[0].thread_id) == []
 
     state_paths = list(agent.home_paths.owner_runs_dir.rglob("work/state.json"))
     assert len(state_paths) == 1
@@ -194,7 +194,7 @@ def test_cli_run_transcript_append_is_idempotent_per_request_and_role(tmp_path) 
     assert persist_cli_run_assistant(agent, second, result)
 
     thread_id = second.task_attributes["conversation_thread_id"]
-    rows = agent.conversation_store.recent_messages(thread_id, limit=0)
+    rows = agent.conversation_store.messages.recent(thread_id, limit=0)
     assert [row.role for row in rows] == ["user", "assistant"]
     assert "conversation_task_id" not in second.task_attributes
 
@@ -233,14 +233,14 @@ def test_cli_run_goal_resolves_explicit_task_without_promoting_conversation(tmp_
     thread_id = params.task_attributes["conversation_thread_id"]
     assert goal_binding(agent)[:2] == (thread_id, "cli-goal-task")
     assert "conversation_task_id" not in params.task_attributes
-    assert agent.conversation_store.task_links(thread_id) == []
+    assert agent.conversation_store.tasks.list(thread_id) == []
     assert not _active_goal_continuation_available(agent, params)
-    goal = agent.conversation_store.create_goal({"thread_id": thread_id, "task_id": params.task_id,
+    goal = agent.conversation_store.goals.create({"thread_id": thread_id, "task_id": params.task_id,
                                                 "objective": "持续完成资料整理"})
     assert _active_goal_continuation_available(agent, params)
     assert agent.tools.tools["get_goal"].execute({}).ok
     assert agent.tools.tools["update_goal"].execute({"status": "complete"}).ok
-    assert agent.conversation_store.load_goal(thread_id, goal_id=goal.goal_id).status == "complete"
+    assert agent.conversation_store.goals.load(thread_id, goal_id=goal.goal_id).status == "complete"
     assert not _active_goal_continuation_available(agent, params)
     assert "conversation_task_id" not in params.task_attributes
 
@@ -263,7 +263,7 @@ def test_cli_run_user_persistence_failure_stops_before_model(tmp_path, monkeypat
     def fail_append(*_args, **_kwargs):
         raise OSError("transcript unavailable")
 
-    monkeypatch.setattr(agent.conversation_store, "append_message_once", fail_append)
+    monkeypatch.setattr(agent.conversation_store.messages, 'append_once', fail_append)
 
     with pytest.raises(CliRunConversationPersistenceError):
         agent.run(
@@ -285,7 +285,7 @@ def test_cli_run_assistant_persistence_failure_is_typed_degradation(
     agent = _agent(tmp_path)
     backend = _StaticBackend()
     agent.backend = backend
-    original = agent.conversation_store.append_message_once
+    original = agent.conversation_store.messages.append_once
     calls = {"count": 0}
 
     def fail_second_append(request, *, dedupe_key):
@@ -295,8 +295,8 @@ def test_cli_run_assistant_persistence_failure_is_typed_degradation(
         return original(request, dedupe_key=dedupe_key)
 
     monkeypatch.setattr(
-        agent.conversation_store,
-        "append_message_once",
+        agent.conversation_store.messages,
+        'append_once',
         fail_second_append,
     )
 
@@ -312,8 +312,8 @@ def test_cli_run_assistant_persistence_failure_is_typed_degradation(
     assert backend.calls == 1
     assert result.conversation_persist_degraded is True
     assert "assistant transcript append failed" in result.conversation_persist_error
-    thread = agent.conversation_store.list_threads(limit=0)[0]
-    rows = agent.conversation_store.recent_messages(thread.thread_id, limit=0)
+    thread = agent.conversation_store.threads.list(limit=0)[0]
+    rows = agent.conversation_store.messages.recent(thread.thread_id, limit=0)
     assert [row.role for row in rows] == ["user"]
 
 
@@ -413,7 +413,7 @@ def test_cli_run_continuation_round_is_structured_internal_event(tmp_path) -> No
         bound_resume.task_attributes["conversation_thread_id"] == first_thread_id
     )  # 同一 thread 复用
 
-    rows = agent.conversation_store.recent_messages(first_thread_id, limit=0)
+    rows = agent.conversation_store.messages.recent(first_thread_id, limit=0)
     assert [row.role for row in rows] == ["user", "system"]  # 首轮 user + 续跑 system
     first_entry, resume_entry = rows
     # 首轮 user 原文不动
@@ -462,7 +462,7 @@ def test_cli_run_continuation_event_not_consumed_as_user_request(tmp_path) -> No
     )
     bind_cli_run_conversation(agent, resume_params, "【系统续跑 #1】…")
 
-    rows = agent.conversation_store.recent_messages(first_thread_id, limit=0)
+    rows = agent.conversation_store.messages.recent(first_thread_id, limit=0)
     user_roles = [row for row in rows if row.role == "user"]
     assert len(user_roles) == 1  # 只有首轮用户原文, 续跑轮不增 user
     assert user_roles[0].content == "用户原文"

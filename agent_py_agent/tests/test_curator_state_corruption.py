@@ -114,7 +114,7 @@ class _OkBackend:
 
 def _append_message(home: Path, thread_id: str, *, seq: int, content: str) -> None:
     store = ConversationStore(home / "conversations")
-    store.append_message(
+    store.messages.append(
         {
             "thread_id": thread_id,
             "role": "user",
@@ -209,7 +209,7 @@ def _sha256(path: Path) -> str:
 
 def _state_with_cursor_candidate_and_lease(home: Path) -> tuple[MemoryCuratorService, dict[str, object]]:
     """构造「已有 cursor + Candidate + active lease」的 state 场景并返回 (service, state)。"""
-    thread = ConversationStore(home / "conversations").get_or_create_thread(
+    thread = ConversationStore(home / "conversations").threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "channel": "internal",
@@ -414,7 +414,7 @@ def test_recover_restores_from_authoritative_audit(tmp_path: Path) -> None:
     assert candidates_after == candidates_before
 
     # 恢复后新消息到达, 重启维护: 只消费新消息(processed_count 只增 1), 不重复处理
-    thread = ConversationStore(home / "conversations").get_or_create_thread(
+    thread = ConversationStore(home / "conversations").threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "channel": "internal",

@@ -94,7 +94,7 @@ def test_scheduler_wake_uses_run_id_as_durable_root_task(tmp_path) -> None:
         tmp_path,
     )
     store = agent.conversation_store
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "channel": "internal",
@@ -108,7 +108,7 @@ def test_scheduler_wake_uses_run_id_as_durable_root_task(tmp_path) -> None:
     wake_ids = agent.scheduler_service.enqueue_ready_runs(now=1_000)
 
     assert len(wake_ids) == 1
-    signals = store.pending_wake_signals()
+    signals = store.wakes.pending()
     assert len(signals) == 1
     signal = signals[0]
     run_id = str(signal.metadata["scheduler_run_id"])
@@ -124,7 +124,7 @@ def test_two_due_jobs_in_one_thread_both_execute_and_close_history(tmp_path) -> 
     backend = _Backend()
     agent.backend = backend
     store = agent.conversation_store
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "channel": "internal",
@@ -151,7 +151,7 @@ def test_two_due_jobs_in_one_thread_both_execute_and_close_history(tmp_path) -> 
     assert len(backend.prompts) == 2
     assert any("执行 first" in prompt for prompt in backend.prompts)
     assert any("执行 second" in prompt for prompt in backend.prompts)
-    assert store.pending_wake_signals() == []
+    assert store.wakes.pending() == []
     history, errors = agent.scheduler_repository.history(limit=10)
     assert errors == []
     assert len(history) == 2
@@ -165,7 +165,7 @@ def test_scheduled_run_waits_for_same_task_terminal_before_history_close(tmp_pat
         tmp_path,
     )
     store = agent.conversation_store
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "channel": "internal",
@@ -192,7 +192,7 @@ def test_scheduled_run_waits_for_same_task_terminal_before_history_close(tmp_pat
         claim.claim_id,
         now=1_002,
     )
-    store.bind_task(
+    store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": claim.run_id,
@@ -238,7 +238,7 @@ def test_scheduled_run_waits_for_same_task_terminal_before_history_close(tmp_pat
     assert next(iter(active.values()))["status"] == "waiting"
     assert agent.scheduler_service.reconcile_waiting_run(claim.run_id, now=1_004) is None
 
-    store.update_task_status(
+    store.tasks.update_status(
         {"task_id": claim.run_id, "status": "completed", "now": 1_005}
     )
     # Gateway 启动/轮询时走批量对账；这条路径保证一次生命周期通知丢失后，
@@ -260,7 +260,7 @@ def test_scheduled_message_tool_delivery_is_mirrored_once_without_fallback_send(
         tmp_path,
     )
     store = agent.conversation_store
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "channel": "feishu",
@@ -311,6 +311,6 @@ def test_scheduled_message_tool_delivery_is_mirrored_once_without_fallback_send(
     assert first.delivery_reason == second.delivery_reason == "scheduled_message_tool_delivery"
     assert first.response == second.response == "提醒到啦：检查索引备份。"
     assert channels.adapter("feishu").sent_messages == []
-    messages = store.recent_messages(thread.thread_id)
+    messages = store.messages.recent(thread.thread_id)
     assert [row.content for row in messages] == ["提醒到啦：检查索引备份。"]
     assert messages[0].metadata["message_tool_delivery"]["receipt_id"] == "receipt-one"

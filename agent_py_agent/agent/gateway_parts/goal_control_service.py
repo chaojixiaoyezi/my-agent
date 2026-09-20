@@ -1,3 +1,5 @@
+# LLM: Goal 只控制目标驱动的后续调度；暂停、清除不取消当前执行，不关闭任务资源。
+# 模块用途: 维护 owner/thread 内的目标与自动续跑开关，和回合中断、资源停止分别处理。
 from __future__ import annotations
 
 """Persistent `/goal` lifecycle operations for one exact owner conversation.
@@ -17,32 +19,30 @@ from ..conversation.control_commands import (
 )
 from ..conversation.goal_prompting import objective_updated_prompt
 from ..conversation.goal_runtime import raise_goal_continuation_wake
-from ..conversation.named_work import stop_named_conversation_work
 
 
+# LLM: 携带已裁决 owner/thread、目录与副作用回调；initial 目录仅可用于新建空闲 Goal，不从文字解析。
+# 类用途: 携带目标状态和恢复所需的可信会话、存储能力，不授予回合或资源停止能力。
 @dataclass(frozen=True)
-# LLM: Carries resolved owner/thread authority plus runtime side-effect callbacks; never resolve from prose here.
-# 类用途: 把一次 /goal 操作需要的可信会话、存储和中断能力装成一个请求对象。
 class GoalControlRequest:
     owner_agent: object
     store: object
     thread: object
     command: ConversationControlCommand
     scope: object
-    interrupt_goal: Callable[[object], None]
     resume_registry: Callable[[str], None]
+    initial_cwd: str = ""
+    initial_workspace_roots: tuple[str, ...] = ()
 
 
-# LLM: One transition lock covers load plus mutation; handlers may not introduce a second goal authority.
-# 函数用途: 在当前会话的目标锁内分派并执行一条已解析的 /goal 操作。
+# LLM: 编号和名称共用同一目标选择与转换锁；不能把命名 Goal 清除路由为任务资源停止。
+# 函数用途: 在当前会话内变更目标定义和自动续跑状态，保持一条权威控制路径。
 def execute_goal_control_operation(request: GoalControlRequest) -> ConversationControlResult:
     """Apply one parsed `/goal` operation under the thread's goal transition lock."""
     thread_id = str(getattr(request.thread, "thread_id", "") or "")
     operation = request.command.operation or "view"
-    if operation == "clear" and request.command.name and not request.command.name.startswith("goal-"):
-        return _clear_named_goal(request)
-    with request.store.goal_transition_guard(thread_id):
-        goals = request.store.load_goals(thread_id)
+    with request.store.goals.transition_guard(thread_id):
+        goals = request.store.goals.list(thread_id)
         if operation == "view":
             return _goal_view_result(goals)
         if operation == "create":
@@ -68,18 +68,29 @@ def execute_goal_control_operation(request: GoalControlRequest) -> ConversationC
         return handler(request, current)
 
 
-# LLM: One Goal overlays the selected agent task; naming never starts a second executor beside an ordinary active turn.
+# LLM: Goal 绑定既有活动任务或新建根任务；只有通过冲突检查、且没有活动任务时才初始化空目录。
 # 函数用途: 给当前工作建立持续目标；空闲时建立一个根任务，已有未结束目标则提示修改。
 def _create_goal(request: GoalControlRequest) -> ConversationControlResult:
     scope = request.scope
-    if any(goal.status != "complete" for goal in request.store.load_goals(request.thread.thread_id)):
+    if any(goal.status != "complete" for goal in request.store.goals.list(request.thread.thread_id)):
         return ConversationControlResult("goal", False, "当前代理已有未结束目标；请修改它或先完成/清除。", error_code="GOAL_STATE_CONFLICT")
     from .control_service import _active_conversation_task
 
     active = _active_conversation_task(request.owner_agent, scope, ordinary_only=True)
     task_id = str(active.payload.get("id") or "") if active is not None else ""
+    if not task_id and request.initial_cwd:
+        request.store.threads.bind_channel({
+            "thread_id": request.thread.thread_id,
+            "canonical_user_id": scope.user_id,
+            "channel": scope.channel,
+            "channel_conversation_id": scope.conversation_id,
+            "channel_user_id": scope.user_id,
+            "cwd": request.initial_cwd,
+            "runtime_workspace_roots": request.initial_workspace_roots,
+            "initialize_workspace": True,
+        })
     try:
-        goal = request.store.create_goal(
+        goal = request.store.goals.create(
             {
                 "thread_id": request.thread.thread_id,
                 "objective": request.command.value,
@@ -95,7 +106,7 @@ def _create_goal(request: GoalControlRequest) -> ConversationControlResult:
         )
     except ValueError as exc:
         return ConversationControlResult("goal", False, str(exc), error_code="GOAL_INVALID_REQUEST")
-    request.store.bind_task(
+    request.store.tasks.bind(
         {
             "thread_id": request.thread.thread_id,
             "task_id": goal.task_id,
@@ -126,10 +137,10 @@ def _create_goal(request: GoalControlRequest) -> ConversationControlResult:
     )
 
 
-# LLM: Edits objective text without changing goal/task identity or workspace lineage.
+# LLM: 插话持久操作经 guidance 领域组件； Edits objective text without changing goal/task identity or workspace lineage.
 # 函数用途: 修改当前持续目标的内容，并同步任务索引中的显示说明。
 def _edit_goal(request: GoalControlRequest, current: object) -> ConversationControlResult:
-    updated = request.store.update_goal(
+    updated = request.store.goals.update(
         {
             "thread_id": request.thread.thread_id,
             "goal_id": current.goal_id,
@@ -140,12 +151,12 @@ def _edit_goal(request: GoalControlRequest, current: object) -> ConversationCont
     )
     if updated is None:
         return _goal_race_result()
-    request.store.update_task_goal({"task_id": current.task_id, "goal": request.command.value})
+    request.store.tasks.update_goal({"task_id": current.task_id, "goal": request.command.value})
     request.owner_agent.local_store.task_registry.update_task_description(
         current.task_id,
         request.command.value,
     )
-    request.store.append_guidance(
+    request.store.guidance.append(
         {
             "target_type": "task",
             "target_id": current.task_id,
@@ -165,8 +176,8 @@ def _edit_goal(request: GoalControlRequest, current: object) -> ConversationCont
     )
 
 
-# LLM: Pause preserves transcript/task files but interrupts the currently executing turn and descendants.
-# 函数用途: 暂停持续目标，保留现场，同时通知运行时停止当前执行。
+# LLM: paused 只撤销后续 Goal 自动调度，不能改任务状态、取消 claim、发中断或关闭资源。
+# 函数用途: 暂停目标驱动的自动续跑，让已开始的模型与工具执行链继续完成当前回合。
 def _pause_goal(request: GoalControlRequest, current: object) -> ConversationControlResult:
     if current.status == "paused":
         return ConversationControlResult(
@@ -182,11 +193,10 @@ def _pause_goal(request: GoalControlRequest, current: object) -> ConversationCon
     updated = _transition_goal(request, current, "paused")
     if updated is None:
         return _goal_race_result()
-    request.interrupt_goal(updated)
     return ConversationControlResult(
         "goal",
         True,
-        "持续目标已暂停；对话和已有工作记录仍保留。",
+        "目标自动续跑已暂停；当前回合和已启动的任务资源继续运行。",
         request_id=current.task_id,
     )
 
@@ -214,7 +224,7 @@ def _resume_goal(request: GoalControlRequest, current: object) -> ConversationCo
             "这个 Goal 的时长或预算已经用完，不能继续运行。",
             request_id=current.task_id,
         )
-    request.store.update_task_status({"task_id": current.task_id, "status": "active"})
+    request.store.tasks.update_status({"task_id": current.task_id, "status": "active"})
     request.resume_registry(current.task_id)
     _raise_goal_wake(request.store, updated, request.scope)
     return ConversationControlResult(
@@ -225,53 +235,27 @@ def _resume_goal(request: GoalControlRequest, current: object) -> ConversationCo
     )
 
 
-# LLM: Clear terminates the overlay only; ordinary transcript and task evidence remain durable.
-# 函数用途: 清除持续目标并中断当前执行，但不删除普通聊天记录和已有工作。
+# LLM: 清除仅删除 Goal overlay，不取消当前回合或子树；资源停止须走独立任务控制。
+# 函数用途: 移除持续目标，保留当前执行、普通对话和已有工作。
 def _clear_goal(request: GoalControlRequest, current: object) -> ConversationControlResult:
-    deleted = request.store.delete_goal(
+    deleted = request.store.goals.delete(
         request.thread.thread_id,
         expected_goal_id=current.goal_id,
     )
     if deleted is None:
         return _goal_race_result()
-    request.interrupt_goal(deleted)
     return ConversationControlResult(
         "goal",
         True,
-        "持续目标已清除；普通对话记录不受影响。",
+        "持续目标已清除；当前执行和普通对话记录保留。",
         request_id=current.task_id,
-    )
-
-
-def _clear_named_goal(request: GoalControlRequest) -> ConversationControlResult:
-    stopped = stop_named_conversation_work(
-        request.owner_agent,
-        thread_id=request.thread.thread_id,
-        kind="goal",
-        name=request.command.name,
-    )
-    if not stopped.ok:
-        messages = {
-            "NAMED_WORK_NOT_FOUND": "没有找到这个 Goal。",
-            "NAMED_WORK_CONFLICT": "同名 Goal 状态冲突，请先用 /status 核对。",
-        }
-        return ConversationControlResult(
-            "goal",
-            False,
-            messages.get(stopped.error_code, "Goal 状态暂时不可用，请稍后重试。"),
-        )
-    return ConversationControlResult(
-        "goal",
-        True,
-        f"Goal“{request.command.name}”已停止。",
-        request_id=stopped.task_id,
     )
 
 
 # LLM: Goal status changes use goal-id plus expected-status CAS to reject stale controllers.
 # 函数用途: 用比较后更新方式安全切换当前目标状态。
 def _transition_goal(request: GoalControlRequest, current: object, status: str):
-    return request.store.update_goal(
+    return request.store.goals.update(
         {
             "thread_id": request.thread.thread_id,
             "goal_id": current.goal_id,

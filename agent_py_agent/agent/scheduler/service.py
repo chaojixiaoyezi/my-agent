@@ -142,7 +142,7 @@ class SchedulerService:
                 self._fail_without_execution(run, skill_error, now=current)
                 continue
             try:
-                signal = self.conversation_store.raise_wake_signal(
+                signal = self.conversation_store.wakes.raise_signal(
                     {
                         "thread_id": str(run["thread_id"]),
                         # 定时执行本身就是这次后台工作的唯一根任务。只把 run_id
@@ -282,7 +282,7 @@ class SchedulerService:
         if run is None or str(run.get("status") or "") != "waiting":
             return None
         try:
-            link = self.conversation_store.load_task_link(selected)
+            link = self.conversation_store.tasks.load(selected)
         except Exception:  # noqa: BLE001 - unreadable task authority must keep the run active
             return None
         task_status = str(getattr(link, "status", "") or "").strip().lower()

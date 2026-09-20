@@ -45,7 +45,7 @@ def _bind_audit(
     run_epoch: int = 0,
     source_bindings: list[dict] | None = None,
 ):
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "channel": "internal",
@@ -54,7 +54,7 @@ def _bind_audit(
             "now": NOW,
         }
     )
-    return_link = store.bind_task(
+    return_link = store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": task_id,

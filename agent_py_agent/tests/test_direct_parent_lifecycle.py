@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace as _StoreDomain
+
 """Recursive parent-child lifecycle uses durable events instead of polling."""
 
 import json
@@ -372,21 +374,27 @@ class _NoRootWakeStore:
     def __init__(self) -> None:
         self.status_updates: list[dict[str, object]] = []
         self.thread_lookups = 0
+        self.wakes = SimpleNamespace(
+            append_observation=self._fake_wakes_append_observation,
+            raise_signal=self._fake_wakes_raise_signal,
+        )
+        self.observations = SimpleNamespace(append=self._fake_observations_append)
+        self.tasks = _StoreDomain(thread_for=self._fake_thread_for_task, update_status=self._fake_update_task_status)
 
-    def thread_for_task(self, _task_id: str):
+    def _fake_thread_for_task(self, _task_id: str):
         self.thread_lookups += 1
         return SimpleNamespace(thread_id="thread-nested")
 
-    def update_task_status(self, payload: dict[str, object]) -> None:
+    def _fake_update_task_status(self, payload: dict[str, object]) -> None:
         self.status_updates.append(payload)
 
-    def append_observation_with_wake(self, *_args, **_kwargs) -> None:
+    def _fake_wakes_append_observation(self, *_args, **_kwargs) -> None:
         raise AssertionError("nested child must not publish a root conversation wake")
 
-    def append_observation(self, *_args, **_kwargs) -> None:
+    def _fake_observations_append(self, *_args, **_kwargs) -> None:
         raise AssertionError("nested capability request must stay with direct parent")
 
-    def raise_wake_signal(self, *_args, **_kwargs) -> None:
+    def _fake_wakes_raise_signal(self, *_args, **_kwargs) -> None:
         raise AssertionError("nested capability request must not wake root")
 
 
@@ -443,7 +451,7 @@ def test_root_child_wake_carries_bounded_completion_message_and_exact_refs(tmp_p
     manager.save(child)
 
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "channel": "internal",
@@ -451,7 +459,7 @@ def test_root_child_wake_carries_bounded_completion_message_and_exact_refs(tmp_p
             "channel_user_id": "user-1",
         }
     )
-    store.bind_task(
+    store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": child.id,
@@ -476,7 +484,7 @@ def test_root_child_wake_carries_bounded_completion_message_and_exact_refs(tmp_p
         {"artifacts": [{"path": str(artifact), "kind": "report"}]},
     )
 
-    signals = store.pending_wake_signals()
+    signals = store.wakes.pending()
     assert len(signals) == 1
     signal = signals[0]
     metadata = signal.metadata
@@ -513,7 +521,7 @@ def test_root_child_wake_hides_legacy_system_default_output_ref(tmp_path) -> Non
     }
     manager.save(child)
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "user-legacy",
             "channel": "internal",
@@ -521,7 +529,7 @@ def test_root_child_wake_hides_legacy_system_default_output_ref(tmp_path) -> Non
             "channel_user_id": "user-legacy",
         }
     )
-    store.bind_task(
+    store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": child.id,
@@ -541,7 +549,7 @@ def test_root_child_wake_hides_legacy_system_default_output_ref(tmp_path) -> Non
 
     notify_parent_on_runner_result(manager, child, result, {})
 
-    signal = store.pending_wake_signals()[0]
+    signal = store.wakes.pending()[0]
     assert signal.metadata["declared_output_refs"] == []
     assert list(signal.evidence_refs) == [str(child.agent_run_final_report_md)]
     assert str(legacy_ref) not in json.dumps(signal.metadata, ensure_ascii=False)
@@ -636,14 +644,16 @@ def test_completion_batch_does_not_read_any_tree() -> None:
 
 def test_ready_scan_never_uses_tree_as_completion_barrier(monkeypatch) -> None:
     store = SimpleNamespace(
-        pending_wake_signals=lambda limit=0: (
-            _root_done_signal("wake-a1", "root-a"),
-            _root_done_signal("wake-a2", "root-a"),
-            _root_done_signal("wake-a3", "root-a"),
-            _root_done_signal("wake-b1", "root-b"),
+        wakes=SimpleNamespace(
+            pending=lambda limit=0: (
+                _root_done_signal("wake-a1", "root-a"),
+                _root_done_signal("wake-a2", "root-a"),
+                _root_done_signal("wake-a3", "root-a"),
+                _root_done_signal("wake-b1", "root-b"),
+            )
         ),
-        unhandled_observations_requiring_main=lambda limit=0: (),
-        list_progress_policies_report=lambda enabled_only=True: ((), ()),
+        observations=SimpleNamespace(unhandled_requiring_main=lambda limit=0: ()),
+        progress=SimpleNamespace(list_report=lambda enabled_only=True: ((), ())),
     )
     scheduler = SimpleNamespace(
         runtime=SimpleNamespace(agent=SimpleNamespace(subagents=object())),

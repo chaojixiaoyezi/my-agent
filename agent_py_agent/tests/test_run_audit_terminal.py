@@ -251,12 +251,10 @@ def test_settle_event_falls_back_to_latest_attempt(repo):
 
 
 def _agent(repo, *, link_status: str = "active"):
-    store = SimpleNamespace(
-        load_task_link=lambda task_id: SimpleNamespace(
+    store = SimpleNamespace(tasks=SimpleNamespace(load=lambda task_id: SimpleNamespace(
             task_id=task_id,
             status=link_status,
-        )
-    )
+        )))
     return SimpleNamespace(
         subagents=SimpleNamespace(runtime_db=repo),
         conversation_store=store,

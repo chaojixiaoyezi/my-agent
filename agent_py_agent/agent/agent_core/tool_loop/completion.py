@@ -306,7 +306,7 @@ def _matching_audit_prepare_link(
     work_name: str,
 ) -> object | None:
     try:
-        links, errors = store.task_links_report(thread_id)
+        links, errors = store.tasks.list_report(thread_id)
     except Exception:
         return None
     if errors:
@@ -437,8 +437,8 @@ def _active_named_audit_facts(
     if store is None:
         return {}
     try:
-        if callable(getattr(store, "task_links_report", None)):
-            links, errors = store.task_links_report(thread_id)
+        if callable(getattr(getattr(store, 'tasks', None), 'list_report', None)):
+            links, errors = store.tasks.list_report(thread_id)
             if errors:
                 return (
                     {
@@ -451,7 +451,7 @@ def _active_named_audit_facts(
                     else {}
                 )
         else:
-            links = store.task_links(thread_id)
+            links = store.tasks.list(thread_id)
     except Exception:
         return (
             {

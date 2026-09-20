@@ -35,7 +35,7 @@ class DisplayArchiveError(ValueError):
 # 函数用途: 逐页保存本次真实显示快照，最后发布引用；返回后业务文件变化不影响历史原文。
 def archive_display_rows(agent: object, *, thread_id: str, rows: Iterable[Mapping]) -> dict[str, object]:
     store = agent.conversation_store
-    if not _ID.fullmatch(thread_id) or store.load_thread(thread_id) is None:
+    if not _ID.fullmatch(thread_id) or store.threads.load(thread_id) is None:
         raise DisplayArchiveError("DISPLAY_THREAD_INVALID", "原文没有有效的会话身份。")
     archive_id = uuid.uuid4().hex
     root = _archive_root(store)
@@ -112,7 +112,7 @@ def validate_display_archive_reference(reference: object) -> tuple[str, str]:
 # LLM: The archive lives only under the canonical owner ConversationStore, never client cwd.
 # 函数用途: 取得唯一显示归档目录，并阻止归档目录被软链接转向其它数据。
 def _archive_root(store: object) -> Path:
-    root = Path(store.root) / "display_archives"
+    root = Path(store.storage.root) / "display_archives"
     if root.is_symlink():
         raise DisplayArchiveError("DISPLAY_ARCHIVE_UNAVAILABLE", "原文归档不可读取。")
     return root

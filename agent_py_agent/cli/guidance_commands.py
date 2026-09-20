@@ -1,4 +1,5 @@
-
+# LLM: CLI 插话命令只按显式目标入队；持久写入经 guidance，修改须核对命令参数与返回回执。
+# 模块用途: 校验命令行补充消息、解析目标并打印写入结果。
 from __future__ import annotations
 
 import json
@@ -7,6 +8,8 @@ from ..agent.conversation.models import normalize_guidance_target_type
 from .common import make_agent
 
 
+# LLM: CLI 显式目标经 guidance 入队；修改须核对目标规范化与返回的持久消息身份，不解析正文路由。
+# 函数用途: 将命令行补充要求写入目标队列，并输出消息回执。
 def cmd_guidance_send(args) -> int:
     agent = make_agent(args)
     target_type, target_id = _target_from_args(args)
@@ -17,7 +20,7 @@ def cmd_guidance_send(args) -> int:
     if not message:
         print("缺少提示内容。")
         return 2
-    entry = agent.conversation_store.append_guidance(
+    entry = agent.conversation_store.guidance.append(
         {
             "target_type": target_type,
             "target_id": target_id,

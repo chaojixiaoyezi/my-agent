@@ -238,6 +238,7 @@ class TestSubagentMixinRun:
     def test_run_subagent_channel_broken(self, mock_mixin: SimpleAgentSubagentMixin) -> None:
         """测试通道健康检查失败。"""
         mock_mixin.subagents = MagicMock()
+        mock_mixin.subagents.runtime_db = None
         mock_mixin.subagents.lifecycle.prepare_runner_attempt.return_value = MagicMock(
             runner_active_attempt_id=""
         )

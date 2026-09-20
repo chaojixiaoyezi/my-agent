@@ -275,7 +275,7 @@ def queue_gateway_input_locked(
     return updated, created
 
 
-# LLM: Terminal settlement first lets ConversationStore reject only never-claimed guidance, then
+# LLM: 插话持久操作经 guidance 领域组件； Terminal settlement first lets ConversationStore reject only never-claimed guidance, then
 # releases that mailbox lock before taking any ingress lock. This fixed order avoids target/ingress inversion.
 # 函数用途: 回合结束后把未认领消息自动排到下一轮，把已消费或不确定消息收成对应状态。
 def settle_gateway_inputs_for_turn(
@@ -288,7 +288,7 @@ def settle_gateway_inputs_for_turn(
     if conversation_store is None:
         return summary
     try:
-        conversation_store.reject_pending_guidance_for_turn(
+        conversation_store.guidance.recovery.reject_pending(
             target_turn_id,
             reject_reserved=True,
         )
@@ -314,7 +314,7 @@ def settle_gateway_inputs_for_turn(
     return summary
 
 
-# LLM: Guidance discovery and correlation have one implementation for initial HTTP routing and
+# LLM: 插话持久操作经 guidance 领域组件； Guidance discovery and correlation have one implementation for initial HTTP routing and
 # background reconciliation. A readable miss proves no active side effect; read failure stays unknown.
 # 函数用途: 查找普通消息对应的 guidance 回执并校验入口、客户端消息和精确回合完全一致。
 def gateway_input_guidance_binding(
@@ -324,11 +324,11 @@ def gateway_input_guidance_binding(
     guidance = None
     recovered_turn_id = ""
     if receipt.guidance_dedupe_key:
-        guidance = conversation_store.guidance_once_receipt(receipt.guidance_dedupe_key)
+        guidance = conversation_store.guidance.receipt(receipt.guidance_dedupe_key)
         if guidance is not None:
             recovered_turn_id = _guidance_turn_id(guidance)
     if guidance is None:
-        guidance, recovered_turn_id = conversation_store.guidance_receipt_for_gateway_input(
+        guidance, recovered_turn_id = conversation_store.guidance.receipt_for_input(
             receipt.request_id
         )
     if guidance is None:
@@ -404,7 +404,7 @@ def reconcile_gateway_input_request(
         return "active_pending"
 
 
-# LLM: The Gateway loop performs bounded durable repair without one thread per message. Owner
+# LLM: 插话持久操作经 guidance 领域组件； The Gateway loop performs bounded durable repair without one thread per message. Owner
 # resolution uses the stored authenticated request and never falls back to another user's store.
 # 函数用途: 周期性扫描少量未完成入口回执，修复进程崩溃留下的 active 或 queued 投影。
 def reconcile_gateway_input_receipts(
@@ -439,7 +439,7 @@ def reconcile_gateway_input_receipts(
             if lifecycle == "terminal" and receipt.target_turn_id:
                 # The owner store is now available, so a never-claimed row can
                 # be rejected safely and promoted. Claimed remains unknown.
-                scoped.conversation_store.reject_pending_guidance_for_turn(
+                scoped.conversation_store.guidance.recovery.reject_pending(
                     receipt.target_turn_id,
                     reject_reserved=True,
                 )

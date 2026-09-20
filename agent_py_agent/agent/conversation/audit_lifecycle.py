@@ -62,7 +62,7 @@ def prepare_named_audit(
     )
     if link is not None:
         if not _same_prepare_request(link, prepare_request_id):
-            updated = store.record_pending_audit_prompt(
+            updated = store.audits.record_pending_prompt(
                 {
                     "task_id": link.task_id,
                     "prompt": prompt,
@@ -73,7 +73,7 @@ def prepare_named_audit(
                 raise AuditLifecycleError("Audit 准备内容未能可靠保存，请稍后重试")
             link = updated
     elif reusable is not None:
-        reopened = store.reopen_audit_prepare(
+        reopened = store.audits.reopen_prepare(
             {
                 "task_id": reusable.task_id,
                 "prompt": prompt,
@@ -87,7 +87,7 @@ def prepare_named_audit(
         owner_home = _owner_home(agent)
         audit_id = new_id("audit")
         try:
-            link = store.bind_task(
+            link = store.tasks.bind(
                 {
                     "thread_id": thread_id,
                     "task_id": audit_id,
@@ -106,7 +106,7 @@ def prepare_named_audit(
             raced = resolve_exact_active_audit(store, thread_id, work_name)
             if raced is None:
                 raise
-            updated = store.record_pending_audit_prompt(
+            updated = store.audits.record_pending_prompt(
                 {
                     "task_id": raced.task_id,
                     "prompt": prompt,
@@ -119,7 +119,7 @@ def prepare_named_audit(
                 ) from None
             link = updated
     materialize_audit_workspace(agent, store, link, prompt=prompt)
-    return store.load_task_link(link.task_id) or link
+    return store.tasks.load(link.task_id) or link
 
 
 def _same_prepare_request(link: object, prepare_request_id: object) -> bool:
@@ -172,7 +172,7 @@ def start_named_audit(
     }:
         raise AuditLifecycleError(f"Audit“{work_name}”已经在运行。")
     if link is not None and status == "preparing":
-        activated = store.activate_audit(
+        activated = store.audits.activate(
             {
                 "task_id": link.task_id,
                 "goal": prompt,
@@ -182,7 +182,7 @@ def start_named_audit(
         if activated is None:
             raise AuditLifecycleError("Audit 启动状态发生冲突，请重试")
     elif reusable is not None:
-        activated = store.reactivate_audit(
+        activated = store.audits.reactivate(
             {
                 "task_id": reusable.task_id,
                 "goal": prompt,
@@ -196,7 +196,7 @@ def start_named_audit(
         audit_id = new_id("audit")
         current = time.time()
         try:
-            activated = store.bind_task(
+            activated = store.tasks.bind(
                 {
                     "thread_id": thread_id,
                     "task_id": audit_id,
@@ -217,13 +217,13 @@ def start_named_audit(
             raise AuditLifecycleError(f"Audit“{work_name}”已存在。") from exc
     _retire_prepare_watches_after_activation(agent, activated.task_id)
     materialize_audit_workspace(agent, store, activated, prompt=prompt)
-    return store.load_task_link(activated.task_id) or activated
+    return store.tasks.load(activated.task_id) or activated
 
 
 def resolve_exact_active_audit(store: object, thread_id: str, name: str):
     """Resolve one exact case-sensitive nonterminal Audit or fail closed."""
 
-    links, errors = store.task_links_report(thread_id)
+    links, errors = store.tasks.list_report(thread_id)
     if errors:
         raise AuditLifecycleError("Audit 状态当前不可用，请稍后重试")
     matches = [
@@ -242,7 +242,7 @@ def resolve_exact_active_audit(store: object, thread_id: str, name: str):
 def resolve_reusable_audit(store: object, thread_id: str, name: str):
     """Select retained identity, preferring published configuration over recency."""
 
-    links, errors = store.task_links_report(thread_id)
+    links, errors = store.tasks.list_report(thread_id)
     if errors:
         raise AuditLifecycleError("Audit 历史状态当前不可用，请稍后重试")
     matches = [
@@ -305,7 +305,7 @@ def materialize_audit_workspace(
                 source="conversation_audit",
             ),
         )
-        store.bind_task(link.to_dict())
+        store.tasks.bind(link.to_dict())
     except (OSError, TypeError, ValueError) as exc:
         raise AuditLifecycleError("Audit 工作目录无法可靠建立，请稍后重试") from exc
 
@@ -436,7 +436,7 @@ def _settle_expired_audit_before_restart(
     if not completed:
         return link
     try:
-        refreshed = store.load_task_link(task_id)
+        refreshed = store.tasks.load(task_id)
     except Exception:
         return link
     return refreshed if refreshed is not None else link

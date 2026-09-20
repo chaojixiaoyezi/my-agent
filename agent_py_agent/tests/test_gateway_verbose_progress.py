@@ -20,19 +20,19 @@ from agent_py_agent.agent.agent_core.tool_model_generation import (
 )
 from agent_py_agent.agent.conversation.control_commands import parse_conversation_control
 from agent_py_agent.agent.core import SimpleAgent
-from agent_py_agent.agent.gateway_parts import request_execution
+from agent_py_agent.agent.gateway_parts import request_execution, stream_approval
 from agent_py_agent.agent.gateway_parts.control_service import (
     GatewayControlScope,
     execute_gateway_conversation_control,
 )
 from agent_py_agent.agent.gateway_parts.http_handlers import _read_public_progress_events
 from agent_py_agent.agent.gateway_parts.paths import gateway_paths
-from agent_py_agent.agent.gateway_parts.request_execution import (
-    BufferedChunkStreamWriter,
-    _gateway_conversation_context,
-    _GatewayConversationLoadRequest,
-    _handle_gateway_request,
+from agent_py_agent.agent.gateway_parts.request_context import (
+    GatewayConversationLoadRequest,
+    gateway_conversation_context,
 )
+from agent_py_agent.agent.gateway_parts.request_execution import _handle_gateway_request
+from agent_py_agent.agent.gateway_parts.stream_writer import BufferedChunkStreamWriter
 from agent_py_agent.agent.settings import AgentConfig
 
 
@@ -74,16 +74,16 @@ def test_verbose_command_is_persisted_per_conversation_without_calling_model(tmp
         AssertionError("system command must not call model")
     )
     first = _run_command(agent, "/verbose on", _conversation())
-    current = _gateway_conversation_context(
-        _GatewayConversationLoadRequest(
+    current = gateway_conversation_context(
+        GatewayConversationLoadRequest(
             agent,
             {"conversation": _conversation()},
             "gw-v2",
             "继续",
         )
     )
-    other = _gateway_conversation_context(
-        _GatewayConversationLoadRequest(
+    other = gateway_conversation_context(
+        GatewayConversationLoadRequest(
             agent,
             {"conversation": _conversation(chat="oc_other")},
             "gw-v3",
@@ -111,8 +111,8 @@ def test_verbose_invalid_level_does_not_change_thread_state(tmp_path) -> None:
         tmp_path,
     )
     result = _run_command(agent, "/verbose everything", _conversation())
-    current = _gateway_conversation_context(
-        _GatewayConversationLoadRequest(
+    current = gateway_conversation_context(
+        GatewayConversationLoadRequest(
             agent,
             {"conversation": _conversation()},
             "gw-v2",
@@ -786,12 +786,16 @@ def test_gateway_round_end_settles_pending_guidance(tmp_path, monkeypatch) -> No
 
     settled: list[tuple[str, bool]] = []
 
-    class FakeStore:
-        def reject_pending_guidance_for_turn(self, turn_id, *, reject_reserved=False):
+    class FakeGuidanceRecovery:
+        def reject_pending(self, turn_id, *, reject_reserved=False):
             settled.append((turn_id, reject_reserved))
             return {"rejected": 0}
 
-    agent = SimpleNamespace(conversation_store=FakeStore())
+    agent = SimpleNamespace(
+        conversation_store=SimpleNamespace(
+            guidance=SimpleNamespace(recovery=FakeGuidanceRecovery()),
+        ),
+    )
 
     request_execution._settle_pending_gateway_guidance(agent, "req-1")
     assert settled == [("req-1", True)]
@@ -848,7 +852,7 @@ def test_gateway_session_approval_cache_survives_request_writer_turns(
     }
     # 第一次：模拟用户在审批框选了"本次会话允许"
     monkeypatch.setattr(
-        request_execution,
+        stream_approval,
         "wait_for_gateway_permission_decision",
         lambda chunk_path, req, cancellation_token=None, mode_decision_provider=None: ToolApprovalDecision(
             req.permission_id, "approved_session"
@@ -864,7 +868,7 @@ def test_gateway_session_approval_cache_survives_request_writer_turns(
         calls.append("wait")
         raise AssertionError("session-approved call must not wait")
 
-    monkeypatch.setattr(request_execution, "wait_for_gateway_permission_decision", fail_wait)
+    monkeypatch.setattr(stream_approval, "wait_for_gateway_permission_decision", fail_wait)
     request2 = dict(request)
     request2["permission_id"] = "approval:abc2"
     second_path = tmp_path / "second.chunks.jsonl"

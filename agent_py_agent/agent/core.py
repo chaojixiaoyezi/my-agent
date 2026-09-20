@@ -552,7 +552,7 @@ def _active_audit_run_epoch(agent: object, task_id: str) -> int | None:
     """Return the current epoch only when this id is one active named Audit."""
 
     store = getattr(agent, "conversation_store", None)
-    loader = getattr(store, "load_task_link", None)
+    loader = getattr(getattr(store, 'tasks', None), 'load', None)
     if not callable(loader):
         return None
     try:
@@ -927,7 +927,7 @@ def _current_delivery_context(agent: SimpleAgent) -> DeliveryContext | None:
     if not thread_id:
         return None
     try:
-        thread, load_error = agent.conversation_store.load_thread_report(thread_id)
+        thread, load_error = agent.conversation_store.threads.load_report(thread_id)
     except Exception:
         return None
     if load_error is not None or thread is None:

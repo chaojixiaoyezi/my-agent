@@ -213,10 +213,10 @@ class TestNormalizeAgentConfig:
         assert len(warnings) == 0
 
     def test_normalize_agent_config_invalid_model_backend(self):
-        """验证无效 model_backend 回退到默认值。"""
+        """无效模型协议保持未配置，不能偷偷选 echo。"""
         data = {"model_backend": "invalid_backend"}
         normalized, warnings = normalize_agent_config(data)
-        assert normalized["model_backend"] == "echo"
+        assert normalized["model_backend"] == ""
         assert len(warnings) > 0
 
     def test_normalize_agent_config_negative_tool_rounds(self):
@@ -396,7 +396,7 @@ class TestAgentConfigDefaults:
     def test_agent_config_default_values(self):
         """验证默认配置值。"""
         config = AgentConfig()
-        assert config.model_backend == "echo"
+        assert config.model_backend == ""
         assert config.max_tool_rounds is None
         assert config.memory_top_k == 5
         assert config.max_subagents == 8

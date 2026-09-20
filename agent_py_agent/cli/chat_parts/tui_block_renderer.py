@@ -2938,8 +2938,8 @@ def _render_pending_input_message(
     return tuple(visible)
 
 
-# LLM: footer 只读状态；主代理中断与目标暂停必须区分，子代理仍走停止语义，不改变控制权限。
-# 函数用途: 展示当前页面可用按键，避免把 Esc 中断一轮误解为已暂停整个 Goal。
+# LLM: footer 只读状态；主代理 Esc 中断本轮，/stop 是任务停止，Goal 暂停只管理续跑。
+# 函数用途: 按当前页面展示控制范围；子代理的明确停止保留原有授权边界。
 def _render_footer(snapshot: TuiViewSnapshot, context: TuiRenderContext) -> FormattedLine:
     if snapshot.permission is not None:
         return ()
@@ -2997,7 +2997,7 @@ def _render_footer(snapshot: TuiViewSnapshot, context: TuiRenderContext) -> Form
             text += " · Esc 中断本轮"
         return (("class:tui-muted", _fit_text(text, context.width, "left").rstrip()),)
     if _has_running_conversation(snapshot):
-        text = f"  Esc 中断本轮 · /stop 暂停任务 · {history_hint}"
+        text = f"  Esc 中断本轮 · /stop 停止任务 · {history_hint}"
         return (("class:tui-muted", _fit_text(text, context.width, "left").rstrip()),)
     text = f"  ? 快捷键 · F4 权限 · {history_hint}"
     return (("class:tui-muted", _fit_text(text, context.width, "left").rstrip()),)

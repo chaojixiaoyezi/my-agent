@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
 
-from .agent_tool_approval import SubagentToolApprovalSinkMixin
+from .agent_tool_approval import AgentToolApprovalSinkMixin
 from .background_history import BackgroundTurnHistory
 from .channels import (
     project_host_paths_for_channel,
@@ -169,12 +169,9 @@ class _ThinkingDeltaBatcher:
         return batch
 
 
-# LLM: This writer converts one background main/child model callback into the
-# same public block vocabulary already rendered by the foreground TUI. It also
-# gives child calls the canonical approval sink, while display events still
-# never change scalar activity or business lifecycle.
-# 类用途: 把后台主代理或子代理回调转换成灰色过程、实时思考、工具结果和 diff，并为 child 接入具体工具审批。
-class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressSinkMixin):
+# LLM: 主/子后台回调复用前台公开 block 词表与唯一审批桥；展示事件不修改业务生命周期，审批独立核对原调用身份。
+# 类用途: 持久化后台思考、工具结果和 diff，并把主/子具体工具审批接到同一用户队列。
+class BackgroundTranscriptSink(AgentToolApprovalSinkMixin, ToolInputProgressSinkMixin):
     # LLM: Construction allocates one display-only turn identity; canonical task
     # and thread ids are inputs, while the generated request id is not authority.
     # 函数用途: 为一片过程绑定逐块持久化及最终快照；前台请求号仅显示去重，child传输writer保持原合同。

@@ -146,6 +146,7 @@ class FinalizationService:
         return written
 
     # LLM: 成功、错误和取消共享 exact thread/request/run 的用量收口；累计代次与物理游标去重，source 不拥有费用。
+    # 用量通过显式 model_usage 组件提交，领域迁移不改变事件身份或收口顺序。
     # 函数用途: 将已经发生的模型用量幂等写入本会话，不因暂停丢账、不因前后台切换重复计算。
     def settle_model_usage(
         self,
@@ -165,7 +166,7 @@ class FinalizationService:
             or ""
         ).strip()
         store = getattr(self._agent, "conversation_store", None)
-        append_usage = getattr(store, "append_model_usage_snapshot_once", None)
+        append_usage = getattr(getattr(store, "model_usage", None), "append_snapshot_once", None)
         if not thread_id or not callable(append_usage):
             return ""
         physical_attempt_count = int(
@@ -663,7 +664,7 @@ def _conversation_turn_is_terminal(ctx: FinalizeContext) -> bool:
     }
 
 
-# LLM: 持久目标与 turn 完成分离；只在安全结构化边界续接 active Goal，工具数和 Todo 不能决定生命周期。
+# LLM: 持久目标与 turn 完成分离；续跑按 turn_end 的结构化判据，工具数和 Todo 不能决定生命周期。
 # 函数用途: 前台正常回复或可恢复技术收口后保持目标运行；后台由 wake 消费回执接续，避免双重调度。
 def _schedule_typed_unfinished_continuation(agent: object, ctx: FinalizeContext) -> None:
     """Resume an explicit persistent Goal after a structured turn boundary."""
@@ -687,14 +688,14 @@ def _schedule_typed_unfinished_continuation(agent: object, ctx: FinalizeContext)
         task_id = str(attrs.get("conversation_task_id") or "")
         if store is None or not thread_id or not task_id:
             return
-        goal = store.load_goal(thread_id, task_id=task_id)
+        goal = store.goals.load(thread_id, task_id=task_id)
         if goal is None or goal.task_id != task_id or goal.status != "active":
             return
         goal_id = goal.goal_id
 
     # Goal mode uses the shared typed continuation gate. Blocked, cancelled,
     # protocol-violating and unknown-effect turns never acquire a future tick.
-    from ..conversation.runtime import should_continue_task
+    from ..turn_end import should_continue_task
 
     should, _reason = should_continue_task(ctx.final_response)
     if not should and not _conversation_turn_is_terminal(ctx):

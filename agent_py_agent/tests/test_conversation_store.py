@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 
 import pytest
 
@@ -11,22 +12,32 @@ from agent_py_agent.agent.gateway_parts.io import update_json_file_atomic
 from agent_py_agent.agent.runtime_errors import DataCorruptionError
 
 
+def test_passive_store_open_and_missing_reads_do_not_create_directories(tmp_path) -> None:
+    root = tmp_path / "missing" / "conversations"
+    store = ConversationStore(root, initialize=False)
+
+    assert store.threads.load("missing-thread") is None
+    with pytest.raises(KeyError, match="unknown conversation thread"):
+        store.claims.load("missing-thread")
+    assert not root.parent.exists()
+
+
 def test_thread_messages_and_channel_bindings_survive_restart(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
 
-    thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "feishu", 'channel_conversation_id': "feishu-chat-1", 'channel_user_id': "feishu-user-1", 'title': "长期研究任务", 'now': 1000.0})
-    store.append_message({'thread_id': thread.thread_id, 'role': "user", 'content': "帮我持续跟进这个任务。", 'channel': "feishu", 'channel_message_id': "msg-1", 'now': 1001.0})
-    store.bind_channel({'thread_id': thread.thread_id, 'canonical_user_id': "user-1", 'channel': "wechat", 'channel_conversation_id': "wechat-chat-1", 'channel_user_id': "wechat-user-1", 'now': 1002.0})
-    store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "长期跟进 GitHub 项目", 'now': 1003.0})
-    store.update_summary(thread.thread_id, "用户要求跨渠道延续同一任务。", now=1004.0)
+    thread = store.threads.get_or_create({'canonical_user_id': "user-1", 'channel': "feishu", 'channel_conversation_id': "feishu-chat-1", 'channel_user_id': "feishu-user-1", 'title': "长期研究任务", 'now': 1000.0})
+    store.messages.append({'thread_id': thread.thread_id, 'role': "user", 'content': "帮我持续跟进这个任务。", 'channel': "feishu", 'channel_message_id': "msg-1", 'now': 1001.0})
+    store.threads.bind_channel({'thread_id': thread.thread_id, 'canonical_user_id': "user-1", 'channel': "wechat", 'channel_conversation_id': "wechat-chat-1", 'channel_user_id': "wechat-user-1", 'now': 1002.0})
+    store.tasks.bind({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "长期跟进 GitHub 项目", 'now': 1003.0})
+    store.threads.update_summary(thread.thread_id, "用户要求跨渠道延续同一任务。", now=1004.0)
 
     reopened = ConversationStore(tmp_path / "conversations")
-    resolved = reopened.resolve_thread(
+    resolved = reopened.threads.resolve(
         channel="wechat",
         channel_conversation_id="wechat-chat-1",
         channel_user_id="wechat-user-1",
     )
-    messages = reopened.recent_messages(thread.thread_id, limit=5)
+    messages = reopened.messages.recent(thread.thread_id, limit=5)
     bundle = reopened.context_bundle(thread.thread_id)
 
     assert resolved is not None
@@ -42,7 +53,7 @@ def test_thread_model_usage_is_idempotent_partitioned_and_survives_restart(
     tmp_path,
 ) -> None:
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {"canonical_user_id": "user-usage", "now": 10.0}
     )
     request = {
@@ -73,12 +84,12 @@ def test_thread_model_usage_is_idempotent_partitioned_and_survives_restart(
         },
     }
 
-    first = store.append_model_usage_once(request)
-    replay = store.append_model_usage_once({**request, "now": 99.0})
+    first = store.model_usage.append_once(request)
+    replay = store.model_usage.append_once({**request, "now": 99.0})
     reopened = ConversationStore(tmp_path / "conversations")
 
     assert first == replay
-    assert reopened.model_usage_summary(thread.thread_id) == {
+    assert reopened.model_usage.summary(thread.thread_id) == {
         "schema": "thread_model_usage_summary.v1",
         "thread_id": thread.thread_id,
         "event_count": 1,
@@ -101,7 +112,7 @@ def test_thread_model_usage_cumulative_snapshots_persist_only_new_deltas(
     tmp_path,
 ) -> None:
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {"canonical_user_id": "user-usage-snapshot", "now": 10.0}
     )
     first_calls = _cumulative_model_calls(
@@ -124,13 +135,13 @@ def test_thread_model_usage_cumulative_snapshots_persist_only_new_deltas(
         "source": "subagent_run",
     }
 
-    first = store.append_model_usage_snapshot_once(
+    first = store.model_usage.append_snapshot_once(
         {**common, "event_id": "usage-snapshot-1", "model_calls": first_calls}
     )
-    second = store.append_model_usage_snapshot_once(
+    second = store.model_usage.append_snapshot_once(
         {**common, "event_id": "usage-snapshot-2", "model_calls": second_calls}
     )
-    replay = store.append_model_usage_snapshot_once(
+    replay = store.model_usage.append_snapshot_once(
         {
             **common,
             "event_id": "usage-snapshot-2",
@@ -144,7 +155,7 @@ def test_thread_model_usage_cumulative_snapshots_persist_only_new_deltas(
         DataCorruptionError,
         match="snapshot event id reused with different input",
     ):
-        store.append_model_usage_snapshot_once(
+        store.model_usage.append_snapshot_once(
             {
                 **common,
                 "event_id": "usage-snapshot-2",
@@ -167,13 +178,47 @@ def test_thread_model_usage_cumulative_snapshots_persist_only_new_deltas(
     assert second.model_calls["ledger_projection"][
         "snapshot_physical_model_attempt_count"
     ] == 2
-    assert store.model_usage_summary(thread.thread_id)["provider"] == {
+    assert store.model_usage.summary(thread.thread_id)["provider"] == {
         "input_tokens": 90_500,
         "output_tokens": 110,
         "cache_read_input_tokens": 80_400,
         "cache_write_input_tokens": 0,
         "call_count": 2,
     }
+
+
+@pytest.mark.parametrize("snapshot", [False, True])
+def test_composed_model_usage_replays_share_the_canonical_append_lock(tmp_path, snapshot):
+    stores = [ConversationStore(tmp_path / "conversations") for _ in range(2)]
+    thread = stores[0].threads.get_or_create({"canonical_user_id": "usage-owner"})
+    calls = _cumulative_model_calls(
+        physical=1, input_tokens=100, output_tokens=20, cache_read_tokens=70,
+    )
+    request = {
+        "event_id": "usage-race", "thread_id": thread.thread_id,
+        "request_id": "request-race", "model_calls": calls,
+    }
+    barrier = Barrier(8)
+
+    # LLM: 两个独立 Store 模拟同源前后台同时收口，必须通过原追加锁取得同一个已提交事件。
+    # 函数用途: 同步并发提交相同用量，核对首次时间戳和账本行均不会重复。
+    def append(index):
+        usage = stores[index % 2].model_usage
+        writer = usage.append_snapshot_once if snapshot else usage.append_once
+        barrier.wait(timeout=10)
+        return writer({**request, "now": 10.0 + index})
+
+    with ThreadPoolExecutor(max_workers=8) as workers:
+        events = list(workers.map(append, range(8)))
+
+    assert all(event == events[0] for event in events)
+    reopened = ConversationStore(tmp_path / "conversations")
+    rows, errors = reopened.model_usage.events_report(thread.thread_id)
+    assert rows == [events[0]] and errors == []
+    total = reopened.model_usage.summary(thread.thread_id)
+    assert total["event_count"] == 1
+    assert total["provider"]["input_tokens"] == 100
+    assert total["provider"]["call_count"] == 1
 
 
 def _cumulative_model_calls(
@@ -220,7 +265,7 @@ def _cumulative_model_calls(
 
 def test_thread_model_usage_conflict_and_corruption_fail_closed(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {"canonical_user_id": "user-usage", "now": 10.0}
     )
     request = {
@@ -236,10 +281,10 @@ def test_thread_model_usage_conflict_and_corruption_fail_closed(tmp_path) -> Non
             },
         },
     }
-    store.append_model_usage_once(request)
+    store.model_usage.append_once(request)
 
     with pytest.raises(DataCorruptionError, match="reused with different input"):
-        store.append_model_usage_once(
+        store.model_usage.append_once(
             {
                 **request,
                 "model_calls": {
@@ -253,9 +298,9 @@ def test_thread_model_usage_conflict_and_corruption_fail_closed(tmp_path) -> Non
             }
         )
 
-    store._model_usage_path(thread.thread_id).write_text("not-json\n", encoding="utf-8")
+    store.model_usage._path(thread.thread_id).write_text("not-json\n", encoding="utf-8")
     with pytest.raises(DataCorruptionError, match="unreadable"):
-        store.model_usage_summary(thread.thread_id)
+        store.model_usage.summary(thread.thread_id)
 
 
 def test_exact_agent_thread_is_idempotent_unbound_and_rejects_run_collision(
@@ -276,24 +321,24 @@ def test_exact_agent_thread_is_idempotent_unbound_and_rejects_run_collision(
         "now": 10.0,
     }
 
-    first = store.ensure_agent_thread(request)
+    first = store.threads.ensure_agent(request)
     reopened = ConversationStore(tmp_path / "conversations")
-    second = reopened.ensure_agent_thread({**request, "now": 20.0})
+    second = reopened.threads.ensure_agent({**request, "now": 20.0})
 
     assert first.thread_id == second.thread_id == "thread-run-child-1"
     assert second.channel_bindings == ()
     assert second.metadata["thread_kind"] == "agent"
     assert second.metadata["agent_run_id"] == "run-child-1"
-    assert reopened._read_bindings() == {}
+    assert reopened.threads._read_bindings_report() == ({}, None)
     with pytest.raises(DataCorruptionError, match="run identity conflicts"):
-        reopened.ensure_agent_thread(
+        reopened.threads.ensure_agent(
             {**request, "agent_run_id": "run-child-2", "now": 30.0}
         )
 
 
 def test_detached_named_task_binds_exact_existing_message_anchor(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "channel": "feishu",
@@ -302,7 +347,7 @@ def test_detached_named_task_binds_exact_existing_message_anchor(tmp_path) -> No
             "now": 10.0,
         }
     )
-    anchor = store.append_message(
+    anchor = store.messages.append(
         {
             "thread_id": thread.thread_id,
             "role": "user",
@@ -310,7 +355,7 @@ def test_detached_named_task_binds_exact_existing_message_anchor(tmp_path) -> No
             "now": 11.0,
         }
     )
-    link = store.bind_task(
+    link = store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": "audit-1",
@@ -321,7 +366,7 @@ def test_detached_named_task_binds_exact_existing_message_anchor(tmp_path) -> No
             "now": 12.0,
         }
     )
-    store.append_message(
+    store.messages.append(
         {
             "thread_id": thread.thread_id,
             "role": "user",
@@ -329,7 +374,7 @@ def test_detached_named_task_binds_exact_existing_message_anchor(tmp_path) -> No
             "now": 13.0,
         }
     )
-    rebound = store.bind_task(
+    rebound = store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": "audit-1",
@@ -357,7 +402,7 @@ def test_untyped_audit_child_workspace_status_sync_stays_under_audit_root(tmp_pa
         encoding="utf-8",
     )
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "channel": "internal",
@@ -367,7 +412,7 @@ def test_untyped_audit_child_workspace_status_sync_stays_under_audit_root(tmp_pa
         }
     )
 
-    store.bind_task(
+    store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": "child-1",
@@ -382,7 +427,7 @@ def test_untyped_audit_child_workspace_status_sync_stays_under_audit_root(tmp_pa
 
 def test_v4_thread_record_loads_with_safe_current_compact_defaults(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "legacy-user",
             "channel": "feishu",
@@ -391,7 +436,7 @@ def test_v4_thread_record_loads_with_safe_current_compact_defaults(tmp_path) -> 
             "now": 100.0,
         }
     )
-    path = store._thread_path(thread.thread_id)
+    path = store.storage.thread_path(thread.thread_id)
     payload = json.loads(path.read_text(encoding="utf-8"))
     payload["schema_version"] = "conversation_thread.v4"
     for field_name in (
@@ -408,7 +453,7 @@ def test_v4_thread_record_loads_with_safe_current_compact_defaults(tmp_path) -> 
     )
 
     reopened = ConversationStore(tmp_path / "conversations")
-    loaded = reopened.load_thread(thread.thread_id)
+    loaded = reopened.threads.load(thread.thread_id)
 
     assert loaded is not None
     assert loaded.compact_checkpoint_id == ""
@@ -421,7 +466,7 @@ def test_v4_thread_record_loads_with_safe_current_compact_defaults(tmp_path) -> 
 def test_compact_generation_cas_is_atomic_across_store_instances(tmp_path) -> None:
     root = tmp_path / "conversations"
     store = ConversationStore(root)
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "cas-user",
             "channel": "feishu",
@@ -432,7 +477,7 @@ def test_compact_generation_cas_is_atomic_across_store_instances(tmp_path) -> No
 
     def commit(label: str):
         independent_store = ConversationStore(root)
-        return independent_store.update_compact_state(
+        return independent_store.threads.update_compact_state(
             thread.thread_id,
             commit=ConversationCompactCommit(
                 summary=f"summary-{label}",
@@ -456,7 +501,7 @@ def test_compact_generation_cas_is_atomic_across_store_instances(tmp_path) -> No
         except RuntimeError as exc:
             failures.append(exc)
 
-    stored = store.load_thread(thread.thread_id)
+    stored = store.threads.load(thread.thread_id)
     assert len(successes) == 1
     assert len(failures) == 1
     assert "generation changed" in str(failures[0])
@@ -470,7 +515,7 @@ def test_provider_context_observation_is_generation_fenced_and_compact_clears_it
     tmp_path,
 ) -> None:
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {"canonical_user_id": "provider-context-user", "now": 10.0}
     )
     observation = {
@@ -481,7 +526,7 @@ def test_provider_context_observation_is_generation_fenced_and_compact_clears_it
         "compact_generation": 0,
     }
 
-    updated = store.update_provider_context_observation(
+    updated = store.threads.update_provider_context_observation(
         thread.thread_id,
         observation,
         expected_compact_generation=0,
@@ -489,7 +534,7 @@ def test_provider_context_observation_is_generation_fenced_and_compact_clears_it
     assert updated.provider_context_observation == observation
     assert updated.updated_at == thread.updated_at
 
-    compacted = store.update_compact_state(
+    compacted = store.threads.update_compact_state(
         thread.thread_id,
         commit=ConversationCompactCommit(
             summary="summary",
@@ -505,7 +550,7 @@ def test_provider_context_observation_is_generation_fenced_and_compact_clears_it
     assert compacted.compact_generation == 1
     assert compacted.provider_context_observation == {}
 
-    stale = store.update_provider_context_observation(
+    stale = store.threads.update_provider_context_observation(
         thread.thread_id,
         observation,
         expected_compact_generation=0,
@@ -516,7 +561,7 @@ def test_provider_context_observation_is_generation_fenced_and_compact_clears_it
 
 def test_delayed_message_does_not_move_thread_activity_backwards(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "channel": "feishu",
@@ -525,15 +570,15 @@ def test_delayed_message_does_not_move_thread_activity_backwards(tmp_path) -> No
             "now": 100.0,
         }
     )
-    store.append_message(
+    store.messages.append(
         {"thread_id": thread.thread_id, "role": "user", "content": "较新的消息", "now": 200.0}
     )
-    store.append_message(
+    store.messages.append(
         {"thread_id": thread.thread_id, "role": "assistant", "content": "延迟补写", "now": 150.0}
     )
 
-    loaded = store.load_thread(thread.thread_id)
-    messages = store.recent_messages(thread.thread_id)
+    loaded = store.threads.load(thread.thread_id)
+    messages = store.messages.recent(thread.thread_id)
 
     assert loaded is not None
     assert loaded.updated_at == 200.0
@@ -546,7 +591,7 @@ def test_delayed_message_does_not_move_thread_activity_backwards(tmp_path) -> No
 def test_thread_records_owner_identity_when_provided(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
 
-    thread = store.get_or_create_thread({
+    thread = store.threads.get_or_create({
         'canonical_user_id': "user-1",
         'owner_id': "providers/feishu/users/u001",
         'owner_home': "/tmp/home/owners/providers/feishu/users/u001",
@@ -556,7 +601,7 @@ def test_thread_records_owner_identity_when_provided(tmp_path) -> None:
         'now': 100.0,
     })
 
-    loaded = store.load_thread(thread.thread_id)
+    loaded = store.threads.load(thread.thread_id)
     assert loaded is not None
     assert loaded.owner_id == "providers/feishu/users/u001"
     assert loaded.owner_home.endswith("/owners/providers/feishu/users/u001")
@@ -564,15 +609,15 @@ def test_thread_records_owner_identity_when_provided(tmp_path) -> None:
 
 def test_progress_policy_due_and_mark_reported(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "local-thread", 'channel_user_id': "local-user", 'now': 10.0})
-    store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "每小时汇报一次", 'now': 11.0})
-    policy = store.set_progress_policy({'thread_id': thread.thread_id, 'task_id': "task-1", 'interval_seconds': 60, 'route_channel': "internal", 'route_target': "local-thread", 'now': 12.0})
+    thread = store.threads.get_or_create({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "local-thread", 'channel_user_id': "local-user", 'now': 10.0})
+    store.tasks.bind({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "每小时汇报一次", 'now': 11.0})
+    policy = store.progress.create({'thread_id': thread.thread_id, 'task_id': "task-1", 'interval_seconds': 60, 'route_channel': "internal", 'route_target': "local-thread", 'now': 12.0})
 
-    assert store.due_progress_policies(now=71.0) == []
-    assert store.due_progress_policies(now=72.0)[0].policy_id == policy.policy_id
+    assert store.progress.due(now=71.0) == []
+    assert store.progress.due(now=72.0)[0].policy_id == policy.policy_id
 
-    store.mark_progress_reported(policy.policy_id, now=72.0)
-    updated = store.get_progress_policy(policy.policy_id)
+    store.progress.mark_reported(policy.policy_id, now=72.0)
+    updated = store.progress.load(policy.policy_id)
 
     assert updated is not None
     assert updated.last_report_at == 72.0
@@ -581,12 +626,12 @@ def test_progress_policy_due_and_mark_reported(tmp_path) -> None:
 
 def test_progress_policy_bad_file_is_reported_without_hiding_good_due_policy(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 10.0})
-    policy = store.set_progress_policy({'thread_id': thread.thread_id, 'task_id': "task-1", 'interval_seconds': 60, 'route_channel': "internal", 'route_target': "thread-1", 'now': 12.0})
-    bad_path = store.policies_dir / "bad-policy.json"
+    thread = store.threads.get_or_create({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 10.0})
+    policy = store.progress.create({'thread_id': thread.thread_id, 'task_id': "task-1", 'interval_seconds': 60, 'route_channel': "internal", 'route_target': "thread-1", 'now': 12.0})
+    bad_path = store.storage.policies_dir / "bad-policy.json"
     bad_path.write_text("{not-json", encoding="utf-8")
 
-    due, errors = store.due_progress_policies_report(now=72.0)
+    due, errors = store.progress.due_report(now=72.0)
 
     assert [item.policy_id for item in due] == [policy.policy_id]
     assert errors
@@ -597,12 +642,12 @@ def test_progress_policy_bad_file_is_reported_without_hiding_good_due_policy(tmp
 
 def test_update_task_status_keeps_thread_binding(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
-    store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "开发网站", 'now': 2.0})
+    thread = store.threads.get_or_create({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
+    store.tasks.bind({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "开发网站", 'now': 2.0})
 
-    link = store.update_task_status({'task_id': "task-1", 'status': "DONE", 'now': 3.0})
-    links = store.task_links(thread.thread_id)
-    stored_thread = store.load_thread(thread.thread_id)
+    link = store.tasks.update_status({'task_id': "task-1", 'status': "DONE", 'now': 3.0})
+    links = store.tasks.list(thread.thread_id)
+    stored_thread = store.threads.load(thread.thread_id)
 
     assert link is not None
     assert link.status == "DONE"
@@ -620,7 +665,7 @@ def test_update_task_status_immediately_retires_exact_task_policies(
 ) -> None:
     """终态提交点立即退休本任务 policy，不等待下一次 scheduler tick。"""
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "channel": "internal",
@@ -629,13 +674,13 @@ def test_update_task_status_immediately_retires_exact_task_policies(
             "now": 1.0,
         }
     )
-    store.bind_task(
+    store.tasks.bind(
         {"thread_id": thread.thread_id, "task_id": "task-1", "goal": "任务一", "now": 2.0}
     )
-    store.bind_task(
+    store.tasks.bind(
         {"thread_id": thread.thread_id, "task_id": "task-2", "goal": "任务二", "now": 2.0}
     )
-    first = store.set_progress_policy(
+    first = store.progress.create(
         {
             "thread_id": thread.thread_id,
             "task_id": "task-1",
@@ -643,7 +688,7 @@ def test_update_task_status_immediately_retires_exact_task_policies(
             "now": 3.0,
         }
     )
-    second = store.set_progress_policy(
+    second = store.progress.create(
         {
             "thread_id": thread.thread_id,
             "task_id": "task-2",
@@ -652,20 +697,20 @@ def test_update_task_status_immediately_retires_exact_task_policies(
         }
     )
 
-    store.update_task_status(
+    store.tasks.update_status(
         {"task_id": "task-1", "status": terminal_status, "now": 4.0}
     )
 
-    assert store.get_progress_policy(first.policy_id).enabled is False
-    assert store.get_progress_policy(second.policy_id).enabled is True
-    assert store.due_progress_policies(now=100.0) == [
-        store.get_progress_policy(second.policy_id)
+    assert store.progress.load(first.policy_id).enabled is False
+    assert store.progress.load(second.policy_id).enabled is True
+    assert store.progress.due(now=100.0) == [
+        store.progress.load(second.policy_id)
     ]
 
 
 def test_selected_workspace_task_survives_completion_and_restart(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "channel": "feishu",
@@ -676,7 +721,7 @@ def test_selected_workspace_task_survives_completion_and_restart(tmp_path) -> No
     )
     workspace = tmp_path / "owner" / "tasks" / "project-one"
     workspace.mkdir(parents=True)
-    store.bind_task(
+    store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": "task-1",
@@ -687,20 +732,20 @@ def test_selected_workspace_task_survives_completion_and_restart(tmp_path) -> No
         }
     )
 
-    selected = store.select_workspace_task(
+    selected = store.tasks.select_workspace_task(
         {"thread_id": thread.thread_id, "task_id": "task-1", "now": 3.0}
     )
-    store.update_task_status(
+    store.tasks.update_status(
         {"task_id": "task-1", "status": "completed", "now": 4.0}
     )
     reopened_store = ConversationStore(tmp_path / "conversations")
-    reopened = reopened_store.load_thread(thread.thread_id)
+    reopened = reopened_store.threads.load(thread.thread_id)
 
     assert selected.workspace_task_id == "task-1"
     assert reopened is not None
     assert reopened.workspace_task_id == "task-1"
     assert reopened.active_task_ids == ()
-    payload = json.loads(reopened_store._thread_path(thread.thread_id).read_text(encoding="utf-8"))
+    payload = json.loads(reopened_store.storage.thread_path(thread.thread_id).read_text(encoding="utf-8"))
     assert payload["schema_version"] == "conversation_thread.v9"
 
 
@@ -718,8 +763,8 @@ def test_thread_persists_client_cwd_across_requests_without_override(tmp_path) -
         "now": 1.0,
     }
 
-    first = store.get_or_create_thread(request)
-    second = store.get_or_create_thread(
+    first = store.threads.get_or_create(request)
+    second = store.threads.get_or_create(
         {
             "canonical_user_id": "local-agent",
             "channel": "chat",
@@ -739,7 +784,7 @@ def test_thread_persists_client_cwd_across_requests_without_override(tmp_path) -
 def test_stale_message_snapshot_cannot_revert_selected_workspace(tmp_path, monkeypatch) -> None:
     store = ConversationStore(tmp_path / "conversations")
     owner_home = tmp_path / "owner"
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "owner_home": str(owner_home),
@@ -753,7 +798,7 @@ def test_stale_message_snapshot_cannot_revert_selected_workspace(tmp_path, monke
     second_workspace = owner_home / "tasks" / "second"
     first_workspace.mkdir(parents=True)
     second_workspace.mkdir(parents=True)
-    store.bind_task(
+    store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": "task-first",
@@ -762,13 +807,13 @@ def test_stale_message_snapshot_cannot_revert_selected_workspace(tmp_path, monke
             "now": 2.0,
         }
     )
-    store.select_workspace_task(
+    store.tasks.select_workspace_task(
         {"thread_id": thread.thread_id, "task_id": "task-first", "now": 3.0}
     )
-    stale = store.load_thread(thread.thread_id)
+    stale = store.threads.load(thread.thread_id)
     assert stale is not None and stale.workspace_task_id == "task-first"
 
-    store.bind_task(
+    store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": "task-second",
@@ -777,13 +822,15 @@ def test_stale_message_snapshot_cannot_revert_selected_workspace(tmp_path, monke
             "now": 4.0,
         }
     )
-    store.select_workspace_task(
+    store.tasks.select_workspace_task(
         {"thread_id": thread.thread_id, "task_id": "task-second", "now": 5.0}
     )
 
     # Simulate a request that loaded the thread before the workspace switch.
-    monkeypatch.setattr(store, "_require_thread", lambda _thread_id: stale)
-    store.append_message(
+    monkeypatch.setattr(store.threads, "require", lambda _thread_id: stale)
+    monkeypatch.setattr(store.messages, "_require_thread", lambda _thread_id: stale)
+    monkeypatch.setattr(store.observations, "_require_thread", lambda _thread_id: stale)
+    store.messages.append(
         {
             "thread_id": thread.thread_id,
             "role": "user",
@@ -791,7 +838,7 @@ def test_stale_message_snapshot_cannot_revert_selected_workspace(tmp_path, monke
             "now": 6.0,
         }
     )
-    store.append_observation(
+    store.observations.append(
         {
             "thread_id": thread.thread_id,
             "event_type": "progress",
@@ -799,7 +846,7 @@ def test_stale_message_snapshot_cannot_revert_selected_workspace(tmp_path, monke
             "now": 7.0,
         }
     )
-    store.bind_channel(
+    store.threads.bind_channel(
         {
             "thread_id": thread.thread_id,
             "canonical_user_id": "user-1",
@@ -810,10 +857,10 @@ def test_stale_message_snapshot_cannot_revert_selected_workspace(tmp_path, monke
             "now": 8.0,
         }
     )
-    store.update_summary(thread.thread_id, "最新摘要", now=9.0)
-    store.update_verbose_level(thread.thread_id, "full", now=10.0)
+    store.threads.update_summary(thread.thread_id, "最新摘要", now=9.0)
+    store.threads.update_verbose_level(thread.thread_id, "full", now=10.0)
 
-    loaded = store.load_thread(thread.thread_id)
+    loaded = store.threads.load(thread.thread_id)
     assert loaded is not None
     assert loaded.workspace_task_id == "task-second"
     assert loaded.task_ids == ("task-first", "task-second")
@@ -824,7 +871,7 @@ def test_stale_message_snapshot_cannot_revert_selected_workspace(tmp_path, monke
 
 def test_selected_workspace_task_rejects_task_from_another_thread(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
-    first = store.get_or_create_thread(
+    first = store.threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "channel": "feishu",
@@ -832,7 +879,7 @@ def test_selected_workspace_task_rejects_task_from_another_thread(tmp_path) -> N
             "channel_user_id": "user-1",
         }
     )
-    second = store.get_or_create_thread(
+    second = store.threads.get_or_create(
         {
             "canonical_user_id": "user-2",
             "channel": "feishu",
@@ -842,7 +889,7 @@ def test_selected_workspace_task_rejects_task_from_another_thread(tmp_path) -> N
     )
     workspace = tmp_path / "owner-two" / "tasks" / "private-project"
     workspace.mkdir(parents=True)
-    store.bind_task(
+    store.tasks.bind(
         {
             "thread_id": second.thread_id,
             "task_id": "task-two",
@@ -852,18 +899,18 @@ def test_selected_workspace_task_rejects_task_from_another_thread(tmp_path) -> N
     )
 
     with pytest.raises(ValueError, match="not bound to conversation thread"):
-        store.select_workspace_task(
+        store.tasks.select_workspace_task(
             {"thread_id": first.thread_id, "task_id": "task-two"}
         )
 
-    unchanged = store.load_thread(first.thread_id)
+    unchanged = store.threads.load(first.thread_id)
     assert unchanged is not None
     assert unchanged.workspace_task_id == ""
 
 
 def test_task_link_lifecycle_projects_to_owner_workspace_state(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "channel": "feishu",
@@ -892,7 +939,7 @@ def test_task_link_lifecycle_projects_to_owner_workspace_state(tmp_path) -> None
         json.dumps({"version": 1, "task_id": "task-1", "status": "RUNNING"}),
         encoding="utf-8",
     )
-    store.bind_task(
+    store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": "task-1",
@@ -903,15 +950,15 @@ def test_task_link_lifecycle_projects_to_owner_workspace_state(tmp_path) -> None
         }
     )
 
-    store.update_task_status(
+    store.tasks.update_status(
         {"task_id": "task-1", "status": "completed", "expected_status": "active", "now": 3.0}
     )
     completed = json.loads(state_path.read_text(encoding="utf-8"))
     completed_summary = summary_path.read_text(encoding="utf-8")
-    store.update_task_status(
+    store.tasks.update_status(
         {"task_id": "task-1", "status": "active", "expected_status": "completed", "now": 4.0}
     )
-    store.update_task_status(
+    store.tasks.update_status(
         {"task_id": "task-1", "status": "interrupted", "expected_status": "active", "now": 5.0}
     )
     interrupted = json.loads(state_path.read_text(encoding="utf-8"))
@@ -932,7 +979,7 @@ def test_task_link_lifecycle_projects_to_owner_workspace_state(tmp_path) -> None
 
 def test_task_link_lifecycle_does_not_overwrite_another_workspace_identity(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "channel": "feishu",
@@ -949,7 +996,7 @@ def test_task_link_lifecycle_does_not_overwrite_another_workspace_identity(tmp_p
         encoding="utf-8",
     )
 
-    linked = store.bind_task(
+    linked = store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": "task-1",
@@ -958,7 +1005,7 @@ def test_task_link_lifecycle_does_not_overwrite_another_workspace_identity(tmp_p
             "task_path": str(task_root),
         }
     )
-    completed = store.update_task_status({"task_id": "task-1", "status": "completed"})
+    completed = store.tasks.update_status({"task_id": "task-1", "status": "completed"})
 
     assert linked.task_id == "task-1"
     assert completed is not None and completed.status == "completed"
@@ -971,7 +1018,7 @@ def test_task_link_lifecycle_does_not_overwrite_another_workspace_identity(tmp_p
 
 def test_task_link_lifecycle_does_not_write_outside_owner_tasks(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "channel": "feishu",
@@ -988,7 +1035,7 @@ def test_task_link_lifecycle_does_not_write_outside_owner_tasks(tmp_path) -> Non
         encoding="utf-8",
     )
 
-    store.bind_task(
+    store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": "task-1",
@@ -997,7 +1044,7 @@ def test_task_link_lifecycle_does_not_write_outside_owner_tasks(tmp_path) -> Non
             "task_path": str(outside),
         }
     )
-    store.update_task_status({"task_id": "task-1", "status": "completed"})
+    store.tasks.update_status({"task_id": "task-1", "status": "completed"})
 
     assert json.loads(state_path.read_text(encoding="utf-8"))["status"] == "RUNNING"
 
@@ -1005,7 +1052,7 @@ def test_task_link_lifecycle_does_not_write_outside_owner_tasks(tmp_path) -> Non
 def test_task_link_lifecycle_does_not_follow_state_symlink_outside_task(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
     owner_home = tmp_path / "owner"
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "channel": "feishu",
@@ -1024,7 +1071,7 @@ def test_task_link_lifecycle_does_not_follow_state_symlink_outside_task(tmp_path
     work_root.mkdir(parents=True)
     (work_root / "state.json").symlink_to(outside_state)
 
-    store.bind_task(
+    store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": "task-1",
@@ -1033,14 +1080,14 @@ def test_task_link_lifecycle_does_not_follow_state_symlink_outside_task(tmp_path
             "task_path": str(task_root),
         }
     )
-    store.update_task_status({"task_id": "task-1", "status": "completed"})
+    store.tasks.update_status({"task_id": "task-1", "status": "completed"})
 
     assert json.loads(outside_state.read_text(encoding="utf-8"))["status"] == "RUNNING"
 
 
 def test_update_task_status_expected_status_does_not_overwrite_terminal_race(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "channel": "internal",
@@ -1049,12 +1096,12 @@ def test_update_task_status_expected_status_does_not_overwrite_terminal_race(tmp
             "now": 1.0,
         }
     )
-    store.bind_task(
+    store.tasks.bind(
         {"thread_id": thread.thread_id, "task_id": "task-1", "goal": "开发网站", "now": 2.0}
     )
-    store.update_task_status({"task_id": "task-1", "status": "completed", "now": 3.0})
+    store.tasks.update_status({"task_id": "task-1", "status": "completed", "now": 3.0})
 
-    rejected = store.update_task_status(
+    rejected = store.tasks.update_status(
         {
             "task_id": "task-1",
             "status": "cancelled",
@@ -1062,7 +1109,7 @@ def test_update_task_status_expected_status_does_not_overwrite_terminal_race(tmp
             "now": 4.0,
         }
     )
-    link = store.task_links(thread.thread_id)[0]
+    link = store.tasks.list(thread.thread_id)[0]
 
     assert rejected is None
     assert link.status == "completed"
@@ -1070,7 +1117,7 @@ def test_update_task_status_expected_status_does_not_overwrite_terminal_race(tmp
 
 def test_bind_task_preserves_existing_identity_and_only_fills_missing_path(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "channel": "internal",
@@ -1079,10 +1126,10 @@ def test_bind_task_preserves_existing_identity_and_only_fills_missing_path(tmp_p
             "now": 1.0,
         }
     )
-    first = store.bind_task(
+    first = store.tasks.bind(
         {"thread_id": thread.thread_id, "task_id": "task-1", "goal": "原始用户目标", "now": 2.0}
     )
-    filled = store.bind_task(
+    filled = store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": "task-1",
@@ -1091,7 +1138,7 @@ def test_bind_task_preserves_existing_identity_and_only_fills_missing_path(tmp_p
             "now": 3.0,
         }
     )
-    repeated = store.bind_task(
+    repeated = store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": "task-1",
@@ -1109,7 +1156,7 @@ def test_bind_task_preserves_existing_identity_and_only_fills_missing_path(tmp_p
 
 def test_bind_task_rejects_cross_thread_rebind_and_preserves_terminal_index(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
-    first = store.get_or_create_thread(
+    first = store.threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "channel": "internal",
@@ -1118,7 +1165,7 @@ def test_bind_task_rejects_cross_thread_rebind_and_preserves_terminal_index(tmp_
             "now": 1.0,
         }
     )
-    second = store.get_or_create_thread(
+    second = store.threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "channel": "internal",
@@ -1127,10 +1174,10 @@ def test_bind_task_rejects_cross_thread_rebind_and_preserves_terminal_index(tmp_
             "now": 2.0,
         }
     )
-    store.bind_task(
+    store.tasks.bind(
         {"thread_id": first.thread_id, "task_id": "task-1", "goal": "原始目标", "now": 3.0}
     )
-    completed = store.bind_task(
+    completed = store.tasks.bind(
         {
             "thread_id": first.thread_id,
             "task_id": "task-1",
@@ -1141,12 +1188,12 @@ def test_bind_task_rejects_cross_thread_rebind_and_preserves_terminal_index(tmp_
     )
 
     with pytest.raises(ValueError, match="another conversation thread"):
-        store.bind_task(
+        store.tasks.bind(
             {"thread_id": second.thread_id, "task_id": "task-1", "goal": "跨线程覆盖", "now": 5.0}
         )
 
-    loaded = store.task_links(first.thread_id)[0]
-    stored_thread = store.load_thread(first.thread_id)
+    loaded = store.tasks.list(first.thread_id)[0]
+    stored_thread = store.threads.load(first.thread_id)
     assert completed.goal == loaded.goal == "原始目标"
     assert completed.status == "completed"
     assert stored_thread is not None
@@ -1156,7 +1203,7 @@ def test_bind_task_rejects_cross_thread_rebind_and_preserves_terminal_index(tmp_
 
 def test_bind_task_cannot_resurrect_terminal_task_but_explicit_update_can(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "channel": "feishu",
@@ -1165,13 +1212,13 @@ def test_bind_task_cannot_resurrect_terminal_task_but_explicit_update_can(tmp_pa
             "now": 1.0,
         }
     )
-    store.bind_task(
+    store.tasks.bind(
         {"thread_id": thread.thread_id, "task_id": "task-1", "goal": "长任务", "now": 2.0}
     )
-    cancelled = store.update_task_status(
+    cancelled = store.tasks.update_status(
         {"task_id": "task-1", "status": "cancelled", "expected_status": "active", "now": 3.0}
     )
-    rebound = store.bind_task(
+    rebound = store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": "task-1",
@@ -1185,18 +1232,18 @@ def test_bind_task_cannot_resurrect_terminal_task_but_explicit_update_can(tmp_pa
     assert cancelled is not None and cancelled.status == "cancelled"
     assert rebound.status == "cancelled"
     assert rebound.task_path == str(tmp_path / "task-root")
-    assert store.load_thread(thread.thread_id).active_task_ids == ()
+    assert store.threads.load(thread.thread_id).active_task_ids == ()
 
-    reopened = store.update_task_status(
+    reopened = store.tasks.update_status(
         {"task_id": "task-1", "status": "active", "expected_status": "cancelled", "now": 5.0}
     )
     assert reopened is not None and reopened.status == "active"
-    assert store.load_thread(thread.thread_id).active_task_ids == ("task-1",)
+    assert store.threads.load(thread.thread_id).active_task_ids == ("task-1",)
 
 
 def test_concurrent_task_bindings_merge_thread_indexes_without_lost_ids(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "channel": "internal",
@@ -1208,7 +1255,7 @@ def test_concurrent_task_bindings_merge_thread_indexes_without_lost_ids(tmp_path
     task_ids = [f"task-{index}" for index in range(16)]
 
     def bind(task_id: str) -> None:
-        store.bind_task(
+        store.tasks.bind(
             {
                 "thread_id": thread.thread_id,
                 "task_id": task_id,
@@ -1219,16 +1266,16 @@ def test_concurrent_task_bindings_merge_thread_indexes_without_lost_ids(tmp_path
     with ThreadPoolExecutor(max_workers=8) as pool:
         list(pool.map(bind, task_ids))
 
-    loaded = store.load_thread(thread.thread_id)
+    loaded = store.threads.load(thread.thread_id)
     assert loaded is not None
     assert set(loaded.task_ids) == set(task_ids)
     assert set(loaded.active_task_ids) == set(task_ids)
-    assert {item.task_id for item in store.task_links(thread.thread_id)} == set(task_ids)
+    assert {item.task_id for item in store.tasks.list(thread.thread_id)} == set(task_ids)
 
 
 def test_concurrent_same_named_audit_reservation_allows_exactly_one(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "channel": "feishu",
@@ -1239,7 +1286,7 @@ def test_concurrent_same_named_audit_reservation_allows_exactly_one(tmp_path) ->
 
     def reserve(task_id: str) -> str:
         try:
-            store.bind_task(
+            store.tasks.bind(
                 {
                     "thread_id": thread.thread_id,
                     "task_id": task_id,
@@ -1258,7 +1305,7 @@ def test_concurrent_same_named_audit_reservation_allows_exactly_one(tmp_path) ->
         results = list(pool.map(reserve, ("audit-a", "audit-b")))
 
     assert sorted(results) == ["created", "duplicate"]
-    links = store.task_links(thread.thread_id)
+    links = store.tasks.list(thread.thread_id)
     assert len(links) == 1
     assert links[0].work_kind == "audit"
     assert links[0].work_name == "同名检查"
@@ -1266,36 +1313,36 @@ def test_concurrent_same_named_audit_reservation_allows_exactly_one(tmp_path) ->
 
 def test_thread_for_task_reports_corrupt_task_link(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
-    store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-bad", 'goal': "长期任务", 'now': 2.0})
-    store._task_path("task-bad").write_text("{bad-json", encoding="utf-8")
+    thread = store.threads.get_or_create({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
+    store.tasks.bind({'thread_id': thread.thread_id, 'task_id': "task-bad", 'goal': "长期任务", 'now': 2.0})
+    store.storage.task_path("task-bad").write_text("{bad-json", encoding="utf-8")
 
     with pytest.raises(DataCorruptionError):
-        store.thread_for_task("task-bad")
+        store.tasks.thread_for("task-bad")
 
-    resolved, error = store.thread_for_task_report("task-bad")
+    resolved, error = store.tasks.thread_for_report("task-bad")
     assert resolved is None
     assert error is not None
     assert error["context"] == "conversation.thread_for_task"
     assert error["task_id"] == "task-bad"
-    assert error["path"] == str(store._task_path("task-bad"))
+    assert error["path"] == str(store.storage.task_path("task-bad"))
 
 
 def test_thread_for_task_reports_corrupt_linked_thread(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
-    store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "长期任务", 'now': 2.0})
-    store._thread_path(thread.thread_id).write_text("{bad-json", encoding="utf-8")
+    thread = store.threads.get_or_create({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
+    store.tasks.bind({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "长期任务", 'now': 2.0})
+    store.storage.thread_path(thread.thread_id).write_text("{bad-json", encoding="utf-8")
 
     with pytest.raises(DataCorruptionError):
-        store.thread_for_task("task-1")
+        store.tasks.thread_for("task-1")
 
-    resolved, error = store.thread_for_task_report("task-1")
+    resolved, error = store.tasks.thread_for_report("task-1")
     assert resolved is None
     assert error is not None
     assert error["context"] == "conversation.thread.read"
     assert error["thread_id"] == thread.thread_id
-    assert error["path"] == str(store._thread_path(thread.thread_id))
+    assert error["path"] == str(store.storage.thread_path(thread.thread_id))
 
 
 def test_update_json_file_atomic_updates_under_single_file_transaction(tmp_path) -> None:
@@ -1310,23 +1357,23 @@ def test_update_json_file_atomic_updates_under_single_file_transaction(tmp_path)
 
 def test_new_unbound_channel_does_not_implicitly_mix_latest_thread(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
-    first = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "feishu", 'channel_conversation_id': "chat-a", 'channel_user_id': "user-a", 'now': 10.0})
-    second = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "wechat", 'channel_conversation_id': "chat-b", 'channel_user_id': "user-b", 'now': 20.0})
+    first = store.threads.get_or_create({'canonical_user_id': "user-1", 'channel': "feishu", 'channel_conversation_id': "chat-a", 'channel_user_id': "user-a", 'now': 10.0})
+    second = store.threads.get_or_create({'canonical_user_id': "user-1", 'channel': "wechat", 'channel_conversation_id': "chat-b", 'channel_user_id': "user-b", 'now': 20.0})
 
     assert second.thread_id != first.thread_id
 
-    resumed = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "qq", 'channel_conversation_id': "chat-c", 'channel_user_id': "user-c", 'reuse_latest_for_user': True, 'now': 30.0})
+    resumed = store.threads.get_or_create({'canonical_user_id': "user-1", 'channel': "qq", 'channel_conversation_id': "chat-c", 'channel_user_id': "user-c", 'reuse_latest_for_user': True, 'now': 30.0})
 
     assert resumed.thread_id == second.thread_id
 
 
 def test_list_threads_report_keeps_good_threads_when_one_thread_file_is_bad(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
-    good = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
-    bad_path = store.threads_dir / "bad-thread.json"
+    good = store.threads.get_or_create({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
+    bad_path = store.storage.threads_dir / "bad-thread.json"
     bad_path.write_text("{bad-json", encoding="utf-8")
 
-    threads, errors = store.list_threads_report()
+    threads, errors = store.threads.list_report()
 
     assert [item.thread_id for item in threads] == [good.thread_id]
     assert errors
@@ -1337,10 +1384,10 @@ def test_list_threads_report_keeps_good_threads_when_one_thread_file_is_bad(tmp_
 
 def test_resolve_thread_report_reports_corrupt_bindings_index(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
-    store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
-    store.bindings_path.write_text("{bad-json", encoding="utf-8")
+    store.threads.get_or_create({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
+    store.storage.bindings_path.write_text("{bad-json", encoding="utf-8")
 
-    thread, error = store.resolve_thread_report(
+    thread, error = store.threads.resolve_report(
         channel="internal",
         channel_conversation_id="thread-1",
         channel_user_id="user-1",
@@ -1349,44 +1396,44 @@ def test_resolve_thread_report_reports_corrupt_bindings_index(tmp_path) -> None:
     assert thread is None
     assert error is not None
     assert error["context"] == "conversation.bindings.read"
-    assert error["path"] == str(store.bindings_path)
+    assert error["path"] == str(store.storage.bindings_path)
 
 
 def test_latest_thread_for_user_report_reports_corrupt_latest_index(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
-    store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
-    store.user_latest_path.write_text("{bad-json", encoding="utf-8")
+    store.threads.get_or_create({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
+    store.storage.user_latest_path.write_text("{bad-json", encoding="utf-8")
 
-    thread, error = store.latest_thread_for_user_report("user-1")
+    thread, error = store.threads.latest_for_user_report("user-1")
 
     assert thread is None
     assert error is not None
     assert error["context"] == "conversation.user_latest.read"
-    assert error["path"] == str(store.user_latest_path)
+    assert error["path"] == str(store.storage.user_latest_path)
 
 
 def test_get_or_create_thread_does_not_duplicate_when_bindings_index_is_corrupt(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
-    store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
-    store.bindings_path.write_text("{bad-json", encoding="utf-8")
+    store.threads.get_or_create({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
+    store.storage.bindings_path.write_text("{bad-json", encoding="utf-8")
 
     with pytest.raises(DataCorruptionError):
-        store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 2.0})
+        store.threads.get_or_create({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 2.0})
 
-    threads, errors = store.list_threads_report()
+    threads, errors = store.threads.list_report()
     assert len(threads) == 1
     assert errors == []
 
 
 def test_get_or_create_thread_does_not_duplicate_when_latest_index_is_corrupt(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
-    store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
-    store.user_latest_path.write_text("{bad-json", encoding="utf-8")
+    store.threads.get_or_create({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
+    store.storage.user_latest_path.write_text("{bad-json", encoding="utf-8")
 
     with pytest.raises(DataCorruptionError):
-        store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "wechat", 'channel_conversation_id': "thread-2", 'channel_user_id': "user-1", 'reuse_latest_for_user': True, 'now': 2.0})
+        store.threads.get_or_create({'canonical_user_id': "user-1", 'channel': "wechat", 'channel_conversation_id': "thread-2", 'channel_user_id': "user-1", 'reuse_latest_for_user': True, 'now': 2.0})
 
-    threads, errors = store.list_threads_report()
+    threads, errors = store.threads.list_report()
     assert len(threads) == 1
     assert errors == []
 
@@ -1394,7 +1441,7 @@ def test_get_or_create_thread_does_not_duplicate_when_latest_index_is_corrupt(tm
 def test_mark_progress_failed_records_backoff_and_retires(tmp_path) -> None:
     """失败续跑记账(问题6):写失败账+退避顺延;连续失败达阈值退休;未知 policy 安全。"""
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "channel": "internal",
@@ -1403,7 +1450,7 @@ def test_mark_progress_failed_records_backoff_and_retires(tmp_path) -> None:
             "now": 10.0,
         }
     )
-    policy = store.set_progress_policy(
+    policy = store.progress.create(
         {
             "thread_id": thread.thread_id,
             "task_id": "task-1",
@@ -1415,10 +1462,10 @@ def test_mark_progress_failed_records_backoff_and_retires(tmp_path) -> None:
     )
 
     # 未知 policy:安全返回 None,不抛。
-    assert store.mark_progress_failed("policy-nope", now=21.0, backoff_seconds=300, failure_count=1) is None
+    assert store.progress.mark_failed("policy-nope", now=21.0, backoff_seconds=300, failure_count=1) is None
 
     # 第 1 次失败:记账 + 退避顺延,enabled 保持。
-    failed = store.mark_progress_failed(
+    failed = store.progress.mark_failed(
         policy.policy_id, now=30.0, backoff_seconds=300.0, failure_count=1
     )
     assert failed is not None and failed.enabled is True
@@ -1428,20 +1475,20 @@ def test_mark_progress_failed_records_backoff_and_retires(tmp_path) -> None:
     assert failed.next_due_at == 30.0 + 300.0
 
     # 阈值内再失败:账累加,仍 enabled。
-    failed2 = store.mark_progress_failed(
+    failed2 = store.progress.mark_failed(
         policy.policy_id, now=40.0, backoff_seconds=600.0, failure_count=2
     )
     assert failed2.enabled is True
     assert failed2.metadata["failure_count"] == 2
 
     # 达退休阈值:enabled=False,离开 due 扫描,账目保留供复盘。
-    retired = store.mark_progress_failed(
+    retired = store.progress.mark_failed(
         policy.policy_id, now=50.0, backoff_seconds=1200.0, failure_count=3
     )
     assert retired.enabled is False
     assert retired.metadata["failure_count"] == 3
     assert retired.metadata["retired_at"] == 50.0
-    assert policy.policy_id not in {p.policy_id for p in store.due_progress_policies(now=100.0)}
+    assert policy.policy_id not in {p.policy_id for p in store.progress.due(now=100.0)}
 
 
 # 读取侧增量索引只允许改变耗时。这里把唤醒查询的四个语义(urgent 优先、created_at 升序、
@@ -1451,12 +1498,12 @@ def test_wake_pending_report_keeps_order_limit_status_filter_and_load_errors(
     tmp_path,
 ) -> None:
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 10.0})
-    normal = store.raise_wake_signal({'thread_id': thread.thread_id, 'reason': "agent_event", 'urgency': "normal", 'now': 20.0})
-    urgent_late = store.raise_wake_signal({'thread_id': thread.thread_id, 'reason': "agent_event", 'urgency': "urgent", 'now': 22.0})
-    urgent_early = store.raise_wake_signal({'thread_id': thread.thread_id, 'reason': "agent_event", 'urgency': "urgent", 'now': 21.0})
+    thread = store.threads.get_or_create({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 10.0})
+    normal = store.wakes.raise_signal({'thread_id': thread.thread_id, 'reason': "agent_event", 'urgency': "normal", 'now': 20.0})
+    urgent_late = store.wakes.raise_signal({'thread_id': thread.thread_id, 'reason': "agent_event", 'urgency': "urgent", 'now': 22.0})
+    urgent_early = store.wakes.raise_signal({'thread_id': thread.thread_id, 'reason': "agent_event", 'urgency': "urgent", 'now': 21.0})
     # 崩溃窗口残留:队列目录里状态已不是 pending 的文件不得被返回。
-    leftover = store.wake_queue_dir / "urgent" / "wake-handled-left.json"
+    leftover = store.storage.wake_queue_dir / "urgent" / "wake-handled-left.json"
     leftover.write_text(
         json.dumps(
             {
@@ -1469,22 +1516,22 @@ def test_wake_pending_report_keeps_order_limit_status_filter_and_load_errors(
         ),
         encoding="utf-8",
     )
-    (store.wake_queue_dir / "normal" / "wake-broken.json").write_text("{not json", encoding="utf-8")
+    (store.storage.wake_queue_dir / "normal" / "wake-broken.json").write_text("{not json", encoding="utf-8")
 
     expected_order = [urgent_early.wake_signal_id, urgent_late.wake_signal_id, normal.wake_signal_id]
-    signals, errors = store.pending_wake_signals_report(limit=0)
+    signals, errors = store.wakes.pending_report(limit=0)
     assert [item.wake_signal_id for item in signals] == expected_order
     assert errors and errors[0]["context"] == "conversation.wake_signal.read"
 
-    capped, capped_errors = store.pending_wake_signals_report(limit=2)
+    capped, capped_errors = store.wakes.pending_report(limit=2)
     assert [item.wake_signal_id for item in capped] == expected_order[:2]
-    urgent_only, _ = store.pending_wake_signals_report(limit=0, include_normal=False)
+    urgent_only, _ = store.wakes.pending_report(limit=0, include_normal=False)
     assert [item.wake_signal_id for item in urgent_only] == expected_order[:2]
 
     # 重复调用必须逐字稳定:信号、顺序、limit 截断、以及 load_error 全集。
     for _ in range(3):
-        repeated, repeated_errors = store.pending_wake_signals_report(limit=0)
-        repeated_capped, repeated_capped_errors = store.pending_wake_signals_report(limit=2)
+        repeated, repeated_errors = store.wakes.pending_report(limit=0)
+        repeated_capped, repeated_capped_errors = store.wakes.pending_report(limit=2)
         assert [item.to_dict() for item in repeated] == [item.to_dict() for item in signals]
         assert repeated_errors == errors
         assert [item.to_dict() for item in repeated_capped] == [item.to_dict() for item in capped]
@@ -1497,25 +1544,25 @@ def test_unhandled_observations_requiring_main_keeps_order_limit_and_handled_fil
     tmp_path,
 ) -> None:
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 10.0})
-    other = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-2", 'channel_user_id': "user-1", 'now': 11.0})
-    first = store.append_observation({'thread_id': thread.thread_id, 'event_type': "child_agent_event", 'summary': "最早", 'requires_main_agent': True, 'now': 30.0})
-    second = store.append_observation({'thread_id': other.thread_id, 'event_type': "child_agent_event", 'summary': "需要模型报告", 'requires_llm_report': True, 'now': 31.0})
-    plain = store.append_observation({'thread_id': thread.thread_id, 'event_type': "child_agent_event", 'summary': "不需要主代理", 'now': 32.0})
-    handled = store.append_observation({'thread_id': other.thread_id, 'event_type': "child_agent_event", 'summary': "已处理", 'requires_main_agent': True, 'now': 33.0})
-    store.mark_observations_handled([handled.observation_id], now=34.0)
+    thread = store.threads.get_or_create({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 10.0})
+    other = store.threads.get_or_create({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-2", 'channel_user_id': "user-1", 'now': 11.0})
+    first = store.observations.append({'thread_id': thread.thread_id, 'event_type': "child_agent_event", 'summary': "最早", 'requires_main_agent': True, 'now': 30.0})
+    second = store.observations.append({'thread_id': other.thread_id, 'event_type': "child_agent_event", 'summary': "需要模型报告", 'requires_llm_report': True, 'now': 31.0})
+    plain = store.observations.append({'thread_id': thread.thread_id, 'event_type': "child_agent_event", 'summary': "不需要主代理", 'now': 32.0})
+    handled = store.observations.append({'thread_id': other.thread_id, 'event_type': "child_agent_event", 'summary': "已处理", 'requires_main_agent': True, 'now': 33.0})
+    store.observations.mark_handled([handled.observation_id], now=34.0)
 
-    events = store.unhandled_observations_requiring_main(limit=0)
+    events = store.observations.unhandled_requiring_main(limit=0)
     assert [item.observation_id for item in events] == [first.observation_id, second.observation_id]
     assert plain.observation_id not in {item.observation_id for item in events}
     assert handled.observation_id not in {item.observation_id for item in events}
     assert [item.observed_at for item in events] == sorted(item.observed_at for item in events)
     assert [
-        item.observation_id for item in store.unhandled_observations_requiring_main(limit=1)
+        item.observation_id for item in store.observations.unhandled_requiring_main(limit=1)
     ] == [first.observation_id]
 
     for _ in range(3):
-        assert [item.to_dict() for item in store.unhandled_observations_requiring_main(limit=0)] == [
+        assert [item.to_dict() for item in store.observations.unhandled_requiring_main(limit=0)] == [
             item.to_dict() for item in events
         ]
 
@@ -1554,25 +1601,25 @@ def test_jsonl_lines_only_split_on_physical_lf() -> None:
 def test_conversation_jsonl_reader_keeps_unicode_line_separators(tmp_path) -> None:
     from agent_py_agent.agent.conversation.store import (
         ConversationStore,
-        read_jsonl_report,
     )
+    from agent_py_agent.agent.conversation.store_io import read_jsonl_report
 
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread({"canonical_user_id": "owner-a"})
+    thread = store.threads.get_or_create({"canonical_user_id": "owner-a"})
     tricky = "首行\u0085次行\u2028三行\u2029四行"
-    store.append_message(
+    store.messages.append(
         {"thread_id": thread.thread_id, "role": "assistant", "content": tricky}
     )
-    store.append_message(
+    store.messages.append(
         {"thread_id": thread.thread_id, "role": "assistant", "content": "普通正文"}
     )
 
-    report = store.recent_messages_report(thread.thread_id, limit=0)
+    report = store.messages.recent_report(thread.thread_id, limit=0)
     rows, load_errors = report
     assert load_errors == []
     assert [row.content for row in rows] == [tricky, "普通正文"]
 
-    path = store.messages_dir / f"{thread.thread_id}.jsonl"
+    path = store.storage.messages_dir / f"{thread.thread_id}.jsonl"
     raw = read_jsonl_report(path, context="guard")
     assert raw.load_errors == []
     assert len(raw.rows) == 2
@@ -1581,7 +1628,7 @@ def test_conversation_jsonl_reader_keeps_unicode_line_separators(tmp_path) -> No
 # LLM: 真正的截断/非法 JSON 仍然必须报结构化错误：修复只改"记录边界"，不允许变成吞坏行。
 # 函数用途: 验证半行、非法 JSON 与非对象行仍产生 load_errors。
 def test_conversation_jsonl_reader_still_reports_real_corruption(tmp_path) -> None:
-    from agent_py_agent.agent.conversation.store import read_jsonl_report
+    from agent_py_agent.agent.conversation.store_io import read_jsonl_report
 
     path = tmp_path / "broken.jsonl"
     path.write_text(

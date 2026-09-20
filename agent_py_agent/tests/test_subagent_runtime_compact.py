@@ -143,10 +143,10 @@ def test_child_failure_keeps_native_history_in_own_thread(tmp_path, error_type):
             return super().generate(prompt, on_chunk, **kwargs)
 
     agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
-    parent = agent.conversation_store.get_or_create_thread({"channel": "chat", "channel_conversation_id": "parent"})
+    parent = agent.conversation_store.threads.get_or_create({"channel": "chat", "channel_conversation_id": "parent"})
     workspace = agent.home_paths.owner_home_dir / "project"
     workspace.mkdir(parents=True)
-    agent.conversation_store.bind_task({"thread_id": parent.thread_id, "task_id": "parent-task", "status": "active", "task_path": str(workspace)})
+    agent.conversation_store.tasks.bind({"thread_id": parent.thread_id, "task_id": "parent-task", "status": "active", "task_path": str(workspace)})
     child = agent.subagents.create_run(goal="整理本地文件", root_id="parent-task", role="worker",
         allowed_tools=["write_file"], extra_write_roots=[str(workspace)], attributes={
             "conversation_thread_id": parent.thread_id, "conversation_task_id": "parent-task",
@@ -155,13 +155,13 @@ def test_child_failure_keeps_native_history_in_own_thread(tmp_path, error_type):
     agent.backend = WriteThenFail()
     result = agent.run_subagent(child.id, dry_run=False, probe=False)
     assert not result.ok
-    rows = agent.conversation_store.recent_messages(child.agent_thread_id, limit=0)
+    rows = agent.conversation_store.messages.recent(child.agent_thread_id, limit=0)
     native = provider_history_messages_from_rows(rows)
     assert "call-child-write-1" in str(native)
     assert any("tool_result" in str(row) for row in native)
     assert rows[-1].content == ""
     assert rows[-1].metadata["turn_end_reason"] == ("aborted" if error_type is InterruptedError else "error")
-    assert agent.conversation_store.recent_messages(parent.thread_id, limit=0) == []
+    assert agent.conversation_store.messages.recent(parent.thread_id, limit=0) == []
 
 
 class _OverflowThenListThenCompleteChildBackend(_OverflowThenCompleteChildBackend):
@@ -246,9 +246,9 @@ def test_subagent_uses_own_conversation_thread_for_forced_compact_and_retry(
         role="worker",
     )
     run_home = Path(task.agent_run_workspace_dir)
-    thread = agent.conversation_store.load_thread(task.agent_thread_id)
+    thread = agent.conversation_store.threads.load(task.agent_thread_id)
     assert thread is not None
-    agent.conversation_store.append_message(
+    agent.conversation_store.messages.append(
         {
             "thread_id": thread.thread_id,
             "role": "user",
@@ -256,7 +256,7 @@ def test_subagent_uses_own_conversation_thread_for_forced_compact_and_retry(
             "metadata": {"conversation_request_id": "prior-attempt"},
         }
     )
-    agent.conversation_store.append_message(
+    agent.conversation_store.messages.append(
         {
             "thread_id": thread.thread_id,
             "role": "assistant",
@@ -270,8 +270,8 @@ def test_subagent_uses_own_conversation_thread_for_forced_compact_and_retry(
 
     result = agent.run_subagent(task.id, dry_run=False, probe=False)
 
-    updated = agent.conversation_store.load_thread(task.agent_thread_id)
-    messages, errors = agent.conversation_store.recent_messages_report(
+    updated = agent.conversation_store.threads.load(task.agent_thread_id)
+    messages, errors = agent.conversation_store.messages.recent_report(
         task.agent_thread_id,
         limit=0,
     )
@@ -380,7 +380,7 @@ def test_subagent_provider_overflow_compacts_unfinished_tool_archive_before_retr
 
     result = agent.run_subagent(task.id, dry_run=False, probe=False)
 
-    thread = agent.conversation_store.load_thread(task.agent_thread_id)
+    thread = agent.conversation_store.threads.load(task.agent_thread_id)
     assert result.ok
     assert len(run_params_seen) == overflow_count + 1
     assert len({params.attempt_id for params in run_params_seen}) == 1
@@ -436,7 +436,7 @@ def test_subagent_overflow_without_compactable_progress_still_fails(tmp_path, mo
     assert ended.status == "FAILED"
     assert ended.failure_type == "runner_error"
     assert "cannot compact the overflowing active turn" in ended.runner_last_error
-    assert agent.conversation_store.load_thread(task.agent_thread_id).compact_generation == 0
+    assert agent.conversation_store.threads.load(task.agent_thread_id).compact_generation == 0
 
 
 def test_subagent_compact_retry_keeps_exact_attempt_authorized_for_later_tools(
@@ -464,7 +464,7 @@ def test_subagent_compact_retry_keeps_exact_attempt_authorized_for_later_tools(
         ("user", "上一轮已经完成了初始目录核对。"),
         ("assistant", "目录事实已经记录，可以继续后续工具步骤。"),
     ):
-        agent.conversation_store.append_message(
+        agent.conversation_store.messages.append(
             {
                 "thread_id": task.agent_thread_id,
                 "role": role,
@@ -499,7 +499,7 @@ def test_child_transcript_thread_does_not_rebind_parent_conversation_task(
     )
     workspace = agent.home_paths.owner_home_dir / "project"
     workspace.mkdir(parents=True)
-    parent_thread = agent.conversation_store.get_or_create_thread(
+    parent_thread = agent.conversation_store.threads.get_or_create(
         {
             "canonical_user_id": "local/main",
             "channel": "tui",
@@ -509,7 +509,7 @@ def test_child_transcript_thread_does_not_rebind_parent_conversation_task(
         }
     )
     parent_task_id = "root-conversation-task"
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": parent_thread.thread_id,
             "task_id": parent_task_id,
@@ -537,9 +537,9 @@ def test_child_transcript_thread_does_not_rebind_parent_conversation_task(
 
     result = agent.run_subagent(task.id, dry_run=False, probe=False)
 
-    parent_link = agent.conversation_store.load_task_link(parent_task_id)
-    child_thread = agent.conversation_store.load_thread(task.agent_thread_id)
-    child_rows = agent.conversation_store.recent_messages(task.agent_thread_id, limit=0)
+    parent_link = agent.conversation_store.tasks.load(parent_task_id)
+    child_thread = agent.conversation_store.threads.load(task.agent_thread_id)
+    child_rows = agent.conversation_store.messages.recent(task.agent_thread_id, limit=0)
     assert result.ok
     assert (workspace / "child-owned.txt").read_text(encoding="utf-8") == "child output\n"
     assert parent_link is not None
@@ -590,7 +590,7 @@ def test_subagent_preflight_compacts_large_completed_history_before_sampling(
         ("user", "old requirement " + ("x" * 150_000)),
         ("assistant", "old completed work " + ("y" * 150_000)),
     ):
-        agent.conversation_store.append_message(
+        agent.conversation_store.messages.append(
             {
                 "thread_id": task.agent_thread_id,
                 "role": role,
@@ -604,7 +604,7 @@ def test_subagent_preflight_compacts_large_completed_history_before_sampling(
 
     result = agent.run_subagent(task.id, dry_run=False, probe=False)
 
-    thread = agent.conversation_store.load_thread(task.agent_thread_id)
+    thread = agent.conversation_store.threads.load(task.agent_thread_id)
     assert result.ok
     # 300K 字符源超过 64K 窗口，必须分段而不是单次超窗发送；每段禁用执行工具，全部覆盖后仅提交一代。
     assert len(backend.summary_prompts) > 1
@@ -664,8 +664,8 @@ def test_child_and_grandchild_materialize_independent_agent_threads(
         depth=1,
     )
 
-    parent_thread = agent.conversation_store.load_thread(parent.agent_thread_id)
-    child_thread = agent.conversation_store.load_thread(child.agent_thread_id)
+    parent_thread = agent.conversation_store.threads.load(parent.agent_thread_id)
+    child_thread = agent.conversation_store.threads.load(child.agent_thread_id)
     assert parent_thread is not None
     assert child_thread is not None
     assert parent_thread.thread_id != child_thread.thread_id
@@ -675,14 +675,14 @@ def test_child_and_grandchild_materialize_independent_agent_threads(
     assert parent_thread.channel_bindings == ()
     assert child_thread.channel_bindings == ()
 
-    agent.conversation_store.append_message(
+    agent.conversation_store.messages.append(
         {
             "thread_id": parent_thread.thread_id,
             "role": "assistant",
             "content": "parent-only history",
         }
     )
-    child_rows, child_errors = agent.conversation_store.recent_messages_report(
+    child_rows, child_errors = agent.conversation_store.messages.recent_report(
         child_thread.thread_id,
         limit=0,
     )

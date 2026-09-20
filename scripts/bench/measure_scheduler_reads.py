@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# LLM: 基准只在临时夹具测调度读取；上下文退出必须还原进程内替换函数，不能污染后续采样。
+# 模块用途: 比较调度仓库的解析次数和锁内耗时，不读写用户任务。
 """GW-03 配对基准:scheduler 只读路径的"锁内全量解析"成本(N 条 run 的 owner store)。
 
 度量口径(与 R265/R267/R274 的验收同源):
@@ -141,7 +143,9 @@ class Instrument:
         self.module.locked_json_path = timed_lock
         return self
 
-    def __exit__(self, *exc):
+    # LLM: 离开基准采样时必须还原三个被替换的入口；标准上下文参数不改变异常传播。
+    # 函数用途: 恢复进程内原函数，基准失败时也不吞掉错误。
+    def __exit__(self, exc_type, exc_value, traceback):
         self.module.SchedulerRepository._parse_run = self._orig_parse
         self.module.SchedulerRepository._load_store_unlocked = self._orig_load
         self.module.locked_json_path = self._orig_lock

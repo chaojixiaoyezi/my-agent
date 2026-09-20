@@ -349,8 +349,8 @@ class TestShellToolValidation:
 
         assert result.ok is False
 
-    def test_command_too_long_rejected(self, tmp_path: Path):
-        """超长命令被拒绝。"""
+    def test_long_valid_command_is_not_rejected_by_arbitrary_length(self, tmp_path: Path):
+        """合法脚本不受旧 5000 字符门限制，危险行为仍由命令策略校验。"""
         from agent_py_agent.agent.tooling.shell import ShellTool, ShellToolOptions
 
         workspace = tmp_path / "workspace"
@@ -360,8 +360,8 @@ class TestShellToolValidation:
         long_command = "echo " + "a" * 5000
         result = tool.execute({"command": long_command})
 
-        assert result.ok is False
-        assert "过长" in result.output
+        assert result.ok is True
+        assert "stdout_chars=5001" in result.output
 
     def test_missing_command_param(self, tmp_path: Path):
         """缺少 command 参数。"""

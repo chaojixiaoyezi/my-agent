@@ -1,5 +1,5 @@
-# LLM: PTY 的容量、写入背压和历史缓冲由唯一注册表管理；会话身份不能代替权限边界。
-# 模块用途: 在 POSIX 提供有界、可取消的交互终端；Windows 暂无 ConPTY，不虚报支持。
+# LLM: PTY 的容量、执行归属、启动预留与终止回执由唯一注册表管理；执行归属不能授予访问权限。
+# 模块用途: 提供有界交互终端，按精确任务收回进程；Windows 暂无 ConPTY，不虚报支持。
 from __future__ import annotations
 
 """Bounded interactive PTY sessions using the same shell policy and sandbox gate."""
@@ -7,7 +7,6 @@ from __future__ import annotations
 import json
 import os
 import select
-import signal
 import subprocess
 import threading
 import time
@@ -16,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from ..contracts.gates.command_policy import evaluate_command_policy
-from .cancellation import cancellation_requested
+from .cancellation import ToolCancelled, cancellation_requested, raise_if_cancelled
 from .models import (
     BaseTool,
     EffectResolverPolicy,
@@ -32,7 +31,11 @@ from .models import (
     ToolRuntimePolicy,
     TrustedParameterBinding,
 )
-from .process_registry import process_access_scope
+from .process_registry import (
+    ProcessTerminationReceipt,
+    process_access_scope,
+    terminate_process_tree,
+)
 from .sandbox import SandboxUnavailable
 from .shell import (
     ShellTool,
@@ -41,6 +44,7 @@ from .shell import (
     _sandbox_read_roots,
     _sandbox_write_roots,
     _subprocess_text_env,
+    parse_shell_command,
 )
 
 _MAX_SESSIONS = 32
@@ -52,9 +56,8 @@ _MAX_TERMINAL_COLUMNS = 1000
 _MAX_TERMINAL_ROWS = 1000
 
 
-# LLM: A PTY session stores the immutable permission snapshot captured at start; later reads and
-# writes must present the same scope and cannot attach to another owner's process.
-# 类用途: 保存一个交互终端进程、增量输出以及启动时的权限边界。
+# LLM: 访问快照与执行归属分别冻结；close_lock 串行同一进程的终止，回执确认后才宣称已停止。
+# 类用途: 保存终端进程、增量输出、权限与所属执行，允许模型回合结束后仍按任务收口。
 @dataclass
 class PtySession:
     session_id: str
@@ -64,12 +67,15 @@ class PtySession:
     started_at: float
     last_active_at: float
     access_scope: PtyAccessScope
+    execution_scope: PtyExecutionScope = field(default_factory=lambda: PtyExecutionScope())
     output: bytearray = field(default_factory=bytearray)
     base_cursor: int = 0
     next_cursor: int = 0
     lock: threading.Lock = field(default_factory=threading.Lock)
     write_lock: threading.Lock = field(default_factory=threading.Lock)
+    close_lock: threading.Lock = field(default_factory=threading.Lock)
     closed: bool = False
+    termination: ProcessTerminationReceipt | None = None
 
     def append(self, chunk: bytes) -> None:
         with self.lock:
@@ -101,6 +107,38 @@ class PtyAccessScope:
     write_roots: tuple[str, ...] | None
     read_roots: tuple[str, ...] | None
     protected_write_paths: tuple[str, ...] | None
+
+
+# LLM: 只冻结 executor 的可信 run_scope；root_task_id 不与 authority task_id 或目录指纹互换。
+# 类用途: 将终端绑定到真实 owner、会话、长期任务及执行轮，独立于文件权限和可见范围。
+@dataclass(frozen=True)
+class PtyExecutionScope:
+    owner_home: str = ""
+    thread_id: str = ""
+    root_task_id: str = ""
+    run_id: str = ""
+    attempt_id: str = ""
+
+    # LLM: Full Access 只取消路径墙，不能抹去宿主 owner home；缺失身份不猜测归属。
+    # 函数用途: 在启动时复制宿主身份，之后不随外部字典变化。
+    @classmethod
+    def from_run_scope(cls, run_scope: object, owner_home: object) -> PtyExecutionScope:
+        scope = run_scope if isinstance(run_scope, dict) else {}
+        return cls(
+            owner_home=process_access_scope(scope, owner_home).owner_home,
+            thread_id=str(scope.get("session_id") or ""),
+            root_task_id=str(scope.get("root_task_id") or ""),
+            run_id=str(scope.get("run_id") or ""),
+            attempt_id=str(scope.get("attempt_id") or ""),
+        )
+
+
+# LLM: 预留和取消标记共用 registry 锁；取消只命中当时的启动，不阻止用户后续显式恢复。
+# 类用途: 在 Popen 尚未返回时保留执行归属，让明确的资源停止请求覆盖尚未完成的启动。
+@dataclass
+class _PtyStart:
+    execution_scope: PtyExecutionScope
+    cancelled: bool = False
 
 
 # LLM: Normalize every PTY scope path before comparing session ownership; missing lists retain
@@ -145,9 +183,8 @@ def _pty_access_scope(
     )
 
 
-# LLM: The process-wide registry may hold sessions from concurrent TUI requests, so every lookup
-# and mutation must validate the immutable PtyAccessScope before touching a process.
-# 类用途: 统一登记、列出、读写、调尺寸和关闭有界交互终端，防止跨用户或跨会话接管。
+# LLM: 模型访问核对 PtyAccessScope；宿主停止按独立执行身份冻结当前句柄和预留，不扫目录猜归属。
+# 类用途: 管理有界终端及其启动、停止竞态，防止跨用户、会话或任务误停。
 class PtySessionRegistry:
     # LLM: 创建中也占容量；历史最多保留最近一批终态，计数 ID 不在 clear 后复用。
     # 函数用途: 初始化唯一会话表和并发创建预留。
@@ -155,10 +192,10 @@ class PtySessionRegistry:
         self._sessions: dict[str, PtySession] = {}
         self._counter = 0
         self._lock = threading.Lock()
-        self._pending_starts = 0
+        self._pending_starts: dict[str, _PtyStart] = {}
 
-    # LLM: 容量检查即预留，所有 spawn 成败路径必须释放预留；运行进程仍并行。
-    # 函数用途: 在当前权限下有界创建终端，防并发检查都通过导致突破数量限制。
+    # LLM: 容量和执行身份一起预留；所有 spawn 成败路径释放同一预留，不吞掉宿主取消。
+    # 函数用途: 有界创建终端，让明确的资源停止请求可以命中尚未完成的启动。
     def start(
         self,
         command: str,
@@ -171,23 +208,25 @@ class PtySessionRegistry:
     ) -> PtySession:
         if os.name == "nt":
             raise OSError("PTY_UNAVAILABLE: Windows requires a ConPTY backend")
+        raise_if_cancelled()
+        execution_scope = PtyExecutionScope.from_run_scope(run_scope, owner_home)
         with self._lock:
             self._prune_finished()
             active = sum(session.process.poll() is None for session in self._sessions.values())
-            if active + self._pending_starts >= _MAX_SESSIONS:
+            if active + len(self._pending_starts) >= _MAX_SESSIONS:
                 raise OSError(f"PTY_SESSION_LIMIT: active session limit is {_MAX_SESSIONS}")
             self._counter += 1
             session_id = f"pty-{self._counter}-{int(time.time())}"
-            self._pending_starts += 1
+            self._pending_starts[session_id] = _PtyStart(execution_scope)
         try:
             return self._spawn(session_id, command, target, owner_home, write_roots,
                                read_roots, protected_write_paths, run_scope)
         finally:
             with self._lock:
-                self._pending_starts -= 1
+                self._pending_starts.pop(session_id, None)
 
-    # LLM: 只有已预留容量的 start 可调用；两端 fd 在失败时都关闭，成功后登记同一权限快照。
-    # 函数用途: 启动实际 PTY 子进程并开启输出排空线程。
+    # LLM: Popen 前后都核对同一预留；取消后的迟到进程仍登记并终止，不能返回运行成功。
+    # 函数用途: 启动 PTY 并排空输出，封住启动期间收到停止后留下孤儿进程的窗口。
     def _spawn(self, session_id, command, target, owner_home, write_roots, read_roots,
                protected_write_paths, run_scope) -> PtySession:
         import pty
@@ -207,6 +246,11 @@ class PtySessionRegistry:
             read_roots=read_roots,
             protected_write_paths=protected_write_paths,
         )
+        with self._lock:
+            launch = self._pending_starts[session_id]
+            if launch.cancelled:
+                raise ToolCancelled("PTY 启动已被取消")
+        raise_if_cancelled()
         master_fd, slave_fd = pty.openpty()
         try:
             os.set_blocking(master_fd, False)
@@ -234,9 +278,14 @@ class PtySessionRegistry:
             started_at=time.time(),
             last_active_at=time.time(),
             access_scope=access_scope,
+            execution_scope=launch.execution_scope,
         )
         with self._lock:
             self._sessions[session_id] = session
+            cancelled = launch.cancelled
+        if cancelled or cancellation_requested():
+            self.close(session_id)
+            raise ToolCancelled("PTY 启动已被取消")
         threading.Thread(target=self._drain, args=(session,), daemon=True).start()
         return session
 
@@ -323,6 +372,8 @@ class PtySessionRegistry:
         session.last_active_at = time.time()
         return session
 
+    # LLM: 终止复用进程树和 PID 实例核对；重复 close 串行，未确认退出保留句柄和真实状态。
+    # 函数用途: 关闭当前权限允许的终端及其后代，保存退出核对回执。
     def close(
         self,
         session_id: str,
@@ -331,16 +382,46 @@ class PtySessionRegistry:
         session = self.get(session_id, access_scope)
         if session is None:
             return None
-        if session.process.poll() is None:
-            try:
-                os.killpg(os.getpgid(session.process.pid), signal.SIGTERM)
-                session.process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                os.killpg(os.getpgid(session.process.pid), signal.SIGKILL)
-            except (OSError, ProcessLookupError):
-                pass
-        self._close_fd(session)
+        with session.close_lock:
+            if session.termination is None or not session.termination.confirmed:
+                code = session.process.poll()
+                session.termination = (
+                    ProcessTerminationReceipt("already_exited", True, code, 1)
+                    if code is not None else terminate_process_tree(session.process.pid, session.process)
+                )
+            if session.termination.confirmed:
+                self._close_fd(session)
         return session
+
+    # LLM: 宿主控制入口必须有 owner 加精确 task/thread 或 run；不以访问范围代替执行归属。
+    # 在锁内冻结句柄和取消预留，锁外异步终止；晚到恢复轮不能被旧停止重新扫描命中。
+    # 函数用途: 明确停止任务资源或取消子代理时圈定其终端，回收进程而不阻塞控制应答。
+    def request_stop(self, *, owner_home: object, thread_id: str = "", task_id: str = "",
+                     run_id: str = "", attempt_id: str = "") -> tuple[str, ...]:
+        if not owner_home or not ((thread_id and task_id) or run_id):
+            return ()
+        owner = str(Path(str(owner_home)).expanduser().resolve(strict=False))
+
+        # LLM: 所有已提供的身份维度均精确匹配；空身份不能成为跨 owner 的通配控制。
+        # 函数用途: 为本次宿主停止筛选启动预留和已登记终端。
+        def matches(scope: PtyExecutionScope) -> bool:
+            return scope.owner_home == owner and all(
+                not expected or actual == expected for actual, expected in (
+                    (scope.thread_id, thread_id), (scope.root_task_id, task_id),
+                    (scope.run_id, run_id), (scope.attempt_id, attempt_id),
+                )
+            )
+
+        with self._lock:
+            pending = [key for key, launch in self._pending_starts.items() if matches(launch.execution_scope)]
+            for key in pending:
+                self._pending_starts[key].cancelled = True
+            sessions = [session for session in self._sessions.values()
+                        if matches(session.execution_scope) and session.process.poll() is None]
+        for session in sessions:
+            threading.Thread(target=self.close, args=(session.session_id,),
+                             name=f"stop-{session.session_id}", daemon=True).start()
+        return tuple(dict.fromkeys([*pending, *(session.session_id for session in sessions)]))
 
     def clear(self) -> None:
         with self._lock:
@@ -589,11 +670,11 @@ class TerminalSessionTool(BaseTool):
             }
         )
 
-    # LLM: Start is the only PTY process-spawn boundary; command policy, cwd policy, sandbox roots
-    # and protected control paths must all be resolved before the registry sees the command.
-    # 函数用途: 校验命令和目录后启动受沙箱保护的交互进程。
+    # LLM: PTY 启动与普通 shell 复用唯一命令解析入口；命令策略、cwd、沙箱与保护路径必须
+    # 先于进程启动裁决。解析接口改动时同步 shell 和 PTY 回归，不能调用已删除的私有方法。
+    # 函数用途: 校验命令和目录后启动受沙箱保护的交互进程，返回可按会话管理的句柄。
     def _start(self, params: dict[str, Any]) -> ToolHandlerOutcome:
-        command_result = self.shell_tool._parse_command(params)
+        command_result = parse_shell_command(self.model_spec.name, params.get("command", ""))
         if isinstance(command_result, ToolHandlerOutcome):
             return self._error(command_result.error_code, command_result.output)
         command = command_result
@@ -729,14 +810,17 @@ class TerminalSessionTool(BaseTool):
             }
         )
 
-    # LLM: close 仅访问当前权限内的句柄；查无句柄时没有发送信号，不得记为未知副作用。
-    # 函数用途: 关闭当前会话拥有的交互终端，缺失或过期句柄交还模型纠正。
+    # LLM: close 只访问当前权限，确认进程树退出才返回 closed；无法确认沿用工具未知副作用合同。
+    # 函数用途: 关闭终端并返回真实核对结果，缺失句柄与未确认终止分别处理。
     def _close(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         session_id = str(params.get("session_id") or "").strip()
         session = pty_session_registry.close(session_id, self._access_scope(params))
         if session is None:
             return self._error("PROCESS_NOT_FOUND", f"PTY session 不存在: {session_id}",
                                effect_outcome="not_started")
+        if session.termination is None or not session.termination.confirmed:
+            return self._error("TOOL_OPERATION_OUTCOME_UNKNOWN", "已请求关闭终端，但尚未确认进程树退出。",
+                               effect_outcome="unknown")
         return self._ok(
             {
                 "status": "closed",
@@ -757,12 +841,11 @@ class TerminalSessionTool(BaseTool):
                                   effect_outcome=effect_outcome)
 
 
-# LLM: This projection is the only model-visible PTY listing shape. Keep OS process identifiers
-# private and derive size/status from the live exact-scope session instead of cached narration.
-# 函数用途: 把一个交互终端整理成列表可读的稳定句柄、状态、命令和实际尺寸。
+# LLM: fd 关闭不等于进程退出；以 poll 优先，PID 保持私有，不能把失去终端输出当作停止成功。
+# 函数用途: 投影终端真实状态和尺寸，供精确权限下的列表展示。
 def _pty_session_summary(session: PtySession) -> dict[str, object]:
     status = (
-        "closed" if session.closed else ("running" if session.process.poll() is None else "exited")
+        "running" if session.process.poll() is None else ("closed" if session.closed else "exited")
     )
     try:
         size = os.get_terminal_size(session.master_fd)

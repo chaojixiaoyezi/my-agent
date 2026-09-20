@@ -28,7 +28,7 @@ def process_completion_target(agent: object, params: object) -> dict[str, str]:
     task_id = durable_task_id(params)
     if store is None or not thread_id or not task_id:
         return {}
-    return {"store_root": str(store.root), "thread_id": thread_id, "task_id": task_id,
+    return {"store_root": str(store.storage.root), "thread_id": thread_id, "task_id": task_id,
             "run_id": str(getattr(params, "run_id", "") or "")}
 
 
@@ -62,7 +62,7 @@ def reconcile_process_completions(agent: object) -> int:
         target = payload.get("completion_target") or {}
         if not target or payload.get("completion_notice_id"):
             continue
-        if str(target.get("store_root") or "") != str(store.root):
+        if str(target.get("store_root") or "") != str(store.storage.root):
             continue
         scope = payload["access_scope"]
         if target.get("thread_id") != scope.get("conversation_id"):
@@ -78,7 +78,7 @@ def reconcile_process_completions(agent: object) -> int:
             notice_id = "explicit_stop"
             if summary["status"] != "killed":
                 facts = {key: summary[key] for key in ("session_id", "status", "exit_code", "output_file") if key in summary}
-                signal = store.raise_wake_signal({
+                signal = store.wakes.raise_signal({
                     "thread_id": target["thread_id"], "root_task_id": target["task_id"],
                     "source_agent_id": target["run_id"], "reason": PROCESS_COMPLETION_REASON,
                     "urgency": "normal", "dedupe_key": f"process-exit:{payload['session_id']}",
@@ -117,14 +117,14 @@ def process_completion_delivery_state(agent: object, signal: object) -> str:
     if not record or record.get("status") != "exited":
         return ""
     target = record.get("completion_target") or {}
-    if target != {"store_root": str(store.root), "thread_id": signal.thread_id,
+    if target != {"store_root": str(store.storage.root), "thread_id": signal.thread_id,
                   "task_id": signal.root_task_id, "run_id": signal.source_agent_id}:
         return ""
-    link = store.load_task_link(signal.root_task_id)
+    link = store.tasks.load(signal.root_task_id)
     if link is None or link.thread_id != signal.thread_id or link.status != "completed":
         return ""
     if any(goal.task_id == signal.root_task_id and goal.status != "complete"
-           for goal in store.load_goals(signal.thread_id)):
+           for goal in store.goals.list(signal.thread_id)):
         return ""
     notice_id = record.get("completion_notice_id")
     if not notice_id:

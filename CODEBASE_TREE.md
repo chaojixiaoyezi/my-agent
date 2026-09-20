@@ -9,6 +9,7 @@
 |-- DESIGN_LEDGER.md                     # 当前架构决策及模块设计导航
 |-- TESTS.md                             # 开发测试、真实 TUI 与发布 gate
 `-- docs/design/
+    |-- MAINTAINABILITY_AND_JEV_REVIEW.md # 可维护性评估、渐进重构建议及 Computer Use/Jev 能力边界
     |-- TUI_DESIGN.md                    # 终端布局、事件、输入与生命周期规范
     |-- SUBAGENT_PARALLEL_EXECUTION.md   # 父子独立工作、逐项交付与慢任务诊断边界
     `-- TUI_BEHAVIOR_CHECKLIST.md        # 不依赖历史流水的 TUI 验收场景
@@ -69,7 +70,7 @@ agent_py_agent/
 |-- skills/builtin/<category>/<name>/   # 内置知识型 skill 树：目录即分类（research/documents/…），递归扫描，类目索引常驻 prompt，skill_search 工具按需检索（千级地基）
 |-- agent/
 |   |-- core.py                         # SimpleAgent 组合入口
-|   |-- turn_end.py                     # 主/子代理共用的六种宿主轮结束原因
+|   |-- turn_end.py                     # 主/子代理共用的结束原因及技术续跑判据
 |   |-- model_guidance.py               # 完整 Prompt 与有副作用工具共用的验证/授权软提示唯一正文
 |   |-- task_progress_guidance.py        # Todo exact-id 最终回复前核对的可配置软合同；不自动判定或打勾
 |   |-- agent_core/                     # 无副作用包入口；主代理运行时、工具循环、编排与自然回合收口实现
@@ -100,7 +101,7 @@ agent_py_agent/
 |   |   |-- kernel.py                   # 子代理树快照
 |   |   |-- manager_work_orders.py      # 工单路径、默认文件、校验
 |   |   |-- models.py                   # 子代理数据模型
-|   |   |-- process_control.py          # 后台进程治理原语：存活探测/两阶段终止（SIGTERM→SIGKILL）
+|   |   |-- process_control.py          # 子代理宿主存活/启动事实，复用公共进程树终止并保留核对回执
 |   |   |-- direct_parent_lifecycle.py # 直属父子等待、事件唤醒、同批合并与结果上下文
 |   |   |-- tool_failure_ledger.py      # 系统级工具失败账本：archive ok=False 摘要 -> attributes/对账投影
 |   |   |-- result_registered_artifacts.py # 自然/结构化收口共用的 exact run 工具产物投影
@@ -152,6 +153,14 @@ agent_py_agent/
 |   |-- runtime_db/                     # SQLite 运行事实源：Task 身份、TaskRun/AgentRun/Attempt 生命周期、wake 与投递账本
 |   |   `-- executor_liveness.py        # exact attempt 执行区间和 OS 退出事实；慢模型不按时长判死
 |   |-- gateway_parts/                 # gateway request/worker/lease/http/renderer
+|   |   |-- request_execution.py        # 单个已领取请求的租约、模型执行、超窗恢复与收尾编排
+|   |   |-- request_context.py          # 原车道内的会话快照、Compact 与工作目录准备
+|   |   |-- request_binding.py          # 精确请求与运行身份绑定、执行车道和原子更新
+|   |   |-- request_history.py          # 公开正文、canonical 历史提交、去重与延迟补交
+|   |   |-- request_prompt.py           # 已准备会话投影的模型输入渲染与历史种子
+|   |   |-- stream_writer.py            # 请求级文本缓冲、typed 流事件和显示投影的有序出口
+|   |   |-- stream_events.py            # 公开事件白名单、插话/重试投影和原思考归档载荷
+|   |   |-- stream_approval.py          # 精确作用域审批缓存绑定与真实客户端交互
 |   |   |-- display_archive_service.py # 按可信 owner 与主子会话归属读取一页完整原文
 |   |   |-- approval_mode_service.py   # /client/permissions 认证与冷 owner 控制入口
 |   |   |-- main_activity.py            # 前台 typed chunk 到共用 main 数字/阶段的只读投影，不复制正文
@@ -160,21 +169,44 @@ agent_py_agent/
 |   |   |-- bounded_http_server.py     # 单 Gateway 固定 daemon worker、128 在途上限与过载 503 背压
 |   |   |-- control_service.py         # owner/thread 持久根任务的即时状态、纠偏和中断
 |   |   |-- control_operation_service.py # slash 控制副作用前置回执、幂等重放与 unknown 对账
+|   |   |-- workspace_scope.py         # 普通请求和控制入口共用的宿主目录与 owner 权限校验
 |   |   |-- input_delivery_service.py  # 普通消息 active/queued 去向的唯一持久回执与后台对账
 |   |   |-- request_client.py          # 薄客户端 ask 载荷和不可变执行选项合同
 |   |   |-- channel_health.py          # adapter PID/heartbeat/逐通道状态的 fail-closed 健康投影
 |   |   |-- permission_bridge.py       # TUI/Gateway 工具审批 request binding 的原子决定文件桥
 |   |   `-- goal_control_service.py    # 同 thread 持续目标的创建/修改/暂停/恢复/清除
 |   |-- conversation/                  # 通道会话账本、权威 transcript、结构化任务关联/续接
+|   |   |-- store.py                    # 同源领域组件组装、跨领域上下文与账本维护
+|   |   |-- store_io.py                 # 无 Store 依赖的 JSONL 读取、错误报告、路径与文件归档原语
+|   |   |-- store_layout.py             # 统一持久目录和路径、只读打开及扫描上下文组装
+|   |   |-- store_threads.py            # 线程身份、通道绑定、默认模型解析与 Compact 原子更新
+|   |   |-- store_messages.py           # 消息幂等追加、展示检查点及字节游标读取
+|   |   |-- store_tasks.py              # 任务关联、活动索引、工作区状态投影及终态进度关闭
+|   |   |-- store_audits.py             # Audit 准备、发布修订、终态重开与运行代提交
+|   |   |-- store_guidance.py           # 插话入队、精确认领、权威回执查询与组件组装
+|   |   |-- store_guidance_records.py   # 插话回执格式、迁移构造与身份校验
+|   |   |-- store_guidance_ledger.py    # 插话回执读取、回合锁及队列与索引修复
+|   |   |-- store_guidance_submission.py # 模型提交批次、执行前拒绝及回执投影修复
+|   |   |-- store_guidance_acknowledgements.py # 模型消费确认批次与幂等消息投影
+|   |   |-- store_guidance_recovery.py  # 插话终态结算、释放与失效尝试改绑
+|   |   |-- store_index.py              # 有界扫描投影、惰性注册、文件指纹与权威读回
+|   |   |-- store_usage.py              # 模型用量领域、累计增量去重及线程数字显示的原子更新
+|   |   |-- store_claims.py             # 执行租约的领取、续租、精确终态、恢复归属与旧账归档
+|   |   |-- store_goals.py              # 目标集合、内容版本 CAS、预算结算及共享时钟依赖
+|   |   |-- store_observations.py       # 观察事件构造、追加、待处理扫描与原子确认
+|   |   |-- store_wakes.py              # 唤醒发布/去重、观察链接、投递冻结与消费确认
+|   |   |-- store_progress.py           # 进度策略、到期投影、失败退避落账与旧策略归档
 |   |   |-- process_events.py           # 受管后台命令终态到原会话 wake 的去重交接
 |   |   |-- compact_progress.py       # transcript/live-tool/turn-local Compact 来源与提交权的唯一公开进度协议
+|   |   |-- compact_carry.py           # 前后台同片超窗重试的工具快照与插话携带纯计算
 |   |   |-- context_usage.py          # 主/子 preflight 数字的 canonical thread 保存、代次检查与无正文展示
 |   |   |-- model_metrics.py          # 主/子模型调用账与历史用量的只读显示投影，不回灌模型上下文
 |   |   |-- agent_activity.py          # active task link + canonical child run 到 TUI/Web 共用有界活动投影
 |   |   |-- agent_transcript.py        # 子代理跨进程公开过程事件的 owner 存储、游标和有界裁剪
 |   |   |-- agent_control.py           # owner 树内代理详情、运行中 guidance 与精确停止的通道中立控制面
-|   |   |-- agent_tool_approval.py     # child exact ToolApprovalRequest 的 owner 耐久记录、consumer 租约与决定等待
-|   |   |-- background_transcript.py  # 后台 main/child 的有界 typed 过程事件环与 child 工具审批 sink
+|   |   |-- agent_tool_approval.py     # main/child exact ToolApprovalRequest 的唯一耐久记录、consumer 租约与决定等待
+|   |   |-- tool_approval_scope.py     # 从 canonical 任务、线程和 claim 读取审批归属，隔离主代理换轮
+|   |   |-- background_transcript.py  # 后台 main/child 的有界 typed 过程事件环与共用工具审批 sink
 |   |   |-- background_history.py     # 后台完整展示块快照，随 canonical final 保存并用于恢复重基
 |   |   |-- display_checkpoint.py     # canonical逐块公开过程校验/写入、恢复未知占位与显示去重
 |   |   |-- display_archive.py        # 不可变显示原文、无路径引用与有界页文件，不进入模型上下文
@@ -193,11 +225,17 @@ agent_py_agent/
 |   |   |-- active_turn_compact.py      # 跨工作片工具 archive 到同一 checkpoint/CAS 的恢复压缩与模型投影
 |   |   |-- live_tool_compact.py        # 运行中原生工具历史到同一 thread checkpoint/CAS 的适配层
 |   |   |-- native_history.py           # 完成回合的 provider 原生消息信封、校验与按请求替换式恢复
+|   |   |-- history_projection.py       # 前后台共用完整历史行选择、范围过滤和原生 metadata 保留
 |   |   |-- history_display.py          # 从 canonical 消息投影只读恢复事件，不把问答预览代替正文
 |   |   |-- history_page.py             # canonical 字节边界向前分页和完整工作片分组
 |   |   |-- message_stream.py           # 同账本正文与显式协商的过程检查点投影，共用 ID/字节游标
 |   |   |-- task_runtime_state.py      # 后台续轮读取精确任务进度的结构化运行事实
 |   |   |-- runtime.py                  # 后台主代理调度热循环：wake_queue 到期消费、三源对账(5min)、事件提前醒取消闹钟
+|   |   |-- background_tool_policy.py   # 无副作用的后台工具目录、owner/task 收紧及展示投影
+|   |   |-- background_context.py       # 后台有界上下文、任务范围与模型可见事实准备
+|   |   |-- background_history_seed.py  # 后台原生历史种子、任务隔离与读取失败合同
+|   |   |-- background_execution.py     # 后台单片执行、Compact 重试、原生历史保存与具名结果
+|   |   |-- background_delivery.py      # 后台投递、canonical 回复提交、整封冻结与耐久去重
 |   |   |-- control_commands.py        # CLI/IM 共用 typed slash dispatcher、task command 与状态渲染
 |   |   |-- goal_tools.py              # 默认可见的持续目标创建、读取与精确收口
 |   |   |-- goal_binding.py            # 当前代理及直属下级的精确目标身份解析，拒绝借用父目标
@@ -293,6 +331,8 @@ agent_py_agent/
 |       |-- factory.py                 # 显式配置构造唯一后端，缺配置判据与调度共享
 |       `-- tool_protocol_adapter.py   # native 事件或显式完整 text 帧到 canonical ToolCall 的唯一适配口
 |-- tests/                             # 单元、集成、真实链路回归
+|   |-- test_subagent_process_control.py # 子代理停止覆盖新会话后代、升级终止、独立宿主保留及未确认回执
+|   |-- test_runtime_module_boundaries.py # 公共后端合同和纯策略不加载执行器/HTTP 的导入边界回归
 |   |-- test_computer_text_input.py     # 文本事件 UTF-16、显式替换与不支持字符零副作用回归
 |   |-- test_subagent_activity_diagnostics.py # 阶段提醒、慢流不误杀、执行代与消息去重回归
 |   |-- test_r223_audit_regressions.py   # 外部审计的编码、版本、并发、MCP、输出、网络和恢复故障注入
@@ -390,6 +430,8 @@ docs/
 
 ### 关键文件说明
 
+- `docs/design/MAINTAINABILITY_AND_JEV_REVIEW.md`：热点源码与参考阅读证据、未实施的重构顺序、Computer Use 当前条件及 Jev 可选接入方案。
+
 - `agent_py_agent/agent/agent_core/agent_tree/model_view.py`：保留 run 身份、状态、原因与真实 read_order；不暴露恢复目录，省略内容可沿原工具归档完整读取。
 - `agent_py_agent/tests/test_agent_tree_model_view.py`：模型状态投影、终态报告可达性、状态不被省略及超长归档回读合同的定向验证。
 - `agent_py_agent/agent/subagents/result_registered_artifacts.py`：从 exact run 的工具产物账本投影真实文件；自然最终回复与结构化收口共用，不扫描目录或搬运文件。
@@ -399,7 +441,39 @@ docs/
 - `docs/design/THREAD_GOAL_LIFECYCLE.md`：Goal 可见性、单一事件续跑、状态边界与旧冲突显式恢复的开发合同。
 - `docs/design/SUBAGENT_PARALLEL_EXECUTION.md`：逐项交付、递归等待与活动诊断的现行设计和验收要求。
 - `agent_py_agent/agent/conversation/goal_recovery.py`：精确恢复旧共享任务 Goal，不迁移运行中的执行，不清除源记录。
-- `agent_py_agent/agent/conversation/goal_clock.py`：前台、后台及控制视图共用同 owner 会话存储的目标时钟。
+- `agent_py_agent/agent/conversation/background_tool_policy.py`：后台目录计算的唯一实现，输入结构化事实，结果供 runtime 消费；不读写会话或启动执行器。
+- `agent_py_agent/agent/conversation/background_context.py`：显式请求接口连接原会话事实、任务范围和有界模型投影；既有任务进度对账仍沿原调用顺序执行。
+- `agent_py_agent/agent/conversation/background_history_seed.py`：复用 canonical 未压缩历史和 provider 投影；区分可用、禁用与不可读，不把读取失败变成空历史。
+- `agent_py_agent/agent/conversation/background_execution.py`：显式接收执行、存储与参数准备能力，保留同片取消、Compact 和原生历史；不选择唤醒、不投递外部消息。
+- `agent_py_agent/agent/conversation/background_delivery.py`：显式交付能力连接原渠道和唯一 store；外发、过程/final 提交、审计回执与整封冻结保持原顺序，不运行模型或拥有调度状态。
+- `agent_py_agent/agent/gateway_parts/workspace_scope.py`：普通消息和首次 Goal 共用目录校验；只接受宿主已存在的合法路径，声明本身不增加权限。
+- `agent_py_agent/agent/gateway_parts/request_context.py`：先领取车道再按 repair、索引、Compact、历史、任务顺序准备当前快照；不拥有独立任务状态。
+- `agent_py_agent/agent/gateway_parts/request_binding.py`：精确请求、task/run/attempt 和 claim 的持久桥接；保持原 T 锁、原子 JSON 更新与恢复身份。
+- `agent_py_agent/agent/gateway_parts/request_history.py`：正常、停止和异常共用 canonical 历史提交及原样 repair；按 request/part 去重，索引仅作投影。
+- `agent_py_agent/agent/gateway_parts/request_prompt.py`：纯渲染已有上下文和历史种子，不重新读盘或通过文字裁决权限。
+- `agent_py_agent/agent/conversation/history_projection.py`：完整行窗口供正文和原生回放共用，后台历史准备无需导入 Gateway 请求执行器。
+- `agent_py_agent/agent/gateway_parts/stream_writer.py`：维护请求级缓冲与事件顺序，组合 `stream_events.py` 的公开投影及 `stream_approval.py` 的审批交互；不拥有 canonical 历史或执行权。
+- `agent_py_agent/agent/conversation/compact_carry.py`：前后台共享完整工具归档替换和结构化插话合并；mailbox 释放仍由各运行器在原位置执行。
+- `agent_py_agent/agent/conversation/store_usage.py`：显式接收原用量目录和线程读取/原子更新能力，持有用量事件、累计增量及数字显示，不继承消息、任务或 Goal 存储。
+- `agent_py_agent/agent/conversation/store_io.py`：各领域与 transcript 共用 JSONL 读取、结构化错误和文件归档；不导入 Store，不吞坏行，不新增持久数据源。
+- `agent_py_agent/agent/conversation/store_layout.py`：`store.storage` 的唯一目录和路径上下文；初始化可只读，路径方法不授权业务操作、不改变原文件名。
+- `agent_py_agent/agent/conversation/store_threads.py`：`store.threads` 保存唯一线程元数据和通道索引，提供同一线程锁内的 CAS；新会话模型解析器由本领域持有。
+- `agent_py_agent/agent/conversation/store_messages.py`：`store.messages` 保持原 append-only 账本、幂等锁和字节游标；只通过显式能力校验线程及更新活动时间。
+- `agent_py_agent/agent/conversation/store_tasks.py`：`store.tasks` 保存原任务关联和线程活动索引，沿原顺序更新工作区投影并关闭终态进度；不建立第二套任务状态。
+- `agent_py_agent/agent/conversation/store_audits.py`：`store.audits` 直接实现 Audit 准备、发布和重启操作，共用 `tasks` 的命名锁、任务锁和索引更新；无旧方法转发。
+- `agent_py_agent/agent/conversation/store_guidance.py`：`store.guidance` 组装插话领域并提供入队、认领和查询；唯一外部写能力是注入消息幂等追加。
+- `agent_py_agent/agent/conversation/store_guidance_records.py`：插话回执及校验的唯一格式定义，保留显式旧数据迁移规则，不负责落盘。
+- `agent_py_agent/agent/conversation/store_guidance_ledger.py`：`guidance.ledger` 共用原目录与精确回合锁，读取回执并修复队列、回合及输入反查投影。
+- `agent_py_agent/agent/conversation/store_guidance_submission.py`：`guidance.submissions` 管理模型调用提交批次及明确拒绝后的恢复，保留先批次后回执的顺序。
+- `agent_py_agent/agent/conversation/store_guidance_acknowledgements.py`：`guidance.acknowledgements` 提交消费确认，幂等修复回执和原消息账本。
+- `agent_py_agent/agent/conversation/store_guidance_recovery.py`：`guidance.recovery` 先修已提交批次再结算终态；逐条安全改绑由同模块辅助对象处理。
+- `agent_py_agent/agent/conversation/store_index.py`：观察、唤醒和策略共用有界扫描缓存；失效回读权威文件，目录不可读不能被当成空目录。
+- `agent_py_agent/agent/conversation/store_claims.py`：`store.claims` 复用同一 storage 和原子文件更新；按结构化宿主、TTL、claim/task ID 领取与释放执行权，已结束旧租约由原维护周期归档。
+- `agent_py_agent/agent/conversation/store_goals.py`：`store.goals` 持有原目标集合和 CAS，显式接收线程校验、任务读取及共享时钟；不建立新的执行或恢复状态。
+- `agent_py_agent/agent/conversation/store_observations.py`：`store.observations` 管理观察账与确认回执；同一事件构造供唤醒联合发布复用，线程活动沿原子回调更新。
+- `agent_py_agent/agent/conversation/store_wakes.py`：`store.wakes` 保持先唤醒后观察、去重锁、投递冻结和处理回执的原顺序；只通过注入能力确认观察。
+- `agent_py_agent/agent/conversation/store_progress.py`：`store.progress` 负责策略 CRUD、到期读取及失败退避事实落账；策略/claim 跨域归档仍由 Store 原维护入口顺序协调。
+- `agent_py_agent/agent/conversation/goal_clock.py`：前台、后台及控制视图共用同 owner 会话存储的目标时钟，四个计时操作直接归共享对象，整数结算保留小数余量。
 - `agent_py_agent/agent/conversation/goal_binding.py`、`goal_delegation.py`：按代理自身 thread/run 归属目标和用量；显式子目标沿同一运行器续接，不另建执行通道。
 - `agent_py_agent/agent/conversation/goal_control.py`、`goal_editing.py`：用户修改自己会话树的目标；内容版本防止并发覆盖，不把保存当作恢复。
 - `agent_py_agent/cli/chat_parts/tui_goal_editor.py`：方向键选择 Goal、Enter 编辑、Ctrl+S 保存、Ctrl+G 放弃退出，Esc 保留停止。
@@ -438,6 +512,7 @@ docs/
 - `cli/chat_parts/tui_provider_menu.py`：同一个 provider 管理多个模型；敏感字段仅表单暂存，短测试明确提示消耗。
 - `agent/settings/model_provider_*.py`：v2 存储 schema/锁内修改/用户主动网络操作，配置只在 owner 私有文件存在一份。
 - `agent/backends/provider_headers.py`、`responses.py`、`responses_wire.py`：统一身份与三种协议；不复制其他产品认证身份。
+- `agent/backends/base.py`、`http.py`、`openai_chat.py`、`anthropic.py`、`factory.py`：公共合同、网络传输、协议适配和构造分工；包级公开导入指向唯一实现，内部调用方不依赖旧文件转发。
 - `agent/backends/request_scope.py`：同 Gateway 前台端点占用和请求局部预算；外部程序及代理别名不作推断。
 - `agent/backends/cache_diagnostics.py`：真实 HTTP 请求的无正文摘要，不修改模型请求或记忆。
 - `agent/conversation/process_events.py`：原进程记录到原 wake 队列的耐久终态通知；不新增任务状态机。

@@ -23,8 +23,8 @@ def usage(tokens=42_100):
 
 def test_idle_thread_projection_keeps_context_without_main_activity(tmp_path):
     store = ConversationStore(tmp_path)
-    thread = store.get_or_create_thread({"canonical_user_id": "alice"})
-    store.update_model_context_usage(thread.thread_id, usage(), expected_compact_generation=0)
+    thread = store.threads.get_or_create({"canonical_user_id": "alice"})
+    store.model_usage.update_context_usage(thread.thread_id, usage(), expected_compact_generation=0)
     reopened = ConversationStore(tmp_path)
     projected = conversation_agent_activity(SimpleNamespace(), reopened, thread.thread_id).to_dict()
     assert projected["context_usage"]["current_tokens"] == 42_100
@@ -52,13 +52,13 @@ def test_authoritative_empty_context_clears_old_snapshot():
 
 def test_model_context_store_is_generation_fenced_and_not_recency(tmp_path):
     store = ConversationStore(tmp_path)
-    thread = store.get_or_create_thread({"canonical_user_id": "alice", "now": 5.0})
-    updated = store.update_model_context_usage(thread.thread_id, usage(), expected_compact_generation=0)
+    thread = store.threads.get_or_create({"canonical_user_id": "alice", "now": 5.0})
+    updated = store.model_usage.update_context_usage(thread.thread_id, usage(), expected_compact_generation=0)
     assert updated.updated_at == thread.updated_at
     assert updated.provider_context_observation == {}
-    denied = store.update_model_context_usage(thread.thread_id, usage(55_000), expected_compact_generation=3)
+    denied = store.model_usage.update_context_usage(thread.thread_id, usage(55_000), expected_compact_generation=3)
     assert denied.model_context_usage == updated.model_context_usage
-    other = store.get_or_create_thread({"canonical_user_id": "bob", "channel_conversation_id": "other"})
+    other = store.threads.get_or_create({"canonical_user_id": "bob", "channel_conversation_id": "other"})
     assert other.model_context_usage == {}
     assert ConversationThread.from_dict(updated.to_dict()).model_context_usage == updated.model_context_usage
 
@@ -67,24 +67,24 @@ def test_model_context_store_is_generation_fenced_and_not_recency(tmp_path):
 def test_preflight_context_uses_exact_main_or_child_thread(tmp_path, isolated):
     from agent_py_agent.agent.conversation.context_usage import record_model_context_usage
     store = ConversationStore(tmp_path)
-    main = store.get_or_create_thread({"canonical_user_id": "main", "channel_conversation_id": "main"})
-    child = store.get_or_create_thread({"canonical_user_id": "child", "channel_conversation_id": "child"})
+    main = store.threads.get_or_create({"canonical_user_id": "main", "channel_conversation_id": "main"})
+    child = store.threads.get_or_create({"canonical_user_id": "child", "channel_conversation_id": "child"})
     agent = SimpleNamespace(conversation_store=store)
     attrs = {"agent_thread_id": child.thread_id, "conversation_thread_id": main.thread_id}
     params = SimpleNamespace(task_attributes=attrs, context_scope="isolated" if isolated else "default")
     assert record_model_context_usage(agent, params, usage()) is (not isolated)
-    assert bool(store.load_thread(child.thread_id).model_context_usage) is (not isolated)
-    assert store.load_thread(main.thread_id).model_context_usage == {}
+    assert bool(store.threads.load(child.thread_id).model_context_usage) is (not isolated)
+    assert store.threads.load(main.thread_id).model_context_usage == {}
 
 
 def test_compact_and_bad_projection_do_not_restore_old_context(tmp_path):
     from agent_py_agent.agent.conversation.context_usage import context_usage_from_thread
     from agent_py_agent.agent.conversation.models import ConversationCompactCommit
     store = ConversationStore(tmp_path)
-    thread = store.get_or_create_thread({"canonical_user_id": "alice"})
-    row = store.update_model_context_usage(thread.thread_id, usage(), expected_compact_generation=0)
+    thread = store.threads.get_or_create({"canonical_user_id": "alice"})
+    row = store.model_usage.update_context_usage(thread.thread_id, usage(), expected_compact_generation=0)
     assert context_usage_from_thread(replace(row, compact_generation=1)) == {}
-    committed = store.update_compact_state(thread.thread_id, expected_generation=0, commit=ConversationCompactCommit(
+    committed = store.threads.update_compact_state(thread.thread_id, expected_generation=0, commit=ConversationCompactCommit(
         summary="保留目标与已完成工作", operation_evidence={}, checkpoint_id="test-checkpoint",
         compacted_through_message_id="", compacted_through_byte_offset=0,
         source_messages=0, source_tool_pairs=0,
@@ -93,11 +93,11 @@ def test_compact_and_bad_projection_do_not_restore_old_context(tmp_path):
 
 
 def test_context_display_telemetry_never_enters_model_bundle(tmp_path):
-    from agent_py_agent.agent.conversation.runtime import _minimal_context_bundle
+    from agent_py_agent.agent.conversation.background_context import _minimal_context_bundle
     store = ConversationStore(tmp_path)
-    thread = store.get_or_create_thread({"canonical_user_id": "alice"})
+    thread = store.threads.get_or_create({"canonical_user_id": "alice"})
     before = store.context_bundle(thread.thread_id)
-    stored = store.update_model_context_usage(thread.thread_id, usage(), expected_compact_generation=0)
+    stored = store.model_usage.update_context_usage(thread.thread_id, usage(), expected_compact_generation=0)
     assert store.context_bundle(thread.thread_id) == before
     assert _minimal_context_bundle(stored) == _minimal_context_bundle(thread)
 
@@ -114,22 +114,22 @@ def test_compact_preflight_cannot_write_through_a_new_generation(tmp_path):
     from agent_py_agent.agent.conversation.models import ConversationCompactCommit
 
     store = ConversationStore(tmp_path)
-    thread = store.get_or_create_thread({"canonical_user_id": "alice"})
-    store.update_compact_state(thread.thread_id, expected_generation=0, commit=ConversationCompactCommit(
+    thread = store.threads.get_or_create({"canonical_user_id": "alice"})
+    store.threads.update_compact_state(thread.thread_id, expected_generation=0, commit=ConversationCompactCommit(
         summary="保留已有任务", operation_evidence={}, checkpoint_id="new-generation",
         compacted_through_message_id="", compacted_through_byte_offset=0,
         source_messages=0, source_tool_pairs=0,
     ))
     assert save_context_usage_snapshot(store, thread, usage()) is False
-    assert store.load_thread(thread.thread_id).model_context_usage == {}
+    assert store.threads.load(thread.thread_id).model_context_usage == {}
 
 
 def test_model_context_display_whitelist_and_corrupt_generation(tmp_path):
     from agent_py_agent.agent.conversation.context_usage import context_usage_from_thread
     store = ConversationStore(tmp_path)
-    thread = store.get_or_create_thread({"canonical_user_id": "alice"})
+    thread = store.threads.get_or_create({"canonical_user_id": "alice"})
     data = {**usage(), "prompt": "private", "api_key": "private", "current_tokens": True}
-    saved = store.update_model_context_usage(thread.thread_id, data, expected_compact_generation=0)
+    saved = store.model_usage.update_context_usage(thread.thread_id, data, expected_compact_generation=0)
     assert saved.model_context_usage["current_tokens"] == 0
     assert "private" not in str(saved.model_context_usage)
     assert context_usage_from_thread(replace(saved, model_context_usage={**usage(), "compact_generation": False})) == {}
@@ -147,11 +147,11 @@ def test_context_measurement_cannot_write_another_owner_store(tmp_path):
     from agent_py_agent.agent.conversation.context_usage import record_model_context_usage
     alice = ConversationStore(tmp_path / "alice")
     bob = ConversationStore(tmp_path / "bob")
-    thread = alice.get_or_create_thread({"canonical_user_id": "alice"})
+    thread = alice.threads.get_or_create({"canonical_user_id": "alice"})
     agent = SimpleNamespace(conversation_store=bob)
     params = SimpleNamespace(task_attributes={"conversation_thread_id": thread.thread_id})
     assert record_model_context_usage(agent, params, usage()) is False
-    assert alice.load_thread(thread.thread_id).model_context_usage == {}
+    assert alice.threads.load(thread.thread_id).model_context_usage == {}
 
 
 def test_unknown_child_context_is_not_displayed_as_zero():

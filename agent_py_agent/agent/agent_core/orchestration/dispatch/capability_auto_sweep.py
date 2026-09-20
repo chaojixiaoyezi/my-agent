@@ -1067,7 +1067,7 @@ def _sync_completed_source_worker_link(
     expected_status: str,
 ) -> None:
     store = getattr(agent, "conversation_store", None)
-    update = getattr(store, "update_task_status", None)
+    update = getattr(getattr(store, 'tasks', None), 'update_status', None)
     if not callable(update):
         return
     request = {"task_id": run_id, "status": "completed"}

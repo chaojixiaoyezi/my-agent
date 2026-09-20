@@ -39,11 +39,7 @@ from agent.conversation.control_commands import (
 from agent.conversation.workspace_paths import audit_workspace_path
 from agent.core import SimpleAgent
 from agent.gateway_parts.request_execution import (
-    _audit_prepare_prompt_section,
-    _gateway_conversation_context,
     _gateway_run_task_attributes,
-    _GatewayAskRunContext,
-    _GatewayConversationLoadRequest,
     _register_named_system_task,
 )
 from agent.ingestion.source_binding import (
@@ -57,6 +53,13 @@ from agent.memory_archive.tool_output_externalizer import (
     externalize_tool_output_record,
 )
 from agent.settings import AgentConfig
+
+from agent_py_agent.agent.gateway_parts.request_context import (
+    GatewayAskRunContext,
+    GatewayConversationLoadRequest,
+    gateway_conversation_context,
+)
+from agent_py_agent.agent.gateway_parts.request_prompt import _audit_prepare_prompt_section
 
 
 @pytest.fixture(autouse=True)
@@ -123,10 +126,10 @@ def _register(
     request_path = tmp_path / f"{request_id}.json"
     response_path = tmp_path / f"{request_id}.response.json"
     request_path.write_text(json.dumps(request, ensure_ascii=False), encoding="utf-8")
-    conversation = _gateway_conversation_context(
-        _GatewayConversationLoadRequest(agent, request, request_id, prompt)
+    conversation = gateway_conversation_context(
+        GatewayConversationLoadRequest(agent, request, request_id, prompt)
     )
-    context = _GatewayAskRunContext(
+    context = GatewayAskRunContext(
         agent,
         request,
         request_path,
@@ -162,7 +165,7 @@ def _register(
 def _link(agent: SimpleAgent, thread_id: str, name: str):
     return next(
         link
-        for link in agent.conversation_store.task_links(thread_id)
+        for link in agent.conversation_store.tasks.list(thread_id)
         if link.work_kind == "audit" and link.work_name == name
     )
 
@@ -286,7 +289,7 @@ def test_publish_immediately_runs_existing_source_reconciler(
     assert calls == [agent]
     assert payload["runtime_sync_checked"] == 2
     assert payload["runtime_sync_degraded"] == 1
-    assert agent.conversation_store.load_task_link(prepared.task_id) is not None
+    assert agent.conversation_store.tasks.load(prepared.task_id) is not None
 
 
 def test_running_source_rejects_identity_rebind_but_accepts_request_revision() -> None:
@@ -388,7 +391,7 @@ def test_interleaved_prepare_uses_exact_independent_transient_workspaces(tmp_pat
         link_a.task_id,
         Path(link_a.task_path),
     )
-    after_archive_sync = agent.conversation_store.load_task_link(link_a.task_id)
+    after_archive_sync = agent.conversation_store.tasks.load(link_a.task_id)
     assert after_archive_sync is not None
     assert after_archive_sync.goal == ""
     assert "第一份接口说明" in after_archive_sync.pending_prompt
@@ -401,8 +404,8 @@ def test_interleaved_prepare_uses_exact_independent_transient_workspaces(tmp_pat
             "canonical_user_id": "local-agent",
         }
     }
-    ordinary = _gateway_conversation_context(
-        _GatewayConversationLoadRequest(
+    ordinary = gateway_conversation_context(
+        GatewayConversationLoadRequest(
             agent,
             ordinary_request,
             "ordinary-chat",
@@ -465,7 +468,7 @@ def test_same_audit_accumulates_unpublished_prepare_turns_in_order(
         delattr(agent, "_current_run_params")
 
     assert published.ok, published.output
-    stored = agent.conversation_store.load_task_link(link.task_id)
+    stored = agent.conversation_store.tasks.load(link.task_id)
     assert stored is not None
     assert stored.pending_prompt == ""
     assert "第一条来源规则" in stored.effective_user_prompt
@@ -510,7 +513,7 @@ def test_publish_is_structured_exact_and_failed_validation_keeps_effective_promp
                 "validation_refs": ["missing-result.json"],
             }
         )
-        after_failed = agent.conversation_store.load_task_link(link_a.task_id)
+        after_failed = agent.conversation_store.tasks.load(link_a.task_id)
         assert failed.ok is True
         failed_payload = json.loads(failed.output)
         assert failed_payload["applied"] is False
@@ -533,8 +536,8 @@ def test_publish_is_structured_exact_and_failed_validation_keeps_effective_promp
     finally:
         delattr(agent, "_current_run_params")
 
-    updated_a = agent.conversation_store.load_task_link(link_a.task_id)
-    unchanged_b = agent.conversation_store.load_task_link(link_b.task_id)
+    updated_a = agent.conversation_store.tasks.load(link_a.task_id)
+    unchanged_b = agent.conversation_store.tasks.load(link_b.task_id)
     assert published.ok is True
     published_payload = json.loads(published.output)
     assert published_payload["applied"] is True
@@ -758,7 +761,7 @@ def test_completed_named_audit_restart_reuses_config_but_mints_fresh_epoch(
     profile = Path(prepared.task_path) / "work" / "sources" / "source-a.md"
     profile.parent.mkdir(parents=True, exist_ok=True)
     profile.write_text("source_id: source-a\n", encoding="utf-8")
-    published = agent.conversation_store.publish_audit_effective_prompt(
+    published = agent.conversation_store.audits.publish_effective_prompt(
         {
             "task_id": prepared.task_id,
             "prompt": "按已经验证的来源资料持续研判",
@@ -800,7 +803,7 @@ def test_completed_named_audit_restart_reuses_config_but_mints_fresh_epoch(
     assert first_attrs[AUDIT_OBJECTIVE_ATTR] == first_goal
     assert "第一次启动说明" not in first_goal
 
-    terminal = agent.conversation_store.update_task_status(
+    terminal = agent.conversation_store.tasks.update_status(
         {
             "task_id": first.task_id,
             "status": "completed",
@@ -846,7 +849,7 @@ def test_expired_named_audit_restart_settles_previous_run_without_status_command
     profile = Path(prepared.task_path) / "work" / "sources" / "source-a.md"
     profile.parent.mkdir(parents=True, exist_ok=True)
     profile.write_text("source_id: source-a\n", encoding="utf-8")
-    published = agent.conversation_store.publish_audit_effective_prompt(
+    published = agent.conversation_store.audits.publish_effective_prompt(
         {
             "task_id": prepared.task_id,
             "prompt": "按已验证来源持续研判",
@@ -921,7 +924,7 @@ def test_completed_named_audit_prepare_reopens_same_workspace_and_config(
     profile = Path(original.task_path) / "work" / "sources" / "source-a.md"
     profile.parent.mkdir(parents=True, exist_ok=True)
     profile.write_text("source_id: source-a\n", encoding="utf-8")
-    published = agent.conversation_store.publish_audit_effective_prompt(
+    published = agent.conversation_store.audits.publish_effective_prompt(
         {
             "task_id": original.task_id,
             "prompt": "第一版已验证说明",
@@ -937,7 +940,7 @@ def test_completed_named_audit_prepare_reopens_same_workspace_and_config(
         }
     )
     assert published is not None
-    started = agent.conversation_store.activate_audit(
+    started = agent.conversation_store.audits.activate(
         {
             "task_id": original.task_id,
             "goal": "不应覆盖已发布要求",
@@ -945,7 +948,7 @@ def test_completed_named_audit_prepare_reopens_same_workspace_and_config(
         }
     )
     assert started is not None and started.run_epoch == 1
-    assert agent.conversation_store.update_task_status(
+    assert agent.conversation_store.tasks.update_status(
         {
             "task_id": original.task_id,
             "status": "completed",
@@ -975,7 +978,7 @@ def test_restart_migration_prefers_older_published_config_over_newer_empty_attem
     tmp_path: Path,
 ) -> None:
     agent = _agent(tmp_path)
-    thread = agent.conversation_store.get_or_create_thread(
+    thread = agent.conversation_store.threads.get_or_create(
         {
             "canonical_user_id": "local-agent",
             "channel": "chat",
@@ -990,7 +993,7 @@ def test_restart_migration_prefers_older_published_config_over_newer_empty_attem
     configured_profile = configured_path / "work" / "sources" / "stable.md"
     configured_profile.parent.mkdir(parents=True, exist_ok=True)
     configured_profile.write_text("source_id: stable\n", encoding="utf-8")
-    configured = agent.conversation_store.bind_task(
+    configured = agent.conversation_store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": "audit-configured",
@@ -1013,7 +1016,7 @@ def test_restart_migration_prefers_older_published_config_over_newer_empty_attem
             "now": 10.0,
         }
     )
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": "audit-empty-attempt",
@@ -1140,7 +1143,7 @@ def test_published_source_bindings_are_exact_preserved_and_visible_by_id(
         "host-file",
     ]
     assert published.result_envelope["audit_publish"] == published_payload
-    stored = agent.conversation_store.load_task_link(prepared.task_id)
+    stored = agent.conversation_store.tasks.load(prepared.task_id)
     assert stored is not None
     assert [item["source_id"] for item in stored.effective_source_bindings] == [
         "login-api",
@@ -1206,7 +1209,7 @@ def test_published_source_bindings_are_exact_preserved_and_visible_by_id(
     finally:
         delattr(agent, "_current_run_params")
     assert prompt_only.ok is True
-    preserved = agent.conversation_store.load_task_link(prepared.task_id)
+    preserved = agent.conversation_store.tasks.load(prepared.task_id)
     assert preserved is not None
     assert preserved.effective_source_bindings == stored.effective_source_bindings
 
@@ -1244,7 +1247,7 @@ def test_published_source_bindings_are_exact_preserved_and_visible_by_id(
         },
         {"source_id": "host-file", "url": source_file.resolve().as_uri()},
     ]
-    preserved_after_empty = agent.conversation_store.load_task_link(prepared.task_id)
+    preserved_after_empty = agent.conversation_store.tasks.load(prepared.task_id)
     assert preserved_after_empty is not None
     assert preserved_after_empty.effective_source_bindings == preserved.effective_source_bindings
 
@@ -1257,7 +1260,7 @@ def test_published_source_bindings_are_exact_preserved_and_visible_by_id(
     assert started_attrs[AUDIT_SOURCE_BINDINGS_ATTR] == [
         dict(item) for item in preserved_after_empty.effective_source_bindings
     ]
-    started_link = agent.conversation_store.load_task_link(prepared.task_id)
+    started_link = agent.conversation_store.tasks.load(prepared.task_id)
     assert started_link is not None and started_link.status == "active"
     assert started_link.run_prompt == "开始按已经准备好的要求持续监测"
 
@@ -1306,7 +1309,7 @@ def test_invalid_source_probe_refs_fail_without_advancing_audit_revision(
     assert rejected.ok is False
     assert rejected.error_code == "AUDIT_SOURCE_PROBE_REFS_INVALID"
     assert "重复" in json.loads(rejected.output)["error_detail"]
-    unchanged = agent.conversation_store.load_task_link(prepared.task_id)
+    unchanged = agent.conversation_store.tasks.load(prepared.task_id)
     assert unchanged is not None
     assert unchanged.effective_revision == 0
     assert unchanged.effective_source_bindings == ()
@@ -1365,7 +1368,7 @@ def test_source_publish_rejects_probe_from_another_named_audit(
     assert rejected.ok is False
     assert rejected.error_code == "AUDIT_SOURCE_PROBE_REFS_INVALID"
     assert "不属于当前命名 Audit" in json.loads(rejected.output)["error_detail"]
-    unchanged = agent.conversation_store.load_task_link(prepared.task_id)
+    unchanged = agent.conversation_store.tasks.load(prepared.task_id)
     assert unchanged is not None
     assert unchanged.effective_revision == 0
     assert unchanged.effective_source_bindings == ()
@@ -1575,7 +1578,7 @@ def test_prepare_can_publish_profile_bound_by_real_watch_open(tmp_path: Path) ->
     assert availability_after_publish.available is True
     assert stale.ok is False
     assert stale.error_code == "AUDIT_PREPARE_ALREADY_PUBLISHED"
-    stored = agent.conversation_store.load_task_link(prepared.task_id)
+    stored = agent.conversation_store.tasks.load(prepared.task_id)
     assert stored is not None
     assert stored.effective_revision == 2
     assert len(stored.effective_source_bindings) == 1
@@ -1621,7 +1624,7 @@ def test_prepare_can_publish_profile_bound_by_real_watch_open(tmp_path: Path) ->
         delattr(agent, "_current_run_params")
 
     assert second_published.ok, second_published.output
-    merged = agent.conversation_store.load_task_link(prepared.task_id)
+    merged = agent.conversation_store.tasks.load(prepared.task_id)
     assert merged is not None
     assert [row["source_id"] for row in merged.effective_source_bindings] == [
         "source-file",
@@ -1661,7 +1664,7 @@ def test_http_probe_rejects_file_only_record_boundary_before_publish(
     assert rejected.ok is False
     assert rejected.error_code == "TOOL_INVALID_ARGUMENTS"
     assert "record_boundary" in rejected.output
-    unchanged = agent.conversation_store.load_task_link(prepared.task_id)
+    unchanged = agent.conversation_store.tasks.load(prepared.task_id)
     assert unchanged is not None
     assert unchanged.effective_revision == 0
 
@@ -1707,7 +1710,7 @@ def test_new_source_binding_cannot_borrow_another_audit_profile(
     assert rejected.error_code == "AUDIT_VALIDATION_EVIDENCE_INVALID"
     assert "work/<文件名>" in rejected.output
     assert "write_file" in rejected.output
-    unchanged = agent.conversation_store.load_task_link(link_a.task_id)
+    unchanged = agent.conversation_store.tasks.load(link_a.task_id)
     assert unchanged is not None
     assert unchanged.effective_revision == 0
     assert unchanged.effective_source_bindings == ()
@@ -1756,7 +1759,7 @@ def test_source_probe_profile_is_optional_workspace_material(
         delattr(agent, "_current_run_params")
 
     assert published.ok is True
-    stored = agent.conversation_store.load_task_link(prepared.task_id)
+    stored = agent.conversation_store.tasks.load(prepared.task_id)
     assert stored is not None
     assert stored.effective_revision == 1
     assert len(stored.effective_source_bindings) == 1
@@ -1847,7 +1850,7 @@ def test_publish_replace_makes_probe_refs_the_exact_source_set(
                 "source_update_mode": "replace",
             }
         )
-        unchanged_after_rejection = agent.conversation_store.load_task_link(
+        unchanged_after_rejection = agent.conversation_store.tasks.load(
             prepared.task_id
         )
         replaced = PublishAuditUpdateTool(agent).execute(
@@ -1872,7 +1875,7 @@ def test_publish_replace_makes_probe_refs_the_exact_source_set(
     ]
     assert replaced.ok, replaced.output
     assert json.loads(replaced.output)["retired_active_source_count"] == 1
-    stored = agent.conversation_store.load_task_link(prepared.task_id)
+    stored = agent.conversation_store.tasks.load(prepared.task_id)
     assert stored is not None
     assert [row["source_id"] for row in stored.effective_source_bindings] == ["source-b"]
     retired_state = load_state(owner_home, retired_watch.watch_id)
@@ -1996,6 +1999,6 @@ def test_passed_validation_accepts_only_successful_artifact_from_exact_audit(
     assert rejected_sibling.ok is False
     assert rejected_sibling.error_code == "AUDIT_VALIDATION_EVIDENCE_INVALID"
     assert published.ok is True
-    updated = agent.conversation_store.load_task_link(link_a.task_id)
+    updated = agent.conversation_store.tasks.load(link_a.task_id)
     assert updated is not None
     assert updated.effective_evidence_refs == (str(Path(valid["artifact_ref"]).resolve()),)

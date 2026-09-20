@@ -126,7 +126,7 @@ def test_goal_configuration_failure_preserves_original_wake(tmp_path, error, exp
 
     agent, thread, goal = _goal_agent(tmp_path)
     store = agent.conversation_store
-    signal = store.raise_wake_signal({
+    signal = store.wakes.raise_signal({
         "thread_id": thread.thread_id, "root_task_id": goal.task_id,
         "reason": "thread_goal_continue", "metadata": {"goal_id": goal.goal_id},
     })
@@ -136,9 +136,9 @@ def test_goal_configuration_failure_preserves_original_wake(tmp_path, error, exp
     scheduler.scheduler_service = SimpleNamespace(release=lambda claim, **kw: released.append(claim))
     claim = object() if expected == "active" else None
     _handle_nonquota_wake_error(scheduler, signal, lifecycle_reason="thread_goal_continue", claim=claim, error=error)
-    assert store.load_goal(thread.thread_id).status == expected
-    pending = {wake.wake_signal_id for wake in store.pending_wake_signals()}
+    assert store.goals.load(thread.thread_id).status == expected
+    pending = {wake.wake_signal_id for wake in store.wakes.pending()}
     assert (signal.wake_signal_id in pending) is (expected == "active")
     if expected == "active":
         assert released == [claim]
-        assert store.load_task_link(goal.task_id).status == "active"
+        assert store.tasks.load(goal.task_id).status == "active"

@@ -177,9 +177,12 @@ def test_background_main_run_registers_the_durable_task_control_name():
             observed["interrupted"] = is_interrupted()
             return "done"
 
-    class Store:
-        def finish_background_run(self, payload):
+    class Claims:
+        def finish(self, payload):
             observed["finish"] = payload
+
+    class Store:
+        claims = Claims()
 
     scheduler = BackgroundMainAgentScheduler.__new__(BackgroundMainAgentScheduler)
     scheduler.runtime = Runtime()
@@ -215,9 +218,12 @@ def test_background_main_user_interrupt_closes_claim_without_runtime_failure():
         def run_once(self, _kwargs):
             raise InterruptedError("user stopped the current task")
 
-    class Store:
-        def finish_background_run(self, payload):
+    class Claims:
+        def finish(self, payload):
             observed["finish"] = payload
+
+    class Store:
+        claims = Claims()
 
     scheduler = BackgroundMainAgentScheduler.__new__(BackgroundMainAgentScheduler)
     scheduler.runtime = Runtime()

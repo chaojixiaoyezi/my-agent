@@ -34,11 +34,11 @@ def notify_parent_on_activity_notice(manager: Any, task: Any, notice: dict[str, 
     store = getattr(manager, "conversation_store", None)
     if store is None:
         return False
-    thread = store.thread_for_task(task.id)
+    thread = store.tasks.thread_for(task.id)
     if thread is None:
         return False
     key = str(notice["notice_key"])
-    if store.wake_delivery_receipt(thread.thread_id, key) in {"pending", "handled"}:
+    if store.wakes.delivery_receipt(thread.thread_id, key) in {"pending", "handled"}:
         return True
     public = {k: v for k, v in notice.items() if k != "notified"}
     metadata = {"task_id": task.id, "status": task.status, "activity_diagnostic": public}
@@ -47,7 +47,7 @@ def notify_parent_on_activity_notice(manager: Any, task: Any, notice: dict[str, 
         "source_agent_id": task.id, "parent_agent_id": str(task.parent_id),
         "root_task_id": str(task.root_id), "metadata": metadata,
     }
-    store.append_observation_with_wake(
+    store.wakes.append_observation(
         {
             **shared, "event_type": "subagent_activity_notice", "requires_main_agent": True,
             "summary": (
@@ -141,10 +141,10 @@ def _notify_parent_terminal(
     if not task_id:
         return "skipped"
     try:
-        thread = parent_thread or store.thread_for_task(task_id)
+        thread = parent_thread or store.tasks.thread_for(task_id)
         if thread is None:
             return "skipped"
-        store.update_task_status({"task_id": task_id, "status": status})
+        store.tasks.update_status({"task_id": task_id, "status": status})
         if _has_persisted_subagent_parent(manager, task):
             return "skipped"
         # 去重身份 = task + status + exact attempt（attempt 未知时保持既有 task+status 形态）。
@@ -156,7 +156,7 @@ def _notify_parent_terminal(
             else f"subagent-finished:{task_id}:{status}"
         )
         # 已有同一去重键的唤醒（待消费或已消费）→ 视为已投递，绝不重发。
-        receipt = getattr(store, "wake_delivery_receipt", None)
+        receipt = getattr(getattr(store, 'wakes', None), 'delivery_receipt', None)
         if callable(receipt):
             try:
                 if str(receipt(thread.thread_id, dedupe_key) or "") in {"pending", "handled"}:
@@ -188,7 +188,7 @@ def _notify_parent_terminal(
         # Publish through the store's wake-first pair operation. Two separate writes let the
         # scheduler consume the observation in the tiny gap before its wake existed, causing
         # duplicate background turns and duplicate IM progress fragments.
-        store.append_observation_with_wake(
+        store.wakes.append_observation(
             {
                 "thread_id": thread.thread_id,
                 "event_type": "subagent_runner_finished",
@@ -233,7 +233,7 @@ def _raise_internal_audit_source_wake(
 
     runner_attempts = max(0, int(getattr(task, "runner_attempts", 0) or 0))
     ended_at = max(0, int(float(getattr(task, "ended_at", 0.0) or 0.0) * 1_000_000))
-    store.raise_wake_signal(
+    store.wakes.raise_signal(
         {
             "thread_id": thread.thread_id,
             "urgency": "normal",
@@ -478,10 +478,10 @@ def notify_parent_on_capability_request(
     if not run_id or not request_id:
         return
     try:
-        thread = store.thread_for_task(run_id)
+        thread = store.tasks.thread_for(run_id)
         if thread is None:
             return
-        observation = store.append_observation(
+        observation = store.observations.append(
             _capability_open_observation(
                 thread,
                 task,
@@ -489,7 +489,7 @@ def notify_parent_on_capability_request(
                 parent_tool_authority=parent_tool_authority,
             )
         )
-        store.raise_wake_signal(
+        store.wakes.raise_signal(
             _capability_open_signal(
                 thread,
                 task,

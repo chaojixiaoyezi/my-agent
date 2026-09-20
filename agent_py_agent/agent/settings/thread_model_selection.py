@@ -30,7 +30,7 @@ def execute_local_model_operation(agent: object, session_id: str, operation: str
     if store is None or not str(session_id).strip():
         raise ModelProfileError("模型选择需要可用的本地会话存储与会话编号。")
     home = agent.home_paths
-    thread = store.get_or_create_thread({
+    thread = store.threads.get_or_create({
         "canonical_user_id": LOCAL_AGENT_USER_ID, "channel": LOCAL_CHAT_CHANNEL,
         "channel_conversation_id": session_id, "channel_user_id": LOCAL_AGENT_USER_ID,
         "owner_id": getattr(home, "owner_id", ""),
@@ -54,7 +54,7 @@ def _require_owner(agent: object, thread: object) -> None:
 # 函数用途: 读取已固定模型；首次迁移只填空，显式选择才替换当前会话并清除旧模型展示校准。
 def thread_model_profile_id(agent: object, thread_id: str, *, select: str | None = None) -> str:
     store = agent.conversation_store
-    thread = store.load_thread(thread_id)
+    thread = store.threads.load(thread_id)
     if thread is None:
         raise ModelProfileError("当前会话不存在，请重新打开会话。")
     _require_owner(agent, thread)
@@ -75,7 +75,7 @@ def thread_model_profile_id(agent: object, thread_id: str, *, select: str | None
             return latest
         return replace(latest, model_profile_id=selected, provider_context_observation={}, model_context_usage={})
 
-    return store._update_thread_atomic(thread_id, update).model_profile_id
+    return store.threads.update_atomic(thread_id, update).model_profile_id
 
 
 # LLM: 每工作片只解析一次配置引用，后续 scope 绑定不可变对象；不临时修改 owner selected 来模拟会话切换。

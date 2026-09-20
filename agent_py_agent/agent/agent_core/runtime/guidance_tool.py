@@ -205,7 +205,7 @@ def _guidance_status_error(
     )
 
 
-# LLM: Append is the only side-effecting seam. Success means durable queue
+# LLM: 插话持久操作经 guidance 领域组件； Append is the only side-effecting seam. Success means durable queue
 # append only; provider acknowledgement and consumption remain false until the
 # target runtime records them.
 # 函数用途: 把已授权消息写入下级消息箱，并返回不夸大交付状态的排队回执。
@@ -219,7 +219,7 @@ def _queue_guidance(
     sender = str(params.get("sender") or requester_run_id or "main_agent").strip()
     metadata = params.get("metadata") if isinstance(params.get("metadata"), dict) else {}
     try:
-        entry = agent.conversation_store.append_guidance(
+        entry = agent.conversation_store.guidance.append(
             {
                 "target_type": "agent_run",
                 "target_id": guidance.target,

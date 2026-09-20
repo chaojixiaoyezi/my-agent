@@ -86,7 +86,7 @@ def _scheduler(tmp_path, backend):
 
 
 def _thread_with_wake_signal(store, *, user: str, conversation: str, now: float) -> str:
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": user,
             "channel": "internal",
@@ -95,7 +95,7 @@ def _thread_with_wake_signal(store, *, user: str, conversation: str, now: float)
             "now": now,
         }
     )
-    observation = store.append_observation(
+    observation = store.observations.append(
         {
             "thread_id": thread.thread_id,
             "event_type": "subagent_runner_finished",
@@ -105,7 +105,7 @@ def _thread_with_wake_signal(store, *, user: str, conversation: str, now: float)
             "now": now,
         }
     )
-    store.raise_wake_signal(
+    store.wakes.raise_signal(
         {
             "thread_id": thread.thread_id,
             "observation": observation,
@@ -127,7 +127,7 @@ def test_supply_outage_does_not_break_tick_and_other_threads_still_consume(tmp_p
 
     assert backend.calls == 2
     assert [report.thread_id for report in reports] == [thread_b]
-    pending = {signal.thread_id for signal in store.pending_wake_signals()}
+    pending = {signal.thread_id for signal in store.wakes.pending()}
     assert thread_a in pending  # A 的信号留 pending,不被标记消费、不丢
     assert thread_b not in pending
     printed = capsys.readouterr().out
@@ -146,13 +146,13 @@ def test_supply_backoff_throttles_retry_then_auto_resumes_after_recovery(tmp_pat
     assert backend.calls == 1
     assert scheduler.tick(now=101.0) == []  # 退避窗内(30s):不打模型
     assert backend.calls == 1
-    assert store.pending_wake_signals()  # 信号还在等
+    assert store.wakes.pending()  # 信号还在等
 
     reports = scheduler.tick(now=131.0)  # 到点自动重试;供应已恢复 → 续跑
 
     assert backend.calls == 2
     assert [report.thread_id for report in reports] == [thread_id]
-    assert store.pending_wake_signals() == []  # 消费完成
+    assert store.wakes.pending() == []  # 消费完成
     printed = capsys.readouterr().out
     assert "provider_supply_resumed" in printed
 
@@ -176,7 +176,7 @@ def test_quota_exhaustion_sends_one_system_fallback_and_does_not_retry_model(
     assert reports[0].reason == "provider_quota_exhausted"
     assert reports[0].wake_handled is True
     assert "额度耗尽" in reports[0].response
-    assert store.pending_wake_signals() == []
+    assert store.wakes.pending() == []
 
     assert scheduler.tick(now=101.0) == []
     assert backend.calls == 1
@@ -191,7 +191,7 @@ def test_due_progress_policy_survives_outage_and_resumes(tmp_path) -> None:
     """盯守判读走 progress policy 路(真机 1.9 冻死的主场景):断供期 policy 留 due,恢复后自动续跑。"""
     backend = _RateLimitedThenHealthyBackend(fail_times=1)
     store, scheduler = _scheduler(tmp_path, backend)
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "channel": "internal",
@@ -200,8 +200,8 @@ def test_due_progress_policy_survives_outage_and_resumes(tmp_path) -> None:
             "now": 10.0,
         }
     )
-    store.bind_task({"thread_id": thread.thread_id, "task_id": "task-1", "goal": "盯守判读", "now": 11.0})
-    store.set_progress_policy(
+    store.tasks.bind({"thread_id": thread.thread_id, "task_id": "task-1", "goal": "盯守判读", "now": 11.0})
+    store.progress.create(
         {"thread_id": thread.thread_id, "task_id": "task-1", "interval_seconds": 60, "now": 12.0}
     )
 

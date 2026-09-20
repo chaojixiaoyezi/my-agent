@@ -2453,7 +2453,7 @@ def _handle_alt_r_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
     try:
         store = getattr(params.agent, "conversation_store", None)
         if store is not None:
-            thread = store.get_or_create_thread(
+            thread = store.threads.get_or_create(
                 {
                     "canonical_user_id": "local-agent",
                     "channel": "chat",

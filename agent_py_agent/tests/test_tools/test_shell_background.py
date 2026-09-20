@@ -26,7 +26,7 @@ from agent_py_agent.tests._tool_runtime_harness import (
 )
 
 
-def _background_policy_decision(tmp_path: Path, command: str):
+def _background_policy_decision(tmp_path: Path, command: str, *, approval_mode: str = "ask"):
     tool = ShellTool(tmp_path)
     snapshot = runtime_snapshot_for_tools({tool.model_spec.name: tool}, run_id="run-bg")
     call: ToolCall = canonical_test_call(
@@ -41,18 +41,24 @@ def _background_policy_decision(tmp_path: Path, command: str):
             workspace_root=tmp_path,
             workspace_roots=(tmp_path,),
             owner_scope_root=str(tmp_path),
+            approval_mode=approval_mode,
         )
     )
 
 
-def test_managed_background_command_uses_same_sandbox_without_false_approval(tmp_path):
+def test_managed_background_command_keeps_explicit_approval_and_sandbox(tmp_path):
     decision = _background_policy_decision(
         tmp_path,
         'python3 -c "import time; time.sleep(2)"',
     )
 
-    assert decision.status == "allow"
-    assert decision.sandbox_plan["mode"] == "required"
+    assert decision.status == "ask"
+    assert not decision.sandbox_plan
+    approved = _background_policy_decision(
+        tmp_path, 'python3 -c "import time; time.sleep(2)"', approval_mode="auto",
+    )
+    assert approved.status == "allow"
+    assert approved.sandbox_plan["mode"] == "required"
 
 
 def test_managed_background_still_rejects_destructive_command(tmp_path):

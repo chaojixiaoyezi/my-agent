@@ -454,7 +454,7 @@ def _compact_subagent_active_turn_archive(
 def _load_subagent_compact_thread(agent: object, refreshed: object) -> tuple[object, object]:
     store = getattr(agent, "conversation_store", None)
     latest, load_error = (
-        store.load_thread_report(refreshed.thread_id)
+        store.threads.load_report(refreshed.thread_id)
         if store is not None and refreshed.thread_id
         else (None, {"code": "CONVERSATION_STORE_UNAVAILABLE"})
     )

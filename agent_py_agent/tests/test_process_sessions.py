@@ -204,6 +204,36 @@ def test_wait_timeout_does_not_terminate_process() -> None:
         process_registry.kill(record.session_id)
 
 
+def test_full_access_process_keeps_canonical_owner_store_across_permission_views(tmp_path: Path) -> None:
+    owner = tmp_path / "owner"
+    owner.mkdir()
+    restricted = _registry(owner)
+    full = restricted.with_access_policy(access_mode="full-access", path_access_mode="full", owner_scope_root="")
+    boundary = {"canonical_owner_home_root": str(owner)}
+    context = {"run_scope": {"session_id": "thread-a", "owner_home": str(tmp_path / "wrong-owner")}}
+    started = _payload(execute_approved_registry_test_call(
+        full, "run_command", {"command": "sleep 1; printf done", "run_in_background": True},
+        write_boundary=boundary, trusted_run_context=context,
+    ))
+    authority = ProcessSessionStore(process_session_store_root(owner, owner))
+    record = authority.load(started["session_id"]).record
+    assert record, "Full Access must not move process authority into the working directory"
+    assert record["access_scope"]["owner_home"] == str(owner)
+    assert not (owner / ".background_jobs" / "process_sessions").exists()
+    process_registry.clear()
+    finished = _payload(execute_registry_test_call(
+        restricted, "process_session", {"action": "wait", "session_id": started["session_id"], "timeout_seconds": 5},
+        write_boundary=boundary, trusted_run_context=context,
+    ))
+    assert finished["status"] == "exited"
+    assert finished["exit_code"] == 0
+    other = execute_registry_test_call(
+        restricted, "process_session", {"action": "status", "session_id": started["session_id"]},
+        write_boundary=boundary, trusted_run_context={"run_scope": {"session_id": "thread-b"}},
+    )
+    assert other.error_code == "PROCESS_NOT_FOUND"
+
+
 def test_process_summary_uses_session_id_as_only_management_handle(tmp_path: Path) -> None:
     registry = _registry(tmp_path)
     scope = {
@@ -397,7 +427,7 @@ def test_process_session_follows_background_command_tool_profiles() -> None:
         CODING_SUBAGENT_TOOLS,
         READ_ONLY_SUBAGENT_TOOLS,
     )
-    from agent_py_agent.agent.conversation.runtime import (
+    from agent_py_agent.agent.conversation.background_tool_policy import (
         DEFAULT_BACKGROUND_ALLOWED_TOOLS,
     )
 
@@ -662,7 +692,7 @@ def test_process_session_terminal_state_never_regresses_to_running(tmp_path: Pat
 
 def test_configured_background_shell_profile_adds_session_companion() -> None:
     """用户只列 run_command 时也不能得到一张无法续接后台命令的残缺快照。"""
-    from agent_py_agent.agent.conversation.runtime import (
+    from agent_py_agent.agent.conversation.background_tool_policy import (
         background_tool_policy_decision,
     )
 

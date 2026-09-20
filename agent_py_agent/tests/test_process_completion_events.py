@@ -25,7 +25,7 @@ from agent_py_agent.agent.tooling.process_session_store import (
 def _fixture(tmp_path, status="exited"):
     owner = tmp_path / "owner"
     store = ConversationStore(owner / "conversations")
-    thread = store.get_or_create_thread({"canonical_user_id": "a", "channel": "tui", "channel_conversation_id": "a"})
+    thread = store.threads.get_or_create({"canonical_user_id": "a", "channel": "tui", "channel_conversation_id": "a"})
     agent = SimpleNamespace(conversation_store=store, home_paths=SimpleNamespace(owner_home_dir=owner),
                             config=SimpleNamespace(background_process_notifications=True))
     params = SimpleNamespace(context_scope="conversation", run_id="run-a", task_id="task-a", request_id="req-a",
@@ -45,7 +45,7 @@ def test_completion_survives_restart_and_notifies_once(tmp_path):
     agent, params, authority = _fixture(tmp_path)
     assert owner_has_pending_process_completions(agent.home_paths.owner_home_dir)
     assert reconcile_process_completions(agent) == 1
-    signals = agent.conversation_store.pending_wake_signals(limit=0)
+    signals = agent.conversation_store.wakes.pending(limit=0)
     assert len(signals) == 1
     assert signals[0].root_task_id == params.task_id
     assert signals[0].metadata["process_completion"]["exit_code"] == 0
@@ -69,14 +69,14 @@ def test_publish_crash_retry_dedupes_and_keeps_receipt(tmp_path, monkeypatch):
     assert not authority.load("bg-test-notice").record["completion_notice_id"]
     monkeypatch.setattr(ProcessSessionStore, "write", original)
     assert reconcile_process_completions(agent) == 1
-    assert len(agent.conversation_store.pending_wake_signals(limit=0)) == 1
+    assert len(agent.conversation_store.wakes.pending(limit=0)) == 1
 
 
 def test_explicit_stop_is_not_auto_restarted(tmp_path):
     agent, _, authority = _fixture(tmp_path, "killed")
     assert reconcile_process_completions(agent) == 0
     assert authority.load("bg-test-notice").record["completion_notice_id"] == "explicit_stop"
-    assert not agent.conversation_store.pending_wake_signals(limit=0)
+    assert not agent.conversation_store.wakes.pending(limit=0)
 
 
 def test_late_completion_is_deliverable_but_stopped_task_is_not(tmp_path):
@@ -84,17 +84,17 @@ def test_late_completion_is_deliverable_but_stopped_task_is_not(tmp_path):
 
     agent, params, _authority = _fixture(tmp_path)
     store = agent.conversation_store
-    store.bind_task({"thread_id": params.task_attributes["conversation_thread_id"],
+    store.tasks.bind({"thread_id": params.task_attributes["conversation_thread_id"],
                      "task_id": params.task_id, "status": "completed", "goal": "test"})
     reconcile_process_completions(agent)
-    signal = store.pending_wake_signals(limit=0)[0]
+    signal = store.wakes.pending(limit=0)[0]
     assert process_completion_delivery_state(agent, signal) == "ready"
     assert not process_completion_delivery_state(agent, replace(signal, source_agent_id="another-run"))
     stopped, stopped_params, _ = _fixture(tmp_path / "stopped")
-    stopped.conversation_store.bind_task({"thread_id": stopped_params.task_attributes["conversation_thread_id"],
+    stopped.conversation_store.tasks.bind({"thread_id": stopped_params.task_attributes["conversation_thread_id"],
         "task_id": stopped_params.task_id, "status": "interrupted", "goal": "test"})
     reconcile_process_completions(stopped)
-    stopped_signal = stopped.conversation_store.pending_wake_signals(limit=0)[0]
+    stopped_signal = stopped.conversation_store.wakes.pending(limit=0)[0]
     assert not process_completion_delivery_state(stopped, stopped_signal)
 
 
@@ -123,7 +123,7 @@ def test_late_completion_passes_scheduler_and_claim_admission(tmp_path, monkeypa
             return ModelResponse(text="采样进程已退出，退出码 0。", backend="test")
 
     agent.backend = Backend()
-    store.bind_task({"thread_id": params.task_attributes["conversation_thread_id"],
+    store.tasks.bind({"thread_id": params.task_attributes["conversation_thread_id"],
         "task_id": params.task_id, "status": status, "goal": "采样后告知结果"})
     runtime = BackgroundMainAgentRuntime(agent=agent, store=store)
     scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": store})
@@ -138,7 +138,7 @@ def test_late_completion_passes_scheduler_and_claim_admission(tmp_path, monkeypa
         monkeypatch.setattr(ProcessSessionStore, "write", fail_receipt)
         reconcile_process_completions(agent)
         assert scheduler.tick() == []
-        assert len(store.pending_wake_signals(limit=0)) == 1
+        assert len(store.wakes.pending(limit=0)) == 1
         assert not calls
         monkeypatch.setattr(ProcessSessionStore, "write", original_write)
     assert reconcile_process_completions(agent) == 1
@@ -147,8 +147,8 @@ def test_late_completion_passes_scheduler_and_claim_admission(tmp_path, monkeypa
     assert len(reports) == expected
     if expected:
         assert "退出码 0" in reports[0].response
-        assert any("退出码 0" in row.content for row in store.recent_messages(params.task_attributes["conversation_thread_id"]))
-    assert not store.pending_wake_signals(limit=0)
+        assert any("退出码 0" in row.content for row in store.messages.recent(params.task_attributes["conversation_thread_id"]))
+    assert not store.wakes.pending(limit=0)
     assert scheduler.tick() == []
     assert len(calls) == expected
 
@@ -159,7 +159,7 @@ def test_disabled_notifications_and_child_scope_do_not_launch_shadow_main(tmp_pa
     assert process_completion_target(agent, params) == {}
     agent.config.background_process_notifications = False
     assert reconcile_process_completions(agent) == 0
-    assert not agent.conversation_store.pending_wake_signals(limit=0)
+    assert not agent.conversation_store.wakes.pending(limit=0)
 
 
 def test_completion_target_is_immutable_and_thread_scoped(tmp_path):

@@ -15,11 +15,9 @@ from agent_py_agent.agent.conversation.history_page import history_group_identit
 from agent_py_agent.agent.conversation.message_stream import read_background_response_page
 from agent_py_agent.agent.conversation.native_history import provider_history_messages_from_rows
 from agent_py_agent.agent.conversation.store import ConversationStore
-from agent_py_agent.agent.gateway_parts.request_execution import (
-    BufferedChunkStreamWriter,
-    _configure_gateway_main_activity,
-    _GatewayAssistantTurn,
-)
+from agent_py_agent.agent.gateway_parts.request_execution import _configure_gateway_main_activity
+from agent_py_agent.agent.gateway_parts.request_history import GatewayAssistantTurn
+from agent_py_agent.agent.gateway_parts.stream_writer import BufferedChunkStreamWriter
 from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
 from agent_py_agent.cli.chat_parts.tui_threading import (
     _consume_gateway_background_snapshot,
@@ -31,13 +29,13 @@ from agent_py_agent.cli.chat_parts.tui_threading import (
 # 函数用途: 建立一片带精确 Gateway 来源的前台公开流，供增量和重放组合验证。
 def _foreground(tmp_path):
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread({"canonical_user_id": "owner-a"})
+    thread = store.threads.get_or_create({"canonical_user_id": "owner-a"})
     agent = SimpleNamespace(conversation_store=store)
     request = {"conversation_runtime": {"request_id": "gwreq-live", "thread_id": thread.thread_id, "task_id": "task-a"}}
     writer = BufferedChunkStreamWriter(tmp_path / "chunks.jsonl", rich_transcript=True)
     context = SimpleNamespace(agent=agent, on_chunk=writer, request_id="gwreq-live", request=request)
     _configure_gateway_main_activity(context, SimpleNamespace(thread_id=thread.thread_id, workspace_task=None))
-    store.append_message({"thread_id": thread.thread_id, "role": "user", "content": "帮我检查文件", "metadata": {
+    store.messages.append({"thread_id": thread.thread_id, "role": "user", "content": "帮我检查文件", "metadata": {
         "gateway_request_id": "gwreq-live", "conversation_request_id": "request-a",
     }})
     return agent, writer, store, thread, request
@@ -60,11 +58,11 @@ def _emit_work(writer):
 # 函数用途: 保存 user/commentary/final，验证显示分组与模型历史不会被新快照改变。
 def _commit(writer, store, thread):
     meta = {"gateway_request_id": "gwreq-live", "conversation_request_id": "request-a"}
-    user = store.message_page_after_offset_report(thread.thread_id, after=0)[0][0]
-    commentary = store.append_message({"thread_id": thread.thread_id, "role": "assistant", "content": "我来读取文件。", "metadata": {**meta, "assistant_part_id": "commentary:1"}})
+    user = store.messages.page_after_offset_report(thread.thread_id, after=0)[0][0]
+    commentary = store.messages.append({"thread_id": thread.thread_id, "role": "assistant", "content": "我来读取文件。", "metadata": {**meta, "assistant_part_id": "commentary:1"}})
     snapshot = writer.prepare_display_history()
-    final_meta = _GatewayAssistantTurn(end_reason="completed", display_snapshot=snapshot).metadata()
-    final = store.append_message({"thread_id": thread.thread_id, "role": "assistant", "content": "这是完整的最终回复。", "metadata": {**meta, **final_meta, "assistant_part_id": "final"}})
+    final_meta = GatewayAssistantTurn(end_reason="completed", display_snapshot=snapshot).metadata()
+    final = store.messages.append({"thread_id": thread.thread_id, "role": "assistant", "content": "这是完整的最终回复。", "metadata": {**meta, **final_meta, "assistant_part_id": "final"}})
     writer.close()
     return user, commentary, final
 
@@ -256,7 +254,7 @@ def test_notices_negotiate_live_stream_separately_from_committed_messages(tmp_pa
     from agent_py_agent.tests.test_gateway_agent_control_service import _bound_agent_tree
 
     agent, scope, _ = _bound_agent_tree(tmp_path)
-    thread, _ = agent.conversation_store.resolve_thread_report(channel="chat", channel_conversation_id="session-a", channel_user_id="local-agent")
+    thread, _ = agent.conversation_store.threads.resolve_report(channel="chat", channel_conversation_id="session-a", channel_user_id="local-agent")
     foreground = GatewayForegroundTranscriptSink(agent, thread_id=thread.thread_id, task_id="task-root", request_id="gwreq-live", request={})
     foreground({"kind": "thinking_delta", "text": "前台显式思考"})
     background = BackgroundTranscriptSink(agent, thread_id=thread.thread_id, task_id="task-root")

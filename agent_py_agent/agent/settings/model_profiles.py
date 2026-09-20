@@ -259,7 +259,7 @@ def inherited_model_config(agent: object, task: object):
     profile_id = ref["profile_id"] if ref is not None else "default"
     store = getattr(agent, "conversation_store", None)
     thread_id = str(getattr(task, "agent_thread_id", "") or "")
-    thread = store.load_thread(thread_id) if store is not None and thread_id else None
+    thread = store.threads.load(thread_id) if store is not None and thread_id else None
     if thread is not None:
         from .thread_model_selection import thread_model_config, thread_model_profile_id
 

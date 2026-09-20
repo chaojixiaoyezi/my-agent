@@ -252,7 +252,7 @@ def _current_published_audit_bindings(
     raw = current_attrs.get(AUDIT_SOURCE_BINDINGS_ATTR)
     if raw is None:
         store = getattr(agent, "conversation_store", None)
-        loader = getattr(store, "load_task_link", None)
+        loader = getattr(getattr(store, 'tasks', None), 'load', None)
         if callable(loader):
             try:
                 link = loader(audit_id)
@@ -896,7 +896,7 @@ def add_current_conversation_attrs(attrs: dict[str, object], agent) -> None:
         return
     lookup_error = None
     try:
-        thread = agent.conversation_store.thread_for_task(task_id)
+        thread = agent.conversation_store.tasks.thread_for(task_id)
     except Exception as exc:
         lookup_error = exc
         thread = None
@@ -975,7 +975,7 @@ def _materialize_internal_thread(
         getattr(current, "root_user_prompt", "") or getattr(current, "prompt", "") or task_id
     ).strip()
     try:
-        thread = store.get_or_create_thread(
+        thread = store.threads.get_or_create(
             {
                 "canonical_user_id": "local-agent",
                 "channel": "internal",
@@ -984,7 +984,7 @@ def _materialize_internal_thread(
                 "title": goal[:80] or task_id,
             }
         )
-        store.bind_task(
+        store.tasks.bind(
             {
                 "thread_id": thread.thread_id,
                 "task_id": task_id,

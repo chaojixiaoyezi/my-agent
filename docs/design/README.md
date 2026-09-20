@@ -27,6 +27,7 @@
 
 | 文档 | 模块 | 状态 | 说明 |
 | --- | --- | --- | --- |
+| [MAINTAINABILITY_AND_JEV_REVIEW.md](MAINTAINABILITY_AND_JEV_REVIEW.md) | 模块可维护性 / Computer Use / Jev | 评估完成，方案待实施 | 热点源码及参考证据、渐进重构顺序、桌面能力现状与可选判断工具边界 |
 | [computer-use.md](computer-use.md) | Computer Use / MCP | 真 TUI 通过 | 开源执行器选型、官方可选依赖、管理员 Full Access 硬门、effect 与 OCR 验收边界 |
 | [FEATURE-20260804-tool-runtime-unification.md](FEATURE-20260804-tool-runtime-unification.md) | 工具运行时统一功能规格 | 完成 | 用户可见行为、需求、状态机、测试与验收权威 |
 | [tool-runtime-unification.md](tool-runtime-unification.md) | ToolRuntime / ToolCall / ToolResult / ActionPolicy / ToolExecutor | 完成 | 参考证据、完整架构、迁移删除表、并行边界和完成证据 |

@@ -454,7 +454,7 @@ def _reopen_capability_blocked_conversation_link(manager: Any, task: SubAgentTas
     ):
         return
     store = getattr(manager, "conversation_store", None)
-    update = getattr(store, "update_task_status", None)
+    update = getattr(getattr(store, 'tasks', None), 'update_status', None)
     if not callable(update):
         return
     try:

@@ -4,6 +4,10 @@
 
 更完整的外部方案调研、优缺点拆解和阶段建议见 GATEWAY_RESEARCH.md。
 
+当前内部请求边界：执行器协调租约与模型工作片；`request_context` 准备快照，`request_binding`
+维持精确执行身份与车道，`request_history` 提交或补交同一 canonical 历史，`request_prompt` 只渲染输入。
+共享完整行选择归会话层，后台不依赖 Gateway 执行器；模块拆分不改变原锁、CAS、存储格式或提交顺序。
+
 ## 我们要的形态
 
 目标是：
@@ -31,6 +35,11 @@ Gateway 的“服务地址”和 TUI 的“项目目录”是两种不同事实�
 `runtime_workspace_roots`。因此从 `/root/a` 和 `/root/b` 启动的两个 TUI 会连接同一个 Gateway，但各自
 相对路径、工具权限、子代理交付和后台续轮仍使用自己的目录。没有合法 cwd 时必须在模型调用前失败，
 不能静默退回 Gateway 守护进程的启动目录。
+
+首次 `/goal` 的控制请求也携带相同 workspace，普通消息和控制服务共用 `workspace_scope.py` 校验。
+模型设置可能先创建空线程，Goal 仅在同一原子通道绑定中初始化空 cwd/roots，不改既有执行目录。
+控制回执 v3 签入原目录声明；无声明保持 v2 重试摘要。读取旧账时禁止夹带未签名 workspace，
+同一消息 ID 改目录必须报冲突，不能按相同命令正文当成等价重试。
 
 子代理完成、定时事件或其它结构化 wake 启动后台 active turn 时，运行参数必须从本轮已经加载的
 `ConversationThread` 快照重新携带同一份 `cwd/runtime_workspace_roots`。隐藏 task `work/output` 只保存

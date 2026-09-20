@@ -20,7 +20,7 @@ def _agent_with_current_user(tmp_path, content: str = "请记住 moneywise 项�
         AgentConfig(my_agent_home=str(tmp_path / "home"), prompt_files=[]),
         tmp_path / "workspace",
     )
-    thread = agent.conversation_store.get_or_create_thread(
+    thread = agent.conversation_store.threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "channel": "internal",
@@ -29,7 +29,7 @@ def _agent_with_current_user(tmp_path, content: str = "请记住 moneywise 项�
         }
     )
     request_id = "req-memory-test"
-    agent.conversation_store.append_message(
+    agent.conversation_store.messages.append(
         {
             "thread_id": thread.thread_id,
             "role": "user",

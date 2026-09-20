@@ -301,10 +301,10 @@ def _consume_local_background_snapshot(
 ) -> bool:
     from ...agent.conversation.channels import LOCAL_AGENT_USER_ID, LOCAL_CHAT_CHANNEL
 
-    root = getattr(store, "root", None)
+    root = getattr(getattr(store, "storage", None), "root", None)
     if not root:
         return True
-    thread, _thread_error = store.resolve_thread_report(
+    thread, _thread_error = store.threads.resolve_report(
         channel=LOCAL_CHAT_CHANNEL,
         channel_conversation_id=session_id,
         channel_user_id=LOCAL_AGENT_USER_ID,
@@ -383,10 +383,8 @@ def _consume_local_background_snapshot(
 
 
 
-# LLM: Gateway rows are already owner-scoped; this adapter supplies one exact
-# POST writer and treats any non-confirmed response as failure so the overlay
-# remains open rather than assuming approval delivery.
-# 函数用途: 将单 Gateway 返回的子代理审批请求接进 TUI，并回写用户选择。
+# LLM: Gateway 行已绑定 owner；适配器给主/子审批同一精确 POST 回写，未确认的响应保留面板，不能当成批准。
+# 函数用途: 将单 Gateway 返回的主/子后台审批接进 TUI，并回写用户选择。
 def _sync_gateway_agent_permissions(
     agent: object,
     session_id: str,
@@ -398,9 +396,8 @@ def _sync_gateway_agent_permissions(
     if not callable(syncer) or not callable(sender):
         return False
 
-    # LLM: The closure preserves canonical run/request and submits the typed
-    # decision only to the dedicated child-approval endpoint.
-    # 函数用途: 回写当前面板选中的精确子代理审批决定。
+    # LLM: 闭包保留 canonical run/request，只向原代理审批端点提交 typed 决定，标题不能改变请求。
+    # 函数用途: 回写当前面板选中的精确主/子后台审批决定。
     def write_decision(run_id, request, decision):
         result = sender(
             session_id,
@@ -417,10 +414,8 @@ def _sync_gateway_agent_permissions(
     return bool(syncer(value, decision_writer=write_decision))
 
 
-# LLM: Embedded mode uses the same durable bridge as Gateway mode. Its local
-# writer does not bypass request validation, and consumer renewal is only a
-# liveness lease, never an approval.
-# 函数用途: 在不走 HTTP 的完整 Agent TUI 中同步并处理子代理审批。
+# LLM: 嵌入模式与 Gateway 复用同一审批桥和完整请求校验；consumer 续租仅表明界面在线，不构成批准。
+# 函数用途: 在不走 HTTP 的完整 Agent TUI 中同步并处理主/子后台审批。
 def _sync_local_agent_permissions(
     agent: object,
     thread: object,
@@ -431,14 +426,14 @@ def _sync_local_agent_permissions(
     if not callable(syncer) or not root_task_id:
         return False
     from ...agent.conversation.agent_tool_approval import (
-        list_pending_subagent_tool_approvals,
-        renew_subagent_tool_approval_consumer,
-        resolve_subagent_tool_approval,
+        list_pending_agent_tool_approvals,
+        renew_agent_tool_approval_consumer,
+        resolve_agent_tool_approval,
     )
 
     try:
-        renew_subagent_tool_approval_consumer(agent, root_task_id=root_task_id)
-        rows = list_pending_subagent_tool_approvals(
+        renew_agent_tool_approval_consumer(agent, root_task_id=root_task_id)
+        rows = list_pending_agent_tool_approvals(
             agent,
             root_task_id=root_task_id,
         )
@@ -449,7 +444,7 @@ def _sync_local_agent_permissions(
     # the process-shared transition lock before changing pending state.
     # 函数用途: 将嵌入式 TUI 的选择写回同一审批账本。
     def write_decision(run_id, request, decision):
-        return resolve_subagent_tool_approval(
+        return resolve_agent_tool_approval(
             agent,
             run_id=run_id,
             request_value=request,

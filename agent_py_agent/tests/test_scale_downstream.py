@@ -227,4 +227,4 @@ def test_scale_group_members_share_group_conversation_without_becoming_owner(tmp
     assert "群里约定代号是远山" in str(backend.message_calls[-1])
     assert result["ok"]
     assert all("# Conversation Transcript" not in prompt for prompt in backend.prompt_calls)
-    assert len(list(agent.conversation_store.threads_dir.glob("*.json"))) == 1
+    assert len(list(agent.conversation_store.storage.threads_dir.glob("*.json"))) == 1

@@ -12,6 +12,8 @@ from __future__ import annotations
 import json
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
+from types import SimpleNamespace as _StoreDomain
 
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings.config import AgentConfig
@@ -198,7 +200,7 @@ def test_capability_request_tool_auto_grants_without_waking_parent():
         # 自动批不该再以 requires_main_agent=True 吵醒主代理(那是未决申请的通道)。
         store = getattr(agent, "conversation_store", None)
         if store is not None:
-            pending = store.unhandled_observations_requiring_main(limit=10)
+            pending = store.observations.unhandled_requiring_main(limit=10)
             assert all(
                 item.event_type != "subagent_capability_request_open" for item in pending
             )
@@ -432,13 +434,18 @@ def test_auto_grant_path_raises_grant_wake_signal():
             thread_id = "thread-test"
 
         class _FakeStore:
-            def thread_for_task(self, task_id):
+            def __init__(self):
+                self.observations = SimpleNamespace(append=self._fake_observations_append)
+                self.wakes = SimpleNamespace(raise_signal=self._fake_wakes_raise_signal)
+                self.tasks = _StoreDomain(thread_for=self._fake_thread_for_task)
+
+            def _fake_thread_for_task(self, task_id):
                 return _FakeThread()
 
-            def append_observation(self, observation):
+            def _fake_observations_append(self, observation):
                 return type("Obs", (), {"observation_id": "obs-1"})()
 
-            def raise_wake_signal(self, request):
+            def _fake_wakes_raise_signal(self, request):
                 raised.append(request)
                 return type("Sig", (), {"wake_signal_id": "sig-1"})()
 
@@ -480,7 +487,7 @@ def test_auto_grant_wake_dedupe_key_matches_dispatch_path():
 
     with tempfile.TemporaryDirectory() as td:
         agent, task = _agent_and_task(td)
-        thread = agent.conversation_store.thread_for_task(task.id)
+        thread = agent.conversation_store.tasks.thread_for(task.id)
         if thread is None:
             # 无线程时验证 dedupe_key 构造本身与 dispatch 路径同构
             return

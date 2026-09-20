@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace as _StoreDomain
+
 """LLM: tests extracted chat helpers so chat.py can keep shrinking safely.
 
 给人看的解释：
@@ -117,7 +119,11 @@ def test_gateway_history_restore_uses_only_complete_foreground_cli_turns() -> No
     ]
 
     class Store:
-        def resolve_thread_report(self, **kwargs):
+        def __init__(self, *args, **kwargs):
+            self.threads = _StoreDomain(resolve_report=self._fake_resolve_thread_report)
+            self.messages = _StoreDomain(history_page_report=self._fake_history_page_report)
+
+        def _fake_resolve_thread_report(self, **kwargs):
             assert kwargs == {
                 "channel": "chat",
                 "channel_conversation_id": "sess-resume",
@@ -125,7 +131,7 @@ def test_gateway_history_restore_uses_only_complete_foreground_cli_turns() -> No
             }
             return SimpleNamespace(thread_id="thread-resume"), None
 
-        def history_page_report(self, thread_id, *, before, limit):
+        def _fake_history_page_report(self, thread_id, *, before, limit):
             assert thread_id == "thread-resume"
             assert before is None
             assert limit == 16
@@ -149,10 +155,14 @@ def test_gateway_history_restore_preserves_structured_load_error() -> None:
     load_error = {"error_code": "jsonl_corrupt", "line_number": 3}
 
     class Store:
-        def resolve_thread_report(self, **_kwargs):
+        def __init__(self, *args, **kwargs):
+            self.threads = _StoreDomain(resolve_report=self._fake_resolve_thread_report)
+            self.messages = _StoreDomain(history_page_report=self._fake_history_page_report)
+
+        def _fake_resolve_thread_report(self, **_kwargs):
             return SimpleNamespace(thread_id="thread-bad"), None
 
-        def history_page_report(self, _thread_id, *, before, limit):
+        def _fake_history_page_report(self, _thread_id, *, before, limit):
             assert before is None
             assert limit == 16
             return SimpleNamespace(rows=[], errors=(load_error,), after=0, before=0)

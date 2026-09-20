@@ -277,7 +277,7 @@ def _retention_apply_payload(agent: Any, _args: Any) -> dict[str, object]:
 # LLM: ConversationStore root 只作为 RetentionService 的显式外部权威根，不扩大到 workspace/home 根。
 # 函数用途: 从当前 Agent 依赖构造唯一 v2 RetentionService。
 def _retention_service(agent: Any) -> MemoryRetentionService:
-    conversation_root = getattr(agent.conversation_store, "root", None)
+    conversation_root = getattr(getattr(agent.conversation_store, "storage", None), "root", None)
     roots = (Path(conversation_root),) if conversation_root is not None else ()
     return MemoryRetentionService(
         home_paths=agent.home_paths,

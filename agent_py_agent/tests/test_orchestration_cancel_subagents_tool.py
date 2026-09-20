@@ -553,7 +553,7 @@ def test_cancel_subagents_retires_existing_conversation_task_link(tmp_path):
     task.status = "RUNNING"
     agent.subagents.save(task)
     store = agent.conversation_store
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "channel": "feishu",
@@ -561,7 +561,7 @@ def test_cancel_subagents_retires_existing_conversation_task_link(tmp_path):
             "channel_user_id": "user-1",
         }
     )
-    store.bind_task(
+    store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": task.id,
@@ -575,8 +575,8 @@ def test_cancel_subagents_retires_existing_conversation_task_link(tmp_path):
         {"run_id": task.id, "reason": "停止会话绑定任务"},
     )
     payload = json.loads(result.output)
-    link = store.task_links(thread.thread_id)[0]
-    updated_thread = store.load_thread(thread.thread_id)
+    link = store.tasks.list(thread.thread_id)[0]
+    updated_thread = store.threads.load(thread.thread_id)
 
     assert result.ok is True
     assert payload["cancelled"][0]["conversation_link"] == {"status": "updated"}

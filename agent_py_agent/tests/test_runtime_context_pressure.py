@@ -625,7 +625,7 @@ def test_provider_observation_survives_reconstructed_background_slice(
     monkeypatch,
 ) -> None:
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread({"canonical_user_id": "provider-calibration"})
+    thread = store.threads.get_or_create({"canonical_user_id": "provider-calibration"})
     agent = SimpleNamespace(
         config=AgentConfig(
             auto_save_memory=True,
@@ -660,7 +660,7 @@ def test_provider_observation_survives_reconstructed_background_slice(
         context_surface_fingerprint=first_snapshot.context_surface_fingerprint,
         response=SimpleNamespace(usage={"prompt_tokens": 40_000}),
     )
-    persisted = store.load_thread(thread.thread_id)
+    persisted = store.threads.load(thread.thread_id)
     assert persisted is not None
     assert persisted.provider_context_observation["compact_generation"] == 0
 

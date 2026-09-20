@@ -144,8 +144,8 @@ def test_permission_only_scope_keeps_backend_and_restores_snapshot(tmp_path):
 
 def test_pending_child_resumes_by_owner_mode_without_waiting_for_parent(tmp_path):
     from agent_py_agent.agent.conversation.agent_tool_approval import (
-        publish_subagent_tool_approval,
-        wait_for_subagent_tool_approval,
+        publish_agent_tool_approval,
+        wait_for_agent_tool_approval,
     )
     from agent_py_agent.tests.test_gateway_agent_control_service import (
         _bound_agent_tree,
@@ -154,11 +154,11 @@ def test_pending_child_resumes_by_owner_mode_without_waiting_for_parent(tmp_path
 
     agent, _scope, child = _bound_agent_tree(tmp_path)
     request = _child_approval_request(child.id)
-    handle = publish_subagent_tool_approval(agent, run_id=child.id,
+    handle = publish_agent_tool_approval(agent, run_id=child.id,
                                            thread_id=child.agent_thread_id, request_value=request)
     assert autonomous_tool_decision(agent, request) is None
     execute_approval_mode_operation(agent.home_paths, "set", "auto")
-    decision = wait_for_subagent_tool_approval(
+    decision = wait_for_agent_tool_approval(
         handle, discovery_seconds=0, mode_decision_provider=partial(autonomous_tool_decision, agent))
     assert decision.permission_id == request.permission_id and decision.decision == "approved"
     assert not handle.path.exists()

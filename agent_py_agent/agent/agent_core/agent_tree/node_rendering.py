@@ -1,4 +1,5 @@
-
+# LLM: 代理树只展示结构化运行与插话状态，不充当身份、权限或调度事实源；修改须核对树查询错误投影。
+# 模块用途: 将运行快照、工作进度和未读插话整理成代理树节点。
 from __future__ import annotations
 
 import time
@@ -219,12 +220,14 @@ def _evidence_layer(values: dict[str, list[object]]) -> dict[str, object]:
     }
 
 
+# LLM: 代理树只投影当前 run 的 guidance 队列；读取错误作为诊断返回，不赋予跨邮箱访问权限。
+# 函数用途: 为代理树节点读取未处理插话及加载错误。
 def _guidance_layer(agent: object, run_id: str) -> dict[str, object]:
     store = getattr(agent, "conversation_store", None)
     if store is None or not run_id:
         return {"pending_count": 0, "recent_pending": []}
     try:
-        pending = list(store.pending_guidance("agent_run", run_id, limit=5))
+        pending = list(store.guidance.pending("agent_run", run_id, limit=5))
     except Exception as exc:
         return {
             "pending_count": 0,

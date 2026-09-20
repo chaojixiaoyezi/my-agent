@@ -23,7 +23,7 @@ def ensure_thread_history_indexed(
         agent._conversation_indexed_threads = indexed
     if thread_id in indexed:
         return
-    rows, errors = store.recent_messages_report(thread_id, limit=0)
+    rows, errors = store.messages.recent_report(thread_id, limit=0)
     if errors:
         raise OSError("conversation transcript could not be indexed reliably")
     for row in rows:
@@ -47,7 +47,7 @@ def index_conversation_message(
         "channel": row.channel,
         "channel_message_id": row.channel_message_id,
         "created_at": row.created_at,
-        "authoritative_transcript": str(store._message_path(row.thread_id)),
+        "authoritative_transcript": str(store.storage.message_path(row.thread_id)),
     }
     operation_verification = row.metadata.get("operation_verification")
     if (

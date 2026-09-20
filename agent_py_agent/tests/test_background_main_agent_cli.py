@@ -29,16 +29,16 @@ def test_background_main_agent_tick_runs_due_policy(tmp_path, capsys) -> None:
     agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
     backend = _BackgroundCliBackend()
     agent.backend = backend
-    thread = agent.conversation_store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 10.0})
-    agent.conversation_store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "巡检", 'now': 11.0})
-    agent.conversation_store.set_progress_policy({'thread_id': thread.thread_id, 'task_id': "task-1", 'interval_seconds': 10, 'route_channel': "internal", 'route_target': "thread-1", 'now': 12.0})
+    thread = agent.conversation_store.threads.get_or_create({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 10.0})
+    agent.conversation_store.tasks.bind({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "巡检", 'now': 11.0})
+    agent.conversation_store.progress.create({'thread_id': thread.thread_id, 'task_id': "task-1", 'interval_seconds': 10, 'route_channel': "internal", 'route_target': "thread-1", 'now': 12.0})
     args = SimpleNamespace(config=str(tmp_path / "config.yaml"), now=22.0, json=False)
 
     with patch("agent_py_agent.cli.background_main_agent.make_agent", return_value=agent):
         assert cmd_background_main_agent_tick(args) == 0
 
     output = capsys.readouterr().out
-    messages = agent.conversation_store.recent_messages(thread.thread_id)
+    messages = agent.conversation_store.messages.recent(thread.thread_id)
     assert "background-main-agent tick reports=1" in output
     assert messages[-1].content == "后台主代理 CLI 汇报。"
     assert "inspect_agent_tree" not in backend.prompts[0]
@@ -59,9 +59,9 @@ def test_gateway_background_loop_runs_due_progress_policy(tmp_path) -> None:
     backend = _BackgroundCliBackend()
     agent.backend = backend
     current = time.time()
-    thread = agent.conversation_store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': current - 10})
-    agent.conversation_store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "巡检", 'now': current - 9})
-    agent.conversation_store.set_progress_policy({'thread_id': thread.thread_id, 'task_id': "task-1", 'interval_seconds': 1, 'route_channel': "internal", 'route_target': "thread-1", 'now': current - 2})
+    thread = agent.conversation_store.threads.get_or_create({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': current - 10})
+    agent.conversation_store.tasks.bind({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "巡检", 'now': current - 9})
+    agent.conversation_store.progress.create({'thread_id': thread.thread_id, 'task_id': "task-1", 'interval_seconds': 1, 'route_channel': "internal", 'route_target': "thread-1", 'now': current - 2})
     context = GatewayRunContext(
         agent=agent,
         paths=SimpleNamespace(),
@@ -74,13 +74,13 @@ def test_gateway_background_loop_runs_due_progress_policy(tmp_path) -> None:
     deadline = time.time() + 2.0
     while (
         time.time() < deadline
-        and not agent.conversation_store.recent_messages(thread.thread_id)
+        and not agent.conversation_store.messages.recent(thread.thread_id)
     ):
         time.sleep(0.05)
     stop_event.set()
     worker.join(timeout=2)
 
-    messages = agent.conversation_store.recent_messages(thread.thread_id)
+    messages = agent.conversation_store.messages.recent(thread.thread_id)
     assert backend.prompts
     assert messages[-1].content == "后台主代理 CLI 汇报。"
 
@@ -123,7 +123,7 @@ def test_background_main_agent_message_and_bind_task_commands(tmp_path, capsys) 
         assert cmd_background_main_agent_bind_task(bind_args) == 0
 
     bind_payload = json.loads(capsys.readouterr().out)
-    policy = agent.conversation_store.get_progress_policy(bind_payload["policy_id"])
+    policy = agent.conversation_store.progress.load(bind_payload["policy_id"])
     assert bind_payload["task_id"] == "task-1"
     assert policy is not None
     assert policy.next_due_at == 161.0
@@ -148,8 +148,8 @@ def test_background_main_agent_observe_records_event_and_wake(tmp_path, capsys) 
     from agent_py_agent.cli.background_main_agent import cmd_background_main_agent_observe
 
     agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
-    thread = agent.conversation_store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
-    agent.conversation_store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "长期任务", 'now': 2.0})
+    thread = agent.conversation_store.threads.get_or_create({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
+    agent.conversation_store.tasks.bind({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "长期任务", 'now': 2.0})
     args = SimpleNamespace(
         config=str(tmp_path / "config.yaml"),
         thread_id="",
@@ -176,16 +176,16 @@ def test_background_main_agent_observe_records_event_and_wake(tmp_path, capsys) 
     payload = json.loads(capsys.readouterr().out)
     assert payload["thread_id"] == thread.thread_id
     assert payload["wake_signal_id"].startswith("wake-")
-    assert agent.conversation_store.pending_wake_signals()[0].summary == "子代理发现需要主代理处理的事件。"
+    assert agent.conversation_store.wakes.pending()[0].summary == "子代理发现需要主代理处理的事件。"
 
 
 def test_background_main_agent_service_wait_returns_when_wake_signal_pending(tmp_path) -> None:
     from agent_py_agent.cli.background_main_agent import _wait_for_service_interval
 
     agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
-    thread = agent.conversation_store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
-    observation = agent.conversation_store.append_observation({'thread_id': thread.thread_id, 'event_type': "runtime_alert", 'summary': "立刻叫醒主代理。", 'urgency': "urgent", 'requires_main_agent': True, 'now': 2.0})
-    agent.conversation_store.raise_wake_signal({'thread_id': thread.thread_id, 'observation': observation, 'now': 2.0})
+    thread = agent.conversation_store.threads.get_or_create({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
+    observation = agent.conversation_store.observations.append({'thread_id': thread.thread_id, 'event_type': "runtime_alert", 'summary': "立刻叫醒主代理。", 'urgency': "urgent", 'requires_main_agent': True, 'now': 2.0})
+    agent.conversation_store.wakes.raise_signal({'thread_id': thread.thread_id, 'observation': observation, 'now': 2.0})
 
     assert _wait_for_service_interval(agent, interval=30.0) == "wake_signal"
 
@@ -197,9 +197,9 @@ def test_background_main_agent_service_runs_bounded_cycles(tmp_path, capsys) -> 
     backend = _BackgroundCliBackend()
     agent.backend = backend
     current = time.time()
-    thread = agent.conversation_store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': current - 3})
-    agent.conversation_store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "巡检", 'now': current - 2})
-    agent.conversation_store.set_progress_policy({'thread_id': thread.thread_id, 'task_id': "task-1", 'interval_seconds': 1, 'route_channel': "internal", 'route_target': "thread-1", 'now': current - 2})
+    thread = agent.conversation_store.threads.get_or_create({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': current - 3})
+    agent.conversation_store.tasks.bind({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "巡检", 'now': current - 2})
+    agent.conversation_store.progress.create({'thread_id': thread.thread_id, 'task_id': "task-1", 'interval_seconds': 1, 'route_channel': "internal", 'route_target': "thread-1", 'now': current - 2})
     args = SimpleNamespace(
         config=str(tmp_path / "config.yaml"),
         interval=0.0,
@@ -238,11 +238,11 @@ def _agent_with_status_control_plane(tmp_path) -> SimpleAgent:
     from agent_py_agent.agent.collaboration import AgentCapability
 
     agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
-    thread = agent.conversation_store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
-    agent.conversation_store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "长期协作", 'now': 2.0})
-    observation = agent.conversation_store.append_observation({'thread_id': thread.thread_id, 'event_type': "runtime_alert", 'summary': "需要主代理处理。", 'urgency': "urgent", 'requires_main_agent': True, 'now': 3.0})
-    agent.conversation_store.raise_wake_signal({'thread_id': thread.thread_id, 'observation': observation, 'now': 3.0})
-    agent.conversation_store.set_progress_policy({'thread_id': thread.thread_id, 'task_id': "task-1", 'interval_seconds': 60, 'now': 4.0})
+    thread = agent.conversation_store.threads.get_or_create({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
+    agent.conversation_store.tasks.bind({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "长期协作", 'now': 2.0})
+    observation = agent.conversation_store.observations.append({'thread_id': thread.thread_id, 'event_type': "runtime_alert", 'summary': "需要主代理处理。", 'urgency': "urgent", 'requires_main_agent': True, 'now': 3.0})
+    agent.conversation_store.wakes.raise_signal({'thread_id': thread.thread_id, 'observation': observation, 'now': 3.0})
+    agent.conversation_store.progress.create({'thread_id': thread.thread_id, 'task_id': "task-1", 'interval_seconds': 60, 'now': 4.0})
     agent.collaboration_store.register_agent(AgentCapability(agent_id="source-a", capabilities=("query",)))
     agent.collaboration_store.open_case({'thread_id': thread.thread_id, 'task_id': "task-1", 'title': "状态看板 case", 'created_by': "source-a", 'now': 5.0})
     return agent

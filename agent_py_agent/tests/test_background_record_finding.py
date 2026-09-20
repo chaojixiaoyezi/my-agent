@@ -1,8 +1,8 @@
-from agent_py_agent.agent.conversation.runtime import (
+from agent_py_agent.agent.conversation.background_tool_policy import (
     SCHEDULED_BACKGROUND_ALLOWED_TOOLS,
     SUBAGENT_INTEGRATION_ALLOWED_TOOLS,
-    _scheduled_continuation_prompt,
 )
+from agent_py_agent.agent.conversation.runtime import _scheduled_continuation_prompt
 
 
 def test_record_finding_absent_from_background_tool_profiles() -> None:

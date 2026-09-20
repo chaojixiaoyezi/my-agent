@@ -170,11 +170,11 @@ def test_start_record_persists_live_context_total_for_subagent(tmp_path: Path) -
     agent.subagents = manager
     agent._current_subagent_run_id = task.id
     agent.conversation_store = ConversationStore(tmp_path / "conversations")
-    thread = agent.conversation_store.get_or_create_thread({"canonical_user_id": "child", "channel_conversation_id": task.id})
+    thread = agent.conversation_store.threads.get_or_create({"canonical_user_id": "child", "channel_conversation_id": task.id})
     params = replace(_params(protocol="native", prompt=PROMPT), run_id=task.id, task_attributes={"agent_thread_id": thread.thread_id})
 
     recorded = _recorded_input_tokens(agent, params, PROMPT)
-    usage = agent.conversation_store.load_thread(thread.thread_id).model_context_usage
+    usage = agent.conversation_store.threads.load(thread.thread_id).model_context_usage
 
     assert usage["schema"] == "model_visible_context_usage.v1"
     assert usage["current_tokens"] == recorded

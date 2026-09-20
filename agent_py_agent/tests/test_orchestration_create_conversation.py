@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from types import SimpleNamespace as _StoreDomain
 
 from agent_py_agent.agent.agent_core.orchestration.create_policy import (
     add_current_conversation_attrs,
@@ -14,11 +15,15 @@ from agent_py_agent.agent.agent_core.orchestration.lifecycle import (
 
 def test_conversation_ref_failures_are_structured_on_attrs() -> None:
     class BrokenConversationStore:
-        def thread_for_task(self, task_id):
+        def __init__(self, *args, **kwargs):
+            self.tasks = _StoreDomain(thread_for=self._fake_thread_for_task)
+            self.threads = _StoreDomain(get_or_create=self._fake_get_or_create_thread)
+
+        def _fake_thread_for_task(self, task_id):
             del task_id
             raise ValueError("thread index broken")
 
-        def get_or_create_thread(self, payload):
+        def _fake_get_or_create_thread(self, payload):
             del payload
             raise OSError("cannot create internal thread")
 
@@ -41,7 +46,10 @@ def test_conversation_ref_failures_are_structured_on_attrs() -> None:
 
 def test_conversation_bind_failure_is_reported_not_swallowed() -> None:
     class BrokenConversationStore:
-        def bind_task(self, payload):
+        def __init__(self, *args, **kwargs):
+            self.tasks = _StoreDomain(bind=self._fake_bind_task)
+
+        def _fake_bind_task(self, payload):
             del payload
             raise OSError("conversation index unavailable")
 
@@ -68,12 +76,13 @@ def test_conversation_bind_reconciles_a_cancel_that_landed_before_projection() -
         def __init__(self) -> None:
             self.bound: list[dict[str, object]] = []
             self.updated: list[dict[str, object]] = []
+            self.tasks = _StoreDomain(bind=self._fake_bind_task, update_status=self._fake_update_task_status)
 
-        def bind_task(self, payload):
+        def _fake_bind_task(self, payload):
             self.bound.append(dict(payload))
             return SimpleNamespace(**payload)
 
-        def update_task_status(self, payload):
+        def _fake_update_task_status(self, payload):
             self.updated.append(dict(payload))
             return SimpleNamespace(**payload)
 

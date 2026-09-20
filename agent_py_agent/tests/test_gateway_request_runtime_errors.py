@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from agent_py_agent.agent.gateway_parts import request_binding, request_context, request_history
+
 """Gateway request execution should surface bad request files as runtime errors."""
 
 import json
@@ -141,8 +143,8 @@ def test_model_failure_keeps_typed_terminal_and_native_history(tmp_path, monkeyp
         assert "参数不完整或格式无效" in response["user_error"]
         assert "本次调用未执行" in response["user_error"]
     assert "任务处理失败" not in response["user_error"]
-    thread = agent.conversation_store.list_threads()[0]
-    rows = agent.conversation_store.recent_messages(thread.thread_id, limit=0)
+    thread = agent.conversation_store.threads.list()[0]
+    rows = agent.conversation_store.messages.recent(thread.thread_id, limit=0)
     assert rows[-1].role == "assistant" and rows[-1].content == body
     assert rows[-1].metadata["turn_end_reason"] == end
     assert list(provider_history_messages_from_rows(rows)) == native
@@ -177,7 +179,7 @@ def test_untyped_empty_reply_still_has_no_deliverable_response(tmp_path):
     from agent_py_agent.agent.gateway_parts.request_errors import UserReplyUnavailableError
 
     with pytest.raises(UserReplyUnavailableError):
-        request_execution._persist_gateway_assistant_result(
+        request_history.persist_gateway_assistant_result(
             SimpleNamespace(), SimpleNamespace(),
             SimpleNamespace(response="", runtime_status="ok", thinking="MODEL_RESPONSE_TRUNCATED"),
         )
@@ -193,11 +195,11 @@ def test_compact_failure_keeps_its_typed_code_and_does_not_claim_data_corruption
     def fail(*_args, **_kwargs):
         raise ProviderContextWindowError("source exceeds provider window")
 
-    monkeypatch.setattr(request_execution, "prepare_conversation_context", fail)
+    monkeypatch.setattr(request_context, "prepare_conversation_context", fail)
     inputs = SimpleNamespace(agent=object(), prompt="继续", request_id="r", on_chunk=None,
                              request={}, loaded_tool_names=())
     with pytest.raises(ConversationCompactError) as caught:
-        request_execution._load_gateway_compact_context(inputs, object(), object(), [])
+        request_context._load_gateway_compact_context(inputs, object(), object())
     assert caught.value.error_code == "COMPACT_MODEL_CONTEXT_WINDOW_EXCEEDED"
     message = gateway_client_error_message(caught.value.error_code)
     assert "压缩未完成" in message
@@ -221,8 +223,8 @@ def test_recovery_uncertainty_has_structured_safe_client_error(monkeypatch, reas
         request={}, request_id="request",
         agent=SimpleNamespace(subagents=SimpleNamespace(runtime_db=repo)),
     )
-    monkeypatch.setattr(request_execution, "_gateway_request_is_active_turn_recovery", lambda *args: True)
-    monkeypatch.setattr(request_execution, "_gateway_runtime_authority", lambda *args: {
+    monkeypatch.setattr(request_binding, 'gateway_request_is_active_turn_recovery', lambda *args: True)
+    monkeypatch.setattr(request_binding, 'gateway_runtime_authority', lambda *args: {
         "task_id": "task", "run_id": "request"
     })
     with pytest.raises(ConversationPersistenceError) as caught:
@@ -257,7 +259,7 @@ def test_terminal_and_provider_admission_share_exact_turn_winner(tmp_path: Path)
         encoding="utf-8",
     )
     dedupe_key = "thread/terminal-wins"
-    entry = agent.conversation_store.append_guidance_once(
+    entry = agent.conversation_store.guidance.append_once(
         {
             "target_type": "request",
             "target_id": request_id,
@@ -269,12 +271,12 @@ def test_terminal_and_provider_admission_share_exact_turn_winner(tmp_path: Path)
         },
         dedupe_key=dedupe_key,
     )
-    assert agent.conversation_store.claim_guidance_once_for_turn(
+    assert agent.conversation_store.guidance.claim_for_turn(
         entry,
         expected_turn_id=request_id,
         attempt_id=attempt_id,
     )
-    guard = request_execution._GatewayActiveTurnTransition(
+    guard = request_binding.GatewayActiveTurnTransition(
         request_path,
         request_id,
         attempt_id,
@@ -292,14 +294,14 @@ def test_terminal_and_provider_admission_share_exact_turn_winner(tmp_path: Path)
     with pytest.raises(InterruptedError, match="closed"):
         guard(
             "submit",
-            lambda: agent.conversation_store.mark_guidance_entries_submitted(
+            lambda: agent.conversation_store.guidance.submissions.mark_submitted(
                 request_id,
                 [entry],
                 attempt_id=attempt_id,
                 provider_call_id="provider-after-terminal",
             ),
         )
-    receipt = agent.conversation_store.guidance_once_receipt(dedupe_key)
+    receipt = agent.conversation_store.guidance.receipt(dedupe_key)
     assert receipt is not None and receipt.status == "rejected"
 
 
@@ -321,7 +323,7 @@ def test_provider_admission_winner_stays_unknown_after_terminal(tmp_path: Path) 
         encoding="utf-8",
     )
     dedupe_key = "thread/provider-wins"
-    entry = agent.conversation_store.append_guidance_once(
+    entry = agent.conversation_store.guidance.append_once(
         {
             "target_type": "request",
             "target_id": request_id,
@@ -333,12 +335,12 @@ def test_provider_admission_winner_stays_unknown_after_terminal(tmp_path: Path) 
         },
         dedupe_key=dedupe_key,
     )
-    assert agent.conversation_store.claim_guidance_once_for_turn(
+    assert agent.conversation_store.guidance.claim_for_turn(
         entry,
         expected_turn_id=request_id,
         attempt_id=attempt_id,
     )
-    guard = request_execution._GatewayActiveTurnTransition(
+    guard = request_binding.GatewayActiveTurnTransition(
         request_path,
         request_id,
         attempt_id,
@@ -346,7 +348,7 @@ def test_provider_admission_winner_stays_unknown_after_terminal(tmp_path: Path) 
 
     submitted = guard(
         "submit",
-        lambda: agent.conversation_store.mark_guidance_entries_submitted(
+        lambda: agent.conversation_store.guidance.submissions.mark_submitted(
             request_id,
             [entry],
             attempt_id=attempt_id,
@@ -363,7 +365,7 @@ def test_provider_admission_winner_stays_unknown_after_terminal(tmp_path: Path) 
     )
 
     assert submitted == (entry.guidance_id,)
-    receipt = agent.conversation_store.guidance_once_receipt(dedupe_key)
+    receipt = agent.conversation_store.guidance.receipt(dedupe_key)
     assert receipt is not None and receipt.status == "submitted"
 
 
@@ -436,7 +438,7 @@ def test_invalid_client_workspace_fails_before_model_and_transcript(
     assert response["ok"] is False
     assert response["error_code"] == "GATEWAY_WORKSPACE_INVALID"
     assert "当前工作目录不可用" in response["user_error"]
-    assert agent.conversation_store.list_threads() == []
+    assert agent.conversation_store.threads.list() == []
 
 
 def test_handle_gateway_request_ignores_orphan_bad_response_projection(tmp_path: Path) -> None:
@@ -779,7 +781,7 @@ def test_claim_persists_server_request_fingerprint(tmp_path: Path) -> None:
 # 函数用途: 为断电边界测试准备真实请求和会话，测试本身不触网或伪造模型产物。
 def _recoverable_claim_fixture(tmp_path):
     agent, paths = _make_agent(tmp_path)
-    thread = agent.conversation_store.get_or_create_thread({
+    thread = agent.conversation_store.threads.get_or_create({
         "canonical_user_id": "owner", "channel": "chat",
         "channel_conversation_id": "session", "channel_user_id": "owner",
     })
@@ -790,7 +792,7 @@ def _recoverable_claim_fixture(tmp_path):
         "status": "processing", "execution_attempt_id": "transport-original",
     }
     path.write_text(json.dumps(request), encoding="utf-8")
-    writer = request_execution._GatewayTaskBindingWriter(
+    writer = request_binding.GatewayTaskBindingWriter(
         path, request_id, request, "transport-original",
     )
     writer.bind_conversation_claim(thread.thread_id)
@@ -800,7 +802,7 @@ def _recoverable_claim_fixture(tmp_path):
 @pytest.mark.parametrize("status", ["done", "failed", "cancelled", "interrupted"])
 @pytest.mark.parametrize("moment", ["acquired", "returned", "reclaimed"])
 def test_terminal_commit_releases_exact_foreground_recovery_claim(tmp_path, monkeypatch, status, moment):
-    from agent_py_agent.agent.conversation import store as store_module
+    from agent_py_agent.agent.conversation import store_claims as store_module
     from agent_py_agent.agent.conversation.run_claim import (
         ConversationRunLaneRequest,
         conversation_run_lane,
@@ -820,59 +822,59 @@ def test_terminal_commit_releases_exact_foreground_recovery_claim(tmp_path, monk
         )) as claim:
             assert claim["task_id"] == claim_request["task_id"]
     else:
-        claim = store.claim_background_run(claim_request)
-    assert store.load_background_run_claim(thread_id)["status"] == "running"
+        claim = store.claims.acquire(claim_request)
+    assert store.claims.load(thread_id)["status"] == "running"
     monkeypatch.setattr(store_module, "process_identity_is_live", lambda _: False)
-    assert store.claim_background_run({
+    assert store.claims.acquire({
         "thread_id": thread_id, "task_id": request_id, "reason": "subagent_runner_finished",
     }) is None
     if moment == "reclaimed":
-        replacement = store.claim_background_run(claim_request)
+        replacement = store.claims.acquire(claim_request)
         assert replacement["claim_id"] != claim["claim_id"]
     target = paths.done if status == "done" else paths.failed
     terminalize_gateway_request_file(
         paths, path, target, request_id, conversation_store=store,
         terminal_response={"id": request_id, "status": status, "ok": status == "done"},
     )
-    assert store.load_background_run_claim(thread_id)["status"] == (
+    assert store.claims.load(thread_id)["status"] == (
         {"done": "finished", "interrupted": "cancelled"}.get(status, status)
     )
     assert not path.exists()
-    later = store.claim_background_run({
+    later = store.claims.acquire({
         "thread_id": thread_id, "task_id": "gateway:later-request", "recover_same_task_only": True,
     })
     assert later is not None
     terminalize_gateway_request_file(
         paths, paths.terminal / path.name, target, request_id, conversation_store=store,
     )
-    current = store.load_background_run_claim(thread_id)
+    current = store.claims.load(thread_id)
     assert current["claim_id"] == later["claim_id"] and current["status"] == "running"
 
 
 def test_recovery_claim_cleanup_failure_is_repaired_without_reexecuting(tmp_path, monkeypatch):
     agent, paths, thread_id, request_id, path, _writer = _recoverable_claim_fixture(tmp_path)
     store = agent.conversation_store
-    store.claim_background_run({
+    store.claims.acquire({
         "thread_id": thread_id, "task_id": f"gateway:{request_id}", "recover_same_task_only": True,
     })
-    finish = store.finish_background_run
+    finish = store.claims.finish
 
     def fail_cleanup(_request):
         raise OSError("test claim cleanup unavailable")
 
-    monkeypatch.setattr(store, "finish_background_run", fail_cleanup)
+    monkeypatch.setattr(store.claims, "finish", fail_cleanup)
     with pytest.raises(OSError, match="cleanup unavailable"):
         terminalize_gateway_request_file(
             paths, path, paths.failed, request_id, conversation_store=store,
             terminal_response={"id": request_id, "status": "failed", "ok": False},
         )
     assert read_json_file(path)["schema_version"] == "gateway_terminal_request.v1"
-    assert store.load_background_run_claim(thread_id)["status"] == "running"
-    monkeypatch.setattr(store, "finish_background_run", finish)
+    assert store.claims.load(thread_id)["status"] == "running"
+    monkeypatch.setattr(store.claims, "finish", finish)
     report = recover_gateway_processing_requests_report(paths, startup=True, agent=agent)
     assert report.summary["archived"] == 1, report
     assert not path.exists()
-    assert store.load_background_run_claim(thread_id)["status"] == "failed"
+    assert store.claims.load(thread_id)["status"] == "failed"
 
 
 @pytest.mark.parametrize("fault", ["write_failure", "thread_rebind", "cancelled"])
@@ -892,13 +894,13 @@ def test_recovery_claim_binding_fails_before_acquiring_execution(tmp_path, monke
         def fail_write(*_args, **_kwargs):
             raise OSError("test binding publication failed")
 
-        monkeypatch.setattr(request_execution, "update_json_file_atomic", fail_write)
-        context = request_execution._GatewayAskRunContext(
+        monkeypatch.setattr(request_binding, "update_json_file_atomic", fail_write)
+        context = request_context.GatewayAskRunContext(
             agent, previous, path, path.with_suffix(".response"), request_id, None,
         )
         with pytest.raises(OSError, match="publication failed"):
-            request_execution._gateway_conversation_execution_lane(context, thread_id)
-    assert not agent.conversation_store.load_background_run_claim(thread_id)
+            request_binding.gateway_conversation_execution_lane(context, thread_id)
+    assert not agent.conversation_store.claims.load(thread_id)
     assert read_json_file(path)["conversation_claim"] == previous["conversation_claim"]
 
 
@@ -906,7 +908,7 @@ def test_recovery_claim_binding_fails_before_acquiring_execution(tmp_path, monke
 def test_terminal_claim_cleanup_does_not_release_another_lane(tmp_path, fault):
     agent, paths, thread_id, request_id, path, _writer = _recoverable_claim_fixture(tmp_path)
     store = agent.conversation_store
-    original = store.claim_background_run({
+    original = store.claims.acquire({
         "thread_id": thread_id, "task_id": f"gateway:{request_id}", "recover_same_task_only": True,
     })
     data = read_json_file(path)
@@ -928,16 +930,16 @@ def test_terminal_claim_cleanup_does_not_release_another_lane(tmp_path, fault):
         expected_error = DataCorruptionError if fault == "wrong_request" else RuntimeError
         with pytest.raises(expected_error):
             terminalize_gateway_request_file(*args, **kwargs)
-    current = store.load_background_run_claim(thread_id)
+    current = store.claims.load(thread_id)
     assert current["claim_id"] == original["claim_id"] and current["status"] == "running"
 
 
 def test_terminal_commit_between_claim_binding_and_acquisition_leaves_no_orphan(tmp_path):
     agent, paths, thread_id, request_id, path, _writer = _recoverable_claim_fixture(tmp_path)
-    context = request_execution._GatewayAskRunContext(
+    context = request_context.GatewayAskRunContext(
         agent, read_json_file(path), path, paths.responses / path.name, request_id, None,
     )
-    lane = request_execution._gateway_conversation_execution_lane(context, thread_id)
+    lane = request_binding.gateway_conversation_execution_lane(context, thread_id)
     terminalize_gateway_request_file(
         paths, path, paths.failed, request_id, conversation_store=agent.conversation_store,
         terminal_response={"id": request_id, "status": "interrupted", "ok": False},
@@ -945,7 +947,7 @@ def test_terminal_commit_between_claim_binding_and_acquisition_leaves_no_orphan(
     with pytest.raises(InterruptedError):
         with lane:
             pytest.fail("已结束请求不能取得执行权")
-    assert not agent.conversation_store.load_background_run_claim(thread_id)
+    assert not agent.conversation_store.claims.load(thread_id)
 
 
 def test_canonical_terminal_never_retires_different_hot_request(tmp_path: Path) -> None:

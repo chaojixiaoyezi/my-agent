@@ -48,7 +48,7 @@ def test_same_feishu_chat_id_does_not_share_history_between_users(tmp_path) -> N
     base = _gateway_agent(tmp_path, scoping=True)
     alice = _resolve_request_agent(base, _req("alice"))
     bob = _resolve_request_agent(base, _req("bob"))
-    alice_thread = alice.conversation_store.get_or_create_thread(
+    alice_thread = alice.conversation_store.threads.get_or_create(
         {
             "canonical_user_id": "alice",
             "channel": "feishu",
@@ -56,10 +56,10 @@ def test_same_feishu_chat_id_does_not_share_history_between_users(tmp_path) -> N
             "channel_user_id": "alice",
         }
     )
-    alice.conversation_store.append_message(
+    alice.conversation_store.messages.append(
         {"thread_id": alice_thread.thread_id, "role": "user", "content": "只属于 Alice 的上下文"}
     )
-    bob_thread = bob.conversation_store.get_or_create_thread(
+    bob_thread = bob.conversation_store.threads.get_or_create(
         {
             "canonical_user_id": "bob",
             "channel": "feishu",
@@ -67,7 +67,7 @@ def test_same_feishu_chat_id_does_not_share_history_between_users(tmp_path) -> N
             "channel_user_id": "bob",
         }
     )
-    assert bob.conversation_store.recent_messages(bob_thread.thread_id, limit=10) == []
+    assert bob.conversation_store.messages.recent(bob_thread.thread_id, limit=10) == []
 
 
 def test_cost_attributed_per_feishu_user(tmp_path) -> None:

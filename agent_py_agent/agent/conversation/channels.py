@@ -353,7 +353,7 @@ def thread_channel(store: object, thread_id: object) -> str:
     if store is None or not tid:
         return ""
     try:
-        thread = store.thread_for_task(tid)
+        thread = store.tasks.thread_for(tid)
     except Exception:
         return ""
     return str(getattr(thread, "channel", "") or "").strip().lower()

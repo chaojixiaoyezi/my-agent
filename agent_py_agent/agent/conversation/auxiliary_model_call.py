@@ -273,6 +273,7 @@ def _record_auxiliary_cost(
 
 
 # LLM: 仅结算拥有独立 request_id 的辅助调用；绑定普通工作片的压缩仍由原 finalizer 结算，避免跨 source 重记。
+# 累计快照只提交给 model_usage 领域，仍沿原增量和事件身份入账。
 # 函数用途: 将手动或独立预检压缩的模型消耗幂等写入原会话账并刷新显示，失败不改变压缩结果。
 def settle_standalone_model_usage(request: object) -> None:
     from ..agent_core.model.call_runtime import model_call_summary
@@ -280,7 +281,7 @@ def settle_standalone_model_usage(request: object) -> None:
 
     try:
         store, agent = request.store, request.agent
-        append = getattr(store, "append_model_usage_snapshot_once", None)
+        append = getattr(getattr(store, "model_usage", None), "append_snapshot_once", None)
         if not callable(append):
             return
         summary = model_call_summary(agent, request_id=request.request_id, run_id=request.run_id)

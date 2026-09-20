@@ -107,17 +107,19 @@ class ProcessRegistration:
 
 
 # LLM: Scope 只能从 executor 注入的 run_scope 和 registry 的 owner home 构造；
+# owner_home 是真实用户地址，不能因 Full Access 取消路径墙而丢失；同步检查 shell 与 process_session。
 # 选择 session -> root task -> root run -> run 的稳定降级顺序，以便主子代理在同一
 # 对话树内协作，同时隔离其他用户、其他 TUI 会话和无法证明归属的裸调用。
-# 函数用途: 把本轮可信身份整理成后台进程查询和停止所用的精确访问范围。
+# 函数用途: 把本轮可信身份和用户地址整理成后台进程查询、持久化和停止的精确范围。
 def process_access_scope(
     run_scope: object,
     owner_scope_root: object = "",
 ) -> ProcessAccessScope:
     scope = run_scope if isinstance(run_scope, dict) else {}
     owner_home = ""
-    if owner_scope_root:
-        owner_home = str(Path(str(owner_scope_root)).expanduser().resolve(strict=False))
+    owner_root = scope.get("owner_home") or owner_scope_root
+    if owner_root:
+        owner_home = str(Path(str(owner_root)).expanduser().resolve(strict=False))
     owner_id = str(scope.get("owner_id") or "").strip()
     if not owner_id and owner_home:
         owner_id = f"path:{owner_home}"
@@ -778,7 +780,8 @@ def _process_parent_map() -> tuple[dict[int, int], bool]:
     return result, complete and bool(result)
 
 
-# LLM: 信号发送失败、出生标识读取失败或权限不足都不能证明死亡；僵尸已不能再执行但可能尚未被父进程收割。
+# LLM: 信号失败、身份读取失败或权限不足不能证明死亡；僵尸以宿主内核状态确认，
+#   不调用 waitpid 冒领 Popen 的退出码。同步检查 shell 和无句柄的子代理停止回执。
 # 函数用途: 只读核对原进程实例已消失、已变成僵尸或 PID 已被明确复用，用于终止回执而非任务验收。
 def _process_instance_terminated(pid: int, birth_token: str) -> bool:
     try:
@@ -787,14 +790,32 @@ def _process_instance_terminated(pid: int, birth_token: str) -> bool:
         return True
     except OSError:
         return False
-    try:
-        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
-        if stat.rsplit(")", 1)[1].split()[0] == "Z":
-            return True
-    except (OSError, IndexError):
-        pass
+    if _process_is_zombie(pid):
+        return True
     current = capture_process_birth_token(pid) if birth_token else ""
     return bool(birth_token and current and current != birth_token)
+
+
+# LLM: Linux 从 proc、其它 POSIX 从 ps 读取内核进程状态；读取失败不等于已死。
+#   只读探测不回收进程，保留持有 Popen 的调用方获取真实退出码的权利。
+# 函数用途: 确认尚未被父进程回收、但已不能继续写文件的进程，包括 macOS 的僵尸。
+def _process_is_zombie(pid: int) -> bool:
+    if _IS_WINDOWS:
+        return False
+    if Path("/proc").is_dir():
+        try:
+            stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
+            return stat.rsplit(")", 1)[1].split()[0] in {"Z", "X"}
+        except (OSError, IndexError):
+            return False
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "stat=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=1, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0 and result.stdout.strip().startswith(("Z", "X"))
 
 
 # LLM: Persisted process control must pair a PID with a stable birth identity.

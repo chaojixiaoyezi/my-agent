@@ -218,7 +218,7 @@ def _valid_output(thread_id: str, message_ids: list[str]) -> dict[str, object]:
 # 函数用途: 造一个真实 ConversationStore 线程和若干条用户消息。
 def _conversation(tmp_path: Path, count: int):
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "channel": "internal",
@@ -228,7 +228,7 @@ def _conversation(tmp_path: Path, count: int):
         }
     )
     messages = [
-        store.append_message(
+        store.messages.append(
             {
                 "thread_id": thread.thread_id,
                 "role": "user",

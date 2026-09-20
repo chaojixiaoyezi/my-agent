@@ -61,8 +61,10 @@ _DELIVERY_PENDING = "pending"
 _DELIVERY_DELIVERED = "delivered"
 
 
-def _noop_outcome(state: str, reason: str, **extra: Any) -> dict[str, Any]:
-    return {"state": state, "reason": reason, "target_run_status": "", "retryable": False, **extra}
+# LLM: 仅构造未发生收口的结果；读写失败有单独的可重试记录，不允许任意字段覆盖默认状态。
+# 函数用途: 给无需收口的分支返回一致的无副作用结果，供唯一收口入口使用。
+def _noop_outcome(state: str, reason: str) -> dict[str, Any]:
+    return {"state": state, "reason": reason, "target_run_status": "", "retryable": False}
 
 
 # LLM: 目标 run 终态只从 runner 的结构化结论推导；PENDING/BLOCKED/RUNNING 等可恢复形态
@@ -105,7 +107,7 @@ def _error_text(exc: BaseException) -> str:
 # LLM: 收口是本模块唯一的写点。返回的 outcome 是后续"是否通知父级 / 是否落待重试事实"
 # 的唯一判据：committed 才允许通知，retryable 才落 WAL，rejected 只留诊断。
 # 语义不变式：只在 attempt 仍是 exact current 时收口；stale/换代保护沿用 repo 的 CAS。
-# 函数用途: 按 runner 最终结论收口对应 runtime run，并返回结构化收口结果。
+# 函数用途: 按 runner 结论收口对应 run，读取失败显式记录可重试结果，无操作分支不附加隐式覆盖字段。
 def settle_runtime_run_for_result(
     manager: Any,
     task: Any,
@@ -125,11 +127,11 @@ def settle_runtime_run_for_result(
     try:
         authority = repo.agent_run_for_run_id(run_id)
     except Exception as exc:  # noqa: BLE001 - 读权威行失败同样是"未收口"，必须可重试
-        return _noop_outcome(
-            CLOSEOUT_WRITE_ERROR, "authority_read_failed", retryable=True,
-            target_run_status=target, run_id=run_id, attempt_id=attempt_id,
-            detail=_error_text(exc),
-        )
+        return {
+            "state": CLOSEOUT_WRITE_ERROR, "reason": "authority_read_failed", "retryable": True,
+            "target_run_status": target, "run_id": run_id, "attempt_id": attempt_id,
+            "detail": _error_text(exc),
+        }
     if authority is None:
         return _noop_outcome(CLOSEOUT_NOT_APPLICABLE, "no_runtime_authority")
     agent_run_id = str(authority["agent_run_id"] or "")

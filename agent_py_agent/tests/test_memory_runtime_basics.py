@@ -428,7 +428,7 @@ def test_run_no_save_still_persists_thread_model_usage_without_runtime_archive(
     agent.backend = SequenceUsageBackend(
         [{"input_tokens": 123, "output_tokens": 45}]
     )
-    thread = agent.conversation_store.get_or_create_thread(
+    thread = agent.conversation_store.threads.get_or_create(
         {"canonical_user_id": "local-usage", "now": 10.0}
     )
 
@@ -443,7 +443,7 @@ def test_run_no_save_still_persists_thread_model_usage_without_runtime_archive(
         task_attributes={"conversation_thread_id": thread.thread_id},
     )
 
-    usage = agent.conversation_store.model_usage_summary(thread.thread_id)
+    usage = agent.conversation_store.model_usage.summary(thread.thread_id)
     assert result.archive_events == 0
     assert usage["event_count"] == 1
     assert usage["provider"]["call_count"] == 1

@@ -202,7 +202,7 @@ class TestMakeAgent:
                 make_agent(args)
 
         expected = explicit_root.resolve()
-        assert mock_config.workspace_root == str(expected)
+        assert mock_config.workspace_root == [str(expected)]
         assert mock_agent_cls.call_args.args[1] == expected
 
 

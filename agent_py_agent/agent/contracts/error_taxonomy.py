@@ -3,6 +3,7 @@
 #   回合结果未知和父级授权快照缺失不可自动重放或补授权，必须分别核实事实或报告阻塞。
 #   删除恢复文案只指向可发现的真实工具和既有 grant；不能把内部回收流程当工具或授予权限。
 #   已退休工具限制的错误码只解释旧持久回执，不重新启用原限制或假称当前仍会触发。
+#   历史读取失败保留待恢复工作；任务绑定冲突先核对身份，不用重放任务掩盖不一致。
 # 模块用途: 给工具结果、恢复状态机和用户汇报提供一致的错误类别、重试性与处理建议。
 
 from __future__ import annotations
@@ -264,6 +265,26 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.RETRY.value,
         recovery_hint=(
             "当前消息无法写入权威会话记录；不要执行模型或副作用，待存储恢复后重试本轮。"
+        ),
+    ),
+    "BACKGROUND_HISTORY_UNAVAILABLE": ErrorContract(
+        code="BACKGROUND_HISTORY_UNAVAILABLE",
+        category="state",
+        retryable=True,
+        recommended_action=RecoveryAction.RETRY.value,
+        recovery_hint=(
+            "后台权威历史暂时无法读取；保留原唤醒与读取诊断，不使用缺失历史调用模型。"
+            "待存储恢复后沿原工作片入口重新读取，不补造或清空历史。"
+        ),
+    ),
+    "CONVERSATION_TASK_BINDING_CONFLICT": ErrorContract(
+        code="CONVERSATION_TASK_BINDING_CONFLICT",
+        category="state",
+        retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint=(
+            "会话任务与执行身份不一致；核对 exact thread/task/run 及旧执行是否结束。"
+            "不清空历史、不猜测归属、不自动重放；确认绑定后由原控制入口显式恢复。"
         ),
     ),
     "ACTIVE_TURN_OUTCOME_UNCERTAIN": ErrorContract(

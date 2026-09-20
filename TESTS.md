@@ -6,10 +6,24 @@
 
 普通需求用自然中文表达。权限、参数、隔离、状态和恢复由底座控制，不靠在提示词里写特殊限制规避缺陷。详见 [测试分层](docs/design/main-agent-contract-testing.md) 与 [测试清单](TEST_CHECKLIST.md)。
 
+拟议结构调整、Computer Use 当前部署复验及 Jev 只读对照边界见
+[可维护性评估](docs/design/MAINTAINABILITY_AND_JEV_REVIEW.md)。后端首批拆分已完成定向验证，既有测试与发布 gate 不变；
+接入协议测试与真实桌面分别留证，Jev API 尚未验收。
+
+本轮用户指定：所有真实验收通过实际 TUI，LLM 只使用官方 MiniMax-M2.7，必须核对 provider 与请求端点。
+测试覆盖长任务矩阵，历史日志只作案例来源；任务、工具、历史和产物须由被测代理自己完成。
+登录认证也从 TUI 进入，其他账号的真实模型调用不混入本轮验收。截图、账号信息和原始日志只保存在仓库外。
+每批可并开多个真实 TUI，必须公布 tmux 名称和查看命令，共用一个 Gateway；重连保留原会话身份。
+新增回归覆盖 Full Access 的后台进程地址、跨权限视图恢复、PTY 共享解析及文本输入 Unicode 事件。
+键盘事件替身和内存事件校验不计真实桌面通过，仍须由 TUI 模型操作后读取目标应用核对。
+本轮已完成后台等待、PTY、取消续做、断连重连、Goal 暂停恢复、多子代理插话与手动/自动压缩；
+本机英文和中文桌面输入读回一致。登录设备码被官方端点拒绝，真实账号确认/刷新/退出未通过。
+具体通过范围与失败记录见 [本轮真实矩阵](docs/design/MAINTAINABILITY_AND_JEV_REVIEW.md#本轮真实-tui-验收矩阵)。
+
 ## 必测模块
 
-长时间运行增量矩阵见 [设计与验收](docs/design/LONG_RUNNING_EXECUTION.md)。真实测试使用一条本地慢模型
-TUI（无子代理）及多条正常模型 TUI，共用单 Gateway，定向回放和真实通过分别记账。
+长时间运行增量矩阵见 [设计与验收](docs/design/LONG_RUNNING_EXECUTION.md)。普通验收并行运行官方 MiniMax-M2.7
+TUI，共用单 Gateway；只有用户明确要求的慢模型专项才另用单路对照，定向回放和真实通过分别记账。
 
 | 模块 | 验证要点 |
 |---|---|
@@ -23,6 +37,97 @@ TUI（无子代理）及多条正常模型 TUI，共用单 Gateway，定向回�
 | 调度与交付 | 普通回合与目标模式、挂起唤醒、断线、后台交付和恢复；IM 无环境时标明未测 |
 
 ## 重点定向回归入口
+
+- 后台审批桥：`test_background_tool_approval.py` 联合 Gateway 代理控制、owner 权限模式、TUI 队列与后台活动测试。
+  核对原始请求批准/拒绝、跨会话拒绝、claim 换轮失效、无接收方关闭式失败、缓存隔离；主审批不能扩权到子代理控制入口。
+  Goal 暂停仍允许当前审批；回合中断取消等待，明确任务停止另验资源收回。真实验收从 TUI 启动 Goal，
+  未批准前核对无执行，正常面板批准后读取原调用结果；拒绝及旧 PTY 续用分别留证。
+  本片 428 项定向通过。真实 TUI 已分别证明暂停后批准原调用、跨 claim 读写同一 PTY 和拒绝不执行；
+  程序仅启动一次、原终端正常退出，30 项实际输出与报告逐项一致。测试者没有执行任务程序或修改产物。
+- 插话存储组合：联合 `test_runtime_guidance.py`、Gateway 控制与输入交付、主子恢复、Compact 和终态测试。
+  故障注入直接指向提交批次组件或账本投影；保留提交后部分回执写入失败、确认重放、旧格式迁移和改绑半写入样例。
+  新组件的独立导入不得加载聚合 Store 或运行执行器。实际 TUI 必须在同次短输入操作内确认完整回显并提交，
+  保存提交时的 running claim、精确输入回执、模型原生输入和最终消费状态，区分忙碌插话与任务结束后的追问。
+  本片定向 2,362 项通过；综合全仓 17,116 项通过、35 项 xfail、22 项跳过；该全仓结果早于本轮控制修正。
+  旧 Goal 暂停后 PTY 继续不算资源停止失败，当前控制语义另行验收，不能由历史结果替代。
+- PTY 生命周期补修定向覆盖 `test_pty_sessions.py`、`test_gateway_conversation_control.py`、
+  `test_orchestration_cancel_subagents_tool.py` 及公共进程终止、线程取消和导入边界：
+  跨模型回合资源停止、同会话不同任务、跨 owner/thread、精确 attempt、Popen 前后取消竞态、自然退出 PID 不再发信号。
+  Goal 暂停/清除保留当前执行；有无 Goal 或目标 paused 时的 interrupt 都不能停止独立资源。
+  真实 TUI 分开验证：暂停 Goal 后当前链及 PTY 继续、回合结束后没有 Goal 自动续跑；
+  中断回合后独立 PTY 保留；明确 `/stop` 后所属资源停止，恢复原程序保留原始记录前缀。
+  另一窗口同期采样用于确认隔离。不得由测试者执行采样脚本或补报告；旧暂停后静止的观测仅是旧实现记录。
+  后台恢复还须验证策略、冻结快照和原生工具 Schema 均含获准的终端工具；显式配置或 owner/task 禁用仍有效。
+  `test_background_main_agent_runtime.py` 联合进程/PTY 测试覆盖 Goal、子代理、定时和 Audit 唤醒目录，真实复验接续原未完成任务。
+  当前两组定向分别为 444 项控制与 267 项目录/工具测试；真实子代理续采保留 19 条后采满 30 条，主代理 PTY 中断后继续并收尾。
+  后者恢复轮走文件查询，未覆盖旧 PTY 句柄的后台读取；模型自设时限耗尽及报告错误均留为失败，详见 STATUS。
+
+- 线程、消息、任务关联与 Audit 组合：核对绑定并发、Compact CAS、幂等追加、游标分页、终态不复活、
+  命名工作修订及进度退休，并联测 Gateway、子代理和 Memory 的实际领域接口。
+  最新定向 2,206 项通过、28 项既有 xfail、1 项 Linux 平台跳过；故障替身指向新组件，不保留旧 API。
+  实际 TUI 已验暂停/压缩/重连续采、两路长命令并行、普通后续指令和用量；失败及未测范围见 STATUS。
+  实际输入必须核对 canonical 用户消息与原生请求。tmux 批量文本使用括号粘贴，确认完整回显后提交；
+  授权弹窗可能改变输入焦点，拟发送字符串不等于已接收。提交前任务已结束时只计后续指令，不计运行中插话。
+
+- Goal、观察、唤醒与进度领域：联合目标编辑/预算/恢复、发布顺序、观察扫描、策略失败/退休/GC、
+  插话与子代理回传测试；工具 mock 和故障 monkeypatch 直接指向所属领域，不能沿旧 Store 补导出。
+  独立导入检查组件不加载 Store 或调度执行器；跨域旧账归档保持同一时间、保留期与原顺序。
+  定向 1,236 项通过、28 项既有 xfail；新版双 TUI 验证约 98 秒暂停静止、压缩重连、原程序真实续采，
+  并行分批生成各 2,000 条 CSV/JSONL 后程序核对全部编号、数值、中文、时间、样本与 SHA-256。
+  报告误述取消原因、临时脚本目录错误与被拒绝的状态面读取分别留证，不冒充完整任务质量通过。
+
+- 存储上下文与执行租约：联合索引、账本 GC、线程中断、后台运行、Goal 恢复与 Gateway 错误测试，
+  验证原子领取/续租/终态、同任务恢复、坏账报告、惰性指纹缓存、动态能力读取与原路径。
+  `initialize=False` 初始化及缺失线程/租约读回不能创建目录；组件独立导入不能加载组装入口或执行器。
+  本片联合 1,064 项通过、4 项既有 xfail，追加只读打开合同一项通过；259 个原函数/方法中两处构造函数单独审阅，其余逻辑比较一致。
+  新版双 TUI 验证约 95 秒暂停静止、压缩一代重连、原程序实际续采到 12 条，另一会话两路各 10 条、重叠 104.01 秒。
+  租约终态、子结果唤醒、插话、目录隔离、原生投递去重与费用入账分别核对；报告的采样路叙述错误保留。
+
+- Gateway 请求组件：联合会话上下文、Compact、前台历史、请求错误、Goal 恢复、模型选择和后台运行测试。
+  历史提交、写前绑定与输入渲染的替身直接注入各职责模块，不给旧导入增加转发；错误字段和持久格式保持。
+  `test_runtime_module_boundaries.py` 实际调用共享历史选择器后检查未加载 Gateway，另核对新组件不加载网络或执行器。
+  本次 666 项定向通过，110 个定义/常量的搬移前后逻辑比较一致；该证据不替代新版真实 TUI 的暂停、
+  压缩、重连、后台交付、插话和目录隔离验收。原始快照、差异与真实日志保留在仓库外。
+  新版双 TUI 已验证暂停四条后约 111 秒静止、Compact 一代并重连、原程序实际续跑至十二条；
+  另一会话两路各八条采样重叠 84.021 秒，插话与后续更新未改原 CSV。原生历史按精确 request/part 无重复。
+  初次报告遗漏合计和时间心算错误保留；后续程序复核只修正部分数字，两处间隔范围仍错，不计完整任务质量通过。
+
+- Gateway 流式边界：联合 streaming、verbose_progress、foreground_transcript、thinking_archive、
+  main_activity 和恢复测试，验证迟到读取、审批缓存、事件顺序、插话、脱敏和思考归档；猴子补丁须指向
+  实际组件，不通过旧请求模块导出。前后台超窗继续由现有真实 store/替身运行器验证携带、代次与取消。
+  纯 carry 与流模块能独立加载，不引入执行器；真实多 TUI 仍须逐路核对模型源、输出、控制和原生账本。
+
+- 配置为空时不得隐式选择 echo；需要本地后端的夹具必须显式配置。默认值、工作区列表、Goal revision
+  和界面文案断言与当前合同同步，不能恢复已删除的兼容语义来迎合旧测试。
+  `test_home_runtime_bootstrap.py` 与 `test_r103_run_reuse_no_split.py` 联合验证同任务复用 canonical run、
+  新请求身份、归档终态和目录准备失败的 attempt 收口；不放宽终态断言。
+  历史不可读与任务绑定冲突在唯一错误表分别登记，保留原唤醒、禁止猜身份或重放未知副作用。
+
+- 后台交付边界：`test_background_owner_delivery_commit.py` 联合后台运行时与历史快照，验证
+  未声明路线的 canonical 交付、声明但不可用时保留外发义务、整封/纯附件冻结、已发送只补本地、
+  v1 载荷重投、commentary/final 去重、终态抑制和精确审计回执。独立导入不加载调度器或网络后端。
+  实际 TUI 核对父子结果返回、Goal 暂停/恢复、重连后最终回复与原生历史身份；外部 IM 的失败重投
+  仍由已有替身合同验证，不冒充真实 IM 发送通过。
+
+- 后台执行边界：联合 `test_background_main_agent_runtime.py`、`test_background_history_snapshot.py`、
+  `test_background_owner_delivery_commit.py`、`test_thread_model_selection.py`、`test_cli_resume_contract.py`，
+  验证同片溢出重试、八次压缩公平让出、正常/取消/异常原生历史、模型冻结和技术续跑来源约束。
+  独立导入检查执行模块和纯续跑判据不反向加载调度器。真实 TUI 并行覆盖父子接续、Goal 压缩恢复、
+  执行中停止及新目录隔离，不能用原候选版本的通过结果代替这批执行器验收。
+  本批五路真实 TUI 已留证：Goal 保留暂停前四条、压缩重连后补齐六条；受管后台进程停止后不再写入，
+  续做保留前六条并补齐十二条。定时作业独立于前台 `/stop`，不能把中断等待当作取消定时任务；
+  此类任务须经 TUI 工具显式清理。字段计算通过与模型写错时间、采样间隔失败分别记账。
+
+- 后台准备边界：`test_background_context_runtime_errors.py`、`test_background_main_agent_runtime.py`、
+  `test_background_owner_delivery_commit.py` 联合 Gateway 控制、上下文用量、TUI 模型统计回归。
+  保持未压缩历史完整、detached 任务创建锚点与 lineage、读取失败不调用模型、展示统计不进入上下文。
+  `test_runtime_module_boundaries.py` 在独立进程检查合同、策略、上下文和历史模块加载不引入调度或网络后端。
+  真 TUI 增量复测子代理返回后的后台接续与 Goal/Compact；文件搬迁的单测不替代真实验收。
+
+- 首次 Goal 目录：TUI 控制传输、HTTP 持久回执、Goal 初始化、普通请求目录和 store 绑定联合验证。
+  覆盖模型菜单先建空线程、目录与 roots 同步、相对/缺失/外部/远程 owner 拒绝、已有目录不变、
+  同 ID 改目录冲突及 v1/v2/v3 摘要防篡改。实际 TUI 分两路验证 owner 内目录执行与 owner 外拒绝，
+  拒绝必须发生在创建 Goal 和调用模型前；不能先发送普通聊天替首次 Goal 补目录再计为通过。
 
 - 仅思考响应：Chat/Messages 的流式与非流式不得因无正文丢弃有效思考、用量或隐藏重试；
   真空白仍报错。`test_native_tool_use_ir_messages_flow.py` 验证两次无工具续跑逐条保存、
@@ -126,12 +231,20 @@ TUI（无子代理）及多条正常模型 TUI，共用单 Gateway，定向回�
   覆盖新增、修改、移动、删除、部分失败、同路径不同历史 artifact_id 与当前删除状态，保留权限和执行事实。
 
 - 生命周期：`test_dispatch_liveness_and_revive.py`、`test_subagent_runner_result_state.py`、`test_direct_parent_lifecycle.py`。
+- 宿主停止：`test_subagent_process_control.py`、`test_shell_orphan_kill.py`、`test_orchestration_cancel_subagents_tool.py`。
+  受控进程验证另开 session 的写入者、忽略 TERM 的后代、独立兄弟保留和无句柄退出核对；
+  未确认回执不得标记已终止或触发重派。它们不替代真实 TUI：还需在子代理长命令运行时暂停，
+  观察文件保持不变，再从原会话恢复，分别核对原记录前缀和实际命令续跑，不由测试者补产物。
 - 父子并行：`test_direct_parent_lifecycle.py`、`test_runtime_guidance.py`、`test_subagent_activity_diagnostics.py`、
   `test_runner_session_pool.py`，覆盖逐个完成、同时释放去重、模型答复/登记等待竞态、忙父级交接、
   慢流不误杀、阶段/审批诊断、旧 attempt、进度快照覆盖、通知重试和心跳回调失败；真实 TUI 组合另列。
 - 退出与积压：`test_executor_exit_recovery.py`、`test_closeout_recovery_paging.py`，包含 exact attempt、慢执行存活、
   未知副作用封存、超过分页窗口、消费去重和重启游标；实际模型/故障注入仍需独立 TUI 证据。
 - 历史：`test_conversation_store.py`、`test_background_history_snapshot.py`。
+- 存储组合：`test_conversation_store.py` 另覆盖两个独立实例并发提交同一用量及累计快照，核对唯一行、首次时间和费用；
+  联测 `test_conversation_context_usage.py` 的代次 CAS、`test_conversation_goal_tools.py` 的共享时钟/小数余量/重启，
+  以及 `test_runtime_module_boundaries.py` 的领域独立导入。旧调用、getattr 与测试替身须一并迁移，不保留旧方法转发。
+  本片真实 TUI 须核对暂停期间 Goal 秒数、恢复后的原程序续做、Compact 独立用量和主子账本归属；原始证据留仓库外。
 - 目标：`test_conversation_goal_tools.py`、`test_goal_lifecycle_recovery.py`、
   `test_agent_goals.py`、`test_background_main_agent_runtime.py`、`test_gateway_conversation_control.py`、`test_run_audit_terminal.py`。
   中断增量另联测 `test_tui_input.py`、`test_tui_agent_navigation.py`、`test_r103_ledger_selfheal.py`：

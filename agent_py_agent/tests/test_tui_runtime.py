@@ -1070,7 +1070,8 @@ def test_concurrent_turn_permissions_are_fifo_and_never_replace_overlay() -> Non
     assert runtime.store.snapshot().permission is None
 
 
-def test_external_child_permissions_use_same_fifo_and_exact_writer() -> None:
+@pytest.mark.parametrize("first_kind", ["main", "subagent"])
+def test_external_agent_permissions_use_same_fifo_and_exact_writer(first_kind) -> None:
     runtime = TuiRuntime("permission-child-fifo")
     first = _approval_request_for(
         "attempt-child-first",
@@ -1089,6 +1090,7 @@ def test_external_child_permissions_use_same_fifo_and_exact_writer() -> None:
             {
                 "run_id": "subagent-child-first",
                 "agent_name": "researcher-1",
+                "agent_kind": first_kind,
                 "request": first.to_dict(),
             },
             {
@@ -1106,7 +1108,7 @@ def test_external_child_permissions_use_same_fifo_and_exact_writer() -> None:
     overlay = runtime.store.snapshot().permission
     assert overlay is not None
     assert overlay.permission_id == first.permission_id
-    assert overlay.title.startswith("子代理 researcher-1")
+    assert overlay.title.startswith("主代理 ·" if first_kind == "main" else "子代理 researcher-1 ·")
     assert runtime.resolve_permission(first.permission_id, "approved")
     assert runtime.store.snapshot().permission.permission_id == second.permission_id
     assert runtime.resolve_permission(second.permission_id, "cancelled")

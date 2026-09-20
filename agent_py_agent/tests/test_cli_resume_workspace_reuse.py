@@ -10,6 +10,7 @@ base_params。本文件覆盖回写行为与失败路径。
 from __future__ import annotations
 
 from types import SimpleNamespace
+from types import SimpleNamespace as _StoreDomain
 
 from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
 from agent_py_agent.cli.resume_loop import ResumeRunOnce
@@ -20,11 +21,13 @@ class _FakeStore:
 
     def __init__(self):
         self.appends = []
+        self.threads = _StoreDomain(get_or_create=self._fake_get_or_create_thread)
+        self.messages = _StoreDomain(append_once=self._fake_append_message_once)
 
-    def get_or_create_thread(self, spec):
+    def _fake_get_or_create_thread(self, spec):
         return SimpleNamespace(thread_id="thread-" + str(spec.get("channel_conversation_id") or "t"))
 
-    def append_message_once(self, spec, dedupe_key=""):
+    def _fake_append_message_once(self, spec, dedupe_key=""):
         self.appends.append(spec)
         return SimpleNamespace(
             message_id="m-" + str(len(self.appends)),

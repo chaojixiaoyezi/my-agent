@@ -12,7 +12,7 @@ from agent_py_agent.agent.scheduler.service import SchedulerService
 
 def _setup(tmp_path):
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "channel": "feishu",
@@ -58,7 +58,7 @@ def test_service_enqueues_claims_and_finishes_in_the_same_thread(tmp_path) -> No
     service = SchedulerService(repository, conversation_store=store)
 
     wake_ids = service.enqueue_ready_runs(now=1_000)
-    signals = store.pending_wake_signals()
+    signals = store.wakes.pending()
     assert len(wake_ids) == 2
     assert len(signals) == 2
     assert {signal.thread_id for signal in signals} == {thread.thread_id}
@@ -98,8 +98,8 @@ def test_service_reuses_deduped_wake_after_restart(tmp_path) -> None:
     first_ids = restarted.enqueue_ready_runs(now=1_001)
     second_ids = restarted.enqueue_ready_runs(now=1_002)
     assert first_ids == second_ids
-    assert len(store.pending_wake_signals()) == 1
-    assert store.pending_wake_signals()[0].metadata["scheduler_job_id"] == job["job_id"]
+    assert len(store.wakes.pending()) == 1
+    assert store.wakes.pending()[0].metadata["scheduler_job_id"] == job["job_id"]
 
 
 def test_stale_skill_snapshot_fails_before_model_execution(tmp_path) -> None:
@@ -117,7 +117,7 @@ def test_stale_skill_snapshot_fails_before_model_execution(tmp_path) -> None:
         skill_snapshot_provider=lambda: snapshot,
     )
     assert service.enqueue_ready_runs(now=1_000) == []
-    assert store.pending_wake_signals() == []
+    assert store.wakes.pending() == []
     history, _errors = repository.history(job_id=str(job["job_id"]))
     assert history[0]["status"] == "failed"
     assert history[0]["error_code"] == "SCHEDULER_SKILL_SNAPSHOT_STALE"

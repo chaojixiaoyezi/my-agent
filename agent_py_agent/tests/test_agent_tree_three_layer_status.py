@@ -162,7 +162,7 @@ def test_agent_tree_exposes_pending_guidance_layer(tmp_path):
         tmp_path,
     )
     child = agent.subagents.create_run(goal="child", thought="", plan=["child"])
-    agent.conversation_store.append_guidance(
+    agent.conversation_store.guidance.append(
         {
             "target_type": "agent_run",
             "target_id": child.id,
@@ -180,8 +180,10 @@ def test_agent_tree_exposes_pending_guidance_layer(tmp_path):
 
 
 def test_agent_tree_reports_pending_guidance_load_error():
-    class _ConversationStore:
-        def pending_guidance(self, *_args, **_kwargs):
+    from types import SimpleNamespace
+
+    class _GuidanceStore:
+        def pending(self, *_args, **_kwargs):
             raise OSError("guidance ledger unreadable")
 
     class _Manager:
@@ -194,7 +196,7 @@ def test_agent_tree_reports_pending_guidance_load_error():
 
     class _Agent:
         subagents = _Manager()
-        conversation_store = _ConversationStore()
+        conversation_store = SimpleNamespace(guidance=_GuidanceStore())
 
     payload = agent_tree_status_payload(_Agent(), {"root_id": "child-1"})
     guidance_layer = payload["nodes"][0]["guidance_layer"]

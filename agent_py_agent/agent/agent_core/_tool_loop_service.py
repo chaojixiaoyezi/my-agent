@@ -1958,7 +1958,7 @@ def _active_goal_continuation_available(agent, params: ToolLoopExecuteParams) ->
             return False
         if execution_id != task_id:
             return False
-        goal = store.load_goal(thread_id, goal_id=goal_id, task_id=task_id)
+        goal = store.goals.load(thread_id, goal_id=goal_id, task_id=task_id)
         return bool(
             goal is not None
             and str(getattr(goal, "task_id", "") or "") == task_id

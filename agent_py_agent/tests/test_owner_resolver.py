@@ -112,8 +112,8 @@ def test_simple_agent_uses_configured_provider_owner_home(tmp_path: Path):
     assert agent.local_store.db_path.name == "local.db"
     assert agent.subagents.workspace.is_relative_to(runtime_root)
     assert agent.subagents.workspace.name == "subagents"
-    assert agent.conversation_store.root.is_relative_to(runtime_root)
-    assert agent.conversation_store.root.name == "conversations"
+    assert agent.conversation_store.storage.root.is_relative_to(runtime_root)
+    assert agent.conversation_store.storage.root.name == "conversations"
     assert agent.collaboration_store.root.is_relative_to(runtime_root)
     assert agent.collaboration_store.root.name == "collaboration"
     assert not provider_daily
@@ -137,8 +137,8 @@ def test_simple_agent_active_runtime_paths_use_owner_home_for_fresh_install(tmp_
     assert agent.local_store.events_path == agent.local_store.db_path.parent / "events.jsonl"
     assert agent.subagents.workspace.is_relative_to(runtime_root)
     assert agent.subagents.workspace.name == "subagents"
-    assert agent.conversation_store.root.is_relative_to(runtime_root)
-    assert agent.conversation_store.root.name == "conversations"
+    assert agent.conversation_store.storage.root.is_relative_to(runtime_root)
+    assert agent.conversation_store.storage.root.name == "conversations"
     assert agent.collaboration_store.root.is_relative_to(runtime_root)
     assert agent.collaboration_store.root.name == "collaboration"
     assert str(agent.memory.path).startswith(str(owner_home / "memory" / "long_term"))
@@ -179,5 +179,5 @@ def test_workspace_only_constructor_roots_share_one_effective_runtime_home(tmp_p
     assert first.effective_workspace_root == owner_home
     assert second.effective_workspace_root == owner_home
     assert first.subagents.workspace == second.subagents.workspace
-    assert first.conversation_store.root == second.conversation_store.root
+    assert first.conversation_store.storage.root == second.conversation_store.storage.root
     assert first.local_store.db_path == second.local_store.db_path

@@ -29,14 +29,14 @@ from agent_py_agent.cli.chat_parts.tui_threading import _publish_background_noti
 def _session(tmp_path, surface="main"):
     store = ConversationStore(tmp_path / "conversations")
     child = surface == "child"
-    thread = (store.ensure_agent_thread({"thread_id": "thread-run-a", "agent_run_id": "run-a", "canonical_user_id": "owner-a"})
-              if child else store.get_or_create_thread({"canonical_user_id": "owner-a"}))
+    thread = (store.threads.ensure_agent({"thread_id": "thread-run-a", "agent_run_id": "run-a", "canonical_user_id": "owner-a"})
+              if child else store.threads.get_or_create({"canonical_user_id": "owner-a"}))
     request_id = "bg-agent:run-a:attempt-1" if child else f"bg-main:{thread.thread_id}:piece-1"
     metadata = ({"conversation_request_id": "attempt-1", "agent_attempt_id": "attempt-1", "agent_run_id": "run-a"}
                 if child else {"gateway_request_id": "gateway-a", "conversation_request_id": "request-a"})
     if surface == "background":
         metadata = {"background_transcript_request_id": request_id, "background_delivery_reason": "test", "task_id": "run-a"}
-    user = store.append_message({"thread_id": thread.thread_id, "role": "user", "content": "检查现有项目", "metadata": metadata, "now": 10})
+    user = store.messages.append({"thread_id": thread.thread_id, "role": "user", "content": "检查现有项目", "metadata": metadata, "now": 10})
     agent = SimpleNamespace(conversation_store=store)
     sink = BackgroundTranscriptSink(agent, thread_id=thread.thread_id, task_id="run-a", request_id=request_id,
                                     gateway_request_id="gateway-a" if surface == "main" else "",
@@ -60,10 +60,10 @@ def test_completed_blocks_survive_before_final_without_model_input_or_activity_c
     store, thread, user, _, sink = _session(tmp_path, surface)
     before = store.context_bundle(thread.thread_id)
     _work(sink)
-    reopened = ConversationStore(store.root, initialize=False)
+    reopened = ConversationStore(store.storage.root, initialize=False)
     assert reopened.context_bundle(thread.thread_id) == before
-    assert reopened.recent_messages(thread.thread_id, limit=1) == [user]
-    page = reopened.history_page_report(thread.thread_id, limit=1)
+    assert reopened.messages.recent(thread.thread_id, limit=1) == [user]
+    page = reopened.messages.history_page_report(thread.thread_id, limit=1)
     assert not page.errors and page.before == 0
     events = conversation_history_display_events(page.rows)
     runtime = TuiRuntime("reopened")
@@ -84,15 +84,15 @@ def test_many_display_rows_do_not_crowd_recent_compact_or_memory_batches(tmp_pat
     store, thread, user, _, sink = _session(tmp_path)
     for index in range(64):
         sink.write_thinking(f"公开过程 {index}")
-    answer = store.append_message({"thread_id": thread.thread_id, "role": "assistant", "content": "已检查", "metadata": {"assistant_part_id": "final"}})
+    answer = store.messages.append({"thread_id": thread.thread_id, "role": "assistant", "content": "已检查", "metadata": {"assistant_part_id": "final"}})
     for index in range(64):
         sink.write_thinking(f"后续过程 {index}")
-    assert store.recent_messages(thread.thread_id, limit=2) == [user, answer]
-    assert store.messages_after_report(thread.thread_id, after_message_id=user.message_id, limit=1) == ([answer], [])
-    offset = store.message_byte_offset_after(thread.thread_id, user.message_id)
-    assert store.messages_after_compact_report(replace(thread, compacted_through_byte_offset=offset)) == ([answer], [])
-    assert store.messages_after_compact_report(thread) == ([user, answer], [])
-    all_rows = store.history_page_report(thread.thread_id, limit=800).rows
+    assert store.messages.recent(thread.thread_id, limit=2) == [user, answer]
+    assert store.messages.after_report(thread.thread_id, after_message_id=user.message_id, limit=1) == ([answer], [])
+    offset = store.messages.byte_offset_after(thread.thread_id, user.message_id)
+    assert store.messages.after_compact_report(replace(thread, compacted_through_byte_offset=offset)) == ([answer], [])
+    assert store.messages.after_compact_report(thread) == ([user, answer], [])
+    all_rows = store.messages.history_page_report(thread.thread_id, limit=800).rows
     forged = copy.deepcopy(next(row for row in all_rows if row.role == "display"))
     forged.metadata["canonical_native_messages"] = canonical_native_messages_envelope([{"role": "assistant", "content": "不能进入模型"}])
     assert provider_history_messages_from_rows([user, forged, answer]) == provider_history_messages_from_rows([user, answer])
@@ -108,8 +108,8 @@ def test_final_snapshot_replaces_same_piece_but_not_earlier_uncommitted_piece(tm
     snapshot["gateway_request_id"] = "gateway-a"
     meta = {**user.metadata, "assistant_part_id": "final", "background_display_turn": snapshot,
             "background_transcript_request_id": current.request_id}
-    final = store.append_message({"thread_id": thread.thread_id, "role": "assistant", "content": "最终回复", "metadata": meta})
-    page = store.history_page_report(thread.thread_id, limit=1)
+    final = store.messages.append({"thread_id": thread.thread_id, "role": "assistant", "content": "最终回复", "metadata": meta})
+    page = store.messages.history_page_report(thread.thread_id, limit=1)
     assert page.before == 0
     events = conversation_history_display_events(page.rows)
     assert [event["payload"].get("text") for event in events] == ["检查现有项目", "崩溃前已完成的一块", "恢复后的一块", "最终回复"]
@@ -120,14 +120,14 @@ def test_final_snapshot_replaces_same_piece_but_not_earlier_uncommitted_piece(tm
 def test_child_final_native_does_not_duplicate_public_checkpoint_or_commentary(tmp_path):
     store, thread, user, _, sink = _session(tmp_path, "child")
     _work(sink)
-    store.append_message({"thread_id": thread.thread_id, "role": "assistant", "content": "我来读文件。",
+    store.messages.append({"thread_id": thread.thread_id, "role": "assistant", "content": "我来读文件。",
                           "metadata": {**user.metadata, "assistant_part_id": "commentary:1"}})
-    store.append_message({"thread_id": thread.thread_id, "role": "assistant", "content": "最终回复", "metadata": {
+    store.messages.append({"thread_id": thread.thread_id, "role": "assistant", "content": "最终回复", "metadata": {
         **user.metadata, "assistant_part_id": "final", "canonical_native_messages": canonical_native_messages_envelope([
             {"role": "assistant", "content": [{"type": "thinking", "thinking": "先查看项目"}, {"type": "text", "text": "我来读文件。"}]},
         ]),
     }})
-    events = conversation_history_display_events(store.history_page_report(thread.thread_id).rows)
+    events = conversation_history_display_events(store.messages.history_page_report(thread.thread_id).rows)
     texts = [event["payload"].get("text") for event in events]
     assert texts.count("先查看项目") == texts.count("我来读文件。") == texts.count("最终回复") == 1
 
@@ -136,7 +136,7 @@ def test_child_final_native_does_not_duplicate_public_checkpoint_or_commentary(t
 def test_deltas_permissions_and_uncommitted_final_are_not_saved(tmp_path, kind, phase):
     store, thread, user, _, sink = _session(tmp_path)
     sink._event(kind, phase, f"{sink.request_id}:private", {"text": "不要保存", "process": False})
-    assert store.history_page_report(thread.thread_id).rows == (user,)
+    assert store.messages.history_page_report(thread.thread_id).rows == (user,)
 
 
 @pytest.mark.parametrize("field,value", [("thread_id", "another"), ("request_id", "bg-main:other:one"), ("block_id", "other:block"), ("kind", "permission_requested")])
@@ -148,8 +148,8 @@ def test_invalid_checkpoint_is_not_authority(tmp_path, field, value):
     metadata = display_checkpoint_metadata(**values)
     metadata["display_checkpoint"][field] = value
     with pytest.raises(ValueError):
-        store.append_display_checkpoint(thread.thread_id, metadata)
-    assert store.history_page_report(thread.thread_id).rows == (user,)
+        store.messages.append_display_checkpoint(thread.thread_id, metadata)
+    assert store.messages.history_page_report(thread.thread_id).rows == (user,)
 
 
 def test_storage_failure_warns_without_stopping_live_output(tmp_path, monkeypatch, caplog):
@@ -158,7 +158,7 @@ def test_storage_failure_warns_without_stopping_live_output(tmp_path, monkeypatc
     def unavailable(*_args):
         raise OSError("PRIVATE_PATH_AND_KEY")
 
-    monkeypatch.setattr(store, "append_display_checkpoint", unavailable)
+    monkeypatch.setattr(store.messages, 'append_display_checkpoint', unavailable)
     sink = BackgroundTranscriptSink(agent, thread_id=thread.thread_id, task_id="run-a")
     sink.write_thinking("仍可显示")
     sink.write_thinking("继续显示")
@@ -166,7 +166,7 @@ def test_storage_failure_warns_without_stopping_live_output(tmp_path, monkeypatc
     assert sum(item["kind"] == "thinking_completed" for item in events) == 2
     assert sum(item["block_id"].endswith("history-write-failed") for item in events) == 1
     assert "PRIVATE_PATH_AND_KEY" not in json.dumps(events) + caplog.text
-    assert store.history_page_report(thread.thread_id).rows == (user,)
+    assert store.messages.history_page_report(thread.thread_id).rows == (user,)
 
 
 def test_live_checkpoint_notices_require_capability_and_do_not_publish_start_placeholders(tmp_path):
@@ -210,7 +210,7 @@ def test_completed_checkpoint_and_volatile_deltas_converge_but_new_blocks_stay_l
 def test_recovered_unknown_placeholder_upgrades_only_when_exact_tool_terminal_arrives(tmp_path):
     store, thread, _, _, sink = _session(tmp_path)
     _work(sink)
-    page = store.history_page_report(thread.thread_id)
+    page = store.messages.history_page_report(thread.thread_id)
     runtime = TuiRuntime("observer")
     runtime.publish_recovered_history([], display_events=conversation_history_display_events(page.rows))
     old = runtime.store.snapshot().stable_blocks
@@ -232,7 +232,7 @@ def test_recovered_unknown_placeholder_upgrades_only_when_exact_tool_terminal_ar
 def test_mismatched_outer_checkpoint_binding_cannot_enter_another_history_group(tmp_path, surface, field):
     store, thread, _, _, sink = _session(tmp_path, surface)
     sink.write_thinking("公开记录")
-    record = copy.deepcopy(store.history_page_report(thread.thread_id).rows[-1])
+    record = copy.deepcopy(store.messages.history_page_report(thread.thread_id).rows[-1])
     record.metadata[field] = "unrelated"
     assert conversation_history_display_events([record]) == ()
 

@@ -100,7 +100,7 @@ class GetGoalTool(BaseTool):
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
 
-    # LLM: get 不改变目标生命周期；旧共享任务歧义可读但必须暴露结构化冲突。
+    # LLM: 插话持久操作经 guidance 领域组件； get 不改变目标生命周期；旧共享任务歧义可读但必须暴露结构化冲突。
     # 函数用途: 返回当前目标或候选列表，目标记录损坏仍交给存储层报错。
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         try:
@@ -111,11 +111,11 @@ class GetGoalTool(BaseTool):
             return _error("get_goal", "current thread context is unavailable", "GOAL_CONTEXT_REQUIRED")
         store = self.agent.conversation_store
         try:
-            goal = store.load_goal(thread_id, goal_id=goal_id, task_id=task_id)
+            goal = store.goals.load(thread_id, goal_id=goal_id, task_id=task_id)
         except ValueError:
             return ToolHandlerOutcome(
                 "get_goal", False,
-                json.dumps({"goal": None, "goals": [item.public_dict() for item in store.load_goals(thread_id)],
+                json.dumps({"goal": None, "goals": [item.public_dict() for item in store.goals.list(thread_id)],
                             "error_code": "GOAL_STATE_CONFLICT",
                             "message": "目标绑定存在歧义，请使用 /goal 目标编号 resume 精确恢复。"}, ensure_ascii=False),
                 error_code="GOAL_STATE_CONFLICT", effect_outcome="not_started", failure_stage="validation",
@@ -123,7 +123,7 @@ class GetGoalTool(BaseTool):
         if goal is None:
             goals = [
                 item.public_dict()
-                for item in store.load_goals(thread_id)
+                for item in store.goals.list(thread_id)
                 if str(getattr(item, "status", "") or "") != "complete"
             ]
             return ToolHandlerOutcome(
@@ -131,7 +131,7 @@ class GetGoalTool(BaseTool):
                 True,
                 json.dumps({"goal": None, "goals": goals}, ensure_ascii=False, indent=2),
             )
-        return ToolHandlerOutcome("get_goal", True, _goal_response(goal, goals=store.load_goals(thread_id)))
+        return ToolHandlerOutcome("get_goal", True, _goal_response(goal, goals=store.goals.list(thread_id)))
 
 
 # LLM: 创建只绑定当前代理会话，名字不授权额外执行器；子代理身份来自 scoped runner。
@@ -175,7 +175,7 @@ class CreateGoalTool(BaseTool):
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
 
-    # LLM: Goal lock covers uniqueness and create; retain current task and execution lane. No implicit background dispatch.
+    # LLM: 插话持久操作经 guidance 领域组件； Goal lock covers uniqueness and create; retain current task and execution lane. No implicit background dispatch.
     # 函数用途: 保存当前代理的一个目标，已有未完成目标明确拒绝，避免悄悄重复开工。
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         objective = str(params.get("objective") or "").strip()
@@ -197,17 +197,17 @@ class CreateGoalTool(BaseTool):
             request["duration_seconds"] = params.get("duration_seconds")
         store = self.agent.conversation_store
         try:
-            with store.goal_transition_guard(thread_id):
-                current_link = store.load_task_link(task_id)
-                existing_goals = store.load_goals(thread_id)
+            with store.goals.transition_guard(thread_id):
+                current_link = store.tasks.load(task_id)
+                existing_goals = store.goals.list(thread_id)
                 if any(item.status != "complete" for item in existing_goals):
                     return _error(
                         "create_goal", "this agent already has an unfinished goal; update it explicitly",
                         "GOAL_STATE_CONFLICT", effect_outcome="not_started",
                     )
-                goal = store.create_goal(request)
+                goal = store.goals.create(request)
                 if not current_subagent_run_id(self.agent):
-                    store.bind_task(
+                    store.tasks.bind(
                         {
                             "thread_id": thread_id,
                             "task_id": goal.task_id,
@@ -233,11 +233,11 @@ class CreateGoalTool(BaseTool):
             "current_goal_id": str(attrs.get("thread_goal_id") or _goal_id),
             "guidance": "此目标由当前代理负责；Todo 可选，子代理目标独立，不会另开执行器。",
         }
-        current_goal = store.load_goal(thread_id, goal_id=str(execution["current_goal_id"]), task_id=task_id)
+        current_goal = store.goals.load(thread_id, goal_id=str(execution["current_goal_id"]), task_id=task_id)
         if current_goal is not None:
             from .goal_prompting import goal_execution_scope
 
-            execution.update(goal_execution_scope(current_goal, tuple(store.load_goals(thread_id))))
+            execution.update(goal_execution_scope(current_goal, tuple(store.goals.list(thread_id))))
         return ToolHandlerOutcome("create_goal", True, _goal_response(goal, execution=execution))
 
 
@@ -292,7 +292,7 @@ class UpdateGoalTool(BaseTool):
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
 
-    # LLM: CAS 前验证 exact Goal/task；完成 Goal 不能提前关闭仍在执行的 turn/task，执行终态由 finalization 提交。
+    # LLM: 插话持久操作经 guidance 领域组件； CAS 前验证 exact Goal/task；完成 Goal 不能提前关闭仍在执行的 turn/task，执行终态由 finalization 提交。
     # 函数用途: 更新目标并返回真实分工；完成后仍可交付回复，避免中途将子代理所属任务误标为结束。
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         status = str(params.get("status") or "").strip().lower()
@@ -314,16 +314,16 @@ class UpdateGoalTool(BaseTool):
                 effect_outcome="not_started",
             )
         store = self.agent.conversation_store
-        with store.goal_transition_guard(thread_id):
-            goals = store.load_goals(thread_id)
+        with store.goals.transition_guard(thread_id):
+            goals = store.goals.list(thread_id)
             if sum(item.task_id == task_id and item.status != "complete" for item in goals) > 1:
                 return _error(
                     "update_goal", "shared task has conflicting goals; resume the exact goal before changing status",
                     "GOAL_STATE_CONFLICT", effect_outcome="not_started",
                 )
-            goal = store.load_goal(thread_id, goal_id=goal_id, task_id=task_id)
+            goal = store.goals.load(thread_id, goal_id=goal_id, task_id=task_id)
             if goal is None:
-                goals = store.load_goals(thread_id)
+                goals = store.goals.list(thread_id)
                 return _error(
                     "update_goal",
                     (
@@ -342,7 +342,7 @@ class UpdateGoalTool(BaseTool):
             expected_revision = params.get("expected_revision", (attrs or {}).get("thread_goal_revision", goal.revision))
             if params.get("target_run_id") and params.get("expected_revision") is None:
                 return _error("update_goal", "read the child get_goal and provide its expected_revision", "TOOL_INVALID_ARGUMENTS", effect_outcome="not_started")
-            updated = store.update_goal(
+            updated = store.goals.update(
                 {
                     "thread_id": thread_id,
                     "goal_id": goal.goal_id,
@@ -361,23 +361,23 @@ class UpdateGoalTool(BaseTool):
                 from .goal_prompting import objective_updated_prompt
 
                 if not params.get("target_run_id") and not current_subagent_run_id(self.agent):
-                    store.update_task_goal({"task_id": updated.task_id, "goal": updated.objective})
+                    store.tasks.update_goal({"task_id": updated.task_id, "goal": updated.objective})
                     self.agent.local_store.task_registry.update_task_description(updated.task_id, updated.objective)
                 # Goal 版本 CAS 已防重；这是持久要求变更，不预绑正在运行的用户插话轮次。
-                store.append_guidance({
+                store.guidance.append({
                     "target_type": "agent_run" if params.get("target_run_id") or current_subagent_run_id(self.agent) else "task",
                     "target_id": updated.task_id, "message": objective_updated_prompt(updated),
                     "sender": "goal", "metadata": {"goal_id": updated.goal_id, "revision": updated.revision},
                 })
             # blocked 是明确的可恢复停止；complete 只是目标已达成，仍有当前回复和子树需要安全收尾。
             if status == "blocked" and not params.get("target_run_id") and not current_subagent_run_id(self.agent):
-                store.update_task_status({"task_id": goal.task_id, "status": "interrupted"})
+                store.tasks.update_status({"task_id": goal.task_id, "status": "interrupted"})
                 self.agent.local_store.task_registry.register_task(
                     goal.task_id, status="blocked", goal=updated.objective
                 )
             from .goal_prompting import goal_execution_scope
 
-            execution = goal_execution_scope(updated, tuple(store.load_goals(thread_id)))
+            execution = goal_execution_scope(updated, tuple(store.goals.list(thread_id)))
         return ToolHandlerOutcome(
             "update_goal",
             True,

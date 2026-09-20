@@ -118,7 +118,7 @@ def _reject_old_candidate(candidates: CandidateService):
 
 def _conversation(root: Path, *, user: str, at: float):
     store = ConversationStore(root)
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": user,
             "channel": "internal",
@@ -127,7 +127,7 @@ def _conversation(root: Path, *, user: str, at: float):
             "now": at,
         }
     )
-    message = store.append_message(
+    message = store.messages.append(
         {
             "thread_id": thread.thread_id,
             "role": "user",
@@ -135,7 +135,7 @@ def _conversation(root: Path, *, user: str, at: float):
             "now": at,
         }
     )
-    return store, store.load_thread(thread.thread_id), message
+    return store, store.threads.load(thread.thread_id), message
 
 
 def _state(paths: list[Path]) -> dict[Path, bytes | None]:
@@ -266,9 +266,9 @@ def test_retention_plan_is_read_only_and_apply_covers_every_authority(tmp_path: 
     assert not (tool_only / "work" / "blobs" / "tool_outputs").exists()
     assert (active / "work" / "blobs" / "tool_outputs" / "large.txt").exists()
     assert held.exists()
-    assert old_store.load_thread(old_thread.thread_id) is None
+    assert old_store.threads.load(old_thread.thread_id) is None
     assert not (conversation_root / "messages" / f"{old_thread.thread_id}.jsonl").exists()
-    assert old_store.load_thread(fresh_thread.thread_id) is not None
+    assert old_store.threads.load(fresh_thread.thread_id) is not None
     assert old_message.message_id not in (
         conversation_root / "user_latest_threads.json"
     ).read_text(encoding="utf-8")

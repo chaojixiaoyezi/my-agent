@@ -1,5 +1,5 @@
-# LLM: CLI 续跑只由既有结构化 Goal 和显式 resume 控制；名称整理不能改变授权、收口或恢复链。
-# 模块用途: 执行已授权的 Goal 接续和用户恢复，本轮仅更新说明，不新增后台轮询或模型调用。
+# LLM: CLI 续跑只由结构化 Goal 和显式 resume 控制；技术判据直接读 turn_end，不反向加载后台调度。
+# 模块用途: 执行已授权的 Goal 接续和用户恢复，修改时核对原授权、收口与同任务恢复合同。
 """CLI Goal 续跑与用户显式 resume 执行器。
 
 普通 ``run`` 只执行一轮；只有 exact active Goal 才能在进程内进入下一轮。
@@ -41,9 +41,11 @@ class CliResumeOutcome:
     reason: str = ""
 
 
+# LLM: CLI 与 finalization 共用 turn_end 的精确技术判据；这里只投影事实，不赋予自动续跑授权。
+# 函数用途: 判断结果能否进入显式 Goal 或用户 resume 的后续收口检查。
 def should_resume(result: object) -> tuple[bool, str]:
     """收口是否允许由显式 Goal 或用户 resume 继续。"""
-    from ..agent.conversation.runtime import should_continue_task
+    from ..agent.turn_end import should_continue_task
 
     return should_continue_task(result)
 
@@ -232,7 +234,7 @@ def _auto_resume_authorized(agent: object, runner: object) -> bool:
     store = getattr(agent, "conversation_store", None)
     if store is None or runner.ctx is None:
         return False
-    load_goal = getattr(store, "load_goal", None)
+    load_goal = getattr(getattr(store, 'goals', None), 'load', None)
     if not callable(load_goal):
         return False
     try:
@@ -454,8 +456,8 @@ def run_manual_resume(
     # 显式 run --resume 就是结构化"重新激活"命令——把终态 link 迁移回
     # active, 再以接管者身份续跑。
     store = getattr(agent, "conversation_store", None)
-    load_link = getattr(store, "load_task_link", None)
-    update_status = getattr(store, "update_task_status", None)
+    load_link = getattr(getattr(store, 'tasks', None), 'load', None)
+    update_status = getattr(getattr(store, 'tasks', None), 'update_status', None)
     if callable(load_link) and callable(update_status):
         try:
             link = load_link(facts["task_id"])
@@ -472,8 +474,8 @@ def run_manual_resume(
     # state 判 running(真机 2026-08-16: 429 收口后 3 个 policy 未停用 →
     # resume 工具仍被 BINDING_FAILED 拦)。用户显式 resume = 接管, 停用
     # 该任务的全部进度 policy, 再由本轮执行重新建立。
-    list_policies = getattr(store, "list_progress_policies", None)
-    disable_policy = getattr(store, "disable_progress_policy", None)
+    list_policies = getattr(getattr(store, 'progress', None), 'list', None)
+    disable_policy = getattr(getattr(store, 'progress', None), 'disable', None)
     if callable(list_policies) and callable(disable_policy):
         try:
             for policy in list_policies(enabled_only=False):
@@ -513,8 +515,8 @@ def run_manual_resume(
     # 把 channel 绑定修正回任务 thread(thread_for_task 优先于 channel
     # resolve)。
     store_fix = getattr(agent, "conversation_store", None)
-    thread_for_task = getattr(store_fix, "thread_for_task", None)
-    bind_channel = getattr(store_fix, "bind_channel", None)
+    thread_for_task = getattr(getattr(store_fix, 'tasks', None), 'thread_for', None)
+    bind_channel = getattr(getattr(store_fix, 'threads', None), 'bind_channel', None)
     if callable(thread_for_task) and callable(bind_channel):
         try:
             task_thread = thread_for_task(facts["task_id"])
@@ -601,7 +603,7 @@ def _next_manual_resume_seq(agent: object, facts: dict) -> int | None:
         return None
     thread_id = str(facts.get("thread_id") or "").strip()
     if not thread_id:
-        resolver = getattr(store, "resolve_thread", None)
+        resolver = getattr(getattr(store, 'threads', None), 'resolve', None)
         if not callable(resolver):
             return None
         try:
@@ -620,7 +622,7 @@ def _next_manual_resume_seq(agent: object, facts: dict) -> int | None:
             return None
     if not thread_id:
         return None
-    recent = getattr(store, "recent_messages", None)
+    recent = getattr(getattr(store, 'messages', None), 'recent', None)
     if not callable(recent):
         return None
     try:

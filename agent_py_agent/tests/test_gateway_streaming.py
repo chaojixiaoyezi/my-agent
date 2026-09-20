@@ -18,11 +18,8 @@ from agent_py_agent.agent.gateway_parts.paths import (
 from agent_py_agent.agent.gateway_parts.permission_bridge import (
     write_gateway_permission_decision,
 )
-from agent_py_agent.agent.gateway_parts.request_execution import (
-    BufferedChunkStreamWriter,
-    _gateway_compact_progress_callback,
-    close_chunk_stream,
-)
+from agent_py_agent.agent.gateway_parts.request_context import _gateway_compact_progress_callback
+from agent_py_agent.agent.gateway_parts.stream_writer import BufferedChunkStreamWriter
 from agent_py_agent.agent.tooling.runtime_contracts import ToolCall
 
 
@@ -50,10 +47,10 @@ def test_compact_start_updates_canonical_usage_before_tui_poll(tmp_path):
     from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
 
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread({"canonical_user_id": "alice"})
+    thread = store.threads.get_or_create({"canonical_user_id": "alice"})
     old = {"schema": "model_visible_context_usage.v1", "context_window_tokens": 1_000_000,
            "current_tokens": 164_000, "estimated": True}
-    store.update_model_context_usage(thread.thread_id, old, expected_compact_generation=0)
+    store.model_usage.update_context_usage(thread.thread_id, old, expected_compact_generation=0)
     original_bundle = store.context_bundle(thread.thread_id)
     runtime = TuiRuntime("compact-model-switch")
     runtime.update_background_activity(0, {"compact_count": 0, "context_usage": old})
@@ -70,7 +67,7 @@ def test_compact_start_updates_canonical_usage_before_tui_poll(tmp_path):
     runtime.update_background_activity(0, conversation_agent_activity(SimpleNamespace(), store, thread.thread_id).to_dict())
     assert runtime.store.snapshot().status.context_usage.current_tokens == 438_000
     assert store.context_bundle(thread.thread_id) == original_bundle
-    assert store.load_thread(thread.thread_id).updated_at == thread.updated_at
+    assert store.threads.load(thread.thread_id).updated_at == thread.updated_at
 
 
 def test_compact_start_telemetry_failure_does_not_stop_progress():
@@ -82,7 +79,7 @@ def test_compact_start_telemetry_failure_does_not_stop_progress():
     writer = SimpleNamespace(write_context_usage=lambda value: events.append("usage"),
                              write_conversation_compact_progress=lambda value: events.append("progress"))
     callback = _gateway_compact_progress_callback(writer,
-        store=SimpleNamespace(update_model_context_usage=fail),
+        store=SimpleNamespace(model_usage=SimpleNamespace(update_context_usage=fail)),
         thread=SimpleNamespace(thread_id="test-thread", compact_generation=0))
     callback({"phase": "started", "before_tokens": 438_000, "context_window_tokens": 200_000})
     assert events == ["usage", "progress"]
@@ -176,12 +173,12 @@ def test_chunk_file_cleanup(tmp_path):
     assert not chunk_path.exists()
 
 
-def test_close_chunk_stream_keeps_file_for_late_pollers(tmp_path):
+def test_writer_close_keeps_file_for_late_pollers(tmp_path):
     paths = _make_paths(tmp_path)
     chunk_path = gateway_chunk_path(paths, "test-req")
     chunk_path.write_text('{"t": 1, "text": "x"}\n', encoding="utf-8")
 
-    close_chunk_stream(chunk_path)
+    BufferedChunkStreamWriter(chunk_path).close()
 
     assert chunk_path.exists()
 

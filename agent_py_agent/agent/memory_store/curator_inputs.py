@@ -303,7 +303,8 @@ def collect_curator_inputs(
     )
 
 
-# LLM: list_threads 只列元数据；每个 transcript 从精确 cursor 后读取，坏线程阻断 cursor 推进。
+# LLM: threads.list_report 只列元数据，messages.after_report 从精确 cursor 后读取；坏线程阻断游标推进。
+# 两个读取能力来自同一 ConversationStore 的显式领域，不探测旧方法或建立第二份消息来源。
 # 函数用途: 收集最早仍未处理的消息直至批量/字符上限。
 def _collect_messages(
     *,
@@ -312,8 +313,8 @@ def _collect_messages(
     limit: int,
     max_chars: int,
 ) -> tuple[list[CuratorMessageInput], list[dict[str, object]]]:
-    list_report = getattr(conversation_store, "list_threads_report", None)
-    after_report = getattr(conversation_store, "messages_after_report", None)
+    list_report = getattr(getattr(conversation_store, 'threads', None), 'list_report', None)
+    after_report = getattr(getattr(conversation_store, 'messages', None), 'after_report', None)
     if not callable(list_report) or not callable(after_report):
         raise TypeError("ConversationStore lacks incremental Memory Curator read contract")
     threads, thread_errors = list_report(limit=0)

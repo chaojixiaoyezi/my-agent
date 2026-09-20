@@ -93,7 +93,7 @@ def _agent_conversation_thread(
     if conversation_store is None or not thread_id:
         return None
     try:
-        thread, error = conversation_store.load_thread_report(thread_id)
+        thread, error = conversation_store.threads.load_report(thread_id)
     except Exception:
         return None
     return thread if error is None else None

@@ -312,7 +312,7 @@ def _current_audit_run_epoch(agent: Any, task_id: str) -> int | None:
     """Read current epoch from the durable link; None keeps standalone compatibility."""
 
     store = getattr(agent, "conversation_store", None)
-    loader = getattr(store, "load_task_link", None)
+    loader = getattr(getattr(store, 'tasks', None), 'load', None)
     if not callable(loader):
         return None
     try:

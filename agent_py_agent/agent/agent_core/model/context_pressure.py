@@ -369,7 +369,7 @@ def _persist_provider_context_observation(
     observation: dict[str, object],
 ) -> bool:
     store, thread_id, thread = _provider_observation_thread(agent, params)
-    updater = getattr(store, "update_provider_context_observation", None)
+    updater = getattr(getattr(store, 'threads', None), 'update_provider_context_observation', None)
     if thread is None or not thread_id or not callable(updater):
         return False
     generation = max(0, int(getattr(thread, "compact_generation", 0) or 0))
@@ -405,7 +405,7 @@ def _provider_observation_thread(
         or ""
     ).strip()
     store = getattr(agent, "conversation_store", None)
-    loader = getattr(store, "load_thread_report", None)
+    loader = getattr(getattr(store, 'threads', None), 'load_report', None)
     if not thread_id or not callable(loader):
         return store, thread_id, None
     try:

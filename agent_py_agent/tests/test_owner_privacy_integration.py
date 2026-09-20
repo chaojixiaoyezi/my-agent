@@ -112,7 +112,7 @@ def test_autonomous_memory_and_agents_updates_remain_owner_isolated(tmp_path: Pa
     user_b = pool.get(OwnerIdentity.provider_user("feishu", "user-b"))
 
     def bind(agent, request_id: str, content: str) -> None:
-        thread = agent.conversation_store.get_or_create_thread(
+        thread = agent.conversation_store.threads.get_or_create(
             {
                 "canonical_user_id": request_id,
                 "channel": "internal",
@@ -120,7 +120,7 @@ def test_autonomous_memory_and_agents_updates_remain_owner_isolated(tmp_path: Pa
                 "channel_user_id": request_id,
             }
         )
-        agent.conversation_store.append_message(
+        agent.conversation_store.messages.append(
             {
                 "thread_id": thread.thread_id,
                 "role": "user",

@@ -169,8 +169,8 @@ def _update_request_argv() -> list[str]:
 
 def _agent_with_collaboration_case(tmp_path, *, with_evidence: bool) -> SimpleAgent:
     agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
-    thread = agent.conversation_store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
-    agent.conversation_store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "协作任务", 'now': 2.0})
+    thread = agent.conversation_store.threads.get_or_create({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
+    agent.conversation_store.tasks.bind({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "协作任务", 'now': 2.0})
     agent.collaboration_store.register_agent(AgentCapability(agent_id="source-a", capabilities=("query",)))
     agent.collaboration_store.register_agent(AgentCapability(agent_id="source-b", capabilities=("query",)))
     case = agent.collaboration_store.open_case({'thread_id': thread.thread_id, 'task_id': "task-1", 'title': "跨源协作入口", 'summary': "需要多代理补证据。", 'priority': "urgent", 'created_by': "source-a", 'now': 3.0})

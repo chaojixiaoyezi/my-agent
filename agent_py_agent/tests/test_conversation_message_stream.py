@@ -24,7 +24,7 @@ from agent_py_agent.cli.chat_parts.tui_threading import (
 @pytest.fixture
 def conversation(tmp_path):
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread({
+    thread = store.threads.get_or_create({
         "canonical_user_id": "local-agent", "channel": "chat",
         "channel_conversation_id": "session", "channel_user_id": "local-agent", "now": 1.0,
     })
@@ -34,7 +34,7 @@ def conversation(tmp_path):
 # LLM: 此 helper 通过唯一 canonical append 入口落一条已提交 final；不触及旧 notices 文件。
 # 函数用途: 为恢复和实时竞态测试追加稳定身份的后台回复。
 def _append(store, thread_id, text="相同正文", *, metadata=None):
-    return store.append_message({
+    return store.messages.append({
         "thread_id": thread_id, "role": "assistant", "content": text, "now": 20.0,
         "metadata": {"background_delivery_reason": "root_subagents_terminal",
                      "assistant_part_id": "final", **(metadata or {})},
@@ -57,7 +57,7 @@ def test_background_length_notice_survives_live_and_history_handoff(conversation
         "background_transcript_request_id": sink.request_id,
         "background_display_turn": sink.display_history_snapshot(),
     })
-    before = store._message_path(thread_id).read_bytes()
+    before = store.storage.message_path(thread_id).read_bytes()
     notices, cursor, ok = read_background_response_page(store, thread_id)
     assert ok and cursor > 0
     events = notices[0]["display_events"]
@@ -71,7 +71,7 @@ def test_background_length_notice_survives_live_and_history_handoff(conversation
     assert sum(block.text == "接下来要修改" for block in snapshot.stable_blocks) == 1
     assert sum("长度限制" in block.text for block in snapshot.stable_blocks) == 1
     assert not snapshot.has_active_work
-    assert store._message_path(thread_id).read_bytes() == before
+    assert store.storage.message_path(thread_id).read_bytes() == before
 
 
 def test_forward_pages_keep_distinct_ids_with_same_text_and_time(conversation):
@@ -80,7 +80,7 @@ def test_forward_pages_keep_distinct_ids_with_same_text_and_time(conversation):
     cursor = 0
     found = []
     for expected_count in (2, 2, 1, 0):
-        rows, next_cursor, errors = store.message_page_after_offset_report(thread_id, after=cursor, limit=2)
+        rows, next_cursor, errors = store.messages.page_after_offset_report(thread_id, after=cursor, limit=2)
         assert not errors and len(rows) == expected_count
         assert next_cursor >= cursor
         cursor = next_cursor
@@ -92,7 +92,7 @@ def test_forward_pages_keep_distinct_ids_with_same_text_and_time(conversation):
 def test_invalid_page_preserves_original_cursor(conversation, invalid):
     store, thread_id = conversation
     row = _append(store, thread_id)
-    cursor = store.message_byte_offset_after(thread_id, row.message_id)
+    cursor = store.messages.byte_offset_after(thread_id, row.message_id)
     if invalid == "middle":
         cursor -= 1
     elif invalid == "beyond":
@@ -100,7 +100,7 @@ def test_invalid_page_preserves_original_cursor(conversation, invalid):
     else:
         value = row.to_dict()
         value["thread_id"] = "other-thread"
-        with store._message_path(thread_id).open("ab") as handle:
+        with store.storage.message_path(thread_id).open("ab") as handle:
             handle.write((json.dumps(value).encode() if invalid == "foreign_row" else b"broken") + b"\n")
     assert read_background_response_page(store, thread_id, after=cursor) == ([], cursor, False)
 
@@ -108,10 +108,10 @@ def test_invalid_page_preserves_original_cursor(conversation, invalid):
 def test_partial_last_row_is_read_on_next_complete_page(conversation):
     store, thread_id = conversation
     row = _append(store, thread_id)
-    cursor = store.message_byte_offset_after(thread_id, row.message_id)
+    cursor = store.messages.byte_offset_after(thread_id, row.message_id)
     value = {**row.to_dict(), "message_id": "msg-late", "content": "后到的完整回复"}
     encoded = json.dumps(value, ensure_ascii=False).encode("utf-8") + b"\n"
-    path = store._message_path(thread_id)
+    path = store.storage.message_path(thread_id)
     with path.open("ab") as handle:
         handle.write(encoded[:-2])
     assert read_background_response_page(store, thread_id, after=cursor) == ([], cursor, True)
@@ -125,9 +125,9 @@ def test_partial_last_row_is_read_on_next_complete_page(conversation):
 def test_forward_page_does_not_parse_prefix_again(conversation):
     store, thread_id = conversation
     first = _append(store, thread_id)
-    cursor = store.message_byte_offset_after(thread_id, first.message_id)
+    cursor = store.messages.byte_offset_after(thread_id, first.message_id)
     second = _append(store, thread_id)
-    with store._message_path(thread_id).open("r+b") as handle:
+    with store.storage.message_path(thread_id).open("r+b") as handle:
         handle.write(b"!")
     rows, _, ok = read_background_response_page(store, thread_id, after=cursor)
     assert ok and [row["message_id"] for row in rows] == [second.message_id]
@@ -140,8 +140,8 @@ def test_history_cursor_stops_at_last_read_row_not_later_append(conversation, mo
 
     store, thread_id = conversation
     first = _append(store, thread_id)
-    exact_offset = store.message_byte_offset_after
-    exact_page = store.history_page_report
+    exact_offset = store.messages.byte_offset_after
+    exact_page = store.messages.history_page_report
     late = []
 
     # LLM: 模拟快照读取和取偏移之间到达新消息；只在临时 canonical 文件追加一次。
@@ -152,7 +152,7 @@ def test_history_cursor_stops_at_last_read_row_not_later_append(conversation, mo
             late.append(_append(store, thread_id))
         return page
 
-    monkeypatch.setattr(store, "history_page_report", append_between_read_and_cursor)
+    monkeypatch.setattr(store.messages, 'history_page_report', append_between_read_and_cursor)
     agent = SimpleNamespace(conversation_store=store)
     if gateway:
         monkeypatch.setattr(client_service, "resolve_gateway_scope_agent", lambda *_args: agent)
@@ -221,14 +221,14 @@ def test_foreground_messages_reach_observer_without_repeating_origin(conversatio
     origin.enqueue_prompt("chat-local", "检查后汇报", queued=False)
     origin.begin_turn("chat-local")
     metadata = {"gateway_request_id": "gwreq-live"}
-    user = store.append_message({
+    user = store.messages.append({
         "thread_id": thread_id, "role": "user", "content": "检查后汇报", "metadata": metadata,
     })
-    final = store.append_message({
+    final = store.messages.append({
         "thread_id": thread_id, "role": "assistant", "content": "检查完成",
         "metadata": {**metadata, "assistant_part_id": "final"},
     })
-    before = store._message_path(thread_id).read_bytes()
+    before = store.storage.message_path(thread_id).read_bytes()
     rows, cursor, ok = read_background_response_page(store, thread_id, include_foreground=True)
     assert ok and [row["message_id"] for row in rows] == [user.message_id, final.message_id]
     assert read_background_response_page(store, thread_id)[0] == []
@@ -244,7 +244,7 @@ def test_foreground_messages_reach_observer_without_repeating_origin(conversatio
         assert texts.count("检查后汇报") == 1
         assert texts.count("检查完成") == 1
         assert not runtime.store.snapshot().has_active_work
-    assert cursor == len(before) and store._message_path(thread_id).read_bytes() == before
+    assert cursor == len(before) and store.storage.message_path(thread_id).read_bytes() == before
 
 
 def test_owned_foreground_does_not_hide_background_continuation(conversation):
@@ -264,7 +264,7 @@ def test_foreground_user_ids_stay_stable_across_partial_pages(conversation):
     )
 
     store, thread_id = conversation
-    entries = [store.append_message({
+    entries = [store.messages.append({
         "thread_id": thread_id, "role": "user", "content": "继续检查",
         "metadata": {"gateway_request_id": "gwreq-live"},
     }) for _ in range(2)]
@@ -279,15 +279,15 @@ def test_foreground_user_ids_stay_stable_across_partial_pages(conversation):
 
 def test_foreground_page_excludes_other_thread_and_unknown_message_roles(conversation):
     store, thread_id = conversation
-    other = store.get_or_create_thread({
+    other = store.threads.get_or_create({
         "canonical_user_id": "another-user", "channel": "chat", "channel_conversation_id": "other",
         "channel_user_id": "another-user",
     })
-    store.append_message({
+    store.messages.append({
         "thread_id": other.thread_id, "role": "user", "content": "另一个用户",
         "metadata": {"gateway_request_id": "gwreq-other"},
     })
-    store.append_message({
+    store.messages.append({
         "thread_id": thread_id, "role": "assistant", "content": "还没确认的过程",
         "metadata": {"gateway_request_id": "gwreq-live", "assistant_part_id": "commentary:1"},
     })

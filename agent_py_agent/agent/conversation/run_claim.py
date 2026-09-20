@@ -1,4 +1,5 @@
 # LLM: Share one durable claim lane; host-bound foreground recovery must retain exact task affinity.
+# 租约操作统一访问 store.claims；线程存在性、心跳和最终释放仍使用同一原文件及调用顺序。
 # 模块用途: 前后台共用执行权、心跳与释放流程，不新增队列或模型重试。
 """One durable execution lane shared by foreground and background turns."""
 
@@ -83,7 +84,7 @@ class ConversationRunClaimHeartbeat(threading.Thread):
     def run(self) -> None:
         while not self.stop_event.wait(self.interval_seconds):
             try:
-                renewed = self.store.renew_background_run_claim(
+                renewed = self.store.claims.renew(
                     {
                         "thread_id": self.thread_id,
                         "claim_scope_id": self.claim_scope_id,
@@ -112,7 +113,7 @@ def _acquire_conversation_run_claim(request: ConversationRunLaneRequest) -> dict
         if request.interrupt_check():
             raise InterruptedError("conversation turn interrupted while waiting for execution lane")
         acquire = partial(
-            request.store.claim_background_run,
+            request.store.claims.acquire,
             {
                 "thread_id": request.thread_id,
                 "task_id": request.claim_task_id,
@@ -159,7 +160,7 @@ def conversation_run_lane(request: ConversationRunLaneRequest) -> Iterator[dict]
     finally:
         heartbeat.stop()
         if not request.recover_same_task_only:
-            request.store.finish_background_run(
+            request.store.claims.finish(
                 {
                     "thread_id": request.thread_id,
                     "claim_id": claim_id,

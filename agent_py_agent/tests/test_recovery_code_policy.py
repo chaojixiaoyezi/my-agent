@@ -84,6 +84,20 @@ def test_exact_code_policy_wins_over_family_prefix():
     assert not repairable_code("STATE_SOMETHING_ELSE")
 
 
+def test_history_read_and_task_binding_errors_have_distinct_recovery():
+    from agent_py_agent.agent.contracts.error_taxonomy import error_contract
+
+    history = error_contract("BACKGROUND_HISTORY_UNAVAILABLE")
+    assert history.code == "BACKGROUND_HISTORY_UNAVAILABLE"
+    assert history.retryable is True
+    assert history.recommended_action == RecoveryAction.RETRY.value
+
+    binding = error_contract("CONVERSATION_TASK_BINDING_CONFLICT")
+    assert binding.code == "CONVERSATION_TASK_BINDING_CONFLICT"
+    assert binding.retryable is False
+    assert binding.recommended_action == RecoveryAction.MANUAL_REVIEW.value
+
+
 def test_declared_recovery_action_overrides_derivation():
     """finding 显式声明的 recommended_action（当前协议枚举值）优先于注册表推导。"""
     envelope = recovery_envelope_from_gate_payload(

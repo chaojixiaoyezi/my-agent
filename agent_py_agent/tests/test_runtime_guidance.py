@@ -445,7 +445,7 @@ def test_two_real_agent_runs_do_not_cross_prompt_task_or_workspace(tmp_path, mon
 def test_missing_guidance_queue_is_an_empty_collection(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
 
-    entries, load_errors = store.pending_guidance_report(
+    entries, load_errors = store.guidance.pending_report(
         "request",
         "request-without-guidance",
         limit=0,
@@ -453,12 +453,12 @@ def test_missing_guidance_queue_is_an_empty_collection(tmp_path) -> None:
 
     assert entries == []
     assert load_errors == []
-    assert not store._guidance_path("request", "request-without-guidance").exists()
+    assert not store.storage.guidance_path("request", "request-without-guidance").exists()
 
 
 def test_conversation_guidance_can_be_delivered_once(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "channel": "internal",
@@ -468,7 +468,7 @@ def test_conversation_guidance_can_be_delivered_once(tmp_path) -> None:
         }
     )
 
-    entry = store.append_guidance(
+    entry = store.guidance.append(
         {
             "target_type": "thread",
             "target_id": thread.thread_id,
@@ -478,14 +478,14 @@ def test_conversation_guidance_can_be_delivered_once(tmp_path) -> None:
         }
     )
 
-    pending = store.pending_guidance("thread", thread.thread_id)
+    pending = store.guidance.pending("thread", thread.thread_id)
     assert [item.guidance_id for item in pending] == [entry.guidance_id]
     assert pending[0].message == "请先汇总已有产物，再继续补缺口。"
 
-    store.mark_guidance_delivered([entry.guidance_id], now=3.0)
+    store.guidance.ledger.mark_delivered([entry.guidance_id], now=3.0)
 
-    assert store.pending_guidance("thread", thread.thread_id) == []
-    delivered = store.recent_guidance("thread", thread.thread_id)
+    assert store.guidance.pending("thread", thread.thread_id) == []
+    delivered = store.guidance.recent("thread", thread.thread_id)
     assert delivered[0].delivered_at == 3.0
 
 
@@ -503,41 +503,41 @@ def test_conversation_guidance_idempotency_reuses_one_entry_and_terminal_receipt
         "now": 10.0,
     }
 
-    first = store.append_guidance_once(request, dedupe_key="thread-1/message-1")
-    replay = store.append_guidance_once(
+    first = store.guidance.append_once(request, dedupe_key="thread-1/message-1")
+    replay = store.guidance.append_once(
         {**request, "now": 20.0},
         dedupe_key="thread-1/message-1",
     )
-    assert store.claim_guidance_once_for_turn(
+    assert store.guidance.claim_for_turn(
         first,
         expected_turn_id="request-1",
         attempt_id="attempt-1",
     )
-    store.mark_guidance_entries_submitted(
+    store.guidance.submissions.mark_submitted(
         "request-1",
         [first],
         attempt_id="attempt-1",
         provider_call_id="provider-call-1",
     )
-    store.consume_submitted_guidance_for_turn(
+    store.guidance.acknowledgements.consume_submitted(
         "request-1",
         [first],
         provider_call_id="provider-call-1",
     )
-    receipt = store.guidance_once_receipt("thread-1/message-1")
+    receipt = store.guidance.receipt("thread-1/message-1")
 
     assert replay.guidance_id == first.guidance_id
     assert replay.created_at == 10.0
     assert receipt is not None and receipt.status == "consumed"
     assert receipt.entry.delivered_at > 0
-    rows = store.recent_guidance("request", "request-1", limit=0)
+    rows = store.guidance.recent("request", "request-1", limit=0)
     assert [item.guidance_id for item in rows] == [first.guidance_id]
 
 
 def test_guidance_receipt_recomputes_embedded_entry_digest(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
     dedupe_key = "thread-1/message-tampered"
-    store.append_guidance_once(
+    store.guidance.append_once(
         {
             "target_type": "request",
             "target_id": "request-tampered",
@@ -546,19 +546,19 @@ def test_guidance_receipt_recomputes_embedded_entry_digest(tmp_path) -> None:
         },
         dedupe_key=dedupe_key,
     )
-    path = store._guidance_dedupe_path(dedupe_key)
+    path = store.storage.guidance_dedupe_path(dedupe_key)
     payload = json.loads(path.read_text(encoding="utf-8"))
     payload["entry"]["message"] = "被改过但保留旧 digest"
     path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
     with pytest.raises(DataCorruptionError, match="input digest mismatch"):
-        store.guidance_once_receipt(dedupe_key)
+        store.guidance.receipt(dedupe_key)
 
 
 def test_guidance_receipt_v3_migration_is_persisted_as_v4(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
     dedupe_key = "thread-1/message-v3"
-    store.append_guidance_once(
+    store.guidance.append_once(
         {
             "target_type": "request",
             "target_id": "request-v3",
@@ -567,12 +567,12 @@ def test_guidance_receipt_v3_migration_is_persisted_as_v4(tmp_path) -> None:
         },
         dedupe_key=dedupe_key,
     )
-    path = store._guidance_dedupe_path(dedupe_key)
+    path = store.storage.guidance_dedupe_path(dedupe_key)
     payload = json.loads(path.read_text(encoding="utf-8"))
     payload["schema_version"] = "conversation_guidance_once.v3"
     path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
-    receipt = store.guidance_once_receipt(dedupe_key)
+    receipt = store.guidance.receipt(dedupe_key)
     migrated = json.loads(path.read_text(encoding="utf-8"))
 
     assert receipt is not None and receipt.migration["from_schema"].endswith(".v3")
@@ -583,11 +583,11 @@ def test_guidance_submission_batch_repairs_partial_receipt_projection(
     tmp_path,
     monkeypatch,
 ) -> None:
-    import agent_py_agent.agent.conversation.store as store_module
+    import agent_py_agent.agent.conversation.store_guidance_submission as store_module
 
     store = ConversationStore(tmp_path / "conversations")
     dedupe_key = "thread/submission-crash"
-    entry = store.append_guidance_once(
+    entry = store.guidance.append_once(
         {
             "target_type": "request",
             "target_id": "request-submission-crash",
@@ -599,7 +599,7 @@ def test_guidance_submission_batch_repairs_partial_receipt_projection(
         },
         dedupe_key=dedupe_key,
     )
-    assert store.claim_guidance_once_for_turn(
+    assert store.guidance.claim_for_turn(
         entry,
         expected_turn_id="request-submission-crash",
         attempt_id="attempt-submission-crash",
@@ -611,7 +611,7 @@ def test_guidance_submission_batch_repairs_partial_receipt_projection(
         nonlocal failed
         if (
             not failed
-            and path.parent == store.guidance_dedupe_dir
+            and path.parent == store.storage.guidance_dedupe_dir
             and payload.get("status") == "submitted"
         ):
             failed = True
@@ -620,24 +620,24 @@ def test_guidance_submission_batch_repairs_partial_receipt_projection(
 
     monkeypatch.setattr(store_module, "write_json_file_atomic", fail_first_receipt_projection)
     with pytest.raises(OSError, match="projection crash"):
-        store.mark_guidance_entries_submitted(
+        store.guidance.submissions.mark_submitted(
             "request-submission-crash",
             [entry],
             attempt_id="attempt-submission-crash",
             provider_call_id="provider-submission-crash",
         )
-    receipt = store.guidance_once_receipt(dedupe_key)
+    receipt = store.guidance.receipt(dedupe_key)
     assert receipt is not None and receipt.status == "reserved"
 
     monkeypatch.setattr(store_module, "write_json_file_atomic", original_write)
-    summary = store.release_reserved_guidance_for_turn(
+    summary = store.guidance.recovery.release_reserved(
         "request-submission-crash",
         dead_attempt_id="attempt-submission-crash",
     )
 
     assert summary["released"] == 0
     assert summary["submitted"] == 1
-    repaired = store.guidance_once_receipt(dedupe_key)
+    repaired = store.guidance.receipt(dedupe_key)
     assert repaired is not None and repaired.status == "submitted"
     assert repaired.submission_id == "provider-submission-crash"
 
@@ -653,28 +653,28 @@ def test_conversation_guidance_idempotency_repairs_crash_between_receipt_and_que
         "message": "崩溃恢复后仍然只能有一条",
         "metadata": {"channel_message_id": "message-crash"},
     }
-    ensure_entry = store._ensure_guidance_once_entry
+    ensure_entry = store.guidance.ledger.ensure_queue_entry
 
     def crash_after_receipt(_entry):
         raise OSError("simulated crash after receipt")
 
-    monkeypatch.setattr(store, "_ensure_guidance_once_entry", crash_after_receipt)
+    monkeypatch.setattr(store.guidance.ledger, 'ensure_queue_entry', crash_after_receipt)
     with pytest.raises(OSError, match="simulated crash"):
-        store.append_guidance_once(request, dedupe_key="thread-1/message-crash")
-    assert store.pending_guidance("request", "request-crash", limit=0) == []
+        store.guidance.append_once(request, dedupe_key="thread-1/message-crash")
+    assert store.guidance.pending("request", "request-crash", limit=0) == []
 
-    monkeypatch.setattr(store, "_ensure_guidance_once_entry", ensure_entry)
-    recovered = store.append_guidance_once(
+    monkeypatch.setattr(store.guidance.ledger, 'ensure_queue_entry', ensure_entry)
+    recovered = store.guidance.append_once(
         request,
         dedupe_key="thread-1/message-crash",
     )
-    replay = store.append_guidance_once(
+    replay = store.guidance.append_once(
         request,
         dedupe_key="thread-1/message-crash",
     )
 
     assert replay.guidance_id == recovered.guidance_id
-    rows = store.recent_guidance("request", "request-crash", limit=0)
+    rows = store.guidance.recent("request", "request-crash", limit=0)
     assert [item.guidance_id for item in rows] == [recovered.guidance_id]
 
 
@@ -697,7 +697,7 @@ def test_send_guidance_tool_writes_run_guidance(tmp_path) -> None:
     assert payload["consumed"] is False
     assert payload["delivery_timing"] == "current_tool_boundary_or_next_turn"
     assert "不代表目标模型已经接收或执行" in payload["message"]
-    pending = agent.conversation_store.pending_guidance("agent_run", child.id)
+    pending = agent.conversation_store.guidance.pending("agent_run", child.id)
     assert pending[0].message == "换一个数据来源核对，不要重复查同一个页面。"
     assert pending[0].priority == "normal"
 
@@ -721,9 +721,9 @@ def test_send_guidance_tool_targets_only_one_named_child(tmp_path) -> None:
 
     assert result.ok is True
     assert payload["target"] == child_a.id
-    assert agent.conversation_store.pending_guidance("agent_run", child_a.id)
-    assert agent.conversation_store.pending_guidance("agent_run", child_b.id) == []
-    assert agent.conversation_store.pending_guidance("agent_run", root.id) == []
+    assert agent.conversation_store.guidance.pending("agent_run", child_a.id)
+    assert agent.conversation_store.guidance.pending("agent_run", child_b.id) == []
+    assert agent.conversation_store.guidance.pending("agent_run", root.id) == []
 
 
 def test_send_guidance_rejects_done_child_without_fake_pending_row(tmp_path) -> None:
@@ -742,7 +742,7 @@ def test_send_guidance_rejects_done_child_without_fake_pending_row(tmp_path) -> 
     assert result.effect_outcome == "not_started"
     assert payload["details"]["status"] == TaskStatus.DONE.value
     assert payload["details"]["recommended_action"] == "create_replacement_subagent"
-    assert agent.conversation_store.pending_guidance("agent_run", child.id) == []
+    assert agent.conversation_store.guidance.pending("agent_run", child.id) == []
 
 
 def test_send_guidance_keeps_blocked_child_eligible_for_correction(tmp_path) -> None:
@@ -756,7 +756,7 @@ def test_send_guidance_keeps_blocked_child_eligible_for_correction(tmp_path) -> 
     )
 
     assert result.ok is True
-    pending = agent.conversation_store.pending_guidance("agent_run", child.id)
+    pending = agent.conversation_store.guidance.pending("agent_run", child.id)
     assert [item.message for item in pending] == ["改读当前 workspace 内的 sources 目录。"]
 
 
@@ -774,7 +774,7 @@ def test_send_guidance_missing_target_does_not_fall_back_to_parent(tmp_path) -> 
     assert result.ok is False
     assert result.error_code == "TOOL_PARAMETER_REQUIRED"
     assert payload["error"] == "guidance_not_delivered"
-    assert agent.conversation_store.pending_guidance("agent_run", root.id) == []
+    assert agent.conversation_store.guidance.pending("agent_run", root.id) == []
 
 
 def test_send_guidance_keeps_recursive_parent_child_boundary(tmp_path) -> None:
@@ -802,7 +802,7 @@ def test_send_guidance_keeps_recursive_parent_child_boundary(tmp_path) -> None:
     assert result.ok is False
     assert result.error_code == "TOOL_PERMISSION_DENIED"
     assert result.effect_outcome == "not_started"
-    assert agent.conversation_store.pending_guidance("agent_run", grandchild.id) == []
+    assert agent.conversation_store.guidance.pending("agent_run", grandchild.id) == []
 
 
 def test_send_guidance_followup_keeps_original_conversation_parent(tmp_path) -> None:
@@ -822,7 +822,7 @@ def test_send_guidance_followup_keeps_original_conversation_parent(tmp_path) -> 
     )
 
     assert result.ok is True
-    pending = agent.conversation_store.pending_guidance("agent_run", child.id)
+    pending = agent.conversation_store.guidance.pending("agent_run", child.id)
     assert [item.message for item in pending] == ["这是同一主任务的后续要求。"]
 
 
@@ -852,13 +852,13 @@ def test_cli_guidance_send_writes_same_guidance_inbox(tmp_path, capsys) -> None:
 
     assert code == 0
     assert "已追加提示" in capsys.readouterr().out
-    pending = agent.conversation_store.pending_guidance("agent_run", "child-1")
+    pending = agent.conversation_store.guidance.pending("agent_run", "child-1")
     assert pending[0].message == "用户补充：先写草稿，不要一直只读。"
 
 
 def test_tool_loop_acks_pending_guidance_only_after_model_accepts_prompt(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
-    agent.conversation_store.append_guidance(
+    agent.conversation_store.guidance.append(
         {
             "target_type": "agent_run",
             "target_id": "main-run-1",
@@ -878,15 +878,15 @@ def test_tool_loop_acks_pending_guidance_only_after_model_accepts_prompt(tmp_pat
     assert params.active_turn_user_inputs[0]["text"] == "先写一个可打开的草稿，再继续完善。"
     assert params.active_turn_user_inputs[0]["input_ids"]
     assert "target" not in params.active_turn_user_inputs[0]
-    assert agent.conversation_store.pending_guidance("agent_run", "main-run-1")
+    assert agent.conversation_store.guidance.pending("agent_run", "main-run-1")
     assert has_pending_request_guidance(agent, params) is False
     assert acknowledge_injected_turn_input(agent, params, now=12.0) == 1
-    assert agent.conversation_store.pending_guidance("agent_run", "main-run-1") == []
+    assert agent.conversation_store.guidance.pending("agent_run", "main-run-1") == []
 
 
 def test_active_turn_user_input_reopens_the_model_reply_sink_once(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
-    agent.conversation_store.append_guidance(
+    agent.conversation_store.guidance.append(
         {
             "target_type": "agent_run",
             "target_id": "main-run-1",
@@ -939,7 +939,7 @@ def test_task_local_waiting_parent_replies_to_consumed_guidance_before_yield(
     child.status = TaskStatus.RUNNING.value
     agent.subagents.save(parent)
     agent.subagents.save(child)
-    agent.conversation_store.append_guidance(
+    agent.conversation_store.guidance.append(
         {
             "target_type": "agent_run",
             "target_id": parent.id,
@@ -987,7 +987,7 @@ def test_task_local_waiting_parent_replies_to_consumed_guidance_before_yield(
     assert response.text == "已经收到你的补充；研究员保持运行，我继续等待它完成。"
     assert response.runtime_status == "unfinished"
     assert response.runtime_reason == "SUBAGENTS_ACTIVE"
-    assert agent.conversation_store.pending_guidance("agent_run", parent.id) == []
+    assert agent.conversation_store.guidance.pending("agent_run", parent.id) == []
     assert active_turn_user_reply_required(params) is False
     assert child.status == agent.subagents.load(child.id).status
     assert agent.subagents.load(child.id).status == TaskStatus.RUNNING.value
@@ -995,7 +995,7 @@ def test_task_local_waiting_parent_replies_to_consumed_guidance_before_yield(
 
 def test_consumed_guidance_reply_obligation_uses_structured_ids(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
-    agent.conversation_store.append_guidance(
+    agent.conversation_store.guidance.append(
         {
             "target_type": "agent_run",
             "target_id": "main-run-1",
@@ -1036,7 +1036,7 @@ def test_active_turn_injects_matching_subagent_events_in_fifo_and_acks_after_mod
 ) -> None:
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
     store = agent.conversation_store
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "channel": "feishu",
@@ -1045,13 +1045,13 @@ def test_active_turn_injects_matching_subagent_events_in_fifo_and_acks_after_mod
             "now": 1.0,
         }
     )
-    store.bind_task(
+    store.tasks.bind(
         {"thread_id": thread.thread_id, "task_id": "task-1", "goal": "build", "now": 2.0}
     )
-    store.bind_task(
+    store.tasks.bind(
         {"thread_id": thread.thread_id, "task_id": "task-2", "goal": "other", "now": 3.0}
     )
-    first = store.raise_wake_signal(
+    first = store.wakes.raise_signal(
         {
             "thread_id": thread.thread_id,
             "root_task_id": "task-1",
@@ -1061,7 +1061,7 @@ def test_active_turn_injects_matching_subagent_events_in_fifo_and_acks_after_mod
             "now": 10.0,
         }
     )
-    second = store.raise_wake_signal(
+    second = store.wakes.raise_signal(
         {
             "thread_id": thread.thread_id,
             "root_task_id": "task-1",
@@ -1071,7 +1071,7 @@ def test_active_turn_injects_matching_subagent_events_in_fifo_and_acks_after_mod
             "now": 11.0,
         }
     )
-    unrelated = store.raise_wake_signal(
+    unrelated = store.wakes.raise_signal(
         {
             "thread_id": thread.thread_id,
             "root_task_id": "task-2",
@@ -1095,14 +1095,14 @@ def test_active_turn_injects_matching_subagent_events_in_fifo_and_acks_after_mod
     assert rendered.index(first.wake_signal_id) < rendered.index(second.wake_signal_id)
     assert "other-child" not in rendered
     assert has_pending_turn_input(agent, params) is False
-    assert [item.wake_signal_id for item in store.pending_wake_signals()] == [
+    assert [item.wake_signal_id for item in store.wakes.pending()] == [
         first.wake_signal_id,
         second.wake_signal_id,
         unrelated.wake_signal_id,
     ]
 
     assert acknowledge_injected_turn_input(agent, params, now=21.0) == 2
-    assert [item.wake_signal_id for item in store.pending_wake_signals()] == [
+    assert [item.wake_signal_id for item in store.wakes.pending()] == [
         unrelated.wake_signal_id
     ]
 
@@ -1110,7 +1110,7 @@ def test_active_turn_injects_matching_subagent_events_in_fifo_and_acks_after_mod
 def test_task_local_child_cannot_consume_parent_lifecycle_mailbox(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
     store = agent.conversation_store
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "channel": "internal",
@@ -1119,7 +1119,7 @@ def test_task_local_child_cannot_consume_parent_lifecycle_mailbox(tmp_path) -> N
             "now": 1.0,
         }
     )
-    store.bind_task(
+    store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": "task-root",
@@ -1127,7 +1127,7 @@ def test_task_local_child_cannot_consume_parent_lifecycle_mailbox(tmp_path) -> N
             "now": 2.0,
         }
     )
-    signal = store.raise_wake_signal(
+    signal = store.wakes.raise_signal(
         {
             "thread_id": thread.thread_id,
             "root_task_id": "task-root",
@@ -1147,7 +1147,7 @@ def test_task_local_child_cannot_consume_parent_lifecycle_mailbox(tmp_path) -> N
     assert has_pending_turn_input(agent, child_params) is False
     assert inject_pending_turn_input(agent, child_params, now=11.0) is False
     assert acknowledge_injected_turn_input(agent, child_params, now=12.0) == 0
-    assert [item.wake_signal_id for item in store.pending_wake_signals()] == [
+    assert [item.wake_signal_id for item in store.wakes.pending()] == [
         signal.wake_signal_id
     ]
 
@@ -1160,13 +1160,13 @@ def test_task_local_child_cannot_consume_parent_lifecycle_mailbox(tmp_path) -> N
     )
     assert inject_pending_turn_input(agent, parent_params, now=13.0) is True
     assert acknowledge_injected_turn_input(agent, parent_params, now=14.0) == 1
-    assert store.pending_wake_signals() == []
+    assert store.wakes.pending() == []
 
 
 def test_active_background_wake_batch_is_left_for_scheduler_ack(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
     store = agent.conversation_store
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "channel": "internal",
@@ -1175,11 +1175,11 @@ def test_active_background_wake_batch_is_left_for_scheduler_ack(tmp_path) -> Non
             "now": 1.0,
         }
     )
-    store.bind_task(
+    store.tasks.bind(
         {"thread_id": thread.thread_id, "task_id": "task-1", "goal": "build", "now": 2.0}
     )
     signals = [
-        store.raise_wake_signal(
+        store.wakes.raise_signal(
             {
                 "thread_id": thread.thread_id,
                 "root_task_id": "task-1",
@@ -1203,14 +1203,14 @@ def test_active_background_wake_batch_is_left_for_scheduler_ack(tmp_path) -> Non
 
     assert has_pending_turn_input(agent, params) is False
     assert inject_pending_turn_input(agent, params, now=20.0) is False
-    assert [item.wake_signal_id for item in store.pending_wake_signals()] == [
+    assert [item.wake_signal_id for item in store.wakes.pending()] == [
         signal.wake_signal_id for signal in signals
     ]
 
 
 def test_request_guidance_is_one_shot_and_does_not_leak_to_next_request(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
-    agent.conversation_store.append_guidance(
+    agent.conversation_store.guidance.append(
         {
             "target_type": "request",
             "target_id": "req-1",
@@ -1226,14 +1226,14 @@ def test_request_guidance_is_one_shot_and_does_not_leak_to_next_request(tmp_path
     assert inject_pending_guidance(agent, current, now=11.0) is True
     assert any("先别写文件" in str(item) for item in current.tool_context)
     assert has_pending_request_guidance(agent, current) is False
-    assert agent.conversation_store.pending_guidance("request", "req-1")
+    assert agent.conversation_store.guidance.pending("request", "req-1")
     assert acknowledge_injected_turn_input(agent, current, now=11.5) == 1
     assert inject_pending_guidance(agent, later, now=12.0) is False
 
 
 def test_background_turn_adopts_pending_guidance_from_original_request_id(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
-    agent.conversation_store.append_guidance(
+    agent.conversation_store.guidance.append(
         {
             "target_type": "request",
             "target_id": "task-original",
@@ -1251,12 +1251,12 @@ def test_background_turn_adopts_pending_guidance_from_original_request_id(tmp_pa
     assert inject_pending_guidance(agent, background, now=11.0) is True
     assert any("最终报告顶部补上三项统计并测试" in str(item) for item in background.tool_context)
     assert acknowledge_injected_turn_input(agent, background, now=12.0) == 1
-    assert agent.conversation_store.pending_guidance("request", "task-original") == []
+    assert agent.conversation_store.guidance.pending("request", "task-original") == []
 
 
 def test_task_guidance_is_consumed_once_and_not_replayed_after_resume(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
-    agent.conversation_store.append_guidance(
+    agent.conversation_store.guidance.append(
         {
             "target_type": "task",
             "target_id": "task-1",
@@ -1282,7 +1282,7 @@ def test_task_guidance_is_consumed_once_and_not_replayed_after_resume(tmp_path) 
 
 def test_task_guidance_uses_selected_durable_task_instead_of_gateway_request_id(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
-    agent.conversation_store.append_guidance(
+    agent.conversation_store.guidance.append(
         {
             "target_type": "task",
             "target_id": "task-original",
@@ -1301,7 +1301,7 @@ def test_task_guidance_uses_selected_durable_task_instead_of_gateway_request_id(
     assert inject_pending_guidance(agent, params, now=11.0) is True
     assert any("从中断位置继续" in str(item) for item in params.tool_context)
     assert acknowledge_injected_turn_input(agent, params, now=11.5) == 1
-    assert agent.conversation_store.pending_guidance("task", "task-original") == []
+    assert agent.conversation_store.guidance.pending("task", "task-original") == []
 
 
 def test_in_turn_workspace_binding_retargets_the_live_conversation_guidance_inbox(tmp_path) -> None:
@@ -1312,7 +1312,7 @@ def test_in_turn_workspace_binding_retargets_the_live_conversation_guidance_inbo
     )
 
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
-    thread = agent.conversation_store.get_or_create_thread(
+    thread = agent.conversation_store.threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "channel": "feishu",
@@ -1324,7 +1324,7 @@ def test_in_turn_workspace_binding_retargets_the_live_conversation_guidance_inbo
     task_root = tmp_path / "existing-task"
     (task_root / "work").mkdir(parents=True)
     (task_root / "output").mkdir()
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": "task-original",
@@ -1362,7 +1362,7 @@ def test_in_turn_workspace_binding_retargets_the_live_conversation_guidance_inbo
     assert live_loop.task_id == "req-followup"
     assert live_loop.task_attributes["conversation_task_id"] == "task-original"
 
-    agent.conversation_store.append_guidance(
+    agent.conversation_store.guidance.append(
         {
             "target_type": "task",
             "target_id": "task-original",
@@ -1385,7 +1385,7 @@ def test_multiple_task_steers_keep_sample_a_style_fifo_order(tmp_path) -> None:
         ),
         start=10,
     ):
-        agent.conversation_store.append_guidance(
+        agent.conversation_store.guidance.append(
             {
                 "target_type": "task",
                 "target_id": "task-1",
@@ -1412,7 +1412,7 @@ def test_multiple_task_steers_keep_sample_a_style_fifo_order(tmp_path) -> None:
 )
 def test_tool_loop_guidance_can_override_earlier_contract_context(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
-    agent.conversation_store.append_guidance(
+    agent.conversation_store.guidance.append(
         {
             "target_type": "agent_run",
             "target_id": "main-run-1",
@@ -1436,9 +1436,9 @@ def test_tool_loop_guidance_can_override_earlier_contract_context(tmp_path) -> N
     assert prompt.rfind("用户补充：25次压缩已经够了") > prompt.find(
         "[tool-system delivery-contract]"
     )
-    assert agent.conversation_store.pending_guidance("agent_run", "main-run-1")
+    assert agent.conversation_store.guidance.pending("agent_run", "main-run-1")
     assert acknowledge_injected_turn_input(agent, params, now=11.0) == 1
-    assert agent.conversation_store.pending_guidance("agent_run", "main-run-1") == []
+    assert agent.conversation_store.guidance.pending("agent_run", "main-run-1") == []
 
 
 def test_task_steer_stays_as_latest_native_user_turn_across_later_model_rounds(tmp_path) -> None:
@@ -1453,7 +1453,7 @@ def test_task_steer_stays_as_latest_native_user_turn_across_later_model_rounds(t
         ),
         tmp_path,
     )
-    agent.conversation_store.append_guidance(
+    agent.conversation_store.guidance.append(
         {
             "target_type": "task",
             "target_id": "task-1",
@@ -1528,7 +1528,7 @@ def test_text_protocol_keeps_steer_in_transcript_without_building_native_ir(tmp_
         AgentConfig(model_backend="echo", subagent_workspace="subs"),
         tmp_path,
     )
-    agent.conversation_store.append_guidance(
+    agent.conversation_store.guidance.append(
         {
             "target_type": "task",
             "target_id": "task-1",
@@ -1548,7 +1548,7 @@ def test_text_protocol_keeps_steer_in_transcript_without_building_native_ir(tmp_
 
 def test_model_authored_receipt_cannot_consume_active_task_guidance(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
-    entry = agent.conversation_store.append_guidance(
+    entry = agent.conversation_store.guidance.append(
         {
             "target_type": "task",
             "target_id": "task-1",
@@ -1570,7 +1570,7 @@ def test_model_authored_receipt_cannot_consume_active_task_guidance(tmp_path) ->
     assert receipt_params.consume_pending_turn_input is False
     assert entry.message not in receipt_prompt
     assert entry.message not in json.dumps(receipt_messages, ensure_ascii=False)
-    assert agent.conversation_store.pending_guidance("task", "task-1")
+    assert agent.conversation_store.guidance.pending("task", "task-1")
     assert discard_pending_natural_user_reply(params) is True
 
     task_prompt = build_tool_loop_prompt(agent, params)
@@ -1578,9 +1578,9 @@ def test_model_authored_receipt_cannot_consume_active_task_guidance(tmp_path) ->
 
     assert entry.message not in task_prompt
     assert entry.message in json.dumps(task_messages, ensure_ascii=False)
-    assert agent.conversation_store.pending_guidance("task", "task-1")
+    assert agent.conversation_store.guidance.pending("task", "task-1")
     assert acknowledge_injected_turn_input(agent, params, now=11.0) == 1
-    assert agent.conversation_store.pending_guidance("task", "task-1") == []
+    assert agent.conversation_store.guidance.pending("task", "task-1") == []
 
 
 def test_steer_arriving_during_receipt_generation_discards_stale_receipt(tmp_path) -> None:
@@ -1596,7 +1596,7 @@ def test_steer_arriving_during_receipt_generation_discards_stale_receipt(tmp_pat
             wire = json.dumps(kwargs.get("messages") or [], ensure_ascii=False)
             if len(prompts) == 1:
                 assert "[natural-user-reply]" in wire
-                agent.conversation_store.append_guidance(
+                agent.conversation_store.guidance.append(
                     {
                         "target_type": "task",
                         "target_id": "task-1",
@@ -1621,7 +1621,7 @@ def test_steer_arriving_during_receipt_generation_discards_stale_receipt(tmp_pat
 
     assert len(prompts) == 2
     assert response.text == "已按最新补充继续当前任务。"
-    assert agent.conversation_store.pending_guidance("task", "task-1") == []
+    assert agent.conversation_store.guidance.pending("task", "task-1") == []
 
 
 def test_steer_survives_empty_stale_provider_response_in_same_turn(tmp_path) -> None:
@@ -1635,7 +1635,7 @@ def test_steer_survives_empty_stale_provider_response_in_same_turn(tmp_path) -> 
             del on_chunk
             prompts.append(prompt)
             if len(prompts) == 1:
-                agent.conversation_store.append_guidance(
+                agent.conversation_store.guidance.append(
                     {
                         "target_type": "task",
                         "target_id": "task-1",
@@ -1662,7 +1662,7 @@ def test_steer_survives_empty_stale_provider_response_in_same_turn(tmp_path) -> 
     assert [item["text"] for item in params.active_turn_user_inputs] == [
         "停止继续搜索，直接用已有资料收口。"
     ]
-    assert agent.conversation_store.pending_guidance("task", "task-1") == []
+    assert agent.conversation_store.guidance.pending("task", "task-1") == []
 
 
 @pytest.mark.xfail(
@@ -1679,7 +1679,7 @@ def test_steer_supersedes_incomplete_stale_provider_response_in_same_turn(tmp_pa
             del on_chunk
             prompts.append(prompt)
             if len(prompts) == 1:
-                agent.conversation_store.append_guidance(
+                agent.conversation_store.guidance.append(
                     {
                         "target_type": "task",
                         "target_id": "task-1",
@@ -1706,7 +1706,7 @@ def test_steer_supersedes_incomplete_stale_provider_response_in_same_turn(tmp_pa
     assert [item["text"] for item in params.active_turn_user_inputs] == [
         "不要继续写旧方案，按最新边界直接收口。"
     ]
-    assert agent.conversation_store.pending_guidance("task", "task-1") == []
+    assert agent.conversation_store.guidance.pending("task", "task-1") == []
 
 
 def test_natural_reply_prompt_treats_fact_carrier_as_invisible(tmp_path) -> None:
@@ -1920,7 +1920,7 @@ def test_active_named_audit_replaces_premature_final_with_model_interim(
         AgentConfig(model_backend="echo", subagent_workspace="subs"),
         tmp_path,
     )
-    thread = agent.conversation_store.get_or_create_thread(
+    thread = agent.conversation_store.threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "channel": "internal",
@@ -1929,7 +1929,7 @@ def test_active_named_audit_replaces_premature_final_with_model_interim(
         }
     )
     now = time.time()
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": "audit-task",
@@ -2004,7 +2004,7 @@ def test_pending_audit_prepare_rewrites_false_publish_claim_with_turn_evidence(
         AgentConfig(model_backend="echo", subagent_workspace="subs"),
         tmp_path,
     )
-    thread = agent.conversation_store.get_or_create_thread(
+    thread = agent.conversation_store.threads.get_or_create(
         {
             "canonical_user_id": "user-prepare",
             "channel": "internal",
@@ -2012,7 +2012,7 @@ def test_pending_audit_prepare_rewrites_false_publish_claim_with_turn_evidence(
             "channel_user_id": "user-prepare",
         }
     )
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": "audit-prepare-task",
@@ -2114,7 +2114,7 @@ def test_published_audit_prepare_rewrites_false_source_binding_claim_from_typed_
         AgentConfig(model_backend="echo", subagent_workspace="subs"),
         tmp_path,
     )
-    thread = agent.conversation_store.get_or_create_thread(
+    thread = agent.conversation_store.threads.get_or_create(
         {
             "canonical_user_id": "user-published-prepare",
             "channel": "internal",
@@ -2123,7 +2123,7 @@ def test_published_audit_prepare_rewrites_false_source_binding_claim_from_typed_
         }
     )
     request_id = "published-prepare-request"
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": "published-prepare-task",
@@ -2136,7 +2136,7 @@ def test_published_audit_prepare_rewrites_false_source_binding_claim_from_typed_
             "now": 1.0,
         }
     )
-    assert agent.conversation_store.publish_audit_effective_prompt(
+    assert agent.conversation_store.audits.publish_effective_prompt(
         {
             "task_id": "published-prepare-task",
             "prompt": "已经发布的研判说明",
@@ -2221,7 +2221,7 @@ def test_published_audit_prepare_uses_durable_outcome_not_repaired_attempts(
         AgentConfig(model_backend="echo", subagent_workspace="subs"),
         tmp_path,
     )
-    thread = agent.conversation_store.get_or_create_thread(
+    thread = agent.conversation_store.threads.get_or_create(
         {
             "canonical_user_id": "user-repaired-prepare",
             "channel": "internal",
@@ -2231,7 +2231,7 @@ def test_published_audit_prepare_uses_durable_outcome_not_repaired_attempts(
     )
     request_id = "repaired-prepare-request"
     task_id = "repaired-prepare-task"
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": task_id,
@@ -2246,7 +2246,7 @@ def test_published_audit_prepare_uses_durable_outcome_not_repaired_attempts(
     )
     profile = tmp_path / "source-a.md"
     profile.write_text("source_id: source-a\n", encoding="utf-8")
-    assert agent.conversation_store.publish_audit_effective_prompt(
+    assert agent.conversation_store.audits.publish_effective_prompt(
         {
             "task_id": task_id,
             "prompt": "来源已经成功探测并发布",
@@ -2364,7 +2364,7 @@ def test_published_prepare_turn_is_not_replaced_by_active_audit_lifecycle(
         AgentConfig(model_backend="echo", subagent_workspace="subs"),
         tmp_path,
     )
-    thread = agent.conversation_store.get_or_create_thread(
+    thread = agent.conversation_store.threads.get_or_create(
         {
             "canonical_user_id": "user-prepare-active",
             "channel": "internal",
@@ -2372,7 +2372,7 @@ def test_published_prepare_turn_is_not_replaced_by_active_audit_lifecycle(
             "channel_user_id": "user-prepare-active",
         }
     )
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": "audit-prepare-active-task",
@@ -2422,7 +2422,7 @@ def test_active_named_work_reply_carries_current_turn_operation_facts(tmp_path) 
         AgentConfig(model_backend="echo", subagent_workspace="subs"),
         tmp_path,
     )
-    thread = agent.conversation_store.get_or_create_thread(
+    thread = agent.conversation_store.threads.get_or_create(
         {
             "canonical_user_id": "user-active-operation",
             "channel": "internal",
@@ -2430,7 +2430,7 @@ def test_active_named_work_reply_carries_current_turn_operation_facts(tmp_path) 
             "channel_user_id": "user-active-operation",
         }
     )
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": "audit-active-operation-task",
@@ -2482,7 +2482,7 @@ def test_published_prepare_keeps_same_turn_reply_but_ordinary_turn_is_unchanged(
         AgentConfig(model_backend="echo", subagent_workspace="subs"),
         tmp_path,
     )
-    thread = agent.conversation_store.get_or_create_thread(
+    thread = agent.conversation_store.threads.get_or_create(
         {
             "canonical_user_id": "user-prepare",
             "channel": "internal",
@@ -2490,7 +2490,7 @@ def test_published_prepare_keeps_same_turn_reply_but_ordinary_turn_is_unchanged(
             "channel_user_id": "user-prepare",
         }
     )
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": "audit-published-task",
@@ -2503,7 +2503,7 @@ def test_published_prepare_keeps_same_turn_reply_but_ordinary_turn_is_unchanged(
             "now": 1.0,
         }
     )
-    assert agent.conversation_store.publish_audit_effective_prompt(
+    assert agent.conversation_store.audits.publish_effective_prompt(
         {
             "task_id": "audit-published-task",
             "prompt": "验证完成后的正式说明",
@@ -2936,7 +2936,7 @@ def test_natural_reply_does_not_salvage_internal_protocol_from_rejected_tool_cal
 
 def test_unacknowledged_guidance_replays_after_run_recovery(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
-    agent.conversation_store.append_guidance(
+    agent.conversation_store.guidance.append(
         {
             "target_type": "task",
             "target_id": "task-1",
@@ -2947,13 +2947,13 @@ def test_unacknowledged_guidance_replays_after_run_recovery(tmp_path) -> None:
     interrupted_run = _tool_loop_params(task_id="task-1")
 
     assert inject_pending_guidance(agent, interrupted_run, now=11.0) is True
-    assert agent.conversation_store.pending_guidance("task", "task-1")
+    assert agent.conversation_store.guidance.pending("task", "task-1")
 
     recovered_run = _tool_loop_params(task_id="task-1")
     assert inject_pending_guidance(agent, recovered_run, now=12.0) is True
     assert any("崩溃恢复后仍要看到这条引导" in str(item) for item in recovered_run.tool_context)
     assert acknowledge_injected_turn_input(agent, recovered_run, now=13.0) == 1
-    assert agent.conversation_store.pending_guidance("task", "task-1") == []
+    assert agent.conversation_store.guidance.pending("task", "task-1") == []
 
 
 def test_tool_loop_reports_thread_guidance_lookup_error(tmp_path, monkeypatch) -> None:
@@ -2964,7 +2964,7 @@ def test_tool_loop_reports_thread_guidance_lookup_error(tmp_path, monkeypatch) -
         del task_id
         raise OSError("thread binding index missing")
 
-    monkeypatch.setattr(agent.conversation_store, "thread_for_task", broken_thread_for_task)
+    monkeypatch.setattr(agent.conversation_store.tasks, 'thread_for', broken_thread_for_task)
 
     updated = inject_pending_guidance(agent, params, now=11.0)
 
@@ -2978,7 +2978,7 @@ def test_subagent_runner_prompt_does_not_claim_guidance_before_provider_safe_poi
 ) -> None:
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
     child = agent.subagents.create_run(goal="child", thought="", plan=["child"])
-    agent.conversation_store.append_guidance(
+    agent.conversation_store.guidance.append(
         {
             "target_type": "agent_run",
             "target_id": child.id,
@@ -2990,7 +2990,7 @@ def test_subagent_runner_prompt_does_not_claim_guidance_before_provider_safe_poi
 
     assert "GUIDANCE_DELIVERED" not in prompt
     assert "先写阶段文件，再继续扩展。" not in prompt
-    assert len(agent.conversation_store.pending_guidance("agent_run", child.id)) == 1
+    assert len(agent.conversation_store.guidance.pending("agent_run", child.id)) == 1
 
     params = _tool_loop_params(
         request_id="attempt-child-1",
@@ -3001,7 +3001,7 @@ def test_subagent_runner_prompt_does_not_claim_guidance_before_provider_safe_poi
     assert inject_pending_guidance(agent, params, now=21.0) is True
     assert any("先写阶段文件，再继续扩展。" in str(item) for item in params.tool_context)
     assert acknowledge_injected_turn_input(agent, params, now=22.0) == 1
-    assert agent.conversation_store.pending_guidance("agent_run", child.id) == []
+    assert agent.conversation_store.guidance.pending("agent_run", child.id) == []
 
 
 def test_pending_agent_guidance_rebinds_to_recovered_attempt_once(tmp_path) -> None:
@@ -3013,9 +3013,9 @@ def test_pending_agent_guidance_rebinds_to_recovered_attempt_once(tmp_path) -> N
         "sender": "user:alice",
         "metadata": {"expected_turn_id": "attempt-old"},
     }
-    first = store.append_guidance_once(request, dedupe_key="child-1/message-1")
+    first = store.guidance.append_once(request, dedupe_key="child-1/message-1")
 
-    summary = store.rebind_unsubmitted_guidance_for_recovered_turn(
+    summary = store.guidance.recovery.rebind_unsubmitted(
         "agent_run",
         "child-1",
         dead_turn_ids={"attempt-old"},
@@ -3023,10 +3023,10 @@ def test_pending_agent_guidance_rebinds_to_recovered_attempt_once(tmp_path) -> N
     )
 
     assert summary["rebound"] == 1
-    pending = store.pending_guidance("agent_run", "child-1")
+    pending = store.guidance.pending("agent_run", "child-1")
     assert [entry.guidance_id for entry in pending] == [first.guidance_id]
     assert pending[0].metadata["expected_turn_id"] == "attempt-new"
-    replay = store.append_guidance_once(
+    replay = store.guidance.append_once(
         {
             **request,
             "metadata": {"expected_turn_id": "attempt-new"},
@@ -3034,32 +3034,33 @@ def test_pending_agent_guidance_rebinds_to_recovered_attempt_once(tmp_path) -> N
         dedupe_key="child-1/message-1",
     )
     assert replay.guidance_id == first.guidance_id
-    assert store.claim_guidance_once_for_turn(
+    assert store.guidance.claim_for_turn(
         pending[0],
         expected_turn_id="attempt-new",
         attempt_id="attempt-new",
     ) is True
-    assert store.mark_guidance_entries_submitted(
+    assert store.guidance.submissions.mark_submitted(
         "attempt-new",
         pending,
         attempt_id="attempt-new",
         provider_call_id="call-new",
     ) == (first.guidance_id,)
-    assert store.consume_submitted_guidance_for_turn(
+    assert store.guidance.acknowledgements.consume_submitted(
         "attempt-new",
         pending,
         provider_call_id="call-new",
         now=30.0,
     ) == (first.guidance_id,)
-    assert store.pending_guidance("agent_run", "child-1") == []
+    assert store.guidance.pending("agent_run", "child-1") == []
 
 
 def test_rebound_guidance_repairs_half_written_lookup_projections(tmp_path) -> None:
-    import agent_py_agent.agent.conversation.store as store_module
+    from agent_py_agent.agent.conversation.store_guidance_records import _rebound_guidance_receipt
+    from agent_py_agent.agent.gateway_parts.io import write_json_file_atomic
 
     store = ConversationStore(tmp_path / "conversations")
     dedupe_key = "child-1/message-half-written"
-    entry = store.append_guidance_once(
+    entry = store.guidance.append_once(
         {
             "target_type": "agent_run",
             "target_id": "child-1",
@@ -3071,17 +3072,17 @@ def test_rebound_guidance_repairs_half_written_lookup_projections(tmp_path) -> N
         },
         dedupe_key=dedupe_key,
     )
-    receipt_path = store._guidance_dedupe_path(dedupe_key)
-    original = store.guidance_once_receipt(dedupe_key)
+    receipt_path = store.storage.guidance_dedupe_path(dedupe_key)
+    original = store.guidance.receipt(dedupe_key)
     assert original is not None
-    rebound = store_module._rebound_guidance_receipt(
+    rebound = _rebound_guidance_receipt(
         original,
         old_turn_id="attempt-old",
         recovered_turn_id="attempt-new",
     )
-    store_module.write_json_file_atomic(receipt_path, rebound.to_dict())
+    write_json_file_atomic(receipt_path, rebound.to_dict())
 
-    repaired, turn_id = store.guidance_receipt_for_gateway_input(
+    repaired, turn_id = store.guidance.receipt_for_input(
         "gateway-input-half-written"
     )
 
@@ -3089,18 +3090,18 @@ def test_rebound_guidance_repairs_half_written_lookup_projections(tmp_path) -> N
     assert repaired.entry.guidance_id == entry.guidance_id
     assert turn_id == "attempt-new"
     input_index = json.loads(
-        store._guidance_input_index_path("gateway-input-half-written").read_text(
+        store.storage.guidance_input_index_path("gateway-input-half-written").read_text(
             encoding="utf-8"
         )
     )
     assert input_index["expected_turn_id"] == "attempt-new"
-    assert not store._guidance_turn_index_path("attempt-old", dedupe_key).exists()
-    assert store._guidance_turn_index_path("attempt-new", dedupe_key).exists()
+    assert not store.storage.guidance_turn_index_path("attempt-old", dedupe_key).exists()
+    assert store.storage.guidance_turn_index_path("attempt-new", dedupe_key).exists()
 
 
 def test_reserved_agent_guidance_rebinds_only_before_provider_submission(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
-    entry = store.append_guidance_once(
+    entry = store.guidance.append_once(
         {
             "target_type": "agent_run",
             "target_id": "child-1",
@@ -3109,13 +3110,13 @@ def test_reserved_agent_guidance_rebinds_only_before_provider_submission(tmp_pat
         },
         dedupe_key="child-1/message-reserved",
     )
-    assert store.claim_guidance_once_for_turn(
+    assert store.guidance.claim_for_turn(
         entry,
         expected_turn_id="attempt-old",
         attempt_id="attempt-old",
     ) is True
 
-    summary = store.rebind_unsubmitted_guidance_for_recovered_turn(
+    summary = store.guidance.recovery.rebind_unsubmitted(
         "agent_run",
         "child-1",
         dead_turn_ids={"attempt-old"},
@@ -3123,7 +3124,7 @@ def test_reserved_agent_guidance_rebinds_only_before_provider_submission(tmp_pat
     )
 
     assert summary["rebound"] == 1
-    receipt = store.guidance_once_receipt("child-1/message-reserved")
+    receipt = store.guidance.receipt("child-1/message-reserved")
     assert receipt is not None
     assert receipt.status == "pending"
     assert receipt.attempt_id == ""
@@ -3132,7 +3133,7 @@ def test_reserved_agent_guidance_rebinds_only_before_provider_submission(tmp_pat
 
 def test_submitted_agent_guidance_is_never_rebound_after_recovery(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
-    entry = store.append_guidance_once(
+    entry = store.guidance.append_once(
         {
             "target_type": "agent_run",
             "target_id": "child-1",
@@ -3141,19 +3142,19 @@ def test_submitted_agent_guidance_is_never_rebound_after_recovery(tmp_path) -> N
         },
         dedupe_key="child-1/message-submitted",
     )
-    assert store.claim_guidance_once_for_turn(
+    assert store.guidance.claim_for_turn(
         entry,
         expected_turn_id="attempt-old",
         attempt_id="attempt-old",
     ) is True
-    assert store.mark_guidance_entries_submitted(
+    assert store.guidance.submissions.mark_submitted(
         "attempt-old",
         [entry],
         attempt_id="attempt-old",
         provider_call_id="call-old",
     ) == (entry.guidance_id,)
 
-    summary = store.rebind_unsubmitted_guidance_for_recovered_turn(
+    summary = store.guidance.recovery.rebind_unsubmitted(
         "agent_run",
         "child-1",
         dead_turn_ids={"attempt-old"},
@@ -3161,7 +3162,7 @@ def test_submitted_agent_guidance_is_never_rebound_after_recovery(tmp_path) -> N
     )
 
     assert summary["submitted_unknown"] == 1
-    receipt = store.guidance_once_receipt("child-1/message-submitted")
+    receipt = store.guidance.receipt("child-1/message-submitted")
     assert receipt is not None
     assert receipt.status == "submitted"
     assert receipt.entry.metadata["expected_turn_id"] == "attempt-old"
@@ -3169,7 +3170,7 @@ def test_submitted_agent_guidance_is_never_rebound_after_recovery(tmp_path) -> N
 
 def test_legacy_prompt_time_delivery_migrates_to_unknown_without_replay(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
-    entry = store.append_guidance_once(
+    entry = store.guidance.append_once(
         {
             "target_type": "agent_run",
             "target_id": "child-1",
@@ -3178,9 +3179,9 @@ def test_legacy_prompt_time_delivery_migrates_to_unknown_without_replay(tmp_path
         },
         dedupe_key="child-1/message-legacy",
     )
-    store.mark_guidance_delivered([entry.guidance_id], now=25.0)
+    store.guidance.ledger.mark_delivered([entry.guidance_id], now=25.0)
 
-    summary = store.rebind_unsubmitted_guidance_for_recovered_turn(
+    summary = store.guidance.recovery.rebind_unsubmitted(
         "agent_run",
         "child-1",
         dead_turn_ids={"attempt-old"},
@@ -3188,17 +3189,17 @@ def test_legacy_prompt_time_delivery_migrates_to_unknown_without_replay(tmp_path
     )
 
     assert summary["legacy_submission_unknown"] == 1
-    receipt = store.guidance_once_receipt("child-1/message-legacy")
+    receipt = store.guidance.receipt("child-1/message-legacy")
     assert receipt is not None
     assert receipt.status == "submitted"
     assert receipt.submission_id.startswith("legacy-runner-prompt-unknown:")
-    assert store.pending_guidance("agent_run", "child-1") == []
+    assert store.guidance.pending("agent_run", "child-1") == []
 
 
 def test_legacy_prompt_delivery_is_retired_on_plain_receipt_lookup(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
     dedupe_key = "child-1/message-legacy-terminal"
-    entry = store.append_guidance_once(
+    entry = store.guidance.append_once(
         {
             "target_type": "agent_run",
             "target_id": "child-1",
@@ -3207,9 +3208,9 @@ def test_legacy_prompt_delivery_is_retired_on_plain_receipt_lookup(tmp_path) -> 
         },
         dedupe_key=dedupe_key,
     )
-    store.mark_guidance_delivered([entry.guidance_id], now=26.0)
+    store.guidance.ledger.mark_delivered([entry.guidance_id], now=26.0)
 
-    receipt = store.guidance_once_receipt(dedupe_key)
+    receipt = store.guidance.receipt(dedupe_key)
 
     assert receipt is not None
     assert receipt.status == "submitted"
@@ -3217,4 +3218,4 @@ def test_legacy_prompt_delivery_is_retired_on_plain_receipt_lookup(tmp_path) -> 
     assert receipt.migration["legacy_runner_prompt_delivery"]["turn_id"] == (
         "attempt-terminal"
     )
-    assert store.pending_guidance("agent_run", "child-1") == []
+    assert store.guidance.pending("agent_run", "child-1") == []

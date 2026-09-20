@@ -173,16 +173,16 @@ def test_cancelled_turn_is_not_cancelled_active_goal(stale_owner):
     from agent_py_agent.agent.gateway_parts.io import write_json_file_atomic
 
     store = ConversationStore(stale_owner["link_path"].parent.parent)
-    thread = store.get_or_create_thread({"canonical_user_id": "test", "channel": "chat", "channel_conversation_id": "goal"})
+    thread = store.threads.get_or_create({"canonical_user_id": "test", "channel": "chat", "channel_conversation_id": "goal"})
     link = _read_json(stale_owner["link_path"])
     link["thread_id"] = thread.thread_id
     write_json_file_atomic(stale_owner["link_path"], link)
-    goal = store.create_goal({"thread_id": thread.thread_id, "task_id": stale_owner["task_id"], "objective": "持续整理"})
+    goal = store.goals.create({"thread_id": thread.thread_id, "task_id": stale_owner["task_id"], "objective": "持续整理"})
     unfinished_task_ids(stale_owner["home"])
-    assert store.load_task_link(goal.task_id).status == "active"
-    assert store.load_goal(thread.thread_id).status == "active"
+    assert store.tasks.load(goal.task_id).status == "active"
+    assert store.goals.load(thread.thread_id).status == "active"
     assert _read_json(stale_owner["task_root"] / "work/state.json")["status"] == "RUNNING"
-    assert not store.pending_wake_signals()  # 扫描不得自己创建续跑授权。
+    assert not store.wakes.pending()  # 扫描不得自己创建续跑授权。
 
 
 def test_non_terminal_run_keeps_driving(tmp_path):

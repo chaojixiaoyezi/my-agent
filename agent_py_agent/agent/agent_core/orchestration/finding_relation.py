@@ -167,7 +167,7 @@ def _resolve_relation(
     if store is None:
         return {}, "会话事件账不可用，不能验证 related_finding_id。"
     try:
-        observations, errors = store.recent_observations_report(
+        observations, errors = store.observations.recent_report(
             thread_id,
             limit=0,
         )
@@ -226,7 +226,7 @@ def _matching_finding_event(event: object, finding_id: str) -> bool:
 
 def _active_audit_link(store: object, thread_id: str, audit_id: str) -> bool:
     try:
-        links, errors = store.active_task_links_report(thread_id)
+        links, errors = store.tasks.active_report(thread_id)
     except Exception:
         return False
     if errors:
@@ -282,7 +282,7 @@ def _current_thread_id(agent: object) -> str:
     if not task_id or store is None:
         return ""
     try:
-        thread = store.thread_for_task(task_id)
+        thread = store.tasks.thread_for(task_id)
     except Exception:
         return ""
     return str(getattr(thread, "thread_id", "") or "").strip()

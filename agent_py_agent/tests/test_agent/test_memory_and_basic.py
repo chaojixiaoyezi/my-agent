@@ -19,6 +19,7 @@ def test_run_does_not_auto_save_formal_memory():
         (root / "prompts").mkdir()
         (root / "prompts/default.md").write_text("动态规则", encoding="utf-8")
         cfg = AgentConfig(
+            model_backend="echo",
             memory_path="memory.jsonl",
             prompt_files=["prompts/default.md"],
         )

@@ -16,7 +16,7 @@ def execute_agent_goal_control(agent: object, *, scope: object, payload: dict) -
         store, _root, task = _authorized_agent_target(agent, scope=scope, run_id=run_id, operation="send_guidance")
         thread_id = str(task.agent_thread_id or "")
     else:
-        thread, error = store.resolve_thread_report(
+        thread, error = store.threads.resolve_report(
             channel=scope.channel, channel_conversation_id=scope.conversation_id, channel_user_id=scope.user_id,
         )
         if thread is None or error:
@@ -25,7 +25,7 @@ def execute_agent_goal_control(agent: object, *, scope: object, payload: dict) -
     goal_id = str(payload.get("goal_id") or "").strip()
     if not goal_id:
         raise AgentControlError(400, "GOAL_ID_REQUIRED", "请选择准确的目标。")
-    goal = store.load_goal(thread_id, goal_id=goal_id)
+    goal = store.goals.load(thread_id, goal_id=goal_id)
     if goal is None or (run_id and goal.task_id != run_id):
         raise AgentControlError(404, "GOAL_NOT_FOUND", "当前代理没有这个目标。")
     operation = str(payload.get("operation") or "view")

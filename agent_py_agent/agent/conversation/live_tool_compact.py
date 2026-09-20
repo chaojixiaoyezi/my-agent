@@ -92,7 +92,7 @@ def resolve_live_tool_compact_binding(
             "authoritative live tool compact has no conversation store",
             code="COMPACT_STORE_UNAVAILABLE",
         )
-    thread, load_error = store.load_thread_report(thread_id)
+    thread, load_error = store.threads.load_report(thread_id)
     if load_error is not None or thread is None:
         raise ConversationCompactError(
             "authoritative live tool compact thread is unavailable",
@@ -140,7 +140,7 @@ def commit_live_tool_compact(
     # Check after the durable candidate exists but before it receives live authority. An orphan
     # checkpoint is recoverable evidence; advancing generation after /stop is not.
     raise_if_compact_interrupted(request.interrupt_check)
-    return binding.store.update_compact_state(
+    return binding.store.threads.update_compact_state(
         binding.thread.thread_id,
         commit=ConversationCompactCommit(
             summary=replacement,

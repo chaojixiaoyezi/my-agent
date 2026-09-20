@@ -505,7 +505,7 @@ def _queue_resolved_child_continuation(
 # 函数用途: 让授权后续跑重新出现在对应会话的活动任务索引中。
 def _reactivate_child_conversation_link(agent: Any, run_id: str) -> None:
     store = getattr(agent, "conversation_store", None)
-    update = getattr(store, "update_task_status", None)
+    update = getattr(getattr(store, 'tasks', None), 'update_status', None)
     if not callable(update):
         return
     try:
@@ -542,12 +542,12 @@ def _wake_subagent(agent: Any, ctx: _ResolveContext) -> None:
     if store is None:
         return
     try:
-        thread = store.thread_for_task(run_id)
+        thread = store.tasks.thread_for(run_id)
         if thread is None:
             _record_resolution_wake(agent, ctx, status="no_thread", wake_signal_id="")
             return
-        observation = store.append_observation(_resolution_observation(thread, ctx, run_id))
-        signal = store.raise_wake_signal(_resolution_signal(thread, ctx, run_id, observation))
+        observation = store.observations.append(_resolution_observation(thread, ctx, run_id))
+        signal = store.wakes.raise_signal(_resolution_signal(thread, ctx, run_id, observation))
         _record_resolution_wake(agent, ctx, status="raised", wake_signal_id=signal.wake_signal_id)
     except Exception as exc:
         attrs = dict(getattr(ctx.task, "attributes", {}) or {})

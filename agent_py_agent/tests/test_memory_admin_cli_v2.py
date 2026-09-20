@@ -98,7 +98,7 @@ def _agent(tmp_path: Path) -> SimpleNamespace:
         memory_lessons=lessons,
         memory_promotion=promotion,
         memory_curator=_CuratorProbe(DailyMemoryStore(home.owner_memory_daily_dir)),
-        conversation_store=SimpleNamespace(root=conversation_root),
+        conversation_store=SimpleNamespace(storage=SimpleNamespace(root=conversation_root)),
     )
 
 

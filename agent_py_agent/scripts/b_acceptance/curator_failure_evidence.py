@@ -83,7 +83,7 @@ class _FaultBackend:
 def _conversation_with_message(home: Path) -> None:
     """在隔离 home 造一条真实用户消息, 让 batch 非空。"""
     store = ConversationStore(home / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "channel": "internal",
@@ -92,7 +92,7 @@ def _conversation_with_message(home: Path) -> None:
             "now": 10.0,
         }
     )
-    store.append_message(
+    store.messages.append(
         {
             "thread_id": thread.thread_id,
             "role": "user",

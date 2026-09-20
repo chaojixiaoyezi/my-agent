@@ -15,7 +15,7 @@ from agent_py_agent.agent.conversation.agent_transcript import (
 
 
 def _agent(tmp_path):
-    return SimpleNamespace(conversation_store=SimpleNamespace(root=tmp_path))
+    return SimpleNamespace(conversation_store=SimpleNamespace(storage=SimpleNamespace(root=tmp_path)))
 
 
 def test_agent_transcript_is_exact_incremental_and_bounded(tmp_path, monkeypatch) -> None:

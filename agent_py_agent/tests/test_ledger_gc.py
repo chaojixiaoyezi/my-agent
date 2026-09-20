@@ -21,13 +21,13 @@ def _agent_with_thread(tmp_path: Path):
         ),
         tmp_path,
     )
-    from agent_py_agent.agent.gateway_parts.request_execution import (
-        _gateway_conversation_context,
-        _GatewayConversationLoadRequest,
+    from agent_py_agent.agent.gateway_parts.request_context import (
+        GatewayConversationLoadRequest,
+        gateway_conversation_context,
     )
 
-    conversation = _gateway_conversation_context(
-        _GatewayConversationLoadRequest(
+    conversation = gateway_conversation_context(
+        GatewayConversationLoadRequest(
             agent,
             {
                 "conversation": {
@@ -46,7 +46,7 @@ def _agent_with_thread(tmp_path: Path):
 def _policy_files(store, thread_id: str) -> list[Path]:
     return [
         p
-        for p in sorted(store.policies_dir.glob("*.json"))
+        for p in sorted(store.storage.policies_dir.glob("*.json"))
         if _policy_thread(p) == thread_id
     ]
 
@@ -62,7 +62,7 @@ def test_disabled_policy_archived_after_retention(tmp_path):
     agent, thread_id = _agent_with_thread(tmp_path)
     store = agent.conversation_store
     now = 1_800_000_000.0
-    old = store.set_progress_policy(
+    old = store.progress.create(
         {
             "thread_id": thread_id,
             "task_id": "task-a",
@@ -70,7 +70,7 @@ def test_disabled_policy_archived_after_retention(tmp_path):
             "metadata": {"kind": "subagent_progress_watch", "watch_run_id": ""},
         }
     )
-    fresh = store.set_progress_policy(
+    fresh = store.progress.create(
         {
             "thread_id": thread_id,
             "task_id": "task-b",
@@ -78,10 +78,10 @@ def test_disabled_policy_archived_after_retention(tmp_path):
             "metadata": {"kind": "subagent_progress_watch", "watch_run_id": ""},
         }
     )
-    store.disable_progress_policy(old.policy_id, now=now - 8 * 24 * 3600)
-    store.disable_progress_policy(fresh.policy_id, now=now - 3600)
+    store.progress.disable(old.policy_id, now=now - 8 * 24 * 3600)
+    store.progress.disable(fresh.policy_id, now=now - 3600)
     # enabled 的不归档(即使超期)
-    kept_enabled = store.set_progress_policy(
+    kept_enabled = store.progress.create(
         {
             "thread_id": thread_id,
             "task_id": "task-c",
@@ -89,20 +89,20 @@ def test_disabled_policy_archived_after_retention(tmp_path):
             "metadata": {"kind": "subagent_progress_watch", "watch_run_id": ""},
         }
     )
-    lock = Path(f"{store._policy_path(old.policy_id)}.lock")
+    lock = Path(f"{store.storage.policy_path(old.policy_id)}.lock")
     lock.write_text("{}", encoding="utf-8")
 
     summary = store.gc_stale_ledger_records(now=now)
 
     assert summary["archived_policies"] >= 1
-    assert not store._policy_path(old.policy_id).exists(), "超期 disabled 应归档"
+    assert not store.storage.policy_path(old.policy_id).exists(), "超期 disabled 应归档"
     assert not lock.exists(), "归档应带走 .lock"
-    assert store._policy_path(fresh.policy_id).exists(), "未超期 disabled 应保留"
-    assert store._policy_path(kept_enabled.policy_id).exists(), "enabled 应保留"
-    archive_dir = store.policies_dir.parent / ".ledger_archive" / "policies"
+    assert store.storage.policy_path(fresh.policy_id).exists(), "未超期 disabled 应保留"
+    assert store.storage.policy_path(kept_enabled.policy_id).exists(), "enabled 应保留"
+    archive_dir = store.storage.policies_dir.parent / ".ledger_archive" / "policies"
     assert (archive_dir / f"{old.policy_id}.json").exists(), "归档目录应能回滚"
     # 归档后扫描不再读到
-    policies, _ = store.list_progress_policies_report()
+    policies, _ = store.progress.list_report()
     ids = {p.policy_id for p in policies}
     assert old.policy_id not in ids
     assert fresh.policy_id in ids and kept_enabled.policy_id in ids
@@ -114,7 +114,7 @@ def test_finished_claim_archived_after_retention(tmp_path):
     store = agent.conversation_store
     now = 1_800_000_000.0
     # 老 finished claim
-    from agent_py_agent.agent.conversation.store import (
+    from agent_py_agent.agent.conversation.store_claims import (
         BackgroundClaimPayload,
         _new_claim,
     )
@@ -127,11 +127,11 @@ def test_finished_claim_archived_after_retention(tmp_path):
             lease=30,
         )
     )
-    claim_path = store._background_claim_path(thread_id)
+    claim_path = store.storage.background_claim_path(thread_id)
     import json
 
     claim_path.write_text(json.dumps(old), encoding="utf-8")
-    store.finish_background_run(
+    store.claims.finish(
         {
             "thread_id": thread_id,
             "claim_scope_id": thread_id,
@@ -150,9 +150,9 @@ def test_finished_claim_archived_after_retention(tmp_path):
             claim_scope_id="scope-fresh",
         )
     )
-    fresh_path = store._background_claim_path("scope-fresh")
+    fresh_path = store.storage.background_claim_path("scope-fresh")
     fresh_path.write_text(json.dumps(fresh_claim), encoding="utf-8")
-    store.finish_background_run(
+    store.claims.finish(
         {
             "thread_id": thread_id,
             "claim_scope_id": "scope-fresh",
@@ -171,7 +171,7 @@ def test_finished_claim_archived_after_retention(tmp_path):
             claim_scope_id="scope-running",
         )
     )
-    store._background_claim_path("scope-running").write_text(
+    store.storage.background_claim_path("scope-running").write_text(
         json.dumps(running_claim), encoding="utf-8"
     )
 
@@ -180,8 +180,8 @@ def test_finished_claim_archived_after_retention(tmp_path):
     assert summary["archived_claims"] >= 1
     assert not claim_path.exists(), "超期 finished claim 应归档"
     assert fresh_path.exists(), "未超期 finished claim 应保留"
-    assert store._background_claim_path("scope-running").exists(), "running 应保留"
-    archive_dir = store.background_claims_dir.parent / ".ledger_archive" / "claims"
+    assert store.storage.background_claim_path("scope-running").exists(), "running 应保留"
+    archive_dir = store.storage.background_claims_dir.parent / ".ledger_archive" / "claims"
     assert (archive_dir / claim_path.name).exists(), "归档目录应能回滚"
 
 
@@ -205,7 +205,7 @@ def test_ledger_gc_wired_into_scheduler_tick(tmp_path):
         }
     )
     now = 1_800_000_000.0
-    policy = store.set_progress_policy(
+    policy = store.progress.create(
         {
             "thread_id": thread_id,
             "task_id": "task-x",
@@ -213,11 +213,11 @@ def test_ledger_gc_wired_into_scheduler_tick(tmp_path):
             "metadata": {"kind": "subagent_progress_watch", "watch_run_id": ""},
         }
     )
-    store.disable_progress_policy(policy.policy_id, now=now - 8 * 24 * 3600)
+    store.progress.disable(policy.policy_id, now=now - 8 * 24 * 3600)
     # 预置 gc 基线:首 tick 不触发(now - last < 6h),验证控频而非首次立即跑
     scheduler._ledger_last_gc_at = now
 
     scheduler.tick(now=now)
-    assert store._policy_path(policy.policy_id).exists(), "距上次 gc 未满 6h,不应归档"
+    assert store.storage.policy_path(policy.policy_id).exists(), "距上次 gc 未满 6h,不应归档"
     scheduler.tick(now=now + 7 * 3600)
-    assert not store._policy_path(policy.policy_id).exists(), "超过 6h 间隔应归档"
+    assert not store.storage.policy_path(policy.policy_id).exists(), "超过 6h 间隔应归档"

@@ -19,7 +19,7 @@ def _goal_agent(tmp_path):
         AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
         tmp_path,
     )
-    thread = agent.conversation_store.get_or_create_thread(
+    thread = agent.conversation_store.threads.get_or_create(
         {
             "canonical_user_id": "u-1",
             "channel": "feishu",
@@ -27,10 +27,10 @@ def _goal_agent(tmp_path):
             "channel_user_id": "u-1",
         }
     )
-    goal = agent.conversation_store.create_goal(
+    goal = agent.conversation_store.goals.create(
         {"thread_id": thread.thread_id, "objective": "持续完成资料整理"}
     )
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": goal.task_id,
@@ -85,7 +85,7 @@ def test_bound_goal_id_does_not_replace_current_lifecycle_state(tmp_path, status
     agent, thread, goal = _goal_agent(tmp_path)
     params = agent._current_run_params
     params.task_attributes["thread_goal_id"] = goal.goal_id
-    agent.conversation_store.update_goal({"thread_id": thread.thread_id, "goal_id": goal.goal_id, "status": status})
+    agent.conversation_store.goals.update({"thread_id": thread.thread_id, "goal_id": goal.goal_id, "status": status})
     assert _active_goal_continuation_available(agent, params) is (status == "active")
 
 
@@ -103,7 +103,7 @@ def test_goal_continuation_promise_rejects_stale_and_foreign_bindings(tmp_path):
     assert not _active_goal_continuation_available(agent, params)
     params.task_id = goal.task_id
     params.task_attributes["conversation_task_id"] = goal.task_id
-    agent.conversation_store.delete_goal(thread.thread_id, expected_goal_id=goal.goal_id)
+    agent.conversation_store.goals.delete(thread.thread_id, expected_goal_id=goal.goal_id)
     assert not _active_goal_continuation_available(agent, params)
 
 
@@ -111,8 +111,8 @@ def test_goal_continuation_promise_rejects_stale_and_foreign_bindings(tmp_path):
 def test_named_goal_keeps_existing_task_execution_scope(tmp_path, scope) -> None:
     agent, thread, previous = _goal_agent(tmp_path)
     store = agent.conversation_store
-    store.delete_goal(thread.thread_id, expected_goal_id=previous.goal_id)
-    store.bind_task({
+    store.goals.delete(thread.thread_id, expected_goal_id=previous.goal_id)
+    store.tasks.bind({
         "thread_id": thread.thread_id, "task_id": previous.task_id,
         "goal": "当前工作", "status": "active", "cancellation_scope": scope,
     })
@@ -121,13 +121,13 @@ def test_named_goal_keeps_existing_task_execution_scope(tmp_path, scope) -> None
     receipt = json.loads(result.output)
     assert result.ok
     assert receipt["execution"]["mode"] == "current_turn"
-    assert store.load_task_link(previous.task_id).cancellation_scope == scope
+    assert store.tasks.load(previous.task_id).cancellation_scope == scope
 
     sibling = agent.tools.tools["create_goal"].execute({"name": "另一项评审", "objective": "独立验证"})
     assert not sibling.ok and sibling.error_code == "GOAL_STATE_CONFLICT"
-    assert len(store.load_goals(thread.thread_id)) == 1
-    assert not store.pending_wake_signals()
-    assert store.load_task_link(previous.task_id).cancellation_scope == scope
+    assert len(store.goals.list(thread.thread_id)) == 1
+    assert not store.wakes.pending()
+    assert store.tasks.load(previous.task_id).cancellation_scope == scope
 
 
 def test_goal_tool_receipts_distinguish_current_and_history(tmp_path) -> None:
@@ -135,7 +135,7 @@ def test_goal_tool_receipts_distinguish_current_and_history(tmp_path) -> None:
     agent._current_run_params.task_attributes["thread_goal_id"] = first.goal_id
     refused = agent.tools.tools["create_goal"].execute({"name": "索引", "objective": "制作索引"})
     assert not refused.ok and refused.error_code == "GOAL_STATE_CONFLICT"
-    assert len(agent.conversation_store.load_goals(thread.thread_id)) == 1
+    assert len(agent.conversation_store.goals.list(thread.thread_id)) == 1
     status = json.loads(agent.tools.tools["get_goal"].execute({}).output)
     assert status["goal"]["goalId"] == first.goal_id
     finished = agent.tools.tools["update_goal"].execute({"status": "complete"})
@@ -143,7 +143,7 @@ def test_goal_tool_receipts_distinguish_current_and_history(tmp_path) -> None:
     assert finished_scope["current_goal"]["status"] == "complete"
     assert finished_scope["other_goals"] == []
     assert finished_scope["next_action"] == "report_current_goal"
-    assert not agent.conversation_store.pending_wake_signals()
+    assert not agent.conversation_store.wakes.pending()
 
 
 def test_goal_scope_updates_during_foreground_without_mutating_history(tmp_path) -> None:
@@ -151,7 +151,7 @@ def test_goal_scope_updates_during_foreground_without_mutating_history(tmp_path)
 
     agent, thread, first = _goal_agent(tmp_path)
     params = SimpleNamespace(task_attributes=agent._current_run_params.task_attributes, context_scope="conversation")
-    original_history = agent.conversation_store.recent_messages(thread.thread_id)
+    original_history = agent.conversation_store.messages.recent(thread.thread_id)
     before = current_goal_scope_prompt(agent, params)
     assert first.goal_id in before
     changed = agent.tools.tools["update_goal"].execute({"objective": "制作新的索引", "expected_revision": first.revision})
@@ -159,7 +159,7 @@ def test_goal_scope_updates_during_foreground_without_mutating_history(tmp_path)
     after = current_goal_scope_prompt(agent, params)
     assert "制作新的索引" in after and before != after
     assert after == current_goal_scope_prompt(agent, params)
-    assert agent.conversation_store.recent_messages(thread.thread_id) == original_history
+    assert agent.conversation_store.messages.recent(thread.thread_id) == original_history
     params.context_scope = "task_local"
     assert current_goal_scope_prompt(agent, params) == ""
 
@@ -169,7 +169,7 @@ def test_new_goals_reach_actual_native_requests_in_the_creating_turn(tmp_path) -
 
     agent = SimpleAgent(AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False), tmp_path)
     (tmp_path / "notes.txt").write_text("交付说明", encoding="utf-8")
-    thread = agent.conversation_store.get_or_create_thread(
+    thread = agent.conversation_store.threads.get_or_create(
         {"canonical_user_id": "goal-native-test", "channel": "internal", "channel_conversation_id": "native-goals"}
     )
 
@@ -207,7 +207,7 @@ def test_new_goals_reach_actual_native_requests_in_the_creating_turn(tmp_path) -
     assert len(backend.requests) == 5
     assert "[current-goal-scope]" not in backend.requests[0]
     assert "[current-goal-scope]" in backend.requests[1]
-    goals = agent.conversation_store.load_goals(thread.thread_id)
+    goals = agent.conversation_store.goals.list(thread.thread_id)
     assert len(goals) == 1
     assert "GOAL_STATE_CONFLICT" in backend.requests[2]
     for goal in goals:
@@ -221,10 +221,10 @@ def test_named_goal_does_not_create_a_second_executor(tmp_path) -> None:
     agent, thread, existing = _goal_agent(tmp_path)
     result = agent.tools.tools["create_goal"].execute({"name": "整理索引", "objective": "整理文件索引"})
     assert not result.ok and result.error_code == "GOAL_STATE_CONFLICT"
-    goals = agent.conversation_store.load_goals(thread.thread_id)
+    goals = agent.conversation_store.goals.list(thread.thread_id)
     assert [goal.goal_id for goal in goals] == [existing.goal_id]
     assert agent._current_run_params.task_attributes["conversation_task_id"] == existing.task_id
-    assert not agent.conversation_store.pending_wake_signals()
+    assert not agent.conversation_store.wakes.pending()
 
 
 def test_goal_tool_errors_keep_registered_control_codes(tmp_path) -> None:
@@ -241,13 +241,13 @@ def test_goal_tool_errors_keep_registered_control_codes(tmp_path) -> None:
             "conversation_task_id": goal.task_id,
         },
     )
-    agent.conversation_store.delete_goal(thread.thread_id, expected_goal_id=goal.goal_id)
+    agent.conversation_store.goals.delete(thread.thread_id, expected_goal_id=goal.goal_id)
     missing_goal = agent.tools.tools["update_goal"].execute({"status": "complete"})
     assert missing_goal.reported_error_code == "GOAL_NOT_FOUND"
     assert missing_goal.error_code == "GOAL_NOT_FOUND"
     assert missing_goal.recommended_action == "change_strategy"
 
-    recreated = agent.conversation_store.create_goal(
+    recreated = agent.conversation_store.goals.create(
         {"thread_id": thread.thread_id, "objective": "仍在进行的目标"}
     )
     invalid_create = agent.tools.tools["create_goal"].execute({"objective": "另一个目标"})
@@ -258,7 +258,7 @@ def test_goal_tool_errors_keep_registered_control_codes(tmp_path) -> None:
 
 def test_get_goal_without_existing_goal_matches_sample_a_response(tmp_path) -> None:
     agent, thread, goal = _goal_agent(tmp_path)
-    agent.conversation_store.delete_goal(thread.thread_id, expected_goal_id=goal.goal_id)
+    agent.conversation_store.goals.delete(thread.thread_id, expected_goal_id=goal.goal_id)
 
     result = agent.tools.tools["get_goal"].execute({})
 
@@ -272,7 +272,7 @@ def test_update_goal_precondition_failure_is_not_unknown(tmp_path, missing):
 
     agent, thread, goal = _goal_agent(tmp_path)
     if missing:
-        agent.conversation_store.delete_goal(thread.thread_id, expected_goal_id=goal.goal_id)
+        agent.conversation_store.goals.delete(thread.thread_id, expected_goal_id=goal.goal_id)
     else:
         agent._current_run_params.task_attributes["conversation_task_id"] = "another-task"
     result = execute_canonical_test_call(
@@ -286,24 +286,24 @@ def test_update_goal_precondition_failure_is_not_unknown(tmp_path, missing):
     assert result.failure_stage == "validation"
     assert result.operation.status == "failed"
     if not missing:
-        assert agent.conversation_store.load_goal(thread.thread_id).status == "active"
+        assert agent.conversation_store.goals.load(thread.thread_id).status == "active"
 
 
 def test_legacy_cleared_goal_is_absent_but_unknown_status_fails_closed(tmp_path) -> None:
     agent, thread, goal = _goal_agent(tmp_path)
-    path = agent.conversation_store._goal_path(thread.thread_id)
+    path = agent.conversation_store.storage.goal_path(thread.thread_id)
     payload = goal.to_dict()
     payload["status"] = "cleared"
     path.write_text(json.dumps(payload), encoding="utf-8")
 
-    loaded, error = agent.conversation_store.load_goal_report(thread.thread_id)
+    loaded, error = agent.conversation_store.goals.load_report(thread.thread_id)
 
     assert loaded is None
     assert error is None
 
     payload["status"] = "unknown-state"
     path.write_text(json.dumps(payload), encoding="utf-8")
-    loaded, error = agent.conversation_store.load_goal_report(thread.thread_id)
+    loaded, error = agent.conversation_store.goals.load_report(thread.thread_id)
 
     assert loaded is None
     assert error is not None
@@ -316,7 +316,7 @@ def test_create_goal_requires_explicit_tool_and_rejects_unfinished_goal(tmp_path
     rejected = agent.tools.tools["create_goal"].execute({"objective": "新的目标"})
     assert rejected.ok is False
 
-    agent.conversation_store.update_goal(
+    agent.conversation_store.goals.update(
         {
             "thread_id": thread.thread_id,
             "goal_id": existing.goal_id,
@@ -328,25 +328,25 @@ def test_create_goal_requires_explicit_tool_and_rejects_unfinished_goal(tmp_path
     )
 
     assert created.ok is True
-    goal = agent.conversation_store.load_goal(thread.thread_id)
+    goal = agent.conversation_store.goals.load(thread.thread_id)
     assert goal is not None and goal.objective == "新的目标"
     assert goal.token_budget == 1000 and goal.tokens_used == 0
 
 
 def test_stop_named_work_tool_uses_exact_thread_name_and_kind(tmp_path) -> None:
     agent, thread, existing = _goal_agent(tmp_path)
-    agent.conversation_store.delete_goal(
+    agent.conversation_store.goals.delete(
         thread.thread_id,
         expected_goal_id=existing.goal_id,
     )
-    goal = agent.conversation_store.create_goal(
+    goal = agent.conversation_store.goals.create(
         {
             "thread_id": thread.thread_id,
             "objective": "持续整理周报",
             "name": "周报整理",
         }
     )
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": goal.task_id,
@@ -366,10 +366,10 @@ def test_stop_named_work_tool_uses_exact_thread_name_and_kind(tmp_path) -> None:
     result = agent.tools.tools["stop_named_work"].execute({"name": "周报整理"})
 
     assert result.ok is True
-    assert agent.conversation_store.load_goals(thread.thread_id) == []
+    assert agent.conversation_store.goals.list(thread.thread_id) == []
     link = next(
         item
-        for item in agent.conversation_store.task_links(thread.thread_id)
+        for item in agent.conversation_store.tasks.list(thread.thread_id)
         if item.task_id == goal.task_id
     )
     assert link.status == "cancelled"
@@ -379,11 +379,11 @@ def test_stop_named_work_without_kind_fails_closed_on_cross_kind_name_conflict(
     tmp_path,
 ) -> None:
     agent, thread, existing = _goal_agent(tmp_path)
-    agent.conversation_store.delete_goal(
+    agent.conversation_store.goals.delete(
         thread.thread_id,
         expected_goal_id=existing.goal_id,
     )
-    goal = agent.conversation_store.create_goal(
+    goal = agent.conversation_store.goals.create(
         {
             "thread_id": thread.thread_id,
             "objective": "持续整理资料",
@@ -394,7 +394,7 @@ def test_stop_named_work_without_kind_fails_closed_on_cross_kind_name_conflict(
         (goal.task_id, "goal"),
         ("audit-daily", "audit"),
     ):
-        agent.conversation_store.bind_task(
+        agent.conversation_store.tasks.bind(
             {
                 "thread_id": thread.thread_id,
                 "task_id": task_id,
@@ -416,13 +416,13 @@ def test_stop_named_work_without_kind_fails_closed_on_cross_kind_name_conflict(
 
     assert result.ok is False
     assert result.error_code == "NAMED_WORK_CONFLICT"
-    assert agent.conversation_store.load_goal(
+    assert agent.conversation_store.goals.load(
         thread.thread_id,
         goal_id=goal.goal_id,
     ) is not None
     links = {
         item.task_id: item
-        for item in agent.conversation_store.task_links(thread.thread_id)
+        for item in agent.conversation_store.tasks.list(thread.thread_id)
     }
     assert links[goal.task_id].status == "active"
     assert links["audit-daily"].status == "active"
@@ -432,7 +432,7 @@ def test_goal_objective_limit_and_public_schema_match_sample_a(tmp_path) -> None
     agent, thread, goal = _goal_agent(tmp_path)
 
     with pytest.raises(ValueError, match="4000"):
-        agent.conversation_store.update_goal(
+        agent.conversation_store.goals.update(
             {
                 "thread_id": thread.thread_id,
                 "goal_id": goal.goal_id,
@@ -458,28 +458,28 @@ def test_goal_objective_limit_and_public_schema_match_sample_a(tmp_path) -> None
 def test_goal_clock_preserves_fractional_seconds_between_charges(tmp_path) -> None:
     agent, _thread, goal = _goal_agent(tmp_path)
     store = agent.conversation_store
-    store.clear_goal_accounting(goal.thread_id, goal_id=goal.goal_id)
-    store.begin_goal_accounting(goal, reset=True, monotonic_now=10.0)
+    store.goal_clock.clear(goal.thread_id, goal_id=goal.goal_id)
+    store.goal_clock.begin(goal, reset=True, monotonic_now=10.0)
 
-    assert store.take_goal_elapsed_seconds(goal, monotonic_now=12.7) == 2
-    assert store.take_goal_elapsed_seconds(goal, monotonic_now=13.2) == 1
-    assert store.take_goal_elapsed_seconds(goal, monotonic_now=13.8) == 0
+    assert store.goal_clock.take_elapsed_seconds(goal, monotonic_now=12.7) == 2
+    assert store.goal_clock.take_elapsed_seconds(goal, monotonic_now=13.2) == 1
+    assert store.goal_clock.take_elapsed_seconds(goal, monotonic_now=13.8) == 0
 
 
 def test_different_agent_goal_clocks_and_persistence_are_independent(tmp_path) -> None:
     agent, thread, first = _goal_agent(tmp_path)
     store = agent.conversation_store
-    child_thread = store.get_or_create_thread({"canonical_user_id": "child", "channel": "internal", "channel_conversation_id": "child-session"})
-    second = store.create_goal({"thread_id": child_thread.thread_id, "objective": "完成第二件事"})
-    store.clear_goal_accounting(thread.thread_id)
-    store.clear_goal_accounting(child_thread.thread_id)
-    store.begin_goal_accounting(first, reset=True, monotonic_now=10.0)
-    store.begin_goal_accounting(second, reset=True, monotonic_now=20.0)
-    assert store.take_goal_elapsed_seconds(first, monotonic_now=13.2) == 3
-    assert store.take_goal_elapsed_seconds(second, monotonic_now=22.8) == 2
-    restarted = ConversationStore(store.root)
-    assert restarted.load_goal(thread.thread_id).goal_id == first.goal_id
-    assert restarted.load_goal(child_thread.thread_id).goal_id == second.goal_id
+    child_thread = store.threads.get_or_create({"canonical_user_id": "child", "channel": "internal", "channel_conversation_id": "child-session"})
+    second = store.goals.create({"thread_id": child_thread.thread_id, "objective": "完成第二件事"})
+    store.goal_clock.clear(thread.thread_id)
+    store.goal_clock.clear(child_thread.thread_id)
+    store.goal_clock.begin(first, reset=True, monotonic_now=10.0)
+    store.goal_clock.begin(second, reset=True, monotonic_now=20.0)
+    assert store.goal_clock.take_elapsed_seconds(first, monotonic_now=13.2) == 3
+    assert store.goal_clock.take_elapsed_seconds(second, monotonic_now=22.8) == 2
+    restarted = ConversationStore(store.storage.root)
+    assert restarted.goals.load(thread.thread_id).goal_id == first.goal_id
+    assert restarted.goals.load(child_thread.thread_id).goal_id == second.goal_id
 
 
 def test_new_store_starts_fresh_clock_without_charging_service_downtime(
@@ -494,33 +494,33 @@ def test_new_store_starts_fresh_clock_without_charging_service_downtime(
     # 模拟服务重启后的空进程注册表；同一进程内新建 Store 并不等于服务重启。
     monkeypatch.setattr(goal_clock, "_CLOCK_GROUPS", weakref.WeakValueDictionary())
     monkeypatch.setattr(
-        "agent_py_agent.agent.conversation.store.time.monotonic",
+        "agent_py_agent.agent.conversation.goal_clock.time.monotonic",
         lambda: 5_000.0,
     )
-    restarted = ConversationStore(agent.conversation_store.root)
+    restarted = ConversationStore(agent.conversation_store.storage.root)
 
-    loaded = restarted.load_goal(thread.thread_id)
+    loaded = restarted.goals.load(thread.thread_id)
 
     assert loaded is not None and loaded.time_used_seconds == 0
-    assert restarted.take_goal_elapsed_seconds(loaded, monotonic_now=5_000.0) == 0
-    assert restarted.take_goal_elapsed_seconds(loaded, monotonic_now=5_002.9) == 2
+    assert restarted.goal_clock.take_elapsed_seconds(loaded, monotonic_now=5_000.0) == 0
+    assert restarted.goal_clock.take_elapsed_seconds(loaded, monotonic_now=5_002.9) == 2
 
 
 def test_foreground_background_and_control_share_one_goal_clock(tmp_path) -> None:
     agent, thread, goal = _goal_agent(tmp_path)
     foreground = agent.conversation_store
-    background = ConversationStore(foreground.root)
-    control = ConversationStore(foreground.root)
-    foreground.begin_goal_accounting(goal, reset=True, monotonic_now=10.0)
-    assert foreground.take_goal_elapsed_seconds(goal, monotonic_now=20.5) == 10
-    assert background.take_goal_elapsed_seconds(goal, monotonic_now=20.5) == 0
-    assert control.take_goal_elapsed_seconds(goal, monotonic_now=21.0) == 1
-    assert foreground.take_goal_elapsed_seconds(goal, monotonic_now=21.0) == 0
+    background = ConversationStore(foreground.storage.root)
+    control = ConversationStore(foreground.storage.root)
+    foreground.goal_clock.begin(goal, reset=True, monotonic_now=10.0)
+    assert foreground.goal_clock.take_elapsed_seconds(goal, monotonic_now=20.5) == 10
+    assert background.goal_clock.take_elapsed_seconds(goal, monotonic_now=20.5) == 0
+    assert control.goal_clock.take_elapsed_seconds(goal, monotonic_now=21.0) == 1
+    assert foreground.goal_clock.take_elapsed_seconds(goal, monotonic_now=21.0) == 0
     other_owner = ConversationStore(tmp_path / "different-owner")
-    other_owner.begin_goal_accounting(goal, reset=True, monotonic_now=10.0)
-    assert other_owner.take_goal_elapsed_seconds(goal, monotonic_now=20.5) == 10
-    control.clear_goal_accounting(thread.thread_id, goal_id=goal.goal_id)
-    assert background.take_goal_elapsed_seconds(goal, monotonic_now=22.0) == 0
+    other_owner.goal_clock.begin(goal, reset=True, monotonic_now=10.0)
+    assert other_owner.goal_clock.take_elapsed_seconds(goal, monotonic_now=20.5) == 10
+    control.goal_clock.clear(thread.thread_id, goal_id=goal.goal_id)
+    assert background.goal_clock.take_elapsed_seconds(goal, monotonic_now=22.0) == 0
 
 
 def test_pause_accounts_live_time_and_resume_starts_a_new_baseline(
@@ -531,14 +531,14 @@ def test_pause_accounts_live_time_and_resume_starts_a_new_baseline(
     store = agent.conversation_store
     clock = {"now": 10.0}
     monkeypatch.setattr(
-        "agent_py_agent.agent.conversation.store.time.monotonic",
+        "agent_py_agent.agent.conversation.goal_clock.time.monotonic",
         lambda: clock["now"],
     )
-    store.clear_goal_accounting(thread.thread_id, goal_id=goal.goal_id)
-    store.begin_goal_accounting(goal, reset=True)
+    store.goal_clock.clear(thread.thread_id, goal_id=goal.goal_id)
+    store.goal_clock.begin(goal, reset=True)
     clock["now"] = 15.9
 
-    paused = store.update_goal(
+    paused = store.goals.update(
         {
             "thread_id": thread.thread_id,
             "goal_id": goal.goal_id,
@@ -549,7 +549,7 @@ def test_pause_accounts_live_time_and_resume_starts_a_new_baseline(
 
     assert paused is not None and paused.time_used_seconds == 5
     clock["now"] = 20.0
-    resumed = store.update_goal(
+    resumed = store.goals.update(
         {
             "thread_id": thread.thread_id,
             "goal_id": goal.goal_id,
@@ -558,12 +558,12 @@ def test_pause_accounts_live_time_and_resume_starts_a_new_baseline(
         }
     )
     assert resumed is not None and resumed.time_used_seconds == 5
-    assert store.take_goal_elapsed_seconds(resumed, monotonic_now=22.4) == 2
+    assert store.goal_clock.take_elapsed_seconds(resumed, monotonic_now=22.4) == 2
 
 
 def test_goal_accounting_excludes_openai_cached_input_and_limits_budget(tmp_path) -> None:
     agent, thread, goal = _goal_agent(tmp_path)
-    agent.conversation_store.update_goal(
+    agent.conversation_store.goals.update(
         {
             "thread_id": thread.thread_id,
             "goal_id": goal.goal_id,
@@ -598,7 +598,7 @@ def test_goal_accounting_excludes_openai_cached_input_and_limits_budget(tmp_path
 
 def test_update_goal_complete_preserves_task_until_turn_finalization(tmp_path) -> None:
     agent, thread, goal = _goal_agent(tmp_path)
-    agent.conversation_store.update_goal(
+    agent.conversation_store.goals.update(
         {
             "thread_id": thread.thread_id,
             "goal_id": goal.goal_id,
@@ -613,8 +613,8 @@ def test_update_goal_complete_preserves_task_until_turn_finalization(tmp_path) -
     assert payload["goal"]["status"] == "complete"
     assert payload["goal"]["tokenBudget"] == 1000
     assert payload["completionBudgetReport"]
-    assert agent.conversation_store.load_goal(thread.thread_id).status == "complete"
-    links = {item.task_id: item for item in agent.conversation_store.task_links(thread.thread_id)}
+    assert agent.conversation_store.goals.load(thread.thread_id).status == "complete"
+    links = {item.task_id: item for item in agent.conversation_store.tasks.list(thread.thread_id)}
     assert links[goal.task_id].status == "active"
 
 
@@ -631,9 +631,9 @@ def test_completed_goal_does_not_close_an_open_child_tree(tmp_path, monkeypatch,
     monkeypatch.setattr(agent.subagents, "list_runs", lambda: [child])
     assert agent.tools.tools["update_goal"].execute({"status": "complete"}).ok
     assert not complete_current_conversation_task(agent, attrs, source="gateway", current_task_id=goal.task_id)
-    assert agent.conversation_store.load_task_link(goal.task_id).status == "active"
+    assert agent.conversation_store.tasks.load(goal.task_id).status == "active"
     assert child.status == child_status
-    assert agent.conversation_store.load_goal(thread.thread_id, goal_id=goal.goal_id).status == "complete"
+    assert agent.conversation_store.goals.load(thread.thread_id, goal_id=goal.goal_id).status == "complete"
 
 
 def test_update_goal_complete_also_closes_terminal_runtime_tree(tmp_path) -> None:
@@ -664,7 +664,7 @@ def test_update_goal_complete_also_closes_terminal_runtime_tree(tmp_path) -> Non
     result = agent.tools.tools["update_goal"].execute({"status": "complete"})
     assert result.ok is True
     assert "conversation_task_completed" not in params.task_attributes
-    assert agent.conversation_store.load_task_link(goal.task_id).status == "active"
+    assert agent.conversation_store.tasks.load(goal.task_id).status == "active"
     assert complete_current_conversation_task(
         agent, params.task_attributes, source="gateway", current_task_id=goal.task_id,
     )
@@ -692,8 +692,8 @@ def test_update_goal_blocked_preserves_resumable_task(tmp_path) -> None:
     result = agent.tools.tools["update_goal"].execute({"status": "blocked"})
 
     assert result.ok is True
-    assert agent.conversation_store.load_goal(thread.thread_id).status == "blocked"
-    links = {item.task_id: item for item in agent.conversation_store.task_links(thread.thread_id)}
+    assert agent.conversation_store.goals.load(thread.thread_id).status == "blocked"
+    links = {item.task_id: item for item in agent.conversation_store.tasks.list(thread.thread_id)}
     assert links[goal.task_id].status == "interrupted"
 
 
@@ -739,7 +739,7 @@ def test_goal_token_usage_is_protocol_equivalent_and_keeps_cache_writes() -> Non
 # 函数用途: 验证未显式命名的第二条目标不会悄悄开启额外工作。
 def test_create_goal_rejects_second_unnamed_goal_on_same_task(tmp_path) -> None:
     agent, thread, existing = _goal_agent(tmp_path)
-    first = agent.conversation_store.load_goal(thread.thread_id, task_id=existing.task_id)
+    first = agent.conversation_store.goals.load(thread.thread_id, task_id=existing.task_id)
     assert first is not None and first.status == "active"
 
     rejected = agent.tools.tools["create_goal"].execute(
@@ -747,7 +747,7 @@ def test_create_goal_rejects_second_unnamed_goal_on_same_task(tmp_path) -> None:
     )
 
     assert rejected.ok is False
-    goals = agent.conversation_store.load_goals(thread.thread_id)
+    goals = agent.conversation_store.goals.list(thread.thread_id)
     same_task = [goal for goal in goals if goal.task_id == existing.task_id]
     assert len(same_task) == 1, "同 task 不得出现第二条未完成目标"
     assert same_task[0].goal_id == existing.goal_id

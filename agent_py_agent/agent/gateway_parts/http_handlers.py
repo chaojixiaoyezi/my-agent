@@ -1,5 +1,6 @@
 # LLM: HTTP handlers preserve authenticated owner/thread boundaries and typed protocol fields;
 # process stream identity affects only display cursors, never model requests or authorization.
+# 控制 workspace 沿持久输入保存，共用宿主权限门；HTTP 投影不自行判定目录权限。
 # 模块用途: 接收 Gateway HTTP 请求并转给正式会话、控制与展示入口，统一返回结构化结果。
 from __future__ import annotations
 
@@ -1110,9 +1111,8 @@ def handle_client_goal(handler, server) -> None:
     handler._send_json(200, result)
 
 
-# LLM: The handler forwards only mappings to the exact owner's approval service;
-# missing/scalar bodies and owner-resolution failures end before durable mutation.
-# 函数用途: 把 TUI/Web 的子代理工具审批决定写回当前用户的原始等待调用。
+# LLM: 主/子审批仅向认证 owner 的原服务传递 mapping；请求格式或 owner 解析失败时不得写耐久记录。
+# 函数用途: 把 TUI/Web 的主/子后台工具审批决定写回当前用户的原始等待调用。
 def handle_client_agent_permission(handler, server) -> None:
     body = _read_agent_control_body(handler, server)
     if body is None:
@@ -1288,7 +1288,7 @@ def read_gateway_client_notices(
             error="conversation store unavailable",
         )
     try:
-        thread, _error = store.resolve_thread_report(
+        thread, _error = store.threads.resolve_report(
             channel=str(scope.channel or "").strip(),
             channel_conversation_id=conversation_id,
             channel_user_id=str(scope.user_id or "").strip(),
@@ -1385,7 +1385,7 @@ def _read_cold_owner_notice_projection(
     for store_root in existing_conversation_store_roots(owner_home):
         try:
             store = ConversationStore(store_root, initialize=False)
-            thread, load_error = store.resolve_thread_report(
+            thread, load_error = store.threads.resolve_report(
                 channel=str(scope.channel or "").strip(),
                 channel_conversation_id=str(scope.conversation_id or "").strip(),
                 channel_user_id=str(scope.user_id or "").strip(),
@@ -1451,10 +1451,8 @@ def _empty_gateway_notice_response(
     return payload
 
 
-# LLM: A notice poll renews the approval-consumer lease only when the client
-# explicitly advertises tool_approval. The returned rows remain a read-only
-# projection and cannot grant a child tool call.
-# 函数用途: 为当前主任务树续接交互审批接收能力并返回等待中的子代理请求。
+# LLM: 仅显式声明 tool_approval 的客户端续租接收能力；返回行是当前主任务树的只读投影，不批准任何调用。
+# 函数用途: 为当前主任务树续接交互审批接收能力，并返回主/子后台等待请求。
 def _gateway_agent_permission_requests(
     agent: object,
     thread: object,
@@ -1467,17 +1465,17 @@ def _gateway_agent_permission_requests(
     if not root_task_id:
         return []
     from ..conversation.agent_tool_approval import (
-        list_pending_subagent_tool_approvals,
-        renew_subagent_tool_approval_consumer,
+        list_pending_agent_tool_approvals,
+        renew_agent_tool_approval_consumer,
     )
 
     try:
         if interactive_approvals:
-            renew_subagent_tool_approval_consumer(
+            renew_agent_tool_approval_consumer(
                 agent,
                 root_task_id=root_task_id,
             )
-        return list_pending_subagent_tool_approvals(
+        return list_pending_agent_tool_approvals(
             agent,
             root_task_id=root_task_id,
         )
@@ -1563,6 +1561,8 @@ def _request_limit(body: dict[str, Any], *, default: int) -> int:
         return default
 
 
+# LLM: 身份由认证中间件决定；workspace 原样进入版本化控制回执，具体路径由命令服务共用权限门校验。
+# 函数用途: 投影 HTTP 控制作用域，保留显式非法目录输入以返回错误，不静默改为默认目录。
 def _gateway_control_scope(
     handler,
     body: dict,
@@ -1581,6 +1581,8 @@ def _gateway_control_scope(
         channel=channel,
         conversation_id=_http_conversation_id(body),
         metadata=dict(metadata),
+        workspace=(body.get("workspace") if body.get("workspace") is not None else {})
+        if "workspace" in body else None,
         all_user_access=(
             permission is None
             or bool(getattr(permission, "can_access_all_users", False))

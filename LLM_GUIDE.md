@@ -22,8 +22,14 @@
 ## 当前运行边界（验收状态看 STATUS）
 
 长等待、后台进程完成通知与缓存诊断复用既有进程/会话账本，见 `docs/design/LONG_RUNNING_EXECUTION.md`。
+子代理宿主终止复用工具层进程树原语，未确认后代不能报告终止；共享宿主仍按精确 attempt 协作取消。
 后台收尾看当前子树及未读邮箱，不用工作片开始时的旧阶段永久抑制最终回复；编辑匹配冲突要求读回文件。
 后台本地缺模型等待该会话配置恢复，不按固定时间热重试；普通错误仍走原冷却，进程内策略不拥有持久状态。
+后台进程持久地址读取宿主冻结的 canonical owner home，不能随 Full Access 的路径墙变化而迁移。
+后台主/子工具审批共用 `agent_tool_approval.py` 的原账本和 TUI FIFO；归属校验读 `tool_approval_scope.py`。
+main 绑定当前选定任务的有效 claim；换轮失效，Goal paused 不取消当前审批，不把接收方续租当批准。
+同任务续做先绑定 canonical run/attempt 再准备归档，request 只代表当前消息；目录准备失败关闭本次新 attempt。
+普通 Shell 与交互 PTY 共用 `parse_shell_command`；删除解析入口时必须同时核对两条执行链。
 
 SSE delta 原样保留，OpenAI 工具参数生成有独立进度；
 派工不会永久禁止主代理本地工作，用户明确限制仍保留；复制按最新代次和实际通道结果反馈。
@@ -39,8 +45,45 @@ Shell 不设人为命令字符上限，安全、权限、时间和输出预算�
 本入口只保留现行规则与导航；当前设计、已实现内容和开放问题分别见 `DESIGN_LEDGER.md`、
 `docs/COMPLETED.md` 和 `STATUS.md`。旧轮次的测试结果不替代当前发布验收。
 
+模块结构调整及 Jev 试验先读 [可维护性评估](docs/design/MAINTAINABILITY_AND_JEV_REVIEW.md)：
+后端、后台工具策略、上下文、历史准备、单片执行、提交/投递、Gateway 和存储已按职责归位，验收及剩余质量问题见 STATUS。
+Computer Use 的依赖与当前桌面验收须单独确认。
+本地提交复核与自动化测试收口见评估文档的“本地提交前复核”；不要将定向重跑写成全仓再次通过。
 后端公共合同读 `backends/base.py`，传输读 `http.py`，协议读 `openai_chat.py` / `anthropic.py` / `responses.py`，
 构造及缺配置判据读 `factory.py`；旧 base 文件不再承载协议实现。
+后台有界投影读 `conversation/background_context.py`，原生历史种子读 `background_history_seed.py`；
+后者与负责展示快照的 `background_history.py` 职责不同。准备模块不拥有调度或投递，读取错误仍显式失败。
+单工作片执行读 `background_execution.py`，每次 Compact 后按最新线程准备参数，沿原 store 保存原生历史；
+执行结果用具名字段交接，模型作用域仍由准备层冻结。技术续跑只读判据统一在 `turn_end.py`。
+后台交付读 `background_delivery.py`：外发、canonical 追加和整封冻结独立于调度器；
+任务状态在原抑制位置通过只读回调查询，重投沿原身份与元数据，不再次调用模型。
+Gateway 流式出口读 `gateway_parts/stream_writer.py`，公开投影和审批交互分别由 `stream_events.py`、
+`stream_approval.py` 承担；恢复直接向原队列 chunk 写终态。Compact 携带读 `conversation/compact_carry.py`，
+只有纯计算共用，mailbox 释放仍在原运行器。本次独立重构 Goal 不包含 auth 与 Jev，Gateway 与存储组合均已落地。
+Gateway 请求编排读 `request_execution.py`，上下文准备、持久绑定、历史提交与输入渲染分别读
+`request_context.py`、`request_binding.py`、`request_history.py`、`request_prompt.py`；旧导入不留转发。
+前后台完整行窗口统一在 `conversation/history_projection.py`，保留 metadata 与同一窗口，不用展示摘要代替原生历史。
+模块搬移须联测上下文、Compact、repair、停止和重启恢复；锁、持久 schema、路径和原提交顺序不随模块迁移。
+存储用量访问 `store.model_usage`，实现读 `conversation/store_usage.py`；通过原线程原子更新保存显示，账本仍只存原事件。
+Goal 计时访问 `store.goal_clock`，共享对象持有操作与基线；JSONL 原语读 `store_io.py`，旧方法与导入不留转发。
+线程、消息、任务关联与 Audit 分别访问 `store.threads` / `messages` / `tasks` / `audits`，
+实现见 `store_threads.py`、`store_messages.py`、`store_tasks.py`、`store_audits.py`。
+线程组件持有新会话默认模型解析器；消息只依赖线程校验和原子更新；任务终态显式关闭进度策略。
+Audit 共用任务账本、命名锁和任务锁；原 TaskStore 的自由函数转发方法已删除。
+插话通过 `store.guidance` 入队、认领和读取；回执规则读 `store_guidance_records.py`，
+账本与投影读 `store_guidance_ledger.py`，模型提交与消费确认分别读 `store_guidance_submission.py`、
+`store_guidance_acknowledgements.py`，终态及失效尝试恢复读 `store_guidance_recovery.py`。
+调用方直接使用 `guidance.ledger` / `submissions` / `acknowledgements` / `recovery`，不保留旧 Store 方法。
+聚合 Store 已无领域继承；Gateway 外锁、回合锁、回执锁及批次先提交后修投影的顺序保持，新版验收见 STATUS。
+公共路径通过 `store.storage` 访问，实现见 `store_layout.py`；读取侧投影在 `storage.indexes`，实现见 `store_index.py`。
+根目录、原子更新目标和索引仍沿同一原文件；旧基础类已删除，路径方法与旧字段不留转发，唤醒回执归唤醒领域。
+执行归属通过 `store.claims` 的领取、读取、续租和终态接口访问；实现读 `store_claims.py`，恢复绑定和租约 TTL 不随模块迁移。
+目标、观察、唤醒和进度分别通过 `store.goals` / `observations` / `wakes` / `progress` 访问，
+对应实现为 `store_goals.py`、`store_observations.py`、`store_wakes.py`、`store_progress.py`；旧 Store 方法不留转发。
+Goal 显式接收原共享时钟；唤醒接收观察确认能力，发布顺序不能拆开。旧账 GC 仍在组装入口先策略后租约。
+通用 JSON 对象读取及尽力删除原语归 `store_io.py`；错误口径与原持久迁移规则保持。
+首次 `/goal` 沿控制回执传递 workspace，复用 `gateway_parts/workspace_scope.py` 校验后仅初始化空 cwd；
+已有线程目录不被控制命令重定向。显式目录签入回执 v3 摘要，旧版不得携带未签名目录。
 
 - 每台机器一个 Gateway，多个 TUI 是独立客户端/会话。wheel 使用 non-editable 独立 runtime，
   Gateway 与默认 TUI 入口必须同版；检查 executable、module.__file__、安装位置和实际配置，保留回滚。
@@ -118,7 +161,9 @@ Shell 不设人为命令字符上限，安全、权限、时间和输出预算�
   已完成项仍可补写 notes 和 evidence，不能返回成功却吞掉验证备注；状态/结果更正仍显式声明。
 - 每个代理最多一个未结束 Goal；主子各自归属，普通派工可不附目标，Todo 可选。方向键选 Goal、Enter 编辑，
   Ctrl+S 保存、Ctrl+G 放弃。主代理 Esc 中断当前轮，active Goal 沿原 wake 安全续接；
-  `/stop` 或 `/goal pause` 才暂停目标，普通消息不隐式恢复。子代理 Esc 保留当前停止语义。
+  `/goal pause` 只关闭目标自动续跑，保留当前执行和独立资源；`/stop` 明确停止任务，组合中断与资源收回。
+  Goal 清除只移除目标；有无 Goal 或目标 paused 都不把 Esc 变成资源停止。普通消息不隐式恢复 Goal。
+  子代理视角标明的“停止此代理”保留其明确资源停止语义。
   后台普通插话由精确 running claim 验证，复用原持久回执；合法新 attempt 与 TaskRun 重开同事务提交，旧关闭事件保留。
   同任务追问只更换消息 request ID；主执行入口将 run/attempt 成对绑定到真实数据库身份，工具不能拿新消息编号冒充原 run。
   内容版本冲突不覆盖草稿，保存不隐式恢复暂停目标；新中断行为的真实 TUI 组合验收仍见 STATUS。

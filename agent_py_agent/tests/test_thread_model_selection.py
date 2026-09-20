@@ -10,6 +10,7 @@ import pytest
 
 from agent_py_agent.agent.conversation.models import ConversationThread
 from agent_py_agent.agent.conversation.store import ConversationStore
+from agent_py_agent.agent.gateway_parts import request_context
 from agent_py_agent.agent.settings.model_profiles import (
     execute_model_profile_operation,
     inherit_model_profile,
@@ -66,7 +67,7 @@ def test_default_changes_only_new_threads_and_persisted_resume(tmp_path):
     assert changed["selected"] == a and changed["default_selected"] == b
     fresh = execute_local_model_operation(host, "new", "list", {})
     assert fresh["selected"] == b
-    host.conversation_store = ConversationStore(host.conversation_store.root)
+    host.conversation_store = ConversationStore(host.conversation_store.storage.root)
     assert thread_model_config(host, old["thread_id"]).model_name == "A"
     assert execute_local_model_operation(host, "old", "list", {})["selected"] == a
 
@@ -91,7 +92,7 @@ def test_first_open_same_session_concurrently_creates_one_thread(tmp_path):
     with ThreadPoolExecutor(max_workers=8) as pool:
         ids = list(pool.map(open_window, range(8)))
     assert len(set(ids)) == 1
-    assert len(list(host.conversation_store.threads_dir.glob("*.json"))) == 1
+    assert len(list(host.conversation_store.storage.threads_dir.glob("*.json"))) == 1
 
 
 def test_work_slice_snapshot_and_default_nested_scope_are_stable(tmp_path, monkeypatch):
@@ -120,13 +121,13 @@ def test_selection_clears_stale_usage_without_modifying_history_or_compact(tmp_p
     host = host_with_store(tmp_path)
     row = execute_local_model_operation(host, "s", "list", {})
     tid = row["thread_id"]
-    host.conversation_store._update_thread_atomic(tid, lambda thread: replace(
+    host.conversation_store.threads.update_atomic(tid, lambda thread: replace(
         thread, summary="prior summary", compact_generation=3, compact_checkpoint_id="checkpoint",
         model_context_usage={"current_tokens": 123}, provider_context_observation={"input_tokens": 123},
     ))
     a = add(host, model_name="A")[0]
     execute_local_model_operation(host, "s", "select", {"profile_id": a})
-    thread = host.conversation_store.load_thread(tid)
+    thread = host.conversation_store.threads.load(tid)
     assert thread.summary == "prior summary" and thread.compact_generation == 3
     assert thread.compact_checkpoint_id == "checkpoint"
     assert thread.model_context_usage == {} and thread.provider_context_observation == {}
@@ -135,13 +136,13 @@ def test_selection_clears_stale_usage_without_modifying_history_or_compact(tmp_p
 def test_legacy_binding_is_atomic_and_other_owner_rejected(tmp_path):
     host = host_with_store(tmp_path)
     store = host.conversation_store
-    store._write_thread(ConversationThread("legacy", "alice", owner_id="alice"))
+    store.threads.write(ConversationThread("legacy", "alice", owner_id="alice"))
     a = add(host, model_name="A")[0]
     execute_model_profile_operation(host, "set_default", {"profile_id": a})
     assert thread_model_profile_id(host, "legacy") == a
     thread_model_profile_id(host, "legacy", select="default")
     assert thread_model_profile_id(host, "legacy") == "default"
-    store._write_thread(ConversationThread("foreign", "bob", owner_id="bob"))
+    store.threads.write(ConversationThread("foreign", "bob", owner_id="bob"))
     with pytest.raises(ValueError, match="其他用户"):
         thread_model_profile_id(host, "foreign", select=a)
 
@@ -169,7 +170,7 @@ def test_child_inherits_creation_selection_after_parent_switch(tmp_path, monkeyp
     inherit_model_profile(default_attrs, host)
     assert default_attrs == {"host_model_profile.v1": {"profile_id": "default"}}
     assert read_model_profiles(model_profiles_path(host.home_paths))["selected"] == "default"
-    host.conversation_store._write_thread(ConversationThread(
+    host.conversation_store.threads.write(ConversationThread(
         "child-thread", "alice", owner_id="alice", model_profile_id=b,
     ))
     task = SimpleNamespace(attributes=attrs, agent_thread_id="child-thread")
@@ -193,8 +194,8 @@ def test_front_and_background_entrypoints_use_exact_thread(tmp_path, monkeypatch
     a, b = add(host, model_name="A")[0], add(host, model_name="B")[0]
     row = execute_local_model_operation(host, "s", "select", {"profile_id": a})
     execute_model_profile_operation(host, "set_default", {"profile_id": b})
-    thread = host.conversation_store.load_thread(row["thread_id"])
-    monkeypatch.setattr(request_execution, "_preflight_gateway_conversation", lambda inputs: SimpleNamespace(thread_id=thread.thread_id))
+    thread = host.conversation_store.threads.load(row["thread_id"])
+    monkeypatch.setattr(request_context, 'preflight_gateway_conversation', lambda inputs: SimpleNamespace(thread_id=thread.thread_id))
     monkeypatch.setattr(request_execution, "_require_gateway_conversation_ready", lambda *args: None)
     monkeypatch.setattr(request_execution, "_run_gateway_ask_with_model", lambda context: context.agent.config.model_name)
     context = SimpleNamespace(agent=host, request={"prompt": "继续"}, request_id="req", on_chunk=None)

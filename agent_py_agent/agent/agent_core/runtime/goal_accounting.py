@@ -1,4 +1,5 @@
 # LLM: 计费只认当前 run 的 thread/task/goal 结构化绑定；多个目标共存时不得把同会话用量记入兄弟目标。
+# 活跃秒数由 store.goal_clock 的同源共享对象结算，持久用量仍在原 Goal 事务中保存。
 # 模块用途: 在模型请求和回合边界记录目标用量，保留缓存与预算口径。
 from __future__ import annotations
 
@@ -20,7 +21,7 @@ def begin_goal_model_turn(agent: object, params: object) -> object | None:
     if not thread_id or not task_id or store is None:
         return None
     try:
-        goal = store.load_goal(thread_id, goal_id=goal_id, task_id=task_id)
+        goal = store.goals.load(thread_id, goal_id=goal_id, task_id=task_id)
     except KeyError:
         return None
     if (
@@ -29,7 +30,7 @@ def begin_goal_model_turn(agent: object, params: object) -> object | None:
         or goal.status not in {"active", "budget_limited"}
     ):
         return None
-    store.begin_goal_accounting(goal)
+    store.goal_clock.begin(goal)
     return goal
 
 
@@ -45,16 +46,16 @@ def account_goal_model_response(agent: object, params: object, response: object)
     if not thread_id or not task_id or store is None:
         return None
     try:
-        with store.goal_transition_guard(thread_id):
-            goal = store.load_goal(thread_id, goal_id=goal_id, task_id=task_id)
+        with store.goals.transition_guard(thread_id):
+            goal = store.goals.load(thread_id, goal_id=goal_id, task_id=task_id)
             if (
                 goal is None
                 or goal.task_id != task_id
                 or goal.status not in {"active", "budget_limited"}
             ):
                 return None
-            elapsed = store.take_goal_elapsed_seconds(goal)
-            updated = store.account_goal_usage(
+            elapsed = store.goal_clock.take_elapsed_seconds(goal)
+            updated = store.goals.account_usage(
                 {
                     "thread_id": thread_id,
                     "goal_id": goal.goal_id,
@@ -84,11 +85,11 @@ def finish_goal_turn_accounting(agent: object, task_attributes: object) -> None:
     if not thread_id or not task_id or store is None:
         return
     try:
-        goal = store.load_goal(thread_id, goal_id=goal_id, task_id=task_id)
+        goal = store.goals.load(thread_id, goal_id=goal_id, task_id=task_id)
     except KeyError:
         return
     if goal is not None and goal.task_id == task_id and goal.status != "active":
-        store.clear_goal_accounting(thread_id, goal_id=goal.goal_id)
+        store.goal_clock.clear(thread_id, goal_id=goal.goal_id)
 
 
 def _inject_budget_limit_once(params: object, goal: object) -> None:

@@ -746,7 +746,7 @@ def _current_user_message_ref(agent: object, candidate_content: str) -> dict[str
     thread_id = str(attrs.get("conversation_thread_id") or "").strip()
     request_id = str(getattr(current, "request_id", "") or "").strip()
     store = getattr(agent, "conversation_store", None)
-    reader = getattr(store, "recent_messages_report", None)
+    reader = getattr(getattr(store, 'messages', None), 'recent_report', None)
     if not thread_id or not request_id or not callable(reader):
         return None
     try:

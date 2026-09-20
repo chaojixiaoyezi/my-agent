@@ -486,7 +486,7 @@ def test_pty_pending_start_reserves_last_slot(tmp_path, monkeypatch):
     finally:
         release.set()
         worker.join(1)
-    assert registry._pending_starts == 0
+    assert not registry._pending_starts
 
 
 def test_pty_write_backpressure_and_history_are_bounded(monkeypatch):

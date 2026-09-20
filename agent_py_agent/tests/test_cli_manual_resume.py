@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from types import SimpleNamespace as _StoreDomain
 
 from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
 from agent_py_agent.cli.resume_loop import _load_task_facts, run_manual_resume
@@ -19,11 +20,13 @@ from agent_py_agent.cli.resume_loop import _load_task_facts, run_manual_resume
 class _FakeStore:
     def __init__(self):
         self.appends = []
+        self.threads = _StoreDomain(get_or_create=self._fake_get_or_create_thread)
+        self.messages = _StoreDomain(append_once=self._fake_append_message_once)
 
-    def get_or_create_thread(self, spec):
+    def _fake_get_or_create_thread(self, spec):
         return SimpleNamespace(thread_id="thread-" + str(spec.get("channel_conversation_id") or "t"))
 
-    def append_message_once(self, spec, dedupe_key=""):
+    def _fake_append_message_once(self, spec, dedupe_key=""):
         self.appends.append(spec)
         return SimpleNamespace(
             message_id="m-" + str(len(self.appends)),
@@ -122,13 +125,14 @@ class _LinkStore(_FakeStore):
         super().__init__()
         self._status = link_status
         self.updated = None
+        self.tasks = _StoreDomain(**{**vars(getattr(self, 'tasks', _StoreDomain())), 'load': self._fake_load_task_link, 'update_status': self._fake_update_task_status})
 
-    def load_task_link(self, task_id):
+    def _fake_load_task_link(self, task_id):
         if self._status is None:
             return None
         return SimpleNamespace(task_id=task_id, status=self._status)
 
-    def update_task_status(self, request):
+    def _fake_update_task_status(self, request):
         self.updated = request
         return SimpleNamespace(task_id=request.get("task_id"), status=request.get("status"))
 
@@ -192,14 +196,15 @@ class _PolicyStore(_LinkStore):
     def __init__(self):
         super().__init__(link_status=None)
         self.disabled = []
+        self.progress = SimpleNamespace(list=self._fake_progress_list, disable=self._fake_progress_disable)
 
-    def list_progress_policies(self, *, enabled_only=False):
+    def _fake_progress_list(self, *, enabled_only=False):
         return [
             SimpleNamespace(policy_id="p1", task_id="run-abc123"),
             SimpleNamespace(policy_id="p2", task_id="other-task"),
         ]
 
-    def disable_progress_policy(self, policy_id):
+    def _fake_progress_disable(self, policy_id):
         self.disabled.append(policy_id)
         return True
 
@@ -223,10 +228,15 @@ def test_next_seq_counts_continuation_history(tmp_path):
     agent = _FakeAgent(tmp_path, workspace_root=task_root)
 
     class _SeqStore(_FakeStore):
-        def resolve_thread(self, *, channel, channel_conversation_id, channel_user_id):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.threads = _StoreDomain(**{**vars(getattr(self, 'threads', _StoreDomain())), 'resolve': self._fake_resolve_thread})
+            self.messages = _StoreDomain(**{**vars(getattr(self, 'messages', _StoreDomain())), 'recent': self._fake_recent_messages})
+
+        def _fake_resolve_thread(self, *, channel, channel_conversation_id, channel_user_id):
             return SimpleNamespace(thread_id="thread-x")
 
-        def recent_messages(self, thread_id, *, limit=20):
+        def _fake_recent_messages(self, thread_id, *, limit=20):
             return [
                 SimpleNamespace(metadata={"continuation_seq": 1}),
                 SimpleNamespace(metadata={"continuation_seq": 2}),
@@ -299,11 +309,13 @@ def test_manual_resume_repairs_channel_binding(tmp_path):
         def __init__(self):
             super().__init__()
             self.bound = None
+            self.tasks = _StoreDomain(**{**vars(getattr(self, 'tasks', _StoreDomain())), 'thread_for': self._fake_thread_for_task})
+            self.threads = _StoreDomain(**{**vars(getattr(self, 'threads', _StoreDomain())), 'bind_channel': self._fake_bind_channel})
 
-        def thread_for_task(self, task_id):
+        def _fake_thread_for_task(self, task_id):
             return SimpleNamespace(thread_id="thread-authoritative")
 
-        def bind_channel(self, request):
+        def _fake_bind_channel(self, request):
             self.bound = request
             return SimpleNamespace(thread_id=request["thread_id"])
 
@@ -342,7 +354,10 @@ def test_auto_resume_requires_active_goal(tmp_path):
     from agent_py_agent.cli.resume_loop import _auto_resume_authorized
 
     class _NoGoalStore(_FakeStore):
-        def load_goal(self, thread_id, *, goal_id="", task_id="", name=""):
+        def __init__(self):
+            self.goals = SimpleNamespace(load=self._fake_goals_load)
+
+        def _fake_goals_load(self, thread_id, *, goal_id="", task_id="", name=""):
             return None
 
     agent = _FakeAgent(tmp_path)
@@ -356,7 +371,10 @@ def test_auto_resume_with_active_goal(tmp_path):
     from agent_py_agent.cli.resume_loop import _auto_resume_authorized
 
     class _GoalStore(_FakeStore):
-        def load_goal(self, thread_id, *, goal_id="", task_id="", name=""):
+        def __init__(self):
+            self.goals = SimpleNamespace(load=self._fake_goals_load)
+
+        def _fake_goals_load(self, thread_id, *, goal_id="", task_id="", name=""):
             return SimpleNamespace(status="active")
 
     agent = _FakeAgent(tmp_path)

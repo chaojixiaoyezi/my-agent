@@ -212,7 +212,7 @@ class PublishAuditUpdateTool(BaseTool):
             return ToolAvailability.unavailable("current turn is not scoped to Audit preparation")
         store = getattr(self.agent, "conversation_store", None)
         try:
-            link = store.load_task_link(task_id) if store is not None else None
+            link = store.tasks.load(task_id) if store is not None else None
         except Exception:
             link = None
         if link is None:
@@ -379,7 +379,7 @@ def _audit_publish_target(
             error_code="CONVERSATION_TASK_STATE_UNAVAILABLE",
         )
     try:
-        link = store.load_task_link(request.task_id)
+        link = store.tasks.load(request.task_id)
     except Exception:
         return None, _AuditPublishResult(
             False,
@@ -610,8 +610,8 @@ def _commit_audit_publish(
     if request.source_probe_refs or request.source_update_mode == "replace":
         payload["source_bindings"] = list(bindings)
     try:
-        with target.store.task_transition_guard(request.task_id):
-            return target.store.publish_audit_effective_prompt(payload)
+        with target.store.tasks.transition_guard(request.task_id):
+            return target.store.audits.publish_effective_prompt(payload)
     except Exception:
         return None
 

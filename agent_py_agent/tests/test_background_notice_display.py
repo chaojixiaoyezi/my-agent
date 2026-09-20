@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from types import SimpleNamespace as _StoreDomain
 
 from wcwidth import wcswidth
 
@@ -15,7 +16,7 @@ def _message_store(tmp_path):
     from agent_py_agent.agent.conversation.store import ConversationStore
 
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread({
+    thread = store.threads.get_or_create({
         "canonical_user_id": "local-agent", "channel": "chat",
         "channel_conversation_id": "session-1", "channel_user_id": "local-agent", "now": 1.0,
     })
@@ -25,7 +26,7 @@ def _message_store(tmp_path):
 # LLM: 后台正文只通过 append_message 写入；metadata 决定是否公开，文本本身没有控制意义。
 # 函数用途: 生成一条有稳定消息 ID 的后台最终回复。
 def _append_background_message(store, thread, content="后台最终回复", **metadata):
-    return store.append_message({
+    return store.messages.append({
         "thread_id": thread.thread_id, "role": "assistant", "content": content, "now": 20.0,
         "metadata": {"background_delivery_reason": "root_subagents_terminal",
                      "assistant_part_id": "final", **metadata},
@@ -43,8 +44,8 @@ def test_background_page_projects_canonical_message(tmp_path):
     assert rows[0]["notice_id"] == message.message_id
     assert rows[0]["schema_version"] == "background_message.v1"
     assert rows[0]["content"] == message.content
-    assert cursor == store.message_byte_offset_after(thread.thread_id, message.message_id)
-    assert not (store.root / "notices").exists()
+    assert cursor == store.messages.byte_offset_after(thread.thread_id, message.message_id)
+    assert not (store.storage.root / "notices").exists()
     assert read_background_response_page(store, thread.thread_id, after=cursor) == ([], cursor, True)
 
 
@@ -52,14 +53,14 @@ def test_background_page_filters_roles_and_internal_audit(tmp_path):
     from agent_py_agent.agent.conversation.message_stream import read_background_response_page
 
     store, thread = _message_store(tmp_path)
-    store.append_message({"thread_id": thread.thread_id, "role": "user", "content": "用户输入"})
-    store.append_message({"thread_id": thread.thread_id, "role": "assistant", "content": "前台回复"})
+    store.messages.append({"thread_id": thread.thread_id, "role": "user", "content": "用户输入"})
+    store.messages.append({"thread_id": thread.thread_id, "role": "assistant", "content": "前台回复"})
     _append_background_message(store, thread, "过程回复", assistant_part_id="commentary:1")
     _append_background_message(store, thread, "内部审计", reason="audit_finding", task_id="task-audit")
     final = _append_background_message(store, thread, "公开汇报")
     rows, cursor, ok = read_background_response_page(store, thread.thread_id)
     assert ok and [row["message_id"] for row in rows] == [final.message_id]
-    assert cursor == store.message_byte_offset_after(thread.thread_id, final.message_id)
+    assert cursor == store.messages.byte_offset_after(thread.thread_id, final.message_id)
 
 
 def test_background_page_preserves_cursor_on_corruption(tmp_path):
@@ -67,8 +68,8 @@ def test_background_page_preserves_cursor_on_corruption(tmp_path):
 
     store, thread = _message_store(tmp_path)
     final = _append_background_message(store, thread)
-    offset = store.message_byte_offset_after(thread.thread_id, final.message_id)
-    with store._message_path(thread.thread_id).open("ab") as handle:
+    offset = store.messages.byte_offset_after(thread.thread_id, final.message_id)
+    with store.storage.message_path(thread.thread_id).open("ab") as handle:
         handle.write(b"not-json\n")
     assert read_background_response_page(store, thread.thread_id, after=offset) == ([], offset, False)
 
@@ -78,7 +79,7 @@ def test_background_page_has_no_notice_file_dependency(tmp_path):
 
     store, thread = _message_store(tmp_path)
     _append_background_message(store, thread)
-    (store.root / "notices").write_text("旧旁路不可写也不影响 canonical 读取")
+    (store.storage.root / "notices").write_text("旧旁路不可写也不影响 canonical 读取")
     assert read_background_response_page(store, thread.thread_id)[2] is True
 
 
@@ -96,7 +97,7 @@ def test_tui_consumes_background_notices_and_publishes(tmp_path):
     blocks = runtime.store.snapshot().stable_blocks
     assert [(block.role, block.text) for block in blocks] == [("assistant", message.content)]
     assert blocks[0].block_id == f"history:{thread.thread_id}:{message.message_id}:assistant"
-    assert runtime.background_message_cursor == store.message_byte_offset_after(thread.thread_id, message.message_id)
+    assert runtime.background_message_cursor == store.messages.byte_offset_after(thread.thread_id, message.message_id)
 
 
 def test_tui_skips_when_no_thread_or_no_session(tmp_path: Path) -> None:
@@ -106,7 +107,10 @@ def test_tui_skips_when_no_thread_or_no_session(tmp_path: Path) -> None:
     class _Store:
         root = tmp_path / "conversations"
 
-        def resolve_thread_report(self, **kwargs):
+        def __init__(self, *args, **kwargs):
+            self.threads = _StoreDomain(resolve_report=self._fake_resolve_thread_report)
+
+        def _fake_resolve_thread_report(self, **kwargs):
             return None, None
 
     class _Runtime:
@@ -729,9 +733,9 @@ def test_background_reconnect_rebases_only_process_cursor(tmp_path: Path) -> Non
     assert _consume_background_notices(Client(), "session-1", runtime, [None], seen, cursor)
     old_stream = runtime.background_event_stream_id
     old_blocks = tuple(runtime.store.snapshot().stable_blocks)
-    message_after = store.history_page_report(thread.thread_id).after
+    message_after = store.messages.history_page_report(thread.thread_id).after
     assert cursor == [10] and runtime.background_message_cursor == message_after
-    before = store._message_path(thread.thread_id).read_bytes()
+    before = store.storage.message_path(thread.thread_id).read_bytes()
 
     source[0] = SimpleNamespace(conversation_store=store)
     # 新 Agent 还没产生事件的第一次读取也要换代，不能沿用上一进程的大游标。
@@ -745,9 +749,9 @@ def test_background_reconnect_rebases_only_process_cursor(tmp_path: Path) -> Non
     blocks = tuple(runtime.store.snapshot().stable_blocks)
     assert blocks[:len(old_blocks)] == old_blocks
     assert blocks[-1].text == "重连后的公开块" and cursor == [2]
-    assert runtime.background_message_cursor == store.history_page_report(thread.thread_id).after > message_after
-    assert store._message_path(thread.thread_id).read_bytes().startswith(before)
-    assert store.recent_messages(thread.thread_id, limit=0) == [final]
+    assert runtime.background_message_cursor == store.messages.history_page_report(thread.thread_id).after > message_after
+    assert store.storage.message_path(thread.thread_id).read_bytes().startswith(before)
+    assert store.messages.recent(thread.thread_id, limit=0) == [final]
     assert _consume_background_notices(Client(), "session-1", runtime, [None], seen, cursor)
     assert tuple(runtime.store.snapshot().stable_blocks) == blocks
 
@@ -817,7 +821,7 @@ def test_gateway_notice_page_transports_background_event_cursor(tmp_path: Path) 
     )
 
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "local-agent",
             "channel": "chat",
@@ -826,7 +830,7 @@ def test_gateway_notice_page_transports_background_event_cursor(tmp_path: Path) 
             "now": 1.0,
         }
     )
-    store.bind_task(
+    store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": "task-rich-cursor",
@@ -863,7 +867,7 @@ def test_gateway_notice_page_transports_background_event_cursor(tmp_path: Path) 
         "tool_started",
     ]
     assert first["event_cursor"] == 2
-    assert first["cursor"] == store.history_page_report(thread.thread_id).after > 0
+    assert first["cursor"] == store.messages.history_page_report(thread.thread_id).after > 0
     assert first["notices"] == []
 
     second = read_gateway_client_notices(
@@ -1284,7 +1288,7 @@ def test_gateway_notice_snapshot_reports_canonical_active_task_count(tmp_path: P
     )
 
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "local-agent",
             "channel": "chat",
@@ -1293,7 +1297,7 @@ def test_gateway_notice_snapshot_reports_canonical_active_task_count(tmp_path: P
             "now": 1.0,
         }
     )
-    store.bind_task(
+    store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": "task-active",
@@ -1310,7 +1314,7 @@ def test_gateway_notice_snapshot_reports_canonical_active_task_count(tmp_path: P
     assert active["agent_activity"]["active_task_count"] == 1
     assert active["agent_activity"]["subagents"] == []
 
-    store.update_task_status(
+    store.tasks.update_status(
         {
             "task_id": "task-active",
             "status": "completed",
@@ -1320,14 +1324,14 @@ def test_gateway_notice_snapshot_reports_canonical_active_task_count(tmp_path: P
     completed = read_gateway_client_notices(agent, scope=scope, after=0.0)
     assert completed["active_task_count"] == 0
 
-    store.update_task_status(
+    store.tasks.update_status(
         {
             "task_id": "task-active",
             "status": "active",
             "expected_status": "completed",
         }
     )
-    store.update_task_status(
+    store.tasks.update_status(
         {
             "task_id": "task-active",
             "status": "interrupted",
@@ -1347,7 +1351,7 @@ def test_gateway_notice_snapshot_uses_resolved_owner_and_scope_identity(
     from agent_py_agent.agent.gateway_parts.control_service import GatewayControlScope
 
     owner_store = ConversationStore(tmp_path / "owner-conversations")
-    owner_thread = owner_store.get_or_create_thread(
+    owner_thread = owner_store.threads.get_or_create(
         {
             "canonical_user_id": "user-a",
             "channel": "tui-test",
@@ -1356,7 +1360,7 @@ def test_gateway_notice_snapshot_uses_resolved_owner_and_scope_identity(
             "now": 1.0,
         }
     )
-    owner_store.bind_task(
+    owner_store.tasks.bind(
         {
             "thread_id": owner_thread.thread_id,
             "task_id": "task-owner",
@@ -1460,7 +1464,7 @@ def test_gateway_notice_cold_owner_replays_exact_durable_final_without_agent(
         / "conversations"
     )
     store = ConversationStore(store_root)
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "cold-user",
             "channel": "tui-test",
@@ -1470,7 +1474,7 @@ def test_gateway_notice_cold_owner_replays_exact_durable_final_without_agent(
         }
     )
     message = _append_background_message(store, thread, "冷 owner 的最终回复仍然可见。")
-    store.goals_dir.rmdir()
+    store.storage.goals_dir.rmdir()
 
     monkeypatch.setattr(
         http_handlers,
@@ -1493,10 +1497,10 @@ def test_gateway_notice_cold_owner_replays_exact_durable_final_without_agent(
     assert [row["content"] for row in snapshot["notices"]] == [
         "冷 owner 的最终回复仍然可见。"
     ]
-    assert snapshot["cursor"] == store.message_byte_offset_after(thread.thread_id, message.message_id)
-    assert not store.goals_dir.exists()
+    assert snapshot["cursor"] == store.messages.byte_offset_after(thread.thread_id, message.message_id)
+    assert not store.storage.goals_dir.exists()
 
-    foreground = store.append_message({
+    foreground = store.messages.append({
         "thread_id": thread.thread_id, "role": "assistant", "content": "冷用户的前台回复",
         "metadata": {"gateway_request_id": "gwreq-cold", "assistant_part_id": "final"},
     })
@@ -1507,11 +1511,11 @@ def test_gateway_notice_cold_owner_replays_exact_durable_final_without_agent(
             after=snapshot["cursor"], display=http_handlers.NoticeDisplayCapabilities(foreground_messages=capable),
         )
         assert page["ok"] and [row["message_id"] for row in page["notices"]] == expected
-        assert page["owner_state"] == "cold" and not store.goals_dir.exists()
+        assert page["owner_state"] == "cold" and not store.storage.goals_dir.exists()
 
     sink = BackgroundTranscriptSink(SimpleNamespace(conversation_store=store), thread_id=thread.thread_id, task_id="task-a")
     sink.write_thinking("重启前保存的完整过程")
-    after = store.message_byte_offset_after(thread.thread_id, foreground.message_id)
+    after = store.messages.byte_offset_after(thread.thread_id, foreground.message_id)
     for capable in (False, True):
         page = http_handlers.read_gateway_client_notices(
             SimpleNamespace(home_paths=SimpleNamespace(root=tmp_path)),
@@ -1519,8 +1523,8 @@ def test_gateway_notice_cold_owner_replays_exact_durable_final_without_agent(
             after=after, display=http_handlers.NoticeDisplayCapabilities(display_checkpoints=capable),
         )
         assert page["ok"] and len(page["notices"]) == int(capable)
-        assert page["cursor"] == store.history_page_report(thread.thread_id).after > after
-        assert page["owner_state"] == "cold" and not store.goals_dir.exists()
+        assert page["cursor"] == store.messages.history_page_report(thread.thread_id).after > after
+        assert page["owner_state"] == "cold" and not store.storage.goals_dir.exists()
         if capable:
             assert page["notices"][0]["display_kind"] == "process_event"
             assert page["notices"][0]["display_events"][0]["payload"]["text"] == "重启前保存的完整过程"
@@ -1547,11 +1551,11 @@ def test_late_foreground_attachment_replaces_early_history_not_other_messages(tm
     from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime, TuiTurnSummary
 
     store, thread = _message_store(tmp_path)
-    user = store.append_message({
+    user = store.messages.append({
         "thread_id": thread.thread_id, "role": "user", "content": "你是什么模型",
         "metadata": {"gateway_request_id": "gwreq-queued"},
     })
-    final = store.append_message({
+    final = store.messages.append({
         "thread_id": thread.thread_id, "role": "assistant", "content": "本轮回答",
         "metadata": {"gateway_request_id": "gwreq-queued", "assistant_part_id": "final"},
     })
@@ -1561,7 +1565,7 @@ def test_late_foreground_attachment_replaces_early_history_not_other_messages(tm
     runtime.enqueue_prompt("different-request", user.content, queued=False)
     for view in (runtime, observer):
         view.publish_recovered_history((), display_events=events)
-    before = store.message_byte_offset_after(thread.thread_id, final.message_id)
+    before = store.messages.byte_offset_after(thread.thread_id, final.message_id)
 
     runtime.register_gateway_request("gwreq-queued")
     runtime.register_gateway_request("gwreq-queued")
@@ -1577,7 +1581,7 @@ def test_late_foreground_attachment_replaces_early_history_not_other_messages(tm
         ("user", user.content), ("assistant", final.content),
     ]
     assert not runtime.store.snapshot().queued_inputs
-    assert store.message_byte_offset_after(thread.thread_id, final.message_id) == before
+    assert store.messages.byte_offset_after(thread.thread_id, final.message_id) == before
 
 
 def test_late_foreground_attachment_retires_early_stream_and_simple_final():
@@ -1699,7 +1703,7 @@ def test_runtime_background_activity_is_one_removable_animated_block() -> None:
     assert "level-design · 已完成 · 设计前三个关卡 · 0:45 · ctx 6.8k · compact 0" in rendered
     assert "模型已生成回复" not in rendered
     assert "尝试 1" not in rendered
-    assert "/stop 停止后台任务" in fragments_text(frame.footer)
+    assert "/stop 停止任务" in fragments_text(frame.footer)
 
     changed_children = [dict(children[0], context_tokens=14000), children[1]]
     assert runtime.update_background_activity(

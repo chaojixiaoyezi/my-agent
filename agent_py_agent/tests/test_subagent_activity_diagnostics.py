@@ -21,13 +21,13 @@ from agent_py_agent.agent.subagents.manager import SubAgentManager
 def _environment(tmp_path, monkeypatch):
     # 测试默认没有审批；专门用例替换这一 canonical 查询，不影响诊断采样本身。
     monkeypatch.setattr(
-        "agent_py_agent.agent.conversation.agent_tool_approval.list_pending_subagent_tool_approvals",
+        "agent_py_agent.agent.conversation.agent_tool_approval.list_pending_agent_tool_approvals",
         lambda *args, **kwargs: [],
     )
     clock = SimpleNamespace(wall=2000.0, mono=1000.0)
     monkeypatch.setattr(diagnostics, "time", SimpleNamespace(time=lambda: clock.wall, monotonic=lambda: clock.mono))
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread({"canonical_user_id": "tester", "channel": "tui", "channel_conversation_id": "diagnostics"})
+    thread = store.threads.get_or_create({"canonical_user_id": "tester", "channel": "tui", "channel_conversation_id": "diagnostics"})
     manager = SubAgentManager(tmp_path / "subagents")
     manager.conversation_store = store
     task = manager.create_run(goal="检查文档链接", thought="执行", plan=["检查"], role="worker")
@@ -36,7 +36,7 @@ def _environment(tmp_path, monkeypatch):
     task.runner_active_attempt_id = "attempt-current"
     manager.save(task)
     for task_id in ("root-task", task.id):
-        store.bind_task({"thread_id": thread.thread_id, "task_id": task_id, "goal": "测试", "status": "active"})
+        store.tasks.bind({"thread_id": thread.thread_id, "task_id": task_id, "goal": "测试", "status": "active"})
     records = []
     worker = SimpleNamespace(
         subagents=manager, conversation_store=store,
@@ -67,19 +67,19 @@ def test_long_first_token_wait_notifies_once_without_stopping_or_restarting(tmp_
     assert notice["phase"] == "first_token_wait"
     assert notice["failure_confirmed"] is False
     assert notice["automatic_action"] == "none"
-    signals = worker.conversation_store.pending_wake_signals()
+    signals = worker.conversation_store.wakes.pending()
     assert len(signals) == 1
     assert _task_event_payload(signals[0])["activity_diagnostic"]["attempt_id"] == "attempt-current"
-    worker.conversation_store.mark_wake_signal_handled(signals[0].wake_signal_id)
+    worker.conversation_store.wakes.mark_handled(signals[0].wake_signal_id)
     diagnostics.observe_runner_activity(worker, task.id)
-    assert not worker.conversation_store.pending_wake_signals()
+    assert not worker.conversation_store.wakes.pending()
 
 
 def test_continuous_slow_stream_survives_hours_and_recovery_does_not_wake_again(tmp_path, monkeypatch):
     worker, task, records, clock = _environment(tmp_path, monkeypatch)
     records.append(_model_record(task, status="first_token", first_token_at=101.0))
     diagnostics.observe_runner_activity(worker, task.id)
-    first = worker.conversation_store.pending_wake_signals()
+    first = worker.conversation_store.wakes.pending()
     assert len(first) == 1
     for elapsed in (10, 3600, 10000):
         clock.mono += elapsed
@@ -89,7 +89,7 @@ def test_continuous_slow_stream_survives_hours_and_recovery_does_not_wake_again(
     current = worker.subagents.load(task.id)
     assert current.status == "RUNNING"
     assert current_activity_diagnostic(current)["state"] == "progress_resumed"
-    assert len(worker.conversation_store.pending_wake_signals()) == 1
+    assert len(worker.conversation_store.wakes.pending()) == 1
 
 
 def test_long_tool_is_reported_as_wait_not_failure(tmp_path, monkeypatch):
@@ -109,7 +109,7 @@ def test_provider_backoff_does_not_count_scheduled_delay_as_silence(tmp_path, mo
     task.attributes["runtime_activity"] = {"kind": "runner_provider_retry_scheduled", "at": 1000.0, "delay_seconds": 1200, "attempt": 2}
     worker.subagents.save(task)
     diagnostics.observe_runner_activity(worker, task.id)
-    assert not worker.conversation_store.pending_wake_signals()
+    assert not worker.conversation_store.wakes.pending()
 
 
 @pytest.mark.parametrize("state", ["DONE", "CANCELLED", "BLOCKED", "PENDING"])
@@ -120,7 +120,7 @@ def test_non_running_attempt_is_never_notified_or_reanimated(tmp_path, monkeypat
     records.append(_model_record(task))
     diagnostics.observe_runner_activity(worker, task.id)
     assert worker.subagents.load(task.id).status == state
-    assert not worker.conversation_store.pending_wake_signals()
+    assert not worker.conversation_store.wakes.pending()
 
 
 def test_disabled_notices_and_zero_stage_threshold(tmp_path, monkeypatch):
@@ -132,7 +132,7 @@ def test_disabled_notices_and_zero_stage_threshold(tmp_path, monkeypatch):
     config.subagent_activity_notices_enabled = True
     config.subagent_first_token_notice_seconds = 0
     diagnostics.observe_runner_activity(worker, task.id)
-    assert not worker.conversation_store.pending_wake_signals()
+    assert not worker.conversation_store.wakes.pending()
 
 
 def test_late_diagnostic_cannot_write_next_attempt(tmp_path, monkeypatch):
@@ -161,7 +161,7 @@ def test_recursive_wait_released_by_one_new_notice_not_every_heartbeat(tmp_path,
     assert decision.active_run_ids == (task.id,)
     assert decision.terminal_run_ids == ()
     assert decision.attention_run_ids == (task.id,)
-    assert not worker.conversation_store.pending_wake_signals()  # 不越级投给根会话。
+    assert not worker.conversation_store.wakes.pending()  # 不越级投给根会话。
     mark_parent_waiting_for_direct_children(worker.subagents, parent.id)
     assert not reconcile_parent_wait_for_child(worker.subagents, task.id).should_resume
     diagnostics.observe_runner_activity(worker, task.id)
@@ -187,7 +187,7 @@ def test_stale_progress_save_does_not_erase_notice_or_redeliver(tmp_path, monkey
     worker.subagents.save(stale)
     assert current_activity_diagnostic(worker.subagents.load(task.id))["state"] == "quiet"
     diagnostics.observe_runner_activity(worker, task.id)
-    assert len(worker.conversation_store.pending_wake_signals()) == 1
+    assert len(worker.conversation_store.wakes.pending()) == 1
 
 
 def test_old_worker_does_not_diagnose_new_attempt(tmp_path, monkeypatch):
@@ -196,7 +196,7 @@ def test_old_worker_does_not_diagnose_new_attempt(tmp_path, monkeypatch):
     task.runner_active_attempt_id = "new-attempt"
     worker.subagents.save(task)
     diagnostics.observe_runner_activity(worker, task.id)
-    assert not worker.conversation_store.pending_wake_signals()
+    assert not worker.conversation_store.wakes.pending()
 
 
 @pytest.mark.parametrize("kind,phase", [
@@ -216,7 +216,7 @@ def test_missing_observation_does_not_invent_silence(tmp_path, monkeypatch):
     worker, task, records, clock = _environment(tmp_path, monkeypatch)
     clock.wall += 100000
     diagnostics.observe_runner_activity(worker, task.id)
-    assert not worker.conversation_store.pending_wake_signals()
+    assert not worker.conversation_store.wakes.pending()
 
 
 @pytest.mark.parametrize("kind", ["runner_tool_call_started", "runner_model_response_received"])
@@ -225,7 +225,7 @@ def test_known_pending_approval_is_not_called_tool_failure(tmp_path, monkeypatch
     task.attributes["runtime_activity"] = {"kind": kind, "at": 500, "tool": "run_command"}
     worker.subagents.save(task)
     monkeypatch.setattr(
-        "agent_py_agent.agent.conversation.agent_tool_approval.list_pending_subagent_tool_approvals",
+        "agent_py_agent.agent.conversation.agent_tool_approval.list_pending_agent_tool_approvals",
         lambda *args, **kwargs: [{"run_id": task.id, "request": {"permission_id": "permission-a", "arguments": "private"}}],
     )
     diagnostics.observe_runner_activity(worker, task.id)
@@ -243,8 +243,8 @@ def test_retry_after_notification_write_failure_keeps_original_dedupe_key(tmp_pa
     monkeypatch.setattr(diagnostics, "notify_parent_on_activity_notice", lambda *args: False)
     diagnostics.observe_runner_activity(worker, task.id)
     notice_key = current_activity_diagnostic(worker.subagents.load(task.id))["notice_key"]
-    assert not worker.conversation_store.pending_wake_signals()
+    assert not worker.conversation_store.wakes.pending()
     monkeypatch.setattr(diagnostics, "notify_parent_on_activity_notice", notify)
     diagnostics.observe_runner_activity(worker, task.id)
-    assert len(worker.conversation_store.pending_wake_signals()) == 1
+    assert len(worker.conversation_store.wakes.pending()) == 1
     assert current_activity_diagnostic(worker.subagents.load(task.id))["notice_key"] == notice_key

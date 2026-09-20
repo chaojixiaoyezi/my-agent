@@ -412,7 +412,7 @@ def _invalid_write_target(agent: object, root: Path, target: str, params: dict) 
     attrs = getattr(current, "task_attributes", None)
     thread_id = str(attrs.get("conversation_thread_id") or "") if isinstance(attrs, dict) else ""
     store = getattr(agent, "conversation_store", None)
-    loader = getattr(store, "task_links_report", None)
+    loader = getattr(getattr(store, 'tasks', None), 'list_report', None)
     if not current_subagent_run_id(agent) and scope in {"default", "conversation", ""} and thread_id and callable(loader):
         try:
             links, errors = loader(thread_id)

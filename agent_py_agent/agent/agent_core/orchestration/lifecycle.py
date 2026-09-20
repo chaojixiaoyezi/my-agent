@@ -85,7 +85,7 @@ def _mark_recursive_parent_wait(
 def _bind_tasks_to_conversation(agent: object, tasks: list[object]) -> list[dict[str, object]]:
     """Make local subagent run_ids addressable in the parent conversation thread."""
     store = getattr(agent, "conversation_store", None)
-    if store is None or not callable(getattr(store, "bind_task", None)):
+    if store is None or not callable(getattr(getattr(store, 'tasks', None), 'bind', None)):
         return []
     bind_errors: list[dict[str, object]] = []
     for task in tasks:
@@ -97,7 +97,7 @@ def _bind_tasks_to_conversation(agent: object, tasks: list[object]) -> list[dict
         if not thread_id:
             continue
         try:
-            store.bind_task(
+            store.tasks.bind(
                 {
                     "thread_id": thread_id,
                     "task_id": _task_id(task),
@@ -135,7 +135,7 @@ def _reconcile_bound_task_status(
     run_id = _task_id(task)
     manager = getattr(agent, "subagents", None)
     loader = getattr(manager, "load", None)
-    updater = getattr(store, "update_task_status", None)
+    updater = getattr(getattr(store, 'tasks', None), 'update_status', None)
     if not run_id or not callable(loader) or not callable(updater):
         return None
     try:

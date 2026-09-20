@@ -9,6 +9,8 @@
 
 ## 当前实现
 
+- 存储组合后，Curator 通过 `threads.list_report` 和 `messages.after_report` 读取；
+  Promotion 通过 `messages.by_id_report` 核验精确消息。原游标、坏账处理和证据匹配不变，不保留旧方法回退。
 - 普通后台策展让出正在工作的同模型端点，pending 和记忆游标保留；pre_compact 屏障不被延后。
 - 后台自适应预算已传入 HTTP；超时取消连接，旧调用未退出前不叠加重试。资源范围限本 Gateway，
   外部应用抢占及模型服务缓存上限另查，不能误报为会话历史丢失。

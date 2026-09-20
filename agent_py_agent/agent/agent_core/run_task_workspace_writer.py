@@ -364,7 +364,7 @@ def register_saved_run_task_ref(agent, result, params) -> None:
 
 def _sync_conversation_task_workspace(agent, run_params, task_id: str, task_root: Path) -> None:
     store = getattr(agent, "conversation_store", None)
-    if store is None or not callable(getattr(store, "bind_task", None)):
+    if store is None or not callable(getattr(getattr(store, 'tasks', None), 'bind', None)):
         return
     attrs = getattr(run_params, "task_attributes", None)
     attrs = attrs if isinstance(attrs, dict) else {}
@@ -381,7 +381,7 @@ def _sync_conversation_task_workspace(agent, run_params, task_id: str, task_root
     thread_id = str(attrs.get("conversation_thread_id") or "").strip()
     if not thread_id:
         try:
-            thread = store.thread_for_task(str(task_id))
+            thread = store.tasks.thread_for(str(task_id))
         except Exception:
             # 绑定线索失败只降级(任务工作区不依赖会话线索),但要留观测——
             # 静默丢元数据会让跨通道接续悄悄断链(体检实锤)。
@@ -403,7 +403,7 @@ def _sync_conversation_task_workspace(agent, run_params, task_id: str, task_root
     ):
         return
     try:
-        store.bind_task(
+        store.tasks.bind(
             {
                 "thread_id": thread_id,
                 "task_id": str(task_id),
@@ -419,7 +419,7 @@ def _sync_conversation_task_workspace(agent, run_params, task_id: str, task_root
 
 def _conversation_task_link(store: object, thread_id: str, task_id: str):
     try:
-        links, errors = store.task_links_report(thread_id)
+        links, errors = store.tasks.list_report(thread_id)
     except Exception:
         return None
     if errors:

@@ -192,9 +192,9 @@ def test_local_btw_is_scoped_to_current_request(tmp_path) -> None:
     result = execute_chat_control(execution, _command("/btw 改为先写摘要"))
 
     assert result.ok is True
-    pending = agent.conversation_store.pending_guidance("request", "chat-1")
+    pending = agent.conversation_store.guidance.pending("request", "chat-1")
     assert pending[0].message == "改为先写摘要"
-    assert agent.conversation_store.pending_guidance("request", "chat-2") == []
+    assert agent.conversation_store.guidance.pending("request", "chat-2") == []
 
 
 def test_local_stop_signals_current_run(tmp_path) -> None:
@@ -224,7 +224,7 @@ def test_local_stop_signals_current_run(tmp_path) -> None:
     thread = threading.Thread(target=worker)
     thread.start()
     assert ready.wait(timeout=2)
-    agent.conversation_store.append_guidance(
+    agent.conversation_store.guidance.append(
         {
             "target_type": "request",
             "target_id": "chat-stop",
@@ -239,7 +239,7 @@ def test_local_stop_signals_current_run(tmp_path) -> None:
 
     assert result.ok is True
     assert stopped.is_set()
-    assert agent.conversation_store.pending_guidance("request", "chat-stop") == []
+    assert agent.conversation_store.guidance.pending("request", "chat-stop") == []
 
 
 def test_local_stop_uses_shared_request_id_instead_of_thread_local_params(tmp_path) -> None:
@@ -639,3 +639,22 @@ def test_direct_chat_goal_fails_explicitly_instead_of_stopping_current_run(tmp_p
     assert audit_result.kind == "audit"
     assert audit_result.ok is False
     assert "Gateway" in audit_result.message
+
+
+def test_gateway_goal_control_transmits_scoped_client_workspace(tmp_path) -> None:
+    workspace = {"cwd": str(tmp_path), "roots": [str(tmp_path)]}
+    captured = []
+    agent = SimpleNamespace(
+        config=SimpleNamespace(gateway_port=18420),
+        gateway_request_workspace=lambda: workspace,
+        post_gateway_json=lambda _path, payload, **_kwargs: (
+            captured.append(payload) or 200,
+            {"kind": "goal", "ok": True, "message": "created"},
+        ),
+    )
+    execution = ChatControlExecution(agent, True, ChatControlState(False, 0, "", 0.0, "fresh"))
+    assert execute_chat_control(execution, _command("/goal 记录当前目录")).ok
+    assert captured[0]["workspace"] == workspace
+    agent.gateway_request_workspace = lambda: {}
+    assert execute_chat_control(execution, _command("/goal 记录当前目录")).ok
+    assert "workspace" not in captured[1]

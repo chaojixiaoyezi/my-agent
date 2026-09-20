@@ -5,6 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent_py_agent.agent.conversation import background_delivery as delivery_module
+from agent_py_agent.agent.conversation import background_execution as execution_module
 from agent_py_agent.agent.conversation.background_history import background_display_turn_from_row
 from agent_py_agent.agent.conversation.background_transcript import (
     BackgroundTranscriptSink,
@@ -22,7 +24,7 @@ from agent_py_agent.cli.chat_parts.tui_threading import _publish_background_noti
 # 函数用途: 建立一轮可回放的后台思考、commentary、工具和 final，验证两个显示入口共享身份。
 def _completed_turn(tmp_path):
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread({"canonical_user_id": "owner-a"})
+    thread = store.threads.get_or_create({"canonical_user_id": "owner-a"})
     agent = SimpleNamespace()
     sink = BackgroundTranscriptSink(agent, thread_id=thread.thread_id, task_id="task-a")
     sink.write_thinking("先核对文件", duration_seconds=2)
@@ -32,9 +34,9 @@ def _completed_turn(tmp_path):
     sink.finish()
     metadata = {"background_delivery_reason": "root_subagents_terminal", "task_id": "task-a",
                 "background_transcript_request_id": sink.request_id}
-    store.append_message({"thread_id": thread.thread_id, "role": "assistant", "content": "开始读取",
+    store.messages.append({"thread_id": thread.thread_id, "role": "assistant", "content": "开始读取",
                           "metadata": {**metadata, "assistant_part_id": "commentary:1"}})
-    final = store.append_message({"thread_id": thread.thread_id, "role": "assistant", "content": "这是最终检查结果",
+    final = store.messages.append({"thread_id": thread.thread_id, "role": "assistant", "content": "这是最终检查结果",
                                   "metadata": {**metadata, "assistant_part_id": "final", "background_display_turn": sink.display_history_snapshot()}})
     return agent, sink, store, thread, final
 
@@ -100,7 +102,7 @@ def test_invalid_snapshot_does_not_authorize_buffer_drop(tmp_path, damage):
 
 def test_display_metadata_does_not_change_provider_history_or_snapshot_source(tmp_path):
     _, sink, store, thread, _ = _completed_turn(tmp_path)
-    rows = store.recent_messages(thread.thread_id, limit=0)
+    rows = store.messages.recent(thread.thread_id, limit=0)
     plain = copy.deepcopy(rows)
     for row in plain:
         row.metadata.pop("background_display_turn", None)
@@ -115,14 +117,14 @@ def test_display_metadata_does_not_change_provider_history_or_snapshot_source(tm
 @pytest.mark.parametrize("ok", [False, True])
 def test_restored_tool_keeps_public_invocation_without_reexecuting(tmp_path, live, ok):
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread({"canonical_user_id": "owner-a"})
+    thread = store.threads.get_or_create({"canonical_user_id": "owner-a"})
     agent = SimpleNamespace()
     sink = BackgroundTranscriptSink(agent, thread_id=thread.thread_id, task_id="task-a")
     progress = {"round": 2, "call_index": 1, "tool": "run_command", "detail": "python3 中文项目/check.py"}
     sink.write_progress({**progress, "phase": "started"})
     sink.write_progress({**progress, "phase": "finished", "ok": ok, "output": "有界结果"})
     sink.finish()
-    store.append_message({"thread_id": thread.thread_id, "role": "assistant", "content": "已检查",
+    store.messages.append({"thread_id": thread.thread_id, "role": "assistant", "content": "已检查",
                           "metadata": {"assistant_part_id": "final", "background_delivery_reason": "root_subagents_terminal",
                                        "task_id": "task-a", "background_transcript_request_id": sink.request_id,
                                        "background_display_turn": sink.display_history_snapshot()}})
@@ -134,7 +136,7 @@ def test_restored_tool_keeps_public_invocation_without_reexecuting(tmp_path, liv
     tool, final = runtime.store.snapshot().stable_blocks
     assert tool.metadata.get("invocation") == progress["detail"]
     assert tool.metadata["ok"] is ok and final.text == "已检查"
-    assert len(store.recent_messages(thread.thread_id)) == 1
+    assert len(store.messages.recent(thread.thread_id)) == 1
 
 
 @pytest.mark.parametrize("payload,expected", [
@@ -179,7 +181,7 @@ def test_background_invocation_snapshot_commits_only_with_canonical_final(tmp_pa
     from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest, GoalRuntimeContext
 
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread({"canonical_user_id": "owner-a"})
+    thread = store.threads.get_or_create({"canonical_user_id": "owner-a"})
     runtime = SimpleNamespace(agent=SimpleNamespace(), store=store)
     request = BackgroundRunRequest(thread_id=thread.thread_id, task_id="task-a", reason="scheduled_progress_report")
 
@@ -190,27 +192,32 @@ def test_background_invocation_snapshot_commits_only_with_canonical_final(tmp_pa
         assert not activity_sink.display_history_snapshot()["complete"]
         return SimpleNamespace(response="最终结果")
 
-    monkeypatch.setattr(runtime_module, "_run_background_main_turn_with_compact", invoke)
+    monkeypatch.setattr(execution_module, 'run_background_turn_with_compact', invoke)
     result, snapshot = runtime_module._invoke_background_main_agent(runtime, thread, request, GoalRuntimeContext(), (False, True))
     assert snapshot["complete"] is True
-    assert not store.recent_messages(thread.thread_id)
+    assert not store.messages.recent(thread.thread_id)
     context = DeliveryContext(channel="internal", target="", thread_id=thread.thread_id)
+    from agent_py_agent.agent.conversation.channels import FakeDeliveryService
+
+    delivery = delivery_module.BackgroundDeliveryDependencies(
+        agent=runtime.agent, store=store, channels=FakeDeliveryService(), task_status=lambda _request: "",
+    )
     kwargs = {"receipt": SimpleNamespace(), "committed_content": result.response, "evidence_refs": (),
               "message_metadata": {"task_id": "task-a", "background_delivery_reason": "scheduled_progress_report"},
               "display_snapshot": snapshot}
     # 欠一次真实外发且没有本地归属权的路线：外发失败不得落 canonical，
     # 但正文必须由冻结重投兜住（见 test_background_owner_delivery_commit.py）。
     external = DeliveryContext(channel="feishu", target="open-id-a", thread_id=thread.thread_id)
-    uncommitted = runtime_module._commit_background_response(
-        runtime, request, external, delivery_status="failed",
+    uncommitted = delivery_module._commit_background_response(
+        delivery, request, external, delivery_status="failed",
         canonical_record=False, transcript_route=False, **kwargs)
     assert uncommitted.persisted is False
     assert uncommitted.commit_kind == "none"
-    assert not store.recent_messages(thread.thread_id)
-    committed = runtime_module._commit_background_response(
-        runtime, request, context, delivery_status="not_applicable",
+    assert not store.messages.recent(thread.thread_id)
+    committed = delivery_module._commit_background_response(
+        delivery, request, context, delivery_status="not_applicable",
         canonical_record=True, transcript_route=True, **kwargs)
     assert committed.persisted is True
     assert committed.commit_kind == "canonical_record"
-    final = store.recent_messages(thread.thread_id)[0]
+    final = store.messages.recent(thread.thread_id)[0]
     assert background_display_turn_from_row(final) == snapshot

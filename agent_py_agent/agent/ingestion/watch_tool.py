@@ -1416,7 +1416,7 @@ def _audit_prepare_open_identity_error(
 def _audit_open_transition_guard(agent: object, audit_id: str):
     selected = str(audit_id or "").strip()
     store = getattr(agent, "conversation_store", None)
-    guard = getattr(store, "task_transition_guard", None)
+    guard = getattr(getattr(store, 'tasks', None), 'transition_guard', None)
     if not selected or store is None or not callable(guard):
         return nullcontext()
     return guard(selected)
@@ -1434,7 +1434,7 @@ def _audit_parent_open_error(
     store = getattr(agent, "conversation_store", None)
     if store is None:
         return None
-    if not selected or not callable(getattr(store, "task_transition_guard", None)):
+    if not selected or not callable(getattr(getattr(store, 'tasks', None), 'transition_guard', None)):
         return _err(
             "Audit 父任务状态不可用，来源未启动。",
             "AUDIT_PARENT_STATE_UNAVAILABLE",

@@ -124,7 +124,7 @@ class DisplayCheckpointWriter:
     # LLM: 仅绑定已有 owner ConversationStore；不新建线程、目录或网络请求，锁只保护当前 sink 的写入去重。
     # 函数用途: 为一片过程准备持久化入口；无会话的独立显示夹具不产生磁盘副作用。
     def __init__(self, agent: object) -> None:
-        self._append = getattr(getattr(agent, "conversation_store", None), "append_display_checkpoint", None)
+        self._append = getattr(getattr(getattr(agent, "conversation_store", None), 'messages', None), 'append_display_checkpoint', None)
         self._seen: dict[tuple[str, str], str] = {}
         self._lock = threading.Lock()
         self.failed = False

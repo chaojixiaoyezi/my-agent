@@ -1,5 +1,48 @@
 # Gateway Structure
 
+## 请求准备、绑定与历史边界
+
+`request_execution.py` 只编排已领取请求的租约、模型工作片、超窗恢复和收尾。
+`request_context.py` 在原车道内按补交、索引、Compact、历史、任务顺序准备快照；
+`request_binding.py` 保留精确 request/thread/task/run/attempt 绑定、T 锁与原子写前登记；
+`request_history.py` 负责正文投影、canonical 追加、request/part 去重和原样延迟 repair；
+`request_prompt.py` 只渲染已取得的事实，历史种子不重读磁盘。
+共同的完整行窗口归 `conversation/history_projection.py`，后台历史种子也从会话领域直接调用。
+组件没有第二份状态，原持久字段、路径、锁、CAS 与提交顺序保持，调用方不再从旧执行文件取私有入口。
+
+## 流式输出与请求编排
+
+`gateway_parts/stream_writer.py` 维护每请求的缓冲、候选分段及发布顺序；`stream_events.py` 清洗公开载荷，
+长思考继续使用绑定 sink 的原归档；`stream_approval.py` 只引用 owner 缓存并沿原 permission bridge 等待。
+请求执行器负责绑定 owner/thread、控制和持久提交，流关闭不决定任务成功；结束后保留 chunk 供客户端补读。
+正常请求和恢复从 `paths.claimed_request_chunk_path` 取得同一队列路径，恢复不反向加载请求执行器。
+`conversation/compact_carry.py` 共用前后台工具快照替换与插话合并/释放编号排除，mailbox 释放时机仍在原调用方。
+CLI 增量归档合并及前台延迟 repair 的语义不同，保持各自合同。
+
+## 后台上下文与历史准备
+
+`conversation/background_context.py` 负责有界上下文、结构化任务范围、模型可见 wake 与展示字段排除；
+`BackgroundContextRequest` 只声明准备所需的 thread/task/reason/wake，不持有第二份请求状态。
+原 `task_runtime_state` 对账仍可能写任务进度，调用顺序不变，不能把模块整体视为纯读取。
+`background_history_seed.py` 复用 canonical 未压缩行、相同任务范围及既有 provider 投影，
+读取失败返回明确错误并阻止缺历史调用；不消费事件、不推进 Compact，也不提交或投递消息。
+二者加载不依赖调度运行时；展示快照仍由原 `background_history.py` 维护。
+
+## 控制请求的执行目录
+
+TUI 的控制载荷复用普通消息 workspace 投影；HTTP、持久回执、Goal 服务传递同一声明。
+`workspace_scope.py` 是请求与控制共用的 owner/path 校验；声明没有授权能力。
+首次 Goal 通过 store 的原子通道绑定初始化空目录，已有目录保持；恢复不会改写或搬迁旧任务产物。
+`control_operation_service.py` 的 v3 摘要签入目录，旧 v1/v2 禁止带此字段；无目录输入仍用 v2，
+保证已有回执重试一致。回执不是新 workspace 权威，运行时仍读 canonical thread。
+
+## 后台工具策略边界
+
+`conversation/background_tool_policy.py` 独占工具目录计算、策略标签与用途展示；显式 request 携带
+配置、owner/task 策略、Goal/wake 及投递能力，不读取会话、不产生网络/文件副作用。
+`runtime.py` 只消费结果并继续原执行、取消和投递主链。执行器仍是最终权限边界，展示文案不授予权限。
+模块可独立加载而不导入 runtime/HTTP；旧实现和无引用的生命周期包装函数已删除，持久旧事件恢复规则保留。
+
 ## 本地来源与 owner 身份
 
 TUI worker 收到已经持久入队的 `gateway_request_id` 时，直接接原 terminal，不再以前台 PID
@@ -7,7 +50,7 @@ TUI worker 收到已经持久入队的 `gateway_request_id` 时，直接接原 t
 
 文件队列由 `submit_gateway_ask` 写入精确 `source=cli_chat/cli_gateway`；
 `metadata.channel` 在多用户 TUI 中承载 owner provider，不能同时决定本地输出脱敏。
-`request_execution.py::_gateway_request_channel` 只把这两个宿主来源投影为 `chat/gateway-cli`，
+`request_history.py::gateway_request_channel` 只把这两个宿主来源投影为 `chat/gateway-cli`，
 流式、final、普通追加和 repair 使用同一决定。保存消息的 channel 供历史重放使用，
 请求 metadata 与 thread 绑定仍不变；这不是鉴权或外部主动投递的路由更改。
 HTTP/IM/未知来源不能凭 rich transcript 获得私有路径展示，后台外部投递仍由原 DeliveryContext 决定。
@@ -58,13 +101,13 @@ TUI 的背景 task ID 仅作 expected-target 提示。`runtime_db/repository.py`
 
 ## 模型统计投影
 
-`request_execution.py::BufferedChunkStreamWriter.write_model_metrics` 发布 `model_metrics_updated`，
+`stream_writer.py::BufferedChunkStreamWriter.write_model_metrics` 发布 `model_metrics_updated`，
 只含统一白名单数字。前台 TUI 直接消费；后台和子代理通过所属 `ConversationThread.model_metrics`
 的数值快照读取。调用账本仍为权威，不新建收费账或模型状态机。详细口径见 [TUI 规范](../../design/TUI_DESIGN.md)。
 
 ## 未配置模型与当前调用身份
 
-随包配置不预填协议、模型名和接口地址。`backends/base.py::get_backend` 对空配置创建未配置适配器，
+随包配置不预填协议、模型名和接口地址。`backends/factory.py::get_backend` 对空配置创建未配置适配器，
 允许 Gateway/TUI 设置入口启动，但模型生成与工具能力探针返回 `MODEL_NOT_CONFIGURED`，不请求网络、
 不回退到其他服务。`request_errors.py` 将其投影为明确的 `/model` 配置提示。
 `status_rendering.py` 仅生成 Gateway 健康事实；`tooling/gateway_status.py` 绑定当前执行配置生成
@@ -105,7 +148,7 @@ task workspace 摘要同步）同样改用它，避免"读时切开、写回落�
 
 ## R279 复审补丁：声明级归属、整封 envelope 与就绪预算
 
-- **归属只读声明**：`_background_route_ownership(channels, channel)` 返回 `local`（transcript 路线，
+- **归属只读声明**：`background_delivery.background_route_ownership(channels, channel)` 返回 `local`（transcript 路线，
   canonical 即交付）/ `external`（部署声明过该通道且声明支持 proactive）/ `undeclared`（未声明，永不外发）。
   它必须读 `declares_channel()` + `declared_proactive()`，**禁止**改用 `supports_proactive()` 这类
   受 adapter 生命周期影响的探测——否则一次暂不可用就会把外发义务抹掉、吞掉通知。
@@ -121,7 +164,7 @@ task workspace 摘要同步）同样改用它，避免"读时切开、写回落�
 
 ## R279 后台答复的 canonical 记录与外部投递解耦
 
-- **canonical 记录不再由渠道能力决定**：`conversation/runtime.py::_record_response` 只要拿到模型产出的
+- **canonical 记录不再由渠道能力决定**：`conversation/background_delivery.py::record_background_response` 只要拿到模型产出的
   可交付正文（非空投影或附件），且该路线以本地权威会话为交付面（`transcript` 路线）或**本来就没有外发
   目标**（未注册渠道、无 target），就必须把 final 写进所属 thread。渠道能力只决定"能不能外发"，
   不决定"要不要记账"；未注册渠道继续 fail-closed，`DeliveryService._prepare` 仍返回
@@ -131,7 +174,7 @@ task workspace 摘要同步）同样改用它，避免"读时切开、写回落�
   `_execute_wake_signal → redeliver_cached_wake` 只重投冻结正文，**不再花一次模型轮**；重投再次失败时
   冻结载荷保持不变，不允许退化成重跑业务。有外发义务的真实 IM 路线保持原有边界——失败草稿不写进本地
   transcript，靠冻结重投兜底。
-- **唤醒确认是结构化事实判定**：`_background_owner_delivery_committed` 不再按事件类型默认返回 True。
+- **唤醒确认是结构化事实判定**：`background_delivery.background_owner_delivery_committed` 不按事件类型默认返回 True。
   只有 `delivery_status == "sent"`，或"没有外发义务且 `BackgroundDeliveryCommit.persisted` 为真"才算
   完成；两者都不成立的唤醒留在队列里重投。投递层显式 `suppressed` 的正文既不外发也不落账。
 - **审计回执不得冒领**：`_record_transcript_audit_refs` 只在 `transcript_route` 为真时写；外发路线失败
@@ -331,7 +374,7 @@ task workspace 摘要同步）同样改用它，避免"读时切开、写回落�
 `conversation/compact_guard.py` 用原生请求投影计量近期尾部；`compact_request_budget.py` 负责当前
 窗口的摘要请求预算、连续原文片段和 typed overflow 缩小请求。原 transcript/checkpoint/CAS 仍由
 `compact.py` 单一入口负责，辅助请求继续进入同一本模型账，不新增工具执行权限或记忆存储。
-`request_execution._load_gateway_compact_context` 保留独立压缩异常，`request_errors` 渲染对应安全提示。
+`request_context._load_gateway_compact_context` 保留独立压缩异常，`request_errors` 渲染对应安全提示。
 `compact_tool_refs.py` 从原生工具参数与匹配成功回执生成原样路径线索，在同一 checkpoint/CAS 保存；
 `observed_tool_paths` 只是历史定位数据，不替代 cwd、权限或文件是否仍存在。旧 task link 的内部 runs 路径
 不会再成为业务项目候选。开始压缩时先发当前模型用量事件，分段完成时更新真实覆盖进度。
@@ -725,7 +768,7 @@ Gateway 解析并校验会话 cwd，但不再把 `workspace_task.task_path` 覆�
 
 ## 会话历史与 provider 缓存前缀
 
-- `request_execution._gateway_conversation_context` 先通过 Conversation Compact 取得唯一 committed summary
+- `request_context.gateway_conversation_context` 先通过 Conversation Compact 取得唯一 committed summary
   与完整消息边界收缩后的 raw tail；`_gateway_conversation_history_seed` 再把这份结果冻结为 immutable
   `ConversationHistorySeed`。Gateway 不把 transcript 重复渲染进 `runtime_injections`，runtime 也不重新读取
   ConversationStore。
@@ -807,7 +850,7 @@ Gateway 解析并校验会话 cwd，但不再把 `workspace_task.task_path` 覆�
 
 ## 跨回合工具终态折叠
 
-- `request_execution._persist_gateway_assistant_result` 从本轮 `archive_tool_calls` 构造唯一
+- `request_history.persist_gateway_assistant_result` 从本轮 `archive_tool_calls` 构造唯一
   `conversation_terminal_tool_fold.v2`，与公开 assistant 正文同一次写入 ConversationStore metadata；repair
   队列携带同一份值。用户 transcript、channel delivery 和最终正文不拼接该投影。
 - V2 metadata 同时固定保存有界 hot-tail、cold-fold 与 typed deadline。`_gateway_conversation_context` 读取 raw
@@ -828,7 +871,7 @@ Gateway 解析并校验会话 cwd，但不再把 `workspace_task.task_path` 覆�
 
 ## 普通续轮的直属子代理完成输入
 
-- `request_execution._gateway_conversation_context` 在加载 sticky workspace 后，从同一 thread 的
+- `request_context.gateway_conversation_context` 在加载 sticky workspace 后，从同一 thread 的
   ConversationStore observation 构造 `conversation-subagent-completions.v1`。普通追加轮会换 task id，
   所以 `_gateway_workspace_lineage_task_ids` 以同 thread、非 detached task link 的 exact canonical
   `task_path` 等值形成持续 workspace lineage；cwd、goal 和用户正文都不参与。
@@ -910,7 +953,7 @@ EPIPE、ECONNRESET、ECONNABORTED 解释为客户端已离开并结束该 socket
 累计成本另走 `ModelCallLedger`：按 request/run 记录 provider input、output、cache read、
 cache creation 和真实/估算调用数，再投影到 runtime fact、`AgentRunResult` 与 Gateway result。一次 request
 可能在 overflow→Compact 前后多次 finalization；每次都以 `physical_model_attempt_count` 作为累计 snapshot
-cursor，`ConversationModelUsageStore` 在唯一追加锁内减去同 scope 既有增量，把 delta 幂等写入 exact
+cursor，`store.model_usage` 的 `ModelUsageStore` 在唯一追加锁内减去同 scope 既有增量，把 delta 幂等写入 exact
 owner/thread 的 `model_usage/<thread_id>.jsonl`。事件保存原 snapshot digest；重放同 cursor 幂等、异值复用
 fail closed。后台 main 即使 `do_save=false` 也只跳过普通档案，不丢真实模型用量。供应商真值和本地估算分栏
 汇总，损坏账本不能降成零成本。它不会反向改动 Context 行，也不会参与 Compact、任务完成或权限触发。
@@ -1029,7 +1072,7 @@ audit Agent 为空而回退 daemon cwd。
 - `agent/gateway_parts/permission_bridge.py` 是跨进程决定桥。目标固定为 processing chunk 同级的
   `.approvals/<sha256(request_id)[:24]>/<sha256(permission_id)[:24]>.json`；路径不接受外部 id 拼接，
   原子文件在 schema、request id、permission id、完整 binding 全部匹配后才消费。
-- `request_execution.BufferedChunkStreamWriter` 是 Gateway typed 事件唯一出口：模型 delta、工具 progress、
+- `stream_writer.BufferedChunkStreamWriter` 是 Gateway typed 事件唯一出口：模型 delta、工具 progress、
   `permission_requested/resolved`、`conversation_compacted` 共用同一 chunk cursor。writer 是否等待审批只读
   请求的显式 `client_capabilities.tool_approval`；没有该能力时不得按 source、终端在线或文案猜测。
 - `cli/chat_parts/gateway_client.py` 把 chunk object 交给 TUI typed consumer；consumer 成功时不再走 legacy
@@ -1297,9 +1340,9 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   实例轮流结算同一目标时不重复累计，同名 Goal 不跨 owner 共享。时钟为进程内状态，不计停机时间。
 - `agent/conversation/goal_recovery.py`：用户以名称或编号显式 resume 旧目标时检查共享任务冲突，
   源任务已完成且执行释放后才准备独立任务并原子保存来源快照。查询或服务启动不自动迁移。
-- `agent/conversation/runtime.py`：每个后台续接 turn 都读取同一 thread 的 compact summary 与完整 raw tail；
-  task id 只约束 wake、progress、workspace 和子代理树等运行事实，不能过滤消息或建立 task-scoped history。
-  持续目标轮携带精确 goal id，未进入 complete/blocked/paused/cleared 才发布一个去重续跑 wake。scheduler
+- `agent/conversation/background_history_seed.py`：每个后台续接 turn 都读取同一 thread 的 compact summary 与完整 raw tail；
+  普通会话不按 task 过滤历史，只有显式 detached named task 沿既有创建锚点与精确 lineage 限定范围。
+- `agent/conversation/runtime.py`：持续目标轮携带精确 goal id，未进入 complete/blocked/paused/cleared 才发布一个去重续跑 wake。scheduler
   只有在没有 linked live turn 时才能启动续接；定时或生命周期 wake 在精确 task 已终态时直接退休。
 - `agent/conversation/run_claim.py`：foreground Gateway turn 与 background scheduler turn 共用的唯一
   per-thread 持久执行 lane。它复用 `ConversationStore` 的 claim 文件、租约、进程身份接管与 heartbeat；

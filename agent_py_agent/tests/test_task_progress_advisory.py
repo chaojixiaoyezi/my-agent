@@ -32,17 +32,17 @@ def test_explicit_progress_update_targets_existing_same_thread_plan(tmp_path, sa
 
     agent = _agent(tmp_path)
     store = agent.conversation_store
-    thread = store.get_or_create_thread({
+    thread = store.threads.get_or_create({
         "channel": "chat", "channel_conversation_id": "original-session", "canonical_user_id": "owner",
     })
     root = agent.home_paths.owner_home_dir
     work = root / "tasks" / "previous-project"
     work.mkdir(parents=True)
-    store.bind_task({
+    store.tasks.bind({
         "thread_id": thread.thread_id, "task_id": "original-task", "goal": "原任务",
         "task_path": str(work), "cancellation_scope": "detached" if detached else "foreground",
     })
-    store.update_task_status({"task_id": "original-task", "status": "completed"})
+    store.tasks.update_status({"task_id": "original-task", "status": "completed"})
     ledger = task_path_progress_ledger_id(work)
     write_task_progress(root, ledger, {"items": [{
         "id": "verify", "title": "验证", "status": "done", "notes": "旧验证记录",
@@ -66,7 +66,7 @@ def test_explicit_progress_update_targets_existing_same_thread_plan(tmp_path, sa
         assert json.loads(result.output)["reason"] == "task_progress_scope_mismatch"
         assert progress_path(root, ledger).read_bytes() == before
     assert not progress_path(root, "current-run").exists()
-    assert store.load_task_link("original-task").status == "completed"
+    assert store.tasks.load("original-task").status == "completed"
     assert "conversation_task_id" not in agent._current_run_params.task_attributes
 
 

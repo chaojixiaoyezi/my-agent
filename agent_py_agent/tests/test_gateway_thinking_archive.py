@@ -10,7 +10,7 @@ from agent_py_agent.agent.conversation.display_archive import read_display_archi
 from agent_py_agent.agent.conversation.display_checkpoint import display_checkpoint_events
 from agent_py_agent.agent.conversation.store import ConversationStore
 from agent_py_agent.agent.gateway_parts.foreground_transcript import GatewayForegroundTranscriptSink
-from agent_py_agent.agent.gateway_parts.request_execution import BufferedChunkStreamWriter
+from agent_py_agent.agent.gateway_parts.stream_writer import BufferedChunkStreamWriter
 
 
 # LLM: The fixture connects the actual foreground writer/sink/archive/checkpoint chain in a
@@ -18,7 +18,7 @@ from agent_py_agent.agent.gateway_parts.request_execution import BufferedChunkSt
 # 函数用途: 创建可读真实归档的前台显示夹具，检查 Gateway 之前是否已丢失长思考正文。
 def _writer(root):
     store = ConversationStore(root / "conversations")
-    thread = store.get_or_create_thread({
+    thread = store.threads.get_or_create({
         "canonical_user_id": "owner-a", "channel": "chat",
         "channel_conversation_id": "session", "channel_user_id": "owner-a",
     })
@@ -43,11 +43,11 @@ def test_full_thinking_archives_before_gateway_clip_and_keeps_ref_on_replay(tmp_
     for part in all_parts:
         reconstructed[part["row_index"]] += part["text"]
     assert "\n".join(reconstructed) == text
-    assert len(list((store.root / "display_archives").iterdir())) == 1
+    assert len(list((store.storage.root / "display_archives").iterdir())) == 1
     live = read_background_transcript_events(agent, thread_id=thread.thread_id, after=0)["events"]
     completed = next(event for event in live if event["kind"] == "thinking_completed")
     assert completed["payload"]["display_archive_ref"] == reference
-    history = store.message_page_after_offset_report(thread.thread_id, after=0)[0]
+    history = store.messages.page_after_offset_report(thread.thread_id, after=0)[0]
     persisted = next(event for event in display_checkpoint_events(history) if event["kind"] == "thinking_completed")
     assert persisted["payload"]["display_archive_ref"] == reference
     snapshot = writer.prepare_display_history()

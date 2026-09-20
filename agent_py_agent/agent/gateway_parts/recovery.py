@@ -2,6 +2,7 @@
 # never imply task failure. Startup resume preserves effects/history, expired processing leases
 # consume their own persisted budget. Terminal commit releases exact request-affine claims; failed
 # cleanup stays retryable without re-execution. Check heartbeat/terminal/owner tests on changes.
+# 中断展示事件直接使用 paths/stream_writer，不通过请求执行器反向导入，也不改变终态写账顺序。
 # 模块用途: 恢复 Gateway 中断的请求，分清服务重启和真正卡死，并保证同一回合只有一个终态和执行者。
 from __future__ import annotations
 
@@ -284,7 +285,7 @@ def _non_negative_int(value: object, *, default: int) -> int:
         return default
 
 
-# LLM: A canonical archive always wins over a leftover hot record. Legacy sealed processing rows
+# LLM: 插话持久操作经 guidance 领域组件； A canonical archive always wins over a leftover hot record. Legacy sealed processing rows
 # are committed without re-running the provider. Exact request-affine claim cleanup precedes
 # the same canonical commit, so a cleanup I/O failure remains a commit retry, not a model retry.
 # 函数用途: 补交已封口的答复和执行权释放，不重跑模型；随后修复用户可见投影。
@@ -325,7 +326,7 @@ def _recover_committed_terminal_processing(
         conversation_store = _recovery_conversation_store(agent, terminal_payload)
         if conversation_store is not None:
             try:
-                mailbox_summary = conversation_store.reject_pending_guidance_for_turn(
+                mailbox_summary = conversation_store.guidance.recovery.reject_pending(
                     request_id,
                     reject_reserved=True,
                 )
@@ -824,7 +825,7 @@ def _gateway_processing_started_at(payload: dict, request_path: Path) -> float:
     return gateway_processing_started_at(payload, request_path)
 
 
-# LLM: Recovery calls this only after the request lease proves the owning process/attempt dead.
+# LLM: 插话持久操作经 guidance 领域组件； Recovery calls this only after the request lease proves the owning process/attempt dead.
 # Reserved input is then safe to release; submitted input remains unknown inside ConversationStore.
 # 函数用途: 在过期请求重排或失败前释放尚未开始模型提交的补充消息。
 def _release_dead_attempt_guidance(
@@ -833,7 +834,7 @@ def _release_dead_attempt_guidance(
     *,
     dead_attempt_id: str,
 ) -> None:
-    release = getattr(conversation_store, "release_reserved_guidance_for_turn", None)
+    release = getattr(getattr(getattr(conversation_store, 'guidance', None), 'recovery', None), 'release_reserved', None)
     if callable(release):
         release(request_id, dead_attempt_id=dead_attempt_id)
 
@@ -874,6 +875,7 @@ def _build_gateway_failure_response(context: dict) -> dict:
 
 # LLM: This projection runs only after the terminal archive contains the full response. A crash
 # before or during projection can therefore be repaired from that archive without rerunning a model.
+# 流终态经 stream_writer 直接投影，不加载请求执行器；显示失败不改变已归档终态。
 # 函数用途: 在终态归档成功后写 response、history 和诊断日志。
 def _publish_gateway_failure_response(
     paths: GatewayPaths,
@@ -890,7 +892,8 @@ def _publish_gateway_failure_response(
     # #4: recovery 失败也向 chunks 流写终态事件(对齐 会话运行时 TurnAborted)——纯 chunks
     # 消费者(rich TUI 等)收到即复位, 不依赖 response 文件轮询。
     try:
-        from .request_execution import claimed_request_chunk_path, write_chunk_event
+        from .paths import claimed_request_chunk_path
+        from .stream_writer import write_chunk_event
 
         chunk_path = claimed_request_chunk_path(request_path, request_id)
         if chunk_path.exists() or chunk_path.parent.exists():
@@ -1104,7 +1107,7 @@ def _finish_gateway_conversation_claim(
         raise DataCorruptionError("Gateway 执行车道引用与原请求不一致")
     if conversation_store is None:
         raise RuntimeError("Gateway 执行车道收尾缺少原用户会话存储")
-    conversation_store.finish_background_run({
+    conversation_store.claims.finish({
         "thread_id": binding["thread_id"],
         "expected_task_id": binding["task_id"],
         "recover_same_task_only": True,
@@ -1115,7 +1118,7 @@ def _finish_gateway_conversation_claim(
     })
 
 
-# LLM: Sole terminal transition seals the response before exact claim/guidance cleanup. Failed
+# LLM: 插话持久操作经 guidance 领域组件； Sole terminal transition seals the response before exact claim/guidance cleanup. Failed
 # cleanup leaves a sealed hot record for startup commit repair, never another model invocation.
 # 函数用途: 保存完整答复，释放原请求执行权、收口补充消息并移动到终态目录；失败可幂等补交。
 def terminalize_gateway_request_file(
@@ -1212,7 +1215,7 @@ def terminalize_gateway_request_file(
             terminal_payload = dict(request_report.payload)
         if conversation_store is not None:
             try:
-                mailbox_summary = conversation_store.reject_pending_guidance_for_turn(
+                mailbox_summary = conversation_store.guidance.recovery.reject_pending(
                     turn_id,
                     reject_reserved=True,
                 )

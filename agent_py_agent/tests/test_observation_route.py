@@ -2,6 +2,8 @@
 飞书。修:_observation_route 从线程 channel binding 取真实路由(飞书 p2p 用 open_id)。"""
 from __future__ import annotations
 
+from types import SimpleNamespace as _StoreDomain
+
 from agent.conversation.models import ChannelBinding, ConversationThread
 from agent.conversation.runtime import BackgroundMainAgentScheduler
 
@@ -9,8 +11,9 @@ from agent.conversation.runtime import BackgroundMainAgentScheduler
 class _MockStore:
     def __init__(self, thread):
         self._thread = thread
+        self.threads = _StoreDomain(load=self._fake_load_thread)
 
-    def load_thread(self, thread_id):
+    def _fake_load_thread(self, thread_id):
         return self._thread
 
 
@@ -40,7 +43,7 @@ def test_observation_requires_main_agent_treated_urgent():
     """观察批叫回(真事件)必须走 urgent 上报分支,不落 default(拿 create_subagents 去重派工)。"""
     from types import SimpleNamespace
 
-    from agent.conversation.runtime import _is_urgent_wake
+    from agent.conversation.background_tool_policy import _is_urgent_wake
     req = SimpleNamespace(wake_signal={}, reason="observation_requires_main_agent")
     assert _is_urgent_wake(req) is True
     # 普通闲聊 reason 不误判成 urgent
@@ -64,12 +67,9 @@ def test_observation_route_parses_owner_home_path():
     thread = ConversationThread(thread_id="tsub", canonical_user_id="u1", channel_bindings=[])
     s = BackgroundMainAgentScheduler.__new__(BackgroundMainAgentScheduler)
     # store 根落在 owner home 子树,身份属性缺失(owner_provider/owner_id 都空)
-    s.store = SimpleNamespace(
-        load_thread=lambda _tid: thread,
-        root="/root/.my-agent/owners/providers/feishu/users/ou_1be76a133/threads",
-    )
+    s.store = SimpleNamespace(root="/owner-fixture/owners/providers/feishu/users/test-owner/conversations", threads=SimpleNamespace(load=lambda _tid: thread))
     s.runtime = SimpleNamespace(agent=SimpleNamespace(home_paths=SimpleNamespace(owner_provider="", owner_id="")))
-    assert s._observation_route("tsub") == ("feishu", "ou_1be76a133")
+    assert s._observation_route("tsub") == ("feishu", "test-owner")
 
 
 def test_owner_from_home_path_no_match_returns_empty():
@@ -92,7 +92,7 @@ def test_run_wake_signal_passes_owner_route():
 
     s = BackgroundMainAgentScheduler.__new__(BackgroundMainAgentScheduler)
     s.runtime = SimpleNamespace(agent=SimpleNamespace(home_paths=SimpleNamespace(owner_provider="feishu", owner_id="ou_owner")))
-    s.store = SimpleNamespace(mark_wake_signal_handled=lambda *a, **k: None)
+    s.store = SimpleNamespace(wakes=SimpleNamespace(mark_handled=lambda *a, **k: None))
     s._observation_route = lambda _tid: ("feishu", "ou_owner")
     s._pre_wake_capability_sweep = lambda *a, **k: None
     s._wake_retry_after = {}

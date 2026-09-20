@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# LLM: 本脚本只读历史用量并生成展示投影；双来源计数保持零值，修改时同步用量重投影回归。
+# 模块用途: 核对旧账本计数，不修改 canonical 记录、不调用模型或网络。
 """模块用途: 把历史 model_usage 账本按"协议归一"口径重算成只读展示投影。
 
 这个脚本只回答一个问题：**旧账本里的 accounted_input_tokens 在今天的新口径下应该是多少**。
@@ -327,12 +329,10 @@ def row_from_record(index: int, record: dict[str, Any]) -> LedgerRow | None:
     )
 
 
-# 函数用途: 顶层字段优先、分栏字段兜底地读取一个计数；两处都没有时返回 None（表示缺失）。
-def _first_known(*values: int | None) -> int | None:
-    for value in values:
-        if value is not None:
-            return value
-    return None
+# LLM: 用量重投影只在顶层与 provider 分栏两个来源间选择；零是有效计数，不能按真假值切换来源。
+# 函数用途: 优先读取顶层计数，缺失时读取分栏；只返回值，不修改原账本。
+def _first_known(primary: int | None, provider: int | None) -> int | None:
+    return primary if primary is not None else provider
 
 
 # LLM: 顶层 accounted 含本地估算调用，provider 分栏只含供应商真值；重算目标是"这份账的累计口径"，

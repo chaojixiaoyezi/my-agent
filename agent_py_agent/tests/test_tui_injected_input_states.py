@@ -91,7 +91,7 @@ class _RecordingSink:
 
 def _agent_with_steer(tmp_path, *, message_id: str = "steer-client-1"):
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
-    agent.conversation_store.append_guidance(
+    agent.conversation_store.guidance.append(
         {
             "target_type": "agent_run",
             "target_id": "main-run-1",
@@ -118,7 +118,7 @@ def test_submit_boundary_emits_submitted_fact_without_consuming(tmp_path) -> Non
     assert [kind for kind, _ids, _call in sink.events].count("complete") == 0
     # 账本只到 submitted:回执仍在(未 consumed),确认待办仍在,且**还没有**建立回复欠账
     # (回复欠账只在真正的 consumed 边界产生,已提交不得提前结算任何东西)。
-    assert agent.conversation_store.pending_guidance("agent_run", "main-run-1") != []
+    assert agent.conversation_store.guidance.pending("agent_run", "main-run-1") != []
     state = params.live_archive_state
     ack_ids = state.get("_guidance_ack_ids")
     assert isinstance(ack_ids, set) and len(ack_ids) == 1, state

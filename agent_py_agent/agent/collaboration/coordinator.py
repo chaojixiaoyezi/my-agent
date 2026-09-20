@@ -81,10 +81,10 @@ class CollaborationCoordinator:
         return decision
 
     def _raise_case_observation(self, case, context: dict, *, now: float) -> str:
-        observation = self.conversation_store.append_observation({'thread_id': case.thread_id, 'event_type': "collaboration_case_closed", 'summary': context["summary"], 'urgency': case.priority, 'source_agent_id': case.created_by, 'root_task_id': case.task_id, 'evidence_refs': context["evidence_refs"], 'requires_main_agent': True, 'requires_llm_report': True, 'now': now, 'metadata': context["metadata"]})
+        observation = self.conversation_store.observations.append({'thread_id': case.thread_id, 'event_type': "collaboration_case_closed", 'summary': context["summary"], 'urgency': case.priority, 'source_agent_id': case.created_by, 'root_task_id': case.task_id, 'evidence_refs': context["evidence_refs"], 'requires_main_agent': True, 'requires_llm_report': True, 'now': now, 'metadata': context["metadata"]})
         if not _should_wake_main(case, context["status"]):
             return ""
-        wake = self.conversation_store.raise_wake_signal({'thread_id': case.thread_id, 'observation': observation, 'urgency': normalize_runtime_priority(case.priority), 'reason': "collaboration_case_closed", 'dedupe_key': f"case:{case.case_id}:closed", 'now': now, 'metadata': context["wake_metadata"]})
+        wake = self.conversation_store.wakes.raise_signal({'thread_id': case.thread_id, 'observation': observation, 'urgency': normalize_runtime_priority(case.priority), 'reason': "collaboration_case_closed", 'dedupe_key': f"case:{case.case_id}:closed", 'now': now, 'metadata': context["wake_metadata"]})
         return wake.wake_signal_id
 
 

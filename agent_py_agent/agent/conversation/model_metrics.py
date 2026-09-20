@@ -59,7 +59,7 @@ def newer_model_metrics(current: object, incoming: object) -> dict[str, object]:
 # LLM: 只读 exact thread 上的显示副本；账本仍是唯一费用权威，不读取文本历史或子代理目录。
 # 函数用途: 在空闲、重连和切入子代理页面时取回最近统计条。
 def model_metrics_from_thread(store: object, thread_id: str) -> dict[str, object]:
-    loader = getattr(store, "load_thread_report", None)
+    loader = getattr(getattr(store, 'threads', None), 'load_report', None)
     if not thread_id or not callable(loader):
         return {}
     try:
@@ -70,6 +70,7 @@ def model_metrics_from_thread(store: object, thread_id: str) -> dict[str, object
 
 
 # LLM: 每个工作片首次读取既有事件，仅排除相同统计代次的 request/run；重启旧账仍加入基数。
+# 事件读取只走 model_usage 领域；缺失能力保持既有嵌入式调用边界，不回退旧 Store 方法。
 # 函数用途: 取得本会话以前已经落账的消耗基数，长输出的每个 token 不会触发历史扫描。
 def _previous_totals(agent: object, params: object, thread_id: str, usage_scope_id: str) -> dict[str, object]:
     state = getattr(params, "live_archive_state", None)
@@ -78,7 +79,8 @@ def _previous_totals(agent: object, params: object, thread_id: str, usage_scope_
     if isinstance(cached, tuple) and cached[0] == key:
         return dict(cached[1])
     totals = {"input_tokens": 0, "output_tokens": 0, "estimated_tokens": 0, "unreported_calls": 0, "totals_known": True}
-    reader = getattr(getattr(agent, "conversation_store", None), "model_usage_events_report", None)
+    store = getattr(agent, "conversation_store", None)
+    reader = getattr(getattr(store, "model_usage", None), "events_report", None)
     if thread_id and callable(reader):
         try:
             events, errors = reader(thread_id)
@@ -119,6 +121,7 @@ def publish_model_metrics(agent: object, params: object, *, pending: bool, tool_
 
 
 # LLM: 使用账本快照构造有界投影并写回所属会话；异常交给外层隔离，不能回退到文本计数。
+# 显示写入走 model_usage 组件的原线程更新能力，不给统计页增加持久写入入口。
 # 函数用途: 实现一次模型边界的统计采样和发布，不在 UI 渲染线程扫描数据。
 def _publish_metrics(agent: object, params: object, *, pending: bool, tool_count: int | None, response: object, call_id: str) -> dict[str, object]:
     if str(getattr(params, "context_scope", "") or "").lower() == "isolated":
@@ -147,7 +150,7 @@ def _publish_metrics(agent: object, params: object, *, pending: bool, tool_count
     if isinstance(state, dict):
         state["_model_metrics_current"] = public
     store = getattr(agent, "conversation_store", None)
-    updater = getattr(store, "update_model_metrics", None)
+    updater = getattr(getattr(store, "model_usage", None), "update_metrics", None)
     try:
         if thread_id and callable(updater):
             updater(thread_id, public)

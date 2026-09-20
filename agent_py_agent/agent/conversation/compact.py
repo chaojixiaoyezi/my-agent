@@ -661,7 +661,7 @@ def _commit_compact_candidate(
 ) -> ConversationCompactResult:
     raise_if_compact_interrupted(request.interrupt_check)
     last_row = candidate.compact_rows[-1]
-    byte_offset = request.store.message_byte_offset_after(
+    byte_offset = request.store.messages.byte_offset_after(
         request.thread.thread_id,
         last_row.message_id,
     )
@@ -695,7 +695,7 @@ def _commit_compact_candidate(
         percent=92,
         after_tokens=candidate.projected_tokens_after,
     )
-    updated = request.store.update_compact_state(
+    updated = request.store.threads.update_compact_state(
         request.thread.thread_id,
         commit=ConversationCompactCommit(
             summary=candidate.summary,
@@ -781,7 +781,7 @@ def _uncompacted_conversation_rows(
     store: ConversationStore,
     thread: ConversationThread,
 ) -> list[MessageLogEntry]:
-    rows, errors = store.messages_after_compact_report(thread)
+    rows, errors = store.messages.after_compact_report(thread)
     if errors:
         raise OSError("conversation transcript could not be read reliably")
     if thread.compacted_through_byte_offset > 0:

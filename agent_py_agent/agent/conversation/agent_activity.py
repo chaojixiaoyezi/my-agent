@@ -1,17 +1,8 @@
-"""Canonical conversation-to-subagent activity projection.
-
-This module only reads the conversation task links and subagent run records.  It
-does not start, retry, stop, or otherwise mutate an agent.  TUI, Web, and IM
-surfaces can therefore share one owner-scoped display snapshot without turning
-the display cache into another lifecycle authority.
-"""
-
-# LLM: This module is the read-only adapter from canonical conversation task
+# LLM: 活动读取只投影 canonical 任务和执行状态；后台回调的审批写入委托唯一审批桥，展示状态不能授权或驱动生命周期。
 # 子代理结束页同步投影 canonical thread/message ID；显示层不得从正文猜最终回复身份。
-# links and subagent runs to bounded public activity rows. It must never become
-# a lifecycle, authorization, retry, or completion authority.
+# Goal 时间从共享 goal_clock 只读查询，不建立展示页自己的计时基线。
 # 前台与后台 main 共用唯一数值/阶段投影，显式审批等待仍属于活动回合；历史正文和生命周期不得由此驱动。
-# 模块用途: 为 TUI/Web 投影主任务与子代理状态；上下文数字独立从各自 canonical thread 读取，不制造活动状态。
+# 模块用途: 为 TUI/Web 投影主子任务状态，并接续后台主代理的真实工具审批；上下文数字仍独立读取 canonical thread。
 
 from __future__ import annotations
 
@@ -68,10 +59,8 @@ _MAIN_ACTIVITY_LIVE_PHASES = frozenset(
 )
 
 
-# LLM: This sink publishes one scalar activity row and delegates public rich
-# events to the bounded background transcript ring. Neither path may deliver
-# messages, mutate task links, or decide completion.
-# 类用途: 接收后台主代理真实的思考、工具和回复阶段，同时更新固定 main 行和可滚动过程正文。
+# LLM: main 活动行与公开正文只作展示，具体审批复用 transcript sink 的原账本，不发明任务状态或新的权限来源。
+# 类用途: 接收后台主代理的思考、工具、审批和回复阶段，并更新固定 main 行和可滚动正文。
 class BackgroundMainActivitySink:
     # LLM: Construction registers one exact thread/task identity; later updates
     # may replace only that thread's display row under the agent-owned lock.
@@ -93,6 +82,15 @@ class BackgroundMainActivitySink:
     # 函数用途: 兼容只会调用普通 callback 的模型/工具路径。
     def __call__(self, _text: str) -> None:
         self._publish("running", "处理中")
+
+    # LLM: 审批仍由原会话桥核对完整调用与当前 claim；这里仅发布等待阶段，Goal 暂停不撤销审批，中断令牌继续透传。
+    # 函数用途: 将后台主代理具体工具请求交给所属 TUI，决定后继续原调用，不自动放行。
+    def request_permission(self, request_value: dict[str, object], *, cancellation_token: object | None = None) -> dict[str, object]:
+        self._publish("waiting_permission", "等待工具审批")
+        try:
+            return self._transcript.request_permission(request_value, cancellation_token=cancellation_token)
+        finally:
+            self._publish("working", "继续处理当前回合")
 
     # LLM: Model deltas indicate generation liveness only; answer content stays
     # in the normal committed transcript and is not duplicated into activity state.
@@ -522,7 +520,7 @@ def _conversation_goal_rows(
     store: object,
     thread_id: str,
 ) -> tuple[list[dict[str, object]], list[str]]:
-    loader = getattr(store, "load_goals_report", None)
+    loader = getattr(getattr(store, 'goals', None), 'list_report', None)
     if not callable(loader):
         # Embedded/legacy read adapters may intentionally omit Goal support;
         # absence means no projection, while an available loader that fails is
@@ -534,7 +532,7 @@ def _conversation_goal_rows(
         return [], ["conversation_goal_projection_unavailable"]
     if load_error:
         return [], ["conversation_goal_projection_load_error"]
-    elapsed_reader = getattr(store, "current_goal_time_seconds", None)
+    elapsed_reader = getattr(getattr(store, "goal_clock", None), "current_time_seconds", None)
     rows: list[dict[str, object]] = []
     for goal in list(raw_goals or []):
         status = str(getattr(goal, "status", "") or "").strip().lower()
@@ -602,8 +600,8 @@ def _live_activity_task_ids(
     execution_ids: set[str] = set()
     execution_state_known = False
     execution_reader_available = callable(
-        getattr(store, "list_progress_policies_report", None)
-    ) and callable(getattr(store, "load_background_run_claim_report", None))
+        getattr(getattr(store, 'progress', None), 'list_report', None)
+    ) and callable(getattr(getattr(store, "claims", None), "load_report", None))
     try:
         if not execution_reader_available:
             raise AttributeError("conversation execution readers unavailable")
@@ -802,7 +800,7 @@ def _conversation_context_state(
     store: object,
     thread_id: str,
 ) -> tuple[int, dict[str, object], list[str]]:
-    loader = getattr(store, "load_thread_report", None)
+    loader = getattr(getattr(store, 'threads', None), 'load_report', None)
     if not callable(loader):
         return 0, {}, []
     try:
@@ -819,7 +817,7 @@ def _conversation_context_state(
 # 函数用途: 找出当前 thread 中状态仍为 active 的主任务记录。
 def _active_task_links(store: object, thread_id: str) -> tuple[list[object], list[str]]:
     try:
-        links, load_errors = store.active_task_links_report(thread_id)
+        links, load_errors = store.tasks.active_report(thread_id)
     except Exception:
         return [], ["conversation_task_links_unavailable"]
     active = [
@@ -844,8 +842,8 @@ def _retained_workspace_task_link(
     store: object,
     thread_id: str,
 ) -> tuple[object | None, list[str]]:
-    loader = getattr(store, "load_thread_report", None)
-    link_loader = getattr(store, "load_task_link_report", None)
+    loader = getattr(getattr(store, 'threads', None), 'load_report', None)
+    link_loader = getattr(getattr(store, 'tasks', None), 'load_report', None)
     if not callable(loader) or not callable(link_loader):
         return None, []
     try:
@@ -897,7 +895,7 @@ def task_progress_projection_for_task(
     store: object,
     task_id: str,
 ) -> tuple[tuple[dict[str, object], ...], str, int]:
-    loader = getattr(store, "load_task_link", None)
+    loader = getattr(getattr(store, 'tasks', None), 'load', None)
     if not callable(loader) or not str(task_id or "").strip():
         return (), "", 0
     try:
@@ -996,7 +994,7 @@ def _task_progress_items_from_links(
 # link reader keep its previous fallback; prompt text and task paths are never parsed.
 # 函数用途: 从会话权威记录读取当前主任务 ID，防止较晚创建的子代理抢走 Todo 面板。
 def _conversation_workspace_task_id(store: object, thread_id: str) -> str:
-    loader = getattr(store, "load_thread_report", None)
+    loader = getattr(getattr(store, 'threads', None), 'load_report', None)
     if not callable(loader):
         return ""
     try:
@@ -1403,7 +1401,7 @@ def _agent_final_response(
 ) -> tuple[str, str, str, list[str]]:
     if not thread_id:
         return "", "", "", []
-    reader = getattr(store, "recent_messages_report", None)
+    reader = getattr(getattr(store, 'messages', None), 'recent_report', None)
     if not callable(reader):
         return "", "", "", ["agent_thread_unavailable"]
     try:

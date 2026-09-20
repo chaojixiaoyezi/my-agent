@@ -73,7 +73,7 @@ def test_capability_grant_does_not_resurrect_stopped_conversation_child():
             Path(td),
         )
         task = agent.subagents.create_run(goal="等待能力后继续", allowed_tools=["read_file"])
-        thread = agent.conversation_store.get_or_create_thread(
+        thread = agent.conversation_store.threads.get_or_create(
             {
                 "canonical_user_id": "user-1",
                 "channel": "feishu",
@@ -81,17 +81,17 @@ def test_capability_grant_does_not_resurrect_stopped_conversation_child():
                 "channel_user_id": "user-1",
             }
         )
-        agent.conversation_store.bind_task(
+        agent.conversation_store.tasks.bind(
             {"thread_id": thread.thread_id, "task_id": task.id, "goal": task.goal}
         )
         blocked = agent.subagents.load(task.id)
         blocked.status = "BLOCKED"
         blocked.failure_type = "capability_request"
         agent.subagents.save(blocked)
-        agent.conversation_store.update_task_status(
+        agent.conversation_store.tasks.update_status(
             {"task_id": task.id, "status": "blocked", "expected_status": "active"}
         )
-        agent.conversation_store.update_task_status(
+        agent.conversation_store.tasks.update_status(
             {"task_id": task.id, "status": "cancelled", "expected_status": "blocked"}
         )
 
@@ -100,10 +100,10 @@ def test_capability_grant_does_not_resurrect_stopped_conversation_child():
             RecordCapabilityGrantParams(request_id="capreq-1", tools=["write_file"]),
         )
 
-        link = agent.conversation_store.thread_for_task(task.id)
+        link = agent.conversation_store.tasks.thread_for(task.id)
         assert link is not None
         links = {
-            item.task_id: item for item in agent.conversation_store.task_links(thread.thread_id)
+            item.task_id: item for item in agent.conversation_store.tasks.list(thread.thread_id)
         }
         assert links[task.id].status == "cancelled"
 
@@ -128,7 +128,7 @@ def test_capability_grant_advances_settled_child_and_reopens_blocked_link():
                 requested_tools=["write_file"],
             ),
         )
-        thread = agent.conversation_store.get_or_create_thread(
+        thread = agent.conversation_store.threads.get_or_create(
             {
                 "canonical_user_id": "user-1",
                 "channel": "feishu",
@@ -136,7 +136,7 @@ def test_capability_grant_advances_settled_child_and_reopens_blocked_link():
                 "channel_user_id": "user-1",
             }
         )
-        agent.conversation_store.bind_task(
+        agent.conversation_store.tasks.bind(
             {"thread_id": thread.thread_id, "task_id": task.id, "goal": task.goal}
         )
         blocked = agent.subagents.load(task.id)
@@ -145,7 +145,7 @@ def test_capability_grant_advances_settled_child_and_reopens_blocked_link():
         blocked.runner_attempts = 1
         blocked.runner_active_attempt_id = ""
         agent.subagents.save(blocked)
-        agent.conversation_store.update_task_status(
+        agent.conversation_store.tasks.update_status(
             {"task_id": task.id, "status": "blocked", "expected_status": "active"}
         )
 
@@ -156,7 +156,7 @@ def test_capability_grant_advances_settled_child_and_reopens_blocked_link():
 
         loaded = agent.subagents.load(task.id)
         links = {
-            item.task_id: item for item in agent.conversation_store.task_links(thread.thread_id)
+            item.task_id: item for item in agent.conversation_store.tasks.list(thread.thread_id)
         }
         assert loaded.status == "PENDING"
         assert loaded.failure_type == ""

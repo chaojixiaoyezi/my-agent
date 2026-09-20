@@ -275,7 +275,7 @@ def test_active_turn_archive_compact_hides_only_committed_source_calls(tmp_path)
     """完整工具账保持不变，模型只隐藏 thread 指针确认过的旧调用；孤儿候选无权隐藏。"""
 
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "local/main",
             "channel": "test",
@@ -359,7 +359,7 @@ def test_active_turn_archive_interrupt_after_summary_does_not_commit_or_fail(tmp
     """慢摘要刚返回时收到停止，只撤候选，不写 checkpoint、代次或失败熔断。"""
 
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "local/main",
             "channel": "test",
@@ -405,7 +405,7 @@ def test_active_turn_archive_interrupt_after_summary_does_not_commit_or_fail(tmp
             ),
         )
 
-    unchanged = store.load_thread(thread.thread_id)
+    unchanged = store.threads.load(thread.thread_id)
     assert unchanged is not None
     assert unchanged.compact_generation == 0
     assert unchanged.compact_checkpoint_id == ""
@@ -540,7 +540,7 @@ def test_conversation_prompt_at_200k_90_percent_uses_shared_native_ir_window(tmp
     agent.config.memory_compact_auto_trigger_percent = 90
     agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "prompt")
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "local/main",
             "channel": "test",
@@ -690,7 +690,7 @@ def test_shared_native_window_counts_large_tool_call_arguments(tmp_path):
 def test_native_window_defers_when_completed_history_alone_reaches_trigger(tmp_path):
     """旧会话前缀已超线时不生成无效 live Compact，交给 transcript Compact。"""
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "local/main",
             "channel": "test",
@@ -726,7 +726,7 @@ def test_native_window_defers_when_completed_history_alone_reaches_trigger(tmp_p
 
     assert params.tool_ir_history == before_ir
     assert agent.backend.calls == []
-    assert store.load_thread(thread.thread_id).compact_generation == 0
+    assert store.threads.load(thread.thread_id).compact_generation == 0
     pressure = preflight_context_pressure_response(
         SimpleNamespace(agent=agent, params=params, prompt=prompt, tool_rounds=6)
     )
@@ -737,7 +737,7 @@ def test_native_window_defers_when_completed_history_alone_reaches_trigger(tmp_p
 def test_native_window_defers_when_completed_history_consumes_recovery_headroom(tmp_path):
     """旧会话虽低于 90% 但已吃掉恢复余量时，不先烧一次必重压的 live summary。"""
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "local/main",
             "channel": "test",
@@ -779,7 +779,7 @@ def test_native_window_defers_when_completed_history_consumes_recovery_headroom(
 
     assert params.tool_ir_history == before_ir
     assert agent.backend.calls == []
-    assert store.load_thread(thread.thread_id).compact_generation == 0
+    assert store.threads.load(thread.thread_id).compact_generation == 0
     pressure = preflight_context_pressure_response(
         SimpleNamespace(agent=agent, params=params, prompt=prompt, tool_rounds=6)
     )
@@ -792,7 +792,7 @@ def test_native_window_summary_may_replace_latest_pair_to_reach_recovery_target(
 ):
     """完整摘要覆盖最新巨型回执后可释放最后一对，避免假失败和立即重压。"""
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "local/main",
             "channel": "test",
@@ -838,7 +838,7 @@ def test_native_window_summary_may_replace_latest_pair_to_reach_recovery_target(
 
     assert params.tool_ir_history != before_ir
     assert summary_calls == [True]
-    updated = store.load_thread(thread.thread_id)
+    updated = store.threads.load(thread.thread_id)
     assert updated is not None and updated.compact_generation == 1
     assert sink.progress_rows[-1]["phase"] == "completed"
     assert sink.progress_rows[-1]["after_tokens"] <= 8_100
@@ -908,7 +908,7 @@ def test_summary_keeps_facts_until_entire_parallel_tool_turn_is_retired(tmp_path
 def test_native_window_reclaims_old_runtime_facts_across_two_generations(tmp_path):
     """旧运行快照不再永久占据 floor；整段交给摘要后继续原回合，插话与最新状态保留。"""
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread({
+    thread = store.threads.get_or_create({
         "canonical_user_id": "local/main", "channel": "test",
         "channel_conversation_id": "runtime-facts-long-turn", "channel_user_id": "local/main",
     })
@@ -946,7 +946,7 @@ def test_native_window_reclaims_old_runtime_facts_across_two_generations(tmp_pat
 
         prompt = build_tool_loop_prompt(agent, params)
 
-        assert store.load_thread(thread.thread_id).compact_generation == generation
+        assert store.threads.load(thread.thread_id).compact_generation == generation
         assert len(agent.backend.calls) == generation
         sent_history = json.dumps(agent.backend.calls[-1][1], ensure_ascii=False)
         assert old_facts[0].text in sent_history
@@ -966,7 +966,7 @@ def test_native_window_reclaims_old_runtime_facts_across_two_generations(tmp_pat
 def test_native_window_floor_keeps_ir_facts_that_live_compact_cannot_delete(tmp_path):
     """运行事实已经吃满恢复目标时直接交给 thread Compact，不先烧一份必然很薄的 live 摘要。"""
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "local/main",
             "channel": "test",
@@ -1005,7 +1005,7 @@ def test_native_window_floor_keeps_ir_facts_that_live_compact_cannot_delete(tmp_
 
     assert params.tool_ir_history == before_ir
     assert agent.backend.calls == []
-    assert store.load_thread(thread.thread_id).compact_generation == 0
+    assert store.threads.load(thread.thread_id).compact_generation == 0
     pressure = preflight_context_pressure_response(
         SimpleNamespace(agent=agent, params=params, prompt=prompt, tool_rounds=8)
     )
@@ -1022,7 +1022,7 @@ def test_native_window_commits_below_trigger_when_recovery_target_is_unreachable
     from agent_py_agent.agent.agent_core import _tool_loop_service as service
 
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "local/main",
             "channel": "test",
@@ -1064,7 +1064,7 @@ def test_native_window_commits_below_trigger_when_recovery_target_is_unreachable
 
     build_tool_loop_prompt(agent, params)
 
-    updated = store.load_thread(thread.thread_id)
+    updated = store.threads.load(thread.thread_id)
     assert updated is not None and updated.compact_generation == 1
     assert sink.progress_rows[-1]["phase"] == "completed"
     assert sink.progress_rows[-1]["after_tokens"] == 8_500
@@ -1076,7 +1076,7 @@ def test_native_window_commits_below_trigger_when_recovery_target_is_unreachable
 def test_native_window_summary_removes_covered_assistant_tool_turn_text(tmp_path):
     """工具对的长思考正文已由完整摘要覆盖时必须同轮回收，不能留下空壳顶爆窗口。"""
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "local/main",
             "channel": "test",
@@ -1117,7 +1117,7 @@ def test_native_window_summary_removes_covered_assistant_tool_turn_text(tmp_path
 
     prompt = build_tool_loop_prompt(agent, params)
 
-    updated = store.load_thread(thread.thread_id)
+    updated = store.threads.load(thread.thread_id)
     assert updated is not None and updated.compact_generation == 1
     assert sink.progress_rows[-1]["phase"] == "completed"
     assert sink.progress_rows[-1]["after_tokens"] <= 8_100
@@ -1137,7 +1137,7 @@ def test_native_window_summary_removes_covered_assistant_tool_turn_text(tmp_path
 def test_native_window_rolls_back_summary_that_still_exceeds_trigger(tmp_path):
     """摘要或最新工具对过大时不提交 generation、不丢 IR，也不误报失败。"""
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "local/main",
             "channel": "test",
@@ -1176,7 +1176,7 @@ def test_native_window_rolls_back_summary_that_still_exceeds_trigger(tmp_path):
     prompt = build_tool_loop_prompt(agent, params)
 
     assert params.tool_ir_history == before_ir
-    updated = store.load_thread(thread.thread_id)
+    updated = store.threads.load(thread.thread_id)
     assert updated.compact_generation == 0
     assert updated.compact_consecutive_failures == 0
     assert sink.progress_rows[-1]["phase"] == "superseded"
@@ -1196,7 +1196,7 @@ def test_shared_native_window_commits_main_or_child_conversation_compact(
 ):
     """真实 main/child IR 回收写同一 checkpoint/CAS，事件展示 canonical generation。"""
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "local/main",
             "channel": "test",
@@ -1228,7 +1228,7 @@ def test_shared_native_window_commits_main_or_child_conversation_compact(
 
     _record_large_write_calls(agent, params, start=1, stop=6, chars=12_000)
     build_tool_loop_prompt(agent, params)
-    first = store.load_thread(thread.thread_id)
+    first = store.threads.load(thread.thread_id)
     assert first is not None
     assert len(sink.rows) == 1
     assert sink.rows[0]["generation"] == first.compact_generation == 1
@@ -1250,11 +1250,11 @@ def test_shared_native_window_commits_main_or_child_conversation_compact(
 
     build_tool_loop_prompt(agent, params)
     assert len(sink.rows) == 1
-    assert store.load_thread(thread.thread_id).compact_generation == 1
+    assert store.threads.load(thread.thread_id).compact_generation == 1
 
     _record_large_write_calls(agent, params, start=7, stop=12, chars=12_000)
     build_tool_loop_prompt(agent, params)
-    second = store.load_thread(thread.thread_id)
+    second = store.threads.load(thread.thread_id)
     assert second is not None
     assert len(sink.rows) == 2
     assert sink.rows[-1]["generation"] == second.compact_generation == 2
@@ -1275,7 +1275,7 @@ def test_background_main_run_params_commit_live_compact_despite_save_false(tmp_p
     )
 
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "local/main",
             "channel": "test",
@@ -1315,7 +1315,7 @@ def test_background_main_run_params_commit_live_compact_despite_save_false(tmp_p
 
     build_tool_loop_prompt(agent, params)
 
-    updated = store.load_thread(thread.thread_id)
+    updated = store.threads.load(thread.thread_id)
     assert run_params.save is False
     assert run_params.task_attributes is not None
     assert run_params.task_attributes[CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR] is True
@@ -1328,7 +1328,7 @@ def test_background_main_run_params_commit_live_compact_despite_save_false(tmp_p
 
 def test_persistent_native_window_commits_completed_empty_summary_fallback(tmp_path):
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "local/main",
             "channel": "test",
@@ -1357,7 +1357,7 @@ def test_persistent_native_window_commits_completed_empty_summary_fallback(tmp_p
 
     build_tool_loop_prompt(agent, params)
 
-    updated = store.load_thread(thread.thread_id)
+    updated = store.threads.load(thread.thread_id)
     summaries = [item for item in params.tool_ir_history if isinstance(item, CompactionSummary)]
     assert updated is not None
     assert updated.compact_generation == 1
@@ -1373,7 +1373,7 @@ def test_persistent_native_window_commits_completed_empty_summary_fallback(tmp_p
 
 def test_persistent_native_window_restores_ir_when_summary_fails(tmp_path):
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "local/main",
             "channel": "test",
@@ -1403,7 +1403,7 @@ def test_persistent_native_window_restores_ir_when_summary_fails(tmp_path):
     with pytest.raises(ConversationCompactError, match="empty summary"):
         build_tool_loop_prompt(agent, params)
 
-    updated = store.load_thread(thread.thread_id)
+    updated = store.threads.load(thread.thread_id)
     assert updated is not None
     assert params.tool_ir_history == before_ir
     assert updated.compact_generation == 0
@@ -1421,7 +1421,7 @@ def test_persistent_native_interrupt_after_summary_restores_ir_without_failure(t
     """摘要请求已计费但停止先于内存改写时，原生历史保持逐项相同且不触发熔断。"""
 
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "local/main",
             "channel": "test",
@@ -1463,7 +1463,7 @@ def test_persistent_native_interrupt_after_summary_restores_ir_without_failure(t
     with pytest.raises(InterruptedError, match="interrupted by user"):
         build_tool_loop_prompt(agent, params)
 
-    unchanged = store.load_thread(thread.thread_id)
+    unchanged = store.threads.load(thread.thread_id)
     assert unchanged is not None
     assert params.tool_ir_history == before_ir
     assert params.tool_context == before_context
@@ -1513,7 +1513,7 @@ def test_persistent_native_interrupt_after_ir_mutation_rolls_back_without_failur
     import agent_py_agent.agent.agent_core._tool_loop_service as tool_loop_service
 
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "local/main",
             "channel": "test",
@@ -1557,7 +1557,7 @@ def test_persistent_native_interrupt_after_ir_mutation_rolls_back_without_failur
     with pytest.raises(InterruptedError, match="interrupted by user"):
         build_tool_loop_prompt(agent, params)
 
-    unchanged = store.load_thread(thread.thread_id)
+    unchanged = store.threads.load(thread.thread_id)
     assert unchanged is not None
     assert params.tool_ir_history == before_ir
     assert params.tool_context == before_context
@@ -1580,7 +1580,7 @@ def test_persistent_native_interrupt_after_checkpoint_leaves_orphan_without_cas(
             return True
 
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "local/main",
             "channel": "test",
@@ -1613,7 +1613,7 @@ def test_persistent_native_interrupt_after_checkpoint_leaves_orphan_without_cas(
     with pytest.raises(InterruptedError, match="interrupted by user"):
         build_tool_loop_prompt(agent, params)
 
-    unchanged = store.load_thread(thread.thread_id)
+    unchanged = store.threads.load(thread.thread_id)
     assert unchanged is not None
     assert params.tool_ir_history == before_ir
     assert params.tool_context == before_context
@@ -1636,7 +1636,7 @@ def test_persistent_native_window_restores_ir_when_compact_cas_fails(
     monkeypatch,
 ):
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "local/main",
             "channel": "test",
@@ -1670,11 +1670,11 @@ def test_persistent_native_window_restores_ir_when_compact_cas_fails(
         assert RuntimeFactsTurn("same-memory", source="memory") in params.tool_ir_history
         raise RuntimeError("synthetic compact CAS conflict")
 
-    monkeypatch.setattr(store, "update_compact_state", fail_compact_cas)
+    monkeypatch.setattr(store.threads, 'update_compact_state', fail_compact_cas)
     with pytest.raises(RuntimeError, match="synthetic compact CAS conflict"):
         build_tool_loop_prompt(agent, params)
 
-    updated = store.load_thread(thread.thread_id)
+    updated = store.threads.load(thread.thread_id)
     assert updated is not None
     assert params.tool_ir_history == before_ir
     assert updated.compact_generation == 0
@@ -1848,7 +1848,7 @@ def test_authoritative_no_save_provider_overflow_commits_same_conversation_compa
     tmp_path,
 ):
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "local/main",
             "channel": "test",
@@ -1876,7 +1876,7 @@ def test_authoritative_no_save_provider_overflow_commits_same_conversation_compa
 
     assert _ptl_reclaim_oldest(agent, params, prompt="base-prompt") is True
 
-    updated = store.load_thread(thread.thread_id)
+    updated = store.threads.load(thread.thread_id)
     assert updated is not None
     assert updated.compact_generation == 1
     checkpoint_path = tmp_path / "compact" / "conversations" / f"{thread.thread_id}.jsonl"

@@ -1,3 +1,5 @@
+# LLM: 子代理恢复复用 canonical run/attempt；插话只按已确认失效身份改绑，修改须联测恢复资格和批次未知状态。
+# 模块用途: 领取、恢复和结束子代理执行尝试，保持运行账本、任务及插话身份一致。
 from __future__ import annotations
 
 """Runner attempt lifecycle helpers for subagent runs."""
@@ -121,7 +123,7 @@ def _reactivate_user_stopped_conversation_link(
     if not thread_id or not parent_task_id:
         raise RuntimeError("user-stopped run has incomplete conversation identity")
     store = getattr(manager, "conversation_store", None)
-    update = getattr(store, "update_task_status", None)
+    update = getattr(getattr(store, 'tasks', None), 'update_status', None)
     if not callable(update):
         raise RuntimeError("conversation store cannot reactivate a user-stopped run")
     link = update(
@@ -348,7 +350,7 @@ def _runtime_authority_task_id(task: SubAgentTask) -> str:
     return str(authority.get("task_id") or "").strip()
 
 
-# LLM: Attempt recovery may transfer only receipt states that never reached provider I/O. The
+# LLM: 插话持久操作经 guidance 领域组件； Attempt recovery may transfer only receipt states that never reached provider I/O. The
 # ConversationStore owns the atomic mailbox transition; this lifecycle seam supplies exact dead
 # attempt ids from RuntimeDB and persists only a bounded diagnostic projection on the task.
 # 函数用途: 子代理启动恢复轮次前，安全接续尚未提交模型的用户插话并记录恢复数量。
@@ -358,7 +360,7 @@ def _recover_unsubmitted_agent_guidance(
     recovered_attempt_id: str,
 ) -> None:
     store = getattr(manager, "conversation_store", None)
-    rebind = getattr(store, "rebind_unsubmitted_guidance_for_recovered_turn", None)
+    rebind = getattr(getattr(getattr(store, 'guidance', None), 'recovery', None), 'rebind_unsubmitted', None)
     dead_attempt_ids = _rebindable_previous_attempt_ids(
         manager,
         task,

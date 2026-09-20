@@ -78,16 +78,13 @@ def test_conversation_agent_activity_projects_only_active_roots_direct_children(
         created_at=1.0,
     )
 
-    store = SimpleNamespace(
-        active_task_links_report=lambda _thread_id: (
+    store = SimpleNamespace(tasks=SimpleNamespace(active_report=lambda _thread_id: (
             [active_link, interrupted_link],
             [],
-        ),
-        load_thread_report=lambda _thread_id: (
+        )), threads=SimpleNamespace(load_report=lambda _thread_id: (
             SimpleNamespace(compact_generation=3),
             None,
-        ),
-    )
+        )))
     manager = SimpleNamespace(
         list_runs_report=lambda: SimpleNamespace(
             runs=[
@@ -161,12 +158,10 @@ def test_conversation_agent_activity_uses_index_then_exact_canonical_reads() -> 
         def list_runs_report(self):
             raise AssertionError("indexed activity lookup must not scan all runs")
 
-    store = SimpleNamespace(
-        active_task_links_report=lambda _thread_id: (
+    store = SimpleNamespace(tasks=SimpleNamespace(active_report=lambda _thread_id: (
             [SimpleNamespace(task_id="task-live", status="active")],
             [],
-        )
-    )
+        )))
 
     activity = conversation_agent_activity(
         SimpleNamespace(subagents=_Manager()),
@@ -183,12 +178,10 @@ def test_conversation_agent_activity_reports_projection_failure_without_claiming
         conversation_agent_activity,
     )
 
-    store = SimpleNamespace(
-        active_task_links_report=lambda _thread_id: (
+    store = SimpleNamespace(tasks=SimpleNamespace(active_report=lambda _thread_id: (
             [SimpleNamespace(task_id="task-live", status="active")],
             [],
-        )
-    )
+        )))
 
     activity = conversation_agent_activity(
         SimpleNamespace(subagents=None),
@@ -213,7 +206,7 @@ def test_conversation_agent_activity_marks_active_roots_unknown_on_link_failure(
 
     activity = conversation_agent_activity(
         SimpleNamespace(subagents=SimpleNamespace(list_runs=lambda: [])),
-        SimpleNamespace(active_task_links_report=_unavailable),
+        SimpleNamespace(tasks=SimpleNamespace(active_report=_unavailable)),
         "thread-1",
     )
 
@@ -250,15 +243,10 @@ def test_conversation_agent_activity_projects_goal_without_active_task() -> None
         task_id="goal-task-done",
         status="complete",
     )
-    store = SimpleNamespace(
-        active_task_links_report=lambda _thread_id: ([], []),
-        load_thread_report=lambda _thread_id: (
+    store = SimpleNamespace(goal_clock=SimpleNamespace(current_time_seconds=lambda _goal: 502), goals=SimpleNamespace(list_report=lambda _thread_id: ([active_goal, completed_goal], None)), tasks=SimpleNamespace(active_report=lambda _thread_id: ([], [])), threads=SimpleNamespace(load_report=lambda _thread_id: (
             SimpleNamespace(compact_generation=2, workspace_task_id=""),
             None,
-        ),
-        load_goals_report=lambda _thread_id: ([active_goal, completed_goal], None),
-        current_goal_time_seconds=lambda _goal: 502,
-    )
+        )))
 
     activity = conversation_agent_activity(
         SimpleNamespace(subagents=None),
@@ -271,6 +259,7 @@ def test_conversation_agent_activity_projects_goal_without_active_task() -> None
     assert activity.goals == (
         {
             "goal_id": "goal-one",
+            "revision": 1,
             "name": "底座验证",
             "objective": "持续验证 Goal 与多子代理交互",
             "status": "active",
@@ -290,13 +279,9 @@ def test_conversation_agent_activity_goal_read_failure_is_explicit() -> None:
         conversation_agent_activity,
     )
 
-    store = SimpleNamespace(
-        active_task_links_report=lambda _thread_id: ([], []),
-        load_goals_report=lambda _thread_id: (
-            [],
-            {"error_code": "GOAL_STORE_CORRUPT"},
-        ),
-    )
+    store = SimpleNamespace(goals=SimpleNamespace(
+            list_report=lambda _thread_id: ([], {"error_code": "GOAL_STORE_CORRUPT"})
+        ), tasks=SimpleNamespace(active_report=lambda _thread_id: ([], [])))
 
     activity = conversation_agent_activity(
         SimpleNamespace(subagents=None),
@@ -321,14 +306,10 @@ def test_conversation_agent_activity_retains_completed_child_roster() -> None:
         task_path="",
         created_at=10.0,
     )
-    store = SimpleNamespace(
-        active_task_links_report=lambda _thread_id: ([], []),
-        load_thread_report=lambda _thread_id: (
+    store = SimpleNamespace(tasks=SimpleNamespace(active_report=lambda _thread_id: ([], []), load_report=lambda _task_id: (link, None)), threads=SimpleNamespace(load_report=lambda _thread_id: (
             SimpleNamespace(compact_generation=2, workspace_task_id="task-live"),
             None,
-        ),
-        load_task_link_report=lambda _task_id: (link, None),
-    )
+        )))
     manager = SimpleNamespace(
         list_runs_report=lambda: SimpleNamespace(
             runs=[_run("child-done", status="DONE", ended_at=20.0)],
@@ -358,7 +339,7 @@ def test_active_task_link_without_executor_or_open_children_is_display_idle(
     from agent_py_agent.agent.conversation.store import ConversationStore
 
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "channel": "internal",
@@ -367,7 +348,7 @@ def test_active_task_link_without_executor_or_open_children_is_display_idle(
             "now": 10.0,
         }
     )
-    store.bind_task(
+    store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": "task-live",
@@ -375,7 +356,7 @@ def test_active_task_link_without_executor_or_open_children_is_display_idle(
             "now": 11.0,
         }
     )
-    store.select_workspace_task(
+    store.tasks.select_workspace_task(
         {"thread_id": thread.thread_id, "task_id": "task-live"}
     )
     manager = SimpleNamespace(
@@ -391,7 +372,7 @@ def test_active_task_link_without_executor_or_open_children_is_display_idle(
         thread.thread_id,
     )
 
-    assert store.load_task_link("task-live").status == "active"
+    assert store.tasks.load("task-live").status == "active"
     assert activity.active_task_count == 0
     assert [row["run_id"] for row in activity.subagents] == ["child-done"]
     assert activity.main_activity["phase"] == "waiting"
@@ -410,13 +391,10 @@ def test_running_child_waits_for_exact_active_attempt_first_event(tmp_path) -> N
         "child-starting",
         runner_active_attempt_id="attempt-current",
     )
-    store = SimpleNamespace(
-        root=tmp_path,
-        active_task_links_report=lambda _thread_id: (
+    store = SimpleNamespace(storage=SimpleNamespace(root=tmp_path), tasks=SimpleNamespace(active_report=lambda _thread_id: (
             [SimpleNamespace(task_id="task-live", status="active")],
             [],
-        ),
-    )
+        )))
     manager = SimpleNamespace(
         list_runs_report=lambda: SimpleNamespace(runs=[task], load_errors=[])
     )
@@ -482,13 +460,10 @@ def test_pending_coordinator_with_active_descendants_is_not_shown_as_starting(
             }
         },
     )
-    store = SimpleNamespace(
-        root=tmp_path,
-        active_task_links_report=lambda _thread_id: (
+    store = SimpleNamespace(storage=SimpleNamespace(root=tmp_path), tasks=SimpleNamespace(active_report=lambda _thread_id: (
             [SimpleNamespace(task_id="task-live", status="active")],
             [],
-        ),
-    )
+        )))
     manager = SimpleNamespace(
         list_runs_report=lambda: SimpleNamespace(runs=[coordinator], load_errors=[])
     )
@@ -523,13 +498,10 @@ def test_pending_coordinator_does_not_infer_descendant_wait_from_prose_or_reason
             }
         },
     )
-    store = SimpleNamespace(
-        root=tmp_path,
-        active_task_links_report=lambda _thread_id: (
+    store = SimpleNamespace(storage=SimpleNamespace(root=tmp_path), tasks=SimpleNamespace(active_report=lambda _thread_id: (
             [SimpleNamespace(task_id="task-live", status="active")],
             [],
-        ),
-    )
+        )))
     manager = SimpleNamespace(
         list_runs_report=lambda: SimpleNamespace(runs=[coordinator], load_errors=[])
     )
@@ -581,15 +553,10 @@ def test_completed_task_retains_child_roster_but_clears_stale_todo(
         status="completed",
         created_at=20.0,
     )
-    store = SimpleNamespace(
-        active_task_links_report=lambda _thread_id: ([], []),
-        load_thread_report=lambda _thread_id: (
+    store = SimpleNamespace(tasks=SimpleNamespace(active_report=lambda _thread_id: ([], []), load_report=lambda _task_id: (link, None), load=lambda _task_id: link), threads=SimpleNamespace(load_report=lambda _thread_id: (
             SimpleNamespace(compact_generation=1, workspace_task_id="task-finished"),
             None,
-        ),
-        load_task_link_report=lambda _task_id: (link, None),
-        load_task_link=lambda _task_id: link,
-    )
+        )))
     child = _run(
         "child-done",
         root_id="task-finished",
@@ -652,13 +619,10 @@ def test_conversation_agent_view_reads_exact_child_state_and_final_reply(
         parent_id="child-done",
         depth=2,
     )
-    store = SimpleNamespace(
-        root=tmp_path,
-        load_thread_report=lambda _thread_id: (
+    store = SimpleNamespace(storage=SimpleNamespace(root=tmp_path), threads=SimpleNamespace(load_report=lambda _thread_id: (
             SimpleNamespace(compact_generation=1, model_context_usage={**usage, "compact_generation": 1}),
             None,
-        ),
-        recent_messages_report=lambda _thread_id, *, limit: (
+        )), messages=SimpleNamespace(recent_report=lambda _thread_id, *, limit: (
             [
                 SimpleNamespace(
                     role="assistant",
@@ -668,8 +632,7 @@ def test_conversation_agent_view_reads_exact_child_state_and_final_reply(
                 )
             ],
             [],
-        ),
-    )
+        )))
     manager = SimpleNamespace(
         load=lambda run_id: child if run_id == child.id else grandchild,
         list_runs_report=lambda: SimpleNamespace(
@@ -732,12 +695,10 @@ def test_conversation_agent_activity_reads_child_thread_generation_only(
             },
         },
     )
-    store = SimpleNamespace(
-        active_task_links_report=lambda _thread_id: (
+    store = SimpleNamespace(tasks=SimpleNamespace(active_report=lambda _thread_id: (
             [SimpleNamespace(task_id="task-live", status="active")],
             [],
-        ),
-        load_thread_report=lambda thread_id: (
+        )), threads=SimpleNamespace(load_report=lambda thread_id: (
             SimpleNamespace(
                 compact_generation=(2 if thread_id == task.agent_thread_id else 0),
                 model_context_usage=(
@@ -749,8 +710,7 @@ def test_conversation_agent_activity_reads_child_thread_generation_only(
                 ),
             ),
             None,
-        ),
-    )
+        )))
     manager = SimpleNamespace(
         list_runs_report=lambda: SimpleNamespace(runs=[task], load_errors=[])
     )
@@ -776,12 +736,10 @@ def test_background_main_activity_sink_projects_real_stage_for_active_task() -> 
             list_runs_report=lambda: SimpleNamespace(runs=[], load_errors=[])
         )
     )
-    store = SimpleNamespace(
-        active_task_links_report=lambda _thread_id: (
+    store = SimpleNamespace(tasks=SimpleNamespace(active_report=lambda _thread_id: (
             [SimpleNamespace(task_id="task-live", status="active")],
             [],
-        )
-    )
+        )))
     sink = BackgroundMainActivitySink(
         agent,
         thread_id="thread-main",
@@ -863,19 +821,16 @@ def test_main_activity_clock_uses_current_workspace_root_not_panel_or_child() ->
         status="active",
         created_at=320.0,
     )
-    store = SimpleNamespace(
-        active_task_links_report=lambda _thread_id: (
+    store = SimpleNamespace(tasks=SimpleNamespace(active_report=lambda _thread_id: (
             [old_root, current_root, newer_child],
             [],
-        ),
-        load_thread_report=lambda _thread_id: (
+        )), threads=SimpleNamespace(load_report=lambda _thread_id: (
             SimpleNamespace(
                 workspace_task_id="task-current",
                 compact_generation=0,
             ),
             None,
-        ),
-    )
+        )))
     agent = SimpleNamespace(
         subagents=SimpleNamespace(
             list_runs_report=lambda: SimpleNamespace(runs=[], load_errors=[])
@@ -938,10 +893,7 @@ def test_conversation_agent_activity_projects_canonical_task_progress(tmp_path: 
         status="active",
         created_at=20.0,
     )
-    store = SimpleNamespace(
-        active_task_links_report=lambda _thread_id: ([link], []),
-        load_task_link=lambda _task_id: link,
-    )
+    store = SimpleNamespace(tasks=SimpleNamespace(active_report=lambda _thread_id: ([link], []), load=lambda _task_id: link))
     agent = SimpleNamespace(
         home_paths=SimpleNamespace(owner_home_dir=owner_root),
         subagents=SimpleNamespace(
@@ -1011,10 +963,7 @@ def test_conversation_activity_projects_only_current_display_generation(
         status="active",
         created_at=20.0,
     )
-    store = SimpleNamespace(
-        active_task_links_report=lambda _thread_id: ([link], []),
-        load_task_link=lambda _task_id: link,
-    )
+    store = SimpleNamespace(tasks=SimpleNamespace(active_report=lambda _thread_id: ([link], []), load=lambda _task_id: link))
     agent = SimpleNamespace(
         home_paths=SimpleNamespace(owner_home_dir=owner_root),
         subagents=SimpleNamespace(
@@ -1075,13 +1024,10 @@ def test_task_progress_projection_keeps_workspace_root_when_children_are_newer(
         status="active",
         created_at=20.0,
     )
-    store = SimpleNamespace(
-        active_task_links_report=lambda _thread_id: ([root_link, child_link], []),
-        load_thread_report=lambda _thread_id: (
+    store = SimpleNamespace(tasks=SimpleNamespace(active_report=lambda _thread_id: ([root_link, child_link], [])), threads=SimpleNamespace(load_report=lambda _thread_id: (
             SimpleNamespace(workspace_task_id="task-root", compact_generation=0),
             None,
-        ),
-    )
+        )))
     agent = SimpleNamespace(
         home_paths=SimpleNamespace(owner_home_dir=owner_root),
         subagents=SimpleNamespace(
@@ -1133,10 +1079,7 @@ def test_task_progress_projection_hides_exact_direct_child_seed_after_finish(
         status="active",
         created_at=20.0,
     )
-    store = SimpleNamespace(
-        active_task_links_report=lambda _thread_id: ([link], []),
-        load_task_link=lambda _task_id: link,
-    )
+    store = SimpleNamespace(tasks=SimpleNamespace(active_report=lambda _thread_id: ([link], []), load=lambda _task_id: link))
     child = _run(
         child_id,
         status="DONE",
@@ -1215,7 +1158,7 @@ def test_task_progress_projection_applies_limit_after_hiding_child_seeds(
                 )
             ),
         ),
-        SimpleNamespace(active_task_links_report=lambda _thread_id: ([link], [])),
+        SimpleNamespace(tasks=SimpleNamespace(active_report=lambda _thread_id: ([link], []))),
         "thread-progress",
     )
 

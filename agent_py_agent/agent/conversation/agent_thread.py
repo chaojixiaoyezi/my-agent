@@ -79,7 +79,7 @@ def ensure_subagent_thread(manager: object, task: object) -> ConversationThread 
                 getattr(parent_task, "agent_thread_id", "") or ""
             ).strip()
             parent_thread = (
-                store.load_thread(parent_thread_id) if parent_thread_id else None
+                store.threads.load(parent_thread_id) if parent_thread_id else None
             )
             parent_metadata = (
                 getattr(parent_thread, "metadata", {})
@@ -106,7 +106,7 @@ def ensure_subagent_thread(manager: object, task: object) -> ConversationThread 
         or getattr(task, "goal", "")
         or run_id
     ).strip()[:240]
-    return store.ensure_agent_thread(
+    return store.threads.ensure_agent(
         {
             "thread_id": thread_id,
             "agent_run_id": run_id,
@@ -151,7 +151,7 @@ def prepare_subagent_thread_turn(
     store = getattr(agent, "conversation_store", None)
     if store is None or store is not getattr(manager, "conversation_store", None):
         raise RuntimeError("subagent ConversationStore is not the owner store")
-    store.append_message_once(
+    store.messages.append_once(
         {
             "thread_id": thread.thread_id,
             "role": "user",
@@ -161,7 +161,7 @@ def prepare_subagent_thread_turn(
         },
         dedupe_key=_agent_message_dedupe_key(task, selected_attempt, "user"),
     )
-    thread, load_error = store.load_thread_report(thread.thread_id)
+    thread, load_error = store.threads.load_report(thread.thread_id)
     if load_error is not None or thread is None:
         raise OSError("subagent conversation thread could not be reloaded")
     compact = prepare_conversation_context(
@@ -235,7 +235,7 @@ def append_subagent_thread_result(
     )
     if native_envelope:
         metadata[CANONICAL_NATIVE_MESSAGES_METADATA_KEY] = native_envelope
-    return agent.conversation_store.append_message_once(
+    return agent.conversation_store.messages.append_once(
         {
             "thread_id": thread.thread_id,
             "role": "assistant",
@@ -273,7 +273,7 @@ def _append_subagent_thread_commentaries(
                 "process": True,
             }
         )
-        agent.conversation_store.append_message_once(
+        agent.conversation_store.messages.append_once(
             {
                 "thread_id": thread_id,
                 "role": "assistant",

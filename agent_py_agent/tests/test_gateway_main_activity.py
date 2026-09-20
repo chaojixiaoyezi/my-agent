@@ -7,6 +7,7 @@ from agent_py_agent.agent.conversation.agent_activity import (
     background_main_activity,
 )
 from agent_py_agent.agent.gateway_parts import request_execution
+from agent_py_agent.agent.gateway_parts.stream_writer import BufferedChunkStreamWriter
 
 
 def test_foreground_writer_replaces_stale_background_activity(tmp_path):
@@ -14,7 +15,7 @@ def test_foreground_writer_replaces_stale_background_activity(tmp_path):
     background = BackgroundMainActivitySink(agent, thread_id="thread-a", task_id="task-a")
     background.write_context_usage({"schema": "model_visible_context_usage.v1", "current_tokens": 8_000})
     background.finish()
-    writer = request_execution.BufferedChunkStreamWriter(tmp_path / "chunks.jsonl", rich_transcript=True)
+    writer = BufferedChunkStreamWriter(tmp_path / "chunks.jsonl", rich_transcript=True)
     context = SimpleNamespace(
         agent=agent, on_chunk=writer, request_id="gwreq-live",
         request={"conversation_runtime": {"request_id": "gwreq-live", "thread_id": "thread-a", "task_id": "task-a"}},
@@ -36,7 +37,7 @@ def test_foreground_writer_replaces_stale_background_activity(tmp_path):
 def test_foreground_projection_follows_exact_promoted_task_and_not_conflicting_binding(tmp_path):
     agent = SimpleNamespace()
     request = {}
-    writer = request_execution.BufferedChunkStreamWriter(tmp_path / "chunks.jsonl", rich_transcript=True)
+    writer = BufferedChunkStreamWriter(tmp_path / "chunks.jsonl", rich_transcript=True)
     context = SimpleNamespace(agent=agent, on_chunk=writer, request_id="gwreq-live", request=request)
     conversation = SimpleNamespace(thread_id="thread-a", workspace_task=SimpleNamespace(task_id="task-old"))
     request_execution._configure_gateway_main_activity(context, conversation)
@@ -51,7 +52,7 @@ def test_foreground_projection_follows_exact_promoted_task_and_not_conflicting_b
 
 def test_plain_writer_does_not_publish_private_model_data(tmp_path):
     agent = SimpleNamespace()
-    writer = request_execution.BufferedChunkStreamWriter(tmp_path / "chunks.jsonl")
+    writer = BufferedChunkStreamWriter(tmp_path / "chunks.jsonl")
     context = SimpleNamespace(agent=agent, on_chunk=writer, request_id="gwreq-plain", request={})
     conversation = SimpleNamespace(thread_id="thread-a", workspace_task=None)
     request_execution._configure_gateway_main_activity(context, conversation)
@@ -62,7 +63,7 @@ def test_plain_writer_does_not_publish_private_model_data(tmp_path):
 
 def test_old_foreground_close_cannot_overwrite_new_background_phase(tmp_path):
     agent = SimpleNamespace()
-    writer = request_execution.BufferedChunkStreamWriter(tmp_path / "chunks.jsonl", rich_transcript=True)
+    writer = BufferedChunkStreamWriter(tmp_path / "chunks.jsonl", rich_transcript=True)
     context = SimpleNamespace(agent=agent, on_chunk=writer, request_id="gwreq-old", request={})
     conversation = SimpleNamespace(thread_id="thread-a", workspace_task=SimpleNamespace(task_id="task-a"))
     request_execution._configure_gateway_main_activity(context, conversation)
@@ -85,7 +86,7 @@ def test_projection_error_preserves_original_chunk_and_close(tmp_path):
             raise OSError("display unavailable")
 
     path = tmp_path / "chunks.jsonl"
-    writer = request_execution.BufferedChunkStreamWriter(path, rich_transcript=True, main_activity_sink=BrokenDisplay())
+    writer = BufferedChunkStreamWriter(path, rich_transcript=True, main_activity_sink=BrokenDisplay())
     writer.write_context_usage({"schema": "model_visible_context_usage.v1", "current_tokens": 62_300})
     writer.close()
     assert "62300" in path.read_text()

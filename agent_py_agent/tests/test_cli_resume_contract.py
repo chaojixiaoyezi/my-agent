@@ -148,7 +148,7 @@ def test_bind_cli_run_conversation_continuation_reuses_thread(tmp_path):
     assert bound1.task_attributes["conversation_thread_id"] == thread0
 
     # 同一 thread 两条消息，续跑消息带 is_continuation
-    messages = store.recent_messages(thread0, limit=10)
+    messages = store.messages.recent(thread0, limit=10)
     assert len(messages) == 2
     cont_msgs = [
         m for m in messages if (m.metadata or {}).get("is_continuation")
@@ -162,7 +162,7 @@ def test_bind_cli_run_conversation_continuation_reuses_thread(tmp_path):
 
 def test_should_continue_task_truth_table():
     """可续跑族与不可续跑族 truth table（审查意见6）。"""
-    from agent_py_agent.agent.conversation.runtime import should_continue_task
+    from agent_py_agent.agent.turn_end import should_continue_task
 
     continuable = [
         ("TOOL_ROUND_LIMIT_REACHED", "tool_loop", "unfinished"),
@@ -348,7 +348,7 @@ class _FakeRunAgent:
         self.calls = []
         # thread 按 bind_cli_run_conversation 的真实 channel 身份预建，
         # base.request_id=channel_id 时 bind 复用同一线程。
-        self._thread = self.conversation_store.get_or_create_thread(
+        self._thread = self.conversation_store.threads.get_or_create(
             {
                 "canonical_user_id": _CLI_RUN_USER_ID, "channel": _CLI_RUN_CHANNEL,
                 "channel_conversation_id": channel_id, "channel_user_id": _CLI_RUN_USER_ID,
@@ -357,7 +357,7 @@ class _FakeRunAgent:
         )
         # 自动续跑授权只来自 active goal，与 bind 后
         # root_thread_id/root_task_id 对齐。
-        self.conversation_store.create_goal(
+        self.conversation_store.goals.create(
             {
                 "thread_id": self._thread.thread_id,
                 "objective": "继续推进任务直到完成",
@@ -553,7 +553,7 @@ def test_active_goal_continues_without_ordinary_resume_policy(tmp_path):
             # 与 _FakeRunAgent 唯一区别只是独立 thread/task 身份。
             self.conversation_store = ConversationStore(tmp_path / "conv")
             self.calls = []
-            self._thread = self.conversation_store.get_or_create_thread(
+            self._thread = self.conversation_store.threads.get_or_create(
                 {
                     "canonical_user_id": _CLI_RUN_USER_ID, "channel": _CLI_RUN_CHANNEL,
                     "channel_conversation_id": "req-nopol", "channel_user_id": _CLI_RUN_USER_ID,
@@ -561,7 +561,7 @@ def test_active_goal_continues_without_ordinary_resume_policy(tmp_path):
                 }
             )
             # 自动续跑只建 active Goal，不发普通 progress policy。
-            self.conversation_store.create_goal(
+            self.conversation_store.goals.create(
                 {
                     "thread_id": self._thread.thread_id,
                     "objective": "继续推进任务直到完成",
@@ -576,7 +576,7 @@ def test_active_goal_continues_without_ordinary_resume_policy(tmp_path):
     outcome = run_with_resume(fake, initial_prompt="t", base_params=base, max_rounds=5)
     assert outcome.status == "completed"
     assert len(fake.calls) == 3  # 首轮 + 2 续跑轮
-    assert fake.conversation_store.list_progress_policies(enabled_only=True) == []
+    assert fake.conversation_store.progress.list(enabled_only=True) == []
 
 
 def test_gateway_retires_removed_ordinary_resume_policy(tmp_path):
@@ -589,14 +589,14 @@ def test_gateway_retires_removed_ordinary_resume_policy(tmp_path):
     from agent_py_agent.agent.conversation.store import ConversationStore
 
     store = ConversationStore(tmp_path / "conv")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "u", "channel": "cli_run",
             "channel_conversation_id": "req-gw", "channel_user_id": "u",
             "owner_id": "local/main", "owner_home": str(tmp_path), "title": "t",
         }
     )
-    store.bind_task(
+    store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": "task-gw",
@@ -605,28 +605,28 @@ def test_gateway_retires_removed_ordinary_resume_policy(tmp_path):
             "now": _time.time(),
         }
     )
-    store.set_progress_policy(
+    store.progress.create(
         {
             "thread_id": thread.thread_id, "task_id": "task-gw",
             "interval_seconds": 180, "now": _time.time(),
             "metadata": {"kind": "ordinary_task_resume", "resume_used": 0, "resume_limit": 3},
         }
     )
-    policy = store.list_progress_policies(enabled_only=True)[0]
+    policy = store.progress.list(enabled_only=True)[0]
     now = _time.time()
     assert (
         _progress_policy_suppression_reason(store, policy, now=now)
         == "removed_ordinary_task_resume_policy"
     )
     # 其它持久策略保持原本的独立语义。
-    store.set_progress_policy(
+    store.progress.create(
         {
             "thread_id": thread.thread_id, "task_id": "task-other",
             "interval_seconds": 180, "now": now,
             "metadata": {"kind": "other_kind"},
         }
     )
-    other = [p for p in store.list_progress_policies(enabled_only=True) if p.task_id == "task-other"][0]
+    other = [p for p in store.progress.list(enabled_only=True) if p.task_id == "task-other"][0]
     assert _progress_policy_suppression_reason(store, other, now=now) == ""
 
 
@@ -1089,7 +1089,7 @@ def test_protocol_repair_exhausted_format_only_continuable(tmp_path):
     assert decision1.action == "break"
     assert decision1.response.runtime_status == "unfinished"
     assert decision1.response.runtime_reason == "TOOL_CALL_UNCLOSED"
-    from agent_py_agent.agent.conversation.runtime import should_continue_task
+    from agent_py_agent.agent.turn_end import should_continue_task
 
     assert should_continue_task(decision1.response)[0] is True
 
@@ -1108,7 +1108,7 @@ def test_protocol_repair_exhausted_format_only_continuable(tmp_path):
 def test_tool_call_unclosed_structural_gate():
     """TOOL_CALL_UNCLOSED 结构门(双席 seq1989): 仅 tool_protocol_adapter +
     unfinished 放行续跑; 其他 source/status 误标同一 reason 拒绝。"""
-    from agent_py_agent.agent.conversation.runtime import should_continue_task
+    from agent_py_agent.agent.turn_end import should_continue_task
 
     ok = SimpleNamespace(
         runtime_reason="TOOL_CALL_UNCLOSED",
@@ -1240,7 +1240,7 @@ def test_unknown_halt_reason_aligns_with_taxonomy(monkeypatch):
     真未知(无码/retryable=False)→ TOOL_OPERATION_OUTCOME_UNKNOWN 不续跑。"""
     import agent_py_agent.agent.agent_core._tool_loop_service as svc
     from agent_py_agent.agent.backends import ModelResponse
-    from agent_py_agent.agent.conversation.runtime import should_continue_task
+    from agent_py_agent.agent.turn_end import should_continue_task
 
     captured = {}
 

@@ -14,6 +14,9 @@
 
 ## 执行器退出与积压恢复
 
+- `services/runtime_closeout.py` 的无操作结果不接受任意扩展参数；读取权威行失败在原收口入口显式返回
+  `write_error`、精确 run/attempt 与重试事实，持久恢复及通知仍只有原有一条路径。
+
 - `runtime_db/executor_liveness.py` 在真实执行边界记录 exact attempt 元数据；本进程注册只在执行期间存在，
   不以 Gateway PID 或旧心跳代替真实执行器。退出事实不产生模型调用。
 - `services/executor_recovery.py` 复用正式 runner_result/WAL/父级通知；没有结论的退出显示失败，
@@ -319,7 +322,7 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
   fold 纳入摘要并推进 generation；`compact_source_tool_pairs` 只累计运行中 native IR 真压掉的完整工具对，
   当前尾部 fold 的回合/调用数单独投影，禁止双计数。
 - `ModelCallLedger` 仍提供 exact request/run 的累计调用快照；每次运行收口以物理调用累计数作为 cursor，
-  `ConversationModelUsageStore` 在同一 JSONL 追加锁内减去该 scope 已落盘增量，再写一条带原快照 digest 的
+  `store.model_usage` 的 `ModelUsageStore` 在同一 JSONL 追加锁内减去该 scope 已落盘增量，再写一条带原快照 digest 的
   delta。这个账只管用量，不推进 Compact、任务终态或 child attempt；重放同 cursor 幂等，异值复用 fail closed。
 
 ## 2026-08-25 长期进度账本与当前回合展示计划
@@ -427,7 +430,7 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
 
 - `subagents/runner_completion_wake.py` 继续是 `subagent-completion.v1` 的唯一生产者；完成状态仍由 canonical
   child task/attempt 决定，信封正文没有状态权威。
-- `gateway_parts/request_execution.py::_gateway_subagent_completion_context` 只做 ConversationStore 的有界
+- `gateway_parts/request_context.py::_gateway_subagent_completion_context` 只做 ConversationStore 的有界
   读取投影。普通追加轮会为同一 workspace 产生新 task id；它先按 same-thread、非 detached task link 的
   exact canonical task path 找出 workspace lineage，再要求 observation root 属于 lineage 且 parent 等于
   该 root，因此只返回直属 child；同 child 多次终态取最新一条。

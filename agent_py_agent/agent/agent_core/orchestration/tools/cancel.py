@@ -629,7 +629,8 @@ def cancel_subagent_tree(
 # attempt/terminal state. Branch-aware user/model close calls must use cancel_subagent_tree;
 # root-request stop may call this primitive for its already-resolved full lineage while holding
 # the non-reentrant creation guard.
-# 函数用途: 精确打断子代理执行体、暂停自身 Goal，再收口执行轮和会话链接；不自行遍历后代。
+# 同一 run 的 PTY 先冻结句柄，实际进程树终止异步核对，不依赖模型回合是否仍在。
+# 函数用途: 精确打断子代理及其终端、暂停自身 Goal，再收口执行轮和会话链接。
 def cancel_subagent_task(
     agent: SimpleAgent,
     request: CancelSubagentTaskRequest,
@@ -640,6 +641,8 @@ def cancel_subagent_task(
     task = request.task
     reason = request.reason
     attempt_id = str(getattr(task, "runner_active_attempt_id", "") or "").strip()
+    from ....tooling.pty_sessions import pty_session_registry
+
     # 会话运行时/终端交互 都先触发当前执行体的 cancellation token/AbortController，再做
     # durable 收尾。这里同样先打断慢模型或工具，让它尽快释放 canonical state 锁；
     # 否则 TUI 的停止请求会先堵在 attempt 落盘上，用户看到“结果无法确认”。
@@ -655,6 +658,11 @@ def cancel_subagent_task(
         # 共享/独占进程形态也可能同时注册精确 attempt token。保留这一事实，既避免
         # 误杀同宿主兄弟，也让审计能证明模型调用已先收到协作中断。
         pid_report["thread_interrupt"] = pre_signalled_thread_interrupt
+    if request.kill_process:
+        pty_session_registry.request_stop(
+            owner_home=getattr(getattr(agent, "home_paths", None), "owner_home_dir", ""),
+            run_id=task.id,
+        )
     if attempt_id:
         task = agent.subagents.lifecycle.abandon_runner_attempt(task.id, attempt_id, reason=reason)
     now = time.time()
@@ -835,7 +843,7 @@ def _sync_cancelled_conversation_link(agent: SimpleAgent, task_id: str) -> dict[
     if store is None:
         return {"status": "unavailable"}
     try:
-        link = store.update_task_status({"task_id": task_id, "status": "cancelled"})
+        link = store.tasks.update_status({"task_id": task_id, "status": "cancelled"})
     except Exception as exc:
         return {
             "status": "error",
@@ -877,9 +885,6 @@ def _close_pending_capability_requests(task: SubAgentTask, reason: str) -> list[
     return [item for item in closed if item]
 
 
-# LLM: 进程终止统一走 subagents/process_control 的两阶段原语(SIGTERM 组→宽限→
-#   SIGKILL 升级),与出口孤儿回收同一手法;本函数只负责"要不要杀"的参数裁决。
-# 函数用途: 取消任务时按 kill_process 参数决定是否连后台进程一起收掉。
 # LLM: Prefer the exact runner-attempt cancellation token registered by the worker. The batch
 # dispatch thread is only a legacy fallback and must never be interrupted while it hosts siblings.
 # 函数用途: 先精确停止目标子代理这一执行轮；旧运行记录才回退到共享派工线程的安全判定。
@@ -911,6 +916,9 @@ def _interrupt_dispatch_thread(
     return "not_found"
 
 
+# LLM: 仅 fresh runner session 的显式独立宿主允许发 OS 信号；未知或仍有活动兄弟时
+#   保留 attempt fence 的协作取消路径。通过独占检查后复用公共进程树终止回执。
+# 函数用途: 核对取消是否允许停掉宿主，避免影响 Gateway 或共享进程内其它任务。
 def _terminate_task_pid(
     agent: SimpleAgent,
     task: SubAgentTask,

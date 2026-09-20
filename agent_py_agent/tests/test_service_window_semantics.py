@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from types import SimpleNamespace
+from types import SimpleNamespace as _StoreDomain
 
 import pytest
 
@@ -269,7 +270,10 @@ def test_wake_payload_marks_pending_audit_source_binding_lifecycle():
 
 def test_pending_source_continuation_does_not_enter_parent_wake_lane():
     class _Store:
-        def thread_for_task(self, _task_id):
+        def __init__(self, *args, **kwargs):
+            self.tasks = _StoreDomain(thread_for=self._fake_thread_for_task)
+
+        def _fake_thread_for_task(self, _task_id):
             raise AssertionError("PENDING source continuation must not publish a wake")
 
     task = _task()
@@ -308,19 +312,24 @@ def test_completed_audit_source_slice_updates_state_and_wakes_only_supervisor(
     class _Store:
         def __init__(self):
             self.status_updates = []
-            self.wakes = []
+            self.raised_wakes = []
+            self.wakes = SimpleNamespace(
+                append_observation=self._fake_wakes_append_observation,
+                raise_signal=self._fake_wakes_raise_signal,
+            )
+            self.tasks = _StoreDomain(thread_for=self._fake_thread_for_task, update_status=self._fake_update_task_status)
 
-        def thread_for_task(self, _task_id):
+        def _fake_thread_for_task(self, _task_id):
             return SimpleNamespace(thread_id="thread-audit")
 
-        def update_task_status(self, payload):
+        def _fake_update_task_status(self, payload):
             self.status_updates.append(dict(payload))
 
-        def append_observation_with_wake(self, *_args, **_kwargs):
+        def _fake_wakes_append_observation(self, *_args, **_kwargs):
             raise AssertionError("normal Audit slice must not publish a parent wake")
 
-        def raise_wake_signal(self, payload):
-            self.wakes.append(dict(payload))
+        def _fake_wakes_raise_signal(self, payload):
+            self.raised_wakes.append(dict(payload))
 
     audit_id = "audit-root"
     watch_id = "watch-source-1"
@@ -364,8 +373,8 @@ def test_completed_audit_source_slice_updates_state_and_wakes_only_supervisor(
     assert store.status_updates == [
         {"task_id": task.id, "status": TaskStatus.DONE.value}
     ]
-    assert len(store.wakes) == 1
-    wake = store.wakes[0]
+    assert len(store.raised_wakes) == 1
+    wake = store.raised_wakes[0]
     assert wake["reason"] == "subagent_runner_finished"
     assert wake["root_task_id"] == audit_id
     assert wake["metadata"]["audit_source_worker"] is True
@@ -376,19 +385,24 @@ def test_retryable_audit_provider_failure_updates_state_without_parent_wake():
     class _Store:
         def __init__(self):
             self.status_updates = []
-            self.wakes = []
+            self.raised_wakes = []
+            self.wakes = SimpleNamespace(
+                append_observation=self._fake_wakes_append_observation,
+                raise_signal=self._fake_wakes_raise_signal,
+            )
+            self.tasks = _StoreDomain(thread_for=self._fake_thread_for_task, update_status=self._fake_update_task_status)
 
-        def thread_for_task(self, _task_id):
+        def _fake_thread_for_task(self, _task_id):
             return SimpleNamespace(thread_id="thread-audit")
 
-        def update_task_status(self, payload):
+        def _fake_update_task_status(self, payload):
             self.status_updates.append(dict(payload))
 
-        def append_observation_with_wake(self, *_args, **_kwargs):
+        def _fake_wakes_append_observation(self, *_args, **_kwargs):
             raise AssertionError("retryable provider failure must stay in supervisor")
 
-        def raise_wake_signal(self, payload):
-            self.wakes.append(dict(payload))
+        def _fake_wakes_raise_signal(self, payload):
+            self.raised_wakes.append(dict(payload))
 
     audit_id = "audit-root"
     watch_id = "watch-source-1"
@@ -432,27 +446,32 @@ def test_retryable_audit_provider_failure_updates_state_without_parent_wake():
     assert store.status_updates == [
         {"task_id": task.id, "status": TaskStatus.BLOCKED.value}
     ]
-    assert len(store.wakes) == 1
-    assert store.wakes[0]["metadata"]["failure_type"] == FailureType.PROVIDER_TIMEOUT.value
+    assert len(store.raised_wakes) == 1
+    assert store.raised_wakes[0]["metadata"]["failure_type"] == FailureType.PROVIDER_TIMEOUT.value
 
 
 def test_pending_audit_source_failure_wakes_only_supervisor():
     class _Store:
         def __init__(self):
             self.status_updates = []
-            self.wakes = []
+            self.raised_wakes = []
+            self.wakes = SimpleNamespace(
+                append_observation=self._fake_wakes_append_observation,
+                raise_signal=self._fake_wakes_raise_signal,
+            )
+            self.tasks = _StoreDomain(thread_for=self._fake_thread_for_task, update_status=self._fake_update_task_status)
 
-        def thread_for_task(self, _task_id):
+        def _fake_thread_for_task(self, _task_id):
             return SimpleNamespace(thread_id="thread-audit")
 
-        def update_task_status(self, payload):
+        def _fake_update_task_status(self, payload):
             self.status_updates.append(dict(payload))
 
-        def append_observation_with_wake(self, *_args, **_kwargs):
+        def _fake_wakes_append_observation(self, *_args, **_kwargs):
             raise AssertionError("pending Audit source failure must stay internal")
 
-        def raise_wake_signal(self, payload):
-            self.wakes.append(dict(payload))
+        def _fake_wakes_raise_signal(self, payload):
+            self.raised_wakes.append(dict(payload))
 
     task = _task()
     task.status = TaskStatus.BLOCKED.value
@@ -488,13 +507,16 @@ def test_pending_audit_source_failure_wakes_only_supervisor():
     assert store.status_updates == [
         {"task_id": task.id, "status": TaskStatus.BLOCKED.value}
     ]
-    assert len(store.wakes) == 1
-    assert store.wakes[0]["metadata"]["audit_source_worker_phase"] == "binding_pending"
+    assert len(store.raised_wakes) == 1
+    assert store.raised_wakes[0]["metadata"]["audit_source_worker_phase"] == "binding_pending"
 
 
 def test_pending_ordinary_agent_does_not_publish_continuation_wake():
     class _Store:
-        def thread_for_task(self, _task_id):
+        def __init__(self, *args, **kwargs):
+            self.tasks = _StoreDomain(thread_for=self._fake_thread_for_task)
+
+        def _fake_thread_for_task(self, _task_id):
             raise AssertionError("ordinary PENDING task must not publish a wake")
 
     task = _task()

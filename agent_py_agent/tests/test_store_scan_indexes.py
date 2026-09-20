@@ -17,8 +17,8 @@ from pathlib import Path
 import pytest
 
 from agent_py_agent.agent.conversation import ConversationStore
-from agent_py_agent.agent.conversation import store as store_module
-from agent_py_agent.agent.conversation.store import (
+from agent_py_agent.agent.conversation import store_index as store_module
+from agent_py_agent.agent.conversation.store_index import (
     _SCAN_INDEX_MAX_RECORDS_PER_FILE,
     _SCAN_INDEX_SCHEMA,
 )
@@ -30,7 +30,7 @@ from agent_py_agent.agent.conversation.store import (
 def _wake_snapshot(
     store: ConversationStore, *, limit: int = 0, include_normal: bool = True
 ) -> tuple[list[dict], list[dict]]:
-    signals, errors = store.pending_wake_signals_report(
+    signals, errors = store.wakes.pending_report(
         limit=limit, include_normal=include_normal
     )
     return [item.to_dict() for item in signals], list(errors)
@@ -38,24 +38,24 @@ def _wake_snapshot(
 
 # 函数用途: 取一次观察查询的可比对快照。
 def _observation_snapshot(store: ConversationStore, *, limit: int = 0) -> list[dict]:
-    return [item.to_dict() for item in store.unhandled_observations_requiring_main(limit=limit)]
+    return [item.to_dict() for item in store.observations.unhandled_requiring_main(limit=limit)]
 
 
 # 函数用途: 取一次策略查询的可比对快照(策略字典 + 结构化错误列表)。
 def _policy_snapshot(
     store: ConversationStore, *, enabled_only: bool = False
 ) -> tuple[list[dict], list[dict]]:
-    policies, errors = store.list_progress_policies_report(enabled_only=enabled_only)
+    policies, errors = store.progress.list_report(enabled_only=enabled_only)
     return [item.to_dict() for item in policies], list(errors)
 
 
 # 函数用途: 取一次到期策略查询的可比对快照。
 def _due_snapshot(store: ConversationStore, *, now: float = 10_000.0) -> list[dict]:
-    return [item.to_dict() for item in store.due_progress_policies_report(now=now)[0]]
+    return [item.to_dict() for item in store.progress.due_report(now=now)[0]]
 
 
 def _thread(store: ConversationStore, suffix: str = "1"):
-    return store.get_or_create_thread(
+    return store.threads.get_or_create(
         {
             "canonical_user_id": "user-1",
             "channel": "internal",
@@ -239,7 +239,7 @@ def _seed_all_ledgers(root: Path) -> Path:
 # 函数用途: 把指定台账的索引容量压到 0,模拟索引完全不可用。
 def _disable_index(store: ConversationStore, *names: str) -> None:
     for name in names:
-        index = store._scan_index(name)  # noqa: SLF001 - 验收需要直接操作索引状态
+        index = store.storage.indexes.get(name)  # noqa: SLF001 - 验收需要直接操作索引状态
         index.max_entries = 0
         index.clear()
 
@@ -251,20 +251,20 @@ def _disable_index(store: ConversationStore, *names: str) -> None:
 def _bounded_wake_store(root: Path, max_entries: int) -> ConversationStore:
     store = ConversationStore(root)
     for kind in ("urgent", "normal"):
-        store._scan_index(f"wake:{kind}").max_entries = max_entries  # noqa: SLF001
+        store.storage.indexes.get(f"wake:{kind}").max_entries = max_entries  # noqa: SLF001
     return store
 
 
 # 函数用途: 读一个索引的 entries/records/evictions/prunes 诊断快照(有界性断言的统一入口)。
 def _index_stats(store: ConversationStore, name: str) -> dict:
-    return store._scan_index(name).stats()  # noqa: SLF001 - 验收需要直接读索引统计
+    return store.storage.indexes.get(name).stats()  # noqa: SLF001 - 验收需要直接读索引统计
 
 
 # LLM: 四种损坏形态分别对应"索引文件版本不符/索引被清空/条目指纹过期/条目主键被污染",
 # 覆盖索引可能失效的全部现实入口;每种都必须回退权威读取并给出完全一致的结果。
 # 函数用途: 按模式损坏指定索引,返回被损坏的索引对象。
 def _corrupt_index(store: ConversationStore, name: str, mode: str):
-    index = store._scan_index(name)  # noqa: SLF001 - 验收需要直接操作索引状态
+    index = store.storage.indexes.get(name)  # noqa: SLF001 - 验收需要直接操作索引状态
     if mode == "schema":
         index.schema = "tampered.schema.v0"
         return index
@@ -321,19 +321,19 @@ def test_wake_report_matches_across_index_states(tmp_path) -> None:
     assert _wake_snapshot(disabled, include_normal=False) == baseline_urgent
     assert any(
         item["reason"] == "dir_too_large"
-        for item in disabled._scan_index("wake:urgent").warnings  # noqa: SLF001
+        for item in disabled.storage.indexes.get("wake:urgent").warnings  # noqa: SLF001
     )
 
     # 热索引: 复用已缓存投影。
     warm = ConversationStore(root)
     assert _wake_snapshot(warm) == baseline_all
-    before_warnings = list(warm._scan_index("wake:urgent").warnings)  # noqa: SLF001
+    before_warnings = list(warm.storage.indexes.get("wake:urgent").warnings)  # noqa: SLF001
     assert _wake_snapshot(warm) == baseline_all
     assert _wake_snapshot(warm, limit=3) == baseline_capped
     assert _wake_snapshot(warm, include_normal=False) == baseline_urgent
     # 健康索引不该产生任何"不可用"告警。
-    assert warm._scan_index("wake:urgent").warnings == before_warnings == []  # noqa: SLF001
-    stats = warm._scan_index("wake:urgent").stats()  # noqa: SLF001
+    assert warm.storage.indexes.get("wake:urgent").warnings == before_warnings == []  # noqa: SLF001
+    stats = warm.storage.indexes.get("wake:urgent").stats()  # noqa: SLF001
     assert stats["hits"] >= 2
     assert stats["index"] == "wake:urgent"
 
@@ -347,7 +347,7 @@ def test_wake_report_matches_across_index_states(tmp_path) -> None:
         assert _wake_snapshot(broken, limit=3) == baseline_capped, mode
         assert _wake_snapshot(broken, include_normal=False) == baseline_urgent, mode
         if mode in {"schema", "identity"}:
-            warnings = broken._scan_index("wake:urgent").warnings  # noqa: SLF001
+            warnings = broken.storage.indexes.get("wake:urgent").warnings  # noqa: SLF001
             assert warnings, mode
             assert all(item["schema"] == "conversation.scan_index.warning.v1" for item in warnings)
             assert all(item["index"] == "wake:urgent" for item in warnings)
@@ -382,11 +382,11 @@ def test_returned_load_errors_are_private_copies(tmp_path) -> None:
     baseline[0]["reason_tampered"] = True
     assert _wake_snapshot(warm)[1] == _wake_snapshot(ConversationStore(root))[1]
 
-    policies, errors = warm.list_progress_policies_report(enabled_only=True)
+    policies, errors = warm.progress.list_report(enabled_only=True)
     assert errors
     errors[0]["message"] = "被消费方改写的策略错误"
-    repeated, repeated_errors = warm.list_progress_policies_report(enabled_only=True)
-    assert repeated_errors == ConversationStore(root).list_progress_policies_report(
+    repeated, repeated_errors = warm.progress.list_report(enabled_only=True)
+    assert repeated_errors == ConversationStore(root).progress.list_report(
         enabled_only=True
     )[1]
 
@@ -430,14 +430,14 @@ def test_observation_report_matches_across_index_states(tmp_path) -> None:
     assert _observation_snapshot(disabled, limit=2) == baseline_capped
     assert any(
         item["reason"] == "dir_too_large"
-        for item in disabled._scan_index("observations").warnings  # noqa: SLF001
+        for item in disabled.storage.indexes.get("observations").warnings  # noqa: SLF001
     )
 
     warm = ConversationStore(root)
     assert _observation_snapshot(warm) == baseline_all
     assert _observation_snapshot(warm) == baseline_all
     assert _observation_snapshot(warm, limit=2) == baseline_capped
-    assert warm._scan_index("observations").warnings == []  # noqa: SLF001
+    assert warm.storage.indexes.get("observations").warnings == []  # noqa: SLF001
 
     for mode in CORRUPTION_MODES:
         broken = ConversationStore(root)
@@ -493,7 +493,7 @@ def test_progress_policy_report_matches_across_index_states(tmp_path) -> None:
     assert _policy_snapshot(warm, enabled_only=True) == baseline_enabled
     assert _policy_snapshot(warm) == baseline_all
     assert _due_snapshot(warm) == baseline_due
-    assert warm._scan_index("progress_policies").warnings == []  # noqa: SLF001
+    assert warm.storage.indexes.get("progress_policies").warnings == []  # noqa: SLF001
 
     for mode in CORRUPTION_MODES:
         broken = ConversationStore(root)
@@ -525,37 +525,37 @@ def test_wake_and_policy_writes_are_visible_through_warm_index(tmp_path) -> None
     store = ConversationStore(root)
     thread = _thread(store)
 
-    signal = store.raise_wake_signal(
+    signal = store.wakes.raise_signal(
         {"thread_id": thread.thread_id, "reason": "urgent_child_event", "now": 20.0}
     )
-    assert [item.wake_signal_id for item in store.pending_wake_signals(limit=0)] == [
+    assert [item.wake_signal_id for item in store.wakes.pending(limit=0)] == [
         signal.wake_signal_id
     ]
     # 原地元数据更新(原子替换)必须被看见,不能被索引挡住。
-    cached = store.cache_pending_wake_delivery(signal.wake_signal_id, {"prompt": "owner payload"})
+    cached = store.wakes.cache_delivery(signal.wake_signal_id, {"prompt": "owner payload"})
     assert cached is not None
     assert cached.metadata["owner_delivery"] == {"prompt": "owner payload"}
-    assert store.pending_wake_signals(limit=0)[0].metadata["owner_delivery"] == {
+    assert store.wakes.pending(limit=0)[0].metadata["owner_delivery"] == {
         "prompt": "owner payload"
     }
-    store.mark_wake_signal_handled(signal.wake_signal_id, now=30.0)
-    assert store.pending_wake_signals(limit=0) == []
+    store.wakes.mark_handled(signal.wake_signal_id, now=30.0)
+    assert store.wakes.pending(limit=0) == []
 
-    policy = store.set_progress_policy(
+    policy = store.progress.create(
         {"thread_id": thread.thread_id, "interval_seconds": 300, "now": 1_000.0}
     )
     assert policy.policy_id in [
-        item.policy_id for item in store.list_progress_policies(enabled_only=True)
+        item.policy_id for item in store.progress.list(enabled_only=True)
     ]
-    store.mark_progress_failed(
+    store.progress.mark_failed(
         policy.policy_id, now=1_100.0, backoff_seconds=60.0, failure_count=3
     )
     assert policy.policy_id not in [
-        item.policy_id for item in store.list_progress_policies(enabled_only=True)
+        item.policy_id for item in store.progress.list(enabled_only=True)
     ]
-    assert policy.policy_id in [item.policy_id for item in store.list_progress_policies()]
+    assert policy.policy_id in [item.policy_id for item in store.progress.list()]
 
-    observation = store.append_observation(
+    observation = store.observations.append(
         {
             "thread_id": thread.thread_id,
             "event_type": "child_agent_event",
@@ -565,11 +565,11 @@ def test_wake_and_policy_writes_are_visible_through_warm_index(tmp_path) -> None
         }
     )
     assert observation.observation_id in [
-        item.observation_id for item in store.unhandled_observations_requiring_main(limit=0)
+        item.observation_id for item in store.observations.unhandled_requiring_main(limit=0)
     ]
-    store.mark_observations_handled([observation.observation_id], now=50.0)
+    store.observations.mark_handled([observation.observation_id], now=50.0)
     assert observation.observation_id not in [
-        item.observation_id for item in store.unhandled_observations_requiring_main(limit=0)
+        item.observation_id for item in store.observations.unhandled_requiring_main(limit=0)
     ]
 
 
@@ -577,7 +577,7 @@ def test_scan_index_stays_bounded_and_reports_structured_warnings(tmp_path) -> N
     root = _seed_all_ledgers(tmp_path / "conversations")
     store = ConversationStore(root)
 
-    index = store._scan_index("wake:urgent")  # noqa: SLF001
+    index = store.storage.indexes.get("wake:urgent")  # noqa: SLF001
     index.max_entries = 4
     assert _wake_snapshot(store) == _wake_snapshot(ConversationStore(root))
     assert index.stats()["entries"] == 0
@@ -591,7 +591,7 @@ def test_scan_index_stays_bounded_and_reports_structured_warnings(tmp_path) -> N
     assert len(index.warnings) == 1
 
     budget = ConversationStore(root)
-    budget_index = budget._scan_index("observations")  # noqa: SLF001
+    budget_index = budget.storage.indexes.get("observations")  # noqa: SLF001
     assert budget_index.max_entries >= 1
     _seed_observations(
         root,
@@ -614,7 +614,7 @@ def test_scan_index_entries_budget_holds_under_name_rotation(tmp_path) -> None:
     root = tmp_path / "conversations"
     limit = 4
     store = _bounded_wake_store(root, limit)
-    queue = store.wake_queue_dir / "urgent"
+    queue = store.storage.wake_queue_dir / "urgent"
 
     live: dict[str, Path] = {}
     for position in range(12):
@@ -630,7 +630,7 @@ def test_scan_index_entries_budget_holds_under_name_rotation(tmp_path) -> None:
     assert {path.name for path in queue.glob("*.json")} == {
         f"{name}.json" for name in live
     }
-    retained = set(store._scan_index("wake:urgent")._entries)  # noqa: SLF001
+    retained = set(store.storage.indexes.get("wake:urgent")._entries)  # noqa: SLF001
     assert retained == {path.name for path in queue.glob("*.json")}
     assert retained.isdisjoint({f"wake-rot-{position:02d}.json" for position in range(9)})
 
@@ -663,7 +663,7 @@ def test_scan_index_entries_budget_when_live_set_stays_small(tmp_path) -> None:
     assert hot[1] == []
     stats = _index_stats(store, "wake:urgent")
     assert stats["entries"] <= limit
-    assert set(store._scan_index("wake:urgent")._entries) == {  # noqa: SLF001
+    assert set(store.storage.indexes.get("wake:urgent")._entries) == {  # noqa: SLF001
         survivor.name
     }
 
@@ -673,7 +673,7 @@ def test_scan_index_lru_evicts_oldest_when_one_scan_exceeds_limit(tmp_path) -> N
     root = tmp_path / "conversations"
     limit = 4
     store = ConversationStore(root)
-    index = store._scan_index("wake:urgent")  # noqa: SLF001
+    index = store.storage.indexes.get("wake:urgent")  # noqa: SLF001
     index.max_entries = limit
 
     # (1) 纯索引层: 单轮写入 6 条(dict 负载,记录数恒为 0)必须仍受条目预算约束。
@@ -743,7 +743,7 @@ def test_scan_index_does_not_prune_when_directory_is_unreadable(
     for position in range(3):
         _seed_wake(root, "urgent", f"wake-kept-{position}", created_at=1.0 + position)
     baseline = _wake_snapshot(store)
-    index = store._scan_index("wake:urgent")  # noqa: SLF001
+    index = store.storage.indexes.get("wake:urgent")  # noqa: SLF001
     before = set(index._entries)
     assert before == {f"wake-kept-{position}.json" for position in range(3)}
 
@@ -752,7 +752,7 @@ def test_scan_index_does_not_prune_when_directory_is_unreadable(
     # OSError 分支返回 None),从而确定性地走"不可列出"状态机。
     real_match_names = store_module._scan_dir_match_names  # noqa: SLF001
     real_glob = Path.glob
-    blocked = store.wake_queue_dir / "urgent"
+    blocked = store.storage.wake_queue_dir / "urgent"
 
     def unreadable_match_names(directory, pattern):
         if Path(directory) == blocked:
@@ -850,14 +850,14 @@ def test_scan_index_dir_too_large_uses_the_query_pattern(tmp_path) -> None:
     root = tmp_path / "conversations"
     limit = 4
     store = _bounded_wake_store(root, limit)
-    queue = store.wake_queue_dir / "urgent"
+    queue = store.storage.wake_queue_dir / "urgent"
 
     for position in range(limit - 1):
         _seed_wake(root, "urgent", f"wake-live-{position}", created_at=1.0 + position)
     # 目录里另有 4 个不匹配 *.json 的邻居: 它们不是本轮要扫的目标,不得计入上界。
     for position in range(4):
         (queue / f"wake-noise-{position}.json.bak").write_text("{}", encoding="utf-8")
-    index = store._scan_index("wake:urgent")  # noqa: SLF001
+    index = store.storage.indexes.get("wake:urgent")  # noqa: SLF001
     assert _wake_snapshot(store) == _wake_snapshot(ConversationStore(root))
     assert index.stats()["entries"] == limit - 1
     assert [item["reason"] for item in index.warnings] == []
@@ -873,7 +873,7 @@ def test_scan_index_dir_too_large_uses_the_query_pattern(tmp_path) -> None:
 
 def test_scan_index_schema_constant_is_self_consistent(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
-    index = store._scan_index("wake:urgent")  # noqa: SLF001
+    index = store.storage.indexes.get("wake:urgent")  # noqa: SLF001
     assert index.schema == _SCAN_INDEX_SCHEMA
     assert index.stats()["schema"] == _SCAN_INDEX_SCHEMA
 
@@ -881,7 +881,7 @@ def test_scan_index_schema_constant_is_self_consistent(tmp_path) -> None:
 def test_ordered_scan_keeps_path_sort_order_for_tricky_names(tmp_path) -> None:
     root = tmp_path / "conversations"
     store = ConversationStore(root)
-    queue = store.wake_queue_dir / "urgent"
+    queue = store.storage.wake_queue_dir / "urgent"
     queue.mkdir(parents=True, exist_ok=True)
     for name in (
         "wake-0002.json",
@@ -896,7 +896,7 @@ def test_ordered_scan_keeps_path_sort_order_for_tricky_names(tmp_path) -> None:
     # 目录名也匹配 pattern: 旧实现的 glob 会把它当成一条记录(读取时报错),顺序也必须一致。
     (queue / "zz-dir.json").mkdir(parents=True, exist_ok=True)
 
-    index = store._scan_index("wake:urgent")  # noqa: SLF001
+    index = store.storage.indexes.get("wake:urgent")  # noqa: SLF001
     expected = [path.name for path in sorted(queue.glob("*.json"))]
     first = index.ordered_paths(queue, "*.json")
     assert [path.name for path in first] == expected
@@ -925,7 +925,7 @@ def test_concurrent_observation_writers_do_not_lose_or_duplicate(tmp_path) -> No
     def writer(offset: int) -> None:
         try:
             for position in range(offset, total, 4):
-                store.append_observation(
+                store.observations.append(
                     {
                         "thread_id": thread.thread_id,
                         "event_type": "child_agent_event",
@@ -941,7 +941,7 @@ def test_concurrent_observation_writers_do_not_lose_or_duplicate(tmp_path) -> No
         while not stop.is_set():
             ids = [
                 item.observation_id
-                for item in store.unhandled_observations_requiring_main(limit=0)
+                for item in store.observations.unhandled_requiring_main(limit=0)
             ]
             seen.append(ids)
 
@@ -957,11 +957,11 @@ def test_concurrent_observation_writers_do_not_lose_or_duplicate(tmp_path) -> No
     assert not errors
     for ids in seen:
         assert len(ids) == len(set(ids)), "并发读返回了重复观察事件"
-    final = [item.observation_id for item in store.unhandled_observations_requiring_main(limit=0)]
+    final = [item.observation_id for item in store.observations.unhandled_requiring_main(limit=0)]
     assert len(final) == len(set(final)) == total, "并发写入后丢失或重复了观察事件"
     assert final == [
         item.observation_id
-        for item in ConversationStore(root).unhandled_observations_requiring_main(limit=0)
+        for item in ConversationStore(root).observations.unhandled_requiring_main(limit=0)
     ]
 
 
@@ -977,7 +977,7 @@ def test_concurrent_wake_writers_do_not_lose_or_duplicate(tmp_path) -> None:
     def writer(offset: int, kind: str) -> None:
         try:
             for position in range(offset, total, 3):
-                store.raise_wake_signal(
+                store.wakes.raise_signal(
                     {
                         "thread_id": thread.thread_id,
                         "reason": "agent_event",
@@ -992,7 +992,7 @@ def test_concurrent_wake_writers_do_not_lose_or_duplicate(tmp_path) -> None:
 
     def reader() -> None:
         while not stop.is_set():
-            signals, load_errors = store.pending_wake_signals_report(limit=0)
+            signals, load_errors = store.wakes.pending_report(limit=0)
             assert not load_errors
             seen.append([item.wake_signal_id for item in signals])
 
@@ -1012,7 +1012,7 @@ def test_concurrent_wake_writers_do_not_lose_or_duplicate(tmp_path) -> None:
     assert not errors
     for ids in seen:
         assert len(ids) == len(set(ids))
-    final, load_errors = store.pending_wake_signals_report(limit=0)
+    final, load_errors = store.wakes.pending_report(limit=0)
     assert not load_errors
     ids = [item.wake_signal_id for item in final]
     assert len(ids) == len(set(ids)) == total
@@ -1030,7 +1030,7 @@ def test_concurrent_policy_writers_do_not_lose_or_duplicate(tmp_path) -> None:
     def writer(offset: int) -> None:
         try:
             for position in range(offset, total, 3):
-                store.set_progress_policy(
+                store.progress.create(
                     {
                         "thread_id": thread.thread_id,
                         "interval_seconds": 300,
@@ -1042,7 +1042,7 @@ def test_concurrent_policy_writers_do_not_lose_or_duplicate(tmp_path) -> None:
 
     def reader() -> None:
         while not stop.is_set():
-            policies, load_errors = store.list_progress_policies_report()
+            policies, load_errors = store.progress.list_report()
             assert not load_errors
             ids = [item.policy_id for item in policies]
             assert len(ids) == len(set(ids))
@@ -1059,7 +1059,7 @@ def test_concurrent_policy_writers_do_not_lose_or_duplicate(tmp_path) -> None:
 
     assert not errors
     assert seen
-    policies, load_errors = store.list_progress_policies_report()
+    policies, load_errors = store.progress.list_report()
     assert not load_errors
     ids = [item.policy_id for item in policies]
     assert len(ids) == len(set(ids)) == total

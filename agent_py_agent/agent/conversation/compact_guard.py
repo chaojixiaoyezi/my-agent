@@ -153,7 +153,7 @@ def record_compact_failure(
     now: float,
 ) -> None:
     try:
-        store.record_compact_failure(
+        store.threads.record_compact_failure(
             thread.thread_id,
             failure_code=code,
             expected_generation=thread.compact_generation,

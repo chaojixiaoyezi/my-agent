@@ -17,13 +17,13 @@ from agent_py_agent.agent.contracts.model_call_ledger import (
 )
 from agent_py_agent.agent.conversation.agent_activity import conversation_agent_activity
 from agent_py_agent.agent.conversation.auxiliary_model_call import settle_standalone_model_usage
+from agent_py_agent.agent.conversation.background_context import _minimal_context_bundle
 from agent_py_agent.agent.conversation.model_metrics import (
     model_metrics_from_thread,
     newer_model_metrics,
     public_model_metrics,
     publish_model_metrics,
 )
-from agent_py_agent.agent.conversation.runtime import _minimal_context_bundle
 from agent_py_agent.agent.conversation.store import ConversationStore
 from agent_py_agent.cli.chat_parts.tui_block_renderer import TuiRenderContext, _render_input_status
 from agent_py_agent.cli.chat_parts.tui_markdown import display_width_text
@@ -35,7 +35,7 @@ from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime, TuiTurnSummary
 # 函数用途: 构造可验证主子代理归属及调用用量的本地环境。
 def fixture(tmp_path):
     store = ConversationStore(tmp_path)
-    thread = store.get_or_create_thread({"canonical_user_id": "test-user"})
+    thread = store.threads.get_or_create({"canonical_user_id": "test-user"})
     clock = SimpleNamespace(now=10.0)
     ledger = ModelCallLedger(ModelCallLedgerOptions(max_records=2), context=ModelCallLedgerContext(now=lambda: clock.now))
     runtime = TuiRuntime("metrics-test")
@@ -106,7 +106,7 @@ def test_previous_requests_accumulate_but_current_persisted_snapshot_not_added_t
     settled(agent, params, clock)
     summary = model_call_summary(agent, request_id=params.request_id)
     for event_id, request_id in (("previous", "old-request"), ("current", params.request_id)):
-        agent.conversation_store.append_model_usage_once({"event_id": event_id, "thread_id": thread.thread_id,
+        agent.conversation_store.model_usage.append_once({"event_id": event_id, "thread_id": thread.thread_id,
             "request_id": request_id, "run_id": params.run_id, "task_id": "task-1", "source": "test", "model_calls": summary})
     metrics = publish_model_metrics(agent, params, pending=False, tool_count=0)
     assert metrics["input_tokens"] == 2000 and metrics["output_tokens"] == 200
@@ -126,7 +126,7 @@ def test_usage_handoff_settles_once_and_restart_adds_new_calls(tmp_path):
     assert finalizer.settle_model_usage(params) == first
     settled(agent, params, clock, call_id="second-call")
     finalizer.settle_model_usage(params)
-    assert agent.conversation_store.model_usage_summary(thread.thread_id)["provider"]["input_tokens"] == 2000
+    assert agent.conversation_store.model_usage.summary(thread.thread_id)["provider"]["input_tokens"] == 2000
 
     # 同一任务/消息在进程重启后是新的真实调用，不得与旧调用相减或复用事件键。
     agent._model_call_ledger = ModelCallLedger()
@@ -135,10 +135,10 @@ def test_usage_handoff_settles_once_and_restart_adds_new_calls(tmp_path):
     value = publish_model_metrics(agent, params, pending=False)
     assert value["input_tokens"] == 3000
     finalizer.settle_model_usage(params)
-    rows, errors = agent.conversation_store.model_usage_events_report(thread.thread_id)
+    rows, errors = agent.conversation_store.model_usage.events_report(thread.thread_id)
     assert not errors and len(rows) == 3
     assert rows[0].model_calls["usage_scope_id"] != rows[-1].model_calls["usage_scope_id"]
-    assert agent.conversation_store.model_usage_summary(thread.thread_id)["provider"]["input_tokens"] == 3000
+    assert agent.conversation_store.model_usage.summary(thread.thread_id)["provider"]["input_tokens"] == 3000
 
 
 @pytest.mark.parametrize("error", [InterruptedError("cancelled"), RuntimeError("provider failed")])
@@ -159,7 +159,7 @@ def test_exception_closeout_keeps_known_usage_without_masking_error(tmp_path, mo
     with pytest.raises(type(error)) as caught:
         runtime_mixin._run_once_with_params(agent, "继续整理原项目", params)
     assert caught.value is error
-    summary = agent.conversation_store.model_usage_summary(thread.thread_id)
+    summary = agent.conversation_store.model_usage.summary(thread.thread_id)
     assert summary["provider"]["input_tokens"] == 1000
     assert summary["provider"]["output_tokens"] == 100
 
@@ -189,13 +189,13 @@ def test_pruned_detail_preserves_total_and_retry_does_not_add_logical_round(tmp_
 
 def test_child_projection_isolation_and_no_model_context_change(tmp_path):
     agent, params, clock, runtime, main = fixture(tmp_path)
-    child = agent.conversation_store.get_or_create_thread({"canonical_user_id": "test-child", "channel_conversation_id": "child"})
+    child = agent.conversation_store.threads.get_or_create({"canonical_user_id": "test-child", "channel_conversation_id": "child"})
     params.task_attributes["agent_thread_id"] = child.thread_id
     before = agent.conversation_store.context_bundle(child.thread_id)
     response = settled(agent, params, clock)
     publish_model_metrics(agent, params, pending=False, response=response)
-    assert agent.conversation_store.load_thread(main.thread_id).model_metrics == {}
-    stored = agent.conversation_store.load_thread(child.thread_id)
+    assert agent.conversation_store.threads.load(main.thread_id).model_metrics == {}
+    stored = agent.conversation_store.threads.load(child.thread_id)
     assert stored.model_metrics and stored.updated_at == child.updated_at
     assert agent.conversation_store.context_bundle(child.thread_id) == before
     assert _minimal_context_bundle(child) == _minimal_context_bundle(stored)
@@ -230,7 +230,7 @@ def test_compact_idle_and_older_poll_do_not_clear_metrics():
 def test_standalone_compact_usage_is_durable_idempotent_and_visible_next_turn(tmp_path):
     agent, params, clock, _runtime, thread = fixture(tmp_path)
     settled(agent, params, clock)
-    agent.conversation_store.append_model_usage_once({"event_id": "previous", "thread_id": thread.thread_id,
+    agent.conversation_store.model_usage.append_once({"event_id": "previous", "thread_id": thread.thread_id,
         "request_id": params.request_id, "run_id": params.run_id, "task_id": "task-1", "source": "test",
         "model_calls": model_call_summary(agent, request_id=params.request_id)})
     params.request_id = "compact-operation-1"
@@ -242,7 +242,7 @@ def test_standalone_compact_usage_is_durable_idempotent_and_visible_next_turn(tm
     metrics = model_metrics_from_thread(agent.conversation_store, thread.thread_id)
     assert metrics["input_tokens"] == 1400 and metrics["output_tokens"] == 140
     assert metrics["model_rounds"] == 1 and metrics["tool_count"] == 0
-    rows, errors = agent.conversation_store.model_usage_events_report(thread.thread_id)
+    rows, errors = agent.conversation_store.model_usage.events_report(thread.thread_id)
     assert not errors and len(rows) == 2
     params.request_id = "after-compact"
     params.live_archive_state = {}
@@ -290,7 +290,7 @@ def test_compact_settles_own_scope_on_success_and_failure(tmp_path, monkeypatch,
             compact._execute_compact_request(request)
     else:
         compact._execute_compact_request(request)
-    events, errors = agent.conversation_store.model_usage_events_report(thread.thread_id)
+    events, errors = agent.conversation_store.model_usage.events_report(thread.thread_id)
     assert not errors and len(events) == int(standalone)
 
 
@@ -321,7 +321,7 @@ def test_metrics_whitelist_preserves_unknown_and_orders_samples():
 def test_gateway_rich_event_reaches_same_tui_projection(tmp_path):
     import json
 
-    from agent_py_agent.agent.gateway_parts.request_execution import BufferedChunkStreamWriter
+    from agent_py_agent.agent.gateway_parts.stream_writer import BufferedChunkStreamWriter
 
     path = tmp_path / "chunks.jsonl"
     writer = BufferedChunkStreamWriter(path, rich_transcript=True)
@@ -347,6 +347,6 @@ def test_broken_telemetry_cannot_fail_model_call(tmp_path, monkeypatch):
     def broken(*_args, **_kwargs):
         raise KeyError("unavailable thread")
 
-    monkeypatch.setattr(agent.conversation_store, "update_model_metrics", broken)
+    monkeypatch.setattr(agent.conversation_store.model_usage, "update_metrics", broken)
     assert publish_model_metrics(agent, params, pending=False) == {}
     assert agent._model_call_ledger.records()[-1].status == "finished"

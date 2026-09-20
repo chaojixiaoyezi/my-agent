@@ -22,13 +22,13 @@ def read_gateway_display_page(
     _archive_id, target_id = validate_display_archive_reference(reference)
     owner_agent = resolve_gateway_scope_agent(base_agent, scope)
     store = owner_agent.conversation_store
-    thread, error = store.resolve_thread_report(
+    thread, error = store.threads.resolve_report(
         channel=scope.channel, channel_conversation_id=scope.conversation_id, channel_user_id=scope.user_id,
     )
     if error is not None or thread is None:
         raise DisplayArchiveError("DISPLAY_SCOPE_DENIED", "当前会话无权读取这份原文。")
     if target_id != thread.thread_id:
-        target, error = store.load_thread_report(target_id)
+        target, error = store.threads.load_report(target_id)
         metadata = target.metadata if target is not None else {}
         if (error is not None or metadata.get("thread_kind") != "agent"
                 or metadata.get("root_agent_thread_id") != thread.thread_id):

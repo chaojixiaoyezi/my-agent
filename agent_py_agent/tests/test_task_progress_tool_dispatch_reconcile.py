@@ -159,11 +159,9 @@ def test_read_explicit_current_task_id_uses_canonical_task_path_ledger(tmp_path)
         ledger_id,
         {"items": [{"id": "C1", "title": "实现核心功能", "status": "in_progress"}]},
     )
-    store = SimpleNamespace(
-        load_task_link=lambda selected: (
+    store = SimpleNamespace(tasks=SimpleNamespace(load=lambda selected: (
             SimpleNamespace(task_path=str(task_root)) if selected == task_id else None
-        )
-    )
+        )))
     agent = SimpleNamespace(
         conversation_store=store,
         home_paths=SimpleNamespace(owner_home_dir=str(home)),

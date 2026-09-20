@@ -560,7 +560,7 @@ def test_capability_request_submission_notifies_parent_thread():
             goal="测试提交推送", thought="t", plan=["p"], allowed_tools=["write_file"],
         )
         store = agent.conversation_store
-        thread = store.thread_for_task(task.id)
+        thread = store.tasks.thread_for(task.id)
         if thread is None and hasattr(store, "open_thread_for_task"):
             store.open_thread_for_task(task.id)
 
@@ -584,7 +584,7 @@ def test_capability_request_submission_notifies_parent_thread():
         assert reloaded.capability_requests, "请求必须落账"
         # 通知失败时会落结构化错误账本;成功时不应有错误记录
         notify_error = reloaded.attributes.get("capability_request_notify_error")
-        thread_now = store.thread_for_task(task.id)
+        thread_now = store.tasks.thread_for(task.id)
         if thread_now is not None:
             assert notify_error is None, f"有 thread 时通知不应失败: {notify_error}"
 
@@ -606,7 +606,7 @@ def test_capability_request_wake_carries_parent_tool_authority_and_separate_appr
             allowed_tools=["capability_request"],
         )
         store = agent.conversation_store
-        thread = store.get_or_create_thread(
+        thread = store.threads.get_or_create(
             {
                 "canonical_user_id": "owner-capability-test",
                 "channel": "internal",
@@ -614,7 +614,7 @@ def test_capability_request_wake_carries_parent_tool_authority_and_separate_appr
                 "channel_user_id": "owner-capability-test",
             }
         )
-        store.bind_task(
+        store.tasks.bind(
             {
                 "thread_id": thread.thread_id,
                 "task_id": task.id,
@@ -635,7 +635,7 @@ def test_capability_request_wake_carries_parent_tool_authority_and_separate_appr
             runner_context.restore_current_subagent_context(agent, previous)
 
         assert result.ok
-        events = store.unhandled_observations_requiring_main(limit=20)
+        events = store.observations.unhandled_requiring_main(limit=20)
         event = next(item for item in events if item.event_type == "subagent_capability_request_open")
         authority = event.metadata["parent_tool_authority"]
         request_scope = event.metadata["capability_request"]

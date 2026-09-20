@@ -17,7 +17,7 @@ def _agent_with_finding(tmp_path, *, finding_owner: str | None = None):
         tmp_path,
     )
     owner_id = str(agent.home_paths.owner_id)
-    thread = agent.conversation_store.get_or_create_thread(
+    thread = agent.conversation_store.threads.get_or_create(
         {
             "canonical_user_id": "user-a",
             "owner_id": owner_id,
@@ -28,7 +28,7 @@ def _agent_with_finding(tmp_path, *, finding_owner: str | None = None):
         }
     )
     audit_id = "audit-root-a"
-    agent.conversation_store.bind_task(
+    agent.conversation_store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": audit_id,
@@ -38,7 +38,7 @@ def _agent_with_finding(tmp_path, *, finding_owner: str | None = None):
             "cancellation_scope": "background",
         }
     )
-    agent.conversation_store.append_observation(
+    agent.conversation_store.observations.append(
         {
             "thread_id": thread.thread_id,
             "event_type": "audit_finding",
@@ -202,7 +202,7 @@ def test_audit_clear_racing_investigation_create_cancels_new_run(
 
     def publish_then_clear(request):
         result = original_publish(request)
-        agent.conversation_store.update_task_status(
+        agent.conversation_store.tasks.update_status(
             {"task_id": audit_id, "status": "cancelled"}
         )
         return result

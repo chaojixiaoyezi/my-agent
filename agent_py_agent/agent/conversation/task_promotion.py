@@ -45,13 +45,13 @@ def promote_current_conversation_task(
         or ""
     ).strip()
     store = getattr(agent, "conversation_store", None)
-    if not thread_id or not task_id or store is None or not callable(getattr(store, "bind_task", None)):
+    if not thread_id or not task_id or store is None or not callable(getattr(getattr(store, 'tasks', None), 'bind', None)):
         return None
     from ..agent_core.runner.context import current_subagent_run_id
 
     child_run_id = current_subagent_run_id(agent)
     if attrs.get(CONVERSATION_TRANSIENT_WORKSPACE_ATTR) is True and not child_run_id:
-        loader = getattr(store, "load_task_link", None)
+        loader = getattr(getattr(store, 'tasks', None), 'load', None)
         try:
             transient = loader(task_id) if callable(loader) else None
         except Exception:
@@ -110,7 +110,7 @@ def promote_current_conversation_task(
         or task_id
     ).strip()
     try:
-        link = store.bind_task(
+        link = store.tasks.bind(
             {
                 "thread_id": thread_id,
                 "task_id": task_id,
@@ -184,7 +184,7 @@ def _materialize_promoted_workspace(
     if store is None:
         return link
     try:
-        return store.bind_task(
+        return store.tasks.bind(
             {
                 "thread_id": str(getattr(link, "thread_id", "") or ""),
                 "task_id": str(getattr(link, "task_id", "") or ""),
@@ -208,7 +208,7 @@ def _materialize_promoted_workspace(
 # 函数用途: 在指定会话中查找一个仍活跃的任务链接。
 def _active_conversation_link(store: object, thread_id: str, task_id: str):
     try:
-        links, errors = store.active_task_links_report(thread_id)
+        links, errors = store.tasks.active_report(thread_id)
     except Exception:
         return None
     if errors:
@@ -235,7 +235,7 @@ def _detached_named_work_link(link: object) -> bool:
 # 函数用途: 读取线程最近任务投影，供回绑时淘汰本轮占位记录，不直接决定工作目录。
 def _sticky_workspace_task_id(store: object, thread_id: str) -> str:
     """读取线程最近任务投影；仅用于替换占位 link，不直接授予下一轮 cwd。"""
-    loader = getattr(store, "load_thread", None)
+    loader = getattr(getattr(store, 'threads', None), 'load', None)
     if not callable(loader):
         return ""
     try:
@@ -376,8 +376,8 @@ def _remove_rebound_placeholder_workspace(
     if source is None or target is None or source == target or not candidate_id:
         return False
     try:
-        link = store.load_task_link(candidate_id)
-        thread = store.load_thread(thread_id)
+        link = store.tasks.load(candidate_id)
+        thread = store.threads.load(thread_id)
     except Exception:
         return False
     if (
@@ -416,7 +416,7 @@ def _publish_current_request_task_binding(current: object, link: object) -> bool
 # 函数用途: 把本轮选中的任务目录记到 thread，供停止、完成或重启后的下一轮继续继承。
 def _remember_conversation_workspace(store: object, link: object) -> bool:
     workspace = _selected_task_workspace(getattr(link, "task_path", ""))
-    writer = getattr(store, "select_workspace_task", None)
+    writer = getattr(getattr(store, 'tasks', None), 'select_workspace_task', None)
     if workspace is None or not callable(writer):
         return False
     try:
@@ -463,7 +463,7 @@ def _activate_reusable_workspace_link(agent: object, store: object, link: object
     if not goal_resume:
         return _continue_terminal_link_as_new_execution(agent, store, link)
     try:
-        reopened = store.update_task_status({"task_id": link.task_id, "status": "active"})
+        reopened = store.tasks.update_status({"task_id": link.task_id, "status": "active"})
     except Exception:
         return None
     if reopened is None:
@@ -483,7 +483,7 @@ def _activate_reusable_workspace_link(agent: object, store: object, link: object
 # 函数用途: 检查精确目标是否允许恢复这份任务，不把用户新聊天当作 resume。
 def _bound_goal_requires_in_place_resume(store: object, link: object) -> bool | None:
     try:
-        goal = store.load_goal(
+        goal = store.goals.load(
             str(getattr(link, "thread_id", "") or ""),
             task_id=str(getattr(link, "task_id", "") or ""),
         )
@@ -538,7 +538,7 @@ def _continue_terminal_link_as_new_execution(agent: object, store: object, link:
     if not current_goal:
         return None
     try:
-        successor = store.bind_task(
+        successor = store.tasks.bind(
             {
                 "thread_id": thread_id,
                 "task_id": successor_id,
@@ -565,7 +565,7 @@ def _terminal_successor_task_id(
 ) -> str:
     """Choose a stable request-local successor id without mutating an existing other task."""
     try:
-        links, errors = store.task_links_report(thread_id)
+        links, errors = store.tasks.list_report(thread_id)
     except Exception:
         return ""
     if errors:
@@ -613,7 +613,7 @@ def _supersede_prior_current(
     if _active_conversation_link(store, thread_id, prior_current_id) is None:
         return True
     try:
-        return store.update_task_status(
+        return store.tasks.update_status(
             {"task_id": prior_current_id, "status": "superseded"}
         ) is not None
     except Exception:
@@ -622,7 +622,7 @@ def _supersede_prior_current(
 
 def _reusable_conversation_workspace_link(store: object, thread_id: str, task_id: str):
     try:
-        links, errors = store.task_links_report(thread_id)
+        links, errors = store.tasks.list_report(thread_id)
     except Exception:
         return None
     if errors:
@@ -716,7 +716,7 @@ def _append_thread_policy_execution_state(
     sources_by_task_id: dict[str, list[str]],
     load_errors: list[dict[str, object]],
 ) -> None:
-    loader = getattr(store, "list_progress_policies_report", None)
+    loader = getattr(getattr(store, 'progress', None), 'list_report', None)
     if not callable(loader):
         load_errors.append(
             {
@@ -761,7 +761,7 @@ def _append_thread_claim_execution_state(
     sources_by_task_id: dict[str, list[str]],
     load_errors: list[dict[str, object]],
 ) -> None:
-    loader = getattr(store, "load_background_run_claim_report", None)
+    loader = getattr(getattr(store, "claims", None), "load_report", None)
     if not callable(loader):
         load_errors.append(
             {
@@ -813,7 +813,7 @@ def _append_execution_source(
         sources_by_task_id.setdefault(selected_id, []).append(source)
 
 
-# LLM: 仅由正常 runtime turn 终态调用；当前子树和未读信封是权威，不用工作片开始时的冻结阶段否定已接收结果。
+# LLM: 插话持久操作经 guidance 领域组件； 仅由正常 runtime turn 终态调用；当前子树和未读信封是权威，不用工作片开始时的冻结阶段否定已接收结果。
 # 函数用途: 在没有待处理引导、活跃目标、未终态子代理或未读事件时关闭普通会话任务，不检查回复质量。
 def complete_current_conversation_task(
     agent: object,
@@ -849,17 +849,17 @@ def complete_current_conversation_task(
     completed_work_kind = ""
     audit_activation_ready = True
     try:
-        with store.task_transition_guard(task_id):
+        with store.tasks.transition_guard(task_id):
             # `/goal` 的每一轮也会正常结束当前模型 turn，但“本轮有最终回复”不等于
             # “整个持续目标已经达成”。活跃目标只能由 update_goal 明确写入终态；
             # 目标记录损坏时同样 fail-closed，不能趁读取失败误关根任务。
-            goal = store.load_goal(thread_id, task_id=task_id)
+            goal = store.goals.load(thread_id, task_id=task_id)
             if goal is not None and goal.task_id == task_id and goal.status != "complete":
                 return False
             link = _active_conversation_link(store, thread_id, task_id)
             if (
                 link is None
-                or store.pending_guidance("task", task_id, limit=1)
+                or store.guidance.pending("task", task_id, limit=1)
                 or _conversation_task_has_open_subagents(agent, task_id)
                 or conversation_task_has_unseen_lifecycle_wakes(
                     store,
@@ -892,7 +892,7 @@ def complete_current_conversation_task(
                 audit_activation_ready = (
                     audit_task_activation_facts(agent, link).get("ready") is True
                 )
-            updated = store.update_task_status(
+            updated = store.tasks.update_status(
                 {
                     "task_id": task_id,
                     "status": (
@@ -936,14 +936,14 @@ def conversation_task_has_unseen_lifecycle_wakes(
     selected = str(task_id or "").strip()
     if not selected or store is None:
         return True
-    loader = getattr(store, "pending_wake_signals_report", None)
+    loader = getattr(getattr(store, 'wakes', None), 'pending_report', None)
     try:
         if callable(loader):
             signals, load_errors = loader(limit=0)
             if load_errors:
                 return True
         else:
-            signals = store.pending_wake_signals(limit=0)
+            signals = store.wakes.pending(limit=0)
     except Exception:
         return True
     from .models import SUBAGENT_LIFECYCLE_WAKE_REASONS
@@ -978,8 +978,8 @@ def _audit_owner_report_pending(store: object, task_id: str) -> bool:
     if not selected:
         return True
     try:
-        wake_signals = store.pending_wake_signals(limit=0)
-        observations = store.unhandled_observations_requiring_main(limit=0)
+        wake_signals = store.wakes.pending(limit=0)
+        observations = store.observations.unhandled_requiring_main(limit=0)
     except Exception:
         return True
     if any(
@@ -1002,7 +1002,7 @@ def complete_named_audit_task_if_settled(agent: object, task_id: str) -> bool:
 
     selected = str(task_id or "").strip()
     store = getattr(agent, "conversation_store", None)
-    loader = getattr(store, "load_task_link", None)
+    loader = getattr(getattr(store, 'tasks', None), 'load', None)
     if not selected or not callable(loader):
         return False
     try:

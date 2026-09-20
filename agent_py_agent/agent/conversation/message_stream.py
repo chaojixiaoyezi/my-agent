@@ -38,7 +38,7 @@ def read_background_response_page(
     store: object, thread_id: str, *, after: int = 0, include_foreground: bool = False,
     include_display_checkpoints: bool = False,
 ) -> tuple[list[dict], int, bool]:
-    entries, cursor, errors = store.message_page_after_offset_report(thread_id, after=after)
+    entries, cursor, errors = store.messages.page_after_offset_report(thread_id, after=after)
     if errors:
         return [], after, False
     notices = []

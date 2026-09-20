@@ -108,7 +108,7 @@ def _bind_conversation_task(
     run_status: str = "active",
 ):
     store = scoped.conversation_store
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "u-restart",
             "channel": "feishu",
@@ -117,7 +117,7 @@ def _bind_conversation_task(
         }
     )
     parent_task_id = f"parent-{task.id}"
-    store.bind_task(
+    store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": parent_task_id,
@@ -125,7 +125,7 @@ def _bind_conversation_task(
             "status": parent_status,
         }
     )
-    store.bind_task(
+    store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": task.id,
@@ -401,7 +401,7 @@ def test_reconciler_cancels_old_run_when_parent_conversation_completed(
     base_agent, owner, scoped = _scoped_restart_fixture(tmp_path)
     task = _running_restart_task(scoped, heartbeat_at=time.time() - 120.0)
     thread, parent_task_id = _bind_conversation_task(scoped, task)
-    scoped.conversation_store.update_task_status(
+    scoped.conversation_store.tasks.update_status(
         {"task_id": parent_task_id, "status": "completed", "expected_status": "active"}
     )
     shared_active_owner_registry(base_agent).record(owner)
@@ -412,7 +412,7 @@ def test_reconciler_cancels_old_run_when_parent_conversation_completed(
 
     assert scoped.subagents.load(task.id).status == "CANCELLED"
     assert starts == []
-    links = {link.task_id: link for link in scoped.conversation_store.task_links(thread.thread_id)}
+    links = {link.task_id: link for link in scoped.conversation_store.tasks.list(thread.thread_id)}
     assert links[parent_task_id].status == "completed"
     assert links[task.id].status == "cancelled"
     assert any(int(report.get("parent_closed_cancelled") or 0) == 1 for report in reports)
@@ -455,7 +455,7 @@ def test_reconciler_cancels_old_run_when_parent_conversation_interrupted(
     base_agent, owner, scoped = _scoped_restart_fixture(tmp_path)
     task = _running_restart_task(scoped, heartbeat_at=time.time() - 120.0)
     _thread, parent_task_id = _bind_conversation_task(scoped, task)
-    scoped.conversation_store.update_task_status(
+    scoped.conversation_store.tasks.update_status(
         {"task_id": parent_task_id, "status": "interrupted", "expected_status": "active"}
     )
     shared_active_owner_registry(base_agent).record(owner)
@@ -475,7 +475,7 @@ def test_reconciler_holds_scoped_run_when_parent_link_is_missing(
 ) -> None:
     base_agent, owner, scoped = _scoped_restart_fixture(tmp_path)
     task = _running_restart_task(scoped, heartbeat_at=time.time() - 120.0)
-    thread = scoped.conversation_store.get_or_create_thread(
+    thread = scoped.conversation_store.threads.get_or_create(
         {
             "canonical_user_id": "u-restart",
             "channel": "feishu",
@@ -508,7 +508,7 @@ def test_reconciler_holds_scoped_run_when_parent_link_is_corrupt(
     base_agent, owner, scoped = _scoped_restart_fixture(tmp_path)
     task = _running_restart_task(scoped, heartbeat_at=time.time() - 120.0)
     _thread, parent_task_id = _bind_conversation_task(scoped, task)
-    (scoped.conversation_store.tasks_dir / f"{parent_task_id}.json").write_text(
+    (scoped.conversation_store.storage.tasks_dir / f"{parent_task_id}.json").write_text(
         "{broken",
         encoding="utf-8",
     )
@@ -530,7 +530,7 @@ def test_auto_start_and_dispatch_both_reject_run_under_completed_parent(
     _base_agent, _owner, scoped = _scoped_restart_fixture(tmp_path)
     task = _running_restart_task(scoped, heartbeat_at=time.time() - 120.0)
     _thread, parent_task_id = _bind_conversation_task(scoped, task)
-    scoped.conversation_store.update_task_status(
+    scoped.conversation_store.tasks.update_status(
         {"task_id": parent_task_id, "status": "completed", "expected_status": "active"}
     )
     pending = scoped.subagents.load(task.id)
@@ -565,10 +565,10 @@ def test_live_claim_keeps_child_allowed_after_parent_projection_completed(tmp_pa
     _base_agent, _owner, scoped = _scoped_restart_fixture(tmp_path)
     task = _running_restart_task(scoped, heartbeat_at=time.time())
     thread, parent_task_id = _bind_conversation_task(scoped, task)
-    scoped.conversation_store.update_task_status(
+    scoped.conversation_store.tasks.update_status(
         {"task_id": parent_task_id, "status": "completed", "expected_status": "active"}
     )
-    claim = scoped.conversation_store.claim_background_run(
+    claim = scoped.conversation_store.claims.acquire(
         {
             "thread_id": thread.thread_id,
             "task_id": parent_task_id,
@@ -606,7 +606,7 @@ def test_explicit_user_stop_resume_reopens_only_the_same_conversation_run(
         },
     }
     scoped.subagents.save(stopped)
-    cancelled_link = scoped.conversation_store.update_task_status(
+    cancelled_link = scoped.conversation_store.tasks.update_status(
         {
             "task_id": task.id,
             "status": "cancelled",
@@ -632,7 +632,7 @@ def test_explicit_user_stop_resume_reopens_only_the_same_conversation_run(
         task.id,
         retry_reason="reason_code=conversation_user_stop; mode=same_run_resume",
     )
-    links, errors = scoped.conversation_store.task_links_report(thread.thread_id)
+    links, errors = scoped.conversation_store.tasks.list_report(thread.thread_id)
     child_link = next(item for item in links if item.task_id == task.id)
 
     assert errors == []
@@ -895,7 +895,7 @@ def test_naturally_settled_audit_source_worker_projects_done_verified(
     completed = scoped.subagents.load(task.id)
     links = {
         link.task_id: link
-        for link in scoped.conversation_store.task_links(thread.thread_id)
+        for link in scoped.conversation_store.tasks.list(thread.thread_id)
     }
     assert decision.allowed is False
     assert decision.should_cancel is False
@@ -1005,7 +1005,7 @@ def test_settled_source_worker_repairs_legacy_false_cancellation(
         },
     }
     scoped.subagents.save(current)
-    assert scoped.conversation_store.update_task_status(
+    assert scoped.conversation_store.tasks.update_status(
         {
             "task_id": task.id,
             "status": "cancelled",
@@ -1018,7 +1018,7 @@ def test_settled_source_worker_repairs_legacy_false_cancellation(
     repaired = scoped.subagents.load(task.id)
     links = {
         link.task_id: link
-        for link in scoped.conversation_store.task_links(thread.thread_id)
+        for link in scoped.conversation_store.tasks.list(thread.thread_id)
     }
     assert repaired.status == "DONE"
     assert repaired.verification_status == "VERIFIED"
@@ -1047,7 +1047,7 @@ def test_manual_cancel_stays_closed_even_when_named_as_a_resume_run(
         },
     }
     scoped.subagents.save(cancelled)
-    assert scoped.conversation_store.update_task_status(
+    assert scoped.conversation_store.tasks.update_status(
         {
             "task_id": task.id,
             "status": "cancelled",
@@ -1073,7 +1073,7 @@ def test_completed_parent_children_share_one_execution_snapshot(
     first = _running_restart_task(scoped, heartbeat_at=time.time())
     thread, parent_task_id = _bind_conversation_task(scoped, first)
     second = _running_restart_task(scoped, heartbeat_at=time.time())
-    scoped.conversation_store.bind_task(
+    scoped.conversation_store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": second.id,
@@ -1088,10 +1088,10 @@ def test_completed_parent_children_share_one_execution_snapshot(
         "conversation_task_id": parent_task_id,
     }
     scoped.subagents.save(second)
-    scoped.conversation_store.update_task_status(
+    scoped.conversation_store.tasks.update_status(
         {"task_id": parent_task_id, "status": "completed", "expected_status": "active"}
     )
-    assert scoped.conversation_store.claim_background_run(
+    assert scoped.conversation_store.claims.acquire(
         {
             "thread_id": thread.thread_id,
             "task_id": parent_task_id,
@@ -1101,8 +1101,8 @@ def test_completed_parent_children_share_one_execution_snapshot(
     ) is not None
 
     calls = {"policies": 0, "claim": 0}
-    original_policies = scoped.conversation_store.list_progress_policies_report
-    original_claim = scoped.conversation_store.load_background_run_claim_report
+    original_policies = scoped.conversation_store.progress.list_report
+    original_claim = scoped.conversation_store.claims.load_report
 
     def policies(*args, **kwargs):
         calls["policies"] += 1
@@ -1112,8 +1112,8 @@ def test_completed_parent_children_share_one_execution_snapshot(
         calls["claim"] += 1
         return original_claim(*args, **kwargs)
 
-    monkeypatch.setattr(scoped.conversation_store, "list_progress_policies_report", policies)
-    monkeypatch.setattr(scoped.conversation_store, "load_background_run_claim_report", claim)
+    monkeypatch.setattr(scoped.conversation_store.progress, 'list_report', policies)
+    monkeypatch.setattr(scoped.conversation_store.claims, "load_report", claim)
 
     current = [scoped.subagents.load(first.id), scoped.subagents.load(second.id)]
     decisions = conversation_lifecycle_decisions(scoped, current)
@@ -1129,12 +1129,12 @@ def test_unreadable_execution_state_holds_child_under_completed_parent(
     _base_agent, _owner, scoped = _scoped_restart_fixture(tmp_path)
     task = _running_restart_task(scoped, heartbeat_at=time.time())
     _thread, parent_task_id = _bind_conversation_task(scoped, task)
-    scoped.conversation_store.update_task_status(
+    scoped.conversation_store.tasks.update_status(
         {"task_id": parent_task_id, "status": "completed", "expected_status": "active"}
     )
     monkeypatch.setattr(
-        scoped.conversation_store,
-        "load_background_run_claim_report",
+        scoped.conversation_store.claims,
+        "load_report",
         lambda _thread_id: ({"task_id": parent_task_id, "expires_at": "invalid"}, None),
     )
 

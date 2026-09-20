@@ -339,7 +339,7 @@ def test_exact_audit_task_drives_background_inheritance_without_owner_pollution(
     )
 
     store = ConversationStore(owner_home / "conversations")
-    thread = store.get_or_create_thread(
+    thread = store.threads.get_or_create(
         {
             "canonical_user_id": "u-test",
             "channel": "feishu",
@@ -347,7 +347,7 @@ def test_exact_audit_task_drives_background_inheritance_without_owner_pollution(
             "channel_user_id": "u-test",
         }
     )
-    store.bind_task(
+    store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": "audit-task",
@@ -363,7 +363,7 @@ def test_exact_audit_task_drives_background_inheritance_without_owner_pollution(
             "cancellation_scope": "detached",
         }
     )
-    store.bind_task(
+    store.tasks.bind(
         {
             "thread_id": thread.thread_id,
             "task_id": "plain-task",
@@ -387,7 +387,7 @@ def test_exact_audit_task_drives_background_inheritance_without_owner_pollution(
     assert audit_attrs is not None and audit_attrs[AUDIT_ATTR] is True
     assert audit_attrs[AUDIT_WINDOW_ATTR] == 30 * 86400
     assert audit_attrs[AUDIT_OBJECTIVE_ATTR] == "盯新增分片"
-    link = next(item for item in store.task_links(thread.thread_id) if item.task_id == "audit-task")
+    link = next(item for item in store.tasks.list(thread.thread_id) if item.task_id == "audit-task")
     assert link is not None
     assert audit_attrs[AUDIT_DEADLINE_ATTR] == link.expires_at
     assert audit_attrs[CONVERSATION_REQUEST_ID_ATTR] == "audit-task"

@@ -17,8 +17,6 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
-
 from agent_py_agent.agent.agent_core.runtime.loop_support import RunParams
 from agent_py_agent.agent.agent_core.tool_call_runtime import (
     ToolCallRuntimeRequest,
@@ -41,14 +39,14 @@ def _agent_with_self_watch(tmp_path: Path, *, policy_enabled: bool = True):
         ),
         tmp_path,
     )
-    from agent_py_agent.agent.gateway_parts.request_execution import (
-        _gateway_conversation_context,
-        _GatewayConversationLoadRequest,
+    from agent_py_agent.agent.gateway_parts.request_context import (
+        GatewayConversationLoadRequest,
+        gateway_conversation_context,
     )
 
     store = agent.conversation_store
-    conversation = _gateway_conversation_context(
-        _GatewayConversationLoadRequest(
+    conversation = gateway_conversation_context(
+        GatewayConversationLoadRequest(
             agent,
             {
                 "conversation": {
@@ -67,7 +65,7 @@ def _agent_with_self_watch(tmp_path: Path, *, policy_enabled: bool = True):
     (task_path / "output").mkdir(parents=True)
     (task_path / "work").mkdir()
     # 真机实况 1：父任务 active link
-    store.bind_task(
+    store.tasks.bind(
         {
             "thread_id": thread_id,
             "task_id": task_id,
@@ -80,10 +78,10 @@ def _agent_with_self_watch(tmp_path: Path, *, policy_enabled: bool = True):
         }
     )
     # 真机实况 1.5：thread sticky workspace_task_id=父任务（上轮晋升写入）
-    store.select_workspace_task({"thread_id": thread_id, "task_id": task_id})
+    store.tasks.select_workspace_task({"thread_id": thread_id, "task_id": task_id})
     # 真机实况 2：父任务自身的 wait policy（wait 无 run_id 的旧 fallback 产物）
     if policy_enabled:
-        store.set_progress_policy(
+        store.progress.create(
             {
                 "thread_id": thread_id,
                 "task_id": task_id,
@@ -149,7 +147,7 @@ def test_realistic_watch_of_other_run_still_marks_that_run_running(tmp_path):
     """语义保留：wait 显式 watch 子代理时，子代理仍算 running（H2-2 不重复催促）。"""
     agent, thread_id, task_id = _agent_with_self_watch(tmp_path)
     child_id = "subagent-1786245734-a462d5b5"
-    agent.conversation_store.set_progress_policy(
+    agent.conversation_store.progress.create(
         {
             "thread_id": thread_id,
             "task_id": task_id,
@@ -180,7 +178,7 @@ def test_realistic_watch_of_other_run_still_marks_that_run_running(tmp_path):
 
 
 def _retire_with_child(agent, store, thread_id, child_id, *, task_id):
-    store.set_progress_policy(
+    store.progress.create(
         {
             "thread_id": thread_id,
             "task_id": task_id,
@@ -195,7 +193,7 @@ def _retire_with_child(agent, store, thread_id, child_id, *, task_id):
         }
     )
     # 子代理 BLOCKED 终态 link
-    store.bind_task(
+    store.tasks.bind(
         {
             "thread_id": thread_id,
             "task_id": child_id,
@@ -207,11 +205,10 @@ def _retire_with_child(agent, store, thread_id, child_id, *, task_id):
     from agent_py_agent.agent.conversation import (
         BackgroundMainAgentRuntime,
         BackgroundMainAgentScheduler,
-        ConversationStore,
         FakeDeliveryService,
     )
 
-    enabled, _ = store.list_progress_policies_report(enabled_only=True)
+    enabled, _ = store.progress.list_report(enabled_only=True)
     stale_policies = [p for p in enabled if str((p.metadata or {}).get("watch_run_id") or "") == child_id]
     assert stale_policies, "watch 子代理的 policy 应存在且 enabled"
     # tick 落在「已 due 但未 stale」窗口(next_due+100s,catchup 是 2h):
@@ -228,7 +225,7 @@ def _retire_with_child(agent, store, thread_id, child_id, *, task_id):
         }
     )
     scheduler.tick(now=due_at + 100)
-    after_enabled, _ = store.list_progress_policies_report(enabled_only=True)
+    after_enabled, _ = store.progress.list_report(enabled_only=True)
     after = {str(p.policy_id) for p in after_enabled}
     assert not (stale_ids & after), "watch 目标已终态的陈旧 policy 应被禁用"
 
@@ -248,7 +245,7 @@ def test_run_observation_does_not_add_a_workspace_file_lock(tmp_path):
     agent, thread_id, task_id = _agent_with_self_watch(tmp_path)
     # blocker 只拦「当前 conversation_task_id 自身 running」:用第三者任务 watch
     # 当前任务,让 task_id 在 execution_state 里 running(而非 child running)。
-    agent.conversation_store.set_progress_policy(
+    agent.conversation_store.progress.create(
         {
             "thread_id": thread_id,
             "task_id": "other-task-9",

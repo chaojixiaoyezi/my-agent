@@ -86,7 +86,7 @@ class _SubmissionInspectingBackend:
 
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         del prompt, on_chunk
-        receipt = self.store.guidance_once_receipt(self.dedupe_key)
+        receipt = self.store.guidance.receipt(self.dedupe_key)
         self.observed_status = str(receipt.status if receipt is not None else "")
         assert receipt is not None and receipt.submission_id
         return ModelResponse(text="accepted", backend=self.name)
@@ -335,7 +335,7 @@ def _tool_loop_params() -> ToolLoopExecuteParams:
 def test_provider_boundary_commits_guidance_batch_before_backend_io(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
     dedupe_key = "thread/provider-boundary"
-    entry = store.append_guidance_once(
+    entry = store.guidance.append_once(
         {
             "target_type": "request",
             "target_id": "request-provider-boundary",
@@ -347,7 +347,7 @@ def test_provider_boundary_commits_guidance_batch_before_backend_io(tmp_path) ->
         },
         dedupe_key=dedupe_key,
     )
-    assert store.claim_guidance_once_for_turn(
+    assert store.guidance.claim_for_turn(
         entry,
         expected_turn_id="request-provider-boundary",
         attempt_id="attempt-provider-boundary",
@@ -380,7 +380,7 @@ def test_provider_boundary_commits_guidance_batch_before_backend_io(tmp_path) ->
 
     assert response.text == "accepted"
     assert backend.observed_status == "submitted"
-    receipt = store.guidance_once_receipt(dedupe_key)
+    receipt = store.guidance.receipt(dedupe_key)
     assert receipt is not None and receipt.status == "submitted"
     assert params.live_archive_state["_guidance_submission_id"] == receipt.submission_id
 
