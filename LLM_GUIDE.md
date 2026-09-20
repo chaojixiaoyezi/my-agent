@@ -33,7 +33,7 @@ runner 的未完成不等于失败；显式结束原因与当前状态、成功�
 同参拒绝携带已发布部署：宿主列表跨同一 child attempt 的 Goal 续轮和活动回合 Compact 传递，批准不随之扩大。
 实际 TUI 70 已验证 Goal 续轮同参不再弹窗；其后嵌套 Shell 后台启动与前台超时遗留进程已发布并同版部署双机，实际 TUI 78/79 复现及 TUI 75 普通对照已验。
 Shell 字面程序语法归 shell_syntax.py；前台管道结束前保留组长，终止仍沿 process_registry 核对出生标识与独立组成员。
-Shell 回执、截断说明与展示行数共用采集正文的 LF 口径；末尾换行不额外算一行，原始输出和采集完整性保持独立。
+Shell 回执、截断说明与展示行数共用采集正文的 LF 口径；末尾换行不额外算一行，原始输出和采集完整性保持独立。修复已同版部署，实际 TUI 80/82 的回执与展示已验；模型报告错误仍见 STATUS。
 无生产调用的旧 verifier integrity 模块已删除；验证事实入口统一读 verification/runtime.py，文件完整性矩阵不证明报告正确。
 main 绑定当前选定任务的有效 claim；换轮失效，Goal paused 不取消当前审批，不把接收方续租当批准。
 同任务续做先绑定 canonical run/attempt 再准备归档，request 只代表当前消息；目录准备失败关闭本次新 attempt。
