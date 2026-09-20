@@ -1,4 +1,4 @@
-# LLM: 此模块独占 Messages 请求与响应转换；保持缓存布局、思考签名、工具块和错误语义，联合 native IR 回归。
+# LLM: 此模块独占 Messages 转换；探针与传输共用地址归一，保持缓存、思考、工具及错误合同，联合 native IR 回归。
 # 模块用途: 调用 Messages 接口并规范化流式或完整响应，保留历史、用量和请求局部控制。
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ from .errors import (
     ProviderResponseError,
 )
 from .http import HttpBackend, bounded_output_tokens, request_stream_lines
+from .provider_headers import endpoint_parts
 from .response_completion import (
     has_reasoning_content,
     incomplete_response_fields,
@@ -51,7 +52,7 @@ class _AnthropicGenerateRequest:
     first_event_timeout_seconds: float | None = None
 
 
-# LLM: Messages 的缓存、原生块与流事件由此适配；HTTP 只提供传输，需联合思考、工具和 OAuth 测试。
+# LLM: Messages 的缓存、原生块与流事件由此适配；能力端点使用 HTTP 同源规则，联合思考、工具和 OAuth 测试。
 # 类用途: 发送 Messages 协议请求，并统一返回正文、思考、工具调用及用量。
 class AnthropicCompatibleBackend(HttpBackend):
     """适配 Anthropic 风格的 `/v1/messages` 接口。"""
@@ -60,10 +61,10 @@ class AnthropicCompatibleBackend(HttpBackend):
     supports_tool_input_progress = True
     supports_thinking_completion = True
 
-    # LLM: Messages 能力证据必须与实际请求路径一致，不能通过端点文本推断权限。
-    # 函数用途: 返回 Messages 端点，供探针记录来源。
+    # LLM: 探针与 HTTP/OAuth 共用 endpoint_parts，保留代理前缀及完整接口，不重复追加版本，不授予权限。
+    # 函数用途: 只读计算 Messages 实际端点，供成功和失败探针记录来源。
     def _tool_endpoint(self) -> str:
-        return self.api_base + "/v1/messages"
+        return "".join(endpoint_parts(self.api_base, "/v1/messages"))
 
     # LLM: Messages 复用公共冻结连接选项，仅附加明确协议版本；需核对工厂及 OAuth 构造调用。
     # 函数用途: 初始化后端与版本头配置，不发网络请求。

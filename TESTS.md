@@ -38,6 +38,11 @@ TUI，共用单 Gateway；只有用户明确要求的慢模型专项才另用单
 
 ## 重点定向回归入口
 
+- 探针端点：`test_backends_base.py::test_probe_endpoint_matches_transport_request` 截获实际 HTTP 出口信封，
+  比较能力诊断与请求 URL；覆盖 Messages、Chat、Responses 的代理前缀、版本后缀、完整接口、尾斜杠及成功/未证明能力共 36 组。
+  替身只提供协议响应，不替换地址计算；与原生工具、请求作用域和 OAuth 相邻回归共 228 项通过。
+  新版真实官方 MiniMax-M2.7 TUI 完成写程序、执行和读回；一次多余参数被拒后自行修正，原失败保留。
+  后台会话未持久化完整探针结果，因此地址合同与真实工具链分别留证，不把替身信封称作真实抓包。
 - 后台审批桥：`test_background_tool_approval.py` 联合 Gateway 代理控制、owner 权限模式、TUI 队列与后台活动测试。
   核对原始请求批准/拒绝、跨会话拒绝、claim 换轮失效、无接收方关闭式失败、缓存隔离；主审批不能扩权到子代理控制入口。
   Goal 暂停仍允许当前审批；回合中断取消等待，明确任务停止另验资源收回。真实验收从 TUI 启动 Goal，

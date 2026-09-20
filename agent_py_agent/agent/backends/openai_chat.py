@@ -1,4 +1,4 @@
-# LLM: 此模块独占 Chat Completions 请求与响应转换；保持原生历史、思考、工具、采样和用量合同，联合 native IR 回归。
+# LLM: 此模块独占 Chat Completions 转换；探针与传输共用地址归一，保持历史、思考、工具、采样与用量合同。
 # 模块用途: 调用 Chat 接口，转换消息和流式结果；网络、回调及显式启用的私有诊断写入均在既有边界内。
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from .errors import (
     ProviderResponseError,
 )
 from .http import HttpBackend, bounded_output_tokens, request_stream_lines
+from .provider_headers import endpoint_parts
 from .response_completion import (
     has_reasoning_content,
     incomplete_response_fields,
@@ -75,7 +76,7 @@ def dump_provider_payload(payload: dict[str, Any], *, path: str) -> None:
         return
 
 
-# LLM: Chat 适配器独占其消息转换；Responses 只复用稳定生成入口，需联合两种协议及 OAuth 回归。
+# LLM: Chat 适配器独占消息转换，能力端点使用 HTTP 同源规则；Responses 只复用稳定生成入口，联合协议及 OAuth 回归。
 # 类用途: 把统一生成请求转换为 Chat Completions 网络调用并返回规范化响应。
 class OpenAICompatibleBackend(HttpBackend):
     """适配 OpenAI-compatible `/chat/completions` 接口。"""
@@ -86,10 +87,10 @@ class OpenAICompatibleBackend(HttpBackend):
     supports_thinking_completion = True
     supports_tool_input_progress = True
 
-    # LLM: Chat 能力探针必须标记实际调用路径，与 _generate 保持一致。
-    # 函数用途: 返回 Chat Completions 端点，供探针记录来源。
+    # LLM: 探针与 HTTP/OAuth 共用 endpoint_parts，配置完整接口时不重复追加路径，不改变实际传输。
+    # 函数用途: 只读计算 Chat Completions 实际端点，供成功和失败探针记录来源。
     def _tool_endpoint(self) -> str:
-        return self.api_base + "/chat/completions"
+        return "".join(endpoint_parts(self.api_base, "/chat/completions"))
 
     # LLM: OpenAI-compatible 传输必须保持 system -> 规范会话/当前 user -> 原生工具历史的追加顺序；
     # reasoning 和工具参数计数是展示边界；请求开关与观察器必须转交组包器，不能丢失或影响执行。

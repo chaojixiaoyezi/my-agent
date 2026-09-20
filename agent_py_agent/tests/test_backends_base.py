@@ -19,6 +19,7 @@ from agent_py_agent.agent.backends.errors import ProviderResponseError, Provider
 from agent_py_agent.agent.backends.factory import get_backend
 from agent_py_agent.agent.backends.http import HttpBackend
 from agent_py_agent.agent.backends.openai_chat import OpenAICompatibleBackend
+from agent_py_agent.agent.backends.responses import OpenAIResponsesBackend
 
 _DEFAULT_OPTIONS = BackendOptions(
     api_base="https://api.example.com",
@@ -845,6 +846,56 @@ def test_probe_missing_api_key_raises_config_error(tmp_path):
     backend = HttpBackend(_options(api_key=""))
     with pytest.raises(ValueError, match="api_key"):
         backend.probe_tool_capability()
+
+
+@pytest.mark.parametrize("backend_type,base_path,expected_path", [
+    (AnthropicCompatibleBackend, "/proxy", "/proxy/v1/messages"),
+    (AnthropicCompatibleBackend, "/proxy/v1", "/proxy/v1/messages"),
+    (AnthropicCompatibleBackend, "/proxy/v1/messages", "/proxy/v1/messages"),
+    (OpenAICompatibleBackend, "/proxy", "/proxy/chat/completions"),
+    (OpenAICompatibleBackend, "/proxy/v1", "/proxy/v1/chat/completions"),
+    (OpenAICompatibleBackend, "/proxy/v1/chat/completions", "/proxy/v1/chat/completions"),
+    (OpenAIResponsesBackend, "/proxy", "/proxy/responses"),
+    (OpenAIResponsesBackend, "/proxy/v1", "/proxy/v1/responses"),
+    (OpenAIResponsesBackend, "/proxy/v1/responses", "/proxy/v1/responses"),
+])
+@pytest.mark.parametrize("trailing_slash", ["", "/"])
+@pytest.mark.parametrize("supported", [True, False])
+def test_probe_endpoint_matches_transport_request(
+    monkeypatch, backend_type, base_path, expected_path, trailing_slash, supported,
+):
+    from agent_py_agent.agent.backends import http
+
+    base = "https://provider.example.test"
+    backend = backend_type(_options(api_base=base + base_path + trailing_slash, stream_enabled=False))
+    nonce = "0123456789abcdef"
+    monkeypatch.setattr(http.secrets, "token_hex", lambda size: nonce)
+    captured_urls = []
+
+    # LLM: 替身只截获 HTTP 出口并返回协议数据，不替换地址计算或探针合同；不能计作真实模型验收。
+    # 函数用途: 在零网络请求下核对探针的公开端点与真实传输信封一致，覆盖成功和未证明能力两种结果。
+    def provider(request):
+        captured_urls.append(request.url)
+        name, arguments = "my_agent_capability_probe", {"nonce": nonce}
+        if backend.name == "anthropic_compatible":
+            content = [{"type": "tool_use", "id": "probe-call", "name": name, "input": arguments}] if supported else [
+                {"type": "text", "text": "未调用工具"}]
+            return {"content": content, "stop_reason": "tool_use" if supported else "end_turn"}
+        if backend.name == "openai_compatible":
+            calls = [{"id": "probe-call", "type": "function", "function": {
+                "name": name, "arguments": json.dumps(arguments)}}] if supported else []
+            return {"choices": [{"message": {"content": "", "tool_calls": calls} if supported else {
+                "content": "未调用工具"}, "finish_reason": "tool_calls" if supported else "stop"}]}
+        output = [{"type": "function_call", "call_id": "probe-call", "name": name,
+                   "arguments": json.dumps(arguments)}] if supported else []
+        return {"status": "completed", "output": output}
+
+    monkeypatch.setattr(http, "post_json", provider)
+    capability = backend.probe_tool_capability()
+    assert capability.native_supported is supported
+    assert len(captured_urls) == (1 if supported else 3)
+    assert set(captured_urls) == {base + expected_path}
+    assert capability.endpoint == base + expected_path
 
 
 @pytest.mark.parametrize("stream", [True, False])

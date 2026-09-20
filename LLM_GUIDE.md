@@ -51,6 +51,7 @@ Computer Use 的依赖与当前桌面验收须单独确认。
 本地提交复核与自动化测试收口见评估文档的“本地提交前复核”；不要将定向重跑写成全仓再次通过。
 后端公共合同读 `backends/base.py`，传输读 `http.py`，协议读 `openai_chat.py` / `anthropic.py` / `responses.py`，
 构造及缺配置判据读 `factory.py`；旧 base 文件不再承载协议实现。
+三种协议的探针诊断与 HTTP/OAuth 传输共用 `provider_headers.endpoint_parts`；保留代理前缀和完整接口，不能重复追加路径。
 后台有界投影读 `conversation/background_context.py`，原生历史种子读 `background_history_seed.py`；
 后者与负责展示快照的 `background_history.py` 职责不同。准备模块不拥有调度或投递，读取错误仍显式失败。
 单工作片执行读 `background_execution.py`，每次 Compact 后按最新线程准备参数，沿原 store 保存原生历史；
