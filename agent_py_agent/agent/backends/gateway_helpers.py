@@ -1,5 +1,5 @@
-# LLM: Provider HTTP transport owns typed connection/body-read errors, bounded open retries and interrupts; body failures defer to the existing model retry without replaying tools.
-# 模块用途: 统一模型 HTTP 请求和响应断流分类；区分超时、用户停止与可恢复网络错误并收回连接。
+# LLM: Provider HTTP transport owns typed connection/body-read errors, bounded open retries and interrupts; open teardown reads the current interrupt before classification. Keep JSON/GET/SSE and test_gateway_helpers aligned.
+# 模块用途: 统一模型 HTTP 请求和响应断流分类；连接清理噪声不覆盖已发生的停止，不因取消重试请求。
 from __future__ import annotations
 
 import errno
@@ -599,8 +599,8 @@ def _gateway_request_attempt(request: GatewayRequest, attempt: int, last_attempt
     return response
 
 
-# LLM: 连接建立和响应头等待可中断；OAuth 请求显式禁重定向，open guard 必须在 open 前注册。
-# 函数用途: 用独立连接/读取超时打开模型请求，并让用户停止能关闭尚未返回 HTTPResponse 的底层连接。
+# LLM: JSON/GET/SSE 共用 open 中断边界；guard 在 open 前注册，清理异常只按当前结构化中断归类，无中断时原样抛出，OAuth 仍禁重定向。
+# 函数用途: 按独立连接/读取超时发送请求；停止时收回未返回响应的连接，避免关闭竞态被误报成请求错误。
 def _gateway_urlopen(req: urllib.request.Request, request: GatewayRequest):
     """Open one provider request with distinct connect and read timeouts.
 
@@ -639,6 +639,10 @@ def _gateway_urlopen(req: urllib.request.Request, request: GatewayRequest):
                     pass
                 raise InterruptedError("模型接口请求已被用户停止")
             return response
+    except Exception as exc:
+        if _provider_is_interrupted():
+            raise InterruptedError("模型接口请求已被用户停止") from exc
+        raise
     finally:
         open_guard.release()
 

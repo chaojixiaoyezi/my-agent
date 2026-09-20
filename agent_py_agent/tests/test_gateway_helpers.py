@@ -1013,6 +1013,33 @@ def test_user_interrupt_aborts_response_header_wait_before_http_response_exists(
     assert isinstance(outcome.get("error"), InterruptedError)
 
 
+@pytest.mark.parametrize("operation", ["post_json", "get_json", "post_stream"])
+@pytest.mark.parametrize("error_type", [http.client.ResponseNotReady, AttributeError])
+@pytest.mark.parametrize("cancelled", [True, False])
+def test_header_open_error_uses_current_interrupt_without_retry(operation, error_type, cancelled):
+    from agent_py_agent.agent.backends import gateway_helpers
+    from agent_py_agent.agent.concurrency.interrupt import interrupt_by_name, register_interruptible
+
+    error = error_type("open failed")
+    opener = MagicMock()
+
+    # LLM: 替身只制造 open 与中断的确定性先后关系；三种公共请求入口必须共用同一取消合同。
+    # 函数用途: 在响应尚未创建时触发停止，再抛连接清理异常，不发送真实网络请求。
+    def open_with_error(*_args, **_kwargs):
+        if cancelled:
+            assert interrupt_by_name("header-error-boundary")
+        raise error
+
+    opener.open.side_effect = open_with_error
+    expected = InterruptedError if cancelled else error_type
+    with register_interruptible("header-error-boundary"):
+        with patch("urllib.request.build_opener", return_value=opener):
+            with pytest.raises(expected) as caught:
+                getattr(gateway_helpers, operation)(_request())
+    assert (caught.value.__cause__ if cancelled else caught.value) is error
+    opener.open.assert_called_once()
+
+
 def test_user_interrupt_serializes_response_close_with_reader_cleanup():
     """Stopping a blocked stream must not race urllib's owning-thread close path."""
     from agent_py_agent.agent.backends.gateway_helpers import post_stream
