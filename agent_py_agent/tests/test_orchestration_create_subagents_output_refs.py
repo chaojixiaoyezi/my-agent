@@ -319,7 +319,7 @@ def test_repair_contract_idempotency_reuses_same_scope_with_reworded_goal(tmp_pa
     assert first["created_run_ids"]
     assert second["created_run_ids"] == []
     assert second["reused_run_ids"] == first["created_run_ids"]
-    assert second["pending_start_run_ids"] == []
+    assert second["pending_start_run_ids"] == [], second["auto_start"]
     assert second["auto_start"]["run_ids"] == first["created_run_ids"]
 
 
@@ -716,7 +716,7 @@ def test_nested_create_repair_contract_reuses_same_scope_with_reworded_goal(tmp_
     assert first["created_run_ids"]
     assert second["created_run_ids"] == []
     assert second["reused_run_ids"] == first["created_run_ids"]
-    assert second["pending_start_run_ids"] == []
+    assert second["pending_start_run_ids"] == [], second["auto_start"]
 
 
 def test_nested_create_without_idempotency_contract_does_not_reuse_by_goal_text(tmp_path):

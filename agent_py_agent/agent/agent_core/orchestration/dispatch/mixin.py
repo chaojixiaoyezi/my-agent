@@ -1,4 +1,5 @@
-
+# LLM: 调度复用原范围与执行计划，准确启动身份显式复制到当前周期，不能由模型指令生成。
+# 模块用途: 组织派工与观察周期，连接原候选、执行及收尾服务。
 from __future__ import annotations
 
 import json
@@ -439,6 +440,8 @@ def _watch_params_from_args(values: Mapping[str, Any]) -> WatchParams:
     )
 
 
+# LLM: 宿主冻结身份沿显式字段进入单次调度；模型指令与执行身份保持分离。
+# 函数用途: 构造本轮调度上下文，复制启动映射防止调用方随后改写。
 def _dispatch_context_from_params(
     router: CapabilityRouter,
     capability_config: CapabilityConfig | None,
@@ -461,6 +464,7 @@ def _dispatch_context_from_params(
         include_run_ids=params.include_run_ids,
         exclude_run_ids=params.exclude_run_ids,
         background_launch_id=params.background_launch_id,
+        expected_attempt_ids=dict(params.expected_attempt_ids) if params.expected_attempt_ids is not None else None,
         router=router,
         execution_plan=plan,
     )

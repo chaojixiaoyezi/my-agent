@@ -1,4 +1,5 @@
-
+# LLM: 生命周期修改复用原状态协议和服务，runner 预留身份显式运输；不得在转发层重新选取 current。
+# 模块用途: 组织子代理授权、状态与执行轮操作，保留各正式写入口的职责。
 from __future__ import annotations
 
 """Lifecycle mutation service for subagent task records.
@@ -377,8 +378,14 @@ class SubAgentLifecycleService:
         self.manager.save(task)
         return task
 
-    def prepare_runner_attempt(self, run_id: str, *, retry_reason: str = "") -> SubAgentTask:
-        return prepare_runner_attempt_for_manager(self.manager, run_id, retry_reason=retry_reason)
+    # LLM: 派工调用方须传排队时的 expected_attempt_id；委托原生命周期实现，不在此重新查询 current。
+    # 函数用途: 为子代理取得准确执行轮，直接调用与后台启动共用同一激活规则。
+    def prepare_runner_attempt(
+        self, run_id: str, *, retry_reason: str = "", expected_attempt_id: str | None = None,
+    ) -> SubAgentTask:
+        return prepare_runner_attempt_for_manager(
+            self.manager, run_id, retry_reason=retry_reason, expected_attempt_id=expected_attempt_id,
+        )
 
     def abandon_runner_attempt(self, run_id: str, attempt_id: str, *, reason: str = "") -> SubAgentTask:
         return abandon_runner_attempt_for_manager(self.manager, run_id, attempt_id, reason=reason)

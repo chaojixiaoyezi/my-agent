@@ -11,6 +11,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent_py_agent.agent.agent_core.orchestration.dispatch.params import DispatchParams
+from agent_py_agent.agent.subagents.manager import SubAgentManager
+from agent_py_agent.agent.subagents.runner_start import reserve_runner_start
+
 
 def test_background_dispatch_project_root_is_repo_root():
     """后台 dispatch 子进程必须从仓库根启动，避免误导入旧安装版 CLI。"""
@@ -22,50 +26,22 @@ def test_background_dispatch_project_root_is_repo_root():
     assert (root / "pyproject.toml").is_file()
 
 
-def test_new_background_launch_does_not_inherit_previous_pid():
+def test_new_background_launch_does_not_inherit_previous_pid(tmp_path):
     import agent_py_agent.agent.agent_core.orchestration.background.dispatch as background_dispatch
-
-    task = SimpleNamespace(
-        id="child-1",
-        attributes={
-            "background_start": {
-                "launch_id": "old-launch",
-                "status": "running",
-                "pid": 111,
-            }
-        },
-    )
-
-    class Manager:
-        def load(self, run_id):
-            assert run_id == "child-1"
-            return task
-
-        def save(self, _task):
-            return None
-
+    manager = SubAgentManager(tmp_path / "runs", owner_home_dir=str(tmp_path / "owner"))
+    task = manager.create_run(goal="旧进程号隔离")
+    manager.mutate(task.id, lambda current: current.attributes.update(background_start={"launch_id": "old-launch", "status": "reclaimed", "pid": 111}))
+    expected = reserve_runner_start(manager, task.id)
     request = background_dispatch._BackgroundDispatchRequest(
-        agent=SimpleNamespace(subagents=Manager()),
-        run_ids=["child-1"],
-        launch_id="new-launch",
-        router=object(),
-        cfg=object(),
-        params=object(),
+        SimpleNamespace(subagents=manager), [task.id], "new-launch", object(), object(),
+        DispatchParams(expected_attempt_ids={task.id: expected}),
     )
-
-    assert background_dispatch.mark_background_start(
-        request,
-        status="launching",
-    ) == []
-    assert task.attributes["background_start"]["launch_id"] == "new-launch"
-    assert "pid" not in task.attributes["background_start"]
-
-    assert background_dispatch.mark_background_start(
-        request,
-        status="running",
-        pid=333,
-    ) == []
-    assert task.attributes["background_start"]["pid"] == 333
+    assert background_dispatch.mark_background_start(request, status="launching") == []
+    record = manager.load(task.id).attributes["background_start"]
+    assert record["launch_id"] == "new-launch"
+    assert "pid" not in record
+    assert background_dispatch.mark_background_start(request, status="running", pid=333) == []
+    assert manager.load(task.id).attributes["background_start"]["pid"] == 333
 
 
 def test_background_result_without_explicit_ok_is_failed():
@@ -83,44 +59,27 @@ def test_background_result_without_explicit_ok_is_failed():
     assert agent._background_subagent_dispatches["launch-1"]["status"] == "failed"
 
 
-def test_background_dispatch_worker_uses_captured_backend_override():
-    """in-process auto-start 要使用创建时捕获的 backend，不能吃到后续全局 backend 改动。"""
+def test_background_dispatch_worker_uses_captured_backend_override(tmp_path):
     import agent_py_agent.agent.agent_core.orchestration.background.dispatch as background_dispatch
-
     captured_backend = object()
-    seen: dict[str, object] = {}
-    task = SimpleNamespace(id="child-1", attributes={})
-
-    class Manager:
-        def load(self, run_id):
-            assert run_id == "child-1"
-            return task
-
-        def save(self, next_task):
-            seen["last_background_status"] = next_task.attributes["background_start"]["status"]
-
+    seen = {}
+    manager = SubAgentManager(tmp_path / "runs", owner_home_dir=str(tmp_path / "owner"))
+    task = manager.create_run(goal="显式后端注入")
+    expected = reserve_runner_start(manager, task.id)
     class Agent:
-        subagents = Manager()
-
+        subagents = manager
         def dispatch_subagents(self, *_args, **_kwargs):
             seen["backend_override"] = getattr(self, "_subagent_worker_backend_override", None)
             return SimpleNamespace(summary="ok", records=[])
-
     agent = Agent()
     request = background_dispatch._BackgroundDispatchRequest(
-        agent=agent,
-        run_ids=["child-1"],
-        launch_id="launch-1",
-        router=object(),
-        cfg=object(),
-        params=object(),
-        backend_override=captured_backend,
+        agent, [task.id], "launch-1", object(), object(),
+        DispatchParams(expected_attempt_ids={task.id: expected}), captured_backend,
     )
-
+    assert background_dispatch.mark_background_start(request, status="launching") == []
     background_dispatch._background_dispatch_worker(request)
-
     assert seen["backend_override"] is captured_backend
-    assert seen["last_background_status"] == "finished"
+    assert manager.load(task.id).attributes["background_start"]["status"] == "finished"
     assert not hasattr(agent, "_subagent_worker_backend_override")
 
 
@@ -246,91 +205,51 @@ def test_worker_recovers_child_model_without_dispatch_backend(tmp_path, monkeypa
     assert recovered.config.model_name == recovered.backend.name == "child-B"
 
 
-def test_start_background_dispatch_reports_mark_errors(monkeypatch):
-    """后台启动状态写不进子代理账本时，父代理要能看到结构化错误。"""
+def test_start_background_dispatch_reports_mark_errors(tmp_path, monkeypatch):
     import agent_py_agent.agent.agent_core.orchestration.background.dispatch as background_dispatch
-
-    agent = SimpleNamespace(
-        config=SimpleNamespace(model_backend="minimax"),
-        subagents=SimpleNamespace(load=lambda _run_id: (_ for _ in ()).throw(ValueError("state broken"))),
-    )
-    monkeypatch.setattr(
-        background_dispatch,
-        "_auto_start_dispatch_args",
-        lambda _agent, _run_ids, background_launch_id="": (object(), object(), object()),
-    )
-    monkeypatch.setattr(
-        background_dispatch,
-        "_spawn_background_dispatch_process",
-        lambda _agent, _request: SimpleNamespace(pid=12345),
-    )
-    result = background_dispatch._start_background_dispatch(agent, ["child-broken"])
-
-    assert result["status"] == "started"
-    assert result["background_mark_errors"][0]["run_id"] == "child-broken"
-    assert result["background_mark_errors"][0]["context"] == "background_dispatch.mark_start.load"
+    manager = SubAgentManager(tmp_path / "runs", owner_home_dir=str(tmp_path / "owner"))
+    task = manager.create_run(goal="启动写入失败")
+    agent = SimpleNamespace(config=SimpleNamespace(model_backend="minimax"), subagents=manager)
+    monkeypatch.setattr(background_dispatch, "_auto_start_dispatch_args", lambda *_a, **_k: (object(), object(), DispatchParams()))
+    monkeypatch.setattr(manager, "mutate", lambda *_: (_ for _ in ()).throw(ValueError("state broken")))
+    monkeypatch.setattr(background_dispatch, "_spawn_background_dispatch_process", lambda *_: pytest.fail("接纳写失败不得启动"))
+    result = background_dispatch._start_background_dispatch(agent, [task.id])
+    assert result["status"] == "failed"
+    assert result["background_mark_errors"][0]["run_id"] == task.id
     assert result["background_mark_errors"][0]["category"] == "data_parse"
 
 
-def test_start_background_dispatch_marks_channel_failure_on_immediate_process_exit(monkeypatch):
-    """后台子进程一启动就退出时，任务不能继续伪装成 PLANNING。"""
+def test_start_background_dispatch_marks_channel_failure_on_immediate_process_exit(tmp_path, monkeypatch):
     import agent_py_agent.agent.agent_core.orchestration.background.dispatch as background_dispatch
-
-    task = SimpleNamespace(
-        id="child-1",
-        status="PLANNING",
-        channel_status="OK",
-        failure_type="",
-        attributes={},
-        result="",
-        updated_at=0.0,
-    )
-    saved = {}
-
-    class Manager:
-        def load(self, run_id):
-            assert run_id == "child-1"
-            return task
-
-        def save(self, next_task):
-            saved["task"] = next_task
-
-    agent = SimpleNamespace(
-        config=SimpleNamespace(model_backend="minimax"),
-        subagents=Manager(),
-    )
-    monkeypatch.setattr(
-        background_dispatch,
-        "_auto_start_dispatch_args",
-        lambda _agent, _run_ids, background_launch_id="": (object(), object(), object()),
-    )
-    monkeypatch.setattr(
-        background_dispatch,
-        "_spawn_background_dispatch_process",
-        lambda _agent, _request: SimpleNamespace(pid=12345, poll=lambda: 2),
-    )
-    result = background_dispatch._start_background_dispatch(agent, ["child-1"])
-
+    manager = SubAgentManager(tmp_path / "runs", owner_home_dir=str(tmp_path / "owner"))
+    task = manager.create_run(goal="立即退出")
+    agent = SimpleNamespace(config=SimpleNamespace(model_backend="minimax"), subagents=manager)
+    monkeypatch.setattr(background_dispatch, "_auto_start_dispatch_args", lambda *_a, **_k: (object(), object(), DispatchParams()))
+    monkeypatch.setattr(background_dispatch, "_spawn_background_dispatch_process", lambda *_: SimpleNamespace(pid=12345, poll=lambda: 2))
+    result = background_dispatch._start_background_dispatch(agent, [task.id])
     assert result["status"] == "failed"
     assert result["failure_type"] == "background_dispatch_startup"
-    assert saved["task"].status == "CHANNEL_ERROR"
-    assert saved["task"].channel_status == "BROKEN"
-    assert saved["task"].failure_type == "background_dispatch_startup"
+    current = manager.load(task.id)
+    assert current.status == "CHANNEL_ERROR"
+    assert current.channel_status == "BROKEN"
+    assert current.failure_type == "background_dispatch_startup"
 
 
-def test_start_background_dispatch_persists_pid_before_startup_poll(monkeypatch):
+def test_start_background_dispatch_persists_pid_before_startup_poll(tmp_path, monkeypatch):
     """父进程先落 PID，再让子进程继续启动，避免双方争抢同一任务锁。"""
     import agent_py_agent.agent.agent_core.orchestration.background.dispatch as background_dispatch
 
     events: list[str] = []
+    manager = SubAgentManager(tmp_path / "runs", owner_home_dir=str(tmp_path / "owner"))
+    task = manager.create_run(goal="先记录进程号")
     agent = SimpleNamespace(
         config=SimpleNamespace(model_backend="minimax"),
-        subagents=SimpleNamespace(),
+        subagents=manager,
     )
     monkeypatch.setattr(
         background_dispatch,
         "_auto_start_dispatch_args",
-        lambda _agent, _run_ids, background_launch_id="": (object(), object(), object()),
+        lambda _agent, _run_ids, background_launch_id="": (object(), object(), DispatchParams()),
     )
     monkeypatch.setattr(
         background_dispatch,
@@ -351,7 +270,7 @@ def test_start_background_dispatch_persists_pid_before_startup_poll(monkeypatch)
         lambda _agent, _request, _process: {"status": "started"},
     )
 
-    result = background_dispatch._start_background_dispatch(agent, ["child-1"])
+    result = background_dispatch._start_background_dispatch(agent, [task.id])
 
     assert result["status"] == "started"
     assert events[:3] == ["launching", "running", "poll"]

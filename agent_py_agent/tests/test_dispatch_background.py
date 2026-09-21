@@ -2,8 +2,13 @@ from __future__ import annotations
 
 import os
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
+from agent_py_agent.agent.subagents.manager import SubAgentManager
+from agent_py_agent.agent.subagents.process_control import BackgroundStartUpdate
+from agent_py_agent.agent.subagents.runner_start import (
+    reserve_runner_start,
+    update_background_start,
+)
 from agent_py_agent.cli.dispatch_background import (
     BackgroundLaunchUpdate,
     mark_background_launch,
@@ -11,7 +16,7 @@ from agent_py_agent.cli.dispatch_background import (
 from agent_py_agent.cli.models import SubagentsDispatchOptions
 
 
-def _dispatch_options() -> SubagentsDispatchOptions:
+def _dispatch_options(run_id, attempt_id) -> SubagentsDispatchOptions:
     return SubagentsDispatchOptions(
         mutate_state=True,
         start_runners=True,
@@ -30,67 +35,47 @@ def _dispatch_options() -> SubagentsDispatchOptions:
         advance=False,
         force_lock=False,
         watch=False,
-        run_ids=["run_a"],
+        run_ids=[run_id],
+        expected_attempt_ids={run_id: attempt_id},
         background_launch_id="launch-1",
     )
 
 
-def test_background_launch_marker_updates_task_tree() -> None:
-    """后台 dispatch 进程要把生命周期写回任务树，父代理才能查到启动状态。"""
-    task = SimpleNamespace(id="run_a", attributes={})
-    manager = MagicMock()
-    manager.load.return_value = task
-    agent = SimpleNamespace(subagents=manager)
-
-    report = mark_background_launch(agent, _dispatch_options(), BackgroundLaunchUpdate("running"))
-
-    assert report.ok is True
-    assert task.attributes["background_start"]["launch_id"] == "launch-1"
-    assert task.attributes["background_start"]["status"] == "running"
-    assert task.attributes["background_start"]["pid"] == os.getpid()
-    manager.save.assert_called_once_with(task)
+def _state(tmp_path):
+    manager = SubAgentManager(tmp_path / "runs", owner_home_dir=str(tmp_path / "owner"))
+    task = manager.create_run(goal="CLI 标记")
+    attempt_id = reserve_runner_start(manager, task.id)
+    update_background_start(manager, task.id, BackgroundStartUpdate(
+        "launch-1", "launching", replace_launch=True, attempt_id=attempt_id,
+    ))
+    return manager, task, _dispatch_options(task.id, attempt_id)
 
 
-def test_stale_background_launch_cannot_overwrite_replacement() -> None:
-    task = SimpleNamespace(
-        id="run_a",
-        attributes={
-            "background_start": {
-                "launch_id": "launch-2",
-                "status": "running",
-                "pid": 222,
-            }
-        },
-    )
-    manager = MagicMock()
-    manager.load.return_value = task
-    agent = SimpleNamespace(subagents=manager)
-
-    report = mark_background_launch(
-        agent,
-        _dispatch_options(),
-        BackgroundLaunchUpdate("finished"),
-    )
-
-    assert report.ok is True
-    assert task.attributes["background_start"] == {
-        "launch_id": "launch-2",
-        "status": "running",
-        "pid": 222,
-    }
-    manager.save.assert_not_called()
+def test_background_launch_marker_updates_task_tree(tmp_path):
+    manager, task, options = _state(tmp_path)
+    report = mark_background_launch(SimpleNamespace(subagents=manager), options, BackgroundLaunchUpdate("running"))
+    assert report.ok
+    record = manager.load(task.id).attributes["background_start"]
+    assert record["launch_id"] == "launch-1"
+    assert record["attempt_id"] == options.expected_attempt_ids[task.id]
+    assert record["status"] == "running"
+    assert record["pid"] == os.getpid()
 
 
-def test_background_launch_marker_reports_task_load_failures() -> None:
-    """后台启动标记不能把账本读取失败静默解释成没有任务。"""
-    manager = MagicMock()
-    manager.load.side_effect = ValueError("bad task json")
-    agent = SimpleNamespace(subagents=manager)
+def test_stale_background_launch_cannot_overwrite_replacement(tmp_path):
+    manager, task, options = _state(tmp_path)
+    manager.mutate(task.id, lambda current: current.attributes["background_start"].update(launch_id="launch-2", pid=222))
+    before = manager.load(task.id)
+    report = mark_background_launch(SimpleNamespace(subagents=manager), options, BackgroundLaunchUpdate("finished"))
+    assert not report.ok
+    assert manager.load(task.id) == before
 
-    report = mark_background_launch(agent, _dispatch_options(), BackgroundLaunchUpdate("running"))
 
-    assert report.ok is False
-    assert report.load_errors[0]["run_id"] == "run_a"
-    assert report.load_errors[0]["context"] == "background_launch.task.load"
-    assert report.load_errors[0]["category"] == "data_parse"
-    manager.save.assert_not_called()
+def test_background_launch_marker_reports_task_load_failures(tmp_path, monkeypatch):
+    manager, task, options = _state(tmp_path)
+    monkeypatch.setattr(manager, "mutate", lambda *_: (_ for _ in ()).throw(ValueError("bad task json")))
+    report = mark_background_launch(SimpleNamespace(subagents=manager), options, BackgroundLaunchUpdate("running"))
+    assert not report.ok
+    assert report.save_errors[0]["run_id"] == task.id
+    assert report.save_errors[0]["context"] == "background_launch.task.update"
+    assert report.save_errors[0]["category"] == "data_parse"

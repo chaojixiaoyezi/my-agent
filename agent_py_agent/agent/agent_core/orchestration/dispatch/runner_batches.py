@@ -1,4 +1,5 @@
-
+# LLM: 候选在创建锁内接纳，线程池只消费原执行轮；联测取消、重试和并发排队。
+# 模块用途: 组织子代理批次，固定每个工作项的身份并收集正式执行结果。
 from __future__ import annotations
 
 """Runner candidate collection and batch execution for dispatch mixins."""
@@ -141,8 +142,14 @@ def _merge_runner_candidates(primary: list, secondary: list, *, limit: int) -> l
     return merged[:limit]
 
 
+# LLM: 候选接纳只在 creation guard 内预留准确 pending；外部已冻结 map 缺项即拒绝，不重新领取。
+# 函数用途: 选出可执行的工作并固定轮次，线程池稍后启动仍使用同一身份。
 def collect_runner_candidates(agent, ctx: DispatchContext, runner_max_attempts: int, runner_candidates: list):
+    from ....subagents.runner_start import reserve_runner_start
+
     pending_runner_jobs, dry_records = [], []
+    supplied_attempts = ctx.expected_attempt_ids
+    admitted_attempts = dict(supplied_attempts or {})
     resume_run_ids = (
         set(requested_include_ids(ctx))
         if _is_explicit_recovery_dispatch(ctx)
@@ -161,13 +168,24 @@ def collect_runner_candidates(agent, ctx: DispatchContext, runner_max_attempts: 
         before = agent.subagents.load(task.id)
         retry_reason = _runner_retry_reason(before, runner_max_attempts)
         if ctx.execution_plan.mutate_state:
+            if ctx.should_start_runners:
+                expected = supplied_attempts[task.id] if supplied_attempts is not None else None
+                admitted = reserve_runner_start(
+                    agent.subagents, task.id, expected_attempt_id=expected,
+                    resume_user_stop=task.id in resume_run_ids,
+                )
+                admitted_attempts[task.id] = admitted
             pending_runner_jobs.append((task.id, before, retry_reason))
             continue
         dry_records.append(dry_runner_record(agent, ctx, (task, before, retry_reason)))
+    ctx.expected_attempt_ids = admitted_attempts
     return dry_records, pending_runner_jobs
 
 
+# LLM: 限流不能改变已接纳工作项的执行轮，批次复制同一映射。
+# 函数用途: 应用并发限制并交给统一 runner 批次入口。
 def _run_runner_jobs_with_limit(agent, ctx: DispatchContext, batch: RunnerBatchContext) -> list:
+    batch.expected_attempt_ids = dict(ctx.expected_attempt_ids or {})
     batch.pending_runner_jobs = _limited_runner_jobs(agent, batch.pending_runner_jobs)
     _guard_multi_runner_instruction(agent, ctx, batch)
     return run_runner_batch(agent, batch)
@@ -215,6 +233,8 @@ def run_runner_batch(agent, ctx: RunnerBatchContext) -> list:
     return _run_sequential_batch(agent, ctx)
 
 
+# LLM: 并行工作参数携带完整身份 map；不得因某个工作失败而写另一轮结果。
+# 函数用途: 并行执行已接纳工作，并按原任务顺序收集结果。
 def _run_concurrent_batch(agent, ctx: RunnerBatchContext) -> list:
     completed = run_concurrent_runners(
         ConcurrentRunnerParams(
@@ -226,6 +246,7 @@ def _run_concurrent_batch(agent, ctx: RunnerBatchContext) -> list:
             start_runners=ctx.execution_plan.start_runners,
             max_cards=ctx.max_cards,
             probe=ctx.probe,
+            expected_attempt_ids=ctx.expected_attempt_ids,
         )
     )
     for run_id, before, retry_reason in ctx.pending_runner_jobs:
@@ -234,6 +255,8 @@ def _run_concurrent_batch(agent, ctx: RunnerBatchContext) -> list:
     return ctx.records
 
 
+# LLM: 顺序排队同样使用接纳时的执行轮；上一项耗时不能让下一项重新领取新 current。
+# 函数用途: 逐项执行固定工作批次，记录每项实际结果。
 def _run_sequential_batch(agent, ctx: RunnerBatchContext) -> list:
     for run_id, before, retry_reason in ctx.pending_runner_jobs:
         result = run_single_runner(
@@ -246,6 +269,7 @@ def _run_sequential_batch(agent, ctx: RunnerBatchContext) -> list:
                 max_cards=ctx.max_cards,
                 probe=ctx.probe,
                 retry_reason=retry_reason,
+                expected_attempt_id=ctx.expected_attempt_ids[run_id] if ctx.execution_plan.start_runners else None,
             )
         )
         _append_runner_record(

@@ -603,8 +603,9 @@ def test_agent_guidance_wakes_waiting_parent_on_same_run_once(
     repo = agent.subagents.runtime_db
     starts: list[str] = []
 
-    def fake_auto_start(_agent, tasks, _request_params):
+    def fake_auto_start(_agent, tasks, _request_params, *, expected_attempt_ids):
         target = tasks[0]
+        assert expected_attempt_ids[target.id]
         starts.append(target.id)
         refreshed = agent.subagents.load(target.id)
         attrs = dict(refreshed.attributes or {})
@@ -661,7 +662,7 @@ def test_guidance_launch_does_not_hold_child_creation_guard(tmp_path, monkeypatc
     agent, scope, child = _bound_agent_tree(tmp_path)
     _park_child_waiting_for_grandchild(agent, child)
 
-    def fake_auto_start(_agent, tasks, _params):
+    def fake_auto_start(_agent, tasks, _params, *, expected_attempt_ids):
         entered = threading.Event()
 
         def another_child_transaction():
@@ -745,8 +746,9 @@ def test_concurrent_waiting_parent_guidance_starts_one_runner(
     _park_child_waiting_for_grandchild(agent, child)
     starts: list[str] = []
 
-    def fake_auto_start(_agent, tasks, _request_params):
+    def fake_auto_start(_agent, tasks, _request_params, *, expected_attempt_ids):
         target = tasks[0]
+        assert expected_attempt_ids[target.id]
         starts.append(target.id)
         time.sleep(0.05)
         refreshed = agent.subagents.load(target.id)
@@ -808,7 +810,7 @@ def test_waiting_parent_guidance_retries_launch_without_duplicate_message(
     _park_child_waiting_for_grandchild(agent, child)
     starts = 0
 
-    def flaky_auto_start(_agent, tasks, _request_params):
+    def flaky_auto_start(_agent, tasks, _request_params, *, expected_attempt_ids):
         nonlocal starts
         starts += 1
         if starts == 1:

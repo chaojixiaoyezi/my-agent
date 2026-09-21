@@ -1,3 +1,5 @@
+# LLM: 创建回执只表达持久任务和正式启动事实，部分失败按已接纳身份区分，不替模型判定交付成功。
+# 模块用途: 生成创建、复用与排队的用户可读回执，不修改执行权。
 # LLM: 创建回执只投影异步启动、可信 cwd 和结果引用；内部运行根不代表业务文件目录。
 # 模块用途: 组装子代理派工条目和父级回执，不替父级决定分工或等待时机。
 
@@ -159,6 +161,8 @@ def _schedule_lifecycle_payload(
     }
 
 
+# LLM: 部分启动回执按显式 started_run_ids 排除已接纳项；不得把同批失败投影到仍在运行的复用孩子。
+# 函数用途: 列出尚未接纳启动的孩子，支持新任务与重复投递混合批次。
 def _pending_start_tasks(
     tasks: list,
     request_params: dict[str, object],
@@ -171,7 +175,8 @@ def _pending_start_tasks(
         return [task for task in tasks if _task_text(task, "id") in deferred]
     if (auto_start or {}).get("status") in {"started", "not_needed"}:
         return []
-    return tasks
+    started = set(_string_items((auto_start or {}).get("started_run_ids")))
+    return [task for task in tasks if _task_text(task, "id") not in started]
 
 
 def _operation_contract(

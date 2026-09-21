@@ -26,7 +26,9 @@ Registry 只缓存当前 Store，丢失 host 保持未知；单 session 停止�
 子树协调基础已进入源码：实际创建、attempt 准备/放弃、插话预留和授权后排队共用原 creation 文件锁；
 嵌套只在同一进程/线程/路径重入，旧 abandon 使用 canonical mutation 保留新轮和并发字段。
 guidance 按单 run admission→creation 的顺序写入，启动探测移至 creation 锁外。
-状态：未发布；精确 pending 身份贯穿启动、旧启动记录条件提交、取消整树冻结和终态资源清理仍待完成。
+状态：未发布。managed 排队已贯穿准确 pending 身份，旧 launch/attempt 回执共用条件提交，worker 激活后才发布带原 attempt 的 session。
+CLI 采用隐藏的成对 argv，非法、重复、漏项或 watch 混用在构造宿主前拒绝；不扩大模型工具 schema。
+无数据库模式显式空 ID 不代表数据库执行权；其完整取消/恢复边界仍须单独验证。取消整树冻结、插话回执重放竞态和终态资源清理仍待完成。
 
 Working 图标间歇消失：状态为**用户明确延期、尚未复现**。当前只记反馈，不修改活动计数或动画策略；
 在本轮十步目标完成后与用户一起采集真实状态时间线，再区分正常展示切换与活动事件丢失，不作为当前目标的验收阻塞。

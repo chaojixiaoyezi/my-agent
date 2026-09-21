@@ -15,7 +15,7 @@ from agent_py_agent.tests.test_orchestration_create_subagents_tool import (
 class TestCreateSubagentsToolWorkspaceDefaults:
     """测试任务工作区默认写入根和保守调度提示。"""
 
-    def test_create_next_action_auto_starts_by_default(self, tmp_path):
+    def test_create_next_action_auto_starts_by_default(self, tmp_path, monkeypatch):
         """创建多个任务后默认直接开跑，下一步只建议登记非阻塞等待。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
@@ -35,6 +35,11 @@ class TestCreateSubagentsToolWorkspaceDefaults:
             task.task_dir = f"/tmp/run_{index}"
             tasks.append(task)
         mock_agent.subagents.create_run.side_effect = tasks
+        # 工作区回执测试不让宽泛 MagicMock 假扮执行权限库。
+        monkeypatch.setattr(
+            "agent_py_agent.agent.agent_core.orchestration.background.dispatch._start_background_dispatch",
+            lambda _agent, ids, **_kw: {"status": "started", "run_ids": ids},
+        )
 
         result = CreateSubagentsTool(mock_agent).execute({
             "goal": "并行生成周数据并形成报告",
@@ -46,7 +51,7 @@ class TestCreateSubagentsToolWorkspaceDefaults:
 
         payload = json.loads(result.output)
         assert result.ok is True
-        assert payload["auto_start"]["status"] == "started"
+        assert payload["auto_start"]["status"] == "started", payload["auto_start"]
         assert payload["auto_start"]["run_ids"] == ["run_0", "run_1"]
         assert payload["pending_start_run_ids"] == []
         assert payload["next_action"]["action"] == "continue_independent_work"

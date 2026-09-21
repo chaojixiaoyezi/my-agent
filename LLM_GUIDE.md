@@ -51,7 +51,10 @@ direct/local 的消息句柄由 worker 与命令端共享，core 在模型前发
 无持久任务热请求先在原 T 锁关闭发布并读取绑定，再释放 T、取 task 锁；已晋升或身份不可读不能降级猜测清理。
 完整子树后台资源接线仍待完成；尚未发布或新增实际 TUI，不把开发回归当作 TUI 137 已通过。
 子代理创建、换轮、旧轮放弃和控制预留沿原 creation guard；`subagents/coordination.py` 只管理同线程嵌套持锁。
-guidance 的 admission 在 creation 之外，启动探测与执行放 creation 锁外；完整启动身份及停止树接线仍待完成。
+guidance 的 admission 在 creation 之外，启动探测与执行放 creation 锁外。
+managed 后台排队绑定原 pending ID，经宿主 argv、DispatchParams 和 runner 到 DB 精确激活；缺失不补 current。
+启动标记复用 runner_start.py 的条件 mutation；worker 先激活再发布携带 attempt 的 session，旧心跳不能覆盖新轮。
+这仍是未发布源码；完整停止树、插话重放竞态和实际 TUI 验收未完成。
 
 SSE delta 原样保留，OpenAI 工具参数生成有独立进度；
 派工不会永久禁止主代理本地工作，用户明确限制仍保留；复制按最新代次和实际通道结果反馈。

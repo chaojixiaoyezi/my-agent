@@ -1,5 +1,5 @@
-
-
+# LLM: 调度 DTO 运输宿主冻结的 pending 身份；公开模型参数不从此自动扩展，修改须联测 CLI 和 runner。
+# 模块用途: 集中声明执行计划、调度范围及每轮启动参数，避免各入口重新解释身份。
 from __future__ import annotations
 
 from dataclasses import dataclass, field, fields, replace
@@ -73,6 +73,8 @@ class DispatchRuntimePolicy:
         }
 
 
+# LLM: 宿主 expected_attempt_ids 固定单次派工身份，不进入模型工具参数；复制后传到 runner，禁止以 current 补缺项。
+# 类用途: 集中声明调度参数与真实执行计划，让后台和人工入口共用同一启动链。
 @dataclass
 class DispatchParams:
     """Dispatch controls after boundary normalization.
@@ -99,6 +101,7 @@ class DispatchParams:
     include_run_ids: list[str] | None = None
     exclude_run_ids: list[str] | None = None
     background_launch_id: str = ""
+    expected_attempt_ids: dict[str, str] | None = None
     execution_plan: DispatchExecutionPlan | None = None
 
     def __post_init__(self) -> None:
@@ -126,6 +129,8 @@ class DispatchParams:
         return bool(self.execution_plan.start_runners)
 
 
+# LLM: watch 每轮重新接纳，不能反复使用一次性 launch/attempt；保留原执行计划和显式推进开关。
+# 类用途: 声明持续观察的节拍与退出条件，与单次后台启动参数区分。
 @dataclass
 class WatchParams(DispatchParams):
 
@@ -134,6 +139,13 @@ class WatchParams(DispatchParams):
     advance: bool = False
     force_lock: bool = False
     stop_file: str | Path | None = None
+
+    # LLM: 持续观察不能重用一次性接纳身份，Python 宿主入口与 CLI 采用同一限制。
+    # 函数用途: 拒绝将固定启动批次放进 watch 循环，防止下一周期误领旧轮。
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.expected_attempt_ids is not None or self.background_launch_id:
+            raise ValueError("watch 不能携带一次性后台启动身份")
 
 
 DISPATCH_PARAM_KEYS = tuple(field.name for field in fields(DispatchParams))
@@ -194,6 +206,8 @@ def _non_negative_float_attr(config: object, field_name: str, default: float) ->
     return max(0.0, value)
 
 
+# LLM: Context 只运输当前周期冻结的身份；expected map 不能被 watch 下一周期重解释。
+# 类用途: 保存一次派工的范围和准入结果，不持有新的生命周期权威。
 @dataclass
 class DispatchContext:
     """Resolved dispatch state passed through one dispatch cycle."""
@@ -214,6 +228,7 @@ class DispatchContext:
     include_run_ids: list[str] | None = None
     exclude_run_ids: list[str] | None = None
     background_launch_id: str = ""
+    expected_attempt_ids: dict[str, str] | None = None
     records: list = field(default_factory=list)
     execution_plan: DispatchExecutionPlan = field(default_factory=DispatchExecutionPlan)
 
@@ -230,6 +245,8 @@ class DispatchContext:
         return bool(self.execution_plan.start_runners)
 
 
+# LLM: 批次必须把接纳时的执行轮原样送入每个 worker，队列等待不授予新轮执行权。
+# 类用途: 传递并行执行限制与每个工作项的准确身份。
 @dataclass
 class RunnerBatchContext:
     """Runner batch controls after dispatch candidate selection."""
@@ -242,3 +259,4 @@ class RunnerBatchContext:
     probe: bool
     records: list
     execution_plan: DispatchExecutionPlan = field(default_factory=DispatchExecutionPlan)
+    expected_attempt_ids: dict[str, str] = field(default_factory=dict)

@@ -7,6 +7,7 @@ from __future__ import annotations
 import time
 
 from ...common.id_generator import new_id as _framework_new_id
+from ...runtime_db.operations import RuntimeConflictError
 from ...runtime_errors import DataCorruptionError
 from ..models import (
     SUBAGENT_RECOVERY_CLOSED_STATUSES,
@@ -21,20 +22,23 @@ from .recovery.strategy import (
 )
 
 
-# LLM: 原创建锁覆盖 canonical 复读、DB 激活和投影发布；DB 提交后才保存文件，用户停止恢复仍受结构化资格约束。
+# LLM: 原创建锁覆盖 canonical 复读、DB 精确激活和投影发布；先核对排队身份，才可恢复会话链接与 Goal。
 # 函数用途: 在同一短事务里准备新执行轮和恢复目标，避免取消或插话在换代中间插入。
-def prepare_runner_attempt(manager: object, run_id: str, *, retry_reason: str = "") -> SubAgentTask:
+def prepare_runner_attempt(
+    manager: object, run_id: str, *, retry_reason: str = "",
+    expected_attempt_id: str | None = None,
+) -> SubAgentTask:
     with manager.creation_guard():
         task = manager.load(run_id)
         resumable_user_stop = user_stopped_run_is_resumable(task)
         _assert_runner_attempt_start_allowed(task, resumable_user_stop=resumable_user_stop)
-        if resumable_user_stop:
-            _reactivate_user_stopped_conversation_link(manager, task)
         previous = f"{task.status}/{task.failure_type or 'none'}"
         strategy = build_subagent_recovery_strategy(
             SubagentRecoveryStrategyRequest(task=task)
         )
-        attempt_id, runtime_task_id = _runtime_attempt_identity(manager, task)
+        attempt_id, runtime_task_id = _runtime_attempt_identity(manager, task, expected_attempt_id)
+        if resumable_user_stop:
+            _reactivate_user_stopped_conversation_link(manager, task)
         if not attempt_id:
             attempt_id = _framework_new_id("attempt_id")
         _recover_unsubmitted_agent_guidance(manager, task, attempt_id)
@@ -74,6 +78,8 @@ def prepare_runner_attempt(manager: object, run_id: str, *, retry_reason: str = 
         return task
 
 
+# LLM: 终态资格只是接纳前提，不代替 DB 精确 pending 检查；拒绝使用冲突类型，旧 worker 不发布结果。
+# 函数用途: 检查任务生命周期是否仍允许启动，保留来源工作者的原结构化门。
 def _assert_runner_attempt_start_allowed(
     task: SubAgentTask,
     *,
@@ -83,7 +89,7 @@ def _assert_runner_attempt_start_allowed(
         task_status_in(task.status, SUBAGENT_RECOVERY_CLOSED_STATUSES)
         and not resumable_user_stop
     ):
-        raise RuntimeError(
+        raise RuntimeConflictError(
             f"runner attempt not allowed for terminal run: run_id={task.id} "
             f"status={task.status}"
         )
@@ -318,30 +324,34 @@ def _runtime_terminal_projection_fact(
     return None
 
 
-def _runtime_attempt_identity(manager: object, task: SubAgentTask) -> tuple[str, str]:
-    """MANAGED 下把 runner attempt 落到权威链（seq 253 闭合）。
+# LLM: managed 激活依赖 DB 原子条件；显式空 ID 只属于 unmanaged，不能在缺记录时降级成文件身份。
+# 函数用途: 领取本次准确的数据库执行权，阻止迟到启动重新打开被停止的旧轮或新轮。
+def _runtime_attempt_identity(
+    manager: object, task: SubAgentTask, expected_attempt_id: str | None,
+) -> tuple[str, str]:
+    """受管派工只激活预留轮；同步入口未预留时沿原生命周期领取。
 
-    第一次 runner 启动原子激活创建时登记的 pending generation 1；只有前一
-    次执行已经结构化收口后，重试才由 create_attempt 创建下一代。任何仍在
-    running 的 current attempt 都拒绝重复启动。返回
-    (DB attempt_id, 权威链 task_id)。repo 缺失或 run 未登记 → ("", "")，
-    调用方回落投影 id（LOCAL_UNMANAGED / 旧 run 兼容，fail-closed 门后拦截
-    与现状一致）。task_id 优先读创建时回存的 runtime_authority，缺则按
-    授权门同款 JOIN 兜底查询（覆盖特性落地前已登记的老 run）。
+    返回数据库 attempt 与原 task 身份。显式预留遇到缺失记录必须拒绝，
+    不能降级；无数据库模式保留本地文件身份，不宣称具有 DB 的精确接纳保证。
     """
     repo = getattr(manager, "runtime_db", None)
     if repo is None:
+        if expected_attempt_id:
+            raise RuntimeError("无 RuntimeDB 的执行模式不能消费数据库执行轮身份")
         return "", ""
     run_id = str(task.id or "").strip()
     if not run_id:
         return "", ""
     row = repo.agent_run_for_run_id(run_id)
     if row is None:
+        if expected_attempt_id is not None:
+            raise RuntimeError("预留执行轮缺少原 RuntimeDB run")
         return "", ""
     attempt = repo.create_attempt(
         str(row["agent_run_id"]),
         reuse_pending=True,
         reject_running=True,
+        expected_pending_attempt_id=expected_attempt_id,
     )
     task_id = _runtime_authority_task_id(task) or repo.task_id_for_run_id(run_id)
     return str(attempt["attempt_id"] or ""), task_id

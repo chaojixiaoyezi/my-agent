@@ -7,7 +7,10 @@
 - `services/lifecycle_runner_attempts.py` 在锁内完成原 DB 激活和投影发布；放弃旧轮通过最新 canonical mutation 精确清指针。
 - `orchestration/tools/capability.py` 排队前锁内复读控制终态；`dispatch/capability_auto_sweep.py` 核对原 attempt/session 后才重排失联者。
 - `conversation/agent_control.py` 按单 run admission→creation 排队；`_AgentGuidanceDelivery` 仅交接响应和启动需求，启动/探测不持 creation 锁。
-- 完整子树停止尚未接通。启动期准确 pending 身份、旧启动回执条件写入与固定资源清单是下一组必做项，不能用锁替代原身份 CAS。
+- `runner_start.py` 只接纳原 pending 和条件更新原 launch；进程内与 CLI 标记复用同一 mutation，不另存执行权。
+- `DispatchParams.expected_attempt_ids` 是宿主字段，经隐藏成对 argv 运输；普通模型 request_params 不读取它。顺序和并行 worker 使用同一映射。
+- `RuntimeRepository.create_attempt(expected_pending_attempt_id=...)` 在同一写事务只激活原 pending，失效不创建后继；session 发布与心跳沿同一 attempt。
+- 完整子树停止尚未接通；回执重放竞态、固定资源清单及无数据库模式完整控制仍待验证，不能用锁代替实际清理。
 
 ## runner 当前错误投影
 

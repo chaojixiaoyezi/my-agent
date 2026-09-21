@@ -1,4 +1,5 @@
-
+# LLM: 子代理命令声明与业务执行分离，内部 expected-attempt 不作为模型参数或新用户控制命令。
+# 模块用途: 注册子代理 CLI 和内部派工选项，实际权限与状态仍交给宿主服务。
 from __future__ import annotations
 
 """implements CLI commands for subagent boards, due-checks, actions, routing, reviews, dispatch, and runner entrypoints.
@@ -205,8 +206,7 @@ def _add_agents_patch_subcommand(sub):
     patches.set_defaults(func=cmd_subagents_patches, patch_action="review_dry_run")
 
 
-# LLM: This command is the host auto-start process entrypoint; its watch lock is an OS-held
-# descriptor lock, so compatibility flags must never turn stale metadata into live ownership.
+# LLM: 宿主入口用隐藏 argv 对运输冻结执行轮；不进入模型工具 schema，watch 锁仍依赖 OS 持有而非文本。
 # 函数用途: 注册底层 runner 调度进程入口；普通用户不需要靠它推动任务，锁文件文字也不能代替进程排他事实。
 def _add_agents_dispatch_subcommands(sub):
     dispatch = sub.add_parser("subagents-dispatch", help="内部运行时调度入口；普通用户无需手动调用")
@@ -231,6 +231,7 @@ def _add_agents_dispatch_subcommands(sub):
     dispatch.add_argument("--instruction", help="给本轮 runner 的额外指令")
     dispatch.add_argument("--run-id", action="append", default=[], help="只推进指定子代理 run_id；可多次传入")
     dispatch.add_argument("--background-launch-id", default="", help="内部字段：标记 create_subagents 后台启动生命周期")
+    dispatch.add_argument("--expected-attempt", action="append", nargs=2, default=None, help=argparse.SUPPRESS)
     dispatch.add_argument("--workspace-root", default="", help=argparse.SUPPRESS)
     dispatch.add_argument("--max-cards", type=int, default=0, help="runner 最多注入多少张能力卡，0 表示不限制")
     dispatch.add_argument("--no-probe", action="store_true", help="执行 runner 前不做通道健康检查")

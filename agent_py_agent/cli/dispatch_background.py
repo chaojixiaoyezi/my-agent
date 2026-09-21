@@ -1,8 +1,8 @@
-
+# LLM: CLI 标记必须复用 runner_start 条件 mutation，不得恢复 load/save 的独立写链。
+# 模块用途: 把派工进程状态写回准确的启动记录，并报告未确认写入。
 from __future__ import annotations
 
 import os
-import time
 from dataclasses import dataclass, field
 
 from ..agent.runtime_errors import runtime_error_report
@@ -29,11 +29,7 @@ class BackgroundLaunchReport:
         return not self.load_errors and not self.save_errors
 
 
-# LLM: CLI dispatch 进程(create_subagents 自动派工的 subprocess)对任务
-#   background_start 的生命周期标记(running/finished/failed)。记录构造统一走
-#   process_control.build_background_start_record。子进程用 os.getpid() 写自己的
-#   实际宿主，且只允许更新同一个 launch_id；被接替的旧进程迟到收尾时不得覆盖
-#   新 launch 的 pid/status。
+# LLM: CLI 使用宿主同一个条件更新入口；原 launch/attempt 的比较和 mutation 共用 creation guard，拒绝时不继续派工。
 # 函数用途: 后台派工进程把自己"跑到哪一步了"写回每个任务,但绝不弄丢主代理
 #   记下的进程号。
 def mark_background_launch(
@@ -43,8 +39,8 @@ def mark_background_launch(
 ) -> BackgroundLaunchReport:
     from ..agent.subagents.process_control import (
         BackgroundStartUpdate,
-        build_background_start_record,
     )
+    from ..agent.subagents.runner_start import update_background_start
 
     launch_id = str(options.background_launch_id or "").strip()
     if not launch_id or not options.run_ids:
@@ -52,40 +48,16 @@ def mark_background_launch(
     manager = getattr(agent, "subagents", None)
     load_errors: list[dict[str, object]] = []
     save_errors: list[dict[str, object]] = []
-    record_update = BackgroundStartUpdate(
-        launch_id=launch_id,
-        status=update.status,
-        error=update.error,
-        pid=os.getpid(),
-    )
     for run_id in options.run_ids:
         try:
-            task = manager.load(run_id)
-        except Exception as exc:
+            update_background_start(manager, run_id, BackgroundStartUpdate(
+                launch_id=launch_id, status=update.status, error=update.error, pid=os.getpid(),
+                attempt_id=options.expected_attempt_ids[run_id],
+            ))
+        except FileNotFoundError as exc:
             load_errors.append(_background_launch_error(exc, "background_launch.task.load", run_id))
-            continue
-        attrs = dict(getattr(task, "attributes", {}) or {})
-        current = attrs.get("background_start")
-        current_launch_id = (
-            str(current.get("launch_id") or "").strip()
-            if isinstance(current, dict)
-            else ""
-        )
-        if current_launch_id and current_launch_id != launch_id:
-            continue
-        attrs["background_start"] = build_background_start_record(attrs.get("background_start"), record_update)
-        task.attributes = attrs
-        try:
-            manager.save(task)
         except Exception as exc:
-            save_error = _background_launch_error(exc, "background_launch.task.save", run_id)
-            save_errors.append(save_error)
-            task.attributes = dict(getattr(task, "attributes", {}) or {})
-            task.attributes["background_start"] = {
-                **dict(task.attributes.get("background_start") or {}),
-                "save_error": save_error,
-            }
-            continue
+            save_errors.append(_background_launch_error(exc, "background_launch.task.update", run_id))
     return BackgroundLaunchReport(load_errors=load_errors, save_errors=save_errors)
 
 

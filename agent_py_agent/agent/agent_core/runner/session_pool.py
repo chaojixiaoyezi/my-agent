@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
+from ...runtime_db.operations import RuntimeConflictError
 from ...runtime_errors import runtime_error_report
 from ...subagents.models import (
     SUBAGENT_RECOVERY_CLOSED_STATUSES,
@@ -18,7 +19,7 @@ from ...subagents.models import (
 )
 
 
-# LLM: 一个租约绑定一个 run 的现有心跳；activity_observer 只能提供只读采样和非终态诊断。
+# LLM: 租约绑定已激活的准确 attempt；activity_observer 只提供只读采样，新轮不能接收旧心跳。
 # 类用途: 声明子代理心跳间隔和附带检查，不负责超时杀进程或重新派工。
 @dataclass(frozen=True)
 class RunnerSessionPoolLease:
@@ -27,15 +28,19 @@ class RunnerSessionPoolLease:
     worker_id: str = ""
     interval_seconds: float = 5.0
     activity_observer: Callable[[], None] | None = None
+    attempt_id: str = ""
 
 
+# LLM: 第一次发布被 canonical fence 拒绝时不得进入执行体；后续心跳仍沿唯一窄写入口。
+# 函数用途: 为已取得执行权的 worker 发布会话并续租，失效工作不得借租约继续启动。
 @contextmanager
 def runner_session_lease(lease: RunnerSessionPoolLease) -> Iterator[dict[str, object]]:
     """Record a durable runner session and keep heartbeats fresh while it runs."""
 
     session = _new_runner_session(lease)
     stop_event = threading.Event()
-    _record_runner_session(lease, session, status="running")
+    if not _record_runner_session(lease, session, status="running", require_persisted=True):
+        raise RuntimeConflictError("执行轮会话发布已失效")
     heartbeat = threading.Thread(
         target=_heartbeat_loop,
         args=(lease, session, stop_event),
@@ -55,6 +60,8 @@ def runner_session_lease(lease: RunnerSessionPoolLease) -> Iterator[dict[str, ob
         heartbeat.join(timeout=1.0)
 
 
+# LLM: session 保存宿主已激活的 attempt 身份，不能从新鲜 task 反查并替换旧 worker 的身份。
+# 函数用途: 生成一份可追溯到本轮执行的心跳记录。
 def _new_runner_session(lease: RunnerSessionPoolLease) -> dict[str, object]:
     from ...subagents.process_control import PROCESS_EPOCH, running_in_dispatch_subprocess
 
@@ -63,6 +70,7 @@ def _new_runner_session(lease: RunnerSessionPoolLease) -> dict[str, object]:
         "schema_version": "runner_session_pool.v1",
         "session_id": f"runsess-{lease.run_id}-{int(now * 1000)}-{os.getpid()}",
         "run_id": lease.run_id,
+        "attempt_id": lease.attempt_id,
         "worker_id": lease.worker_id or f"pid:{os.getpid()}",
         "worker_pid": os.getpid(),
         # 记会话的进程实例身份:宿主已死回收据此判同代/异代——异代(重启换进程)记的
@@ -94,8 +102,7 @@ def _heartbeat_loop(lease: RunnerSessionPoolLease, session: dict[str, object], s
                 logging.getLogger(__name__).warning("runner activity observation failed (run_id=%s)", lease.run_id, exc_info=True)
 
 
-# LLM: This is the sole session-pool write adapter. False means canonical terminal state fenced
-# this lease and callers must stop heartbeats; transient storage errors remain retryable True.
+# LLM: 首次发布必须落盘后才能执行，旧代返回 False；周期心跳的瞬时错误保留原可重试语义。
 # 函数用途: 写一拍 runner-session 状态，并告诉心跳线程该执行轮是否仍有资格继续。
 def _record_runner_session(
     lease: RunnerSessionPoolLease,
@@ -103,6 +110,7 @@ def _record_runner_session(
     *,
     status: str,
     error: dict[str, object] | None = None,
+    require_persisted: bool = False,
 ) -> bool:
     try:
         task = lease.manager.load(lease.run_id)
@@ -136,6 +144,8 @@ def _record_runner_session(
             lease.manager.save(task)
         return True
     except Exception:
+        if require_persisted:
+            raise
         # 容忍:这是周期性 heartbeat,在后台线程里跑;单次 load/save 失败不能传播——
         # 否则会打死 heartbeat 线程/整轮 run,下一拍会重试。但不再无声:记日志可查
         # "session 元数据为何没更新"(续跑断链排障入口)。

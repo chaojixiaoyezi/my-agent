@@ -8,7 +8,7 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from ....concurrency.interrupt import register_interruptible
@@ -42,7 +42,12 @@ class _ProcessStartupFailureRequest:
     mark_errors: list[dict[str, object]]
 
 
-def auto_start_tasks(agent, tasks: list, request_params: dict[str, object]) -> dict[str, object]:
+# LLM: expected_attempt_ids 只接受宿主关键字，不能从模型 request_params 读取；进程启动在 creation 锁外。
+# 函数用途: 自动启动可执行孩子，并沿用控制入口已经预留的准确执行轮。
+def auto_start_tasks(
+    agent, tasks: list, request_params: dict[str, object], *,
+    expected_attempt_ids: dict[str, str] | None = None,
+) -> dict[str, object]:
     skipped_run_ids = [_safe_task_id(task) for task in tasks if _safe_task_id(task)]
     dispatchable = dispatchable_tasks(tasks)
     if _bool_param(request_params.get("defer_start"), default=False):
@@ -79,7 +84,7 @@ def auto_start_tasks(agent, tasks: list, request_params: dict[str, object]) -> d
     if workspace is not None and not isinstance(workspace, (str, Path)):
         return {"status": "unavailable", "run_ids": run_ids, "reason": "subagents workspace is not a real path"}
     try:
-        result = _start_background_dispatch(agent, run_ids)
+        result = _start_background_dispatch(agent, run_ids, expected_attempt_ids=expected_attempt_ids)
         if held:
             result["conversation_gate"] = held
         if deferred_run_ids:
@@ -90,7 +95,15 @@ def auto_start_tasks(agent, tasks: list, request_params: dict[str, object]) -> d
         return {"status": "failed", "run_ids": run_ids, "error": f"{type(exc).__name__}: {exc}"}
 
 
-def _start_background_dispatch(agent, run_ids: list[str]) -> dict[str, object]:
+# LLM: 先在原创建锁固定 pending 和 launch，再释放锁启动线程/进程；任一接纳错误都不能交给执行器。
+# 函数用途: 把本次后台启动准确绑定到一批已预留轮次，停止可撤销这些原轮次。
+def _start_background_dispatch(
+    agent, run_ids: list[str], *, expected_attempt_ids: dict[str, str] | None = None,
+) -> dict[str, object]:
+    from ....subagents.runner_start import existing_runner_launch, reserve_runner_start
+
+    if expected_attempt_ids is not None and set(expected_attempt_ids) != set(run_ids):
+        raise ValueError("启动身份必须与本批运行范围逐项对应")
     launch_id = f"subagent-start-{time.time_ns()}"
     router, cfg, dispatch_params = _auto_start_dispatch_args(
         agent,
@@ -106,9 +119,28 @@ def _start_background_dispatch(agent, run_ids: list[str]) -> dict[str, object]:
         dispatch_params,
         _captured_backend_override(agent),
     )
-    mark_errors = mark_background_start(request, status="launching")
+    with agent.subagents.creation_guard():
+        reused = [run_id for run_id in run_ids if existing_runner_launch(
+            agent.subagents, run_id, expected_attempt_ids[run_id] if expected_attempt_ids is not None else None,
+        )]
+        run_ids = [run_id for run_id in run_ids if run_id not in reused]
+        if not run_ids:
+            return {"status": "started", "run_ids": reused, "reused_run_ids": reused, "acceptance_status": "accepted"}
+        request = replace(request, run_ids=run_ids)
+        dispatch_params.include_run_ids = list(run_ids)
+        dispatch_params.expected_attempt_ids = {
+            run_id: reserve_runner_start(
+                agent.subagents, run_id,
+                expected_attempt_id=expected_attempt_ids[run_id] if expected_attempt_ids is not None else None,
+            )
+            for run_id in run_ids
+        }
+        mark_errors = mark_background_start(request, status="launching")
+    if mark_errors:
+        mark_errors.extend(mark_background_start(request, status="failed", error="启动批次未全部接纳"))
+        return _with_reused_starts({"status": "failed", "run_ids": run_ids, "background_mark_errors": mark_errors}, reused)
     if _use_inprocess_autostart(agent):
-        return _start_inprocess_dispatch(agent, request, mark_errors)
+        return _with_reused_starts(_start_inprocess_dispatch(agent, request, mark_errors), reused)
     process = _spawn_background_dispatch_process(agent, request)
     # Persist the PID before giving the child enough startup time to enter the
     # runner and contend for the same canonical task guard.  The previous
@@ -118,9 +150,9 @@ def _start_background_dispatch(agent, run_ids: list[str]) -> dict[str, object]:
     # typed startup-failure state.
     mark_errors.extend(mark_background_start(request, status="running", pid=process.pid))
     if (returncode := process_startup_returncode(process)) is not None:
-        return _background_process_startup_failure(
+        return _with_reused_starts(_background_process_startup_failure(
             _ProcessStartupFailureRequest(agent, request, process, returncode, mark_errors)
-        )
+        ), reused)
     # 孤儿回收前提:pid 必须落盘到任务权威记录(R6a 实锤:此前 pid 只进内存
     # registry,主代理退出后无人能定位后台进程;cancel_subagents 的
     # background_start.pid 终止路径因此永远 no_pid)。
@@ -128,6 +160,17 @@ def _start_background_dispatch(agent, run_ids: list[str]) -> dict[str, object]:
     _start_background_process_reaper(agent, request, process)
     payload = _background_process_started_payload(agent, request, process)
     attach_mark_errors(payload, mark_errors)
+    return _with_reused_starts(payload, reused)
+
+
+# LLM: 混合批次分别报告本次新启动与原接纳；失败不能把仍有效的旧启动说成已取消。
+# 函数用途: 合并重复投递的启动回执，不修改任何运行状态。
+def _with_reused_starts(payload: dict[str, object], reused: list[str]) -> dict[str, object]:
+    if reused:
+        current = list(payload.get("run_ids") or [])
+        payload["run_ids"] = [*reused, *current]
+        payload["reused_run_ids"] = list(reused)
+        payload["started_run_ids"] = [*reused, *current] if payload.get("status") == "started" else list(reused)
     return payload
 
 
@@ -319,18 +362,20 @@ def _reap_background_process(agent, launch_id: str, process: subprocess.Popen) -
     registry[launch_id] = item
 
 
+# LLM: 通道失败也须按原 launch/attempt 条件提交，不能用失败回执覆盖新轮任务状态。
+# 函数用途: 仅标记本次仍有效的启动失败，并保留每项未确认原因。
 def mark_background_channel_failure(request: _BackgroundDispatchRequest, *, error: str) -> list[dict[str, object]]:
+    from ....subagents.process_control import BackgroundStartUpdate
+    from ....subagents.runner_start import update_background_start
+
     manager = getattr(getattr(request, "agent", None), "subagents", None)
     mark_errors: list[dict[str, object]] = []
     for run_id in request.run_ids:
         try:
-            task = manager.load(run_id)
-            task.status = "CHANNEL_ERROR"
-            task.channel_status = "BROKEN"
-            task.failure_type = FailureType.BACKGROUND_DISPATCH_STARTUP.value
-            task.result = error
-            task.updated_at = time.time()
-            manager.save(task)
+            update_background_start(manager, run_id, BackgroundStartUpdate(
+                launch_id=request.launch_id, status="failed", error=error,
+                attempt_id=request.params.expected_attempt_ids[run_id],
+            ), channel_failure=True)
         except Exception as exc:
             mark_errors.append(
                 {"run_id": str(run_id), **runtime_error_report(exc, context="background_dispatch.channel_failure.save")}
@@ -354,32 +399,20 @@ def mark_background_start(
     error: str = "",
     pid: int = 0,
 ) -> list[dict[str, object]]:
-    from ....subagents.process_control import BackgroundStartUpdate, build_background_start_record
+    from ....subagents.process_control import BackgroundStartUpdate
+    from ....subagents.runner_start import update_background_start
 
     manager = getattr(getattr(request, "agent", None), "subagents", None)
     mark_errors: list[dict[str, object]] = []
-    update = BackgroundStartUpdate(
-        launch_id=str(getattr(request, "launch_id", "") or ""),
-        status=status,
-        error=error,
-        pid=pid,
-        replace_launch=status == "launching",
-    )
     for run_id in list(getattr(request, "run_ids", []) or []):
         try:
-            task = manager.load(run_id)
+            update_background_start(manager, run_id, BackgroundStartUpdate(
+                launch_id=request.launch_id, status=status, error=error, pid=pid,
+                replace_launch=status == "launching",
+                attempt_id=request.params.expected_attempt_ids[run_id],
+            ))
         except Exception as exc:
-            mark_errors.append(_background_mark_error(str(run_id), exc, "background_dispatch.mark_start.load"))
-            continue
-        if getattr(task, "id", "") != run_id:
-            continue
-        attrs = dict(getattr(task, "attributes", {}) or {})
-        attrs["background_start"] = build_background_start_record(attrs.get("background_start"), update)
-        task.attributes = attrs
-        try:
-            manager.save(task)
-        except Exception as exc:
-            mark_errors.append(_background_mark_error(str(run_id), exc, "background_dispatch.mark_start.save"))
+            mark_errors.append(_background_mark_error(str(run_id), exc, "background_dispatch.mark_start.update"))
     return mark_errors
 
 
@@ -392,6 +425,8 @@ def _background_mark_error(run_id: str, exc: BaseException, context: str) -> dic
     return {"run_id": run_id, **runtime_error_report(exc, context=context)}
 
 
+# LLM: argv 数组显式运输宿主 pending 身份；不拼 shell、不借自然语言备注传权限。
+# 函数用途: 让独立派工进程消费与进程内执行相同的一次启动接纳。
 def _background_dispatch_command(agent, request: _BackgroundDispatchRequest) -> list[str]:
     command = [
         sys.executable,
@@ -418,6 +453,7 @@ def _background_dispatch_command(agent, request: _BackgroundDispatchRequest) -> 
     ]
     for run_id in request.run_ids:
         command.extend(["--run-id", run_id])
+        command.extend(["--expected-attempt", run_id, request.params.expected_attempt_ids[run_id]])
     return command
 
 
@@ -456,13 +492,16 @@ def _background_dispatch_worker(request: _BackgroundDispatchRequest) -> None:
         _background_dispatch_worker_inner(request)
 
 
+# LLM: 运行标记失败时不得派工；显式后端注入在 finally 恢复，收尾只修改原启动记录。
+# 函数用途: 执行已接纳的后台派工并保存该次真实结果。
 def _background_dispatch_worker_inner(request: _BackgroundDispatchRequest) -> None:
     previous_backend_override = getattr(request.agent, "_subagent_worker_backend_override", None)
     previous_present = hasattr(request.agent, "_subagent_worker_backend_override")
     if request.backend_override is not None:
         request.agent._subagent_worker_backend_override = request.backend_override
     try:
-        mark_background_start(request, status="running")
+        if mark_background_start(request, status="running"):
+            raise RuntimeError("后台启动身份未确认，未进入派工")
         report = request.agent.dispatch_subagents(request.router, request.cfg, params=request.params)
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"

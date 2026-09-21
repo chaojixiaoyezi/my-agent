@@ -226,6 +226,22 @@ direct/local 控制在精确回合中断成功后，按 `operation=interrupt` �
   只有正式四元组、可信会话且 canonical task/Goal 确实未晋升时才关闭主权限；不创建链接，不按消息编号猜运行链。
   已晋升但解析失败、晚晋升、坏绑定、未发布、错运输代次或旧 attempt 均不能悄悄转成历史主链清理。
 
+managed 启动接纳已进入源码：宿主在 creation guard 内预留原 RuntimeDB pending，并把准确 ID 经
+`DispatchParams.expected_attempt_ids`、隐藏 `--expected-attempt RUN ATTEMPT` 和 runner DTO 传到实际执行器。
+同一数据库写事务只激活该 ID；已停止、已替换、已运行、UNKNOWN 或缺失均不重领 current、不创建后继。
+插话初次投递和重试的启动交接保留各自最终预留 ID，不把旧 turn 快照当新 pending。
+
+`runner_start.py` 共用接纳与启动记录条件写入；后台与 CLI 的 load/compare/save 分支已移除。
+`background_start.attempt_id` 只是原 DB 身份的关联字段，不是第二份执行权；回执须同时匹配 launch/attempt 和有效状态。
+接纳写失败不启动，CLI running 标记失败不派工，旧失败回执不能重写新任务为 CHANNEL_ERROR。
+worker 在准确激活后才发布带同一 attempt 的 session；首次未确认落盘不能进入执行，已领取权限仍沿原结果门收口，旧 session 不覆盖新轮。
+重复创建复用原 launch 的接纳，不再为同一轮启动线程；混合批次分别报告旧接纳与新启动。
+CLI 批量标记部分失败时，只将本次仍匹配的标记收成 failed，不能留下虚假的 running 或改动替换记录。
+
+CLI 缺字段、重复、范围不完整或与 watch 混用会在构造宿主前拒绝。空字符串只能显式声明无数据库模式，
+managed 最终准入仍拒绝；不能把未管理执行伪装成受管 DB 执行。无数据库模式的完整停止/恢复尚未获得本片保证。
+没有新增配置开关或模型工具参数；这是原启动和取消边界的修复。
+
 尚未完成：完整子树及已终态孩子遗留后台资源的停止接线。
 下一片须固定原子树范围及各自执行权，不能在异步清理时重新发现后来恢复的新孩子；终态孩子原业务结果不因资源清理重写。
 子树协调沿原 owner 的 `.create-subagents.guard`，覆盖实际创建、attempt 激活/放弃、插话预留和授权后排队。

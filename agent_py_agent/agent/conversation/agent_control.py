@@ -74,12 +74,13 @@ class _AgentGuidanceSubmission:
     dedupe_key: str
 
 
-# LLM: 锁内只交接已持久的响应与需启动的 task；执行器启动必须在 creation guard 释放后进行，不以展示文本判断是否启动。
+# LLM: 锁内交接已持久回执与准确 pending ID；执行器在 creation guard 外启动，不能丢 ID 后借用后来 current。
 # 类用途: 把插话排队与启动分开，防止进程探测或新线程反过来堵住整个子代理创建锁。
 @dataclass(frozen=True)
 class _AgentGuidanceDelivery:
     payload: dict[str, object]
     resume_task: object | None = None
+    expected_attempt_id: str = ""
 
 
 # LLM: The single Gateway serializes only competing submissions for the same
@@ -204,7 +205,9 @@ def _send_agent_guidance_admitted(
         )
     if delivery.resume_task is not None:
         try:
-            delivery.payload["resume"] = _resume_agent_for_guidance(agent, delivery.resume_task)
+            delivery.payload["resume"] = _resume_agent_for_guidance(
+                agent, delivery.resume_task, expected_attempt_id=delivery.expected_attempt_id,
+            )
         except AgentControlError:
             raise
         except Exception as exc:
@@ -271,7 +274,7 @@ def _submit_new_agent_guidance(
         "expected_turn_id": expected_turn_id,
         "run_id": str(getattr(task, "id", "") or ""),
         "resume": {"status": "active_turn", "run_ids": []},
-    }, task if turn.resume_required else None)
+    }, task if turn.resume_required else None, expected_turn_id)
 
 
 # LLM: Attempt reservation reads only RuntimeDB lifecycle and may create one
@@ -456,7 +459,7 @@ def _replay_agent_guidance(
         "run_id": str(getattr(submission.task, "id", "") or ""),
         "resume": resume,
         "replayed": True,
-    }, submission.task if resume_required else None)
+    }, submission.task if resume_required else None, expected_turn_id)
 
 
 # LLM: 调用方持 creation 锁；仅 pending 回执可按原 DB 旧轮事实改绑，返回启动需求而不在锁内启动执行器。
@@ -584,7 +587,9 @@ def _agent_guidance_turn(agent: object, task: object) -> _AgentGuidanceTurn:
 
 # LLM: 原创建锁内复读控制终态、解除 typed wait 并复用已有启动；auto_start 的启动与探测必须在该锁外，失败保留原插话回执。
 # 函数用途: 在确认孩子仍可运行后启动刚排队的用户消息，停止已生效时不再启动。
-def _resume_agent_for_guidance(agent: object, task: object) -> dict[str, object]:
+def _resume_agent_for_guidance(
+    agent: object, task: object, *, expected_attempt_id: str,
+) -> dict[str, object]:
     manager = getattr(agent, "subagents", None)
     run_id = str(getattr(task, "id", "") or "").strip()
     if manager is None or not run_id:
@@ -598,6 +603,9 @@ def _resume_agent_for_guidance(agent: object, task: object) -> dict[str, object]
     )
 
     with manager.creation_guard():
+        from ..subagents.runner_start import assert_expected_runner_attempt
+
+        assert_expected_runner_attempt(manager, run_id, expected_attempt_id)
         task = _reload_guidance_task(agent, task)
         if _task_is_terminal(task):
             raise AgentControlError(
@@ -618,7 +626,7 @@ def _resume_agent_for_guidance(agent: object, task: object) -> dict[str, object]
             }
     from ..agent_core.orchestration.background.dispatch import auto_start_tasks
 
-    result = auto_start_tasks(agent, [refreshed], {})
+    result = auto_start_tasks(agent, [refreshed], {}, expected_attempt_ids={run_id: expected_attempt_id})
     status = str(result.get("status") or "").strip()
     if status != "started":
         raise AgentControlError(

@@ -1,3 +1,5 @@
+# LLM: 任务执行权与 current CAS 共用原 RuntimeDB；预留激活必须在同一事务匹配原 pending，联测取消、UNKNOWN 与换代。
+# 模块用途: 保存任务、执行轮和委托关系，以事务方式领取和收回执行权。
 """Owner runtime.db 权威实体仓储（3.txt A/C/D/F 节落地面）。
 
 职责：
@@ -1393,6 +1395,7 @@ class RuntimeRepository(
     # 换代必须同时关闭所有非 current 的 active attempt，但不能把旧工具副作用
     # 猜成成功：未决工具仍转 UNKNOWN、未确认 mutation 仍转 DIRTY，已确认 STABLE 保留。
     # 合法恢复若复用已关闭 TaskRun，须在同一事务重开总账并留事件；不允许运行中的树仍展示旧 cancelled。
+    # expected_pending_attempt_id 是宿主排队时冻结的身份；传入后只能激活该 pending，不能换领 current 或创建后继。
     # 函数用途: 原子取得新执行权、收掉旧运行态并同步整棵执行总账；准入拒绝时这些状态均不改变。
     def create_attempt(
         self,
@@ -1400,6 +1403,7 @@ class RuntimeRepository(
         *,
         reuse_pending: bool = False,
         reject_running: bool = False,
+        expected_pending_attempt_id: str | None = None,
     ) -> sqlite3.Row:
         """单事务创建新 attempt + 原子取得执行权（R1-03 v5）。
 
@@ -1440,6 +1444,10 @@ class RuntimeRepository(
         now = time.time()
         scope = exec_lock_scope(agent_run_id)
         with self._runtime_connection() as conn:
+            if expected_pending_attempt_id is not None:
+                if not expected_pending_attempt_id or not reuse_pending:
+                    raise ValueError("精确激活必须提供非空 pending 身份并启用 reuse_pending")
+                conn.execute("BEGIN IMMEDIATE")
             run = conn.execute(
                 "SELECT current_attempt_generation, current_attempt_id, "
                 "status, task_run_id, workspace_epoch FROM agent_runs "
@@ -1458,6 +1466,14 @@ class RuntimeRepository(
             latest_attempt_status = (
                 str(latest_attempt["status"] or "") if latest_attempt is not None else ""
             )
+            if expected_pending_attempt_id is not None and (
+                latest_attempt is None
+                or str(run["current_attempt_id"] or "") != expected_pending_attempt_id
+                or str(latest_attempt["attempt_id"] or "") != expected_pending_attempt_id
+                or latest_attempt_status != ATTEMPT_STATUS_PENDING
+                or float(latest_attempt["ended_at"] or 0) != 0
+            ):
+                raise RuntimeConflictError("预留执行轮已失效，拒绝重新领取执行权")
             if (
                 reuse_pending
                 and latest_attempt is not None

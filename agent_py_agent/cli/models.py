@@ -1,4 +1,5 @@
-
+# LLM: CLI DTO 只表达边界输入，后台身份与展示备注分离，修改须核对解析和业务适配。
+# 模块用途: 保存命令行请求的具名字段，方便发现遗漏或错误运输。
 from __future__ import annotations
 
 """defines small CLI DTOs for chat jobs, daemon options, and CLI request bundles.
@@ -105,6 +106,8 @@ class AdapterOptions:
     stop_timeout: float
 
 
+# LLM: expected_attempt_ids 是宿主命令行运输值，空值只声明 unmanaged，运行模式与最终接纳仍由宿主验证。
+# 类用途: 将一次派工的命令行选项收成具名字段，保持排队身份不丢失。
 @dataclass(frozen=True)
 class SubagentsDispatchOptions:
 
@@ -127,6 +130,7 @@ class SubagentsDispatchOptions:
     watch: bool
     run_ids: list[str]
     background_launch_id: str = ""
+    expected_attempt_ids: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)

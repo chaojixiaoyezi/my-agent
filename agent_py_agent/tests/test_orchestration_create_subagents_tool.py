@@ -483,7 +483,7 @@ class TestCreateSubagentsToolExecute:
         mock_agent.tools.specs.return_value = []
         launched: dict[str, object] = {}
 
-        def fake_background_start(agent, run_ids):
+        def fake_background_start(agent, run_ids, *, expected_attempt_ids=None):
             launched["agent"] = agent
             launched["run_ids"] = list(run_ids)
             return {
@@ -556,7 +556,7 @@ class TestCreateSubagentsToolExecute:
             launch_id="launch-1",
             router=object(),
             cfg=object(),
-            params=object(),
+            params=SimpleNamespace(expected_attempt_ids={"run_a": "attempt-a", "run_b": "attempt-b"}),
         )
 
         command = _background_dispatch_command(mock_agent, request)
@@ -602,6 +602,7 @@ class TestCreateSubagentsToolExecute:
             watch=False,
             run_id=["run_a", "run_b,run_c"],
             background_launch_id="launch-1",
+            expected_attempt=[["run_a", "attempt-a"], ["run_b", "attempt-b"], ["run_c", "attempt-c"]],
         )
 
         options = _subagents_dispatch_options(args)
@@ -641,7 +642,7 @@ class TestCreateSubagentsToolStartControls:
 
         captured: dict[str, object] = {}
 
-        def fake_start(agent, run_ids):
+        def fake_start(agent, run_ids, *, expected_attempt_ids=None):
             del agent
             captured["run_ids"] = list(run_ids)
             return {"status": "started", "run_ids": list(run_ids)}

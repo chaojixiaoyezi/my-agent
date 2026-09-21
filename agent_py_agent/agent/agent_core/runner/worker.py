@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 
+from ...runtime_db.operations import RuntimeConflictError
 from ...settings import AgentConfig
 from ...settings.services.runtime_config_task import apply_task_runtime_config_overlay
 from ...subagents.authorization_gate import OperationRequest, authorize_operation
@@ -22,6 +23,8 @@ from .session_pool import RunnerSessionPoolLease, runner_session_lease
 _LOGGER = logging.getLogger(__name__)
 
 
+# LLM: expected_attempt_id 固定宿主接纳身份；None 只用于直接同步入口，后台已接纳路径必须显式传入。
+# 类用途: 为一个 worker 保存不可变启动参数，等待期间不重新选取执行轮。
 @dataclass(frozen=True)
 class RunSubagentWorkerParams:
     config: AgentConfig
@@ -35,38 +38,66 @@ class RunSubagentWorkerParams:
     timeout_seconds: float = 0.0
     local_store: object | None = None
     backend_override: object | None = None
+    expected_attempt_id: str | None = None
 
 
-# LLM: 每个 worker 只持有自己的执行代；原心跳附带阶段观测，收口后才按结构化来源或直属孩子事实续跑。
+# LLM: worker 先精确激活再发布 session；拒绝接纳不写 runner 结果或租约，不能覆盖后来轮次。
 # 函数用途: 运行子代理工作片，续租并诊断长等待，落盘结果后继续来源岗位或唤醒直属父级。
 def _run_subagent_worker(params: RunSubagentWorkerParams) -> SubAgentRunnerResult:
     from ...core import SimpleAgent
 
     worker = _build_worker_agent(SimpleAgent, params)
-    with runner_session_lease(
-        RunnerSessionPoolLease(
-            manager=worker.subagents,
-            run_id=params.run_id,
-            worker_id=f"subagent-worker:{params.run_id}",
-            interval_seconds=_runner_session_heartbeat_interval(worker),
-            activity_observer=partial(observe_runner_activity, worker, params.run_id),
-        )
-    ):
-        if params.dry_run:
-            result = worker.run_subagent(
-                params=SubagentRunParams(
-                    run_id=params.run_id,
-                    instruction=params.instruction,
-                    dry_run=params.dry_run,
-                    max_cards=params.max_cards,
-                    probe=params.probe,
-                    retry_reason=params.retry_reason,
-                )
+    attempt_id = ""
+    if not params.dry_run:
+        try:
+            prepared = worker.subagents.lifecycle.prepare_runner_attempt(
+                params.run_id, retry_reason=params.retry_reason,
+                expected_attempt_id=params.expected_attempt_id,
             )
-        elif params.timeout_seconds <= 0:
-            result = _run_subagent_worker_interruptibly(worker, params)
-        else:
-            result = _run_subagent_worker_with_timeout(worker, params)
+        except RuntimeConflictError as exc:
+            return SubAgentRunnerResult(
+                run_id=params.run_id, dry_run=False, ok=False, status="CANCELLED",
+                verification_status="UNVERIFIED", message=f"启动接纳已失效：{exc}",
+            )
+        attempt_id = prepared.runner_active_attempt_id
+        worker._runner_activity_attempt_id = attempt_id
+    try:
+        with runner_session_lease(
+            RunnerSessionPoolLease(
+                manager=worker.subagents,
+                run_id=params.run_id,
+                worker_id=f"subagent-worker:{params.run_id}",
+                interval_seconds=_runner_session_heartbeat_interval(worker),
+                activity_observer=partial(observe_runner_activity, worker, params.run_id),
+                attempt_id=attempt_id,
+            )
+        ):
+            if params.dry_run:
+                result = worker.run_subagent(
+                    params=SubagentRunParams(
+                        run_id=params.run_id,
+                        instruction=params.instruction,
+                        dry_run=params.dry_run,
+                        max_cards=params.max_cards,
+                        probe=params.probe,
+                        retry_reason=params.retry_reason,
+                    )
+                )
+            elif params.timeout_seconds <= 0:
+                result = _run_subagent_worker_interruptibly(worker, params, attempt_id=attempt_id)
+            else:
+                result = _run_subagent_worker_with_timeout(worker, params, attempt_id=attempt_id)
+    except InterruptedError:
+        raise
+    except Exception as exc:
+        if params.dry_run:
+            raise
+        # 首次租约发布失败也要沿原结果门释放已领取的执行权，不能留下活进程持有的空运行轮。
+        result = worker.subagents.runner_result.record_runner_result(RecordRunnerResultParams(
+            run_id=params.run_id, attempt_id=attempt_id, dry_run=False, ok=False,
+            message=f"runner worker failed: {exc}", status="FAILED",
+            verification_status="UNVERIFIED", failure_type=FailureType.RUNNER_WORKER_ERROR.value,
+        ))
     result = _reconcile_timed_out_runner(
         worker,
         params.run_id,
@@ -218,16 +249,11 @@ def _attach_worker_local_store(worker, local_store: object | None) -> None:
 def _run_subagent_worker_interruptibly(
     worker,
     params: RunSubagentWorkerParams,
+    *,
+    attempt_id: str,
 ):
     from ...concurrency.interrupt import register_interruptible
 
-    prepared = worker.subagents.lifecycle.prepare_runner_attempt(
-        params.run_id,
-        retry_reason=params.retry_reason,
-    )
-    attempt_id = prepared.runner_active_attempt_id
-    # 跨心跳线程只传递此 worker 真正取得的执行代；不能拿后来新 worker 的活动冒充本轮。
-    worker._runner_activity_attempt_id = attempt_id
     interrupt_name = f"subagent-runner-attempt:{params.run_id}:{attempt_id}"
     with register_interruptible(interrupt_name):
         return worker.run_subagent(
@@ -245,18 +271,13 @@ def _run_subagent_worker_interruptibly(
 
 # LLM: 仅执行显式 timeout，活动提醒不能进入这条取消路径；执行和观测使用同一个预备 attempt。
 # 函数用途: 为明确有时间预算的子代理启动执行线程，到期按原合同收口，而不是因模型慢自行判死。
-def _run_subagent_worker_with_timeout(worker, params: RunSubagentWorkerParams):
+def _run_subagent_worker_with_timeout(worker, params: RunSubagentWorkerParams, *, attempt_id: str):
     from ...concurrency.interrupt import (
         interrupt_by_name,
         register_interruptible,
         set_interrupt,
     )
 
-    prepared = worker.subagents.lifecycle.prepare_runner_attempt(
-        params.run_id, retry_reason=params.retry_reason
-    )
-    attempt_id = prepared.runner_active_attempt_id
-    worker._runner_activity_attempt_id = attempt_id
     interrupt_name = (
         f"subagent-runner-attempt:{params.run_id}:{attempt_id}"
     )

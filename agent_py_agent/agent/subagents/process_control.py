@@ -120,6 +120,8 @@ def terminate_pid_with_escalation(
     }
 
 
+# LLM: attempt_id 由宿主接纳时固定；后续 marker 与 CLI 只能消费原 ID，无数据库模式显式为空。
+# 类用途: 描述一次启动记录的条件更新，进程号为零时保留原进程号。
 @dataclass(frozen=True)
 class BackgroundStartUpdate:
     """background_start 状态更新的入参包(pid=0 表示沿用已落盘 pid)。"""
@@ -129,6 +131,7 @@ class BackgroundStartUpdate:
     error: str = ""
     pid: int = 0
     replace_launch: bool = False
+    attempt_id: str = ""
 
 
 # LLM: background_start 记录构造的唯一权威(R7a 实锤:agent 侧 mark 与 CLI 侧
@@ -154,13 +157,14 @@ def build_background_start_record(previous: object, update: BackgroundStartUpdat
         # A late writer from an abandoned launch must not overwrite the
         # authoritative lifecycle/PID of its replacement.
         return previous_record
+    same_launch = not previous_launch_id or previous_launch_id == next_launch_id
     record: dict[str, object] = {
         "launch_id": next_launch_id,
+        "attempt_id": update.attempt_id or (previous_record.get("attempt_id", "") if same_launch else ""),
         "status": str(update.status or ""),
         "updated_at": _time.time(),
         "error": str(update.error or ""),
     }
-    same_launch = not previous_launch_id or previous_launch_id == next_launch_id
     effective_pid = _safe_pid(update.pid)
     if effective_pid <= 0 and same_launch:
         effective_pid = _safe_pid(previous_record.get("pid"))

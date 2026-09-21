@@ -377,6 +377,8 @@ class TestCmdSubagentsDispatch:
         args.max_cycles = None
         args.force_lock = False
         args.watch = False
+        args.expected_attempt = None
+        args.background_launch_id = ""
         args.skill_dir = None
 
         mock_agent = MagicMock()
@@ -415,6 +417,8 @@ class TestCmdSubagentsDispatch:
         args.max_cycles = None
         args.force_lock = False
         args.watch = False
+        args.expected_attempt = None
+        args.background_launch_id = ""
         args.skill_dir = None
 
         with patch("agent_py_agent.cli._dispatch.make_agent", return_value=MagicMock()):

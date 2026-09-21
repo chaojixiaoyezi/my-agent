@@ -1,11 +1,11 @@
-
-
+# LLM: runner 参数必须保留已接纳 attempt；失败写入也按该 ID 受原结果提交门约束。
+# 模块用途: 统一单个和并行工作项的执行接口，汇总结果与失败诊断。
 from __future__ import annotations
 
 import json
 import threading
 from concurrent.futures import as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -30,6 +30,8 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 
+# LLM: expected_attempt_id 由派工接纳固定，不能在 worker 排队结束时取后来 current。
+# 类用途: 描述单个子代理工作片及其原执行轮。
 @dataclass(frozen=True)
 class SingleRunnerParams:
     agent: SimpleAgent
@@ -40,8 +42,11 @@ class SingleRunnerParams:
     max_cards: int
     probe: bool
     retry_reason: str
+    expected_attempt_id: str | None = None
 
 
+# LLM: 身份 map 属于当前批次，不随并发完成顺序改变；每个 worker 只消费自己的条目。
+# 类用途: 传递多子代理工作和接纳时的执行轮编号。
 @dataclass(frozen=True)
 class ConcurrentRunnerParams:
     agent: SimpleAgent
@@ -52,6 +57,7 @@ class ConcurrentRunnerParams:
     start_runners: bool
     max_cards: int
     probe: bool
+    expected_attempt_ids: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -71,6 +77,8 @@ class _RunnerWorkerRequest:
     retry_reason: str
 
 
+# LLM: 同步与线程池入口使用相同 worker DTO，排队身份不进入模型输入。
+# 函数用途: 按执行计划启动一个准确工作片，预览仍沿只读路径。
 def run_single_runner(params: SingleRunnerParams) -> SubAgentRunnerResult:
     from ..subagent.params import SubagentRunParams
     from .dispatch import RunSubagentWorkerParams, _run_subagent_worker
@@ -88,6 +96,7 @@ def run_single_runner(params: SingleRunnerParams) -> SubAgentRunnerResult:
             timeout_seconds=params.task_timeout,
             local_store=params.agent.local_store,
             backend_override=getattr(params.agent, "_subagent_worker_backend_override", None),
+            expected_attempt_id=params.expected_attempt_id,
         )
         return _run_subagent_worker(worker_params)
     return params.agent.run_subagent(
@@ -139,6 +148,8 @@ def run_concurrent_runners(params: ConcurrentRunnerParams) -> dict[str, tuple[Su
     return completed
 
 
+# LLM: 从已接纳批次复制准确执行轮；不得读取 current 来补缺失身份。
+# 函数用途: 给线程池工作项生成固定启动参数。
 def _runner_worker_params(
     context: ConcurrentRunnerParams | None = None,
     *,
@@ -164,9 +175,12 @@ def _runner_worker_params(
         timeout_seconds=task_timeout,
         local_store=params.agent.local_store,
         backend_override=getattr(params.agent, "_subagent_worker_backend_override", None),
+        expected_attempt_id=params.expected_attempt_ids[request.run_id] if params.start_runners else None,
     )
 
 
+# LLM: 异常结果携带本批原 attempt，由既有提交门裁决；旧 future 不能写无身份 BLOCKED 覆盖新轮。
+# 函数用途: 收集线程池结果，把异常限制在原工作项的执行轮内。
 def _collect_runner_future_result(params: ConcurrentRunnerParams, future, run_id: str):
     try:
         return future.result()
@@ -180,6 +194,7 @@ def _collect_runner_future_result(params: ConcurrentRunnerParams, future, run_id
                 status="BLOCKED",
                 verification_status="UNVERIFIED",
                 failure_type=FailureType.RUNNER_WORKER_ERROR.value,
+                attempt_id=params.expected_attempt_ids.get(run_id, ""),
             )
         )
 

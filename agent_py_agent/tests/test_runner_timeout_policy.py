@@ -115,7 +115,7 @@ def test_timed_runner_interrupts_blocking_transport_after_attempt_is_fenced():
         timeout_seconds=0.02,
     )
 
-    result = _run_subagent_worker_with_timeout(worker, params)
+    result = _run_subagent_worker_with_timeout(worker, params, attempt_id="attempt-timeout")
 
     assert transport_started.is_set()
     assert lifecycle_events == ["abandoned"]
@@ -166,7 +166,7 @@ def test_non_timed_runner_registers_exact_attempt_interrupt_token():
 
     def _target() -> None:
         try:
-            _run_subagent_worker_interruptibly(worker, params)
+            _run_subagent_worker_interruptibly(worker, params, attempt_id="attempt-normal")
         except InterruptedError:
             result["interrupted"] = True
 
@@ -291,7 +291,7 @@ def test_audit_runner_uses_stream_inactivity_not_total_wall_time():
     )
 
     started = time.monotonic()
-    result = _run_subagent_worker_with_timeout(worker, params)
+    result = _run_subagent_worker_with_timeout(worker, params, attempt_id="attempt-progressing")
 
     assert time.monotonic() - started > params.timeout_seconds * 2
     assert result.status == "DONE"

@@ -1,5 +1,5 @@
-
-
+# LLM: 内部启动输入先校验再创建宿主；命令行只运输身份，最终执行权仍由原 RuntimeDB 裁决。
+# 模块用途: 把 CLI 调度和执行请求接入正式运行链，拒绝缺失或冲突的后台启动参数。
 from __future__ import annotations
 
 import json
@@ -20,6 +20,8 @@ from .dispatch_background import BackgroundLaunchUpdate, mark_background_launch
 from .models import SubagentsDispatchOptions
 
 
+# LLM: CLI 固定身份与可配置默认值分别解析；不得从当前数据库补充遗漏的宿主字段。
+# 函数用途: 把命令行输入变成单次派工选项，严格保留原执行轮映射。
 def _subagents_dispatch_options(args, agent=None) -> SubagentsDispatchOptions:
     config = getattr(agent, "config", None)
     policy = DispatchRuntimePolicy.from_config(config)
@@ -43,6 +45,7 @@ def _subagents_dispatch_options(args, agent=None) -> SubagentsDispatchOptions:
         watch=bool(args.watch),
         run_ids=_flatten_run_ids(getattr(args, "run_id", []) or []),
         background_launch_id=str(getattr(args, "background_launch_id", "") or "").strip(),
+        expected_attempt_ids=_expected_attempt_ids(args),
     )
 
 
@@ -58,6 +61,8 @@ def _configured_float(value: object, default: float) -> float:
     return float(default or 0.0)
 
 
+# LLM: 原启动身份直接传入派工 DTO，不写入 note/instruction 等模型上下文。
+# 函数用途: 让 CLI 与进程内后台派工使用相同的执行参数。
 def _dispatch_params(options: SubagentsDispatchOptions) -> DispatchParams:
     return DispatchParams(
         execution_plan=DispatchExecutionPlan.from_parts(
@@ -76,7 +81,38 @@ def _dispatch_params(options: SubagentsDispatchOptions) -> DispatchParams:
         locked_files=options.locked_files,
         include_run_ids=options.run_ids or None,
         background_launch_id=options.background_launch_id,
+        expected_attempt_ids=dict(options.expected_attempt_ids) if options.expected_attempt_ids is not None else None,
     )
+
+
+# LLM: 纯解析先于 agent 构造；重复/缺项/越界与 watch 混用均拒绝。空 attempt 只声明 unmanaged，managed 在接纳处拒绝。
+# 函数用途: 校验内部启动参数的完整对应关系，避免丢参数后变成全树调度或重新领取当前轮。
+def _expected_attempt_ids(args) -> dict[str, str] | None:
+    pairs = getattr(args, "expected_attempt", None)
+    launch_id = getattr(args, "background_launch_id", "")
+    if pairs is None:
+        if launch_id:
+            raise ValueError("后台启动缺少 --expected-attempt 身份")
+        return None
+    if not isinstance(pairs, list) or not pairs:
+        raise ValueError("--expected-attempt 必须提供运行编号和执行轮编号")
+    result = {}
+    for pair in pairs:
+        if not isinstance(pair, (tuple, list)) or len(pair) != 2:
+            raise ValueError("--expected-attempt 必须成对提供")
+        run_id, attempt_id = pair
+        if not isinstance(run_id, str) or not run_id or run_id != run_id.strip():
+            raise ValueError("启动运行编号必须是规范的非空字符串")
+        if not isinstance(attempt_id, str) or attempt_id != attempt_id.strip():
+            raise ValueError("启动执行轮编号必须是规范字符串")
+        if run_id in result:
+            raise ValueError("同一启动运行编号不能重复声明")
+        result[run_id] = attempt_id
+    if set(result) != set(_flatten_run_ids(getattr(args, "run_id", []) or [])):
+        raise ValueError("启动身份必须与 --run-id 范围逐项对应")
+    if getattr(args, "watch", False) or not args.apply or not args.start_runners:
+        raise ValueError("固定启动身份只用于 --apply --start-runners 单次派工")
+    return result
 
 
 def _watch_params(options: SubagentsDispatchOptions) -> WatchParams:
@@ -151,8 +187,14 @@ def _print_dispatch_report(agent, report, options: SubagentsDispatchOptions) -> 
         print(f"planner: {ws / 'PARENT_PLANNER.md'}")
 
 
+# LLM: 内部参数先纯校验再创建依赖；条件 marker 失败不进入 dispatch，最终 worker 仍须独立精确激活。
+# 函数用途: 执行 CLI 调度，在启动身份无效时明确报错而不推进任务。
 def cmd_subagents_dispatch(args) -> int:
-
+    try:
+        _expected_attempt_ids(args)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     agent = make_agent(args)
     options = _subagents_dispatch_options(args, agent=agent)
     if options.start_runners and not options.mutate_state:
@@ -174,7 +216,13 @@ def cmd_subagents_dispatch(args) -> int:
         _print_watch_report(agent, report, options)
         return 0
 
-    _print_background_launch_report(mark_background_launch(agent, options, BackgroundLaunchUpdate("running")))
+    launch_report = mark_background_launch(agent, options, BackgroundLaunchUpdate("running"))
+    _print_background_launch_report(launch_report)
+    if not launch_report.ok:
+        _print_background_launch_report(mark_background_launch(
+            agent, options, BackgroundLaunchUpdate("failed", "启动标记未全部确认，派工未执行"),
+        ))
+        return 2
     try:
         report = agent.dispatch_subagents(router, capability_config, params=_dispatch_params(options))
     except Exception as exc:

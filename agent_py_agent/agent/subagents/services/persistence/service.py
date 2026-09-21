@@ -1,4 +1,5 @@
-
+# LLM: canonical 状态始终先于投影；session 窄写在同一原锁内核对终态和准确 attempt，不能以旧快照覆盖新轮。
+# 模块用途: 持久保存子代理任务及派生视图，并为心跳提供受条件约束的轻量写入。
 """Persistence service for SubAgentManager task records.
 
 Saves are split into two phases. The canonical task-local state is written first
@@ -403,7 +404,7 @@ class SubAgentPersistenceService:
             return copy.deepcopy(task)
 
     # LLM: Narrow runner-session persistence may update only the newest canonical payload and
-    # returns False when a recovery-closed lifecycle fences the old lease.
+    # returns False when lifecycle or the exact active attempt fences the old lease.
     # 函数用途: 轻量保存 runner 心跳；终态后拒绝旧会话继续冒充运行中。
     def save_runner_session(
         self,
@@ -421,7 +422,7 @@ class SubAgentPersistenceService:
         initial_task = self.task_from_payload(_read_state_payload(locator_path))
         with locked_json_path(_canonical_state_guard_path(self.workspace, initial_task)):
             payload = _read_state_payload(locator_path)
-            if _runner_session_write_is_stale_for_closed_task(payload, session):
+            if _runner_session_write_is_stale(payload, session):
                 return False
             _merge_runner_session_payload(payload, session, now=now)
             canonical_ref = _canonical_state_ref_from_payload(payload)
@@ -512,14 +513,19 @@ def _merge_runner_session_payload(
     payload["updated_at"] = now
 
 
-# LLM: This narrow heartbeat path bypasses full task save, so it must repeat the same terminal
-# fence using canonical payload fields. It may never turn a cancelled/abandoned/taken-over lease
-# live again; DONE accepts only the final completed session receipt.
-# 函数用途: 拒绝终态之后迟到的启动或心跳窄写，避免界面和恢复器继续把已结束子代理看成活跃。
-def _runner_session_write_is_stale_for_closed_task(
+# LLM: 精确 attempt 和 canonical 终态共同约束心跳；正常结束只允许原 session 收尾，旧轮不能覆盖新轮。
+# 函数用途: 拒绝停止或换代后的旧会话更新，同时保留正常完成回执。
+def _runner_session_write_is_stale(
     payload: dict[str, Any],
     session: dict[str, object],
 ) -> bool:
+    expected = str(session.get("attempt_id") or "")
+    current = str(payload.get("runner_active_attempt_id") or "")
+    if expected and expected != current:
+        previous = (payload.get("attributes") or {}).get("runner_session") or {}
+        if (current or session.get("status") not in {"completed", "failed"}
+                or previous.get("session_id") != session.get("session_id")):
+            return True
     task_status = str(payload.get("status") or "").strip().upper()
     if task_status not in SUBAGENT_RECOVERY_CLOSED_STATUSES:
         return False

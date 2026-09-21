@@ -93,12 +93,17 @@ def test_items_create_without_redundant_batch_goal():
 class TestCreateSubagentsItemsMode:
     """测试 create_subagents 的 items 结构化批量入口。"""
 
-    def test_items_create_distinct_goals_with_batch_goal(self):
+    def test_items_create_distinct_goals_with_batch_goal(self, monkeypatch):
         """items[] 批量模式应创建不同目标，不能复制同一个 goal。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = _agent()
         mock_agent.subagents.create_run.side_effect = _create_run_sequence()
+        # 本用例只验创建参数；真实接纳使用 test_runner_start_admission 的临时账本。
+        monkeypatch.setattr(
+            "agent_py_agent.agent.agent_core.orchestration.background.dispatch._start_background_dispatch",
+            lambda _agent, ids, **_kw: {"status": "started", "run_ids": ids},
+        )
 
         result = CreateSubagentsTool(mock_agent).execute({
             "goal": "并行研究市场并形成进入策略",
@@ -132,7 +137,7 @@ class TestCreateSubagentsItemsMode:
             "制定进入策略",
         ]
         assert payload["created"] == 3
-        assert payload["auto_start"]["status"] == "started"
+        assert payload["auto_start"]["status"] == "started", payload["auto_start"]
         assert payload["auto_start"]["run_ids"] == ["run_1", "run_2", "run_3"]
         assert payload["next_action"]["action"] == "continue_independent_work"
 
