@@ -1741,6 +1741,11 @@ generic `create_attempt` 和 `recover_attempt_unknown` 不感知 transport marke
 `_bind_main_agent_authority`；旧操作不会被 RuntimeDB 重开，模型只从 carried records 获得已做事实。任何
 EXECUTING/UNKNOWN、已启动但未 settle、缺 archive、operation 字段冲突或 DIRTY/MUTATING 资源都返回结构化
 blocked，由 Gateway 停止该 request，避免重复副作用。
+
+执行换代与升级调和只把未确认的旧资源标为 DIRTY；已确认 STABLE 的资源记录、版本和确认时间保持，
+下一代仍须通过原 fence 和 mutation CAS 才能再次写入。旧 attempt 失去执行权不撤销已确认的副作用。
+既有 DIRTY 原因和时间也保持；不能按整个旧 attempt 已完成而跳过未完成资源，更不自动修复历史脏账。
+
 # R211 模型菜单接口
 
 `model_profile_service.handle_client_models` 为 `/client/models` 提供 owner 认证后的 list/add/select。

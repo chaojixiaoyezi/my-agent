@@ -16,6 +16,7 @@
 # LLM: runtime.db 只保存 Task 身份与 TaskRun/AgentRun/Attempt 的执行生命周期；
 # 禁止把已退休的机器验收合同或 Task 业务完成状态重新接回这个权威仓储。
 # 冷 owner 的精确恢复与启动扫描共用进程死亡证明，展示投影不得覆盖 current attempt。
+# 换代清理保留已确认 STABLE 资源，不把旧执行失去权限等同于其已完成副作用变得未知。
 # 模块用途: 管理 owner 级任务身份、每次执行、代理树、工具操作和恢复状态。
 
 from __future__ import annotations
@@ -1081,10 +1082,9 @@ class RuntimeRepository(
         assert row is not None
         return row
 
-    # LLM: current pointer is the sole execution-generation authority. This transaction helper
-    # closes every older active attempt and preserves uncertain effects as UNKNOWN/DIRTY; both
-    # live takeover and upgrade reconciliation must use this one implementation.
-    # 函数用途: 在事务内收口被当前执行轮替代的旧 attempt，并清理其锁和未知副作用账本。
+    # LLM: current pointer 仍是唯一执行代次权威；正常续轮、活动接管和升级调和共用本事务。
+    # 只将未确认资源保守置 DIRTY，保留 STABLE 和既有 DIRTY 证据；同步检查换代与 mutation 回归。
+    # 函数用途: 收口被替代的旧执行轮并释放其锁；已确认资源保持可用，未完成副作用继续阻断。
     def _supersede_noncurrent_attempts_conn(
         self,
         conn: sqlite3.Connection,
@@ -1166,14 +1166,15 @@ class RuntimeRepository(
                     ),
                 )
             # 非 current attempt 已永久失去执行权；UNKNOWN 是结果不可知终态，
-            # 旧锁必须释放，进行中 mutation 则保守标 DIRTY 等后续核对。
+            # 旧锁必须释放；STABLE 已有确认事实，不能因换代重新判为未知。
+            # 其余未确认 mutation 保守标 DIRTY，已有 DIRTY 的原因和时间保持。
             conn.execute(
                 "DELETE FROM resource_locks WHERE attempt_id = ?",
                 (cleanup_attempt_id,),
             )
             conn.execute(
                 "UPDATE resource_mutations SET state = 'DIRTY', dirty_reason = ?, "
-                "updated_at = ? WHERE attempt_id = ? AND state != 'DIRTY'",
+                "updated_at = ? WHERE attempt_id = ? AND state NOT IN ('STABLE', 'DIRTY')",
                 (reason, now, cleanup_attempt_id),
             )
         return superseded_ids
@@ -1389,7 +1390,7 @@ class RuntimeRepository(
     # LLM: 创建 attempt 的事务闸与后台只读 recovery 投影必须共用
     # _main_agent_recovery_reason；只读 preflight 不能替代这里的最终 CAS。
     # 换代必须同时关闭所有非 current 的 active attempt，但不能把旧工具副作用
-    # 猜成成功：工具仍转 UNKNOWN、mutation 仍转 DIRTY。
+    # 猜成成功：未决工具仍转 UNKNOWN、未确认 mutation 仍转 DIRTY，已确认 STABLE 保留。
     # 合法恢复若复用已关闭 TaskRun，须在同一事务重开总账并留事件；不允许运行中的树仍展示旧 cancelled。
     # 函数用途: 原子取得新执行权、收掉旧运行态并同步整棵执行总账；准入拒绝时这些状态均不改变。
     def create_attempt(
@@ -1427,8 +1428,9 @@ class RuntimeRepository(
         的 ID/generation/执行证据不改写，但生命周期原子转 cancelled，追加
         agent_attempt.superseded 事件。历史版本遗留的其他非 current active
         attempt 也在同一事务收口，避免幽灵 RUNNING 累积。G4 takeover
-        （G4-4）继续把旧 attempt 非终态 operation 统一转 UNKNOWN、mutation
-        标 DIRTY（旧 worker 即使还活着也只能看到 UNKNOWN/DIRTY，无法盲重放）。
+        （G4-4）继续把旧 attempt 非终态 operation 统一转 UNKNOWN、未确认
+        mutation 标 DIRTY，已确认 STABLE 和既有 DIRTY 证据保留；旧 worker
+        即使还活着也由 current fence 拒绝，不能因资源稳定而继续执行。
 
         ``reuse_pending`` 只给真实 runner 启动路径使用：如果 current attempt
         仍是 pending，就原子激活 generation 1；``reject_running`` 同时阻止

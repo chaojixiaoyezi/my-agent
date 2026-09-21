@@ -360,6 +360,7 @@ agent_py_agent/
 |   |-- test_slow_model_liveness.py     # 慢模型长任务活性：流式不按总时长判死、客户端只按机器活动续期、租约心跳与长工具续租
 |   |-- test_background_claim_execution.py # 后台领取后竞态、异常收尾顺序及运行中真实续租
 |   |-- test_background_recovery.py     # 恢复阻断每次重读、不可读判据与日志去重边界
+|   |-- test_runtime_db_stable_mutation_generation.py # 正常换代、活动接管和升级调和保留已确认资源
 |   |-- test_gateway_admission_wait.py  # 合法排队等准入的结构化等待信号：只写等待事实、有节流与总预算、客户端持续收到且停写/取消/终态收口
 |   |-- test_scheduler_scan_costs.py    # waiting 投影缓存三重校验、runtime_snapshot 锁外解析与旧实现逐字一致、owner 事实缓存失效回归
 |   |-- fixtures/tui/                   # 固定尺寸/时间线的非敏感 TUI PTY 动作 fixture
