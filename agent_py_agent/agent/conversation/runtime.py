@@ -1,9 +1,9 @@
 # LLM: 后台稳定 task 身份与逐轮请求分离；唤醒共用 coordinator 软指导，不能生成永久禁写或额外授权。
 # 上下文和历史准备通过独立模块调用，修改执行顺序时同步后台历史、取消、Compact 和投递回归。
+# 进度策略计算只接收当前事实，其读取时机、租约和持久落账仍由本模块负责。
 # 模块用途: 编排后台唤醒和工作片；执行、交付、策略、上下文和历史种子各有独立实现。
 from __future__ import annotations
 
-import hashlib
 import json
 import time
 from dataclasses import field, replace
@@ -63,6 +63,7 @@ from .background_execution import (
     collect_background_execution_result,
     invoke_background_turn,
 )
+from .background_progress_policy import next_no_progress_streak, policy_failure_backoff
 from .background_tool_policy import (
     SCHEDULED_WAKE_REASONS,
     BackgroundToolPolicyRequest,
@@ -2159,10 +2160,7 @@ _MAX_PROGRESS_POLICY_CATCHUP_INTERVALS = 4
 # 陈旧账本 gc 节奏:tick ~2 分钟一次,这里最多 6 小时跑一趟归档(问题8)。
 _LEDGER_GC_INTERVAL_SECONDS = 6 * 3600
 
-# 失败续跑记账(问题6):失败 run 后 policy 退避 5min×2^(n-1)、上限 1h;抖动按
-# policy_id 确定性派生(纯函数,可测,不引入 random);连续 3 次失败退休(等用户)。
-_POLICY_FAILURE_BASE_BACKOFF_SECONDS = 300
-_POLICY_FAILURE_MAX_BACKOFF_SECONDS = 3600
+# 连续失败次数由原 Store 持久化；普通失败达阈值后停用策略，供应和配置错误另行退避。
 _POLICY_FAILURE_RETIRE_AFTER = 3
 
 if TYPE_CHECKING:
@@ -4126,11 +4124,13 @@ def _subagent_owned_background_report(kwargs: dict) -> BackgroundMainAgentReport
     )
 
 
+# LLM: 调度执行沿原 claim、心跳和持久进度账本收口；纯数值规则外置，但执行后重读与写账顺序不变。
+# 类用途: 运行到期策略并维护其执行租约、心跳和结果；迁移时联合检查后台调度及供应退避回归。
 class _BackgroundSchedulerExecutionMixin:
-    """Claimed progress-policy execution, heartbeats, and runtime facts."""
 
-    # LLM: 旧目标周期策略一次迁移为 canonical Goal wake；普通用户定时策略保留原调度语义。
-    # 函数用途: 运行到期策略，旧 Goal 轮询只迁移事件而不直接再调用模型。
+    # LLM: 旧目标周期策略一次迁移为 canonical Goal wake；普通策略保留原准入和落账顺序。
+    # 成功回合后读取当时的计数交给纯策略计算，不复用运行前 metadata 快照；同步后台策略回归。
+    # 函数用途: 运行到期策略并更新持久进度；旧 Goal 轮询只迁移事件，不直接再调用模型。
     def _run_due_policy(
         self, policy: ProgressPolicy, *, now: float
     ) -> BackgroundMainAgentReport | None:
@@ -4183,10 +4183,13 @@ class _BackgroundSchedulerExecutionMixin:
             # 问题6:成功 run 清零失败账(failure_count=0),退避/退休账目复原——
             # 一旦恢复,policy 回正常 interval,绝不带着旧失败历史继续减速。
             metadata_updates["failure_count"] = 0
+            reported_metadata = policy.metadata if isinstance(policy.metadata, dict) else {}
             self.store.progress.mark_reported(
                 policy.policy_id,
                 now=now,
-                no_progress_streak=_next_no_progress_streak(policy, report),
+                no_progress_streak=next_no_progress_streak(
+                    reported_metadata.get("no_progress_streak"), report.material_progress_count,
+                ),
                 metadata_updates=metadata_updates,
             )
         return report
@@ -4312,8 +4315,10 @@ class _BackgroundSchedulerExecutionMixin:
                 # 恢复后照常排期。判据只认 typed provider error,不匹配错误文本。
                 self._record_policy_failure(kwargs)
 
+    # LLM: 只按 wake 的 policy_id 更新原 Store；供应/配置错误由调用方排除，不改变退避和退休记账顺序。
+    # 函数用途: 失败回合后保存次数和下次到期时间，连续三次停用策略；记账异常只记录警告。
     def _record_policy_failure(self, kwargs: dict) -> None:
-        """失败续跑记账:policy 退避 + 连续失败退休(见 _policy_failure_backoff)。
+        """失败续跑记账:policy 退避 + 连续失败退休。
 
         只认结构化信号:kwargs 的 wake_signal 里 policy_id(policy 触发 run 时由
         _progress_policy_wake_payload 注入)。无 policy_id/policy 已不存在 → 跳过。
@@ -4334,7 +4339,7 @@ class _BackgroundSchedulerExecutionMixin:
                 return
             metadata = policy.metadata if isinstance(policy.metadata, dict) else {}
             failures = max(0, int(metadata.get("failure_count") or 0)) + 1
-            backoff = _policy_failure_backoff(failures, policy_id)
+            backoff = policy_failure_backoff(failures, policy_id)
             # 失败时刻与 run 的调度时刻对齐(kwargs["now"],与 claim/finish 同一时钟);
             # 缺失时回落真实时钟。测试用注入时钟可精确断言,生产行为不变。
             try:
@@ -4502,23 +4507,8 @@ class BackgroundMainAgentScheduler(
         self._authority_recovery_blocks: dict[str, str] = {}
 
 
-# 函数用途: 把到点的 progress policy 摊开成 Active Wake Signal 载荷——被唤醒的模型要能看到
-#   "这是我自己登记的提醒 + 当时写下的原因(wait_reason)",而不是一个没头没尾的定时汇报。
-# §6-B4 无进展退避判据(纯结构化信号,不做任何文本判断):本唤醒轮没有成功的
-# mutating/dangerous 工具事实=无物质进展,streak+1；读文件、查树、读 task_progress
-# 即使成功也不能把 streak 清零。streak 由 store 按 2^streak 拉长间隔(封顶)，
-# 让只读空转自动让出调度资源；一旦真正写入/调度/落账成功即复原。
-def _next_no_progress_streak(policy: ProgressPolicy, report: BackgroundMainAgentReport) -> int:
-    if report.material_progress_count > 0:
-        return 0
-    metadata = policy.metadata if isinstance(policy.metadata, dict) else {}
-    try:
-        previous = int(metadata.get("no_progress_streak") or 0)
-    except (TypeError, ValueError):
-        previous = 0
-    return max(0, previous) + 1
-
-
+# LLM: 只投影当前进度策略及其显式请求代次，不从等待原因正文推导调度或执行身份。
+# 函数用途: 将到期策略转换成模型可见的唤醒事实，保留原登记原因和目标引用。
 def _progress_policy_wake_payload(policy: ProgressPolicy) -> dict[str, object]:
     metadata = policy.metadata if isinstance(policy.metadata, dict) else {}
     payload: dict[str, object] = {
@@ -4543,23 +4533,6 @@ def _progress_policy_wake_payload(policy: ProgressPolicy) -> dict[str, object]:
 
 def _progress_policy_run_reason(policy: ProgressPolicy) -> str:
     return "scheduled_progress_report"
-
-
-def _policy_failure_backoff(failures: int, policy_id: str) -> float:
-    """失败退避 5min×2^(n-1) 上限 1h,抖动 0.90~1.10 按 policy_id 确定性派生。
-
-    纯函数(无 random):同一 policy 每次失败算出同一退避,跨进程/重启可复现,测试
-    可精确断言区间;抖动只做跨 policy 错峰(防多个失败 policy 同秒齐醒),不改变
-    退避的量级结构。
-    """
-
-    base = min(
-        _POLICY_FAILURE_BASE_BACKOFF_SECONDS * (2 ** max(0, int(failures) - 1)),
-        _POLICY_FAILURE_MAX_BACKOFF_SECONDS,
-    )
-    digest = hashlib.md5(str(policy_id).encode("utf-8")).hexdigest()
-    ratio = 0.9 + (int(digest[:4], 16) % 2000) / 10000.0
-    return round(base * ratio, 3)
 
 
 # LLM: 子代理终态只结束一次整合回合；后续运行仍以精确 active Goal 为准，不读取 Todo 文本或数量。

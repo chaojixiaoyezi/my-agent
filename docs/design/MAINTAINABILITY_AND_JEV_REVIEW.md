@@ -614,20 +614,33 @@ Responses 已使用该入口，纳入同组回归；保留代理前缀和完整�
 实际工具出口仍调用 `verification/runtime.py`，owner/thread/task 事件由 `verification/repository.py` 持久化；相关 22 项定向通过。
 开发矩阵改指实际实现与现有测试，只证明文件完整性，不证明报告的数字、分工或自然语言结论正确。
 
-以下按 `61d8b4673` 核对定义、直接调用和关键提交路径；是拆分所需的定向清单，不是全仓逐行审阅。
-本表完成不代表真实基线通过；当前失败及进入第 2 步的条件仍由执行 Goal 记录。
+以下清单最初按 `61d8b4673` 建立，本轮按 `ba90862f9` 补核调度、Gateway/CLI 接线、命令、工具注册及 Skill 快照。
+依赖复核时 `runtime.py`、`background_main_agent.py`、`gateway_lane_retry.py` 与旧基线内容相同；补充的是原表未展开的既有边界。之后的第 2 步首片迁移另记如下。
+这是拆分所需的定向清单，不是全仓逐行审阅。
+本表完成不代表真实基线通过；用户确认分账后，第 1 步框架基线按执行 Goal 的实际证据收口，模型交付失败保留。
 表内路径均相对 `agent_py_agent/`。
 
 | 边界 | 当前入口和直接调用方 | 读取事实与写入责任 | 拆分时必须保留 |
 | --- | --- | --- | --- |
-| 后台会话车道 | `cli/background_main_agent.py` 组装 `conversation/runtime.py::BackgroundMainAgentScheduler`；五个 mixin 共同使用 runtime/store | `prepare_tick` 做维护与入队；`ready_thread_ids` 只投影就绪线程；`tick_thread` 消费原事件 | 每线程执行归属仍由持久 claim 裁决，不能由就绪列表或新队列取得执行权 |
-| 纯策略与进程内退避 | 同文件 `_policy_failure_backoff`、`_next_no_progress_streak`、`_ProviderSupplyBackoff` | 前两者只计算；后者及 `_wake_retry_after`、`_quota_fallback_wakes`、`_authority_recovery_blocks` 是调度器内存状态 | 计算与可变状态分开；不复制持久 Goal/wake/policy，不改变时钟、错误分类及读取时机 |
+| 后台会话车道 | `cli/background_main_agent.py::_run_tick`、`cli/gateway_loops.py::_build_background_scheduler` 组装 `conversation/runtime.py::BackgroundMainAgentScheduler`；五个 mixin 共享组装依赖 | `prepare_tick` 做维护与入队；`ready_thread_ids` 不消费持久来源，但会重读恢复权威并更新日志去重缓存；`tick_thread` 消费原事件 | 每线程执行归属仍由持久 claim 裁决，不能由就绪列表取得执行权，也不能把整个就绪查询当作纯函数 |
+| 纯策略与进程内退避 | `background_progress_policy.py` 的 `policy_failure_backoff`、`next_no_progress_streak`；`runtime.py::_ProviderSupplyBackoff` | 前两者只计算，已在首片迁出；后者及 `_wake_retry_after`、`_quota_fallback_wakes` 是调度器内存状态；`_authority_recovery_blocks` 仅去重日志，每次仍读恢复权威 | 计算与可变状态分开；不复制持久 Goal/wake/policy，不改变时钟、错误分类及读取时机 |
 | Gateway 配置恢复冷却 | `cli/gateway_lane_retry.py::BackgroundLaneRetry` 由 Gateway 车道消费 | 记录当前宿主的配置故障冷却，阻止缺模型热重试 | 与 provider 供应退避的作用域不同，不能因为都叫 backoff 就合成同一状态 |
 | 租约与后台执行 | `runtime.py::_run_claimed`、`_run_with_heartbeat` 调用原 `store.claims` 与 `runtime.run_once` | 领取后重读任务终态/恢复阻断；心跳续租；finally 停心跳并关闭精确 claim | 终态竞态检查不能移到领取前；仅关闭本 claim 不等于消费来源；供应/配置错误不增加普通 policy 失败次数 |
 | 子代理生命周期和审批 | `agent_core/orchestration/lifecycle.py::_bind_tasks_to_conversation` 与 `conversation/tool_approval_scope.py` | 前者建立父会话的显示/查找关联；canonical child 持有真实 run/root/thread/status；审批沿原账本记录具体操作 | task link 不能充当 child 执行身份；主代理仍读有效 claim，坏账不回退，不把能力授予当批准 |
 | 模型与工具轮 | `agent_core/_tool_loop_service.py` 调用现有 `tool_loop/round_execution.py`、`completion.py`、`deliverable_closeout.py` | 原链路冻结工具快照、审批/执行、保存原生历史、决定让出/结束；产物存在与操作成功各有明确口径 | 不新建执行器或把完成状态扩成内容正确；Compact 仍用原 checkpoint/generation 提交 |
 | 命令、帮助与补全 | `conversation/control_commands.py::system_slash_command_name`、`cli/chat_parts/slash_command_types.py`、`slash_commands.py`、`tui_input.py` | 公共控制解析负责动作；静态命令声明供帮助和 TUI 补全读取 | 插件请求进入同一公共解析，身份由宿主绑定；不能只在 TUI 加分支或让错误命令进入聊天 |
 | 启动扩展与工具注册 | `extensions/plugin.py::ExtensionRegistry` 被 `agent/core.py` 和 `cli/parser.py` 使用；`tooling/registry.py` 提供执行快照 | 启动扩展直接加载显式模块并调用注册 hook；工具注册表与每轮授权快照分开 | 现有启动 hook 没有热撤销合同；不能直接当成可卸载插件。新增贡献须带所属插件和激活代次，继续走原工具执行/权限链 |
+
+五个 mixin 还共享 `scheduler_service`、`collaboration_store`、准确的子代理恢复库与任务事实、owner 路径、配置及 claim 心跳参数。
+ThreadLane 负责准备/消费编排；Tick 负责维护、恢复与持久入队；Wake 负责来源与定时任务租约；Goal 负责原目标状态、时钟与路由；Execution 负责最终准入、会话租约和 policy 记账。
+这些是后续收窄依赖的清单，不能照搬为五个持有完整 Agent/Store 的服务。诊断使用 `threading.local()`，当前 worker 可追加自己的诊断列表，不改成 owner 或全局共享列表。
+
+装配生命周期与读取时机也属于行为：
+
+- Gateway supervisor 长期持有 base/owner scheduler；规划轮用同一个 `planned_at` 做准备和就绪查询，明确关闭同步孤儿监督，再按车道冷却和并发空位提交。
+- worker 调用 `tick_thread(thread_id)` 时重新取时间、重读来源；不能复用规划阶段的旧状态直接执行。Gateway 独立孤儿监督保持原归属。
+- CLI 的 tick 与 service 循环每次经 `_run_tick` 新建 runtime/scheduler 及 FakeDeliveryService，进程内退避和维护节流随实例重置；提取类不能顺手延长其生命周期。
+- claim TTL/心跳和供应退避配置在 scheduler 构造时读取，消费数量等 `_config_limit` 在调用时读取；车道缺模型恢复读取当前线程模型引用，且配置读取不持有冷却表锁。
 
 原有顺序需作为迁移约束逐项核对：
 
@@ -637,12 +650,30 @@ Responses 已使用该入口，纳入同组回归；保留代理前缀和完整�
 4. 同批唤醒确认仍以模型轮开始时的采样时间为界；期间新到的孩子结果保留 pending，不能顺带消费。
 5. 插件停用要先撤销执行资格，再清理其进程/订阅；冻结旧快照不能重新激活已撤销贡献。此项是待实现合同，不代表当前注册表已有能力。
 
+定时任务另有外层 `scheduler_service` claim/心跳，不能与内层会话 claim 合并：
+正常返回时，先结束内层工作片并收口会话 claim，再停外层心跳，按真实报告释放、等待或结束定时 claim，最后按原条件确认来源。
+异常时，原 `except` 分支先按 typed 错误处理定时 claim，之后 `finally` 停外层心跳；quota 路径仍沿原专用处理，不能改写成统一收尾顺序。
+`wake_handled` 来自实际外发或 canonical 提交事实，不来自 claim finished；Compact 让出关闭本次执行租约，但保留未处理来源。
+未完成任务恢复还使用 wake_queue 的独立行租约：向 ConversationStore 成功发布后才完成原行，失败释放重试，不能将不同租约合并成一个状态。
+
+上述调度复核只读取实现和已有回归入口，本轮未重跑后台测试；相关入口为 `test_background_main_wake_recall.py`、`test_gateway_lane_retry.py`、`test_background_main_agent_runtime.py` 和 `test_wake_queue_state_machine.py`。
+插件侧现有 17 项合同回归已通过，实际 handler、权限视图、MCP 重连及 Skill 文件身份见[接线核对](PLUGIN_LIFECYCLE.md#第-1-步接线核对与迁移约束)。
+
 资源归属继续分三层：Goal 管自动续跑，当前回合管模型/工具执行链，进程与子代理由精确任务/attempt 管理。
 实际 TUI 另暴露拒绝记忆只存在内部工具参数中、跨同一子代理 Goal 回合丢失；当前修复由宿主运行参数承接原列表，
 并让前后台 Compact 保持同一对象。不同孩子/新调用隔离、批准不提升；模型结束与 Goal 状态仍按各自原合同处理。
 参考定向读取 Codex `tools/approvals.rs` 的结构化拒绝结果和 Hermes `tools/approval.py` 的上下文隔离；未复制其策略或宣称整库审阅。
 插件的执行进程、订阅和注册贡献也必须带显式归属；卸载不能据名称相似清理无关资源。
-接下来只在第 1 步实际基线收口后实施纯策略切片；本轮清单不引入空 SDK、替代 Store 或兼容转发。
+第 1 步框架基线收口后开始纯策略切片；清单和实现均不引入空 SDK、替代 Store 或兼容转发。
+
+### 第 2 步首片：进度策略纯计算
+
+`background_progress_policy.py` 只接收失败次数、策略 ID、原无进展次数和结构化物质进展数。
+`runtime.py` 保留回合后读取 metadata、成功/失败持久记账、三次失败退休和供应错误分类；没有迁移租约或调度器内存状态。
+失败退避保留 MD5 派生的确定性抖动，3600 秒是抖动前的基数上限；无进展次数本身不封顶，间隔上限仍归 `store_progress.py`。
+原函数、专属常量和导入删除，调用方及既有回归直接使用新实现，无旧名别名或转发层。
+定向参考 OpenAI Agents SDK `run_internal/model_retry.py` 的延迟计算与等待分离，及 Codex Python SDK `retry.py` 的调用/等待边界；只用于核对职责，不复制其随机抖动、配置或重试策略。
+自动验证和新安装版真实 TUI 分列；普通长任务若未产生进度策略落账，不能声称命中该内部支路。当前验收进展见执行 Goal。
 
 ### 后续切片实施约束
 
@@ -665,7 +696,7 @@ Responses 已使用该入口，纳入同组回归；保留代理前缀和完整�
 插件只提交声明和实现，宿主组装所需适配器；owner/run 身份由当前宿主上下文绑定，不信任命令参数自报身份。
 普通对话仍由原模型入口运行，显式工具动作仍由原工具执行入口处理。
 
-第 1 步先并行读取真实报告、文件和交接证据；基线未收口时，不开始第 2 步结构修改。
+第 1 步已核对真实报告、文件和交接证据；后续只有框架基线收口的部分才进入对应结构修改，模型交付失败分列保留。
 先确认出站上下文、文件版本与交接时序，具体准入以执行 Goal 的逐步验收为准。
 若确证通用实现缺陷，单独小批修复；模型判断失误继续如实留证，不承诺移动代码就能消除。
 Goal 预算授权属于行为边界，不能借结构迁移顺手改变。Audit/摄取及其来源提示撤销不在本轮待办。

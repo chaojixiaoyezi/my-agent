@@ -24,11 +24,38 @@ my-agent 自身保留完整的会话、任务、内置工具和恢复能力；�
 | --- | --- | --- |
 | `agent/extensions/plugin.py` | 按管理员显式配置加载 Python entry point 或模块；注册工具、记忆源和 CLI 命令 | 进程内启动加载，没有完整卸载、版本切换和资源清理协议；失败配置按现行合同阻止启动 |
 | `cli/parser.py` | 插件命令接入 argparse | 不是 TUI 动态 `/xxx` 命令；TUI 当前还使用静态目录与处理器 |
-| `agent/tooling/registry.py`、`agent/tooling/models.py` | 权限过滤后的逐次运行工具快照、MCP 连接准备 | 快照尚未绑定插件实现版本、激活代次和独立执行端点；旧 schema 快照不等于旧代码仍在执行 |
+| `agent/tooling/registry.py`、`agent/tooling/models.py` | 权限过滤后的逐次运行工具快照，已绑定 schema、策略与 handler 对象；MCP 连接准备 | 尚未绑定插件包版本、激活代次和独立执行端点；冻结 handler 引用不等于冻结它引用的外部进程版本 |
 | `agent/tooling/mcp_client.py`、`agent/tooling/mcp_registration.py` | MCP 工具变更通知、运行边界重发现、连接重试、工具目录替换 | 不是包安装器；停用必须同时阻止重连和重新注册，不能只删工具名字 |
 | `agent/capability/skill_service.py` | Skill 索引、正文指纹、逐次运行快照 | 热切换需保留旧版本正文，不能覆盖文件后声称旧任务仍能读取同一份内容 |
 
 上述路径均相对于 `agent_py_agent/`。现有经验候选继续复用 CandidateService，不能重建第二套长期记忆或草稿事实源。
+
+### 第 1 步接线核对与迁移约束
+
+本节按 `ba90862f9` 定向读取现有入口及回归；描述实际依赖与后续必须保留的边界，不代表插件装卸已经实现。
+工具快照已经有实现绑定，因此继续沿原执行器扩展生命周期约束，不再增加一个插件工具执行器。
+
+| 当前入口 | 已核实的依赖与行为 | 后续接入约束 |
+| --- | --- | --- |
+| `cli/parser.py::main` | chat/resume 先走轻量解析；其他命令才加载管理员启动扩展并注册 argparse 命令 | 动态 TUI 目录从 Gateway 读取；不能为补全或帮助把插件导入重新塞回客户端启动链 |
+| `agent/core.py` 与 `extensions/plugin.py::activate_agent` | 先创建工具注册表，再顺序调用启动扩展的 tools/memory hook，再注册编排工具与能力目录；hook 失败中止装配，没有贡献事务回滚 | 保留管理员启动扩展的失败语义；可装卸插件的候选验证和原子发布不能直接冒用该 hook |
+| `ToolRegistry.runtime_snapshot`、`models.py::ToolRuntime` | 每轮冻结 schema、策略、handler 及当时可用性；`ToolExecutor` 从同一快照取实现，调用侧不重查当前工具字典 | 保留已有实现绑定；新增插件代次和撤销约束，不能只删除目录项或修改一次 availability 就宣称停用 |
+| `ToolRegistry.with_access_policy` | 权限视图重建基础工具字典，其他 handler、MCP 客户端、重试字典和准备锁沿原共享对象 | 插件撤销的权威须覆盖同 owner 的所有权限视图及已冻结快照，不能只清理发起管理操作的那个字典 |
+| `executor.py::_execute_authorized`、`_invoke_with_operation_policy` | 参数校验和 pre-handler 回调先于副作用操作领取；只读失败可按原条件重试，写操作仍沿原 operation、资源锁和对账链 | 等待审批、锁或重试后都须受当前撤销事实约束；仅在最初解析或 preclaim 阶段检查一次不足以覆盖在途停用 |
+| `registry.py::_prepare_registry_clients_for_run`、`mcp_registration.py::refresh_registered_mcp_client` | 新运行边界重连同一个 client 对象，再替换该连接的工具目录；旧 proxy 仍引用原 client | 插件端点绑定到激活代次，旧代次不得原地重连成新版本；停用先阻断重连再清理，不能用关闭全部 MCP 代替精确撤销 |
+| `capability/skill_snapshot.py::SkillSnapshot.read_body` | 快照固定路径和正文摘要，读取时重新读文件并比对；文件被覆盖会返回 `SKILL_SNAPSHOT_STALE`，快照没有保存正文副本 | 插件版本文件按代次保留，仍沿现有 Skill 身份、快照和正文校验；不能覆盖旧路径后假称旧任务仍有原内容 |
+| `conversation/control_commands.py`、`cli/chat_parts/slash_commands.py`、`tui_input.py` | 公共 slash 正则不接受首 token 的 `@`；未知命令拦截和静态补全依赖这套识别 | 第 3 步在公共入口识别完整插件命名空间及错误形式，再让 TUI/plain/Gateway 共用声明；不能只增加一个补全项 |
+
+拟议插件的“可调用”检查与在途资源登记，须在同一生命周期权威中形成不可被停用穿插的准入动作：
+
+- 停用先取得该边界时，调用拒绝且不启动实现；调用先取得时，其精确 owner/run/attempt、插件和激活代次已登记，随后停用可以取消并追踪它。
+- 审批通过只表示该操作获准，不保证插件仍启用。等待审批期间停用后，旧批准不能恢复已撤销代次；重新启用生成的新代次也不能让旧调用自动换实现。
+- 原工具 operation、幂等记录、资源锁和副作用对账仍是唯一执行账本；插件注册只补充生命周期归属，不再复制一次业务执行状态。
+- 已经发出的请求按实际取消/退出/未知结果收口，不能在停用后改写成“从未执行”。目录刷新、快照存在及模型报告均不能证明资源已经退出。
+
+上述准入和代次约束在第 4—6 步实施，并覆盖停用与审批、资源等待、重试、重连、权限视图交错；本轮不改核心运行语义。
+现有 17 项定向回归已通过：启动扩展注册与失败、工具快照不扩权及冻结可用性、MCP 重连与目录替换/退避、Skill 过期读取、公共未知命令与 TUI 补全。
+这些是既有合同的自动化证据，不是插件热卸载或新增真实 TUI 验收；第 1 步按用户确认的框架/交付分账收口，原长任务失败及后续推进门槛仍由执行 Goal 记录。
 
 ## 核心与插件边界
 

@@ -8146,15 +8146,15 @@ def test_policy_failure_backoff_is_deterministic_exponential_and_bounded() -> No
 
     同一 policy 每次失败同值(可复现、可精确断言);不同 policy 抖动错峰(防齐醒)。
     """
-    from agent_py_agent.agent.conversation.runtime import _policy_failure_backoff
+    from agent_py_agent.agent.conversation.background_progress_policy import policy_failure_backoff
 
     def base_seconds(n: int) -> float:
         return min(300 * (2 ** (n - 1)), 3600)
 
     def ratio(failures: int, policy_id: str) -> float:
-        return _policy_failure_backoff(failures, policy_id) / base_seconds(failures)
+        return policy_failure_backoff(failures, policy_id) / base_seconds(failures)
 
-    assert _policy_failure_backoff(1, "p-a") == _policy_failure_backoff(1, "p-a")
+    assert policy_failure_backoff(1, "p-a") == policy_failure_backoff(1, "p-a")
     for n in (1, 2, 3, 4, 5, 8, 9, 20):
         assert base_seconds(n) <= 3600  # 封顶 1h,永不超
         for pid in ("p-a", "p-b", "p-c"):
@@ -8173,10 +8173,10 @@ def test_failed_policy_run_records_backoff_and_retires_after_three(tmp_path) -> 
     下个 tick 又 due = 无限重试。修后:失败落账 failure_count/last_failure_at,
     next_due_at 退避顺延;第 3 次失败 → enabled=False 退休,离开 due 扫描等用户。
     """
+    from agent_py_agent.agent.conversation.background_progress_policy import policy_failure_backoff
     from agent_py_agent.agent.conversation.runtime import (
         BackgroundMainAgentRuntime,
         BackgroundMainAgentScheduler,
-        _policy_failure_backoff,
     )
 
     agent = SimpleAgent(
@@ -8235,7 +8235,7 @@ def test_failed_policy_run_records_backoff_and_retires_after_three(tmp_path) -> 
         assert after is not None and after.enabled is True
         assert after.metadata["failure_count"] == attempt
         assert after.metadata["last_failure_at"] == tick
-        expected_backoff = _policy_failure_backoff(attempt, policy.policy_id)
+        expected_backoff = policy_failure_backoff(attempt, policy.policy_id)
         assert after.metadata["last_backoff_seconds"] == expected_backoff
         assert after.next_due_at == tick + expected_backoff
         assert after.next_due_at > tick + 30  # 比原 interval 退避更长(1 次=5min 基数)

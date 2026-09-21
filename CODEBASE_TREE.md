@@ -239,6 +239,7 @@ agent_py_agent/
 |   |   |-- message_stream.py           # 同账本正文与显式协商的过程检查点投影，共用 ID/字节游标
 |   |   |-- task_runtime_state.py      # 后台续轮读取精确任务进度的结构化运行事实
 |   |   |-- runtime.py                  # 后台主代理调度热循环：wake_queue 到期消费、三源对账(5min)、事件提前醒取消闹钟
+|   |   |-- background_progress_policy.py # 无副作用的进度策略计数与确定性失败退避
 |   |   |-- background_tool_policy.py   # 无副作用的后台工具目录、owner/task 收紧及展示投影
 |   |   |-- background_context.py       # 后台有界上下文、任务范围与模型可见事实准备
 |   |   |-- background_history_seed.py  # 后台原生历史种子、任务隔离与读取失败合同
@@ -462,6 +463,7 @@ docs/
 - `docs/design/SUBAGENT_PARALLEL_EXECUTION.md`：逐项交付、递归等待与活动诊断的现行设计和验收要求。
 - `agent_py_agent/agent/conversation/goal_recovery.py`：精确恢复旧共享任务 Goal，不迁移运行中的执行，不清除源记录。
 - `agent_py_agent/agent/conversation/background_tool_policy.py`：后台目录计算的唯一实现，输入结构化事实，结果供 runtime 消费；不读写会话或启动执行器。
+- `agent_py_agent/agent/conversation/background_progress_policy.py`：仅接收计数和策略身份，计算无进展次数与失败退避；状态读取、租约及持久写入仍由后台调度负责。
 - `agent_py_agent/agent/conversation/background_context.py`：显式请求接口连接原会话事实、任务范围和有界模型投影；既有任务进度对账仍沿原调用顺序执行。
 - `agent_py_agent/agent/conversation/background_history_seed.py`：复用 canonical 未压缩历史和 provider 投影；区分可用、禁用与不可读，不把读取失败变成空历史。
 - `agent_py_agent/agent/conversation/background_execution.py`：显式接收执行、存储与参数准备能力，保留同片取消、Compact 和原生历史；不选择唤醒、不投递外部消息。

@@ -1,6 +1,8 @@
 
 from __future__ import annotations
 
+# LLM: 本模块承接 ToolExecutor 已授权的同一 ToolRuntimeSnapshot；路径上下文只能收窄，不能重选 handler 或重新冻结可用性。调整时联查 executor、action_policy 及工具作用域回归。
+# 模块用途: 准备单次工具的工作目录、读写边界和取消上下文，再调用快照绑定的实现；不负责工具发现或插件装卸。
 """Execute an authorized registry tool after parsing and auth checks."""
 
 import json
@@ -132,8 +134,8 @@ def _read_boundary_denied(
     )
 
 
-# LLM: invoke 位于权限门之后，先复检无副作用 readiness，再进入任何参数归一、边界临时态或真实工具代码。
-# 函数用途: 在同一请求快照下准备并执行已授权工具，同时把运行期掉线归一为 TOOL_UNAVAILABLE。
+# LLM: invoke 位于统一权限门之后，只消费已冻结的 runtime/handler；不重新调用 availability，也不从当前注册表替换实现。调整时保持 ToolExecutor、ActionPolicy 和 test_tool_runtime_scope 的同快照合同。
+# 函数用途: 核对调用绑定、收窄工作目录与读写边界，再执行真实工具；取消上下文随调用传入，实际掉线由绑定的工具返回，不把可用性探针当作撤销。
 def invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolHandlerOutcome:
     request = _with_effective_registry_workspace(request)
     runtime = request.runtime
