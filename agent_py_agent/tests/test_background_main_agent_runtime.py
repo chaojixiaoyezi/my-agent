@@ -16,6 +16,7 @@ from agent_py_agent.agent.conversation import (
     ConversationStore,
     FakeDeliveryService,
 )
+from agent_py_agent.agent.conversation import background_claim as claim_module
 from agent_py_agent.agent.conversation import background_delivery as delivery_module
 from agent_py_agent.agent.conversation import background_execution as execution_module
 from agent_py_agent.agent.conversation.authority import (
@@ -26,6 +27,7 @@ from agent_py_agent.agent.conversation.authority import (
     CONVERSATION_TASK_TURN_ACTIVE_ATTR,
     CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR,
 )
+from agent_py_agent.agent.conversation.runtime import _background_claim_dependencies
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.runtime_errors import DataCorruptionError
 from agent_py_agent.agent.settings import AgentConfig
@@ -320,10 +322,11 @@ def test_background_scheduler_treats_compact_slice_yield_as_clean_continuation(
             "claim_ttl_seconds": 30,
         }
     )
-    monkeypatch.setattr(scheduler, "_start_heartbeat", lambda *_args, **_kwargs: Heartbeat())
+    monkeypatch.setattr(claim_module, "_start_heartbeat", lambda *_args, **_kwargs: Heartbeat())
     monkeypatch.setattr(scheduler, "_runtime_facts", lambda: {"current_tool": ""})
 
-    result = scheduler._run_with_heartbeat(
+    result = claim_module.run_with_heartbeat(
+        _background_claim_dependencies(scheduler),
         "claim-yield",
         {
             "thread_id": "thread-yield",
@@ -2721,7 +2724,7 @@ def test_thread_goal_provider_usage_limit_maps_to_usage_limited(tmp_path, monkey
     def fail_run(_request):
         raise ProviderUsageLimitError("HTTP 429")
 
-    monkeypatch.setattr(scheduler, "_run_claimed", fail_run)
+    monkeypatch.setattr(claim_module, "run_claimed", lambda _dependencies, params: (fail_run)(params))
     with pytest.raises(ProviderUsageLimitError):
         scheduler._run_wake_signal(signal, now=20.0)
 
@@ -4158,7 +4161,7 @@ def test_failed_audit_finding_delivery_does_not_consume_wake(
             wake_handled=False,
         )
 
-    monkeypatch.setattr(scheduler, "_run_claimed", pending_report)
+    monkeypatch.setattr(claim_module, "run_claimed", lambda _dependencies, params: (pending_report)(params))
 
     assert scheduler._run_wake_signal(signal, now=20.0) is None
     assert [item.wake_signal_id for item in store.wakes.pending()] == [signal.wake_signal_id]
@@ -4248,7 +4251,7 @@ def test_completed_audit_keeps_unreceipted_typed_finding_until_delivery(
             wake_handled=False,
         )
 
-    monkeypatch.setattr(scheduler, "_run_claimed", failed_delivery)
+    monkeypatch.setattr(claim_module, "run_claimed", lambda _dependencies, params: (failed_delivery)(params))
 
     assert scheduler.tick(now=21.0) == []
     assert attempts == ["failed"]
@@ -4269,7 +4272,7 @@ def test_completed_audit_keeps_unreceipted_typed_finding_until_delivery(
             wake_handled=True,
         )
 
-    monkeypatch.setattr(scheduler, "_run_claimed", delivered)
+    monkeypatch.setattr(claim_module, "run_claimed", lambda _dependencies, params: (delivered)(params))
 
     reports = scheduler.tick(now=51.0)
     assert [item.delivery_status for item in reports] == ["sent"]
@@ -4317,11 +4320,7 @@ def test_completed_root_retires_ordinary_late_child_wake(tmp_path, monkeypatch) 
             "store": store,
         }
     )
-    monkeypatch.setattr(
-        scheduler,
-        "_run_claimed",
-        lambda _kwargs: pytest.fail("stale child wake must not start a model turn"),
-    )
+    monkeypatch.setattr(claim_module, "run_claimed", lambda _dependencies, params: (lambda _kwargs: pytest.fail("stale child wake must not start a model turn"))(params))
 
     assert scheduler.tick(now=30.0) == []
     assert store.wakes.pending_one(signal.wake_signal_id) is None
@@ -4406,7 +4405,7 @@ def test_linked_observation_does_not_fork_while_delivery_wake_is_pending(
             wake_handled=False,
         )
 
-    monkeypatch.setattr(scheduler, "_run_claimed", failed_delivery)
+    monkeypatch.setattr(claim_module, "run_claimed", lambda _dependencies, params: (failed_delivery)(params))
 
     assert scheduler.tick(now=20.0) == []
     assert attempts == ["audit_capacity_alert"]
@@ -5459,7 +5458,7 @@ def test_two_audit_findings_on_one_thread_share_one_receipted_model_turn(
             wake_handled=True,
         )
 
-    monkeypatch.setattr(scheduler, "_run_claimed", delivered)
+    monkeypatch.setattr(claim_module, "run_claimed", lambda _dependencies, params: (delivered)(params))
 
     assert len(scheduler.tick()) == 1
     assert len(processed) == 1
@@ -5632,7 +5631,7 @@ def test_failed_audit_finding_batch_stays_pending_and_shares_retry_boundary(
             wake_handled=False,
         )
 
-    monkeypatch.setattr(scheduler, "_run_claimed", failed)
+    monkeypatch.setattr(claim_module, "run_claimed", lambda _dependencies, params: (failed)(params))
     current = time.time()
 
     assert scheduler.tick(now=current) == []
@@ -5732,7 +5731,7 @@ def test_audit_finding_batch_honors_existing_wake_projection_limit(
             wake_handled=True,
         )
 
-    monkeypatch.setattr(scheduler, "_run_claimed", delivered)
+    monkeypatch.setattr(claim_module, "run_claimed", lambda _dependencies, params: (delivered)(params))
 
     assert len(scheduler.tick(now=time.time())) == 1
     assert processed == [["audit://watch-1/candidate/1:1"]]
@@ -8068,7 +8067,7 @@ def test_renew_background_run_claim_missing_thread_returns_none_not_keyerror(tmp
 
 
 def test_finish_background_run_missing_thread_finalizes_claim_without_crash(tmp_path) -> None:
-    """收尾在 _run_with_heartbeat 的 finally 跑:线程缺失也要能释放已存在的 claim 租约,绝不二次抛 KeyError。"""
+    """收尾在 background_claim.run_with_heartbeat 的 finally 跑:线程缺失也要能释放已存在的 claim 租约,绝不二次抛 KeyError。"""
     store = ConversationStore(tmp_path / "conversations")
     thread = store.threads.get_or_create(
         {

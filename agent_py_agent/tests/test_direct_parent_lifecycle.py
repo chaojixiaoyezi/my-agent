@@ -669,7 +669,7 @@ def test_ready_scan_never_uses_tree_as_completion_barrier(monkeypatch) -> None:
         return (), None
 
     monkeypatch.setattr(runtime_module, "_related_subagent_runs", fake_related)
-    monkeypatch.setattr(runtime_module, "_background_authority_recovery_block", lambda *a, **k: None)
+    scheduler._recovery_guard = SimpleNamespace(block_for_task=lambda _task: None)
     monkeypatch.setattr(runtime_module, "_runnable_due_policies", lambda *a, **k: ((), ()))
 
     ready = runtime_module._ready_background_thread_ids(scheduler, current=10.0)

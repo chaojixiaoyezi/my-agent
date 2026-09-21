@@ -330,7 +330,7 @@ class ClaimStore:
         finish_recovery_task = request.get("recover_same_task_only") is True
         if not claim_id and not (expected_task_id and finish_recovery_task):
             return None
-        # 收尾（释放租约/记失败事实）只作用于 claim 文件，不依赖线程仍可读。这条在 `_run_with_heartbeat`
+        # 收尾（释放租约/记失败事实）只作用于 claim 文件，不依赖线程仍可读。这条在 `background_claim.run_with_heartbeat`
         # 的 finally 里跑：若线程在长跑中变不可读还硬 `_require_thread`，会二次抛 KeyError 盖掉真正的 run
         # 错误、并再次崩后台清理。改为对已存在的 claim 文件收尾；无 claim 文件则无可收尾直接返回 None。
         claim_path = self.storage.background_claim_path(claim_scope_id)

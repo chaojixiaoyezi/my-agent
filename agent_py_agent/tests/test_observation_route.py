@@ -4,6 +4,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+from agent.conversation import background_claim as claim_module
 from agent.conversation.background_routing import (
     BackgroundRouteDependencies,
     default_route_target,
@@ -155,17 +156,22 @@ def test_default_route_target_keeps_matching_then_last_binding_order():
     assert default_route_target(empty_thread, "internal") == "t1"
 
 
-def test_run_wake_signal_passes_owner_route():
+def test_run_wake_signal_passes_owner_route(monkeypatch):
     """实际 wake 入口必须把同一路由器的结果传到既有 claimed 执行链。"""
 
     captured = {}
 
-    s = BackgroundMainAgentScheduler.__new__(BackgroundMainAgentScheduler)
-    s.runtime = SimpleNamespace(agent=SimpleNamespace(home_paths=SimpleNamespace(owner_provider="feishu", owner_id="ou_owner")))
-    s.store = SimpleNamespace(
-        wakes=SimpleNamespace(mark_handled=lambda *a, **k: None),
-        threads=SimpleNamespace(load=lambda _tid: None),
-    )
+    s = BackgroundMainAgentScheduler({
+        "runtime": SimpleNamespace(
+            agent=SimpleNamespace(home_paths=SimpleNamespace(owner_provider="feishu", owner_id="ou_owner")),
+            run_once=lambda _params: None,
+        ),
+        "store": SimpleNamespace(
+            claims=SimpleNamespace(),
+            wakes=SimpleNamespace(mark_handled=lambda *a, **k: None),
+            threads=SimpleNamespace(load=lambda _tid: None),
+        ),
+    })
     s._pre_wake_capability_sweep = lambda *a, **k: None
     s._wake_retry_after = {}
     s.scheduler_service = None
@@ -177,7 +183,7 @@ def test_run_wake_signal_passes_owner_route():
             wake_handled=True,
         )
 
-    s._run_claimed = _fake_run_claimed
+    monkeypatch.setattr(claim_module, "run_claimed", lambda _dependencies, params: _fake_run_claimed(params))
 
     signal = SimpleNamespace(
         reason="", urgency="urgent", thread_id="bg-main-thread-x", root_task_id="task-1", wake_signal_id="ws-1",

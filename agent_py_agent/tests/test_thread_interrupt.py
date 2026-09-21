@@ -29,7 +29,11 @@ from agent_py_agent.agent.concurrency.interrupt import (
     set_interrupt,
     wait_interruptibly,
 )
-from agent_py_agent.agent.conversation.runtime import BackgroundMainAgentScheduler
+from agent_py_agent.agent.conversation import background_claim as claim_module
+from agent_py_agent.agent.conversation.runtime import (
+    BackgroundMainAgentScheduler,
+    _background_claim_dependencies,
+)
 from agent_py_agent.agent.tooling.shell import ShellTool, ShellToolOptions
 from agent_py_agent.tests._tool_runtime_harness import (
     canonical_history_call,
@@ -162,7 +166,7 @@ def test_same_control_name_interrupts_foreground_and_background_scopes():
     assert interrupt_by_name("conversation-request:req-shared") is False
 
 
-def test_background_main_run_registers_the_durable_task_control_name():
+def test_background_main_run_registers_the_durable_task_control_name(monkeypatch):
     observed: dict[str, object] = {}
 
     class Heartbeat:
@@ -184,15 +188,15 @@ def test_background_main_run_registers_the_durable_task_control_name():
     class Store:
         claims = Claims()
 
-    scheduler = BackgroundMainAgentScheduler.__new__(BackgroundMainAgentScheduler)
-    scheduler.runtime = Runtime()
-    scheduler.store = Store()
-    scheduler._start_heartbeat = (
-        lambda _claim, _thread, *, claim_scope_id="": Heartbeat()
+    scheduler = BackgroundMainAgentScheduler({"runtime": Runtime(), "store": Store()})
+    monkeypatch.setattr(
+        claim_module, "_start_heartbeat",
+        lambda _dependencies, _claim, _thread, *, claim_scope_id="": Heartbeat(),
     )
     scheduler._runtime_facts = lambda: {}
 
-    result = scheduler._run_with_heartbeat(
+    result = claim_module.run_with_heartbeat(
+        _background_claim_dependencies(scheduler),
         "claim-1",
         {"thread_id": "thread-1", "task_id": "req-background"},
     )
@@ -205,7 +209,7 @@ def test_background_main_run_registers_the_durable_task_control_name():
     assert interrupt_by_name("conversation-request:req-background") is False
 
 
-def test_background_main_user_interrupt_closes_claim_without_runtime_failure():
+def test_background_main_user_interrupt_closes_claim_without_runtime_failure(monkeypatch):
     observed: dict[str, object] = {}
 
     class Heartbeat:
@@ -225,15 +229,15 @@ def test_background_main_user_interrupt_closes_claim_without_runtime_failure():
     class Store:
         claims = Claims()
 
-    scheduler = BackgroundMainAgentScheduler.__new__(BackgroundMainAgentScheduler)
-    scheduler.runtime = Runtime()
-    scheduler.store = Store()
-    scheduler._start_heartbeat = (
-        lambda _claim, _thread, *, claim_scope_id="": Heartbeat()
+    scheduler = BackgroundMainAgentScheduler({"runtime": Runtime(), "store": Store()})
+    monkeypatch.setattr(
+        claim_module, "_start_heartbeat",
+        lambda _dependencies, _claim, _thread, *, claim_scope_id="": Heartbeat(),
     )
     scheduler._runtime_facts = lambda: {}
 
-    result = scheduler._run_with_heartbeat(
+    result = claim_module.run_with_heartbeat(
+        _background_claim_dependencies(scheduler),
         "claim-stop",
         {"thread_id": "thread-stop", "task_id": "req-stop"},
     )

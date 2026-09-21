@@ -203,6 +203,7 @@ RFC 8628 参数，不导入其他应用凭据、不默认选模型。登录取�
 第 2 步首片将无进展计数和确定性失败退避移至 `conversation/background_progress_policy.py`；只输入标量事实，运行后读取、持久记账、租约与供应退避状态保留原位。旧函数删除，不保留转发层；新切片验收独立记录。
 供应退避次片已独立为 `background_supply_backoff.py` 并同版部署，TUI 114—119 已验；状态、执行守卫和事件日志同属一个模块，runtime 构造时读取配置并持有三类消费共用的唯一实例，详见[迁移边界](docs/design/MAINTAINABILITY_AND_JEV_REVIEW.md#第-2-步次片进程内供应退避)。
 第 2 步路由切片已在源码分为 `background_goal.py` 与 `background_routing.py`：前者只接收原 Goal/任务/时钟领域和精确查询、发布能力，后者只接收三个只读回调；删除混合职责的 GoalMixin，观察执行保留为原调度器内的独立编排函数，能力预扫归 Wake。353 项相关回归及独立审阅通过，同包部署双机后的 TUI 120—123 已验长 Goal 暂停续采/Compact、并行普通任务、三子代理和定时投递；交付失败及未覆盖分路见 TESTS，具体结构边界见[路由切片](docs/design/MAINTAINABILITY_AND_JEV_REVIEW.md#第-2-步路由切片目标续跑与投递地址)。
+租约/恢复片的源码迁移已完成：执行 claim 编排迁入 `background_claim.py`，权威恢复查询与日志指纹归 `background_recovery.py`；共享心跳和三类租约各守原边界，324 项定向回归与独立源码复核通过，尚未部署或真机验收。领取后竞态、各时钟、异常顺序及引用范围见[本片合同](docs/design/MAINTAINABILITY_AND_JEV_REVIEW.md#第-2-步租约与恢复切片实施中)。
 插件接线已补当前源码核对：工具快照已有 handler 绑定，但冻结可用性不承担热撤销；权限视图共享 MCP 连接，Skill 快照只校验原文件。
 后续沿原执行链补激活代次、准入与资源登记的原子边界，覆盖审批/锁等待、重试及重连后的停用；仍待实施，见[接线约束](docs/design/PLUGIN_LIFECYCLE.md#第-1-步接线核对与迁移约束)。
 真实长任务发现拒绝记忆在子代理 Goal 自动续轮重建参数时丢失，同一参数再次弹出审批；已发布部署，实际 TUI 70 已验证同参续轮拒绝。

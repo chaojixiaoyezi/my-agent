@@ -1,8 +1,8 @@
 # LLM: 后台稳定 task 身份与逐轮请求分离；唤醒共用 coordinator 软指导，不能生成永久禁写或额外授权。
 # 上下文和历史准备通过独立模块调用，修改执行顺序时同步后台历史、取消、Compact 和投递回归。
 # 进度计算和供应退避各有独立实现；本模块保留配置组装、实例寿命、读取时机、租约和持久落账。
-# Goal 状态和投递地址通过窄能力组件裁决；来源消费、能力预扫和执行租约仍在原位置。
-# 模块用途: 编排后台唤醒和工作片，并组装执行、交付、路由、策略、退避、上下文和历史种子。
+# Goal、投递地址、执行 claim 和恢复守卫各有窄能力组件；来源消费和能力预扫保留原编排位置。
+# 模块用途: 编排后台唤醒和工作片，并组装执行、交付、路由、租约、恢复、策略及上下文。
 from __future__ import annotations
 
 import json
@@ -20,11 +20,12 @@ from ..backends.errors import (
     is_provider_transient_error,
     is_provider_usage_limit_error,
 )
-from ..concurrency.interrupt import is_interrupted, register_interruptible
+from ..concurrency.interrupt import is_interrupted
 from ..runtime_errors import compact_error_message
 from ..settings.config import DEFAULT_EXECUTION_PERSISTENCE
 from ..settings.runtime_guard_config import runtime_guard_int
 from ..settings.thread_model_selection import is_model_configuration_unavailable
+from . import background_claim
 from .authority import (
     CONVERSATION_BACKGROUND_EVENT_REASON_ATTR,
     CONVERSATION_BACKGROUND_SUBAGENT_PHASE_ATTR,
@@ -70,6 +71,7 @@ from .background_goal import (
     stop_goal_after_error,
 )
 from .background_progress_policy import next_no_progress_streak, policy_failure_backoff
+from .background_recovery import BackgroundRecoveryGuard
 from .background_routing import (
     BackgroundRouteDependencies,
     default_route_target,
@@ -81,7 +83,6 @@ from .background_tool_policy import (
     BackgroundToolPolicyRequest,
     background_allowed_tools,
 )
-from .control_commands import conversation_request_interrupt_name
 from .models import (
     SUBAGENT_LIFECYCLE_WAKE_REASONS,
     THREAD_TASK_LINK_ACTIVE_STATUS,
@@ -90,7 +91,7 @@ from .models import (
     WakeSignal,
     new_id,
 )
-from .run_claim import ConversationRunClaimHeartbeat, claim_heartbeat_interval_seconds
+from .run_claim import claim_heartbeat_interval_seconds
 from .store import ConversationStore
 
 
@@ -2244,7 +2245,7 @@ def _skip_pending_wake_signal(
     if signal.wake_signal_id in handled or signal.wake_signal_id in attempted:
         return True
     if (
-        _background_authority_recovery_block(scheduler, str(signal.root_task_id or "").strip())
+        scheduler._recovery_guard.block_for_task(str(signal.root_task_id or "").strip())
         is not None
     ):
         return True
@@ -2786,7 +2787,8 @@ def _run_observation_batch(
         route_target,
     )
     reason, wake_signal = _observation_batch_semantics(observations)
-    report = scheduler._run_claimed(
+    report = background_claim.run_claimed(
+        _background_claim_dependencies(scheduler),
         {
             "thread_id": thread_id,
             "task_id": first_root_task_id(observations),
@@ -2831,7 +2833,7 @@ def _consume_observation_batches(
             break
         if thread_id in reported:
             continue
-        if _background_authority_recovery_block(scheduler, task_id) is not None:
+        if scheduler._recovery_guard.block_for_task(task_id) is not None:
             continue
         selected = thread_observations
         if observation_limit > 0:
@@ -2904,7 +2906,7 @@ def _consume_due_policies(
     for policy in runnable:
         if policy.thread_id in reported:
             continue
-        recovery_block = _background_authority_recovery_block(scheduler, policy.task_id)
+        recovery_block = scheduler._recovery_guard.block_for_task(policy.task_id)
         if recovery_block is not None:
             _record_recovery_blocked_policy(scheduler, policy, recovery_block)
             continue
@@ -2939,10 +2941,7 @@ def _ready_background_thread_ids(
         if not scheduler._supply_backoff.should_attempt(normalized, current):
             return
         if (
-            _background_authority_recovery_block(
-                scheduler,
-                str(task_id or "").strip(),
-            )
+            scheduler._recovery_guard.block_for_task(str(task_id or "").strip())
             is not None
         ):
             return
@@ -3518,7 +3517,8 @@ def _execute_wake_signal(
         target,
     )
     return _WakeExecution(
-        scheduler._run_claimed(
+        background_claim.run_claimed(
+            _background_claim_dependencies(scheduler),
             {
                 "thread_id": signal.thread_id,
                 "task_id": signal.root_task_id,
@@ -3862,6 +3862,8 @@ def _background_owner_identity(scheduler: BackgroundMainAgentScheduler) -> tuple
     )
 
 
+# LLM: 只读取精确 task link 的 detached 声明；读取失败沿原空范围，不能按任务名或类型猜车道。
+# 函数用途: 为 claim 组件查询当前执行范围，不领取租约；原目录和前台共享车道规则不变。
 def _background_claim_scope_id(
     store: object,
     thread_id: str,
@@ -3916,28 +3918,40 @@ def _subagent_runner_owns_task(agent: object | None, task_id: object) -> bool:
     return str(getattr(task, "id", "") or "").strip() == selected
 
 
-# LLM: This model-free acknowledgement is the final fail-closed guard for any
-# child-bound source that bypassed source-specific filtering. It lets wake and
-# observation ledgers settle without invoking the root model or exposing root
-# tools; the child runner/supervisor remains the sole continuation authority.
-# 函数用途: 把误投给主代理的子代理后台来源标成已由 child runner 接管，不消耗模型调用。
-def _subagent_owned_background_report(kwargs: dict) -> BackgroundMainAgentReport:
-    return BackgroundMainAgentReport(
-        thread_id=str(kwargs.get("thread_id") or ""),
-        task_id=str(kwargs.get("task_id") or ""),
-        reason=str(kwargs.get("reason") or "subagent_runner_owned"),
-        response="",
-        route_channel=str(kwargs.get("route_channel") or "internal"),
-        route_target=str(kwargs.get("route_target") or ""),
-        created_at=now(kwargs.get("now")),
-        delivery_status="suppressed",
-        delivery_reason="subagent_runner_owns_continuation",
-        wake_handled=True,
+# LLM: 这里只解析当前权威查询入口，不调用、不捕获读取异常；具体阻断查询及日志归恢复组件。
+# 函数用途: 将当前运行器的恢复库接到窄能力接口，运行器更新后仍读取当前对象。
+def _background_recovery_checker(runtime: object):
+    agent = getattr(runtime, "agent", None)
+    repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
+    return getattr(repo, "main_agent_recovery_block_for_task", None)
+
+
+# LLM: 只绑定本次所需领域和能力；任务/归属/终态读取仍在原准入分支，来源退休和失败写账仍归 runtime。
+# 函数用途: 为一片后台执行列明依赖，沿已有模型入口与 claim 账本运行，不另造执行上下文。
+def _background_claim_dependencies(
+    scheduler: BackgroundMainAgentScheduler,
+) -> background_claim.BackgroundClaimDependencies:
+    return background_claim.BackgroundClaimDependencies(
+        claims=scheduler.store.claims,
+        claim_scope_id=partial(_background_claim_scope_id, scheduler.store),
+        child_owns_task=lambda task_id: _subagent_runner_owns_task(
+            getattr(scheduler.runtime, "agent", None), task_id,
+        ),
+        terminal_task=lambda kwargs: _claimed_background_task_is_terminal(
+            scheduler.runtime.agent, scheduler.store, kwargs,
+        ),
+        recovery_block=scheduler._recovery_guard.block_for_task,
+        retire_source=partial(_retire_terminal_background_source, scheduler.store),
+        run_once=scheduler.runtime.run_once,
+        runtime_facts=scheduler._runtime_facts,
+        record_policy_failure=scheduler._record_policy_failure,
+        lease_seconds=scheduler.claim_ttl_seconds,
+        heartbeat_interval_seconds=scheduler.claim_heartbeat_interval_seconds,
     )
 
 
-# LLM: 调度执行沿原 claim、心跳和持久进度账本收口；纯数值规则外置，但执行后重读与写账顺序不变。
-# 类用途: 运行到期策略并维护其执行租约、心跳和结果；迁移时联合检查后台调度及供应退避回归。
+# LLM: 策略执行经独立 claim 组件领取和结算；执行后才重读进度账，来源确认及写账顺序保持。
+# 类用途: 编排到期策略和来源确认，租约交给窄依赖组件；联测后台调度、恢复及供应退避。
 class _BackgroundSchedulerExecutionMixin:
 
     # LLM: 旧目标周期策略一次迁移为 canonical Goal wake；普通策略保留原准入和落账顺序。
@@ -3979,7 +3993,8 @@ class _BackgroundSchedulerExecutionMixin:
                     except Exception:
                         pass
                     return None
-        report = self._run_claimed(
+        report = background_claim.run_claimed(
+            _background_claim_dependencies(self),
             {
                 "thread_id": policy.thread_id,
                 "task_id": policy.task_id,
@@ -4006,123 +4021,6 @@ class _BackgroundSchedulerExecutionMixin:
             )
         return report
 
-    # LLM: claim 后必须重查 terminal 与 recovery block，封住 preflight 到执行间竞态；
-    # recovery block 只关闭本 claim，不消费来源。
-    # 函数用途: 领取一个后台执行 lane，通过最终准入后运行带心跳的主代理回合。
-    def _run_claimed(self, kwargs: dict) -> BackgroundMainAgentReport | None:
-        if _subagent_runner_owns_task(
-            getattr(self.runtime, "agent", None),
-            kwargs.get("task_id"),
-        ):
-            return _subagent_owned_background_report(kwargs)
-        claim_scope_id = _background_claim_scope_id(
-            self.store,
-            str(kwargs.get("thread_id") or ""),
-            str(kwargs.get("task_id") or ""),
-        )
-        claim = self.store.claims.acquire(
-            {
-                "thread_id": kwargs.get("thread_id", ""),
-                "claim_scope_id": claim_scope_id,
-                "task_id": kwargs.get("task_id", ""),
-                "reason": kwargs.get("reason", ""),
-                "lease_seconds": self.claim_ttl_seconds,
-                "now": kwargs.get("now"),
-            }
-        )
-        if claim is None:
-            return None
-        # A wake/policy may pass its earlier eligibility check and then race
-        # `/stop` or foreground completion before the background claim is
-        # acquired.  Re-read the exact task link after claiming and before any
-        # model/tool work; terminal state wins and the stale source is retired.
-        if _claimed_background_task_is_terminal(self.runtime.agent, self.store, kwargs):
-            _finish_nonexecuted_background_claim(
-                self.store,
-                kwargs,
-                claim_scope_id=claim_scope_id,
-                claim_id=str(claim.get("claim_id") or ""),
-                admission="terminal_task_link",
-            )
-            _retire_terminal_background_source(self.store, kwargs)
-            return None
-        recovery_block = _background_authority_recovery_block(
-            self, str(kwargs.get("task_id") or "").strip()
-        )
-        if recovery_block is not None:
-            _finish_nonexecuted_background_claim(
-                self.store,
-                kwargs,
-                claim_scope_id=claim_scope_id,
-                claim_id=str(claim.get("claim_id") or ""),
-                admission="authority_recovery_required",
-                recovery_block=recovery_block,
-            )
-            return None
-        return self._run_with_heartbeat(
-            str(claim.get("claim_id") or ""),
-            kwargs,
-            claim_scope_id=claim_scope_id,
-        )
-
-    # LLM: 每片都按实际结果关闭 claim；本地模型依赖失败不累计 policy 退休次数，Goal/wake 保留在原权威账。
-    # 函数用途: 为后台执行续租并记下真实退出原因，慢模型活跃时不因等待时间停止。
-    def _run_with_heartbeat(
-        self,
-        claim_id: str,
-        kwargs: dict,
-        *,
-        claim_scope_id: str = "",
-    ) -> BackgroundMainAgentReport | None:
-        heartbeat = self._start_heartbeat(
-            claim_id,
-            kwargs["thread_id"],
-            claim_scope_id=claim_scope_id,
-        )
-        status = "finished"
-        error: BaseException | None = None
-        try:
-            task_id = str(kwargs.get("task_id") or "").strip()
-            if task_id:
-                with register_interruptible(conversation_request_interrupt_name(task_id)):
-                    return self.runtime.run_once(kwargs)
-            return self.runtime.run_once(kwargs)
-        except InterruptedError:
-            # `/stop` is an expected user control transition.  The durable task
-            # link is already marked interrupted by the control service, so the
-            # background lease must close quietly instead of becoming a failed
-            # run that recovery code may try to take over.
-            status = "cancelled"
-            return None
-        except BackgroundCompactSliceYield:
-            # The exact wake/observation/policy remains unhandled. Closing only this bounded
-            # execution claim lets the next scheduler slice resume from canonical checkpoints
-            # without logging a fake crash or incrementing policy failure counters.
-            return None
-        except BaseException as exc:
-            status = "failed"
-            error = exc
-            raise
-        finally:
-            heartbeat.stop()
-            self.store.claims.finish(
-                {
-                    "thread_id": kwargs["thread_id"],
-                    "claim_scope_id": claim_scope_id,
-                    "claim_id": claim_id,
-                    "task_id": kwargs.get("task_id", ""),
-                    "status": status,
-                    "error": error,
-                    "runtime_facts": self._runtime_facts(),
-                    "now": now(),
-                }
-            )
-            if (status == "failed" and error is not None and not is_provider_transient_error(error)
-                    and not is_model_configuration_unavailable(error)):
-                # 只有普通执行失败写 policy 的退避/退休账；供应和配置错误不能累计成三次失败退休。
-                # 临时供应错误由外层 consume_with_supply_guard 更新内存状态，持久 policy 保持待处理。
-                self._record_policy_failure(kwargs)
-
     # LLM: 只按 wake 的 policy_id 更新原 Store；供应/配置错误由调用方排除，不改变退避和退休记账顺序。
     # 函数用途: 失败回合后保存次数和下次到期时间，连续三次停用策略；记账异常只记录警告。
     def _record_policy_failure(self, kwargs: dict) -> None:
@@ -4148,7 +4046,7 @@ class _BackgroundSchedulerExecutionMixin:
             metadata = policy.metadata if isinstance(policy.metadata, dict) else {}
             failures = max(0, int(metadata.get("failure_count") or 0)) + 1
             backoff = policy_failure_backoff(failures, policy_id)
-            # 失败时刻与 run 的调度时刻对齐(kwargs["now"],与 claim/finish 同一时钟);
+            # 策略失败优先沿 run 的调度时刻 kwargs["now"]，claim 最终结算仍用实时钟；
             # 缺失时回落真实时钟。测试用注入时钟可精确断言,生产行为不变。
             try:
                 recorded_at = float(kwargs.get("now") or 0.0) or now()
@@ -4172,26 +4070,6 @@ class _BackgroundSchedulerExecutionMixin:
             # 记账失败绝不能让主流程连带崩:失败本身已由 claims.finish 记录,
             # 这里只是补 policy 退避账,最坏情况退回旧行为(下次仍 due)。
             _HEARTBEAT_LOGGER.warning("record policy failure failed", exc_info=True)
-
-    def _start_heartbeat(
-        self,
-        claim_id: str,
-        thread_id: str,
-        *,
-        claim_scope_id: str = "",
-    ) -> ConversationRunClaimHeartbeat:
-        heartbeat = ConversationRunClaimHeartbeat(
-            {
-                "store": self.store,
-                "thread_id": thread_id,
-                "claim_scope_id": claim_scope_id,
-                "claim_id": claim_id,
-                "lease_seconds": self.claim_ttl_seconds,
-                "interval_seconds": self.claim_heartbeat_interval_seconds,
-            }
-        )
-        heartbeat.start()
-        return heartbeat
 
     def _mark_signal(self, signal: WakeSignal, current: float, handled: set[str]) -> None:
         self.store.wakes.mark_handled(signal.wake_signal_id, now=current)
@@ -4274,9 +4152,9 @@ class BackgroundMainAgentScheduler(
     def last_progress_policy_suppressed(self, value: list[dict[str, object]]) -> None:
         self._diagnostics.policy_suppressed = list(value or [])
 
-    # LLM: scheduler 的恢复阻塞缓存只负责同状态日志去重；真实暂停状态始终从
-    # RuntimeRepository 重读，进程重启不能改变准入结论。
-    # 函数用途: 组装单 Gateway 的后台事件消费者及其进程内退避/观测状态。
+    # LLM: 恢复守卫与本实例同寿命，仅去重日志；真实状态按调用时从 RuntimeRepository 重读。
+    # 租约配置仍在这里归一化，领取、续租和结算由同一 claim 域执行，联测后台及前台共享车道。
+    # 函数用途: 组装单 Gateway 的后台消费者、恢复守卫及进程内退避/观测状态。
     def __init__(self, config: dict):
         self.runtime = config["runtime"]
         self.store = config["store"]
@@ -4311,7 +4189,9 @@ class BackgroundMainAgentScheduler(
         self._supply_backoff = _supply_backoff_from_agent(self.runtime.agent)
         self._wake_retry_after: dict[str, float] = {}
         self._quota_fallback_wakes: set[str] = set()
-        self._authority_recovery_blocks: dict[str, str] = {}
+        self._recovery_guard = BackgroundRecoveryGuard(
+            lambda: _background_recovery_checker(self.runtime)
+        )
 
 
 # LLM: 只投影当前进度策略及其显式请求代次，不从等待原因正文推导调度或执行身份。
@@ -4601,74 +4481,8 @@ def _claimed_background_task_is_terminal(
     return status.upper() in _TASK_LINK_TERMINAL_STATUSES
 
 
-# LLM: unknown 权威只暂停自动调度，不消费 wake/observation/policy；状态来自
-# RuntimeRepository 的结构化投影，禁止捕获 RuntimeConflictError 后解析中文文案。
-# 函数用途: 判断后台来源是否必须等人工恢复，并对同一阻塞状态只记一次日志。
-def _background_authority_recovery_block(
-    scheduler: object,
-    task_id: str,
-) -> dict[str, str] | None:
-    normalized_task_id = str(task_id or "").strip()
-    if not normalized_task_id:
-        return None
-    agent = getattr(getattr(scheduler, "runtime", None), "agent", None)
-    repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
-    checker = getattr(repo, "main_agent_recovery_block_for_task", None)
-    if not callable(checker):
-        return None
-    try:
-        block = checker(normalized_task_id)
-    except Exception as exc:  # noqa: BLE001 权威不可读时也不能放行模型/副作用
-        block = {
-            "schema_version": "main-agent-recovery-block.v1",
-            "reason": "authority_state_unreadable",
-            "task_id": normalized_task_id,
-            "error_type": exc.__class__.__name__,
-        }
-    cache = getattr(scheduler, "_authority_recovery_blocks", None)
-    if not isinstance(cache, dict):
-        cache = {}
-        scheduler._authority_recovery_blocks = cache
-    if block is None:
-        if normalized_task_id in cache:
-            cache.pop(normalized_task_id, None)
-            _HEARTBEAT_LOGGER.info(
-                "BACKGROUND_AUTHORITY_RECOVERY_RESUMED task=%s", normalized_task_id
-            )
-        return None
-    fingerprint = json.dumps(block, ensure_ascii=False, sort_keys=True)
-    if cache.get(normalized_task_id) != fingerprint:
-        cache[normalized_task_id] = fingerprint
-        _HEARTBEAT_LOGGER.warning("BACKGROUND_AUTHORITY_RECOVERY_BLOCK %s", fingerprint)
-    return block
 
 
-# LLM: terminal 与 unknown 的最终准入失败都只能关闭本次 claim；是否消费触发源
-# 由调用方按原因决定，不能在这个账本 helper 里猜。
-# 函数用途: 关闭一次未执行模型/工具的后台 claim，并记录结构化准入原因。
-def _finish_nonexecuted_background_claim(
-    store: object,
-    kwargs: dict,
-    *,
-    claim_scope_id: str,
-    claim_id: str,
-    admission: str,
-    recovery_block: dict[str, str] | None = None,
-) -> None:
-    runtime_facts: dict[str, object] = {"admission": admission}
-    if recovery_block is not None:
-        runtime_facts["recovery_block"] = dict(recovery_block)
-    store.claims.finish(
-        {
-            "thread_id": kwargs.get("thread_id", ""),
-            "claim_scope_id": claim_scope_id,
-            "claim_id": claim_id,
-            "task_id": kwargs.get("task_id", ""),
-            "status": "cancelled",
-            "runtime_facts": runtime_facts,
-            "now": now(),
-        }
-    )
 
 
 # LLM: recovery-blocked policy 只能进入本轮观测投影，不得 disable 或改写 next_due_at。

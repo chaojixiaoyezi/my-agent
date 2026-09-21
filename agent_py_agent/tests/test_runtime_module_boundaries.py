@@ -54,6 +54,8 @@ assert not any(name.startswith('agent_py_agent.agent.gateway_parts.') for name i
     "from agent_py_agent.agent.conversation.background_history_seed import background_history_seed_or_raise; assert callable(background_history_seed_or_raise)",
     "from agent_py_agent.agent.gateway_parts.workspace_scope import gateway_request_workspace_scope; assert callable(gateway_request_workspace_scope)",
     "from agent_py_agent.agent.conversation.background_execution import invoke_background_turn; assert callable(invoke_background_turn)",
+    "from agent_py_agent.agent.conversation.background_claim import run_claimed; assert callable(run_claimed)",
+    "from agent_py_agent.agent.conversation.background_recovery import BackgroundRecoveryGuard; assert callable(BackgroundRecoveryGuard)",
     "from agent_py_agent.agent.turn_end import should_continue_task; assert should_continue_task(object()) == (False, 'not_continuable')",
     "from agent_py_agent.agent.conversation.background_delivery import record_background_response; assert callable(record_background_response)",
 ])

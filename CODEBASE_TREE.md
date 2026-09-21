@@ -243,6 +243,8 @@ agent_py_agent/
 |   |   |-- background_supply_backoff.py  # 会话供应冷却的进程内状态、消费守卫及恢复日志
 |   |   |-- background_goal.py          # 后台 Goal 异常结算与续跑裁决，只持有精确领域和回调能力
 |   |   |-- background_routing.py       # 线程及 owner 投递地址的只读选择，不消费来源或执行发送
+|   |   |-- background_claim.py         # 后台执行领取、最终准入、共享心跳与精确 claim 结算
+|   |   |-- background_recovery.py      # 按次查询权威恢复阻断，只去重日志、不缓存执行资格
 |   |   |-- background_tool_policy.py   # 无副作用的后台工具目录、owner/task 收紧及展示投影
 |   |   |-- background_context.py       # 后台有界上下文、任务范围与模型可见事实准备
 |   |   |-- background_history_seed.py  # 后台原生历史种子、任务隔离与读取失败合同
@@ -356,6 +358,8 @@ agent_py_agent/
 |   |-- test_store_scan_indexes.py      # wake/观察/策略读取侧索引：条目+记录双预算有界、删名清理、目录不可读不误清、枚举与 glob 同口径
 |   |-- test_tui_injected_input_states.py  # 插话三段状态(排队/已提交/已确认)：提交边界不消费、已提交即入历史、慢流/失败/重连不丢不重
 |   |-- test_slow_model_liveness.py     # 慢模型长任务活性：流式不按总时长判死、客户端只按机器活动续期、租约心跳与长工具续租
+|   |-- test_background_claim_execution.py # 后台领取后竞态、异常收尾顺序及运行中真实续租
+|   |-- test_background_recovery.py     # 恢复阻断每次重读、不可读判据与日志去重边界
 |   |-- test_gateway_admission_wait.py  # 合法排队等准入的结构化等待信号：只写等待事实、有节流与总预算、客户端持续收到且停写/取消/终态收口
 |   |-- test_scheduler_scan_costs.py    # waiting 投影缓存三重校验、runtime_snapshot 锁外解析与旧实现逐字一致、owner 事实缓存失效回归
 |   |-- fixtures/tui/                   # 固定尺寸/时间线的非敏感 TUI PTY 动作 fixture
@@ -470,6 +474,8 @@ docs/
 - `agent_py_agent/agent/conversation/background_supply_backoff.py`：按会话维护供应冷却，三类消费及就绪扫描共享同一实例；配置组装归 runtime，额度与持久策略分路不进入组件。
 - `agent_py_agent/agent/conversation/background_goal.py`：从原 Goal、任务和时钟领域结算异常或发布后续唤醒；精确身份、事务、CAS 与写账顺序保持，不持有调度器或完整 Agent/Store。
 - `agent_py_agent/agent/conversation/background_routing.py`：按原优先级惰性读取线程与 owner 路由；普通唤醒、观察批次、冻结重投及额度通知共用，不另建路由状态或投递链。
+- `agent_py_agent/agent/conversation/background_claim.py`：仅持有原 claims 域及精确能力；领取后重查终态/恢复，运行中复用共享心跳，退出先停心跳再结算本 claim，普通失败最后记账。
+- `agent_py_agent/agent/conversation/background_recovery.py`：每次解析并查询当前权威恢复入口；指纹只抑制重复日志，unknown/不可读阻断不消费原来源。
 - `agent_py_agent/agent/conversation/background_context.py`：显式请求接口连接原会话事实、任务范围和有界模型投影；既有任务进度对账仍沿原调用顺序执行。
 - `agent_py_agent/agent/conversation/background_history_seed.py`：复用 canonical 未压缩历史和 provider 投影；区分可用、禁用与不可读，不把读取失败变成空历史。
 - `agent_py_agent/agent/conversation/background_execution.py`：显式接收执行、存储与参数准备能力，保留同片取消、Compact 和原生历史；不选择唤醒、不投递外部消息。
