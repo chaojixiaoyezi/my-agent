@@ -925,7 +925,7 @@ def _cancel_closed_parent_task(agent: Any, task: Any, decision: Any) -> bool:
         return False
     if decision.reason == "parent_link_closed":
         _close_inactive_parent_audit_watches(agent, task, decision)
-    from ..tools.cancel import CancelSubagentTaskRequest, cancel_subagent_task
+    from ....subagents.cancellation import CancelSubagentTaskRequest, cancel_subagent_task
 
     cancel_subagent_task(
         agent,

@@ -1,6 +1,4 @@
-# LLM: 创建回执只表达持久任务和正式启动事实，部分失败按已接纳身份区分，不替模型判定交付成功。
-# 模块用途: 生成创建、复用与排队的用户可读回执，不修改执行权。
-# LLM: 创建回执只投影异步启动、可信 cwd 和结果引用；内部运行根不代表业务文件目录。
+# LLM: 创建回执从 canonical 复读发布后的状态，不能依赖创建快照被控制域原地修改；联测取消与启动并发，不改执行权。
 # 模块用途: 组装子代理派工条目和父级回执，不替父级决定分工或等待时机。
 
 from __future__ import annotations
@@ -38,7 +36,7 @@ class CreateSubagentsPayloadInput:
     conversation_bind_errors: list[dict[str, object]] | None = None
 
 
-# LLM: 创建回执只能陈述已记录、已启动和待事件的结构化事实；不得附带模型
+# LLM: 发布可能触发取消或 runner 更新，状态须读取原任务最新记录；只能陈述已记录、已启动和待事件的结构化事实，不得附带模型
 # 查询/推进工具调用，否则 provider 会把回执当下一条操作指令反复轮询。
 # 函数用途: 汇总一批创建或复用的子代理，并生成父级可读的启动回执。
 def create_subagents_payload(request: CreateSubagentsPayloadInput) -> dict[str, object]:
@@ -46,7 +44,7 @@ def create_subagents_payload(request: CreateSubagentsPayloadInput) -> dict[str, 
     resolutions = request.resolutions
     auto_start = request.auto_start
     request_params = request.request_params
-    tasks = [item.task for item in resolutions]
+    tasks = [agent.subagents.load(item.task.id) for item in resolutions]
     created = created_tasks(resolutions)
     reused = reused_tasks(resolutions)
     dispatchable = dispatchable_tasks(tasks)

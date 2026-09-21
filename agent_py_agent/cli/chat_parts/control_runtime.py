@@ -451,11 +451,8 @@ def _execute_local_stop(
             delivery_status="unknown", error_code="TASK_RESOURCE_STOP_UNCONFIRMED",
         )
     _retire_local_guidance(execution.agent, request_id)
-    _cancel_local_subagents(
-        execution.agent, request_id, resources=resources,
-        task_id=control.runtime_authority().get("task_id", ""),
-    )
-    if resources is not None and (resources.background_freeze_error or resources.pty_request_error):
+    _cleanup_local_resources(request_id, resources)
+    if resources is not None and resources.unconfirmed:
         return ConversationControlResult(
             "stop", False, "本轮已中断，部分任务资源停止尚未确认。", request_id=request_id,
             delivery_status="unknown", error_code="TASK_RESOURCE_STOP_UNCONFIRMED",
@@ -533,35 +530,16 @@ def _local_status(execution: ChatControlExecution) -> ConversationTaskStatus:
     )
 
 
-# LLM: 主资源只消费已经冻结的清单；子代理沿原 request/task 谱系选择，耗时清理不持 UI 状态锁。
-# 函数用途: 在后台清理本地主任务固定资源，并沿现有入口回收子代理。
-def _cancel_local_subagents(
-    agent: object, request_id: str, *, resources: object | None = None, task_id: str = "",
-) -> None:
-    try:
-        run_ids = agent.subagent_run_ids_for_request(request_id)
-        if task_id and task_id != request_id:
-            run_ids = list(dict.fromkeys([*run_ids, *agent.subagent_run_ids_for_request(task_id)]))
-    except Exception:
-        run_ids = []
+# LLM: 只接收原控制事务固定的主/子资源，不携带当前 agent、任务身份或重新查询能力。
+# 函数用途: 锁外异步清理本次停止清单，控制界面不等待进程退出。
+def _cleanup_local_resources(request_id: str, resources: object | None) -> None:
+    if resources is None:
+        return
+    from ...agent.conversation.task_resources import cleanup_task_resources
 
-    # LLM: 清理只消费原批次；异常不能改变原资源身份或扩大到其它会话。
-    # 函数用途: 在控制锁外消费本地停止清单并派发原子代理取消。
-    def cancel() -> None:
-        if resources is not None:
-            from ...agent.tooling.process_resource_stop import cleanup_process_stop
-
-            cleanup_process_stop(resources)
-        try:
-            agent.cancel_request_subagents(
-                request_id,
-                reason="conversation_user_stop",
-                run_ids=run_ids,
-            )
-        except Exception:
-            return
-
-    threading.Thread(target=cancel, name=f"cancel-{request_id}", daemon=True).start()
+    threading.Thread(
+        target=cleanup_task_resources, args=(resources,), name=f"cancel-{request_id}", daemon=True,
+    ).start()
 
 
 # LLM: 序列化显式控制操作，尤其不能将 interrupt 降级为暂停目标的 /stop。

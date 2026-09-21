@@ -35,6 +35,13 @@ class TestCreateSubagentsToolWorkspaceDefaults:
             task.task_dir = f"/tmp/run_{index}"
             tasks.append(task)
         mock_agent.subagents.create_run.side_effect = tasks
+        def load(run_id):
+            task = next((item for item in tasks if item.id == run_id), None)
+            if task is None:
+                raise FileNotFoundError(run_id)
+            return task
+
+        mock_agent.subagents.load.side_effect = load
         # 工作区回执测试不让宽泛 MagicMock 假扮执行权限库。
         monkeypatch.setattr(
             "agent_py_agent.agent.agent_core.orchestration.background.dispatch._start_background_dispatch",

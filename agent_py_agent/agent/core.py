@@ -21,7 +21,6 @@ from .agent_core.orchestration_tools import (
     CreateSubagentsTool,
     ListAgentsTool,
     ResolveCapabilityRequestsTool,
-    execute_cancel_subagents,
 )
 from .agent_core.parameters import (
     ONE_SHOT_TOOL_NAMES,
@@ -510,6 +509,7 @@ class SimpleAgent(
                 task_id,
                 str(getattr(task, "root_id", "") or "").strip(),
                 str(getattr(task, "parent_id", "") or "").strip(),
+                str(attrs.get("conversation_task_id") or "").strip() if isinstance(attrs, dict) else "",
             }
             if (
                 task_id
@@ -519,33 +519,29 @@ class SimpleAgent(
                 run_ids.append(task_id)
         return list(dict.fromkeys(run_ids))
 
-    # LLM: Gateway and CLI cancel exact run ids supplied by the typed request-lineage query;
-    # they never import orchestration tools across their enforced layer boundaries.
-    # 函数用途：取消某个会话请求派生的活跃子代理树。
-    def cancel_request_subagents(
-        self,
-        request_id: str,
-        *,
-        reason: str,
-        run_ids: list[str] | None = None,
-    ) -> object:
-        targets = (
-            list(run_ids) if run_ids is not None else self.subagent_run_ids_for_request(request_id)
-        )
-        if not targets:
-            return None
-        return execute_cancel_subagents(
-            self,
-            {
-                "run_ids": targets,
-                "status": ["PLANNING", "PENDING", "RUNNING", "BLOCKED", "PAUSED"],
-                "reason": reason,
-                "kill_process": True,
-                # 调用方已经在唯一 creation_guard 内复读完整 request lineage；
-                # 每个 exact run 只收口一次，避免非可重入 guard 嵌套。
-                "cascade_descendants": False,
-            }
-        )
+    # LLM: 控制调用方已关闭主链；同一 C 内解析原 request/task 谱系并准备固定子树，返回后不再选择后代。
+    # 函数用途: 为 Gateway 和本地停止交回已关闭权限的固定子代理批次，耗时清理由控制层锁外执行。
+    def prepare_request_subagent_stop(
+        self, request_id: str, *, reason: str, related_request_ids: tuple[str, ...] = (),
+    ):
+        from .subagents.authorization_gate import OperationRequest, authorize_operation
+        from .subagents.cancellation import CancelSubagentTaskRequest, prepare_subagent_stops
+
+        with self.subagents.creation_guard():
+            targets = []
+            for identity in dict.fromkeys((request_id, *related_request_ids)):
+                if identity:
+                    targets.extend(self.subagent_run_ids_for_request(identity))
+            requests = [
+                CancelSubagentTaskRequest(
+                    authorize_operation(self.subagents, OperationRequest(
+                        operation="cancel", run_id=run_id,
+                        requester_owner=str(getattr(self.home_paths, "owner_id", "") or ""),
+                    )), reason, source="conversation_control",
+                )
+                for run_id in dict.fromkeys(targets)
+            ]
+            return prepare_subagent_stops(self, requests)
 
 
 def _active_audit_run_epoch(agent: object, task_id: str) -> int | None:

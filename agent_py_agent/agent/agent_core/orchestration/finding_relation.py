@@ -253,7 +253,7 @@ def _relation_is_active(agent: object, relation: dict[str, object]) -> bool:
 
 def _cancel_task(agent: object, task: object) -> None:
     try:
-        from .tools.cancel import CancelSubagentTaskRequest, cancel_subagent_task
+        from ...subagents.cancellation import CancelSubagentTaskRequest, cancel_subagent_task
 
         cancel_subagent_task(
             agent,

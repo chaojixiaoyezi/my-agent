@@ -266,7 +266,7 @@ def test_local_stop_signals_current_run(tmp_path, monkeypatch) -> None:
 
     cancel_resources = MagicMock()
     monkeypatch.setattr(
-        "agent_py_agent.cli.chat_parts.control_runtime._cancel_local_subagents", cancel_resources,
+        "agent_py_agent.cli.chat_parts.control_runtime._cleanup_local_resources", cancel_resources,
     )
     agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
     execution = ChatControlExecution(
@@ -311,7 +311,7 @@ def test_local_stop_signals_current_run(tmp_path, monkeypatch) -> None:
     assert result.ok is True
     assert stopped.is_set()
     assert agent.conversation_store.guidance.pending("request", "chat-stop") == []
-    cancel_resources.assert_called_once_with(agent, "chat-stop", resources=None, task_id="")
+    cancel_resources.assert_called_once_with("chat-stop", None)
 
 
 def test_local_interrupt_preserves_guidance_and_independent_resources(tmp_path, monkeypatch) -> None:
@@ -319,7 +319,7 @@ def test_local_interrupt_preserves_guidance_and_independent_resources(tmp_path, 
     agent._current_run_params = SimpleNamespace(request_id="wrong-request")
     cancel_resources = MagicMock(side_effect=AssertionError("interrupt 不回收独立资源"))
     monkeypatch.setattr(
-        "agent_py_agent.cli.chat_parts.control_runtime._cancel_local_subagents", cancel_resources,
+        "agent_py_agent.cli.chat_parts.control_runtime._cleanup_local_resources", cancel_resources,
     )
     execution = ChatControlExecution(
         agent, False,
@@ -364,7 +364,7 @@ def test_local_interrupt_preserves_guidance_and_independent_resources(tmp_path, 
 def test_local_interrupt_stops_foreground_shell_without_resource_reclaim(tmp_path, monkeypatch) -> None:
     cancel_resources = MagicMock(side_effect=AssertionError("interrupt 不回收独立资源"))
     monkeypatch.setattr(
-        "agent_py_agent.cli.chat_parts.control_runtime._cancel_local_subagents", cancel_resources,
+        "agent_py_agent.cli.chat_parts.control_runtime._cleanup_local_resources", cancel_resources,
     )
     agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
     execution = ChatControlExecution(

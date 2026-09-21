@@ -56,7 +56,7 @@ def test_local_stop_uses_published_ids_and_frozen_resources(main_task, monkeypat
         cleaned.set()
 
     monkeypatch.setattr(resources, "cleanup_process_stop", clean)
-    monkeypatch.setattr(agent, "cancel_request_subagents", Mock())
+
     execution = ChatControlExecution(agent, False, ChatControlState(True, 0, "工作", 0, "ui-session", "message", control))
     result = execute_chat_control(execution, parse_conversation_control("/stop"))
     assert result.ok and result.delivery_status == "accepted"
@@ -76,7 +76,7 @@ def test_local_interrupt_keeps_authority_background_and_child_resources(main_tas
     clean = Mock(side_effect=AssertionError("纯中断不清理后台"))
     monkeypatch.setattr(resources, "freeze_process_stop", clean)
     child_cancel = Mock(side_effect=AssertionError("纯中断不取消孩子"))
-    monkeypatch.setattr(agent, "cancel_request_subagents", child_cancel)
+    monkeypatch.setattr(agent, "prepare_request_subagent_stop", child_cancel)
     result = execute_chat_control(
         ChatControlExecution(agent, False, ChatControlState(True, 0, "工作", 0, "session", "message", control)),
         parse_conversation_control("/interrupt"),
@@ -101,7 +101,7 @@ def test_local_partial_freeze_reports_unknown_and_retains_committed_batch(main_t
 
     monkeypatch.setattr(resources.pty_session_registry, "request_stop", Mock(side_effect=OSError("unavailable")))
     monkeypatch.setattr(resources, "cleanup_process_stop", clean)
-    monkeypatch.setattr(agent, "cancel_request_subagents", Mock())
+
     result = execute_chat_control(
         ChatControlExecution(agent, False, ChatControlState(True, 0, "工作", 0, "session", "message", control)),
         parse_conversation_control("/stop"),
@@ -175,7 +175,7 @@ def test_local_stop_waits_for_compact_publication_before_freezing(main_task, mon
     assert not binder.is_alive() and not stopper.is_alive() and not failures, failures
     assert control.runtime_authority()["attempt_id"] == output["attempt"]
     assert agent.subagents.runtime_db.current_attempt(record["agent_run_id"])["status"] == "cancelled"
-    assert {row["session_id"] for row in output["batch"].receipt.records} == {"bg-old", "bg-current"}
+    assert {row["session_id"] for row in output["batch"].main.receipt.records} == {"bg-old", "bg-current"}
 
 
 def test_old_local_binding_cannot_follow_a_resumed_run(main_task):

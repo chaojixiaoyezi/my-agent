@@ -22,8 +22,17 @@ def _agent(max_subagents: int = 10) -> MagicMock:
     return mock_agent
 
 
-def _create_run_sequence():
+# LLM: 此替身显式保存创建记录，回执读取必须命中同一 ID；不模拟执行权、后台进程或停止协议。
+# 函数用途: 为批量参数用例提供一致的创建/读取事实，不使用未配置的 MagicMock 状态。
+def _create_run_sequence(mock_agent):
     created_count = 0
+    tasks = {}
+    def load(run_id):
+        if run_id not in tasks:
+            raise FileNotFoundError(run_id)
+        return tasks[run_id]
+
+    mock_agent.subagents.load.side_effect = load
 
     def create_run(*, params):
         nonlocal created_count
@@ -34,6 +43,7 @@ def _create_run_sequence():
         task.status = "PLANNING"
         task.verification_status = "UNVERIFIED"
         task.task_dir = f"/tmp/{task.id}"
+        tasks[task.id] = task
         return task
 
     return create_run
@@ -58,7 +68,7 @@ def _planned_agent(tmp_path) -> MagicMock:
     mock_agent.subagents.workspace_roots = [workspace]
     mock_agent.subagents.role_template_dirs = []
     mock_agent.subagents.list_runs.return_value = []
-    mock_agent.subagents.create_run.side_effect = _create_run_sequence()
+    mock_agent.subagents.create_run.side_effect = _create_run_sequence(mock_agent)
     return mock_agent
 
 
@@ -73,7 +83,7 @@ def test_items_create_without_redundant_batch_goal():
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
     mock_agent = _agent()
-    mock_agent.subagents.create_run.side_effect = _create_run_sequence()
+    mock_agent.subagents.create_run.side_effect = _create_run_sequence(mock_agent)
     result = CreateSubagentsTool(mock_agent).execute(
         {
             "items": [
@@ -98,7 +108,7 @@ class TestCreateSubagentsItemsMode:
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = _agent()
-        mock_agent.subagents.create_run.side_effect = _create_run_sequence()
+        mock_agent.subagents.create_run.side_effect = _create_run_sequence(mock_agent)
         # 本用例只验创建参数；真实接纳使用 test_runner_start_admission 的临时账本。
         monkeypatch.setattr(
             "agent_py_agent.agent.agent_core.orchestration.background.dispatch._start_background_dispatch",
@@ -146,7 +156,7 @@ class TestCreateSubagentsItemsMode:
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = _agent()
-        mock_agent.subagents.create_run.side_effect = _create_run_sequence()
+        mock_agent.subagents.create_run.side_effect = _create_run_sequence(mock_agent)
 
         result = CreateSubagentsTool(mock_agent).execute({
             "goal": "并行完成游戏模块",
@@ -171,7 +181,7 @@ class TestCreateSubagentsItemsMode:
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = _agent(max_subagents=2)
-        mock_agent.subagents.create_run.side_effect = _create_run_sequence()
+        mock_agent.subagents.create_run.side_effect = _create_run_sequence(mock_agent)
 
         result = CreateSubagentsTool(mock_agent).execute({
             "goal": "并行研究三个市场维度",
@@ -191,7 +201,7 @@ class TestCreateSubagentsItemsMode:
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = _agent()
-        mock_agent.subagents.create_run.side_effect = _create_run_sequence()
+        mock_agent.subagents.create_run.side_effect = _create_run_sequence(mock_agent)
 
         result = CreateSubagentsTool(mock_agent).execute({
             "goal": "并行读取资料并形成证据报告",
@@ -219,7 +229,7 @@ class TestCreateSubagentsItemsMode:
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = _agent()
-        mock_agent.subagents.create_run.side_effect = _create_run_sequence()
+        mock_agent.subagents.create_run.side_effect = _create_run_sequence(mock_agent)
 
         result = CreateSubagentsTool(mock_agent).execute({
             "goal": "并行实现两个模块",
@@ -237,7 +247,7 @@ class TestCreateSubagentsItemsMode:
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = _agent()
-        mock_agent.subagents.create_run.side_effect = _create_run_sequence()
+        mock_agent.subagents.create_run.side_effect = _create_run_sequence(mock_agent)
 
         result = CreateSubagentsTool(mock_agent).execute({
             "goal": "并行复刻项目",
@@ -265,7 +275,7 @@ class TestCreateSubagentsItemsMode:
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = _agent()
-        mock_agent.subagents.create_run.side_effect = _create_run_sequence()
+        mock_agent.subagents.create_run.side_effect = _create_run_sequence(mock_agent)
         result = CreateSubagentsTool(mock_agent).execute({
             "goal": "并行编写报告",
             "items": [
@@ -282,7 +292,7 @@ class TestCreateSubagentsItemsMode:
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = _agent()
-        mock_agent.subagents.create_run.side_effect = _create_run_sequence()
+        mock_agent.subagents.create_run.side_effect = _create_run_sequence(mock_agent)
 
         result = CreateSubagentsTool(mock_agent).execute({
             "goal": "并行实现相邻模块",
@@ -354,7 +364,7 @@ class TestCreateSubagentsItemsMode:
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = _agent()
-        mock_agent.subagents.create_run.side_effect = _create_run_sequence()
+        mock_agent.subagents.create_run.side_effect = _create_run_sequence(mock_agent)
 
         result = CreateSubagentsTool(mock_agent).execute({
             "goal": "研究市场并保留子级计划",
@@ -377,7 +387,7 @@ class TestCreateSubagentsItemsMode:
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = _agent()
-        mock_agent.subagents.create_run.side_effect = _create_run_sequence()
+        mock_agent.subagents.create_run.side_effect = _create_run_sequence(mock_agent)
 
         result = CreateSubagentsTool(mock_agent).execute({
             "goal": "分析市场资料",
@@ -444,7 +454,7 @@ class TestCreateSubagentsItemsMode:
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = _agent()
-        mock_agent.subagents.create_run.side_effect = _create_run_sequence()
+        mock_agent.subagents.create_run.side_effect = _create_run_sequence(mock_agent)
         result = CreateSubagentsTool(mock_agent).execute({
             "goal": "分析印尼市场",
             "items": [{
@@ -731,7 +741,7 @@ def test_empty_items_list_falls_through_to_single_goal():
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
     mock_agent = _agent()
-    mock_agent.subagents.create_run.side_effect = _create_run_sequence()
+    mock_agent.subagents.create_run.side_effect = _create_run_sequence(mock_agent)
 
     result = CreateSubagentsTool(mock_agent).execute({
         "goal": "创建企业级协作平台的基础目录结构与入口文件",

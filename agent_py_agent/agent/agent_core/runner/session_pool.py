@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-# LLM: 负责 runner 租约及可选活动观察；观察失败不得中断心跳或改变任务状态。
-# 模块用途: 为正在执行的子代理续租，在同一条线程中检查长等待，不叠加后台计时器。
+# LLM: runner 租约沿原执行轮读取持久取消并转交本进程中断；可选活动观察失败不改变状态，联测独立/共享宿主。
+# 模块用途: 为子代理续租、传递精确停止和观察长等待，复用原心跳，不叠加后台计时器。
 import logging
 import os
 import threading
@@ -29,6 +29,7 @@ class RunnerSessionPoolLease:
     interval_seconds: float = 5.0
     activity_observer: Callable[[], None] | None = None
     attempt_id: str = ""
+    launch_id: str = ""
 
 
 # LLM: 第一次发布被 canonical fence 拒绝时不得进入执行体；后续心跳仍沿唯一窄写入口。
@@ -64,6 +65,7 @@ def runner_session_lease(lease: RunnerSessionPoolLease) -> Iterator[dict[str, ob
 # 函数用途: 生成一份可追溯到本轮执行的心跳记录。
 def _new_runner_session(lease: RunnerSessionPoolLease) -> dict[str, object]:
     from ...subagents.process_control import PROCESS_EPOCH, running_in_dispatch_subprocess
+    from ...tooling.process_registry import capture_process_birth_token
 
     now = time.time()
     return {
@@ -71,8 +73,10 @@ def _new_runner_session(lease: RunnerSessionPoolLease) -> dict[str, object]:
         "session_id": f"runsess-{lease.run_id}-{int(now * 1000)}-{os.getpid()}",
         "run_id": lease.run_id,
         "attempt_id": lease.attempt_id,
+        "launch_id": lease.launch_id,
         "worker_id": lease.worker_id or f"pid:{os.getpid()}",
         "worker_pid": os.getpid(),
+        "worker_birth_token": capture_process_birth_token(os.getpid()),
         # 记会话的进程实例身份:宿主已死回收据此判同代/异代——异代(重启换进程)记的
         # worker_pid 属旧进程不可信,只认心跳过期即回收(见 process_control.PROCESS_EPOCH)。
         "process_epoch": PROCESS_EPOCH,
@@ -88,18 +92,37 @@ def _new_runner_session(lease: RunnerSessionPoolLease) -> dict[str, object]:
     }
 
 
-# LLM: 心跳写入与活动诊断共享一条线程；诊断失败只记日志，不能停掉健康模型或导致心跳失活。
-# 函数用途: 续租并检查长等待，终态拒绝旧心跳后退出，不额外创建轮询器。
+# LLM: 同一心跳读取持久取消事实并在 worker 所在进程中转精确中断；自然收口不发中断，暂时读取错误仍可重试。
+# 函数用途: 续租、诊断长等待，并让独立进程收到针对原执行轮的停止，不额外创建轮询器。
 def _heartbeat_loop(lease: RunnerSessionPoolLease, session: dict[str, object], stop_event: threading.Event) -> None:
     interval = max(0.2, float(lease.interval_seconds or 5.0))
     while not stop_event.wait(interval):
-        if not _record_runner_session(lease, session, status="running"):
+        if _relay_runner_stop(lease):
             return
+        if not _record_runner_session(lease, session, status="running"):
+            # 控制可能在上次读取与本次窄写之间关闭权限；拒绝心跳不能让跨进程取消传递一起退出。
+            continue
         if lease.activity_observer is not None:
             try:
                 lease.activity_observer()
             except Exception:
                 logging.getLogger(__name__).warning("runner activity observation failed (run_id=%s)", lease.run_id, exc_info=True)
+
+
+# LLM: 持久权威已关闭才中断同进程命名 token；不会向共享 PID 发信号，缺 token 留给注册后的同一状态复核。
+# 函数用途: 将其它进程提交的停止转换为本 worker 的模型/工具协作中断。
+def _relay_runner_stop(lease: RunnerSessionPoolLease) -> bool:
+    from ...concurrency.interrupt import interrupt_by_name
+    from ...subagents.runner_control import runner_attempt_cancelled
+
+    try:
+        if not runner_attempt_cancelled(lease.manager, lease.run_id, lease.attempt_id):
+            return False
+    except Exception:
+        logging.getLogger(__name__).warning("runner 停止状态读取未确认 (run_id=%s)", lease.run_id, exc_info=True)
+        return False
+    interrupt_by_name(f"subagent-runner-attempt:{lease.run_id}:{lease.attempt_id}")
+    return True
 
 
 # LLM: 首次发布必须落盘后才能执行，旧代返回 False；周期心跳的瞬时错误保留原可重试语义。

@@ -149,13 +149,13 @@ def test_cancel_tree_broadcasts_attempt_interrupts_before_durable_closeout(
     monkeypatch,
 ):
     """慢模型分支先全部收到 attempt 中断，再串行写各节点终态。"""
-    from agent_py_agent.agent.agent_core.orchestration.tools import cancel as cancel_module
-    from agent_py_agent.agent.agent_core.orchestration.tools.cancel import (
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+    from agent_py_agent.agent.subagents import cancellation_hosts as cancel_module
+    from agent_py_agent.agent.subagents.cancellation import (
         CancelSubagentTaskRequest,
         cancel_subagent_tree,
     )
-    from agent_py_agent.agent.core import SimpleAgent
-    from agent_py_agent.agent.settings import AgentConfig
 
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
@@ -181,14 +181,14 @@ def test_cancel_tree_broadcasts_attempt_interrupts_before_durable_closeout(
         events.append(("signal", name))
         return True
 
-    original_abandon = agent.subagents.lifecycle.abandon_runner_attempt
+    original_mutate = agent.subagents.mutate
 
-    def abandon(run_id: str, attempt_id: str, *, reason: str):
+    def mutate(run_id: str, reducer, **kwargs):
         events.append(("close", run_id))
-        return original_abandon(run_id, attempt_id, reason=reason)
+        return original_mutate(run_id, reducer, **kwargs)
 
     monkeypatch.setattr(cancel_module, "interrupt_by_name", interrupt)
-    monkeypatch.setattr(agent.subagents.lifecycle, "abandon_runner_attempt", abandon)
+    monkeypatch.setattr(agent.subagents, "mutate", mutate)
 
     cancel_subagent_tree(
         agent,
@@ -367,12 +367,12 @@ def test_cancel_subagents_tool_allows_cancellation_after_same_run_retry_exhauste
 def test_conversation_user_stop_settles_authority_then_explicitly_reopens_same_run(
     tmp_path,
 ):
-    from agent_py_agent.agent.agent_core.orchestration.tools.cancel import (
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+    from agent_py_agent.agent.subagents.cancellation import (
         CancelSubagentTaskRequest,
         cancel_subagent_task,
     )
-    from agent_py_agent.agent.core import SimpleAgent
-    from agent_py_agent.agent.settings import AgentConfig
 
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
@@ -403,10 +403,6 @@ def test_conversation_user_stop_settles_authority_then_explicitly_reopens_same_r
 
 
 def test_cancel_subagents_tool_cannot_cancel_system_managed_audit_source_worker(tmp_path):
-    from agent_py_agent.agent.agent_core.orchestration.tools.cancel import (
-        CancelSubagentTaskRequest,
-        cancel_subagent_task,
-    )
     from agent_py_agent.agent.common.audit_activation import (
         AUDIT_SOURCE_ID_ATTR,
         AUDIT_SOURCE_OWNER_HOME_ATTR,
@@ -418,6 +414,10 @@ def test_cancel_subagents_tool_cannot_cancel_system_managed_audit_source_worker(
     from agent_py_agent.agent.conversation.authority import CONVERSATION_REQUEST_ID_ATTR
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings import AgentConfig
+    from agent_py_agent.agent.subagents.cancellation import (
+        CancelSubagentTaskRequest,
+        cancel_subagent_task,
+    )
     from agent_py_agent.agent.subagents.services.base import CreateRunParams
 
     agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
@@ -667,9 +667,9 @@ def test_cancel_subagents_tool_reports_corrupt_locator_without_private_recovery(
 
 
 def test_cancel_subagents_never_signals_gateway_pid_for_in_process_runner(tmp_path, monkeypatch):
-    from agent_py_agent.agent.agent_core.orchestration.tools import cancel
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings import AgentConfig
+    from agent_py_agent.agent.subagents import cancellation_hosts as cancel
     from agent_py_agent.agent.subagents.services.base import CreateRunParams
 
     agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
@@ -684,7 +684,7 @@ def test_cancel_subagents_never_signals_gateway_pid_for_in_process_runner(tmp_pa
     }
     agent.subagents.save(task)
     signalled: list[int] = []
-    monkeypatch.setattr(cancel, "terminate_pid_with_escalation", lambda pid: signalled.append(pid) or {})
+    monkeypatch.setattr("agent_py_agent.agent.subagents.process_control.terminate_pid_with_escalation", lambda pid: signalled.append(pid) or {})
 
     result = _execute_cancel_subagents(agent, {"run_id": task.id, "reason": "停止进程内任务"})
     payload = json.loads(result.output)
@@ -699,10 +699,10 @@ def test_cancel_subagents_never_signals_gateway_pid_for_in_process_runner(tmp_pa
     assert loaded.attributes["runner_session"]["ended_at"] > 0
 
 
-def test_cancel_subagents_signals_fresh_subprocess_runner_pid(tmp_path, monkeypatch):
-    from agent_py_agent.agent.agent_core.orchestration.tools import cancel
+def test_cancel_subagents_observes_host_without_killing_its_future_descendants(tmp_path, monkeypatch):
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings import AgentConfig
+    from agent_py_agent.agent.subagents import cancellation_hosts as cancel
     from agent_py_agent.agent.subagents.services.base import CreateRunParams
 
     agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
@@ -721,23 +721,23 @@ def test_cancel_subagents_signals_fresh_subprocess_runner_pid(tmp_path, monkeypa
         signalled.append(pid)
         return {"status": "terminated", "pid": pid, "escalated": False}
 
-    monkeypatch.setattr(cancel, "terminate_pid_with_escalation", _terminate)
+    monkeypatch.setattr("agent_py_agent.agent.subagents.process_control.terminate_pid_with_escalation", _terminate)
 
     result = _execute_cancel_subagents(agent, {"run_id": task.id, "reason": "停止独立进程"})
     payload = json.loads(result.output)
 
     assert result.ok is True
-    assert signalled == [5252]
-    assert payload["cancelled"][0]["pid_report"]["status"] == "terminated"
+    assert signalled == []
+    assert payload["cancelled"][0]["pid_report"]["status"] == "identity_unavailable"
 
 
 def test_cancel_subagents_fences_one_task_without_killing_shared_subprocess_host(
     tmp_path,
     monkeypatch,
 ):
-    from agent_py_agent.agent.agent_core.orchestration.tools import cancel
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings import AgentConfig
+    from agent_py_agent.agent.subagents import cancellation_hosts as cancel
     from agent_py_agent.agent.subagents.services.base import CreateRunParams
 
     agent = SimpleAgent(
@@ -771,7 +771,7 @@ def test_cancel_subagents_fences_one_task_without_killing_shared_subprocess_host
         signalled.append(pid)
         return {"status": "terminated", "pid": pid, "escalated": False}
 
-    monkeypatch.setattr(cancel, "terminate_pid_with_escalation", _terminate)
+    monkeypatch.setattr("agent_py_agent.agent.subagents.process_control.terminate_pid_with_escalation", _terminate)
 
     first = _execute_cancel_subagents(
         agent,
@@ -785,10 +785,7 @@ def test_cancel_subagents_fences_one_task_without_killing_shared_subprocess_host
     assert first.ok is True
     assert signalled == []
     assert first_payload["cancelled"][0]["pid_report"] == {
-        "status": "shared_host_cooperative",
-        "pid": 5353,
-        "escalated": False,
-        "shared_run_ids": [tasks[1].id],
+        "status": "identity_unavailable", "pid": 5353,
     }
     assert agent.subagents.load(tasks[0].id).status == "CANCELLED"
     assert agent.subagents.load(tasks[1].id).status == "RUNNING"
@@ -803,17 +800,17 @@ def test_cancel_subagents_fences_one_task_without_killing_shared_subprocess_host
     second_payload = json.loads(second.output)
 
     assert second.ok is True
-    assert signalled == [5353]
-    assert second_payload["cancelled"][0]["pid_report"]["status"] == "terminated"
+    assert signalled == []
+    assert second_payload["cancelled"][0]["pid_report"]["status"] == "identity_unavailable"
 
 
 def test_cancel_subagents_does_not_interrupt_shared_in_process_dispatch(
     tmp_path,
     monkeypatch,
 ):
-    from agent_py_agent.agent.agent_core.orchestration.tools import cancel
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings import AgentConfig
+    from agent_py_agent.agent.subagents import cancellation_hosts as cancel
     from agent_py_agent.agent.subagents.services.base import CreateRunParams
 
     agent = SimpleAgent(
@@ -867,7 +864,7 @@ def test_cancel_subagents_does_not_interrupt_shared_in_process_dispatch(
     assert interrupted == []
     assert (
         first_payload["cancelled"][0]["pid_report"]["thread_interrupt"]
-        == "shared_host_cooperative"
+        == "not_found"
     )
     assert agent.subagents.load(tasks[1].id).status == "RUNNING"
 
@@ -880,16 +877,16 @@ def test_cancel_subagents_does_not_interrupt_shared_in_process_dispatch(
     )
 
     assert second.ok is True
-    assert interrupted == ["my-agent-launch-shared"]
+    assert interrupted == []
 
 
 def test_cancel_subagents_interrupts_exact_attempt_without_stopping_shared_host(
     tmp_path,
     monkeypatch,
 ):
-    from agent_py_agent.agent.agent_core.orchestration.tools import cancel
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings import AgentConfig
+    from agent_py_agent.agent.subagents import cancellation_hosts as cancel
     from agent_py_agent.agent.subagents.services.base import CreateRunParams
 
     agent = SimpleAgent(
@@ -956,9 +953,9 @@ def test_cancel_subagents_signals_exact_attempt_before_persisting_abandon(
     tmp_path,
     monkeypatch,
 ):
-    from agent_py_agent.agent.agent_core.orchestration.tools import cancel
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings import AgentConfig
+    from agent_py_agent.agent.subagents import cancellation_hosts as cancel
     from agent_py_agent.agent.subagents.services.base import CreateRunParams
 
     agent = SimpleAgent(
@@ -984,18 +981,18 @@ def test_cancel_subagents_signals_exact_attempt_before_persisting_abandon(
     }
     agent.subagents.save(task)
     observed: list[str] = []
-    original_abandon = agent.subagents.lifecycle.abandon_runner_attempt
+    original_mutate = agent.subagents.mutate
 
     def interrupt(name: str) -> bool:
         observed.append(f"interrupt:{name}")
         return True
 
-    def abandon(run_id: str, attempt_id: str, *, reason: str = ""):
-        observed.append(f"abandon:{run_id}:{attempt_id}")
-        return original_abandon(run_id, attempt_id, reason=reason)
+    def mutate(run_id: str, reducer, **kwargs):
+        observed.append(f"close:{run_id}")
+        return original_mutate(run_id, reducer, **kwargs)
 
     monkeypatch.setattr(cancel, "interrupt_by_name", interrupt)
-    monkeypatch.setattr(agent.subagents.lifecycle, "abandon_runner_attempt", abandon)
+    monkeypatch.setattr(agent.subagents, "mutate", mutate)
 
     result = _execute_host_cancel_subagents(
         agent,
@@ -1005,15 +1002,15 @@ def test_cancel_subagents_signals_exact_attempt_before_persisting_abandon(
     assert result.ok is True
     assert observed == [
         f"interrupt:subagent-runner-attempt:{task.id}:attempt-order",
-        f"abandon:{task.id}:attempt-order",
+        f"close:{task.id}",
     ]
     assert agent.subagents.load(task.id).status == "CANCELLED"
 
 
 def test_cancel_subagents_missing_runner_topology_fails_closed(tmp_path, monkeypatch):
-    from agent_py_agent.agent.agent_core.orchestration.tools import cancel
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings import AgentConfig
+    from agent_py_agent.agent.subagents import cancellation_hosts as cancel
     from agent_py_agent.agent.subagents.services.base import CreateRunParams
 
     agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
@@ -1026,7 +1023,7 @@ def test_cancel_subagents_missing_runner_topology_fails_closed(tmp_path, monkeyp
     task.attributes = {**dict(task.attributes or {}), "pid": 6262, "runner_session": session}
     agent.subagents.save(task)
     signalled: list[int] = []
-    monkeypatch.setattr(cancel, "terminate_pid_with_escalation", lambda pid: signalled.append(pid) or {})
+    monkeypatch.setattr("agent_py_agent.agent.subagents.process_control.terminate_pid_with_escalation", lambda pid: signalled.append(pid) or {})
 
     result = _execute_cancel_subagents(agent, {"run_id": task.id, "reason": "停止旧版会话"})
     payload = json.loads(result.output)
@@ -1037,9 +1034,9 @@ def test_cancel_subagents_missing_runner_topology_fails_closed(tmp_path, monkeyp
 
 
 def test_cancel_subagents_missing_runner_session_ignores_legacy_pid(tmp_path, monkeypatch):
-    from agent_py_agent.agent.agent_core.orchestration.tools import cancel
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings import AgentConfig
+    from agent_py_agent.agent.subagents import cancellation_hosts as cancel
     from agent_py_agent.agent.subagents.services.base import CreateRunParams
 
     agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
@@ -1050,7 +1047,7 @@ def test_cancel_subagents_missing_runner_session_ignores_legacy_pid(tmp_path, mo
     task.attributes = {**dict(task.attributes or {}), "pid": 7373, "runner_process": {"pid": 7474}}
     agent.subagents.save(task)
     signalled: list[int] = []
-    monkeypatch.setattr(cancel, "terminate_pid_with_escalation", lambda pid: signalled.append(pid) or {})
+    monkeypatch.setattr("agent_py_agent.agent.subagents.process_control.terminate_pid_with_escalation", lambda pid: signalled.append(pid) or {})
 
     result = _execute_cancel_subagents(agent, {"run_id": task.id, "reason": "停止旧记录"})
     payload = json.loads(result.output)
@@ -1061,9 +1058,9 @@ def test_cancel_subagents_missing_runner_session_ignores_legacy_pid(tmp_path, mo
 
 
 def test_cancel_subagents_stale_subprocess_session_never_signals_reused_pid(tmp_path, monkeypatch):
-    from agent_py_agent.agent.agent_core.orchestration.tools import cancel
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings import AgentConfig
+    from agent_py_agent.agent.subagents import cancellation_hosts as cancel
     from agent_py_agent.agent.subagents.services.base import CreateRunParams
 
     agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
@@ -1076,7 +1073,7 @@ def test_cancel_subagents_stale_subprocess_session_never_signals_reused_pid(tmp_
     task.attributes = {**dict(task.attributes or {}), "pid": 8484, "runner_session": session}
     agent.subagents.save(task)
     signalled: list[int] = []
-    monkeypatch.setattr(cancel, "terminate_pid_with_escalation", lambda pid: signalled.append(pid) or {})
+    monkeypatch.setattr("agent_py_agent.agent.subagents.process_control.terminate_pid_with_escalation", lambda pid: signalled.append(pid) or {})
 
     result = _execute_cancel_subagents(agent, {"run_id": task.id, "reason": "停止过期记录"})
     payload = json.loads(result.output)

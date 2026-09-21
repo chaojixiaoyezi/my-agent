@@ -95,13 +95,13 @@ class _GatewayRequestRecord:
     linked_request: _GatewayRequestRecord | None = None
 
 
-# LLM: 只承接本次任务锁内的主链停止结果；错误保留固定清单，不能据此声称整棵子树已停止。
+# LLM: 承接本次控制锁内的整树停止准备；错误保留固定清单，接纳不等于资源已退出。
 # 类用途: 让控制应答与后台清理共享同一份准备结果，包括部分失败。
 @dataclass(frozen=True)
 class _MainTaskStop:
     task_link: object | None = None
     resources: object | None = None
-    goal_pause_error: str = ""
+    preparation_errors: tuple[str, ...] = ()
 
 
 # LLM: A receipt state comes only from the owner-scoped ConversationStore. It lets control
@@ -491,7 +491,11 @@ def _execute_audit_control(
                 continue
             stopped_request_ids.append(request_id)
             interrupt_by_name(conversation_request_interrupt_name(request_id))
-            _cancel_request_execution(owner_agent, request_id)
+            from ..conversation.task_resources import freeze_task_resources
+
+            with owner_agent.subagents.creation_guard():
+                resources = freeze_task_resources(owner_agent, None, request_id)
+            _cancel_request_execution(request_id, resources=resources)
         thread = store.threads.get_or_create(
             {
                 "canonical_user_id": scope.user_id,
@@ -1927,9 +1931,11 @@ def _stop_unpromoted_main(
         if owner_agent is None or binding_error or not binding or _linked_conversation_task_id(active):
             raise ValueError("本请求缺少可确认的主执行身份")
         store = owner_agent.conversation_store
-        with store.tasks.transition_guard(binding["task_id"]):
-            from ..conversation.task_resources import close_main_task_authority
-            from ..tooling.process_resource_stop import freeze_process_stop
+        with store.tasks.transition_guard(binding["task_id"]), owner_agent.subagents.creation_guard():
+            from ..conversation.task_resources import (
+                close_main_task_authority,
+                freeze_task_resources,
+            )
 
             thread = store.threads.resolve(
                 channel=scope.channel, channel_conversation_id=scope.conversation_id, channel_user_id=scope.user_id,
@@ -1947,10 +1953,11 @@ def _stop_unpromoted_main(
             )
             if selected is None:
                 raise ValueError("主执行链未受管理，资源归属无法确认")
-            resources = freeze_process_stop(selected)
-        run_ids = _related_control_run_ids(owner_agent, binding["task_id"], request_id)
-        _cancel_request_execution(owner_agent, request_id, run_ids=run_ids, resources=resources)
-        if resources.background_freeze_error or resources.pty_request_error:
+            resources = freeze_task_resources(
+                owner_agent, selected, request_id, related_request_ids=(binding["task_id"],),
+            )
+        _cancel_request_execution(request_id, resources=resources)
+        if resources.unconfirmed:
             raise ValueError("主资源冻结存在未确认项")
     except (OSError, RuntimeError, TypeError, ValueError, KeyError):
         return ConversationControlResult(
@@ -2056,7 +2063,6 @@ def _stop_active_task(
         )
     try:
         owner_agent = _request_agent_for_scope(base_agent, scope)
-        store = owner_agent.conversation_store
         prepared = _prepare_main_task_stop(owner_agent, active, task_id, scope)
     except Exception:
         if linked_marked:
@@ -2071,25 +2077,13 @@ def _stop_active_task(
         )
     if prepared.task_link is None:
         return ConversationControlResult("stop", False, "任务状态已经变化，未停止新的执行轮。", request_id=task_id)
-    run_ids = _related_control_run_ids(owner_agent, task_id, linked_request_id)
-    for run_id in run_ids:
-        try:
-            store.tasks.update_status(
-                {"task_id": run_id, "status": "cancelled", "expected_status": "active"}
-            )
-        except Exception:
-            continue
     _interrupt_task_registry_record(owner_agent, task_id)
     if linked_request_id:
         interrupt_by_name(conversation_request_interrupt_name(linked_request_id))
     _cancel_request_execution(
-        owner_agent,
-        task_id,
-        run_ids=run_ids,
-        resources=prepared.resources,
+        task_id, resources=prepared.resources,
     )
-    if prepared.goal_pause_error or (prepared.resources is not None and (
-            prepared.resources.background_freeze_error or prepared.resources.pty_request_error)):
+    if prepared.preparation_errors or (prepared.resources is not None and prepared.resources.unconfirmed):
         return ConversationControlResult(
             "stop", False, "原执行轮已关闭，部分资源停止仍未确认；已选中的资源继续清理。",
             request_id=task_id, delivery_status="unknown", error_code="TASK_RESOURCE_STOP_UNCONFIRMED",
@@ -2122,7 +2116,7 @@ def _continue_goal_after_turn_interrupt(
         return True
 
 
-# LLM: 沿 Goal→task→Gateway T 顺序；精确执行权确认后才发任务信号，Goal resume 不能插入停止准备。
+# LLM: 沿主 Goal→task 短读 Gateway T，释放 T 后进入 creation→子 Goal；精确关闭权限并固定树，不在锁内等进程退出。
 # 函数用途: 关闭主任务准入、冻结资源并暂停续跑；清理在所有控制锁之外，部分错误不丢清单。
 def _prepare_main_task_stop(
     owner_agent: object,
@@ -2135,40 +2129,56 @@ def _prepare_main_task_stop(
         active.payload.get("conversation_task_link_status") or "active"
     ).strip().lower()
     thread_id = str(active.payload.get("conversation_thread_id") or "")
+    preparation_errors = []
     with store.goals.transition_guard(thread_id):
         with store.tasks.transition_guard(task_id):
             current = store.tasks.load(task_id)
             if current is None or current.status != expected_status or current.thread_id != thread_id:
                 return _MainTaskStop()
-            from ..conversation.task_resources import close_main_task_authority
-            from ..tooling.process_resource_stop import freeze_process_stop
-
-            resource_scope = close_main_task_authority(
-                getattr(getattr(owner_agent, "subagents", None), "runtime_db", None),
-                owner_home=getattr(getattr(owner_agent, "home_paths", None), "owner_home_dir", ""),
-                task_id=task_id, thread_id=thread_id,
-                binding=_fresh_stop_runtime_binding(active.linked_request, scope),
+            from ..conversation.task_resources import (
+                close_main_task_authority,
+                freeze_task_resources,
             )
-            interrupt_by_name(conversation_request_interrupt_name(task_id))
-            stopped = store.tasks.update_status(
-                {"task_id": task_id, "status": "interrupted", "expected_status": expected_status}
-            )
-            if stopped is None:
-                raise ValueError("停止时任务状态发生冲突")
-            resources = freeze_process_stop(resource_scope) if resource_scope is not None else None
-            if resource_scope is None:
-                from ..tooling.pty_sessions import pty_session_registry
 
-                pty_session_registry.request_stop(
+            binding = _fresh_stop_runtime_binding(active.linked_request, scope)
+            with owner_agent.subagents.creation_guard():
+                resource_scope = close_main_task_authority(
+                    getattr(getattr(owner_agent, "subagents", None), "runtime_db", None),
                     owner_home=getattr(getattr(owner_agent, "home_paths", None), "owner_home_dir", ""),
-                    thread_id=thread_id, task_id=task_id,
+                    task_id=task_id, thread_id=thread_id,
+                    binding=binding,
                 )
-        goal_error = ""
+                interrupt_by_name(conversation_request_interrupt_name(task_id))
+                stopped = store.tasks.update_status(
+                    {"task_id": task_id, "status": "interrupted", "expected_status": expected_status}
+                )
+                if stopped is None:
+                    raise ValueError("停止时任务状态发生冲突")
+                resources = freeze_task_resources(
+                    owner_agent, resource_scope, task_id, related_request_ids=(_record_id(active.linked_request),),
+                )
+                if resource_scope is None:
+                    preparation_errors.extend(_request_unmanaged_pty_stop(owner_agent, thread_id, task_id))
         try:
             _pause_goal_for_stopped_task(store, stopped)
         except (OSError, RuntimeError, ValueError) as exc:
-            goal_error = type(exc).__name__
-    return _MainTaskStop(stopped, resources, goal_error)
+            preparation_errors.append(f"goal_pause:{type(exc).__name__}")
+    return _MainTaskStop(stopped, resources, tuple(preparation_errors))
+
+
+# LLM: 无受管主链时保留原精确 task/thread PTY 入口；异常只能标记未确认，不能丢弃已冻结的孩子清单。
+# 函数用途: 请求回收旧本地模式的原终端，把失败交回停止应答，后续清理仍继续。
+def _request_unmanaged_pty_stop(owner_agent: object, thread_id: str, task_id: str) -> tuple[str, ...]:
+    from ..tooling.pty_sessions import pty_session_registry
+
+    try:
+        pty_session_registry.request_stop(
+            owner_home=getattr(getattr(owner_agent, "home_paths", None), "owner_home_dir", ""),
+            thread_id=thread_id, task_id=task_id,
+        )
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        return (f"pty_stop:{type(exc).__name__}",)
+    return ()
 
 
 # LLM: 调用方已持任务锁；请求锁只短读本请求和原运输代次，不从过时 discovery payload 取得执行权。
@@ -2206,20 +2216,6 @@ def _stop_linked_live_request(
     return linked_request_id, marked
 
 
-def _related_control_run_ids(
-    owner_agent: object,
-    task_id: str,
-    linked_request_id: str,
-) -> list[str]:
-    try:
-        run_ids = owner_agent.subagent_run_ids_for_request(task_id)
-        if linked_request_id:
-            run_ids.extend(owner_agent.subagent_run_ids_for_request(linked_request_id))
-        return list(dict.fromkeys(run_ids))
-    except Exception:
-        return []
-
-
 # LLM: 调用者已持 Goal 锁且释放任务锁；只暂停精确绑定的 active Goal，错误须交还控制回执。
 # 函数用途: `/stop` 完成资源冻结后暂停同一目标，保持与显式恢复的先后顺序。
 def _pause_goal_for_stopped_task(store: object, task_link: object) -> None:
@@ -2248,55 +2244,14 @@ def _interrupt_task_registry_record(owner_agent: object, task_id: str) -> None:
         return
 
 
-# LLM: 普通后台只消费控制临界区交来的固定清单；子树在 creation_guard 内沿原谱系取消，不重扫主任务资源。
-# 函数用途: 在控制锁外清理主任务已冻结的资源，并取消原请求派生的子代理。
-def _cancel_request_execution(
-    owner_agent: object,
-    request_id: str,
-    *,
-    run_ids: list[str] | None = None,
-    resources: object | None = None,
-) -> None:
-    # LLM: 子树只沿原请求谱系选择；主进程清理在进入 creation_guard 前单独完成。
-    # 函数用途: 收回创建锁内确认的子代理谱系。
-    def cancel() -> None:
-        try:
-            supplied = [str(item).strip() for item in list(run_ids or []) if str(item).strip()]
-            discovered = [
-                str(item).strip()
-                for item in owner_agent.subagent_run_ids_for_request(request_id)
-                if str(item).strip()
-            ]
-            selected_run_ids = list(dict.fromkeys([*supplied, *discovered]))
-            owner_agent.cancel_request_subagents(
-                request_id,
-                reason="conversation_user_stop",
-                run_ids=selected_run_ids,
-            )
-        except Exception:
-            return
-
-    # LLM: 耗时进程清理不持任务锁、资源选择锁或子代理创建锁；只消费控制入口冻结的句柄。
-    # 函数用途: 先清理固定主资源，再沿原创建协调边界收口子代理。
-    def reconcile_after_creation() -> None:
-        if resources is not None:
-            from ..tooling.process_resource_stop import cleanup_process_stop
-
-            cleanup_process_stop(resources)
-        guard = getattr(getattr(owner_agent, "subagents", None), "creation_guard", None)
-        if not callable(guard):
-            cancel()
-            return
-        try:
-            with guard():
-                cancel()
-        except Exception:
-            return
+# LLM: 异步 worker 不再接收 agent 或任何查询选择器；只能消费在原控制锁内准备好的整树资源。
+# 函数用途: 锁外清理原主任务及其原孩子，恢复后新建的任务不会被旧停止请求纳入。
+def _cancel_request_execution(request_id: str, *, resources: object) -> None:
+    from ..conversation.task_resources import cleanup_task_resources
 
     threading.Thread(
-        target=reconcile_after_creation,
-        name=f"cancel-{request_id}",
-        daemon=True,
+        target=cleanup_task_resources, args=(resources,),
+        name=f"cancel-{request_id}", daemon=True,
     ).start()
 
 

@@ -154,7 +154,9 @@ allow 与 forbidden 同时命中时按最具体路径条目决定，同层由 fo
 - 用户从 TUI/Web 发给运行 child 的普通输入也走同一消息箱，但 Gateway 必须在写账前把消息绑定到
   canonical 当前 `AgentAttempt`。只有 `pending/running` attempt 可接收；执行片切换期间明确拒绝并保留
   用户输入，不能落一条没有 `expected_turn_id` 的消息，也不能因校验失败杀掉 child。
-- 停止：`cancel_subagents(run_id|run_ids, reason)`，只停止点名的直属 child。
+- 停止：`cancel_subagents(run_id|run_ids, reason)`，模型只能点名直属 child，宿主按已授权分支固定原后代和所属资源。
+  当前源码在原创建锁内关闭权限并冻结清单，再锁外清理；终态历史、后台退出、PTY 请求和 runner 宿主退出分别核对。
+  不按整个会话或共享 PID 清理，不重新选择恢复后的新孩子。源码尚未部署，实际 TUI 137 失败与后续验收见 TESTS。
 - 权限：`resolve_capability_requests(run_id, decision, reason, ...)`，只裁决直属 child。
 - 权限裁决只读宿主提供的 exact `capability_request` 与 `parent_tool_authority`。根 child 的上限来自创建当轮
   不可变 Tool Gateway 快照，孙代理来自直属父 run 当前 execution context；模型不能用“我好像没有这个工具”

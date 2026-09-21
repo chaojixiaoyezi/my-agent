@@ -10,13 +10,15 @@ from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 
-from ..agent_core.orchestration.tools.cancel import (
-    CancelSubagentTaskRequest,
-    cancel_subagent_tree,
-)
 from ..runtime_db.operations import RuntimeConflictError, RuntimeExecutionBusyError
 from ..runtime_errors import DataCorruptionError, runtime_error_report
 from ..subagents.authorization_gate import OperationRequest, authorize_operation
+from ..subagents.cancellation import (
+    CancelSubagentTaskRequest,
+    cancel_subagent_tree,
+    cleanup_subagent_tree,
+    prepare_subagent_stops,
+)
 from ..subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
 from .agent_activity import conversation_agent_view
 from .agent_tool_approval import resolve_agent_tool_approval
@@ -642,9 +644,8 @@ def _resume_agent_for_guidance(
     }
 
 
-# LLM: Stop reuses the canonical cancellation primitive after the same subtree
-# authorization. A terminal target is reported idempotently without touching it.
-# 函数用途: 按用户 Esc 请求停止当前正在查看的子代理。
+# LLM: 先核精确子树授权，已终态也可能有遗留资源；业务状态由取消域保留，不能直接早退略过资源。
+# 函数用途: 按用户明确控制停止当前子代理分支，并返回真实清理结果。
 def stop_agent(
     agent: object,
     *,
@@ -661,13 +662,6 @@ def stop_agent(
     stable_id = str(operation_id or "").strip()
     if not stable_id:
         raise AgentControlError(400, "AGENT_STOP_ID_REQUIRED", "停止操作缺少 operation_id。")
-    if _task_is_terminal(task):
-        return {
-            "ok": True,
-            "operation_id": stable_id,
-            "run_id": str(getattr(task, "id", "") or ""),
-            "status": "already_terminal",
-        }
     try:
         result = _cancel_user_controlled_agent_tree(agent, task, parent_thread=_thread)
     except OSError as exc:
@@ -677,19 +671,16 @@ def stop_agent(
             "停止请求暂时无法确认；系统没有自动重复执行。",
         ) from exc
     return {
-        "ok": True,
+        "ok": result.get("ok", False),
         "operation_id": stable_id,
         "run_id": str(getattr(task, "id", "") or ""),
-        "status": "cancelled",
+        "status": "cancelled" if result.get("cancel_status") == "CANCELLED" else "preserved",
         "result": result,
     }
 
 
-# LLM: Interactive clients acknowledge an authorized stop after one background worker has been
-# admitted, not after every canonical projection/index has flushed. The exact owner/run pair is
-# the in-process dedupe key; the worker still uses the same synchronous canonical cancellation
-# primitive as model tools, and a later view reads only durable lifecycle state.
-# 函数用途: 让 TUI/Web 快速接收停止请求，在后台完成可能较慢的终态、索引和会话收口。
+# LLM: 接纳前在 C 内固定原树与资源；异步只做清理和父级通知，同 run 去重不授予读取新代次的权限。
+# 函数用途: 让 TUI/Web 在原停止准备完成后立即返回，不等待慢进程退出。
 def enqueue_agent_stop(
     agent: object,
     *,
@@ -707,13 +698,6 @@ def enqueue_agent_stop(
     if not stable_id:
         raise AgentControlError(400, "AGENT_STOP_ID_REQUIRED", "停止操作缺少 operation_id。")
     stable_run_id = str(getattr(task, "id", "") or "").strip()
-    if _task_is_terminal(task):
-        return {
-            "ok": True,
-            "operation_id": stable_id,
-            "run_id": stable_run_id,
-            "status": "already_terminal",
-        }
     owner_id = str(
         getattr(getattr(agent, "home_paths", None), "owner_id", "") or ""
     ).strip()
@@ -724,23 +708,29 @@ def enqueue_agent_stop(
             _AGENT_STOP_ACTIVE.add(active_key)
 
     if not already_active:
+        try:
+            batch = prepare_subagent_stops(agent, [CancelSubagentTaskRequest(
+                task, "用户从代理详情页按 Esc 停止", source="user_agent_control",
+            )])
+        except Exception as exc:
+            with _AGENT_STOP_LOCK:
+                _AGENT_STOP_ACTIVE.discard(active_key)
+            raise AgentControlError(503, "AGENT_STOP_UNAVAILABLE", "停止准备未确认，请重新查看状态。") from exc
 
-        # LLM: The worker owns the exact task snapshot authorized above. Any exception leaves the
-        # durable run nonterminal and clears only the ephemeral dedupe key, so a later explicit
-        # user action may retry; the client never performs an automatic duplicate cancellation.
-        # 函数用途: 后台执行一次真实取消，并在结束后释放同一 run 的并发停止占位。
+        # LLM: worker 只消费已固定 batch；父通知在控制锁外，finally 释放本次临时去重键。
+        # 函数用途: 清理用户点名的原分支，并把实际取消结果交给直属父级。
         def cancel() -> None:
             try:
-                _cancel_user_controlled_agent_tree(agent, task, parent_thread=_thread)
+                result = cleanup_subagent_tree(batch, stable_run_id)
+                if result.get("cancel_status") == "CANCELLED":
+                    _deliver_stopped_agent_to_parent(agent, stable_run_id, parent_thread=_thread)
             finally:
                 with _AGENT_STOP_LOCK:
                     _AGENT_STOP_ACTIVE.discard(active_key)
 
-        threading.Thread(
-            target=cancel,
-            name=f"agent-stop:{stable_run_id}",
-            daemon=True,
-        ).start()
+        threading.Thread(target=cancel, name=f"agent-stop:{stable_run_id}", daemon=True).start()
+        if batch.unconfirmed:
+            raise AgentControlError(503, "AGENT_STOP_UNCONFIRMED", "部分停止准备未确认；已选中的资源继续清理。")
 
     return {
         "ok": True,
@@ -774,10 +764,9 @@ def _cancel_user_controlled_agent_tree(
     run_id = str(getattr(task, "id", "") or "").strip()
     return {
         **result,
-        "parent_delivery": _deliver_stopped_agent_to_parent(
-            agent,
-            run_id,
-            parent_thread=parent_thread,
+        "parent_delivery": (
+            _deliver_stopped_agent_to_parent(agent, run_id, parent_thread=parent_thread)
+            if result.get("cancel_status") == "CANCELLED" else {"status": "preserved"}
         ),
     }
 

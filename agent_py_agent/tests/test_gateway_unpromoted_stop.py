@@ -96,7 +96,7 @@ def test_stop_reads_publication_after_discovery_and_only_cleans_frozen_main(hot,
             cleaned.set()
 
     monkeypatch.setattr(resources, "cleanup_process_stop", cleanup)
-    monkeypatch.setattr(hot.agent, "cancel_request_subagents", Mock())
+
     try:
         result = _stop(hot)
         assert result.ok and result.delivery_status == "accepted"

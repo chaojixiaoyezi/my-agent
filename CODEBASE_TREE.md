@@ -111,6 +111,9 @@ agent_py_agent/
 |   |   |-- manager.py                  # 子代理 root manager：初始化、基础生命周期、服务组合
 |   |   |-- coordination.py             # 原创建文件锁的同线程重入，统一创建与执行轮短事务
 |   |   |-- runner_start.py             # 准确 pending 接纳与原 launch 条件提交，共用创建锁
+|   |   |-- cancellation.py             # 原子树权限关闭和资源冻结，锁外仅清理固定批次
+|   |   |-- cancellation_hosts.py       # 原执行轮协作中断与宿主退出只读观察，不杀共享或接续进程
+|   |   |-- runner_control.py           # 原 RuntimeDB/canonical 取消判据，供心跳和执行前复核
 |   |   |-- kernel.py                   # 子代理树快照
 |   |   |-- manager_work_orders.py      # 工单路径、默认文件、校验
 |   |   |-- models.py                   # 子代理数据模型
@@ -257,7 +260,7 @@ agent_py_agent/
 |   |   |-- background_execution.py     # 后台单片执行、Compact 重试、原生历史保存与具名结果
 |   |   |-- background_delivery.py      # 后台投递、canonical 回复提交、整封冻结与耐久去重
 |   |   |-- control_commands.py        # CLI/IM 共用 typed slash dispatcher、task command 与状态渲染
-|   |   |-- task_resources.py          # 从正式主链绑定关闭权限并交回资源范围，不推断热请求缺失身份
+|   |   |-- task_resources.py          # 从正式主链绑定关闭权限并组合固定子树清单，清理不再重新查树
 |   |   |-- local_run_control.py       # direct 单次调用的身份发布与中断门，沿原任务锁冻结主资源
 |   |   |-- goal_tools.py              # 默认可见的持续目标创建、读取与精确收口
 |   |   |-- goal_binding.py            # 当前代理及直属下级的精确目标身份解析，拒绝借用父目标
@@ -364,7 +367,9 @@ agent_py_agent/
 |       |-- factory.py                 # 显式配置构造唯一后端，缺配置判据与调度共享
 |       `-- tool_protocol_adapter.py   # native 事件或显式完整 text 帧到 canonical ToolCall 的唯一适配口
 |-- tests/                             # 单元、集成、真实链路回归
-|   |-- test_subagent_process_control.py # 子代理停止覆盖新会话后代、升级终止、独立宿主保留及未确认回执
+|   |-- test_subagent_process_control.py # 公共进程树终止覆盖后代、升级、宿主保留及未确认回执
+|   |-- test_subagent_resource_stop.py  # 固定原子树、终态资源、恢复隔离及 Goal/creation 锁序
+|   |-- test_runner_stop_relay.py       # 独立 Python 宿主心跳转交精确取消、共享隔离及旧配置投影
 |   |-- test_runtime_module_boundaries.py # 公共后端合同和纯策略不加载执行器/HTTP 的导入边界回归
 |   |-- test_computer_text_input.py     # 文本事件 UTF-16、显式替换与不支持字符零副作用回归
 |   |-- test_subagent_activity_diagnostics.py # 阶段提醒、慢流不误杀、执行代与消息去重回归
@@ -468,7 +473,10 @@ docs/
 ### 关键文件说明
 
 - `agent_py_agent/agent/runtime_db/run_cancellation.py`：在原 RuntimeDB 上核对 task/run/agent run/attempt 四个身份并关闭执行权；原 UNKNOWN 不恢复、不释放锁，旧控制不能追随新的执行轮。
-- `agent_py_agent/agent/conversation/task_resources.py`：主链资源停止的身份适配；热请求必须带正式运行绑定，无热请求才读取持久任务唯一主链，不从请求编号猜 attempt。
+- `agent_py_agent/agent/conversation/task_resources.py`：主链身份适配与整任务固定清单；热请求带正式绑定，无热请求才读取唯一主链，组合原子树后锁外清理，不重新选择资源。
+- `agent_py_agent/agent/subagents/cancellation.py`：原创建事务内选择后代、关闭原权限并冻结资源；模型和用户控制共用，业务终态与资源退出分别保留。
+- `agent_py_agent/agent/subagents/cancellation_hosts.py`：精确 attempt 中断及冻结宿主身份的只读观察；PID/launch 不构成整棵进程树的取消许可。
+- `agent_py_agent/agent/subagents/runner_control.py`：原执行轮持久取消的唯一读取判据；session 心跳与模型前复核共用，不创建第二份状态。
 - `agent_py_agent/agent/conversation/local_run_control.py`：plain/TUI worker 每条消息的临时控制句柄；复用运行绑定和任务晋升确认接口，执行权仍归 RuntimeDB，旧句柄不覆盖下一条消息。
 - `agent_py_agent/agent/tooling/process_resource_stop.py`：固定后台停止回执与 PTY 请求分开记录；提交后的 PTY 失败不丢清单，清理不重新扫任务，也不把异步请求当成全部退出。
 - `agent_py_agent/agent/tooling/process_scope.py`：后台访问身份与 PTY 执行身份的唯一类型定义，缺失的任务归属不从访问回退或工作目录推断；不持有资源或执行取消。

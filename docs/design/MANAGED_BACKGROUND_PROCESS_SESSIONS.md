@@ -242,17 +242,34 @@ CLI 缺字段、重复、范围不完整或与 watch 混用会在构造宿主前
 managed 最终准入仍拒绝；不能把未管理执行伪装成受管 DB 执行。无数据库模式的完整停止/恢复尚未获得本片保证。
 没有新增配置开关或模型工具参数；这是原启动和取消边界的修复。
 
-尚未完成：完整子树及已终态孩子遗留后台资源的停止接线。
-下一片须固定原子树范围及各自执行权，不能在异步清理时重新发现后来恢复的新孩子；终态孩子原业务结果不因资源清理重写。
+源码已接入、尚未发布：子代理取消拆为锁内准备与锁外清理，领域入口归 `subagents/cancellation.py`。准备阶段在原 creation guard 内固定整个原子树，
+逐项关闭原 RuntimeDB 权限，保存控制状态并冻结已有后台/PTY 清单；异步清理只消费这些固定对象，
+不再持有 agent 或重新查询当前孩子。DONE/FAILED/UNKNOWN 保留原业务结果及 UNKNOWN 的执行锁。
+主任务控制在原 Goal/task 锁内进入同一创建边界，主资源和孩子在释放控制锁前一并准备。
+runner 不以宿主进程树为取消单位：即便 launch 批次全被选中，原进程也可能已经启动父级接续、新轮或同进程任务。
+`cancellation_hosts.py` 只转交本进程 exact attempt 中断，并按冻结 launch/attempt/出生标识只读观察原宿主退出；
+`runner_control.py` 读取原 RuntimeDB/canonical 取消事实，已有 session 心跳在 worker 自己的进程中转交中断。
+注册中断令牌后、进入模型前再次核对，覆盖心跳先于令牌登记的窗口；自然 done/failed 不打断正常结果提交。
+取消状态读取后若心跳条件写入被拒绝，原循环继续检查取消；不能因这一交错提前退出而漏掉跨进程中断。
+宿主尚存活如实返回 `host_exited=False`，缺身份保持未确认；停止请求受理、后台确认和 PTY 请求不等于整树已退出。
+清理结果中后台退出未确认会保留失败，单项异常不丢掉其它已冻结成员。
+
+已参考本地 Codex `578c1b2` 的 `core/src/agent/control/legacy.rs::close_agent/shutdown_agent_tree`
+和 `control.rs::live_thread_spawn_descendants`：先持久关闭入口，再固定后代集合执行关闭。只做相关源码核读，未运行参考项目测试。
+本项目仍复用自己的执行权、进程账本和原锁，不照搬 Rust 线程或创建第二套状态。
+开发验证见 TESTS；未部署、未增加实际 TUI，不能作为 TUI 137 修复通过的证据。
+
+发布阻断仍在：pending 插话重放可能在确认旧消息已消费前多预留一轮；显式无数据库模式的空预留身份可能让迟到 worker 重开已停止任务。
+修复须沿原 mailbox 的旧/新 turn 锁排序、回执和 RuntimeDB 事务；不能先持旧 turn 再逆序获取双锁。
+无数据库模式仍需原文件代次的准确接纳，不能把空身份或 user-stop 可恢复性当旧工作重新运行的许可。
 子树协调沿原 owner 的 `.create-subagents.guard`，覆盖实际创建、attempt 激活/放弃、插话预留和授权后排队。
 同一线程、同一进程、同一 canonical 路径的嵌套事务复用已持有的原锁；其它线程/进程仍互斥，
 不以可重入取代清晰的调用边界。插话锁顺序为单 run admission→creation；creation 内不得反取 admission。
 模型执行、宿主启动探测和进程退出等待均留在 creation 锁外；runner 最终激活必须核对原投递身份，
 停止后的迟到启动不能仅凭“该 run 允许用户续做”自动恢复。子 Goal 的状态操作沿原 Goal 锁，
-主控制的 Goal/task 外锁不得在 creation 内反向获取。取消与固定资源接线完成前不发布这一组改动。
-补充核读同一 Codex 参考版本的 `core/src/agent/control/legacy.rs` 与 `control.rs`：关闭原 spawn edge，
-再消费预先获取的 descendant ID 集合并等退出；只借鉴固定集合和清理分层，没有复制另一套树状态。
-未运行参考项目测试，也不把这两个片段当作其完整创建/恢复并发合同已审阅。
+主控制的顺序为主 Goal→task→短读 Gateway T，释放 T 后 creation→子 Goal；不得反取主 Goal/task。
+进程清理与父级启动留在这些控制锁外；旧 overlay 只在准确激活后窄写本轮，不能覆盖新轮配置投影。
+插话重放及无数据库迟到启动修复、严格 gate 通过后方可发布部署；新版多 TUI 验收通过后才能确认完整停止修复。
 本片的旧工作片中断测试覆盖同一 Gateway 内的实际线程登记；未绑定的跨进程旧片没有被这项测试证明。
 
 ### 现有进程会话行为

@@ -283,7 +283,7 @@ def _cancel_named_work_subagents_async(
             run_ids = agent.subagent_run_ids_for_request(task_id)
         except Exception:
             return
-        from ..agent_core.orchestration.tools.cancel import (
+        from ..subagents.cancellation import (
             CancelSubagentTaskRequest,
             cancel_subagent_task,
         )

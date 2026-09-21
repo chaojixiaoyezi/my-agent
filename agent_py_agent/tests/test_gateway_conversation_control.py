@@ -3524,7 +3524,9 @@ def test_status_and_stop_follow_typed_request_lineage_to_subagents(tmp_path) -> 
     assert agent.subagents.load(child.id).status == "CANCELLED"
 
 
-def test_stop_reconciles_child_created_by_inflight_transaction(tmp_path) -> None:
+def test_stop_waits_for_inflight_creation_before_freezing_children(tmp_path, monkeypatch) -> None:
+    from contextlib import contextmanager
+
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
         tmp_path,
@@ -3533,26 +3535,39 @@ def test_stop_reconciles_child_created_by_inflight_transaction(tmp_path) -> None
     paths.processing.mkdir(parents=True, exist_ok=True)
     write_json_file(paths.processing / "req-late-child.json", _request("req-late-child"))
     _bind_live_main_request(agent, paths.processing / "req-late-child.json")
+    original_guard = agent.subagents.creation_guard
+    waiting = threading.Event()
+    results, errors = [], []
 
+    @contextmanager
+    def observed_guard():
+        if threading.current_thread() is stopper:
+            waiting.set()
+        with original_guard():
+            yield
+
+    def stop():
+        try:
+            results.append(execute_gateway_conversation_control(agent, paths, _command("/stop"), _scope()))
+        except Exception as exc:
+            errors.append(exc)
+
+    stopper = threading.Thread(target=stop, daemon=True)
+    monkeypatch.setattr(agent.subagents, "creation_guard", observed_guard)
     with agent.subagents.creation_guard():
-        stopped = execute_gateway_conversation_control(
-            agent,
-            paths,
-            _command("/stop"),
-            _scope(),
-        )
+        stopper.start()
+        assert waiting.wait(2), "停止线程必须到达原创建锁"
+        assert not results
         child = agent.subagents.create_run(
             goal="模拟已进入 handler 的迟到派工",
-            thought="停止线程必须等创建事务退出后复读谱系",
+            thought="停止线程必须等创建事务退出后固定谱系",
             plan=["落盘", "等待停止侧收口"],
             attributes={CONVERSATION_REQUEST_ID_ATTR: "req-late-child"},
         )
 
-    deadline = time.monotonic() + 2
-    while time.monotonic() < deadline and agent.subagents.load(child.id).status != "CANCELLED":
-        time.sleep(0.01)
-
-    assert stopped.ok is True
+    stopper.join(3)
+    assert not stopper.is_alive() and not errors
+    assert results[0].ok is True
     assert agent.subagents.load(child.id).status == "CANCELLED"
 
 

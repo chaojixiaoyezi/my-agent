@@ -10,7 +10,12 @@
 - `runner_start.py` 只接纳原 pending 和条件更新原 launch；进程内与 CLI 标记复用同一 mutation，不另存执行权。
 - `DispatchParams.expected_attempt_ids` 是宿主字段，经隐藏成对 argv 运输；普通模型 request_params 不读取它。顺序和并行 worker 使用同一映射。
 - `RuntimeRepository.create_attempt(expected_pending_attempt_id=...)` 在同一写事务只激活原 pending，失效不创建后继；session 发布与心跳沿同一 attempt。
-- 完整子树停止尚未接通；回执重放竞态、固定资源清单及无数据库模式完整控制仍待验证，不能用锁代替实际清理。
+- `subagents/cancellation.py` 在原 creation 内关闭原树权限、暂停子 Goal、冻结后台/PTY；`cleanup_subagent_stops` 不接收 agent，只消费固定批次。
+- `conversation/task_resources.py` 合并主/子清单；主 Goal→task→短读 Gateway T，释放 T 后 creation→子 Goal，进程等待在所有控制锁外。
+- `runner_control.py` 读取原取消状态；原 session 心跳在独立 worker 内发送 exact attempt 中断，注册后模型前再核对。
+- `cancellation_hosts.py` 只读观察冻结的原宿主退出，不把 launch/PID 当整个 OS 树独占证明。
+- 创建回执读取最新 canonical，不要求控制域原地改写旧对象；旧 overlay 只在本轮激活后窄写。
+- 插话回执重放与无数据库迟到启动仍有已确认的准入缺口，阻断发布；源码和开发验证不能替代新版真实 TUI。
 
 ## runner 当前错误投影
 
@@ -863,9 +868,8 @@ SimpleAgent orchestration tool
 - `agent/agent_core/runner/`：子代理 worker、prompt、session heartbeat、timeout policy。
 - `agent/agent_core/runner/stage_trace.py`：从模型请求与工具调用的 typed 边界刷新 heartbeat，并写入有界
   `runtime_activity/current_step/current_tool`；该投影只供状态面观察，不包含 prompt、response 或工具输出。
-- `agent/subagents/runner_session_liveness.py` 与
-  `agent/agent_core/orchestration/tools/cancel.py`：`runner_session.in_process` 区分 Gateway 内线程与
-  独立子进程；前者只能协作中断，后者才可发送操作系统信号，禁止把宿主 PID 当 child PID。
+- `agent/subagents/runner_session_liveness.py` 只判会话新鲜度；`runner_session.in_process=False` 不证明 OS 树独占。
+  `cancellation_hosts.py` 只对精确 attempt 协作中断，`runner_control.py` 让异进程心跳读取原取消事实；不能按宿主 PID 清掉新接续任务。
 - `cli/subagents.py`：子代理 CLI 命令和注册入口，包含基础、监控、层级和 leadership recovery 命令；不再通过单独 registration / hierarchy 注册文件跳转。
 
 ## 用户观察与直控边界
@@ -987,16 +991,17 @@ SimpleAgent orchestration tool
 ## Cancel And Takeover
 
 当前代理可以用 `cancel_subagents` 按精确 `run_id/run_ids` 取消自己的直属下级。模型 Schema 不提供
-root/status/整树筛选，也不能越过 child 代管孙代理。取消会写 CANCELLED/ABANDONED、废弃 active attempt、
-尽量 interrupt/terminate 已知 pid/session，并写审计记录。宿主恢复与运维仍保留内部批量 primitive；模型
+root/status/整树筛选，也不能越过 child 代管孙代理。取消在原创建事务中关闭可取消的执行权和投影，
+固定后台/PTY 资源；DONE/FAILED/UNKNOWN 保留真实历史与锁，不从宿主 PID 推断可杀整棵进程树。宿主恢复与运维仍保留内部批量 primitive；模型
 工具只处理 canonical loader 能读取且直接父子授权通过的 run。父级说明取消/接管原因后，可以继续汇总，
 或用 `create_subagents` 创建替代执行者。
 
-合法取消一个节点时，生命周期范围是该 exact 节点及其存活后代，不是只改一行状态。实现对齐 会话运行时
-`shutdown_agent_tree`：先 signal 目标 attempt，阻止在途 `create_subagents` 继续扩张；随后等待 owner-local
-创建事务，按 canonical `parent_id/root_id` 重读该分支并关闭后代。模型仍只能点名直属 child，用户控制面仍需
-证明目标属于当前 owner/conversation；子树收口不能赋予越层选择权，也不得影响目标的祖先或兄弟。根
-`/stop` 已经持有同一创建事务并拿到 exact request lineage，因此使用不再重取 guard 的内部批量路径。
+合法取消一个节点时，资源范围包含原节点及原后代，已终态节点也可能仍有后台程序。参考 Codex
+`close_agent/shutdown_agent_tree` 的固定集合思路：先进入 owner-local 创建事务，按 canonical parent_id
+固定原分支，逐项关闭执行权并冻结资源；清理 worker 不再选择后来恢复的新孩子。模型仍只能点名直属 child，
+用户控制面仍需证明 owner/conversation 归属；不扩大到祖先或兄弟。根 `/stop` 与 direct/local 共用同一准备入口，
+主/子资源在释放控制锁前一并固定，准备部分失败仍交出其它已提交清单。
+控制受理不代表资源已退出；后台、PTY 请求和宿主观察分别报告，跨进程 runner 由原心跳转交精确中断。
 
 takeover replacement 的来源权威入口是 `context_bundle.takeover`：创建时由
 `services/takeover/refs.py::source_handoff` 生成有界结构化快照，包含 source run id、状态、

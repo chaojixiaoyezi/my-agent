@@ -16,6 +16,7 @@ from ...settings.services.runtime_config_task import apply_task_runtime_config_o
 from ...subagents.authorization_gate import OperationRequest, authorize_operation
 from ...subagents.manager_runner_result_payload import RecordRunnerResultParams
 from ...subagents.models import FailureType, SubAgentRunnerResult
+from ...subagents.runner_control import runner_attempt_cancelled
 from ..subagent.params import SubagentRunParams
 from .activity_diagnostics import observe_runner_activity
 from .session_pool import RunnerSessionPoolLease, runner_session_lease
@@ -48,6 +49,7 @@ def _run_subagent_worker(params: RunSubagentWorkerParams) -> SubAgentRunnerResul
 
     worker = _build_worker_agent(SimpleAgent, params)
     attempt_id = ""
+    launch_id = ""
     if not params.dry_run:
         try:
             prepared = worker.subagents.lifecycle.prepare_runner_attempt(
@@ -60,8 +62,13 @@ def _run_subagent_worker(params: RunSubagentWorkerParams) -> SubAgentRunnerResul
                 verification_status="UNVERIFIED", message=f"启动接纳已失效：{exc}",
             )
         attempt_id = prepared.runner_active_attempt_id
+        start = (prepared.attributes or {}).get("background_start") or {}
+        if start.get("attempt_id") == attempt_id:
+            launch_id = str(start.get("launch_id") or "")
         worker._runner_activity_attempt_id = attempt_id
     try:
+        if not params.dry_run:
+            _record_effective_config_overlay(worker, params.run_id, prepared, attempt_id=attempt_id)
         with runner_session_lease(
             RunnerSessionPoolLease(
                 manager=worker.subagents,
@@ -70,6 +77,7 @@ def _run_subagent_worker(params: RunSubagentWorkerParams) -> SubAgentRunnerResul
                 interval_seconds=_runner_session_heartbeat_interval(worker),
                 activity_observer=partial(observe_runner_activity, worker, params.run_id),
                 attempt_id=attempt_id,
+                launch_id=launch_id,
             )
         ):
             if params.dry_run:
@@ -171,8 +179,8 @@ def _resume_direct_parent_after_session(worker: object, child_run_id: str) -> No
         )
 
 
-# LLM: 先做 owner/dispatch 授权，再从宿主记录恢复创建时模型引用；用户后来切模型不能改写当前 child。
-# 函数用途: 构造子代理执行依赖，复用原 task overlay，并为重启后的自定义模型恢复正确接口和窗口。
+# LLM: 先做 owner/dispatch 授权，再恢复创建时模型引用；这里只构造依赖，激活前不得发布旧 overlay 到新执行轮。
+# 函数用途: 构造子代理依赖并恢复正确模型配置，元数据在准确激活后才条件保存。
 def _build_worker_agent(simple_agent_cls, params: RunSubagentWorkerParams):
     worker = simple_agent_cls(params.config, params.root)
     _attach_worker_runtime(worker, params)
@@ -198,7 +206,6 @@ def _build_worker_agent(simple_agent_cls, params: RunSubagentWorkerParams):
         return worker
     worker = simple_agent_cls(effective_config, params.root)
     _attach_worker_runtime(worker, params)
-    _record_effective_config_overlay(worker, params.run_id, task)
     return worker
 
 
@@ -209,14 +216,14 @@ def _attach_worker_runtime(worker, params: RunSubagentWorkerParams) -> None:
     _attach_worker_local_store(worker, params.local_store)
 
 
-def _record_effective_config_overlay(worker, run_id: str, task) -> None:
+# LLM: 激活后在 C 内按原 attempt 窄更新；不以锁外 load/save 覆盖停止或换代后的任务。
+# 函数用途: 记录本轮实际配置来源，迟到 worker 不能改写新轮元数据。
+def _record_effective_config_overlay(worker, run_id: str, task, *, attempt_id: str) -> None:
     identity = getattr(task, "runtime_identity", None)
     overlay_ref = str(getattr(identity, "config_overlay_ref", "") or "").strip()
     if not overlay_ref:
         return
-    refreshed = worker.subagents.load(run_id)
-    attrs = dict(getattr(refreshed, "attributes", {}) or {})
-    attrs["runtime_config_overlay"] = {
+    overlay = {
         "schema_version": "runtime_config_overlay.v1",
         "overlay_ref": overlay_ref,
         "scope": str(getattr(identity, "config_scope", "") or "run"),
@@ -224,8 +231,18 @@ def _record_effective_config_overlay(worker, run_id: str, task) -> None:
         "config_layers": list(getattr(worker.config, "config_layers", []) or []),
         "warnings": list(getattr(worker.config, "config_warnings", []) or []),
     }
-    refreshed.attributes = attrs
-    worker.subagents.save(refreshed)
+
+    # LLM: 同一 canonical mutation 再核准确执行轮；异常不写入，不重建整个旧任务快照。
+    # 函数用途: 只保存本次负责的配置诊断字段。
+    def record(current):
+        if current.runner_active_attempt_id != attempt_id or current.status != "RUNNING":
+            raise RuntimeConflictError("配置元数据的原执行轮已失效")
+        current.attributes = {**(current.attributes or {}), "runtime_config_overlay": overlay}
+
+    with worker.subagents.creation_guard():
+        if runner_attempt_cancelled(worker.subagents, run_id, attempt_id):
+            raise RuntimeConflictError("配置元数据的原执行权已关闭")
+        worker.subagents.mutate(run_id, record)
 
 
 def _runner_session_heartbeat_interval(worker) -> float:
@@ -256,6 +273,8 @@ def _run_subagent_worker_interruptibly(
 
     interrupt_name = f"subagent-runner-attempt:{params.run_id}:{attempt_id}"
     with register_interruptible(interrupt_name):
+        if runner_attempt_cancelled(worker.subagents, params.run_id, attempt_id):
+            raise InterruptedError("原子代理执行轮已停止")
         return worker.run_subagent(
             params=SubagentRunParams(
                 run_id=params.run_id,
@@ -287,6 +306,8 @@ def _run_subagent_worker_with_timeout(worker, params: RunSubagentWorkerParams, *
     def _target() -> None:
         try:
             with register_interruptible(interrupt_name):
+                if runner_attempt_cancelled(worker.subagents, params.run_id, attempt_id):
+                    raise InterruptedError("原子代理执行轮已停止")
                 # Close the registration race: a very short timeout may fire
                 # before this thread is scheduled.  In that case the target
                 # marks itself interrupted before entering any model/tool work.

@@ -3,10 +3,10 @@
 #   会话正在跑的工具(gateway 场景的关键);②中断状态仍在安全点轮询，
 #   但阻塞传输可以注册幂等关闭回调，不强杀线程;③register_
 #   interruptible 的 finally 必清标志+注销名字——线程池 ident 会复用,脏标志
-#   会让下一个任务莫名"被中断";④只覆盖进程内线程形态,独立进程形态照旧走
-#   SIGTERM 升级链(subagents/process_control),gateway 停止语义不动。
+#   会让下一个任务莫名"被中断";④这里只覆盖进程内线程，独立 runner 的原
+#   session 心跳读取持久取消事实，再在其宿主内转交精确 attempt 的中断。
 #   改动时同步检查 round_execution 轮询点、background/dispatch worker 注册、
-#   orchestration/tools/cancel.py 接线与 tests/test_thread_interrupt.py。
+#   subagents/cancellation.py 接线与 tests/test_thread_interrupt.py。
 # 模块用途: 给"正在干活的线程"递一张暂停条；安全点体面收工，阻塞的模型连接则主动关闭。
 from __future__ import annotations
 

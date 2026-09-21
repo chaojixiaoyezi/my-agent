@@ -1143,7 +1143,7 @@ def _cancel_if_watch_closed_during_create(
         closed = bool(state.closed)
     if not closed:
         return False
-    from ..agent_core.orchestration.tools.cancel import (
+    from ..subagents.cancellation import (
         CancelSubagentTaskRequest,
         cancel_subagent_task,
     )
@@ -3154,7 +3154,7 @@ def _cancel_closed_source_worker(
     ]
     if not tasks:
         return False
-    from ..agent_core.orchestration.tools.cancel import (
+    from ..subagents.cancellation import (
         CancelSubagentTaskRequest,
         cancel_subagent_task,
     )
@@ -3240,7 +3240,7 @@ def _canonical_worker_task(
     canonical = min(matching, key=_worker_selection_key)
     if not retire_duplicates or agent is None:
         return canonical, 0
-    from ..agent_core.orchestration.tools.cancel import (
+    from ..subagents.cancellation import (
         CancelSubagentTaskRequest,
         cancel_subagent_task,
     )

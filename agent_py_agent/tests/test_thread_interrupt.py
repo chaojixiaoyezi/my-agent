@@ -16,7 +16,6 @@ from agent_py_agent.agent.agent_core._tool_loop_service import (
     ToolLoopService,
     _execute_tool_loop_service,
 )
-from agent_py_agent.agent.agent_core.orchestration.tools.cancel import _interrupt_dispatch_thread
 from agent_py_agent.agent.agent_core.tool_loop.round_execution import (
     ToolRoundExecutionRequest,
     execute_tool_round,
@@ -36,6 +35,7 @@ from agent_py_agent.agent.conversation.runtime import (
     BackgroundMainAgentScheduler,
     _background_claim_dependencies,
 )
+from agent_py_agent.agent.subagents.cancellation_hosts import signal_runner_attempt
 from agent_py_agent.agent.tooling.shell import ShellTool, ShellToolOptions
 from agent_py_agent.tests._tool_runtime_harness import (
     canonical_history_call,
@@ -312,17 +312,14 @@ def test_tool_round_stops_at_interrupt_safe_point():
     assert all("已被取消" in item[1] for item in records)
 
 
-def test_cancel_signals_dispatch_thread_by_run_id():
-    agent = SimpleNamespace(
-        _background_subagent_dispatches={
-            "launch-1": {"run_ids": ["run-a"], "thread_name": "t-cancel-target"}
-        }
-    )
-    with register_interruptible("t-cancel-target"):
-        assert _interrupt_dispatch_thread(agent, "run-a", "") == "signaled"
+def test_cancel_signals_only_exact_runner_attempt():
+    with register_interruptible("subagent-runner-attempt:run-a:attempt-a"):
+        assert signal_runner_attempt("run-a", "") == "not_found"
+        assert signal_runner_attempt("run-a", "attempt-b") == "not_found"
+        assert not is_interrupted()
+        assert signal_runner_attempt("run-a", "attempt-a") == "attempt_signaled"
         assert is_interrupted() is True
-    assert _interrupt_dispatch_thread(agent, "run-miss", "") == "not_found"
-    assert _interrupt_dispatch_thread(SimpleNamespace(), "run-a", "") == "not_found", "无登记表不崩"
+    assert signal_runner_attempt("run-a", "attempt-a") == "not_found"
 
 
 def test_foreground_shell_stops_when_conversation_is_interrupted(tmp_path):

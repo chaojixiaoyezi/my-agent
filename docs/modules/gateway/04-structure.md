@@ -101,7 +101,9 @@ owner 发现层签名进程记录，不因热缓存淘汰丢唤醒；显式停�
 热请求缺失或过期的绑定不借用持久主链当前 attempt；无热请求才从原任务唯一主链定位。
 同一任务临界区写停止状态并通过 `tooling/process_resource_stop.py` 冻结后台清单，随后暂停原 Goal；耗时清理在全部控制锁外。
 后台 claim 领取前登记原命名中断，运行绑定前再检查，旧片不能因显式恢复而开始新副作用。
-冻结/PTY 部分失败保留固定后台回执并报告未确认，异步 worker 不重扫恢复的新主资源；完整子树尚待接线。
+冻结/PTY 部分失败保留固定回执并报告未确认。`freeze_task_resources` 在原 task/creation 边界组合主与原子树，
+异步 worker 只消费 batch，不持 agent 或重新选择后来恢复的孩子；子树由 `subagents/cancellation.py` 准备。
+持久主控制短读 T 后释放，再进入 creation→子 Goal；跨进程 runner 沿原 session 心跳转交精确取消，宿主退出单独核对。
 无持久 task link 的热请求同样可能已有 RuntimeDB main。控制在 T 内 fresh 读取正式绑定并关闭发布门，释放 T 后才等待 task guard；
 再核对 canonical link/Goal 尚未晋升后关闭精确权限并冻结。错代次、不可读、未发布或已晋升不能当空任务，也不能追随 current attempt。
 direct/plain/TUI 由 `conversation/local_run_control.py` 接收同一 core 回调；每条 job 原子发布独立句柄，Compact 复用句柄。

@@ -9,6 +9,8 @@ from unittest.mock import MagicMock
 import pytest
 
 
+# LLM: 参数测试用显式内存任务表；创建与读取返回同一记录，不让 MagicMock 动态属性假装 canonical 状态。
+# 函数用途: 构造不运行模型的批量创建替身，实际启动和并发控制由管理器集成测试覆盖。
 def _mock_create_items_agent(task_count: int = 3):
     mock_agent = MagicMock()
     mock_agent.config.enable_subagents = True
@@ -19,6 +21,13 @@ def _mock_create_items_agent(task_count: int = 3):
     tasks = [_mock_created_task(index) for index in range(task_count)]
     mock_agent._created_tasks = tasks
     mock_agent.subagents.create_run.side_effect = tasks
+    def load(run_id):
+        task = next((item for item in tasks if item.id == run_id), None)
+        if task is None:
+            raise FileNotFoundError(run_id)
+        return task
+
+    mock_agent.subagents.load.side_effect = load
     return mock_agent
 
 

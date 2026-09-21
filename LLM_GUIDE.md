@@ -22,7 +22,8 @@
 ## 当前运行边界（验收状态看 STATUS）
 
 长等待、后台进程完成通知与缓存诊断复用既有进程/会话账本，见 `docs/design/LONG_RUNNING_EXECUTION.md`。
-子代理宿主终止复用工具层进程树原语，未确认后代不能报告终止；共享宿主仍按精确 attempt 协作取消。
+子代理明确停止按固定执行归属清理后台/PTY；独立 runner 复用原心跳转交精确 attempt 中断。
+宿主可能启动父级接续或新轮，launch/PID/出生标识不能证明整棵 OS 树独占；宿主退出单独只读核对。
 runner 的未完成不等于失败；显式结束原因与当前状态、成功标志一致且无明确失败时，清当前错误投影，保留原尝试历史。
 后台收尾看当前子树及未读邮箱，不用工作片开始时的旧阶段永久抑制最终回复；编辑匹配冲突要求读回文件。
 后台本地缺模型等待该会话配置恢复，不按固定时间热重试；普通错误仍走原冷却，进程内策略不拥有持久状态。
@@ -40,21 +41,24 @@ main 绑定当前选定任务的有效 claim；换轮失效，Goal paused 不取
 同任务续做先绑定 canonical run/attempt 再准备归档，request 只代表当前消息；目录准备失败关闭本次新 attempt。
 普通 Shell 与交互 PTY 共用 `parse_shell_command`；删除解析入口时必须同时核对两条执行链。
 资源访问身份和执行归属分别定义在 `tooling/process_scope.py`；PTY 已直接使用，不能拿访问回退补齐任务身份。
-源码中的 direct/local 中断只停止精确回合，保留插话及独立资源；主链资源停止已接运行绑定，完整子树仍待接线，发布与实际验收见 STATUS。
+源码中的 direct/local 中断只停止精确回合，保留插话及独立资源；任务资源停止已接主绑定和固定子树，发布与实际验收见 STATUS。
 后台记录的源码 Store 已支持显式 v2、版本 CAS 和同目录 redo；记录校验、文件提交与系统锁分属三个窄模块。
 读写与裁剪先恢复固定批次；提交后异常不能当作未发生。源码启动已沿唯一 v2 预留、host/child 绑定和交接链；
 启动方只在交接前持有取消权，独立 host 持续限制日志。Registry 每次读取原 Store，明确 session 停止消费冻结实例。
 执行权关闭共用 `runtime_db/run_cancellation.py`，取消 UNKNOWN 保留原锁，pending 条件在同一事务核对。
 Gateway 持久主任务沿 Goal→task→请求锁关闭原权限并冻结主资源；后台旧片在创建 attempt 前检查中断，不能被恢复复活。
-`conversation/task_resources.py` 只裁决主链身份，`tooling/process_resource_stop.py` 只消费固定清单；后台确认与 PTY 异步请求分开。
+`conversation/task_resources.py` 组合主绑定及固定子树，`subagents/cancellation.py` 关闭原子权限并准备清单；
+`tooling/process_resource_stop.py` 只清理冻结实例，后台确认、PTY 异步请求和 runner 退出分开。
 direct/local 的消息句柄由 worker 与命令端共享，core 在模型前发布实际身份；Compact 在原任务锁内重新核对，旧句柄不控制新 job。
 无持久任务热请求先在原 T 锁关闭发布并读取绑定，再释放 T、取 task 锁；已晋升或身份不可读不能降级猜测清理。
-完整子树后台资源接线仍待完成；尚未发布或新增实际 TUI，不把开发回归当作 TUI 137 已通过。
+整树清单在原 Goal/task/creation 锁内固定，异步清理不再查询 agent 或当前孩子；DONE/FAILED/UNKNOWN 保留业务历史。
+尚未发布或新增实际 TUI，不把开发回归当作 TUI 137 已通过。
 子代理创建、换轮、旧轮放弃和控制预留沿原 creation guard；`subagents/coordination.py` 只管理同线程嵌套持锁。
 guidance 的 admission 在 creation 之外，启动探测与执行放 creation 锁外。
 managed 后台排队绑定原 pending ID，经宿主 argv、DispatchParams 和 runner 到 DB 精确激活；缺失不补 current。
 启动标记复用 runner_start.py 的条件 mutation；worker 先激活再发布携带 attempt 的 session，旧心跳不能覆盖新轮。
-这仍是未发布源码；完整停止树、插话重放竞态和实际 TUI 验收未完成。
+旧配置投影也须在激活后核对原 attempt 再写；创建回执复读 canonical，不能依赖控制函数原地修改旧对象。
+这仍是未发布源码；插话重放可能多预留一轮，无数据库模式迟到启动可能重开 user-stop，二者阻断发布。
 
 SSE delta 原样保留，OpenAI 工具参数生成有独立进度；
 派工不会永久禁止主代理本地工作，用户明确限制仍保留；复制按最新代次和实际通道结果反馈。

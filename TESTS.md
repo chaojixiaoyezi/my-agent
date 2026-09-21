@@ -1,5 +1,30 @@
 # 测试与发布验收
 
+## 固定子树停止与跨进程取消（源码验证）
+
+`test_subagent_resource_stop.py` 使用临时真实管理器、RuntimeDB 和资源账本，覆盖主任务、孩子、孙代理及
+已完成/失败/UNKNOWN 孩子的遗留资源；停止后恢复的新轮、新孩子、新 session 与其它任务不进入旧清理清单。
+独立线程和屏障验证创建中停止、清理不占 creation 锁，以及主 Goal/task/creation 与子 Goal 的实际锁序。
+部分权限、后台或 PTY 准备失败仍保留其它已提交成员；后台未确认不返回完整成功，PTY 请求不冒充已退出。
+
+`test_runner_stop_relay.py` 在独立 Python 进程中启动两个受控 worker：主进程没有其本地令牌，原 session 心跳
+读取持久取消并在 worker 进程中转交精确中断，另一个 run 保持运行；旧轮恢复后仍不能写新轮。
+覆盖注册前取消、自然 done/failed、瞬时读取失败和旧配置投影拒写。
+取消恰好发生在“读取取消状态→写心跳”之间时，心跳条件写失败仍继续检查，不能提前结束而漏掉中断。
+这些 worker 和进程都是开发替身，不运行真实模型，不是 TUI 验收。
+
+取消域改为窄 mutation 后，创建响应曾读取旧 task 对象而显示 PENDING；现改读最新 canonical。
+相关创建、授权、取消、Gateway、本地控制、guidance、runner 和来源生命周期一起复验：
+41 个文件共 901 项，895 项通过，5 项既有 xfail、1 项 Linux `/proc` 用例跳过，无失败或 error。
+开发过程中旧测试入口/夹具、创建状态回执和心跳竞争的失败记录保留；没有用新 xfail 隐藏回归。
+详情页取消不具有同 run 恢复资格，已撤掉基于相反假设的试验测试和实现，未放宽正式恢复合同。
+文档 6 项另行通过；本地 Ruff、文档同步、严格尺寸、diff、clean-package 和新增行隐私扫描通过。
+尺寸基线未改，线上 CI 未作为验收来源。diff 首轮发现三处空行尾部空白，删除后 AST 不变且复查通过。
+
+此片未发布部署、未调用真实模型或新增 TUI，不能关闭 TUI 137 的 `FAIL_RESOURCE_STOP`。
+插话回执从 pending 变为已消费时可能多预留一轮、LOCAL_UNMANAGED 旧排队启动缺少准确接纳身份，
+仍是两个发布阻断项。下一轮实际验收从 TUI 138 开始，提前公布 tmux；每台单 Gateway，使用官方 MiniMax-M2.7。
+
 ## 子代理准确启动身份（源码验证）
 
 `test_runner_start_admission.py` 使用临时真实 RuntimeDB/管理器、受控线程和执行替身：

@@ -6,9 +6,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_py_agent.agent.agent_core.orchestration.tools.cancel import (
-    _settle_cancelled_runtime_authority,
-)
 from agent_py_agent.agent.runtime_db import repository as repository_module
 from agent_py_agent.agent.runtime_db.managed_operation_store import (
     AuthorityContextMissing,
@@ -21,6 +18,7 @@ from agent_py_agent.agent.runtime_db.run_cancellation import (
     RuntimeCancellationTarget,
     cancel_runtime_run,
 )
+from agent_py_agent.agent.subagents.cancellation import CancelSubagentTaskRequest, _close_authority
 
 
 @pytest.fixture
@@ -155,7 +153,7 @@ def test_pending_replacement_is_checked_at_database_commit(tmp_path, monkeypatch
     )
     context = SimpleNamespace(attempt_id="old-projection", now=None, reason="stop", source="test")
     agent = SimpleNamespace(subagents=SimpleNamespace(runtime_db=repo))
-    task = SimpleNamespace(id="child")
+    task = SimpleNamespace(id="child", runner_active_attempt_id="old-projection")
     if activate_before_commit:
         original = repo.settle_agent_run
 
@@ -167,12 +165,12 @@ def test_pending_replacement_is_checked_at_database_commit(tmp_path, monkeypatch
 
         monkeypatch.setattr(repo, "settle_agent_run", settle)
         with pytest.raises(RuntimeCancellationConflict) as caught:
-            _settle_cancelled_runtime_authority(agent, task, context)
+            _close_authority(agent.subagents, CancelSubagentTaskRequest(task, context.reason, source=context.source))
         assert caught.value.reason == "attempt_status_conflict"
         assert repo.get_attempt(record["attempt_id"])["status"] == "running"
         assert _locks(repo)
     else:
-        report = _settle_cancelled_runtime_authority(agent, task, context)
+        report = _close_authority(agent.subagents, CancelSubagentTaskRequest(task, context.reason, source=context.source))
         assert report["attempt_id"] == record["attempt_id"]
         assert report["status"] == "cancelled"
 
@@ -207,7 +205,8 @@ def test_full_child_cancel_does_not_overwrite_terminal_or_unknown_as_cancelled(t
     before = dict(repo.get_attempt(attempt["attempt_id"]))
     locks = _locks(repo)
     result = execute_cancel_subagents(agent, {"run_id": task.id, "kill_process": False, "reason": "停止任务"})
-    assert not result.ok and result.effect_outcome == "unknown"
+    assert result.ok
+    assert '"cancel_status": "preserved"' in result.output
     loaded = agent.subagents.load(task.id)
     assert loaded.status == projection_status and "cancel_subagents" not in loaded.attributes
     assert dict(repo.get_attempt(attempt["attempt_id"])) == before

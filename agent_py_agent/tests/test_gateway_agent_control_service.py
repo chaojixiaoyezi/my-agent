@@ -272,7 +272,7 @@ def test_owner_can_view_steer_stop_and_reopen_terminal_child(tmp_path) -> None:
         run_id=child.id,
         operation_id="agent-stop-1",
     )
-    assert replayed_stop["status"] == "already_terminal"
+    assert replayed_stop["status"] == "preserved"
     delivered_replay = send_agent_guidance(
         agent,
         scope=scope,
@@ -376,7 +376,7 @@ def test_owner_stop_grandchild_resumes_parent_while_sibling_keeps_running(
     assert delivery["resume_requested"] is True
 
 
-def test_interactive_stop_acknowledges_before_slow_canonical_closeout(
+def test_interactive_stop_freezes_before_ack_and_does_not_wait_for_cleanup(
     tmp_path, monkeypatch
 ) -> None:
     agent, scope, child = _bound_agent_tree(tmp_path)
@@ -384,14 +384,16 @@ def test_interactive_stop_acknowledges_before_slow_canonical_closeout(
     release = threading.Event()
     calls: list[str] = []
 
-    def slow_cancel(_agent, request):
-        calls.append(request.task.id)
+    def slow_cancel(batch, root_id):
+        calls.append(root_id)
+        assert agent.subagents.load(root_id).status == "CANCELLED"
+        assert {item.report["run_id"] for item in batch.stops} == {root_id}
         entered.set()
         release.wait(timeout=2.0)
-        return {"run_id": request.task.id, "status": "CANCELLED"}
+        return {"run_id": root_id, "status": "CANCELLED"}
 
     monkeypatch.setattr(
-        "agent_py_agent.agent.conversation.agent_control.cancel_subagent_tree",
+        "agent_py_agent.agent.conversation.agent_control.cleanup_subagent_tree",
         slow_cancel,
     )
 
