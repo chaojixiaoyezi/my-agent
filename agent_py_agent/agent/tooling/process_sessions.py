@@ -26,8 +26,9 @@ from .models import (
     ToolRuntimePolicy,
 )
 from .process_network_status import managed_process_network_status
-from .process_registry import process_registry
+from .process_registry import ProcessSessionAuthorityError, process_registry
 from .process_scope import process_access_scope
+from .process_session_cleanup import ProcessSessionCleanupError
 from .process_session_store import process_session_store_root
 
 _DEFAULT_WAIT_SECONDS = 30.0
@@ -152,6 +153,16 @@ class ProcessSessionTool(BaseTool):
     # 返回稳定错误，不泄露其他会话是否存在；stop 沿用 registry 终止回执，status/wait 附宿主进展观测。
     # 函数用途: 执行后台进程控制；未确认的停止结果明确 UNKNOWN，保留结果供核对。
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
+        try:
+            return self._execute_action(params)
+        except (ProcessSessionAuthorityError, ProcessSessionCleanupError) as exc:
+            return ToolHandlerOutcome(self.model_spec.name, False, "后台进程权威暂不可读取，请保留原句柄核对。",
+                                      error_code="TOOL_OPERATION_OUTCOME_UNKNOWN", effect_outcome="unknown",
+                                      result_envelope={"load_error": exc.report})
+
+    # LLM: 查询与停止仍沿同一访问范围，起始和未知状态属于 pending，不将不可读状态当不存在。
+    # 函数用途: 解析显式动作并返回当前会话事实。
+    def _execute_action(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         scope = process_access_scope(params.get("__run_scope"), self.owner_scope_root)
         if not scope.is_bound():
             return self._error(
@@ -218,9 +229,6 @@ class ProcessSessionTool(BaseTool):
         scope: object,
         store_root: object,
     ) -> dict[str, object] | None:
-        summary = process_registry.status(session_id, scope, store_root)
-        if summary is None:
-            return None
         record = process_registry.get(session_id, scope, store_root)
         if record is None:
             return None
@@ -229,7 +237,7 @@ class ProcessSessionTool(BaseTool):
         except (TypeError, ValueError):
             port = 0
         return {
-            "process": summary,
+            "process": record.to_summary(include_output=True),
             "network": managed_process_network_status(record, requested_port=port),
         }
 
@@ -251,7 +259,7 @@ class ProcessSessionTool(BaseTool):
         if observe_progress:
             stable = {key: value for key, value in payload.items() if key not in {"uptime_seconds", "wait_timed_out"}}
             digest = hashlib.sha256(json.dumps(stable, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
-            envelope["progress_observation"] = {"sha256": digest, "pending": payload.get("status") == "running"}
+            envelope["progress_observation"] = {"sha256": digest, "pending": payload.get("status") in {"starting", "running", "unknown"}}
         return ToolHandlerOutcome(
             self.model_spec.name,
             True,

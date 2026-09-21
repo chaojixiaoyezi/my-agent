@@ -38,12 +38,14 @@ from agent_py_agent.agent.contracts.gates.command_policy import (
 )
 from agent_py_agent.agent.path_access_policy import PathAccessPolicy
 
-from .background_process_host import (
-    HostedBackgroundProcess,
-    start_background_process_host,
+from .background_process_launch import (
+    BACKGROUND_START_SETTLE_SECONDS,
+    BackgroundLaunchError,
+    BackgroundLaunchRequest,
+    start_background_process,
 )
 from .cancellation import (
-    CancellationToken,
+    ToolCancelled,
     cancellation_requested,
     current_cancellation_token,
     register_cancellation_callback,
@@ -59,6 +61,7 @@ from .models import (
     ToolAvailability,
     ToolHandlerOutcome,
     ToolInputPolicy,
+    ToolInvocationContext,
     ToolModelHints,
     ToolModelSpec,
     ToolOperationReconciliation,
@@ -70,12 +73,11 @@ from .models import (
 from .process_output_capture import ProcessOutputCapture
 from .process_registry import (
     BackgroundProcess,
-    ProcessRegistration,
     ProcessTerminationReceipt,
     process_registry,
     terminate_process_tree,
 )
-from .process_scope import ProcessAccessScope, process_access_scope
+from .process_scope import ProcessAccessScope, ProcessExecutionScope, process_access_scope
 from .process_session_store import process_session_store_root
 from .sandbox import SandboxUnavailable
 from .shell_syntax import contains_unmanaged_background_operator
@@ -452,54 +454,7 @@ logger = logging.getLogger(__name__)
 _MAX_BG_LOG_BYTES = (
     1_000_000_000  # 后台命令日志字节上限(1GB);超限杀进程组,防失控/恶意命令写满磁盘(审计 #16)
 )
-_BG_WATCHDOG_INTERVAL = 2.0
 _PROCESS_PIPE_DRAIN_SECONDS = 2.0
-# 会话运行时 unified exec 会先 yield 一小段时间：短命令在同一工具结果里返回 exit code，
-# 只有仍存活的进程才返回 session。显式后台模式取 0.5 秒，既抓住端口占用/导入失败，
-# 又不把持久服务启动拖成阻塞调用。
-_BACKGROUND_START_SETTLE_SECONDS = 0.5
-
-
-class _LogSizeWatchdog(threading.Thread):
-    """监控后台进程日志大小,超上限 killpg 杀整组(终端交互 sizeWatchdog 范式)。进程退出即自停。"""
-
-    def __init__(
-        self,
-        proc: subprocess.Popen,
-        log_path: Path,
-        *,
-        max_bytes: int = _MAX_BG_LOG_BYTES,
-        interval: float = _BG_WATCHDOG_INTERVAL,
-        cancellation_token: CancellationToken | None = None,
-    ) -> None:
-        super().__init__(daemon=True)
-        self._proc = proc
-        self._log_path = log_path
-        self._max = max_bytes
-        self._interval = interval
-        self._cancellation_token = cancellation_token
-
-    def run(self) -> None:
-        while self._proc.poll() is None:
-            if self._cancellation_token and self._cancellation_token.cancelled:
-                _kill_process_group(self._proc)
-                return
-            if self._over_limit():
-                _kill_process_group(self._proc)
-                logger.error(
-                    f"后台命令日志超 {self._max} 字节上限,已杀进程组防写满磁盘: {self._log_path}"
-                )
-                return
-            if self._cancellation_token is not None:
-                self._cancellation_token.wait(self._interval)
-            else:
-                time.sleep(self._interval)
-
-    def _over_limit(self) -> bool:
-        try:
-            return self._log_path.stat().st_size > self._max
-        except OSError:
-            return False
 
 
 # LLM: 前台和后台必须共享同一个终止实现；返回可信回执，不能凭函数被调用就宣称清理成功。
@@ -695,57 +650,24 @@ def _sandbox_exec(
     return argv, False
 
 
-# LLM: The explicit background command keeps the same sandbox argv as foreground
-# execution, including bwrap --die-with-parent. A detached host becomes that
-# parent so a one-shot child-agent runner may exit without killing the command.
-# Windows owner-scoped execution remains fail-closed through _sandbox_exec.
-# 函数用途: 由独立托管进程启动沙箱命令，并把输出持续写入指定日志。
-def _spawn_background_process(
-    command: str,
-    target: Path,
-    log_path: Path,
-    owner_home: object = None,
-    protected_persona_root: object = None,
-    write_roots: tuple[Path, ...] | None = None,
-    read_roots: tuple[Path, ...] | None = None,
-    protected_write_paths: tuple[Path, ...] | None = None,
-) -> HostedBackgroundProcess:
+# LLM: 显式后台命令使用前台相同的已校验沙箱 argv；保留 bwrap die-with-parent，实际父进程为独立 host。
+# 函数用途: 构造后台命令的系统执行参数，此处不启动进程或登记状态。
+def _background_command_argv(
+    command: str, target: Path, owner_home: object, protected_persona_root: object,
+    write_roots: tuple[Path, ...] | None, read_roots: tuple[Path, ...] | None,
+    protected_write_paths: tuple[Path, ...] | None,
+) -> list[str]:
     if owner_home or protected_persona_root or os.name == "posix":
-        exec_arg, use_shell = _sandbox_exec(
-            command,
-            target,
-            owner_home,
-            protected_persona_root,
-            write_roots,
-            read_roots,
-            protected_write_paths,
-        )
-        if use_shell or not isinstance(exec_arg, list):
+        argv, use_shell = _sandbox_exec(command, target, owner_home, protected_persona_root,
+                                        write_roots, read_roots, protected_write_paths)
+        if use_shell or not isinstance(argv, list):
             raise OSError("managed background sandbox must provide argv execution")
-        return start_background_process_host(
-            exec_arg,
-            cwd=target,
-            log_path=log_path,
-            env=_subprocess_text_env(owner_home),
-            max_log_bytes=_MAX_BG_LOG_BYTES,
-        )
+        return argv
     if os.name == "nt":
-        return start_background_process_host(
-            ["powershell.exe", "-NoProfile", "-Command", command],
-            cwd=target,
-            log_path=log_path,
-            env=_subprocess_text_env(owner_home),
-            max_log_bytes=_MAX_BG_LOG_BYTES,
-        )
+        return ["powershell.exe", "-NoProfile", "-Command", command]
     from .sandbox import strict_posix_shell_argv
 
-    return start_background_process_host(
-        strict_posix_shell_argv(command),
-        cwd=target,
-        log_path=log_path,
-        env=_subprocess_text_env(owner_home),
-        max_log_bytes=_MAX_BG_LOG_BYTES,
-    )
+    return strict_posix_shell_argv(command)
 
 
 # background_jobs 登记台账上限:后台任务每启一个登记一条,原裸 append 永不回收 → 长跑无界增长
@@ -777,56 +699,6 @@ def _record_background_job(
         )
     except OSError:
         pass
-
-
-# LLM: Durable registration is a fail-closed boundary. Production scopes receive
-# one protected cross-process authority record addressed by access_scope.owner_home,
-# independent of the Full Access sandbox wall; an unbound internal/test call stays
-# process-local. If persistence fails, the exact managed host tree is terminated.
-# 函数用途: 按真实用户地址登记后台进程及通知目标、写辅助观测；失败立即回收，避免失管服务。
-def _register_hosted_background_process(
-    *,
-    workspace_root: Path,
-    log_path: Path,
-    command: str,
-    target: Path,
-    hosted: HostedBackgroundProcess,
-    access_scope: ProcessAccessScope,
-    completion_target: dict[str, str] | None = None,
-) -> BackgroundProcess:
-    store_root = (
-        process_session_store_root(workspace_root, access_scope.owner_home)
-        if access_scope.is_bound()
-        else None
-    )
-    try:
-        record = process_registry.register(
-            ProcessRegistration(
-                command=command,
-                pid=hosted.process.pid,
-                output_file=str(log_path),
-                process=hosted.process,
-                cwd=str(target),
-                access_scope=access_scope,
-                completion_target=dict(completion_target or {}),
-                child_pid=hosted.child_pid,
-                pid_birth_token=hosted.pid_birth_token,
-                host_state_file=str(hosted.state_file),
-                store_root=store_root,
-            )
-        )
-    except (OSError, TypeError, ValueError):
-        _kill_process_group(hosted.process)
-        raise
-    _record_background_job(
-        log_path.parent,
-        hosted.process.pid,
-        command,
-        log_path,
-        session_id=record.session_id,
-        process_pid=hosted.child_pid,
-    )
-    return record
 
 
 # LLM: 模型与执行使用同一 Schema；持久进程走结构化 run_in_background，命令不设人为字符上限。
@@ -1039,9 +911,14 @@ class ShellTool(BaseTool):
             error_code="SANDBOX_UNAVAILABLE",
         )
 
+    # LLM: callback 属于当前不可变调用上下文，不能写共享 handler 或注入模型参数。
+    # 函数用途: 将原执行权限复查交给后台启动，在预留和交接时重新确认当前调用仍有效。
+    def execute_scoped(self, params: dict[str, Any], context: ToolInvocationContext) -> ToolHandlerOutcome:
+        return self.execute(params, context=context)
+
     # LLM: shell 自带 & 不得进入执行；deadline 已过等前置拒绝必须声明 not_started，不能遗留 UNKNOWN。
     # 函数用途: 校验并执行命令，未启动与执行后失败分账；长期进程统一登记为受管后台会话。
-    def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
+    def execute(self, params: dict[str, Any], *, context: ToolInvocationContext | None = None) -> ToolHandlerOutcome:
         command_result = parse_shell_command(self.model_spec.name, params.get("command", ""))
         if isinstance(command_result, ToolHandlerOutcome):
             return command_result
@@ -1088,14 +965,14 @@ class ShellTool(BaseTool):
             return self._start_background_command(
                 command,
                 target,
-                sandbox_write_roots,
-                sandbox_read_roots,
-                sandbox_protected_paths,
+                (sandbox_write_roots, sandbox_read_roots, sandbox_protected_paths),
                 process_access_scope(
                     params.get("__run_scope"),
                     self.path_access_policy.owner_scope_root,
                 ),
                 completion_target=params.get("__process_completion_target"),
+                execution_scope=ProcessExecutionScope.from_run_scope(params.get("__run_scope"), self.path_access_policy.owner_scope_root),
+                context=context,
             )
         return _execute_with_artifact_protection(
             _ShellArtifactExecutionRequest(
@@ -1232,87 +1109,44 @@ class ShellTool(BaseTool):
             sandbox_protected_paths,
         )
 
-    # LLM: Background execution is owned by a detached managed host, not the
-    # one-shot agent runner. Model output exposes only the stable session handle;
-    # completion target and canonical owner address are host-injected and immutable;
-    # host and command-entry PIDs remain private because later
-    # descendants may own the actual resource. Exact scope is persisted first.
-    # stdin remains unsupported here because interactive processes belong to PTY.
-    # 函数用途: 把命令放到当前用户会话的后台，马上返回，不堵住模型工具循环。
+    # LLM: 先预留真实执行归属，再由 host 启动和明确交接；原回合取消只影响交接前，日志上限由 host 独占。
+    # 函数用途: 启动可跨工作片管理的后台命令，返回稳定句柄及真实启动或清理结果。
     def _start_background_command(
-        self,
-        command: str,
-        target: Path,
-        sandbox_write_roots: tuple[Path, ...] | None,
-        sandbox_read_roots: tuple[Path, ...] | None,
-        sandbox_protected_paths: tuple[Path, ...] | None,
-        access_scope: ProcessAccessScope,
-        completion_target: dict[str, str] | None = None,
+        self, command: str, target: Path, sandbox_roots: _ShellSandboxRoots,
+        access_scope: ProcessAccessScope, completion_target: dict[str, str] | None = None,
+        *, execution_scope: ProcessExecutionScope | None = None, context: ToolInvocationContext | None = None,
     ) -> ToolHandlerOutcome:
         try:
+            argv = _background_command_argv(command, target, self.path_access_policy.owner_scope_root,
+                                            self.protected_persona_root, *sandbox_roots)
             jobs_dir = self.workspace_root / ".background_jobs"
             jobs_dir.mkdir(parents=True, exist_ok=True)
             log_path = jobs_dir / f"job-{time.time_ns()}.log"
             log_path.touch(exist_ok=False)
-        except OSError as exc:
-            return ToolHandlerOutcome(
-                self.model_spec.name,
-                False,
-                f"COMMAND_FAILED: 后台日志创建失败: {exc}",
-                error_code="COMMAND_FAILED",
+            request = BackgroundLaunchRequest(
+                argv=argv, command=command, cwd=target, log_path=log_path,
+                env=_subprocess_text_env(self.path_access_policy.owner_scope_root), max_log_bytes=_MAX_BG_LOG_BYTES,
+                store_root=process_session_store_root(self.workspace_root, access_scope.owner_home),
+                access_scope=access_scope, execution_scope=execution_scope or ProcessExecutionScope(owner_home=access_scope.owner_home),
+                completion_target=dict(completion_target or {}), authority_check=context.execution_authority_check if context else None,
             )
+            hosted = start_background_process(request)
+        except BackgroundLaunchError as exc:
+            return _background_launch_failure(self.model_spec.name, exc)
+        except (OSError, TypeError, ValueError, SandboxUnavailable) as exc:
+            return ToolHandlerOutcome(self.model_spec.name, False, f"后台命令未启动：{type(exc).__name__}",
+                                      error_code="SANDBOX_UNAVAILABLE" if isinstance(exc, SandboxUnavailable) else "COMMAND_FAILED",
+                                      effect_outcome="not_started")
         try:
-            hosted = _spawn_background_process(
-                command,
-                target,
-                log_path,
-                self.path_access_policy.owner_scope_root,
-                self.protected_persona_root,
-                sandbox_write_roots,
-                sandbox_read_roots,
-                sandbox_protected_paths,
-            )
-        except SandboxUnavailable as exc:
-            return ToolHandlerOutcome(
-                self.model_spec.name,
-                False,
-                f"SANDBOX_UNAVAILABLE: {exc}",
-                error_code="SANDBOX_UNAVAILABLE",
-            )
-        except OSError as exc:
-            return ToolHandlerOutcome(
-                self.model_spec.name,
-                False,
-                f"COMMAND_FAILED: 后台启动失败: {exc}",
-                error_code="COMMAND_FAILED",
-            )
-        try:
-            record = _register_hosted_background_process(
-                workspace_root=self.workspace_root,
-                log_path=log_path,
-                command=command,
-                target=target,
-                hosted=hosted,
-                access_scope=access_scope,
-                completion_target=completion_target,
-            )
-        except (OSError, TypeError, ValueError) as exc:
-            return ToolHandlerOutcome(
-                self.model_spec.name,
-                False,
-                f"COMMAND_FAILED: 后台会话登记失败: {exc}",
-                error_code="COMMAND_FAILED",
-            )
-        _LogSizeWatchdog(
-            hosted.process,
-            log_path,
-            cancellation_token=current_cancellation_token(),
-        ).start()  # 日志超上限或所属 turn 取消时终止完整进程组
-        return _background_start_outcome(
-            tool_name=self.model_spec.name,
-            record=record,
-            log_path=log_path,
-        )
+            record = process_registry.attach(hosted.record, hosted.process, hosted.store_root)
+            _record_background_job(jobs_dir, record.pid, command, log_path, session_id=record.session_id, process_pid=record.child_pid)
+            return _background_start_outcome(tool_name=self.model_spec.name, record=record, log_path=log_path)
+        except (OSError, RuntimeError, ValueError) as exc:
+            # 已交接资源仍归持久 session，查询故障不能把它当未启动或回滚。
+            return ToolHandlerOutcome(self.model_spec.name, False,
+                                      json.dumps({"status": "unknown", "session_id": hosted.record["session_id"], "error_type": type(exc).__name__}),
+                                      error_code="TOOL_OPERATION_OUTCOME_UNKNOWN", effect_outcome="unknown")
+
 
     def _run_command(
         self,
@@ -1818,45 +1652,42 @@ def _shell_timeout_result(exc, command: str, timeout: int, max_output_chars: int
     return output, facts
 
 
-# LLM: The initial result distinguishes a managed process that is still alive from a command
-# that already exited. This preserves the initial yield contract and prevents a session
-# handle from being interpreted as service readiness; external reachability remains separate.
-# 函数用途: 短暂等待后台命令的首个稳定状态；立即失败就原回合返回退出码和日志，仍运行才报告已启动。
+# LLM: 启动方已完成观察和交接，这里只读当前事实；缺失、未知和 killed 不冒充启动成功或自然退出。
+# 函数用途: 返回稳定后台句柄、真实短命令退出码或未知结果，不把句柄等同服务就绪。
 def _background_start_outcome(
     *,
     tool_name: str,
     record: BackgroundProcess,
     log_path: Path,
 ) -> ToolHandlerOutcome:
-    settled = process_registry.wait(
-        record.session_id,
-        _BACKGROUND_START_SETTLE_SECONDS,
-        record.access_scope,
-        record.store_root or None,
-    )
+    settled = process_registry.status(record.session_id, record.access_scope, record.store_root)
     state = dict(settled or {})
-    status = str(state.get("status") or "running").strip().lower()
+    status = str(state.get("status") or "unknown")
     if status == "running":
         payload = {
             "status": "started",
             "session_id": record.session_id,
             "output_file": str(log_path),
-            "startup_observation_seconds": _BACKGROUND_START_SETTLE_SECONDS,
+            "startup_observation_seconds": BACKGROUND_START_SETTLE_SECONDS,
             "hint": _background_session_hint(running=True),
         }
         return ToolHandlerOutcome(tool_name, True, json.dumps(payload, ensure_ascii=False))
 
-    exit_code = _background_exit_code(state)
+    if status not in {"exited", "killed"} or type(state.get("exit_code")) is not int:
+        payload = {"status": status, "session_id": record.session_id, "output_file": str(log_path)}
+        return ToolHandlerOutcome(tool_name, False, json.dumps(payload, ensure_ascii=False),
+                                  error_code="TOOL_OPERATION_OUTCOME_UNKNOWN", effect_outcome="unknown")
+    exit_code = state["exit_code"]
     payload = {
-        "status": "exited",
+        "status": status,
         "session_id": record.session_id,
         "exit_code": exit_code,
         "output_tail": str(state.get("output_tail") or ""),
         "output_file": str(log_path),
-        "startup_observation_seconds": _BACKGROUND_START_SETTLE_SECONDS,
+        "startup_observation_seconds": BACKGROUND_START_SETTLE_SECONDS,
         "hint": _background_session_hint(running=False),
     }
-    if exit_code == 0:
+    if status == "exited" and exit_code == 0:
         return ToolHandlerOutcome(tool_name, True, json.dumps(payload, ensure_ascii=False))
     return ToolHandlerOutcome(
         tool_name,
@@ -1867,14 +1698,25 @@ def _background_start_outcome(
     )
 
 
-# LLM: Exit code is a typed host lifecycle fact. Missing or malformed terminal state must not be
-# converted to success, so the fallback remains a generic non-zero failure.
-# 函数用途: 从后台终态安全读取退出码，缺失时按失败处理而不是说启动成功。
-def _background_exit_code(state: dict[str, object]) -> int:
-    try:
-        return int(state.get("exit_code"))
-    except (TypeError, ValueError):
-        return -1
+# LLM: 业务创建标记和终态决定副作用结果，不能因异常或清理完成就假装没有启动。
+# 函数用途: 将启动失败映射为工具回执，保留原句柄、取消类型和清理是否确认。
+def _background_launch_failure(tool_name: str, error: BackgroundLaunchError) -> ToolHandlerOutcome:
+    record = error.record
+    status = str(record.get("status") or "unknown")
+    effect = "unknown"
+    if error.cleanup_confirmed:
+        effect = "not_started" if not record.get("child_launch_started") else "failed" if status in {"killed", "exited"} else "unknown"
+    if effect in {"unknown", "not_started"}:
+        status = effect
+    code = "CANCELLED" if isinstance(error.cause, ToolCancelled) else "TOOL_OPERATION_OUTCOME_UNKNOWN" if effect == "unknown" else "COMMAND_FAILED"
+    payload = {"session_id": record.get("session_id"), "status": status,
+               "cleanup_confirmed": error.cleanup_confirmed, "error_type": type(error.cause).__name__}
+    if not record.get("revision"):
+        payload.pop("session_id", None)
+    if error.cleanup_error:
+        payload["cleanup_error"] = error.cleanup_error
+    return ToolHandlerOutcome(tool_name, False, json.dumps(payload, ensure_ascii=False), error_code=code,
+                              effect_outcome=effect, result_envelope={"process": payload})
 
 
 # LLM: Guidance explains the stable session handle without claiming port or network readiness.

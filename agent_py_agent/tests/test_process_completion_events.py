@@ -1,3 +1,4 @@
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -11,18 +12,24 @@ from agent_py_agent.agent.conversation.process_events import (
 from agent_py_agent.agent.conversation.store import ConversationStore
 from agent_py_agent.agent.tooling.process_registry import (
     BackgroundProcess,
+    capture_process_birth_token,
     process_registry,
 )
 from agent_py_agent.agent.tooling.process_scope import ProcessAccessScope
+from agent_py_agent.agent.tooling.process_session_records import (
+    LEGACY_PROCESS_SESSION_SCHEMA,
+    PROCESS_SESSION_SCHEMA,
+)
 from agent_py_agent.agent.tooling.process_session_store import (
     ProcessSessionStore,
+    ProcessSessionTransaction,
     process_session_store_root,
 )
 
 
 # LLM: 测试使用真实持久存储与伪终态进程记录，不启动或杀宿主进程。
 # 函数用途: 组装隔离 owner/thread 与已结束进程，验证通知重入和权限边界。
-def _fixture(tmp_path, status="exited"):
+def _fixture(tmp_path, status="exited", *, v2=False, stopped=False):
     owner = tmp_path / "owner"
     store = ConversationStore(owner / "conversations")
     thread = store.threads.get_or_create({"canonical_user_id": "a", "channel": "tui", "channel_conversation_id": "a"})
@@ -36,7 +43,21 @@ def _fixture(tmp_path, status="exited"):
     record = BackgroundProcess("bg-test-notice", "test", 99999999, 1.0,
         access_scope=ProcessAccessScope("a", thread.thread_id, str(owner)), pid_birth_token="test",
         status=status, exit_code=0, completion_target=target, store_root=str(root))
-    authority.write(record.to_record())
+    record.persisted_snapshot = {"schema": LEGACY_PROCESS_SESSION_SCHEMA}
+    payload = record.to_record()
+    if v2:
+        child_known = status in {"running", "unknown", "exited", "killed"}
+        payload.update(schema=PROCESS_SESSION_SCHEMA, revision=0,
+                       execution_scope={"owner_home": str(owner), "thread_id": thread.thread_id,
+                                        "root_task_id": "task-a", "run_id": "run-a", "attempt_id": "attempt-a"},
+                       launcher_pid=os.getpid(), launcher_birth_token=capture_process_birth_token(os.getpid()),
+                       pid=99999999 if child_known else 0, pid_birth_token="test" if child_known else "",
+                       child_pid=99999998 if child_known else 0, child_pid_birth_token="test-child" if child_known else "",
+                       reserved_at=1.0, started_at=1.0 if child_known else 0, child_launch_started=child_known,
+                       handoff_confirmed=child_known, stop_requested=stopped,
+                       finished_at=2.0 if status in {"exited", "killed", "not_started"} else None,
+                       exit_code=0 if status in {"exited", "killed"} else None)
+    authority.write(payload)
     process_registry.clear()
     return agent, params, authority
 
@@ -57,17 +78,17 @@ def test_completion_survives_restart_and_notifies_once(tmp_path):
 
 def test_publish_crash_retry_dedupes_and_keeps_receipt(tmp_path, monkeypatch):
     agent, _, authority = _fixture(tmp_path)
-    original = ProcessSessionStore.write
+    original = ProcessSessionTransaction.write
 
     def fail_receipt(self, payload):
         if payload.get("completion_notice_id"):
             raise OSError("simulated receipt write failure")
         return original(self, payload)
 
-    monkeypatch.setattr(ProcessSessionStore, "write", fail_receipt)
+    monkeypatch.setattr(ProcessSessionTransaction, "write", fail_receipt)
     reconcile_process_completions(agent)
     assert not authority.load("bg-test-notice").record["completion_notice_id"]
-    monkeypatch.setattr(ProcessSessionStore, "write", original)
+    monkeypatch.setattr(ProcessSessionTransaction, "write", original)
     assert reconcile_process_completions(agent) == 1
     assert len(agent.conversation_store.wakes.pending(limit=0)) == 1
 
@@ -127,7 +148,7 @@ def test_late_completion_passes_scheduler_and_claim_admission(tmp_path, monkeypa
         "task_id": params.task_id, "status": status, "goal": "采样后告知结果"})
     runtime = BackgroundMainAgentRuntime(agent=agent, store=store)
     scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": store})
-    original_write = ProcessSessionStore.write
+    original_write = ProcessSessionTransaction.write
 
     def fail_receipt(self, payload):
         if payload.get("completion_notice_id"):
@@ -135,12 +156,12 @@ def test_late_completion_passes_scheduler_and_claim_admission(tmp_path, monkeypa
         return original_write(self, payload)
 
     if expected:
-        monkeypatch.setattr(ProcessSessionStore, "write", fail_receipt)
+        monkeypatch.setattr(ProcessSessionTransaction, "write", fail_receipt)
         reconcile_process_completions(agent)
         assert scheduler.tick() == []
         assert len(store.wakes.pending(limit=0)) == 1
         assert not calls
-        monkeypatch.setattr(ProcessSessionStore, "write", original_write)
+        monkeypatch.setattr(ProcessSessionTransaction, "write", original_write)
     assert reconcile_process_completions(agent) == 1
     reports = scheduler.tick()
     assert len(calls) == expected
@@ -176,4 +197,37 @@ def test_notified_receipt_survives_stale_registry_write(tmp_path):
     reconcile_process_completions(agent)
     authority.write(stale)
     assert authority.load("bg-test-notice").record["completion_notice_id"]
+    assert reconcile_process_completions(agent) == 0
+
+
+@pytest.mark.parametrize("status", ["starting", "running", "unknown", "not_started", "killed"])
+def test_v2_only_confirmed_natural_exit_can_publish_completion(tmp_path, status):
+    agent, _, authority = _fixture(tmp_path, status, v2=True)
+    assert reconcile_process_completions(agent) == 0
+    assert not agent.conversation_store.wakes.pending(limit=0)
+    record = authority.load("bg-test-notice").record
+    assert bool(record["completion_notice_id"]) is (status in {"not_started", "killed"})
+
+
+def test_v2_natural_completion_survives_cas_and_stopped_exit_never_wakes(tmp_path):
+    agent, _, authority = _fixture(tmp_path / "natural", v2=True)
+    before = authority.load("bg-test-notice").record
+    assert reconcile_process_completions(agent) == 1
+    assert authority.load("bg-test-notice").record["revision"] > before["revision"]
+    assert reconcile_process_completions(agent) == 0
+    stopped, _, stopped_authority = _fixture(tmp_path / "stopped", v2=True, stopped=True)
+    assert reconcile_process_completions(stopped) == 0
+    assert not stopped.conversation_store.wakes.pending(limit=0)
+    assert stopped_authority.load("bg-test-notice").record["completion_notice_id"] == "explicit_stop"
+
+
+def test_store_read_failure_keeps_pending_completion_for_retry(tmp_path):
+    agent, params, authority = _fixture(tmp_path, v2=True)
+    agent.conversation_store.tasks.bind({"thread_id": params.task_attributes["conversation_thread_id"],
+                                        "task_id": params.task_id, "status": "completed", "goal": "test"})
+    assert reconcile_process_completions(agent) == 1
+    signal = agent.conversation_store.wakes.pending(limit=0)[0]
+    (authority.root / ".process-sessions.redo.json").write_text("broken")
+    assert owner_has_pending_process_completions(agent.home_paths.owner_home_dir)
+    assert process_completion_delivery_state(agent, signal) == "receipt_pending"
     assert reconcile_process_completions(agent) == 0

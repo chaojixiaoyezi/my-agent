@@ -10,6 +10,7 @@ import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -499,6 +500,28 @@ def _invoke_with_operation_policy(
     )
 
 
+# LLM: 冻结本调用的精确 task/run/attempt，回调只复读原权威，不重复审批、预算或 operation claim。
+# 函数用途: 给需要锁内准入复查的长期资源提供只读权限检查，后续恢复轮不能替旧调用授权。
+def _operation_authority_check(
+    request: ToolExecutorRequest,
+    call: ToolCall,
+) -> Callable[[], None] | None:
+    require = getattr(request.operation_store, "require_authority", None)
+    if require is None:
+        return None
+    authority = ToolOperationAuthorityRequest(
+        owner_id=request.operation_owner_id,
+        run_id=call.run_id,
+        task_id=_task_id(request),
+        operation_id=call.operation_id,
+        tool_name=call.tool_name,
+        attempt_id=call.attempt_id,
+    )
+    return partial(require, authority)
+
+
+# LLM: handler 前仍使用原结构化拒绝合同；长期资源锁内复查与这里共用同一只读权威检查。
+# 函数用途: 在派发前确认原执行轮有效，缺失或故障均返回未进入 handler 的失败事实。
 def _require_operation_authority(
     request: ToolExecutorRequest,
     call: ToolCall,
@@ -511,20 +534,11 @@ def _require_operation_authority(
     - 门自身故障（其它异常）→ TOOL_OPERATION_STORE_UNAVAILABLE（同族 fail-closed）。
     read-only 只跳过副作用 operation，不绕过 authority（l 契约）。
     """
-    require = getattr(request.operation_store, "require_authority", None)
-    if require is None:
+    check = _operation_authority_check(request, call)
+    if check is None:
         return None
     try:
-        require(
-            ToolOperationAuthorityRequest(
-                owner_id=request.operation_owner_id,
-                run_id=call.run_id,
-                task_id=_task_id(request),
-                operation_id=call.operation_id,
-                tool_name=call.tool_name,
-                attempt_id=call.attempt_id,
-            )
-        )
+        check()
         return None
     except AuthorityContextMissing as exc:
         return apply_tool_execution_facts(
@@ -657,6 +671,7 @@ def _invoke_request(
         owner_type=request.owner_type,
         runtime=runtime,
         cancellation_token=request.cancellation_token,
+        execution_authority_check=_operation_authority_check(request, call),
     )
 
 

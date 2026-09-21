@@ -14,12 +14,13 @@ from types import SimpleNamespace
 import pytest
 
 from agent_py_agent.agent.tooling.action_policy import ActionPolicy, ActionPolicyRequest
+from agent_py_agent.agent.tooling.background_process_launch import start_background_process
 from agent_py_agent.agent.tooling.cancellation import (
     CancellationToken,
     ToolCancelled,
     bind_cancellation_token,
 )
-from agent_py_agent.agent.tooling.process_registry import ProcessRegistration, process_registry
+from agent_py_agent.agent.tooling.process_registry import process_registry
 from agent_py_agent.agent.tooling.process_session_records import LEGACY_PROCESS_SESSION_SCHEMA
 from agent_py_agent.agent.tooling.process_session_store import (
     ProcessSessionStore,
@@ -27,6 +28,7 @@ from agent_py_agent.agent.tooling.process_session_store import (
 )
 from agent_py_agent.agent.tooling.process_sessions import ProcessSessionTool
 from agent_py_agent.agent.tooling.registry import ToolRegistry, ToolRegistryParams
+from agent_py_agent.tests._managed_process_harness import managed_request
 from agent_py_agent.tests._tool_runtime_harness import (
     canonical_test_call,
     execute_approved_registry_test_call,
@@ -164,10 +166,9 @@ def test_process_session_wait_replaces_shell_sleep_polling(tmp_path: Path) -> No
 
 
 def test_long_wait_is_cancellable_without_killing_background_command(tmp_path: Path) -> None:
-    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
-    record = process_registry.register(ProcessRegistration(
-        command="test long wait", pid=process.pid, output_file="", process=process,
-    ))
+    hosted = start_background_process(managed_request(tmp_path))
+    process = hosted.process
+    record = process_registry.attach(hosted.record, process, hosted.store_root)
     token = CancellationToken()
     timer = threading.Timer(0.1, token.cancel)
     timer.start()
@@ -190,11 +191,10 @@ def test_long_wait_budget_exposed_and_bounded() -> None:
     assert ProcessSessionTool._wait_timeout(None) == 30
 
 
-def test_wait_timeout_does_not_terminate_process() -> None:
-    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
-    record = process_registry.register(ProcessRegistration(
-        command="test wait deadline", pid=process.pid, output_file="", process=process,
-    ))
+def test_wait_timeout_does_not_terminate_process(tmp_path) -> None:
+    hosted = start_background_process(managed_request(tmp_path))
+    process = hosted.process
+    record = process_registry.attach(hosted.record, process, hosted.store_root)
     try:
         result = process_registry.wait(record.session_id, 0.01)
         assert result["wait_timed_out"] is True
@@ -609,7 +609,7 @@ def test_background_session_outlives_one_shot_launcher_and_is_rehydrated(tmp_pat
             f"command = {command!r}",
             "tool = ShellTool(root)",
             "result = tool._start_background_command(",
-            "    command, root, None, None, None,",
+            "    command, root, (None, None, None),",
             "    ProcessAccessScope('owner-cross-process', 'thread-cross-process', ''),",
             ")",
             "print(result.output, flush=True)",
@@ -701,3 +701,58 @@ def test_configured_background_shell_profile_adds_session_companion() -> None:
     )
 
     assert decision.allowed_tools == ("run_command", "process_session")
+
+
+@pytest.mark.parametrize("phase", ["before", "during"])
+def test_v2_network_observer_excludes_reused_roots(tmp_path, monkeypatch, phase):
+    from agent_py_agent.agent.tooling import process_network_status as network
+    from agent_py_agent.agent.tooling import process_registry as registry_module
+    from agent_py_agent.agent.tooling.process_session_records import PROCESS_SESSION_SCHEMA
+
+    class ProcPath:
+        def __init__(self, path):
+            self.path = path
+
+        def exists(self):
+            return True
+
+    record = SimpleNamespace(pid=8123, child_pid=8124, persisted_snapshot={
+        "schema": PROCESS_SESSION_SCHEMA, "pid": 8123, "pid_birth_token": "host",
+        "child_pid": 8124, "child_pid_birth_token": "child",
+    })
+    identities = {8123: "reused" if phase == "before" else "host", 8124: "child"}
+    seen = []
+
+    def tree(host, child):
+        seen.append((host, child))
+        return {pid for pid in (host, child) if pid}
+
+    def sockets(pids):
+        if phase == "during":
+            identities[8124] = "reused"
+        return {"123": pids}
+
+    monkeypatch.setattr(network, "os", SimpleNamespace(name="posix"))
+    monkeypatch.setattr(network, "Path", ProcPath)
+    monkeypatch.setattr(registry_module, "capture_process_birth_token", lambda pid: identities[pid])
+    monkeypatch.setattr(network, "_process_tree_pids", tree)
+    monkeypatch.setattr(network, "_socket_inode_owners", sockets)
+    monkeypatch.setattr(network, "_proc_tcp_listeners", lambda *_args, **_kwargs: [])
+    bindings, observed = network._managed_listener_bindings(record, requested_port=0)
+    assert bindings == []
+    if phase == "before":
+        assert seen == [(0, 8124)]
+        assert observed == "observed_no_matching_listener"
+    else:
+        assert seen == [(8123, 8124)]
+        assert observed == "process_identity_changed"
+
+
+def test_v2_network_unknown_is_not_reported_as_stopped(monkeypatch):
+    from agent_py_agent.agent.tooling import process_network_status as network
+
+    monkeypatch.setattr(network, "_managed_listener_bindings", lambda *_args, **_kwargs: ([], "process_identity_unavailable"))
+    monkeypatch.setattr(network, "_host_firewall_observation", lambda _bindings: {"status": "not_applicable"})
+    result = network.managed_process_network_status(SimpleNamespace(session_id="bg-unknown", status="unknown"))
+    assert result["lan_reachability"] == "unknown"
+    assert result["process_status"] == "unknown"

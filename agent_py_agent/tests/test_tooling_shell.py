@@ -94,7 +94,7 @@ class TestShellToolBasics:
         assert not thread.is_alive()
         assert observed["result"].error_code == "CANCELLED"
 
-    def test_background_process_is_terminated_when_owning_token_is_cancelled(
+    def test_handed_off_background_process_survives_old_turn_cancellation(
         self,
         tmp_path: Path,
     ):
@@ -115,15 +115,19 @@ class TestShellToolBasics:
         assert result.ok is True
         session_id = json.loads(result.output)["session_id"]
 
-        token.cancel("test stop")
-        deadline = time.monotonic() + 4
-        status = process_registry.status(session_id)
-        while status and status["status"] == "running" and time.monotonic() < deadline:
-            time.sleep(0.05)
+        try:
+            token.cancel("test interrupt after handoff")
+            time.sleep(0.15)
             status = process_registry.status(session_id)
-
-        assert status is not None
-        assert status["status"] == "exited"
+            assert status is not None
+            assert status["status"] == "running"
+            record = process_registry.get(session_id)
+            assert record.to_record()["handoff_confirmed"] is True
+            assert record.to_record()["stop_requested"] is False
+        finally:
+            stopped = process_registry.kill(session_id)
+            assert stopped["termination"]["confirmed"] is True
+            assert stopped["status"] == "killed"
 
     def test_run_command_with_cwd(self, tmp_path: Path):
         """指定工作目录执行命令。"""

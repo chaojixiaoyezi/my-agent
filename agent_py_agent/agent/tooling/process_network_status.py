@@ -33,7 +33,9 @@ def managed_process_network_status(
     process_status = str(getattr(record, "status", "") or "unknown")
     bindings, observation = _managed_listener_bindings(record, requested_port=port)
     non_loopback = [row for row in bindings if row["scope"] == "non_loopback"]
-    if process_status != "running":
+    if process_status in {"starting", "unknown"}:
+        reachability = "unknown"
+    elif process_status != "running":
         reachability = "process_not_running"
     elif not bindings:
         reachability = "not_listening"
@@ -66,7 +68,7 @@ def managed_process_network_status(
 
 
 # LLM: Linux /proc ownership is joined by socket inode across the exact managed process tree.
-# Unsupported platforms return an explicit observation state instead of guessing from command text.
+# v2 先后核对已绑定根实例，PID 复用不可带来新的观察范围；不支持的平台明确返回未知。
 # 函数用途: 找出当前受管进程及其后代真正持有的 TCP 监听地址。
 def _managed_listener_bindings(
     record: object,
@@ -75,11 +77,21 @@ def _managed_listener_bindings(
 ) -> tuple[list[dict[str, object]], str]:
     if os.name != "posix" or not Path("/proc/net/tcp").exists():
         return [], "unsupported_on_host"
-    pids = _process_tree_pids(
-        int(getattr(record, "pid", 0) or 0),
-        int(getattr(record, "child_pid", 0) or 0),
-    )
+    from .process_registry import capture_process_birth_token
+    from .process_session_records import PROCESS_SESSION_SCHEMA
+
+    payload = getattr(record, "persisted_snapshot", {})
+    roots = [int(getattr(record, key, 0) or 0) for key in ("pid", "child_pid")]
+    identities = {}
+    if payload.get("schema") == PROCESS_SESSION_SCHEMA:
+        identities = {payload[key]: payload[birth] for key, birth in (("pid", "pid_birth_token"), ("child_pid", "child_pid_birth_token")) if payload[key]}
+        roots = [pid if pid and capture_process_birth_token(pid) == identities.get(pid) else 0 for pid in roots]
+        if not any(roots):
+            return [], "process_identity_unavailable"
+    pids = _process_tree_pids(*roots)
     inode_owners = _socket_inode_owners(pids)
+    if identities and any(pid and capture_process_birth_token(pid) != identities[pid] for pid in roots):
+        return [], "process_identity_changed"
     if not inode_owners:
         return [], "observed_no_owned_listener"
     rows: list[dict[str, object]] = []

@@ -999,3 +999,34 @@ def test_required_action_gate_still_blocks_open_actions_without_evidence() -> No
         },
     )
     assert required_action_no_tool_decision(contract) in {"repair", "unfinished", "blocked"}
+
+
+def test_scoped_authority_recheck_freezes_original_call_without_repeating_gate(tmp_path):
+    from agent_py_agent.agent.tooling.models import ToolInvocationContext
+
+    authorities = []
+    gates = []
+    scope = {"task_id": "task-original"}
+
+    class Tool(_CountingTool):
+        def execute_scoped(self, params, context: ToolInvocationContext):
+            assert context.execution_authority_check is not None
+            scope["task_id"] = "task-later"
+            context.execution_authority_check()
+            context.execution_authority_check()
+            return ToolHandlerOutcome(self.model_spec.name, True, "rechecked")
+
+    tool = Tool()
+    request = ToolExecutorRequest(
+        call=_call(tool, {"value": "hello"}), runtime_snapshot=_snapshot(tool), workspace_root=tmp_path,
+        operation_store=SimpleNamespace(require_authority=authorities.append), operation_store_required=False,
+        trusted_run_context={"run_scope": scope},
+        pre_handler_gate=lambda call: gates.append(call),
+    )
+    result = ToolExecutor().execute(request).result
+    assert result.ok
+    assert len(gates) == 1
+    assert len(authorities) == 3
+    assert {row.task_id for row in authorities} == {"task-original"}
+    assert {row.run_id for row in authorities} == {"run-1"}
+    assert {row.attempt_id for row in authorities} == {"attempt-1"}

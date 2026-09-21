@@ -1,6 +1,7 @@
 # 受管后台进程会话
 
-状态：后台 session 主链和 `network_status` 只读投影已部署 `.7` 唯一 Gateway；fresh r53 验收了跨 runner
+状态：安装版仍为已发布 v1。源码已完成 v2 启动预留、明确交接、权威查询和单 session 清理，尚未发布；整任务停止接线与实际复验仍待完成。
+历史后台 session 主链和 `network_status` 只读投影已部署 `.7` 唯一 Gateway；fresh r53 验收了跨 runner
 存活/停止，fresh r10 验收了稳定 session handle、真实 listener PID 和外部探针边界，fresh r27 验收了
 启动观察期内的立即退出不会再被报告成“已启动”。
 
@@ -24,20 +25,21 @@ bwrap 把自己和 HTTP 服务一同退出。界面和最终回复仍拿着启�
 - 本项目已有 `process_session(list/status/wait/stop)`，而用户要求服务在 child 完成后继续供主代理与用户
   使用，因此选 会话运行时 的 Session 所有权语义；不采用“child 一结束就杀服务”的 终端交互 语义。
 
-## 唯一主链
+## 源码唯一主链（v2，未发布）
 
 ```text
 run_command(run_in_background=true)
   -> exact approval / capability / path / sandbox gates
-  -> ShellTool 构造已经校验的 argv
-  -> detached managed host
-       -> bwrap --die-with-parent --new-session
-            -> 用户命令及其后代
-  -> managed_process_session.v1 受保护记录
-  -> 有界启动观察（0.5 秒）
-       -> 仍存活：status=started + stable session_id
-       -> 已退出：status=exited + exit_code + output_tail
+  -> ShellTool 构造已经校验的 argv 并冻结访问/执行身份
+  -> 原 operation 的只读权限复查 + Store 启动预留
+  -> detached managed host 在同一 Store 绑定自己
+       -> 创建标记先提交，锁内 Popen 并绑定精确 child 实例
+       -> bwrap --die-with-parent --new-session / 原平台 argv
+  -> 有界启动观察（0.5 秒）与最后权限/取消复查
+       -> 仍运行或已自然退出：launcher 确认同一 session 交接
+       -> 失败/取消：冻结停止意图，只清理原实例；未确认保持 unknown
   -> process_session list/status/wait/network_status/stop
+  -> host 保存真实业务终态；只有未被停止的自然 exited 发送原完成通知
 ```
 
 关键点：不删除 `bwrap --die-with-parent`。以前它指向短命 agent runner；现在它指向专门的 managed host。
@@ -45,30 +47,40 @@ run_command(run_in_background=true)
 
 ## 组件职责
 
+### `background_process_launch.py`
+
+- 冻结原访问范围、执行归属和 launcher 出生标识；记录进入同一个受保护 Store 后才创建 host。
+- 启动 spec 只含 argv、session 和日志上限，放在 Store 内的私有一次性交接目录；环境只传给进程，不写磁盘。
+- 准入复查复用原 operation 的 task/run/attempt 权限，不再审批、扣预算或重新 claim。
+- 有界观察后，在同一个 Store 锁内重读身份与停止事实，并在交接提交前最后检查取消。
+- 交接成功后旧回合 token 不再拥有该后台程序；持久异常恢复同一句柄，不重复 Popen。
+
 ### `background_process_host.py`
 
-- 每条显式后台命令创建一个独立 OS session；不依赖 Gateway 或 child runner 的 Python 线程继续存活。
-- 只执行 ShellTool 已构造的 argv，`shell=False`，不重新解析模型字符串。
-- 启动文件只用于一次性交接，读取后立即删除；状态文件只记录 running/exited、child PID、退出码和时间。
-- stdout/stderr 继续写工作区 `.background_jobs/*.log`。
-- host 自己持续执行日志上限；即原 runner 与其内存 watchdog 已退出，也不会失去日志保护。
+- 每条显式后台命令由独立 host 持有，child 也建立独立系统进程组；保留原沙箱安全参数。
+- 只执行 ShellTool 已验证的 argv，`shell=False`；host 与 child 在原预留记录上各绑定一次。
+- child 创建标记在系统调用前提交，创建与绑定共用目录锁；进入创建却未能绑定时只能保留未知。
+- 在首次 poll/wait 之前取得 child 出生标识；自然退出也先核对并收回已观察的遗留后代，再保存真实退出码。
+- 交接前持续检查 launcher 的原实例，交接后只读取停止意图和日志上限；不需要 launcher 常驻 watchdog。
+- stdout/stderr 保持原日志地址；v2 不写另一份 host-state 权威。
 
-### `process_session_store.py`
+### `process_session_store.py` 与 `process_session_cleanup.py`
 
-- `managed_process_session.v1` 是跨主代理、子代理和 Gateway 进程的唯一持久事实。
-- owner-scoped 部署把记录放在 owner sandbox 的同级受保护目录，不放进模型可写的 owner home。
-- 每个 session 一个 JSON；文件锁串行更新，原子替换，目录 `0700`、记录 `0600`。
-- session id、host PID、PID 出生指纹和 owner/conversation scope 创建后不可变。
-- 生命周期只允许 `running -> exited|killed`；并发旧缓存不能把终态写回 running，明确 killed 优先。
-- 坏记录返回结构化 load error，不把半条 PID 记录变成可控制进程。
+- v2 沿原 session JSON 地址持久化，版本/身份验证、目录锁和可恢复提交的职责分别由窄模块承接。
+- v1 是确实已经发布的数据格式，只保留原访问范围内按 session 读取/管理，不补猜执行归属或升级。
+- 访问目录仍在 owner 沙箱之外，目录 `0700`、记录 `0600`；模型不能通过普通参数指定它。
+- 多记录停止只提交精确冻结集合；清理入口消费给定记录，不重扫任务、恢复轮或 launcher。
+- 终止原语在采集树后复核冻结出生标识，无法确认的实例和后代保留未确认回执。
+- 停止意图提交后、发信号后以及终态保存后是不同事实；异常保留已提交、待恢复和实际终止回执。
+  被其它事务阻塞恢复不等于本次停止已提交；只有本目标的停止记录才能证明目标提交。
 
 ### `process_registry.py`
 
-- 内存表只作当前进程缓存，不再充当跨 runner 权威。
-- 查询时从 exact store 水合；必须同时匹配 owner、conversation 和 store root。
-- 有 Popen 句柄时直接 poll；跨进程时用 `PID + birth token` 核对，避免 PID 复用后误杀无关进程。
-- host 真正退出后才读取状态文件补命令 exit code；状态文件从不提供授权、PID 或 scope。
-- stop 对 host 与已快照后代做 TERM、宽限、KILL，随后持久化 killed。
+- 缓存以规范 Store 地址和 session ID 共同索引；每次冷热查询都读取当前权威，并保留全部 v2 字段。
+- 只有同目录、同 PID 和同出生标识才能沿用本进程 Popen；查询确认终态时回收该句柄，不用 host 退出码替代 child 退出码。
+- host 消失而业务终态没有可靠记录时标为 unknown；starting/unknown 仍待处理，不发完成通知或冒充退出。
+- 显式 stop 只清理那个 session；完整任务的权限关闭及冻结清单消费由后续控制层接线负责。
+- 旧 v1 host-state 文件仅补充已发布记录的退出观测，不为 v2 提供身份、权限或终态旁路。
 
 ### `process_network_status.py`
 
@@ -88,7 +100,7 @@ run_command(run_in_background=true)
 
 ## 权威记录
 
-`managed_process_session.v1` 至少包含：
+已发布 `managed_process_session.v1` 包含以下旧字段，新源码仍能显式读取：
 
 - `session_id`
 - `pid`：managed host PID，也是 stop 的进程树根
@@ -97,6 +109,9 @@ run_command(run_in_background=true)
 - `owner_id + conversation_id + owner_home`
 - `command + cwd + output_file + host_state_file`
 - `status + exit_code + started_at + finished_at`
+
+新 v2 还明确保存 `revision`、`execution_scope`、launcher/child 出生标识、`reserved_at`、
+`child_launch_started`、`handoff_confirmed` 和 `stop_requested`，不从通知或 command 推断这些事实。
 
 模型可见启动/状态结果只提供稳定 `session_id`，不公开上述 host/child 内部 PID。模型只能提供
 `session_id` 和 action；store root 与访问 scope 都由 ToolRegistry/ToolExecutor 注入，不能由模型覆盖。
@@ -157,7 +172,7 @@ direct/local 控制在精确回合中断成功后，按 `operation=interrupt` �
   [Windows 字节锁](https://docs.python.org/3/library/msvcrt.html#msvcrt.locking)；无 OS 锁的平台明确拒绝。
   原子替换及 redo 只声明进程中断后的恢复，不宣称断电耐久或 Windows 已做实机验收。
 
-当前落地范围为 Store 合同，启动与控制仍待接入：
+当前源码已完成 Store、启动交接及单 session 查询清理，整任务控制仍待接入：
 
 - `process_session_records.py` 统一 v1/v2 校验与不可变身份，v2 的 host/child 只能绑定一次；停止后不能开始 child 创建或确认交接。
 - `process_session_lock.py` 持固定目录锁；`process_session_commit.py` 先预检完整批次，再发布 redo、逐条安装及清日志。
@@ -166,16 +181,16 @@ direct/local 控制在精确回合中断成功后，按 `operation=interrupt` �
   读取、枚举、写入和裁剪都先恢复；事务发布后异常携带固定回执，并使当前锁内视图失效。
 - Store 只记录停止意图，不发信号、不重新扫恢复轮、不另建任务取消状态。控制端仍须先关闭原执行轮的真实权限，
   不能把 request closing 或任务投影终态视作 RuntimeDB 权限已经关闭。既有 UNKNOWN 及锁的保留语义不能改写。
-- 现有 Shell/host 尚未调用 v2，仍显式写 v1；独立测试进程的故障注入不替代 TUI 137 的安装版复验。
+- Shell/host 已调用 v2；已删除启动后 `ProcessRegistration/register` 和 launcher watchdog。独立开发进程的故障注入不替代 TUI 137 的安装版复验。
 
 ### 现有进程会话行为
 
-- host 未完成有界启动握手：返回 `COMMAND_FAILED`，回收该 host 树。
-- 受保护记录无法落盘：先回收 host，再返回失败；绝不留下“已经运行但无人能管”的服务。
+- host 未完成有界启动握手：返回原 session 失败/未知事实，并尝试精确清理；未确认不能写成未启动或已停止。
+- 受保护记录提交异常：保留提交点与恢复回执，读取不可靠时不再发信号或继续启动；明确暴露 UNKNOWN，不能声称清理成功。
 - 记录落盘后在 0.5 秒启动观察期内退出：同一次工具结果返回真实 `exit_code/output_tail`；非零退出为
   `COMMAND_FAILED`，零退出为成功的 `status=exited`，两者都不能叫“后台运行中”。
 - 无法取得 PID 出生指纹：持久会话启动失败并回收，不能退化为只凭 PID 管理。
-- 日志超过上限：host 终止真实命令树并留下 `reason=log_limit_exceeded`。
+- 日志超过上限：host 终止真实命令树并留下 `reason=log_limit_exceeded`；只有回执确认才记 killed，即使命令处理 TERM 后退出码为 0 也不是自然成功。
 - agent runner/Gateway 退出：不自动杀已批准的受管会话；另一个同 scope 进程可重新水合。
 - 主机崩溃或重启：不自动重放命令。旧记录只用于还原真实终态，避免重复副作用。
 

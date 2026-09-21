@@ -1,77 +1,61 @@
-"""审计 #16(部分)修复真测:后台命令日志字节上限——失控/恶意命令写满磁盘前被 killpg 杀掉。
-
-真起一个无限写日志的后台进程,给小的 max_bytes,断言 watchdog 超限即杀整组(进程终止);正常命令不受影响。
-学 终端交互 sizeWatchdog。补 #14 留的"后台日志无字节上限"缺口。
-"""
+"""后台 host 独占日志上限，启动方退出或旧回合取消不影响保护。"""
 
 from __future__ import annotations
 
-import json
-import os
-import subprocess
-import sys
 import time
 
-import pytest
-
-from agent_py_agent.agent.tooling.background_process_host import (
-    start_background_process_host,
+from agent_py_agent.agent.tooling.background_process_launch import (
+    BackgroundLaunchError,
+    start_background_process,
 )
-from agent_py_agent.agent.tooling.shell import _kill_process_group, _LogSizeWatchdog
+from agent_py_agent.agent.tooling.process_registry import process_registry
+from agent_py_agent.agent.tooling.process_session_store import ProcessSessionStore
+from agent_py_agent.tests._managed_process_harness import managed_request
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX 进程组语义(用户:不管 Windows)")
-def test_watchdog_kills_runaway_log(tmp_path) -> None:
-    log = tmp_path / "j.log"
-    handle = log.open("wb")
-    proc = subprocess.Popen(  # 无限写日志,模拟失控/恶意命令
-        "while true; do echo spamspamspam; done", shell=True, stdout=handle, start_new_session=True,
+def test_host_limits_runaway_log_before_handoff(tmp_path):
+    request = managed_request(
+        tmp_path, "while True: print('x' * 1000, flush=True)", max_log_bytes=20_000
     )
     try:
-        _LogSizeWatchdog(proc, log, max_bytes=50_000, interval=0.05).start()
-        end = time.monotonic() + 5.0
-        while proc.poll() is None and time.monotonic() < end:
-            time.sleep(0.05)
-        assert proc.poll() is not None  # 被 watchdog 超限杀掉(没无限写满磁盘)
-    finally:
-        handle.close()
-        if proc.poll() is None:
-            _kill_process_group(proc)
+        hosted = start_background_process(request)
+    except BackgroundLaunchError as exc:
+        record = exc.record
+    else:
+        record = process_registry.attach(
+            hosted.record, hosted.process, hosted.store_root
+        ).to_record()
+        hosted.process.wait(timeout=5)
+    current = ProcessSessionStore(request.store_root).load(record["session_id"]).record
+    assert current["status"] == "killed"
+    assert current["reason"] == "log_limit_exceeded"
+    assert current["termination"]["confirmed"] is True
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX")
-def test_watchdog_lets_normal_command_finish(tmp_path) -> None:
-    log = tmp_path / "j.log"
-    handle = log.open("wb")
-    proc = subprocess.Popen("echo hi-bg", shell=True, stdout=handle, start_new_session=True)
-    _LogSizeWatchdog(proc, log, max_bytes=50_000, interval=0.05).start()
-    proc.wait(timeout=5)
-    handle.close()
-    assert proc.returncode == 0  # 正常小输出命令不被杀,正常结束
-    assert "hi-bg" in log.read_text(encoding="utf-8")
+def test_host_lets_small_output_command_finish_with_actual_code(tmp_path):
+    request = managed_request(tmp_path, "print('hi-bg')")
+    hosted = start_background_process(request)
+    hosted.process.wait(timeout=5)
+    current = ProcessSessionStore(request.store_root).load(hosted.record["session_id"]).record
+    assert current["status"] == "exited"
+    assert current["exit_code"] == 0
+    assert request.log_path.read_text().strip() == "hi-bg"
 
 
-def test_detached_host_keeps_enforcing_log_cap_after_launcher_scope(tmp_path) -> None:
-    """独立 host 自己守日志上限，不依赖已经结束的子代理 watchdog 线程。"""
-
-    log = tmp_path / "hosted.log"
-    hosted = start_background_process_host(
-        [
-            sys.executable,
-            "-u",
-            "-c",
-            "while True: print('x' * 1000, flush=True)",
-        ],
-        cwd=tmp_path,
-        log_path=log,
-        env=dict(os.environ),
+def test_host_keeps_enforcing_cap_after_handoff(tmp_path):
+    request = managed_request(
+        tmp_path,
+        "import time; time.sleep(1.5)\nwhile True: print('x' * 1000, flush=True)",
         max_log_bytes=20_000,
     )
+    hosted = start_background_process(request)
+    record = process_registry.attach(hosted.record, hosted.process, hosted.store_root)
     try:
-        hosted.process.wait(timeout=6)
-        state = json.loads(hosted.state_file.read_text(encoding="utf-8"))
-        assert state["status"] == "exited"
-        assert state["reason"] == "log_limit_exceeded"
+        assert record.to_record()["handoff_confirmed"] is True
+        hosted.process.wait(timeout=5)
+        current = ProcessSessionStore(request.store_root).load(record.session_id).record
+        assert current["status"] == "killed"
+        assert current["reason"] == "log_limit_exceeded"
+        assert current["finished_at"] <= time.time()
     finally:
-        if hosted.process.poll() is None:
-            _kill_process_group(hosted.process)
+        process_registry.kill(record.session_id, record.access_scope, hosted.store_root)

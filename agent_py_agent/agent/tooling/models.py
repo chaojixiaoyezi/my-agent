@@ -1,3 +1,5 @@
+# LLM: 本模块定义工具元数据与不可变调用合同；执行权威回调只留在宿主上下文，不能进入模型参数或跨调用缓存。
+# 模块用途: 统一工具声明、结果与调用上下文，让执行器和实现按同一份结构化协议协作。
 from __future__ import annotations
 
 """Defines stable tool metadata, retrieval hits, and base execution contracts."""
@@ -5,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
@@ -1134,12 +1137,13 @@ def _tool_runtime_snapshot_hash(
     )
 
 
-# LLM: 工具实现拿到的是不可变调用上下文；目录工具不能再从进程全局注册表猜测本轮权限。
-# 类用途: 把同一请求快照传给 list_tools/tool_search，同时让普通工具沿用原 execute 合同。
+# LLM: 调用上下文不向模型序列化；只读权威回调冻结原 task/run/attempt，不重复审批或预算，不能保存在工具实例上。
+# 类用途: 传递同一调用快照、取消信号及长期资源启动时需要的精确权限复查。
 @dataclass(frozen=True)
 class ToolInvocationContext:
     runtime_snapshot: ToolRuntimeSnapshot
     cancellation_token: object | None = None
+    execution_authority_check: Callable[[], None] | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass

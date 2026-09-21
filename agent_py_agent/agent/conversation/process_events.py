@@ -6,7 +6,8 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from ..tooling.process_registry import process_registry
+from ..tooling.process_registry import ProcessSessionAuthorityError, process_registry
+from ..tooling.process_session_records import PROCESS_TERMINAL_STATUSES
 from ..tooling.process_session_store import ProcessSessionStore, process_session_store_root
 
 PROCESS_COMPLETION_REASON = "managed_process_exited"
@@ -44,7 +45,7 @@ def _agent_process_root(agent: object) -> Path | None:
 
 
 # LLM: 宿主周期 tick 与前台安全点共用此入口；先持久去重入队，再标记已发布，崩溃重入不丢不重。
-# killed 只登记已观察，不重新唤醒用户明确停止的命令；日志全文不复制进上下文，只有原文件引用。
+# 仅自然 exited 可唤醒，starting/unknown 不通知，明确停止或未启动只结算；写回重读同一 ID，日志只传引用。
 # 函数用途: 自动收割已结束后台命令并通知所属主会话；一个损坏记录不会阻塞其它会话。
 def reconcile_process_completions(agent: object) -> int:
     store = getattr(agent, "conversation_store", None)
@@ -70,14 +71,17 @@ def reconcile_process_completions(agent: object) -> int:
             continue
         try:
             summary = process_registry.status(str(payload["session_id"]), store_root=root)
-            if not summary or summary["status"] == "running":
+            if not summary or summary["status"] not in PROCESS_TERMINAL_STATUSES:
                 continue
-            current = authority.load(str(payload["session_id"])).record
-            if not current or current.get("completion_notice_id"):
+            report = authority.load(str(payload["session_id"]))
+            if report.load_error:
+                raise ProcessSessionAuthorityError(report.load_error)
+            current = report.record
+            if not current or current.get("completion_notice_id") or current["status"] not in PROCESS_TERMINAL_STATUSES:
                 continue
             notice_id = "explicit_stop"
-            if summary["status"] != "killed":
-                facts = {key: summary[key] for key in ("session_id", "status", "exit_code", "output_file") if key in summary}
+            if current["status"] == "exited" and not current.get("stop_requested"):
+                facts = {key: current[key] for key in ("session_id", "status", "exit_code", "output_file") if key in current}
                 signal = store.wakes.raise_signal({
                     "thread_id": target["thread_id"], "root_task_id": target["task_id"],
                     "source_agent_id": target["run_id"], "reason": PROCESS_COMPLETION_REASON,
@@ -87,18 +91,30 @@ def reconcile_process_completions(agent: object) -> int:
                 })
                 notice_id = signal.wake_signal_id
                 sent += 1
-            authority.write({**current, "completion_notice_id": notice_id})
+            _record_completion_notice(authority, current, notice_id)
         except Exception:
             _LOG.exception("PROCESS_COMPLETION_RETRY session=%s", payload["session_id"])
     return sent
 
 
-# LLM: 发现层只判断尚欠通知的结构化记录存在，真实是否退出由 registry PID 出生标识核对。
+# LLM: 发布后只重读同一 session，终态或停止改变不重发 wake；不强换旧 revision 覆盖新记录。
+# 函数用途: 保存原完成通知的去重回执，显式停止优先结算为不再唤醒。
+def _record_completion_notice(authority: ProcessSessionStore, current: dict[str, object], notice_id: str) -> None:
+    with authority.transaction() as transaction:
+        latest = transaction.load(str(current["session_id"]))
+        if latest is None or latest.get("completion_notice_id"):
+            return
+        if latest.get("completion_target") != current["completion_target"] or latest["status"] not in PROCESS_TERMINAL_STATUSES:
+            raise ValueError("process completion authority changed")
+        transaction.write({**latest, "completion_notice_id": "explicit_stop" if latest.get("stop_requested") else notice_id})
+
+
+# LLM: 发现层只判断尚欠通知的结构化记录；权威读取失败保留待检查，不能当成没有义务。
 # 函数用途: Gateway 重启或 owner 热缓存淘汰后，仍能发现后台命令，不让完成通知无人处理。
 def owner_has_pending_process_completions(owner_home: Path) -> bool:
     root = process_session_store_root(owner_home, owner_home)
-    records, _errors = ProcessSessionStore(root).list_records()
-    return any(record.get("completion_target") and not record.get("completion_notice_id") for record in records)
+    records, errors = ProcessSessionStore(root).list_records()
+    return bool(errors) or any(record.get("completion_target") and not record.get("completion_notice_id") for record in records)
 
 
 # LLM: 终态和收件身份匹配后分辨 ready/receipt_pending；发布间隙或回执写失败须等重投，不能误消费。
@@ -113,8 +129,11 @@ def process_completion_delivery_state(agent: object, signal: object) -> str:
     facts = (getattr(signal, "metadata", None) or {}).get("process_completion")
     if not isinstance(facts, dict) or not facts.get("session_id"):
         return ""
-    record = ProcessSessionStore(root).load(str(facts["session_id"])).record
-    if not record or record.get("status") != "exited":
+    report = ProcessSessionStore(root).load(str(facts["session_id"]))
+    if report.load_error:
+        return "receipt_pending"
+    record = report.record
+    if not record or record.get("status") != "exited" or record.get("stop_requested"):
         return ""
     target = record.get("completion_target") or {}
     if target != {"store_root": str(store.storage.root), "thread_id": signal.thread_id,

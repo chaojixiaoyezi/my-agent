@@ -87,7 +87,7 @@ class ProcessSessionTransaction:
                 if record is not None:
                     records.append(record)
             except (OSError, TypeError, ValueError) as exc:
-                errors.append(_store_error(exc, "process_session_store.validate", path=path))
+                errors.append(process_session_error_report(exc, "process_session_store.validate", path=path))
         return records, errors
 
     # LLM: v1 沿原逐记录锁合并，v2 使用 revision CAS 和 redo；任何坏旧记录都不能被静默覆盖。
@@ -212,7 +212,7 @@ class ProcessSessionStore:
                 return ProcessSessionLoadReport(transaction.load(session_id) or {})
         except (OSError, TypeError, ValueError, RuntimeError) as exc:
             return ProcessSessionLoadReport(
-                {}, _store_error(exc, "process_session_store.load", path=self.root)
+                {}, process_session_error_report(exc, "process_session_store.load", path=self.root)
             )
 
     # LLM: 只有普通 session 损坏可返回健康子集；事务日志损坏影响整个视图，必须返回空集及错误。
@@ -224,7 +224,7 @@ class ProcessSessionStore:
             with self.transaction() as transaction:
                 return transaction.list_records()
         except (OSError, TypeError, ValueError, RuntimeError) as exc:
-            return [], [_store_error(exc, "process_session_store.list", path=self.root)]
+            return [], [process_session_error_report(exc, "process_session_store.list", path=self.root)]
 
     # LLM: 与预留和交接共用锁；调用方必须先关闭旧执行轮准入，再冻结资源，不能用本方法替代任务取消。
     # 函数用途: 提交精确任务的停止清单，供控制层在锁外清理这些资源。
@@ -244,7 +244,7 @@ class ProcessSessionStore:
 
 # LLM: 诊断只公开错误分类、路径与已提交身份，不包含记录正文；调用者可以辨别提交后故障。
 # 函数用途: 把存储错误转换为统一回执，避免未知安装状态被表现成没有资源。
-def _store_error(
+def process_session_error_report(
     exc: BaseException, context: str, *, path: Path | None = None
 ) -> dict[str, object]:
     report = runtime_error_report(exc, context=context)

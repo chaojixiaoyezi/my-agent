@@ -314,13 +314,15 @@ agent_py_agent/
 |   |   |-- capabilities_tool.py      # 从真实工具目录与唯一 channel registry 投影模型能力
 |   |   |-- _filesystem_display.py   # 文件工具共用的有界 diff/write 富终端展示事实构造器
 |   |   |-- _persona_write_guard.py   # SOUL/USER/AGENTS 统一强制走 update_persona
-|   |   |-- background_process_host.py # 脱离 one-shot runner 的后台命令托管、日志上限与退出事实
+|   |   |-- background_process_launch.py # v2 启动预留、原执行权威复查、有界观察与明确交接
+|   |   |-- background_process_host.py # 独立绑定业务子进程、检查交接前启动者、限制日志并提交真实终态
 |   |   |-- process_scope.py          # 资源访问身份与执行归属的纯合同，按精确任务/run/attempt 选择
 |   |   |-- process_registry.py       # 受保护记录的进程缓存、水合、PID 身份核对与完整后代树终止
 |   |   |-- process_session_store.py  # 原 session 地址的互斥读写、版本 CAS、精确停止清单与裁剪
 |   |   |-- process_session_records.py # v1 显式读取与 v2 启动、实例绑定、交接及单调状态合同
 |   |   |-- process_session_lock.py   # 后台记录目录的线程及跨进程系统互斥，不支持时明确拒绝
 |   |   |-- process_session_commit.py # 固定 v2 批次的 redo 发布、完整预检、安装恢复及提交回执
+|   |   |-- process_session_cleanup.py # 冻结单 session 实例的精确清理与保留已提交副作用的异常回执
 |   |   |-- process_network_status.py # exact 受管进程树监听、防火墙显式规则与外部探针边界的只读投影
 |   |   |-- process_sessions.py       # owner+TUI 会话隔离的后台命令查询、等待与停止工具
 |   |   |-- gateway_status.py         # 本机管理员读取唯一 Gateway 身份、端点、队列和本生命周期日志摘要
@@ -461,6 +463,8 @@ docs/
 
 - `agent_py_agent/agent/tooling/process_scope.py`：后台访问身份与 PTY 执行身份的唯一类型定义，缺失的任务归属不从访问回退或工作目录推断；不持有资源或执行取消。
 - `agent_py_agent/agent/tooling/process_session_store.py`：受保护进程记录的统一入口，读写与裁剪先恢复同一目录的未完成提交；持锁事务提供启动检查点和精确停止意图，实际进程信号仍由调用方负责。
+- `agent_py_agent/agent/tooling/background_process_launch.py`：启动方先预留再交接，原 execution 权限只读复查；host 只绑定一次 child，交接后由精确资源停止控制。
+- `agent_py_agent/agent/tooling/process_session_cleanup.py`：只清理原 Store 冻结的 host/child 出生实例，不按任务重扫；保留未确认及已提交待恢复回执。
 - `agent_py_agent/agent/tooling/process_session_records.py`：纯数据校验与单调合并；`process_session_commit.py` 只安装固定记录，`process_session_lock.py` 只负责互斥。v1 不隐式升级或获得任务停止授权。
 - `agent_py_agent/agent/command_catalog.py`：无 UI/执行依赖的公共命令声明；原控制参数仍归会话模块，插件后缀识别不等于身份校验或可执行授权。
 

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 # LLM: 本模块承接 ToolExecutor 已授权的同一 ToolRuntimeSnapshot；路径上下文只能收窄，不能重选 handler 或重新冻结可用性。调整时联查 executor、action_policy 及工具作用域回归。
-# 模块用途: 准备单次工具的工作目录、读写边界和取消上下文，再调用快照绑定的实现；不负责工具发现或插件装卸。
+# 模块用途: 准备单次工具的路径、取消和只读执行权威检查，再调用快照绑定的实现；不负责工具发现或插件装卸。
 """Execute an authorized registry tool after parsing and auth checks."""
 
 import json
@@ -43,9 +43,8 @@ _SANDBOX_WRITE_BOUNDARY_TOOL_NAMES = {"run_command", "terminal_session", "lsp"}
 _BOUNDARY_CONTEXT_TOOL_NAMES = _BOUNDARY_FILESYSTEM_TOOL_NAMES | _SANDBOX_WRITE_BOUNDARY_TOOL_NAMES
 
 
-# LLM: This request is the immutable per-invocation permission snapshot. Shared registry handlers
-# must never be mutated from its workspace, owner, or private-network fields.
-# 类用途: 将一次工具调用的参数、工作区、owner 墙和运行快照固定在一起。
+# LLM: 每次调用冻结权限及只读 execution 复查；不能修改共享 handler，复查不重跑审批或预算。
+# 类用途: 固定工具参数、工作区、owner 墙和当前执行权威，在真正启动与交接时仍可核对原调用。
 @dataclass(frozen=True)
 class RegistryToolInvokeRequest:
     tool_name: str
@@ -61,6 +60,7 @@ class RegistryToolInvokeRequest:
     runtime_snapshot: ToolRuntimeSnapshot | None = None
     owner_type: str = "main_agent"
     cancellation_token: object | None = None
+    execution_authority_check: Callable[[], None] | None = None
     # Canonical executor supplies the exact immutable binding selected from the
     # run snapshot. Missing bindings fail closed; this is not a public adapter.
     runtime: ToolRuntime | None = None
@@ -205,6 +205,7 @@ def invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolHandlerOutco
                 invocation_context=ToolInvocationContext(
                     runtime_snapshot=_invocation_snapshot(request),
                     cancellation_token=request.cancellation_token,
+                    execution_authority_check=request.execution_authority_check,
                 ),
             )
         ),

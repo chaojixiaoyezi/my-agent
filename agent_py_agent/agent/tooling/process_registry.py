@@ -3,53 +3,30 @@
 # 模块用途: 记录受管进程并按精确执行归属停止，核对原进程树和独立组成员退出，不把发送信号当成清理完成。
 from __future__ import annotations
 
-"""后台进程注册表 —— 让模型能管住 run_command(run_in_background=true) 起的后台进程。
-
-学标杆 长期助手 tools/process_registry.py 的 ProcessSession + ProcessRegistry 设计
-(输出滚动缓冲、状态轮询 poll()、按 ID 杀进程组、列表),裁剪适配 my-agent:
-
-适配差异(为什么不照搬 长期助手):
-  - my-agent 的 run_command 后台路径已经把 stdout/stderr 落到 .background_jobs/*.log
-    日志文件(handle 写盘),不像 长期助手 用 stdout=PIPE + 后台 reader 线程实时读。
-    所以这里"滚动输出缓冲"= 查询时惰性读日志文件尾部,不另起常驻 reader 线程
-    (零额外线程,CI 友好,不引入 reader 卡死/孤儿线程那一类坑)。
-  - 状态更新惰性化:不起后台轮询线程,而是在 list/status/kill 被调用时用
-    Popen.poll() 或持久 PID 出生标识收割状态。显式后台命令由独立 host 持有，
-    所以 one-shot 子代理结束后沙箱进程不会被 bwrap --die-with-parent 一起收掉；
-    主代理、子代理和 Gateway 通过同一受保护记录继续管理它。
-  - 不做自动重启后台命令：host 和持久记录只保证跨 one-shot runner 的生命周期、
-    查询与停止；主机崩溃后保持真实终态，不凭旧记录擅自重放有副作用的命令。
-
-杀进程组(避免杀父留子):后台 Popen 用 start_new_session=True 建独立进程组
-(POSIX setsid),kill 时对整个进程组发信号(os.killpg(os.getpgid(pid))),
-SIGTERM 宽限后再 SIGKILL;Windows 用 taskkill /T /F 杀进程树。
-"""
-
-# LLM: 本模块是后台 shell 的唯一进程事实源；任何模型可见的查询或停止入口都必须
-# 携带 host 注入的 ProcessAccessScope，不能仅凭可猜的 session_id 访问全局记录；
-# 终止回执必须区分已发信号与已确认退出，供前台超时和后台停止共用。
-# 模块用途: 登记后台命令、隔离查询并终止进程树，保留实际退出核对结果而不凭信号宣称成功。
-
 import json
 import os
 import signal
 import subprocess
 import threading
 import time
-import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 from ..common.json_io import read_json_object
-from .background_process_host import HOST_STATE_SCHEMA
 from .cancellation import current_cancellation_token, raise_if_cancelled
 from .process_scope import ProcessAccessScope
-from .process_session_records import LEGACY_PROCESS_SESSION_SCHEMA
+from .process_session_records import (
+    LEGACY_PROCESS_SESSION_SCHEMA,
+    PROCESS_SESSION_SCHEMA,
+    PROCESS_TERMINAL_STATUSES,
+)
 from .process_session_store import (
     ProcessSessionStore,
+    process_session_error_report,
 )
 
+HOST_STATE_SCHEMA = "background_process_host.v1"  # 仅供已发布 v1 记录读取旧终态文件。
 _IS_WINDOWS = os.name == "nt"
 
 # 杀进程时 SIGTERM 到 SIGKILL 的宽限秒数。先礼(SIGTERM 让进程自己清理)后兵
@@ -72,24 +49,14 @@ _OUTPUT_TAIL_CHARS = 4000
 _MAX_FINISHED = 128
 
 
-# LLM: Process registration is one immutable launch fact. Bundle it before the
-# registry lock so call sites cannot shift positional fields or grow another
-# parallel registration signature; access scope and store root remain typed.
-# 类用途: 汇总刚启动后台 host 的登记参数，交给唯一 ProcessRegistry 入口原子落盘。
-@dataclass(frozen=True)
-class ProcessRegistration:
-    command: str
-    pid: int
-    output_file: str
-    process: subprocess.Popen | None = None
-    cwd: str = ""
-    session_id: str | None = None
-    access_scope: ProcessAccessScope | None = None
-    completion_target: dict[str, str] = field(default_factory=dict)
-    child_pid: int = 0
-    pid_birth_token: str = ""
-    host_state_file: str = ""
-    store_root: str | Path | None = None
+# LLM: 结构化错误区别权威损坏和记录不存在，不展开其它会话的记录内容。
+# 类用途: 阻止查询或停止在存储故障后继续使用旧缓存。
+class ProcessSessionAuthorityError(RuntimeError):
+    # LLM: 保留 Store 的脱敏分类供工具返回，异常消息不包含命令或身份正文。
+    # 函数用途: 向调用方报告原权威不可读取。
+    def __init__(self, report: dict[str, object]) -> None:
+        super().__init__("managed process authority unavailable")
+        self.report = report
 
 
 # LLM: 记录既保存进程生命周期事实，也保存启动时的不可变访问范围；后续查询不得
@@ -111,29 +78,33 @@ class BackgroundProcess:
     pid_birth_token: str = ""
     host_state_file: str = ""
     store_root: str = ""
-    status: str = "running"  # running / exited / killed
+    status: str = "running"
     exit_code: int | None = None
     finished_at: float | None = None
     completion_target: dict[str, str] = field(default_factory=dict)
     completion_notice_id: str = ""
+    persisted_snapshot: dict[str, object] = field(default_factory=dict, repr=False)
 
     # LLM: Terminal is a typed host fact; model text and host-state prose never
     # participate in this transition.
-    # 函数用途: 判断受管后台会话是否已经结束或被明确停止。
+    # 函数用途: 判断业务是否已退出、被终止或确定未启动；此标志不替代 host 资源清理回执。
     def is_terminal(self) -> bool:
-        return self.status in {"exited", "killed"}
+        return self.status in PROCESS_TERMINAL_STATUSES
 
-    # LLM: 摘要只暴露 session 句柄；日志字节数区分相同尾部的新增输出，读取失败为未知，不能改进程终态。
+    # LLM: 摘要只暴露 session 管理句柄和控制标记；启动未确认时没有开始时间，日志错误不能改终态。
     # 函数用途: 生成后台进程的状态和日志观测，耗时与输出增长分开，宿主 PID 保持内部使用。
     def to_summary(self, *, include_output: bool = False, output_tail_chars: int = _OUTPUT_TAIL_CHARS) -> dict[str, Any]:
         summary: dict[str, Any] = {
             "session_id": self.session_id,
             "command": self.command[:200],
             "status": self.status,
-            "started_at": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(self.started_at)),
-            "uptime_seconds": int((self.finished_at or time.time()) - self.started_at),
+            "started_at": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(self.started_at)) if self.started_at else None,
+            "uptime_seconds": max(0, int((self.finished_at or time.time()) - self.started_at)) if self.started_at else 0,
             "output_file": self.output_file,
         }
+        if self.persisted_snapshot.get("schema") == PROCESS_SESSION_SCHEMA:
+            summary.update(stop_requested=self.persisted_snapshot["stop_requested"],
+                           handoff_confirmed=self.persisted_snapshot["handoff_confirmed"])
         if self.exit_code is not None:
             summary["exit_code"] = self.exit_code
         if include_output:
@@ -144,11 +115,12 @@ class BackgroundProcess:
                 summary["output_bytes"] = None
         return summary
 
-    # LLM: 现有启动仍明确写 v1；新 host 交接未接入前不得伪造 v2 执行身份，Popen 句柄不持久化。
-    # 函数用途: 保存原已绑定后台进程的访问身份与生命周期，保持已发布记录可由其他进程读取。
+    # LLM: 保留已验证记录的全部版本字段；旧版本不升级，新版本不丢执行身份、revision 或控制事实。
+    # 函数用途: 返回当前缓存快照的持久字段，Popen 永不序列化。
     def to_record(self) -> dict[str, object]:
         return {
-            "schema": LEGACY_PROCESS_SESSION_SCHEMA,
+            **self.persisted_snapshot,
+            "schema": self.persisted_snapshot["schema"],
             "session_id": self.session_id,
             "command": self.command,
             "pid": self.pid,
@@ -170,9 +142,8 @@ class BackgroundProcess:
             "completion_notice_id": self.completion_notice_id,
         }
 
-    # LLM: Hydration accepts only ProcessSessionStore-validated payloads and
-    # creates a handle-free record whose lifecycle is checked by PID identity.
-    # 函数用途: 从另一进程写下的后台会话记录恢复可查询、可停止的内存对象。
+    # LLM: 只接受 Store 验证的当前记录，完整保留 v1/v2 字段；本地句柄只能在同目录同出生实例核对后附加。
+    # 函数用途: 恢复另一进程写下的当前状态、执行归属和控制事实，不从访问范围猜任务身份。
     @classmethod
     def from_record(
         cls,
@@ -204,6 +175,7 @@ class BackgroundProcess:
             finished_at=float(finished_at) if finished_at is not None else None,
             completion_target=dict(payload.get("completion_target") or {}),
             completion_notice_id=str(payload.get("completion_notice_id") or ""),
+            persisted_snapshot=dict(payload),
         )
 
 
@@ -231,312 +203,233 @@ def _read_log_tail(output_file: str, max_chars: int) -> str:
     return text
 
 
-# LLM: Registry is a process-local cache over ProcessSessionStore. Every
-# model-visible call must provide the exact access_scope and store_root; None is
-# reserved for same-process compatibility and tests. Never reintroduce an
-# in-memory-only authority because subagent runners are intentionally one-shot.
-# 类用途: 跨进程登记、等待、列出和终止后台命令，并按用户会话精确隔离。
+# LLM: 此表只缓存原 Store 记录和本进程句柄；任何冷热查询都先刷新权威，锁顺序始终 registry 到 Store。
+# 类用途: 按精确访问范围查询、等待和停止持久后台会话，不再在启动后创建另一份登记。
 class ProcessRegistry:
-    """后台进程会话注册表；内存做加速，受保护 JSON 是跨进程权威。"""
-
-    # LLM: The lock protects this process's cache; cross-process serialization is
-    # supplied by ProcessSessionStore's per-record file lock.
-    # 函数用途: 初始化空的进程会话缓存。
+    # LLM: key 同时包含规范目录和 session ID；不同 owner 的同名句柄不会复用进程对象。
+    # 函数用途: 初始化本进程缓存和互斥。
     def __init__(self) -> None:
-        self._processes: dict[str, BackgroundProcess] = {}
+        self._processes: dict[tuple[str, str], BackgroundProcess] = {}
         self._lock = threading.Lock()
 
-    # LLM: IDs must be collision-resistant across concurrently exiting subagent
-    # processes; a process-local counter is insufficient.
-    # 函数用途: 生成可读且跨进程不冲突的后台 session id。
-    def _next_session_id(self) -> str:
-        return f"bg-{int(time.time())}-{uuid.uuid4().hex[:16]}"
+    # LLM: 原记录必须已经提交；附加 Popen 不新建 ID 或重写生命周期，实例不符明确拒绝。
+    # 函数用途: 接管启动方已经交接的同一个会话，保留可回收的本地 host 句柄。
+    def attach(self, payload: dict[str, object], process: subprocess.Popen, store_root: Path) -> BackgroundProcess:
+        from .process_session_records import merge_process_record
 
-    # LLM: access_scope is frozen into the record at launch and cannot be replaced later by a
-    # caller-supplied session id; callers without trusted scope remain internal-only records.
-    # 函数用途: 登记一条刚启动的后台命令，并返回后续管理所需的 session id。
-    def register(self, request: ProcessRegistration) -> BackgroundProcess:
-        """登记一个刚启动的后台 host，并在可用时同步写入跨进程权威记录。"""
         with self._lock:
-            sid = request.session_id or self._next_session_id()
-            birth_token = str(request.pid_birth_token or "") or capture_process_birth_token(
-                request.pid
-            )
-            if request.store_root and not birth_token:
-                raise OSError("cannot establish managed process birth identity")
-            record = BackgroundProcess(
-                session_id=sid,
-                command=request.command,
-                pid=request.pid,
-                started_at=time.time(),
-                access_scope=request.access_scope or ProcessAccessScope(),
-                cwd=request.cwd,
-                output_file=request.output_file,
-                process=request.process,
-                child_pid=max(0, int(request.child_pid or 0)),
-                pid_birth_token=birth_token,
-                host_state_file=str(request.host_state_file or ""),
-                completion_target=dict(request.completion_target),
-                store_root=(
-                    str(Path(request.store_root).resolve(strict=False))
-                    if request.store_root
-                    else ""
-                ),
-            )
-            self._persist_locked(record)
-            self._processes[sid] = record
-            self._prune_finished_locked()
+            record = self._visible_record_locked(str(payload["session_id"]), None, store_root)
+            if record is None:
+                raise ProcessSessionAuthorityError({"error_type": "authority_missing"})
+            merge_process_record(payload, record.to_record())
+            if process.pid != record.pid:
+                raise ValueError("managed process handle conflict")
+            record.process = process
+            self._prune_finished_locked(store_root)
             return record
 
-    # LLM: access_scope 非空时必须精确匹配启动记录，错误 scope 与不存在统一返回 None，
-    # 避免通过错误差异探测其他用户的 session_id。
-    # 函数用途: 在允许的用户会话范围内取得一条后台进程记录。
-    def get(
-        self,
-        session_id: str,
-        access_scope: ProcessAccessScope | None = None,
-        store_root: str | Path | None = None,
-    ) -> BackgroundProcess | None:
-        with self._lock:
-            return self._visible_record_locked(session_id, access_scope, store_root)
-
-    # LLM: Refresh trusts only the exact Popen handle or the persisted PID birth
-    # token. Host state may supply the child exit code only after that host is dead.
-    # 函数用途: 惰性核对 host 是否仍是同一进程，结束后补上真实命令退出码并持久化。
-    def _refresh_locked(self, record: BackgroundProcess) -> None:
-        if record.is_terminal():
-            return
-        proc = record.process
-        return_code: int | None = None
-        if proc is not None:
-            return_code = proc.poll()
-            if return_code is None:
-                return
-        elif _same_process(record.pid, record.pid_birth_token):
-            return
-        host_state = _host_terminal_state(record.host_state_file)
-        record.status = "exited"
-        record.exit_code = (
-            int(host_state["exit_code"])
-            if host_state.get("exit_code") is not None
-            else return_code
-        )
-        record.finished_at = float(host_state.get("finished_at") or time.time())
-        self._persist_locked(record)
-
-    # LLM: status 的日志尾部可能包含外部数据，只能在 scope 匹配后读取。
-    # 函数用途: 查询一个后台进程的状态和最近输出。
-    def status(
-        self,
-        session_id: str,
-        access_scope: ProcessAccessScope | None = None,
-        store_root: str | Path | None = None,
-    ) -> dict[str, Any] | None:
-        """查单个进程状态 + 最近输出(日志尾部)。不存在返回 None。"""
-        with self._lock:
-            record = self._visible_record_locked(session_id, access_scope, store_root)
-            if record is None:
-                return None
-            self._refresh_locked(record)
-            return record.to_summary(include_output=True)
-
-    # LLM: 模型工具必须传 scope；内部 None 调用仍可看全表用于 Gateway 清理和旧测试。
-    # 函数用途: 列出当前用户会话可见的后台进程摘要。
-    def list(
-        self,
-        access_scope: ProcessAccessScope | None = None,
-        store_root: str | Path | None = None,
-    ) -> list[dict[str, Any]]:
-        """列出所有登记的后台进程；跨进程记录会先加载到当前缓存。"""
-        rows, _errors = self.list_report(access_scope, store_root)
-        return rows
-
-    # LLM: Corrupt store records remain structured diagnostics rather than being
-    # silently omitted from the model-facing list response.
-    # 函数用途: 列出当前会话后台进程，并同时返回权威文件损坏信息。
-    def list_report(
-        self,
-        access_scope: ProcessAccessScope | None = None,
-        store_root: str | Path | None = None,
-    ) -> tuple[list[dict[str, Any]], list[dict[str, object]]]:
-        with self._lock:
-            load_errors = self._hydrate_store_locked(store_root)
-            records = [
-                record
-                for record in self._processes.values()
-                if (access_scope is None or record.access_scope == access_scope)
-                and _record_matches_store(record, store_root)
-            ]
-            for record in records:
-                self._refresh_locked(record)
-            # 运行中的排前面,其次按启动时间倒序(新的在前)。
-            records.sort(key=lambda item: (item.is_terminal(), -item.started_at))
-            return [record.to_summary(include_output=False) for record in records], load_errors
-
-    # LLM: kill 在拿到 PID 前先做 scope 精确匹配，实际发信号放在锁外；二次回锁时
-    # 仍核对同一记录，只有终止回执确认后才登记 killed，不能把已发信号写成退出事实。
-    # 函数用途: 停止当前用户会话所属的后台进程及后代，持久化已确认的终态并返回核对信息。
-    def kill(
-        self,
-        session_id: str,
-        access_scope: ProcessAccessScope | None = None,
-        store_root: str | Path | None = None,
-    ) -> dict[str, Any] | None:
-        """SIGTERM→(宽限超时)SIGKILL 杀进程组,更新状态。不存在返回 None;
-        已结束返回 already_exited。"""
-        with self._lock:
-            record = self._visible_record_locked(session_id, access_scope, store_root)
-            if record is None:
-                return None
-            self._refresh_locked(record)
-            if record.is_terminal():
-                return {
-                    "session_id": record.session_id,
-                    "status": "already_exited" if record.status == "exited" else record.status,
-                    "exit_code": record.exit_code,
-                    "message": "进程已经结束,无需终止。",
-                }
-            pid = record.pid
-            proc = record.process
-
-        # 真正杀进程在锁外做(killpg + 宽限 + wait 可能耗时,不长占锁阻塞 list/status)。
-        termination = terminate_process_tree(pid, proc)
-
+    # LLM: 越界和缺失统一为空，损坏权威必须报错而不是拿缓存补成功；日志只能在范围校验后读取。
+    # 函数用途: 获取当前有效会话，并检查托管进程是否失去控制。
+    def get(self, session_id: str, access_scope: ProcessAccessScope | None = None,
+            store_root: str | Path | None = None) -> BackgroundProcess | None:
         with self._lock:
             record = self._visible_record_locked(session_id, access_scope, store_root)
             if record is not None:
-                if termination.confirmed:
-                    record.status = "killed"
-                    record.finished_at = time.time()
-                    record.exit_code = termination.return_code
-                self._persist_locked(record)
-                summary = record.to_summary(include_output=False)
-                summary["signal"] = termination.method
-                summary["termination"] = asdict(termination)
-                summary["message"] = (
-                    "已确认观察到的进程树终止。" if termination.confirmed
-                    else "已尝试终止，但仍无法确认所有进程退出；未登记已停止。"
-                )
-                return summary
-        return None
+                self._refresh_locked(record)
+            return record
 
-    # LLM: wait 只等待真实 Popen/PID，使用单调时钟与宿主取消令牌；取消等待不等于杀后台进程，
-    # 不持注册表锁等待，不循环请求模型，届满仍返回 running，不能改成失败或重放命令。
-    # 函数用途: 可中断地长等后台结果；用户插话/停止能释放工具线程，其他会话仍可查询与控制。
-    def wait(
-        self,
-        session_id: str,
-        timeout_seconds: float,
-        access_scope: ProcessAccessScope | None = None,
-        store_root: str | Path | None = None,
-    ) -> dict[str, Any] | None:
-        timeout = max(0.0, float(timeout_seconds or 0.0))
+    # LLM: v2 只信原 Store 的终态，host 丢失不是 child 退出；v1 明确保留已发布数据的旧终态读取。
+    # 函数用途: 更新失去托管的未知状态，或读取旧版本已经退出的命令结果。
+    def _refresh_locked(self, record: BackgroundProcess) -> None:
+        if record.is_terminal():
+            if record.process is not None:
+                record.process.poll()
+            return
+        if record.persisted_snapshot.get("schema") == PROCESS_SESSION_SCHEMA:
+            pid = record.pid or record.persisted_snapshot["launcher_pid"]
+            birth = record.pid_birth_token or record.persisted_snapshot["launcher_birth_token"]
+            if not _process_instance_terminated(pid, birth) or record.status == "unknown":
+                return
+            try:
+                with ProcessSessionStore(record.store_root).transaction() as transaction:
+                    current = transaction.load(record.session_id)
+                    if current is None:
+                        raise ProcessSessionAuthorityError({"error_type": "authority_missing"})
+                    # 刚读取的较新终态或实例绑定优先，不能把旧观察写给不同的启动阶段。
+                    if current == record.persisted_snapshot:
+                        current = transaction.write({**current, "status": "unknown"})
+                    self._cache_payload(current, Path(record.store_root))
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                self._processes.pop((record.store_root, record.session_id), None)
+                raise ProcessSessionAuthorityError(process_session_error_report(exc, "process_registry.refresh")) from exc
+            return
+        return_code = record.process.poll() if record.process is not None else None
+        if (record.process is not None and return_code is None) or (record.process is None and _same_process(record.pid, record.pid_birth_token)):
+            return
+        host_state = _host_terminal_state(record.host_state_file)
+        record.status = "exited"
+        record.exit_code = int(host_state["exit_code"]) if host_state.get("exit_code") is not None else return_code
+        record.finished_at = float(host_state.get("finished_at") or time.time())
+        self._persist_locked(record)
+
+    # LLM: 状态与日志来自同一个范围内的当前记录；PID 不进入模型摘要。
+    # 函数用途: 查询后台进度和最近输出。
+    def status(self, session_id: str, access_scope: ProcessAccessScope | None = None,
+               store_root: str | Path | None = None) -> dict[str, Any] | None:
+        record = self.get(session_id, access_scope, store_root)
+        return record.to_summary(include_output=True) if record is not None else None
+
+    # LLM: 简单内部调用沿结构化报告入口，模型工具需直接消费 list_report 中的错误。
+    # 函数用途: 返回当前可见的进程摘要列表。
+    def list(self, access_scope: ProcessAccessScope | None = None, store_root: str | Path | None = None) -> list[dict[str, Any]]:
+        rows, _errors = self.list_report(access_scope, store_root)
+        return rows
+
+    # LLM: 枚举先清除该目录旧缓存再装入有效记录；redo 故障不能回退到旧成功视图。
+    # 函数用途: 列出当前范围的后台会话，并单列损坏或恢复错误。
+    def list_report(self, access_scope: ProcessAccessScope | None = None,
+                    store_root: str | Path | None = None) -> tuple[list[dict[str, Any]], list[dict[str, object]]]:
+        with self._lock:
+            roots = {str(Path(store_root).resolve())} if store_root else {rec.store_root for rec in self._processes.values()}
+            errors = []
+            for root in roots:
+                errors.extend(self._hydrate_store_locked(root))
+            records = [rec for rec in self._processes.values() if (access_scope is None or rec.access_scope == access_scope)
+                       and _record_matches_store(rec, store_root)]
+            for record in records:
+                self._refresh_locked(record)
+            records.sort(key=lambda item: (item.is_terminal(), -item.started_at))
+            return [record.to_summary() for record in records], errors
+
+    # LLM: v2 精确冻结一个 ID 再锁外清理；不得按其 task 扩大范围，launcher 绝不参与终止。
+    # 函数用途: 停止显式指定的会话；只有可信树退出回执才报告已停止。
+    def kill(self, session_id: str, access_scope: ProcessAccessScope | None = None,
+             store_root: str | Path | None = None) -> dict[str, Any] | None:
         with self._lock:
             record = self._visible_record_locked(session_id, access_scope, store_root)
             if record is None:
                 return None
+            payload, process = record.to_record(), record.process
+            root = Path(record.store_root)
+        if payload["schema"] == PROCESS_SESSION_SCHEMA:
+            from .process_session_cleanup import stop_process_session
+
+            cleanup = stop_process_session(ProcessSessionStore(root), payload, host_process=process)
+            with self._lock:
+                current = self._cache_payload(cleanup.record, root)
+                summary = current.to_summary()
+            summary["termination"] = {"confirmed": cleanup.confirmed, "instances": [asdict(r) for r in cleanup.terminations]}
+            return summary
+        return self._kill_legacy(record, access_scope)
+
+    # LLM: 已发布 v1 仅按原 session 管理，不推导 task 身份；原出生标识必须传入终止快照边界。
+    # 函数用途: 保留旧记录的显式句柄停止，确认失败时不登记 killed。
+    def _kill_legacy(self, record: BackgroundProcess, access_scope: ProcessAccessScope | None) -> dict[str, Any]:
+        with self._lock:
             self._refresh_locked(record)
             if record.is_terminal():
-                summary = record.to_summary(include_output=True)
-                summary["wait_timed_out"] = False
-                return summary
-            proc = record.process
-            pid = record.pid
-            birth_token = record.pid_birth_token
+                return {"session_id": record.session_id, "status": "already_exited" if record.status == "exited" else record.status,
+                        "exit_code": record.exit_code, "message": "进程已经结束，无需终止。"}
+        receipt = terminate_process_tree(record.pid, record.process, expected_birth_token=record.pid_birth_token)
+        with self._lock:
+            current = self._visible_record_locked(record.session_id, access_scope, record.store_root)
+            if current is None:
+                raise ProcessSessionAuthorityError({"error_type": "authority_missing"})
+            if receipt.confirmed:
+                current.status, current.finished_at, current.exit_code = "killed", time.time(), receipt.return_code
+                self._persist_locked(current)
+            summary = current.to_summary()
+            summary.update(signal=receipt.method, termination=asdict(receipt))
+            return summary
 
-        deadline = time.monotonic() + timeout
+    # LLM: 每轮观察原 Store 的阶段变化，取消仅释放等待；超时仍 pending，不能因 host 不活推断 child 结束。
+    # 函数用途: 在宿主取消和超时范围内等待同一个 session 的可信终态。
+    def wait(self, session_id: str, timeout_seconds: float, access_scope: ProcessAccessScope | None = None,
+             store_root: str | Path | None = None) -> dict[str, Any] | None:
+        deadline = time.monotonic() + max(0.0, float(timeout_seconds or 0.0))
         token = current_cancellation_token()
         while True:
             raise_if_cancelled()
-            alive = proc.poll() is None if proc is not None else _same_process(pid, birth_token)
+            record = self.get(session_id, access_scope, store_root)
+            if record is None:
+                return None
             remaining = deadline - time.monotonic()
-            if not alive or remaining <= 0:
-                break
-            interval = min(0.25, remaining)
-            if token is not None:
-                token.wait(interval)
-            else:
-                time.sleep(interval)
+            if record.is_terminal() or remaining <= 0:
+                summary = record.to_summary(include_output=True)
+                summary["wait_timed_out"] = not record.is_terminal()
+                return summary
+            interval = min(0.1, remaining)
+            token.wait(interval) if token is not None else time.sleep(interval)
 
-        summary = self.status(session_id, access_scope, store_root)
-        if summary is not None:
-            summary["wait_timed_out"] = summary.get("status") == "running"
-        return summary
-
-    # LLM: This is the single scope predicate used before process state or logs are exposed.
-    # 函数用途: 在持锁状态下取得当前范围可见的记录。
-    def _visible_record_locked(
-        self,
-        session_id: str,
-        access_scope: ProcessAccessScope | None,
-        store_root: str | Path | None,
-    ) -> BackgroundProcess | None:
-        """返回 scope 可见记录；调用方必须持有 _lock。"""
-        record = self._processes.get(session_id)
-        if record is not None and not _record_matches_store(record, store_root):
-            return None
-        if record is None and store_root:
-            store_path = Path(store_root).expanduser().resolve(strict=False)
-            report = ProcessSessionStore(store_path).load(session_id)
-            if report.record:
-                record = BackgroundProcess.from_record(report.record, store_root=store_path)
-                self._processes[record.session_id] = record
-        if record is None:
-            return None
-        if access_scope is not None and record.access_scope != access_scope:
-            return None
-        return record
-
-    # LLM: Hydration never overwrites a live same-process Popen handle. Persisted
-    # rows only fill cache misses, and each row retains its exact store root.
-    # 函数用途: 把同一权威目录里的其他 agent 进程记录加载进当前缓存。
-    def _hydrate_store_locked(
-        self,
-        store_root: str | Path | None,
-    ) -> list[dict[str, object]]:
+    # LLM: 没有显式 root 的内部查询只允许缓存中唯一匹配，再读它的原地址；不能跨 owner 猜同名句柄。
+    # 函数用途: 从权威目录读当前记录，再做访问身份比较。
+    def _visible_record_locked(self, session_id: str, access_scope: ProcessAccessScope | None,
+                               store_root: str | Path | None) -> BackgroundProcess | None:
         if not store_root:
-            return []
+            matches = [rec for rec in self._processes.values() if rec.session_id == session_id]
+            if len(matches) != 1:
+                return None
+            store_root = matches[0].store_root
+        root = Path(store_root).expanduser().resolve(strict=False)
+        report = ProcessSessionStore(root).load(session_id)
+        if report.load_error:
+            self._processes.pop((str(root), session_id), None)
+            raise ProcessSessionAuthorityError(report.load_error)
+        if not report.record:
+            cached = self._processes.pop((str(root), session_id), None)
+            if cached is not None and not cached.is_terminal():
+                raise ProcessSessionAuthorityError({"error_type": "active_authority_missing"})
+            return None
+        record = self._cache_payload(report.record, root)
+        return record if access_scope is None or record.access_scope == access_scope else None
+
+    # LLM: 只在地址、PID 和出生标识完全相同时保留本地 Popen；所有持久字段每次整体刷新。
+    # 函数用途: 将可信当前快照装入缓存，不丢 revision、执行归属和控制标记。
+    def _cache_payload(self, payload: dict[str, object], root: Path) -> BackgroundProcess:
+        key = (str(root), str(payload["session_id"]))
+        cached = self._processes.get(key)
+        fresh = BackgroundProcess.from_record(payload, store_root=root)
+        if cached is not None:
+            if cached.pid == fresh.pid and cached.pid_birth_token == fresh.pid_birth_token:
+                fresh.process = cached.process
+            cached.__dict__.update(fresh.__dict__)
+            return cached
+        self._processes[key] = fresh
+        return fresh
+
+    # LLM: 读取错误的记录从缓存撤下，健康子集来自同一次枚举；不可拿原缓存绕过恢复错误。
+    # 函数用途: 刷新一个规范目录的完整可读记录，并返回独立错误。
+    def _hydrate_store_locked(self, store_root: str | Path) -> list[dict[str, object]]:
         root = Path(store_root).expanduser().resolve(strict=False)
         records, errors = ProcessSessionStore(root).list_records()
+        present = {str(payload["session_id"]) for payload in records}
+        for key in list(self._processes):
+            if key[0] == str(root) and key[1] not in present:
+                del self._processes[key]
         for payload in records:
-            session_id = str(payload.get("session_id") or "")
-            if session_id and session_id not in self._processes:
-                self._processes[session_id] = BackgroundProcess.from_record(
-                    payload,
-                    store_root=root,
-                )
+            self._cache_payload(payload, root)
         return errors
 
-    # LLM: Durable writes contain the full record and happen on every terminal
-    # transition. A missing store_root deliberately keeps legacy internal tests in-memory.
-    # 函数用途: 把当前记录同步到跨进程权威目录。
+    # LLM: 此入口只写已发布 v1 的观察更新；v2 必须在调用处同一事务重读，不能强换 revision 写旧缓存。
+    # 函数用途: 保存旧会话终态并吸收实际提交结果。
     def _persist_locked(self, record: BackgroundProcess) -> None:
-        if not record.store_root:
-            return
+        if record.persisted_snapshot.get("schema") != LEGACY_PROCESS_SESSION_SCHEMA:
+            raise ValueError("v2 updates require a current store transaction")
         effective = ProcessSessionStore(record.store_root).write(record.to_record())
-        effective_status = str(effective.get("status") or record.status)
-        if effective_status != record.status:
-            record.status = effective_status
-            exit_code = effective.get("exit_code")
-            finished_at = effective.get("finished_at")
-            record.exit_code = int(exit_code) if exit_code is not None else None
-            record.finished_at = float(finished_at) if finished_at is not None else None
+        self._cache_payload(effective, Path(record.store_root))
 
-    def _prune_finished_locked(self) -> None:
-        """已结束记录超上限时淘汰最老的。必须持锁调用。"""
-        finished = [(sid, rec) for sid, rec in self._processes.items() if rec.is_terminal()]
-        overflow = len(finished) - _MAX_FINISHED
-        if overflow <= 0:
-            return
+    # LLM: 只裁剪确认终态；磁盘仅操作当前调用目录，不能因其它 owner 的损坏影响本次交接。
+    # 函数用途: 限制已完成缓存数量，并在本次启动所属的原目录裁剪历史。
+    def _prune_finished_locked(self, store_root: Path) -> None:
+        finished = [(key, rec) for key, rec in self._processes.items() if rec.is_terminal()]
         finished.sort(key=lambda item: item[1].finished_at or item[1].started_at)
-        for sid, _ in finished[:overflow]:
-            self._processes.pop(sid, None)
-        roots = {record.store_root for _sid, record in finished if record.store_root}
-        for root in roots:
-            ProcessSessionStore(root).prune_finished(_MAX_FINISHED)
+        for key, _record in finished[:max(0, len(finished) - _MAX_FINISHED)]:
+            self._processes.pop(key, None)
+        ProcessSessionStore(store_root).prune_finished(_MAX_FINISHED)
 
+    # LLM: 只丢本进程缓存，不修改持久记录或杀资源；测试负责精确回收自己创建的资源。
+    # 函数用途: 清除缓存以验证跨进程恢复或隔离测试。
     def clear(self) -> None:
-        """清空注册表(测试隔离用;不杀进程,只丢记录)。"""
         with self._lock:
             self._processes.clear()
 
@@ -590,13 +483,14 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
-# LLM: 前台超时、后台停止和 runner 清理共用唯一终止入口；PID 出生标识避免复用误杀。
+# LLM: 前台超时、后台停止和 runner 清理共用唯一终止入口；冻结资源可要求指定出生标识，快照不匹配时绝不发信号。
 # 函数用途: 有界发送 TERM/KILL 并回收直接子进程，返回核对回执；无法读取进程信息时不冒充确认。
 def terminate_process_tree(
     pid: int,
     proc: subprocess.Popen | None,
     *,
     grace_seconds: float | None = None,
+    expected_birth_token: str | None = None,
 ) -> ProcessTerminationReceipt:
     """终止观察到的后代进程树，并返回退出核对结果。
 
@@ -608,9 +502,15 @@ def terminate_process_tree(
     """
     if pid <= 0:
         return ProcessTerminationReceipt("noop", False, None, 0)
+    if expected_birth_token is not None and not expected_birth_token:
+        return ProcessTerminationReceipt("identity_unavailable", False, None, 0, (pid,))
     if _IS_WINDOWS:
+        if expected_birth_token is not None and not _same_process(pid, expected_birth_token):
+            return ProcessTerminationReceipt("identity_changed", False, None, 0, (pid,))
         return _terminate_windows_tree(pid, proc)
     snapshot, complete = _process_tree_snapshot(pid)
+    if expected_birth_token is not None and snapshot.get(pid) != expected_birth_token:
+        return ProcessTerminationReceipt("identity_changed", False, None, len(snapshot), (pid,))
     method = "already_gone"
     signalled = _signal_process_snapshot(snapshot, signal.SIGTERM)
     grace = _KILL_GRACE_SECONDS if grace_seconds is None else max(0.0, grace_seconds)
@@ -920,7 +820,6 @@ process_registry = ProcessRegistry()
 
 __all__ = [
     "BackgroundProcess",
-    "ProcessRegistration",
     "ProcessRegistry",
     "ProcessTerminationReceipt",
     "capture_process_birth_token",
