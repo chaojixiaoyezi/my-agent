@@ -631,7 +631,7 @@ Responses 已使用该入口，纳入同组回归；保留代理前缀和完整�
 | 命令、帮助与补全 | `conversation/control_commands.py::system_slash_command_name`、`cli/chat_parts/slash_command_types.py`、`slash_commands.py`、`tui_input.py` | 公共控制解析负责动作；静态命令声明供帮助和 TUI 补全读取 | 插件请求进入同一公共解析，身份由宿主绑定；不能只在 TUI 加分支或让错误命令进入聊天 |
 | 启动扩展与工具注册 | `extensions/plugin.py::ExtensionRegistry` 被 `agent/core.py` 和 `cli/parser.py` 使用；`tooling/registry.py` 提供执行快照 | 启动扩展直接加载显式模块并调用注册 hook；工具注册表与每轮授权快照分开 | 现有启动 hook 没有热撤销合同；不能直接当成可卸载插件。新增贡献须带所属插件和激活代次，继续走原工具执行/权限链 |
 
-五个 mixin 还共享 `scheduler_service`、`collaboration_store`、准确的子代理恢复库与任务事实、owner 路径、配置及 claim 心跳参数。
+第 1 步盘点时，五个 mixin 还共享 `scheduler_service`、`collaboration_store`、准确的子代理恢复库与任务事实、owner 路径、配置及 claim 心跳参数。
 ThreadLane 负责准备/消费编排；Tick 负责维护、恢复与持久入队；Wake 负责来源与定时任务租约；Goal 负责原目标状态、时钟与路由；Execution 负责最终准入、会话租约和 policy 记账。
 这些是后续收窄依赖的清单，不能照搬为五个持有完整 Agent/Store 的服务。诊断使用 `threading.local()`，当前 worker 可追加自己的诊断列表，不改成 owner 或全局共享列表。
 
@@ -684,6 +684,27 @@ runtime 的 `_supply_backoff_from_agent` 仍在 scheduler 构造时读取原 30/
 只吸收 typed transient，额度耗尽、配置错误、普通失败及 KeyboardInterrupt/SystemExit 保持各自传播边界；事件字段和打印格式不变。
 删除旧类/guard 定义和空 TYPE_CHECKING，不留旧名别名；配置说明同时纠正“额度耗尽进入自动长退避”的过期描述，配置值与实现行为不变。
 既有时钟替身直接指向新模块，恢复用例同时检查就绪筛选共享冷却，另覆盖 None 与假值报告的区别；新安装版验收独立记账。
+
+### 第 2 步路由切片：目标续跑与投递地址
+
+解决问题：原 GoalMixin 同时处理目标停住/续跑、观察执行、能力预扫和地址选择，调用方难以看出依赖和副作用。
+源码已按下列边界拆开，353 项相关回归及独立复核通过，新安装版尚待验；不能把前一版本的 TUI 结果计入新切片。
+
+| 职责 | 唯一实现及依赖 | 保持的顺序与边界 |
+| --- | --- | --- |
+| 后台 Goal 异常与续跑 | `background_goal.py`；Goal、任务、时钟三个原领域及任务状态、子树阶段、wake 发布、注册表四个能力 | 异常仍在原 transition_guard 内依次读取、结算时钟、CAS、更新任务、登记注册表；普通续跑在原 wake 确认之后判断 |
+| 后台投递路由 | `background_routing.py`；线程、owner 路径、owner 属性三个只读能力 | 最新有效外呼 binding → 首个匹配路径 → owner 属性 → 普通 binding；owner 按需读取，不在装配阶段预取或缓存 |
+| 观察批次执行 | `runtime.py::_run_observation_batch` 独立编排函数 | 仍经原会话 claim 执行，report 非 None 才按原条件确认观察；不顺手改变交付判断或继续扩充执行类 |
+| 能力预扫与唤醒租约 | 原 WakeMixin | 预扫仍在冻结重投及内部来源分支之前；正常与异常各自保持原心跳/定时 claim 收口顺序 |
+
+删除 GoalMixin 及旧路由/目标私有方法；调用方直接用新实现，不保留旧名代理。runtime 的组装函数只绑定现有领域和回调，
+实际账本/子树读取仍在原分支中进行；GoalRuntimeContext、目标去重发布、模型执行器、持久格式及配置不在本片迁移。
+默认目标选择也迁入路由模块，普通唤醒、观察、冻结重投和额度通知共用地址判据；选中外部地址不证明投递成功。
+
+定向参考 6 个源码文件：Codex `ext/goal/src/runtime.rs::continue_if_idle` 与 `state/src/runtime/goals.rs` 的精确 Goal 更新和既有执行入口；
+OpenClaw `infra/heartbeat-wake.ts` 的显式事件/目标、队列和 handler 边界；Hermes `gateway/wake.py::deliver_wake` 的会话身份和失败传播。
+其中 3 个文件全文、3 个只读指定片段，未跑参考测试；不照搬自然语言 reason 推断、内存队列、额外 HTTP 入口、清退避或重试政策。
+对应索引与精确片段、哈希留在私有审阅证据，不能将索引命中当作整库审阅。
 
 ### 后续切片实施约束
 

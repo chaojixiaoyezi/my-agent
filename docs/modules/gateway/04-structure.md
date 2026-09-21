@@ -1346,8 +1346,10 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   源任务已完成且执行释放后才准备独立任务并原子保存来源快照。查询或服务启动不自动迁移。
 - `agent/conversation/background_history_seed.py`：每个后台续接 turn 都读取同一 thread 的 compact summary 与完整 raw tail；
   普通会话不按 task 过滤历史，只有显式 detached named task 沿既有创建锚点与精确 lineage 限定范围。
-- `agent/conversation/runtime.py`：持续目标轮携带精确 goal id，未进入 complete/blocked/paused/cleared 才发布一个去重续跑 wake。scheduler
-  只有在没有 linked live turn 时才能启动续接；定时或生命周期 wake 在精确 task 已终态时直接退休。
+- `agent/conversation/runtime.py` 与 `background_goal.py`：调度器在原来源确认后调用目标组件，后者读取精确 goal/task 状态并经原入口发布去重续跑 wake，或沿原事务结算异常。
+  组件只接收原领域与精确能力；scheduler 只有在没有 linked live turn 时才能启动续接，定时或生命周期 wake 在精确 task 已终态时直接退休。
+- `agent/conversation/background_routing.py`：通过线程、owner 路径与身份三个只读能力选择地址；外呼绑定优先，owner 惰性读取。
+  观察批次、普通唤醒、冻结重投与额度通知共用该实现，路由选择不替代权限门或送达回执。
 - `agent/conversation/run_claim.py`：foreground Gateway turn 与 background scheduler turn 共用的唯一
   per-thread 持久执行 lane。它复用 `ConversationStore` 的 claim 文件、租约、进程身份接管与 heartbeat；
   不按 IM、提示词或任务类型分流。Gateway 可等待当前 lane，scheduler 拿不到 lane 则跳过并由既有 due/wake

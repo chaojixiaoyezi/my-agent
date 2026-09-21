@@ -241,6 +241,8 @@ agent_py_agent/
 |   |   |-- runtime.py                  # 后台主代理调度热循环：wake_queue 到期消费、三源对账(5min)、事件提前醒取消闹钟
 |   |   |-- background_progress_policy.py # 无副作用的进度策略计数与确定性失败退避
 |   |   |-- background_supply_backoff.py  # 会话供应冷却的进程内状态、消费守卫及恢复日志
+|   |   |-- background_goal.py          # 后台 Goal 异常结算与续跑裁决，只持有精确领域和回调能力
+|   |   |-- background_routing.py       # 线程及 owner 投递地址的只读选择，不消费来源或执行发送
 |   |   |-- background_tool_policy.py   # 无副作用的后台工具目录、owner/task 收紧及展示投影
 |   |   |-- background_context.py       # 后台有界上下文、任务范围与模型可见事实准备
 |   |   |-- background_history_seed.py  # 后台原生历史种子、任务隔离与读取失败合同
@@ -466,6 +468,8 @@ docs/
 - `agent_py_agent/agent/conversation/background_tool_policy.py`：后台目录计算的唯一实现，输入结构化事实，结果供 runtime 消费；不读写会话或启动执行器。
 - `agent_py_agent/agent/conversation/background_progress_policy.py`：仅接收计数和策略身份，计算无进展次数与失败退避；状态读取、租约及持久写入仍由后台调度负责。
 - `agent_py_agent/agent/conversation/background_supply_backoff.py`：按会话维护供应冷却，三类消费及就绪扫描共享同一实例；配置组装归 runtime，额度与持久策略分路不进入组件。
+- `agent_py_agent/agent/conversation/background_goal.py`：从原 Goal、任务和时钟领域结算异常或发布后续唤醒；精确身份、事务、CAS 与写账顺序保持，不持有调度器或完整 Agent/Store。
+- `agent_py_agent/agent/conversation/background_routing.py`：按原优先级惰性读取线程与 owner 路由；普通唤醒、观察批次、冻结重投及额度通知共用，不另建路由状态或投递链。
 - `agent_py_agent/agent/conversation/background_context.py`：显式请求接口连接原会话事实、任务范围和有界模型投影；既有任务进度对账仍沿原调用顺序执行。
 - `agent_py_agent/agent/conversation/background_history_seed.py`：复用 canonical 未压缩历史和 provider 投影；区分可用、禁用与不可读，不把读取失败变成空历史。
 - `agent_py_agent/agent/conversation/background_execution.py`：显式接收执行、存储与参数准备能力，保留同片取消、Compact 和原生历史；不选择唤醒、不投递外部消息。

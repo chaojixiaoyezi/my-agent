@@ -1,7 +1,8 @@
 # LLM: 后台稳定 task 身份与逐轮请求分离；唤醒共用 coordinator 软指导，不能生成永久禁写或额外授权。
 # 上下文和历史准备通过独立模块调用，修改执行顺序时同步后台历史、取消、Compact 和投递回归。
 # 进度计算和供应退避各有独立实现；本模块保留配置组装、实例寿命、读取时机、租约和持久落账。
-# 模块用途: 编排后台唤醒和工作片，并组装执行、交付、策略、退避、上下文和历史种子。
+# Goal 状态和投递地址通过窄能力组件裁决；来源消费、能力预扫和执行租约仍在原位置。
+# 模块用途: 编排后台唤醒和工作片，并组装执行、交付、路由、策略、退避、上下文和历史种子。
 from __future__ import annotations
 
 import json
@@ -63,7 +64,17 @@ from .background_execution import (
     collect_background_execution_result,
     invoke_background_turn,
 )
+from .background_goal import (
+    GoalContinuationDependencies,
+    continue_goal_after_report,
+    stop_goal_after_error,
+)
 from .background_progress_policy import next_no_progress_streak, policy_failure_backoff
+from .background_routing import (
+    BackgroundRouteDependencies,
+    default_route_target,
+    resolve_background_route,
+)
 from .background_supply_backoff import ProviderSupplyBackoff, consume_with_supply_guard
 from .background_tool_policy import (
     SCHEDULED_WAKE_REASONS,
@@ -302,17 +313,6 @@ def background_prompt(
     )
 
 
-def default_route_target(thread: ConversationThread, route_channel: str) -> str:
-    for binding in thread.channel_bindings:
-        if binding.channel == route_channel:
-            return binding.channel_conversation_id
-    return (
-        thread.channel_bindings[-1].channel_conversation_id
-        if thread.channel_bindings
-        else thread.thread_id
-    )
-
-
 def wake_signal_payload(signal: WakeSignal | dict[str, Any] | None) -> dict[str, Any] | None:
     if isinstance(signal, WakeSignal):
         return signal.to_dict()
@@ -398,7 +398,7 @@ def _agent_owner_home(agent: object) -> str:
 
 
 # Conversation runtime worker
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
 from ..agent_core.runtime.loop_models import RunParams
@@ -2766,9 +2766,46 @@ def _wake_signal_root_is_inactive(store: object, signal: WakeSignal) -> bool:
     )
 
 
-# LLM: observation 必须先按 task 隔离再计算 runnable limit；unknown task 的
-# 事件原样保留；共享供应冷却不改变来源消费顺序，已提交回复由 canonical 消息流显示，不重复写正文或确认其它 task。
-# 函数用途: 批量消费没有可用 wake 的观察事件并登记调度结果，不另建回复账本。
+# LLM: 路由在原执行前读取；report 非 None 才按原顺序确认观察，不把路由选择等同外发成功。
+# 函数用途: 经同一会话 claim 运行观察批次并写处理记录，保持 observation 与 wake 各自的消费条件。
+def _run_observation_batch(
+    scheduler: BackgroundMainAgentScheduler,
+    thread_id: str,
+    observations: list[ObservationEvent],
+    *,
+    now: float,
+) -> BackgroundMainAgentReport | None:
+    route_channel, route_target = resolve_background_route(
+        _background_route_dependencies(scheduler), thread_id,
+    )
+    _HEARTBEAT_LOGGER.info(
+        "OBSERVATION_BATCH_RUN thread=%s obs=%d route_channel=%s route_target=%s",
+        thread_id,
+        len(observations),
+        route_channel,
+        route_target,
+    )
+    reason, wake_signal = _observation_batch_semantics(observations)
+    report = scheduler._run_claimed(
+        {
+            "thread_id": thread_id,
+            "task_id": first_root_task_id(observations),
+            "reason": reason,
+            "route_channel": route_channel,
+            "route_target": route_target,
+            "now": now,
+            "wake_signal": wake_signal,
+        }
+    )
+    if report is not None:
+        scheduler.store.observations.mark_handled(
+            [item.observation_id for item in observations], now=now
+        )
+    return report
+
+
+# LLM: 先按 task 隔离再计算限额，unknown 来源保留；原 supply guard 内调用观察编排，不提前查路由或重复确认来源。
+# 函数用途: 消费没有可用 wake 的观察批次，经原会话 claim 运行并收集报告；正文仍由 canonical 消息流显示。
 def _consume_observation_batches(
     scheduler: BackgroundMainAgentScheduler,
     reports: list[BackgroundMainAgentReport],
@@ -2804,7 +2841,7 @@ def _consume_observation_batches(
             scheduler._supply_backoff,
             thread_id,
             current,
-            partial(scheduler._run_observation_batch, thread_id, selected, now=current),
+            partial(_run_observation_batch, scheduler, thread_id, selected, now=current),
         )
         if report is not None:
             reports.append(report)
@@ -3312,9 +3349,11 @@ class _WakeExecution:
     terminal: bool = False
 
 
+# LLM: 唤醒执行保留原跳过、能力预扫、定时租约和来源确认顺序，Goal 与地址裁决交给窄能力模块。
+# 类用途: 运行并收口一条唤醒；不拥有 tick 编排，修改时联测定时恢复、冻结重投和 Goal 续跑。
 class _BackgroundSchedulerWakeMixin:
-    """Run and durably settle one wake without owning tick orchestration."""
-
+    # LLM: 正常返回先在 finally 停外层心跳，再结束定时 claim 与来源；异常分支仍先按 typed 分类处理 claim。
+    # 函数用途: 消费一条已选唤醒，沿原租约执行并结算，不把 Goal 暂停当成当前回合中断。
     def _run_wake_signal(
         self, signal: WakeSignal, *, now: float
     ) -> BackgroundMainAgentReport | None:
@@ -3372,6 +3411,20 @@ class _BackgroundSchedulerWakeMixin:
             lifecycle_reason=lifecycle_reason,
             now=now,
         )
+    # LLM: 子代理生命周期唤醒执行前仍经原确定性能力预扫；失败只记警告，不吞掉后续唤醒轮。
+    # 函数用途: 在原执行位置处理能力申请与恢复候选，可能更新子代理状态；联测自动授权和内部唤醒。
+    def _pre_wake_capability_sweep(self, lifecycle_reason: str, signal: WakeSignal) -> None:
+        from ..agent_core.orchestration.dispatch.capability_auto_sweep import (
+            auto_capability_sweep,
+            sweep_applies_to_reason,
+        )
+
+        if not sweep_applies_to_reason(lifecycle_reason):
+            return
+        try:
+            auto_capability_sweep(self.runtime.agent, signal)
+        except Exception:
+            _HEARTBEAT_LOGGER.warning("pre-wake capability sweep failed", exc_info=True)
 
 
 def _claim_scheduler_wake(
@@ -3402,7 +3455,7 @@ def _claim_scheduler_wake(
     return _WakeClaimState(claim=result.claim, heartbeat=heartbeat)
 
 
-# LLM: 冻结交付先于业务执行分支，重投不调用模型；跳过、消费、租约释放均沿原持久事实和顺序。
+# LLM: 冻结交付先于业务执行分支，重投不调用模型；原位置通过只读路由能力选址，跳过、消费、租约释放顺序不变。
 # 函数用途: 为一条已选唤醒执行清理、交付恢复或新的后台工作片。
 def _execute_wake_signal(
     scheduler: BackgroundMainAgentScheduler,
@@ -3431,7 +3484,9 @@ def _execute_wake_signal(
     scheduler._pre_wake_capability_sweep(lifecycle_reason, signal)
     cached = cached_owner_delivery(signal)
     if cached is not None:
-        channel, target = scheduler._observation_route(signal.thread_id)
+        channel, target = resolve_background_route(
+            _background_route_dependencies(scheduler), signal.thread_id,
+        )
         return _WakeExecution(
             scheduler.runtime.redeliver_cached_wake(
                 signal,
@@ -3452,7 +3507,9 @@ def _execute_wake_signal(
         )
         scheduler.store.wakes.mark_handled(signal.wake_signal_id, now=now)
         return _WakeExecution(terminal=True)
-    channel, target = scheduler._observation_route(signal.thread_id)
+    channel, target = resolve_background_route(
+        _background_route_dependencies(scheduler), signal.thread_id,
+    )
     _HEARTBEAT_LOGGER.info(
         "WAKE_SIGNAL_RUN thread=%s reason=%s route_channel=%s route_target=%s",
         signal.thread_id,
@@ -3475,6 +3532,8 @@ def _execute_wake_signal(
     )
 
 
+# LLM: 额度分路沿原 Goal 状态转换和既有通知，不进入供应瞬态重试；消费标记依实际投递回执。
+# 函数用途: 在唤醒异常位置结算额度受限目标并生成原通知，维护精确 wake 的待重投集合。
 def _quota_wake_report_after_error(
     scheduler: BackgroundMainAgentScheduler,
     signal: WakeSignal,
@@ -3482,7 +3541,9 @@ def _quota_wake_report_after_error(
     lifecycle_reason: str,
 ) -> BackgroundMainAgentReport:
     if lifecycle_reason == "thread_goal_continue":
-        scheduler._stop_thread_goal_after_error(signal, status="usage_limited")
+        stop_goal_after_error(
+            _background_goal_dependencies(scheduler), signal, status="usage_limited",
+        )
     report = _provider_quota_fallback_report(scheduler, signal, now=time.time())
     if report.wake_handled:
         scheduler._quota_fallback_wakes.discard(signal.wake_signal_id)
@@ -3491,7 +3552,7 @@ def _quota_wake_report_after_error(
     return report
 
 
-# LLM: 本地缺模型保留原 wake/Goal，由 Gateway 配置依赖退避；真实任务错误/额度保持现有显式恢复语义。
+# LLM: 本地缺模型保留原 wake/Goal，由 Gateway 配置依赖退避；原错误分类后才调用目标组件，显式恢复语义不变。
 # 函数用途: 关闭或释放失败的调度 claim；不能把暂缺模型配置误作任务已受阻并吃掉恢复事件。
 def _handle_nonquota_wake_error(
     scheduler: BackgroundMainAgentScheduler,
@@ -3525,7 +3586,9 @@ def _handle_nonquota_wake_error(
     if lifecycle_reason != "thread_goal_continue":
         return
     status = "usage_limited" if is_provider_usage_limit_error(error) else "blocked"
-    scheduler._stop_thread_goal_after_error(signal, status=status)
+    stop_goal_after_error(
+        _background_goal_dependencies(scheduler), signal, status=status,
+    )
     scheduler.store.wakes.mark_handled(signal.wake_signal_id, now=observed_at)
 
 
@@ -3566,6 +3629,8 @@ def _finish_scheduler_wake_claim(
     return report if terminal is not None else None
 
 
+# LLM: 先确认原 wake，再按精确 Goal 或孩子事实安排续跑，最后对账定时等待；不改变持久顺序。
+# 函数用途: 收口已提交的唤醒报告并连接后续工作，未完成交付保留来源和原重试时间。
 def _complete_wake_report(
     scheduler: BackgroundMainAgentScheduler,
     signal: WakeSignal,
@@ -3590,7 +3655,9 @@ def _complete_wake_report(
             str(signal.root_task_id or "").strip(),
         )
     if lifecycle_reason == "thread_goal_continue":
-        scheduler._continue_thread_goal(signal, report=report, now=now)
+        continue_goal_after_report(
+            _background_goal_dependencies(scheduler), signal, report=report, now=now,
+        )
     if lifecycle_reason == "subagent_runner_finished" and report.goal_continuation_allowed:
         _ensure_goal_progress_wake_chain(scheduler, signal, now=now)
     if scheduler.scheduler_service is not None:
@@ -3601,6 +3668,8 @@ def _complete_wake_report(
     return report
 
 
+# LLM: 只沿原额度耗尽分路使用固定通知；地址选择不等于送达，写入和 wake_handled 仍取真实回执。
+# 函数用途: 经原通道投递额度通知，完成后写入原会话；不调用模型或新增发送路径。
 def _provider_quota_fallback_report(
     scheduler: BackgroundMainAgentScheduler,
     signal: WakeSignal,
@@ -3620,7 +3689,9 @@ def _provider_quota_fallback_report(
         f"{subject}因模型供应商额度耗尽已经暂停。已接收的数据、游标、已完成结果和待处理队列都已保留，"
         "系统不会继续使用同一额度配置反复重试。请由管理员恢复额度或切换到可用模型后，再显式恢复运行。"
     )
-    channel, target = scheduler._observation_route(signal.thread_id)
+    channel, target = resolve_background_route(
+        _background_route_dependencies(scheduler), signal.thread_id,
+    )
     supports_proactive = _channel_supports_proactive(scheduler, channel, target)
     delivery_status, wake_handled = _deliver_quota_fallback(
         scheduler,
@@ -3729,234 +3800,66 @@ def _record_quota_fallback_message(
     )
 
 
-class _BackgroundSchedulerGoalMixin:
-    """Goal continuation, lifecycle preprocessing, and owner delivery routing."""
+# LLM: 领域对象沿原 scheduler 读取；状态、子树、注册表及 wake 发布仍在组件需要它们时调用。
+# 函数用途: 为后台目标处理绑定精确能力，不查询账本、不复制 Agent/Store，也不建立新状态。
+def _background_goal_dependencies(
+    scheduler: BackgroundMainAgentScheduler,
+) -> GoalContinuationDependencies:
+    from .goal_runtime import raise_goal_continuation_wake
 
-    # LLM: Turn errors and typed provider usage limits are system-owned goal stops, matching 会话运行时.
-    # 停止前从同源 goal_clock 结算一次活跃秒数，再在原 Goal 事务中更新状态。
-    # 函数用途: 目标后台轮异常时原子停住同一目标与任务，等待用户恢复。
-    def _stop_thread_goal_after_error(self, signal: WakeSignal, *, status: str) -> None:
-        metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
-        with self.store.goals.transition_guard(signal.thread_id):
-            goal = self.store.goals.load(
-                signal.thread_id,
-                goal_id=str(metadata.get("goal_id") or "").strip(),
-            )
-            if (
-                goal is None
-                or goal.status != "active"
-                or goal.goal_id != str(metadata.get("goal_id") or "")
-                or goal.task_id != str(signal.root_task_id or "")
-            ):
-                return
-            elapsed = self.store.goal_clock.take_elapsed_seconds(goal)
-            if elapsed:
-                goal = (
-                    self.store.goals.account_usage(
-                        {
-                            "thread_id": goal.thread_id,
-                            "goal_id": goal.goal_id,
-                            "time_delta_seconds": elapsed,
-                            "mode": "active_only",
-                        }
-                    )
-                    or goal
-                )
-            updated = self.store.goals.update(
-                {
-                    "thread_id": goal.thread_id,
-                    "goal_id": goal.goal_id,
-                    "status": status,
-                    "expected_status": "active",
-                }
-            )
-            if updated is None:
-                return
-            self.store.tasks.update_status({"task_id": goal.task_id, "status": "interrupted"})
-            registry = getattr(
-                getattr(getattr(self.runtime, "agent", None), "local_store", None),
-                "task_registry",
-                None,
-            )
-            if registry is not None:
-                registry.register_task(goal.task_id, status="blocked", goal=updated.objective)
+    return GoalContinuationDependencies(
+        goals=scheduler.store.goals,
+        tasks=scheduler.store.tasks,
+        goal_clock=scheduler.store.goal_clock,
+        task_status=lambda thread_id, task_id: _background_task_link_status(
+            scheduler.runtime.agent,
+            BackgroundRunRequest(
+                thread_id=thread_id, task_id=task_id, reason="thread_goal_continue",
+            ),
+            store=scheduler.store,
+        ),
+        subagent_phase=lambda task_id: _goal_subagent_phase(scheduler.runtime.agent, task_id),
+        raise_wake=partial(raise_goal_continuation_wake, scheduler.store),
+        task_registry=lambda: getattr(
+            getattr(getattr(scheduler.runtime, "agent", None), "local_store", None),
+            "task_registry",
+            None,
+        ),
+    )
 
-    # LLM: 精确 Goal 状态决定续跑；工具计数只是统计，不能成为运行授权。子代理等待和任务中断仍优先。
-    # 函数用途: 持续目标一轮结束后同步终态，仍可运行则发布一个去重续跑事件，不依赖 Todo 或工具次数。
-    def _continue_thread_goal(
-        self,
-        signal: WakeSignal,
-        *,
-        report: BackgroundMainAgentReport,
-        now: float,
-    ) -> None:
-        """Reconcile one goal turn and enqueue exactly one next turn while active."""
-        if not report.goal_continuation_allowed:
-            return
-        try:
-            metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
-            goal = self.store.goals.load(
-                signal.thread_id,
-                goal_id=str(metadata.get("goal_id") or "").strip(),
-            )
-            if (
-                goal is None
-                or goal.goal_id != str(metadata.get("goal_id") or "")
-                or goal.task_id != str(signal.root_task_id or "")
-            ):
-                return
-            task_status = _background_task_link_status(
-                self.runtime.agent,
-                BackgroundRunRequest(
-                    thread_id=signal.thread_id,
-                    task_id=goal.task_id,
-                    reason="thread_goal_continue",
-                ),
-                store=self.store,
-            )
-            if goal.status != "active":
-                if goal.status in {"blocked", "usage_limited", "budget_limited"}:
-                    self.store.tasks.update_status(
-                        {"task_id": goal.task_id, "status": "interrupted"}
-                    )
-                return
-            if task_status != "active":
-                return
-            subagent_phase, state_error = _goal_subagent_phase(
-                self.runtime.agent,
-                goal.task_id,
-            )
-            if subagent_phase == "subagents_active" or state_error:
-                # Child lifecycle events are the continuation authority while
-                # related work is active. Do not create a polling wake loop.
-                return
-            from .goal_runtime import raise_goal_continuation_wake
 
-            raise_goal_continuation_wake(
-                self.store,
-                goal,
-                channel=str(metadata.get("channel") or ""),
-                conversation_id=str(metadata.get("conversation_id") or ""),
-                now=now,
-            )
-        except Exception:
-            _HEARTBEAT_LOGGER.warning("thread goal continuation failed", exc_info=True)
+# LLM: 三个回调保持调用时读取；路由优先命中线程 binding 时不提前查询 owner，禁止增加路由缓存。
+# 函数用途: 把调度器的当前线程与 owner 来源绑定成窄只读能力，供各后台来源共用。
+def _background_route_dependencies(
+    scheduler: BackgroundMainAgentScheduler,
+) -> BackgroundRouteDependencies:
+    return BackgroundRouteDependencies(
+        load_thread=lambda thread_id: scheduler.store.threads.load(thread_id),
+        owner_paths=partial(_background_owner_paths, scheduler),
+        owner_identity=partial(_background_owner_identity, scheduler),
+    )
 
-    # LLM: 子代理生命周期唤醒进 LLM 整合轮之前的机制层预处理(§5.1 头号靶的 wake 端半边):
-    #   常规能力申请自动批 + BLOCKED/孤儿候选全量续派,全部确定性动作,不依赖模型调
-    #   resolve_capability_requests / 系统自动恢复。失败静默记日志,唤醒轮照常进行。
-    def _pre_wake_capability_sweep(self, lifecycle_reason: str, signal: WakeSignal) -> None:
-        from ..agent_core.orchestration.dispatch.capability_auto_sweep import (
-            auto_capability_sweep,
-            sweep_applies_to_reason,
-        )
 
-        if not sweep_applies_to_reason(lifecycle_reason):
-            return
-        try:
-            auto_capability_sweep(self.runtime.agent, signal)
-        except Exception:
-            _HEARTBEAT_LOGGER.warning("pre-wake capability sweep failed", exc_info=True)
+# LLM: 保留 home_paths 先于 store、owner_home 先于 owner_home_dir/root 的查询顺序；只按需读取属性。
+# 函数用途: 为路由器逐项提供原 owner 路径，不读取文件系统或推断新身份。
+def _background_owner_paths(scheduler: BackgroundMainAgentScheduler) -> Iterable[str]:
+    sources = [
+        getattr(getattr(getattr(scheduler, "runtime", None), "agent", None), "home_paths", None),
+        getattr(scheduler, "store", None),
+    ]
+    for source in sources:
+        for attribute in ("owner_home", "owner_home_dir", "root"):
+            yield str(getattr(source, attribute, "") or "")
 
-    def _run_observation_batch(
-        self, thread_id: str, observations: list[ObservationEvent], *, now: float
-    ) -> BackgroundMainAgentReport | None:
-        # 真机根 bug:此路原来不传 route_channel/route_target → BackgroundRunRequest 默认
-        # route_channel="internal" → 主代理被真事件叫回后即便自然汇报,也只发到 internal、到不了用户
-        # 通道。对比 _run_due_policy 是带 route 的。修:从线程 channel binding 取真实投递路由传进去,
-        # 让原生"叫回→主代理自然汇报"直达 owner 通道；内部 findings 账不直接出站。
-        route_channel, route_target = self._observation_route(thread_id)
-        # 结构化探针:真机确认原生"叫回→上报"是否触发 + 路由落在哪个通道(只读日志即可核实,
-        # 不必反复重启验证)。route_channel!=internal 即证明第3/5层路由修复生效、报告直达 owner。
-        _HEARTBEAT_LOGGER.info(
-            "OBSERVATION_BATCH_RUN thread=%s obs=%d route_channel=%s route_target=%s",
-            thread_id,
-            len(observations),
-            route_channel,
-            route_target,
-        )
-        reason, wake_signal = _observation_batch_semantics(observations)
-        report = self._run_claimed(
-            {
-                "thread_id": thread_id,
-                "task_id": first_root_task_id(observations),
-                "reason": reason,
-                "route_channel": route_channel,
-                "route_target": route_target,
-                "now": now,
-                "wake_signal": wake_signal,
-            }
-        )
-        if report is not None:
-            self.store.observations.mark_handled(
-                [item.observation_id for item in observations], now=now
-            )
-        return report
 
-    def _observation_route(self, thread_id: str) -> tuple[str, str]:
-        """真事件上报要直达 owner 通道。取路由三档优先级(由最具体到最兜底):
-        ① 观察所在【线程自带的真实外呼 binding】(PROACTIVE_PUSH_CHANNELS,如 feishu)——最具体,
-           直取其 channel_user_id(飞书=open_id,适配器 receive_id_type=open_id)。
-        ② 无外呼 binding 时(真机第3层实锤:urgent 观察常挂【子代理线程】bg-main-thread,无
-           channel binding,按线程取会回落 internal 发不出去)→ 按 owner-scoped agent 的 owner 身份取
-           (飞书/open_id):owner 身份就是那个飞书用户。open_id 优先从 owner home 路径解析(不依赖属性
-           是否设置),再退 home_paths 属性。**owner 身份必须是真外呼通道(PROACTIVE_PUSH_CHANNELS)才用**
-           ——单租户 owner_provider="local" 不是外呼通道,不能拿它当路由(否则绕过 internal 投递、发不出)。
-        ③ 都取不到 → 回落线程 binding(单机 internal 绑定)或 (internal, "")。
-        ⚠️ ①在②之前:owner_id 是 provider 的 user_id,生产环境恰等于 open_id,但概念上不等于线程
-           binding 的 channel_user_id;②排前面会让已绑定线程错发到 owner_id 而非 open_id(实锤)。"""
-        try:
-            thread = self.store.threads.load(thread_id)
-        except Exception:
-            thread = None
-        bindings = list(getattr(thread, "channel_bindings", ()) or ())
-        # ① 线程自带真实外呼 binding(最具体)→ 直取 channel_user_id(飞书 open_id)
-        for binding in reversed(bindings):
-            channel = str(getattr(binding, "channel", "") or "")
-            target = str(
-                getattr(binding, "channel_user_id", "")
-                or getattr(binding, "channel_conversation_id", "")
-                or ""
-            )
-            if channel in PROACTIVE_PUSH_CHANNELS and target:
-                return channel, target
-        # ② 无外呼 binding(子代理线程)→ owner 身份(仅真外呼通道;"local"/"internal" 不算)
-        provider, open_id = self._owner_from_home_path()
-        if provider in PROACTIVE_PUSH_CHANNELS and open_id:
-            return provider, open_id
-        home = getattr(getattr(getattr(self, "runtime", None), "agent", None), "home_paths", None)
-        owner_channel = str(getattr(home, "owner_provider", "") or "").strip()
-        owner_id = str(getattr(home, "owner_id", "") or "").strip()
-        if owner_channel in PROACTIVE_PUSH_CHANNELS and owner_id:
-            return owner_channel, owner_id
-        # ③ 回落线程 binding(单机 internal 绑定)或 internal
-        if bindings:
-            binding = bindings[-1]
-            channel = str(getattr(binding, "channel", "") or "internal")
-            target = str(
-                getattr(binding, "channel_user_id", "")
-                or getattr(binding, "channel_conversation_id", "")
-                or ""
-            )
-            return channel, target or default_route_target(thread, channel)
-        return "internal", ""
-
-    def _owner_from_home_path(self) -> tuple[str, str]:
-        """从 owner home 路径解析 (provider, open_id):.my-agent/owners/providers/<provider>/users/<id>。
-        scoped scheduler 的 store/agent 根落在 owner home 子树,据此取投递路由最稳(不依赖属性是否设置)。"""
-        import re
-
-        sources = [
-            getattr(getattr(getattr(self, "runtime", None), "agent", None), "home_paths", None),
-            getattr(self, "store", None),
-        ]
-        for src in sources:
-            for attr in ("owner_home", "owner_home_dir", "root"):
-                text = str(getattr(src, attr, "") or "")
-                match = re.search(r"owners/providers/([^/]+)/(?:users|groups)/([^/]+)", text)
-                if match:
-                    return match.group(1), match.group(2)
-        return "", ""
+# LLM: 仅在线程绑定和路径均未提供可外发身份后读取原 owner 属性，不把 local 当成外发通道。
+# 函数用途: 提供当前 owner 的显式通道与编号；是否可外发由路由模块的既有声明决定。
+def _background_owner_identity(scheduler: BackgroundMainAgentScheduler) -> tuple[str, str]:
+    home = getattr(getattr(getattr(scheduler, "runtime", None), "agent", None), "home_paths", None)
+    return (
+        str(getattr(home, "owner_provider", "") or "").strip(),
+        str(getattr(home, "owner_id", "") or "").strip(),
+    )
 
 
 def _background_claim_scope_id(
@@ -4334,15 +4237,14 @@ class _BackgroundSchedulerExecutionMixin:
         }
 
 
+# LLM: 只组装既有消费、维护、唤醒和执行车道；Goal/路由组件不接管租约或新增可变状态。
+# 类用途: 连接单 Gateway 的后台调度能力，构造寿命、配置和进程内状态保持原边界。
 class BackgroundMainAgentScheduler(
     _BackgroundSchedulerThreadLaneMixin,
     _BackgroundSchedulerTickMixin,
     _BackgroundSchedulerWakeMixin,
-    _BackgroundSchedulerGoalMixin,
     _BackgroundSchedulerExecutionMixin,
 ):
-    """Single facade over background tick, goal routing, and claimed execution."""
-
     # LLM: Diagnostic rows belong to the current background worker thread so
     # concurrent conversation lanes cannot leak policy facts into one another.
     # 函数用途: 读取当前会话车道这一轮的 policy 加载错误。

@@ -1,26 +1,27 @@
-"""真机根 bug:观察批上报路(真事件→主代理→通道)原来不传 route → 默认 internal → 到不了
-飞书。修:_observation_route 从线程 channel binding 取真实路由(飞书 p2p 用 open_id)。"""
+"""后台来源共用路由合同：精确线程绑定优先，owner 按需读取，真实调用携带所选地址。"""
 from __future__ import annotations
 
-from types import SimpleNamespace as _StoreDomain
+from types import SimpleNamespace
 
+import pytest
+from agent.conversation.background_routing import (
+    BackgroundRouteDependencies,
+    default_route_target,
+    owner_from_paths,
+    resolve_background_route,
+)
 from agent.conversation.models import ChannelBinding, ConversationThread
 from agent.conversation.runtime import BackgroundMainAgentScheduler
 
 
-class _MockStore:
-    def __init__(self, thread):
-        self._thread = thread
-        self.threads = _StoreDomain(load=self._fake_load_thread)
-
-    def _fake_load_thread(self, thread_id):
-        return self._thread
-
-
-def _sched(thread):
-    s = BackgroundMainAgentScheduler.__new__(BackgroundMainAgentScheduler)
-    s.store = _MockStore(thread)
-    return s
+# LLM: helper 只提供路由所需的三个只读能力，不构造 scheduler 或缓存第二份线程状态。
+# 函数用途: 为路由合同提供合成线程和 owner 事实，无文件、网络或持久化副作用。
+def _routes(thread, *, paths=(), identity=("", "")):
+    return BackgroundRouteDependencies(
+        load_thread=lambda _thread_id: thread,
+        owner_paths=lambda: iter(paths),
+        owner_identity=lambda: identity,
+    )
 
 
 def test_observation_route_feishu_uses_open_id():
@@ -29,20 +30,18 @@ def test_observation_route_feishu_uses_open_id():
         channel_bindings=[ChannelBinding(channel="feishu", channel_conversation_id="default",
                                           channel_user_id="ou_abc", canonical_user_id="ou_abc", thread_id="t1")],
     )
-    channel, target = _sched(thread)._observation_route("t1")
+    channel, target = resolve_background_route(_routes(thread), "t1")
     assert channel == "feishu"
     assert target == "ou_abc"  # 飞书发到 open_id(receive_id_type=open_id),不是 "default"
 
 
 def test_observation_route_no_binding_falls_back_internal():
     thread = ConversationThread(thread_id="t2", canonical_user_id="u1", channel_bindings=[])
-    assert _sched(thread)._observation_route("t2") == ("internal", "")
+    assert resolve_background_route(_routes(thread), "t2") == ("internal", "")
 
 
 def test_observation_requires_main_agent_treated_urgent():
     """观察批叫回(真事件)必须走 urgent 上报分支,不落 default(拿 create_subagents 去重派工)。"""
-    from types import SimpleNamespace
-
     from agent.conversation.background_tool_policy import _is_urgent_wake
     req = SimpleNamespace(wake_signal={}, reason="observation_requires_main_agent")
     assert _is_urgent_wake(req) is True
@@ -51,49 +50,122 @@ def test_observation_requires_main_agent_treated_urgent():
 
 
 def test_observation_route_prefers_owner_identity():
-    """第3层根修:观察挂子代理线程(无binding)时,按 owner 身份(feishu/ou_xxx)取路由,不回落 internal。"""
-    from types import SimpleNamespace
+    """没有线程绑定时才使用 owner 的可外发身份。"""
     thread = ConversationThread(thread_id="tsub", canonical_user_id="u1", channel_bindings=[])
-    s = BackgroundMainAgentScheduler.__new__(BackgroundMainAgentScheduler)
-    s.store = _MockStore(thread)
-    s.runtime = SimpleNamespace(agent=SimpleNamespace(home_paths=SimpleNamespace(owner_provider="feishu", owner_id="ou_owner")))
-    assert s._observation_route("tsub") == ("feishu", "ou_owner")
+    routes = _routes(thread, identity=("feishu", "ou_owner"))
+    assert resolve_background_route(routes, "tsub") == ("feishu", "ou_owner")
 
 
-def test_observation_route_parses_owner_home_path():
-    """第5层根修:scoped scheduler 的 owner 身份属性没设时,直接从 owner home 路径解析 provider+open_id。
-    (真机疑点:观察批在 scoped scheduler 跑,agent.home_paths 属性可能为空 → 回落 internal → 到不了飞书。)"""
-    from types import SimpleNamespace
+@pytest.mark.parametrize("owner_kind", ["users", "groups"])
+def test_observation_route_parses_owner_home_path(owner_kind):
+    """路径中的 owner 身份优先于属性，但不能覆盖更具体的线程绑定。"""
     thread = ConversationThread(thread_id="tsub", canonical_user_id="u1", channel_bindings=[])
-    s = BackgroundMainAgentScheduler.__new__(BackgroundMainAgentScheduler)
-    # store 根落在 owner home 子树,身份属性缺失(owner_provider/owner_id 都空)
-    s.store = SimpleNamespace(root="/owner-fixture/owners/providers/feishu/users/test-owner/conversations", threads=SimpleNamespace(load=lambda _tid: thread))
-    s.runtime = SimpleNamespace(agent=SimpleNamespace(home_paths=SimpleNamespace(owner_provider="", owner_id="")))
-    assert s._observation_route("tsub") == ("feishu", "test-owner")
+    routes = _routes(
+        thread,
+        paths=(f"/owner-fixture/owners/providers/feishu/{owner_kind}/test-owner/conversations",),
+        identity=("feishu", "attribute-owner"),
+    )
+    assert resolve_background_route(routes, "tsub") == ("feishu", "test-owner")
 
 
 def test_owner_from_home_path_no_match_returns_empty():
-    """路径里没有 owners/providers 结构(如单租户/admin)→ 返回空,由上层回落 binding/internal。"""
-    from types import SimpleNamespace
-    s = BackgroundMainAgentScheduler.__new__(BackgroundMainAgentScheduler)
-    s.store = SimpleNamespace(root="/root/.my-agent/threads")
-    s.runtime = SimpleNamespace(agent=SimpleNamespace(home_paths=SimpleNamespace(owner_home="", root="")))
-    assert s._owner_from_home_path() == ("", "")
+    assert owner_from_paths(("", "/owner-fixture/threads")) == ("", "")
+
+
+def test_thread_binding_skips_owner_reads():
+    thread = ConversationThread(
+        thread_id="t1", canonical_user_id="u1",
+        channel_bindings=[
+            ChannelBinding(channel="feishu", channel_conversation_id="chat-old", channel_user_id="old",
+                           canonical_user_id="u1", thread_id="t1"),
+            ChannelBinding(channel="feishu", channel_conversation_id="chat-new", channel_user_id="new",
+                           canonical_user_id="u1", thread_id="t1"),
+        ],
+    )
+    reads = []
+
+    def forbidden_owner_read():
+        reads.append("owner")
+        raise AssertionError("有效线程绑定不能读取或被 owner 覆盖")
+
+    routes = BackgroundRouteDependencies(
+        load_thread=lambda _thread_id: thread,
+        owner_paths=forbidden_owner_read,
+        owner_identity=forbidden_owner_read,
+    )
+    assert resolve_background_route(routes, "t1") == ("feishu", "new")
+    assert reads == []
+
+
+def test_owner_path_skips_identity_and_later_path_reads():
+    reads = []
+
+    def owner_paths():
+        reads.append("path")
+        yield "/owner-fixture/owners/providers/feishu/users/path-owner"
+        raise AssertionError("首个 canonical 路径已匹配，不得预读后续路径")
+
+    def forbidden_identity():
+        raise AssertionError("有效路径身份不应再查 owner 属性")
+
+    routes = BackgroundRouteDependencies(
+        load_thread=lambda _thread_id: None,
+        owner_paths=owner_paths,
+        owner_identity=forbidden_identity,
+    )
+    assert resolve_background_route(routes, "t1") == ("feishu", "path-owner")
+    assert reads == ["path"]
+
+
+def test_thread_load_failure_keeps_owner_route():
+    def missing_thread(_thread_id):
+        raise OSError("合成线程读取失败")
+
+    routes = BackgroundRouteDependencies(
+        load_thread=missing_thread,
+        owner_paths=lambda: iter(()),
+        owner_identity=lambda: ("feishu", "owner"),
+    )
+    assert resolve_background_route(routes, "missing") == ("feishu", "owner")
+
+
+def test_local_owner_does_not_override_internal_binding():
+    thread = ConversationThread(
+        thread_id="t1", canonical_user_id="u1",
+        channel_bindings=[ChannelBinding(channel="internal", channel_conversation_id="session", channel_user_id="",
+                                         canonical_user_id="u1", thread_id="t1")],
+    )
+    routes = _routes(thread, identity=("local", "owner"))
+    assert resolve_background_route(routes, "t1") == ("internal", "session")
+
+
+def test_default_route_target_keeps_matching_then_last_binding_order():
+    thread = ConversationThread(
+        thread_id="t1", canonical_user_id="u1",
+        channel_bindings=[
+            ChannelBinding(channel="feishu", channel_conversation_id="first", channel_user_id="",
+                           canonical_user_id="u1", thread_id="t1"),
+            ChannelBinding(channel="internal", channel_conversation_id="last", channel_user_id="",
+                           canonical_user_id="u1", thread_id="t1"),
+        ],
+    )
+    assert default_route_target(thread, "feishu") == "first"
+    assert default_route_target(thread, "other") == "last"
+    empty_thread = ConversationThread(thread_id="t1", canonical_user_id="u1", channel_bindings=[])
+    assert default_route_target(empty_thread, "internal") == "t1"
 
 
 def test_run_wake_signal_passes_owner_route():
-    """真机第5层根修:wake signal 路径(真正的投递路径,先于观察批消费并连带标 observation handled)
-    必须给 _run_claimed 传 owner 投递路由,否则回落 internal → 真事件叫回后上报到不了飞书。"""
-    from types import SimpleNamespace
-
-    from agent.conversation.runtime import BackgroundMainAgentScheduler
+    """实际 wake 入口必须把同一路由器的结果传到既有 claimed 执行链。"""
 
     captured = {}
 
     s = BackgroundMainAgentScheduler.__new__(BackgroundMainAgentScheduler)
     s.runtime = SimpleNamespace(agent=SimpleNamespace(home_paths=SimpleNamespace(owner_provider="feishu", owner_id="ou_owner")))
-    s.store = SimpleNamespace(wakes=SimpleNamespace(mark_handled=lambda *a, **k: None))
-    s._observation_route = lambda _tid: ("feishu", "ou_owner")
+    s.store = SimpleNamespace(
+        wakes=SimpleNamespace(mark_handled=lambda *a, **k: None),
+        threads=SimpleNamespace(load=lambda _tid: None),
+    )
     s._pre_wake_capability_sweep = lambda *a, **k: None
     s._wake_retry_after = {}
     s.scheduler_service = None
