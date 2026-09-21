@@ -1,9 +1,7 @@
 """Owner-scoped view, guidance, approval, and stop operations for delegated agents."""
 
-# LLM: This module is the transport-neutral user control plane for TUI, Web, and
-# IM surfaces. It resolves one authenticated conversation root, authorizes one
-# exact descendant run, and delegates mutations to canonical lifecycle services.
-# 模块用途: 让用户查看、插话或停止自己当前主任务树中的任意子代理，不在前端直接修改任务账本。
+# LLM: TUI/Web/IM 共用已授权的精确子代理控制；插话按 admission→creation 写原账本，启动在 creation 锁外。
+# 模块用途: 让用户查看、插话或停止自己任务树中的孩子，状态变更仍经正式生命周期服务。
 
 from __future__ import annotations
 
@@ -74,6 +72,14 @@ class _AgentGuidanceSubmission:
     content: str
     stable_id: str
     dedupe_key: str
+
+
+# LLM: 锁内只交接已持久的响应与需启动的 task；执行器启动必须在 creation guard 释放后进行，不以展示文本判断是否启动。
+# 类用途: 把插话排队与启动分开，防止进程探测或新线程反过来堵住整个子代理创建锁。
+@dataclass(frozen=True)
+class _AgentGuidanceDelivery:
+    payload: dict[str, object]
+    resume_task: object | None = None
 
 
 # LLM: The single Gateway serializes only competing submissions for the same
@@ -173,10 +179,8 @@ def send_agent_guidance(
         )
 
 
-# LLM: Gateway admission is serialized only through durable attempt reservation,
-# idempotent mailbox append, and nonblocking launch acceptance. Never move a
-# provider call or child execution into this critical section.
-# 函数用途: 在短锁内完成一次子代理插话的排队和启动接纳，避免并发重复拉起。
+# LLM: 调用方持单 run admission，再取原 creation 锁完成 fresh task/attempt、预留和邮箱提交；启动在 creation 锁外。
+# 函数用途: 将插话可靠排入一个执行轮，再放开树协调锁启动孩子，避免停止与预留交错。
 def _send_agent_guidance_admitted(
     agent: object,
     *,
@@ -187,20 +191,28 @@ def _send_agent_guidance_admitted(
     content: str,
     stable_id: str,
 ) -> dict[str, object]:
-    task = _reload_guidance_task(agent, task)
-    submission = _AgentGuidanceSubmission(
-        scope=scope,
-        store=store,
-        thread=thread,
-        task=task,
-        content=content,
-        stable_id=stable_id,
-        dedupe_key=f"user-agent-guidance:{stable_id}",
-    )
-    prior = _read_guidance_receipt(submission)
-    if prior is not None:
-        return _replay_agent_guidance(agent, submission, prior)
-    return _submit_new_agent_guidance(agent, submission)
+    with agent.subagents.creation_guard():
+        task = _reload_guidance_task(agent, task)
+        submission = _AgentGuidanceSubmission(
+            scope=scope, store=store, thread=thread, task=task, content=content,
+            stable_id=stable_id, dedupe_key=f"user-agent-guidance:{stable_id}",
+        )
+        prior = _read_guidance_receipt(submission)
+        delivery = (
+            _replay_agent_guidance(agent, submission, prior)
+            if prior is not None else _submit_new_agent_guidance(agent, submission)
+        )
+    if delivery.resume_task is not None:
+        try:
+            delivery.payload["resume"] = _resume_agent_for_guidance(agent, delivery.resume_task)
+        except AgentControlError:
+            raise
+        except Exception as exc:
+            raise AgentControlError(
+                503, "AGENT_RESUME_UNAVAILABLE",
+                "子代理消息已经保存，但处理轮暂未启动；系统会按同一消息重试。",
+            ) from exc
+    return delivery.payload
 
 
 # LLM: Admission always refreshes the task after taking the per-run lock; an
@@ -239,20 +251,18 @@ def _read_guidance_receipt(submission: _AgentGuidanceSubmission) -> object | Non
         ) from exc
 
 
-# LLM: First delivery resolves one exact current or successor attempt, persists
-# the message once, then starts only the already-reserved same AgentRun.
-# 函数用途: 完成首次插话的回合预留、可靠写入与必要唤醒。
+# LLM: 调用方持 creation 锁；首次投递只解析并持久预留回合、写邮箱，返回结构化启动需求，不启动线程。
+# 函数用途: 在同一短事务中完成首次插话排队，交给锁外启动路径继续。
 def _submit_new_agent_guidance(
     agent: object,
     submission: _AgentGuidanceSubmission,
-) -> dict[str, object]:
+) -> _AgentGuidanceDelivery:
     task = submission.task
     if _task_is_terminal(task):
         raise AgentControlError(409, "AGENT_ALREADY_TERMINAL", "这个子代理已经结束；当前详情页只读。")
     turn, expected_turn_id = _reserve_guidance_turn(agent, task)
     entry = _append_guidance_entry(submission, expected_turn_id)
-    resume = _resume_new_guidance_turn(agent, task, turn)
-    return {
+    return _AgentGuidanceDelivery({
         "ok": True,
         "delivery": "queued",
         "status": "pending",
@@ -260,8 +270,8 @@ def _submit_new_agent_guidance(
         "guidance_id": entry.guidance_id,
         "expected_turn_id": expected_turn_id,
         "run_id": str(getattr(task, "id", "") or ""),
-        "resume": resume,
-    }
+        "resume": {"status": "active_turn", "run_ids": []},
+    }, task if turn.resume_required else None)
 
 
 # LLM: Attempt reservation reads only RuntimeDB lifecycle and may create one
@@ -341,28 +351,6 @@ def _append_guidance_entry(
         ) from exc
 
 
-# LLM: Launch follows a durable mailbox append and only for a turn explicitly
-# marked resume_required. Failure keeps the receipt pending for stable replay.
-# 函数用途: 在消息保存后启动等待中的同一子代理；活跃轮不重复启动。
-def _resume_new_guidance_turn(
-    agent: object,
-    task: object,
-    turn: _AgentGuidanceTurn,
-) -> dict[str, object]:
-    if not turn.resume_required:
-        return {"status": "active_turn", "run_ids": []}
-    try:
-        return _resume_agent_for_guidance(agent, task)
-    except AgentControlError:
-        raise
-    except Exception as exc:
-        raise AgentControlError(
-            503,
-            "AGENT_RESUME_UNAVAILABLE",
-            "子代理消息已经保存，但处理轮暂未启动；系统会按同一消息重试。",
-        ) from exc
-
-
 # LLM: Host-owned attempt routing is the only field that may differ after a
 # crash/retry rebind. All user/scope/thread fields stay in this canonical
 # request builder so append_guidance_once can detect stable-id conflicts.
@@ -398,16 +386,13 @@ def _agent_guidance_request(
     }
 
 
-# LLM: 插话持久操作经 guidance 领域组件； A stable client id is authoritative across HTTP timeout and attempt
-# transitions. Consumed/submitted/reserved receipts are acknowledged exactly as
-# recorded and never start another turn. Pending receipts may resume/rebind only
-# through proven same-AgentRun attempt ancestry.
-# 函数用途: 对网络重试返回原消息的真实回执，避免“已收到却恢复输入框”或重复唤醒。
+# LLM: 调用方持 creation 锁；稳定消息 ID 复用原回执，pending 只准备同 AgentRun 的接续，启动需求交给锁外调用者。
+# 函数用途: 返回网络重试的原投递事实，已提交或消费的消息不重复启动。
 def _replay_agent_guidance(
     agent: object,
     submission: _AgentGuidanceSubmission,
     prior: object,
-) -> dict[str, object]:
+) -> _AgentGuidanceDelivery:
     prior_entry = getattr(prior, "entry", None)
     prior_metadata = (
         getattr(prior_entry, "metadata", {})
@@ -433,6 +418,7 @@ def _replay_agent_guidance(
         "status": f"replay_{receipt_status or 'recorded'}",
         "run_ids": [],
     }
+    resume_required = False
     if receipt_status == "pending":
         if _task_is_terminal(submission.task):
             raise AgentControlError(
@@ -441,7 +427,7 @@ def _replay_agent_guidance(
                 "这个子代理已经结束；当前详情页只读。",
             )
         try:
-            expected_turn_id, resume = _resume_pending_guidance_replay(
+            expected_turn_id, resume_required = _resume_pending_guidance_replay(
                 agent,
                 store=submission.store,
                 task=submission.task,
@@ -458,7 +444,9 @@ def _replay_agent_guidance(
             ) from exc
         if refreshed is not None:
             entry = refreshed.entry
-    return {
+        if not resume_required:
+            resume = {"status": "active_turn", "run_ids": []}
+    return _AgentGuidanceDelivery({
         "ok": True,
         "delivery": "queued",
         "status": receipt_status or "pending",
@@ -468,20 +456,18 @@ def _replay_agent_guidance(
         "run_id": str(getattr(submission.task, "id", "") or ""),
         "resume": resume,
         "replayed": True,
-    }
+    }, submission.task if resume_required else None)
 
 
-# LLM: 插话持久操作经 guidance 领域组件； Only a pending receipt can cross this recovery edge. It either resumes
-# its exact current pending turn, or is atomically rebound from a proven dead
-# attempt to the current/new pending attempt on the same AgentRun.
-# 函数用途: 首次启动失败或回执丢失后，安全续起仍未提交模型的同一条子代理消息。
+# LLM: 调用方持 creation 锁；仅 pending 回执可按原 DB 旧轮事实改绑，返回启动需求而不在锁内启动执行器。
+# 函数用途: 为首次启动失败或回执丢失的插话准备同一 run 的接续，启动另在锁外执行。
 def _resume_pending_guidance_replay(
     agent: object,
     *,
     store: ConversationStore,
     task: object,
     expected_turn_id: str,
-) -> tuple[str, dict[str, object]]:
+) -> tuple[str, bool]:
     turn = _agent_guidance_turn(agent, task)
     if not turn.expected_turn_id:
         raise AgentControlError(
@@ -519,9 +505,7 @@ def _resume_pending_guidance_replay(
                 "AGENT_GUIDANCE_STORE_UNAVAILABLE",
                 "子代理消息暂时无法接续到新执行轮；系统会按同一消息重试。",
             )
-    if turn.resume_required:
-        return target_turn_id, _resume_agent_for_guidance(agent, task)
-    return target_turn_id, {"status": "active_turn", "run_ids": []}
+    return target_turn_id, turn.resume_required
 
 
 # LLM: Rebind authority comes only from RuntimeDB ancestry and a terminal
@@ -598,11 +582,8 @@ def _agent_guidance_turn(agent: object, task: object) -> _AgentGuidanceTurn:
     return _AgentGuidanceTurn()
 
 
-# LLM: Resume admission clears only a typed direct-child wait, then reuses the
-# canonical exact-run background dispatcher. Existing runner/launch liveness is
-# accepted idempotently; failures remain retriable because the guidance receipt
-# and pending attempt were already committed with the caller's stable id.
-# 函数用途: 让空闲或等待孩子的指定子代理立刻处理刚排队的用户消息。
+# LLM: 原创建锁内复读控制终态、解除 typed wait 并复用已有启动；auto_start 的启动与探测必须在该锁外，失败保留原插话回执。
+# 函数用途: 在确认孩子仍可运行后启动刚排队的用户消息，停止已生效时不再启动。
 def _resume_agent_for_guidance(agent: object, task: object) -> dict[str, object]:
     manager = getattr(agent, "subagents", None)
     run_id = str(getattr(task, "id", "") or "").strip()
@@ -616,19 +597,25 @@ def _resume_agent_for_guidance(agent: object, task: object) -> dict[str, object]
         release_parent_wait_for_user_guidance,
     )
 
-    released_child_ids = release_parent_wait_for_user_guidance(manager, run_id)
-    refreshed = manager.load(run_id)
-    from ..agent_core.runner.dispatch import candidate_policy, runner_launch_in_progress
-    from ..subagents.runner_session_liveness import has_fresh_runner_session
+    with manager.creation_guard():
+        task = _reload_guidance_task(agent, task)
+        if _task_is_terminal(task):
+            raise AgentControlError(
+                409, "AGENT_ALREADY_TERMINAL", "这个子代理已经结束；当前详情页只读。",
+            )
+        released_child_ids = release_parent_wait_for_user_guidance(manager, run_id)
+        refreshed = manager.load(run_id)
+        from ..agent_core.runner.dispatch import candidate_policy, runner_launch_in_progress
+        from ..subagents.runner_session_liveness import has_fresh_runner_session
 
-    if runner_launch_in_progress(refreshed, candidate_policy()) or has_fresh_runner_session(
-        refreshed
-    ):
-        return {
-            "status": "already_starting",
-            "run_ids": [run_id],
-            "released_child_wait_run_ids": list(released_child_ids),
-        }
+        if runner_launch_in_progress(refreshed, candidate_policy()) or has_fresh_runner_session(
+            refreshed
+        ):
+            return {
+                "status": "already_starting",
+                "run_ids": [run_id],
+                "released_child_wait_run_ids": list(released_child_ids),
+            }
     from ..agent_core.orchestration.background.dispatch import auto_start_tasks
 
     result = auto_start_tasks(agent, [refreshed], {})

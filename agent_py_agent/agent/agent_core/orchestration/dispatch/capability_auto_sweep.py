@@ -11,6 +11,7 @@ from __future__ import annotations
 #   改动时同步检查 conversation/runtime.py(BackgroundMainAgentScheduler._run_wake_signal
 #   接入点)、tests/test_capability_auto_grant.py。
 #   正常工作片次数不构成存活上限；续跑与故障重试统一复用 runner candidate，UNKNOWN 仍由运行账裁决。
+#   失联重排在原 creation guard 内复核 attempt/session；不能拿巡检旧快照覆盖新执行者。
 # 模块用途: 在唤醒和监督阶段核对能力及运行生命周期；允许长期父子协作接续，不把工作片数量当失败次数。
 """Mechanism-level capability sweep before subagent-lifecycle wake turns."""
 
@@ -664,10 +665,8 @@ def _terminate_fully_stalled_source_hosts(
     return {pid: dict(terminate_pid_with_escalation(pid) or {}) for pid in sorted(host_pids)}
 
 
-# LLM: Task-file and runtime.db attempts are two projections of one execution.
-# A natural runtime terminal event must run the ordinary structured finalizer
-# instead of reopening work; only a fenced crash attempt becomes PENDING.
-# 函数用途: 回收已确认失联的 runner；自然终态补齐任务结果，真正崩溃才改成待派状态。
+# LLM: 创建锁内复核原 attempt/session；自然终态走原 finalizer，安全封存的崩溃轮才重排，DB 事务结束后再写 canonical。
+# 函数用途: 回收已确认失联的原 runner；自然终态补齐结果，真正崩溃才改成待派状态。
 def _requeue_dead_running(
     manager: Any,
     task: Any,
@@ -675,51 +674,63 @@ def _requeue_dead_running(
     *,
     reason: str,
 ) -> bool:
-    attempt_id = str(getattr(task, "runner_active_attempt_id", "") or "").strip()
-    if attempt_id:
-        authority = manager.lifecycle.reconcile_dead_runner_attempt(
-            run_id,
-            attempt_id,
-            reason=f"supervision_{reason}_reclaim",
-        )
-        terminal_projection = authority.get("terminal_projection")
-        if isinstance(terminal_projection, dict):
-            return _project_runtime_terminal_result(
-                manager,
-                run_id,
-                attempt_id,
-                terminal_projection,
-                reason=reason,
-            )
-        if not bool(authority.get("ready")):
-            _LOGGER.info(
-                "supervision requeue deferred (run_id=%s attempt_id=%s reason=%s)",
-                run_id,
-                attempt_id,
-                str(authority.get("reason") or "runtime_attempt_not_ready"),
-            )
+    from ....subagents.runner_session_liveness import runner_session_of
+
+    with manager.creation_guard():
+        current = manager.load(run_id)
+        if (
+            str(getattr(current, "status", "")) != "RUNNING"
+            or str(getattr(current, "runner_active_attempt_id", "") or "")
+            != str(getattr(task, "runner_active_attempt_id", "") or "")
+            or runner_session_of(current) != runner_session_of(task)
+        ):
             return False
-        manager.lifecycle.abandon_runner_attempt(
-            run_id,
-            attempt_id,
-            reason=f"supervision_{reason}_reclaim",
+        task = current
+        attempt_id = str(getattr(task, "runner_active_attempt_id", "") or "").strip()
+        if attempt_id:
+            authority = manager.lifecycle.reconcile_dead_runner_attempt(
+                run_id,
+                attempt_id,
+                reason=f"supervision_{reason}_reclaim",
+            )
+            terminal_projection = authority.get("terminal_projection")
+            if isinstance(terminal_projection, dict):
+                return _project_runtime_terminal_result(
+                    manager,
+                    run_id,
+                    attempt_id,
+                    terminal_projection,
+                    reason=reason,
+                )
+            if not bool(authority.get("ready")):
+                _LOGGER.info(
+                    "supervision requeue deferred (run_id=%s attempt_id=%s reason=%s)",
+                    run_id,
+                    attempt_id,
+                    str(authority.get("reason") or "runtime_attempt_not_ready"),
+                )
+                return False
+            manager.lifecycle.abandon_runner_attempt(
+                run_id,
+                attempt_id,
+                reason=f"supervision_{reason}_reclaim",
+            )
+        refreshed = manager.load(run_id)
+        from ....ingestion.source_worker import record_source_worker_recovery
+
+        record_source_worker_recovery(refreshed, reason=reason)
+        _close_reclaimed_runner_session(refreshed, reason=reason)
+        refreshed.status = "PENDING"
+        refreshed.failure_type = ""
+        from ....subagents.process_control import reclaim_background_start
+
+        reclaim_background_start(refreshed)
+        manager.save(refreshed)
+        manager.actions._append_task_work_log(
+            refreshed,
+            f"supervision: requeued RUNNING->PENDING reason={reason}",
         )
-    refreshed = manager.load(run_id)
-    from ....ingestion.source_worker import record_source_worker_recovery
-
-    record_source_worker_recovery(refreshed, reason=reason)
-    _close_reclaimed_runner_session(refreshed, reason=reason)
-    refreshed.status = "PENDING"
-    refreshed.failure_type = ""
-    from ....subagents.process_control import reclaim_background_start
-
-    reclaim_background_start(refreshed)
-    manager.save(refreshed)
-    manager.actions._append_task_work_log(
-        refreshed,
-        f"supervision: requeued RUNNING->PENDING reason={reason}",
-    )
-    return True
+        return True
 
 
 # LLM: This crash repair deliberately reuses the canonical runner-result service,

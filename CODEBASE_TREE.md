@@ -109,6 +109,7 @@ agent_py_agent/
 |   |       `-- activity_diagnostics.py # 复用心跳的 exact attempt 阶段提醒，不强杀慢模型或自动重派
 |   |-- subagents/
 |   |   |-- manager.py                  # 子代理 root manager：初始化、基础生命周期、服务组合
+|   |   |-- coordination.py             # 原创建文件锁的同线程重入，统一创建与执行轮短事务
 |   |   |-- kernel.py                   # 子代理树快照
 |   |   |-- manager_work_orders.py      # 工单路径、默认文件、校验
 |   |   |-- models.py                   # 子代理数据模型
@@ -488,6 +489,7 @@ docs/
 - `agent_py_agent/agent/agent_core/agent_tree/model_view.py`：保留 run 身份、状态、原因与真实 read_order；不暴露恢复目录，省略内容可沿原工具归档完整读取。
 - `agent_py_agent/tests/test_agent_tree_model_view.py`：模型状态投影、终态报告可达性、状态不被省略及超长归档回读合同的定向验证。
 - `agent_py_agent/agent/subagents/result_registered_artifacts.py`：从 exact run 的工具产物账本投影真实文件；自然最终回复与结构化收口共用，不扫描目录或搬运文件。
+- `agent_py_agent/agent/subagents/coordination.py`：复用原 owner 创建锁协调 canonical 创建、执行轮变更和插话预留；只记录本线程持锁事实，不保存任务状态，启动和退出等待不得持锁。
 - `agent_py_agent/agent/agent_core/runner/activity_diagnostics.py`：复用现有心跳与调用账，阶段长等待只通知直属父级，不强杀或自动重派。
 - `agent_py_agent/tests/test_subagent_activity_diagnostics.py`：慢流、阶段诊断、通知去重、旧执行代与并发进度保存的定向验证。
 

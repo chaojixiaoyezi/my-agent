@@ -1,5 +1,5 @@
-# LLM: 子代理恢复复用 canonical run/attempt；插话只按已确认失效身份改绑，修改须联测恢复资格和批次未知状态。
-# 模块用途: 领取、恢复和结束子代理执行尝试，保持运行账本、任务及插话身份一致。
+# LLM: 子代理换轮在原创建锁内使用 canonical run/attempt；插话只按已确认失效身份改绑，联测恢复资格与 UNKNOWN。
+# 模块用途: 协调执行轮的领取、恢复和精确放弃，保持运行账本、任务与插话身份一致。
 from __future__ import annotations
 
 """Runner attempt lifecycle helpers for subagent runs."""
@@ -21,57 +21,57 @@ from .recovery.strategy import (
 )
 
 
-# LLM: Starting an attempt must bind RuntimeDB identity and may reopen CANCELLED only when the
-# structured conversation_user_stop eligibility contract proves this exact run is resumable.
-# 函数用途: 为子代理准备新执行轮；普通终态拒绝重启，用户停止的同一 run 显式续跑时恢复其暂停目标。
+# LLM: 原创建锁覆盖 canonical 复读、DB 激活和投影发布；DB 提交后才保存文件，用户停止恢复仍受结构化资格约束。
+# 函数用途: 在同一短事务里准备新执行轮和恢复目标，避免取消或插话在换代中间插入。
 def prepare_runner_attempt(manager: object, run_id: str, *, retry_reason: str = "") -> SubAgentTask:
-    task = manager.load(run_id)
-    resumable_user_stop = user_stopped_run_is_resumable(task)
-    _assert_runner_attempt_start_allowed(task, resumable_user_stop=resumable_user_stop)
-    if resumable_user_stop:
-        _reactivate_user_stopped_conversation_link(manager, task)
-    previous = f"{task.status}/{task.failure_type or 'none'}"
-    strategy = build_subagent_recovery_strategy(
-        SubagentRecoveryStrategyRequest(task=task)
-    )
-    attempt_id, runtime_task_id = _runtime_attempt_identity(manager, task)
-    if not attempt_id:
-        attempt_id = _framework_new_id("attempt_id")
-    _recover_unsubmitted_agent_guidance(manager, task, attempt_id)
-    now = time.time()
-    task.status = "RUNNING"
-    task.verification_status = "UNVERIFIED"
-    task.failure_type = ""
-    task.ended_at = 0.0
-    task.runner_active_attempt_id = attempt_id
-    task.runner_last_attempt_at = now
-    task.updated_at = now
-    task.heartbeat_at = now
-    _record_runner_recovery_preflight(task, strategy, previous)
-    if runtime_task_id:
-        _persist_runtime_task_id(task, runtime_task_id)
-    manager.save(
-        task,
-        allow_terminal_reactivation=resumable_user_stop,
-    )
-    if (
-        not task_status_in(task.status, {TaskStatus.RUNNING.value})
-        or task.runner_active_attempt_id != attempt_id
-    ):
-        raise RuntimeError(
-            f"runner attempt rejected by canonical lifecycle: run_id={run_id}"
+    with manager.creation_guard():
+        task = manager.load(run_id)
+        resumable_user_stop = user_stopped_run_is_resumable(task)
+        _assert_runner_attempt_start_allowed(task, resumable_user_stop=resumable_user_stop)
+        if resumable_user_stop:
+            _reactivate_user_stopped_conversation_link(manager, task)
+        previous = f"{task.status}/{task.failure_type or 'none'}"
+        strategy = build_subagent_recovery_strategy(
+            SubagentRecoveryStrategyRequest(task=task)
         )
-    if resumable_user_stop:
-        from ...conversation.goal_delegation import transition_delegated_goal
+        attempt_id, runtime_task_id = _runtime_attempt_identity(manager, task)
+        if not attempt_id:
+            attempt_id = _framework_new_id("attempt_id")
+        _recover_unsubmitted_agent_guidance(manager, task, attempt_id)
+        now = time.time()
+        task.status = "RUNNING"
+        task.verification_status = "UNVERIFIED"
+        task.failure_type = ""
+        task.ended_at = 0.0
+        task.runner_active_attempt_id = attempt_id
+        task.runner_last_attempt_at = now
+        task.updated_at = now
+        task.heartbeat_at = now
+        _record_runner_recovery_preflight(task, strategy, previous)
+        if runtime_task_id:
+            _persist_runtime_task_id(task, runtime_task_id)
+        manager.save(
+            task,
+            allow_terminal_reactivation=resumable_user_stop,
+        )
+        if (
+            not task_status_in(task.status, {TaskStatus.RUNNING.value})
+            or task.runner_active_attempt_id != attempt_id
+        ):
+            raise RuntimeError(
+                f"runner attempt rejected by canonical lifecycle: run_id={run_id}"
+            )
+        if resumable_user_stop:
+            from ...conversation.goal_delegation import transition_delegated_goal
 
-        transition_delegated_goal(manager, task, expected_status="paused", status="active")
-    suffix = f" retry_reason={retry_reason}" if retry_reason else ""
-    manager.actions._append_task_work_log(
-        task,
-        f"runner_attempt: start previous={previous} attempt={task.runner_attempts + 1} "
-        f"attempt_id={attempt_id}{suffix}",
-    )
-    return task
+            transition_delegated_goal(manager, task, expected_status="paused", status="active")
+        suffix = f" retry_reason={retry_reason}" if retry_reason else ""
+        manager.actions._append_task_work_log(
+            task,
+            f"runner_attempt: start previous={previous} attempt={task.runner_attempts + 1} "
+            f"attempt_id={attempt_id}{suffix}",
+        )
+        return task
 
 
 def _assert_runner_attempt_start_allowed(
@@ -137,6 +137,8 @@ def _reactivate_user_stopped_conversation_link(
         raise RuntimeError("user-stopped conversation run link could not be reactivated")
 
 
+# LLM: 原创建锁与准备/控制共用；canonical mutate 只放弃显式旧 attempt，不能用旧快照清掉后来激活的 ID。
+# 函数用途: 登记一个执行轮已放弃，仅当它仍是当前轮时清空指针，保留其它并发状态。
 def abandon_runner_attempt(
     manager: object,
     run_id: str,
@@ -144,22 +146,27 @@ def abandon_runner_attempt(
     *,
     reason: str = "",
 ) -> SubAgentTask:
-    task = manager.load(run_id)
     normalized = str(attempt_id or "").strip()
-    if not normalized:
+    with manager.creation_guard():
+        if not normalized:
+            return manager.load(run_id)
+
+        # LLM: reducer 只操作最新 task 的 attempt 字段；不能在 canonical 锁里重新读取或获取 creation 锁。
+        # 函数用途: 合并旧轮废弃记录，同时保护已经换代的新活动轮。
+        def abandon(task: SubAgentTask) -> None:
+            if normalized not in task.runner_abandoned_attempt_ids:
+                task.runner_abandoned_attempt_ids.append(normalized)
+            if task.runner_active_attempt_id == normalized:
+                task.runner_active_attempt_id = ""
+            task.updated_at = time.time()
+
+        task = manager.mutate(run_id, abandon)
+        if reason:
+            manager.actions._append_task_work_log(
+                task,
+                f"runner_attempt: abandon attempt_id={normalized} reason={reason}",
+            )
         return task
-    if normalized not in task.runner_abandoned_attempt_ids:
-        task.runner_abandoned_attempt_ids.append(normalized)
-    if task.runner_active_attempt_id == normalized:
-        task.runner_active_attempt_id = ""
-    task.updated_at = time.time()
-    manager.save(task)
-    if reason:
-        manager.actions._append_task_work_log(
-            task,
-            f"runner_attempt: abandon attempt_id={normalized} reason={reason}",
-        )
-    return task
 
 
 # LLM: Dead-runner supervision must reconcile the exact runtime.db attempt before

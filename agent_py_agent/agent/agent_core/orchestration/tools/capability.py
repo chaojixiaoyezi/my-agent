@@ -6,6 +6,7 @@
 #     workspace 之外）必须结构化拒绝，不允许静默放行。
 #   改动时同步检查 tests/test_resolve_capability_requests_tool.py、
 #   子代理聚合记录与 docs/audits/R4-goattack-20260611.md。
+#   裁决后的排队必须在原 creation guard 内复读控制终态，不能由旧快照复活已停止的孩子。
 # 模块用途: 子代理 capability_request 的显式、结构化、可审计处理入口。
 from __future__ import annotations
 
@@ -435,11 +436,8 @@ def _model_requester_run_id(agent: Any) -> str:
     return current_orchestration_requester_run_id(agent)
 
 
-# LLM: capability 裁决是继续同一 child turn 的结构化控制事实。只要所有未决
-# 请求已闭合且没有活 runner，就把原 run 重排为 PENDING；这是终态单调保护允许的
-# 窄例外，但绝不复活用户已经 cancel/abandon/takeover 的 run，也不根据模型回复
-# 文字猜测是否应该继续。
-# 函数用途: 把已完成的授权裁决转换成同一子代理的自动续跑状态。
+# LLM: 授权后排队在原创建锁内复读任务；未决请求已闭合且无活 runner 才排队，旧裁决快照不得跨过新控制终态。
+# 函数用途: 把已完成的授权裁决转换成同一子代理的自动续跑状态，不复活后来被停止的孩子。
 def _queue_resolved_child_continuation(
     agent: Any,
     task: Any,
@@ -451,53 +449,55 @@ def _queue_resolved_child_continuation(
     run_id = str(getattr(task, "id", "") or "").strip()
     if not resolved or errors:
         return {"status": "not_queued", "run_id": run_id, "reason": "resolution_incomplete"}
-    if any(
-        capability_request_requires_parent_resolution(getattr(item, "status", "OPEN"))
-        for item in (getattr(task, "capability_requests", None) or [])
-    ):
-        return {"status": "not_queued", "run_id": run_id, "reason": "requests_still_open"}
-    if task_status_in(
-        getattr(task, "status", ""),
-        {
-            TaskStatus.CANCELLED.value,
-            TaskStatus.ABANDONED.value,
-            TaskStatus.TAKEN_OVER.value,
-        },
-    ):
-        return {"status": "not_queued", "run_id": run_id, "reason": "run_closed_by_control"}
-    if has_fresh_runner_session(task):
-        return {"status": "already_running", "run_id": run_id, "reason": "fresh_runner_session"}
-    previous_status = str(getattr(task, "status", "") or "")
-    task.status = TaskStatus.PENDING.value
-    task.verification_status = VerificationStatus.UNVERIFIED.value
-    if str(getattr(task, "failure_type", "") or "") in {
-        "capability_request",
-        "permission_blocked",
-        "write_permission_blocked",
-    }:
-        task.failure_type = ""
-    attrs = dict(getattr(task, "attributes", {}) or {})
-    attrs["capability_resolution_continuation"] = {
-        "schema_version": "capability_resolution_continuation.v1",
-        "decision": decision,
-        "previous_status": previous_status,
-        "status": "queued",
-        "queued_at": time.time(),
-        "request_ids": [
-            str(item.get("request_id") or "")
-            for item in resolved
-            if str(item.get("request_id") or "").strip()
-        ],
-    }
-    task.attributes = attrs
-    agent.subagents.save(task, allow_terminal_reactivation=True)
-    _reactivate_child_conversation_link(agent, run_id)
-    return {
-        "status": "queued",
-        "run_id": run_id,
-        "previous_status": previous_status,
-        "next_status": TaskStatus.PENDING.value,
-    }
+    with agent.subagents.creation_guard():
+        task = agent.subagents.load(run_id)
+        if any(
+            capability_request_requires_parent_resolution(getattr(item, "status", "OPEN"))
+            for item in (getattr(task, "capability_requests", None) or [])
+        ):
+            return {"status": "not_queued", "run_id": run_id, "reason": "requests_still_open"}
+        if task_status_in(
+            getattr(task, "status", ""),
+            {
+                TaskStatus.CANCELLED.value,
+                TaskStatus.ABANDONED.value,
+                TaskStatus.TAKEN_OVER.value,
+            },
+        ):
+            return {"status": "not_queued", "run_id": run_id, "reason": "run_closed_by_control"}
+        if has_fresh_runner_session(task):
+            return {"status": "already_running", "run_id": run_id, "reason": "fresh_runner_session"}
+        previous_status = str(getattr(task, "status", "") or "")
+        task.status = TaskStatus.PENDING.value
+        task.verification_status = VerificationStatus.UNVERIFIED.value
+        if str(getattr(task, "failure_type", "") or "") in {
+            "capability_request",
+            "permission_blocked",
+            "write_permission_blocked",
+        }:
+            task.failure_type = ""
+        attrs = dict(getattr(task, "attributes", {}) or {})
+        attrs["capability_resolution_continuation"] = {
+            "schema_version": "capability_resolution_continuation.v1",
+            "decision": decision,
+            "previous_status": previous_status,
+            "status": "queued",
+            "queued_at": time.time(),
+            "request_ids": [
+                str(item.get("request_id") or "")
+                for item in resolved
+                if str(item.get("request_id") or "").strip()
+            ],
+        }
+        task.attributes = attrs
+        agent.subagents.save(task, allow_terminal_reactivation=True)
+        _reactivate_child_conversation_link(agent, run_id)
+        return {
+            "status": "queued",
+            "run_id": run_id,
+            "previous_status": previous_status,
+            "next_status": TaskStatus.PENDING.value,
+        }
 
 
 # LLM: 旧版错误可能已把含 OPEN request 的 child link 写成 completed；裁决后的

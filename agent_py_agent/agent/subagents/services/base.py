@@ -1,6 +1,6 @@
 
-# LLM: 子代理创建共用 canonical 身份、继承清单和 owner 权限；登记与落盘不能生成第二套身份来源。
-# 模块用途: 创建、注册和组织子代理任务，把结构化运行身份交给后续 worker 和持久仓库。
+# LLM: 子代理创建在原 owner 创建锁内发布 canonical 身份、继承清单及权限；登记与落盘不能生成第二套身份来源。
+# 模块用途: 完整创建和组织子代理任务，把已发布的运行身份交给后续 worker 和持久仓库。
 """base task creation and lifecycle service.
 
 这里承接子代理任务创建、分割、注册卡等基础能力。
@@ -394,6 +394,8 @@ def _store_rebindings(task: SubAgentTask, rewrites: list[OutputRefRebinding]) ->
     task.attributes = attrs
 
 
+# LLM: 新孩子在原 creation guard 内完成线程、权限与 canonical 发布；上层批次可重入同一原锁。
+# 类用途: 把创建参数物化为可运行的子代理任务，保持父子关系和权限身份一致。
 class SubAgentBaseService:
     """Base task creation and lifecycle service."""
 
@@ -431,27 +433,27 @@ class SubAgentBaseService:
         """Register a subagent role card."""
         self.manager.cards[card.name] = card
 
-    # LLM: Creation publishes one task, one exact delegated ConversationThread, runtime authority,
-    # and projections in that order; callers must not add a second thread or transcript path.
-    # 函数用途: 创建一条完整子代理任务，并在任务可运行前同步建立其独立会话线程。
+    # LLM: 原创建锁覆盖线程、DB 权威和 canonical 发布；服务层已持同一路径锁时只重入，不建立第二份身份。
+    # 函数用途: 在停止扫描之前完整发布一个孩子及独立会话，创建中途不会被误判为空树。
     def create_run(
         self,
         *,
         params: CreateRunParams,
     ) -> SubAgentTask:
         """Create one explicit subagent task record."""
-        from ..role_contracts import apply_role_contract_to_create_params
+        with self.manager.creation_guard():
+            from ..role_contracts import apply_role_contract_to_create_params
 
-        params = apply_role_contract_to_create_params(
-            params,
-            role_template_dirs=getattr(self.manager, "role_template_dirs", None),
-        )
-        prepared = self._prepare_run(params)
-        task = self._build_task(params, prepared)
-        self._materialize_agent_thread(task)
-        self._write_authority_records(task, params)
-        self._finalize_task(task, params.parent_id)
-        return task
+            params = apply_role_contract_to_create_params(
+                params,
+                role_template_dirs=getattr(self.manager, "role_template_dirs", None),
+            )
+            prepared = self._prepare_run(params)
+            task = self._build_task(params, prepared)
+            self._materialize_agent_thread(task)
+            self._write_authority_records(task, params)
+            self._finalize_task(task, params.parent_id)
+            return task
 
     # LLM: A delegated run receives its exact ConversationThread and explicitly requested Goal before lifecycle publication.
     # Standalone unmanaged managers without a ConversationStore remain valid test/index adapters.

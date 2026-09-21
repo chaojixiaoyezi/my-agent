@@ -1,5 +1,14 @@
 # Subagent Structure
 
+## 原创建锁与执行轮短事务
+
+- `coordination.py` 复用 `.create-subagents.guard` 的原线程锁和文件锁，仅为同进程/线程/canonical 路径处理嵌套持有；不另存任务状态。
+- `services/base.py::create_run` 在实际登记处持锁；上层模型创建批次使用同一边界，不能绕到第二创建入口。
+- `services/lifecycle_runner_attempts.py` 在锁内完成原 DB 激活和投影发布；放弃旧轮通过最新 canonical mutation 精确清指针。
+- `orchestration/tools/capability.py` 排队前锁内复读控制终态；`dispatch/capability_auto_sweep.py` 核对原 attempt/session 后才重排失联者。
+- `conversation/agent_control.py` 按单 run admission→creation 排队；`_AgentGuidanceDelivery` 仅交接响应和启动需求，启动/探测不持 creation 锁。
+- 完整子树停止尚未接通。启动期准确 pending 身份、旧启动回执条件写入与固定资源清单是下一组必做项，不能用锁替代原身份 CAS。
+
 ## runner 当前错误投影
 
 - `manager_runner_result_payload.py::apply_status_and_build_payload` 将显式 `turn_end_reason` 传入既有

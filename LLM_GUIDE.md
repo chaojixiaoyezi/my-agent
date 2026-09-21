@@ -50,6 +50,8 @@ Gateway 持久主任务沿 Goal→task→请求锁关闭原权限并冻结主资
 direct/local 的消息句柄由 worker 与命令端共享，core 在模型前发布实际身份；Compact 在原任务锁内重新核对，旧句柄不控制新 job。
 无持久任务热请求先在原 T 锁关闭发布并读取绑定，再释放 T、取 task 锁；已晋升或身份不可读不能降级猜测清理。
 完整子树后台资源接线仍待完成；尚未发布或新增实际 TUI，不把开发回归当作 TUI 137 已通过。
+子代理创建、换轮、旧轮放弃和控制预留沿原 creation guard；`subagents/coordination.py` 只管理同线程嵌套持锁。
+guidance 的 admission 在 creation 之外，启动探测与执行放 creation 锁外；完整启动身份及停止树接线仍待完成。
 
 SSE delta 原样保留，OpenAI 工具参数生成有独立进度；
 派工不会永久禁止主代理本地工作，用户明确限制仍保留；复制按最新代次和实际通道结果反馈。

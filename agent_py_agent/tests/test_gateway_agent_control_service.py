@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
+from contextlib import contextmanager
 
 import pytest
 
@@ -457,24 +458,47 @@ def test_interactive_stop_eventually_wakes_root_parent(tmp_path) -> None:
 def test_interactive_stop_reconciles_grandchild_created_inside_inflight_guard(
     tmp_path,
 ) -> None:
-    """详情页停止先打断目标，再在创建 guard 后复读并关闭迟到孙代理。"""
+    """独立创建和控制线程交错；停止须覆盖创建事务已经落盘的孙代理。"""
     agent, scope, child = _bound_agent_tree(tmp_path)
+    creating, finish_creation, controlling = (threading.Event() for _ in range(3))
+    created, results, errors = [], [], []
 
-    with agent.subagents.creation_guard():
-        accepted = enqueue_agent_stop(
-            agent,
-            scope=scope,
-            run_id=child.id,
-            operation_id="agent-stop-late-grandchild",
-        )
-        late_grandchild = agent.subagents.create_run(
-            goal="模拟在途派工落盘的孙任务",
-            root_id="task-root",
-            parent_id=child.id,
-        )
-        late_grandchild = agent.subagents.lifecycle.prepare_runner_attempt(
-            late_grandchild.id
-        )
+    def create():
+        try:
+            with agent.subagents.creation_guard():
+                creating.set()
+                assert finish_creation.wait(3)
+                task = agent.subagents.create_run(
+                    goal="模拟在途派工落盘的孙任务", root_id="task-root", parent_id=child.id,
+                )
+                created.append(agent.subagents.lifecycle.prepare_runner_attempt(task.id))
+        except BaseException as exc:
+            errors.append(exc)
+
+    def stop():
+        controlling.set()
+        try:
+            results.append(enqueue_agent_stop(
+                agent, scope=scope, run_id=child.id, operation_id="agent-stop-late-grandchild",
+            ))
+        except BaseException as exc:
+            errors.append(exc)
+
+    creator = threading.Thread(target=create, daemon=True)
+    controller = threading.Thread(target=stop, daemon=True)
+    creator.start()
+    try:
+        assert creating.wait(2)
+        controller.start()
+        assert controlling.wait(2)
+    finally:
+        finish_creation.set()
+        creator.join(5)
+        if controller.ident is not None:
+            controller.join(5)
+    assert not creator.is_alive() and not controller.is_alive()
+    assert not errors
+    late_grandchild = created[0]
 
     deadline = time.monotonic() + 2.0
     while time.monotonic() < deadline:
@@ -485,7 +509,7 @@ def test_interactive_stop_reconciles_grandchild_created_inside_inflight_guard(
             break
         time.sleep(0.01)
 
-    assert accepted["status"] == "accepted"
+    assert results[0]["status"] == "accepted"
     assert agent.subagents.load(child.id).status == "CANCELLED"
     assert agent.subagents.load(late_grandchild.id).status == "CANCELLED"
 
@@ -631,6 +655,86 @@ def test_agent_guidance_wakes_waiting_parent_on_same_run_once(
     entries = agent.conversation_store.guidance.recent("agent_run", child.id)
     assert len(entries) == 1
     assert entries[0].metadata["expected_turn_id"] == successor["attempt_id"]
+
+
+def test_guidance_launch_does_not_hold_child_creation_guard(tmp_path, monkeypatch):
+    agent, scope, child = _bound_agent_tree(tmp_path)
+    _park_child_waiting_for_grandchild(agent, child)
+
+    def fake_auto_start(_agent, tasks, _params):
+        entered = threading.Event()
+
+        def another_child_transaction():
+            with agent.subagents.creation_guard():
+                entered.set()
+
+        thread = threading.Thread(target=another_child_transaction, daemon=True)
+        thread.start()
+        thread.join(2)
+        assert entered.is_set(), "宿主启动不得占用子代理树协调锁"
+        return {"status": "started", "run_ids": [tasks[0].id]}
+
+    monkeypatch.setattr(
+        "agent_py_agent.agent.agent_core.orchestration.background.dispatch.auto_start_tasks",
+        fake_auto_start,
+    )
+    result = send_agent_guidance(
+        agent, scope=scope, run_id=child.id, message="继续当前任务", message_id="launch-outside-guard",
+    )
+    assert result["resume"]["status"] == "started"
+
+
+def test_guidance_waits_for_control_then_rejects_terminal_without_reservation(tmp_path, monkeypatch):
+    from agent_py_agent.agent.conversation import agent_control
+
+    agent, scope, child = _bound_agent_tree(tmp_path)
+    _grandchild, agent_run = _park_child_waiting_for_grandchild(agent, child)
+    repo = agent.subagents.runtime_db
+    before = len(repo.attempts_for_run(str(agent_run["agent_run_id"])))
+    errors = []
+    acquiring, reloading, finished = (threading.Event() for _ in range(3))
+    original_guard = agent.subagents.creation_guard
+    original_reload = agent_control._reload_guidance_task
+
+    @contextmanager
+    def observed_guard():
+        if threading.current_thread().name == "waiting-guidance":
+            acquiring.set()
+        with original_guard():
+            yield
+
+    def observed_reload(*args):
+        reloading.set()
+        return original_reload(*args)
+
+    monkeypatch.setattr(agent.subagents, "creation_guard", observed_guard)
+    monkeypatch.setattr(agent_control, "_reload_guidance_task", observed_reload)
+
+    def send():
+        try:
+            send_agent_guidance(
+                agent, scope=scope, run_id=child.id, message="继续当前任务", message_id="stale-guidance",
+            )
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            finished.set()
+
+    with agent.subagents.creation_guard():
+        thread = threading.Thread(target=send, daemon=True, name="waiting-guidance")
+        thread.start()
+        assert acquiring.wait(2)
+        assert not reloading.is_set()
+        assert not finished.is_set()
+        current = agent.subagents.load(child.id)
+        current.status = "CANCELLED"
+        agent.subagents.save(current)
+    thread.join(5)
+    assert not thread.is_alive()
+    assert len(errors) == 1 and isinstance(errors[0], AgentControlError)
+    assert errors[0].error_code == "AGENT_ALREADY_TERMINAL"
+    assert len(repo.attempts_for_run(str(agent_run["agent_run_id"]))) == before
+    assert agent.conversation_store.guidance.recent("agent_run", child.id) == []
 
 
 def test_concurrent_waiting_parent_guidance_starts_one_runner(

@@ -1,4 +1,5 @@
-
+# LLM: manager 组合原 canonical 服务；创建、换轮和控制使用同一 owner guard，不把普通保存改成新的生命周期入口。
+# 模块用途: 组装子代理状态、创建和执行服务，提供统一的短事务协调入口。
 """Subagent orchestration manager."""
 
 from __future__ import annotations
@@ -8,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ..common.json_io import locked_json_path
+from .coordination import subagent_creation_guard
 from .kernel import SubagentKernelMixin
 from .manager_work_orders import (
     build_work_order_paths,
@@ -66,6 +67,8 @@ class SubAgentManagerInitParams:
     owner_scope_root: str = ""
     owner_policy_snapshot: dict[str, object] | None = None
 
+# LLM: 服务共享同一 owner 路径、RuntimeDB 与 canonical 状态，协调锁只包短事务，不替代各领域权威。
+# 类用途: 提供子代理创建、执行和管理入口，组装各服务而不维护第二份运行状态。
 class SubAgentManager(SubagentKernelMixin):
     """Coordinate focused subagent services behind one manager."""
 
@@ -93,12 +96,10 @@ class SubAgentManager(SubagentKernelMixin):
         _init_manager_state(self, workspace, params)
         _attach_services(self)
 
-    # LLM: Every root or recursive child creation and every stop-side late-child reconciliation
-    # must share this owner-local transaction boundary. Callers may wait on it, but must not hold
-    # it while waiting for a model, child process, or user approval.
-    # 函数用途: 返回当前 owner 的子代理创建事务锁，避免停止操作漏掉正在落盘的迟到子代理。
+    # LLM: 创建、换轮、插话预留和取消共用原 owner 文件锁；同线程嵌套复用，禁止锁内等待模型、启动探测或进程退出。
+    # 函数用途: 返回子代理短事务边界，避免旧停止覆盖新执行轮或漏掉正在落盘的孩子。
     def creation_guard(self):
-        return locked_json_path(Path(self.workspace) / ".create-subagents.guard")
+        return subagent_creation_guard(self.workspace)
 
     @property
     def _indexing_service(self):
