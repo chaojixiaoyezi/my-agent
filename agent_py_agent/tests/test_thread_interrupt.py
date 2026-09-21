@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import threading
 import time
+from dataclasses import replace
 from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
@@ -24,6 +25,7 @@ from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.concurrency.interrupt import (
     interrupt_by_name,
     is_interrupted,
+    is_interruptible_registered,
     register_interrupt_callback,
     register_interruptible,
     set_interrupt,
@@ -182,6 +184,12 @@ def test_background_main_run_registers_the_durable_task_control_name(monkeypatch
             return "done"
 
     class Claims:
+        def acquire(self, _payload):
+            observed["registered_before_claim"] = is_interruptible_registered(
+                "conversation-request:req-background"
+            )
+            return {"claim_id": "claim-1"}
+
         def finish(self, payload):
             observed["finish"] = payload
 
@@ -195,13 +203,18 @@ def test_background_main_run_registers_the_durable_task_control_name(monkeypatch
     )
     scheduler._runtime_facts = lambda: {}
 
-    result = claim_module.run_with_heartbeat(
-        _background_claim_dependencies(scheduler),
-        "claim-1",
+    dependencies = replace(
+        _background_claim_dependencies(scheduler), child_owns_task=lambda _task: False,
+        claim_scope_id=lambda _thread, _task: "lane", terminal_task=lambda _kwargs: False,
+        recovery_block=lambda _task: None,
+    )
+    result = claim_module.run_claimed(
+        dependencies,
         {"thread_id": "thread-1", "task_id": "req-background"},
     )
 
     assert result == "done"
+    assert observed["registered_before_claim"] is True
     assert observed["signaled"] is True
     assert observed["interrupted"] is True
     assert observed["heartbeat_stopped"] is True

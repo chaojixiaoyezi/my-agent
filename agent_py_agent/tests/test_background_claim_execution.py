@@ -14,6 +14,11 @@ from agent_py_agent.agent.backends.errors import (
     ProviderTransientError,
     ProviderUsageLimitError,
 )
+from agent_py_agent.agent.concurrency.interrupt import (
+    interrupt_by_name,
+    is_interrupted,
+    is_interruptible_registered,
+)
 from agent_py_agent.agent.conversation import background_claim as claim_module
 from agent_py_agent.agent.conversation import runtime as runtime_module
 from agent_py_agent.agent.conversation.background_execution import BackgroundCompactSliceYield
@@ -130,6 +135,29 @@ def _run_case(case):
     return claim_module.run_claimed(runtime_module._background_claim_dependencies(case.scheduler), case.request)
 
 
+def test_interrupt_during_claim_acquire_is_latched_and_releases_exact_claim(monkeypatch):
+    case = _claim_fixture(monkeypatch)
+    signals = []
+    case.state.after_acquire = lambda: signals.append(interrupt_by_name("conversation-request:task"))
+    assert _run_case(case) is None
+    assert signals == [True]
+    assert case.records["finish"][0]["runtime_facts"]["admission"] == "turn_interrupted"
+    assert not case.records["retire"] and "run" not in case.trace and "start" not in case.trace
+    assert not is_interrupted() and not is_interruptible_registered("conversation-request:task")
+    case.state.after_acquire = lambda: None
+    assert _run_case(case) is case.state.result
+
+
+@pytest.mark.parametrize("stage", ["acquire", "start"])
+def test_early_admission_failure_releases_control_registration(monkeypatch, stage):
+    case = _claim_fixture(monkeypatch)
+    case.state.broken_stage = stage
+    with pytest.raises(RuntimeError, match=stage):
+        _run_case(case)
+    assert not is_interruptible_registered("conversation-request:task")
+    assert not is_interrupted()
+
+
 @pytest.mark.parametrize("result", [None, False, "report"])
 def test_claim_execution_order_identity_and_clock_sources(monkeypatch, result):
     case = _claim_fixture(monkeypatch)
@@ -216,6 +244,8 @@ def test_recovery_change_after_acquire_keeps_all_sources_pending(monkeypatch, bl
     else:
         assert recorded["reason"] == "authority_state_unreadable" and recorded["error_type"] == "OSError"
     assert not case.records["retire"] and not case.records["policy"]
+    assert not is_interruptible_registered("conversation-request:task")
+    assert not is_interrupted()
 
 
 @pytest.mark.parametrize("owned,busy", [(True, False), (False, True)])

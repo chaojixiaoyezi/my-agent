@@ -162,6 +162,7 @@ agent_py_agent/
 |   |-- memory_archive/                # compact、audit、tool output artifact、task workspace refs
 |   |-- local_storage/                 # SQLite/FTS/文件事实源；ledger_redaction.py 精确擦除已删事实但保留幂等身份
 |   |-- runtime_db/                     # SQLite 运行事实源：Task 身份、TaskRun/AgentRun/Attempt 生命周期、wake 与投递账本
+|   |   |-- run_cancellation.py         # 精确 task/run/attempt 的共用取消权限合同，UNKNOWN 保留锁与恢复障碍
 |   |   `-- executor_liveness.py        # exact attempt 执行区间和 OS 退出事实；慢模型不按时长判死
 |   |-- gateway_parts/                 # gateway request/worker/lease/http/renderer
 |   |   |-- request_execution.py        # 单个已领取请求的租约、模型执行、超窗恢复与收尾编排
@@ -254,6 +255,7 @@ agent_py_agent/
 |   |   |-- background_execution.py     # 后台单片执行、Compact 重试、原生历史保存与具名结果
 |   |   |-- background_delivery.py      # 后台投递、canonical 回复提交、整封冻结与耐久去重
 |   |   |-- control_commands.py        # CLI/IM 共用 typed slash dispatcher、task command 与状态渲染
+|   |   |-- task_resources.py          # 从正式主链绑定关闭权限并交回资源范围，不推断热请求缺失身份
 |   |   |-- goal_tools.py              # 默认可见的持续目标创建、读取与精确收口
 |   |   |-- goal_binding.py            # 当前代理及直属下级的精确目标身份解析，拒绝借用父目标
 |   |   |-- goal_delegation.py         # 显式子目标初始化、正常轮续接及授权停止/恢复的状态同步
@@ -323,6 +325,7 @@ agent_py_agent/
 |   |   |-- process_session_lock.py   # 后台记录目录的线程及跨进程系统互斥，不支持时明确拒绝
 |   |   |-- process_session_commit.py # 固定 v2 批次的 redo 发布、完整预检、安装恢复及提交回执
 |   |   |-- process_session_cleanup.py # 冻结单 session 实例的精确清理与保留已提交副作用的异常回执
+|   |   |-- process_resource_stop.py   # 主控制冻结后台清单和 PTY 请求，锁外清理只消费原回执并保留部分错误
 |   |   |-- process_network_status.py # exact 受管进程树监听、防火墙显式规则与外部探针边界的只读投影
 |   |   |-- process_sessions.py       # owner+TUI 会话隔离的后台命令查询、等待与停止工具
 |   |   |-- gateway_status.py         # 本机管理员读取唯一 Gateway 身份、端点、队列和本生命周期日志摘要
@@ -461,6 +464,9 @@ docs/
 
 ### 关键文件说明
 
+- `agent_py_agent/agent/runtime_db/run_cancellation.py`：在原 RuntimeDB 上核对 task/run/agent run/attempt 四个身份并关闭执行权；原 UNKNOWN 不恢复、不释放锁，旧控制不能追随新的执行轮。
+- `agent_py_agent/agent/conversation/task_resources.py`：主链资源停止的身份适配；热请求必须带正式运行绑定，无热请求才读取持久任务唯一主链，不从请求编号猜 attempt。
+- `agent_py_agent/agent/tooling/process_resource_stop.py`：固定后台停止回执与 PTY 请求分开记录；提交后的 PTY 失败不丢清单，清理不重新扫任务，也不把异步请求当成全部退出。
 - `agent_py_agent/agent/tooling/process_scope.py`：后台访问身份与 PTY 执行身份的唯一类型定义，缺失的任务归属不从访问回退或工作目录推断；不持有资源或执行取消。
 - `agent_py_agent/agent/tooling/process_session_store.py`：受保护进程记录的统一入口，读写与裁剪先恢复同一目录的未完成提交；持锁事务提供启动检查点和精确停止意图，实际进程信号仍由调用方负责。
 - `agent_py_agent/agent/tooling/background_process_launch.py`：启动方先预留再交接，原 execution 权限只读复查；host 只绑定一次 child，交接后由精确资源停止控制。

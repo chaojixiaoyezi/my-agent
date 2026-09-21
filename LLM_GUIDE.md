@@ -44,7 +44,10 @@ main 绑定当前选定任务的有效 claim；换轮失效，Goal paused 不取
 后台记录的源码 Store 已支持显式 v2、版本 CAS 和同目录 redo；记录校验、文件提交与系统锁分属三个窄模块。
 读写与裁剪先恢复固定批次；提交后异常不能当作未发生。源码启动已沿唯一 v2 预留、host/child 绑定和交接链；
 启动方只在交接前持有取消权，独立 host 持续限制日志。Registry 每次读取原 Store，明确 session 停止消费冻结实例。
-原任务执行权限关闭及 Gateway/direct/子代理的整任务停止接线仍待完成；尚未发布或新增实际 TUI，不把开发回归当作 TUI 137 已通过。
+执行权关闭共用 `runtime_db/run_cancellation.py`，取消 UNKNOWN 保留原锁，pending 条件在同一事务核对。
+Gateway 持久主任务沿 Goal→task→请求锁关闭原权限并冻结主资源；后台旧片在创建 attempt 前检查中断，不能被恢复复活。
+`conversation/task_resources.py` 只裁决主链身份，`tooling/process_resource_stop.py` 只消费固定清单；后台确认与 PTY 异步请求分开。
+direct/local、无持久任务的热请求及完整子树后台资源接线仍待完成；尚未发布或新增实际 TUI，不把开发回归当作 TUI 137 已通过。
 
 SSE delta 原样保留，OpenAI 工具参数生成有独立进度；
 派工不会永久禁止主代理本地工作，用户明确限制仍保留；复制按最新代次和实际通道结果反馈。

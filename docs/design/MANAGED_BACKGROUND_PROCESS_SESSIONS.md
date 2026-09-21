@@ -1,6 +1,6 @@
 # 受管后台进程会话
 
-状态：安装版仍为已发布 v1。源码已完成 v2 启动预留、明确交接、权威查询和单 session 清理，尚未发布；整任务停止接线与实际复验仍待完成。
+状态：安装版仍为已发布 v1。源码已完成 v2 启动交接、查询清理及 Gateway 持久主任务停止，尚未发布；其它入口、完整子树及实际复验仍待完成。
 历史后台 session 主链和 `network_status` 只读投影已部署 `.7` 唯一 Gateway；fresh r53 验收了跨 runner
 存活/停止，fresh r10 验收了稳定 session handle、真实 listener PID 和外部探针边界，fresh r27 验收了
 启动观察期内的立即退出不会再被报告成“已启动”。
@@ -79,7 +79,7 @@ run_command(run_in_background=true)
 - 缓存以规范 Store 地址和 session ID 共同索引；每次冷热查询都读取当前权威，并保留全部 v2 字段。
 - 只有同目录、同 PID 和同出生标识才能沿用本进程 Popen；查询确认终态时回收该句柄，不用 host 退出码替代 child 退出码。
 - host 消失而业务终态没有可靠记录时标为 unknown；starting/unknown 仍待处理，不发完成通知或冒充退出。
-- 显式 stop 只清理那个 session；完整任务的权限关闭及冻结清单消费由后续控制层接线负责。
+- 显式 session stop 只清理那个句柄；主任务控制使用同一 Store 冻结清单，完整入口和子树边界见下文。
 - 旧 v1 host-state 文件仅补充已发布记录的退出观测，不为 v2 提供身份、权限或终态旁路。
 
 ### `process_network_status.py`
@@ -149,6 +149,22 @@ run_command(run_in_background=true)
 这些源码不证明本项目的跨进程启动竞态已解决。确定方案后须覆盖交接前各阶段取消、跨 attempt/进程停止、
 同会话不同任务隔离、停止后恢复的新资源、PID 复用和退出未确认；真实 TUI 原失败单独保留。
 
+按用户要求再次定向核读 Codex `578c1b2230288104041e880a86d0f7f3a5ca6e47`：
+
+| 实际源码 / 测试 | 已核实机制 | 本仓库接线 |
+| --- | --- | --- |
+| `core/src/session/handlers.rs` 的 `interrupt` / `clean_background_terminals` | 两个独立控制入口 | `/interrupt` 只中断回合；`/stop` 明确组合资源停止 |
+| `core/src/tasks/mod.rs` 的 `abort_turn_if_active` / `handle_task_abort` | 锁内匹配原 turn，再取消原 token、有限等待和终止执行 handle | 任务锁内核对原 attempt，迟到控制不追新轮 |
+| `core/src/unified_exec/process_manager.rs` 的 `terminate_all_processes` | 锁内取出固定进程集合，锁外逐个清理 | 原 Store 冻结本任务资源，worker 不重新扫描 |
+| 同文件 `terminate_process` | 先冻结进程对象，终止后再次比较对象身份 | Python 跨进程沿已冻结 session 与 PID 出生标识核对 |
+| 同文件初次执行 / `store_process` | 在首次输出等待前把活进程交给独立 manager 持有 | 明确交接后不再受旧回合 token 所有 |
+| `core/tests/suite/unified_exec.rs::unified_exec_interrupt_preserves_long_running_session` | 测试要求 Interrupt 后仍存活，CleanBackgroundTerminals 后实际退出 | 复验同一程序的中断保留与明确停止；不能以文字回执代替退出 |
+
+路径均相对于 Codex 的 `codex-rs/`。本次只读了上述入口、PTY 进程组原语及相关调用区段，未运行 Codex 测试。
+模块索引命中上述五个核心实现文件；合同索引未命中，行数有版本差异，以实际 checkout 为准。
+Codex 清理集合来自单个 Session 的 manager；本仓库一个 Gateway 同时承载多个持久任务，
+因此保留相同的固定集合与锁外清理结构，集合必须再由原 owner/task/run 身份限定。
+
 修复先分离无副作用的身份合同：`process_scope.py` 统一保存访问身份与执行身份，两种类型仍分别使用。
 访问身份保留原 owner/conversation 规则；执行身份只复制可信的 owner/thread/root task/run/attempt，
 不能从访问身份的回退值、通知地址或工作目录反推出任务。PTY 直接使用该合同，不保留旧的专用执行身份类。
@@ -172,7 +188,7 @@ direct/local 控制在精确回合中断成功后，按 `operation=interrupt` �
   [Windows 字节锁](https://docs.python.org/3/library/msvcrt.html#msvcrt.locking)；无 OS 锁的平台明确拒绝。
   原子替换及 redo 只声明进程中断后的恢复，不宣称断电耐久或 Windows 已做实机验收。
 
-当前源码已完成 Store、启动交接及单 session 查询清理，整任务控制仍待接入：
+当前源码已完成 Store、启动交接、单 session 查询清理和主任务控制首片：
 
 - `process_session_records.py` 统一 v1/v2 校验与不可变身份，v2 的 host/child 只能绑定一次；停止后不能开始 child 创建或确认交接。
 - `process_session_lock.py` 持固定目录锁；`process_session_commit.py` 先预检完整批次，再发布 redo、逐条安装及清日志。
@@ -181,7 +197,30 @@ direct/local 控制在精确回合中断成功后，按 `operation=interrupt` �
   读取、枚举、写入和裁剪都先恢复；事务发布后异常携带固定回执，并使当前锁内视图失效。
 - Store 只记录停止意图，不发信号、不重新扫恢复轮、不另建任务取消状态。控制端仍须先关闭原执行轮的真实权限，
   不能把 request closing 或任务投影终态视作 RuntimeDB 权限已经关闭。既有 UNKNOWN 及锁的保留语义不能改写。
+
+### 整任务控制接线（实现中，尚未发布）
+
+- 停止先锁定原 task/run/attempt，沿 RuntimeDB 的现有终态事务关闭执行权，再冻结后台 session 清单；
+  实际清理只消费这份清单。主代理与子代理分别关闭自己的执行轮，不能只关闭主代理便声称整棵树已失去权限。
+- 已为 UNKNOWN 的 attempt 保留原状态、执行锁和恢复障碍。其已登记资源仍可按明确停止请求清理，
+  但清理进程不等于确认原工具副作用，也不授权自动恢复该 attempt。
+- 子代理旧投影只能在同一数据库事务仍确认新 attempt 为 pending 时取消它；
+  事务外曾经看到 pending 不能用来关闭后来已经运行的新执行轮。
+  现有子代理取消消费端仅在权威确认为 cancelled 时写取消投影；done/failed/UNKNOWN 不改写成 CANCELLED。
+  已尝试取消后发生异常只能返回未知，不能把已经发过的中断信号说成未发生。
+- 后台片领取执行车道之前就登记本片中断身份；绑定新 attempt 的任务锁内再次检查中断和任务终态。
+  任务恢复不能清掉旧片已经收到的中断；新片沿现有准入与换代入口正常执行，不增加永久任务禁用标记。
+- Gateway 先退出入口请求锁，再按 Goal→task→请求锁读取正式绑定；精确身份校验成功后才给任务发中断。
+  任务锁内关闭权限、写停止状态和冻结资源，退出任务锁后在原 Goal 锁下暂停续跑，显式恢复不能插入其间。
+  `task_resources.py` 仅适配正式主链身份，`process_resource_stop.py` 冻结后台清单并记录 PTY 请求；耗时终止在全部控制锁外。
+- 冻结遇到旧 redo 恢复失败时只记录本次未确认，不借用旧回执。自身事务已提交但待安装时保留固定清单。
+  后续 PTY 请求失败也不丢已提交的后台清单；控制应答明确部分未确认，已选后台资源继续清理。
+  后台 `background_confirmed` 与 PTY 的 `requested/unknown` 分列，没有“异步请求成功就是整批已退出”的结论。
 - Shell/host 已调用 v2；已删除启动后 `ProcessRegistration/register` 和 launcher watchdog。独立开发进程的故障注入不替代 TUI 137 的安装版复验。
+
+尚未完成：direct/local、无持久任务绑定的热请求、完整子树及已终态孩子遗留后台资源的停止接线。
+下一片须固定原子树范围及各自执行权，不能在异步清理时重新发现后来恢复的新孩子；终态孩子原业务结果不因资源清理重写。
+本片的旧工作片中断测试覆盖同一 Gateway 内的实际线程登记；未绑定的跨进程旧片没有被这项测试证明。
 
 ### 现有进程会话行为
 

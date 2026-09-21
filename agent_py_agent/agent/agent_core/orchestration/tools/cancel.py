@@ -1,3 +1,5 @@
+# LLM: 子树停止沿原创建锁和精确执行权 CAS；未知 attempt 保留原锁，不能借旧投影取消已经运行的新轮。
+# 模块用途: 处理显式子代理取消，收口执行权、子树和会话投影，保留原工具结果与权限边界。
 from __future__ import annotations
 
 """cancel_subagents control tool with TaskStatus-backed status filters."""
@@ -9,6 +11,11 @@ from typing import TYPE_CHECKING
 
 from ....common.audit_activation import structured_audit_source_worker_attributes
 from ....concurrency.interrupt import interrupt_by_name
+from ....runtime_db.run_cancellation import (
+    RuntimeCancellationConflict,
+    RuntimeCancellationTarget,
+    cancel_runtime_run,
+)
 from ....runtime_errors import runtime_error_report
 from ....subagents.authorization_gate import (
     OperationRequest,
@@ -225,6 +232,8 @@ def execute_cancel_subagents(
     return _execute_cancel_targets(agent, params, run_ids, targets)
 
 
+# LLM: 只遍历已经过授权的目标；开始取消后异常保留 attempted 事实，工具回执不能谎称无副作用。
+# 函数用途: 逐个执行取消并保留成功与失败结果，避免部分已停止时被整体写成未开始。
 def _execute_cancel_targets(
     agent: SimpleAgent,
     params: dict[str, object],
@@ -251,6 +260,7 @@ def _execute_cancel_targets(
             failed.append(
                 {
                     "run_id": getattr(task, "id", ""),
+                    "cancellation_attempted": True,
                     **runtime_error_report(
                         exc,
                         context="cancel_subagents.cancel_one",
@@ -276,7 +286,8 @@ def _execute_cancel_targets(
 
 # LLM: Cancel receipts report only named outcomes. Returning the whole tree
 # would recreate inspect-by-dry-run through a mutating control tool.
-# 函数用途: 生成取消结果，不夹带兄弟、孙代理或整树状态。
+# 已进入取消的异常可能已经发过信号，不能降为 not_started。
+# 函数用途: 生成取消结果；部分失败保留未知，不夹带兄弟、孙代理或整树状态。
 def _cancel_payload_result(request: _CancelPayloadRequest) -> ToolHandlerOutcome:
     payload = {
         "ok": request.ok,
@@ -285,15 +296,15 @@ def _cancel_payload_result(request: _CancelPayloadRequest) -> ToolHandlerOutcome
         "failed": request.failed,
         "skipped": request.skipped,
     }
+    effect_outcome = ""
+    if not request.ok:
+        attempted = request.cancelled or any(row.get("cancellation_attempted") for row in request.failed)
+        effect_outcome = "unknown" if attempted else "not_started"
     return ToolHandlerOutcome(
         "cancel_subagents",
         request.ok,
         json.dumps(payload, ensure_ascii=False, indent=2),
-        effect_outcome=(
-            "not_started"
-            if not request.ok and not request.cancelled
-            else ""
-        ),
+        effect_outcome=effect_outcome,
     )
 
 
@@ -727,6 +738,8 @@ def _cancelled_attributes(task: SubAgentTask, context: _CancellationContext) -> 
     return attrs
 
 
+# LLM: 仅权威确认 cancelled 或未托管时保存取消投影；其它终态/UNKNOWN 不得被改写成 CANCELLED。
+# 函数用途: 先确认执行权结果，再持久保存取消状态、工作记录和原会话链接。
 def _persist_cancelled_task(
     agent: SimpleAgent,
     task: SubAgentTask,
@@ -736,12 +749,12 @@ def _persist_cancelled_task(
     # SUBAGENT_HANDLED_TERMINAL_STATUSES,继承终态语义(recovery 不再捡、compaction 不续传),
     # 行为等价旧 ABANDONED;但状态名不再把"完成产物后收尾取消"误显成失败。ABANDONED 只留给
     # startup_recovery 崩溃调和(进程已死)那种名副其实的烂尾。
+    runtime_authority = _settle_cancelled_runtime_authority(agent, task, context)
     task.status = "CANCELLED"
     task.failure_type = FailureType.CANCELLED.value
     task.ended_at = context.now
     task.updated_at = context.now
     task.runner_active_attempt_id = ""
-    runtime_authority = _settle_cancelled_runtime_authority(agent, task, context)
     agent.subagents.save(task)
     agent.subagents.actions._append_task_work_log(
         task,
@@ -761,11 +774,8 @@ def _persist_cancelled_task(
     }
 
 
-# LLM: RuntimeDB is the managed run authority. A cancellation may arrive after a coordinator has
-# already yielded its current attempt while waiting for descendants, so the runner exception path
-# is not guaranteed to settle the run. Fence the exact current attempt here before writing the task
-# projection; terminal conflicts must surface instead of leaving RuntimeDB at ``created``.
-# 函数用途: 在统一取消入口把受管子代理的权威 AgentRun 收口为 cancelled；无权威库的本地兼容模式保持原样。
+# LLM: 原创建锁内选择执行身份；旧投影改选 pending 必须由数据库同事务复核，UNKNOWN 不释放锁。
+# 函数用途: 关闭选定子代理的执行权，把实际确认的 attempt 交给后续资源清理；冲突不追随新代次。
 def _settle_cancelled_runtime_authority(
     agent: SimpleAgent,
     task: SubAgentTask,
@@ -783,6 +793,7 @@ def _settle_cancelled_runtime_authority(
     recorded_attempt_id = str(row["current_attempt_id"] or "").strip()
     requested_attempt_id = str(context.attempt_id or "").strip()
     authority_attempt_id = requested_attempt_id or recorded_attempt_id
+    pending_only = False
     if requested_attempt_id and requested_attempt_id != recorded_attempt_id:
         current_attempt = repo.get_attempt(recorded_attempt_id)
         current_status = (
@@ -800,41 +811,20 @@ def _settle_cancelled_runtime_authority(
         # 必须保留 stale-attempt 闸，不能拿旧 task 快照停止一个未被信号触达的新执行者。
         if current_status == "pending" and current_ended_at == 0:
             authority_attempt_id = recorded_attempt_id
-    result = repo.settle_agent_run(
-        agent_run_id=agent_run_id,
-        status="cancelled",
-        attempt_id=authority_attempt_id,
-        now=context.now,
-        payload={
-            "status": "cancelled",
-            "runtime_status": "cancelled",
-            "runtime_reason": context.reason,
-            "runtime_source": context.source,
-            "run_id": run_id,
-        },
+            pending_only = True
+    task_run = repo.get_task_run(str(row["task_run_id"]))
+    target = RuntimeCancellationTarget(
+        str(task_run["task_id"]) if task_run is not None else "",
+        run_id, agent_run_id, authority_attempt_id,
     )
-    if bool(result.get("settled")):
-        return {
-            "status": "cancelled",
-            "run_id": run_id,
-            "agent_run_id": agent_run_id,
-            "attempt_id": authority_attempt_id,
-        }
-    refreshed = repo.agent_run_for_run_id(run_id)
-    refreshed_status = str(refreshed["status"] or "") if refreshed is not None else ""
-    if result.get("reason") == "already_terminal" and refreshed_status == "cancelled":
-        return {
-            "status": "cancelled",
-            "run_id": run_id,
-            "agent_run_id": agent_run_id,
-            "attempt_id": authority_attempt_id,
-            "replayed": True,
-        }
-    raise RuntimeError(
-        "子代理取消未能收口权威 AgentRun："
-        f"run_id={run_id} reason={result.get('reason') or 'unknown'} "
-        f"current_status={refreshed_status or 'missing'}"
+    result = cancel_runtime_run(
+        repo, target,
+        reason=context.reason, source=context.source,
+        pending_only=pending_only, now=context.now,
     )
+    if result["status"] != "cancelled":
+        raise RuntimeCancellationConflict(target, str(result["status"]))
+    return result
 
 
 def _sync_cancelled_conversation_link(agent: SimpleAgent, task_id: str) -> dict[str, object]:

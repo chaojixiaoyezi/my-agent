@@ -96,6 +96,13 @@ owner 发现层签名进程记录，不因热缓存淘汰丢唤醒；显式停�
 
 ## 中断与持续目标
 
+主资源停止的源码接线遵循 Goal→task→Gateway T：先结束入口 T 临界区，再持 Goal 锁串行显式恢复，
+任务锁内由 `conversation/task_resources.py` 校验正式运行绑定，调用 `runtime_db/run_cancellation.py` 关闭原执行轮权限。
+热请求缺失或过期的绑定不借用持久主链当前 attempt；无热请求才从原任务唯一主链定位。
+同一任务临界区写停止状态并通过 `tooling/process_resource_stop.py` 冻结后台清单，随后暂停原 Goal；耗时清理在全部控制锁外。
+后台 claim 领取前登记原命名中断，运行绑定前再检查，旧片不能因显式恢复而开始新副作用。
+冻结/PTY 部分失败保留固定后台回执并报告未确认，异步 worker 不重扫恢复的新主资源；完整子树及其它控制入口尚待接线。
+
 `control_service.py` 区分显式 `/interrupt` 与 `/stop`：前者保留 active Goal 及原 task，
 经原 owner wake 去重续接；后者暂停目标并收停子树。`request_execution.py` 和 task transition
 锁维护 exact attempt，迟到取消不覆盖活动目标的新执行。`request_errors.py` 将绑定冲突独立报告，

@@ -19,6 +19,7 @@ from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
 
+from ..concurrency.interrupt import is_interrupted
 from ..conversation.authority import conversation_transcript_is_authoritative
 from ..conversation.task_state import conversation_task_link_is_terminal
 from ..runtime_db.repository import AGENT_RUN_TERMINAL_STATUSES
@@ -590,7 +591,8 @@ def _settle_main_agent_run_exception(agent, params: RunParams, exc: BaseExceptio
 
 
 # LLM: 先绑定 canonical run/新 attempt 再写归档，request 仍是消息身份；返回参数贯穿 Compact 与收尾。
-# 与终态扫描共用换代锁，归档失败只结算本次新 attempt；修改时核对复用 run 和归档准备失败测试。
+# 与终态扫描共用换代锁，入锁复查本片中断和任务终态；恢复不能复活已收到中断的旧片。
+# 归档失败只结算本次新 attempt；修改时核对复用 run、停止竞争和归档准备失败测试。
 # 函数用途: 在同一锁内确定执行身份并准备运行目录，防止续做归档与收尾使用不同 run；失败不遗留新执行权。
 def _bind_main_agent_turn_params(
     agent,
@@ -601,6 +603,12 @@ def _bind_main_agent_turn_params(
     guard = getattr(getattr(store, 'tasks', None), 'transition_guard', None)
     task_id = str(params.task_id or params.run_id or "")
     with guard(task_id) if task_id and callable(guard) else nullcontext():
+        if is_interrupted():
+            raise InterruptedError("当前执行片已被中断，未创建新执行轮")
+        loader = getattr(getattr(store, "tasks", None), "load", None)
+        link = loader(task_id) if task_id and callable(loader) else None
+        if link is not None and getattr(link, "status", "") in {"interrupted", "cancelled"}:
+            raise InterruptedError("当前任务已停止，未创建新执行轮")
         bound = _bind_main_agent_authority(agent, params)
         try:
             return attach_run_task_workspace_context(agent, bound, user_prompt)

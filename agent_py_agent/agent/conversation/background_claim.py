@@ -4,12 +4,13 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 from ..backends.errors import is_provider_transient_error
-from ..concurrency.interrupt import register_interruptible
+from ..concurrency.interrupt import is_interrupted, register_interruptible
 from ..settings.thread_model_selection import is_model_configuration_unavailable
 from .background_execution import BackgroundCompactSliceYield
 from .control_commands import conversation_request_interrupt_name
@@ -55,60 +56,69 @@ def _subagent_owned_report(kwargs: dict) -> BackgroundMainAgentReport:
     )
 
 
-# LLM: 领取后重查 terminal 与 recovery；终态先关闭精确 claim 再退休来源，unknown 只关闭 claim。
+# LLM: 领取前登记中断身份，直到本片结算后才释放；终态先关闭 claim 再退休来源，回合中断只关闭 claim。
 # 函数用途: 防止排队期间已停止或待恢复的任务开始新副作用，忙碌车道不启动心跳或模型。
 def run_claimed(
     dependencies: BackgroundClaimDependencies,
     kwargs: dict,
 ) -> BackgroundMainAgentReport | None:
-    if dependencies.child_owns_task(kwargs.get("task_id")):
-        return _subagent_owned_report(kwargs)
-    claim_scope_id = dependencies.claim_scope_id(
-        str(kwargs.get("thread_id") or ""),
-        str(kwargs.get("task_id") or ""),
-    )
-    claim = dependencies.claims.acquire(
-        {
-            "thread_id": kwargs.get("thread_id", ""),
-            "claim_scope_id": claim_scope_id,
-            "task_id": kwargs.get("task_id", ""),
-            "reason": kwargs.get("reason", ""),
-            "lease_seconds": dependencies.lease_seconds,
-            "now": kwargs.get("now"),
-        }
-    )
-    if claim is None:
-        return None
-    if dependencies.terminal_task(kwargs):
-        _finish_nonexecuted_claim(
+    task_id = str(kwargs.get("task_id") or "").strip()
+    registration = register_interruptible(conversation_request_interrupt_name(task_id)) if task_id else nullcontext()
+    with registration:
+        if dependencies.child_owns_task(kwargs.get("task_id")):
+            return _subagent_owned_report(kwargs)
+        claim_scope_id = dependencies.claim_scope_id(
+            str(kwargs.get("thread_id") or ""),
+            str(kwargs.get("task_id") or ""),
+        )
+        claim = dependencies.claims.acquire(
+            {
+                "thread_id": kwargs.get("thread_id", ""),
+                "claim_scope_id": claim_scope_id,
+                "task_id": kwargs.get("task_id", ""),
+                "reason": kwargs.get("reason", ""),
+                "lease_seconds": dependencies.lease_seconds,
+                "now": kwargs.get("now"),
+            }
+        )
+        if claim is None:
+            return None
+        if is_interrupted():
+            _finish_nonexecuted_claim(
+                dependencies, kwargs, claim_scope_id=claim_scope_id,
+                claim_id=str(claim.get("claim_id") or ""), admission="turn_interrupted",
+            )
+            return None
+        if dependencies.terminal_task(kwargs):
+            _finish_nonexecuted_claim(
+                dependencies,
+                kwargs,
+                claim_scope_id=claim_scope_id,
+                claim_id=str(claim.get("claim_id") or ""),
+                admission="terminal_task_link",
+            )
+            dependencies.retire_source(kwargs)
+            return None
+        recovery_block = dependencies.recovery_block(str(kwargs.get("task_id") or "").strip())
+        if recovery_block is not None:
+            _finish_nonexecuted_claim(
+                dependencies,
+                kwargs,
+                claim_scope_id=claim_scope_id,
+                claim_id=str(claim.get("claim_id") or ""),
+                admission="authority_recovery_required",
+                recovery_block=recovery_block,
+            )
+            return None
+        return run_with_heartbeat(
             dependencies,
+            str(claim.get("claim_id") or ""),
             kwargs,
             claim_scope_id=claim_scope_id,
-            claim_id=str(claim.get("claim_id") or ""),
-            admission="terminal_task_link",
         )
-        dependencies.retire_source(kwargs)
-        return None
-    recovery_block = dependencies.recovery_block(str(kwargs.get("task_id") or "").strip())
-    if recovery_block is not None:
-        _finish_nonexecuted_claim(
-            dependencies,
-            kwargs,
-            claim_scope_id=claim_scope_id,
-            claim_id=str(claim.get("claim_id") or ""),
-            admission="authority_recovery_required",
-            recovery_block=recovery_block,
-        )
-        return None
-    return run_with_heartbeat(
-        dependencies,
-        str(claim.get("claim_id") or ""),
-        kwargs,
-        claim_scope_id=claim_scope_id,
-    )
 
 
-# LLM: 精确 task 中断名、异常类别及 stop→facts→finish→普通失败账顺序保持；None/假值仍正常结算。
+# LLM: 调用者持有本片中断登记；异常类别及 stop→facts→finish→普通失败账顺序保持，None/假值正常结算。
 # 函数用途: 运行已经领取的后台工作片，持续续租，退出后保存真实结果；不把取消或压缩让出写成失败。
 def run_with_heartbeat(
     dependencies: BackgroundClaimDependencies,
@@ -126,10 +136,8 @@ def run_with_heartbeat(
     status = "finished"
     error: BaseException | None = None
     try:
-        task_id = str(kwargs.get("task_id") or "").strip()
-        if task_id:
-            with register_interruptible(conversation_request_interrupt_name(task_id)):
-                return dependencies.run_once(kwargs)
+        if is_interrupted():
+            raise InterruptedError("后台工作片已被中断")
         return dependencies.run_once(kwargs)
     except InterruptedError:
         # 回合中断只关闭本次执行权；目标续跑和任务资源停止分别由原控制入口负责。

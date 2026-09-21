@@ -17,6 +17,7 @@
 # 禁止把已退休的机器验收合同或 Task 业务完成状态重新接回这个权威仓储。
 # 冷 owner 的精确恢复与启动扫描共用进程死亡证明，展示投影不得覆盖 current attempt。
 # 换代清理保留已确认 STABLE 资源，不把旧执行失去权限等同于其已完成副作用变得未知。
+# 取消以同一写事务核对原 attempt/status；UNKNOWN 的执行锁与恢复障碍不能随资源停止清除。
 # 模块用途: 管理 owner 级任务身份、每次执行、代理树、工具操作和恢复状态。
 
 from __future__ import annotations
@@ -2136,6 +2137,8 @@ class RuntimeRepository(
             )
         return {"settled": True, "attempt_id": normalized_attempt_id}
 
+    # LLM: 终态提交与 exact attempt/status CAS 同事务；取消不能清除 UNKNOWN 的锁或恢复障碍。
+    # 函数用途: 收口选定执行轮；控制端可要求仍为 pending，避免旧快照误停已开始的新轮。
     def settle_agent_run(
         self,
         *,
@@ -2144,6 +2147,7 @@ class RuntimeRepository(
         payload: dict[str, Any] | None = None,
         now: float | None = None,
         attempt_id: str = "",
+        expected_attempt_status: str = "",
     ) -> dict[str, Any]:
         """run 级终态收口（单事务 CAS，幂等，以第一次为准）。
 
@@ -2167,11 +2171,15 @@ class RuntimeRepository(
           - stale attempt 闸：传入 attempt_id 时校验其仍是 current
             attempt（takeover 换代后旧 worker 自称收口 → 拒 +
             closeout_blocked 事件）；
+          - 取消 UNKNOWN 明确拒绝，不清除既有执行锁或恢复障碍；
+          - expected_attempt_status 与 exact attempt 在同一写事务检查；
           - 终态即释放：收口成功同事务释放执行权锁（scope=attempt-exec:
             {agent_run_id}），锁不残留。
         """
         now = time.time() if now is None else now
         event_id = uuid.uuid4().hex
+        if expected_attempt_status and not str(attempt_id or "").strip():
+            return {"settled": False, "reason": "missing_attempt"}
         if str(status or "").strip() not in AGENT_RUN_TERMINAL_STATUSES:
             with self.transaction() as conn:
                 self._append_event_conn(
@@ -2182,6 +2190,7 @@ class RuntimeRepository(
                 )
             return {"settled": False, "reason": "invalid_status"}
         with self.transaction() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 "SELECT task_run_id, current_attempt_id, status AS run_status "
                 "FROM agent_runs WHERE agent_run_id = ?",
@@ -2221,6 +2230,15 @@ class RuntimeRepository(
                     (agent_run_id,),
                 ).fetchone()
                 attempt_id = str(latest["attempt_id"]) if latest is not None else ""
+            attempt = conn.execute(
+                "SELECT status FROM agent_attempts WHERE attempt_id = ? AND agent_run_id = ?",
+                (attempt_id, agent_run_id),
+            ).fetchone()
+            attempt_status = str(attempt["status"] or "") if attempt is not None else ""
+            if expected_attempt_status and attempt_status != expected_attempt_status:
+                return {"settled": False, "reason": "attempt_status_conflict", "attempt_id": attempt_id}
+            if status == "cancelled" and attempt_status == ATTEMPT_STATUS_UNKNOWN:
+                return {"settled": False, "reason": "attempt_unknown", "attempt_id": attempt_id}
             task_run_id = str(row["task_run_id"])
             cur = conn.execute(
                 "UPDATE agent_runs SET status = ?, updated_at = ? WHERE agent_run_id = ? "
@@ -2262,7 +2280,7 @@ class RuntimeRepository(
                 (event_id, "agent_run.completed", attempt_id, agent_run_id, task_run_id,
                  json.dumps(payload or {}, ensure_ascii=False), now),
             )
-        return {"settled": True, "event_id": event_id}
+        return {"settled": True, "event_id": event_id, "attempt_id": attempt_id}
 
     # LLM: 此入口只结束一次 TaskRun 的执行生命周期；不得顺带关闭长期 Task，
     # 也不得从模型正文、验收文案或产物质量推导机器终态。
