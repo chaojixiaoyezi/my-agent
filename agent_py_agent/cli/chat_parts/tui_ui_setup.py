@@ -12,6 +12,7 @@ from typing import Any
 from prompt_toolkit.mouse_events import MouseButton, MouseEventType
 
 from ...agent.common.opaque_id import validate_opaque_id
+from .plugin_command_client import PluginCommandClient
 from .rendering import set_tui_output_sink
 from .tui_block_renderer import TuiRenderContext
 from .tui_input import (
@@ -28,6 +29,7 @@ from .tui_keybindings import (
     _write_selection_clipboard,
 )
 from .tui_params import MakeTuiAppParams
+from .tui_plugin_commands import bind_plugin_input
 from .tui_runtime import TuiRuntime
 from .tui_terminal import TuiTerminalTitleController
 from .tui_transcript import TuiTranscriptModeState
@@ -43,18 +45,19 @@ ESCAPE_SEQUENCE_TIMEOUT_SECONDS = 0.1
 TERMINAL_ESCAPE_PREFIX_TIMEOUT_SECONDS = 0.05
 
 
-# LLM: 输入 buffer 保留 FileHistory、typed queue placeholder 与结构化命令/路径补全；多行编辑由 keybinding 区分发送与换行。
+# LLM: 输入保留原 history 与补全；插件客户端只在显式 Tab/提交读取，候选原 revision 跟随输入框，不增加启动请求。
 # 函数用途: 创建底部可增长到八行的聊天输入框。
 def _make_input_area(
     history_file_path: str,
     runtime: TuiRuntime,
     workspace: Path,
+    *, plugin_client: PluginCommandClient | None = None,
 ) -> Any:
     from prompt_toolkit.history import FileHistory
     from prompt_toolkit.layout.dimension import Dimension
     from prompt_toolkit.widgets import TextArea
 
-    return TextArea(
+    input_area = TextArea(
         height=Dimension(min=1, max=8),
         dont_extend_height=True,
         style="class:tui-input",
@@ -62,10 +65,13 @@ def _make_input_area(
         wrap_lines=True,
         history=FileHistory(history_file_path),
         auto_suggest=TuiHistoryAutoSuggest(),
-        completer=TuiInputCompleter(workspace),
+        completer=TuiInputCompleter(workspace, plugin_client=plugin_client, catalog_error=runtime.set_notice),
         complete_while_typing=True,
         input_processors=[TuiQueuedPlaceholderProcessor(runtime)],
     )
+    if plugin_client is not None:
+        bind_plugin_input(input_area.buffer, plugin_client)
+    return input_area
 
 
 # LLM: 输入 marker 是纯显示前缀；用户提交后的 transcript 背景块由 reducer/renderer 独立生成。
@@ -482,7 +488,7 @@ class _TuiAppParts:
     transcript_search_active: Any
 
 
-# LLM: 控件准备只创建一个 runtime/store 视图并连接 typed listeners；history 目录创建是本函数唯一文件系统副作用。
+# LLM: 控件准备只创建原 runtime 视图和易失插件客户端；目录不在此读取，history 目录仍是唯一文件系统副作用。
 # 函数用途: 创建 TUI 所需的状态、控件和动态模式条件。
 def _prepare_tui_app_parts(params: MakeTuiAppParams) -> _TuiAppParts:
     from prompt_toolkit.filters import Condition
@@ -500,7 +506,8 @@ def _prepare_tui_app_parts(params: MakeTuiAppParams) -> _TuiAppParts:
     )
     history_file = _tui_input_history_path(params)
     history_file.parent.mkdir(parents=True, exist_ok=True)
-    input_area = _make_input_area(str(history_file), runtime, Path(params.agent.root))
+    plugin_client = PluginCommandClient(params.agent, str(params.current_session_id or "default"), use_gateway=params.use_gateway)
+    input_area = _make_input_area(str(history_file), runtime, Path(params.agent.root), plugin_client=plugin_client)
     _wire_help_dismiss_on_input(input_area, interaction, params.agent_navigation)
     history_search_area = _make_history_search_area(interaction)
     _wire_history_search_area(history_search_area, input_area, interaction)

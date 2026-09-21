@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
 from queue import Queue
@@ -66,7 +67,22 @@ def test_plugin_namespace_completion_only_edits_without_path_scan(tmp_path, monk
 def test_plugin_submit_uses_real_dispatch_without_chat_guidance_or_stop(
     tmp_path, monkeypatch, use_gateway, mode, raw, message,
 ) -> None:
-    from agent_py_agent.cli.chat_parts import control_runtime, tui
+    from agent_py_agent.agent.plugin_command_service import (
+        execute_plugin_command,
+        read_plugin_catalog,
+    )
+    from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity
+    from agent_py_agent.cli.chat_parts import control_runtime, plugin_command_client, tui
+
+    snapshot = read_plugin_catalog(OwnerIdentity.local_main(), channel="chat", conversation_id="session-1")
+
+    def transport(port, owner, path, payload, *, timeout):
+        assert path == "/client/plugins" and owner == OwnerIdentity.local_main()
+        result = ({"ok": True, "catalog": snapshot.to_payload()} if payload["operation"] == "catalog"
+                  else execute_plugin_command(snapshot, payload["command"], revision=payload["catalog_revision"]))
+        return 200, result
+
+    monkeypatch.setattr(plugin_command_client, "post_gateway_json", transport)
 
     input_area = TextArea(multiline=True)
     input_area.text = raw
@@ -87,7 +103,7 @@ def test_plugin_submit_uses_real_dispatch_without_chat_guidance_or_stop(
     background_before = runtime.has_active_background_task()
     params = SimpleNamespace(
         input_area=input_area, interaction_state=TuiInteractionState(), tui_runtime=runtime,
-        agent=SimpleNamespace(), args=SimpleNamespace(memory_limit=5), runtime_inject=[], prompt_files=[],
+        agent=SimpleNamespace(config=SimpleNamespace()), args=SimpleNamespace(memory_limit=5), runtime_inject=[], prompt_files=[],
         use_gateway=use_gateway, paths=SimpleNamespace(root=tmp_path), state_lock=threading.Lock(),
         is_running_ref=[mode == "foreground"], pending_jobs_ref=[0], running_prompt_ref=["正在核对"],
         running_request_id_ref=["goal-task-1" if mode == "background" else "req-1"],
@@ -98,7 +114,7 @@ def test_plugin_submit_uses_real_dispatch_without_chat_guidance_or_stop(
         escape_armed_at_ref=[0.0], escape_armed_text_ref=[""],
         local_run_ref=[None],
     )
-    event = SimpleNamespace(app=SimpleNamespace(exit=blocked, invalidate=lambda: None))
+    event = SimpleNamespace(app=SimpleNamespace(exit=blocked, invalidate=lambda: None, create_background_task=asyncio.run))
 
     tui_keybindings._submit_input_area(event, params)
 

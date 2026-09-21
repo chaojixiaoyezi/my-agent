@@ -14,7 +14,7 @@ import dataclasses
 import threading
 
 
-# LLM: 命令与 worker 共用 local_run_ref；消息快照不能代替模型前发布的运行身份。
+# LLM: 命令与 worker 共用 local_run_ref；插件只透传独立目录客户端及原候选 revision，不能成为控制或运行身份。
 # 类用途: 保存 TUI 单次命令所需的状态和精确本地控制引用。
 @dataclasses.dataclass(frozen=True)
 class TuiHandleCommandParams:
@@ -36,6 +36,8 @@ class TuiHandleCommandParams:
     assistant_outputs: list[str]
     current_session_id: str = ""
     local_run_ref: list = dataclasses.field(default_factory=lambda: [None])
+    plugin_client: object | None = None
+    plugin_revision: str = ""
 
 
 # LLM: 保持与界面同一份 queue/refs，local_run_ref 随 job 更新，不能在工厂中复制。

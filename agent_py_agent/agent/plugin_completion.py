@@ -16,6 +16,7 @@ from .command_arguments import (
     lex_command_arguments,
 )
 from .command_binding import BoundArguments, bind_command_arguments
+from .command_catalog import COMMAND_INDEX
 from .plugin_commands import (
     PluginCommandSpec,
     namespace_actions,
@@ -136,11 +137,11 @@ def _initial_candidates(
     return tuple({item.text: item for item in candidates}.values())
 
 
-# LLM: plugins 是宿主可见目录投影；requested 只表示用户显式请求候选，完整输入不能被自动菜单改写后吞掉 Enter。
+# LLM: 插件与管理动作消费同一宿主目录；requested 只表示显式请求候选，完整输入不能被自动菜单改写后吞掉 Enter。
 # 函数用途: 补全插件 ID、动作和参数；未开放的管理动作仅能通过 help 发现，不暗示可执行。
 def complete_plugin_command(
     text: str, *, plugins: tuple[PluginCommandSpec, ...] = (), paths: PathCandidates | None = None,
-    requested: bool = False,
+    requested: bool = False, management_actions: tuple[CommandActionSpec, ...] = COMMAND_INDEX["plugins"].actions,
 ) -> tuple[PluginCompletion, ...]:
     namespace = plugin_namespace(text)
     if namespace is None:
@@ -154,7 +155,7 @@ def complete_plugin_command(
     if not namespace.body and not text[-1].isspace() and not requested:
         return ()
     try:
-        actions, plugin = namespace_actions(namespace, plugins)
+        actions, plugin = namespace_actions(namespace, plugins, management_actions)
         tokens = lex_command_arguments(namespace.body, partial=True)
         current = tokens[-1] if tokens and tokens[-1].end == len(namespace.body) else None
         completed = tuple(token.value for token in (tokens[:-1] if current else tokens))

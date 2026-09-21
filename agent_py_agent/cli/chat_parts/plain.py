@@ -43,6 +43,8 @@ def _wait_for_exit(cfg: PlainHandleCommandConfig) -> None:
     print("再见。")
 
 
+# LLM: plain 的插件请求也依显式 use_gateway 选择宿主，不能因持有完整 Agent 而误用本地目录；控制仍沿原句柄。
+# 函数用途: 把命令交给公共分派，插件网络调用只发生在用户显式提交时。
 def _handle_shared_slash_command(cfg: PlainHandleCommandConfig) -> bool:
     return handle_common_slash_command(
         cfg.user,
@@ -53,6 +55,7 @@ def _handle_shared_slash_command(cfg: PlainHandleCommandConfig) -> bool:
             prompt_files=cfg.prompt_files,
             print_line=print,
             conversation_id=str(cfg.current_session_id or "default"),
+            use_gateway=cfg.use_gateway,
             control_executor=lambda command: execute_chat_control(
                 ChatControlExecution(
                     agent=cfg.agent,

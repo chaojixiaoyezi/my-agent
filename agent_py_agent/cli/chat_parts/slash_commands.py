@@ -17,7 +17,8 @@ from ...agent.conversation.control_commands import (
     parse_conversation_control,
     parse_conversation_task_command,
 )
-from ...agent.plugin_commands import plugin_command_response
+from ...agent.plugin_commands import plugin_namespace
+from .plugin_command_client import PluginCommandClient
 from .slash_command_types import SlashCommandContext
 
 
@@ -64,13 +65,14 @@ def handle_common_slash_command(
     return False
 
 
-# LLM: 这里只消费公共的静态帮助或拒绝回执，不调用会话控制器，也不把参数写入普通聊天。
+# LLM: 目录必须来自显式模式选定的宿主；输入携带原 revision，不调用旧会话控制器或模型，TUI 在输入线程外调用。
 # 函数用途: 在前台、后台和空闲 TUI 中一致处理插件命令，实际装卸仍未开放。
 def _handle_plugin_command(user: str, ctx: SlashCommandContext, include_plain_help: bool) -> bool | None:
     del include_plain_help
-    result = plugin_command_response(user)
-    if result is None:
+    if plugin_namespace(user) is None:
         return None
+    client = ctx.plugin_client or PluginCommandClient(ctx.agent, ctx.conversation_id, use_gateway=ctx.use_gateway)
+    result = client.command(user, revision=ctx.plugin_revision)
     ctx.print_line(str(result["message"]))
     return True
 

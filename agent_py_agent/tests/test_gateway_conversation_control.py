@@ -3910,7 +3910,7 @@ def test_http_ask_routes_stop_to_live_window_interrupt(tmp_path) -> None:
     ("/plugins@", "plugin_command", False, "invalid_plugin_id"),
     ("/PLUGINS@Demo run", "plugin_command", False, "unknown_plugin"),
     ('/plugins@demo run --path "C:\\new folder\\中文.txt" -- -x | literal', "plugin_command", False, "unknown_plugin"),
-    ('/plugins install "中文 a.whl"', "plugin_command", False, "not_implemented"),
+    ('/plugins install "中文 a.whl"', "plugin_command", False, "missing_revision"),
     ("/plugins install", "plugin_command", False, "missing_argument"),
     ('/plugins install "未闭合', "plugin_command", False, "unclosed_quote"),
 ])

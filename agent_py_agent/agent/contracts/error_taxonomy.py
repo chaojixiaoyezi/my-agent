@@ -319,6 +319,16 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
         recovery_hint="当前动作尚未开放；静态帮助不代表安装或执行成功，不通过模型或 Shell 绕过。",
     ),
+    "PLUGIN_CATALOG_STALE": ErrorContract(
+        code="PLUGIN_CATALOG_STALE", category="state", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="重新查看当前作用域的插件目录并确认输入；不要替换旧 revision 后自动重放业务。",
+    ),
+    "PLUGIN_CATALOG_UNAVAILABLE": ErrorContract(
+        code="PLUGIN_CATALOG_UNAVAILABLE", category="state", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="插件目录暂不可读；保留原任务，显式刷新后再决定操作，不降级到聊天或本地执行。",
+    ),
     "ACTIVE_TURN_OUTCOME_UNCERTAIN": ErrorContract(
         code="ACTIVE_TURN_OUTCOME_UNCERTAIN",
         category="state",

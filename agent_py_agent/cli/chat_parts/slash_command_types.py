@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 
-# LLM: SlashCommandContext 汇总 dispatcher 的可信依赖；普通输入文本之外的控制结果只经 control_executor 返回。
+# LLM: 控制执行与插件目录客户端分别传入；use_gateway 是原 CLI 模式，plugin_revision 仅保存用户所选目录版本。
 # 类用途: 把 agent、记忆限制、运行注入、提示文件和输出函数交给通用命令处理器。
 @dataclass
 class SlashCommandContext:
@@ -19,6 +19,9 @@ class SlashCommandContext:
     print_line: Callable[[str], None]
     control_executor: Callable[[Any], Any] | None = None
     conversation_id: str = "default"
+    use_gateway: bool = False
+    plugin_client: Any = None
+    plugin_revision: str = ""
 
 
 __all__ = ["SlashCommandContext"]

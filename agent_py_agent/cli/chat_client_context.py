@@ -505,9 +505,8 @@ class GatewayChatClientAgent:
         except (urllib.error.URLError, OSError, json.JSONDecodeError, ValueError):
             return 0, {}
         return status, body if isinstance(body, dict) else {}
-    # LLM: This is the sole HTTP writer for the lightweight chat context. It returns safe empty
-    # state on transport/JSON failure and never falls back to local Agent services.
-    # 函数用途: 向本机 Gateway 发送一条 JSON 请求，并返回 HTTP 状态和对象响应。
+    # LLM: 薄客户端和 plain Gateway 使用同一传输实现；身份来自构造时的 owner，故障不回退到本地 Agent。
+    # 函数用途: 用当前客户端身份发送一次 JSON 请求，并返回 HTTP 状态和对象响应。
     def post_gateway_json(
         self,
         path: str,
@@ -515,24 +514,31 @@ class GatewayChatClientAgent:
         *,
         timeout: float,
     ) -> tuple[int, dict[str, object]]:
-        port = int(getattr(self.config, "gateway_port", 0) or 0)
-        if port <= 0:
-            return 0, {}
-        normalized_payload = _with_client_identity(self.owner_identity, payload)
-        request = urllib.request.Request(
-            f"http://127.0.0.1:{port}{path}",
-            data=json.dumps(normalized_payload, ensure_ascii=False).encode("utf-8"),
-            headers=_gateway_headers(self.owner_identity, json_body=True),
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=max(0.1, float(timeout))) as response:
-                body = json.loads(response.read().decode("utf-8", "replace"))
-                status = int(response.status)
-        except urllib.error.HTTPError as exc:
-            return _http_error_json(exc)
-        except (urllib.error.URLError, OSError, json.JSONDecodeError, ValueError):
-            return 0, {}
-        return status, body if isinstance(body, dict) else {}
+        return post_gateway_json(int(getattr(self.config, "gateway_port", 0) or 0), self.owner_identity, path, payload, timeout=timeout)
+
+
+# LLM: 这是薄/完整客户端共用的 Gateway JSON 写传输；始终覆盖正文身份，不从命令参数推断身份，不自动重试请求。
+# 函数用途: 在现有本机 Gateway 地址发送已绑定 owner 的请求，传输故障只返回不可确认结果。
+def post_gateway_json(
+    port: int, owner_identity: OwnerIdentity, path: str, payload: dict[str, object], *, timeout: float,
+) -> tuple[int, dict[str, object]]:
+    if port <= 0:
+        return 0, {}
+    normalized_payload = _with_client_identity(owner_identity, payload)
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}{path}",
+        data=json.dumps(normalized_payload, ensure_ascii=False).encode("utf-8"),
+        headers=_gateway_headers(owner_identity, json_body=True),
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=max(0.1, float(timeout))) as response:
+            body = json.loads(response.read().decode("utf-8", "replace"))
+            status = int(response.status)
+    except urllib.error.HTTPError as exc:
+        return _http_error_json(exc)
+    except (urllib.error.URLError, OSError, json.JSONDecodeError, ValueError):
+        return 0, {}
+    return status, body if isinstance(body, dict) else {}
 
 
 # LLM: POST /ask and GET /input-status share one result decoder. Client UI decisions rely only on

@@ -335,6 +335,7 @@ def test_cprint_uses_plain_print_when_stdout_is_not_tty(monkeypatch, capsys):
 
     monkeypatch.setattr(rendering, "_pt_print", fail_print)
     monkeypatch.setattr(rendering, "_PT_ANSI", lambda text: text)
+    monkeypatch.setattr(rendering, "_TUI_OUTPUT_SINK", None)
 
     rendering._cprint("hello")
 

@@ -18,7 +18,7 @@ from .command_catalog import COMMAND_INDEX, system_slash_command_name
 _PLUGIN_ID = re.compile(r"[A-Za-z][A-Za-z0-9._-]{0,63}\Z")
 
 
-# LLM: 这是宿主目录的只读描述，不是安装注册表；enabled 不代替执行门的 owner、版本与撤销核对。
+# LLM: 这是宿主目录的只读描述，不是安装注册表；版本及激活引用参与目录摘要，不代替执行门的 owner 与撤销核对。
 # 类用途: 让插件静态帮助和动作解析共享身份及显式默认动作。
 @dataclass(frozen=True)
 class PluginCommandSpec:
@@ -27,10 +27,14 @@ class PluginCommandSpec:
     actions: tuple[CommandActionSpec, ...]
     enabled: bool = False
     default_action: str = ""
+    package_version: str = ""
+    activation_id: str = ""
 
-    # LLM: 拒绝重复动作和无效默认目标，不能依靠展示名或动作数量猜默认业务。
+    # LLM: 拒绝重复动作、错误字段类型和无效默认目标；版本是显式描述，不从展示名猜业务或授权。
     # 函数用途: 在目录发布前检查插件命令身份。
     def __post_init__(self) -> None:
+        if any(not isinstance(value, str) for value in (self.plugin_id, self.summary, self.default_action, self.package_version, self.activation_id)) or type(self.enabled) is not bool:
+            raise ValueError("插件声明字段类型错误")
         if not isinstance(self.actions, tuple):
             raise ValueError("插件动作必须是不可变元组")
         names = tuple(action.name for action in self.actions)
@@ -83,9 +87,10 @@ def plugin_namespace(text: str) -> PluginNamespace | None:
 # 函数用途: 为管理或插件命名空间取得唯一声明集合。
 def namespace_actions(
     namespace: PluginNamespace, plugins: tuple[PluginCommandSpec, ...],
+    management_actions: tuple[CommandActionSpec, ...] = COMMAND_INDEX["plugins"].actions,
 ) -> tuple[tuple[CommandActionSpec, ...], PluginCommandSpec | None]:
     if namespace.prefix == "/plugins":
-        return COMMAND_INDEX["plugins"].actions, None
+        return management_actions, None
     if not _PLUGIN_ID.fullmatch(namespace.plugin_id):
         raise CommandArgumentError("invalid_plugin_id", "插件 ID 应为 1—64 位英文字母开头的字母、数字、点、下划线或横线。")
     if len({plugin.plugin_id for plugin in plugins}) != len(plugins):
@@ -115,11 +120,12 @@ def select_plugin_action(
 # 函数用途: 解析一条插件命令，普通聊天返回 None，命令错误保留结构化原因。
 def parse_plugin_command(
     text: str, *, plugins: tuple[PluginCommandSpec, ...] = (),
+    management_actions: tuple[CommandActionSpec, ...] = COMMAND_INDEX["plugins"].actions,
 ) -> ParsedPluginCommand | None:
     namespace = plugin_namespace(text)
     if namespace is None:
         return None
-    actions, plugin = namespace_actions(namespace, plugins)
+    actions, plugin = namespace_actions(namespace, plugins, management_actions)
     tokens = tuple(token.value for token in lex_command_arguments(namespace.body))
     action, arguments = select_plugin_action(actions, tokens, plugin)
     try:
@@ -144,7 +150,10 @@ def render_plugin_help(namespace: PluginNamespace, actions: tuple[CommandActionS
 
 # LLM: 当前只处理静态帮助与拒绝结果；未来业务执行应消费 ParsedPluginCommand 并接原工具链，不能在这里另造执行器。
 # 函数用途: 为所有实际入口返回同一份只读命令回执，不修改任务、Goal 或请求队列。
-def plugin_command_response(text: str) -> dict[str, object] | None:
+def plugin_command_response(
+    text: str, *, plugins: tuple[PluginCommandSpec, ...] = (),
+    management_actions: tuple[CommandActionSpec, ...] = COMMAND_INDEX["plugins"].actions,
+) -> dict[str, object] | None:
     namespace = plugin_namespace(text)
     if namespace is None:
         return None
@@ -152,11 +161,11 @@ def plugin_command_response(text: str) -> dict[str, object] | None:
     actions: tuple[CommandActionSpec, ...] = ()
     action = None
     try:
-        actions, _plugin = namespace_actions(namespace, ())
-        parsed = parse_plugin_command(text)
+        actions, _plugin = namespace_actions(namespace, plugins, management_actions)
+        parsed = parse_plugin_command(text, plugins=plugins, management_actions=management_actions)
         action = parsed.action
         if parsed.help_requested:
-            if action is not None and action.name == "help" and not parsed.arguments.help_requested:
+            if parsed.plugin is None and action is not None and action.name == "help" and not parsed.arguments.help_requested:
                 target = parsed.arguments.values.get("action", "")
                 action = next((item for item in actions if item.name == target), None)
                 if target and action is None:

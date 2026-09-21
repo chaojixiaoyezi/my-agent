@@ -33,6 +33,7 @@ from .tui_input import (
 )
 from .tui_interaction import TuiDraft, TuiInteractionState
 from .tui_params import TuiHandleCommandParams
+from .tui_plugin_commands import submit_plugin_command
 from .tui_transcript import TuiTranscriptModeState
 
 TRANSCRIPT_SCROLL_LINES = 10
@@ -400,24 +401,23 @@ def _handle_enter_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
 
 
 # LLM: 提交入口统一恢复 transcript follow-tail、保存历史、执行 typed command 或进入 canonical queue；补全 Enter 也必须复用它。
-# 终态 child 的拒发必须清空未投递草稿，避免同一个输入控件返回父页面后把 child 消息误发给父代理。
+# 终态 child 的拒发必须清空草稿；插件候选版本在清空前冻结，随后只交给后台命令分派。
 # 函数用途: 提交当前输入框内容，先回到最新对话，再在命令未消费时创建一个聊天任务；终态子代理只提示拒发并清空本次草稿。
 def _submit_input_area(event, params: TuiCreateKeybindingsParams) -> None:
     if _replace_trailing_backslash_with_newline(params.input_area):
         return
     interaction = _required_interaction(params)
     buffer = params.input_area.buffer
-    draft = interaction.capture_draft(
-        str(buffer.text or ""),
-        int(buffer.cursor_position),
-    )
+    plugin_binding = getattr(buffer, "_my_agent_plugin_input", None)
+    plugin_revision = plugin_binding.revision if plugin_binding else ""
+    draft = _capture_input_draft(params)
     display_text = draft.text.strip()
     if not display_text:
         return
     text = interaction.expand_draft(draft).strip()
     if len(text) > MAX_USER_INPUT_CHARS:
         # 会话运行时 语义：超限拒发 + 保留原文（不丢输入），避免大粘贴静默丢失。
-        _set_input_draft(params, TuiDraft(str(buffer.text or ""), int(buffer.cursor_position)))
+        _set_input_draft(params, draft)
         _required_tui_runtime(params).set_notice(
             f"消息超过 {MAX_USER_INPUT_CHARS} 字符上限（{len(text)}），未发送",
             duration_seconds=2.4,
@@ -461,6 +461,9 @@ def _submit_input_area(event, params: TuiCreateKeybindingsParams) -> None:
             text=text,
             display_text=display_text,
         )
+        _restore_stash_after_submit(params)
+        return
+    if submit_plugin_command(event, params, text, plugin_binding, plugin_revision):
         _restore_stash_after_submit(params)
         return
     if _tui_submit_control_operation(params, text):
@@ -545,12 +548,17 @@ def _repin_transcript_after_submit(params: TuiCreateKeybindingsParams) -> None:
     _scroll_transcript_end(params)
 
 
-# LLM: Tab 只接受当前候选、不执行命令；候选不存在时保留默认的字面 tab 抑制行为。
-# 函数用途: 将菜单选中项写入输入框，供用户继续编辑参数或正文。
+# LLM: Tab 接受已有候选；插件输入无候选时启动原 Buffer 显式异步补全，不能执行命令或逐字发请求。
+# 函数用途: 接受当前候选，或让宿主刷新插件声明供用户选择。
 def _handle_tab_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
-    if apply_selected_completion(params.input_area.buffer) is not None:
+    from ...agent.plugin_commands import plugin_namespace
+
+    buffer = params.input_area.buffer
+    if apply_selected_completion(buffer) is not None:
         _reset_exit_arms(params)
         event.app.invalidate()
+    elif plugin_namespace(buffer.document.text_before_cursor) is not None:
+        buffer.start_completion()
 
 
 # LLM: Meta-Enter/Ctrl-J 只编辑当前 buffer，不发布用户事件或改变 canonical queue。
@@ -586,6 +594,7 @@ def _remember_input(input_area: Any, text: str) -> None:
 # durable history append. Merely replacing Document text leaves same-session entries outside the
 # buffer's history cursor even though FileHistory already contains them. Stash/queue restoration
 # continues to use _set_input_draft because those operations are edits, not submissions.
+# Buffer.reset 不发送正文变化事件，因此这里显式清候选版本，不能让下一条输入继承旧选择。
 # 函数用途: 提交后清空输入并重建历史游标，让本次 TUI 刚发送的消息立即可用 Up/Down 取回。
 def _reset_input_after_submit(params: TuiCreateKeybindingsParams) -> None:
     from prompt_toolkit.document import Document
@@ -594,6 +603,9 @@ def _reset_input_after_submit(params: TuiCreateKeybindingsParams) -> None:
     buffer.cancel_completion()
     _required_interaction(params).install_draft(TuiDraft("", 0))
     buffer.reset(document=Document("", cursor_position=0))
+    binding = getattr(buffer, "_my_agent_plugin_input", None)
+    if binding is not None:
+        binding.edited("")
 
 
 # LLM: interaction dependency 必须是 setup 创建的同一实例；缺失时禁止静默退化为无 stash/search 的另一条输入路径。
@@ -768,7 +780,18 @@ def _clear_permission_feedback_text(params: TuiCreateKeybindingsParams) -> None:
     )
 
 
-# LLM: Document 写入统一裁剪光标并取消旧 completion；历史/stash 恢复不得触发命令或追加 history。
+# LLM: 捕获原输入快照与候选 revision；所有 stash/search 入口共用，不能只保存文字再按新缓存解释。
+# 函数用途: 保存当前编辑内容、粘贴引用和用户原先选择的目录版本。
+def _capture_input_draft(params: TuiCreateKeybindingsParams) -> TuiDraft:
+    from dataclasses import replace
+
+    buffer = params.input_area.buffer
+    draft = _required_interaction(params).capture_draft(str(buffer.text or ""), int(buffer.cursor_position))
+    binding = getattr(buffer, "_my_agent_plugin_input", None)
+    return replace(draft, plugin_revision=binding.revision if binding else "")
+
+
+# LLM: Document 写入取消旧候选并恢复草稿的原 revision；历史/stash 恢复不得触发命令或追加 history。
 # 函数用途: 把一份结构化草稿投影到主输入框。
 def _set_input_draft(params: TuiCreateKeybindingsParams, draft: TuiDraft) -> None:
     from prompt_toolkit.document import Document
@@ -780,6 +803,10 @@ def _set_input_draft(params: TuiCreateKeybindingsParams, draft: TuiDraft) -> Non
         Document(draft.text, cursor_position=draft.cursor_position),
         bypass_readonly=True,
     )
+    binding = getattr(buffer, "_my_agent_plugin_input", None)
+    if binding is not None:
+        binding.namespace, binding.revision = "", ""
+        binding.selected(draft.text, draft.plugin_revision)
 
 
 # LLM: 提交恢复只消费 interaction 单槽并写回编辑器；返回的草稿不会被自动放进 canonical job queue。
@@ -790,15 +817,11 @@ def _restore_stash_after_submit(params: TuiCreateKeybindingsParams) -> None:
         _set_input_draft(params, draft)
 
 
-# LLM: Ctrl-S 保存精确文本/光标或在空输入时弹出已有 stash；动作不写历史、不提交模型。
+# LLM: Ctrl-S 保存精确文本/光标和原候选 revision；恢复不取新目录版本，不写历史或提交模型。
 # 函数用途: 实现 终端交互 的 stash/unstash 快捷键。
 def _handle_stash_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
-    buffer = params.input_area.buffer
     interaction = _required_interaction(params)
-    current = interaction.capture_draft(
-        str(buffer.text or ""),
-        int(buffer.cursor_position),
-    )
+    current = _capture_input_draft(params)
     restored = interaction.toggle_stash(current)
     if current.text.strip():
         _set_input_draft(params, TuiDraft("", 0))
@@ -808,7 +831,7 @@ def _handle_stash_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
     event.app.invalidate()
 
 
-# LLM: 历史来源只调用当前 Buffer history 的公开 loader，并在搜索开始时冻结；读取失败等价于空候选而非改写输入。
+# LLM: 搜索冻结原草稿含 revision，来源只读 Buffer history；读取失败为空候选，取消搜索不能升级原命令版本。
 # 函数用途: 启动 Ctrl-R 搜索并把焦点移到底栏查询框。
 def _start_history_search(event, params: TuiCreateKeybindingsParams) -> None:
     buffer = params.input_area.buffer
@@ -822,7 +845,7 @@ def _start_history_search(event, params: TuiCreateKeybindingsParams) -> None:
     buffer.cancel_completion()
     interaction = _required_interaction(params)
     interaction.start_history_search(
-        interaction.capture_draft(str(buffer.text or ""), int(buffer.cursor_position)),
+        _capture_input_draft(params),
         entries,
     )
     event.app.layout.focus(params.history_search_area)
@@ -867,15 +890,12 @@ def _cancel_history_search(event, params: TuiCreateKeybindingsParams) -> None:
     _finish_history_search(event, params, draft)
 
 
-# LLM: Enter 仅提交空 query 的原草稿或已找到的当前 match；零匹配时只退出搜索，不制造空任务。
+# LLM: Enter 仅提交原草稿或当前 match；零匹配保留正文与原 revision，不制造空任务或替换版本。
 # 函数用途: 接受历史搜索结果并立即走统一提交入口。
 def _execute_history_search(event, params: TuiCreateKeybindingsParams) -> None:
     draft = _required_interaction(params).execute_history_search()
     if draft is None:
-        current = _required_interaction(params).capture_draft(
-            str(params.input_area.buffer.text or ""),
-            int(params.input_area.buffer.cursor_position),
-        )
+        current = _capture_input_draft(params)
         _finish_history_search(event, params, current)
         return
     _finish_history_search(event, params, draft)

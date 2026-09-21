@@ -1,5 +1,9 @@
 # Gateway 维护状态
 
+- 宿主目录片已接本地源码，待发布与实际 TUI：`/client/plugins` 和 ask/control 共用原 owner 解析，返回不可变声明及 revision。
+  冷用户不创建 Agent/thread；无中间件本机与群聊 metadata 保留原规则，不重做 auth。
+  旧版本或缺失业务版本明确拒绝，不自动重放，不进入原控制或队列；实际插件贡献仍为空，装卸尚未实现。
+
 - 参数次片已发布同版双机，所测 TUI 入口已复验：`ask/control` 在原鉴权后消费公共插件静态帮助或结构化错误。
   不新增 ControlKind，不触发旧控制回执持久化、guidance、模型或普通队列；动态 owner 目录及执行身份后续接入宿主。
   483 项相关回归及严格 gate 通过；TUI 146 的 Tab→Enter、两端各 13 类命令检查通过，143 原失败及普通任务质量单列。

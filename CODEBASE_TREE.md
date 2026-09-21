@@ -47,6 +47,8 @@ agent_py_agent/
 |   |   |-- tui_complete_detail.py      # 完整原文有界分页、长行分片与稀疏页索引
 |   |   |-- tui_display_archive.py      # 异步读取原文归档页，缓存限额与失败重试
 |   |   |-- slash_commands.py          # CLI 命令分派与公共声明的帮助投影
+|   |   |-- plugin_command_client.py   # 显式宿主模式、会话目录缓存与原版本提交
+|   |   |-- tui_plugin_commands.py     # 输入候选版本绑定与不阻塞输入的插件命令分派
 |   |   |-- slash_command_types.py     # CLI 命令处理器的可信上下文，不另设命令目录
 |   |   |-- tui_input.py                # 真实 slash/path 补全、菜单、history suggest 与排队占位投影
 |   |   |-- tui_model_menu.py           # /model 新增/选择/退出浮层，私密密钥与显式上下文窗口
@@ -83,6 +85,8 @@ agent_py_agent/
 |   |-- command_arguments.py           # 参数不可变声明、类型校验与保留原文范围的公共词法
 |   |-- command_binding.py             # 同源参数绑定、缺值位置、帮助与选项分界
 |   |-- plugin_commands.py             # 插件命名空间、宿主描述解析与无副作用的静态回执
+|   |-- plugin_command_catalog.py      # 可验证的不可变目录快照、JSON 合同及内容版本
+|   |-- plugin_command_service.py      # 宿主作用域目录与旧版本拒绝，不拥有安装和执行权
 |   |-- plugin_completion.py           # 用公共词法和绑定事实生成只编辑输入的候选
 |   |-- core.py                         # SimpleAgent 组合入口
 |   |-- turn_end.py                     # 主/子代理共用的结束原因及技术续跑判据
@@ -175,6 +179,7 @@ agent_py_agent/
 |   |   |-- run_cancellation.py         # 精确 task/run/attempt 的共用取消权限合同，UNKNOWN 保留锁与恢复障碍
 |   |   `-- executor_liveness.py        # exact attempt 执行区间和 OS 退出事实；慢模型不按时长判死
 |   |-- gateway_parts/                 # gateway request/worker/lease/http/renderer
+|   |   |-- plugin_command_service.py  # 可信 owner 的只读目录与插件 HTTP 命令入口
 |   |   |-- request_execution.py        # 单个已领取请求的租约、模型执行、超窗恢复与收尾编排
 |   |   |-- request_context.py          # 原车道内的会话快照、Compact 与工作目录准备
 |   |   |-- request_binding.py          # 精确请求与运行身份绑定、执行车道和原子更新
@@ -404,6 +409,10 @@ agent_py_agent/
 |   |-- test_tui_history_paging.py      # 更早页渲染顺序、锚点、冻结页、子页/过期响应和单在途读取
 |   |-- test_conversation_history_paging.py # 中文长行字节边界、完整工作片、坏游标与追加竞态
 |   |-- test_tui_input.py               # slash/path 补全、菜单选择、queue 回取与 bracketed paste 输入回归
+|   |-- test_plugin_command_catalog.py # 声明跨进程往返、版本变化及损坏载荷拒绝
+|   |-- test_gateway_plugin_commands.py # 冷 owner、可信身份、HTTP 插件命令分流与过期拒绝
+|   |-- test_plugin_command_client.py  # 三模式、异步响应隔离、原候选版本及显式 Tab 读取
+|   |-- test_tui_plugin_directory_pipe.py # 完整键盘链的 Tab 读取、候选接受、暂存恢复和原版本提交
 |   |-- test_tui_interaction.py         # stash、Ctrl-R、help 与 paste refs 状态机回归
 |   |-- test_tui_paste.py               # 大小 paste 的折叠/展开和占位符安全回归
 |   |-- test_tui_preflight.py           # Gateway readiness 瞬态成功、typed 失败与 worker 只启动一次回归
@@ -492,6 +501,11 @@ docs/
 - `agent_py_agent/agent/command_catalog.py`：无 UI/执行依赖的公共命令声明；原控制参数仍归会话模块，插件后缀识别不等于身份校验或可执行授权。
 - `agent_py_agent/agent/command_arguments.py` 与 `command_binding.py`：参数定义、字面词法及值绑定的权威实现；部分输入也使用同一协议，帮助不从展示文字反推规则。
 - `agent_py_agent/agent/plugin_commands.py`：接收宿主提供的只读动作描述；当前实际入口仅有管理帮助和明确拒绝，没有安装表、插件加载或第二执行器。
+- `agent_py_agent/agent/plugin_command_catalog.py`：冻结及校验完整管理/插件声明，内容摘要绑定 owner 视图、版本和激活引用；不提供权限凭证。
+- `agent_py_agent/agent/plugin_command_service.py`：从既有 OwnerIdentity 生成会话目录，旧或缺失业务版本明确拒绝；当前实际插件贡献仍为空。
+- `agent_py_agent/agent/gateway_parts/plugin_command_service.py`：`/client/plugins`、`/ask` 和 `/control` 共用原可信 owner 解析，静态读取不初始化冷用户 Agent 或会话。
+- `agent_py_agent/cli/chat_parts/plugin_command_client.py`：TUI、plain Gateway 与 direct 共用显式模式和声明缓存，故障不降级，乱序或换作用域响应不回写。
+- `agent_py_agent/cli/chat_parts/tui_plugin_commands.py`：保存首次接受候选的目录版本，参数补全不升级；网络提交沿共享分派在 UI 线程外执行。
 - `agent_py_agent/agent/plugin_completion.py`：仅建议能够绑定到当前参数的值；停用插件只给静态帮助，文件枚举由宿主按显式路径声明提供。
 
 - `agent_py_agent/cli/scenario.py`：诊断场景注册与参数目录；`scenario_cases/runner_retry_case.py` 和 `runner_retry_backend.py` 只负责保留的离线重试场景，旧结果块修复场景已删除。

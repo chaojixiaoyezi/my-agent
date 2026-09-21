@@ -44,14 +44,14 @@ from agent_py_agent.cli.chat_parts.slash_commands import handle_common_slash_com
 def test_plugin_command_is_consumed_without_calling_control_or_agent(raw, message) -> None:
     output: list[str] = []
     executor = MagicMock(side_effect=AssertionError("插件命令不能进入旧控制器"))
-    agent = MagicMock()
+    agent = SimpleNamespace(config=AgentConfig())
     ctx = SlashCommandContext(agent, 5, [], [], output.append, executor)
 
     assert handle_common_slash_command(raw, ctx=ctx)
 
     assert len(output) == 1 and message in output[0]
     executor.assert_not_called()
-    assert agent.mock_calls == []
+    assert set(vars(agent)) == {"config"}
     assert ctx.runtime_inject == [] and ctx.prompt_files == []
 
 

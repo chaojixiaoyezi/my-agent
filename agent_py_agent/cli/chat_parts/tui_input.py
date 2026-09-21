@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import threading
 from dataclasses import dataclass
@@ -22,6 +23,7 @@ from ...agent.command_catalog import COMMAND_CATALOG
 from ...agent.plugin_commands import plugin_namespace
 from ...agent.plugin_completion import complete_plugin_command
 from .chat_prompt_queue import pop_all_matching
+from .plugin_command_client import PluginCommandClient
 from .tui_runtime import TuiRuntime
 
 QUEUE_EDIT_PLACEHOLDER = "Press up to edit queued messages"
@@ -32,7 +34,7 @@ _COMPLETION_MENU_MAX_ITEMS = 6
 # LLM: TuiCompletion 只携带 UI 接受动作，不改变命令权限；submit 仍必须进入既有 command dispatcher。
 # 类用途: 在普通补全文本之外，标记 Enter 应提交、只应用候选，还是提交当前原文。
 class TuiCompletion(Completion):
-    # LLM: kind/enter_action/append_space 是输入控制的结构化事实，renderer 与 keybinding 不得解析 display_meta 文案。
+    # LLM: 输入动作和目录 revision 是结构化字段，不能解析 display_meta；目录版本只绑定用户选择，不授予执行权限。
     # 函数用途: 创建带有输入行为元数据的 prompt_toolkit 候选。
     def __init__(
         self,
@@ -44,6 +46,7 @@ class TuiCompletion(Completion):
         kind: str,
         enter_action: str = "apply",
         append_space: bool = False,
+        catalog_revision: str = "",
     ) -> None:
         super().__init__(
             text,
@@ -54,6 +57,7 @@ class TuiCompletion(Completion):
         self.kind = str(kind)
         self.enter_action = str(enter_action)
         self.append_space = bool(append_space)
+        self.catalog_revision = catalog_revision
 
 
 # LLM: slash menu 可见时不能叠加历史 ghost text；普通输入仍完全复用 FileHistory 的既有建议算法。
@@ -197,13 +201,25 @@ def move_input_cursor_by_wrapped_rows(
     return True
 
 
-# LLM: completer 的目录来自结构化 slash registry 与显式 workspace root；候选仅编辑 buffer，不执行命令或读取文件内容。
-# 类用途: 补全核心与插件命令、`@路径` 和 `/prompt-file`；插件候选只来自静态声明。
+# LLM: 核心目录保持原注册表，插件使用宿主声明缓存；显式 Tab 可异步刷新，逐字补全不发请求或执行命令。
+# 类用途: 补全核心与插件命令、`@路径` 和 `/prompt-file`，每个插件候选携带原目录版本。
 class TuiInputCompleter(Completer):
-    # LLM: workspace root 在 app 创建时固定；后续补全只能在该根或用户显式输入的绝对父目录做单层枚举。
-    # 函数用途: 创建输入补全器并规范工作目录。
-    def __init__(self, workspace: Path) -> None:
+    # LLM: workspace 与客户端都在 app 创建时绑定；构造不能触发网络或插件发现，路径仍只做原单层枚举。
+    # 函数用途: 创建输入补全器及可选的当前宿主目录读取入口。
+    def __init__(self, workspace: Path, *, plugin_client: PluginCommandClient | None = None, catalog_error=None) -> None:
         self.workspace = Path(workspace).expanduser().resolve(strict=False)
+        self.plugin_client = plugin_client
+        self.catalog_error = catalog_error
+
+    # LLM: prompt_toolkit 的异步补全在显式 Tab 才刷新目录，HTTP 离开事件线程；自动补全仅读缓存。
+    # 函数用途: 用户请求发现插件时更新声明，再沿同一个纯候选生成器补全。
+    async def get_completions_async(self, document: Document, complete_event: Any):
+        if self.plugin_client is not None and complete_event.completion_requested and plugin_namespace(document.text_before_cursor) is not None:
+            result = await asyncio.to_thread(self.plugin_client.refresh)
+            if not result.get("ok") and self.catalog_error is not None:
+                self.catalog_error(str(result["message"]))
+        for item in self.get_completions(document, complete_event):
+            yield item
 
     # LLM: 插件参数先走公共词法，完整命令不自动追加可选旗标；显式 Tab 可继续发现候选，不执行或扩大授权。
     # 函数用途: 按当前 token 生成候选，保留正常 Enter 提交及光标后的未编辑正文。
@@ -212,13 +228,17 @@ class TuiInputCompleter(Completer):
         if plugin_namespace(before) is not None:
             if document.text_after_cursor and not document.text_after_cursor[0].isspace():
                 return
+            catalog = self.plugin_client.snapshot() if self.plugin_client is not None else None
+            declarations = {"plugins": catalog.plugins, "management_actions": catalog.management_actions} if catalog else {}
             for item in complete_plugin_command(
                 before, paths=lambda token: _path_candidates(self.workspace, token),
                 requested=bool(complete_event.completion_requested),
+                **declarations,
             ):
                 yield TuiCompletion(
                     item.text, start_position=item.start - len(before), display=item.label,
                     display_meta=item.summary, kind="command", append_space=item.append_space,
+                    catalog_revision=catalog.revision if catalog else "",
                 )
             return
         slash_prefix = _slash_command_prefix(before)
@@ -337,7 +357,7 @@ def move_completion_selection(buffer: Any, delta: int) -> Completion | None:
     return state.completions[state.complete_index]
 
 
-# LLM: 接受候选只调用 Buffer 的标准替换一次；尾随空格由 typed completion 字段决定，不从显示说明猜测。
+# LLM: 接受候选只调用标准替换一次，再保留候选原 revision；尾随空格由 typed 字段决定，不能从新缓存或文案猜测。
 # 函数用途: 把当前选中候选写入输入文档，并按命令/文件语义补一个空格。
 def apply_selected_completion(buffer: Any) -> Completion | None:
     completion = selected_completion(buffer)
@@ -347,6 +367,9 @@ def apply_selected_completion(buffer: Any) -> Completion | None:
     if isinstance(completion, TuiCompletion) and completion.append_space:
         if not str(buffer.text).endswith(" "):
             buffer.insert_text(" ")
+    binding = getattr(buffer, "_my_agent_plugin_input", None)
+    if binding is not None and isinstance(completion, TuiCompletion):
+        binding.selected(str(buffer.text), completion.catalog_revision)
     return completion
 
 

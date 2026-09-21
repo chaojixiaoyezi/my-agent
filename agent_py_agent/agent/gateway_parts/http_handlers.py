@@ -47,7 +47,7 @@ from ..conversation.control_commands import (
     parse_conversation_task_command,
 )
 from ..conversation.message_stream import NoticeDisplayCapabilities, read_background_response_page
-from ..plugin_commands import plugin_command_response
+from ..plugin_commands import plugin_namespace
 from ..runtime_errors import DataCorruptionError, runtime_error_report
 from .client_service import execute_gateway_client_memory, read_gateway_client_history
 from .control_operation_service import (
@@ -80,6 +80,7 @@ from .input_delivery_service import (
 )
 from .io import gateway_request_counts, write_json_file_atomic
 from .paths import gateway_chunk_path, gateway_chunk_path_candidates
+from .plugin_command_service import plugin_http_response
 from .request_client import GatewayAskExecutionOptions
 from .response_renderer import read_gateway_terminal_envelope_report
 
@@ -514,7 +515,7 @@ def _payload_load_error(path, exc: BaseException, context: str) -> dict[str, Any
     return report
 
 
-# LLM: 鉴权之后先消费明确命令，插件只读回执不进入持久控制或消息队列；普通请求仍沿原作用域绑定。
+# LLM: 鉴权之后按原 owner 读取插件目录并核对提交版本，不进入持久控制或消息队列；普通请求仍沿原作用域绑定。
 # 函数用途: 接收消息与系统命令，避免参数错误成为活动插话或模型任务。
 def handle_ask(handler, server, request_id_factory: Callable[[], str]) -> None:
     if require_trusted_source(handler):
@@ -547,8 +548,8 @@ def handle_ask(handler, server, request_id_factory: Callable[[], str]) -> None:
         handler._send_json(500, {"error": "server not initialized"})
         return
     user_id, channel = _request_channel(handler)
-    plugin_result = plugin_command_response(goal)
-    if plugin_result is not None:
+    if plugin_namespace(goal) is not None:
+        plugin_result = plugin_http_response(handler, server, body, text=goal)
         handler._send_json(200, {**plugin_result, "status": "control", "disposition": "system_command"})
         return
     task_command = parse_conversation_task_command(goal)
@@ -851,9 +852,7 @@ def _route_ask_to_active_turn(
     )
 
 
-# LLM: /control authenticates the caller before selecting a structured owner conversation.
-# 函数用途：让 IM/CLI 立即查询、纠偏或停止自己的当前任务，不进入普通 /ask 队列。
-# LLM: 插件参数不扩展旧 ControlKind；先经原可信来源检查，再返回公共静态回执，业务控制仍持久幂等。
+# LLM: 插件参数不扩展旧 ControlKind；先经原可信来源和 owner 解析，再核对目录版本，业务控制仍持久幂等。
 # 函数用途: 分别处理只读命令与原会话控制，不因新命名空间触发默认停止。
 def handle_control(handler, server) -> None:
     if require_trusted_source(handler):
@@ -867,8 +866,8 @@ def handle_control(handler, server) -> None:
         handler._send_json(400, {"error": f"invalid JSON: {exc}"})
         return
     command_text = str(body.get("command", body.get("prompt", "")) or "")
-    plugin_result = plugin_command_response(command_text)
-    if plugin_result is not None:
+    if plugin_namespace(command_text) is not None:
+        plugin_result = plugin_http_response(handler, server, body, text=command_text)
         handler._send_json(200, plugin_result)
         return
     command = parse_conversation_control(

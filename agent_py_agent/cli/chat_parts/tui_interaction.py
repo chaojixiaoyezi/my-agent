@@ -1,5 +1,5 @@
 # LLM: 本模块保存一次 TUI 生命周期内的纯输入交互状态；它不执行命令、不写 history，也不把提示文案当控制信号。
-# 模块用途: 为草稿 stash、Ctrl-R 历史搜索、快捷键帮助、鼠标模式和括号粘贴提示提供线程安全状态机。
+# 模块用途: 为含原命令版本的草稿暂存、历史搜索、快捷键帮助、鼠标模式和粘贴提示提供线程安全状态机。
 
 from __future__ import annotations
 
@@ -14,13 +14,14 @@ from .tui_paste import (
 )
 
 
-# LLM: TuiDraft 是编辑器内容、光标与文本粘贴 refs 的不可变快照；隐藏正文只能由 refs 提供，不能从占位符或 history 文案猜测。
+# LLM: TuiDraft 冻结编辑器内容、光标、粘贴 refs 及用户选中目录的 revision；恢复草稿不能按新目录升级原输入含义。
 # 类用途: 保存一份可恢复的输入草稿。
 @dataclass(frozen=True)
 class TuiDraft:
     text: str
     cursor_position: int
     pasted_text_refs: tuple[TuiPastedTextRef, ...] = ()
+    plugin_revision: str = ""
 
     # LLM: 光标必须被限制在正文边界内，坏输入不能让 prompt_toolkit Document 构造失败。
     # 函数用途: 规范草稿文本和光标位置。
