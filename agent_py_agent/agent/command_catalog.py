@@ -8,8 +8,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
+from .command_arguments import ArgumentSpec, CommandActionSpec
 
-# LLM: 尾部正则只声明已有会话语法，不能从 usage/summary 反推参数；插件命名空间预留不代表可执行。
+
+# LLM: 尾部正则保留核心自由正文，actions 描述结构化参数；两者不能从 usage/summary 反推或互相替代。
 # 类用途: 保存一种命令的名称、别名、帮助变体、输入行为及可选会话语法，不持有处理器或运行状态。
 @dataclass(frozen=True)
 class CommandSpec:
@@ -22,7 +24,7 @@ class CommandSpec:
     conversation_suffix: str | None = None
     multiline: bool = False
     namespace_separator: str = ""
-    unavailable_message: str = ""
+    actions: tuple[CommandActionSpec, ...] = ()
 
 
 COMMAND_CATALOG = (
@@ -124,10 +126,30 @@ COMMAND_CATALOG = (
     CommandSpec(
         "plugins",
         "/plugins [管理动作]",
-        "插件管理入口（尚未开放）",
+        "查看插件命令帮助（装卸与业务尚未开放）",
         help_variants=(("/plugins@<插件ID> [动作] [参数]", "插件使用入口（尚未开放）"),),
         namespace_separator="@",
-        unavailable_message="插件命令尚未开放；当前版本还不能安装、启用或调用插件。",
+        actions=(
+            CommandActionSpec("help", "查看管理动作的参数说明", (ArgumentSpec("action", "管理动作名称"),)),
+            CommandActionSpec("list", "列出已安装插件", (
+                ArgumentSpec("enabled", "只列已启用插件", options=("-e", "--enabled"), value_type="boolean"),
+            ), available=False),
+            CommandActionSpec("info", "查看插件说明和状态", (
+                ArgumentSpec("plugin", "插件 ID", required=True),
+            ), available=False),
+            CommandActionSpec("install", "安装本地包，默认停用", (
+                ArgumentSpec("source", "本地包路径", required=True, path=True),
+            ), available=False),
+            CommandActionSpec("enable", "启用已安装插件", (
+                ArgumentSpec("plugin", "插件 ID", required=True),
+            ), available=False),
+            CommandActionSpec("disable", "停用插件并保留安装包", (
+                ArgumentSpec("plugin", "插件 ID", required=True),
+            ), available=False),
+            CommandActionSpec("remove", "停用并卸载插件，保留用户产物", (
+                ArgumentSpec("plugin", "插件 ID", required=True),
+            ), available=False),
+        ),
     ),
 )
 
@@ -186,19 +208,7 @@ def system_slash_command_name(text: object) -> str:
     return str(match.group(1) or "").lower() if match is not None else ""
 
 
-# LLM: 不可用结果只读声明，不尝试安装、启动或推断插件权限；调用方必须在执行链前消费结果。
-# 函数用途: 为未知系统命令或尚未开放的命名空间生成一致的中文提示。
+# LLM: 此错误只负责未知核心命令；插件参数结果归 plugin_commands，不能再增加第二套命名空间文案。
+# 函数用途: 为未知系统命令生成中文提示，不尝试任何执行或聊天回退。
 def unavailable_command_message(name: str) -> str:
-    spec = COMMAND_INDEX.get(name)
-    if spec is None:
-        spec = next(
-            (
-                item
-                for item in _NAMESPACE_COMMANDS
-                if name.startswith(item.name + item.namespace_separator)
-            ),
-            None,
-        )
-    if spec is not None and spec.unavailable_message:
-        return spec.unavailable_message
     return f"不支持的系统命令：/{name}。输入 /help 查看当前界面支持的命令。"

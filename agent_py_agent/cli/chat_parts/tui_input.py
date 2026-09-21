@@ -19,6 +19,8 @@ from prompt_toolkit.layout.processors import Processor, Transformation, Transfor
 from prompt_toolkit.utils import get_cwidth
 
 from ...agent.command_catalog import COMMAND_CATALOG
+from ...agent.plugin_commands import plugin_namespace
+from ...agent.plugin_completion import complete_plugin_command
 from .chat_prompt_queue import pop_all_matching
 from .tui_runtime import TuiRuntime
 
@@ -196,18 +198,27 @@ def move_input_cursor_by_wrapped_rows(
 
 
 # LLM: completer 的目录来自结构化 slash registry 与显式 workspace root；候选仅编辑 buffer，不执行命令或读取文件内容。
-# 类用途: 补全 my-agent 斜杠命令、`@路径` 和 `/prompt-file` 路径参数。
+# 类用途: 补全核心与插件命令、`@路径` 和 `/prompt-file`；插件候选只来自静态声明。
 class TuiInputCompleter(Completer):
     # LLM: workspace root 在 app 创建时固定；后续补全只能在该根或用户显式输入的绝对父目录做单层枚举。
     # 函数用途: 创建输入补全器并规范工作目录。
     def __init__(self, workspace: Path) -> None:
         self.workspace = Path(workspace).expanduser().resolve(strict=False)
 
-    # LLM: 名称和 Enter 行为读取公共声明；插件前缀只填入且紧接 ID，不查路径、不执行插件或扩大授权。
-    # 函数用途: 按当前 token 生成命令或文件候选，保留原核心命令的提交方式。
+    # LLM: 插件参数先走公共词法，只有声明的 path 才枚举路径；所有候选只填入，不执行或扩大授权。
+    # 函数用途: 按当前 token 生成命令或文件候选，保留核心命令提交方式及光标后的未编辑正文。
     def get_completions(self, document: Document, complete_event: Any):
         del complete_event
         before = document.text_before_cursor
+        if plugin_namespace(before) is not None and (any(char.isspace() for char in before) or "@" in before):
+            if document.text_after_cursor and not document.text_after_cursor[0].isspace():
+                return
+            for item in complete_plugin_command(before, paths=lambda token: _path_candidates(self.workspace, token)):
+                yield TuiCompletion(
+                    item.text, start_position=item.start - len(before), display=item.label,
+                    display_meta=item.summary, kind="command", append_space=item.append_space,
+                )
+            return
         slash_prefix = _slash_command_prefix(before)
         if slash_prefix is not None:
             directory = {}

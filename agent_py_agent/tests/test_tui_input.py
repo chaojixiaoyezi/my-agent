@@ -57,13 +57,19 @@ def test_plugin_namespace_completion_only_edits_without_path_scan(tmp_path, monk
 
 @pytest.mark.parametrize("use_gateway", [False, True])
 @pytest.mark.parametrize("mode", ["idle", "foreground", "background", "child"])
+@pytest.mark.parametrize(("raw", "message"), [
+    ('/plugins@Demo run --path "中文 a" -- -x | literal', "当前目录没有"),
+    ("/plugins help install", "用法：/plugins install <source>"),
+    ("/plugins list --bad", "未声明的选项"),
+    ('/plugins install "未闭合', "引号尚未闭合"),
+])
 def test_plugin_submit_uses_real_dispatch_without_chat_guidance_or_stop(
-    tmp_path, monkeypatch, use_gateway, mode,
+    tmp_path, monkeypatch, use_gateway, mode, raw, message,
 ) -> None:
     from agent_py_agent.cli.chat_parts import control_runtime, tui
 
     input_area = TextArea(multiline=True)
-    input_area.text = '/plugins@Demo run --path "中文 a" -- -x | literal'
+    input_area.text = raw
     output: list[str] = []
     blocked = MagicMock(side_effect=AssertionError("命令错误不能进入执行或普通输入"))
     monkeypatch.setattr(tui, "_cprint", output.append)
@@ -96,7 +102,7 @@ def test_plugin_submit_uses_real_dispatch_without_chat_guidance_or_stop(
 
     tui_keybindings._submit_input_area(event, params)
 
-    assert output == ["插件命令尚未开放；当前版本还不能安装、启用或调用插件。"]
+    assert len(output) == 1 and message in output[0]
     blocked.assert_not_called()
     assert not params.stop_event.is_set() and params.pending_jobs_ref == [0]
     assert params.local_run_ref == [None]

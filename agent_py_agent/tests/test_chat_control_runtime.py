@@ -33,11 +33,15 @@ from agent_py_agent.cli.chat_parts.slash_command_types import SlashCommandContex
 from agent_py_agent.cli.chat_parts.slash_commands import handle_common_slash_command
 
 
-@pytest.mark.parametrize("raw", [
-    "/plugins", "/plugins enable demo", "/plugins@", "/plugins@Demo",
-    '/plugins@demo run "中文 a" -- -x | literal',
+@pytest.mark.parametrize(("raw", "message"), [
+    ("/plugins", "插件业务入口"), ("/plugins enable demo", "本次没有执行操作"),
+    ("/plugins@", "插件 ID"), ("/plugins@Demo", "当前目录没有"),
+    ('/plugins@demo run "中文 a" -- -x | literal', "当前目录没有"),
+    ('/plugins install "未闭合', "引号尚未闭合"),
+    ("/plugins install", "缺少必填参数 source"),
+    ("/plugins list --bad", "未声明的选项"),
 ])
-def test_plugin_command_is_consumed_without_calling_control_or_agent(raw) -> None:
+def test_plugin_command_is_consumed_without_calling_control_or_agent(raw, message) -> None:
     output: list[str] = []
     executor = MagicMock(side_effect=AssertionError("插件命令不能进入旧控制器"))
     agent = MagicMock()
@@ -45,7 +49,7 @@ def test_plugin_command_is_consumed_without_calling_control_or_agent(raw) -> Non
 
     assert handle_common_slash_command(raw, ctx=ctx)
 
-    assert output == ["插件命令尚未开放；当前版本还不能安装、启用或调用插件。"]
+    assert len(output) == 1 and message in output[0]
     executor.assert_not_called()
     assert agent.mock_calls == []
     assert ctx.runtime_inject == [] and ctx.prompt_files == []

@@ -111,6 +111,16 @@ def test_control_errors_preserve_uncertainty_without_automatic_replay():
     assert unknown.recommended_action == RecoveryAction.CHANGE_STRATEGY.value
 
 
+def test_plugin_argument_and_availability_errors_never_automatically_retry():
+    from agent_py_agent.agent.contracts.error_taxonomy import error_contract
+
+    for code in ("INVALID_COMMAND_ARGUMENTS", "UNKNOWN_PLUGIN", "PLUGIN_COMMAND_UNAVAILABLE"):
+        contract = error_contract(code)
+        assert contract.code == code and contract.category == "contract"
+        assert contract.retryable is False
+        assert contract.recommended_action == RecoveryAction.CHANGE_STRATEGY.value
+
+
 def test_declared_recovery_action_overrides_derivation():
     """finding 显式声明的 recommended_action（当前协议枚举值）优先于注册表推导。"""
     envelope = recovery_envelope_from_gate_payload(

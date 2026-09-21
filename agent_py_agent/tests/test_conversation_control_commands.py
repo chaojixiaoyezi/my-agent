@@ -91,7 +91,7 @@ def test_reserved_plugin_namespace_never_becomes_chat_or_stop(raw: str) -> None:
     command = parse_conversation_control(raw, reject_unknown_slash=True)
     assert command is not None
     assert command.kind == "unsupported" and not command.valid
-    assert "尚未开放" in command.usage
+    assert "插件 ID" in command.usage or "当前目录没有这个插件" in command.usage
     assert parse_conversation_task_command(raw) is None
 
 

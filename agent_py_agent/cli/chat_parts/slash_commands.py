@@ -17,6 +17,7 @@ from ...agent.conversation.control_commands import (
     parse_conversation_control,
     parse_conversation_task_command,
 )
+from ...agent.plugin_commands import plugin_command_response
 from .slash_command_types import SlashCommandContext
 
 
@@ -48,6 +49,7 @@ def handle_common_slash_command(
         _handle_help_command,
         _handle_sessions_command,
         _handle_permissions_command,
+        _handle_plugin_command,
         _handle_control_command,
         _handle_remember_command,
         _handle_memory_command,
@@ -60,6 +62,17 @@ def handle_common_slash_command(
         if result is not None:
             return result
     return False
+
+
+# LLM: 这里只消费公共的静态帮助或拒绝回执，不调用会话控制器，也不把参数写入普通聊天。
+# 函数用途: 在前台、后台和空闲 TUI 中一致处理插件命令，实际装卸仍未开放。
+def _handle_plugin_command(user: str, ctx: SlashCommandContext, include_plain_help: bool) -> bool | None:
+    del include_plain_help
+    result = plugin_command_response(user)
+    if result is None:
+        return None
+    ctx.print_line(str(result["message"]))
+    return True
 
 
 # LLM: plain 命令也只消费封闭枚举；Gateway 与本地共用权限配置入口，不进模型任务队列。

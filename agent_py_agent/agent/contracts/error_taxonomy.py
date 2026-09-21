@@ -304,6 +304,21 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
             "不要原样重试、转成模型消息或默认执行停止。"
         ),
     ),
+    "INVALID_COMMAND_ARGUMENTS": ErrorContract(
+        code="INVALID_COMMAND_ARGUMENTS", category="contract", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="按命令声明修正动作、选项、引号或缺失参数；不要转成聊天、Shell 或原样重试。",
+    ),
+    "UNKNOWN_PLUGIN": ErrorContract(
+        code="UNKNOWN_PLUGIN", category="contract", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="核对宿主可见的插件 ID；不自动安装、启用或猜测替代插件。",
+    ),
+    "PLUGIN_COMMAND_UNAVAILABLE": ErrorContract(
+        code="PLUGIN_COMMAND_UNAVAILABLE", category="contract", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="当前动作尚未开放；静态帮助不代表安装或执行成功，不通过模型或 Shell 绕过。",
+    ),
     "ACTIVE_TURN_OUTCOME_UNCERTAIN": ErrorContract(
         code="ACTIVE_TURN_OUTCOME_UNCERTAIN",
         category="state",

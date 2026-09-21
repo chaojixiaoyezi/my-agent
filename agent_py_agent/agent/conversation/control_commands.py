@@ -14,6 +14,7 @@ from ..command_catalog import (
     system_slash_command_name,
     unavailable_command_message,
 )
+from ..plugin_commands import plugin_command_response
 from .authority import (
     CONVERSATION_AUDIT_PREPARE_ATTR,
     CONVERSATION_CANCELLATION_SCOPE_ATTR,
@@ -154,7 +155,7 @@ def parse_conversation_control(
     return command if isinstance(command, ConversationControlCommand) else None
 
 
-# LLM: 名称和捕获正文读取公共声明；原控制类型与 Goal/Audit 参数解释不变，未知插件只返回无效结果。
+# LLM: 名称和正文读取公共声明；插件实际入口另行消费其只读回执，此控制解析器仍拒绝插件，不能执行旧 stop 分支。
 # 函数用途: 区分即时控制与模型任务，保留暂停目标、中断本轮和停止资源三种语义。
 def parse_conversation_command(
     text: object,
@@ -227,11 +228,12 @@ def parse_conversation_command(
             usage="用法：/effort [low|medium|high|max|auto]",
         )
     if reject_unknown_slash and (name := system_slash_command_name(raw)):
+        plugin_result = plugin_command_response(raw)
         return ConversationControlCommand(
             "unsupported",
             operation=name,
             valid=False,
-            usage=unavailable_command_message(name),
+            usage=str(plugin_result["message"]) if plugin_result else unavailable_command_message(name),
         )
     return None
 

@@ -80,6 +80,10 @@ agent_py_agent/
 |-- skills/builtin/<category>/<name>/   # 内置知识型 skill 树：目录即分类（research/documents/…），递归扫描，类目索引常驻 prompt，skill_search 工具按需检索（千级地基）
 |-- agent/
 |   |-- command_catalog.py             # 核心命令声明、别名、会话词法、保留命名空间与帮助/补全事实
+|   |-- command_arguments.py           # 参数不可变声明、类型校验与保留原文范围的公共词法
+|   |-- command_binding.py             # 同源参数绑定、缺值位置、帮助与选项分界
+|   |-- plugin_commands.py             # 插件命名空间、宿主描述解析与无副作用的静态回执
+|   |-- plugin_completion.py           # 用公共词法和绑定事实生成只编辑输入的候选
 |   |-- core.py                         # SimpleAgent 组合入口
 |   |-- turn_end.py                     # 主/子代理共用的结束原因及技术续跑判据
 |   |-- model_guidance.py               # 完整 Prompt 与有副作用工具共用的验证/授权软提示唯一正文
@@ -486,6 +490,9 @@ docs/
 - `agent_py_agent/agent/tooling/process_session_cleanup.py`：只清理原 Store 冻结的 host/child 出生实例，不按任务重扫；保留未确认及已提交待恢复回执。
 - `agent_py_agent/agent/tooling/process_session_records.py`：纯数据校验与单调合并；`process_session_commit.py` 只安装固定记录，`process_session_lock.py` 只负责互斥。v1 不隐式升级或获得任务停止授权。
 - `agent_py_agent/agent/command_catalog.py`：无 UI/执行依赖的公共命令声明；原控制参数仍归会话模块，插件后缀识别不等于身份校验或可执行授权。
+- `agent_py_agent/agent/command_arguments.py` 与 `command_binding.py`：参数定义、字面词法及值绑定的权威实现；部分输入也使用同一协议，帮助不从展示文字反推规则。
+- `agent_py_agent/agent/plugin_commands.py`：接收宿主提供的只读动作描述；当前实际入口仅有管理帮助和明确拒绝，没有安装表、插件加载或第二执行器。
+- `agent_py_agent/agent/plugin_completion.py`：仅建议能够绑定到当前参数的值；停用插件只给静态帮助，文件枚举由宿主按显式路径声明提供。
 
 - `agent_py_agent/cli/scenario.py`：诊断场景注册与参数目录；`scenario_cases/runner_retry_case.py` 和 `runner_retry_backend.py` 只负责保留的离线重试场景，旧结果块修复场景已删除。
 - `agent_py_agent/agent/verification/runtime.py`：主子代理共用的被动验证入口；它消费工具执行事实，不裁决任意报告的语义正确性。

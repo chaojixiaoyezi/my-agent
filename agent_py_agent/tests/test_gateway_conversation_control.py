@@ -3903,12 +3903,19 @@ def test_http_ask_routes_stop_to_live_window_interrupt(tmp_path) -> None:
 
 
 @pytest.mark.parametrize("endpoint", ["ask", "control"])
-@pytest.mark.parametrize("command", [
-    "/not-a-command anything", "/plugins", "/plugins@", "/PLUGINS@Demo run",
-    '/plugins@demo run --path "C:\\new folder\\中文.txt" -- -x | literal',
+@pytest.mark.parametrize(("command", "kind", "ok", "reason"), [
+    ("/not-a-command anything", "unsupported", False, None),
+    ("/plugins", "plugin_command", True, None),
+    ("/plugins help install", "plugin_command", True, None),
+    ("/plugins@", "plugin_command", False, "invalid_plugin_id"),
+    ("/PLUGINS@Demo run", "plugin_command", False, "unknown_plugin"),
+    ('/plugins@demo run --path "C:\\new folder\\中文.txt" -- -x | literal', "plugin_command", False, "unknown_plugin"),
+    ('/plugins install "中文 a.whl"', "plugin_command", False, "not_implemented"),
+    ("/plugins install", "plugin_command", False, "missing_argument"),
+    ('/plugins install "未闭合', "plugin_command", False, "unclosed_quote"),
 ])
-def test_http_commands_reject_unknown_slash_without_model_guidance_or_stop(
-    tmp_path, monkeypatch, endpoint, command,
+def test_http_plugin_help_and_errors_do_not_call_model_guidance_or_stop(
+    tmp_path, monkeypatch, endpoint, command, kind, ok, reason,
 ) -> None:
     from agent_py_agent.agent.gateway_parts import http_handlers
 
@@ -3957,8 +3964,9 @@ def test_http_commands_reject_unknown_slash_without_model_guidance_or_stop(
 
     if endpoint == "ask":
         assert payload["status"] == "control"
-    assert payload["kind"] == "unsupported"
-    assert payload["ok"] is False
+    assert payload["kind"] == kind
+    assert payload["ok"] is ok
+    assert payload.get("reason") == reason
     assert agent.conversation_store.guidance.pending("request", "req-1") == guidance_before
     assert list(paths.inbox.glob("*.json")) == []
     assert request_path.read_bytes() == before
