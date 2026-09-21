@@ -1,3 +1,5 @@
+# LLM: 原操作协调器持有副作用领取与结算；终态只读重放复用原结果投影，不能重新取得执行权。
+# 模块用途: 执行、保存和重放工具操作，保留未知副作用与原始诊断。
 from __future__ import annotations
 
 """Authoritative execution lifecycle for side-effecting tools.
@@ -13,6 +15,7 @@ import logging
 import threading
 import time
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
@@ -31,6 +34,7 @@ from ..local_storage import (
     ToolOperationReopenRequest,
     new_tool_operation_holder,
 )
+from ..local_storage.tool_operations import TOOL_OPERATION_TERMINAL_STATUSES
 from ..runtime_db.managed_operation_store import (
     AuthorityContextMissing,
     RuntimeConflictError,
@@ -222,13 +226,15 @@ def _claim_operation(
     )
 
 
+# LLM: 重放与宿主终态查询共用纯投影；只有此已领取分支发送原结算通知，不能重新执行 handler。
+# 函数用途: 按原操作领取结果选择执行、只读重放或未知核对。
 def _resolve_claim(
     request: ToolOperationExecutionRequest,
     attempt: _ToolOperationClaimAttempt,
 ) -> ToolOperationClaim | ToolHandlerOutcome:
     claim = attempt.claim
     if claim.action == "replay":
-        result = _result_from_record(claim.record)
+        result = replay_completed_tool_operation(claim.record)
         if result.error_code == "TOOL_OPERATION_OUTCOME_UNKNOWN":
             _attach_operation_facts(
                 result,
@@ -242,10 +248,6 @@ def _resolve_claim(
                 failure_stage=ToolFailureStage.EFFECT_RECONCILIATION,
                 handler_executed=False,
             )
-        delivery = result.result_envelope.get("delivery_evidence")
-        if isinstance(delivery, dict):
-            delivery["deduplicated"] = True
-        original_execution = _tool_execution_facts(result)
         _attach_operation_facts(
             result,
             request,
@@ -253,15 +255,6 @@ def _resolve_claim(
             action="replay",
             replayed=True,
         )
-        result.result_envelope["tool_operation"][
-            "original_tool_execution"
-        ] = original_execution
-        apply_tool_execution_facts(result, handler_executed=False)
-        if not result.ok:
-            apply_tool_execution_facts(
-                result,
-                failure_stage=ToolFailureStage.EFFECT_RECONCILIATION,
-            )
         _notify_operation_settled(
             request,
             status=claim.record.status,
@@ -998,6 +991,8 @@ def _operation_result_ref(result: ToolHandlerOutcome) -> str:
     )
 
 
+# LLM: 此处还用于 UNKNOWN 诊断旁证；终态授权重放另须完整性检查，嵌套展示字段必须独立复制。
+# 函数用途: 将保存的工具结果还原为展示对象，保留诊断但不改变原记录。
 def _result_from_record(record: ToolOperationRecord) -> ToolHandlerOutcome:
     payload = record.result if isinstance(record.result, dict) else {}
     if payload.get("schema_version") != _RESULT_SCHEMA:
@@ -1013,7 +1008,7 @@ def _result_from_record(record: ToolOperationRecord) -> ToolHandlerOutcome:
             output=str(payload.get("output") or ""),
             call_id=str(payload.get("call_id") or ""),
             result_envelope=(
-                dict(payload.get("result_envelope") or {})
+                deepcopy(payload.get("result_envelope") or {})
                 if isinstance(payload.get("result_envelope"), dict)
                 else {}
             ),
@@ -1043,6 +1038,69 @@ def _result_from_record(record: ToolOperationRecord) -> ToolHandlerOutcome:
             payload.get("recovery_hint") or result.recovery_hint
         )
     return result
+
+
+# LLM: 调用方先用原 Store 核对 owner/task/run/attempt/输入；只读终态不 claim、reopen 或调用 handler。
+# 函数用途: 给已结束的宿主请求返回原结果；未决或损坏结果保留未知，不制造一次新的工具执行。
+def replay_completed_tool_operation(record: ToolOperationRecord) -> ToolHandlerOutcome:
+    if record.status not in TOOL_OPERATION_TERMINAL_STATUSES:
+        return _operation_error(
+            record.tool, "TOOL_OPERATION_OUTCOME_UNKNOWN", "原操作尚无可重放的确定结果，请核对原操作状态。",
+        )
+    if not _complete_terminal_result(record):
+        return _operation_error(
+            record.tool, "TOOL_OPERATION_OUTCOME_UNKNOWN", "原操作结果不完整或与终态不符，请核对原操作记录。",
+        )
+    result = _result_from_record(record)
+    if result.error_code == "TOOL_OPERATION_OUTCOME_UNKNOWN":
+        return _operation_error(
+            record.tool, "TOOL_OPERATION_OUTCOME_UNKNOWN", "原操作没有可核对的确定结果，请检查原操作记录。",
+        )
+    original = _tool_execution_facts(result)
+    delivery = result.result_envelope.get("delivery_evidence")
+    if isinstance(delivery, dict):
+        delivery["deduplicated"] = True
+    prior = result.result_envelope.get("tool_operation")
+    result.result_envelope["tool_operation"] = {
+        **(prior if isinstance(prior, dict) else {}),
+        "schema_version": "tool_operation.v1", "action": "replay",
+        "operation_id": record.operation_id, "status": record.status, "replayed": True,
+        "result_ref": f"tool-operation://{record.run_id}/{record.operation_id}",
+        "idempotency_scope": record.idempotency_scope, "original_tool_execution": original,
+    }
+    apply_tool_execution_facts(result, handler_executed=False,
+                               failure_stage="" if result.ok else ToolFailureStage.EFFECT_RECONCILIATION)
+    return result
+
+
+# LLM: 正式结果必须保留核心字段与严格类型；只检查持久协议，不能从工具正文补齐丢失事实。
+# 函数用途: 拒绝截断、错误类型和相互矛盾的终态结果，同时接纳原未启动取消回执。
+def _complete_terminal_result(record: ToolOperationRecord) -> bool:
+    payload = record.result
+    if not isinstance(payload, dict) or payload.get("schema_version") != _RESULT_SCHEMA:
+        return False
+    required = {"tool": str, "ok": bool, "output": str, "handler_executed": bool}
+    if any(type(payload.get(key)) is not kind for key, kind in required.items()):
+        return False
+    if payload["tool"] != record.tool or payload["ok"] != (record.status == TOOL_OPERATION_SUCCEEDED):
+        return False
+    strings = ("result_ref", "call_id", "error_code", "reported_error_code", "error_category",
+               "recommended_action", "recovery_hint", "effect_outcome", "effect_source_ref", "failure_stage")
+    if any(key in payload and not isinstance(payload[key], str) for key in strings):
+        return False
+    if "result_envelope" in payload and not isinstance(payload["result_envelope"], dict):
+        return False
+    if "retryable" in payload and type(payload["retryable"]) is not bool:
+        return False
+    if "duration_ms" in payload and type(payload["duration_ms"]) not in (int, float):
+        return False
+    if payload.get("effect_outcome", "") not in {"", "not_started", "failed"}:
+        return False
+    if record.status == "cancelled" and (
+        payload.get("effect_outcome") != "not_started" or payload["handler_executed"]
+    ):
+        return False
+    return True
 
 
 def _operation_error(
@@ -1095,4 +1153,5 @@ def _attach_operation_facts(
 __all__ = [
     "ToolOperationExecutionRequest",
     "execute_tool_operation",
+    "replay_completed_tool_operation",
 ]

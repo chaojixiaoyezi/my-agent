@@ -45,6 +45,12 @@ from ..scheduler.repository import (
     _process_state as _proc_state,
 )
 from .delivery_operations import RuntimeDeliveryMixin
+from .host_commands import (
+    HostCommandBinding,
+    HostCommandRequest,
+    insert_host_command,
+    read_host_command,
+)
 from .operations import (
     _ATTEMPT_TERMINAL_STATUSES,
     AGENT_RUN_TERMINAL_STATUSES,
@@ -67,6 +73,7 @@ from .operations import (
     exec_lock_scope,
     holder_is_alive,
 )
+from .run_creation import RunCreation, create_run_chain
 from .schema import RuntimeSchemaMixin, runtime_db_path
 
 #: D.6/D.9：binding 生命周期状态。v1 不扩容（D.8），迁移时旧 ACTIVE → SUPERSEDED。
@@ -409,6 +416,7 @@ class RuntimeRepository(
     # -------------------------------------------- A.4/A.5/A.6/A.9 主链写入
     # LLM: 根运行创建新的 TaskRun，child 复用父 TaskRun；Task 本身只承载
     # owner/thread/goal 等耐久身份，不写本次执行状态。
+    # 与宿主命令共用 run_creation 的同连接写入；本入口仍负责校验与事务，联测主代理及子代理创建。
     # 函数用途: 在一个事务里登记任务身份、运行、代理、首次尝试和委托关系。
     def record_run_creation(
         self,
@@ -447,126 +455,36 @@ class RuntimeRepository(
         if normalized_attempt_status not in {ATTEMPT_STATUS_PENDING, "running"}:
             raise ValueError(f"不支持的初始 attempt 状态: {attempt_status!r}")
         with self.transaction() as conn:
-            now = time.time()
-            task_run_id = ""
-            parent_agent_run_id = ""
-            task_id = ""
-            if str(parent_run_id or "").strip():
-                # child：并入 parent 的 TaskRun（同树），共享 parent 的 Task 身份。
-                parent_row = conn.execute(
-                    "SELECT ar.agent_run_id, ar.task_run_id, tr.task_id "
-                    "FROM agent_runs ar "
-                    "JOIN task_runs tr ON tr.task_run_id = ar.task_run_id "
-                    "WHERE ar.run_id = ?",
-                    (parent_run_id,),
-                ).fetchone()
-                if parent_row is not None:
-                    parent_agent_run_id = str(parent_row["agent_run_id"])
-                    task_run_id = str(parent_row["task_run_id"])
-                    task_id = str(parent_row["task_id"] or "")
-            if not task_run_id:
-                # root（无 parent 或 parent 无权威记录）：新 TaskRun + Task 行。
-                # Task：conversation_task_id 复用既有任务身份；无则铸造框架 task_id。
-                task_id = str(conversation_task_id or "").strip() or new_id("task_id")
-                existing = conn.execute(
-                    "SELECT task_id, owner_id FROM tasks WHERE task_id = ?", (task_id,)
-                ).fetchone()
-                if existing is None:
-                    try:
-                        conn.execute(
-                            """
-                            INSERT INTO tasks(task_id, owner_id, thread_id, conversation_task_id,
-                                              title, goal, created_at, updated_at)
-                            VALUES(?, ?, ?, ?, '', ?, ?, ?)
-                            """,
-                            (task_id, owner_id, thread_id, conversation_task_id, goal, now, now),
-                        )
-                    except sqlite3.IntegrityError:
-                        # 并发同 conversation 建任务：另一事务已插入，取既有行。
-                        pass
-                task_run_id = new_id("task_run_id")
-                conn.execute(
-                    """
-                    INSERT INTO task_runs(task_run_id, task_id, status, created_at, updated_at, metadata_json)
-                    VALUES(?, ?, 'created', ?, ?, '{}')
-                    """,
-                    (task_run_id, task_id, now, now),
-                )
-            # root AgentRun（parent 为空 = 合法根身份 A.7）。
-            agent_run_id = new_id("agent_run_id")
-            delegation_id = ""
-            conn.execute(
-                """
-                INSERT INTO agent_runs(agent_run_id, task_run_id, parent_agent_run_id,
-                                       delegation_id, run_id, role, status,
-                                       current_attempt_id, current_attempt_generation,
-                                       workspace_epoch, created_at, updated_at)
-                VALUES(?, ?, ?, ?, ?, ?, 'created', '', 0, 1, ?, ?)
-                """,
-                (agent_run_id, task_run_id, parent_agent_run_id, delegation_id,
-                 run_id, role, now, now),
-            )
-            # 第一个 AgentAttempt（A.6），CAS 语义与 create_attempt 同源。
-            attempt_id = new_id("attempt_id")
-            conn.execute(
-                """
-                INSERT INTO agent_attempts(attempt_id, agent_run_id, attempt_generation,
-                                           status, started_at, metadata_json)
-                VALUES(?, ?, 1, ?, ?, ?)
-                """,
-                (
-                    attempt_id,
-                    agent_run_id,
-                    normalized_attempt_status,
-                    now,
-                    json.dumps(
+            return create_run_chain(
+                conn,
+                RunCreation(
+                    owner_id=owner_id, goal=goal, conversation_task_id=conversation_task_id,
+                    thread_id=thread_id, run_id=run_id, role=role, parent_run_id=parent_run_id,
+                    attempt_status=normalized_attempt_status,
+                    attempt_metadata=(
                         _runner_identity_metadata()
                         if normalized_attempt_status == "running"
-                        else {"lifecycle": ATTEMPT_STATUS_PENDING},
-                        ensure_ascii=False,
+                        else {"lifecycle": ATTEMPT_STATUS_PENDING}
                     ),
                 ),
+                now=time.time(),
             )
-            conn.execute(
-                """
-                UPDATE agent_runs
-                SET current_attempt_id = ?, current_attempt_generation = 1, updated_at = ?
-                WHERE agent_run_id = ? AND current_attempt_generation = 0
-                """,
-                (attempt_id, now, agent_run_id),
-            )
-            # child：immutable 委托（A.7）。
-            if parent_agent_run_id:
-                delegation_id = new_id("delegation_id")
-                conn.execute(
-                    """
-                    INSERT INTO delegations(delegation_id, parent_agent_run_id, child_agent_run_id,
-                                            child_attempt_id, granted_scope_json, created_at)
-                    VALUES(?, ?, ?, ?, '{}', ?)
-                    """,
-                    (delegation_id, parent_agent_run_id, agent_run_id, attempt_id, now),
-                )
-                conn.execute(
-                    "UPDATE agent_runs SET delegation_id = ? WHERE agent_run_id = ?",
-                    (delegation_id, agent_run_id),
-                )
-            # A.8：事件追到 attempt。
-            for event_type in ("task.created", "agent_run.created"):
-                conn.execute(
-                    """
-                    INSERT INTO runtime_events(event_id, event_type, attempt_id, agent_run_id,
-                                              task_run_id, payload_json, created_at)
-                    VALUES(?, ?, ?, ?, ?, '{}', ?)
-                    """,
-                    (uuid.uuid4().hex, event_type, attempt_id, agent_run_id, task_run_id, now),
-                )
-        return {
-            "task_id": task_id,
-            "task_run_id": task_run_id,
-            "agent_run_id": agent_run_id,
-            "attempt_id": attempt_id,
-            "delegation_id": delegation_id,
-        }
+
+    # LLM: 请求身份已经由宿主鉴权；查找、创建链和唯一事件必须在同一写事务，重复请求不换代。
+    # 函数用途: 为显式管理命令登记或复用原 pending 运行，不启动模型或普通任务调度。
+    def register_host_command(self, request: HostCommandRequest) -> HostCommandBinding:
+        with self.transaction() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            existing = read_host_command(conn, request)
+            if existing is not None:
+                return existing
+            return insert_host_command(conn, request, now=time.time())
+
+    # LLM: 只读原请求绑定，查询不能补建链、重开 attempt 或消除 UNKNOWN；联测请求冲突和损坏记录。
+    # 函数用途: 供宿主命令查询或重送前取得原始执行身份。
+    def find_host_command(self, request: HostCommandRequest) -> HostCommandBinding | None:
+        with self._runtime_connection() as conn:
+            return read_host_command(conn, request)
 
     # ------------------------------------------------------------------ Task
     # LLM: Task 是可跨多次执行复用的长期身份，运行终态只能写到 TaskRun。

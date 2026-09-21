@@ -12,6 +12,7 @@
     |-- MAINTAINABILITY_AND_JEV_REVIEW.md # 可维护性评估、渐进重构建议及 Computer Use/Jev 能力边界
     |-- PLUGIN_LIFECYCLE.md              # 可装卸插件、动态命令、版本切换与故障回收的待实施方案
     |-- PLUGIN_PACKAGES.md               # 本地包静态校验与待接线的安装事实、隔离和撤销边界
+    |-- HOST_COMMAND_EXECUTION.md        # 显式命令复用原运行链的请求身份、重送和结果回读合同
     |-- PLUGIN_SAMPLE_ACCEPTANCE.md      # 10 个自有简易插件的来源、功能范围及真实 TUI 验收计划
     |-- TUI_DESIGN.md                    # 终端布局、事件、输入与生命周期规范
     |-- SUBAGENT_PARALLEL_EXECUTION.md   # 父子独立工作、逐项交付与慢任务诊断边界
@@ -182,6 +183,8 @@ agent_py_agent/
 |   |-- memory_archive/                # compact、audit、tool output artifact、task workspace refs
 |   |-- local_storage/                 # SQLite/FTS/文件事实源；ledger_redaction.py 精确擦除已删事实但保留幂等身份
 |   |-- runtime_db/                     # SQLite 运行事实源：Task 身份、TaskRun/AgentRun/Attempt 生命周期、wake 与投递账本
+|   |   |-- run_creation.py             # 普通代理及宿主命令共用的同连接运行树创建
+|   |   |-- host_commands.py            # 显式宿主请求与原始 pending 运行的唯一绑定及严格回读
 |   |   |-- run_cancellation.py         # 精确 task/run/attempt 的共用取消权限合同，UNKNOWN 保留锁与恢复障碍
 |   |   `-- executor_liveness.py        # exact attempt 执行区间和 OS 退出事实；慢模型不按时长判死
 |   |-- gateway_parts/                 # gateway request/worker/lease/http/renderer
@@ -399,6 +402,8 @@ agent_py_agent/
 |   |-- test_background_claim_execution.py # 后台领取后竞态、异常收尾顺序及运行中真实续租
 |   |-- test_background_recovery.py     # 恢复阻断每次重读、不可读判据与日志去重边界
 |   |-- test_runtime_db_stable_mutation_generation.py # 正常换代、活动接管和升级调和保留已确认资源
+|   |-- test_host_command_registration.py # 并发请求唯一登记、输入冲突、事务回滚与原链损坏检查
+|   |-- test_host_command_operation_replay.py # 原执行器终态回读、身份隔离及线程退出 UNKNOWN 保留
 |   |-- test_gateway_admission_wait.py  # 合法排队等准入的结构化等待信号：只写等待事实、有节流与总预算、客户端持续收到且停写/取消/终态收口
 |   |-- test_scheduler_scan_costs.py    # waiting 投影缓存三重校验、runtime_snapshot 锁外解析与旧实现逐字一致、owner 事实缓存失效回归
 |   |-- fixtures/tui/                   # 固定尺寸/时间线的非敏感 TUI PTY 动作 fixture
@@ -498,6 +503,9 @@ docs/
 ### 关键文件说明
 
 - `agent_py_agent/agent/runtime_db/run_cancellation.py`：在原 RuntimeDB 上核对 task/run/agent run/attempt 四个身份并关闭执行权；原 UNKNOWN 不恢复、不释放锁，旧控制不能追随新的执行轮。
+- `agent_py_agent/agent/runtime_db/run_creation.py`：在调用方原事务内创建 Task→TaskRun→AgentRun→首次 Attempt 及委托/事件，普通调用与显式宿主命令共用，不能另开事务。
+- `agent_py_agent/agent/runtime_db/host_commands.py`：原事件索引与 TaskRun 冻结请求共同绑定唯一运行；本身不授予权限、不启动模型或任务调度。
+- `docs/design/HOST_COMMAND_EXECUTION.md`：显式宿主请求的登记、终态只读重放、UNKNOWN 和现有执行器接线边界。
 - `agent_py_agent/agent/conversation/task_resources.py`：主链身份适配与整任务固定清单；热请求带正式绑定，无热请求才读取唯一主链，组合原子树后锁外清理，不重新选择资源。
 - `agent_py_agent/agent/subagents/cancellation.py`：原创建事务内选择后代、关闭原权限并冻结资源；模型和用户控制共用，业务终态与资源退出分别保留。
 - `agent_py_agent/agent/subagents/cancellation_hosts.py`：精确 attempt 中断及冻结宿主身份的只读观察；PID/launch 不构成整棵进程树的取消许可。

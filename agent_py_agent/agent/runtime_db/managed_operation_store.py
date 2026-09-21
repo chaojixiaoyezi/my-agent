@@ -1,3 +1,5 @@
+# LLM: 管理操作仍沿原运行、尝试与工具表；终态回读核对持久身份，不以查询参数冒充账中归属。
+# 模块用途: 将工具执行、资源锁和结果重放接到同一份 owner RuntimeDB。
 """B 切片：runtime.db 权威侧 OperationStore adapter（duck-typing LocalStore 契约）。
 
 LocalStore（local_storage/tool_operations.py）是每 owner 一份的本地副作用账本；
@@ -102,6 +104,8 @@ class ToolOperationAuthorityRequest:
     attempt_id: str = ""
 
 
+# LLM: 所有副作用依赖原 attempt 与资源 fence；回读只核对事实，不授予终态尝试新的执行权。
+# 类用途: 为原工具执行器提供持久领取、提交、核对及精确结果读取。
 class ManagedOperationStore:
     """runtime.db 权威侧的 OperationStore（claim/finish/reopen 三件套）。"""
 
@@ -614,28 +618,47 @@ class ManagedOperationStore:
         )
 
     # --------------------------------------------- read 面（对账/观测用）
+    # LLM: 回读按原 Task→TaskRun→AgentRun→Attempt 联表校验，不能用调用参数覆盖持久身份。
+    # 函数用途: 读取原操作；宿主终态重放可同时限定任务、尝试、工具和参数，身份冲突不冒充未执行。
     def get_tool_operation(
         self,
         *,
         owner_id: str,
         run_id: str,
         operation_id: str,
+        task_id: str = "",
+        attempt_id: str = "",
+        tool_name: str = "",
+        args_hash: str = "",
     ) -> ToolOperationRecord | None:
         if self._repo is None:
             return None
         with self._repo._runtime_connection() as conn:
             row = conn.execute(
-                "SELECT * FROM tool_operations WHERE operation_id = ?",
+                "SELECT op.*, ar.run_id AS _run_id, t.owner_id AS _owner_id, "
+                "t.task_id AS _task_id, at.attempt_id AS _attempt_id "
+                "FROM tool_operations op "
+                "LEFT JOIN agent_runs ar ON ar.agent_run_id = op.agent_run_id "
+                "LEFT JOIN task_runs tr ON tr.task_run_id = ar.task_run_id "
+                "LEFT JOIN tasks t ON t.task_id = tr.task_id "
+                "LEFT JOIN agent_attempts at ON at.attempt_id = op.attempt_id "
+                "AND at.agent_run_id = op.agent_run_id AND at.attempt_generation = op.attempt_generation "
+                "WHERE op.operation_id = ?",
                 (operation_id,),
             ).fetchone()
         if row is None:
             return None
-        return _operation_record(
-            self._repo,
-            operation_id,
-            owner_id=owner_id,
-            run_id=run_id,
-            task_id="",
+        if (
+            not owner_id or not run_id or not row["_task_id"] or not row["_attempt_id"]
+            or row["_owner_id"] != owner_id or row["_run_id"] != run_id
+            or (task_id and row["_task_id"] != task_id)
+            or (attempt_id and row["_attempt_id"] != attempt_id)
+            or (tool_name and row["operation_type"] != tool_name)
+            or (args_hash and _outcome_payload(row).get("args_hash") != args_hash)
+        ):
+            raise ToolOperationStateError("原工具操作的归属或输入与查询不符")
+        return _record_from_row(
+            row, owner_id=row["_owner_id"], run_id=row["_run_id"], task_id=row["_task_id"],
         )
 
     def list_tool_operations(
