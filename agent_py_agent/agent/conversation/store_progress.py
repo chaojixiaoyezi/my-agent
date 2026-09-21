@@ -30,12 +30,9 @@ from .store_layout import ConversationStorage
 # 又不至于把守望任务拖到没响应;有进展即归零复原,永不 disable。
 _NO_PROGRESS_MAX_BACKOFF_MULTIPLIER = 8
 
-# 失败续跑记账(问题6「失败自动续跑记账不正确」)机制层根因:失败 run 的异常在
-# _consume_with_supply_guard 被吸收后 policy.next_due_at 不动 → 下个 tick 又 due →
-# 失败无限重试。修复=失败事实落账:next_due_at 推到 now+backoff(指数退避,抖动由
-# 调度层按 policy_id 确定性派生),连续失败达 retire_after 次 → enabled=False 退休
-# (等用户,绝不停机式无限重试)。成功路径由调度层 mark_progress_reported(failure_count=0)
-# 清零复原,退休 policy 被 disable 后不再出现在 due 扫描,账目保留在 metadata 供复盘。
+# 这里只持久化调度层判定后的普通执行失败；供应/配置错误不计入策略退休。
+# 调度层传入按 policy_id 确定的退避，连续失败达阈值后停用；成功报告清零。
+# 退休策略不再参与 due 扫描，原失败事实仍保留在 metadata，供应冷却另由进程内组件管理。
 _POLICY_FAILURE_RETIRE_AFTER = 3
 
 

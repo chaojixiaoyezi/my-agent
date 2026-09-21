@@ -1,7 +1,7 @@
 # LLM: 后台稳定 task 身份与逐轮请求分离；唤醒共用 coordinator 软指导，不能生成永久禁写或额外授权。
 # 上下文和历史准备通过独立模块调用，修改执行顺序时同步后台历史、取消、Compact 和投递回归。
-# 进度策略计算只接收当前事实，其读取时机、租约和持久落账仍由本模块负责。
-# 模块用途: 编排后台唤醒和工作片；执行、交付、策略、上下文和历史种子各有独立实现。
+# 进度计算和供应退避各有独立实现；本模块保留配置组装、实例寿命、读取时机、租约和持久落账。
+# 模块用途: 编排后台唤醒和工作片，并组装执行、交付、策略、退避、上下文和历史种子。
 from __future__ import annotations
 
 import json
@@ -64,6 +64,7 @@ from .background_execution import (
     invoke_background_turn,
 )
 from .background_progress_policy import next_no_progress_streak, policy_failure_backoff
+from .background_supply_backoff import ProviderSupplyBackoff, consume_with_supply_guard
 from .background_tool_policy import (
     SCHEDULED_WAKE_REASONS,
     BackgroundToolPolicyRequest,
@@ -2114,7 +2115,6 @@ def ledger_open_progress_item_count(agent: object | None, task_id: str) -> int:
 # Conversation runtime scheduler
 import logging
 import threading
-from typing import TYPE_CHECKING
 
 from ..settings.defaults import default_config_int
 from .models import ProgressPolicy
@@ -2163,103 +2163,12 @@ _LEDGER_GC_INTERVAL_SECONDS = 6 * 3600
 # 连续失败次数由原 Store 持久化；普通失败达阈值后停用策略，供应和配置错误另行退避。
 _POLICY_FAILURE_RETIRE_AFTER = 3
 
-if TYPE_CHECKING:
-    pass
 
-
-# 供应断供的 tick 层长退避(治真机"429 限流断供把后台消费永久冻死"):短期限流在
-# turn 内 auto_resume 短链用尽后会抛回消费循环；套餐额度耗尽则应立刻进入本长退避，
-# 等显式模型/凭据切换或额度重置，不能在 turn 内无效重试。旧行为
-# 两宗罪:①异常中断整个 tick——一个撞限流的会话把同 tick 的其他唤醒/观察/判读全部队头阻塞;
-# ②下一 poll(秒级)立刻重打已限流的模型,额度按分钟/小时刷新,秒级猛打只会加重限流。
-# 这里按 thread 记内存态指数退避:第 n 次失败等 base*2^(n-1) 秒(封顶 max),到点自动重试;
-# 成功即清零。信号/policy 不被标记消费,退避只是"本轮跳过",供应恢复后自动续跑,无需人肉。
-# 进程重启态丢失=重启后立刻重试一次,无害。判据只认 typed ProviderTransientError,不做文本匹配。
-class _ProviderSupplyBackoff:
-    def __init__(self, *, base_seconds: float = 30.0, max_seconds: float = 900.0):
-        self._base = max(1.0, float(base_seconds))
-        self._cap = max(self._base, float(max_seconds))
-        self._streaks: dict[str, int] = {}
-        self._next_attempt_at: dict[str, float] = {}
-
-    def should_attempt(self, thread_id: str, now: float) -> bool:
-        return now >= self._next_attempt_at.get(str(thread_id), 0.0)
-
-    def record_failure(self, thread_id: str, now: float) -> dict[str, object]:
-        key = str(thread_id)
-        streak = self._streaks.get(key, 0) + 1
-        self._streaks[key] = streak
-        delay = min(self._base * (2 ** (streak - 1)), self._cap)
-        self._next_attempt_at[key] = now + delay
-        return {
-            "thread_id": key,
-            "consecutive_failures": streak,
-            "retry_delay_seconds": delay,
-            "next_attempt_at": now + delay,
-        }
-
-    def record_success(self, thread_id: str) -> int:
-        key = str(thread_id)
-        self._next_attempt_at.pop(key, None)
-        return self._streaks.pop(key, 0)
-
-
-def _consume_with_supply_guard(backoff: _ProviderSupplyBackoff, thread_id: str, now: float, run):
-    """带供应退避护栏跑一个后台消费 turn(唤醒/观察/盯守判读共用)。
-    冷却中 → 不消费返回 None(信号/policy 留 pending,到点自动重试);
-    供应错 → 吸收进退避返回 None,放行其余会话;非供应异常原样上抛;
-    成功拿到 report → 清退避计数(供应恢复)。"""
-    if not backoff.should_attempt(thread_id, now):
-        return None
-    started = time.monotonic()
-    try:
-        report = run()
-    except Exception as exc:
-        # 退避锚点=失败真实时刻(tick 逻辑时刻 + turn 实际耗时)。turn 内 auto_resume 短链
-        # 本身要跑几分钟,若锚在 tick 起点,next_attempt_at 在 turn 结束时早已过期 → 退避
-        # 形同虚设、下一 poll 立刻猛打(隔离演练请求账实锤)。monotonic 差不受注入时钟影响。
-        failed_at = now + (time.monotonic() - started)
-        if not _absorb_provider_supply_failure(backoff, thread_id, failed_at, exc):
-            raise
-        return None
-    if report is not None:
-        _note_supply_recovery(backoff, thread_id)
-    return report
-
-
-def _absorb_provider_supply_failure(
-    backoff: _ProviderSupplyBackoff, thread_id: str, now: float, exc: BaseException
-) -> bool:
-    """临时供应错(限流/断供/超载)专属吸收:记长退避+打点,放行本 tick 其余会话的消费
-    (治队头阻塞);其他异常一律不吸、照旧上抛走 [gateway-loop-error] 兜底(真 bug 不掩盖)。
-    套餐额度耗尽有独立的单次通知+人工恢复路线，绝不能进入本自动重试环。
-    判据只认 typed provider supply error；不匹配错误文本。"""
-    if not is_provider_transient_error(exc):
-        return False
-    payload = backoff.record_failure(thread_id, now)
-    payload["error_type"] = exc.__class__.__name__
-    payload["error"] = compact_error_message(exc)
-    _print_supply_event("provider_supply_backoff", payload)
-    return True
-
-
-def _note_supply_recovery(backoff: _ProviderSupplyBackoff, thread_id: str) -> None:
-    failed_attempts = backoff.record_success(thread_id)
-    if failed_attempts:
-        _print_supply_event(
-            "provider_supply_resumed",
-            {"thread_id": thread_id, "failed_attempts": failed_attempts},
-        )
-
-
-def _print_supply_event(event: str, payload: dict[str, object]) -> None:
-    body = json.dumps({"event": event, **payload}, ensure_ascii=False, sort_keys=True)
-    print(f"[gateway-supply-backoff] {body}", flush=True)
-
-
-def _supply_backoff_from_agent(agent: object) -> _ProviderSupplyBackoff:
+# LLM: 只在 scheduler 构造时读取原配置并交付数值，Gateway/CLI 的实例寿命保持；联测供应冷却和就绪筛选。
+# 函数用途: 为当前调度器创建会话冷却状态，不把完整 Agent 或配置热更新逻辑带入状态组件。
+def _supply_backoff_from_agent(agent: object) -> ProviderSupplyBackoff:
     guard_policy = getattr(agent, "runtime_guard_policy", None)
-    return _ProviderSupplyBackoff(
+    return ProviderSupplyBackoff(
         base_seconds=runtime_guard_int(
             "provider_supply_backoff_base_seconds", 30, policy=guard_policy
         ),
@@ -2269,7 +2178,7 @@ def _supply_backoff_from_agent(agent: object) -> _ProviderSupplyBackoff:
     )
 
 
-# 三条后台消费车道(唤醒信号/观察批/到点 policy)。都过 _consume_with_supply_guard:
+# 三条后台消费车道(唤醒信号/观察批/到点 policy)。都过 consume_with_supply_guard:
 # 供应断供时按会话退避而不是中断整个 tick,恢复后自动续跑。
 def _is_scheduler_wake_signal(signal: WakeSignal) -> bool:
     return str(getattr(signal, "reason", "") or "").strip().lower() == "scheduled_job_due"
@@ -2359,7 +2268,7 @@ def _skip_pending_wake_signal(
         scheduler._mark_signal(signal, current, handled)
         return True
     return False
-# LLM: 批次执行与确认仍走 scheduler 的耐久 wake 合同；runtime 已提交 canonical 回复，这里不能另存正文。
+# LLM: 批次执行先经过 scheduler 共享的供应冷却，再沿原耐久 wake 确认；runtime 已提交 canonical 回复，这里不能另存正文。
 # 函数用途: 运行一批同源唤醒、登记调度结果并处理确认或退避，不创建第二条通知主链。
 def _consume_wake_signal_batch(
     scheduler: BackgroundMainAgentScheduler,
@@ -2374,7 +2283,7 @@ def _consume_wake_signal_batch(
     wake_batch = _select_wake_batch(scheduler, signal, wake_signals)
     execution_signal = _batched_wake_signal(wake_batch)
     attempted.update(member.wake_signal_id for member in wake_batch)
-    report = _consume_with_supply_guard(
+    report = consume_with_supply_guard(
         scheduler._supply_backoff,
         execution_signal.thread_id,
         current,
@@ -2858,7 +2767,7 @@ def _wake_signal_root_is_inactive(store: object, signal: WakeSignal) -> bool:
 
 
 # LLM: observation 必须先按 task 隔离再计算 runnable limit；unknown task 的
-# 事件原样保留；已提交回复由 canonical 消息流显示，调度器不重复写正文或确认其它 task。
+# 事件原样保留；共享供应冷却不改变来源消费顺序，已提交回复由 canonical 消息流显示，不重复写正文或确认其它 task。
 # 函数用途: 批量消费没有可用 wake 的观察事件并登记调度结果，不另建回复账本。
 def _consume_observation_batches(
     scheduler: BackgroundMainAgentScheduler,
@@ -2891,7 +2800,7 @@ def _consume_observation_batches(
         if observation_limit > 0:
             selected = selected[: observation_limit - admitted]
         admitted += len(selected)
-        report = _consume_with_supply_guard(
+        report = consume_with_supply_guard(
             scheduler._supply_backoff,
             thread_id,
             current,
@@ -2929,7 +2838,7 @@ def _observation_waits_for_linked_wake(
 
 
 # LLM: policy 的 unknown 权威阻塞只暂停调度，不退休、不顺延；显式恢复后
-# 原排期自然重新获得准入。回复提交留在 runtime，策略调度不复制最终正文。
+# 原排期自然重新获得准入；临时供应错误只更新 scheduler 的共享内存冷却。回复提交留在 runtime，不复制最终正文。
 # 函数用途: 消费本轮到期且拥有执行权的进度策略，收集结果供上层观察。
 def _consume_due_policies(
     scheduler: BackgroundMainAgentScheduler,
@@ -2962,7 +2871,7 @@ def _consume_due_policies(
         if recovery_block is not None:
             _record_recovery_blocked_policy(scheduler, policy, recovery_block)
             continue
-        report = _consume_with_supply_guard(
+        report = consume_with_supply_guard(
             scheduler._supply_backoff,
             policy.thread_id,
             current,
@@ -4307,12 +4216,8 @@ class _BackgroundSchedulerExecutionMixin:
             )
             if (status == "failed" and error is not None and not is_provider_transient_error(error)
                     and not is_model_configuration_unavailable(error)):
-                # 问题6:失败 run 的异常在 _consume_with_supply_guard 被吸收 → policy
-                # next_due_at 不动 → 下个 tick 又 due = 失败无限重试。这里把失败事实
-                # 落账(退避顺延/连续失败退休);非 policy 来源的失败不动账,行为不变。
-                # 供应类错误(429/限流/超载)不记失败账:它们走 _ProviderSupplyBackoff
-                # 专属退避,计 failure_count 会连 3 次 429 就把 policy 退休(错杀);
-                # 恢复后照常排期。判据只认 typed provider error,不匹配错误文本。
+                # 只有普通执行失败写 policy 的退避/退休账；供应和配置错误不能累计成三次失败退休。
+                # 临时供应错误由外层 consume_with_supply_guard 更新内存状态，持久 policy 保持待处理。
                 self._record_policy_failure(kwargs)
 
     # LLM: 只按 wake 的 policy_id 更新原 Store；供应/配置错误由调用方排除，不改变退避和退休记账顺序。

@@ -623,7 +623,7 @@ Responses 已使用该入口，纳入同组回归；保留代理前缀和完整�
 | 边界 | 当前入口和直接调用方 | 读取事实与写入责任 | 拆分时必须保留 |
 | --- | --- | --- | --- |
 | 后台会话车道 | `cli/background_main_agent.py::_run_tick`、`cli/gateway_loops.py::_build_background_scheduler` 组装 `conversation/runtime.py::BackgroundMainAgentScheduler`；五个 mixin 共享组装依赖 | `prepare_tick` 做维护与入队；`ready_thread_ids` 不消费持久来源，但会重读恢复权威并更新日志去重缓存；`tick_thread` 消费原事件 | 每线程执行归属仍由持久 claim 裁决，不能由就绪列表取得执行权，也不能把整个就绪查询当作纯函数 |
-| 纯策略与进程内退避 | `background_progress_policy.py` 的 `policy_failure_backoff`、`next_no_progress_streak`；`runtime.py::_ProviderSupplyBackoff` | 前两者只计算，已在首片迁出；后者及 `_wake_retry_after`、`_quota_fallback_wakes` 是调度器内存状态；`_authority_recovery_blocks` 仅去重日志，每次仍读恢复权威 | 计算与可变状态分开；不复制持久 Goal/wake/policy，不改变时钟、错误分类及读取时机 |
+| 纯策略与进程内退避 | `background_progress_policy.py` 的 `policy_failure_backoff`、`next_no_progress_streak`；`background_supply_backoff.py::ProviderSupplyBackoff` | 前两者只计算，供应冷却次片独立但仍由 scheduler 持有；`_wake_retry_after`、`_quota_fallback_wakes` 保留原位；`_authority_recovery_blocks` 仅去重日志，每次仍读恢复权威 | 计算与可变状态分开；不复制持久 Goal/wake/policy，不改变时钟、错误分类及读取时机 |
 | Gateway 配置恢复冷却 | `cli/gateway_lane_retry.py::BackgroundLaneRetry` 由 Gateway 车道消费 | 记录当前宿主的配置故障冷却，阻止缺模型热重试 | 与 provider 供应退避的作用域不同，不能因为都叫 backoff 就合成同一状态 |
 | 租约与后台执行 | `runtime.py::_run_claimed`、`_run_with_heartbeat` 调用原 `store.claims` 与 `runtime.run_once` | 领取后重读任务终态/恢复阻断；心跳续租；finally 停心跳并关闭精确 claim | 终态竞态检查不能移到领取前；仅关闭本 claim 不等于消费来源；供应/配置错误不增加普通 policy 失败次数 |
 | 子代理生命周期和审批 | `agent_core/orchestration/lifecycle.py::_bind_tasks_to_conversation` 与 `conversation/tool_approval_scope.py` | 前者建立父会话的显示/查找关联；canonical child 持有真实 run/root/thread/status；审批沿原账本记录具体操作 | task link 不能充当 child 执行身份；主代理仍读有效 claim，坏账不回退，不把能力授予当批准 |
@@ -675,6 +675,16 @@ ThreadLane 负责准备/消费编排；Tick 负责维护、恢复与持久入队
 定向参考 OpenAI Agents SDK `run_internal/model_retry.py` 的延迟计算与等待分离，及 Codex Python SDK `retry.py` 的调用/等待边界；只用于核对职责，不复制其随机抖动、配置或重试策略。
 自动验证和新安装版真实 TUI 分列；普通长任务若未产生进度策略落账，不能声称命中该内部支路。当前验收进展见执行 Goal。
 
+### 第 2 步次片：进程内供应退避
+
+`background_supply_backoff.py` 集中会话冷却状态、消费守卫和失败/恢复日志，不依赖 Agent、Store、Goal 或唤醒类型。
+runtime 的 `_supply_backoff_from_agent` 仍在 scheduler 构造时读取原 30/900 配置，传入数值；Gateway 长驻与 CLI 每次 tick 新建的实例寿命保持。
+同一实例同时供 wake、observation、due-policy 消费和 ready-thread 扫描使用；原来源筛选、数量限制及落账顺序不动。
+异常锚点仍为 tick 时刻加本次回调的 monotonic 耗时；冷却期间不执行回调，回调返回 None 不清状态，任何非 None 报告才清零。
+只吸收 typed transient，额度耗尽、配置错误、普通失败及 KeyboardInterrupt/SystemExit 保持各自传播边界；事件字段和打印格式不变。
+删除旧类/guard 定义和空 TYPE_CHECKING，不留旧名别名；配置说明同时纠正“额度耗尽进入自动长退避”的过期描述，配置值与实现行为不变。
+既有时钟替身直接指向新模块，恢复用例同时检查就绪筛选共享冷却，另覆盖 None 与假值报告的区别；新安装版验收独立记账。
+
 ### 后续切片实施约束
 
 第 2 步内部从纯判断开始；一次迁移一个可以单独验证的职责。需要查询 Store 的规则显式接收事实或只读能力，
@@ -685,7 +695,7 @@ ThreadLane 负责准备/消费编排；Tick 负责维护、恢复与持久入队
 具体从哪里开始：
 
 1. 核对 `agent/conversation/runtime.py` 中后台调度五个 mixin 的直接调用、共享字段和写账位置，按读取事实、纯判断、进程内状态、持久副作用分类；只记录相关依赖，不扩成全仓扫描。
-2. 第一片优先提取 `_policy_failure_backoff`、`_next_no_progress_streak` 等纯策略，再单独处理 `_ProviderSupplyBackoff` 的进程内状态；后者不是纯函数，也不是新增持久账本。
+2. 首片纯进度计算与次片 `ProviderSupplyBackoff` 已按上述边界迁出；后者是进程内状态，不能当纯函数或新增持久账本，后续继续唤醒/Goal 与租约边界。
 3. 原调度器保留消费事件、领取/续租、写账和通知时机；新组件只接收实际所需的配置、时钟或能力，不接受另一个包住完整 Agent/Store 的大上下文。
 4. 同片迁移生产与测试的直接导入，删除无调用旧入口、转发和失效注释；按新职责同步双层注释及文件树。新文件名以调用方核对结果确定。
 5. 先跑 `tests/test_background_main_agent_runtime.py`、`tests/test_background_supply_backoff.py` 中相关回归，再做对应的真实 TUI 验收；仅结构整理不新造镜像测试或变更重试阈值。

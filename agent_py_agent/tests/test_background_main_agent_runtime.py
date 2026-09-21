@@ -8169,8 +8169,7 @@ def test_policy_failure_backoff_is_deterministic_exponential_and_bounded() -> No
 def test_failed_policy_run_records_backoff_and_retires_after_three(tmp_path) -> None:
     """问题6:失败 run 后 policy 记账(退避顺延),连续 3 次失败退休,绝不无限重试。
 
-    修前:失败异常被 _consume_with_supply_guard 吸收 → policy.next_due_at 不动 →
-    下个 tick 又 due = 无限重试。修后:失败落账 failure_count/last_failure_at,
+    普通执行失败必须落账 failure_count/last_failure_at，不能只有进程内供应冷却。
     next_due_at 退避顺延;第 3 次失败 → enabled=False 退休,离开 due 扫描等用户。
     """
     from agent_py_agent.agent.conversation.background_progress_policy import policy_failure_backoff
