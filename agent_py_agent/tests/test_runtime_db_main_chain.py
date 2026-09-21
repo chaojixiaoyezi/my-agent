@@ -214,6 +214,31 @@ def test_concurrent_explicit_inputs_reuse_one_pending_successor(manager, repo):
     assert len(repo.attempts_for_run(str(agent_run["agent_run_id"]))) == 2
 
 
+def test_exact_successor_reservation_never_follows_replaced_current(manager, repo):
+    task = manager.create_run(goal="准确预留", root_id="run-main", parent_id="run-main")
+    first = manager.lifecycle.prepare_runner_attempt(task.id)
+    agent_run_id = repo.agent_run_for_run_id(task.id)["agent_run_id"]
+    old = first.runner_active_attempt_id
+    assert repo.settle_agent_attempt(agent_run_id=agent_run_id, attempt_id=old)["settled"]
+    second = repo.queue_pending_attempt(agent_run_id, expected_current_attempt_id=old, pending_attempt_id="exact-pending")
+    assert second["attempt_id"] == "exact-pending"
+    for expected in (old, second["attempt_id"]):
+        with pytest.raises(RuntimeConflictError):
+            repo.queue_pending_attempt(agent_run_id, expected_current_attempt_id=expected, pending_attempt_id="late-candidate")
+    assert len(repo.attempts_for_run(agent_run_id)) == 2
+    assert repo.current_attempt(agent_run_id)["attempt_id"] == second["attempt_id"]
+
+
+@pytest.mark.parametrize("expected,candidate", [(None, "new"), ("old", None), ("", "new"), ("old", ""), ("same", "same")])
+def test_exact_reservation_requires_complete_distinct_pair(manager, repo, expected, candidate):
+    task = manager.create_run(goal="不完整预留", root_id="run-main", parent_id="run-main")
+    run = repo.agent_run_for_run_id(task.id)
+    with pytest.raises(ValueError):
+        repo.queue_pending_attempt(run["agent_run_id"], expected_current_attempt_id=expected, pending_attempt_id=candidate)
+    assert len(repo.attempts_for_run(run["agent_run_id"])) == 1
+    assert repo.current_attempt(run["agent_run_id"])["attempt_id"] == run["current_attempt_id"]
+
+
 def test_conversation_task_id_reuses_task_row(manager, repo):
     first = manager.create_run(
         goal="会话任务",

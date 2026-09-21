@@ -10,6 +10,7 @@ from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 
+from ..common.id_generator import new_id
 from ..runtime_db.operations import RuntimeConflictError, RuntimeExecutionBusyError
 from ..runtime_errors import DataCorruptionError, runtime_error_report
 from ..subagents.authorization_gate import OperationRequest, authorize_operation
@@ -23,6 +24,7 @@ from ..subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
 from .agent_activity import conversation_agent_view
 from .agent_tool_approval import resolve_agent_tool_approval
 from .store import ConversationStore
+from .store_guidance_records import GuidanceOnceReceipt
 
 MAX_AGENT_GUIDANCE_CHARS = 1 << 20
 
@@ -391,7 +393,7 @@ def _agent_guidance_request(
     }
 
 
-# LLM: 调用方持 creation 锁；稳定消息 ID 复用原回执，pending 只准备同 AgentRun 的接续，启动需求交给锁外调用者。
+# LLM: 调用方持 creation 锁；旧 pending 必须在原 mailbox 锁内复读，只有仍 pending 才预留，启动交给锁外调用者。
 # 函数用途: 返回网络重试的原投递事实，已提交或消费的消息不重复启动。
 def _replay_agent_guidance(
     agent: object,
@@ -411,8 +413,27 @@ def _replay_agent_guidance(
             "AGENT_GUIDANCE_STORE_UNAVAILABLE",
             "子代理消息回执缺少执行轮身份，投递结果未知。",
         )
-    entry = _append_guidance_entry(submission, expected_turn_id)
-    receipt_status = str(getattr(prior, "status", "") or "").strip().lower()
+    _append_guidance_entry(submission, expected_turn_id)
+    resume_required = False
+    try:
+        if prior.status == "pending":
+            receipt, resume_required = _resume_pending_guidance_replay(
+                agent, submission=submission, expected_turn_id=expected_turn_id,
+            )
+        else:
+            receipt = submission.store.guidance.receipt(submission.dedupe_key)
+        if receipt is None:
+            raise DataCorruptionError("guidance replay receipt is unavailable")
+    except AgentControlError:
+        raise
+    except Exception as exc:
+        raise AgentControlError(
+            503, "AGENT_RESUME_UNAVAILABLE",
+            "子代理消息已经保存，但处理轮暂未启动；系统会按同一消息重试。",
+        ) from exc
+    entry = receipt.entry
+    expected_turn_id = str(entry.metadata.get("expected_turn_id") or "")
+    receipt_status = receipt.status
     if receipt_status == "rejected":
         raise AgentControlError(
             409,
@@ -423,34 +444,8 @@ def _replay_agent_guidance(
         "status": f"replay_{receipt_status or 'recorded'}",
         "run_ids": [],
     }
-    resume_required = False
-    if receipt_status == "pending":
-        if _task_is_terminal(submission.task):
-            raise AgentControlError(
-                409,
-                "AGENT_ALREADY_TERMINAL",
-                "这个子代理已经结束；当前详情页只读。",
-            )
-        try:
-            expected_turn_id, resume_required = _resume_pending_guidance_replay(
-                agent,
-                store=submission.store,
-                task=submission.task,
-                expected_turn_id=expected_turn_id,
-            )
-            refreshed = submission.store.guidance.receipt(submission.dedupe_key)
-        except AgentControlError:
-            raise
-        except Exception as exc:
-            raise AgentControlError(
-                503,
-                "AGENT_RESUME_UNAVAILABLE",
-                "子代理消息已经保存，但处理轮暂未启动；系统会按同一消息重试。",
-            ) from exc
-        if refreshed is not None:
-            entry = refreshed.entry
-        if not resume_required:
-            resume = {"status": "active_turn", "run_ids": []}
+    if receipt_status == "pending" and not resume_required:
+        resume = {"status": "active_turn", "run_ids": []}
     return _AgentGuidanceDelivery({
         "ok": True,
         "delivery": "queued",
@@ -464,53 +459,45 @@ def _replay_agent_guidance(
     }, submission.task if resume_required else None, expected_turn_id)
 
 
-# LLM: 调用方持 creation 锁；仅 pending 回执可按原 DB 旧轮事实改绑，返回启动需求而不在锁内启动执行器。
-# 函数用途: 为首次启动失败或回执丢失的插话准备同一 run 的接续，启动另在锁外执行。
+# LLM: 调用方持 creation；先铸造尚未落盘的新 ID 供 mailbox 排序锁定，再在 fresh pending 回执下按原 DB 身份预留。
+# 函数用途: 为确实未提交的消息准备同一代理接续，返回最新回执；消费竞争中不多排轮次。
 def _resume_pending_guidance_replay(
     agent: object,
     *,
-    store: ConversationStore,
-    task: object,
+    submission: _AgentGuidanceSubmission,
     expected_turn_id: str,
-) -> tuple[str, bool]:
+) -> tuple[GuidanceOnceReceipt, bool]:
+    task = submission.task
     turn = _agent_guidance_turn(agent, task)
-    if not turn.expected_turn_id:
-        raise AgentControlError(
-            503,
-            "AGENT_ATTEMPT_UNAVAILABLE",
-            "子代理消息已经保存，但当前执行轮仍在切换；系统会按同一消息重试。",
-        )
-    target_turn_id = turn.expected_turn_id
-    if turn.queue_successor:
-        queued = agent.subagents.runtime_db.queue_pending_attempt(
-            turn.agent_run_id,
-            source="user_agent_guidance_replay",
-        )
-        target_turn_id = str(queued["attempt_id"] or "").strip()
-    if target_turn_id != expected_turn_id:
-        if not _guidance_attempt_is_rebindable(
-            agent.subagents.runtime_db,
-            turn.agent_run_id,
-            expected_turn_id,
+    target_turn_id = new_id("attempt_id") if turn.queue_successor else turn.expected_turn_id or expected_turn_id
+
+    # LLM: mailbox 已持旧/新 turn 与原 receipt；只做短 fresh/DB 准入，不重入邮箱、不启动或等待任何 runner。
+    # 函数用途: 在消息仍 pending 的同一边界中确认恢复资格，并持久预留外层锁定的新轮。
+    def reserve_turn() -> None:
+        current = agent.subagents.load(task.id)
+        if _task_is_terminal(current):
+            raise AgentControlError(409, "AGENT_ALREADY_TERMINAL", "这个子代理已经结束；当前详情页只读。")
+        if not turn.expected_turn_id or turn != _agent_guidance_turn(agent, current):
+            raise AgentControlError(503, "AGENT_ATTEMPT_UNAVAILABLE", "子代理当前执行轮仍在切换；请按同一消息重试。")
+        if target_turn_id != expected_turn_id and not _guidance_attempt_is_rebindable(
+            agent.subagents.runtime_db, turn.agent_run_id, expected_turn_id,
         ):
             raise AgentControlError(
-                503,
-                "AGENT_ATTEMPT_UNAVAILABLE",
+                503, "AGENT_ATTEMPT_UNAVAILABLE",
                 "子代理消息的旧执行轮尚不能安全接续；系统会按同一消息重试。",
             )
-        summary = store.guidance.recovery.rebind_unsubmitted(
-            "agent_run",
-            str(getattr(task, "id", "") or ""),
-            dead_turn_ids=[expected_turn_id],
-            recovered_turn_id=target_turn_id,
-        )
-        if int(summary.get("errors") or 0) > 0 or int(summary.get("rebound") or 0) != 1:
-            raise AgentControlError(
-                503,
-                "AGENT_GUIDANCE_STORE_UNAVAILABLE",
-                "子代理消息暂时无法接续到新执行轮；系统会按同一消息重试。",
+        if turn.queue_successor:
+            agent.subagents.runtime_db.queue_pending_attempt(
+                turn.agent_run_id, source="user_agent_guidance_replay",
+                expected_current_attempt_id=turn.expected_turn_id,
+                pending_attempt_id=target_turn_id,
             )
-    return target_turn_id, turn.resume_required
+
+    receipt, prepared = submission.store.guidance.recovery.prepare_pending_replay(
+        submission.dedupe_key, expected_turn_id=expected_turn_id,
+        recovered_turn_id=target_turn_id, reserve_turn=reserve_turn,
+    )
+    return receipt, prepared and turn.resume_required
 
 
 # LLM: Rebind authority comes only from RuntimeDB ancestry and a terminal

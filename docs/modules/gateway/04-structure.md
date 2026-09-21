@@ -1,5 +1,11 @@
 # Gateway Structure
 
+## 子代理插话重放边界
+
+`conversation/agent_control.py` 只决定准确旧/新轮和启动需求；`GuidanceRecovery.prepare_pending_replay` 一次排序锁定两轮，
+先修旧批次，再在原回执锁下复读和预留。`RuntimeRepository.queue_pending_attempt` 成对 CAS 原 current/候选，
+单条改绑复用原回执与索引写入；不引入新的邮箱或执行器，启动在所有这些控制锁之外。
+
 ## 公共命令边界
 
 `agent/command_catalog.py` 提供核心名称、别名、会话尾部语法及保留命名空间的唯一声明。

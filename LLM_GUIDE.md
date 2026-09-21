@@ -58,7 +58,8 @@ guidance 的 admission 在 creation 之外，启动探测与执行放 creation �
 managed 后台排队绑定原 pending ID，经宿主 argv、DispatchParams 和 runner 到 DB 精确激活；缺失不补 current。
 启动标记复用 runner_start.py 的条件 mutation；worker 先激活再发布携带 attempt 的 session，旧心跳不能覆盖新轮。
 旧配置投影也须在激活后核对原 attempt 再写；创建回执复读 canonical，不能依赖控制函数原地修改旧对象。
-这仍是未发布源码；插话重放可能多预留一轮，无数据库模式迟到启动可能重开 user-stop，二者阻断发布。
+这仍是未发布源码；插话重放现按排序 turn→批次修复→回执 fresh pending→准确 DB 预留，仅接续本条消息。
+无数据库模式迟到启动可能重开 user-stop，仍阻断发布；不得把开发回归当作安装版 TUI 通过。
 
 SSE delta 原样保留，OpenAI 工具参数生成有独立进度；
 派工不会永久禁止主代理本地工作，用户明确限制仍保留；复制按最新代次和实际通道结果反馈。

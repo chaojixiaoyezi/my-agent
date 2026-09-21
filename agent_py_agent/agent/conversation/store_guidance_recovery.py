@@ -1,5 +1,5 @@
-# LLM: 协调精确回合终态和失效尝试恢复；修改须核对旧批次修复顺序及取消、Compact、重启调用方。
-# 模块用途: 协调精确回合终态和失效尝试恢复。
+# LLM: 终态、恢复和网络重试共用旧/新 turn 排序及原回执；预留前先修批次和复读，修改须联测消费、取消与半写重试。
+# 模块用途: 收口精确回合消息并恢复未提交消息，避免重试在消费之后重复排队。
 from __future__ import annotations
 
 import hashlib
@@ -20,6 +20,7 @@ from .models import GuidanceEntry, normalize_guidance_target_type
 from .store_guidance_acknowledgements import GuidanceAcknowledgements
 from .store_guidance_ledger import GuidanceLedger
 from .store_guidance_records import (
+    GuidanceOnceReceipt,
     _legacy_prompt_submission_unknown_receipt,
     _rebound_guidance_receipt,
 )
@@ -126,23 +127,27 @@ class GuidanceRebinding:
                 )
                 write_json_file_atomic(receipt_path, migrated.to_dict())
                 return "legacy_submission_unknown"
-            rebound = _rebound_guidance_receipt(
-                receipt,
-                old_turn_id=old_turn_id,
-                recovered_turn_id=recovered_turn_id,
-            )
-            write_json_file_atomic(receipt_path, rebound.to_dict())
-            self.ledger.ensure_turn_index(rebound)
-            self.ledger.rebind_input_index(
-                rebound,
-                old_turn_id=old_turn_id,
-            )
-            unlink_quietly(self.storage.guidance_turn_index_path(old_turn_id, dedupe_key))
+            self.write_rebound_locked(receipt, recovered_turn_id=recovered_turn_id)
             return "rebound"
 
+    # LLM: 调用者已持有全部旧/新 turn 与原 receipt 锁，并证明未提交；先写权威回执，索引失败可从回执修复。
+    # 函数用途: 共用一次消息改绑的持久写入顺序，供恢复和网络重试接续使用。
+    def write_rebound_locked(
+        self, receipt: GuidanceOnceReceipt, *, recovered_turn_id: str,
+    ) -> GuidanceOnceReceipt:
+        old_turn_id = str(receipt.entry.metadata.get("expected_turn_id") or "")
+        rebound = _rebound_guidance_receipt(
+            receipt, old_turn_id=old_turn_id, recovered_turn_id=recovered_turn_id,
+        )
+        write_json_file_atomic(self.storage.guidance_dedupe_path(receipt.dedupe_key), rebound.to_dict())
+        self.ledger.ensure_turn_index(rebound)
+        self.ledger.rebind_input_index(rebound, old_turn_id=old_turn_id)
+        unlink_quietly(self.storage.guidance_turn_index_path(old_turn_id, receipt.dedupe_key))
+        return rebound
 
-# LLM: 协调精确回合终态和失效尝试恢复；修改须核对旧批次修复顺序及取消、Compact、重启调用方。
-# 类用途: 协调精确回合终态和失效尝试恢复。
+
+# LLM: 恢复可接续确认死亡轮的 reserved，网络重试仅接 fresh pending；两者保持独立资格、同一回执与写入顺序。
+# 类用途: 协调消息终态、失效回合恢复和网络重试中的准确接续。
 class GuidanceRecovery:
     # LLM: 终态先修提交再修确认；队列读取能力显式提供，不读取整个 Store 或猜测尝试身份。
     # 函数用途: 组装结束、释放与恢复操作所需的同源组件，初始化不改变持久状态。
@@ -211,6 +216,37 @@ class GuidanceRecovery:
                     index_path, turn_id=turn_id, expected_attempt=expected_attempt, summary=summary,
                 )
         return summary
+
+    # LLM: 候选新轮尚未落盘；按排序取得旧/新 turn，修原提交/确认，再持 receipt 复读。reserve_turn 只准预留准确身份，不得启动 runner。
+    # 函数用途: 网络重试仅为仍待处理的同一消息准备接续，避免旧 pending 快照在消费后多排执行轮。
+    def prepare_pending_replay(
+        self, dedupe_key: str, *, expected_turn_id: str, recovered_turn_id: str,
+        reserve_turn: Callable[[], None],
+    ) -> tuple[GuidanceOnceReceipt, bool]:
+        if not dedupe_key or not expected_turn_id or not recovered_turn_id:
+            raise ValueError("guidance replay requires receipt and exact turn ids")
+        with ExitStack() as stack:
+            for turn_id in sorted({expected_turn_id, recovered_turn_id}):
+                stack.enter_context(self.ledger.turn_guard(turn_id))
+            errors = self.submissions.repair_locked(expected_turn_id)
+            errors += self.acknowledgements.repair_locked(expected_turn_id)
+            if errors:
+                raise DataCorruptionError("guidance replay batch repair is incomplete")
+            receipt_path = self.storage.guidance_dedupe_path(dedupe_key)
+            with locked_file_transition(receipt_path.with_name(f".{receipt_path.name}.transition")):
+                receipt = self.ledger.read_receipt(receipt_path)
+                if receipt is None or receipt.dedupe_key != dedupe_key:
+                    raise DataCorruptionError("guidance replay receipt is unavailable")
+                if receipt.status != "pending":
+                    return receipt, False
+                if receipt.entry.metadata.get("expected_turn_id") != expected_turn_id:
+                    raise DataCorruptionError("guidance replay binding changed")
+                reserve_turn()
+                if recovered_turn_id != expected_turn_id:
+                    receipt = self._rebinding.write_rebound_locked(
+                        receipt, recovered_turn_id=recovered_turn_id,
+                    )
+                return receipt, True
 
     # LLM: GuidanceRecovery 调用方持回合锁；本函数逐条锁回执并累计结果，坏索引不能释放别的尝试，联测部分提交恢复。
     # 函数用途: 结算一个回合索引对应的预留消息；只释放尚未提交且匹配失效尝试的回执。

@@ -1,4 +1,4 @@
-# LLM: 任务执行权与 current CAS 共用原 RuntimeDB；预留激活必须在同一事务匹配原 pending，联测取消、UNKNOWN 与换代。
+# LLM: 任务执行权与 current CAS 共用原 RuntimeDB；精确预留匹配原 current/候选，激活匹配原 pending，联测取消、UNKNOWN 与换代。
 # 模块用途: 保存任务、执行轮和委托关系，以事务方式领取和收回执行权。
 """Owner runtime.db 权威实体仓储（3.txt A/C/D/F 节落地面）。
 
@@ -1188,17 +1188,27 @@ class RuntimeRepository(
     # the sole activation edge that acquires the execution lock. Callers must
     # still enforce task lifecycle, owner authorization, and terminal read-only
     # rules before using this repository primitive.
+    # expected_current_attempt_id/pending_attempt_id 成对固定外层已经锁定的旧、新轮；事务不得换领后来 current。
     # 函数用途: 给暂时空闲或等待孩子的同一个代理预留下一执行轮；这里只排队，不启动模型或工具。
     def queue_pending_attempt(
         self,
         agent_run_id: str,
         *,
         source: str = "external_input",
+        expected_current_attempt_id: str | None = None,
+        pending_attempt_id: str | None = None,
     ) -> sqlite3.Row:
         """Create or reuse one unstarted current attempt for an explicit wake."""
 
         now = time.time()
         normalized_source = str(source or "external_input").strip() or "external_input"
+        exact = expected_current_attempt_id is not None or pending_attempt_id is not None
+        if exact and (
+            not str(expected_current_attempt_id or "").strip()
+            or not str(pending_attempt_id or "").strip()
+            or expected_current_attempt_id == pending_attempt_id
+        ):
+            raise ValueError("准确预留必须同时提供不同的原轮和新轮身份")
         scope = exec_lock_scope(agent_run_id)
         with self.transaction() as conn:
             # Reserve the writer before reading current_generation. Two TUI/Web
@@ -1210,6 +1220,8 @@ class RuntimeRepository(
                 conn,
                 agent_run_id,
             )
+            if exact and str(current["attempt_id"]) != expected_current_attempt_id:
+                raise RuntimeConflictError("预留原轮已变化，不能复用后来的 current")
             reusable = self._validate_pending_attempt_transition_conn(
                 conn,
                 run=run,
@@ -1219,6 +1231,8 @@ class RuntimeRepository(
                 source=normalized_source,
             )
             if reusable is not None:
+                if exact:
+                    raise RuntimeConflictError("准确后继预留不能替换或复用尚未启动的原轮")
                 return reusable
             return self._insert_pending_attempt_conn(
                 conn,
@@ -1227,6 +1241,7 @@ class RuntimeRepository(
                 agent_run_id=agent_run_id,
                 source=normalized_source,
                 now=now,
+                attempt_id=pending_attempt_id or new_id("attempt_id"),
             )
 
     # LLM: The writer transaction must read the run pointer and pointed attempt
@@ -1311,6 +1326,7 @@ class RuntimeRepository(
 
     # LLM: Insertion and current-pointer CAS share the same immediate writer
     # transaction. Events describe the committed generation and never trigger it.
+    # attempt_id 由原统一生成器铸造，可在外层锁定新旧回合前分配；本事务才使其成为执行账事实。
     # 函数用途: 原子插入下一 pending attempt、切换 current pointer 并记录排队事件。
     def _insert_pending_attempt_conn(
         self,
@@ -1321,12 +1337,12 @@ class RuntimeRepository(
         agent_run_id: str,
         source: str,
         now: float,
+        attempt_id: str,
     ) -> sqlite3.Row:
         current_attempt_id = str(current["attempt_id"] or "")
         current_status = str(current["status"] or "").strip().lower()
         previous_generation = int(run["current_attempt_generation"] or 0)
         generation = previous_generation + 1
-        attempt_id = new_id("attempt_id")
         conn.execute(
             """
             INSERT INTO agent_attempts(attempt_id, agent_run_id, attempt_generation,

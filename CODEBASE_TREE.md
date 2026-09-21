@@ -205,7 +205,7 @@ agent_py_agent/
 |   |   |-- store_guidance_ledger.py    # 插话回执读取、回合锁及队列与索引修复
 |   |   |-- store_guidance_submission.py # 模型提交批次、执行前拒绝及回执投影修复
 |   |   |-- store_guidance_acknowledgements.py # 模型消费确认批次与幂等消息投影
-|   |   |-- store_guidance_recovery.py  # 插话终态结算、释放与失效尝试改绑
+|   |   |-- store_guidance_recovery.py  # 插话终态结算、释放、失效改绑与网络重试准确预留
 |   |   |-- store_index.py              # 有界扫描投影、惰性注册、文件指纹与权威读回
 |   |   |-- store_usage.py              # 模型用量领域、累计增量去重及线程数字显示的原子更新
 |   |   |-- store_claims.py             # 执行租约的领取、续租、精确终态、恢复归属与旧账归档
@@ -537,7 +537,7 @@ docs/
 - `agent_py_agent/agent/conversation/store_guidance_ledger.py`：`guidance.ledger` 共用原目录与精确回合锁，读取回执并修复队列、回合及输入反查投影。
 - `agent_py_agent/agent/conversation/store_guidance_submission.py`：`guidance.submissions` 管理模型调用提交批次及明确拒绝后的恢复，保留先批次后回执的顺序。
 - `agent_py_agent/agent/conversation/store_guidance_acknowledgements.py`：`guidance.acknowledgements` 提交消费确认，幂等修复回执和原消息账本。
-- `agent_py_agent/agent/conversation/store_guidance_recovery.py`：`guidance.recovery` 先修已提交批次再结算终态；逐条安全改绑由同模块辅助对象处理。
+- `agent_py_agent/agent/conversation/store_guidance_recovery.py`：`guidance.recovery` 先修批次再结算或恢复；网络重试按旧/新 turn 排序及原回执锁，只为最新 pending 预留候选，逐条改绑共用原持久写入顺序。
 - `agent_py_agent/agent/conversation/store_index.py`：观察、唤醒和策略共用有界扫描缓存；失效回读权威文件，目录不可读不能被当成空目录。
 - `agent_py_agent/agent/conversation/store_claims.py`：`store.claims` 复用同一 storage 和原子文件更新；按结构化宿主、TTL、claim/task ID 领取与释放执行权，已结束旧租约由原维护周期归档。
 - `agent_py_agent/agent/conversation/store_goals.py`：`store.goals` 持有原目标集合和 CAS，显式接收线程校验、任务读取及共享时钟；不建立新的执行或恢复状态。

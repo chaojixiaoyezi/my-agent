@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import time
 from contextlib import contextmanager
+from types import SimpleNamespace
 
 import pytest
 
@@ -594,6 +595,225 @@ def test_consumed_guidance_http_replay_does_not_queue_another_attempt(tmp_path) 
     assert replay["expected_turn_id"] == turn_id
     assert replay["resume"]["status"] == "replay_consumed"
     assert len(repo.attempts_for_run(str(agent_run["agent_run_id"]))) == 1
+
+
+@pytest.mark.parametrize("status", ["reserved", "submitted", "consumed", "rejected", "submitted_batch", "consumed_batch"])
+def test_guidance_replay_refreshes_receipt_before_reserving_successor(tmp_path, monkeypatch, status):
+    """旧 pending 快照与独立消费者交错，重放不能为已接纳消息多预留一轮。"""
+    from agent_py_agent.agent.conversation import agent_control
+
+    agent, scope, child = _bound_agent_tree(tmp_path)
+    args = dict(scope=scope, run_id=child.id, message="确认收到后继续等待。", message_id="racing-replay")
+    accepted = send_agent_guidance(agent, **args)
+    guidance = agent.conversation_store.guidance
+    key = "user-agent-guidance:racing-replay"
+    entry = guidance.receipt(key).entry
+    turn_id = entry.metadata["expected_turn_id"]
+    repo = agent.subagents.runtime_db
+    agent_run_id = repo.agent_run_for_run_id(child.id)["agent_run_id"]
+    assert repo.settle_agent_attempt(agent_run_id=agent_run_id, attempt_id=turn_id)["settled"]
+    idle = agent.subagents.load(child.id)
+    idle.status, idle.runner_active_attempt_id = "PENDING", ""
+    agent.subagents.save(idle)
+    prior_read, changed = threading.Event(), threading.Event()
+    errors, starts = [], []
+    outcome = status.removesuffix("_batch")
+
+    def consume():
+        try:
+            assert prior_read.wait(3)
+            if outcome == "rejected":
+                guidance.mark_status(key, "rejected")
+            else:
+                assert guidance.claim_for_turn(entry, expected_turn_id=turn_id, attempt_id=turn_id)
+                if status == "submitted_batch":
+                    with monkeypatch.context() as patch:
+                        patch.setattr(guidance.submissions, "apply_locked", fail_projection)
+                        with pytest.raises(OSError, match="projection fault"):
+                            guidance.submissions.mark_submitted(turn_id, [entry], attempt_id=turn_id)
+                elif outcome in {"submitted", "consumed"}:
+                    guidance.submissions.mark_submitted(turn_id, [entry], attempt_id=turn_id)
+                if status == "consumed_batch":
+                    with monkeypatch.context() as patch:
+                        patch.setattr(guidance.acknowledgements, "_apply_locked", fail_projection)
+                        with pytest.raises(OSError, match="projection fault"):
+                            guidance.acknowledgements.consume_submitted(turn_id, [entry])
+                elif outcome == "consumed":
+                    guidance.acknowledgements.consume_submitted(turn_id, [entry])
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            changed.set()
+
+    def fail_projection(*args, **kwargs):
+        raise OSError("projection fault")
+
+    read = agent_control._read_guidance_receipt
+
+    def pause_after_read(submission):
+        prior = read(submission)
+        assert prior.status == "pending"
+        prior_read.set()
+        assert changed.wait(3)
+        return prior
+
+    monkeypatch.setattr(agent_control, "_read_guidance_receipt", pause_after_read)
+    monkeypatch.setattr(agent_control, "_resume_agent_for_guidance", lambda *a, **kw: starts.append(kw))
+    consumer = threading.Thread(target=consume, daemon=True)
+    consumer.start()
+    try:
+        if outcome == "rejected":
+            with pytest.raises(AgentControlError) as exc_info:
+                send_agent_guidance(agent, **args)
+            assert exc_info.value.error_code == "AGENT_GUIDANCE_REJECTED"
+        else:
+            replay = send_agent_guidance(agent, **args)
+            assert replay["status"] == outcome
+            assert replay["guidance_id"] == accepted["guidance_id"]
+            assert replay["expected_turn_id"] == turn_id
+    finally:
+        consumer.join(3)
+    assert not consumer.is_alive() and not errors
+    assert not starts
+    assert len(repo.attempts_for_run(agent_run_id)) == 1
+    assert guidance.receipt(key).status == outcome
+    assert guidance.receipt(key).entry.metadata["expected_turn_id"] == turn_id
+
+
+# LLM: 使用真实临时 DB/邮箱建立已结束原轮中的 pending 消息，不预留后继；后续故障只注入正式写入边界。
+# 函数用途: 为消息重放测试提供一个确实需要恢复的空闲代理及其原始回执。
+def _idle_guidance_replay_state(tmp_path):
+    agent, scope, child = _bound_agent_tree(tmp_path)
+    args = dict(agent=agent, scope=scope, run_id=child.id, message="继续检查剩余工作。", message_id="idle-replay")
+    send_agent_guidance(**args)
+    guidance, repo = agent.conversation_store.guidance, agent.subagents.runtime_db
+    key = "user-agent-guidance:idle-replay"
+    entry = guidance.receipt(key).entry
+    agent_run_id = repo.agent_run_for_run_id(child.id)["agent_run_id"]
+    assert repo.settle_agent_attempt(agent_run_id=agent_run_id, attempt_id=entry.metadata["expected_turn_id"])["settled"]
+    current = agent.subagents.load(child.id)
+    current.status, current.runner_active_attempt_id = "PENDING", ""
+    agent.subagents.save(current)
+    return SimpleNamespace(agent=agent, child=child, args=args, guidance=guidance, repo=repo,
+                           key=key, entry=entry, agent_run_id=agent_run_id)
+
+
+@pytest.mark.parametrize("fault", ["receipt", "index"])
+def test_guidance_replay_reuses_committed_successor_after_write_failure(tmp_path, monkeypatch, fault):
+    from agent_py_agent.agent.conversation import agent_control
+
+    state = _idle_guidance_replay_state(tmp_path)
+    starts = []
+    monkeypatch.setattr(agent_control, "_resume_agent_for_guidance", lambda *a, **kw: starts.append(kw) or {"status": "started"})
+    target = state.guidance.recovery._rebinding if fault == "receipt" else state.guidance.ledger
+    method = "write_rebound_locked" if fault == "receipt" else "ensure_turn_index"
+    original = getattr(target, method)
+
+    def fail_new_binding(receipt, **kwargs):
+        if fault == "receipt" or receipt.entry.metadata["expected_turn_id"] != state.entry.metadata["expected_turn_id"]:
+            raise OSError("rebind write fault")
+        return original(receipt, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(target, method, fail_new_binding)
+        with pytest.raises(AgentControlError, match="处理轮暂未启动"):
+            send_agent_guidance(**state.args)
+    assert not starts
+    pending = state.repo.current_attempt(state.agent_run_id)
+    assert pending["status"] == "pending"
+    assert len(state.repo.attempts_for_run(state.agent_run_id)) == 2
+    replay = send_agent_guidance(**state.args)
+    assert replay["status"] == "pending"
+    assert replay["guidance_id"] == state.entry.guidance_id
+    assert replay["expected_turn_id"] == pending["attempt_id"]
+    assert len(state.repo.attempts_for_run(state.agent_run_id)) == 2
+    assert starts == [{"expected_attempt_id": pending["attempt_id"]}]
+
+
+@pytest.mark.parametrize("candidate", ["a-new-turn", "z-new-turn"])
+def test_guidance_replay_locks_both_turns_in_order_and_rebinds_only_one_message(tmp_path, monkeypatch, candidate):
+    from agent_py_agent.agent.conversation import agent_control
+
+    state = _idle_guidance_replay_state(tmp_path)
+    original = state.guidance.ledger.turn_guard
+    locks = []
+    request = {**state.entry.to_dict(), "message": "另一条独立消息"}
+    other = state.guidance.append_once(request, dedupe_key="other-guidance")
+
+    @contextmanager
+    def observe(turn_id):
+        locks.append(turn_id)
+        with original(turn_id):
+            yield
+
+    monkeypatch.setattr(state.guidance.ledger, "turn_guard", observe)
+    monkeypatch.setattr(agent_control, "new_id", lambda kind: candidate)
+    monkeypatch.setattr(agent_control, "_resume_agent_for_guidance", lambda *a, **kw: {"status": "started"})
+    replay = send_agent_guidance(**state.args)
+    old = state.entry.metadata["expected_turn_id"]
+    assert locks == sorted([old, candidate])
+    assert replay["expected_turn_id"] == candidate
+    assert state.guidance.receipt("other-guidance").entry.metadata["expected_turn_id"] == old
+    assert state.guidance.receipt("other-guidance").entry.guidance_id == other.guidance_id
+    assert state.repo.current_attempt(state.agent_run_id)["attempt_id"] == candidate
+
+
+def test_consumer_cannot_claim_old_message_during_successor_reservation(tmp_path, monkeypatch):
+    from agent_py_agent.agent.conversation import agent_control, store_guidance
+    from agent_py_agent.agent.gateway_parts import io
+
+    state = _idle_guidance_replay_state(tmp_path)
+    reserving, attempted, release = (threading.Event() for _ in range(3))
+    errors, claimed, replies, lock_states = [], [], [], []
+    queue = state.repo.queue_pending_attempt
+    transition = store_guidance.locked_file_transition
+
+    def slow_reserve(*args, **kwargs):
+        reserving.set()
+        assert release.wait(4)
+        return queue(*args, **kwargs)
+
+    @contextmanager
+    def observed_transition(path):
+        if threading.current_thread().name == "late-guidance-consumer":
+            lock_states.append(io._path_lock(path).locked())
+            attempted.set()
+        with transition(path):
+            yield
+
+    def replay():
+        try:
+            replies.append(send_agent_guidance(**state.args))
+        except BaseException as exc:
+            errors.append(exc)
+
+    def consume():
+        try:
+            old = state.entry.metadata["expected_turn_id"]
+            claimed.append(state.guidance.claim_for_turn(state.entry, expected_turn_id=old, attempt_id=old))
+        except BaseException as exc:
+            errors.append(exc)
+
+    monkeypatch.setattr(state.agent.subagents.runtime_db, "queue_pending_attempt", slow_reserve)
+    monkeypatch.setattr(store_guidance, "locked_file_transition", observed_transition)
+    monkeypatch.setattr(agent_control, "_resume_agent_for_guidance", lambda *a, **kw: {"status": "started"})
+    controller = threading.Thread(target=replay, daemon=True)
+    consumer = threading.Thread(target=consume, daemon=True, name="late-guidance-consumer")
+    controller.start()
+    try:
+        assert reserving.wait(3)
+        consumer.start()
+        assert attempted.wait(3)
+        assert lock_states == [True]
+    finally:
+        release.set()
+        controller.join(4)
+        if consumer.ident is not None:
+            consumer.join(4)
+    assert not errors and not controller.is_alive() and not consumer.is_alive()
+    assert claimed == [False]
+    assert replies[0]["expected_turn_id"] != state.entry.metadata["expected_turn_id"]
+    assert len(state.repo.attempts_for_run(state.agent_run_id)) == 2
 
 
 def test_agent_guidance_wakes_waiting_parent_on_same_run_once(
