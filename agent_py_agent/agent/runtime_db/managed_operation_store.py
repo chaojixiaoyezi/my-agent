@@ -1,4 +1,4 @@
-# LLM: 管理操作仍沿原运行、尝试与工具表；终态回读核对持久身份，不以查询参数冒充账中归属。
+# LLM: 管理操作仍沿原运行、尝试与工具表；终态回读严格校验持久身份与结果 JSON，损坏记录不得伪装为空账。
 # 模块用途: 将工具执行、资源锁和结果重放接到同一份 owner RuntimeDB。
 """B 切片：runtime.db 权威侧 OperationStore adapter（duck-typing LocalStore 契约）。
 
@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..common.strict_json import load_strict_json
 from ..local_storage.tool_operations import (
     TOOL_OPERATION_CANCELLED,
     TOOL_OPERATION_FAILED,
@@ -618,8 +619,8 @@ class ManagedOperationStore:
         )
 
     # --------------------------------------------- read 面（对账/观测用）
-    # LLM: 回读按原 Task→TaskRun→AgentRun→Attempt 联表校验，不能用调用参数覆盖持久身份。
-    # 函数用途: 读取原操作；宿主终态重放可同时限定任务、尝试、工具和参数，身份冲突不冒充未执行。
+    # LLM: 回读联查原 Task→TaskRun→AgentRun→Attempt；非 TEXT、过深/坏 JSON 与未知版本拒绝，不能让解析和记录映射使用不同输入。
+    # 函数用途: 严格读取原操作及其输入；历史终态不重开执行权，损坏记录不冒充未执行。
     def get_tool_operation(
         self,
         *,
@@ -648,13 +649,14 @@ class ManagedOperationStore:
             ).fetchone()
         if row is None:
             return None
+        payload = _checked_operation_payload(row["outcome_json"])
         if (
             not owner_id or not run_id or not row["_task_id"] or not row["_attempt_id"]
             or row["_owner_id"] != owner_id or row["_run_id"] != run_id
             or (task_id and row["_task_id"] != task_id)
             or (attempt_id and row["_attempt_id"] != attempt_id)
             or (tool_name and row["operation_type"] != tool_name)
-            or (args_hash and _outcome_payload(row).get("args_hash") != args_hash)
+            or (args_hash and payload.get("args_hash") != args_hash)
         ):
             raise ToolOperationStateError("原工具操作的归属或输入与查询不符")
         return _record_from_row(
@@ -1674,6 +1676,20 @@ def _json_loads(value: object) -> dict[str, Any]:
 
 def _outcome_payload(row: sqlite3.Row) -> dict[str, Any]:
     return _json_loads(row["outcome_json"])
+
+
+# LLM: 精确结果查询只接受原 TEXT JSON；规范 object/schema 校验与数据库身份查询分开，坏账不补空值，联测取消后的两种查询。
+# 函数用途: 解码一份持久工具结果，不读写数据库；损坏、过深、非文本和未知版本统一返回原账本错误类型。
+def _checked_operation_payload(raw: object) -> dict[str, Any]:
+    if not isinstance(raw, str):
+        raise ToolOperationStateError("原工具操作结果记录必须是 JSON 文本")
+    try:
+        payload = load_strict_json(raw)
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise ToolOperationStateError("原工具操作结果记录损坏") from exc
+    if not isinstance(payload, dict) or payload.get("schema", _OUTCOME_SCHEMA) != _OUTCOME_SCHEMA:
+        raise ToolOperationStateError("原工具操作结果记录格式或版本无效")
+    return payload
 
 
 # ------------------------------------------------------------------ record 映射

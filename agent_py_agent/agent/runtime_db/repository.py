@@ -1,4 +1,4 @@
-# LLM: 任务执行权与 current CAS 共用原 RuntimeDB；精确预留匹配原 current/候选，激活匹配原 pending，联测取消、UNKNOWN 与换代。
+# LLM: 任务执行权与 current CAS 共用原 RuntimeDB；精确预留/激活沿原身份，取消保留原领取元数据，联测严格回读、UNKNOWN 与换代。
 # 模块用途: 保存任务、执行轮和委托关系，以事务方式领取和收回执行权。
 """Owner runtime.db 权威实体仓储（3.txt A/C/D/F 节落地面）。
 
@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any
 
 from ..common.id_generator import new_id
+from ..common.strict_json import load_strict_json
 
 # LLM: 与 scheduler P0-4 共用同一套进程死亡证明判定（RUN-01），禁止另写第二份判死实现。
 from ..scheduler.repository import (
@@ -149,10 +150,8 @@ def _mark_dead_runner_attempt_unknown(conn, row, current: float) -> bool:
     return True
 
 
-# LLM: A successful attempt close may leave the AgentRun resumable, but every
-# provably unstarted claim must still become a typed terminal operation in the
-# same transaction. Callers must pass either the run or exact attempt scope.
-# 函数用途: 将从未进入 handler 的工具占位安全取消，避免执行轮结束后残留 CLAIMED 记录。
+# LLM: 原收口事务只取消精确作用域内 CLAIMED 且 handler 未启动的行；保留领取身份、输入和资源元数据，联测三个调用方及严格回读。
+# 函数用途: 结束未执行的工具占位；损坏结果原文保留，不妨碍撤回已证实未启动操作的执行权。
 def _cancel_unstarted_tool_operations(
     conn: sqlite3.Connection,
     *,
@@ -164,35 +163,42 @@ def _cancel_unstarted_tool_operations(
     scope_sql = "attempt_id = ?" if attempt_id else "agent_run_id = ?"
     scope_value = attempt_id or agent_run_id
     rows = conn.execute(
-        "SELECT operation_id, operation_type FROM tool_operations "
+        "SELECT operation_id, operation_type, outcome_json FROM tool_operations "
         f"WHERE {scope_sql} AND status = ? AND handler_started_at = 0",
         (scope_value, OP_CLAIMED),
     ).fetchall()
     for row in rows:
-        result_json = json.dumps(
-            {
-                "schema": "managed_operation.v1",
-                "result": {
-                    "schema_version": "tool_execution_result.v1",
-                    "tool": str(row["operation_type"] or ""),
-                    "ok": False,
-                    "output": (
-                        "未启动(not_started): 执行轮已结束, 操作从未执行, "
-                        "无副作用(G.5 CANCELLED)"
-                    ),
-                    "error_code": "TOOL_OPERATION_CANCELLED_NOT_STARTED",
-                    "effect_outcome": "not_started",
-                    "handler_executed": False,
-                },
-                "error_code": "TOOL_OPERATION_CANCELLED_NOT_STARTED",
-            },
-            ensure_ascii=False,
-        )
+        result_json = _unstarted_cancellation_payload(row["outcome_json"], row["operation_type"])
         conn.execute(
-            "UPDATE tool_operations SET status = ?, settled_at = ?, outcome_json = ? "
+            "UPDATE tool_operations SET status = ?, settled_at = ?, outcome_json = ?, updated_at = ? "
             "WHERE operation_id = ? AND status = ? AND handler_started_at = 0",
-            (OP_CANCELLED, now, result_json, str(row["operation_id"]), OP_CLAIMED),
+            (OP_CANCELLED, now, result_json, now, str(row["operation_id"]), OP_CLAIMED),
         )
+
+
+# LLM: 这里只拥有取消结果字段；仅处理原 TEXT JSON，SQLite 非文本值、过深或坏内容保留，严格读取端拒绝；原领取身份不改。
+# 函数用途: 给合法领取记录追加未启动取消回执，不修改磁盘；不可读内容交回原字节供后续诊断。
+def _unstarted_cancellation_payload(raw: str | bytes, tool: str) -> str | bytes:
+    if not isinstance(raw, str):
+        return raw
+    try:
+        payload = load_strict_json(raw)
+    except (TypeError, ValueError, RecursionError):
+        return raw
+    if not isinstance(payload, dict) or payload.get("schema", "managed_operation.v1") != "managed_operation.v1":
+        return raw
+    payload.update(
+        schema="managed_operation.v1",
+        result={
+            "schema_version": "tool_execution_result.v1", "tool": str(tool or ""), "ok": False,
+            "output": "未启动(not_started): 执行轮已结束, 操作从未执行, 无副作用(G.5 CANCELLED)",
+            "error_code": "TOOL_OPERATION_CANCELLED_NOT_STARTED", "effect_outcome": "not_started",
+            "handler_executed": False,
+        },
+        error_code="TOOL_OPERATION_CANCELLED_NOT_STARTED",
+        unknown_reason="",
+    )
+    return json.dumps(payload, ensure_ascii=False)
 
 
 # LLM: Manual and typed active-turn recovery must share this one unknown->recovered CAS.  The
@@ -2202,15 +2208,7 @@ class RuntimeRepository(
                 "WHERE agent_run_id = ? AND ended_at = 0",
                 (status, now, agent_run_id),
             )
-            # 2026-08-15 真机根因（3×3 cell2）：模型坏块整轮零执行留下的
-            # 未启动 op（CLAIMED 且 handler 从未启动）在终态收口时如实落
-            # CANCELLED（G.5：CANCELLED 只允许能证明 handler 未启动的操作；
-            # coordinator 同款 not_started 语义）——不残留 UNKNOWN 残账。
-            # 双席 seq1989 缺口4: outcome_json 必须 schema-valid——CANCELLED
-            # 后重复 claim 进 terminal replay, 空 result 会被 _result_from_record
-            # 降为 TOOL_OPERATION_OUTCOME_UNKNOWN; 写结构化取消结果
-            # (schema_version/not_started/handler_executed=false/closeout 信息)
-            # replay 才能如实读到「未启动已取消」而非降级 UNKNOWN。
+            # 未启动占位与运行终态同事务结束；公共入口保留原领取事实，保证取消后可精确回读。
             _cancel_unstarted_tool_operations(
                 conn,
                 agent_run_id=agent_run_id,
