@@ -11,6 +11,7 @@
 `-- docs/design/
     |-- MAINTAINABILITY_AND_JEV_REVIEW.md # 可维护性评估、渐进重构建议及 Computer Use/Jev 能力边界
     |-- PLUGIN_LIFECYCLE.md              # 可装卸插件、动态命令、版本切换与故障回收的待实施方案
+    |-- PLUGIN_PACKAGES.md               # 本地包静态校验与待接线的安装事实、隔离和撤销边界
     |-- PLUGIN_SAMPLE_ACCEPTANCE.md      # 10 个自有简易插件的来源、功能范围及真实 TUI 验收计划
     |-- TUI_DESIGN.md                    # 终端布局、事件、输入与生命周期规范
     |-- SUBAGENT_PARALLEL_EXECUTION.md   # 父子独立工作、逐项交付与慢任务诊断边界
@@ -84,10 +85,13 @@ agent_py_agent/
 |   |-- command_catalog.py             # 核心命令声明、别名、会话词法、保留命名空间与帮助/补全事实
 |   |-- command_arguments.py           # 参数不可变声明、类型校验与保留原文范围的公共词法
 |   |-- command_binding.py             # 同源参数绑定、缺值位置、帮助与选项分界
+|   |-- command_declarations.py        # 包和宿主目录共用的严格 JSON 声明读取器
 |   |-- plugin_commands.py             # 插件命名空间、宿主描述解析与无副作用的静态回执
 |   |-- plugin_command_catalog.py      # 可验证的不可变目录快照、JSON 合同及内容版本
 |   |-- plugin_command_service.py      # 宿主作用域目录与旧版本拒绝，不拥有安装和执行权
 |   |-- plugin_completion.py           # 用公共词法和绑定事实生成只编辑输入的候选
+|   |-- plugin_manifest.py             # 静态包描述、不可变 schema 与默认停用的命令投影
+|   |-- plugin_package.py              # 有界 ZIP 读取、成员与摘要核对，不安装或导入插件
 |   |-- core.py                         # SimpleAgent 组合入口
 |   |-- turn_end.py                     # 主/子代理共用的结束原因及技术续跑判据
 |   |-- model_guidance.py               # 完整 Prompt 与有副作用工具共用的验证/授权软提示唯一正文
@@ -410,6 +414,7 @@ agent_py_agent/
 |   |-- test_conversation_history_paging.py # 中文长行字节边界、完整工作片、坏游标与追加竞态
 |   |-- test_tui_input.py               # slash/path 补全、菜单选择、queue 回取与 bracketed paste 输入回归
 |   |-- test_plugin_command_catalog.py # 声明跨进程往返、版本变化及损坏载荷拒绝
+|   |-- test_plugin_package.py         # 静态包篡改、归档预算、危险成员及不执行代码的合同检查
 |   |-- test_gateway_plugin_commands.py # 冷 owner、可信身份、HTTP 插件命令分流与过期拒绝
 |   |-- test_plugin_command_client.py  # 三模式、异步响应隔离、原候选版本及显式 Tab 读取
 |   |-- test_tui_plugin_directory_pipe.py # 完整键盘链的 Tab 读取、候选接受、暂存恢复和原版本提交
@@ -502,6 +507,8 @@ docs/
 - `agent_py_agent/agent/command_arguments.py` 与 `command_binding.py`：参数定义、字面词法及值绑定的权威实现；部分输入也使用同一协议，帮助不从展示文字反推规则。
 - `agent_py_agent/agent/plugin_commands.py`：接收宿主提供的只读动作描述；当前实际入口仅有管理帮助和明确拒绝，没有安装表、插件加载或第二执行器。
 - `agent_py_agent/agent/plugin_command_catalog.py`：冻结及校验完整管理/插件声明，内容摘要绑定 owner 视图、版本和激活引用；不提供权限凭证。
+- `agent_py_agent/agent/command_declarations.py`：命令 JSON 的唯一读取器，包和宿主目录共用，旧目录私有 decoder 已删除。
+- `agent_py_agent/agent/plugin_manifest.py` 与 `plugin_package.py`：只读校验包并保留同一字节快照；不接受宿主身份，不代表已安装、已授权或已隔离。
 - `agent_py_agent/agent/plugin_command_service.py`：从既有 OwnerIdentity 生成会话目录，旧或缺失业务版本明确拒绝；当前实际插件贡献仍为空。
 - `agent_py_agent/agent/gateway_parts/plugin_command_service.py`：`/client/plugins`、`/ask` 和 `/control` 共用原可信 owner 解析，静态读取不初始化冷用户 Agent 或会话。
 - `agent_py_agent/cli/chat_parts/plugin_command_client.py`：TUI、plain Gateway 与 direct 共用显式模式和声明缓存，故障不降级，乱序或换作用域响应不回写。
@@ -514,6 +521,7 @@ docs/
 
 - `docs/design/MAINTAINABILITY_AND_JEV_REVIEW.md`：热点源码与参考阅读证据、未实施的重构顺序、Computer Use 当前条件及 Jev 可选接入方案。
 - `docs/design/PLUGIN_LIFECYCLE.md`：可选 Python 插件的核心边界、命令目录、隔离依赖、版本绑定和卡死卸载；提案与现有实现明确区分。
+- `docs/design/PLUGIN_PACKAGES.md`：本地包格式、读取预算、静态校验及待实现的安装提交和隔离撤销合同。
 - `docs/design/PLUGIN_SAMPLE_ACCEPTANCE.md`：社区候选抽样与热度快照、10 个简易插件的最小功能、分批实现顺序和组合卸载验收；不代表已实现。
 - `docs/tasks/REFACTOR_PLUGIN_GOAL.md`：发布部署前置条件、十步执行状态、每步真实多 TUI 矩阵、证据与推进条件。
 

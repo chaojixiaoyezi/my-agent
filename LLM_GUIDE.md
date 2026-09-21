@@ -101,7 +101,7 @@ TUI 插件只提交声明式展示，读取有作用域的快照/订阅；所有
 插件入口统一为 `/plugins` 管理与 `/plugins@插件ID` 调用；公共 `command_catalog.py` 已统一名称、别名和核心尾部语法，参数声明驱动绑定、帮助与补全。帮助及错误在公共入口结束，不进入模型或旧停止分支；宿主 owner 目录与提交版本已接通，实际插件贡献及装卸未开放，验收边界看 STATUS。
 后台目标状态处理读 `background_goal.py`，只依赖原 Goal/任务/时钟领域和精确能力；地址选择读 `background_routing.py`，只接收线程、owner 路径及属性的只读回调。来源消费、执行租约和能力预扫仍由 runtime 编排，旧 GoalMixin 和旧路由方法不再保留。
 后台执行 claim 的领取、最终准入与结算现读 `background_claim.py`，每次权威恢复检查读 `background_recovery.py`；runtime 绑定原状态查询、来源退休和失败记账能力。共享心跳仍在 `run_claim.py`，三种租约不合并；已同包部署双机，恢复与竞争的实际覆盖见 TESTS。
-第 3 步公共命令、参数、资源停止和宿主目录均已发布部署，本轮框架范围收口，实际分项复验及模型交付失败见 TESTS；第 4—10 步待做。现有启动插件不代表已经支持 TUI 热装卸。
+第 3 步公共命令、参数、资源停止和宿主目录均已发布部署，本轮框架范围收口，实际分项复验及模型交付失败见 TESTS；第 4 步静态包校验已进入本地开发，第 5—10 步待做。现有启动插件不代表已经支持 TUI 热装卸。
 本地提交复核与自动化测试收口见评估文档的“本地提交前复核”；不要将定向重跑写成全仓再次通过。
 后端公共合同读 `backends/base.py`，传输读 `http.py`，协议读 `openai_chat.py` / `anthropic.py` / `responses.py`，
 构造及缺配置判据读 `factory.py`；旧 base 文件不再承载协议实现。
@@ -497,3 +497,6 @@ def example(...):
 2. 读 `DESIGN_LEDGER.md`，看设计原则。
 3. 读 `STATUS.md` "当前主要限制"，看是否在限制列表里。
 4. 如果都不确定，在 `DISCUSSION_BACKLOG.md` 里记录问题，等确认后再动。
+
+本地包校验首片见 [插件包合同](docs/design/PLUGIN_PACKAGES.md)：命令 JSON 读取统一归 command_declarations，
+归档读取不安装、不导入实现；首次安装停用、原子记录及独立环境仍待接线，不把候选描述当作已授权工具。

@@ -1,14 +1,19 @@
-# LLM: 目录是宿主声明的不可变投影；scope_ref/revision 只绑定展示与过期判断，不能成为权限、安装或执行状态。
+# LLM: 目录是宿主声明的不可变投影；JSON 读取共用 command_declarations，scope_ref/revision 不能成为权限或安装状态。
 # 模块用途: 将同一份命令声明传给客户端，验证收到的结构和摘要，避免客户端按旧目录解释新动作。
 
 from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass
 
-from .command_arguments import ArgumentSpec, CommandActionSpec
+from .command_arguments import CommandActionSpec
 from .command_catalog import COMMAND_INDEX
+from .command_declarations import (
+    command_action_from_payload,
+    declaration_list,
+    plugin_command_from_payload,
+)
 from .plugin_commands import PluginCommandSpec
 
 _SCHEMA = "plugin_command_catalog.v1"
@@ -72,7 +77,7 @@ class PluginCommandCatalog:
             )
         )
 
-    # LLM: 网络载荷必须显式匹配 v1 并通过原声明校验；未知或过期协议不按默认值补成成功。
+    # LLM: 网络载荷必须显式匹配 v1 并通过公共声明读取器；保持既有摘要，不为包入口增补 wire 默认字段。
     # 函数用途: 从宿主回执重建只读目录，损坏声明或摘要不符时明确失败。
     @classmethod
     def from_payload(cls, payload: object) -> PluginCommandCatalog:
@@ -89,75 +94,17 @@ class PluginCommandCatalog:
         try:
             result = cls(
                 payload["scope_ref"],
-                tuple(_action(item) for item in _list(payload["management_actions"])),
-                tuple(_plugin(item) for item in _list(payload["plugins"])),
+                tuple(
+                    command_action_from_payload(item)
+                    for item in declaration_list(payload["management_actions"])
+                ),
+                tuple(
+                    plugin_command_from_payload(item)
+                    for item in declaration_list(payload["plugins"])
+                ),
             )
             if payload["revision"] != result.revision:
                 raise ValueError("插件目录摘要不匹配")
             return result
         except (TypeError, KeyError, AttributeError, ValueError) as exc:
             raise ValueError("插件目录声明无效") from exc
-
-
-# LLM: JSON 数组不能从字符串、对象或任意可迭代值推断；仅转换已验证的声明集合。
-# 函数用途: 为目录中的动作、参数和候选列表提供一致的类型检查。
-def _list(value: object) -> list:
-    if not isinstance(value, list):
-        raise ValueError("声明集合必须是数组")
-    return value
-
-
-# LLM: 序列化字段与 dataclass 同源，但客户端必须收到全部字段；布尔值和描述文本禁止隐式强制转换。
-# 函数用途: 校验一条跨进程声明的字段集合和基础类型。
-def _record(
-    value: object, kind: type, *, strings: tuple[str, ...], booleans: tuple[str, ...] = ()
-) -> dict:
-    if not isinstance(value, dict) or set(value) != {item.name for item in fields(kind)}:
-        raise ValueError("声明字段不完整或存在未知字段")
-    if any(not isinstance(value[key], str) for key in strings) or any(
-        type(value[key]) is not bool for key in booleans
-    ):
-        raise ValueError("声明字段类型错误")
-    return dict(value)
-
-
-# LLM: 参数的类型、默认值和候选约束继续由 ArgumentSpec 裁决；这里只恢复 JSON 丢失的不可变集合形态。
-# 函数用途: 读取一个参数声明，不接受字符串冒充开关或数组。
-def _argument(value: object) -> ArgumentSpec:
-    row = _record(
-        value,
-        ArgumentSpec,
-        strings=("name", "summary", "value_type"),
-        booleans=("required", "multiple", "path"),
-    )
-    row["options"] = tuple(_list(row["options"]))
-    row["choices"] = tuple(_list(row["choices"]))
-    if isinstance(row["default"], list):
-        row["default"] = tuple(row["default"])
-    return ArgumentSpec(**row)
-
-
-# LLM: 动作 kind/target 仍只是声明；读取目录不能取得或执行对应 handler。
-# 函数用途: 将公开动作的参数恢复为经过同一合同验证的描述。
-def _action(value: object) -> CommandActionSpec:
-    row = _record(
-        value,
-        CommandActionSpec,
-        strings=("name", "summary", "kind", "target"),
-        booleans=("available",),
-    )
-    row["arguments"] = tuple(_argument(item) for item in _list(row["arguments"]))
-    return CommandActionSpec(**row)
-
-
-# LLM: 插件版本和激活引用仅保留宿主声明，实际执行仍需原生命周期的当前准入与撤销核对。
-# 函数用途: 读取插件静态信息及其动作，不导入实现或连接执行端点。
-def _plugin(value: object) -> PluginCommandSpec:
-    row = _record(
-        value,
-        PluginCommandSpec,
-        strings=("plugin_id", "summary", "default_action", "package_version", "activation_id"),
-        booleans=("enabled",),
-    )
-    row["actions"] = tuple(_action(item) for item in _list(row["actions"]))
-    return PluginCommandSpec(**row)
