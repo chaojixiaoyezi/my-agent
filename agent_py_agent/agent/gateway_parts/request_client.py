@@ -175,17 +175,15 @@ def submit_gateway_ask(
     return request_id, request_path, response_path
 
 
-# LLM: 普通自然语言不得加载控制运行时；只有显式 slash 语法才按共享 typed parser 校验或转换成 system_task。
-# 函数用途: 规范请求正文和可选持续任务载荷，并拒绝绕过控制端点的系统命令。
+# LLM: 普通自然语言不加载控制运行时；显式 slash 按公共判据校验，插件命名空间不能写入普通队列。
+# 函数用途: 规范正文及既有持续任务载荷，在创建请求前拒绝必须经命令入口处理的输入。
 def _normalized_gateway_prompt(params: GatewayAskParams) -> tuple[str, dict[str, object]]:
     prompt = str(params.prompt or "").strip()
     system_task = dict(params.system_task or {})
     if not prompt.startswith("/"):
         return prompt, system_task
-    from ..conversation.control_commands import (
-        parse_conversation_task_command,
-        system_slash_command_name,
-    )
+    from ..command_catalog import system_slash_command_name
+    from ..conversation.control_commands import parse_conversation_task_command
 
     if not system_task:
         task_command = parse_conversation_task_command(prompt)

@@ -1,11 +1,7 @@
+# LLM: 会话控制保留原类型、参数语义和回执格式；词法声明读取公共目录，插件不可进入旧控制执行器。
+# 模块用途: 将明确命令解释为会话控制或任务，供终端与 IM 共用，普通语言不获得控制权。
+
 from __future__ import annotations
-
-"""Typed, adapter-neutral controls for an ordinary conversation task.
-
-给人看的解释：
-这里定义普通聊天里可以立即生效的控制动作。飞书、终端和以后新增的 IM
-只负责传递命令，不各自猜测“停止”“纠偏”“查看状态”是什么意思。
-"""
 
 import hashlib
 import json
@@ -13,6 +9,11 @@ import re
 from dataclasses import asdict, dataclass
 from typing import Literal
 
+from ..command_catalog import (
+    match_conversation_command,
+    system_slash_command_name,
+    unavailable_command_message,
+)
 from .authority import (
     CONVERSATION_AUDIT_PREPARE_ATTR,
     CONVERSATION_CANCELLATION_SCOPE_ATTR,
@@ -35,17 +36,6 @@ ControlKind = Literal[
 ]
 TaskCommandKind = Literal["audit_prepare"]
 
-_STATUS_COMMAND = re.compile(r"^/status(?:\s+(.*))?$", re.IGNORECASE)
-_CONTEXT_COMMAND = re.compile(r"^/context(?:\s+(.*))?$", re.IGNORECASE)
-_COMPACT_COMMAND = re.compile(r"^/compact(?:\s*(.*))?$", re.IGNORECASE | re.DOTALL)
-_EFFORT_COMMAND = re.compile(r"^/effort(?:\s+(\S+))?\s*$", re.IGNORECASE)
-_STEER_COMMAND = re.compile(r"^/btw(?:\s+(.*))?$", re.IGNORECASE)
-_STOP_COMMAND = re.compile(r"^/stop(?:\s+(.*))?$", re.IGNORECASE)
-_INTERRUPT_COMMAND = re.compile(r"^/interrupt(?:\s+(.*))?$", re.IGNORECASE)
-_GOAL_COMMAND = re.compile(r"^/goal(?:\s+(.*))?$", re.IGNORECASE)
-_AUDIT_PREFIX = re.compile(r"^/audit(?:\s|$)", re.IGNORECASE)
-_VERBOSE_COMMAND = re.compile(r"^/(?:verbose|v)(?:\s+(\S+))?\s*$", re.IGNORECASE)
-_SYSTEM_SLASH = re.compile(r"^/([a-z][a-z0-9_-]*)(?:\s|$)", re.IGNORECASE)
 _AUDIT_UNIT_SECONDS = {"d": 86400, "h": 3600, "m": 60}
 _AUDIT_WINDOW_MAX_SECONDS = 400 * 86400
 _WORK_NAME_MAX_CHARS = 64
@@ -164,28 +154,29 @@ def parse_conversation_control(
     return command if isinstance(command, ConversationControlCommand) else None
 
 
-# LLM: 所有通道复用此显式语法；interrupt 是 stop 的本轮操作，不由自然语言推断，也不等于暂停 Goal。
-# 函数用途：区分即时控制与模型任务，Esc 与 /stop 共用停止传输但保留不同生命周期语义。
+# LLM: 名称和捕获正文读取公共声明；原控制类型与 Goal/Audit 参数解释不变，未知插件只返回无效结果。
+# 函数用途: 区分即时控制与模型任务，保留暂停目标、中断本轮和停止资源三种语义。
 def parse_conversation_command(
     text: object,
     *,
     reject_unknown_slash: bool = False,
 ) -> ConversationCommand | None:
     raw = str(text or "").strip()
-    if match := _STATUS_COMMAND.fullmatch(raw):
-        return _argumentless_command("status", match.group(1), "/status")
-    if match := _CONTEXT_COMMAND.fullmatch(raw):
-        return _argumentless_command("context", match.group(1), "/context")
-    if match := _COMPACT_COMMAND.fullmatch(raw):
-        instructions = str(match.group(1) or "").strip()
+    name, trailing = match_conversation_command(raw) or ("", None)
+    if name == "status":
+        return _argumentless_command("status", trailing, "/status")
+    if name == "context":
+        return _argumentless_command("context", trailing, "/context")
+    if name == "compact":
+        instructions = str(trailing or "").strip()
         return ConversationControlCommand(
             "compact",
             value=instructions,
             operation="run",
             usage="用法：/compact [可选的摘要要求]",
         )
-    if match := _EFFORT_COMMAND.fullmatch(raw):
-        value = str(match.group(1) or "").strip().lower()
+    if name == "effort":
+        value = str(trailing or "").strip().lower()
         if value in {"current", "status"}:
             value = ""
         return ConversationControlCommand(
@@ -195,27 +186,27 @@ def parse_conversation_command(
             valid=not value or value in {"low", "medium", "high", "max", "auto", "help"},
             usage="用法：/effort [low|medium|high|max|auto]",
         )
-    if match := _STOP_COMMAND.fullmatch(raw):
-        return _argumentless_command("stop", match.group(1), "/stop")
-    if match := _INTERRUPT_COMMAND.fullmatch(raw):
+    if name == "stop":
+        return _argumentless_command("stop", trailing, "/stop")
+    if name == "interrupt":
         return ConversationControlCommand(
-            "stop", operation="interrupt", valid=not str(match.group(1) or "").strip(),
+            "stop", operation="interrupt", valid=not str(trailing or "").strip(),
             usage="用法：/interrupt（中断本轮；活动 Goal 仍会继续）",
         )
-    if match := _STEER_COMMAND.fullmatch(raw):
-        value = str(match.group(1) or "").strip()
+    if name == "btw":
+        value = str(trailing or "").strip()
         return ConversationControlCommand(
             "steer",
             value=value,
             valid=bool(value),
             usage="用法：/btw 你的补充要求",
         )
-    if match := _GOAL_COMMAND.fullmatch(raw):
-        return _goal_command(match.group(1))
-    if _AUDIT_PREFIX.match(raw):
+    if name == "goal":
+        return _goal_command(trailing)
+    if name == "audit":
         return _audit_command(raw)
-    if match := _VERBOSE_COMMAND.fullmatch(raw):
-        value = str(match.group(1) or "").strip().lower()
+    if name == "verbose":
+        value = str(trailing or "").strip().lower()
         return ConversationControlCommand(
             "verbose",
             value=value,
@@ -240,7 +231,7 @@ def parse_conversation_command(
             "unsupported",
             operation=name,
             valid=False,
-            usage=f"不支持的系统命令：/{name}。输入 /help 查看当前界面支持的命令。",
+            usage=unavailable_command_message(name),
         )
     return None
 
@@ -250,13 +241,6 @@ def parse_conversation_command(
 def parse_conversation_task_command(text: object) -> ConversationTaskCommand | None:
     command = parse_conversation_command(text)
     return command if isinstance(command, ConversationTaskCommand) else None
-
-
-# LLM: Slash syntax is a transport protocol marker, never a natural-language intent guess.
-# 函数用途：识别位于整条消息开头的系统命令名；文件路径和正文中的斜杠不会命中。
-def system_slash_command_name(text: object) -> str:
-    match = _SYSTEM_SLASH.match(str(text or "").strip())
-    return str(match.group(1) or "").lower() if match is not None else ""
 
 
 # LLM: Runtime task attributes are projected from the typed command payload, never re-inferred from prose.
@@ -560,5 +544,4 @@ __all__ = [
     "parse_conversation_task_command",
     "render_conversation_task_status",
     "render_verbose_control",
-    "system_slash_command_name",
 ]

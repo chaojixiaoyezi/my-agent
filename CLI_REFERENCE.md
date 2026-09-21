@@ -84,6 +84,11 @@ python -m agent_py_agent --help
 Gateway 管理员的 `my-agent gateway stop` / HTTP `POST /stop` 是服务生命周期命令，与聊天
 `/stop` 不同。
 
+## 插件命令入口
+
+公共目录预留 `/plugins [管理动作]` 与 `/plugins@<插件ID> [动作] [参数]`。当前首片仅识别命名空间并明确提示尚未开放，不能安装、启用或调用插件。`/help` 与静态补全读取同一声明；补全只填入，`/plugins@` 后直接填写 ID，不插入空格。
+未知或异常后缀不会转为普通聊天、运行中插话、Shell 或停止操作。完整参数语法和装卸功能见 [插件设计](docs/design/PLUGIN_LIFECYCLE.md)，仍待后续实现。
+
 ## 常用命令
 
 安全检查一轮 watch：

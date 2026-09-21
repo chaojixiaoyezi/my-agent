@@ -7,6 +7,8 @@ import urllib.error
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+
 from agent_py_agent.agent.concurrency.interrupt import is_interrupted, register_interruptible
 from agent_py_agent.agent.conversation.control_commands import (
     ConversationControlResult,
@@ -23,6 +25,62 @@ from agent_py_agent.cli.chat_parts.control_runtime import (
 )
 from agent_py_agent.cli.chat_parts.slash_command_types import SlashCommandContext
 from agent_py_agent.cli.chat_parts.slash_commands import handle_common_slash_command
+
+
+@pytest.mark.parametrize("raw", [
+    "/plugins", "/plugins enable demo", "/plugins@", "/plugins@Demo",
+    '/plugins@demo run "中文 a" -- -x | literal',
+])
+def test_plugin_command_is_consumed_without_calling_control_or_agent(raw) -> None:
+    output: list[str] = []
+    executor = MagicMock(side_effect=AssertionError("插件命令不能进入旧控制器"))
+    agent = MagicMock()
+    ctx = SlashCommandContext(agent, 5, [], [], output.append, executor)
+
+    assert handle_common_slash_command(raw, ctx=ctx)
+
+    assert output == ["插件命令尚未开放；当前版本还不能安装、启用或调用插件。"]
+    executor.assert_not_called()
+    assert agent.mock_calls == []
+    assert ctx.runtime_inject == [] and ctx.prompt_files == []
+
+
+@pytest.mark.parametrize("raw", ["请解释 /plugins@Demo 的用途", "/plugins/tools.py"])
+def test_plugin_words_in_ordinary_input_are_left_for_chat(raw) -> None:
+    executor = MagicMock()
+    ctx = SlashCommandContext(SimpleNamespace(), 5, [], [], lambda _text: None, executor)
+    assert not handle_common_slash_command(raw, ctx=ctx)
+    executor.assert_not_called()
+
+
+@pytest.mark.parametrize(("raw", "query"), [
+    ("/memory订单", "订单"), ("/memory-old", "-old"),
+    ("/memory/path", "/path"), ("/memory a\nb", "a\nb"),
+    ("/MEMORY x", None),
+])
+def test_memory_prefix_and_case_survive_catalog_migration(raw, query) -> None:
+    request_memory = MagicMock(return_value={"ok": True, "records": []})
+    agent = SimpleNamespace(gateway_client_only=True, request_memory=request_memory)
+    ctx = SlashCommandContext(agent, 5, [], [], lambda _text: None)
+
+    assert handle_common_slash_command(raw, ctx=ctx)
+
+    if query is None:
+        request_memory.assert_not_called()
+    else:
+        request_memory.assert_called_once_with(
+            operation="search", session_id="default", query=query, limit=5,
+        )
+
+
+@pytest.mark.parametrize(("raw", "expected"), [
+    ("/EXIT", True), ("/logout", True), ("/QUIT", True), ("LOGOUT", True),
+    ("退出", True), ("quit", False), ("/exit extra", False),
+])
+def test_exit_aliases_keep_their_original_scope(raw, expected) -> None:
+    from agent_py_agent.cli.chat_parts.slash_commands import is_exit_command
+
+    assert is_exit_command(raw) is expected
 
 
 def test_slash_sessions_lists_only_current_owner_and_exact_resume_command(tmp_path) -> None:

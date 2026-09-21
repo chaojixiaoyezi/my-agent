@@ -6,6 +6,7 @@ import json
 import threading
 import time
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -25,6 +26,26 @@ from agent_py_agent.agent.gateway_parts.request_worker import (
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.cli import gateway_client
 from agent_py_agent.cli.chat_parts.gateway_client import poll_gateway_chunks
+
+
+@pytest.mark.parametrize("raw", [
+    "/plugins", "/plugins@", "/plugins@Demo", '/plugins@demo run --path "a b" -- -x',
+])
+@pytest.mark.parametrize("system_task", [None, {"kind": "audit_prepare"}])
+def test_plugin_input_is_rejected_before_request_allocation(tmp_path, monkeypatch, raw, system_task):
+    from agent_py_agent.agent.gateway_parts import request_client
+    from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
+
+    paths = gateway_paths_from_root(tmp_path)
+    allocated = MagicMock(side_effect=AssertionError("错误命令不能分配或写入请求"))
+    monkeypatch.setattr(request_client, "new_gateway_request_id", allocated)
+    with pytest.raises(ValueError, match="系统命令"):
+        submit_gateway_ask(
+            paths, params=GatewayAskParams(prompt=raw, system_task=system_task),
+            on_request_allocated=allocated,
+        )
+    allocated.assert_not_called()
+    assert list(paths.inbox.glob("*.json")) == []
 
 
 # LLM: Client polling tests must create the same canonical terminal envelope as the worker; a

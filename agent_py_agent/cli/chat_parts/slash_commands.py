@@ -1,25 +1,32 @@
 
-# LLM: 本模块是 chat 系统斜杠命令的目录与分派入口；帮助/补全共享 CHAT_SLASH_COMMANDS，执行权仍归 typed parser 和显式 handler。
-# 模块用途: 列出当前聊天命令、渲染帮助文字，并即时处理控制、记忆、提示文件和保证档命令。
+# LLM: chat 分派读取公共 command_catalog，不再声明命令目录；执行权仍归原 typed parser、权限与显式 handler。
+# 模块用途: 渲染公共帮助并处理当前界面的控制、记忆和提示文件命令，错误插件输入在普通聊天前结束。
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime
 
+from ...agent.command_catalog import (
+    COMMAND_CATALOG,
+    COMMAND_INDEX,
+    system_slash_command_name,
+    unavailable_command_message,
+)
 from ...agent.conversation.control_commands import (
     parse_conversation_control,
     parse_conversation_task_command,
-    system_slash_command_name,
 )
-from .slash_command_types import CHAT_SLASH_COMMANDS, SlashCommandContext
+from .slash_command_types import SlashCommandContext
 
 
-# LLM: help renderer 只投影结构化目录项，保持既有 30 列用法栏和中文用户文案；不能把帮助文本反向作为命令解析器。
-# 函数用途: 生成 plain/TUI 共用的中文命令帮助正文。
+# LLM: 帮助投影公共声明及其用法变体，保持 30 列布局；文案不能反向决定解析与执行。
+# 函数用途: 为 plain/TUI 生成同一份中文帮助，并准确标示尚未开放的命令。
 def _render_chat_help_text() -> str:
     lines = ["可用命令："]
-    lines.extend(f"{spec.usage:<30} {spec.summary}" for spec in CHAT_SLASH_COMMANDS)
+    for spec in COMMAND_CATALOG:
+        for usage, summary in ((spec.usage, spec.summary), *spec.help_variants):
+            lines.append(f"{usage:<30} {summary}")
     return "\n".join(lines) + "\n"
 
 
@@ -29,6 +36,8 @@ CHAT_HELP_TEXT = _render_chat_help_text()
 SlashHandler = Callable[[str, SlashCommandContext, bool], bool | None]
 
 
+# LLM: 所有显式命令先经现有 handler；返回已处理后，TUI/plain 不得再把原输入当作聊天或活动插话。
+# 函数用途: 顺序分派当前界面支持的命令，执行副作用仍由各原处理器负责。
 def handle_common_slash_command(
     user: str,
     *,
@@ -248,6 +257,8 @@ def _handle_audit_command(
     return True
 
 
+# LLM: 公共命名空间判据也捕获无效插件 ID；只展示不可用结果，不转给控制执行器、模型或 Shell。
+# 函数用途: 消费当前界面不能执行的明确系统命令，保留 Audit 任务和 show-prompt 的原交接。
 def _handle_unsupported_slash_command(
     user: str, ctx: SlashCommandContext, include_plain_help: bool
 ) -> bool | None:
@@ -259,12 +270,15 @@ def _handle_unsupported_slash_command(
         return None
     if name == "show-prompt":
         return None
-    ctx.print_line(f"不支持的系统命令：/{name}。输入 /help 查看当前界面支持的命令。")
+    ctx.print_line(unavailable_command_message(name))
     return True
 
 
+# LLM: slash 别名读取唯一目录；无斜杠退出词保持现有范围，不因别名归一扩展自然语言控制。
+# 函数用途: 识别退出当前聊天界面的显式输入，不停止 Gateway 或其它会话。
 def is_exit_command(user: str) -> bool:
-    return user.lower() in {"/exit", "/logout", "/quit", "exit", "logout", "退出"}
+    spec = COMMAND_INDEX["exit"]
+    return user.lower() in {"exit", "logout", "退出", *("/" + name for name in (spec.name, *spec.aliases))}
 
 
 # LLM: `/expand` 的帮助目录、plain TUI 与 rich TUI 必须共享这一解析器；显式 last
@@ -289,7 +303,6 @@ def is_show_prompt_command(user: str) -> tuple[bool, str]:
 
 __all__ = [
     "CHAT_HELP_TEXT",
-    "CHAT_SLASH_COMMANDS",
     "handle_common_slash_command",
     "is_exit_command",
     "is_show_prompt_command",

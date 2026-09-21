@@ -4,6 +4,7 @@ import threading
 import time
 from queue import Queue
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 from prompt_toolkit.buffer import Buffer, CompletionState
@@ -32,6 +33,75 @@ from agent_py_agent.cli.chat_parts.tui_interaction import TuiInteractionState
 from agent_py_agent.cli.chat_parts.tui_keybindings import _normalize_bracketed_paste
 from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
 from agent_py_agent.cli.chat_parts.tui_transcript import TuiTranscriptModeState
+
+
+def test_plugin_namespace_completion_only_edits_without_path_scan(tmp_path, monkeypatch) -> None:
+    from agent_py_agent.cli.chat_parts import tui_input
+
+    scan = MagicMock(side_effect=AssertionError("插件命名空间不能扫描文件"))
+    monkeypatch.setattr(tui_input, "_path_candidates", scan)
+    completer = TuiInputCompleter(tmp_path)
+    candidates = list(completer.get_completions(Document("/plug"), CompleteEvent()))
+    assert {item.text for item in candidates} == {"/plugins", "/plugins@"}
+    assert all(item.enter_action == "apply" for item in candidates)
+    namespace = next(item for item in candidates if item.text == "/plugins@")
+    assert namespace.append_space is False
+    buffer = Buffer()
+    buffer.set_document(Document("/plug"), bypass_readonly=True)
+    buffer.complete_state = CompletionState(buffer.document, [namespace], complete_index=0)
+    assert apply_selected_completion(buffer) is namespace
+    assert buffer.text == "/plugins@"
+    assert list(completer.get_completions(Document("/plugins@Demo"), CompleteEvent())) == []
+    scan.assert_not_called()
+
+
+@pytest.mark.parametrize("use_gateway", [False, True])
+@pytest.mark.parametrize("mode", ["idle", "foreground", "background", "child"])
+def test_plugin_submit_uses_real_dispatch_without_chat_guidance_or_stop(
+    tmp_path, monkeypatch, use_gateway, mode,
+) -> None:
+    from agent_py_agent.cli.chat_parts import control_runtime, tui
+
+    input_area = TextArea(multiline=True)
+    input_area.text = '/plugins@Demo run --path "中文 a" -- -x | literal'
+    output: list[str] = []
+    blocked = MagicMock(side_effect=AssertionError("命令错误不能进入执行或普通输入"))
+    monkeypatch.setattr(tui, "_cprint", output.append)
+    monkeypatch.setattr(control_runtime, "execute_chat_control", blocked)
+    for name in ("_tui_submit_active_turn_input", "_tui_enqueue_job",
+                 "_tui_submit_agent_input", "_dispatch_agent_interrupt"):
+        monkeypatch.setattr(tui_keybindings, name, blocked)
+    monkeypatch.setattr(tui_keybindings, "_agent_navigation_snapshot", lambda _params:
+                        SimpleNamespace(active_run_id="child-1" if mode == "child" else "", terminal=False))
+    runtime = TuiRuntime("plugin-input")
+    if mode == "background":
+        runtime.update_background_activity(
+            1, {"main_activity": {"task_id": "goal-task-1", "phase": "running"}},
+        )
+    background_before = runtime.has_active_background_task()
+    params = SimpleNamespace(
+        input_area=input_area, interaction_state=TuiInteractionState(), tui_runtime=runtime,
+        agent=SimpleNamespace(), args=SimpleNamespace(memory_limit=5), runtime_inject=[], prompt_files=[],
+        use_gateway=use_gateway, paths=SimpleNamespace(root=tmp_path), state_lock=threading.Lock(),
+        is_running_ref=[mode == "foreground"], pending_jobs_ref=[0], running_prompt_ref=["正在核对"],
+        running_request_id_ref=["goal-task-1" if mode == "background" else "req-1"],
+        running_started_at_ref=[0.0], shutting_down_ref=[False], stop_event=threading.Event(),
+        assistant_outputs=[], current_session_id="session-1",
+        control_operation_reconciler=SimpleNamespace(enqueue=blocked),
+        exit_armed_at_ref=[0.0], eof_armed_at_ref=[0.0],
+        escape_armed_at_ref=[0.0], escape_armed_text_ref=[""],
+    )
+    event = SimpleNamespace(app=SimpleNamespace(exit=blocked, invalidate=lambda: None))
+
+    tui_keybindings._submit_input_area(event, params)
+
+    assert output == ["插件命令尚未开放；当前版本还不能安装、启用或调用插件。"]
+    blocked.assert_not_called()
+    assert not params.stop_event.is_set() and params.pending_jobs_ref == [0]
+    assert params.is_running_ref == [mode == "foreground"]
+    assert runtime.has_active_background_task() == background_before == (mode == "background")
+    assert runtime.store.snapshot().queued_inputs == ()
+    assert input_area.text == ""
 
 
 def _job(request_id: str, text: str) -> ChatJob:

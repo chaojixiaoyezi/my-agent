@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..agent_core.runtime_mixin import RunParams, release_active_turn_inputs_for_compact
+from ..command_catalog import system_slash_command_name
 from ..concurrency.interrupt import is_interrupted
 from ..conversation.audit_lifecycle import (
     AuditLifecycleError,
@@ -33,10 +34,7 @@ from ..conversation.authority import (
     CONVERSATION_WORKSPACE_TASK_STATUS_ATTR,
 )
 from ..conversation.compact_carry import compact_overflow_carry
-from ..conversation.control_commands import (
-    conversation_task_attributes,
-    system_slash_command_name,
-)
+from ..conversation.control_commands import conversation_task_attributes
 from ..tooling.operation_verification import public_operation_verification
 from . import request_binding, request_context, request_history, request_prompt
 from .approval_session import (
@@ -352,8 +350,8 @@ def _configure_gateway_main_activity(context: request_context.GatewayAskRunConte
     )
 
 
-# LLM: 仅在车道内运行；用户消息成功追加后才进入模型，返回结果沿 request_history 统一提交或 repair。
-# 函数用途: 配置流和审批、登记命名工作并执行一轮会话，历史不可写时阻止模型副作用。
+# LLM: 仅在车道内运行；公共命令判据先于用户历史和模型，旧队列也拒绝插件命名空间，结果仍沿原提交链。
+# 函数用途: 配置流和审批并执行会话；明确系统命令及历史写入失败均阻止模型副作用。
 def _execute_gateway_conversation_turn(
     context: request_context.GatewayAskRunContext,
     prompt: str,

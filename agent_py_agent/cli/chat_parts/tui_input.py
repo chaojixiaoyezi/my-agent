@@ -18,8 +18,8 @@ from prompt_toolkit.layout.controls import UIContent, UIControl
 from prompt_toolkit.layout.processors import Processor, Transformation, TransformationInput
 from prompt_toolkit.utils import get_cwidth
 
+from ...agent.command_catalog import COMMAND_CATALOG
 from .chat_prompt_queue import pop_all_matching
-from .slash_command_types import CHAT_SLASH_COMMANDS
 from .tui_runtime import TuiRuntime
 
 QUEUE_EDIT_PLACEHOLDER = "Press up to edit queued messages"
@@ -203,16 +203,18 @@ class TuiInputCompleter(Completer):
     def __init__(self, workspace: Path) -> None:
         self.workspace = Path(workspace).expanduser().resolve(strict=False)
 
-    # LLM: completion 分支只看光标前的明确语法位置；普通中文与正文中的斜杠不会被当成系统命令。
-    # 函数用途: 根据当前 token 生成命令或文件候选。
+    # LLM: 名称和 Enter 行为读取公共声明；插件前缀只填入且紧接 ID，不查路径、不执行插件或扩大授权。
+    # 函数用途: 按当前 token 生成命令或文件候选，保留原核心命令的提交方式。
     def get_completions(self, document: Document, complete_event: Any):
         del complete_event
         before = document.text_before_cursor
         slash_prefix = _slash_command_prefix(before)
         if slash_prefix is not None:
             directory = {}
-            for spec in CHAT_SLASH_COMMANDS:
-                directory.setdefault(spec.name, spec)
+            for spec in COMMAND_CATALOG:
+                directory[spec.name] = spec
+                if spec.namespace_separator:
+                    directory[spec.name + spec.namespace_separator] = spec
             for name in sorted(directory):
                 spec = directory[name]
                 if not name.startswith(slash_prefix):
@@ -223,8 +225,8 @@ class TuiInputCompleter(Completer):
                     display="/" + name,
                     display_meta=spec.summary,
                     kind="command",
-                    enter_action="submit" if spec.submit_on_enter else "apply",
-                    append_space=True,
+                    enter_action="submit" if spec.submit_on_enter and name == spec.name else "apply",
+                    append_space=name == spec.name,
                 )
             return
         query = _path_query(before)

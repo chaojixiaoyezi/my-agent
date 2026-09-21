@@ -3,6 +3,9 @@ from __future__ import annotations
 import json
 import time
 from types import SimpleNamespace
+from unittest.mock import MagicMock
+
+import pytest
 
 from agent_py_agent.agent.adapter.delivery import (
     GatewayReplyDeliveryStore,
@@ -522,8 +525,11 @@ def test_model_generation_prefers_typed_model_chunk_sink() -> None:
     assert plain_chunks == ["兼容旧回调"]
 
 
+@pytest.mark.parametrize("prompt", [
+    "/verbose on", "/plugins", "/plugins@", '/plugins@Demo run --path "a b" -- -x',
+])
 def test_legacy_queued_system_command_fails_closed_beside_claimed_request(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, prompt,
 ) -> None:
     owner_root = tmp_path / "owner-runtime"
     agent = SimpleAgent(
@@ -542,7 +548,7 @@ def test_legacy_queued_system_command_fails_closed_beside_claimed_request(
                 "status": "processing",
                 "turn_phase": "open",
                 "execution_attempt_id": request_id,
-                "goal": "/verbose on",
+                "goal": prompt,
                 "conversation": _conversation(),
             }
         ),
@@ -556,6 +562,10 @@ def test_legacy_queued_system_command_fails_closed_beside_claimed_request(
         return path, time.time()
 
     monkeypatch.setattr(request_execution, "open_chunk_stream", capture_open)
+    model = MagicMock(side_effect=AssertionError("系统命令不能调用模型"))
+    history = MagicMock(side_effect=AssertionError("系统命令不能追加用户历史"))
+    monkeypatch.setattr(request_execution, "_run_gateway_turn_with_conversation_compact", model)
+    monkeypatch.setattr(request_execution.request_history, "append_gateway_conversation_message", history)
 
     response = _handle_gateway_request(agent, request_path)
 
@@ -563,6 +573,8 @@ def test_legacy_queued_system_command_fails_closed_beside_claimed_request(
     assert response["error_code"] == "SYSTEM_COMMAND_ROUTING_ERROR"
     assert opened == [request_path.with_name(f"{request_id}.chunks.jsonl")]
     assert not opened[0].is_relative_to(owner_root)
+    model.assert_not_called()
+    history.assert_not_called()
 
 
 def test_full_progress_redacts_credentials_and_internal_protocol() -> None:

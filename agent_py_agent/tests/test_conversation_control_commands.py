@@ -1,3 +1,5 @@
+import pytest
+from agent.command_catalog import system_slash_command_name
 from agent.conversation.control_commands import (
     ConversationControlResult,
     ConversationTaskStatus,
@@ -5,7 +7,6 @@ from agent.conversation.control_commands import (
     parse_conversation_control,
     parse_conversation_task_command,
     render_conversation_task_status,
-    system_slash_command_name,
 )
 
 
@@ -78,6 +79,49 @@ def test_verbose_and_unknown_slash_commands_are_typed_system_inputs() -> None:
     assert unknown is not None and unknown.kind == "unsupported" and not unknown.valid
     assert system_slash_command_name("/usr/bin/python") == ""
     assert system_slash_command_name("请运行 /stop") == ""
+
+
+@pytest.mark.parametrize("raw", [
+    "/plugins@", "/plugins@Demo", "/PLUGINS@Demo help",
+    '/plugins@demo run --path "C:\\new folder\\中文.txt" -- -x | literal',
+    "/plugins@../../invalid", "/plugins@@demo", "/plugins@demo\n参数",
+])
+def test_reserved_plugin_namespace_never_becomes_chat_or_stop(raw: str) -> None:
+    assert system_slash_command_name(raw).startswith("plugins@")
+    command = parse_conversation_control(raw, reject_unknown_slash=True)
+    assert command is not None
+    assert command.kind == "unsupported" and not command.valid
+    assert "尚未开放" in command.usage
+    assert parse_conversation_task_command(raw) is None
+
+
+@pytest.mark.parametrize("raw", [
+    "请解释 /plugins@Demo 的用途", "/plugins/tools.py", "`` `/plugins@Demo` ``", "/usr/bin/python",
+])
+def test_plugin_namespace_does_not_capture_ordinary_text_or_paths(raw: str) -> None:
+    assert system_slash_command_name(raw) == ""
+    assert parse_conversation_control(raw, reject_unknown_slash=True) is None
+
+
+@pytest.mark.parametrize(("raw", "kind", "value", "valid"), [
+    ("/compact保留末尾\n以及引用", "compact", "保留末尾\n以及引用", True),
+    (r'/COMPACT  保留 "C:\new folder\中文.txt" | $literal --', "compact",
+     r'保留 "C:\new folder\中文.txt" | $literal --', True),
+    (r'/goal 整理 "C:\new folder" -- 不解释 | 符号', "goal",
+     r'整理 "C:\new folder" -- 不解释 | 符号', True),
+    (r'/btw 保留 "a b" 和 C:\new\file -- |', "steer",
+     r'保留 "a b" 和 C:\new\file -- |', True),
+    ("/btw 第一行\n第二行", "steer", "", False),
+    ("/btw-extra", "steer", "", False),
+    ("/effort HIGH", "effort", "high", True),
+    ("/V FULL", "verbose", "full", True),
+])
+def test_core_command_body_boundaries_stay_unchanged(
+    raw: str, kind: str, value: str, valid: bool,
+) -> None:
+    command = parse_conversation_control(raw)
+    assert command is not None
+    assert (command.kind, command.value, command.valid) == (kind, value, valid)
 
 
 def test_audit_prepare_strips_protocol_without_activating_guarantee() -> None:

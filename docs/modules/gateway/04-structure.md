@@ -1,5 +1,12 @@
 # Gateway Structure
 
+## 公共命令边界
+
+`agent/command_catalog.py` 提供核心名称、别名、会话尾部语法及保留命名空间的唯一声明。
+HTTP ask/control 先经原会话解析器拒绝无效命令；`request_client.py` 在分配请求编号前拒绝普通队列中的系统命令，
+`request_execution.py` 在追加用户历史和调用模型前再次校验旧队列。三处沿原入口顺序，不增加队列或控制类型。
+当前 `/plugins` 与 `/plugins@` 仅明确返回尚未开放；参数、身份和运行目录快照留待插件后续切片实现。
+
 ## 请求准备、绑定与历史边界
 
 `request_execution.py` 只编排已领取请求的租约、模型工作片、超窗恢复和收尾。

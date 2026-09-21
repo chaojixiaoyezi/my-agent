@@ -7,6 +7,7 @@ import time
 import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -3862,14 +3863,35 @@ def test_http_ask_routes_stop_to_live_window_interrupt(tmp_path) -> None:
     assert agent.conversation_store.guidance.pending("request", "req-1") == []
 
 
-def test_http_ask_rejects_unknown_slash_without_model_or_guidance(tmp_path) -> None:
+@pytest.mark.parametrize("endpoint", ["ask", "control"])
+@pytest.mark.parametrize("command", [
+    "/not-a-command anything", "/plugins", "/plugins@", "/PLUGINS@Demo run",
+    '/plugins@demo run --path "C:\\new folder\\中文.txt" -- -x | literal',
+])
+def test_http_commands_reject_unknown_slash_without_model_guidance_or_stop(
+    tmp_path, monkeypatch, endpoint, command,
+) -> None:
+    from agent_py_agent.agent.gateway_parts import http_handlers
+
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
         tmp_path,
     )
     paths = gateway_paths(agent)
     paths.processing.mkdir(parents=True, exist_ok=True)
-    write_json_file(paths.processing / "req-1.json", _request("req-1"))
+    request_path = paths.processing / "req-1.json"
+    write_json_file(request_path, _request("req-1"))
+    before = request_path.read_bytes()
+    agent.conversation_store.guidance.append({
+        "target_type": "request", "target_id": "req-1", "message": "原任务的补充",
+        "sender": "feishu:u-1", "delivery": "current_request",
+    })
+    guidance_before = agent.conversation_store.guidance.pending("request", "req-1")
+    control = MagicMock(wraps=http_handlers._handle_persistent_control_operation)
+    monkeypatch.setattr(http_handlers, "_handle_persistent_control_operation", control)
+    model = MagicMock(side_effect=AssertionError("命令错误不能调用模型"))
+    monkeypatch.setattr(agent, "run", model)
+    interrupted = threading.Event()
     auth = AuthMiddleware(AuthManager(admin_user_id="admin", auth_enabled=True))
     port = _free_port()
     server = GatewayHTTPServer(
@@ -3877,34 +3899,33 @@ def test_http_ask_rejects_unknown_slash_without_model_or_guidance(tmp_path) -> N
         paths,
         params=GatewayHTTPServerParams(agent=agent, auth_middleware=auth),
     )
-    server.start()
-    try:
-        body = json.dumps(
-            {
-                "kind": "ask",
-                "goal": "/not-a-command anything",
-                "conversation_id": "c-1",
-            }
-        ).encode("utf-8")
-        request = urllib.request.Request(
-            f"http://127.0.0.1:{port}/ask",
-            data=body,
-            headers={
-                "Content-Type": "application/json",
-                "X-User-Id": "u-1",
-                "X-Channel": "feishu",
-            },
-        )
-        with urllib.request.urlopen(request, timeout=5) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    finally:
-        server.stop()
+    with register_interruptible("conversation-request:req-1"), register_interrupt_callback(interrupted.set):
+        server.start()
+        try:
+            body = json.dumps({
+                "kind": "ask", "goal": command, "command": command, "conversation_id": "c-1",
+                "metadata": {"message_id": "command-1", "expected_turn_id": "req-1"},
+            }).encode("utf-8")
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{port}/{endpoint}", data=body,
+                headers={"Content-Type": "application/json", "X-User-Id": "u-1", "X-Channel": "feishu"},
+            )
+            with urllib.request.urlopen(request, timeout=5) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        finally:
+            server.stop()
+        assert not is_interrupted()
 
-    assert payload["status"] == "control"
+    if endpoint == "ask":
+        assert payload["status"] == "control"
     assert payload["kind"] == "unsupported"
     assert payload["ok"] is False
-    assert agent.conversation_store.guidance.pending("request", "req-1") == []
+    assert agent.conversation_store.guidance.pending("request", "req-1") == guidance_before
     assert list(paths.inbox.glob("*.json")) == []
+    assert request_path.read_bytes() == before
+    assert not interrupted.is_set()
+    control.assert_not_called()
+    model.assert_not_called()
 
 
 def test_http_audit_start_executes_control_instead_of_queueing_or_steering(tmp_path) -> None:
