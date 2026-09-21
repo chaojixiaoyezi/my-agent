@@ -80,7 +80,7 @@ def _bound_candidates(
 # 函数用途: 根据已经完整输入的参数生成当前 token 的候选，语法错误则保持原文不动。
 def _argument_candidates(
     action: CommandActionSpec, completed: tuple[str, ...], prefix: str, start: int,
-    paths: PathCandidates | None,
+    paths: PathCandidates | None, *, requested: bool = False,
 ) -> Iterable[PluginCompletion]:
     bound = bind_command_arguments(action, completed, partial=True)
     if bound.help_requested:
@@ -94,7 +94,10 @@ def _argument_candidates(
         if spec is not None and spec.value_type != "boolean":
             yield from _bound_candidates(action, completed, bound, spec, value_prefix, start, paths, option=option)
         return
-    if not bound.options_ended and (not prefix or prefix.startswith("-")):
+    if not bound.options_ended and (requested or prefix.startswith("-")):
+        declared = (*HELP_OPTIONS, *(option for spec in action.arguments for option in spec.options))
+        if not requested and prefix in declared:
+            return
         for spec in action.arguments:
             if spec.name in bound.seen and not spec.multiple:
                 continue
@@ -108,39 +111,48 @@ def _argument_candidates(
             return
     positional = tuple(spec for spec in action.arguments if not spec.options)
     if bound.positional_count < len(positional):
-        yield from _bound_candidates(action, completed, bound, positional[bound.positional_count], prefix, start, paths)
+        spec = positional[bound.positional_count]
+        if prefix or spec.required or requested:
+            yield from _bound_candidates(action, completed, bound, spec, prefix, start, paths)
 
 
 # LLM: 显式动作名优先；默认首位置候选必须仍由同一选择器认作参数，不能覆盖动作候选语义。
 # 函数用途: 合并初始动作、帮助与默认参数候选，保持选择和严格解析一致。
 def _initial_candidates(
     actions: tuple[CommandActionSpec, ...], plugin: PluginCommandSpec | None,
-    prefix: str, start: int, paths: PathCandidates | None,
+    prefix: str, start: int, paths: PathCandidates | None, *, requested: bool,
 ) -> tuple[PluginCompletion, ...]:
+    if not requested and any(action.name == prefix for action in actions):
+        return ()
     candidates = [_candidate(action.name, start, action.summary) for action in actions if action.available and action.name.startswith(prefix)]
     candidates.extend(_candidate(option, start, "查看帮助") for option in HELP_OPTIONS if option.startswith(prefix))
     if plugin is not None and plugin.default_action:
         default = next(item for item in actions if item.name == plugin.default_action)
         if default.available:
-            for item in _argument_candidates(default, (), prefix, start, paths):
+            for item in _argument_candidates(default, (), prefix, start, paths, requested=requested):
                 selected, arguments = select_plugin_action(actions, (item.label,), plugin)
                 if selected is default and arguments == (item.label,):
                     candidates.append(item)
     return tuple({item.text: item for item in candidates}.values())
 
 
-# LLM: plugins 是宿主可见目录的投影，当前入口不传动态贡献；已停用 ID 只在显式输入后提供静态帮助。
+# LLM: plugins 是宿主可见目录投影；requested 只表示用户显式请求候选，完整输入不能被自动菜单改写后吞掉 Enter。
 # 函数用途: 补全插件 ID、动作和参数；未开放的管理动作仅能通过 help 发现，不暗示可执行。
 def complete_plugin_command(
     text: str, *, plugins: tuple[PluginCommandSpec, ...] = (), paths: PathCandidates | None = None,
+    requested: bool = False,
 ) -> tuple[PluginCompletion, ...]:
     namespace = plugin_namespace(text)
     if namespace is None:
         return ()
     if "@" in namespace.prefix and not any(char.isspace() for char in text.lstrip()):
+        if not requested and any(plugin.plugin_id == namespace.plugin_id for plugin in plugins):
+            return ()
         return tuple(PluginCompletion(
             "/plugins@" + plugin.plugin_id, len(text) - len(text.lstrip()), plugin.plugin_id, plugin.summary,
         ) for plugin in plugins if plugin.enabled and plugin.plugin_id.startswith(namespace.plugin_id))
+    if not namespace.body and not text[-1].isspace() and not requested:
+        return ()
     try:
         actions, plugin = namespace_actions(namespace, plugins)
         tokens = lex_command_arguments(namespace.body, partial=True)
@@ -150,16 +162,18 @@ def complete_plugin_command(
         start = namespace.body_start + current.start if current else len(text)
         if plugin is not None and not plugin.enabled:
             can_help = not completed or (len(completed) == 1 and any(item.name == completed[0] for item in actions))
+            if not prefix and completed and not requested:
+                return ()
             return tuple(_candidate(option, start, "查看停用插件的静态帮助") for option in HELP_OPTIONS if can_help and option.startswith(prefix))
         if not completed:
-            return _initial_candidates(actions, plugin, prefix, start, paths)
+            return _initial_candidates(actions, plugin, prefix, start, paths, requested=requested)
         action, arguments = select_plugin_action(actions, completed, plugin)
-        if action is None and plugin is not None and plugin.default_action:
-            action = next(item for item in actions if item.name == plugin.default_action)
         if action is None:
             return ()
         if plugin is None and action.name == "help" and not arguments and not prefix.startswith("-"):
+            if not requested and (not prefix or any(item.name == prefix for item in actions)):
+                return ()
             return tuple(_candidate(item.name, start, item.summary) for item in actions if item.name.startswith(prefix))
-        return tuple(_argument_candidates(action, arguments, prefix, start, paths))
+        return tuple(_argument_candidates(action, arguments, prefix, start, paths, requested=requested))
     except CommandArgumentError:
         return ()

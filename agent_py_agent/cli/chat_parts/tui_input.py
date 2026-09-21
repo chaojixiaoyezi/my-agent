@@ -205,15 +205,17 @@ class TuiInputCompleter(Completer):
     def __init__(self, workspace: Path) -> None:
         self.workspace = Path(workspace).expanduser().resolve(strict=False)
 
-    # LLM: 插件参数先走公共词法，只有声明的 path 才枚举路径；所有候选只填入，不执行或扩大授权。
-    # 函数用途: 按当前 token 生成命令或文件候选，保留核心命令提交方式及光标后的未编辑正文。
+    # LLM: 插件参数先走公共词法，完整命令不自动追加可选旗标；显式 Tab 可继续发现候选，不执行或扩大授权。
+    # 函数用途: 按当前 token 生成候选，保留正常 Enter 提交及光标后的未编辑正文。
     def get_completions(self, document: Document, complete_event: Any):
-        del complete_event
         before = document.text_before_cursor
-        if plugin_namespace(before) is not None and (any(char.isspace() for char in before) or "@" in before):
+        if plugin_namespace(before) is not None:
             if document.text_after_cursor and not document.text_after_cursor[0].isspace():
                 return
-            for item in complete_plugin_command(before, paths=lambda token: _path_candidates(self.workspace, token)):
+            for item in complete_plugin_command(
+                before, paths=lambda token: _path_candidates(self.workspace, token),
+                requested=bool(complete_event.completion_requested),
+            ):
                 yield TuiCompletion(
                     item.text, start_position=item.start - len(before), display=item.label,
                     display_meta=item.summary, kind="command", append_space=item.append_space,

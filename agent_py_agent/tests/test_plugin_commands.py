@@ -76,7 +76,7 @@ def test_stopped_plugin_help_remains_static_and_business_is_not_authorized(plugi
     assert not complete_plugin_command("/plugins@D", plugins=(disabled,))
     paths = Mock(side_effect=AssertionError("停用插件不扫描业务路径"))
     for text in ("/plugins@Demo ", "/plugins@Demo run "):
-        assert {item.label for item in complete_plugin_command(text, plugins=(disabled,), paths=paths)} == {"-h", "--help"}
+        assert {item.label for item in complete_plugin_command(text, plugins=(disabled,), paths=paths, requested=True)} == {"-h", "--help"}
     assert complete_plugin_command("/plugins@Demo run --path ", plugins=(disabled,), paths=paths) == ()
     paths.assert_not_called()
 
@@ -131,6 +131,7 @@ def test_plugin_value_and_namespace_completion_share_host_description(plugin):
     assert len(result) == 1 and result[0].label == "--level=高"
     text = "/plugins@Demo -n 1 "
     assert "--count" not in {item.label for item in complete_plugin_command(text, plugins=(plugin,))}
+    assert complete_plugin_command("/plugins@Demo --help ", plugins=(plugin,)) == ()
 
 
 def test_unfinished_quote_path_completion_preserves_prefix_and_roundtrips():
@@ -157,11 +158,44 @@ def test_value_completion_never_changes_a_literal_into_an_option():
     assert {item.label for item in separated} == {"normal"}
     inline = complete_plugin_command("/plugins@demo run --label=", plugins=(plugin,))
     assert {item.label for item in inline} == {"--label=-x", "--label=normal"}
-    ended = complete_plugin_command("/plugins@demo run -- ", plugins=(plugin,))
+    ended = complete_plugin_command("/plugins@demo run -- ", plugins=(plugin,), requested=True)
     assert {item.label for item in ended} == {"--label", "normal"}
     for item in ended:
         text = "/plugins@demo run -- " + item.text
         assert parse_plugin_command(text, plugins=(plugin,)).arguments.values["file"] == item.label
+
+
+@pytest.mark.parametrize("text", ["/plugins", "/plugins help", "/plugins help install", "/plugins help install ", "/plugins list -e ", "/plugins list -e", "/plugins list --help"])
+def test_complete_management_input_does_not_get_optional_flags_inserted_by_enter(tmp_path, text):
+    completer = TuiInputCompleter(tmp_path)
+    assert list(completer.get_completions(Document(text), CompleteEvent())) == []
+    if text.endswith(" "):
+        explicit = list(completer.get_completions(Document(text), CompleteEvent(completion_requested=True)))
+        assert {item.text for item in explicit} >= {"-h", "--help"}
+        assert all(item.enter_action == "apply" for item in explicit)
+
+
+def test_apply_completion_then_enter_submits_the_original_help_target(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from prompt_toolkit.buffer import Buffer, CompletionState
+
+    from agent_py_agent.cli.chat_parts import tui_keybindings
+    from agent_py_agent.cli.chat_parts.tui_input import apply_selected_completion
+
+    completer = TuiInputCompleter(tmp_path)
+    buffer = Buffer()
+    buffer.set_document(Document("/plugins help ins"))
+    items = list(completer.get_completions(buffer.document, CompleteEvent()))
+    assert len(items) == 1
+    buffer.complete_state = CompletionState(buffer.document, items, complete_index=0)
+    apply_selected_completion(buffer)
+    assert buffer.text == "/plugins help install "
+    assert list(completer.get_completions(buffer.document, CompleteEvent())) == []
+    submitted = []
+    monkeypatch.setattr(tui_keybindings, "_submit_input_area", lambda _event, params: submitted.append(params.input_area.buffer.text))
+    tui_keybindings._handle_enter_keybinding(SimpleNamespace(), SimpleNamespace(input_area=SimpleNamespace(buffer=buffer)))
+    assert submitted == ["/plugins help install "]
 
 
 def test_real_tui_completion_only_fills_declared_path_and_never_submits(tmp_path, monkeypatch):
