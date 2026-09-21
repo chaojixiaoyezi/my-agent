@@ -1,5 +1,5 @@
-# LLM: 各配置域共用默认和校验，采样只规范化显式值，不在配置层猜供应商或产生请求。
-# 模块用途: 将 YAML/覆盖配置转成运行字段，非法值返回可观察告警并采用既有默认。
+# LLM: 各配置域共用默认和校验；工具及插件开关须归一为布尔值，采样不猜供应商，规范化不产生请求。
+# 模块用途: 将 YAML/覆盖配置转成运行字段，避免字符串 false 被当成开启，非法值告警并采用既有默认。
 """Domain-specific normalize services for config fields.
 
 Was split across _normalize_core_fields / _normalize_home_fields /
@@ -372,10 +372,13 @@ def _normalize_tool_int_fields(out: dict[str, object], defaults: object) -> list
     return _apply_int_fields(out, defaults, TOOL_INT_FIELDS)
 
 
+# LLM: 工具与插件开关共用布尔转换和 dataclass 默认；新增开关同时检查 YAML、管理入口和配置回归。
+# 函数用途: 把配置中的开关转成真实布尔值，避免带引号的 false 在权限判断中变成真。
 def _normalize_tool_bool_fields(out: dict[str, object], defaults: object) -> list[str]:
     return _apply_bool_fields(
         out, defaults,
         (
+            "enable_plugins",
             "stream_enabled",
             "tool_catalog_include_examples",
             "tool_catalog_show_truncated_notice",

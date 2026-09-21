@@ -1,8 +1,8 @@
 
 from __future__ import annotations
 
-# LLM: 配置默认值须与随包 YAML 一致；温度按显式开关出站，top_p 保持可选，权限与终态仍读取结构化事实。
-# 模块用途: 定义并加载 Agent 配置，统一三种接口的显式采样、人格、持续执行与用户确认口径。
+# LLM: 默认值须与随包 YAML 一致；显式插件管理开关经原布尔转换，采样按配置出站，权限与终态仍读结构化事实。
+# 模块用途: 定义并加载 Agent 配置，统一显式采样、人格、持续执行、插件管理与用户确认口径。
 """智能体配置加载工具。
 
 这个模块干的事情不复杂，但很关键：
@@ -178,9 +178,13 @@ class _HomeProviderConfigFields:
     week_start: str = "monday"  # 周起始 locale:monday/sunday/saturday,影响"本周"范围计算
 
 
+# LLM: 工具与显式插件管理的默认配置归此组；修改开关须同步 YAML、规范化和执行入口，不能用展示配置代替权限。
+# 类用途: 保存工具行为与管理开关的默认值，构造本身不加载插件或执行工具。
 @dataclass
 class _ToolConfigFields:
     enable_tools: bool = True
+    # 仅允许用户显式管理插件；未安装/启用时不加载插件或启动额外进程。
+    enable_plugins: bool = True
     max_tool_rounds: int | None = None
     # 历史字段名保留配置兼容；语义是一次并发执行批次大小，不是丢弃同轮尾部调用。
     max_tool_calls_per_round: int | None = None

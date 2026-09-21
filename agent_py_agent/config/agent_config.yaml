@@ -671,6 +671,8 @@ anthropic_prompt_cache_enabled: true
 
 # 是否启用工具调用循环
 enable_tools: true
+# 允许显式插件管理；未安装并启用时不加载插件、不启动额外进程。关闭后仍可查询原结果。
+enable_plugins: true
 
 # 是否启用流式模型响应；关闭后走一次性响应路径，便于排查模型接口问题。
 stream_enabled: true

@@ -1,5 +1,5 @@
-# LLM: 配置接口沿用 Gateway 可信 owner 解析和 canonical 路径；冷用户不能触发 Agent/后端/工具初始化，保持配置读写独立。
-# 模块用途: 为 TUI 提供私有模型列表、保存和选择，不把密钥写入聊天队列，也不启动用户后台服务。
+# LLM: 配置接口沿用可信 owner 与共享 owner_conversation_store；冷用户不能触发 Agent/后端/工具初始化，配置读写仍独立。
+# 模块用途: 为 TUI 提供私有模型列表、保存和选择，共用原会话路径，不把密钥写入聊天队列或启动后台服务。
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from ..settings.model_profiles import ModelProfileError, execute_model_profile_operation
 from ..user_space.owner_resolver import home_paths_with_owner, resolve_owner_home
 from .control_service import resolve_gateway_scope_owner
+from .owner_conversation_store import owner_conversation_store
 
 
 # LLM: 列表永不回传密钥；只从可信 owner/channel binding 取得会话，冷菜单可创建线程但不进入 owner pool。
@@ -36,7 +37,7 @@ def handle_client_models(handler, server) -> None:
         base_home = server.agent.home_paths
         scoped_home = home_paths_with_owner(base_home, resolve_owner_home(base_home.root, owner))
         config_host = SimpleNamespace(home_paths=scoped_home, config=server.agent.config)
-        store = _model_conversation_store(server.agent, scoped_home)
+        store = owner_conversation_store(server.agent, scoped_home)
         config_host.conversation_store = store
         thread = store.threads.get_or_create({
             "canonical_user_id": scope.user_id, "owner_id": scoped_home.owner_id,
@@ -57,21 +58,3 @@ def handle_client_models(handler, server) -> None:
         handler._send_json(500, {"ok": False, "message": "无法读取或保存模型配置，原配置未被主动清除。"})
         return
     handler._send_json(200, result)
-
-
-# LLM: 冷 owner 只创建 canonical 会话存储，不启动 Agent/backend；路径解析与 owner pool 共用，不能借用基础 owner 路径。
-# 函数用途: 让首次打开 /model 就固定真实会话的模型，随后发消息仍读同一份 thread。
-def _model_conversation_store(base_agent: object, scoped_home: object):
-    from ..conversation.store import ConversationStore
-    from ..settings.thread_model_selection import default_model_profile_id
-    from ..user_space.runtime_paths import resolve_runtime_paths_for_agent
-    from .request_worker import _config_without_runtime_paths
-
-    same_owner = all(getattr(base_agent.home_paths, field, None) == getattr(scoped_home, field, None)
-                     for field in ("owner_provider", "owner_kind", "owner_id"))
-    if same_owner and getattr(base_agent, "conversation_store", None) is not None:
-        return base_agent.conversation_store
-    config = base_agent.config if same_owner else _config_without_runtime_paths(base_agent)
-    paths = resolve_runtime_paths_for_agent(config, scoped_home.owner_home_dir, scoped_home).paths
-    host = SimpleNamespace(config=config, home_paths=scoped_home)
-    return ConversationStore(paths["conversation_workspace"], model_default=lambda: default_model_profile_id(host))

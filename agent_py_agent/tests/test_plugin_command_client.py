@@ -52,8 +52,8 @@ def test_gateway_mode_uses_original_owner_transport_for_both_client_kinds(monkey
 
     monkeypatch.setattr(plugin_command_client, "post_gateway_json", transport)
     monkeypatch.setattr(
-        plugin_command_client,
-        "read_plugin_catalog",
+        plugin_command_client.PluginCommandClient,
+        "_direct_manager",
         Mock(side_effect=AssertionError("不读本地目录")),
     )
     client = PluginCommandClient(agent, "session-1", use_gateway=True)
@@ -64,7 +64,7 @@ def test_gateway_mode_uses_original_owner_transport_for_both_client_kinds(monkey
     assert calls[1]["catalog_revision"] == snapshot.revision
 
 
-def test_direct_client_uses_config_owner_without_http(monkeypatch):
+def test_direct_client_uses_config_owner_without_http(monkeypatch, tmp_path):
     monkeypatch.setattr(
         plugin_command_client,
         "post_gateway_json",
@@ -73,12 +73,25 @@ def test_direct_client_uses_config_owner_without_http(monkeypatch):
     agent = host(
         my_agent_owner_provider="local", my_agent_owner_kind="user", my_agent_owner_id="alice"
     )
+    from agent_py_agent.agent.conversation.store import ConversationStore
+    from agent_py_agent.agent.settings.config import AgentConfig
+    from agent_py_agent.agent.user_space.home_layout import home_paths
+    from agent_py_agent.agent.user_space.owner_resolver import (
+        home_paths_with_owner,
+        resolve_owner_home,
+    )
+    owner = resolve_owner_home(tmp_path, OwnerIdentity.provider_user("local", "alice"))
+    agent.config = AgentConfig(my_agent_owner_provider="local", my_agent_owner_kind="user", my_agent_owner_id="alice")
+    agent.home_paths = home_paths_with_owner(home_paths(tmp_path), owner)
+    agent.conversation_store = ConversationStore(owner.home_dir / "conversations", initialize=False)
+    agent.effective_workspace_root = owner.home_dir
     client = PluginCommandClient(agent, "session-a", use_gateway=False)
     assert client.command("/plugins help")["ok"]
     expected = read_plugin_catalog(
-        OwnerIdentity.provider_user("local", "alice"), channel="local", conversation_id="session-a"
+        OwnerIdentity.provider_user("local", "alice"), channel="chat", conversation_id="session-a"
     )
-    assert client.snapshot() == expected
+    assert client.snapshot().scope_ref == expected.scope_ref
+    assert client.snapshot().plugins == ()
 
 
 def test_old_selection_is_not_rebound_to_fresh_catalog_or_automatically_replayed(monkeypatch):
@@ -106,14 +119,45 @@ def test_gateway_or_catalog_failure_never_falls_back_or_submits_command(monkeypa
     transport = Mock(return_value=response)
     monkeypatch.setattr(plugin_command_client, "post_gateway_json", transport)
     monkeypatch.setattr(
-        plugin_command_client,
-        "read_plugin_catalog",
+        plugin_command_client.PluginCommandClient,
+        "_direct_manager",
         Mock(side_effect=AssertionError("不允许本地兜底")),
     )
     client = PluginCommandClient(host(), "session-a", use_gateway=True)
     result = client.command("/plugins help")
     assert result["error_code"] == "PLUGIN_CATALOG_UNAVAILABLE"
     assert client.snapshot() is None and transport.call_count == 1
+
+
+def test_submission_timeout_keeps_original_id_without_retry_and_status_skips_catalog(monkeypatch):
+    calls = []
+
+    def timeout(_port, _owner, _path, body, **kwargs):
+        calls.append(body)
+        raise TimeoutError("private transport detail")
+
+    monkeypatch.setattr(plugin_command_client, "post_gateway_json", timeout)
+    client = PluginCommandClient(host(), "session-a", use_gateway=True)
+    result = client.command("/plugins install sample.zip", revision="seen-version")
+    assert result["state"] == "outcome_unknown"
+    assert result["request_id"] == calls[0]["plugin_request_id"]
+    assert "没有执行" not in result["message"] and "private" not in result["message"]
+    assert len(calls) == 1
+    queried = client.command("/plugins status original-request")
+    assert len(calls) == 2 and calls[-1]["operation"] == "command"
+    assert queried["request_id"] == "original-request"
+
+
+@pytest.mark.parametrize("catalog", [None, {"revision": "bad"}])
+def test_catalog_refresh_failure_does_not_erase_known_install_result(monkeypatch, catalog):
+    def transport(_port, _owner, _path, body, **kwargs):
+        return 200, {"ok": True, "kind": "plugin_command", "state": "succeeded", "message": "已完成",
+                     "request_id": body["plugin_request_id"], "catalog": catalog}
+
+    monkeypatch.setattr(plugin_command_client, "post_gateway_json", transport)
+    client = PluginCommandClient(host(), "session-a", use_gateway=True)
+    assert client.command("/plugins install sample.zip", revision="seen-version")["state"] == "succeeded"
+    assert client.snapshot() is None
 
 
 def test_slow_old_response_cannot_overwrite_newer_snapshot(monkeypatch):

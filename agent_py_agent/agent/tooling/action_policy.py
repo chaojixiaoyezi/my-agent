@@ -1,5 +1,5 @@
-# LLM: 所有副作用前走唯一 ActionPolicy；用户自主选择只免可选确认，不替代身份、参数、路径和命令硬门。
-# 模块用途: 将宿主运行快照和本次调用合成可审计的允许、询问或拒绝决定，本模块不执行工具。
+# LLM: 所有副作用前走唯一 ActionPolicy；显式宿主管理可免模型暴露门，用户自主选择只免可选确认，其余硬门保持。
+# 模块用途: 从宿主快照裁决模型或管理调用的允许、询问与拒绝，不执行工具或从参数取得权限。
 from __future__ import annotations
 
 """The single pre-effect authorization decision for canonical tool calls."""
@@ -92,7 +92,7 @@ class ActionDecision:
         }
 
 
-# LLM: approval_mode 只能由 owner 控制面读入；此快照不能混入模型自报权限，修改时同步 ToolExecutorRequest。
+# LLM: approval_mode 与 require_model_visibility 只能由宿主组装；显式管理可调用隐藏工具，其他权限不变，修改时同步 ToolExecutorRequest。
 # 类用途: 保存本次工具裁决所需的调用、工作目录、安全边界和用户审批选择。
 @dataclass(frozen=True)
 class ActionPolicyRequest:
@@ -108,6 +108,7 @@ class ActionPolicyRequest:
     approval_mode: str = "ask"
     required_action: object | None = None
     now: float = 0.0
+    require_model_visibility: bool = True
 
 
 # LLM: 先执行客观安全门，再考虑可选确认；返回结构化事实供唯一执行器消费，不在这里运行 handler。
@@ -122,7 +123,7 @@ class ActionPolicy:
         if request.approval_mode not in {"ask", "auto"}:
             return _deny("APPROVAL_MODE_UNAVAILABLE")
         snapshot = request.runtime_snapshot
-        runtime, early = _runtime_for_call(call, snapshot)
+        runtime, early = _runtime_for_call(call, snapshot, require_model_visibility=request.require_model_visibility)
         if early is not None:
             return early
         assert runtime is not None
@@ -197,16 +198,19 @@ class ActionPolicy:
         )
 
 
+# LLM: 模型可见性是单独的暴露门，只有显式宿主调用可免除此门；快照、版本与可用性仍须逐项检查。
+# 函数用途: 取得本次允许调用的工具，模型默认不能访问隐藏管理工具。
 def _runtime_for_call(
     call: ToolCall,
     snapshot: ToolRuntimeSnapshot,
+    *, require_model_visibility: bool = True,
 ) -> tuple[ToolRuntime | None, ActionDecision | None]:
     if snapshot.run_id and call.run_id != snapshot.run_id:
         return None, _deny("TOOL_RUN_SNAPSHOT_MISMATCH")
     runtime = snapshot.runtime(call.tool_name)
     if runtime is None or call.tool_name not in snapshot.available_tool_names:
         return None, _deny("TOOL_NOT_IN_RUNTIME_SNAPSHOT")
-    if not runtime.exposure.model_visible:
+    if require_model_visibility is not False and not runtime.exposure.model_visible:
         return None, _deny("TOOL_NOT_MODEL_VISIBLE")
     if call.schema_hash != runtime.model_spec.schema_hash:
         return None, _deny("TOOL_SCHEMA_HASH_MISMATCH")

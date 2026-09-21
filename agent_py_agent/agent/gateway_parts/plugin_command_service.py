@@ -1,41 +1,94 @@
 # LLM: 入口复用可信来源检查与 GatewayControlScope；命令文本、客户端 scope_ref/revision 不参与 owner 解析。
-# 模块用途: 向 TUI 提供静态插件目录，并将 HTTP 插件命令留在独立命令分路，冷用户保持未加载。
+# 模块用途: 向 TUI 提供 owner 安装目录和原管理执行入口，冷用户保持未加载，未知结果可按原请求查询。
 
 from __future__ import annotations
 
 import json
+from dataclasses import replace
+from pathlib import Path
+from types import SimpleNamespace
 
 from ..plugin_command_service import (
-    execute_plugin_command,
     plugin_catalog_unavailable,
-    read_plugin_catalog,
+    plugin_command_unknown,
 )
+from ..plugin_management import PluginManagement, plugin_management_context
+from ..user_space.owner_resolver import home_paths_with_owner, resolve_owner_home
 from .control_service import resolve_gateway_scope_owner
+from .owner_conversation_store import owner_conversation_store
 
 
-# LLM: 调用方必须已完成来源鉴权；只复用原 owner 解析，不创建 Agent、thread、模型请求或控制账本。
+# LLM: 调用方已完成来源鉴权；管理仍独立检查管理员，只在首次授权安装时创建原线程与宿主运行，不启动模型。
 # 函数用途: 为新目录接口以及 /ask、/control 的插件输入生成同一宿主回执。
 def plugin_http_response(handler, server, body: dict, *, text: str | None = None) -> dict:
-    from .http_handlers import _gateway_control_scope, _request_channel
+    request_id = body.get("plugin_request_id", "")
+    if not isinstance(request_id, str):
+        request_id = ""
+    if text is not None:
+        from ..command_arguments import CommandArgumentError
+        from ..plugin_commands import parse_plugin_command
+
+        try:
+            parsed = parse_plugin_command(text)
+            if parsed is not None and parsed.action and parsed.action.name == "status" and not parsed.help_requested:
+                request_id = parsed.arguments.values["request"]
+        except CommandArgumentError:
+            pass
 
     try:
         if server is None or server.agent is None:
             return plugin_catalog_unavailable()
-        user_id, channel = _request_channel(handler)
-        scope = _gateway_control_scope(handler, body, user_id=user_id, channel=channel)
-        owner = resolve_gateway_scope_owner(server.agent, scope)
-        catalog = read_plugin_catalog(
-            owner, channel=scope.channel, conversation_id=scope.conversation_id
-        )
+        manager = _management(handler, server, body)
         if text is None:
-            return {"ok": True, "catalog": catalog.to_payload()}
+            return {"ok": True, "catalog": manager.catalog().to_payload()}
         revision = body.get("catalog_revision", "")
         if not isinstance(revision, str):
             raise ValueError("目录版本必须是字符串")
-        result = execute_plugin_command(catalog, text, revision=revision)
-        return result if result is not None else plugin_catalog_unavailable()
-    except Exception:  # noqa: BLE001 目录错误不能泄露内部身份、路径或凭证，也不能进入模型队列
-        return plugin_catalog_unavailable()
+        return manager.command(text, revision=revision, request_id=request_id)
+    except Exception:  # noqa: BLE001 回包失败不能推断已接受命令未执行，也不能泄露私有路径
+        return plugin_catalog_unavailable() if text is None else plugin_command_unknown(request_id)
+
+
+# LLM: 使用原认证中间件裁决角色；无认证模式仅在显式关闭 auth 且监听及对端均为本机时授权，不信任正文 user/channel。
+# 函数用途: 固定管理请求的操作者和权限，并按原 owner 与线程路径组装冷服务。
+def _management(handler, server, body: dict) -> PluginManagement:
+    from ..auth.middleware import _handler_peer_ip, _is_loopback_peer
+    from .http_handlers import _gateway_control_scope, _request_channel
+    from .http_service import _is_loopback_host
+    from .workspace_scope import gateway_request_workspace_scope
+
+    base = server.agent
+    middleware = getattr(handler, "_auth_middleware", None)
+    peer = _handler_peer_ip(handler)
+    if middleware is not None:
+        headers = dict(handler.headers)
+        if peer is None or not middleware.check_trusted(headers, peer):
+            raise PermissionError("插件入口来源未获授权")
+        actor, channel = middleware.extract_identity(headers, peer)
+        is_admin = middleware.require_admin(headers, peer)[0]
+    else:
+        actor, channel = _request_channel(handler)
+        is_admin = (base.config.auth_enabled is False
+                    and getattr(server, "auth_middleware", None) is None
+                    and _is_loopback_host(str(getattr(server, "bind_host", "")))
+                    and peer is not None and _is_loopback_peer(peer))
+    scope = _gateway_control_scope(handler, body, user_id=actor, channel=channel)
+    scope = replace(scope, user_id=actor, channel=channel)
+    owner = resolve_owner_home(base.home_paths.root, resolve_gateway_scope_owner(base, scope))
+    home = home_paths_with_owner(base.home_paths, owner)
+    store = owner_conversation_store(base, home, initialize=False)
+    context = plugin_management_context(
+        owner, home, base.config, store.threads, actor_id=actor, channel=channel,
+        conversation_id=scope.conversation_id, is_admin=is_admin,
+    )
+    if "workspace" in body:
+        narrow_host = SimpleNamespace(
+            config=SimpleNamespace(my_agent_owner_provider=owner.identity.provider),
+            tools=SimpleNamespace(owner_scope_root=str(context.path_policy.owner_scope_root or "")),
+        )
+        cwd, _roots = gateway_request_workspace_scope(narrow_host, body)
+        context = replace(context, workspace=Path(cwd))
+    return PluginManagement(context)
 
 
 # LLM: 来源检查先于正文读取；catalog/command 是唯一显式操作，非法载荷不能隐式转换成业务请求。

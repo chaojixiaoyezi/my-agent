@@ -18,17 +18,15 @@ _SCHEMA = "host_command_request.v1"
 _EVENT = "host_command.registered"
 
 
-# LLM: 身份必须由已鉴权宿主提供，input_digest 覆盖全部规范输入；该对象不是权限证明。
-# 类用途: 冻结显式命令的去重范围和输入摘要，避免重送时换参数执行。
+# LLM: 身份只接受宿主鉴权后的字段；查询不需要来源文件或命令正文，也不授予原运行新的执行权。
+# 类用途: 绑定同一操作者与会话中的请求，供提交去重与只读状态查询共用。
 @dataclass(frozen=True)
-class HostCommandRequest:
+class HostCommandIdentity:
     owner_id: str
     actor_id: str
     channel: str
     thread_id: str
     request_id: str
-    command_name: str
-    input_digest: str
 
     # LLM: 标识只做传输校验，不规范化身份；非法 UTF-8、空值及超长输入不能进入持久请求账。
     # 函数用途: 检查宿主提供的身份与摘要，失败不写数据库。
@@ -38,8 +36,6 @@ class HostCommandRequest:
                 raise ValueError(f"宿主命令字段无效: {name}")
             if len(value.encode("utf-8")) > 1024:
                 raise ValueError(f"宿主命令字段过长: {name}")
-        if re.fullmatch(r"[0-9a-f]{64}", self.input_digest) is None:
-            raise ValueError("宿主命令输入摘要无效")
 
     # LLM: 不含命令与参数，保证同一消息改变输入仍命中原绑定并拒绝，而不是生成新操作。
     # 函数用途: 生成已鉴权请求范围的稳定摘要，供原事件唯一索引使用。
@@ -48,6 +44,21 @@ class HostCommandRequest:
         scope = [_SCHEMA, self.owner_id, self.actor_id, self.channel, self.thread_id, self.request_id]
         digest = hashlib.sha256(json.dumps(scope, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
         return f"host-command:{digest}"
+
+
+# LLM: 提交在可信范围上附加命令和完整规范输入摘要；与纯查询共用身份，不改变原 v1 持久字段或 operation ID。
+# 类用途: 固定一次显式管理命令的输入，重送改变参数时拒绝。
+@dataclass(frozen=True)
+class HostCommandRequest(HostCommandIdentity):
+    command_name: str
+    input_digest: str
+
+    # LLM: 基类检查全部字符串字段；摘要必须规范，不能用展示正文代替参数事实。
+    # 函数用途: 在登记前拒绝不完整或格式错误的输入摘要。
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if re.fullmatch(r"[0-9a-f]{64}", self.input_digest) is None:
+            raise ValueError("宿主命令输入摘要无效")
 
     # LLM: 仅保存结构化身份和输入摘要，不复制完整命令正文、来源文件或凭据。
     # 函数用途: 生成 TaskRun 中唯一的冻结请求记录。
@@ -97,7 +108,7 @@ def insert_host_command(
 # LLM: 须核对原链和冻结请求；现存索引的断链不能视为首次请求。去重依赖原事件表只追加、不删除。
 # 函数用途: 只读获取同一宿主请求的原始运行，输入变化或缺失事实时拒绝。
 def read_host_command(
-    conn: sqlite3.Connection, request: HostCommandRequest,
+    conn: sqlite3.Connection, request: HostCommandIdentity,
 ) -> HostCommandBinding | None:
     row = conn.execute(
         "SELECT e.event_type, e.attempt_id, e.agent_run_id, e.task_run_id, "
@@ -121,11 +132,25 @@ def read_host_command(
         raise RuntimeConflictError("宿主命令的原始运行链不完整或身份不符")
     try:
         metadata = load_strict_json(row["metadata_json"])
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, RecursionError) as exc:
         raise RuntimeConflictError("宿主命令的冻结请求记录无效") from exc
-    if not isinstance(metadata, dict) or metadata.get("host_command") != request.to_payload():
-        raise RuntimeConflictError("宿主命令标识已绑定不同输入或请求记录损坏")
+    frozen = _read_frozen_request(metadata, request)
     keys = ("task_id", "task_run_id", "agent_run_id", "run_id", "attempt_id")
     if any(not isinstance(row[key], str) or not row[key] for key in keys):
         raise RuntimeConflictError("宿主命令缺少原始执行身份")
-    return HostCommandBinding(request=request, **{key: row[key] for key in keys})
+    return HostCommandBinding(request=frozen, **{key: row[key] for key in keys})
+
+
+# LLM: 状态查询只省略命令参数，不省略完整可信身份；提交仍核对全部冻结输入，不从客户端补丢失记录。
+# 函数用途: 解码原请求并检查当前读取者范围，返回唯一持久请求。
+def _read_frozen_request(metadata: object, requested: HostCommandIdentity) -> HostCommandRequest:
+    try:
+        raw = metadata["host_command"]
+        if raw["schema_version"] != _SCHEMA:
+            raise ValueError("未知请求版本")
+        frozen = HostCommandRequest(**{key: value for key, value in raw.items() if key != "schema_version"})
+        if any(getattr(frozen, key) != value for key, value in asdict(requested).items()):
+            raise ValueError("输入或身份冲突")
+    except (TypeError, KeyError, AttributeError, ValueError) as exc:
+        raise RuntimeConflictError("宿主命令标识已绑定不同输入或请求记录损坏") from exc
+    return frozen

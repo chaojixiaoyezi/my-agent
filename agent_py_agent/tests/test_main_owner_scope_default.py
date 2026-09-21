@@ -6,9 +6,15 @@ import types
 from dataclasses import replace
 from pathlib import Path
 
-from agent_py_agent.agent.core import _resolve_owner_scope_and_access
 from agent_py_agent.agent.path_access_policy import PathAccessPolicy
 from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+from agent_py_agent.agent.user_space.owner_access import resolve_owner_scope_and_access
+
+
+# LLM: 测试夹具保留既有调用形状，只把三个真实依赖传给共享权限裁决。
+# 函数用途: 复用原 owner 边界用例核对职责迁移，不创建产品 Agent。
+def _resolve_owner_scope_and_access(agent, config):
+    return resolve_owner_scope_and_access(agent.home_paths, config, agent.owner_policy)
 
 
 def _home(tmp_path: Path, monkeypatch):

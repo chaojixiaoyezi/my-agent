@@ -23,6 +23,12 @@ from .plugin_installation import (
     admit_installation,
 )
 from .plugin_package import PackageReadLimits, PluginPackageSnapshot, inspect_plugin_package
+from .user_space.owner_quota import (
+    OwnerQuotaChange,
+    OwnerQuotaExceeded,
+    OwnerQuotaUnavailable,
+    owner_quota_enforcer_from_policy,
+)
 from .user_space.owner_resolver import OwnerHomeResult
 
 _SCHEMA = "plugin_installations.v1"
@@ -32,13 +38,15 @@ _STATE_LIMIT = 16 * 1024 * 1024
 # LLM: 只保留必要 owner 身份与规范地址；缺失查询不创建目录，blob 目录不参与决定安装清单。
 # 类用途: 管理一个用户的本地安装事实，为后续启停提供同一持久权威。
 class PluginInstallStore:
-    # LLM: owner 须来自宿主既有解析；构造不初始化 Agent，也不把绝对路径写入状态。
-    # 函数用途: 绑定可信 owner、固定安装目录和包读取预算。
+    # LLM: owner 须来自宿主既有解析；配额与安装地址沿同一 owner，构造不初始化 Agent 或把绝对路径写入状态。
+    # 函数用途: 绑定可信 owner、原配额文件、固定安装目录和包读取预算。
     def __init__(self, owner: OwnerHomeResult, *, limits: PackageReadLimits | None = None) -> None:
         self.root = owner.plugins_dir
         self._anchor = owner.root
         self._parts = owner.plugins_dir.relative_to(owner.root).parts
         self._owner = owner.identity
+        self._owner_home = owner.home_dir
+        self._quota_path = owner.quota_json
         self._limits = limits or PackageReadLimits()
 
     # LLM: 一次原子文件读取得到完整投影；包缺失需由 package_bytes 报告，不能因此丢掉已提交历史。
@@ -96,7 +104,7 @@ class PluginInstallStore:
                 "package_integrity", "已登记的插件包缺失或损坏。"
             ) from exc
 
-    # LLM: 准入和来源授权归外层；锁内先包后表，清理失败不能覆盖锁体已裁定的提交状态和回执。
+    # LLM: 授权归外层；沿原 owner quota→目录锁顺序，锁内先包后表，清理失败不得覆盖已裁定提交。
     # 函数用途: 保存一个本地候选包为停用状态，重复请求复读回执，不重置既有安装。
     def install(self, request: PluginInstallRequest) -> PluginInstallResult:
         verified = inspect_plugin_package(request.package.archive_bytes, limits=self._limits)
@@ -105,15 +113,17 @@ class PluginInstallStore:
         result = None
         operation_error = None
         try:
-            with locked_private_directory(
+            with owner_quota_enforcer_from_policy(self._owner_home, quota_path=self._quota_path).admission() as quota, locked_private_directory(
                 self._anchor, relative_parts=self._parts, lock_name=".plugins.lock"
             ):
                 try:
-                    result = self._install_locked(request)
+                    result = self._install_locked(request, quota)
                 except PluginInstallationError as exc:
                     operation_error = exc
                     raise
             return result
+        except (OwnerQuotaExceeded, OwnerQuotaUnavailable) as exc:
+            raise PluginInstallationError("quota_unavailable", "当前用户配额不足或配额状态不可读。") from exc
         except OSError as exc:
             if operation_error is not None:
                 raise PluginInstallationError(
@@ -133,9 +143,9 @@ class PluginInstallStore:
                 "storage_unavailable", "安装存储不可用，安装记录未提交。"
             ) from exc
 
-    # LLM: 锁内复读最新记录；原请求已命中回执后，即使包损坏也保留其已提交事实，不自动修包或重做。
+    # LLM: 锁内复读最新记录；原请求命中后保留提交事实，新写入在原配额锁内计算完整包与安装表增长。
     # 函数用途: 在完整临界区内完成准入、保存包及提交安装表。
-    def _install_locked(self, request: PluginInstallRequest) -> PluginInstallResult:
+    def _install_locked(self, request: PluginInstallRequest, quota) -> PluginInstallResult:
         package = request.package
         entries = self.snapshot()
         replay = admit_installation(request, entries)
@@ -160,6 +170,10 @@ class PluginInstallStore:
         )
         updated = (*entries, installed)
         text = self._state_text(updated)
+        quota.check((
+            OwnerQuotaChange(self._anchor.joinpath(*self._blob_parts(package.sha256)), len(package.archive_bytes)),
+            OwnerQuotaChange(self.root / "installations.json", len(text.encode("utf-8"))),
+        ))
         self._save_blob(package)
         self._commit(entries, updated, text, receipt)
         return PluginInstallResult(installed, "installed", "committed", receipt)

@@ -1,5 +1,5 @@
-# LLM: 工具只通过本执行状态机进入 handler；错误展示读取结构化裁决，不扩大权限或自动修写参数。
-# 模块用途: 统一工具校验、授权、执行和结果记录；拒绝时给出可定位原因，保证未执行与已执行明确区分。
+# LLM: 模型与显式宿主管理共用本执行状态机；可见性选项仅来自宿主，错误读结构化裁决，不扩大权限或自动修写参数。
+# 模块用途: 统一工具校验、授权、执行和结果记录，区分未执行、已执行与副作用未知。
 from __future__ import annotations
 
 """The only state machine allowed to enter a registered tool handler."""
@@ -75,7 +75,7 @@ class ToolExecution:
     states: tuple[str, ...]
 
 
-# LLM: 模型参数与宿主执行配置分离；approval_mode 是 owner 控制面快照，不能从 ToolCall 参数提权。
+# LLM: 模型参数与宿主配置分离；审批和模型可见性检查由可信调用方设置，不能从 ToolCall 参数提权。
 # 类用途: 汇总本次调用、权限、账本和取消上下文，供唯一执行器使用。
 @dataclass(frozen=True)
 class ToolExecutorRequest:
@@ -98,6 +98,7 @@ class ToolExecutorRequest:
     cancellation_token: CancellationToken | None = None
     pre_handler_gate: Callable[[ToolCall], ToolHandlerOutcome | None] | None = None
     output_archiver: Callable[[ToolCall, object], ToolOutputProjection] | None = None
+    require_model_visibility: bool = True
 
 
 # LLM: Pre-handler exits reuse the authorized call's immutable input sources/start time and the
@@ -114,6 +115,8 @@ class ToolExecutor:
     def __init__(self, policy: ActionPolicy | None = None) -> None:
         self.policy = policy or ActionPolicy()
 
+    # LLM: 宿主显式管理只可解除模型暴露检查，其余快照、参数、权限、取消及原操作持久门均沿同一顺序。
+    # 函数用途: 校验一次工具请求并执行或返回前置拒绝，副作用始终通过原操作协调器登记。
     def execute(self, request: ToolExecutorRequest) -> ToolExecution:
         started_at = time.monotonic()
         states = ["received"]
@@ -181,6 +184,7 @@ class ToolExecutor:
                 runtime_guard_policy=request.runtime_guard_policy,
                 approval_mode=request.approval_mode,
                 required_action=request.required_action,
+                require_model_visibility=request.require_model_visibility,
             )
         )
         states.extend(("validated", "authorized"))

@@ -1,5 +1,5 @@
-# LLM: 任务执行权与 current CAS 共用原 RuntimeDB；精确预留/激活沿原身份，取消保留原领取元数据，联测严格回读、UNKNOWN 与换代。
-# 模块用途: 保存任务、执行轮和委托关系，以事务方式领取和收回执行权。
+# LLM: 执行权与 current CAS 共用原 RuntimeDB；查询可禁止初始化和写入，未启动收口同事务核对无操作，联测 UNKNOWN 与换代。
+# 模块用途: 保存任务、执行轮和委托关系，以事务领取和收回执行权，并提供不修改原账的结果查询。
 """Owner runtime.db 权威实体仓储（3.txt A/C/D/F 节落地面）。
 
 职责：
@@ -48,6 +48,7 @@ from ..scheduler.repository import (
 from .delivery_operations import RuntimeDeliveryMixin
 from .host_commands import (
     HostCommandBinding,
+    HostCommandIdentity,
     HostCommandRequest,
     insert_host_command,
     read_host_command,
@@ -396,14 +397,18 @@ class RuntimeRepository(
 ):
     """单 owner 权威库入口。每个 owner 一个实例（A.1）。"""
 
-    def __init__(self, db_path: str | Path, *, instance_id: str = ""):
+    # LLM: 只读调用不初始化或迁移原库，连接层使用 SQLite ro；普通运行仍沿既有初始化顺序。
+    # 函数用途: 打开唯一 owner 运行库，管理状态查询不会因读取而建立新账本。
+    def __init__(self, db_path: str | Path, *, instance_id: str = "", read_only: bool = False):
         self.db_path = Path(db_path)
+        self.read_only = read_only
         # R1-03：执行权锁 holder 身份（host-pid 实例级，跨进程天然互斥，
         # 同进程多次换代视为同一 worker 续跑——compact/账本续跑轮）。
         # instance_id 可选注入：测试模拟另一进程（同进程多实例 pid 相同，
         # 默认 identity 无法区分）。
         self.instance_id = instance_id or f"{socket.gethostname()}-{os.getpid()}"
-        self._init_runtime_schema()
+        if not read_only:
+            self._init_runtime_schema()
 
     # ------------------------------------------------------------------ 事务
     @contextmanager
@@ -488,7 +493,7 @@ class RuntimeRepository(
 
     # LLM: 只读原请求绑定，查询不能补建链、重开 attempt 或消除 UNKNOWN；联测请求冲突和损坏记录。
     # 函数用途: 供宿主命令查询或重送前取得原始执行身份。
-    def find_host_command(self, request: HostCommandRequest) -> HostCommandBinding | None:
+    def find_host_command(self, request: HostCommandIdentity) -> HostCommandBinding | None:
         with self._runtime_connection() as conn:
             return read_host_command(conn, request)
 
@@ -2093,8 +2098,8 @@ class RuntimeRepository(
             )
         return {"settled": True, "attempt_id": normalized_attempt_id}
 
-    # LLM: 终态提交与 exact attempt/status CAS 同事务；取消不能清除 UNKNOWN 的锁或恢复障碍。
-    # 函数用途: 收口选定执行轮；控制端可要求仍为 pending，避免旧快照误停已开始的新轮。
+    # LLM: 终态与精确 attempt/status CAS 同事务；未启动回执另要求原 attempt 无 operation，UNKNOWN 锁不清除。
+    # 函数用途: 收口选定执行轮，避免旧控制误停新轮或在工具已领取后写出未执行回执。
     def settle_agent_run(
         self,
         *,
@@ -2104,6 +2109,7 @@ class RuntimeRepository(
         now: float | None = None,
         attempt_id: str = "",
         expected_attempt_status: str = "",
+        require_no_tool_operations: bool = False,
     ) -> dict[str, Any]:
         """run 级终态收口（单事务 CAS，幂等，以第一次为准）。
 
@@ -2134,7 +2140,7 @@ class RuntimeRepository(
         """
         now = time.time() if now is None else now
         event_id = uuid.uuid4().hex
-        if expected_attempt_status and not str(attempt_id or "").strip():
+        if (expected_attempt_status or require_no_tool_operations) and not str(attempt_id or "").strip():
             return {"settled": False, "reason": "missing_attempt"}
         if str(status or "").strip() not in AGENT_RUN_TERMINAL_STATUSES:
             with self.transaction() as conn:
@@ -2195,6 +2201,10 @@ class RuntimeRepository(
                 return {"settled": False, "reason": "attempt_status_conflict", "attempt_id": attempt_id}
             if status == "cancelled" and attempt_status == ATTEMPT_STATUS_UNKNOWN:
                 return {"settled": False, "reason": "attempt_unknown", "attempt_id": attempt_id}
+            if require_no_tool_operations and conn.execute(
+                "SELECT 1 FROM tool_operations WHERE attempt_id=? LIMIT 1", (attempt_id,),
+            ).fetchone() is not None:
+                return {"settled": False, "reason": "tool_operation_present", "attempt_id": attempt_id}
             task_run_id = str(row["task_run_id"])
             cur = conn.execute(
                 "UPDATE agent_runs SET status = ?, updated_at = ? WHERE agent_run_id = ? "

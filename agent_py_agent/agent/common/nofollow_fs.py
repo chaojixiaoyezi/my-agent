@@ -71,18 +71,21 @@ def read_text_beneath(
     return content.decode("utf-8") if content is not None else None
 
 
-# LLM: 与文本读取共用 no-follow 链，缺失返回 None，损坏/越界明确报错；max_bytes 限制实际读取而非仅相信 stat。
+# LLM: 与文本读取共用 no-follow 链；严格来源读取可要求 dirfd，能力不足不能降级 portable；预算限制实际读取而非仅相信 stat。
 # 函数用途: 有界读取宿主管理的普通二进制文件，不跟随链接，也不创建目录。
 def read_bytes_beneath(
     root: str | Path,
     relative_parts: tuple[str, ...],
     *,
     max_bytes: int | None = None,
+    require_dir_fd: bool = False,
 ) -> bytes | None:
     _validate_relative_parts(relative_parts)
     if max_bytes is not None and (type(max_bytes) is not int or max_bytes < 0):
         raise ValueError("managed read limit must be a nonnegative integer")
     if not _supports_dir_fd():
+        if require_dir_fd:
+            raise NoFollowPathError("strict no-follow reading is unavailable")
         return _read_bytes_portable(root, relative_parts, max_bytes)
     try:
         parent_fd = open_directory_beneath(root, relative_parts[:-1])
@@ -369,9 +372,8 @@ def _openat_directory(parent_fd: int, name: str) -> int:
     return descriptor
 
 
-# LLM: Final ledger files are regular files only. O_NOFOLLOW plus inode comparison protects both
-# existing and just-created entries from leaf replacement.
-# 函数用途: 在已验证父目录中安全打开最终普通文件。
+# LLM: 只接受单链接普通文件；no-follow 与 inode 比较阻止替换，非阻塞打开避免预检后换成 FIFO 使线程卡住。
+# 函数用途: 在已验证父目录中打开并复核最终文件，调用方负责关闭描述符。
 def _openat_file(parent_fd: int, name: str, flags: int, mode: int) -> int:
     before: os.stat_result | None
     try:
@@ -386,7 +388,7 @@ def _openat_file(parent_fd: int, name: str, flags: int, mode: int) -> int:
         raise NoFollowPathError("managed file is not a regular file")
     descriptor = os.open(
         name,
-        flags | getattr(os, "O_NOFOLLOW", 0),
+        flags | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
         mode,
         dir_fd=parent_fd,
     )

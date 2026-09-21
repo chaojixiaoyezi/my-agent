@@ -126,7 +126,7 @@ COMMAND_CATALOG = (
     CommandSpec(
         "plugins",
         "/plugins [管理动作]",
-        "查看插件命令帮助（装卸与业务尚未开放）",
+        "查看插件、管理本地安装与查询请求",
         help_variants=(("/plugins@<插件ID> [动作] [参数]", "插件使用入口（尚未开放）"),),
         namespace_separator="@",
         actions=(
@@ -139,6 +139,9 @@ COMMAND_CATALOG = (
             ), available=False),
             CommandActionSpec("install", "安装本地包，默认停用", (
                 ArgumentSpec("source", "本地包路径", required=True, path=True),
+            ), available=False),
+            CommandActionSpec("status", "查询当前会话的管理请求", (
+                ArgumentSpec("request", "原请求编号", required=True),
             ), available=False),
             CommandActionSpec("enable", "启用已安装插件", (
                 ArgumentSpec("plugin", "插件 ID", required=True),

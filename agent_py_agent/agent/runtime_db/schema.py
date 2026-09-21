@@ -12,9 +12,8 @@
 投影库任何字段不得反向决定权威状态（A.2）。
 """
 
-# LLM: schema 只为长期 Task 身份和真实执行/工具/投递状态建表；退役功能的
-# 旧列或旧表可留在存量 SQLite 中，但不得再由新库创建或被运行时读取。
-# 模块用途: 创建并幂等迁移每个 owner 的 runtime.db 运行事实表。
+# LLM: schema 只为 Task 身份和真实执行/工具/投递状态建表；只读连接不得初始化或切 WAL，退役表列不再创建或读取。
+# 模块用途: 创建并幂等迁移 owner 的运行事实表，为只读查询提供禁止写入的连接。
 
 from __future__ import annotations
 
@@ -445,14 +444,19 @@ class RuntimeSchemaMixin:
         for statement in statements:
             conn.execute(statement)
 
+    # LLM: ro 使用标准 SQLite URI 并禁止初始化/WAL 切换；缺失或旧库报错，不在只读查询时偷偷迁移。
+    # 函数用途: 创建对应访问模式的短连接，写模式沿既有 WAL 与外键设置。
     def _runtime_connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path), timeout=30.0)
+        read_only = getattr(self, "read_only", False)
+        address = self.db_path.resolve().as_uri() + "?mode=ro" if read_only else str(self.db_path)
+        conn = sqlite3.connect(address, timeout=30.0, uri=read_only)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout=30000")
-        try:
-            conn.execute("PRAGMA journal_mode=WAL")
-        except sqlite3.OperationalError:
-            pass
+        if not read_only:
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+            except sqlite3.OperationalError:
+                pass
         conn.execute("PRAGMA foreign_keys=ON")
         return conn
 

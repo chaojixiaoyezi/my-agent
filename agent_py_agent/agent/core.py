@@ -2,7 +2,7 @@
 
 # LLM: core.py 只装配 SimpleAgent 的当前主链；拆出的私有 helper 必须由所属
 # 模块直接导入，不在这里保留无人消费的旧 re-export 兼容面；显式派工后端注入也须隔离到线程。
-# 模块用途: 组装模型后端、工具、记忆、会话和子代理，生成可运行的 SimpleAgent。
+# 模块用途: 组装模型后端、工具、记忆、会话和子代理；owner 权限纯裁决与冷管理入口共用。
 
 from __future__ import annotations
 
@@ -102,6 +102,7 @@ from .tooling.user_config_tool import UserConfigTool
 from .user_space.home_indexes import register_owner_ref
 from .user_space.home_layout import ensure_my_agent_home
 from .user_space.home_root import configured_home_root
+from .user_space.owner_access import is_local_admin_owner, resolve_owner_scope_and_access
 from .user_space.owner_policy import resolve_effective_owner_policy
 from .user_space.owner_quota import OwnerQuotaEnforcer
 from .user_space.owner_resolver import (
@@ -728,53 +729,6 @@ def _build_subagent_manager(agent: SimpleAgent, paths: dict) -> SubAgentManager:
 # 在长驻 Gateway 中会在构造时冻结、到期后仍保留权限，因此不再作为 Full Access 来源。
 
 
-# LLM: Local/main is the only administrator identity. Full Access must be an explicit structured
-# config value; remote owner configuration and natural-language claims cannot lift the owner wall.
-# 函数用途: 统一裁决 owner 硬边界和命令权限档位，供工作区、文件工具、Shell 与 Gateway 共用。
-def _resolve_owner_scope_and_access(agent: SimpleAgent, config: AgentConfig) -> tuple[str, str]:
-    """返回 (owner_scope_root, access_mode)。
-
-    owner home 是普通用户和默认管理员的硬边界。只有 local/main 管理员显式请求
-    full-access 才同时解除 owner 墙和 shell 限制；其他 owner 不能仅靠自己的配置
-    文本或 owner 目录内文件提权。
-    """
-    owner_scope_root = str(getattr(agent.home_paths, "owner_home_dir", "") or "")
-    requested_access = str(getattr(config, "access_mode", "workspace-write") or "workspace-write")
-    requested_access = requested_access.strip().lower().replace("_", "-")
-    if requested_access not in {"restricted", "workspace-write", "full-access"}:
-        requested_access = "workspace-write"
-    if requested_access == "full-access":
-        if _is_local_admin_owner(agent.home_paths):
-            return "", "full-access"
-        requested_access = "workspace-write"
-    policy_access = str(
-        getattr(getattr(agent, "owner_policy", None), "shell_access_mode", "") or ""
-    ).strip().lower().replace("_", "-")
-    requested_access = _narrower_access_mode(requested_access, policy_access)
-    return owner_scope_root, requested_access
-
-
-# LLM: Host-admin identity is a structured local/main fact, never a username parsed from chat
-# text. Remote identities remain owner-scoped even if their display/user id says "admin".
-# 函数用途: 判断当前 owner 是否为本机 TUI 的默认管理员身份。
-def _is_local_admin_owner(home_paths: object) -> bool:
-    provider = str(getattr(home_paths, "owner_provider", "") or "").strip().lower()
-    owner_kind = str(getattr(home_paths, "owner_kind", "") or "").strip().lower()
-    return provider in {"", "local"} and owner_kind in {"", "main"}
-
-
-# LLM: Per-owner policy can only narrow a non-Full host configuration. Unknown policy values are
-# ignored rather than treated as grants, and Full Access is decided before this helper.
-# 函数用途: 从全局请求和 owner 策略中选出更严格的 Shell 权限档位。
-def _narrower_access_mode(requested: str, owner_policy: str) -> str:
-    rank = {"restricted": 0, "workspace-write": 1, "full-access": 2}
-    if owner_policy not in rank:
-        return requested
-    if requested not in rank:
-        return owner_policy
-    return min((requested, owner_policy), key=rank.__getitem__)
-
-
 # LLM: Process cwd never grants workspace authority. While the owner wall exists, both local and
 # remote agents use owner home; only a local/main Full Access registry may retain an explicit root.
 # 函数用途: 为 WorkspaceOnly 身份把默认工作区收回 owner home，避免从 /root 启动就污染系统目录。
@@ -782,7 +736,7 @@ def _owner_scoped_workspace_override(
     agent: SimpleAgent, config: AgentConfig
 ) -> tuple[Path, list[Path]] | None:
     """owner 墙有效时返回 (owner_home, [owner_home])；Full Access 时返回 None。"""
-    owner_scope_root, _access_mode = _resolve_owner_scope_and_access(agent, config)
+    owner_scope_root, _access_mode = resolve_owner_scope_and_access(agent.home_paths, config, agent.owner_policy)
     if not owner_scope_root:
         return None
     owner_home = Path(owner_scope_root).expanduser().resolve(strict=False)
@@ -812,14 +766,14 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
 
     workspace_root = agent.effective_workspace_root
     workspace_roots = agent.effective_workspace_roots
-    owner_scope_root, access_mode = _resolve_owner_scope_and_access(agent, config)
+    owner_scope_root, access_mode = resolve_owner_scope_and_access(agent.home_paths, config, agent.owner_policy)
     effective_path_access_mode = (
         "full" if access_mode == "full-access" and not owner_scope_root else config.path_access_mode
     )
     mcp_servers = computer_use_mcp_servers(
         getattr(config, "mcp_servers", {}),
         enabled=bool(getattr(config, "computer_use_enabled", False)),
-        is_local_admin=_is_local_admin_owner(agent.home_paths),
+        is_local_admin=is_local_admin_owner(agent.home_paths),
         access_mode=access_mode,
     )
     return ToolRegistry(

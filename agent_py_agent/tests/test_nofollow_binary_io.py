@@ -10,6 +10,33 @@ import pytest
 from agent_py_agent.agent.common import nofollow_fs as fs
 
 
+def test_strict_source_does_not_downgrade_without_dirfd(tmp_path, monkeypatch):
+    path = tmp_path / "source"
+    path.write_bytes(b"original")
+    monkeypatch.setattr(fs, "_supports_dir_fd", lambda: False)
+    with pytest.raises(fs.NoFollowPathError):
+        fs.read_bytes_beneath(tmp_path, ("source",), require_dir_fd=True)
+    assert fs.read_bytes_beneath(tmp_path, ("source",)) == b"original"
+
+
+def test_fifo_swap_during_open_is_nonblocking_and_rejected(tmp_path, monkeypatch):
+    path = tmp_path / "source"
+    path.write_bytes(b"original")
+    original = os.open
+
+    def swap(name, flags, mode=0o777, **kwargs):
+        if name == "source":
+            assert flags & os.O_NONBLOCK  # 缺标记立即失败，测试本身不能挂在 FIFO 上。
+            path.unlink()
+            os.mkfifo(path)
+        return original(name, flags, mode, **kwargs)
+
+    monkeypatch.setattr(fs, "_supports_dir_fd", lambda: True)
+    monkeypatch.setattr(os, "open", swap)
+    with pytest.raises(fs.NoFollowPathError):
+        fs.read_bytes_beneath(tmp_path, ("source",), require_dir_fd=True)
+
+
 @pytest.mark.parametrize("portable", [False, True])
 def test_binary_and_text_share_private_atomic_writer(tmp_path, monkeypatch, portable):
     if portable:

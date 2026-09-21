@@ -5,6 +5,7 @@
 #   已退休工具限制的错误码只解释旧持久回执，不重新启用原限制或假称当前仍会触发。
 #   历史读取失败保留待恢复工作；任务绑定冲突先核对身份，不用重放任务掩盖不一致。
 #   资源停止未确认必须核对原回执，未知控制必须修正调用；两者均不得原样重放或扩大停止范围。
+#   插件管理超时须查询原请求；管理权限、配置禁用和执行准备失败分别呈现，不能因错误而再次安装。
 # 模块用途: 给工具结果、恢复状态机和用户汇报提供一致的错误类别、重试性与处理建议。
 
 from __future__ import annotations
@@ -328,6 +329,31 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         code="PLUGIN_CATALOG_UNAVAILABLE", category="state", retryable=False,
         recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
         recovery_hint="插件目录暂不可读；保留原任务，显式刷新后再决定操作，不降级到聊天或本地执行。",
+    ),
+    "PLUGIN_PERMISSION_DENIED": ErrorContract(
+        code="PLUGIN_PERMISSION_DENIED", category="permission", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="当前身份没有插件管理权限，请由已授权管理员操作。",
+    ),
+    "PLUGIN_DISABLED": ErrorContract(
+        code="PLUGIN_DISABLED", category="configuration", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="插件管理已关闭；原请求结果仍可查询，不自动启用。",
+    ),
+    "PLUGIN_COMMAND_OUTCOME_UNKNOWN": ErrorContract(
+        code="PLUGIN_COMMAND_OUTCOME_UNKNOWN", category="state", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="按原请求编号查询，不根据断连或超时重复安装。",
+    ),
+    "HOST_COMMAND_PREPARATION_FAILED": ErrorContract(
+        code="HOST_COMMAND_PREPARATION_FAILED", category="state", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="宿主管理请求在执行器入口前准备失败；查看原回执，不自动重试。",
+    ),
+    "TOOL_DISABLED": ErrorContract(
+        code="TOOL_DISABLED", category="permission", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="当前 owner 工具策略禁用了该工具，不绕过禁用状态。",
     ),
     "ACTIVE_TURN_OUTCOME_UNCERTAIN": ErrorContract(
         code="ACTIVE_TURN_OUTCOME_UNCERTAIN",

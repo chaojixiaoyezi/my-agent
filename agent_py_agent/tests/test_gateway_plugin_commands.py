@@ -7,14 +7,26 @@ from unittest.mock import Mock
 
 import pytest
 
+from agent_py_agent.agent.auth.manager import AuthManager
+from agent_py_agent.agent.auth.middleware import AuthMiddleware
 from agent_py_agent.agent.gateway_parts import http_handlers, plugin_command_service, request_worker
 from agent_py_agent.agent.plugin_command_catalog import PluginCommandCatalog
 from agent_py_agent.agent.settings.config import AgentConfig
-from agent_py_agent.tests.test_gateway_model_profiles import Handler
+from agent_py_agent.agent.user_space.home_layout import home_paths
+from agent_py_agent.tests.test_gateway_model_profiles import Handler as ModelHandler
+
+
+class Handler(ModelHandler):
+    def __init__(self, body, user="alice"):
+        super().__init__(body, user)
+        self.headers = {"X-User-Id": user, "X-Channel": "local"}
+        self.client_address = ("127.0.0.1", 12345)
+        self._auth_middleware = AuthMiddleware(AuthManager(admin_user_id="admin", auth_enabled=True))
+
 
 
 @pytest.fixture
-def host(monkeypatch):
+def host(monkeypatch, tmp_path):
     monkeypatch.setattr(http_handlers, "require_trusted_source", lambda handler: False)
     monkeypatch.setattr(http_handlers, "_request_channel", lambda handler: (handler.user, "local"))
     monkeypatch.setattr(http_handlers, "_request_identity", lambda handler: (handler.user, None))
@@ -22,7 +34,7 @@ def host(monkeypatch):
         request_worker, "_owner_pool", Mock(side_effect=AssertionError("禁止初始化完整 Agent"))
     )
     return SimpleNamespace(
-        agent=SimpleNamespace(config=AgentConfig(gateway_per_user_owner_scoping=True))
+        agent=SimpleNamespace(config=AgentConfig(gateway_per_user_owner_scoping=True), home_paths=home_paths(tmp_path))
     )
 
 
@@ -69,8 +81,8 @@ def test_all_http_command_entries_keep_invalid_and_stale_input_out_of_task_queue
         ("/plugins help install", "", True, None),
         ("/plugins list --bad", "", False, "INVALID_COMMAND_ARGUMENTS"),
         ("/plugins@missing", "", False, "UNKNOWN_PLUGIN"),
-        ("/plugins install sample.whl", "", False, "PLUGIN_CATALOG_STALE"),
-        ("/plugins install sample.whl", snapshot.revision, False, "PLUGIN_COMMAND_UNAVAILABLE"),
+        ("/plugins install sample.whl", "", False, "PLUGIN_PERMISSION_DENIED"),
+        ("/plugins install sample.whl", snapshot.revision, False, "PLUGIN_PERMISSION_DENIED"),
         ("/plugins help", "old-revision", False, "PLUGIN_CATALOG_STALE"),
     ]
     for text, revision, ok, error in texts:
@@ -120,7 +132,7 @@ def test_declarations_changed_between_discovery_and_submit_are_not_reinterpreted
     snapshot = catalog(host)
     changed = replace(snapshot, management_actions=())
     monkeypatch.setattr(
-        plugin_command_service, "read_plugin_catalog", lambda *args, **kwargs: changed
+        plugin_command_service.PluginManagement, "catalog", lambda *args, **kwargs: changed
     )
     handler = Handler(
         {

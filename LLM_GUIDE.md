@@ -77,9 +77,11 @@ Shell 不设人为命令字符上限，安全、权限、时间和输出预算�
 `docs/COMPLETED.md` 和 `STATUS.md`。旧轮次的测试结果不替代当前发布验收。
 插件参数已共用不可变声明、词法、绑定、帮助与补全，核心自由正文保持原协议；参数与补全修复已同版部署，实际验收及模型质量边界见 STATUS。
 自动补全不能在完整命令后擅自追加可选旗标；显式 Tab 负责进一步发现，接受候选与 Enter 提交分开。
-插件命令错误和静态帮助在 CLI/HTTP 入口结束，不能进入旧控制执行器或普通模型队列；安装/启停仍未开放。
+插件命令错误和静态帮助在 CLI/HTTP 入口结束，不能进入旧控制执行器或普通模型队列；完整装卸仍未发布。
 显式管理请求的本地源码已沿原 RuntimeDB 原子登记独立 pending 运行；请求重送不换代，终态只读原操作。
-创建树统一归 `runtime_db/run_creation.py`，冻结绑定读 `host_commands.py`；完整管理执行适配仍待接线，见 [宿主命令合同](docs/design/HOST_COMMAND_EXECUTION.md)。
+创建树统一归 `runtime_db/run_creation.py`，冻结绑定读 `host_commands.py`；本地管理执行与只读查询由 `host_command_execution.py` 接原执行器，见 [宿主命令合同](docs/design/HOST_COMMAND_EXECUTION.md)。
+本地 HTTP/direct 安装复用原管理授权、路径权限和配额，只保存默认停用包；独立环境、激活、撤销与实际多 TUI 装卸仍待完成。
+`enable_plugins=false` 拒绝新安装，原管理员查询不受开关或来源文件消失影响；断连保留原请求和未知结果，不能自动重送。
 未启动占位取消保留原输入、幂等与资源声明，损坏结果原文不洗成空账；严格回读拒绝损坏或未知版本，源码验证与已部署停止验收分开。
 宿主目录与提交版本已发布同版双机：`plugin_command_catalog.v1` 只是只读声明，原 owner 解析仍唯一；无冷用户初始化。
 TUI 自动补全只读缓存，显式 Tab/命令才请求宿主；首次选择的版本在参数补全后也不能被刷新覆盖，过期不自动重放。

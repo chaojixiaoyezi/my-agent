@@ -95,6 +95,8 @@ agent_py_agent/
 |   |-- plugin_package.py              # 有界 ZIP 读取、成员与摘要核对，不安装或导入插件
 |   |-- plugin_installation.py         # 安装请求、停用事实、最后回执与纯准入判断
 |   |-- plugin_install_store.py        # owner 唯一安装表、包内容保存及锁内 CAS/提交裁决
+|   |-- plugin_install_tool.py         # 经原执行器读取授权包快照并保存默认停用记录
+|   |-- plugin_management.py           # 原权限、线程与目录的轻量组合，显式安装与只读结果查询
 |   |-- core.py                         # SimpleAgent 组合入口
 |   |-- turn_end.py                     # 主/子代理共用的结束原因及技术续跑判据
 |   |-- model_guidance.py               # 完整 Prompt 与有副作用工具共用的验证/授权软提示唯一正文
@@ -156,6 +158,7 @@ agent_py_agent/
 |   |   |-- execution/                 # 测试执行和记录
 |   |   `-- static_site/               # 静态站点检查
 |   |-- user_space/                    # owner home、task workspace、policy、可选 quota、doctor、自动 retention
+|   |   |-- owner_access.py            # 完整代理与冷管理共用的 owner 目录墙及权限裁决
 |   |   |-- approval_mode.py           # owner 显式审批模式与权限快照映射，子代理同源读取
 |   |   |-- owner_quota.py             # 显式非零磁盘上限的跨进程配额锁；0 时退出热路径
 |   |   |-- home_retention.py          # 结构化终态/时间清理、二次校验、trash tombstone 与 legal hold
@@ -185,10 +188,12 @@ agent_py_agent/
 |   |-- runtime_db/                     # SQLite 运行事实源：Task 身份、TaskRun/AgentRun/Attempt 生命周期、wake 与投递账本
 |   |   |-- run_creation.py             # 普通代理及宿主命令共用的同连接运行树创建
 |   |   |-- host_commands.py            # 显式宿主请求与原始 pending 运行的唯一绑定及严格回读
+|   |   |-- host_command_execution.py   # 原 pending 精确执行、原运行收口和不重跑的只读查询
 |   |   |-- run_cancellation.py         # 精确 task/run/attempt 的共用取消权限合同，UNKNOWN 保留锁与恢复障碍
 |   |   `-- executor_liveness.py        # exact attempt 执行区间和 OS 退出事实；慢模型不按时长判死
 |   |-- gateway_parts/                 # gateway request/worker/lease/http/renderer
-|   |   |-- plugin_command_service.py  # 可信 owner 的只读目录与插件 HTTP 命令入口
+|   |   |-- plugin_command_service.py  # 原管理员授权、可信 owner 目录与插件 HTTP 命令入口
+|   |   |-- owner_conversation_store.py # 模型配置与插件管理共用的原 owner 会话 Store 组装
 |   |   |-- request_execution.py        # 单个已领取请求的租约、模型执行、超窗恢复与收尾编排
 |   |   |-- request_context.py          # 原车道内的会话快照、Compact 与工作目录准备
 |   |   |-- request_binding.py          # 精确请求与运行身份绑定、执行车道和原子更新
@@ -404,6 +409,7 @@ agent_py_agent/
 |   |-- test_runtime_db_stable_mutation_generation.py # 正常换代、活动接管和升级调和保留已确认资源
 |   |-- test_host_command_registration.py # 并发请求唯一登记、输入冲突、事务回滚与原链损坏检查
 |   |-- test_host_command_operation_replay.py # 原执行器终态回读、身份隔离及线程退出 UNKNOWN 保留
+|   |-- test_host_command_execution.py # 同请求并发、规范输入守门、终态收口故障及只读查询
 |   |-- test_gateway_admission_wait.py  # 合法排队等准入的结构化等待信号：只写等待事实、有节流与总预算、客户端持续收到且停写/取消/终态收口
 |   |-- test_scheduler_scan_costs.py    # waiting 投影缓存三重校验、runtime_snapshot 锁外解析与旧实现逐字一致、owner 事实缓存失效回归
 |   |-- fixtures/tui/                   # 固定尺寸/时间线的非敏感 TUI PTY 动作 fixture
@@ -425,8 +431,10 @@ agent_py_agent/
 |   |-- test_plugin_command_catalog.py # 声明跨进程往返、版本变化及损坏载荷拒绝
 |   |-- test_plugin_package.py         # 静态包篡改、归档预算、危险成员及不执行代码的合同检查
 |   |-- test_plugin_install_store.py   # 默认停用、原请求重放、失败裁决与独立进程安装竞争
+|   |-- test_plugin_management.py      # 真实原执行链、来源消失、配置关闭、路径权限和配额检查
 |   |-- test_nofollow_binary_io.py      # 二进制预算、私有原子写入、锁链接和 portable 创建竞争
 |   |-- test_gateway_plugin_commands.py # 冷 owner、可信身份、HTTP 插件命令分流与过期拒绝
+|   |-- test_gateway_plugin_management.py # 原认证管理角色、冷用户拒绝及安装结果回读
 |   |-- test_plugin_command_client.py  # 三模式、异步响应隔离、原候选版本及显式 Tab 读取
 |   |-- test_tui_plugin_directory_pipe.py # 完整键盘链的 Tab 读取、候选接受、暂存恢复和原版本提交
 |   |-- test_tui_interaction.py         # stash、Ctrl-R、help 与 paste refs 状态机回归
@@ -505,6 +513,7 @@ docs/
 - `agent_py_agent/agent/runtime_db/run_cancellation.py`：在原 RuntimeDB 上核对 task/run/agent run/attempt 四个身份并关闭执行权；原 UNKNOWN 不恢复、不释放锁，旧控制不能追随新的执行轮。
 - `agent_py_agent/agent/runtime_db/run_creation.py`：在调用方原事务内创建 Task→TaskRun→AgentRun→首次 Attempt 及委托/事件，普通调用与显式宿主命令共用，不能另开事务。
 - `agent_py_agent/agent/runtime_db/host_commands.py`：原事件索引与 TaskRun 冻结请求共同绑定唯一运行；本身不授予权限、不启动模型或任务调度。
+- `agent_py_agent/agent/runtime_db/host_command_execution.py`：只领取原 pending，强制原操作 Store，终态沿原运行收口；查询不初始化数据库，UNKNOWN 不重跑。
 - `docs/design/HOST_COMMAND_EXECUTION.md`：显式宿主请求的登记、终态只读重放、UNKNOWN 和现有执行器接线边界。
 - `agent_py_agent/agent/conversation/task_resources.py`：主链身份适配与整任务固定清单；热请求带正式绑定，无热请求才读取唯一主链，组合原子树后锁外清理，不重新选择资源。
 - `agent_py_agent/agent/subagents/cancellation.py`：原创建事务内选择后代、关闭原权限并冻结资源；模型和用户控制共用，业务终态与资源退出分别保留。
@@ -519,15 +528,16 @@ docs/
 - `agent_py_agent/agent/tooling/process_session_records.py`：纯数据校验与单调合并；`process_session_commit.py` 只安装固定记录，目录互斥归公共 `common/directory_lock.py`，原锁名不变。v1 不隐式升级或获得任务停止授权。
 - `agent_py_agent/agent/command_catalog.py`：无 UI/执行依赖的公共命令声明；原控制参数仍归会话模块，插件后缀识别不等于身份校验或可执行授权。
 - `agent_py_agent/agent/command_arguments.py` 与 `command_binding.py`：参数定义、字面词法及值绑定的权威实现；部分输入也使用同一协议，帮助不从展示文字反推规则。
-- `agent_py_agent/agent/plugin_commands.py`：接收宿主提供的只读动作描述；当前实际入口仅有管理帮助和明确拒绝，没有安装表、插件加载或第二执行器。
+- `agent_py_agent/agent/plugin_commands.py`：接收宿主提供的动作描述，统一参数解析和静态错误；安装表与实际执行由管理服务沿原链处理。
 - `agent_py_agent/agent/plugin_command_catalog.py`：冻结及校验完整管理/插件声明，内容摘要绑定 owner 视图、版本和激活引用；不提供权限凭证。
 - `agent_py_agent/agent/command_declarations.py`：命令 JSON 的唯一读取器，包和宿主目录共用，旧目录私有 decoder 已删除。
 - `agent_py_agent/agent/plugin_manifest.py` 与 `plugin_package.py`：只读校验包并保留同一字节快照；不接受宿主身份，不代表已安装、已授权或已隔离。
 - `agent_py_agent/agent/plugin_installation.py` 与 `plugin_install_store.py`：原 owner 插件目录中的唯一安装表和最后回执；先存包再提交，默认停用，异常读回区分提交结果，不拥有管理权限或执行历史。
+- `agent_py_agent/agent/plugin_install_tool.py` 与 `plugin_management.py`：管理服务先核对可信授权，隐藏工具再经原执行器读取一次包；默认停用保存，查询只读原请求，不启动插件。
 - `agent_py_agent/agent/common/directory_lock.py`、`nofollow_fs.py` 与 `strict_json.py`：分别维护永久互斥、受信根文件原语和严格 JSON；这些公共原语不裁决领域授权或替代操作账本。
 - `agent_py_agent/agent/plugin_command_service.py`：从既有 OwnerIdentity 生成会话目录，旧或缺失业务版本明确拒绝；当前实际插件贡献仍为空。
-- `agent_py_agent/agent/gateway_parts/plugin_command_service.py`：`/client/plugins`、`/ask` 和 `/control` 共用原可信 owner 解析，静态读取不初始化冷用户 Agent 或会话。
-- `agent_py_agent/cli/chat_parts/plugin_command_client.py`：TUI、plain Gateway 与 direct 共用显式模式和声明缓存，故障不降级，乱序或换作用域响应不回写。
+- `agent_py_agent/agent/gateway_parts/plugin_command_service.py`：三个 HTTP 入口共用原管理员与可信 owner；只读不初始化冷用户，获授权安装才登记原独立运行。
+- `agent_py_agent/cli/chat_parts/plugin_command_client.py`：TUI、plain Gateway 与 direct 共用模式、声明缓存及查询语义；传输失败保留原编号与未知，不降级或自动重送。
 - `agent_py_agent/cli/chat_parts/tui_plugin_commands.py`：保存首次接受候选的目录版本，参数补全不升级；网络提交沿共享分派在 UI 线程外执行。
 - `agent_py_agent/agent/plugin_completion.py`：仅建议能够绑定到当前参数的值；停用插件只给静态帮助，文件枚举由宿主按显式路径声明提供。
 
@@ -620,8 +630,10 @@ docs/
 - `agent/gateway_parts/foreground_transcript.py`：同会话公开过程、候选增量与 final 快照，不拥有运行或审批权限。
 - `agent_py_agent/tests/test_gateway_foreground_transcript.py`：前台 writer、消息顺序、缺帧恢复、候选接替与隔离验证。
 - `agent/gateway_parts/model_profile_service.py`：authenticated owner 的模型菜单接口，不经聊天队列或模型。
+- `agent/gateway_parts/owner_conversation_store.py`：沿原配置与 owner 路径组装模型菜单和插件管理共用的轻量会话 Store，不初始化完整 Agent。
 - `agent/gateway_parts/approval_mode_service.py`：认证 owner 的权限菜单服务，不允许正文伪造管理员。
 - `agent/user_space/approval_mode.py`：既有 owner 工具策略里的唯一用户审批模式读写与运行快照映射。
+- `agent/user_space/owner_access.py`：原 core 路径权限裁决的唯一实现；冷管理与完整代理共用，不能替代 HTTP 管理角色认证。
 - `agent/settings/model_profiles.py` 与 `model_scope.py`：用户模型存储和运行快照；敏感配置位于宿主 config/model-profiles，非业务目录。
 - `agent/settings/model_oauth.py`、`model_oauth_schema.py`、`model_oauth_wire.py`：账号登录的状态、校验与协议；说明见 `docs/design/MODEL_OAUTH.md`。
 - `agent/backends/oauth.py`、`oauth_transport.py` 和 `cli/chat_parts/tui_model_auth.py`：认证与原模型后端的适配及私密登录交互。

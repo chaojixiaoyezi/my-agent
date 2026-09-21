@@ -33,7 +33,19 @@ def plugin_catalog_unavailable() -> dict[str, object]:
         "request_id": "",
         "error_code": "PLUGIN_CATALOG_UNAVAILABLE",
         "reason": "catalog_unavailable",
-        "message": "无法读取当前插件目录；本次没有执行操作，请稍后重新查看。",
+        "message": "无法读取当前插件目录，请稍后重新查看。",
+    }
+
+
+# LLM: 传输失败不能证明宿主未执行；只保留客户端的稳定请求标识，不根据错误正文判断提交结果。
+# 函数用途: 提示用户查询原请求，避免回包丢失后重复提交安装。
+def plugin_command_unknown(request_id: str) -> dict[str, object]:
+    return {
+        "kind": "plugin_command", "ok": False, "state": "outcome_unknown",
+        "request_id": request_id, "error_code": "PLUGIN_COMMAND_OUTCOME_UNKNOWN",
+        "message": "未能确认插件请求结果。" + (
+            f"请查询原请求：/plugins status {request_id}" if request_id else "请核对原请求编号后查询。"
+        ),
     }
 
 
