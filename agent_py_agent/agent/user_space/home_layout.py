@@ -25,7 +25,7 @@ from .persona_templates import AGENTS_TEMPLATE, SOUL_TEMPLATE, USER_TEMPLATE
 DEFAULT_ROUTE_INDEX = Path("memory") / "routing" / "INDEX.md"
 
 
-# LLM: Every durable owner authority gets one explicit path field; callers must not reconstruct alternate locations from prose.
+# LLM: 每项 owner 持久权威有明确路径字段；插件位于原受保护 data 内，调用方不能从包或用户正文重建地址。
 # 类用途: 保存 my-agent 根目录和当前 owner 的全部规范文件/目录路径。
 @dataclass(frozen=True)
 class MyAgentHomePaths:
@@ -99,6 +99,7 @@ class MyAgentHomePaths:
     owner_artifacts_dir: Path
     owner_audit_dir: Path
     owner_data_dir: Path
+    owner_plugins_dir: Path
     owner_artifact_backups_dir: Path
     owner_scheduler_dir: Path
     owner_scheduler_store_json: Path

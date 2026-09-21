@@ -1,4 +1,4 @@
-# LLM: 本模块是后台 session 的唯一持久入口；目录锁内先恢复 redo，再读取、CAS 合并或裁剪原 JSON。
+# LLM: 本模块是后台 session 的唯一持久入口；原锁名由公共目录锁承载，锁内先恢复 redo，再读取、CAS 合并或裁剪原 JSON。
 # 模块用途: 为 launcher、host 和 Gateway 串行管理启动预留及停止意图，保留原目录和 v1 显式句柄权限。
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..common.directory_lock import locked_private_directory
 from ..common.json_io import locked_json_path, write_json_file_atomic_unlocked
 from ..runtime_errors import runtime_error_report
 from .process_scope import ProcessExecutionScope
@@ -18,7 +19,6 @@ from .process_session_commit import (
     read_process_record,
     recover_process_commit,
 )
-from .process_session_lock import locked_process_sessions
 from .process_session_records import (
     LEGACY_PROCESS_SESSION_SCHEMA,
     PROCESS_SESSION_SCHEMA,
@@ -182,11 +182,11 @@ class ProcessSessionStore:
     def record_path(self, session_id: str) -> Path:
         return self.root / f"{validate_session_id(session_id)}.json"
 
-    # LLM: 恢复必须先于任何读取或修改；持锁回调只能取必要权威检查，不能再次调用公共 Store 入口。
+    # LLM: 恢复必须先于任何读取或修改；保留原 .process-sessions.lock 身份及锁顺序，不能再次调用公共 Store 入口。
     # 函数用途: 获取目录互斥并补齐上次提交，向启动/停止调用者开放一次短临界区。
     @contextmanager
     def transaction(self) -> Iterator[ProcessSessionTransaction]:
-        with locked_process_sessions(self.root):
+        with locked_private_directory(self.root, lock_name=".process-sessions.lock"):
             recover_process_commit(self.root)
             transaction = ProcessSessionTransaction(self.root)
             try:

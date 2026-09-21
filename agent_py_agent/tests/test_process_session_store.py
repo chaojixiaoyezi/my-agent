@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
+from agent_py_agent.agent.common import directory_lock as lock_module
 from agent_py_agent.agent.tooling import process_session_commit as commit_module
-from agent_py_agent.agent.tooling import process_session_lock as lock_module
 from agent_py_agent.agent.tooling.process_scope import ProcessExecutionScope
 from agent_py_agent.agent.tooling.process_session_commit import ProcessSessionCommitPendingError
 from agent_py_agent.agent.tooling.process_session_records import (

@@ -1,4 +1,5 @@
-
+# LLM: owner 身份与路径沿同一 v2 布局解析，插件安装不能自行指定归属；纯解析不创建文件或初始化 Agent。
+# 模块用途: 解析各用户的规范目录，显式初始化时才创建目录与种子文件。
 from __future__ import annotations
 
 import json
@@ -43,6 +44,8 @@ class OwnerIdentity:
         return cls(provider=safe_path_segment(provider), owner_kind="group", owner_id=safe_path_segment(owner_id))
 
 
+# LLM: 每个 owner 权威位置显式保存；插件目录归 data，不能由工作目录、权限模式或包字段改变。
+# 类用途: 给宿主提供同一用户的规范路径，纯解析结果本身不授予操作权限。
 @dataclass(frozen=True)
 class OwnerHomeResult:
     root: Path
@@ -79,6 +82,7 @@ class OwnerHomeResult:
     artifacts_dir: Path
     audit_dir: Path
     data_dir: Path
+    plugins_dir: Path
     artifact_backups_dir: Path
     scheduler_dir: Path
     scheduler_store_json: Path
@@ -122,6 +126,8 @@ def owner_identity_from_config(config: Any) -> OwnerIdentity:
     return OwnerIdentity.provider_user(provider, owner_id)
 
 
+# LLM: 替换所有 owner 作用域路径，不能沿用本地主用户的插件或会话目录；不写入状态。
+# 函数用途: 将基础宿主路径投影到指定可信 owner，供冷用户管理入口直接使用。
 def home_paths_with_owner(paths: MyAgentHomePaths, owner: OwnerHomeResult) -> MyAgentHomePaths:
     return replace(
         paths,
@@ -162,6 +168,7 @@ def home_paths_with_owner(paths: MyAgentHomePaths, owner: OwnerHomeResult) -> My
         owner_artifacts_dir=owner.artifacts_dir,
         owner_audit_dir=owner.audit_dir,
         owner_data_dir=owner.data_dir,
+        owner_plugins_dir=owner.plugins_dir,
         owner_artifact_backups_dir=owner.artifact_backups_dir,
         owner_scheduler_dir=owner.scheduler_dir,
         owner_scheduler_store_json=owner.scheduler_store_json,
@@ -183,6 +190,8 @@ def _owner_home_dir(root: Path, identity: OwnerIdentity) -> Path:
     return root / "owners" / "providers" / identity.provider / bucket / identity.owner_id
 
 
+# LLM: 与 home_layout_v2 的本地主用户路径保持一致，新增权威字段须同步两侧及 owner 隔离测试。
+# 函数用途: 从可信身份的 home 生成完整规范位置，不创建目录或加载用户状态。
 def _owner_home_result(root: Path, identity: OwnerIdentity, home_dir: Path) -> OwnerHomeResult:
     memory = home_dir / "memory"
     data = home_dir / "data"
@@ -222,6 +231,7 @@ def _owner_home_result(root: Path, identity: OwnerIdentity, home_dir: Path) -> O
         artifacts_dir=home_dir / "artifacts",
         audit_dir=home_dir / "audit",
         data_dir=data,
+        plugins_dir=data / "plugins",
         artifact_backups_dir=data / "artifact_backups",
         scheduler_dir=scheduler,
         scheduler_store_json=scheduler / "store.json",

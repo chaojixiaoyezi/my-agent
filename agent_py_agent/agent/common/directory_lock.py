@@ -1,5 +1,5 @@
-# LLM: 目录锁只串行本版进程 Store；固定锁文件不可替换或删除，旧 v1 写入仍须按记录取原锁。
-# 模块用途: 用标准库在线程和独立进程之间互斥后台记录事务；没有系统锁时拒绝继续写权威数据。
+# LLM: 每个权威目录必须选择固定锁名，锁文件不可替换或删除；本模块不读取状态，不支持重入，也不降级为仅线程锁。
+# 模块用途: 复用原进程 Store 的标准库互斥，在同一临界区串行权威文件的线程与跨进程读写。
 from __future__ import annotations
 
 import errno
@@ -12,6 +12,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .nofollow_fs import open_private_lock_beneath
+
 try:
     import fcntl
 except ImportError:  # pragma: no cover - Windows 使用下面的字节锁。
@@ -23,7 +25,7 @@ except ImportError:
 
 
 # LLM: 只保存锁，不缓存记录或取消状态；等待者的强引用保证弱表中的锁不会被提前回收。
-# 类用途: 为同一后台目录提供可弱引用的线程锁容器。
+# 类用途: 为同一目录和锁名提供可弱引用的线程锁容器。
 @dataclass
 class _StoreMutex:
     lock: threading.Lock = field(default_factory=threading.Lock)
@@ -33,21 +35,29 @@ _MUTEXES: weakref.WeakValueDictionary[str, _StoreMutex] = weakref.WeakValueDicti
 _MUTEX_GUARD = threading.Lock()
 
 
-# LLM: 调用方必须传规范目录；锁顺序固定为目录线程锁、目录系统锁、旧记录锁，不支持重入。
-# 函数用途: 在整个读改写或恢复期间锁住同一 Store，创建私有目录及永久锁文件。
+# LLM: root 是受信锚点，relative_parts 是宿主固定地址；锁顺序保持线程、系统、领域记录，永久锁不替换。
+# 函数用途: 在读改写或恢复期间锁住同一目录，逐段准备私有目录并拒绝链接锁文件。
 @contextmanager
-def locked_process_sessions(root: Path) -> Iterator[None]:
+def locked_private_directory(
+    root: Path,
+    *,
+    lock_name: str,
+    relative_parts: tuple[str, ...] = (),
+) -> Iterator[None]:
+    if not lock_name or lock_name in {".", ".."} or Path(lock_name).name != lock_name:
+        raise ValueError("directory lock name must be one path component")
     if fcntl is None and msvcrt is None:
-        raise RuntimeError("managed process store requires an OS file lock")
+        raise RuntimeError("authority store requires an OS file lock")
+    root = Path(os.path.abspath(root))
+    key = str(root.joinpath(*relative_parts, lock_name))
     with _MUTEX_GUARD:
-        mutex = _MUTEXES.get(str(root))
+        mutex = _MUTEXES.get(key)
         if mutex is None:
             mutex = _StoreMutex()
-            _MUTEXES[str(root)] = mutex
+            _MUTEXES[key] = mutex
     with mutex.lock:
-        root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        root.chmod(0o700)
-        descriptor = os.open(root / ".process-sessions.lock", os.O_RDWR | os.O_CREAT, 0o600)
+        anchor, parts = _existing_anchor(root, relative_parts)
+        descriptor = open_private_lock_beneath(anchor, (*parts, lock_name))
         try:
             _acquire_file_lock(descriptor)
             try:
@@ -58,8 +68,17 @@ def locked_process_sessions(root: Path) -> Iterator[None]:
             os.close(descriptor)
 
 
+# LLM: 原进程 Store 可能首次使用尚不存在的私有根；只向上找已有锚点，不创建目录也不解析链接。
+# 函数用途: 把缺失根的固定后缀并入相对路径，让创建仍统一经过 no-follow 原语。
+def _existing_anchor(root: Path, parts: tuple[str, ...]) -> tuple[Path, tuple[str, ...]]:
+    while not root.exists() and not root.is_symlink():
+        parts = (root.name, *parts)
+        root = root.parent
+    return root, parts
+
+
 # LLM: Windows 在固定偏移锁一字节；只重试锁冲突，中断和权限错误必须离开临界区。
-# 函数用途: 获取当前系统支持的文件排他锁，防止两个独立 Gateway/runner 同时提交进程记录。
+# 函数用途: 获取当前系统支持的文件排他锁，防止两个独立写入者同时提交同一权威记录。
 def _acquire_file_lock(descriptor: int) -> None:
     if fcntl is not None:
         fcntl.flock(descriptor, fcntl.LOCK_EX)

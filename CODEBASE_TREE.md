@@ -92,6 +92,8 @@ agent_py_agent/
 |   |-- plugin_completion.py           # 用公共词法和绑定事实生成只编辑输入的候选
 |   |-- plugin_manifest.py             # 静态包描述、不可变 schema 与默认停用的命令投影
 |   |-- plugin_package.py              # 有界 ZIP 读取、成员与摘要核对，不安装或导入插件
+|   |-- plugin_installation.py         # 安装请求、停用事实、最后回执与纯准入判断
+|   |-- plugin_install_store.py        # owner 唯一安装表、包内容保存及锁内 CAS/提交裁决
 |   |-- core.py                         # SimpleAgent 组合入口
 |   |-- turn_end.py                     # 主/子代理共用的结束原因及技术续跑判据
 |   |-- model_guidance.py               # 完整 Prompt 与有副作用工具共用的验证/授权软提示唯一正文
@@ -309,6 +311,9 @@ agent_py_agent/
 |   |   |-- model_provider_network.py   # 用户主动目录 GET/短问候，不执行工具或创建任务
 |   |   |-- model_scope.py              # 主工作片冻结 config/backend/prompts，切换不热改在途执行
 |   |-- common/                        # 跨域小权威：safe_id、path_normalize、json_io、日志脱敏、结构化输出批处理
+|   |   |-- directory_lock.py           # 原后台与安装 Store 共用的永久目录系统锁，不降级为仅线程互斥
+|   |   |-- nofollow_fs.py              # 受信根内的文本/二进制读写及锁文件打开，拒绝链接路径
+|   |   |-- strict_json.py              # 包与安装表共用的唯一键、有限数及严格 UTF-8 JSON 读取
 |   |   |-- text_file_window.py          # 普通/按行/字符读取共用的有界编码索引、seek 游标和版本失效
 |   |   |-- file_version.py              # 观察版本与显式写前置条件；不建立任务锁或冒充内核 CAS
 |   |   |-- audit_activation.py        # 显式 `/audit` 前缀 -> guarantee/window 结构化激活
@@ -342,7 +347,6 @@ agent_py_agent/
 |   |   |-- process_registry.py       # 受保护记录的进程缓存、水合、PID 身份核对与完整后代树终止
 |   |   |-- process_session_store.py  # 原 session 地址的互斥读写、版本 CAS、精确停止清单与裁剪
 |   |   |-- process_session_records.py # v1 显式读取与 v2 启动、实例绑定、交接及单调状态合同
-|   |   |-- process_session_lock.py   # 后台记录目录的线程及跨进程系统互斥，不支持时明确拒绝
 |   |   |-- process_session_commit.py # 固定 v2 批次的 redo 发布、完整预检、安装恢复及提交回执
 |   |   |-- process_session_cleanup.py # 冻结单 session 实例的精确清理与保留已提交副作用的异常回执
 |   |   |-- process_resource_stop.py   # 主控制冻结后台清单和 PTY 请求，锁外清理只消费原回执并保留部分错误
@@ -415,6 +419,8 @@ agent_py_agent/
 |   |-- test_tui_input.py               # slash/path 补全、菜单选择、queue 回取与 bracketed paste 输入回归
 |   |-- test_plugin_command_catalog.py # 声明跨进程往返、版本变化及损坏载荷拒绝
 |   |-- test_plugin_package.py         # 静态包篡改、归档预算、危险成员及不执行代码的合同检查
+|   |-- test_plugin_install_store.py   # 默认停用、原请求重放、失败裁决与独立进程安装竞争
+|   |-- test_nofollow_binary_io.py      # 二进制预算、私有原子写入、锁链接和 portable 创建竞争
 |   |-- test_gateway_plugin_commands.py # 冷 owner、可信身份、HTTP 插件命令分流与过期拒绝
 |   |-- test_plugin_command_client.py  # 三模式、异步响应隔离、原候选版本及显式 Tab 读取
 |   |-- test_tui_plugin_directory_pipe.py # 完整键盘链的 Tab 读取、候选接受、暂存恢复和原版本提交
@@ -502,13 +508,15 @@ docs/
 - `agent_py_agent/agent/tooling/process_session_store.py`：受保护进程记录的统一入口，读写与裁剪先恢复同一目录的未完成提交；持锁事务提供启动检查点和精确停止意图，实际进程信号仍由调用方负责。
 - `agent_py_agent/agent/tooling/background_process_launch.py`：启动方先预留再交接，原 execution 权限只读复查；host 只绑定一次 child，交接后由精确资源停止控制。
 - `agent_py_agent/agent/tooling/process_session_cleanup.py`：只清理原 Store 冻结的 host/child 出生实例，不按任务重扫；保留未确认及已提交待恢复回执。
-- `agent_py_agent/agent/tooling/process_session_records.py`：纯数据校验与单调合并；`process_session_commit.py` 只安装固定记录，`process_session_lock.py` 只负责互斥。v1 不隐式升级或获得任务停止授权。
+- `agent_py_agent/agent/tooling/process_session_records.py`：纯数据校验与单调合并；`process_session_commit.py` 只安装固定记录，目录互斥归公共 `common/directory_lock.py`，原锁名不变。v1 不隐式升级或获得任务停止授权。
 - `agent_py_agent/agent/command_catalog.py`：无 UI/执行依赖的公共命令声明；原控制参数仍归会话模块，插件后缀识别不等于身份校验或可执行授权。
 - `agent_py_agent/agent/command_arguments.py` 与 `command_binding.py`：参数定义、字面词法及值绑定的权威实现；部分输入也使用同一协议，帮助不从展示文字反推规则。
 - `agent_py_agent/agent/plugin_commands.py`：接收宿主提供的只读动作描述；当前实际入口仅有管理帮助和明确拒绝，没有安装表、插件加载或第二执行器。
 - `agent_py_agent/agent/plugin_command_catalog.py`：冻结及校验完整管理/插件声明，内容摘要绑定 owner 视图、版本和激活引用；不提供权限凭证。
 - `agent_py_agent/agent/command_declarations.py`：命令 JSON 的唯一读取器，包和宿主目录共用，旧目录私有 decoder 已删除。
 - `agent_py_agent/agent/plugin_manifest.py` 与 `plugin_package.py`：只读校验包并保留同一字节快照；不接受宿主身份，不代表已安装、已授权或已隔离。
+- `agent_py_agent/agent/plugin_installation.py` 与 `plugin_install_store.py`：原 owner 插件目录中的唯一安装表和最后回执；先存包再提交，默认停用，异常读回区分提交结果，不拥有管理权限或执行历史。
+- `agent_py_agent/agent/common/directory_lock.py`、`nofollow_fs.py` 与 `strict_json.py`：分别维护永久互斥、受信根文件原语和严格 JSON；这些公共原语不裁决领域授权或替代操作账本。
 - `agent_py_agent/agent/plugin_command_service.py`：从既有 OwnerIdentity 生成会话目录，旧或缺失业务版本明确拒绝；当前实际插件贡献仍为空。
 - `agent_py_agent/agent/gateway_parts/plugin_command_service.py`：`/client/plugins`、`/ask` 和 `/control` 共用原可信 owner 解析，静态读取不初始化冷用户 Agent 或会话。
 - `agent_py_agent/cli/chat_parts/plugin_command_client.py`：TUI、plain Gateway 与 direct 共用显式模式和声明缓存，故障不降级，乱序或换作用域响应不回写。

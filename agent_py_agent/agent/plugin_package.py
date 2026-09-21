@@ -1,11 +1,10 @@
-# LLM: 读取器只处理已由调用方授权的本地来源，不安装、不导入、不启动插件；完整字节快照供后续安装使用。
+# LLM: 读取器只处理已授权来源，严格 JSON 与安装表共用；不安装、不导入、不启动插件，保留完整字节快照。
 # 模块用途: 有界读取 ZIP、拒绝危险成员并核对 wheel 摘要，让包验证和保存不受来源文件变化影响。
 
 from __future__ import annotations
 
 import hashlib
 import io
-import json
 import os
 import stat
 import struct
@@ -14,6 +13,7 @@ import zlib
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
+from .common.strict_json import load_strict_json
 from .plugin_manifest import PluginManifest, PluginPackageError
 
 
@@ -223,35 +223,14 @@ def _read_member(archive: zipfile.ZipFile, member: zipfile.ZipInfo, limit: int) 
     return content
 
 
-# LLM: manifest 必须是唯一键、有限数值的 UTF-8 JSON；嵌套重名同样拒绝，不能以最后一项覆盖身份。
-# 函数用途: 将描述文件转换为不可变声明，并统一报告损坏描述。
+# LLM: manifest 沿公共严格 JSON 入口读取；描述和权威记录保持同一传输约束，不能以重名字段覆盖身份。
+# 函数用途: 通过公共严格 JSON 读取器转换不可变描述，并统一报告损坏内容。
 def _read_manifest(content: bytes) -> PluginManifest:
     try:
-        payload = json.loads(
-            content.decode("utf-8"),
-            object_pairs_hook=_unique_fields,
-            parse_constant=_invalid_constant,
-        )
+        payload = load_strict_json(content)
         return PluginManifest.from_payload(payload)
     except (UnicodeError, ValueError, TypeError, RecursionError) as exc:
         raise PluginPackageError("invalid_manifest", "插件包描述无效。") from exc
-
-
-# LLM: 字段重复不能靠 JSON 默认覆盖规则裁决，尤其不能让已校验值与展示值不一致。
-# 函数用途: 拒绝每层对象中重复的 JSON 键。
-def _unique_fields(pairs: list[tuple[str, object]]) -> dict:
-    result = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError("插件包描述字段重复")
-        result[key] = value
-    return result
-
-
-# LLM: NaN/Infinity 不属于包协议 JSON，必须在 schema 校验前拒绝。
-# 函数用途: 关闭 Python JSON 解码器默认允许的非有限数值扩展。
-def _invalid_constant(value: str) -> object:
-    raise ValueError("插件包描述数值无效")
 
 
 # LLM: 大小异常只返回稳定分类，不回显包路径或正文；不能因超限降级为无界读取。

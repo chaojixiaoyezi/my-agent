@@ -1,6 +1,6 @@
 """Canonical v2 owner path, directory, and seed projections."""
 
-# LLM: This file is the canonical v2 path/seed projection; removed hooks/store/runtime_refs paths must not reappear.
+# LLM: 本模块是 v2 路径及种子投影；插件权威沿 owner data，不新增自动启用种子，已移除旧目录不可恢复。
 # 模块用途: 生成 owner v2 目录、文件路径和首次初始化种子清单。
 
 from __future__ import annotations
@@ -236,6 +236,8 @@ def _owner_memory_path_fields(owner_memory_dir: Path) -> dict[str, Path]:
     }
 
 
+# LLM: 与 owner_resolver 的可信 owner 投影保持同一布局；这里只声明路径，不创建插件目录或安装状态。
+# 函数用途: 生成 owner 工作与控制数据的规范位置，插件不会随业务工作区变化迁移。
 def _owner_workspace_path_fields(owner_home_dir: Path) -> dict[str, Path]:
     owner_data_dir = owner_home_dir / "data"
     scheduler_dir = owner_data_dir / "scheduler"
@@ -248,6 +250,7 @@ def _owner_workspace_path_fields(owner_home_dir: Path) -> dict[str, Path]:
         "owner_artifacts_dir": owner_home_dir / "artifacts",
         "owner_audit_dir": owner_home_dir / "audit",
         "owner_data_dir": owner_data_dir,
+        "owner_plugins_dir": owner_data_dir / "plugins",
         "owner_artifact_backups_dir": owner_data_dir / "artifact_backups",
         "owner_scheduler_dir": scheduler_dir,
         "owner_scheduler_store_json": scheduler_dir / "store.json",

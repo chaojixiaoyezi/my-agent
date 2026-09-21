@@ -191,7 +191,7 @@ direct/local 控制在精确回合中断成功后，按 `operation=interrupt` �
 当前源码已完成 Store、启动交接、单 session 查询清理和主任务控制首片：
 
 - `process_session_records.py` 统一 v1/v2 校验与不可变身份，v2 的 host/child 只能绑定一次；停止后不能开始 child 创建或确认交接。
-- `process_session_lock.py` 持固定目录锁；`process_session_commit.py` 先预检完整批次，再发布 redo、逐条安装及清日志。
+- 公共 `common/directory_lock.py` 持固定目录锁，原 `.process-sessions.lock` 名称与锁顺序不变；`process_session_commit.py` 先预检完整批次，再发布 redo、逐条安装及清日志。
   恢复时原内容摘要、精确下一版本、不可变字段和单调事实均须成立，不能用坏日志覆盖新的权威。
 - `ProcessSessionStore.transaction()` 为宿主提供有限期锁内检查点；v2 过期写入明确冲突，v1 沿原逐记录锁管理。
   读取、枚举、写入和裁剪都先恢复；事务发布后异常携带固定回执，并使当前锁内视图失效。

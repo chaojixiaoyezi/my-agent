@@ -1,4 +1,4 @@
-"""LLM: Provide descriptor-anchored IO for host-owned files below a mutable workspace.
+"""LLM: 宿主文件读写固定受信根；文本和二进制共用逐段 no-follow 原语，不能用它代替业务权限。
 
 模块用途: 当模型或 shell 能修改工作区目录时，宿主通过受信根逐段拒绝符号链接地读写内部账本，
 避免普通 Path.open/mkdir 跟随被替换的父目录越出工作区。
@@ -61,16 +61,29 @@ def append_text_beneath(
         os.close(parent_fd)
 
 
-# LLM: Reads use the same no-follow chain as writes and never cache bytes obtained through an
-# unverified path. Missing files return None; structural violations remain typed failures.
+# LLM: 文本复用同一二进制 no-follow 链；缺失返回 None，路径违规与 UTF-8 损坏显式失败，不缓存未验证内容。
 # 函数用途: 从受信根安全读取一个宿主管理的 UTF-8 文本文件。
 def read_text_beneath(
     root: str | Path,
     relative_parts: tuple[str, ...],
 ) -> str | None:
+    content = read_bytes_beneath(root, relative_parts)
+    return content.decode("utf-8") if content is not None else None
+
+
+# LLM: 与文本读取共用 no-follow 链，缺失返回 None，损坏/越界明确报错；max_bytes 限制实际读取而非仅相信 stat。
+# 函数用途: 有界读取宿主管理的普通二进制文件，不跟随链接，也不创建目录。
+def read_bytes_beneath(
+    root: str | Path,
+    relative_parts: tuple[str, ...],
+    *,
+    max_bytes: int | None = None,
+) -> bytes | None:
     _validate_relative_parts(relative_parts)
+    if max_bytes is not None and (type(max_bytes) is not int or max_bytes < 0):
+        raise ValueError("managed read limit must be a nonnegative integer")
     if not _supports_dir_fd():
-        return _read_text_portable(root, relative_parts)
+        return _read_bytes_portable(root, relative_parts, max_bytes)
     try:
         parent_fd = open_directory_beneath(root, relative_parts[:-1])
     except FileNotFoundError:
@@ -81,10 +94,7 @@ def read_text_beneath(
             descriptor = _openat_file(parent_fd, relative_parts[-1], os.O_RDONLY, 0o600)
         except FileNotFoundError:
             return None
-        chunks: list[bytes] = []
-        while chunk := os.read(descriptor, 1024 * 1024):
-            chunks.append(chunk)
-        return b"".join(chunks).decode("utf-8")
+        return _read_descriptor(descriptor, max_bytes)
     finally:
         if descriptor >= 0:
             os.close(descriptor)
@@ -118,8 +128,7 @@ def regular_file_exists_beneath(
         return False
 
 
-# LLM: State-machine manifests need replace semantics, not append. The temporary file and final
-# rename stay inside one verified parent descriptor so a mutable workspace cannot redirect either.
+# LLM: 文本状态文件与二进制共用同目录原子替换；替换后异常不证明未提交，调用方须按自己的提交标识读回。
 # 函数用途: 在受信根内原子写入一个 UTF-8 状态文件，并把文件和父目录都刷盘。
 def write_text_atomic_beneath(
     root: str | Path,
@@ -129,13 +138,28 @@ def write_text_atomic_beneath(
     directory_mode: int = 0o700,
     file_mode: int = 0o600,
 ) -> None:
+    write_bytes_atomic_beneath(
+        root,
+        relative_parts,
+        text.encode("utf-8"),
+        directory_mode=directory_mode,
+        file_mode=file_mode,
+    )
+
+
+# LLM: 候选文件先以私有权限完整写入并刷盘，再同目录替换；本函数不拥有领域锁或跨文件事务。
+# 函数用途: 安全原子保存宿主二进制文件；POSIX 刷父目录，portable 分支不承诺相同的目录耐久性。
+def write_bytes_atomic_beneath(
+    root: str | Path,
+    relative_parts: tuple[str, ...],
+    payload: bytes,
+    *,
+    directory_mode: int = 0o700,
+    file_mode: int = 0o600,
+) -> None:
     _validate_relative_parts(relative_parts)
     if not _supports_dir_fd():
-        target = _portable_path(root, relative_parts, create=True)
-        temporary = target.with_name(f".{target.name}.tmp-{secrets.token_hex(16)}")
-        temporary.write_text(text, encoding="utf-8")
-        os.chmod(temporary, file_mode)
-        os.replace(temporary, target)
+        _write_bytes_portable(root, relative_parts, payload, file_mode)
         return
     parent_fd = open_directory_beneath(
         root,
@@ -152,7 +176,6 @@ def write_text_atomic_beneath(
             os.O_WRONLY | os.O_CREAT | os.O_EXCL,
             file_mode,
         )
-        payload = text.encode("utf-8")
         view = memoryview(payload)
         while view:
             written = os.write(descriptor, view)
@@ -178,6 +201,54 @@ def write_text_atomic_beneath(
         except FileNotFoundError:
             pass
         os.close(parent_fd)
+
+
+# LLM: 永久锁仅允许单链接普通文件；先排他创建，已存在再打开，避免并发非排他创建的歧义；调用方关闭 fd。
+# 函数用途: 安全创建私有锁目录并打开不截断的锁文件，避免目录预检后再次按路径跟随链接。
+def open_private_lock_beneath(root: str | Path, relative_parts: tuple[str, ...]) -> int:
+    _validate_relative_parts(relative_parts)
+    if not _supports_dir_fd():
+        return _open_private_lock_portable(root, relative_parts)
+    parent_fd = open_directory_beneath(root, relative_parts[:-1], create=True)
+    try:
+        os.fchmod(parent_fd, 0o700)
+        try:
+            return _openat_file(
+                parent_fd, relative_parts[-1], os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600
+            )
+        except FileExistsError:
+            return _openat_file(parent_fd, relative_parts[-1], os.O_RDWR, 0o600)
+    finally:
+        os.close(parent_fd)
+
+
+# LLM: 缺少 dir_fd 时仍检查父链、锁叶子与打开后身份；无法承诺 POSIX 的目录替换竞态强度。
+# 函数用途: 在 portable 平台打开永久锁，拒绝已有链接或特殊文件，不截断原锁。
+def _open_private_lock_portable(root: str | Path, parts: tuple[str, ...]) -> int:
+    target = _portable_path(root, parts, create=True)
+    try:
+        before = target.lstat()
+    except FileNotFoundError:
+        before = None
+    if before is not None and (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1):
+        raise NoFollowPathError("managed lock is not a regular file")
+    flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(target, flags | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        descriptor = os.open(target, flags, 0o600)
+    try:
+        after = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(after.st_mode)
+            or after.st_nlink != 1
+            or (before is not None and not _same_identity(before, after))
+        ):
+            raise NoFollowPathError("managed lock changed during open")
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
 
 
 # LLM: Managed cleanup unlinks regular leaves only and never follows an attacker-controlled link.
@@ -320,8 +391,10 @@ def _openat_file(parent_fd: int, name: str, flags: int, mode: int) -> int:
         dir_fd=parent_fd,
     )
     after = os.fstat(descriptor)
-    if not stat.S_ISREG(after.st_mode) or int(after.st_nlink) != 1 or (
-        before is not None and not _same_identity(before, after)
+    if (
+        not stat.S_ISREG(after.st_mode)
+        or int(after.st_nlink) != 1
+        or (before is not None and not _same_identity(before, after))
     ):
         os.close(descriptor)
         raise NoFollowPathError("managed file changed during open")
@@ -355,10 +428,8 @@ def _portable_path(root: str | Path, parts: tuple[str, ...], *, create: bool) ->
     return target
 
 
-# LLM: Portable traversal mirrors the POSIX lstat chain without resolving a root that may have
-# been replaced by a symlink. It is less race-resistant, so owner execution remains fail-closed
-# on platforms where strong process sandboxing is unavailable.
-# 函数用途: 在缺少 dir_fd 的平台逐层检查或创建普通目录。
+# LLM: 只容忍并发创建的 FileExistsError，随后重新 lstat；不 resolve 链接，也不承诺 POSIX 描述符的竞态强度。
+# 函数用途: 在缺少 dir_fd 的平台逐层检查或创建普通目录，正常创建竞争不误报失败。
 def _portable_directory(
     root: str | Path,
     parts: tuple[str, ...],
@@ -370,14 +441,14 @@ def _portable_directory(
     current = base
     for part in parts:
         current = current / part
-        if current.exists() or current.is_symlink():
-            metadata = current.lstat()
-            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
-                raise NoFollowPathError("managed path contains an unsafe parent")
-        elif create:
-            current.mkdir(mode=0o700)
-        else:
-            raise FileNotFoundError(current)
+        if create:
+            try:
+                current.mkdir(mode=0o700)
+            except FileExistsError:
+                pass
+        metadata = current.lstat()
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise NoFollowPathError("managed path contains an unsafe parent")
     return current
 
 
@@ -401,8 +472,7 @@ def _append_text_portable(
     _ = directory_mode
     target = _portable_path(root, parts, create=True)
     if target.is_symlink() or (
-        target.exists()
-        and (not target.is_file() or int(target.stat().st_nlink) != 1)
+        target.exists() and (not target.is_file() or int(target.stat().st_nlink) != 1)
     ):
         raise NoFollowPathError("managed file is not regular")
     descriptor = os.open(
@@ -418,25 +488,62 @@ def _append_text_portable(
         os.close(descriptor)
 
 
-# LLM: Portable reads never follow a final symlink and preserve missing-file semantics.
-# 函数用途: 在缺少 dir_fd 的平台安全读取 UTF-8 文本。
-def _read_text_portable(root: str | Path, parts: tuple[str, ...]) -> str | None:
+# LLM: Portable 读取保留缺失语义和实际字节预算，不把链接当作合法宿主文件。
+# 函数用途: 在缺少 dir_fd 的平台读取有界二进制内容。
+def _read_bytes_portable(
+    root: str | Path, parts: tuple[str, ...], max_bytes: int | None
+) -> bytes | None:
     try:
         target = _portable_path(root, parts, create=False)
     except FileNotFoundError:
         return None
-    if not target.exists():
+    try:
+        metadata = target.lstat()
+    except FileNotFoundError:
         return None
-    if target.is_symlink() or not target.is_file() or int(target.stat().st_nlink) != 1:
+    if not stat.S_ISREG(metadata.st_mode) or int(metadata.st_nlink) != 1:
         raise NoFollowPathError("managed file is not regular")
     descriptor = os.open(target, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     try:
-        chunks: list[bytes] = []
-        while chunk := os.read(descriptor, 1024 * 1024):
-            chunks.append(chunk)
-        return b"".join(chunks).decode("utf-8")
+        return _read_descriptor(descriptor, max_bytes)
     finally:
         os.close(descriptor)
+
+
+# LLM: 以剩余预算加一字节检测超限，不能因为文件大小在打开后改变而无界分配。
+# 函数用途: 读取已验证的描述符，供 POSIX/portable 和文本/二进制共用。
+def _read_descriptor(descriptor: int, max_bytes: int | None) -> bytes:
+    chunks = []
+    count = 0
+    while True:
+        size = 1024 * 1024 if max_bytes is None else min(1024 * 1024, max_bytes - count + 1)
+        chunk = os.read(descriptor, size)
+        if not chunk:
+            return b"".join(chunks)
+        count += len(chunk)
+        if max_bytes is not None and count > max_bytes:
+            raise ValueError("managed file exceeds read limit")
+        chunks.append(chunk)
+
+
+# LLM: 临时文件创建即为指定私有权限；原子替换前拒绝链接，异常可能发生在替换后，不能推断未提交。
+# 函数用途: 在没有 dir_fd 的平台保存完整二进制内容并清理暂存文件。
+def _write_bytes_portable(
+    root: str | Path, parts: tuple[str, ...], payload: bytes, file_mode: int
+) -> None:
+    target = _portable_path(root, parts, create=True)
+    temporary = target.with_name(f".{target.name}.tmp-{secrets.token_hex(16)}")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, file_mode)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if target.is_symlink() or (target.exists() and not target.is_file()):
+            raise NoFollowPathError("managed destination is not a regular file")
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 # LLM: Feature detection is runtime-based because supported dir_fd sets differ by platform build.
@@ -457,10 +564,13 @@ def _same_identity(left: os.stat_result, right: os.stat_result) -> bool:
 __all__ = [
     "NoFollowPathError",
     "append_text_beneath",
+    "open_private_lock_beneath",
     "list_names_beneath",
     "open_directory_beneath",
     "read_text_beneath",
+    "read_bytes_beneath",
     "regular_file_exists_beneath",
     "unlink_file_beneath",
     "write_text_atomic_beneath",
+    "write_bytes_atomic_beneath",
 ]
