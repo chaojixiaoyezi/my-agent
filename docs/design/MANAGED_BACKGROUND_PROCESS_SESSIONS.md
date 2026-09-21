@@ -142,6 +142,32 @@ direct/local 控制在精确回合中断成功后，按 `operation=interrupt` �
 明确 `/stop` 继续清退该请求插话并回收其子代理。当前同步工具仍接收原协作取消信号。
 这片身份整理和入口修正不能替代普通后台的持久归属、启动预留、明确交接与停止接线；TUI 137 仍未修复验收。
 
+后续修复采用同一 Store 内的显式 v2 协议，保留原 session JSON 地址，当前正在实现，尚未发布：
+
+- v1 不补猜执行归属，保留原访问权限内按 session 管理；新 v2 冻结执行身份、launcher 出生标识、
+  启动预留、host/child 一次绑定、停止意图及 launcher 的明确交接确认。停止意图与交接事实不能被旧缓存清除。
+- 新操作共用目录锁，启动准入在锁内复读原调用的取消和权威门，不重复审批或扣减预算。
+  host 创建 child 前先记“已进入创建”，随后持锁创建并绑定；外力崩溃发生在 OS 创建与绑定之间时保留未知。
+- 多条停止记录先冻结 session 集合，再在原 Store 发布短期 redo 事务文件，作为文件级提交点；
+  安装中断后只补写该集合，不重新扫描恢复轮。提交后的安装失败须区分“已提交、待恢复”，不能报告未发生。
+  v1 不参加新批量事务；旧二进制不认识目录锁，部署须避免混合版本并发写入。
+- 交接前 launcher 死亡、取消或停止使这次启动失效；确认交接后，旧回合 token 不再拥有后台资源。
+  终止仍须核对精确进程实例，host 死亡或发出信号都不自动成为 child 已退出；未知状态不得通知完成或被裁剪。
+- 锁使用标准库的 [POSIX flock](https://docs.python.org/3/library/fcntl.html#fcntl.flock) 或
+  [Windows 字节锁](https://docs.python.org/3/library/msvcrt.html#msvcrt.locking)；无 OS 锁的平台明确拒绝。
+  原子替换及 redo 只声明进程中断后的恢复，不宣称断电耐久或 Windows 已做实机验收。
+
+当前落地范围为 Store 合同，启动与控制仍待接入：
+
+- `process_session_records.py` 统一 v1/v2 校验与不可变身份，v2 的 host/child 只能绑定一次；停止后不能开始 child 创建或确认交接。
+- `process_session_lock.py` 持固定目录锁；`process_session_commit.py` 先预检完整批次，再发布 redo、逐条安装及清日志。
+  恢复时原内容摘要、精确下一版本、不可变字段和单调事实均须成立，不能用坏日志覆盖新的权威。
+- `ProcessSessionStore.transaction()` 为宿主提供有限期锁内检查点；v2 过期写入明确冲突，v1 沿原逐记录锁管理。
+  读取、枚举、写入和裁剪都先恢复；事务发布后异常携带固定回执，并使当前锁内视图失效。
+- Store 只记录停止意图，不发信号、不重新扫恢复轮、不另建任务取消状态。控制端仍须先关闭原执行轮的真实权限，
+  不能把 request closing 或任务投影终态视作 RuntimeDB 权限已经关闭。既有 UNKNOWN 及锁的保留语义不能改写。
+- 现有 Shell/host 尚未调用 v2，仍显式写 v1；独立测试进程的故障注入不替代 TUI 137 的安装版复验。
+
 ### 现有进程会话行为
 
 - host 未完成有界启动握手：返回 `COMMAND_FAILED`，回收该 host 树。

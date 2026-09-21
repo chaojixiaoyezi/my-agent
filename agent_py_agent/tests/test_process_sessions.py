@@ -20,8 +20,8 @@ from agent_py_agent.agent.tooling.cancellation import (
     bind_cancellation_token,
 )
 from agent_py_agent.agent.tooling.process_registry import ProcessRegistration, process_registry
+from agent_py_agent.agent.tooling.process_session_records import LEGACY_PROCESS_SESSION_SCHEMA
 from agent_py_agent.agent.tooling.process_session_store import (
-    PROCESS_SESSION_SCHEMA,
     ProcessSessionStore,
     process_session_store_root,
 )
@@ -669,7 +669,7 @@ def test_process_session_authority_store_is_outside_owner_sandbox(tmp_path: Path
 def test_process_session_terminal_state_never_regresses_to_running(tmp_path: Path) -> None:
     store = ProcessSessionStore(tmp_path / "authority")
     running = {
-        "schema": PROCESS_SESSION_SCHEMA,
+        "schema": LEGACY_PROCESS_SESSION_SCHEMA,
         "session_id": "bg-terminal-monotonic",
         "pid": 12345,
         "pid_birth_token": "birth-a",

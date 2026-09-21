@@ -45,8 +45,8 @@ from ..common.json_io import read_json_object
 from .background_process_host import HOST_STATE_SCHEMA
 from .cancellation import current_cancellation_token, raise_if_cancelled
 from .process_scope import ProcessAccessScope
+from .process_session_records import LEGACY_PROCESS_SESSION_SCHEMA
 from .process_session_store import (
-    PROCESS_SESSION_SCHEMA,
     ProcessSessionStore,
 )
 
@@ -144,12 +144,11 @@ class BackgroundProcess:
                 summary["output_bytes"] = None
         return summary
 
-    # LLM: Durable serialization carries the exact immutable scope and birth
-    # token. Popen handles are process-local and must never be serialized.
-    # 函数用途: 把内存进程对象转成可由其他 agent 进程接管的权威 JSON 记录。
+    # LLM: 现有启动仍明确写 v1；新 host 交接未接入前不得伪造 v2 执行身份，Popen 句柄不持久化。
+    # 函数用途: 保存原已绑定后台进程的访问身份与生命周期，保持已发布记录可由其他进程读取。
     def to_record(self) -> dict[str, object]:
         return {
-            "schema": PROCESS_SESSION_SCHEMA,
+            "schema": LEGACY_PROCESS_SESSION_SCHEMA,
             "session_id": self.session_id,
             "command": self.command,
             "pid": self.pid,

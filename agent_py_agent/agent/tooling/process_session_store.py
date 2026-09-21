@@ -1,46 +1,51 @@
+# LLM: 本模块是后台 session 的唯一持久入口；目录锁内先恢复 redo，再读取、CAS 合并或裁剪原 JSON。
+# 模块用途: 为 launcher、host 和 Gateway 串行管理启动预留及停止意图，保留原目录和 v1 显式句柄权限。
 from __future__ import annotations
 
-"""Managed background-process session records shared across agent processes."""
-
-# LLM: This module is the only durable store for managed background shell sessions.
-# Records live outside an owner sandbox when an owner home is available, because a
-# model-controlled command must never be able to rewrite the PID that process_session
-# will later signal. Keep schema validation and atomic writes in this module.
-# 模块用途: 跨主代理、子代理和 Gateway 进程保存后台命令的 PID、归属与终态，且避免
-# 被沙箱内命令篡改成任意 PID。
-
 import hashlib
-import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..common.json_io import (
-    locked_json_path,
-    read_json_object_report,
-    write_json_file_atomic_unlocked,
-)
+from ..common.json_io import locked_json_path, write_json_file_atomic_unlocked
 from ..runtime_errors import runtime_error_report
+from .process_scope import ProcessExecutionScope
+from .process_session_commit import (
+    ProcessSessionCommitPendingError,
+    ProcessSessionCommitReceipt,
+    commit_process_records,
+    read_process_record,
+    recover_process_commit,
+)
+from .process_session_lock import locked_process_sessions
+from .process_session_records import (
+    LEGACY_PROCESS_SESSION_SCHEMA,
+    PROCESS_SESSION_SCHEMA,
+    PROCESS_TERMINAL_STATUSES,
+    merge_process_record,
+    validate_process_record,
+    validate_session_id,
+)
 
-PROCESS_SESSION_SCHEMA = "managed_process_session.v1"
-_SESSION_ID_RE = re.compile(r"^bg-[A-Za-z0-9][A-Za-z0-9-]{0,95}$")
 
-
-# LLM: Load errors remain structured so the model-facing layer can distinguish a
-# missing session from a damaged authority record without parsing exception text.
-# 类用途: 返回一次后台会话记录读取结果，以及可供上层展示的结构化损坏信息。
+# LLM: 读取损坏与记录不存在必须区分；异常不能暴露原始命令、环境或记录内容。
+# 类用途: 返回一条可信记录或结构化读取错误，供查询层判断能否继续使用该句柄。
 @dataclass(frozen=True)
 class ProcessSessionLoadReport:
     record: dict[str, object]
     load_error: dict[str, object] | None = None
 
 
-# LLM: Owner-scoped records must be siblings of, not descendants of, owner_home.
-# The bwrap policy mounts only the exact owner home, so this authority stays host-only.
-# 函数用途: 计算后台会话唯一权威目录；多用户放在 owner 沙箱外，可信单机回落到工作区。
-def process_session_store_root(
-    workspace_root: str | Path,
-    owner_scope_root: object = "",
-) -> Path:
+# LLM: 过期 v2 写入不得通过生命周期合并绕过 CAS；调用方应重新读取原句柄而不是启动新进程。
+# 类用途: 表示调用者拿着旧记录版本更新，磁盘事实没有被本次请求改动。
+class ProcessSessionRevisionConflict(ValueError):
+    pass
+
+
+# LLM: Owner-scoped records remain outside the exact owner sandbox; this address must not change with permissions.
+# 函数用途: 计算原后台会话权威目录，多用户记录仍放在 owner 沙箱外的同级受保护目录。
+def process_session_store_root(workspace_root: str | Path, owner_scope_root: object = "") -> Path:
     workspace = Path(workspace_root).expanduser().resolve(strict=False)
     owner_text = str(owner_scope_root or "").strip()
     if not owner_text:
@@ -50,231 +55,206 @@ def process_session_store_root(
     return owner.parent / ".my-agent-runtime" / "process_sessions" / digest
 
 
-# LLM: Each session has one JSON authority file. Filename validation is mandatory
-# before joining paths because session_id is model-visible and therefore untrusted.
-# 类用途: 原子写入、读取、枚举和裁剪某个受保护目录里的后台会话记录。
-class ProcessSessionStore:
-    # LLM: Construction only normalizes the authority root; directory creation is
-    # delayed until a write so read-only list/status calls do not mutate the host.
-    # 函数用途: 绑定一个后台会话权威目录。
-    def __init__(self, root: str | Path) -> None:
-        self.root = Path(root).expanduser().resolve(strict=False)
+# LLM: 此对象只在 Store.transaction 的同一目录锁内有效；不另存任务状态，也不重入公共 Store 方法。
+# 类用途: 为需要多次检查与持久检查点的启动交接提供锁内读写，退出上下文后不能再次调用。
+class ProcessSessionTransaction:
+    # LLM: 构造不取锁，只有持目录锁的 Store 可以提供此对象；根目录已经规范化。
+    # 函数用途: 绑定本次临界区的目录和有效期。
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.active = True
 
-    # LLM: Never accept path separators, dots, or arbitrary filenames from callers.
-    # 函数用途: 把合法 session_id 映射到唯一 JSON 文件；非法值直接拒绝。
-    def record_path(self, session_id: str) -> Path:
-        normalized = str(session_id or "").strip()
-        if not _SESSION_ID_RE.fullmatch(normalized):
-            raise ValueError("invalid managed process session id")
-        return self.root / f"{normalized}.json"
+    # LLM: 离开目录锁后必须失败，防止把一次临界区对象保存在长寿命缓存里继续写。
+    # 函数用途: 检查当前事务是否仍处于持锁上下文。
+    def _require_active(self) -> None:
+        if not self.active:
+            raise RuntimeError("managed process transaction is no longer active")
 
-    # LLM: A write replaces one complete schema record atomically and tightens host
-    # permissions after replace. Callers must provide the full immutable scope.
-    # 函数用途: 原子保存一条完整后台会话记录，并限制为当前系统用户可读写。
-    def write(self, record: dict[str, object]) -> dict[str, object]:
-        validated = _validated_record(record)
-        path = self.record_path(str(validated["session_id"]))
-        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        try:
-            self.root.chmod(0o700)
-        except OSError:
-            pass
-        with locked_json_path(path):
-            existing_report = read_json_object_report(
-                path,
-                context="process_session_store.transition_read",
-            )
-            existing = existing_report.payload
-            if existing:
-                existing = _validated_record(existing)
-                _assert_same_process_authority(existing, validated)
-                validated = _terminal_transition(existing, validated)
-            write_json_file_atomic_unlocked(path, validated)
-        try:
-            path.chmod(0o600)
-        except OSError:
-            pass
-        return validated
+    # LLM: 损坏与缺失不合并；这里抛出读取错误，让更高层决定是否能执行副作用。
+    # 函数用途: 读取锁内最新记录，用于启动准入、交接和精确终态更新。
+    def load(self, session_id: str) -> dict[str, object] | None:
+        self._require_active()
+        return read_process_record(self.root, session_id)
 
-    # LLM: Missing and corrupt are different results. Corrupt records never become
-    # partially trusted BackgroundProcess objects.
-    # 函数用途: 读取并完整校验一个 session；缺失返回空，损坏返回结构化错误。
-    def load(self, session_id: str) -> ProcessSessionLoadReport:
-        try:
-            path = self.record_path(session_id)
-        except ValueError as exc:
-            return ProcessSessionLoadReport({}, _store_error(exc, "process_session_store.invalid_id"))
-        report = read_json_object_report(
-            path,
-            context="process_session_store.load",
-        )
-        if report.load_error is not None:
-            return ProcessSessionLoadReport({}, report.load_error)
-        if not report.payload:
-            return ProcessSessionLoadReport({})
-        try:
-            return ProcessSessionLoadReport(_validated_record(report.payload))
-        except (TypeError, ValueError) as exc:
-            return ProcessSessionLoadReport(
-                {},
-                _store_error(exc, "process_session_store.validate", path=path),
-            )
-
-    # LLM: Enumeration validates each authority independently. One damaged record
-    # must not hide healthy sessions, but its error must remain observable.
-    # 函数用途: 枚举目录中的合法后台会话，并单独收集损坏文件错误。
+    # LLM: 单条损坏保留错误；调用方需要全范围原子操作时必须拒绝有错误的清单。
+    # 函数用途: 在一个一致的目录视图内枚举原 session 文件，记录无效项。
     def list_records(self) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
-        if not self.root.is_dir():
-            return [], []
-        records: list[dict[str, object]] = []
-        errors: list[dict[str, object]] = []
-        try:
-            paths = tuple(self.root.glob("bg-*.json"))
-        except OSError as exc:
-            return [], [_store_error(exc, "process_session_store.list", path=self.root)]
-        for path in paths:
-            report = self.load(path.stem)
-            if report.record:
-                records.append(report.record)
-            elif report.load_error is not None:
-                errors.append(report.load_error)
+        self._require_active()
+        records, errors = [], []
+        for path in sorted(self.root.glob("bg-*.json")):
+            try:
+                record = self.load(path.stem)
+                if record is not None:
+                    records.append(record)
+            except (OSError, TypeError, ValueError) as exc:
+                errors.append(_store_error(exc, "process_session_store.validate", path=path))
         return records, errors
 
-    # LLM: Pruning removes only old terminal records; running records are never
-    # inferred stale from age and never deleted here.
-    # 函数用途: 只保留最近若干条已结束会话，防止长期 Gateway 的小记录无限增长。
+    # LLM: v1 沿原逐记录锁合并，v2 使用 revision CAS 和 redo；任何坏旧记录都不能被静默覆盖。
+    # 函数用途: 原子保存一条完整记录，返回磁盘接受的有效内容和新版本。
+    def write(self, record: dict[str, object]) -> dict[str, object]:
+        self._require_active()
+        incoming = validate_process_record(record)
+        if incoming["schema"] == LEGACY_PROCESS_SESSION_SCHEMA:
+            path = self.root / f"{incoming['session_id']}.json"
+            with locked_json_path(path):
+                existing = self.load(incoming["session_id"])
+                effective = merge_process_record(existing, incoming) if existing else incoming
+                write_json_file_atomic_unlocked(path, effective)
+                path.chmod(0o600)
+            return effective
+        existing, effective = self._prepare_v2(incoming)
+        return self._commit([(existing, effective)]).records[0]
+
+    # LLM: 提交后失败使当前锁内视图失效；调用方必须退出上下文并通过正常恢复入口重新读取。
+    # 函数用途: 安装固定批次，阻止调用者捕获待恢复异常后继续读取半份事务。
+    def _commit(
+        self, transitions: list[tuple[dict[str, object] | None, dict[str, object]]]
+    ) -> ProcessSessionCommitReceipt:
+        try:
+            return commit_process_records(self.root, transitions)
+        except ProcessSessionCommitPendingError:
+            self.active = False
+            raise
+
+    # LLM: 同一句柄版本只能前进一次；命令、实例与执行归属由纯记录合同校验，不接受从 v1 隐式迁移。
+    # 函数用途: 在磁盘当前版本上准备一次 v2 更新，尚不修改文件。
+    def _prepare_v2(
+        self, incoming: dict[str, object]
+    ) -> tuple[dict[str, object] | None, dict[str, object]]:
+        existing = self.load(incoming["session_id"])
+        expected = existing.get("revision") if existing else 0
+        if incoming["revision"] != expected:
+            raise ProcessSessionRevisionConflict("managed process revision conflict")
+        effective = merge_process_record(existing, incoming) if existing else dict(incoming)
+        return existing, {**effective, "revision": expected + 1}
+
+    # LLM: scope 必须是宿主冻结身份；坏记录使整批拒绝，v1 和其他任务不参加，回执只含此次固定集合。
+    # 函数用途: 在同一锁内选中任务当前的 v2 资源并批量提交停止意图，不发送任何进程信号。
+    def request_stop(self, scope: ProcessExecutionScope) -> ProcessSessionCommitReceipt:
+        records, errors = self.list_records()
+        if errors:
+            raise ValueError("damaged managed process records prevent complete stop selection")
+        selected = [
+            record
+            for record in records
+            if record["schema"] == PROCESS_SESSION_SCHEMA
+            and record["status"] not in PROCESS_TERMINAL_STATUSES
+            and ProcessExecutionScope(**record["execution_scope"]).matches(scope)
+        ]
+        transitions = [self._prepare_v2({**record, "stop_requested": True}) for record in selected]
+        if not transitions:
+            return ProcessSessionCommitReceipt("", ())
+        return self._commit(transitions)
+
+    # LLM: 只删已确认终态且完成通知已消费的记录；旧 writer 仍按其原锁串行，未知/启动中不能按年龄删。
+    # 函数用途: 保留最近若干条终态记录，限制长期运行的记录数量。
     def prune_finished(self, max_finished: int) -> None:
-        limit = max(0, int(max_finished))
         records, _errors = self.list_records()
         finished = [
             record
             for record in records
-            if str(record.get("status") or "") in {"exited", "killed"}
+            if record["status"] in PROCESS_TERMINAL_STATUSES
             and (not record.get("completion_target") or record.get("completion_notice_id"))
         ]
         finished.sort(
-            key=lambda item: float(item.get("finished_at") or item.get("started_at") or 0.0),
+            key=lambda item: float(item.get("finished_at") or item.get("started_at") or 0),
             reverse=True,
         )
-        for record in finished[limit:]:
+        for record in finished[max(0, int(max_finished)) :]:
+            path = self.root / f"{record['session_id']}.json"
+            with locked_json_path(path):
+                current = self.load(record["session_id"])
+                if current == record:
+                    path.unlink(missing_ok=True)
+
+
+# LLM: 公共入口统一经过同一目录锁和恢复；现有 JSON 路径不变，旧版本不能参与 v2 按任务控制。
+# 类用途: 提供跨进程的后台会话存取，以及需要持锁多检查点的启动与停止事务。
+class ProcessSessionStore:
+    # LLM: 构造只规范路径，不创建目录；缺失目录的纯查询保持无副作用。
+    # 函数用途: 绑定一个后台会话权威目录。
+    def __init__(self, root: str | Path) -> None:
+        self.root = Path(root).expanduser().resolve(strict=False)
+
+    # LLM: 文件地址只由已校验句柄生成，不能接受分隔符、相对路径或不匹配正文的别名。
+    # 函数用途: 返回 session 的原 JSON 路径。
+    def record_path(self, session_id: str) -> Path:
+        return self.root / f"{validate_session_id(session_id)}.json"
+
+    # LLM: 恢复必须先于任何读取或修改；持锁回调只能取必要权威检查，不能再次调用公共 Store 入口。
+    # 函数用途: 获取目录互斥并补齐上次提交，向启动/停止调用者开放一次短临界区。
+    @contextmanager
+    def transaction(self) -> Iterator[ProcessSessionTransaction]:
+        with locked_process_sessions(self.root):
+            recover_process_commit(self.root)
+            transaction = ProcessSessionTransaction(self.root)
             try:
-                self.record_path(str(record["session_id"])).unlink(missing_ok=True)
-            except (OSError, ValueError):
-                continue
+                yield transaction
+            finally:
+                transaction.active = False
+
+    # LLM: v2 的提交后异常携带固定回执，调用方不能把异常当成记录没有写入。
+    # 函数用途: 在互斥与恢复后保存一条记录，保留既有单条写入 API。
+    def write(self, record: dict[str, object]) -> dict[str, object]:
+        incoming = validate_process_record(record)
+        with self.transaction() as transaction:
+            return transaction.write(incoming)
+
+    # LLM: 已存在目录的查询会完成待恢复文件安装；损坏 redo 时拒绝整次查询，不返回部分成功。
+    # 函数用途: 读取可信记录，区分缺失、坏记录和已提交待恢复。
+    def load(self, session_id: str) -> ProcessSessionLoadReport:
+        try:
+            self.record_path(session_id)
+            if not self.root.exists():
+                return ProcessSessionLoadReport({})
+            with self.transaction() as transaction:
+                return ProcessSessionLoadReport(transaction.load(session_id) or {})
+        except (OSError, TypeError, ValueError, RuntimeError) as exc:
+            return ProcessSessionLoadReport(
+                {}, _store_error(exc, "process_session_store.load", path=self.root)
+            )
+
+    # LLM: 只有普通 session 损坏可返回健康子集；事务日志损坏影响整个视图，必须返回空集及错误。
+    # 函数用途: 读取同一目录中的后台会话，并保留结构化错误。
+    def list_records(self) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+        try:
+            if not self.root.exists():
+                return [], []
+            with self.transaction() as transaction:
+                return transaction.list_records()
+        except (OSError, TypeError, ValueError, RuntimeError) as exc:
+            return [], [_store_error(exc, "process_session_store.list", path=self.root)]
+
+    # LLM: 与预留和交接共用锁；调用方必须先关闭旧执行轮准入，再冻结资源，不能用本方法替代任务取消。
+    # 函数用途: 提交精确任务的停止清单，供控制层在锁外清理这些资源。
+    def request_stop(self, scope: ProcessExecutionScope) -> ProcessSessionCommitReceipt:
+        if not self.root.exists():
+            return ProcessSessionCommitReceipt("", ())
+        with self.transaction() as transaction:
+            return transaction.request_stop(scope)
+
+    # LLM: 裁剪前必须恢复，错误不能被忽略后继续删除可能属于未完成事务的记录。
+    # 函数用途: 删除超出保留数的旧终态 session，启动中和未知资源持续可见。
+    def prune_finished(self, max_finished: int) -> None:
+        if self.root.exists():
+            with self.transaction() as transaction:
+                transaction.prune_finished(max_finished)
 
 
-# LLM: Validation is deliberately closed-world for authority fields while command
-# text remains opaque data. Add schema migrations explicitly instead of accepting aliases.
-# 函数用途: 校验后台会话记录的版本、身份、PID、状态和访问范围是否完整可信。
-def _validated_record(record: object) -> dict[str, object]:
-    if not isinstance(record, dict):
-        raise TypeError("managed process session record must be an object")
-    payload = dict(record)
-    if str(payload.get("schema") or "") != PROCESS_SESSION_SCHEMA:
-        raise ValueError("unsupported managed process session schema")
-    session_id = str(payload.get("session_id") or "").strip()
-    if not _SESSION_ID_RE.fullmatch(session_id):
-        raise ValueError("invalid managed process session id")
-    try:
-        pid = int(payload.get("pid") or 0)
-        started_at = float(payload.get("started_at") or 0.0)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("invalid managed process numeric fields") from exc
-    if pid <= 0 or started_at <= 0:
-        raise ValueError("managed process pid and started_at are required")
-    pid_birth_token = str(payload.get("pid_birth_token") or "").strip()
-    if not pid_birth_token:
-        raise ValueError("managed process pid_birth_token is required")
-    status = str(payload.get("status") or "")
-    if status not in {"running", "exited", "killed"}:
-        raise ValueError("invalid managed process status")
-    scope = payload.get("access_scope")
-    if not isinstance(scope, dict):
-        raise ValueError("managed process access_scope is required")
-    owner_id = str(scope.get("owner_id") or "").strip()
-    conversation_id = str(scope.get("conversation_id") or "").strip()
-    if not owner_id or not conversation_id:
-        raise ValueError("managed process access_scope is not bound")
-    target = payload.get("completion_target") or {}
-    if not isinstance(target, dict):
-        raise ValueError("invalid managed process completion target")
-    if target and (
-        set(target) != {"store_root", "thread_id", "task_id", "run_id"}
-        or not all(isinstance(value, str) and value for value in target.values())
-        or target["thread_id"] != conversation_id
-        or not Path(target["store_root"]).is_absolute()
-    ):
-        raise ValueError("invalid managed process completion target scope")
-    payload.update(
-        {
-            "schema": PROCESS_SESSION_SCHEMA,
-            "session_id": session_id,
-            "pid": pid,
-            "pid_birth_token": pid_birth_token,
-            "started_at": started_at,
-            "status": status,
-            "access_scope": {
-                "owner_id": owner_id,
-                "conversation_id": conversation_id,
-                "owner_home": str(scope.get("owner_home") or ""),
-            },
-        }
-    )
-    return payload
-
-
-# LLM: PID, birth token, session, and access scope are immutable authority. A
-# second process may update lifecycle only for that exact same hosted command.
-# 函数用途: 阻止并发写把一条 session 偷换成另一个 PID 或另一个用户会话。
-def _assert_same_process_authority(
-    existing: dict[str, object],
-    incoming: dict[str, object],
-) -> None:
-    immutable_keys = ("session_id", "pid", "pid_birth_token", "access_scope")
-    if any(existing.get(key) != incoming.get(key) for key in immutable_keys):
-        raise ValueError("managed process session immutable authority conflict")
-    if existing.get("completion_target", {}) != incoming.get("completion_target", {}):
-        raise ValueError("managed process completion target conflict")
-
-
-# LLM: Terminal state is monotonic. Explicit killed outranks a racing exited
-# refresh, and no later running cache may reopen either terminal state.
-# 函数用途: 合并并发生命周期更新，保证 running 只能单向进入 exited/killed。
-def _terminal_transition(
-    existing: dict[str, object],
-    incoming: dict[str, object],
-) -> dict[str, object]:
-    if existing.get("completion_notice_id"):
-        incoming = {**incoming, "completion_notice_id": existing["completion_notice_id"]}
-    old_status = str(existing.get("status") or "")
-    new_status = str(incoming.get("status") or "")
-    if old_status == "killed":
-        return {**existing, "completion_notice_id": incoming.get("completion_notice_id", "")}
-    if old_status == "exited" and new_status == "running":
-        return existing
-    if old_status == "exited" and new_status == "killed":
-        return incoming
-    return incoming
-
-
-# LLM: Store diagnostics use the shared runtime error taxonomy and may expose only
-# the authority path, never record contents.
-# 函数用途: 把路径或 schema 异常转换成统一结构化错误。
+# LLM: 诊断只公开错误分类、路径与已提交身份，不包含记录正文；调用者可以辨别提交后故障。
+# 函数用途: 把存储错误转换为统一回执，避免未知安装状态被表现成没有资源。
 def _store_error(
-    exc: BaseException,
-    context: str,
-    *,
-    path: Path | None = None,
+    exc: BaseException, context: str, *, path: Path | None = None
 ) -> dict[str, object]:
     report = runtime_error_report(exc, context=context)
     if path is not None:
         report["path"] = str(path)
+    if isinstance(exc, ProcessSessionCommitPendingError):
+        report.update(
+            committed=True,
+            recovery_required=True,
+            transaction_id=exc.receipt.transaction_id,
+            session_ids=[record["session_id"] for record in exc.receipt.records],
+        )
     return report
-
-
-__all__ = [
-    "PROCESS_SESSION_SCHEMA",
-    "ProcessSessionLoadReport",
-    "ProcessSessionStore",
-    "process_session_store_root",
-]
