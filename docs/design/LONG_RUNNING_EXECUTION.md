@@ -88,8 +88,8 @@ native 信封落盘，恢复只读取已有取消账、attempt 和文件事实�
 
 `process_session(action=wait)` 默认 30 秒，上限 600 秒，工具外层预算略长于等待上限。
 等待不持注册表锁，使用单调时钟和宿主取消令牌，不循环调用模型。取消等待不伪造命令退出；
-回合中断不能视为持久后台资源停止；明确 `/stop` 的当前缺口及修复边界见
-[受管后台进程合同](MANAGED_BACKGROUND_PROCESS_SESSIONS.md#任务资源停止缺口待修复)。届满返回 `running + wait_timed_out`，不是任务失败。
+回合中断不能视为持久后台资源停止；明确 `/stop` 的历史缺口及现行停止边界见
+[受管后台进程合同](MANAGED_BACKGROUND_PROCESS_SESSIONS.md#任务资源停止修复)。届满返回 `running + wait_timed_out`，不是任务失败。
 
 ## 完成通知
 

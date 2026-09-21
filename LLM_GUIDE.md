@@ -52,15 +52,15 @@ Gateway 持久主任务沿 Goal→task→请求锁关闭原权限并冻结主资
 direct/local 的消息句柄由 worker 与命令端共享，core 在模型前发布实际身份；Compact 在原任务锁内重新核对，旧句柄不控制新 job。
 无持久任务热请求先在原 T 锁关闭发布并读取绑定，再释放 T、取 task 锁；已晋升或身份不可读不能降级猜测清理。
 整树清单在原 Goal/task/creation 锁内固定，异步清理不再查询 agent 或当前孩子；DONE/FAILED/UNKNOWN 保留业务历史。
-尚未发布或新增实际 TUI，不把开发回归当作 TUI 137 已通过。
+已发布同版双机，实际 TUI 138—142 分项验证主后台、并行孩子、PTY、孙代理和另一会话隔离；137 原失败保留。
 子代理创建、换轮、旧轮放弃和控制预留沿原 creation guard；`subagents/coordination.py` 只管理同线程嵌套持锁。
 guidance 的 admission 在 creation 之外，启动探测与执行放 creation 锁外。
 managed 后台排队绑定原 pending ID，经宿主 argv、DispatchParams 和 runner 到 DB 精确激活；缺失不补 current。
 启动标记由原 lifecycle 服务执行条件 mutation，runner_start.py 只负责准入与核对；CLI 不越层导入领域实现。worker 先激活再发布携带 attempt 的 session，旧心跳不能覆盖新轮。
 旧配置投影也须在激活后核对原 attempt 再写；创建回执复读 canonical，不能依赖控制函数原地修改旧对象。
-这仍是未发布源码；插话重放现按排序 turn→批次修复→回执 fresh pending→准确 DB 预留，仅接续本条消息。
+插话重放按排序 turn→批次修复→回执 fresh pending→准确 DB 预留，仅接续本条消息；源码竞态与实际覆盖分别记录。
 无数据库模式已补原 canonical 启动接纳：非空 ID 绑定唯一 launch，消费与 RUNNING 同次 mutation，旧保存不能回滚。
-停止也撤销业务终态上的新预留，显式恢复重新领取；普通保存只可回收同一准确身份。累计源码全仓已通过，完整计数见 TESTS；发布与实际验收见 STATUS，不得当作安装版 TUI 通过。
+停止也撤销业务终态上的新预留，显式恢复重新领取；普通保存只可回收同一准确身份。累计源码全仓、严格 gate 与安装版所测控制链通过；完整计数和未实测旁支见 TESTS。
 
 SSE delta 原样保留，OpenAI 工具参数生成有独立进度；
 派工不会永久禁止主代理本地工作，用户明确限制仍保留；复制按最新代次和实际通道结果反馈。
@@ -95,7 +95,7 @@ TUI 插件只提交声明式展示，读取有作用域的快照/订阅；所有
 插件入口统一为 `/plugins` 管理与 `/plugins@插件ID` 调用；公共 `command_catalog.py` 已统一名称、别名、核心尾部语法、帮助和静态前缀补全。保留命名空间明确拒绝，不进入模型或旧停止分支；参数 schema、动态目录和装卸尚未实现，发布及实际验收看 STATUS。
 后台目标状态处理读 `background_goal.py`，只依赖原 Goal/任务/时钟领域和精确能力；地址选择读 `background_routing.py`，只接收线程、owner 路径及属性的只读回调。来源消费、执行租约和能力预扫仍由 runtime 编排，旧 GoalMixin 和旧路由方法不再保留。
 后台执行 claim 的领取、最终准入与结算现读 `background_claim.py`，每次权威恢复检查读 `background_recovery.py`；runtime 绑定原状态查询、来源退休和失败记账能力。共享心跳仍在 `run_claim.py`，三种租约不合并；已同包部署双机，恢复与竞争的实际覆盖见 TESTS。
-第 3 步公共命令首片已发布并同包部署，实际 TUI 137 的主后台资源停止缺口须先修复；完整参数及第 4—10 步待做；现有启动插件不代表已经支持 TUI 热装卸。
+第 3 步公共命令首片与资源停止修复已发布部署，实际分项复验见 TESTS；下一片继续完整参数，第 4—10 步待做。现有启动插件不代表已经支持 TUI 热装卸。
 本地提交复核与自动化测试收口见评估文档的“本地提交前复核”；不要将定向重跑写成全仓再次通过。
 后端公共合同读 `backends/base.py`，传输读 `http.py`，协议读 `openai_chat.py` / `anthropic.py` / `responses.py`，
 构造及缺配置判据读 `factory.py`；旧 base 文件不再承载协议实现。
