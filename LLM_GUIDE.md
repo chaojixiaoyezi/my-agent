@@ -39,6 +39,8 @@ Shell 回执、截断说明与展示行数共用采集正文的 LF 口径；末�
 main 绑定当前选定任务的有效 claim；换轮失效，Goal paused 不取消当前审批，不把接收方续租当批准。
 同任务续做先绑定 canonical run/attempt 再准备归档，request 只代表当前消息；目录准备失败关闭本次新 attempt。
 普通 Shell 与交互 PTY 共用 `parse_shell_command`；删除解析入口时必须同时核对两条执行链。
+资源访问身份和执行归属分别定义在 `tooling/process_scope.py`；PTY 已直接使用，不能拿访问回退补齐任务身份。
+源码中的 direct/local 中断只停止精确回合，保留插话及独立资源；普通后台任务停止仍待接线，发布与实际验收见 STATUS。
 
 SSE delta 原样保留，OpenAI 工具参数生成有独立进度；
 派工不会永久禁止主代理本地工作，用户明确限制仍保留；复制按最新代次和实际通道结果反馈。

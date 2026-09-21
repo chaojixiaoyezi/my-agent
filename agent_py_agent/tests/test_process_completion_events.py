@@ -11,9 +11,9 @@ from agent_py_agent.agent.conversation.process_events import (
 from agent_py_agent.agent.conversation.store import ConversationStore
 from agent_py_agent.agent.tooling.process_registry import (
     BackgroundProcess,
-    ProcessAccessScope,
     process_registry,
 )
+from agent_py_agent.agent.tooling.process_scope import ProcessAccessScope
 from agent_py_agent.agent.tooling.process_session_store import (
     ProcessSessionStore,
     process_session_store_root,

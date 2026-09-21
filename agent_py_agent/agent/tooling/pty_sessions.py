@@ -1,5 +1,5 @@
-# LLM: PTY 的容量、执行归属、启动预留与终止回执由唯一注册表管理；执行归属不能授予访问权限。
-# 模块用途: 提供有界交互终端，按精确任务收回进程；Windows 暂无 ConPTY，不虚报支持。
+# LLM: PTY 使用 process_scope 的执行身份合同；注册表独占容量、启动预留与终止回执，身份不授予访问权限。
+# 模块用途: 提供有界交互终端并按任务归属收回进程；Windows 暂无 ConPTY，不虚报支持。
 from __future__ import annotations
 
 """Bounded interactive PTY sessions using the same shell policy and sandbox gate."""
@@ -33,9 +33,9 @@ from .models import (
 )
 from .process_registry import (
     ProcessTerminationReceipt,
-    process_access_scope,
     terminate_process_tree,
 )
+from .process_scope import ProcessExecutionScope, process_access_scope
 from .sandbox import SandboxUnavailable
 from .shell import (
     ShellTool,
@@ -67,7 +67,7 @@ class PtySession:
     started_at: float
     last_active_at: float
     access_scope: PtyAccessScope
-    execution_scope: PtyExecutionScope = field(default_factory=lambda: PtyExecutionScope())
+    execution_scope: ProcessExecutionScope = field(default_factory=ProcessExecutionScope)
     output: bytearray = field(default_factory=bytearray)
     base_cursor: int = 0
     next_cursor: int = 0
@@ -109,35 +109,11 @@ class PtyAccessScope:
     protected_write_paths: tuple[str, ...] | None
 
 
-# LLM: 只冻结 executor 的可信 run_scope；root_task_id 不与 authority task_id 或目录指纹互换。
-# 类用途: 将终端绑定到真实 owner、会话、长期任务及执行轮，独立于文件权限和可见范围。
-@dataclass(frozen=True)
-class PtyExecutionScope:
-    owner_home: str = ""
-    thread_id: str = ""
-    root_task_id: str = ""
-    run_id: str = ""
-    attempt_id: str = ""
-
-    # LLM: Full Access 只取消路径墙，不能抹去宿主 owner home；缺失身份不猜测归属。
-    # 函数用途: 在启动时复制宿主身份，之后不随外部字典变化。
-    @classmethod
-    def from_run_scope(cls, run_scope: object, owner_home: object) -> PtyExecutionScope:
-        scope = run_scope if isinstance(run_scope, dict) else {}
-        return cls(
-            owner_home=process_access_scope(scope, owner_home).owner_home,
-            thread_id=str(scope.get("session_id") or ""),
-            root_task_id=str(scope.get("root_task_id") or ""),
-            run_id=str(scope.get("run_id") or ""),
-            attempt_id=str(scope.get("attempt_id") or ""),
-        )
-
-
 # LLM: 预留和取消标记共用 registry 锁；取消只命中当时的启动，不阻止用户后续显式恢复。
 # 类用途: 在 Popen 尚未返回时保留执行归属，让明确的资源停止请求覆盖尚未完成的启动。
 @dataclass
 class _PtyStart:
-    execution_scope: PtyExecutionScope
+    execution_scope: ProcessExecutionScope
     cancelled: bool = False
 
 
@@ -209,7 +185,7 @@ class PtySessionRegistry:
         if os.name == "nt":
             raise OSError("PTY_UNAVAILABLE: Windows requires a ConPTY backend")
         raise_if_cancelled()
-        execution_scope = PtyExecutionScope.from_run_scope(run_scope, owner_home)
+        execution_scope = ProcessExecutionScope.from_run_scope(run_scope, owner_home)
         with self._lock:
             self._prune_finished()
             active = sum(session.process.poll() is None for session in self._sessions.values())
@@ -393,31 +369,25 @@ class PtySessionRegistry:
                 self._close_fd(session)
         return session
 
-    # LLM: 宿主控制入口必须有 owner 加精确 task/thread 或 run；不以访问范围代替执行归属。
+    # LLM: 使用 process_scope 的精确选择合同，不以访问范围代替执行归属。
     # 在锁内冻结句柄和取消预留，锁外异步终止；晚到恢复轮不能被旧停止重新扫描命中。
     # 函数用途: 明确停止任务资源或取消子代理时圈定其终端，回收进程而不阻塞控制应答。
     def request_stop(self, *, owner_home: object, thread_id: str = "", task_id: str = "",
                      run_id: str = "", attempt_id: str = "") -> tuple[str, ...]:
         if not owner_home or not ((thread_id and task_id) or run_id):
             return ()
-        owner = str(Path(str(owner_home)).expanduser().resolve(strict=False))
-
-        # LLM: 所有已提供的身份维度均精确匹配；空身份不能成为跨 owner 的通配控制。
-        # 函数用途: 为本次宿主停止筛选启动预留和已登记终端。
-        def matches(scope: PtyExecutionScope) -> bool:
-            return scope.owner_home == owner and all(
-                not expected or actual == expected for actual, expected in (
-                    (scope.thread_id, thread_id), (scope.root_task_id, task_id),
-                    (scope.run_id, run_id), (scope.attempt_id, attempt_id),
-                )
-            )
+        target = ProcessExecutionScope(
+            owner_home=str(Path(str(owner_home)).expanduser().resolve(strict=False)),
+            thread_id=thread_id, root_task_id=task_id, run_id=run_id, attempt_id=attempt_id,
+        )
 
         with self._lock:
-            pending = [key for key, launch in self._pending_starts.items() if matches(launch.execution_scope)]
+            pending = [key for key, launch in self._pending_starts.items()
+                       if launch.execution_scope.matches(target)]
             for key in pending:
                 self._pending_starts[key].cancelled = True
             sessions = [session for session in self._sessions.values()
-                        if matches(session.execution_scope) and session.process.poll() is None]
+                        if session.execution_scope.matches(target) and session.process.poll() is None]
         for session in sessions:
             threading.Thread(target=self.close, args=(session.session_id,),
                              name=f"stop-{session.session_id}", daemon=True).start()

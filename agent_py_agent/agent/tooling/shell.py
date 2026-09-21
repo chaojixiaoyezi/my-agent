@@ -1,6 +1,7 @@
 # LLM: 普通 shell 关闭宿主 stdin，交互归独立 PTY；命令长度不是权限边界，不再额外卡短脚本。
 # 捕获全文与模型预览分离，展示归档不得拿裁剪预览充全文；修改执行入口需联测参数、危险命令和 owner 沙箱。
 # 输出行数按采集正文的 LF 分隔计算，模型回执、截断说明与展示事实必须共用口径。
+# 后台访问身份由 process_scope 规范，不能拿其会话回退值推断任务执行归属。
 # 模块用途: 在用户权限内执行命令并整理输出、进程及产物保护记录，保留有界采集原文和真实缺失事实。
 from __future__ import annotations
 
@@ -69,13 +70,12 @@ from .models import (
 from .process_output_capture import ProcessOutputCapture
 from .process_registry import (
     BackgroundProcess,
-    ProcessAccessScope,
     ProcessRegistration,
     ProcessTerminationReceipt,
-    process_access_scope,
     process_registry,
     terminate_process_tree,
 )
+from .process_scope import ProcessAccessScope, process_access_scope
 from .process_session_store import process_session_store_root
 from .sandbox import SandboxUnavailable
 from .shell_syntax import contains_unmanaged_background_operator

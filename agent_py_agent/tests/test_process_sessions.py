@@ -603,7 +603,7 @@ def test_background_session_outlives_one_shot_launcher_and_is_rehydrated(tmp_pat
         (
             "import json",
             "from pathlib import Path",
-            "from agent_py_agent.agent.tooling.process_registry import ProcessAccessScope",
+            "from agent_py_agent.agent.tooling.process_scope import ProcessAccessScope",
             "from agent_py_agent.agent.tooling.shell import ShellTool",
             f"root = Path({str(tmp_path)!r})",
             f"command = {command!r}",

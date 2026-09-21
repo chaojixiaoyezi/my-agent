@@ -2,7 +2,7 @@ from __future__ import annotations
 
 """Model-facing control surface for managed background shell sessions."""
 
-# LLM: 本模块只投影 process_registry 中当前可信用户会话可见的记录；session_id
+# LLM: 访问身份经 process_scope 规范，只投影 process_registry 中当前可信用户会话可见的记录；session_id
 # 只是定位键，不是授权凭证；停止的未确认回执不能投影成成功，权限由 __run_scope 注入。
 # 进展指纹只用于软观察，不参与权限、进程终态或任务完成裁决。
 # 模块用途: 查询、等待和停止自己的后台命令，向模型明确报告停止已确认还是执行结果未知。
@@ -26,7 +26,8 @@ from .models import (
     ToolRuntimePolicy,
 )
 from .process_network_status import managed_process_network_status
-from .process_registry import process_access_scope, process_registry
+from .process_registry import process_registry
+from .process_scope import process_access_scope
 from .process_session_store import process_session_store_root
 
 _DEFAULT_WAIT_SECONDS = 30.0

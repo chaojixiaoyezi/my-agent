@@ -1,5 +1,5 @@
 
-# LLM: 后台记录与前台命令共用出生标识和终止回执；组长仍可核对时才纳入其组成员，不能用旧 PID 猜归属；联测 registry、后台 host 与 shell orphan kill。
+# LLM: 访问身份读取 process_scope；后台记录与前台命令共用出生标识和终止回执，不用旧 PID 猜归属；联测 registry、后台 host 与 shell orphan kill。
 # 模块用途: 记录受管进程并按精确执行归属停止，核对原进程树和独立组成员退出，不把发送信号当成清理完成。
 from __future__ import annotations
 
@@ -44,6 +44,7 @@ from typing import Any
 from ..common.json_io import read_json_object
 from .background_process_host import HOST_STATE_SCHEMA
 from .cancellation import current_cancellation_token, raise_if_cancelled
+from .process_scope import ProcessAccessScope
 from .process_session_store import (
     PROCESS_SESSION_SCHEMA,
     ProcessSessionStore,
@@ -71,23 +72,6 @@ _OUTPUT_TAIL_CHARS = 4000
 _MAX_FINISHED = 128
 
 
-# LLM: Scope equality is the authorization test; do not add fuzzy path ancestry or natural-language
-# identity fallback here. Empty fields deliberately fail the model-facing bound check.
-# 类用途: 保存一条后台进程可被哪个用户、哪个 TUI 会话访问的不可变身份。
-@dataclass(frozen=True)
-class ProcessAccessScope:
-    """后台进程的可信访问边界；空 conversation_id 表示不能暴露给模型工具。"""
-
-    owner_id: str = ""
-    conversation_id: str = ""
-    owner_home: str = ""
-
-    # LLM: Both owner and conversation identity are required before model-visible access.
-    # 函数用途: 判断这份范围是否足以安全地访问共享 Gateway 里的后台进程。
-    def is_bound(self) -> bool:
-        return bool(self.owner_id and self.conversation_id)
-
-
 # LLM: Process registration is one immutable launch fact. Bundle it before the
 # registry lock so call sites cannot shift positional fields or grow another
 # parallel registration signature; access scope and store root remain typed.
@@ -106,38 +90,6 @@ class ProcessRegistration:
     pid_birth_token: str = ""
     host_state_file: str = ""
     store_root: str | Path | None = None
-
-
-# LLM: Scope 只能从 executor 注入的 run_scope 和 registry 的 owner home 构造；
-# owner_home 是真实用户地址，不能因 Full Access 取消路径墙而丢失；同步检查 shell 与 process_session。
-# 选择 session -> root task -> root run -> run 的稳定降级顺序，以便主子代理在同一
-# 对话树内协作，同时隔离其他用户、其他 TUI 会话和无法证明归属的裸调用。
-# 函数用途: 把本轮可信身份和用户地址整理成后台进程查询、持久化和停止的精确范围。
-def process_access_scope(
-    run_scope: object,
-    owner_scope_root: object = "",
-) -> ProcessAccessScope:
-    scope = run_scope if isinstance(run_scope, dict) else {}
-    owner_home = ""
-    owner_root = scope.get("owner_home") or owner_scope_root
-    if owner_root:
-        owner_home = str(Path(str(owner_root)).expanduser().resolve(strict=False))
-    owner_id = str(scope.get("owner_id") or "").strip()
-    if not owner_id and owner_home:
-        owner_id = f"path:{owner_home}"
-    conversation_id = next(
-        (
-            str(scope.get(key) or "").strip()
-            for key in ("session_id", "root_task_id", "root_run_id", "run_id")
-            if str(scope.get(key) or "").strip()
-        ),
-        "",
-    )
-    return ProcessAccessScope(
-        owner_id=owner_id,
-        conversation_id=conversation_id,
-        owner_home=owner_home,
-    )
 
 
 # LLM: 记录既保存进程生命周期事实，也保存启动时的不可变访问范围；后续查询不得
@@ -969,12 +921,10 @@ process_registry = ProcessRegistry()
 
 __all__ = [
     "BackgroundProcess",
-    "ProcessAccessScope",
     "ProcessRegistration",
     "ProcessRegistry",
     "ProcessTerminationReceipt",
     "capture_process_birth_token",
-    "process_access_scope",
     "process_registry",
     "terminate_process_tree",
 ]

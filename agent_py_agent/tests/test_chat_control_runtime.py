@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import threading
 import time
 import urllib.error
@@ -9,13 +10,18 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from agent_py_agent.agent.concurrency.interrupt import is_interrupted, register_interruptible
+from agent_py_agent.agent.concurrency.interrupt import (
+    interrupt_by_name,
+    is_interrupted,
+    register_interruptible,
+)
 from agent_py_agent.agent.conversation.control_commands import (
     ConversationControlResult,
     parse_conversation_control,
 )
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.agent.tooling.shell import ShellTool, ShellToolOptions
 from agent_py_agent.cli.chat_parts.control_runtime import (
     ChatControlExecution,
     ChatControlState,
@@ -255,7 +261,11 @@ def test_local_btw_is_scoped_to_current_request(tmp_path) -> None:
     assert agent.conversation_store.guidance.pending("request", "chat-2") == []
 
 
-def test_local_stop_signals_current_run(tmp_path) -> None:
+def test_local_stop_signals_current_run(tmp_path, monkeypatch) -> None:
+    cancel_resources = MagicMock()
+    monkeypatch.setattr(
+        "agent_py_agent.cli.chat_parts.control_runtime._cancel_local_subagents", cancel_resources,
+    )
     agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
     execution = ChatControlExecution(
         agent,
@@ -298,6 +308,92 @@ def test_local_stop_signals_current_run(tmp_path) -> None:
     assert result.ok is True
     assert stopped.is_set()
     assert agent.conversation_store.guidance.pending("request", "chat-stop") == []
+    cancel_resources.assert_called_once_with(agent, "chat-stop")
+
+
+def test_local_interrupt_preserves_guidance_and_independent_resources(tmp_path, monkeypatch) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    agent._current_run_params = SimpleNamespace(request_id="wrong-request")
+    cancel_resources = MagicMock(side_effect=AssertionError("interrupt 不回收独立资源"))
+    monkeypatch.setattr(
+        "agent_py_agent.cli.chat_parts.control_runtime._cancel_local_subagents", cancel_resources,
+    )
+    execution = ChatControlExecution(
+        agent, False,
+        ChatControlState(True, 2, "当前工作", time.perf_counter(), "session", request_id="chat-interrupt"),
+    )
+    guidance = agent.conversation_store.guidance
+    for request_id in ("chat-interrupt", "other-request"):
+        guidance.append({
+            "target_type": "request", "target_id": request_id, "message": "保留的补充要求",
+            "sender": "local-cli", "delivery": "current_request",
+        })
+    before = {request: guidance.pending("request", request) for request in ("chat-interrupt", "other-request")}
+    ready, cancelled, release = threading.Event(), threading.Event(), threading.Event()
+
+    def worker() -> None:
+        with register_interruptible("conversation-request:chat-interrupt"):
+            ready.set()
+            while not release.wait(0.01):
+                if is_interrupted():
+                    cancelled.set()
+                    return
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    try:
+        assert ready.wait(2)
+        with register_interruptible("conversation-request:wrong-request"):
+            result = execute_chat_control(execution, _command("/interrupt"))
+            assert not is_interrupted()
+        assert result.ok and result.request_id == "chat-interrupt"
+        assert cancelled.wait(2)
+        assert execution.state.running and execution.state.queued_count == 2
+        for request, expected in before.items():
+            assert guidance.pending("request", request) == expected
+        cancel_resources.assert_not_called()
+    finally:
+        release.set()
+        thread.join(2)
+    assert not thread.is_alive()
+
+
+def test_local_interrupt_stops_foreground_shell_without_resource_reclaim(tmp_path, monkeypatch) -> None:
+    cancel_resources = MagicMock(side_effect=AssertionError("interrupt 不回收独立资源"))
+    monkeypatch.setattr(
+        "agent_py_agent.cli.chat_parts.control_runtime._cancel_local_subagents", cancel_resources,
+    )
+    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    execution = ChatControlExecution(
+        agent, False,
+        ChatControlState(True, 0, "当前命令", time.perf_counter(), "session", request_id="chat-sync"),
+    )
+    output = {}
+    command = "python3 -c " + shlex.quote(
+        "from pathlib import Path; import time; Path('started').touch(); time.sleep(20)"
+    )
+
+    def worker() -> None:
+        with register_interruptible("conversation-request:chat-sync"):
+            output["result"] = ShellTool(
+                tmp_path, options=ShellToolOptions(default_timeout=10),
+            ).execute({"command": command})
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    try:
+        deadline = time.monotonic() + 5
+        while not (tmp_path / "started").exists() and thread.is_alive() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert (tmp_path / "started").exists(), output
+        result = execute_chat_control(execution, _command("/interrupt"))
+        thread.join(5)
+        assert result.ok and not thread.is_alive()
+        assert output["result"].error_code == "CANCELLED"
+        cancel_resources.assert_not_called()
+    finally:
+        interrupt_by_name("conversation-request:chat-sync")
+        thread.join(12)
 
 
 def test_local_stop_uses_shared_request_id_instead_of_thread_local_params(tmp_path) -> None:

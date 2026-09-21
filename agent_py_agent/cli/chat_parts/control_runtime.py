@@ -1,5 +1,5 @@
-# LLM: TUI 控制沿持久控制回执执行；显式工作目录复用普通消息投影，权限仍由 Gateway 裁决。
-# 模块用途: 把终端控制命令交给共享协议，保留会话身份、目录和可重试的消息编号。
+# LLM: Gateway 控制沿持久回执执行；本地 interrupt 只发精确回合信号，stop 才清退插话并派发子代理取消。
+# 模块用途: 将终端控制交给共享协议，保留会话身份、目录、可重试消息编号及不同控制的边界。
 from __future__ import annotations
 
 """CLI adapter for the shared ordinary-conversation control protocol.
@@ -340,8 +340,8 @@ def _http_error_body(exc: urllib.error.HTTPError) -> dict[str, object]:
     return result
 
 
-# LLM: 插话持久操作经 guidance 领域组件； Local control targets only the exact run currently mounted in this chat window.
-# 函数用途:在不启动 Gateway 的终端聊天里查询、纠偏或停止当前执行轮。
+# LLM: 只中断窗口快照里的精确 request；interrupt 保留插话和独立资源，stop 才写 guidance 并派发子代理回收。
+# 函数用途: 在直接本地聊天里查询或控制当前回合，让单纯中断与任务资源停止保持不同边界。
 def _execute_local_control(
     execution: ChatControlExecution,
     command: ConversationControlCommand,
@@ -415,6 +415,10 @@ def _execute_local_control(
     )
     if not interrupted:
         return ConversationControlResult("stop", False, "当前没有运行中的内容，无需停止。")
+    if command.operation == "interrupt":
+        return ConversationControlResult(
+            "stop", True, "已中断本轮模型与工具执行链。", request_id=request_id,
+        )
     _retire_local_guidance(execution.agent, request_id)
     _cancel_local_subagents(execution.agent, request_id)
     return ConversationControlResult(
