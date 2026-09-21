@@ -1286,6 +1286,7 @@ my-agent subagents-dispatch --watch --planner --interval 30
 | `--note <text>` | - | 写入调度关联审核记录的备注。 |
 | `--instruction <text>` | - | 给本轮 runner 的额外指令。 |
 | `--background-launch-id <id>` | - | 内部字段：`create_subagents` 后台启动时写回任务树生命周期，普通用户不需要手填。 |
+| `--expected-attempt <run> <attempt>` | - | 内部宿主参数：可逐项重复，运输本批预留的非空执行轮；必须与 `--run-id` 完整对应，只供一次真实派工使用，不能与 `--watch` 混用。普通用户无需手填，停止或换代后的旧身份会被拒绝。 |
 | `--workspace-root <path>` | - | 内部字段：后台自动 dispatch 继承父代理当前工作区，普通用户不需要手填。 |
 | `--max-cards <n>` | `0` | runner 最多注入多少张能力卡，`0` 表示不限制。 |
 | `--no-probe` | `false` | 执行 runner 前不做通道健康检查。 |

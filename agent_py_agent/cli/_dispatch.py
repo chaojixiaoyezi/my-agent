@@ -1,4 +1,4 @@
-# LLM: 内部启动输入先校验再创建宿主；命令行只运输身份，最终执行权仍由原 RuntimeDB 裁决。
+# LLM: 内部启动输入先校验再创建宿主；命令行只运输身份，最终执行权由原 RuntimeDB 或显式文件模式的 canonical 裁决。
 # 模块用途: 把 CLI 调度和执行请求接入正式运行链，拒绝缺失或冲突的后台启动参数。
 from __future__ import annotations
 
@@ -85,7 +85,7 @@ def _dispatch_params(options: SubagentsDispatchOptions) -> DispatchParams:
     )
 
 
-# LLM: 纯解析先于 agent 构造；重复/缺项/越界与 watch 混用均拒绝。空 attempt 只声明 unmanaged，managed 在接纳处拒绝。
+# LLM: 纯解析先于 agent 构造；空身份、重复/缺项/越界与 watch 混用均拒绝，两种执行模式都运输准确 ID。
 # 函数用途: 校验内部启动参数的完整对应关系，避免丢参数后变成全树调度或重新领取当前轮。
 def _expected_attempt_ids(args) -> dict[str, str] | None:
     pairs = getattr(args, "expected_attempt", None)
@@ -103,8 +103,8 @@ def _expected_attempt_ids(args) -> dict[str, str] | None:
         run_id, attempt_id = pair
         if not isinstance(run_id, str) or not run_id or run_id != run_id.strip():
             raise ValueError("启动运行编号必须是规范的非空字符串")
-        if not isinstance(attempt_id, str) or attempt_id != attempt_id.strip():
-            raise ValueError("启动执行轮编号必须是规范字符串")
+        if not isinstance(attempt_id, str) or not attempt_id or attempt_id != attempt_id.strip():
+            raise ValueError("启动执行轮编号必须是规范的非空字符串")
         if run_id in result:
             raise ValueError("同一启动运行编号不能重复声明")
         result[run_id] = attempt_id

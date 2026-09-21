@@ -90,6 +90,7 @@ def test_plugin_submit_uses_real_dispatch_without_chat_guidance_or_stop(
         control_operation_reconciler=SimpleNamespace(enqueue=blocked),
         exit_armed_at_ref=[0.0], eof_armed_at_ref=[0.0],
         escape_armed_at_ref=[0.0], escape_armed_text_ref=[""],
+        local_run_ref=[None],
     )
     event = SimpleNamespace(app=SimpleNamespace(exit=blocked, invalidate=lambda: None))
 
@@ -98,6 +99,7 @@ def test_plugin_submit_uses_real_dispatch_without_chat_guidance_or_stop(
     assert output == ["插件命令尚未开放；当前版本还不能安装、启用或调用插件。"]
     blocked.assert_not_called()
     assert not params.stop_event.is_set() and params.pending_jobs_ref == [0]
+    assert params.local_run_ref == [None]
     assert params.is_running_ref == [mode == "foreground"]
     assert runtime.has_active_background_task() == background_before == (mode == "background")
     assert runtime.store.snapshot().queued_inputs == ()

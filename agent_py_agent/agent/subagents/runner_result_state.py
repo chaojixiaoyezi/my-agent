@@ -1,4 +1,4 @@
-# LLM: runner 写回遵守唯一 turn_end 协议及宿主授权事实；未完成不等于失败，修改须联测持久结果、直属等待和恢复。
+# LLM: runner 写回遵守唯一 turn_end 协议；文件消费身份随原结果回收，未完成不等于失败，联测持久结果、直属等待和恢复。
 # 模块用途: 把子代理本轮状态、失败分类和活动信息写回任务对象，由调用方沿原账本持久化。
 from __future__ import annotations
 
@@ -101,7 +101,7 @@ def apply_runner_result_fields(params: RunnerResultFieldParams) -> None:
     ))
     apply_runner_display_status(task)
     _release_source_worker_lease_after_result(task, dry_run=dry_run)
-    _reclaim_runner_launch_if_requeued(task)
+    _reclaim_settled_runner_launch(task)
     if ok and not dry_run:
         from ..ingestion.source_worker import record_source_worker_progress
 
@@ -411,10 +411,13 @@ def _source_worker_still_has_work(task: object) -> bool:
 # LLM: One background dispatch process may host several independent runners.
 # Once any accepted result projects its exact run back to PENDING, that run's
 # launch slot is over even if sibling threads keep the shared host PID alive.
+# 文件模式没有 DB 终态；已消费身份在结果释放活动指针后同次回收，失败重试也领取新身份。
 # Reclaim only the per-task record; never terminate or rewrite the shared host.
-# 函数用途：任一子代理本轮结束后若仍需续跑，立即释放它自己的启动占位，不再等同批兄弟结束。
-def _reclaim_runner_launch_if_requeued(task: object) -> None:
-    if not task_has_status(task, TaskStatus.PENDING):
+# 函数用途: 子代理让出或文件执行轮收口后释放自己的启动占位，不等待同批兄弟或重用已消费身份。
+def _reclaim_settled_runner_launch(task: object) -> None:
+    record = (task.attributes or {}).get("background_start") or {}
+    settled_file_start = bool(record.get("activated_at") and not task.runner_active_attempt_id)
+    if not task_has_status(task, TaskStatus.PENDING) and not settled_file_start:
         return
     from .process_control import reclaim_background_start
 

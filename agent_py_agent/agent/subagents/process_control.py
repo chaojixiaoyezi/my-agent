@@ -120,7 +120,7 @@ def terminate_pid_with_escalation(
     }
 
 
-# LLM: attempt_id 由宿主接纳时固定；后续 marker 与 CLI 只能消费原 ID，无数据库模式显式为空。
+# LLM: attempt_id 由宿主接纳时固定；后续 marker 与 CLI 只能消费原非空 ID，不能重新领取或更换。
 # 类用途: 描述一次启动记录的条件更新，进程号为零时保留原进程号。
 @dataclass(frozen=True)
 class BackgroundStartUpdate:
@@ -140,6 +140,7 @@ class BackgroundStartUpdate:
 #   里已落盘的 pid——pid 是孤儿回收/cancel 的定位事实,任何状态更新不得抹掉。
 #   两个调用方:orchestration/background/dispatch.mark_background_start、
 #   cli/dispatch_background.mark_background_launch;改字段时同步两边测试。
+#   同 launch/attempt 的文件激活事实必须跨状态标记保留，新身份才能清零。
 # 函数用途: 所有想往任务上写 background_start 状态的人都从这里拿记录,保证
 #   谁也不会顺手把 pid 弄丢。
 def build_background_start_record(previous: object, update: BackgroundStartUpdate) -> dict[str, object]:
@@ -165,6 +166,8 @@ def build_background_start_record(previous: object, update: BackgroundStartUpdat
         "updated_at": _time.time(),
         "error": str(update.error or ""),
     }
+    if same_launch and record["attempt_id"] == previous_record.get("attempt_id") and "activated_at" in previous_record:
+        record["activated_at"] = previous_record["activated_at"]
     effective_pid = _safe_pid(update.pid)
     if effective_pid <= 0 and same_launch:
         effective_pid = _safe_pid(previous_record.get("pid"))
@@ -174,7 +177,7 @@ def build_background_start_record(previous: object, update: BackgroundStartUpdat
 
 
 # LLM: Reclaiming a launch updates the same canonical background_start record;
-# callers must not hand-edit status dictionaries and accidentally lose the pid.
+# callers must not hand-edit status dictionaries and accidentally lose the pid or activation fact.
 # 函数用途: 将已失效 runner 的后台启动残留标成 reclaimed，令同一任务可以安全续派。
 def reclaim_background_start(task: object) -> bool:
     attrs = getattr(task, "attributes", None)
@@ -183,7 +186,7 @@ def reclaim_background_start(task: object) -> bool:
     previous = attrs.get("background_start")
     if not isinstance(previous, dict):
         return False
-    if str(previous.get("status") or "").strip() not in {"launching", "running"}:
+    if str(previous.get("status") or "").strip() not in {"reserved", "launching", "running"}:
         return False
     attrs["background_start"] = build_background_start_record(
         previous,

@@ -40,9 +40,11 @@ def test_durable_daemon_executor_shutdown_does_not_wait_for_wedged_work() -> Non
 
 def test_concurrent_subagent_runners_use_daemon_workers(monkeypatch) -> None:
     observed_daemon_flags: list[bool] = []
+    observed_attempts: list[tuple[str, str]] = []
 
     def fake_run_subagent_worker(_params):
         observed_daemon_flags.append(threading.current_thread().daemon)
+        observed_attempts.append((_params.run_id, _params.expected_attempt_id))
         return "ok"
 
     from agent_py_agent.agent.agent_core.runner import dispatch
@@ -78,8 +80,10 @@ def test_concurrent_subagent_runners_use_daemon_workers(monkeypatch) -> None:
             start_runners=True,
             max_cards=1,
             probe=False,
+            expected_attempt_ids={"child-1": "attempt-1", "child-2": "attempt-2"},
         )
     )
 
     assert set(completed) == {"child-1", "child-2"}
     assert observed_daemon_flags == [True, True]
+    assert sorted(observed_attempts) == [("child-1", "attempt-1"), ("child-2", "attempt-2")]

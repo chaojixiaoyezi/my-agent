@@ -1,5 +1,5 @@
-# LLM: 生命周期修改复用原状态协议和服务，runner 预留身份显式运输；不得在转发层重新选取 current。
-# 模块用途: 组织子代理授权、状态与执行轮操作，保留各正式写入口的职责。
+# LLM: 生命周期修改复用原状态协议；启动标记在本服务按 launch/attempt 条件写入，CLI 不反向导入领域实现。
+# 模块用途: 组织子代理授权、状态与执行轮操作，集中保存准确启动记录，保留各写入口的原事务顺序。
 from __future__ import annotations
 
 """Lifecycle mutation service for subagent task records.
@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ...memory_routing import load_routes, match_routes, resolve_required_paths
+from ...runtime_db.operations import RuntimeConflictError
 from ...runtime_errors import runtime_error_report
 from ..capability_request_identity import find_equivalent_capability_request
 from ..capability_scope import ensure_grant_path_scope_within_owner
@@ -21,12 +22,15 @@ from ..models import (
     CapabilityGap,
     CapabilityGrant,
     CapabilityRequest,
+    FailureType,
     SubAgentTask,
+    TaskStatus,
     VerificationEvidence,
     known_failure_type,
     normalize_task_status,
     task_status_in,
 )
+from ..process_control import BackgroundStartUpdate, build_background_start_record
 from ..utils import _merge_list
 from .lifecycle_capability_records import (
     BuildCapabilityGapInput,
@@ -132,6 +136,8 @@ class SetStatusParams:
     failure_type: str = ""
 
 
+# LLM: 公开生命周期服务供宿主调用；启动条件写在原 creation/canonical 锁下完成，不能另选身份或在锁里启动进程。
+# 类用途: 管理子代理授权、状态和准确执行轮，让 CLI 与调度器共用正式状态写入口。
 class SubAgentLifecycleService:
     """Mutate lifecycle fields on subagent tasks through SubAgentManager."""
 
@@ -377,6 +383,45 @@ class SubAgentLifecycleService:
         task.updated_at = time.time()
         self.manager.save(task)
         return task
+
+    # LLM: 条件比较与窄 mutation 同在 creation guard；launch/attempt/status 三者匹配才写，停止后的回执不得重新标 running。
+    # 函数用途: 两种后台执行方式共用一个启动记录写入口，保留新任务字段和新进程身份。
+    def update_background_start(
+        self, run_id: str, update: BackgroundStartUpdate, *, channel_failure: bool = False,
+    ) -> None:
+        from ..runner_start import assert_expected_runner_attempt
+
+        manager = self.manager
+        with manager.creation_guard():
+            assert_expected_runner_attempt(manager, run_id, update.attempt_id, pending_only=update.replace_launch)
+
+            # LLM: reducer 只读锁内最新 canonical 任务；抛错时不写文件，不能恢复旧 task 整体快照。
+            # 函数用途: 原子校验这份回执的归属，并合并它负责的启动字段。
+            def apply(task):
+                previous = (task.attributes or {}).get("background_start") or {}
+                if task_status_in(task.status, {"CANCELLED", "ABANDONED", "TAKEN_OVER"}):
+                    raise RuntimeConflictError("任务已关闭，拒绝旧启动回执")
+                if update.replace_launch:
+                    if previous.get("status") in {"launching", "running"}:
+                        raise RuntimeConflictError("已有启动尚未回收，拒绝重复接纳")
+                    if manager.runtime_db is None and previous.get("launch_id") != update.launch_id:
+                        raise RuntimeConflictError("文件启动不能更换原预留的宿主")
+                elif (
+                    previous.get("launch_id") != update.launch_id
+                    or previous.get("attempt_id", "") != update.attempt_id
+                    or previous.get("status") == "reclaimed"
+                    or previous.get("status") in {"finished", "failed"} and update.status == "running"
+                ):
+                    raise RuntimeConflictError("后台启动回执已失效")
+                task.attributes = dict(task.attributes or {})
+                task.attributes["background_start"] = build_background_start_record(previous, update)
+                if channel_failure:
+                    task.status = TaskStatus.CHANNEL_ERROR.value
+                    task.channel_status = "BROKEN"
+                    task.failure_type = FailureType.BACKGROUND_DISPATCH_STARTUP.value
+                    task.result = update.error
+
+            manager.mutate(run_id, apply)
 
     # LLM: 派工调用方须传排队时的 expected_attempt_id；委托原生命周期实现，不在此重新查询 current。
     # 函数用途: 为子代理取得准确执行轮，直接调用与后台启动共用同一激活规则。

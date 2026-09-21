@@ -1,4 +1,4 @@
-# LLM: CLI 标记必须复用 runner_start 条件 mutation，不得恢复 load/save 的独立写链。
+# LLM: CLI 标记调用原 lifecycle 服务的条件 mutation，不直接导入领域实现或恢复独立 load/save 写链。
 # 模块用途: 把派工进程状态写回准确的启动记录，并报告未确认写入。
 from __future__ import annotations
 
@@ -40,7 +40,6 @@ def mark_background_launch(
     from ..agent.subagents.process_control import (
         BackgroundStartUpdate,
     )
-    from ..agent.subagents.runner_start import update_background_start
 
     launch_id = str(options.background_launch_id or "").strip()
     if not launch_id or not options.run_ids:
@@ -50,7 +49,7 @@ def mark_background_launch(
     save_errors: list[dict[str, object]] = []
     for run_id in options.run_ids:
         try:
-            update_background_start(manager, run_id, BackgroundStartUpdate(
+            manager.lifecycle.update_background_start(run_id, BackgroundStartUpdate(
                 launch_id=launch_id, status=update.status, error=update.error, pid=os.getpid(),
                 attempt_id=options.expected_attempt_ids[run_id],
             ))

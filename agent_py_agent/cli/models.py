@@ -106,7 +106,7 @@ class AdapterOptions:
     stop_timeout: float
 
 
-# LLM: expected_attempt_ids 是宿主命令行运输值，空值只声明 unmanaged，运行模式与最终接纳仍由宿主验证。
+# LLM: expected_attempt_ids 运输两种模式的非空原身份，运行模式与最终接纳仍由宿主验证。
 # 类用途: 将一次派工的命令行选项收成具名字段，保持排队身份不丢失。
 @dataclass(frozen=True)
 class SubagentsDispatchOptions:

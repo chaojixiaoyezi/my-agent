@@ -7,7 +7,8 @@
 - `services/lifecycle_runner_attempts.py` 在锁内完成原 DB 激活和投影发布；放弃旧轮通过最新 canonical mutation 精确清指针。
 - `orchestration/tools/capability.py` 排队前锁内复读控制终态；`dispatch/capability_auto_sweep.py` 核对原 attempt/session 后才重排失联者。
 - `conversation/agent_control.py` 按单 run admission→creation 排队；`_AgentGuidanceDelivery` 仅交接响应和启动需求，启动/探测不持 creation 锁。
-- `runner_start.py` 只接纳原 pending 和条件更新原 launch；进程内与 CLI 标记复用同一 mutation，不另存执行权。
+- `runner_start.py` 只接纳原 pending 并核对身份；原 lifecycle 服务拥有 launch 条件 mutation 的真实实现，进程内与 CLI 直接调用，不保留自由函数转发或新增边界例外。
+- `file_runner_start.py` 只处理显式无数据库模式：预留与消费写原 canonical 记录；启动身份和生命周期同次 mutation，旧整任务保存只可回收同一身份。
 - `DispatchParams.expected_attempt_ids` 是宿主字段，经隐藏成对 argv 运输；普通模型 request_params 不读取它。顺序和并行 worker 使用同一映射。
 - `RuntimeRepository.create_attempt(expected_pending_attempt_id=...)` 在同一写事务只激活原 pending，失效不创建后继；session 发布与心跳沿同一 attempt。
 - `subagents/cancellation.py` 在原 creation 内关闭原树权限、暂停子 Goal、冻结后台/PTY；`cleanup_subagent_stops` 不接收 agent，只消费固定批次。
@@ -15,7 +16,7 @@
 - `runner_control.py` 读取原取消状态；原 session 心跳在独立 worker 内发送 exact attempt 中断，注册后模型前再核对。
 - `cancellation_hosts.py` 只读观察冻结的原宿主退出，不把 launch/PID 当整个 OS 树独占证明。
 - 创建回执读取最新 canonical，不要求控制域原地改写旧对象；旧 overlay 只在本轮激活后窄写。
-- 插话回执重放与无数据库迟到启动仍有已确认的准入缺口，阻断发布；源码和开发验证不能替代新版真实 TUI。
+- 插话回执重放与文件模式一次性接纳均已补入源码；完整开发验证与发布仍待收口，不能替代新版真实 TUI。
 
 ## runner 当前错误投影
 

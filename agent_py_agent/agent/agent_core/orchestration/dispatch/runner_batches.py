@@ -173,6 +173,7 @@ def collect_runner_candidates(agent, ctx: DispatchContext, runner_max_attempts: 
                 admitted = reserve_runner_start(
                     agent.subagents, task.id, expected_attempt_id=expected,
                     resume_user_stop=task.id in resume_run_ids,
+                    launch_id=ctx.background_launch_id,
                 )
                 admitted_attempts[task.id] = admitted
             pending_runner_jobs.append((task.id, before, retry_reason))

@@ -343,6 +343,7 @@ class SubAgentPersistenceService:
 
     # LLM: This is the canonical full-state write boundary. Closed lifecycle facts are monotonic;
     # only a structured same-run continuation or lifecycle-repair caller may explicitly reopen one.
+    # 文件启动凭据只可由窄 mutation 预留/消费，full save 只允许同身份单调回收。
     # 函数用途: 原子保存子代理权威状态及派生投影，并阻止旧线程把终态写回运行态。
     def save(
         self,
@@ -825,7 +826,8 @@ def _merge_existing_child_links(service: SubAgentPersistenceService, task: SubAg
 # runner_attempts is the monotonic generation fence: an older writer may add a capability delta,
 # but cannot replace lifecycle/result/attempt facts settled by a newer runner generation.
 #   活动诊断只允许专属窄 mutation 更新，full save 始终保留 canonical 版本。
-# 函数用途: 保留并发授权与活动提醒，并阻止旧副本把已收口的子代理改回运行中。
+#   显式文件模式还按预留/消费身份保留生命周期，防止结果计数尚未增长时旧快照清掉新启动。
+# 函数用途: 保留并发授权、活动提醒与文件启动事实，阻止旧副本回滚执行状态。
 def _merge_concurrent_capability_and_runner_state(
     service: SubAgentPersistenceService,
     task: SubAgentTask,
@@ -849,9 +851,20 @@ def _merge_concurrent_capability_and_runner_state(
     incoming_is_control_terminal = (
         str(task.status or "").strip().upper() in SUBAGENT_RECOVERY_CLOSED_STATUSES
     )
-    if existing_runner_is_newer and not incoming_is_control_terminal:
+    stale_file_start = False
+    if service.manager.runtime_db is None:
+        from ...file_runner_start import file_runner_start_is_newer, preserve_background_start
+
+        stale_file_start = file_runner_start_is_newer(task, existing)
+    replaced = stale_file_start or (existing_runner_is_newer and not incoming_is_control_terminal)
+    if replaced:
         for item in fields(task):
             setattr(task, item.name, copy.deepcopy(getattr(existing, item.name)))
+    if service.manager.runtime_db is None:
+        preserve_background_start(task, existing)
+        task.runner_abandoned_attempt_ids = _unique_strings([
+            *existing.runner_abandoned_attempt_ids, *task.runner_abandoned_attempt_ids,
+        ])
     # 活动诊断由心跳的窄 mutation 独占写入。旧工具/进度快照保存时不能覆盖或删除它，
     # 否则正常流式进展会抹掉提醒回执，造成重复通知；旧 attempt 的展示仍按 exact ID 隔离。
     diagnostic = (existing.attributes or {}).get("runtime_activity_diagnostic")
@@ -892,7 +905,7 @@ def _merge_concurrent_capability_and_runner_state(
         float(existing.updated_at or 0.0),
     )
     _advance_granted_capability_resume_state(task)
-    return existing_runner_is_newer and not incoming_is_control_terminal
+    return replaced
 
 
 # LLM: A settled attempt with fully resolved capability requests is dispatch-ready, not blocked.

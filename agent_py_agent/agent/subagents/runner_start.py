@@ -1,10 +1,9 @@
-# LLM: 启动接纳与标记共用原 creation guard 和 RuntimeDB pending；不建立第二份执行权，调用方在锁外启动进程。
-# 模块用途: 固定后台工作将要执行的轮次，并阻止旧启动回执覆盖停止或换代后的任务。
+# LLM: 启动接纳共用 creation guard；受管模式读 RuntimeDB，文件模式读原 canonical。标记写入归 lifecycle 服务，启动留锁外。
+# 模块用途: 预留后台工作将要执行的轮次，并为激活与生命周期标记提供准确身份核对。
 from __future__ import annotations
 
 from ..runtime_db.operations import RuntimeConflictError
-from .models import FailureType, TaskStatus, task_status_in
-from .process_control import BackgroundStartUpdate, build_background_start_record
+from .models import task_status_in
 
 
 # LLM: 调用方持 creation guard；这里只确认原启动接纳尚属当前执行轮，不把启动回执当进程存活证明。
@@ -29,10 +28,10 @@ def existing_runner_launch(manager: object, run_id: str, expected_attempt_id: st
 
 
 # LLM: supplied ID 是宿主冻结输入，不能改领 current；无输入的正常派工在锁内预留 pending，明确恢复才可接纳 user stop。
-# 函数用途: 给排队工作绑定原执行轮；无数据库的显式模式用空 ID 表示，不伪造数据库身份。
+# 函数用途: 给排队工作绑定非空的原执行轮，文件模式与数据库模式各守唯一事实源。
 def reserve_runner_start(
     manager: object, run_id: str, *, expected_attempt_id: str | None = None,
-    resume_user_stop: bool = False,
+    resume_user_stop: bool = False, launch_id: str = "",
 ) -> str:
     from .recovery_eligibility import user_stopped_run_is_resumable
     from .services.lifecycle_runner_attempts import _assert_runner_attempt_start_allowed
@@ -44,10 +43,16 @@ def reserve_runner_start(
         )
         if expected_attempt_id is not None:
             assert_expected_runner_attempt(manager, run_id, expected_attempt_id, pending_only=True)
+            record = (task.attributes or {}).get("background_start") or {}
+            if manager.runtime_db is None and launch_id and record.get("launch_id") != launch_id:
+                raise RuntimeConflictError("文件预留与本次启动不符")
             return expected_attempt_id
         repo = manager.runtime_db
         if repo is None:
-            return ""
+            from .file_runner_start import reserve_file_runner_start
+
+            reserved = manager.mutate(run_id, lambda current: reserve_file_runner_start(current, launch_id))
+            return str(reserved.attributes["background_start"]["attempt_id"])
         run = repo.agent_run_for_run_id(run_id)
         if run is None:
             raise RuntimeConflictError("子代理缺少原 RuntimeDB run，不能预留执行轮")
@@ -56,14 +61,15 @@ def reserve_runner_start(
 
 
 # LLM: 此检查服务于短锁内接纳/标记；实际激活必须继续在 DB 事务核对，不能把本次读取当激活权。
-# 函数用途: 确认收到的编号仍属于这个任务，空编号仅在显式无数据库模式可用。
+# 函数用途: 确认收到的非空编号仍属于这个任务；实际激活在对应原子提交边界再次核对。
 def assert_expected_runner_attempt(
     manager: object, run_id: str, expected_attempt_id: str, *, pending_only: bool = False,
 ) -> None:
     repo = manager.runtime_db
     if repo is None:
-        if expected_attempt_id:
-            raise RuntimeConflictError("无数据库模式不能消费数据库执行轮身份")
+        from .file_runner_start import assert_file_runner_attempt
+
+        assert_file_runner_attempt(manager.load(run_id), expected_attempt_id, pending_only=pending_only)
         return
     run = repo.agent_run_for_run_id(run_id)
     if not expected_attempt_id or run is None or str(run["current_attempt_id"] or "") != expected_attempt_id:
@@ -72,38 +78,3 @@ def assert_expected_runner_attempt(
         attempt = repo.get_attempt(expected_attempt_id)
         if attempt is None or attempt["status"] != "pending" or float(attempt["ended_at"] or 0) != 0:
             raise RuntimeConflictError("预留执行轮不再等待启动")
-
-
-# LLM: 条件比较与窄 mutation 同在 creation guard；launch/attempt/status 三者匹配才写，停止后的回执不得重新标 running。
-# 函数用途: 两种后台执行方式共用一个启动记录写入口，保留新任务字段和新进程身份。
-def update_background_start(
-    manager: object, run_id: str, update: BackgroundStartUpdate, *, channel_failure: bool = False,
-) -> None:
-    with manager.creation_guard():
-        assert_expected_runner_attempt(manager, run_id, update.attempt_id, pending_only=update.replace_launch)
-
-        # LLM: reducer 只读锁内最新 canonical 任务；抛错时不写文件，不能恢复旧 task 整体快照。
-        # 函数用途: 原子校验这份回执的归属，并合并它负责的启动字段。
-        def apply(task):
-            previous = (task.attributes or {}).get("background_start") or {}
-            if task_status_in(task.status, {"CANCELLED", "ABANDONED", "TAKEN_OVER"}):
-                raise RuntimeConflictError("任务已关闭，拒绝旧启动回执")
-            if update.replace_launch:
-                if previous.get("status") in {"launching", "running"}:
-                    raise RuntimeConflictError("已有启动尚未回收，拒绝重复接纳")
-            elif (
-                previous.get("launch_id") != update.launch_id
-                or previous.get("attempt_id", "") != update.attempt_id
-                or previous.get("status") == "reclaimed"
-                or previous.get("status") in {"finished", "failed"} and update.status == "running"
-            ):
-                raise RuntimeConflictError("后台启动回执已失效")
-            task.attributes = dict(task.attributes or {})
-            task.attributes["background_start"] = build_background_start_record(previous, update)
-            if channel_failure:
-                task.status = TaskStatus.CHANNEL_ERROR.value
-                task.channel_status = "BROKEN"
-                task.failure_type = FailureType.BACKGROUND_DISPATCH_STARTUP.value
-                task.result = update.error
-
-        manager.mutate(run_id, apply)

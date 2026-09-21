@@ -187,11 +187,12 @@ def cleanup_subagent_tree(batch: FrozenSubagentStops, root_id: str) -> dict[str,
 
 
 # LLM: C 内从 RuntimeDB 读取原 current；旧 canonical active 只可指向原轮或未激活 pending，数据库事务再次确认。
-# 函数用途: 关闭一个任务的原执行权，已终态或 UNKNOWN 的历史保持原样。
+# 函数用途: 关闭一个任务的原执行权；文件模式固定原预留供投影撤销，已终态或 UNKNOWN 的历史保持原样。
 def _close_authority(manager: object, request: CancelSubagentTaskRequest) -> dict[str, object]:
     task, repo = request.task, manager.runtime_db
     if repo is None:
-        return {"status": "not_managed", "run_id": task.id}
+        record = (task.attributes or {}).get("background_start") or {}
+        return {"status": "not_managed", "run_id": task.id, "attempt_id": str(record.get("attempt_id") or "")}
     row = repo.agent_run_for_run_id(task.id)
     if row is None:
         raise RuntimeConflictError("子代理缺少执行权记录，不能确认停止")
@@ -209,7 +210,7 @@ def _close_authority(manager: object, request: CancelSubagentTaskRequest) -> dic
     )
 
 
-# LLM: 已完成/失败或 UNKNOWN 不改业务终态和执行锁；可取消的旧轮用 canonical mutation 收口，DB 事务早已退出。
+# LLM: 已完成/失败或 UNKNOWN 不改业务终态和执行锁；文件接纳即便处于业务终态也须撤销，DB 事务早已退出。
 # 函数用途: 暂停精确子目标并记录取消投影，清理遗留资源不会抹掉真实业务结果。
 def _close_projection(agent: object, request: CancelSubagentTaskRequest, authority: dict) -> dict[str, object]:
     task = request.task
@@ -219,10 +220,16 @@ def _close_projection(agent: object, request: CancelSubagentTaskRequest, authori
     preserved = authority["status"] not in {"cancelled", "not_managed"} or task.status in SUBAGENT_RECOVERY_CLOSED_STATUSES
 
     # LLM: reducer 只操作最新 canonical 行，不能从旧 task 覆盖并发字段；UNKNOWN 不经过此写路径。
-    # 函数用途: 将原可取消任务收为 CANCELLED，并保留废弃轮和关闭的能力申请记录。
+    # 函数用途: 撤销原文件启动，把可取消任务收为 CANCELLED；保留业务终态和废弃轮记录。
     def close(current: SubAgentTask) -> None:
         if current.runner_active_attempt_id != task.runner_active_attempt_id:
             raise RuntimeConflictError("取消投影的执行轮发生变化")
+        if agent.subagents.runtime_db is None:
+            from .file_runner_start import revoke_file_runner_start
+
+            revoke_file_runner_start(current)
+        if preserved:
+            return
         if attempt_id and attempt_id not in current.runner_abandoned_attempt_ids:
             current.runner_abandoned_attempt_ids.append(attempt_id)
         closed_requests.extend(_close_pending_capability_requests(current, request.reason))
@@ -241,8 +248,9 @@ def _close_projection(agent: object, request: CancelSubagentTaskRequest, authori
         current.ended_at = current.updated_at = now
         current.runner_active_attempt_id = ""
 
-    if not preserved:
+    if not preserved or agent.subagents.runtime_db is None:
         task = agent.subagents.mutate(task.id, close)
+    if not preserved:
         agent.subagents.actions._append_task_work_log(task, f"cancel_subagents: status=CANCELLED reason={request.reason}")
     transition_delegated_goal(agent.subagents, task, expected_status="active", status="paused")
     link = _sync_cancelled_conversation_link(agent, task.id) if not preserved else {"status": "preserved"}

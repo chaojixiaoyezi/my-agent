@@ -4,6 +4,7 @@
 #   删除恢复文案只指向可发现的真实工具和既有 grant；不能把内部回收流程当工具或授予权限。
 #   已退休工具限制的错误码只解释旧持久回执，不重新启用原限制或假称当前仍会触发。
 #   历史读取失败保留待恢复工作；任务绑定冲突先核对身份，不用重放任务掩盖不一致。
+#   资源停止未确认必须核对原回执，未知控制必须修正调用；两者均不得原样重放或扩大停止范围。
 # 模块用途: 给工具结果、恢复状态机和用户汇报提供一致的错误类别、重试性与处理建议。
 
 from __future__ import annotations
@@ -285,6 +286,22 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recovery_hint=(
             "会话任务与执行身份不一致；核对 exact thread/task/run 及旧执行是否结束。"
             "不清空历史、不猜测归属、不自动重放；确认绑定后由原控制入口显式恢复。"
+        ),
+    ),
+    "TASK_RESOURCE_STOP_UNCONFIRMED": ErrorContract(
+        code="TASK_RESOURCE_STOP_UNCONFIRMED", category="state", retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint=(
+            "任务资源停止尚未确认；核对原 task/run 的冻结清单、清理回执与实际状态。"
+            "中断或受理不代表资源已退出；不要重放任务、扩大停止范围或假称已停止。"
+        ),
+    ),
+    "UNKNOWN_CONVERSATION_CONTROL": ErrorContract(
+        code="UNKNOWN_CONVERSATION_CONTROL", category="contract", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint=(
+            "会话控制类型不受支持；核对正式命令目录和调用方，改用已声明的控制。"
+            "不要原样重试、转成模型消息或默认执行停止。"
         ),
     ),
     "ACTIVE_TURN_OUTCOME_UNCERTAIN": ErrorContract(

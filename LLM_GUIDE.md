@@ -56,10 +56,11 @@ direct/local 的消息句柄由 worker 与命令端共享，core 在模型前发
 子代理创建、换轮、旧轮放弃和控制预留沿原 creation guard；`subagents/coordination.py` 只管理同线程嵌套持锁。
 guidance 的 admission 在 creation 之外，启动探测与执行放 creation 锁外。
 managed 后台排队绑定原 pending ID，经宿主 argv、DispatchParams 和 runner 到 DB 精确激活；缺失不补 current。
-启动标记复用 runner_start.py 的条件 mutation；worker 先激活再发布携带 attempt 的 session，旧心跳不能覆盖新轮。
+启动标记由原 lifecycle 服务执行条件 mutation，runner_start.py 只负责准入与核对；CLI 不越层导入领域实现。worker 先激活再发布携带 attempt 的 session，旧心跳不能覆盖新轮。
 旧配置投影也须在激活后核对原 attempt 再写；创建回执复读 canonical，不能依赖控制函数原地修改旧对象。
 这仍是未发布源码；插话重放现按排序 turn→批次修复→回执 fresh pending→准确 DB 预留，仅接续本条消息。
-无数据库模式迟到启动可能重开 user-stop，仍阻断发布；不得把开发回归当作安装版 TUI 通过。
+无数据库模式已补原 canonical 启动接纳：非空 ID 绑定唯一 launch，消费与 RUNNING 同次 mutation，旧保存不能回滚。
+停止也撤销业务终态上的新预留，显式恢复重新领取；普通保存只可回收同一准确身份。累计源码全仓已通过，完整计数见 TESTS；发布与实际验收见 STATUS，不得当作安装版 TUI 通过。
 
 SSE delta 原样保留，OpenAI 工具参数生成有独立进度；
 派工不会永久禁止主代理本地工作，用户明确限制仍保留；复制按最新代次和实际通道结果反馈。

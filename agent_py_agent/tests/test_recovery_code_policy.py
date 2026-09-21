@@ -98,6 +98,19 @@ def test_history_read_and_task_binding_errors_have_distinct_recovery():
     assert binding.recommended_action == RecoveryAction.MANUAL_REVIEW.value
 
 
+def test_control_errors_preserve_uncertainty_without_automatic_replay():
+    from agent_py_agent.agent.contracts.error_taxonomy import error_contract
+
+    stopped = error_contract("TASK_RESOURCE_STOP_UNCONFIRMED")
+    assert stopped.code == "TASK_RESOURCE_STOP_UNCONFIRMED"
+    assert stopped.category == "state" and stopped.retryable is False
+    assert stopped.recommended_action == RecoveryAction.MANUAL_REVIEW.value
+    unknown = error_contract("UNKNOWN_CONVERSATION_CONTROL")
+    assert unknown.code == "UNKNOWN_CONVERSATION_CONTROL"
+    assert unknown.category == "contract" and unknown.retryable is False
+    assert unknown.recommended_action == RecoveryAction.CHANGE_STRATEGY.value
+
+
 def test_declared_recovery_action_overrides_derivation():
     """finding 显式声明的 recommended_action（当前协议枚举值）优先于注册表推导。"""
     envelope = recovery_envelope_from_gate_payload(

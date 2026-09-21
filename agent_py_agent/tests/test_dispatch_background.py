@@ -7,7 +7,6 @@ from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.process_control import BackgroundStartUpdate
 from agent_py_agent.agent.subagents.runner_start import (
     reserve_runner_start,
-    update_background_start,
 )
 from agent_py_agent.cli.dispatch_background import (
     BackgroundLaunchUpdate,
@@ -45,7 +44,7 @@ def _state(tmp_path):
     manager = SubAgentManager(tmp_path / "runs", owner_home_dir=str(tmp_path / "owner"))
     task = manager.create_run(goal="CLI 标记")
     attempt_id = reserve_runner_start(manager, task.id)
-    update_background_start(manager, task.id, BackgroundStartUpdate(
+    manager.lifecycle.update_background_start(task.id, BackgroundStartUpdate(
         "launch-1", "launching", replace_launch=True, attempt_id=attempt_id,
     ))
     return manager, task, _dispatch_options(task.id, attempt_id)

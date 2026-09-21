@@ -132,6 +132,7 @@ def _start_background_dispatch(
             run_id: reserve_runner_start(
                 agent.subagents, run_id,
                 expected_attempt_id=expected_attempt_ids[run_id] if expected_attempt_ids is not None else None,
+                launch_id=launch_id,
             )
             for run_id in run_ids
         }
@@ -366,13 +367,12 @@ def _reap_background_process(agent, launch_id: str, process: subprocess.Popen) -
 # 函数用途: 仅标记本次仍有效的启动失败，并保留每项未确认原因。
 def mark_background_channel_failure(request: _BackgroundDispatchRequest, *, error: str) -> list[dict[str, object]]:
     from ....subagents.process_control import BackgroundStartUpdate
-    from ....subagents.runner_start import update_background_start
 
     manager = getattr(getattr(request, "agent", None), "subagents", None)
     mark_errors: list[dict[str, object]] = []
     for run_id in request.run_ids:
         try:
-            update_background_start(manager, run_id, BackgroundStartUpdate(
+            manager.lifecycle.update_background_start(run_id, BackgroundStartUpdate(
                 launch_id=request.launch_id, status="failed", error=error,
                 attempt_id=request.params.expected_attempt_ids[run_id],
             ), channel_failure=True)
@@ -400,13 +400,12 @@ def mark_background_start(
     pid: int = 0,
 ) -> list[dict[str, object]]:
     from ....subagents.process_control import BackgroundStartUpdate
-    from ....subagents.runner_start import update_background_start
 
     manager = getattr(getattr(request, "agent", None), "subagents", None)
     mark_errors: list[dict[str, object]] = []
     for run_id in list(getattr(request, "run_ids", []) or []):
         try:
-            update_background_start(manager, run_id, BackgroundStartUpdate(
+            manager.lifecycle.update_background_start(run_id, BackgroundStartUpdate(
                 launch_id=request.launch_id, status=status, error=error, pid=pid,
                 replace_launch=status == "launching",
                 attempt_id=request.params.expected_attempt_ids[run_id],

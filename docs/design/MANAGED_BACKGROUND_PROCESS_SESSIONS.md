@@ -231,15 +231,16 @@ managed 启动接纳已进入源码：宿主在 creation guard 内预留原 Runt
 同一数据库写事务只激活该 ID；已停止、已替换、已运行、UNKNOWN 或缺失均不重领 current、不创建后继。
 插话初次投递和重试的启动交接保留各自最终预留 ID，不把旧 turn 快照当新 pending。
 
-`runner_start.py` 共用接纳与启动记录条件写入；后台与 CLI 的 load/compare/save 分支已移除。
+`runner_start.py` 共用接纳与身份核对，启动记录条件写入实现在原 lifecycle 服务；后台与 CLI 直接调用同一服务，旧自由函数已删除。
+CLI 不直接导入领域实现，不通过新增白名单或转发 facade 绕过分层；原 load/compare/save 分支不再保留。
 `background_start.attempt_id` 只是原 DB 身份的关联字段，不是第二份执行权；回执须同时匹配 launch/attempt 和有效状态。
 接纳写失败不启动，CLI running 标记失败不派工，旧失败回执不能重写新任务为 CHANNEL_ERROR。
 worker 在准确激活后才发布带同一 attempt 的 session；首次未确认落盘不能进入执行，已领取权限仍沿原结果门收口，旧 session 不覆盖新轮。
 重复创建复用原 launch 的接纳，不再为同一轮启动线程；混合批次分别报告旧接纳与新启动。
 CLI 批量标记部分失败时，只将本次仍匹配的标记收成 failed，不能留下虚假的 running 或改动替换记录。
 
-CLI 缺字段、重复、范围不完整或与 watch 混用会在构造宿主前拒绝。空字符串只能显式声明无数据库模式，
-managed 最终准入仍拒绝；不能把未管理执行伪装成受管 DB 执行。无数据库模式的完整停止/恢复尚未获得本片保证。
+CLI 空身份、缺字段、重复、范围不完整或与 watch 混用会在构造宿主前拒绝。两种执行模式均运输原非空 ID，
+最终准入仍各读唯一权威，不能把未管理执行伪装成受管 DB 执行。
 没有新增配置开关或模型工具参数；这是原启动和取消边界的修复。
 
 源码已接入、尚未发布：子代理取消拆为锁内准备与锁外清理，领域入口归 `subagents/cancellation.py`。准备阶段在原 creation guard 内固定整个原子树，
@@ -268,8 +269,14 @@ submitted/consumed/rejected/reserved 不触发网络重试预留，响应使用�
 保持顺序 creation→排序 turn→短 receipt→短 DB；禁止 DB 写事务反取 mailbox，实际 runner 启动仍在控制锁外。
 开发回归已覆盖上述消费和半写竞争；尚未部署或新增实际 TUI。
 
-发布阻断仍在：显式无数据库模式的空预留身份可能让迟到 worker 重开已停止任务。
-无数据库模式仍需原文件代次的准确接纳，不能把空身份或 user-stop 可恢复性当旧工作重新运行的许可。
+无数据库准入补片已接入源码、正在验证：显式文件模式仍以原 canonical task 为权威，在原 `background_start`
+记录中预留非空 attempt，绑定唯一 launch；运输继续使用现有 expected attempt，不另建状态库或参数链。
+`activated_at` 记录一次性消费，不能用宿主先写的 running 标记代替；激活事实与 RUNNING/active 指针同一次窄 mutation 提交。
+普通整任务保存不得换代或回滚消费，只能保留 canonical 记录，或回收同一准确 launch/attempt；旧代快照不得撤销新激活。
+停止撤销当前预留，即便业务状态早已 CANCELLED；显式恢复领取新身份。直接同步启动撤销原排队身份，预览不预留。
+旧标记保留消费事实，迟到启动、空运输身份及旧 launch 均拒绝，不能凭 user-stop 可恢复性重新运行旧工作。
+本补片尚未通过完整开发验证或实际 TUI，发布阻断仍保留。
+控制错误登记在原 error_taxonomy：资源停止未确认保留未知并要求核实原清单/回执；未知控制要求修正调用，均不可自动原样重放。
 子树协调沿原 owner 的 `.create-subagents.guard`，覆盖实际创建、attempt 激活/放弃、插话预留和授权后排队。
 同一线程、同一进程、同一 canonical 路径的嵌套事务复用已持有的原锁；其它线程/进程仍互斥，
 不以可重入取代清晰的调用边界。插话锁顺序为单 run admission→creation；creation 内不得反取 admission。

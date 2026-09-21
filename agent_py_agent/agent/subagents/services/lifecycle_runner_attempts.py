@@ -22,7 +22,7 @@ from .recovery.strategy import (
 )
 
 
-# LLM: 原创建锁覆盖 canonical 复读、DB 精确激活和投影发布；先核对排队身份，才可恢复会话链接与 Goal。
+# LLM: 原创建锁覆盖 canonical 复读、准确激活和投影；文件消费与活动指针同次 mutate，先核对身份才可恢复链接与 Goal。
 # 函数用途: 在同一短事务里准备新执行轮和恢复目标，避免取消或插话在换代中间插入。
 def prepare_runner_attempt(
     manager: object, run_id: str, *, retry_reason: str = "",
@@ -43,21 +43,29 @@ def prepare_runner_attempt(
             attempt_id = _framework_new_id("attempt_id")
         _recover_unsubmitted_agent_guidance(manager, task, attempt_id)
         now = time.time()
-        task.status = "RUNNING"
-        task.verification_status = "UNVERIFIED"
-        task.failure_type = ""
-        task.ended_at = 0.0
-        task.runner_active_attempt_id = attempt_id
-        task.runner_last_attempt_at = now
-        task.updated_at = now
-        task.heartbeat_at = now
-        _record_runner_recovery_preflight(task, strategy, previous)
-        if runtime_task_id:
-            _persist_runtime_task_id(task, runtime_task_id)
-        manager.save(
-            task,
-            allow_terminal_reactivation=resumable_user_stop,
-        )
+
+        # LLM: reducer 只更新启动所属字段，不覆盖并发授权；文件接纳在锁内复验并与 RUNNING 一起落盘。
+        # 函数用途: 在最新任务上发布准确执行轮，保留准备期间产生的其它状态。
+        def activate(current: SubAgentTask) -> None:
+            _assert_runner_attempt_start_allowed(current, resumable_user_stop=resumable_user_stop)
+            if manager.runtime_db is None:
+                from ..file_runner_start import activate_file_runner_start
+
+                activate_file_runner_start(current, expected_attempt_id, attempt_id, now)
+            guidance = (task.attributes or {}).get("guidance_recovery")
+            if isinstance(guidance, dict) and guidance.get("recovered_attempt_id") == attempt_id:
+                current.attributes = {**dict(current.attributes or {}), "guidance_recovery": guidance}
+            current.status = "RUNNING"
+            current.verification_status = "UNVERIFIED"
+            current.failure_type = ""
+            current.ended_at = 0.0
+            current.runner_active_attempt_id = attempt_id
+            current.runner_last_attempt_at = current.updated_at = current.heartbeat_at = now
+            _record_runner_recovery_preflight(current, strategy, previous)
+            if runtime_task_id:
+                _persist_runtime_task_id(current, runtime_task_id)
+
+        task = manager.mutate(run_id, activate)
         if (
             not task_status_in(task.status, {TaskStatus.RUNNING.value})
             or task.runner_active_attempt_id != attempt_id
@@ -324,21 +332,26 @@ def _runtime_terminal_projection_fact(
     return None
 
 
-# LLM: managed 激活依赖 DB 原子条件；显式空 ID 只属于 unmanaged，不能在缺记录时降级成文件身份。
-# 函数用途: 领取本次准确的数据库执行权，阻止迟到启动重新打开被停止的旧轮或新轮。
+# LLM: managed 激活依赖 DB 原子条件；文件预留先验证再由 canonical reducer 消费，缺记录不得降级。
+# 函数用途: 领取或核对本次准确执行身份，阻止迟到启动重新打开被停止的旧轮或新轮。
 def _runtime_attempt_identity(
     manager: object, task: SubAgentTask, expected_attempt_id: str | None,
 ) -> tuple[str, str]:
     """受管派工只激活预留轮；同步入口未预留时沿原生命周期领取。
 
     返回数据库 attempt 与原 task 身份。显式预留遇到缺失记录必须拒绝，
-    不能降级；无数据库模式保留本地文件身份，不宣称具有 DB 的精确接纳保证。
+    不能降级；无数据库模式核对原文件身份，消费由后续同次任务提交完成。
     """
     repo = getattr(manager, "runtime_db", None)
     if repo is None:
-        if expected_attempt_id:
-            raise RuntimeError("无 RuntimeDB 的执行模式不能消费数据库执行轮身份")
-        return "", ""
+        from ..file_runner_start import assert_file_runner_attempt
+
+        if expected_attempt_id is not None:
+            assert_file_runner_attempt(task, expected_attempt_id, pending_only=True)
+            return expected_attempt_id, ""
+        if task.runner_active_attempt_id:
+            raise RuntimeConflictError("文件执行轮仍在运行，不能重复启动")
+        return _framework_new_id("attempt_id"), ""
     run_id = str(task.id or "").strip()
     if not run_id:
         return "", ""

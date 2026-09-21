@@ -110,7 +110,8 @@ agent_py_agent/
 |   |-- subagents/
 |   |   |-- manager.py                  # 子代理 root manager：初始化、基础生命周期、服务组合
 |   |   |-- coordination.py             # 原创建文件锁的同线程重入，统一创建与执行轮短事务
-|   |   |-- runner_start.py             # 准确 pending 接纳与原 launch 条件提交，共用创建锁
+|   |   |-- runner_start.py             # 准确 pending 接纳与原身份核对，共用创建锁
+|   |   |-- file_runner_start.py        # 显式文件模式的一次性启动与撤销，整任务保存保留原接纳事实
 |   |   |-- cancellation.py             # 原子树权限关闭和资源冻结，锁外仅清理固定批次
 |   |   |-- cancellation_hosts.py       # 原执行轮协作中断与宿主退出只读观察，不杀共享或接续进程
 |   |   |-- runner_control.py           # 原 RuntimeDB/canonical 取消判据，供心跳和执行前复核
@@ -498,7 +499,8 @@ docs/
 - `agent_py_agent/agent/agent_core/agent_tree/model_view.py`：保留 run 身份、状态、原因与真实 read_order；不暴露恢复目录，省略内容可沿原工具归档完整读取。
 - `agent_py_agent/tests/test_agent_tree_model_view.py`：模型状态投影、终态报告可达性、状态不被省略及超长归档回读合同的定向验证。
 - `agent_py_agent/agent/subagents/result_registered_artifacts.py`：从 exact run 的工具产物账本投影真实文件；自然最终回复与结构化收口共用，不扫描目录或搬运文件。
-- `agent_py_agent/agent/subagents/runner_start.py`：在原创建锁内预留准确 pending，并条件更新 launch/attempt 启动记录；CLI 与进程内入口复用，不执行进程启动或另存权限。
+- `agent_py_agent/agent/subagents/runner_start.py`：在原创建锁内预留准确 pending 并核对原身份；启动记录实际写入归既有 lifecycle 服务，CLI 与进程内入口直接调用服务，不保留旧转发函数。
+- `agent_py_agent/agent/subagents/file_runner_start.py`：显式无数据库模式在原 canonical 启动记录中预留和消费准确身份；停止可撤销，旧快照不能覆盖新预留或激活，普通保存只可回收同一身份。
 - `agent_py_agent/agent/subagents/coordination.py`：复用原 owner 创建锁协调 canonical 创建、执行轮变更和插话预留；只记录本线程持锁事实，不保存任务状态，启动和退出等待不得持锁。
 - `agent_py_agent/agent/agent_core/runner/activity_diagnostics.py`：复用现有心跳与调用账，阶段长等待只通知直属父级，不强杀或自动重派。
 - `agent_py_agent/tests/test_subagent_activity_diagnostics.py`：慢流、阶段诊断、通知去重、旧执行代与并发进度保存的定向验证。
