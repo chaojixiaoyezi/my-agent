@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ...agent.agent_core.runtime.loop_models import RunParams
 from ...agent.concurrency.interrupt import register_interruptible
 from ...agent.conversation.control_commands import (
     conversation_request_interrupt_name,
@@ -19,12 +20,17 @@ from .tui_runtime import TuiTurnSummary
 from .tui_worker_paths import _model_length_error, _nonnegative_int
 
 
-# LLM: local adapter 保留模型 delta/tool 身份；与 Gateway 共用 typed 长度限制，不以正文猜成功，不额外调用模型。
+# LLM: local adapter 交给 core 同一个 worker 句柄；模型前绑定真实身份，启动前中断不能随线程注册丢失。
 # 函数用途: 执行本地回合，返回完整或被截断的实际回复与明确终态提示。
 def _worker_local_path(ctx: Any) -> tuple[str, bool, TuiTurnSummary]:
+    control = ctx.cfg.local_run_ref[0]
+    if control is None or control.request_id != ctx.job.request_id:
+        raise ValueError("本地 TUI 缺少本轮控制句柄")
     with register_interruptible(conversation_request_interrupt_name(ctx.job.request_id)):
+        control.check_admission()
         result = ctx.cfg.agent.run(
             ctx.job.user,
+            params=RunParams(conversation_task_binding_callback=control),
             inject=ctx.turn_inject,
             prompt_files=ctx.job.prompt_files,
             save=ctx.job.save,

@@ -957,6 +957,7 @@ def test_plain_local_user_stop_is_silent(monkeypatch):
     from contextlib import nullcontext
     from types import SimpleNamespace
 
+    from agent_py_agent.agent.conversation.local_run_control import LocalRunControl
     from agent_py_agent.cli.chat_parts import plain_handlers
 
     rendered: list[tuple[str, bool]] = []
@@ -1003,6 +1004,7 @@ def test_plain_local_user_stop_is_silent(monkeypatch):
         paths=SimpleNamespace(),
         assistant_outputs=[],
         build_history_context=lambda: "",
+        local_run=LocalRunControl("req-local-stop"),
     )
 
     text, streamed = plain_handlers._plain_local_handle(ctx)

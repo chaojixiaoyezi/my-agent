@@ -139,8 +139,8 @@ def _tui_handle_command(*, params: TuiHandleCommandParams) -> bool:
     )
 
 
-# LLM: TUI controls consume a lock-protected worker snapshot and never mutate UI refs directly.
-# 函数用途：读取 TUI 当前任务、排队数和会话 id。
+# LLM: 状态锁内只取 worker 快照和原 local_run 句柄；DB/资源操作在锁外由命令执行端处理。
+# 函数用途: 读取当前消息状态并把本次调用的精确控制句柄交给命令端。
 def _tui_control_state(params: TuiHandleCommandParams) -> ChatControlState:
     from .control_runtime import ChatControlState
 
@@ -152,6 +152,7 @@ def _tui_control_state(params: TuiHandleCommandParams) -> ChatControlState:
             started_at=float(params.running_started_at_ref[0] or 0.0),
             session_id=str(params.current_session_id or "default"),
             request_id=str(params.running_request_id_ref[0] or ""),
+            local_run=params.local_run_ref[0],
         )
 
 
@@ -183,7 +184,7 @@ def _run_tui_loop(ctx: TuiLoopContext) -> int:
     return result
 
 
-# LLM: app 参数必须携带与 worker 相同的 runtime，禁止 UI setup 自行创建第二个 store。
+# LLM: app 参数携带与 worker 相同的 runtime/local_run_ref，禁止 UI setup 创建第二份状态。
 # 函数用途: 从顶层运行配置组装 TUI 界面参数。
 def _make_tui_app_params(
     run_config: TuiRunParams,
@@ -210,6 +211,7 @@ def _make_tui_app_params(
         shutting_down_ref=run_config.shutting_down_ref,
         running_prompt_ref=run_config.running_prompt_ref,
         running_request_id_ref=run_config.running_request_id_ref,
+        local_run_ref=run_config.local_run_ref,
         stop_event=stop_event,
         current_session_id=run_config.current_session_id,
         tui_runtime=tui_runtime,
@@ -217,7 +219,7 @@ def _make_tui_app_params(
     )
 
 
-# LLM: worker 参数沿用 refs 中同一 runtime，不能从 session_id 隐式重建事件序号。
+# LLM: worker 沿用同一 runtime/local_run_ref，不能从 session_id 重建事件或运行身份。
 # 函数用途: 从顶层配置和界面引用组装后台 worker 参数。
 def _make_start_worker_params(
     params: TuiRunParams,
@@ -232,6 +234,7 @@ def _make_start_worker_params(
         pending_jobs_ref=params.pending_jobs_ref,
         running_prompt_ref=params.running_prompt_ref,
         running_request_id_ref=params.running_request_id_ref,
+        local_run_ref=params.local_run_ref,
         running_started_at_ref=params.running_started_at_ref,
         agent=params.agent,
         args=params.args,

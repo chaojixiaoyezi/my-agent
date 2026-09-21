@@ -32,6 +32,8 @@ from .plain_ui import _make_chunk_handler, _render_assistant_response
 from .rendering import GRAY, RESET, _cprint
 
 
+# LLM: direct local_run 必须是 worker 事先发布的原句柄；Gateway 不携带本地运行权威。
+# 类用途: 汇总单条普通终端消息需要的依赖和运行绑定回调。
 @dataclass
 class PlainJobContext:
     job: object
@@ -41,6 +43,7 @@ class PlainJobContext:
     assistant_outputs: list[str]
     build_history_context: Callable[[], str]
     current_session_id: str = ""
+    local_run: object | None = None
 
 
 # LLM: Gateway handler 只发送当前 prompt、style 和显式附件；服务端负责 canonical thread 历史与持久化。
@@ -97,9 +100,13 @@ def _plain_gateway_handle(ctx: PlainJobContext) -> tuple[str, bool]:
     return response_text, terminal_response_streamed
 
 
-# LLM: direct handler 没有 Gateway thread 注入，因此保留当前进程内历史上下文且只追加一次。
+# LLM: direct 保留单次历史注入；先核对原句柄，再把现有 binding callback 交给 core，模型前发布真实身份。
 # 函数用途: 不经过 Gateway 直接执行一轮普通终端聊天并显示结果。
 def _plain_local_handle(ctx: PlainJobContext) -> tuple[str, bool]:
+    from ...agent.agent_core.runtime.loop_models import RunParams
+
+    if ctx.local_run is None or ctx.local_run.request_id != ctx.job.request_id:
+        raise ValueError("本地聊天缺少本轮控制句柄")
     started_at = time.perf_counter()
     on_chunk, stream_started_ref = _make_chunk_handler(
         ctx.agent.config.agent_name,
@@ -107,8 +114,10 @@ def _plain_local_handle(ctx: PlainJobContext) -> tuple[str, bool]:
         preview_chars=_chat_preview_chars(ctx),
     )
     with register_interruptible(conversation_request_interrupt_name(ctx.job.request_id)):
+        ctx.local_run.check_admission()
         result = ctx.agent.run(
             ctx.job.user,
+            params=RunParams(conversation_task_binding_callback=ctx.local_run),
             inject=_turn_inject(ctx, include_history=True),
             prompt_files=ctx.job.prompt_files,
             save=not ctx.args.no_save,

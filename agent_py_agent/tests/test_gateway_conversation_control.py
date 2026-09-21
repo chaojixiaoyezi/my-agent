@@ -104,6 +104,25 @@ def _scope(user: str = "u-1", conversation_id: str = "c-1") -> GatewayControlSco
     return GatewayControlScope(user, "feishu", conversation_id)
 
 
+# LLM: 停止测试必须通过正式 writer 发布临时 RuntimeDB 身份；仅 request 文件不能证明主执行权归属。
+# 函数用途: 模拟 core 在模型前完成的绑定，不晋升任务链接、不调用模型或工具。
+def _bind_live_main_request(agent, path):
+    from agent_py_agent.agent.agent_core.runtime_mixin import _bind_main_agent_authority
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    request_id = payload["id"]
+    payload["execution_attempt_id"] = "transport-" + request_id
+    write_json_file(path, payload)
+    thread = agent.conversation_store.threads.get_or_create(payload["conversation"])
+    _bind_main_agent_authority(agent, RunParams(
+        request_id=request_id, run_id=request_id, task_id=request_id,
+        task_attributes={"conversation_thread_id": thread.thread_id},
+        conversation_task_binding_callback=GatewayTaskBindingWriter(
+            path, request_id, execution_attempt_id=payload["execution_attempt_id"],
+        ),
+    ))
+
+
 def _command(text: str):
     command = parse_conversation_control(text)
     assert command is not None
@@ -1096,6 +1115,7 @@ def test_multiple_named_audits_are_listed_and_window_stop_only_stops_foreground(
         )
     paths.processing.mkdir(parents=True, exist_ok=True)
     write_json_file(paths.processing / "foreground.json", _request("foreground"))
+    _bind_live_main_request(agent, paths.processing / "foreground.json")
 
     status = execute_gateway_conversation_control(
         agent,
@@ -3292,6 +3312,7 @@ def test_stop_persists_and_signals_only_matching_request(tmp_path) -> None:
     paths.processing.mkdir(parents=True, exist_ok=True)
     request_path = paths.processing / "req-1.json"
     write_json_file(request_path, _request("req-1"))
+    _bind_live_main_request(agent, request_path)
     ready = threading.Event()
     observed = threading.Event()
 
@@ -3359,6 +3380,7 @@ def test_stop_ack_is_bounded_when_provider_transport_close_blocks(tmp_path) -> N
     paths.processing.mkdir(parents=True, exist_ok=True)
     request_path = paths.processing / "req-slow-close.json"
     write_json_file(request_path, _request("req-slow-close"))
+    _bind_live_main_request(agent, request_path)
     ready = threading.Event()
     release_cleanup = threading.Event()
     observed = threading.Event()
@@ -3481,6 +3503,7 @@ def test_status_and_stop_follow_typed_request_lineage_to_subagents(tmp_path) -> 
     paths = gateway_paths(agent)
     paths.processing.mkdir(parents=True, exist_ok=True)
     write_json_file(paths.processing / "req-1.json", _request("req-1"))
+    _bind_live_main_request(agent, paths.processing / "req-1.json")
     child = agent.subagents.create_run(
         goal="整理子目录",
         thought="先检查",
@@ -3509,6 +3532,7 @@ def test_stop_reconciles_child_created_by_inflight_transaction(tmp_path) -> None
     paths = gateway_paths(agent)
     paths.processing.mkdir(parents=True, exist_ok=True)
     write_json_file(paths.processing / "req-late-child.json", _request("req-late-child"))
+    _bind_live_main_request(agent, paths.processing / "req-late-child.json")
 
     with agent.subagents.creation_guard():
         stopped = execute_gateway_conversation_control(

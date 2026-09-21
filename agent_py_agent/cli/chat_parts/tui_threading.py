@@ -19,7 +19,7 @@ TUI_BACKGROUND_NOTICE_FAILURE_INITIAL_SECONDS = 0.5
 TUI_BACKGROUND_NOTICE_FAILURE_MAX_SECONDS = 8.0
 
 
-# LLM: config factory 只能透传同一 queue/refs/runtime；不得在这里复制状态或创建第二个 TuiRuntime。
+# LLM: config factory 透传同一 queue/refs/runtime/local_run_ref；不得复制状态或创建第二个控制句柄。
 # 函数用途: 将线程启动参数收窄成 worker 配置。
 def _make_worker_config(*, params: WorkerConfigParams):
     from .tui_worker import TuiWorkerConfig
@@ -31,6 +31,7 @@ def _make_worker_config(*, params: WorkerConfigParams):
         pending_jobs_ref=params.pending_jobs_ref,
         running_prompt_ref=params.running_prompt_ref,
         running_request_id_ref=params.running_request_id_ref,
+        local_run_ref=params.local_run_ref,
         running_started_at_ref=params.running_started_at_ref,
         agent=params.agent,
         args=params.args,
@@ -47,7 +48,7 @@ def _make_worker_config(*, params: WorkerConfigParams):
     )
 
 
-# LLM: 两个 daemon thread 分别执行 canonical prompt queue 与纯重绘 tick；应用退出由共享 stop events 收口。
+# LLM: worker 继承原 local_run_ref，刷新只读展示；应用退出沿共享 stop events，不等同停止任务资源。
 # 函数用途: 启动 TUI 后台 worker 和动画刷新线程。
 def _start_worker_threads(*, params: StartWorkerParams) -> None:
     from .tui_worker import _tui_worker_body
@@ -60,6 +61,7 @@ def _start_worker_threads(*, params: StartWorkerParams) -> None:
             pending_jobs_ref=params.pending_jobs_ref,
             running_prompt_ref=params.running_prompt_ref,
             running_request_id_ref=params.running_request_id_ref,
+            local_run_ref=params.local_run_ref,
             running_started_at_ref=params.running_started_at_ref,
             agent=params.agent,
             args=params.args,

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import queue
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from .chat_style import CHAT_RESPONSE_STYLE_INJECT
@@ -13,7 +13,7 @@ from .history import chat_history_max_turns
 from .tui_runtime import TuiRuntime, TuiTurnEventAdapter, TuiTurnSummary
 
 
-# LLM: TuiWorkerConfig 只引用现有 canonical job queue/history/control refs 和同一 TuiRuntime；不保留字符串 stream buffer。
+# LLM: worker 与 UI 共用 queue/history/control refs；direct local_run_ref 只保存本 job 的控制句柄。
 # 类用途: 汇总后台 worker 执行聊天任务需要的共享依赖。
 @dataclass
 class TuiWorkerConfig:
@@ -36,6 +36,7 @@ class TuiWorkerConfig:
     stop_event: Any
     current_session_id: str = ""
     tui_runtime: Any | None = None
+    local_run_ref: list = field(default_factory=lambda: [None])
 
 
 # LLM: WorkerPathContext 把一个 job 与唯一 turn adapter 绑定；两条执行路径不得自行创建或 finalize adapter。
@@ -59,9 +60,7 @@ class ConversationTurnAppendRequest:
     max_turns: int
 
 
-# LLM: Gateway jobs expose an exact turn id only after durable submit. A local chat-* id must never
-# enter running_request_id_ref because active input would then target a non-existent turn; attached
-# canonical Gateway jobs may publish their already-known id immediately.
+# LLM: Gateway 只发布 durable turn id；direct 在同一锁内发布消息和独立句柄，真实身份等待 core 回调。
 # 函数用途: 标记聊天任务开始运行，并在 Gateway 提交完成前把精确回合 ID 保持为空。
 def _tui_update_running_state(cfg: TuiWorkerConfig, job: Any) -> None:
     with cfg.state_lock:
@@ -74,6 +73,10 @@ def _tui_update_running_state(cfg: TuiWorkerConfig, job: Any) -> None:
             else job.request_id
         )
         cfg.running_started_at_ref[0] = time.perf_counter()
+        if not cfg.use_gateway:
+            from ...agent.conversation.local_run_control import LocalRunControl
+
+            cfg.local_run_ref[0] = LocalRunControl(job.request_id)
 
 
 # LLM: cleanup 只登记最终正文并复位 worker refs；回合显示终态必须在调用它之前由 runtime 完成。
@@ -100,10 +103,13 @@ def _tui_cleanup_after_job(
     cfg.jobs.task_done()
 
 
-# LLM: reset 只清当前运行 refs，不触碰 pending queue、TUI journal 或持久 session。
+# LLM: reset 先结束旧句柄再清运行 refs；不会结算执行权或清理独立资源，不触碰下一条 job。
 # 函数用途: 把 worker 快照恢复为空闲状态。
 def _reset_worker_refs(cfg: TuiWorkerConfig) -> None:
     with cfg.state_lock:
+        if cfg.local_run_ref[0] is not None:
+            cfg.local_run_ref[0].finish()
+        cfg.local_run_ref[0] = None
         cfg.is_running_ref[0] = False
         cfg.running_prompt_ref[0] = ""
         cfg.running_request_id_ref[0] = ""
@@ -182,8 +188,8 @@ def _tui_prepare_gateway_job(cfg: TuiWorkerConfig, job: Any) -> None:
     _submit_new_gateway_job(cfg, job, turn_inject)
 
 
-# LLM: worker 对每个 dequeue 精确 begin/finalize 一次；show-prompt 轮在 begin 时声明延迟回答正文，
-# 其余轮继续逐 token 显示；任何路径异常也必须以 structured failed summary 收口。
+# LLM: 每个 dequeue 精确 begin/finalize 一次；InterruptedError 收口为中断，其它异常才记失败，不解析错误正文。
+# show-prompt 在 begin 声明延迟回答，其余轮仍逐 token 显示。
 # 函数用途: 后台循环串行处理聊天任务，必要时保证完整 prompt 先于最终回答显示。
 def _tui_worker_body(cfg: TuiWorkerConfig) -> None:
     runtime = _required_runtime(cfg)
@@ -217,6 +223,8 @@ def _tui_worker_body(cfg: TuiWorkerConfig) -> None:
                 job,
                 turn_adapter,
             )
+        except InterruptedError:
+            summary = TuiTurnSummary(ok=False, interrupted=True)
         except Exception as exc:  # noqa: BLE001 worker 必须把任意执行异常收口为 typed failed turn
             summary = TuiTurnSummary(ok=False, error=str(exc))
         finally:

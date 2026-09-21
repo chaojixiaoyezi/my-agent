@@ -322,7 +322,7 @@ def reconcile_gateway_steer_delivery(
     return _reconcile_existing_steer_receipt(paths, scope, receipt, turn_id)
 
 
-# LLM: Goal 调度、当前回合中断、任务资源停止是三个边界；仅明确 stop 才组合后两者并暂停续跑。
+# LLM: 三类控制分别调度 Goal、中断回合或停止任务资源；只有明确 stop 才组合，未知控制不能回退到停止。
 # 函数用途: 分派结构化控制，避免已暂停 Goal 或普通任务的 interrupt 落入资源停止。
 def execute_gateway_conversation_control(
     agent: object,
@@ -453,7 +453,7 @@ def execute_gateway_conversation_control(
         )
     if command.kind == "steer":
         return _steer_active_request(agent, paths, active, command, scope)
-    return _stop_active_request(agent, active, scope)
+    return ConversationControlResult(command.kind, False, "不支持的会话控制命令。", error_code="UNKNOWN_CONVERSATION_CONTROL")
 
 
 # LLM: Gateway 只解析已认证的 typed session event 并解析 owner；真正 durable reason 仍由 Memory Service 持有。
@@ -1837,41 +1837,8 @@ def _wake_for_task_guidance(
         return
 
 
-# LLM: Stop persists run interruption before signalling workers; it must preserve the durable task/workspace for an explicit later resume.
-# 函数用途:中断当前执行轮并异步回收其子代理进程，但不删除会话、任务或工作目录。
-def _stop_active_request(
-    base_agent: object,
-    active: _GatewayRequestRecord,
-    scope: GatewayControlScope,
-) -> ConversationControlResult:
-    if active.target_kind == "task":
-        return _stop_active_task(base_agent, active, scope)
-    request_id = _record_id(active)
-    marked, failure_message = _mark_request_stopping(active, scope)
-    if not marked:
-        return ConversationControlResult(
-            "stop",
-            False,
-            failure_message,
-            request_id=request_id,
-        )
-    interrupt_by_name(conversation_request_interrupt_name(request_id))
-    try:
-        owner_agent = _request_agent_for_scope(base_agent, scope)
-    except Exception:
-        owner_agent = None
-    if owner_agent is not None:
-        _cancel_request_execution(owner_agent, request_id)
-    return ConversationControlResult(
-        "stop",
-        True,
-        "已收到停止请求，当前任务正在停止。",
-        request_id=request_id,
-    )
-
-
-# LLM: interrupt_only 在无持久任务和 paused Goal 下也不能关闭资源；只对精确当前请求发中断。
-# 函数用途: 中断窗口当前执行链，明确 stop 时才继续走任务与子树收口。
+# LLM: T 内关闭请求并读取新鲜绑定，释放 T 后才取 task guard；无持久链接也必须沿正式绑定关闭主执行权。
+# 函数用途: 中断当前窗口执行链，明确 stop 时按实际主链冻结资源；缺失身份保留未知，不猜 run/attempt。
 def _stop_live_window_request(
     base_agent: object,
     paths: GatewayPaths,
@@ -1887,18 +1854,30 @@ def _stop_live_window_request(
     except Exception:
         owner_agent = None
         store = None
+    binding, binding_error = {}, ""
     with gateway_turn_transition(paths, request_id):
         marked, failure_message = _mark_request_stopping_locked(live_request, scope)
-        if marked and store is not None:
-            store.guidance.recovery.reject_pending(request_id)
-    interrupted = interrupt_by_name(conversation_request_interrupt_name(request_id))
-    if not interrupted and not marked:
+        if marked:
+            try:
+                from .request_binding import gateway_runtime_authority
+
+                report = read_json_file_report(live_request.path)
+                if report.load_error or not report.payload:
+                    raise ValueError("停止后的请求身份不可读")
+                live_request = replace(live_request, payload=report.payload)
+                binding = gateway_runtime_authority(report.payload, request_id)
+                if store is not None:
+                    store.guidance.recovery.reject_pending(request_id)
+            except (OSError, RuntimeError, TypeError, ValueError):
+                binding_error = "request_binding_unconfirmed"
+    if not marked:
         return ConversationControlResult(
             "stop",
             False,
             failure_message or "当前执行刚刚结束，无需停止。",
             request_id=request_id,
         )
+    interrupt_by_name(conversation_request_interrupt_name(request_id))
 
     linked_task_id = _linked_conversation_task_id(live_request)
     if _request_is_detached(live_request):
@@ -1924,13 +1903,63 @@ def _stop_live_window_request(
         if interrupt_only or not result.ok:
             return result
     else:
-        if owner_agent is not None and not interrupt_only:
-            _cancel_request_execution(owner_agent, request_id)
+        if not interrupt_only:
+            return _stop_unpromoted_main(owner_agent, live_request, scope, binding, binding_error)
     return ConversationControlResult(
         "stop",
         True,
-        "已停止当前会话正在执行的内容。",
+        "已中断本轮执行链。" if interrupt_only else "已受理停止请求，正在清理本任务资源。",
         request_id=request_id,
+    )
+
+
+# LLM: 释放 T 后只用冻结四元组；task guard 内再次排除已晋升任务及 Goal，未知不能降级为空，也不能猜线程。
+# 函数用途: 为尚未晋升持久任务的请求关闭实际主执行权并冻结资源，清理失败与中断受理分别汇报。
+def _stop_unpromoted_main(
+    owner_agent: object,
+    active: _GatewayRequestRecord,
+    scope: GatewayControlScope,
+    binding: dict,
+    binding_error: str,
+) -> ConversationControlResult:
+    request_id = _record_id(active)
+    try:
+        if owner_agent is None or binding_error or not binding or _linked_conversation_task_id(active):
+            raise ValueError("本请求缺少可确认的主执行身份")
+        store = owner_agent.conversation_store
+        with store.tasks.transition_guard(binding["task_id"]):
+            from ..conversation.task_resources import close_main_task_authority
+            from ..tooling.process_resource_stop import freeze_process_stop
+
+            thread = store.threads.resolve(
+                channel=scope.channel, channel_conversation_id=scope.conversation_id, channel_user_id=scope.user_id,
+            )
+            if thread is None:
+                raise ValueError("停止请求的会话身份无法确认")
+            if store.tasks.load(binding["task_id"]) is not None:
+                raise ValueError("任务已晋升，不能按无持久任务停止")
+            if store.goals.load(thread.thread_id, task_id=binding["task_id"]) is not None:
+                raise ValueError("任务已有持续目标，不能跳过目标控制")
+            selected = close_main_task_authority(
+                getattr(getattr(owner_agent, "subagents", None), "runtime_db", None),
+                owner_home=getattr(getattr(owner_agent, "home_paths", None), "owner_home_dir", ""),
+                task_id=binding["task_id"], thread_id=thread.thread_id, binding=binding,
+            )
+            if selected is None:
+                raise ValueError("主执行链未受管理，资源归属无法确认")
+            resources = freeze_process_stop(selected)
+        run_ids = _related_control_run_ids(owner_agent, binding["task_id"], request_id)
+        _cancel_request_execution(owner_agent, request_id, run_ids=run_ids, resources=resources)
+        if resources.background_freeze_error or resources.pty_request_error:
+            raise ValueError("主资源冻结存在未确认项")
+    except (OSError, RuntimeError, TypeError, ValueError, KeyError):
+        return ConversationControlResult(
+            "stop", False, "本轮中断已受理；任务资源停止尚未确认。", request_id=request_id,
+            delivery_status="unknown", error_code="TASK_RESOURCE_STOP_UNCONFIRMED",
+        )
+    return ConversationControlResult(
+        "stop", True, "已受理停止请求，正在清理本任务资源。", request_id=request_id,
+        delivery_status="accepted",
     )
 
 
@@ -1951,8 +1980,7 @@ def _mark_request_stopping(
         return _mark_request_stopping_locked(active, scope)
 
 
-# LLM: This helper mutates cancellation only while its caller owns the exact-turn T lock. It
-# re-reads owner/scope/open state from disk and never trusts a pre-lock active projection.
+# LLM: 在 T 内核对同请求、同运输代次及开放状态；只允许正式绑定在同代次更新，不停止换代后的新执行。
 # 函数用途: 在已持回合锁时二次校验并写入 closing/cancel 事实。
 def _mark_request_stopping_locked(
     active: _GatewayRequestRecord,
@@ -1964,6 +1992,8 @@ def _mark_request_stopping_locked(
     def mark_cancel(current: dict) -> dict:
         path_stem = active.path.stem if active.path is not None else ""
         if str(current.get("id") or path_stem) != request_id:
+            return current
+        if str(current.get("execution_attempt_id") or "") != str(active.payload.get("execution_attempt_id") or ""):
             return current
         fresh = _GatewayRequestRecord(active.path, dict(current))
         if not _request_matches_scope(current, scope) or not _request_accepts_active_input(fresh):
@@ -2157,7 +2187,9 @@ def _fresh_stop_runtime_binding(
     root = request_root.parent if request_root.name == "requests" else request_root
     with gateway_turn_transition(gateway_paths_from_root(root), request_id):
         report = read_json_file_report(record.path)
-        if report.load_error or not _request_matches_scope(report.payload, scope):
+        if (report.load_error or not _request_matches_scope(report.payload, scope)
+                or _record_id(_GatewayRequestRecord(record.path, report.payload)) != request_id
+                or str(report.payload.get("execution_attempt_id") or "") != str(record.payload.get("execution_attempt_id") or "")):
             raise ValueError("停止请求的持久身份无法确认")
         return gateway_runtime_authority(report.payload, request_id)
 

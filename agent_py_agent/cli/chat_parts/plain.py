@@ -1,4 +1,5 @@
-
+# LLM: 普通终端只分派输入和控制快照；运行绑定从原 worker 句柄取得，不根据界面文本选择资源。
+# 模块用途: 驱动普通聊天输入、共享命令与队列。
 from __future__ import annotations
 
 from ...agent.conversation.control_commands import parse_conversation_task_command
@@ -86,8 +87,8 @@ def _plain_enqueue_job(params: PlainEnqueueParams) -> ChatJob:
     return job
 
 
-# LLM: The slash controller receives an atomic snapshot of worker facts, not mutable UI references.
-# 函数用途：在锁内读取普通终端当前任务状态和会话 id。
+# LLM: 状态锁只读取 worker 快照和原调用句柄；执行身份在句柄内发布，不从界面消息编号推导。
+# 函数用途: 把普通终端当前任务与本地控制句柄一起交给命令端。
 def _plain_control_state(cfg: PlainHandleCommandConfig) -> ChatControlState:
     with cfg.state_lock:
         return ChatControlState(
@@ -97,6 +98,7 @@ def _plain_control_state(cfg: PlainHandleCommandConfig) -> ChatControlState:
             started_at=float(cfg.running_started_at_ref[0] or 0.0),
             session_id=str(cfg.current_session_id or "default"),
             request_id=str(cfg.running_request_id_ref[0] or ""),
+            local_run=cfg.local_run_ref[0],
         )
 
 
@@ -119,6 +121,8 @@ def _plain_handle_user_input(
     return None
 
 
+# LLM: 透传与 worker 相同的运行引用，特别是 local_run_ref；不能另造控制状态。
+# 函数用途: 为当前普通终端输入组装命令执行依赖。
 def _plain_command_config(
     cfg: RunPlainConfig,
     user: str,
@@ -136,6 +140,7 @@ def _plain_command_config(
         pending_jobs_ref=refs.pending_jobs_ref,
         running_prompt_ref=refs.running_prompt_ref,
         running_request_id_ref=refs.running_request_id_ref,
+        local_run_ref=refs.local_run_ref,
         running_started_at_ref=refs.running_started_at_ref,
         paths=cfg.paths,
         assistant_outputs=refs.assistant_outputs,

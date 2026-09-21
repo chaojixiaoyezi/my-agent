@@ -1,4 +1,4 @@
-# LLM: Gateway 控制沿持久回执执行；本地 interrupt 只发精确回合信号，stop 才清退插话并派发子代理取消。
+# LLM: Gateway 沿持久回执控制；direct 沿 worker 句柄绑定真实执行身份，interrupt 与资源停止分离。
 # 模块用途: 将终端控制交给共享协议，保留会话身份、目录、可重试消息编号及不同控制的边界。
 from __future__ import annotations
 
@@ -29,6 +29,8 @@ from ...agent.conversation.control_commands import (
 from ...agent.conversation.models import new_id
 
 
+# LLM: UI 状态只作展示；local_run 为原 worker 的临时控制句柄，资源归属必须经其发布绑定和 DB 校验。
+# 类用途: 把一刻的消息状态和精确本地控制目标交给命令执行端。
 @dataclass(frozen=True)
 class ChatControlState:
     running: bool
@@ -37,6 +39,7 @@ class ChatControlState:
     started_at: float
     session_id: str
     request_id: str = ""
+    local_run: object | None = None
 
 
 @dataclass(frozen=True)
@@ -340,7 +343,7 @@ def _http_error_body(exc: urllib.error.HTTPError) -> dict[str, object]:
     return result
 
 
-# LLM: 只中断窗口快照里的精确 request；interrupt 保留插话和独立资源，stop 才写 guidance 并派发子代理回收。
+# LLM: 窗口只选择精确 request；停止委托原 worker 句柄和正式运行绑定，不能读另一线程的当前参数猜身份。
 # 函数用途: 在直接本地聊天里查询或控制当前回合，让单纯中断与任务资源停止保持不同边界。
 def _execute_local_control(
     execution: ChatControlExecution,
@@ -410,22 +413,56 @@ def _execute_local_control(
             "已补充到当前任务；代理会在下一个安全点按新要求调整。",
             request_id=request_id,
         )
-    interrupted = bool(request_id) and interrupt_by_name(
-        conversation_request_interrupt_name(request_id)
-    )
-    if not interrupted:
+    return _execute_local_stop(execution, command)
+
+
+# LLM: interrupt 不关闭执行权和资源；stop 在原 task guard 内关权并冻结，迟到回调由同一调用句柄拒绝。
+# 函数用途: 中断本地当前回合，或受理精确任务资源停止；冻结失败单列未知，不伪报全部退出。
+def _execute_local_stop(
+    execution: ChatControlExecution, command: ConversationControlCommand,
+) -> ConversationControlResult:
+    request_id = str(execution.state.request_id or "").strip()
+    control = execution.state.local_run
+    if not request_id:
         return ConversationControlResult("stop", False, "当前没有运行中的内容，无需停止。")
-    if command.operation == "interrupt":
+    if control is not None and control.request_id != request_id:
         return ConversationControlResult(
-            "stop", True, "已中断本轮模型与工具执行链。", request_id=request_id,
+            "stop", False, "当前回合控制身份发生变化，请重新查看状态。", request_id=request_id,
+            error_code="TASK_CONTROL_IDENTITY_CONFLICT",
+        )
+    if command.operation == "interrupt":
+        interrupted = (
+            control.request_interrupt() if control is not None
+            else interrupt_by_name(conversation_request_interrupt_name(request_id))
+        )
+        return ConversationControlResult(
+            "stop", interrupted, "已中断本轮模型与工具执行链。" if interrupted else "当前回合已结束。",
+            request_id=request_id,
+        )
+    try:
+        from ...agent.conversation.local_run_control import prepare_local_task_stop
+
+        if control is None:
+            raise ValueError("当前消息没有正式的运行绑定入口")
+        resources = prepare_local_task_stop(execution.agent, control)
+    except (OSError, RuntimeError, TypeError, ValueError, KeyError):
+        return ConversationControlResult(
+            "stop", False, "本次任务资源停止尚未确认，请查看运行状态。", request_id=request_id,
+            delivery_status="unknown", error_code="TASK_RESOURCE_STOP_UNCONFIRMED",
         )
     _retire_local_guidance(execution.agent, request_id)
-    _cancel_local_subagents(execution.agent, request_id)
+    _cancel_local_subagents(
+        execution.agent, request_id, resources=resources,
+        task_id=control.runtime_authority().get("task_id", ""),
+    )
+    if resources is not None and (resources.background_freeze_error or resources.pty_request_error):
+        return ConversationControlResult(
+            "stop", False, "本轮已中断，部分任务资源停止尚未确认。", request_id=request_id,
+            delivery_status="unknown", error_code="TASK_RESOURCE_STOP_UNCONFIRMED",
+        )
     return ConversationControlResult(
-        "stop",
-        True,
-        "已停止当前会话正在执行的内容。",
-        request_id=request_id,
+        "stop", True, "已受理停止请求，正在清理本任务资源。", request_id=request_id,
+        delivery_status="accepted",
     )
 
 
@@ -496,15 +533,25 @@ def _local_status(execution: ChatControlExecution) -> ConversationTaskStatus:
     )
 
 
-# LLM: Subagent teardown stays asynchronous so a local stop acknowledgement is immediate.
-# 函数用途:后台回收本地当前请求派生的子代理树。
-def _cancel_local_subagents(agent: object, request_id: str) -> None:
+# LLM: 主资源只消费已经冻结的清单；子代理沿原 request/task 谱系选择，耗时清理不持 UI 状态锁。
+# 函数用途: 在后台清理本地主任务固定资源，并沿现有入口回收子代理。
+def _cancel_local_subagents(
+    agent: object, request_id: str, *, resources: object | None = None, task_id: str = "",
+) -> None:
     try:
         run_ids = agent.subagent_run_ids_for_request(request_id)
+        if task_id and task_id != request_id:
+            run_ids = list(dict.fromkeys([*run_ids, *agent.subagent_run_ids_for_request(task_id)]))
     except Exception:
         run_ids = []
 
+    # LLM: 清理只消费原批次；异常不能改变原资源身份或扩大到其它会话。
+    # 函数用途: 在控制锁外消费本地停止清单并派发原子代理取消。
     def cancel() -> None:
+        if resources is not None:
+            from ...agent.tooling.process_resource_stop import cleanup_process_stop
+
+            cleanup_process_stop(resources)
         try:
             agent.cancel_request_subagents(
                 request_id,

@@ -262,6 +262,8 @@ def test_local_btw_is_scoped_to_current_request(tmp_path) -> None:
 
 
 def test_local_stop_signals_current_run(tmp_path, monkeypatch) -> None:
+    from agent_py_agent.agent.conversation.local_run_control import LocalRunControl
+
     cancel_resources = MagicMock()
     monkeypatch.setattr(
         "agent_py_agent.cli.chat_parts.control_runtime._cancel_local_subagents", cancel_resources,
@@ -277,6 +279,7 @@ def test_local_stop_signals_current_run(tmp_path, monkeypatch) -> None:
             time.perf_counter(),
             "session-1",
             request_id="chat-stop",
+            local_run=LocalRunControl("chat-stop"),
         ),
     )
     ready = threading.Event()
@@ -308,7 +311,7 @@ def test_local_stop_signals_current_run(tmp_path, monkeypatch) -> None:
     assert result.ok is True
     assert stopped.is_set()
     assert agent.conversation_store.guidance.pending("request", "chat-stop") == []
-    cancel_resources.assert_called_once_with(agent, "chat-stop")
+    cancel_resources.assert_called_once_with(agent, "chat-stop", resources=None, task_id="")
 
 
 def test_local_interrupt_preserves_guidance_and_independent_resources(tmp_path, monkeypatch) -> None:
@@ -397,6 +400,8 @@ def test_local_interrupt_stops_foreground_shell_without_resource_reclaim(tmp_pat
 
 
 def test_local_stop_uses_shared_request_id_instead_of_thread_local_params(tmp_path) -> None:
+    from agent_py_agent.agent.conversation.local_run_control import LocalRunControl
+
     agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
     agent._current_run_params = SimpleNamespace(request_id="wrong-thread-local-id")
     execution = ChatControlExecution(
@@ -409,6 +414,7 @@ def test_local_stop_uses_shared_request_id_instead_of_thread_local_params(tmp_pa
             time.perf_counter(),
             "session-1",
             request_id="chat-shared-state",
+            local_run=LocalRunControl("chat-shared-state"),
         ),
     )
     ready = threading.Event()

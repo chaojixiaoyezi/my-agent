@@ -43,7 +43,7 @@ ACTIVE_TURN_RETRY_MAX_SECONDS = 3.0
 MAX_USER_INPUT_CHARS = 1 << 20
 
 
-# LLM: 参数束中的 tui_runtime 与 transcript view 是唯一显示入口；计时 refs 只实现双击退出，不代表业务状态。
+# LLM: typed runtime/view 是唯一显示入口；local_run_ref 只传递原 worker 句柄，计时 refs 不代表业务状态。
 # 类用途: 汇总输入控制器需要的控件、队列、运行快照、会话与 typed TUI runtime。
 @dataclass
 class TuiCreateKeybindingsParams:
@@ -84,6 +84,7 @@ class TuiCreateKeybindingsParams:
     eof_armed_at_ref: list[float] | None = field(default_factory=lambda: [0.0])
     escape_armed_at_ref: list[float] | None = field(default_factory=lambda: [0.0])
     escape_armed_text_ref: list[str] | None = field(default_factory=lambda: [""])
+    local_run_ref: list = field(default_factory=lambda: [None])
 
 
 # LLM: 这些 filters 是同一次 key map 构建的不可变条件集合；不得复制条件表达式或从控件可见文本推断 mode。
@@ -935,6 +936,8 @@ def _handle_clipboard_paste(event, params: TuiCreateKeybindingsParams) -> None:
     _insert_pasted_text(event, params, text)
 
 
+# LLM: 只透传与 worker 相同的本地控制引用；快捷键不按界面文本决定资源归属。
+# 函数用途: 把输入状态收窄为命令所需的当前消息快照和控制依赖。
 def _handle_command_params(params: TuiCreateKeybindingsParams, text: str) -> TuiHandleCommandParams:
     return TuiHandleCommandParams(
         user=text,
@@ -949,6 +952,7 @@ def _handle_command_params(params: TuiCreateKeybindingsParams, text: str) -> Tui
         pending_jobs_ref=params.pending_jobs_ref,
         running_prompt_ref=params.running_prompt_ref,
         running_request_id_ref=params.running_request_id_ref,
+        local_run_ref=params.local_run_ref,
         running_started_at_ref=params.running_started_at_ref,
         shutting_down_ref=params.shutting_down_ref,
         stop_event=params.stop_event,

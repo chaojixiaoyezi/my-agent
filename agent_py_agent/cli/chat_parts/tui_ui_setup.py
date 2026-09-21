@@ -905,7 +905,7 @@ def make_tui_app(params: MakeTuiAppParams):
     )
 
 
-# LLM: keybinding 参数携带 typed view/runtime；滚动、输入队列和命令输出不得访问 TextArea transcript 私有 buffer。
+# LLM: keybinding 继承同一 typed view/runtime/local_run_ref；界面不查询或猜测资源执行身份。
 # 函数用途: 把 app 状态组装为输入控制器参数。
 def _make_tui_keybindings(
     app_config: MakeTuiAppParams,
@@ -942,6 +942,7 @@ def _make_tui_keybindings(
             int(getattr(app_config.agent.config, "chat_transcript_scroll_lines", 10) or 10),
             app_config.tui_runtime,
             agent_navigation=app_config.agent_navigation,
+            local_run_ref=app_config.local_run_ref,
         )
     )
 

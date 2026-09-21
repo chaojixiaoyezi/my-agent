@@ -40,14 +40,16 @@ main 绑定当前选定任务的有效 claim；换轮失效，Goal paused 不取
 同任务续做先绑定 canonical run/attempt 再准备归档，request 只代表当前消息；目录准备失败关闭本次新 attempt。
 普通 Shell 与交互 PTY 共用 `parse_shell_command`；删除解析入口时必须同时核对两条执行链。
 资源访问身份和执行归属分别定义在 `tooling/process_scope.py`；PTY 已直接使用，不能拿访问回退补齐任务身份。
-源码中的 direct/local 中断只停止精确回合，保留插话及独立资源；普通后台任务停止仍待接线，发布与实际验收见 STATUS。
+源码中的 direct/local 中断只停止精确回合，保留插话及独立资源；主链资源停止已接运行绑定，完整子树仍待接线，发布与实际验收见 STATUS。
 后台记录的源码 Store 已支持显式 v2、版本 CAS 和同目录 redo；记录校验、文件提交与系统锁分属三个窄模块。
 读写与裁剪先恢复固定批次；提交后异常不能当作未发生。源码启动已沿唯一 v2 预留、host/child 绑定和交接链；
 启动方只在交接前持有取消权，独立 host 持续限制日志。Registry 每次读取原 Store，明确 session 停止消费冻结实例。
 执行权关闭共用 `runtime_db/run_cancellation.py`，取消 UNKNOWN 保留原锁，pending 条件在同一事务核对。
 Gateway 持久主任务沿 Goal→task→请求锁关闭原权限并冻结主资源；后台旧片在创建 attempt 前检查中断，不能被恢复复活。
 `conversation/task_resources.py` 只裁决主链身份，`tooling/process_resource_stop.py` 只消费固定清单；后台确认与 PTY 异步请求分开。
-direct/local、无持久任务的热请求及完整子树后台资源接线仍待完成；尚未发布或新增实际 TUI，不把开发回归当作 TUI 137 已通过。
+direct/local 的消息句柄由 worker 与命令端共享，core 在模型前发布实际身份；Compact 在原任务锁内重新核对，旧句柄不控制新 job。
+无持久任务热请求先在原 T 锁关闭发布并读取绑定，再释放 T、取 task 锁；已晋升或身份不可读不能降级猜测清理。
+完整子树后台资源接线仍待完成；尚未发布或新增实际 TUI，不把开发回归当作 TUI 137 已通过。
 
 SSE delta 原样保留，OpenAI 工具参数生成有独立进度；
 派工不会永久禁止主代理本地工作，用户明确限制仍保留；复制按最新代次和实际通道结果反馈。

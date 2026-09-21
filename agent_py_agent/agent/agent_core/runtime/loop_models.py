@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
-# LLM: 入口参数保留请求、运行、尝试的独立身份；宿主拒绝列表仅在同一执行链自动续接时共享，新调用默认独立。
+# LLM: 消息、运行、尝试身份独立；绑定回调同时服务正式身份发布和任务链接确认，Compact 续接须保留同一宿主对象。
 # 类用途: 收拢一次代理调用的配置和上下文，不自行执行模型、工具或文件写入。
 @dataclass
 class RunParams:
@@ -43,9 +43,8 @@ class RunParams:
     # Gateway injects one exact-turn transition callback. Runtime invokes it at
     # reservation and provider-submission edges; generic/local runs leave it empty.
     active_turn_transition_callback: object = None
-    # Gateway-only typed callback used to publish the exact durable task selected
-    # by this live request.  It is runtime state, never prompt text or persisted
-    # task metadata, and survives ``dataclasses.replace`` continuations.
+    # Gateway/direct 宿主回调发布本消息实际选择的 task/run/attempt；不是 prompt 或持久任务属性，
+    # 沿 dataclasses.replace 续轮保留，发布失败必须在模型/工具开始前收口；callable 接口仍确认原 Store 的任务晋升。
     conversation_task_binding_callback: object = None
     # The conversation layer supplies one immutable, already-bounded completed transcript seed.
     # Native protocol maps it to provider messages; text protocol renders it once.

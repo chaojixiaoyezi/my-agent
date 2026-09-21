@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
+# LLM: worker 和输入端必须共享同一个 local_run_ref；句柄随 job 换代，不能从 agent 的线程局部参数猜身份。
+# 类用途: 集中普通终端 worker 的队列、运行快照和本地控制句柄。
 @dataclass
 class PlainWorkerConfig:
 
@@ -34,19 +36,11 @@ class PlainWorkerConfig:
     history_lock: threading.Lock
     build_history_context: Callable[[], str]
     current_session_id: str = ""
+    local_run_ref: list = field(default_factory=lambda: [None])
 
 
-@dataclass
-class WorkerStateRefs:
-
-    state_lock: threading.Lock
-    is_running_ref: list
-    pending_jobs_ref: list
-    running_prompt_ref: list
-    running_request_id_ref: list
-    running_started_at_ref: list
-
-
+# LLM: 运行快照由 worker 在 state_lock 内更新，local_run_ref 仅传递本次调用的控制句柄。
+# 类用途: 保存普通终端输入端与 worker 共享的状态引用。
 @dataclass
 class PlainInputRefs:
 
@@ -56,6 +50,7 @@ class PlainInputRefs:
     running_request_id_ref: list
     running_started_at_ref: list
     assistant_outputs: list[str]
+    local_run_ref: list = field(default_factory=lambda: [None])
 
 
 @dataclass
@@ -69,6 +64,8 @@ class PlainEnqueueParams:
     prompt_files: list[str]
 
 
+# LLM: 命令使用与 worker 同一份运行引用；本地执行身份只从 local_run_ref 的正式发布读取。
+# 类用途: 把普通终端当前输入及控制所需的依赖交给命令分派。
 @dataclass
 class PlainHandleCommandConfig:
 
@@ -88,6 +85,7 @@ class PlainHandleCommandConfig:
     assistant_outputs: list[str]
     jobs: Any  # queue.Queue
     current_session_id: str = ""
+    local_run_ref: list = field(default_factory=lambda: [None])
 
 
 @dataclass
