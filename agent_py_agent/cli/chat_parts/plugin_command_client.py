@@ -15,6 +15,7 @@ from ...agent.plugin_command_service import (
 from ...agent.user_space.owner_access import is_local_admin_owner
 from ...agent.user_space.owner_resolver import owner_identity_from_config, resolve_owner_home
 from ..chat_client_context import post_gateway_json
+from .command_interaction import CommandInteraction
 
 
 # LLM: 每个实例固定一个宿主连接与会话；序号只仲裁异步展示回写，不是目录版本或持久安装代次。
@@ -50,15 +51,18 @@ class PluginCommandClient:
         with self._lock:
             return self._snapshot if self._snapshot_binding == self._binding() else None
 
-    # LLM: 读取和提交都在同一模式下解析身份；完整 Agent 的 --gateway 也只走 HTTP，绝不使用本地目录兜底。
-    # 函数用途: 提交一次带稳定编号的命令；传输失败保留未知，目录坏响应不覆盖已知操作结果。
-    def _request(self, operation: str, *, text: str = "", revision: str = "") -> dict:
-        request_id = uuid.uuid4().hex if operation == "command" else ""
+    # LLM: 每次提交冻结原身份及可选交互引用；Gateway 失败不能降级 direct，交互编号在 TUI Enter 时已固定。
+    # 函数用途: 读取目录或提交命令，交互模式持续接收审批，失败保留原编号和未知结果。
+    def _request(self, operation: str, *, text: str = "", revision: str = "",
+                 interaction: CommandInteraction | None = None) -> dict:
+        request_id = (interaction.request_id if interaction is not None else uuid.uuid4().hex) if operation == "command" else ""
         binding = None
         with self._lock:
             self._sequence += 1
             sequence = self._sequence
         try:
+            if interaction is not None:
+                interaction.cancellation_token.raise_if_cancelled()
             binding = self._binding()
             owner, conversation_id, use_gateway, port = binding
             if use_gateway:
@@ -69,21 +73,24 @@ class PluginCommandClient:
                 value = _gateway_submit_workspace(self.agent, workspace_root=None, workspace_roots=None)
                 if value.get("cwd"):
                     payload["workspace"] = value
-                status, result = post_gateway_json(
-                    port,
-                    owner,
-                    "/client/plugins",
-                    payload,
-                    timeout=3.0,
-                )
-                if status != 200:
-                    raise ValueError("目录请求未成功")
+                if interaction is not None and operation == "command":
+                    from .plugin_command_stream import post_plugin_command_stream
+
+                    result = post_plugin_command_stream(port, owner, payload, interaction)
+                else:
+                    status, result = post_gateway_json(port, owner, "/client/plugins", payload, timeout=3.0)
+                    if status != 200:
+                        raise ValueError("目录请求未成功")
             else:
                 manager = self._direct_manager(owner, conversation_id)
                 result = (
                     {"ok": True, "catalog": manager.catalog().to_payload()}
                     if operation == "catalog"
-                    else manager.command(text, revision=revision, request_id=request_id)
+                    else manager.command(
+                        text, revision=revision, request_id=request_id,
+                        request_permission=interaction.request_permission if interaction else None,
+                        cancellation_token=interaction.cancellation_token if interaction else None,
+                    )
                 )
             if not isinstance(result, dict) or not isinstance(result.get("ok"), bool):
                 raise ValueError("插件响应无效")
@@ -122,16 +129,16 @@ class PluginCommandClient:
     def refresh(self) -> dict:
         return self._request("catalog")
 
-    # LLM: 用户已选择的 revision 原样提交；没有选择时使用已见目录或首次显式读取，失败不重放、不静默替换旧版本。
-    # 函数用途: 提交一次插件命令；状态查询无需目录可用，其他新命令使用原选中版本。
-    def command(self, text: str, *, revision: str = "") -> dict:
+    # LLM: 原 revision 与交互编号保持不变；刷新只读目录，失败不重放、不静默替换旧版本或审批消费者。
+    # 函数用途: 提交一次插件命令并可选等待用户审批；原请求查询无需目录可用。
+    def command(self, text: str, *, revision: str = "", interaction: CommandInteraction | None = None) -> dict:
         from ...agent.command_arguments import CommandArgumentError
         from ...agent.plugin_commands import parse_plugin_command
 
         try:
             parsed = parse_plugin_command(text)
             if parsed is not None and parsed.action and parsed.action.name == "status" and not parsed.help_requested:
-                result = self._request("command", text=text, revision=revision)
+                result = self._request("command", text=text, revision=revision, interaction=interaction)
                 if result.get("state") == "outcome_unknown":
                     return plugin_command_unknown(parsed.arguments.values["request"])
                 return result
@@ -145,4 +152,4 @@ class PluginCommandClient:
             snapshot = self.snapshot()
             if snapshot is None:
                 return plugin_catalog_unavailable()
-        return self._request("command", text=text, revision=revision or snapshot.revision)
+        return self._request("command", text=text, revision=revision or snapshot.revision, interaction=interaction)

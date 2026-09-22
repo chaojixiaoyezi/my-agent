@@ -76,7 +76,12 @@ def test_plugin_submit_uses_real_dispatch_without_chat_guidance_or_stop(
     from agent_py_agent.agent.settings.config import AgentConfig
     from agent_py_agent.agent.user_space.home_layout import home_paths
     from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity, resolve_owner_home
-    from agent_py_agent.cli.chat_parts import control_runtime, plugin_command_client, tui
+    from agent_py_agent.cli.chat_parts import (
+        control_runtime,
+        plugin_command_client,
+        plugin_command_stream,
+        tui,
+    )
 
     snapshot = read_plugin_catalog(OwnerIdentity.local_main(), channel="chat", conversation_id="session-1")
 
@@ -87,6 +92,13 @@ def test_plugin_submit_uses_real_dispatch_without_chat_guidance_or_stop(
         return 200, result
 
     monkeypatch.setattr(plugin_command_client, "post_gateway_json", transport)
+
+    def stream_transport(port, owner, payload, interaction):
+        assert interaction.request_id == payload["plugin_request_id"]
+        assert interaction.cancellation_token.cancelled is False
+        return transport(port, owner, "/client/plugins", payload, timeout=3)[1]
+
+    monkeypatch.setattr(plugin_command_stream, "post_plugin_command_stream", stream_transport)
 
     input_area = TextArea(multiline=True)
     input_area.text = raw

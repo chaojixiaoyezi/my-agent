@@ -158,7 +158,8 @@ class PluginManagement:
             return self._reply(self._query(values["request"]), values["request"])
         if parsed.action.name in _MANAGEMENT_TOOLS:
             tool_name = _MANAGEMENT_TOOLS[parsed.action.name]
-            return self._reply(self._submit(tool_name, dict(values), revision, request_id), request_id)
+            return self._reply(self._submit(tool_name, dict(values), revision, request_id,
+                                           request_permission, cancellation_token), request_id)
         catalog = self.catalog()
         if not revision or revision != catalog.revision:
             return execute_plugin_command(catalog, text, revision=revision)
@@ -235,9 +236,10 @@ class PluginManagement:
         arguments = json.loads(json.dumps(dict(parsed.arguments.values), ensure_ascii=False, allow_nan=False))
         return PluginInvocation(entry, name, arguments)
 
-    # LLM: 明确动作共用原请求链；认证和开关先于新写入，旧请求先读账，不得将旧停用重放到新激活。
-    # 函数用途: 提交管理请求，首次必须携带已见目录版本，重送复用原操作。
-    def _submit(self, tool_name: str, values: dict, revision: str, request_id: str) -> dict:
+    # LLM: 认证和开关先于新写入，旧请求先读账；交互和取消仅属于当前提交，不能把旧动作重放到新激活。
+    # 函数用途: 按已见目录版本提交管理请求，将当前连接取消信号传给原执行器。
+    def _submit(self, tool_name: str, values: dict, revision: str, request_id: str,
+                request_permission: Callable | None, cancellation_token: CancellationToken | None) -> dict:
         if not self.context.is_admin:
             return {"ok": False, "state": "rejected", "error_code": "PLUGIN_PERMISSION_DENIED"}
         try:
@@ -252,7 +254,7 @@ class PluginManagement:
             if repo.find_host_command(request) is not None:
                 if not self.context.enabled:
                     return query_host_command(repo, request)
-                return self._execute(repo, request, arguments)
+                return self._execute(repo, request, arguments, request_permission, cancellation_token)
         if not self.context.enabled:
             return {"ok": False, "state": "rejected", "error_code": "PLUGIN_DISABLED"}
         if not revision or revision != self.catalog().revision:
@@ -260,12 +262,15 @@ class PluginManagement:
         thread = self._thread(create=True)
         repo = RuntimeRepository(runtime_db_path(self.context.owner.home_dir))
         request = self._request(thread.thread_id, request_id, tool_name, arguments)
-        return self._execute(repo, request, arguments)
+        return self._execute(repo, request, arguments, request_permission, cancellation_token)
 
-    # LLM: 首次与显式重送共用原 HostCommand；只有原结果严格读回后才消费准确退出证据，查询与禁用开关下的重读不写。
-    # 函数用途: 执行明确管理动作并单列证据消费情况，消费失败不翻转原操作成功或重跑插件。
-    def _execute(self, repo: RuntimeRepository, request: HostCommandRequest, arguments: dict) -> dict:
-        result = execute_host_command(repo, request, lambda binding: self._prepare(repo, binding, arguments))
+    # LLM: 原 HostCommand 只使用当前消费者与令牌；结果严格读回后才消费退出证据，清理失败不翻转成功或重跑。
+    # 函数用途: 在原执行区间处理明确管理动作，并分别返回执行结果与退出证据消费情况。
+    def _execute(self, repo: RuntimeRepository, request: HostCommandRequest, arguments: dict,
+                 request_permission: Callable | None, cancellation_token: CancellationToken | None) -> dict:
+        result = execute_host_command(repo, request, lambda binding: replace(
+            self._prepare(repo, binding, arguments), cancellation_token=cancellation_token),
+            request_permission=request_permission)
         cleanup = consume_plugin_cleanup(self.context.owner, repo, request)
         return {**result, "cleanup_consumption": cleanup} if cleanup else result
 

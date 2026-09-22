@@ -13,8 +13,10 @@ TUI 的函数参数很多，集中放在这里，主循环文件就只保留流�
 import dataclasses
 import threading
 
+from .command_interaction import CommandInteraction
 
-# LLM: 命令与 worker 共用 local_run_ref；插件只透传独立目录客户端及原候选 revision，不能成为控制或运行身份。
+
+# LLM: 命令与 worker 共用 local_run_ref；插件透传原候选版本与独立交互引用，不能借用聊天控制或运行身份。
 # 类用途: 保存 TUI 单次命令所需的状态和精确本地控制引用。
 @dataclasses.dataclass(frozen=True)
 class TuiHandleCommandParams:
@@ -38,6 +40,7 @@ class TuiHandleCommandParams:
     local_run_ref: list = dataclasses.field(default_factory=lambda: [None])
     plugin_client: object | None = None
     plugin_revision: str = ""
+    command_interaction: CommandInteraction | None = None
 
 
 # LLM: 保持与界面同一份 queue/refs，local_run_ref 随 job 更新，不能在工厂中复制。

@@ -52,6 +52,8 @@ agent_py_agent/
 |   |   |-- tui_display_archive.py      # 异步读取原文归档页，缓存限额与失败重试
 |   |   |-- slash_commands.py          # CLI 命令分派与公共声明的帮助投影
 |   |   |-- plugin_command_client.py   # 显式宿主模式、会话目录缓存与原版本提交
+|   |   |-- command_interaction.py     # 单次命令的编号、审批消费者及独立取消引用
+|   |   |-- plugin_command_stream.py   # 持续读原命令流并异步回写完整审批绑定
 |   |   |-- tui_plugin_commands.py     # 输入候选版本绑定与不阻塞输入的插件命令分派
 |   |   |-- slash_command_types.py     # CLI 命令处理器的可信上下文，不另设命令目录
 |   |   |-- tui_input.py                # 真实 slash/path 补全、菜单、history suggest 与排队占位投影
@@ -218,6 +220,8 @@ agent_py_agent/
 |   |   `-- executor_liveness.py        # exact attempt 执行区间和 OS 退出事实；慢模型不按时长判死
 |   |-- gateway_parts/                 # gateway request/worker/lease/http/renderer
 |   |   |-- plugin_command_service.py  # 原管理员授权、可信 owner 目录与插件 HTTP 命令入口
+|   |   |-- command_stream_protocol.py # 命令有界消息、规范 owner 握手与原审批路径
+|   |   |-- command_stream.py          # 原 HTTP 线程执行、审批运输和断连取消
 |   |   |-- owner_conversation_store.py # 模型配置与插件管理共用的原 owner 会话 Store 组装
 |   |   |-- request_execution.py        # 单个已领取请求的租约、模型执行、超窗恢复与收尾编排
 |   |   |-- request_context.py          # 原车道内的会话快照、Compact 与工作目录准备
@@ -443,6 +447,7 @@ agent_py_agent/
 |   |-- test_host_command_operation_replay.py # 原执行器终态回读、身份隔离及线程退出 UNKNOWN 保留
 |   |-- test_host_command_execution.py # 同请求并发、规范输入守门、终态收口故障及只读查询
 |   |-- test_host_command_approval.py  # 明确批准、拒绝、取消、迟到决定与并发重复请求
+|   |-- test_host_command_stream.py    # 临时 HTTP/MCP 与 TUI 审批往返、身份映射和取消隔离
 |   |-- test_host_command_resource_reference.py # 原操作反查、坏链拒绝及资源集合回读
 |   |-- test_gateway_admission_wait.py  # 合法排队等准入的结构化等待信号：只写等待事实、有节流与总预算、客户端持续收到且停写/取消/终态收口
 |   |-- test_scheduler_scan_costs.py    # waiting 投影缓存三重校验、runtime_snapshot 锁外解析与旧实现逐字一致、owner 事实缓存失效回归
@@ -618,6 +623,10 @@ docs/
 - `agent_py_agent/agent/plugin_command_service.py`：从原安装表生成静态命令目录，旧或缺失版本明确拒绝；显式业务动作尚未接执行，普通工具贡献归 Registry。
 - `agent_py_agent/agent/gateway_parts/plugin_command_service.py`：三个 HTTP 入口共用原管理员与可信 owner；只读不初始化冷用户，获授权安装才登记原独立运行。
 - `agent_py_agent/cli/chat_parts/plugin_command_client.py`：TUI、plain Gateway 与 direct 共用模式、声明缓存及查询语义；传输失败保留原编号与未知，不降级或自动重送。
+- `agent_py_agent/cli/chat_parts/command_interaction.py`：每次 Enter 单独绑定审批回调、取消令牌和原 Gateway 连接；并发命令不共享可变回调或借聊天身份。
+- `agent_py_agent/cli/chat_parts/plugin_command_stream.py`：网络持续读流，原面板独立等待；只在本连接有效时写回完整决定，退出关闭本命令等待。
+- `agent_py_agent/agent/gateway_parts/command_stream_protocol.py`：校验原编号、完整帧和固定规范 owner；在可信服务根内派生隐藏审批地址，不从 HTTP 接收路径。
+- `agent_py_agent/agent/gateway_parts/command_stream.py`：原请求线程调用一次原服务；心跳只检测断连，结果和资源退出仍由原执行链裁决。
 - `agent_py_agent/cli/chat_parts/tui_plugin_commands.py`：保存首次接受候选的目录版本，参数补全不升级；网络提交沿共享分派在 UI 线程外执行。
 - `agent_py_agent/agent/plugin_completion.py`：仅建议能够绑定到当前参数的值；停用插件只给静态帮助，文件枚举由宿主按显式路径声明提供。
 

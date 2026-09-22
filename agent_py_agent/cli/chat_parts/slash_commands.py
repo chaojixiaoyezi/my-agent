@@ -65,14 +65,14 @@ def handle_common_slash_command(
     return False
 
 
-# LLM: 目录必须来自显式模式选定的宿主；输入携带原 revision，不调用旧会话控制器或模型，TUI 在输入线程外调用。
-# 函数用途: 在前台、后台和空闲 TUI 中一致处理插件命令，实际装卸仍未开放。
+# LLM: 目录来自显式模式选定的宿主；原 revision 与命令交互引用分别传递，不借聊天回合或模型执行权限。
+# 函数用途: 在输入线程外提交插件管理或业务命令，并展示原宿主结果。
 def _handle_plugin_command(user: str, ctx: SlashCommandContext, include_plain_help: bool) -> bool | None:
     del include_plain_help
     if plugin_namespace(user) is None:
         return None
     client = ctx.plugin_client or PluginCommandClient(ctx.agent, ctx.conversation_id, use_gateway=ctx.use_gateway)
-    result = client.command(user, revision=ctx.plugin_revision)
+    result = client.command(user, revision=ctx.plugin_revision, interaction=ctx.command_interaction)
     ctx.print_line(str(result["message"]))
     return True
 
