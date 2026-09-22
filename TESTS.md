@@ -1,5 +1,15 @@
 # 测试与发布验收
 
+## 决策模型 TODO11 设置与显式探测（本地）
+
+最终14文件联合243项通过，包含原ToolExecutor→user_config→原生HTTP→原会话用量结算及失败真实工具状态。
+
+原设置菜单/模型操作/薄客户端到 Gateway 的真实本机 HTTP，再到原生决策 HTTP 与账本已组合验证。
+六文件菜单/运输/用量组合81项、七文件配置/范围/服务组合117项通过；后端构造共用与准确冷却恢复后，
+`test_decision_model_operations.py`、`test_decision_gateway_transport.py`、`test_decision_service.py` 54项通过。
+受控认证容器验证运输和owner隔离，不代替真实认证部署；真实按键表单不代替安装版TUI或收费模型质量。
+文件、原接口、失败对照与剩余边界见 [TODO11交接](docs/tasks/DECISION_MODEL_SETTINGS_HANDOFF.md)。
+
 ## 决策模型 07/09 业务入口（本地）
 
 子代理片联合 10 个 focused 文件 209 项通过；父侧追加同修复身份/不同幂等身份的名字边界，

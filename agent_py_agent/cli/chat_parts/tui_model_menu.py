@@ -1,5 +1,5 @@
 # LLM: /model 是本机表单，不进入聊天、LLM 或 FileHistory；网络与文件操作在线程中执行，密钥只在掩码控件短暂保留。
-# 模块用途: 在现有 TUI 管理服务商和模型、主动测试连接，并在选择确认后刷新欢迎区；不热改运行配置。
+# 模块用途: 在原 TUI 管理模型、显式连接测试与决策设置；聊天选择按原确认刷新，决策覆盖由宿主控制后续请求。
 
 from __future__ import annotations
 
@@ -64,7 +64,7 @@ async def _dialog(app, title: str, body, actions: tuple, *, focus=None, completi
 # LLM: 请求参数通过单独payload映射传递；走现有owner认证，保存重试复用profile_id，未知结果不自动另建记录。
 # 函数用途: 不阻塞 TUI 绘制地管理配置或执行用户明确选择的连接检查，等待提示区分网络与纯配置操作。
 async def _request(app, agent, session_id: str, operation: str, payload: dict[str, object] | None = None) -> dict:
-    text = ("正在发送短问候，等待模型回复…" if operation == "probe" else "正在读取模型目录…" if operation == "discover"
+    text = ("正在执行限时决策测试…" if operation == "decision_probe" else "正在发送短问候，等待模型回复…" if operation == "probe" else "正在读取模型目录…" if operation == "discover"
             else "正在联系认证服务…（不会调用模型）" if operation.startswith("auth_")
             else "正在等待配置操作确认…（不会向模型发请求）")
     waiting = TextArea(text=text, read_only=True, height=2, width=64)
@@ -217,7 +217,7 @@ async def _select_model(app, agent, session_id: str, runtime, *, operation: str 
 
 
 # LLM: 菜单始终在现有事件循环内；期间隔离聊天键盘处理，退出后恢复，异常不打印请求或密钥。
-# 函数用途: 打开 /model 的快捷新增、选择、服务商管理和主动测试入口。
+# 函数用途: 打开 /model 的新增、选择、服务商、主动测试与独立决策设置入口。
 async def run_model_menu(app, agent, session_id: str, runtime) -> None:
     app._my_agent_model_menu_active = True
     message = "每个会话独立选模型；正在执行的工作片保持原模型。"
@@ -228,7 +228,8 @@ async def run_model_menu(app, agent, session_id: str, runtime) -> None:
                 ("provider_add", "新增服务商（支持多个模型）"), ("providers", "管理服务商 / 模型 / 请求头"),
                 ("probe", "连接测试（短问候，不做任务）"),
                 ("set_default", "新会话默认模型（不修改已有会话）"),
-                ("sharing", "管理员共享模型（显式开放给其他用户）")], select_on_focus=True)
+                ("sharing", "管理员共享模型（显式开放给其他用户）"),
+                ("decision", "决策模型设置（可选建议 / 不切换聊天模型）")], select_on_focus=True)
             action = await _dialog(app, "模型配置 /model", HSplit([Label(message), choices]),
                                    (("进入", lambda: choices.current_value), ("退出", None)), focus=choices)
             if action is None:
@@ -243,8 +244,12 @@ async def run_model_menu(app, agent, session_id: str, runtime) -> None:
 
 
 # LLM: 只分发菜单结构化选项；网络与配置副作用仍由各动作的确认入口负责，未知选项不能默认切模型。
-# 函数用途: 保持主菜单循环轻量，分别进入会话选择、默认值、服务商、共享和连接测试。
+# 函数用途: 分发会话选择、服务商、共享、连接测试和独立决策设置；后者不能更新聊天模型显示。
 async def _run_model_action(app, agent, session_id: str, runtime, action: str) -> str:
+    if action == "decision":
+        from .tui_decision_menu import manage_decision_settings
+
+        return await manage_decision_settings(app, agent, session_id)
     if action == "auth":
         from .tui_model_auth import manage_auth
 

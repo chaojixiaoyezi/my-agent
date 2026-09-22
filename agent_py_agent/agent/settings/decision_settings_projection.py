@@ -1,9 +1,14 @@
-# LLM: 此模块只投影原覆盖和连接可用性，不返回凭据、不发请求、不拥有运行中阶段时钟。
-# 模块用途: 为界面和模型工具读回相同有效值、继承来源与决策上限。
+# LLM: 有效层与字段来源必须遵守 schema 的同一范围登记；后台不叠加线程值，不返回凭据或拥有运行中时钟。
+# 模块用途: 为界面、工具和决策服务读回按作用范围计算的有效值、来源及请求上限。
 from __future__ import annotations
 
 from .decision_settings_defaults import decision_defaults
-from .decision_settings_schema import POINTS, validate_decision_settings
+from .decision_settings_schema import (
+    POINT_RUNTIME_SCOPES,
+    decision_field_scopes,
+    empty_decision_settings,
+    validate_decision_settings,
+)
 from .model_provider_schema import ModelProfileError, resolved_model
 from .shared_model_catalog import resolve_shared_model, shared_profile_key
 
@@ -30,38 +35,45 @@ def _profile_status(context: object, data: dict, profile_id: str) -> dict:
     return {"configured": True, "reason": "configured", "network": "unchecked"}
 
 
-# LLM: 缺点覆盖时动态继承有效通用值；关闭总开关不改变保存模式，时间上限不包含运行中阶段余额。
-# 函数用途: 读回字段来源、持久覆盖和可用上限，调用方仍须与已冻结阶段/自身剩余期限取最小值。
+# LLM: 缺点值只从该点允许的配置层继承；后台用 owner 与后台预算，旧线程后台覆盖只展示供清理，不参加有效值。
+# 函数用途: 返回可写范围、真实字段来源和静态等待上限，运行服务仍须扣除原阶段已耗时间。
 def decision_settings_projection(context: object, data: dict, thread: object = None, *, scope: str = "owner") -> dict:
-    from .decision_settings_schema import empty_decision_settings
-
     owner = validate_decision_settings(data["decision_settings"])
     temporary = validate_decision_settings(thread.decision_settings) if thread is not None else empty_decision_settings()
-    effective, sources = decision_defaults(context)
-    for name, settings in (("owner", owner), ("thread", temporary)):
-        for key, value in settings["overrides"].items():
-            effective[key], sources[key] = value, name
+    field_scopes = decision_field_scopes()
+    owner_values, owner_sources = decision_defaults(context)
+    for key, value in owner["overrides"].items():
+        owner_values[key], owner_sources[key] = value, "owner"
+    effective, sources = dict(owner_values), dict(owner_sources)
+    for key, value in temporary["overrides"].items():
+        if "thread" in field_scopes[key]:
+            effective[key], sources[key] = value, "thread"
     general = {key: value for key, value in effective.items() if not key.startswith("points.")}
     points = {}
-    for point in POINTS:
+    for point, runtime_scope in POINT_RUNTIME_SCOPES.items():
+        values = owner_values if runtime_scope == "owner_background" else effective
+        origins = owner_sources if runtime_scope == "owner_background" else sources
         prefix = f"points.{point}."
-        time_key = "background_timeout_seconds" if point == "curator" else "timeout_seconds"
+        time_key = "background_timeout_seconds" if runtime_scope == "owner_background" else "timeout_seconds"
+        budget_key = "background_timeout_seconds" if runtime_scope == "owner_background" else "stage_timeout_seconds"
         for field, fallback in (("timeout_seconds", time_key), ("profile_id", "profile_id")):
-            if prefix + field not in effective:
-                effective[prefix + field] = effective[fallback]
-                sources[prefix + field] = f"inherit:{fallback}:{sources[fallback]}"
-        seconds = effective[prefix + "timeout_seconds"]
-        points[point] = {field: effective[prefix + field] for field in ("mode", "timeout_seconds", "profile_id")}
+            if prefix + field not in values:
+                values[prefix + field] = values[fallback]
+                origins[prefix + field] = f"inherit:{fallback}:{origins[fallback]}"
+        sources.update({prefix + field: origins[prefix + field] for field in ("mode", "timeout_seconds", "profile_id")})
+        seconds = values[prefix + "timeout_seconds"]
+        points[point] = {field: values[prefix + field] for field in ("mode", "timeout_seconds", "profile_id")}
         points[point].update(
-            effective_mode=points[point]["mode"] if effective["enabled"] else "off",
-            max_request_seconds=min(seconds, effective["stage_timeout_seconds"]),
-            limiting_field="stage_timeout_seconds" if effective["stage_timeout_seconds"] < seconds else prefix + "timeout_seconds",
+            runtime_scope=runtime_scope, enabled=values["enabled"], enabled_source=origins["enabled"],
+            effective_mode=points[point]["mode"] if values["enabled"] else "off",
+            max_request_seconds=min(seconds, values[budget_key]),
+            limiting_field=budget_key if values[budget_key] < seconds else prefix + "timeout_seconds",
             connection=_profile_status(context, data, points[point]["profile_id"]),
         )
     return {"ok": True, "schema": "decision_settings_view.v1", "scope": scope,
             "thread_id": str(getattr(thread, "thread_id", "")),
             "revision": {"owner": owner["revision"], "thread": temporary["revision"]},
             "overrides": {"owner": owner["overrides"], "thread": temporary["overrides"]},
-            "effective": {**general, "points": points}, "sources": sources,
+            "effective": {**general, "points": points}, "sources": sources, "field_scopes": field_scopes,
             "effective_from": "next_request", "stage_budget_policy": "preserve_started_stage",
             "temporary_until": "reset_or_thread_end" if thread is not None else ""}

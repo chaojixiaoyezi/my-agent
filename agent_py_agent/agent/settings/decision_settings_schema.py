@@ -1,14 +1,19 @@
-# LLM: 决策覆盖仅接受宿主登记字段；不拥有默认值、权限、连接或第二份配置存储；同步设置服务与迁移测试。
-# 模块用途: 校验原 owner/thread 文件里的版本化决策覆盖和字段级修改。
+# LLM: 决策字段及运行范围由此唯一登记；持久校验保留旧覆盖可清理，新的写入须检查 scope；同步设置投影与服务范围测试。
+# 模块用途: 校验原 owner/thread 决策覆盖，并提供界面和运行服务共用的字段作用范围。
 from __future__ import annotations
 
 import math
+from types import MappingProxyType
 from uuid import UUID
 
 from .model_provider_schema import ModelProfileError
 
 DECISION_SETTINGS_SCHEMA = "decision_settings.v1"
-POINTS = ("model_selection", "subagent_model", "skill_tool", "recall", "curator")
+POINT_RUNTIME_SCOPES = MappingProxyType({
+    "model_selection": "thread", "subagent_model": "thread", "skill_tool": "thread",
+    "recall": "thread", "curator": "owner_background",
+})
+POINTS = tuple(POINT_RUNTIME_SCOPES)
 GENERAL_FIELDS = ("enabled", "timeout_seconds", "stage_timeout_seconds", "background_timeout_seconds", "profile_id")
 POINT_FIELDS = ("mode", "timeout_seconds", "profile_id")
 
@@ -59,18 +64,25 @@ def profile_reference(value: object) -> str:
     return value
 
 
-# LLM: 接入点是宿主有限登记表，未知点或字段不能借通用 patch 获得执行权。
-# 函数用途: 检查一个扁平字段路径及其明确填写值，返回规范值。
-def validate_decision_field(path: object, value: object) -> object:
-    if type(path) is not str:
-        raise ModelProfileError("决策设置字段无效。")
-    parts = path.split(".")
-    if path in GENERAL_FIELDS:
-        field = path
-    elif len(parts) == 3 and parts[0] == "points" and parts[1] in POINTS and parts[2] in POINT_FIELDS:
-        field = parts[2]
-    else:
+# LLM: 元数据只声明原字段可 patch 的范围，不授予身份权限；reset 仍可清理旧线程覆盖，调用方不能修改全局登记表。
+# 函数用途: 返回菜单、写入校验和有效值叠加共用的字段范围副本。
+def decision_field_scopes() -> dict[str, list[str]]:
+    result = {key: ["owner"] if key == "background_timeout_seconds" else ["owner", "thread"] for key in GENERAL_FIELDS}
+    for point, runtime_scope in POINT_RUNTIME_SCOPES.items():
+        for field in POINT_FIELDS:
+            result[f"points.{point}.{field}"] = ["owner"] if runtime_scope == "owner_background" else ["owner", "thread"]
+    return result
+
+
+# LLM: 新 patch 必须传已认证 scope，持久读取和 reset 不按当前范围拒绝旧数据；字段和值校验仍为唯一实现。
+# 函数用途: 检查扁平字段和值；写入时拒绝把用户后台设置保存成线程临时覆盖。
+def validate_decision_field(path: object, value: object, *, scope: str | None = None) -> object:
+    scopes = decision_field_scopes()
+    if type(path) is not str or path not in scopes:
         raise ModelProfileError("决策设置包含未登记的字段或接入点。")
+    if scope is not None and scope not in scopes[path]:
+        raise ModelProfileError("该决策设置不支持当前作用范围；后台字段请使用用户长期设置，线程旧覆盖仍可恢复继承。")
+    field = path.rsplit(".", 1)[-1]
     if field == "enabled":
         if type(value) is not bool:
             raise ModelProfileError("决策总开关必须是布尔值。")
@@ -84,8 +96,8 @@ def validate_decision_field(path: object, value: object) -> object:
     return value
 
 
-# LLM: 持久结构严格校验，不丢未知覆盖；旧文件缺信封只能由显式迁移入口补齐。
-# 函数用途: 读取并复制一份有效的版本化覆盖，损坏数据保持失败而非清空。
+# LLM: 持久结构严格校验，不丢未知覆盖；保留历史线程后台字段供显式 reset，不能在读取时静默删改或重新授权。
+# 函数用途: 复制有效的版本化覆盖；当前不适用的旧范围仍可读取，损坏结构保持失败。
 def validate_decision_settings(value: object) -> dict:
     if type(value) is not dict or set(value) != {"schema", "revision", "overrides"}:
         raise ModelProfileError("决策覆盖结构无效，原配置未修改。")

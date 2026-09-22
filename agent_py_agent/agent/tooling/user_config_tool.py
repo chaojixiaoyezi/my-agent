@@ -5,8 +5,8 @@ from __future__ import annotations
 # LLM: 这个工具解决的真机问题是"用户问能不能改 compact 阈值，模型直接答'我没有权限'"——模型既不知道
 #   用户配置在哪，也没有任何入口，于是凭空断言。这里给出结构化事实：生效值、来源（用户配置 vs 随包默认）、
 #   白名单可改项、安全边界不可改项及原因、保存位置与生效时机。
-#   决策设置单独调用原 owner/thread 共用服务，只用可信 runner 身份；不开放凭据、权限或任意线程参数。
-# 模块用途: 让原获授权主代理读取/修改配置；决策字段复用统一继承、CAS 与读回。
+#   决策覆盖沿原设置服务，目录与显式探测沿原模型操作；身份只取可信 runner，不开放凭据或任意线程参数。
+# 模块用途: 让原获授权主代理读取/修改配置、列出决策模型或按用户要求测试连接，保留统一权限与失败事实。
 import json
 
 from ..settings.user_config_capability import (
@@ -46,8 +46,8 @@ def _decision_change_properties() -> dict:
     return properties
 
 
-# LLM: 保留原 main_agent 注册及中央工具策略；决策动作按当前 runner 和 owner 校验，不能修改别的会话。
-# 类用途: 原配置工具的受控入口；进程 YAML 与 owner/thread 决策设置使用各自原权限和事实源。
+# LLM: 保留原 main_agent 注册及中央策略；目录只读，探测只接受已存引用和显式预算，当前 runner 身份不可由模型覆盖。
+# 类用途: 原配置工具的受控入口；读取、保存与显式联网测试分别复用原服务，不开放凭据写入。
 class UserConfigTool(BaseTool):
     model_spec = ToolModelSpec(
         name="user_config",
@@ -62,14 +62,17 @@ class UserConfigTool(BaseTool):
             "先读 revision 再作为 expected_revision 提交。scope=owner 为长期设置，thread 仅当前可信会话；"
             "时间使用有限正秒数，reset 的 fields 删除覆盖。总开关关闭保留各点模式，observe 也会产生用量；"
             "保存不联网，时间只用于后续请求且不重置正在进行的阶段预算。"
+            "decision_models 只读当前用户已保存或获共享授权的脱敏 Decision 目录，可用返回的编号绑定配置。"
+            "decision_probe 仅在用户要求测试连接时使用，必须显式传 profile_id 和有限正 timeout_seconds；"
+            "它会联网并产生用量，不能在读取目录或保存配置后自动测试，也不能据测试通过声称判断质量可靠。"
         ),
         input_schema={
             "type": "object",
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["view", "set", "decision_read", "decision_patch", "decision_reset"],
-                    "description": "view/set 管理原本机配置；decision_* 管理当前用户决策覆盖。",
+                    "enum": ["view", "set", "decision_read", "decision_patch", "decision_reset", "decision_models", "decision_probe"],
+                    "description": "view/set 管理本机配置；decision_read/patch/reset 管理覆盖，decision_models 只读目录，decision_probe 显式测试连接。",
                 },
                 "key": {
                     "type": "string",
@@ -83,6 +86,8 @@ class UserConfigTool(BaseTool):
                 "expected_revision": {"type": "object", "properties": {"owner": {"type": "integer", "minimum": 0}, "thread": {"type": "integer", "minimum": 0}}, "required": ["owner", "thread"], "additionalProperties": False},
                 "changes": {"type": "object", "properties": _decision_change_properties(), "additionalProperties": False, "minProperties": 1},
                 "fields": {"type": "array", "items": {"type": "string", "enum": list(_decision_change_properties())}, "minItems": 1, "description": "decision_reset 删除这些覆盖字段以恢复继承。"},
+                "profile_id": {"type": "string", "description": "decision_probe 必填：decision_models 返回的已保存 Decision 编号或 shared:编号，不能传模型名称、地址或凭据。"},
+                "timeout_seconds": {"type": "number", "exclusiveMinimum": 0, "description": "decision_probe 必填：用户明确要求的有限正测试预算秒数，包含准备与完整请求。"},
             },
             "additionalProperties": False,
         },
@@ -93,11 +98,12 @@ class UserConfigTool(BaseTool):
                 "用户要求修改 compact 触发百分比等用户级偏好",
                 "需要说明某项配置为什么不能由模型自行修改",
                 "用户要求开启、关闭或调整决策模型等待时间及接入点，并指定长期或本会话范围",
+                "用户要求选择已保存的决策配置，或明确要求测试其连接",
             ),
             avoid_when=("需要改权限模式、危险路径或凭据时",),
         ),
     )
-    # LLM: view 是只读；set 会改宿主配置文件，所以整体按 mutating 声明，让中央门与审计照常记录。
+    # LLM: view/目录只读，set 改配置，显式 probe 会联网并记用量；保持原 mutating 中央门、串行策略和操作审计。
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy("mutating"),
         sandbox_policy=SandboxPolicy("none"),
@@ -117,12 +123,14 @@ class UserConfigTool(BaseTool):
     def __init__(self, agent: object | None = None) -> None:
         self._agent = agent
 
-    # LLM: action 结构化分派；决策写入走原 CAS 服务，失败不解析错误正文或冒充保存成功。
-    # 函数用途: 处理本机配置与当前 owner/thread 决策设置的读取、修改和恢复继承。
+    # LLM: action 结构化分派；目录和显式探测使用原模型操作，覆盖仍走原 CAS，失败不解析正文或冒充成功。
+    # 函数用途: 处理获授权配置操作，将用户要求的联网测试与普通读取、保存明确分开。
     def execute(self, params: dict) -> ToolHandlerOutcome:
         action = str(params.get("action") or "view").strip().lower()
         if action in {"decision_read", "decision_patch", "decision_reset"}:
             return self._decision(action.removeprefix("decision_"), params)
+        if action in {"decision_models", "decision_probe"}:
+            return self._decision_model_operation(action, params)
         key = str(params.get("key") or "").strip()
         if action == "view":
             return self._view(key)
@@ -172,6 +180,51 @@ class UserConfigTool(BaseTool):
             return ToolHandlerOutcome("user_config", False, "配置存储读写失败，请重新读取核对是否保存。", error_code="TOOL_PERSISTENCE_FAILED", effect_outcome="unknown")
         report["scope_resolution"] = {"source": "current_runner_context", "effective": {"thread_id": thread_id, "scope": report["scope"]}}
         return ToolHandlerOutcome("user_config", True, json.dumps(report, ensure_ascii=False, sort_keys=True))
+
+    # LLM: 只转交原脱敏目录/原探测，不重建后端或配置器；拒绝显式身份和秘密，probe 预算必填，取消原样传播。
+    # 函数用途: 按当前可信会话列出决策配置或发起一次用户要求的测试；真实测试失败保持工具失败及结构化报告。
+    def _decision_model_operation(self, operation: str, params: dict) -> ToolHandlerOutcome:
+        from ..agent_core.runner.context import current_task_attributes
+        from ..settings.decision_settings_schema import (
+            DecisionSettingsAccessError,
+            positive_seconds,
+            profile_reference,
+        )
+        from ..settings.model_profiles import execute_model_profile_operation
+        from ..settings.model_provider_schema import ModelProfileError
+
+        if self._agent is None:
+            return ToolHandlerOutcome("user_config", False, "缺少可信用户配置上下文。", error_code="TOOL_PERMISSION_DENIED", effect_outcome="not_started")
+        attrs = current_task_attributes(self._agent) or {}
+        thread = attrs.get("agent_thread_id") or attrs.get("conversation_thread_id") or ""
+        thread_id = thread.strip() if type(thread) is str else ""
+        try:
+            required = {"action", "profile_id", "timeout_seconds"} if operation == "decision_probe" else {"action"}
+            if set(params) != required:
+                raise ModelProfileError("决策目录仅接受 action；连接测试必须且只能填写 action、profile_id、timeout_seconds，不能指定身份或连接凭据。")
+            payload = {}
+            if operation == "decision_probe":
+                payload = {"profile_id": profile_reference(params["profile_id"]), "timeout_seconds": positive_seconds(params["timeout_seconds"])}
+                if not payload["profile_id"]:
+                    raise ModelProfileError("连接测试需要明确选择已保存的决策模型编号。")
+                if not thread_id:
+                    raise DecisionSettingsAccessError("当前运行没有可信会话，不能发起决策连接测试。")
+            report = execute_model_profile_operation(self._agent, operation, payload, thread_id=thread_id)
+        except InterruptedError:
+            raise
+        except DecisionSettingsAccessError as exc:
+            return ToolHandlerOutcome("user_config", False, str(exc), error_code="TOOL_PERMISSION_DENIED", effect_outcome="not_started")
+        except ModelProfileError as exc:
+            return ToolHandlerOutcome("user_config", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS", effect_outcome="not_started")
+        except OSError:
+            return ToolHandlerOutcome("user_config", False, "决策配置读取或测试记录保存失败，请重新读取核对。", error_code="TOOL_PERSISTENCE_FAILED", effect_outcome="unknown")
+        scope = "thread" if operation == "decision_probe" else "owner"
+        report = {**report, "scope_resolution": {"source": "current_runner_context", "effective": {"thread_id": thread_id, "scope": scope}}}
+        output = json.dumps(report, ensure_ascii=False, sort_keys=True)
+        if report.get("ok") is not True:
+            return ToolHandlerOutcome("user_config", False, output, result_envelope={"decision_report": report},
+                error_code="TOOL_EXECUTION_FAILED", reported_error_code="DECISION_PROBE_FAILED", effect_outcome="unknown")
+        return ToolHandlerOutcome("user_config", True, output, result_envelope={"decision_report": report})
 
     # 函数用途: 组装读取结果：单键给生效值/来源，未给键则给白名单与安全边界清单。
     def _view(self, key: str) -> ToolHandlerOutcome:

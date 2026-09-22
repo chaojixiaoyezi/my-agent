@@ -1,5 +1,5 @@
-# LLM: 本模块是 owner 私有模型配置的唯一文件源；子代理仅可显式引用已保存配置，密钥不进入公开投影。
-# 模块用途: 保存用户模型配置，解析主/子代理的模型选择；派工不能新增配置或改变主代理选择。
+# LLM: 原模型目录仍是唯一文件源；决策读写/探测在生成选择前独立分派，子代理只引用已存配置，密钥不进投影。
+# 模块用途: 管理主/子模型与决策入口；配置、目录和显式测试各守原权限，派工不能新增连接或切换主模型。
 
 from __future__ import annotations
 
@@ -118,8 +118,24 @@ def public_model_profiles(data: dict, config: object) -> dict:
 
 
 # LLM: 目录写入锁内原子进行；select 只改 thread，set_default 只改未来默认，set_shared 只改管理员发布引用。
-# 函数用途: 管理会话选择、用户默认、共享及显式登录；网络只在认证或 discover/probe 动作发生，回执不含令牌。
+# 函数用途: 管理模型与决策设置；决策操作不初始化生成选择，网络只在显式认证/目录/连接测试时发生，回执不含令牌。
 def execute_model_profile_operation(agent: object, operation: str, payload: dict, *, thread_id: str = "") -> dict:
+    decision_operations = {"decision_read": "read", "decision_patch": "patch", "decision_reset": "reset"}
+    if operation in decision_operations:
+        from .decision_settings import execute_decision_settings_operation
+
+        return execute_decision_settings_operation(agent, decision_operations[operation], payload.get("decision", {}), thread_id=thread_id)
+    if operation == "decision_models":
+        from .decision_settings import execute_decision_settings_operation
+
+        execute_decision_settings_operation(agent, "read", payload.get("decision", {}), thread_id=thread_id)
+        view = _model_selection_projection(agent, read_model_profiles(model_profiles_path(agent.home_paths)), "")
+        return {"ok": True, "scope": "owner", "profiles": [row for row in view["profiles"] if row.get("capability") == "decision"],
+                **({"warning": view["warning"]} if view.get("warning") else {})}
+    if operation == "decision_probe":
+        from .decision_probe import probe_decision_model
+
+        return probe_decision_model(agent, payload, thread_id=thread_id)
     path = model_profiles_path(agent.home_paths)
     if thread_id:
         from .thread_model_selection import thread_model_profile_id

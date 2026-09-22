@@ -1,3 +1,5 @@
+# LLM: 辅助生成与独立用量结算复用原模型账；显式决策探测只复用结算，不进入生成接口或另建持久账。
+# 模块用途: 记录 Compact 等辅助模型调用，并结算独立操作的用量；展示故障不改变调用结果。
 """统一记录 Compact 等非工具循环模型调用。"""
 
 from __future__ import annotations
@@ -272,8 +274,8 @@ def _record_auxiliary_cost(
 
 
 # LLM: 独立 request_id 的辅助调用提交原累计快照；store 按范围/摘要生成幂等身份，不用物理调用数猜快照版本。
-# 函数用途: 保存独立压缩的模型消耗并刷新显示；迟到事实只补增量，保存失败不改变压缩结果。
-def settle_standalone_model_usage(request: object) -> None:
+# 函数用途: 保存独立压缩或显式探测的模型消耗；只更新用量时保留当前生成状态，保存失败不改变调用结果。
+def settle_standalone_model_usage(request: object, *, source: str = "conversation_compact", usage_only: bool = False) -> None:
     from ..agent_core.model.call_runtime import model_call_summary
     from .model_metrics import publish_model_metrics
 
@@ -290,14 +292,14 @@ def settle_standalone_model_usage(request: object) -> None:
         append({
             "thread_id": thread_id, "request_id": request.request_id,
             "run_id": request.run_id, "task_id": request.task_id,
-            "source": "conversation_compact", "model_calls": summary, "now": time.time(),
+            "source": source, "model_calls": summary, "now": time.time(),
         })
         params = SimpleNamespace(request_id=request.request_id, run_id=request.run_id,
             live_archive_state={}, task_attributes={"conversation_thread_id": thread_id})
         # 已结束的独立压缩没有工具执行权；没有原始响应就不伪造最近缓存与速度。
-        publish_model_metrics(agent, params, pending=False, tool_count=0)
+        publish_model_metrics(agent, params, pending=False, tool_count=0, usage_only=usage_only)
     except Exception:
-        logging.getLogger(__name__).warning("独立模型调用用量保存失败；压缩结果不受影响", exc_info=False)
+        logging.getLogger(__name__).warning("独立模型调用用量保存失败；调用结果不受影响", exc_info=False)
 
 
 # LLM: Purpose is a bounded diagnostic label, not a routing decision or prompt-derived status.

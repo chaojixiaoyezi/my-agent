@@ -157,6 +157,26 @@ HTTP 尝试可补记为物理事实。显式 retain 句柄只在原账本保留�
 决策不占普通模型轮数、不覆盖最近生成缓存/工具/速度；后台用量文件变化令原显示基数失效。
 这些是本地统计与设置接线；实际执行消费者、设置菜单及真实 TUI 仍按完整 TODO 单独验收。
 
+### 原设置菜单与显式测试（TODO11 本地接线）
+
+原 `/model` 的“决策模型设置”复用 provider/model 表单，保存仍不联网。
+`execute_model_profile_operation` 在普通生成模型初始化之前分派 `decision_read/patch/reset`，
+嵌套 `decision` 参数交共用服务；身份只取原 Gateway 认证会话或本地会话解析。
+`decision_models` 只返回原 owner/已共享 decision 配置的脱敏投影；原 `user_config` 可用它选择已保存引用。
+`decision_probe` 只在显式动作时测试已保存且可用的连接，参数为 profile_id 与有限正 timeout_seconds；
+不保存开关、不替换主模型、不附聊天材料。原生单题走同一后端构造、原有界 worker/准入/身份头/账本。
+成功仅证明本次连接与协议，并清除该准确连接的临时冷却；其他 owner/连接不受影响。
+探测使用独立 request_id，原 standalone 用量结算追加到原会话账本；只刷新用量，不覆盖主模型轮次、pending 或工具状态。
+未知输入为 null，供应商原输出内部保留；菜单仅展示输入，输出留白，无价格。
+前台 HTTP 等待为用户探测秒数加 10 秒运输余量，模型自身仍使用准备前冻结的绝对期限且不重试。
+本地文件事务不承诺强制抢占；没有新增后台结算器、配置文件或第二份调用账。
+
+配置读回新增 field_scopes；Curator 的 runtime_scope 固定 owner_background，只读 owner enabled/profile/后台预算。
+线程不再允许新增 background_timeout_seconds 或 points.curator.*；历史覆盖仍可读，并能按原双层 CAS reset 清理。
+投影与服务共用 POINT_RUNTIME_SCOPES；错误 point/stage 范围不发请求。前台修改不延长原已开始阶段。
+菜单每次保存一字段，冲突后重读，不自动重放。my-agent 的测试动作仍走原工具权限，不开放凭据写入。
+本地真实按键、原设置和双 HTTP 组合与收费模型/安装版 TUI 分别验收，详见 TODO11 交接。
+
 ### 4.2 已实现的可选服务边界
 
 `conversation/decision_service.py` 提供 `begin_decision_stage` 和 `decide`，宿主在准备额外材料前冻结一次阶段；
@@ -450,3 +470,17 @@ test_orchestration_create_subagents_idempotency.py、test_memory_curator_v2.py�
 
 建议下一步：先确认 P1 的共享入口归属，完成“默认关闭 + 用户/agent 共用可调时间与开关 + 可取消的短期限决策 + 故障走原流程”的最小切片。
 插件线继续其当前工作；本线先做协议、假服务与记忆输入准备，避免等待共享文件时停工，也避免提前改对方代码。
+
+## TODO10 上下文减量实施约定（2026-09-22，实施中）
+
+不能以“增加推荐文字但仍发送全部名卡/schema”代替减量目标。原Skill快照/工具Registry仍是唯一授权来源；
+宿主只为当前工作片建立不可变展示投影。None保持旧字节路径；关闭、观察、失败和非选择仍用原输入。
+Skill选中/明确required名卡进入原动态推荐段，稳定区只保留固定发现说明；省略项可从原skill_search找回。
+任务局部范围仅在显式非None投影时展示当前run受限快照的名卡，不恢复owner人格/项目等隔离材料；isolated/control_plane保持不注入。
+工具短清单只影响展示，不约束搜索。progressive仅收起原配置明确可选类别的未选中direct schema；
+原发现入口、显式allowed和真实loaded保持，原tool_search必须能返回被收起项的完整原schema，否则拒绝该隐藏投影。
+不暗改默认deferred类别，不伪造loaded或权限，不跟随同名插件新activation/transport。
+原ToolRuntimeSnapshot新增的host-only展示字段不改变注册snapshot_hash，真实执行仍在原ToolExecutor/MCP发送前准入。
+context_policy计划区分metadata/progressive，可选类别由原capability配置及同一决策设置入口管理；默认关闭，具体配置与测试随实现同步。
+普通自然语言没有可信required refs时，不靠字符串匹配宣称“已识别明确工具”；保留完整用户需求与原搜索找回路径。
+验证要比较真实provider输入字节/token、原搜索可达、撤销和实际cache事实，不能只检查建议对象或承诺缓存收益。

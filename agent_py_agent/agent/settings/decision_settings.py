@@ -1,5 +1,5 @@
-# LLM: 界面/工具共用 owner→thread 锁顺序及 CAS；只修改原配置覆盖，不发网络请求、不创建 Agent、不重置阶段预算。
-# 模块用途: 在原模型目录和原会话存储读取、字段修改或恢复继承，并读回有效值及版本。
+# LLM: 界面/工具共用 owner→thread 锁顺序及 CAS；新 patch 遵守原 schema 范围，reset 可清理历史线程后台字段；不发网络或重置阶段预算。
+# 模块用途: 在原模型目录和会话存储修改决策覆盖，按后台或会话作用范围读回有效值及版本。
 from __future__ import annotations
 
 import logging
@@ -47,16 +47,16 @@ def _check_revision(payload: dict, owner: dict, thread: dict) -> None:
         raise DecisionSettingsConflict("决策设置已被修改，请重新读取后再提交。")
 
 
-# LLM: 只检查本次写入的 profile 引用，不让已有失效服务阻止关闭；恢复继承通过删除覆盖实现。
-# 函数用途: 生成下一版本字段覆盖，不修改默认值或调用方传入对象。
-def _patch_settings(context: object, data: dict, current: dict, operation: str, payload: dict) -> dict:
+# LLM: 新写字段使用宿主已校验 scope；reset 仅校验字段身份以清理历史不适用覆盖，失效 profile 不得阻止关闭或删除。
+# 函数用途: 为原事务生成下一版本字段覆盖，拒绝新增线程后台设置，不修改传入对象或默认值。
+def _patch_settings(context: object, data: dict, current: dict, operation: str, payload: dict, *, scope: str) -> dict:
     overrides = dict(current["overrides"])
     if operation == "patch":
         changes = payload.get("changes")
         if type(changes) is not dict or not changes or len(changes) > 20:
             raise ModelProfileError("字段修改需要非空 changes 对象。")
         for key, value in changes.items():
-            normalized = validate_decision_field(key, value)
+            normalized = validate_decision_field(key, value, scope=scope)
             if key.endswith("profile_id") and normalized:
                 decision_profile(context, data, normalized, require_enabled=False)
             overrides[key] = normalized
@@ -65,7 +65,7 @@ def _patch_settings(context: object, data: dict, current: dict, operation: str, 
         if type(fields) is not list or not fields or len(fields) > 20 or any(type(key) is not str for key in fields):
             raise ModelProfileError("恢复继承需要非空 fields 字段路径列表。")
         for key in fields:
-            # 用同一字段白名单检查路径；删除允许当前没有覆盖的已登记字段。
+            # 恢复继承不限制当前可写范围，否则旧版本遗留的线程后台字段将无法清理。
             sample = False if key == "enabled" else "off" if key.endswith(".mode") else "" if key.endswith("profile_id") else 1.0
             validate_decision_field(key, sample)
             overrides.pop(key, None)
@@ -93,27 +93,27 @@ def _check_thread_owner(context: object, thread: object) -> None:
         raise DecisionSettingsAccessError("决策设置缺少已验证的会话归属。")
 
 
-# LLM: owner 锁持有期间调用原 thread.update_atomic；回执由锁内成功提交值产生，不受后续窗口写入污染。
-# 函数用途: 原子修改会话临时覆盖，保留并发 Compact、模型选择及其他线程字段。
+# LLM: owner 锁持有期间调用原 thread.update_atomic；范围失败和 CAS 失败均不写回，回执使用锁内成功提交值。
+# 函数用途: 原子修改允许的会话临时字段或清理旧覆盖，保留并发 Compact、模型选择和其他线程状态。
 def _update_thread(context: object, data: dict, thread_id: str, operation: str, payload: dict) -> dict:
     before = {}
 
-    # LLM: 原 thread 锁内核对身份及两层版本；仅替换 decision_settings，逻辑时钟和执行状态不在此修改。
-    # 函数用途: 把字段 patch/reset 应用到最新线程快照。
+    # LLM: 原 thread 锁内核对身份及两层版本，patch 使用准确 thread 范围；仅替换 decision_settings。
+    # 函数用途: 将允许的字段修改或旧覆盖清理应用到最新线程快照，保持其他状态不变。
     def update(latest):
         _check_thread_owner(context, latest)
         current = validate_decision_settings(latest.decision_settings)
         _check_revision(payload, data["decision_settings"], current)
         before.update(decision_settings_projection(context, data, latest, scope="thread"))
-        return replace(latest, decision_settings=_patch_settings(context, data, current, operation, payload))
+        return replace(latest, decision_settings=_patch_settings(context, data, current, operation, payload, scope="thread"))
 
     saved = context.conversation_store.threads.update_atomic(thread_id, update)
     result = decision_settings_projection(context, data, saved, scope="thread")
     return {**result, "before": before}
 
 
-# LLM: 原 owner 锁下完成 CAS/字段修改/原子保存/读回；若携带 thread，上层同时持有原 thread 锁以冻结继承版本。
-# 函数用途: 修改长期覆盖后读回正式文件，不复制默认值、密钥或整份用户配置到回执。
+# LLM: 原 owner 锁下按 owner 可写字段执行 CAS/保存/读回；携带 thread 时上层持有原 thread 锁以冻结继承版本。
+# 函数用途: 修改用户长期覆盖后读回正式文件；线程身份不会把本次 owner 写入变成临时覆盖。
 def _owner_operation(context: object, path, data: dict, thread: object, operation: str, payload: dict, scope: str) -> dict:
     before = decision_settings_projection(context, data, thread, scope=scope)
     if operation == "read":
@@ -121,7 +121,7 @@ def _owner_operation(context: object, path, data: dict, thread: object, operatio
     temporary = thread.decision_settings if thread is not None else empty_decision_settings()
     _check_revision(payload, data["decision_settings"], temporary)
     updated = deepcopy(data)
-    updated["decision_settings"] = _patch_settings(context, data, data["decision_settings"], operation, payload)
+    updated["decision_settings"] = _patch_settings(context, data, data["decision_settings"], operation, payload, scope="owner")
     _save_profiles(path, updated)
     return {**decision_settings_projection(context, read_model_profiles(path), thread, scope=scope), "before": before}
 

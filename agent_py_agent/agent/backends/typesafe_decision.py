@@ -1,5 +1,5 @@
 # LLM: 原生 decide 独立于生成后端，只经原 HTTP 发送一次；调用者负责准入、完整等待期限、原账本与应用权。
-# 模块用途: 用标准库传输接入 TypeSafe Jev，不安装 harness/SDK，不生成聊天正文或执行工具。
+# 模块用途: 为正常增强和显式测试共用原决策配置映射与标准库传输，不安装 harness/SDK、不生成聊天或执行工具。
 from __future__ import annotations
 
 import math
@@ -57,3 +57,11 @@ class TypesafeDecisionBackend:
         result = parse_typesafe_response(request, self.model_name, raw)
         remaining_deadline_seconds(deadline)
         return result
+
+
+# LLM: 接入服务和显式探测共用同一配置映射；profile必须已由原owner目录解析，不在此验证权限或读取配置。
+# 函数用途: 从已授权的原决策配置创建无网络后端，避免连接头和窗口字段在两个入口分叉。
+def decision_backend_from_profile(config: dict) -> TypesafeDecisionBackend:
+    return TypesafeDecisionBackend(BackendOptions(api_base=config["api_base"], api_key=config["api_key"],
+        model_name=config["model_name"], context_window_tokens=config["model_context_window_tokens"],
+        custom_headers=config["model_custom_headers"], session_header=config["model_session_header"]))

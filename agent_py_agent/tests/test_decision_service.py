@@ -89,7 +89,7 @@ def test_off_never_builds_backend_or_request(prepared, monkeypatch):
     host, params, _ = prepared
     patch(host, {"enabled": False})
     stage = service.begin_decision_stage(host, params, operation_id="batch")
-    monkeypatch.setattr(service, "_backend", lambda *_: pytest.fail("off cannot construct backend"))
+    monkeypatch.setattr(service, "decision_backend_from_profile", lambda *_: pytest.fail("off cannot construct backend"))
     monkeypatch.setattr(service, "DecisionRequest", lambda *_: pytest.fail("off cannot construct request"))
     assert decide(host, params, stage, state=object()).status == "off"
 

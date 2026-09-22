@@ -63,6 +63,7 @@ agent_py_agent/
 |   |   |-- tui_plugin_commands.py     # 输入候选版本绑定与不阻塞输入的插件命令分派
 |   |   |-- slash_command_types.py     # CLI 命令处理器的可信上下文，不另设命令目录
 |   |   |-- tui_input.py                # 真实 slash/path 补全、菜单、history suggest 与排队占位投影
+|   |   |-- tui_decision_menu.py        # 原模型菜单的决策范围、模式、秒数、恢复继承和显式原生连接测试
 |   |   |-- tui_model_menu.py           # /model 新增/选择/退出浮层，私密密钥与显式上下文窗口
 |   |   |-- tui_model_auth.py           # 私密设备码登录、通用参数编辑、取消及退出账号
 |   |   |-- tui_model_metrics.py        # Context 下方模型轮、工具数、最近缓存、会话累计与输出速度的一行统计
@@ -348,6 +349,7 @@ agent_py_agent/
 |   |-- settings/                      # AgentConfig、加载、来源账本、runtime scope config
 |   |   |-- user_config_capability.py  # 用户可自助修改配置的唯一白名单/校验/生效时机；安全边界结构性拒绝
 |   |   |-- model_profiles.py           # owner 私有模型配置唯一文件源、脱敏列表及子代理创建时引用
+|   |   |-- decision_probe.py           # 显式原生连接测试，共用后端/worker/账本，不改开关或聊天选择
 |   |   |-- decision_settings.py        # 原 owner/thread 决策覆盖共用读取、字段修改、恢复继承与双版本 CAS
 |   |   |-- decision_settings_schema.py # 决策字段/范围校验及旧会话覆盖迁移，不持有默认值
 |   |   |-- decision_settings_defaults.py # 投影原 Agent/能力/记忆配置默认值和继承来源
@@ -449,6 +451,11 @@ agent_py_agent/
 |       `-- tool_protocol_adapter.py   # native 事件或显式完整 text 帧到 canonical ToolCall 的唯一适配口
 |-- tests/                             # 单元、集成、真实链路回归
 |   |-- test_decision_model_profiles.py # 决策用途隔离、旧目录迁移、共享撤销与生成选择不退化
+|   |-- test_decision_model_operations.py # 原模型操作中的决策设置、原生HTTP测试和用量结算
+|   |-- test_decision_gateway_transport.py # 原菜单运输到本地Gateway服务和原生HTTP的组合
+|   |-- test_decision_settings_scope.py  # owner后台范围、前台覆盖隔离和历史覆盖清理
+|   |-- test_tui_decision_menu.py        # 真实按键的决策设置、CAS、取消和显式测试
+|   |-- test_user_config_decision_operations.py # 主代理读取已保存决策目录及显式测试，拒绝伪造身份
 |   |-- test_decision_settings.py       # 决策覆盖继承、双版本 CAS、权限隔离及原配置迁移
 |   |-- test_decision_settings_notifications.py # 设置逆序通知、覆盖恢复继承及精准取消
 |   |-- test_decision_service.py        # 决策阶段预算、冷却、设置复核、关闭与旧请求隔离
@@ -858,3 +865,11 @@ docs/
 - `agent_py_agent/agent/memory_store/decision_recall.py`：原召回预算后排序及消费前来源复核，不扩大权限或新增记忆存储。
 - `docs/tasks/DECISION_MODEL_P2_SUBAGENT_HANDOFF.md`：子代理选择生产接线、联合验证和完整窗口待验边界。
 - `docs/tasks/DECISION_MODEL_P3_RECALL_HANDOFF.md`：记忆排序、来源撤销、原本轮复用及本地验证交接。
+
+- `agent_py_agent/agent/settings/decision_probe.py`：显式连接测试，复用唯一原生后端、调用账和独立用量结算，不改变设置。
+- `agent_py_agent/cli/chat_parts/tui_decision_menu.py`：从原 `/model` 进入的共用设置表单和探测回执；当前有效值与来源由原服务给出。
+- `docs/tasks/DECISION_MODEL_SETTINGS_SCOPE_HANDOFF.md`、`DECISION_MODEL_TUI_HANDOFF.md`：后台范围和真实按键设置的本地证据。
+
+- `docs/tasks/DECISION_MODEL_SETTINGS_HANDOFF.md`：原模型操作、原生连接测试、双HTTP运输与独立用量结算的组合交接。
+
+- `docs/tasks/DECISION_MODEL_USER_CONFIG_OPERATIONS_HANDOFF.md`：原主代理配置工具的脱敏决策目录、显式连接测试与真实工具状态。

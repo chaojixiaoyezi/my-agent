@@ -1,5 +1,5 @@
-# LLM: 可选决策只有建议权；阶段期限来自原业务batch，显式owner后台不冒用材料中的thread，设置与模型引用发送前后复核。
-# 模块用途: 在原模型配置、原有界调用和原账本之外提供无业务写入权的决策策略边界。
+# LLM: 可选决策只有建议权；接入点运行范围复用设置schema，后台不冒用材料thread，阶段期限和配置引用发送前后复核。
+# 模块用途: 为原业务批次执行准确会话或用户后台范围的可选决策，不授予业务写入权。
 from __future__ import annotations
 
 import hashlib
@@ -10,7 +10,6 @@ import uuid
 from dataclasses import dataclass, field
 
 from ..agent_core.runner.context import current_subagent_run_id, current_task_attributes
-from ..backends.base import BackendOptions
 from ..backends.bounded_call import BoundedCallBusyError, BoundedCallTimeoutError
 from ..backends.decision_protocol import (
     DecisionBinding,
@@ -23,12 +22,12 @@ from ..backends.errors import (
     ProviderRecoverableError,
     ProviderTimeoutError,
 )
-from ..backends.typesafe_decision import TypesafeDecisionBackend
+from ..backends.typesafe_decision import decision_backend_from_profile
 from ..concurrency.interrupt import InterruptHandle, is_interrupted
 from ..llm_scale.concurrency import ConcurrencyTimeout
 from ..settings.decision_settings import execute_decision_settings_operation
 from ..settings.decision_settings_projection import decision_profile
-from ..settings.decision_settings_schema import POINTS
+from ..settings.decision_settings_schema import POINT_RUNTIME_SCOPES
 from ..settings.model_profiles import model_profiles_path, read_model_profiles
 from ..settings.model_provider_schema import ModelProfileError
 from ..tooling.cancellation import ToolCancelled, raise_if_cancelled
@@ -128,8 +127,8 @@ def _check_interrupted() -> None:
         raise InterruptedError("当前决策随用户任务停止。")
 
 
-# LLM: 开始时刻在读配置前取得；原锁非阻塞，后台scope读取owner设置/后台预算，宿主caller期限只缩短，不能获得额外租约。
-# 函数用途: 在额外输入准备前建立一次会话或用户后台批次预算；配置错误保留原业务，不创建会话补身份。
+# LLM: 开始时刻在读配置前取得；非阻塞读原设置，后台使用owner预算且只发布同scope接入点，caller期限只能缩短。
+# 函数用途: 在输入准备前建立准确会话或用户后台批次预算；无效配置保留原业务，不创建身份或额外租约。
 def begin_decision_stage(agent: object, params: object, *, operation_id: str, caller_deadline: float | None = None,
                          scope: str = "thread") -> DecisionStage:
     started = time.monotonic()
@@ -146,7 +145,8 @@ def begin_decision_stage(agent: object, params: object, *, operation_id: str, ca
         if caller is not None:
             deadline = min(deadline, caller)
         _check_interrupted()
-        points = tuple(point for point, row in settings["effective"]["points"].items() if row["effective_mode"] != "off")
+        points = tuple(point for point, row in settings["effective"]["points"].items()
+                       if row["effective_mode"] != "off" and POINT_RUNTIME_SCOPES[point] == scope)
         return DecisionStage(operation_id, *identity, started, deadline, scope=scope, enabled_points=points)
     except (InterruptedError, ToolCancelled):
         raise
@@ -191,28 +191,22 @@ def _stale(agent: object, params: object, stage: DecisionStage, point: str, revi
     return ""
 
 
-# LLM: 原配置被固定成 BackendOptions，TypeSafe 仍不实现 generate；构造无网络，采样字段不进入决策协议。
-# 函数用途: 构造一次已授权决策连接的轻量后端快照。
-def _backend(config: dict) -> TypesafeDecisionBackend:
-    return TypesafeDecisionBackend(BackendOptions(api_base=config["api_base"], api_key=config["api_key"],
-        model_name=config["model_name"], context_window_tokens=config["model_context_window_tokens"],
-        custom_headers=config["model_custom_headers"], session_header=config["model_session_header"]))
-
-
-# LLM: 此入口只返回建议；caller 独占逻辑收口，provider调用/原账本/有界worker全由原 decision_model_call 负责。
-# 函数用途: 在批次剩余预算内执行一次可选决策，观察不应用，所有普通失败保留原方案。
+# LLM: 发送前按唯一schema拒绝接入点与stage范围不符；caller独占逻辑收口，provider/账本/worker仍由原调用边界负责。
+# 函数用途: 在同一合法范围的批次剩余预算内请求建议，观察不应用，普通失败保留原方案。
 def decide(agent: object, params: object, stage: DecisionStage, *, point: str, state: object, questions: dict,
            candidates_revision: str, source_refs: tuple[str, ...] = (), caller_deadline: float | None = None,
            explicit_retry: bool = False) -> DecisionOutcome:
     _check_interrupted()
     mode = "off"
     try:
-        if type(point) is not str or point not in POINTS or type(explicit_retry) is not bool:
+        if type(point) is not str or point not in POINT_RUNTIME_SCOPES or type(explicit_retry) is not bool:
             raise DecisionInputError("决策接入点或重试标志无效。")
         if not isinstance(stage, DecisionStage) or _identity(agent, params, scope=stage.scope) != (stage.owner_ref, stage.thread_id, stage.run_id, stage.task_id):
             return DecisionOutcome(mode, "stale", reason="identity_changed")
         if stage.error_code:
             return DecisionOutcome(mode, "error" if stage.error_code == "settings_busy" else "configuration_required", reason=stage.error_code)
+        if POINT_RUNTIME_SCOPES[point] != stage.scope:
+            raise DecisionInputError("决策接入点与本次运行范围不匹配。")
         started = time.monotonic()
         caller = _deadline(caller_deadline)
         settings, row, revision, config = _snapshot(agent, stage.thread_id, point)
@@ -232,7 +226,7 @@ def decide(agent: object, params: object, stage: DecisionStage, *, point: str, s
         binding = DecisionBinding(point, stage.owner_ref, stage.operation_id, revision, candidates_revision,
             stage.thread_id, stage.run_id, stage.task_id, source_refs)
         request = DecisionRequest(binding, state, questions)
-        backend = _backend(config)
+        backend = decision_backend_from_profile(config)
         active = ActiveDecision(stage.owner_ref, stage.thread_id, point, InterruptHandle(), agent, settings)
         token = uuid.uuid4().hex
         if not register_active(token, active):

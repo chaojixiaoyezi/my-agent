@@ -290,3 +290,6 @@ task workspace 摘要同步）同样改用它，避免"读时切开、写回落�
 
 上述验证限本地 fake 决策、原有界 worker/账本及原提取/提交组合；真实 Jev 质量、服务端时延、实际 TUI
 和部署尚未验收，不能据此宣称正式记忆提取质量提升。
+
+Curator 设置读回的 `runtime_scope=owner_background` 与实际服务一致：后台阶段预算不受前台 stage_timeout_seconds 限制，
+线程 enabled/profile 不覆盖 owner 后台有效值。历史线程后台覆盖只展示供清理，实际标注不消费它们。
