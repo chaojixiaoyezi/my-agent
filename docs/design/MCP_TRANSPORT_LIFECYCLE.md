@@ -40,8 +40,28 @@
 清理回执只证明本次可观察并核对的进程树；没有额外 OS 隔离的任意脱离/隐藏进程不获保证。
 读线程在自己的 finally 关闭流，收尾有界等待且不等待自身；明确关闭成功后移除退出回调引用。
 
-这一片仍是进程内的通用 MCP 生命周期。唯一安装表的[持久激活 CAS](PLUGIN_ACTIVATION.md)已有本地实现，
-但原操作/资源登记、审批后及发送前的插件准入尚未与它接通；不能以关闭一个 client 代替 owner 范围的持久撤销。
+## 固定激活与原托管进程
+
+本地内部接线中，`MCPStdioClient` 可由可信宿主绑定 `PluginActivationRef`，整个客户端只能沿原代启动和重连。
+插件使用原 BackgroundLaunch/host/ProcessSessionStore，普通已配置 MCP 保留原进程树路径；插件启动失败不回退裸 Popen。
+stdio 的 stdout/stderr 各交给一个 UTF-8 TextIOWrapper，之后沿原有字符上限、脱敏和 reader 关闭归属；stdin 仍发送原始字节。
+Transport 固定真实托管 Popen、原 record/store 与出生身份，不能将共享 Gateway PID 标成可清理的插件 host。
+清理直接返回原 `ProcessSessionCleanup`；提交/redo 异常继续携带原报告，UNKNOWN 禁止替代。
+启动后、Transport 接管前的失败同样回收原句柄和管道；该阶段清理未确认时保留异常，stop 不能改报 not_started。
+
+launcher 与独立 host 从可信 root/owner/scope 还原同一安装表，不从工作目录或首个任务猜用户。
+预留、Popen、host 创建 child 和交接前在原资源锁内复查；只有 preparing/active 可以启动，revoked 永久拒绝。
+撤销组合顺序为：原安装 CAS 提交 revoked 并释放安装锁，再原资源 Store 冻结该代，最后锁外精确清理。
+这条完整管理组合尚待实现；不能用单个 client.stop 替代 owner 范围的持久撤销和资源证明。
+
+发送在 request/write 队列后取得原资源锁，再取本地 admission_lock，复查原 session、激活和本次 executor 权限。
+等待资源锁可响应原调用取消/期限和连接关闭，不持 admission_lock 排队；锁内不等待协议响应。
+原目录锁仅在等待/准入前调用 wait_check；取得锁后的 redo/提交保持完整，取消不截断事务。
+initialize、initialized 和 tools/list 允许同代 preparing；业务调用只接受 active，普通未知方法不能借准备状态执行。
+原代理冻结发现 transport，重连后需发布新代理，旧 Schema 不会自动指向新连接。
+未创建 writer 的拒绝只结束本次调用，并以结构化 `effect_outcome=not_started` 进入原操作账。
+writer 已启动则可能收到部分帧，错误继续 UNKNOWN；不能按错误码或文案把所有取消/超时都认作未执行。
+目录发布前复查 active，但内存目录仍是投影，真正执行必须再次准入；完整静态 tools/list 匹配和公开装卸仍待组合。
 
 ## 参考与验收
 

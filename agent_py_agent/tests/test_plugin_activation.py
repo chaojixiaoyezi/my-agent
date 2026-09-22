@@ -51,7 +51,7 @@ def test_prepare_publish_revoke_share_one_authority_and_old_snapshot_stays_revok
     prepared = store.change_activation(request)
     entry = prepared.installation
     assert entry.revision == 2 and not entry.enabled
-    assert store.require_activation(entry.manifest.plugin_id, entry.activation_id, preparing=True) == entry
+    assert store.require_activation(entry.manifest.plugin_id, entry.activation_id, phases=frozenset({"preparing"})) == entry
     with pytest.raises(PluginInstallationError, match="不可用"):
         store.require_activation(entry.manifest.plugin_id, entry.activation_id)
     published = store.change_activation(publication(prepared)).installation
@@ -63,9 +63,9 @@ def test_prepare_publish_revoke_share_one_authority_and_old_snapshot_stays_revok
     assert stopped.activation.plan == entry.activation.plan
     assert store.package_bytes(stopped) == store.package_bytes(original)
     assert published.enabled  # 冻结快照没有被原地修改，执行必须重新核对权威。
-    for preparing in (False, True):
+    for phases in (frozenset({"active"}), frozenset({"preparing"}), frozenset({"preparing", "active"})):
         with pytest.raises(PluginInstallationError, match="不可用"):
-            store.require_activation(published.manifest.plugin_id, published.activation_id, preparing=preparing)
+            store.require_activation(published.manifest.plugin_id, published.activation_id, phases=phases)
     payload = json.loads((store.root / "installations.json").read_text())
     assert payload["schema_version"] == "plugin_installations.v3"
     assert "enabled" not in payload["installations"][0] and "activation_id" not in payload["installations"][0]

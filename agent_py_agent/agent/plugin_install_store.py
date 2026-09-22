@@ -113,11 +113,13 @@ class PluginInstallStore:
             reserve_quota=request.action != "revoke",
         )
 
-    # LLM: 此读取不是调用准入锁；资源层须在自己的预留/发送临界区调用，并让撤销随后冻结该代已登记资源。
-    # 函数用途: 拒绝缺失、损坏、换代和已撤销的原激活，不能把旧快照刷新为新实现。
-    def require_activation(self, plugin_id: str, activation_id: str, *, preparing: bool = False) -> PluginInstallation:
+    # LLM: 此读取不是准入锁；资源层须在原预留/发送临界区调用，允许阶段只能选 preparing/active，不能授权 revoked。
+    # 函数用途: 拒绝缺失、损坏、换代及已撤销的原激活，握手可沿同一代跨越发布，业务默认只接受 active。
+    def require_activation(self, plugin_id: str, activation_id: str, *,
+                           phases: frozenset[str] = frozenset({"active"})) -> PluginInstallation:
+        if not isinstance(phases, frozenset) or not phases or not phases <= {"preparing", "active"}:
+            raise ValueError("插件准入阶段无效")
         entry = next((row for row in self.snapshot() if row.manifest.plugin_id == plugin_id), None)
-        phases = {"preparing"} if preparing else {"active"}
         if (entry is None or not activation_id or entry.activation_id != activation_id
                 or entry.activation is None or entry.activation.phase not in phases):
             raise PluginInstallationError("activation_unavailable", "原插件激活不可用或已撤销。")

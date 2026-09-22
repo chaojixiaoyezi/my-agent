@@ -28,8 +28,8 @@ from .process_session_store import ProcessSessionStore
 _HOST_POLL_SECONDS = 0.05
 
 
-# LLM: 只接收当前 v4 完整通道与寿命字段；环境只继承父进程，旧信封不补模式默认值，stdio 禁止日志预算。
-# 函数用途: 验证一次性交接文件及通道设置，损坏或通道寿命矛盾时不启动命令。
+# LLM: 只接收当前 v5 完整字段；激活引用必须明确有值或 null，环境只继承父进程，旧信封不补默认值。
+# 函数用途: 验证一次性交接文件和通道寿命，畸形或缺少激活字段时不启动命令。
 def _read_launch_spec(
     store: ProcessSessionStore, session_id: str, spec_path: Path
 ) -> dict[str, object]:
@@ -42,6 +42,7 @@ def _read_launch_spec(
         report.load_error
         or spec.get("schema") != LAUNCH_SPEC_SCHEMA
         or spec.get("session_id") != session_id
+        or "activation" not in spec
     ):
         raise ValueError("managed background launch identity conflict")
     if (
@@ -92,8 +93,8 @@ def _require_reservation(record: dict[str, object] | None) -> None:
         raise RuntimeError("managed background launcher unavailable")
 
 
-# LLM: 创建标记先提交，Popen 与 child 绑定同锁；stdio 继承后释放 host 端点，异常仍按真实副作用清理。
-# 函数用途: 启动并监控精确归属命令，让协议管道直接连到 child，保存同一资源账的终态。
+# LLM: 原资源锁内复查安装权威后才提交创建标记和 Popen；撤销后的冻结可看到所有已准入 child，异常保留真实清理事实。
+# 函数用途: 核对激活并启动精确归属命令，协议管道直连 child，终态仍写原资源账。
 def run_background_process_host(
     store: ProcessSessionStore, session_id: str, spec_path: Path
 ) -> int:
@@ -109,6 +110,7 @@ def run_background_process_host(
                 raise TimeoutError("managed background deadline")
             if (spec["io_mode"] == "stdio") != (record["output_file"] == ""):
                 raise ValueError("managed background output binding conflict")
+            _require_activation(spec, record, store)
             record = transaction.write({**record, "child_launch_started": True})
             # 留住未回收 child；短命令的出生身份必须先于任何 poll/wait 采集。
             with _child_stdio(spec, record) as streams:
@@ -149,6 +151,24 @@ def run_background_process_host(
             spec_path.unlink(missing_ok=True)
         except OSError:
             pass
+
+
+# LLM: 只读原安装表，不取其写锁；信封引用须匹配原 session 和原 Store，空引用不能替共享连接放行。
+# 函数用途: 在实际 child 创建前拒绝已停用、换代、跨用户或损坏的插件启动。
+def _require_activation(spec: dict, record: dict, store: ProcessSessionStore) -> None:
+    payload, scope = spec["activation"], record.get("activation_scope")
+    if payload is None:
+        if scope is not None:
+            raise ValueError("managed background activation reference missing")
+        return
+    from ..plugin_activation_ref import PluginActivationRef
+    from .process_session_store import process_session_store_root
+
+    activation = PluginActivationRef.from_payload(payload)
+    owner = activation.owner()
+    if scope != asdict(activation.scope) or store.root != process_session_store_root(owner.home_dir, owner.home_dir):
+        raise ValueError("managed background activation binding conflict")
+    activation.require(allow_preparing=True)
 
 
 # LLM: stdio 的 None 继承标准端点；日志关闭可抛错，调用方必须在退出上下文前拿到 Popen，保留精确清理权。

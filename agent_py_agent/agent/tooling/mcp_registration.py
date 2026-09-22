@@ -1,6 +1,6 @@
 
-# LLM: MCP 注册沿客户端固定连接发现并发布；临时失败不永久 stop，关闭后的共享客户端不得恢复，联测注册与权限视图。
-# 模块用途: 将远端工具变成原 ToolRegistry 的受控代理，并在连接仍有效时原子替换工具目录。
+# LLM: MCP 代理冻结发现连接并沿本次上下文复查权限；清理异常保留原资源事实，联测注册、共享视图和激活撤销。
+# 模块用途: 将远端工具接到原执行链，发布完整目录并阻止旧代理追随重连，未知清理不改报成功。
 from __future__ import annotations
 
 """把 MCP server 发现的工具动态注册进 my-agent 的 ToolRegistry。
@@ -52,10 +52,12 @@ from .models import (
     ResourceScopePolicy,
     ToolAvailability,
     ToolHandlerOutcome,
+    ToolInvocationContext,
     ToolModelHints,
     ToolModelSpec,
     ToolRuntimePolicy,
 )
+from .process_session_cleanup import ProcessSessionCleanupError
 
 logger = logging.getLogger(__name__)
 
@@ -111,37 +113,65 @@ class MCPProxyTool(BaseTool):
     ``MCPError.code`` 映射成 my-agent 错误码。
     """
 
+    # LLM: 可选 transport 是发现时的原实例，不能执行时重取新连接；本次调用权限不能保存在共享 proxy 上。
+    # 函数用途: 绑定工具声明、策略与原服务连接，不发请求或启动进程。
     def __init__(
         self,
         client: MCPStdioClient,
         remote_tool: str,
         model_spec: ToolModelSpec,
         runtime_policy: ToolRuntimePolicy,
+        *,
+        transport: MCPTransport | None = None,
     ):
         self.client = client
         self.remote_tool = remote_tool
         self.model_spec = model_spec
         self.runtime_policy = runtime_policy
+        self.transport = transport
 
-    # LLM: 只读取既有 stdio 进程状态，不自动重启或重新发现工具，防止列表查询产生子进程副作用。
-    # 函数用途: MCP server 掉线后立即从后续请求快照中隐藏对应 proxy。
+    # LLM: 只读原连接，不自动重启或跟随新的 current；目录可见不代替真正发送前的激活和任务权限检查。
+    # 函数用途: 隐藏已断开的原代理，防止新连接让旧工具声明重新可用。
     def availability(self) -> ToolAvailability:
         if self.client.is_running():
-            return ToolAvailability.ready()
+            try:
+                if self.transport is None or self.client.connection() is self.transport:
+                    return ToolAvailability.ready()
+            except MCPError:
+                pass
         return ToolAvailability.unavailable("MCP stdio server 当前未运行")
 
-    # LLM: 保留完整 MCP canonical 块交给统一外置/预览链；未知模态不假装已作为视觉输入消费。
-    # 函数用途: 转发已授权调用，返回完整文本与类型化内容；错误仍保留真实状态。
+    # LLM: 无上下文入口保留原 BaseTool 接口；正式执行应由 executor 使用 execute_scoped 注入本次权限。
+    # 函数用途: 执行直接调用，复用同一结果处理链，不生成权限或任务身份。
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
+        return self._execute(params, None)
+
+    # LLM: 原执行权限按调用传到排队后发送处；保留 canonical 块和托管清理异常事实，不能存入共享实例或改写为清理成功。
+    # 函数用途: 沿原 executor 上下文调用固定工具连接，返回内容或结构化失败。
+    def execute_scoped(self, params: dict[str, Any], context: ToolInvocationContext) -> ToolHandlerOutcome:
+        return self._execute(params, context)
+
+    # LLM: 两个 BaseTool 入口共用同一执行链，context 缺失不伪造快照；清理和权限错误继续留给原结果/操作处理。
+    # 函数用途: 转发当前参数和可选调用权限，保留完整内容及结构化失败。
+    def _execute(self, params: dict[str, Any], context: ToolInvocationContext | None) -> ToolHandlerOutcome:
         arguments = {
             key: value
             for key, value in (params or {}).items()
             if key != "tool" and not key.startswith("__")
         }
         try:
-            result = self.client.call_tool(self.remote_tool, arguments)
+            options = {}
+            if self.transport is not None:
+                options["transport"] = self.transport
+            if context is not None and context.execution_authority_check is not None:
+                options["authority_check"] = context.execution_authority_check
+            result = self.client.call_tool(self.remote_tool, arguments, **options)
+        except ProcessSessionCleanupError as exc:
+            return self._error_result("插件原进程清理尚未确认", "TOOL_EXECUTION_FAILED",
+                                      details={"process_cleanup": exc.report})
         except MCPError as exc:
-            return self._error_result(str(exc), _ERROR_CODE_MAP.get(exc.code, "TOOL_EXECUTION_FAILED"))
+            return self._error_result(str(exc), _ERROR_CODE_MAP.get(exc.code, "TOOL_EXECUTION_FAILED"),
+                                      effect_outcome=exc.effect_outcome)
         except Exception as exc:  # 兜底：任何意外异常都转结构化错误，绝不向上崩主循环。
             logger.exception("MCP 工具 %s 调用出现未预期异常", self.model_spec.name)
             return self._error_result(
@@ -167,12 +197,16 @@ class MCPProxyTool(BaseTool):
             error_code="TOOL_EXECUTION_FAILED" if failed else "",
         )
 
-    def _error_result(self, message: str, error_code: str) -> ToolHandlerOutcome:
+    # LLM: 发送事实只接受 transport 的结构化结论；未发送拒绝不得记 UNKNOWN，已启动 writer 和清理异常不能改成未发生。
+    # 函数用途: 返回 MCP 失败、精确清理信息与原操作账所需的执行边界，不暴露配置或完整进程记录。
+    def _error_result(self, message: str, error_code: str, *, details: dict | None = None,
+                      effect_outcome: str = "") -> ToolHandlerOutcome:
         return ToolHandlerOutcome(
             self.model_spec.name,
             False,
-            json.dumps({"error": message}, ensure_ascii=False),
+            json.dumps({"error": message, **(details or {})}, ensure_ascii=False),
             error_code=error_code,
+            effect_outcome=effect_outcome,
         )
 
 
@@ -185,10 +219,13 @@ _ERROR_CODE_MAP = {
     "MCP_PROTOCOL_ERROR": "TOOL_EXECUTION_FAILED",
     "MCP_SERVER_START_FAILED": "TOOL_UNAVAILABLE",
     "MCP_CONFIG_INVALID": "TOOL_UNAVAILABLE",
+    "PLUGIN_ACTIVATION_UNAVAILABLE": "TOOL_UNAVAILABLE",
     "MCP_ERROR": "TOOL_EXECUTION_FAILED",
 }
 
 
+# LLM: Schema 先编译，effect 来自宿主声明，transport 固定发现实例；非法声明不能降级透传或改绑新连接。
+# 函数用途: 构造进入统一权限和工具执行链的代理，参数与效果继续以原 canonical 声明为准。
 def build_proxy_tool(
     client: MCPStdioClient,
     server_name: str,
@@ -196,11 +233,8 @@ def build_proxy_tool(
     *,
     effect: str = "dangerous",
     catalog_category: str = "mcp",
+    transport: MCPTransport | None = None,
 ) -> MCPProxyTool:
-    """LLM: MCP 完整 Schema 必须先通过 canonical 编译；失败时调用方跳过该工具而非降级透传。
-
-    函数用途: 从一个已发现 MCP 工具构造受统一 Schema/effect 门控制的本地代理。
-    """
     raw_schema = info.input_schema if isinstance(info.input_schema, dict) else {}
     canonical_schema = canonicalize_tool_input_schema(raw_schema)
     upstream_description = info.description or f"工具 {info.name}"
@@ -233,7 +267,7 @@ def build_proxy_tool(
         ),
         output_policy=OutputPolicy(trust="external_data"),
     )
-    return MCPProxyTool(client, info.name, model_spec, runtime_policy)
+    return MCPProxyTool(client, info.name, model_spec, runtime_policy, transport=transport)
 
 
 def _mcp_use_cases(server_name: str, tool_name: str, effect: str) -> list[str]:
@@ -347,6 +381,7 @@ def refresh_registered_mcp_client(
                 info,
                 effect=client.config.effect_for_tool(info.name),
                 catalog_category=client.config.catalog_category,
+                transport=transport,
             )
         except (TypeError, ValueError) as exc:
             logger.warning(

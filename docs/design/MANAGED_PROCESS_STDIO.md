@@ -12,7 +12,7 @@
 
 - `BackgroundLaunchRequest.io_mode` 显式选择 `log` 或 `stdio`，默认仍是原日志模式。
 - stdio 必须绑定 launcher 寿命，`log_path=None` 且日志预算为零；不伪造输出文件。
-- 一次性启动信封升为 `background_process_launch.v4`，完整声明模式及寿命；旧版或缺字段拒绝，不补默认值。
+- 一次性启动信封为 `background_process_launch.v5`，完整声明模式、寿命和可空激活引用；旧版或缺字段拒绝，不补默认值。
 - launcher 为独立 host 创建 stdin/stdout/stderr 管道，host 将三路端点直接继承给 child。
   host 不读取、解码或转发字节，随后释放自己持有的端点，不能因托管还在收尾而阻止调用方观察 EOF。
 - stdout 与 stderr 分离，无 PTY、Shell 拼接或文本转换；协议帧与有界 stderr 排空仍由 MCP 传输负责。
@@ -27,7 +27,10 @@
 普通任务停止和模型进程工具排除共享连接；按激活停止只冻结同一 owner/插件/代次，继续用原批次回执在锁外精确清理。
 共享连接的终态记录不参与普通历史裁剪，保留原退出证据，后续由插件管理完成收口后明确释放。
 venv/pip 准备仍归原管理 operation，不改成共享插件资源。上述字段不是执行授权；
-完整启用必须继续接通安装表的鲜活准入检查、MCP 发送边界和清理后收口，不以新记录代替它们。
+固定激活引用已接到 launcher 预留、启动、交接及 host 创建 child 前，均在原资源锁内只读原安装表。
+引用必须匹配同一 owner 的规范 root/home、原 Store 和 session scope，缺失或错配不能只靠身份字段放行。
+同代 preparing 可跨越 active 继续握手，业务发送只能接受 active；具体协议准入见 [MCP 合同](MCP_TRANSPORT_LIFECYCLE.md)。
+完整管理启用和清理后收口仍待组合，不以这些内部能力代替公开装卸验收。
 
 ## 参考与验证
 

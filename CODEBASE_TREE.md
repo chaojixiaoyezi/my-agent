@@ -104,6 +104,7 @@ agent_py_agent/
 |   |-- plugin_installation_state.py   # 唯一安装表 v3 编解码及 v1/v2 明确迁移来源
 |   |-- plugin_configuration.py        # 完整配置替换、原请求重放与版本 CAS 纯裁决
 |   |-- plugin_activation_record.py    # 固定环境计划、同代准备/发布/撤销身份及严格读回
+|   |-- plugin_activation_ref.py       # 可信 owner 与原代次引用，跨进程复查唯一安装表
 |   |-- plugin_activation.py           # 原安装版本上的激活迁移、阶段重放与旧代拒绝
 |   |-- plugin_install_store.py        # owner 唯一安装表、包内容保存及锁内 CAS/提交裁决
 |   |-- plugin_install_tool.py         # 经原执行器读取授权包快照并保存默认停用记录
@@ -351,6 +352,7 @@ agent_py_agent/
 |   |-- tooling/                       # 唯一 ToolRuntime/ActionPolicy/ToolExecutor、写入边界与结果投影
 |   |   |-- mcp_client.py             # MCP 配置、握手、当前连接及永久关闭；目录发布核对同一连接
 |   |   |-- mcp_transport.py          # 固定进程与出生身份、请求队列、读写线程和原进程树清理
+|   |   |-- mcp_managed_process.py    # 插件 MCP 接原托管管道、资源锁准入和原生清理回执
 |   |   |-- mcp_protocol.py           # 每连接独立响应箱、有界诊断、期限与结构化协议错误
 |   |   |-- process_output_capture.py   # stdout/stderr 有界保留与持续排空，公开截断和完整性
 |   |   |-- computer_use_profile.py   # MIT 开源桌面执行器的 local/main + Full Access MCP 薄装配与 effect 边界
@@ -457,6 +459,9 @@ agent_py_agent/
 |   |-- test_plugin_install_store.py   # 默认停用、原请求重放、失败裁决与独立进程安装竞争
 |   |-- test_plugin_configuration.py   # 私有配置 CAS、显式迁移、矛盾状态和提交异常裁决
 |   |-- test_plugin_activation.py      # 激活/撤销竞争、配额隔离、跨进程 CAS、迁移及坏记录拒绝
+|   |-- test_plugin_activation_ref.py  # 规范用户引用、独立进程复查和 host 创建前撤销拒绝
+|   |-- test_plugin_mcp_transport.py   # 托管协议、队列撤销、调用隔离和原操作账结果集成
+|   |-- test_directory_lock_wait.py   # 原线程/系统目录锁等待的取消与释放验证
 |   |-- test_plugin_configure_management.py # 原配置执行链、值不外泄、过期请求与 UNKNOWN 重放
 |   |-- test_plugin_management.py      # 真实原执行链、来源消失、配置关闭、路径权限和配额检查
 |   |-- test_nofollow_binary_io.py      # 二进制预算、私有原子写入、锁链接和 portable 创建竞争
@@ -567,6 +572,7 @@ docs/
 - `agent_py_agent/agent/plugin_installation.py` 与 `plugin_install_store.py`：原 owner 插件目录中的唯一安装表和最后回执；先存包再提交，默认停用，异常读回区分提交结果，不拥有管理权限或执行历史。
 - `agent_py_agent/agent/plugin_installation_state.py` 与 `plugin_configuration.py`：原表 v3 编解码、v1/v2 明确迁移来源和完整配置替换裁决；未清理激活阻止改配置，没有第二套权威。
 - `agent_py_agent/agent/plugin_activation.py` 与 `plugin_activation_record.py`：同一原计划的准备/发布/撤销 CAS，旧快照只读原代；撤销状态不证明资源退出。
+- `agent_py_agent/agent/plugin_activation_ref.py`：只定位原安装表的可信引用；严格核对原 owner/root/scope，启动和发送不缓存授权。
 - `docs/design/PLUGIN_ACTIVATION.md`：激活身份、持久撤销、配额与锁边界；完整 stdio 托管、调用和卸载仍待接通。
 - `docs/design/MANAGED_PROCESS_STDIO.md`：原托管器的字节通道、v3 激活归属、旧 v2 原版本恢复及后续执行准入接线边界。
 - `agent_py_agent/agent/plugin_configure_tool.py` 与 `plugin_sources.py`：隐藏管理工具通过原执行链读取授权来源，配置值只进 owner 私有安装表；包与配置共用有界安全读取。
@@ -750,4 +756,5 @@ docs/
 普通运行不读写 repo 根 `data/*` 作为事实源；测试 fixture 或用户显式配置路径除外。
 
 - `agent_py_agent/agent/tooling/mcp_transport.py`、`mcp_protocol.py`：请求和线程永远绑定原连接；临时清理与永久关闭分开，不持有插件激活权威。
+- `agent_py_agent/agent/tooling/mcp_managed_process.py`：插件连接只走原托管启动，输出交给唯一文本读取端，原资源锁内复查原激活，清理保留完整 Store 回执与异常。
 - `docs/design/MCP_TRANSPORT_LIFECYCLE.md`：MCP 的关闭、重连、发布顺序与未知清理边界；对应开发用例为 `agent_py_agent/tests/test_mcp_lifecycle.py`。

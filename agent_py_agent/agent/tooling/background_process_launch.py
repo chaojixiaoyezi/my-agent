@@ -11,6 +11,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from ..common.json_io import write_json_file_atomic
 from .cancellation import raise_if_cancelled
@@ -19,13 +20,16 @@ from .process_registry import (
     capture_process_birth_token,
     terminate_process_tree,
 )
-from .process_scope import ProcessAccessScope, ProcessActivationScope, ProcessExecutionScope
+from .process_scope import ProcessAccessScope, ProcessExecutionScope
 from .process_session_cleanup import ProcessSessionCleanupError, stop_process_session
 from .process_session_records import PROCESS_SESSION_SCHEMA
 from .process_session_store import ProcessSessionStore
 
+if TYPE_CHECKING:
+    from ..plugin_activation_ref import PluginActivationRef
+
 BACKGROUND_START_SETTLE_SECONDS = 0.5
-LAUNCH_SPEC_SCHEMA = "background_process_launch.v4"
+LAUNCH_SPEC_SCHEMA = "background_process_launch.v5"
 
 
 # LLM: 参数来自已授权宿主，env 不写磁盘；stdio 不写任务日志且必须绑定 launcher，不能继承长期后台的独立寿命。
@@ -46,10 +50,10 @@ class BackgroundLaunchRequest:
     deadline_monotonic: float = 0.0
     stop_on_launcher_exit: bool = False
     io_mode: str = "log"
-    activation_scope: ProcessActivationScope | None = None
+    activation: PluginActivationRef | None = None
 
-    # LLM: 零期限只代表无此时间限制；stdio 必须绑定 launcher，且不能伪造输出文件或沿用日志预算。
-    # 函数用途: 在创建启动记录前校验宿主提供的寿命与通道约束。
+    # LLM: 零期限不限制寿命；共享资源必须附原激活引用，不能只填身份跳过跨进程复查。
+    # 函数用途: 在创建记录前验证寿命、管道和可信激活引用；任务启动不加载插件存储。
     def __post_init__(self) -> None:
         if (type(self.deadline_monotonic) not in {int, float}
                 or not math.isfinite(self.deadline_monotonic) or self.deadline_monotonic < 0
@@ -63,6 +67,15 @@ class BackgroundLaunchRequest:
                 raise ValueError("managed stdio requires attached lifetime without log output")
         elif self.log_path is None:
             raise ValueError("managed background log path required")
+        if self.activation is not None:
+            from ..plugin_activation_ref import PluginActivationRef
+            from .process_session_store import process_session_store_root
+
+            if not isinstance(self.activation, PluginActivationRef):
+                raise ValueError("managed background activation reference invalid")
+            owner = self.activation.owner()
+            if self.store_root != process_session_store_root(owner.home_dir, owner.home_dir):
+                raise ValueError("managed background activation store conflict")
 
 
 # LLM: session 已在 Store 交接；process 的 stdio 管道交给调用方关闭，句柄不充当另一份生命周期权威。
@@ -122,6 +135,7 @@ def start_background_process(
                     "deadline_monotonic": request.deadline_monotonic,
                     "stop_on_launcher_exit": request.stop_on_launcher_exit,
                     "io_mode": request.io_mode,
+                    "activation": request.activation.to_payload() if request.activation is not None else None,
                 },
             )
             spec_path.chmod(0o600)
@@ -216,7 +230,7 @@ def _reservation(request: BackgroundLaunchRequest, session_id: str) -> dict[str,
         "revision": 0,
         "access_scope": asdict(request.access_scope),
         "execution_scope": asdict(request.execution_scope),
-        "activation_scope": asdict(request.activation_scope) if request.activation_scope is not None else None,
+        "activation_scope": asdict(request.activation.scope) if request.activation is not None else None,
         "launcher_pid": launcher_pid,
         "launcher_birth_token": birth,
         "pid": 0,
@@ -240,14 +254,16 @@ def _reservation(request: BackgroundLaunchRequest, session_id: str) -> dict[str,
     }
 
 
-# LLM: 此检查不重跑审批或预算；期限沿同一 monotonic 时钟，交接不会为准备进程重新起算。
-# 函数用途: 检查取消、原执行权限和宿主截止时间，拒绝过期启动或交接。
+# LLM: 在原资源锁内复读同一激活，不取插件写锁；撤销先提交安装表再冻结资源，不能反向嵌套两把写锁。
+# 函数用途: 核对取消、原执行权、激活和期限，拒绝撤销后的预留、启动及交接。
 def _require_admission(request: BackgroundLaunchRequest) -> None:
     raise_if_cancelled()
     if request.deadline_monotonic and time.monotonic() >= request.deadline_monotonic:
         raise TimeoutError("managed background deadline")
     if request.authority_check is not None:
         request.authority_check()
+    if request.activation is not None:
+        request.activation.require(allow_preparing=True)
     raise_if_cancelled()
 
 

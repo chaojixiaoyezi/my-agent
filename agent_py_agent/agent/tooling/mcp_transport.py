@@ -1,5 +1,5 @@
-# LLM: 每个 transport 永久绑定一个 Popen 和出生标识，重连必须新建；退出复用 process_registry 回执，联测背压、关闭和重连交错。
-# 模块用途: 管理一条 MCP stdio 连接的收发与精确进程清理，旧线程永远不能触及新连接。
+# LLM: transport 固定原进程/托管资源，发送复查原代与本次权限；普通树和托管 Store 清理各保留原回执，联测排队与撤销。
+# 模块用途: 管理一条 MCP 连接，旧线程不能触及新实例，单次未发送的拒绝不关闭共享连接。
 from __future__ import annotations
 
 import json
@@ -8,32 +8,52 @@ import os
 import subprocess
 import threading
 import time
+from collections.abc import Callable
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from .mcp_protocol import MCPError, MCPInbox, bounded_mcp_lock, require_mcp_wait
+from ..plugin_installation import PluginInstallationError
+from .mcp_protocol import (
+    MCPError,
+    MCPInbox,
+    bounded_mcp_lock,
+    require_mcp_execution_authority,
+    require_mcp_wait,
+)
 from .process_registry import (
     ProcessTerminationReceipt,
     capture_process_birth_token,
     terminate_process_tree,
 )
+from .process_session_cleanup import ProcessSessionCleanup, ProcessSessionCleanupError
+
+if TYPE_CHECKING:
+    from .mcp_managed_process import ManagedMCPProcess
+
+MCPCleanupReceipt = ProcessTerminationReceipt | ProcessSessionCleanup
 
 
-# LLM: 只记录启动时得到的进程句柄与出生身份；清理不能重新查询 client.current 代替它。
-# 类用途: 固定这条连接拥有的进程实例。
+# LLM: 托管引用保留原资源账和激活，不据进程名猜归属；清理不能重新查询 client.current 或只杀托管 host。
+# 类用途: 固定这条连接的进程出生身份及可选的原托管资源。
 @dataclass(frozen=True)
 class MCPProcessBinding:
     process: subprocess.Popen
     birth_token: str
+    managed: ManagedMCPProcess | None = None
 
 
 # LLM: 请求锁、写锁、响应箱均是连接私有；撤销先关闭准入，再在独立清理锁下回收固定进程。
 # 类用途: 承载一次启动的 MCP 连接，保留真实清理回执并隔离旧请求与重连。
 class MCPTransport:
-    # LLM: 调用方已经启动进程；这里只冻结资源身份和内存状态，不能替调用方重建进程。
-    # 函数用途: 为新进程创建唯一的收发和清理句柄。
-    def __init__(self, process: subprocess.Popen, name: str, *, max_line_chars: int, connect_timeout: float):
-        self.binding = MCPProcessBinding(process, capture_process_birth_token(process.pid))
+    # LLM: 托管连接只能绑定该原句柄和已登记出生身份；非托管 MCP 保持原路径，不能据可选字段猜测资源归属。
+    # 函数用途: 为一次启动创建收发与清理句柄，插件清理保留完整原资源回执。
+    def __init__(self, process: subprocess.Popen, name: str, *, max_line_chars: int, connect_timeout: float,
+                 managed: ManagedMCPProcess | None = None):
+        if managed is not None and managed.hosted.process is not process:
+            raise ValueError("MCP 托管进程绑定冲突")
+        birth = managed.hosted.record["pid_birth_token"] if managed is not None else capture_process_birth_token(process.pid)
+        self.binding = MCPProcessBinding(process, birth, managed)
         self.inbox = MCPInbox(name)
         self.max_line_chars = max_line_chars
         self.connect_timeout = connect_timeout
@@ -45,7 +65,8 @@ class MCPTransport:
         self.admission_lock = threading.Lock()
         self.cleanup_lock = threading.Lock()
         self._next_id = 1
-        self._receipt: ProcessTerminationReceipt | None = None
+        self._receipt: MCPCleanupReceipt | None = None
+        self._cleanup_error: ProcessSessionCleanupError | None = None
         self.reader = threading.Thread(target=read_messages, args=(self,), name=f"mcp-reader-{name}", daemon=True)
         self.stderr_reader = threading.Thread(target=self.inbox.stderr.drain, args=(process.stderr,),
                                               name=f"mcp-stderr-{name}", daemon=True)
@@ -68,18 +89,31 @@ class MCPTransport:
             self.ready = False
             self.inbox.close()
 
-    # LLM: 不先回收组长再猜后代；保留原出生身份和原终止回执，身份丢失或清理失败保持未确认。
-    # 函数用途: 有界清理这条连接的进程树；重复调用返回同一结果，不误杀新连接。
-    def terminate(self, *, grace_seconds: float = 3.0) -> ProcessTerminationReceipt:
+    # LLM: 托管清理保留原 Store 回执/异常且不回退裸 Popen；普通 MCP 沿原树回执，未确认不能重连。
+    # 函数用途: 清理固定连接，重复返回原结果或原提交异常，读线程只关闭自己拥有的流。
+    def terminate(self, *, grace_seconds: float = 3.0) -> MCPCleanupReceipt:
         self.revoke()
         with self.cleanup_lock:
+            if self._cleanup_error is not None:
+                raise self._cleanup_error
             if self._receipt is None:
                 try:
-                    self._receipt = terminate_process_tree(
-                        self.binding.process.pid, self.binding.process, grace_seconds=grace_seconds,
-                        expected_birth_token=self.binding.birth_token,
-                    )
+                    if self.binding.managed is not None:
+                        self._receipt = self.binding.managed.terminate()
+                    else:
+                        self._receipt = terminate_process_tree(
+                            self.binding.process.pid, self.binding.process, grace_seconds=grace_seconds,
+                            expected_birth_token=self.binding.birth_token,
+                        )
+                except ProcessSessionCleanupError as exc:
+                    self._cleanup_error = exc
+                    close_finished_streams(self)
+                    raise
                 except Exception as exc:
+                    if self.binding.managed is not None:
+                        self._cleanup_error = ProcessSessionCleanupError(exc, self.binding.managed.hosted.record, (), False)
+                        close_finished_streams(self)
+                        raise self._cleanup_error from exc
                     logging.getLogger(__name__).warning("MCP 进程清理异常：%s", type(exc).__name__)
                     self._receipt = ProcessTerminationReceipt("cleanup_error", False, None, 0,
                                                               (self.binding.process.pid,))
@@ -87,9 +121,10 @@ class MCPTransport:
         close_finished_streams(self)
         return receipt
 
-    # LLM: 请求在原连接队列等待，总期限覆盖排队、写入和结果；迟到结果不可进入另一连接。
-    # 函数用途: 发送带 ID 的请求，并在退出时移除本请求的在途状态。
-    def request(self, method: str, params: dict[str, Any], *, timeout: float) -> Any:
+    # LLM: 本次权限回调不存入共享连接，排队后随请求交给发送；迟到结果不跨连接，总期限覆盖整个调用。
+    # 函数用途: 发送带 ID 的请求，保留调用自身的执行检查，退出时移除在途状态。
+    def request(self, method: str, params: dict[str, Any], *, timeout: float,
+                authority_check: Callable[[], None] | None = None) -> Any:
         deadline = time.monotonic() + max(0.01, timeout)
         with bounded_mcp_lock(self.request_lock, deadline, closed=self.inbox.closed):
             req_id = self._next_id
@@ -98,7 +133,8 @@ class MCPTransport:
                 self.inbox.pending.add(req_id)
             sent = False
             try:
-                self.send({"jsonrpc": "2.0", "id": req_id, "method": method, "params": params}, deadline=deadline)
+                self.send({"jsonrpc": "2.0", "id": req_id, "method": method, "params": params},
+                          deadline=deadline, authority_check=authority_check)
                 sent = True
                 return self.inbox.await_response(req_id, method, deadline)
             except MCPError as exc:
@@ -127,16 +163,19 @@ class MCPTransport:
         with bounded_mcp_lock(self.request_lock, deadline, closed=self.inbox.closed):
             self.send({"jsonrpc": "2.0", "method": method, "params": params}, deadline=deadline)
 
-    # LLM: 写锁之后仍核对准入；独占 fd 保证旧写线程不会使用已关闭后复用的 fd，半帧错误须结束原传输。
-    # 函数用途: 有界写出完整一帧 JSON-RPC，背压取消或超时时只清理本连接。
-    def send(self, message: dict[str, Any], *, deadline: float | None = None, allow_cancelled: bool = False) -> None:
+    # LLM: 排队后在原资源/本连接短锁内检查同一代；尚未发送的拒绝只结束调用，已创建 writer 的失败须清理原连接。
+    # 函数用途: 有界发送完整帧，插件停用阻止旧队列，单次排队取消不关闭共享连接。
+    def send(self, message: dict[str, Any], *, deadline: float | None = None, allow_cancelled: bool = False,
+             authority_check: Callable[[], None] | None = None) -> None:
         until = deadline if deadline is not None else time.monotonic() + self.connect_timeout
         payload = (json.dumps(message, ensure_ascii=False) + "\n").encode("utf-8")
         if len(payload) > self.max_line_chars:
             raise MCPError("MCP 请求超过单帧大小上限", code="MCP_PROTOCOL_ERROR")
         with bounded_mcp_lock(self.write_lock, until, closed=self.inbox.closed, allow_cancelled=allow_cancelled):
+            writer = None
             try:
-                with self.admission_lock:
+                with self._send_admission(message, until, allow_cancelled=allow_cancelled):
+                    require_mcp_execution_authority(authority_check)
                     require_mcp_wait(until, self.inbox.closed, allow_cancelled=allow_cancelled)
                     stream = self.binding.process.stdin
                     if stream is None:
@@ -144,12 +183,46 @@ class MCPTransport:
                     writer = MCPFrameWriter(os.dup(stream.fileno()), payload, self.inbox.name)
                     writer.start()
                 writer.wait(until, self.inbox.closed, allow_cancelled=allow_cancelled)
-            except MCPError:
-                self.terminate(grace_seconds=0)
+            except MCPError as exc:
+                exc.effect_outcome = "not_started" if writer is None else "unknown"
+                if writer is not None:
+                    self.terminate(grace_seconds=0)
                 raise
             except (OSError, ValueError) as exc:
-                self.terminate(grace_seconds=0)
-                raise MCPError(f"MCP 写入失败：{exc}", code="MCP_CONNECTION_CLOSED") from exc
+                if writer is not None:
+                    self.terminate(grace_seconds=0)
+                raise MCPError(f"MCP 写入失败：{exc}", code="MCP_CONNECTION_CLOSED",
+                               effect_outcome="not_started" if writer is None else "unknown") from exc
+
+    # LLM: 原资源锁先于本地准入锁，排队不阻止 revoke；安装表只读，不能持锁等待服务端。只有协议初始化/发现可用 preparing。
+    # 函数用途: 为发送线程启动建立可取消的临界区，检查原进程、激活和本次等待条件。
+    @contextmanager
+    def _send_admission(self, message: dict, deadline: float, *, allow_cancelled: bool):
+        managed = self.binding.managed
+        # LLM: 只检查本次期限、取消和原连接关闭；供原目录锁在等待阶段调用，不触发资源清理。
+        # 函数用途: 让跨进程锁排队与 MCP 请求共享同一个取消和超时边界。
+        def check() -> None:
+            require_mcp_wait(deadline, self.inbox.closed, allow_cancelled=allow_cancelled)
+        admitted = False
+        try:
+            with (managed.transaction(check) if managed is not None else nullcontext()) as transaction:
+                with self.admission_lock:
+                    check()
+                    if managed is not None:
+                        method = message.get("method")
+                        preparation = method in {"initialize", "notifications/initialized", "tools/list"} or method is None
+                        managed.require(transaction, allow_preparing=preparation)
+                    check()
+                    admitted = True
+                    yield
+        except PluginInstallationError as exc:
+            if admitted:
+                raise
+            raise MCPError("插件原激活不可用，拒绝发送", code="PLUGIN_ACTIVATION_UNAVAILABLE") from exc
+        except (OSError, ValueError, RuntimeError) as exc:
+            if admitted:
+                raise
+            raise MCPError("MCP 原资源准入未确认", code="MCP_ADMISSION_UNAVAILABLE") from exc
 
 
 # LLM: 写线程拥有单独 dup fd，直到自身 finally 关闭；不得在外线程关闭此 fd 引入复用竞态。

@@ -1,6 +1,6 @@
 
-# LLM: MCP 配置、握手与客户端生命周期；协议状态归 mcp_protocol、固定进程 IO 归 mcp_transport，联测注册层发布和永久关闭。
-# 模块用途: 组织可取消的 MCP 连接、完整工具发现和结果归一化；明确断线恢复与永久关闭，不把进程重连当插件激活。
+# LLM: MCP 客户端固定插件代次，托管启动失败未知不能消失；收发归 transport，联测原注册、关闭和旧代理拒绝。
+# 模块用途: 组织普通及托管 MCP 的启动、发现、调用和重连，保留原资源清理事实，不用重连更换激活。
 from __future__ import annotations
 
 """标准库实现的 MCP (Model Context Protocol) stdio 客户端。
@@ -36,12 +36,18 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, TypeVar
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from ..common.log_redaction import redact_sensitive_text
+from .background_process_launch import BackgroundLaunchError
 from .mcp_protocol import MCPError, bounded_mcp_lock
-from .mcp_transport import MCPTransport
+from .mcp_transport import MCPCleanupReceipt, MCPTransport
 from .process_registry import ProcessTerminationReceipt
+from .process_session_cleanup import ProcessSessionCleanupError
+
+if TYPE_CHECKING:
+    from ..plugin_activation_ref import PluginActivationRef
 
 # my-agent 侧协商的 MCP 协议版本。2024-11-05 是稳定且被绝大多数 server 接受的版本；
 # server 在 initialize 回包里必须返回已支持版本；未知版本不能按成功握手继续。
@@ -356,15 +362,17 @@ _Publication = TypeVar("_Publication")
 # LLM: 客户端持有唯一当前连接和永久关闭状态；所有 IO 绑定固定 transport，永久关闭不能被运行边界恢复。
 # 类用途: 管理 MCP 的启动、握手、临时重连和最终关闭，供注册层发布同连接的工具目录。
 class MCPStdioClient:
-    # LLM: 创建客户端不启动进程；连接串行锁与短状态锁分离，stop 不等业务请求或握手。
-    # 函数用途: 保存服务声明、当前连接及启动和关闭状态。
-    def __init__(self, config: MCPServerConfig):
+    # LLM: activation 来自可信组合入口并永久固定；插件只能托管启动，未提供时保持普通 MCP 路径，构造不启动进程。
+    # 函数用途: 保存服务声明、原激活及当前连接，防止旧客户端重连时换绑新代。
+    def __init__(self, config: MCPServerConfig, *, activation: PluginActivationRef | None = None):
         self.config = config
+        self._activation = activation
         self._transport: MCPTransport | None = None
         self._connect_lock = threading.RLock()
         self._state_lock = threading.RLock()
         self._closed = threading.Event()
         self._starting = False
+        self._launch_failure: BackgroundLaunchError | ProcessSessionCleanupError | None = None
         self._exit_registered = False
 
     # LLM: 永久关闭是本客户端终态，不由进程存活、目录缓存或后续重连覆盖。
@@ -407,6 +415,8 @@ class MCPStdioClient:
             with self._state_lock:
                 if self.is_closed():
                     raise MCPError("MCP 客户端已永久关闭", code="MCP_CONNECTION_CLOSED")
+                if self._launch_failure is not None:
+                    raise self._launch_failure
                 if self.is_running():
                     assert self._transport is not None
                     return self._transport
@@ -418,18 +428,28 @@ class MCPStdioClient:
                     self._exit_registered = True
             return self._start_transport()
 
-    # LLM: Popen 返回前的关闭保持 launch_pending；返回后也需清理候选，不能把已关闭客户端重新置为 ready。
-    # 函数用途: 创建独立进程、启动读线程并完成握手。
+    # LLM: 插件只走原托管启动；接管前失败回收原资源，普通 MCP 保留原启动；候选关闭不能再次发布 ready。
+    # 函数用途: 启动固定来源的进程和读线程，完成握手并保留未知清理事实。
     def _start_transport(self) -> MCPTransport:
         transport = None
+        managed = None
         try:
-            process = subprocess.Popen(
-                [self.config.command, *self.config.args], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE, env=build_safe_env(self.config.env), cwd=self.config.cwd or None,
-                text=True, encoding="utf-8", errors="replace", bufsize=1, start_new_session=True,
-            )
+            if self._activation is not None:
+                from .mcp_managed_process import ManagedMCPProcess
+
+                managed = ManagedMCPProcess.launch(
+                    self._activation, argv=[self.config.command, *self.config.args], cwd=Path(self.config.cwd),
+                    environment=build_safe_env(self.config.env), timeout=self.config.connect_timeout,
+                )
+                process = managed.hosted.process
+            else:
+                process = subprocess.Popen(
+                    [self.config.command, *self.config.args], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, env=build_safe_env(self.config.env), cwd=self.config.cwd or None,
+                    text=True, encoding="utf-8", errors="replace", bufsize=1, start_new_session=True,
+                )
             transport = MCPTransport(process, self.config.name, max_line_chars=self.config.max_line_chars,
-                                     connect_timeout=self.config.connect_timeout)
+                                     connect_timeout=self.config.connect_timeout, managed=managed)
             with self._state_lock:
                 self._transport = transport
                 self._starting = False
@@ -441,10 +461,21 @@ class MCPStdioClient:
                 transport.ready = True
             return transport
         except BaseException as exc:
-            with self._state_lock:
-                self._starting = False
-            if transport is not None:
-                transport.terminate(grace_seconds=0)
+            failure = exc
+            try:
+                if transport is not None:
+                    transport.terminate(grace_seconds=0)
+                elif managed is not None:
+                    managed.close_unclaimed()
+            except BaseException as cleanup_error:
+                failure = cleanup_error
+                raise
+            finally:
+                with self._state_lock:
+                    self._starting = False
+                    if transport is None and (isinstance(failure, ProcessSessionCleanupError)
+                            or isinstance(failure, BackgroundLaunchError) and not failure.cleanup_confirmed):
+                        self._launch_failure = failure
             if isinstance(exc, OSError):
                 raise MCPError(f"MCP server '{self.config.name}' 启动失败：{exc}", code="MCP_SERVER_START_FAILED") from exc
             raise
@@ -463,12 +494,12 @@ class MCPStdioClient:
         transport.capabilities = result["capabilities"]
         transport.notify("notifications/initialized", {})
 
-    # LLM: 先关闭状态与原连接准入，再在锁外回收资源；启动尚未返回时必须保留清理未确认。
-    # 函数用途: 永久关闭这个客户端，返回原进程树清理事实，禁止后续重连。
-    def stop(self) -> ProcessTerminationReceipt:
+    # LLM: 先撤销再清理；启动未返回保持 pending，未接管资源的启动/清理未知异常仍保留，不能改报 not_started。
+    # 函数用途: 永久关闭客户端，返回原资源或进程树回执，禁止后续重连。
+    def stop(self) -> MCPCleanupReceipt:
         with self._state_lock:
             self._closed.set()
-            transport, starting = self._transport, self._starting
+            transport, starting, failure = self._transport, self._starting, self._launch_failure
             if transport is not None:
                 transport.revoke()
         if transport is not None:
@@ -476,13 +507,15 @@ class MCPStdioClient:
             if receipt.confirmed:
                 atexit.unregister(self.stop)
             return receipt
+        if failure is not None:
+            raise failure
         if not starting:
             atexit.unregister(self.stop)
         return ProcessTerminationReceipt("launch_pending" if starting else "not_started", not starting, None, 0)
 
     # LLM: 临时失败只关闭调用方持有的 transport；传入旧连接不能改变或清理新连接。
     # 函数用途: 清理一次失败的握手后发现或调用连接，保留客户端在下轮重连的资格。
-    def disconnect(self, *, transport: MCPTransport) -> ProcessTerminationReceipt:
+    def disconnect(self, *, transport: MCPTransport) -> MCPCleanupReceipt:
         with self._state_lock:
             transport.revoke()
         return transport.terminate()
@@ -523,14 +556,16 @@ class MCPStdioClient:
                 or transport.inbox.closed.is_set()):
             raise MCPError("MCP 连接已关闭或被替换", code="MCP_CONNECTION_CLOSED")
 
-    # LLM: publisher 只能做当前目录的纯内存替换，不能发 IO 或反向获取 prepare 锁；与 stop 共用短状态锁。
-    # 函数用途: 将完整发现的工具目录发布到仍然有效的同一连接上。
+    # LLM: 发布仅替换内存目录，插件必须先已提交 active；停用竞态后的旧目录仍受实际发送准入约束，不据目录授予执行权。
+    # 函数用途: 复查原连接和激活后发布候选工具目录，禁止准备中或撤销代向普通调用方发布。
     def publish_tools(self, transport: MCPTransport, publisher: Callable[[], _Publication]) -> _Publication:
         with self._state_lock:
             with transport.admission_lock:
                 self._require_current(transport)
                 if not transport.is_running():
                     raise MCPError("MCP 连接在目录发布前已退出", code="MCP_CONNECTION_CLOSED")
+                if self._activation is not None:
+                    self._activation.require()
                 return publisher()
 
     # LLM: 所有分页固定同一 transport；发布前仍须由注册层调用 publish_tools 校验有效性。
@@ -545,10 +580,13 @@ class MCPStdioClient:
             selected.inbox.tools_changed = generation != selected.inbox.tools_generation
         return tools
 
-    # LLM: 本调用只发送到获取时的连接；排队期间停用或换连接须失败，不能自动转投新进程。
-    # 函数用途: 调用一个 MCP 工具并保留完整、规范化的原始结果。
-    def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        transport = self.connection()
-        result = transport.request("tools/call", {"name": tool_name, "arguments": arguments or {}},
-                                   timeout=self.config.timeout)
+    # LLM: 已发布代理冻结 transport，本次权限回调只沿当前请求传递；排队或重连不能转投新实例或借另一个调用的权限。
+    # 函数用途: 调用固定连接上的 MCP 工具，发送前复核当前任务，规范化完整结果。
+    def call_tool(self, tool_name: str, arguments: dict[str, Any], *, transport: MCPTransport | None = None,
+                  authority_check: Callable[[], None] | None = None) -> dict[str, Any]:
+        selected = transport if transport is not None else self.connection()
+        with self._state_lock:
+            self._require_current(selected)
+        result = selected.request("tools/call", {"name": tool_name, "arguments": arguments or {}},
+                                  timeout=self.config.timeout, authority_check=authority_check)
         return _normalize_call_result(result, self.config.max_content_chars)

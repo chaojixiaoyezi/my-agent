@@ -5,21 +5,37 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Callable
 from contextlib import contextmanager
 from typing import Any
 
 from ..common.log_redaction import redact_sensitive_text
-from .cancellation import cancellation_requested, register_cancellation_callback
+from .cancellation import ToolCancelled, cancellation_requested, register_cancellation_callback
 
 
 # LLM: 错误码是调用方映射依据；异常正文必须先脱敏，不能暴露远端回包中的凭证。
 # 类用途: 将连接、超时和协议错误作为结构化失败传回工具执行链。
 class MCPError(Exception):
-    # LLM: 构造不做 IO；保留明确错误码，正文统一通过进程级脱敏器。
-    # 函数用途: 创建可向上层安全展示的 MCP 错误。
-    def __init__(self, message: str, *, code: str = "MCP_ERROR"):
+    # LLM: effect_outcome 仅由已观察发送边界的宿主设置，不能从错误码/正文推断；未知与未发送必须分开。
+    # 函数用途: 创建脱敏 MCP 错误，携带可供原操作账使用的发送事实。
+    def __init__(self, message: str, *, code: str = "MCP_ERROR", effect_outcome: str = ""):
         super().__init__(redact_sensitive_text(message, redacted_marker="[REDACTED]", redact_assignment_labels=True))
         self.code = code
+        self.effect_outcome = effect_outcome
+
+
+# LLM: 仅在发送 writer 创建前调用；原回调只核对同次权限，异常结论只描述尚未发送，原账本仍决定是否能收口。
+# 函数用途: 复查本次执行权限，保留取消或权威缺失的原因，并向原操作链传递未发送事实。
+def require_mcp_execution_authority(check: Callable[[], None] | None) -> None:
+    if check is None:
+        return
+    try:
+        check()
+    except MCPError:
+        raise
+    except Exception as exc:
+        code = "MCP_CANCELLED" if isinstance(exc, ToolCancelled) else "MCP_EXECUTION_AUTHORITY_UNAVAILABLE"
+        raise MCPError("本次 MCP 执行权限不可用，未发送请求", code=code, effect_outcome="not_started") from exc
 
 
 # LLM: 锁前和锁后均核对期限、取消与原连接关闭；等待不能跨到下一条连接。

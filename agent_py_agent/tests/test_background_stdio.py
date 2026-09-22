@@ -22,12 +22,15 @@ from agent_py_agent.agent.tooling.process_registry import (
 )
 from agent_py_agent.agent.tooling.process_scope import (
     ProcessAccessScope,
-    ProcessActivationScope,
     ProcessExecutionScope,
 )
 from agent_py_agent.agent.tooling.process_session_cleanup import stop_process_session
-from agent_py_agent.agent.tooling.process_session_store import ProcessSessionStore
+from agent_py_agent.agent.tooling.process_session_store import (
+    ProcessSessionStore,
+    process_session_store_root,
+)
 from agent_py_agent.tests._managed_process_harness import managed_request
+from agent_py_agent.tests.test_plugin_activation_ref import plugin_reference
 
 
 # LLM: 仅构造临时目录中的真实托管子进程；字节模式不创建日志，测试退出时必须精确清理自己的 session。
@@ -65,7 +68,8 @@ def test_invalid_stdio_request_does_not_create_authority(tmp_path, changes):
 
 
 @pytest.mark.parametrize("change", [
-    {"schema": "background_process_launch.v3"}, {"io_mode": None}, {"io_mode": "pty"},
+    {"schema": "background_process_launch.v3"}, {"schema": "background_process_launch.v4"},
+    {"io_mode": None}, {"io_mode": "pty"},
     {"stop_on_launcher_exit": False}, {"max_log_bytes": 1},
 ])
 def test_host_refuses_old_or_inconsistent_stdio_spec(tmp_path, change):
@@ -74,7 +78,7 @@ def test_host_refuses_old_or_inconsistent_stdio_spec(tmp_path, change):
     spec_path.parent.mkdir()
     spec = {"schema": launch.LAUNCH_SPEC_SCHEMA, "session_id": "bg-test", "command_argv": ["unused"],
             "max_log_bytes": 0, "deadline_monotonic": 0, "stop_on_launcher_exit": True,
-            "io_mode": "stdio", **change}
+            "io_mode": "stdio", "activation": None, **change}
     spec_path.write_text(json.dumps(spec))
     with pytest.raises(ValueError):
         _read_launch_spec(store, "bg-test", spec_path)
@@ -157,7 +161,7 @@ def test_child_is_owned_before_log_close_failure(tmp_path, monkeypatch):
     spec_path.parent.mkdir()
     spec_path.write_text(json.dumps({"schema": launch.LAUNCH_SPEC_SCHEMA, "session_id": "bg-close-failure",
         "command_argv": request.argv, "max_log_bytes": request.max_log_bytes, "deadline_monotonic": 0,
-        "stop_on_launcher_exit": False, "io_mode": "log"}))
+        "stop_on_launcher_exit": False, "io_mode": "log", "activation": None}))
     original_open, original_popen = Path.open, subprocess.Popen
     spawned = []
 
@@ -198,16 +202,19 @@ def test_child_is_owned_before_log_close_failure(tmp_path, monkeypatch):
 
 
 def test_exact_activation_stop_preserves_another_activation_and_business_task(tmp_path):
-    base = managed_request(tmp_path)
-    scope = ProcessActivationScope("owner-test", str(tmp_path), "workspace-peek", "a" * 64)
-    shared = replace(stdio_request(tmp_path), activation_scope=scope,
+    _, _, activation, owner = plugin_reference(tmp_path)
+    _, _, other_activation, _ = plugin_reference(tmp_path, plugin_id="other-peek")
+    scope = activation.scope
+    root = process_session_store_root(owner.home_dir, owner.home_dir)
+    base = replace(managed_request(tmp_path), store_root=root)
+    shared = replace(stdio_request(tmp_path), activation=activation, store_root=root,
                      access_scope=ProcessAccessScope(scope.owner_id, "", scope.owner_home),
                      execution_scope=ProcessExecutionScope(owner_home=scope.owner_home))
     hosted = []
     try:
         first = launch.start_background_process(shared)
         hosted.append(first)
-        second = launch.start_background_process(replace(shared, activation_scope=replace(scope, activation_id="b" * 64)))
+        second = launch.start_background_process(replace(shared, activation=other_activation))
         hosted.append(second)
         business = launch.start_background_process(base)
         hosted.append(business)
@@ -249,5 +256,9 @@ def test_stdio_host_recovers_launcher_loss_after_handoff(tmp_path):
             current = store.load(current["session_id"]).record
         assert current["handoff_confirmed"] and current["status"] == "killed"
         assert current["reason"] == "launcher_unavailable" and current["termination"]["confirmed"]
+        # host 提交的是 child 退出事实；还要观察 host 自然退出，避免把其退出中的身份竞态误当成确定清理。
+        while capture_process_birth_token(current["pid"]) == current["pid_birth_token"] and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert _process_instance_terminated(current["pid"], current["pid_birth_token"])
     finally:
         assert stop_process_session(store, current).confirmed

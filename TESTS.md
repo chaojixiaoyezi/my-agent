@@ -1,5 +1,28 @@
 # 测试与发布验收
 
+## 第 4 步托管 MCP 与鲜活准入开发验证
+
+本片仅使用临时原安装表、原 RuntimeDB 和真实隔离进程，不启动产品 Gateway/TUI，也不连接模型。
+静态清单与环境是组件夹具；它们不证明完整插件包启用或工具目录匹配，完整管理和多 TUI 仍待完成。
+
+- 可信 owner/root/激活引用在独立进程复查原表，路径错配、缺失、损坏、旧代和撤销均拒绝。
+- launcher 预留、启动及交接与 host 创建 child 前共用原资源锁检查；握手/发现允许同代 preparing，业务必须 active。
+- 托管二进制管道由唯一文本读取端解码，实际 Unicode/大内容、stderr、原 host/child 精确退出验证。
+- 原请求/写队列之后再次准入，撤销代不发帧；旧代理冻结原 transport，不追随重连。
+- 单次权限拒绝不关闭共享连接；原 executor 已领取后仍保留未发送事实，writer 已启动的失败继续 UNKNOWN。
+- 原目录锁的线程和跨进程等待可取消；取得锁后的 redo/提交不可被等待回调截断。
+- 原 ProcessSessionCleanup 和提交异常继续传递；未接管启动的未知结果也阻止重启，不改报未开始。
+
+初轮夹具拦截 Popen 时误拦了出生标识所需 ps，已限于目标 child；结果断言改为原 ToolHandlerOutcome 的 ok/output 字段。
+stdio launcher 消失用例首次在 host 提交 child 终态后、host 自身退出中执行收尾，原终止回执保守返回身份未知。
+该用例现另外观察 host 自然退出后再做收尾，没有放宽生产清理或把首次 UNKNOWN 改报成功。
+只读复核指出未发送事实没有进入原操作账，已通过结构化 effect_outcome 传递，不能按超时/取消文案猜是否执行。
+最终 28 个相关测试文件 **681 passed、零失败/错误/跳过**，约 72 秒；前后 2,217 个 agent_py_agent Python 源文件摘要一致。
+原执行器用例核对同一 operation 从 EXECUTING 收口 FAILED，结构化结果为 not_started；writer 启动后的故障仍 unknown。
+首次严格尺寸检查发现发送函数嵌套过深，已将本次权限异常分类提到协议模块，未改尺寸基线；之后重跑同组 681 项通过。
+Ruff、文档同步、严格尺寸、diff 与 clean-package 全通过；新增内容隐私检查同步执行。
+本片不发布部署、未新增实际 TUI，线上 CI 不作为验收来源；完整管理启停与多 TUI 仍待完成。
+
 ## 第 4 步托管 stdio 与共享资源归属开发验证
 
 原后台启动/host 已有显式 stdio，session v3 区分任务与共享激活，旧 v2 原版本保留；首轮 6 个文件 **182 项通过**。

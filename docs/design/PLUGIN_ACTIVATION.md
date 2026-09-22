@@ -38,10 +38,12 @@ launcher 创建 host 管道，再将端点直接继承给 child，继续原预�
 原资源记录 v3 已有固定 activation 引用与同锁精确冻结，普通任务不可访问或裁剪共享资源。
 完整停用仍须先提交 revoked 并释放安装锁，再由资源 Store 冻结该代记录并写停止意图，最后锁外逐资源清理。
 启动预留、创建进程前和交接均须复查原代；避免安装锁和资源锁反向嵌套。
-不能将 Gateway PID 伪装成可以整树清理的 host。该接线和完整资源退出证明仍待完成。
+不能将 Gateway PID 伪装成可以整树清理的 host。固定引用和 MCP 启动/发送已本地接线，完整管理撤销和资源退出证明仍待组合。
 公开启用、普通/显式调用、disable/remove 只有在这些边界接通后才开放。
 撤销事实不能代替 OS 清理证明，不能提供接受外部 `cleaned=true` 即删除激活记录的入口。
 
 参考边界：沿已核对的本地 Codex MCP Closed-before-cleanup 顺序，以及本仓库
 `MCP_TRANSPORT_LIFECYCLE.md`、ProcessSessionStore 的原预留/身份/精确停止实现。
-托管字节与归属组件不代表 MCP 注册、发送和完整启停已接通，也不代替实际多 TUI 装卸验收。
+`PluginActivationRef` 只携带可信 root/owner 和原 scope，读回沿唯一 Store；它本身不缓存授权。
+准备握手显式接受 preparing/active，业务调用仅 active；旧客户端不能将冻结引用刷新成新代。
+当前托管 MCP 组件已覆盖鲜活发送准入，完整管理装卸仍未完成，也不代替实际多 TUI 验收。

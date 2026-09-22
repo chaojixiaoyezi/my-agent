@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -198,11 +198,12 @@ class ProcessSessionStore:
     def record_path(self, session_id: str) -> Path:
         return self.root / f"{validate_session_id(session_id)}.json"
 
-    # LLM: 恢复必须先于任何读取或修改；保留原 .process-sessions.lock 身份及锁顺序，不能再次调用公共 Store 入口。
-    # 函数用途: 获取目录互斥并补齐上次提交，向启动/停止调用者开放一次短临界区。
+    # LLM: 原锁及 redo 顺序不变；wait_check 仅影响排队，取得锁后的恢复/提交不能因取消半途丢弃。
+    # 函数用途: 获取可选有界等待的原互斥，补齐待恢复提交后开放一次短临界区。
     @contextmanager
-    def transaction(self) -> Iterator[ProcessSessionTransaction]:
-        with locked_private_directory(self.root, lock_name=".process-sessions.lock"):
+    def transaction(self, *, wait_check: Callable[[], None] | None = None) -> Iterator[ProcessSessionTransaction]:
+        options = {"wait_check": wait_check} if wait_check is not None else {}
+        with locked_private_directory(self.root, lock_name=".process-sessions.lock", **options):
             recover_process_commit(self.root)
             transaction = ProcessSessionTransaction(self.root)
             try:

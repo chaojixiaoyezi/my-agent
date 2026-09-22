@@ -7,7 +7,7 @@ import os
 import threading
 import time
 import weakref
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -35,14 +35,15 @@ _MUTEXES: weakref.WeakValueDictionary[str, _StoreMutex] = weakref.WeakValueDicti
 _MUTEX_GUARD = threading.Lock()
 
 
-# LLM: root 是受信锚点，relative_parts 是宿主固定地址；锁顺序保持线程、系统、领域记录，永久锁不替换。
-# 函数用途: 在读改写或恢复期间锁住同一目录，逐段准备私有目录并拒绝链接锁文件。
+# LLM: 原线程→系统→领域顺序不变；可选 wait_check 只在准入前/等待时调用，取得锁后的提交不能因取消切成半笔。
+# 函数用途: 串行同一目录读改写，允许有期限的调用在排队时退出，永久锁文件不替换。
 @contextmanager
 def locked_private_directory(
     root: Path,
     *,
     lock_name: str,
     relative_parts: tuple[str, ...] = (),
+    wait_check: Callable[[], None] | None = None,
 ) -> Iterator[None]:
     if not lock_name or lock_name in {".", ".."} or Path(lock_name).name != lock_name:
         raise ValueError("directory lock name must be one path component")
@@ -55,17 +56,36 @@ def locked_private_directory(
         if mutex is None:
             mutex = _StoreMutex()
             _MUTEXES[key] = mutex
-    with mutex.lock:
+    with _acquire_mutex(mutex.lock, wait_check):
         anchor, parts = _existing_anchor(root, relative_parts)
         descriptor = open_private_lock_beneath(anchor, (*parts, lock_name))
         try:
-            _acquire_file_lock(descriptor)
+            _acquire_file_lock(descriptor, wait_check)
             try:
                 yield
             finally:
                 _release_file_lock(descriptor)
         finally:
             os.close(descriptor)
+
+
+# LLM: 默认调用仍阻塞；有控制回调时仅轮询同一锁，异常前后都不会留下已取得但未释放的线程锁。
+# 函数用途: 等待进程内互斥期间响应调用者的取消和期限。
+@contextmanager
+def _acquire_mutex(lock, wait_check: Callable[[], None] | None) -> Iterator[None]:
+    if wait_check is None:
+        lock.acquire()
+    else:
+        while True:
+            wait_check()
+            if lock.acquire(timeout=0.02):
+                break
+    try:
+        if wait_check is not None:
+            wait_check()
+        yield
+    finally:
+        lock.release()
 
 
 # LLM: 原进程 Store 可能首次使用尚不存在的私有根；只向上找已有锚点，不创建目录也不解析链接。
@@ -77,16 +97,21 @@ def _existing_anchor(root: Path, parts: tuple[str, ...]) -> tuple[Path, tuple[st
     return root, parts
 
 
-# LLM: Windows 在固定偏移锁一字节；只重试锁冲突，中断和权限错误必须离开临界区。
-# 函数用途: 获取当前系统支持的文件排他锁，防止两个独立写入者同时提交同一权威记录。
-def _acquire_file_lock(descriptor: int) -> None:
-    if fcntl is not None:
+# LLM: 有回调时以同一 OS 锁非阻塞重试，只重试锁冲突；回调失败在取得文件锁前退出，不替换锁身份。
+# 函数用途: 获取跨进程互斥，在有控制要求时允许排队取消，默认 POSIX 阻塞行为保持。
+def _acquire_file_lock(descriptor: int, wait_check: Callable[[], None] | None = None) -> None:
+    if fcntl is not None and wait_check is None:
         fcntl.flock(descriptor, fcntl.LOCK_EX)
         return
     while True:
-        os.lseek(descriptor, 0, os.SEEK_SET)
+        if wait_check is not None:
+            wait_check()
         try:
-            msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+            if fcntl is not None:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            else:
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
             return
         except OSError as exc:
             if exc.errno not in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
