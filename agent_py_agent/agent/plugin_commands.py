@@ -29,14 +29,17 @@ class PluginCommandSpec:
     default_action: str = ""
     package_version: str = ""
     activation_id: str = ""
+    installation_revision: int = 0
 
-    # LLM: 拒绝重复动作、错误字段类型和无效默认目标；版本是显式描述，不从展示名猜业务或授权。
+    # LLM: 拒绝重复动作、错误字段类型和无效默认目标；安装版本参与目录过期判断，不代表配置内容或执行授权。
     # 函数用途: 在目录发布前检查插件命令身份。
     def __post_init__(self) -> None:
         if any(not isinstance(value, str) for value in (self.plugin_id, self.summary, self.default_action, self.package_version, self.activation_id)) or type(self.enabled) is not bool:
             raise ValueError("插件声明字段类型错误")
         if not isinstance(self.actions, tuple):
             raise ValueError("插件动作必须是不可变元组")
+        if type(self.installation_revision) is not int or self.installation_revision < 0:
+            raise ValueError("插件安装版本无效")
         names = tuple(action.name for action in self.actions)
         if not _PLUGIN_ID.fullmatch(self.plugin_id) or len(set(names)) != len(names):
             raise ValueError("插件 ID 无效或动作重名")

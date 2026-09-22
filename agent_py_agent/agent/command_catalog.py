@@ -140,6 +140,10 @@ COMMAND_CATALOG = (
             CommandActionSpec("install", "安装本地包，默认停用", (
                 ArgumentSpec("source", "本地包路径", required=True, path=True),
             ), available=False),
+            CommandActionSpec("configure", "保存停用插件的完整配置", (
+                ArgumentSpec("plugin", "插件 ID", required=True),
+                ArgumentSpec("source", "私有 JSON 配置文件", options=("-f", "--file"), required=True, path=True),
+            ), available=False),
             CommandActionSpec("status", "查询当前会话的管理请求", (
                 ArgumentSpec("request", "原请求编号", required=True),
             ), available=False),

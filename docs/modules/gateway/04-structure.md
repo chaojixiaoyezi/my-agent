@@ -16,6 +16,9 @@ HTTP ask/control 在原鉴权之后先经 `plugin_command_service.py` 读取可�
 帮助、参数和补全同源，只读目录不初始化冷 owner、不写会话或任务。摘要绑定当前 owner/通道/会话及完整声明，不是授权或持久安装状态。
 旧或缺失业务版本明确拒绝并返回新目录；客户端不能改版本自动重放。原认证和群聊路由保持，不能从 argv 取得权限。
 本地管理安装由 `agent/plugin_management.py` 接原运行与执行器；当前管理员检查与来源读取授权分别执行，正文不能提供管理身份。
+配置共用同一管理链，`plugin_configure_tool.py` 在内部读一次文件并按原 schema 验证；`plugin_sources.py` 统一安装/配置的授权读取。
+安装表由 `plugin_installation_state.py` 明确读取 v1/v2，配置与版本提交仍归原 `plugin_install_store.py`，没有第二套表。
+目录 v2 的 `installation_revision` 与原子安装记录同源；组装配置 handler 时目录和目标来自同一次读取，写入在原锁内 CAS。
 首次获授权安装才创建原线程和独立宿主运行；`/plugins status <请求编号>` 使用只读原数据库，不创建 attempt、不自动恢复。
 `owner_conversation_store.py` 统一模型菜单和插件入口的轻量 Store 组装，沿原 owner 路径，旧模型菜单私有组装函数删除。
 完整装卸仍未发布；独立环境已有内部准备器，激活贡献和撤销仍待接线，并须在原执行门再核对准入与撤销。

@@ -1,12 +1,37 @@
 # 本地插件包与安装事实
 
 状态：第 4 步开发中，本地源码已有静态包校验、默认停用的安装记录及原子提交回执；尚未发布或部署。
-管理授权、HTTP/direct 命令及原请求查询已有本地接线；独立环境、启用发布及精确撤销仍待实现。已部署的第 3 步版本不因此获得装卸能力。
+管理授权、HTTP/direct 安装/配置及原请求查询已有本地接线；环境准备已有内部实现，启用发布及精确撤销仍待完成。已部署的第 3 步版本不因此获得装卸能力。
 
 ## 解决问题
 
 帮助不能依赖导入插件，安装成功也不能自动扩大模型工具目录。包文件、安装状态、激活代次分别承担不同职责，
 但安装和激活的当前选择只能由一个 owner 作用域持久记录裁决，不能扫描目录猜测“最新版本”。
+
+## 配置接线（第 4 步本地开发中）
+
+`/plugins configure <插件ID> --file <JSON路径>` 是明确管理动作，沿原认证、路径权限、
+宿主 request/run/attempt、ToolExecutor 和操作账执行。只读取一次有界配置文件，按包的
+`settings_schema` 使用原工具输入校验器严格验证；不隐式转型、补默认值或执行插件。
+命令及工具账只保存来源引用，实际值保存在 owner 私有安装表，不进入命令目录或结果正文。
+它是完整配置替换，不是补丁；停用时修改配置，启用期间不能原地改写既有代次。
+
+安装表升级为 `plugin_installations.v2`，配置、配置版本、安装版本和最后动作回执同次原子保存。
+旧 v1 只按其原字段显式读取；第一次实际修改时，在同一 v2 文件记录原协议及源文件摘要，
+不单独写迁移表，不在只读查询时落盘。新文件直接使用 v2；未知协议和损坏值拒绝覆盖。
+配置读取前固定已见安装及目录版本，原安装锁内再次 CAS；同请求查询仍只读原操作，不能因
+配置来源被删、改写或当前版本变化而重新执行。相同值的新请求不制造一次配置更新。
+当前协议中 install 回执只可对应未配置状态；configure 回执必须匹配规范配置摘要和当前配置版本，矛盾记录不能读成有效状态。
+
+公开目录升级为 `plugin_command_catalog.v2`，插件声明包含非敏感 `installation_revision`，
+因此配置修改也使目录摘要变化；旧客户端明确拒绝未知协议，发布时客户端和 Gateway 同版。
+目录没有配置值或配置摘要，版本只是过期检测依据，不能授予权限或替代安装表的 CAS。
+启用、环境准备资源绑定、MCP 发布及精确撤销继续沿此权威扩展，当前配置接线不代表它们完成。
+
+本片定向核对本地 Codex `578c1b22` 的 `app-server/src/request_processors/plugins.rs::plugin_install_response`
+及 `core-plugins/src/manager.rs`：宿主加载当前配置并检查开关后进入插件管理器；它安装后设置 enabled 的行为不照搬。
+对应模块索引有这两个源码入口，合同文件索引没有直接匹配；索引只用作导航，未声称完整审阅或运行参考项目测试。
+本仓库保留明确安装后停用，并以原操作链和同一安装表承接配置版本，不另建执行器或凭据表。
 
 ## 首期包边界
 
@@ -19,26 +44,26 @@
 - 读取使用有界归档/展开预算，逐 wheel 核对摘要；不调用 `extractall`，不导入模块、不启动服务、不安装依赖。
 - 包摘要由实际读到的完整字节产生；后续安装使用同一份已校验字节，不复读可变化的来源路径。
 - 首期动作只允许引用本包声明的工具；包投影到 `PluginCommandSpec` 时必为停用、激活引用为空，不能借包字段启用。
-- 工具和设置 schema 用规范 JSON 冻结，读取返回独立副本；设置值验证和运行时参数适配仍待接线。
+- 工具和设置 schema 用规范 JSON 冻结，读取返回独立副本；设置值已复用原校验器，运行时参数适配仍待接线。
 - v1 外层只接收单卷、非 ZIP64 尾部的 stored/deflate 普通文件，不接目录成员；默认归档上限 64 MiB、展开总量 128 MiB、单成员 64 MiB、描述 512 KiB、中央目录 1 MiB、成员 128 个。
 - 在构造 `ZipFile` 前有界检查中央目录的真实计数与边界，不能先分配全部成员再判断超限；描述中孤立 Unicode surrogate 和非有限数拒绝。
 - 普通尾部没有 ZIP64 哨兵也不能放行实际 ZIP64 locator，避免标准库将预检范围换成另一个目录。
 - 静态读取只核对 wheel 的文件名、字节及摘要，不证明内部发行元数据、平台兼容性或依赖完整；这些留标准安装器及独立环境验证。
 
-wheel 使用 Python 已有分发格式，不自行编写 wheel 安装器。环境准备将使用独立 venv，
+wheel 使用 Python 已有分发格式，不自行编写 wheel 安装器。内部环境准备使用独立 venv，
 只安装已校验的本地 wheel，关闭索引和依赖下载，再核对依赖；直接 URL 依赖也不能触发网络获取。
 参考 [PyPA wheel 规范](https://packaging.python.org/en/latest/specifications/binary-distribution-format/)
-及 [Python ZIP 文档](https://docs.python.org/3/library/zipfile.html)。本片没有新增第三方依赖。
+及 [Python ZIP 文档](https://docs.python.org/3/library/zipfile.html)。环境片所用公共 packaging 依赖见[环境合同](PLUGIN_ENVIRONMENTS.md)；配置片没有新增依赖。
 
 ## 安装事实（本地源码已实现）
 
 规范地址为原 owner 解析器提供的 `owner_data_dir/plugins`，两个路径投影统一提供插件目录字段；
 构造 Store 和缺失查询不创建目录，也不初始化 Agent 或用户模板。包目录扫描不决定是否已安装。
 
-- `installations.json` 是唯一安装表，协议 `plugin_installations.v1`，包含原始 owner 身份和完整安装清单，上限 16 MiB。
-- 每条保存不可变 manifest、包摘要、revision、`enabled=false`、空 activation_id 和最后一次提交回执。当前协议只接纳停用态，未来启停须显式扩展同一权威。
-- 回执包含 operation_id、规范输入摘要、插件/包身份及前后版本，与记录同次原子保存。它只证明该次提交，不是第二套 OperationStore 或永久操作历史。
-- 请求、记录与纯准入判断统一在 `plugin_installation.py`；Store 只负责加锁、读写和提交，不能再平行维护一套冲突规则。
+- `installations.json` 是唯一安装表，协议 `plugin_installations.v2`，包含原始 owner 身份、完整安装清单和明确迁移来源，上限 16 MiB。
+- 每条保存不可变 manifest、包摘要、revision、私有设置/设置版本、`enabled=false`、空 activation_id 和最后一次提交回执。当前协议只接纳停用态，未来启停须显式扩展同一权威。
+- 回执包含明确动作、operation_id、规范输入摘要、插件/包身份及前后版本，与记录同次原子保存。它只证明该次提交，不是第二套 OperationStore 或永久操作历史。
+- 请求、记录与安装准入归 `plugin_installation.py`，完整配置替换归 `plugin_configuration.py`；Store 只负责加锁、读写和提交，`plugin_installation_state.py` 负责唯一协议编解码及明确迁移。
 - 同一 owner 的固定 `.plugins.lock` 覆盖最新读取、版本 CAS、保存包和提交安装表。多插件提交不能丢掉其它插件记录或回执。
 - 写入复用原 owner quota：先取得配额准入，再取 `.plugins.lock`，按完整包与待提交表预算检查；配额不足不发布包或安装表。
 - 原请求与摘要匹配时返回原回执；同操作标识换输入报冲突；不同请求须匹配当前 revision。当前版本上的相同包只返回 unchanged，不改表或伪称原请求重放。
@@ -58,7 +83,7 @@ portable 的路径检查不承诺 POSIX 描述符级竞态强度，文件原子�
 `plugin_management.py` 组合当前管理员授权、原线程与安装 Store；`plugin_install_tool.py` 经唯一原执行器保存静态包，不向模型开放内部工具。
 来源文件另经原路径权限校验，从文件系统锚逐段 dirfd/no-follow 打开，一次有界读取后不再打开来源；链接及 FIFO 竞争不能绕过或卡住入口。
 不支持严格描述符打开的平台明确拒绝安装，普通文件原语的 portable 行为保持，不声称本片已验 Windows。
-`enable_plugins` 只控制显式新安装；工具总开关、owner 禁用策略、路径权限与磁盘配额同样生效，未使用时不产生插件后台活动。
+`enable_plugins` 控制显式新安装/配置；工具总开关、各管理工具的 owner 禁用策略、路径权限与磁盘配额同样生效，未使用时不产生插件后台活动。
 HTTP/direct 命令绑定真实 run/attempt 与原 OperationStore；网络回包失败保持结果未知，提供 `/plugins status <请求编号>` 查原账。
 同请求重送不重读已删除的来源、不重开终态或 UNKNOWN；运行收尾失败与工具操作结果分别报告，没有第二套租约或重试历史。
 

@@ -61,17 +61,21 @@ def test_plugin_namespace_completion_only_edits_without_path_scan(tmp_path, monk
 @pytest.mark.parametrize(("raw", "message"), [
     ('/plugins@Demo run --path "中文 a" -- -x | literal', "当前目录没有"),
     ("/plugins help install", "用法：/plugins install <source>"),
+    ("/plugins help configure", "用法：/plugins configure"),
     ("/plugins list --bad", "未声明的选项"),
     ('/plugins install "未闭合', "引号尚未闭合"),
 ])
 def test_plugin_submit_uses_real_dispatch_without_chat_guidance_or_stop(
     tmp_path, monkeypatch, use_gateway, mode, raw, message,
 ) -> None:
+    from agent_py_agent.agent.conversation.store import ConversationStore
     from agent_py_agent.agent.plugin_command_service import (
         execute_plugin_command,
         read_plugin_catalog,
     )
-    from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity
+    from agent_py_agent.agent.settings.config import AgentConfig
+    from agent_py_agent.agent.user_space.home_layout import home_paths
+    from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity, resolve_owner_home
     from agent_py_agent.cli.chat_parts import control_runtime, plugin_command_client, tui
 
     snapshot = read_plugin_catalog(OwnerIdentity.local_main(), channel="chat", conversation_id="session-1")
@@ -101,9 +105,14 @@ def test_plugin_submit_uses_real_dispatch_without_chat_guidance_or_stop(
             1, {"main_activity": {"task_id": "goal-task-1", "phase": "running"}},
         )
     background_before = runtime.has_active_background_task()
+    paths = home_paths(tmp_path)
+    owner = resolve_owner_home(tmp_path)
+    agent = SimpleNamespace(config=AgentConfig(), home_paths=paths,
+                            conversation_store=ConversationStore(owner.home_dir / "conversations", initialize=False),
+                            effective_workspace_root=tmp_path)
     params = SimpleNamespace(
         input_area=input_area, interaction_state=TuiInteractionState(), tui_runtime=runtime,
-        agent=SimpleNamespace(config=SimpleNamespace()), args=SimpleNamespace(memory_limit=5), runtime_inject=[], prompt_files=[],
+        agent=agent, args=SimpleNamespace(memory_limit=5), runtime_inject=[], prompt_files=[],
         use_gateway=use_gateway, paths=SimpleNamespace(root=tmp_path), state_lock=threading.Lock(),
         is_running_ref=[mode == "foreground"], pending_jobs_ref=[0], running_prompt_ref=["正在核对"],
         running_request_id_ref=["goal-task-1" if mode == "background" else "req-1"],

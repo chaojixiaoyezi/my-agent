@@ -91,3 +91,44 @@ def test_trusted_normal_user_cannot_install_or_query_admin_request(tmp_path):
                                   "plugin_request_id": "new-a"}, user="alice", channel="local")[1]
         assert result["error_code"] == "PLUGIN_PERMISSION_DENIED"
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("auth", [True, False])
+def test_configure_http_original_chain_keeps_values_private_and_rejects_stale_catalog(tmp_path, auth):
+    from agent_py_agent.agent.plugin_install_store import PluginInstallStore
+    from agent_py_agent.tests.test_plugin_configuration import SETTINGS_SCHEMA
+
+    server = host(tmp_path, auth=auth)
+    owner = resolve_owner_home(tmp_path)
+    owner.home_dir.mkdir(parents=True)
+    package = owner.home_dir / "source.zip"
+    package.write_bytes(_bundle(change=lambda row: row.update(settings_schema=SETTINGS_SCHEMA)))
+    catalog = request(server, {"operation": "catalog"})[1]["catalog"]
+    installed = request(server, {"operation": "command", "command": f'/plugins install "{package}"',
+                                "catalog_revision": catalog["revision"], "plugin_request_id": "install"})[1]
+    source = owner.home_dir / "中文 配置.json"
+    source.write_text('{"limit":3,"credential":"synthetic-http-private-value"}')
+    body = {"operation": "command", "command": f'/plugins configure sample-peek -f "{source}"',
+            "catalog_revision": installed["catalog"]["revision"], "plugin_request_id": "configure"}
+    status, result = request(server, body)
+    assert status == 200 and result["state"] == "succeeded", result
+    assert "synthetic-http-private-value" not in repr(result)
+    assert result["catalog"]["schema_version"] == "plugin_command_catalog.v2"
+    assert PluginInstallStore(owner).snapshot()[0].revision == 2
+    source.unlink()
+    assert request(server, body)[1]["details"] == result["details"]
+    stale = request(server, {**body, "plugin_request_id": "stale"})[1]
+    assert stale["error_code"] == "PLUGIN_CATALOG_STALE"
+    server.agent.config = replace(server.agent.config, enable_plugins=False)
+    query = request(server, {"operation": "command", "command": "/plugins status configure"})[1]
+    assert query["details"] == result["details"]
+    assert not hasattr(server.agent, "tools") and not hasattr(server.agent, "_owner_pool")
+
+
+def test_configure_management_identity_cannot_come_from_http_body(tmp_path):
+    server = host(tmp_path)
+    result = request(server, {"operation": "command", "command": "/plugins configure missing --file missing.json",
+                             "plugin_request_id": "a", "owner_id": "local", "is_admin": True,
+                             "actor_id": "local-agent"}, user="alice", channel="local")[1]
+    assert result["error_code"] == "PLUGIN_PERMISSION_DENIED"
+    assert not list(tmp_path.iterdir())

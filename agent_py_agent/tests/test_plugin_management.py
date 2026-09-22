@@ -130,10 +130,10 @@ def test_source_validation_preserves_core_and_never_installs(tmp_path, monkeypat
 
 
 def test_package_is_one_immutable_read_and_catalog_damage_does_not_erase_result(tmp_path, monkeypatch):
-    from agent_py_agent.agent import plugin_install_tool
+    from agent_py_agent.agent import plugin_sources
 
     service, source = manager(tmp_path)
-    original = plugin_install_tool.read_bytes_beneath
+    original = plugin_sources.read_bytes_beneath
     calls = []
 
     def read_then_replace(*args, **kwargs):
@@ -142,7 +142,7 @@ def test_package_is_one_immutable_read_and_catalog_damage_does_not_erase_result(
         source.write_bytes(b"replaced after read")
         return content
 
-    monkeypatch.setattr(plugin_install_tool, "read_bytes_beneath", read_then_replace)
+    monkeypatch.setattr(plugin_sources, "read_bytes_beneath", read_then_replace)
     result = service.command(f'/plugins install "{source}"', revision=service.catalog().revision, request_id="a")
     assert result["state"] == "succeeded" and len(calls) == 1
     (service.installations.root / "installations.json").write_text("broken")

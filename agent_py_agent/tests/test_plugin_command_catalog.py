@@ -66,6 +66,7 @@ def test_owner_schema_version_and_activation_changes_invalidate_revision():
         PluginCommandCatalog("owner-view-b", plugins=(plugin,)),
         PluginCommandCatalog("owner-view-a", plugins=(replace(plugin, enabled=False),)),
         PluginCommandCatalog("owner-view-a", plugins=(replace(plugin, package_version="2.0"),)),
+        PluginCommandCatalog("owner-view-a", plugins=(replace(plugin, installation_revision=2),)),
         PluginCommandCatalog(
             "owner-view-a", plugins=(replace(plugin, activation_id="activation-b"),)
         ),
@@ -80,9 +81,13 @@ def test_owner_schema_version_and_activation_changes_invalidate_revision():
     [
         lambda row: row.update(revision="forged"),
         lambda row: row.update(schema_version="unknown.v2"),
+        lambda row: row.update(schema_version="plugin_command_catalog.v1"),
         lambda row: row.update(owner="forged"),
         lambda row: row.pop("management_actions"),
         lambda row: row["plugins"][0].update(enabled="false"),
+        lambda row: row["plugins"][0].pop("installation_revision"),
+        lambda row: row["plugins"][0].update(installation_revision=True),
+        lambda row: row["plugins"][0].update(installation_revision=-1),
         lambda row: row["plugins"][0]["actions"][0]["arguments"][1].update(required="false"),
         lambda row: row["plugins"][0].update(actions="invalid"),
         lambda row: row["plugins"].append(row["plugins"][0]),

@@ -97,10 +97,14 @@ agent_py_agent/
 |   |-- plugin_wheel_layout.py         # 环境内文件计划、引导文件保护与宿主只读核对
 |   |-- plugin_environment.py          # 固定地址的 owner 独立 venv 准备，尚不发布激活
 |   |-- plugin_environment_process.py  # 受控离线命令、原取消 token 与精确退出回执
-|   |-- plugin_installation.py         # 安装请求、停用事实、最后回执与纯准入判断
+|   |-- plugin_installation.py         # 安装请求、私有配置事实、通用提交回执与安装准入
+|   |-- plugin_installation_state.py   # 唯一安装表 v2 编解码及 v1 明确迁移来源
+|   |-- plugin_configuration.py        # 完整配置替换、原请求重放与版本 CAS 纯裁决
 |   |-- plugin_install_store.py        # owner 唯一安装表、包内容保存及锁内 CAS/提交裁决
 |   |-- plugin_install_tool.py         # 经原执行器读取授权包快照并保存默认停用记录
-|   |-- plugin_management.py           # 原权限、线程与目录的轻量组合，显式安装与只读结果查询
+|   |-- plugin_configure_tool.py       # 经原执行器读取和验证私有配置，结果不含配置值
+|   |-- plugin_sources.py              # 安装包与配置共用的有界授权文件读取
+|   |-- plugin_management.py           # 原权限、线程与目录的轻量组合，安装/配置与原结果查询
 |   |-- core.py                         # SimpleAgent 组合入口
 |   |-- turn_end.py                     # 主/子代理共用的结束原因及技术续跑判据
 |   |-- model_guidance.py               # 完整 Prompt 与有副作用工具共用的验证/授权软提示唯一正文
@@ -440,6 +444,8 @@ agent_py_agent/
 |   |-- test_plugin_environment.py     # 临时真实 venv/pip、导入陷阱、原配额及候选排他检查
 |   |-- test_plugin_environment_process.py # 准备进程的取消、超时、I/O 异常和未知退出替身
 |   |-- test_plugin_install_store.py   # 默认停用、原请求重放、失败裁决与独立进程安装竞争
+|   |-- test_plugin_configuration.py   # 私有配置 CAS、显式迁移、矛盾状态和提交异常裁决
+|   |-- test_plugin_configure_management.py # 原配置执行链、值不外泄、过期请求与 UNKNOWN 重放
 |   |-- test_plugin_management.py      # 真实原执行链、来源消失、配置关闭、路径权限和配额检查
 |   |-- test_nofollow_binary_io.py      # 二进制预算、私有原子写入、锁链接和 portable 创建竞争
 |   |-- test_gateway_plugin_commands.py # 冷 owner、可信身份、HTTP 插件命令分流与过期拒绝
@@ -544,6 +550,8 @@ docs/
 - `agent_py_agent/agent/plugin_wheels.py` 与 `plugin_wheel_layout.py`：标准元数据和固定依赖集合预检、环境内目标保护及安装后宿主读回；不运行插件或替代 pip 安装器。
 - `agent_py_agent/agent/plugin_environment.py` 与 `plugin_environment_process.py`：原 owner 配额下的固定地址 venv 准备，复用原取消与精确进程退出；只返回准备事实，不发布激活或重建操作账。
 - `agent_py_agent/agent/plugin_installation.py` 与 `plugin_install_store.py`：原 owner 插件目录中的唯一安装表和最后回执；先存包再提交，默认停用，异常读回区分提交结果，不拥有管理权限或执行历史。
+- `agent_py_agent/agent/plugin_installation_state.py` 与 `plugin_configuration.py`：原表 v2 编解码、v1 明确迁移来源和完整配置替换裁决；配置及版本同次提交，没有第二套配置权威。
+- `agent_py_agent/agent/plugin_configure_tool.py` 与 `plugin_sources.py`：隐藏管理工具通过原执行链读取授权来源，配置值只进 owner 私有安装表；包与配置共用有界安全读取。
 - `agent_py_agent/agent/plugin_install_tool.py` 与 `plugin_management.py`：管理服务先核对可信授权，隐藏工具再经原执行器读取一次包；默认停用保存，查询只读原请求，不启动插件。
 - `agent_py_agent/agent/common/directory_lock.py`、`nofollow_fs.py` 与 `strict_json.py`：分别维护永久互斥、受信根文件原语和严格 JSON；这些公共原语不裁决领域授权或替代操作账本。
 - `agent_py_agent/agent/plugin_command_service.py`：从既有 OwnerIdentity 生成会话目录，旧或缺失业务版本明确拒绝；当前实际插件贡献仍为空。

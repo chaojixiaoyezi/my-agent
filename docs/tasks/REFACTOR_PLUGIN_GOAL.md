@@ -4,7 +4,8 @@
 整体顺序由 [合并重构计划](../design/MAINTAINABILITY_AND_JEV_REVIEW.md#下一轮结构整理顺序待实施) 维护；本文记录执行状态和详细验收。
 插件合同见 [生命周期](../design/PLUGIN_LIFECYCLE.md)，样本范围见 [10 个简易插件](../design/PLUGIN_SAMPLE_ACCEPTANCE.md)。
 第 4 步独立环境内部准备器已有本地源码和临时 venv/pip 组件验证，原安装表仍保持停用；
-产品配置/启用、激活 CAS、MCP 贡献发布和撤销尚未接通。本片未发布部署、未新增实际 TUI，下一环继续沿原执行链组合，见 [环境合同](../design/PLUGIN_ENVIRONMENTS.md)。
+配置已沿原管理与工具执行链本地接通，值只进唯一私有安装表；v2 配置/版本/回执同次提交，旧 v1 明确迁移，目录 v2 拒绝旧安装版本。
+启用前资源绑定、激活 CAS、MCP 贡献发布和撤销尚未接通。本片未发布部署、未新增实际 TUI，下一环继续沿原执行链组合，见 [环境合同](../design/PLUGIN_ENVIRONMENTS.md)。
 
 资源停止修复已按用户要求参考本地 Codex 的独立控制入口、关闭派工入口及固定集合清理，未运行参考项目测试。
 沿原持久权威补齐 v2 启动交接、整树权限关闭和固定资源清单；direct/local 中断分路、准确 pending 与无数据库一次性接纳同时补齐。

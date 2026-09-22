@@ -94,6 +94,35 @@ def test_direct_client_uses_config_owner_without_http(monkeypatch, tmp_path):
     assert client.snapshot().plugins == ()
 
 
+def test_configure_direct_client_uses_real_manager_and_updates_selected_revision(tmp_path, monkeypatch):
+    from agent_py_agent.agent.conversation.store import ConversationStore
+    from agent_py_agent.agent.settings.config import AgentConfig
+    from agent_py_agent.agent.user_space.home_layout import home_paths
+    from agent_py_agent.agent.user_space.owner_resolver import resolve_owner_home
+    from agent_py_agent.tests.test_plugin_configuration import SETTINGS_SCHEMA
+    from agent_py_agent.tests.test_plugin_package import _bundle
+
+    owner = resolve_owner_home(tmp_path)
+    owner.home_dir.mkdir(parents=True)
+    agent = SimpleNamespace(config=AgentConfig(), home_paths=home_paths(tmp_path),
+                            conversation_store=ConversationStore(owner.home_dir / "conversations", initialize=False),
+                            effective_workspace_root=owner.home_dir)
+    monkeypatch.setattr(plugin_command_client, "post_gateway_json", Mock(side_effect=AssertionError("direct 不发 HTTP")))
+    package = owner.home_dir / "sample.zip"
+    package.write_bytes(_bundle(change=lambda row: row.update(settings_schema=SETTINGS_SCHEMA)))
+    client = PluginCommandClient(agent, "configure-session", use_gateway=False)
+    assert client.command(f'/plugins install "{package}"')["state"] == "succeeded"
+    selected = client.snapshot().revision
+    source = owner.home_dir / "中文 配置.json"
+    source.write_text('{"limit":3}')
+    result = client.command(f'/plugins configure sample-peek --file "{source}"', revision=selected)
+    assert result["state"] == "succeeded", result
+    assert client.snapshot().revision != selected
+    source.write_text('{"limit":4}')
+    assert client.command(f'/plugins configure sample-peek -f "{source}"', revision=selected)["error_code"] == "PLUGIN_CATALOG_STALE"
+    assert client.command(f'/plugins status {result["request_id"]}')["details"] == result["details"]
+
+
 def test_old_selection_is_not_rebound_to_fresh_catalog_or_automatically_replayed(monkeypatch):
     old, current = PluginCommandCatalog("old-scope"), PluginCommandCatalog("current-scope")
     calls = []

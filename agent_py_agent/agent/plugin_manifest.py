@@ -11,9 +11,10 @@ from dataclasses import asdict, dataclass
 from .command_arguments import CommandActionSpec
 from .command_declarations import command_action_from_payload, declaration_list
 from .plugin_commands import PluginCommandSpec
-from .tooling.input_schema import canonicalize_tool_input_schema
+from .tooling.input_schema import canonicalize_tool_input_schema, validate_tool_input
 
 PLUGIN_PACKAGE_SCHEMA = "plugin_package.v1"
+PLUGIN_SETTINGS_BYTES = 64 * 1024
 _MODULE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*\Z")
 _WHEEL_PATH = re.compile(r"wheels/[A-Za-z0-9_][A-Za-z0-9_.+-]*\.whl\Z")
 _TOOL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]{0,63}\Z")
@@ -241,3 +242,15 @@ def _json(value: object) -> str:
     )
     result.encode("utf-8")
     return result
+
+
+# LLM: 配置使用原工具 schema 校验器，严格拒绝而不猜类型或注入默认值；错误不能携带私有值、动态键或 schema 内容。
+# 函数用途: 验证并冻结一份完整配置，供私有安装表保存；不执行插件，不把值放进公共目录。
+def canonical_plugin_settings(value: object, schema: dict) -> str:
+    try:
+        encoded = _json(value)
+        if len(encoded.encode("utf-8")) > PLUGIN_SETTINGS_BYTES or not validate_tool_input(value, schema).ok:
+            raise ValueError("配置不满足声明")
+        return encoded
+    except (ValueError, TypeError, RecursionError, OverflowError) as exc:
+        raise ValueError("插件配置格式或内容不符合声明。") from exc

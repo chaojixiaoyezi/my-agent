@@ -6,11 +6,11 @@ from __future__ import annotations
 from dataclasses import asdict
 from pathlib import Path
 
-from .common.nofollow_fs import read_bytes_beneath
 from .path_access_policy import PathAccessPolicy
 from .plugin_install_store import PluginInstallStore
 from .plugin_installation import PluginInstallationError, PluginInstallRequest
 from .plugin_package import PackageReadLimits, inspect_plugin_package
+from .plugin_sources import read_plugin_source
 from .tooling.models import (
     ApprovalPolicy,
     BaseTool,
@@ -48,7 +48,10 @@ class PluginInstallTool(BaseTool):
     # 函数用途: 读取包、检查当前安装版本并提交默认停用记录，返回可对账的领域回执。
     def execute(self, params: dict) -> ToolHandlerOutcome:
         try:
-            package = self._read_source(params["source"])
+            limits = PackageReadLimits()
+            package = inspect_plugin_package(read_plugin_source(
+                params["source"], self.workspace, self.policy, max_bytes=limits.archive_bytes,
+            ), limits=limits)
         except (OSError, ValueError, RuntimeError):
             return ToolHandlerOutcome(PLUGIN_INSTALL_TOOL, False, "插件包来源不可读、未获授权或格式无效。",
                                       error_code="TOOL_INVALID_ARGUMENTS", effect_outcome="not_started")
@@ -76,21 +79,3 @@ class PluginInstallTool(BaseTool):
                 "receipt": asdict(installed.receipt) if installed.receipt else None,
             }},
         )
-
-    # LLM: 解析后的实际路径逐段从文件系统锚打开；不把任意 source.parent 当受信根，能力不足不降级为普通 open。
-    # 函数用途: 在原路径权限内读取一份有界普通文件快照，避免链接替换和 FIFO 阻塞。
-    def _read_source(self, source: str):
-        path = Path(source).expanduser()
-        if not path.is_absolute():
-            path = self.workspace / path
-        if path.is_symlink():
-            raise ValueError("插件包来源不能是链接")
-        path = path.resolve(strict=True)
-        if not self.policy.check(path).allowed:
-            raise ValueError("插件包来源未获授权")
-        limits = PackageReadLimits()
-        content = read_bytes_beneath(Path(path.anchor), path.parts[1:],
-                                     max_bytes=limits.archive_bytes, require_dir_fd=True)
-        if content is None:
-            raise ValueError("插件包来源不存在")
-        return inspect_plugin_package(content, limits=limits)

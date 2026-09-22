@@ -1,11 +1,9 @@
 # LLM: 本 Store 是 owner 插件安装事实的唯一文件入口；不承担认证、工具执行或操作历史，管理入口必须先授权。
-# 模块用途: 在固定目录锁内校验版本、保存包并原子提交默认停用状态，失败按实际读回区分提交结果。
+# 模块用途: 在固定目录锁内校验版本、保存包或私有配置并原子提交，失败按实际读回区分提交结果。
 
 from __future__ import annotations
 
 import hashlib
-import json
-from dataclasses import asdict
 
 from .common.directory_lock import locked_private_directory
 from .common.nofollow_fs import (
@@ -13,14 +11,20 @@ from .common.nofollow_fs import (
     write_bytes_atomic_beneath,
     write_text_atomic_beneath,
 )
-from .common.strict_json import load_strict_json
+from .plugin_configuration import PluginConfigureRequest, prepare_configuration
 from .plugin_installation import (
+    PluginCommitReceipt,
     PluginInstallation,
     PluginInstallationError,
-    PluginInstallReceipt,
     PluginInstallRequest,
-    PluginInstallResult,
+    PluginMutationResult,
     admit_installation,
+)
+from .plugin_installation_state import (
+    INSTALLATION_STATE_LIMIT,
+    PluginInstallationState,
+    decode_installation_state,
+    encode_installation_state,
 )
 from .plugin_package import PackageReadLimits, PluginPackageSnapshot, inspect_plugin_package
 from .user_space.owner_quota import (
@@ -30,9 +34,6 @@ from .user_space.owner_quota import (
     owner_quota_enforcer_from_policy,
 )
 from .user_space.owner_resolver import OwnerHomeResult
-
-_SCHEMA = "plugin_installations.v1"
-_STATE_LIMIT = 16 * 1024 * 1024
 
 
 # LLM: 只保留必要 owner 身份与规范地址；缺失查询不创建目录，blob 目录不参与决定安装清单。
@@ -52,31 +53,16 @@ class PluginInstallStore:
     # LLM: 一次原子文件读取得到完整投影；包缺失需由 package_bytes 报告，不能因此丢掉已提交历史。
     # 函数用途: 读取安装清单，损坏、未知版本或跨 owner 内容均明确拒绝。
     def snapshot(self) -> tuple[PluginInstallation, ...]:
+        return self._read_state().entries
+
+    # LLM: 解码 v1 不写迁移；同次真正提交才连同旧来源摘要写 v2，不能将损坏表当空表。
+    # 函数用途: 读取原表及迁移信息，保持只读查询无副作用。
+    def _read_state(self) -> PluginInstallationState:
         try:
             content = read_bytes_beneath(
-                self._anchor, (*self._parts, "installations.json"), max_bytes=_STATE_LIMIT
+                self._anchor, (*self._parts, "installations.json"), max_bytes=INSTALLATION_STATE_LIMIT
             )
-            if content is None:
-                return ()
-            payload = load_strict_json(content)
-            if (
-                not isinstance(payload, dict)
-                or set(payload) != {"schema_version", "owner", "installations"}
-                or payload["schema_version"] != _SCHEMA
-            ):
-                raise ValueError("安装表协议无效")
-            if payload["owner"] != asdict(self._owner):
-                raise PluginInstallationError("owner_mismatch", "安装表不属于当前用户。")
-            if not isinstance(payload["installations"], list):
-                raise ValueError("安装清单无效")
-            entries = tuple(
-                PluginInstallation.from_payload(row) for row in payload["installations"]
-            )
-            if len({item.manifest.plugin_id for item in entries}) != len(entries):
-                raise ValueError("插件身份重复")
-            if len({item.last_commit.operation_id for item in entries}) != len(entries):
-                raise ValueError("安装提交身份重复")
-            return entries
+            return decode_installation_state(content, self._owner)
         except PluginInstallationError:
             raise
         except (OSError, ValueError, TypeError, KeyError, RecursionError) as exc:
@@ -104,12 +90,22 @@ class PluginInstallStore:
                 "package_integrity", "已登记的插件包缺失或损坏。"
             ) from exc
 
-    # LLM: 授权归外层；沿原 owner quota→目录锁顺序，锁内先包后表，清理失败不得覆盖已裁定提交。
+    # LLM: 授权归外层；复验包内容后沿原 quota→目录锁顺序提交，不能把配置更新重置成新安装。
     # 函数用途: 保存一个本地候选包为停用状态，重复请求复读回执，不重置既有安装。
-    def install(self, request: PluginInstallRequest) -> PluginInstallResult:
+    def install(self, request: PluginInstallRequest) -> PluginMutationResult:
         verified = inspect_plugin_package(request.package.archive_bytes, limits=self._limits)
         if verified.manifest != request.package.manifest:
             raise PluginInstallationError("package_integrity", "候选包与声明不一致。")
+        return self._write(lambda quota: self._install_locked(request, quota))
+
+    # LLM: 配置仍属于同一安装表；值验证、版本 CAS 和提交均在原锁内，包不在此更新或执行。
+    # 函数用途: 完整替换停用插件的私有配置，重送复读原回执。
+    def configure(self, request: PluginConfigureRequest) -> PluginMutationResult:
+        return self._write(lambda quota: self._configure_locked(request, quota))
+
+    # LLM: 两个动作复用原 quota→插件目录锁，不增加锁或操作表；清理失败不能覆盖先前裁决的提交状态。
+    # 函数用途: 在完整临界区执行安装领域更新，并保留确定或未知提交事实。
+    def _write(self, mutation) -> PluginMutationResult:
         result = None
         operation_error = None
         try:
@@ -117,7 +113,7 @@ class PluginInstallStore:
                 self._anchor, relative_parts=self._parts, lock_name=".plugins.lock"
             ):
                 try:
-                    result = self._install_locked(request, quota)
+                    result = mutation(quota)
                 except PluginInstallationError as exc:
                     operation_error = exc
                     raise
@@ -145,9 +141,10 @@ class PluginInstallStore:
 
     # LLM: 锁内复读最新记录；原请求命中后保留提交事实，新写入在原配额锁内计算完整包与安装表增长。
     # 函数用途: 在完整临界区内完成准入、保存包及提交安装表。
-    def _install_locked(self, request: PluginInstallRequest, quota) -> PluginInstallResult:
+    def _install_locked(self, request: PluginInstallRequest, quota) -> PluginMutationResult:
         package = request.package
-        entries = self.snapshot()
+        state = self._read_state()
+        entries = state.entries
         replay = admit_installation(request, entries)
         if replay is not None:
             try:
@@ -157,7 +154,7 @@ class PluginInstallStore:
                     exc.reason, str(exc), commit_state=replay.commit_state, receipt=replay.receipt
                 ) from exc
             return replay
-        receipt = PluginInstallReceipt(
+        receipt = PluginCommitReceipt(
             request.operation_id,
             request.input_digest,
             package.manifest.plugin_id,
@@ -169,14 +166,28 @@ class PluginInstallStore:
             package.manifest, package.sha256, receipt.after_revision, receipt
         )
         updated = (*entries, installed)
-        text = self._state_text(updated)
+        text = encode_installation_state(updated, self._owner, state.migration_json)
         quota.check((
             OwnerQuotaChange(self._anchor.joinpath(*self._blob_parts(package.sha256)), len(package.archive_bytes)),
             OwnerQuotaChange(self.root / "installations.json", len(text.encode("utf-8"))),
         ))
         self._save_blob(package)
         self._commit(entries, updated, text, receipt)
-        return PluginInstallResult(installed, "installed", "committed", receipt)
+        return PluginMutationResult(installed, "installed", "committed", receipt)
+
+    # LLM: 配置与版本、最后回执同次提交；旧读取在锁内 CAS 失败，不覆盖并发配置或伪造无副作用。
+    # 函数用途: 验证并保存完整私有配置，迁移来源随首次修改原子保留。
+    def _configure_locked(self, request: PluginConfigureRequest, quota) -> PluginMutationResult:
+        state = self._read_state()
+        result = prepare_configuration(request, state.entries)
+        if result.outcome != "configured":
+            return result
+        updated = tuple(result.installation if row.manifest.plugin_id == request.plugin_id else row
+                        for row in state.entries)
+        text = encode_installation_state(updated, self._owner, state.migration_json)
+        quota.check((OwnerQuotaChange(self.root / "installations.json", len(text.encode("utf-8"))),))
+        self._commit(state.entries, updated, text, result.receipt)
+        return result
 
     # LLM: 包地址只由本次重新核验的完整摘要决定；已存在但损坏的 blob 不覆盖，未引用包不是安装事实。
     # 函数用途: 保存完整包字节，为随后的安装表提交准备内容引用。
@@ -196,24 +207,6 @@ class PluginInstallStore:
             return
         write_bytes_atomic_beneath(self._anchor, parts, package.archive_bytes)
 
-    # LLM: owner 从绑定身份写入，所有提交均保存完整清单及每插件最后回执；不另写索引或操作历史。
-    # 函数用途: 生成完整且有界的权威状态，超限在发布包和状态之前拒绝。
-    def _state_text(self, entries: tuple[PluginInstallation, ...]) -> str:
-        value = {
-            "schema_version": _SCHEMA,
-            "owner": asdict(self._owner),
-            "installations": [row.to_payload() for row in entries],
-        }
-        text = (
-            json.dumps(
-                value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
-            )
-            + "\n"
-        )
-        if len(text.encode("utf-8")) > _STATE_LIMIT:
-            raise PluginInstallationError("state_limit", "安装表超过存储预算。")
-        return text
-
     # LLM: 原子替换后可能刷盘或返回失败；同锁读回只裁决可见提交，不能把未知变成未发生或自动重做。
     # 函数用途: 提交安装表，异常时保留原请求回执并区分已提交、未提交和无法确认。
     def _commit(
@@ -221,7 +214,7 @@ class PluginInstallStore:
         before: tuple[PluginInstallation, ...],
         after: tuple[PluginInstallation, ...],
         text: str,
-        receipt: PluginInstallReceipt,
+        receipt: PluginCommitReceipt,
     ) -> None:
         try:
             write_text_atomic_beneath(self._anchor, (*self._parts, "installations.json"), text)
