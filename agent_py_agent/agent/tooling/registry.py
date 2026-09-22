@@ -16,7 +16,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..contracts.tool_manifest_contract import tool_manifest_payload
 from ..settings.defaults import default_config_int
@@ -46,6 +46,9 @@ from .registry_bootstrap import build_tool_retriever, register_base_tools
 from .registry_workspace import effective_registry_cwd
 from .runtime_contracts import ToolCall, ToolResult
 
+if TYPE_CHECKING:
+    from ..user_space.owner_resolver import OwnerHomeResult
+
 _allowed_tool_set = allowed_tool_set
 # LLM: 这两项都只允许宿主显式下发给受控 runner；普通 root 会话既不能直接
 # 调用，也不能经 tool_search 重新发现。capability_request 的 run_id 由 child
@@ -73,8 +76,8 @@ class CatalogRenderConfig:
     deferred_categories: list[str] = field(default_factory=list)
 
 
-# LLM: ToolRegistry 的单一装配配置；审批读取器由 core 绑定 owner，不能接受模型回调；新增字段同步 bootstrap 与测试。
-# 类用途: 汇总工作区、权限、工具上限和可选后端配置，避免每类工具各自读取一套全局配置。
+# LLM: ToolRegistry 的单一装配配置；审批读取器和可选插件 owner 由 core 绑定，不能从工作区或模型参数推导；联测 owner/worker。
+# 类用途: 汇总工作区、权限、工具上限和可信插件身份，未启用插件时不读安装表或启动服务。
 @dataclass(frozen=True)
 class ToolRegistryParams:
     workspace_root: Path
@@ -124,6 +127,8 @@ class ToolRegistryParams:
     runtime_guard_policy: object | None = None
     # MCP 客户端(短板6)：要连接的外部 MCP server 声明。默认空 = 不连、不起子进程(零开销)。
     mcp_servers: dict[str, Any] | None = None
+    # 只有宿主显式启用插件时注入规范 owner；不从工作目录或权限墙反推身份，构造不启动插件。
+    plugin_owner: OwnerHomeResult | None = None
     # 视觉理解(短板6)：辅助视觉模型配置(VisionModelConfig)。默认 None = 未配视觉模型,
     # analyze_image 注册但调用时返回 TOOL_UNAVAILABLE(可选加法,零默认影响)。
     # 真实语义工具检索的 embedding provider；未配置时 vector 通道明确显示 unconfigured。
@@ -377,7 +382,7 @@ def _live_tool_manifest_payload(payload: dict[str, object]) -> dict[str, object]
 # LLM: Registry 是工具事实窄腰；注册、可见、搜索、Schema 与执行必须从同一请求快照派生。
 # 类用途: 组合进程级工具实现，并为每个 Agent run 生成权限与可用性的不可变交集。
 class ToolRegistry:
-    # LLM: 保存唯一构造配置供工作片派生权限视图；初始装配会注册工具与连接配置，派生视图不得重复建立服务。
+    # LLM: 保存唯一构造配置供工作片派生权限视图；普通 MCP 保持初始连接，插件只在新运行准备时启动，视图共用客户端与关闭标记。
     # 函数用途: 初始化一个 owner 的工具表、检索和审批读取器，运行时按同一注册表完成授权与调用。
     def __init__(
         self,
@@ -423,6 +428,7 @@ class ToolRegistry:
         # 后续只在新 run 边界重试，不让一次瞬时故障永久删掉工具。
         self._mcp_clients = _connect_mcp_servers(self, params.mcp_servers)
         self._mcp_prepare_lock = threading.Lock()
+        self._mcp_closed = threading.Event()
         initial_retry_at = time.monotonic() + 1.0
         self._mcp_retry_state: dict[int, tuple[int, float]] = {
             id(client): (1, initial_retry_at)
@@ -524,8 +530,8 @@ class ToolRegistry:
         """关闭所有已连接的 MCP server 子进程(进程生命周期收尾)。幂等。"""
         _close_registry_clients(self)
 
-    # LLM: 可用性检查始终无副作用；MCP 重连只发生在新 run 固定工具快照之前。
-    # 函数用途: 为下一轮恢复已断开的 stdio MCP，并原子发布该连接重新发现的精确工具表。
+    # LLM: 可用性检查始终无副作用；普通 MCP 恢复与插件按代接线只发生在新 run 冻结工具快照之前。
+    # 函数用途: 为下一轮同步完整插件贡献和 MCP 连接，各权限视图分别生成自己的工具表。
     def prepare_for_run(self) -> None:
         _prepare_registry_clients_for_run(self)
 
@@ -763,26 +769,42 @@ def _execution_workspace_roots(
     return tuple(roots or (invocation_root,))
 
 
-# LLM: 先永久撤销冻结客户端以打断发现，再取得 prepare 锁清共享引用；不能持 prepare 等长请求后才关闭。
+# LLM: 先置共享关闭标记再冻结客户端并锁外 stop；迟到登记方复查标记，之后取得 prepare 锁清引用，不等发现后才撤销。
 # 函数用途: 关闭本注册表及其权限视图共用的 MCP 连接，避免旧视图再次重连。
 def _close_registry_clients(registry: ToolRegistry) -> None:
-    for client in getattr(registry, "_mcp_clients", ()) or ():
+    registry._mcp_closed.set()
+    for client in tuple(getattr(registry, "_mcp_clients", ()) or ()):
         try:
             client.stop()
         except Exception:  # 关闭尽力而为，单个失败不阻断其余清理。
             pass
     with registry._mcp_prepare_lock:
+        for client in registry._mcp_clients:
+            if not client.is_closed():
+                try:
+                    client.stop()
+                except Exception:
+                    pass
         registry._mcp_clients.clear()
         registry._mcp_retry_state.clear()
 
 
-# LLM: 远程目录只在运行边界更新；永久关闭不重连、不续退避，旧快照由共享客户端拒绝执行。
-# 函数用途: 恢复暂时断连或更新工具目录，已明确关闭的连接保持关闭。
+# LLM: 插件同步及各视图投影在原 prepare 锁内，安装权威只读；永久关闭不重连，旧快照保留原 handler。
+# 函数用途: 为新运行接入当前插件并恢复普通 MCP，核心工具及其他视图不被原位改写。
 def _prepare_registry_clients_for_run(registry: ToolRegistry) -> None:
+    if registry._mcp_closed.is_set():
+        return
     clients = list(getattr(registry, "_mcp_clients", ()) or ())
-    if not clients or all(client.is_running() and not getattr(client, "tools_changed", False) for client in clients):
+    plugin_owner = registry._construction_params.plugin_owner
+    if plugin_owner is None and (not clients or all(client.is_running() and not getattr(client, "tools_changed", False) for client in clients)):
         return
     with registry._mcp_prepare_lock:
+        if registry._mcp_closed.is_set():
+            return
+        if plugin_owner is not None:
+            from .plugin_registration import project_plugin_tools, synchronize_plugin_clients
+
+            synchronize_plugin_clients(registry)
         for client in list(getattr(registry, "_mcp_clients", ()) or ()):
             if client.is_closed():
                 registry._mcp_retry_state.pop(id(client), None)
@@ -791,6 +813,8 @@ def _prepare_registry_clients_for_run(registry: ToolRegistry) -> None:
                 registry._mcp_retry_state.pop(id(client), None)
                 continue
             _reconnect_registry_client_if_due(registry, client)
+        if plugin_owner is not None:
+            project_plugin_tools(registry)
 
 
 # LLM: 恢复与发布固定同一 transport；失败只能清理已收到的句柄，不能 stop 整个可恢复客户端或猜 current。
@@ -807,7 +831,14 @@ def _reconnect_registry_client_if_due(registry: ToolRegistry, client: object) ->
         from .mcp_registration import disconnect_failed_mcp_transport, refresh_registered_mcp_client
 
         transport = client.reconnect()
-        refresh_registered_mcp_client(registry, client, transport=transport)
+        from ..plugin_runtime import PluginMCPClient
+
+        if isinstance(client, PluginMCPClient):
+            from .plugin_registration import refresh_plugin_client
+
+            refresh_plugin_client(registry, client, transport)
+        else:
+            refresh_registered_mcp_client(registry, client, transport=transport)
         registry._mcp_retry_state.pop(id(client), None)
     except Exception as exc:
         if transport is not None:

@@ -110,8 +110,8 @@ def _validate_v2_instances(payload: dict[str, object]) -> None:
         raise ValueError("invalid managed process revision")
 
 
-# LLM: stop_requested 只是意图；running 要求完整 child，未确认终态不得伪装退出或完成通知。
-# 函数用途: 核对新记录的阶段、时间和交接条件，保持启动中、运行中和未知结果的区别。
+# LLM: stop_requested 只是意图；完整 session 清理与 child 终止回执分开，新增清理字段必须严格有效，未确认不能伪装成功。
+# 函数用途: 核对阶段、时间、交接及可选清理证据，保持原命令状态不被资源回收改写。
 def _validate_v2_lifecycle(payload: dict[str, object]) -> None:
     for key in ("stop_requested", "handoff_confirmed", "child_launch_started"):
         if type(payload.get(key)) is not bool:
@@ -153,6 +153,29 @@ def _validate_v2_lifecycle(payload: dict[str, object]) -> None:
             raise ValueError("invalid managed process text field")
     if status not in PROCESS_TERMINAL_STATUSES and payload["completion_notice_id"]:
         raise ValueError("unfinished managed process cannot have completion notice")
+    _validate_cleanup_evidence(payload.get("termination"))
+
+
+# LLM: cleanup 只附加在原 termination 中，身份沿不可变 session 字段；缺失表示未记录，不能从 child-only confirmed 补齐。
+# 函数用途: 拒绝畸形或自相矛盾的完整资源清理回执，不修改既有 host 的终止协议。
+def _validate_cleanup_evidence(termination) -> None:
+    if not isinstance(termination, dict) or "cleanup" not in termination:
+        return
+    cleanup = termination["cleanup"]
+    if (not isinstance(cleanup, dict) or set(cleanup) != {"confirmed", "instances"}
+            or type(cleanup["confirmed"]) is not bool or not isinstance(cleanup["instances"], list)):
+        raise ValueError("invalid managed session cleanup evidence")
+    keys = {"method", "confirmed", "return_code", "observed_processes", "unresolved_pids"}
+    for receipt in cleanup["instances"]:
+        if (not isinstance(receipt, dict) or set(receipt) != keys or type(receipt["confirmed"]) is not bool
+                or not isinstance(receipt["method"], str) or not receipt["method"]
+                or type(receipt["observed_processes"]) is not int or receipt["observed_processes"] < 0
+                or receipt["return_code"] is not None and type(receipt["return_code"]) is not int
+                or not isinstance(receipt["unresolved_pids"], (tuple, list))
+                or any(type(pid) is not int or pid <= 0 for pid in receipt["unresolved_pids"])
+                or receipt["confirmed"] and receipt["unresolved_pids"]
+                or cleanup["confirmed"] and not receipt["confirmed"]):
+            raise ValueError("invalid managed session cleanup receipt")
 
 
 # LLM: 保留 v1 的显式读取合同；它的附加字段不会让 v1 获得 v2 的任务停止授权。
@@ -212,8 +235,8 @@ def _validate_completion_target(target: object, conversation_id: str) -> None:
         raise ValueError("invalid managed process completion target scope")
 
 
-# LLM: 同一 session 不能换版本或身份；v2/v3 仅允许 host/child 绑定一次，v3 激活不可换代，禁止取消后复活。
-# 函数用途: 合并一份已有记录与更新，保留新的停止、交接和通知事实，再由 Store 递增版本号。
+# LLM: 同一 session 不能换身份或复活；完整 cleanup 确认单调保留，迟到 host 更新不能擦除，原命令终态仍冻结。
+# 函数用途: 合并版本化记录的停止、交接、清理和通知事实，再由原 Store 递增版本号。
 def merge_process_record(
     existing: dict[str, object], incoming: dict[str, object]
 ) -> dict[str, object]:
@@ -232,11 +255,21 @@ def merge_process_record(
         for key in ("stop_requested", "handoff_confirmed", "child_launch_started"):
             merged[key] = existing[key] or incoming[key]
     old, new = existing["status"], incoming["status"]
-    if old in PROCESS_TERMINAL_STATUSES and not (old == "exited" and new == "killed"):
+    terminal = old in PROCESS_TERMINAL_STATUSES and not (old == "exited" and new == "killed")
+    if managed and ("termination" in existing or "termination" in incoming):
+        previous = existing.get("termination") or {}
+        updated = incoming.get("termination") or {}
+        cleanup = previous.get("cleanup")
+        if not isinstance(cleanup, dict) or cleanup.get("confirmed") is not True:
+            cleanup = updated.get("cleanup", cleanup)
+        merged["termination"] = dict(previous if terminal else updated)
+        if cleanup is not None:
+            merged["termination"]["cleanup"] = cleanup
+    if terminal:
         controls = {
             key: merged[key]
-            for key in ("stop_requested", "handoff_confirmed", "child_launch_started")
-            if managed
+            for key in ("stop_requested", "handoff_confirmed", "child_launch_started", "termination")
+            if managed and key in merged
         }
         merged = {
             **existing,

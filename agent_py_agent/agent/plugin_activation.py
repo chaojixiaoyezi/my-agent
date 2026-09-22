@@ -17,6 +17,8 @@ from .plugin_installation import (
 )
 from .plugin_manifest import canonical_plugin_settings
 
+PLUGIN_ENABLE_TOOL = "plugin_enable"
+
 
 # LLM: activation 是宿主从固定候选生成的目标状态，不能直接由管理正文或模型传入；operation_id 仍来自原操作。
 # 类用途: 将一次准备、发布或撤销绑定到明确安装版本与原激活计划。

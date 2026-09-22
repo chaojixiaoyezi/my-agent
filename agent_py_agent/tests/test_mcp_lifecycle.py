@@ -60,6 +60,7 @@ def test_stop_rejects_queued_request_without_sending(queue, tmp_path):
         receipt = client.stop()
         assert receipt.confirmed
         _joined_failure(thread, errors)
+        assert errors[0].effect_outcome == "not_started"
         assert not observed.exists()
         assert transport.inbox.pending == set()
         for action in (client.start, client.reconnect):
@@ -87,6 +88,7 @@ def test_old_queue_cannot_send_to_reconnected_transport():
         assert new is not old
         old.request_lock.release()
         _joined_failure(thread, errors)
+        assert errors[0].effect_outcome == "not_started"
         old.inbox.dispatch({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"})
         assert not new.inbox.tools_changed
         assert client.disconnect(transport=old).confirmed
@@ -172,6 +174,8 @@ def test_discovery_cleanup_failure_does_not_break_other_servers(monkeypatch, ini
     registry._mcp_clients = [broken]
     registry._mcp_retry_state = {}
     registry._mcp_prepare_lock = threading.Lock()
+    registry._mcp_closed = threading.Event()
+    registry._construction_params = SimpleNamespace(plugin_owner=None)
     if initial:
         real_client = mcp_registration.MCPStdioClient
         monkeypatch.setattr(mcp_registration, "MCPStdioClient", lambda config: broken if config.name == "broken" else real_client(config))
@@ -310,6 +314,7 @@ def test_stop_wakes_inflight_call_and_closes_owned_streams(monkeypatch):
         assert sent.wait(3)
         assert client.stop().confirmed
         _joined_failure(thread, errors)
+        assert errors[0].effect_outcome == "unknown"
         assert not transport.reader.is_alive() and not transport.stderr_reader.is_alive()
         process = transport.binding.process
         assert process.stdin.closed and process.stdout.closed and process.stderr.closed

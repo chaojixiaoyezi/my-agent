@@ -71,8 +71,8 @@ class ProcessSessionCleanupError(RuntimeError):
                 self.record = pending_record
 
 
-# LLM: 首次读改写固定 v2/v3 同一句柄身份，调用方已验证任务或激活范围；停止意图落盘前不发信号。
-# 函数用途: 停止一个已选定的托管 session，不扩大为其他资源或启动者进程。
+# LLM: 固定 v2/v3 同一句柄，先落停止意图再发信号；完整 session 清理写 termination.cleanup，原命令终态及 child 回执不重写。
+# 函数用途: 停止准确资源并持久保存完整退出确认，自然结束的命令也能留下清理证据。
 def stop_process_session(
     store: ProcessSessionStore,
     selected: dict[str, object],
@@ -125,18 +125,16 @@ def stop_process_session(
                     if confirmed
                     else "unknown"
                 )
-                current = transaction.write(
-                    {
-                        **current,
-                        "status": status,
-                        "finished_at": time.time() if confirmed else None,
-                        "exit_code": None,
-                        "termination": {
-                            "confirmed": confirmed,
-                            "instances": [asdict(r) for r in receipts],
-                        },
-                    }
-                )
+                current = {
+                    **current,
+                    "status": status,
+                    "finished_at": time.time() if confirmed else None,
+                    "exit_code": None,
+                }
+            current = transaction.write({**current, "termination": {
+                **(current.get("termination") or {}),
+                "cleanup": {"confirmed": confirmed, "instances": [asdict(r) for r in receipts]},
+            }})
             return ProcessSessionCleanup(current, confirmed, receipts)
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         raise ProcessSessionCleanupError(exc, frozen, receipts, committed) from exc

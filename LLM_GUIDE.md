@@ -21,9 +21,15 @@
 
 ## 当前运行边界（验收状态看 STATUS）
 
+本地实际 `/plugins enable` 复用原 HostCommand/ToolExecutor：计划先领取，准备环境，完整核对候选 MCP 目录，确认候选退出后发布 active。
+新运行由原 Registry 按 core 注入的可信 owner 接入同代工具；各权限视图独立投影，构造和可用性检查不启动插件。
+私有设置只经子进程环境交付，插件自述 effect 不降低原审批；关闭与迟到登记双向复查，旧代理不转投新连接。
+完整 session 证明保存在原 termination.cleanup，迟到 host 不能擦除；命令退出状态、退出码和 child 回执保持。
+旧连接或排队拒绝的未发送事实进入原操作账，真正已发送或缺失退出证明的 UNKNOWN 不改报成功；见 [启用组合](docs/design/PLUGIN_ACTIVATION.md)。
+
 本地 `/plugins disable` 已接原 HostCommand/ToolExecutor：先撤销安装表中的固定代次，再关闭原 enable attempt。
 原准备任务资源与共享 MCP 按各自身份冻结，锁外清理；准备清理明确包含终态记录以核对仍可能存活的 host。
-清理未确认保持 UNKNOWN；原激活仍为 revoked、退出证据保留，释放激活与完整启用/卸载、实际多 TUI 尚未完成。
+清理未确认保持 UNKNOWN；原激活仍为 revoked、退出证据保留，释放/消费、重新启用、卸载、显式业务命令及实际多 TUI 尚未完成。
 原 operation 引用只按可信 owner 精确反查首次管理链，资源核对按原集合语义，不通过列表顺序或当前 attempt 猜身份。
 
 原 host 已有显式 stdio 通道，三路字节直接继承给 child；日志模式默认不变，stdio 绑定 launcher 寿命。
@@ -32,7 +38,7 @@
 
 安装表本地源码已升 v3：同一原计划预留、发布和撤销，旧代读回不换绑；配置和重新准备须等原激活清理确认。
 撤销只关闭原表中的执行权，不等待准备阶段的 quota，不表示 OS 资源已退出；原插件锁与提交读回保持。
-显式 v1/v2 迁移和待接线的 stdio 资源归属见 [激活权威](docs/design/PLUGIN_ACTIVATION.md)，完整 enable/disable/remove 尚未开放。
+显式 v1/v2 迁移、stdio 资源归属与启停接线见 [激活权威](docs/design/PLUGIN_ACTIVATION.md)，完整装卸尚未发布验收。
 
 MCP 本地源码已区分临时 disconnect 与永久 stop；每次请求和目录发现固定 transport，关闭后不能经 prepare 重连。
 原进程树清理未确认不替换连接；可用性不提前回收组长，读线程自行关闭管道。连接合同见 [MCP 生命周期](docs/design/MCP_TRANSPORT_LIFECYCLE.md)。
@@ -98,14 +104,14 @@ Shell 不设人为命令字符上限，安全、权限、时间和输出预算�
 插件命令错误和静态帮助在 CLI/HTTP 入口结束，不能进入旧控制执行器或普通模型队列；完整装卸仍未发布。
 显式管理请求的本地源码已沿原 RuntimeDB 原子登记独立 pending 运行；请求重送不换代，终态只读原操作。
 创建树统一归 `runtime_db/run_creation.py`，冻结绑定读 `host_commands.py`；本地管理执行与只读查询由 `host_command_execution.py` 接原执行器，见 [宿主命令合同](docs/design/HOST_COMMAND_EXECUTION.md)。
-本地 HTTP/direct 安装复用原管理授权、路径权限和配额，只保存默认停用包；独立环境、激活、撤销与实际多 TUI 装卸仍待完成。
+本地 HTTP/direct 安装复用原管理授权、路径权限和配额，只保存默认停用包；后续启停组合见首段，完整装卸与实际多 TUI 仍待完成。
 独立环境内部准备器已本地实现，见 `plugin_environment.py`：固定地址、原配额非阻塞准入、本地 wheel 闭包和原取消链。
 环境准备已改为原 operation 的固定计划与原 ProcessSessionStore：计划先领取，候选后写入，运行中核对原 holder/代数/锁。
-准备进程显式绑定 launcher 寿命与同一 monotonic 期限；普通长期后台默认不变，启动信封 v4 要求同版模式和寿命字段。
+准备进程显式绑定 launcher 寿命与同一 monotonic 期限；普通长期后台默认不变，当前启动信封 v5 要求同版模式、寿命和激活字段。
 创建 venv 不代表启用接线完成；禁止扫描目录代替原安装权威，禁止在启用前运行已装插件的 Python 自检。
 配置已在本地接到原管理执行链：`/plugins configure <插件> --file <JSON>` 完整替换停用插件设置，使用原 schema 校验，不补默认值。
 唯一安装表当前 v3 保存配置、激活、版本及回执；旧 v1/v2 在实际修改时显式迁移，查询只读。目录 v2 携带安装版本，私有值不进入公开目录或工具账。
-新目录拒绝旧协议，客户端和 Gateway 发布时必须同版；这不代表激活、MCP 发布或撤销已完成。
+新目录拒绝旧协议，客户端和 Gateway 发布时必须同版；目录本身不是执行权或资源清理证明。
 `enable_plugins=false` 拒绝新安装，原管理员查询不受开关或来源文件消失影响；断连保留原请求和未知结果，不能自动重送。
 未启动占位取消保留原输入、幂等与资源声明，损坏结果原文不洗成空账；严格回读拒绝损坏或未知版本，源码验证与已部署停止验收分开。
 宿主目录与提交版本已发布同版双机：`plugin_command_catalog.v1` 只是只读声明，原 owner 解析仍唯一；无冷用户初始化。

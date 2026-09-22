@@ -773,6 +773,8 @@ def test_registry_failed_reconnect_uses_backoff_instead_of_retrying_every_lookup
     registry.tools = {}
     registry._mcp_clients = [client]
     registry._mcp_prepare_lock = threading.Lock()
+    registry._mcp_closed = threading.Event()
+    registry._construction_params = SimpleNamespace(plugin_owner=None)
     registry._mcp_retry_state = {}
 
     registry.prepare_for_run()

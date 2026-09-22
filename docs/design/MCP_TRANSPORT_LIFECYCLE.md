@@ -23,13 +23,13 @@
 
 所有 tools/list 分页绑定同一连接。注册层先构建候选目录，再经 `publish_tools(原连接, 回调)`
 在短状态/准入锁内核对身份和运行状态，回调只替换内存目录，不能请求网络或获取 prepare 锁。
-已有普通 MCP 的非法声明跳过策略保持；插件静态清单的完整匹配仍须在激活接线时实施，
-这里的原子替换不等于已经实现插件清单验收。
+已有普通 MCP 的非法声明跳过策略保持；插件由专属组合层完整匹配静态清单，任一坏项拒绝整包贡献。
+它仍复用本连接发布门，见 [启用组合](PLUGIN_ACTIVATION.md#启用与新运行的贡献组合)。
 
 普通注册失败使用精确 disconnect；启动未返回句柄时由 start 自行收尾，外层不能猜 current。
 永久关闭不进入退避。权限视图共用的客户端列表就地清空，旧快照通过同一客户端拒绝调用。
-关闭注册表必须先 stop 客户端，打断正在等待的发现，再取得 prepare 锁清共享引用；
-不能持 prepare 锁等长业务工作后才撤销连接。
+关闭注册表先设置各视图共享的关闭标记，再冻结客户端并 stop，打断发现后取得 prepare 锁清共享引用。
+登记新客户端后也必须复查关闭标记；不能让首次清理快照后加入的连接逃过关闭，不能持 prepare 锁等长请求后才撤销。
 
 ## 进程清理与限制
 
@@ -52,16 +52,16 @@ Transport 固定真实托管 Popen、原 record/store 与出生身份，不能�
 launcher 与独立 host 从可信 root/owner/scope 还原同一安装表，不从工作目录或首个任务猜用户。
 预留、Popen、host 创建 child 和交接前在原资源锁内复查；只有 preparing/active 可以启动，revoked 永久拒绝。
 撤销组合顺序为：原安装 CAS 提交 revoked 并释放安装锁，再原资源 Store 冻结该代，最后锁外精确清理。
-这条完整管理组合尚待实现；不能用单个 client.stop 替代 owner 范围的持久撤销和资源证明。
+管理 disable 已本地组合该顺序；不能用单个 client.stop 替代 owner 范围的持久撤销和资源证明。
 
 发送在 request/write 队列后取得原资源锁，再取本地 admission_lock，复查原 session、激活和本次 executor 权限。
 等待资源锁可响应原调用取消/期限和连接关闭，不持 admission_lock 排队；锁内不等待协议响应。
 原目录锁仅在等待/准入前调用 wait_check；取得锁后的 redo/提交保持完整，取消不截断事务。
 initialize、initialized 和 tools/list 允许同代 preparing；业务调用只接受 active，普通未知方法不能借准备状态执行。
 原代理冻结发现 transport，重连后需发布新代理，旧 Schema 不会自动指向新连接。
-未创建 writer 的拒绝只结束本次调用，并以结构化 `effect_outcome=not_started` 进入原操作账。
+固定连接选择、请求/写队列中未创建 writer 的拒绝只结束本次调用，以结构化 `effect_outcome=not_started` 进入原操作账。
 writer 已启动则可能收到部分帧，错误继续 UNKNOWN；不能按错误码或文案把所有取消/超时都认作未执行。
-目录发布前复查 active，但内存目录仍是投影，真正执行必须再次准入；完整静态 tools/list 匹配和公开装卸仍待组合。
+目录发布前复查 active，但内存目录仍是投影，真正执行必须再次准入；静态 tools/list 匹配已本地组合，完整装卸和实际多 TUI 尚未验收。
 
 ## 参考与验收
 

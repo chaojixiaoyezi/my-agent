@@ -82,11 +82,13 @@ def sanitize_credentials(text: str) -> str:
     )
 
 
+# LLM: 日志只显示公开环境值，插件设置整个对象均属私有，不能仅按内部字段名猜哪些是密钥。
+# 函数用途: 隐藏显式凭证和插件私有设置，保留无敏感内容的环境诊断。
 def redact_env_for_log(env: dict[str, str] | None) -> dict[str, str]:
     """构造一个可安全落日志的 env 视图：疑似 secret 的键值打成 ``<redacted>``。"""
     safe: dict[str, str] = {}
     for key, value in (env or {}).items():
-        if _SECRET_ENV_HINT.search(str(key)):
+        if _SECRET_ENV_HINT.search(str(key)) or str(key) == "MY_AGENT_PLUGIN_SETTINGS":
             safe[str(key)] = "<redacted>"
         else:
             safe[str(key)] = str(value)
@@ -580,13 +582,17 @@ class MCPStdioClient:
             selected.inbox.tools_changed = generation != selected.inbox.tools_generation
         return tools
 
-    # LLM: 已发布代理冻结 transport，本次权限回调只沿当前请求传递；排队或重连不能转投新实例或借另一个调用的权限。
-    # 函数用途: 调用固定连接上的 MCP 工具，发送前复核当前任务，规范化完整结果。
+    # LLM: 已发布代理冻结 transport；选择失败明确未发送，实际请求后的副作用只由 transport 裁决，不转投新实例。
+    # 函数用途: 调用固定连接上的 MCP 工具，区分旧连接拒绝与已发送失败，规范化完整结果。
     def call_tool(self, tool_name: str, arguments: dict[str, Any], *, transport: MCPTransport | None = None,
                   authority_check: Callable[[], None] | None = None) -> dict[str, Any]:
-        selected = transport if transport is not None else self.connection()
-        with self._state_lock:
-            self._require_current(selected)
+        try:
+            selected = transport if transport is not None else self.connection()
+            with self._state_lock:
+                self._require_current(selected)
+        except MCPError as exc:
+            exc.effect_outcome = "not_started"
+            raise
         result = selected.request("tools/call", {"name": tool_name, "arguments": arguments or {}},
                                   timeout=self.config.timeout, authority_check=authority_check)
         return _normalize_call_result(result, self.config.max_content_chars)

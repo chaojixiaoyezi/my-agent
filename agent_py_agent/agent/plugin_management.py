@@ -1,5 +1,5 @@
 # LLM: 管理分路只消费宿主已认证身份、当前权限与原线程 Store；有副作用必须经过原宿主运行和工具执行链。
-# 模块用途: 组合目录、安装/配置/停用及原请求查询；不初始化完整 Agent，停用仅回收原资源。
+# 模块用途: 组合目录、安装、配置、启停及原请求查询；不初始化完整 Agent，所有副作用走原管理执行器。
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from .plugin_command_service import execute_plugin_command, read_plugin_catalog
 from .plugin_commands import parse_plugin_command, plugin_command_response, plugin_namespace
 from .plugin_configure_tool import PLUGIN_CONFIGURE_TOOL, PluginConfigureTool
 from .plugin_disable_tool import PLUGIN_DISABLE_TOOL, PluginDisableTool
+from .plugin_enable_tool import PLUGIN_ENABLE_TOOL, PluginEnableTool
 from .plugin_install_store import PluginInstallStore
 from .plugin_install_tool import PLUGIN_INSTALL_TOOL, PluginInstallTool
 from .runtime_db.host_command_execution import execute_host_command, query_host_command
@@ -27,11 +28,11 @@ from .tooling.runtime_contracts import ToolCall, tool_arguments_hash
 from .user_space.owner_resolver import OwnerHomeResult
 
 _MANAGEMENT_TOOLS = {"install": PLUGIN_INSTALL_TOOL, "configure": PLUGIN_CONFIGURE_TOOL,
-                     "disable": PLUGIN_DISABLE_TOOL}
+                     "enable": PLUGIN_ENABLE_TOOL, "disable": PLUGIN_DISABLE_TOOL}
 
 
 # LLM: 所有字段来自宿主，布尔授权不是客户端参数；ThreadStore 是原会话权威，目录投影不能提供执行身份。
-# 类用途: 给安装、配置和停用传所需身份、权限及存储依赖，不携带完整 Agent。
+# 类用途: 给安装、配置和启停传所需身份、权限及存储依赖，不携带完整 Agent。
 @dataclass(frozen=True)
 class PluginManagementContext:
     owner: OwnerHomeResult
@@ -46,6 +47,7 @@ class PluginManagementContext:
     tool_allowed: bool = True
     configure_allowed: bool = True
     disable_allowed: bool = True
+    enable_allowed: bool = True
 
 
 # LLM: 冷入口与完整代理共用 owner 权限裁决；各管理工具分别受禁用策略约束，查询仍绑定原身份。
@@ -78,11 +80,12 @@ def plugin_management_context(
                                    path_policy, is_admin, config.enable_plugins,
                                    allowed and PLUGIN_INSTALL_TOOL not in policy.disabled_tools,
                                    allowed and PLUGIN_CONFIGURE_TOOL not in policy.disabled_tools,
-                                   allowed and PLUGIN_DISABLE_TOOL not in policy.disabled_tools)
+                                   allowed and PLUGIN_DISABLE_TOOL not in policy.disabled_tools,
+                                   allowed and PLUGIN_ENABLE_TOOL not in policy.disabled_tools)
 
 
 # LLM: 一个 owner 只有一个安装事实 Store 和原 runtime.db；实例本身无后台任务、可变注册表或业务历史。
-# 类用途: 承接显式插件命令，安装默认停用，撤销清理精确资源，查询只读原结果。
+# 类用途: 承接显式插件命令，安装默认停用，启用先验完整服务，撤销清理精确资源，查询只读原结果。
 class PluginManagement:
     # LLM: 构造不创建目录或线程；后续写入前仍须显式检查管理员与开关。
     # 函数用途: 保存这次已鉴权入口的必要依赖。
@@ -226,20 +229,22 @@ class PluginManagement:
                                   command_name=tool_name,
                                   input_digest=tool_arguments_hash(arguments).removeprefix("sha256:"))
 
-    # LLM: 管理 handler 共用原执行器；配置/停用冻结同次目录和安装读，原锁内继续 CAS，不豁免工具禁用。
+    # LLM: 管理 handler 共用原执行器；配置/启停冻结同次目录和安装读，启用计划在 claim 前声明，不豁免工具禁用。
     # 函数用途: 将已登记管理请求接到唯一工具执行器及原操作 Store，不创建普通代理。
     def _prepare(self, repo: RuntimeRepository, binding, arguments: dict) -> ToolExecutorRequest:
         context = self.context
         tool_name = binding.request.command_name
         if tool_name == PLUGIN_INSTALL_TOOL:
             tool = PluginInstallTool(self.installations, context.path_policy, context.workspace, binding.request.operation_id)
-        elif tool_name in {PLUGIN_CONFIGURE_TOOL, PLUGIN_DISABLE_TOOL}:
+        elif tool_name in {PLUGIN_CONFIGURE_TOOL, PLUGIN_DISABLE_TOOL, PLUGIN_ENABLE_TOOL}:
             entries = self.installations.snapshot()
             existing = next((row for row in entries if row.manifest.plugin_id == arguments["plugin"]), None)
             catalog_revision = self._catalog(entries).revision
             if tool_name == PLUGIN_CONFIGURE_TOOL:
                 tool = PluginConfigureTool(self.installations, context.path_policy, context.workspace,
                                            binding.request.operation_id, existing, catalog_revision)
+            elif tool_name == PLUGIN_ENABLE_TOOL:
+                tool = PluginEnableTool(context.owner, repo, binding, existing, catalog_revision)
             else:
                 tool = PluginDisableTool(context.owner, repo, binding.request.operation_id, existing, catalog_revision)
         else:
@@ -266,7 +271,8 @@ class PluginManagement:
     def _allowed(self, tool_name: str) -> bool:
         return {PLUGIN_INSTALL_TOOL: self.context.tool_allowed,
                 PLUGIN_CONFIGURE_TOOL: self.context.configure_allowed,
-                PLUGIN_DISABLE_TOOL: self.context.disable_allowed}.get(tool_name, False)
+                PLUGIN_DISABLE_TOOL: self.context.disable_allowed,
+                PLUGIN_ENABLE_TOOL: self.context.enable_allowed}.get(tool_name, False)
 
     # LLM: 目录刷新失败不能抹掉原操作结果；公开回执只取管理结果投影，不输出配置值或整个工具账。
     # 函数用途: 为 TUI/HTTP 返回原管理动作结果和查询编号，执行权关闭与资源未知分别展示。

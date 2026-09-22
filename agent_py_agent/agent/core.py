@@ -109,6 +109,7 @@ from .user_space.owner_resolver import (
     ensure_owner_home,
     home_paths_with_owner,
     owner_identity_from_config,
+    resolve_owner_home,
 )
 from .user_space.runtime_paths import (
     apply_runtime_paths_to_config,
@@ -757,8 +758,8 @@ def _effective_workspace_scope(agent: SimpleAgent, config: AgentConfig) -> tuple
     return workspace_root, workspace_roots
 
 
-# LLM: ToolRegistry 唯一装配入口；工作区与工具配置来自同一 AgentConfig，审批读取器只绑定该 Agent 的可信 home。
-# 函数用途: 按当前 Agent 的工作区、权限和配置创建工具注册表，让工具执行与能力自我描述看到同一份运行事实。
+# LLM: ToolRegistry 唯一装配入口；插件 owner 由既有 scoped config/resolver 固定，不能随权限墙或工作目录改变；构造不启动插件。
+# 函数用途: 按当前 Agent 的可信身份、工作区和配置组合工具，主代理与同进程子代理共用同一接线入口。
 def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistry:
     from functools import partial
 
@@ -823,6 +824,8 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
             artifact_backup_root=agent.home_paths.owner_artifact_backups_dir,
             runtime_guard_policy=getattr(agent, "runtime_guard_policy", None),
             mcp_servers=mcp_servers,
+            plugin_owner=(resolve_owner_home(agent.home_paths.root, owner_identity_from_config(config))
+                          if config.enable_plugins and config.enable_tools else None),
             tool_embedder=_build_tool_embedder(config),
             operation_store=select_operation_store(agent),
             operation_store_required=True,

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, replace
 
-from .plugin_activation import PluginActivationRequest
+from .plugin_activation import PLUGIN_ENABLE_TOOL, PluginActivationRequest
 from .plugin_install_store import PluginInstallStore
 from .plugin_installation import PluginInstallation, PluginInstallationError
 from .runtime_db.managed_operation_store import ManagedOperationStore
@@ -14,8 +14,6 @@ from .runtime_db.run_cancellation import RuntimeCancellationTarget, cancel_runti
 from .tooling.process_scope import ProcessActivationScope, ProcessExecutionScope
 from .tooling.process_session_cleanup import ProcessSessionCleanupError, stop_process_session
 from .tooling.process_session_store import ProcessSessionStore, process_session_store_root
-
-PLUGIN_ENABLE_TOOL = "plugin_enable"
 
 
 # LLM: installation 来自与已见目录同一次宿主读取；提交后错误不能猜未发生，原记录及清理证据保留到后续显式释放。

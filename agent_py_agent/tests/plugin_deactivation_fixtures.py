@@ -7,10 +7,9 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 
-from agent_py_agent.agent.plugin_activation import PluginActivationRequest
+from agent_py_agent.agent.plugin_activation import PLUGIN_ENABLE_TOOL, PluginActivationRequest
 from agent_py_agent.agent.plugin_activation_record import PluginActivation
 from agent_py_agent.agent.plugin_activation_ref import PluginActivationRef
-from agent_py_agent.agent.plugin_deactivation import PLUGIN_ENABLE_TOOL
 from agent_py_agent.agent.plugin_environment_plan import plan_plugin_environment
 from agent_py_agent.agent.plugin_environment_process import PluginEnvironmentOperation
 from agent_py_agent.agent.runtime_db.host_command_execution import execute_host_command

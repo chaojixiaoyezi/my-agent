@@ -315,6 +315,7 @@ def test_call_after_stop_raises_connection_closed():
     with pytest.raises(MCPError) as exc_info:
         client.call_tool("echo", {"text": "x"})
     assert exc_info.value.code == "MCP_CONNECTION_CLOSED"
+    assert exc_info.value.effect_outcome == "not_started"
 
 
 def test_stop_is_idempotent():

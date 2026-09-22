@@ -121,30 +121,35 @@ class MCPTransport:
         close_finished_streams(self)
         return receipt
 
-    # LLM: 本次权限回调不存入共享连接，排队后随请求交给发送；迟到结果不跨连接，总期限覆盖整个调用。
-    # 函数用途: 发送带 ID 的请求，保留调用自身的执行检查，退出时移除在途状态。
+    # LLM: 请求排队失败尚未发送；send 的部分写入未知不得降级，发出后丢响应仍未知；权限只沿同次请求传递。
+    # 函数用途: 发送带 ID 的请求，保存真实发送边界并清理在途状态，避免停用旧连接留下虚假的未知操作。
     def request(self, method: str, params: dict[str, Any], *, timeout: float,
                 authority_check: Callable[[], None] | None = None) -> Any:
         deadline = time.monotonic() + max(0.01, timeout)
-        with bounded_mcp_lock(self.request_lock, deadline, closed=self.inbox.closed):
-            req_id = self._next_id
-            self._next_id += 1
-            with self.inbox.condition:
-                self.inbox.pending.add(req_id)
-            sent = False
-            try:
-                self.send({"jsonrpc": "2.0", "id": req_id, "method": method, "params": params},
-                          deadline=deadline, authority_check=authority_check)
-                sent = True
-                return self.inbox.await_response(req_id, method, deadline)
-            except MCPError as exc:
-                if sent and method != "initialize" and exc.code in {"MCP_CANCELLED", "MCP_TIMEOUT"}:
-                    self.cancel_request(req_id, exc.code)
-                raise
-            finally:
+        sent = False
+        try:
+            with bounded_mcp_lock(self.request_lock, deadline, closed=self.inbox.closed):
+                req_id = self._next_id
+                self._next_id += 1
                 with self.inbox.condition:
-                    self.inbox.pending.discard(req_id)
-                    self.inbox.responses.pop(req_id, None)
+                    self.inbox.pending.add(req_id)
+                try:
+                    self.send({"jsonrpc": "2.0", "id": req_id, "method": method, "params": params},
+                              deadline=deadline, authority_check=authority_check)
+                    sent = True
+                    return self.inbox.await_response(req_id, method, deadline)
+                except MCPError as exc:
+                    if sent and method != "initialize" and exc.code in {"MCP_CANCELLED", "MCP_TIMEOUT"}:
+                        self.cancel_request(req_id, exc.code)
+                    raise
+                finally:
+                    with self.inbox.condition:
+                        self.inbox.pending.discard(req_id)
+                        self.inbox.responses.pop(req_id, None)
+        except MCPError as exc:
+            if not exc.effect_outcome:
+                exc.effect_outcome = "unknown" if sent else "not_started"
+            raise
 
     # LLM: 取消通知仅是协议请求，不证明远端执行已回滚；永远发到原请求连接。
     # 函数用途: 在短期限内尽力通知服务端取消已发送请求。

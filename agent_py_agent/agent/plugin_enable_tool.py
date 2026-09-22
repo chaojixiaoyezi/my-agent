@@ -1,0 +1,115 @@
+# LLM: 启用复用原 HostCommand/ToolExecutor 和安装表；固定计划先声明、领取后才建环境，不建立第二套运行账。
+# 模块用途: 验证一个插件的完整隔离环境和实际工具目录，再发布同代启用事实，私有值不进入回执。
+
+from __future__ import annotations
+
+from dataclasses import asdict, replace
+
+from .plugin_activation import PLUGIN_ENABLE_TOOL, PluginActivationRequest
+from .plugin_activation_record import PluginActivation, plugin_catalog_digest
+from .plugin_environment import prepare_plugin_environment
+from .plugin_environment_plan import plan_plugin_environment
+from .plugin_environment_process import EnvironmentPreparationError, PluginEnvironmentOperation
+from .plugin_install_store import PluginInstallStore
+from .plugin_installation import PluginInstallationError
+from .plugin_package import inspect_plugin_package
+from .plugin_runtime import PluginMCPClient
+from .tooling.background_process_launch import BackgroundLaunchError
+from .tooling.mcp_client import MCPError
+from .tooling.models import (
+    ApprovalPolicy,
+    BaseTool,
+    EffectResolverPolicy,
+    IdempotencyPolicy,
+    ResourceScopePolicy,
+    ToolHandlerOutcome,
+    ToolModelSpec,
+    ToolRuntimePolicy,
+)
+
+
+# LLM: owner/binding/installation 均由宿主冻结；构造只生成原 claim 所需计划，不能提前写文件或启动进程。
+# 类用途: 将显式管理员启用接入原幂等与权限链，保持准备失败不可用。
+class PluginEnableTool(BaseTool):
+    # LLM: never 仅免显式管理动作的重复询问，原工具禁用和执行权仍须成立；计划只为未激活的固定版本生成。
+    # 函数用途: 保存启用依赖并在原执行器领取前声明完整候选环境身份。
+    def __init__(self, owner, repository, binding, installation, catalog_revision):
+        self.owner, self.repository, self.binding = owner, repository, binding
+        self.installation, self.catalog_revision = installation, catalog_revision
+        self.plan = (plan_plugin_environment(installation, binding.request.operation_id)
+                     if installation is not None and installation.activation is None else None)
+        keys = ("plugin", "catalog_revision", "workspace", "permission_digest")
+        self.model_spec = ToolModelSpec(PLUGIN_ENABLE_TOOL, "准备插件隔离环境并验证完整工具目录后启用。", {
+            "type": "object", "properties": {key: {"type": "string"} for key in keys},
+            "required": list(keys), "additionalProperties": False,
+        })
+        self.runtime_policy = ToolRuntimePolicy(
+            effect_resolver=EffectResolverPolicy("dangerous"), approval_policy=ApprovalPolicy("never"),
+            idempotency_policy=IdempotencyPolicy("operation"), mutates_workspace=False,
+            resource_scopes=ResourceScopePolicy("declared", static_scopes=(self.plan.resource_scope,) if self.plan else ()),
+        )
+
+    # LLM: 原请求重放由执行器完成；失败保留原准备事实与资源，不换 operation 或重建候选来掩盖未知结果。
+    # 函数用途: 处理版本/缺失拒绝和完整启用，将实际提交状态交回原工具账。
+    def execute(self, params: dict) -> ToolHandlerOutcome:
+        if params["catalog_revision"] != self.catalog_revision:
+            return self._failure("stale_catalog", "PLUGIN_CATALOG_STALE", "not_started")
+        if self.installation is None or self.installation.manifest.plugin_id != params["plugin"]:
+            return self._failure("plugin_missing", "TOOL_INVALID_ARGUMENTS", "not_started")
+        try:
+            result = self._enable()
+        except PluginInstallationError as exc:
+            return self._failure(exc.reason, "TOOL_EXECUTION_FAILED",
+                                 "unknown" if exc.commit_state == "unknown" else "failed", exc.commit_state)
+        except EnvironmentPreparationError as exc:
+            return self._failure(exc.reason, "TOOL_EXECUTION_FAILED", "failed" if exc.exit_confirmed else "unknown")
+        except MCPError:
+            return self._failure("plugin_endpoint_failed", "TOOL_EXECUTION_FAILED", "failed")
+        except BackgroundLaunchError as exc:
+            return self._failure("plugin_launch_failed", "TOOL_EXECUTION_FAILED",
+                                 "failed" if exc.cleanup_confirmed else "unknown")
+        except Exception:  # noqa: BLE001 原执行链保留未确认结果，不能按异常文本推断已清理或重新准备
+            return self._failure("activation_unconfirmed", "TOOL_EXECUTION_FAILED", "unknown", "unknown")
+        return ToolHandlerOutcome(PLUGIN_ENABLE_TOOL, True, "插件版本已启用，新任务将读取该代工具。",
+                                  result_envelope={PLUGIN_ENABLE_TOOL: result})
+
+    # LLM: 激活 CAS、环境副作用、握手目录和退出确认按序发生；候选只作验收，新运行通过原 Registry 按同代创建业务连接。
+    # 函数用途: 在固定版本上完成启用；确认候选退出后才发布，不让冷管理入口留下临时服务。
+    def _enable(self) -> dict:
+        store, entry = PluginInstallStore(self.owner), self.installation
+        if self.plan is None:
+            if entry.enabled and store.require_activation(entry.manifest.plugin_id, entry.activation_id) == entry:
+                return {"plugin_id": entry.manifest.plugin_id, "activation_id": entry.activation_id,
+                        "revision": entry.revision, "enabled": True, "outcome": "unchanged"}
+            raise PluginInstallationError("activation_unsettled", "原插件激活尚未清理，不能准备新一代。")
+        package = inspect_plugin_package(store.package_bytes(entry))
+        operation = PluginEnvironmentOperation.bind(self.owner, self.repository, self.binding, self.plan)
+        prepared = store.change_activation(PluginActivationRequest(
+            self.plan.operation_id, entry.revision, PluginActivation(self.plan, "preparing"),
+        ))
+        prepare_plugin_environment(self.owner, package, operation)
+        operation.authorize()
+        client = PluginMCPClient(self.owner, prepared.installation)
+        try:
+            transport = client.start()
+            tools = client.discover_tools(transport)
+            operation.authorize()
+        finally:
+            cleanup = client.stop()
+            if not cleanup.confirmed:
+                raise EnvironmentPreparationError("candidate_cleanup_unconfirmed", started=True, exit_confirmed=False)
+        operation.authorize()
+        active = replace(prepared.installation.activation, phase="active", catalog_sha256=plugin_catalog_digest(entry.manifest))
+        published = store.change_activation(PluginActivationRequest(self.plan.operation_id, prepared.installation.revision, active))
+        return {"plugin_id": entry.manifest.plugin_id, "enabled": True, "activation_id": active.activation_id,
+                "revision": published.installation.revision, "environment_ref": self.plan.environment_ref,
+                "tools": [tool.model_spec.name for tool in tools], "commit_state": published.commit_state,
+                "candidate_cleanup": {"session_id": cleanup.record["session_id"], "confirmed": cleanup.confirmed,
+                                      "terminations": [asdict(item) for item in cleanup.terminations]}}
+
+    # LLM: 回执只包含稳定原因和提交分类，不回显设置、安装日志、候选路径或底层错误正文。
+    # 函数用途: 让原请求状态查询保留启用失败与未知的区别。
+    def _failure(self, reason, error_code, effect, commit_state="not_committed") -> ToolHandlerOutcome:
+        return ToolHandlerOutcome(PLUGIN_ENABLE_TOOL, False, "插件启用尚未得到完整确认，请查询原请求。",
+                                  error_code=error_code, effect_outcome=effect,
+                                  result_envelope={PLUGIN_ENABLE_TOOL: {"reason": reason, "commit_state": commit_state}})

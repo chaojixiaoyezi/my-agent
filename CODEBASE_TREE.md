@@ -106,13 +106,15 @@ agent_py_agent/
 |   |-- plugin_activation_record.py    # 固定环境计划、同代准备/发布/撤销身份及严格读回
 |   |-- plugin_activation_ref.py       # 可信 owner 与原代次引用，跨进程复查唯一安装表
 |   |-- plugin_activation.py           # 原安装版本上的激活迁移、阶段重放与旧代拒绝
+|   |-- plugin_runtime.py              # 固定代次的 MCP 服务、完整目录校验与原工具代理
 |   |-- plugin_deactivation.py         # 撤销原代、关闭准备执行权并清理两类精确资源
 |   |-- plugin_install_store.py        # owner 唯一安装表、包内容保存及锁内 CAS/提交裁决
 |   |-- plugin_install_tool.py         # 经原执行器读取授权包快照并保存默认停用记录
 |   |-- plugin_configure_tool.py       # 经原执行器读取和验证私有配置，结果不含配置值
+|   |-- plugin_enable_tool.py          # 原操作内准备环境、核对目录并确认候选退出后发布
 |   |-- plugin_disable_tool.py         # 原宿主链中的隐藏停用工具，区分撤销与资源清理结果
 |   |-- plugin_sources.py              # 安装包与配置共用的有界授权文件读取
-|   |-- plugin_management.py           # 原权限、线程与目录的组合，安装/配置/停用及原结果查询
+|   |-- plugin_management.py           # 原权限、线程与目录的组合，安装/配置/启停及原结果查询
 |   |-- core.py                         # SimpleAgent 组合入口
 |   |-- turn_end.py                     # 主/子代理共用的结束原因及技术续跑判据
 |   |-- model_guidance.py               # 完整 Prompt 与有副作用工具共用的验证/授权软提示唯一正文
@@ -356,6 +358,7 @@ agent_py_agent/
 |   |   |-- mcp_transport.py          # 固定进程与出生身份、请求队列、读写线程和原进程树清理
 |   |   |-- mcp_managed_process.py    # 插件 MCP 接原托管管道、资源锁准入和原生清理回执
 |   |   |-- mcp_protocol.py           # 每连接独立响应箱、有界诊断、期限与结构化协议错误
+|   |   |-- plugin_registration.py    # 新运行中同步原插件连接，各权限视图分别投影已验工具
 |   |   |-- process_output_capture.py   # stdout/stderr 有界保留与持续排空，公开截断和完整性
 |   |   |-- computer_use_profile.py   # MIT 开源桌面执行器的 local/main + Full Access MCP 薄装配与 effect 边界
 |   |   |-- computer_use_server.py    # 用公开 MCP 接口组合上游桌面工具、滚轮及文本输入
@@ -377,7 +380,7 @@ agent_py_agent/
 |   |   |-- process_session_store.py  # 原 session 地址的互斥读写、版本 CAS、精确停止清单与裁剪
 |   |   |-- process_session_records.py # v1/v2 原版本读取及 v3 任务/激活归属、实例与单调状态合同
 |   |   |-- process_session_commit.py # 原版本 v2/v3 批次的 redo 预检、安装恢复及提交回执
-|   |   |-- process_session_cleanup.py # 冻结单 session 实例的精确清理与保留已提交副作用的异常回执
+|   |   |-- process_session_cleanup.py # 冻结实例的精确清理、原账完整退出证明与提交异常回执
 |   |   |-- process_resource_stop.py   # 主控制冻结后台清单和 PTY 请求，锁外清理只消费原回执并保留部分错误
 |   |   |-- process_network_status.py # exact 受管进程树监听、防火墙显式规则与外部探针边界的只读投影
 |   |   |-- process_sessions.py       # owner+TUI 会话隔离的后台命令查询、等待与停止工具
@@ -467,6 +470,10 @@ agent_py_agent/
 |   |-- plugin_deactivation_fixtures.py # 原执行器内的假启用夹具与真实两类资源，精确 finally 清理
 |   |-- test_plugin_deactivation.py   # 管理停用、原请求重放、准备取消、权限和未知清理保留
 |   |-- test_plugin_deactivation_races.py # 阻塞业务停用、另一插件/任务隔离与独立 host 创建交错
+|   |-- plugin_activation_fixtures.py # 实际临时 wheel/MCP、原管理链和业务工具执行夹具
+|   |-- test_plugin_enable.py         # 实际启用、坏目录、原执行器调用与旧快照停用验证
+|   |-- test_plugin_registry.py       # 共享视图、可信 owner 注入、关闭登记交错与未知保留
+|   |-- test_process_cleanup_evidence.py # 完整清理证明、自然终态保持、单调合并与 redo 恢复
 |   |-- test_directory_lock_wait.py   # 原线程/系统目录锁等待的取消与释放验证
 |   |-- test_plugin_configure_management.py # 原配置执行链、值不外泄、过期请求与 UNKNOWN 重放
 |   |-- test_plugin_management.py      # 真实原执行链、来源消失、配置关闭、路径权限和配额检查
@@ -564,7 +571,7 @@ docs/
 - `agent_py_agent/agent/tooling/process_scope.py`：后台访问、PTY/任务执行及共享激活的身份类型；不从访问或工作目录补业务身份，激活引用不授予执行权，不持有资源或执行取消。
 - `agent_py_agent/agent/tooling/process_session_store.py`：受保护进程记录的统一入口，读写与裁剪先恢复同一目录的未完成提交；持锁事务提供启动检查点和精确停止意图，实际进程信号仍由调用方负责。
 - `agent_py_agent/agent/tooling/background_process_launch.py`：启动方先预留再交接；stdio 三路端点直接继承给 child，失败关闭未交出管道，host 保持原寿命和精确停止控制。
-- `agent_py_agent/agent/tooling/process_session_cleanup.py`：只清理原 Store 冻结的 host/child 出生实例，不按任务重扫；保留未确认及已提交待恢复回执。
+- `agent_py_agent/agent/tooling/process_session_cleanup.py`：只清理原 Store 冻结的 host/child 出生实例；完整证明保存到原 termination.cleanup，原命令终态不改写，未确认及待恢复回执保留。
 - `agent_py_agent/agent/tooling/process_session_records.py`：纯数据校验与单调合并；`process_session_commit.py` 只安装固定记录，目录互斥归公共 `common/directory_lock.py`，原锁名不变。v1 不隐式升级或获得任务停止授权。
 - `agent_py_agent/agent/command_catalog.py`：无 UI/执行依赖的公共命令声明；原控制参数仍归会话模块，插件后缀识别不等于身份校验或可执行授权。
 - `agent_py_agent/agent/command_arguments.py` 与 `command_binding.py`：参数定义、字面词法及值绑定的权威实现；部分输入也使用同一协议，帮助不从展示文字反推规则。
@@ -579,13 +586,15 @@ docs/
 - `agent_py_agent/agent/plugin_installation_state.py` 与 `plugin_configuration.py`：原表 v3 编解码、v1/v2 明确迁移来源和完整配置替换裁决；未清理激活阻止改配置，没有第二套权威。
 - `agent_py_agent/agent/plugin_activation.py` 与 `plugin_activation_record.py`：同一原计划的准备/发布/撤销 CAS，旧快照只读原代；撤销状态不证明资源退出。
 - `agent_py_agent/agent/plugin_activation_ref.py`：只定位原安装表的可信引用；严格核对原 owner/root/scope，启动和发送不缓存授权。
-- `docs/design/PLUGIN_ACTIVATION.md`：激活身份、持久撤销、配额与锁边界；完整 stdio 托管、调用和卸载仍待接通。
+- `docs/design/PLUGIN_ACTIVATION.md`：激活身份、持久撤销、配额/锁和实际启用组合；释放、卸载及实际多 TUI 仍待完成。
 - `docs/design/MANAGED_PROCESS_STDIO.md`：原托管器的字节通道、v3 激活归属、旧 v2 原版本恢复及后续执行准入接线边界。
 - `agent_py_agent/agent/plugin_configure_tool.py` 与 `plugin_sources.py`：隐藏管理工具通过原执行链读取授权来源，配置值只进 owner 私有安装表；包与配置共用有界安全读取。
-- `agent_py_agent/agent/plugin_install_tool.py` 与 `plugin_management.py`：管理服务核对原授权并走唯一执行器；安装默认停用，配置和停用同源，查询只读原请求。
+- `agent_py_agent/agent/plugin_install_tool.py` 与 `plugin_management.py`：管理服务核对原授权并走唯一执行器；安装默认停用，配置与启停同源，查询只读原请求。
+- `agent_py_agent/agent/plugin_enable_tool.py`：在原管理操作中准备环境、完整验证候选目录，确认退出后才发布同代 active。
+- `agent_py_agent/agent/plugin_runtime.py` 与 `tooling/plugin_registration.py`：固定激活的 MCP 适配和新运行组合；原客户端共享连接，权限视图单独生成目录，不新建激活缓存权威。
 - `agent_py_agent/agent/plugin_deactivation.py` 与 `plugin_disable_tool.py`：先关闭原激活与准备任务权限，再冻结两类准确资源并锁外清理；保留原退出记录，不能将撤销等同清理成功。
 - `agent_py_agent/agent/common/directory_lock.py`、`nofollow_fs.py` 与 `strict_json.py`：分别维护永久互斥、受信根文件原语和严格 JSON；这些公共原语不裁决领域授权或替代操作账本。
-- `agent_py_agent/agent/plugin_command_service.py`：从既有 OwnerIdentity 生成会话目录，旧或缺失业务版本明确拒绝；当前实际插件贡献仍为空。
+- `agent_py_agent/agent/plugin_command_service.py`：从原安装表生成静态命令目录，旧或缺失版本明确拒绝；显式业务动作尚未接执行，普通工具贡献归 Registry。
 - `agent_py_agent/agent/gateway_parts/plugin_command_service.py`：三个 HTTP 入口共用原管理员与可信 owner；只读不初始化冷用户，获授权安装才登记原独立运行。
 - `agent_py_agent/cli/chat_parts/plugin_command_client.py`：TUI、plain Gateway 与 direct 共用模式、声明缓存及查询语义；传输失败保留原编号与未知，不降级或自动重送。
 - `agent_py_agent/cli/chat_parts/tui_plugin_commands.py`：保存首次接受候选的目录版本，参数补全不升级；网络提交沿共享分派在 UI 线程外执行。

@@ -30,7 +30,14 @@ venv/pip 准备仍归原管理 operation，不改成共享插件资源。上述�
 固定激活引用已接到 launcher 预留、启动、交接及 host 创建 child 前，均在原资源锁内只读原安装表。
 引用必须匹配同一 owner 的规范 root/home、原 Store 和 session scope，缺失或错配不能只靠身份字段放行。
 同代 preparing 可跨越 active 继续握手，业务发送只能接受 active；具体协议准入见 [MCP 合同](MCP_TRANSPORT_LIFECYCLE.md)。
-完整管理启用和清理后收口仍待组合，不以这些内部能力代替公开装卸验收。
+实际管理启用与停用已本地组合，清理后的释放/消费仍待完成，不以这些内部能力代替完整装卸验收。
+
+## 完整 session 清理证明
+
+原 `termination` 保留 host 写入的 child 终止事实；可选 `termination.cleanup` 单独记录整个冻结 session 的确认及原生回执。
+自然退出命令也保存 cleanup，但不覆盖原 status、exit_code、finished_at 或 child 回执。后续 host 写入不能擦除已确认清理。
+清理保存失败继续报告原异常与实际信号回执；redo 已提交可由原 Store 恢复，未到提交点不能当作已有持久证明。
+原记录 unknown 且没有完整树回执时，即使 host/child PID 消失也不能确认全部退出；继续保留未知与停止意图。
 
 ## 参考与验证
 
