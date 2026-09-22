@@ -1,5 +1,5 @@
-# LLM: 预留、host 绑定和交接共用原 Store；stdio 管道绑定 launcher 寿命，日志后台沿原默认独立，联测两种通道。
-# 模块用途: 冻结归属与寿命，托管启动并交出管道；失败关闭未交接管道且保留真实清理结果。
+# LLM: 预留、host 绑定和交接共用原 Store；观察退出后复读原终态，stdio 绑定 launcher 寿命，联测两种通道。
+# 模块用途: 冻结归属与寿命，托管启动并交出管道；短命令保留真实退出结果，失败清理尚未交接的资源。
 from __future__ import annotations
 
 import math
@@ -270,13 +270,14 @@ def _require_admission(request: BackgroundLaunchRequest) -> None:
     raise_if_cancelled()
 
 
-# LLM: 缺失/starting/unknown 不能报告成功；观察期取消尚未交接，必须由启动失败路径回收。
-# 函数用途: 等待 host 绑定并观察半秒真实业务状态，保留短命令的实际退出结果。
+# LLM: host 退出后须复读原 Store，缺失/未终态/撤销仍失败；取消由未交接清理处理，退出码留给调用方裁决。
+# 函数用途: 等待 host 绑定并观察真实业务状态，消除读旧状态后进程退出的窗口，不重启命令或延长等待。
 def _observe_startup(
     store: ProcessSessionStore, session_id: str, host_pid: int, birth: str, timeout: float
 ) -> None:
     deadline = time.monotonic() + max(0.1, timeout)
     settled_at = None
+    host_exited = False
     while True:
         raise_if_cancelled()
         report = store.load(session_id)
@@ -287,6 +288,8 @@ def _observe_startup(
             raise RuntimeError("managed background startup revoked or unresolved")
         if record["status"] == "exited":
             return
+        if host_exited:
+            raise RuntimeError("managed background host exited without terminal authority")
         now = time.monotonic()
         if record["status"] == "running":
             settled_at = settled_at or now + BACKGROUND_START_SETTLE_SECONDS
@@ -295,7 +298,8 @@ def _observe_startup(
         elif now >= deadline:
             raise TimeoutError("managed background startup timeout")
         if _process_instance_terminated(host_pid, birth):
-            raise RuntimeError("managed background host exited without terminal authority")
+            host_exited = True
+            continue
         time.sleep(0.02)
 
 

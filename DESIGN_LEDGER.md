@@ -1,5 +1,7 @@
 # 设计台账
 
+通用启动观察竞态修复已本地实现，383 项相关回归通过，尚待发布和新 TUI 验收：观察 host 退出后复读同一 session 的权威终态，保持原交接事务、身份、取消及退出码裁决。详见[托管进程合同](docs/design/MANAGED_PROCESS_STDIO.md#生命周期与通道)。
+
 发布前边界修正已本地实现：进程内取消令牌从 tooling 迁入 common，保留唯一类型与上下文，不新增兼容入口或持久状态。详见[宿主命令边界](docs/design/HOST_COMMAND_EXECUTION.md#解决问题)，完整发布验收仍待通过。
 
 十步重构的具体 TODO 已落地于 [原 Goal 台账](docs/tasks/REFACTOR_PLUGIN_GOAL.md#当前-todo唯一执行清单)。仅细化交付顺序与汇报，不改变架构范围；当前第 4 步的本地实现、发包部署与真实 TUI 验收分开标记。
