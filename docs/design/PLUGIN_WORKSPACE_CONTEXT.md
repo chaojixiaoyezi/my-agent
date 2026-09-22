@@ -1,6 +1,6 @@
 # 插件逐次工作区读取上下文
 
-状态：第 4 步运输已进入本地源码；首个样本和 SDK 构建仍待实现，未发布部署或完成实际 TUI 验收。
+状态：第 4 步运输、轻量 SDK 和首个 workspace-peek 样本已有本地实现与组件验证；未发布部署或完成实际 TUI 验收。
 
 ## 解决问题
 
@@ -34,9 +34,11 @@ Python 绕过协议直接访问系统；不把声明 `read_only` 或一份元数
 墙外授权不扩权及自定义数据根。样本另验符号链接、目录逐项裁决、有界读取和分页。
 这些开发组件测试不计入真实 TUI；发布后仍要管理、插件业务、核心任务至少三路实际 TUI。
 
-## 轻量 SDK 构建边界（待实现）
+## 轻量 SDK 构建边界（本地已实现）
 
-宿主保留唯一 `path_access_policy.py` 与 `workspace_read_context.py` 源文件。开发构建脚本将这两个文件
+宿主保留唯一 `path_access_policy.py`、`workspace_read_context.py` 与 `common/nofollow_fs.py` 源文件。
+后者只提供原通用安全 I/O，不拥有权限；只读 fd 打开供分页使用，避免在样本复制逐段 no-follow 实现。
+开发构建脚本将这三个文件
 按固定清单原字节投影到临时 `src/my_agent_plugin_api/`，再调用标准 setuptools/pip wheel；不递归复制宿主，
 不改写 import，不手写 wheel，不在仓库维护第二份实现。SDK 仅依赖标准库，不要求安装整个 my-agent。
 构建后核对成员、源码字节和零宿主依赖；插件声明 SDK 精确版本并把该 wheel 一同放入原本地依赖闭包。

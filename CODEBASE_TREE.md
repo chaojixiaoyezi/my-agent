@@ -13,6 +13,7 @@
     |-- PLUGIN_LIFECYCLE.md              # 可装卸插件、动态命令、版本切换与故障回收的待实施方案
     |-- PLUGIN_PACKAGES.md               # 本地包静态校验与待接线的安装事实、隔离和撤销边界
     |-- PLUGIN_WORKSPACE_CONTEXT.md      # 逐次只读工作区协议、路径裁决与轻量 SDK 构建边界
+    |-- WORKSPACE_PEEK.md                # 首个自有只读插件的预览、分页、安全打开与构建边界
     |-- PLUGIN_ACTIVATION.md             # 唯一安装表的激活 CAS、撤销、显式迁移及待接线资源边界
     |-- MANAGED_PROCESS_STDIO.md         # 原 host 字节管道、激活资源归属及旧版本恢复边界
     |-- HOST_COMMAND_EXECUTION.md        # 显式命令复用原运行链的请求身份、重送和结果回读合同
@@ -543,6 +544,9 @@ agent_py_agent/
 |   |-- test_container_install.py      # 假 runtime 验证一键 build/probe/透明包装器
 |   `-- test_check_clean_package.py    # untracked、运行目录和 tar/wheel 制品门
 scripts/
+|-- build_plugin_api.py                # 固定共用源码原字节投影，标准构建零运行依赖 SDK wheel
+|-- build_plugin_package.py            # 构建自有插件并沿原包/依赖校验生成安装 ZIP
+|-- plugin_build.py                    # 开发构建后端调用、wheel 元数据读取与独占产物写入
 |-- bench/                             # GW-03/慢模型配对基准：锁内解析成本、owner 事实缓存各路径（配对交替，比值只在组内）
 |-- live_lab/                          # 真实链路 harness；真实 preflight、main-artifact、tool-recovery
 |-- tui_ansi_snapshot.py               # pyte 开发工具：从 raw ANSI/offset 账还原文本、样式、光标和标题快照
@@ -550,6 +554,20 @@ scripts/
 |-- tui_pty_recorder.py                # argv-only PTY 黑盒录制器：按键/粘贴/resize、原始 ANSI、事件索引与脱敏 manifest
 `-- check_clean_package.py             # 工作树与真实发布制品的结构化干净度检查
 `-- reproject_model_usage.py           # 历史用量账本的只读重算投影（exact/partial/incomplete，不覆盖原账本）
+plugins/
+|-- sdk/pyproject.toml                  # 独立 SDK 的唯一发行版本及标准构建声明
+`-- workspace-peek/                    # 自有文件预览插件；不依赖完整宿主运行包
+    |-- README.md                      # 离线构建、命令示例与当前验收边界
+    |-- pyproject.toml                 # 插件发行身份及精确 SDK 依赖
+    `-- src/workspace_peek/
+        |-- declaration.json           # 命令、工具、输入与设置的唯一声明
+        |-- __init__.py                # 独立插件包入口
+        |-- __main__.py                # 标准模块执行入口
+        |-- server.py                  # 有界 stdio MCP 请求与逐次读取上下文接入
+        |-- declarations.py            # 读取同源声明并验证样本平面输入和配置
+        |-- reading.py                 # 路径授权、对象身份与进度游标
+        |-- preview.py                 # 固定 fd 上的 UTF-8 文件分页
+        `-- tree.py                    # 预算内目录枚举、变化检测与稳定分页
 deploy/
 |-- Dockerfile                         # 内置系统 bubblewrap+tini，构建期 binary probe
 |-- seccomp-bwrap.json                 # 固定 Moby 默认 profile，仅放行 bwrap namespace/mount 系统调用
@@ -579,6 +597,10 @@ docs/
 ## Current Storage Roots
 
 ### 关键文件说明
+
+- `plugins/sdk/pyproject.toml` 与 `scripts/build_plugin_api.py`：SDK 唯一发行声明和原源码字节投影；不另存共用权限实现。
+- `plugins/workspace-peek/` 与 `scripts/build_plugin_package.py`：首个自有只读插件及标准安装包构建，独立 MCP 入口只消费宿主逐次上下文。
+- `agent_py_agent/tests/test_plugin_api_build.py`、`agent_py_agent/tests/test_workspace_peek_package.py`：实际标准包、独立环境和原 MCP/宿主管理链的开发验证，不代替真实 TUI。
 
 - `agent_py_agent/agent/runtime_db/run_cancellation.py`：在原 RuntimeDB 上核对 task/run/agent run/attempt 四个身份并关闭执行权；原 UNKNOWN 不恢复、不释放锁，旧控制不能追随新的执行轮。
 - `agent_py_agent/agent/runtime_db/run_creation.py`：在调用方原事务内创建 Task→TaskRun→AgentRun→首次 Attempt 及委托/事件，普通调用与显式宿主命令共用，不能另开事务。
