@@ -1,5 +1,5 @@
-# LLM: 子代理创建策略统一角色与显式运行身份；产品 cwd 与归档分离，交付路径不重写到 task 或生成身份。
-# 模块用途: 为派工组装角色和参数，继承用户家目录并绑定所选模型；显式模型在创建前解析，不能新增凭证。
+# LLM: 子代理创建策略统一角色与显式身份；宿主模型建议和命名来源不能由用户 attributes 伪造，产品 cwd 与归档分离。
+# 模块用途: 为派工组装角色和参数，继承用户家目录并绑定原模型；保留宿主增强接缝，显式模型错误仍在创建前拒绝。
 
 from __future__ import annotations
 
@@ -474,8 +474,8 @@ def _config_bool(agent, key: str, default: bool) -> bool:
     return bool_value(value, default=default)
 
 
-# LLM: 根/递归创建共用属性装配，宿主工具上限与 owner 模型引用覆盖伪造值；IO 只作元数据，不生成 work_scope_key。
-# 函数用途: 保留显式属性并绑定父工具上限和已验证模型引用；不落盘，无效模型在整批创建前报错。
+# LLM: 根/递归共用属性装配，宿主工具上限和模型引用覆盖伪造值，决策与命名来源只能由宿主在准备后写入。
+# 函数用途: 保留显式属性并绑定父工具上限和原模型引用；移除伪造建议，无效显式模型在整批创建前报错。
 def create_task_attributes(raw_params: dict[str, object], agent=None) -> dict[str, object]:
     attrs = (
         dict(raw_params.get("attributes") or {})
@@ -483,6 +483,8 @@ def create_task_attributes(raw_params: dict[str, object], agent=None) -> dict[st
         else {}
     )
     attrs.pop(DIRECT_PARENT_TOOL_AUTHORITY_ATTR, None)
+    attrs.pop("host_model_decision.v1", None)
+    attrs.pop("host_agent_name_origin.v1", None)
     if parent_authority := current_creation_tool_authority():
         attrs[DIRECT_PARENT_TOOL_AUTHORITY_ATTR] = parent_authority
     for key in _LIST_ATTRIBUTE_FIELDS:

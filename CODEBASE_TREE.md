@@ -142,6 +142,7 @@ agent_py_agent/
 |   |   |-- tool_loop/display_archive.py # 执行当时的公开工具原文归档与轻量预览引用
 |   |   |-- tool_context/               # 工具结果上下文：reducer、窗口、microcompact、PTL 单轮重试
 |   |   |-- orchestration/              # 创建、只读状态、消息、取消、授权五个递归直属工具与内部自动启动/恢复引擎；无兄弟 goal 广播，进展事件由宿主写入
+|   |   |   |-- decision_subagent.py # 原批次创建前模型建议，锁外请求、锁内复核，不另建任务账
 |   |   |   |-- create_context.py     # 显式资料与合同装配；已移除 work_scope.py 的自动 IO 身份，引用不合并派工
 |   |   |   |-- capacity.py           # 根/子/孙代理共用的会话树与 owner 容量事实；超限整批拒绝
 |   |   |   |-- coordinator_policy.py # 主代理/多层 coordinator 共用的 会话运行时 式派工后职责软合同
@@ -199,6 +200,7 @@ agent_py_agent/
 |   |   |-- candidates.py             # owner candidates.jsonl 唯一候选账本和唯一状态机
 |   |   |-- curator.py                # 后台策展统一 Service、reason、lease、增量 cursor 与有界重试
 |   |   |-- curator_backend.py        # 无工具辅助模型调用适配；只返回严格结构化结果
+|   |   |-- decision_recall.py        # 原预算后仅重排长期记忆槽位，来源复核并复用本轮上下文
 |   |   |-- decision_curator.py       # 可选用户后台分类/优先级标注，失败保留原批次且不拥有记忆写权限
 |   |   |-- curator_commit.py         # Daily/Candidate/state/run audit 整批提交与崩溃恢复
 |   |   |-- curator_*.py              # Curator 输入、Schema、正式记忆快照、状态与运行审计辅助模块
@@ -452,6 +454,8 @@ agent_py_agent/
 |   |-- test_decision_service.py        # 决策阶段预算、冷却、设置复核、关闭与旧请求隔离
 |   |-- test_decision_service_http.py   # 原配置到真实本地 HTTP、账本与活动用量行的组合
 |   |-- test_decision_owner_scope.py    # 用户后台run/空thread、原身份冲突、后台期限与配置隔离
+|   |-- test_decision_subagent.py      # 原根/递归创建、有工具真实快照、逐项模型选择及幂等
+|   |-- test_decision_recall.py        # 预算先行、固定保护槽位、来源撤销及原完整准备入口复用
 |   |-- test_decision_curator.py        # 原Curator临时建议、完整材料、非选择结果和lease头寸对照
 |   |-- test_decision_model_call.py     # 实际 worker 账本保留、HTTP 尝试、身份、准入与取消
 |   |-- test_model_call_ledger_partitions.py # 原账本用途、字段真值、单调终态及 worker 精确保留
@@ -849,3 +853,8 @@ docs/
 - `agent_py_agent/agent/tooling/mcp_transport.py`、`mcp_protocol.py`：请求和线程永远绑定原连接；临时清理与永久关闭分开，不持有插件激活权威。
 - `agent_py_agent/agent/tooling/mcp_managed_process.py`：插件连接只走原托管启动，输出交给唯一文本读取端，原资源锁内复查原激活，清理保留完整 Store 回执与异常。
 - `docs/design/MCP_TRANSPORT_LIFECYCLE.md`：MCP 的关闭、重连、发布顺序与未知清理边界；对应开发用例为 `agent_py_agent/tests/test_mcp_lifecycle.py`。
+
+- `agent_py_agent/agent/agent_core/orchestration/decision_subagent.py`：创建前可选模型建议，复用原目录、准备/物化、原工具快照和幂等身份。
+- `agent_py_agent/agent/memory_store/decision_recall.py`：原召回预算后排序及消费前来源复核，不扩大权限或新增记忆存储。
+- `docs/tasks/DECISION_MODEL_P2_SUBAGENT_HANDOFF.md`：子代理选择生产接线、联合验证和完整窗口待验边界。
+- `docs/tasks/DECISION_MODEL_P3_RECALL_HANDOFF.md`：记忆排序、来源撤销、原本轮复用及本地验证交接。

@@ -1,5 +1,13 @@
 # 测试与发布验收
 
+## 决策模型 07/09 业务入口（本地）
+
+子代理片联合 10 个 focused 文件 209 项通过；父侧追加同修复身份/不同幂等身份的名字边界，
+与召回片联合执行 `test_decision_subagent.py`、`test_decision_recall.py`、`test_memory_recall_v2.py`、
+`test_memory_first_loop.py`，83 项通过。实际 ToolExecutor + RunParams + 工具开启可持久采用建议模型；
+召回覆盖原授权/预算后排序、来源撤销、完整准备入口与本轮上下文复用。
+这里使用协议替身及原本地存储/worker，不代表真实 Jev 质量、完整窗口缓存或安装版 TUI 验收。
+
 ## 决策模型 Curator 与用户后台 scope（本地）
 
 `test_decision_curator.py` 与原 Curator、自适应超时/缩批测试共 **117 passed**。

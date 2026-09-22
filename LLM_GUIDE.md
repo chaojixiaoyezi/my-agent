@@ -131,7 +131,7 @@ Gateway 模式须读宿主目录，plain 持有完整 Agent 也不能回退本�
 
 Jev 的最新产品方向与独立开发顺序读 [可选决策模型计划](docs/design/DECISION_MODEL_INTEGRATION.md)，P1—P5 已授权独立实施；
 本地已有 decision 用途、生成隔离和原生 decide 适配器；原目录当前 v4、会话 v10，旧数据显式迁移。
-完整清单见 [执行 Goal](docs/tasks/DECISION_MODEL_GOAL.md)。
+完整清单见 [执行 Goal](docs/tasks/DECISION_MODEL_GOAL.md)；子代理选择、Curator 标注和召回重排已本地接通，原设置菜单实施中，真实模型与安装版尚未验。
 严格 HTTP 与协议联合 216 项本地验证通过；后续有界等待/精确取消/原准入及 Curator 迁移联合 315 项通过。
 共用决策设置与原 user_config 已接 read/patch/reset、owner/thread CAS、有效值读回；失效配置不能阻止关闭。
 原账本终态不再被迟到回调复活，用途分区和字段来源保留至原累计容器，worker 可准确保留未退出调用。

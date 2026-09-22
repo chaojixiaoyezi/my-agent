@@ -1,9 +1,10 @@
 
-# LLM: 递归创建在全部规格校验成功后才物化；模型引用共用 owner 私有配置解析，不改变父级或现有 child。
-# 模块用途: 创建当前 child 的下一层，显式模型错误整批拒绝而不留下部分孙代理。
+# LLM: 递归创建在全部规格校验成功后才物化；建议请求在创建锁外，回来后必须复查原权限和持久复用。
+# 模块用途: 创建当前 child 的下一层，显式模型优先，可选决策不改变父级或现有孩子。
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from dataclasses import dataclass
 
 from ..action_protocol import subagent_schedule_envelope_from_payload
@@ -11,10 +12,12 @@ from ..common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
 from ..runtime_errors import runtime_error_report
 from ..settings.model_profiles import ModelProfileError
 from ..subagents.services.hierarchy.qa_scheduler import quality_advice_payload
+from ..subagents.services.hierarchy.schedule_idempotency import find_reusable_scheduled_child
 from ..subagents.services.hierarchy.scheduler import (
     HierarchyChildSpec,
     HierarchyScheduleRequest,
     HierarchyScheduleResult,
+    _child_create_params,
 )
 from ..tooling.cancellation import raise_if_cancelled
 from ..tooling.models import ToolHandlerOutcome
@@ -27,6 +30,12 @@ from .orchestration.create_context import create_context_manifest, create_contex
 from .orchestration.create_policy import (
     create_task_attributes,
     normalize_create_output_params,
+)
+from .orchestration.decision_subagent import (
+    SubagentModelInput,
+    apply_subagent_model_decision,
+    decide_subagent_models,
+    prepare_subagent_model_decision,
 )
 from .orchestration.dispatch.state_contract import dispatch_state_contract_payload
 from .orchestration.lifecycle import (
@@ -53,9 +62,8 @@ class ScheduleLifecyclePayload:
     conversation_bind_errors: list[dict[str, object]]
 
 
-# LLM: Nested creation is the host service behind the sole recursive create_subagents
-# surface. It persists children and requests automatic start; no second schedule tool exists.
-# 函数用途: 在当前子代理名下创建并自动启动下一层，主代理和孙代理共用同一个入口。
+# LLM: 递归入口自己持有原 manager 锁，外层不得覆盖锁外网络阶段；最终仍只调用原 schedule_child_runs。
+# 函数用途: 在当前子代理名下创建下一层，可选请求一次整批模型建议并在物化前重新校验。
 def execute_child_creation(
     agent: object,
     params: dict[str, object],
@@ -63,6 +71,33 @@ def execute_child_creation(
     tool_name: str = "create_subagents",
 ) -> ToolHandlerOutcome:
     params = _schedule_tool_params(params)
+    with _creation_guard(agent):
+        prepared = _prepare_child_creation(agent, params, tool_name=tool_name)
+        if isinstance(prepared, ToolHandlerOutcome):
+            return prepared
+        decision = prepare_subagent_model_decision(agent, params, lambda: _decision_children(agent, params, prepared))
+        if decision is None:
+            return _materialize_child_creation(agent, params, prepared, tool_name=tool_name)
+    outcome = decide_subagent_models(agent, decision)
+    with _creation_guard(agent):
+        raise_if_cancelled()
+        prepared = _prepare_child_creation(agent, params, tool_name=tool_name)
+        if isinstance(prepared, ToolHandlerOutcome):
+            return prepared
+        apply_subagent_model_decision(agent, decision, outcome, _decision_children(agent, params, prepared))
+        return _materialize_child_creation(agent, params, prepared, tool_name=tool_name)
+
+
+# LLM: 锁对象仍由 manager 唯一拥有，本函数不新建锁或持久状态；普通测试适配器允许没有该接口。
+# 函数用途: 取得原递归创建事务边界，确保网络前后使用同一把锁。
+def _creation_guard(agent: object):
+    guard = getattr(getattr(agent, "subagents", None), "creation_guard", None)
+    return guard() if callable(guard) else nullcontext()
+
+
+# LLM: 重复准备复用原规格/容量/权限检查且不保存 child；网络后必须重新调用，不能沿用过期父级事实。
+# 函数用途: 为一次递归创建准备全部规格和原调度请求。
+def _prepare_child_creation(agent: object, params: dict, *, tool_name: str) -> HierarchyScheduleRequest | ToolHandlerOutcome:
     parent_run_id = current_subagent_run_id(agent)
     if not parent_run_id:
         return _schedule_error(
@@ -85,11 +120,28 @@ def execute_child_creation(
     if target_error:
         return _schedule_error(target_error, tool_name=tool_name)
     try:
-        result = agent.subagents.hierarchy.schedule_child_runs(
-            params=_schedule_request(
-                ScheduleRequestBuildParams(agent, parent_run_id, child_specs, params)
-            )
-        )
+        return _schedule_request(ScheduleRequestBuildParams(agent, parent_run_id, child_specs, params))
+    except (IndexError, TypeError, ValueError) as exc:
+        return _schedule_error(_schedule_validation_error_message(exc), tool_name=tool_name)
+
+
+# LLM: 复用原 scheduler 的准确参数装配和查重函数，不通过自然语言目标推断任务身份；本函数不物化记录。
+# 函数用途: 标记递归批次中已有的孩子，避免恢复重放再调用决策模型。
+def _decision_children(agent: object, params: dict, prepared: HierarchyScheduleRequest) -> list[SubagentModelInput]:
+    raw = _json_list_param(params.get("children"))
+    parent = agent.subagents.load(prepared.parent_run_id)
+    result = []
+    for offset, (item, spec) in enumerate(zip(raw, prepared.child_specs, strict=True), start=len(parent.child_ids) + 1):
+        canonical = _child_create_params(parent, spec, sibling_index=offset)
+        result.append(SubagentModelInput(item, spec, find_reusable_scheduled_child(agent.subagents, canonical) is not None, canonical))
+    return result
+
+
+# LLM: 这是原递归保存/发布出口，调用方持有原创建锁；模型建议不能绕过 scheduler 的最终父级和幂等判定。
+# 函数用途: 沿原层级调度器物化已校验的孩子并发布启动回执。
+def _materialize_child_creation(agent: object, params: dict, prepared: HierarchyScheduleRequest, *, tool_name: str) -> ToolHandlerOutcome:
+    try:
+        result = agent.subagents.hierarchy.schedule_child_runs(params=prepared)
     except (IndexError, TypeError, ValueError) as exc:
         return _schedule_error(
             _schedule_validation_error_message(exc),
@@ -393,9 +445,8 @@ def _bulk_schedule_error(agent: object, child_specs: list[HierarchyChildSpec]) -
     )
 
 
-# LLM: Recursive child specs pass through the same output-ref normalization as root
-# creation before permissions and attributes are derived; do not add a second path policy.
-# 函数用途: 构造孙代理规格及选定模型引用；无效配置在整个批次落盘前返回可修错误。
+# LLM: 递归规格沿原路径/模型校验；命名来源只能取未补默认值的原参数，供原显式幂等合同复用，不能从名字猜。
+# 函数用途: 构造孙代理规格并记录名称是否用户明确填写；无效模型仍在整个批次落盘前报错。
 def _hierarchy_child_spec(
     agent: object,
     raw: object,
@@ -412,6 +463,7 @@ def _hierarchy_child_spec(
         attrs = create_task_attributes(raw, agent)
     except ModelProfileError as exc:
         return ToolHandlerOutcome(tool_name, False, str(exc), error_code="TOOL_INVALID_ARGUMENTS", effect_outcome="not_started")
+    attrs["host_agent_name_origin.v1"] = {"explicit": bool(str(raw.get("agent_name") or "").strip())}
     return HierarchyChildSpec(
         goal=goal,
         description=str(raw.get("description") or "").strip()[:240],

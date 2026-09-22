@@ -426,7 +426,7 @@ def _routed_memory_context_for_request(agent, request: RuntimeContextRequest, *,
     )
 
 
-# LLM: Runtime Prompt 只能收到一个 MemoryRecord 列表；routing 原始 Markdown 和 HOT 不得另建注入格式。
+# LLM: 原授权与预算先固定记忆集合；可选决策只改长期事实槽位顺序，HOT/lesson、正文和后续原投影保持权威。
 # 函数用途: 合并适用的 HOT、已成功路由 lesson 和 active long-term，并清空旧 routing 文本注入。
 def _formal_memories_for_request(
     agent,
@@ -465,7 +465,30 @@ def _formal_memories_for_request(
             routed_context.findings.append(finding)
         hot, lessons = [], []
     routed_context.injected_sections = []
-    return _budgeted_formal_memories(_dedupe_formal_memories([*hot, *lessons, *long_term_memories]))
+    memories = _budgeted_formal_memories(_dedupe_formal_memories([*hot, *lessons, *long_term_memories]))
+    from ...memory_store.decision_recall import rerank_recalled_memories
+
+    memories, finding = rerank_recalled_memories(
+        agent, request, memories, recall_scope=recall_scope,
+        refresh=lambda: _refresh_recall_candidates(agent, memories, read_paths, recall_scope),
+    )
+    if finding:
+        routed_context.findings.append(finding)
+    return memories
+
+
+# LLM: 采用旧建议前重读原正式仓库，只投影原选中 ID 并复用原范围/预算；删除、到期或撤销不能被旧排序复活。
+# 函数用途: 刷新本批合法候选版本，不重新检索、不增加访问信号、不引入新记忆。
+def _refresh_recall_candidates(agent: object, records: list, read_paths: list[str], scope: MemoryRecallScope) -> list:
+    available = [
+        *hot_memory_records(agent.memory_hot, agent.memory_lessons, scope=scope),
+        *routed_lesson_records(agent.memory_lessons, read_paths=read_paths, scope=scope,
+                               stale_days=float(getattr(agent.config, "home_lesson_stale_caveat_days", 7.0) or 0.0)),
+        *(record for record in agent.memory.all() if long_term_record_matches_scope(record, scope)),
+    ]
+    current = {record.entry_id: record for record in _dedupe_formal_memories(available)}
+    selected = [current[record.entry_id] for record in records if record.entry_id in current]
+    return _budgeted_formal_memories(_dedupe_formal_memories(selected))
 
 
 # 记忆注入总预算池(字符≈token,中文 1:1)。上下文有界第一原则:宁可丢不撑爆。

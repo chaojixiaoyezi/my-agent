@@ -1,5 +1,13 @@
 # Memory Structure
 
+## 原召回结果中的可选排序
+
+`memory_store/decision_recall.py` 经共用决策服务提供临时优先级；唯一接线位于
+`agent_core/runtime/loop_support.py::_formal_memories_for_request` 原预算之后。
+当前选中集合完整保留，HOT/lesson 只绑定不参与排序。来源刷新只查原正式仓库并投影原 ID，不新增检索或访问计数。
+候选、请求属性、主模型或设置变更时拒绝旧建议；最后采用沿 `decision_outcome_is_current`。
+结果驻留原 PreparedRuntimeContext.memories，工具循环/Compact 复用该轮材料。同步本地文件 I/O 不承诺强制中断，迟到建议不会采用。
+
 ## 会话存储读取边界
 
 `curator_inputs.py` 只从同一 ConversationStore 的 `threads` 元数据和 `messages` 增量读取能力收集输入。

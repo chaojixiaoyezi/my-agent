@@ -1,5 +1,14 @@
 # Subagent Structure
 
+## 创建前可选模型建议
+
+`agent_core/orchestration/decision_subagent.py` 只保存一次批次的候选/规格摘要；模型引用仍写原 host_model_profile.v1。
+`orchestration_tools.py` 与 `hierarchy_tools.py` 沿原创建锁准备→锁外建议→锁内重新准备/采用/物化；关闭时沿一次原事务。
+`execute_scoped` 引用原 ToolRuntimeSnapshot，ContextVar 仅活到本次工具返回，不给 RunParams 增加第二快照。
+候选只取原 owner/shared agentic 配置；冷候选由原 child runner 探测，建议不证明实际工具支持。
+采用前复核配置/连接/期限、原规格和候选版本。默认名字来源由宿主规范化前记录；仅相同显式幂等身份可忽略序号变化。
+当前窗口是创建前估算（内联材料、当前工具 schema、输出预留）；完整 child prompt、模态和缓存验证仍属 TODO12。
+
 ## 原创建锁与执行轮短事务
 
 - `coordination.py` 复用 `.create-subagents.guard` 的原线程锁和文件锁，仅为同进程/线程/canonical 路径处理嵌套持有；不另存任务状态。
