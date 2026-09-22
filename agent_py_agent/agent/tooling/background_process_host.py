@@ -1,5 +1,5 @@
-# LLM: host 仅执行已批准 argv；交接后默认保留长期后台，显式准备调用继续检查 launcher 和原期限，不重建进程账。
-# 模块用途: 独立持有后台命令并保存真实终态，使工作片结束不误杀资源，异常或未确认退出不伪装成功。
+# LLM: host 仅执行已批准 argv；stdio 直接继承管道并绑定 launcher，日志后台沿旧默认寿命，原进程账仍唯一。
+# 模块用途: 独立托管命令并记录真实终态，分开日志与协议字节，不转发数据或伪造退出成功。
 from __future__ import annotations
 
 import argparse
@@ -7,6 +7,7 @@ import math
 import os
 import subprocess
 import time
+from contextlib import contextmanager, nullcontext
 from dataclasses import asdict
 from pathlib import Path
 
@@ -18,7 +19,7 @@ from .process_registry import (
     terminate_process_tree,
 )
 from .process_session_records import (
-    PROCESS_SESSION_SCHEMA,
+    MANAGED_PROCESS_SESSION_SCHEMAS,
     PROCESS_TERMINAL_STATUSES,
     validate_session_id,
 )
@@ -27,8 +28,8 @@ from .process_session_store import ProcessSessionStore
 _HOST_POLL_SECONDS = 0.05
 
 
-# LLM: 只接收当前 v3 完整寿命字段；cwd/output 来自不可变预留，环境只继承父进程，未知版本不补默认值。
-# 函数用途: 验证一次性交接文件及有界执行设置，损坏时不启动命令。
+# LLM: 只接收当前 v4 完整通道与寿命字段；环境只继承父进程，旧信封不补模式默认值，stdio 禁止日志预算。
+# 函数用途: 验证一次性交接文件及通道设置，损坏或通道寿命矛盾时不启动命令。
 def _read_launch_spec(
     store: ProcessSessionStore, session_id: str, spec_path: Path
 ) -> dict[str, object]:
@@ -55,6 +56,11 @@ def _read_launch_spec(
     if (type(deadline) not in {int, float} or not math.isfinite(deadline) or deadline < 0
             or type(spec.get("stop_on_launcher_exit")) is not bool):
         raise ValueError("managed background lifetime invalid")
+    mode = spec.get("io_mode")
+    if not isinstance(mode, str) or mode not in {"log", "stdio"}:
+        raise ValueError("managed background I/O mode invalid")
+    if mode == "stdio" and (not spec["stop_on_launcher_exit"] or spec["max_log_bytes"] != 0):
+        raise ValueError("managed stdio requires attached lifetime without log output")
     return spec
 
 
@@ -72,10 +78,10 @@ def _bind_host(store: ProcessSessionStore, session_id: str) -> dict[str, object]
         return transaction.write({**record, "pid": pid, "pid_birth_token": birth})
 
 
-# LLM: 该检查只验证持锁读取的启动事实与 launcher 实例；不能替代启动端原 RuntimeDB 权限复查。
+# LLM: 持锁检查 v2/v3 原启动事实和 launcher 实例；不能替代启动端的任务/插件权威复查，不迁移旧记录。
 # 函数用途: 拒绝被停止、已进入创建或失去启动者的预留。
 def _require_reservation(record: dict[str, object] | None) -> None:
-    if record is None or record["schema"] != PROCESS_SESSION_SCHEMA:
+    if record is None or record["schema"] not in MANAGED_PROCESS_SESSION_SCHEMAS:
         raise ValueError("managed background reservation missing")
     if record["stop_requested"] or record["child_launch_started"] or record["status"] != "starting":
         raise RuntimeError("managed background reservation unavailable")
@@ -86,8 +92,8 @@ def _require_reservation(record: dict[str, object] | None) -> None:
         raise RuntimeError("managed background launcher unavailable")
 
 
-# LLM: 创建标记先提交，Popen 与 child 绑定同锁；期限先于创建，外力崩溃窗口保持 unknown，不将副作用降为未启动。
-# 函数用途: 启动并监控一个精确归属命令，执行显式寿命限制，异常仅清理本 host 的子树。
+# LLM: 创建标记先提交，Popen 与 child 绑定同锁；stdio 继承后释放 host 端点，异常仍按真实副作用清理。
+# 函数用途: 启动并监控精确归属命令，让协议管道直接连到 child，保存同一资源账的终态。
 def run_background_process_host(
     store: ProcessSessionStore, session_id: str, spec_path: Path
 ) -> int:
@@ -101,22 +107,18 @@ def run_background_process_host(
             _require_reservation(record)
             if spec["deadline_monotonic"] and time.monotonic() >= spec["deadline_monotonic"]:
                 raise TimeoutError("managed background deadline")
+            if (spec["io_mode"] == "stdio") != (record["output_file"] == ""):
+                raise ValueError("managed background output binding conflict")
             record = transaction.write({**record, "child_launch_started": True})
             # 留住未回收 child；短命令的出生身份必须先于任何 poll/wait 采集。
-            with Path(record["output_file"]).open("ab") as log:
+            with _child_stdio(spec, record) as streams:
                 child = subprocess.Popen(
-                    spec["command_argv"],
-                    shell=False,
-                    cwd=record["cwd"],
-                    stdin=subprocess.DEVNULL,
-                    stdout=log,
-                    stderr=subprocess.STDOUT,
-                    env=dict(os.environ),
-                    start_new_session=os.name != "nt",
-                    creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-                    if os.name == "nt"
-                    else 0,
+                    spec["command_argv"], shell=False, cwd=record["cwd"], **streams,
+                    env=dict(os.environ), start_new_session=os.name != "nt",
+                    creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0,
                 )
+            if spec["io_mode"] == "stdio":
+                _release_host_pipes()
             birth = capture_process_birth_token(child.pid)
             if not birth:
                 raise OSError("managed child identity unavailable")
@@ -147,6 +149,24 @@ def run_background_process_host(
             spec_path.unlink(missing_ok=True)
         except OSError:
             pass
+
+
+# LLM: stdio 的 None 继承标准端点；日志关闭可抛错，调用方必须在退出上下文前拿到 Popen，保留精确清理权。
+# 函数用途: 为已校验模式准备子进程端点，继承后关闭 host 日志句柄，不转发或解码字节。
+@contextmanager
+def _child_stdio(spec: dict[str, object], record: dict[str, object]):
+    stdio = spec["io_mode"] == "stdio"
+    with (nullcontext() if stdio else Path(record["output_file"]).open("ab")) as log:
+        yield {"stdin": None if stdio else subprocess.DEVNULL,
+               "stdout": None if stdio else log, "stderr": None if stdio else subprocess.STDOUT}
+
+
+# LLM: 仅独立 host 在 child 继承后调用；释放重复端点使 EOF 由 child 决定，保留有效标准 fd 避免后续诊断写入协议流。
+# 函数用途: 将 host 自己的标准流换到空设备，实际通信端点仅留给 child。
+def _release_host_pipes() -> None:
+    with open(os.devnull, "r+b", buffering=0) as sink:
+        for fd in (0, 1, 2):
+            os.dup2(sink.fileno(), fd)
 
 
 # LLM: 不提前回收组长；自然退出也核对后代。只有宿主显式要求时，handoff 后仍受 launcher 和原期限约束。

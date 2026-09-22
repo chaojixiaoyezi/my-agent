@@ -1,6 +1,6 @@
 
-# LLM: 访问身份读取 process_scope；后台记录与前台命令共用出生标识和终止回执，不用旧 PID 猜归属；联测 registry、后台 host 与 shell orphan kill。
-# 模块用途: 记录受管进程并按精确执行归属停止，核对原进程树和独立组成员退出，不把发送信号当成清理完成。
+# LLM: 访问与归属读取 process_scope；v2/v3 复用原出生标识和终止回执，共享激活不向业务会话暴露；联测 Store/host/shell。
+# 模块用途: 从同一持久账查询或精确停止受管进程，不让普通任务控制共享插件连接，不把发信号当清理完成。
 from __future__ import annotations
 
 import json
@@ -18,7 +18,7 @@ from .cancellation import current_cancellation_token, raise_if_cancelled
 from .process_scope import ProcessAccessScope
 from .process_session_records import (
     LEGACY_PROCESS_SESSION_SCHEMA,
-    PROCESS_SESSION_SCHEMA,
+    MANAGED_PROCESS_SESSION_SCHEMAS,
     PROCESS_TERMINAL_STATUSES,
 )
 from .process_session_store import (
@@ -91,7 +91,7 @@ class BackgroundProcess:
     def is_terminal(self) -> bool:
         return self.status in PROCESS_TERMINAL_STATUSES
 
-    # LLM: 摘要只暴露 session 管理句柄和控制标记；启动未确认时没有开始时间，日志错误不能改终态。
+    # LLM: 摘要保留 v2/v3 原控制标记；调用方先核对资源可见范围，启动未确认时不补开始时间，日志错误不改终态。
     # 函数用途: 生成后台进程的状态和日志观测，耗时与输出增长分开，宿主 PID 保持内部使用。
     def to_summary(self, *, include_output: bool = False, output_tail_chars: int = _OUTPUT_TAIL_CHARS) -> dict[str, Any]:
         summary: dict[str, Any] = {
@@ -102,7 +102,7 @@ class BackgroundProcess:
             "uptime_seconds": max(0, int((self.finished_at or time.time()) - self.started_at)) if self.started_at else 0,
             "output_file": self.output_file,
         }
-        if self.persisted_snapshot.get("schema") == PROCESS_SESSION_SCHEMA:
+        if self.persisted_snapshot.get("schema") in MANAGED_PROCESS_SESSION_SCHEMAS:
             summary.update(stop_requested=self.persisted_snapshot["stop_requested"],
                            handoff_confirmed=self.persisted_snapshot["handoff_confirmed"])
         if self.exit_code is not None:
@@ -142,7 +142,7 @@ class BackgroundProcess:
             "completion_notice_id": self.completion_notice_id,
         }
 
-    # LLM: 只接受 Store 验证的当前记录，完整保留 v1/v2 字段；本地句柄只能在同目录同出生实例核对后附加。
+    # LLM: 只接受 Store 验证的记录，完整保留 v1/v2/v3 字段；本地句柄只在同目录同出生实例核对后附加。
     # 函数用途: 恢复另一进程写下的当前状态、执行归属和控制事实，不从访问范围猜任务身份。
     @classmethod
     def from_record(
@@ -238,14 +238,14 @@ class ProcessRegistry:
                 self._refresh_locked(record)
             return record
 
-    # LLM: v2 只信原 Store 的终态，host 丢失不是 child 退出；v1 明确保留已发布数据的旧终态读取。
+    # LLM: v2/v3 只信原 Store 终态，host 丢失不是 child 退出；v1 保留原终态读取，旧 v2 不得误走该分支。
     # 函数用途: 更新失去托管的未知状态，或读取旧版本已经退出的命令结果。
     def _refresh_locked(self, record: BackgroundProcess) -> None:
         if record.is_terminal():
             if record.process is not None:
                 record.process.poll()
             return
-        if record.persisted_snapshot.get("schema") == PROCESS_SESSION_SCHEMA:
+        if record.persisted_snapshot.get("schema") in MANAGED_PROCESS_SESSION_SCHEMAS:
             pid = record.pid or record.persisted_snapshot["launcher_pid"]
             birth = record.pid_birth_token or record.persisted_snapshot["launcher_birth_token"]
             if not _process_instance_terminated(pid, birth) or record.status == "unknown":
@@ -285,7 +285,7 @@ class ProcessRegistry:
         rows, _errors = self.list_report(access_scope, store_root)
         return rows
 
-    # LLM: 枚举先清除该目录旧缓存再装入有效记录；redo 故障不能回退到旧成功视图。
+    # LLM: 枚举先刷新权威；业务范围显式排除共享激活，redo 故障不能回退到旧成功视图。
     # 函数用途: 列出当前范围的后台会话，并单列损坏或恢复错误。
     def list_report(self, access_scope: ProcessAccessScope | None = None,
                     store_root: str | Path | None = None) -> tuple[list[dict[str, Any]], list[dict[str, object]]]:
@@ -294,14 +294,15 @@ class ProcessRegistry:
             errors = []
             for root in roots:
                 errors.extend(self._hydrate_store_locked(root))
-            records = [rec for rec in self._processes.values() if (access_scope is None or rec.access_scope == access_scope)
+            records = [rec for rec in self._processes.values() if (access_scope is None or
+                       rec.persisted_snapshot.get("activation_scope") is None and rec.access_scope == access_scope)
                        and _record_matches_store(rec, store_root)]
             for record in records:
                 self._refresh_locked(record)
             records.sort(key=lambda item: (item.is_terminal(), -item.started_at))
             return [record.to_summary() for record in records], errors
 
-    # LLM: v2 精确冻结一个 ID 再锁外清理；不得按其 task 扩大范围，launcher 绝不参与终止。
+    # LLM: v2/v3 精确冻结一个 ID 再锁外清理；业务范围不得访问共享激活，launcher 绝不参与终止。
     # 函数用途: 停止显式指定的会话；只有可信树退出回执才报告已停止。
     def kill(self, session_id: str, access_scope: ProcessAccessScope | None = None,
              store_root: str | Path | None = None) -> dict[str, Any] | None:
@@ -311,7 +312,7 @@ class ProcessRegistry:
                 return None
             payload, process = record.to_record(), record.process
             root = Path(record.store_root)
-        if payload["schema"] == PROCESS_SESSION_SCHEMA:
+        if payload["schema"] in MANAGED_PROCESS_SESSION_SCHEMAS:
             from .process_session_cleanup import stop_process_session
 
             cleanup = stop_process_session(ProcessSessionStore(root), payload, host_process=process)
@@ -361,7 +362,7 @@ class ProcessRegistry:
             interval = min(0.1, remaining)
             token.wait(interval) if token is not None else time.sleep(interval)
 
-    # LLM: 没有显式 root 的内部查询只允许缓存中唯一匹配，再读它的原地址；不能跨 owner 猜同名句柄。
+    # LLM: 无 root 内部查询只允许缓存唯一匹配；业务 scope 显式拒绝共享激活，不能凭已知句柄越过归属。
     # 函数用途: 从权威目录读当前记录，再做访问身份比较。
     def _visible_record_locked(self, session_id: str, access_scope: ProcessAccessScope | None,
                                store_root: str | Path | None) -> BackgroundProcess | None:
@@ -381,7 +382,9 @@ class ProcessRegistry:
                 raise ProcessSessionAuthorityError({"error_type": "active_authority_missing"})
             return None
         record = self._cache_payload(report.record, root)
-        return record if access_scope is None or record.access_scope == access_scope else None
+        return record if access_scope is None or (
+            record.persisted_snapshot.get("activation_scope") is None and record.access_scope == access_scope
+        ) else None
 
     # LLM: 只在地址、PID 和出生标识完全相同时保留本地 Popen；所有持久字段每次整体刷新。
     # 函数用途: 将可信当前快照装入缓存，不丢 revision、执行归属和控制标记。
@@ -410,7 +413,7 @@ class ProcessRegistry:
             self._cache_payload(payload, root)
         return errors
 
-    # LLM: 此入口只写已发布 v1 的观察更新；v2 必须在调用处同一事务重读，不能强换 revision 写旧缓存。
+    # LLM: 此入口只写已发布 v1 的观察更新；v2/v3 必须在原事务重读，不能强换 revision 写旧缓存。
     # 函数用途: 保存旧会话终态并吸收实际提交结果。
     def _persist_locked(self, record: BackgroundProcess) -> None:
         if record.persisted_snapshot.get("schema") != LEGACY_PROCESS_SESSION_SCHEMA:

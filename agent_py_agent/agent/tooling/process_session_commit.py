@@ -1,5 +1,5 @@
 # LLM: redo 是同一 Store 的短期安装日志，不是第二套进程状态；调用方必须持目录锁，恢复不启动或终止进程。
-# 模块用途: 把一批固定 v2 记录作为一次提交安装，进程中断后补齐原批次并明确已提交但未安装完的结果。
+# 模块用途: 原版本安装一批 v2/v3 记录，中断后补齐原批次，明确已提交但未安装完的结果，不迁移旧 session。
 from __future__ import annotations
 
 import hashlib
@@ -11,7 +11,7 @@ from pathlib import Path
 
 from ..common.json_io import write_json_file_atomic_unlocked
 from .process_session_records import (
-    PROCESS_SESSION_SCHEMA,
+    MANAGED_PROCESS_SESSION_SCHEMAS,
     merge_process_record,
     validate_process_record,
     validate_session_id,
@@ -64,7 +64,7 @@ def _record_digest(record: dict[str, object]) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
-# LLM: 批量文件事务只接受 v2；先校验全批再发布，当前路径和记录身份不能由 redo 任意指定。
+# LLM: 批量事务显式接纳 v2/v3 原版本；先校验全批再发布，路径和记录身份不能由 redo 任意指定。
 # 函数用途: 检查暂存日志格式、重复句柄和记录版本，返回可恢复的固定条目。
 def _validate_redo(payload: object) -> dict[str, object]:
     if not isinstance(payload, dict) or set(payload) != {"schema", "transaction_id", "entries"}:
@@ -86,8 +86,8 @@ def _validate_redo(payload: object) -> dict[str, object]:
         ):
             raise ValueError("invalid managed process prior digest")
         record = validate_process_record(entry["record"])
-        if record["schema"] != PROCESS_SESSION_SCHEMA or record["revision"] < 1:
-            raise ValueError("managed process redo requires versioned v2 records")
+        if record["schema"] not in MANAGED_PROCESS_SESSION_SCHEMAS or record["revision"] < 1:
+            raise ValueError("managed process redo requires versioned managed records")
         if record["session_id"] in seen:
             raise ValueError("duplicate managed process redo identity")
         seen.add(record["session_id"])
@@ -96,7 +96,7 @@ def _validate_redo(payload: object) -> dict[str, object]:
     return payload
 
 
-# LLM: 安装前整批检查原摘要或目标摘要；后续版本、丢失或损坏记录都必须拒绝，不能旧日志覆盖新事实。
+# LLM: 整批检查原/目标摘要并保持 v2/v3 原 schema；后续版本、丢失或损坏记录拒绝，旧 redo 不能迁移身份。
 # 函数用途: 确认当前磁盘仍是提交前版本或已经安装的同一版本，防止部分恢复先覆盖健康记录。
 def _check_installation(root: Path, redo: dict[str, object]) -> None:
     for entry in redo["entries"]:
@@ -106,7 +106,7 @@ def _check_installation(root: Path, redo: dict[str, object]) -> None:
         if current_digest not in {entry["before_digest"], _record_digest(record)}:
             raise ValueError("managed process redo conflicts with current record")
         if current_digest == entry["before_digest"]:
-            if current is not None and current["schema"] != PROCESS_SESSION_SCHEMA:
+            if current is not None and current["schema"] not in MANAGED_PROCESS_SESSION_SCHEMAS:
                 raise ValueError("managed process redo cannot migrate legacy records")
             expected_revision = current["revision"] + 1 if current is not None else 1
             if record["revision"] != expected_revision:

@@ -1,9 +1,31 @@
-# LLM: 资源访问授权和任务执行归属分别冻结；这里只整理可信身份，不查询记录、发信号或推断缺失任务。
-# 模块用途: 为进程工具和交互终端提供无副作用的身份合同，避免把可见范围误用成资源停止范围。
+# LLM: 访问、任务执行和共享激活分别冻结；这里只校验可信身份，不查询权威或发信号，联测进程 Store 与插件停止隔离。
+# 模块用途: 提供无副作用的资源身份合同，避免把共享连接归到第一个业务任务，或把可见范围当停止范围。
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
+
+
+# LLM: 本引用只定位原安装表的一代，不授予运行权限；必须与资源记录的 owner 一致且不带业务任务身份。
+# 类用途: 为多个会话共享的插件进程保存不可变归属，供原 Store 精确冻结和保留清理证据。
+@dataclass(frozen=True)
+class ProcessActivationScope:
+    owner_id: str
+    owner_home: str
+    plugin_id: str
+    activation_id: str
+
+    # LLM: 不补默认值、不猜 owner；插件与激活沿原协议身份格式，路径只验证绝对地址，不读写文件。
+    # 函数用途: 拒绝不完整或畸形的共享资源归属，避免空值变成跨插件通配符。
+    def __post_init__(self) -> None:
+        if (not isinstance(self.owner_id, str) or not self.owner_id.strip()
+                or not isinstance(self.owner_home, str) or not Path(self.owner_home).is_absolute()
+                or not isinstance(self.plugin_id, str)
+                or re.fullmatch(r"[A-Za-z][A-Za-z0-9._-]{0,63}", self.plugin_id) is None
+                or not isinstance(self.activation_id, str)
+                or re.fullmatch(r"[0-9a-f]{64}", self.activation_id) is None):
+            raise ValueError("invalid managed process activation scope")
 
 
 # LLM: 相等比较才授予模型访问；不增加路径祖先匹配，空 owner 或 conversation 必须拒绝。

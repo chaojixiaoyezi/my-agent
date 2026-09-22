@@ -1,5 +1,5 @@
-# LLM: 本模块只处理已验证 session 的精确资源；launcher 是存活证据，永远不是清理目标；不得按任务重扫。
-# 模块用途: 在原 Store 提交停止意图后，按冻结的 host/child 出生身份清理并保存可信结果，未确认保持未知。
+# LLM: 仅清理已验证 v2/v3 session，任务或激活由调用方选定；launcher 仅是存活证据，不再按范围重扫。
+# 模块用途: 原 Store 提交停止意图后，按冻结 host/child 出生身份清理并保存结果，未确认保持未知。
 from __future__ import annotations
 
 import subprocess
@@ -14,7 +14,7 @@ from .process_registry import (
 )
 from .process_session_commit import ProcessSessionCommitPendingError
 from .process_session_records import (
-    PROCESS_SESSION_SCHEMA,
+    MANAGED_PROCESS_SESSION_SCHEMAS,
     PROCESS_TERMINAL_STATUSES,
     merge_process_record,
 )
@@ -71,16 +71,16 @@ class ProcessSessionCleanupError(RuntimeError):
                 self.record = pending_record
 
 
-# LLM: 首次读改写固定同一句柄身份，调用方已验证访问权或任务执行范围；停止意图落盘前不发信号。
-# 函数用途: 停止一个已选定的 v2 session，不扩大为同任务的其它资源或启动者进程。
+# LLM: 首次读改写固定 v2/v3 同一句柄身份，调用方已验证任务或激活范围；停止意图落盘前不发信号。
+# 函数用途: 停止一个已选定的托管 session，不扩大为其他资源或启动者进程。
 def stop_process_session(
     store: ProcessSessionStore,
     selected: dict[str, object],
     *,
     host_process: subprocess.Popen | None = None,
 ) -> ProcessSessionCleanup:
-    if selected.get("schema") != PROCESS_SESSION_SCHEMA:
-        raise ValueError("managed session cleanup requires v2 authority")
+    if selected.get("schema") not in MANAGED_PROCESS_SESSION_SCHEMAS:
+        raise ValueError("managed session cleanup requires versioned authority")
     frozen, receipts, committed = selected, (), False
     try:
         with store.transaction() as transaction:

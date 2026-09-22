@@ -1,5 +1,5 @@
-# LLM: 预留、host 绑定和交接共用原 Store，启动不重放；默认后台交接后独立，宿主准备须显式声明有限寿命。
-# 模块用途: 冻结进程归属和寿命、托管启动并有界确认交接，失败保留真实启动与清理状态。
+# LLM: 预留、host 绑定和交接共用原 Store；stdio 管道绑定 launcher 寿命，日志后台沿原默认独立，联测两种通道。
+# 模块用途: 冻结归属与寿命，托管启动并交出管道；失败关闭未交接管道且保留真实清理结果。
 from __future__ import annotations
 
 import math
@@ -19,23 +19,23 @@ from .process_registry import (
     capture_process_birth_token,
     terminate_process_tree,
 )
-from .process_scope import ProcessAccessScope, ProcessExecutionScope
+from .process_scope import ProcessAccessScope, ProcessActivationScope, ProcessExecutionScope
 from .process_session_cleanup import ProcessSessionCleanupError, stop_process_session
 from .process_session_records import PROCESS_SESSION_SCHEMA
 from .process_session_store import ProcessSessionStore
 
 BACKGROUND_START_SETTLE_SECONDS = 0.5
-LAUNCH_SPEC_SCHEMA = "background_process_launch.v3"
+LAUNCH_SPEC_SCHEMA = "background_process_launch.v4"
 
 
-# LLM: 参数来自已授权宿主；权限复查只读原 operation，env 不写磁盘；默认长期后台不随 launcher 退出，新准备调用须显式收紧寿命。
-# 类用途: 汇总一次托管启动的命令、归属和权限，允许准备进程绑定宿主寿命及同一单调期限。
+# LLM: 参数来自已授权宿主，env 不写磁盘；stdio 不写任务日志且必须绑定 launcher，不能继承长期后台的独立寿命。
+# 类用途: 汇总一次托管启动的命令、归属、字节通道和权限，启动前拒绝相互矛盾的寿命或输出设置。
 @dataclass(frozen=True)
 class BackgroundLaunchRequest:
     argv: list[str]
     command: str
     cwd: Path
-    log_path: Path
+    log_path: Path | None
     env: dict[str, str]
     max_log_bytes: int
     store_root: Path
@@ -45,18 +45,28 @@ class BackgroundLaunchRequest:
     authority_check: Callable[[], None] | None = field(default=None, repr=False, compare=False)
     deadline_monotonic: float = 0.0
     stop_on_launcher_exit: bool = False
+    io_mode: str = "log"
+    activation_scope: ProcessActivationScope | None = None
 
-    # LLM: 零期限只代表既有后台无此限制；布尔值、NaN 及负数不得变成无界准备。
-    # 函数用途: 在创建任何启动记录前校验宿主提供的寿命约束。
+    # LLM: 零期限只代表无此时间限制；stdio 必须绑定 launcher，且不能伪造输出文件或沿用日志预算。
+    # 函数用途: 在创建启动记录前校验宿主提供的寿命与通道约束。
     def __post_init__(self) -> None:
         if (type(self.deadline_monotonic) not in {int, float}
                 or not math.isfinite(self.deadline_monotonic) or self.deadline_monotonic < 0
                 or type(self.stop_on_launcher_exit) is not bool):
             raise ValueError("managed background lifetime invalid")
+        if not isinstance(self.io_mode, str) or self.io_mode not in {"log", "stdio"}:
+            raise ValueError("managed background I/O mode invalid")
+        if self.io_mode == "stdio":
+            if (not self.stop_on_launcher_exit or self.log_path is not None
+                    or type(self.max_log_bytes) is not int or self.max_log_bytes != 0):
+                raise ValueError("managed stdio requires attached lifetime without log output")
+        elif self.log_path is None:
+            raise ValueError("managed background log path required")
 
 
-# LLM: session 已在 Store 交接，process 仅本进程回收句柄；返回对象不能充当另一份生命周期权威。
-# 类用途: 把同一个持久会话和本地托管句柄交给查询缓存，不重新登记 ID。
+# LLM: session 已在 Store 交接；process 的 stdio 管道交给调用方关闭，句柄不充当另一份生命周期权威。
+# 类用途: 把同一个持久会话、本地托管句柄和可选字节管道交给调用方，不重新登记 ID。
 @dataclass(frozen=True)
 class HostedBackgroundProcess:
     process: subprocess.Popen
@@ -83,8 +93,8 @@ class BackgroundLaunchError(RuntimeError):
         self.cleanup_error = cleanup_error
 
 
-# LLM: 两次准入和最后交接均在 Store 锁内复查旧调用；Popen 只执行一次，提交后异常恢复同一个 session。
-# 函数用途: 预留后台资源，启动独立 host，观察短命令并确认交接；交接前失败负责精确清理。
+# LLM: 准入与交接在原 Store 锁内；Popen 只执行一次，提交后异常恢复原 session；未交出的 stdio 由本入口关闭。
+# 函数用途: 预留资源并启动独立 host，交接成功后返回原句柄及管道，失败精确清理。
 def start_background_process(
     request: BackgroundLaunchRequest, *, startup_timeout_seconds: float = 3.0
 ) -> HostedBackgroundProcess:
@@ -94,6 +104,7 @@ def start_background_process(
     session_id = f"bg-{int(time.time())}-{uuid.uuid4().hex[:16]}"
     record = _reservation(request, session_id)
     process, birth = None, ""
+    handed_off = False
     spec_path = store.root / ".launches" / f"{session_id}.json"
     try:
         with store.transaction() as transaction:
@@ -110,6 +121,7 @@ def start_background_process(
                     "max_log_bytes": request.max_log_bytes,
                     "deadline_monotonic": request.deadline_monotonic,
                     "stop_on_launcher_exit": request.stop_on_launcher_exit,
+                    "io_mode": request.io_mode,
                 },
             )
             spec_path.chmod(0o600)
@@ -131,9 +143,9 @@ def start_background_process(
                     "--spec",
                     str(spec_path),
                 ],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdin=subprocess.PIPE if request.io_mode == "stdio" else subprocess.DEVNULL,
+                stdout=subprocess.PIPE if request.io_mode == "stdio" else subprocess.DEVNULL,
+                stderr=subprocess.PIPE if request.io_mode == "stdio" else subprocess.DEVNULL,
                 env=dict(request.env),
                 start_new_session=os.name != "nt",
                 creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
@@ -159,10 +171,12 @@ def start_background_process(
                 raise RuntimeError("managed background host disappeared before handoff")
             raise_if_cancelled()
             record = transaction.write({**current, "handoff_confirmed": True})
+        handed_off = True
         return HostedBackgroundProcess(process, record, store.root)
     except Exception as exc:
         report = store.load(session_id)
         if report.record.get("handoff_confirmed") and process is not None:
+            handed_off = True
             return HostedBackgroundProcess(process, report.record, store.root)
         try:
             record, confirmed = _abort_launch(store, report.record or record, process, birth)
@@ -170,14 +184,27 @@ def start_background_process(
             raise BackgroundLaunchError(exc, cleanup_exc.record, False, cleanup_exc.report) from exc
         raise BackgroundLaunchError(exc, record, confirmed) from exc
     finally:
+        if process is not None and not handed_off and request.io_mode == "stdio":
+            _close_unhanded_pipes(process)
         try:
             spec_path.unlink(missing_ok=True)
         except OSError:
             pass
 
 
-# LLM: 执行归属已由调用者从可信上下文冻结；这里不从访问、通知或目录推导 task/run/attempt。
-# 函数用途: 创建尚无托管或业务 PID 的 v2 预留，启动者身份必须可靠。
+# LLM: 启动失败时尚无外部 reader/writer，只有本入口拥有管道；关闭不代表未知进程已清理。
+# 函数用途: 回收没有交给调用方的三路字节管道，避免失败重试留下文件描述符。
+def _close_unhanded_pipes(process: subprocess.Popen) -> None:
+    for stream in (process.stdin, process.stdout, process.stderr):
+        if stream is not None:
+            try:
+                stream.close()
+            except OSError:
+                pass
+
+
+# LLM: 任务或激活归属由可信宿主冻结，Store 验证互斥；不从访问、通知或目录推导身份，归属字段不是执行授权。
+# 函数用途: 创建尚无 host/child 的 v3 预留；共享连接不借用任务身份，stdio 不登记虚假日志。
 def _reservation(request: BackgroundLaunchRequest, session_id: str) -> dict[str, object]:
     launcher_pid = os.getpid()
     birth = capture_process_birth_token(launcher_pid)
@@ -189,6 +216,7 @@ def _reservation(request: BackgroundLaunchRequest, session_id: str) -> dict[str,
         "revision": 0,
         "access_scope": asdict(request.access_scope),
         "execution_scope": asdict(request.execution_scope),
+        "activation_scope": asdict(request.activation_scope) if request.activation_scope is not None else None,
         "launcher_pid": launcher_pid,
         "launcher_birth_token": birth,
         "pid": 0,
@@ -205,7 +233,7 @@ def _reservation(request: BackgroundLaunchRequest, session_id: str) -> dict[str,
         "child_launch_started": False,
         "command": request.command,
         "cwd": str(request.cwd),
-        "output_file": str(request.log_path),
+        "output_file": str(request.log_path) if request.log_path is not None else "",
         "host_state_file": "",
         "completion_target": dict(request.completion_target),
         "completion_notice_id": "",

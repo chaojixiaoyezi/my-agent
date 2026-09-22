@@ -40,6 +40,7 @@ def _reservation(session_id: str = "bg-a", **changes: object) -> dict[str, objec
             "owner_home": SCOPE.owner_home,
         },
         "execution_scope": asdict(SCOPE),
+        "activation_scope": None,
         "completion_target": {},
         "completion_notice_id": "",
         "command": "test command",

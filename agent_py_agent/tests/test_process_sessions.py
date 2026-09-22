@@ -704,10 +704,10 @@ def test_configured_background_shell_profile_adds_session_companion() -> None:
 
 
 @pytest.mark.parametrize("phase", ["before", "during"])
-def test_v2_network_observer_excludes_reused_roots(tmp_path, monkeypatch, phase):
+@pytest.mark.parametrize("schema", ["managed_process_session.v2", "managed_process_session.v3"])
+def test_managed_network_observer_excludes_reused_roots(tmp_path, monkeypatch, phase, schema):
     from agent_py_agent.agent.tooling import process_network_status as network
     from agent_py_agent.agent.tooling import process_registry as registry_module
-    from agent_py_agent.agent.tooling.process_session_records import PROCESS_SESSION_SCHEMA
 
     class ProcPath:
         def __init__(self, path):
@@ -717,7 +717,7 @@ def test_v2_network_observer_excludes_reused_roots(tmp_path, monkeypatch, phase)
             return True
 
     record = SimpleNamespace(pid=8123, child_pid=8124, persisted_snapshot={
-        "schema": PROCESS_SESSION_SCHEMA, "pid": 8123, "pid_birth_token": "host",
+        "schema": schema, "pid": 8123, "pid_birth_token": "host",
         "child_pid": 8124, "child_pid_birth_token": "child",
     })
     identities = {8123: "reused" if phase == "before" else "host", 8124: "child"}

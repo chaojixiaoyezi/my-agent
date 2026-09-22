@@ -28,8 +28,8 @@ from agent_py_agent.agent.tooling.process_session_store import (
 
 
 # LLM: 测试使用真实持久存储与伪终态进程记录，不启动或杀宿主进程。
-# 函数用途: 组装隔离 owner/thread 与已结束进程，验证通知重入和权限边界。
-def _fixture(tmp_path, status="exited", *, v2=False, stopped=False):
+# 函数用途: 组装隔离 owner/thread 的旧 v1 或当前托管记录，验证通知重入与权限边界。
+def _fixture(tmp_path, status="exited", *, managed=False, stopped=False):
     owner = tmp_path / "owner"
     store = ConversationStore(owner / "conversations")
     thread = store.threads.get_or_create({"canonical_user_id": "a", "channel": "tui", "channel_conversation_id": "a"})
@@ -45,9 +45,9 @@ def _fixture(tmp_path, status="exited", *, v2=False, stopped=False):
         status=status, exit_code=0, completion_target=target, store_root=str(root))
     record.persisted_snapshot = {"schema": LEGACY_PROCESS_SESSION_SCHEMA}
     payload = record.to_record()
-    if v2:
+    if managed:
         child_known = status in {"running", "unknown", "exited", "killed"}
-        payload.update(schema=PROCESS_SESSION_SCHEMA, revision=0,
+        payload.update(schema=PROCESS_SESSION_SCHEMA, revision=0, activation_scope=None,
                        execution_scope={"owner_home": str(owner), "thread_id": thread.thread_id,
                                         "root_task_id": "task-a", "run_id": "run-a", "attempt_id": "attempt-a"},
                        launcher_pid=os.getpid(), launcher_birth_token=capture_process_birth_token(os.getpid()),
@@ -201,28 +201,28 @@ def test_notified_receipt_survives_stale_registry_write(tmp_path):
 
 
 @pytest.mark.parametrize("status", ["starting", "running", "unknown", "not_started", "killed"])
-def test_v2_only_confirmed_natural_exit_can_publish_completion(tmp_path, status):
-    agent, _, authority = _fixture(tmp_path, status, v2=True)
+def test_managed_only_confirmed_natural_exit_can_publish_completion(tmp_path, status):
+    agent, _, authority = _fixture(tmp_path, status, managed=True)
     assert reconcile_process_completions(agent) == 0
     assert not agent.conversation_store.wakes.pending(limit=0)
     record = authority.load("bg-test-notice").record
     assert bool(record["completion_notice_id"]) is (status in {"not_started", "killed"})
 
 
-def test_v2_natural_completion_survives_cas_and_stopped_exit_never_wakes(tmp_path):
-    agent, _, authority = _fixture(tmp_path / "natural", v2=True)
+def test_managed_natural_completion_survives_cas_and_stopped_exit_never_wakes(tmp_path):
+    agent, _, authority = _fixture(tmp_path / "natural", managed=True)
     before = authority.load("bg-test-notice").record
     assert reconcile_process_completions(agent) == 1
     assert authority.load("bg-test-notice").record["revision"] > before["revision"]
     assert reconcile_process_completions(agent) == 0
-    stopped, _, stopped_authority = _fixture(tmp_path / "stopped", v2=True, stopped=True)
+    stopped, _, stopped_authority = _fixture(tmp_path / "stopped", managed=True, stopped=True)
     assert reconcile_process_completions(stopped) == 0
     assert not stopped.conversation_store.wakes.pending(limit=0)
     assert stopped_authority.load("bg-test-notice").record["completion_notice_id"] == "explicit_stop"
 
 
 def test_store_read_failure_keeps_pending_completion_for_retry(tmp_path):
-    agent, params, authority = _fixture(tmp_path, v2=True)
+    agent, params, authority = _fixture(tmp_path, managed=True)
     agent.conversation_store.tasks.bind({"thread_id": params.task_attributes["conversation_thread_id"],
                                         "task_id": params.task_id, "status": "completed", "goal": "test"})
     assert reconcile_process_completions(agent) == 1

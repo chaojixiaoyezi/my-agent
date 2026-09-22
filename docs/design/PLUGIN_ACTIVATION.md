@@ -33,10 +33,10 @@ v1/v2 只有符合旧字段、停用与空激活约束时才能显式迁移；�
 每个实例及调用仍须登记原资源账的精确身份；不新建 broker、插件执行器或副作用账。
 共享连接寿命归 owner/activation，不能伪装成首个业务任务的资源；业务调用继续保留原 run/attempt。
 
-现有后台 host 使用日志和空 stdin，不能直接承载 MCP 管道；后续显式 stdio 模式由 launcher
-创建 host 管道，再将端点直接继承给 child，继续原预留/出生身份/交接，不增加转发 broker。
-原资源记录需要经过校验的固定 activation 引用；先提交 revoked 并释放安装锁，再由资源 Store
-同锁冻结原代 starting/running/unknown 记录，写停止意图，最后锁外逐资源清理。
+原后台 host 的日志与空 stdin 不能承载 MCP 管道；[显式 stdio 模式](MANAGED_PROCESS_STDIO.md)已有本地实现：
+launcher 创建 host 管道，再将端点直接继承给 child，继续原预留/出生身份/交接，不增加转发 broker。
+原资源记录 v3 已有固定 activation 引用与同锁精确冻结，普通任务不可访问或裁剪共享资源。
+完整停用仍须先提交 revoked 并释放安装锁，再由资源 Store 冻结该代记录并写停止意图，最后锁外逐资源清理。
 启动预留、创建进程前和交接均须复查原代；避免安装锁和资源锁反向嵌套。
 不能将 Gateway PID 伪装成可以整树清理的 host。该接线和完整资源退出证明仍待完成。
 公开启用、普通/显式调用、disable/remove 只有在这些边界接通后才开放。
@@ -44,4 +44,4 @@ v1/v2 只有符合旧字段、停用与空激活约束时才能显式迁移；�
 
 参考边界：沿已核对的本地 Codex MCP Closed-before-cleanup 顺序，以及本仓库
 `MCP_TRANSPORT_LIFECYCLE.md`、ProcessSessionStore 的原预留/身份/精确停止实现。
-本片不声称现有后台字节通道已支持 MCP，也不将组件测试作为实际多 TUI 装卸验收。
+托管字节与归属组件不代表 MCP 注册、发送和完整启停已接通，也不代替实际多 TUI 装卸验收。

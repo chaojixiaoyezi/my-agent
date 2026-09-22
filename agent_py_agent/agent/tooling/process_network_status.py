@@ -4,7 +4,7 @@ from __future__ import annotations
 
 # LLM: This module observes only host-owned process/socket/firewall facts for one already
 # authorized managed session. Failed observations remain unknown, never approval or stopped state.
-# It never changes firewall rules or declares remote reachability; keep process_session tests in sync.
+# v2/v3 均复查原 host/child 出生身份，不改防火墙或声称远端可达，联测 process_session 的版本与 PID 复用边界。
 # 模块用途: 查询受管后台服务监听与防火墙事实；查询失败保留未知，不能据此宣布局域网可达。
 
 import ipaddress
@@ -68,7 +68,7 @@ def managed_process_network_status(
 
 
 # LLM: Linux /proc ownership is joined by socket inode across the exact managed process tree.
-# v2 先后核对已绑定根实例，PID 复用不可带来新的观察范围；不支持的平台明确返回未知。
+# v2/v3 先后核对已绑定根实例，PID 复用不可扩大范围；调用方须先核对任务/共享资源访问，不支持的平台明确返回未知。
 # 函数用途: 找出当前受管进程及其后代真正持有的 TCP 监听地址。
 def _managed_listener_bindings(
     record: object,
@@ -78,12 +78,12 @@ def _managed_listener_bindings(
     if os.name != "posix" or not Path("/proc/net/tcp").exists():
         return [], "unsupported_on_host"
     from .process_registry import capture_process_birth_token
-    from .process_session_records import PROCESS_SESSION_SCHEMA
+    from .process_session_records import MANAGED_PROCESS_SESSION_SCHEMAS
 
     payload = getattr(record, "persisted_snapshot", {})
     roots = [int(getattr(record, key, 0) or 0) for key in ("pid", "child_pid")]
     identities = {}
-    if payload.get("schema") == PROCESS_SESSION_SCHEMA:
+    if payload.get("schema") in MANAGED_PROCESS_SESSION_SCHEMAS:
         identities = {payload[key]: payload[birth] for key, birth in (("pid", "pid_birth_token"), ("child_pid", "child_pid_birth_token")) if payload[key]}
         roots = [pid if pid and capture_process_birth_token(pid) == identities.get(pid) else 0 for pid in roots]
         if not any(roots):

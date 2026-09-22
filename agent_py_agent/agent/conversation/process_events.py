@@ -1,4 +1,4 @@
-# LLM: 后台命令终态由受保护的 ProcessSessionStore 核实，通知只进入既有 ConversationStore wake。
+# LLM: 任务进程终态由原 ProcessSessionStore 核实，共享激活不参与业务通知；通知只进入既有 ConversationStore wake。
 # 不重放命令、不新建任务、不靠正文判完成；同 session 的通知发布与重启补发共用去重键。
 # 模块用途: 让后台命令结束后主动叫醒所属主会话，或在活动主回合安全点交接，省掉模型短轮询。
 from __future__ import annotations
@@ -45,7 +45,7 @@ def _agent_process_root(agent: object) -> Path | None:
 
 
 # LLM: 宿主周期 tick 与前台安全点共用此入口；先持久去重入队，再标记已发布，崩溃重入不丢不重。
-# 仅自然 exited 可唤醒，starting/unknown 不通知，明确停止或未启动只结算；写回重读同一 ID，日志只传引用。
+# 仅任务的自然 exited 可唤醒，共享激活不通知；starting/unknown 不通知，明确停止只结算；写回重读原 ID。
 # 函数用途: 自动收割已结束后台命令并通知所属主会话；一个损坏记录不会阻塞其它会话。
 def reconcile_process_completions(agent: object) -> int:
     store = getattr(agent, "conversation_store", None)
@@ -60,6 +60,8 @@ def reconcile_process_completions(agent: object) -> int:
         _LOG.warning("PROCESS_COMPLETION_STORE_ERRORS count=%s", len(errors))
     sent = 0
     for payload in records:
+        if payload.get("activation_scope") is not None:
+            continue
         target = payload.get("completion_target") or {}
         if not target or payload.get("completion_notice_id"):
             continue

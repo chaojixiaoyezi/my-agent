@@ -13,6 +13,7 @@
     |-- PLUGIN_LIFECYCLE.md              # 可装卸插件、动态命令、版本切换与故障回收的待实施方案
     |-- PLUGIN_PACKAGES.md               # 本地包静态校验与待接线的安装事实、隔离和撤销边界
     |-- PLUGIN_ACTIVATION.md             # 唯一安装表的激活 CAS、撤销、显式迁移及待接线资源边界
+    |-- MANAGED_PROCESS_STDIO.md         # 原 host 字节管道、激活资源归属及旧版本恢复边界
     |-- HOST_COMMAND_EXECUTION.md        # 显式命令复用原运行链的请求身份、重送和结果回读合同
     |-- PLUGIN_SAMPLE_ACCEPTANCE.md      # 10 个自有简易插件的来源、功能范围及真实 TUI 验收计划
     |-- TUI_DESIGN.md                    # 终端布局、事件、输入与生命周期规范
@@ -365,13 +366,13 @@ agent_py_agent/
 |   |   |-- capabilities_tool.py      # 从真实工具目录与唯一 channel registry 投影模型能力
 |   |   |-- _filesystem_display.py   # 文件工具共用的有界 diff/write 富终端展示事实构造器
 |   |   |-- _persona_write_guard.py   # SOUL/USER/AGENTS 统一强制走 update_persona
-|   |   |-- background_process_launch.py # v2 启动预留、原执行权威复查、有界观察与明确交接
-|   |   |-- background_process_host.py # 独立绑定业务子进程、检查交接前启动者、限制日志并提交真实终态
-|   |   |-- process_scope.py          # 资源访问身份与执行归属的纯合同，按精确任务/run/attempt 选择
+|   |   |-- background_process_launch.py # v3 预留、原权威复查及 v4 日志/stdio 启动交接
+|   |   |-- background_process_host.py # 独立绑定 child、直接继承管道、检查寿命并提交真实终态
+|   |   |-- process_scope.py          # 访问、任务执行与共享激活的独立身份合同
 |   |   |-- process_registry.py       # 受保护记录的进程缓存、水合、PID 身份核对与完整后代树终止
 |   |   |-- process_session_store.py  # 原 session 地址的互斥读写、版本 CAS、精确停止清单与裁剪
-|   |   |-- process_session_records.py # v1 显式读取与 v2 启动、实例绑定、交接及单调状态合同
-|   |   |-- process_session_commit.py # 固定 v2 批次的 redo 发布、完整预检、安装恢复及提交回执
+|   |   |-- process_session_records.py # v1/v2 原版本读取及 v3 任务/激活归属、实例与单调状态合同
+|   |   |-- process_session_commit.py # 原版本 v2/v3 批次的 redo 预检、安装恢复及提交回执
 |   |   |-- process_session_cleanup.py # 冻结单 session 实例的精确清理与保留已提交副作用的异常回执
 |   |   |-- process_resource_stop.py   # 主控制冻结后台清单和 PTY 请求，锁外清理只消费原回执并保留部分错误
 |   |   |-- process_network_status.py # exact 受管进程树监听、防火墙显式规则与外部探针边界的只读投影
@@ -492,6 +493,8 @@ agent_py_agent/
 |   |-- test_tool_input_completion_provenance.py # 有限补参、来源账目、伪造拒绝和旧旁路删除回归
 |   |-- test_tool_input_schema.py      # 强类型纠正、嵌套/组合/边界规则与显式 Schema fail-closed
 |   |-- test_process_sessions.py       # 后台命令有界等待、进程树停止与 owner/TUI 会话隔离回归
+|   |-- test_process_activation_scope.py # 共享激活归属、旧 v2 恢复、任务隔离及退出证据保留
+|   |-- test_background_stdio.py       # 实际字节管道、EOF、交接失败及精确资源隔离组件验证
 |   |-- test_process_completion_events.py # 后台完成通知的重启补发、去重和停止边界
 |   |-- test_cache_diagnostics.py       # 请求前缀诊断、无正文存储与线程隔离
 |   |-- test_gateway_status_tool.py    # Gateway 权威身份、端点与生命周期日志诊断回归
@@ -547,9 +550,9 @@ docs/
 - `agent_py_agent/agent/subagents/runner_control.py`：原执行轮持久取消的唯一读取判据；session 心跳与模型前复核共用，不创建第二份状态。
 - `agent_py_agent/agent/conversation/local_run_control.py`：plain/TUI worker 每条消息的临时控制句柄；复用运行绑定和任务晋升确认接口，执行权仍归 RuntimeDB，旧句柄不覆盖下一条消息。
 - `agent_py_agent/agent/tooling/process_resource_stop.py`：固定后台停止回执与 PTY 请求分开记录；提交后的 PTY 失败不丢清单，清理不重新扫任务，也不把异步请求当成全部退出。
-- `agent_py_agent/agent/tooling/process_scope.py`：后台访问身份与 PTY 执行身份的唯一类型定义，缺失的任务归属不从访问回退或工作目录推断；不持有资源或执行取消。
+- `agent_py_agent/agent/tooling/process_scope.py`：后台访问、PTY/任务执行及共享激活的身份类型；不从访问或工作目录补业务身份，激活引用不授予执行权，不持有资源或执行取消。
 - `agent_py_agent/agent/tooling/process_session_store.py`：受保护进程记录的统一入口，读写与裁剪先恢复同一目录的未完成提交；持锁事务提供启动检查点和精确停止意图，实际进程信号仍由调用方负责。
-- `agent_py_agent/agent/tooling/background_process_launch.py`：启动方先预留再交接，原 execution 权限只读复查；host 只绑定一次 child，交接后由精确资源停止控制。
+- `agent_py_agent/agent/tooling/background_process_launch.py`：启动方先预留再交接；stdio 三路端点直接继承给 child，失败关闭未交出管道，host 保持原寿命和精确停止控制。
 - `agent_py_agent/agent/tooling/process_session_cleanup.py`：只清理原 Store 冻结的 host/child 出生实例，不按任务重扫；保留未确认及已提交待恢复回执。
 - `agent_py_agent/agent/tooling/process_session_records.py`：纯数据校验与单调合并；`process_session_commit.py` 只安装固定记录，目录互斥归公共 `common/directory_lock.py`，原锁名不变。v1 不隐式升级或获得任务停止授权。
 - `agent_py_agent/agent/command_catalog.py`：无 UI/执行依赖的公共命令声明；原控制参数仍归会话模块，插件后缀识别不等于身份校验或可执行授权。
@@ -565,6 +568,7 @@ docs/
 - `agent_py_agent/agent/plugin_installation_state.py` 与 `plugin_configuration.py`：原表 v3 编解码、v1/v2 明确迁移来源和完整配置替换裁决；未清理激活阻止改配置，没有第二套权威。
 - `agent_py_agent/agent/plugin_activation.py` 与 `plugin_activation_record.py`：同一原计划的准备/发布/撤销 CAS，旧快照只读原代；撤销状态不证明资源退出。
 - `docs/design/PLUGIN_ACTIVATION.md`：激活身份、持久撤销、配额与锁边界；完整 stdio 托管、调用和卸载仍待接通。
+- `docs/design/MANAGED_PROCESS_STDIO.md`：原托管器的字节通道、v3 激活归属、旧 v2 原版本恢复及后续执行准入接线边界。
 - `agent_py_agent/agent/plugin_configure_tool.py` 与 `plugin_sources.py`：隐藏管理工具通过原执行链读取授权来源，配置值只进 owner 私有安装表；包与配置共用有界安全读取。
 - `agent_py_agent/agent/plugin_install_tool.py` 与 `plugin_management.py`：管理服务先核对可信授权，隐藏工具再经原执行器读取一次包；默认停用保存，查询只读原请求，不启动插件。
 - `agent_py_agent/agent/common/directory_lock.py`、`nofollow_fs.py` 与 `strict_json.py`：分别维护永久互斥、受信根文件原语和严格 JSON；这些公共原语不裁决领域授权或替代操作账本。

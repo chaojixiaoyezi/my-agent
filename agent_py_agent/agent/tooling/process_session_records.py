@@ -1,12 +1,16 @@
-# LLM: 本模块只验证和合并进程权威记录；v1 不推导执行身份，v2 的实例与控制事实不能被旧缓存改写。
-# 模块用途: 定义后台会话的版本、启动阶段和单向转换，为 Store、host 与缓存提供同一份纯数据合同。
+# LLM: v1 不推导执行身份，v2 显式保留原任务协议，v3 区分任务与激活；同一句柄不换版本或归属，联测 Store/redo/host。
+# 模块用途: 校验后台会话的版本、启动阶段和单向转换，防止共享插件进程被当作业务任务资源。
 from __future__ import annotations
 
 import math
 import re
 from pathlib import Path
 
-PROCESS_SESSION_SCHEMA = "managed_process_session.v2"
+from .process_scope import ProcessActivationScope
+
+PROCESS_SESSION_SCHEMA = "managed_process_session.v3"
+PREVIOUS_PROCESS_SESSION_SCHEMA = "managed_process_session.v2"
+MANAGED_PROCESS_SESSION_SCHEMAS = frozenset({PROCESS_SESSION_SCHEMA, PREVIOUS_PROCESS_SESSION_SCHEMA})
 LEGACY_PROCESS_SESSION_SCHEMA = "managed_process_session.v1"
 PROCESS_TERMINAL_STATUSES = frozenset({"exited", "killed", "not_started"})
 _SESSION_ID_RE = re.compile(r"^bg-[A-Za-z0-9][A-Za-z0-9-]{0,95}$")
@@ -21,22 +25,46 @@ def validate_session_id(value: object) -> str:
     return value
 
 
-# LLM: v1 保留原校验及显式版本，不自动升级；v2 的空 PID 只能作为已声明的启动中状态。
-# 函数用途: 验证完整记录并返回独立字段副本，坏记录不得成为可发信号的对象。
+# LLM: 旧协议保持原版本，v3 必须显式声明激活归属；不从旧字段推断或补默认值，空 PID 只属于明确启动阶段。
+# 函数用途: 分版本验证完整记录并复制嵌套身份，坏记录不得成为可发信号的对象。
 def validate_process_record(record: object) -> dict[str, object]:
     if not isinstance(record, dict):
         raise TypeError("managed process session record must be an object")
     schema = record.get("schema")
     if schema == LEGACY_PROCESS_SESSION_SCHEMA:
         return _validate_legacy_record(record)
-    if schema != PROCESS_SESSION_SCHEMA:
+    if not isinstance(schema, str) or schema not in MANAGED_PROCESS_SESSION_SCHEMAS:
         raise ValueError("unsupported managed process session schema")
     payload = dict(record)
     validate_session_id(payload.get("session_id"))
     _validate_v2_scope(payload)
+    _validate_activation_scope(payload)
     _validate_v2_instances(payload)
     _validate_v2_lifecycle(payload)
     return payload
+
+
+# LLM: v3 共享连接不能携带任务或通知身份，v2 不能通过额外字段声明激活；归属校验不代替原安装表的执行准入。
+# 函数用途: 明确区分普通任务和共享插件资源，拒绝混绑 owner 或借用首个业务调用的身份。
+def _validate_activation_scope(payload: dict[str, object]) -> None:
+    if payload["schema"] == PREVIOUS_PROCESS_SESSION_SCHEMA:
+        if "activation_scope" in payload:
+            raise ValueError("v2 managed process cannot declare activation scope")
+        return
+    if "activation_scope" not in payload:
+        raise ValueError("managed process activation scope required")
+    value = payload["activation_scope"]
+    if value is None:
+        return
+    if not isinstance(value, dict) or set(value) != {"owner_id", "owner_home", "plugin_id", "activation_id"}:
+        raise ValueError("invalid managed process activation scope fields")
+    scope = ProcessActivationScope(**value)
+    access, execution = payload["access_scope"], payload["execution_scope"]
+    if (scope.owner_id != access["owner_id"] or scope.owner_home != access["owner_home"]
+            or access["conversation_id"] or any(execution[key] for key in _EXECUTION_KEYS - {"owner_home"})
+            or payload["completion_target"] or payload.get("completion_notice_id")):
+        raise ValueError("shared activation cannot bind business task identities")
+    payload["activation_scope"] = dict(value)
 
 
 # LLM: 新持久身份要求字符串精确字段；访问回退不补执行身份，通知地址永不授权资源停止。
@@ -184,7 +212,7 @@ def _validate_completion_target(target: object, conversation_id: str) -> None:
         raise ValueError("invalid managed process completion target scope")
 
 
-# LLM: 同一 session 不能换版本或身份；v2 仅允许 host/child 从未绑定到一次真实实例，禁止取消后复活。
+# LLM: 同一 session 不能换版本或身份；v2/v3 仅允许 host/child 绑定一次，v3 激活不可换代，禁止取消后复活。
 # 函数用途: 合并一份已有记录与更新，保留新的停止、交接和通知事实，再由 Store 递增版本号。
 def merge_process_record(
     existing: dict[str, object], incoming: dict[str, object]
@@ -192,15 +220,15 @@ def merge_process_record(
     keys = ("schema", "session_id", "access_scope", "completion_target")
     if any(existing.get(key, {}) != incoming.get(key, {}) for key in keys):
         raise ValueError("managed process immutable authority conflict")
-    v2 = existing["schema"] == PROCESS_SESSION_SCHEMA
-    if v2:
+    managed = existing["schema"] in MANAGED_PROCESS_SESSION_SCHEMAS
+    if managed:
         _assert_v2_authority(existing, incoming)
     elif any(existing.get(key) != incoming.get(key) for key in ("pid", "pid_birth_token")):
         raise ValueError("managed process immutable instance conflict")
     merged = dict(incoming)
     if existing.get("completion_notice_id"):
         merged["completion_notice_id"] = existing["completion_notice_id"]
-    if v2:
+    if managed:
         for key in ("stop_requested", "handoff_confirmed", "child_launch_started"):
             merged[key] = existing[key] or incoming[key]
     old, new = existing["status"], incoming["status"]
@@ -208,7 +236,7 @@ def merge_process_record(
         controls = {
             key: merged[key]
             for key in ("stop_requested", "handoff_confirmed", "child_launch_started")
-            if v2
+            if managed
         }
         merged = {
             **existing,
@@ -218,11 +246,12 @@ def merge_process_record(
     return validate_process_record(merged)
 
 
-# LLM: launcher 和执行归属不可更换；child 进入创建后即使 PID 未知，也不允许伪称没有启动副作用。
-# 函数用途: 核对 v2 不可变字段及唯一实例绑定，拒绝旧缓存或新调用把同一句柄换成另一条命令。
+# LLM: launcher、任务/激活归属不可更换；child 进入创建后即使 PID 未知，也不能伪称没有启动副作用。
+# 函数用途: 核对 v2/v3 不可变字段及唯一实例绑定，拒绝把同一句柄换成另一条命令或插件代次。
 def _assert_v2_authority(existing: dict[str, object], incoming: dict[str, object]) -> None:
     keys = (
         "execution_scope",
+        "activation_scope",
         "launcher_pid",
         "launcher_birth_token",
         "reserved_at",

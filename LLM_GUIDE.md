@@ -21,6 +21,10 @@
 
 ## 当前运行边界（验收状态看 STATUS）
 
+原 host 已有显式 stdio 通道，三路字节直接继承给 child；日志模式默认不变，stdio 绑定 launcher 寿命。
+启动信封当前 v4，session 当前 v3；旧 v2 原版本更新/恢复。共享激活排除业务查询、任务停止和普通终态裁剪。
+字段不替代执行权限，MCP 注册/发送与安装表准入仍待接通，见 [托管管道](docs/design/MANAGED_PROCESS_STDIO.md)。
+
 安装表本地源码已升 v3：同一原计划预留、发布和撤销，旧代读回不换绑；配置和重新准备须等原激活清理确认。
 撤销只关闭原表中的执行权，不等待准备阶段的 quota，不表示 OS 资源已退出；原插件锁与提交读回保持。
 显式 v1/v2 迁移和待接线的 stdio 资源归属见 [激活权威](docs/design/PLUGIN_ACTIVATION.md)，完整 enable/disable/remove 尚未开放。
@@ -51,7 +55,7 @@ main 绑定当前选定任务的有效 claim；换轮失效，Goal paused 不取
 普通 Shell 与交互 PTY 共用 `parse_shell_command`；删除解析入口时必须同时核对两条执行链。
 资源访问身份和执行归属分别定义在 `tooling/process_scope.py`；PTY 已直接使用，不能拿访问回退补齐任务身份。
 源码中的 direct/local 中断只停止精确回合，保留插话及独立资源；任务资源停止已接主绑定和固定子树，发布与实际验收见 STATUS。
-后台记录的源码 Store 已支持显式 v2、版本 CAS 和同目录 redo；记录校验、文件提交分开，系统锁已提到公共 directory_lock，原锁名和顺序不变。
+后台记录 Store 当前 v3 区分任务与共享激活，旧 v2 原版本读改写；原 CAS、同目录 redo 与公共 directory_lock 保持，锁名和顺序不变。
 读写与裁剪先恢复固定批次；提交后异常不能当作未发生。源码启动已沿唯一 v2 预留、host/child 绑定和交接链；
 启动方只在交接前持有取消权，独立 host 持续限制日志。Registry 每次读取原 Store，明确 session 停止消费冻结实例。
 执行权关闭共用 `runtime_db/run_cancellation.py`，取消 UNKNOWN 保留原锁，pending 条件在同一事务核对。
@@ -92,7 +96,7 @@ Shell 不设人为命令字符上限，安全、权限、时间和输出预算�
 本地 HTTP/direct 安装复用原管理授权、路径权限和配额，只保存默认停用包；独立环境、激活、撤销与实际多 TUI 装卸仍待完成。
 独立环境内部准备器已本地实现，见 `plugin_environment.py`：固定地址、原配额非阻塞准入、本地 wheel 闭包和原取消链。
 环境准备已改为原 operation 的固定计划与原 ProcessSessionStore：计划先领取，候选后写入，运行中核对原 holder/代数/锁。
-准备进程显式绑定 launcher 寿命与同一 monotonic 期限；普通长期后台默认不变，启动信封 v3 要求同版完整字段。
+准备进程显式绑定 launcher 寿命与同一 monotonic 期限；普通长期后台默认不变，启动信封 v4 要求同版模式和寿命字段。
 创建 venv 不代表启用接线完成；禁止扫描目录代替原安装权威，禁止在启用前运行已装插件的 Python 自检。
 配置已在本地接到原管理执行链：`/plugins configure <插件> --file <JSON>` 完整替换停用插件设置，使用原 schema 校验，不补默认值。
 唯一安装表当前 v3 保存配置、激活、版本及回执；旧 v1/v2 在实际修改时显式迁移，查询只读。目录 v2 携带安装版本，私有值不进入公开目录或工具账。
