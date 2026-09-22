@@ -151,8 +151,13 @@ class MCPProxyTool(BaseTool):
     def execute_scoped(self, params: dict[str, Any], context: ToolInvocationContext) -> ToolHandlerOutcome:
         return self._execute(params, context)
 
-    # LLM: 两个 BaseTool 入口共用同一执行链，context 缺失不伪造快照；清理和权限错误继续留给原结果/操作处理。
-    # 函数用途: 转发当前参数和可选调用权限，保留完整内容及结构化失败。
+    # LLM: 普通 MCP 不因服务自述能力获得宿主路径；只有受控插件子类可投影已声明支持的逐次上下文。
+    # 函数用途: 保持普通外部 MCP 的请求不携带宿主元数据。
+    def _request_meta(self, context: ToolInvocationContext | None) -> dict[str, object] | None:
+        return None
+
+    # LLM: 两入口共用执行链；逐次请求元数据与业务参数分离，缺快照不伪造。清理与权限错误仍沿原结果链。
+    # 函数用途: 向固定连接转发参数、明确支持的元数据和调用权限，保留完整结果。
     def _execute(self, params: dict[str, Any], context: ToolInvocationContext | None) -> ToolHandlerOutcome:
         arguments = {
             key: value
@@ -165,6 +170,9 @@ class MCPProxyTool(BaseTool):
                 options["transport"] = self.transport
             if context is not None and context.execution_authority_check is not None:
                 options["authority_check"] = context.execution_authority_check
+            request_meta = self._request_meta(context)
+            if request_meta is not None:
+                options["request_meta"] = request_meta
             result = self.client.call_tool(self.remote_tool, arguments, **options)
         except ProcessSessionCleanupError as exc:
             return self._error_result("插件原进程清理尚未确认", "TOOL_EXECUTION_FAILED",

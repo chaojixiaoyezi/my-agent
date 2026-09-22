@@ -1,5 +1,10 @@
 # 设计台账
 
+第 4 步新增[插件逐次工作区读取上下文](docs/design/PLUGIN_WORKSPACE_CONTEXT.md)，状态为开发中：
+仅对固定连接明确支持扩展的自有插件传递冻结 cwd 与原读取权限，不改参数、共享进程或安装配置。
+通用运输已在本地接通；后续以唯一源码的构建期投影生成轻量 SDK，再完成 workspace-peek。
+真实多 TUI 装卸未验，不进入第 5 步。
+
 显式业务命令本地执行链已接通：原 HostCommand v2 分别冻结工具参数摘要和宿主选择摘要，v1 身份索引不变；
 等待审批仍在原 executor 区间，经现有批准 binding 恢复同一调用，不新增审批服务或执行器。
 协议与恢复边界见 [宿主命令](docs/design/HOST_COMMAND_EXECUTION.md#请求与运行)，尚未完成端到端验收。

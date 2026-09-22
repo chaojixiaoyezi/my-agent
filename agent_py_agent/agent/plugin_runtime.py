@@ -15,8 +15,9 @@ from .plugin_manifest import canonical_plugin_settings
 from .tooling.input_schema import canonicalize_tool_input_schema
 from .tooling.mcp_client import MCPError, MCPServerConfig, MCPStdioClient
 from .tooling.mcp_registration import MCPProxyTool, build_proxy_tool, sanitize_name_component
-from .tooling.models import ResourceScopePolicy, ToolAvailability
+from .tooling.models import ResourceScopePolicy, ToolAvailability, ToolInvocationContext
 from .tooling.process_session_store import ProcessSessionStore, process_session_store_root
+from .workspace_read_context import WORKSPACE_READ_EXTENSION, WORKSPACE_READ_VERSION
 
 
 # LLM: 展示名由完整大小写敏感身份派生，截断只作用于可读部分；发布还必须检测实际名称冲突，不能覆盖核心工具。
@@ -28,8 +29,8 @@ def plugin_tool_name(plugin_id: str, tool_name: str) -> str:
     return "plugin__" + "__".join(parts)
 
 
-# LLM: 代理继承原执行/结果链，仅补鲜活激活可用性；可用性查询不启动服务，也不能代替排队后的发送准入。
-# 类用途: 让停用插件立即从新快照消失，而旧快照仍绑定原连接并在执行时拒绝。
+# LLM: 代理继承原执行/结果链，补固定激活可用性和能力协商的逐次元数据；不追随新连接或更改共享 cwd。
+# 类用途: 将插件接入原权限与撤销链，并把已冻结读取范围交给明确支持的插件。
 class PluginProxyTool(MCPProxyTool):
     # LLM: 配置和代次只取固定 client；原表坏、撤销或换代都按不可用处理，不追随最新安装。
     # 函数用途: 只读检查原插件和已握手连接能否进入本轮目录。
@@ -39,6 +40,19 @@ class PluginProxyTool(MCPProxyTool):
         except (OSError, ValueError):
             return ToolAvailability.unavailable("原插件已停用或激活不可用")
         return super().availability()
+
+    # LLM: 只看代理固定 transport 的声明；普通 arguments 不能伪造元数据，缺可信上下文须在发送前失败。
+    # 函数用途: 为支持当前扩展版本的插件生成本次工作区读取元数据。
+    def _request_meta(self, context: ToolInvocationContext | None) -> dict[str, object] | None:
+        capabilities = self.transport.capabilities if self.transport is not None else {}
+        experimental = capabilities.get("experimental")
+        declared = experimental.get(WORKSPACE_READ_EXTENSION) if isinstance(experimental, dict) else None
+        versions = declared.get("versions") if isinstance(declared, dict) else None
+        if not isinstance(versions, list) or WORKSPACE_READ_VERSION not in versions:
+            return None
+        if context is None or context.workspace_read_context is None:
+            raise MCPError("插件缺少本次工作区读取上下文", code="MCP_PROTOCOL_ERROR", effect_outcome="not_started")
+        return {WORKSPACE_READ_EXTENSION: context.workspace_read_context.to_payload()}
 
 
 # LLM: 一个客户端只属于安装表中的固定代次；沿原 MCP 重连/关闭与资源登记，不接收包提供的 owner、argv 或宿主地址。

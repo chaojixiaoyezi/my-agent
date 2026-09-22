@@ -54,6 +54,8 @@ def canonicalize_owner_home_arguments(
     return {**params, "path": rewritten} if rewritten else params
 
 
+# LLM: 核心读工具与插件上下文共用精确 roots 的解释；此入口只裁决现有内置读工具，不扩展到业务工具名。
+# 函数用途: 检查内置读请求是否在本次明确授权的读取范围内。
 def exact_read_boundary_error(
     tool_name: str,
     arguments: dict[str, Any],
@@ -63,21 +65,23 @@ def exact_read_boundary_error(
 ) -> str:
     """Return an error when an exact read scope excludes the requested path."""
 
-    if (
-        tool_name not in _READ_BOUNDARY_TOOL_NAMES
-        or not isinstance(write_boundary, dict)
-        or str(write_boundary.get("read_scope_mode") or "").strip().lower()
-        != "exact"
-    ):
+    if tool_name not in _READ_BOUNDARY_TOOL_NAMES:
+        return ""
+    allowed = exact_read_roots(write_boundary, workspace_root)
+    if allowed is None:
         return ""
     target = _resolved_path(arguments.get("path", "."), workspace_root)
-    allowed = _resolved_boundary_paths(
-        write_boundary.get("allowed_read_roots"),
-        workspace_root,
-    )
     if target is not None and any(_is_relative_to(target, root) for root in allowed):
         return ""
     return "只能读取当前任务结构化授权的输入或本 run 工作目录。"
+
+
+# LLM: None 表示没有额外 exact 上界，空元组表示明确拒绝全部；不得将两者合并或从展示文字推导权限。
+# 函数用途: 为内置工具和插件上下文解析同一份结构化精确读取范围。
+def exact_read_roots(write_boundary: dict[str, object] | None, workspace_root: Path) -> tuple[Path, ...] | None:
+    if not isinstance(write_boundary, dict) or str(write_boundary.get("read_scope_mode") or "").strip().lower() != "exact":
+        return None
+    return _resolved_boundary_paths(write_boundary.get("allowed_read_roots"), workspace_root)
 
 
 # LLM: 此入口只恢复补丁头里的 owner 展示别名，不解释业务目录，也不改补丁正文中的路径。
@@ -222,4 +226,5 @@ def _is_relative_to(path: Path, root: Path) -> bool:
 __all__ = [
     "canonicalize_owner_home_arguments",
     "exact_read_boundary_error",
+    "exact_read_roots",
 ]

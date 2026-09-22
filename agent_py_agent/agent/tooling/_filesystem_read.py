@@ -1,5 +1,7 @@
 
 
+# LLM: 文件读取逐项复用唯一 PathAccessPolicy，墙外授权仅来自宿主 registry；工作区提示不产生权限，联查文件工具和 owner 边界测试。
+# 模块用途: 为内置文件工具解析和展示路径、检查读写边界，不拥有插件或任务状态。
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -112,6 +114,8 @@ def owner_quota_error_result(tool_name: str, exc: BaseException) -> ToolHandlerO
     )
 
 
+# LLM: 工作区和已授权外部根由 registry 逐次注入；路径决定共用 PathAccessPolicy，不从展示提示或模型参数生成权限。
+# 类用途: 为内置读写工具提供路径解析、权限核对和输出路径展示。
 class FileSystemTool(BaseTool):
 
     def __init__(
@@ -183,23 +187,10 @@ class FileSystemTool(BaseTool):
             raise ValueError(hint)
         raise PathAccessError(decision.message or "路径访问被拒绝。")
 
-    # LLM: owner 墙的逃生口必须和中央路径门 (`contracts/gates/path_url_command._path_finding`)
-    #   一致：只有目标确实落在**宿主逐次下发的墙外已授权根**(granted_external_roots) 里才放行，
-    #   危险目录、凭据文件名这些与 owner 无关的硬拦继续生效。少了这一步，子代理在用户显式声明的
-    #   项目目录里会先被 handler 自己的 owner 墙判死，中央门和写边界门放行也没用
-    #   （2026-09-11 真机：write_file 报 WRITE_FORBIDDEN、list_files 报 TOOL_INVALID_ARGUMENTS，
-    #   文件始终不落盘）。
-    # 函数用途: 统一 owner 墙裁决，并在宿主已授权的墙外工作根内按"无 owner 墙"策略复核。
+    # LLM: 只消费 registry 注入的墙外授权，裁决复用原路径策略；workspace_roots 不能自行产生权限，联测 owner/exact 读取边界。
+    # 函数用途: 使用核心与插件共用的路径裁决，检查目标是否获准读取。
     def check_path_access(self, resolved: Path) -> PathAccessDecision:
-        decision = self.path_access_policy.check(resolved)
-        if decision.allowed or decision.code != "PATH_OWNER_SCOPE_BLOCKED":
-            return decision
-        if not any(_path_is_under(resolved, root) for root in self.granted_external_roots):
-            return decision
-        return PathAccessPolicy.from_values(
-            mode=self.path_access_policy.mode,
-            dangerous_roots=self.path_access_policy.dangerous_roots,
-        ).check(resolved)
+        return self.path_access_policy.check_with_external_roots(resolved, self.granted_external_roots)
 
     # LLM: owner-scoped 的写操作只能落在当前结构化 workspace_roots；registry 会把
     #   本轮明确授权的外部输出根临时加入该列表。读操作仍走 resolve_path 的既有策略。
