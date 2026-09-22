@@ -1,5 +1,19 @@
 # 测试与发布验收
 
+## 决策模型 P1-B 原生协议与传输组合（本地）
+
+`test_decision_protocol.py` 与 `test_typesafe_decision.py` 合计 59 项通过，验证冻结输入、版本与来源绑定、
+候选校验、逐题缺失/错误、原生三类问题、缺失 usage 不补零、迟到网络/解析结果拒绝、取消不重试。
+本地 HTTP 服务器收到了真实 `/v1/systemone` 中文 state/questions 请求，并返回逐题结果与用量；没有调用真实 Jev。
+这不能代替可选调用的资源准入、有界 worker、阶段预算、账本或用户实际 TUI 验收，这些仍未接线。
+联合 7 个文件 **216 项通过**（零失败/错误/跳过）：上述两个文件，加 `test_gateway_strict_request.py`、
+`test_gateway_helpers.py`、`test_provider_request_scope.py`、`test_compact_request_budget.py`、`test_runtime_module_boundaries.py`。
+严格传输覆盖 46 项：真实慢 HTTP、302、零重试不读错误正文、解析前后同一期限、关闭竞态及 1 MiB 超深 JSON。
+显式严格 JSON 在原解析器前做 64 层资源预检，普通请求仍用原解析/重试与 SSE 合同。
+协议新增编码器调用哨兵：超量整数/字符串在序列化前拒绝；合法 JSON 内坏题不损坏好题。
+首轮深 JSON 测试假设 1500 层必然触发 RecursionError，与仓库递归上限不符，已改为真正资源界限测试；
+结构守卫发现的深嵌套已按校验职责拆分，未修改尺寸基线。命令详见 [P1-B 交接](docs/tasks/DECISION_MODEL_P1B_HANDOFF.md)。
+
 ## 决策模型 P1-A 本地配置合同验收
 
 10 个相关文件 213 项通过：决策用途配置 17 项，以及原模型、服务商、共享、线程选择、Gateway、OAuth、

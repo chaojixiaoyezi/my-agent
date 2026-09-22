@@ -1,5 +1,5 @@
-# LLM: Provider HTTP transport owns typed connection/body-read errors, bounded open retries and interrupts; open teardown reads the current interrupt before classification. Keep JSON/GET/SSE and test_gateway_helpers aligned.
-# 模块用途: 统一模型 HTTP 请求和响应断流分类；连接清理噪声不覆盖已发生的停止，不因取消重试请求。
+# LLM: HTTP 唯一传输入口维护请求局部期限、重试、有限正文和中断合同；严格 JSON 不改变默认 SSE，联合 gateway_helpers/strict_request 测试。
+# 模块用途: 统一模型 HTTP 请求和错误分类；严格调用按绝对期限收口，普通生成保留原重试和流式空闲语义。
 from __future__ import annotations
 
 import errno
@@ -28,6 +28,13 @@ from .errors import (
     ProviderTimeoutError,
     ProviderTransientError,
     ProviderUsageLimitError,
+)
+from .gateway_request_limits import (
+    decode_response_json,
+    read_response_body,
+    remaining_deadline_seconds,
+    stdlib_response_socket,
+    validate_request_limits,
 )
 
 _RETRYABLE_HTTP_STATUS_CODES = frozenset({408, 409, 425, 429, 502, 503, 504, 529})
@@ -89,8 +96,8 @@ _HTTP_ERROR_DETAIL_ATTR = "_my_agent_provider_error_detail"
 _PROVIDER_ATTEMPT_OBSERVER = threading.local()
 
 
-# LLM: 请求封装持有独立超时和重定向策略；OAuth 禁止重定向，以免账号凭据被送往非绑定地址。
-# 类用途: 保存一次 provider HTTP 请求及 connect、首事件和滚动 idle 参数。
+# LLM: 不可变信封独占本请求期限/重试/大小策略；None 保持原生成合同，显式零重试不可被任何传输层重试放大。
+# 类用途: 保存一次 provider HTTP 请求及可选严格限制，OAuth/决策调用可禁止重定向以保护绑定凭据。
 @dataclass(frozen=True)
 class GatewayRequest:
     """Immutable request envelope for one provider HTTP call."""
@@ -106,6 +113,14 @@ class GatewayRequest:
     # None 表示沿用 timeout；该字段只影响当前请求，不能修改共享 backend。
     first_event_timeout: float | None = None
     allow_redirects: bool = True
+    deadline: float | None = None
+    max_retries: int | None = None
+    max_response_bytes: int | None = None
+
+    # LLM: 新限制在信封创建时校验，不修改共享 backend 或普通请求默认值；校验失败不产生网络副作用。
+    # 函数用途: 拒绝非法绝对期限、重试计数或响应上限。
+    def __post_init__(self) -> None:
+        validate_request_limits(self)
 
     @property
     def url(self) -> str:
@@ -191,19 +206,25 @@ def _retry_unlabeled_rejection(operation):
     raise _runtime_http_error(last) from last  # pragma: no cover - 循环内必已 raise
 
 
+# LLM: 严格请求从发送前到 JSON 解析后共享绝对 deadline；普通请求保留原两层重试，显式重试只在 open 单层计数。
+# 函数用途: 发送并完整解析非流式 JSON，超限/到期拒绝半份或迟到结果，关闭响应后沿原错误类型返回。
 def post_json(
     request: GatewayRequest,
 ) -> dict[str, Any]:
     """POST JSON and normalize provider/network failures into typed exceptions."""
     _require_api_key(request.api_key)
+    remaining_deadline_seconds(request.deadline)
 
+    # LLM: 读取只使用原响应 guard 和同一绝对期限；取消关闭连接但不赋予传输层任何业务提交权。
+    # 函数用途: 完成一次有界 HTTP 正文读取，所有出口释放当前响应。
     def _once() -> bytes:
         with _gateway_response_scope(_open_gateway_request(request)) as (resp, response_guard):
             with _provider_interrupt_callback(response_guard.abort):
-                return resp.read()
+                with _request_deadline_scope(request, response_guard):
+                    return read_response_body(resp, request)
 
     try:
-        raw = _retry_unlabeled_rejection(_once)
+        raw = _retry_unlabeled_rejection(_once) if request.max_retries is None else _once()
     except InterruptedError:
         raise
     except urllib.error.HTTPError as exc:
@@ -213,12 +234,10 @@ def post_json(
         if _provider_is_interrupted():
             raise InterruptedError("模型接口请求已被用户停止") from exc
         raise _runtime_network_error(exc, request) from exc
-    # decode/loads 在 with 外做:坏字节(非 UTF-8)或非 JSON 响应体不能漏出去崩整轮,
-    # 归一为可恢复的 ProviderResponseError(适配器无法解析,不是任务本身的 bug)。
+    # 严格解码沿原 strict_json，解析错误仍归一为 ProviderResponseError，不把坏响应当任务 bug。
     try:
-        text = raw.decode("utf-8", "replace")
-        return json.loads(text)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return decode_response_json(raw, request)
+    except (ValueError, UnicodeError, RecursionError) as exc:
         raise _runtime_decode_error(exc, request) from exc
 
 
@@ -340,14 +359,16 @@ def _stream_with_watchdog(request: GatewayRequest) -> Iterator[str]:
                 watchdog.cancel()
 
 
-# LLM: The watchdog closes only the current response and changes from first-event to rolling-idle after valid data.
-# 类用途: 在底层读取阻塞时提供可中断的首包/事件间空闲计时，不限制健康流的累计时长。
+# LLM: watchdog 只关闭当前 guard；SSE 有效 data 后滚动续期，严格 JSON 不调用 touch，始终使用原绝对期限。
+# 类用途: 共用网络等待计时器，分别执行流式空闲和显式非流式总期限合同。
 class _StreamIdleWatchdog:
     """Close one blocked response only after the active phase's full idle interval."""
 
+    # LLM: guard 属于当前响应或 open attempt；严格 JSON 不调用 touch，因此沿用同一个绝对期限而不滚动续期。
+    # 函数用途: 建立共用传输 watchdog 的初始期限和清理状态，不在构造时启动计时。
     def __init__(
         self,
-        response_guard: _GatewayResponseGuard,
+        response_guard: _GatewayResponseGuard | _GatewayOpenGuard,
         timeout: int | float,
         *,
         idle_deadline: float,
@@ -429,6 +450,8 @@ def _stream_timeout_error(request: GatewayRequest, stage: str) -> ProviderTimeou
     )
 
 
+# LLM: 这个 guard 独占响应关闭锁，严格 JSON/SSE/用户取消共用，不能因迁出 socket helper 重建第二套关闭状态。
+# 类用途: 串行化正常结束和中断关闭，避免标准库响应在并发 close 时产生竞态。
 class _GatewayResponseGuard:
     """Serialize normal close, user cancellation, and idle-timeout teardown.
 
@@ -444,12 +467,14 @@ class _GatewayResponseGuard:
         self._lock = threading.Lock()
         self._closed = False
 
+    # LLM: 当前响应的关闭只走这个串行 guard；socket 获取与严格读取共用唯一 helper，不关闭其它请求资源。
+    # 函数用途: 先 shutdown 唤醒阻塞读取，再幂等关闭响应并忽略清理噪声。
     def abort(self) -> None:
         """Cancel a blocked read and close exactly once without surfacing cleanup noise."""
         with self._lock:
             if self._closed:
                 return
-            transport = _stdlib_response_socket(self.response)
+            transport = stdlib_response_socket(self.response)
             if transport is not None:
                 try:
                     transport.shutdown(socket.SHUT_RDWR)
@@ -483,12 +508,35 @@ def _gateway_response_scope(response: Any):
         guard.close()
 
 
-def _stdlib_response_socket(resp: Any) -> socket.socket | None:
-    """Return CPython urllib's one transport socket without probing arbitrary objects."""
-    fp = getattr(resp, "fp", None)
-    raw = getattr(fp, "raw", None)
-    transport = getattr(raw, "_sock", None)
-    return transport if isinstance(transport, socket.socket) else None
+# LLM: JSON open/正文共用既有 watchdog，取消只作用精确 guard；不等待清理线程，不宣称可以中止 DNS 或任意解析代码。
+# 函数用途: 用不滚动的绝对期限关闭正在阻塞的连接，退出时取消计时并拒绝迟到结果。
+@contextmanager
+def _request_deadline_scope(request: GatewayRequest, guard: Any):
+    if request.deadline is None:
+        yield
+        return
+    remaining_deadline_seconds(request.deadline)
+    watchdog = _StreamIdleWatchdog(guard, request.timeout, idle_deadline=request.deadline)
+    watchdog.start()
+    try:
+        yield
+    except Exception:
+        _check_gateway_deadline(request, guard)
+        raise
+    else:
+        _check_gateway_deadline(request, guard)
+    finally:
+        watchdog.cancel()
+
+
+# LLM: 计时器尚未获得调度也必须关闭到期连接；取消优先，由既有 guard 幂等处理与 timer 的关闭竞态。
+# 函数用途: 在 HTTP 阶段退出时拒绝迟到结果并释放仍归当前请求所有的连接。
+def _check_gateway_deadline(request: GatewayRequest, guard: Any) -> None:
+    try:
+        remaining_deadline_seconds(request.deadline)
+    except (ProviderTimeoutError, InterruptedError):
+        guard.abort()
+        raise
 
 
 # LLM: Keep the backend module importable while runtime_errors is initializing; resolve the higher-level interruption registry only when a request is active.
@@ -524,19 +572,23 @@ def _urllib_request(request: GatewayRequest) -> urllib.request.Request:
     )
 
 
+# LLM: 显式 max_retries 是整次 HTTP 调用的唯一重试计数；None 维持普通请求既有策略，期限耗尽前不再发请求。
+# 函数用途: 执行有限次 HTTP open，将零重试落实到每一次物理发送之前。
 def _open_gateway_request(request: GatewayRequest):
-    last_attempt = len(_RETRYABLE_HTTP_DELAYS_SECONDS)
+    last_attempt = len(_RETRYABLE_HTTP_DELAYS_SECONDS) if request.max_retries is None else request.max_retries
     for attempt in range(last_attempt + 1):
+        remaining_deadline_seconds(request.deadline)
         response = _gateway_request_attempt(request, attempt, last_attempt)
         if response is not None:
             return response
     raise RuntimeError("unreachable gateway retry state")
 
 
-# LLM: 每次物理 HTTP open 都发布重试事实；IncompleteRead 在 open 阶段用本层预算，已移交响应的 body 断流由模型层处理。
-# 函数用途: 执行一次连接及响应头请求，按异常类型登记有界退避，不在这里重新读取或拼接半截响应。
+# LLM: 每次物理 open 都发布观察事实；显式重试合并无定位 400 与网络重试，严格错误正文也不能绕过 deadline/大小上限。
+# 函数用途: 发送一次连接及响应头请求，按当前信封限制登记失败或有限退避，不重放半截正文。
 def _gateway_request_attempt(request: GatewayRequest, attempt: int, last_attempt: int):
     req = _urllib_request(request)
+    remaining_deadline_seconds(request.deadline)
     attempt_id = f"provider-http:{time.time_ns()}:{attempt + 1}"
     base_event = {
         "attempt_id": attempt_id,
@@ -553,7 +605,7 @@ def _gateway_request_attempt(request: GatewayRequest, attempt: int, last_attempt
     except InterruptedError:
         raise
     except urllib.error.HTTPError as exc:
-        retry_scheduled = _should_retry_http_error(exc, attempt, last_attempt)
+        retry_scheduled = _request_http_retry(exc, request, attempt, last_attempt)
         retry_wait_seconds = _retry_delay_seconds(exc, attempt) if retry_scheduled else 0.0
         _emit_provider_attempt(
             {
@@ -569,7 +621,7 @@ def _gateway_request_attempt(request: GatewayRequest, attempt: int, last_attempt
         )
         if not retry_scheduled:
             raise
-        _provider_retry_wait(retry_wait_seconds)
+        _request_retry_wait(request, retry_wait_seconds)
         return None
     except _NETWORK_IO_ERRORS as exc:
         retry_scheduled = _should_retry_network_error(exc, attempt, last_attempt)
@@ -587,7 +639,7 @@ def _gateway_request_attempt(request: GatewayRequest, attempt: int, last_attempt
         )
         if not retry_scheduled:
             raise
-        _provider_retry_wait(retry_wait_seconds)
+        _request_retry_wait(request, retry_wait_seconds)
         return None
     _emit_provider_attempt(
         {
@@ -599,8 +651,35 @@ def _gateway_request_attempt(request: GatewayRequest, attempt: int, last_attempt
     return response
 
 
-# LLM: JSON/GET/SSE 共用 open 中断边界；guard 在 open 前注册，清理异常只按当前结构化中断归类，无中断时原样抛出，OAuth 仍禁重定向。
-# 函数用途: 按独立连接/读取超时发送请求；停止时收回未返回响应的连接，避免关闭竞态被误报成请求错误。
+# LLM: 重试退避不得绕过请求绝对期限；仍复用原可中断等待，不新增定时任务或给下一次重置预算。
+# 函数用途: 最多等待剩余预算，退避期间到期就结束整次请求。
+def _request_retry_wait(request: GatewayRequest, seconds: float) -> None:
+    remaining = remaining_deadline_seconds(request.deadline)
+    _provider_retry_wait(min(seconds, remaining) if remaining is not None else seconds)
+    remaining_deadline_seconds(request.deadline)
+
+
+# LLM: 零重试错误按状态立即结束，不读取网络诊断正文，关闭噪声不得覆盖原 HTTP 状态；有预算的正文同样受限。
+# 函数用途: 清理当前 HTTP 错误响应，并在唯一物理尝试循环决定是否重试。
+def _request_http_retry(exc: urllib.error.HTTPError, request: GatewayRequest, attempt: int, last_attempt: int) -> bool:
+    if request.max_retries == 0:
+        if not isinstance(getattr(exc, _HTTP_ERROR_DETAIL_ATTR, None), str):
+            setattr(exc, _HTTP_ERROR_DETAIL_ATTR, "")
+        _GatewayResponseGuard(exc).abort()
+        return False
+    if request.deadline is not None or request.max_response_bytes is not None:
+        with _gateway_response_scope(exc) as (response, guard):
+            with _provider_interrupt_callback(guard.abort), _request_deadline_scope(request, guard):
+                body = read_response_body(response, request)
+                setattr(exc, _HTTP_ERROR_DETAIL_ATTR, body.decode("utf-8", "replace"))
+    retry = _should_retry_http_error(exc, attempt, last_attempt)
+    if request.max_retries is not None and attempt < last_attempt:
+        retry = retry or _is_unlabeled_provider_rejection(exc)
+    return retry
+
+
+# LLM: JSON/GET/SSE 共用 open 中断边界；期限复核替代已返回响应时仍须关闭它，HTTPError 未被替代则交原分类；DNS 不能强停。
+# 函数用途: 按连接/读取和可选总期限发送请求，释放停止或到期后才返回的当前响应，保留默认生成合同。
 def _gateway_urlopen(req: urllib.request.Request, request: GatewayRequest):
     """Open one provider request with distinct connect and read timeouts.
 
@@ -615,7 +694,7 @@ def _gateway_urlopen(req: urllib.request.Request, request: GatewayRequest):
     connect_timeout = _bounded_connect_timeout(request)
     read_timeout = _request_initial_read_timeout(request)
     open_guard = _GatewayOpenGuard()
-    transport_options = _SplitTimeoutOptions(connect_timeout, read_timeout, open_guard)
+    transport_options = _SplitTimeoutOptions(connect_timeout, read_timeout, open_guard, request.deadline)
     handlers = [
         _provider_proxy_handler(req.full_url),
         _SplitTimeoutHTTPHandler(transport_options),
@@ -626,20 +705,23 @@ def _gateway_urlopen(req: urllib.request.Request, request: GatewayRequest):
 
         handlers.append(NoAuthRedirect())
     opener = urllib.request.build_opener(*handlers)
+    response = None
     try:
-        with _provider_interrupt_callback(open_guard.abort):
+        with _provider_interrupt_callback(open_guard.abort), _request_deadline_scope(request, open_guard):
             if _provider_is_interrupted():
                 raise InterruptedError("模型接口请求已被用户停止")
-            response = opener.open(req, timeout=read_timeout)
+            try:
+                response = opener.open(req, timeout=read_timeout)
+            except urllib.error.HTTPError as exc:
+                response = exc
+                raise
             if _provider_is_interrupted():
                 open_guard.abort()
-                try:
-                    response.close()
-                except Exception:
-                    pass
                 raise InterruptedError("模型接口请求已被用户停止")
             return response
     except Exception as exc:
+        if response is not None and response is not exc:
+            _GatewayResponseGuard(response).abort()
         if _provider_is_interrupted():
             raise InterruptedError("模型接口请求已被用户停止") from exc
         raise
@@ -672,25 +754,31 @@ def _is_loopback_host(host: str) -> bool:
     return bool(address.is_loopback or (mapped is not None and mapped.is_loopback))
 
 
+# LLM: 严格请求连接窗口不得超过剩余期限；普通请求保留既有最小连接等待以维持默认模型语义。
+# 函数用途: 将连接等待限制在本请求允许的读取/总期限之内。
 def _bounded_connect_timeout(request: GatewayRequest) -> float:
     read_timeout = _request_initial_read_timeout(request)
     configured = max(0.2, float(request.connect_timeout or 0))
     return min(configured, read_timeout)
 
 
-# LLM: The initial socket window may be longer than steady-state SSE idle, but only for this immutable request.
-# 函数用途: 计算响应头和首个事件共用的初始读取窗口，不修改共享 backend 配置。
+# LLM: 严格请求使用原始小数秒及剩余 deadline，不经过 SSE 的一秒下限；None 保持既有首包和滚动 idle 语义。
+# 函数用途: 计算当前响应头允许等待的时间，不延长短期限，也不修改共享 backend。
 def _request_initial_read_timeout(request: GatewayRequest) -> float:
+    remaining = remaining_deadline_seconds(request.deadline)
+    if remaining is not None:
+        configured = max(float(request.timeout), float(request.first_event_timeout or 0))
+        return min(remaining, configured)
     idle_timeout = _stream_deadline_offset(request.timeout)
     if request.first_event_timeout is None:
         return idle_timeout
     return max(idle_timeout, _stream_deadline_offset(request.first_event_timeout))
 
 
-# LLM: After the first valid SSE data line, reset the live socket from prefill budget to normal idle without replacing the response object.
+# LLM: SSE 首个有效 data 后按原 idle 规则更新 socket；读取实际 socket 与严格 JSON 共用唯一 helper，不改变流总时长。
 # 函数用途: 首包到达后把 socket 读取超时切回常规流式空闲窗口。
 def _set_response_read_timeout(response: Any, timeout: int | float) -> None:
-    transport = _stdlib_response_socket(response)
+    transport = stdlib_response_socket(response)
     if transport is None:
         return
     try:
@@ -762,20 +850,21 @@ def _abort_http_connection(connection: Any) -> None:
         pass
 
 
-# LLM: 双超时和 attempt-local open guard 必须作为一个不可分运输配置向 urllib handler/connection 传递，避免构造参数漂移。
-# 类用途: 汇总一次 provider open 的连接超时、读取超时和可中断连接句柄。
+# LLM: 双超时、可选绝对期限和 attempt-local guard 向 urllib 连接原样传递，连接完成后只使用剩余时间。
+# 类用途: 汇总一次 provider open 的连接/读取限制及精确中断句柄。
 @dataclass(frozen=True)
 class _SplitTimeoutOptions:
     connect_timeout: float
     read_timeout: float
     open_guard: _GatewayOpenGuard | None
+    deadline: float | None = None
 
 
-# LLM: HTTP 连接必须在构造时绑定本 attempt open guard，并在停止已到达时拒绝继续连接。
-# 类用途: 为普通 HTTP provider 分离连接超时和读取超时，同时暴露可中断连接句柄。
+# LLM: HTTP 连接必须绑定本 attempt guard，显式总期限不得在连接后重新获得完整读取预算。
+# 类用途: 为 HTTP provider 分离连接和读取限制，保留当前连接取消与总期限事实。
 class _SplitTimeoutHTTPConnection(http.client.HTTPConnection):
-    # LLM: open_guard 是 attempt-local 可选依赖；None 仅保留给独立构造测试，不形成运行时旁路。
-    # 函数用途: 初始化带连接/读取双超时的 HTTPConnection。
+    # LLM: guard/deadline 只属于当前 attempt；None 保留普通请求合同，不能跨请求共享取消状态。
+    # 函数用途: 初始化带双超时和可选绝对期限的 HTTPConnection。
     def __init__(
         self,
         host: str,
@@ -788,6 +877,7 @@ class _SplitTimeoutHTTPConnection(http.client.HTTPConnection):
     ):
         del timeout
         self._provider_read_timeout = transport_options.read_timeout
+        self._provider_deadline = transport_options.deadline
         super().__init__(
             host,
             port=port,
@@ -799,8 +889,8 @@ class _SplitTimeoutHTTPConnection(http.client.HTTPConnection):
         if transport_options.open_guard is not None:
             transport_options.open_guard.attach(self)
 
-    # LLM: connect 前后都检查 typed abort，覆盖停止早于 socket 创建和停止发生在 connect/TLS 内两种竞态。
-    # 函数用途: 建立 HTTP 连接，成功后切换为长读取超时或按用户中断退出。
+    # LLM: connect 前后检查 typed abort；已花在 DNS/connect 的时间不会补回读取窗口，迟到连接不能移交。
+    # 函数用途: 建立 HTTP 连接，成功后按实际剩余期限设置读取超时。
     def connect(self) -> None:
         if self._provider_open_guard is not None and self._provider_open_guard.aborted:
             raise InterruptedError("模型接口请求已被用户停止")
@@ -809,14 +899,15 @@ class _SplitTimeoutHTTPConnection(http.client.HTTPConnection):
             _abort_http_connection(self)
             raise InterruptedError("模型接口请求已被用户停止")
         if self.sock is not None:
-            self.sock.settimeout(self._provider_read_timeout)
+            remaining = remaining_deadline_seconds(self._provider_deadline)
+            self.sock.settimeout(min(self._provider_read_timeout, remaining) if remaining is not None else self._provider_read_timeout)
 
 
-# LLM: HTTPS 与 HTTP 共用同一 open guard 合同；TLS handshake 和响应头等待也必须可由 typed interrupt 关闭。
-# 类用途: 为 HTTPS provider 分离连接/读取超时并暴露可中断 TLS 连接句柄。
+# LLM: HTTPS 与 HTTP 共用 guard/deadline 合同，TLS 完成后读取窗口仍受同一个绝对期限约束。
+# 类用途: 为 HTTPS provider 分离连接和读取限制，暴露当前 TLS 连接的中断句柄。
 class _SplitTimeoutHTTPSConnection(http.client.HTTPSConnection):
-    # LLM: open_guard 只绑定本连接所属 attempt；context 和代理隧道行为继续由 urllib 标准 handler 控制。
-    # 函数用途: 初始化带 TLS context、双超时和 open guard 的 HTTPSConnection。
+    # LLM: guard/deadline 只绑定本 attempt；TLS context 和代理隧道继续沿标准库入口，不复制第二传输链。
+    # 函数用途: 初始化带 TLS、双超时和可选绝对期限的 HTTPSConnection。
     def __init__(
         self,
         host: str,
@@ -830,6 +921,7 @@ class _SplitTimeoutHTTPSConnection(http.client.HTTPSConnection):
     ):
         del timeout
         self._provider_read_timeout = transport_options.read_timeout
+        self._provider_deadline = transport_options.deadline
         super().__init__(
             host,
             port=port,
@@ -842,8 +934,8 @@ class _SplitTimeoutHTTPSConnection(http.client.HTTPSConnection):
         if transport_options.open_guard is not None:
             transport_options.open_guard.attach(self)
 
-    # LLM: TLS connect 完成后仍须复核 abort，不能把停止期间才建成的连接移交给响应读取层。
-    # 函数用途: 建立 HTTPS/TLS 连接并在成功后设置读取超时。
+    # LLM: TLS 完成后复核 abort 和剩余 deadline，不能把停止或总期限过后才建成的连接移交。
+    # 函数用途: 建立 HTTPS/TLS 连接并按本次剩余期限设置读取超时。
     def connect(self) -> None:
         if self._provider_open_guard is not None and self._provider_open_guard.aborted:
             raise InterruptedError("模型接口请求已被用户停止")
@@ -852,7 +944,8 @@ class _SplitTimeoutHTTPSConnection(http.client.HTTPSConnection):
             _abort_http_connection(self)
             raise InterruptedError("模型接口请求已被用户停止")
         if self.sock is not None:
-            self.sock.settimeout(self._provider_read_timeout)
+            remaining = remaining_deadline_seconds(self._provider_deadline)
+            self.sock.settimeout(min(self._provider_read_timeout, remaining) if remaining is not None else self._provider_read_timeout)
 
 
 # LLM: handler 只把双超时和同一 open guard 注入 urllib 创建的 HTTPConnection；不持有第二取消状态。
