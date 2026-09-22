@@ -7,6 +7,7 @@ from __future__ import annotations
 # 模块用途: 调度增量策展、严格模型提取、整批提交、失败审计与保守自动晋升。
 
 import json
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -20,9 +21,9 @@ from .candidates import CandidateService
 from .curator_backend import (
     CuratorModelAttempt,
     CuratorModelTimeoutError,
-    adaptive_timeout_seconds,
     attempt_shape_payload,
     extract_with_retries,
+    extraction_budget_seconds,
     last_model_attempts,
 )
 from .curator_commit import (
@@ -105,6 +106,7 @@ class MemoryCuratorDependencies:
     promotion_callback: Callable[[str], object] | None = None
     # 升级自愈:每次持 lease 执行前自动应用 Memory v2 迁移(幂等),失败不阻断提炼。
     migration_service: object | None = None
+    annotate_batch: Callable[[CuratorInputBatch, str, float], tuple[CuratorInputBatch, tuple[str, ...]]] | None = None
 
 
 # LLM: Run context binds one acquired lease to its pre-run cursor snapshot; helpers cannot use a
@@ -116,6 +118,7 @@ class _RunContext:
     run_id: str
     lease_id: str
     started_at: str
+    expires_at: str
     state_before: MemoryCuratorState
     recovery: dict[str, object]
 
@@ -419,7 +422,7 @@ class _CuratorLifecycleMixin:
 # 模型提取、整批事务和提交后晋升收拢在一条可审计路径上。
 # 类用途: 提供 Curator 的持 lease 执行链。
 class _CuratorExecutionMixin:
-    # LLM: Extraction/evidence validation 全部在事务收到任何权威内容前完成。
+    # LLM: 可选前置标注只能附于临时输入；提取/证据验证在任何权威提交前完成，材料及游标仍由原链持有。
     # 函数用途: 执行一个已持 lease 的提取、整批提交与提交后晋升。
     def _execute(self, context: _RunContext) -> CuratorRunResult:
         migration_warnings = self._preflight_migration()
@@ -430,6 +433,10 @@ class _CuratorExecutionMixin:
             return self._commit_batch(
                 context, batch, None, extra_warnings=migration_warnings
             )
+        annotate = self.dependencies.annotate_batch
+        if annotate is not None:
+            batch, decision_warnings = annotate(batch, context.run_id, _annotation_deadline(context, self.config))
+            migration_warnings = (*migration_warnings, *decision_warnings)
         # 提取可能因超时按比例缩批重试,返回的 batch 才是本次真正喂给模型的输入快照:
         # 证据验证、processed 前缀和游标推进都必须按同一快照计算,否则等待重放时引用不上。
         attempt = extract_with_retries(self.backend, self.config, batch)
@@ -934,6 +941,7 @@ def _run_context(
         run_id=str(lease["run_id"]),
         lease_id=str(lease["lease_id"]),
         started_at=str(lease["acquired_at"]),
+        expires_at=str(lease.get("expires_at") or ""),
         state_before=state,
         recovery=dict(recovery),
     )
@@ -1201,18 +1209,23 @@ def _finalize_date(reason: str, timezone_name: str, *, started_at: str) -> str:
     return _localized_now(current, timezone_name).date().isoformat()
 
 
-# LLM: Lease covers all bounded retries plus commit/recovery margin and has one lower bound.
-# 函数用途: 计算一次 Curator lease 时长。
+# LLM: 原 acquire 继续使用同一提取上界加 90 秒提交/恢复缓冲；可选标注不能延长 lease 或改变此授权。
+# 函数用途: 计算一次 Curator lease 时长，预算公式唯一归后台提取模块。
 def _lease_seconds(config: MemoryCuratorConfig) -> int:
-    # 模型调用超时按输入规模自适应放大(adaptive_timeout_seconds),lease 必须覆盖
-    # 最坏情况(输入达 max_input_chars 上限)的两次尝试加提交缓冲——否则长文提炼时
-    # lease 先于模型调用过期,运行中 batch 会被误判 busy/丢失。
-    # 同一上界也是 curator_backend 的超时缩批预算护栏:缩批重试不得把模型调用总时长推出
-    # 本 lease,两处公式必须同步修改。
-    worst_case_timeout = adaptive_timeout_seconds(
-        config.timeout_seconds, config.max_input_chars
-    )
-    return worst_case_timeout * (config.max_retries + 1) + 90
+    return extraction_budget_seconds(config) + 90
+
+
+# LLM: 只读原 lease 确切时间并冻结单调时钟期限；最多借剩余缓冲的一半，不挤掉原提取上界及另一半提交余量。
+# 函数用途: 给可选标注分配当前真实租约内的短期限，坏时间或过期只跳过增强，原提取仍照常运行。
+def _annotation_deadline(context: _RunContext, config: MemoryCuratorConfig) -> float:
+    started = time.monotonic()
+    acquired, expires = _parse_time(context.started_at), _parse_time(context.expires_at)
+    if acquired is None or expires is None:
+        return started
+    now = datetime.now(timezone.utc)
+    remaining = min((expires - now).total_seconds(), (expires - acquired).total_seconds())
+    spare = max(0.0, remaining - extraction_budget_seconds(config))
+    return started + spare / 2
 
 
 # LLM: Owner timezone affects scheduling/date sharding only and never fact truth or ledger order.

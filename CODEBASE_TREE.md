@@ -29,6 +29,7 @@ P1-B 本地协议与传输交接：`docs/tasks/DECISION_MODEL_P1B_HANDOFF.md`。
 P1-C/D 有界调用组件交接：`docs/tasks/DECISION_MODEL_P1CD_HANDOFF.md`。
 P1-E 共用设置交接：`docs/tasks/DECISION_MODEL_P1E_HANDOFF.md`。
 P1-F/G 实际服务与用量组合交接：`docs/tasks/DECISION_MODEL_P1FG_HANDOFF.md`。
+P2 Curator 前置标注交接：`docs/tasks/DECISION_MODEL_P2_CURATOR_HANDOFF.md`。
 
 这份树只描述当前主链路。旧迁移入口、过渡计划和已删除模块不在这里保留。
 
@@ -198,6 +199,7 @@ agent_py_agent/
 |   |   |-- candidates.py             # owner candidates.jsonl 唯一候选账本和唯一状态机
 |   |   |-- curator.py                # 后台策展统一 Service、reason、lease、增量 cursor 与有界重试
 |   |   |-- curator_backend.py        # 无工具辅助模型调用适配；只返回严格结构化结果
+|   |   |-- decision_curator.py       # 可选用户后台分类/优先级标注，失败保留原批次且不拥有记忆写权限
 |   |   |-- curator_commit.py         # Daily/Candidate/state/run audit 整批提交与崩溃恢复
 |   |   |-- curator_*.py              # Curator 输入、Schema、正式记忆快照、状态与运行审计辅助模块
 |   |   |-- daily.py                  # v2 DailyMemoryEvent 稳定序列、幂等合并与按天账本
@@ -449,6 +451,8 @@ agent_py_agent/
 |   |-- test_decision_settings_notifications.py # 设置逆序通知、覆盖恢复继承及精准取消
 |   |-- test_decision_service.py        # 决策阶段预算、冷却、设置复核、关闭与旧请求隔离
 |   |-- test_decision_service_http.py   # 原配置到真实本地 HTTP、账本与活动用量行的组合
+|   |-- test_decision_owner_scope.py    # 用户后台run/空thread、原身份冲突、后台期限与配置隔离
+|   |-- test_decision_curator.py        # 原Curator临时建议、完整材料、非选择结果和lease头寸对照
 |   |-- test_decision_model_call.py     # 实际 worker 账本保留、HTTP 尝试、身份、准入与取消
 |   |-- test_model_call_ledger_partitions.py # 原账本用途、字段真值、单调终态及 worker 精确保留
 |   |-- test_decision_usage_metrics.py  # 决策用途增量、迟到补账、未知输入与原 TUI 一行展示
@@ -662,6 +666,7 @@ docs/
 - `agent_py_agent/tests/test_decision_model_profiles.py`：验证当前模型目录 v4 的用途隔离、显式迁移、凭据复用、共享撤销及主子代理选择不误用决策模型。
 - `agent_py_agent/agent/settings/decision_settings.py`：原设置界面和工具共用服务；原 owner 模型目录及线程字段保存覆盖，锁序 owner→thread，版本冲突拒绝覆写。
 - `agent_py_agent/agent/conversation/decision_service.py`、`decision_policy.py`、`decision_model_call.py`：分别负责建议策略、连接隔离和实际模型调用；复用原存储/准入/取消/账本，不建立第二份任务权威。
+- `agent_py_agent/agent/memory_store/decision_curator.py`：原用户后台批次的临时分类/优先级建议；关闭不准备，失败保留完整输入，原提取/提交仍唯一。
 - `agent_py_agent/agent/settings/decision_settings_schema.py`、`decision_settings_defaults.py`、`decision_settings_projection.py`：分别负责严格结构、原模块默认值映射及脱敏有效值投影，不增加配置权威位置。
 - `agent_py_agent/tests/test_decision_usage_metrics.py`：验证用途分区复用原增量规则，决策输入与 LLM 总量不双计、缺报保留未知、历史基数随原文件更新。
 - `agent_py_agent/agent/backends/decision_protocol.py`：冻结宿主决策材料、来源和候选版本；结果只有建议权，消费者仍要复查。
@@ -678,6 +683,7 @@ docs/
 - `docs/tasks/DECISION_MODEL_P1B_HANDOFF.md`：原生协议、严格 HTTP、组件联合验收及后续有界调用边界。
 - `docs/tasks/DECISION_MODEL_P1CD_HANDOFF.md`：精确取消、有界资源、Curator 迁移和原准入组合证据，保留尚未接线的设置/账本边界。
 - `docs/tasks/DECISION_MODEL_P1E_HANDOFF.md`、`DECISION_MODEL_P1FG_HANDOFF.md`：共用设置、实际短决策调用及原用量展示的本地交接；真实服务与业务消费者另行验收。
+- `docs/tasks/DECISION_MODEL_P2_CURATOR_HANDOFF.md`：用户后台身份、临时标注、非选择结果、lease头寸和原Curator对照证据。
 
 - `agent_py_agent/agent/agent_core/agent_tree/model_view.py`：保留 run 身份、状态、原因与真实 read_order；不暴露恢复目录，省略内容可沿原工具归档完整读取。
 - `agent_py_agent/tests/test_agent_tree_model_view.py`：模型状态投影、终态报告可达性、状态不被省略及超长归档回读合同的定向验证。

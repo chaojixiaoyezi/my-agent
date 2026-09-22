@@ -9,6 +9,13 @@
 
 ## 当前实现
 
+- 本地 P2 Curator 前置决策已接原批次提取入口，默认关闭；owner 设置支持 off/observe/apply。
+  observe 只留调用事实，apply 仅在原输入中附临时分类和优先级，原材料不丢弃、不重排；
+  错误、超时、过期或提示超预算继续原提取。原验证、整批提交、晋升和游标仍持唯一权限。
+  后台使用真实 Curator run 和 owner 范围，不冒用历史会话；调用进入原模型账本，
+  尚不代表已有独立后台用量持久结算或用户会话用量归属。已用 fake 决策/原 worker 和原 Curator
+  提取提交链验证，未跑真实 Jev、实际 TUI 或部署验收。
+
 - 本地 Curator 的有界模型等待已迁入共用 `backends/bounded_call.py`，删除旧线程/队列副本；
   到期不再额外等待清理，准确 worker 或 cleanup 未退出时保持 still-running，禁止重叠重试。
   原缩批、游标与记忆提交规则不变；与取消/HTTP/准入联合 315 项通过，尚未实际 TUI 验收或部署。

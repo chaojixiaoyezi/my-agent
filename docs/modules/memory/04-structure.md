@@ -244,3 +244,38 @@ task workspace 摘要同步）同样改用它，避免"读时切开、写回落�
 - 记忆相关测试的 `tool_protocol="text"` 配置移除、假后端 native 化、协议快照默认
   native（EXEC-31b 适配，详见 02-progress.md）。
 - compact 自动续接链的 native 工具轮差异已记录 xfail，待按 native 语义适配。
+
+## P2 Curator 前置决策标注（本地实现）
+
+- `memory_store/decision_curator.py` 在原 `_execute` 收集批次后、`extract_with_retries` 前调用共用
+  `decision_service`；每次原 lease 批次只创建一次阶段。`core._wire_memory_curator` 注入既有 agent 的
+  callable，不创建第二 Agent、配置库、后台 worker 或记忆写服务。
+- 使用宿主关键字 `scope="owner_background"`，params 的 run_id 为原 Curator run，thread/task/request
+  为空。决策只读 owner 设置，阶段读取 `background_timeout_seconds`，不能借材料中的会话身份
+  读取 thread 覆盖。活动会话 runner 与 owner 后台身份冲突时，不允许调用。
+- `DecisionStage.enabled_points` 来自 begin 的同一次设置读取，明确关闭时立即返回原批次，不准备或编码材料；
+  它只决定是否准备，发送/采用仍由共用服务复读原设置，不能作为采用权限。
+- 原批次完整进入决策上下文；最多为 32 条来源各问分类和优先级两题，保持原生接口 64 题上限。
+  超出部分只是不加注释，原提取仍收到全部材料。逐题失败只丢对应建议，原候选绑定与整个输入
+  摘要在消费前再次核对；不使用置信度直接入库、删材料或推进游标。
+- 每题提供显式 `not_needed`、`need_data`、`no_match`、`abstain` 候选，分别保存在
+  `tag_outcome`/`priority_outcome`，不混入普通分类或把错误当弃权。`need_data.required_refs` 只由宿主
+  绑定到当前来源；截断消息为精确 `full_source_ref`，其他来源为已有 context/artifact 引用。
+  这些只给原 Curator 作临时建议，不授权工具补读、不创建补资料 agent；没有补齐时照常沿原材料处理。
+- `CuratorDecisionAnnotation` 与 `CuratorInputBatch.decision_annotations` 仅在内存中承载来源类型、
+  精确 ID/hash、标签、优先级、实际模型和输入摘要。prompt 在原稳定说明之后明确标注其非权威性质；
+  不进入输出 schema、证据 refs 或持久状态。observe/off 不改变原输入；提示超过原字符预算时全部放弃提示。
+- 原超时缩批继续保留消息/审计前缀；`to_model_payload` 只投影仍存在且 hash 一致的标注，尾部建议
+  不会成为新证据。提交继续使用原实际 extraction batch，决策自身永不提交或推进游标。
+- `curator_backend.extraction_budget_seconds` 是原提取、lease 和可选头寸的唯一总预算公式。
+  lease 时长仍为原提取上界加 90 秒，`_annotation_deadline` 读取本次原 lease 的确切取得/到期时间，
+  扣除完整提取上界后最多把剩余正缓冲的一半借给可选标注，另一半保留提交。
+  转换为冻结 monotonic caller_deadline 后只缩短增强，不延长 lease、不重置阶段；
+  极大后台配置、过期或坏 lease 时间都不能借此抢走原提取预算。
+- 决策沿原模型账本记录 purpose=decision/auxiliary 和实际 Curator run，thread 为空；
+  不虚构用户会话累计记录。原 Curator 未设独立持久模型用量结算，本片没有新增该存储。
+- 运行诊断只追加原 run warnings 中的固定 `memory_curator_decision:<mode>:<status>`，
+  不改变严格 run schema，不落材料、概率或供应商错误正文。临时批次字段不需要持久 schema 迁移。
+
+上述验证限本地 fake 决策、原有界 worker/账本及原提取/提交组合；真实 Jev 质量、服务端时延、实际 TUI
+和部署尚未验收，不能据此宣称正式记忆提取质量提升。

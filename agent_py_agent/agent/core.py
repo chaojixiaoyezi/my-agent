@@ -227,10 +227,11 @@ def _wire_memory_authorities(
     )
 
 
-# LLM: Composition is kept outside SimpleAgent.__init__; every repository is the existing owner
-# authority and the Curator dependency bundle contains no model-facing tools.
+# LLM: 复用原 owner 仓库并注入仅返回临时建议的决策 callback；Curator 无模型工具权限，不创建第二 Agent 或配置库。
 # 函数用途: 为一个已建立 ConversationStore/Memory/Persona 的 agent 接通统一后台策展链。
 def _wire_memory_curator(agent: object, config: AgentConfig) -> None:
+    from .memory_store.decision_curator import annotate_curator_batch
+
     agent.memory_lessons = LessonRepository(
         agent.home_paths.owner_memory_lessons_dir,
         agent.home_paths.owner_memory_routing_index_md,
@@ -270,6 +271,9 @@ def _wire_memory_curator(agent: object, config: AgentConfig) -> None:
         dependencies=MemoryCuratorDependencies(
             backend=backend,
             conversation_store=agent.conversation_store,
+            annotate_batch=lambda batch, run_id, deadline: annotate_curator_batch(
+                agent, batch, run_id, max_input_chars=curator_config.max_input_chars, caller_deadline=deadline,
+            ),
             audit_dir=agent.home_paths.owner_audit_dir,
             state_store=state_store,
             daily_store=daily_store,

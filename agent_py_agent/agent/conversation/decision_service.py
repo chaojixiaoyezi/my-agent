@@ -1,4 +1,4 @@
-# LLM: 可选决策只有建议权；阶段期限来自原业务batch，owner/thread设置与模型引用发送前后复核，消费者仍核验候选。
+# LLM: 可选决策只有建议权；阶段期限来自原业务batch，显式owner后台不冒用材料中的thread，设置与模型引用发送前后复核。
 # 模块用途: 在原模型配置、原有界调用和原账本之外提供无业务写入权的决策策略边界。
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ from .decision_policy import (
 )
 
 
-# LLM: 由宿主在准备前创建一次，不拥有调度状态；修改配置不改变已冻结 deadline，不能跨身份复用。
+# LLM: 宿主准备前创建；enabled_points仅供关闭时跳过额外准备，不是授权，发送/采用仍复读；scope和deadline不能跨身份复用。
 # 类用途: 保存同一原业务批次共用的绝对预算与可信身份。
 @dataclass(frozen=True)
 class DecisionStage:
@@ -55,6 +55,8 @@ class DecisionStage:
     started_at: float
     deadline: float
     error_code: str = ""
+    scope: str = "thread"
+    enabled_points: tuple[str, ...] = ()
 
 
 # LLM: may_apply 仅表示信封和策略有效，不证明每道题成功，更不授予业务写入权；响应逐题 error 必须由消费者处理。
@@ -70,16 +72,22 @@ class DecisionOutcome:
     retain_original: bool = True
 
 
-# LLM: 运行身份只取宿主 params/线程本地上下文；两者明确冲突时拒绝，不从 state/questions 选身份。
-# 函数用途: 解析当前准确 thread/run/task，防止把一次请求或阶段转用到另一个会话。
-def _identity(agent: object, params: object) -> tuple[str, str, str, str]:
+# LLM: 身份只取宿主 params/runner；owner_background必须有run且无thread，不能从历史材料取身份或把活跃会话改称后台。
+# 函数用途: 解析原会话或显式用户后台的准确身份，拒绝跨范围复用阶段。
+def _identity(agent: object, params: object, *, scope: str = "thread") -> tuple[str, str, str, str]:
+    if type(scope) is not str or scope not in {"thread", "owner_background"}:
+        raise DecisionInputError("决策范围无效。")
     current = current_task_attributes(agent) or {}
     attrs = getattr(params, "task_attributes", {}) or {}
     if type(attrs) is not dict:
         raise DecisionInputError("决策需要可信任务属性。")
+    supplied_thread = attrs.get("agent_thread_id") or attrs.get("conversation_thread_id")
+    direct_thread = getattr(params, "thread_id", "")
+    if supplied_thread and direct_thread and supplied_thread != direct_thread:
+        raise DecisionInputError("决策参数中的会话身份冲突。")
     result = []
     for active, supplied in (
-        (current.get("agent_thread_id") or current.get("conversation_thread_id"), attrs.get("agent_thread_id") or attrs.get("conversation_thread_id")),
+        (current.get("agent_thread_id") or current.get("conversation_thread_id"), supplied_thread or direct_thread),
         (current_subagent_run_id(agent), getattr(params, "run_id", "")),
         (current.get("task_id"), getattr(params, "task_id", "") or attrs.get("task_id")),
     ):
@@ -89,8 +97,10 @@ def _identity(agent: object, params: object) -> tuple[str, str, str, str]:
         if type(value) is not str or len(value) > 1024:
             raise DecisionInputError("决策任务身份格式无效。")
         result.append(value)
-    if not result[0]:
+    if scope == "thread" and not result[0]:
         raise DecisionInputError("决策需要准确的当前会话。")
+    if scope == "owner_background" and (result[0] or not result[1]):
+        raise DecisionInputError("用户后台决策需要独立运行编号，不能借用会话身份。")
     return decision_owner_ref(agent), *result
 
 
@@ -116,28 +126,31 @@ def _check_interrupted() -> None:
         raise InterruptedError("当前决策随用户任务停止。")
 
 
-# LLM: started_at 在读取配置前取得；原owner/thread锁均非阻塞，忙时跳过增强，不为配置读锁另起worker。
-# 函数用途: 在额外输入准备前建立一次批次预算；配置错误只产生不可调用阶段，保留原业务方案。
-def begin_decision_stage(agent: object, params: object, *, operation_id: str, caller_deadline: float | None = None) -> DecisionStage:
+# LLM: 开始时刻在读配置前取得；原锁非阻塞，后台scope读取owner设置/后台预算，宿主caller期限只缩短，不能获得额外租约。
+# 函数用途: 在额外输入准备前建立一次会话或用户后台批次预算；配置错误保留原业务，不创建会话补身份。
+def begin_decision_stage(agent: object, params: object, *, operation_id: str, caller_deadline: float | None = None,
+                         scope: str = "thread") -> DecisionStage:
     started = time.monotonic()
     _check_interrupted()
     identity = ("", "", "", "")
     try:
         if type(operation_id) is not str or not operation_id or len(operation_id) > 1024:
             raise DecisionInputError("决策阶段需要宿主操作编号。")
-        identity = _identity(agent, params)
+        identity = _identity(agent, params, scope=scope)
         caller = _deadline(caller_deadline)
         settings = execute_decision_settings_operation(agent, "read", {}, thread_id=identity[1], blocking=False)
-        deadline = started + settings["effective"]["stage_timeout_seconds"]
+        budget = "background_timeout_seconds" if scope == "owner_background" else "stage_timeout_seconds"
+        deadline = started + settings["effective"][budget]
         if caller is not None:
             deadline = min(deadline, caller)
         _check_interrupted()
-        return DecisionStage(operation_id, *identity, started, deadline)
+        points = tuple(point for point, row in settings["effective"]["points"].items() if row["effective_mode"] != "off")
+        return DecisionStage(operation_id, *identity, started, deadline, scope=scope, enabled_points=points)
     except (InterruptedError, ToolCancelled):
         raise
     except Exception as exc:
         code = "settings_busy" if isinstance(exc, BlockingIOError) else "invalid_identity" if isinstance(exc, DecisionInputError) else "configuration_unavailable"
-        return DecisionStage(operation_id if type(operation_id) is str else "", *identity, started, started, code)
+        return DecisionStage(operation_id if type(operation_id) is str else "", *identity, started, started, code, scope=scope)
 
 
 # LLM: 策略版本绑定两层CAS及实际有效值；连接摘要另外绑定，模型目录改动不能借未变的设置revision混过。
@@ -166,7 +179,7 @@ def _snapshot(agent: object, thread_id: str, point: str) -> tuple[dict, dict, st
 # LLM: 当前身份、设置和连接必须仍匹配发送快照；关闭/共享撤销/换密钥均不能应用旧建议。
 # 函数用途: 在调用前后复读原事实源，返回旧请求是否已经失效。
 def _stale(agent: object, params: object, stage: DecisionStage, point: str, revision: str, connection: str) -> str:
-    if _identity(agent, params) != (stage.owner_ref, stage.thread_id, stage.run_id, stage.task_id):
+    if _identity(agent, params, scope=stage.scope) != (stage.owner_ref, stage.thread_id, stage.run_id, stage.task_id):
         return "identity_changed"
     _settings, row, current_revision, config = _snapshot(agent, stage.thread_id, point)
     if row["effective_mode"] == "off":
@@ -194,7 +207,7 @@ def decide(agent: object, params: object, stage: DecisionStage, *, point: str, s
     try:
         if type(point) is not str or point not in POINTS or type(explicit_retry) is not bool:
             raise DecisionInputError("决策接入点或重试标志无效。")
-        if not isinstance(stage, DecisionStage) or _identity(agent, params) != (stage.owner_ref, stage.thread_id, stage.run_id, stage.task_id):
+        if not isinstance(stage, DecisionStage) or _identity(agent, params, scope=stage.scope) != (stage.owner_ref, stage.thread_id, stage.run_id, stage.task_id):
             return DecisionOutcome(mode, "stale", reason="identity_changed")
         if stage.error_code:
             return DecisionOutcome(mode, "error" if stage.error_code == "settings_busy" else "configuration_required", reason=stage.error_code)

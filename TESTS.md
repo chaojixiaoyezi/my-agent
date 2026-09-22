@@ -1,5 +1,15 @@
 # 测试与发布验收
 
+## 决策模型 Curator 与用户后台 scope（本地）
+
+`test_decision_curator.py` 与原 Curator、自适应超时/缩批测试共 **117 passed**。
+父侧 `python3 -m pytest agent_py_agent/tests/test_decision_owner_scope.py agent_py_agent/tests/test_decision_curator.py agent_py_agent/tests/test_decision_service_http.py -o addopts='' -q --tb=short`：**62 passed**。
+覆盖 owner 后台明确 run/空 thread、拒绝活动会话冒充后台、后台预算冻结、原设置隔离、真实 localhost HTTP，
+以及实际公共服务→原 worker/账本→临时标注→原提取/验证/游标；缺数据等四类业务结果与运行失败分开。
+原 lease 剩余头寸限制极大后台超时，关闭不编码材料；提示超预算、失效和错误沿原链。
+原 Curator 缺独立持久模型用量结算，本片不伪造前台统计或新建账本；真实质量/部署未验。
+文件、命令和限制见 [Curator 交接](docs/tasks/DECISION_MODEL_P2_CURATOR_HANDOFF.md)。
+
 ## 决策模型 P1 实际服务组合（本地）
 
 17 个直接相关文件联合 **399 passed**，覆盖设置/迁移、协议、worker/准入、策略通知、原账本与显示。

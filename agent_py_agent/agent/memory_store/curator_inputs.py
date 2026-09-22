@@ -165,6 +165,22 @@ class CuratorAuditInput:
         return {**self.ref(), "preview": self.preview}
 
 
+# LLM: 标注只属于当前批次的模型输入，既非证据也非持久状态；来源消失或正文摘要变化时不得继续发送。
+# 类用途: 保存原生决策给提取模型的临时标签和优先级，不具备修改记忆或游标的权限。
+@dataclass(frozen=True)
+class CuratorDecisionAnnotation:
+    source_kind: str
+    source_id: str
+    content_hash: str
+    tag: str = ""
+    priority: str = ""
+    model: str = ""
+    input_digest: str = ""
+    tag_outcome: str = ""
+    priority_outcome: str = ""
+    required_refs: tuple[tuple[str, str], ...] = ()
+
+
 # LLM: batch 保存的是这次 lease 看到的精确输入顺序；模型声明只能引用这里的 ID。
 # 类用途: 为 prompt、证据核验和 cursor 计算提供同一输入快照。
 @dataclass(frozen=True)
@@ -175,15 +191,23 @@ class CuratorInputBatch:
     load_errors: tuple[dict[str, object], ...] = ()
     # 可降级读取错误(如 formal 记忆整体失败):与 load_errors 严格语义不同,只记不阻断。
     formal_memory_errors: tuple[dict[str, object], ...] = ()
+    decision_annotations: tuple[CuratorDecisionAnnotation, ...] = ()
 
-    # LLM: 序列化保持消息/audit/formal-memory 的冻结顺序，不能在 prompt 阶段补猜引用。
+    # LLM: 保持原材料顺序；临时决策标注只投影仍在本批且 hash 一致的来源，缩批不能遗留尾部建议。
     # 函数用途: 生成一次后台模型调用的完整结构化输入。
     def to_model_payload(self) -> dict[str, object]:
-        return {
+        payload = {
             "messages": [item.to_model() for item in self.messages],
             "audit_events": [item.to_model() for item in self.audit_events],
             "formal_memories": [item.to_model() for item in self.formal_memories],
         }
+        refs = {("message", item.message_id, item.content_hash) for item in self.messages}
+        refs.update(("audit", item.event_id, item.content_hash) for item in self.audit_events)
+        annotations = [{**vars(item), "required_refs": [{"kind": kind, "ref": ref} for kind, ref in item.required_refs]}
+                       for item in self.decision_annotations if (item.source_kind, item.source_id, item.content_hash) in refs]
+        if annotations:
+            payload["decision_annotations"] = annotations
+        return payload
 
     # LLM: 轮次阈值只统计结构化 role=user 的新消息，不解析正文或 assistant 摘要。
     # 函数用途: 计算本批游标后的真实用户轮次数。
