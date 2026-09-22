@@ -1,6 +1,6 @@
 
-# LLM: MCP stdio 协议边界；工具结果完整保留到统一输出归档，协议错误不能作为空成功。
-# 模块用途: 管理有期限、可取消的 MCP 子进程连接；仅承诺已实现的 tools 能力，不承诺 HTTP、sampling 或 tasks。
+# LLM: MCP 配置、握手与客户端生命周期；协议状态归 mcp_protocol、固定进程 IO 归 mcp_transport，联测注册层发布和永久关闭。
+# 模块用途: 组织可取消的 MCP 连接、完整工具发现和结果归一化；明确断线恢复与永久关闭，不把进程重连当插件激活。
 from __future__ import annotations
 
 """标准库实现的 MCP (Model Context Protocol) stdio 客户端。
@@ -20,29 +20,28 @@ from __future__ import annotations
   绝不向上抛裸异常打断主循环。
 - 凭证不泄露：错误文本复用进程级统一脱敏边界（统一错误脱敏）；
   日志里 server env 的 secret 只打键名不打值。
-- 进程生命周期：每个 server 一个长驻子进程，stop() 优雅关闭（先 terminate 再 kill 兜底）。
+- 进程生命周期：每条 transport 固定进程出生身份；stop() 永久撤销后按原进程树回执清理。
 
-并发模型：本实现用 ``_lock`` 将同一 server 的请求串行化，不代表 JSON-RPC 不能多路复用。
+并发模型：每条 transport 使用自己的请求锁串行化，不代表 JSON-RPC 不能多路复用。
 后台读线程按在途 ID 投递响应；tools/list_changed 推进目录代次，下一运行边界重新完整发现工具。
 请求排队、写入和等待共享 deadline；超时取消通知不代表远端动作一定已经停止或回滚。
 """
 
 import atexit
 import json
-import logging
 import os
 import re
 import subprocess
 import threading
 import time
-from contextlib import contextmanager
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TypeVar
 
 from ..common.log_redaction import redact_sensitive_text
-from .cancellation import cancellation_requested, register_cancellation_callback
-
-logger = logging.getLogger(__name__)
+from .mcp_protocol import MCPError, bounded_mcp_lock
+from .mcp_transport import MCPTransport
+from .process_registry import ProcessTerminationReceipt
 
 # my-agent 侧协商的 MCP 协议版本。2024-11-05 是稳定且被绝大多数 server 接受的版本；
 # server 在 initialize 回包里必须返回已支持版本；未知版本不能按成功握手继续。
@@ -51,7 +50,6 @@ _SUPPORTED_PROTOCOL_VERSIONS = frozenset({"2024-11-05", "2025-03-26", "2025-06-1
 
 _DEFAULT_CONNECT_TIMEOUT = 30.0  # initialize 握手超时（秒）
 _DEFAULT_TOOL_TIMEOUT = 60.0     # 单次 tools/call 超时（秒）
-_STOP_GRACE_SECONDS = 5.0        # 关闭时等子进程优雅退出的宽限期
 # 仅限制独立 preview；完整 content 与 blocks 交给统一工具输出归档，不能在协议归一化阶段丢正文。
 _DEFAULT_MAX_CONTENT_CHARS = 16 * 1024
 # 读 server stdout 的单行字符上限（纯防 OOM 安全底线）。话痨/失控/被入侵的 server 吐一行超大 JSON
@@ -103,14 +101,6 @@ def build_safe_env(user_env: dict[str, str] | None) -> dict[str, str]:
     for key, value in (user_env or {}).items():
         env[str(key)] = str(value)
     return env
-
-
-class MCPError(Exception):
-    """MCP 客户端层的统一异常。``code`` 给调用方做错误码映射；str(exc) 已脱敏。"""
-
-    def __init__(self, message: str, *, code: str = "MCP_ERROR"):
-        super().__init__(sanitize_credentials(message))
-        self.code = code
 
 
 @dataclass
@@ -291,18 +281,6 @@ def _render_content_block(block: object) -> str:
     return ""
 
 
-def _unwrap_jsonrpc(server_name: str, payload: dict[str, Any], method: str) -> Any:
-    """从 JSON-RPC 响应里取 result；若是 error 对象则转成 MCPError。"""
-    err = payload.get("error") if isinstance(payload, dict) else None
-    if err is None:
-        return payload.get("result") if isinstance(payload, dict) else None
-    detail = f"{err.get('message') or '未知 JSON-RPC 错误'}（code={err.get('code')}）" if isinstance(err, dict) else str(err)
-    raise MCPError(
-        f"MCP server '{server_name}' {method} 返回错误：{detail}",
-        code="MCP_PROTOCOL_ERROR",
-    )
-
-
 # LLM: 保留完整 canonical content 后才由 ToolExecutor 做预览/归档；协议错误不能归一化成空成功。
 # 函数用途: 校验工具结果结构，保留 typed blocks 和全文，同时给出独立有界预览。
 def _normalize_call_result(result: object, max_chars: int = _DEFAULT_MAX_CONTENT_CHARS) -> dict[str, Any]:
@@ -372,472 +350,205 @@ def _parse_tool_info(item: object) -> MCPToolInfo:
     return MCPToolInfo(name=name, description=description, input_schema=schema)
 
 
-# LLM: 协议锁必须计入请求总期限；只检查本调用取消 token，拿到锁后所有退出路径都释放。
-# 函数用途: 有期限、可取消地等待 MCP 请求锁或写锁，不把排队时间藏在 timeout 之外。
-@contextmanager
-def _bounded_lock(lock, deadline: float, *, allow_cancelled: bool = False):
-    while True:
-        if cancellation_requested() and not allow_cancelled:
-            raise MCPError("MCP 排队已取消", code="MCP_CANCELLED")
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise MCPError("MCP 排队超时", code="MCP_TIMEOUT")
-        if lock.acquire(timeout=min(remaining, 0.05)):
-            break
-    try:
-        yield
-    finally:
-        lock.release()
+_Publication = TypeVar("_Publication")
 
 
-# LLM: MCP 客户端持有唯一 server 子进程事实；工具可用性只能读取这里，不能另建健康检查连接。
-# 类用途: 管理一个 stdio MCP server 的启动、JSON-RPC 请求、状态和幂等清理。
+# LLM: 客户端持有唯一当前连接和永久关闭状态；所有 IO 绑定固定 transport，永久关闭不能被运行边界恢复。
+# 类用途: 管理 MCP 的启动、握手、临时重连和最终关闭，供注册层发布同连接的工具目录。
 class MCPStdioClient:
-    """单个 stdio MCP server 的同步客户端：起子进程 + JSON-RPC over stdio。
-
-    生命周期：``start()`` 起子进程并完成 initialize 握手 + initialized 通知；
-    ``list_tools()`` 发现工具；``call_tool()`` 调用；``stop()`` 关闭子进程。
-    任何一步失败都抛 ``MCPError``（已脱敏），由上层 manager 兜底成「该 server 不可用」
-    而不影响其他 server 与主流程。
-    """
-
+    # LLM: 创建客户端不启动进程；连接串行锁与短状态锁分离，stop 不等业务请求或握手。
+    # 函数用途: 保存服务声明、当前连接及启动和关闭状态。
     def __init__(self, config: MCPServerConfig):
         self.config = config
-        self._proc: subprocess.Popen | None = None
-        self._lock = threading.Lock()          # 串行化本 server 的 JSON-RPC 请求
-        self._write_lock = threading.Lock()
-        self._lifecycle_lock = threading.RLock()
-        self._next_id = 1
-        self._reader: threading.Thread | None = None
-        self._responses: dict[int, dict[str, Any]] = {}
-        self._pending_request_ids: set[int] = set()
-        self.tools_changed = False
-        self._tools_generation = 0
-        self._responses_cv = threading.Condition()
-        self._reader_done = threading.Event()
-        self._stderr_tail = _StderrTail(config.name)  # 子进程 stderr 末尾若干行，用于诊断
-        self._started = False
-        self.server_info: dict[str, Any] = {}    # initialize 回包里的 serverInfo
-        self.capabilities: dict[str, Any] = {}   # initialize 回包里的 capabilities
+        self._transport: MCPTransport | None = None
+        self._connect_lock = threading.RLock()
+        self._state_lock = threading.RLock()
+        self._closed = threading.Event()
+        self._starting = False
+        self._exit_registered = False
 
-    # LLM: 运行状态检查只读取现有子进程与 reader 状态，不重启 server、不握手也不延长失败进程寿命。
-    # 函数用途: 判断已注册 MCP 工具背后的 stdio server 是否仍可接受调用。
+    # LLM: 永久关闭是本客户端终态，不由进程存活、目录缓存或后续重连覆盖。
+    # 函数用途: 供注册层跳过已明确关闭的客户端。
+    def is_closed(self) -> bool:
+        return self._closed.is_set()
+
+    # LLM: 可用性只读当前连接，不握手、不重启；进程退出不自动恢复旧快照。
+    # 函数用途: 判断当前客户端是否有可用的已握手连接。
     def is_running(self) -> bool:
-        proc = self._proc
-        return bool(
-            self._started
-            and proc is not None
-            and proc.poll() is None
-            and not self._reader_done.is_set()
-        )
+        with self._state_lock:
+            return not self.is_closed() and self._transport is not None and self._transport.is_running()
 
-    # -- 生命周期 ------------------------------------------------------------
+    # LLM: 通知计数属于当前 transport，旧 reader 不可改变这里的新连接投影。
+    # 函数用途: 告诉注册层是否需要重新读取当前服务的工具目录。
+    @property
+    def tools_changed(self) -> bool:
+        with self._state_lock:
+            return self._transport is not None and self._transport.inbox.tools_changed
 
-    def start(self) -> None:
-        """起子进程并完成 MCP 握手。失败抛 MCPError（子进程已清理）。"""
-        if self._started:
-            return
-        safe_env = build_safe_env(self.config.env)
-        argv = [self.config.command, *self.config.args]
-        logger.debug(
-            "启动 MCP server '%s': argv=%s env=%s",
-            self.config.name, argv, redact_env_for_log(self.config.env),
-        )
+    # LLM: 握手数据只从当前连接读取；返回副本，调用方不能改变连接的协议事实。
+    # 函数用途: 展示当前服务声明的名称与版本。
+    @property
+    def server_info(self) -> dict[str, Any]:
+        with self._state_lock:
+            return dict(self._transport.server_info) if self._transport is not None else {}
+
+    # LLM: 能力仅是协议声明，不授予权限；旧连接数据不复制到新连接。
+    # 函数用途: 展示当前握手返回的能力列表。
+    @property
+    def capabilities(self) -> dict[str, Any]:
+        with self._state_lock:
+            return dict(self._transport.capabilities) if self._transport is not None else {}
+
+    # LLM: 启动串行化但不持状态锁等待握手；stop 可先永久撤销，候选返回后必须再次核对再发布。
+    # 函数用途: 启动一个服务并返回本次固定连接，失败只清理本次候选。
+    def start(self) -> MCPTransport:
+        deadline = time.monotonic() + self.config.connect_timeout
+        with bounded_mcp_lock(self._connect_lock, deadline, closed=self._closed):
+            with self._state_lock:
+                if self.is_closed():
+                    raise MCPError("MCP 客户端已永久关闭", code="MCP_CONNECTION_CLOSED")
+                if self.is_running():
+                    assert self._transport is not None
+                    return self._transport
+                if self._transport is not None:
+                    raise MCPError("MCP 旧连接已断开，须在运行边界重连", code="MCP_CONNECTION_CLOSED")
+                self._starting = True
+                if not self._exit_registered:
+                    atexit.register(self.stop)
+                    self._exit_registered = True
+            return self._start_transport()
+
+    # LLM: Popen 返回前的关闭保持 launch_pending；返回后也需清理候选，不能把已关闭客户端重新置为 ready。
+    # 函数用途: 创建独立进程、启动读线程并完成握手。
+    def _start_transport(self) -> MCPTransport:
+        transport = None
         try:
-            self._proc = subprocess.Popen(
-                argv,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                env=safe_env,
-                cwd=self.config.cwd or None,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                bufsize=1,  # 行缓冲：stdio JSON-RPC 按行分帧
-                start_new_session=True,  # 独立进程组，关闭时可整组清理、避免信号误伤父进程
+            process = subprocess.Popen(
+                [self.config.command, *self.config.args], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, env=build_safe_env(self.config.env), cwd=self.config.cwd or None,
+                text=True, encoding="utf-8", errors="replace", bufsize=1, start_new_session=True,
             )
-        except FileNotFoundError as exc:
-            raise MCPError(
-                f"MCP server '{self.config.name}' 启动失败：找不到命令 '{self.config.command}'"
-                f"（确认它已安装且在 PATH 中，或用绝对路径）",
-                code="MCP_SERVER_START_FAILED",
-            ) from exc
-        except OSError as exc:
-            raise MCPError(
-                f"MCP server '{self.config.name}' 启动失败：{exc}",
-                code="MCP_SERVER_START_FAILED",
-            ) from exc
-
-        # 后台读线程：把 stdout 按行解析成 JSON-RPC 消息，按 id 投递。
-        self._reader = threading.Thread(
-            target=self._read_loop, name=f"mcp-reader-{self.config.name}", daemon=True,
-        )
-        self._reader.start()
-        # 单独的 stderr 抽干线程：避免 server 往 stderr 狂写把管道塞满导致死锁，
-        # 同时保留末尾若干行用于失败诊断。
-        threading.Thread(
-            target=self._stderr_tail.drain, args=(self._proc.stderr,),
-            name=f"mcp-stderr-{self.config.name}", daemon=True,
-        ).start()
-
-        try:
-            self._handshake()
-        except MCPError:
-            # 握手失败：清理子进程，再把异常抛给上层（结构化错误）。
-            self._kill_process()
+            transport = MCPTransport(process, self.config.name, max_line_chars=self.config.max_line_chars,
+                                     connect_timeout=self.config.connect_timeout)
+            with self._state_lock:
+                self._transport = transport
+                self._starting = False
+                self._require_current(transport)
+                transport.start_readers()
+            self._handshake(transport)
+            with self._state_lock:
+                self._require_current(transport)
+                transport.ready = True
+            return transport
+        except BaseException as exc:
+            with self._state_lock:
+                self._starting = False
+            if transport is not None:
+                transport.terminate(grace_seconds=0)
+            if isinstance(exc, OSError):
+                raise MCPError(f"MCP server '{self.config.name}' 启动失败：{exc}", code="MCP_SERVER_START_FAILED") from exc
             raise
-        self._started = True
-        # atexit 兜底：进程异常退出（未显式 close_mcp_clients）时也确保子进程被收掉，
-        # 避免 MCP server 子进程变孤儿。stop() 幂等，重复调用安全。沿用 browser_session 的约定。
-        atexit.register(self.stop)
 
-    # LLM: 握手只接受已实现版本及对象能力；不支持的版本关闭传输，不声明空成功。
-    # 函数用途: 协商协议并发送 initialized 通知。
-    def _handshake(self) -> None:
-        """initialize 请求 + 等待 capabilities + 发 notifications/initialized。"""
-        init_params = {
-            "protocolVersion": MCP_PROTOCOL_VERSION,
-            "capabilities": {},  # client 暂不声明 sampling/roots 等高级能力（最小实现）
+    # LLM: 只接受支持的协议及对象能力；initialize 和 initialized 始终使用同一候选连接。
+    # 函数用途: 完成三步握手，把返回的服务信息保存在本连接。
+    def _handshake(self, transport: MCPTransport) -> None:
+        result = transport.request("initialize", {
+            "protocolVersion": MCP_PROTOCOL_VERSION, "capabilities": {},
             "clientInfo": {"name": "my-agent", "version": "1.0"},
-        }
-        result = self._request("initialize", init_params, timeout=self.config.connect_timeout)
+        }, timeout=self.config.connect_timeout)
         if (not isinstance(result, dict) or result.get("protocolVersion") not in _SUPPORTED_PROTOCOL_VERSIONS
                 or not isinstance(result.get("capabilities"), dict) or not isinstance(result.get("serverInfo"), dict)):
             raise MCPError("MCP 握手版本或能力结构不受支持", code="MCP_PROTOCOL_ERROR")
-        self.server_info = result["serverInfo"]
-        self.capabilities = result["capabilities"]
-        # 握手第三步：通知 server 客户端已就绪（无需回包）。
-        self._notify("notifications/initialized", {})
+        transport.server_info = result["serverInfo"]
+        transport.capabilities = result["capabilities"]
+        transport.notify("notifications/initialized", {})
 
-    def stop(self) -> None:
-        """优雅关闭：关 stdin → 等退出 → terminate → kill 兜底。幂等。"""
-        if self._proc is None:
-            return
-        proc = self._proc
-        try:
-            if proc.stdin and not proc.stdin.closed:
-                try:
-                    proc.stdin.close()
-                except OSError:
-                    pass
-            try:
-                proc.wait(timeout=_STOP_GRACE_SECONDS)
-            except subprocess.TimeoutExpired:
-                self._kill_process()
-        finally:
-            self._reader_done.set()
-            self._proc = None
-            self._started = False
+    # LLM: 先关闭状态与原连接准入，再在锁外回收资源；启动尚未返回时必须保留清理未确认。
+    # 函数用途: 永久关闭这个客户端，返回原进程树清理事实，禁止后续重连。
+    def stop(self) -> ProcessTerminationReceipt:
+        with self._state_lock:
+            self._closed.set()
+            transport, starting = self._transport, self._starting
+            if transport is not None:
+                transport.revoke()
+        if transport is not None:
+            receipt = transport.terminate()
+            if receipt.confirmed:
+                atexit.unregister(self.stop)
+            return receipt
+        if not starting:
+            atexit.unregister(self.stop)
+        return ProcessTerminationReceipt("launch_pending" if starting else "not_started", not starting, None, 0)
 
-    def reconnect(self) -> None:
-        """在两轮调用之间重建已失效的 stdio transport，并保留同一工具绑定。
+    # LLM: 临时失败只关闭调用方持有的 transport；传入旧连接不能改变或清理新连接。
+    # 函数用途: 清理一次失败的握手后发现或调用连接，保留客户端在下轮重连的资格。
+    def disconnect(self, *, transport: MCPTransport) -> ProcessTerminationReceipt:
+        with self._state_lock:
+            transport.revoke()
+        return transport.terminate()
 
-        可用性查询仍然只读；只有显式的运行边界准备才调用这里。旧 reader 必须先退出，
-        再清理响应表和 Event，否则上一代 transport 的 EOF 会把新连接误判为已关闭。
-        """
-        with self._lifecycle_lock:
+    # LLM: 重连先确认原树清理；未知保留原句柄，不启动替代进程。新连接不复用队列和事件。
+    # 函数用途: 清理断开的原连接并创建下一条连接，返回新的固定句柄。
+    def reconnect(self) -> MCPTransport:
+        deadline = time.monotonic() + self.config.connect_timeout
+        with bounded_mcp_lock(self._connect_lock, deadline, closed=self._closed):
             if self.is_running():
-                return
-            old_reader = self._reader
-            self.stop()
-            if old_reader is not None and old_reader.is_alive():
-                old_reader.join(timeout=_STOP_GRACE_SECONDS)
-                if old_reader.is_alive():
-                    raise MCPError("旧 MCP 读取线程尚未退出，拒绝混用两代连接", code="MCP_CONNECTION_CLOSED")
-            with self._responses_cv:
-                self._responses.clear()
-                self._pending_request_ids.clear()
-            self._reader_done.clear()
-            self._reader = None
-            self.tools_changed = False
-            self.server_info = {}
-            self.capabilities = {}
-            self.start()
+                return self.connection()
+            with self._state_lock:
+                previous = self._transport
+            if previous is not None:
+                receipt = self.disconnect(transport=previous)
+                if not receipt.confirmed:
+                    raise MCPError("MCP 原连接进程清理尚未确认，拒绝重连", code="MCP_CLEANUP_UNKNOWN")
+            with self._state_lock:
+                if self.is_closed():
+                    raise MCPError("MCP 客户端已永久关闭", code="MCP_CONNECTION_CLOSED")
+                self._transport = None
+            return self.start()
 
-    def _kill_process(self) -> None:
-        """强制结束子进程（及其进程组），用于启动/握手失败或优雅关闭超时。"""
-        proc = self._proc
-        if proc is None:
-            return
-        try:
-            # 优先杀整个进程组（start_new_session 让子进程自成组），覆盖它派生的孙进程。
-            killpg = getattr(os, "killpg", None)
-            if killpg is not None:
-                try:
-                    import signal
+    # LLM: 调用前冻结当前已握手连接，之后所有排队与收发只使用返回值；不能事后重取 current。
+    # 函数用途: 为一次业务调用或目录发现获取固定连接。
+    def connection(self) -> MCPTransport:
+        with self._state_lock:
+            transport = self._transport
+            self._require_current(transport)
+            if transport is None or not transport.ready:
+                raise MCPError("MCP 尚未完成握手", code="MCP_CONNECTION_CLOSED")
+            return transport
 
-                    killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                except (ProcessLookupError, PermissionError, OSError):
-                    proc.kill()
-            else:
-                proc.kill()
-        except (ProcessLookupError, OSError):
-            pass
-        try:
-            proc.wait(timeout=_STOP_GRACE_SECONDS)
-        except (subprocess.TimeoutExpired, OSError):
-            pass
-        self._reader_done.set()
+    # LLM: 必须在状态锁内核对原对象；连接 EOF、显式断开、替换或永久关闭都不能继续发布。
+    # 函数用途: 拒绝过期或已关闭的候选连接。
+    def _require_current(self, transport: MCPTransport | None) -> None:
+        if (self.is_closed() or transport is None or self._transport is not transport
+                or transport.inbox.closed.is_set()):
+            raise MCPError("MCP 连接已关闭或被替换", code="MCP_CONNECTION_CLOSED")
 
-    # -- JSON-RPC over stdio -------------------------------------------------
+    # LLM: publisher 只能做当前目录的纯内存替换，不能发 IO 或反向获取 prepare 锁；与 stop 共用短状态锁。
+    # 函数用途: 将完整发现的工具目录发布到仍然有效的同一连接上。
+    def publish_tools(self, transport: MCPTransport, publisher: Callable[[], _Publication]) -> _Publication:
+        with self._state_lock:
+            with transport.admission_lock:
+                self._require_current(transport)
+                if not transport.is_running():
+                    raise MCPError("MCP 连接在目录发布前已退出", code="MCP_CONNECTION_CLOSED")
+                return publisher()
 
-    # LLM: tools/list 必须穷尽分页；重复 cursor、同名或错误结构拒绝发布残缺目录。
-    # 函数用途: 获取完整远程工具表，并清除已消费的变更通知。
-    def list_tools(self) -> list[MCPToolInfo]:
-        """``tools/list``：发现 server 暴露的工具。失败抛 MCPError。"""
-        generation = self._tools_generation
-        tools = _discover_tools(self._request, self.config.connect_timeout)
-        self.tools_changed = generation != self._tools_generation
+    # LLM: 所有分页固定同一 transport；发布前仍须由注册层调用 publish_tools 校验有效性。
+    # 函数用途: 获取完整工具目录，保留发现期间发生的目录变更通知。
+    def list_tools(self, *, transport: MCPTransport | None = None) -> list[MCPToolInfo]:
+        selected = transport if transport is not None else self.connection()
+        with self._state_lock:
+            self._require_current(selected)
+        generation = selected.inbox.tools_generation
+        tools = _discover_tools(selected.request, self.config.connect_timeout)
+        with selected.inbox.condition:
+            selected.inbox.tools_changed = generation != selected.inbox.tools_generation
         return tools
 
+    # LLM: 本调用只发送到获取时的连接；排队期间停用或换连接须失败，不能自动转投新进程。
+    # 函数用途: 调用一个 MCP 工具并保留完整、规范化的原始结果。
     def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        """``tools/call``：调用一个工具，返回归一化结果 dict。
-
-        返回形如 ``{"content": <文本>, "isError": bool, "structuredContent": <可选>}``。
-        协议错 / 超时 / 进程死 抛 MCPError；server 自己报的工具错（isError=true）不抛，
-        而是把 isError 一起返回，由上层决定如何呈现给模型。
-        """
-        result = self._request(
-            "tools/call",
-            {"name": tool_name, "arguments": arguments or {}},
-            timeout=self.config.timeout,
-        )
+        transport = self.connection()
+        result = transport.request("tools/call", {"name": tool_name, "arguments": arguments or {}},
+                                   timeout=self.config.timeout)
         return _normalize_call_result(result, self.config.max_content_chars)
-
-    # LLM: 总 deadline 从排队前开始；取消/超时只终止等待，不证明远程副作用未发生。
-    # 函数用途: 串行发送带唯一 ID 的请求，所有退出路径清理在途表并尽力通知远端取消。
-    def _request(self, method: str, params: dict[str, Any], *, timeout: float) -> Any:
-        deadline = time.monotonic() + max(0.01, timeout)
-        with _bounded_lock(self._lock, deadline):
-            req_id = self._next_id
-            self._next_id += 1
-            message = {"jsonrpc": "2.0", "id": req_id, "method": method, "params": params}
-            with self._responses_cv:
-                self._pending_request_ids.add(req_id)
-            sent = False
-            try:
-                self._send(message, deadline=deadline)
-                sent = True
-                return self._await_response(req_id, method, max(0, deadline - time.monotonic()))
-            except MCPError as exc:
-                if sent and method != "initialize" and exc.code in {"MCP_CANCELLED", "MCP_TIMEOUT"}:
-                    try:
-                        self._send({"jsonrpc": "2.0", "method": "notifications/cancelled",
-                                    "params": {"requestId": req_id, "reason": exc.code}},
-                                   deadline=time.monotonic() + 0.2, allow_cancelled=True)
-                    except MCPError:
-                        pass
-                raise
-            finally:
-                with self._responses_cv:
-                    self._pending_request_ids.discard(req_id)
-                    self._responses.pop(req_id, None)
-
-    # LLM: 通知与请求共用排队 deadline；没有 request ID 就不等待响应。
-    # 函数用途: 在连接期限内发出初始化等通知，不无限等候请求锁。
-    def _notify(self, method: str, params: dict[str, Any]) -> None:
-        deadline = time.monotonic() + self.config.connect_timeout
-        with _bounded_lock(self._lock, deadline):
-            self._send({"jsonrpc": "2.0", "method": method, "params": params}, deadline=deadline)
-
-    # LLM: 每条连接只有一项写入；背压消耗总 deadline，半帧失败必须销毁连接，禁止续写取消帧。
-    # 函数用途: 跨平台写入完整 JSON-RPC 帧；超时终止传输进程，不谎称远端副作用回滚。
-    def _send(self, message: dict[str, Any], *, deadline: float | None = None, allow_cancelled: bool = False) -> None:
-        proc = self._proc
-        if proc is None or proc.stdin is None or proc.stdin.closed:
-            raise MCPError(
-                f"MCP server '{self.config.name}' 连接已关闭，无法发送请求",
-                code="MCP_CONNECTION_CLOSED",
-            )
-        try:
-            until = deadline if deadline is not None else time.monotonic() + self.config.connect_timeout
-            with _bounded_lock(self._write_lock, until, allow_cancelled=allow_cancelled):
-                payload = (json.dumps(message, ensure_ascii=False) + "\n").encode("utf-8")
-                if len(payload) > self.config.max_line_chars:
-                    raise MCPError("MCP 请求超过单帧大小上限", code="MCP_PROTOCOL_ERROR")
-                complete = threading.Event()
-                failures: list[OSError] = []
-
-                # LLM: 此线程只持有一帧和一个 fd；调用方超时会杀整个 transport 以解除管道背压。
-                # 函数用途: 排空一帧字节并通知等待者；不使用文本缓冲，避免拆开 UTF-8 字符。
-                def write_frame() -> None:
-                    try:
-                        remaining = memoryview(payload)
-                        while remaining:
-                            remaining = remaining[os.write(proc.stdin.fileno(), remaining):]
-                    except (OSError, ValueError) as exc:
-                        failures.append(OSError(str(exc)))
-                    finally:
-                        complete.set()
-
-                writer = threading.Thread(target=write_frame, name=f"mcp-writer-{self.config.name}", daemon=True)
-                writer.start()
-                while not complete.wait(timeout=0.01):
-                    if cancellation_requested() and not allow_cancelled:
-                        self._kill_process()
-                        raise MCPError("MCP 发送已取消", code="MCP_CANCELLED")
-                    if time.monotonic() >= until:
-                        self._kill_process()
-                        raise MCPError("MCP 写入超时", code="MCP_TIMEOUT")
-                if failures:
-                    raise failures[0]
-        except (BrokenPipeError, OSError) as exc:
-            raise MCPError(
-                f"MCP server '{self.config.name}' 写入失败（子进程可能已退出）：{exc}",
-                code="MCP_CONNECTION_CLOSED",
-            ) from exc
-
-    def _await_response(self, req_id: int, method: str, timeout: float) -> Any:
-        """轮询等待指定 id 的响应；超时 / 进程提前死 都转成 MCPError。"""
-        deadline = time.monotonic() + max(0, timeout)
-        def wake_waiter() -> None:
-            with self._responses_cv:
-                self._responses_cv.notify_all()
-
-        with register_cancellation_callback(wake_waiter):
-            with self._responses_cv:
-                while True:
-                    if cancellation_requested():
-                        raise MCPError(
-                            f"MCP server '{self.config.name}' 调用 {method} 已取消",
-                            code="MCP_CANCELLED",
-                        )
-                    if req_id in self._responses:
-                        payload = self._responses.pop(req_id)
-                        return _unwrap_jsonrpc(self.config.name, payload, method)
-                    if self._reader_done.is_set() and req_id not in self._responses:
-                        # 读线程已结束（子进程退出 / stdout EOF）但没拿到本请求的响应。
-                        raise MCPError(
-                            f"MCP server '{self.config.name}' 在响应 {method} 前断开连接"
-                            f"{self._stderr_tail.hint()}",
-                            code="MCP_CONNECTION_CLOSED",
-                        )
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise MCPError(
-                            f"MCP server '{self.config.name}' 调用 {method} 超时"
-                            f"（{timeout:.0f}s）",
-                            code="MCP_TIMEOUT",
-                        )
-                    self._responses_cv.wait(timeout=min(remaining, 0.5))
-
-    # -- 后台读 / stderr -----------------------------------------------------
-
-    def _read_loop(self) -> None:
-        """后台线程：逐行读 stdout（单行有上限,防 OOM），解析 JSON-RPC 消息并按 id 投递。"""
-        proc = self._proc
-        if proc is None or proc.stdout is None:
-            self._reader_done.set()
-            return
-        cap = self.config.max_line_chars
-        try:
-            while True:
-                raw = proc.stdout.readline(cap + 1)  # 至多读 cap+1 字符或到换行,不无上限读进内存
-                if raw == "":
-                    break  # EOF：子进程退出
-                if self._line_over_cap(raw, proc.stdout, cap):
-                    continue  # 超长行已丢弃,跳过该消息(防话痨 server 撑爆内存)
-                self._handle_line(raw.strip())
-        except (OSError, ValueError):
-            pass
-        finally:
-            # stdout EOF：子进程退出。唤醒所有还在等响应的请求，让它们走 MCPError。
-            with self._responses_cv:
-                self._reader_done.set()
-                self._responses_cv.notify_all()
-
-    def _line_over_cap(self, raw: str, stream: Any, cap: int) -> bool:
-        """raw 未到换行且已达上限 → 超长行:吞掉本行剩余(到换行/EOF)并返回 True。"""
-        if raw.endswith("\n") or len(raw) <= cap:
-            return False
-        while True:
-            extra = stream.readline(cap + 1)
-            if extra == "" or extra.endswith("\n"):
-                break
-        logger.warning("MCP server '%s' 单行超 %d 字符上限,已丢弃该消息(防 OOM)", self.config.name, cap)
-        return True
-
-    def _handle_line(self, line: str) -> None:
-        """解析一行 JSON-RPC 并投递;非 JSON 行(有些 server 往 stdout 混日志)跳过留痕。"""
-        if not line:
-            return
-        try:
-            message = json.loads(line)
-        except (json.JSONDecodeError, ValueError):
-            logger.debug("MCP server '%s' stdout 非 JSON 行已忽略: %.200s", self.config.name, line)
-            return
-        self._dispatch_message(message)
-
-    # LLM: method 区分服务端请求/通知，result/error 才是响应；仅接收精确在途 ID，迟到和未知响应不积压。
-    # 函数用途: 分发 JSON-RPC 消息，标记目录变化并拒绝把服务端请求混入客户端响应。
-    def _dispatch_message(self, message: object) -> None:
-        if not isinstance(message, dict) or message.get("jsonrpc") != "2.0":
-            return
-        msg_id = message.get("id")
-        method = message.get("method")
-        if isinstance(method, str):
-            if msg_id is None:
-                if method == "notifications/tools/list_changed":
-                    self._tools_generation += 1
-                    self.tools_changed = True
-            else:
-                response = ({"result": {}} if method == "ping" else
-                            {"error": {"code": -32601, "message": "Client method not supported"}})
-                try:
-                    self._send({"jsonrpc": "2.0", "id": msg_id, **response})
-                except MCPError:
-                    pass
-            return
-        if type(msg_id) is not int or ("result" in message) == ("error" in message):
-            return
-        with self._responses_cv:
-            if msg_id not in self._pending_request_ids:
-                return
-            self._responses.setdefault(msg_id, message)
-            self._responses_cv.notify_all()
-
-class _StderrTail:
-    """抽干子进程 stderr 并保留末尾若干行，用于失败诊断（避免管道塞满死锁）。
-
-    从 ``MCPStdioClient`` 拆出来：stderr 诊断是独立关注点，单独成类让客户端类更聚焦于
-    JSON-RPC 收发主线。``drain`` 在后台线程跑，``hint`` 在主线程读末尾几行（脱敏后）。
-    """
-
-    def __init__(self, server_name: str, keep: int = 20):
-        self._server_name = server_name
-        self._keep = keep
-        self._lines: list[str] = []
-
-    # LLM: stderr 同时限制每段与保留段数；没有换行的失控输出也不能无限分配。
-    # 函数用途: 持续排空错误管道，仅留有界、脱敏的末尾诊断。
-    def drain(self, stream: object) -> None:
-        if stream is None:
-            return
-        try:
-            for raw in iter(lambda: stream.readline(4096), ""):  # type: ignore[attr-defined]
-                line = raw.rstrip("\n")
-                if not line:
-                    continue
-                self._lines.append(sanitize_credentials(line))
-                if len(self._lines) > self._keep:
-                    del self._lines[: len(self._lines) - self._keep]
-        except (OSError, ValueError):
-            pass
-
-    def hint(self) -> str:
-        if not self._lines:
-            return ""
-        return f"（server stderr: {sanitize_credentials('; '.join(self._lines[-3:]))}）"
-
-
-__all__ = [
-    "MCP_PROTOCOL_VERSION",
-    "MCPError",
-    "MCPServerConfig",
-    "MCPStdioClient",
-    "MCPToolInfo",
-    "build_safe_env",
-    "redact_env_for_log",
-    "sanitize_credentials",
-]

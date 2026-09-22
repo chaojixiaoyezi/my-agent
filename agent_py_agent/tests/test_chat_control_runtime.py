@@ -41,17 +41,31 @@ from agent_py_agent.cli.chat_parts.slash_commands import handle_common_slash_com
     ("/plugins install", "缺少必填参数 source"),
     ("/plugins list --bad", "未声明的选项"),
 ])
-def test_plugin_command_is_consumed_without_calling_control_or_agent(raw, message) -> None:
+def test_plugin_command_is_consumed_without_calling_control_or_agent(tmp_path, raw, message) -> None:
+    from agent_py_agent.agent.conversation.store import ConversationStore
+    from agent_py_agent.agent.user_space.home_layout import home_paths
+    from agent_py_agent.agent.user_space.owner_resolver import resolve_owner_home
+
     output: list[str] = []
     executor = MagicMock(side_effect=AssertionError("插件命令不能进入旧控制器"))
-    agent = SimpleNamespace(config=AgentConfig())
+    owner = resolve_owner_home(tmp_path)
+    agent = SimpleNamespace(
+        config=AgentConfig(),
+        home_paths=home_paths(tmp_path),
+        conversation_store=ConversationStore(owner.home_dir / "conversations", initialize=False),
+        effective_workspace_root=owner.home_dir,
+        run=MagicMock(side_effect=AssertionError("插件帮助和错误不能调用模型")),
+    )
+    original_attributes = set(vars(agent))
     ctx = SlashCommandContext(agent, 5, [], [], output.append, executor)
 
     assert handle_common_slash_command(raw, ctx=ctx)
 
     assert len(output) == 1 and message in output[0]
     executor.assert_not_called()
-    assert set(vars(agent)) == {"config"}
+    agent.run.assert_not_called()
+    assert set(vars(agent)) == original_attributes
+    assert not list(tmp_path.iterdir())
     assert ctx.runtime_inject == [] and ctx.prompt_files == []
 
 

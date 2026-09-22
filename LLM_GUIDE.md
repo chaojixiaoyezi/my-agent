@@ -21,6 +21,11 @@
 
 ## 当前运行边界（验收状态看 STATUS）
 
+MCP 本地源码已区分临时 disconnect 与永久 stop；每次请求和目录发现固定 transport，关闭后不能经 prepare 重连。
+原进程树清理未确认不替换连接；可用性不提前回收组长，读线程自行关闭管道。连接合同见 [MCP 生命周期](docs/design/MCP_TRANSPORT_LIFECYCLE.md)。
+这不代替唯一插件安装表的持久激活/撤销和真实 TUI 装卸验收。
+模型工作片冻结权限时直接读取 `user_space/owner_access.py`，不得从 core 恢复旧私有 helper；主任务与继承子代理的目录墙仍按原裁决。
+
 长等待、后台进程完成通知与缓存诊断复用既有进程/会话账本，见 `docs/design/LONG_RUNNING_EXECUTION.md`。
 子代理明确停止按固定执行归属清理后台/PTY；独立 runner 复用原心跳转交精确 attempt 中断。
 宿主可能启动父级接续或新轮，launch/PID/出生标识不能证明整棵 OS 树独占；宿主退出单独只读核对。

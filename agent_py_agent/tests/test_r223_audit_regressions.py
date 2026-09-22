@@ -89,35 +89,35 @@ def test_artifact_budget_reserves_pending_and_releases_failure():
 
 
 def test_mcp_queue_wait_counts_towards_timeout():
-    client = mcp.MCPStdioClient(mcp.MCPServerConfig("queue", "unused"))
-    client._lock.acquire()
+    from agent_py_agent.agent.tooling.mcp_transport import MCPTransport
+    transport = MCPTransport(SimpleNamespace(pid=0, stderr=None), "queue", max_line_chars=1024, connect_timeout=1)
+    transport.request_lock.acquire()
     before = time.monotonic()
     try:
         with pytest.raises(mcp.MCPError) as error:
-            client._request("tools/list", {}, timeout=0.06)
+            transport.request("tools/list", {}, timeout=0.06)
         assert error.value.code == "MCP_TIMEOUT"
         assert time.monotonic() - before < 0.5
-        assert not client._pending_request_ids
+        assert not transport.inbox.pending
     finally:
-        client._lock.release()
+        transport.request_lock.release()
 
 
-def test_mcp_server_request_is_not_a_client_response(monkeypatch):
-    client = mcp.MCPStdioClient(mcp.MCPServerConfig("request", "unused"))
-    sent = []
-    monkeypatch.setattr(client, "_send", lambda message, **kwargs: sent.append(message))
-    client._pending_request_ids.add(1)
-    client._dispatch_message({"jsonrpc": "2.0", "id": 1, "method": "ping"})
-    assert sent == [{"jsonrpc": "2.0", "id": 1, "result": {}}]
-    assert client._responses == {}
+def test_mcp_server_request_is_not_a_client_response():
+    from agent_py_agent.agent.tooling.mcp_protocol import MCPInbox
+    inbox = MCPInbox("request")
+    inbox.pending.add(1)
+    response = inbox.dispatch({"jsonrpc": "2.0", "id": 1, "method": "ping"})
+    assert response == {"jsonrpc": "2.0", "id": 1, "result": {}}
+    assert inbox.responses == {}
 
 
-def test_mcp_rejects_unsupported_protocol(monkeypatch):
+def test_mcp_rejects_unsupported_protocol():
     client = mcp.MCPStdioClient(mcp.MCPServerConfig("version", "unused"))
-    monkeypatch.setattr(client, "_request", lambda *a, **kw: {
+    transport = SimpleNamespace(request=lambda *a, **kw: {
         "protocolVersion": "unsupported", "capabilities": {}, "serverInfo": {}})
     with pytest.raises(mcp.MCPError) as error:
-        client._handshake()
+        client._handshake(transport)
     assert error.value.code == "MCP_PROTOCOL_ERROR"
 
 
@@ -130,13 +130,18 @@ def test_mcp_catalog_does_not_replace_malformed_schema_with_empty(definition):
 
 
 def test_mcp_list_change_during_refresh_is_not_lost(monkeypatch):
-    client = mcp.MCPStdioClient(mcp.MCPServerConfig("changed", "unused"))
-    def changed(*args, **kwargs):
-        client._dispatch_message({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"})
-        return {"tools": []}
-    monkeypatch.setattr(client, "_request", changed)
-    assert client.list_tools() == []
-    assert client.tools_changed is True
+    from agent_py_agent.tests.test_mcp_client import _ECHO_SERVER, _config
+    client = mcp.MCPStdioClient(_config(_ECHO_SERVER))
+    try:
+        transport = client.start()
+        def changed(*args, **kwargs):
+            transport.inbox.dispatch({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"})
+            return {"tools": []}
+        monkeypatch.setattr(transport, "request", changed)
+        assert client.list_tools() == []
+        assert client.tools_changed is True
+    finally:
+        client.stop()
 
 
 def test_mcp_timeout_sends_cancellation_to_real_server(tmp_path):
@@ -160,7 +165,7 @@ def test_mcp_timeout_sends_cancellation_to_real_server(tmp_path):
         while not observed.exists() and time.monotonic() < until:
             threading.Event().wait(0.01)
         assert json.loads(observed.read_text())["requestId"] == 2
-        assert client._pending_request_ids == set()
+        assert client.connection().inbox.pending == set()
     finally:
         client.stop()
 
@@ -174,19 +179,20 @@ time.sleep(30)
     client = mcp.MCPStdioClient(mcp.MCPServerConfig("backpressure", sys.executable,
         args=["-u", "-c", server], timeout=0.1, max_line_chars=1024 * 1024))
     try:
-        client.start()
+        transport = client.start()
         before = time.monotonic()
         with pytest.raises(mcp.MCPError) as error:
             client.call_tool("unused", {"text": "x" * 500000})
         assert error.value.code == "MCP_TIMEOUT"
         assert time.monotonic() - before < 1
-        assert client._proc.poll() is not None
+        assert transport.binding.process.poll() is not None
     finally:
         client.stop()
 
 
 def test_mcp_stderr_without_newlines_is_bounded():
-    tail = mcp._StderrTail("noise")
+    from agent_py_agent.agent.tooling.mcp_protocol import MCPStderrTail
+    tail = MCPStderrTail("noise")
     tail.drain(io.StringIO("x" * 500000))
     assert len(tail._lines) == 20
     assert sum(map(len, tail._lines)) <= 20 * 4096

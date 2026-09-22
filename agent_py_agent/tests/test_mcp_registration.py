@@ -592,10 +592,10 @@ def test_registry_run_boundary_reconnects_and_refreshes_dead_mcp_binding(tmp_pat
     )
     try:
         client = registry._mcp_clients[0]
-        process = client._proc
-        assert process is not None
+        original = client.connection()
+        process = original.binding.process
         process.kill()
-        process.wait(timeout=3)
+        assert original.inbox.closed.wait(3)
         assert "mcp__demo__echo" not in registry.runtime_snapshot().available_tool_names
 
         registry.prepare_for_run()
@@ -729,10 +729,10 @@ def test_registry_reconnect_replaces_stale_mcp_catalog_exactly(tmp_path):
     try:
         assert "mcp__changing__before" in registry.runtime_snapshot().available_tool_names
         client = registry._mcp_clients[0]
-        process = client._proc
-        assert process is not None
+        original = client.connection()
+        process = original.binding.process
         process.kill()
-        process.wait(timeout=3)
+        assert original.inbox.closed.wait(3)
         server.write_text(_single_tool_server("after"), encoding="utf-8")
 
         registry.prepare_for_run()
@@ -758,6 +758,9 @@ def test_registry_failed_reconnect_uses_backoff_instead_of_retrying_every_lookup
         def is_running(self):
             return False
 
+        def is_closed(self):
+            return False
+
         def reconnect(self):
             self.reconnect_calls += 1
             raise MCPError("still offline", code="MCP_CONNECTION_CLOSED")
@@ -776,7 +779,7 @@ def test_registry_failed_reconnect_uses_backoff_instead_of_retrying_every_lookup
     registry.prepare_for_run()
 
     assert client.reconnect_calls == 1
-    assert client.stop_calls == 1
+    assert client.stop_calls == 0
     attempts, retry_at = registry._mcp_retry_state[id(client)]
     assert attempts == 1
     assert retry_at > 0

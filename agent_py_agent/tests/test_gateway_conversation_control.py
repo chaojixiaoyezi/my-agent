@@ -3903,19 +3903,19 @@ def test_http_ask_routes_stop_to_live_window_interrupt(tmp_path) -> None:
 
 
 @pytest.mark.parametrize("endpoint", ["ask", "control"])
-@pytest.mark.parametrize(("command", "kind", "ok", "reason"), [
-    ("/not-a-command anything", "unsupported", False, None),
-    ("/plugins", "plugin_command", True, None),
-    ("/plugins help install", "plugin_command", True, None),
-    ("/plugins@", "plugin_command", False, "invalid_plugin_id"),
-    ("/PLUGINS@Demo run", "plugin_command", False, "unknown_plugin"),
-    ('/plugins@demo run --path "C:\\new folder\\中文.txt" -- -x | literal', "plugin_command", False, "unknown_plugin"),
-    ('/plugins install "中文 a.whl"', "plugin_command", False, "missing_revision"),
-    ("/plugins install", "plugin_command", False, "missing_argument"),
-    ('/plugins install "未闭合', "plugin_command", False, "unclosed_quote"),
+@pytest.mark.parametrize(("command", "kind", "ok", "reason", "error_code"), [
+    ("/not-a-command anything", "unsupported", False, None, None),
+    ("/plugins", "plugin_command", True, None, None),
+    ("/plugins help install", "plugin_command", True, None, None),
+    ("/plugins@", "plugin_command", False, "invalid_plugin_id", "INVALID_COMMAND_ARGUMENTS"),
+    ("/PLUGINS@Demo run", "plugin_command", False, "unknown_plugin", "UNKNOWN_PLUGIN"),
+    ('/plugins@demo run --path "C:\\new folder\\中文.txt" -- -x | literal', "plugin_command", False, "unknown_plugin", "UNKNOWN_PLUGIN"),
+    ('/plugins install "中文 a.whl"', "plugin_command", False, None, "PLUGIN_PERMISSION_DENIED"),
+    ("/plugins install", "plugin_command", False, "missing_argument", "INVALID_COMMAND_ARGUMENTS"),
+    ('/plugins install "未闭合', "plugin_command", False, "unclosed_quote", "INVALID_COMMAND_ARGUMENTS"),
 ])
 def test_http_plugin_help_and_errors_do_not_call_model_guidance_or_stop(
-    tmp_path, monkeypatch, endpoint, command, kind, ok, reason,
+    tmp_path, monkeypatch, endpoint, command, kind, ok, reason, error_code,
 ) -> None:
     from agent_py_agent.agent.gateway_parts import http_handlers
 
@@ -3967,6 +3967,7 @@ def test_http_plugin_help_and_errors_do_not_call_model_guidance_or_stop(
     assert payload["kind"] == kind
     assert payload["ok"] is ok
     assert payload.get("reason") == reason
+    assert payload.get("error_code") == error_code
     assert agent.conversation_store.guidance.pending("request", "req-1") == guidance_before
     assert list(paths.inbox.glob("*.json")) == []
     assert request_path.read_bytes() == before

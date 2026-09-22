@@ -763,45 +763,58 @@ def _execution_workspace_roots(
     return tuple(roots or (invocation_root,))
 
 
+# LLM: 先永久撤销冻结客户端以打断发现，再取得 prepare 锁清共享引用；不能持 prepare 等长请求后才关闭。
+# 函数用途: 关闭本注册表及其权限视图共用的 MCP 连接，避免旧视图再次重连。
 def _close_registry_clients(registry: ToolRegistry) -> None:
     for client in getattr(registry, "_mcp_clients", ()) or ():
         try:
             client.stop()
         except Exception:  # 关闭尽力而为，单个失败不阻断其余清理。
             pass
-    registry._mcp_clients = []
-    registry._mcp_retry_state.clear()
+    with registry._mcp_prepare_lock:
+        registry._mcp_clients.clear()
+        registry._mcp_retry_state.clear()
 
 
-# LLM: 远程目录变化只在新运行边界发布；不改变已冻结快照，不在普通可用性查询里发网络请求。
-# 函数用途: 在运行前恢复断开的 MCP 连接，或重新发现已收到 list_changed 的工具目录。
+# LLM: 远程目录只在运行边界更新；永久关闭不重连、不续退避，旧快照由共享客户端拒绝执行。
+# 函数用途: 恢复暂时断连或更新工具目录，已明确关闭的连接保持关闭。
 def _prepare_registry_clients_for_run(registry: ToolRegistry) -> None:
     clients = list(getattr(registry, "_mcp_clients", ()) or ())
     if not clients or all(client.is_running() and not getattr(client, "tools_changed", False) for client in clients):
         return
     with registry._mcp_prepare_lock:
         for client in list(getattr(registry, "_mcp_clients", ()) or ()):
+            if client.is_closed():
+                registry._mcp_retry_state.pop(id(client), None)
+                continue
             if client.is_running() and not getattr(client, "tools_changed", False):
                 registry._mcp_retry_state.pop(id(client), None)
                 continue
             _reconnect_registry_client_if_due(registry, client)
 
 
+# LLM: 恢复与发布固定同一 transport；失败只能清理已收到的句柄，不能 stop 整个可恢复客户端或猜 current。
+# 函数用途: 按退避连接暂时不可用的 MCP 服务，永久关闭时撤销恢复队列。
 def _reconnect_registry_client_if_due(registry: ToolRegistry, client: object) -> None:
+    if client.is_closed():
+        registry._mcp_retry_state.pop(id(client), None)
+        return
     attempts, retry_at = registry._mcp_retry_state.get(id(client), (0, 0.0))
     if time.monotonic() < retry_at:
         return
+    transport = None
     try:
-        from .mcp_registration import refresh_registered_mcp_client
+        from .mcp_registration import disconnect_failed_mcp_transport, refresh_registered_mcp_client
 
-        client.reconnect()
-        refresh_registered_mcp_client(registry, client)
+        transport = client.reconnect()
+        refresh_registered_mcp_client(registry, client, transport=transport)
         registry._mcp_retry_state.pop(id(client), None)
     except Exception as exc:
-        try:
-            client.stop()
-        except Exception:
-            pass
+        if transport is not None:
+            disconnect_failed_mcp_transport(client, transport)
+        if client.is_closed():
+            registry._mcp_retry_state.pop(id(client), None)
+            return
         attempts += 1
         delay = min(60.0, float(2 ** min(attempts - 1, 6)))
         registry._mcp_retry_state[id(client)] = (

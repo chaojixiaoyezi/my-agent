@@ -1,4 +1,4 @@
-# LLM: 工作片入口冻结模型及用户显式路径权限；共享 Agent 其他线程不被热改，子代理不能继承管理员全盘权限。
+# LLM: 工作片入口冻结模型及用户显式路径权限；权限裁决直接读取 owner_access，联测真实 Agent、权限视图与子代理继承。
 # 模块用途: 绑定模型、提示和工具权限视图；存储、会话、MCP 连接仍使用原权威，离开时恢复。
 
 from __future__ import annotations
@@ -75,7 +75,7 @@ def _profile_backend(agent: object, config: object):
         return cache[key]
 
 
-# LLM: 只绑定 descriptor Agent；即使部署默认也冻结绑定，防止嵌套运行重读 owner 默认；退出恢复，不新建 MCP。
+# LLM: 只绑定 descriptor Agent；原 owner 裁决接收路径、配置和策略，不再从 composition root 导入已移除 helper；退出恢复，不新建 MCP。
 # 函数用途: 工作片按 canonical thread 选模型，期间切换仅影响下一片；子代理继承模型但保持家目录边界。
 @contextmanager
 def selected_model_scope(agent: object, *, inherited: bool = False, thread_id: str = "", active: bool = True):
@@ -97,9 +97,9 @@ def selected_model_scope(agent: object, *, inherited: bool = False, thread_id: s
         "prompts": prompts,
     }
     if isinstance(getattr(type(agent), "tools", None), ModelScopedAttribute):
-        from ..core import _resolve_owner_scope_and_access
+        from ..user_space.owner_access import resolve_owner_scope_and_access
 
-        owner_root, access = _resolve_owner_scope_and_access(agent, config)
+        owner_root, access = resolve_owner_scope_and_access(agent.home_paths, config, getattr(agent, "owner_policy", None))
         values["tools"] = agent.tools.with_access_policy(
             access_mode=access, path_access_mode="full" if not owner_root else config.path_access_mode,
             owner_scope_root=owner_root,

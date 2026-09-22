@@ -1,5 +1,9 @@
 # 设计台账
 
+本地开发：MCP 已分离客户端、固定连接和协议响应箱；永久关闭先撤销，临时断连只清理原连接，未知清理阻止替代进程。
+目录发布复查同一连接，权限视图不再复活已关闭客户端；跨进程插件激活/撤销仍待接线，见 [连接合同](docs/design/MCP_TRANSPORT_LIFECYCLE.md)。
+本地修复：模型工作片权限视图已迁移到原共享 owner_access；删除 helper 后的遗漏调用方已修正，不增加权限别名或兼容层。
+
 本地实施中：插件环境准备复用原 operation 的完整 logical 资源声明和原 ProcessSessionStore；不新增进程账或操作 checkpoint。
 固定计划及原 claim 先于写入；准备进程绑定原 owner/thread/task/run/attempt、宿主寿命及截止时间，普通后台仍按旧默认独立运行。
 完整激活及 MCP 撤销仍待实施，见 [插件环境合同](docs/design/PLUGIN_ENVIRONMENTS.md)。

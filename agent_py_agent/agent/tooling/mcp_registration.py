@@ -1,4 +1,6 @@
 
+# LLM: MCP 注册沿客户端固定连接发现并发布；临时失败不永久 stop，关闭后的共享客户端不得恢复，联测注册与权限视图。
+# 模块用途: 将远端工具变成原 ToolRegistry 的受控代理，并在连接仍有效时原子替换工具目录。
 from __future__ import annotations
 
 """把 MCP server 发现的工具动态注册进 my-agent 的 ToolRegistry。
@@ -40,6 +42,7 @@ from .mcp_client import (
     redact_env_for_log,
     sanitize_credentials,
 )
+from .mcp_transport import MCPTransport
 from .models import (
     BaseTool,
     ConcurrencyPolicy,
@@ -268,6 +271,8 @@ def parse_mcp_servers(raw: object) -> list[MCPServerConfig]:
     return configs
 
 
+# LLM: 初次发现与恢复共用固定 transport 发布；未返回句柄的启动失败由 client 自行清理，不终结重试资格。
+# 函数用途: 启动声明的 MCP 服务并注册工具，保留暂时失败的客户端供后续运行恢复。
 def register_mcp_servers(registry: Any, mcp_servers: object) -> list[MCPStdioClient]:
     """连接所有配置的 MCP server，把已发现的工具注册进 ``registry``。
 
@@ -284,35 +289,48 @@ def register_mcp_servers(registry: Any, mcp_servers: object) -> list[MCPStdioCli
     for config in configs:
         client = MCPStdioClient(config)
         clients.append(client)
+        transport = None
         try:
-            client.start()
-            tools = client.list_tools()
+            transport = client.start()
+            registered = refresh_registered_mcp_client(registry, client, transport=transport)
         except MCPError as exc:
             logger.warning(
                 "MCP server '%s' 连接失败，跳过（command=%s env=%s）：%s",
                 config.name, config.command, redact_env_for_log(config.env), exc,
             )
-            client.stop()
+            if transport is not None:
+                disconnect_failed_mcp_transport(client, transport)
             continue
         except Exception as exc:  # 兜底：连接路径任何意外异常都不许崩主流程。
             logger.exception("MCP server '%s' 连接出现未预期异常，跳过", config.name)
-            client.stop()
+            if transport is not None:
+                disconnect_failed_mcp_transport(client, transport)
             continue
 
-        registered = _register_discovered_tools(registry, client, config, tools)
-        logger.info(
-            "MCP server '%s' 已连接，注册 %d 个工具：%s",
-            config.name, registered, _tool_names_preview(tools),
-        )
+        logger.info("MCP server '%s' 已连接，注册 %d 个工具", config.name, registered)
     return clients
 
 
+# LLM: 错误收尾只能清理原 transport；异常不能中断其他服务装配，未知仍由原客户端保留，不新建替代连接。
+# 函数用途: 隔离单个 MCP 服务的清理失败，保持核心和其他服务可用。
+def disconnect_failed_mcp_transport(client: MCPStdioClient, transport: MCPTransport) -> None:
+    try:
+        receipt = client.disconnect(transport=transport)
+        if not receipt.confirmed:
+            logger.warning("MCP server '%s' 原连接清理未确认", client.config.name)
+    except Exception as exc:
+        logger.warning("MCP server '%s' 原连接清理异常：%s", client.config.name, type(exc).__name__)
+
+
+# LLM: 所有分页来自固定连接；发布在客户端生命周期锁内复核该连接，纯目录替换不能反向获取 prepare 锁。
+# 函数用途: 刷新一个 MCP 服务的工具目录；停用或重连已使候选失效时拒绝发布。
 def refresh_registered_mcp_client(
     registry: Any,
     client: MCPStdioClient,
+    *,
+    transport: MCPTransport,
 ) -> int:
-    """Refresh one reconnected server and atomically publish its exact tool catalog."""
-    tools = client.list_tools()
+    tools = client.list_tools(transport=transport)
     current = dict(getattr(registry, "tools", {}) or {})
     old_names = {
         name
@@ -348,61 +366,10 @@ def refresh_registered_mcp_client(
             continue
         replacement[proxy.model_spec.name] = proxy
         registered += 1
-    registry.tools = replacement
-    return registered
+    # LLM: 回调只提交已构建好的内存目录，不调用插件、发请求或获取注册准备锁。
+    # 函数用途: 在连接仍有效的最后边界，一次替换目录。
+    def publish() -> int:
+        registry.tools = replacement
+        return registered
 
-
-def _register_discovered_tools(
-    registry: Any,
-    client: MCPStdioClient,
-    config: MCPServerConfig,
-    tools: list[MCPToolInfo],
-) -> int:
-    """把一个 server 发现的工具逐个包成代理工具注册进 registry；返回注册数。"""
-    count = 0
-    existing = getattr(registry, "tools", {})
-    for info in tools:
-        try:
-            proxy = build_proxy_tool(
-                client,
-                config.name,
-                info,
-                effect=config.effect_for_tool(info.name),
-                catalog_category=config.catalog_category,
-            )
-        except (TypeError, ValueError) as exc:
-            logger.warning(
-                "MCP 工具 Schema 无法安全执行，跳过 server '%s' 的 '%s'：%s",
-                config.name,
-                info.name,
-                exc,
-            )
-            continue
-        if proxy.model_spec.name in existing:
-            # 极端情况下两个 server 清洗后撞名：保留先到者，跳过后者并告警。
-            logger.warning(
-                "MCP 工具名冲突，跳过 server '%s' 的 '%s'（已存在 %s）",
-                config.name, info.name, proxy.model_spec.name,
-            )
-            continue
-        registry.register(proxy)
-        count += 1
-    return count
-
-
-def _tool_names_preview(tools: list[MCPToolInfo]) -> str:
-    names = [info.name for info in tools[:10]]
-    suffix = " ..." if len(tools) > 10 else ""
-    return ", ".join(names) + suffix if names else "(无)"
-
-
-__all__ = [
-    "MCPProxyTool",
-    "build_proxy_tool",
-    "mcp_schema_parameters",
-    "mcp_tool_name",
-    "parse_mcp_servers",
-    "refresh_registered_mcp_client",
-    "register_mcp_servers",
-    "sanitize_name_component",
-]
+    return client.publish_tools(transport, publish)

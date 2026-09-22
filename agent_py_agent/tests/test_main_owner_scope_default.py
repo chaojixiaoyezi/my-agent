@@ -6,6 +6,8 @@ import types
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from agent_py_agent.agent.path_access_policy import PathAccessPolicy
 from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
 from agent_py_agent.agent.user_space.owner_access import resolve_owner_scope_and_access
@@ -124,3 +126,22 @@ def test_explicit_full_access_can_see_external_and_other_owner_paths(
     other = home.root / "owners" / "providers" / "feishu" / "users" / "B" / "USER.md"
     assert policy.check(other).allowed
     assert policy.check(home.admin_grants_dir / "grant.json").allowed
+
+
+@pytest.mark.parametrize("full,inherited", [(False, False), (True, False), (True, True)])
+def test_real_agent_model_scope_uses_shared_owner_policy_and_restores_tools(tmp_path, full, inherited):
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+    from agent_py_agent.agent.settings.model_scope import selected_model_scope
+    from agent_py_agent.agent.user_space.approval_mode import execute_approval_mode_operation
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    original = agent.tools
+    if full:
+        execute_approval_mode_operation(agent.home_paths, "set", "full-access")
+    with selected_model_scope(agent, inherited=inherited):
+        unrestricted = full and not inherited
+        assert agent.tools.owner_scope_root == ("" if unrestricted else str(agent.home_paths.owner_home_dir))
+        assert agent.tools.path_access_mode == ("full" if unrestricted else "normal")
+        assert agent.tools._mcp_clients is original._mcp_clients
+    assert agent.tools is original

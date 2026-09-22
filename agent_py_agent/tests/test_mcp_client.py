@@ -34,6 +34,7 @@ from agent_py_agent.agent.tooling.mcp_client import (
     redact_env_for_log,
     sanitize_credentials,
 )
+from agent_py_agent.agent.tooling.mcp_protocol import MCPInbox
 from agent_py_agent.agent.tooling.mcp_registration import (
     build_proxy_tool,
     mcp_tool_name,
@@ -54,21 +55,20 @@ def test_malformed_tool_result_is_protocol_failure(payload):
 
 
 def test_unknown_response_is_not_retained():
-    client = MCPStdioClient(MCPServerConfig("test", "unused"))
+    inbox = MCPInbox("test")
     for number in range(1000):
-        client._dispatch_message({"jsonrpc": "2.0", "id": number, "result": {}})
-    assert client._responses == {}
+        inbox.dispatch({"jsonrpc": "2.0", "id": number, "result": {}})
+    assert inbox.responses == {}
 
 
-def test_list_tools_follows_cursor_and_rejects_cycles(monkeypatch):
-    client = MCPStdioClient(MCPServerConfig("test", "unused"))
+def test_list_tools_follows_cursor_and_rejects_cycles():
+    from agent_py_agent.agent.tooling.mcp_client import _discover_tools
     calls = []
     def request(method, params, **kwargs):
         calls.append(params)
         return {"tools": [{"name": "second" if params else "first", "inputSchema": {}}],
                 **({} if params else {"nextCursor": "page2"})}
-    monkeypatch.setattr(client, "_request", request)
-    assert [t.name for t in client.list_tools()] == ["first", "second"]
+    assert [t.name for t in _discover_tools(request, 1)] == ["first", "second"]
     assert calls == [{}, {"cursor": "page2"}]
 
 
@@ -678,10 +678,10 @@ def test_client_reconnects_same_binding_after_stdio_server_dies():
     try:
         client.start()
         assert client.call_tool("echo", {"text": "before"})["content"] == "before"
-        process = client._proc
-        assert process is not None
+        original = client.connection()
+        process = original.binding.process
         process.kill()
-        process.wait(timeout=3)
+        assert original.inbox.closed.wait(3)
         assert client.is_running() is False
 
         client.reconnect()
