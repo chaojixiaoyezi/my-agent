@@ -1,6 +1,6 @@
 # 可选决策模型接入与并行实施计划
 
-状态：用户已授权 P1—P5 完整实施；P1-A 本地已验，决策调用尚未接通。日期：2026-09-22。最初核对基线：9141dad9c。
+状态：用户已授权 P1—P5 完整实施；P1 本地决策服务已接通、联合验收收尾，P2 业务接线开始。日期：2026-09-22。最初核对基线：9141dad9c。
 完整 P1—P5 完成条件与逐项进度见[执行 Goal](../tasks/DECISION_MODEL_GOAL.md)，不得在完成 P1 后关闭整个 Goal。
 当前先开发本地配置、协议与假服务验证，尚未安排收费模型调用、运行配置修改、发布或 Gateway 重启。
 计划在独立 worktree 保存；另一任务正在使用的工作区及其未提交修改不纳入本轮修改。
@@ -91,7 +91,7 @@ my-agent 也可根据用户明确要求或既有授权，通过同一配置服�
 P1-C/D 本地组件已验：原 ConcurrencyLimiter 的占用与保留量由同一 Condition 原子核对，
 `global_llm_admission_slot(optional=True)` 立即尝试，并在已配置上限时给普通模型保留 1 个名额；
 上限为 1 时跳过可选调用。默认普通请求仍读原等待时间，未配置全局上限时保持原行为。
-名额必须由实际 worker 持有到退出，等待者到期不能释放未退出调用；实际决策服务尚未调用这个入口。
+名额必须由实际 worker 持有到退出，等待者到期不能释放未退出调用；实际决策服务已经复用这个入口。
 通用有界 worker 已从 Curator 迁出复用，单进程残留安全上限为 32，可选调用保留 1 个正常后台名额；
 到期即返回时合作线程也可能暂时仍存活，Curator 据实记 still-running，退出前不能缩批重叠重试。
 
@@ -127,7 +127,51 @@ P1-B 本地实现使用 `decision_protocol.py` 固定输入快照与宿主绑定
 显式严格 JSON 在原 strict_json 解析前做 64 层资源预检（字符串/转义不计容器），领域输入/答案仍按 16 层及节点上限校验；
 解析成功和失败都复核同一期限。零重试的 HTTP 错误按状态立即返回，不为诊断而等待错误正文。
 本地协议与传输组件不等于可选调用服务已完成：有界 worker、主资源保留与取消唤醒已有原语组合验证，
-实际策略、设置、冷却、账本和业务消费仍须接线。
+实际策略和冷却已经接通，业务消费仍须接线。设置、账本及服务的当前本地边界见下节；不能据此声称真实 Jev 已可用。
+
+### 4.1 共用设置与原账本的本地合同
+
+`settings/decision_settings.py::execute_decision_settings_operation` 是界面与原 `user_config` 共用入口。
+`read/patch/reset` 只访问原 owner 模型目录与原线程字段，不构造 Agent、不测试服务、不复制凭据。
+`patch.changes` 使用扁平路径，`reset.fields` 删除覆盖恢复继承；写入必须携带读取到的
+`expected_revision={owner,thread}`。读回字段是 `revision`（单数）、`effective`、`sources`、两层 `overrides`；
+修改另返回 `before`。锁序固定 owner→thread；版本冲突要求重读，不自动重放旧写入。
+原 `user_config` 增加 `decision_read/decision_patch/decision_reset`，线程只取原可信 runner，模型不能传任意身份。
+
+原模型目录 v4 和 conversation_thread.v10 显式迁移旧数据，仅新增 `decision_settings.v1` 覆盖。
+默认值归原 AgentConfig、CapabilityConfig 与 MemorySettings；覆盖内不存默认值、阶段余额或运行状态。
+共用 profile_id 与逐点 profile_id 都引用原模型目录；只有本次新写入的引用需要检查有效用途，
+已有配置失效不能阻止关闭。共享撤销仍按原授权读取，`configured` 只证明本地配置，不证明网络在线。
+阶段时钟仍由实际消费点持有，服务读回的 `max_request_seconds` 只表示配置上限，不承诺运行中的剩余时间。
+完整字段、迁移、错误码及当前菜单未接线边界见 [P1-E 交接](../tasks/DECISION_MODEL_P1E_HANDOFF.md)。
+
+原 `ModelCallLedger` 终态只记录首次结束，迟到 first_token/finished/timeout 不重开调用；
+HTTP 尝试可补记为物理事实。显式 retain 句柄只在原账本保留准确明细及其累计范围，实际 worker 退出才释放。
+`model_call_purpose_breakdown.v1` 在原摘要内按 main/auxiliary/decision 互斥分区，复用相同累计算法，不另建账本。
+`provider_usage_fields` 区分逐字段真值与估算；历史缺字段保留历史解释，不能反推已报。
+输入已报且为零、输入缺报但输出已报、全部未知分别保留，决策无正文时不虚构正文输出估算。
+
+用量存储的累计快照事件编号由原范围及内容摘要派生，迟到 HTTP 尝试不再与相同调用数的旧快照冲突。
+显式旧 event_id 仍按原冲突规则校验；用途桶使用同一增量规则，不把分区再次加入根总量。
+原统计行额外显示“决策入”：完全缺报显示未知，部分已报显示数值加 `+?`，输出留白、无价格。
+决策不占普通模型轮数、不覆盖最近生成缓存/工具/速度；后台用量文件变化令原显示基数失效。
+这些是本地统计与设置接线；实际执行消费者、设置菜单及真实 TUI 仍按完整 TODO 单独验收。
+
+### 4.2 已实现的可选服务边界
+
+`conversation/decision_service.py` 提供 `begin_decision_stage` 和 `decide`，宿主在准备额外材料前冻结一次阶段；
+同阶段调用共享绝对截止时间，点级超时只缩短本次请求，不补回阶段时间。发送前后复核 owner/thread、配置和连接。
+`DecisionOutcome.may_apply` 只表示信封和模式允许消费，消费者仍逐题检查答案、当前候选和来源，不因此获得写入权。
+`decision_policy.py` 的进程内有界索引仅负责精确设置通知与连接冷却；不拥有 worker 或持久配置。
+普通传输失败冷却 30 秒，额度失败 300 秒，认证/配置错误等待配置变化或显式重试；输入错误、锁忙和准入忙不冷却连接。
+设置通知单调合并 owner/thread 版本，恢复继承也按新的实际路由取消；跨进程修改由结果采用前复读拒绝旧建议，
+当前不承诺跨进程主动即时中断 socket。
+
+`decision_model_call.py` 在实际 worker 安装原 HTTP observer 和身份头，并持有原可选准入与原账本 retain；
+caller 先完成/失败/超时入账，真实 worker 退出前不释放其资源。稳定资源键不含阶段编号，不能换阶段绕过残留限制。
+返回和异常边界复用 `publish_model_metrics(usage_only=True)` 刷新活动行：保留原生成的 pending/工具/缓存/速度，
+不在短决策后等待会话写锁；持久显示在下个原模型边界刷新，持久用量仍沿原 finalizer，不提前结算混合活动范围。
+本地 HTTP 组合验证实际发送、错误、超时、关闭和活动 TUI 数据流；不证明真实 Jev 判断质量或已安装产品体验。
 
 先准备基础方案不等于偷偷执行原动作；在选择确定之前，不创建两批子代理、不提前记忆提交、不调用两个主模型竞速。
 已执行的模型选择和配置版本跟随原 operation/run 记录；同一创建请求重送、恢复和重试不得重新抽签换模型。

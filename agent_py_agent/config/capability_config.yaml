@@ -48,3 +48,10 @@ subagent_first_token_notice_seconds: 600
 subagent_stream_idle_notice_seconds: 180
 # 工具长时间未返回时的提醒秒数；可能仍在编译或等待审批，不判失败；0 关闭。
 subagent_tool_wait_notice_seconds: 900
+# 决策能力点默认关闭；observe 也会发请求并产生用量；模式不授予执行权限。
+decision_subagent_model_mode: off
+decision_subagent_model_timeout_seconds: null  # 有限正秒数；留空继承通用前台期限，零不是无限
+decision_subagent_model_profile_id: null  # 留空继承通用 Decision 模型引用
+decision_skill_tool_mode: off
+decision_skill_tool_timeout_seconds: null  # 有限正秒数；留空继承通用前台期限
+decision_skill_tool_profile_id: null  # 留空继承通用 Decision 模型引用

@@ -15,15 +15,21 @@ from ..settings.config import load_simple_yaml
 # LLM: 子代理权限、运行投影和阶段提醒的唯一默认配置；新增字段同步随包 YAML 与配置一致性测试。
 # 模块用途: 集中读取协作能力设置，不把阶段提醒时间当成执行超时或权限授予。
 
-# LLM: 时间限制与只提示不终止的活动阈值分开；关闭提醒不得改变 runner 原生命周期。
+# LLM: 能力决策字段只定义推荐模式和绑定，不授予工具/子代理权限；时间限制与活动提醒仍分开。
 # 类用途: 定义子代理能力和观测选项；数值为零的阶段提醒表示关闭该阶段。
 @dataclass
 class CapabilityConfig:
     """能力路由与子代理运行配置总表。
 
-    数字限制项统一约定：0 表示不限制。
-    这样用户可以先只打开关键限制，其余细节等系统成熟后再慢慢调。"""
+    既有额度数字项：0 表示不限制；决策等待只接受有限正秒数，None 表示继承。
+    决策关闭由 mode=off 表达，不把零解释为无限等待。"""
 
+    decision_subagent_model_mode: str = "off"
+    decision_subagent_model_timeout_seconds: float | None = None
+    decision_subagent_model_profile_id: str | None = None
+    decision_skill_tool_mode: str = "off"
+    decision_skill_tool_timeout_seconds: float | None = None
+    decision_skill_tool_profile_id: str | None = None
     enable_capability_routing: bool = False
     capability_request_max_tokens: int = 600
     capability_escalation_max_hops: int = 0
@@ -98,6 +104,8 @@ def _coerce_capability_value(field_name: str, value: object) -> object:
     return value
 
 
+# LLM: 决策能力点严格校验，有限正秒数不沿用普通配额的零值约定；不授予新能力。
+# 函数用途: 加载原能力配置并拒绝未知字段或非法决策设置。
 def load_capability_config(config_path: str | Path) -> CapabilityConfig:
     """加载能力路由配置；未知字段直接报错。"""
 
@@ -105,6 +113,9 @@ def load_capability_config(config_path: str | Path) -> CapabilityConfig:
     if not path.exists():
         raise FileNotFoundError(f"能力路由配置文件不存在: {path}")
     raw = load_simple_yaml(path)
+    from ..settings.decision_settings_defaults import validate_config_decision_fields
+
+    raw.update(validate_config_decision_fields(raw, domain="capability"))
     allowed = set(CapabilityConfig.__dataclass_fields__.keys())
     unknown = sorted(set(raw) - allowed)
     if unknown:

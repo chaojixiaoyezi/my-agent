@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import threading
 import uuid
 from typing import Any
 
@@ -14,6 +15,7 @@ from ...contracts.model_call_ledger import (
     ModelCallProviderAttemptParams,
     ModelCallStartedParams,
     ModelCallTimeoutParams,
+    summarize_model_call_records,
 )
 from ...conversation.context_usage import record_model_context_usage
 from ...conversation.model_metrics import publish_model_metrics
@@ -30,12 +32,15 @@ from .usage import (
     cache_creation_input_token_usage,
     input_token_usage,
     output_token_usage,
+    provider_usage_fields,
     reported_cache_read_token_usage,
     response_usage,
 )
 
-# LLM: 本模块把 provider/model 生命周期写入唯一 ModelCallLedger，并只投影结构化计数与超时事实。
-# 模块用途: 连接真实调用与账本、超时、流式观测和统计；主/子 preflight 数字统一保存到各自会话。
+# LLM: 本模块把响应和传输事实写入唯一 ModelCallLedger；按字段保留用量来源，终态裁决与用途统计仍归账本，不能创建生成旁路。
+# 模块用途: 连接实际调用与账本、超时及统计，让生成和决策响应共用用量读取并保留缺报事实。
+
+_LEDGER_CREATION_LOCK = threading.Lock()
 
 
 # LLM: The caller may pass the exact precomputed context snapshot so timeout, ledger, TUI and
@@ -181,11 +186,13 @@ def record_model_call_first_token(
     )
 
 
+# LLM: 已报字段由同一归一读取器提供；仅真实 text 可走原正文估算，无 text 的决策响应不得套空正文估算；缺报仍由字段来源表达。
+# 函数用途: 把响应的用量和结束事实提交原账本，逐字段保留真值或估算，不为决策响应伪造生成内容。
 def record_model_call_finished(ledger: ModelCallLedger, call_id: str, response: object) -> None:
     input_tokens = input_token_usage(response)
     output_tokens = output_token_usage(response)
     if output_tokens is None:
-        output_tokens = estimate_tokens(getattr(response, "text", ""))
+        output_tokens = estimate_tokens(response.text) if hasattr(response, "text") else 0
     ledger.finished(
         ModelCallFinishParams(
             call_id=call_id,
@@ -194,6 +201,7 @@ def record_model_call_finished(ledger: ModelCallLedger, call_id: str, response: 
             cached_input_tokens=reported_cache_read_token_usage(response),
             cache_creation_input_tokens=cache_creation_input_token_usage(response),
             provider_usage_reported=bool(response_usage(response)),
+            provider_usage_fields=provider_usage_fields(response),
             # 流末事实必须随调用落账：真实事故（provider 断流 → 空正文 → USER_REPLY_UNAVAILABLE）
             # 事后只能从 attempt 事件侧推，因为 finish_reason/stop_reason/turn_end 当时没有落盘。
             stop_reason=str(getattr(response, "stop_reason", "") or ""),
@@ -272,16 +280,19 @@ def record_model_call_timeout(
     )
 
 
+# LLM: 同一 agent 的首次并发调用必须取得同一本账；只锁初始化，不串行模型调用，不能建立第二工厂或状态源。
+# 函数用途: 原子取得或建立代理的模型调用账本，保留不能附加属性对象的旧临时账本行为。
 def model_call_ledger(agent: object) -> ModelCallLedger:
-    existing = getattr(agent, "_model_call_ledger", None)
-    if isinstance(existing, ModelCallLedger):
-        return existing
-    ledger = ModelCallLedger()
-    try:
-        agent._model_call_ledger = ledger
-    except Exception:
+    with _LEDGER_CREATION_LOCK:
+        existing = getattr(agent, "_model_call_ledger", None)
+        if isinstance(existing, ModelCallLedger):
+            return existing
+        ledger = ModelCallLedger()
+        try:
+            agent._model_call_ledger = ledger
+        except Exception:
+            return ledger
         return ledger
-    return ledger
 
 
 # LLM: 优先读取不受明细裁剪影响的累计 scope；仅为旧账本或测试私有注入保留 retained-record 回退。
@@ -316,143 +327,16 @@ def model_call_summary(
     return _retained_model_call_summary(records)
 
 
-# LLM: This path exists only for legacy/test ledgers without cumulative scope;
-# it must preserve the public summary schema while staying independent of the
-# bounded-record aggregate implementation.
-# 函数用途: 从仍保留的模型调用明细计算兼容汇总，供旧账本和测试注入使用。
+# LLM: 兼容入口只用于没有增量 scope 的保留明细；用量及用途规则复用原统计器，不维护第二份来源判断。
+# 函数用途: 为旧账本或测试注入生成兼容摘要，正常运行仍读取原累计容器。
 def _retained_model_call_summary(records: list[Any]) -> dict[str, object]:
-    """Build a compatibility summary from retained model-call records."""
-    logical_ids = {
-        str(record.metadata.get("logical_call_id") or record.call_id)
-        for record in records
-    }
-    statuses = {
-        status: sum(record.status == status for record in records)
-        for status in ("started", "first_token", "finished", "failed", "timed_out")
-    }
-    provider_attempts = sum(record.provider_attempt_count for record in records)
-    provider_retries = sum(
-        max(0, record.provider_attempt_count - 1)
-        for record in records
-    )
-    accounted_input_tokens = sum(
-        max(0, int(record.accounted_input_tokens)) for record in records
-    )
-    output_tokens = sum(max(0, int(record.output_tokens)) for record in records)
-    provider_usage_call_count = sum(
-        record.status == "finished" and record.provider_usage_reported
-        for record in records
-    )
-    estimated_usage_call_count = sum(
-        record.status == "finished" and not record.provider_usage_reported
-        for record in records
-    )
-    return {
-        "schema": "model_call_summary.v1",
-        "logical_model_turn_count": len(logical_ids),
-        "physical_model_attempt_count": len(records),
-        "model_retry_count": max(0, len(records) - len(logical_ids)),
-        "provider_http_attempt_count": provider_attempts,
-        "provider_http_retry_count": provider_retries,
-        "status_counts": statuses,
-        "backends": sorted({record.backend for record in records if record.backend}),
-        "models": sorted({record.model for record in records if record.model}),
-        "accounted_input_tokens": accounted_input_tokens,
-        "output_tokens": output_tokens,
-        "total_tokens": accounted_input_tokens + output_tokens,
-        "cached_input_tokens": sum(
-            max(0, int(record.cached_input_tokens)) for record in records
-        ),
-        "cache_creation_input_tokens": sum(
-            max(0, int(record.cache_creation_input_tokens)) for record in records
-        ),
-        "provider_usage_call_count": provider_usage_call_count,
-        "estimated_usage_call_count": estimated_usage_call_count,
-        "usage_breakdown": _retained_usage_breakdown(records),
-    }
+    return {"schema": "model_call_summary.v1", **summarize_model_call_records(records)}
 
 
-# LLM: Provider-reported usage and fallback estimates are disjoint accounting
-# partitions. Never fill a provider bucket from an estimate in this projection.
-# 函数用途: 将保留明细按供应商真值和本地估算拆账，供兼容汇总展示成本口径。
-def _retained_usage_breakdown(records: list[Any]) -> dict[str, object]:
-    """Partition retained records into provider and estimated usage."""
-    provider_records = [
-        record
-        for record in records
-        if record.status == "finished" and record.provider_usage_reported
-    ]
-    estimated_records = [
-        record
-        for record in records
-        if record.status == "finished" and not record.provider_usage_reported
-    ]
-    return {
-        "schema": "model_usage_breakdown.v1",
-        "provider": {
-            "input_tokens": sum(
-                max(0, int(record.accounted_input_tokens))
-                for record in provider_records
-            ),
-            "output_tokens": sum(
-                max(0, int(record.output_tokens)) for record in provider_records
-            ),
-            "cache_read_input_tokens": sum(
-                max(0, int(record.cached_input_tokens)) for record in provider_records
-            ),
-            "cache_write_input_tokens": sum(
-                max(0, int(record.cache_creation_input_tokens))
-                for record in provider_records
-            ),
-            "call_count": len(provider_records),
-        },
-        "estimated": {
-            "input_tokens": sum(
-                max(0, int(record.accounted_input_tokens))
-                for record in estimated_records
-            ),
-            "output_tokens": sum(
-                max(0, int(record.output_tokens)) for record in estimated_records
-            ),
-            "call_count": len(estimated_records),
-        },
-    }
-
-
+# LLM: 空摘要同样包含用途分区和字段计次；沿用旧空 status_counts，不把无记录解释成失败或已报零。
+# 函数用途: 在尚无模型调用时返回完整统计形状，供最终响应与消费端统一读取。
 def _empty_model_call_summary() -> dict[str, object]:
-    return {
-        "schema": "model_call_summary.v1",
-        "logical_model_turn_count": 0,
-        "physical_model_attempt_count": 0,
-        "model_retry_count": 0,
-        "provider_http_attempt_count": 0,
-        "provider_http_retry_count": 0,
-        "status_counts": {},
-        "backends": [],
-        "models": [],
-        "accounted_input_tokens": 0,
-        "output_tokens": 0,
-        "total_tokens": 0,
-        "cached_input_tokens": 0,
-        "cache_creation_input_tokens": 0,
-        "provider_usage_call_count": 0,
-        "estimated_usage_call_count": 0,
-        "usage_breakdown": {
-            "schema": "model_usage_breakdown.v1",
-            "provider": {
-                "input_tokens": 0,
-                "output_tokens": 0,
-                "cache_read_input_tokens": 0,
-                "cache_write_input_tokens": 0,
-                "call_count": 0,
-            },
-            "estimated": {
-                "input_tokens": 0,
-                "output_tokens": 0,
-                "call_count": 0,
-            },
-        },
-    }
+    return {"schema": "model_call_summary.v1", **summarize_model_call_records(()), "status_counts": {}}
 
 
 def effective_model_request_timeout_seconds(agent: object, first_token_timeout_seconds: float) -> float:

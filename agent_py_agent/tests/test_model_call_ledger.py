@@ -50,6 +50,17 @@ class _ProbeSpec:
     latency_seconds: float
 
 
+def _check_main_only_summary_extensions(summary: dict, *, reported_fields: int = 0) -> None:
+    partitions = summary.pop("purpose_breakdown")
+    assert partitions["schema"] == "model_call_purpose_breakdown.v1"
+    assert partitions["main"] == {key: value for key, value in summary.items() if key != "schema"}
+    assert partitions["auxiliary"]["physical_model_attempt_count"] == 0
+    assert partitions["decision"]["physical_model_attempt_count"] == 0
+    provider = summary["usage_breakdown"]["provider"]
+    for name in ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_write_input_tokens"):
+        assert provider.pop(f"{name}_reported_call_count") == reported_fields
+
+
 def test_queue_budget_extends_first_event_without_changing_prefill_or_idle():
     normal = estimate_first_token_timeout(FirstTokenTimeoutParams(input_tokens=10000, ledger=ModelCallLedger()))
     queued = estimate_first_token_timeout(FirstTokenTimeoutParams(input_tokens=10000, ledger=ModelCallLedger(),
@@ -125,6 +136,7 @@ def test_finished_model_call_records_provider_usage_and_cache_tokens() -> None:
     assert finished.provider_usage_reported is True
     summary = ledger.cumulative_summary(run_id="run-provider-usage")
     assert len(summary.pop("usage_scope_id")) == 32
+    _check_main_only_summary_extensions(summary, reported_fields=1)
     assert summary == {
         "logical_model_turn_count": 1,
         "physical_model_attempt_count": 1,
@@ -382,6 +394,7 @@ def test_same_logical_model_turn_preserves_distinct_physical_attempts() -> None:
     ]
     summary = model_call_summary(agent, request_id="request-1")
     assert len(summary.pop("usage_scope_id")) == 32
+    _check_main_only_summary_extensions(summary)
     assert summary == {
         "schema": "model_call_summary.v1",
         "logical_model_turn_count": 1,
@@ -502,6 +515,7 @@ def test_summary_counts_all_calls_after_detail_retention_limit() -> None:
     assert len(ledger.records()) == 4
     summary = model_call_summary(agent, request_id="request-over-limit")
     assert len(summary.pop("usage_scope_id")) == 32
+    _check_main_only_summary_extensions(summary)
     assert summary == {
         "schema": "model_call_summary.v1",
         "logical_model_turn_count": 4,

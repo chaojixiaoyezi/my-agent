@@ -1,7 +1,7 @@
 
 from __future__ import annotations
 
-# LLM: 默认值须与随包 YAML 一致；显式插件管理开关经原布尔转换，采样按配置出站，权限与终态仍读结构化事实。
+# LLM: 默认值须与随包 YAML 一致；决策通用字段严格校验，覆盖由原 owner/thread 保存，权限与终态仍读结构化事实。
 # 模块用途: 定义并加载 Agent 配置，统一显式采样、人格、持续执行、插件管理与用户确认口径。
 """智能体配置加载工具。
 
@@ -310,11 +310,20 @@ class _RuntimeBudgetConfigFields:
     background_main_agent_allowed_tools: list[str] = field(default_factory=list)
 
 
-# LLM: AgentConfig 是公开配置权威；温度数值与启用开关同步随包 YAML，Memory 默认同时对齐 MemorySettings。
-# 类用途: 汇总模型采样与运行配置；温度开关未启用时，三个接口都不覆盖提供方默认值。
+# LLM: AgentConfig 拥有通用决策默认与模型选择点，能力点归 CapabilityConfig，Memory 字段对齐 MemorySettings。
+# 类用途: 汇总模型和运行配置；决策默认关闭，有限正时间只为后续请求提供默认，不管理阶段时钟。
 @dataclass
 class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetConfigFields):
 
+    # 决策增强默认关闭；有限正秒数只作用后续请求，不重置已开始阶段的预算。
+    decision_enabled: bool = False
+    decision_timeout_seconds: float = 2.0
+    decision_stage_timeout_seconds: float = 4.0
+    decision_background_timeout_seconds: float = 4.0
+    decision_profile_id: str = ""
+    decision_model_selection_mode: str = "off"
+    decision_model_selection_timeout_seconds: float | None = None
+    decision_model_selection_profile_id: str | None = None
     agent_name: str = "myagent"
     # 默认沿 终端交互 主链由 TUI 接管滚轮、点击与应用内选区；F6 仍可临时退回宿主终端原生复制。
     # 关闭后备用屏幕收不到物理滚轮，历史只能用 PgUp/Ctrl+Home，因此不再作为开箱默认。
@@ -324,6 +333,13 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 未配置时允许打开 Gateway/TUI 和 /model，但不选厂商、不调用模型；echo 仅供显式离线调试。
     model_backend: str = ""
     memory_path: str = ""
+    # 记忆决策默认定义归 MemorySettings；这里镜像供现有 YAML 配置加载与展示。
+    memory_decision_recall_mode: str = "off"
+    memory_decision_recall_timeout_seconds: float | None = None
+    memory_decision_recall_profile_id: str | None = None
+    memory_decision_curator_mode: str = "off"
+    memory_decision_curator_timeout_seconds: float | None = None
+    memory_decision_curator_profile_id: str | None = None
     memory_top_k: int = 5
     auto_save_memory: bool = True
     # 记忆语义召回(检索拓宽 #1,默认关=现状纯关键词):开后记忆召回在关键词(FTS5/BM25)外再加一路
@@ -631,12 +647,17 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
         }
 
 
+# LLM: 决策字段在原 YAML 读取后严格校验，不用宽松 coercion 把非法时间变成另一有效设置。
+# 函数用途: 加载原部署配置与来源，拒绝无效决策字段，不创建 Agent 或发网络请求。
 def load_config(config_path: str | Path) -> AgentConfig:
 
     path = Path(config_path)
     if not path.exists():
         raise FileNotFoundError(f"配置文件不存在: {path}")
     raw = load_simple_yaml(path)
+    from .decision_settings_defaults import validate_config_decision_fields
+
+    raw.update(validate_config_decision_fields(raw, domain="agent"))
 
     # 先做类型验证和默认值归一（在过滤未知 key 之前）
     normalized, config_warnings = normalize_agent_config(raw)

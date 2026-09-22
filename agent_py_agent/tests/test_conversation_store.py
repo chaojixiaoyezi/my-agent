@@ -187,6 +187,27 @@ def test_thread_model_usage_cumulative_snapshots_persist_only_new_deltas(
     }
 
 
+def test_snapshot_auto_identity_is_scope_and_content_bound(tmp_path):
+    store = ConversationStore(tmp_path)
+    thread = store.threads.get_or_create({"canonical_user_id": "usage-owner"})
+    calls = {**_cumulative_model_calls(physical=1, input_tokens=100, output_tokens=2, cache_read_tokens=0),
+             "usage_scope_id": "scope-one"}
+    request = {"thread_id": thread.thread_id, "request_id": "request", "run_id": "run",
+               "task_id": "task", "source": "foreground", "model_calls": calls}
+    first = store.model_usage.append_snapshot_once(request)
+    replay = store.model_usage.append_snapshot_once({**request, "source": "background", "now": 200.0})
+    assert first == replay
+    late = {**calls, "provider_http_attempt_count": 2, "provider_http_retry_count": 1}
+    second = store.model_usage.append_snapshot_once({**request, "model_calls": late})
+    assert second.event_id != first.event_id
+    assert second.model_calls["physical_model_attempt_count"] == 0
+    assert second.model_calls["accounted_input_tokens"] == 0
+    assert second.model_calls["provider_http_retry_count"] == 1
+    assert store.model_usage.append_snapshot_once(request) == first
+    rows, errors = store.model_usage.events_report(thread.thread_id)
+    assert not errors and len(rows) == 2
+
+
 @pytest.mark.parametrize("snapshot", [False, True])
 def test_composed_model_usage_replays_share_the_canonical_append_lock(tmp_path, snapshot):
     stores = [ConversationStore(tmp_path / "conversations") for _ in range(2)]
@@ -746,7 +767,7 @@ def test_selected_workspace_task_survives_completion_and_restart(tmp_path) -> No
     assert reopened.workspace_task_id == "task-1"
     assert reopened.active_task_ids == ()
     payload = json.loads(reopened_store.storage.thread_path(thread.thread_id).read_text(encoding="utf-8"))
-    assert payload["schema_version"] == "conversation_thread.v9"
+    assert payload["schema_version"] == "conversation_thread.v10"
 
 
 def test_thread_persists_client_cwd_across_requests_without_override(tmp_path) -> None:

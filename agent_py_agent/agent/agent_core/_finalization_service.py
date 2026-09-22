@@ -1,6 +1,7 @@
+# LLM: 收口沿原模型账本和会话领域；用量事件身份由原 store 按范围/快照派生，禁止依赖物理调用数代替快照。
+# 模块用途: 保存运行结果、归档与用量，并触发原后续维护；不拥有第二份模型费用账。
 from __future__ import annotations
 
-import hashlib
 import time as time_module
 from dataclasses import dataclass
 from pathlib import Path
@@ -45,6 +46,8 @@ class BuildAgentRunResultParams:
     model_calls: dict[str, object]
 
 
+# LLM: 结果、归档、用量各走原事实源；修改收口顺序须同步运行失败和辅助调用测试。
+# 类用途: 汇总一次主代理运行的最终保存动作，不把费用显示当作业务完成依据。
 class FinalizationService:
     def __init__(self, agent):
         self._agent = agent
@@ -145,9 +148,8 @@ class FinalizationService:
             )
         return written
 
-    # LLM: 成功、错误和取消共享 exact thread/request/run 的用量收口；累计代次与物理游标去重，source 不拥有费用。
-    # 用量通过显式 model_usage 组件提交，领域迁移不改变事件身份或收口顺序。
-    # 函数用途: 将已经发生的模型用量幂等写入本会话，不因暂停丢账、不因前后台切换重复计算。
+    # LLM: 成功/错误/取消按 exact thread/request/run 提交原累计账；store 以范围和完整快照去重，迟到尝试不冲突。
+    # 函数用途: 幂等保存本会话的模型用量，同物理调用数的新事实仅补增量，前后台交接不重复计算。
     def settle_model_usage(
         self,
         ctx: object,
@@ -169,23 +171,8 @@ class FinalizationService:
         append_usage = getattr(getattr(store, "model_usage", None), "append_snapshot_once", None)
         if not thread_id or not callable(append_usage):
             return ""
-        physical_attempt_count = int(
-            model_calls.get("physical_model_attempt_count") or 0
-        )
-        identity = "\x1f".join(
-            (
-                thread_id,
-                request_id,
-                str(ctx.run_id or "").strip(),
-                str(ctx.task_id or "").strip(),
-                str(model_calls.get("usage_scope_id") or ctx.source or "").strip(),
-                str(physical_attempt_count),
-            )
-        )
-        event_id = "usage-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
         event = append_usage(
             {
-                "event_id": event_id,
                 "thread_id": thread_id,
                 "request_id": request_id,
                 "run_id": str(ctx.run_id or "").strip(),

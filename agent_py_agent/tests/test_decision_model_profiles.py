@@ -98,15 +98,18 @@ def test_v2_migration_is_readonly_until_explicit_save(tmp_path):
     path = model_profiles_path(host.home_paths)
     legacy = json.loads(path.read_text())
     legacy["schema"] = "owner_model_profiles.v2"
+    legacy.pop("decision_settings")
     path.write_text(json.dumps(legacy))
     before = path.read_bytes()
     current = read_model_profiles(path)
-    assert current == {**legacy, "schema": "owner_model_profiles.v3"}
+    assert current == {**legacy, "schema": "owner_model_profiles.v4", "decision_settings": {
+        "schema": "decision_settings.v1", "revision": 0, "overrides": {},
+    }}
     assert selected_model_config(host).api_key == "only-private-secret"
     assert path.read_bytes() == before
     decision(host)
     saved = json.loads(path.read_text())
-    assert saved["schema"] == "owner_model_profiles.v3" and saved["selected"] == key
+    assert saved["schema"] == "owner_model_profiles.v4" and saved["selected"] == key
     assert saved["profiles"][key] == legacy["profiles"][key]
     assert all(saved["providers"][k] == v for k, v in legacy["providers"].items())
 

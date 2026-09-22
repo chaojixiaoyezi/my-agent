@@ -9,11 +9,17 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 
-# LLM: Curator fields are provider-independent and cannot change Candidate/Daily schemas or evidence rules.
+# LLM: Curator/召回的决策默认归此类；可选时间和模型引用为 None 时继承通用策略，不改变记忆证据规则。
 # 类用途: 保存校验后真正供 Memory 运行时使用的全部配置。
 @dataclass(frozen=True)
 class MemorySettings:
     """Effective memory config after validation and default normalization."""
+    memory_decision_recall_mode: str = "off"
+    memory_decision_recall_timeout_seconds: float | None = None
+    memory_decision_recall_profile_id: str | None = None
+    memory_decision_curator_mode: str = "off"
+    memory_decision_curator_timeout_seconds: float | None = None
+    memory_decision_curator_profile_id: str | None = None
     memory_archive_level: int = 3
     memory_hook_enabled: bool = True
     memory_hook_archive_level: int = 3

@@ -1,5 +1,5 @@
-# LLM: 线程元数据与通道绑定；同一文件锁内完成身份校验和 Compact CAS，模型默认仅影响新线程；保持 canonical 文件、锁和错误报告合同。
-# 模块用途: 线程元数据与通道绑定；同一文件锁内完成身份校验和 Compact CAS，模型默认仅影响新线程。
+# LLM: 原线程文件锁内核对身份及 Compact/设置 CAS；只合并当前模型字段，保留旧扩展，不增加状态源。
+# 模块用途: 保存会话元数据与通道绑定，原子更新不覆盖并发状态；模型默认仅影响新线程。
 from __future__ import annotations
 
 import hashlib
@@ -390,9 +390,8 @@ class ThreadStore:
     def write(self, thread: ConversationThread) -> None:
         write_json_file_atomic(self.storage.thread_path(thread.thread_id), thread.to_dict())
 
-    # LLM: Compact CAS checks and writes must share one cross-process file lock; checking a
-    # previously loaded dataclass and locking only the final replace permits two generations.
-    # 函数用途: 在同一个文件锁里读取、校验和写回 thread，供 compact 成功/失败状态做真实原子迁移。
+    # LLM: Compact/设置 CAS 与写回共用原文件锁，保留未由当前模型声明的旧扩展字段；未知版本由 from_dict 拒绝。
+    # 函数用途: 在原锁内校验和写回 thread，避免覆盖并发状态或迁移时丢掉其他持久字段。
     def update_atomic(
         self,
         thread_id: str,
@@ -413,7 +412,7 @@ class ThreadStore:
                 raise DataCorruptionError(
                     f"conversation thread updater changed identity: {thread_id}"
                 )
-            return updated.to_dict()
+            return {**payload, **updated.to_dict()}
 
         payload = update_json_file_atomic(path, apply, require_existing=True)
         return ConversationThread.from_dict(payload)

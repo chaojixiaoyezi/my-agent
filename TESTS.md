@@ -1,5 +1,32 @@
 # 测试与发布验收
 
+## 决策模型 P1 实际服务组合（本地）
+
+17 个直接相关文件联合 **399 passed**，覆盖设置/迁移、协议、worker/准入、策略通知、原账本与显示。
+随后新增会话写锁争用检查，`test_decision_service_http.py` **8 passed**：使用真实 localhost HTTP、原配置、
+原账本和活动 TUI sink，验证正常/观察、关闭零请求、401/500、超时、在途关闭及用量刷新不等待会话写锁。
+决策结束自动发原活动统计帧；`usage_only` 不持久写显示，下一原模型边界沿原路径保存，原 finalizer 仍负责用量结算。
+`test_decision_service.py` 验证阶段共用时间、配置变化、锁忙、逐题错误、冷却隔离、旧阶段未退出不可叠加。
+`test_decision_settings_notifications.py` 验证通知逆序及会话覆盖恢复继承，关闭不能被较旧通知复活。
+详细命令、严格 gate 和限制见 [P1 服务交接](docs/tasks/DECISION_MODEL_P1FG_HANDOFF.md)。
+真实 Jev、真实 MiniMax、当前安装版 TUI 和实际业务消费者尚未验收；本地 HTTP 样本不代表模型决策质量。
+
+## 决策模型共用设置与原用量展示（本地）
+
+`test_decision_settings.py` 与原 `test_user_config_capability.py` 验证同一服务/工具的读取、修改、恢复继承、
+有限正秒数、owner/thread 双版本冲突、共享撤销、缺凭据仍可关闭和可信线程身份。
+迁移与配置相关 12 个文件联合 251 项通过；原模型目录当前 v4，线程当前 v10，不改原连接、历史和模型选择。
+
+`test_model_call_ledger_partitions.py` 验证终态单调、裁剪后用途累计、逐字段来源、准确保留句柄及迟到 HTTP。
+`test_decision_usage_metrics.py` 与原 conversation_store/tui_model_metrics 验证实际存储增量、快照重放、
+部分输入缺报、真实零值、原一行展示以及后台追加后基数刷新；不以模型正文判断用量。
+设置、账本、存储和显示 7 个文件联合 198 项通过；该组合未调用真实 Jev 或 MiniMax。
+`usage_only` 接原活动 request/run 的显示，用途统计不增加普通生成轮数或覆盖最近生成指标。
+跨独立活动范围的即时遥测与实际业务消费者仍随 TODO 08/12 验收，不能以静态渲染代替真实 TUI。
+
+本片 focused 命令：
+`python3 -m pytest agent_py_agent/tests/test_decision_settings.py agent_py_agent/tests/test_user_config_capability.py agent_py_agent/tests/test_model_call_ledger.py agent_py_agent/tests/test_model_call_ledger_partitions.py agent_py_agent/tests/test_conversation_store.py agent_py_agent/tests/test_tui_model_metrics.py agent_py_agent/tests/test_decision_usage_metrics.py -o addopts='' -q --tb=short`。
+
 ## 决策模型 P1-C/D 有界调用与原准入组件（本地）
 
 18 个直接相关文件 **315 passed**，覆盖精确取消、启动前取消、迟到结果、慢清理与非协作调用的资源保留，

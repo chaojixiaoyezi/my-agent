@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import inspect
 import logging
 import time
@@ -31,8 +30,8 @@ from ..contracts.model_call_ledger import (
 from ..memory_archive import estimate_tokens
 from ..tooling.runtime_contracts import ToolChoice
 
-# LLM: 辅助模型共享调用账与并发入口；独立 request 的用量在自身收口时持久化，不拥有压缩状态或解析提示词身份。
-# 模块用途: 让压缩等辅助请求进入统一调用账、会话消耗、重试账和成本统计，避免遗漏手动压缩费用。
+# LLM: 辅助模型共享调用账与并发入口；精确 thread 写入 metadata，独立快照身份归原 store，不解析正文身份。
+# 模块用途: 让压缩等辅助请求进入统一消耗与成本统计，原快照去重允许迟到物理事实补记。
 
 
 # LLM: The host supplies exact request/run/task identity and a typed purpose; optional tools and
@@ -91,9 +90,8 @@ def generate_auxiliary_model_response(request: AuxiliaryModelCallRequest) -> obj
     return response
 
 
-# LLM: Ledger identity and estimated request size are fixed before any provider I/O. Cache-safe
-# fields count toward input cost but their bodies never enter metadata.
-# 函数用途: 为辅助请求建立唯一调用编号，并按真实 prompt/messages/tools/system 请求面登记预计输入。
+# LLM: 请求身份含宿主 thread/request/run/task；I/O 前冻结估算和编号，输入正文不进 metadata。
+# 函数用途: 为辅助请求建立唯一调用及归属，按原请求面估算输入，沿原账本用途分区累计。
 def _start_auxiliary_call(
     request: AuxiliaryModelCallRequest,
     backend: object,
@@ -123,6 +121,7 @@ def _start_auxiliary_call(
                 "logical_call_id": logical_call_id,
                 "physical_attempt": 1,
                 "task_id": str(request.task_id or ""),
+                "thread_id": str(request.thread_id or ""),
                 "purpose": _purpose(request.purpose),
                 "auxiliary": True,
             },
@@ -272,9 +271,8 @@ def _record_auxiliary_cost(
         pass
 
 
-# LLM: 仅结算拥有独立 request_id 的辅助调用；绑定普通工作片的压缩仍由原 finalizer 结算，避免跨 source 重记。
-# 累计快照只提交给 model_usage 领域，仍沿原增量和事件身份入账。
-# 函数用途: 将手动或独立预检压缩的模型消耗幂等写入原会话账并刷新显示，失败不改变压缩结果。
+# LLM: 独立 request_id 的辅助调用提交原累计快照；store 按范围/摘要生成幂等身份，不用物理调用数猜快照版本。
+# 函数用途: 保存独立压缩的模型消耗并刷新显示；迟到事实只补增量，保存失败不改变压缩结果。
 def settle_standalone_model_usage(request: object) -> None:
     from ..agent_core.model.call_runtime import model_call_summary
     from .model_metrics import publish_model_metrics
@@ -289,9 +287,7 @@ def settle_standalone_model_usage(request: object) -> None:
         if not count:
             return
         thread_id = request.thread.thread_id
-        identity = f"{thread_id}\x1f{request.operation_id}\x1f{count}"
         append({
-            "event_id": "usage-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32],
             "thread_id": thread_id, "request_id": request.request_id,
             "run_id": request.run_id, "task_id": request.task_id,
             "source": "conversation_compact", "model_calls": summary, "now": time.time(),

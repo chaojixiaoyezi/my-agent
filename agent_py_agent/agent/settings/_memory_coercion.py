@@ -92,7 +92,7 @@ _FIELDS = (
 )
 
 
-# LLM: All MemorySettings fields must be produced in _FIELDS order so warning order and defaults stay deterministic.
+# LLM: 原记忆字段维持既有 warning，新增决策字段严格校验，不将非法时间静默替换成另一有效配置。
 # 函数用途: 从配置源构造完整、已验证的 Memory 设置字典。
 def _build_memory_settings_dict(
     source: Mapping[str, Any] | object,
@@ -103,6 +103,11 @@ def _build_memory_settings_dict(
     result: dict[str, Any] = {}
     for spec in _FIELDS:
         result[spec.field_name] = _coerce_field(spec, source, defaults, warnings)
+    from .decision_settings_defaults import decision_config_fields, validate_config_decision_fields
+
+    decision = {name: _lookup(source, name) for domain, name in decision_config_fields().values() if domain == "memory"}
+    decision = {key: value for key, value in decision.items() if value is not _MISSING}
+    result.update(validate_config_decision_fields(decision, domain="memory"))
     return result
 
 

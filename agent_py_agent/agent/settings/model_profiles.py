@@ -17,6 +17,7 @@ from .model_provider_schema import (
     ModelProfileError,
     migrate_v1,
     migrate_v2,
+    migrate_v3,
     resolved_model,
     validate_model,
     validate_model_profile,
@@ -39,19 +40,25 @@ def model_profiles_path(home_paths: object) -> Path:
     return Path(home_paths.config_dir) / "model-profiles" / f"{digest}.json"
 
 
-# LLM: 只认显式 schema，v1/v2 迁移不落盘；损坏和悬空引用拒绝，未知版本不覆盖秘密。
+# LLM: 只认显式 schema，v1/v2/v3 迁移不落盘；v4 覆盖严格校验，损坏和未知版本不覆盖秘密。
 # 函数用途: 读取当前用户的唯一模型配置，显式迁移旧目录并检查引用完整性。
 def read_model_profiles(path: Path) -> dict:
+    from .decision_settings_schema import empty_decision_settings, validate_decision_settings
+
     if not path.exists():
-        return {"schema": SCHEMA, "selected": "default", "providers": {}, "profiles": {}}
+        return {"schema": SCHEMA, "selected": "default", "providers": {}, "profiles": {},
+                "decision_settings": empty_decision_settings()}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         if data["schema"] == "owner_model_profiles.v1":
             data = migrate_v1(data)
         elif data["schema"] == "owner_model_profiles.v2":
             data = migrate_v2(data)
+        elif data["schema"] == "owner_model_profiles.v3":
+            data = migrate_v3(data)
         if data["schema"] != SCHEMA or not isinstance(data["profiles"], dict) or not isinstance(data["providers"], dict):
             raise ModelProfileError("模型配置结构无效。")
+        data["decision_settings"] = validate_decision_settings(data["decision_settings"])
         data["providers"] = {validate_provider_id(key): validate_provider(row) for key, row in data["providers"].items()}
         for profile_id, row in data["profiles"].items():
             UUID(profile_id)

@@ -9,7 +9,7 @@ from urllib.parse import urlsplit
 from ..backends.provider_headers import validate_headers, validate_session_header
 from ..backends.sampling import validate_top_p
 
-SCHEMA = "owner_model_profiles.v3"
+SCHEMA = "owner_model_profiles.v4"
 BACKENDS = {"openai_compatible", "anthropic_compatible", "openai_responses", "typesafe_decision"}
 CAPABILITIES = {"agentic", "embedding", "decision"}
 
@@ -148,7 +148,7 @@ def validate_model_profile(value: object) -> dict:
 # LLM: 迁移保持 selected/profile UUID、密钥和传输头，不写源文件；同步 v1 完整连接回归。
 # 函数用途: 将旧版逐模型连接转换为一对一服务商，保留采样、身份头与已有子代理模型引用。
 def migrate_v1(data: dict) -> dict:
-    migrated = {"schema": SCHEMA, "selected": data["selected"], "providers": {}, "profiles": {}}
+    migrated = {**data, "schema": "owner_model_profiles.v3", "providers": {}, "profiles": {}}
     for profile_id, value in data["profiles"].items():
         if value.get("capability") == "decision" or value.get("model_backend") == "typesafe_decision":
             raise ModelProfileError("旧模型目录不能包含决策模型，请使用当前配置入口新增。")
@@ -158,18 +158,28 @@ def migrate_v1(data: dict) -> dict:
             "capabilities": [row["capability"]], "custom_headers": row.get("model_custom_headers", {}),
             "session_header": row.get("model_session_header", "")})
         migrated["profiles"][profile_id] = validate_model({**row, "provider_id": provider_id})
-    return migrated
+    return migrate_v3(migrated)
 
 
 # LLM: v2 只拥有 agentic/embedding 用途；迁移只改内存版本，拒绝把未来协议伪装成旧配置。
-# 函数用途: 显式升级原模型目录，不改编号、凭据、选择或源文件；下一次修改才写入 v3。
+# 函数用途: 显式升级原模型目录，不改编号、凭据、选择或源文件；下一次修改才写入当前版本。
 def migrate_v2(data: dict) -> dict:
     for row in data["profiles"].values():
         if row.get("capability", "agentic") == "decision" or row.get("model_backend") == "typesafe_decision":
             raise ModelProfileError("旧模型目录不能包含决策模型，请使用当前配置入口新增。")
     if any("decision" in row.get("capabilities", []) for row in data["providers"].values()):
         raise ModelProfileError("旧服务商目录不能包含决策用途。")
-    return {**data, "schema": SCHEMA}
+    return migrate_v3({**data, "schema": "owner_model_profiles.v3"})
+
+
+# LLM: v3 没有决策覆盖；迁移保留全部已有根字段，不允许旧版本夹带未来覆盖后被静默清除。
+# 函数用途: 只在内存新增空的版本化决策覆盖，下一次原目录管理写入才保存 v4。
+def migrate_v3(data: dict) -> dict:
+    from .decision_settings_schema import empty_decision_settings
+
+    if "decision_settings" in data:
+        raise ModelProfileError("旧模型目录不能包含新版本决策覆盖。")
+    return {**data, "schema": SCHEMA, "decision_settings": empty_decision_settings()}
 
 
 # LLM: 唯一解析点校验调用方所需用途，即使跳过启用检查也不能混用；OAuth 只返回绑定引用。

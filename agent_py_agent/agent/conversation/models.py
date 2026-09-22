@@ -1,5 +1,5 @@
 
-# LLM: 本模块定义 canonical 会话状态；显示遥测不得进入模型上下文或替代 Compact/计费事实源。
+# LLM: 本模块定义 canonical 会话状态；v10 增加原地决策覆盖，旧版本显式迁移，显示遥测不替代计费事实。
 # 模块用途: 保存会话、消息、运行关联和独立数值快照的结构化协议。
 from __future__ import annotations
 
@@ -7,7 +7,9 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-SCHEMA_VERSION = "conversation_thread.v9"
+from ..settings.decision_settings_schema import empty_decision_settings
+
+SCHEMA_VERSION = "conversation_thread.v10"
 
 THREAD_TASK_LINK_ACTIVE_STATUS = "active"
 THREAD_TASK_LINK_INACTIVE_STATUSES = frozenset(
@@ -310,9 +312,9 @@ class ConversationCompactCommit:
 
 
 # LLM: ConversationThread is the sole durable authority for transcript, compact cursor/checkpoint,
-# model profile reference, provider context calibration, display-only preflight usage, compact failure circuit, and the latest workspace projection; task
+# model profile reference, versioned decision overrides, provider context calibration, display-only preflight usage, compact failure circuit, and the latest workspace projection; task
 # lifecycle remains in ThreadTaskLink.
-# 类用途: 保存会话模型选择、压缩点和上下文快照，任务运行状态仍由 task link 保存。
+# 类用途: 保存会话模型选择、临时决策覆盖、压缩点和上下文快照，任务运行状态仍由 task link 保存。
 @dataclass(frozen=True)
 class ConversationThread:
     thread_id: str
@@ -322,6 +324,9 @@ class ConversationThread:
     # LLM: 仅存 owner 配置引用，不保存密钥；空串表示旧记录尚未首次冻结，不是每轮跟随用户默认。
     # 字段用途: 固定当前会话的模型，多个窗口打开同一会话共享，不同会话互不改变。
     model_profile_id: str = ""
+    # LLM: 覆盖信封只存字段及 revision，不复制默认值、凭据或阶段计时；旧记录显式迁移为空覆盖。
+    # 字段用途: 保存本会话临时决策偏好，删除字段即可恢复 owner/部署配置的继承。
+    decision_settings: dict[str, Any] = field(default_factory=empty_decision_settings)
     title: str = ""
     status: str = "active"
     summary: str = ""
@@ -365,7 +370,7 @@ class ConversationThread:
     runtime_workspace_roots: tuple[str, ...] = ()
     metadata: dict[str, Any] = field(default_factory=dict)
 
-    # LLM: Persist v9 model reference, transcript/tool compact sources, calibration, numeric display usage, guards, latest
+    # LLM: Persist v10 decision overrides, model reference, transcript/tool compact sources, calibration, numeric display usage, guards, latest
     # workspace projection and client cwd together.
     # 函数用途: 将会话模型引用和上下文状态一并写成 JSON，供重启恢复读取，不保存模型密钥。
     def to_dict(self) -> dict[str, Any]:
@@ -376,11 +381,13 @@ class ConversationThread:
         payload["active_task_ids"] = list(self.active_task_ids)
         return payload
 
-    # LLM: Older records load with no provider calibration/display usage and zero live-tool compact sources;
-    # missing runtime facts are never inferred from summary prose.
-    # 函数用途: 读取旧会话时缺少上下文快照保持未知，不从校准数或历史正文推断显示数字。
+    # LLM: v1-v9/无版本记录显式补空决策覆盖；未知版本拒绝，运行事实不从 summary 推断。
+    # 函数用途: 迁移旧会话的可选设置，同时保持既有上下文、绑定和用量字段。
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ConversationThread:
+        from ..settings.decision_settings_schema import thread_decision_settings
+
+        decision_settings = thread_decision_settings(data)
         bindings = data.get("channel_bindings")
         active_task_ids = data.get("active_task_ids")
         task_ids = data.get("task_ids")
@@ -391,6 +398,7 @@ class ConversationThread:
             owner_id=str(data.get("owner_id") or ""),
             owner_home=str(data.get("owner_home") or ""),
             model_profile_id=str(data.get("model_profile_id") or ""),
+            decision_settings=decision_settings,
             title=str(data.get("title") or ""),
             status=str(data.get("status") or "active"),
             summary=str(data.get("summary") or ""),

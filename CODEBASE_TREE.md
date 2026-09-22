@@ -27,6 +27,8 @@
 P1-A 本地配置交接：`docs/tasks/DECISION_MODEL_P1A_HANDOFF.md`。
 P1-B 本地协议与传输交接：`docs/tasks/DECISION_MODEL_P1B_HANDOFF.md`。
 P1-C/D 有界调用组件交接：`docs/tasks/DECISION_MODEL_P1CD_HANDOFF.md`。
+P1-E 共用设置交接：`docs/tasks/DECISION_MODEL_P1E_HANDOFF.md`。
+P1-F/G 实际服务与用量组合交接：`docs/tasks/DECISION_MODEL_P1FG_HANDOFF.md`。
 
 这份树只描述当前主链路。旧迁移入口、过渡计划和已删除模块不在这里保留。
 
@@ -282,6 +284,9 @@ agent_py_agent/
 |   |   |-- display_checkpoint.py     # canonical逐块公开过程校验/写入、恢复未知占位与显示去重
 |   |   |-- display_archive.py        # 不可变显示原文、无路径引用与有界页文件，不进入模型上下文
 |   |   |-- auxiliary_model_call.py   # 会话辅助模型调用的统一账、退避、并发闸；独立压缩用量持久结算
+|   |   |-- decision_service.py       # 可选决策阶段预算、设置/身份复核和建议返回，不执行业务动作
+|   |   |-- decision_policy.py        # 有界连接冷却与同进程设置取消通知，不拥有 worker 或持久状态
+|   |   |-- decision_model_call.py    # 实际决策 worker 复用原准入、身份头、HTTP 观察和唯一调用账
 |   |   |-- tool_context_window.py    # text/native 共用的有界工具历史窗口与稳定前缀投影
 |   |   |-- tool_input_progress.py     # provider 大工具参数生成期的脱敏临时展示合同
 |   |   |-- agent_thread.py            # child/grandchild 独立 thread、逐 attempt transcript 与统一 Compact 适配
@@ -339,6 +344,10 @@ agent_py_agent/
 |   |-- settings/                      # AgentConfig、加载、来源账本、runtime scope config
 |   |   |-- user_config_capability.py  # 用户可自助修改配置的唯一白名单/校验/生效时机；安全边界结构性拒绝
 |   |   |-- model_profiles.py           # owner 私有模型配置唯一文件源、脱敏列表及子代理创建时引用
+|   |   |-- decision_settings.py        # 原 owner/thread 决策覆盖共用读取、字段修改、恢复继承与双版本 CAS
+|   |   |-- decision_settings_schema.py # 决策字段/范围校验及旧会话覆盖迁移，不持有默认值
+|   |   |-- decision_settings_defaults.py # 投影原 Agent/能力/记忆配置默认值和继承来源
+|   |   |-- decision_settings_projection.py # 原模型引用可用性与有效设置读回，不发请求、不暴露凭据
 |   |   |-- model_oauth.py              # owner 登录代次、取消与刷新并发控制，复用私有配置源
 |   |   |-- model_oauth_schema.py       # 授权配置、凭据目的地、私有状态与绑定校验
 |   |   |-- model_oauth_wire.py         # 设备码、兑换和刷新协议的有界无重定向 HTTP
@@ -436,6 +445,13 @@ agent_py_agent/
 |       `-- tool_protocol_adapter.py   # native 事件或显式完整 text 帧到 canonical ToolCall 的唯一适配口
 |-- tests/                             # 单元、集成、真实链路回归
 |   |-- test_decision_model_profiles.py # 决策用途隔离、旧目录迁移、共享撤销与生成选择不退化
+|   |-- test_decision_settings.py       # 决策覆盖继承、双版本 CAS、权限隔离及原配置迁移
+|   |-- test_decision_settings_notifications.py # 设置逆序通知、覆盖恢复继承及精准取消
+|   |-- test_decision_service.py        # 决策阶段预算、冷却、设置复核、关闭与旧请求隔离
+|   |-- test_decision_service_http.py   # 原配置到真实本地 HTTP、账本与活动用量行的组合
+|   |-- test_decision_model_call.py     # 实际 worker 账本保留、HTTP 尝试、身份、准入与取消
+|   |-- test_model_call_ledger_partitions.py # 原账本用途、字段真值、单调终态及 worker 精确保留
+|   |-- test_decision_usage_metrics.py  # 决策用途增量、迟到补账、未知输入与原 TUI 一行展示
 |   |-- test_decision_protocol.py       # 决策快照、复杂度上限、逐题失败与用量未知合同
 |   |-- test_typesafe_decision.py       # 原生请求、绝对期限及本地 HTTP 组合验收
 |   |-- test_gateway_strict_request.py  # 原 HTTP 严格请求的零重试、期限与正文上限回归
@@ -643,7 +659,11 @@ docs/
 
 - `docs/design/MAINTAINABILITY_AND_JEV_REVIEW.md`：热点源码与参考阅读证据、未实施的重构顺序、Computer Use 当前条件及 Jev 可选接入方案。
 - `docs/design/DECISION_MODEL_INTEGRATION.md`：原生决策模型的实施合同，覆盖配置复用、2/4 秒预算、缺数据、记忆/派工/能力接入、缓存窗口、并行认领与验收。
-- `agent_py_agent/tests/test_decision_model_profiles.py`：验证模型目录 v3 的用途隔离、显式迁移、凭据复用、共享撤销及主子代理选择不误用决策模型。
+- `agent_py_agent/tests/test_decision_model_profiles.py`：验证当前模型目录 v4 的用途隔离、显式迁移、凭据复用、共享撤销及主子代理选择不误用决策模型。
+- `agent_py_agent/agent/settings/decision_settings.py`：原设置界面和工具共用服务；原 owner 模型目录及线程字段保存覆盖，锁序 owner→thread，版本冲突拒绝覆写。
+- `agent_py_agent/agent/conversation/decision_service.py`、`decision_policy.py`、`decision_model_call.py`：分别负责建议策略、连接隔离和实际模型调用；复用原存储/准入/取消/账本，不建立第二份任务权威。
+- `agent_py_agent/agent/settings/decision_settings_schema.py`、`decision_settings_defaults.py`、`decision_settings_projection.py`：分别负责严格结构、原模块默认值映射及脱敏有效值投影，不增加配置权威位置。
+- `agent_py_agent/tests/test_decision_usage_metrics.py`：验证用途分区复用原增量规则，决策输入与 LLM 总量不双计、缺报保留未知、历史基数随原文件更新。
 - `agent_py_agent/agent/backends/decision_protocol.py`：冻结宿主决策材料、来源和候选版本；结果只有建议权，消费者仍要复查。
 - `agent_py_agent/agent/backends/typesafe_decision.py`：独立 decide 操作，复用原连接选项、请求头、HTTP 与错误协议；不实现 generate。
 - `agent_py_agent/agent/backends/typesafe_decision_wire.py`：TypeSafe 问题和答案解析，单题错误与顶层协议损坏分开，完整用量交给原账本。
@@ -657,6 +677,7 @@ docs/
 - `docs/tasks/DECISION_MODEL_P1A_HANDOFF.md`：用途隔离、目录迁移、原管理表单及本地验收证据；不代替决策调用验收。
 - `docs/tasks/DECISION_MODEL_P1B_HANDOFF.md`：原生协议、严格 HTTP、组件联合验收及后续有界调用边界。
 - `docs/tasks/DECISION_MODEL_P1CD_HANDOFF.md`：精确取消、有界资源、Curator 迁移和原准入组合证据，保留尚未接线的设置/账本边界。
+- `docs/tasks/DECISION_MODEL_P1E_HANDOFF.md`、`DECISION_MODEL_P1FG_HANDOFF.md`：共用设置、实际短决策调用及原用量展示的本地交接；真实服务与业务消费者另行验收。
 
 - `agent_py_agent/agent/agent_core/agent_tree/model_view.py`：保留 run 身份、状态、原因与真实 read_order；不暴露恢复目录，省略内容可沿原工具归档完整读取。
 - `agent_py_agent/tests/test_agent_tree_model_view.py`：模型状态投影、终态报告可达性、状态不被省略及超长归档回读合同的定向验证。

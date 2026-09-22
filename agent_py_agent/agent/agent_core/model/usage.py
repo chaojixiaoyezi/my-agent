@@ -1,10 +1,13 @@
-
+# LLM: 用量归一只依据供应商结构化字段；兼容总数与按字段已报事实分开，缺失不得伪装真实零，修改时联测原账本及上下文用量。
+# 模块用途: 统一读取生成和决策响应的 token 用量，保留不同协议的总输入、缓存及缺报语义。
 from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
 
 
+# LLM: 只读取响应的 usage 映射，不要求聊天正文、工具调用或 generate 接口；返回副本，不修改供应商信封。
+# 函数用途: 取得任意模型响应的结构化用量，供原账本和费用计算共用。
 def response_usage(response: object) -> dict[str, object]:
     usage = getattr(response, "usage", {})
     return dict(usage) if isinstance(usage, Mapping) else {}
@@ -135,46 +138,43 @@ def cached_input_token_usage(response: object) -> int:
     return 0
 
 
-# LLM: Cost/accounting subtraction and observability are different contracts. This helper reports
-# every provider cache-read field without assuming whether it is already included in input_tokens.
-# 函数用途: 读取供应商实际返回的缓存命中 token，供任务消耗对比单独展示。
+# LLM: 兼容值缺报仍返回零；按字段来源必须通过 provider_usage_fields 判断，不能凭零推断供应商已报告。
+# 函数用途: 读取供应商缓存命中计数，保持原计费与展示接口的数值合同。
 def reported_cache_read_token_usage(response: object) -> int:
-    usage = response_usage(response)
-    for key in ("input_tokens_details", "prompt_tokens_details"):
-        details = usage.get(key)
-        if isinstance(details, Mapping):
-            value = _first_positive_int(
-                (details.get("cached_tokens"), details.get("cache_read_tokens"))
-            )
-            if value is not None:
-                return value
-    return _first_positive_int(
-        (usage.get("cache_read_input_tokens"), usage.get("cached_input_tokens"))
-    ) or 0
+    return _reported_cache_token_value(response, write=False) or 0
 
 
-# LLM: Cache creation is reported separately by Anthropic-style providers and must not be merged
-# into cache reads or guessed from latency.
-# 函数用途: 读取本次请求新写入供应商缓存的 token 数。
+# LLM: 缓存写入不能由延迟或缓存读取猜测；兼容零值与真实报告来源分开，由同一可空读取函数维护。
+# 函数用途: 读取本次请求写入供应商缓存的 token，未报告时保持原数值零接口。
 def cache_creation_input_token_usage(response: object) -> int:
+    return _reported_cache_token_value(response, write=True) or 0
+
+
+# LLM: 缓存字段选择与兼容数值读取共用；None 表示字段缺失或无有效数值，真实零必须原样返回。
+# 函数用途: 读取缓存命中或写入的可空值，避免按字段来源和原计数采用不同协议规则。
+def _reported_cache_token_value(response: object, *, write: bool) -> int | None:
     usage = response_usage(response)
+    nested_fields = ("cache_creation_tokens", "cache_write_tokens") if write else ("cached_tokens", "cache_read_tokens")
+    top_fields = ("cache_creation_input_tokens", "cache_write_input_tokens") if write else ("cache_read_input_tokens", "cached_input_tokens")
     for key in ("input_tokens_details", "prompt_tokens_details"):
         details = usage.get(key)
         if isinstance(details, Mapping):
-            value = _first_positive_int(
-                (
-                    details.get("cache_creation_tokens"),
-                    details.get("cache_write_tokens"),
-                )
-            )
+            value = _first_positive_int(tuple(details.get(name) for name in nested_fields))
             if value is not None:
                 return value
-    return _first_positive_int(
-        (
-            usage.get("cache_creation_input_tokens"),
-            usage.get("cache_write_input_tokens"),
-        )
-    ) or 0
+    return _first_positive_int(tuple(usage.get(name) for name in top_fields))
+
+
+# LLM: 只声明已有有效 token 字段；信封存在、估算回退和真实零互不等价，DecisionResponse 不必伪造 text 或生成接口。
+# 函数用途: 返回供应商实际报告的用量字段，供账本逐字段划分真值和估算。
+def provider_usage_fields(response: object) -> tuple[str, ...]:
+    values = {
+        "input_tokens": input_token_usage(response),
+        "output_tokens": output_token_usage(response),
+        "cache_read_input_tokens": _reported_cache_token_value(response, write=False),
+        "cache_write_input_tokens": _reported_cache_token_value(response, write=True),
+    }
+    return tuple(name for name, value in values.items() if value is not None)
 
 
 def goal_token_usage(response: object) -> int:
@@ -220,6 +220,7 @@ __all__ = [
     "goal_token_usage",
     "input_token_usage",
     "output_token_usage",
+    "provider_usage_fields",
     "provider_visible_input_token_usage",
     "reported_cache_read_token_usage",
     "response_cost_usd",

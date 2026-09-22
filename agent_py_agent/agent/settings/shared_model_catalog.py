@@ -65,9 +65,9 @@ def _admin_profiles(home: object) -> dict:
     return read_model_profiles(model_profiles_path(identity))
 
 
-# LLM: 每次执行核验发布、用途及可用性；OAuth 不跨用户共享，决策配置不可通过共享绕过生成用途守卫。
-# 函数用途: 将已授权共享引用解析为指定用途的连接，默认只接受聊天模型；撤销或删除后明确失败。
-def resolve_shared_model(home: object, profile_id: str, *, capability: str = "agentic") -> dict:
+# LLM: 始终核验发布/用途且禁共享 OAuth；仅离线设置可显式跳过启用/凭据检查，原执行默认不放宽。
+# 函数用途: 解析已授权共享引用；保存草稿可检查用途，实际调用仍必须检查连接可用性。
+def resolve_shared_model(home: object, profile_id: str, *, capability: str = "agentic", require_enabled: bool = True) -> dict:
     key = shared_profile_key(profile_id)
     if not key or key not in _read_catalog(home):
         raise ModelProfileError("共享模型未开放或已撤销，请在 /model 重新选择。")
@@ -76,7 +76,7 @@ def resolve_shared_model(home: object, profile_id: str, *, capability: str = "ag
         raise ModelProfileError("共享模型原配置已删除，请在 /model 重新选择。")
     if data["providers"][data["profiles"][key]["provider_id"]].get("auth"):
         raise ModelProfileError("订阅/OAuth 登录仅供所属用户使用，不能跨用户共享。")
-    return resolved_model(data, key, capability=capability)
+    return resolved_model(data, key, capability=capability, require_enabled=require_enabled)
 
 
 # LLM: 仅投影显式发布的公开模型字段；不泄漏管理员其他模型、API Key、自定义头或私有文件位置。

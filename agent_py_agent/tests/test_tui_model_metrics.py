@@ -141,6 +141,35 @@ def test_usage_handoff_settles_once_and_restart_adds_new_calls(tmp_path):
     assert agent.conversation_store.model_usage.summary(thread.thread_id)["provider"]["input_tokens"] == 3000
 
 
+@pytest.mark.parametrize("standalone", [False, True])
+def test_late_http_attempt_can_settle_without_recounting_same_model_call(tmp_path, standalone):
+    from agent_py_agent.agent.agent_core._finalization_service import FinalizationService
+
+    agent, params, clock, _runtime, thread = fixture(tmp_path)
+    params.task_id, params.source = "task-1", "gateway"
+    settled(agent, params, clock)
+    request = SimpleNamespace(agent=agent, store=agent.conversation_store, thread=thread,
+        request_id=params.request_id, run_id=params.run_id, task_id=params.task_id, operation_id="compact-op")
+    finalizer = FinalizationService(agent)
+
+    def settle():
+        if standalone:
+            return settle_standalone_model_usage(request)
+        return finalizer.settle_model_usage(params)
+
+    settle()
+    agent._model_call_ledger.provider_attempt(ModelCallProviderAttemptParams(
+        "call-1", "late-wire-attempt", "response_opened"))
+    settle()
+    settle()
+    events, errors = agent.conversation_store.model_usage.events_report(thread.thread_id)
+    assert not errors and len(events) == 2
+    assert events[0].event_id != events[1].event_id
+    assert events[1].model_calls["physical_model_attempt_count"] == 0
+    assert events[1].model_calls["provider_http_attempt_count"] == 1
+    assert agent.conversation_store.model_usage.summary(thread.thread_id)["provider"]["input_tokens"] == 1000
+
+
 @pytest.mark.parametrize("error", [InterruptedError("cancelled"), RuntimeError("provider failed")])
 def test_exception_closeout_keeps_known_usage_without_masking_error(tmp_path, monkeypatch, error):
     from agent_py_agent.agent.agent_core import runtime_mixin

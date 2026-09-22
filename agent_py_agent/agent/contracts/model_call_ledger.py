@@ -8,8 +8,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-# LLM: 本模块同时维护有界模型调用明细与按 request/run 聚合的累计观测；裁剪明细不得截断最终计数。
-# 模块用途: 记录模型调用、供应商 HTTP 尝试和超时等结构化事实，供运行时诊断与最终结果展示。
+# LLM: 本模块是调用及累计用量的唯一事实源；终态单调，显式保留句柄覆盖迟到 HTTP 生命周期，字段来源与用途累计不能受明细裁剪影响。
+# 模块用途: 记录模型调用、真实用量和后台传输事实，按 request/run 提供主调用、辅助调用及决策统计。
 
 # 门槛2 终审边界②(steward seq1622-2): stage 合同单一事实源下沉到账本层。
 # ProviderTimeoutError 构造入口与 ModelCallLedger.timeout 写入入口共用同一
@@ -19,6 +19,9 @@ from typing import Any
 TIMEOUT_STAGES = frozenset(
     {"first_event", "stream_idle", "wall_clock", "provider_declared", "provider_wall"}
 )
+_TERMINAL_STATUSES = frozenset({"failed", "finished", "timed_out"})
+_USAGE_FIELDS = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_write_input_tokens")
+_PURPOSE_BUCKETS = ("main", "auxiliary", "decision")
 
 
 @dataclass(frozen=True)
@@ -57,6 +60,8 @@ class ModelCallActivityParams:
     output_tokens_seen: int = 0
 
 
+# LLM: provider_usage_fields=None 保留旧信封级来源；显式字段列表只声明已报告事实，不能用估算补供应商缺值。
+# 类用途: 描述一次成功收尾的用量和结束事实，允许输入与输出各自保留不同来源。
 @dataclass(frozen=True)
 class ModelCallFinishParams:
     call_id: str
@@ -72,6 +77,7 @@ class ModelCallFinishParams:
     runtime_reason: str = ""
     turn_end_reason: str = ""
     truncated: bool = False
+    provider_usage_fields: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -107,6 +113,8 @@ class ModelCallProviderAttemptParams:
     request_surface: dict[str, Any] = field(default_factory=dict)
 
 
+# LLM: 调用身份及首个终态固定；可追加传输事实，provider_usage_fields 缺失仍沿历史全有或全无来源解释。
+# 类用途: 保存一次物理模型调用的生命周期、token 来源和 HTTP 观察结果，供原累计账本更新。
 @dataclass(frozen=True)
 class ModelCallRecord:
     call_id: str
@@ -154,7 +162,10 @@ class ModelCallRecord:
     cache_suspected: bool = False
     events: tuple[str, ...] = ("started",)
     metadata: dict[str, Any] = field(default_factory=dict)
+    provider_usage_fields: tuple[str, ...] | None = None
 
+    # LLM: 只投影已有结构化事实；None 与空列表分别表示历史来源未知和本次未报告任何已知 token 字段。
+    # 函数用途: 生成可序列化的调用明细，保留按字段用量来源以便诊断部分报告。
     def to_dict(self) -> dict[str, Any]:
         return {
             "call_id": self.call_id,
@@ -178,6 +189,7 @@ class ModelCallRecord:
             "cached_input_tokens": self.cached_input_tokens,
             "cache_creation_input_tokens": self.cache_creation_input_tokens,
             "provider_usage_reported": self.provider_usage_reported,
+            "provider_usage_fields": list(self.provider_usage_fields) if self.provider_usage_fields is not None else None,
             "output_tokens_seen": self.output_tokens_seen,
             "timeout_seconds": self.timeout_seconds,
             "timeout_stage": self.timeout_stage,
@@ -194,12 +206,11 @@ class ModelCallRecord:
         }
 
 
-# LLM: 聚合态保存唯一统计代次、计数和展示集合；重建累计容器必须生成新身份，来源切换不换代。
-# 类用途: 在详细调用记录被裁剪后继续保留某个 request/run 的准确累计统计。
+# LLM: 这是原累计容器及其用途分区共用的计数实现，不建立第二账本；逻辑身份包含用途，字段来源缺失保留历史解释。
+# 类用途: 增量累计调用、HTTP 尝试和 token，供总计与各用途分区使用同一计算规则。
 @dataclass
-class _ModelCallAggregate:
-    usage_scope_id: str = field(default_factory=lambda: uuid.uuid4().hex)
-    logical_call_counts: dict[str, int] = field(default_factory=dict)
+class _ModelCallTotals:
+    logical_call_counts: dict[tuple[str, str], int] = field(default_factory=dict)
     physical_model_attempt_count: int = 0
     provider_http_attempt_count: int = 0
     provider_http_retry_count: int = 0
@@ -218,6 +229,10 @@ class _ModelCallAggregate:
     provider_cache_write_input_tokens: int = 0
     estimated_input_tokens: int = 0
     estimated_output_tokens: int = 0
+    provider_input_tokens_reported_call_count: int = 0
+    provider_output_tokens_reported_call_count: int = 0
+    provider_cache_read_input_tokens_reported_call_count: int = 0
+    provider_cache_write_input_tokens_reported_call_count: int = 0
 
     # LLM: 每个新 call_id 恰好调用一次；同 call_id 的状态变化必须走 observe_update，避免重复累计。
     # 函数用途: 把一条新模型调用加入累计统计，并登记逻辑回合、后端、模型和初始状态。
@@ -272,37 +287,16 @@ class _ModelCallAggregate:
             self.models.add(current.model)
         self._observe_usage_delta(previous, current)
 
-    # LLM: Aggregate token totals are maintained by replacement deltas so detail pruning never
-    # truncates long-task usage and repeated finish events remain idempotent.
-    # 函数用途: 按同一 call 的新旧快照增量更新 token 总账，避免重复收尾多计。
+    # LLM: 按原记录与新记录的差值更新；信封级调用次数保持历史意义，字段级计次只累计显式已报事实。
+    # 函数用途: 增量更新 token 总量及来源，部分报告不会把缺失字段的估算误写成供应商真值。
     def _observe_usage_delta(
         self,
         previous: ModelCallRecord | None,
         current: ModelCallRecord,
     ) -> None:
         old = previous or ModelCallRecord("", "", "", 0)
-        self.accounted_input_tokens = max(
-            0,
-            self.accounted_input_tokens
-            + current.accounted_input_tokens
-            - old.accounted_input_tokens,
-        )
-        self.output_tokens = max(
-            0,
-            self.output_tokens + current.output_tokens - old.output_tokens,
-        )
-        self.cached_input_tokens = max(
-            0,
-            self.cached_input_tokens
-            + current.cached_input_tokens
-            - old.cached_input_tokens,
-        )
-        self.cache_creation_input_tokens = max(
-            0,
-            self.cache_creation_input_tokens
-            + current.cache_creation_input_tokens
-            - old.cache_creation_input_tokens,
-        )
+        for field_name in ("accounted_input_tokens", "output_tokens", "cached_input_tokens", "cache_creation_input_tokens"):
+            setattr(self, field_name, max(0, getattr(self, field_name) + getattr(current, field_name) - getattr(old, field_name)))
         old_reported = int(old.provider_usage_reported and old.status == "finished")
         new_reported = int(
             current.provider_usage_reported and current.status == "finished"
@@ -321,14 +315,7 @@ class _ModelCallAggregate:
         )
         old_usage = _partitioned_usage(old)
         new_usage = _partitioned_usage(current)
-        for field_name in (
-            "provider_input_tokens",
-            "provider_output_tokens",
-            "provider_cache_read_input_tokens",
-            "provider_cache_write_input_tokens",
-            "estimated_input_tokens",
-            "estimated_output_tokens",
-        ):
+        for field_name in new_usage:
             setattr(
                 self,
                 field_name,
@@ -340,8 +327,8 @@ class _ModelCallAggregate:
                 ),
             )
 
-    # LLM: 返回值只含公开统计，不泄露内部 logical id 集合或可变容器引用。
-    # 函数用途: 生成最终结果和 runtime facts 可直接消费的累计统计快照。
+    # LLM: 旧总量和信封调用计数保持意义；新字段计数仅代表明确报告，不能把 legacy None 解释成真实零。
+    # 函数用途: 生成公开统计快照，帮助消费端区分部分报告、完全缺失与真实零 token。
     def to_summary(self) -> dict[str, object]:
         logical_count = len(self.logical_call_counts)
         physical_count = max(0, self.physical_model_attempt_count)
@@ -381,6 +368,7 @@ class _ModelCallAggregate:
                         0, self.provider_cache_write_input_tokens
                     ),
                     "call_count": max(0, self.provider_usage_call_count),
+                    **{f"{name}_reported_call_count": max(0, getattr(self, f"provider_{name}_reported_call_count")) for name in _USAGE_FIELDS},
                 },
                 "estimated": {
                     "input_tokens": max(0, self.estimated_input_tokens),
@@ -391,10 +379,8 @@ class _ModelCallAggregate:
         }
 
 
-# LLM: Provider truth and fallback estimates share legacy compatibility totals,
-# but this partition is the only cost-grade view and never fills a missing
-# provider field from an estimate.
-# 函数用途: 将一条已结束调用拆成供应商真值或本地估算，供累计账本独立求和。
+# LLM: 显式 provider_usage_fields 按字段拆账；None 只为旧调用保留原信封级分类，不能推断旧字段是否真实报告。
+# 函数用途: 将成功调用的每个 token 字段归到供应商或本地估算，并独立记录已报告字段的次数。
 def _partitioned_usage(record: ModelCallRecord) -> dict[str, int]:
     empty = {
         "provider_input_tokens": 0,
@@ -403,33 +389,103 @@ def _partitioned_usage(record: ModelCallRecord) -> dict[str, int]:
         "provider_cache_write_input_tokens": 0,
         "estimated_input_tokens": 0,
         "estimated_output_tokens": 0,
+        **{f"provider_{name}_reported_call_count": 0 for name in _USAGE_FIELDS},
     }
     if record.status != "finished":
         return empty
-    if record.provider_usage_reported:
+    explicit_fields = record.provider_usage_fields
+    reported = set(explicit_fields) if explicit_fields is not None else set(_USAGE_FIELDS if record.provider_usage_reported else ())
+    values = (record.accounted_input_tokens, record.output_tokens, record.cached_input_tokens, record.cache_creation_input_tokens)
+    for name, value in zip(_USAGE_FIELDS, values, strict=True):
+        if name in reported:
+            empty[f"provider_{name}"] = max(0, int(value))
+        elif name in {"input_tokens", "output_tokens"}:
+            empty[f"estimated_{name}"] = max(0, int(value))
+        empty[f"provider_{name}_reported_call_count"] = int(explicit_fields is not None and name in reported)
+    return empty
+
+
+# LLM: 用途来自宿主结构化 metadata；未声明 decision 的辅助调用仍归辅助，普通调用默认归主桶。
+# 函数用途: 为累计账选一个互斥用途分区，不读取提示词、后端名或响应正文猜测用途。
+def _model_call_purpose(record: ModelCallRecord) -> str:
+    if record.metadata.get("purpose") == "decision":
+        return "decision"
+    return "auxiliary" if record.metadata.get("auxiliary") is True else "main"
+
+
+# LLM: 每个 request/run 只有一个累计容器和代次；用途分区复用同一计数实现，不能从裁剪后的明细重算。
+# 类用途: 在原累计账内维护总量及主调用、辅助调用、决策调用三个分区。
+@dataclass
+class _ModelCallAggregate(_ModelCallTotals):
+    usage_scope_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    purpose_totals: dict[str, _ModelCallTotals] = field(default_factory=lambda: {name: _ModelCallTotals() for name in _PURPOSE_BUCKETS})
+
+    # LLM: 同一新 call_id 同步进入总账和唯一用途桶；两处更新均由外层 ledger 锁保护。
+    # 函数用途: 登记一次新调用，并保留其用途分区计数。
+    def observe_new(self, record: ModelCallRecord) -> None:
+        super().observe_new(record)
+        self.purpose_totals[_model_call_purpose(record)].observe_new(record)
+
+    # LLM: started 后身份及用途不再改变；后续终态和迟到 HTTP 事实按同一新旧记录同步更新原分区。
+    # 函数用途: 更新调用的总计和用途计数，不新建调用或改变统计代次。
+    def observe_update(self, previous: ModelCallRecord, current: ModelCallRecord) -> None:
+        super().observe_update(previous, current)
+        self.purpose_totals[_model_call_purpose(current)].observe_update(previous, current)
+
+    # LLM: 分区只有统计字段，不含独立代次或嵌套分区；旧持久事件未声明分区时不能事后猜测用途。
+    # 函数用途: 在原累计摘要中附加三类调用的用量和尝试统计。
+    def to_summary(self) -> dict[str, object]:
         return {
-            **empty,
-            "provider_input_tokens": max(0, int(record.accounted_input_tokens)),
-            "provider_output_tokens": max(0, int(record.output_tokens)),
-            "provider_cache_read_input_tokens": max(
-                0, int(record.cached_input_tokens)
-            ),
-            "provider_cache_write_input_tokens": max(
-                0, int(record.cache_creation_input_tokens)
-            ),
+            **super().to_summary(),
+            "purpose_breakdown": {
+                "schema": "model_call_purpose_breakdown.v1",
+                **{name: totals.to_summary() for name, totals in self.purpose_totals.items()},
+            },
         }
-    return {
-        **empty,
-        "estimated_input_tokens": max(0, int(record.accounted_input_tokens)),
-        "estimated_output_tokens": max(0, int(record.output_tokens)),
-    }
 
 
-# LLM: ledger 是模型调用观测的唯一进程内事实源；明细有界，但当前 request/run 累计值必须保持准确。
-# 类用途: 线程安全地登记模型调用生命周期，并向超时估算和最终响应提供记录与汇总。
+# LLM: 只供无累计态的旧明细和空摘要使用；运行中的 request/run 必须优先读取原 ledger 的增量累计态。
+# 函数用途: 复用累计规则投影一组保留明细，避免兼容入口另维护用量来源和用途规则。
+def summarize_model_call_records(records: tuple[ModelCallRecord, ...] | list[ModelCallRecord]) -> dict[str, object]:
+    aggregate = _ModelCallAggregate()
+    for record in records:
+        aggregate.observe_new(record)
+    return aggregate.to_summary()
+
+
+# LLM: 句柄只能由 ledger.retain_call 建立；每个持有者独立释放，worker 句柄必须随真实退出释放，不能由超时 caller 代劳。
+# 类用途: 在有界 worker 尚未退出时保留准确调用明细及累计作用域，支持 finally 释放或上下文管理。
+class ModelCallRetention:
+    # LLM: 构造只绑定原账本与 call_id，登记由持锁的 retain_call 完成；不得直接构造并假定已有保留权。
+    # 函数用途: 创建精确保留令牌，由原账本登记并管理其有效期。
+    def __init__(self, ledger: ModelCallLedger, call_id: str) -> None:
+        self._ledger = ledger
+        self._call_id = call_id
+
+    # LLM: 已释放句柄不可重用，不允许同名新调用继承旧保留权；有效性只读取原账本令牌集合。
+    # 函数用途: 进入实际 worker 或 caller 的保留区间，拒绝已失效句柄。
+    def __enter__(self) -> ModelCallRetention:
+        with self._ledger._lock:
+            if self not in self._ledger._retained_calls.get(self._call_id, ()):
+                raise RuntimeError("模型调用保留句柄已释放。")
+        return self
+
+    # LLM: 异常退出也必须释放准确令牌；不吞异常，不改变调用成功、失败或超时状态。
+    # 函数用途: 离开上下文时解除本持有者的保留，让原异常继续传播。
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        self.release()
+
+    # LLM: 释放在原 ledger 锁内幂等执行；多个持有者互不代替，最后一个释放才允许裁剪。
+    # 函数用途: 在实际资源生命周期结束的 finally 中解除自己的保留，不启动清理线程。
+    def release(self) -> None:
+        self._ledger._release_retained_call(self)
+
+
+# LLM: ledger 是唯一调用事实源；首个终态不可撤销，HTTP 观察只补物理事实，显式保留须由宿主现有有界 worker 生命周期约束。
+# 类用途: 线程安全地登记调用及用途用量，并保留仍有物理观察来源的准确记录，避免迟到响应重新打开终态。
 class ModelCallLedger:
-    # LLM: 聚合 scope 使用有界 LRU，容量至少覆盖全部 retained record 的 request/run 双键。
-    # 函数用途: 初始化线程安全明细账本和不会被 128 条明细裁剪截断的累计统计。
+    # LLM: 普通 scope 保持原有界 LRU；只有显式 pin 的准确调用及 scope 豁免，宿主必须在 worker 退出后释放。
+    # 函数用途: 初始化原调用账、累计统计和保留令牌集合，不另建执行池或记账入口。
     def __init__(
         self,
         options: ModelCallLedgerOptions | None = None,
@@ -440,10 +496,44 @@ class ModelCallLedger:
         self._records: list[ModelCallRecord] = []
         self._index: dict[str, int] = {}
         self._scope_aggregates: dict[tuple[str, str], _ModelCallAggregate] = {}
+        self._retained_calls: dict[str, set[ModelCallRetention]] = {}
         self._lock = threading.RLock()
 
+    # LLM: 只保留已经存在的 call；caller 和 worker 可各持令牌，各自 finally 释放，worker 总量沿原 bounded 准入限制。
+    # 函数用途: 立即为准确调用登记一个保留句柄，避免正常裁剪先于逻辑收尾或物理退出。
+    def retain_call(self, call_id: str) -> ModelCallRetention:
+        with self._lock:
+            self._require_record(call_id)
+            token = ModelCallRetention(self, call_id)
+            self._retained_calls.setdefault(call_id, set()).add(token)
+            return token
+
+    # LLM: 建立调用与 caller 保留必须处在同一原锁内，避免首次登记后被其他线程裁剪；此入口不预分配 worker 保留。
+    # 函数用途: 原子建立一次调用并返回 caller 句柄，供有界调用等待和逻辑收尾使用。
+    def started_retained(self, params: ModelCallStartedParams) -> tuple[ModelCallRecord, ModelCallRetention]:
+        with self._lock:
+            record = self.started(params)
+            return record, self.retain_call(record.call_id)
+
+    # LLM: 仅移除本令牌；重复释放无副作用，最后一个持有者离开后同步恢复明细及 scope 的原裁剪上限。
+    # 函数用途: 回收一个准确调用保留权，不替其他 caller 或 worker 提前释放。
+    def _release_retained_call(self, token: ModelCallRetention) -> None:
+        with self._lock:
+            tokens = self._retained_calls.get(token._call_id)
+            if tokens is None or token not in tokens:
+                return
+            tokens.remove(token)
+            if not tokens:
+                del self._retained_calls[token._call_id]
+            self._trim_records()
+            self._trim_scope_aggregates()
+
+    # LLM: call_id 是一次物理调用的唯一身份；重复启动不得改身份、清空用量或重开终态，真正重试必须使用新 call_id。
+    # 函数用途: 建立调用明细与累计记录，重复登记时返回原记录。
     def started(self, params: ModelCallStartedParams) -> ModelCallRecord:
         with self._lock:
+            if params.call_id in self._index:
+                return self._require_record(params.call_id)
             now = float(self.context.now())
             record = ModelCallRecord(
                 call_id=params.call_id,
@@ -461,10 +551,12 @@ class ModelCallLedger:
             self._append_or_replace(record)
             return record
 
+    # LLM: 首 token 只推进活动调用；超时或失败后的迟到流事件不能把终态重开，也不能改变终态时延。
+    # 函数用途: 为尚未终结的调用登记首段输出及延迟，重复或迟到通知直接返回原记录。
     def first_token(self, params: ModelCallFirstTokenParams) -> ModelCallRecord:
         with self._lock:
             record = self._require_record(params.call_id)
-            if record.first_token_at is not None:
+            if record.first_token_at is not None or record.status in _TERMINAL_STATUSES:
                 return record
             now = float(self.context.now())
             updated = replace(
@@ -480,12 +572,14 @@ class ModelCallLedger:
             self._replace(updated)
             return updated
 
+    # LLM: 流活动只更新活动调用，不增加事件数组；终态时钟和输出计数不能被迟到片段改写。
+    # 函数用途: 更新尚在运行的流式输出进度，供闲置超时判断使用。
     def activity(self, params: ModelCallActivityParams) -> ModelCallRecord:
         """Record streamed output activity without growing the event ledger."""
 
         with self._lock:
             record = self._require_record(params.call_id)
-            if record.status in {"failed", "finished", "timed_out"}:
+            if record.status in _TERMINAL_STATUSES:
                 return record
             now = float(self.context.now())
             updated = replace(
@@ -499,10 +593,12 @@ class ModelCallLedger:
             self._replace(updated)
             return updated
 
+    # LLM: 首个终态获胜；重复成功和取消后迟到成功均不改写原状态、用量或时间，字段来源随首次收尾冻结。
+    # 函数用途: 一次性记录成功调用及各 token 字段来源，保留旧调用未声明来源时的历史解释。
     def finished(self, params: ModelCallFinishParams) -> ModelCallRecord:
         with self._lock:
             record = self._require_record(params.call_id)
-            if record.status in {"failed", "timed_out"}:
+            if record.status in _TERMINAL_STATUSES:
                 return record
             now = float(self.context.now())
             updated = replace(
@@ -525,6 +621,7 @@ class ModelCallLedger:
                     0, int(params.cache_creation_input_tokens)
                 ),
                 provider_usage_reported=bool(params.provider_usage_reported),
+                provider_usage_fields=tuple(params.provider_usage_fields) if params.provider_usage_fields is not None else None,
                 cache_suspected=record.cache_suspected or params.cache_suspected,
                 stop_reason=str(params.stop_reason or record.stop_reason or ""),
                 runtime_reason=str(params.runtime_reason or record.runtime_reason or ""),
@@ -535,6 +632,8 @@ class ModelCallLedger:
             self._replace(updated)
             return updated
 
+    # LLM: 超时阶段必须属于原合同；只有活动调用能首次终结，迟到或重复 timeout 不覆盖成功与失败。
+    # 函数用途: 保存首次超时的阶段和时长，保持调用终态单调。
     def timeout(self, params: ModelCallTimeoutParams) -> ModelCallRecord:
         # 门槛2 终审边界②: 账本写入 stage 封闭——未知 stage 抛 ValueError
         # (fail-closed), 与 ProviderTimeoutError 构造入口同一合同集合, 防旁路
@@ -546,6 +645,8 @@ class ModelCallLedger:
             )
         with self._lock:
             record = self._require_record(params.call_id)
+            if record.status in _TERMINAL_STATUSES:
+                return record
             now = float(self.context.now())
             updated = replace(
                 record,
@@ -566,9 +667,13 @@ class ModelCallLedger:
             self._replace(updated)
             return updated
 
+    # LLM: 失败只终结活动调用；不能把已成功或已超时记录改成另一失败，首次错误码和耗时保持稳定。
+    # 函数用途: 一次性登记调用失败，重复或迟到异常仅返回原记录。
     def failed(self, params: ModelCallFailureParams) -> ModelCallRecord:
         with self._lock:
             record = self._require_record(params.call_id)
+            if record.status in _TERMINAL_STATUSES:
+                return record
             now = float(self.context.now())
             updated = replace(
                 record,
@@ -583,8 +688,8 @@ class ModelCallLedger:
             self._replace(updated)
             return updated
 
-    # LLM: 请求摘要按同线程比较，缺线程时仅同 run；不同用户账本独立，摘要不改变计费/恢复行为。
-    # 函数用途: 记录 HTTP 尝试及客户端缓存前缀变化；服务端是否淘汰缓存保持未知。
+    # LLM: 物理观察允许晚于逻辑终态，但只修改 HTTP 事实及诊断；终态时钟、状态和用量不变，请求面仅按同线程或 run 比较。
+    # 函数用途: 记录真实 HTTP 尝试与缓存前缀变化，保留取消后仍在退出的 worker 观察结果。
     def provider_attempt(
         self,
         params: ModelCallProviderAttemptParams,
@@ -632,7 +737,7 @@ class ModelCallLedger:
                 attempts[index] = payload
             updated = replace(
                 record,
-                last_activity_at=now,
+                last_activity_at=record.last_activity_at if record.status in _TERMINAL_STATUSES else now,
                 provider_attempt_count=len(attempts),
                 metadata=metadata,
                 provider_attempts=tuple(attempts),
@@ -681,8 +786,8 @@ class ModelCallLedger:
             aggregate.observe_update(previous, record)
         self._records[index] = record
 
-    # LLM: scope LRU 只限制历史 request/run 数，不删除当前 retained detail 对应的累计键。
-    # 函数用途: 取得一条调用所属 request/run 的累计容器，并控制长寿命进程的统计内存上限。
+    # LLM: 原 scope 容器身份不随 pin 改变；保留调用的 request/run 在物理观察结束前不得被 LRU 淘汰。
+    # 函数用途: 取得调用所属累计容器，并按普通窗口与准确保留权清理历史统计。
     def _aggregates_for(self, record: ModelCallRecord) -> tuple[_ModelCallAggregate, ...]:
         aggregates: list[_ModelCallAggregate] = []
         for scope_key in _model_call_scope_keys(record):
@@ -691,22 +796,35 @@ class ModelCallLedger:
                 aggregate = _ModelCallAggregate()
             self._scope_aggregates[scope_key] = aggregate
             aggregates.append(aggregate)
-        max_scopes = max(2, max(1, int(self.options.max_records)) * 2)
-        while len(self._scope_aggregates) > max_scopes:
-            oldest_scope = next(iter(self._scope_aggregates))
-            del self._scope_aggregates[oldest_scope]
+        self._trim_scope_aggregates()
         return tuple(aggregates)
+
+    # LLM: 仅在原 LRU 最新窗口之外追加 pin 作用域；无 pin 时完全保留旧上限和淘汰顺序。
+    # 函数用途: 清理历史累计容器，同时保留仍有实际观察来源的调用所属统计代次。
+    def _trim_scope_aggregates(self) -> None:
+        max_scopes = max(2, max(1, int(self.options.max_records)) * 2)
+        if len(self._scope_aggregates) <= max_scopes:
+            return
+        keep = set(tuple(self._scope_aggregates)[-max_scopes:])
+        for call_id in self._retained_calls:
+            keep.update(_model_call_scope_keys(self._require_record(call_id)))
+        for scope_key in tuple(self._scope_aggregates):
+            if scope_key not in keep:
+                del self._scope_aggregates[scope_key]
 
     def _require_record(self, call_id: str) -> ModelCallRecord:
         if call_id not in self._index:
             raise KeyError(f"unknown model call id: {call_id}")
         return self._records[self._index[call_id]]
 
+    # LLM: 普通明细仍只保留最新 max_records；额外记录必须有显式活令牌，解除后立即恢复裁剪，不保留全部终态。
+    # 函数用途: 清理过期明细，但让尚未收尾的 caller 或 worker 继续向准确调用写事实。
     def _trim_records(self) -> None:
         max_records = max(1, int(self.options.max_records))
         if len(self._records) <= max_records:
             return
-        self._records = self._records[-max_records:]
+        keep = set(self._retained_calls) | {record.call_id for record in self._records[-max_records:]}
+        self._records = [record for record in self._records if record.call_id in keep]
         self._rebuild_index()
 
     def _rebuild_index(self) -> None:
@@ -746,15 +864,15 @@ def _selected_scope_key(
     return None
 
 
-# LLM: logical_call_id 是重试去重事实；缺失时只回退稳定 call_id，不解析其它 metadata 文本。
-# 函数用途: 取得累计统计用于区分逻辑回合与物理重试的唯一键。
-def _logical_call_id(record: ModelCallRecord) -> str:
-    return str(record.metadata.get("logical_call_id") or record.call_id)
+# LLM: logical_call_id 只在同一用途桶中去重；不同用途不能因宿主误用同名 ID 而少计，也不能从自然语言推断身份。
+# 函数用途: 取得带用途命名空间的逻辑回合键，使总计与各分区可以准确相加。
+def _logical_call_id(record: ModelCallRecord) -> tuple[str, str]:
+    return _model_call_purpose(record), str(record.metadata.get("logical_call_id") or record.call_id)
 
 
 # LLM: 引用计数归零时删除键，防逻辑回合或状态集合残留幽灵项。
 # 函数用途: 安全减少内部引用计数，供罕见的同 call_id 身份或状态替换使用。
-def _decrement_counter(counter: dict[str, int], key: str) -> None:
+def _decrement_counter(counter: dict[Any, int], key: Any) -> None:
     remaining = int(counter.get(key, 0)) - 1
     if remaining > 0:
         counter[key] = remaining
@@ -771,7 +889,9 @@ __all__ = [
     "ModelCallLedgerContext",
     "ModelCallLedgerOptions",
     "ModelCallRecord",
+    "ModelCallRetention",
     "ModelCallProviderAttemptParams",
     "ModelCallStartedParams",
     "ModelCallTimeoutParams",
+    "summarize_model_call_records",
 ]
