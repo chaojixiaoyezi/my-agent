@@ -1,8 +1,9 @@
-# LLM: host 仅执行已批准 argv；从原 Store 绑定自己及 child，交接前检查 launcher，交接后只服从精确停止和日志上限。
+# LLM: host 仅执行已批准 argv；交接后默认保留长期后台，显式准备调用继续检查 launcher 和原期限，不重建进程账。
 # 模块用途: 独立持有后台命令并保存真实终态，使工作片结束不误杀资源，异常或未确认退出不伪装成功。
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import subprocess
 import time
@@ -26,8 +27,8 @@ from .process_session_store import ProcessSessionStore
 _HOST_POLL_SECONDS = 0.05
 
 
-# LLM: 只从受保护的原 session 启动文件读 argv；cwd/output 来自不可变预留，环境只由父进程继承。
-# 函数用途: 验证一次性交接文件及句柄，损坏时不执行命令。
+# LLM: 只接收当前 v3 完整寿命字段；cwd/output 来自不可变预留，环境只继承父进程，未知版本不补默认值。
+# 函数用途: 验证一次性交接文件及有界执行设置，损坏时不启动命令。
 def _read_launch_spec(
     store: ProcessSessionStore, session_id: str, spec_path: Path
 ) -> dict[str, object]:
@@ -50,6 +51,10 @@ def _read_launch_spec(
         raise ValueError("managed background argv invalid")
     if type(spec.get("max_log_bytes")) is not int or spec["max_log_bytes"] < 0:
         raise ValueError("managed background log limit invalid")
+    deadline = spec.get("deadline_monotonic")
+    if (type(deadline) not in {int, float} or not math.isfinite(deadline) or deadline < 0
+            or type(spec.get("stop_on_launcher_exit")) is not bool):
+        raise ValueError("managed background lifetime invalid")
     return spec
 
 
@@ -81,8 +86,8 @@ def _require_reservation(record: dict[str, object] | None) -> None:
         raise RuntimeError("managed background launcher unavailable")
 
 
-# LLM: 创建标记先提交，Popen 与 child 绑定同锁；外力崩溃窗口保持 unknown，不将可能的副作用降为未启动。
-# 函数用途: 启动并监控一个独立命令，任何异常只清理当前 host 真正创建的子树。
+# LLM: 创建标记先提交，Popen 与 child 绑定同锁；期限先于创建，外力崩溃窗口保持 unknown，不将副作用降为未启动。
+# 函数用途: 启动并监控一个精确归属命令，执行显式寿命限制，异常仅清理本 host 的子树。
 def run_background_process_host(
     store: ProcessSessionStore, session_id: str, spec_path: Path
 ) -> int:
@@ -94,6 +99,8 @@ def run_background_process_host(
         with store.transaction() as transaction:
             record = transaction.load(session_id)
             _require_reservation(record)
+            if spec["deadline_monotonic"] and time.monotonic() >= spec["deadline_monotonic"]:
+                raise TimeoutError("managed background deadline")
             record = transaction.write({**record, "child_launch_started": True})
             # 留住未回收 child；短命令的出生身份必须先于任何 poll/wait 采集。
             with Path(record["output_file"]).open("ab") as log:
@@ -122,7 +129,9 @@ def run_background_process_host(
                     "status": "running",
                 }
             )
-        return _monitor_child(store, session_id, child, birth, spec["max_log_bytes"])
+        return _monitor_child(store, session_id, child, birth, spec["max_log_bytes"],
+                              deadline_monotonic=spec["deadline_monotonic"],
+                              stop_on_launcher_exit=spec["stop_on_launcher_exit"])
     except Exception as exc:
         receipt = (
             terminate_process_tree(
@@ -140,21 +149,25 @@ def run_background_process_host(
             pass
 
 
-# LLM: 不提前回收组长；自然退出也先核对遗留后代。handoff 后 launcher 的退出与旧 token 不再影响此资源。
-# 函数用途: 持续检查精确停止和日志上限，按真实树退出回执持久化终态或未知状态。
+# LLM: 不提前回收组长；自然退出也核对后代。只有宿主显式要求时，handoff 后仍受 launcher 和原期限约束。
+# 函数用途: 持续检查停止、寿命和日志上限，按真实树退出回执持久化结果。
 def _monitor_child(
     store: ProcessSessionStore,
     session_id: str,
     child: subprocess.Popen,
     birth: str,
     max_log_bytes: int,
+    *,
+    deadline_monotonic: float = 0.0,
+    stop_on_launcher_exit: bool = False,
 ) -> int:
     while True:
         report = store.load(session_id)
         if report.load_error or not report.record:
             raise OSError("managed background authority unreadable")
         record = report.record
-        reason = _stop_reason(record, max_log_bytes)
+        reason = _stop_reason(record, max_log_bytes, deadline_monotonic=deadline_monotonic,
+                              stop_on_launcher_exit=stop_on_launcher_exit)
         ended = _process_instance_terminated(child.pid, birth)
         if reason or ended:
             receipt = terminate_process_tree(
@@ -180,12 +193,15 @@ def _monitor_child(
         time.sleep(_HOST_POLL_SECONDS)
 
 
-# LLM: 控制依据仅来自结构化停止事实、launcher 出生身份和文件字节数，不解析命令或日志正文。
-# 函数用途: 决定当前 host 是否应收回业务子进程，正常无事时返回空原因。
-def _stop_reason(record: dict[str, object], max_log_bytes: int) -> str:
+# LLM: 控制只读结构化事实及同一 monotonic 期限，不解析正文；既有长期后台仍允许 launcher 交接后退出。
+# 函数用途: 判断是否收回精确 child，准备进程可因宿主消失或到期而停止。
+def _stop_reason(record: dict[str, object], max_log_bytes: int, *,
+                 deadline_monotonic: float = 0.0, stop_on_launcher_exit: bool = False) -> str:
     if record["stop_requested"]:
         return "stop_requested"
-    if not record["handoff_confirmed"]:
+    if deadline_monotonic and time.monotonic() >= deadline_monotonic:
+        return "deadline_exceeded"
+    if stop_on_launcher_exit or not record["handoff_confirmed"]:
         pid, birth = record["launcher_pid"], record["launcher_birth_token"]
         if capture_process_birth_token(pid) != birth or _process_instance_terminated(pid, birth):
             return "launcher_unavailable"

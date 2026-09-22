@@ -1,10 +1,9 @@
-# LLM: 这是启用前的内部准备器，不发布激活或目录；调用方须原宿主授权/执行器，结果写原操作账，不能扫描目录判断成功。
-# 模块用途: 从固定本地 wheel 在 owner 的最终地址创建独立 Python 环境，源码开发阶段尚未接到启用命令。
+# LLM: 准备只消费原 operation 已领取的固定计划，所有进程沿原托管链；不发布激活或通过目录扫描判断成功。
+# 模块用途: 从固定本地 wheel 创建独立 Python 环境，准备权限与资源绑定可反复核对，启用发布仍由上层负责。
 
 from __future__ import annotations
 
 import hashlib
-import json
 import math
 import os
 import stat
@@ -15,8 +14,10 @@ from pathlib import Path
 
 from .common.nofollow_fs import open_directory_beneath
 from .common.strict_json import load_strict_json
+from .plugin_environment_plan import interpreter_fingerprint
 from .plugin_environment_process import (
     EnvironmentPreparationError,
+    PluginEnvironmentOperation,
     check_preparation_deadline,
     preparation_environment,
     run_environment_process,
@@ -71,22 +72,25 @@ class PreparedPluginEnvironment:
 _DEFAULT_LIMITS = EnvironmentBuildLimits()
 
 
-# LLM: 原配额锁非阻塞准入后覆盖有期限的准备，未持插件业务锁；每操作只建一次候选，失败不修改安装/启用事实。
-# 函数用途: 从不可变包在独立最终地址安装本地依赖，返回验证结果；不启动插件、MCP 或重启 Gateway。
+# LLM: 原 claim 和资源声明先于候选写入；原 quota 非阻塞，失败不修改安装/激活，解释器变化不得重新生成计划。
+# 函数用途: 按原操作冻结的地址准备离线环境，三个宿主命令沿已有进程 Store，结果不代表插件启用。
 def prepare_plugin_environment(
-    owner: OwnerHomeResult, package: PluginPackageSnapshot, operation_id: str,
+    owner: OwnerHomeResult, package: PluginPackageSnapshot, operation: PluginEnvironmentOperation,
     *, limits: EnvironmentBuildLimits = _DEFAULT_LIMITS,
 ) -> PreparedPluginEnvironment:
     deadline = time.monotonic() + limits.timeout_seconds
     check_preparation_deadline(deadline)
     if os.name != "posix":
         raise EnvironmentPreparationError("environment_platform")
-    if not isinstance(operation_id, str) or not operation_id.strip() or len(operation_id) > 256:
-        raise ValueError("环境准备必须绑定原宿主操作身份")
+    operation.authorize()
+    plan = operation.plan
+    if operation.owner != owner or package.sha256 != plan.package_sha256 or package.manifest.plugin_id != plan.plugin_id:
+        raise EnvironmentPreparationError("environment_plan_conflict")
     wheels = inspect_plugin_wheels(package)
     check_preparation_deadline(deadline)
-    fingerprint = _interpreter_fingerprint(deadline)
-    reference = hashlib.sha256(json.dumps([operation_id, package.sha256, fingerprint]).encode()).hexdigest()
+    if interpreter_fingerprint(deadline) != plan.interpreter_fingerprint:
+        raise EnvironmentPreparationError("environment_interpreter_changed")
+    reference = plan.environment_ref
     candidate = owner.plugins_dir / "environments" / reference
     reserve = _preparation_capacity(wheels)
     if reserve > limits.max_bytes:
@@ -94,28 +98,16 @@ def prepare_plugin_environment(
     with owner_quota_enforcer_from_policy(owner.home_dir, quota_path=owner.quota_json).admission(blocking=False) as quota:
         quota.check((OwnerQuotaChange(candidate, reserve),))
         check_preparation_deadline(deadline)
+        operation.authorize()
         descriptor = _create_candidate(owner, reference)
         try:
-            _prepare_candidate(candidate, descriptor, wheels, deadline, reserve)
+            _prepare_candidate(candidate, descriptor, wheels, deadline, reserve, operation)
         finally:
             os.close(descriptor)
     return PreparedPluginEnvironment(
-        reference, package.sha256, fingerprint, "python/bin/python",
+        reference, package.sha256, plan.interpreter_fingerprint, "python/bin/python",
         tuple((wheel.name, wheel.version) for wheel in wheels),
     )
-
-
-# LLM: 同一源包在不同宿主 Python 上不能共享候选；只返回摘要，不持久化用户路径。
-# 函数用途: 固定当前解释器版本、实现和实际程序内容，后续启用可据此拒绝过期环境。
-def _interpreter_fingerprint(deadline: float | None = None) -> str:
-    digest = hashlib.sha256()
-    digest.update(json.dumps([sys.version, sys.implementation.cache_tag, os.path.realpath(sys.executable)]).encode())
-    with open(sys.executable, "rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            if deadline is not None:
-                check_preparation_deadline(deadline)
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 # LLM: 保守预留包括解压、安装临时副本、入口包装与标准引导文件；在原 quota 锁内使用，不能当第二套持久配额。
@@ -143,9 +135,9 @@ def _create_candidate(owner, reference: str) -> int:
         os.close(parent)
 
 
-# LLM: venv 从第一刻就在最终地址，pip 只消费固定哈希；探测发生在安装前，安装后绝不再启动该 Python 做自检。
-# 函数用途: 依次建立引导环境、核对文件计划、离线安装并从宿主读回内容。
-def _prepare_candidate(candidate, descriptor, wheels, deadline, reserve) -> None:
+# LLM: venv 从第一刻就在最终地址；三个命令均使用同一原 operation，pip 只消费固定哈希，安装后不启动插件 Python 自检。
+# 函数用途: 依次托管引导、布局探测和离线安装，再从宿主读回内容并复查原执行权。
+def _prepare_candidate(candidate, descriptor, wheels, deadline, reserve, operation) -> None:
     temporary = candidate / "temporary"
     temporary.mkdir(mode=0o700)
     environment = preparation_environment(temporary)
@@ -153,10 +145,10 @@ def _prepare_candidate(candidate, descriptor, wheels, deadline, reserve) -> None
     _check_candidate(candidate, descriptor, reserve, deadline)
     run_environment_process(
         (sys.executable, "-I", "-m", "venv", "--symlinks", str(root)),
-        cwd=candidate, environment=environment, deadline=deadline,
+        cwd=candidate, environment=environment, deadline=deadline, operation=operation, stage="venv",
     )
     python = root / "bin" / "python"
-    layout = _probe_layout(python, root, candidate, environment, deadline)
+    layout = _probe_layout(python, root, candidate, environment, deadline, operation)
     bootstrap = _bootstrap_files(root, deadline)
     plan = plan_wheel_installation(wheels, layout)
     check_preparation_deadline(deadline)
@@ -165,20 +157,22 @@ def _prepare_candidate(candidate, descriptor, wheels, deadline, reserve) -> None
     run_environment_process(
         (str(python), "-I", "-m", "pip", "--isolated", "--disable-pip-version-check", "--no-input", "--no-cache-dir",
          "install", "--no-index", "--no-deps", "--only-binary=:all:", "--no-compile", "--require-hashes", "-r", str(requirements)),
-        cwd=candidate, environment=environment, deadline=deadline,
+        cwd=candidate, environment=environment, deadline=deadline, operation=operation, stage="install",
     )
     _check_candidate(candidate, descriptor, reserve, deadline)
     if any(_file_fingerprint(root / relative, deadline) != original for relative, original in bootstrap.items()):
         raise EnvironmentPreparationError("bootstrap_modified")
     verify_wheel_installation(plan, layout, python, checkpoint=lambda: check_preparation_deadline(deadline))
     check_preparation_deadline(deadline)
+    operation.authorize()
 
 
-# LLM: 输出来自固定的未装插件解释器脚本；必须确认 prefix 和版本，不能接受包提供的 JSON 或其它解释器布局。
-# 函数用途: 在执行任何 wheel 安装前读取标准安装路径，全部目标需留在独立环境内。
-def _probe_layout(python, root, candidate, environment, deadline) -> WheelInstallLayout:
+# LLM: 输出来自原操作托管的未装插件解释器脚本；必须确认 prefix 和版本，不能接受包提供的 JSON 或其它解释器布局。
+# 函数用途: 在安装 wheel 前从有界私有日志读取标准路径，全部目标必须留在独立环境内。
+def _probe_layout(python, root, candidate, environment, deadline, operation) -> WheelInstallLayout:
     output = run_environment_process(
-        (str(python), "-I", "-c", _PROBE), cwd=candidate, environment=environment, deadline=deadline, capture=True,
+        (str(python), "-I", "-c", _PROBE), cwd=candidate, environment=environment, deadline=deadline,
+        operation=operation, stage="probe", capture=True,
     )
     payload = load_strict_json(output)
     if payload["prefix"] != str(root) or payload["base_prefix"] == str(root) or payload["version"] != list(sys.version_info[:3]):

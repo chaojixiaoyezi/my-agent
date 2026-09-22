@@ -96,7 +96,8 @@ agent_py_agent/
 |   |-- plugin_wheels.py               # wheel 标准元数据、RECORD、平台与本地依赖闭包预检
 |   |-- plugin_wheel_layout.py         # 环境内文件计划、引导文件保护与宿主只读核对
 |   |-- plugin_environment.py          # 固定地址的 owner 独立 venv 准备，尚不发布激活
-|   |-- plugin_environment_process.py  # 受控离线命令、原取消 token 与精确退出回执
+|   |-- plugin_environment_plan.py     # 原 operation 领取前冻结包、配置版本、解释器与候选身份
+|   |-- plugin_environment_process.py  # 原 claim 精确复查、托管准备命令与有界取消清理
 |   |-- plugin_installation.py         # 安装请求、私有配置事实、通用提交回执与安装准入
 |   |-- plugin_installation_state.py   # 唯一安装表 v2 编解码及 v1 明确迁移来源
 |   |-- plugin_configuration.py        # 完整配置替换、原请求重放与版本 CAS 纯裁决
@@ -197,6 +198,7 @@ agent_py_agent/
 |   |   |-- run_creation.py             # 普通代理及宿主命令共用的同连接运行树创建
 |   |   |-- host_commands.py            # 显式宿主请求与原始 pending 运行的唯一绑定及严格回读
 |   |   |-- host_command_execution.py   # 原 pending 精确执行、原运行收口和不重跑的只读查询
+|   |   |-- operation_resources.py      # 同次只读核对原操作、holder/代数/epoch 与已领取资源锁
 |   |   |-- run_cancellation.py         # 精确 task/run/attempt 的共用取消权限合同，UNKNOWN 保留锁与恢复障碍
 |   |   `-- executor_liveness.py        # exact attempt 执行区间和 OS 退出事实；慢模型不按时长判死
 |   |-- gateway_parts/                 # gateway request/worker/lease/http/renderer
@@ -442,7 +444,9 @@ agent_py_agent/
 |   |-- test_plugin_wheels.py          # 固定依赖、extras、平台、摘要与归档预算检查
 |   |-- test_plugin_wheel_layout.py    # 跨 wheel 与引导文件冲突、安装布局和入口脚本检查
 |   |-- test_plugin_environment.py     # 临时真实 venv/pip、导入陷阱、原配额及候选排他检查
-|   |-- test_plugin_environment_process.py # 准备进程的取消、超时、I/O 异常和未知退出替身
+|   |-- test_plugin_environment_process.py # 托管准备取消、正常退出交错与未知状态替身
+|   |-- test_plugin_preparation_operation.py # 原 claim、资源锁故障与完整临时宿主执行回读
+|   |-- plugin_environment_fixtures.py  # 临时 RuntimeDB 原操作与计划的开发测试组装
 |   |-- test_plugin_install_store.py   # 默认停用、原请求重放、失败裁决与独立进程安装竞争
 |   |-- test_plugin_configuration.py   # 私有配置 CAS、显式迁移、矛盾状态和提交异常裁决
 |   |-- test_plugin_configure_management.py # 原配置执行链、值不外泄、过期请求与 UNKNOWN 重放
@@ -548,7 +552,8 @@ docs/
 - `agent_py_agent/agent/command_declarations.py`：命令 JSON 的唯一读取器，包和宿主目录共用，旧目录私有 decoder 已删除。
 - `agent_py_agent/agent/plugin_manifest.py` 与 `plugin_package.py`：只读校验包并保留同一字节快照；不接受宿主身份，不代表已安装、已授权或已隔离。
 - `agent_py_agent/agent/plugin_wheels.py` 与 `plugin_wheel_layout.py`：标准元数据和固定依赖集合预检、环境内目标保护及安装后宿主读回；不运行插件或替代 pip 安装器。
-- `agent_py_agent/agent/plugin_environment.py` 与 `plugin_environment_process.py`：原 owner 配额下的固定地址 venv 准备，复用原取消与精确进程退出；只返回准备事实，不发布激活或重建操作账。
+- `agent_py_agent/agent/plugin_environment.py`、`plugin_environment_plan.py` 与 `plugin_environment_process.py`：计划先进入原 operation，准备沿原 owner 配额与 ProcessSessionStore；只返回准备事实，不发布激活或重建进程账。
+- `agent_py_agent/agent/runtime_db/operation_resources.py`：精确资源准入的同事务只读检查，不能领取新代次、续租或恢复 UNKNOWN。
 - `agent_py_agent/agent/plugin_installation.py` 与 `plugin_install_store.py`：原 owner 插件目录中的唯一安装表和最后回执；先存包再提交，默认停用，异常读回区分提交结果，不拥有管理权限或执行历史。
 - `agent_py_agent/agent/plugin_installation_state.py` 与 `plugin_configuration.py`：原表 v2 编解码、v1 明确迁移来源和完整配置替换裁决；配置及版本同次提交，没有第二套配置权威。
 - `agent_py_agent/agent/plugin_configure_tool.py` 与 `plugin_sources.py`：隐藏管理工具通过原执行链读取授权来源，配置值只进 owner 私有安装表；包与配置共用有界安全读取。

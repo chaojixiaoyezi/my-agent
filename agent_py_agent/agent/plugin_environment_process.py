@@ -1,16 +1,85 @@
-# LLM: 只运行宿主声明的 venv/pip 准备命令，不承接插件业务；取消沿原 token 和出生标识，未知退出不能洗成成功。
-# 模块用途: 为一次有期限的依赖准备管理精确子进程，不增加后台会话或第二套停止账本。
+# LLM: venv/pip 必须沿原 operation 的固定资源和原 ProcessSessionStore 启动；不另建进程账，未知退出不能洗成成功。
+# 模块用途: 将同步环境准备接到既有托管进程和精确停止链，宿主崩溃后仍保留归属。
 
 from __future__ import annotations
 
 import os
 import subprocess
 import time
+from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
+from .local_storage.tool_operations import ToolOperationRecord
+from .runtime_db.host_commands import HostCommandBinding
+from .runtime_db.managed_operation_store import ManagedOperationStore, ToolOperationAuthorityRequest
 from .tooling._subprocess_env_scrub import scrub_subprocess_env
-from .tooling.cancellation import raise_if_cancelled
-from .tooling.process_registry import capture_process_birth_token, terminate_process_tree
+from .tooling.background_process_launch import (
+    BackgroundLaunchError,
+    BackgroundLaunchRequest,
+    start_background_process,
+)
+from .tooling.cancellation import ToolCancelled, raise_if_cancelled
+from .tooling.process_scope import ProcessAccessScope, ProcessExecutionScope
+from .tooling.process_session_cleanup import stop_process_session
+from .tooling.process_session_store import ProcessSessionStore, process_session_store_root
+from .user_space.owner_resolver import OwnerHomeResult
+
+if TYPE_CHECKING:
+    from .plugin_environment_plan import PluginEnvironmentPlan
+
+
+# LLM: 这是原 claim 的进程内冻结引用，不能重读当前 holder 补权；持久资源仍归原操作和 ProcessSessionStore。
+# 类用途: 将一批准备命令绑定到真实 owner、会话、任务、尝试和已领取的环境计划。
+@dataclass(frozen=True)
+class PluginEnvironmentOperation:
+    owner: OwnerHomeResult
+    binding: HostCommandBinding
+    plan: PluginEnvironmentPlan
+    store: ManagedOperationStore
+    claim: ToolOperationRecord
+
+    # LLM: 仅不重入、不 reopen 的 host command handler 使用；未来若允许重开，必须改由 coordinator 直接传原 claim，不能迟到查询补权。
+    # 函数用途: 从原管理操作读取一次不可变领取身份，供准备期间反复核对。
+    @classmethod
+    def bind(cls, owner, repo, binding, plan) -> PluginEnvironmentOperation:
+        if owner.owner_id != binding.request.owner_id or plan.operation_id != binding.request.operation_id:
+            raise ValueError("环境准备与原管理身份不符")
+        store = ManagedOperationStore(repo)
+        claim = store.get_tool_operation(
+            owner_id=owner.owner_id, run_id=binding.run_id, task_id=binding.task_id,
+            attempt_id=binding.attempt_id, operation_id=plan.operation_id,
+            tool_name=binding.request.command_name, args_hash="sha256:" + binding.request.input_digest,
+        )
+        if claim is None:
+            raise ValueError("环境准备尚无原操作领取")
+        result = cls(owner, binding, plan, store, claim)
+        result.authorize()
+        return result
+
+    # LLM: 每次目录创建、启动和等待均核对原 holder/代数/epoch/锁；取消不因已完成进程交接而丢失。
+    # 函数用途: 拒绝原操作撤销后继续准备，不续租或改动数据库。
+    def authorize(self) -> None:
+        raise_if_cancelled()
+        self.store.require_authority(ToolOperationAuthorityRequest(
+            self.owner.owner_id, self.binding.run_id, self.binding.task_id,
+            self.plan.operation_id, self.binding.request.command_name, self.binding.attempt_id,
+        ), claim=self.claim, resource_scopes=(self.plan.resource_scope,))
+        raise_if_cancelled()
+
+    # LLM: 访问会话与执行任务分别来自可信原绑定；Full Access 不得抹去 owner 的规范地址。
+    # 函数用途: 为一个准备命令生成原后台启动请求，日志留私有候选且没有完成唤醒。
+    def launch_request(self, argv, cwd, environment, deadline, log_path) -> BackgroundLaunchRequest:
+        binding, owner = self.binding, self.owner
+        return BackgroundLaunchRequest(
+            argv=list(argv), command="插件独立环境准备", cwd=cwd, log_path=log_path,
+            env=environment, max_log_bytes=65536,
+            store_root=process_session_store_root(owner.home_dir, owner.home_dir),
+            access_scope=ProcessAccessScope(owner.owner_id, binding.request.thread_id, str(owner.home_dir)),
+            execution_scope=ProcessExecutionScope(str(owner.home_dir), binding.request.thread_id,
+                                                  binding.task_id, binding.run_id, binding.attempt_id),
+            authority_check=self.authorize, deadline_monotonic=deadline, stop_on_launcher_exit=True,
+        )
 
 
 # LLM: 退出确认与环境准备结果分开；上层原操作记录必须保留未知副作用，不据这个异常自动重试。
@@ -47,55 +116,79 @@ def check_preparation_deadline(deadline: float) -> None:
         raise EnvironmentPreparationError("preparation_timeout")
 
 
-# LLM: argv 只能来自宿主准备器且不经 Shell；capture 只用于固定引导探测，不允许捕获插件输出或无界安装日志。
-# 函数用途: 启动一个受控命令，响应原取消请求，超时或取消时核对并终止原进程树。
+# LLM: argv 只来自宿主；原进程 Store 先预留再启动，交接后仍受原 operation 和期限约束，不能回退裸 Popen。
+# 函数用途: 同步等待一个精确托管准备命令，失败只清理本次 session，日志仅保存在私有候选。
 def run_environment_process(
-    argv: tuple[str, ...], *, cwd: Path, environment: dict[str, str], deadline: float, capture: bool = False,
+    argv: tuple[str, ...], *, cwd: Path, environment: dict[str, str], deadline: float,
+    operation: PluginEnvironmentOperation, stage: str, capture: bool = False,
 ) -> bytes:
     check_preparation_deadline(deadline)
+    operation.authorize()
+    if stage not in {"venv", "probe", "install"}:
+        raise ValueError("未知的宿主环境准备阶段")
+    log_path = cwd / f"{stage}.log"
+    with log_path.open("xb"):
+        pass
     try:
-        process = subprocess.Popen(
-            argv, cwd=cwd, env=environment, stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE if capture else subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            start_new_session=True, close_fds=True,
+        hosted = start_background_process(
+            operation.launch_request(argv, cwd, environment, deadline, log_path),
+            startup_timeout_seconds=min(3.0, max(0.1, deadline - time.monotonic())),
         )
-    except OSError as exc:
-        raise EnvironmentPreparationError("preparation_spawn") from exc
-    birth = ""
+    except BackgroundLaunchError as exc:
+        if exc.cleanup_confirmed and isinstance(exc.cause, ToolCancelled):
+            raise exc.cause from exc
+        raise EnvironmentPreparationError("preparation_launch" if exc.cleanup_confirmed else "process_exit_unknown",
+                                          started=True, exit_confirmed=exc.cleanup_confirmed) from exc
+    store = ProcessSessionStore(hosted.store_root)
     try:
-        birth = capture_process_birth_token(process.pid)
-        output = _wait_for_preparation(process, deadline)
+        record = _wait_for_preparation(hosted, store, operation, deadline)
+        hosted.process.wait(timeout=2.0)
     except BaseException as exc:
-        # 已启动进程的所有异常都必须先收尾，再保留原控制信号；空身份只会得到未确认，不猜 PID。
         try:
-            receipt = terminate_process_tree(process.pid, process, expected_birth_token=birth)
+            receipt = stop_process_session(store, hosted.record, host_process=hosted.process)
         except Exception as cleanup_error:
             raise EnvironmentPreparationError("process_exit_unknown", started=True, exit_confirmed=False) from cleanup_error
         if not receipt.confirmed:
             raise EnvironmentPreparationError("process_exit_unknown", started=True, exit_confirmed=False) from exc
-        if isinstance(exc, TimeoutError):
+        if isinstance(exc, (TimeoutError, subprocess.TimeoutExpired)):
             raise EnvironmentPreparationError("preparation_timeout", started=True) from exc
-        if isinstance(exc, OSError):
-            raise EnvironmentPreparationError("preparation_io", started=True) from exc
+        if isinstance(exc, EnvironmentPreparationError):
+            raise EnvironmentPreparationError(exc.reason, started=True, exit_confirmed=exc.exit_confirmed) from exc
         raise
-    if process.returncode != 0:
+    if record["status"] != "exited" or record["exit_code"] != 0:
         raise EnvironmentPreparationError("preparation_command", started=True)
+    if not capture:
+        return b""
+    with log_path.open("rb") as stream:
+        output = stream.read(65537)
     if len(output) > 65536:
         raise EnvironmentPreparationError("preparation_probe", started=True)
     return output
 
 
-# LLM: 短等待共用全流程截止时间，不能每次重置预算；读取仅针对宿主固定小输出探测，其它命令输出为 DEVNULL。
-# 函数用途: 等待环境命令结束并及时接收当前工具的取消信号。
-def _wait_for_preparation(process, deadline: float) -> bytes:
+# LLM: Store 是退出唯一事实源，Popen 结束不代替成功；等待继续核对原权限，原 host 另行保证宿主消失和期限后的清理。
+# 函数用途: 在同步准备期间读取同一进程记录，及时响应取消、丢权和未知结果。
+def _wait_for_preparation(hosted, store, operation, deadline: float) -> dict:
     while True:
-        raise_if_cancelled()
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise TimeoutError("environment preparation deadline")
-        try:
-            output, _ = process.communicate(timeout=min(0.15, remaining))
-            raise_if_cancelled()
-            return output or b""
-        except subprocess.TimeoutExpired:
-            continue
+        check_preparation_deadline(deadline)
+        operation.authorize()
+        record = _preparation_record(hosted, store)
+        if record["status"] in {"exited", "killed", "not_started"}:
+            return record
+        if record["status"] == "unknown":
+            raise EnvironmentPreparationError("process_exit_unknown", started=True, exit_confirmed=False)
+        if hosted.process.poll() is not None:
+            record = _preparation_record(hosted, store)
+            if record["status"] in {"exited", "killed", "not_started"}:
+                return record
+            raise EnvironmentPreparationError("process_exit_unknown", started=True, exit_confirmed=False)
+        time.sleep(0.05)
+
+
+# LLM: 只读原 session，宿主刚退出时允许复读同一权威；不可用 Popen 的 exit0 替代已提交终态。
+# 函数用途: 获取准备进程的可信状态，读取失败保留未知。
+def _preparation_record(hosted, store) -> dict:
+    report = store.load(str(hosted.record["session_id"]))
+    if report.load_error or not report.record:
+        raise EnvironmentPreparationError("process_state_unreadable", started=True, exit_confirmed=False)
+    return report.record

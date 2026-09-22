@@ -71,3 +71,10 @@ handler 构造使用同一次安装快照的目录及目标，写入时原安装
 
 取消记录修复是 Repository 合法持久状态的开发验证；当前 ManagedStore 的领取直接进入 `EXECUTING`，并非此次复现了新的 TUI 资源漏停。
 该片 12 个相关文件 360 项通过，涵盖三个收口入口、重复取消、精确作用域、损坏结果和新旧查询；尚未发布部署。
+
+## 环境准备的精确资源检查（本地开发）
+
+插件环境计划由宿主 prepare 冻结到原 policy 的单个 logical scope，原执行器完成 claim 后才允许创建候选。
+准备器冻结一次原 claim，ManagedOperationStore.require_authority 的显式 claim/scopes 分支核对当前操作、代数、epoch 和锁；
+默认分支继续支持 handler 前尚未 claim 的检查。PID 与退出回执沿原 ProcessSessionStore，不写进 operation holder 或新建进程表。
+同步等待继续检查原操作，交接后的寿命通过原 host 的明确参数控制。原请求 UNKNOWN 或终态不重新准备；此接线不代表完整插件启用已开放。

@@ -1,7 +1,8 @@
-# LLM: 这里只编排启动方；预留、host 绑定和交接共用原 Store，启动不重放，交接后取消归资源控制而非旧回合。
-# 模块用途: 为独立后台命令冻结归属、创建托管进程并有界确认交接，失败保留真实启动及清理状态。
+# LLM: 预留、host 绑定和交接共用原 Store，启动不重放；默认后台交接后独立，宿主准备须显式声明有限寿命。
+# 模块用途: 冻结进程归属和寿命、托管启动并有界确认交接，失败保留真实启动与清理状态。
 from __future__ import annotations
 
+import math
 import os
 import subprocess
 import sys
@@ -24,11 +25,11 @@ from .process_session_records import PROCESS_SESSION_SCHEMA
 from .process_session_store import ProcessSessionStore
 
 BACKGROUND_START_SETTLE_SECONDS = 0.5
-LAUNCH_SPEC_SCHEMA = "background_process_launch.v2"
+LAUNCH_SPEC_SCHEMA = "background_process_launch.v3"
 
 
-# LLM: 参数来自已批准 Shell；权限复查只读原 operation，不重跑审批或预算；env 仅传进程，不写磁盘。
-# 类用途: 汇总一次后台启动的精确命令、归属、地址和宿主权限复查。
+# LLM: 参数来自已授权宿主；权限复查只读原 operation，env 不写磁盘；默认长期后台不随 launcher 退出，新准备调用须显式收紧寿命。
+# 类用途: 汇总一次托管启动的命令、归属和权限，允许准备进程绑定宿主寿命及同一单调期限。
 @dataclass(frozen=True)
 class BackgroundLaunchRequest:
     argv: list[str]
@@ -42,6 +43,16 @@ class BackgroundLaunchRequest:
     execution_scope: ProcessExecutionScope
     completion_target: dict[str, str] = field(default_factory=dict)
     authority_check: Callable[[], None] | None = field(default=None, repr=False, compare=False)
+    deadline_monotonic: float = 0.0
+    stop_on_launcher_exit: bool = False
+
+    # LLM: 零期限只代表既有后台无此限制；布尔值、NaN 及负数不得变成无界准备。
+    # 函数用途: 在创建任何启动记录前校验宿主提供的寿命约束。
+    def __post_init__(self) -> None:
+        if (type(self.deadline_monotonic) not in {int, float}
+                or not math.isfinite(self.deadline_monotonic) or self.deadline_monotonic < 0
+                or type(self.stop_on_launcher_exit) is not bool):
+            raise ValueError("managed background lifetime invalid")
 
 
 # LLM: session 已在 Store 交接，process 仅本进程回收句柄；返回对象不能充当另一份生命周期权威。
@@ -97,6 +108,8 @@ def start_background_process(
                     "session_id": session_id,
                     "command_argv": request.argv,
                     "max_log_bytes": request.max_log_bytes,
+                    "deadline_monotonic": request.deadline_monotonic,
+                    "stop_on_launcher_exit": request.stop_on_launcher_exit,
                 },
             )
             spec_path.chmod(0o600)
@@ -199,10 +212,12 @@ def _reservation(request: BackgroundLaunchRequest, session_id: str) -> dict[str,
     }
 
 
-# LLM: 此检查可以反复调用但不得产生审批或预算副作用；最后一次成功才允许交接独立资源。
-# 函数用途: 检查当前回合取消及原 execution attempt 是否仍有启动权限。
+# LLM: 此检查不重跑审批或预算；期限沿同一 monotonic 时钟，交接不会为准备进程重新起算。
+# 函数用途: 检查取消、原执行权限和宿主截止时间，拒绝过期启动或交接。
 def _require_admission(request: BackgroundLaunchRequest) -> None:
     raise_if_cancelled()
+    if request.deadline_monotonic and time.monotonic() >= request.deadline_monotonic:
+        raise TimeoutError("managed background deadline")
     if request.authority_check is not None:
         request.authority_check()
     raise_if_cancelled()

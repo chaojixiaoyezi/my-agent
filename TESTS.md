@@ -1,5 +1,22 @@
 # 测试与发布验收
 
+## 第 4 步环境准备归属开发验证
+
+本片 16 个相关测试文件合计 **420 项通过，0 失败、0 错误、0 跳过**。
+覆盖原环境/管理组件、后台启动交接和 ProcessSessionStore、原操作权限及宿主命令重放；临时 OS 进程不等于产品 TUI 验收。
+
+- 固定计划先作为一个 logical scope 写入原 operation，准备前核对包/解释器，运行中核对原 claim、owner/task/run/attempt/tool、epoch 和资源锁。
+- 原 ToolExecutor + 临时 RuntimeDB 内实际完成 venv/探测/pip；三个进程使用同一原 attempt，原请求查询及重复提交不再次准备。
+- 同步准备复用原托管进程账，不再裸启动；配置、安装状态及激活不因此改变，没有新增完成唤醒。
+- 原后台链验证交接后启动方崩溃、host 自行实施截止时间、非法/过期期限；普通长期后台默认语义回归通过。
+- 真实临时命令交接后撤销原 attempt，准备器只停止其精确 session，读回 child 退出；取消/清理未知和记录不可读仍保留未知。
+- 复核发现并修复“第一次读取 running 后 host 刚完成退出”的竞态，退出后复读同一权威；另修复启动后超时丢失 started 事实。对应交错测试通过。
+- 初次撤销组件断言把原 AuthorityContextMissing 错写为 RuntimeConflictError，修正测试期待后通过；生产错误类型和清理路径未因此改动。
+
+本地严格 gate 已通过：相关 focused tests、Ruff、文档同步、严格尺寸（基线不变）、diff 与 clean-package；线上 CI 未作为验收来源。
+完整启用命令、MCP 目录发布、精确撤销和装卸尚未接完；本片未发布部署、未重启 Gateway、未调用真实模型或新增实际 TUI。
+下一次实际多 TUI 验收仍在第 4 步完整候选上执行；本片不关闭该验收项，不进入第 5 步。
+
 ## 第 4 步私有配置开发验证
 
 配置命令沿原 ToolExecutor/ManagedOperationStore、RuntimeDB 和真实文件锁在临时 owner 验证，不启动插件或真实模型。

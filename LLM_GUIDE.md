@@ -82,6 +82,8 @@ Shell 不设人为命令字符上限，安全、权限、时间和输出预算�
 创建树统一归 `runtime_db/run_creation.py`，冻结绑定读 `host_commands.py`；本地管理执行与只读查询由 `host_command_execution.py` 接原执行器，见 [宿主命令合同](docs/design/HOST_COMMAND_EXECUTION.md)。
 本地 HTTP/direct 安装复用原管理授权、路径权限和配额，只保存默认停用包；独立环境、激活、撤销与实际多 TUI 装卸仍待完成。
 独立环境内部准备器已本地实现，见 `plugin_environment.py`：固定地址、原配额非阻塞准入、本地 wheel 闭包和原取消链。
+环境准备已改为原 operation 的固定计划与原 ProcessSessionStore：计划先领取，候选后写入，运行中核对原 holder/代数/锁。
+准备进程显式绑定 launcher 寿命与同一 monotonic 期限；普通长期后台默认不变，启动信封 v3 要求同版完整字段。
 创建 venv 不代表启用接线完成；禁止扫描目录代替原安装权威，禁止在启用前运行已装插件的 Python 自检。
 配置已在本地接到原管理执行链：`/plugins configure <插件> --file <JSON>` 完整替换停用插件设置，使用原 schema 校验，不补默认值。
 唯一安装表 v2 保存配置、版本及回执；旧 v1 在实际修改时显式迁移，查询只读。目录 v2 携带安装版本，私有值不进入公开目录或工具账。

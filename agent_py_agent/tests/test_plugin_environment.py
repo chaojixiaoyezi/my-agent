@@ -19,6 +19,7 @@ from agent_py_agent.agent.tooling.cancellation import (
 )
 from agent_py_agent.agent.user_space.owner_quota import OwnerQuotaExceeded, OwnerQuotaUnavailable
 from agent_py_agent.agent.user_space.owner_resolver import resolve_owner_home
+from agent_py_agent.tests.plugin_environment_fixtures import prepare_environment
 from agent_py_agent.tests.plugin_wheel_fixtures import change_wheel, make_wheel, package_wheels
 
 
@@ -36,7 +37,7 @@ def test_real_offline_environment_does_not_import_plugin_or_publish_activation(t
     store = PluginInstallStore(owner)
     store.install(PluginInstallRequest(package, "install-first", 0))
     original = (store.root / "installations.json").read_bytes()
-    result = module.prepare_plugin_environment(owner, package, "prepare-one")
+    result = prepare_environment(owner, package, "prepare-one")
     candidate = owner.plugins_dir / "environments" / result.environment_ref
     assert (candidate / result.python_relative_path).is_file()
     assert result.distributions == (("peek", "1.0"), ("helper", "1.0"))
@@ -46,7 +47,7 @@ def test_real_offline_environment_does_not_import_plugin_or_publish_activation(t
     assert str(tmp_path) not in str(asdict(result))
     monkeypatch.setattr(module, "run_environment_process", lambda *a, **kw: pytest.fail("同操作不得重建环境"))
     with pytest.raises(module.EnvironmentPreparationError) as error:
-        module.prepare_plugin_environment(owner, package, "prepare-one")
+        prepare_environment(owner, package, "prepare-one")
     assert error.value.reason == "environment_exists"
 
 
@@ -54,7 +55,7 @@ def test_invalid_dependency_does_not_create_owner_files(tmp_path):
     owner = resolve_owner_home(tmp_path)
     package = package_wheels(make_wheel(requires=("missing>=1",)))
     with pytest.raises(PluginPackageError):
-        module.prepare_plugin_environment(owner, package, "bad-dependencies")
+        prepare_environment(owner, package, "bad-dependencies")
     assert not owner.plugins_dir.exists()
 
 
@@ -68,7 +69,7 @@ def test_real_pip_record_growth_for_many_entry_points_has_a_separate_budget(tmp_
         "m.py": b"raise RuntimeError('entry points must not run')\n",
     })
     package = package_wheels(change_wheel(wheel, changes={"peek-1.0.dist-info/RECORD.jws": b"{}"}))
-    result = module.prepare_plugin_environment(owner, package, "many-entry-points")
+    result = prepare_environment(owner, package, "many-entry-points")
     candidate = owner.plugins_dir / "environments" / result.environment_ref
     installed_record = next((candidate / "python" / "lib").glob("python*/site-packages/peek-1.0.dist-info/RECORD"))
     assert installed_record.stat().st_size > 8192
@@ -87,9 +88,9 @@ def test_failed_candidate_is_not_overwritten_or_treated_as_ready(tmp_path, monke
 
     monkeypatch.setattr(module, "_prepare_candidate", fail)
     with pytest.raises(module.EnvironmentPreparationError):
-        module.prepare_plugin_environment(owner, package, "same-operation")
+        prepare_environment(owner, package, "same-operation")
     with pytest.raises(module.EnvironmentPreparationError) as error:
-        module.prepare_plugin_environment(owner, package, "same-operation")
+        prepare_environment(owner, package, "same-operation")
     assert error.value.reason == "environment_exists"
     assert len(started) == 1
     assert (started[0] / "partial").read_text() == "incomplete"
@@ -101,7 +102,7 @@ def test_budget_fails_before_candidate_or_process(tmp_path, monkeypatch):
     package = package_wheels(make_wheel())
     monkeypatch.setattr(module, "run_environment_process", lambda *a, **kw: pytest.fail("不得启动"))
     with pytest.raises(module.EnvironmentPreparationError) as error:
-        module.prepare_plugin_environment(owner, package, "too-small", limits=module.EnvironmentBuildLimits(max_bytes=1))
+        prepare_environment(owner, package, "too-small", limits=module.EnvironmentBuildLimits(max_bytes=1))
     assert error.value.reason == "environment_budget"
     assert not owner.plugins_dir.exists()
 
@@ -111,7 +112,7 @@ def test_original_owner_quota_blocks_preparation_before_first_candidate(tmp_path
     owner.home_dir.mkdir(parents=True)
     owner.quota_json.write_text(json.dumps({"max_disk_mb": 1}))
     with pytest.raises(OwnerQuotaExceeded):
-        module.prepare_plugin_environment(owner, package_wheels(make_wheel()), "quota-blocked")
+        prepare_environment(owner, package_wheels(make_wheel()), "quota-blocked")
     assert not owner.plugins_dir.exists()
 
 
@@ -121,7 +122,7 @@ def test_busy_original_owner_quota_returns_without_waiting_or_creating_candidate
     owner.quota_json.write_text(json.dumps({"max_disk_mb": 1024}))
     started = time.monotonic()
     with locked_json_path(owner.home_dir / ".owner-quota"), pytest.raises(OwnerQuotaUnavailable):
-        module.prepare_plugin_environment(owner, package_wheels(make_wheel()), "quota-busy")
+        prepare_environment(owner, package_wheels(make_wheel()), "quota-busy")
     assert time.monotonic() - started < 2
     assert not owner.plugins_dir.exists()
 
@@ -138,14 +139,14 @@ def test_cancellation_during_readonly_preflight_prevents_candidate(tmp_path, mon
 
     monkeypatch.setattr(module, "inspect_plugin_wheels", cancel_after_read)
     with bind_cancellation_token(token), pytest.raises(ToolCancelled):
-        module.prepare_plugin_environment(owner, package_wheels(make_wheel()), "cancelled-read")
+        prepare_environment(owner, package_wheels(make_wheel()), "cancelled-read")
     assert not owner.plugins_dir.exists()
 
 
 def test_expired_preflight_does_not_begin_filesystem_writes(tmp_path):
     owner = resolve_owner_home(tmp_path)
     with pytest.raises(module.EnvironmentPreparationError) as error:
-        module.prepare_plugin_environment(
+        prepare_environment(
             owner, package_wheels(make_wheel()), "expired", limits=module.EnvironmentBuildLimits(timeout_seconds=0.000001),
         )
     assert error.value.reason == "preparation_timeout"
@@ -159,7 +160,7 @@ def test_candidate_parent_symlink_is_not_followed(tmp_path):
     outside.mkdir()
     (owner.plugins_dir / "environments").symlink_to(outside, target_is_directory=True)
     with pytest.raises(OSError):
-        module.prepare_plugin_environment(owner, package_wheels(make_wheel()), "linked")
+        prepare_environment(owner, package_wheels(make_wheel()), "linked")
     assert not list(outside.iterdir())
 
 
@@ -176,8 +177,8 @@ def test_interpreter_fingerprint_is_content_bound_and_does_not_expose_path(monke
     executable = tmp_path / "host-python"
     executable.write_bytes(b"one")
     monkeypatch.setattr(module.sys, "executable", str(executable))
-    original = module._interpreter_fingerprint()
+    original = module.interpreter_fingerprint()
     executable.write_bytes(b"two")
-    assert module._interpreter_fingerprint() != original
+    assert module.interpreter_fingerprint() != original
     assert len(original) == 64
     assert str(Path(tmp_path)) not in original

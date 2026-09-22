@@ -114,7 +114,10 @@ class ManagedOperationStore:
         self._repo = repo
 
     # ------------------------------------------------------------- authority 门
-    def require_authority(self, request: ToolOperationAuthorityRequest) -> None:
+    # LLM: 默认分支是原 preclaim 运行权检查；显式 claim/scopes 只读核对同一持有者和锁，不为调用方补新代次。
+    # 函数用途: 在工具进入前检查运行权，或在长准备过程中重复核对已领取的精确资源。
+    def require_authority(self, request: ToolOperationAuthorityRequest, *,
+                          claim: ToolOperationRecord | None = None, resource_scopes: tuple[str, ...] = ()) -> None:
         """MANAGED 权威门：缺 repo / run 未登记 / attempt 非 current → 抛错。
 
         所有工具（含 read-only）在 handler 前过此门；read-only 只跳过副作用
@@ -126,6 +129,13 @@ class ManagedOperationStore:
         current attempt 指针 → 调用者声明的 task_id（非空时）必须与权威链
         tasks.task_id 一致。
         """
+        if claim is not None:
+            from .operation_resources import require_claimed_resources
+
+            require_claimed_resources(self._repo, request, claim, resource_scopes)
+            return
+        if resource_scopes:
+            raise AuthorityContextMissing("资源检查缺少原操作领取记录")
         if self._repo is None:
             raise AuthorityContextMissing("MANAGED run 无权威库（repo 缺失）")
         attempt_id = str(request.attempt_id or "")

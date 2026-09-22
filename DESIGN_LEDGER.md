@@ -1,5 +1,9 @@
 # 设计台账
 
+本地实施中：插件环境准备复用原 operation 的完整 logical 资源声明和原 ProcessSessionStore；不新增进程账或操作 checkpoint。
+固定计划及原 claim 先于写入；准备进程绑定原 owner/thread/task/run/attempt、宿主寿命及截止时间，普通后台仍按旧默认独立运行。
+完整激活及 MCP 撤销仍待实施，见 [插件环境合同](docs/design/PLUGIN_ENVIRONMENTS.md)。
+
 本台账保留当前决策、设计入口和未落地边界。逐次排障流水不作为产品规范；实际实现以代码、配置和结构化协议为准。
 
 ## 已采用的原则

@@ -138,6 +138,61 @@ def test_launcher_crash_before_handoff_is_recovered_by_host(tmp_path):
         stop_process_session(store, store.load(selected["session_id"]).record)
 
 
+def test_explicit_attached_lifetime_stops_after_launcher_crash_even_after_handoff(tmp_path):
+    script = "\n".join([
+        "import os", "from pathlib import Path",
+        "from agent_py_agent.agent.tooling.background_process_launch import start_background_process",
+        "from agent_py_agent.tests._managed_process_harness import managed_request",
+        f"start_background_process(managed_request(Path({str(tmp_path)!r}), stop_on_launcher_exit=True))",
+        "os._exit(28)",
+    ])
+    launcher = subprocess.run([sys.executable, "-c", script], cwd=Path(__file__).resolve().parents[2], timeout=8)
+    assert launcher.returncode == 28
+    store = ProcessSessionStore(tmp_path / "authority")
+    records, errors = store.list_records()
+    assert not errors and len(records) == 1
+    selected = records[0]
+    try:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            current = store.load(selected["session_id"]).record
+            if current["status"] == "killed":
+                break
+            time.sleep(0.05)
+        assert current["handoff_confirmed"]
+        assert current["status"] == "killed" and current["reason"] == "launcher_unavailable"
+        assert current["termination"]["confirmed"]
+    finally:
+        stop_process_session(store, store.load(selected["session_id"]).record)
+
+
+def test_host_enforces_original_deadline_after_handoff_without_parent_polling(tmp_path):
+    request = managed_request(tmp_path, deadline_monotonic=time.monotonic() + 3)
+    hosted = launch.start_background_process(request)
+    store = ProcessSessionStore(request.store_root)
+    try:
+        hosted.process.wait(timeout=6)
+        record = store.load(hosted.record["session_id"]).record
+        assert record["status"] == "killed" and record["reason"] == "deadline_exceeded"
+        assert record["handoff_confirmed"] and record["termination"]["confirmed"]
+    finally:
+        stop_process_session(store, store.load(hosted.record["session_id"]).record, host_process=hosted.process)
+
+
+@pytest.mark.parametrize("value", [-1, True, float("nan"), float("inf")])
+def test_launch_lifetime_rejects_invalid_values_before_store_writes(tmp_path, value):
+    with pytest.raises(ValueError):
+        managed_request(tmp_path, deadline_monotonic=value)
+    assert not (tmp_path / "authority").exists()
+
+
+def test_expired_deadline_cannot_start_child(tmp_path):
+    with pytest.raises(launch.BackgroundLaunchError) as error:
+        launch.start_background_process(managed_request(tmp_path, deadline_monotonic=time.monotonic() - 1))
+    assert error.value.cleanup_confirmed
+    assert not error.value.record["child_launch_started"]
+
+
 def test_host_loss_does_not_fake_child_exit_and_exact_stop_recovers(tmp_path):
     hosted = launch.start_background_process(managed_request(tmp_path))
     registry = ProcessRegistry()
