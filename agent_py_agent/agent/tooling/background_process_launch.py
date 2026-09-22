@@ -32,7 +32,7 @@ BACKGROUND_START_SETTLE_SECONDS = 0.5
 LAUNCH_SPEC_SCHEMA = "background_process_launch.v5"
 
 
-# LLM: 参数来自已授权宿主，env 不写磁盘；stdio 不写任务日志且必须绑定 launcher，不能继承长期后台的独立寿命。
+# LLM: 参数来自已授权宿主，env 不写磁盘；stdio 绑定 launcher，显式保留只控制记录裁剪，不改变执行归属或进程寿命。
 # 类用途: 汇总一次托管启动的命令、归属、字节通道和权限，启动前拒绝相互矛盾的寿命或输出设置。
 @dataclass(frozen=True)
 class BackgroundLaunchRequest:
@@ -51,13 +51,15 @@ class BackgroundLaunchRequest:
     stop_on_launcher_exit: bool = False
     io_mode: str = "log"
     activation: PluginActivationRef | None = None
+    retain_until_consumed: bool = False
 
-    # LLM: 零期限不限制寿命；共享资源必须附原激活引用，不能只填身份跳过跨进程复查。
-    # 函数用途: 在创建记录前验证寿命、管道和可信激活引用；任务启动不加载插件存储。
+    # LLM: 零期限不限制寿命；保留策略须为宿主布尔值，共享资源附原激活引用，不能以展示字段跳过复查。
+    # 函数用途: 在创建记录前验证寿命、管道、保留策略与可信激活引用；任务启动不加载插件存储。
     def __post_init__(self) -> None:
         if (type(self.deadline_monotonic) not in {int, float}
                 or not math.isfinite(self.deadline_monotonic) or self.deadline_monotonic < 0
-                or type(self.stop_on_launcher_exit) is not bool):
+                or type(self.stop_on_launcher_exit) is not bool
+                or type(self.retain_until_consumed) is not bool):
             raise ValueError("managed background lifetime invalid")
         if not isinstance(self.io_mode, str) or self.io_mode not in {"log", "stdio"}:
             raise ValueError("managed background I/O mode invalid")
@@ -217,8 +219,8 @@ def _close_unhanded_pipes(process: subprocess.Popen) -> None:
                 pass
 
 
-# LLM: 任务或激活归属由可信宿主冻结，Store 验证互斥；不从访问、通知或目录推导身份，归属字段不是执行授权。
-# 函数用途: 创建尚无 host/child 的 v3 预留；共享连接不借用任务身份，stdio 不登记虚假日志。
+# LLM: 任务/激活及记录保留策略由可信宿主冻结；不从访问、通知或目录推导身份，保留不扩大执行权限。
+# 函数用途: 创建尚无 host/child 的 v4 预留；共享连接不借用任务身份，stdio 不登记虚假日志。
 def _reservation(request: BackgroundLaunchRequest, session_id: str) -> dict[str, object]:
     launcher_pid = os.getpid()
     birth = capture_process_birth_token(launcher_pid)
@@ -231,6 +233,7 @@ def _reservation(request: BackgroundLaunchRequest, session_id: str) -> dict[str,
         "access_scope": asdict(request.access_scope),
         "execution_scope": asdict(request.execution_scope),
         "activation_scope": asdict(request.activation.scope) if request.activation is not None else None,
+        "retain_until_consumed": request.retain_until_consumed,
         "launcher_pid": launcher_pid,
         "launcher_birth_token": birth,
         "pid": 0,

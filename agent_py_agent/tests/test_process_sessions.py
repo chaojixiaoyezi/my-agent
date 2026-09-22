@@ -704,7 +704,7 @@ def test_configured_background_shell_profile_adds_session_companion() -> None:
 
 
 @pytest.mark.parametrize("phase", ["before", "during"])
-@pytest.mark.parametrize("schema", ["managed_process_session.v2", "managed_process_session.v3"])
+@pytest.mark.parametrize("schema", ["managed_process_session.v2", "managed_process_session.v3", "managed_process_session.v4"])
 def test_managed_network_observer_excludes_reused_roots(tmp_path, monkeypatch, phase, schema):
     from agent_py_agent.agent.tooling import process_network_status as network
     from agent_py_agent.agent.tooling import process_registry as registry_module

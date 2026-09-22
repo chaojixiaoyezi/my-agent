@@ -12,7 +12,8 @@ from .common.nofollow_fs import (
     write_bytes_atomic_beneath,
     write_text_atomic_beneath,
 )
-from .plugin_activation import PluginActivationRequest, prepare_activation
+from .common.nofollow_tree import remove_tree_beneath
+from .plugin_activation import PluginActivationRequest, prepare_activation, prepare_release
 from .plugin_configuration import PluginConfigureRequest, prepare_configuration
 from .plugin_installation import (
     PluginCommitReceipt,
@@ -29,6 +30,7 @@ from .plugin_installation_state import (
     encode_installation_state,
 )
 from .plugin_package import PackageReadLimits, PluginPackageSnapshot, inspect_plugin_package
+from .plugin_release import plugin_release_evidence
 from .user_space.owner_quota import (
     OwnerQuotaChange,
     OwnerQuotaExceeded,
@@ -112,6 +114,25 @@ class PluginInstallStore:
             lambda quota: self._update_locked(quota, lambda entries: prepare_activation(request, entries)),
             reserve_quota=request.action != "revoke",
         )
+
+    # LLM: 原 executor 和资源证明必须来自原账；删除在锁外按固定计划进行，之后同表 CAS，失败保留 revoked 地址供继续收尾。
+    # 函数用途: 删除已确认退出的旧环境并释放同一安装代次，不接受外部清理成功标志或删除进程证据。
+    def release_activation(self, owner: OwnerHomeResult, repository, expected: PluginInstallation,
+                           operation_id: str) -> tuple[PluginMutationResult, dict]:
+        if (owner.identity != self._owner or owner.plugins_dir != self.root
+                or owner.root != self._anchor or owner.home_dir != self._owner_home):
+            raise PluginInstallationError("owner_conflict", "插件释放用户与原安装存储不符。")
+        # 先检查已见版本，耗时的递归删除不占原安装锁，真正提交时再次 CAS。
+        prepare_release(operation_id, expected, self.snapshot())
+        evidence = plugin_release_evidence(owner, repository, expected)
+        parts = (*self._parts, "environments", expected.activation.plan.environment_ref)
+        try:
+            remove_tree_beneath(self._anchor, parts)
+        except OSError as exc:
+            raise PluginInstallationError("environment_cleanup_failed", "旧插件环境尚未完整删除，原代保留。") from exc
+        result = self._write(lambda quota: self._update_locked(
+            quota, lambda entries: prepare_release(operation_id, expected, entries)), reserve_quota=False)
+        return result, evidence
 
     # LLM: 停用空代也须在原安装锁线性化，不能凭先前快照宣布后来启用的插件已停；不写记录、不等待配额。
     # 函数用途: 确认同一版本确实没有激活，防止无资源停用与并发启用交错时误报成功。

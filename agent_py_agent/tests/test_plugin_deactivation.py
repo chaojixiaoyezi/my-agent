@@ -44,7 +44,9 @@ def test_management_disable_revokes_and_cleans_both_exact_resource_kinds(tmp_pat
         assert details["authority_revoked"] and details["cleanup_confirmed"]
         assert {row["kind"] for row in details["sessions"]} == {"preparation", "activation"}
         assert len(details["sessions"]) == 2 and all(row["confirmed"] for row in details["sessions"])
-        assert service.installations.snapshot()[0].activation.phase == "revoked"
+        activation = service.installations.snapshot()[0].activation
+        assert details["released"] is not running
+        assert activation.phase == "revoked" if running else activation is None
         assert not service.catalog().plugins[0].enabled
         with pytest.raises(MCPError):
             client.call_tool("echo", {"text": "after"})
@@ -58,7 +60,10 @@ def test_management_disable_revokes_and_cleans_both_exact_resource_kinds(tmp_pat
         assert state["repo"].get_attempt(binding.attempt_id)["status"] == ("cancelled" if running else "done")
         hosted = state["prepared_process"]
         records, errors = process_session_store.ProcessSessionStore(hosted.store_root).list_records()
-        assert not errors and len(records) == 2  # 退出证据仍留在原账，不提前消费。
+        assert not errors and len(records) == (2 if running else 0)
+        if not running:
+            assert result["cleanup_consumption"] == {"state": "consumed", "count": 2}
+            assert len(details["release"]["resources"]) == 2
         for row in records:
             assert row["stop_requested"]
             assert all(_process_instance_terminated(row[key], row[birth]) for key, birth in (

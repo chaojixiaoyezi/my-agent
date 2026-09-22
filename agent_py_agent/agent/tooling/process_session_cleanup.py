@@ -1,4 +1,4 @@
-# LLM: 仅清理已验证 v2/v3 session，任务或激活由调用方选定；launcher 仅是存活证据，不再按范围重扫。
+# LLM: 仅清理已验证 v2/v3/v4 session，任务或激活由调用方选定；launcher 仅是存活证据，不再按范围重扫。
 # 模块用途: 原 Store 提交停止意图后，按冻结 host/child 出生身份清理并保存结果，未确认保持未知。
 from __future__ import annotations
 
@@ -71,7 +71,7 @@ class ProcessSessionCleanupError(RuntimeError):
                 self.record = pending_record
 
 
-# LLM: 固定 v2/v3 同一句柄，先落停止意图再发信号；完整 session 清理写 termination.cleanup，原命令终态及 child 回执不重写。
+# LLM: 固定 v2/v3/v4 同一句柄，先落停止意图再发信号；完整 session 清理写 termination.cleanup，原命令终态及 child 回执不重写。
 # 函数用途: 停止准确资源并持久保存完整退出确认，自然结束的命令也能留下清理证据。
 def stop_process_session(
     store: ProcessSessionStore,

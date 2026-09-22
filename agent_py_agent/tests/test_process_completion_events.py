@@ -28,7 +28,7 @@ from agent_py_agent.agent.tooling.process_session_store import (
 
 
 # LLM: 测试使用真实持久存储与伪终态进程记录，不启动或杀宿主进程。
-# 函数用途: 组装隔离 owner/thread 的旧 v1 或当前托管记录，验证通知重入与权限边界。
+# 函数用途: 组装隔离 owner/thread 的旧 v1 或 v4 普通任务记录，验证通知重入与权限边界。
 def _fixture(tmp_path, status="exited", *, managed=False, stopped=False):
     owner = tmp_path / "owner"
     store = ConversationStore(owner / "conversations")
@@ -47,7 +47,7 @@ def _fixture(tmp_path, status="exited", *, managed=False, stopped=False):
     payload = record.to_record()
     if managed:
         child_known = status in {"running", "unknown", "exited", "killed"}
-        payload.update(schema=PROCESS_SESSION_SCHEMA, revision=0, activation_scope=None,
+        payload.update(schema=PROCESS_SESSION_SCHEMA, revision=0, activation_scope=None, retain_until_consumed=False,
                        execution_scope={"owner_home": str(owner), "thread_id": thread.thread_id,
                                         "root_task_id": "task-a", "run_id": "run-a", "attempt_id": "attempt-a"},
                        launcher_pid=os.getpid(), launcher_birth_token=capture_process_birth_token(os.getpid()),

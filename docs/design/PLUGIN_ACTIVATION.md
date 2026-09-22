@@ -1,6 +1,6 @@
 # 插件激活与撤销权威
 
-状态：第 4 步本地源码已串通实际启用、普通工具组合和停用，仍未完成重新启用及卸载。安装表继续是唯一当前状态，
+状态：第 4 步本地源码已串通启用、普通工具组合、停用后释放及重新启用，卸载和显式业务命令仍待完成。安装表继续是唯一当前状态，
 原 HostCommand / ToolExecutor / OperationStore 保存执行、幂等历史和未知结果。
 
 ## 状态与原子边界
@@ -39,7 +39,7 @@ launcher 创建 host 管道，再将端点直接继承给 child，继续原预�
 完整停用仍须先提交 revoked 并释放安装锁，再由资源 Store 冻结该代记录并写停止意图，最后锁外逐资源清理。
 启动预留、创建进程前和交接均须复查原代；避免安装锁和资源锁反向嵌套。
 不能将 Gateway PID 伪装成可以整树清理的 host。固定引用和 MCP 启动/发送已本地接线，完整管理撤销和资源退出证明仍待组合。
-当前管理 disable 和 enable/普通调用见下文；显式调用、重新启用及 remove 仍须接通释放/消费边界并实际验收。
+当前管理 disable、enable/普通调用及释放消费见下文；显式调用与 remove 仍须接通并实际验收。
 撤销事实不能代替 OS 清理证明，不能提供接受外部 `cleaned=true` 即删除激活记录的入口。
 
 参考边界：沿已核对的本地 Codex MCP Closed-before-cleanup 顺序，以及本仓库
@@ -51,7 +51,7 @@ launcher 创建 host 管道，再将端点直接继承给 child，继续原预�
 ## 管理停用的组合边界
 
 状态：本地 `/plugins disable <插件>` 已沿原管理权限、HostCommand 与 ToolExecutor 接线；尚未部署或实际 TUI 验收。
-实际启用与普通贡献已有本地组件验证，重新启用与卸载未完成；先前假启用组件不算实际包 enable 验收。
+实际启用、普通贡献与重新启用已有本地组件链路，卸载未完成；先前假启用组件不算实际包 enable 验收。
 
 1. 从同次目录/安装快照冻结原代，在唯一安装表先 CAS 为 revoked；释放安装锁。
 2. 按 plan 保存的 operation ID 与可信 owner 反查原 HostCommandBinding；核验首次完整运行链、启用工具及原资源声明。
@@ -63,11 +63,23 @@ launcher 创建 host 管道，再将端点直接继承给 child，继续原预�
 当前普通 task stop 的默认终态过滤不变；仅明确管理清理传 `include_terminal=True`。
 静态目录读原 enabled/activation_id，不能把已发布插件一直画成停用，也不能用目录缓存授予执行权。
 
-本片保留 revoked 激活及全部 retained records；`cleanup_confirmed` 只表示本次两类已选资源退出得到确认。
-仍待实现：资源证据核验后的 release CAS，以及原 ToolExecutor 结果持久化/读回后的精确 consume。
+`cleanup_confirmed` 表示本次资源清理及已经尝试的收尾得到确认；`released` 单独表示原环境删除并释放安装激活。
+本轮已接入资源证据核验后的 release CAS，以及原 ToolExecutor 结果持久化/读回后的精确 consume。
 不得先删记录再提交 release，安装提交 UNKNOWN 时保留全部证据；消费失败只留下历史，不反向改写已确认提交。
 原 operation 的 UNKNOWN 分支不保存新结果，尤其不能在 handler 返回前抢先删除资源记录。
 移除候选环境还须读取原 executor 的真实退出事实；attempt cancelled 只关闭创建权限，不证明原 Python handler 已结束。
+
+释放顺序：关闭原代权限并清理固定资源后，核验原 enable attempt 的 executor 退出与原资源账完整清理证明，
+在锁外按计划的固定相对地址删除独立环境，再 CAS 清空同一 revoked 激活。删除失败保留原计划，以便新管理请求续收尾。
+原 handler 仍活着时，停用可以完成权限关闭和已选资源清理，但 `released=false`，仍禁止重新启用；不等待业务锁。
+同一 disable 的原操作终态成功且严格读回后，写入口才消费回执中固定的 session 引用及出生身份摘要；纯查询无副作用。
+原 enable UNKNOWN 保持 UNKNOWN；disable UNKNOWN、结果读回失败或消费失败时不能抹掉未持久化的退出证据。
+释放只新增原回执的 release 动作，不新增持久表；旧读取器遇未知动作仍拒绝。重新启用生成新计划，旧快照不改绑。
+准备资源的原 session v4 显式保存不可变 `retain_until_consumed=true`，其任务执行归属不变；普通裁剪不能先删这些记录。
+普通后台默认 false，原历史裁剪不变；共享 activation 记录继续保留。旧 v2/v3 原版本读写，不能夹带新保留字段。
+部署时 launcher/host 必须同版；旧 v2/v3 兼容只验证原版本任务/共享记录读写，不代表跨版本插件释放已经验收。
+本轮参考本地 Codex core-plugins 的 manager/store 卸载分工，实际只核对相关入口，未运行参考项目；
+它的目录移除本身不证明本仓库准备执行器或托管子进程退出，此处仍依赖原 executor 与原 session 事实。
 
 ## 启用与新运行的贡献组合
 

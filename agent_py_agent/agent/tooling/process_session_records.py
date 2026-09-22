@@ -1,5 +1,5 @@
-# LLM: v1 不推导执行身份，v2 显式保留原任务协议，v3 区分任务与激活；同一句柄不换版本或归属，联测 Store/redo/host。
-# 模块用途: 校验后台会话的版本、启动阶段和单向转换，防止共享插件进程被当作业务任务资源。
+# LLM: v1/v2/v3 原版本读写；v4 增加宿主固定的显式保留策略，同一句柄不换版本/归属/保留策略，联测 Store/redo/host。
+# 模块用途: 校验后台会话身份与单向转换，保护共享资源和需要随原管理结果收尾的准备记录。
 from __future__ import annotations
 
 import math
@@ -8,9 +8,11 @@ from pathlib import Path
 
 from .process_scope import ProcessActivationScope
 
-PROCESS_SESSION_SCHEMA = "managed_process_session.v3"
-PREVIOUS_PROCESS_SESSION_SCHEMA = "managed_process_session.v2"
-MANAGED_PROCESS_SESSION_SCHEMAS = frozenset({PROCESS_SESSION_SCHEMA, PREVIOUS_PROCESS_SESSION_SCHEMA})
+PROCESS_SESSION_SCHEMA = "managed_process_session.v4"
+ACTIVATION_PROCESS_SESSION_SCHEMA = "managed_process_session.v3"
+TASK_PROCESS_SESSION_SCHEMA = "managed_process_session.v2"
+MANAGED_PROCESS_SESSION_SCHEMAS = frozenset({PROCESS_SESSION_SCHEMA, ACTIVATION_PROCESS_SESSION_SCHEMA,
+                                          TASK_PROCESS_SESSION_SCHEMA})
 LEGACY_PROCESS_SESSION_SCHEMA = "managed_process_session.v1"
 PROCESS_TERMINAL_STATUSES = frozenset({"exited", "killed", "not_started"})
 _SESSION_ID_RE = re.compile(r"^bg-[A-Za-z0-9][A-Za-z0-9-]{0,95}$")
@@ -25,7 +27,7 @@ def validate_session_id(value: object) -> str:
     return value
 
 
-# LLM: 旧协议保持原版本，v3 必须显式声明激活归属；不从旧字段推断或补默认值，空 PID 只属于明确启动阶段。
+# LLM: 旧协议保持原版本，v3 起显式激活，v4 必须固定保留策略；不从旧字段补默认值或隐式升级。
 # 函数用途: 分版本验证完整记录并复制嵌套身份，坏记录不得成为可发信号的对象。
 def validate_process_record(record: object) -> dict[str, object]:
     if not isinstance(record, dict):
@@ -39,15 +41,20 @@ def validate_process_record(record: object) -> dict[str, object]:
     validate_session_id(payload.get("session_id"))
     _validate_v2_scope(payload)
     _validate_activation_scope(payload)
+    if schema == PROCESS_SESSION_SCHEMA:
+        if type(payload.get("retain_until_consumed")) is not bool:
+            raise ValueError("managed process retention policy required")
+    elif "retain_until_consumed" in payload:
+        raise ValueError("old managed process cannot declare retention policy")
     _validate_v2_instances(payload)
     _validate_v2_lifecycle(payload)
     return payload
 
 
-# LLM: v3 共享连接不能携带任务或通知身份，v2 不能通过额外字段声明激活；归属校验不代替原安装表的执行准入。
+# LLM: v3/v4 共享连接不能携带任务/通知身份，v2 不能夹带激活；归属校验不代替原安装表的执行准入。
 # 函数用途: 明确区分普通任务和共享插件资源，拒绝混绑 owner 或借用首个业务调用的身份。
 def _validate_activation_scope(payload: dict[str, object]) -> None:
-    if payload["schema"] == PREVIOUS_PROCESS_SESSION_SCHEMA:
+    if payload["schema"] == TASK_PROCESS_SESSION_SCHEMA:
         if "activation_scope" in payload:
             raise ValueError("v2 managed process cannot declare activation scope")
         return
@@ -279,10 +286,11 @@ def merge_process_record(
     return validate_process_record(merged)
 
 
-# LLM: launcher、任务/激活归属不可更换；child 进入创建后即使 PID 未知，也不能伪称没有启动副作用。
-# 函数用途: 核对 v2/v3 不可变字段及唯一实例绑定，拒绝把同一句柄换成另一条命令或插件代次。
+# LLM: launcher、任务/激活及原保留策略不可更换；child 进入创建后即使 PID 未知，也不能伪称没有启动副作用。
+# 函数用途: 核对各托管版本的不可变字段与实例绑定，拒绝句柄换代或提前解除证据保留。
 def _assert_v2_authority(existing: dict[str, object], incoming: dict[str, object]) -> None:
     keys = (
+        "retain_until_consumed",
         "execution_scope",
         "activation_scope",
         "launcher_pid",

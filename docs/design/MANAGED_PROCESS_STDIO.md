@@ -21,16 +21,18 @@
   关闭 stdin 只表示输入结束；进程是否退出仍以原账本和精确资源回执为准。
 - 管道字节没有持久重放，launcher 退出后必须停止原 child；普通 log 后台的独立寿命不改变。
 
-同一 session Store 升为 `managed_process_session.v3`，新增严格的可选 `activation_scope`。
+同一 session Store 当前写 `managed_process_session.v4`，保留 v3 引入的严格可选 `activation_scope`。
 普通任务为 null；共享连接绑定 owner ID/home、plugin ID、activation ID，不填写业务会话、任务、run/attempt 或完成通知。
-旧 v2 显式按原版本读取和更新，redo 也能恢复原 v2；查询不升版、不补插件身份，同一个 session 不允许换 schema 或归属。
+旧 v2/v3 显式按原版本读取、更新和 redo 恢复；查询不升版、不补插件身份，同一个 session 不允许换 schema 或归属。
 普通任务停止和模型进程工具排除共享连接；按激活停止只冻结同一 owner/插件/代次，继续用原批次回执在锁外精确清理。
 共享连接的终态记录不参与普通历史裁剪，保留原退出证据，后续由插件管理完成收口后明确释放。
-venv/pip 准备仍归原管理 operation，不改成共享插件资源。上述字段不是执行授权；
+v4 增加宿主固定的 `retain_until_consumed`，普通任务默认 false；venv/pip 准备为 true，继续归原管理 operation。
+它只保护原记录不被普通历史裁剪，不改变执行归属或寿命；原管理结果成功保存后精确消费，同句柄不能取消保留或隐式升级。
+上述字段不是执行授权；
 固定激活引用已接到 launcher 预留、启动、交接及 host 创建 child 前，均在原资源锁内只读原安装表。
 引用必须匹配同一 owner 的规范 root/home、原 Store 和 session scope，缺失或错配不能只靠身份字段放行。
 同代 preparing 可跨越 active 继续握手，业务发送只能接受 active；具体协议准入见 [MCP 合同](MCP_TRANSPORT_LIFECYCLE.md)。
-实际管理启用与停用已本地组合，清理后的释放/消费仍待完成，不以这些内部能力代替完整装卸验收。
+实际管理启用、停用、释放/消费与再启用已本地组合，不以这些组件能力代替完整装卸和真实 TUI 验收。
 
 ## 完整 session 清理证明
 

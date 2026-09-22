@@ -68,8 +68,8 @@ class PluginCommitReceipt:
             raise ValueError("安装回执摘要无效")
         if type(self.after_revision) is not int or self.after_revision != self.before_revision + 1:
             raise ValueError("安装回执版本无效")
-        lifecycle = self.action in {"prepare", "activate", "revoke"}
-        if (self.action not in {"install", "configure", "prepare", "activate", "revoke"}
+        lifecycle = self.action in {"prepare", "activate", "revoke", "release"}
+        if (self.action not in {"install", "configure", "prepare", "activate", "revoke", "release"}
                 or not isinstance(self.settings_sha256, str)
                 or (self.action != "configure" and self.settings_sha256 != "")
                 or (self.action == "configure" and not _DIGEST.fullmatch(self.settings_sha256))
@@ -130,13 +130,13 @@ class PluginInstallation:
                 raise ValueError("配置与提交回执不一致")
         self._validate_activation()
 
-    # LLM: 激活必须绑定原包/配置/安装版本与最后提交；revoked 保留原代，不能据此推导进程清理成功。
-    # 函数用途: 拒绝拼接不同版本或缺少阶段回执的激活记录。
+    # LLM: 激活绑定原包/配置/安装版本；release 只允许空激活并保留原代摘要，真实退出由 Store 在提交前核验。
+    # 函数用途: 拒绝拼接不同版本或缺少阶段回执的激活，允许已确认清理后的再次准备。
     def _validate_activation(self) -> None:
         activation = self.activation
         action = self.last_commit.action
         if activation is None:
-            if action not in {"install", "configure"}:
+            if action not in {"install", "configure", "release"}:
                 raise ValueError("激活提交缺少原代记录")
             return
         if not isinstance(activation, PluginActivation):
@@ -247,7 +247,7 @@ def validate_install_identity(operation_id: str, expected_revision: int) -> None
         raise ValueError("安装期望版本无效")
 
 
-# LLM: 安装/配置保持原摘要；激活提交另含完整目标摘要，不保存配置正文或授权身份。
+# LLM: 安装/配置保持原摘要；激活/释放提交另含完整原代摘要，不保存配置正文或授权身份。
 # 函数用途: 对明确动作、插件、包、期望版本与内容身份生成稳定的输入摘要。
 def plugin_input_digest(action: str, plugin_id: str, package_sha256: str, expected_revision: int,
                         settings_sha256: str = "", *, activation_sha256: str = "") -> str:
@@ -259,7 +259,7 @@ def plugin_input_digest(action: str, plugin_id: str, package_sha256: str, expect
     }
     if action == "configure":
         value["settings_sha256"] = settings_sha256
-    if action in {"prepare", "activate", "revoke"}:
+    if action in {"prepare", "activate", "revoke", "release"}:
         value["activation_sha256"] = activation_sha256
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, separators=(",", ":")).encode()

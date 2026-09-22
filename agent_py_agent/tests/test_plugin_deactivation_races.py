@@ -101,7 +101,17 @@ raise SystemExit(host.run_background_process_host(ProcessSessionStore(root), ses
 
 
 @pytest.mark.parametrize("order", ["before", "after"])
-def test_independent_host_admission_and_management_revoke_share_resource_boundary(tmp_path, order):
+def test_independent_host_admission_and_management_revoke_share_resource_boundary(tmp_path, order, monkeypatch):
+    from agent_py_agent.agent.tooling.process_session_store import ProcessSessionTransaction
+
+    consumed = {}
+    original = ProcessSessionTransaction.consume_cleanup
+
+    def observe(transaction, references):
+        consumed.update((ref["session_id"], transaction.load(ref["session_id"])) for ref in references)
+        return original(transaction, references)
+
+    monkeypatch.setattr(ProcessSessionTransaction, "consume_cleanup", observe)
     service = installed_manager(tmp_path)
     with activation_component(service, tmp_path, preparation=False) as state:
         request = activated_request(tmp_path / "racing-host", state["reference"])
@@ -129,7 +139,8 @@ def test_independent_host_admission_and_management_revoke_share_resource_boundar
                 result = stop.result(timeout=8)
             host.wait(timeout=3)
             assert result["state"] == "succeeded", result
-            current = store.load(session).record
+            assert not store.load(session).record
+            current = consumed[session]
             assert current["stop_requested"] and current["child_launch_started"] is (order == "after")
             assert session in {row["session_id"] for row in result["details"]["sessions"]}
             assert not current["child_pid"] or _process_instance_terminated(current["child_pid"], current["child_pid_birth_token"])

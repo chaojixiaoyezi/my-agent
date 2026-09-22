@@ -41,6 +41,7 @@ def _reservation(session_id: str = "bg-a", **changes: object) -> dict[str, objec
         },
         "execution_scope": asdict(SCOPE),
         "activation_scope": None,
+        "retain_until_consumed": False,
         "completion_target": {},
         "completion_notice_id": "",
         "command": "test command",

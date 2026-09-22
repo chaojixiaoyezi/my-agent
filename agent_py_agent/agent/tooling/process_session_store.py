@@ -1,4 +1,4 @@
-# LLM: 原 Store 是 v2/v3 session 唯一权威，锁内先恢复 redo；任务/激活分别冻结，共享资源退出证据不参与普通裁剪。
+# LLM: 原 Store 是 v2/v3/v4 session 唯一权威，锁内先恢复 redo；任务/激活分别冻结，共享和显式保留记录只在原结果落账后消费。
 # 模块用途: 为 launcher、host 和 Gateway 串行管理预留与停止意图，保留原目录、CAS 和 v1 显式句柄权限。
 from __future__ import annotations
 
@@ -10,7 +10,9 @@ from pathlib import Path
 
 from ..common.directory_lock import locked_private_directory
 from ..common.json_io import locked_json_path, write_json_file_atomic_unlocked
+from ..common.nofollow_fs import unlink_file_beneath
 from ..runtime_errors import runtime_error_report
+from .process_cleanup_evidence import confirm_cleanup_reference, validate_cleanup_reference
 from .process_scope import ProcessActivationScope, ProcessExecutionScope
 from .process_session_commit import (
     ProcessSessionCommitPendingError,
@@ -22,7 +24,6 @@ from .process_session_commit import (
 from .process_session_records import (
     LEGACY_PROCESS_SESSION_SCHEMA,
     MANAGED_PROCESS_SESSION_SCHEMAS,
-    PROCESS_SESSION_SCHEMA,
     PROCESS_TERMINAL_STATUSES,
     merge_process_record,
     validate_process_record,
@@ -38,7 +39,7 @@ class ProcessSessionLoadReport:
     load_error: dict[str, object] | None = None
 
 
-# LLM: 过期 v2/v3 写入不得通过生命周期合并绕过 CAS；调用方应重读原句柄而不是启动新进程。
+# LLM: 过期 v2/v3/v4 写入不得通过生命周期合并绕过 CAS；调用方应重读原句柄而不是启动新进程。
 # 类用途: 表示调用者拿着旧记录版本更新，磁盘事实没有被本次请求改动。
 class ProcessSessionRevisionConflict(ValueError):
     pass
@@ -91,7 +92,7 @@ class ProcessSessionTransaction:
                 errors.append(process_session_error_report(exc, "process_session_store.validate", path=path))
         return records, errors
 
-    # LLM: v1 沿原逐记录锁，v2/v3 共用 revision CAS 和 redo；旧版本原样更新，不能迁移或覆盖坏记录。
+    # LLM: v1 沿原逐记录锁，v2/v3/v4 共用 revision CAS 和 redo；旧版本原样更新，不能迁移或覆盖坏记录。
     # 函数用途: 原子保存一条完整记录，返回磁盘接受的有效内容和新版本。
     def write(self, record: dict[str, object]) -> dict[str, object]:
         self._require_active()
@@ -157,19 +158,39 @@ class ProcessSessionTransaction:
         records, errors = self.list_records()
         if errors:
             raise ValueError("damaged managed process records prevent complete stop selection")
-        selected = [record for record in records if record["schema"] == PROCESS_SESSION_SCHEMA
-                    and record["activation_scope"] == asdict(scope)]
+        selected = [record for record in records if record["schema"] in MANAGED_PROCESS_SESSION_SCHEMAS
+                    and record.get("activation_scope") == asdict(scope)]
         transitions = [self._prepare_managed({**record, "stop_requested": True}) for record in selected]
         return self._commit(transitions) if transitions else ProcessSessionCommitReceipt("", ())
 
-    # LLM: 只删普通任务已确认且通知消费的终态；共享激活保留退出证据，必须由插件管理完成收口后明确释放。
-    # 函数用途: 限制普通后台历史数量，不把已退出插件记录丢失当作清理完成。
+    # LLM: 调用方必须先持久化原操作中的固定引用；原锁先恢复 redo，整批核验后逐条幂等删除，部分失败保留余项供重送。
+    # 函数用途: 消费原管理结果已经接管的准确退出证据，不按当前插件或任务重新扫描删除。
+    def consume_cleanup(self, references: tuple[dict, ...]) -> None:
+        self._require_active()
+        selected = []
+        seen = set()
+        for reference in references:
+            validate_cleanup_reference(reference)
+            session_id = reference["session_id"]
+            if session_id in seen:
+                raise ValueError("重复资源清理引用")
+            seen.add(session_id)
+            record = self.load(session_id)
+            if record is not None:
+                confirm_cleanup_reference(reference, record)
+                selected.append(session_id)
+        for session_id in selected:
+            unlink_file_beneath(self.root, (f"{session_id}.json",))
+
+    # LLM: 普通任务原裁剪保持；共享激活和宿主显式保留的准备记录只由原操作结果接管后消费，终态不是提前删证据的许可。
+    # 函数用途: 限制普通后台历史数量，不裁掉后续释放仍需核验的管理资源。
     def prune_finished(self, max_finished: int) -> None:
         records, _errors = self.list_records()
         finished = [
             record
             for record in records
             if record["status"] in PROCESS_TERMINAL_STATUSES
+            and not record.get("retain_until_consumed", False)
             and record.get("activation_scope") is None
             and (not record.get("completion_target") or record.get("completion_notice_id"))
         ]
@@ -185,7 +206,7 @@ class ProcessSessionTransaction:
                     path.unlink(missing_ok=True)
 
 
-# LLM: 公共入口共用原目录锁和恢复；v2/v3 原版本更新，v1 不参与按任务控制，共享激活另按完整归属冻结。
+# LLM: 公共入口共用原目录锁和恢复；v2/v3/v4 原版本更新，v1 不参与按任务控制，共享激活另按完整归属冻结。
 # 类用途: 提供跨进程的后台会话存取，以及需要持锁多检查点的启动与停止事务。
 class ProcessSessionStore:
     # LLM: 构造只规范路径，不创建目录；缺失目录的纯查询保持无副作用。
@@ -211,7 +232,7 @@ class ProcessSessionStore:
             finally:
                 transaction.active = False
 
-    # LLM: v2/v3 的提交后异常携带固定回执，调用方不能把异常当成记录没有写入。
+    # LLM: v2/v3/v4 的提交后异常携带固定回执，调用方不能把异常当成记录没有写入。
     # 函数用途: 在互斥与恢复后保存一条记录，保留既有单条写入 API。
     def write(self, record: dict[str, object]) -> dict[str, object]:
         incoming = validate_process_record(record)

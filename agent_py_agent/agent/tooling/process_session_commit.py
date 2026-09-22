@@ -1,5 +1,5 @@
 # LLM: redo 是同一 Store 的短期安装日志，不是第二套进程状态；调用方必须持目录锁，恢复不启动或终止进程。
-# 模块用途: 原版本安装一批 v2/v3 记录，中断后补齐原批次，明确已提交但未安装完的结果，不迁移旧 session。
+# 模块用途: 原版本安装一批 v2/v3/v4 记录，中断后补齐原批次，明确已提交但未安装完的结果，不迁移旧 session。
 from __future__ import annotations
 
 import hashlib
@@ -64,7 +64,7 @@ def _record_digest(record: dict[str, object]) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
-# LLM: 批量事务显式接纳 v2/v3 原版本；先校验全批再发布，路径和记录身份不能由 redo 任意指定。
+# LLM: 批量事务显式接纳 v2/v3/v4 原版本；先校验全批再发布，路径和记录身份不能由 redo 任意指定。
 # 函数用途: 检查暂存日志格式、重复句柄和记录版本，返回可恢复的固定条目。
 def _validate_redo(payload: object) -> dict[str, object]:
     if not isinstance(payload, dict) or set(payload) != {"schema", "transaction_id", "entries"}:
@@ -96,7 +96,7 @@ def _validate_redo(payload: object) -> dict[str, object]:
     return payload
 
 
-# LLM: 整批检查原/目标摘要并保持 v2/v3 原 schema；后续版本、丢失或损坏记录拒绝，旧 redo 不能迁移身份。
+# LLM: 整批检查原/目标摘要并保持 v2/v3/v4 原 schema；后续版本、丢失或损坏记录拒绝，旧 redo 不能迁移身份。
 # 函数用途: 确认当前磁盘仍是提交前版本或已经安装的同一版本，防止部分恢复先覆盖健康记录。
 def _check_installation(root: Path, redo: dict[str, object]) -> None:
     for entry in redo["entries"]:

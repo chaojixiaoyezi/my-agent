@@ -37,6 +37,9 @@ def test_actual_enable_and_registry_view_call_then_disable(tmp_path):
     records, errors = store.list_records()
     assert not errors and len(records) == 4  # venv/probe/pip 和一次 MCP 候选
     assert all(row["status"] in {"exited", "killed"} for row in records)
+    store.prune_finished(0)
+    assert len(store.list_records()[0]) == 4  # 准备记录仍由原管理结果消费，不能按普通历史先删。
+    assert all(row["retain_until_consumed"] for row in records if row["activation_scope"] is None)
     name = plugin_tool_name("sample-peek", "read")
     try:
         view.prepare_for_run()
@@ -52,8 +55,12 @@ def test_actual_enable_and_registry_view_call_then_disable(tmp_path):
         assert result["state"] == "succeeded", result
         assert "实际插件读取" in json.dumps(result, ensure_ascii=False)
         old = registry.runtime_snapshot(run_id="old")
-        disabled = service.command("/plugins disable sample-peek", revision=service.catalog().revision, request_id="disable")
+        disable_revision = service.catalog().revision
+        disabled = service.command("/plugins disable sample-peek", revision=disable_revision, request_id="disable")
         assert disabled["state"] == "succeeded", disabled
+        assert disabled["details"]["released"]
+        old_entry = client.installation
+        assert not (owner.plugins_dir / "environments" / old_entry.activation.plan.environment_ref).exists()
         assert not registry.tools[name].availability().available
         rejected = invoke_registered_tool(service, registry, name, {"path": str(source)}, request_id="old-call", snapshot=old)
         assert rejected["state"] == "failed" and rejected["error_code"] == "TOOL_EXECUTION_FAILED", rejected
@@ -61,6 +68,21 @@ def test_actual_enable_and_registry_view_call_then_disable(tmp_path):
         registry.prepare_for_run()
         assert name not in view.tools and name not in registry.tools
         assert "read_file" in registry.tools
+        new = service.command("/plugins enable sample-peek", revision=service.catalog().revision, request_id="reenable")
+        assert new["state"] == "succeeded", new
+        assert service.installations.snapshot()[0].activation_id != old_entry.activation_id
+        replay = service.command("/plugins disable sample-peek", revision=disable_revision, request_id="disable")
+        assert replay["details"] == disabled["details"]
+        assert service.installations.snapshot()[0].enabled
+        registry.prepare_for_run()
+        assert name in registry.tools and "read_file" in registry.tools
+        current_call = invoke_registered_tool(service, registry, name, {"path": str(source)}, request_id="new-call")
+        assert current_call["state"] == "succeeded", current_call
+        stale = invoke_registered_tool(service, registry, name, {"path": str(source)}, request_id="still-old", snapshot=old)
+        assert stale["state"] == "failed", stale
+        final = service.command("/plugins disable sample-peek", revision=service.catalog().revision, request_id="final")
+        assert final["state"] == "succeeded" and final["details"]["released"], final
+        assert not store.list_records()[0]
     finally:
         registry.close_mcp_clients()
 
@@ -149,7 +171,8 @@ def test_candidate_cleanup_storage_failure_prevents_active(tmp_path, monkeypatch
         # 独立 host 可能先保存自然终态；仅该事实允许重新核验，丢失清理回执的 unknown 不能靠 PID 消失洗白。
         expected = "succeeded" if candidate["status"] in PROCESS_TERMINAL_STATUSES else "outcome_unknown"
         assert disabled["state"] == expected, disabled
-        assert service.installations.snapshot()[0].activation.phase == "revoked"
+        activation = service.installations.snapshot()[0].activation
+        assert activation is None if expected == "succeeded" else activation.phase == "revoked"
         registry = plugin_registry(service)
         try:
             registry.prepare_for_run()

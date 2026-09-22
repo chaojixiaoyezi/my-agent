@@ -67,8 +67,8 @@ class PluginEnvironmentOperation:
         ), claim=self.claim, resource_scopes=(self.plan.resource_scope,))
         raise_if_cancelled()
 
-    # LLM: 访问会话与执行任务分别来自可信原绑定；Full Access 不得抹去 owner 的规范地址。
-    # 函数用途: 为一个准备命令生成原后台启动请求，日志留私有候选且没有完成唤醒。
+    # LLM: 访问和执行归属来自原绑定，准备记录明确保留到原管理结果消费；Full Access 不改变 owner 地址。
+    # 函数用途: 为准备命令绑定原操作、宿主寿命和退出证明保留策略，避免历史裁剪提前丢证据。
     def launch_request(self, argv, cwd, environment, deadline, log_path) -> BackgroundLaunchRequest:
         binding, owner = self.binding, self.owner
         return BackgroundLaunchRequest(
@@ -79,6 +79,7 @@ class PluginEnvironmentOperation:
             execution_scope=ProcessExecutionScope(str(owner.home_dir), binding.request.thread_id,
                                                   binding.task_id, binding.run_id, binding.attempt_id),
             authority_check=self.authorize, deadline_monotonic=deadline, stop_on_launcher_exit=True,
+            retain_until_consumed=True,
         )
 
 

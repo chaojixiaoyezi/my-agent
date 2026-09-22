@@ -36,8 +36,8 @@ class PluginDisableTool(BaseTool):
             idempotency_policy=IdempotencyPolicy("operation"), mutates_workspace=False,
         )
 
-    # LLM: 新停用请求只控制冻结代次；原请求重放由 ToolExecutor 读原结果，不能再次读取当前代再停一次。
-    # 函数用途: 先撤销权限，再清理准确准备任务和共享服务，原退出证据仍留在原资源账。
+    # LLM: 新停用只控制冻结代次；原请求重放读原结果，退出证明随结果保存后由管理写入口消费，不能跟随新代。
+    # 函数用途: 撤销权限、清理准确资源，能确认原执行器退出时释放环境；否则明确显示仍待收尾。
     def execute(self, params: dict) -> ToolHandlerOutcome:
         if params["catalog_revision"] != self.catalog_revision:
             return self._failure("stale_catalog", "PLUGIN_CATALOG_STALE", "not_started")
@@ -52,9 +52,11 @@ class PluginDisableTool(BaseTool):
         except Exception:  # noqa: BLE001 写入后意外异常不能猜未撤销或重放
             return self._failure("deactivation_unconfirmed", "TOOL_EXECUTION_FAILED", "unknown", "unknown")
         confirmed = result["cleanup_confirmed"]
+        message = ("插件已停用并释放，可以再次启用。" if result["released"]
+                   else "插件已停用，原准备执行器退出尚未确认；请稍后再次停用以完成释放。")
         return ToolHandlerOutcome(
             PLUGIN_DISABLE_TOOL, confirmed,
-            "插件已停用，所选资源退出已确认。" if confirmed else "插件执行权已撤销，资源清理尚未全部确认。",
+            message if confirmed else "插件执行权已撤销，资源清理尚未全部确认。",
             error_code="" if confirmed else "PLUGIN_CLEANUP_UNCONFIRMED",
             effect_outcome="" if confirmed else "unknown", result_envelope={"plugin_disable": result},
         )

@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .command_catalog import COMMAND_INDEX
 from .path_access_policy import PathAccessPolicy
+from .plugin_cleanup import consume_plugin_cleanup
 from .plugin_command_service import execute_plugin_command, read_plugin_catalog
 from .plugin_commands import parse_plugin_command, plugin_command_response, plugin_namespace
 from .plugin_configure_tool import PLUGIN_CONFIGURE_TOOL, PluginConfigureTool
@@ -166,7 +167,7 @@ class PluginManagement:
             if repo.find_host_command(request) is not None:
                 if not self.context.enabled:
                     return query_host_command(repo, request)
-                return execute_host_command(repo, request, lambda binding: self._prepare(repo, binding, arguments))
+                return self._execute(repo, request, arguments)
         if not self.context.enabled:
             return {"ok": False, "state": "rejected", "error_code": "PLUGIN_DISABLED"}
         if not revision or revision != self.catalog().revision:
@@ -174,7 +175,14 @@ class PluginManagement:
         thread = self._thread(create=True)
         repo = RuntimeRepository(runtime_db_path(self.context.owner.home_dir))
         request = self._request(thread.thread_id, request_id, tool_name, arguments)
-        return execute_host_command(repo, request, lambda binding: self._prepare(repo, binding, arguments))
+        return self._execute(repo, request, arguments)
+
+    # LLM: 首次与显式重送共用原 HostCommand；只有原结果严格读回后才消费准确退出证据，查询与禁用开关下的重读不写。
+    # 函数用途: 执行明确管理动作并单列证据消费情况，消费失败不翻转原操作成功或重跑插件。
+    def _execute(self, repo: RuntimeRepository, request: HostCommandRequest, arguments: dict) -> dict:
+        result = execute_host_command(repo, request, lambda binding: self._prepare(repo, binding, arguments))
+        cleanup = consume_plugin_cleanup(self.context.owner, repo, request)
+        return {**result, "cleanup_consumption": cleanup} if cleanup else result
 
     # LLM: 查询仍要求当前管理员身份且绑定原操作者；不创建线程、数据库、attempt 或对账工作。
     # 函数用途: 按稳定请求编号读取本会话的安装结果。
@@ -274,8 +282,8 @@ class PluginManagement:
                 PLUGIN_DISABLE_TOOL: self.context.disable_allowed,
                 PLUGIN_ENABLE_TOOL: self.context.enable_allowed}.get(tool_name, False)
 
-    # LLM: 目录刷新失败不能抹掉原操作结果；公开回执只取管理结果投影，不输出配置值或整个工具账。
-    # 函数用途: 为 TUI/HTTP 返回原管理动作结果和查询编号，执行权关闭与资源未知分别展示。
+    # LLM: 展示只读结构化结果；目录刷新/消费失败不能抹掉原操作，未释放明确告知，不能按文案裁决资源状态。
+    # 函数用途: 为 TUI/HTTP 区分管理结果、待释放与证据消费，并提供原请求查询编号。
     def _reply(self, payload: dict, request_id: str = "") -> dict:
         payload = dict(payload)
         envelope = payload.pop("result", {})
@@ -297,6 +305,13 @@ class PluginManagement:
             "TOOL_INVALID_ARGUMENTS": "插件、来源文件或配置无效，或读取未获授权。",
         }
         message = messages.get(state, "插件命令已处理。")
+        details = payload.get("details", {})
+        if state == "succeeded" and details.get("release_pending"):
+            message = "插件已停用，原准备执行器尚未确认退出；请稍后再次停用以完成环境释放。"
+        elif state == "succeeded" and details.get("released") is True:
+            message = "插件已停用并释放，可以再次启用。"
+        if payload.get("cleanup_consumption", {}).get("state") == "pending":
+            message += "退出证明仍保留；重送原请求可继续收尾。"
         if state in {"succeeded", "failed", "cancelled"} and payload.get("finalization_pending"):
             message = "插件管理操作已有结果，运行收尾尚未确认。"
         result.setdefault("message", explanations.get(payload.get("error_code"), message))

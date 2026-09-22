@@ -109,3 +109,29 @@ def _validate_transition(request: PluginActivationRequest, existing: PluginInsta
             raise PluginInstallationError("activation_catalog_conflict", "候选工具目录与原包声明不同。")
     elif target.catalog_sha256 != current.catalog_sha256:
         raise PluginInstallationError("activation_catalog_conflict", "撤销不能改换原工具目录。")
+
+
+# LLM: 这是 Store 核验资源退出并删除固定环境后的纯 CAS；不接受外部 cleaned 标志，也不能释放活跃或后来换代的安装。
+# 函数用途: 清空准确的已撤销激活，保留原回执和私有配置，为下一次启用开放同一安装记录。
+def prepare_release(operation_id: str, expected: PluginInstallation,
+                    entries: tuple[PluginInstallation, ...]) -> PluginMutationResult:
+    validate_install_identity(operation_id, expected.revision)
+    activation = expected.activation
+    if activation is None or activation.phase != "revoked":
+        raise PluginInstallationError("activation_unsettled", "只能释放已撤销且清理确认的原激活。")
+    digest = plugin_input_digest("release", expected.manifest.plugin_id, expected.package_sha256,
+                                 expected.revision, activation_sha256=activation.content_sha256)
+    for row in entries:
+        if row.last_commit.operation_id == operation_id:
+            if row.last_commit.input_digest == digest:
+                return PluginMutationResult(row, "replayed", "committed", row.last_commit)
+            if row != expected or row.last_commit.action != "revoke":
+                raise PluginInstallationError("operation_conflict", "同一插件操作不能改换输入。")
+    current = next((row for row in entries if row.manifest.plugin_id == expected.manifest.plugin_id), None)
+    if current != expected:
+        raise PluginInstallationError("revision_conflict", "安装或激活已变化，请读取最新状态。")
+    receipt = PluginCommitReceipt(operation_id, digest, expected.manifest.plugin_id, expected.package_sha256,
+                                  expected.revision, expected.revision + 1, "release",
+                                  activation_sha256=activation.content_sha256)
+    return PluginMutationResult(replace(expected, revision=receipt.after_revision, last_commit=receipt,
+                                        activation=None), "released", "committed", receipt)

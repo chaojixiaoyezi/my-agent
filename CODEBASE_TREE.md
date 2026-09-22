@@ -108,6 +108,8 @@ agent_py_agent/
 |   |-- plugin_activation.py           # 原安装版本上的激活迁移、阶段重放与旧代拒绝
 |   |-- plugin_runtime.py              # 固定代次的 MCP 服务、完整目录校验与原工具代理
 |   |-- plugin_deactivation.py         # 撤销原代、关闭准备执行权并清理两类精确资源
+|   |-- plugin_release.py              # 原准备执行器退出与完整资源证据核验，不改写 UNKNOWN
+|   |-- plugin_cleanup.py              # 原管理结果严格读回后精确消费退出记录，重送不重跑
 |   |-- plugin_install_store.py        # owner 唯一安装表、包内容保存及锁内 CAS/提交裁决
 |   |-- plugin_install_tool.py         # 经原执行器读取授权包快照并保存默认停用记录
 |   |-- plugin_configure_tool.py       # 经原执行器读取和验证私有配置，结果不含配置值
@@ -340,6 +342,7 @@ agent_py_agent/
 |   |-- common/                        # 跨域小权威：safe_id、path_normalize、json_io、日志脱敏、结构化输出批处理
 |   |   |-- directory_lock.py           # 原后台与安装 Store 共用的永久目录系统锁，不降级为仅线程互斥
 |   |   |-- nofollow_fs.py              # 受信根内的文本/二进制读写及锁文件打开，拒绝链接路径
+|   |   |-- nofollow_tree.py            # 固定目录树递归删除，拒绝顶层链接且不沿树内链接越界
 |   |   |-- strict_json.py              # 包与安装表共用的唯一键、有限数及严格 UTF-8 JSON 读取
 |   |   |-- text_file_window.py          # 普通/按行/字符读取共用的有界编码索引、seek 游标和版本失效
 |   |   |-- file_version.py              # 观察版本与显式写前置条件；不建立任务锁或冒充内核 CAS
@@ -378,6 +381,7 @@ agent_py_agent/
 |   |   |-- process_scope.py          # 访问、任务执行与共享激活的独立身份合同
 |   |   |-- process_registry.py       # 受保护记录的进程缓存、水合、PID 身份核对与完整后代树终止
 |   |   |-- process_session_store.py  # 原 session 地址的互斥读写、版本 CAS、精确停止清单与裁剪
+|   |   |-- process_cleanup_evidence.py # 原退出证明与固定身份摘要，原锁下消费前核验
 |   |   |-- process_session_records.py # v1/v2 原版本读取及 v3 任务/激活归属、实例与单调状态合同
 |   |   |-- process_session_commit.py # 原版本 v2/v3 批次的 redo 预检、安装恢复及提交回执
 |   |   |-- process_session_cleanup.py # 冻结实例的精确清理、原账完整退出证明与提交异常回执
@@ -472,8 +476,11 @@ agent_py_agent/
 |   |-- test_plugin_deactivation_races.py # 阻塞业务停用、另一插件/任务隔离与独立 host 创建交错
 |   |-- plugin_activation_fixtures.py # 实际临时 wheel/MCP、原管理链和业务工具执行夹具
 |   |-- test_plugin_enable.py         # 实际启用、坏目录、原执行器调用与旧快照停用验证
+|   |-- test_plugin_release.py        # 原 handler 退出、环境删除、结果落账与重送消费边界
 |   |-- test_plugin_registry.py       # 共享视图、可信 owner 注入、关闭登记交错与未知保留
 |   |-- test_process_cleanup_evidence.py # 完整清理证明、自然终态保持、单调合并与 redo 恢复
+|   |-- test_process_cleanup_consumption.py # 精确引用消费、部分删除、同 ID 换代及原记录保留
+|   |-- test_nofollow_tree.py          # 环境目录与父链链接拒绝、树内链接不越界
 |   |-- test_directory_lock_wait.py   # 原线程/系统目录锁等待的取消与释放验证
 |   |-- test_plugin_configure_management.py # 原配置执行链、值不外泄、过期请求与 UNKNOWN 重放
 |   |-- test_plugin_management.py      # 真实原执行链、来源消失、配置关闭、路径权限和配额检查
@@ -586,13 +593,16 @@ docs/
 - `agent_py_agent/agent/plugin_installation_state.py` 与 `plugin_configuration.py`：原表 v3 编解码、v1/v2 明确迁移来源和完整配置替换裁决；未清理激活阻止改配置，没有第二套权威。
 - `agent_py_agent/agent/plugin_activation.py` 与 `plugin_activation_record.py`：同一原计划的准备/发布/撤销 CAS，旧快照只读原代；撤销状态不证明资源退出。
 - `agent_py_agent/agent/plugin_activation_ref.py`：只定位原安装表的可信引用；严格核对原 owner/root/scope，启动和发送不缓存授权。
-- `docs/design/PLUGIN_ACTIVATION.md`：激活身份、持久撤销、配额/锁和实际启用组合；释放、卸载及实际多 TUI 仍待完成。
-- `docs/design/MANAGED_PROCESS_STDIO.md`：原托管器的字节通道、v3 激活归属、旧 v2 原版本恢复及后续执行准入接线边界。
+- `docs/design/PLUGIN_ACTIVATION.md`：激活身份、持久撤销、释放/证据消费及重新启用；卸载、显式业务命令及实际多 TUI 仍待完成。
+- `docs/design/MANAGED_PROCESS_STDIO.md`：原托管器的字节通道、v4 显式保留和激活归属，旧 v2/v3 原版本恢复边界。
 - `agent_py_agent/agent/plugin_configure_tool.py` 与 `plugin_sources.py`：隐藏管理工具通过原执行链读取授权来源，配置值只进 owner 私有安装表；包与配置共用有界安全读取。
 - `agent_py_agent/agent/plugin_install_tool.py` 与 `plugin_management.py`：管理服务核对原授权并走唯一执行器；安装默认停用，配置与启停同源，查询只读原请求。
 - `agent_py_agent/agent/plugin_enable_tool.py`：在原管理操作中准备环境、完整验证候选目录，确认退出后才发布同代 active。
 - `agent_py_agent/agent/plugin_runtime.py` 与 `tooling/plugin_registration.py`：固定激活的 MCP 适配和新运行组合；原客户端共享连接，权限视图单独生成目录，不新建激活缓存权威。
 - `agent_py_agent/agent/plugin_deactivation.py` 与 `plugin_disable_tool.py`：先关闭原激活与准备任务权限，再冻结两类准确资源并锁外清理；保留原退出记录，不能将撤销等同清理成功。
+- `agent_py_agent/agent/plugin_release.py` 与 `plugin_cleanup.py`：前者从原 enable 执行器和资源账核验退出，后者只在 disable 原结果严格成功读回后消费固定引用；不改写 UNKNOWN，不重新选择当前代。
+- `agent_py_agent/agent/tooling/process_cleanup_evidence.py`：原资源记录的最小身份摘要及完整退出证明，旧引用不能删除同 ID 新实例；不另建持久状态。
+- `agent_py_agent/agent/common/nofollow_tree.py`：使用已验证父目录描述符递归删除固定目录，不沿链接越界；调用方负责先确认原进程和执行器已退出。
 - `agent_py_agent/agent/common/directory_lock.py`、`nofollow_fs.py` 与 `strict_json.py`：分别维护永久互斥、受信根文件原语和严格 JSON；这些公共原语不裁决领域授权或替代操作账本。
 - `agent_py_agent/agent/plugin_command_service.py`：从原安装表生成静态命令目录，旧或缺失版本明确拒绝；显式业务动作尚未接执行，普通工具贡献归 Registry。
 - `agent_py_agent/agent/gateway_parts/plugin_command_service.py`：三个 HTTP 入口共用原管理员与可信 owner；只读不初始化冷用户，获授权安装才登记原独立运行。

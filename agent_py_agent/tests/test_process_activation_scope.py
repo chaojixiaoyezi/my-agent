@@ -18,7 +18,7 @@ from agent_py_agent.agent.tooling.process_scope import (
 )
 from agent_py_agent.agent.tooling.process_session_commit import ProcessSessionCommitPendingError
 from agent_py_agent.agent.tooling.process_session_records import (
-    PREVIOUS_PROCESS_SESSION_SCHEMA,
+    TASK_PROCESS_SESSION_SCHEMA,
     validate_process_record,
 )
 from agent_py_agent.agent.tooling.process_session_store import (
@@ -46,8 +46,9 @@ def shared_record(session_id="bg-plugin", *, scope=ACTIVATION, status="starting"
 # LLM: 显式使用旧 v2 原字段，不把新字段写进旧协议；调用方只能保留原版本更新。
 # 函数用途: 为跨版本恢复测试构造旧任务预留。
 def previous_record(session_id="bg-previous"):
-    value = _reservation(session_id, schema=PREVIOUS_PROCESS_SESSION_SCHEMA)
+    value = _reservation(session_id, schema=TASK_PROCESS_SESSION_SCHEMA)
     value.pop("activation_scope")
+    value.pop("retain_until_consumed")
     return value
 
 
@@ -96,9 +97,10 @@ def test_shared_record_refuses_business_and_conflicting_identity(section, field,
 def test_new_schema_requires_scope_and_old_schema_cannot_smuggle_it():
     value = _reservation()
     value.pop("activation_scope")
+    value.pop("retain_until_consumed")
     with pytest.raises(ValueError, match="scope required"):
         validate_process_record(value)
-    value["schema"] = PREVIOUS_PROCESS_SESSION_SCHEMA
+    value["schema"] = TASK_PROCESS_SESSION_SCHEMA
     assert "activation_scope" not in validate_process_record(value)
     value["activation_scope"] = None
     with pytest.raises(ValueError, match="v2 managed process"):
@@ -144,13 +146,13 @@ def test_old_v2_redo_recovers_without_schema_migration(tmp_path, monkeypatch):
         store.write(previous_record())
     monkeypatch.setattr(commit, "write_json_file_atomic_unlocked", original)
     record = store.load("bg-previous").record
-    assert record["schema"] == PREVIOUS_PROCESS_SESSION_SCHEMA and "activation_scope" not in record
+    assert record["schema"] == TASK_PROCESS_SESSION_SCHEMA and "activation_scope" not in record
     before = store.record_path(record["session_id"]).read_bytes()
     assert store.load(record["session_id"]).record == record
     assert store.record_path(record["session_id"]).read_bytes() == before
     updated = store.write({**record, "stop_requested": True})
-    assert updated["schema"] == PREVIOUS_PROCESS_SESSION_SCHEMA and updated["revision"] == record["revision"] + 1
-    changed = {**updated, "schema": _reservation()["schema"], "activation_scope": None}
+    assert updated["schema"] == TASK_PROCESS_SESSION_SCHEMA and updated["revision"] == record["revision"] + 1
+    changed = {**updated, "schema": _reservation()["schema"], "activation_scope": None, "retain_until_consumed": False}
     with pytest.raises(ValueError, match="authority conflict"):
         store.write(changed)
 
