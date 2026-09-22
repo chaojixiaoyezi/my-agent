@@ -1,5 +1,5 @@
-# LLM: 这是唯一安装表的纯编解码，不执行迁移写入；v1 来源摘要随下一次真实提交写入 v2，不接受隐式协议别名。
-# 模块用途: 严格读取安装表并记录明确迁移来源，让配置与安装共享一个私有持久权威。
+# LLM: 唯一安装表严格解码 v3；旧 v1/v2 仅按原停用协议显式迁移，来源随下一次真实提交保存，不在查询时写入。
+# 模块用途: 保留安装、配置和激活的同一权威及明确迁移来源，拒绝丢字段降级。
 
 from __future__ import annotations
 
@@ -11,9 +11,10 @@ from dataclasses import asdict, dataclass
 from .common.strict_json import load_strict_json
 from .plugin_installation import PluginInstallation, PluginInstallationError
 
-INSTALLATION_SCHEMA = "plugin_installations.v2"
+INSTALLATION_SCHEMA = "plugin_installations.v3"
 INSTALLATION_STATE_LIMIT = 16 * 1024 * 1024
-_PREVIOUS_SCHEMA = "plugin_installations.v1"
+_V1 = "plugin_installations.v1"
+_V2 = "plugin_installations.v2"
 
 
 # LLM: migration_json 是原文件来源事实，不是另一个状态表；记录内有配置，默认 repr 不可用于日志。
@@ -24,7 +25,7 @@ class PluginInstallationState:
     migration_json: str = "null"
 
 
-# LLM: 只有明确 v1 进入迁移解析，严格检查其原字段再映射；v2 缺字段不能借旧路径补默认值。
+# LLM: 旧协议严格检查原字段再映射，保留前次迁移来源；v3 缺字段不能借旧路径补默认值。
 # 函数用途: 恢复 owner 的私有记录，损坏或跨用户状态不覆盖。
 def decode_installation_state(content: bytes | None, owner) -> PluginInstallationState:
     if content is None:
@@ -34,17 +35,23 @@ def decode_installation_state(content: bytes | None, owner) -> PluginInstallatio
         raise ValueError("安装表协议无效")
     version = payload.get("schema_version")
     fields = {"schema_version", "owner", "installations"}
-    if version == INSTALLATION_SCHEMA:
+    if version in {INSTALLATION_SCHEMA, _V2}:
         fields.add("migration")
-    elif version != _PREVIOUS_SCHEMA:
+    elif version != _V1:
         raise ValueError("安装表协议无效")
     if set(payload) != fields or not isinstance(payload["installations"], list):
         raise ValueError("安装表字段无效")
     if payload["owner"] != asdict(owner):
         raise PluginInstallationError("owner_mismatch", "安装表不属于当前用户。")
-    if version == _PREVIOUS_SCHEMA:
-        rows = tuple(_migrate_v1_record(row) for row in payload["installations"])
+    if version in {_V1, _V2}:
+        rows = tuple(_migrate_record(row, version) for row in payload["installations"])
         migration = {"from_schema": version, "source_sha256": hashlib.sha256(content).hexdigest()}
+        if version == _V2:
+            previous = payload["migration"]
+            _validate_migration(previous)
+            if previous is not None and previous["from_schema"] != _V1:
+                raise ValueError("旧安装迁移来源无效")
+            migration["previous"] = previous
     else:
         rows = tuple(PluginInstallation.from_payload(row) for row in payload["installations"])
         migration = payload["migration"]
@@ -56,34 +63,52 @@ def decode_installation_state(content: bytes | None, owner) -> PluginInstallatio
     return PluginInstallationState(rows, json.dumps(migration, sort_keys=True, separators=(",", ":")))
 
 
-# LLM: v1 只接纳未配置停用安装，旧回执的摘要保持原值；字段增补仅存在于这一显式迁移边界。
-# 函数用途: 将严格合法的旧安装记录转换成等价 v2 内存对象，不写文件。
-def _migrate_v1_record(value: object) -> PluginInstallation:
-    if not isinstance(value, dict) or set(value) != {
-        "manifest", "package_sha256", "revision", "last_commit", "enabled", "activation_id",
-    }:
+# LLM: 旧 v1/v2 都只接纳停用且空激活；旧回执摘要保持原值，补字段仅存在于这个明确迁移入口。
+# 函数用途: 将严格合法的旧安装/配置记录转换成等价 v3 内存对象，不写文件。
+def _migrate_record(value: object, version: str) -> PluginInstallation:
+    expected = {"manifest", "package_sha256", "revision", "last_commit", "enabled", "activation_id"}
+    if version == _V2:
+        expected |= {"settings_json", "settings_revision"}
+    if not isinstance(value, dict) or set(value) != expected:
         raise ValueError("旧安装记录字段无效")
+    if value["enabled"] is not False or value["activation_id"] != "":
+        raise ValueError("旧安装协议不能声明激活")
     receipt = value["last_commit"]
-    if not isinstance(receipt, dict) or set(receipt) != {
-        "operation_id", "input_digest", "plugin_id", "package_sha256", "before_revision", "after_revision",
-    }:
+    receipt_fields = {"operation_id", "input_digest", "plugin_id", "package_sha256", "before_revision", "after_revision"}
+    if version == _V2:
+        receipt_fields |= {"action", "settings_sha256"}
+    if not isinstance(receipt, dict) or set(receipt) != receipt_fields:
         raise ValueError("旧安装回执字段无效")
+    receipt = {**receipt, "activation_sha256": ""}
+    if version == _V1:
+        receipt.update(action="install", settings_sha256="")
+    if receipt["action"] not in {"install", "configure"}:
+        raise ValueError("旧安装回执不能声明激活动作")
     return PluginInstallation.from_payload({
-        **value, "settings_json": None, "settings_revision": 0,
-        "last_commit": {**receipt, "action": "install", "settings_sha256": ""},
+        **{key: value[key] for key in ("manifest", "package_sha256", "revision")},
+        "settings_json": value["settings_json"] if version == _V2 else None,
+        "settings_revision": value["settings_revision"] if version == _V2 else 0,
+        "last_commit": receipt, "activation": None,
     })
 
 
-# LLM: 来源摘要仅证明该次显式读取的旧表字节，不是可信签名；未知迁移结构不能静默保留或忽略。
-# 函数用途: 校验原子表中迁移标记的完整字段。
+# LLM: 来源摘要只证明读取字节；v2 的 previous 只能是合法 v1 来源，不能无限递归或悄悄丢弃旧迁移。
+# 函数用途: 校验唯一表中至多两代的完整迁移链。
 def _validate_migration(value: object) -> None:
     if value is None:
         return
-    if (not isinstance(value, dict) or set(value) != {"from_schema", "source_sha256"}
-            or value["from_schema"] != _PREVIOUS_SCHEMA
+    if (not isinstance(value, dict) or not {"from_schema", "source_sha256"} <= set(value)
             or not isinstance(value["source_sha256"], str)
             or not re.fullmatch(r"[0-9a-f]{64}", value["source_sha256"])):
         raise ValueError("安装迁移记录无效")
+    if value["from_schema"] == _V1 and set(value) == {"from_schema", "source_sha256"}:
+        return
+    if value["from_schema"] == _V2 and set(value) == {"from_schema", "source_sha256", "previous"}:
+        previous = value["previous"]
+        if previous is None or isinstance(previous, dict) and previous.get("from_schema") == _V1:
+            _validate_migration(previous)
+            return
+    raise ValueError("安装迁移记录无效")
 
 
 # LLM: 私有配置只在此 owner 表编码，完整文件大小在提交前检查；不能将返回文本用于公开目录或结果。

@@ -1,9 +1,10 @@
 # LLM: 本 Store 是 owner 插件安装事实的唯一文件入口；不承担认证、工具执行或操作历史，管理入口必须先授权。
-# 模块用途: 在固定目录锁内校验版本、保存包或私有配置并原子提交，失败按实际读回区分提交结果。
+# 模块用途: 在固定目录锁内提交包、配置与激活，撤销不等待资源配额，失败按实际读回区分结果。
 
 from __future__ import annotations
 
 import hashlib
+from contextlib import nullcontext
 
 from .common.directory_lock import locked_private_directory
 from .common.nofollow_fs import (
@@ -11,6 +12,7 @@ from .common.nofollow_fs import (
     write_bytes_atomic_beneath,
     write_text_atomic_beneath,
 )
+from .plugin_activation import PluginActivationRequest, prepare_activation
 from .plugin_configuration import PluginConfigureRequest, prepare_configuration
 from .plugin_installation import (
     PluginCommitReceipt,
@@ -55,7 +57,7 @@ class PluginInstallStore:
     def snapshot(self) -> tuple[PluginInstallation, ...]:
         return self._read_state().entries
 
-    # LLM: 解码 v1 不写迁移；同次真正提交才连同旧来源摘要写 v2，不能将损坏表当空表。
+    # LLM: 解码 v1/v2 不写迁移；真正提交才连同旧来源写 v3，不能将损坏表当空表。
     # 函数用途: 读取原表及迁移信息，保持只读查询无副作用。
     def _read_state(self) -> PluginInstallationState:
         try:
@@ -101,15 +103,35 @@ class PluginInstallStore:
     # LLM: 配置仍属于同一安装表；值验证、版本 CAS 和提交均在原锁内，包不在此更新或执行。
     # 函数用途: 完整替换停用插件的私有配置，重送复读原回执。
     def configure(self, request: PluginConfigureRequest) -> PluginMutationResult:
-        return self._write(lambda quota: self._configure_locked(request, quota))
+        return self._write(lambda quota: self._update_locked(quota, lambda entries: prepare_configuration(request, entries)))
 
-    # LLM: 两个动作复用原 quota→插件目录锁，不增加锁或操作表；清理失败不能覆盖先前裁决的提交状态。
+    # LLM: 新资源阶段保持 quota→插件锁；撤销只关闭有界既有记录，不能等正在准备的 quota 或以空间不足维持执行权。
+    # 函数用途: 在同一安装表预留、发布或撤销固定代次，不启动进程或声称清理完成。
+    def change_activation(self, request: PluginActivationRequest) -> PluginMutationResult:
+        return self._write(
+            lambda quota: self._update_locked(quota, lambda entries: prepare_activation(request, entries)),
+            reserve_quota=request.action != "revoke",
+        )
+
+    # LLM: 此读取不是调用准入锁；资源层须在自己的预留/发送临界区调用，并让撤销随后冻结该代已登记资源。
+    # 函数用途: 拒绝缺失、损坏、换代和已撤销的原激活，不能把旧快照刷新为新实现。
+    def require_activation(self, plugin_id: str, activation_id: str, *, preparing: bool = False) -> PluginInstallation:
+        entry = next((row for row in self.snapshot() if row.manifest.plugin_id == plugin_id), None)
+        phases = {"preparing"} if preparing else {"active"}
+        if (entry is None or not activation_id or entry.activation_id != activation_id
+                or entry.activation is None or entry.activation.phase not in phases):
+            raise PluginInstallationError("activation_unavailable", "原插件激活不可用或已撤销。")
+        return entry
+
+    # LLM: 新资源复用原 quota→插件锁；撤销跳过 quota 但仍用同一插件锁，不增锁/操作表，清理错误保留原裁决。
     # 函数用途: 在完整临界区执行安装领域更新，并保留确定或未知提交事实。
-    def _write(self, mutation) -> PluginMutationResult:
+    def _write(self, mutation, *, reserve_quota: bool = True) -> PluginMutationResult:
         result = None
         operation_error = None
         try:
-            with owner_quota_enforcer_from_policy(self._owner_home, quota_path=self._quota_path).admission() as quota, locked_private_directory(
+            admission = (owner_quota_enforcer_from_policy(self._owner_home, quota_path=self._quota_path).admission()
+                         if reserve_quota else nullcontext(None))
+            with admission as quota, locked_private_directory(
                 self._anchor, relative_parts=self._parts, lock_name=".plugins.lock"
             ):
                 try:
@@ -175,17 +197,18 @@ class PluginInstallStore:
         self._commit(entries, updated, text, receipt)
         return PluginMutationResult(installed, "installed", "committed", receipt)
 
-    # LLM: 配置与版本、最后回执同次提交；旧读取在锁内 CAS 失败，不覆盖并发配置或伪造无副作用。
-    # 函数用途: 验证并保存完整私有配置，迁移来源随首次修改原子保留。
-    def _configure_locked(self, request: PluginConfigureRequest, quota) -> PluginMutationResult:
+    # LLM: 纯领域迁移接收同一完整快照；配置/激活/版本/回执同次提交，撤销只豁免新增资源配额，不豁免表上限。
+    # 函数用途: 保存一条已通过 CAS 的安装更新，迁移来源和其他插件保持。
+    def _update_locked(self, quota, prepare) -> PluginMutationResult:
         state = self._read_state()
-        result = prepare_configuration(request, state.entries)
-        if result.outcome != "configured":
+        result = prepare(state.entries)
+        if result.receipt is None or result.outcome == "replayed":
             return result
-        updated = tuple(result.installation if row.manifest.plugin_id == request.plugin_id else row
+        updated = tuple(result.installation if row.manifest.plugin_id == result.installation.manifest.plugin_id else row
                         for row in state.entries)
         text = encode_installation_state(updated, self._owner, state.migration_json)
-        quota.check((OwnerQuotaChange(self.root / "installations.json", len(text.encode("utf-8"))),))
+        if quota is not None:
+            quota.check((OwnerQuotaChange(self.root / "installations.json", len(text.encode("utf-8"))),))
         self._commit(state.entries, updated, text, result.receipt)
         return result
 

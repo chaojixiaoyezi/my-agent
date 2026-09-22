@@ -14,19 +14,21 @@
 宿主 request/run/attempt、ToolExecutor 和操作账执行。只读取一次有界配置文件，按包的
 `settings_schema` 使用原工具输入校验器严格验证；不隐式转型、补默认值或执行插件。
 命令及工具账只保存来源引用，实际值保存在 owner 私有安装表，不进入命令目录或结果正文。
-它是完整配置替换，不是补丁；停用时修改配置，启用期间不能原地改写既有代次。
+它是完整配置替换，不是补丁；只有没有未清理激活的安装才能修改配置，准备中、已发布或已撤销但未清理的代次都不能原地改写。
 
-安装表升级为 `plugin_installations.v2`，配置、配置版本、安装版本和最后动作回执同次原子保存。
-旧 v1 只按其原字段显式读取；第一次实际修改时，在同一 v2 文件记录原协议及源文件摘要，
-不单独写迁移表，不在只读查询时落盘。新文件直接使用 v2；未知协议和损坏值拒绝覆盖。
+安装表当前为 `plugin_installations.v3`，配置、配置版本、安装版本、激活和最后动作回执同次原子保存。
+旧 v1/v2 只按原字段和停用约束显式读取；第一次实际修改时，在同一 v3 文件记录原协议及源文件摘要，
+保留 v2 中已有的 v1 迁移来源，不单独写迁移表，不在只读查询时落盘。新文件直接使用 v3；未知协议和损坏值拒绝覆盖。
 配置读取前固定已见安装及目录版本，原安装锁内再次 CAS；同请求查询仍只读原操作，不能因
 配置来源被删、改写或当前版本变化而重新执行。相同值的新请求不制造一次配置更新。
-当前协议中 install 回执只可对应未配置状态；configure 回执必须匹配规范配置摘要和当前配置版本，矛盾记录不能读成有效状态。
+当前协议中 install 回执只可对应未配置状态；configure 回执必须匹配规范配置摘要和当前配置版本。
+prepare/activate/revoke 回执须绑定同一激活内容、计划和对应版本；准备与发布还须使用原启用操作身份，矛盾记录不能读成有效状态。
 
 公开目录升级为 `plugin_command_catalog.v2`，插件声明包含非敏感 `installation_revision`，
 因此配置修改也使目录摘要变化；旧客户端明确拒绝未知协议，发布时客户端和 Gateway 同版。
 目录没有配置值或配置摘要，版本只是过期检测依据，不能授予权限或替代安装表的 CAS。
-启用、环境准备资源绑定、MCP 发布及精确撤销继续沿此权威扩展，当前配置接线不代表它们完成。
+激活预留、发布和撤销已有内部 CAS，见 [激活权威](PLUGIN_ACTIVATION.md)；环境准备资源已接原操作，
+完整启用、MCP 发布和精确撤销仍待串通，当前配置接线不代表它们完成。
 
 本片定向核对本地 Codex `578c1b22` 的 `app-server/src/request_processors/plugins.rs::plugin_install_response`
 及 `core-plugins/src/manager.rs`：宿主加载当前配置并检查开关后进入插件管理器；它安装后设置 enabled 的行为不照搬。
@@ -60,12 +62,14 @@ wheel 使用 Python 已有分发格式，不自行编写 wheel 安装器。内�
 规范地址为原 owner 解析器提供的 `owner_data_dir/plugins`，两个路径投影统一提供插件目录字段；
 构造 Store 和缺失查询不创建目录，也不初始化 Agent 或用户模板。包目录扫描不决定是否已安装。
 
-- `installations.json` 是唯一安装表，协议 `plugin_installations.v2`，包含原始 owner 身份、完整安装清单和明确迁移来源，上限 16 MiB。
-- 每条保存不可变 manifest、包摘要、revision、私有设置/设置版本、`enabled=false`、空 activation_id 和最后一次提交回执。当前协议只接纳停用态，未来启停须显式扩展同一权威。
+- `installations.json` 是唯一安装表，协议 `plugin_installations.v3`，包含原始 owner 身份、完整安装清单和明确迁移来源，上限 16 MiB。
+- 每条保存不可变 manifest、包摘要、revision、私有设置/设置版本、可选 activation 和最后一次提交回执。新安装没有激活；`enabled` 和 `activation_id` 由激活记录只读推导，不再重复保存。
+- 激活记录绑定原环境计划及 preparing/active/revoked 阶段；active 只是持久发布事实，不证明当前进程健康，revoked 也不证明 OS 资源已退出。
 - 回执包含明确动作、operation_id、规范输入摘要、插件/包身份及前后版本，与记录同次原子保存。它只证明该次提交，不是第二套 OperationStore 或永久操作历史。
-- 请求、记录与安装准入归 `plugin_installation.py`，完整配置替换归 `plugin_configuration.py`；Store 只负责加锁、读写和提交，`plugin_installation_state.py` 负责唯一协议编解码及明确迁移。
+- 请求、记录与安装准入归 `plugin_installation.py`，完整配置替换归 `plugin_configuration.py`，激活记录及转换归 `plugin_activation_record.py` / `plugin_activation.py`；Store 只负责加锁、读写和提交，`plugin_installation_state.py` 负责唯一协议编解码及明确迁移。
 - 同一 owner 的固定 `.plugins.lock` 覆盖最新读取、版本 CAS、保存包和提交安装表。多插件提交不能丢掉其它插件记录或回执。
-- 写入复用原 owner quota：先取得配额准入，再取 `.plugins.lock`，按完整包与待提交表预算检查；配额不足不发布包或安装表。
+- 安装、配置及激活准备/发布复用原 owner quota：先取得配额准入，再取 `.plugins.lock`，按完整包与待提交表预算检查；配额不足不发布新资源。
+- 撤销只在原插件锁内修改有界既有记录，不领取配额锁；避免准备占用配额时阻塞关闭执行权，仍遵守表大小上限、原子提交和异常读回。
 - 原请求与摘要匹配时返回原回执；同操作标识换输入报冲突；不同请求须匹配当前 revision。当前版本上的相同包只返回 unchanged，不改表或伪称原请求重放。
 - 同插件不同包摘要拒绝原地替换，包括版本不变而字节改变。升级、卸载、重新安装及旧回执回收尚未实现。
 - 包先完整保存在 `packages/<sha256>.zip`，再原子替换安装表；包保存后、表提交前的失败可以留下未引用包，不算安装成功。已有损坏包不覆盖。

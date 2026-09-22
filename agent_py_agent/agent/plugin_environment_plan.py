@@ -1,5 +1,5 @@
 # LLM: 环境计划是原 operation 的不可变资源身份，不是第二套安装状态；声明必须先经原执行器 claim，准备器才可写文件。
-# 模块用途: 在启动前固定包、解释器、配置版本和候选地址，避免崩溃后只能扫描目录猜归属。
+# 模块用途: 冷读取计划不加载环境执行器；启动前固定包、解释器、配置版本和候选地址，避免扫描目录猜归属。
 
 from __future__ import annotations
 
@@ -9,8 +9,6 @@ import os
 import re
 import sys
 from dataclasses import asdict, dataclass
-
-from .plugin_environment_process import check_preparation_deadline
 
 
 # LLM: 所有字段都是宿主结构化身份，不能含配置正文或个人路径；scope 是完整计划的规范身份，不能只保存不可逆摘要。
@@ -65,9 +63,11 @@ def plan_plugin_environment(installation, operation_id: str, *, deadline: float 
     )
 
 
-# LLM: 指纹涵盖宿主版本、实际解释器内容与位置的摘要，不持久化绝对路径；准备前复验，不能悄悄重算另一个环境。
+# LLM: 指纹涵盖宿主版本、解释器内容与位置摘要；只有实际计划生成才加载期限检查，冷读计划不加载准备执行器。
 # 函数用途: 拒绝计划生成后被替换的 Python，读取期间继续响应取消和准备期限。
 def interpreter_fingerprint(deadline: float | None = None) -> str:
+    from .plugin_environment_process import check_preparation_deadline
+
     digest = hashlib.sha256()
     digest.update(json.dumps([sys.version, sys.implementation.cache_tag, os.path.realpath(sys.executable)]).encode())
     with open(sys.executable, "rb") as stream:

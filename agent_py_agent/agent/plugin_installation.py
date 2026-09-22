@@ -1,5 +1,5 @@
-# LLM: 安装事实描述已保存的包、私有配置和最后提交，不复制 OperationStore 的运行/租约/UNKNOWN 状态机。
-# 模块用途: 定义安装请求、记录、通用提交回执与安装准入；配置准入独立计算，读写及系统锁由 Store 负责。
+# LLM: 安装事实描述包、私有配置、激活与最后提交，不复制 OperationStore 的运行/租约/UNKNOWN 状态机。
+# 模块用途: 定义唯一安装记录和提交回执；配置/激活迁移独立计算，读写及系统锁由 Store 负责。
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import re
 from dataclasses import asdict, dataclass, field
 
 from .common.strict_json import load_strict_json
+from .plugin_activation_record import PluginActivation, plugin_catalog_digest
 from .plugin_manifest import PluginManifest, canonical_plugin_settings
 from .plugin_package import PluginPackageSnapshot
 
@@ -41,7 +42,7 @@ class PluginInstallRequest:
 
 
 # LLM: 最后回执与安装记录同次保存；它只能证明这一条提交，不是永久幂等历史，也不提供执行权限。
-# 类用途: 保存安装或配置操作的输入摘要和前后版本，供响应丢失后的原请求核对。
+# 类用途: 保存安装、配置或激活提交的输入摘要和前后版本，供响应丢失后的原请求核对。
 @dataclass(frozen=True)
 class PluginCommitReceipt:
     operation_id: str
@@ -52,8 +53,9 @@ class PluginCommitReceipt:
     after_revision: int
     action: str = "install"
     settings_sha256: str = ""
+    activation_sha256: str = ""
 
-    # LLM: 每次安装或配置只前进一版；动作和输入摘要同源，配置回执仅留摘要，不包含原值。
+    # LLM: 每次提交只前进一版；动作与输入摘要同源，配置和激活各自绑定完整内容，不包含配置原值。
     # 函数用途: 拒绝无效提交标识、动作、摘要和非单调版本。
     def __post_init__(self) -> None:
         validate_install_identity(self.operation_id, self.before_revision)
@@ -66,39 +68,41 @@ class PluginCommitReceipt:
             raise ValueError("安装回执摘要无效")
         if type(self.after_revision) is not int or self.after_revision != self.before_revision + 1:
             raise ValueError("安装回执版本无效")
-        if (self.action not in {"install", "configure"}
+        lifecycle = self.action in {"prepare", "activate", "revoke"}
+        if (self.action not in {"install", "configure", "prepare", "activate", "revoke"}
                 or not isinstance(self.settings_sha256, str)
-                or (self.action == "install" and self.settings_sha256 != "")
-                or (self.action == "configure" and not _DIGEST.fullmatch(self.settings_sha256))):
-            raise ValueError("插件提交动作或配置摘要无效")
+                or (self.action != "configure" and self.settings_sha256 != "")
+                or (self.action == "configure" and not _DIGEST.fullmatch(self.settings_sha256))
+                or not isinstance(self.activation_sha256, str)
+                or (lifecycle and not _DIGEST.fullmatch(self.activation_sha256))
+                or (not lifecycle and self.activation_sha256 != "")):
+            raise ValueError("插件提交动作或内容摘要无效")
         if self.input_digest != plugin_input_digest(
-            self.action, self.plugin_id, self.package_sha256, self.before_revision, self.settings_sha256
+            self.action, self.plugin_id, self.package_sha256, self.before_revision, self.settings_sha256,
+            activation_sha256=self.activation_sha256,
         ):
             raise ValueError("安装回执输入摘要不匹配")
 
 
-# LLM: v2 配置与安装同一权威；当前仍拒绝激活，启停必须显式扩展合同，配置值不得进入公开投影。
-# 类用途: 保存静态描述、私有配置、内容地址、版本和最后提交，不扫描目录猜测有效安装。
+# LLM: v3 配置与激活仍在唯一安装表，enabled/activation_id 只投影该记录；配置值不得进入公开投影。
+# 类用途: 保存静态描述、私有配置、激活、版本和最后提交，不扫描目录猜测有效安装。
 @dataclass(frozen=True)
 class PluginInstallation:
     manifest: PluginManifest
     package_sha256: str
     revision: int
     last_commit: PluginCommitReceipt
-    enabled: bool = False
-    activation_id: str = ""
     settings_json: str | None = field(default=None, repr=False)
     settings_revision: int = 0
+    activation: PluginActivation | None = None
 
-    # LLM: 最后回执与包、插件、版本及配置匹配；私有配置读回须通过原 schema，损坏不能降级为空值。
+    # LLM: 最后回执与包、版本、配置及激活匹配；私有配置读回须通过原 schema，损坏不能降级为空值。
     # 函数用途: 校验完整安装事实，不从包自述生成宿主激活状态。
     def __post_init__(self) -> None:
         if not isinstance(self.manifest, PluginManifest) or not isinstance(
             self.last_commit, PluginCommitReceipt
         ):
             raise ValueError("安装记录缺少已验证声明或回执")
-        if self.enabled is not False or self.activation_id != "":
-            raise ValueError("当前安装协议不接受激活状态")
         if (
             type(self.revision) is not int
             or self.revision != self.last_commit.after_revision
@@ -124,19 +128,55 @@ class PluginInstallation:
                 or hashlib.sha256(canonical.encode()).hexdigest() != self.last_commit.settings_sha256
             ):
                 raise ValueError("配置与提交回执不一致")
+        self._validate_activation()
+
+    # LLM: 激活必须绑定原包/配置/安装版本与最后提交；revoked 保留原代，不能据此推导进程清理成功。
+    # 函数用途: 拒绝拼接不同版本或缺少阶段回执的激活记录。
+    def _validate_activation(self) -> None:
+        activation = self.activation
+        action = self.last_commit.action
+        if activation is None:
+            if action not in {"install", "configure"}:
+                raise ValueError("激活提交缺少原代记录")
+            return
+        if not isinstance(activation, PluginActivation):
+            raise ValueError("安装激活记录无效")
+        plan = activation.plan
+        offset = self.revision - plan.installation_revision
+        if (action != {"preparing": "prepare", "active": "activate", "revoked": "revoke"}[activation.phase]
+                or activation.content_sha256 != self.last_commit.activation_sha256
+                or plan.plugin_id != self.manifest.plugin_id or plan.package_sha256 != self.package_sha256
+                or plan.settings_revision != self.settings_revision
+                or offset != {"preparing": 1, "active": 2,
+                              "revoked": 3 if activation.catalog_sha256 else 2}[activation.phase]
+                or (activation.phase != "revoked" and self.last_commit.operation_id != plan.operation_id)
+                or (activation.catalog_sha256 and activation.catalog_sha256 != plugin_catalog_digest(self.manifest))):
+            raise ValueError("安装激活与版本或提交回执不一致")
+        canonical_plugin_settings(load_strict_json(self.settings_json or "{}"), self.manifest.settings_schema)
+
+    # LLM: 这是持久发布状态的只读投影，不证明当前 MCP 进程健康或授权；运行时仍须复核原代。
+    # 函数用途: 让目录沿唯一激活记录显示是否已发布。
+    @property
+    def enabled(self) -> bool:
+        return self.activation is not None and self.activation.phase == "active"
+
+    # LLM: 身份只由原环境计划生成，撤销仍保留它供精确资源清理；未激活没有可调用代次。
+    # 函数用途: 取得当前或待清理激活的固定身份。
+    @property
+    def activation_id(self) -> str:
+        return self.activation.activation_id if self.activation is not None else ""
 
     # LLM: 本投影含私有配置，只可写入 owner 私有安装表；不能复用作工具结果、命令目录或用户消息。
-    # 函数用途: 为同一次原子替换生成完整安装与配置记录。
+    # 函数用途: 为同一次原子替换生成完整安装、配置与激活记录。
     def to_payload(self) -> dict:
         return {
             "manifest": self.manifest.to_payload(),
             "package_sha256": self.package_sha256,
             "revision": self.revision,
             "last_commit": asdict(self.last_commit),
-            "enabled": self.enabled,
-            "activation_id": self.activation_id,
             "settings_json": self.settings_json,
             "settings_revision": self.settings_revision,
+            "activation": self.activation.to_payload() if self.activation is not None else None,
         }
 
     # LLM: 严格字段集合防止忽略未来生命周期协议；不能补默认值使旧 binary 覆盖新记录。
@@ -148,15 +188,14 @@ class PluginInstallation:
             "package_sha256",
             "revision",
             "last_commit",
-            "enabled",
-            "activation_id",
             "settings_json",
             "settings_revision",
+            "activation",
         }:
             raise ValueError("安装记录字段无效")
         if not isinstance(value["last_commit"], dict) or set(value["last_commit"]) != {
             "operation_id", "input_digest", "plugin_id", "package_sha256", "before_revision",
-            "after_revision", "action", "settings_sha256",
+            "after_revision", "action", "settings_sha256", "activation_sha256",
         }:
             raise ValueError("安装提交回执无效")
         return cls(
@@ -164,10 +203,9 @@ class PluginInstallation:
             package_sha256=value["package_sha256"],
             revision=value["revision"],
             last_commit=PluginCommitReceipt(**value["last_commit"]),
-            enabled=value["enabled"],
-            activation_id=value["activation_id"],
             settings_json=value["settings_json"],
             settings_revision=value["settings_revision"],
+            activation=PluginActivation.from_payload(value["activation"]) if value["activation"] is not None else None,
         )
 
 
@@ -209,10 +247,10 @@ def validate_install_identity(operation_id: str, expected_revision: int) -> None
         raise ValueError("安装期望版本无效")
 
 
-# LLM: 请求和持久回执共用规范输入；安装沿原 v1 摘要，配置只加值的摘要，不保存正文或授权身份。
-# 函数用途: 对明确动作、插件、包、期望版本与配置身份生成稳定的输入摘要。
+# LLM: 安装/配置保持原摘要；激活提交另含完整目标摘要，不保存配置正文或授权身份。
+# 函数用途: 对明确动作、插件、包、期望版本与内容身份生成稳定的输入摘要。
 def plugin_input_digest(action: str, plugin_id: str, package_sha256: str, expected_revision: int,
-                        settings_sha256: str = "") -> str:
+                        settings_sha256: str = "", *, activation_sha256: str = "") -> str:
     value = {
         "action": action,
         "plugin_id": plugin_id,
@@ -221,6 +259,8 @@ def plugin_input_digest(action: str, plugin_id: str, package_sha256: str, expect
     }
     if action == "configure":
         value["settings_sha256"] = settings_sha256
+    if action in {"prepare", "activate", "revoke"}:
+        value["activation_sha256"] = activation_sha256
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()

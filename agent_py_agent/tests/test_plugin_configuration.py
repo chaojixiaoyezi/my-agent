@@ -69,6 +69,8 @@ def test_v1_is_read_only_until_atomic_migration_with_configuration(tmp_path):
     del old["migration"]
     for row in old["installations"]:
         del row["settings_json"], row["settings_revision"]
+        del row["activation"], row["last_commit"]["activation_sha256"]
+        row.update(enabled=False, activation_id="")
         del row["last_commit"]["action"], row["last_commit"]["settings_sha256"]
     path.write_text(json.dumps(old))
     before = path.read_bytes(), path.stat().st_mtime_ns
@@ -76,7 +78,7 @@ def test_v1_is_read_only_until_atomic_migration_with_configuration(tmp_path):
     assert (path.read_bytes(), path.stat().st_mtime_ns) == before
     store.configure(configure_request(entry))
     current = json.loads(path.read_text())
-    assert current["schema_version"] == "plugin_installations.v2"
+    assert current["schema_version"] == "plugin_installations.v3"
     assert current["migration"] == {"from_schema": "plugin_installations.v1", "source_sha256": hashlib.sha256(before[0]).hexdigest()}
     assert store.snapshot()[0].settings_json == '{"limit":3}'
 

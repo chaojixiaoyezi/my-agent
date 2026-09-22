@@ -43,7 +43,7 @@ class PluginConfigureRequest:
                                    self.expected_revision, hashlib.sha256(self.settings_json.encode()).hexdigest())
 
 
-# LLM: Store 在原锁内传当前完整记录；新请求只改停用插件，重放不写文件，相同值不制造新版本。
+# LLM: Store 在原锁内传当前完整记录；新请求只能改没有待清理激活的插件，重放不写文件，相同值不制造新版本。
 # 函数用途: 纯计算完整配置替换后的安装记录和回执，或报告跨版本、包变化和旧操作冲突。
 def prepare_configuration(request: PluginConfigureRequest,
                           entries: tuple[PluginInstallation, ...]) -> PluginMutationResult:
@@ -59,8 +59,8 @@ def prepare_configuration(request: PluginConfigureRequest,
         raise PluginInstallationError("revision_conflict", "安装版本已变化，请先读取当前状态。")
     if existing.package_sha256 != request.package_sha256:
         raise PluginInstallationError("package_conflict", "当前插件包与已见内容不同。")
-    if existing.enabled:
-        raise PluginInstallationError("plugin_enabled", "请先停用插件再修改配置。")
+    if existing.activation is not None:
+        raise PluginInstallationError("activation_unsettled", "请先停用并确认原激活清理完成，再修改配置。")
     try:
         canonical = canonical_plugin_settings(load_strict_json(request.settings_json), existing.manifest.settings_schema)
         if canonical != request.settings_json:

@@ -1,7 +1,8 @@
 # 可装卸插件与命令生命周期
 
-第 4 步 MCP 连接片已有本地实现：固定 transport、永久 stop、精确断连和同连接发布复核，见 [连接合同](MCP_TRANSPORT_LIFECYCLE.md)。
-这尚未接唯一安装表的持久激活/撤销，不代表完整装卸已验收。
+第 4 步唯一安装表 v3 已本地实现同代准备/发布/撤销 CAS，配置与新一代准备受未清理状态约束，见 [激活权威](PLUGIN_ACTIVATION.md)。
+MCP 固定 transport、永久 stop、精确断连和同连接发布复核也已有本地实现，见 [连接合同](MCP_TRANSPORT_LIFECYCLE.md)。
+原 stdio 托管、激活资源归属和 MCP 执行门尚未与持久激活接通，不代表完整装卸已验收。
 
 第 4 步本地开发补充：环境候选计划先经原 operation 领取，准备命令复用原 ProcessSessionStore；运行中复查原 claim/锁，交接后仍受宿主寿命和期限约束。
 此内部准备集成已做开发验证；完整启用、MCP 贡献发布和旧代次撤销仍待接线，不能将临时环境组件作为真实装卸验收。详见 [环境合同](PLUGIN_ENVIRONMENTS.md)。
