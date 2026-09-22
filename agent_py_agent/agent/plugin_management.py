@@ -1,9 +1,11 @@
-# LLM: 管理分路只消费宿主已认证身份、当前权限与原线程 Store；有副作用必须经过原宿主运行和工具执行链。
-# 模块用途: 组合目录、安装、配置、启停、卸载及原请求查询；不初始化完整 Agent，副作用走原管理执行器。
+# LLM: 命令分路只消费宿主已认证身份、当前权限与原线程 Store；管理和业务复用原宿主运行及工具执行链。
+# 模块用途: 组合插件目录、装卸管理、明确工具调用与原请求查询，不初始化完整 Agent 或借用聊天回合。
 
 from __future__ import annotations
 
+import json
 import re
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
@@ -17,14 +19,21 @@ from .plugin_disable_tool import PLUGIN_DISABLE_TOOL, PluginDisableTool
 from .plugin_enable_tool import PLUGIN_ENABLE_TOOL, PluginEnableTool
 from .plugin_install_store import PluginInstallStore
 from .plugin_install_tool import PLUGIN_INSTALL_TOOL, PluginInstallTool
+from .plugin_invocation import (
+    PluginInvocation,
+    execute_plugin_invocation,
+    plugin_invocation_context,
+)
 from .plugin_removal import PLUGIN_REMOVE_TOOL
 from .plugin_remove_tool import PluginRemoveTool
+from .plugin_runtime import plugin_tool_name
 from .runtime_db.host_command_execution import execute_host_command, query_host_command
 from .runtime_db.host_commands import HostCommandIdentity, HostCommandRequest
 from .runtime_db.managed_operation_store import ManagedOperationStore
 from .runtime_db.operations import RuntimeConflictError
 from .runtime_db.repository import RuntimeRepository
 from .runtime_db.schema import runtime_db_path
+from .tooling.cancellation import CancellationToken
 from .tooling.executor import ToolExecutorRequest
 from .tooling.models import ToolAvailability, ToolExposure, ToolRuntime, ToolRuntimeSnapshot
 from .tooling.runtime_contracts import ToolCall, tool_arguments_hash
@@ -35,7 +44,7 @@ _MANAGEMENT_TOOLS = {"install": PLUGIN_INSTALL_TOOL, "configure": PLUGIN_CONFIGU
 
 
 # LLM: 所有字段来自宿主，布尔授权不是客户端参数；ThreadStore 是原会话权威，目录投影不能提供执行身份。
-# 类用途: 给插件装卸、配置和启停传所需身份、权限及存储依赖，不携带完整 Agent。
+# 类用途: 给插件命令传必要身份、权限和存储依赖，业务调用不借用管理员资格或聊天审批缓存。
 @dataclass(frozen=True)
 class PluginManagementContext:
     owner: OwnerHomeResult
@@ -52,22 +61,28 @@ class PluginManagementContext:
     disable_allowed: bool = True
     enable_allowed: bool = True
     remove_allowed: bool = True
+    business_allowed: bool = True
+    disabled_tools: frozenset[str] = frozenset()
+    approval_mode: str = "ask"
 
 
-# LLM: 冷入口与完整代理共用 owner 权限裁决；装卸和启停分别受禁用策略约束，查询仍绑定原身份。
-# 函数用途: 从当前私有配置和原线程路径组装管理依赖，不创建 owner、线程或完整 Agent。
+# LLM: 冷入口与完整代理共用 owner 权限和审批配置；管理/业务分别受工具禁用约束，查询仍绑定原身份。
+# 函数用途: 从当前私有配置和原线程路径组装命令依赖，不创建 owner、线程或完整 Agent。
 def plugin_management_context(
     owner: OwnerHomeResult, home: object, config: object, threads: object, *,
     actor_id: str, channel: str, conversation_id: str, is_admin: bool,
 ) -> PluginManagementContext:
-    from .user_space.approval_mode import permission_config
+    from .user_space.approval_mode import permission_config, read_approval_mode
     from .user_space.owner_access import resolve_owner_scope_and_access
     from .user_space.owner_policy import resolve_effective_owner_policy
 
     policy = resolve_effective_owner_policy(home)
     allowed = not policy.load_errors and bool(config.enable_tools)
+    approval_mode = "ask"
     try:
         effective = permission_config(config, home)
+        if hasattr(home, "owner_tool_policy_json"):
+            approval_mode = read_approval_mode(home)
     except (OSError, ValueError):
         effective, allowed = config, False
     scope, access = resolve_owner_scope_and_access(home, effective, policy)
@@ -86,13 +101,15 @@ def plugin_management_context(
                                    allowed and PLUGIN_CONFIGURE_TOOL not in policy.disabled_tools,
                                    allowed and PLUGIN_DISABLE_TOOL not in policy.disabled_tools,
                                    allowed and PLUGIN_ENABLE_TOOL not in policy.disabled_tools,
-                                   allowed and PLUGIN_REMOVE_TOOL not in policy.disabled_tools)
+                                   allowed and PLUGIN_REMOVE_TOOL not in policy.disabled_tools,
+                                   business_allowed=allowed, disabled_tools=frozenset(policy.disabled_tools),
+                                   approval_mode=approval_mode)
 
 
 # LLM: 一个 owner 只有一个安装事实 Store 和原 runtime.db；实例本身无后台任务、可变注册表或业务历史。
-# 类用途: 承接显式插件命令，安装默认停用，启用先验完整服务，撤销清理精确资源，查询只读原结果。
+# 类用途: 承接插件管理和业务命令，安装默认停用，调用遵守原审批，撤销清理精确资源，查询只读原结果。
 class PluginManagement:
-    # LLM: 构造不创建目录或线程；后续写入前仍须显式检查管理员与开关。
+    # LLM: 构造不创建目录或线程；管理写入检查管理员，业务另检查工具策略，均须遵守插件开关。
     # 函数用途: 保存这次已鉴权入口的必要依赖。
     def __init__(self, context: PluginManagementContext) -> None:
         self.context = context
@@ -120,14 +137,16 @@ class PluginManagement:
                                              enabled=row.enabled, activation_id=row.activation_id)
                                      for row in entries))
 
-    # LLM: 状态查询和已接受请求先读原账，不先打开来源；参数错误与帮助沿公共解析，不进入普通聊天。
-    # 函数用途: 执行一次明确管理命令，停用也走原请求链，并附同一权威的当前目录。
-    def command(self, text: str, *, revision: str, request_id: str) -> dict:
+    # LLM: 已接受请求先读原账，不先读来源或新插件；帮助沿公共解析，审批消费者与取消信号由宿主独立绑定。
+    # 函数用途: 分派明确的管理或业务命令，不进入聊天；业务批准只恢复同一原调用。
+    def command(self, text: str, *, revision: str, request_id: str,
+                request_permission: Callable | None = None,
+                cancellation_token: CancellationToken | None = None) -> dict:
         namespace = plugin_namespace(text)
         if namespace is None:
             raise ValueError("不是插件命令")
         if namespace.plugin_id:
-            return execute_plugin_command(self.catalog(), text, revision=revision)
+            return self._reply(self._business(text, revision, request_id, request_permission, cancellation_token), request_id)
         static = plugin_command_response(text)
         if static.get("reason") not in {None, "not_implemented"}:
             return self._reply(static)
@@ -154,6 +173,67 @@ class PluginManagement:
                 f"{plugin.plugin_id} {plugin.package_version}（{'启用' if plugin.enabled else '停用'}）\n{plugin.summary}"
                 if plugin else "未找到该插件。")})
         return execute_plugin_command(catalog, text, revision=revision)
+
+    # LLM: 先按原身份查冻结请求，再解释当前目录；旧终态不启动新连接，原 pending 只能在原选择仍成立时执行。
+    # 函数用途: 让普通授权用户明确调用插件工具，参数与宿主上下文分别登记，管理权限不授予业务执行权。
+    def _business(self, text: str, revision: str, request_id: str,
+                  request_permission: Callable | None, cancellation_token: CancellationToken | None) -> dict:
+        context_digest = plugin_invocation_context(self.context, text, revision)
+        thread = self._thread(create=False)
+        path = runtime_db_path(self.context.owner.home_dir)
+        binding = repo = None
+        if request_id and thread is not None and path.is_file():
+            _validate_request_id(request_id)
+            repo = RuntimeRepository(path)
+            binding = repo.find_host_command(self._identity(thread.thread_id, request_id))
+        selection = None
+        if binding is not None:
+            request = replace(binding.request, context_digest=context_digest)
+            repo.find_host_command(request)
+            if not self.context.enabled:
+                return query_host_command(repo, request)
+        else:
+            selection = self._business_selection(text, revision)
+            if isinstance(selection, dict):
+                return selection
+            _validate_request_id(request_id)
+            thread = self._thread(create=True)
+            repo = RuntimeRepository(path)
+            request = replace(self._request(thread.thread_id, request_id, selection.tool_name, selection.arguments),
+                              context_digest=context_digest)
+
+        # LLM: 新请求持原不可变安装，恢复只核对原目录；拒绝结果不伪造选择或把新安装塞入旧请求。
+        # 函数用途: 在唯一 HostCommand 执行区间内交付本次确定的插件和参数。
+        def select():
+            selected = selection if selection is not None else self._business_selection(text, revision)
+            if isinstance(selected, dict):
+                raise RuntimeConflictError("原插件命令选择已不可执行")
+            return selected
+
+        return execute_plugin_invocation(self.context, repo, request, select,
+                                         request_permission=request_permission, cancellation_token=cancellation_token)
+
+    # LLM: 同一快照绑定安装、目录和公共参数；仅 kind=tool 可调用本包目标，包自述不降低宿主权限。
+    # 函数用途: 在建立运行和连接前处理静态帮助、目录过期、停用与策略拒绝，并取实际工具参数。
+    def _business_selection(self, text: str, revision: str) -> PluginInvocation | dict:
+        entries = self.installations.snapshot()
+        catalog = self._catalog(entries)
+        static = execute_plugin_command(catalog, text, revision=revision)
+        if static.get("reason") != "not_implemented":
+            return static
+        if not self.context.enabled:
+            return {"ok": False, "state": "rejected", "error_code": "PLUGIN_DISABLED"}
+        parsed = parse_plugin_command(text, plugins=catalog.plugins, management_actions=catalog.management_actions)
+        if not parsed.plugin.enabled:
+            return {"ok": False, "state": "rejected", "error_code": "PLUGIN_NOT_ENABLED"}
+        if parsed.action.kind != "tool" or not parsed.action.available:
+            return static
+        name = plugin_tool_name(parsed.plugin.plugin_id, parsed.action.target)
+        if not self.context.business_allowed or name in self.context.disabled_tools:
+            return {"ok": False, "state": "rejected", "error_code": "TOOL_DISABLED"}
+        entry = next(row for row in entries if row.manifest.plugin_id == parsed.plugin.plugin_id)
+        arguments = json.loads(json.dumps(dict(parsed.arguments.values), ensure_ascii=False, allow_nan=False))
+        return PluginInvocation(entry, name, arguments)
 
     # LLM: 明确动作共用原请求链；认证和开关先于新写入，旧请求先读账，不得将旧停用重放到新激活。
     # 函数用途: 提交管理请求，首次必须携带已见目录版本，重送复用原操作。
@@ -189,20 +269,25 @@ class PluginManagement:
         cleanup = consume_plugin_cleanup(self.context.owner, repo, request)
         return {**result, "cleanup_consumption": cleanup} if cleanup else result
 
-    # LLM: 查询仍要求当前管理员身份且绑定原操作者；不创建线程、数据库、attempt 或对账工作。
-    # 函数用途: 按稳定请求编号读取本会话的安装结果。
+    # LLM: 查询绑定原操作者，管理结果另要求当前管理员；业务用户只能读取自己原身份的请求，不创建或补齐执行。
+    # 函数用途: 按稳定请求编号读取本会话的插件管理或调用结果。
     def _query(self, request_id: str) -> dict:
         _validate_request_id(request_id)
-        if not self.context.is_admin:
-            return {"ok": False, "state": "rejected", "error_code": "PLUGIN_PERMISSION_DENIED"}
         thread = self._thread(create=False)
         path = runtime_db_path(self.context.owner.home_dir)
         if thread is None or not path.is_file():
+            if not self.context.is_admin:
+                return {"ok": False, "state": "rejected", "error_code": "PLUGIN_PERMISSION_DENIED"}
             return {"ok": False, "state": "not_found"}
-        return query_host_command(RuntimeRepository(path, read_only=True), self._identity(thread.thread_id, request_id))
+        repo = RuntimeRepository(path, read_only=True)
+        identity = self._identity(thread.thread_id, request_id)
+        binding = repo.find_host_command(identity)
+        if not self.context.is_admin and (binding is None or binding.request.command_name in _MANAGEMENT_TOOLS.values()):
+            return {"ok": False, "state": "rejected", "error_code": "PLUGIN_PERMISSION_DENIED"}
+        return query_host_command(repo, identity)
 
     # LLM: canonical thread 只从原会话 Store 取得；身份由宿主绑定，输入正文不能提供 thread/owner。
-    # 函数用途: 查原线程，首次获授权安装才允许经原入口创建线程。
+    # 函数用途: 查原线程，首次获授权命令才允许经原入口创建线程。
     def _thread(self, *, create: bool):
         context = self.context
         fields = {"channel": context.channel, "channel_conversation_id": context.conversation_id,
@@ -213,7 +298,7 @@ class PluginManagement:
         if thread is None and create:
             thread = context.threads.get_or_create({
                 **fields, "canonical_user_id": context.actor_id, "owner_id": context.owner.owner_id,
-                "owner_home": str(context.owner.home_dir), "title": "插件管理",
+                "owner_home": str(context.owner.home_dir), "title": "插件命令",
             })
         if thread is not None and thread.owner_id != context.owner.owner_id:
             raise RuntimeConflictError("原会话不属于当前 owner")
@@ -295,13 +380,16 @@ class PluginManagement:
                 PLUGIN_ENABLE_TOOL: self.context.enable_allowed,
                 PLUGIN_REMOVE_TOOL: self.context.remove_allowed}.get(tool_name, False)
 
-    # LLM: 展示只读结构化结果；卸载与停用分别投影，目录刷新/消费失败不能抹掉原操作，未释放明确告知。
-    # 函数用途: 为 TUI/HTTP 区分管理结果、待释放与证据消费，并提供原请求查询编号。
+    # LLM: 展示只读原结构化结果；业务正文仅展示，不能改变状态；目录刷新或清理失败不能抹掉原操作。
+    # 函数用途: 展示管理或调用结果、未确认清理和原查询编号，供 TUI/HTTP 使用。
     def _reply(self, payload: dict, request_id: str = "") -> dict:
         payload = dict(payload)
         envelope = payload.pop("result", {})
         if envelope:
             payload["details"] = next((envelope[key] for key in _MANAGEMENT_TOOLS.values() if key in envelope), {})
+        business = bool(payload.get("tool_name")) and payload["tool_name"] not in _MANAGEMENT_TOOLS.values()
+        if business:
+            payload["details"] = envelope
         state = payload.get("state", "")
         messages = {"succeeded": "插件管理请求已完成。", "failed": "插件管理请求失败，请核对原因。",
                     "cancelled": "插件管理请求已取消，请查看原请求结果。", "rejected": "插件管理请求被拒绝，没有开始执行。",
@@ -312,6 +400,7 @@ class PluginManagement:
         explanations = {
             "PLUGIN_PERMISSION_DENIED": "当前身份没有插件管理权限。",
             "PLUGIN_DISABLED": "插件管理已关闭，原请求结果仍可查询。",
+            "PLUGIN_NOT_ENABLED": "插件尚未启用，请先启用后再调用。",
             "PLUGIN_CATALOG_STALE": "目录已经变化或尚未读取，请重新查看帮助后确认输入。",
             "INVALID_COMMAND_ARGUMENTS": "插件命令参数或请求编号无效。",
             "TOOL_DISABLED": "当前用户策略禁止此插件管理操作。",
@@ -329,6 +418,14 @@ class PluginManagement:
             message += "资源或包回收尚未确认；重送原请求可继续收尾。"
         if state in {"succeeded", "failed", "cancelled"} and payload.get("finalization_pending"):
             message = "插件管理操作已有结果，运行收尾尚未确认。"
+        if business:
+            message = {"succeeded": "插件调用已完成。", "failed": "插件调用失败，请核对原结果。",
+                       "approval_required": "插件调用需要审批，尚未执行。",
+                       "outcome_unknown": "插件调用结果尚未确认，请查询原请求。"}.get(state, message)
+            if payload.get("output"):
+                message += "\n" + payload["output"]
+        if payload.get("connection_cleanup", {}).get("confirmed") is False:
+            message += "\n本次插件连接退出尚未确认；原调用结果保持，请核对资源。"
         result.setdefault("message", explanations.get(payload.get("error_code"), message))
         if request_id:
             result["message"] += f"\n查询：/plugins status {request_id}"

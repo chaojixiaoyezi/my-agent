@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import multiprocessing
 import sqlite3
@@ -9,7 +10,7 @@ from dataclasses import asdict, replace
 
 import pytest
 
-from agent_py_agent.agent.runtime_db.host_commands import HostCommandRequest
+from agent_py_agent.agent.runtime_db.host_commands import HostCommandIdentity, HostCommandRequest
 from agent_py_agent.agent.runtime_db.repository import RuntimeConflictError, RuntimeRepository
 
 
@@ -44,10 +45,10 @@ def test_register_pending_chain_and_read_from_fresh_repository(repo, command_req
         assert conn.execute("SELECT COUNT(*) FROM tool_operations").fetchone()[0] == 0
 
 
-@pytest.mark.parametrize("field", ["command_name", "input_digest"])
+@pytest.mark.parametrize("field", ["command_name", "input_digest", "context_digest"])
 def test_same_message_different_input_conflicts_without_new_chain(repo, command_request, field):
     first = repo.register_host_command(command_request)
-    changed = replace(command_request, **{field: "b" * 64 if field == "input_digest" else "remove"})
+    changed = replace(command_request, **{field: "remove" if field == "command_name" else "b" * 64})
     assert changed.operation_id == command_request.operation_id
     for operation in (repo.find_host_command, repo.register_host_command):
         with pytest.raises(RuntimeConflictError):
@@ -70,10 +71,56 @@ def test_distinct_authenticated_scope_never_replays_other_identity(repo, command
 @pytest.mark.parametrize("field,value", [
     ("request_id", ""), ("owner_id", " owner"), ("actor_id", "a\x00b"),
     ("channel", "a" * 1025), ("thread_id", "\ud800"), ("input_digest", "x" * 64),
+    ("context_digest", ""), ("context_digest", "A" * 64),
 ])
 def test_invalid_identity_is_rejected(command_request, field, value):
     with pytest.raises(ValueError):
         replace(command_request, **{field: value})
+
+
+def test_request_v2_keeps_original_identity_and_separate_context(repo, command_request):
+    request = replace(command_request, context_digest="b" * 64)
+    original_scope = ["host_command_request.v1", request.owner_id, request.actor_id,
+                      request.channel, request.thread_id, request.request_id]
+    digest = hashlib.sha256(json.dumps(original_scope, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+    assert request.operation_id == "host-command:" + digest
+    binding = repo.register_host_command(request)
+    payload = json.loads(repo.get_task_run(binding.task_run_id)["metadata_json"])["host_command"]
+    assert payload["schema_version"] == "host_command_request.v2"
+    assert payload["context_digest"] != payload["input_digest"]
+    assert repo.find_host_command_by_operation(owner_id=request.owner_id, operation_id=request.operation_id).request == request
+
+
+@pytest.mark.parametrize("damage", [None, "extra", "v1_context", "v2_missing", "future"])
+def test_explicit_legacy_read_is_readonly_and_malformed_versions_are_rejected(repo, command_request, damage):
+    binding = repo.register_host_command(command_request)
+    payload = command_request.to_payload()
+    payload["schema_version"] = "host_command_request.v1"
+    payload.pop("context_digest")
+    if damage == "extra":
+        payload["other"] = "unexpected"
+    elif damage == "v1_context":
+        payload["context_digest"] = "b" * 64
+    elif damage == "v2_missing":
+        payload["schema_version"] = "host_command_request.v2"
+    elif damage == "future":
+        payload["schema_version"] = "host_command_request.v99"
+    encoded = json.dumps({"host_command": payload})
+    with repo.transaction() as conn:
+        conn.execute("UPDATE task_runs SET metadata_json=? WHERE task_run_id=?", (encoded, binding.task_run_id))
+    identity = HostCommandIdentity(command_request.owner_id, command_request.actor_id, command_request.channel,
+                                   command_request.thread_id, command_request.request_id)
+    if damage:
+        with pytest.raises(RuntimeConflictError):
+            repo.find_host_command(identity)
+        with pytest.raises(RuntimeConflictError):
+            repo.find_host_command_by_operation(owner_id=identity.owner_id, operation_id=identity.operation_id)
+    else:
+        assert repo.find_host_command(identity).request == command_request
+        assert repo.find_host_command_by_operation(owner_id=identity.owner_id, operation_id=identity.operation_id).request == command_request
+        with pytest.raises(RuntimeConflictError):
+            repo.register_host_command(replace(command_request, context_digest="b" * 64))
+    assert repo.get_task_run(binding.task_run_id)["metadata_json"] == encoded
 
 
 # LLM: 子进程只打开测试临时库并调用生产登记入口；不会运行代理、模型或真实工具。

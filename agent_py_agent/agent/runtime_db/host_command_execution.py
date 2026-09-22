@@ -14,6 +14,7 @@ from ..tooling.models import ToolHandlerOutcome
 from ..tooling.runtime_contracts import tool_arguments_hash
 from ..tooling.tool_operation_coordinator import replay_completed_tool_operation
 from .executor_liveness import attempt_executor, exited_attempt_facts, mark_exited_attempt_unknown
+from .host_command_approval import resolve_host_command_approval
 from .host_commands import HostCommandBinding, HostCommandIdentity, HostCommandRequest
 from .managed_operation_store import ManagedOperationStore
 from .operations import RuntimeConflictError
@@ -23,11 +24,12 @@ _UNSTARTED_SCHEMA = "host_command_not_started.v1"
 _LOGGER = logging.getLogger(__name__)
 
 
-# LLM: 这里只接受已授权请求和按绑定组装的原 ToolExecutorRequest；执行前核对唯一输入，绝不换代或自动重试 handler。
-# 函数用途: 为显式命令领取原 pending 的执行权，执行一次并读取原结果。
+# LLM: 只接受已授权请求和原 ToolExecutorRequest；审批等待保留同一执行区间，批准只恢复尚未执行的原 call。
+# 函数用途: 领取原 pending、经原审批/工具链执行一次，再从原账读取结果，不换代或重跑 handler。
 def execute_host_command(
     repo: RuntimeRepository, request: HostCommandRequest,
     prepare: Callable[[HostCommandBinding], ToolExecutorRequest],
+    *, request_permission: Callable | None = None,
 ) -> dict:
     binding = repo.register_host_command(request)
     try:
@@ -61,6 +63,8 @@ def execute_host_command(
                                trusted_run_context=trusted, pre_handler_gate=gate, require_model_visibility=False)
             entered_executor = True
             execution = ToolExecutor().execute(prepared)
+            execution = resolve_host_command_approval(prepared, execution, request_id=request.request_id,
+                                                       consumer=request_permission)
             if _operation(repo, binding) is None and not execution.result.handler_executed:
                 _settle_unstarted(repo, binding, execution.result.reported_error_code,
                                   state="approval_required" if execution.decision.status == "ask" else "rejected")
@@ -159,8 +163,8 @@ def _close_task_run(repo: RuntimeRepository, binding: HostCommandBinding) -> Non
     )
 
 
-# LLM: 查询完全只读；scope 来自宿主，缺失不补建，pending/running/UNKNOWN 不领取执行或对账权。
-# 函数用途: 重送、断连后或显式状态命令查回原执行事实。
+# LLM: 查询完全只读；原正文和工具名只投影原账，UNKNOWN 不暴露未经确认的结果，也不领取执行或对账权。
+# 函数用途: 重送、断连后或显式状态命令查回原执行事实及可重放的工具输出。
 def query_host_command(repo: RuntimeRepository, identity: HostCommandIdentity) -> dict:
     binding = repo.find_host_command(identity)
     if binding is None:
@@ -168,6 +172,7 @@ def query_host_command(repo: RuntimeRepository, identity: HostCommandIdentity) -
     record = _operation(repo, binding)
     attempt = repo.get_attempt(binding.attempt_id)
     common = {"request_id": identity.request_id, "operation_id": identity.operation_id,
+              "tool_name": binding.request.command_name,
               "attempt_status": attempt["status"] if attempt is not None else "unknown"}
     if record is not None:
         if (record.status == "running" and attempt is not None and attempt["status"] == "running"
@@ -177,7 +182,7 @@ def query_host_command(repo: RuntimeRepository, identity: HostCommandIdentity) -
         if result.error_code == "TOOL_OPERATION_OUTCOME_UNKNOWN":
             return {**common, "state": "outcome_unknown", "ok": False}
         return {**common, "state": record.status, "ok": result.ok, "error_code": result.error_code,
-                "result": result.result_envelope,
+                "result": result.result_envelope, "output": result.output,
                 "finalization_pending": (attempt is None or attempt["status"] not in {"done", "failed", "cancelled"}
                                          or not repo.get_task_run(binding.task_run_id)["closed_at"])}
     rejection = _unstarted_receipt(repo, binding)

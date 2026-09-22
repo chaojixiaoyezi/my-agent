@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import os
-from dataclasses import replace
+from dataclasses import asdict, replace
 
 from .common.nofollow_fs import open_directory_beneath
 from .common.strict_json import load_strict_json
@@ -16,6 +16,7 @@ from .tooling.input_schema import canonicalize_tool_input_schema
 from .tooling.mcp_client import MCPError, MCPServerConfig, MCPStdioClient
 from .tooling.mcp_registration import MCPProxyTool, build_proxy_tool, sanitize_name_component
 from .tooling.models import ResourceScopePolicy, ToolAvailability
+from .tooling.process_session_store import ProcessSessionStore, process_session_store_root
 
 
 # LLM: 展示名由完整大小写敏感身份派生，截断只作用于可读部分；发布还必须检测实际名称冲突，不能覆盖核心工具。
@@ -66,6 +67,22 @@ class PluginMCPClient(MCPStdioClient):
             args=["-I", "-m", installation.manifest.entry_module], cwd=str(environment),
             env={"MY_AGENT_PLUGIN_SETTINGS": settings}, catalog_category="plugins",
         ), activation=self.activation_ref)
+
+    # LLM: 原 Store 同代资源是唯一事实源；其他运行实例可共存，未知和未确认停止不能靠新客户端绕过。
+    # 函数用途: 在模型或显式命令建立业务连接前，核对这个激活留下的资源清理结果。
+    def require_settled_previous_resources(self) -> None:
+        owner = self.activation_ref.owner()
+        store = ProcessSessionStore(process_session_store_root(owner.home_dir, owner.home_dir))
+        with store.transaction() as transaction:
+            records, errors = transaction.list_records()
+            if errors:
+                raise ValueError("插件原资源目录不可读")
+            for record in records:
+                if record.get("activation_scope") != asdict(self.activation_ref.scope):
+                    continue
+                if record["status"] == "unknown" or (record["stop_requested"]
+                        and ((record.get("termination") or {}).get("cleanup") or {}).get("confirmed") is not True):
+                    raise ValueError("插件原资源退出尚未确认")
 
     # LLM: 完整分页来自固定 transport；名称、说明和规范 schema 全部相符才构造代理，任一坏项拒绝整包而非部分发布。
     # 函数用途: 验证当前服务确实提供所安装的工具，并沿原 MCP 代理生成受控能力。

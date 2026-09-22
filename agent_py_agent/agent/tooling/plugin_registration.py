@@ -4,12 +4,10 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import asdict
 
 from ..plugin_install_store import PluginInstallStore
 from ..plugin_runtime import PluginMCPClient, PluginProxyTool
 from .mcp_client import MCPError
-from .process_session_store import ProcessSessionStore, process_session_store_root
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +40,7 @@ def synchronize_plugin_clients(registry) -> None:
         client = None
         try:
             client = PluginMCPClient(owner, installation)
-            _require_settled_previous_resources(client)
+            client.require_settled_previous_resources()
             registry._mcp_clients.append(client)
             if registry._mcp_closed.is_set():
                 client.stop()
@@ -50,23 +48,6 @@ def synchronize_plugin_clients(registry) -> None:
             if client is not None:
                 client.stop()
             logger.warning("插件业务连接暂不可创建：%s", type(exc).__name__)
-
-
-# LLM: 只核对原 Store 的同代结构化记录；运行中的其他实例允许共存，未知和未确认停止不能靠新对象绕过。
-# 函数用途: 新注册表接入已有激活时检查持久资源，不按进程名称或目录缺失猜清理成功。
-def _require_settled_previous_resources(client: PluginMCPClient) -> None:
-    owner = client.activation_ref.owner()
-    store = ProcessSessionStore(process_session_store_root(owner.home_dir, owner.home_dir))
-    with store.transaction() as transaction:
-        records, errors = transaction.list_records()
-        if errors:
-            raise ValueError("插件原资源目录不可读")
-        for record in records:
-            if record.get("activation_scope") != asdict(client.activation_ref.scope):
-                continue
-            if record["status"] == "unknown" or (record["stop_requested"]
-                    and ((record.get("termination") or {}).get("cleanup") or {}).get("confirmed") is not True):
-                raise ValueError("插件原资源退出尚未确认")
 
 
 # LLM: 完整目录验收与名称冲突先于任何内存发布，既有普通 MCP/核心工具不能被插件覆盖。

@@ -14,7 +14,9 @@ from ..common.strict_json import load_strict_json
 from .operations import RuntimeConflictError
 from .run_creation import RunCreation, create_run_chain
 
-_SCHEMA = "host_command_request.v1"
+_IDENTITY_SCHEMA = "host_command_request.v1"
+_SCHEMA = "host_command_request.v2"
+EMPTY_CONTEXT_DIGEST = "0" * 64
 _EVENT = "host_command.registered"
 
 
@@ -37,30 +39,31 @@ class HostCommandIdentity:
             if len(value.encode("utf-8")) > 1024:
                 raise ValueError(f"宿主命令字段过长: {name}")
 
-    # LLM: 不含命令与参数，保证同一消息改变输入仍命中原绑定并拒绝，而不是生成新操作。
+    # LLM: 请求版本演进不改原 v1 身份摘要；不含命令或参数，同编号换输入仍命中原绑定并拒绝。
     # 函数用途: 生成已鉴权请求范围的稳定摘要，供原事件唯一索引使用。
     @property
     def operation_id(self) -> str:
-        scope = [_SCHEMA, self.owner_id, self.actor_id, self.channel, self.thread_id, self.request_id]
+        scope = [_IDENTITY_SCHEMA, self.owner_id, self.actor_id, self.channel, self.thread_id, self.request_id]
         digest = hashlib.sha256(json.dumps(scope, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
         return f"host-command:{digest}"
 
 
-# LLM: 提交在可信范围上附加命令和完整规范输入摘要；与纯查询共用身份，不改变原 v1 持久字段或 operation ID。
-# 类用途: 固定一次显式管理命令的输入，重送改变参数时拒绝。
+# LLM: v2 将真实工具参数和宿主选择分别摘要，索引身份不变；v1 只显式解码为空上下文，不推导新的执行选择。
+# 类用途: 固定显式命令的参数及所选环境，重送改变任一输入时拒绝。
 @dataclass(frozen=True)
 class HostCommandRequest(HostCommandIdentity):
     command_name: str
     input_digest: str
+    context_digest: str = EMPTY_CONTEXT_DIGEST
 
-    # LLM: 基类检查全部字符串字段；摘要必须规范，不能用展示正文代替参数事实。
+    # LLM: 基类检查全部字符串字段；两个摘要必须规范，宿主上下文不可进入实际工具参数或替代权限检查。
     # 函数用途: 在登记前拒绝不完整或格式错误的输入摘要。
     def __post_init__(self) -> None:
         super().__post_init__()
-        if re.fullmatch(r"[0-9a-f]{64}", self.input_digest) is None:
+        if any(re.fullmatch(r"[0-9a-f]{64}", value) is None for value in (self.input_digest, self.context_digest)):
             raise ValueError("宿主命令输入摘要无效")
 
-    # LLM: 仅保存结构化身份和输入摘要，不复制完整命令正文、来源文件或凭据。
+    # LLM: v2 仅保存结构化身份及两类摘要，不复制完整命令正文、来源文件或凭据；身份索引仍沿原算法。
     # 函数用途: 生成 TaskRun 中唯一的冻结请求记录。
     def to_payload(self) -> dict:
         return {"schema_version": _SCHEMA, **asdict(self)}
@@ -146,14 +149,26 @@ def read_host_command(
 def _read_frozen_request(metadata: object, requested: HostCommandIdentity) -> HostCommandRequest:
     try:
         raw = metadata["host_command"]
-        if raw["schema_version"] != _SCHEMA:
-            raise ValueError("未知请求版本")
-        frozen = HostCommandRequest(**{key: value for key, value in raw.items() if key != "schema_version"})
+        frozen = _decode_request(raw)
         if any(getattr(frozen, key) != value for key, value in asdict(requested).items()):
             raise ValueError("输入或身份冲突")
     except (TypeError, KeyError, AttributeError, ValueError) as exc:
         raise RuntimeConflictError("宿主命令标识已绑定不同输入或请求记录损坏") from exc
     return frozen
+
+
+# LLM: v1 只能补明确无上下文的零摘要，不能接受缺字段 v2 或未知字段；旧记录只读，不写迁移或改变原身份。
+# 函数用途: 严格读取同一请求记录的两个明确版本，供身份查询和原操作反查共用。
+def _decode_request(raw: object) -> HostCommandRequest:
+    if not isinstance(raw, dict):
+        raise ValueError("宿主请求不是对象")
+    keys = {"schema_version", "owner_id", "actor_id", "channel", "thread_id", "request_id",
+            "command_name", "input_digest"}
+    if raw.get("schema_version") == _IDENTITY_SCHEMA and set(raw) == keys:
+        return HostCommandRequest(**{key: value for key, value in raw.items() if key != "schema_version"})
+    if raw.get("schema_version") != _SCHEMA or set(raw) != keys | {"context_digest"}:
+        raise ValueError("宿主请求版本或字段无效")
+    return HostCommandRequest(**{key: value for key, value in raw.items() if key != "schema_version"})
 
 
 # LLM: operation_id 只接受宿主已保存引用；反查仍核对可信 owner、原请求摘要及完整首次运行链，不跟随 current attempt。
@@ -171,9 +186,7 @@ def read_host_command_by_operation(
     try:
         metadata = load_strict_json(row["metadata_json"])
         raw = metadata["host_command"]
-        if raw["schema_version"] != _SCHEMA:
-            raise ValueError("未知请求版本")
-        frozen = HostCommandRequest(**{key: value for key, value in raw.items() if key != "schema_version"})
+        frozen = _decode_request(raw)
         if frozen.owner_id != owner_id or frozen.operation_id != operation_id:
             raise ValueError("宿主命令归属不符")
     except (TypeError, KeyError, ValueError, RecursionError) as exc:

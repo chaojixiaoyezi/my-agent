@@ -67,11 +67,15 @@ UNKNOWN 不因当前插件缺失而变成功，也不重跑卸载。用户工作
 统一入口仍为 `PluginManagement.command`。动作只指向本包声明工具，公共解析的规范参数名转成 JSON，
 再交原工具 schema 验证；不猜别名或嵌套对象，不把管理的 revision/workspace 字段混入 MCP 业务参数。
 固定原 owner/thread/request、run/attempt/operation、activation、schema 和 handler；旧请求先读原操作，不能换新连接重跑。
-原 HostCommand 遇 ask 当前立即收口为未启动，后续需在同一执行器区间复用原审批请求、决定和 approved binding，
-真正批准后才执行同一请求。现有同步插件 HTTP 与 TUI 命令尚无审批运输，须接原 StreamApproval/permission bridge，
+原 HostCommand 现已在同一执行器区间复用原审批请求、决定和 approved binding，真正批准后才执行同一请求。
+该业务入口已本地实现；同步插件 HTTP 与 TUI 命令尚无交互审批运输，须接原 StreamApproval/permission bridge，
 等待在 UI 线程外，并持有命令自己的请求生命周期；断连或超时只查询原编号，不自动重发或借用聊天回合。
 显式 slash 不是批准；无消费者、拒绝、取消都不得执行。原会话批准缓存未绑定 activation，首片不能继承旧代批准。
-审批后仍须核验固定激活和原执行权，撤销不能被迟到批准复活。以上属于下一片待实施，不能算当前验收完成。
+审批后仍须核验固定激活和原执行权，撤销不能被迟到批准复活。无消费者时仍明确未执行，不以 slash 自动批准。
+每次明确调用建立原 MCP 客户端并完整验证声明，调用后只关闭本次连接；模型 Registry 和业务入口共用旧资源检查。
+握手、发现和执行均读取本命令取消 token；业务结果由原操作账保存，连接退出未确认单独报告，不能翻转原调用结果。
+普通授权用户可以调用与查询自己的业务请求；安装、配置、启停及卸载继续要求管理员，跨操作者或管理结果不向其开放。
+当前是本地组件实现，不是完整实际 TUI 验收；交互审批运输仍属于下一片。
 
 ## 管理停用的组合边界
 

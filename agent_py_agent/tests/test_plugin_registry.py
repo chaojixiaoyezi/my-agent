@@ -27,7 +27,7 @@ def test_close_collects_client_registered_after_first_close_snapshot(tmp_path, m
     view = registry.with_access_policy(access_mode="full-access", path_access_mode="full", owner_scope_root="")
     entered, release, created = threading.Event(), threading.Event(), []
     original = PluginMCPClient.__init__
-    resources = plugin_registration._require_settled_previous_resources
+    resources = PluginMCPClient.require_settled_previous_resources
 
     def gated_constructor(self, *args, **kwargs):
         original(self, *args, **kwargs)
@@ -43,7 +43,7 @@ def test_close_collects_client_registered_after_first_close_snapshot(tmp_path, m
             assert release.wait(10)
 
     monkeypatch.setattr(PluginMCPClient, "__init__", gated_constructor)
-    monkeypatch.setattr(plugin_registration, "_require_settled_previous_resources", gated_resources)
+    monkeypatch.setattr(PluginMCPClient, "require_settled_previous_resources", gated_resources)
     with ThreadPoolExecutor(max_workers=2) as pool:
         preparing = pool.submit(view.prepare_for_run)
         assert entered.wait(5)
