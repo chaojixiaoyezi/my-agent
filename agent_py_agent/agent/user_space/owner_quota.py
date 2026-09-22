@@ -1,3 +1,5 @@
+# LLM: owner 配额继续使用原文件和锁序；显式非阻塞准入只用于有期限管理，默认工具写入保持等待语义。
+# 模块用途: 在同一用户的文件写入前核对空间，避免插件准备和其它工具各自计算配额。
 from __future__ import annotations
 
 import os
@@ -101,6 +103,8 @@ class OwnerQuotaAdmission:
         return projection
 
 
+# LLM: 唯一 owner 配额锁始终先于领域文件锁；非阻塞模式不授予绕锁权限，等待选择不改变持久策略。
+# 类用途: 为用户目录内的结构化写入提供跨线程、跨进程的统一空间准入。
 class OwnerQuotaEnforcer:
     """Cross-process admission gate for structured writes inside one owner home.
 
@@ -117,8 +121,10 @@ class OwnerQuotaEnforcer:
         self.policy_available = bool(policy_available)
         self._lock_anchor = self.owner_root / _QUOTA_LOCK_BASENAME
 
+    # LLM: 默认阻塞保持既有调用合同；限时准备可选择立即拒绝竞争，但仍须在同一锁内检查和执行完整写入。
+    # 函数用途: 取得一次 owner 配额临界区，供文件批次或独立环境准备共享。
     @contextmanager
-    def admission(self) -> Iterator[OwnerQuotaAdmission]:
+    def admission(self, *, blocking: bool = True) -> Iterator[OwnerQuotaAdmission]:
         """Hold the owner gate while a repository computes and applies a mutation."""
 
         if not self.policy_available:
@@ -126,7 +132,7 @@ class OwnerQuotaEnforcer:
         if self.max_bytes <= 0:
             yield OwnerQuotaAdmission(self, enabled=False)
             return
-        with _locked_owner_quota(self._lock_anchor):
+        with _locked_owner_quota(self._lock_anchor, blocking=blocking):
             yield OwnerQuotaAdmission(self, enabled=True)
 
     @contextmanager
@@ -338,9 +344,11 @@ def _logical_file_size(path: Path) -> int:
     return max(0, int(info.st_size))
 
 
+# LLM: 沿用原 JSON 双层锁；竞争/存储故障仍转配额不可用，不能因为立即准入失败而无锁继续。
+# 函数用途: 将配额锁的底层错误转成领域错误，退出归还同一锁。
 @contextmanager
-def _locked_owner_quota(path: Path) -> Iterator[None]:
-    manager = locked_json_path(path)
+def _locked_owner_quota(path: Path, *, blocking: bool = True) -> Iterator[None]:
+    manager = locked_json_path(path, blocking=blocking)
     try:
         manager.__enter__()
     except (OSError, RuntimeError, ValueError) as exc:

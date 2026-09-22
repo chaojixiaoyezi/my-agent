@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
 dependencies = [
+  "packaging>=24.2,<27",  # 插件本地 wheel 的 PEP 440/508、元数据和平台标签；避免自写依赖规则，许可与替代方案见环境合同
   "openpyxl>=3.1",
   "prompt_toolkit>=3.0",
   "markdown-it-py>=4.2,<5",  # TUI Markdown 用成熟 CommonMark token，终端布局/样式仍由本项目 renderer 控制

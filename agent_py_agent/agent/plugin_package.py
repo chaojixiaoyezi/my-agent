@@ -8,6 +8,7 @@ import io
 import os
 import stat
 import struct
+import unicodedata
 import zipfile
 import zlib
 from dataclasses import dataclass
@@ -98,7 +99,7 @@ def inspect_plugin_package(
     if not isinstance(content, bytes):
         raise PluginPackageError("invalid_archive", "插件包必须是不可变字节。")
     _check_limit(len(content), limits.archive_bytes)
-    _validate_zip_directory(content, limits)
+    validate_zip_directory(content, limits)
     try:
         with zipfile.ZipFile(io.BytesIO(content)) as archive:
             manifest = _verified_manifest(archive, limits)
@@ -119,23 +120,24 @@ def inspect_plugin_package(
 # LLM: 声明、归档成员和摘要必须三方精确匹配；失败时不返回部分工具目录或可安装候选。
 # 函数用途: 从已预检的归档读取描述并验证全部 wheel 字节，不展开到磁盘。
 def _verified_manifest(archive: zipfile.ZipFile, limits: PackageReadLimits) -> PluginManifest:
-    members = _validate_members(archive.infolist(), limits)
+    members = validate_zip_members(archive.infolist(), limits)
     if "plugin.json" not in members:
         raise PluginPackageError("invalid_archive", "插件包缺少描述文件。")
-    manifest = _read_manifest(_read_member(archive, members["plugin.json"], limits.manifest_bytes))
+    manifest = _read_manifest(read_zip_member(archive, members["plugin.json"], limits.manifest_bytes))
     expected = {"plugin.json", *(wheel.path for wheel in manifest.wheels)}
     if set(members) != expected:
         raise PluginPackageError("invalid_archive", "插件包成员与描述不一致。")
     for wheel in manifest.wheels:
-        data = _read_member(archive, members[wheel.path], limits.member_bytes)
+        data = read_zip_member(archive, members[wheel.path], limits.member_bytes)
         if hashlib.sha256(data).hexdigest() != wheel.sha256:
             raise PluginPackageError("digest_mismatch", "插件 wheel 内容摘要不匹配。")
     return manifest
 
 
-# LLM: ZipFile 构造会分配所有目录对象；先有界遍历标准 ZIP 目录，实际计数不能只信 EOCD 自报值。
-# 函数用途: 在交给标准库前限制元数据内存，只接收首期协议的单卷非 ZIP64 尾部；正文仍由 zipfile 校验。
-def _validate_zip_directory(content: bytes, limits: PackageReadLimits) -> None:
+# LLM: 外包与 wheel 共用有界目录预检；ZipFile 构造前限制实际计数，正文仍由标准库校验，不信 EOCD 自报值。
+# 函数用途: 在分配 ZIP 目录对象前检查单卷、非 ZIP64 尾部和内存预算，不读取或执行成员代码。
+def validate_zip_directory(content: bytes, limits: PackageReadLimits) -> None:
+    _check_limit(len(content), limits.archive_bytes)
     end = content.rfind(b"PK\x05\x06", max(0, len(content) - 65557))
     if end < 0 or end + 22 > len(content):
         raise PluginPackageError("invalid_archive", "插件包 ZIP 目录无效。")
@@ -173,10 +175,10 @@ def _validate_zip_directory(content: bytes, limits: PackageReadLimits) -> None:
         raise PluginPackageError("invalid_archive", "插件包 ZIP 目录计数或边界不一致。")
 
 
-# LLM: 校验在任何成员展开前完成；同名、大小写别名、链接和非普通文件都不能进入安装候选。
-# 函数用途: 检查 ZIP 目录及总预算，返回仅含明确普通文件的精确名称表。
-def _validate_members(
-    items: list[zipfile.ZipInfo], limits: PackageReadLimits
+# LLM: 外包默认拒绝目录；wheel 可显式允许规范空目录，但链接、别名和特殊文件始终拒绝；调用方仍须有界读取内容。
+# 函数用途: 检查 ZIP 成员与展开预算，返回精确名称表，避免包和内部 wheel 各维护一套路径规则。
+def validate_zip_members(
+    items: list[zipfile.ZipInfo], limits: PackageReadLimits, *, allow_directories: bool = False,
 ) -> dict[str, zipfile.ZipInfo]:
     _check_limit(len(items), limits.members)
     result = {}
@@ -189,17 +191,17 @@ def _validate_members(
         if (
             not name
             or name != item.orig_filename
-            or name != path.as_posix()
+            or name != path.as_posix() + ("/" if item.is_dir() else "")
             or path.is_absolute()
             or any(part in {".", ".."} for part in path.parts)
             or "\\" in name
             or ":" in name
             or "\x00" in name
-            or name.casefold() in folded
-            or item.is_dir()
+            or archive_path_key(path.as_posix()) in folded
+            or item.is_dir() and (not allow_directories or item.file_size != 0)
             or item.flag_bits & 1
-            or item.external_attr & 0x10
-            or stat.S_IFMT(mode) not in {0, stat.S_IFREG}
+            or item.external_attr & 0x10 and not item.is_dir()
+            or stat.S_IFMT(mode) not in {0, stat.S_IFDIR if item.is_dir() else stat.S_IFREG}
             or item.compress_type not in {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}
         ):
             raise PluginPackageError("invalid_archive", "插件包包含无效、重复或非普通文件成员。")
@@ -207,13 +209,19 @@ def _validate_members(
         total += item.file_size
         _check_limit(total, limits.expanded_bytes)
         result[name] = item
-        folded.add(name.casefold())
+        folded.add(archive_path_key(path.as_posix()))
     return result
 
 
-# LLM: 不只相信 ZIP 自报大小；读取也加一字节硬上限，并让 zipfile 完成 CRC/重叠检测。
-# 函数用途: 在预算内展开一个已验证成员，不将其写入文件系统。
-def _read_member(archive: zipfile.ZipFile, member: zipfile.ZipInfo, limit: int) -> bytes:
+# LLM: 仅用于碰撞比较，不改写实际成员名；Unicode 等价和大小写别名在不同宿主文件系统上必须得到同一裁决。
+# 函数用途: 为 ZIP 预检与安装目标计划生成统一的可移植路径键。
+def archive_path_key(name: str) -> str:
+    return unicodedata.normalize("NFC", name.casefold())
+
+
+# LLM: 外包和内部 wheel 共用实际读取上限，不能只信 ZIP 大小；标准库完成 CRC/重叠检测，不调用 extract。
+# 函数用途: 有界读取已验证成员供摘要、描述或 wheel 元数据核对，不写文件系统。
+def read_zip_member(archive: zipfile.ZipFile, member: zipfile.ZipInfo, limit: int) -> bytes:
     _check_limit(member.file_size, limit)
     with archive.open(member) as stream:
         content = stream.read(limit + 1)

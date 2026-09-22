@@ -4,6 +4,8 @@ import logging
 import threading
 import time
 
+import pytest
+
 import agent_py_agent.agent.common.file_lock_support as fls
 from agent_py_agent.agent.concurrency.exceptions import LockAcquisitionError
 from agent_py_agent.agent.concurrency.task_lock import TaskLockManager
@@ -135,3 +137,33 @@ def test_json_io_flock_warns_when_no_fcntl(monkeypatch, tmp_path):
     finally:
         logging.getLogger("agent.concurrency").removeHandler(handler)
     assert any("fcntl 不可用" in r.getMessage() for r in records)
+
+
+def test_json_lock_nonblocking_thread_contention_preserves_original_owner(tmp_path):
+    from agent_py_agent.agent.common.json_io import locked_json_path
+
+    path = tmp_path / "data.json"
+    with locked_json_path(path):
+        with pytest.raises(BlockingIOError), locked_json_path(path, blocking=False):
+            pytest.fail("繁忙锁不能准入")
+        with pytest.raises(BlockingIOError), locked_json_path(path, blocking=False):
+            pytest.fail("失败不能释放原持有者的锁")
+    with locked_json_path(path, blocking=False):
+        pass
+
+
+def test_json_lock_nonblocking_flock_uses_original_lock_and_releases_thread_lock(tmp_path):
+    from agent_py_agent.agent.common import json_io
+
+    if json_io.fcntl is None:
+        pytest.skip("当前平台没有 flock")
+    path = tmp_path / "data.json"
+    with path.with_name(path.name + ".lock").open("a+") as handle:
+        json_io.fcntl.flock(handle.fileno(), json_io.fcntl.LOCK_EX)
+        try:
+            with pytest.raises(BlockingIOError), json_io.locked_json_path(path, blocking=False):
+                pytest.fail("同一 OS 锁必须保持排他")
+        finally:
+            json_io.fcntl.flock(handle.fileno(), json_io.fcntl.LOCK_UN)
+    with json_io.locked_json_path(path, blocking=False):
+        pass

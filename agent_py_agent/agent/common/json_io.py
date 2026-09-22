@@ -1,4 +1,5 @@
-"""Small JSON IO helpers for runtime metadata files."""
+# LLM: JSON 文件仍共用原线程锁和 OS 锁；显式非阻塞准入只改变等待方式，不建立另一锁名或写入入口。
+# 模块用途: 提供运行元数据的读取、原子写入与共享文件锁，让管理准备在资源繁忙时及时返回。
 
 from __future__ import annotations
 
@@ -290,41 +291,53 @@ def _path_lock(path: Path) -> _PathLock:
         return handle
 
 
+# LLM: 默认仍等待原双层锁；blocking=False 任一层繁忙即失败，调用方不能因此绕开原子读改写。
+# 函数用途: 为原文件提供共用临界区，允许有期限的管理入口在竞争时立即返回。
 @contextmanager
-def locked_json_path(path: Path):
+def locked_json_path(path: Path, *, blocking: bool = True):
     """公开的"线程锁 + fcntl.flock(LOCK_EX)"双层临界区(与 io/jsonl.py 同手法)。
 
     供需要把 读-改-写 整段做成原子的调用方使用(如 OptimisticLock 的 CAS):
     进入即对 path 的 per-path 线程锁 + 同名 .lock 文件的 OS 排他锁双重持有,
     退出释放。临界区内落盘请用 write_json_file_atomic_unlocked(锁已持有)。"""
 
-    with _locked_json_path(path):
+    with _locked_json_path(path, blocking=blocking):
         yield
 
 
+# LLM: 持有 _PathLock 强引用到释放，非阻塞失败不能释放别人的锁；文件锁失败也必须释放已取得的线程锁。
+# 函数用途: 按固定顺序取得线程锁与 OS 锁，并在所有退出路径归还。
 @contextmanager
-def _locked_json_path(path: Path):
+def _locked_json_path(path: Path, *, blocking: bool = True):
     handle = _path_lock(path)  # 持 _PathLock 强引用直到临界区结束 → 持锁期间弱字典绝不回收它
-    with handle.lock:
-        with _locked_file_path(path):
+    if not handle.lock.acquire(blocking=blocking):
+        raise BlockingIOError("共享文件线程锁繁忙")
+    try:
+        with _locked_file_path(path, blocking=blocking):
             yield
+    finally:
+        handle.lock.release()
 
 
+# LLM: 锁文件路径和创建方式保持原协议；非阻塞只使用同一 OS 锁的 LOCK_NB，不跳过跨进程互斥。
+# 函数用途: 在原同名锁文件上获取排他权，忙碌或异常时关闭文件句柄。
 @contextmanager
-def _locked_file_path(path: Path):
+def _locked_file_path(path: Path, *, blocking: bool = True):
     lock_path = path.with_name(path.name + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a+", encoding="utf-8") as handle:
-        _flock_exclusive(handle)
+        _flock_exclusive(handle, blocking=blocking)
         try:
             yield
         finally:
             _flock_unlock(handle)
 
 
-def _flock_exclusive(handle) -> None:
+# LLM: 不支持 OS 锁的平台沿原告警策略；支持时两种等待模式使用同一 flock，默认行为不变。
+# 函数用途: 执行原排他文件锁操作，可选择立即报告锁竞争。
+def _flock_exclusive(handle, *, blocking: bool = True) -> None:
     if fcntl is not None:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
     else:
         from .file_lock_support import warn_file_lock_unavailable_once
         warn_file_lock_unavailable_once()

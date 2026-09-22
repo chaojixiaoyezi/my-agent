@@ -18,7 +18,9 @@ HTTP ask/control 在原鉴权之后先经 `plugin_command_service.py` 读取可�
 本地管理安装由 `agent/plugin_management.py` 接原运行与执行器；当前管理员检查与来源读取授权分别执行，正文不能提供管理身份。
 首次获授权安装才创建原线程和独立宿主运行；`/plugins status <请求编号>` 使用只读原数据库，不创建 attempt、不自动恢复。
 `owner_conversation_store.py` 统一模型菜单和插件入口的轻量 Store 组装，沿原 owner 路径，旧模型菜单私有组装函数删除。
-完整装卸仍未发布；独立环境、激活贡献和撤销尚待实现，并需在原执行门再核对准入与撤销。
+完整装卸仍未发布；独立环境已有内部准备器，激活贡献和撤销仍待接线，并须在原执行门再核对准入与撤销。
+准备器复用 `OwnerQuotaEnforcer.admission(blocking=False)`；它与普通写入使用原线程锁、原 `.owner-quota.lock` 和原 OS 锁，
+只对准备器在竞争时立即返回，原调用方默认等待及锁序保持。固定候选目录不是安装/激活权威，也不创建独立 Gateway。
 
 ## 请求准备、绑定与历史边界
 

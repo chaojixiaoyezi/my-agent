@@ -81,6 +81,8 @@ Shell 不设人为命令字符上限，安全、权限、时间和输出预算�
 显式管理请求的本地源码已沿原 RuntimeDB 原子登记独立 pending 运行；请求重送不换代，终态只读原操作。
 创建树统一归 `runtime_db/run_creation.py`，冻结绑定读 `host_commands.py`；本地管理执行与只读查询由 `host_command_execution.py` 接原执行器，见 [宿主命令合同](docs/design/HOST_COMMAND_EXECUTION.md)。
 本地 HTTP/direct 安装复用原管理授权、路径权限和配额，只保存默认停用包；独立环境、激活、撤销与实际多 TUI 装卸仍待完成。
+独立环境内部准备器已本地实现，见 `plugin_environment.py`：固定地址、原配额非阻塞准入、本地 wheel 闭包和原取消链。
+创建 venv 不代表启用接线完成；禁止扫描目录代替原安装权威，禁止在启用前运行已装插件的 Python 自检。
 `enable_plugins=false` 拒绝新安装，原管理员查询不受开关或来源文件消失影响；断连保留原请求和未知结果，不能自动重送。
 未启动占位取消保留原输入、幂等与资源声明，损坏结果原文不洗成空账；严格回读拒绝损坏或未知版本，源码验证与已部署停止验收分开。
 宿主目录与提交版本已发布同版双机：`plugin_command_catalog.v1` 只是只读声明，原 owner 解析仍唯一；无冷用户初始化。

@@ -93,6 +93,10 @@ agent_py_agent/
 |   |-- plugin_completion.py           # 用公共词法和绑定事实生成只编辑输入的候选
 |   |-- plugin_manifest.py             # 静态包描述、不可变 schema 与默认停用的命令投影
 |   |-- plugin_package.py              # 有界 ZIP 读取、成员与摘要核对，不安装或导入插件
+|   |-- plugin_wheels.py               # wheel 标准元数据、RECORD、平台与本地依赖闭包预检
+|   |-- plugin_wheel_layout.py         # 环境内文件计划、引导文件保护与宿主只读核对
+|   |-- plugin_environment.py          # 固定地址的 owner 独立 venv 准备，尚不发布激活
+|   |-- plugin_environment_process.py  # 受控离线命令、原取消 token 与精确退出回执
 |   |-- plugin_installation.py         # 安装请求、停用事实、最后回执与纯准入判断
 |   |-- plugin_install_store.py        # owner 唯一安装表、包内容保存及锁内 CAS/提交裁决
 |   |-- plugin_install_tool.py         # 经原执行器读取授权包快照并保存默认停用记录
@@ -430,6 +434,11 @@ agent_py_agent/
 |   |-- test_tui_input.py               # slash/path 补全、菜单选择、queue 回取与 bracketed paste 输入回归
 |   |-- test_plugin_command_catalog.py # 声明跨进程往返、版本变化及损坏载荷拒绝
 |   |-- test_plugin_package.py         # 静态包篡改、归档预算、危险成员及不执行代码的合同检查
+|   |-- plugin_wheel_fixtures.py       # 合成标准 wheel 与导入陷阱，仅用于开发组件检查
+|   |-- test_plugin_wheels.py          # 固定依赖、extras、平台、摘要与归档预算检查
+|   |-- test_plugin_wheel_layout.py    # 跨 wheel 与引导文件冲突、安装布局和入口脚本检查
+|   |-- test_plugin_environment.py     # 临时真实 venv/pip、导入陷阱、原配额及候选排他检查
+|   |-- test_plugin_environment_process.py # 准备进程的取消、超时、I/O 异常和未知退出替身
 |   |-- test_plugin_install_store.py   # 默认停用、原请求重放、失败裁决与独立进程安装竞争
 |   |-- test_plugin_management.py      # 真实原执行链、来源消失、配置关闭、路径权限和配额检查
 |   |-- test_nofollow_binary_io.py      # 二进制预算、私有原子写入、锁链接和 portable 创建竞争
@@ -532,6 +541,8 @@ docs/
 - `agent_py_agent/agent/plugin_command_catalog.py`：冻结及校验完整管理/插件声明，内容摘要绑定 owner 视图、版本和激活引用；不提供权限凭证。
 - `agent_py_agent/agent/command_declarations.py`：命令 JSON 的唯一读取器，包和宿主目录共用，旧目录私有 decoder 已删除。
 - `agent_py_agent/agent/plugin_manifest.py` 与 `plugin_package.py`：只读校验包并保留同一字节快照；不接受宿主身份，不代表已安装、已授权或已隔离。
+- `agent_py_agent/agent/plugin_wheels.py` 与 `plugin_wheel_layout.py`：标准元数据和固定依赖集合预检、环境内目标保护及安装后宿主读回；不运行插件或替代 pip 安装器。
+- `agent_py_agent/agent/plugin_environment.py` 与 `plugin_environment_process.py`：原 owner 配额下的固定地址 venv 准备，复用原取消与精确进程退出；只返回准备事实，不发布激活或重建操作账。
 - `agent_py_agent/agent/plugin_installation.py` 与 `plugin_install_store.py`：原 owner 插件目录中的唯一安装表和最后回执；先存包再提交，默认停用，异常读回区分提交结果，不拥有管理权限或执行历史。
 - `agent_py_agent/agent/plugin_install_tool.py` 与 `plugin_management.py`：管理服务先核对可信授权，隐藏工具再经原执行器读取一次包；默认停用保存，查询只读原请求，不启动插件。
 - `agent_py_agent/agent/common/directory_lock.py`、`nofollow_fs.py` 与 `strict_json.py`：分别维护永久互斥、受信根文件原语和严格 JSON；这些公共原语不裁决领域授权或替代操作账本。
