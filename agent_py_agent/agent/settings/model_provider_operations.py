@@ -71,13 +71,14 @@ def _delete(data: dict, operation: str, payload: dict) -> None:
         data["profiles"].pop(key, None)
 
 
-# LLM: 保留快捷 add 的幂等接口，立即规范为 provider + model；不建立第二套扁平文件。
-# 函数用途: 将旧菜单快捷新增变为一个服务商和一个模型的原子保存。
+# LLM: 快捷 add 幂等保留用途，立即规范为 provider + model；与用途分离测试同步，不建立第二份凭据。
+# 函数用途: 将快捷新增变为一个服务商和一个模型的原子保存，决策模型不会被存成聊天用途。
 def _add_flat(data: dict, payload: dict) -> None:
     key = _model_id(payload.get("profile_id"))
     row = validate_model_profile(payload.get("profile"))
     provider_id = "provider-" + key
     provider = validate_provider({**row, "display_name": row["model_name"],
+        "capabilities": [row["capability"]],
         "custom_headers": row.get("model_custom_headers", {}), "session_header": row.get("model_session_header", "")})
     model = validate_model({**row, "provider_id": provider_id})
     if key in data["profiles"] and (data["profiles"][key] != model or data["providers"].get(provider_id) != provider):

@@ -28,7 +28,7 @@
 | 文档 | 模块 | 状态 | 说明 |
 | --- | --- | --- | --- |
 | [MAINTAINABILITY_AND_JEV_REVIEW.md](MAINTAINABILITY_AND_JEV_REVIEW.md) | 模块可维护性 / Computer Use / Jev | 评估完成，方案待实施 | 热点源码及参考证据、渐进重构顺序、桌面能力现状；Jev 新接入方向见决策模型计划 |
-| [DECISION_MODEL_INTEGRATION.md](DECISION_MODEL_INTEGRATION.md) | 可选决策模型 / Jev | 规划草案，待实施 | 原模型配置复用、短期限与失败隔离、逐点开关、记忆/派工/能力推荐、缓存和并行开发验收 |
+| [DECISION_MODEL_INTEGRATION.md](DECISION_MODEL_INTEGRATION.md) | 可选决策模型 / Jev | P1—P5 实施中，P1-A 已本地验收 | 原模型配置复用、短期限与失败隔离、逐点开关、记忆/派工/能力推荐、缓存和并行开发验收 |
 | [PLUGIN_LIFECYCLE.md](PLUGIN_LIFECYCLE.md) | 可选插件 / 动态命令 / 热装卸 | 设计草案，待实施 | 核心与插件边界、停用无运行影响、Python 进程隔离、版本快照与卡死卸载；参考范围和 TUI 验收矩阵 |
 | [PLUGIN_SAMPLE_ACCEPTANCE.md](PLUGIN_SAMPLE_ACCEPTANCE.md) | 插件样本 / 功能组合 / TUI 验收 | 计划已记录，待实施 | 社区热度与随机抽样、10 个自有简易插件、分批功能验证和故障卸载；Audit 不在本轮重构范围 |
 | [computer-use.md](computer-use.md) | Computer Use / MCP | 真 TUI 通过 | 开源执行器选型、官方可选依赖、管理员 Full Access 硬门、effect 与 OCR 验收边界 |

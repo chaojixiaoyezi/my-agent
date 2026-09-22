@@ -129,7 +129,8 @@ Gateway 模式须读宿主目录，plain 持有完整 Agent 也不能回退本�
 模块结构调整及 Jev 试验先读 [可维护性评估](docs/design/MAINTAINABILITY_AND_JEV_REVIEW.md)：
 后端、后台工具策略、上下文、历史准备、单片执行、提交/投递、Gateway 和存储已按职责归位，验收及剩余质量问题见 STATUS。
 
-Jev 的最新产品方向与独立开发顺序读 [可选决策模型计划](docs/design/DECISION_MODEL_INTEGRATION.md)，目前仅为规划；
+Jev 的最新产品方向与独立开发顺序读 [可选决策模型计划](docs/design/DECISION_MODEL_INTEGRATION.md)，P1—P5 已授权独立实施；
+本地 P1-A 已有原模型目录 v3、decision 用途和生成隔离，网络/设置接线仍待完成；完整清单见 [执行 Goal](docs/tasks/DECISION_MODEL_GOAL.md)。
 默认关闭、短总期限、失败沿原流程、配置/账本复用，不加入当前插件重构 Goal，也不改变普通主模型慢流合同。
 时间可调，用户设置与 agent 按用户指令代操作共用原配置服务；首版即支持开关、读回和作用范围，不依赖决策服务在线。
 Computer Use 的依赖与当前桌面验收须单独确认。

@@ -16,6 +16,7 @@ from .model_provider_schema import (
     SCHEMA,
     ModelProfileError,
     migrate_v1,
+    migrate_v2,
     resolved_model,
     validate_model,
     validate_model_profile,
@@ -38,8 +39,8 @@ def model_profiles_path(home_paths: object) -> Path:
     return Path(home_paths.config_dir) / "model-profiles" / f"{digest}.json"
 
 
-# LLM: 只认显式 schema，v1 迁移不落盘；损坏/悬空引用必须拒绝，不覆盖已有秘密。
-# 函数用途: 读取当前用户的唯一 provider/model 配置并检查引用完整性。
+# LLM: 只认显式 schema，v1/v2 迁移不落盘；损坏和悬空引用拒绝，未知版本不覆盖秘密。
+# 函数用途: 读取当前用户的唯一模型配置，显式迁移旧目录并检查引用完整性。
 def read_model_profiles(path: Path) -> dict:
     if not path.exists():
         return {"schema": SCHEMA, "selected": "default", "providers": {}, "profiles": {}}
@@ -47,6 +48,8 @@ def read_model_profiles(path: Path) -> dict:
         data = json.loads(path.read_text(encoding="utf-8"))
         if data["schema"] == "owner_model_profiles.v1":
             data = migrate_v1(data)
+        elif data["schema"] == "owner_model_profiles.v2":
+            data = migrate_v2(data)
         if data["schema"] != SCHEMA or not isinstance(data["profiles"], dict) or not isinstance(data["providers"], dict):
             raise ModelProfileError("模型配置结构无效。")
         data["providers"] = {validate_provider_id(key): validate_provider(row) for key, row in data["providers"].items()}
@@ -76,8 +79,8 @@ def _save_profiles(path: Path, data: dict) -> None:
         Path(name).unlink(missing_ok=True)
 
 
-# LLM: 列表只含白名单字段；OAuth 暴露登录状态而非 token/account/secret，未登录不冒充可调用。
-# 函数用途: 提供可选择的真实模型和服务商，空部署配置不出现在模型列表中。
+# LLM: available 保持聊天可选语义，available_for 显式声明用途；OAuth 不暴露 token，不能误选 decision。
+# 函数用途: 提供模型和服务商的脱敏列表；决策配置可管理，但不会进入普通聊天的可选集合。
 def public_model_profiles(data: dict, config: object) -> dict:
     from .model_oauth_schema import has_credential
 
@@ -89,14 +92,16 @@ def public_model_profiles(data: dict, config: object) -> dict:
     if configured or default["model_backend"] == "echo":
         rows.append({"id": "default", **default, "api_base": "（使用显式部署配置）",
                      "model_name": default["model_name"] or "echo（离线调试）",
-                     "has_key": bool(getattr(config, "api_key", "")), "available": True})
+                     "has_key": bool(getattr(config, "api_key", "")), "available": True, "available_for": ["agentic"]})
     for profile_id, row in data["profiles"].items():
         provider = data["providers"][row["provider_id"]]
+        available = bool(row["enabled"] and provider["enabled"] and has_credential(provider)
+                         and row["capability"] in provider["capabilities"])
         rows.append({"id": profile_id, **row, "api_base": provider["api_base"],
                      "provider_name": provider["display_name"], "has_key": bool(provider["api_key"]),
                      "auth_mode": provider.get("auth", {}).get("mode", "api_key"),
-                     "available": bool(row["enabled"] and provider["enabled"] and has_credential(provider)
-                                       and row["capability"] == "agentic" and "agentic" in provider["capabilities"])})
+                     "available": available and row["capability"] == "agentic",
+                     "available_for": [row["capability"]] if available else []})
     providers = [{"id": key, **{field: row[field] for field in (
         "display_name", "api_base", "enabled", "capabilities", "session_header")},
         "has_key": bool(row["api_key"]), "header_names": sorted(row["custom_headers"]),
@@ -199,21 +204,21 @@ def selected_model_config(agent: object, *, profile_id: str | None = None):
     return config
 
 
-# LLM: 子代理只解析本 owner 的配置；OAuth 引用路径由可信 home 生成，不接受客户端填写或网络响应指定。
-# 函数用途: 将可用模型编号解析成连接字段，未知模型明确失败。
-def _resolved_profile(agent: object, data: dict, selected: str) -> dict:
+# LLM: 解析本 owner 或已授权共享的指定用途；OAuth 引用路径由可信 home 生成，不接受客户端指定。
+# 函数用途: 将模型编号解析成连接字段，默认只供生成消费者；决策用途必须显式传入。
+def _resolved_profile(agent: object, data: dict, selected: str, *, capability: str = "agentic") -> dict:
     if shared_profile_key(selected):
-        return resolve_shared_model(agent.home_paths, selected)
+        return resolve_shared_model(agent.home_paths, selected, capability=capability)
     if selected not in data["profiles"]:
         raise ModelProfileError("任务原模型配置已不存在，不能静默换成其它模型。")
-    row = resolved_model(data, selected)
+    row = resolved_model(data, selected, capability=capability)
     if row.get("model_auth_ref"):
         row["model_auth_ref"]["path"] = str(model_profiles_path(agent.home_paths))
     return row
 
 
-# LLM: 显式 model 只按当前 owner 私有及管理员已发布模型精确解析；不接受端点、密钥或未授权 owner 引用。
-# 函数用途: 找到子代理可用模型；私有/共享重名必须用编号消歧，未知配置在创建前拒绝。
+# LLM: 子代理 model 只解析有权引用的 agentic 用途；decision 同名不制造歧义，显式错误编号不能换选。
+# 函数用途: 找到子代理的生成模型；私有/共享重名用编号消歧，决策或未知配置在创建前拒绝。
 def resolve_child_model_profile(agent: object, model: object) -> str:
     from ..user_space.approval_mode import is_permission_admin
 
@@ -225,9 +230,9 @@ def resolve_child_model_profile(agent: object, model: object) -> str:
     if model in profiles or shared_profile_key(model):
         _resolved_profile(agent, data, model)
         return model
-    available = [{"id": key, "model_name": row["model_name"]} for key, row in profiles.items()]
+    available = [{"id": key, "model_name": row["model_name"]} for key, row in profiles.items() if row["capability"] == "agentic"]
     available.extend({"id": row["id"], "model_name": row["model_name"]} for row in public_shared_profiles(agent.home_paths)
-                     if not (is_permission_admin(agent.home_paths) and shared_profile_key(row["id"]) in profiles))
+                     if row.get("capability") == "agentic" and not (is_permission_admin(agent.home_paths) and shared_profile_key(row["id"]) in profiles))
     matches = [row["id"] for row in available if row["model_name"] == model]
     if len(matches) == 1:
         _resolved_profile(agent, data, matches[0])

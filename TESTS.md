@@ -1,5 +1,19 @@
 # 测试与发布验收
 
+## 决策模型 P1-A 本地配置合同验收
+
+10 个相关文件 213 项通过：决策用途配置 17 项，以及原模型、服务商、共享、线程选择、Gateway、OAuth、
+OAuth 传输、采样和模型菜单回归。覆盖保存无网络、公开字段无密钥、只读旧版本迁移、生成误选拒绝、同名用途隔离、
+共享与 owner 权限/撤销；没有调用真实 Jev 或 MiniMax，没有修改日常配置、启动 Gateway 或部署。
+首轮既有迁移测试仍预期 v2，已更新为当前 v3 后通过；新测试导入排序由 Ruff 修正。
+独立复核发现旧表单会丢 decision 用途、旧 v1 迁移会丢自定义头，已修复并通过原表单与保存服务组合回归。
+本片没有时间/请求/设置双入口实现，其验收不能算通过；完整剩余项见 [执行 Goal](docs/tasks/DECISION_MODEL_GOAL.md)。
+
+命令：对 `test_decision_model_profiles.py`、`test_model_profiles.py`、`test_model_provider_management.py`、
+`test_shared_model_catalog.py`、`test_thread_model_selection.py`、`test_gateway_model_profiles.py` 运行 focused pytest，
+再覆盖 `test_model_oauth.py`、`test_model_oauth_transport.py`、`test_tui_model_menu.py`、`test_provider_sampling.py`；
+最终联合命令使用 `python3 -m pytest <以上十个文件> -o addopts='' -q --tb=short`，213 passed in 4.29s。
+
 ## 第 4 步显式业务调用与原审批开发验证
 
 本片只完成本地命令服务、原执行器及 MCP 组件接线；TUI/Gateway 的交互审批运输尚未完成，没有新增实际 TUI 或模型调用。
@@ -22,14 +36,14 @@
 建议下一步：接原 TUI 审批队列和 Gateway StreamApproval，命令使用独立取消寿命；断连只查询原编号，不自动重发。
 主代理负责写入与环境控制，可并行只读审阅运输边界；接线及发布检查通过后再做管理、插件、核心多路实际 TUI。
 
-## 决策模型后续验证计划（未执行）
+## 决策模型后续验证计划（配置合同以首节为准，其余待执行）
 
 [可选决策模型计划](docs/design/DECISION_MODEL_INTEGRATION.md#11-验证矩阵与完成标准)列出后续合同、假服务、
 replay 与少量真实 TUI 顺序，重点是 2/4 秒总期限、零叠加重试、未退出资源有界、故障沿原流程、
 迟到结果失效、记忆游标、模型窗口与完整费用。全部是计划，不能计入现有通过数量或替代插件验收。
 补充双入口配置验收：用户与 agent 修改同一时间/开关、按点覆盖及恢复继承、版本冲突、在途请求不延长期限、
 关闭撤销旧建议，以及 Jev 不可用时仍能修改设置；必须核对读回值与后续实际请求生效值。
-本轮仅改文档，未运行产品测试、真实模型、Gateway 或部署；文档检查结果另见本轮交接。
+本段为最初规划记录；当前配置合同结果看首节，后续真实模型、Gateway 与部署尚未执行。
 
 ## 第 4 步卸载与重新安装开发验证
 

@@ -38,8 +38,8 @@ async def _provider_preset(app) -> dict | None:
             "session_header": "x-opencode-session"} if preset == "go" else {}
 
 
-# LLM: 空密钥/空头编辑保留，清空需要显式 checkbox；保存不选择模型、不发模型请求，关闭清除内存密码。
-# 函数用途: 新增或编辑服务商，长表单在小终端可滚动。
+# LLM: 服务商用途完整读写，不能在编辑时丢 decision；空秘密保留，清除须明确，保存不发模型请求。
+# 函数用途: 编辑服务商及聊天/嵌入/决策用途，长表单可滚动；关闭时清除内存密码。
 async def _edit_provider(app, agent, session: str, existing: dict | None = None) -> str:
     preset = existing if existing is not None else await _provider_preset(app)
     if preset is None:
@@ -53,10 +53,11 @@ async def _edit_provider(app, agent, session: str, existing: dict | None = None)
     enabled = Checkbox("启用服务商", checked=preset.get("enabled", True))
     agentic = Checkbox("Agentic（对话/工具）", checked="agentic" in preset.get("capabilities", ["agentic"]))
     embedding = Checkbox("Embedding（目录配置；不用于聊天）", checked="embedding" in preset.get("capabilities", []))
+    decision = Checkbox("Decision（决策建议；不用于聊天）", checked="decision" in preset.get("capabilities", []))
     clear_key, clear_headers = Checkbox("清空已保存密钥"), Checkbox("清空已保存自定义头")
     notice = Label("")
     form = HSplit([Label("Provider ID（保存后不变）"), identity, Label("展示名"), name, Label("Base URL"), address,
-        Label("API Key（留空保留；不会进入聊天记录）"), secret, enabled, agentic, embedding,
+        Label("API Key（留空保留；不会进入聊天记录）"), secret, enabled, agentic, embedding, decision,
         Label("稳定会话头名称（可空；值由 my-agent 生成）"), session_header,
         Label("自定义请求头 JSON（留空保留）"), headers, clear_key, clear_headers,
         Label("Tab 切换 · 长表单自动滚动 · Esc 不保存退出"), notice])
@@ -71,7 +72,7 @@ async def _edit_provider(app, agent, session: str, existing: dict | None = None)
             result = await _request(app, agent, session, "save_provider", {"provider_id": identity.text,
                 "editing": existing is not None, "clear_key": clear_key.checked, "clear_headers": clear_headers.checked,
                 "provider": {"display_name": name.text, "api_base": address.text, "api_key": secret.text,
-                    "enabled": enabled.checked, "capabilities": [v for v, c in (("agentic", agentic), ("embedding", embedding)) if c.checked],
+                    "enabled": enabled.checked, "capabilities": [v for v, c in (("agentic", agentic), ("embedding", embedding), ("decision", decision)) if c.checked],
                     "custom_headers": parsed, "session_header": session_header.text}})
             if result.get("ok"):
                 return "服务商已保存；可以为它新增多个模型。未发模型请求。"
@@ -82,10 +83,10 @@ async def _edit_provider(app, agent, session: str, existing: dict | None = None)
     return ""
 
 
-# LLM: 每模型显式选择协议/容量/采样，top_p 空值沿用部署或供应商默认；保存不发模型请求。
-# 函数用途: 新增或编辑模型、采样及额外排队预算；认证在 provider 管理，原 profile UUID 保持不变。
+# LLM: 编辑保留原用途/协议；decision 不发送生成采样字段，保存无网络，同步用途表单回归。
+# 函数用途: 新增或编辑生成/决策模型；认证在 provider 管理，原 UUID 不变，决策设置另行绑定。
 async def _edit_model(app, agent, session: str, provider_id: str, row: dict | None = None) -> str:
-    backend = await _choose_interface(app, default=(row or {}).get("model_backend"), allow_auth=False)
+    backend = await _choose_interface(app, default=(row or {}).get("model_backend"), allow_auth=False, allow_decision=True)
     if backend is None:
         return ""
     data = row or {}
@@ -95,25 +96,28 @@ async def _edit_model(app, agent, session: str, provider_id: str, row: dict | No
     top_p = _field(data.get("top_p", ""))
     queue = _field(data.get("model_queue_wait_seconds", ""))
     enabled = Checkbox("启用模型", checked=data.get("enabled", True))
-    capability = RadioList([("agentic", "Agentic 对话/工具"), ("embedding", "Embedding 目录配置")],
-                           default=data.get("capability", "agentic"), select_on_focus=True)
+    is_decision = backend == "typesafe_decision"
+    capability = RadioList([("decision", "Decision 决策建议")] if is_decision else
+                          [("agentic", "Agentic 对话/工具"), ("embedding", "Embedding 目录配置")],
+                          default="decision" if is_decision else data.get("capability", "agentic"), select_on_focus=True)
     notice = Label("")
     body = HSplit([Label("模型名称（区分大小写）"), name, Label("总上下文 tokens（按供应商说明填写）"), window,
+                   *([Label("决策等待时间与接入点分别设置；保存不启用，也不发请求。")] if is_decision else [
                    Label("温度 0–2（留空沿用部署值；按供应商要求填写）"), temperature,
                    Label("top_p 0–1（留空沿用部署/供应商；Flash 思考下限 0.95）"), top_p,
-                   Label("额外排队预算秒数（0–86400，留空继承；慢模型可增大）"), queue,
+                   Label("额外排队预算秒数（0–86400，留空继承；慢模型可增大）"), queue]),
                    enabled, capability, notice, Label("Tab 切换 · Esc 不保存返回")])
     identity = data.get("id") or str(uuid4())
     while await _dialog(app, "编辑模型" if data.get("id") else "新增模型", body,
                        (("保存", True), ("返回", None)), focus=name):
         result = await _request(app, agent, session, "save_model", {"profile_id": identity, "editing": bool(data.get("id")),
             "profile": {"provider_id": provider_id, "model_backend": backend, "model_name": name.text,
-                        "model_context_window_tokens": window.text, "temperature": temperature.text,
-                        "top_p": top_p.text,
-                        "model_queue_wait_seconds": queue.text,
+                        "model_context_window_tokens": window.text,
+                        **({} if is_decision else {"temperature": temperature.text, "top_p": top_p.text,
+                                                 "model_queue_wait_seconds": queue.text}),
                         "enabled": enabled.checked, "capability": capability.current_value}})
         if result.get("ok"):
-            return "模型已保存；选择后将在后续工作片生效。"
+            return "决策模型已保存；尚未启用或测试。" if is_decision else "模型已保存；选择后将在后续工作片生效。"
         notice.text = str(result.get("message") or "保存未确认。")
     return ""
 

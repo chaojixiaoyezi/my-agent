@@ -82,12 +82,15 @@ def test_v1_read_only_migration_preserves_profile_uuid(tmp_path):
     path = model_profiles_path(host.home_paths)
     path.parent.mkdir(parents=True)
     key = str(uuid4())
-    path.write_text(json.dumps({"schema": "owner_model_profiles.v1", "selected": key, "profiles": {key: profile()}}))
+    legacy = profile(model_custom_headers={"X-Private": "kept-private"}, model_session_header="X-Session")
+    path.write_text(json.dumps({"schema": "owner_model_profiles.v1", "selected": key, "profiles": {key: legacy}}))
     before = path.read_bytes()
     assert selected_model_config(host).model_name == "MiniMax-M2.7"
+    assert selected_model_config(host).model_custom_headers == {"X-Private": "kept-private"}
+    assert selected_model_config(host).model_session_header == "X-Session"
     assert path.read_bytes() == before
     op(host, "set_default", {"profile_id": key})
-    assert read_model_profiles(path)["schema"] == "owner_model_profiles.v2"
+    assert read_model_profiles(path)["schema"] == "owner_model_profiles.v3"
     assert op(host, "list", {})["selected"] == key
 
 

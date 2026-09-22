@@ -128,9 +128,9 @@ def refresh_model_selection(agent, session_id: str, runtime, stop_event=None) ->
         runtime.set_notice("当前模型名称尚未同步，可打开 /model 重新确认。", duration_seconds=6)
 
 
-# LLM: 协议与认证分开选择；快捷新增可进入 Auth，已有 provider 的模型编辑不重复创建账号。
-# 函数用途: 选择新模型的接口类型。
-async def _choose_interface(app, *, default=None, allow_auth=True):
+# LLM: 协议与认证分开；decision 仅在明确支持用途的管理表单开放，编辑原值不可隐式降为生成协议。
+# 函数用途: 选择模型接口；快捷新增保留生成选项，服务商模型编辑可选择决策协议。
+async def _choose_interface(app, *, default=None, allow_auth=True, allow_decision=False):
     values = [
         ("openai_compatible", "OpenAI 风格（Chat Completions）"),
         ("anthropic_compatible", "Anthropic 风格（Messages）"),
@@ -138,6 +138,8 @@ async def _choose_interface(app, *, default=None, allow_auth=True):
     ]
     if allow_auth:
         values.append(("auth", "Auth 登录（ChatGPT 订阅 / 通用 OAuth）"))
+    if allow_decision:
+        values.append(("typesafe_decision", "TypeSafe Jev（决策建议）"))
     choices = RadioList(values, default=default, select_on_focus=True)
     return await _dialog(app, "新增模型 · 选择接口", choices,
                          (("下一步", lambda: choices.current_value), ("返回", None)), focus=choices)

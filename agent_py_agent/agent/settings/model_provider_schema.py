@@ -1,5 +1,5 @@
-# LLM: provider/model 的结构和采样校验只有这个事实源；公开投影不能包含 key 或自定义头值。
-# 模块用途: 校验服务商、模型引用与可选采样，让多个模型共享一份私有连接配置。
+# LLM: provider/model 用途与协议校验只有这个事实源；decision 不可解析为生成模型，公开投影不含秘密。
+# 模块用途: 校验服务商、模型引用与采样，让聊天和决策模型复用私有连接存储且保持用途隔离。
 from __future__ import annotations
 
 import math
@@ -9,8 +9,9 @@ from urllib.parse import urlsplit
 from ..backends.provider_headers import validate_headers, validate_session_header
 from ..backends.sampling import validate_top_p
 
-SCHEMA = "owner_model_profiles.v2"
-BACKENDS = {"openai_compatible", "anthropic_compatible", "openai_responses"}
+SCHEMA = "owner_model_profiles.v3"
+BACKENDS = {"openai_compatible", "anthropic_compatible", "openai_responses", "typesafe_decision"}
+CAPABILITIES = {"agentic", "embedding", "decision"}
 
 
 # LLM: 此类错误必须仅使用固定脱敏文案；HTTP/TUI 可直接公开。
@@ -43,8 +44,8 @@ def validate_provider_id(value: object) -> str:
     return value
 
 
-# LLM: 保留/清除 secret 是明确字段操作；OAuth 私有状态只校验不公开，表单入口另拦状态注入。
-# 函数用途: 检查服务商配置；允许无密钥保存草稿，发请求前另行检查。
+# LLM: 保留/清除 secret 是明确字段操作；用途不从模型名猜，OAuth 状态只校验不公开。
+# 函数用途: 检查服务商的明确用途和连接配置；允许无密钥保存草稿，发请求前另行检查。
 def validate_provider(value: object) -> dict:
     if not isinstance(value, dict):
         raise ModelProfileError("服务商配置须为对象。")
@@ -56,8 +57,8 @@ def validate_provider(value: object) -> dict:
         raise ModelProfileError("服务商展示名不能为空。")
     enabled = value.get("enabled", True)
     capabilities = value.get("capabilities", ["agentic"])
-    if type(enabled) is not bool or not isinstance(capabilities, list) or not capabilities or any(c not in {"agentic", "embedding"} for c in capabilities):
-        raise ModelProfileError("请明确选择启用状态及 Agentic/Embedding 能力。")
+    if type(enabled) is not bool or not isinstance(capabilities, list) or not capabilities or any(not isinstance(c, str) or c not in CAPABILITIES for c in capabilities):
+        raise ModelProfileError("请明确选择启用状态及 Agentic/Embedding/Decision 能力。")
     try:
         headers = validate_headers(value.get("custom_headers", {}))
         session = validate_session_header(value.get("session_header", ""))
@@ -77,11 +78,11 @@ def validate_provider(value: object) -> dict:
     return result
 
 
-# LLM: 模型引用不持有第二份 secret；采样、容量和排队预算按模型保存，未知型号允许透传。
-# 函数用途: 检查模型协议、用途、容量、采样及额外首事件等待；非法数值不能保存或发送。
+# LLM: 模型引用不持有第二份 secret；decision 只走独立决策协议，不能进入生成适配器；同步用途隔离测试。
+# 函数用途: 检查模型协议、用途、容量和适用采样；型号允许透传，决策模型不接受无效的生成参数。
 def validate_model(value: object) -> dict:
-    if not isinstance(value, dict) or value.get("model_backend") not in BACKENDS:
-        raise ModelProfileError("请选择 OpenAI Chat、OpenAI Responses 或 Anthropic；登录认证在服务商中配置。")
+    if not isinstance(value, dict) or not isinstance(value.get("model_backend"), str) or value["model_backend"] not in BACKENDS:
+        raise ModelProfileError("请选择 OpenAI Chat、OpenAI Responses、Anthropic 或 TypeSafe 决策接口。")
     name = value.get("model_name")
     if not isinstance(name, str) or not name.strip() or len(name) > 4096 or any(ord(c) < 32 for c in name):
         raise ModelProfileError("模型名称不能为空或包含控制字符。")
@@ -89,8 +90,12 @@ def validate_model(value: object) -> dict:
     if isinstance(window, bool) or not str(window).isascii() or not str(window).isdigit() or not 4096 <= int(window) <= 2**31 - 1:
         raise ModelProfileError("上下文窗口请填写 4096 至 2147483647 之间的整数 tokens。")
     capability = value.get("capability", "agentic")
-    if capability not in {"agentic", "embedding"} or type(value.get("enabled", True)) is not bool:
+    if not isinstance(capability, str) or capability not in CAPABILITIES or type(value.get("enabled", True)) is not bool:
         raise ModelProfileError("模型用途或启用状态不合法。")
+    if (capability == "decision") != (value["model_backend"] == "typesafe_decision"):
+        raise ModelProfileError("TypeSafe 决策接口必须配合 Decision 用途，不能用于聊天生成。")
+    if capability == "decision" and any(value.get(key) not in (None, "") for key in ("temperature", "top_p", "model_queue_wait_seconds")):
+        raise ModelProfileError("决策模型不使用温度、top_p 或生成排队预算；等待时间由决策设置控制。")
     result = {"provider_id": validate_provider_id(value.get("provider_id")), "model_name": name.strip(),
             "model_backend": value["model_backend"], "model_context_window_tokens": int(window),
             "capability": capability, "enabled": value.get("enabled", True)}
@@ -121,17 +126,17 @@ def validate_model(value: object) -> dict:
     return result
 
 
-# LLM: 扁平输入立即变成 provider 引用；保留显式采样，未知字段不传入 AgentConfig。
-# 函数用途: 校验快捷新增和旧 v1 迁移的完整连接信息，避免该入口悄悄丢掉温度或 top_p。
+# LLM: 扁平输入立即变成 provider 引用；用途必须保留，不能在快捷新增中把 decision 降为 agentic。
+# 函数用途: 校验快捷新增的完整连接信息及用途；秘密仍只保存到服务商，非生成字段不传入 AgentConfig。
 def validate_model_profile(value: object) -> dict:
     if not isinstance(value, dict):
         raise ModelProfileError("模型配置须为对象。")
     model = validate_model({**value, "provider_id": "validation"})
-    provider = validate_provider({"display_name": model["model_name"], **value,
+    provider = validate_provider({"display_name": model["model_name"], "capabilities": [model["capability"]], **value,
         "custom_headers": value.get("model_custom_headers", {}), "session_header": value.get("model_session_header", "")})
     if not provider["api_key"]:
         raise ModelProfileError("模型名称、地址和密钥不能为空。")
-    row = {key: model[key] for key in ("model_name", "model_backend", "model_context_window_tokens", "temperature", "top_p", "model_queue_wait_seconds") if key in model}
+    row = {key: model[key] for key in ("model_name", "model_backend", "model_context_window_tokens", "temperature", "top_p", "model_queue_wait_seconds", "capability", "enabled") if key in model}
     row.update(api_base=provider["api_base"], api_key=provider["api_key"])
     if provider["custom_headers"]:
         row["model_custom_headers"] = provider["custom_headers"]
@@ -140,28 +145,44 @@ def validate_model_profile(value: object) -> dict:
     return row
 
 
-# LLM: 迁移保持 selected/profile UUID，不写源文件；只在显式保存时把唯一存储升级为 v2。
-# 函数用途: 将旧版逐模型密钥转换为一对一服务商，避免覆盖或丢失已有子代理模型引用。
+# LLM: 迁移保持 selected/profile UUID、密钥和传输头，不写源文件；同步 v1 完整连接回归。
+# 函数用途: 将旧版逐模型连接转换为一对一服务商，保留采样、身份头与已有子代理模型引用。
 def migrate_v1(data: dict) -> dict:
     migrated = {"schema": SCHEMA, "selected": data["selected"], "providers": {}, "profiles": {}}
     for profile_id, value in data["profiles"].items():
+        if value.get("capability") == "decision" or value.get("model_backend") == "typesafe_decision":
+            raise ModelProfileError("旧模型目录不能包含决策模型，请使用当前配置入口新增。")
         row = validate_model_profile(value)
         provider_id = "provider-" + profile_id
-        migrated["providers"][provider_id] = validate_provider({**row, "display_name": row["model_name"]})
+        migrated["providers"][provider_id] = validate_provider({**row, "display_name": row["model_name"],
+            "capabilities": [row["capability"]], "custom_headers": row.get("model_custom_headers", {}),
+            "session_header": row.get("model_session_header", "")})
         migrated["profiles"][profile_id] = validate_model({**row, "provider_id": provider_id})
     return migrated
 
 
-# LLM: 唯一解析点合并连接；OAuth 只返回代次绑定引用，不返回 token，路径由可信 owner 调用方补齐。
-# 函数用途: 获得可发送请求的连接和采样配置，不返回展示或管理字段，不发模型请求。
-def resolved_model(data: dict, profile_id: str, *, require_enabled: bool = True) -> dict:
+# LLM: v2 只拥有 agentic/embedding 用途；迁移只改内存版本，拒绝把未来协议伪装成旧配置。
+# 函数用途: 显式升级原模型目录，不改编号、凭据、选择或源文件；下一次修改才写入 v3。
+def migrate_v2(data: dict) -> dict:
+    for row in data["profiles"].values():
+        if row.get("capability", "agentic") == "decision" or row.get("model_backend") == "typesafe_decision":
+            raise ModelProfileError("旧模型目录不能包含决策模型，请使用当前配置入口新增。")
+    if any("decision" in row.get("capabilities", []) for row in data["providers"].values()):
+        raise ModelProfileError("旧服务商目录不能包含决策用途。")
+    return {**data, "schema": SCHEMA}
+
+
+# LLM: 唯一解析点校验调用方所需用途，即使跳过启用检查也不能混用；OAuth 只返回绑定引用。
+# 函数用途: 获得指定用途的连接字段，默认只供聊天生成；决策消费者须显式请求 decision，不发网络请求。
+def resolved_model(data: dict, profile_id: str, *, require_enabled: bool = True, capability: str = "agentic") -> dict:
     from .model_oauth_schema import has_credential, oauth_binding
 
     model = data["profiles"][profile_id]
     provider = data["providers"][model["provider_id"]]
-    if require_enabled and (not model["enabled"] or not provider["enabled"] or not has_credential(provider)
-                            or model["capability"] != "agentic" or "agentic" not in provider["capabilities"]):
-        raise ModelProfileError("这个模型或服务商未启用、缺少密钥或尚未登录，或不是 Agentic 模型。")
+    if capability not in CAPABILITIES or model["capability"] != capability or capability not in provider["capabilities"]:
+        raise ModelProfileError("模型及服务商用途与本次请求不一致。")
+    if require_enabled and (not model["enabled"] or not provider["enabled"] or not has_credential(provider)):
+        raise ModelProfileError("这个模型或服务商未启用、缺少密钥或尚未登录。")
     result = {**{key: model[key] for key in ("model_name", "model_backend", "model_context_window_tokens", "temperature", "top_p", "model_queue_wait_seconds") if key in model},
             "api_base": provider["api_base"], "api_key": provider["api_key"],
             "model_custom_headers": dict(provider["custom_headers"]), "model_session_header": provider["session_header"]}

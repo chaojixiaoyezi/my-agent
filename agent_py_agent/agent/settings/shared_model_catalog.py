@@ -65,9 +65,9 @@ def _admin_profiles(home: object) -> dict:
     return read_model_profiles(model_profiles_path(identity))
 
 
-# LLM: 每次执行核验发布及可用性；OAuth 账号不能跨用户共享，撤销或删除后不换模型。
-# 函数用途: 在服务端将已授权共享引用解析为完整连接配置。
-def resolve_shared_model(home: object, profile_id: str) -> dict:
+# LLM: 每次执行核验发布、用途及可用性；OAuth 不跨用户共享，决策配置不可通过共享绕过生成用途守卫。
+# 函数用途: 将已授权共享引用解析为指定用途的连接，默认只接受聊天模型；撤销或删除后明确失败。
+def resolve_shared_model(home: object, profile_id: str, *, capability: str = "agentic") -> dict:
     key = shared_profile_key(profile_id)
     if not key or key not in _read_catalog(home):
         raise ModelProfileError("共享模型未开放或已撤销，请在 /model 重新选择。")
@@ -76,7 +76,7 @@ def resolve_shared_model(home: object, profile_id: str) -> dict:
         raise ModelProfileError("共享模型原配置已删除，请在 /model 重新选择。")
     if data["providers"][data["profiles"][key]["provider_id"]].get("auth"):
         raise ModelProfileError("订阅/OAuth 登录仅供所属用户使用，不能跨用户共享。")
-    return resolved_model(data, key)
+    return resolved_model(data, key, capability=capability)
 
 
 # LLM: 仅投影显式发布的公开模型字段；不泄漏管理员其他模型、API Key、自定义头或私有文件位置。
@@ -93,8 +93,8 @@ def public_shared_profiles(home: object) -> list[dict]:
     return [{**row, "id": "shared:" + row["id"], "shared": True} for row in public["profiles"] if row["id"] in selected]
 
 
-# LLM: 发布与撤销只接受结构化 bool 和管理员本人编号；OAuth 不能跨用户共享，不改变会话选择。
-# 函数用途: 显式开放或关闭 API Key 模型的共享引用；订阅账号仍只供所属用户使用。
+# LLM: 发布与撤销只接受管理员本人编号；按原模型用途验证，发布 decision 不授予生成能力，OAuth 不共享。
+# 函数用途: 开放或关闭 API Key 模型共享引用，聊天和决策用途仍由各自消费者复核，不改变会话选择。
 def set_shared_profile(agent: object, profile_id: object, enabled: object) -> None:
     if not is_permission_admin(agent.home_paths):
         raise ModelProfileError("只有管理员可以发布或撤销共享模型。")
@@ -110,7 +110,7 @@ def set_shared_profile(agent: object, profile_id: object, enabled: object) -> No
             raise ModelProfileError("管理员模型配置不存在。")
         if data["providers"][data["profiles"][key]["provider_id"]].get("auth"):
             raise ModelProfileError("订阅/OAuth 登录仅供所属用户使用，不能跨用户共享。")
-        resolved_model(data, key)
+        resolved_model(data, key, capability=data["profiles"][key]["capability"])
     path = shared_catalog_path(agent.home_paths)
     path.parent.mkdir(parents=True, exist_ok=True)
     with locked_json_path(path):
