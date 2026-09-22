@@ -14,6 +14,9 @@
 
 ## 前台优先与后台请求预算
 
+决策响应只有临时建议权；Curator 整理标注后通过 `decision_outcome_is_current` 复查原身份、
+连接与本次绝对期限，设置变化或过期时送原批次。这个只读门共用决策服务，不复制配置判断或另发请求。
+
 `curator_backend.call_backend_with_timeout` 只保留记忆语义适配，实际等待复用 `backends/bounded_call.py`。
 宿主后端实例键保持原隔离规则，原语保留 worker 与精确 InterruptHandle；到期返回不代表资源已经退出。
 取消 Event 直接唤醒等待者，慢清理异步去重；无第二份 Curator inflight 集合或额外 join。

@@ -9,6 +9,8 @@
 原 lease 剩余头寸限制极大后台超时，关闭不编码材料；提示超预算、失效和错误沿原链。
 原 Curator 缺独立持久模型用量结算，本片不伪造前台统计或新建账本；真实质量/部署未验。
 文件、命令和限制见 [Curator 交接](docs/tasks/DECISION_MODEL_P2_CURATOR_HANDOFF.md)。
+消费复核补充：service、owner_scope、curator、service_http 四文件联合 **95 passed**；覆盖响应返回后关闭/观察/
+修改预算失效、实际调用 deadline 不延长和用户取消传播，Curator 在正式附注释前使用公共复核。
 
 ## 决策模型 P1 实际服务组合（本地）
 

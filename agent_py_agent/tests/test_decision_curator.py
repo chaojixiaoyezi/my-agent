@@ -49,6 +49,7 @@ def install_decision(monkeypatch, *, mode="apply", status="success", mutate=None
         return SimpleNamespace(mode=mode, status=status, may_apply=mode == "apply" and status == "success", response=response)
     monkeypatch.setattr(module, "begin_decision_stage", begin)
     monkeypatch.setattr(module, "decide", decide)
+    monkeypatch.setattr(module, "decision_outcome_is_current", lambda *_: True)
     return observed
 
 
@@ -87,6 +88,13 @@ def test_bad_question_does_not_discard_successful_sibling(batch, monkeypatch):
 
 def test_wrong_candidate_revision_is_rejected(batch, monkeypatch):
     install_decision(monkeypatch, mutate=lambda response: replace(response, binding=replace(response.binding, candidates_revision="old")))
+    result, warnings = annotate(batch)
+    assert result is batch and warnings == ("memory_curator_decision:apply:stale",)
+
+
+def test_configuration_revocation_before_annotation_consumption_keeps_original(batch, monkeypatch):
+    install_decision(monkeypatch)
+    monkeypatch.setattr(module, "decision_outcome_is_current", lambda *_: False)
     result, warnings = annotate(batch)
     assert result is batch and warnings == ("memory_curator_decision:apply:stale",)
 

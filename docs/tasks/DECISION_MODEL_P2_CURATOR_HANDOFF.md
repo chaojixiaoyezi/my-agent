@@ -24,6 +24,7 @@
 - choice 显式提供 not_needed/need_data/no_match/abstain，分别记入 tag_outcome/priority_outcome，不能混入标签或等同错误。need_data 缺项引用由宿主按本来源绑定，截断消息携带 full_source_ref；无工具授权，不新建补资料链。
 - off/observe/失败保持原批次对象；apply 仅附 `CuratorDecisionAnnotation` 临时输入。消费前核对候选版本与当前完整批次摘要，逐题 error 不污染成功兄弟题。
 - 临时注释携带来源类型、精确 ID/hash、分类、优先级、实际模型和输入摘要。prompt 明确非权威性质，放在原稳定说明之后。注释超过原提取字符预算就全部放弃提示。
+- 父侧集成补充：注释准备后调用公共 `decision_outcome_is_current`，再次核对配置/连接/原调用截止，关闭或过期仍保留原批次；不复制策略算法。
 - 缩批仍由原 backend 执行；批次模型投影按仍存在的 refs/hash 过滤注释，不能借尾部建议遗漏原 processed 覆盖或推进游标。
 - 原 run warnings 仅追加固定无正文诊断，不新增持久字段；批次注释与 `_RunContext.expires_at` 仅为内存字段，无持久 schema 迁移。
 - `curator_backend.extraction_budget_seconds` 为原模型总预算唯一公式，提取、原 lease 和可选头寸共用。lease 仍是原提取上界加 90 秒；增强最多借剩余正缓冲的一半，另一半留提交。原 lease 真实时间转成冻结 caller_deadline，只缩短增强，不扩 lease 或重置阶段。
@@ -48,6 +49,7 @@ git diff --check
 ```
 
 结果：117 项通过（新 45 项、原相关 72 项）；相关 Ruff、diff 检查通过。没有收费模型调用、全仓 pytest、提交、推送或部署。
+父侧随后已本地提交至 `0dc960034`；公共消费复核补充后，service/owner_scope/curator/service_http 联合 95 项通过。
 
 覆盖：off 不编码材料，四种题级非选择结果及精确缺项引用，off/observe/apply/失败，单题失败，候选和材料过期，注释字符预算，来源 hash 改变，原缩批，64 题上限但全量材料保留，用户中断传播，原提取失败不推进游标，原提取成功精确推进，真实公共 service→原 worker→原账本三路，极大后台配置与过期 caller 截止保留原提取，lease 坏时间/过期/正头寸及共用预算公式。
 

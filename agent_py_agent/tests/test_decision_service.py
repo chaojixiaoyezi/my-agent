@@ -52,6 +52,33 @@ def successful(_agent, _params, request, backend, **_kwargs):
     return parse_typesafe_response(request, backend.model_name, response())
 
 
+@pytest.mark.parametrize("change", [{"enabled": False}, {"points.recall.mode": "observe"}, {"timeout_seconds": 10}])
+def test_consumer_revalidates_settings_after_candidate_refresh(prepared, monkeypatch, change):
+    host, params, _ = prepared
+    monkeypatch.setattr(calls, "invoke_decision_model_call", successful)
+    stage = service.begin_decision_stage(host, params, operation_id="consumer-batch")
+    outcome = decide(host, params, stage)
+    assert service.decision_outcome_is_current(host, params, stage, outcome)
+    patch(host, change)
+    assert not service.decision_outcome_is_current(host, params, stage, outcome)
+
+
+def test_consumer_uses_original_call_deadline_and_propagates_user_stop(prepared, monkeypatch):
+    host, params, _ = prepared
+    monkeypatch.setattr(calls, "invoke_decision_model_call", successful)
+    stage = service.begin_decision_stage(host, params, operation_id="consumer-batch")
+    outcome = decide(host, params, stage)
+    monkeypatch.setattr(service, "time", SimpleNamespace(monotonic=lambda: outcome.deadline))
+    assert not service.decision_outcome_is_current(host, params, stage, outcome)
+
+    def stop():
+        raise InterruptedError("user stopped")
+
+    monkeypatch.setattr(service, "_check_interrupted", stop)
+    with pytest.raises(InterruptedError):
+        service.decision_outcome_is_current(host, params, stage, outcome)
+
+
 # LLM: 每次测试显式创建原业务stage；多次调用复用stage的测试自行持有，不在helper内重置。
 # 函数用途: 对已建阶段执行一次固定接入点判断。
 def decide(host, params, stage, **kwargs):

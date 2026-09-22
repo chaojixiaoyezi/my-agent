@@ -7,7 +7,11 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 from ..backends.decision_protocol import DecisionInputError, decision_json
-from ..conversation.decision_service import begin_decision_stage, decide
+from ..conversation.decision_service import (
+    begin_decision_stage,
+    decide,
+    decision_outcome_is_current,
+)
 from ..tooling.cancellation import ToolCancelled
 from .curator_backend import curator_prompt
 from .curator_inputs import CuratorDecisionAnnotation, CuratorInputBatch
@@ -24,7 +28,7 @@ _NON_SELECTIONS = {
 _PRIORITIES = {"high": "建议优先核对", "normal": "按原顺序核对", "low": "建议稍后核对，但不可跳过"}
 
 
-# LLM: 每个 Curator lease 仅建一次决策阶段；原 service 校验 owner 后台身份、期限、连接与取消，不创建新 Agent 或存储。
+# LLM: 每个lease仅建一次阶段；准备注释后用公共门复查身份/配置/期限，不能在服务返回至采用的间隙忽略关闭，不创建新Agent或存储。
 # 函数用途: 可选调用决策模型并返回附建议的原批次；所有普通增强失败只记无正文 warning，继续原提取。
 def annotate_curator_batch(agent: object, batch: CuratorInputBatch, run_id: str, *, max_input_chars: int, caller_deadline: float | None = None) -> tuple[CuratorInputBatch, tuple[str, ...]]:
     try:
@@ -52,6 +56,8 @@ def annotate_curator_batch(agent: object, batch: CuratorInputBatch, run_id: str,
         # 可选提示不能挤掉原材料或让原先合法的提取超过预算，超量就完整放弃提示。
         if len(curator_prompt(annotated)) > max_input_chars:
             return batch, ("memory_curator_decision:apply:annotation_budget",)
+        if not decision_outcome_is_current(agent, params, stage, outcome):
+            return batch, ("memory_curator_decision:apply:stale",)
         return annotated, (warning,)
     except (InterruptedError, ToolCancelled):
         raise

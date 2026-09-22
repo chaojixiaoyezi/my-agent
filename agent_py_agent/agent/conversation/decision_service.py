@@ -7,7 +7,7 @@ import json
 import math
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from ..agent_core.runner.context import current_subagent_run_id, current_task_attributes
 from ..backends.base import BackendOptions
@@ -59,7 +59,7 @@ class DecisionStage:
     enabled_points: tuple[str, ...] = ()
 
 
-# LLM: may_apply 仅表示信封和策略有效，不证明每道题成功，更不授予业务写入权；响应逐题 error 必须由消费者处理。
+# LLM: may_apply仅表示返回时信封有效；消费前用同一helper核验内存连接摘要/绝对期限，逐题error仍由消费者处理，不授予写入权。
 # 类用途: 明确区分关闭、观察、可用建议、到期、冷却和过期结果，失败时保留原业务方案。
 @dataclass(frozen=True)
 class DecisionOutcome:
@@ -70,6 +70,8 @@ class DecisionOutcome:
     reason: str = ""
     retry_after_seconds: float = 0.0
     retain_original: bool = True
+    connection_revision: str = field(default="", repr=False)
+    deadline: float = 0.0
 
 
 # LLM: 身份只取宿主 params/runner；owner_background必须有run且无thread，不能从历史材料取身份或把活跃会话改称后台。
@@ -280,7 +282,7 @@ def _invoke(params, stage, request, backend, deadline, key, active) -> DecisionO
             return DecisionOutcome(mode, "stale", reason="settings_changed")
         if time.monotonic() >= deadline:
             return DecisionOutcome(mode, "deadline", reason="late_validation")
-        return DecisionOutcome(mode, "success", response, mode == "apply")
+        return DecisionOutcome(mode, "success", response, mode == "apply", connection_revision=key[2], deadline=deadline)
     except InterruptedError:
         _check_interrupted()
         if active.settings_cancelled:
@@ -310,3 +312,27 @@ def _invoke(params, stage, request, backend, deadline, key, active) -> DecisionO
         elif status == "cooldown":
             status = "error"
         return DecisionOutcome(mode, status, reason="provider_failed")
+
+
+# LLM: 消费者在刷新候选后共用此只读门；沿原非阻塞设置/身份复核，不联网、不重置期限，用户取消不能吞成可选失败。
+# 函数用途: 在真正采用建议前检查关闭、配置更改和期限；失败时消费者保留当前合法基础方案。
+def decision_outcome_is_current(agent: object, params: object, stage: DecisionStage, outcome: DecisionOutcome) -> bool:
+    _check_interrupted()
+    try:
+        if not outcome.may_apply or outcome.response is None or not outcome.connection_revision:
+            return False
+        binding = outcome.response.binding
+        if (binding.owner_ref, binding.thread_id, binding.run_id, binding.task_id, binding.operation_id) != (
+            stage.owner_ref, stage.thread_id, stage.run_id, stage.task_id, stage.operation_id,
+        ):
+            return False
+        deadline = min(stage.deadline, outcome.deadline)
+        if time.monotonic() >= deadline:
+            return False
+        stale = _stale(agent, params, stage, binding.point, binding.policy_revision, outcome.connection_revision)
+        _check_interrupted()
+        return not stale and time.monotonic() < deadline
+    except (InterruptedError, ToolCancelled):
+        raise
+    except Exception:
+        return False
