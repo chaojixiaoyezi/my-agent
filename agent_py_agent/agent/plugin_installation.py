@@ -41,8 +41,8 @@ class PluginInstallRequest:
         )
 
 
-# LLM: 最后回执与安装记录同次保存；它只能证明这一条提交，不是永久幂等历史，也不提供执行权限。
-# 类用途: 保存安装、配置或激活提交的输入摘要和前后版本，供响应丢失后的原请求核对。
+# LLM: 更新回执与安装记录同次保存，删除回执只留原操作结果；它不是永久幂等历史，也不提供执行权限。
+# 类用途: 保存安装变化的输入摘要和前后版本，供响应丢失后的原请求核对。
 @dataclass(frozen=True)
 class PluginCommitReceipt:
     operation_id: str
@@ -55,7 +55,7 @@ class PluginCommitReceipt:
     settings_sha256: str = ""
     activation_sha256: str = ""
 
-    # LLM: 每次提交只前进一版；动作与输入摘要同源，配置和激活各自绑定完整内容，不包含配置原值。
+    # LLM: 每次提交只前进一版；remove 只证明删除目标，其它动作仍绑定原内容，配置原值不进入回执。
     # 函数用途: 拒绝无效提交标识、动作、摘要和非单调版本。
     def __post_init__(self) -> None:
         validate_install_identity(self.operation_id, self.before_revision)
@@ -69,7 +69,7 @@ class PluginCommitReceipt:
         if type(self.after_revision) is not int or self.after_revision != self.before_revision + 1:
             raise ValueError("安装回执版本无效")
         lifecycle = self.action in {"prepare", "activate", "revoke", "release"}
-        if (self.action not in {"install", "configure", "prepare", "activate", "revoke", "release"}
+        if (self.action not in {"install", "configure", "prepare", "activate", "revoke", "release", "remove"}
                 or not isinstance(self.settings_sha256, str)
                 or (self.action != "configure" and self.settings_sha256 != "")
                 or (self.action == "configure" and not _DIGEST.fullmatch(self.settings_sha256))
@@ -165,6 +165,15 @@ class PluginInstallation:
     @property
     def activation_id(self) -> str:
         return self.activation.activation_id if self.activation is not None else ""
+
+    # LLM: 引用派生自原提交身份，不新增持久代次，也不包含配置及其摘要；同包卸载重装不能复活旧目录。
+    # 函数用途: 为公开目录生成区分不同安装提交的不可逆标记，不授予执行权。
+    @property
+    def installation_ref(self) -> str:
+        receipt = self.last_commit
+        value = (receipt.operation_id, receipt.action, receipt.plugin_id,
+                 receipt.package_sha256, receipt.after_revision)
+        return hashlib.sha256(json.dumps(value, separators=(",", ":")).encode()).hexdigest()
 
     # LLM: 本投影含私有配置，只可写入 owner 私有安装表；不能复用作工具结果、命令目录或用户消息。
     # 函数用途: 为同一次原子替换生成完整安装、配置与激活记录。

@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 
 from .plugin_activation import PluginActivationRequest
 from .plugin_install_store import PluginInstallStore
@@ -15,15 +15,23 @@ from .tooling.process_session_cleanup import ProcessSessionCleanupError, stop_pr
 from .tooling.process_session_store import ProcessSessionStore, process_session_store_root
 
 
-# LLM: installation 来自已见目录；先清理再核验原 handler 退出并 release，提交后错误不猜未发生，资源证据在这里不消费。
+# LLM: 返回原 CAS 得到的完整安装，卸载不能重读插件名挑新目标；报告继续交同一个原操作保存。
+# 类用途: 将准确停用或释放后的安装记录与可展示的清理结果一并交给管理工具。
+@dataclass(frozen=True)
+class PluginDeactivationResult:
+    installation: PluginInstallation
+    report: dict
+
+
+# LLM: installation 来自已见目录；返回准确停用/释放记录，提交后错误不猜未发生，资源证据在这里不消费。
 # 函数用途: 停用固定插件代次，能确认原准备和资源都结束时删除环境并允许再次启用。
-def deactivate_plugin(owner, repository, installation: PluginInstallation, operation_id: str) -> dict:
+def deactivate_plugin(owner, repository, installation: PluginInstallation, operation_id: str) -> PluginDeactivationResult:
     activation = installation.activation
     if activation is None:
         PluginInstallStore(owner).confirm_inactive(installation)
-        return {"plugin_id": installation.manifest.plugin_id, "enabled": False,
+        return PluginDeactivationResult(installation, {"plugin_id": installation.manifest.plugin_id, "enabled": False,
                 "revision": installation.revision, "authority_revoked": True,
-                "cleanup_confirmed": True, "released": True, "sessions": [], "errors": []}
+                "cleanup_confirmed": True, "released": True, "sessions": [], "errors": []})
     stopped = PluginInstallStore(owner).change_activation(PluginActivationRequest(
         operation_id, installation.revision, replace(activation, phase="revoked"),
     )).installation
@@ -52,16 +60,17 @@ def deactivate_plugin(owner, repository, installation: PluginInstallation, opera
         report["errors"].append({"stage": "activation", "error_type": type(exc).__name__})
     report["cleanup_confirmed"] = not report["errors"] and all(row["confirmed"] for row in report["sessions"])
     if report["cleanup_confirmed"]:
-        _release_if_settled(owner, repository, stopped, operation_id, report)
-    return report
+        stopped = _release_if_settled(owner, repository, stopped, operation_id, report)
+    return PluginDeactivationResult(stopped, report)
 
 
-# LLM: 已选资源退出不代表原 handler 退出；仍在执行时明确保留 revoked，其它释放错误保持 UNKNOWN 和原账。
+# LLM: 已选资源退出不代表原 handler 退出；原记录不重读换绑，返回释放 CAS 结果或原 revoked，错误仍留原账。
 # 函数用途: 尝试完成已停用插件的环境释放，并把执行器/资源证明交给同一个管理结果。
-def _release_if_settled(owner, repository, stopped, operation_id: str, report: dict) -> None:
+def _release_if_settled(owner, repository, stopped, operation_id: str, report: dict) -> PluginInstallation:
     try:
         released, evidence = PluginInstallStore(owner).release_activation(owner, repository, stopped, operation_id)
         report.update(released=True, revision=released.installation.revision, release=evidence)
+        return released.installation
     except PluginInstallationError as exc:
         if exc.reason == "preparation_executor_unconfirmed":
             report["release_pending"] = exc.reason
@@ -71,6 +80,7 @@ def _release_if_settled(owner, repository, stopped, operation_id: str, report: d
     except Exception as exc:  # noqa: BLE001 证明损坏不能用已选集合的局部成功洗成全部收尾
         report["cleanup_confirmed"] = False
         report["errors"].append({"stage": "release", "error_type": type(exc).__name__})
+    return stopped
 
 
 # LLM: 输入已在原锁内固定，逐一原生清理并保留每个结果；一个坏资源不能跳过余下资源，也不能凭命令退出代替 host 退出。

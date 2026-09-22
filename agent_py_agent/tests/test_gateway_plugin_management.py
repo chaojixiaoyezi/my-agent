@@ -107,7 +107,8 @@ def test_disable_http_uses_original_management_chain_without_creating_agent(tmp_
 
 def test_trusted_normal_user_cannot_install_or_query_admin_request(tmp_path):
     server = host(tmp_path)
-    for command in ["/plugins install missing.zip", "/plugins disable missing", "/plugins status request-a"]:
+    for command in ["/plugins install missing.zip", "/plugins disable missing", "/plugins remove missing",
+                    "/plugins status request-a"]:
         result = request(server, {"operation": "command", "command": command,
                                   "plugin_request_id": "new-a"}, user="alice", channel="local")[1]
         assert result["error_code"] == "PLUGIN_PERMISSION_DENIED"
@@ -134,7 +135,7 @@ def test_configure_http_original_chain_keeps_values_private_and_rejects_stale_ca
     status, result = request(server, body)
     assert status == 200 and result["state"] == "succeeded", result
     assert "synthetic-http-private-value" not in repr(result)
-    assert result["catalog"]["schema_version"] == "plugin_command_catalog.v2"
+    assert result["catalog"]["schema_version"] == "plugin_command_catalog.v3"
     assert PluginInstallStore(owner).snapshot()[0].revision == 2
     source.unlink()
     assert request(server, body)[1]["details"] == result["details"]
@@ -153,3 +154,25 @@ def test_configure_management_identity_cannot_come_from_http_body(tmp_path):
                              "actor_id": "local-agent"}, user="alice", channel="local")[1]
     assert result["error_code"] == "PLUGIN_PERMISSION_DENIED"
     assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("auth", [True, False])
+def test_remove_http_reuses_original_chain_and_keeps_user_files(tmp_path, auth):
+    from agent_py_agent.agent.plugin_install_store import PluginInstallStore
+
+    server = host(tmp_path, auth=auth)
+    owner = resolve_owner_home(tmp_path)
+    owner.home_dir.mkdir(parents=True)
+    source = owner.home_dir / "sample.zip"
+    source.write_bytes(_bundle())
+    catalog = request(server, {"operation": "catalog"})[1]["catalog"]
+    installed = request(server, {"operation": "command", "command": f'/plugins install "{source}"',
+                                "catalog_revision": catalog["revision"], "plugin_request_id": "install"})[1]
+    body = {"operation": "command", "command": "/plugins remove sample-peek",
+            "catalog_revision": installed["catalog"]["revision"], "plugin_request_id": "remove"}
+    status, removed = request(server, body)
+    assert status == 200 and removed["state"] == "succeeded" and removed["details"]["removed"], removed
+    assert source.is_file() and not PluginInstallStore(owner).snapshot()
+    assert request(server, body)[1]["details"] == removed["details"]
+    assert request(server, {"operation": "command", "command": "/plugins status remove"})[1]["details"] == removed["details"]
+    assert not hasattr(server.agent, "tools") and not hasattr(server.agent, "_owner_pool")

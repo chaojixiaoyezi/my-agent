@@ -1,5 +1,5 @@
 # LLM: 本 Store 是 owner 插件安装事实的唯一文件入口；不承担认证、工具执行或操作历史，管理入口必须先授权。
-# 模块用途: 在固定目录锁内提交包、配置与激活，撤销不等待资源配额，失败按实际读回区分结果。
+# 模块用途: 在固定目录锁内提交包、配置、激活与卸载，撤销不等待资源配额，失败按实际读回区分结果。
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from contextlib import nullcontext
 from .common.directory_lock import locked_private_directory
 from .common.nofollow_fs import (
     read_bytes_beneath,
+    unlink_file_beneath,
     write_bytes_atomic_beneath,
     write_text_atomic_beneath,
 )
@@ -31,6 +32,7 @@ from .plugin_installation_state import (
 )
 from .plugin_package import PackageReadLimits, PluginPackageSnapshot, inspect_plugin_package
 from .plugin_release import plugin_release_evidence
+from .plugin_removal import PluginRemovalResult, prepare_removal
 from .user_space.owner_quota import (
     OwnerQuotaChange,
     OwnerQuotaExceeded,
@@ -41,7 +43,7 @@ from .user_space.owner_resolver import OwnerHomeResult
 
 
 # LLM: 只保留必要 owner 身份与规范地址；缺失查询不创建目录，blob 目录不参与决定安装清单。
-# 类用途: 管理一个用户的本地安装事实，为后续启停提供同一持久权威。
+# 类用途: 管理一个用户的安装、启停与卸载事实，包回收也在同一原锁内检查引用。
 class PluginInstallStore:
     # LLM: owner 须来自宿主既有解析；配额与安装地址沿同一 owner，构造不初始化 Agent 或把绝对路径写入状态。
     # 函数用途: 绑定可信 owner、原配额文件、固定安装目录和包读取预算。
@@ -147,6 +149,34 @@ class PluginInstallStore:
 
         return self._write(confirm, reserve_quota=False)
 
+    # LLM: 只删停用释放返回的固定记录，原锁内完整 CAS；包与退出证明留到原管理结果成功持久化后回收。
+    # 函数用途: 从唯一安装表卸载插件，保留用户产物和原操作历史，不等待资源配额。
+    def remove(self, operation_id: str, plugin_id: str, expected: PluginInstallation | None) -> PluginRemovalResult:
+        return self._write(lambda _quota: self._remove_locked(operation_id, plugin_id, expected), reserve_quota=False)
+
+    # LLM: 沿原整表原子替换及提交异常读回；缺失确认不写，旧 expected 不因当前缺失而推定已完成。
+    # 函数用途: 在插件锁内删除已确认释放的准确安装，并保留其它插件和迁移事实。
+    def _remove_locked(self, operation_id: str, plugin_id: str,
+                       expected: PluginInstallation | None) -> PluginRemovalResult:
+        state = self._read_state()
+        result = prepare_removal(operation_id, plugin_id, expected, state.entries)
+        if result.receipt is not None:
+            updated = tuple(row for row in state.entries if row.manifest.plugin_id != plugin_id)
+            text = encode_installation_state(updated, self._owner, state.migration_json)
+            self._commit(state.entries, updated, text, result.receipt)
+        return result
+
+    # LLM: 只能由严格读回的原卸载成功结果调用；同一插件锁覆盖引用检查及 unlink，重新安装引用同包时不删。
+    # 函数用途: 回收无人使用的旧包字节，失败可重送原请求，不删除插件外的任何文件。
+    def consume_removed_package(self, receipt: PluginCommitReceipt) -> str:
+        if not isinstance(receipt, PluginCommitReceipt) or receipt.action != "remove":
+            raise ValueError("包回收缺少原卸载回执")
+        with locked_private_directory(self._anchor, relative_parts=self._parts, lock_name=".plugins.lock"):
+            if any(row.package_sha256 == receipt.package_sha256 for row in self.snapshot()):
+                return "retained_in_use"
+            unlink_file_beneath(self._anchor, self._blob_parts(receipt.package_sha256))
+        return "removed"
+
     # LLM: 此读取不是准入锁；资源层须在原预留/发送临界区调用，允许阶段只能选 preparing/active，不能授权 revoked。
     # 函数用途: 拒绝缺失、损坏、换代及已撤销的原激活，握手可沿同一代跨越发布，业务默认只接受 active。
     def require_activation(self, plugin_id: str, activation_id: str, *,
@@ -159,9 +189,9 @@ class PluginInstallStore:
             raise PluginInstallationError("activation_unavailable", "原插件激活不可用或已撤销。")
         return entry
 
-    # LLM: 新资源复用原 quota→插件锁；撤销跳过 quota 但仍用同一插件锁，不增锁/操作表，清理错误保留原裁决。
+    # LLM: 新资源复用原 quota→插件锁；撤销/删除跳过 quota 但仍用同一插件锁，不增锁/操作表，清理错误保留原裁决。
     # 函数用途: 在完整临界区执行安装领域更新，并保留确定或未知提交事实。
-    def _write(self, mutation, *, reserve_quota: bool = True) -> PluginMutationResult:
+    def _write(self, mutation, *, reserve_quota: bool = True) -> PluginMutationResult | PluginRemovalResult:
         result = None
         operation_error = None
         try:

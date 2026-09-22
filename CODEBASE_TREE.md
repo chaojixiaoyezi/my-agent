@@ -109,12 +109,14 @@ agent_py_agent/
 |   |-- plugin_runtime.py              # 固定代次的 MCP 服务、完整目录校验与原工具代理
 |   |-- plugin_deactivation.py         # 撤销原代、关闭准备执行权并清理两类精确资源
 |   |-- plugin_release.py              # 原准备执行器退出与完整资源证据核验，不改写 UNKNOWN
-|   |-- plugin_cleanup.py              # 原管理结果严格读回后精确消费退出记录，重送不重跑
+|   |-- plugin_cleanup.py              # 原结果成功读回后消费退出引用、回收无人引用包，重送不重跑
+|   |-- plugin_removal.py              # 固定安装删除 CAS 与卸载回执，不新增墓碑或持久历史
 |   |-- plugin_install_store.py        # owner 唯一安装表、包内容保存及锁内 CAS/提交裁决
 |   |-- plugin_install_tool.py         # 经原执行器读取授权包快照并保存默认停用记录
 |   |-- plugin_configure_tool.py       # 经原执行器读取和验证私有配置，结果不含配置值
 |   |-- plugin_enable_tool.py          # 原操作内准备环境、核对目录并确认候选退出后发布
 |   |-- plugin_disable_tool.py         # 原宿主链中的隐藏停用工具，区分撤销与资源清理结果
+|   |-- plugin_remove_tool.py          # 原宿主链中先停用释放再卸载，保留产物及确定/未知提交事实
 |   |-- plugin_sources.py              # 安装包与配置共用的有界授权文件读取
 |   |-- plugin_management.py           # 原权限、线程与目录的组合，安装/配置/启停及原结果查询
 |   |-- core.py                         # SimpleAgent 组合入口
@@ -477,6 +479,8 @@ agent_py_agent/
 |   |-- plugin_activation_fixtures.py # 实际临时 wheel/MCP、原管理链和业务工具执行夹具
 |   |-- test_plugin_enable.py         # 实际启用、坏目录、原执行器调用与旧快照停用验证
 |   |-- test_plugin_release.py        # 原 handler 退出、环境删除、结果落账与重送消费边界
+|   |-- test_plugin_removal.py        # 管理卸载、权限、旧请求重放、准备未退与持久成功后包回收
+|   |-- test_plugin_removal_store.py  # 安装删除 CAS、提交故障、符号链接与并发重新安装隔离
 |   |-- test_plugin_registry.py       # 共享视图、可信 owner 注入、关闭登记交错与未知保留
 |   |-- test_process_cleanup_evidence.py # 完整清理证明、自然终态保持、单调合并与 redo 恢复
 |   |-- test_process_cleanup_consumption.py # 精确引用消费、部分删除、同 ID 换代及原记录保留
@@ -600,7 +604,8 @@ docs/
 - `agent_py_agent/agent/plugin_enable_tool.py`：在原管理操作中准备环境、完整验证候选目录，确认退出后才发布同代 active。
 - `agent_py_agent/agent/plugin_runtime.py` 与 `tooling/plugin_registration.py`：固定激活的 MCP 适配和新运行组合；原客户端共享连接，权限视图单独生成目录，不新建激活缓存权威。
 - `agent_py_agent/agent/plugin_deactivation.py` 与 `plugin_disable_tool.py`：先关闭原激活与准备任务权限，再冻结两类准确资源并锁外清理；保留原退出记录，不能将撤销等同清理成功。
-- `agent_py_agent/agent/plugin_release.py` 与 `plugin_cleanup.py`：前者从原 enable 执行器和资源账核验退出，后者只在 disable 原结果严格成功读回后消费固定引用；不改写 UNKNOWN，不重新选择当前代。
+- `agent_py_agent/agent/plugin_release.py` 与 `plugin_cleanup.py`：前者从原 enable 执行器和资源账核验退出，后者只在 disable/remove 原结果严格成功读回后消费固定引用，并回收无人引用的旧包；不改写 UNKNOWN，不重新选择当前代。
+- `agent_py_agent/agent/plugin_removal.py` 与 `plugin_remove_tool.py`：原停用释放返回完整记录后，沿原锁 CAS 删除安装；删除回执只存原操作，不建墓碑，不删除用户产物。
 - `agent_py_agent/agent/tooling/process_cleanup_evidence.py`：原资源记录的最小身份摘要及完整退出证明，旧引用不能删除同 ID 新实例；不另建持久状态。
 - `agent_py_agent/agent/common/nofollow_tree.py`：使用已验证父目录描述符递归删除固定目录，不沿链接越界；调用方负责先确认原进程和执行器已退出。
 - `agent_py_agent/agent/common/directory_lock.py`、`nofollow_fs.py` 与 `strict_json.py`：分别维护永久互斥、受信根文件原语和严格 JSON；这些公共原语不裁决领域授权或替代操作账本。

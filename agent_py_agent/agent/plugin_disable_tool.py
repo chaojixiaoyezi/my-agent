@@ -36,7 +36,7 @@ class PluginDisableTool(BaseTool):
             idempotency_policy=IdempotencyPolicy("operation"), mutates_workspace=False,
         )
 
-    # LLM: 新停用只控制冻结代次；原请求重放读原结果，退出证明随结果保存后由管理写入口消费，不能跟随新代。
+    # LLM: 新停用只控制冻结代次，只投影结构化报告；退出证明随原结果保存后由管理写入口消费，不能跟随新代。
     # 函数用途: 撤销权限、清理准确资源，能确认原执行器退出时释放环境；否则明确显示仍待收尾。
     def execute(self, params: dict) -> ToolHandlerOutcome:
         if params["catalog_revision"] != self.catalog_revision:
@@ -45,7 +45,7 @@ class PluginDisableTool(BaseTool):
         if entry is None or entry.manifest.plugin_id != params["plugin"]:
             return self._failure("plugin_missing", "TOOL_INVALID_ARGUMENTS", "not_started")
         try:
-            result = deactivate_plugin(self.owner, self.repository, entry, self.operation_id)
+            result = deactivate_plugin(self.owner, self.repository, entry, self.operation_id).report
         except PluginInstallationError as exc:
             return self._failure(exc.reason, "TOOL_EXECUTION_FAILED",
                                  "unknown" if exc.commit_state == "unknown" else "failed", exc.commit_state)

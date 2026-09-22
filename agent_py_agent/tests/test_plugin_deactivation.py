@@ -115,7 +115,7 @@ def test_bad_original_preparation_binding_does_not_stop_unrelated_attempt(tmp_pa
                 value = json.loads(raw)
                 value["resource_scopes"] = []
                 conn.execute("UPDATE tool_operations SET outcome_json=? WHERE operation_id=?", (json.dumps(value), binding.request.operation_id))
-        result = deactivate_plugin(service.context.owner, repo, state["entry"], "revoke-bad-binding")
+        result = deactivate_plugin(service.context.owner, repo, state["entry"], "revoke-bad-binding").report
         assert result["authority_revoked"] and not result["cleanup_confirmed"]
         assert result["errors"][0]["stage"] == "preparation"
         assert len(result["sessions"]) == 1 and result["sessions"][0]["confirmed"]

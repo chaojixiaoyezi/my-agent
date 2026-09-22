@@ -60,13 +60,13 @@ def command_action_from_payload(value: object) -> CommandActionSpec:
     return CommandActionSpec(**row)
 
 
-# LLM: 这里保留宿主公开的版本和激活引用，不从包描述生成执行身份或启用资格。
+# LLM: 保留宿主版本、原提交派生安装引用与激活引用，不从包描述生成执行身份或启用资格。
 # 函数用途: 读取宿主插件目录的静态信息和动作，不连接执行端点。
 def plugin_command_from_payload(value: object) -> PluginCommandSpec:
     row = _record(
         value,
         PluginCommandSpec,
-        strings=("plugin_id", "summary", "default_action", "package_version", "activation_id"),
+        strings=("plugin_id", "summary", "default_action", "package_version", "activation_id", "installation_ref"),
         booleans=("enabled",),
     )
     row["actions"] = tuple(

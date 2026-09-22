@@ -16,7 +16,7 @@ from .command_declarations import (
 )
 from .plugin_commands import PluginCommandSpec
 
-_SCHEMA = "plugin_command_catalog.v2"
+_SCHEMA = "plugin_command_catalog.v3"
 
 
 # LLM: 这里只冻结已由宿主过滤的声明，不加载插件或保存第二份安装表；版本变化须进入同一摘要。
@@ -77,7 +77,7 @@ class PluginCommandCatalog:
             )
         )
 
-    # LLM: 网络载荷必须显式匹配 v2 并通过公共声明读取器；旧客户端须同版更新，不隐式补安装版本。
+    # LLM: 网络载荷必须显式匹配 v3 并通过公共声明读取器；旧客户端须同版更新，不隐式补安装代次引用。
     # 函数用途: 从宿主回执重建只读目录，损坏声明或摘要不符时明确失败。
     @classmethod
     def from_payload(cls, payload: object) -> PluginCommandCatalog:

@@ -18,7 +18,7 @@ from .command_catalog import COMMAND_INDEX, system_slash_command_name
 _PLUGIN_ID = re.compile(r"[A-Za-z][A-Za-z0-9._-]{0,63}\Z")
 
 
-# LLM: 这是宿主目录的只读描述，不是安装注册表；版本及激活引用参与目录摘要，不代替执行门的 owner 与撤销核对。
+# LLM: 这是宿主目录的只读描述，不是安装注册表；原提交引用区分重装，版本/激活仍不代替 owner 与撤销核对。
 # 类用途: 让插件静态帮助和动作解析共享身份及显式默认动作。
 @dataclass(frozen=True)
 class PluginCommandSpec:
@@ -30,8 +30,9 @@ class PluginCommandSpec:
     package_version: str = ""
     activation_id: str = ""
     installation_revision: int = 0
+    installation_ref: str = ""
 
-    # LLM: 拒绝重复动作、错误字段类型和无效默认目标；安装版本参与目录过期判断，不代表配置内容或执行授权。
+    # LLM: 安装正版本必须含原提交派生引用，包静态声明无引用；字段参与过期判断，不代表配置内容或授权。
     # 函数用途: 在目录发布前检查插件命令身份。
     def __post_init__(self) -> None:
         if any(not isinstance(value, str) for value in (self.plugin_id, self.summary, self.default_action, self.package_version, self.activation_id)) or type(self.enabled) is not bool:
@@ -40,6 +41,10 @@ class PluginCommandSpec:
             raise ValueError("插件动作必须是不可变元组")
         if type(self.installation_revision) is not int or self.installation_revision < 0:
             raise ValueError("插件安装版本无效")
+        if (not isinstance(self.installation_ref, str)
+                or (self.installation_revision > 0 and not re.fullmatch(r"[0-9a-f]{64}", self.installation_ref))
+                or (self.installation_revision == 0 and self.installation_ref != "")):
+            raise ValueError("插件安装引用无效")
         names = tuple(action.name for action in self.actions)
         if not _PLUGIN_ID.fullmatch(self.plugin_id) or len(set(names)) != len(names):
             raise ValueError("插件 ID 无效或动作重名")
