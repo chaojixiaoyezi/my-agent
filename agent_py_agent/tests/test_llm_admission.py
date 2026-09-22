@@ -47,6 +47,74 @@ def test_concurrency_rejects_bad_max() -> None:
         ConcurrencyLimiter(max_in_flight=0)
 
 
+def test_reserved_capacity_still_belongs_to_normal_calls() -> None:
+    limiter = ConcurrencyLimiter(2)
+    with limiter.slot(timeout=0, reserve=1):
+        with pytest.raises(ConcurrencyTimeout), limiter.slot(timeout=0, reserve=1):
+            pytest.fail("可选调用占用了普通请求保留名额")
+        with limiter.slot(timeout=0):
+            assert limiter.in_flight() == 2
+    assert limiter.in_flight() == 0
+
+
+@pytest.mark.parametrize("reserve", [-1, True, 1.5])
+def test_invalid_reservation_does_not_change_capacity(reserve) -> None:
+    limiter = ConcurrencyLimiter(1)
+    with pytest.raises(ValueError), limiter.slot(timeout=0, reserve=reserve):
+        pytest.fail("无效保留数量被接纳")
+    with limiter.slot(timeout=0):
+        assert limiter.in_flight() == 1
+
+
+def test_failed_optional_body_releases_its_own_slot() -> None:
+    limiter = ConcurrencyLimiter(2)
+    with pytest.raises(RuntimeError), limiter.slot(timeout=0, reserve=1):
+        raise RuntimeError("backend failed")
+    with limiter.slot(timeout=0, reserve=1):
+        assert limiter.in_flight() == 1
+
+
+def test_simultaneous_optional_admission_leaves_one_normal_slot() -> None:
+    limiter = ConcurrencyLimiter(4)
+    start = threading.Barrier(13)
+    attempted = threading.Semaphore(0)
+    release = threading.Event()
+    failures = []
+
+    def worker():
+        signaled = False
+        try:
+            start.wait(3)
+            with limiter.slot(timeout=0, reserve=1):
+                attempted.release()
+                signaled = True
+                assert release.wait(3)
+        except ConcurrencyTimeout:
+            pass
+        except BaseException as exc:
+            failures.append(exc)
+        finally:
+            if not signaled:
+                attempted.release()
+
+    threads = [threading.Thread(target=worker) for _ in range(12)]
+    for thread in threads:
+        thread.start()
+    try:
+        start.wait(3)
+        for _ in threads:
+            assert attempted.acquire(timeout=3)
+        assert limiter.in_flight() == 3
+        with limiter.slot(timeout=0):
+            assert limiter.in_flight() == 4
+    finally:
+        release.set()
+        for thread in threads:
+            thread.join(3)
+    assert not failures
+    assert limiter.in_flight() == 0
+
+
 def _admission(rps: float, burst: float, limit: int) -> LLMAdmission:
     clock = _Clock()
     return LLMAdmission(

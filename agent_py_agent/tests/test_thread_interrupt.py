@@ -10,6 +10,7 @@ import threading
 import time
 from dataclasses import replace
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
 from agent_py_agent.agent.agent_core._tool_loop_service import (
@@ -22,10 +23,12 @@ from agent_py_agent.agent.agent_core.tool_loop.round_execution import (
 )
 from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.concurrency.interrupt import (
+    InterruptHandle,
     interrupt_by_name,
     is_interrupted,
     is_interruptible_registered,
     register_interrupt_callback,
+    register_interrupt_wakeup,
     register_interruptible,
     set_interrupt,
     wait_interruptibly,
@@ -70,6 +73,62 @@ def test_register_scope_clears_flag_and_name():
         assert is_interrupted() is True
     assert is_interrupted() is False, "退出 finally 必清旗(线程复用安全)"
     assert interrupt_by_name("t-clean") is False, "名字已注销"
+
+
+def test_precancelled_handle_preserves_fact_after_bind_and_ordinary_clear():
+    handle = InterruptHandle()
+    closed = threading.Event()
+    handle.cancel()
+    assert not is_interrupted()
+    with register_interruptible("precancelled-handle", handle=handle):
+        assert is_interrupted()
+        set_interrupt(False)
+        assert is_interrupted()
+        wake = threading.Event()
+        with register_interrupt_wakeup(wake):
+            assert wake.is_set()
+        with register_interrupt_callback(closed.set):
+            assert closed.wait(1)
+    assert not is_interrupted()
+    handle._cleanup_thread.join(1)
+    assert not handle.cleanup_pending
+
+
+def test_cleanup_construction_failure_keeps_unknown_and_does_not_retry(monkeypatch):
+    handle = InterruptHandle()
+    callback = Mock()
+    constructor = Mock(side_effect=RuntimeError("cannot create cleanup thread"))
+    monkeypatch.setattr(threading, "Thread", constructor)
+    with register_interruptible("cleanup-construction-failed", handle=handle):
+        with register_interrupt_callback(callback):
+            handle.cancel()
+            handle.cancel()
+    assert handle.cleanup_pending
+    constructor.assert_called_once()
+    callback.assert_not_called()
+
+
+def test_handle_late_callback_does_not_wait_for_slow_close():
+    handle = InterruptHandle()
+    started, release = threading.Event(), threading.Event()
+
+    def cleanup():
+        started.set()
+        release.wait(3)
+
+    try:
+        with register_interruptible("late-slow-hook", handle=handle):
+            handle.cancel()
+            before = time.monotonic()
+            with register_interrupt_callback(cleanup):
+                assert time.monotonic() - before < 0.2
+                assert started.wait(1)
+            assert handle.cleanup_pending
+    finally:
+        release.set()
+        if handle._cleanup_thread is not None:
+            handle._cleanup_thread.join(1)
+    assert not handle.cleanup_pending
 
 
 def test_interrupt_invokes_blocking_transport_callback_once_per_signal():

@@ -14,6 +14,10 @@
 
 ## 前台优先与后台请求预算
 
+`curator_backend.call_backend_with_timeout` 只保留记忆语义适配，实际等待复用 `backends/bounded_call.py`。
+宿主后端实例键保持原隔离规则，原语保留 worker 与精确 InterruptHandle；到期返回不代表资源已经退出。
+取消 Event 直接唤醒等待者，慢清理异步去重；无第二份 Curator inflight 集合或额外 join。
+
 - 同 Gateway 内按实际后端 HTTP origin 登记完整 `agent.run` 的占用，覆盖工具间隙及 Compact；
   普通 Curator 在同端点被占用时返回 busy，不推进游标、不清 pending、不丢消息。
   `pre_compact` 需要打通屏障，显式管理运行也保留；前台之间不串行化。

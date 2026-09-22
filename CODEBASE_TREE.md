@@ -26,6 +26,7 @@
 决策模型 P1—P5 独立执行清单：`docs/tasks/DECISION_MODEL_GOAL.md`。
 P1-A 本地配置交接：`docs/tasks/DECISION_MODEL_P1A_HANDOFF.md`。
 P1-B 本地协议与传输交接：`docs/tasks/DECISION_MODEL_P1B_HANDOFF.md`。
+P1-C/D 有界调用组件交接：`docs/tasks/DECISION_MODEL_P1CD_HANDOFF.md`。
 
 这份树只描述当前主链路。旧迁移入口、过渡计划和已删除模块不在这里保留。
 
@@ -418,6 +419,7 @@ agent_py_agent/
 |       |-- provider_headers.py        # 自定义头保护、owner/thread 稳定会话头及 endpoint 拼接
 |       |-- request_scope.py           # 前台模型端点占用与后台单次预算；不保存正文和持久状态
 |       |-- gateway_request_limits.py  # 原 HTTP 请求的绝对期限、有限读取与严格 JSON 校验
+|       |-- bounded_call.py            # 从 Curator 迁出的唯一有界调用，保留未退出 worker/清理资源
 |       |-- decision_protocol.py       # 决策输入快照、宿主来源/版本绑定及逐题响应，不拥有业务执行权
 |       |-- typesafe_decision.py       # Jev 原生 decide 适配，复用原 HTTP，不接聊天生成接口
 |       |-- typesafe_decision_wire.py  # TypeSafe 三类问题与逐题结果校验，未知用量保留缺失
@@ -437,6 +439,8 @@ agent_py_agent/
 |   |-- test_decision_protocol.py       # 决策快照、复杂度上限、逐题失败与用量未知合同
 |   |-- test_typesafe_decision.py       # 原生请求、绝对期限及本地 HTTP 组合验收
 |   |-- test_gateway_strict_request.py  # 原 HTTP 严格请求的零重试、期限与正文上限回归
+|   |-- test_bounded_call.py            # 启动/取消/超时竞态、未退出资源与进程容量保护
+|   |-- test_decision_call_resources.py # 有界调用与原模型准入的组合、普通模型保留名额
 |   |-- test_subagent_process_control.py # 公共进程树终止覆盖后代、升级、宿主保留及未确认回执
 |   |-- test_subagent_resource_stop.py  # 固定原子树、终态资源、恢复隔离及 Goal/creation 锁序
 |   |-- test_runner_stop_relay.py       # 独立 Python 宿主心跳转交精确取消、共享隔离及旧配置投影
@@ -644,6 +648,7 @@ docs/
 - `agent_py_agent/agent/backends/typesafe_decision.py`：独立 decide 操作，复用原连接选项、请求头、HTTP 与错误协议；不实现 generate。
 - `agent_py_agent/agent/backends/typesafe_decision_wire.py`：TypeSafe 问题和答案解析，单题错误与顶层协议损坏分开，完整用量交给原账本。
 - `agent_py_agent/agent/backends/gateway_request_limits.py`：原 HTTP 传输的有限读取、剩余期限和严格 JSON 原语，不另建执行器。
+- `agent_py_agent/agent/backends/bounded_call.py`：Curator 与后续决策共用的有界 callable；及时放弃等待与真实资源退出分别记录。
 - `docs/design/PLUGIN_LIFECYCLE.md`：可选 Python 插件的核心边界、命令目录、隔离依赖、版本绑定和卡死卸载；提案与现有实现明确区分。
 - `docs/design/PLUGIN_PACKAGES.md`：本地包格式、读取预算、静态校验及待实现的安装提交和隔离撤销合同。
 - `docs/design/PLUGIN_SAMPLE_ACCEPTANCE.md`：社区候选抽样与热度快照、10 个简易插件的最小功能、分批实现顺序和组合卸载验收；不代表已实现。
@@ -651,6 +656,7 @@ docs/
 - `docs/tasks/DECISION_MODEL_GOAL.md`：决策模型 P1—P5 完整范围、逐项完成条件、并行认领及分层验收状态。
 - `docs/tasks/DECISION_MODEL_P1A_HANDOFF.md`：用途隔离、目录迁移、原管理表单及本地验收证据；不代替决策调用验收。
 - `docs/tasks/DECISION_MODEL_P1B_HANDOFF.md`：原生协议、严格 HTTP、组件联合验收及后续有界调用边界。
+- `docs/tasks/DECISION_MODEL_P1CD_HANDOFF.md`：精确取消、有界资源、Curator 迁移和原准入组合证据，保留尚未接线的设置/账本边界。
 
 - `agent_py_agent/agent/agent_core/agent_tree/model_view.py`：保留 run 身份、状态、原因与真实 read_order；不暴露恢复目录，省略内容可沿原工具归档完整读取。
 - `agent_py_agent/tests/test_agent_tree_model_view.py`：模型状态投影、终态报告可达性、状态不被省略及超长归档回读合同的定向验证。

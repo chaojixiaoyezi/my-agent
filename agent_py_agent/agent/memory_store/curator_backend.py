@@ -2,20 +2,24 @@ from __future__ import annotations
 
 """Memory Curator 的无工具结构化模型调用。"""
 
-# LLM: The background model receives one prompt and one strict response schema, with no agent
-# loop, tool registry, shell, file writer, remember, persona, or Skill capability.
-# 模块用途: 构造非权威历史输入、执行有界超时重试并严格解析 CuratorExtraction。
+# LLM: 后台模型只接收 prompt/schema；有界线程及取消复用 backends.bounded_call，缩批/游标合同仍归 Curator。
+# 模块用途: 构造非权威历史输入，复用通用有界调用执行提取并严格解析 CuratorExtraction。
 
 import contextvars
 import json
 import logging
-import queue
-import threading
 import time
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass, replace
 from typing import TypeVar
 
+from ..backends.bounded_call import (
+    BoundedCallBusyError,
+    BoundedCallStillRunningError,
+    BoundedCallTimeoutError,
+    call_with_deadline,
+)
+from ..backends.request_scope import provider_request_budget
 from .candidate_models import (
     CANDIDATE_TYPES,
     PROMOTION_TARGETS,
@@ -36,7 +40,7 @@ from .daily import DAILY_ACTORS, DAILY_EVENT_TYPES
 _LOGGER = logging.getLogger(__name__)
 
 
-# LLM: 超时后须关闭对应线程的连接并等待清理；不得让失败请求在后台继续与重试争用模型。
+# LLM: 超时请求精确取消但调用者不等待清理；仍活着的资源必须用下方子类禁止重叠重试。
 # 类用途: 为 Curator provider 超时提供稳定错误分类，保持游标不推进。
 class CuratorModelTimeoutError(TimeoutError):
     pass
@@ -48,8 +52,21 @@ class CuratorModelStillRunningError(CuratorModelTimeoutError):
     pass
 
 
-_CALL_LOCK = threading.Lock()
-_INFLIGHT_BACKENDS: set[int] = set()
+# LLM: Curator 原合同按同一个 backend 实例隔离；强引用防对象 ID 复用，通用原语自身不推断服务身份。
+# 类用途: 把 Curator 已有的对象身份规则交给通用资源登记表，不维护第二份 inflight 集合。
+@dataclass(frozen=True, eq=False, repr=False)
+class _CuratorBackendResource:
+    backend: object
+
+    # LLM: hash 仅作进程内查找，不能成为日志或跨调用稳定服务身份；对象保留期间 ID 不会被重用。
+    # 函数用途: 为后端实例的私有资源键提供哈希。
+    def __hash__(self) -> int:
+        return id(self.backend)
+
+    # LLM: 相等必须按 is，不调用 backend 自定义相等逻辑，避免把不同实例错误合并。
+    # 函数用途: 保持原 Curator 同实例防重叠语义。
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, _CuratorBackendResource) and self.backend is other.backend
 
 
 # LLM: 缩批重试使用**独立**的有限步数,不读写 config.max_retries(后者只表示非超时错误的
@@ -307,66 +324,30 @@ def _attempt_shape_log_line(shapes: Sequence[CuratorModelAttempt]) -> str:
     )
 
 
-# LLM: 请求预算/ContextVar 必须传入专用线程；超时关闭传输，同 backend 旧线程存活期间拒绝并发重试。
-# 函数用途: 有界执行无工具提取，回传结果或原始异常；取消后不给遗留请求叠加新请求。
+# LLM: 请求预算由原 ContextVar 传入唯一通用 worker；旧 worker 或清理未退出时映射 still-running，取消不转为可重试异常。
+# 函数用途: 有界执行无工具提取；到期即返回，同 backend 的旧资源退出前拒绝叠加请求。
 def call_backend_with_timeout(
     backend: object,
     *,
     prompt: str,
     response_schema: dict[str, object],
-    timeout_seconds: int,
+    timeout_seconds: int | float,
 ) -> object:
     generate = getattr(backend, "generate_structured", None)
     if not callable(generate):
         raise TypeError("memory curator backend lacks generate_structured")
-    from ..backends.request_scope import provider_request_budget
-    from ..concurrency.interrupt import (
-        interrupt_by_name,
-        register_interrupt_callback,
-        register_interruptible,
-    )
-
-    key = id(backend)
-    with _CALL_LOCK:
-        if key in _INFLIGHT_BACKENDS:
-            raise CuratorModelStillRunningError("记忆模型上一请求尚未退出")
-        _INFLIGHT_BACKENDS.add(key)
-    result_queue: queue.Queue[tuple[bool, object]] = queue.Queue(maxsize=1)
-    call_context = contextvars.copy_context()
-    call_name = f"memory-curator-model:{id(result_queue)}"
-
-    # LLM: 线程只拥有单次无工具请求；finally 释放资源登记，没有记忆事务提交权。
-    # 函数用途: 在隔离预算与可取消传输中执行提取，再回传结果。
-    def invoke() -> None:
-        try:
-            with register_interruptible(call_name), provider_request_budget(timeout_seconds):
-                result_queue.put((True, generate(prompt, response_schema=response_schema)))
-        except BaseException as exc:  # noqa: BLE001 - preserve provider error type for taxonomy.
-            result_queue.put((False, exc))
-        finally:
-            with _CALL_LOCK:
-                _INFLIGHT_BACKENDS.discard(key)
-
-    thread = threading.Thread(target=call_context.run, args=(invoke,), name="memory-curator-model", daemon=True)
+    deadline = time.monotonic() + float(timeout_seconds)
     try:
-        thread.start()
-    except BaseException:
-        with _CALL_LOCK:
-            _INFLIGHT_BACKENDS.discard(key)
-        raise
-    try:
-        with register_interrupt_callback(lambda: interrupt_by_name(call_name)):
-            ok, value = result_queue.get(timeout=max(0.001, timeout_seconds))
-    except queue.Empty as exc:
-        interrupt_by_name(call_name)
-        thread.join(timeout=0.5)
-        if thread.is_alive():
-            raise CuratorModelStillRunningError("记忆模型超时，连接已取消但调用尚未退出") from exc
+        with provider_request_budget(timeout_seconds):
+            return call_with_deadline(
+                lambda: generate(prompt, response_schema=response_schema),
+                deadline=deadline,
+                resource_key=_CuratorBackendResource(backend),
+            )
+    except (BoundedCallBusyError, BoundedCallStillRunningError) as exc:
+        raise CuratorModelStillRunningError("记忆模型旧请求或清理尚未退出，当前不能叠加调用") from exc
+    except BoundedCallTimeoutError as exc:
         raise CuratorModelTimeoutError("memory curator model request timed out") from exc
-    if ok:
-        return value
-    assert isinstance(value, BaseException)
-    raise value
 
 
 # LLM: All historical text is explicitly delimited as data, existing formal memory is comparison

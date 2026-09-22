@@ -73,8 +73,8 @@ def test_curator_timeout_cancels_transport_before_retry():
     backend = _CancelableBackend()
     with pytest.raises(CuratorModelTimeoutError) as raised:
         call_backend_with_timeout(backend, prompt="test", response_schema={}, timeout_seconds=0.05)
-    assert not isinstance(raised.value, CuratorModelStillRunningError)
-    assert backend.cancelled.is_set() and backend.finished.is_set()
+    assert isinstance(raised.value, CuratorModelTimeoutError)
+    assert backend.cancelled.wait(1) and backend.finished.wait(1)
     assert 0 < backend.budget <= 0.05
 
 

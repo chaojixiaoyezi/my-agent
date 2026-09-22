@@ -72,3 +72,38 @@ def test_saturation_raises_retryable_transient(monkeypatch):
             with hot_path.global_llm_admission_slot():
                 pass
     assert is_provider_transient_error(caught.value)
+
+
+def test_single_slot_skips_optional_and_keeps_normal_available(monkeypatch):
+    monkeypatch.setenv("LLM_MAX_INFLIGHT", "1")
+    monkeypatch.setenv("LLM_ADMISSION_WAIT_SECONDS", "300")
+    with pytest.raises(ProviderTransientError):
+        with hot_path.global_llm_admission_slot(optional=True):
+            pytest.fail("仅有的主模型名额被可选调用占用")
+    with hot_path.global_llm_admission_slot():
+        assert hot_path._limiter().in_flight() == 1
+
+
+def test_optional_never_waits_for_normal_queue(monkeypatch):
+    monkeypatch.setenv("LLM_MAX_INFLIGHT", "2")
+    monkeypatch.setenv("LLM_ADMISSION_WAIT_SECONDS", "300")
+    limiter = hot_path._limiter()
+    observed = []
+    original = limiter._condition.wait_for
+
+    def check_wait(predicate, timeout=None):
+        observed.append(timeout)
+        assert timeout == 0
+        return original(predicate, timeout)
+
+    with hot_path.global_llm_admission_slot():
+        monkeypatch.setattr(limiter._condition, "wait_for", check_wait)
+        with pytest.raises(ProviderTransientError), hot_path.global_llm_admission_slot(optional=True):
+            pytest.fail("可选调用挤占剩余普通名额")
+    assert observed == [0.0]
+    assert limiter.in_flight() == 0
+
+
+def test_optional_default_uses_original_unlimited_admission():
+    with hot_path.global_llm_admission_slot(optional=True):
+        assert hot_path._limiter() is None

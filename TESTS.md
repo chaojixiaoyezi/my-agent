@@ -1,5 +1,15 @@
 # 测试与发布验收
 
+## 决策模型 P1-C/D 有界调用与原准入组件（本地）
+
+18 个直接相关文件 **315 passed**，覆盖精确取消、启动前取消、迟到结果、慢清理与非协作调用的资源保留，
+以及原 HTTP、Curator、准入/预算和模块边界。原 Curator 线程/队列实现已迁入唯一 `bounded_call.py`，没有第二份执行器。
+父侧组合测试验证 caller 超时后 worker 仍持模型名额，同资源和额外可选调用被拒绝，普通 LLM 可取得保留名额；
+worker 真正退出后才允许同资源新请求。只证明组件组合，没有声称实际决策服务或真实模型已接通。
+Curator 超时不再额外 join 0.5 秒：返回时仍存活就记 still-running，退出前不缩批重试；原游标/缩批规则未改。
+修复并覆盖清旗后的 late hook、线程构造/Context复制/启动失败、大期限等待溢出和 caller BaseException 收尾。
+复核只读；没有实际模型、日常配置写入、部署或 Gateway 重启。完整命令及剩余边界见 [组件交接](docs/tasks/DECISION_MODEL_P1CD_HANDOFF.md)。
+
 ## 决策模型 P1-B 原生协议与传输组合（本地）
 
 `test_decision_protocol.py` 与 `test_typesafe_decision.py` 合计 59 项通过，验证冻结输入、版本与来源绑定、

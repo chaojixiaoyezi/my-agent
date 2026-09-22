@@ -1,4 +1,6 @@
-"""把 llm_scale 的全局并发闸接进真实 LLM 热路径(T4 层4:唯一测得到却拦不住的层)。
+# LLM: 普通与可选模型请求使用同一个进程准入器；optional 不排队且保留一个普通名额，同步 hot_path/admission 测试。
+# 模块用途: 把原并发上限接入实际模型调用；开关与容量仍归原环境配置，不另建决策并发池。
+"""把 llm_scale 的全局并发闸接进真实 LLM 热路径。
 
 架构勘查结论:llm_scale 的 admission/限流/公平栈功能齐全但没接线,真实文件网关路径的
 `_invoke_backend_generate` 只有 gauge、无任何全局并发闸——子代理扇出(每层×8、总50)
@@ -25,6 +27,8 @@ _LIMITER: ConcurrencyLimiter | None = None
 _RESOLVED = False
 
 
+# LLM: 环境解析保持原缺失/无效值回退语义，不从模型文本或请求正文读取容量。
+# 函数用途: 读取原准入环境设置，未配置时保持普通调用默认行为。
 def _env_int(name: str, default: int) -> int:
     try:
         return int(str(os.environ.get(name, "")).strip() or default)
@@ -32,6 +36,8 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+# LLM: 所有请求复用同一个惰性实例；此容量是单进程配置，不宣称跨机器限额。
+# 函数用途: 首次调用时创建原并发限制器，未配置上限则不启用该限制。
 def _limiter() -> ConcurrencyLimiter | None:
     global _LIMITER, _RESOLVED
     with _LOCK:
@@ -42,8 +48,10 @@ def _limiter() -> ConcurrencyLimiter | None:
         return _LIMITER
 
 
+# LLM: optional 必须在实际 worker 内持有，不能随外层超时释放；只改领取策略，不改主模型等待或异常类型。
+# 函数用途: 领取原全局模型名额，可选调用立即尝试并给普通调用留一个名额，避免短判断排队阻塞主流程。
 @contextmanager
-def global_llm_admission_slot() -> Iterator[None]:
+def global_llm_admission_slot(*, optional: bool = False) -> Iterator[None]:
     """全局在飞 LLM 并发槽;未配上限时是零成本 nullcontext(默认路径不变)。
 
     槽满等 LLM_ADMISSION_WAIT_SECONDS 拿不到 → 抛 ProviderTransientError(过载/限流类,
@@ -55,7 +63,8 @@ def global_llm_admission_slot() -> Iterator[None]:
             yield
         return
     try:
-        with limiter.slot(timeout=float(_env_int("LLM_ADMISSION_WAIT_SECONDS", 30))):
+        timeout = 0.0 if optional else float(_env_int("LLM_ADMISSION_WAIT_SECONDS", 30))
+        with limiter.slot(timeout=timeout, reserve=1 if optional else 0):
             yield
     except ConcurrencyTimeout as exc:
         from ..backends.errors import ProviderTransientError
@@ -63,6 +72,8 @@ def global_llm_admission_slot() -> Iterator[None]:
         raise ProviderTransientError(f"全局 LLM 并发闸背压: {exc}") from exc
 
 
+# LLM: 仅供没有在途请求的测试重置实例，生产配置切换不得借此丢失真实占用。
+# 函数用途: 清理测试环境缓存，避免上一项测试的容量影响下一项。
 def reset_hot_path_admission_for_test() -> None:
     global _LIMITER, _RESOLVED
     with _LOCK:
