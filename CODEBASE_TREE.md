@@ -106,11 +106,13 @@ agent_py_agent/
 |   |-- plugin_activation_record.py    # 固定环境计划、同代准备/发布/撤销身份及严格读回
 |   |-- plugin_activation_ref.py       # 可信 owner 与原代次引用，跨进程复查唯一安装表
 |   |-- plugin_activation.py           # 原安装版本上的激活迁移、阶段重放与旧代拒绝
+|   |-- plugin_deactivation.py         # 撤销原代、关闭准备执行权并清理两类精确资源
 |   |-- plugin_install_store.py        # owner 唯一安装表、包内容保存及锁内 CAS/提交裁决
 |   |-- plugin_install_tool.py         # 经原执行器读取授权包快照并保存默认停用记录
 |   |-- plugin_configure_tool.py       # 经原执行器读取和验证私有配置，结果不含配置值
+|   |-- plugin_disable_tool.py         # 原宿主链中的隐藏停用工具，区分撤销与资源清理结果
 |   |-- plugin_sources.py              # 安装包与配置共用的有界授权文件读取
-|   |-- plugin_management.py           # 原权限、线程与目录的轻量组合，安装/配置与原结果查询
+|   |-- plugin_management.py           # 原权限、线程与目录的组合，安装/配置/停用及原结果查询
 |   |-- core.py                         # SimpleAgent 组合入口
 |   |-- turn_end.py                     # 主/子代理共用的结束原因及技术续跑判据
 |   |-- model_guidance.py               # 完整 Prompt 与有副作用工具共用的验证/授权软提示唯一正文
@@ -429,6 +431,7 @@ agent_py_agent/
 |   |-- test_host_command_registration.py # 并发请求唯一登记、输入冲突、事务回滚与原链损坏检查
 |   |-- test_host_command_operation_replay.py # 原执行器终态回读、身份隔离及线程退出 UNKNOWN 保留
 |   |-- test_host_command_execution.py # 同请求并发、规范输入守门、终态收口故障及只读查询
+|   |-- test_host_command_resource_reference.py # 原操作反查、坏链拒绝及资源集合回读
 |   |-- test_gateway_admission_wait.py  # 合法排队等准入的结构化等待信号：只写等待事实、有节流与总预算、客户端持续收到且停写/取消/终态收口
 |   |-- test_scheduler_scan_costs.py    # waiting 投影缓存三重校验、runtime_snapshot 锁外解析与旧实现逐字一致、owner 事实缓存失效回归
 |   |-- fixtures/tui/                   # 固定尺寸/时间线的非敏感 TUI PTY 动作 fixture
@@ -461,6 +464,9 @@ agent_py_agent/
 |   |-- test_plugin_activation.py      # 激活/撤销竞争、配额隔离、跨进程 CAS、迁移及坏记录拒绝
 |   |-- test_plugin_activation_ref.py  # 规范用户引用、独立进程复查和 host 创建前撤销拒绝
 |   |-- test_plugin_mcp_transport.py   # 托管协议、队列撤销、调用隔离和原操作账结果集成
+|   |-- plugin_deactivation_fixtures.py # 原执行器内的假启用夹具与真实两类资源，精确 finally 清理
+|   |-- test_plugin_deactivation.py   # 管理停用、原请求重放、准备取消、权限和未知清理保留
+|   |-- test_plugin_deactivation_races.py # 阻塞业务停用、另一插件/任务隔离与独立 host 创建交错
 |   |-- test_directory_lock_wait.py   # 原线程/系统目录锁等待的取消与释放验证
 |   |-- test_plugin_configure_management.py # 原配置执行链、值不外泄、过期请求与 UNKNOWN 重放
 |   |-- test_plugin_management.py      # 真实原执行链、来源消失、配置关闭、路径权限和配额检查
@@ -576,7 +582,8 @@ docs/
 - `docs/design/PLUGIN_ACTIVATION.md`：激活身份、持久撤销、配额与锁边界；完整 stdio 托管、调用和卸载仍待接通。
 - `docs/design/MANAGED_PROCESS_STDIO.md`：原托管器的字节通道、v3 激活归属、旧 v2 原版本恢复及后续执行准入接线边界。
 - `agent_py_agent/agent/plugin_configure_tool.py` 与 `plugin_sources.py`：隐藏管理工具通过原执行链读取授权来源，配置值只进 owner 私有安装表；包与配置共用有界安全读取。
-- `agent_py_agent/agent/plugin_install_tool.py` 与 `plugin_management.py`：管理服务先核对可信授权，隐藏工具再经原执行器读取一次包；默认停用保存，查询只读原请求，不启动插件。
+- `agent_py_agent/agent/plugin_install_tool.py` 与 `plugin_management.py`：管理服务核对原授权并走唯一执行器；安装默认停用，配置和停用同源，查询只读原请求。
+- `agent_py_agent/agent/plugin_deactivation.py` 与 `plugin_disable_tool.py`：先关闭原激活与准备任务权限，再冻结两类准确资源并锁外清理；保留原退出记录，不能将撤销等同清理成功。
 - `agent_py_agent/agent/common/directory_lock.py`、`nofollow_fs.py` 与 `strict_json.py`：分别维护永久互斥、受信根文件原语和严格 JSON；这些公共原语不裁决领域授权或替代操作账本。
 - `agent_py_agent/agent/plugin_command_service.py`：从既有 OwnerIdentity 生成会话目录，旧或缺失业务版本明确拒绝；当前实际插件贡献仍为空。
 - `agent_py_agent/agent/gateway_parts/plugin_command_service.py`：三个 HTTP 入口共用原管理员与可信 owner；只读不初始化冷用户，获授权安装才登记原独立运行。

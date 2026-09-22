@@ -113,6 +113,19 @@ class PluginInstallStore:
             reserve_quota=request.action != "revoke",
         )
 
+    # LLM: 停用空代也须在原安装锁线性化，不能凭先前快照宣布后来启用的插件已停；不写记录、不等待配额。
+    # 函数用途: 确认同一版本确实没有激活，防止无资源停用与并发启用交错时误报成功。
+    def confirm_inactive(self, expected: PluginInstallation) -> PluginMutationResult:
+        # LLM: 回调只在原插件锁内读取同一权威，完整记录相等才能确认无须清理；异常由原写入口保留。
+        # 函数用途: 对空激活做一次无写入的版本核验。
+        def confirm(_quota):
+            current = next((row for row in self.snapshot() if row.manifest.plugin_id == expected.manifest.plugin_id), None)
+            if current != expected or current.activation is not None:
+                raise PluginInstallationError("revision_conflict", "安装或激活已变化，请读取最新状态。")
+            return PluginMutationResult(current, "unchanged", "not_committed", None)
+
+        return self._write(confirm, reserve_quota=False)
+
     # LLM: 此读取不是准入锁；资源层须在原预留/发送临界区调用，允许阶段只能选 preparing/active，不能授权 revoked。
     # 函数用途: 拒绝缺失、损坏、换代及已撤销的原激活，握手可沿同一代跨越发布，业务默认只接受 active。
     def require_activation(self, plugin_id: str, activation_id: str, *,

@@ -52,6 +52,7 @@ from .host_commands import (
     HostCommandRequest,
     insert_host_command,
     read_host_command,
+    read_host_command_by_operation,
 )
 from .operations import (
     _ATTEMPT_TERMINAL_STATUSES,
@@ -496,6 +497,12 @@ class RuntimeRepository(
     def find_host_command(self, request: HostCommandIdentity) -> HostCommandBinding | None:
         with self._runtime_connection() as conn:
             return read_host_command(conn, request)
+
+    # LLM: 仅供宿主消费已持久化的 operation 引用；owner 必须已鉴权，返回原首次绑定，不授予新执行权限。
+    # 函数用途: 为插件撤销等资源管理找回原创建操作，缺失查询不创建运行。
+    def find_host_command_by_operation(self, *, owner_id: str, operation_id: str) -> HostCommandBinding | None:
+        with self._runtime_connection() as conn:
+            return read_host_command_by_operation(conn, owner_id=owner_id, operation_id=operation_id)
 
     # ------------------------------------------------------------------ Task
     # LLM: Task 是可跨多次执行复用的长期身份，运行终态只能写到 TaskRun。

@@ -39,7 +39,7 @@ launcher 创建 host 管道，再将端点直接继承给 child，继续原预�
 完整停用仍须先提交 revoked 并释放安装锁，再由资源 Store 冻结该代记录并写停止意图，最后锁外逐资源清理。
 启动预留、创建进程前和交接均须复查原代；避免安装锁和资源锁反向嵌套。
 不能将 Gateway PID 伪装成可以整树清理的 host。固定引用和 MCP 启动/发送已本地接线，完整管理撤销和资源退出证明仍待组合。
-公开启用、普通/显式调用、disable/remove 只有在这些边界接通后才开放。
+当前管理 disable 的接线见下节；完整启用、普通/显式调用、重新启用及 remove 仍须等发布与资源收口边界全部接通。
 撤销事实不能代替 OS 清理证明，不能提供接受外部 `cleaned=true` 即删除激活记录的入口。
 
 参考边界：沿已核对的本地 Codex MCP Closed-before-cleanup 顺序，以及本仓库
@@ -47,3 +47,24 @@ launcher 创建 host 管道，再将端点直接继承给 child，继续原预�
 `PluginActivationRef` 只携带可信 root/owner 和原 scope，读回沿唯一 Store；它本身不缓存授权。
 准备握手显式接受 preparing/active，业务调用仅 active；旧客户端不能将冻结引用刷新成新代。
 当前托管 MCP 组件已覆盖鲜活发送准入，完整管理装卸仍未完成，也不代替实际多 TUI 验收。
+
+## 管理停用的组合边界
+
+状态：本地 `/plugins disable <插件>` 已沿原管理权限、HostCommand 与 ToolExecutor 接线；尚未部署或实际 TUI 验收。
+完整启用、贡献发布、重新启用与卸载仍未开放，不把假启用组件当产品 enable 验收。
+
+1. 从同次目录/安装快照冻结原代，在唯一安装表先 CAS 为 revoked；释放安装锁。
+2. 按 plan 保存的 operation ID 与可信 owner 反查原 HostCommandBinding；核验首次完整运行链、启用工具及原资源声明。
+3. 沿原取消入口关闭该准备 attempt；DB 事务结束后冻结其完整 execution_scope，包含终态准备命令，以核对 host 是否真正退出。
+4. 按原 owner/plugin/activation 冻结共享 MCP 资源；两类清单各自在原 Store 锁内形成，实际清理均在锁外。
+5. 原清理回执进入同一管理操作，查询/原请求重送不重新选择当前代。无激活的停用也在原安装锁内核对同一版本。
+
+坏准备引用不授权停止其他任务；已撤销的准确共享资源仍尝试清理。坏记录/redo、提交错误或任一退出未知均保留。
+当前普通 task stop 的默认终态过滤不变；仅明确管理清理传 `include_terminal=True`。
+静态目录读原 enabled/activation_id，不能把已发布插件一直画成停用，也不能用目录缓存授予执行权。
+
+本片保留 revoked 激活及全部 retained records；`cleanup_confirmed` 只表示本次两类已选资源退出得到确认。
+仍待实现：资源证据核验后的 release CAS，以及原 ToolExecutor 结果持久化/读回后的精确 consume。
+不得先删记录再提交 release，安装提交 UNKNOWN 时保留全部证据；消费失败只留下历史，不反向改写已确认提交。
+原 operation 的 UNKNOWN 分支不保存新结果，尤其不能在 handler 返回前抢先删除资源记录。
+移除候选环境还须读取原 executor 的真实退出事实；attempt cancelled 只关闭创建权限，不证明原 Python handler 已结束。

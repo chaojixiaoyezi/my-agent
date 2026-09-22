@@ -83,6 +83,18 @@ def _running(session_id: str = "bg-a", **changes: object) -> dict[str, object]:
     )
 
 
+def test_explicit_preparation_cleanup_includes_terminal_but_stays_in_exact_scope(tmp_path):
+    store = ProcessSessionStore(tmp_path)
+    store.write(_running("bg-terminal", status="exited", finished_at=3.0, exit_code=0))
+    store.write(_reservation("bg-not-started", status="not_started", finished_at=3.0))
+    store.write(_running("bg-other", execution_scope={**asdict(SCOPE), "attempt_id": "another"}))
+    assert not store.request_stop(SCOPE).records
+    receipt = store.request_stop(SCOPE, include_terminal=True)
+    assert {row["session_id"] for row in receipt.records} == {"bg-terminal", "bg-not-started"}
+    assert all(row["stop_requested"] for row in receipt.records)
+    assert not store.load("bg-other").record["stop_requested"]
+
+
 def test_missing_reads_do_not_create_store_and_filename_must_match_record(tmp_path):
     store = ProcessSessionStore(tmp_path / "absent")
     assert not store.load("bg-a").record

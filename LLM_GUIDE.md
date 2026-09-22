@@ -21,8 +21,13 @@
 
 ## 当前运行边界（验收状态看 STATUS）
 
+本地 `/plugins disable` 已接原 HostCommand/ToolExecutor：先撤销安装表中的固定代次，再关闭原 enable attempt。
+原准备任务资源与共享 MCP 按各自身份冻结，锁外清理；准备清理明确包含终态记录以核对仍可能存活的 host。
+清理未确认保持 UNKNOWN；原激活仍为 revoked、退出证据保留，释放激活与完整启用/卸载、实际多 TUI 尚未完成。
+原 operation 引用只按可信 owner 精确反查首次管理链，资源核对按原集合语义，不通过列表顺序或当前 attempt 猜身份。
+
 原 host 已有显式 stdio 通道，三路字节直接继承给 child；日志模式默认不变，stdio 绑定 launcher 寿命。
-启动信封当前 v4，session 当前 v3；旧 v2 原版本更新/恢复。共享激活排除业务查询、任务停止和普通终态裁剪。
+启动信封当前 v5，session 当前 v3；旧 v2 原版本更新/恢复。共享激活排除业务查询、任务停止和普通终态裁剪。
 固定激活已接原托管 MCP 启动与实际发送；字段本身仍不授予执行权。完整管理装卸未开放，见 [托管管道](docs/design/MANAGED_PROCESS_STDIO.md)。
 
 安装表本地源码已升 v3：同一原计划预留、发布和撤销，旧代读回不换绑；配置和重新准备须等原激活清理确认。

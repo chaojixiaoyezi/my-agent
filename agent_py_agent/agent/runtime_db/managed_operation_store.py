@@ -629,8 +629,8 @@ class ManagedOperationStore:
         )
 
     # --------------------------------------------- read 面（对账/观测用）
-    # LLM: 回读联查原 Task→TaskRun→AgentRun→Attempt；非 TEXT、过深/坏 JSON 与未知版本拒绝，不能让解析和记录映射使用不同输入。
-    # 函数用途: 严格读取原操作及其输入；历史终态不重开执行权，损坏记录不冒充未执行。
+    # LLM: 回读联查原 Task→TaskRun→AgentRun→Attempt；可核验原持久资源声明，坏 JSON/未知协议/身份失配均拒绝。
+    # 函数用途: 严格读取原操作、输入及指定资源归属；历史终态不重开执行权，损坏记录不冒充未执行。
     def get_tool_operation(
         self,
         *,
@@ -641,6 +641,7 @@ class ManagedOperationStore:
         attempt_id: str = "",
         tool_name: str = "",
         args_hash: str = "",
+        resource_scopes: tuple[str, ...] | None = None,
     ) -> ToolOperationRecord | None:
         if self._repo is None:
             return None
@@ -667,6 +668,7 @@ class ManagedOperationStore:
             or (attempt_id and row["_attempt_id"] != attempt_id)
             or (tool_name and row["operation_type"] != tool_name)
             or (args_hash and payload.get("args_hash") != args_hash)
+            or (resource_scopes is not None and not _matching_resource_scopes(payload, resource_scopes))
         ):
             raise ToolOperationStateError("原工具操作的归属或输入与查询不符")
         return _record_from_row(
@@ -1118,6 +1120,14 @@ def _delete_locks_in_tx(
             "WHERE canonical_scope = ? AND holder_instance = ?",
             (scope, holder),
         )
+
+
+# LLM: 原 claim 保留列表顺序和重复项，读取按原资源集合语义核验；畸形字段不得清洗成有效身份。
+# 函数用途: 判断已保存的资源声明是否正好等于宿主要求，不改写原账。
+def _matching_resource_scopes(payload: dict[str, Any], expected: tuple[str, ...]) -> bool:
+    actual = payload.get("resource_scopes")
+    return (isinstance(actual, list) and all(isinstance(value, str) and value.strip() for value in actual)
+            and set(actual) == set(expected))
 
 
 def _scopes_from_payload(payload: dict[str, Any]) -> list[str]:

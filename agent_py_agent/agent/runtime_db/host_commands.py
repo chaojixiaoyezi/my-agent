@@ -154,3 +154,28 @@ def _read_frozen_request(metadata: object, requested: HostCommandIdentity) -> Ho
     except (TypeError, KeyError, AttributeError, ValueError) as exc:
         raise RuntimeConflictError("宿主命令标识已绑定不同输入或请求记录损坏") from exc
     return frozen
+
+
+# LLM: operation_id 只接受宿主已保存引用；反查仍核对可信 owner、原请求摘要及完整首次运行链，不跟随 current attempt。
+# 函数用途: 让已授权管理操作找回原资源创建者，缺失和坏记录均不能被猜成另一个运行。
+def read_host_command_by_operation(
+    conn: sqlite3.Connection, *, owner_id: str, operation_id: str,
+) -> HostCommandBinding | None:
+    row = conn.execute(
+        "SELECT tr.metadata_json FROM runtime_events e "
+        "LEFT JOIN task_runs tr ON tr.task_run_id = e.task_run_id WHERE e.event_id = ?",
+        (operation_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        metadata = load_strict_json(row["metadata_json"])
+        raw = metadata["host_command"]
+        if raw["schema_version"] != _SCHEMA:
+            raise ValueError("未知请求版本")
+        frozen = HostCommandRequest(**{key: value for key, value in raw.items() if key != "schema_version"})
+        if frozen.owner_id != owner_id or frozen.operation_id != operation_id:
+            raise ValueError("宿主命令归属不符")
+    except (TypeError, KeyError, ValueError, RecursionError) as exc:
+        raise RuntimeConflictError("宿主命令的原操作引用不可读") from exc
+    return read_host_command(conn, frozen)

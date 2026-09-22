@@ -130,9 +130,9 @@ class ProcessSessionTransaction:
         effective = merge_process_record(existing, incoming) if existing else dict(incoming)
         return existing, {**effective, "revision": expected + 1}
 
-    # LLM: scope 必须是宿主冻结身份；坏记录使整批拒绝，v1/共享激活/其他任务不参加，回执只含固定集合。
-    # 函数用途: 在同一锁内选中任务当前的 v2/v3 资源并提交停止意图，不发送进程信号。
-    def request_stop(self, scope: ProcessExecutionScope) -> ProcessSessionCommitReceipt:
+    # LLM: scope 必须是宿主冻结身份；坏记录拒绝整批，v1/共享激活不参加；终态仅在调用方明确核验全部资源时纳入。
+    # 函数用途: 在同一锁内冻结任务资源；管理清理可包含已结束命令的 host，普通任务停止仍只选未终态。
+    def request_stop(self, scope: ProcessExecutionScope, *, include_terminal: bool = False) -> ProcessSessionCommitReceipt:
         records, errors = self.list_records()
         if errors:
             raise ValueError("damaged managed process records prevent complete stop selection")
@@ -141,7 +141,7 @@ class ProcessSessionTransaction:
             for record in records
             if record["schema"] in MANAGED_PROCESS_SESSION_SCHEMAS
             and record.get("activation_scope") is None
-            and record["status"] not in PROCESS_TERMINAL_STATUSES
+            and (include_terminal or record["status"] not in PROCESS_TERMINAL_STATUSES)
             and ProcessExecutionScope(**record["execution_scope"]).matches(scope)
         ]
         transitions = [self._prepare_managed({**record, "stop_requested": True}) for record in selected]
@@ -243,13 +243,13 @@ class ProcessSessionStore:
         except (OSError, TypeError, ValueError, RuntimeError) as exc:
             return [], [process_session_error_report(exc, "process_session_store.list", path=self.root)]
 
-    # LLM: 与预留和交接共用锁；调用方必须先关闭旧执行轮准入，再冻结资源，不能用本方法替代任务取消。
-    # 函数用途: 提交精确任务的停止清单，供控制层在锁外清理这些资源。
-    def request_stop(self, scope: ProcessExecutionScope) -> ProcessSessionCommitReceipt:
+    # LLM: 与预留和交接共用锁；调用方先关闭旧执行轮准入；include_terminal 只扩展同一精确身份的退出证据。
+    # 函数用途: 提交任务停止清单，插件准备收口可一并核验终态 host，信号仍在锁外发送。
+    def request_stop(self, scope: ProcessExecutionScope, *, include_terminal: bool = False) -> ProcessSessionCommitReceipt:
         if not self.root.exists():
             return ProcessSessionCommitReceipt("", ())
         with self.transaction() as transaction:
-            return transaction.request_stop(scope)
+            return transaction.request_stop(scope, include_terminal=include_terminal)
 
     # LLM: 入口只选择已登记资源，不替代安装表撤销；空清单不证明没有尚未登记的启动，必须配合相同准入边界。
     # 函数用途: 冻结一个 owner/插件/代次的共享资源，保持缺失目录查询无副作用。
