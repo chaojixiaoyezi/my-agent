@@ -1,5 +1,7 @@
 # Subagent Structure
 
+`shell_gateway_execution.py` 只从 `common/cancellation.py` 查询本次执行取消；与本模块 `cancellation.py` 的持久子树权限和资源冻结职责分开。
+
 ## 原创建锁与执行轮短事务
 
 - `coordination.py` 复用 `.create-subagents.guard` 的原线程锁和文件锁，仅为同进程/线程/canonical 路径处理嵌套持有；不另存任务状态。

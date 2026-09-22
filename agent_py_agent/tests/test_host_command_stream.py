@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent_py_agent.agent.common.cancellation import CancellationToken
 from agent_py_agent.agent.gateway_parts import command_stream, http_service
 from agent_py_agent.agent.gateway_parts.command_stream_protocol import (
     COMMAND_STREAM_MAX_BYTES,
@@ -23,7 +24,6 @@ from agent_py_agent.agent.gateway_parts.http_service import (
 )
 from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
 from agent_py_agent.agent.settings.config import AgentConfig
-from agent_py_agent.agent.tooling.cancellation import CancellationToken
 from agent_py_agent.agent.user_space.home_layout import home_paths
 from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity
 from agent_py_agent.cli.chat_parts.command_interaction import CommandInteraction

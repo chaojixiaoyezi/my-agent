@@ -6,8 +6,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from ...agent.common.cancellation import CancellationToken
 from ...agent.gateway_parts.paths import GatewayPaths
-from ...agent.tooling.cancellation import CancellationToken
 
 
 # LLM: 请求编号在输入提交时固定；回调只接原 ToolApproval 合同，关闭由创建方负责，不缓存用户授权。

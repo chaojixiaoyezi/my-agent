@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 from .command_catalog import COMMAND_INDEX
+from .common.cancellation import CancellationToken
 from .path_access_policy import PathAccessPolicy
 from .plugin_cleanup import consume_plugin_cleanup
 from .plugin_command_service import execute_plugin_command, read_plugin_catalog
@@ -33,7 +34,6 @@ from .runtime_db.managed_operation_store import ManagedOperationStore
 from .runtime_db.operations import RuntimeConflictError
 from .runtime_db.repository import RuntimeRepository
 from .runtime_db.schema import runtime_db_path
-from .tooling.cancellation import CancellationToken
 from .tooling.executor import ToolExecutorRequest
 from .tooling.models import ToolAvailability, ToolExposure, ToolRuntime, ToolRuntimeSnapshot
 from .tooling.runtime_contracts import ToolCall, tool_arguments_hash

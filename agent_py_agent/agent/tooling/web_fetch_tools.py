@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from .cancellation import cancellation_requested
+from ..common.cancellation import cancellation_requested
 from .models import (
     BaseTool,
     EffectResolverPolicy,

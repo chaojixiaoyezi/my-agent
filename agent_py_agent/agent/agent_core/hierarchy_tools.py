@@ -7,6 +7,7 @@ import json
 from dataclasses import dataclass
 
 from ..action_protocol import subagent_schedule_envelope_from_payload
+from ..common.cancellation import raise_if_cancelled
 from ..common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
 from ..runtime_errors import runtime_error_report
 from ..settings.model_profiles import ModelProfileError
@@ -16,7 +17,6 @@ from ..subagents.services.hierarchy.scheduler import (
     HierarchyScheduleRequest,
     HierarchyScheduleResult,
 )
-from ..tooling.cancellation import raise_if_cancelled
 from ..tooling.models import ToolHandlerOutcome
 from .orchestration.capacity import (
     checked_creation_capacity,

@@ -60,6 +60,7 @@ from agent_py_agent.agent.backends.tool_ir import (
     ToolResult,
     UserTurn,
 )
+from agent_py_agent.agent.common.cancellation import CancellationToken
 from agent_py_agent.agent.conversation.active_turn_compact import (
     ActiveTurnArchiveCompactRequest,
     compact_carried_active_turn_archive,
@@ -72,7 +73,6 @@ from agent_py_agent.agent.conversation.authority import (
 from agent_py_agent.agent.conversation.compact_guard import ConversationCompactError
 from agent_py_agent.agent.conversation.store import ConversationStore
 from agent_py_agent.agent.memory_archive import estimate_tokens
-from agent_py_agent.agent.tooling.cancellation import CancellationToken
 from agent_py_agent.tests._tool_runtime_harness import (
     canonical_history_call,
     canonical_history_result,

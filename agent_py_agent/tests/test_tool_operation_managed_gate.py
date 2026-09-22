@@ -299,6 +299,7 @@ def _tool_registry_agent_stub(
             max_disk_mb=0, load_errors=[], disabled_tools=[]
         ),
         home_paths=SimpleNamespace(
+            root=root,
             owner_id="owner-test",
             owner_provider="local",
             owner_kind="main",

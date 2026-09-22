@@ -8,8 +8,8 @@ import threading
 import uuid
 from dataclasses import dataclass, replace
 
+from ...agent.common.cancellation import CancellationToken
 from ...agent.plugin_commands import plugin_namespace
-from ...agent.tooling.cancellation import CancellationToken
 from .command_interaction import CommandInteraction
 from .plugin_command_client import PluginCommandClient
 

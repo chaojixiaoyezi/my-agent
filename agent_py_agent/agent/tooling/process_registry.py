@@ -13,8 +13,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..common.cancellation import current_cancellation_token, raise_if_cancelled
 from ..common.json_io import read_json_object
-from .cancellation import current_cancellation_token, raise_if_cancelled
 from .process_scope import ProcessAccessScope
 from .process_session_records import (
     LEGACY_PROCESS_SESSION_SCHEMA,

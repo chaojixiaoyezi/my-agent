@@ -34,7 +34,7 @@ from agent_py_agent.cli.chat_parts.slash_commands import handle_common_slash_com
 
 
 @pytest.mark.parametrize(("raw", "message"), [
-    ("/plugins", "插件业务入口"), ("/plugins enable demo", "本次没有执行操作"),
+    ("/plugins", "插件业务入口"), ("/plugins enable demo --help", "enable"),
     ("/plugins@", "插件 ID"), ("/plugins@Demo", "当前目录没有"),
     ('/plugins@demo run "中文 a" -- -x | literal', "当前目录没有"),
     ('/plugins install "未闭合', "引号尚未闭合"),

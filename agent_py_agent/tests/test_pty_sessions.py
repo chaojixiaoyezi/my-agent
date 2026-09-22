@@ -341,8 +341,8 @@ def test_stop_during_start_closes_late_process(tmp_path, monkeypatch, during_pop
     import threading
     from concurrent.futures import ThreadPoolExecutor
 
+    from agent_py_agent.agent.common.cancellation import ToolCancelled
     from agent_py_agent.agent.tooling import pty_sessions as pty
-    from agent_py_agent.agent.tooling.cancellation import ToolCancelled
 
     entered, release = threading.Event(), threading.Event()
     owner, attr = (pty.subprocess, "Popen") if during_popen else (pty, "_sandbox_exec")
@@ -375,12 +375,12 @@ def test_stop_during_start_closes_late_process(tmp_path, monkeypatch, during_pop
 
 
 def test_cancelled_token_never_starts_pty(tmp_path, monkeypatch):
-    from agent_py_agent.agent.tooling import pty_sessions as pty
-    from agent_py_agent.agent.tooling.cancellation import (
+    from agent_py_agent.agent.common.cancellation import (
         CancellationToken,
         ToolCancelled,
         bind_cancellation_token,
     )
+    from agent_py_agent.agent.tooling import pty_sessions as pty
 
     token = CancellationToken()
     token.cancel()

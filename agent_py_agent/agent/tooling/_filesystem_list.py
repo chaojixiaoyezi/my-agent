@@ -8,6 +8,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from ..common.cancellation import raise_if_cancelled
 from ._filesystem_helpers import (
     _bool_param,
     _discovery_result_envelope,
@@ -22,7 +23,6 @@ from ._filesystem_read import (
     FileSystemAccessOptions,
     FileSystemTool,
 )
-from .cancellation import raise_if_cancelled
 from .filesystem_path_recovery import MissingPathRequest, missing_path_result
 from .models import (
     ConcurrencyPolicy,

@@ -351,6 +351,7 @@ agent_py_agent/
 |   |   |-- model_provider_network.py   # 用户主动目录 GET/短问候，不执行工具或创建任务
 |   |   |-- model_scope.py              # 主工作片冻结 config/backend/prompts，切换不热改在途执行
 |   |-- common/                        # 跨域小权威：safe_id、path_normalize、json_io、日志脱敏、结构化输出批处理
+|   |   |-- cancellation.py             # UI、Gateway 和工具共用的唯一进程内取消令牌与上下文绑定
 |   |   |-- directory_lock.py           # 原后台与安装 Store 共用的永久目录系统锁，不降级为仅线程互斥
 |   |   |-- nofollow_fs.py              # 受信根内的文本/二进制读写及锁文件打开，拒绝链接路径
 |   |   |-- nofollow_tree.py            # 固定目录树递归删除，拒绝顶层链接且不沿树内链接越界
@@ -645,6 +646,7 @@ docs/
 - `agent_py_agent/agent/plugin_removal.py` 与 `plugin_remove_tool.py`：原停用释放返回完整记录后，沿原锁 CAS 删除安装；删除回执只存原操作，不建墓碑，不删除用户产物。
 - `agent_py_agent/agent/tooling/process_cleanup_evidence.py`：原资源记录的最小身份摘要及完整退出证明，旧引用不能删除同 ID 新实例；不另建持久状态。
 - `agent_py_agent/agent/common/nofollow_tree.py`：使用已验证父目录描述符递归删除固定目录，不沿链接越界；调用方负责先确认原进程和执行器已退出。
+- `agent_py_agent/agent/common/cancellation.py`：原取消令牌、异常、ContextVar 和回调的唯一实现；全部调用方直接依赖公共层，旧 tooling 入口删除，不管理持久任务或 OS 资源。
 - `agent_py_agent/agent/common/directory_lock.py`、`nofollow_fs.py` 与 `strict_json.py`：分别维护永久互斥、受信根文件原语和严格 JSON；这些公共原语不裁决领域授权或替代操作账本。
 - `agent_py_agent/agent/plugin_command_service.py`：从原安装表生成静态命令目录，旧或缺失版本明确拒绝；显式业务动作尚未接执行，普通工具贡献归 Registry。
 - `agent_py_agent/agent/gateway_parts/plugin_command_service.py`：三个 HTTP 入口共用原管理员与可信 owner；只读不初始化冷用户，获授权安装才登记原独立运行。

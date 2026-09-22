@@ -1,5 +1,7 @@
 # Gateway Structure
 
+`command_stream.py` 的进程内 CancellationToken 统一来自 `common/cancellation.py`；请求线程及消息流仍由本模块管理，令牌不拥有持久任务状态。
+
 ## 子代理插话重放边界
 
 `conversation/agent_control.py` 只决定准确旧/新轮和启动需求；`GuidanceRecovery.prepare_pending_replay` 一次排序锁定两轮，

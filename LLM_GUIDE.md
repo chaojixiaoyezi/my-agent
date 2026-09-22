@@ -1,5 +1,7 @@
 # LLM_GUIDE
 
+本轮发布前取消原语归位：唯一实现位于 `agent/common/cancellation.py`，UI/Gateway/工具直接共用，旧 tooling 路径删除。取消语义不变；验收状态见 TESTS 与具体 TODO。
+
 这份文档是给 LLM/AI 开发者读的项目入口指南。
 
 **开工前必须读，收工后必须改。**

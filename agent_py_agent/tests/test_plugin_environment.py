@@ -8,15 +8,15 @@ from pathlib import Path
 import pytest
 
 from agent_py_agent.agent import plugin_environment as module
-from agent_py_agent.agent.common.json_io import locked_json_path
-from agent_py_agent.agent.plugin_install_store import PluginInstallStore
-from agent_py_agent.agent.plugin_installation import PluginInstallRequest
-from agent_py_agent.agent.plugin_manifest import PluginPackageError
-from agent_py_agent.agent.tooling.cancellation import (
+from agent_py_agent.agent.common.cancellation import (
     CancellationToken,
     ToolCancelled,
     bind_cancellation_token,
 )
+from agent_py_agent.agent.common.json_io import locked_json_path
+from agent_py_agent.agent.plugin_install_store import PluginInstallStore
+from agent_py_agent.agent.plugin_installation import PluginInstallRequest
+from agent_py_agent.agent.plugin_manifest import PluginPackageError
 from agent_py_agent.agent.user_space.owner_quota import OwnerQuotaExceeded, OwnerQuotaUnavailable
 from agent_py_agent.agent.user_space.owner_resolver import resolve_owner_home
 from agent_py_agent.tests.plugin_environment_fixtures import prepare_environment

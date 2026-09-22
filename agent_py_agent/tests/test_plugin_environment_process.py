@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from agent_py_agent.agent import plugin_environment_process as module
-from agent_py_agent.agent.tooling.cancellation import (
+from agent_py_agent.agent.common.cancellation import (
     CancellationToken,
     ToolCancelled,
     bind_cancellation_token,

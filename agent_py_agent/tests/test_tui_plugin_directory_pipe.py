@@ -11,7 +11,7 @@ from prompt_toolkit.output import DummyOutput
 
 from agent_py_agent.agent.plugin_command_catalog import PluginCommandCatalog
 from agent_py_agent.agent.plugin_command_service import execute_plugin_command
-from agent_py_agent.cli.chat_parts import plugin_command_client, rendering
+from agent_py_agent.cli.chat_parts import plugin_command_client, plugin_command_stream, rendering
 from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
 from agent_py_agent.cli.chat_parts.tui_ui_setup import make_tui_app
 from agent_py_agent.tests.test_plugin_command_catalog import _plugin
@@ -38,7 +38,14 @@ def test_native_keybindings_refresh_accept_stash_and_submit_original_revision(
             )
         )
 
+    def command_stream(port, owner, payload, interaction):
+        assert payload["plugin_request_id"] == interaction.request_id
+        assert interaction.gateway_paths is not None
+        assert not interaction.cancellation_token.cancelled
+        return transport(port, owner, "/client/plugins", payload)[1]
+
     monkeypatch.setattr(plugin_command_client, "post_gateway_json", transport)
+    monkeypatch.setattr(plugin_command_stream, "post_plugin_command_stream", command_stream)
     monkeypatch.setattr(rendering, "_TUI_OUTPUT_SINK", None)
 
     async def scenario():

@@ -17,6 +17,10 @@ from agent_py_agent.agent.backends.tool_protocol_adapter import (
     ProviderToolCallRequest,
     canonical_tool_calls_from_response,
 )
+from agent_py_agent.agent.common.cancellation import (
+    CancellationToken,
+    current_cancellation_token,
+)
 from agent_py_agent.agent.concurrency.interrupt import (
     interrupt_by_name,
     register_interruptible,
@@ -32,10 +36,6 @@ from agent_py_agent.agent.contracts.required_actions import (
 )
 from agent_py_agent.agent.local_storage import LocalStore
 from agent_py_agent.agent.tooling._filesystem_write import WriteFileTool
-from agent_py_agent.agent.tooling.cancellation import (
-    CancellationToken,
-    current_cancellation_token,
-)
 from agent_py_agent.agent.tooling.controlled_exec import ControlledExecTool
 from agent_py_agent.agent.tooling.executor import ToolExecutor, ToolExecutorRequest
 from agent_py_agent.agent.tooling.models import (

@@ -12,6 +12,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from .common.cancellation import raise_if_cancelled
 from .common.nofollow_fs import open_directory_beneath
 from .common.strict_json import load_strict_json
 from .plugin_environment_plan import interpreter_fingerprint
@@ -29,7 +30,6 @@ from .plugin_wheel_layout import (
     verify_wheel_installation,
 )
 from .plugin_wheels import inspect_plugin_wheels
-from .tooling.cancellation import raise_if_cancelled
 from .user_space.owner_quota import OwnerQuotaChange, owner_quota_enforcer_from_policy
 from .user_space.owner_resolver import OwnerHomeResult
 

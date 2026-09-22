@@ -22,8 +22,8 @@ from agent_py_agent.agent.agent_core.tool_loop.round_execution import (
     execute_tool_round,
 )
 from agent_py_agent.agent.backends import ModelResponse
+from agent_py_agent.agent.common.cancellation import CancellationToken
 from agent_py_agent.agent.tooling.action_policy import ActionDecision
-from agent_py_agent.agent.tooling.cancellation import CancellationToken
 from agent_py_agent.agent.tooling.executor import ToolExecution
 from agent_py_agent.agent.tooling.runtime_contracts import (
     ProviderToolCapability,

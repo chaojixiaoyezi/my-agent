@@ -18,6 +18,7 @@ from itertools import islice
 from pathlib import Path
 from typing import Any
 
+from ..common.cancellation import raise_if_cancelled, register_cancellation_callback
 from ._filesystem_helpers import (
     _MAX_SEARCH_LINE_CHARS,
     _read_text_safe,
@@ -42,7 +43,6 @@ from ._filesystem_search_models import (
     search_request_from_params,
     slice_hits,
 )
-from .cancellation import raise_if_cancelled, register_cancellation_callback
 from .filesystem_artifact_guard import (
     is_tool_output_artifact_path,
     mark_tool_output_artifact_result,

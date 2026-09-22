@@ -16,13 +16,13 @@ from typing import Any
 
 _LOGGER = logging.getLogger(__name__)
 
+from ..common.cancellation import CancellationToken
 from ..local_storage import ToolOperationRecord
 from ..runtime_db.managed_operation_store import (
     AuthorityContextMissing,
     ToolOperationAuthorityRequest,
 )
 from .action_policy import ActionDecision, ActionPolicy, ActionPolicyRequest
-from .cancellation import CancellationToken
 from .models import (
     ResourceScopeResolutionError,
     ToolFailureStage,

@@ -6,11 +6,11 @@ from threading import Event
 
 import pytest
 
+from agent_py_agent.agent.common.cancellation import CancellationToken
 from agent_py_agent.agent.plugin_management import PluginManagement
 from agent_py_agent.agent.plugin_runtime import PluginMCPClient, plugin_tool_name
 from agent_py_agent.agent.runtime_db.repository import RuntimeConflictError, RuntimeRepository
 from agent_py_agent.agent.runtime_db.schema import runtime_db_path
-from agent_py_agent.agent.tooling.cancellation import CancellationToken
 from agent_py_agent.agent.tooling.mcp_protocol import MCPInbox
 from agent_py_agent.tests.plugin_activation_fixtures import (
     _SERVER,

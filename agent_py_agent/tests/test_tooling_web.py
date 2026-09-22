@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agent_py_agent.agent.tooling.cancellation import (
+from agent_py_agent.agent.common.cancellation import (
     CancellationToken,
     bind_cancellation_token,
 )

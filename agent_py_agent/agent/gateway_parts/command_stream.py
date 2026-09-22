@@ -1,3 +1,4 @@
+# LLM: 取消令牌来自中性 common.cancellation，与 UI 和原执行器共用唯一类型，不引入 tooling 依赖。
 # LLM: HTTP 原请求线程执行命令；辅助线程只发有界心跳，断连置本命令取消位，不创建新执行器或改写持久结果。
 # 模块用途: 在同机插件命令执行期间运输原审批和结果，并把客户端消失传给原取消令牌。
 
@@ -7,7 +8,7 @@ import threading
 from collections.abc import Callable
 from dataclasses import asdict
 
-from ..tooling.cancellation import CancellationToken
+from ..common.cancellation import CancellationToken
 from ..user_space.owner_resolver import OwnerIdentity
 from .command_stream_protocol import (
     COMMAND_STREAM_MEDIA_TYPE,

@@ -1,5 +1,7 @@
 # 设计台账
 
+发布前边界修正已本地实现：进程内取消令牌从 tooling 迁入 common，保留唯一类型与上下文，不新增兼容入口或持久状态。详见[宿主命令边界](docs/design/HOST_COMMAND_EXECUTION.md#解决问题)，完整发布验收仍待通过。
+
 十步重构的具体 TODO 已落地于 [原 Goal 台账](docs/tasks/REFACTOR_PLUGIN_GOAL.md#当前-todo唯一执行清单)。仅细化交付顺序与汇报，不改变架构范围；当前第 4 步的本地实现、发包部署与真实 TUI 验收分开标记。
 
 第 4 步新增[插件逐次工作区读取上下文](docs/design/PLUGIN_WORKSPACE_CONTEXT.md)，状态为开发中：

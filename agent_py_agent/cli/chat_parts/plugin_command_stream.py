@@ -7,6 +7,7 @@ import json
 import threading
 import urllib.request
 
+from ...agent.common.cancellation import CancellationToken
 from ...agent.contracts.tool_approval import ToolApprovalDecision, ToolApprovalRequest
 from ...agent.gateway_parts.command_stream_protocol import (
     COMMAND_STREAM_MAX_BYTES,
@@ -16,7 +17,6 @@ from ...agent.gateway_parts.command_stream_protocol import (
     command_stream_owner,
 )
 from ...agent.gateway_parts.permission_bridge import write_gateway_permission_decision
-from ...agent.tooling.cancellation import CancellationToken
 from ..chat_client_context import _gateway_headers, _with_client_identity
 from .command_interaction import CommandInteraction
 

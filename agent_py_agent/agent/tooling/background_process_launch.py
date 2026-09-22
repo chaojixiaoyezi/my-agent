@@ -13,8 +13,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..common.cancellation import raise_if_cancelled
 from ..common.json_io import write_json_file_atomic
-from .cancellation import raise_if_cancelled
 from .process_registry import (
     _process_instance_terminated,
     capture_process_birth_token,

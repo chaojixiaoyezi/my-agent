@@ -1,5 +1,7 @@
 # Gateway 维护状态
 
+插件命令流的取消原语现直接引用 `common/cancellation.py`，不再越层依赖 tooling。保持逐请求取消和原审批运输，发布前回归进行中。
+
 - 独立插件命令的交互审批已有本地实现：原 HTTP 请求线程执行，消息流运输原审批和结果，心跳仅检测本连接离开。
   同机 TUI 使用原 GatewayPaths 及服务端规范 owner 派生审批地址，覆盖按用户隔离关闭时的 owner 映射。
   复用 StreamApproval 和原文件桥且禁用会话批准缓存；每次 Enter 的令牌不借主/子任务，断连不自动重发。
