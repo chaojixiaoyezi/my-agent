@@ -330,3 +330,25 @@ def test_background_overflow_refresh_retains_original_scope_bundle(background_ca
     assert [row.message_id for row in after.compact_source.messages] == [
         row.message_id for row in before.compact_source.messages
     ]
+
+
+@pytest.mark.parametrize("recent_limit", [0, 20])
+def test_detached_operational_and_native_source_do_not_load_all_bodies(background_case, monkeypatch, recent_limit):
+    case = background_case
+    case.agent.config.conversation_context_recent_limit = recent_limit
+    original = case.store.messages.recent_report
+
+    # LLM: 普通展示窗口仍可读取，只有旧全量入口被拒绝；实际canonical选择必须走原文件流式验证。
+    # 函数用途: 防止native来源虽已改流式、后台operational却仍提前加载全部历史的回归。
+    def bounded_recent(thread_id, *, limit=20):
+        assert limit > 0, "detached preparation must not load all canonical bodies"
+        return original(thread_id, limit=limit)
+
+    monkeypatch.setattr(case.store.messages, "recent_report", bounded_recent)
+    request = _request(case)
+    history = prepare_background_history_or_raise(case.agent, case.store, case.thread, request)
+    assert history.status == "ready"
+    assert [row.content for row in history.compact_source.messages] == ["PRE_CREATION_EVIDENCE", "TASK_A_LATER_EVIDENCE"]
+    visible = json.dumps(history.context_bundle, ensure_ascii=False)
+    assert "PRE_CREATION_EVIDENCE" in visible and "TASK_A_LATER_EVIDENCE" in visible
+    assert "UNRELATED_TASK_B_SECRET" not in visible

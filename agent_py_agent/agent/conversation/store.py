@@ -96,16 +96,19 @@ class ConversationStore:
         bundle, _load_errors = self.context_bundle_report(thread_id, recent_limit=recent_limit)
         return bundle
 
-    # LLM: 模型上下文只投影会话内容和运行事实，model_context_usage 仅供 UI，不得扰动缓存前缀。
+    # LLM: 模型上下文只投影运行事实；include_messages=False只延后正文读取，调用方须同次按任务范围补齐，不能当空历史。
     # 函数用途: 读取会话上下文及加载错误，排除展示遥测，原持久 thread 完整保留。
     def context_bundle_report(
         self,
         thread_id: str,
         *,
         recent_limit: int = 20,
+        include_messages: bool = True,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         thread = self.threads.require(thread_id)
-        messages, message_errors = self.messages.recent_report(thread_id, limit=recent_limit)
+        messages, message_errors = (
+            self.messages.recent_report(thread_id, limit=recent_limit) if include_messages else ([], [])
+        )
         tasks, task_errors = self.tasks.list_report(thread_id)
         observations, observation_errors = self.observations.recent_report(
             thread_id, limit=recent_limit

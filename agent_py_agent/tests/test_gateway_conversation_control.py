@@ -3215,7 +3215,7 @@ def test_manual_compact_after_task_head_uses_thread_source_and_replays_receipt(t
     }) for role in ("user", "assistant")]
     local_source = load_conversation_compact_source(
         agent, store, thread, scope=CompactScope(kind="task", task_id="task-A", created_at=1.0),
-        select_rows=lambda canonical: canonical[:1],
+        selector_factory=lambda positions: lambda row: positions[row.message_id] == 0,
     )
     with monkeypatch.context() as local_patch:
         local_patch.setattr(compact_module, "_summarize", lambda *_args, **_kwargs: "仅任务A的摘要")

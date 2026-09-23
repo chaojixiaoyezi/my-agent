@@ -17,7 +17,7 @@ class _BrokenBackgroundContextStore(ConversationStore):
     def context_bundle(self, thread_id: str, *, recent_limit: int = 20):
         raise OSError("context bundle unreadable")
 
-    def context_bundle_report(self, thread_id: str, *, recent_limit: int = 20):
+    def context_bundle_report(self, thread_id: str, *, recent_limit: int = 20, include_messages: bool = True):
         raise OSError("context bundle unreadable")
 
     def _fake_wakes_pending(self, *, limit: int = 100, include_normal: bool = True):

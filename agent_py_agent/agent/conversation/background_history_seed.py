@@ -13,6 +13,7 @@ from .background_context import (
     BackgroundContextRequest,
     TaskScopeDecision,
     detached_task_rows,
+    history_scope_selector_factory,
     is_narrow_audit_event,
     load_context_bundle,
     task_scope_decision,
@@ -258,12 +259,10 @@ def refresh_background_history(agent, store, thread, previous: BackgroundHistory
 # LLM: 全局cursor不代表局部摘要覆盖；先按原任务事实筛选完整行，再按实际采用的view精确替代，不修改原记录。
 # 函数用途: 共用首次和溢出准备的历史读取、范围过滤和来源构造；坏原文不能当成空历史。
 def _load_scoped_history(agent, store, thread, decision, scope, scoped_thread) -> BackgroundHistorySeedResult:
-    from functools import partial
-
     from .compact import load_conversation_compact_source
 
     source = load_conversation_compact_source(
-        agent, store, thread, scope=scope, select_rows=partial(history_scope_rows, decision),
+        agent, store, thread, scope=scope, selector_factory=history_scope_selector_factory(decision),
     )
     application = source.compact_context
     projected_thread = dict(scoped_thread)

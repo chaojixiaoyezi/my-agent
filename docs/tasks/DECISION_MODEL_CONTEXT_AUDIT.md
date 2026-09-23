@@ -1274,3 +1274,26 @@ append_once沿原锁流式扫描固定物理EOF的全部记录，命中后仍检
 建议下一步：在原Compact来源/作用域读取接入固定尾界，再沿原writer/CAS处理连续范围证明，不能直接把tuple改成分页就声称完成。其它agent可以只读复核或独立构造存储边界测试，不并行改共享扫描、作用域选择和writer。本片仍O历史长度扫描时间，单行解析无硬帽；固定字节尾界不防违规等长替换，显示页暂未启用新字节预算，整项12.4继续开放。
 
 本片Ruff、doc sync、import boundaries零发现、strict code-size hard=0且原基线未改、diff和clean-package均通过，本地严格gate已通过；未推送、未部署，线上CI未作为验收来源。页预算约束返回行的原始字节总量，边界探测最多额外读取1字节，完整尾界查找另有最多64KiB块；解码对象和既有单行本身仍需要对应内存，不宣称进程RSS等于页预算。
+
+
+### 固定来源范围筛选（本地实现，接口集成未验完）
+
+显式scope的Compact加载不再先recent_report(limit=0)取得全部正文再筛选：在原MessageStore完整LF尾界内第一遍验证非display身份/顺序与创建锚点，第二遍只保留宿主范围内未覆盖正文，并比较同范围原字节SHA256；迟到追加留待下一次读取，坏行、重复身份、缺legacy终点及两遍之间改写均拒绝。selector改为基于只读位置的逐行bool，不能返回另造行或重排来源。v3精确ID排除及legacy前缀终点沿原视图，无新checkpoint或覆盖写入。
+
+Gateway沿原visible谓词；后台detached创建锚点/时间加精确lineage统一编译成同一谓词，缺锚点保持仅精确任务。后台operational的_detached_task_messages也沿同一原文扫描，只在选完范围后应用原展示limit，不先全量to_dict。
+
+本片内存仍包含O消息数的ID位置和O未压正文，单行按原JSON解析完整读取，没有增加任意正文截断或行大小硬门；仍有旧未显式scope入口和checkpoint覆盖链待迁移。其意义是移除已覆盖/范围外大正文的全量常驻，不等于全部Compact有界。后续须接流式分段与同一writer/CAS连续覆盖证明。
+
+后台有任务时通过原context_bundle_report(include_messages=False)延后正文；同一次任务事实决定范围，普通任务再沿原recent_limit读取，detached沿固定来源筛选后才应用窗口。无任务与其他调用默认行为保持；0仍表示不限制。读取错误进入原load_errors，禁止空历史继续生成。
+
+本片交接：基线467f3cac3，分支codex/decision-model-integration，决策线负责原只读加载及范围筛选；已与模块重构owner对齐。生产文件为message_scan/message_selection、compact、background_context/background_history_seed、store及gateway_parts/request_context；未改runtime、claim、Compact writer/schema或主线独占test_background_main_agent_runtime.py。不推送、不部署、不调用真实模型。
+
+最终12文件联合 **326 passed（30.05秒）**，日志 `/tmp/decision_scope_scan_final_20260923.log`；覆盖固定EOF后追加、两遍间改写、排除行仍验坏数据、只读位置、legacy完整前缀、锚点被覆盖/缺失、0与1窗口及读取错误。1000行8KB正文的tracemalloc检查仅证明本样本避免全量常驻，不是RSS硬上限。此前225/71/29项属于重叠中间验证，不累加。
+
+**仍有4项明确失败，整体gate未通过**：主线独占test_background_main_agent_runtime.py中的test_background_context_overflow_resumes_after_committed_recovery_same_slice、test_background_compact_slice_yields_after_eight_progressful_generations[False/True]、test_background_empty_transcript_carries_active_turn_into_committed_recovery。结构化load_errors均为TypeError：fake Store.context_bundle_report不接受include_messages；日志 `/tmp/decision_scope_failures_typed_20260923.log`。owner要求保留其7.10文件独占，由第8步集成适配；本线不增加生产兼容分支来隐藏测试接口差异。原8项历史全仓失败不被此片覆盖。
+
+建议下一步：主线适配四个fake Store后联验；本线另片修复Compact已保留历史在history_projection等宿主投影再次受字符窗口裁剪的问题，并比较候选与真实HTTP。普通展示窗口继续保持。之后才沿原摘要分段器接可重读来源，原生信封必须跨页完整分组，writer/CAS继续唯一。SQLite临时索引及v4覆盖分页只是审查提出的候选方向，尚未采纳或实现；不能将其当成本片交付。只读审查和独立测试可并行，恢复写入及共享Gateway维持单owner。
+
+本片非pytest守卫现已通过：Ruff、doc sync、import boundaries零发现、strict code-size hard=0（未改基线）、diff和clean-package。首次Ruff发现新增测试的两处导入格式，doc sync发现Gateway注释/模块文档遗漏，clean-package发现两份新文件未纳入版本管理；均已修正。主线独占4项测试接口失败仍开放，因此整体本地严格gate未通过，不推送；线上CI未作为验收来源。
+
+Sol high独立只读复核未发现可确认的新增缺陷：核对普通0/1窗口、延后读取错误、detached锚点与lineage、固定EOF/hash及legacy边界；未重复运行测试，不以审查替代上述测试。

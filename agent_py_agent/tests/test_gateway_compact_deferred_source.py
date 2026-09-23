@@ -148,7 +148,7 @@ def test_deferred_source_excludes_only_unfinished_current_user_suffix(tmp_path) 
     assert direct.messages == completed.compact_source.messages
 
 
-def test_bad_canonical_source_raises_instead_of_becoming_empty(tmp_path, monkeypatch) -> None:
+def test_bad_canonical_source_raises_instead_of_becoming_empty(tmp_path) -> None:
     agent = _agent(tmp_path, context_tokens=1_000_000)
     request = _request("ou_deferred_bad_source")
     initial = _context(agent, request, "gw-create", "开始")
@@ -157,12 +157,11 @@ def test_bad_canonical_source_raises_instead_of_becoming_empty(tmp_path, monkeyp
     )
     store = agent.conversation_store
     before = store.threads.load(initial.thread_id)
-    original_report = store.messages.recent_report
-    monkeypatch.setattr(
-        store.messages,
-        "recent_report",
-        lambda _thread_id, *, limit: ([], [{"error_code": "transcript_corrupt"}]),
-    )
+    path = store.storage.message_path(initial.thread_id)
+    original_bytes = path.read_bytes()
+    with path.open("ab") as handle:
+        handle.write(b"broken canonical row\n")
+    corrupted_bytes = path.read_bytes()
 
     with pytest.raises(ConversationCompactError):
         gateway_conversation_context(
@@ -170,7 +169,7 @@ def test_bad_canonical_source_raises_instead_of_becoming_empty(tmp_path, monkeyp
         )
 
     after = store.threads.load(initial.thread_id)
-    monkeypatch.setattr(store.messages, "recent_report", original_report)
     assert before is not None and after is not None
     assert after.compact_generation == before.compact_generation == 0
-    assert store.messages.recent(initial.thread_id, limit=0)[0].content == "必须保留的原文"
+    assert path.read_bytes() == corrupted_bytes
+    assert corrupted_bytes.startswith(original_bytes)

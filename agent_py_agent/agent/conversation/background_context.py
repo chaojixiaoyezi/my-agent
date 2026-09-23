@@ -394,15 +394,18 @@ def _narrow_audit_event_bundle(
     }
 
 
-# LLM: 只读同一 store 的权威 bundle，统一任务范围投影；失败放入 load_errors，历史入口必须据此拒绝缺失历史。
+# LLM: 有任务先延后正文，读取同次任务事实后按原范围补齐；不重读link，失败进入load_errors阻止缺历史继续。
 # 函数用途: 加载当前会话的任务视图，保留读取失败供调用方按合同处理。
 def load_context_bundle(state: BackgroundContextLoad) -> dict[str, Any]:
     """Load one authoritative thread ledger and project the current task view."""
     try:
+        messages_deferred = False
         if callable(getattr(state.store, "context_bundle_report", None)):
+            messages_deferred = bool(str(state.task_id or "").strip())
             bundle, load_errors = state.store.context_bundle_report(
                 state.thread.thread_id,
                 recent_limit=_config_int(state.config, "conversation_context_recent_limit"),
+                **({"include_messages": False} if messages_deferred else {}),
             )
             state.load_errors.extend(load_errors)
         else:
@@ -410,7 +413,7 @@ def load_context_bundle(state: BackgroundContextLoad) -> dict[str, Any]:
                 state.thread.thread_id,
                 recent_limit=_config_int(state.config, "conversation_context_recent_limit"),
             )
-        return _task_scoped_operational_context(state, bundle)
+        return _task_scoped_operational_context(state, bundle, messages_deferred=messages_deferred)
     except Exception as exc:
         state.load_errors.append(
             runtime_error_report(exc, context="background_context.context_bundle")
@@ -452,11 +455,13 @@ def task_scope_decision(
     )
 
 
-# LLM: 任务过滤由一次结构化范围裁决决定；普通连续对话保留全部历史，detached 才应用创建锚点。
+# LLM: 任务过滤由一次结构化裁决决定；延后正文在此补齐，普通任务沿原窗口，detached沿创建锚点，错误不空历史。
 # 函数用途: 把共享会话投影为本次任务视图，避免后来的无关消息串入独立任务。
 def _task_scoped_operational_context(
     state: BackgroundContextLoad,
     bundle: dict[str, Any],
+    *,
+    messages_deferred: bool = False,
 ) -> dict[str, Any]:
     """Project one task from the shared ledger using only persisted identities.
 
@@ -468,6 +473,12 @@ def _task_scoped_operational_context(
     projection neither copies history nor classifies natural-language text.
     """
     decision = task_scope_decision(state, bundle)
+    if messages_deferred and not decision.detached:
+        rows, errors = state.store.messages.recent_report(
+            state.thread.thread_id, limit=_config_int(state.config, "conversation_context_recent_limit"),
+        )
+        state.load_errors.extend(errors)
+        bundle = {**bundle, "messages": [row.to_dict() for row in rows]}
     if not decision.task_id:
         return bundle
     task_ids = set(decision.task_ids)
@@ -546,28 +557,26 @@ def _detached_named_task_context(
     return projected
 
 
-# LLM: 读取完整消息后按锚点筛选，最后才施加 recent limit；读取错误必须进入本片错误集合。
-# 函数用途: 获得独立任务可见的消息，避免先分页丢掉创建锚点。
+# LLM: 固定完整消息边界后流式按锚点筛选，最后施加recent limit；读取错误必须进入本片错误集合。
+# 函数用途: 固定完整canonical尾界后筛选独立任务可见消息，只在最后应用原展示窗口，避免整份正文加载。
 def _detached_task_messages(
     state: BackgroundContextLoad,
     link: dict[str, Any],
     task_ids: set[str],
 ) -> list[dict[str, Any]]:
+    from .message_selection import select_message_snapshot
+
     try:
-        rows, errors = state.store.messages.recent_report(
-            state.thread.thread_id,
-            limit=0,
+        decision = TaskScopeDecision(state.task_id, frozenset(task_ids), dict(link), True)
+        selected = select_message_snapshot(
+            state.store.messages, state.thread.thread_id,
+            selector_factory=history_scope_selector_factory(decision),
+            retain_limit=_config_int(state.config, "conversation_context_recent_limit"),
         )
-        state.load_errors.extend(errors)
-        payload = [row.to_dict() for row in rows]
+        return [row.to_dict() for row in selected]
     except Exception as exc:
-        state.load_errors.append(
-            runtime_error_report(exc, context="background_context.detached_messages")
-        )
-        payload = []
-    selected = detached_task_rows(payload, link, task_ids)
-    limit = _config_int(state.config, "conversation_context_recent_limit")
-    return selected if limit <= 0 else selected[-limit:]
+        state.load_errors.append(runtime_error_report(exc, context="background_context.detached_messages"))
+        return []
 
 
 # LLM: operational 与 native 历史必须共用此算法；锚点缺失时仅保留精确身份行，不能放开整段会话。
@@ -577,34 +586,57 @@ def detached_task_rows(
     link: dict[str, Any],
     task_ids: set[str],
 ) -> list[dict[str, Any]]:
-    anchor_id = str(link.get("context_anchor_message_id") or "").strip()
-    if not any(str(row.get("message_id") or "").strip() for row in rows):
-        anchor_id = ""
+    positions: dict[str, int] = {}
+    for index, row in enumerate(rows):
+        message_id = str(row.get("message_id") or "").strip()
+        if message_id:
+            positions.setdefault(message_id, index)
+    predicate = detached_row_selector(link, task_ids, positions)
+    return [row for index, row in enumerate(rows) if predicate(row, index)]
+
+
+# LLM: 编译同一次创建锚点/时间与精确lineage；positions来自完整输入，缺锚点只允许精确任务，无正文关键词裁决。
+# 函数用途: 让operational列表和canonical流式读取共用唯一逐行范围规则，编译不读取持久状态。
+def detached_row_selector(link, task_ids, positions):
+    anchor_id = str(link.get("context_anchor_message_id") or "").strip() if positions else ""
+    anchor_position = next((position for key, position in positions.items() if str(key).strip() == anchor_id), None)
+    frozen_ids = frozenset(task_ids)
     try:
         created_at = float(link.get("created_at") or 0.0)
     except (TypeError, ValueError):
         created_at = 0.0
-    before_anchor = bool(anchor_id)
-    anchor_found = not anchor_id
-    selected: list[dict[str, Any]] = []
-    for row in rows:
-        exact_task_row = _context_row_matches_task_ids(row, task_ids)
-        snapshot_row = False
-        if anchor_id and before_anchor:
-            snapshot_row = True
-            if str(row.get("message_id") or "").strip() == anchor_id:
-                before_anchor = False
-                anchor_found = True
-        elif not anchor_id:
+
+    # LLM: 快照前缀必须有已找到的锚点；无消息ID的guidance沿原创建时间，后续正文仅按精确身份放行。
+    # 函数用途: 对一行结构化消息及其原序号判断是否属于任务创建快照或本任务后续流量。
+    def includes(row, index):
+        if anchor_id:
+            snapshot = anchor_position is not None and index <= anchor_position
+        else:
             try:
-                snapshot_row = float(row.get("created_at") or 0.0) <= created_at
+                snapshot = float(row.get("created_at") or 0.0) <= created_at
             except (TypeError, ValueError):
-                snapshot_row = False
-        if exact_task_row or snapshot_row:
-            selected.append(row)
-    if anchor_id and not anchor_found:
-        return [row for row in rows if _context_row_matches_task_ids(row, task_ids)]
-    return selected
+                snapshot = False
+        return snapshot or _context_row_matches_task_ids(row, frozen_ids)
+
+    return includes
+
+
+# LLM: 原TaskScopeDecision来自成功的同次bundle；编译器只读完整身份位置，不重读link或复制全量正文。
+# 函数用途: 将原后台范围规则适配成逐行canonical选择，锚点被摘要覆盖仍能准确限定创建快照。
+def history_scope_selector_factory(decision: TaskScopeDecision):
+    frozen = deepcopy(decision)
+
+    # LLM: positions是当前固定EOF内全部非display消息的只读位置，缺锚点不能退到时间扩大范围。
+    # 函数用途: 只编译一次原范围谓词，将消息元数据直接投影给唯一任务筛选算法。
+    def compile_selector(positions):
+        if not frozen.detached or not frozen.exact_link:
+            return lambda _row: True
+        predicate = detached_row_selector(frozen.exact_link, frozen.task_ids, positions)
+        return lambda row: predicate({
+            "message_id": row.message_id, "created_at": row.created_at, "metadata": row.metadata,
+        }, positions[row.message_id])
+
+    return compile_selector
 
 
 # LLM: 摘要继承只比较持久时间；无效时间不能放行未来摘要，不以摘要文字判断任务关系。

@@ -40,6 +40,21 @@ def complete_message_offset(path: Path) -> int:
         return complete_jsonl_end(handle, handle.seek(0, 2))
 
 
+# LLM: canonical分页和来源扫描共用解析/线程检查，非对象JSON与错误身份都归数据损坏，不猜空记录。
+# 函数用途: 将一条完整原字节消息解析为本线程记录，不修改正文、元数据或持久状态。
+def _message_from_line(line: bytes, thread_id: str) -> MessageLogEntry:
+    try:
+        raw = json.loads(line.decode("utf-8"))
+        if not isinstance(raw, dict):
+            raise ValueError("message row must be a JSON object")
+        entry = MessageLogEntry.from_dict(raw)
+    except (ValueError, TypeError, UnicodeError) as exc:
+        raise DataCorruptionError("invalid canonical message row") from exc
+    if entry.thread_id != thread_id:
+        raise DataCorruptionError("invalid canonical message row")
+    return entry
+
+
 # LLM: through只限定同canonical文件的读取范围，不授予摘要覆盖；max_bytes限制物理页与单行，错误由Store包装。
 # 函数用途: 读取一页完整消息；页内放不下的下一行留待下页，第一行超限则显式拒绝而不无限空转。
 def read_message_page(
@@ -82,15 +97,7 @@ def read_message_page(
                 if through is not None or max_bytes is not None or handle.tell() < end:
                     raise DataCorruptionError("canonical transcript truncated during page read")
                 break
-            try:
-                raw = json.loads(line.decode("utf-8"))
-                if not isinstance(raw, dict):
-                    raise ValueError("message row must be a JSON object")
-                entry = MessageLogEntry.from_dict(raw)
-            except (ValueError, TypeError, UnicodeError) as exc:
-                raise DataCorruptionError("invalid canonical message row") from exc
-            if entry.thread_id != thread_id:
-                raise DataCorruptionError("invalid canonical message row")
+            entry = _message_from_line(line, thread_id)
             entries.append(entry)
             cursor = handle.tell()
     return entries, cursor
@@ -120,3 +127,30 @@ def find_message_dedupe(path: Path, key: str) -> MessageLogEntry | None:
                     and str(entry.metadata.get("dedupe_key") or "").strip() == key):
                 existing = entry
     return existing
+
+
+# LLM: 固定完整LF尾界内逐行验证原消息，visitor仅接收解析副本；完整原字节hash用于两次只读扫描一致性，不作持久权威。
+# 函数用途: 不保存全量正文地扫描canonical消息，空白不生成消息，任何坏行或截断拒绝整个来源。
+def scan_message_snapshot(path: Path, thread_id: str, through: int, visitor) -> str:
+    import hashlib
+
+    digest = hashlib.sha256()
+    try:
+        handle = path.open("rb")
+    except FileNotFoundError:
+        if through == 0:
+            return digest.hexdigest()
+        raise
+    with handle:
+        _validate_boundary(handle, through, handle.seek(0, 2))
+        handle.seek(0)
+        while handle.tell() < through:
+            line = handle.readline(through - handle.tell())
+            if not line.endswith(b"\n"):
+                raise DataCorruptionError("canonical transcript truncated during source scan")
+            digest.update(line)
+            if not line.strip():
+                continue
+            entry = _message_from_line(line, thread_id)
+            visitor(entry)
+    return digest.hexdigest()

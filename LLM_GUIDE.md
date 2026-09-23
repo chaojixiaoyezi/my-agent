@@ -1,5 +1,7 @@
 # LLM_GUIDE
 
+12.4固定来源范围筛选已本地实现：完整尾界内两遍校验后只保留范围内未覆盖正文；后台先读任务事实，recent_limit=0也不提前全载正文。12文件326项通过，另4项主线独占测试的旧Store签名尚待集成适配，不能称整体gate通过；ID索引、未压正文和覆盖链仍非完全有界，11/18不变。见[容量审计](docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。
+
 12.4消息扫描底座已本地实现：原前向页可冻结完整尾界并限制页字节，幂等追加改逐行完整校验、拒绝未完成尾行，153项定向回归通过。Compact全量来源/覆盖链仍待接入，不按整项完成；见[容量审计](docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。
 
 集成安装版319004926已在独立测试机完成决策关闭/2秒超时/4秒返回三轮原生TUI，主任务均完成；真实缓存有回执但总输入未节省。全线Jev HTTP 57次，11/18清单不变；设置已恢复关闭、候选Gateway已停，详见[真实验收](docs/tasks/DECISION_MODEL_REAL_VALIDATION.md)。

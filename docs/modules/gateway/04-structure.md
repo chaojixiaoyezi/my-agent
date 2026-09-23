@@ -1,5 +1,7 @@
 # Gateway Structure
 
+Gateway Compact的原visible范围规则现编译成逐行selector，公共message_selection沿固定完整尾界两遍验证/筛选；后台通过原Store延后正文，共用同次任务范围。writer/CAS与执行身份不变。12文件326项通过，4项主线独占后台fake Store签名待集成，整体gate未通过；12.4仍开放，详见[容量审计](../../tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。
+
 `background_compact_context.py` 选择原后台thread/task/turn范围，`background_history_seed.py` 从完整原文按范围及实际覆盖准备seed/source；临时AppliedCompactContext沿原参数链交给摘要与工具过滤。
 `compact_scope.py` 定义冻结适用范围；`compact_summary_view.py` 只沿已提交的适用摘要base链解析覆盖；`compact_checkpoint.py` 统一v3来源、版本封印及追加，提交仍走原thread CAS。此底座不拥有任务权限，宿主完整恢复接线仍由原执行入口负责。
 

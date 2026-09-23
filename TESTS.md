@@ -1,5 +1,15 @@
 # 测试与发布验收
 
+## 第12.4项固定来源范围筛选（2026-09-23，本地）
+
+12.4固定来源范围筛选已本地实现：完整尾界内两遍校验后只保留范围内未覆盖正文；后台先读任务事实，recent_limit=0也不提前全载正文。12文件326项通过，另4项主线独占测试的旧Store签名尚待集成适配，不能称整体gate通过；ID索引、未压正文和覆盖链仍非完全有界，11/18不变。
+
+12文件清单：conversation_message_selection、conversation_message_scan、background_scoped_compact、background_context_runtime_errors、background_prepared_context、background_compact_recovery、runtime_module_boundaries、conversation_store、compact_scoped_transcript、gateway_child_compact_scope_application、gateway_compact_deferred_source、gateway_conversation_control（均为test_前缀）。命令使用pytest -o addopts= -q --tb=short，30.05秒；失败node及原日志见[容量审计](docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。没有真实调用、部署或推送；线上CI未作为验收来源。
+本片非pytest守卫现已通过：Ruff、doc sync、import boundaries零发现、strict code-size hard=0（未改基线）、diff和clean-package。首次Ruff发现新增测试的两处导入格式，doc sync发现Gateway注释/模块文档遗漏，clean-package发现两份新文件未纳入版本管理；均已修正。主线独占4项测试接口失败仍开放，因此整体本地严格gate未通过，不推送；线上CI未作为验收来源。
+
+
+建议下一步：主线适配独占夹具后再联验，本线继续保留历史完整投影；只读审查可并行。
+
 ## 第12.4项消息扫描底座（2026-09-23，本地）
 
 六个文件定向联合153 passed（3.96秒），日志 `/tmp/decision_message_scan_final_20260923.log`：message_scan/message_stream/history_paging/conversation_store/cli_run_conversation/background_owner_delivery_commit。真实临时文件验证固定EOF、页字节预算与Unicode、半行等待和幂等写前拒绝、坏行游标回滚、display过滤、截断与并发同key；2000行历史禁止全量recent_report，tracemalloc峰值低于文件体积三分之一。没有真实模型调用或Gateway重启，非Compact全链/绝对内存上限证明。
