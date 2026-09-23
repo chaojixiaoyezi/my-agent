@@ -17,9 +17,9 @@
 
 默认运行路径的验收结论：macOS 直接后代回收／TERM 升级和原 0／7 已实证；Linux 默认沙箱直接非零及本次后代退出已实证，不能归因于同一升级路径。Linux 非 PID 隔离／Full Access 与本次 Linux 忽略 TERM 就绪仍未实证，不为取得指定信号回执放宽默认沙箱。
 
-## 第 7.8 步能力请求唤醒后的完成交付（只读定位中）
+## 第 7.8 步能力请求唤醒后的完成交付（已集成，待发布与原生复验）
 
-TUI212 的工作区准备失误与后续框架现象分开：原生历史已有模型完整 final、turn_end_reason=completed，ConversationTaskLink 已 completed，最后后台 claim finished；公开 assistant final 未落账。交付裁决对 capability_request_open／granted 原因无条件 suppress，初步定位为旧唤醒原因覆盖新的完成事实。原生 PTY 的确返回 exit_code=0／36 passed；最终三个样例各400行，合计1200行平方均已被模型修正正确。所有 attempt 已结束，最后 claim finished、无本线程排队唤醒；一个孩子因 thread_goal_blocked 保留 AgentRun created，整树 TaskRun 因此未闭，这是既有 BLOCKED 保留合同，不是仍活执行或另一结算 bug。只修公开完成交付，不强制改运行账终态，不补写旧212回复。隔离候选开发中，尚未真实复验修复。
+TUI212 的工作区准备失误与后续框架现象分开：原生历史已有模型完整 final、turn_end_reason=completed，ConversationTaskLink 已 completed，最后后台 claim finished；公开 assistant final 未落账。交付裁决对 capability_request_open／granted 原因无条件 suppress，初步定位为旧唤醒原因覆盖新的完成事实。原生 PTY 的确返回 exit_code=0／36 passed；最终三个样例各400行，合计1200行平方均已被模型修正正确。所有 attempt 已结束，最后 claim finished、无本线程排队唤醒；一个孩子因 thread_goal_blocked 保留 AgentRun created，整树 TaskRun 因此未闭，这是既有 BLOCKED 保留合同，不是仍活执行或另一结算 bug。只修公开完成交付，不强制改运行账终态，不补写旧212回复。最小候选979ed5c76已集成为fc17def5f。新增状态矩阵、同片孩子BLOCKED、空载荷和canonical重放共16项：旧实现6红，修复后全绿。候选组合后台运行／Gateway控制／终态检查三文件348项通过，严格gate通过；主线相同三文件348项通过，Ruff、doc sync、strict-size（hard=0、blocked=False）、diff、clean-package全部通过；尚未部署或真实复验修复。
 
 ## 第 7 步真实孩子失败及父级接手 TUI207—209
 
