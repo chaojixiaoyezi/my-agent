@@ -1,5 +1,17 @@
 # 测试与发布验收
 
+## 第 12.4 项子代理完整恢复与公共实现（本地）
+
+Gateway 的完整恢复协调提到 `agent_core/compact_request_recovery.py`；Gateway、child 共享一次冻结、完整候选计量、摘要错误隔离及原 checkpoint/CAS，正常选模也共用 `tool_request_capture.py`。child overflow 在下一次真实 `agent.run` 准备后提交并同次发送，原独立历史、run/attempt 和权限保持。
+
+19 文件联合 **408 passed**：新增 `test_subagent_compact_recovery.py` 8 项，加既有完整投影、Gateway 来源/恢复/工具接续/选模/错误、三宿主能力展示、child runtime/首请求、进度/熔断/预算及原生 IR 回归。新增 HTTP 替身测试覆盖 Anthropic/OpenAI × 工具开关，逐字核对候选和实际出站请求，准备恰好两次、候选一次、业务/摘要/恢复代次 0→0→1；另验 run token 取消、并发代次、摘要瞬时错误和来源加载失败均不发送恢复业务。
+
+尺寸检查发现原子代理执行函数超限后，按职责拆出单次恢复作用域执行，未改尺寸基线；拆分后 child 三文件 **31 passed**。旧展示测试改为核对真实准备后的清除状态与实际 wire，不再要求 defer 前重做准备；摘要继承原 builder 的无候选占位段，明确断言旧推荐卡片未复活。没有真实网络、安装版 TUI、部署或重启；本片不关闭前轮全仓 8 项失败，也不证明真实缓存命中。
+
+独立 Astra max 审查未发现具体阻塞问题；其两协议 × 两接续场景已保存为 `test_subagent_compact_recovery_continuation.py`，另 **4 passed**。恢复后实际 `read_file` 及最终业务轮保持同一新参数、历史与取消令牌；无旧历史时活动归档 CAS 先于第二次准备，真实读取仅一次，另一 child 代次不变。本片 Ruff、doc sync、导入边界零发现、strict code-size（hard=0、基线未改）、差异及 clean-package 检查通过；仅本地检查点，不推送或部署。
+
+后台、初次加载和手动入口仍待接入完整恢复。后台须先冻结可能写任务进度的上下文，并保留 detached task 的历史锚点/lineage；不能补入 owner 历史来代替窄审计事件的空种子。文件与并行边界见[子代理恢复交接](docs/tasks/DECISION_MODEL_CHILD_COMPACT_HANDOFF.md)。
+
 ## 第 12.4 项 Gateway 完整压缩恢复请求（本地）
 
 Gateway overflow 的恢复轮现在先保留原始历史来源，待真实提示、工具和运行材料准备完毕，再用完整下一请求计量候选；原 checkpoint/CAS 成功后直接使用获选材料发送。16 个相关测试文件联合 **337 passed**，新增四文件共 **24 项**覆盖只读来源、两种供应商协议、工具开关、关闭/应用模式、候选回退、并发代次、真实 run token 取消、未知投影、摘要瞬时/首事件超时，以及恢复后真实 `read_file` 工具接续。实际 HTTP 由内存替身捕获，未调用真实模型。

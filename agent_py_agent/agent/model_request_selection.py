@@ -1,5 +1,5 @@
 # LLM: 请求宿主只能在原渲染与发送安全点提供回调；ContextVar 不授予权限，不保存身份或模型目录，默认路径零额外 I/O。
-# 模块用途: 让 Gateway 的可选模型采用复用主生成链，不让 core 依赖 Gateway 或复制请求渲染器。
+# 模块用途: 让宿主选模和完整压缩恢复共用主生成安全点，原身份和提交仍由各宿主负责。
 from __future__ import annotations
 
 from contextlib import contextmanager
@@ -43,11 +43,13 @@ def select_request_model(agent: object, params: object, prompt: str) -> tuple[ob
 
 
 # LLM: 回调位于原 provider observer/准入内、实际网络前；宿主不得在这里生成模型回复或重新调用 Jev。
-# 函数用途: 对最终真实发送材料执行最后的宿主事务检查。
+# 恢复专用宿主没有发送前事务，不能为适配接口另造空事务。
+# 函数用途: 对提供此回调的宿主执行最终发送检查。
 def before_model_request_send(backend: object, prompt: str, state: object) -> None:
     host = _HOST.get()
-    if host is not None:
-        host.before_send(backend, prompt, state)
+    callback = getattr(host, "before_send", None)
+    if callback is not None:
+        callback(backend, prompt, state)
 
 
 # LLM: 只在 caller 处理明确的发送前拒绝，ContextVar token 在创建它的线程退出；不得吞取消或 HTTP 错误。

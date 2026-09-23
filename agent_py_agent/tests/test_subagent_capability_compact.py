@@ -162,13 +162,19 @@ def test_child_compact_clears_stale_selection_even_when_connection_recovers(capa
     monkeypatch.setattr(fixture.backend, "generate", generate)
     result = fixture.agent.run_subagent(task.id, dry_run=False, probe=False)
     assert result.ok and len(calls) == 1 and len(captured) == 2
-    assert captured[1][1:3] == (None, True)
+    # 延迟 Compact 在第二次真实准备中清除失效面；不为入口快照提前重跑准备。
+    assert captured[1][0].capability_presentation is None
+    assert captured[1][0].capability_presentation_evaluated is True
     cards = [next(block["text"] for message in kwargs["messages"] for block in message["content"]
                   if block["type"] == "text" and block["text"].startswith("# Recommended Tools"))
              for kwargs in fixture.backend.model_kwargs]
     assert "workspace:method-001" in cards[0] and "workspace:method-001" not in cards[1]
-    assert not any(block["type"] == "text" and block["text"].startswith("# Recommended Tools")
-                   for message in fixture.backend.summary_kwargs[0]["messages"] for block in message["content"])
+    # 摘要复用真实恢复请求，包括原builder的无候选占位段；失效卡片不能复活。
+    summary_cards = [block["text"] for message in fixture.backend.summary_kwargs[0]["messages"]
+                     for block in message["content"]
+                     if block["type"] == "text" and block["text"].startswith("# Recommended Tools")]
+    assert summary_cards == [cards[1]]
+    assert "workspace:method-001" not in summary_cards[0]
 
 
 def test_child_next_goal_turn_resets_presentation_with_the_same_attempt(capability_host, monkeypatch):

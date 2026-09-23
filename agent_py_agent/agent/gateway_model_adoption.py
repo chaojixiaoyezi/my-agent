@@ -1,5 +1,5 @@
 # LLM: Gateway apply 只消费同请求的一次建议；完整输入验证在锁外，目录→T→thread CAS 在发送前，未知保留原模型。
-# 模块用途: 复用原依赖、原请求投影和线程选择版本自动采用模型，不创建 renderer、模型注册表或恢复代理。
+# 模块用途: 复用公共完整请求捕获、原依赖和线程版本自动采用模型，不创建 renderer、模型注册表或恢复代理。
 from __future__ import annotations
 
 import json
@@ -9,6 +9,7 @@ from contextlib import ExitStack
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 
+from .agent_core.tool_request_capture import capture_tool_loop_request
 from .agent_core.tool_request_projection import ToolLoopRequestInput, project_tool_loop_request
 from .backends.base import ProviderRequestOptions
 from .backends.bounded_call import call_with_deadline
@@ -16,7 +17,6 @@ from .backends.request_scope import foreground_model_scope, provider_request_bud
 from .common.cancellation import ToolCancelled
 from .concurrency.interrupt import is_interrupted
 from .conversation import decision_service
-from .conversation.models import ConversationHistorySeed
 from .gateway_parts.request_binding import GatewayActiveTurnTransition, gateway_runtime_authority
 from .memory_archive import estimate_tokens
 from .model_guidance import provider_system_instruction
@@ -91,26 +91,6 @@ def _portable_history(prepared: ToolLoopRequestInput) -> bool:
         elif not isinstance(item, (CompactionSummary, RuntimeFactsTurn, ToolResult, UserTurn)):
             return False
     return True
-
-
-# LLM: 只组装原事实和 native_tool_protocol 的唯一工具选择，不刷新 child/Goal/文件或邮箱；未知历史不补空。
-# 函数用途: 将实际首请求的冻结 system、完整 IR 和原工具选择交给唯一纯投影。
-def _request_input(agent: object, params: object, prompt_input: object) -> ToolLoopRequestInput:
-    from .agent_core.native_tool_protocol import model_turn_tool_choice, resolve_native_tools
-    from .agent_core.runtime.conversation_state import conversation_runtime_state_section
-    from .agent_core.tool_model_generation import _forwarded_guidance_seen
-
-    if not isinstance(params.conversation_history_seed, ConversationHistorySeed):
-        raise ValueError("history_unknown")
-    tools = resolve_native_tools(agent, params)
-    return ToolLoopRequestInput(
-        prompt_input=prompt_input, system_instruction=provider_system_instruction(agent.backend),
-        tool_protocol_snapshot=params.tool_protocol_snapshot, native_tools=tuple(tools or ()),
-        tool_choice=model_turn_tool_choice(params, tools), tool_ir_history=tuple(params.tool_ir_history),
-        provider_history_messages=tuple(params.provider_history_messages), tool_context=tuple(params.tool_context),
-        forwarded_guidance=frozenset(_forwarded_guidance_seen(params)),
-        conversation_state=conversation_runtime_state_section(params),
-    )
 
 
 # LLM: 原 schema 消费口径来自实际 backend builder，thinking_disabled 仅在实际 tools 参数存在时生效；不生成替代载荷。
@@ -200,7 +180,7 @@ class GatewayModelAdoption:
             dependencies = prepare_model_dependencies(agent, config)
             if dependencies is None:
                 raise ValueError("model_dependencies_unknown")
-            prepared = _request_input(agent, params, self.prompt_input)
+            prepared = capture_tool_loop_request(agent, params, self.prompt_input)
             if not _portable_history(prepared):
                 raise ValueError("history_modality_unknown")
             frozen_params = replace(params, tool_ir_history=deepcopy(params.tool_ir_history),

@@ -1,5 +1,7 @@
 # Gateway Structure
 
+`gateway_compact_recovery.py` 只构造原来源和Gateway历史投影回调；一次冻结/摘要/原CAS及历史参数替换共用 `agent_core/compact_request_recovery.py`。普通Gateway选模和child首请求也共用 `tool_request_capture.py`，纯renderer与目录仍各自唯一。
+
 `command_stream.py` 的进程内 CancellationToken 统一来自 `common/cancellation.py`；请求线程及消息流仍由本模块管理，令牌不拥有持久任务状态。
 
 ## 子代理插话重放边界

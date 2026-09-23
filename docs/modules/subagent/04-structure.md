@@ -1,5 +1,7 @@
 # Subagent Structure
 
+`agent_core/subagent/run_flow.py` 在overflow只读加载canonical来源，下一次原 `agent.run` 临时绑定公共恢复器；无来源仍先执行原active-turn归档CAS。`conversation/agent_thread.py::project_agent_thread_context` 是普通准备与候选共用的纯历史renderer，不写任务或消息。`agent_core/subagent/compact_recovery.py` 只按原第0注入位置重投影，不重跑上下文包/工具准备；成功的host_state回到原循环，异常退出清理scope。
+
 ## 创建前可选模型建议
 
 `agent_core/orchestration/decision_subagent.py` 只保存本批候选/规格摘要；返回 typed `PendingSubagentModelAdvice`，不更改模型引用。

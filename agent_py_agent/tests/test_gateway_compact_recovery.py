@@ -51,7 +51,7 @@ def test_full_gateway_recovery_reuses_preparation_and_sends_selected_payload(tmp
     prepares, projections, rendered = [], [], []
     original_prepare = runtime_mixin._prepare_runtime_context
     original_project = recovery._project_recovery_candidate
-    original_render = recovery.GatewayCompactRecovery.render
+    original_render = recovery.PreparedCompactRecovery.render
 
     def prepare(*args, **kwargs):
         prepares.append(args)
@@ -71,7 +71,7 @@ def test_full_gateway_recovery_reuses_preparation_and_sends_selected_payload(tmp
 
     monkeypatch.setattr(runtime_mixin, "_prepare_runtime_context", prepare)
     monkeypatch.setattr(recovery, "_project_recovery_candidate", project)
-    monkeypatch.setattr(recovery.GatewayCompactRecovery, "render", render)
+    monkeypatch.setattr(recovery.PreparedCompactRecovery, "render", render)
     seen = []
 
     def on_business(wire):
@@ -97,7 +97,7 @@ def test_full_gateway_recovery_reuses_preparation_and_sends_selected_payload(tmp
     assert len(prepares) == 2 and len(rendered) == 1 and len(projections) == 1
     material = projections[0]
     assert material.request_input.prompt_input.injection_fragments[:3] == tuple(context.request["inject"])
-    assert material.conversation.compact_operation_evidence_ref
+    assert material.host_state.compact_operation_evidence_ref
     assert agent.conversation_store.threads.require(fixture.thread_id).compact_generation == 1
     assert len(decision.calls) == (1 if mode == "apply" else 0)
 
@@ -154,7 +154,7 @@ def test_uncommitted_recovery_never_sends_business_request(tmp_path, monkeypatch
     assert seen == (["overflow"] if failure.startswith("summary_") else ["overflow", "summary"])
     assert waits == []
     assert hosts[0].compact_recovery.committed is False
-    assert hosts[0].compact_recovery.conversation.compact_generation == 0
+    assert hosts[0].compact_recovery.host_state.compact_generation == 0
     thread = agent.conversation_store.threads.require(fixture.thread_id)
     assert thread.compact_generation == (1 if failure == "generation" else 0)
     if failure == "generation":

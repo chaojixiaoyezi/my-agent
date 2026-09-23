@@ -551,7 +551,7 @@ def _run_gateway_turn_with_conversation_compact(
             params=run_params,
         )
         if observer is not None and observer.compact_recovery is not None and observer.compact_recovery.committed:
-            current = observer.compact_recovery.conversation
+            current = observer.compact_recovery.host_state
         _record_gateway_stage(context.stages, "run_ms", _run_started)
         if str(getattr(result, "runtime_status", "") or "").strip().lower() != "context_overflow":
             return result, current
@@ -594,9 +594,9 @@ def _gateway_compact_overflowing_turn(
     )
     _require_gateway_conversation_ready(request, refreshed)
     if observer is not None and refreshed.compact_source is not None and refreshed.compact_source.messages:
-        from ..gateway_compact_recovery import GatewayCompactRecovery
+        from ..gateway_compact_recovery import prepare_gateway_compact_recovery
 
-        observer.compact_recovery = GatewayCompactRecovery(context, refreshed)
+        observer.compact_recovery = prepare_gateway_compact_recovery(context, refreshed)
         return refreshed
     if refreshed.compact_generation > current.compact_generation:
         _publish_gateway_compact_boundary(context.on_chunk, refreshed.compact_generation)

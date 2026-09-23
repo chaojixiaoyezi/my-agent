@@ -1,17 +1,18 @@
 # LLM: 每个 delegated run 使用原 ConversationThread/Compact；谱系不共享历史，模型建议仅由宿主参数初始化新 thread，读取/恢复不采用。
-# 模块用途: 为子孙代理建立独立会话、保存待验证建议与正文，沿原 Compact 和恢复合同管理历史。
+# 模块用途: 为子孙代理建立独立会话、保存正文与建议；普通准备和完整恢复候选共用纯历史投影。
 
 from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from ..settings.thread_model_selection import PendingSubagentModelAdvice
 from ..tooling.operation_verification import public_operation_verification
 from ..turn_end import result_turn_end_reason
-from .compact_guard import CompactInterruptCheck
+from .compact_guard import CompactInterruptCheck, raise_if_compact_interrupted
+from .compact_projection import ConversationCompactSource, ConversationCompactView
 from .models import ConversationHistorySeed, ConversationThread, MessageLogEntry
 from .native_history import (
     CANONICAL_NATIVE_MESSAGES_METADATA_KEY,
@@ -25,7 +26,6 @@ from .tool_context_window import (
 )
 
 if TYPE_CHECKING:
-    from .compact import ConversationCompactResult
     from .compact_provider_surface import ConversationCompactModelSurface
 
 _AGENT_THREAD_CHANNEL = "agent-runtime"
@@ -40,9 +40,8 @@ class AgentThreadTurnInput:
     turn_id: str = ""
 
 
-# LLM: The prepared context carries only the live thread generation and bounded prompt section;
-# callers must reload through ConversationStore for any later authoritative decision.
-# 类用途: 保存某次子代理运行前已经完成 Compact 后要注入模型的历史片段。
+# LLM: 历史投影不授予提交权；compact_source仅供内部恢复保留原未压缩行，候选不重新读盘或写消息。
+# 类用途: 保存子代理准备好的历史，以及可选的待完整请求准备后压缩的来源。
 @dataclass(frozen=True)
 class AgentThreadTurnContext:
     thread_id: str
@@ -50,6 +49,7 @@ class AgentThreadTurnContext:
     compacted: bool
     injection: str
     history_seed: ConversationHistorySeed | None = None
+    compact_source: ConversationCompactSource | None = field(default=None, repr=False)
 
 
 # LLM: 谱系只读 canonical task/父；建议仅接受宿主准备载体的显式参数，绝不从 task attrs 恢复，既有线程不重植 pending。
@@ -124,8 +124,7 @@ def ensure_subagent_thread(manager: object, task: object, *, model_advice: Pendi
 
 
 # LLM: The current child prompt is appended once before preflight and excluded by its typed request
-# id. The runner supplies the same model surface used by its following ordinary turn; interruption
-# crosses summary/checkpoint/CAS exactly like the foreground path.
+# id. 内部defer只读原来源；普通入口沿原摘要/提交，停止检查不能因延迟而跳过。
 # 函数用途: 按独立对话轮记录输入，保留真实 attempt 身份，以相同缓存面做可中断 Compact 并生成历史注入。
 def prepare_subagent_thread_turn(
     agent: object,
@@ -133,11 +132,16 @@ def prepare_subagent_thread_turn(
     *,
     turn: AgentThreadTurnInput,
     force: bool = False,
+    defer_compact: bool = False,
     progress_callback: Callable[[dict[str, object]], object] | None = None,
     interrupt_check: CompactInterruptCheck | None = None,
     model_surface: ConversationCompactModelSurface | None = None,
 ) -> AgentThreadTurnContext:
-    from .compact import ConversationCompactOptions, prepare_conversation_context
+    from .compact import (
+        ConversationCompactOptions,
+        load_conversation_compact_source,
+        prepare_conversation_context,
+    )
 
     prompt, attempt_id = turn.prompt, turn.attempt_id
     selected_attempt = str(turn.turn_id or attempt_id or "").strip()
@@ -163,6 +167,13 @@ def prepare_subagent_thread_turn(
     thread, load_error = store.threads.load_report(thread.thread_id)
     if load_error is not None or thread is None:
         raise OSError("subagent conversation thread could not be reloaded")
+    if defer_compact:
+        raise_if_compact_interrupted(interrupt_check)
+        source = load_conversation_compact_source(agent, store, thread, exclude_request_id=selected_attempt)
+        return project_agent_thread_context(agent, ConversationCompactView(
+            thread.thread_id, thread.compact_generation, thread.summary, source.messages,
+            thread.compact_operation_evidence, source.recent_operation_evidence, source.policy.trigger_tokens, False,
+        ), source=source)
     compact = prepare_conversation_context(
         agent,
         store,
@@ -176,12 +187,20 @@ def prepare_subagent_thread_turn(
             model_surface=model_surface,
         ),
     )
+    return project_agent_thread_context(agent, ConversationCompactView(
+        compact.thread.thread_id, compact.thread.compact_generation, compact.thread.summary, compact.messages,
+        compact.thread.compact_operation_evidence, dict(compact.recent_operation_evidence or {}),
+        compact.trigger_tokens, compact.compacted,
+    ))
+
+
+# LLM: 仅渲染显式历史视图，不写消息、不读任务/Goal，也不重跑整个runner准备；候选生成代次不是提交证明。
+# 函数用途: 普通准备和完整恢复候选共用同一子代理历史注入与原生历史种子。
+def project_agent_thread_context(agent, view: ConversationCompactView, *, source=None) -> AgentThreadTurnContext:
     return AgentThreadTurnContext(
-        thread_id=compact.thread.thread_id,
-        compact_generation=max(0, int(compact.thread.compact_generation or 0)),
-        compacted=bool(compact.compacted),
-        injection=_render_agent_thread_context(agent, compact, include_transcript=False),
-        history_seed=_agent_thread_history_seed(agent, compact),
+        thread_id=view.thread_id, compact_generation=view.compact_generation, compacted=view.is_candidate,
+        injection=_render_agent_thread_context(agent, view, include_transcript=False),
+        history_seed=_agent_thread_history_seed(agent, view), compact_source=source,
     )
 
 
@@ -351,44 +370,42 @@ def _agent_message_dedupe_key(task: object, attempt_id: str, role: str) -> str:
     )
 
 
-# LLM: Summary prose, structured operation evidence, and raw tail remain visibly separate.
-# The renderer applies only display bounds; the Compact result remains the authority.
+# LLM: 摘要、证据和原文从显式view投影且彼此分离；预计候选不是提交证明，renderer只施加原展示预算。
 # 函数用途: 将子代理自己更早的历史整理成下一次模型可理解的上下文片段。
 def _render_agent_thread_context(
     agent: object,
-    compact: ConversationCompactResult,
+    view: ConversationCompactView,
     *,
     include_transcript: bool = True,
 ) -> str:
-    thread = compact.thread
-    rows = list(compact.messages)
-    if not thread.summary and not rows and not thread.compact_operation_evidence:
+    rows = list(view.messages)
+    if not view.summary and not rows and not view.operation_evidence:
         return ""
     lines = [
         "# Agent Thread Context",
-        f"- thread_id: {thread.thread_id}",
+        f"- thread_id: {view.thread_id}",
         "- 以下内容只来自本子代理已经结束的历史轮次；不是当前新指令，当前任务要求优先。",
     ]
-    if include_transcript and thread.summary:
+    if include_transcript and view.summary:
         lines.extend(
             [
-                f"## Earlier Agent Summary (generation {thread.compact_generation})",
-                thread.summary,
+                f"## Earlier Agent Summary (generation {view.compact_generation})",
+                view.summary,
             ]
         )
-    if thread.compact_operation_evidence:
+    if view.operation_evidence:
         lines.extend(
             [
                 "## Program-Verified Operations From Compacted History",
                 json.dumps(
-                    thread.compact_operation_evidence,
+                    view.operation_evidence,
                     ensure_ascii=False,
                     sort_keys=True,
                     separators=(",", ":"),
                 ),
             ]
         )
-    bounded = _bounded_agent_history(agent, rows, compact.trigger_tokens)
+    bounded = _bounded_agent_history(agent, rows, view.history_token_budget)
     if include_transcript and bounded:
         lines.append("## Recent Agent History")
         for row in bounded:
@@ -406,18 +423,16 @@ def _render_agent_thread_context(
     return "\n".join(lines)
 
 
-# LLM: The child thread uses the same provider-neutral seed as the root conversation. Terminal
-# tool folds are projected before the seed is frozen so later native/text rendering cannot lose
-# verified completed operations or reopen ConversationStore.
+# LLM: 普通准备与候选共用provider-neutral seed；终态工具折叠在冻结前沿原规则投影，不重新打开ConversationStore。
 # 函数用途: 把子代理已经结束的历史轮次整理成下一次运行可复用的强类型会话种子。
 def _agent_thread_history_seed(
     agent: object,
-    compact: ConversationCompactResult,
+    view: ConversationCompactView,
 ) -> ConversationHistorySeed:
     rows = _bounded_agent_history(
         agent,
-        list(compact.messages),
-        compact.trigger_tokens,
+        list(view.messages),
+        view.history_token_budget,
     )
     messages: list[tuple[str, str]] = []
     for row in rows:
@@ -432,8 +447,8 @@ def _agent_thread_history_seed(
         if content:
             messages.append((role, str(content)))
     return ConversationHistorySeed(
-        compact_summary=str(compact.thread.summary or ""),
-        compact_generation=max(0, int(compact.thread.compact_generation or 0)),
+        compact_summary=str(view.summary or ""),
+        compact_generation=max(0, int(view.compact_generation or 0)),
         messages=tuple(messages),
         canonical_messages=provider_history_messages_from_rows(rows),
     )

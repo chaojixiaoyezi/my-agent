@@ -1,5 +1,5 @@
 # LLM: 新建标记只能被原真实 attempt 领取一次；候选探针在锁外，原目录/创建/线程锁内 CAS 后才采用，旧 pending/空账本不是首次证明。
-# 模块用途: 自动验证子代理模型建议并冻结首个业务请求；未知保留原模型，发送栅栏先于 I/O，用户不用逐个确认。
+# 模块用途: 共用真实请求捕获自动验证子代理模型建议；未知保留原模型，发送栅栏先于 I/O，用户不用逐个确认。
 
 from __future__ import annotations
 
@@ -101,34 +101,20 @@ def render_first_request_prompt(agent: object, params: object, request: object) 
     return render_prepared_prompt(prepared)
 
 
-# LLM: 本层读取实际 child 准备事实，工具选择共用 native_tool_protocol 唯一规则；不填占位历史或借父快照。
+# LLM: 本层复用tool_request_capture读取实际child准备事实；不填占位历史或借父快照，捕获失败保留unknown。
 # 函数用途: 在原生成入口提交 IR 前冻结完整请求材料；缺原规范历史时保持 unknown，取消原样传播。
 def capture_first_request_input(agent: object, params: object, prompt: str) -> None:
     preparation = first_request_preparation(agent, params)
     if preparation is None or preparation.prompt_input is None:
         return
     from ...common.cancellation import ToolCancelled
-    from ...conversation.models import ConversationHistorySeed
-    from ...model_guidance import provider_system_instruction
-    from ..native_tool_protocol import model_turn_tool_choice, resolve_native_tools
-    from ..runtime.conversation_state import conversation_runtime_state_section
-    from ..tool_model_generation import _forwarded_guidance_seen
+    from ..tool_request_capture import capture_tool_loop_request
 
     preparation.request_input = None
-    if not isinstance(getattr(params, "conversation_history_seed", None), ConversationHistorySeed):
-        return
     try:
         if render_prepared_prompt(preparation.prompt_input) != prompt:
             return
-        tools = resolve_native_tools(agent, params)
-        preparation.request_input = ToolLoopRequestInput(
-            prompt_input=preparation.prompt_input, system_instruction=provider_system_instruction(agent.backend),
-            tool_protocol_snapshot=params.tool_protocol_snapshot, native_tools=tuple(tools or ()),
-            tool_choice=model_turn_tool_choice(params, tools), tool_ir_history=tuple(params.tool_ir_history),
-            provider_history_messages=tuple(params.provider_history_messages), tool_context=tuple(params.tool_context),
-            forwarded_guidance=frozenset(_forwarded_guidance_seen(params)),
-            conversation_state=conversation_runtime_state_section(params),
-        )
+        preparation.request_input = capture_tool_loop_request(agent, params, preparation.prompt_input)
     except (InterruptedError, ToolCancelled):
         raise
     except Exception:

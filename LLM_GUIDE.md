@@ -150,7 +150,7 @@ Jev 的最新产品方向与独立开发顺序读 [可选决策模型计划](doc
 完整清单见 [执行 Goal](docs/tasks/DECISION_MODEL_GOAL.md)；子代理选择、Curator 标注和召回重排已本地接通，原设置菜单、原运输与原生探测已本地接通，隔离真实模型/TUI 部分已验，安装版尚未验。
 第 12 项原生预检已共用出站清扫和 ToolChoice；`projected_model_context_components` 只计量冻结投影，宿主准备及校准留在外层。三宿主同轮展示由原参数携带，后台实际身份走原发布回传；清除不重决策，新业务轮重置。旧 v2 观测不能套用新口径；完整 Compact 恢复输入接线和跨模型缓存仍按执行 Goal 验收。
 transcript Compact 的触发和候选接受已复用普通请求的已知输出预留；恢复目标不能绕过容量门，未知cap不补猜。尚未接入完整恢复输入的宿主仍沿旧会话估算，不能据此宣称12.4/12.5整项已验。
-原 PromptRenderInput 保留不可变注入片段；Gateway overflow已在原render/select接入完整恢复请求，只替换历史/操作证据/代次，原CAS后同次生成。只读来源的defer不是force=False；摘要失败不得进入普通业务瞬时重试，停止同时检查真实run token。child、后台及初次/手动入口的完整容量仍待接入，见[容量审计](docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。
+原 PromptRenderInput 保留不可变注入片段；Gateway overflow已在原render/select接入完整恢复请求，只替换历史/操作证据/代次，原CAS后同次生成。只读来源的defer不是force=False；摘要失败不得进入普通业务瞬时重试，停止同时检查真实run token。child overflow现已复用公共恢复器接入；后台及初次/手动入口的完整容量仍待接入，见[容量审计](docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。
 严格 HTTP 与协议联合 216 项本地验证通过；后续有界等待/精确取消/原准入及 Curator 迁移联合 315 项通过。
 共用决策设置与原 user_config 已接 read/patch/reset、owner/thread CAS、有效值读回；失效配置不能阻止关闭。
 原账本终态不再被迟到回调复活，用途分区和字段来源保留至原累计容器，worker 可准确保留未退出调用。

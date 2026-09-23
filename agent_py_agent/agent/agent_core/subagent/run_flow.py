@@ -1,8 +1,9 @@
 # LLM: 同一 child turn 的 Compact 重试保留展示与已评估事实，下一 Goal turn 清零；拒绝记忆仍属原 attempt，失败沿原生命周期。
-# 模块用途: 执行子代理并保存结果、异常历史和截断说明；同轮压缩复用展示，失效回调清除后不能复活旧值。
+# 模块用途: 执行子代理并保存结果；overflow来源延迟到完整请求准备后压缩，同轮展示失效后不复活。
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from functools import partial
@@ -58,7 +59,7 @@ class SubagentModelIteration:
 
 
 # LLM: 原溢出请求不产生身份或权限；run_params 仅指向同轮宿主参数，二次准备须读取失效回调清过的当前展示，不复活 frozen surface。
-# 类用途: 收拢一次子代理压缩的代次、工具轨迹和缓存面；缺原参数时不补造已评估事实。
+# 类用途: 收拢子代理压缩的代次、轨迹和缓存面；内部defer供真实恢复轮完整准备，缺原参数不补造事实。
 @dataclass(frozen=True)
 class SubagentOverflowCompactRequest:
     prompt: str
@@ -70,6 +71,7 @@ class SubagentOverflowCompactRequest:
     model_surface: object
     conversation_turn_id: str = ""
     run_params: RunParams | None = None
+    defer_compact: bool = False
 
 
 # LLM: exact attempt 先登记真实执行器，再开启可选首次请求准备；退出同时清理范围并记录执行器退出，不新增 task/attempt。
@@ -240,7 +242,7 @@ def _run_subagent_model_turn(lifecycle, prompt, context, task_attributes, *, tas
 
 
 # LLM: 展示及已评估事实仅属于 AgentThreadTurnInput.turn_id；同 attempt 的下一 Goal turn 清零，回调只改本地参数，Compact/CAS/取消仍沿原合同。
-# 函数用途: 使用 child 自己的历史执行一轮；同轮压缩不重发推荐，清旧展示后继续基础面，不跨轮保存选择。
+# 函数用途: 使用child独立历史执行一轮，完整恢复请求与摘要同次提交和发送，同轮压缩不重复推荐。
 def _run_subagent_conversation_turn(
     lifecycle,
     turn: AgentThreadTurnInput,
@@ -297,7 +299,9 @@ def _run_subagent_conversation_turn(
                 _persist_subagent_partial_result, agent, task, turn,
             )
             _bind_subagent_presentation(run_params, previous_params, conversation_turn_id)
-            result = agent.run(prompt, params=run_params)
+            result, current = _run_subagent_recovery_attempt(
+                agent, run_params, current, task=task, turn=turn, progress_callback=compact_progress,
+            )
             if str(getattr(result, "runtime_status", "") or "").strip().lower() != (
                 "context_overflow"
             ):
@@ -329,7 +333,7 @@ def _run_subagent_conversation_turn(
                         carried_archive_tool_calls,
                         run_params=run_params,
                     ),
-                    run_params=run_params,
+                    run_params=run_params, defer_compact=True,
                 ),
             )
             current = refreshed
@@ -339,6 +343,22 @@ def _run_subagent_conversation_turn(
         raise
     finally:
         _trim_subagent_transcript(agent, task, enabled=transcript_sink is not None)
+
+
+# LLM: scope仅覆盖一次原agent.run，异常必清理；成功CAS后的host_state回到原循环，其余路径不创建恢复器。
+# 函数用途: 用当前子代理完整准备执行一次模型尝试，并带回实际已提交的新历史。
+def _run_subagent_recovery_attempt(agent, params, current, *, task, turn, progress_callback):
+    from ...model_request_selection import model_request_selection_scope
+    from .compact_recovery import prepare_subagent_compact_recovery
+
+    recovery = None
+    if current.compact_source is not None and current.compact_source.messages:
+        recovery = prepare_subagent_compact_recovery(
+            agent, current, task, turn, progress_callback=progress_callback, interrupt_check=is_interrupted,
+        )
+    with model_request_selection_scope(recovery) if recovery is not None else nullcontext():
+        result = agent.run(turn.prompt, params=params)
+    return result, recovery.host_state if recovery is not None and recovery.committed else current
 
 
 # LLM: 只在宿主明确相同 turn_id 时读取上一实际 RunParams；不从 attempt、历史或 carrier.binding 推断同轮，不持久化。
@@ -407,6 +427,7 @@ def _next_subagent_overflow_carry(
 # rebuilding RunParams. Transcript Compact gets first claim; if the unfinished turn is the pressure
 # source, the canonical active-turn archive checkpoint/CAS is the only valid fallback. Never treat a
 # freshly rendered handoff or newly archived tool record as an uncounted Compact.
+# 完整恢复模式只加载transcript来源，提交延迟到真实请求select；无来源仍先走原active-turn提交。
 # 函数用途: 子代理上下文溢出时先压已结束历史，再正式压当前工具轨迹；成功推进代次后才继续原尝试。
 def _compact_subagent_overflowing_turn(
     agent: object,
@@ -420,11 +441,13 @@ def _compact_subagent_overflowing_turn(
             agent,
             task,
             turn=AgentThreadTurnInput(request.prompt, request.attempt_id, request.conversation_turn_id),
-            force=True,
+            force=not request.defer_compact, defer_compact=request.defer_compact,
             progress_callback=request.progress_callback,
             interrupt_check=is_interrupted,
             model_surface=request.model_surface,
         )
+        if request.defer_compact and refreshed.compact_source is not None and refreshed.compact_source.messages:
+            return refreshed
         if refreshed.compact_generation > request.current.compact_generation:
             return refreshed
         return _compact_subagent_active_turn_archive(
@@ -436,7 +459,7 @@ def _compact_subagent_overflowing_turn(
 
 
 # LLM: active-turn archive 仍须原 child/store/CAS；二次加载只读回调更新后的展示，缺原 RunParams 时保留旧调用合同而不伪造已评估值。
-# 函数用途: 把当前工具轨迹正式压缩后复核代次；前次准备已清除的推荐不能因再次加载而复活。
+# 函数用途: 先提交活动工具轨迹再加载新历史；defer模式不在二次加载时重做摘要，已清除推荐不复活。
 def _compact_subagent_active_turn_archive(
     agent: object,
     task: object,
@@ -475,7 +498,7 @@ def _compact_subagent_active_turn_archive(
         turn=AgentThreadTurnInput(request.prompt, request.attempt_id, request.conversation_turn_id),
         progress_callback=request.progress_callback,
         interrupt_check=is_interrupted,
-        model_surface=model_surface,
+        model_surface=model_surface, defer_compact=request.defer_compact,
     )
     if refreshed.compact_generation <= request.current.compact_generation:
         raise RuntimeError("subagent Compact generation did not advance")

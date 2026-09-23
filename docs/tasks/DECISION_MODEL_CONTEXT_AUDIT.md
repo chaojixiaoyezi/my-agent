@@ -1095,3 +1095,15 @@ Gateway Compact 与 runtime context pressure 两文件72项通过。新增10种�
 边界：初次普通加载与手动Compact仍走原估算；child、后台完整恢复请求尚未接入。若准备中的deferred工具先触发live Compact并推进代次，原CAS会拒绝旧来源，不覆盖新状态；该组合尚未单独验收。未提交的自动模型采用与延迟Compact并存时明确拒绝，尚未实现自动撤销后恢复。12.4整体保持未完成，未部署或使用真实供应商。
 
 建议下一步：先把共享完整投影接至child/后台并补上述代次/采用组合，再做跨窗口、真实缓存和已安装TUI验收；共享生命周期由主线串行修改，可并行只读评审或独立测试文件。
+
+### child overflow共享完整恢复（本地接入）
+
+基线 `5aa08c7e4` 后，Gateway已验证的冻结/计量/摘要错误隔离/原CAS算法移至 `agent_core/compact_request_recovery.py`，原选模与恢复共用 `tool_request_capture.py`。Gateway不保留第二实现；通用模块不知道宿主目录或持久身份，只有原调用方绑定的投影回调。
+
+child的 `prepare_subagent_thread_turn(defer_compact=True)` 保留原消息幂等追加、身份核对和取消检查，只读取未窗口化来源。`project_agent_thread_context` 从结构化view纯渲染原注入和历史seed，候选不再读任务/文件。原overflow循环在下一次真实运行准备时安装短生命周期scope，选中候选原CAS后继续同次生成，成功新上下文传回原循环；无transcript来源仍先压活动归档再准备。
+
+子代理的历史注入来自原 `RunParams.inject[0]`，与用户正文内容无关；系统、上下文包、工具、权限及模型选择保持。展示失效现在在真正恢复准备时清除，摘要沿同一冻结请求保留原builder的无候选占位段；测试检查准备后状态及实际wire无旧卡片，不要求提前重跑准备。
+
+后台调查已确认不能直接复制child：`context_markdown` 可能写任务进度，需要一次冻结结构化上下文再纯渲染；detached任务的锚点/lineage历史范围也需随同次准备保存。窄审计事件的seed=None是隔离约定，不能补入owner历史来让容量检查通过。后台尚未改代码，初次加载/手动入口及12.5—12.7仍保持待办。
+
+建议下一步：先补后台一次准备的上下文与历史范围，再接同一恢复器。共享core串行修改，独立payload/失败测试与只读评审可并行；所有真实供应商和部署证据仍单独验收，不扩大本片结论。

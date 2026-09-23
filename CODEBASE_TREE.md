@@ -9,6 +9,7 @@
 |-- DESIGN_LEDGER.md                     # 当前架构决策及模块设计导航
 |-- TESTS.md                             # 开发测试、真实 TUI 与发布 gate
 |-- docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md # 决策容量、完整请求投影与 Compact 的源码证据和分片交接
+|-- docs/tasks/DECISION_MODEL_CHILD_COMPACT_HANDOFF.md # child完整恢复共享实现、验收与后台后续边界交接
 |-- docs/tasks/DECISION_MODEL_CHILD_LIVE_HANDOFF.md # Jev 自动建议到真实异模子代理首轮/工具轮的隔离验收
 |-- docs/tasks/DECISION_MODEL_P5B_HANDOFF.md # 来源—正式记忆关系建议的第一片、原权威边界与离线验收
 |-- docs/tasks/DECISION_MODEL_EXTERNAL_MATERIAL_ORDER_HANDOFF.md # 已归档网页阅读提示的首片、原来源边界与离线验收
@@ -190,6 +191,9 @@ agent_py_agent/
 |   |-- agent_core/                     # 无副作用包入口；主代理运行时、工具循环、编排与自然回合收口实现
 |   |   |-- decision_planning.py        # 原 Todo read 的当前未完成项精确优先级软建议
 |   |   |-- cli_run_conversation.py     # 一次性 CLI 的权威 user/assistant transcript、幂等身份与失败分级
+|   |   |-- tool_request_capture.py    # 从真实运行参数共用捕获完整请求，不重复目录或上下文准备
+|   |   |-- compact_request_recovery.py # 一次准备、完整候选计量和原CAS后同次发送，Gateway与child共用
+|   |   |-- subagent/compact_recovery.py # child独立历史与固定注入位置到公共完整恢复器的适配
 |   |   |-- tool_request_projection.py # 冻结完整 prompt/schema/IR 的纯请求投影，缺事实返回 typed unknown
 |   |   |-- subagent/model_selection.py # 首个真实子代理模型请求的宿主资格、持久选择及失败保留协调
 |   |   |-- runtime/                    # 单 child guidance、active-turn compact carrier、sleep 闹钟与 loop support
@@ -543,6 +547,8 @@ agent_py_agent/
 |   |-- test_gateway_model_observation.py # Gateway 主模型观察的零副作用、请求身份与恢复边界
 |   |-- test_gateway_model_adoption.py # 原 Gateway/PromptBuilder/provider builder 的采用、容量、竞态与零 HTTP 回退
 |   |-- test_gateway_compact_deferred_source.py # 只读压缩来源、坏原文及当前未完成后缀排除
+|   |-- test_subagent_compact_recovery.py # child真实runner到HTTP载荷等价及取消/冲突/摘要故障隔离
+|   |-- test_subagent_compact_recovery_continuation.py # child恢复后真实工具轮、活动归档提交与其它child隔离
 |   |-- test_gateway_compact_recovery.py # 完整恢复请求与真实HTTP对照、CAS/取消/摘要故障不发送业务
 |   |-- test_gateway_compact_recovery_continuation.py # 新历史沿后续工具轮保留，活动轮CAS先于恢复准备
 |   |-- test_compact_request_projection.py # 原候选回退携带对应材料，未知完整输入不降级粗估
@@ -1049,3 +1055,8 @@ docs/
 - `docs/tasks/DECISION_MODEL_SETTINGS_HANDOFF.md`：原模型操作、原生连接测试、双HTTP运输与独立用量结算的组合交接。
 
 - `docs/tasks/DECISION_MODEL_USER_CONFIG_OPERATIONS_HANDOFF.md`：原主代理配置工具的脱敏决策目录、显式连接测试与真实工具状态。
+
+- `agent_py_agent/agent/agent_core/tool_request_capture.py`：正常选模和压缩恢复共用真实请求捕获；未知历史不填零或空。
+- `agent_py_agent/agent/agent_core/compact_request_recovery.py`：共享真实提示冻结、完整候选计量、原CAS提交及同次继续生成；宿主只提供历史投影。
+- `agent_py_agent/agent/agent_core/subagent/compact_recovery.py`：child只替换自身历史和原第0注入，权限与首请求选模不变。
+- `agent_py_agent/tests/test_subagent_compact_recovery.py`：两协议原生HTTP恢复载荷对照和失败无业务发送。
