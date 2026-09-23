@@ -8,6 +8,7 @@
 |-- STATUS.md                            # 当前能力、开放问题与证据边界
 |-- DESIGN_LEDGER.md                     # 当前架构决策及模块设计导航
 |-- TESTS.md                             # 开发测试、真实 TUI 与发布 gate
+|-- docs/tasks/TUI_RESOURCE_HANDOFF.md  # 资源性能线的归属、验收、限制和主线整合交接
 `-- docs/design/
     |-- MAINTAINABILITY_AND_JEV_REVIEW.md # 可维护性评估、渐进重构建议及 Computer Use/Jev 能力边界
     |-- TOOL_LOOP_DEPENDENCY_SPLIT.md   # 第8步模型响应、工具轮与Compact职责边界及参考核对
@@ -19,10 +20,13 @@
     |-- MANAGED_PROCESS_STDIO.md         # 原 host 字节管道、激活资源归属及旧版本恢复边界
     |-- HOST_COMMAND_EXECUTION.md        # 显式命令复用原运行链的请求身份、重送和结果回读合同
     |-- PLUGIN_SAMPLE_ACCEPTANCE.md      # 10 个自有简易插件的来源、功能范围及真实 TUI 验收计划
+    |-- TUI_RESOURCE_LIFETIME.md         # TUI、HTTP 和空闲 owner 的资源寿命与规模验收边界
     |-- TUI_DESIGN.md                    # 终端布局、事件、输入与生命周期规范
     |-- SUBAGENT_PARALLEL_EXECUTION.md   # 父子独立工作、逐项交付与慢任务诊断边界
     `-- TUI_BEHAVIOR_CHECKLIST.md        # 不依赖历史流水的 TUI 验收场景
 ```
+
+独立资源线交接：`docs/tasks/TUI_RESOURCE_HANDOFF.md`，记录文件归属、容量证据及默认环境切换边界。
 
 十步重构的执行状态和逐批验收入口：`docs/tasks/REFACTOR_PLUGIN_GOAL.md`。
 
@@ -79,6 +83,8 @@ agent_py_agent/
 |   |   |-- tui_transcript.py           # 详细 transcript 冻结视图、全文搜索与命中导航状态
 |   |   |-- tui_view.py                 # prompt_toolkit typed transcript control、frame/block cache、scroll anchor 与 overlay/footer
 |   |   |-- tui_history.py              # 上翻异步读取更早页、同页面响应校验和冻结视口衔接
+|   |   |-- tui_safe_lines.py           # 不可变已净化展示行，复用稳定正文并保留新文本过滤
+|   |   |-- tui_identity_window.py      # 客户端有界近期身份索引，不替代 canonical 幂等
 |   |   |-- tui_events.py               # TUI 唯一 versioned event 信封、单调 sequencer 与幂等有界 journal
 |   |   |-- tui_view_model.py           # typed event reducer：稳定/活动 block、权限 overlay、输入队列与状态快照
 |   |   |-- tui_ui_setup.py             # alternate-screen prompt_toolkit 布局、控件、style 与 focus 接线
@@ -248,6 +254,7 @@ agent_py_agent/
 |   |   |-- main_activity.py            # 前台 typed chunk 到共用 main 数字/阶段的只读投影，不复制正文
 |   |   |-- foreground_transcript.py    # 前台公开过程复用会话 mapper，候选与 canonical final 精确交接
 |   |   |-- approval_session.py        # owner/thread/cwd/权限精确作用域的有界进程内工具审批缓存
+|   |   |-- owner_retention.py          # 有精确在途保护的空闲 owner 缓存回收
 |   |   |-- bounded_http_server.py     # 单 Gateway 固定 daemon worker、128 在途上限与过载 503 背压
 |   |   |-- control_service.py         # owner/thread 持久根任务的即时状态、纠偏和中断
 |   |   |-- control_operation_service.py # slash 控制副作用前置回执、幂等重放与 unknown 对账
@@ -482,6 +489,8 @@ agent_py_agent/
 |   |-- test_tui_ansi_snapshot.py       # ANSI offset 重放、样式/背景、Unicode、resize 和坏账 fail-closed 回归
 |   |-- test_tui_agent_navigation.py    # 子代理选中/进入/返回、详情过程、只读终态与 footer 回归
 |   |-- test_agent_goals.py            # 单代理单 Goal、主子隔离、版本冲突、停止和同执行轮持续工作回归
+|   |-- test_tui_resource_lifetime.py  # 缓存净化、异常退出、事件和冻结阅读预算回归
+|   |-- test_gateway_owner_retention.py # 空闲回收、配置、在途及新消息竞态回归
 |   |-- test_tui_events.py              # TUI event 信封、sequencer、cursor、重复/冲突/乱序与有界重放
 |   |-- test_tui_markdown.py            # CommonMark 标题/列表/引用/代码/表格、样式角色与 Unicode 宽度换行
 |   |-- test_tui_runtime.py             # 本地/Gateway 流式、工具、queue、终态和全局事件顺序 adapter 回归
@@ -628,6 +637,9 @@ docs/
 - `agent_py_agent/agent/tooling/call_ref.py`：工具归档和 live-tool Compact 共用的精确调用来源；缺身份保持未知，不解析 scoped 字符串或借用当前请求。
 
 - `agent_py_agent/agent/agent_core/tool_loop/model_turn.py`：协调请求周期与响应采纳；实际prompt构造、Compact和执行权仍由原入口绑定。
+- `agent_py_agent/cli/chat_parts/tui_safe_lines.py`、`tui_identity_window.py`：只管理显示缓存和近期身份，完整记录留在 canonical 历史。
+- `agent_py_agent/agent/gateway_parts/owner_retention.py`：复核既有硬事实后回收空闲实例和轮询登记，不关闭持久任务或共享插件。
+- `docs/design/TUI_RESOURCE_LIFETIME.md`：身份、执行槽、连接和历史规模的边界与参考源码。
 
 - `plugins/sdk/pyproject.toml` 与 `scripts/build_plugin_api.py`：SDK 唯一发行声明和原源码字节投影；不另存共用权限实现。
 - `plugins/workspace-peek/` 与 `scripts/build_plugin_package.py`：首个自有只读插件及标准安装包构建，独立 MCP 入口只消费宿主逐次上下文。

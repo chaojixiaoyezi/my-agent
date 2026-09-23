@@ -162,9 +162,8 @@ def _tui_control_state(params: TuiHandleCommandParams) -> ChatControlState:
         )
 
 
-# LLM: App exit always stops client-owned refresh/poll threads and leaves the durable session
-# resumable. The result is reserved for startup readiness failures; normal exit/EOF returns zero.
-# 函数用途: 运行 TUI 事件循环，退出时恢复终端、保存会话并打印精确恢复命令。
+# LLM: 所有退出路径先停止本客户端的刷新/轮询，再清终端；异常不能跳过停止信号，不取消 Gateway 持久任务。
+# 函数用途: 运行界面并在 finally 释放客户端活动；正常退出保存会话并打印恢复命令。
 def _run_tui_loop(ctx: TuiLoopContext) -> int:
     from .rendering import set_tui_output_sink
 
@@ -176,12 +175,12 @@ def _run_tui_loop(ctx: TuiLoopContext) -> int:
     except (EOFError, KeyboardInterrupt):
         pass
     finally:
+        ctx.stop_event.set()
+        ctx.refresh_stop.set()
+        set_tui_output_sink(None)
         title_controller = getattr(ctx.app, "_my_agent_title_controller", None)
         if title_controller is not None:
             title_controller.clear(ctx.app.output)
-        set_tui_output_sink(None)
-        ctx.refresh_stop.set()
-    ctx.stop_event.set()
     ctx.session_manager.touch_session(ctx.current_session_id, channel="chat")
     _cprint(
         "\n已退出界面；会话与 Gateway 后台任务已保留。\n"

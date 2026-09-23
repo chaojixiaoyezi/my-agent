@@ -1,5 +1,7 @@
 # Gateway Structure
 
+`bounded_http_server.py` 统一 HTTP 容量、传输空闲和排队期限；`io.gateway_request_counts` 只读目录类型计数，不派生准入。`owner_scoped_pool.py` 合并同身份首次构建并记录精确实例租用；`owner_retention.py` 复核原持久硬事实、在途线程及版本时刻，只回收进程内引用。`gateway_loops.py` 限频触发回收，巡检通过 `touch=False` 不把自身变成用户活动。任务、权限和副作用仍由原 request/attempt 合同管理。
+
 `command_stream.py` 的进程内 CancellationToken 统一来自 `common/cancellation.py`；请求线程及消息流仍由本模块管理，令牌不拥有持久任务状态。
 
 ## 子代理插话重放边界

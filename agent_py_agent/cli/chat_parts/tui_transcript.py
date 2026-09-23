@@ -46,9 +46,10 @@ class TuiTranscriptModeSnapshot:
 # LLM: TuiTranscriptModeState 在同一锁内维护模式和搜索；冻结 snapshot 只属于当前显示来源，control 动作仍由外层 keybinding 调用。
 # 类用途: 管理 Ctrl-O 进入/退出、Ctrl-E、`/` 搜索、n/N 导航与 resize 清理。
 class TuiTranscriptModeState:
-    # LLM: invalidate callback 只能丢 frame cache 并请求重绘，不能从 worker 线程操作 prompt_toolkit layout。
-    # 函数用途: 创建一个关闭状态的 transcript 控制器。
-    def __init__(self, invalidate: Callable[[], None] | None = None) -> None:
+    # LLM: 冻结显示窗口有界且不删除持久历史；invalidate 只请求重绘，不能从 worker 操作 layout。
+    # 函数用途: 创建详情控制器；连续翻旧页时淘汰窗口末端，Ctrl+End 可回到实时正文。
+    def __init__(self, invalidate: Callable[[], None] | None = None, *, max_frozen_blocks: int = 20_000) -> None:
+        self._max_frozen_blocks = max(1, max_frozen_blocks)
         self._active = False
         self._show_all = False
         self._complete_pages: CompleteDetailPages | tuple = ()
@@ -158,8 +159,8 @@ class TuiTranscriptModeState:
             self._reset_search_locked()
         self._notify()
 
-    # LLM: 冻结阅读可追加更早的静态块，但不能夹入查看期间的新回复或改变原活动/审批快照。
-    # 函数用途: Ctrl+O 模式翻旧页时保留当前阅读现场，同时补齐新读到的历史前缀。
+    # LLM: 冻结阅读只追加指定旧页，不能混入新回复；保留靠近上翻位置的有界窗口，磁盘历史不变。
+    # 函数用途: 补入旧页并释放远离阅读位置的末端快照，避免一直按 Ctrl+Home 累积整份历史。
     def prepend_history(self, live_snapshot: TuiViewSnapshot, block_ids: tuple[str, ...]) -> None:
         with self._lock:
             frozen = self._frozen_snapshot
@@ -169,9 +170,10 @@ class TuiTranscriptModeState:
             old_ids = {block.block_id for block in frozen.stable_blocks}
             prefix = [block for block in live_snapshot.stable_blocks if block.block_id in ids - old_ids]
             welcome = {block.block_id: block for block in live_snapshot.stable_blocks if block.kind == "session_started"}
-            self._frozen_snapshot = replace(frozen, stable_blocks=(
+            blocks = (
                 *prefix, *(welcome.get(block.block_id, block) for block in frozen.stable_blocks),
-            ))
+            )
+            self._frozen_snapshot = replace(frozen, stable_blocks=blocks[:self._max_frozen_blocks])
             self._complete_pages = ()
             self._complete_page = 0
             self._matches, self._matches_query = (), ""

@@ -8,6 +8,7 @@ import threading
 from collections.abc import Mapping
 from pathlib import Path
 
+from .tui_identity_window import TuiIdentityWindow
 from .tui_params import StartWorkerParams, WorkerConfigParams
 
 TUI_REFRESH_INTERVAL_SECONDS = 0.125
@@ -105,7 +106,7 @@ def _start_worker_threads(*, params: StartWorkerParams) -> None:
 # LLM: The first snapshot is immediate. Foreground/background-active sessions poll at one second;
 # inactive sessions poll at five seconds. Transport failures use a separate exponential backoff
 # that resets after the next valid snapshot, so detached TUIs cannot storm the single Gateway.
-# 函数用途: 持续检查当前会话更新；失败沿原退避节奏重试并标记状态未同步，不终止后台任务。
+# 函数用途: 按游标读取会话更新，近期通知去重有界；失败退避并标记未同步，不终止后台任务。
 def _background_notice_loop(
     stop_event: threading.Event,
     agent: object,
@@ -115,7 +116,7 @@ def _background_notice_loop(
     agent_navigation: object | None = None,
     foreground_running_ref: list[bool] | None = None,
 ) -> None:
-    seen: set[tuple[str, str]] = set()
+    seen = TuiIdentityWindow()
     event_cursor = [0]
     failure_delay = TUI_BACKGROUND_NOTICE_FAILURE_INITIAL_SECONDS
     while not stop_event.is_set():

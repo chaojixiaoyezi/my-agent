@@ -1,19 +1,20 @@
+# LLM: owner 池只管理进程内实例，唯一身份及持久工作沿既有 owner/thread 合同；空闲回收不删除用户资料。
+# 模块用途: 按用户隔离资源、合并首次构建，并向 Gateway 提供带在途保护的空闲回收入口。
 """按 owner 隔离的 agent 池(多用户飞书 per-用户隔离 + 审计 #2/#13)。
 
-实证现状:网关只建一个 owner="main" 的 agent 复用,所有飞书用户的 home/记忆/数据/成本/审计全混在
-main 名下——多用户多公司场景下串户(隐私/合规硬伤)、不可计费、审计不到人。本池按 OwnerIdentity 给
-每个用户建一个作用域 agent(把 config 的 owner 三字段覆盖成该用户),其 home/记忆/local_store 天然
-隔离,成本/审计自动按用户分。有界 LRU 逐出最久未用(复用审计 #16 的"无界结构必有界"律),线程安全。
-
-默认不启用:网关无 per-请求 owner 时仍走单 agent main(不破现有);启用与解析见 Phase 2 网关接线。
-构建在锁外做(SimpleAgent 初始化较重),不阻塞其他 owner 的并发请求;双检避免重复登记。
+本池按 OwnerIdentity 复用用户作用域实例；home、记忆和 local_store 继续按 owner 隔离。
+HTTP、请求 worker 与后台调度共用同一池；只读状态使用 peek，不构建实例或续空闲期。
+构建在锁外完成，同一身份的并发首次访问等待同一个 Future；持久任务不属于缓存生命周期。
 """
 
 from __future__ import annotations
 
 import dataclasses
 import threading
+import time
 from collections import OrderedDict
+from concurrent.futures import Future
+from contextlib import contextmanager
 from functools import partial
 from typing import Any
 
@@ -91,6 +92,8 @@ def _maybe_seed_feishu_call_name(base_config: Any, owner: Any, agent: Any) -> No
         pass  # 绝不因 auto-name 失败影响 agent 创建
 
 
+# LLM: 同 owner 并发构建合流；缓存、活动租用和持久任务是不同寿命，调用者必须完成租用。
+# 类用途: 复用用户智能体，减少并发首次访问重复初始化和历史用户常驻。
 class OwnerScopedAgentPool:
     """按 OwnerIdentity get-or-create 作用域 agent;有界 LRU、线程安全、锁外构建。
 
@@ -100,6 +103,8 @@ class OwnerScopedAgentPool:
     池满不进,且被后来的硬 owner 逐出——软活可以等,硬活不能饿死。请求路/盯守路默认
     硬(用户正在交互),后台 seed 路按发现的事实类别显式传 hard。"""
 
+    # LLM: 初始化只创建进程内容器，不加载用户；容量与空闲策略由 Gateway 配置和调用者统一应用。
+    # 函数用途: 绑定构建依赖并准备有界缓存、首次构建协调和活动租用计数。
     def __init__(
         self,
         base_config: Any,
@@ -125,19 +130,95 @@ class OwnerScopedAgentPool:
         self._hard_agents: OrderedDict[tuple, Any] = OrderedDict()
         self._soft_agents: OrderedDict[tuple, Any] = OrderedDict()
         self._lock = threading.Lock()
+        self._last_used: dict[tuple, float] = {}
+        self._pins: dict[int, int] = {}
+        self._building: dict[tuple, Future] = {}
 
-    def get(self, owner: Any, *, hard: bool = True) -> Any | None:
-        """取或建该 owner 的作用域 agent。硬:命中缓存(LRU touch)或锁外构建;满时优先逐软。
-        软:缓存命中(命中硬表不降级)或构建;满时逐软表最久,软表空且总容量被硬占满则
-        None(软活可以等,不挤硬活)——调用方须容忍 None。软拒发生在构建前,不白建 agent。"""
+    # LLM: 同一 owner 首次构建合流；真实入口刷新空闲时刻，后台扫描 touch=False 不伪造使用。
+    # 函数用途: 复用或创建唯一用户实例，等待同身份初始化时不重复加载工具和记忆。
+    def get(self, owner: Any, *, hard: bool = True, touch: bool = True) -> Any | None:
         key = (owner.provider, owner.owner_kind, owner.owner_id)
         hit = self._get_cached(key, hard=hard)
-        if hit is not None:
-            return hit
-        if not hard and not self._room_for_soft():
-            return None  # 总容量被硬占满 → 软活等下一轮(构建开销大,绝不白建)
-        agent = self._builder(self._base_config, self._root, owner, self._workspace_roots)
-        return self._store(key, agent, hard=hard)
+        if hit is None:
+            if not hard and not self._room_for_soft():
+                return None
+            hit = self._build_once(key, owner, hard=hard)
+        with self._lock:
+            if hit is not None and touch:
+                self._last_used[key] = time.monotonic()
+        return hit
+
+    # LLM: Future 只表示同 owner 初始化，不持久化；失败传播给所有等待者，完成后删除临时槽。
+    # 函数用途: 防止多个请求同时首次访问同一用户时重复构造重量级实例。
+    def _build_once(self, key: tuple, owner: Any, *, hard: bool) -> Any | None:
+        with self._lock:
+            future = self._building.get(key)
+            creator = future is None
+            if creator:
+                future = self._building[key] = Future()
+        if not creator:
+            result = future.result()
+            if hard:
+                cached = self._get_cached(key, hard=True)
+                if cached is not None:
+                    return cached
+                if result is None:
+                    result = self._builder(self._base_config, self._root, owner, self._workspace_roots)
+                return self._store(key, result, hard=True)
+            return result
+        try:
+            existing = self._get_cached(key, hard=hard)
+            result = existing if existing is not None else self._store(
+                key, self._builder(self._base_config, self._root, owner, self._workspace_roots), hard=hard,
+            )
+            future.set_result(result)
+            return result
+        except BaseException as exc:
+            future.set_exception(exc)
+            raise
+        finally:
+            with self._lock:
+                self._building.pop(key, None)
+
+    # LLM: 执行租用只固定对象身份，不授予任务权；finally 释放并从完成时重新计空闲时间。
+    # 函数用途: 请求执行和后台扫描持有实例期间禁止空闲回收，不取消用户任务。
+    @contextmanager
+    def pin(self, agent: Any, *, touch: bool = True):
+        identity = id(agent)
+        with self._lock:
+            self._pins[identity] = self._pins.get(identity, 0) + 1
+        try:
+            yield agent
+        finally:
+            with self._lock:
+                count = self._pins[identity] - 1
+                if count:
+                    self._pins[identity] = count
+                else:
+                    self._pins.pop(identity, None)
+                for key, value in (*self._hard_agents.items(), *self._soft_agents.items()):
+                    if value is agent and touch:
+                        self._last_used[key] = time.monotonic()
+
+    # LLM: 候选只是缓存投影，调用者必须再验证持久事实及在途线程；过期不等于任务完成。
+    # 函数用途: 返回超过空闲期限且无人租用的硬实例，不做磁盘读取。
+    def idle_candidates(self, seconds: float) -> list[tuple[tuple, Any, float]]:
+        cutoff = time.monotonic() - seconds
+        with self._lock:
+            return [(key, agent, self._last_used.get(key, 0.0))
+                    for key, agent in self._hard_agents.items()
+                    if self._last_used.get(key, 0.0) <= cutoff and not self._pins.get(id(agent))]
+
+    # LLM: 使用时刻或精确实例变化时不能释放；删除仅为缓存引用，不关闭仍被读取方持有的资源。
+    # 函数用途: 完成事实检查后回收同一空闲版本，防止与新消息争用。
+    def evict_idle(self, key: tuple, agent: Any, touched_at: float) -> bool:
+        with self._lock:
+            if (self._hard_agents.get(key) is not agent or self._pins.get(id(agent))
+                    or self._last_used.get(key, 0.0) != touched_at):
+                return False
+            self._hard_agents.pop(key)
+            self._last_used.pop(key, None)
+            return True
 
     # LLM: Read-only polling may inspect an already-loaded owner, but it must not
     # create, promote, or LRU-touch an Agent. Real ingress/control paths continue
@@ -179,6 +260,8 @@ class OwnerScopedAgentPool:
                 return existing
             return None
 
+    # LLM: 注册对象与空闲时刻在同一锁内，LRU 逐出同步清除寿命元数据；不取消持久工作。
+    # 函数用途: 存放初始化结果并保持缓存与记账容量一致。
     def _store(self, key: tuple, agent: Any, *, hard: bool) -> Any | None:
         with self._lock:
             # 双检:构建期间别人已建,丢弃多建的(罕见竞态,无害);升级场景两表都查。
@@ -191,17 +274,19 @@ class OwnerScopedAgentPool:
             if hard:
                 if total >= self._max_agents:
                     if self._soft_agents:
-                        self._soft_agents.popitem(last=False)  # 逐出最久未用软 owner
+                        self._last_used.pop(self._soft_agents.popitem(last=False)[0], None)  # 逐出软 owner
                     else:
-                        self._hard_agents.popitem(last=False)  # 全是硬 → 逐硬最久(有界)
+                        self._last_used.pop(self._hard_agents.popitem(last=False)[0], None)  # 逐出旧 owner
+                self._last_used[key] = time.monotonic()
                 self._hard_agents[key] = agent
                 self._hard_agents.move_to_end(key)
                 return agent
             if total >= self._max_agents:
                 if self._soft_agents:
-                    self._soft_agents.popitem(last=False)  # 软内互挤
+                    self._last_used.pop(self._soft_agents.popitem(last=False)[0], None)  # 软内互挤
                 else:
                     return None  # 总容量被硬占满 → 软活等下一轮(绝不逐硬腾位)
+            self._last_used[key] = time.monotonic()
             self._soft_agents[key] = agent
             self._soft_agents.move_to_end(key)
             return agent
@@ -239,32 +324,42 @@ class OwnerScopedAgentPool:
                     break
             if matched_key is not None:
                 self._soft_agents.pop(matched_key, None)
+                self._last_used.pop(matched_key, None)
                 return True
         return False
 
 
+# LLM: 登记本只投影近期身份，实例与执行租用由共享 owner 池管理，持久工作另有事实源。
+# 类用途: 让真实入站和后台发现交换有界的活跃身份，不长期持有历史用户的完整实例。
 class ActiveOwnerRegistry:
     """网关进程内"最近活跃 scoped owner"身份登记表(有界分层 LRU、线程安全)。
 
     只登记 OwnerIdentity(轻量,不持有 agent 实例),解决"请求 worker 与后台主代理循环各建自己的
     agent+owner 池、互不可见"的断裂:请求路解析出 scoped owner 时登记进来,后台循环据此快照逐 owner
-    tick 唤醒(各自建自己线程私有的 scoped agent,不跨线程共享 agent 实例)。有界防无限涨(复用池同款
+    tick 唤醒(实例统一由共享 owner 池取得，可变回合字段沿线程局部合同隔离)。有界防无限涨(复用池同款
     "无界结构必有界"律);单 owner/未开 scoping 时永不登记 → 表空 → 后台只 tick base,行为不变。
 
     硬/软两层(与 OwnerScopedAgentPool 同款):硬事实(待消费 wake/到期 policy/未完成子代理/
     盯守路/调度活)必登记,满时优先逐软;软事实(curator 记忆策展)登记表满则跳过(返回 False),
     且被后来的硬 owner 逐出。请求路(入站交互)/到期任务默认硬;后台磁盘发现路按事实类别显式传。"""
 
+    # LLM: 登记本只保存身份与最近写入时刻；它是唤醒发现的缓存，不持有 Agent 或任务状态。
+    # 函数用途: 创建有界的最近活跃身份登记本。
     def __init__(self, *, max_owners: int = _DEFAULT_MAX_AGENTS) -> None:
         self._max_owners = _resolved_max_agents(max_owners)
         self._hard: OrderedDict[tuple, Any] = OrderedDict()
         self._soft: OrderedDict[tuple, Any] = OrderedDict()
         self._lock = threading.Lock()
+        self._recorded_at: dict[tuple, float] = {}
 
+    # LLM: 每次真实入站/发现更新单调时刻，退休扫描必须重检，不能抹掉并发新登记。
+    # 函数用途: 记录用户的近期活动身份，按既有硬/软优先级维护容量。
     def record(self, owner: Any, *, hard: bool = True) -> bool:
         """登记 owner;返回是否在表内(软满拒入时 False)。硬:满时优先逐软再逐硬;软:满则拒。"""
         key = (owner.provider, owner.owner_kind, owner.owner_id)
         with self._lock:
+            self._recorded_at = {key: value for key, value in self._recorded_at.items() if key in self._hard or key in self._soft}
+            self._recorded_at[key] = time.monotonic()
             if hard:
                 existing = self._hard.get(key)
                 if existing is not None:
@@ -291,6 +386,17 @@ class ActiveOwnerRegistry:
                 return False  # 登记表满 → 软活等下一轮(绝不挤硬)
             self._soft[key] = owner
             self._soft.move_to_end(key)
+            return True
+
+    # LLM: 只移除检查开始前的身份版本；新入站/持久唤醒登记优先，不被旧空闲扫描抹掉。
+    # 函数用途: 释放空闲用户的后台轮询登记，磁盘身份和历史保留。
+    def discard_idle(self, key: tuple, touched_at: float) -> bool:
+        with self._lock:
+            if self._recorded_at.get(key, 0.0) > touched_at:
+                return False
+            self._hard.pop(key, None)
+            self._soft.pop(key, None)
+            self._recorded_at.pop(key, None)
             return True
 
     def snapshot(self) -> list[Any]:

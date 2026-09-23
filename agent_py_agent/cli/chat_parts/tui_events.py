@@ -6,6 +6,7 @@ from __future__ import annotations
 import threading
 import time
 import uuid
+from collections import OrderedDict, deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -145,19 +146,23 @@ class TuiEventSequencer:
 # LLM: TuiEventJournal 是 UI 事件顺序与去重的唯一账；它不渲染，也不替代 canonical conversation/tool records。
 # 类用途: 按 stream 检查单调序号、按 event_id 幂等，并保留有界重放窗口。
 class TuiEventJournal:
-    # LLM: max_events 只裁 UI 重放窗口，last_seq/seen identity 仍保持，避免裁剪后旧事件再次生效。
-    # 函数用途: 创建线程安全的有界事件账。
-    def __init__(self, *, max_events: int = 20_000, max_seen_ids: int = 50_000) -> None:
+    # LLM: UI 诊断事件不是历史数据库；限制条数、正文和流游标，当前流单调性与近期身份冲突仍检查。
+    # 函数用途: 创建有界短期事件账，避免流式长聊保留数万份已经过期的文字。
+    def __init__(self, *, max_events: int = 256, max_seen_ids: int = 2048,
+                 max_payload_chars: int = 262_144, max_streams: int = 4096) -> None:
         self.max_events = max(1, int(max_events or 1))
         self.max_seen_ids = max(self.max_events, int(max_seen_ids or self.max_events))
-        self._events: list[TuiEvent] = []
+        self.max_payload_chars = max(1, int(max_payload_chars))
+        self.max_streams = max(1, int(max_streams))
+        self._events: deque[TuiEvent] = deque(maxlen=self.max_events)
         self._seen: dict[str, TuiEvent] = {}
-        self._seen_order: list[str] = []
-        self._last_seq: dict[str, int] = {}
+        self._seen_order: deque[tuple[str, int]] = deque()
+        self._payload_chars = 0
+        self._last_seq: OrderedDict[str, int] = OrderedDict()
         self._lock = threading.Lock()
 
-    # LLM: append 对同 id 同内容返回 duplicate，对冲突 id 或非单调新事件 fail-closed；不得按 arrival time 修正。
-    # 函数用途: 将一条新事件幂等加入 journal，并返回结构化裁决。
+    # LLM: 近期同 ID 比较原事件，当前流检查单调性；正文预算只控制诊断保留，不阻止事件进入 reducer。
+    # 函数用途: 幂等接收事件并裁剪旧诊断，完整历史仍从 canonical 分页读取。
     def append(self, event: TuiEvent) -> JournalAppendResult:
         with self._lock:
             previous = self._seen.get(event.event_id)
@@ -170,8 +175,11 @@ class TuiEventJournal:
                 return JournalAppendResult("rejected", "out_of_order_seq")
             self._events.append(event)
             self._seen[event.event_id] = event
-            self._seen_order.append(event.event_id)
+            weight = _payload_text_size(event.payload)
+            self._seen_order.append((event.event_id, weight))
+            self._payload_chars += weight
             self._last_seq[event.stream_id] = event.seq
+            self._last_seq.move_to_end(event.stream_id)
             self._trim_locked()
             return JournalAppendResult("accepted")
 
@@ -187,18 +195,30 @@ class TuiEventJournal:
         with self._lock:
             return dict(self._last_seq)
 
-    # LLM: trim 只删除最老正文窗口和超出 seen 上限的已裁身份，不能改变 last_seq 防回退事实。
-    # 函数用途: 将 journal 与 event-id 索引限制在配置上限内。
+    # LLM: 只淘汰短期 UI 投影，不能删除磁盘历史；保留流按 LRU 有界，活跃流游标不会随正文裁剪消失。
+    # 函数用途: 同步裁剪正文、去重身份和闲置来源游标，按 deque 从头释放而非搬移整个列表。
     def _trim_locked(self) -> None:
-        overflow = len(self._events) - self.max_events
-        if overflow > 0:
-            del self._events[:overflow]
-        seen_overflow = len(self._seen_order) - self.max_seen_ids
-        if seen_overflow <= 0:
-            return
-        for event_id in self._seen_order[:seen_overflow]:
+        while self._seen_order and (len(self._seen_order) > self.max_seen_ids
+                                   or self._payload_chars > self.max_payload_chars):
+            event_id, weight = self._seen_order.popleft()
             self._seen.pop(event_id, None)
-        del self._seen_order[:seen_overflow]
+            self._payload_chars -= weight
+        while self._events and self._events[0].event_id not in self._seen:
+            self._events.popleft()
+        while len(self._last_seq) > self.max_streams:
+            self._last_seq.popitem(last=False)
+
+
+# LLM: 只估算 UI payload 中已有字符串，不序列化未知对象、不运行 __str__，不用于机器授权或状态判断。
+# 函数用途: 给诊断保留窗口计算轻量字符预算。
+def _payload_text_size(value: object) -> int:
+    if isinstance(value, str):
+        return len(value)
+    if isinstance(value, dict):
+        return sum(_payload_text_size(item) for item in value.values())
+    if isinstance(value, (tuple, list)):
+        return sum(_payload_text_size(item) for item in value)
+    return 0
 
 
 __all__ = [

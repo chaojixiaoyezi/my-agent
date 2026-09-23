@@ -298,13 +298,12 @@ class TuiTranscriptControl(UIControl):
     def is_focusable(self) -> bool:
         return True
 
-    # LLM: create_content 每次只取共享 frame 引用，不拼整份字符串；空 transcript 仍返回一行合法 UIContent。
+    # LLM: create_content 复用共享 frame，仅在布局需要补行时分配；空 transcript 仍返回合法 UIContent。
     # 函数用途: 生成行访问器；窗口中任何归档未就绪时保留来源锚点，前文加载也不能推走正在看的消息。
     def create_content(self, width: int, height: int) -> UIContent:
         frame = self.provider.frame(width)
-        lines = frame.transcript_lines or ((),)
         line_count = scrollable_line_count(frame, max(1, height), self.provider.transcript_state)
-        lines = (*lines, *((),) * (line_count - len(lines)))
+        lines = _pad_transcript_lines(frame.transcript_lines, line_count)
         visible_block_ids = _counted_message_block_ids(
             self.provider.state_store.snapshot()
         )
@@ -1133,6 +1132,15 @@ def _decorate_selection(
                 decorated.append((selected_style, char))
             source_index += 1
     return tuple(decorated)
+
+
+# LLM: 布局补空行是纯显示变换，已有足够行时必须返回原 tuple，不能每帧复制稳定历史。
+# 函数用途: 按视口需要补空白行；空正文也保留一行，不触碰内容或阅读锚点。
+def _pad_transcript_lines(lines: tuple[FormattedLine, ...], line_count: int) -> tuple[FormattedLine, ...]:
+    lines = lines or ((),)
+    if line_count > len(lines):
+        return (*lines, *((),) * (line_count - len(lines)))
+    return lines
 
 
 # LLM: 多行 control 的 newline 在此统一插入，末行不额外添加换行避免 overlay 高度漂移。

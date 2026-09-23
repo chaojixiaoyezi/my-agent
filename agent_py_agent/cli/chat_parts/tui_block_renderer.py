@@ -29,6 +29,7 @@ from .tui_markdown import (
     wrap_fragments,
 )
 from .tui_model_metrics import render_model_metrics
+from .tui_safe_lines import SafeFormattedLine
 from .tui_view_model import (
     TuiBlock,
     TuiContextUsage,
@@ -448,8 +449,8 @@ class TuiBlockRenderCache:
         self._live_last_key: dict[str, tuple[Any, ...]] = {}
         self._live_last_at: dict[str, float] = {}
 
-    # LLM: render 使用 block identity/update 与必要 context 字段；稳定块不被 spinner frame 误伤。
-    # 函数用途: 返回缓存或新渲染的单 block 行；流式活动块在节流窗内复用最近一次渲染。
+    # LLM: 缓存只保存已净化的不可变行，安全出口按类型复用；键仍绑定 block 版本、宽度和显示模式。
+    # 函数用途: 返回已检查的缓存行；新版本才重新排版和过滤终端字符，稳定历史不随动画重扫。
     def render(self, block: TuiBlock, context: TuiRenderContext) -> tuple[FormattedLine, ...]:
         key = _block_cache_key(block, context)
         cached = self._entries.get(key)
@@ -464,7 +465,7 @@ class TuiBlockRenderCache:
                 if stale is not None:
                     # 复用最近一次渲染：流式增量不逐帧全量重渲染（万字块展开时避免卡死）。
                     return stale
-        rendered = _render_block(block, context)
+        rendered = tuple(SafeFormattedLine(line) for line in _render_block(block, context))
         if _is_live_stream_block(block):
             previous_key = self._live_last_key.get(block.block_id)
             if previous_key is not None and previous_key != key:
@@ -587,7 +588,7 @@ def render_tui_snapshot(
 
 # LLM: This is the final TUI display-security chokepoint. It must preserve style and mouse
 # handlers byte-for-byte while removing terminal controls from every visible text fragment.
-# The operation is idempotent so transcript/search decorators can safely pass through it again.
+# Checked immutable lines pass through by identity; new decorator lines must still be checked.
 # 函数用途: 在画面交给 prompt_toolkit 前统一净化 transcript、覆盖层、输入状态、Todo、代理面板和 footer，确保
 # provider、工具、路径和搜索内容都不能向宿主终端注入控制序列。
 def sanitize_tui_render_frame(frame: TuiRenderFrame) -> TuiRenderFrame:
@@ -606,13 +607,9 @@ def sanitize_tui_render_frame(frame: TuiRenderFrame) -> TuiRenderFrame:
 
 # LLM: prompt_toolkit fragments may carry a mouse handler after style/text. Keep every tail
 # element unchanged; only the visible text field is untrusted terminal data.
-# 函数用途: 净化一行所有可见文字，同时保留样式和点击处理器。
+# 函数用途: 净化一行所有可见文字；不可变安全行直接复用，样式和点击处理器保持原样。
 def _sanitize_formatted_line(line: FormattedLine) -> FormattedLine:
-    sanitized = []
-    for fragment in line:
-        style, text, *tail = fragment
-        sanitized.append((style, sanitize_terminal_text(text), *tail))
-    return tuple(sanitized)
+    return SafeFormattedLine(line)
 
 
 # LLM: Empty waiting spinners follow 终端交互 and disappear behind a visible assistant stream;

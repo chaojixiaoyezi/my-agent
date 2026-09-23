@@ -62,3 +62,24 @@ def test_real_agents_concurrent_isolation(tmp_path) -> None:
     db_paths = {str(agent.local_store.db_path) for agent in results.values()}
     assert len(db_paths) == 6  # 6 个用户 → 6 条互不相同的数据库路径(并发下也不串户)
     assert all("user" in p for p in db_paths)
+
+
+def test_same_owner_initialization_runs_once_under_contention(tmp_path):
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    pool = OwnerScopedAgentPool(AgentConfig(model_backend="echo"), tmp_path)
+    built = []
+
+    def build(*_args):
+        built.append(object())
+        time.sleep(0.02)
+        return built[-1]
+
+    pool._builder = build
+    owner = OwnerIdentity.provider_user("test", "one")
+    with ThreadPoolExecutor(max_workers=20) as executor:
+        results = list(executor.map(lambda _: pool.get(owner), range(100)))
+    assert len(built) == 1
+    assert all(item is built[0] for item in results)
+    assert not pool._building

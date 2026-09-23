@@ -12,6 +12,7 @@ from typing import Any
 
 from ...agent.conversation.model_metrics import newer_model_metrics
 from .tui_events import JournalAppendResult, TuiEvent, TuiEventJournal
+from .tui_identity_window import TuiIdentityWindow
 
 TERMINAL_BLOCK_PHASES = frozenset({"completed", "failed", "interrupted"})
 _LOGGER = logging.getLogger(__name__)
@@ -265,7 +266,7 @@ class _TuiPermissionReducerMixin:
 # LLM: TuiViewModelReducer 是事件到显示状态的唯一转换表；权限方法按领域拆入内部 mixin，新增 kind 仍须注册 handler 并补状态转换测试。
 # 类用途: 顺序应用已通过 journal 的事件，并维持 active→stable 一次冻结。
 class TuiViewModelReducer(_TuiPermissionReducerMixin):
-    # LLM: handler registry 明确列出已理解 kind，未知 kind 只记诊断，不把 payload 当文本透传。
+    # LLM: handler registry 明确列出显示事件；稳定块和近期去重身份分别有界，持久历史不在 reducer 保存。
     # 函数用途: 初始化空 view model、确认后的模型显示名、独立的刷新健康标记和事件处理表。
     def __init__(
         self,
@@ -287,7 +288,7 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
         self.diagnostics: list[TuiDiagnostic] = []
         self.max_diagnostics = max(1, int(max_diagnostics or 1))
         self.max_stable_blocks = max(1, int(max_stable_blocks or 1))
-        self._stable_ids: set[str] = set()
+        self._stable_ids = TuiIdentityWindow(maximum=self.max_stable_blocks * 2)
         self._task_progress_generation_id = ""
         # 本轮聊天请求的身份（只用于展示去重/诊断），与计划代次严格分开。
         self._task_progress_turn_id = ""
