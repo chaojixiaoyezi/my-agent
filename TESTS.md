@@ -1,6 +1,6 @@
 # 测试与发布验收
 
-## 第 7 步子代理结果链本地整合（未远端发布）
+## 第 7 步子代理结果链已发布 main（未切换运行环境）
 
 独立工作树已拆出 runner 状态展示、完成交接信封、exact attempt 准入与
 “结果先落盘、再 WAL、再运行账、最后父通知”的初次提交编排；旧函数和导出已删除。
@@ -8,8 +8,11 @@
 组合源码又跑过 17 个跨线定向文件及 9 个恢复／资源／层级文件，均无失败。
 Ruff、导入边界、doc sync、strict code-size、diff、clean-package 均通过。
 组合 wheel 发布边界检查为 forbidden／source_missing／source_mismatched／resource_missing 全部 0；
-SHA-256 为 `34ec67b064b489ac190c88e2b4ad6418228f3125763d42029eecaec94b665d65`，
+SHA-256 为 `6b66d2a4f9dc3f3df8902bdbd4181c733a9c15dc224c474c2c5ca9d36b62ce71`，
 四个新模块与 TUI 阅读模块均在包内。原生 TUI 验收仍待完成。
+首次推送后复查发现同文件注释插入 import 组触发 Ruff I001；该版本未切换任何 Gateway，
+本次移正注释并重新通过 focused tests、Ruff、导入边界、doc sync、strict code-size、
+diff、clean-package 与修正 wheel 的发布边界，以上 SHA 只指修正包。
 终态冲突原先漏记 `closeout_blocked`，现写入 manager 的原 RuntimeDB。
 首次父通知后若 `delivered` 标记落盘失败，保留 pending WAL；
 故障注入验证恢复后同一 attempt 的 wake 仍恰好一条。
@@ -19,12 +22,13 @@ SHA-256 为 `34ec67b064b489ac190c88e2b4ad6418228f3125763d42029eecaec94b665d65`�
 再补 5 个 worker pool、作用域、创建幂等和层级合同文件 **47 passed**。
 Ruff、doc sync、strict code-size、diff、clean-package 通过。
 仓库外构建的候选 wheel 含四个新模块，包内 `agent_py_agent/` 文件共 1,271 个。
-隔离候选 wheel 尚未作为组合版推送、安装或切换 Gateway；
+组合源码已随提交 `ad6827935` 推送远端 main；同一 wheel 已在测试机候选环境旁路安装，
+尚未切换该机 Gateway／默认入口，本机当前 Gateway 仍运行旧包；
 这些离线回归不能替代官方 MiniMax-M2.7 的第 7.6 项多路真实 TUI 验收。
 隔离线交接见 [第 7 步交接](docs/tasks/HANDOFF_STEP7_SUBAGENT_LIFECYCLE.md)，
 正式验收矩阵见 [唯一 TODO](docs/tasks/REFACTOR_PLUGIN_GOAL.md#第-7-步当前-todo子代理状态和交接按序小片推进)。
 
-## TUI 阅读与插话并行修复（本地提交，未远端发布）
+## TUI 阅读与插话并行修复（已发布 main，未双机切换）
 
 这条线独立于十步 Goal 的第 7 步子代理结果链；它修复运行中插话的历史顺序、
 后台 native 回复重复显示，以及普通／详细／原文视图的阅读锚点和连续滚动。
@@ -54,7 +58,7 @@ diff、clean-package 和候选 wheel 的发布边界检查通过。全仓 pytest
 
 本轮只验证 root TUI 与已有历史恢复；没有覆盖全部子／孙代理、IM、长达 100 小时的耐久，
 也不证明所有重复正文问题均已解决。代码已在原 checkout 单独本地提交 `c297c52f3`，
-尚未推送远端 main 或部署到本机和既定测试机；
+已随本轮快进推送远端 main，尚未部署到本机和既定测试机的默认 Gateway；
 此候选的真实验收不能冒充第 7 步新版子代理 TUI 验收。
 文件归属、逐项证据与未测边界见 [TUI 阅读交接](docs/tasks/TUI_READING_HANDOFF.md)。
 

@@ -20,10 +20,10 @@ from .models import (
     task_has_ended_status,
     task_status_in,
 )
-# LLM: 交接正文只读共享投影；等待标记和唤醒裁决仍由本模块持有。
-# 模块用途: 引用统一完成信封，避免各层父代理各自拼接不同正文。
 from .runner_completion_payload import completion_handoff_payload
 
+# LLM: 交接正文只读共享投影；等待标记和唤醒裁决仍由本模块持有。
+# 模块用途: 引用统一完成信封，避免各层父代理各自拼接不同正文。
 DIRECT_CHILD_WAIT_ATTR = "direct_child_wait"
 _WAIT_SCHEMA_VERSION = "direct-child-wait.v1"
 _CONTEXT_CHILD_LIMIT = 12
