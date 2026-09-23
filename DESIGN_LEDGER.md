@@ -30,7 +30,7 @@ SDK 构建开始实施：原字节投影读取合同、路径策略及通用 no-
 第 12 项本地计量已复用原出站配对清扫、guidance 与 ToolChoice，纯投影计量不读取宿主或校准；旧观测 v2 明确失效。三宿主同 turn 展示接续、失效清除与后台原执行身份回传已本地验收；不新增持久展示状态。完整恢复请求与 Compact 候选接受边界仍未闭合，细节见[容量审计](docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。
 12.5的已知输出预留已接原transcript触发/候选接受门，本地72项通过；完整计量仍依赖12.4的原恢复准备一次化，不得多次召回/重放摘要副作用或把上一失败轮IR直接冒充恢复输入。
 后台准备已分离prepare/render，历史范围及摘要投影从同次成功读取冻结；这只是完整恢复前置，不改变持久Compact的作用域权威。detached任务与窄审计的全局摘要/工具隐藏关系须先收口，不以省略历史后得到的小容量作为成功。
-审查已用原store/checkpoint复现三类恢复材料丢失；拟在唯一checkpoint链内明确scope、摘要基础与精确覆盖，局部压缩不覆盖全线程视图，实际消费摘要后才隐藏来源。此方案尚未实现，详见[容量审计末节](docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。
+审查已用原store/checkpoint复现三类恢复材料丢失。唯一checkpoint链的v3 scope/base/精确覆盖与局部CAS保留全线程投影已实现底座；旧v1/v2显式读取，旧工具身份不全不命中精确覆盖。后台作用域选择、同一视图的摘要注入与隐藏、完整请求接线仍待实施，详见[容量审计末节](docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。
 
 12.4的Gateway overflow接缝已本地实施：原render/select冻结完整恢复请求，候选按结构化位置更新历史/证据，原CAS成功后继续同次生成。原来源defer只跳过压缩，保留repair/索引；无来源的活动回合压缩仍先于恢复准备。摘要失败不进入普通业务重试，token取消与边界事件沿原合同；child overflow现已接通并共用core恢复器与请求捕获，Gateway只保留宿主投影；后台及初次/手动入口尚未接通，详见容量审计末节。
 P5-B 首片已本地接入独立 `curator_relation`：只比较本批完整消息与有真实版本、完整短正文的正式 long-term 条目，提示可能重复/更新/冲突；原提取、候选、验证和晋升仍唯一，缺版本/截断/变更保留原流程。默认关闭、owner 后台设置、同一阶段期限；隔离真实 Jev 的12对短样本符合预设、超时保留原输入，后续提取仅本地替身，更广质量和真实晋升未验，详见[交接](docs/tasks/DECISION_MODEL_P5B_HANDOFF.md)。

@@ -1129,3 +1129,20 @@ child的 `prepare_subagent_thread_turn(defer_compact=True)` 保留原消息幂�
 窄审计保持conversation_history_seed=None，仅压本活动回合的工具/IR，并以精确conversation_turn_id读取替代摘要；不能只凭task_id继承另一审计事件。摘要器必须读取适用base，不能继续直接使用binding.thread.summary。最后扩共享完整恢复器支持没有transcript但有active IR的来源，沿原一次准备、候选纯投影、CAS与同次发送完成接线。
 
 以上是下一片待核实实施的通用合同方向，尚无新schema或resolver落地。需要覆盖交错任务、旧checkpoint读取、并发CAS、取消、坏来源、前台/child正常历史，以及窄审计不泄漏旧聊天的回归；先验证基础迁移，再改变宿主发送路径。
+
+
+#### v3检查点与精确来源底座（本地实现，宿主仍待接）
+
+基线`3cbbba540`后，原writer统一写v3；commit head与generation CAS保持唯一。scope、summary_base_checkpoint_id、精确message IDs/工具refs、摘要/证据与创建时间共同封印，ID带v3前缀。提交链前驱和摘要语义基础分开；reader只沿实际适用摘要的base收集覆盖，旧v1/v2显式按全线程格式读取。局部CAS的publish_thread_view=False只推进同一head与计数/清理旧代遥测，不覆盖全线程摘要、游标和摘要时间。
+
+独立审查实际复现“只改schema v3→v2即可把局部摘要暴露为全线程”，已通过ID版本与schema一致性、旧格式拒绝新范围字段修复。创建时间影响任务可继承的边界，故包含于ID：新时间重试是新候选，唯一CAS仍只允许一份提交，未依赖候选ID去重代替CAS。
+
+工具覆盖必须按原ToolCall的run/attempt/模型turn/call四元组。原native IR在摘要前捕获调用与结果配对身份，删除后做精确集合差；活动归档按记录身份切分来源/保留区，合法同call_id跨轮不拒绝也不相互隐藏。call_id列表仅用于展示，旧缺身份的归档不可精确命中，需替代未知来源时明确拒绝候选，不能补当前attempt。
+
+原工具外置路径先于完整archive写入，现从第一次externalize起保留原attempt/turn；原index、source refs和carried重载沿用这些值。归档去重/运行中合并不按裸ID消掉不同轮；未知旧条目不冒充新执行进展。同正文同call但不同执行身份的新版artifact路径包含身份摘要，避免旧ref指向被改写的身份。旧路径不重写、不迁移。
+
+进一步真实生成函数复现：child Goal多轮复用attempt，每轮新状态的序号均从1开始，原ToolCall.turn_id因此碰撞，使未摘要的新调用被旧覆盖误删。`tool_model_generation._begin_model_turn_identity` 现只在原turn_id添加每次模型调用的唯一nonce，原sequence语义不变，不新增身份账或改变宿主conversation_turn_id。参考本地Codex的`core/src/session/mod.rs::new_submission_id`与`session/inject.rs`的结构化唯一提交身份；实际修复仍使用本项目原ToolCall合同。
+
+本片未将detached/narrow宿主绑定到新scope，也未完成同一个应用view的摘要注入/来源隐藏与完整恢复首请求。普通路径目前默认thread范围，后台原三类复现不能据此宣布修复。下一片仍须沿原准备与TaskScopeDecision绑定来源、支持窄审计seed=None的活动IR摘要、接公共完整计量并做实际payload对照；不能做普通后台可用而其它范围回旧旁路的收尾。
+
+另有并行TUI线的合成历史容量证据：1.11一万行M2.7续聊410.81秒后成功，generation=1、4次provider调用、0重试，仅证明该样本；千万行无compact字节游标的after_compact_report在384MiB受限子进程立即MemoryError。后者明确未通过，需有界原文读取和append去重组合验收，不能替代真实长开发任务验收。对_segment_end的O(N²)初步判断已撤回（原实现已有二分），本线未据此修改预算算法。

@@ -259,8 +259,8 @@ class ThreadStore:
             ),
         )
 
-    # LLM: One CAS advances transcript/live-tool totals and clears both prior-generation calibration and display usage.
-    # 函数用途: 原子提交压缩及累计来源，清除旧代上下文显示和校准，不改写原始消息。
+    # LLM: 唯一CAS推进提交链和计数；局部检查点不覆盖全线程摘要/游标，旧代校准与展示仍统一失效。
+    # 函数用途: 原子提交压缩；局部视图只沿同链读取，不另建任务摘要表，也不改原始消息。
     def update_compact_state(
         self,
         thread_id: str,
@@ -270,10 +270,12 @@ class ThreadStore:
         now: float | None = None,
     ) -> ConversationThread:
         """Atomically advance one validated summary/checkpoint without touching raw messages."""
+        if type(commit.publish_thread_view) is not bool:
+            raise ValueError("compact publication scope must be an explicit boolean")
         current = now if now is not None else time.time()
 
-        # LLM: store_threads 的持久化合同：在持锁线程上检查 generation 后提交压缩游标及计数，并清除旧代遥测；修改须同步本领域调用方与存储回归。
-        # 函数用途: 在持锁线程上检查 generation 后提交压缩游标及计数，并清除旧代遥测。
+        # LLM: 先检查原generation，再根据结构化publish_thread_view提交全线程投影；局部摘要不成为全局权限。
+        # 函数用途: 同锁提交唯一head；局部压缩保留全线程摘要时间和游标，防止其它任务跳过未覆盖原文。
         def apply(thread: ConversationThread) -> ConversationThread:
             if thread.compact_generation != expected_generation:
                 raise RuntimeError(
@@ -281,15 +283,15 @@ class ThreadStore:
                 )
             return replace(
                 thread,
-                summary=str(commit.summary).strip(),
-                compact_operation_evidence=dict(commit.operation_evidence),
-                compacted_through_message_id=str(commit.compacted_through_message_id),
-                compacted_through_byte_offset=max(
-                    0,
-                    int(commit.compacted_through_byte_offset),
-                ),
+                summary=str(commit.summary).strip() if commit.publish_thread_view else thread.summary,
+                compact_operation_evidence=(dict(commit.operation_evidence) if commit.publish_thread_view
+                                            else thread.compact_operation_evidence),
+                compacted_through_message_id=(str(commit.compacted_through_message_id) if commit.publish_thread_view
+                                             else thread.compacted_through_message_id),
+                compacted_through_byte_offset=(max(0, int(commit.compacted_through_byte_offset))
+                                              if commit.publish_thread_view else thread.compacted_through_byte_offset),
                 compact_generation=thread.compact_generation + 1,
-                compact_updated_at=current,
+                compact_updated_at=current if commit.publish_thread_view else thread.compact_updated_at,
                 compact_source_messages=max(0, int(commit.source_messages)),
                 compact_source_tool_pairs=max(
                     0,

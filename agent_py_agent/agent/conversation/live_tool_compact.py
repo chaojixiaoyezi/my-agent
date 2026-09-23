@@ -1,7 +1,6 @@
-# LLM: This module adapts a persistent active-turn native IR reduction to the same
-# ConversationThread checkpoint/CAS authority used by transcript Compact. It never owns IR
-# mutation, provider messages, task lifecycle, or UI counters.
-# 模块用途: 把主代理、子代理和孙代理运行中的工具历史压缩提交到唯一会话账本，失败时保留原历史。
+# LLM: 活动IR压缩复用原ConversationThread检查点/CAS；精确refs决定覆盖，绑定scope决定是否发布全线程投影。
+# 不拥有IR变更、provider消息或任务生命周期，宿主必须先准备适用摘要，失败保留原记录。
+# 模块用途: 将运行中工具压缩提交到同一账本，区分局部摘要与全线程状态。
 
 from __future__ import annotations
 
@@ -27,6 +26,8 @@ from .compact_guard import (
     raise_if_compact_interrupted,
     record_compact_failure,
 )
+from .compact_scope import THREAD_COMPACT_SCOPE, CompactScope
+from .compact_tool_identity import compact_tool_ref_key, compact_tool_refs
 from .models import ConversationCompactCommit, ConversationThread
 
 if TYPE_CHECKING:
@@ -35,17 +36,17 @@ if TYPE_CHECKING:
     from .store import ConversationStore
 
 
-# LLM: The binding is a point-in-time CAS candidate; callers must not reuse it after a commit.
-# 类用途: 绑定一次运行中压缩要写入的 owner store 和精确 ConversationThread 代次。
+# LLM: 绑定是某个CAS代次及适用scope的临时引用；scope只限制摘要范围，提交后不能复用旧绑定。
+# 类用途: 固定本次活动压缩的原store、线程和摘要范围，不建立第二状态。
 @dataclass(frozen=True)
 class LiveToolCompactBinding:
     store: ConversationStore
     thread: ConversationThread
+    scope: CompactScope = THREAD_COMPACT_SCOPE
 
 
-# LLM: This immutable request keeps one live-tool candidate's summary, boundaries, usage and
-# interruption check aligned through checkpoint/CAS; the UI callback remains observation-only.
-# 类用途: 打包一次运行中压缩的摘要、调用编号、token、请求身份和停止检查，避免提交阶段参数错位。
+# LLM: 精确source/retained refs随同摘要经过原checkpoint/CAS，UI回调只有观察权，未知来源不能补当前runner。
+# 类用途: 打包活动摘要、四元调用边界、计量和停止检查；同名调用仍按不同执行身份分别处理。
 @dataclass(frozen=True)
 class LiveToolCompactCommitRequest:
     summary: str
@@ -56,6 +57,8 @@ class LiveToolCompactCommitRequest:
     policy: RuntimeCompactPolicy
     request_id: str
     attempt_id: str
+    source_tool_refs: tuple[dict[str, str], ...]
+    retained_tool_refs: tuple[dict[str, str], ...] = ()
     forced: bool = False
     after_checkpoint: Callable[[], None] | None = None
     interrupt_check: CompactInterruptCheck | None = None
@@ -128,7 +131,10 @@ def commit_live_tool_compact(
             policy=request.policy,
             request_id=str(request.request_id or ""),
             attempt_id=str(request.attempt_id or ""),
+            source_tool_refs=request.source_tool_refs,
+            retained_tool_refs=request.retained_tool_refs,
             forced=bool(request.forced),
+            scope=binding.scope,
         ),
     )
     if request.after_checkpoint is not None:
@@ -158,18 +164,23 @@ def commit_live_tool_compact(
             source_tool_pairs=(
                 binding.thread.compact_source_tool_pairs + len(source_ids)
             ),
+            publish_thread_view=binding.scope.kind == "thread",
         ),
         expected_generation=binding.thread.compact_generation,
     )
 
 
-# LLM: Structural call boundaries and the replacement summary must be valid before checkpoint I/O.
-# 函数用途: 在写账前校验一次工具历史 Compact 的移除区、保留区和完整摘要。
+# LLM: 只检查四元来源与保留区交集，不能用call_id展示别名拒绝合法跨轮调用；写候选前必须通过。
+# 函数用途: 校验工具Compact的准确边界和完整摘要，不让未知调用身份推进检查点。
 def _validated_live_tool_request(
     request: LiveToolCompactCommitRequest,
 ) -> tuple[tuple[str, ...], tuple[str, ...], str]:
-    source_ids = _normalized_ids(request.source_tool_call_ids)
-    retained_ids = _normalized_ids(request.retained_tool_call_ids)
+    source_refs = compact_tool_refs(list(request.source_tool_refs))
+    retained_refs = compact_tool_refs(list(request.retained_tool_refs))
+    source_ids = tuple(ref["call_id"] for ref in source_refs)
+    retained_ids = tuple(ref["call_id"] for ref in retained_refs)
+    if source_ids != request.source_tool_call_ids or retained_ids != request.retained_tool_call_ids:
+        raise ValueError("compact display call ids do not match exact source references")
     replacement = str(request.summary or "").strip()
     if not source_ids:
         raise ConversationCompactError(
@@ -181,7 +192,7 @@ def _validated_live_tool_request(
             "live tool compact summary is empty",
             code="COMPACT_EMPTY_SUMMARY",
         )
-    if set(source_ids) & set(retained_ids):
+    if {compact_tool_ref_key(ref) for ref in source_refs} & {compact_tool_ref_key(ref) for ref in retained_refs}:
         raise ConversationCompactError(
             "live tool compact source and retained calls overlap",
             code="COMPACT_TOOL_BOUNDARY_INVALID",
@@ -203,14 +214,6 @@ def record_live_tool_compact_failure(
         binding.thread,
         code=compact_exception_code(exc),
         now=time.time(),
-    )
-
-
-# LLM: Checkpoint boundaries are ordered, non-empty exact ids; prose and tool names never join them.
-# 函数用途: 将工具调用编号去空、去重并保持原执行顺序。
-def _normalized_ids(values: tuple[str, ...]) -> tuple[str, ...]:
-    return tuple(
-        dict.fromkeys(str(item).strip() for item in values if str(item or "").strip())
     )
 
 

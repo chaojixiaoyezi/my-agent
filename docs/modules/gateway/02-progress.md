@@ -1,5 +1,7 @@
 # Gateway 维护状态
 
+Compact检查点底座已写v3，区分提交前驱与摘要基础；局部CAS保留全线程摘要/游标，新工具恢复按完整执行身份处理。后台实际选择scope并将同一摘要view交给注入和隐藏的接线尚未完成，12.4仍不关闭。
+
 后台上下文的 `prepare_background_context` 保留原事实读取与进度对账，`render_background_context` 只消费冻结值并调用原预算器；`BackgroundHistoryProjection` 保存同次任务范围与摘要投影，纯种子投影不重读任务。完整后台Compact接线仍待作用域检查点边界闭合，不能把全局新摘要给detached或窄审计事件。
 
 Gateway恢复协调已抽到 `agent_core/compact_request_recovery.py` 与child共用，原payload/CAS/取消证据保持；Gateway模块只负责自己的历史投影和边界事件。

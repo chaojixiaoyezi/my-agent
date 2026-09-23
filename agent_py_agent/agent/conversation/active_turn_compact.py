@@ -14,13 +14,14 @@ from .authority import (
     AGENT_THREAD_ID_ATTR,
     CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR,
 )
-from .compact_checkpoint import committed_live_tool_compact_source_ids
+from .compact_checkpoint import committed_live_tool_compact_source_refs
 from .compact_guard import CompactInterruptCheck, raise_if_compact_interrupted
 from .compact_progress import (
     COMPACT_AUTHORITY_CONVERSATION,
     COMPACT_SOURCE_ACTIVE_TURN,
     CONVERSATION_COMPACT_PROGRESS_SCHEMA,
 )
+from .compact_tool_identity import compact_tool_ref_key, compact_tool_refs
 from .live_tool_compact import (
     LiveToolCompactCommitRequest,
     commit_live_tool_compact,
@@ -63,15 +64,17 @@ class _ActiveTurnArchiveCompactPlan:
     policy: object
     visible_records: tuple[dict[str, object], ...]
     source_call_ids: tuple[str, ...]
+    source_tool_refs: tuple[dict[str, str], ...]
     retained_records: tuple[dict[str, object], ...]
     retained_call_ids: tuple[str, ...]
+    retained_tool_refs: tuple[dict[str, str], ...]
     projected_tokens_before: int
     progress: dict[str, object]
 
 
-# LLM: Runtime dedupe/audit continues to receive every record. Only the model projection excludes
-# calls named by the committed checkpoint chain; unreadable authority fails closed.
-# 函数用途: 从完整本轮工具账中筛出尚未被 Compact 摘要替代、仍需直接展示给模型的记录。
+# LLM: 运行权威仍保留全部记录，模型只按适用摘要base链中的四元refs隐藏来源，旧未知不能当通配。
+# 当前默认全线程视图；局部宿主必须先接同一实际应用view，不得把这个默认调用误当局部恢复已完成。
+# 函数用途: 从完整工具账筛出尚未被摘要精确覆盖的记录，读取坏权威时拒绝投影。
 def model_visible_active_turn_tool_calls(
     agent: object,
     task_attributes: object,
@@ -81,10 +84,11 @@ def model_visible_active_turn_tool_calls(
     if not values or not _transcript_authoritative(task_attributes):
         return values
     thread = _load_authoritative_thread(agent, task_attributes)
-    hidden = committed_live_tool_compact_source_ids(agent, thread)
+    hidden = {compact_tool_ref_key(ref) for ref in committed_live_tool_compact_source_refs(agent, thread)}
+    hidden.discard(None)
     if not hidden:
         return values
-    return [item for item in values if not _record_matches_call_ids(item, hidden)]
+    return [item for item in values if compact_tool_ref_key(item) not in hidden]
 
 
 # LLM: This is the recovery counterpart of the in-process native IR compactor. It runs only after
@@ -142,13 +146,18 @@ def _build_active_turn_compact_plan(
 ) -> _ActiveTurnArchiveCompactPlan:
     retained = _recent_records_within_budget(indexed, policy.recent_tail_tokens)
     retained_ids = tuple(call_id for _item, call_id in retained)
-    retained_set = set(retained_ids)
-    source_ids = tuple(call_id for _item, call_id in indexed if call_id not in retained_set)
+    retained_refs = compact_tool_refs([item for item, _call_id in retained])
+    retained_set = {compact_tool_ref_key(ref) for ref in retained_refs}
+    source_records = [item for item, _call_id in indexed if compact_tool_ref_key(item) not in retained_set]
+    source_refs = compact_tool_refs(source_records)
+    source_ids = tuple(ref["call_id"] for ref in source_refs)
     if not source_ids:
         # A single huge result must still be replaceable after an actual provider overflow.
         source_ids = (indexed[0][1],)
         retained = indexed[1:]
         retained_ids = tuple(call_id for _item, call_id in retained)
+        source_refs = compact_tool_refs([indexed[0][0]])
+        retained_refs = compact_tool_refs([item for item, _call_id in retained])
     thread = binding.thread
     generation = max(0, int(thread.compact_generation or 0)) + 1
     before_tokens = estimate_tokens({"active_turn_tool_calls": visible})
@@ -158,8 +167,10 @@ def _build_active_turn_compact_plan(
         policy=policy,
         visible_records=tuple(visible),
         source_call_ids=source_ids,
+        source_tool_refs=source_refs,
         retained_records=tuple(item for item, _call_id in retained),
         retained_call_ids=retained_ids,
+        retained_tool_refs=retained_refs,
         projected_tokens_before=before_tokens,
         progress={
             "generation": generation,
@@ -334,6 +345,8 @@ def _commit_active_turn_compact(
         LiveToolCompactCommitRequest(
             summary=replacement,
             source_tool_call_ids=plan.source_call_ids,
+            source_tool_refs=plan.source_tool_refs,
+            retained_tool_refs=plan.retained_tool_refs,
             retained_tool_call_ids=plan.retained_call_ids,
             projected_tokens_before=plan.projected_tokens_before,
             projected_tokens_after=after_tokens,
@@ -437,16 +450,6 @@ def _transcript_authoritative(attributes: object) -> bool:
 # 函数用途: 从归档记录提取用于 checkpoint 的精确工具调用编号。
 def _record_call_id(record: dict[str, object]) -> str:
     return str(record.get("call_id") or record.get("id") or "").strip()
-
-
-# LLM: Recovery accepts every structured alias emitted by the archive writer, but compares exact ids.
-# 函数用途: 判断一条完整工具记录是否已被某个已提交 Compact 摘要替代。
-def _record_matches_call_ids(record: dict[str, object], values: frozenset[str]) -> bool:
-    return any(
-        str(record.get(key) or "").strip() in values
-        for key in ("call_id", "id", "scoped_call_id")
-        if str(record.get(key) or "").strip()
-    )
 
 
 __all__ = [

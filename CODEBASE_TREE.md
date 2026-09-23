@@ -370,7 +370,10 @@ agent_py_agent/
 |   |   |-- compact_request_budget.py   # 按当前模型窗口顺序分段摘要，完整覆盖历史且失败不推进游标
 |   |   |-- compact_tool_refs.py        # 从匹配原生工具往返保留原样路径线索，不靠模型摘要记忆目录
 |   |   |-- compact_guard.py            # 结构化完整回合选择、连续失败冷却与 typed compact 错误
-|   |   |-- compact_checkpoint.py       # owner-scoped 完整 compact 恢复点与代际引用
+|   |   |-- compact_checkpoint.py       # 原提交链v3检查点、版本封印与scope/base精确来源
+|   |   |-- compact_scope.py            # 全线程、任务和活动轮的结构化摘要适用范围
+|   |   |-- compact_summary_view.py     # 沿实际摘要基础链解析覆盖，旧版本显式读取
+|   |   |-- compact_tool_identity.py    # 原调用四元身份与精确覆盖键，旧未知不伪造
 |   |   |-- active_turn_compact.py      # 跨工作片工具 archive 到同一 checkpoint/CAS 的恢复压缩与模型投影
 |   |   |-- live_tool_compact.py        # 运行中原生工具历史到同一 thread checkpoint/CAS 的适配层
 |   |   |-- native_history.py           # 完成回合的 provider 原生消息信封、校验与按请求替换式恢复
@@ -563,6 +566,9 @@ agent_py_agent/
 |   |-- test_gateway_capability_compact.py # 同片能力展示沿 Gateway/子代理 Compact 和续跑保留
 |   |-- test_subagent_capability_compact.py # child 同轮展示沿真实 Compact 重试保留、失效清除与新轮重置
 |   |-- test_background_prepared_context.py # 后台重复纯渲染无写账、冻结输入、任务范围与窄审计隔离
+|   |-- test_compact_scoped_checkpoint.py # 交错作用域、摘要基础、局部CAS、版本篡改与精确覆盖
+|   |-- test_compact_tool_provenance.py  # 原归档索引四元身份、同名调用保留与产物不覆盖
+|   |-- test_model_turn_identity.py     # 同run/attempt跨真实模型轮的身份碰撞及错误隐藏回归
 |   |-- test_background_capability_compact.py # 后台同工作片展示复用、清除与下一片重新评估
 |   |-- test_decision_skill_tool_settings.py # 展示策略/开放类别列表的设置、CAS及原菜单编辑
 |   |-- test_user_config_owner_scope.py # 普通 owner 决策工具可见性、可信线程与本机全局配置拒绝

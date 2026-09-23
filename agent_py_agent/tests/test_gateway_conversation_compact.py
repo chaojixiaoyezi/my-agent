@@ -860,7 +860,9 @@ def test_compact_preserves_bounded_complete_recent_turns_and_full_checkpoint(tmp
         for index in range(18, 20)
         for role in ("user", "assistant")
     ]
-    assert checkpoint["schema"] == "conversation_compact_checkpoint.v1"
+    assert checkpoint["schema"] == "conversation_compact_checkpoint.v3"
+    assert checkpoint["scope"]["kind"] == "thread"
+    assert checkpoint["source_message_ids"]
     assert checkpoint["status"] == "validated_candidate"
     assert checkpoint["checkpoint_id"] == stored.compact_checkpoint_id
     assert checkpoint["previous_checkpoint_id"] == ""

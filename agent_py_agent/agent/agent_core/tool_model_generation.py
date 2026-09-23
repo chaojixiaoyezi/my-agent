@@ -1,9 +1,10 @@
-# LLM: 模型生成拥有传输守卫；保持冻结身份、中断和原 IR 提交时机，出站消息与纯容量投影共用一个转换入口。
+# LLM: 模型生成拥有传输守卫和每次调用的唯一原 turn_id；保持冻结身份、中断和原 IR 提交时机，出站消息与纯容量投影共用一个转换入口。
 # 模块用途: 统一模型调用、超时与流输出，使当前模型、原生消息和停止信号准确进入实际请求线程。
 from __future__ import annotations
 
 import os
 import time
+import uuid
 from contextvars import copy_context
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
@@ -620,13 +621,15 @@ def _start_model_generation(request: ModelGenerateParams) -> _ModelGenerationSta
     )
 
 
+# LLM: 原 ToolCall.turn_id 在每次模型生成前建立唯一身份；局部序号仍供超时探针时序使用，不能跨 Goal 轮或重建工作片代替身份。
+# 函数用途: 更新当前模型调用的原身份和轮内序号，防止同 attempt 新工作片的工具被旧 Compact 引用误覆盖；不新增持久状态。
 def _begin_model_turn_identity(params: object, tool_rounds: int) -> str:
     state = getattr(params, "live_archive_state", None)
     if not isinstance(state, dict):
         return ""
     sequence = max(0, int(state.get("_model_turn_sequence") or 0)) + 1
     state["_model_turn_sequence"] = sequence
-    turn_id = f"{getattr(params, 'run_id', '')}:model:{sequence}:after-tools:{tool_rounds}"
+    turn_id = f"{getattr(params, 'run_id', '')}:model:{sequence}:after-tools:{tool_rounds}:{uuid.uuid4().hex}"
     state["_current_model_turn_id"] = turn_id
     return turn_id
 

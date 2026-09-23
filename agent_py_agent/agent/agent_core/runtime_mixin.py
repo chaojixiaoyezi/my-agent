@@ -798,6 +798,8 @@ def _compact_auto_continue_params(
     )
 
 
+# LLM: 原工具账保留未知旧记录，但只有新出现的完整调用身份能证明本轮新增执行；累计计数不作为证明。
+# 函数用途: 判断Compact续跑是否确有新工具事实，不把重复携带旧材料算进展。
 def _result_added_tool_progress(
     params: RunParams,
     result: object,
@@ -813,10 +815,15 @@ def _result_added_tool_progress(
     """
 
     if hasattr(result, "archive_tool_calls"):
-        carried = _merged_archive_tool_calls(params.carried_archive_tool_calls, None)
-        merged = _merged_archive_tool_calls(carried, incoming_archive_calls)
-        new_records = merged[len(carried) :]
-        return any(_archive_record_is_tool_progress(record) for record in new_records)
+        from ..conversation.compact_tool_identity import compact_tool_ref_key
+
+        carried_keys = {compact_tool_ref_key(record) for record in list(params.carried_archive_tool_calls or [])}
+        return any(
+            compact_tool_ref_key(record) is not None
+            and compact_tool_ref_key(record) not in carried_keys
+            and _archive_record_is_tool_progress(record)
+            for record in incoming_archive_calls
+        )
     # Compatibility for focused callers that predate the typed archive field.
     return not _result_has_no_tool_progress(result)
 
@@ -843,17 +850,25 @@ def _non_compact_auto_injections(injections: list[str] | None) -> list[str]:
     ]
 
 
+# LLM: 精确工具身份包含run/attempt/模型turn/call；未知旧记录不按裸call_id去重，防止续跑先于覆盖解析丢来源。
+# 函数用途: 合并完整活动工具账；保留不同执行回合的同名调用及身份未知的原记录。
 def _merged_archive_tool_calls(
     existing: list[dict[str, object]] | None,
     incoming: list[dict[str, object]] | None,
 ) -> list[dict[str, object]]:
+    from ..conversation.compact_tool_identity import compact_tool_ref_key
+
     merged: list[dict[str, object]] = []
-    seen: set[tuple[str, str, str, str, str]] = set()
+    seen: set[tuple[object, ...]] = set()
     for record in [*list(existing or []), *list(incoming or [])]:
         if not isinstance(record, dict):
             continue
+        identity = compact_tool_ref_key(record)
+        if identity is None:
+            merged.append(record)
+            continue
         key = (
-            str(record.get("run_id") or ""),
+            identity,
             str(record.get("tool") or ""),
             str(record.get("source_input") or _record_parameter_path(record)),
             _record_parameters_key(record),

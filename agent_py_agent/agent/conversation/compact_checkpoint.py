@@ -1,7 +1,6 @@
-# LLM: This module writes append-only, owner-scoped compact candidates before the live
-# ConversationThread pointer is advanced. The thread's compact_checkpoint_id is the commit
-# authority; an unreferenced checkpoint row is only an orphaned candidate, never live state.
-# 模块用途: 保存每一代会话压缩的完整恢复快照；先落快照、再由 thread 指针确认提交，避免坏摘要先推进游标。
+# LLM: v3候选在原owner账本追加，thread head/CAS仍是唯一提交权威；scope/base/精确覆盖与摘要一起封印，
+# v1/v2仅通过原版本合同读取。局部摘要不能因在同一提交链就扩大适用范围，孤立候选不可用于隐藏来源。
+# 模块用途: 保存完整压缩恢复点，分开提交前驱与摘要基础，再由原线程CAS确认。
 
 from __future__ import annotations
 
@@ -13,6 +12,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..io.jsonl import append_jsonl
+from .compact_scope import THREAD_COMPACT_SCOPE, CompactScope
+from .compact_tool_identity import compact_tool_refs
 from .models import ConversationThread, MessageLogEntry
 
 if TYPE_CHECKING:
@@ -20,8 +21,8 @@ if TYPE_CHECKING:
     from ..core import SimpleAgent
 
 
-# LLM: This immutable request keeps all fields for one checkpoint generation aligned.
-# 类用途: 汇总一次已验证候选的摘要、来源、近期尾部和 token 口径，避免写快照时参数错配。
+# LLM: 同一候选的scope/base、原消息和计量必须对齐；引用是同链读取投影，不授予任务权限。
+# 类用途: 汇总摘要的适用范围、来源和近期尾部，交给原检查点写入。
 @dataclass(frozen=True)
 class CompactCheckpointRequest:
     thread: ConversationThread
@@ -34,10 +35,12 @@ class CompactCheckpointRequest:
     projected_tokens_after: int
     policy: RuntimeCompactPolicy
     forced: bool
+    scope: CompactScope = THREAD_COMPACT_SCOPE
+    summary_base_checkpoint_id: str | None = None
 
 
-# LLM: This request records a mid-turn native IR replacement in the same owner/thread ledger.
-# 类用途: 保存一次正在运行回合的工具往返压缩候选，以及被移除和保留的精确调用编号。
+# LLM: 工具来源/保留区均以原四元refs为权威，call_id仅作展示；与scope/base共同写入原owner账本。
+# 类用途: 保存一次活动工具压缩候选及准确来源，避免跨轮同名调用被误替代。
 @dataclass(frozen=True)
 class LiveToolCompactCheckpointRequest:
     thread: ConversationThread
@@ -49,223 +52,138 @@ class LiveToolCompactCheckpointRequest:
     policy: RuntimeCompactPolicy
     request_id: str
     attempt_id: str
+    source_tool_refs: tuple[dict[str, str], ...]
+    retained_tool_refs: tuple[dict[str, str], ...] = ()
     forced: bool = False
+    scope: CompactScope = THREAD_COMPACT_SCOPE
+    summary_base_checkpoint_id: str | None = None
 
 
-# LLM: The returned id is content-addressed across one intended generation so retries cannot
-# create competing identities for the same candidate.
-# 函数用途: 根据 thread、目标代次、摘要和消息边界生成稳定 checkpoint 编号。
-def compact_checkpoint_id(
-    thread: ConversationThread,
-    *,
-    summary: str,
-    source_end_message_id: str,
-) -> str:
-    payload = "\0".join(
-        [
-            thread.thread_id,
-            str(thread.compact_generation + 1),
-            str(source_end_message_id),
-            str(summary),
-        ]
-    )
+# LLM: v3身份绑定提交前驱、摘要基础、scope、精确覆盖及创建时间；时间影响任务继承，必须封印。
+# 重试在新时间创建的是另一候选，原CAS仍只允许一个获胜；旧v1/v2不能使用新身份算法写入。
+# 函数用途: 为同一提交候选生成内容身份，防止摘要相同但适用范围不同的候选混同。
+def scoped_compact_checkpoint_id(row: dict[str, object]) -> str:
+    keys = ("schema", "thread_id", "generation", "previous_checkpoint_id", "summary_base_checkpoint_id",
+            "scope", "source_kind", "source_message_ids", "source_tool_refs", "summary_sha256",
+            "operation_evidence", "source_end_byte_offset", "retained_tail_message_ids", "retained_tool_call_ids",
+            "created_at", "retained_tool_refs")
+    payload = json.dumps({key: row.get(key) for key in keys}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:20]
-    return f"compact-{thread.compact_generation + 1}-{digest}"
+    return f"compact-v3-{row['generation']}-{digest}"
 
 
-# LLM: Live-tool checkpoint identity includes the exact dropped calls and intended generation.
-# 函数用途: 为同一回合的一次工具历史压缩生成稳定编号，重试不会造出竞争 checkpoint。
-def live_tool_compact_checkpoint_id(
-    thread: ConversationThread,
-    *,
-    summary: str,
-    source_tool_call_ids: tuple[str, ...],
-    attempt_id: str,
-) -> str:
-    payload = "\0".join(
-        [
-            thread.thread_id,
-            str(thread.compact_generation + 1),
-            "live_tool_ir",
-            str(attempt_id or ""),
-            *source_tool_call_ids,
-            str(summary),
-        ]
-    )
-    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:20]
-    return f"compact-{thread.compact_generation + 1}-{digest}"
+# LLM: 摘要基础是适用视图而不是链head；显式基础也必须是该准备代次的同一适用摘要，不能暗中跨任务继承。
+# 函数用途: 校验原提交链并固定候选将要继承的摘要引用，不写持久状态。
+def _summary_base(agent, request) -> str:
+    from .compact_summary_view import resolve_compact_summary_view
+
+    view = resolve_compact_summary_view(agent, request.thread, request.scope)
+    requested = request.summary_base_checkpoint_id
+    if requested is not None and requested != view.checkpoint_id:
+        raise ValueError("compact summary base changed or is outside the requested scope")
+    return view.checkpoint_id
 
 
-# LLM: Persist the full validated candidate before ConversationStore advances the live pointer.
-# The raw transcript remains authoritative and is referenced by exact byte/message boundaries.
-# 函数用途: 写入一代完整压缩快照，包含摘要正文、来源边界、近期尾部和压缩前后 token，供恢复与审计。
-def write_compact_checkpoint(
-    agent: SimpleAgent,
-    request: CompactCheckpointRequest,
-) -> str:
-    thread = request.thread
-    summary = request.summary
-    compact_rows = request.compact_rows
-    retained_tail = request.retained_tail
-    if not compact_rows:
-        raise ValueError("conversation compact checkpoint requires source messages")
-    home = getattr(agent, "home_paths", None)
-    raw_root = str(getattr(home, "owner_compact_dir", "") or "").strip()
-    if not raw_root:
-        raise OSError("owner compact directory is unavailable")
-    checkpoint_id = compact_checkpoint_id(
-        thread,
-        summary=summary,
-        source_end_message_id=compact_rows[-1].message_id,
-    )
-    summary_digest = hashlib.sha256(summary.encode("utf-8")).hexdigest()
-    backend = getattr(agent, "backend", None)
-    append_jsonl(
-        Path(raw_root) / "conversations" / f"{thread.thread_id}.jsonl",
-        {
-            "schema": "conversation_compact_checkpoint.v1",
-            "event": "conversation_compact_checkpoint",
-            "status": "validated_candidate",
-            "commit_authority": "conversation_thread.compact_checkpoint_id",
-            "checkpoint_id": checkpoint_id,
-            "previous_checkpoint_id": thread.compact_checkpoint_id,
-            "thread_id": thread.thread_id,
-            "previous_generation": thread.compact_generation,
-            "generation": thread.compact_generation + 1,
-            "source_start_message_id": compact_rows[0].message_id,
-            "source_start_byte_offset": thread.compacted_through_byte_offset,
-            "source_end_message_id": compact_rows[-1].message_id,
-            "source_end_byte_offset": max(0, int(request.source_end_byte_offset)),
-            "source_messages": len(compact_rows),
-            "source_messages_total": thread.compact_source_messages + len(compact_rows),
-            "source_tool_pairs": 0,
-            "source_tool_pairs_total": thread.compact_source_tool_pairs,
-            "source_kind": "transcript",
-            "retained_tail_start_message_id": (
-                retained_tail[0].message_id if retained_tail else ""
-            ),
-            "retained_tail_end_message_id": (
-                retained_tail[-1].message_id if retained_tail else ""
-            ),
-            "retained_tail_message_ids": [row.message_id for row in retained_tail],
-            "retained_tail_messages": len(retained_tail),
-            "projected_tokens_before": max(0, int(request.projected_tokens_before)),
-            "projected_tokens_after": max(0, int(request.projected_tokens_after)),
-            "context_window_tokens": request.policy.context_window_tokens,
-            "trigger_percent": request.policy.trigger_percent,
-            "trigger_tokens": request.policy.trigger_tokens,
-            "recovery_target_tokens": request.policy.recovery_target_tokens,
-            "forced": bool(request.forced),
-            "summary": summary,
-            "summary_sha256": summary_digest,
-            "operation_evidence": json.loads(
-                json.dumps(request.operation_evidence, ensure_ascii=False)
-            ),
-            "backend": str(getattr(backend, "name", "") or ""),
-            "model": str(getattr(backend, "model_name", "") or ""),
-            "created_at": time.time(),
-        },
-        sort_keys=True,
-    )
-    return checkpoint_id
-
-
-# LLM: Persist a complete live-tool candidate before the ConversationThread generation advances;
-# the unchanged transcript cursor and exact call ids make recovery source boundaries explicit.
-# 函数用途: 把当前回合被替换的工具往返先写入 owner Compact 账本，成功后才允许 thread 提交。
-def write_live_tool_compact_checkpoint(
-    agent: SimpleAgent,
-    request: LiveToolCompactCheckpointRequest,
-) -> str:
+# LLM: 所有来源共用v3头和原用量事实；source字段由各来源提供，元数据不授予运行权限。
+# 函数用途: 固定检查点的同链前驱、摘要基础、范围和预算，避免两种压缩产生不同权威。
+def _checkpoint_payload(agent, request) -> dict[str, object]:
     thread = request.thread
     summary = str(request.summary or "").strip()
-    source_ids = tuple(
-        dict.fromkeys(
-            str(item).strip()
-            for item in request.source_tool_call_ids
-            if str(item or "").strip()
-        )
-    )
-    retained_ids = tuple(
-        dict.fromkeys(
-            str(item).strip()
-            for item in request.retained_tool_call_ids
-            if str(item or "").strip()
-        )
-    )
-    if not source_ids:
-        raise ValueError("live tool compact checkpoint requires source tool pairs")
     if not summary:
-        raise ValueError("live tool compact checkpoint requires a summary")
+        raise ValueError("compact checkpoint requires a summary")
+    backend = getattr(agent, "backend", None)
+    return {
+        "schema": "conversation_compact_checkpoint.v3", "event": "conversation_compact_checkpoint",
+        "status": "validated_candidate", "commit_authority": "conversation_thread.compact_checkpoint_id",
+        "previous_checkpoint_id": thread.compact_checkpoint_id, "thread_id": thread.thread_id,
+        "previous_generation": thread.compact_generation, "generation": thread.compact_generation + 1,
+        "summary_base_checkpoint_id": _summary_base(agent, request), "scope": request.scope.to_dict(),
+        "source_message_ids": [], "source_tool_refs": [],
+        "source_start_byte_offset": thread.compacted_through_byte_offset,
+        "source_end_byte_offset": thread.compacted_through_byte_offset,
+        "source_messages": 0, "source_messages_total": thread.compact_source_messages,
+        "source_tool_pairs": 0, "source_tool_pairs_total": thread.compact_source_tool_pairs,
+        "projected_tokens_before": max(0, int(request.projected_tokens_before)),
+        "projected_tokens_after": max(0, int(request.projected_tokens_after)),
+        "context_window_tokens": request.policy.context_window_tokens,
+        "trigger_percent": request.policy.trigger_percent, "trigger_tokens": request.policy.trigger_tokens,
+        "recovery_target_tokens": request.policy.recovery_target_tokens, "forced": bool(request.forced),
+        "summary": summary, "summary_sha256": hashlib.sha256(summary.encode("utf-8")).hexdigest(),
+        "backend": str(getattr(backend, "name", "") or ""),
+        "model": str(getattr(backend, "model_name", "") or ""), "created_at": time.time(),
+    }
+
+
+# LLM: 唯一追加路径先落完整候选，head仍由原CAS发布；写失败不生成提交权，orphan不可见。
+# 函数用途: 将内容寻址的候选写入原owner检查点账本，不更新线程。
+def _append_checkpoint(agent, row: dict[str, object]) -> str:
     home = getattr(agent, "home_paths", None)
     raw_root = str(getattr(home, "owner_compact_dir", "") or "").strip()
     if not raw_root:
         raise OSError("owner compact directory is unavailable")
-    checkpoint_id = live_tool_compact_checkpoint_id(
-        thread,
-        summary=summary,
-        source_tool_call_ids=source_ids,
-        attempt_id=request.attempt_id,
-    )
-    backend = getattr(agent, "backend", None)
-    append_jsonl(
-        Path(raw_root) / "conversations" / f"{thread.thread_id}.jsonl",
-        {
-            "schema": "conversation_compact_checkpoint.v2",
-            "event": "conversation_compact_checkpoint",
-            "status": "validated_candidate",
-            "commit_authority": "conversation_thread.compact_checkpoint_id",
-            "checkpoint_id": checkpoint_id,
-            "previous_checkpoint_id": thread.compact_checkpoint_id,
-            "thread_id": thread.thread_id,
-            "previous_generation": thread.compact_generation,
-            "generation": thread.compact_generation + 1,
-            "source_kind": "live_tool_ir",
-            "source_start_message_id": "",
-            "source_start_byte_offset": thread.compacted_through_byte_offset,
-            "source_end_message_id": "",
-            "source_end_byte_offset": thread.compacted_through_byte_offset,
-            "source_messages": 0,
-            "source_messages_total": thread.compact_source_messages,
-            "source_tool_call_ids": list(source_ids),
-            "source_tool_pairs": len(source_ids),
-            "source_tool_pairs_total": (
-                thread.compact_source_tool_pairs + len(source_ids)
-            ),
-            "retained_tool_call_ids": list(retained_ids),
-            "retained_tool_pairs": len(retained_ids),
-            "projected_tokens_before": max(
-                0,
-                int(request.projected_tokens_before),
-            ),
-            "projected_tokens_after": max(
-                0,
-                int(request.projected_tokens_after),
-            ),
-            "context_window_tokens": request.policy.context_window_tokens,
-            "trigger_percent": request.policy.trigger_percent,
-            "trigger_tokens": request.policy.trigger_tokens,
-            "recovery_target_tokens": request.policy.recovery_target_tokens,
-            "forced": bool(request.forced),
-            "request_id": str(request.request_id or ""),
-            "attempt_id": str(request.attempt_id or ""),
-            "summary": summary,
-            "summary_sha256": hashlib.sha256(summary.encode("utf-8")).hexdigest(),
-            "operation_evidence": json.loads(
-                json.dumps(thread.compact_operation_evidence, ensure_ascii=False)
-            ),
-            "backend": str(getattr(backend, "name", "") or ""),
-            "model": str(getattr(backend, "model_name", "") or ""),
-            "created_at": time.time(),
-        },
-        sort_keys=True,
-    )
-    return checkpoint_id
+    row["checkpoint_id"] = scoped_compact_checkpoint_id(row)
+    append_jsonl(Path(raw_root) / "conversations" / f"{row['thread_id']}.jsonl", row, sort_keys=True)
+    return row["checkpoint_id"]
+
+
+# LLM: transcript候选记录精确message IDs；局部范围的末尾offset仅是来源证据，不能当全线程跳过游标。
+# 函数用途: 保存本次真实摘要覆盖的原消息和保留尾部，再由宿主原CAS提交。
+def write_compact_checkpoint(agent: SimpleAgent, request: CompactCheckpointRequest) -> str:
+    compact_rows = request.compact_rows
+    if not compact_rows or any(row.thread_id != request.thread.thread_id for row in compact_rows):
+        raise ValueError("conversation compact checkpoint requires source messages from its thread")
+    source_ids = [item.message_id for item in compact_rows]
+    if any(not isinstance(item, str) or not item.strip() for item in source_ids) or len(set(source_ids)) != len(source_ids):
+        raise ValueError("conversation compact source messages need distinct identities")
+    row = _checkpoint_payload(agent, request)
+    row.update({
+        "source_kind": "transcript", "source_start_message_id": compact_rows[0].message_id,
+        "source_end_message_id": compact_rows[-1].message_id,
+        "source_end_byte_offset": max(0, int(request.source_end_byte_offset)),
+        "source_message_ids": [item.message_id for item in compact_rows],
+        "source_messages": len(compact_rows),
+        "source_messages_total": request.thread.compact_source_messages + len(compact_rows),
+        "retained_tail_start_message_id": request.retained_tail[0].message_id if request.retained_tail else "",
+        "retained_tail_end_message_id": request.retained_tail[-1].message_id if request.retained_tail else "",
+        "retained_tail_message_ids": [item.message_id for item in request.retained_tail],
+        "retained_tail_messages": len(request.retained_tail),
+        "operation_evidence": json.loads(json.dumps(request.operation_evidence, ensure_ascii=False)),
+    })
+    return _append_checkpoint(agent, row)
+
+
+# LLM: 运行中摘要覆盖原调用四元身份，不能把摘要请求的request/attempt当作被压调用来源；缺失时拒绝写候选。
+# 函数用途: 保存精确工具覆盖和同一摘要基础，仍不改变原工具账或全线程游标。
+def write_live_tool_compact_checkpoint(agent: SimpleAgent, request: LiveToolCompactCheckpointRequest) -> str:
+    refs = compact_tool_refs(list(request.source_tool_refs))
+    retained_refs = compact_tool_refs(list(request.retained_tool_refs))
+    source_ids = tuple(ref["call_id"] for ref in refs)
+    if not source_ids:
+        raise ValueError("live tool compact checkpoint requires source tool pairs")
+    if source_ids != request.source_tool_call_ids or tuple(ref["call_id"] for ref in retained_refs) != request.retained_tool_call_ids:
+        raise ValueError("compact call projection does not match exact references")
+    row = _checkpoint_payload(agent, request)
+    base_evidence = request.thread.compact_operation_evidence
+    if request.scope.kind != "thread":
+        from .compact_summary_view import resolve_compact_summary_view
+
+        base_evidence = resolve_compact_summary_view(agent, request.thread, request.scope).operation_evidence
+    row.update({
+        "source_kind": "live_tool_ir", "source_start_message_id": "", "source_end_message_id": "",
+        "source_tool_call_ids": list(source_ids), "source_tool_refs": list(refs),
+        "source_tool_pairs": len(refs), "source_tool_pairs_total": request.thread.compact_source_tool_pairs + len(refs),
+        "retained_tool_call_ids": list(request.retained_tool_call_ids),
+        "retained_tool_pairs": len(retained_refs), "retained_tool_refs": list(retained_refs),
+        "request_id": str(request.request_id or ""), "attempt_id": str(request.attempt_id or ""),
+        "operation_evidence": json.loads(json.dumps(base_evidence, ensure_ascii=False)),
+    })
+    return _append_checkpoint(agent, row)
 
 
 # LLM: Only the chain ending at ConversationThread.compact_checkpoint_id is committed. Readers
 # must follow previous_checkpoint_id backwards and reject a missing/corrupt link instead of treating
 # an orphan candidate as authority or replaying already-compacted active-turn effects.
+# v3版本前缀、schema及内容封印必须一致，旧schema不得夹带新scope字段以绕过范围检查。
 # 函数用途: 读取当前 thread 真正提交过的 Compact 快照链，供恢复时识别已被摘要替代的工具调用。
 def committed_compact_checkpoint_chain(
     agent: SimpleAgent,
@@ -314,6 +232,13 @@ def committed_compact_checkpoint_chain(
             raise OSError("conversation compact checkpoint generation is invalid") from exc
         if row_generation != expected_generation:
             raise OSError("conversation compact checkpoint generation chain mismatches")
+        is_v3 = row.get("schema") == "conversation_compact_checkpoint.v3"
+        if is_v3 != current_id.startswith("compact-v3-"):
+            raise OSError("conversation compact checkpoint version identity mismatches")
+        if not is_v3 and any(key in row for key in ("scope", "summary_base_checkpoint_id", "source_tool_refs", "source_message_ids")):
+            raise OSError("legacy conversation compact checkpoint contains new scope fields")
+        if is_v3 and scoped_compact_checkpoint_id(row) != current_id:
+            raise OSError("conversation compact checkpoint content identity mismatches")
         chain.append(dict(row))
         current_id = str(row.get("previous_checkpoint_id") or "").strip()
         expected_generation -= 1
@@ -323,34 +248,20 @@ def committed_compact_checkpoint_chain(
     return tuple(chain)
 
 
-# LLM: Active-turn replay suppression is derived only from committed live_tool_ir checkpoints.
-# Transcript checkpoints and unreferenced candidates never hide archive records.
-# 函数用途: 汇总已提交运行中 Compact 精确替代掉的工具 call id，恢复时仍保留完整账本但不再重复喂模型。
-def committed_live_tool_compact_source_ids(
-    agent: SimpleAgent,
-    thread: ConversationThread,
-) -> frozenset[str]:
-    values = {
-        str(call_id or "").strip()
-        for row in committed_compact_checkpoint_chain(agent, thread)
-        if str(row.get("source_kind") or "").strip() == "live_tool_ir"
-        for call_id in (
-            row.get("source_tool_call_ids")
-            if isinstance(row.get("source_tool_call_ids"), list)
-            else ()
-        )
-        if str(call_id or "").strip()
-    }
-    return frozenset(values)
+# LLM: 覆盖来自实际适用摘要的语义基础链，不能把同提交链其它任务的来源一起隐藏。
+# 函数用途: 返回全线程摘要真正覆盖的工具引用；局部宿主应传入同次已应用的摘要视图。
+def committed_live_tool_compact_source_refs(agent: SimpleAgent, thread: ConversationThread) -> tuple[dict[str, object], ...]:
+    from .compact_summary_view import resolve_compact_summary_view
+
+    return resolve_compact_summary_view(agent, thread, THREAD_COMPACT_SCOPE).source_tool_refs
 
 
 __all__ = [
     "CompactCheckpointRequest",
     "LiveToolCompactCheckpointRequest",
-    "compact_checkpoint_id",
+    "scoped_compact_checkpoint_id",
     "committed_compact_checkpoint_chain",
-    "committed_live_tool_compact_source_ids",
-    "live_tool_compact_checkpoint_id",
+    "committed_live_tool_compact_source_refs",
     "write_live_tool_compact_checkpoint",
     "write_compact_checkpoint",
 ]

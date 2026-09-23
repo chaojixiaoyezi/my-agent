@@ -51,3 +51,14 @@ detached transcript 压缩推进共享游标，但创建后的全局摘要被原
 第 12.4 项仍未完成：后台完整恢复接线、初次加载及手动 Compact 尚待实施；跨窗口、模态、输出预留组合与真实缓存验证另按 TODO 推进。
 
 建议下一步：先以以上复现修正原 Compact 作用域与替代关系，再接公共完整恢复器并核对实际出站 payload。共享 checkpoint 实现串行，独立回归与只读审查可并行；不能提前关闭总 Goal 或扩大本地证据为已安装 TUI 验收。
+
+
+## 后续v3来源底座切片（基线3cbbba540）
+
+原checkpoint writer已统一写v3，scope/摘要base/精确来源与版本共同封印；局部CAS可以保留全线程投影。原全链工具ID union改为适用摘要base链的四元覆盖；旧身份不全不隐藏。source/retained均按完整引用切分，不能以call_id重复为由拒绝合法不同轮调用。
+
+工具归档从第一次外置写入保留原run/attempt/turn/call；索引与恢复引用不补当前runner。新artifact按执行身份区分相同正文的同名调用，旧引用保持。原合并保留未知材料，但未知材料重复不会算本轮新增执行。检查点版本降级、交错task scope、孤立候选、CAS竞争及同名调用测试见TESTS。
+
+模型轮原生成函数已补唯一nonce，修复同run/attempt跨Goal工作片重置局部序号造成的四元身份碰撞；只改`tool_model_generation.py::_begin_model_turn_identity`，未动媒体线的IR/provider编码。21文件562项通过；最后旧摘要完整性补强组三文件74项通过。具体本地guard与剩余边界以TESTS为准，未推送部署。
+
+重要边界：生产宿主仍使用默认thread作用域，未把后台注入/过滤绑定同一个适用view，也未把初次/手动Compact接入完整请求。新检查点底座通过不代表原后台三类缺陷已关闭。下一片继续实施宿主scope与view应用，归档与恢复测试可并行，共享CAS/source串行；大历史流式读取另与TUI线对齐，当前千万行无cursor样本未通过。

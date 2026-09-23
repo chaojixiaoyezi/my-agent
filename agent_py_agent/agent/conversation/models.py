@@ -1,5 +1,6 @@
 
 # LLM: 本模块定义 canonical 会话状态；v10 模型选择三字段全缺时迁移为未知，部分或坏事实拒绝，不能伪造旧手动事件。
+# Compact提交命令可只推进原检查点head；局部摘要不成为ConversationThread的全线程投影，不新增持久任务摘要表。
 # 模块用途: 保存会话、消息、模型选择版本和独立数值快照；选择来源不代表自动采用授权或永久固定。
 from __future__ import annotations
 
@@ -326,7 +327,8 @@ class ProgressPolicy:
 
 
 # LLM: This immutable command carries one already-validated compact candidate into the store;
-# ConversationThread remains the persisted authority after the command is applied.
+# ConversationThread remains the persisted authority after the command is applied. A scoped
+# checkpoint advances the same head/CAS while preserving the full-thread summary and cursor.
 # 类用途: 把摘要、checkpoint 和精确游标作为一个整体交给存储层，避免一串参数彼此错配。
 @dataclass(frozen=True)
 class ConversationCompactCommit:
@@ -337,6 +339,7 @@ class ConversationCompactCommit:
     compacted_through_byte_offset: int
     source_messages: int
     source_tool_pairs: int
+    publish_thread_view: bool = True
 
 
 # LLM: ConversationThread 是历史、压缩点、模型引用与选择版本、决策覆盖及上下文投影的唯一持久权威；

@@ -227,6 +227,8 @@ def test_compact_auto_continue_replaces_previous_session_carrier() -> None:
 def test_compact_auto_continue_carries_archive_tool_calls_for_closeout_evidence() -> None:
     read_record = {
         "run_id": "run-1",
+        "attempt_id": "attempt-1",
+        "turn_id": "turn-1",
         "scoped_call_id": "run-1:1-1",
         "call_id": "1-1",
         "tool": "read_file",
@@ -235,6 +237,8 @@ def test_compact_auto_continue_carries_archive_tool_calls_for_closeout_evidence(
     }
     write_record = {
         "run_id": "run-1",
+        "attempt_id": "attempt-1",
+        "turn_id": "turn-1",
         "scoped_call_id": "run-1:2-1",
         "call_id": "2-1",
         "tool": "write_file",
@@ -243,6 +247,8 @@ def test_compact_auto_continue_carries_archive_tool_calls_for_closeout_evidence(
     }
     next_read_same_call_id = {
         "run_id": "run-1",
+        "attempt_id": "attempt-1",
+        "turn_id": "turn-2",
         "scoped_call_id": "run-1:1-1",
         "call_id": "1-1",
         "tool": "read_file",
@@ -455,7 +461,10 @@ def test_conversation_with_tool_progress_still_uses_single_transcript_compact(tm
 def test_compact_continuation_counts_only_new_archive_records_as_progress() -> None:
     carried = {
         "run_id": "run-1",
+        "attempt_id": "attempt-1",
+        "turn_id": "turn-1",
         "scoped_call_id": "run-1:1-1",
+        "call_id": "1-1",
         "tool": "read_file",
         "parameters": {"path": "source.txt"},
         "ok": True,
@@ -486,14 +495,20 @@ def test_compact_continuation_counts_only_new_archive_records_as_progress() -> N
 def test_compact_continuation_resets_idle_depth_after_new_archive_record() -> None:
     carried = {
         "run_id": "run-1",
+        "attempt_id": "attempt-1",
+        "turn_id": "turn-1",
         "scoped_call_id": "run-1:1-1",
+        "call_id": "1-1",
         "tool": "read_file",
         "parameters": {"path": "source.txt"},
         "ok": True,
     }
     added = {
         "run_id": "run-1",
+        "attempt_id": "attempt-1",
+        "turn_id": "turn-1",
         "scoped_call_id": "run-1:2-1",
+        "call_id": "2-1",
         "tool": "write_file",
         "parameters": {"path": "output.txt"},
         "ok": True,

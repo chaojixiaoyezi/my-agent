@@ -1,5 +1,19 @@
 # 测试与发布验收
 
+## 第 12.4 项作用域检查点与工具来源底座（本地）
+
+原writer现统一写v3，scope、摘要基础与精确覆盖沿同一提交链，原generation CAS保持唯一；局部提交可以保留全线程摘要/游标。新reader只收集实际适用摘要的base覆盖。旧v1/v2显式读取并核对原摘要hash，未知旧工具身份不伪装为精确引用。
+
+21文件联合 **562 passed**：Gateway与child完整恢复/接续、原Compact和存储、native IR、后台准备及运行、工具归档、记忆续接、超时恢复和模型生成。版本/摘要完整性补强后，`test_compact_scoped_checkpoint.py`、`test_native_tool_ir_compact_and_orphan_sweep.py`、`test_model_turn_identity.py` 三文件 **74 passed**。不将重复运行累加成独立覆盖数。
+
+新增回归使用临时原Store、writer/CAS及真实投影，覆盖thread与task交错的摘要base、局部CAS、孤立候选、竞争、旧版本、摘要hash损坏和schema降级；相同call_id跨run/attempt/模型轮仍可分列source/retained，未知旧记录保留。原工具artifact/index重载保留四元身份，相同正文跨执行轮不覆盖旧artifact。原模型轮生成也曾在同attempt重启工作片后碰撞，真实检查点过滤复现了误隐藏；在原turn_id加入唯一nonce后回归通过，原数字序号不变。
+
+首次核心回归因旧schema断言和缺调用身份的夹具失败，已按真实新合同更新；原完整调用与未知旧记录分别测试。扩大回归发现未知重复记录被误算新增执行进展，已修原进展判断并保留未知材料。所有复现及本片测试均无真实供应商请求，未部署或重启；前轮全仓8项失败仍未收口，线上CI不作为证据。
+
+边界：本片只完成scope/base/coverage与来源身份底座。后台宿主仍须选择并实际应用同一个view，再接完整请求恢复；原detached/narrow三类问题尚未关闭，初次/手动及真实缓存也待验。交接见[后台准备与后续底座](docs/tasks/DECISION_MODEL_BACKGROUND_PREPARATION_HANDOFF.md)。
+
+本片Ruff、doc sync、导入边界（0发现）、strict code-size（hard=0，尺寸基线未改）、diff与clean-package检查通过；仅保存本地提交，不推送、部署或把线上CI当验收来源。
+
 ## 第 12.4 项后台一次准备与纯投影（本地前置片）
 
 `background_context.py` 将可能写任务进度的事实准备与无副作用渲染分离；`background_history_seed.py` 携带同次冻结的任务范围，正常种子与候选共用原历史投影。没有接通新的后台 Compact 恢复分支，也没有改变持久 schema。

@@ -329,6 +329,9 @@ def test_subagent_provider_overflow_compacts_unfinished_tool_archive_before_retr
     records = [
         {
             "call_id": f"call-active-{index}",
+            "run_id": "run",
+            "attempt_id": "attempt-active",
+            "turn_id": f"run:model:{index}",
             "scoped_call_id": f"run:call-active-{index}",
             "tool": "read_file",
             "ok": True,

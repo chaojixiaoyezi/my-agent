@@ -1,5 +1,7 @@
 # Memory Structure
 
+`tool_output_externalizer.py` 从原ToolCall参数接收attempt/turn，并写入原artifact/index；`compact_tool_output_refs.py` 原样带回并按四元身份区分调用。完整身份参与新artifact命名，索引位置和scoped_call_id展示格式保持；旧缺维度只能保留，不能用裸ID隐藏。
+
 Curator 与召回的可选决策入口直接导入 `common.cancellation` 的 `ToolCancelled` 和取消检查；这是与插件宿主共用的唯一进程内异常类型。已删除的 `tooling/cancellation.py` 不再作为兼容入口，记忆来源、游标和正式写入路径没有变化。
 
 ## 子代理任务工作区的路径与物化边界

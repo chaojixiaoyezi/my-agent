@@ -1,5 +1,7 @@
 # Verification：结构
 
+`tool_call_archive_record.py` 两个外置输出入口均传原ToolCall的执行身份；`conversation/compact_tool_identity.py` 共用精确引用。native候选在摘要前捕获原IR配对身份，活动归档按同一四元键切分来源与保留区，裸call_id仅作展示。
+
 ## 零工具续跑原生历史
 
 `backends.response_completion.has_reasoning_content` 区分有效 typed 思考与空包；适配器返回原内容和用量。

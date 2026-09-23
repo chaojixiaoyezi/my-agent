@@ -876,7 +876,7 @@ def test_tool_loop_records_live_raw_archive_for_each_tool_result(tmp_path: Path)
     assert raw_records[-1]["request_id"] == "req-live"
 
 
-def test_tool_loop_externalizer_falls_back_to_current_subagent_run_id(tmp_path: Path) -> None:
+def test_tool_loop_externalizer_preserves_record_call_run_id(tmp_path: Path) -> None:
     service = ToolLoopService(SimpleNamespace(root=tmp_path, _current_subagent_run_id="runner-42"))
     params = _tool_loop_params(request_id="", run_id="", task_id="")
     large_output = "line\n" + ("x" * 250_000)
@@ -894,9 +894,9 @@ def test_tool_loop_externalizer_falls_back_to_current_subagent_run_id(tmp_path: 
     record = params.archive_tool_calls[0]
     artifact = json.loads(Path(record["output_path"]).read_text(encoding="utf-8"))
 
-    assert record["run_id"] == "runner-42"
-    assert record["scoped_call_id"] == "runner-42:7-1"
-    assert artifact["run_id"] == "runner-42"
+    assert record["run_id"] == "archive-test-run"
+    assert record["scoped_call_id"] == "archive-test-run:7-1"
+    assert artifact["run_id"] == "archive-test-run"
 
 
 def test_externalizer_preserves_internal_tool_outputs_without_path_sanitizer(

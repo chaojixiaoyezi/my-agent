@@ -24,16 +24,16 @@ from .run_task_workspace_writer import (
     current_run_tool_output_archive_root,
 )
 from .runtime.owner_roots import runtime_owner_root
-from .tool_loop.recovery import runtime_run_id, runtime_run_scope
+from .tool_loop.recovery import runtime_run_scope
 from .tool_loop.round_execution import ToolCallRecordParams
 from .tool_output_failsafe import write_tool_output_fail_safe_checkpoint
 
 _MODEL_SUMMARY_MAX_CHARS = 12_000
 
 
-# LLM: 原始输出先按 owner/run 归档；仅真正外置且未声明保留正文的结果使用预览。读取器已分页的正文、
-# 游标及文件版本必须完整进入 canonical ToolResult；同步检查 reducer、原生历史及外置输出回归。
-# 函数用途: 写入工具归档并生成安全的模型结果；日志预览不能代替有界正文，否则会丢尾部并诱发重复读取。
+# LLM: 原始输出先按 owner/run 及实际 ToolCall 的 attempt/turn 归档；仅真正外置且未声明保留正文的结果使用预览。
+# 读取器已分页的正文、游标及文件版本必须完整进入 canonical ToolResult；同步检查 reducer、原生历史及外置输出回归。
+# 函数用途: 按本次工具调用的真实身份写入归档并生成安全的模型结果；日志预览不能代替有界正文。
 def archive_tool_output_projection(
     agent: object,
     params: object,
@@ -72,6 +72,8 @@ def archive_tool_output_projection(
         request_id=str(getattr(params, "request_id", "") or ""),
         conversation_request_id=_conversation_request_id(params),
         run_id=call.run_id,
+        attempt_id=call.attempt_id,
+        turn_id=call.turn_id,
         task_id=str(getattr(params, "task_id", "") or ""),
         min_chars=_config_int(agent, "tool_output_externalize_min_chars"),
         preview_chars=_config_int(agent, "tool_output_preview_chars"),
@@ -153,9 +155,9 @@ def _projection_refs(
     return tuple(refs)
 
 
-# LLM: The canonical archive row must reuse the output already externalized at execution time;
-# direct/fallback callers still receive the same typed lifecycle envelope before persistence.
-# 函数用途: 汇总一次工具调用的耐久记录、执行事实、操作终态和产物引用，供当前轮与后台续接共用。
+# LLM: The canonical archive row must reuse output already externalized with the executed call's
+# identity; direct callers must persist that same identity before index creation.
+# 函数用途: 汇总一次工具调用的耐久记录；未缓存输出也按实际调用身份写入产物与索引。
 def archive_tool_call_record(agent: object, record: ToolCallRecordParams) -> dict[str, object]:
     call_id = record.call.call_id
     cached = record.result.metadata.get("archive_output_record")
@@ -172,7 +174,9 @@ def archive_tool_call_record(agent: object, record: ToolCallRecordParams) -> dic
             reported_error_code=record.result.reported_error_code,
             request_id=record.params.request_id,
             conversation_request_id=_conversation_request_id(record.params),
-            run_id=runtime_run_id(agent, record.params),
+            run_id=record.call.run_id,
+            attempt_id=record.call.attempt_id,
+            turn_id=record.call.turn_id,
             task_id=record.params.task_id,
             min_chars=_config_int(agent, "tool_output_externalize_min_chars"),
             preview_chars=_config_int(agent, "tool_output_preview_chars"),

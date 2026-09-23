@@ -293,6 +293,9 @@ def _carried_record(index: int, *, tool: str = "read_file") -> dict[str, object]
     return {
         "call_id": call_id,
         "scoped_call_id": f"run:{call_id}",
+        "run_id": "run",
+        "attempt_id": "attempt-carried",
+        "turn_id": f"run:model:{index}",
         "tool": tool,
         "ok": True,
         "parameters": dict(parameters),
@@ -302,7 +305,8 @@ def _carried_record(index: int, *, tool: str = "read_file") -> dict[str, object]
     }
 
 
-def test_active_turn_archive_compact_hides_only_committed_source_calls(tmp_path):
+@pytest.mark.parametrize("reuse_call_id", [False, True])
+def test_active_turn_archive_compact_hides_only_committed_source_calls(tmp_path, reuse_call_id):
     """完整工具账保持不变，模型只隐藏 thread 指针确认过的旧调用；孤儿候选无权隐藏。"""
 
     store = ConversationStore(tmp_path / "conversations")
@@ -321,6 +325,8 @@ def test_active_turn_archive_compact_hides_only_committed_source_calls(tmp_path)
     agent.conversation_store = store
     agent.home_paths = SimpleNamespace(owner_compact_dir=tmp_path / "compact")
     records = [_carried_record(index) for index in range(1, 6)]
+    if reuse_call_id:
+        records = [dict(row, call_id="reused", scoped_call_id="run:reused") for row in records]
     original_records = json.loads(json.dumps(records))
     attrs = {
         CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True,
@@ -344,15 +350,10 @@ def test_active_turn_archive_compact_hides_only_committed_source_calls(tmp_path)
 
     assert result.compacted is True
     assert result.thread.compact_generation == 1
-    assert result.source_call_ids == ("carried-1",)
+    assert result.source_call_ids == (("reused",) if reuse_call_id else ("carried-1",))
     assert records == original_records
     visible = model_visible_active_turn_tool_calls(agent, attrs, records)
-    assert [item["call_id"] for item in visible] == [
-        "carried-2",
-        "carried-3",
-        "carried-4",
-        "carried-5",
-    ]
+    assert visible == records[1:]
     assert [row["percent"] for row in progress] == [5, 20, 65, 82, 92, 100]
     assert progress[-1]["generation"] == 1
     assert {row["source_kind"] for row in progress} == {"active_turn_tool_archive"}
@@ -378,12 +379,7 @@ def test_active_turn_archive_compact_hides_only_committed_source_calls(tmp_path)
             + "\n"
         )
     visible_after_orphan = model_visible_active_turn_tool_calls(agent, attrs, records)
-    assert [item["call_id"] for item in visible_after_orphan] == [
-        "carried-2",
-        "carried-3",
-        "carried-4",
-        "carried-5",
-    ]
+    assert visible_after_orphan == records[1:]
 
 
 def test_active_turn_archive_interrupt_after_summary_does_not_commit_or_fail(tmp_path):
@@ -2233,3 +2229,20 @@ def test_to_provider_messages_stays_pure_translation():
             ],
         }
     ]
+
+
+def test_native_compact_captures_reused_ids_by_original_model_turn() -> None:
+    from agent_py_agent.agent.agent_core._tool_loop_service import _native_tool_refs
+
+    first = canonical_history_call("read_file", {}, call_id="reused", turn_id="model-1")
+    second = replace(first, turn_id="model-2")
+    params = _params()
+    params.tool_ir_history[:] = [
+        AssistantTurn(tool_calls=[first]), canonical_history_result(first, "first fact"),
+        AssistantTurn(tool_calls=[second]), canonical_history_result(second, "second fact"),
+    ]
+    before = _native_tool_refs(params)
+    params.tool_ir_history[:] = params.tool_ir_history[2:]
+    retained = _native_tool_refs(params)
+    assert [ref["turn_id"] for ref in before] == ["model-1", "model-2"]
+    assert retained == (before[1],)

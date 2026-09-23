@@ -170,6 +170,7 @@ class _NativeCompactPlan:
     target_tokens: int
     before_tokens: int
     before_call_ids: tuple[str, ...]
+    before_tool_refs: tuple[dict[str, str], ...]
     semantic_summary: str
     progress_generation: int
     progress_operation_id: str
@@ -470,6 +471,7 @@ def _prepare_native_compact_plan(
     # summary 再提交一个下一轮必然重压的薄 generation。
     if base_tokens >= recovery_target:
         return None
+    before_tool_refs = _native_tool_refs(params)
     target = min(recovery_target, base_tokens + recent_tail_tokens)
     (
         binding,
@@ -495,6 +497,7 @@ def _prepare_native_compact_plan(
         target_tokens=target,
         before_tokens=before_tokens,
         before_call_ids=before_call_ids,
+        before_tool_refs=before_tool_refs,
         semantic_summary=summary,
         progress_generation=progress_generation,
         progress_operation_id=progress_operation_id,
@@ -921,24 +924,25 @@ def _commit_native_ir_generation(
 ) -> int:
     if plan.binding is None:
         return 0
+    from ..conversation.compact_tool_identity import compact_tool_ref_key
     from ..conversation.live_tool_compact import (
         LiveToolCompactCommitRequest,
         commit_live_tool_compact,
     )
 
-    retained_call_ids = _native_tool_call_ids(params)
-    retained_call_id_set = set(retained_call_ids)
-    source_call_ids = tuple(
-        call_id
-        for call_id in plan.before_call_ids
-        if call_id not in retained_call_id_set
-    )
+    retained_refs = _native_tool_refs(params)
+    retained_keys = {compact_tool_ref_key(ref) for ref in retained_refs}
+    source_refs = tuple(ref for ref in plan.before_tool_refs if compact_tool_ref_key(ref) not in retained_keys)
+    source_call_ids = tuple(ref["call_id"] for ref in source_refs)
+    retained_call_ids = tuple(ref["call_id"] for ref in retained_refs)
     updated_thread = commit_live_tool_compact(
         agent,
         plan.binding,
         LiveToolCompactCommitRequest(
             summary=plan.semantic_summary,
             source_tool_call_ids=source_call_ids,
+            source_tool_refs=source_refs,
+            retained_tool_refs=retained_refs,
             retained_tool_call_ids=retained_call_ids,
             projected_tokens_before=plan.before_tokens,
             projected_tokens_after=after_tokens,
@@ -1156,6 +1160,29 @@ def _native_tool_call_ids(params: ToolLoopExecuteParams) -> tuple[str, ...]:
         for item in list(getattr(params, "tool_ir_history", None) or [])
         if isinstance(item, ToolResult) and str(item.call_id or "").strip()
     )
+
+
+# LLM: 原typed IR中的ToolCall携带执行四元身份；必须在删减前读取，不能用本次摘要请求补历史attempt。
+# 函数用途: 固定运行中Compact的来源引用，检查点与归档恢复用同一身份匹配。
+def _native_tool_refs(params: ToolLoopExecuteParams) -> tuple[dict[str, str], ...]:
+    from ..backends.tool_ir import AssistantTurn, ToolResult
+    from ..conversation.compact_guard import ConversationCompactError
+    from ..conversation.compact_tool_identity import compact_tool_refs
+
+    pending = {}
+    completed = []
+    for turn in params.tool_ir_history:
+        if isinstance(turn, AssistantTurn):
+            for call in turn.tool_calls:
+                if call.call_id in pending:
+                    raise ConversationCompactError("同轮工具来源存在歧义", code="COMPACT_TOOL_COVERAGE_UNKNOWN")
+                pending[call.call_id] = call
+        elif isinstance(turn, ToolResult):
+            call = pending.pop(turn.call_id, None)
+            if call is None:
+                raise ConversationCompactError("工具结果缺少原调用身份", code="COMPACT_TOOL_COVERAGE_UNKNOWN")
+            completed.append(call)
+    return compact_tool_refs(completed)
 
 
 # LLM: native Compact 传完整 typed IR 和同一 run/线程停止回调；分段取消须在回收前生效，原 handoff 不能被重复摘要投影吞掉。

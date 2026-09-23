@@ -1,5 +1,5 @@
-# LLM: 本模块读取 owner 私有的工具输出索引，为 Compact 恢复和同一 active turn 的耐久续接提供结构化记录；不得从工具正文猜状态。
-# 模块用途: 从任务工作区的工具索引中恢复调用引用、输出引用和可续接的调用事实。
+# LLM: 本模块读取 owner 私有的原工具输出索引，为 Compact 恢复提供真实 run/attempt/turn/call 身份；缺失身份保持未知，不从正文猜测。
+# 模块用途: 从任务工作区的工具索引中恢复调用引用、输出引用和可续接的调用事实及来源身份。
 
 from __future__ import annotations
 
@@ -14,24 +14,34 @@ from .tool_output_externalizer import model_visible_tool_parameters
 _INTERNAL_LEDGER_TOOLS = {"task_progress"}
 
 
-# LLM: Child lifecycle wakes are another slice of the originating conversation turn. Rehydrate
-# only exact typed turn rows, preserve append order, and never scan child workspaces or prose.
-# 函数用途: 从一个任务自己的工具索引恢复跨后台工作片所需的调用历史。
+# LLM: Child lifecycle wakes share the originating conversation turn. Deduplicate complete
+# run/attempt/turn/call identities; unknown legacy identities collapse only for identical index rows.
+# 函数用途: 从任务原索引恢复调用历史；旧身份未知时只合并完全相同的索引行。
 def carried_tool_call_records(
     workspace: str | Path,
     scope: dict[str, Any],
 ) -> list[dict[str, Any]]:
     rows = _read_tool_output_index(Path(workspace))
     records: list[dict[str, Any]] = []
-    seen: set[str] = set()
+    seen: set[tuple[str, str, str, str]] = set()
+    seen_unknown_rows: set[str] = set()
     for row in rows:
         if not _is_indexed_call_fact(row) or not _matches_scope(row, scope):
             continue
         record = _carried_tool_call_record(row)
-        identity = str(record.get("scoped_call_id") or record.get("call_id") or "").strip()
-        if not identity or identity in seen:
-            continue
-        seen.add(identity)
+        identity = tuple(
+            str(record.get(key) or "").strip()
+            for key in ("run_id", "attempt_id", "turn_id", "call_id")
+        )
+        if all(identity):
+            if identity in seen:
+                continue
+            seen.add(identity)
+        else:
+            raw_row = json.dumps(row, ensure_ascii=False, sort_keys=True)
+            if raw_row in seen_unknown_rows:
+                continue
+            seen_unknown_rows.add(raw_row)
         records.append(record)
     return records
 
@@ -48,9 +58,9 @@ def tool_call_source_refs(workspace: str | Path, scope: dict[str, Any]) -> list[
     return [_tool_call_ref(row) for row in rows if _is_tool_call_row(row) and _matches_scope(row, scope)]
 
 
-# LLM: Restore refs retain execution parameters for machine recovery and model_parameters for any
-# later prompt projection; neither view may silently overwrite the other.
-# 函数用途: 从 Compact 恢复包提取外置工具输出引用及两套参数视图。
+# LLM: Restore refs retain the indexed call identity, execution parameters and model_parameters;
+# neither parameter view nor missing identity may be silently overwritten.
+# 函数用途: 从 Compact 恢复包提取外置工具输出引用、真实调用身份及两套参数视图。
 def tool_output_artifact_refs(restore_refs: dict[str, Any]) -> list[dict[str, Any]]:
     source_refs = restore_refs.get("source_refs", {}) if isinstance(restore_refs.get("source_refs"), dict) else {}
     items = source_refs.get("tool_outputs", []) if isinstance(source_refs.get("tool_outputs"), list) else []
@@ -61,6 +71,9 @@ def tool_output_artifact_refs(restore_refs: dict[str, Any]) -> list[dict[str, An
             "tool": str(item.get("tool", "") or ""),
             "call_id": str(item.get("call_id", "") or ""),
             "scoped_call_id": str(item.get("scoped_call_id", "") or ""),
+            "run_id": str(item.get("run_id") or ""),
+            "attempt_id": str(item.get("attempt_id") or ""),
+            "turn_id": str(item.get("turn_id") or ""),
             "source_path": str(item.get("source_input") or ""),
             "parameters": dict(item.get("parameters", {}) if isinstance(item.get("parameters"), dict) else {}),
             "model_parameters": model_visible_tool_parameters(item),
@@ -159,10 +172,9 @@ def _is_indexed_call_fact(row: dict[str, Any]) -> bool:
     )
 
 
-# LLM: Convert index metadata into the existing carried archive contract. Successful indexed
-# calls prove the handler ran; failed legacy rows remain fail-closed because the index does not
-# claim a handler boundary. Artifact paths are refs, never eagerly loaded into the prompt.
-# 函数用途: 把一条工具索引转换成工具循环可重建去重、参数和结果引用的轻量记录。
+# LLM: Convert index metadata into the carried archive contract without inventing absent
+# attempt/turn ids; failed legacy rows remain fail-closed. Artifact paths stay refs.
+# 函数用途: 把工具索引转换成保留真实调用身份、参数和结果引用的轻量记录。
 def _carried_tool_call_record(row: dict[str, Any]) -> dict[str, Any]:
     path = str(row.get("path") or "").strip()
     digest = str(row.get("sha256") or "").strip()
@@ -178,6 +190,8 @@ def _carried_tool_call_record(row: dict[str, Any]) -> dict[str, Any]:
         "request_id": str(row.get("request_id") or ""),
         "conversation_request_id": str(row.get("conversation_request_id") or ""),
         "run_id": str(row.get("run_id") or ""),
+        "attempt_id": str(row.get("attempt_id") or ""),
+        "turn_id": str(row.get("turn_id") or ""),
         "task_id": str(row.get("task_id") or ""),
         "tool": str(row.get("tool") or ""),
         "parameters": dict(row.get("parameters") or {})
@@ -238,9 +252,9 @@ def _attach_carried_operation_facts(
         record["tool_operation_replayed"] = value.get("replayed") is True
 
 
-# LLM: A source ref is machine-facing provenance but may later feed model projections, so preserve
-# the provider-authored view explicitly beside the execution arguments.
-# 函数用途: 把工具输出索引行转换成 Compact 使用的来源引用。
+# LLM: A source ref carries the indexed call's exact identity and both parameter views; absent
+# attempt/turn ids remain empty rather than inferred from the current Compact request.
+# 函数用途: 把工具输出索引行转换成保留真实调用身份的 Compact 来源引用。
 def _source_ref(row: dict[str, Any]) -> dict[str, Any]:
     path = Path(str(row.get("path") or ""))
     return {
@@ -258,6 +272,8 @@ def _source_ref(row: dict[str, Any]) -> dict[str, Any]:
         "request_id": str(row.get("request_id", "") or ""),
         "conversation_request_id": str(row.get("conversation_request_id", "") or ""),
         "run_id": str(row.get("run_id", "") or ""),
+        "attempt_id": str(row.get("attempt_id") or ""),
+        "turn_id": str(row.get("turn_id") or ""),
         "task_id": str(row.get("task_id", "") or ""),
         "ok": row.get("ok"),
         "status": str(row.get("status") or ""),
@@ -269,8 +285,9 @@ def _source_ref(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-# LLM: Small-call refs follow the same dual-view contract as externalized outputs.
-# 函数用途: 把未外置正文的工具调用索引行转换成 Compact 引用。
+# LLM: Small-call refs preserve the same exact call identity and dual-view contract as externalized
+# outputs; missing legacy attempt/turn ids stay unknown.
+# 函数用途: 把未外置正文的工具调用索引行转换成保留真实身份的 Compact 引用。
 def _tool_call_ref(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "kind": "tool_call",
@@ -284,6 +301,8 @@ def _tool_call_ref(row: dict[str, Any]) -> dict[str, Any]:
         "request_id": str(row.get("request_id", "") or ""),
         "conversation_request_id": str(row.get("conversation_request_id", "") or ""),
         "run_id": str(row.get("run_id", "") or ""),
+        "attempt_id": str(row.get("attempt_id") or ""),
+        "turn_id": str(row.get("turn_id") or ""),
         "task_id": str(row.get("task_id", "") or ""),
         "ok": row.get("ok"),
         "status": str(row.get("status") or ""),

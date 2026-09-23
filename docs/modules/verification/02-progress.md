@@ -1,5 +1,7 @@
 # Verification：开发推进
 
+Compact来源覆盖现沿实际执行的run/attempt/模型turn/call四元身份；归档不再用当前runner覆盖原ToolCall。原摘要检查点v3封印scope/base/精确覆盖，旧未知身份保留。只验证来源和检查点合同，完整后台摘要应用与HTTP恢复仍待接。
+
 ## 2026-09-22 可选外部材料阅读优先级
 
 `external_material_order` 仅消费原 `web_fetch mode=extract` 已归档页，默认关闭；原 owner/thread 设置、
