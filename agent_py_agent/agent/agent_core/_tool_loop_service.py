@@ -1,7 +1,7 @@
 
 
 # LLM: 工具循环用同一 native IR 和 owner/thread Compact 权威；原生执行事实只补当前批次，不从次数推断任务完成。
-# 模块用途: 组装工具请求并协调压缩与提交，避免重复复制执行摘要；不改已有用户输入、账本、缓存前缀或任务状态。
+# 模块用途: 装配工具循环与原Compact，模型采纳交由窄操作入口；不改变输入账本、缓存前缀或任务状态。
 from __future__ import annotations
 
 import json
@@ -40,7 +40,6 @@ from ..tooling.registry_workspace import effective_registry_cwd
 from ._runtime_params import ToolLoopExecuteParams
 from .delivery_contract_prompting import render_delivery_contract_section
 from .native_tool_protocol import native_tool_use_active
-from .provider_transient_auto_resume import run_with_provider_transient_auto_resume
 from .runner.context import current_task_attributes
 from .runner.stage_trace import (
     trace_runner_tool_call_started,
@@ -52,6 +51,7 @@ from .runtime.conversation_state import (
 from .runtime.goal_accounting import account_goal_model_response, begin_goal_model_turn
 from .runtime.guidance import (
     acknowledge_injected_turn_input,
+    active_turn_input_has_unconfirmed_delivery,
     has_pending_turn_input,
     inject_pending_turn_input,
     refresh_runtime_direct_children_snapshot,
@@ -99,6 +99,7 @@ from .tool_loop.completion import (
     queue_reply_for_audit_prepare,
     task_local_wait_response_for_open_subagents,
 )
+from .tool_loop.model_turn import sample_and_accept_model_response
 from .tool_loop.natural_user_reply import (
     discard_pending_natural_user_reply,
     finish_natural_user_reply,
@@ -1701,6 +1702,8 @@ def _drain_pending_deferred_tool_calls(
     return _PendingDeferredToolDrainResult(next_round, final_response)
 
 
+# LLM: 原执行权和Goal开始仍在本装配点；仅将采样／响应确认交给窄操作，空响应返工及插话注入保持当前循环内。
+# 函数用途: 在有效工作片内请求下一轮模型，绑定原计量和消息账本，处理无可用响应时的一次修复。
 def _model_turn_or_retry(
     agent,
     loop_params: ToolLoopExecuteParams,
@@ -1719,23 +1722,19 @@ def _model_turn_or_retry(
         )
     try:
         begin_goal_model_turn(agent, loop_params)
-        prompt, response = run_with_provider_transient_auto_resume(
+        prompt, response = sample_and_accept_model_response(
             lambda: next_tool_loop_model_response(agent, loop_params, tool_rounds),
+            retry_allowed=lambda: not active_turn_input_has_unconfirmed_delivery(
+                getattr(loop_params, "live_archive_state", None)
+            ),
+            account_response=partial(account_goal_model_response, agent, loop_params),
+            restore_rejected_input=partial(
+                restore_injected_turn_input_for_provider_retry, agent, loop_params
+            ),
+            acknowledge_input=partial(acknowledge_injected_turn_input, agent, loop_params),
             on_chunk=loop_params.effective_on_chunk,
             policy=getattr(agent, "runtime_guard_policy", None),
-            retry_guard=lambda: not _active_turn_input_delivery_is_ambiguous(
-                loop_params
-            ),
         )
-        account_goal_model_response(agent, loop_params, response)
-        # Provider submission is already durable and therefore never blindly
-        # replayed after an ambiguous transport failure. Successful response is
-        # the only edge that advances the exact batch to consumed.
-        if _model_response_deferred_prompt_consumption(response):
-            if str(getattr(response, "runtime_source", "") or "") == "provider_error":
-                restore_injected_turn_input_for_provider_retry(agent, loop_params)
-        else:
-            acknowledge_injected_turn_input(agent, loop_params)
         # 会话运行时/长期助手 scope stream retries to one sampling request.  A later
         # successful model turn proves the provider recovered, so an isolated
         # empty response many tool rounds later gets its own bounded repair
@@ -1760,27 +1759,6 @@ def _model_turn_or_retry(
             True,
             provider_response_repairs + 1,
         )
-
-
-# LLM: A transient exception after active-turn input reached provider admission is delivery
-# unknown. The model-turn auto-resumer must not rebuild the prompt under a new provider call id.
-# 函数用途: 判断本轮是否携带不能安全自动重发的用户补充消息。
-def _active_turn_input_delivery_is_ambiguous(loop_params: object) -> bool:
-    state = getattr(loop_params, "live_archive_state", None)
-    if not isinstance(state, dict):
-        return False
-    pending = state.get("_guidance_ack_ids")
-    return bool(
-        str(state.get("_guidance_submission_id") or "").strip()
-        or (isinstance(pending, set) and pending)
-    )
-
-
-# LLM: Context-pressure responses are lifecycle signals, not provider acceptance of the prompt.
-# Preflight never crossed I/O; provider_error is an explicit pre-execution rejection safe to retry.
-# 函数用途: 判断本次结构化响应是否要求先压缩并保留待确认输入，而不是确认已消费。
-def _model_response_deferred_prompt_consumption(response: object) -> bool:
-    return str(getattr(response, "runtime_status", "") or "") == "context_overflow"
 
 
 def _response_action(agent, loop_params: ToolLoopExecuteParams, response, repair_counters: ToolLoopRepairCounters):

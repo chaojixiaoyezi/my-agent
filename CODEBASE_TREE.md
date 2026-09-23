@@ -10,6 +10,7 @@
 |-- TESTS.md                             # 开发测试、真实 TUI 与发布 gate
 `-- docs/design/
     |-- MAINTAINABILITY_AND_JEV_REVIEW.md # 可维护性评估、渐进重构建议及 Computer Use/Jev 能力边界
+    |-- TOOL_LOOP_DEPENDENCY_SPLIT.md   # 第8步模型响应、工具轮与Compact职责边界及参考核对
     |-- PLUGIN_LIFECYCLE.md              # 可装卸插件、动态命令、版本切换与故障回收的待实施方案
     |-- PLUGIN_PACKAGES.md               # 本地包静态校验与待接线的安装事实、隔离和撤销边界
     |-- PLUGIN_WORKSPACE_CONTEXT.md      # 逐次只读工作区协议、路径裁决与轻量 SDK 构建边界
@@ -137,6 +138,7 @@ agent_py_agent/
 |   |   |   |-- sleep_tool.py           # clock.sleep 工具：模型主动定时等待，写 wake_queue 字条、事件提前醒取消
 |   |   |-- model/                      # 主工具循环的统一模型调用账、动态超时、上下文压力与成本统计
 |   |   |-- tool_loop/                  # 工具轮次执行、恢复与自然结束
+|   |   |-- tool_loop/model_turn.py     # 绑定原采样、用量与输入确认操作，保持响应采纳顺序
 |   |   |-- tool_loop/display_archive.py # 执行当时的公开工具原文归档与轻量预览引用
 |   |   |-- tool_context/               # 工具结果上下文：reducer、窗口、microcompact、PTL 单轮重试
 |   |   |-- orchestration/              # 创建、只读状态、消息、取消、授权五个递归直属工具与内部自动启动/恢复引擎；无兄弟 goal 广播，进展事件由宿主写入
@@ -596,6 +598,7 @@ docs/
 |-- tasks/TUI_READING_HANDOFF.md        # 阅读锚点、连续滚动、插话顺序与真实终端验收交接
 |-- tasks/HANDOFF_STEP7_SUBAGENT_LIFECYCLE.md # 第 7 步子代理结果链的代码、验证和集成交接
 |-- tasks/HANDOFF_STEP7_WAKE_PUBLICATION.md # 第 7 步唤醒配对发布半写修复与恢复边界交接
+|-- tasks/HANDOFF_STEP8_MODEL_TURN.md # 第8.2模型采纳边界、验证和集成交接
 |-- tasks/HANDOFF_STEP7_CLOSEOUT_RECOVERY.md # 第 7 步恢复扫描显式依赖、回归与装配交接
 |-- design/FEATURE-20260804-tool-runtime-unification.md # 工具唯一主链的用户行为、需求与验收规格
 |-- design/tool-runtime-unification.md  # 工具参考证据、架构、迁移删除表与并行边界
@@ -612,6 +615,8 @@ docs/
 ## Current Storage Roots
 
 ### 关键文件说明
+
+- `agent_py_agent/agent/agent_core/tool_loop/model_turn.py`：仅协调模型采样与响应采纳；执行权、请求准备与Compact仍归原入口。
 
 - `plugins/sdk/pyproject.toml` 与 `scripts/build_plugin_api.py`：SDK 唯一发行声明和原源码字节投影；不另存共用权限实现。
 - `plugins/workspace-peek/` 与 `scripts/build_plugin_package.py`：首个自有只读插件及标准安装包构建，独立 MCP 入口只消费宿主逐次上下文。

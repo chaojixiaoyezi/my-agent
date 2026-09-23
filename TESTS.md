@@ -1,5 +1,12 @@
 # 测试与发布验收
 
+## 第8.2首片模型采纳：本地合同验证
+
+新增 `test_tool_loop_model_turn.py` 十项：成功／中断结构化返回先计量再确认；provider超限恢复原输入、preflight不消费；请求或计量失败不确认；瞬断中实时读取submission及待确认ID，拒绝重发已提交输入；安全重试只计量最终响应。
+三个空响应旧xfail已迁为native假后端：补齐generate关键字和空text字段、用实际工作目录准备文件、从messages读取工具结果与恢复引导、为第二次工具使用独立call id。保留原3／3／5次调用、单次read／write、产物内容和操作核验断言；最初失败来自过期夹具，没有为通过而改变生产行为。
+十文件组合：模型采纳、tool_loop、runtime_guidance、tool_context_ptl_retry、thread_interrupt、tool_model_generation、provider_timeout_acceptance、provider_transient_auto_resume、subagent_runtime_guards、tool_progressive_disclosure，结果 **212 passed、24既有xfail，14.47秒**。基线两项中断替身错误已显式修复，三个空响应xfail转为真实通过，其余既有xfail未改。
+诊断准备失误单列：一次直接Python诊断漏用了pytest的HOME隔离，触及日常模型配置；已终止该准确诊断进程并改在独立临时HOME执行。该调用不是原生TUI、不计验收证据，共享Gateway未操作。后续本片测试均为隔离假后端；本片Ruff、doc sync、strict code-size、diff和登记后的clean-package均通过；第8步新版原生TUI仍待组合实现。
+
 ## 第8步基线发现的中断测试替身遗漏
 
 在85050017d开始模型／工具循环拆分前，四文件基线为112 passed、27既有xfail、2 failed。两项失败均发生于后台claim依赖装配：test_thread_interrupt中的两个最小Store未提供7.10已要求的wakes.pending_one，尚未进入中断／结束断言。仅为这两个替身补显式只读查询接口；同文件12项通过，生产代码与默认部署不变，不用默认旁路掩盖遗漏。此前365项相关测试没有覆盖这两个替身，保留失败记录；这不是新片重构造成的回归，也不宣称第8步验收完成。

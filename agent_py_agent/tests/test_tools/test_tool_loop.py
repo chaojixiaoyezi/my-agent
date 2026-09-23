@@ -343,16 +343,23 @@ class _RepeatedMissingReadBackend(_NativeFakeBackend):
         return ModelResponse(text="已看到提示，改用其他路径继续推进。", backend=self.name)
 
 
+# LLM: 只模拟原生模型响应；工具操作仍由实际测试执行链完成，不能靠文本伪造工具结果。
+# 类用途: 首轮读取后持续抛空响应，验证修复次数有界。
 class _EmptyAfterToolBackend(_NativeFakeBackend):
     name = "fake_empty_after_tool_backend"
 
+    # LLM: 每个测试实例独立计数，不共享调用状态。
+    # 函数用途: 初始化本例模型调用次数。
     def __init__(self):
         self.calls = 0
 
-    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+    # LLM: 接受原生messages并返回唯一工具call id；不发网络请求。
+    # 函数用途: 按调用序号提供工具响应、空响应异常或最终回答。
+    def generate(self, prompt: str, on_chunk=None, **kwargs) -> ModelResponse:
         self.calls += 1
         if self.calls == 1:
             return ModelResponse(
+                text="",
                 tool_use_blocks=[{"id": "call_auto", "name": 'read_file', "input": {"path": "notes.txt"}}],
                 backend=self.name,
             )
@@ -361,16 +368,23 @@ class _EmptyAfterToolBackend(_NativeFakeBackend):
         )
 
 
+# LLM: 只模拟原生模型响应；工具操作仍由实际测试执行链完成，不能靠文本伪造工具结果。
+# 类用途: 读取后只空一次，验证原生结果保留且不重复执行。
 class _EmptyThenFinalAfterToolBackend(_NativeFakeBackend):
     name = "fake_empty_then_final_after_tool_backend"
 
+    # LLM: 每个测试实例独立计数，不共享调用状态。
+    # 函数用途: 初始化本例模型调用次数。
     def __init__(self):
         self.calls = 0
 
-    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+    # LLM: 接受原生messages并返回唯一工具call id；不发网络请求。
+    # 函数用途: 按调用序号提供工具响应、空响应异常或最终回答。
+    def generate(self, prompt: str, on_chunk=None, **kwargs) -> ModelResponse:
         self.calls += 1
         if self.calls == 1:
             return ModelResponse(
+                text="",
                 tool_use_blocks=[{"id": "call_auto", "name": 'read_file', "input": {"path": "notes.txt"}}],
                 backend=self.name,
             )
@@ -378,30 +392,38 @@ class _EmptyThenFinalAfterToolBackend(_NativeFakeBackend):
             raise ProviderResponseError(
                 "Anthropic-compatible 流式响应没有文本内容", error_code="MODEL_EMPTY_RESPONSE"
             )
-        assert "上一轮模型接口返回了空文本" in prompt
-        assert "hello empty repair" in prompt
+        assert "上一轮模型接口返回了空文本" in json.dumps(kwargs.get("messages"), ensure_ascii=False)
+        assert "hello empty repair" in json.dumps(kwargs.get("messages"), ensure_ascii=False)
         return ModelResponse(text="已根据工具结果继续完成。", backend=self.name)
 
 
+# LLM: 只模拟原生模型响应；工具操作仍由实际测试执行链完成，不能靠文本伪造工具结果。
+# 类用途: 两次工具成功之间分别空响应，验证修复额度逐轮重置。
 class _SeparatedEmptyResponsesBackend(_NativeFakeBackend):
     name = "fake_separated_empty_responses_backend"
 
+    # LLM: 每个测试实例独立计数，不共享调用状态。
+    # 函数用途: 初始化本例模型调用次数。
     def __init__(self):
         self.calls = 0
 
-    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+    # LLM: 接受原生messages并返回唯一工具call id；不发网络请求。
+    # 函数用途: 按调用序号提供工具响应、空响应异常或最终回答。
+    def generate(self, prompt: str, on_chunk=None, **kwargs) -> ModelResponse:
         self.calls += 1
         if self.calls == 1:
             return ModelResponse(
+                text="",
                 tool_use_blocks=[{"id": "call_auto", "name": 'read_file', "input": {"path": "notes.txt"}}],
                 backend=self.name,
             )
         if self.calls == 2:
             raise ProviderResponseError("first empty response", error_code="MODEL_EMPTY_RESPONSE")
         if self.calls == 3:
-            assert "上一轮模型接口返回了空文本" in prompt
+            assert "上一轮模型接口返回了空文本" in json.dumps(kwargs.get("messages"), ensure_ascii=False)
             return ModelResponse(
-                tool_use_blocks=[{"id": "call_auto", "name": "write_file",
+                text="",
+                tool_use_blocks=[{"id": "call_recovered_write", "name": "write_file",
                     "input": {"path": "summary.txt",
                               "content": "first recovery succeeded"}}],
                 backend=self.name,
@@ -410,7 +432,7 @@ class _SeparatedEmptyResponsesBackend(_NativeFakeBackend):
             raise ProviderResponseError(
                 "second isolated empty response", error_code="MODEL_EMPTY_RESPONSE"
             )
-        assert "上一轮模型接口返回了空文本" in prompt
+        assert "上一轮模型接口返回了空文本" in json.dumps(kwargs.get("messages"), ensure_ascii=False)
         return ModelResponse(text="两次独立空响应后仍完成。", backend=self.name)
 
 
@@ -781,28 +803,28 @@ def test_runtime_tool_sections_only_collapse_catalog_when_native_is_effective(tm
     assert len(native_catalog) < len(text_catalog) // 2
 
 
-@pytest.mark.xfail(reason="EXEC-31b: text 驱动 fake 待 native 适配")
 def test_tool_loop_reports_empty_final_model_response_after_retry():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
-        (workspace / "notes.txt").write_text("hello empty model response", encoding="utf-8")
         cfg = _text_agent_config(enable_tools=True, memory_path="memory.jsonl")
         agent = SimpleAgent(cfg, workspace)
         agent.backend = _EmptyAfterToolBackend()
+        workspace = agent.effective_workspace_root
+        (workspace / "notes.txt").write_text("hello empty model response", encoding="utf-8")
 
         with pytest.raises(ProviderResponseError, match="流式响应没有文本内容"):
             agent.run("读取 notes 后总结", save=False, allowed_tools=["read_file"])
         assert agent.backend.calls == 3
 
 
-@pytest.mark.xfail(reason="EXEC-31b: text 驱动 fake 待 native 适配")
 def test_tool_loop_retries_once_when_final_model_response_is_empty_after_tool():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
-        (workspace / "notes.txt").write_text("hello empty repair", encoding="utf-8")
         cfg = _text_agent_config(enable_tools=True, memory_path="memory.jsonl")
         agent = SimpleAgent(cfg, workspace)
         agent.backend = _EmptyThenFinalAfterToolBackend()
+        workspace = agent.effective_workspace_root
+        (workspace / "notes.txt").write_text("hello empty repair", encoding="utf-8")
 
         result = agent.run("读取 notes 后继续总结", save=False, allowed_tools=["read_file"])
 
@@ -811,14 +833,14 @@ def test_tool_loop_retries_once_when_final_model_response_is_empty_after_tool():
         assert agent.backend.calls == 3
 
 
-@pytest.mark.xfail(reason="EXEC-31b: text 驱动 fake 待 native 适配")
 def test_tool_loop_resets_empty_response_retry_after_successful_model_turn():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
-        (workspace / "notes.txt").write_text("hello separated empty repairs", encoding="utf-8")
         cfg = _text_agent_config(enable_tools=True, memory_path="memory.jsonl")
         agent = SimpleAgent(cfg, workspace)
         agent.backend = _SeparatedEmptyResponsesBackend()
+        workspace = agent.effective_workspace_root
+        (workspace / "notes.txt").write_text("hello separated empty repairs", encoding="utf-8")
 
         result = agent.run(
             "读取 notes，写出摘要后继续总结",
