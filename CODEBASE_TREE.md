@@ -10,6 +10,7 @@
 |-- TESTS.md                             # 开发测试、真实 TUI 与发布 gate
 |-- docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md # 决策容量、完整请求投影与 Compact 的源码证据和分片交接
 |-- docs/tasks/DECISION_MODEL_CHILD_COMPACT_HANDOFF.md # child完整恢复共享实现、验收与后台后续边界交接
+|-- docs/tasks/DECISION_MODEL_BACKGROUND_PREPARATION_HANDOFF.md # 后台一次准备、范围冻结与原Compact材料丢失复现交接
 |-- docs/tasks/DECISION_MODEL_CHILD_LIVE_HANDOFF.md # Jev 自动建议到真实异模子代理首轮/工具轮的隔离验收
 |-- docs/tasks/DECISION_MODEL_P5B_HANDOFF.md # 来源—正式记忆关系建议的第一片、原权威边界与离线验收
 |-- docs/tasks/DECISION_MODEL_EXTERNAL_MATERIAL_ORDER_HANDOFF.md # 已归档网页阅读提示的首片、原来源边界与离线验收
@@ -386,8 +387,8 @@ agent_py_agent/
 |   |   |-- background_claim.py         # 后台执行领取、最终准入、共享心跳与精确 claim 结算
 |   |   |-- background_recovery.py      # 按次查询权威恢复阻断，只去重日志、不缓存执行资格
 |   |   |-- background_tool_policy.py   # 无副作用的后台工具目录、owner/task 收紧及展示投影
-|   |   |-- background_context.py       # 后台有界上下文、任务范围与模型可见事实准备
-|   |   |-- background_history_seed.py  # 后台原生历史种子、任务隔离与读取失败合同
+|   |   |-- background_context.py       # 后台一次性事实准备与纯渲染，保留任务范围和原预算
+|   |   |-- background_history_seed.py  # 后台历史范围冻结、纯种子投影与读取失败合同
 |   |   |-- background_execution.py     # 后台单片执行、Compact 重试、原生历史保存与具名结果
 |   |   |-- background_delivery.py      # 后台投递、canonical 回复提交、整封冻结与耐久去重
 |   |   |-- control_commands.py        # CLI/IM 共用 typed slash dispatcher、task command 与状态渲染
@@ -561,6 +562,7 @@ agent_py_agent/
 |   |-- test_tool_request_projection.py # 完整冻结请求与实际原生出站等价、未知输入及无副作用
 |   |-- test_gateway_capability_compact.py # 同片能力展示沿 Gateway/子代理 Compact 和续跑保留
 |   |-- test_subagent_capability_compact.py # child 同轮展示沿真实 Compact 重试保留、失效清除与新轮重置
+|   |-- test_background_prepared_context.py # 后台重复纯渲染无写账、冻结输入、任务范围与窄审计隔离
 |   |-- test_background_capability_compact.py # 后台同工作片展示复用、清除与下一片重新评估
 |   |-- test_decision_skill_tool_settings.py # 展示策略/开放类别列表的设置、CAS及原菜单编辑
 |   |-- test_user_config_owner_scope.py # 普通 owner 决策工具可见性、可信线程与本机全局配置拒绝
@@ -875,8 +877,8 @@ docs/
 - `agent_py_agent/agent/conversation/background_routing.py`：按原优先级惰性读取线程与 owner 路由；普通唤醒、观察批次、冻结重投及额度通知共用，不另建路由状态或投递链。
 - `agent_py_agent/agent/conversation/background_claim.py`：仅持有原 claims 域及精确能力；领取后重查终态/恢复，运行中复用共享心跳，退出先停心跳再结算本 claim，普通失败最后记账。
 - `agent_py_agent/agent/conversation/background_recovery.py`：每次解析并查询当前权威恢复入口；指纹只抑制重复日志，unknown/不可读阻断不消费原来源。
-- `agent_py_agent/agent/conversation/background_context.py`：显式请求接口连接原会话事实、任务范围和有界模型投影；既有任务进度对账仍沿原调用顺序执行。
-- `agent_py_agent/agent/conversation/background_history_seed.py`：复用 canonical 未压缩历史和 provider 投影；区分可用、禁用与不可读，不把读取失败变成空历史。
+- `agent_py_agent/agent/conversation/background_context.py`：显式请求接口一次准备原会话事实，再纯渲染；原任务进度对账不在重复候选渲染中执行。
+- `agent_py_agent/agent/conversation/background_history_seed.py`：复用canonical未压缩历史与provider投影，同次冻结任务范围、摘要和预算；禁用/不可读不伪造投影依据。
 - `agent_py_agent/agent/conversation/background_execution.py`：显式接收执行、存储与参数准备能力，保留同片取消、Compact 和原生历史；不选择唤醒、不投递外部消息。
 - `agent_py_agent/agent/conversation/background_delivery.py`：显式交付能力连接原渠道和唯一 store；外发、过程/final 提交、审计回执与整封冻结保持原顺序，不运行模型或拥有调度状态。
 - `agent_py_agent/agent/gateway_parts/workspace_scope.py`：普通消息和首次 Goal 共用目录校验；只接受宿主已存在的合法路径，声明本身不增加权限。

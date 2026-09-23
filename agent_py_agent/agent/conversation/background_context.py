@@ -1,10 +1,11 @@
 # LLM: 本模块负责后台模型上下文准备，复用唯一会话与任务范围事实，不调度执行或外发消息。
 # task_runtime_state 的既有进度对账可能写任务账；保持调用顺序，修改时同步历史隔离、读取错误和展示排除测试。
-# 模块用途: 从持久会话组装有界后台上下文，让执行器与上下文投影各自维护，不创建第二份历史。
+# 模块用途: 一次读取后台事实后纯渲染有界上下文，候选不重复进度对账或读取持久状态。
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from ..agent_core.agent_tree.status import agent_tree_status_payload
@@ -93,36 +94,64 @@ class BackgroundContextLoad:
     load_errors: list[dict[str, Any]]
 
 
-# LLM: 后台上下文会投给模型，active/pending wake 必须先做模型可见净化；
-# 原始持久事件仍留在 ConversationStore，不能在这里改写权威账本。
-# 函数用途: 组装一次后台唤醒轮的有界 Markdown 上下文。
+# LLM: 仅保存一次已读取的后台材料；不授予身份或执行权，不进入持久状态，候选渲染不能重新触发进度写账。
+# 类用途: 把副作用准备与纯格式化分开，保留原预算、控制策略及窄审计隔离事实。
+@dataclass(frozen=True)
+class PreparedBackgroundContext:
+    payload: BackgroundContextPayloadRequest = field(repr=False)
+    header: tuple[str, ...]
+    control_policy: dict[str, Any]
+    control_actions: tuple[str, ...]
+    task_id: str
+    narrow_audit_event: bool
+    include_recent_messages: bool
+
+    # LLM: 复制嵌套事实以隔离原store/调用方后续修改；不读盘、不创建新持久快照。
+    # 函数用途: 固定本次准备内容，保证重复纯渲染不会受借用容器变化影响。
+    def __post_init__(self):
+        object.__setattr__(self, "payload", deepcopy(self.payload))
+        object.__setattr__(self, "control_policy", deepcopy(self.control_policy))
+
+
+# LLM: 原一次性调用保持准备与渲染的顺序；需要重复投影的宿主应持有prepare返回值，不能重复调用本入口。
+# 函数用途: 为普通后台调用生成完整上下文，实际读取和可能的进度写入只在prepare阶段发生。
 def context_markdown(
-    *,
-    agent: object,
-    store: ConversationStore,
-    thread: ConversationThread,
-    request: BackgroundContextRequest,
-    proactive_delivery_available: bool | None = None,
+    *, agent: object, store: ConversationStore, thread: ConversationThread,
+    request: BackgroundContextRequest, proactive_delivery_available: bool | None = None,
     include_recent_messages: bool = True,
 ) -> str:
-    policy_request = tool_policy_request(
-        agent,
-        request,
-        proactive_delivery_available=proactive_delivery_available,
-    )
+    return render_background_context(prepare_background_context(
+        agent=agent, store=store, thread=thread, request=request,
+        proactive_delivery_available=proactive_delivery_available, include_recent_messages=include_recent_messages,
+    ))
+
+
+# LLM: 原wake净化、上下文读取和task_runtime_state对账仅执行一次；返回的预算/策略已冻结，不在候选之间刷新。
+# 函数用途: 收集后台请求所需事实；可能更新原进度账，后续render无副作用。
+def prepare_background_context(
+    *, agent: object, store: ConversationStore, thread: ConversationThread,
+    request: BackgroundContextRequest, proactive_delivery_available: bool | None = None,
+    include_recent_messages: bool = True,
+) -> PreparedBackgroundContext:
+    policy_request = tool_policy_request(agent, request, proactive_delivery_available=proactive_delivery_available)
     task_id = str(getattr(request, "task_id", "") or "").strip()
-    active_wake_signal = model_visible_wake_signal(getattr(request, "wake_signal", None))
-    bounded = _bounded_context(
-        agent,
-        store,
-        thread,
-        task_id,
-        policy_request,
-        active_wake_signal=active_wake_signal,
+    payload = _prepare_context_payload(
+        agent, store, thread, task_id, policy_request,
+        active_wake_signal=model_visible_wake_signal(getattr(request, "wake_signal", None)),
     )
-    policy_decision = background_tool_policy_decision(
-        getattr(agent, "config", None), request=policy_request
+    return PreparedBackgroundContext(
+        payload=payload, header=tuple(_context_header(request, thread)),
+        control_policy=background_tool_policy_decision(getattr(agent, "config", None), request=policy_request).to_dict(),
+        control_actions=tuple(background_control_action_lines(getattr(agent, "config", None), request=policy_request)),
+        task_id=task_id, narrow_audit_event=is_narrow_audit_event(getattr(request, "reason", "")),
+        include_recent_messages=include_recent_messages,
     )
+
+
+# LLM: 只消费冻结材料并调用原预算器；不得读取agent/store/时间，不以展示标题裁决身份或范围。
+# 函数用途: 纯渲染完整后台上下文，重复候选使用同一输入时输出一致。
+def render_background_context(prepared: PreparedBackgroundContext) -> str:
+    bounded = bounded_background_context_payload(prepared.payload)
     sections = [
         ("Active Wake Signal", bounded.get("active_wake_signal") or {}),
         (
@@ -140,12 +169,12 @@ def context_markdown(
         ("Recovery Snapshot", bounded.get("recovery_snapshot") or {}),
         ("Agent Tree Snapshot", bounded.get("agent_tree") or {}),
         ("Background Context Projection", bounded.get("_projection") or {}),
-        ("Control Action Policy", policy_decision.to_dict()),
+        ("Control Action Policy", prepared.control_policy),
     ]
-    if include_recent_messages:
+    if prepared.include_recent_messages:
         # 只有"没有 canonical 历史种子"的历史遗留路径才需要这份有界摘要副本。
         sections.insert(5, ("Recent Messages", bounded.get("messages") or []))
-    if is_narrow_audit_event(getattr(request, "reason", "")):
+    if prepared.narrow_audit_event:
         # 审计发现或容量事件只投影当前权威事实与精确审计目标，防止无关历史干扰。
         # 完整持久账仍可通过原工具读取，这里不修改它。
         sections = [
@@ -154,7 +183,7 @@ def context_markdown(
                 "Audit Task Objective",
                 _audit_event_task_objective(
                     bounded.get("tasks"),
-                    task_id=task_id,
+                    task_id=prepared.task_id,
                     wake_signal=bounded.get("active_wake_signal"),
                 ),
             ),
@@ -163,21 +192,12 @@ def context_markdown(
                 "Background Context Projection",
                 bounded.get("_projection") or {},
             ),
-            ("Control Action Policy", policy_decision.to_dict()),
+            ("Control Action Policy", prepared.control_policy),
         ]
-    lines = _context_header(request, thread)
+    lines = list(prepared.header)
     for title, payload in sections:
         lines.extend(["", f"## {title}", json_block(payload)])
-    lines.extend(
-        [
-            "",
-            "## Available Control Actions",
-            *background_control_action_lines(
-                getattr(agent, "config", None), request=policy_request
-            ),
-            "[/background-main-agent-context]",
-        ]
-    )
+    lines.extend(["", "## Available Control Actions", *prepared.control_actions, "[/background-main-agent-context]"])
     return "\n".join(lines)
 
 
@@ -248,9 +268,9 @@ def _audit_event_source_ids(wake_signal: object) -> set[str]:
     return source_ids
 
 
-# LLM: 维持原有读取与进度对账顺序，再调用唯一预算器；task_runtime_state 可能更新进度账，错误须保留。
-# 函数用途: 准备后台所需的事实并施加统一上下文预算，不另建模型历史。
-def _bounded_context(
+# LLM: 维持原读取与进度对账顺序，返回唯一预算器的输入；task_runtime_state可能写账，错误保留供render展示。
+# 函数用途: 一次准备后台事实与原预算配置，之后候选纯渲染不重做这些副作用。
+def _prepare_context_payload(
     agent: object,
     store: ConversationStore,
     thread: ConversationThread,
@@ -258,7 +278,7 @@ def _bounded_context(
     policy_request: BackgroundToolPolicyRequest,
     *,
     active_wake_signal: dict[str, Any] | None = None,
-) -> dict[str, Any]:
+) -> BackgroundContextPayloadRequest:
     config = getattr(agent, "config", None)
     load_errors: list[dict[str, Any]] = []
     state = BackgroundContextLoad(
@@ -288,18 +308,16 @@ def _bounded_context(
     subagent_completions = (
         {} if narrow_audit_event else _background_subagent_completion_context(state)
     )
-    return bounded_background_context_payload(
-        BackgroundContextPayloadRequest(
-            bundle=bundle,
-            active_wake_signal=active_wake_signal,
-            subagent_completions=subagent_completions,
-            pending_wake_signals=pending_wake_signals,
-            task_runtime_state=task_state,
-            agent_tree=agent_tree,
-            recovery_snapshot=recovery_snapshot,
-            load_errors=load_errors,
-            budget=background_context_budget_from_config(config),
-        )
+    return BackgroundContextPayloadRequest(
+        bundle=bundle,
+        active_wake_signal=active_wake_signal,
+        subagent_completions=subagent_completions,
+        pending_wake_signals=pending_wake_signals,
+        task_runtime_state=task_state,
+        agent_tree=agent_tree,
+        recovery_snapshot=recovery_snapshot,
+        load_errors=load_errors,
+        budget=background_context_budget_from_config(config),
     )
 
 

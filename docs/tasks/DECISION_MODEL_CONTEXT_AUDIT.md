@@ -1107,3 +1107,25 @@ child的 `prepare_subagent_thread_turn(defer_compact=True)` 保留原消息幂�
 后台调查已确认不能直接复制child：`context_markdown` 可能写任务进度，需要一次冻结结构化上下文再纯渲染；detached任务的锚点/lineage历史范围也需随同次准备保存。窄审计事件的seed=None是隔离约定，不能补入owner历史来让容量检查通过。后台尚未改代码，初次加载/手动入口及12.5—12.7仍保持待办。
 
 建议下一步：先补后台一次准备的上下文与历史范围，再接同一恢复器。共享core串行修改，独立payload/失败测试与只读评审可并行；所有真实供应商和部署证据仍单独验收，不扩大本片结论。
+
+### 后台一次性准备与作用域前置（本地）
+
+基线 `468fec0a9` 后，`background_context.py` 将原 `context_markdown` 拆为prepare和纯render。prepare仍按原顺序净化wake、读取上下文与对账任务进度，冻结原预算及控制策略；render只对冻结材料执行原预算器和格式化。既有调用入口继续同样的准备→渲染，候选可持有准备值而不重复读盘或写进度。
+
+`background_history_seed.py` 从同次成功加载的bundle构造 `BackgroundHistoryProjection`，包含原TaskScopeDecision、scoped thread和预算；正常种子也通过公共纯投影生成。锚点、lineage和摘要继承规则未改变；disabled/unreadable没有可用projection，不可被解释为合法空历史。
+
+本片不把后台接到新恢复器。Astra max 使用真实 SimpleAgent、临时 ConversationStore 与原checkpoint/CAS（只替身摘要）复现三项原有边界：detached transcript提交v1检查点后，generation=1、source_messages=3，而后台seed为ready但summary和messages均空；detached活动工具提交v2检查点后，原工具可见数从1变0、seed摘要仍空；narrow audit同样隐藏已压工具，但seed按原约定disabled。原始transcript/工具账仍在，问题是恢复材料无法取得替代摘要，尚未进行实际HTTP。需在原append-only消息和committed checkpoint chain内明确适用范围与替代关系，不能另建第二摘要库或从自然语言猜作用域。
+
+建议下一步：依据作用域复现实验先收口原Compact来源/替代关系，再接后台完整恢复和实际payload对照；共享checkpoint修改由主线串行，冻结/隔离测试可并行。本片不关闭12.4或真实缓存/TUI验收。
+
+#### 作用域修复方案（审查建议，尚未实现）
+
+继续使用同一committed checkpoint chain与唯一generation CAS，不新建任务摘要库或per-task状态表。拟在原来源/候选中携带结构化scope、摘要基础checkpoint ref和精确覆盖refs；scope只从冻结的TaskScopeDecision、conversation_turn_id及原run/attempt身份形成，不扩大权限。
+
+原checkpoint拟显式升版：previous_checkpoint_id仍代表提交链，summary_base_checkpoint_id单独代表摘要语义继承，scope/base/coverage纳入候选身份；v1/v2按明确的旧全线程合同读取。局部提交不能推进全局transcript cursor或把局部摘要写成全线程摘要；thread上的全线程投影须绑定相应checkpoint，其他视图只解析同链。
+
+只读resolver返回当前请求实际适用的摘要和覆盖refs，校验摘要基础链与来源。detached无适用摘要时从canonical原文和安全基础重新投影，不能套最新全局cursor；使用精确覆盖而非局部高水位，避免lineage后来增加时跳过未压行。活动工具也仅隐藏本请求实际消费摘要覆盖的精确refs，删除整链无条件union。seed/provider历史与活动IR应消费同一视图。
+
+窄审计保持conversation_history_seed=None，仅压本活动回合的工具/IR，并以精确conversation_turn_id读取替代摘要；不能只凭task_id继承另一审计事件。摘要器必须读取适用base，不能继续直接使用binding.thread.summary。最后扩共享完整恢复器支持没有transcript但有active IR的来源，沿原一次准备、候选纯投影、CAS与同次发送完成接线。
+
+以上是下一片待核实实施的通用合同方向，尚无新schema或resolver落地。需要覆盖交错任务、旧checkpoint读取、并发CAS、取消、坏来源、前台/child正常历史，以及窄审计不泄漏旧聊天的回归；先验证基础迁移，再改变宿主发送路径。

@@ -1,8 +1,9 @@
 # LLM: 后台种子与前台共用 conversation.history_projection 和 Compact 代次，不依赖 Gateway 执行器；读取失败必须阻止缺历史的模型调用。
-# 模块用途: 按当前任务范围加载后台原生历史，保留完整工具往返，不推进调度、压缩或消息投递状态。
+# 模块用途: 一次加载并冻结后台历史范围，纯投影原生历史；不推进调度、压缩或消息投递状态。
 from __future__ import annotations
 
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import dataclass, field
 from typing import Any
 
 from ..runtime_errors import runtime_error_report
@@ -17,7 +18,7 @@ from .background_context import (
     tool_policy_request,
 )
 from .background_tool_policy import BackgroundToolPolicyRequest
-from .models import ConversationThread, MessageLogEntry
+from .models import ConversationHistorySeed, ConversationThread, MessageLogEntry
 from .store import ConversationStore
 
 
@@ -100,6 +101,40 @@ class BackgroundHistoryUnavailableError(RuntimeError):
         self.detail = str(detail or "")
 
 
+# LLM: 范围只来自同次已成功加载的bundle；复制锚点/lineage和thread投影，不让后续任务变化或渲染重新扩大权限。
+# 类用途: 固定一次后台历史准备的范围、摘要与预算，供原准备和后续候选纯投影共用。
+@dataclass(frozen=True)
+class BackgroundHistoryProjection:
+    thread_id: str
+    scope: TaskScopeDecision
+    thread: dict[str, Any] = field(repr=False)
+    token_budget: int
+
+    # LLM: frozen dataclass中的嵌套字典同样须隔离，不能借后来的任务link或线程修改改变已冻结范围。
+    # 函数用途: 复制实际scope和摘要字段，不产生额外读盘或持久状态。
+    def __post_init__(self):
+        object.__setattr__(self, "scope", deepcopy(self.scope))
+        object.__setattr__(self, "thread", deepcopy(self.thread))
+
+
+# LLM: 显式rows是唯一历史输入，范围与摘要来自同次准备；不重读task/store或按正文推断归属，读取失败不得在这里补空。
+# 函数用途: 从已读行生成后台原生历史种子，使用原筛选、预算和provider消息投影。
+def project_background_history_seed(agent, prepared: BackgroundHistoryProjection, rows) -> ConversationHistorySeed:
+    from .history_projection import conversation_history_rows
+    from .native_history import provider_history_messages_from_rows
+
+    selected_rows = conversation_history_rows(
+        agent, prepared.thread_id, "", [], rows=tuple(history_scope_rows(prepared.scope, list(rows))),
+        token_budget=prepared.token_budget,
+    )
+    return ConversationHistorySeed(
+        compact_summary=str(prepared.thread.get("summary") or ""),
+        compact_generation=max(0, int(prepared.thread.get("compact_generation", 0) or 0)),
+        messages=tuple((row.role, row.content) for row in selected_rows),
+        canonical_messages=tuple(provider_history_messages_from_rows(selected_rows)),
+    )
+
+
 # LLM: 后台历史种子的结果必须区分三态，不能把"读不到"和"确实没有"混成同一个 None：
 # - ready: 拿到权威行并投影成功（可能为空历史，那是合法空）；
 # - unreadable: 历史读取/解析失败（load_errors 非空或抛错）→ 调用方必须按 typed 错误处理，
@@ -107,13 +142,14 @@ class BackgroundHistoryUnavailableError(RuntimeError):
 #   伪装成"上下文骤降"；
 # - disabled: 窄范围审计事件等按设计不使用会话历史。
 # 调用方（background_execution.run_background_turn_with_compact）读 status 决定是否继续，load_errors 一路带出去。
-# 类用途: 承载后台历史种子的三态结果与结构化读取错误。
+# 类用途: 承载三态结果、错误及同次纯投影依据；disabled/unreadable不伪造可用范围。
 @dataclass(frozen=True)
 class BackgroundHistorySeedResult:
     status: str
     seed: object | None = None
     load_errors: tuple[dict[str, Any], ...] = ()
     detail: str = ""
+    projection: BackgroundHistoryProjection | None = field(default=None, repr=False)
 
 
 # LLM: 后台工作片必须与前台共用同一份 canonical 历史投影与同一个 Compact 权威：
@@ -122,7 +158,7 @@ class BackgroundHistorySeedResult:
 #      不能直接吞全 thread 未压缩行（会把后来别的任务的消息带进 detached 工作）；
 #   ② 读取失败给 typed 结果，绝不静默退回摘要；
 #   ③ 只读：不在后台切片里另起一次压缩（压缩由本片 context_overflow 路径与前台 Compact 负责）。
-# 函数用途: 为后台工作片构造与前台同源的会话历史种子（三态结果）。
+# 函数用途: 为后台片一次读取历史并冻结范围，返回同源种子及可重复纯投影的内部材料。
 def background_conversation_history_seed(
     agent: object,
     store: ConversationStore | None,
@@ -168,29 +204,13 @@ def background_conversation_history_seed(
     try:
         from ..agent_core.runtime.context_compactor import runtime_compact_policy
         from .compact import _uncompacted_conversation_rows
-        from .history_projection import conversation_history_rows
-        from .models import ConversationHistorySeed
-        from .native_history import provider_history_messages_from_rows
-
         rows = _uncompacted_conversation_rows(store, thread)
-        # 权威历史 = 全部未压缩行；范围裁决用与 operational 摘要**同一份** decision
-        # （来自本轮显式 task 身份 + 已加载 bundle），既不重读盘、也不按第几个 task 猜身份。
-        scoped_rows = history_scope_rows(
-            task_scope_decision(scope_state, scoped),
-            rows,
+        prepared = BackgroundHistoryProjection(
+            thread_id=thread_id, scope=task_scope_decision(scope_state, scoped),
+            thread=scoped.get("thread") if isinstance(scoped.get("thread"), dict) else {},
+            token_budget=int(getattr(runtime_compact_policy(agent), "trigger_tokens", 0) or 0),
         )
-        budget = int(getattr(runtime_compact_policy(agent), "trigger_tokens", 0) or 0)
-        # 只用历史投影两步（行选择 + provider 消息），不牵入 recent_artifacts 等与续接无关的投影。
-        selected_rows = conversation_history_rows(
-            agent,
-            thread_id,
-            "",
-            load_errors,
-            rows=tuple(scoped_rows),
-            token_budget=budget,
-        )
-        history = tuple((row.role, row.content) for row in selected_rows)
-        canonical_history = provider_history_messages_from_rows(selected_rows)
+        seed = project_background_history_seed(agent, prepared, rows)
     except InterruptedError:
         raise
     except Exception as exc:
@@ -206,14 +226,4 @@ def background_conversation_history_seed(
             load_errors=tuple(load_errors),
             detail="history projection reported load errors",
         )
-    scoped_thread = scoped.get("thread") if isinstance(scoped.get("thread"), dict) else {}
-    return BackgroundHistorySeedResult(
-        "ready",
-        seed=ConversationHistorySeed(
-            # detached named task 的 summary/代次按既有投影口径（创建锚点之前的摘要才继承）。
-            compact_summary=str(scoped_thread.get("summary") or ""),
-            compact_generation=max(0, int(scoped_thread.get("compact_generation", 0) or 0)),
-            messages=tuple(history),
-            canonical_messages=tuple(canonical_history),
-        ),
-    )
+    return BackgroundHistorySeedResult("ready", seed=seed, projection=prepared)

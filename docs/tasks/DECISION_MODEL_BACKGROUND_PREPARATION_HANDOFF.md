@@ -1,0 +1,53 @@
+# 后台 Compact 准备与作用域交接
+
+## 基本信息
+
+- workstream：决策模型第 12.4 项，后台完整恢复前置片。
+- branch：`codex/decision-model-integration`；独立决策工作区，基线 `468fec0a9`。
+- owner：主代理负责生产实现，sol high 负责独立测试，Astra max 负责作用域复现与审查。
+- date：2026-09-23。
+
+## 本线目标
+
+后台容量候选需要真实完整请求，但不能为每个候选重复读取任务、写进度或扩大独立任务可见范围。
+
+## 实际完成
+
+`background_context.py` 的一次准备保留原副作用顺序，冻结预算、策略、wake 和上下文；纯渲染只调用原预算器与格式化。原 `context_markdown` 继续执行一次准备和渲染。
+
+`background_history_seed.py` 在原成功加载后冻结 `TaskScopeDecision` 与 scoped thread，正常种子也使用同一纯行投影。读取失败与主动禁用不产生可用 projection。未新增持久 schema、配置、调度或后台恢复分支。
+
+## 改动文件
+
+- `conversation/background_context.py`、`background_history_seed.py`：一次准备与纯投影。
+- `tests/test_background_prepared_context.py`：6 项冻结、重复渲染、历史隔离与错误测试。
+- 入口、设计、TODO、容量审计、测试、Gateway 模块和文件树文档：同步已完成前置片与剩余边界。
+
+## 测试命令和结果
+
+使用仓库虚拟环境：
+
+```bash
+python -m pytest -o addopts='' agent_py_agent/tests/test_background_main_agent_runtime.py agent_py_agent/tests/test_background_context_runtime_errors.py agent_py_agent/tests/test_background_owner_delivery_commit.py agent_py_agent/tests/test_background_capability_compact.py -q --tb=short
+python -m pytest -o addopts='' agent_py_agent/tests/test_background_prepared_context.py -q --tb=short
+```
+
+结果分别为 201 passed、6 passed。Ruff、doc sync、导入边界、strict code-size（hard=0，基线不变）、diff 与 clean-package 检查通过。打包检查首次只因新增测试未跟踪失败，纳入 Git 索引后通过。无真实供应商调用、部署或重启；旧全仓 8 项失败未在本片收口。
+
+独立诊断脚本在本机临时文件 `/tmp/background_compact_scope_repro_20260923.py`，结果在同名前缀 `.json`；用虚拟环境 Python 执行并传 `--repo <本工作区>`。三组真实 SimpleAgent/Store/checkpoint/CAS 复现均退出 0，仅摘要为替身，没有业务 HTTP。脚本断言用于确认原缺陷，修复时必须改成正确行为回归，不能将维持缺陷算验收通过。
+
+## 影响范围与需要主线重点复查
+
+detached transcript 压缩推进共享游标，但创建后的全局摘要被原隔离规则清除，导致 seed 为 ready 却无旧行及替代摘要。活动工具压缩也会沿全局已提交链隐藏工具 ID；detached 或窄审计不消费该摘要，仍会失去恢复材料。原始记录未删除。
+
+下一片必须在唯一 checkpoint/CAS 权威内明确摘要消费范围和精确替代来源，不能用全局游标裁掉不消费摘要的任务材料，也不能为窄审计补入整段 owner 历史。单靠恢复创建前的旧摘要不足以保留任务创建后的工具和交错消息。
+
+## 需要其他线协调
+
+已与模块重构负责人对齐本片文件，不修改调度、投递、owner 或 TUI。媒体线的原生 IR 与 provider 编码继续由其负责；不抢占文件。测试机 192.168.1.9 已获用户授权，实际部署/重启须先协调共享 Gateway 占用。
+
+## 剩余风险与后续建议
+
+第 12.4 项仍未完成：后台完整恢复接线、初次加载及手动 Compact 尚待实施；跨窗口、模态、输出预留组合与真实缓存验证另按 TODO 推进。
+
+建议下一步：先以以上复现修正原 Compact 作用域与替代关系，再接公共完整恢复器并核对实际出站 payload。共享 checkpoint 实现串行，独立回归与只读审查可并行；不能提前关闭总 Goal 或扩大本地证据为已安装 TUI 验收。

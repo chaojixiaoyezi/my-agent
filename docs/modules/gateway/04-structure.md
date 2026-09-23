@@ -1,5 +1,7 @@
 # Gateway Structure
 
+后台上下文的 `prepare_background_context` 保留原事实读取与进度对账，`render_background_context` 只消费冻结值并调用原预算器；`BackgroundHistoryProjection` 保存同次任务范围与摘要投影，纯种子投影不重读任务。完整后台Compact接线仍待作用域检查点边界闭合，不能把全局新摘要给detached或窄审计事件。
+
 `gateway_compact_recovery.py` 只构造原来源和Gateway历史投影回调；一次冻结/摘要/原CAS及历史参数替换共用 `agent_core/compact_request_recovery.py`。普通Gateway选模和child首请求也共用 `tool_request_capture.py`，纯renderer与目录仍各自唯一。
 
 `command_stream.py` 的进程内 CancellationToken 统一来自 `common/cancellation.py`；请求线程及消息流仍由本模块管理，令牌不拥有持久任务状态。

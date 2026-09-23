@@ -1,5 +1,15 @@
 # 测试与发布验收
 
+## 第 12.4 项后台一次准备与纯投影（本地前置片）
+
+`background_context.py` 将可能写任务进度的事实准备与无副作用渲染分离；`background_history_seed.py` 携带同次冻结的任务范围，正常种子与候选共用原历史投影。没有接通新的后台 Compact 恢复分支，也没有改变持久 schema。
+
+后台主运行、上下文读取错误、owner 投递与能力展示四文件联合 **201 passed**。新增 `test_background_prepared_context.py` **6 passed**：重复渲染不读 store、不重复进度对账，借用请求/配置/wake 修改不影响冻结结果；detached 锚点与兄弟任务隔离、创建后摘要排除、窄审计无旧聊天，以及 unreadable/disabled 不伪造可用投影。此次未调用真实供应商、未部署或重启；不抵充前轮全仓 8 项失败。
+
+Astra max 独立诊断使用真实 SimpleAgent、临时 ConversationStore 和原 checkpoint/CAS，仅摘要模型为替身，复现三个原有材料丢失边界：detached transcript 压缩后全局游标推进但新摘要被隔离；detached 与 narrow audit 的活动工具压缩后工具记录被隐藏，而该任务不消费新摘要。原始持久记录仍在，丢失发生于模型恢复材料投影；不是实际 HTTP 或供应商验收。后续必须先完善唯一 checkpoint 的作用域与替代关系，再接完整后台恢复。
+
+本片 Ruff、doc sync、导入边界（0 发现）、strict code-size（hard=0，基线未改）、diff 与 clean-package 检查通过。打包检查首次因新增测试尚未进入 Git 索引失败，纳入本片后复查通过；没有忽略文件或绕过检查。并行边界与复现方式见[后台准备交接](docs/tasks/DECISION_MODEL_BACKGROUND_PREPARATION_HANDOFF.md)。
+
 ## 第 12.4 项子代理完整恢复与公共实现（本地）
 
 Gateway 的完整恢复协调提到 `agent_core/compact_request_recovery.py`；Gateway、child 共享一次冻结、完整候选计量、摘要错误隔离及原 checkpoint/CAS，正常选模也共用 `tool_request_capture.py`。child overflow 在下一次真实 `agent.run` 准备后提交并同次发送，原独立历史、run/attempt 和权限保持。

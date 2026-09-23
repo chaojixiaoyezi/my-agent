@@ -1,5 +1,7 @@
 # Gateway 维护状态
 
+后台上下文的 `prepare_background_context` 保留原事实读取与进度对账，`render_background_context` 只消费冻结值并调用原预算器；`BackgroundHistoryProjection` 保存同次任务范围与摘要投影，纯种子投影不重读任务。完整后台Compact接线仍待作用域检查点边界闭合，不能把全局新摘要给detached或窄审计事件。
+
 Gateway恢复协调已抽到 `agent_core/compact_request_recovery.py` 与child共用，原payload/CAS/取消证据保持；Gateway模块只负责自己的历史投影和边界事件。
 
 - 第 12.4 项 Gateway overflow 已本地接通完整恢复请求计量：只读保留原来源，真实请求准备后生成摘要候选，原 checkpoint/CAS 成功后直接发送获选材料。两协议、工具开关、取消/代次竞争/摘要错误及后续工具轮等 16 文件联合 337 项通过；HTTP 为内存替身，未部署。子代理、后台、初次加载及手动 Compact 仍待接入，完整进度见 `docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md`。
