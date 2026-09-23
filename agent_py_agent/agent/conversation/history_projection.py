@@ -63,8 +63,8 @@ def _history_row_visible_in_work_scope(
     return bool(current_name and row_name and row_name == current_name)
 
 
-# LLM: 前后台正文和原生回放必须共用同一完整行窗口；修改时联测 background_history_seed 与 Gateway 上下文，避免缓存前缀分叉。
-# 函数用途: 读取并筛选完整会话行，同时保留原生工具历史所需的结构化 metadata。
+# LLM: 前后台共用同一行选择；preserve_complete仅用于已裁决Compact来源，必须完整进入容量门，普通读取保留展示窗口。
+# 函数用途: 筛选会话行并保留原生metadata；已选来源不再次按字符截掉旧行，修改时联测三个宿主。
 def conversation_history_rows(
     agent: SimpleAgent,
     thread_id: str,
@@ -74,6 +74,7 @@ def conversation_history_rows(
     rows: object = None,
     token_budget: int = 0,
     work_scope: dict[str, object] | None = None,
+    preserve_complete: bool = False,
 ) -> tuple[ConversationHistoryRow, ...]:
     store = getattr(agent, "conversation_store", None)
     config = getattr(agent, "config", None)
@@ -86,6 +87,8 @@ def conversation_history_rows(
         int(getattr(config, "conversation_history_max_chars", 48_000) or 48_000),
     )
     supplied_rows = isinstance(rows, (list, tuple))
+    if preserve_complete and not supplied_rows:
+        raise ValueError("complete history projection requires explicit source rows")
     if supplied_rows:
         message_rows = list(rows)
     else:
@@ -122,6 +125,8 @@ def conversation_history_rows(
                 metadata=dict(metadata),
             )
         )
+    if preserve_complete:
+        return tuple(candidates)
     history_chars = total_chars
     history_messages = max_turns * 2
     if supplied_rows:

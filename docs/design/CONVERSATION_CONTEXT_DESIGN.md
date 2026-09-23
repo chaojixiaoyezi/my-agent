@@ -26,7 +26,7 @@ task 或 turn 语义；它们进入同一个 Gateway/runtime。
 
 显式scope的Compact只读来源现按完整LF尾界扫描两次：第一遍验证身份及创建锚点，第二遍按原范围与原检查点精确覆盖筛正文，原字节hash必须一致。后台有任务先读同次结构事实，再按范围加载正文，0展示限制仍不截断。该实现不改变摘要writer/CAS；ID位置、选中正文及覆盖链仍需内存，完整有界化尚未完成。
 
-后续待实施：Compact已明确保留的历史须完整进入容量候选及实际发送，不能在宿主投影中再次用普通展示字符窗口悄悄删除。普通展示窗口与原范围规则保留；未知容量或完整请求过大必须由原容量合同处理。详细证据和待办见[容量审计](../tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。
+本地已接线并通过相关回归：Compact已明确保留的历史完整进入容量候选及实际发送，宿主通过内部preserve_complete投影，不再用普通展示字符窗口删除。普通展示窗口与原范围规则保留；未知容量或完整请求过大必须由原容量合同处理。详细证据和待办见[容量审计](../tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。
 
 本地文件队列的 `cli_chat/cli_gateway` 来源由提交入口写入，属于私有展示，不能把用于多用户身份的
 `metadata.channel`（owner provider）当成外部投递通道。前台流式、final、延迟 repair 与保存消息的

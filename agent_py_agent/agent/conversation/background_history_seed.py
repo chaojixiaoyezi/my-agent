@@ -122,8 +122,8 @@ class BackgroundHistoryProjection:
         object.__setattr__(self, "thread", deepcopy(self.thread))
 
 
-# LLM: 显式rows是唯一历史输入，范围与摘要来自同次准备；scope_applied只用于原Compact已筛选候选，不能重用全局cursor。
-# 函数用途: 从已读行生成后台原生历史种子，使用原筛选、预算和provider消息投影。
+# LLM: 显式rows按同次范围/覆盖裁决后必须完整投影给容量门；scope_applied只跳过重复范围裁决，不得再按展示窗口裁剪。
+# 函数用途: 从已读来源生成完整后台历史种子，沿原范围与provider投影，超容量交原Compact处理。
 def project_background_history_seed(agent, prepared: BackgroundHistoryProjection, rows, *, scope_applied: bool = False) -> ConversationHistorySeed:
     from .history_projection import conversation_history_rows
     from .native_history import provider_history_messages_from_rows
@@ -134,7 +134,7 @@ def project_background_history_seed(agent, prepared: BackgroundHistoryProjection
     scoped = canonical if scope_applied else history_scope_rows(prepared.scope, canonical)
     selected_rows = conversation_history_rows(
         agent, prepared.thread_id, "", [], rows=tuple(row for row in scoped if row.message_id not in covered),
-        token_budget=prepared.token_budget,
+        token_budget=prepared.token_budget, preserve_complete=True,
     )
     return ConversationHistorySeed(
         compact_summary=str(prepared.thread.get("summary") or ""),

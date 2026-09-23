@@ -1297,3 +1297,18 @@ Gateway沿原visible谓词；后台detached创建锚点/时间加精确lineage�
 本片非pytest守卫现已通过：Ruff、doc sync、import boundaries零发现、strict code-size hard=0（未改基线）、diff和clean-package。首次Ruff发现新增测试的两处导入格式，doc sync发现Gateway注释/模块文档遗漏，clean-package发现两份新文件未纳入版本管理；均已修正。主线独占4项测试接口失败仍开放，因此整体本地严格gate未通过，不推送；线上CI未作为验收来源。
 
 Sol high独立只读复核未发现可确认的新增缺陷：核对普通0/1窗口、延后读取错误、detached锚点与lineage、固定EOF/hash及legacy边界；未重复运行测试，不以审查替代上述测试。
+
+
+### Compact保留历史完整投影（本地已验，基线5c8183651）
+
+解决已裁决的未压历史/媒体后缀在宿主字符窗口中被再次丢弃、进而低估候选容量的问题。history_projection增加仅内部preserve_complete模式，必须显式传入来源；Gateway初次来源及恢复候选、后台scope/coverage后的来源及候选、child原Compact视图沿同一路径完整投影。普通非显式读取和展示窗口保留；原scope/role/current-request排除及终态工具折叠不变。没有配置开关，这是保留历史和计量一致性的修复，不增加摘要writer或权限。
+
+先核对本地Codex参考compact.rs的整体history替换和重算口径；其溢出时删最旧输入的策略不照搬，本项目仍要求先证明完整摘要覆盖。Sol high只读跟踪seed→tool loop→Anthropic/OpenAI Chat/Responses组包：未发现通用条数/字符再裁剪；协议转换仍会处理不支持块，不能宣称任意媒体完全等价。完整恢复器当前仅支持native协议，文本seed完整渲染不等于文本恢复链已验。
+
+新测试用超过原展示预算的完整行及最早媒体/工具配对验证三个宿主seed；两协议完整原宿主执行捕获最终post_json载荷。小材料完整发送；60万字符大来源完整进入捕获输入，原容量门触发压力，未知媒体在强制恢复拒绝，零业务HTTP、零摘要覆盖/CAS。初版4通过6失败源于误把超容量样本期望为可发送；原production容量门保持，修订为可发送/必须失败两组后16通过（6.48秒）。随后补充真实冻结输入上的三个候选投影，低字符窗不删保留行且纯投影不提交，六文件联合73 passed（15.88秒）；随后10文件相邻回归416 passed（62.41秒），重叠部分不累加。日志分别为 `/tmp/decision_retained_joint_20260923.log` 和 `/tmp/decision_retained_adjacent_20260923.log`。HTTP为内存替身，无真实供应商调用。
+
+本片只写history_projection、agent_thread、background_history_seed、gateway_compact_recovery与request_context，新增独立test_compact_retained_history；未碰主线runtime/claim和其独占后台runtime测试。上一片4个fake Store接口失败仍由主线集成，整体gate未通过；11/18与12.4开放状态不变。全链流式来源/覆盖、超大摘要分段及供应商缓存组合仍待验。
+
+建议下一步：联合验证保留候选与发送载荷，再沿原摘要分段器减少全量正文常驻。独立测试和审查可并行，writer/CAS和共享Gateway保持单owner。
+
+本片Ruff、doc sync、import boundaries零发现、strict code-size hard=0且原基线未改、diff和clean-package通过；初次Ruff的测试lambda/导入已改partial及格式，模块文档已同步。Sol high再次只读核对五个生产diff，未发现新增缺陷，确认角色/当前请求/Audit/任务范围过滤仍在完整保留前执行。新测试HTTP为post_json最终JSON捕获，不是socket或供应商验收。原4个主线fake签名失败仍保留，整体严格gate未通过；不推送部署，线上CI未作为验收来源。主线7.10发布窗口继续独占本机/.10 Gateway，本线未操作任何测试机进程。

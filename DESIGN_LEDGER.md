@@ -1,5 +1,7 @@
 # 设计台账
 
+12.4保留历史完整投影已本地实现：显式Compact来源及候选不再套普通字符窗口，三个宿主共用原容量门；超量/未知拒绝而不删原文放行。普通展示规则保留，详见[容量审计](docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。
+
 12.4固定来源范围筛选已本地实现、待主线接口集成：两遍同EOF原字节校验，先解析完整锚点再保留范围内未覆盖正文，后台operational和native共用谓词；ID位置与未压正文仍常驻，完整有界Compact尚未完成。见[容量审计](docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。
 
 超大canonical历史有界化已完成依赖审计，原消息固定尾界/字节页和幂等流式扫描底座已本地153项通过：须同时约束原消息页、scope筛选、checkpoint覆盖链与幂等扫描，不能仅改limit或截断来源。后续沿原游标与CAS设计连续范围证明，详情见[容量审计](docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。

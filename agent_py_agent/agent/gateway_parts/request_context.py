@@ -818,9 +818,8 @@ def _gateway_recent_task_workspaces(
     return tuple(rows)
 
 
-# LLM: Visible prose, canonical provider replay and artifact refs come from one bounded thread
-# row selection but remain three typed outputs; paths and native envelopes never enter prose.
-# 函数用途: 一次读取本轮共用的有界正文、原生消息前缀和近期产物引用。
+# LLM: Compact显式来源完整进入正文及原生回放，禁止先套展示窗口少算容量；非显式读取保留原窗口，产物引用独立。
+# 函数用途: 从本轮原来源投影正文和原生消息，再读取近期产物；已裁决保留行交由完整容量合同处理。
 def _gateway_conversation_refs(
     agent: SimpleAgent,
     thread_id: str,
@@ -841,6 +840,7 @@ def _gateway_conversation_refs(
         request_id,
         load_errors,
         rows=history_rows,
+        preserve_complete=isinstance(history_rows, (list, tuple)),
         token_budget=history_token_budget,
         work_scope=work_scope,
     )

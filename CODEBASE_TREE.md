@@ -589,6 +589,7 @@ agent_py_agent/
 |   |-- test_compact_tool_source.py      # 同一纯来源分区、完整身份与未知保留、快照隔离
 |   |-- test_compact_tool_partition.py   # 原生完整配对、跨轮同名调用、未知/媒体/孤儿保留
 |   |-- test_compact_native_ir_recovery.py # 真实读文件原生回执、恢复安全点、原CAS及候选HTTP对等
+|   |-- test_compact_retained_history.py # 三宿主完整保留行、媒体/工具回放和超容量不丢来源
 |   |-- test_compact_media_recovery.py  # 两协议媒体工具轮及溢出后原文保留、无摘要和无CAS
 |   |-- test_compact_transcript_media_partition.py # 文字前缀覆盖与媒体完整后缀、分段拒绝
 |   |-- test_request_content_capacity.py # 当前思考与跨模型内容边界、child保留原模型
@@ -923,7 +924,7 @@ docs/
 - `agent_py_agent/agent/gateway_parts/request_binding.py`：精确请求、task/run/attempt 和 claim 的持久桥接；保持原 T 锁、原子 JSON 更新与恢复身份。
 - `agent_py_agent/agent/gateway_parts/request_history.py`：正常、停止和异常共用 canonical 历史提交及原样 repair；按 request/part 去重，索引仅作投影。
 - `agent_py_agent/agent/gateway_parts/request_prompt.py`：纯渲染已有上下文和历史种子，不重新读盘或通过文字裁决权限。
-- `agent_py_agent/agent/conversation/history_projection.py`：完整行窗口供正文和原生回放共用，后台历史准备无需导入 Gateway 请求执行器。
+- `agent_py_agent/agent/conversation/history_projection.py`：正文与原生回放共用行选择；Compact已选来源完整投影，普通展示沿原窗口，后台无需导入Gateway执行器。
 - `agent_py_agent/agent/gateway_parts/stream_writer.py`：维护请求级缓冲与事件顺序，组合 `stream_events.py` 的公开投影及 `stream_approval.py` 的审批交互；不拥有 canonical 历史或执行权。
 - `agent_py_agent/agent/conversation/compact_carry.py`：三宿主共享完整工具归档替换和插话合并；真实循环溢出边界沿原mailbox释放，并携带完整原生IR及准确释放ID，不恢复权限或新建持久状态。
 - `agent_py_agent/agent/conversation/store_usage.py`：显式接收原用量目录和线程读取/原子更新能力，持有用量事件、累计增量及数字显示，不继承消息、任务或 Goal 存储。
@@ -1116,3 +1117,5 @@ docs/
 
 - `agent/backends/request_content.py`：原内容完整性检查，不读文件、不估算视觉token；主子选模与Compact共用。
 - `agent_py_agent/tests/test_compact_media_recovery.py`、`test_compact_transcript_media_partition.py`、`test_request_content_capacity.py`：媒体完整往返、准确覆盖和未知容量保留的隔离验收。
+
+- `agent_py_agent/tests/test_compact_retained_history.py`：保留历史首尾、原生媒体/工具配对、三宿主候选与两协议最终HTTP载荷，以及超容量拒绝不提交。

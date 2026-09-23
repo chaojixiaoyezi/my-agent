@@ -1,5 +1,7 @@
 # Gateway 维护状态
 
+12.4保留历史完整投影已本地实现：Gateway、后台和child的Compact来源/候选不再套普通字符窗，完整材料统一进入原容量门；普通展示保持原规则。73项联合及416项相邻回归通过（含重叠，不累加），整项12.4及11/18不变。见[容量审计](../../tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。
+
 Gateway Compact的原visible范围规则现编译成逐行selector，公共message_selection沿固定完整尾界两遍验证/筛选；后台通过原Store延后正文，共用同次任务范围。writer/CAS与执行身份不变。12文件326项通过，4项主线独占后台fake Store签名待集成，整体gate未通过；12.4仍开放，详见[容量审计](../../tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。
 
 决策模型第12.4媒体整合本地1419项联合与严格gate通过：普通媒体沿原模型发送，未知模态不自动切模型或提交强制Compact；摘要覆盖只到完整文字前缀，原生媒体后缀保留。原媒体M3验收不替代集成版证据；11/18和旧全仓八项失败状态不变，详见[容量审计](../../tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。

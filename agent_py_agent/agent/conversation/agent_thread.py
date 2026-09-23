@@ -440,7 +440,7 @@ def _render_agent_thread_context(
     return "\n".join(lines)
 
 
-# LLM: 普通准备与候选共用provider-neutral seed；终态工具折叠在冻结前沿原规则投影，不重新打开ConversationStore。
+# LLM: 普通Compact来源与候选完整保留于seed，不能再按展示字符窗少算容量；终态工具折叠仍沿原规则，不重读Store。
 # 函数用途: 把子代理已经结束的历史轮次整理成下一次运行可复用的强类型会话种子。
 def _agent_thread_history_seed(
     agent: object,
@@ -450,6 +450,7 @@ def _agent_thread_history_seed(
         agent,
         list(view.messages),
         view.history_token_budget,
+        preserve_complete=True,
     )
     messages: list[tuple[str, str]] = []
     for row in rows:
@@ -471,13 +472,14 @@ def _agent_thread_history_seed(
     )
 
 
-# LLM: Completed tail order and message bodies remain immutable until explicit Compact. Only
-# complete oldest rows may be dropped from this legacy rendering bound; no row is clipped.
-# 函数用途: 按总历史预算保留最近完整的子代理轮次，预算不足时整条淘汰旧消息。
+# LLM: 普通渲染可按旧字符窗删整行；Compact来源/候选传preserve_complete保留全部原序及metadata，容量由请求门负责。
+# 函数用途: 共用终态工具折叠投影，普通展示应用窗口，模型已选历史完整保留。
 def _bounded_agent_history(
     agent: object,
     rows: list[MessageLogEntry],
     trigger_tokens: int,
+    *,
+    preserve_complete: bool = False,
 ) -> tuple[MessageLogEntry, ...]:
     config = getattr(agent, "config", None)
     configured_total = max(
@@ -496,7 +498,7 @@ def _bounded_agent_history(
             if row.role == "assistant"
             else str(row.content or "")
         )
-        if selected and used + len(content) > total_limit:
+        if not preserve_complete and selected and used + len(content) > total_limit:
             break
         selected.append(
             MessageLogEntry(

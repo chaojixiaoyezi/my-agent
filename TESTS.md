@@ -1,5 +1,13 @@
 # 测试与发布验收
 
+## 第12.4项保留历史完整投影（2026-09-23，本地）
+
+六文件73 passed（15.88秒），日志 `/tmp/decision_retained_joint_20260923.log`：compact_retained_history、gateway_compact_recovery、subagent_compact_recovery、background_compact_recovery、gateway_child_compact_scope_application、compact_transcript_media_partition，均为test_前缀。新增16项中三宿主seed及同次真实冻结候选完整保留最早媒体/工具回合；两个原生协议small最终post_json载荷完整，large60万字符先完整捕获，后容量压力与未知模态明确失败、零业务HTTP和零CAS。HTTP为内存替身，未真实联网，不能当作供应商媒体容量验收。
+
+初版测试4 passed/6 failed为超容量样本误期望发送，产品容量门未更改；修订后的可发送/应拒绝分组先16通过，再纳入73项联合。原4项主线独占fake Store签名失败仍待集成，不以本片测试覆盖它们，不称整体严格gate通过。10文件相邻回归416 passed（62.41秒），日志 `/tmp/decision_retained_adjacent_20260923.log`；包含新16项复验，不与前73累加。Ruff、doc sync、import boundaries零发现、strict code-size hard=0且基线未改、diff通过；clean-package在新测试纳入版本管理后通过。仅本地候选，未推送部署；线上CI未作为验收来源。
+
+建议下一步：沿原摘要分段接有界来源，再做授权测试机真实组合验收；只读审查可并行，writer与共享Gateway保持单owner。
+
 ## 第12.4项固定来源范围筛选（2026-09-23，本地）
 
 12.4固定来源范围筛选已本地实现：完整尾界内两遍校验后只保留范围内未覆盖正文；后台先读任务事实，recent_limit=0也不提前全载正文。12文件326项通过，另4项主线独占测试的旧Store签名尚待集成适配，不能称整体gate通过；ID索引、未压正文和覆盖链仍非完全有界，11/18不变。

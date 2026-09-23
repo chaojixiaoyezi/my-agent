@@ -43,7 +43,7 @@ def prepare_gateway_compact_recovery(context, conversation, *, force=True):
     )
 
 
-# LLM: 只重投影宿主已拥有的会话注入位置、历史和同scope临时候选view；CAS前不能读取或发布新来源。
+# LLM: 候选保留行必须完整投影给容量门，不套展示窗口；只改已有注入位置和同scope视图，CAS前不发布。
 # 函数用途: 生成候选的完整下一请求和对应参数，所有更改都在副本，成功 CAS 前不安装。
 def _project_recovery_candidate(context, conversation, params, frozen, view):
     if not view.is_candidate:
@@ -51,7 +51,7 @@ def _project_recovery_candidate(context, conversation, params, frozen, view):
     work_scope = request_binding.gateway_message_work_scope(context.request)
     rows = history_projection.conversation_history_rows(
         context.agent, view.thread_id, context.request_id, [], rows=view.messages,
-        token_budget=view.history_token_budget, work_scope=work_scope,
+        token_budget=view.history_token_budget, work_scope=work_scope, preserve_complete=True,
     )
     root = str(getattr(getattr(context.agent, "home_paths", None), "owner_compact_dir", "") or "")
     if not root:
