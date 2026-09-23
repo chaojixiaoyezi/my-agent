@@ -179,7 +179,7 @@ class SubAgentRunnerResultService:
         self.manager.indexing.index_runner_result(result, output_payload)
         return len(memory_candidates)
 
-    # LLM: 此处装配原 RuntimeDB、save 与 exact attempt 的通知／追踪回调，提交模块不再接收 manager；
+    # LLM: 此处装配原 RuntimeDB、save 及只持四项必要依赖的通知器；提交和终态通知均不接收 manager；
     # 仅向准入传入原 RuntimeDB 与 canonical task；核对 exact attempt 后再落盘，提交模块按原顺序收口与通知。
     # 函数用途: 写回通过准入的子代理结果并启动原可靠交接；旧轮被拒，UNKNOWN 不自动重跑。
     def record_runner_result(
@@ -213,9 +213,14 @@ class SubAgentRunnerResultService:
             debug_trace.trace_runner_result,
             debug_trace.SubAgentRunnerTraceRequest(self.manager, task, result, params),
         )
+        store = self.manager.conversation_store
+        notifier = runner_completion_wake.RunnerCompletionNotifier(
+            tasks=store.tasks if store is not None else None,
+            wakes=store.wakes if store is not None else None,
+            load_task=self.manager.load, save_task=self.manager.save,
+        )
         notify_parent = partial(
-            runner_completion_wake.notify_parent_on_runner_result,
-            self.manager, task, result, output_payload, attempt_id=str(params.attempt_id or ""),
+            notifier.notify_result, task, result, output_payload, attempt_id=str(params.attempt_id or ""),
         )
 
         # LLM: 仅闭包绑定本轮原追踪与通知；提交模块在 WAL／RuntimeDB 结算后调用，不能提前执行。

@@ -758,7 +758,7 @@ def _cancel_user_controlled_agent_tree(
     }
 
 
-# LLM: A root child uses the canonical conversation completion wake, while a nested child releases
+# LLM: 终态通知器只绑定原 Store、load 和 save；A root child uses the canonical conversation completion wake, while a nested child releases
 # only its exact direct parent's wait marker and starts that durable parent through the ordinary
 # idempotent dispatcher. The periodic reconciler remains the crash fallback for delivery errors.
 # 函数用途: 把已取消节点交给正确的直属父级，让主代理或协调代理马上知道它已经停止。
@@ -777,13 +777,15 @@ def _deliver_stopped_agent_to_parent(
         from ..subagents.direct_parent_lifecycle import (
             reconcile_parent_wait_for_child,
         )
-        from ..subagents.runner_completion_wake import notify_parent_on_controlled_cancel
+        from ..subagents.runner_completion_wake import RunnerCompletionNotifier
 
-        notify_parent_on_controlled_cancel(
-            manager,
-            task,
-            parent_thread=parent_thread,
+        store = manager.conversation_store
+        notifier = RunnerCompletionNotifier(
+            tasks=store.tasks if store is not None else None,
+            wakes=store.wakes if store is not None else None,
+            load_task=manager.load, save_task=manager.save,
         )
+        notifier.notify_controlled_cancel(task, parent_thread=parent_thread)
         decision = reconcile_parent_wait_for_child(manager, run_id)
         start_result: dict[str, object] = {}
         if decision.should_resume:

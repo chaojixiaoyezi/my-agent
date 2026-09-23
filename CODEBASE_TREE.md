@@ -691,6 +691,7 @@ docs/
 - `agent_py_agent/agent/subagents/result_registered_artifacts.py`：从 exact run 的工具产物账本投影真实文件；自然最终回复与结构化收口共用，不扫描目录或搬运文件。
 - `agent_py_agent/agent/subagents/runner_display_projection.py`：仅从已裁决的状态码和失败类型计算 TUI 标签；不读取模型正文或改变生命周期。
 - `agent_py_agent/agent/subagents/runner_result_admission.py`：只接收 canonical task、结果参数和原 RuntimeDB，核对当前轮，拒绝迟到／冲突结果并写原诊断事件；不保存结果或通知父级。
+- `agent_py_agent/agent/subagents/runner_completion_wake.py`：终态通知器仅持任务关联、唤醒和 task 读写能力；类内实现完成／受控取消的原交接，阶段提醒与能力申请保持独立入口。
 - `agent_py_agent/agent/subagents/services/runner_result_commit.py`：在结果文件与 task 投影落盘后按原 WAL→运行账→父通知→已交付→清账顺序推进；显式接收原 RuntimeDB、保存与绑定交付回调；使用既有 runtime_closeout 恢复原语，不建立第二份权威。
 - `agent_py_agent/agent/subagents/services/runtime_closeout.py`：WAL、结算、事件分页还原和逐条恢复仍沿原事实；只接显式 repo/load/save/list/notify，通知 Protocol 保留本次结果与 exact attempt；唯一生产装配在既有 capability sweep。
 - `agent_py_agent/agent/subagents/runner_completion_payload.py`：从已有子代理结果构造有界完成正文和规范产物引用；根通知、递归父级和直属父交接共用，既不写状态也不投递通知。

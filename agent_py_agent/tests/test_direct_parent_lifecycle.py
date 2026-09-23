@@ -38,10 +38,21 @@ from agent_py_agent.agent.subagents.direct_parent_lifecycle import (
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.model_capabilities import CapabilityRequest
 from agent_py_agent.agent.subagents.runner_completion_wake import (
+    RunnerCompletionNotifier,
     _metadata,
     notify_parent_on_capability_request,
-    notify_parent_on_runner_result,
 )
+
+
+# LLM: 测试装配只传终态通知实际所需的四项能力；缺少的测试端口显式为 None，不添加生产兼容入口。
+# 函数用途: 将本文件现有真实 Store／最小替身绑定到通知器，保留原场景断言。
+def _completion_notifier(manager):
+    store = getattr(manager, "conversation_store", None)
+    return RunnerCompletionNotifier(
+        tasks=store.tasks if store is not None else None,
+        wakes=store.wakes if store is not None else None,
+        load_task=getattr(manager, "load", None), save_task=getattr(manager, "save", None),
+    )
 
 
 def test_simultaneous_child_results_release_one_parent_wait(tmp_path):
@@ -411,7 +422,7 @@ def test_nested_child_result_and_capability_do_not_wake_root_conversation(tmp_pa
         result_json="",
     )
 
-    notify_parent_on_runner_result(manager, child, result, {})
+    _completion_notifier(manager).notify_result(child, result, {})
     notify_parent_on_capability_request(
         manager,
         child,
@@ -477,12 +488,7 @@ def test_root_child_wake_carries_bounded_completion_message_and_exact_refs(tmp_p
         message="done",
     )
 
-    notify_parent_on_runner_result(
-        manager,
-        child,
-        result,
-        {"artifacts": [{"path": str(artifact), "kind": "report"}]},
-    )
+    _completion_notifier(manager).notify_result(child, result, {"artifacts": [{"path": str(artifact), "kind": "report"}]})
 
     signals = store.wakes.pending()
     assert len(signals) == 1
@@ -547,7 +553,7 @@ def test_root_child_wake_hides_legacy_system_default_output_ref(tmp_path) -> Non
         message="done",
     )
 
-    notify_parent_on_runner_result(manager, child, result, {})
+    _completion_notifier(manager).notify_result(child, result, {})
 
     signal = store.wakes.pending()[0]
     assert signal.metadata["declared_output_refs"] == []
