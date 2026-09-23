@@ -1842,3 +1842,10 @@ blocked，由 Gateway 停止该 request，避免重复副作用。
 未知模态/协议保持原模型。fake HTTP 联合302项通过，真实供应商主会话仍待验；细节见
 `docs/tasks/DECISION_MODEL_MAIN_MODEL_ADOPTION_HANDOFF.md`。
 集成时把跨 Gateway/core 的模型选择与 Compact 重载编排移至 `agent/` 应用层，并把 Tooling、Conversation、core 共用的线程本地 runner 身份移至 `runtime_context.py`。底层 Gateway/Tooling 不再反向导入 core；当前 import-boundary 守卫零发现，相关 10 文件 **268 passed、4 xfailed**。这项结构整理不改变原车道/发送 CAS 或已测真实请求结论。
+
+
+## 完整恢复的应用摘要视图
+
+`GatewayConversationContext.compact_context` 与 `AgentThreadTurnContext.compact_context` 保存本次原checkpoint解析的只读view，经RunParams交给历史、活动工具过滤及恢复器。scope显式传给原`load_conversation_compact_source`；thread与窄审计turn来源分别绑定真实宿主身份，不从最新局部摘要推断全线程历史。
+
+`PreparedCompactRecovery`在原render/select捕获一次完整准备，候选只替换既有注入位置和历史；其拥有本次Compact时原自动压缩不能抢先写代次。成功CAS后按返回的获胜thread补齐实际checkpoint/base/coverage，已计量payload不重渲染。后台也通过该入口，新增的`background_compact_recovery`仅持请求内候选，不拥有wake/Goal/投递。初次/手动及其它活动归档入口仍按容量审计迁移，不能将现有本地切片当成全部宿主完成。

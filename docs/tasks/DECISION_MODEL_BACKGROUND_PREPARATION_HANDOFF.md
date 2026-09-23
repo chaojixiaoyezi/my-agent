@@ -75,3 +75,18 @@ detached transcript 压缩推进共享游标，但创建后的全局摘要被原
 本片联合18文件420项通过，最终补充验证和严格guard见TESTS；没有将重复运行相加。作用域测试由独立审查代理实现，控制流旧夹具由另一代理适配，生产共享文件由各自认领者修改后主代理整合。
 
 末次补验102项及空工具线程绑定29项通过；严格本地guard通过，尺寸基线未变。空archive不跳过显式context的线程校验，防止首轮摘要错绑。独立源码复核未发现本片阻塞问题。
+
+
+## 后续完整恢复片交接（2026-09-23，本地）
+
+本片基于上一提交`7c73c5d96`，仍在决策模型独立分支内。解决后台粗估摘要先提交、真正恢复请求才发现仍过大的问题；Gateway/child先统一同次scope/view，后台再复用原完整请求恢复器。精确实现与开放边界见[容量审计末节](DECISION_MODEL_CONTEXT_AUDIT.md)，验证结果统一写TESTS。
+
+改动归属：root拥有公共恢复器、capture、原IR标记及后台投影/执行；Sol负责Gateway/child准备及独立HTTP/helper测试；Astra max负责active-turn完整projector和独立审查。没有修改另一任务的wake/WAL或TUI媒体实现，不推送、部署或重启。
+
+重点复查：CAS后只安装获胜snapshot的view；后台同片范围只冻结一次；活动归档保留未知四元身份和待发送指导；候选完整计量包含原输出预留。IR source是内部结构字段，provider不发送；整份原archive、审批和预算保持。恢复不再调用旧后台粗估wrapper，删除旁路后旧测试按真实render/select或明确defer合同适配。
+
+剩余风险：混合transcript+active两侧都很大时尚无联合候选；其它宿主无transcript活动归档仍待同入口迁移；初次/手动与超大canonical有界读取、真实缓存/安装版TUI均待验。旧全仓八项失败未借本片关闭。测试机1.9已获用户授权并只读核对可达，尚未部署。
+
+建议下一步：先将本片定向测试和严格检查收口，再迁移其它活动入口及联合候选；公共状态/CAS由主线串行整合，可并行独立协议测试或只读审查。部署前与插件主线同步目标、现有Gateway和回滚版本。
+
+本片最终验收：25文件657 passed（67.69秒），日志 `/tmp/compact_complete_recovery_final_20260923.log`；Ruff、doc sync、导入边界0发现、strict code-size hard=0（基线未改）、diff与clean-package通过。候选/发送一致性在实际provider builder和HTTP入口替身核对，未调用真实供应商；前轮全仓失败不抵扣。

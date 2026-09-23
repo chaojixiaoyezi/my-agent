@@ -574,7 +574,7 @@ def _run_gateway_turn_with_conversation_compact(
     raise ConversationPersistenceError("当前会话压缩后仍超过模型上下文上限")
 
 
-# LLM: 有宿主时只读加载原transcript来源，延迟其CAS到完整恢复准备；无来源先提交原active-turn Compact，不能在恢复IR准备后改归档。
+# LLM: 有宿主时只读加载同view的transcript来源，延迟CAS到完整恢复；无来源的active-turn Compact也必须用刷新后的同scope载体。
 # 未绑定宿主的内部调用保持原入口；每次overflow清前一恢复载体，不借持久结果重建展示选择。
 # 函数用途: 决定本次恢复先处理活动工具账，还是等待完整请求后压缩历史，仍共用原checkpoint及停止语义。
 def _gateway_compact_overflowing_turn(
@@ -621,6 +621,7 @@ def _gateway_compact_overflowing_turn(
         carried_archive_tool_calls,
         ActiveTurnArchiveCompactRequest(
             task_attributes=run_params.task_attributes,
+            compact_context=refreshed.compact_context,
             request_id=context.request_id,
             attempt_id=str(request.get("execution_attempt_id") or context.request_id),
             task_prompt=prompt,
@@ -762,7 +763,7 @@ def _require_gateway_conversation_ready(
         raise ConversationPersistenceError("会话记录当前不可用，请稍后重试")
 
 
-# LLM: 模型前统一 canonical task 与 RuntimeDB 身份；active Goal 跨前台/后台保持同一任务，不以请求 ID 另建树。
+# LLM: 模型前统一 canonical task、RuntimeDB 身份与已冻结Compact view；active Goal跨前后台保持同一任务。
 # 函数用途: 构造精确运行参数，已发布的恢复身份优先，未发布时沿已经校验的活动任务或 Goal 绑定。
 def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> RunParams:
     request = inputs.request
@@ -809,6 +810,7 @@ def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> RunParams:
             conversation,
             work_scope=request_binding.gateway_message_work_scope(request),
         ),
+        compact_context=conversation.compact_context,
         conversation_task_binding_callback=request_binding.GatewayTaskBindingWriter(
             context.request_path,
             context.request_id,

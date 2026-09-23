@@ -458,7 +458,7 @@ def _compact_subagent_overflowing_turn(
         )
 
 
-# LLM: active-turn archive 仍须原 child/store/CAS；二次加载只读回调更新后的展示，缺原 RunParams 时保留旧调用合同而不伪造已评估值。
+# LLM: active-turn archive仍须原child/store/CAS与刷新后的同scope view；二次加载只读回调更新后的展示。
 # 函数用途: 先提交活动工具轨迹再加载新历史；defer模式不在二次加载时重做摘要，已清除推荐不复活。
 def _compact_subagent_active_turn_archive(
     agent: object,
@@ -480,6 +480,7 @@ def _compact_subagent_active_turn_archive(
         request.carried_archive_tool_calls,
         ActiveTurnArchiveCompactRequest(
             task_attributes=request.task_attributes,
+            compact_context=refreshed.compact_context,
             request_id=str(request.conversation_turn_id or request.attempt_id or ""),
             attempt_id=str(request.attempt_id or ""),
             task_prompt=request.prompt,
@@ -547,7 +548,8 @@ def _open_subagent_transcript_sink(agent, task: object, current, attempt_id: str
         return None
 
 
-# LLM: Every compact generation reuses this exact task-local RunParams contract;
+# LLM: Every compact generation reuses this exact task-local RunParams contract and its applied
+# Compact scope; later tool coverage must not read a different checkpoint than the seed.
 # display callbacks are observers and cannot alter ids, permissions, or carry state. Rejections
 # share the outer attempt's list; approvals are never promoted into this carrier.
 # 函数用途: 组装一次子代理模型调用参数，让初轮和 Compact 后续轮保持同一身份与权限。
@@ -580,6 +582,7 @@ def _subagent_model_run_params(
         carried_active_turn_user_inputs=list(iteration.carried_active_turn_user_inputs),
         runtime_rejected_actions=iteration.runtime_rejected_actions,
         conversation_history_seed=iteration.current.history_seed,
+        compact_context=iteration.current.compact_context,
         on_chunk=iteration.transcript_sink,
     )
 

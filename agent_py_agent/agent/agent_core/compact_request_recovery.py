@@ -50,6 +50,7 @@ class PreparedCompactRecovery:
     host_state: object
     matches_request: Callable[[object], bool] = field(repr=False)
     project_candidate: Callable[[object, ToolLoopRequestInput, ConversationCompactView], CompactRecoveryMaterial] = field(repr=False)
+    project_active_candidate: Callable[..., CompactRecoveryMaterial] | None = field(default=None, repr=False)
     exclude_request_id: str = ""
     progress_callback: Callable[[dict[str, object]], object] | None = field(default=None, repr=False)
     interrupt_check: Callable[[], bool] | None = field(default=None, repr=False)
@@ -58,6 +59,12 @@ class PreparedCompactRecovery:
     prompt_input: PromptRenderInput | None = field(default=None, repr=False)
     render_params: object | None = field(default=None, repr=False)
     committed: bool = False
+    committed_thread: object | None = field(default=None, repr=False)
+
+    # LLM: 恢复宿主在原生成安全点独占本次Compact；普通工具轮和其它请求仍走原自动压缩。
+    # 函数用途: 防止完整输入捕获前的自动压缩先推进同一来源代次。
+    def owns_compact(self, agent: object, params: object) -> bool:
+        return agent is self.agent and not self.consumed and self.matches_request(params)
 
     # LLM: 自定义 builder 不支持冻结时显式拒绝完整投影；不先调用 build 再重采集，也不降级成粗估。
     # 函数用途: 在原 renderer 时点保留一次真实提示材料，仍使用原纯格式化器生成字节。
@@ -84,7 +91,7 @@ class PreparedCompactRecovery:
         if self.render_params is not params or self.prompt_input is None or render_prepared_prompt(self.prompt_input) != prompt:
             raise ConversationCompactError("完整恢复输入已变化", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
         source = self.source
-        if source is None or not source.messages:
+        if source is None or (not source.messages and self.project_active_candidate is None):
             raise ConversationCompactError("恢复来源不完整", code="COMPACT_SOURCE_CHANGED")
         try:
             frozen = capture_tool_loop_request(agent, params, self.prompt_input)
@@ -105,21 +112,28 @@ class PreparedCompactRecovery:
         # 函数用途: 将每个摘要候选映射为原请求材料，并沿唯一纯计量入口得到接受数字。
         def project(view: ConversationCompactView) -> ConversationCompactProjection:
             material = self.project_candidate(params, frozen, view)
+            if source.compact_context is not None:
+                expected = project_recovery_compact_context(source.compact_context, view)
+                if getattr(material.params, "compact_context", None) != expected:
+                    raise ConversationCompactError("恢复候选摘要视图不一致", code="COMPACT_REQUEST_PROJECTION_CHANGED")
             if material.projection.status != "ready":
                 raise ConversationCompactError("完整恢复投影未知", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
             tokens, _ = projected_model_context_components(material.projection)
             return ConversationCompactProjection(tokens, material)
 
         try:
-            result = prepare_conversation_context(
-                agent, agent.conversation_store, source.thread,
-                options=ConversationCompactOptions(
-                    current_prompt=params.user_prompt, exclude_request_id=self.exclude_request_id, force=True,
-                    source=source, request_projector=project, provider_surface=_summary_surface(frozen),
-                    progress_callback=self.progress_callback,
-                    interrupt_check=interrupted,
-                ),
-            )
+            if source.messages:
+                result = prepare_conversation_context(
+                    agent, agent.conversation_store, source.thread,
+                    options=ConversationCompactOptions(
+                        current_prompt=params.user_prompt, exclude_request_id=self.exclude_request_id, force=True,
+                        source=source, request_projector=project, provider_surface=_summary_surface(frozen),
+                        progress_callback=self.progress_callback,
+                        interrupt_check=interrupted,
+                    ),
+                )
+            else:
+                result = self._compact_active_source(params, frozen, interrupted)
         except (InterruptedError, ToolCancelled):
             raise
         except Exception as exc:
@@ -131,12 +145,53 @@ class PreparedCompactRecovery:
                 or material.host_state.compact_generation != result.thread.compact_generation
                 or agent.backend is not backend or agent.config is not config):
             raise ConversationCompactError("压缩后的请求材料不一致", code="COMPACT_REQUEST_PROJECTION_CHANGED")
+        material = _committed_recovery_material(agent, source, result, material)
         invalidate_provider_context_observation(material.params)
         self.host_state = material.host_state
         self.committed = True
+        self.committed_thread = result.thread
         if self.on_commit is not None:
             self.on_commit(result.thread.compact_generation)
         return material.params, material.projection.prompt
+
+    # LLM: carried来源复用原active-turn摘要与CAS；projector只替换冻结请求片段，不能伪造原生工具对。
+    # 函数用途: 没有已结束历史时，以完整请求计量压缩原归档交接，未知/过大不提交。
+    def _compact_active_source(self, params, frozen, interrupted):
+        from ..conversation.active_turn_compact import (
+            ActiveTurnArchiveCompactRequest,
+            compact_carried_active_turn_archive,
+        )
+
+        before_projection = self.project_candidate(params, frozen, ConversationCompactView(
+            self.source.thread.thread_id, self.source.thread.compact_generation,
+            self.source.compact_context.view.summary, (), self.source.compact_context.view.operation_evidence,
+            {}, self.source.policy.trigger_tokens, False,
+        )).projection
+        if before_projection.status != "ready":
+            raise ConversationCompactError("恢复输入未知", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
+        before, _ = projected_model_context_components(before_projection)
+
+        # LLM: 本回调只在原摘要后、写checkpoint前执行；预计代次来自真实binding，不使用原旧thread猜新代次。
+        # 函数用途: 把活动摘要和保留区交给宿主纯投影，交回真实完整计量及同次材料。
+        def project(summary, retained, generation):
+            material = self.project_active_candidate(params, frozen, summary, retained, generation)
+            expected = replace(self.source.compact_context, view=replace(
+                self.source.compact_context.view, summary=summary, generation=generation,
+            ))
+            if material.projection.status != "ready" or material.params.compact_context != expected:
+                raise ConversationCompactError("活动恢复候选未知", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
+            tokens, _ = projected_model_context_components(material.projection)
+            return ConversationCompactProjection(tokens, material)
+
+        return compact_carried_active_turn_archive(
+            self.agent, self.agent.conversation_store, self.source.thread, list(params.archive_tool_calls),
+            ActiveTurnArchiveCompactRequest(
+                task_attributes=params.task_attributes, request_id=params.request_id, attempt_id=params.attempt_id,
+                task_prompt=params.user_prompt, progress_callback=self.progress_callback, interrupt_check=interrupted,
+                compact_context=self.source.compact_context, request_projector=project,
+                projected_tokens_before=before, provider_surface=_summary_surface(frozen),
+            ),
+        )
 
 
 # LLM: 摘要继续沿原 provider surface，但只消费此次已准备的 system/schema/展示；不得重跑 Registry、推荐或 PromptBuilder。
@@ -149,19 +204,50 @@ def _summary_surface(prepared: ToolLoopRequestInput) -> ConversationCompactProvi
     )
 
 
-
-
 # LLM: 注入索引由宿主原组装顺序提供，不能从正文搜索；副本只替换历史/代次和该片段，其余准备与IR保持。
 # 函数用途: 将一个摘要候选投影成同次请求的参数和冻结输入，供各宿主统一计量后发送。
-def replace_recovery_history(params, frozen, *, history_seed, injection: str, injection_index: int):
+def replace_recovery_history(params, frozen, *, history_seed, injection: str, injection_index: int, compact_context):
     injections, fragments = list(params.runtime_injections), list(frozen.prompt_input.injection_fragments)
     if injection_index < 0 or injection_index >= len(injections) or injection_index >= len(fragments):
         raise ConversationCompactError("恢复注入位置未知", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
     injections[injection_index] = fragments[injection_index] = injection
-    candidate_params = replace(params, conversation_history_seed=history_seed,
+    candidate_params = replace(params, conversation_history_seed=history_seed, compact_context=compact_context,
                                runtime_injections=injections, live_archive_state=deepcopy(params.live_archive_state))
     candidate_params = replace(candidate_params, provider_history_messages=_native_provider_history_messages(candidate_params))
     prepared = replace(frozen, prompt_input=replace(frozen.prompt_input, injection_fragments=tuple(fragments)),
                        provider_history_messages=tuple(candidate_params.provider_history_messages),
                        conversation_state=conversation_runtime_state_section(candidate_params))
     return candidate_params, prepared
+
+
+# LLM: 候选仅替换摘要文本和证据，原base/coverage直到CAS后才能推进；不读Store或把未提交候选当权威。
+# 函数用途: 给各宿主的纯候选投影统一更新请求内摘要载体。
+def project_recovery_compact_context(context, view):
+    if context is None:
+        return None
+    if context.thread_id != view.thread_id:
+        raise ConversationCompactError("恢复摘要线程不一致", code="COMPACT_SOURCE_CHANGED")
+    if not view.is_candidate:
+        return context
+    return replace(context, view=replace(context.view, summary=view.summary,
+        operation_evidence=deepcopy(view.operation_evidence), generation=view.compact_generation))
+
+
+# LLM: 只读取获胜CAS返回的head，不load更新后的别人的thread；补齐真实checkpoint与coverage，不改变已验payload。
+# 函数用途: 提交成功后把候选参数和宿主状态中的临时base换成实际生效视图。
+def _committed_recovery_material(agent, source, result, material):
+    from ..conversation.compact_summary_view import resolve_compact_summary_view
+
+    context = source.compact_context
+    if context is None:
+        return material
+    view = resolve_compact_summary_view(agent, result.thread, context.scope)
+    candidate = getattr(material.params, "compact_context", None)
+    if (candidate is None or candidate.scope != context.scope or candidate.thread_id != context.thread_id
+            or candidate.view.summary != view.summary or candidate.view.operation_evidence != view.operation_evidence
+            or view.checkpoint_id != result.thread.compact_checkpoint_id):
+        raise ConversationCompactError("提交后摘要与恢复请求不一致", code="COMPACT_REQUEST_PROJECTION_CHANGED")
+    applied = replace(context, view=view)
+    params = replace(material.params, compact_context=applied)
+    host_state = replace(material.host_state, compact_context=applied)
+    return replace(material, params=params, host_state=host_state)

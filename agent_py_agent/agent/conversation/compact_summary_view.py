@@ -50,6 +50,18 @@ class AppliedCompactContext:
         object.__setattr__(self, "view", deepcopy(self.view))
 
 
+# LLM: 旧 v1 只有前缀终点，必须在完整 canonical 行内解析，不能在任务筛选后猜边界；新版本只认精确 ID。
+# 函数用途: 计算本次摘要实际替代的消息，缺失旧边界视为读取不完整而不是清空历史。
+def compact_covered_message_ids(view, rows) -> frozenset[str]:
+    covered = set(view.source_message_ids)
+    positions = {row.message_id: index for index, row in enumerate(rows)}
+    for end in view.legacy_message_end_ids:
+        if end not in positions:
+            raise OSError("legacy compact source boundary is missing from canonical history")
+        covered.update(row.message_id for row in rows[:positions[end] + 1])
+    return frozenset(covered)
+
+
 # LLM: v1/v2 的摘要属于全线程，previous 兼任摘要 base；v3 读取严格显式字段。
 # 函数用途: 将一条已提交 checkpoint 解释为其历史版本的摘要范围。
 def _checkpoint_scope(row: dict[str, object]) -> CompactScope:

@@ -291,7 +291,9 @@ def test_scoped_active_compact_hides_only_with_its_applied_summary(background_ca
                          if isinstance(item, CompactionSummary) and "TASK_A_TOOL_EVIDENCE" in item.text]
     if kind == "turn":
         assert before.seed is after.seed is None
-        assert after.status == "disabled" and after.compact_source is None
+        assert after.status == "disabled" and after.seed is None
+        assert after.compact_source is not None and after.compact_source.messages == ()
+        assert after.compact_source.compact_context == after.compact_context
         assert len(applied_summaries) == 1 and loop.provider_history_messages == []
         next_event = prepare_background_history_or_raise(
             case.agent, case.store, compacted.thread,
@@ -304,3 +306,27 @@ def test_scoped_active_compact_hides_only_with_its_applied_summary(background_ca
     else:
         assert after.seed is not None and after.seed.compact_summary == _live_summary()
         assert applied_summaries == []
+
+
+def test_background_overflow_refresh_retains_original_scope_bundle(background_case, monkeypatch):
+    from agent_py_agent.agent.conversation import background_history_seed as history_module
+
+    case = background_case
+    request = _request(case)
+    before = prepare_background_history_or_raise(case.agent, case.store, case.thread, request)
+    assert before.compact_context.scope.kind == "task"
+    assert before.context_bundle is not None
+    _append(case, "LATE_SIBLING_MATERIAL", now=250.0, task_id="task-B")
+
+    def reject_scope_reload(*args, **kwargs):
+        raise AssertionError("同片恢复不得重新裁决任务范围")
+
+    monkeypatch.setattr(history_module, "load_context_bundle", reject_scope_reload)
+    latest = case.store.threads.require(case.thread.thread_id)
+    after = refresh_background_history(case.agent, case.store, latest, before)
+    assert after.context_bundle is before.context_bundle
+    assert after.projection.scope == before.projection.scope
+    assert after.compact_context.scope == before.compact_context.scope
+    assert [row.message_id for row in after.compact_source.messages] == [
+        row.message_id for row in before.compact_source.messages
+    ]

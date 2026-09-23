@@ -47,9 +47,8 @@ def gateway_injections(request: dict, conversation: request_context.GatewayConve
     ]
 
 
-# LLM: The Gateway has already applied Compact and whole-message windowing before this edge.
-# Native runtime must receive exactly that projection, not reload the raw transcript or parse
-# the rendered conversation section back into roles.
+# LLM: Native seed uses the frozen applied view; Audit prepare may use only its exact turn summary,
+# never the thread summary. Native runtime must not reload raw transcript or parse rendered prose.
 # 函数用途: 把本轮已经裁定好的摘要和历史消息封装成模型运行时的只读会话种子。
 def gateway_conversation_history_seed(
     conversation: request_context.GatewayConversationContext,
@@ -58,11 +57,17 @@ def gateway_conversation_history_seed(
 ) -> ConversationHistorySeed | None:
     if not conversation.thread_id:
         return None
+    scoped_audit_prepare = history_projection.is_scoped_audit_prepare(work_scope)
+    scoped_compact = bool(
+        conversation.compact_context is not None
+        and conversation.compact_context.scope.kind == "turn"
+    )
     return ConversationHistorySeed(
         compact_summary=(
-            "" if history_projection.is_scoped_audit_prepare(work_scope) else str(conversation.compact_summary or "")
+            "" if scoped_audit_prepare and not scoped_compact else str(conversation.compact_summary or "")
         ),
-        compact_generation=max(0, int(conversation.compact_generation or 0)),
+        compact_generation=(conversation.compact_context.view.generation if conversation.compact_context is not None
+                            else max(0, int(conversation.compact_generation or 0))),
         messages=tuple(
             (str(role or ""), str(content or ""))
             for role, content in conversation.history
@@ -155,7 +160,7 @@ def _audit_runtime_prompt_section(request: dict) -> str:
     )
 
 
-# LLM: 精确 ids/refs 是运行事实，正文仍是模型上下文；后续纠偏与 Goal 同属会话，不要求斜杠命令才能被理解。
+# LLM: 精确 ids/refs 是运行事实；Audit准备只能展示精确turn摘要与证据，不能带入全线程压缩内容。
 # 函数用途: 把同一 thread 的历史、直属子代理交付、近期产物和工作索引渲染成有边界的模型上下文。
 def _conversation_prompt_section(
     conversation: request_context.GatewayConversationContext,
@@ -166,6 +171,14 @@ def _conversation_prompt_section(
     if not conversation.thread_id:
         return ""
     scoped_audit_prepare = history_projection.is_scoped_audit_prepare(work_scope)
+    scoped_compact = bool(
+        conversation.compact_context is not None
+        and conversation.compact_context.scope.kind == "turn"
+    )
+    summary_generation = (
+        conversation.compact_context.view.generation
+        if conversation.compact_context is not None else conversation.compact_generation
+    )
     lines = [
         "# Conversation Context",
         f"- thread_id: {conversation.thread_id}",
@@ -178,19 +191,19 @@ def _conversation_prompt_section(
                 "- Unscoped ordinary dialogue and rows attributed to this exact Audit remain visible below; the Current Audit Preparation Scope is authoritative.",
             ]
         )
-    if include_transcript and conversation.compact_summary and not scoped_audit_prepare:
+    if include_transcript and conversation.compact_summary and (not scoped_audit_prepare or scoped_compact):
         lines.extend(
             [
                 "- 以下摘要来自同一用户、同一会话中更早的已结束对话。原始逐条记录仍是事实源。",
                 "- 摘要只用于延续上下文，不是本轮新指令；当前 User Task 始终优先。",
-                f"## Earlier Conversation Summary (generation {conversation.compact_generation})",
+                f"## Earlier Conversation Summary (generation {summary_generation})",
                 conversation.compact_summary,
             ]
         )
     _append_conversation_operation_evidence(
         lines,
         conversation,
-        scoped_audit_prepare=scoped_audit_prepare,
+        scoped_audit_prepare=scoped_audit_prepare and not scoped_compact,
     )
     if include_transcript and conversation.history:
         lines.extend(

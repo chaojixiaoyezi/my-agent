@@ -6,12 +6,12 @@ from copy import deepcopy
 from dataclasses import replace
 
 from .compact_scope import THREAD_COMPACT_SCOPE, CompactScope
-from .compact_summary_view import AppliedCompactContext, resolve_compact_summary_view
+from .compact_summary_view import AppliedCompactContext
 
 
 # LLM: narrow 身份只能用宿主 conversation_turn_id；detached 必须保留原创建锚点和精确 lineage，不能猜最新任务。
 # 函数用途: 从一次读取的后台范围构造 Compact 范围，缺失必要身份直接拒绝准备。
-def background_compact_application(agent, thread, request, decision=None) -> AppliedCompactContext:
+def background_compact_scope(request, decision=None) -> CompactScope:
     from .background_context import is_narrow_audit_event
 
     if is_narrow_audit_event(request.reason):
@@ -26,19 +26,7 @@ def background_compact_application(agent, thread, request, decision=None) -> App
         )
     else:
         scope = THREAD_COMPACT_SCOPE
-    return AppliedCompactContext(thread.thread_id, scope, resolve_compact_summary_view(agent, thread, scope))
-
-
-# LLM: 旧 v1 只有前缀终点，必须在完整 canonical 行内解析，不能在任务筛选后猜边界；新版本只认精确 ID。
-# 函数用途: 计算本次摘要实际替代的消息，缺失旧边界视为读取不完整而不是清空历史。
-def compact_covered_message_ids(view, rows) -> frozenset[str]:
-    covered = set(view.source_message_ids)
-    positions = {row.message_id: index for index, row in enumerate(rows)}
-    for end in view.legacy_message_end_ids:
-        if end not in positions:
-            raise OSError("legacy compact source boundary is missing from canonical history")
-        covered.update(row.message_id for row in rows[:positions[end] + 1])
-    return frozenset(covered)
+    return scope
 
 
 # LLM: operational 展示与 native seed 必须采用同一摘要；只改准备副本，不重读任务或更新进度。
@@ -47,8 +35,9 @@ def apply_background_compact_context(prepared, application: AppliedCompactContex
     bundle = deepcopy(prepared.payload.bundle)
     thread = dict(bundle.get("thread") or {})
     thread.update(summary=application.view.summary, compact_generation=generation,
-                  compact_operation_evidence=deepcopy(application.view.operation_evidence),
-                  compact_checkpoint_id=application.view.checkpoint_id)
+                  compact_operation_evidence=deepcopy(application.view.operation_evidence))
+    # checkpoint内部编号在writer时才确定，不混入提交前已计量的模型正文。
+    thread.pop("compact_checkpoint_id", None)
     if application.scope.kind != "thread":
         thread.update(compacted_through_message_id="", compacted_through_byte_offset=0)
     bundle["thread"] = thread

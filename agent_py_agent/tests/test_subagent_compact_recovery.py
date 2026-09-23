@@ -7,7 +7,11 @@ from dataclasses import replace
 
 import pytest
 
-from agent_py_agent.agent.agent_core import provider_transient_auto_resume, runtime_mixin
+from agent_py_agent.agent.agent_core import (
+    _tool_loop_service,
+    provider_transient_auto_resume,
+    runtime_mixin,
+)
 from agent_py_agent.agent.agent_core.subagent import compact_recovery
 from agent_py_agent.agent.backends import http
 from agent_py_agent.agent.backends.base import ProviderRequestOptions
@@ -69,10 +73,11 @@ def _http(monkeypatch, *, backend: str, on_business):
 @pytest.mark.parametrize("tools", [False, True])
 def test_child_overflow_commits_full_candidate_and_sends_identical_wire(tmp_path, monkeypatch, backend, tools):
     agent, task = _child(tmp_path, backend=backend, tools=tools)
-    prepares, candidates, recovery_instances, sent_attempts, generations = [], [], [], [], []
+    prepares, candidates, recovery_instances, sent_attempts, generations, model_contexts = [], [], [], [], [], []
     original_prepare = runtime_mixin._prepare_runtime_context
     original_project = compact_recovery._project_subagent_candidate
     original_recovery = compact_recovery.prepare_subagent_compact_recovery
+    original_generate = _tool_loop_service.generate_model_response
 
     def prepare(*args, **kwargs):
         prepares.append(args)
@@ -89,9 +94,14 @@ def test_child_overflow_commits_full_candidate_and_sends_identical_wire(tmp_path
         recovery_instances.append(value)
         return value
 
+    def generate(request):
+        model_contexts.append(request.params.compact_context)
+        return original_generate(request)
+
     monkeypatch.setattr(runtime_mixin, "_prepare_runtime_context", prepare)
     monkeypatch.setattr(compact_recovery, "_project_subagent_candidate", project)
     monkeypatch.setattr(compact_recovery, "prepare_subagent_compact_recovery", recovery)
+    monkeypatch.setattr(_tool_loop_service, "generate_model_response", generate)
 
     def on_business(wire, number):
         sent_attempts.append(agent.subagents.load(task.id).runner_active_attempt_id)
@@ -125,6 +135,10 @@ def test_child_overflow_commits_full_candidate_and_sends_identical_wire(tmp_path
     assert len(recovery_instances) == 1 and recovery_instances[0].committed
     thread = agent.conversation_store.threads.require(task.agent_thread_id)
     assert thread.compact_generation == 1
+    assert len(model_contexts) == 2
+    assert model_contexts[0] is not None and model_contexts[0].view.checkpoint_id == ""
+    assert model_contexts[1] is not None and model_contexts[1].view.checkpoint_id == thread.compact_checkpoint_id
+    assert model_contexts[1].view.source_message_ids
     current = agent.subagents.load(task.id)
     assert current.id == task.id and current.runner_attempts == result.runner_attempts == 1
 

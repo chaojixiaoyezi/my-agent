@@ -1,5 +1,7 @@
 # Gateway 维护状态
 
+Gateway/child现通过原canonical loader绑定同一Compact scope/view，真实恢复参数在CAS后取得获胜checkpoint。后台也已接公共完整请求恢复及活动归档纯投影；定向验收见TESTS。初次/手动、其它宿主活动归档和混合超大来源仍待统一，12.4保持未完成，未部署。
+
 后台Compact已本地接同一scope/view的摘要注入和精确覆盖，局部来源/提交不改全线程摘要和游标；18文件联合420项通过，最终验证见TESTS。此片不证明完整恢复payload，Gateway/child准备同view、初次/手动和真实缓存仍待验；唯一TODO的12.4保持未完成。
 
 Compact检查点底座已写v3，区分提交前驱与摘要基础；局部CAS保留全线程摘要/游标，新工具恢复按完整执行身份处理。后台实际选择scope并将同一摘要view交给注入和隐藏的接线尚未完成，12.4仍不关闭。

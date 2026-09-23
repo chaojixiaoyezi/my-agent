@@ -62,13 +62,12 @@ def _delivery_dependencies(runtime):
 # LLM: 这些续片单测的假线程没有持久checkpoint；空视图明确表示无摘要覆盖，不从thread.summary猜来源。
 # 函数用途: 为只验证重试/归档接续的假运行提供当前只读scope视图，避免假线程冒充已提交摘要。
 def _stub_empty_compact_views(monkeypatch):
-    from agent_py_agent.agent.conversation import background_compact_context, compact_summary_view
+    from agent_py_agent.agent.conversation import compact_summary_view
     from agent_py_agent.agent.conversation.compact_summary_view import CompactSummaryView
 
     def empty_view(_agent, _thread, _scope):
         return CompactSummaryView()
 
-    monkeypatch.setattr(background_compact_context, "resolve_compact_summary_view", empty_view)
     monkeypatch.setattr(compact_summary_view, "resolve_compact_summary_view", empty_view)
 
 
@@ -93,6 +92,25 @@ def _stub_prepared_background_context(**values):
 # 函数用途: 让溢出重试测试继续核对每轮真实采用的准备代次。
 def _stub_render_background_context(prepared):
     return f"ctx-generation-{prepared.payload.bundle['thread']['compact_generation']}"
+
+
+# LLM: 控制流桩只在模拟的模型发送边界明确宣布提交；原CAS和真实wire另由专门HTTP测试覆盖。
+# 函数用途: 让旧后台重试/公平让出测试沿新的PreparedCompactRecovery宿主观察成功提交。
+def _stub_committing_background_recovery(monkeypatch, advance):
+    from agent_py_agent.agent.conversation import background_compact_recovery
+
+    prepared = []
+
+    def prepare(_agent, history, _context, **_kwargs):
+        recovery = SimpleNamespace(
+            committed=False,
+            committed_thread=advance(history.compact_source.thread),
+        )
+        prepared.append((history, recovery))
+        return recovery
+
+    monkeypatch.setattr(background_compact_recovery, "prepare_background_compact_recovery", prepare)
+    return prepared
 
 def test_background_run_params_carry_structured_conversation_task_identity() -> None:
     from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest, _run_params
@@ -119,17 +137,16 @@ def test_background_run_params_carry_structured_conversation_task_identity() -> 
     }
 
 
-def test_background_context_overflow_compacts_and_retries_same_slice(monkeypatch) -> None:
-    """后台主代理必须像前台/子代理一样在同一工作片 Compact 后续跑并携带已完成工具。"""
+def test_background_context_overflow_resumes_after_committed_recovery_same_slice(monkeypatch) -> None:
+    """后台主代理只在恢复宿主宣告提交后同片续跑，并携带已完成工具。"""
     from dataclasses import replace
 
     from agent_py_agent.agent.agent_core import runtime_mixin
     from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
-    from agent_py_agent.agent.conversation import compact as compact_module
     from agent_py_agent.agent.conversation import runtime as runtime_module
-    from agent_py_agent.agent.conversation.compact import ConversationCompactResult
     from agent_py_agent.agent.conversation.models import ConversationThread
     from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest
+    from agent_py_agent.agent.model_request_selection import _HOST
 
     original = ConversationThread(thread_id="thread-bg", canonical_user_id="owner-bg")
     compacted = replace(original, compact_generation=1, summary="已压缩旧历史")
@@ -152,6 +169,9 @@ def test_background_context_overflow_compacts_and_retries_same_slice(monkeypatch
                     archive_tool_calls=[{"tool": "read_file", "ok": True}],
                     active_turn_user_inputs=[],
                 )
+            recovery = _HOST.get()
+            assert recovery is not None and recovery.committed is False
+            recovery.committed = True
             return SimpleNamespace(runtime_status="ok", response="继续完成")
 
     class Store:
@@ -189,23 +209,11 @@ def test_background_context_overflow_compacts_and_retries_same_slice(monkeypatch
             task_attributes={CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True},
         )
 
-    compact_calls = []
-
-    def fake_prepare(_agent, _store, _thread, *, options):
-        compact_calls.append(options)
-        return ConversationCompactResult(
-            thread=compacted,
-            messages=(),
-            projected_tokens=1_000,
-            trigger_tokens=9_000,
-            compacted=True,
-        )
-
     monkeypatch.setattr(runtime_module, "_run_params", fake_run_params)
     _stub_empty_compact_views(monkeypatch)
+    recoveries = _stub_committing_background_recovery(monkeypatch, lambda _thread: compacted)
     monkeypatch.setattr(execution_module, "prepare_background_context", _stub_prepared_background_context)
     monkeypatch.setattr(execution_module, "render_background_context", _stub_render_background_context)
-    monkeypatch.setattr(compact_module, "prepare_conversation_context", fake_prepare)
     monkeypatch.setattr(
         runtime_mixin,
         "release_active_turn_inputs_for_compact",
@@ -224,9 +232,11 @@ def test_background_context_overflow_compacts_and_retries_same_slice(monkeypatch
 
     assert result.runtime_status == "ok"
     assert len(observed_params) == 2
-    assert compact_calls and compact_calls[0].force is True
+    assert len(recoveries) == 1 and recoveries[0][1].committed is True
     assert observed_params[0].inject == ["ctx-generation-0", "child completed"]
-    assert observed_params[1].inject == ["ctx-generation-1", "child completed"]
+    # 第二次 Agent.run 入口仍持有旧投影；真实renderer/select 内才安装提交后的候选请求。
+    assert observed_params[1].inject == ["ctx-generation-0", "child completed"]
+    assert recoveries[0][1].committed_thread.compact_generation == 1
     assert observed_params[1].carried_archive_tool_calls == [{"tool": "read_file", "ok": True}]
     assert observed_params[1].runtime_rejected_actions == [rejection]
     assert observed_params[1].runtime_rejected_actions is observed_params[0].runtime_rejected_actions
@@ -244,10 +254,12 @@ def test_background_compact_slice_yields_after_eight_progressful_generations(mon
     from agent_py_agent.agent.conversation import runtime as runtime_module
     from agent_py_agent.agent.conversation.models import ConversationThread
     from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest
+    from agent_py_agent.agent.model_request_selection import _HOST
     BackgroundCompactSliceYield = execution_module.BackgroundCompactSliceYield
 
     original = ConversationThread(thread_id="thread-yield", canonical_user_id="owner-yield")
     generations: list[int] = []
+    latest = [original]
 
     class Agent:
         # 历史种子需要读会话范围配置；生产 AgentConfig 一直有这些字段，桩必须同样提供。
@@ -258,6 +270,11 @@ def test_background_compact_slice_yields_after_eight_progressful_generations(mon
 
         def run(self, _prompt, *, params):
             del params
+            recovery = _HOST.get()
+            if recovery is not None:
+                assert recovery.committed is False
+                recovery.committed = True
+                latest[0] = recovery.committed_thread
             return SimpleNamespace(
                 runtime_status="context_overflow",
                 archive_tool_calls=[{"call_id": "call-live", "tool": "read_file", "ok": True}],
@@ -270,6 +287,7 @@ def test_background_compact_slice_yields_after_eight_progressful_generations(mon
             return {"thread": {"thread_id": thread_id}}, []
 
         def __init__(self, *args, **kwargs):
+            self.threads = _StoreDomain(load_report=lambda _thread_id: (latest[0], None))
             self.messages = _StoreDomain(recent_report=self._fake_messages_recent_report)
 
         def _fake_messages_recent_report(self, _thread_id, *, limit=0):
@@ -287,16 +305,16 @@ def test_background_compact_slice_yields_after_eight_progressful_generations(mon
     def fake_run_params(*_args, **_kwargs):
         return RunParams(task_attributes={CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True})
 
-    def advancing_compact(_runtime, current, **_kwargs):
+    def advancing_recovery(current):
         generation = current.compact_generation + 1
         generations.append(generation)
         return replace(current, compact_generation=generation)
 
     monkeypatch.setattr(runtime_module, "_run_params", fake_run_params)
     _stub_empty_compact_views(monkeypatch)
+    recoveries = _stub_committing_background_recovery(monkeypatch, advancing_recovery)
     monkeypatch.setattr(execution_module, "prepare_background_context", _stub_prepared_background_context)
     monkeypatch.setattr(execution_module, "render_background_context", _stub_render_background_context)
-    monkeypatch.setattr(execution_module, "_compact_background_main_thread", advancing_compact)
     monkeypatch.setattr(
         runtime_mixin,
         "release_active_turn_inputs_for_compact",
@@ -315,6 +333,7 @@ def test_background_compact_slice_yields_after_eight_progressful_generations(mon
         )
 
     assert generations == list(range(1, 9))
+    assert len(recoveries) == 8 and all(recovery.committed for _history, recovery in recoveries)
 
 
 def test_background_scheduler_treats_compact_slice_yield_as_clean_continuation(
@@ -380,24 +399,19 @@ def test_background_scheduler_treats_compact_slice_yield_as_clean_continuation(
     assert finished[0]["error"] is None
 
 
-def test_background_overflow_compacts_carried_active_turn_when_transcript_is_empty(
+def test_background_empty_transcript_carries_active_turn_into_committed_recovery(
     monkeypatch,
 ) -> None:
-    """真实溢出不能因 transcript 暂无可压消息而账外重启，必须推进本轮工具 Compact。"""
+    """transcript 为空时活动工具必须进入恢复宿主，提交后才允许继续。"""
 
     from dataclasses import replace
 
     from agent_py_agent.agent.agent_core import runtime_mixin
     from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
-    from agent_py_agent.agent.conversation import active_turn_compact as active_module
-    from agent_py_agent.agent.conversation import compact as compact_module
     from agent_py_agent.agent.conversation import runtime as runtime_module
-    from agent_py_agent.agent.conversation.active_turn_compact import (
-        ActiveTurnArchiveCompactResult,
-    )
-    from agent_py_agent.agent.conversation.compact import ConversationCompactResult
     from agent_py_agent.agent.conversation.models import ConversationThread
     from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest
+    from agent_py_agent.agent.model_request_selection import _HOST
 
     original = ConversationThread(thread_id="thread-active", canonical_user_id="owner-bg")
     compacted = replace(
@@ -423,6 +437,9 @@ def test_background_overflow_compacts_carried_active_turn_when_transcript_is_emp
                     archive_tool_calls=[{"call_id": "call-old", "tool": "read_file", "ok": True}],
                     active_turn_user_inputs=[],
                 )
+            recovery = _HOST.get()
+            assert recovery is not None and recovery.committed is False
+            recovery.committed = True
             return SimpleNamespace(runtime_status="ok", response="继续完成")
 
     class Store:
@@ -454,32 +471,11 @@ def test_background_overflow_compacts_carried_active_turn_when_transcript_is_emp
             task_attributes={CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True},
         )
 
-    def no_transcript_compact(_agent, _store, _thread, *, options):
-        assert options.force is True
-        return ConversationCompactResult(
-            thread=original,
-            messages=(),
-            projected_tokens=100_000,
-            trigger_tokens=90_000,
-            compacted=False,
-        )
-
-    active_calls: list[object] = []
-
-    def active_compact(*args, **_kwargs):
-        active_calls.append(args[-1])
-        return ActiveTurnArchiveCompactResult(
-            thread=compacted,
-            compacted=True,
-            source_call_ids=("call-old",),
-        )
-
     monkeypatch.setattr(runtime_module, "_run_params", fake_run_params)
     _stub_empty_compact_views(monkeypatch)
+    recoveries = _stub_committing_background_recovery(monkeypatch, lambda _thread: compacted)
     monkeypatch.setattr(execution_module, "prepare_background_context", _stub_prepared_background_context)
     monkeypatch.setattr(execution_module, "render_background_context", _stub_render_background_context)
-    monkeypatch.setattr(compact_module, "prepare_conversation_context", no_transcript_compact)
-    monkeypatch.setattr(active_module, "compact_carried_active_turn_archive", active_compact)
     monkeypatch.setattr(
         runtime_mixin,
         "release_active_turn_inputs_for_compact",
@@ -498,9 +494,9 @@ def test_background_overflow_compacts_carried_active_turn_when_transcript_is_emp
 
     assert result.runtime_status == "ok"
     assert len(observed_params) == 2
-    assert len(active_calls) == 1
-    assert getattr(active_calls[0], "task_prompt", "") == "继续原任务"
-    assert observed_params[1].inject == ["ctx-generation-1", "child completed"]
+    assert len(recoveries) == 1 and recoveries[0][1].committed is True
+    assert recoveries[0][0].compact_source.messages == ()
+    assert observed_params[1].inject == ["ctx-generation-0", "child completed"]
     assert observed_params[1].carried_archive_tool_calls == [
         {"call_id": "call-old", "tool": "read_file", "ok": True}
     ]

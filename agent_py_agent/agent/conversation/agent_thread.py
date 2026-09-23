@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 from ..settings.thread_model_selection import PendingSubagentModelAdvice
@@ -13,6 +13,8 @@ from ..tooling.operation_verification import public_operation_verification
 from ..turn_end import result_turn_end_reason
 from .compact_guard import CompactInterruptCheck, raise_if_compact_interrupted
 from .compact_projection import ConversationCompactSource, ConversationCompactView
+from .compact_scope import THREAD_COMPACT_SCOPE
+from .compact_summary_view import AppliedCompactContext, resolve_compact_summary_view
 from .models import ConversationHistorySeed, ConversationThread, MessageLogEntry
 from .native_history import (
     CANONICAL_NATIVE_MESSAGES_METADATA_KEY,
@@ -40,7 +42,7 @@ class AgentThreadTurnInput:
     turn_id: str = ""
 
 
-# LLM: 历史投影不授予提交权；compact_source仅供内部恢复保留原未压缩行，候选不重新读盘或写消息。
+# LLM: 历史投影不授予提交权；compact_context固定本轮所用摘要范围，source仅供内部恢复保留原未压缩行。
 # 类用途: 保存子代理准备好的历史，以及可选的待完整请求准备后压缩的来源。
 @dataclass(frozen=True)
 class AgentThreadTurnContext:
@@ -49,6 +51,7 @@ class AgentThreadTurnContext:
     compacted: bool
     injection: str
     history_seed: ConversationHistorySeed | None = None
+    compact_context: AppliedCompactContext | None = field(default=None, repr=False)
     compact_source: ConversationCompactSource | None = field(default=None, repr=False)
 
 
@@ -124,8 +127,8 @@ def ensure_subagent_thread(manager: object, task: object, *, model_advice: Pendi
 
 
 # LLM: The current child prompt is appended once before preflight and excluded by its typed request
-# id. 内部defer只读原来源；普通入口沿原摘要/提交，停止检查不能因延迟而跳过。
-# 函数用途: 按独立对话轮记录输入，保留真实 attempt 身份，以相同缓存面做可中断 Compact 并生成历史注入。
+# id. 首次读source时冻结thread view；内部defer只读，普通入口沿同源摘要/提交，停止检查不能因延迟而跳过。
+# 函数用途: 按独立对话轮记录输入，保留真实 attempt 身份，以同一摘要范围生成历史种子并可中断压缩。
 def prepare_subagent_thread_turn(
     agent: object,
     task: object,
@@ -167,13 +170,16 @@ def prepare_subagent_thread_turn(
     thread, load_error = store.threads.load_report(thread.thread_id)
     if load_error is not None or thread is None:
         raise OSError("subagent conversation thread could not be reloaded")
+    source = load_conversation_compact_source(
+        agent, store, thread, exclude_request_id=selected_attempt, scope=THREAD_COMPACT_SCOPE,
+    )
     if defer_compact:
         raise_if_compact_interrupted(interrupt_check)
-        source = load_conversation_compact_source(agent, store, thread, exclude_request_id=selected_attempt)
         return project_agent_thread_context(agent, ConversationCompactView(
-            thread.thread_id, thread.compact_generation, thread.summary, source.messages,
-            thread.compact_operation_evidence, source.recent_operation_evidence, source.policy.trigger_tokens, False,
-        ), source=source)
+            thread.thread_id, thread.compact_generation, source.compact_context.view.summary, source.messages,
+            source.compact_context.view.operation_evidence, source.recent_operation_evidence,
+            source.policy.trigger_tokens, False,
+        ), source=source, compact_context=source.compact_context)
     compact = prepare_conversation_context(
         agent,
         store,
@@ -181,26 +187,37 @@ def prepare_subagent_thread_turn(
         options=ConversationCompactOptions(
             current_prompt=str(prompt or ""),
             exclude_request_id=selected_attempt,
+            source=source,
             force=bool(force),
             progress_callback=progress_callback,
             interrupt_check=interrupt_check,
             model_surface=model_surface,
         ),
     )
+    applied = source.compact_context
+    if compact.compacted:
+        applied = AppliedCompactContext(
+            compact.thread.thread_id, THREAD_COMPACT_SCOPE,
+            resolve_compact_summary_view(agent, compact.thread, THREAD_COMPACT_SCOPE),
+        )
     return project_agent_thread_context(agent, ConversationCompactView(
-        compact.thread.thread_id, compact.thread.compact_generation, compact.thread.summary, compact.messages,
-        compact.thread.compact_operation_evidence, dict(compact.recent_operation_evidence or {}),
+        compact.thread.thread_id, compact.thread.compact_generation, applied.view.summary, compact.messages,
+        applied.view.operation_evidence, dict(compact.recent_operation_evidence or {}),
         compact.trigger_tokens, compact.compacted,
-    ))
+    ), compact_context=applied)
 
 
-# LLM: 仅渲染显式历史视图，不写消息、不读任务/Goal，也不重跑整个runner准备；候选生成代次不是提交证明。
+# LLM: 仅渲染显式历史视图并原样传递同次摘要范围；seed展示代次取view，宿主CAS代次仍取thread。
 # 函数用途: 普通准备和完整恢复候选共用同一子代理历史注入与原生历史种子。
-def project_agent_thread_context(agent, view: ConversationCompactView, *, source=None) -> AgentThreadTurnContext:
+def project_agent_thread_context(agent, view: ConversationCompactView, *, source=None, compact_context=None) -> AgentThreadTurnContext:
+    applied_view = (
+        replace(view, compact_generation=compact_context.view.generation)
+        if compact_context is not None else view
+    )
     return AgentThreadTurnContext(
         thread_id=view.thread_id, compact_generation=view.compact_generation, compacted=view.is_candidate,
-        injection=_render_agent_thread_context(agent, view, include_transcript=False),
-        history_seed=_agent_thread_history_seed(agent, view), compact_source=source,
+        injection=_render_agent_thread_context(agent, applied_view, include_transcript=False),
+        history_seed=_agent_thread_history_seed(agent, applied_view), compact_context=compact_context, compact_source=source,
     )
 
 

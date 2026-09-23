@@ -10,6 +10,7 @@ from pathlib import Path
 from .agent_core.compact_request_recovery import (
     CompactRecoveryMaterial,
     PreparedCompactRecovery,
+    project_recovery_compact_context,
     replace_recovery_history,
 )
 from .agent_core.tool_request_projection import project_tool_loop_request
@@ -39,7 +40,7 @@ def prepare_gateway_compact_recovery(context, conversation):
     )
 
 
-# LLM: 只重投影宿主已拥有的会话注入位置和历史；Goal/记忆/工作区等值固定，正文不得用于识别来源或授权。
+# LLM: 只重投影宿主已拥有的会话注入位置、历史和同scope临时候选view；CAS前不能读取或发布新来源。
 # 函数用途: 生成候选的完整下一请求和对应参数，所有更改都在副本，成功 CAS 前不安装。
 def _project_recovery_candidate(context, conversation, params, frozen, view):
     if not view.is_candidate:
@@ -52,17 +53,23 @@ def _project_recovery_candidate(context, conversation, params, frozen, view):
     root = str(getattr(getattr(context.agent, "home_paths", None), "owner_compact_dir", "") or "")
     if not root:
         raise ConversationCompactError("缺少原 Compact 证据地址", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
+    candidate_context = project_recovery_compact_context(conversation.compact_context, view)
     candidate = replace(
         conversation, compact_summary=view.summary, compact_generation=view.compact_generation,
         compact_operation_evidence=deepcopy(view.operation_evidence),
         recent_operation_evidence=deepcopy(view.recent_operation_evidence),
-        compact_operation_evidence_ref=str(Path(root) / "conversations" / f"{view.thread_id}.jsonl"),
+        compact_operation_evidence_ref=(
+            str(Path(root) / "conversations" / f"{view.thread_id}.jsonl")
+            if candidate_context is None or candidate_context.scope.kind == "thread" else ""
+        ),
         history=tuple((row.role, row.content) for row in rows),
-        canonical_history_messages=provider_history_messages_from_rows(rows), compact_source=None,
+        canonical_history_messages=provider_history_messages_from_rows(rows),
+        compact_context=candidate_context, compact_source=None,
     )
     seed = request_prompt.gateway_conversation_history_seed(candidate, work_scope=work_scope)
     candidate_params, prepared = replace_recovery_history(
         params, frozen, history_seed=seed, injection_index=len(context.request.get("inject", [])),
         injection=request_prompt._conversation_prompt_section(candidate, work_scope=work_scope, include_transcript=False),
+        compact_context=candidate_context,
     )
     return CompactRecoveryMaterial(candidate, candidate_params, prepared, project_tool_loop_request(prepared))

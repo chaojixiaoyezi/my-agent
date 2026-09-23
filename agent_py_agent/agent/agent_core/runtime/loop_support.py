@@ -912,7 +912,8 @@ def _native_ir_with_applied_summary(
     if context is None or has_history_seed or not context.view.summary.strip():
         return history
     summary = CompactionSummary(
-        f"# Earlier Conversation Summary (generation {context.view.generation})\n{context.view.summary}"
+        f"# Earlier Conversation Summary (generation {context.view.generation})\n{context.view.summary}",
+        source="applied_compact",
     )
     insert_at = 1 if history and isinstance(history[0], UserTurn) else 0
     history.insert(insert_at, summary)
@@ -965,9 +966,8 @@ def _native_provider_history_messages(
     return [*prefix, *adapter.to_provider_messages(legacy)]
 
 
-# LLM: The media-owning native initializer stays unchanged. A narrow seed with an applied view
-# must expose that summary in native IR or text tool context before covered calls are hidden.
-# 函数用途: 按工具协议把窄历史种子的真实适用摘要放进原生IR或文本工具上下文。
+# LLM: 原媒体初始化器仍拥有用户IR；以结构类型定位交接并标记source，已覆盖工具隐藏前必须注入同view摘要。
+# 函数用途: 为原归档交接标记可替换位置，并把窄历史种子的适用摘要放进原生IR或文本上下文。
 def _reconstructed_native_initial_ir(
     agent: object,
     seed: RuntimeToolLoopSeed,
@@ -996,6 +996,13 @@ def _reconstructed_native_initial_ir(
         carried_handoff=handoff,
         carried_user_inputs=carried_user_inputs,
     )
+    if handoff:
+        from ...backends.tool_ir import CompactionSummary, UserTurn
+
+        index = 1 if history and isinstance(history[0], UserTurn) else 0
+        if not isinstance(history[index], CompactionSummary):
+            raise TypeError("恢复工具交接位置与原IR构造不一致")
+        history[index] = replace(history[index], source="carried_tool_handoff")
     return _native_ir_with_applied_summary(
         history,
         compact_context=seed.params.compact_context,

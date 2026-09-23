@@ -34,6 +34,8 @@ class UserTurn:
     text: str
 
 
+# LLM: 摘要仍非权威；source由原构造点赋值，候选只能按结构化来源替换，不解析正文，provider不发送该字段。
+# 类用途: 保存模型可见的摘要与内部来源，供完整恢复保留媒体、用户插话和其它IR片段。
 @dataclass(frozen=True)
 class CompactionSummary:
     """当前运行 turn 的非权威压缩摘要。
@@ -44,6 +46,7 @@ class CompactionSummary:
     """
 
     text: str
+    source: str = ""
 
 
 # LLM: RuntimeFactsTurn is a chronological provider-visible input item. Unlike UserTurn it is

@@ -1159,3 +1159,19 @@ transcript source携同context，预检验证原链和来源身份；摘要候�
 本片不关闭12.4：后台仍需接共享PreparedCompactRecovery的完整候选与首个实际payload；narrow已知空历史及active IR来源须接同一容量合同。Gateway/child原种子也须在其准备边界绑定同view，消除旧摘要/最新覆盖竞态；不能保留双轨作为最终实现。CAS后候选context要按获胜提交更新，不能继承候选旧base或重读别人更晚的head。初次/手动入口、超大历史有界读取、真实缓存均另验。
 
 建议下一步：直接接公共完整恢复器并以实际HTTP材料核对，不继续扩新状态；Gateway/child准备可独立核对，公共捕获与CAS接缝串行。测试机1.9已只读确认可达，尚未部署；不能将本地测试当安装版验收。
+
+
+#### 三宿主同视图准备与后台完整恢复（本地接线）
+
+解决问题：候选计量必须覆盖恢复后的实际请求，后台重试不能重新扩大任务范围，候选提交后也不能继续携带旧摘要基础。
+Gateway、child及后台共享 `load_conversation_compact_source(scope=...)`：从canonical行按同次scope裁决、解析旧覆盖并产生唯一AppliedCompactContext；选择器必须返回原对象的有序子序列。Gateway窄审计以真实request ID和task ID绑定turn范围。后台同工作片冻结初次TaskScopeDecision和上下文bundle，溢出仅刷新原scope的检查点与原文。完整历史读取目前仍无界，未解决已记录的超大历史内存失败。
+
+后台在真实overflow后安装公共PreparedCompactRecovery，原runtime准备一次，然后纯替换第0上下文注入、seed、摘要及代次。普通/独立任务先压transcript；已知空transcript可沿原active-turn archive摘要器、writer及CAS压carried工具交接。窄审计仍seed=None，不读取旧聊天；空source与不可读来源明确不同。候选使用原完整模型计量和已知输出预留，未知、过大或取消不取得覆盖权。
+
+原IR的CompactionSummary增加内部source，仅原构造点标记carried_tool_handoff/applied_compact，不解析文本。纯投影保持用户媒体、插话和运行事实顺序，只替换已知交接位置；原完整归档、审批、拒绝记录和预算不裁剪。活动来源缺完整四元身份的旧记录保留可见，不能因无法覆盖而丢弃。混入真实ToolCall/ToolResult的未知组合拒绝候选，不能造工具对假装恢复。
+
+恢复宿主在该次生成安全点拥有Compact，原自动压缩不能抢先推进来源代次；普通工具轮仍沿原行为。CAS后使用获胜result.thread解析真实checkpoint/base/coverage并回填参数，不读取别人的更晚head，也不重新render已测请求。后台模型输入不再包含writer时才产生的内部checkpoint ID，避免提交前后字节漂移。同片首次业务不占压缩配额，之后最多八次真实提交才公平让出，未提交的恢复不能被当作健康进展。
+
+状态：本地实现和定向验收中，准确结果见TESTS；未部署或使用真实供应商。12.4继续未完成：初次/手动入口、真实native IR组合、transcript与active同时很大时的联合候选仍待处理；Gateway/child无transcript的旧活动归档入口尚需迁移至完整请求计量。12.5—12.7和旧全仓八项失败仍独立保留。
+
+建议下一步：先完成本片实际HTTP和取消/CAS组合验证，串行收口公共恢复器；独立测试可并行。之后迁移其它活动归档入口和初次/手动，最后安排测试机1.9隔离真实验收，不重启既有Gateway。

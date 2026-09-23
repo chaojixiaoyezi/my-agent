@@ -112,6 +112,15 @@ def test_recovered_tool_round_keeps_committed_history_and_boundary_order(tmp_pat
     assert restored_first["injections"] != original["injections"]
     assert restored_first["provider_history"] == restored_second["provider_history"]
     assert restored_first["provider_history"] != original["provider_history"]
+    assert original["params"].compact_context is not None
+    assert original["params"].compact_context.view.checkpoint_id == ""
+    committed_context = restored_first["params"].compact_context
+    assert committed_context is not None
+    assert committed_context == restored_second["params"].compact_context
+    assert committed_context.view.checkpoint_id == agent.conversation_store.threads.require(
+        fixture.thread_id,
+    ).compact_checkpoint_id
+    assert committed_context.view.source_message_ids
     assert "generation 1" in json.dumps(restored_second["provider_history"], ensure_ascii=False)
     assert any(
         block.get("type") == "tool_result"

@@ -1,13 +1,13 @@
-# LLM: This module bridges a provider-overflowing carried active turn into the existing canonical
-# Conversation Compact ledger. Full archives remain runtime authority; committed checkpoint call ids
-# only decide which old records are replaced by the model-facing summary on later process slices.
-# 模块用途: 将跨进程续跑的长工具历史正式记成 Compact，并在恢复时只向模型展示摘要与近期调用。
+# LLM: 跨片工具压缩仍只写原 checkpoint/CAS；完整请求 projector 由宿主纯替换冻结材料，
+# 容量未知或越界不得提交，也不能重建运行准备。完整归档始终是运行事实源。
+# 模块用途: 将跨进程工具历史压成正式摘要，提交前验证宿主实际请求，并原样交回获选材料。
 
 from __future__ import annotations
 
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from ..memory_archive import estimate_tokens
 from .authority import (
@@ -15,12 +15,17 @@ from .authority import (
     CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR,
 )
 from .compact_checkpoint import committed_live_tool_compact_source_refs
-from .compact_guard import CompactInterruptCheck, raise_if_compact_interrupted
+from .compact_guard import (
+    CompactInterruptCheck,
+    ConversationCompactError,
+    raise_if_compact_interrupted,
+)
 from .compact_progress import (
     COMPACT_AUTHORITY_CONVERSATION,
     COMPACT_SOURCE_ACTIVE_TURN,
     CONVERSATION_COMPACT_PROGRESS_SCHEMA,
 )
+from .compact_projection import ConversationCompactProjection
 from .compact_summary_view import AppliedCompactContext
 from .compact_tool_identity import compact_tool_ref_key, compact_tool_refs
 from .live_tool_compact import (
@@ -29,9 +34,12 @@ from .live_tool_compact import (
 )
 from .models import ConversationThread
 
+if TYPE_CHECKING:
+    from .compact_provider_surface import ConversationCompactProviderSurface
 
-# LLM: The result separates canonical generation movement from the unchanged full archive records.
-# 类用途: 返回本次是否提交、替代与保留了哪些调用，以及提交后的唯一 thread。
+
+# LLM: 结果区分持久提交和完整归档；request_projection 必须是已量且获选的原对象，不能重新准备。
+# 类用途: 返回原 CAS 的线程、替代边界和真实容量，并保留随后发送应采用的同一候选材料。
 @dataclass(frozen=True)
 class ActiveTurnArchiveCompactResult:
     thread: ConversationThread
@@ -40,11 +48,12 @@ class ActiveTurnArchiveCompactResult:
     retained_call_ids: tuple[str, ...] = ()
     projected_tokens_before: int = 0
     projected_tokens_after: int = 0
+    request_projection: ConversationCompactProjection | None = None
 
 
-# LLM: The caller supplies one immutable overflow identity and optional applied scope/view; the
-# request cannot change task status or enlarge the selected Compact coverage.
-# 类用途: 打包跨工作片压缩所需身份、已应用摘要视图、进度回调和停止检查。
+# LLM: projector 只按摘要、保留记录、预计提交代次替换原材料；provider_surface 沿原准备复用，
+# 不授予重新准备、状态变更或扩范围权限。未接 projector 的宿主保留原局部计量行为。
+# 类用途: 冻结本次身份、摘要视图和完整请求投影入口，供跨片压缩在同次准备内计量与提交。
 @dataclass(frozen=True)
 class ActiveTurnArchiveCompactRequest:
     task_attributes: object
@@ -54,6 +63,11 @@ class ActiveTurnArchiveCompactRequest:
     progress_callback: Callable[[dict[str, object]], object] | None = None
     interrupt_check: CompactInterruptCheck | None = None
     compact_context: AppliedCompactContext | None = None
+    request_projector: Callable[
+        [str, tuple[dict[str, object], ...], int], ConversationCompactProjection
+    ] | None = None
+    projected_tokens_before: int | None = None
+    provider_surface: ConversationCompactProviderSurface | None = None
 
 
 # LLM: This candidate freezes one exact checkpoint boundary before the summary model call. The
@@ -105,10 +119,9 @@ def model_visible_active_turn_tool_calls(
     return [item for item in values if compact_tool_ref_key(item) not in hidden]
 
 
-# LLM: This is the recovery counterpart of the in-process native IR compactor. It runs only after
-# a real context_overflow and a transcript Compact no-op, then reuses the same checkpoint/CAS ledger
-# instead of treating a fresh Agent.run as an implicit uncounted compaction.
-# 函数用途: 把已溢出的跨工作片工具历史压成正式摘要，保留完整账本与近期调用后推进一次 Compact。
+# LLM: 跨片恢复复用 native Compact 的原 checkpoint/CAS；显式 projector 负责实际完整请求，
+# 本入口只提供精确替换边界，未知身份不能参与覆盖，也不能重新运行 Agent.run 或补历史种子。
+# 函数用途: 把已溢出的跨工作片工具历史压成正式摘要，完整候选通过计量后才推进唯一 Compact。
 def compact_carried_active_turn_archive(
     agent: object,
     store: object,
@@ -124,8 +137,7 @@ def compact_carried_active_turn_archive(
         records,
         compact_context=request.compact_context,
     )
-    indexed = [(item, _record_call_id(item)) for item in visible]
-    indexed = [(item, call_id) for item, call_id in indexed if call_id]
+    indexed = [(item, _record_call_id(item)) for item in visible if compact_tool_ref_key(item) is not None]
     if not indexed:
         return ActiveTurnArchiveCompactResult(thread=thread)
 
@@ -147,18 +159,21 @@ def compact_carried_active_turn_archive(
         return ActiveTurnArchiveCompactResult(thread=thread)
     if binding.thread.thread_id != thread.thread_id or binding.store is not store:
         raise OSError("active-turn compact binding does not match the caller thread")
-    plan = _build_active_turn_compact_plan(binding, policy, visible, indexed)
+    plan = _build_active_turn_compact_plan(
+        binding, policy, visible, indexed, projected_tokens_before=request.projected_tokens_before,
+    )
     return _execute_active_turn_compact(agent, plan, request)
 
 
-# LLM: Boundaries are selected from whole records before any model call. The newest complete tail is
-# retained and at least one overflowing call remains in the replacement source.
-# 函数用途: 按统一近期 token 预算冻结一代 active-turn Compact 的移除区和保留区。
+# LLM: 来源边界在摘要调用前冻结，未知身份保留原顺序且不授覆盖权；宿主前计量坏值不能退回局部估算。
+# 函数用途: 按统一近期预算冻结准确来源与全部未覆盖行，记录宿主已准备请求的真实前计量。
 def _build_active_turn_compact_plan(
     binding: object,
     policy: object,
     visible: list[dict[str, object]],
     indexed: list[tuple[dict[str, object], str]],
+    *,
+    projected_tokens_before: int | None = None,
 ) -> _ActiveTurnArchiveCompactPlan:
     retained = _recent_records_within_budget(indexed, policy.recent_tail_tokens)
     retained_ids = tuple(call_id for _item, call_id in retained)
@@ -174,9 +189,15 @@ def _build_active_turn_compact_plan(
         retained_ids = tuple(call_id for _item, call_id in retained)
         source_refs = compact_tool_refs([indexed[0][0]])
         retained_refs = compact_tool_refs([item for item, _call_id in retained])
+    source_set = {compact_tool_ref_key(ref) for ref in source_refs}
+    retained_records = tuple(item for item in visible if compact_tool_ref_key(item) not in source_set)
     thread = binding.thread
     generation = max(0, int(thread.compact_generation or 0)) + 1
-    before_tokens = estimate_tokens({"active_turn_tool_calls": visible})
+    before_tokens = projected_tokens_before
+    if before_tokens is None:
+        before_tokens = estimate_tokens({"active_turn_tool_calls": visible})
+    elif type(before_tokens) is not int or before_tokens < 0:
+        raise ConversationCompactError("完整恢复请求前计量不可用", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
     return _ActiveTurnArchiveCompactPlan(
         thread=thread,
         binding=binding,
@@ -184,7 +205,7 @@ def _build_active_turn_compact_plan(
         visible_records=tuple(visible),
         source_call_ids=source_ids,
         source_tool_refs=source_refs,
-        retained_records=tuple(item for item, _call_id in retained),
+        retained_records=retained_records,
         retained_call_ids=retained_ids,
         retained_tool_refs=retained_refs,
         projected_tokens_before=before_tokens,
@@ -201,9 +222,8 @@ def _build_active_turn_compact_plan(
     )
 
 
-# LLM: Summary, checkpoint and CAS are one interruptible candidate. User stop discards it without
-# failure accounting; only a real error records the shared circuit while the full archive stays.
-# 函数用途: 可中断地生成并提交跨工作片摘要；停止时保留原工具账并收起进度块。
+# LLM: 摘要后、checkpoint 前只投影一次完整请求；失败沿原熔断，停止中性撤销，CAS 成功后原样返回投影。
+# 函数用途: 可中断地生成、计量并提交跨片摘要，防止局部小估算让实际仍过大的请求取得覆盖权。
 def _execute_active_turn_compact(
     agent: object,
     plan: _ActiveTurnArchiveCompactPlan,
@@ -220,7 +240,8 @@ def _execute_active_turn_compact(
     try:
         replacement = _active_turn_replacement_summary(agent, plan, request)
         raise_if_compact_interrupted(request.interrupt_check)
-        after_tokens = estimate_tokens(
+        projection = _project_active_turn_request(agent, plan, request, replacement)
+        after_tokens = projection.projected_tokens if projection is not None else estimate_tokens(
             {
                 "compact_summary": replacement,
                 "retained_active_turn_tool_calls": plan.retained_records,
@@ -291,12 +312,40 @@ def _execute_active_turn_compact(
         retained_call_ids=plan.retained_call_ids,
         projected_tokens_before=plan.projected_tokens_before,
         projected_tokens_after=after_tokens,
+        request_projection=projection,
     )
 
 
-# LLM: The one summary call uses the same applied summary as source hiding and checkpoint base;
-# no-context callers keep the original thread summary behavior.
-# 函数用途: 以本次真正适用的前摘要生成可独立替代上一代摘要的交接。
+# LLM: 宿主返回原完整候选，类型与计量未知必须失败；接受门复用 transcript 的阈值和已知输出预留。
+# 函数用途: 在写任何检查点前校验完整请求，保留恰好获选的材料对象给同次发送。
+def _project_active_turn_request(
+    agent: object,
+    plan: _ActiveTurnArchiveCompactPlan,
+    request: ActiveTurnArchiveCompactRequest,
+    replacement: str,
+) -> ConversationCompactProjection | None:
+    if request.request_projector is None:
+        return None
+    from .compact import _compact_request_input_ceiling
+
+    projection = request.request_projector(
+        replacement, plan.retained_records, max(0, int(plan.thread.compact_generation or 0)) + 1,
+    )
+    raise_if_compact_interrupted(request.interrupt_check)
+    if (not isinstance(projection, ConversationCompactProjection)
+            or type(projection.projected_tokens) is not int
+            or projection.projected_tokens < 0 or projection.material is None):
+        raise ConversationCompactError("完整恢复请求投影不可用", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
+    if projection.projected_tokens >= _compact_request_input_ceiling(agent, plan.policy):
+        raise ConversationCompactError(
+            "完整恢复请求仍超出输入阈值或已知输出预留", code="COMPACT_CANDIDATE_TOO_LARGE",
+        )
+    return projection
+
+
+# LLM: 摘要、隐藏范围和 checkpoint base 使用同一已应用视图；显式 provider_surface 只沿原 helper 渲染，
+# 不重新选择工具或准备 prompt。摘要指令与分段仍归原 LiveToolHistorySummaryRequest 主链。
+# 函数用途: 复用已冻结供应商缓存面与停止信号，生成可独立替代前摘要的跨片交接。
 def _active_turn_replacement_summary(
     agent: object,
     plan: _ActiveTurnArchiveCompactPlan,
@@ -308,6 +357,10 @@ def _active_turn_replacement_summary(
         LiveToolHistorySummaryRequest,
         semantic_summary_config,
         summarize_live_tool_history,
+    )
+    from .compact_provider_surface import (
+        conversation_compact_provider_messages,
+        conversation_compact_provider_prompt,
     )
     from .tool_context_window import native_carried_tool_handoff
 
@@ -327,6 +380,13 @@ def _active_turn_replacement_summary(
         plan.visible_records,
         max_chars=config.max_input_chars,
     )
+    context = request.compact_context
+    previous_summary = str(context.view.summary if context is not None else plan.thread.summary or "")
+    surface = request.provider_surface
+    provider_history = tuple(conversation_compact_provider_messages(
+        previous_summary, context.view.generation if context is not None else plan.thread.compact_generation,
+        (), volatile_sections=surface.volatile_sections,
+    )) if surface is not None else ()
     replacement = summarize_live_tool_history(
         LiveToolHistorySummaryRequest(
             history=[RuntimeFactsTurn(handoff)],
@@ -336,11 +396,13 @@ def _active_turn_replacement_summary(
             run_id=scope_id,
             task_id=scope_id,
             task_prompt=str(request.task_prompt or "继续当前任务。"),
-            previous_summary=str(
-                request.compact_context.view.summary
-                if request.compact_context is not None else plan.thread.summary or ""
-            ),
+            previous_summary=previous_summary,
             max_output_chars=config.max_input_chars,
+            provider_prompt=conversation_compact_provider_prompt(surface, "") if surface is not None else "",
+            provider_history_messages=provider_history,
+            tools=surface.tools or () if surface is not None else (),
+            system_instruction=surface.system_instruction if surface is not None else "",
+            interrupt_check=request.interrupt_check,
         )
     )
     if not replacement:

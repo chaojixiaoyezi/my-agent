@@ -193,7 +193,8 @@ agent_py_agent/
 |   |   |-- decision_planning.py        # 原 Todo read 的当前未完成项精确优先级软建议
 |   |   |-- cli_run_conversation.py     # 一次性 CLI 的权威 user/assistant transcript、幂等身份与失败分级
 |   |   |-- tool_request_capture.py    # 从真实运行参数共用捕获完整请求，不重复目录或上下文准备
-|   |   |-- compact_request_recovery.py # 一次准备、完整候选计量和原CAS后同次发送，Gateway与child共用
+|   |   |-- compact_request_recovery.py # 三宿主一次准备、完整候选计量和原CAS后同次发送
+|   |   |-- compact_active_projection.py # 纯替换已标记的活动归档交接，保留原工具账和媒体插话
 |   |   |-- subagent/compact_recovery.py # child独立历史与固定注入位置到公共完整恢复器的适配
 |   |   |-- tool_request_projection.py # 冻结完整 prompt/schema/IR 的纯请求投影，缺事实返回 typed unknown
 |   |   |-- subagent/model_selection.py # 首个真实子代理模型请求的宿主资格、持久选择及失败保留协调
@@ -392,7 +393,8 @@ agent_py_agent/
 |   |   |-- background_tool_policy.py   # 无副作用的后台工具目录、owner/task 收紧及展示投影
 |   |   |-- background_context.py       # 后台一次性事实准备与纯渲染，保留任务范围和原预算
 |   |   |-- background_history_seed.py  # 后台范围与应用视图冻结、精确消息覆盖、种子及压缩来源
-|   |   |-- background_compact_context.py # 后台范围选择、旧边界解析与同视图上下文投影
+|   |   |-- background_compact_context.py # 后台范围选择与同视图上下文投影
+|   |   |-- background_compact_recovery.py # 后台完整候选纯投影及公共恢复器接线
 |   |   |-- background_execution.py     # 后台单片执行、Compact 重试、原生历史保存与具名结果
 |   |   |-- background_delivery.py      # 后台投递、canonical 回复提交、整封冻结与耐久去重
 |   |   |-- control_commands.py        # CLI/IM 共用 typed slash dispatcher、task command 与状态渲染
@@ -571,6 +573,10 @@ agent_py_agent/
 |   |-- test_compact_scoped_transcript.py # 局部历史来源、交错摘要基础与竞争CAS
 |   |-- test_applied_compact_context.py # 同一应用视图的参数传递、工具过滤和摘要注入
 |   |-- test_background_scoped_compact.py # 独立任务与窄事件原Store压缩及实际模型材料回归
+|   |-- test_background_compact_recovery.py # 后台transcript及活动归档候选和实际HTTP材料对照、失败不恢复发送
+|   |-- test_compact_active_projection.py # 原生交接纯替换、媒体插话与guidance保留、未知IR拒绝
+|   |-- test_active_turn_compact_projection.py # 活动归档完整容量、取消、CAS及局部证据继承
+|   |-- test_gateway_child_compact_scope_application.py # Gateway和child共用view、交错游标及Audit范围隔离
 |   |-- test_compact_tool_provenance.py  # 原归档索引四元身份、同名调用保留与产物不覆盖
 |   |-- test_model_turn_identity.py     # 同run/attempt跨真实模型轮的身份碰撞及错误隐藏回归
 |   |-- test_background_capability_compact.py # 后台同工作片展示复用、清除与下一片重新评估
@@ -889,7 +895,7 @@ docs/
 - `agent_py_agent/agent/conversation/background_recovery.py`：每次解析并查询当前权威恢复入口；指纹只抑制重复日志，unknown/不可读阻断不消费原来源。
 - `agent_py_agent/agent/conversation/background_context.py`：显式请求接口一次准备原会话事实，再纯渲染；原任务进度对账不在重复候选渲染中执行。
 - `agent_py_agent/agent/conversation/background_history_seed.py`：先按原任务范围筛选canonical原文，再按实际采用摘要覆盖移除消息；原种子和Compact来源共用视图，读取失败不伪造空历史。
-- `agent_py_agent/agent/conversation/background_compact_context.py`：只读选择thread/task/turn范围，解析旧覆盖边界并对齐后台上下文摘要；不拥有持久状态或任务权限。
+- `agent_py_agent/agent/conversation/background_compact_context.py`：只读选择thread/task/turn范围并对齐后台上下文摘要；覆盖解析复用compact_summary_view；不拥有持久状态或任务权限。
 - `agent_py_agent/agent/conversation/background_execution.py`：显式接收执行、存储与参数准备能力，保留同片取消、Compact 和原生历史；不选择唤醒、不投递外部消息。
 - `agent_py_agent/agent/conversation/background_delivery.py`：显式交付能力连接原渠道和唯一 store；外发、过程/final 提交、审计回执与整封冻结保持原顺序，不运行模型或拥有调度状态。
 - `agent_py_agent/agent/gateway_parts/workspace_scope.py`：普通消息和首次 Goal 共用目录校验；只接受宿主已存在的合法路径，声明本身不增加权限。
@@ -1073,3 +1079,6 @@ docs/
 - `agent_py_agent/agent/agent_core/compact_request_recovery.py`：共享真实提示冻结、完整候选计量、原CAS提交及同次继续生成；宿主只提供历史投影。
 - `agent_py_agent/agent/agent_core/subagent/compact_recovery.py`：child只替换自身历史和原第0注入，权限与首请求选模不变。
 - `agent_py_agent/tests/test_subagent_compact_recovery.py`：两协议原生HTTP恢复载荷对照和失败无业务发送。
+
+- `agent_py_agent/agent/agent_core/compact_active_projection.py`：按IR结构化source替换carried交接和活动摘要，冻结请求计量与发送共用；完整归档不裁剪。
+- `agent_py_agent/agent/conversation/background_compact_recovery.py`：将后台已准备上下文、同scope历史或活动归档投影为公共恢复候选，不拥有调度和投递状态。

@@ -59,3 +59,11 @@ def reject_request_selection(agent: object, params: object) -> None:
     if host is None:
         raise RuntimeError("缺少模型请求宿主。")
     host.reject(agent, params)
+
+
+# LLM: 仅内部恢复宿主可领取本次Compact时点；没有该方法的正常选模宿主不改变原自动回收。
+# 函数用途: 在完整恢复捕获前暂缓自动压缩，避免同来源先被另一路提交。
+def request_owns_compact(agent: object, params: object) -> bool:
+    host = _HOST.get()
+    callback = getattr(host, "owns_compact", None)
+    return callback is not None and callback(agent, params) is True

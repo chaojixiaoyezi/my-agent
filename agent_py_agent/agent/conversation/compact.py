@@ -232,15 +232,53 @@ def prepare_conversation_context(
     return _execute_compact_request(prepared)
 
 
-# LLM: 原来源读取只排除当前未完成输入；读取失败原样传播，不能降级为空或从展示窗口重建来源。
-# 函数用途: 只读加载 canonical 未压缩历史和策略，不调用摘要、不写检查点、不估造完整请求大小。
+# LLM: 显式scope从完整canonical行先裁决宿主范围，再按同次view去覆盖；旧入口仍读全局游标，不能混用。
+# 函数用途: 只读加载原始历史和策略，显式范围时冻结摘要载体，不调用摘要或推进检查点。
 def load_conversation_compact_source(
     agent: SimpleAgent, store: ConversationStore, thread: ConversationThread, *, exclude_request_id: str = "",
+    scope: CompactScope | None = None,
+    select_rows: Callable[[list[MessageLogEntry]], list[MessageLogEntry]] | None = None,
 ) -> ConversationCompactSource:
     from ..agent_core.runtime.context_compactor import runtime_compact_policy
 
-    pending = _without_current_request_suffix(_uncompacted_conversation_rows(store, thread), exclude_request_id)
-    return ConversationCompactSource(thread, tuple(pending), runtime_compact_policy(agent), dict(_recent_operation_evidence(pending) or {}))
+    if scope is None:
+        if select_rows is not None:
+            raise ValueError("Compact row selection requires scope")
+        pending = _without_current_request_suffix(_uncompacted_conversation_rows(store, thread), exclude_request_id)
+        return ConversationCompactSource(thread, tuple(pending), runtime_compact_policy(agent), dict(_recent_operation_evidence(pending) or {}))
+    from .compact_summary_view import (
+        AppliedCompactContext,
+        compact_covered_message_ids,
+        resolve_compact_summary_view,
+    )
+
+    canonical, errors = store.messages.recent_report(thread.thread_id, limit=0)
+    if errors:
+        raise OSError("conversation transcript could not be read reliably")
+    view = resolve_compact_summary_view(agent, thread, scope)
+    covered = compact_covered_message_ids(view, canonical)
+    selected = select_rows(list(canonical)) if select_rows is not None else list(canonical)
+    canonical_positions = {row.message_id: index for index, row in enumerate(canonical)}
+    selected_positions = (
+        [canonical_positions.get(row.message_id, -1) for row in selected]
+        if isinstance(selected, (list, tuple)) and all(isinstance(row, MessageLogEntry) for row in selected)
+        else []
+    )
+    if (not isinstance(selected, (list, tuple))
+            or len(canonical_positions) != len(canonical)
+            or any(not row.message_id or row.thread_id != thread.thread_id for row in canonical)
+            or len(selected_positions) != len(selected)
+            or any(position < 0 or selected[index] is not canonical[position]
+                   for index, position in enumerate(selected_positions))
+            or selected_positions != sorted(set(selected_positions))):
+        raise ValueError("Compact selected rows are not canonical")
+    pending = _without_current_request_suffix(
+        [row for row in selected if row.message_id not in covered], exclude_request_id,
+    )
+    return ConversationCompactSource(
+        thread, tuple(pending), runtime_compact_policy(agent), dict(_recent_operation_evidence(pending) or {}),
+        compact_context=AppliedCompactContext(thread.thread_id, scope, view),
+    )
 
 
 # LLM: 显式来源在预检时校验同线程、精确行和已提交视图；只读核对后候选不重复读链或重建宿主准备。

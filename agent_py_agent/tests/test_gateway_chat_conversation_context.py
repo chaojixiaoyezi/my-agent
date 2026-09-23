@@ -1178,7 +1178,7 @@ def test_private_identifier_projection_preserves_path_segments_not_standalone_id
     assert "example-user" not in redact_structured_identifiers(raw, ids, channel="feishu")
 
 
-def test_gateway_compacts_and_retries_internal_context_pressure_inline(tmp_path, monkeypatch):
+def test_gateway_fake_run_retries_pressure_without_publishing_unrendered_compact(tmp_path, monkeypatch):
     agent = SimpleAgent(
         AgentConfig(
             model_backend="echo",
@@ -1261,7 +1261,9 @@ def test_gateway_compacts_and_retries_internal_context_pressure_inline(tmp_path,
     assert calls[0].carried_archive_tool_calls == []
     assert calls[1].carried_archive_tool_calls == [carried_tool_record]
     assert calls[1].carried_active_turn_user_inputs == [carried_turn_input]
-    assert thread.compact_generation == 1
+    # fake agent.run 不经过真实 renderer/provider 安全点；仅携带原工具事实，不能发布未验证候选。
+    assert thread.compact_generation == 0
+    assert calls[0].compact_context == calls[1].compact_context
     assert result.response == "压缩后继续得到的自然回复"
     assert [row.content for row in rows if row.role == "assistant"][-1] == result.response
     assert all("RUN_CONTEXT_PRESSURE" not in row.content for row in rows)
@@ -1352,7 +1354,7 @@ def test_same_gateway_request_keeps_task_turn_authority_after_inline_compact(
     assert agent.conversation_store.progress.load(policy.policy_id).enabled is False
 
 
-def test_gateway_same_turn_can_cross_pressure_twice_without_recompacting_transcript(
+def test_gateway_fake_run_preserves_two_pressure_carries_without_unrendered_commit(
     tmp_path,
     monkeypatch,
 ):
@@ -1441,13 +1443,13 @@ def test_gateway_same_turn_can_cross_pressure_twice_without_recompacting_transcr
     assert len(calls) == 3
     assert calls[1].carried_archive_tool_calls == [first_tool]
     assert calls[2].carried_archive_tool_calls == [first_tool, second_tool]
-    # 第一次回收已结束 transcript，第二次回收新增的 active-turn 工具历史；
-    # 两次都必须形成 canonical generation，不能再以“有进展”无账重试。
-    assert thread is not None and thread.compact_generation == 2
+    # 真实 HTTP 恢复在 test_gateway_compact_recovery_continuation 验证 CAS；此 fake 绕开渲染安全点。
+    assert thread is not None and thread.compact_generation == 0
+    assert calls[0].compact_context == calls[1].compact_context == calls[2].compact_context
     assert result.response == "连续两次压缩后仍沿原任务完成"
 
 
-def test_gateway_same_turn_pressure_without_new_structured_progress_stops(tmp_path, monkeypatch):
+def test_gateway_fake_run_repeated_pressure_stops_without_unrendered_commit(tmp_path, monkeypatch):
     agent = SimpleAgent(
         AgentConfig(
             model_backend="echo",
@@ -1498,7 +1500,7 @@ def test_gateway_same_turn_pressure_without_new_structured_progress_stops(tmp_pa
         )
 
     monkeypatch.setattr(agent, "run", pressure_without_progress)
-    with pytest.raises(ConversationPersistenceError, match="无法继续压缩"):
+    with pytest.raises(ConversationPersistenceError, match="超过模型上下文上限"):
         _run_claimed_gateway_ask(
             GatewayAskRunContext(
                 agent,
@@ -1510,11 +1512,10 @@ def test_gateway_same_turn_pressure_without_new_structured_progress_stops(tmp_pa
             )
         )
 
-    # 第一次 overflow 压 transcript，第二次才把尚未覆盖的 active-turn tool
-    # archive 提交为另一代；第三次完全相同且无新 source id 时 fail closed。
-    assert calls == 3
+    # fake 不进入真实模型渲染安全点，所有 defer 候选保持未提交；重试上限必须失败关闭。
+    assert calls == 8
     thread = agent.conversation_store.threads.load(existing.thread_id)
-    assert thread is not None and thread.compact_generation == 2
+    assert thread is not None and thread.compact_generation == 0
 
 
 def test_gateway_foreground_turn_holds_shared_conversation_execution_lane(tmp_path, monkeypatch):
@@ -5581,6 +5582,9 @@ def test_gateway_overflow_without_transcript_commits_active_turn_compact(tmp_pat
     records = [
         {
             "call_id": f"overflow-{index}",
+            "run_id": "gateway-overflow-run",
+            "attempt_id": request_id,
+            "turn_id": request_id,
             "tool": "read_file",
             "ok": True,
             "parameters": {"tool": "read_file", "path": f"part-{index}.txt"},

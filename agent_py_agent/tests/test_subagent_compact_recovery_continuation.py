@@ -95,7 +95,19 @@ def test_child_transcript_then_tool(tmp_path, monkeypatch, backend):
     assert len(model_calls) == 3
     first, restored, after_tool = model_calls
     assert first[0].conversation_history_seed.compact_generation == 0
-    assert restored[0] is after_tool[0] is candidates[0].params
+    assert restored[0] is after_tool[0]
+    assert restored[0] is not candidates[0].params
+    assert restored[0].conversation_history_seed == candidates[0].params.conversation_history_seed
+    assert restored[0].provider_history_messages == candidates[0].params.provider_history_messages
+    assert restored[0].compact_context is not None
+    assert restored[0].compact_context == after_tool[0].compact_context
+    assert restored[0].compact_context.view.summary == candidates[0].params.compact_context.view.summary
+    assert restored[0].compact_context.view.operation_evidence == candidates[0].params.compact_context.view.operation_evidence
+    assert candidates[0].params.compact_context.view.checkpoint_id == ""
+    assert restored[0].compact_context.view.checkpoint_id == agent.conversation_store.threads.require(
+        task.agent_thread_id,
+    ).compact_checkpoint_id
+    assert restored[0].compact_context.view.source_message_ids
     assert restored[0].cancellation_token is recoveries[0].render_params.cancellation_token
     assert restored[0].conversation_history_seed.compact_generation == 1
     assert after_tool[0].conversation_history_seed.compact_generation == 1

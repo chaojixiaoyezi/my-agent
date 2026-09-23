@@ -9,6 +9,7 @@ from ...conversation.compact_guard import ConversationCompactError
 from ..compact_request_recovery import (
     CompactRecoveryMaterial,
     PreparedCompactRecovery,
+    project_recovery_compact_context,
     replace_recovery_history,
 )
 from ..tool_request_projection import project_tool_loop_request
@@ -31,15 +32,17 @@ def prepare_subagent_compact_recovery(agent, current, task, turn, *, progress_ca
     )
 
 
-# LLM: 候选仅修改子代理自己的历史和已知第0注入位置；其余系统、上下文包、权限和工具沿原冻结输入，不重复准备。
+# LLM: 候选仅修改子代理自己的历史、同scope临时view和已知第0注入位置；其他权限和工具沿原冻结输入。
 # 函数用途: 生成与获选摘要绑定的完整下一请求及参数，提交前不修改当前运行对象。
 def _project_subagent_candidate(agent, current, params, frozen, view):
     if not view.is_candidate:
         return CompactRecoveryMaterial(current, params, frozen, project_tool_loop_request(frozen))
-    candidate = project_agent_thread_context(agent, view)
+    candidate_context = project_recovery_compact_context(current.compact_context, view)
+    candidate = project_agent_thread_context(agent, view, compact_context=candidate_context)
     if not current.injection:
         raise ConversationCompactError("子代理恢复注入位置未知", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
     candidate_params, prepared = replace_recovery_history(
         params, frozen, history_seed=candidate.history_seed, injection=candidate.injection, injection_index=0,
+        compact_context=candidate_context,
     )
     return CompactRecoveryMaterial(candidate, candidate_params, prepared, project_tool_loop_request(prepared))

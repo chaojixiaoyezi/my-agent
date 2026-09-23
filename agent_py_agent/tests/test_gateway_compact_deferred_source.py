@@ -157,10 +157,11 @@ def test_bad_canonical_source_raises_instead_of_becoming_empty(tmp_path, monkeyp
     )
     store = agent.conversation_store
     before = store.threads.load(initial.thread_id)
+    original_report = store.messages.recent_report
     monkeypatch.setattr(
         store.messages,
-        "after_compact_report",
-        lambda _thread: ([], [{"error_code": "transcript_corrupt"}]),
+        "recent_report",
+        lambda _thread_id, *, limit: ([], [{"error_code": "transcript_corrupt"}]),
     )
 
     with pytest.raises(ConversationCompactError):
@@ -169,6 +170,7 @@ def test_bad_canonical_source_raises_instead_of_becoming_empty(tmp_path, monkeyp
         )
 
     after = store.threads.load(initial.thread_id)
+    monkeypatch.setattr(store.messages, "recent_report", original_report)
     assert before is not None and after is not None
     assert after.compact_generation == before.compact_generation == 0
     assert store.messages.recent(initial.thread_id, limit=0)[0].content == "必须保留的原文"

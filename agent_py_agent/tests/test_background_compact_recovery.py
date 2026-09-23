@@ -1,0 +1,386 @@
+"""后台 Compact 恢复：真实执行器、会话账和 provider builder，仅替换末端 HTTP。"""
+from __future__ import annotations
+
+from dataclasses import replace
+from functools import partial
+
+import pytest
+
+from agent_py_agent.agent.agent_core import runtime_mixin
+from agent_py_agent.agent.backends.base import ProviderRequestOptions
+from agent_py_agent.agent.backends.errors import ProviderContextWindowError, ProviderTransientError
+from agent_py_agent.agent.backends.tool_ir import AssistantTurn, CompactionSummary, ToolResult
+from agent_py_agent.agent.conversation import (
+    active_turn_compact,
+    background_compact_recovery,
+    background_execution,
+    compact,
+)
+from agent_py_agent.agent.conversation.agent_activity import BackgroundMainActivitySink
+from agent_py_agent.agent.conversation.background_history_seed import (
+    prepare_background_history_or_raise,
+)
+from agent_py_agent.agent.conversation.compact_guard import ConversationCompactError
+from agent_py_agent.agent.conversation.compact_summary_view import resolve_compact_summary_view
+from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest, _run_params
+from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.tests.test_subagent_compact_recovery import _http
+
+
+# LLM: 使用原 SimpleAgent、唯一会话 store 与后台真实入口；只有 HTTP 模型响应由既有替身提供。
+# 函数用途: 为普通或拆出的后台任务建立足够长的已结束历史，并返回同一片执行依赖。
+def _background(tmp_path, *, backend: str, detached: bool, with_history: bool = True):
+    api_base = "https://api.minimaxi.com/anthropic" if backend == "anthropic_compatible" else "https://opencode.ai/zen/go/v1"
+    model_name = "MiniMax-M2.7" if backend == "anthropic_compatible" else "deepseek-v4-flash"
+    agent = SimpleAgent(AgentConfig(
+        model_backend=backend, model_name=model_name, api_base=api_base,
+        api_key="fake-private-key", stream_enabled=False, enable_tools=False,
+        my_agent_home=str(tmp_path / "home"),
+        model_context_window_tokens=200_000, model_context_window_explicit=True,
+        max_tool_rounds=1, tool_context_ptl_retry_max=0,
+    ), tmp_path)
+    store = agent.conversation_store
+    thread = store.threads.get_or_create({
+        "canonical_user_id": "owner", "channel": "tui", "channel_conversation_id": "compact-recovery",
+        "channel_user_id": "owner", "now": 10.0,
+    })
+    task_id = "detached-1" if detached else "ordinary-1"
+    store.tasks.bind({
+        "thread_id": thread.thread_id, "task_id": task_id, "goal": "持续核对旧资料",
+        "work_kind": "goal" if detached else "general", "work_name": "旧资料监测",
+        "cancellation_scope": "detached" if detached else "shared", "now": 11.0,
+    })
+    for position, (role, content) in enumerate((
+        ("user", "之前需要核对的原始材料" * 100),
+        ("assistant", "已核对旧材料，等待下一步" * 100),
+    ) if with_history else ()):
+        store.messages.append({
+            "thread_id": thread.thread_id, "role": role, "content": content,
+            "metadata": {"conversation_request_id": f"completed-prior-turn-{position}", "task_id": task_id},
+            "now": 12.0 + position,
+        })
+    request = BackgroundRunRequest(
+        thread_id=thread.thread_id, task_id=task_id, reason="scheduled_progress_report",
+        route_channel="internal", now=20.0,
+    )
+    execution = background_execution.BackgroundExecutionDependencies(
+        agent=agent, store=store, prepare_run=partial(_run_params, request=request, agent=agent),
+    )
+    sink = BackgroundMainActivitySink(agent, thread_id=thread.thread_id, task_id=task_id)
+    return agent, store, thread, request, execution, sink
+
+
+@pytest.mark.parametrize("backend", ["anthropic_compatible", "openai_compatible"])
+@pytest.mark.parametrize("detached", [False, True])
+def test_background_overflow_reuses_selected_candidate_wire(tmp_path, monkeypatch, backend, detached):
+    agent, store, thread, request, execution, sink = _background(tmp_path, backend=backend, detached=detached)
+    scope = prepare_background_history_or_raise(agent, store, thread, request).compact_context.scope
+    assert scope.kind == ("task" if detached else "thread")
+    prepares, prepare_run_indices, candidates, runs, sent_business, sent_summaries = [], [], [], [], [], []
+    original_prepare = runtime_mixin._prepare_runtime_context
+    original_project = background_compact_recovery._project_background_candidate
+    original_run = agent.run
+    original_summary = compact._summarize
+    in_summary = False
+
+    def prepare(*args, **kwargs):
+        prepares.append(args)
+        prepare_run_indices.append(len(runs))
+        return original_prepare(*args, **kwargs)
+
+    def project(*args):
+        material = original_project(*args)
+        if args[-1].is_candidate:
+            candidates.append(material)
+        return material
+
+    def run(*args, **kwargs):
+        runs.append(args)
+        return original_run(*args, **kwargs)
+
+    def summary(*args, **kwargs):
+        nonlocal in_summary
+        in_summary = True
+        try:
+            return original_summary(*args, **kwargs)
+        finally:
+            in_summary = False
+
+    monkeypatch.setattr(runtime_mixin, "_prepare_runtime_context", prepare)
+    monkeypatch.setattr(background_compact_recovery, "_project_background_candidate", project)
+    monkeypatch.setattr(agent, "run", run)
+    monkeypatch.setattr(compact, "_summarize", summary)
+
+    def on_business(wire, _number):
+        if in_summary:
+            sent_summaries.append(wire)
+            return
+        sent_business.append(wire)
+        if len(sent_business) == 1:
+            raise ProviderContextWindowError("测试供应商上下文溢出")
+        if len(sent_business) == 2:
+            assert len(candidates) == 1
+            material = candidates[0]
+            projected = material.projection
+            frozen = material.request_input
+            expected = agent.backend.project_generate_payload(
+                projected.provider_prompt, tools=list(frozen.native_tools) or None,
+                tool_choice=projected.tool_choice if frozen.native_tools else None,
+                messages=projected.messages,
+                request_options=ProviderRequestOptions(
+                    system_instruction=projected.system_instruction,
+                    thinking_disabled=bool(frozen.native_tools) and projected.tool_choice.mode != "auto",
+                ),
+            )
+            assert wire == expected
+
+    business, _ = _http(monkeypatch, backend=backend, on_business=on_business)
+    result = background_execution.run_background_turn_with_compact(
+        execution, thread, request, user_prompt="继续核对本轮资料", continuation_injection=[],
+        proactive_delivery_available=False, activity_sink=sink,
+    )
+    assert result.runtime_status != "context_overflow"
+    assert len(business) == 3
+    assert len(sent_business) == 2 and len(sent_summaries) == 1
+    assert len(candidates) == 1
+    assert len(prepares) == len(runs) == 2
+    assert prepare_run_indices == [1, 2]
+    assert store.threads.require(thread.thread_id).compact_generation == 1
+
+
+@pytest.mark.parametrize("failure", ["summary_failure", "candidate_cancel", "generation_race"])
+def test_uncommitted_background_recovery_sends_no_restored_business(tmp_path, monkeypatch, failure):
+    agent, store, thread, request, execution, sink = _background(
+        tmp_path, backend="anthropic_compatible", detached=False,
+    )
+    original_project = background_compact_recovery._project_background_candidate
+    original_summary = compact._summarize
+    in_summary = False
+    sent_business, sent_summaries = [], []
+
+    def project(*args):
+        if args[-1].is_candidate:
+            if failure == "candidate_cancel":
+                raise InterruptedError("测试取消候选")
+            if failure == "generation_race":
+                store.threads.update_atomic(thread.thread_id, lambda current: replace(
+                    current, compact_generation=current.compact_generation + 1,
+                    summary="另一个提交者已经获胜",
+                ))
+        return original_project(*args)
+
+    def summary(*args, **kwargs):
+        nonlocal in_summary
+        if failure == "summary_failure":
+            raise ProviderTransientError("503 temporary overload")
+        in_summary = True
+        try:
+            return original_summary(*args, **kwargs)
+        finally:
+            in_summary = False
+
+    monkeypatch.setattr(compact, "_summarize", summary)
+    monkeypatch.setattr(background_compact_recovery, "_project_background_candidate", project)
+
+    def on_business(wire, _number):
+        if in_summary:
+            sent_summaries.append(wire)
+            return
+        sent_business.append(wire)
+        if len(sent_business) == 1:
+            raise ProviderContextWindowError("测试供应商上下文溢出")
+        pytest.fail("未提交恢复时发送了业务模型请求")
+
+    business, _ = _http(monkeypatch, backend="anthropic_compatible", on_business=on_business)
+    with pytest.raises((RuntimeError, InterruptedError)):
+        background_execution.run_background_turn_with_compact(
+            execution, thread, request, user_prompt="继续核对本轮资料", continuation_injection=[],
+            proactive_delivery_available=False, activity_sink=sink,
+        )
+    assert len(business) == (1 if failure == "summary_failure" else 2)
+    assert len(sent_business) == 1
+    assert len(sent_summaries) == (0 if failure == "summary_failure" else 1)
+    refreshed = store.threads.require(thread.thread_id)
+    assert refreshed.compact_generation == (1 if failure == "generation_race" else 0)
+    if failure == "generation_race":
+        assert refreshed.summary == "另一个提交者已经获胜"
+
+
+# LLM: 两种后台scope只改变原宿主请求和历史种子；工具来源仍是同一四元原归档，不伪造provider工具对。
+# 函数用途: 给活动归档的HTTP成功与失败验收准备真实后台执行入口。
+def _active_background(tmp_path, *, backend: str, narrow: bool):
+    agent, store, thread, request, _, sink = _background(
+        tmp_path, backend=backend, detached=narrow, with_history=False,
+    )
+    if narrow:
+        request = replace(request, reason="audit_finding")
+    history = prepare_background_history_or_raise(agent, store, thread, request)
+    assert history.status == ("disabled" if narrow else "ready")
+    assert (history.seed is None) is narrow
+    assert not history.compact_source.messages
+    assert history.compact_context.scope.kind == ("turn" if narrow else "thread")
+    archived = [{
+        "call_id": "call-prior", "scoped_call_id": "run-prior:call-prior",
+        "run_id": "run-prior", "attempt_id": "attempt-prior", "turn_id": "turn-prior",
+        "tool": "read_file", "ok": True, "model_parameters": {"path": "old.txt"},
+        "model_summary": "先前已完成的读取结果", "output_preview": "旧材料摘要" * 400,
+    }]
+
+    def prepare(thread_id, *, thread, history_seed):
+        params = _run_params(thread_id, request, agent, thread=thread, history_seed=history_seed)
+        params.carried_archive_tool_calls = list(archived)
+        return params
+
+    execution = background_execution.BackgroundExecutionDependencies(agent, store, prepare)
+    return agent, store, thread, request, execution, sink, history, archived
+
+
+@pytest.mark.parametrize("backend", ["anthropic_compatible", "openai_compatible"])
+@pytest.mark.parametrize("narrow", [False, True])
+def test_active_archive_recovery_sends_selected_wire(tmp_path, monkeypatch, backend, narrow):
+    agent, store, thread, request, execution, sink, history, archived = _active_background(
+        tmp_path, backend=backend, narrow=narrow,
+    )
+    original_project = background_compact_recovery._project_background_active_candidate
+    original_summary = active_turn_compact._active_turn_replacement_summary
+    candidates, sent_business, sent_summaries = [], [], []
+    in_summary = False
+
+    def project(*args):
+        frozen_ir = args[3].tool_ir_history
+        assert sum(isinstance(item, CompactionSummary) and item.source == "carried_tool_handoff"
+                   for item in frozen_ir) == 1
+        assert not any(isinstance(item, ToolResult) or (
+            isinstance(item, AssistantTurn) and item.tool_calls
+        ) for item in frozen_ir)
+        material = original_project(*args)
+        candidates.append(material)
+        return material
+
+    def summary(*args, **kwargs):
+        nonlocal in_summary
+        in_summary = True
+        try:
+            return original_summary(*args, **kwargs)
+        finally:
+            in_summary = False
+
+    monkeypatch.setattr(background_compact_recovery, "_project_background_active_candidate", project)
+    monkeypatch.setattr(active_turn_compact, "_active_turn_replacement_summary", summary)
+
+    def on_business(wire, _number):
+        if in_summary:
+            sent_summaries.append(wire)
+            return
+        sent_business.append(wire)
+        if len(sent_business) == 1:
+            raise ProviderContextWindowError("测试供应商上下文溢出")
+        if len(sent_business) == 2:
+            assert len(candidates) == 1
+            material = candidates[0]
+            projected = material.projection
+            frozen = material.request_input
+            expected = agent.backend.project_generate_payload(
+                projected.provider_prompt, tools=list(frozen.native_tools) or None,
+                tool_choice=projected.tool_choice if frozen.native_tools else None,
+                messages=projected.messages,
+                request_options=ProviderRequestOptions(
+                    system_instruction=projected.system_instruction,
+                    thinking_disabled=bool(frozen.native_tools) and projected.tool_choice.mode != "auto",
+                ),
+            )
+            assert wire == expected
+
+    business, _ = _http(monkeypatch, backend=backend, on_business=on_business)
+    result = background_execution.run_background_turn_with_compact(
+        execution, thread, request, user_prompt="报告本次新发现", continuation_injection=[],
+        proactive_delivery_available=False, activity_sink=sink,
+    )
+    assert result.runtime_status != "context_overflow"
+    assert len(sent_business) == 2 and len(sent_summaries) == 1 and len(business) == 3
+    assert len(candidates) == 1
+    candidate = candidates[0]
+    assert sum(isinstance(item, CompactionSummary) and item.source == "applied_compact"
+               for item in candidate.request_input.tool_ir_history) == (1 if narrow else 0)
+    if not narrow:
+        assert any("Earlier Conversation Summary" in str(message.get("content"))
+                   for message in candidate.request_input.provider_history_messages)
+    assert not any(isinstance(item, CompactionSummary) and item.source == "carried_tool_handoff"
+                   for item in candidate.request_input.tool_ir_history)
+    assert candidate.params.archive_tool_calls == archived
+    committed = store.threads.require(thread.thread_id)
+    assert committed.compact_generation == 1
+    view = resolve_compact_summary_view(agent, committed, history.compact_context.scope)
+    assert view.source_tool_refs == ({
+        "run_id": "run-prior", "attempt_id": "attempt-prior",
+        "turn_id": "turn-prior", "call_id": "call-prior",
+    },)
+
+
+@pytest.mark.parametrize("failure", [
+    "candidate_too_large", "unknown_handoff", "summary_failure", "candidate_cancel", "generation_race",
+])
+def test_uncommitted_active_recovery_sends_no_restored_business(tmp_path, monkeypatch, failure):
+    agent, store, thread, request, execution, sink, _, _ = _active_background(
+        tmp_path, backend="anthropic_compatible", narrow=True,
+    )
+    original_project = background_compact_recovery._project_background_active_candidate
+    original_summary = active_turn_compact._active_turn_replacement_summary
+    sent_business, sent_summaries = [], []
+    in_summary = False
+
+    def project(*args):
+        if failure == "candidate_cancel":
+            raise InterruptedError("测试取消活动摘要候选")
+        if failure == "generation_race":
+            store.threads.update_atomic(thread.thread_id, lambda current: replace(
+                current, compact_generation=current.compact_generation + 1,
+                summary="另一个提交者已经获胜",
+            ))
+        if failure == "unknown_handoff":
+            changed = tuple(
+                replace(item, source="") if isinstance(item, CompactionSummary)
+                and item.source == "carried_tool_handoff" else item
+                for item in args[3].tool_ir_history
+            )
+            args = (*args[:3], replace(args[3], tool_ir_history=changed), *args[4:])
+        return original_project(*args)
+
+    def summary(*args, **kwargs):
+        nonlocal in_summary
+        if failure == "summary_failure":
+            raise ProviderTransientError("503 temporary overload")
+        in_summary = True
+        try:
+            return original_summary(*args, **kwargs)
+        finally:
+            in_summary = False
+
+    if failure == "candidate_too_large":
+        monkeypatch.setattr(compact, "_compact_request_input_ceiling", lambda *_: 1)
+    monkeypatch.setattr(background_compact_recovery, "_project_background_active_candidate", project)
+    monkeypatch.setattr(active_turn_compact, "_active_turn_replacement_summary", summary)
+
+    def on_business(wire, _number):
+        if in_summary:
+            sent_summaries.append(wire)
+            return
+        sent_business.append(wire)
+        if len(sent_business) == 1:
+            raise ProviderContextWindowError("测试供应商上下文溢出")
+        pytest.fail("活动摘要未提交时发送了恢复业务请求")
+
+    business, _ = _http(monkeypatch, backend="anthropic_compatible", on_business=on_business)
+    with pytest.raises((ConversationCompactError, InterruptedError)):
+        background_execution.run_background_turn_with_compact(
+            execution, thread, request, user_prompt="报告本次新发现", continuation_injection=[],
+            proactive_delivery_available=False, activity_sink=sink,
+        )
+    assert len(sent_business) == 1
+    assert len(sent_summaries) == (0 if failure == "summary_failure" else 1)
+    assert len(business) == 1 + len(sent_summaries)
+    committed = store.threads.require(thread.thread_id)
+    assert committed.compact_generation == (1 if failure == "generation_race" else 0)
+    if failure == "generation_race":
+        assert committed.summary == "另一个提交者已经获胜"

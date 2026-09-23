@@ -1,5 +1,17 @@
 # 测试与发布验收
 
+## 第 12.4 项后台完整恢复与三宿主同视图（本地）
+
+后台transcript、普通空transcript活动归档和narrow审计恢复已接公共PreparedCompactRecovery；Gateway/child共用原canonical loader的scope/view准备。后台同片范围冻结、候选完整计量、CAS后获胜view回填及原参数继续发送按同一链验收。原自动Compact不在完整捕获前抢先推进代次；实际业务请求不包含提交时才产生的内部checkpoint ID。
+
+新增后台HTTP替身16例覆盖两协议×普通/独立任务transcript、两协议×普通/窄审计活动归档，以及摘要瞬时错误、未知IR、过大候选、取消、CAS冲突不恢复发送。候选payload与实际HTTP入口字节对照，不用模型正文判定摘要调用。活动入口23例使用真实Store/checkpoint/CAS，覆盖完整容量/输出预留、停止时点、原projection材料身份、未知四元身份保留和局部非空evidence不继承全局值。纯IR投影保持媒体、插话、未转发guidance及去重；相关六文件最终联合 **91 passed**，日志 `/tmp/background_complete_final_20260923.log`。
+
+最终25文件联合 **657 passed，67.69秒**，日志 `/tmp/compact_complete_recovery_final_20260923.log`，覆盖三宿主准备/恢复/能力展示、后台运行、原生IR、完整请求投影和作用域检查点。Ruff、doc sync、导入边界（0发现）、strict code-size（hard=0，基线未变）、diff和clean-package通过；首次打包检查仅因新增文件未纳入索引失败，明确纳入本片后复查通过。这里只证明本片定向与严格检查通过，不把旧全仓八项失败改写为通过。
+
+旧fake agent.run测试绕开renderer/select，现按明确defer/宿主已提交语义验证控制流；不把fake声明提交算真实CAS证据，后者由上述及Gateway/child实际HTTP材料测试覆盖。初次14文件联合有2项child旧params对象identity断言失败，CAS回填正式view后参数确有新对象；已改为检验候选材料相等、获胜checkpoint、恢复及后续工具轮共用新params，原失败日志保留 `/tmp/compact_complete_recovery_joint_20260923.log`。
+
+本片没有供应商真实请求、安装版TUI、部署、重启或线上CI证据。初次/手动、其它宿主活动归档完整计量和混合transcript+active联合候选仍待实现；超大历史无界读取及前轮全仓八项失败也未关闭。12.4保持未完成。测试机1.9已授权且只读核对可达，尚未用其部署本片。
+
 ## 第 12.4 项后台实际摘要视图接线（本地）
 
 后台普通/task/turn范围现把同一AppliedCompactContext传给历史种子、上下文、工具过滤和摘要器。局部transcript与live/carried均显式写scope/base，仍复用原检查点/CAS；完整归档与运行预算保留。原历史读取错误测试已改为真实canonical入口，旧无checkpoint的假摘要夹具改为真实writer/CAS。

@@ -5,7 +5,7 @@ from __future__ import annotations
 from .tool_request_projection import ToolLoopRequestInput
 
 
-# LLM: 只组装原事实和 native_tool_protocol 的唯一工具选择，不刷新 child/Goal/文件或邮箱；未知历史不补空。
+# LLM: 只组装原事实与工具选择；seed=None仅在显式turn范围且原provider历史确知为空时合法，未知历史不补空。
 # 函数用途: 将实际首请求的冻结 system、完整 IR 和原工具选择交给唯一纯投影。
 def capture_tool_loop_request(agent: object, params: object, prompt_input: object) -> ToolLoopRequestInput:
     from ..conversation.models import ConversationHistorySeed
@@ -15,7 +15,12 @@ def capture_tool_loop_request(agent: object, params: object, prompt_input: objec
     from .tool_model_generation import _forwarded_guidance_seen
 
     if not isinstance(params.conversation_history_seed, ConversationHistorySeed):
-        raise ValueError("history_unknown")
+        from ..conversation.compact_summary_view import AppliedCompactContext
+
+        context = getattr(params, "compact_context", None)
+        if not (params.conversation_history_seed is None and isinstance(context, AppliedCompactContext)
+                and context.scope.kind == "turn" and params.provider_history_messages == []):
+            raise ValueError("history_unknown")
     tools = resolve_native_tools(agent, params)
     return ToolLoopRequestInput(
         prompt_input=prompt_input, system_instruction=provider_system_instruction(agent.backend),

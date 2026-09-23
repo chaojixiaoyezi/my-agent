@@ -2,12 +2,12 @@
 # 模块用途: 执行后台模型工作片并压缩重试；复用本轮展示，失效清除后不重发推荐，也不保存第二份状态。
 from __future__ import annotations
 
-from copy import deepcopy
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from functools import partial
 from typing import Protocol
 
-from ..agent_core.runtime.loop_models import RunParams, RuntimeContextRequest
+from ..agent_core.runtime.loop_models import RunParams
 from ..concurrency.interrupt import is_interrupted
 from ..turn_end import result_turn_end_reason, should_continue_task
 from .agent_activity import BackgroundMainActivitySink
@@ -17,7 +17,7 @@ from .background_context import (
     prepare_background_context,
     render_background_context,
 )
-from .background_history_seed import prepare_background_history_or_raise
+from .background_history_seed import prepare_background_history_or_raise, refresh_background_history
 from .compact_carry import compact_overflow_carry
 from .local_run_control import LocalRunControl
 from .models import ConversationThread
@@ -177,6 +177,7 @@ def run_background_turn_with_compact(
     runtime_rejected_actions: list[dict[str, str]] | None = None
     capability_presentation = None
     presentation_evaluated = False
+    recovering = False
 
     # LLM: 同步回调只写当前调用的局部状态及原参数，失效 None 不清已评估事实，绝不落盘或回写请求。
     # 函数用途: 让 Compact 和后续模型尝试都读取本后台 turn 的最新展示。
@@ -186,14 +187,12 @@ def run_background_turn_with_compact(
         run_params.capability_presentation = value
         run_params.capability_presentation_evaluated = True
 
-    for _attempt in range(8):
-        history = prepare_background_history_or_raise(
-            execution.agent,
-            execution.store,
-            current,
-            request,
-            proactive_delivery_available=proactive_delivery_available,
-        )
+    history = prepare_background_history_or_raise(
+        execution.agent, execution.store, current, request,
+        proactive_delivery_available=proactive_delivery_available,
+    )
+    # 首次业务尝试不消耗Compact配额，之后每次必须真实提交才可继续。
+    for _attempt in range(9):
         history_seed = history.seed
         run_params = execution.prepare_run(
             current.thread_id,
@@ -224,7 +223,14 @@ def run_background_turn_with_compact(
         run_params.capability_presentation_turn_id = request.conversation_turn_id
         run_params.capability_presentation_callback = retain_presentation
         activity_sink.begin_model_attempt(_attempt + 1)
-        result, run_params = _run_background_model_attempt(execution.agent, user_prompt, run_params)
+        result, run_params, recovery = _run_background_recovery_attempt(
+            execution, user_prompt, run_params, history, prepared_context,
+            recovering=recovering, activity_sink=activity_sink,
+        )
+        if recovering and (recovery is None or not recovery.committed):
+            raise RuntimeError("background compact recovery did not commit")
+        if recovery is not None and recovery.committed:
+            current = recovery.committed_thread
         if str(getattr(result, "runtime_status", "") or "").strip().lower() != ("context_overflow"):
             _persist_background_native_turn(execution.store, request, result)
             return result
@@ -238,58 +244,15 @@ def run_background_turn_with_compact(
             result_active_turn_user_inputs=getattr(result, "active_turn_user_inputs", None),
             released_input_ids=released_input_ids,
         )
-        refreshed = _compact_background_main_thread(
-            execution,
-            current,
-            current_prompt=user_prompt,
-            activity_sink=activity_sink,
-            run_params=run_params,
-            carried_archive_tool_calls=carried_archive_tool_calls,
-            history=history,
-        )
-        if refreshed.compact_generation <= current.compact_generation:
-            refreshed = _compact_background_active_turn(
-                execution, refreshed, run_params, carried_archive_tool_calls,
-                task_id=request.task_id, user_prompt=user_prompt, activity_sink=activity_sink,
+        if _attempt == 8:
+            raise BackgroundCompactSliceYield(
+                "background main compact slice advanced eight generations and will resume"
             )
-        current = refreshed
-    raise BackgroundCompactSliceYield(
-        "background main compact slice advanced eight generations and will resume"
-    )
-
-
-# LLM: 已结束历史无压缩进展时仅压缩本活动轮归档；沿原 CAS 与取消合同提交，不凭输出正文判定可继续。
-# 函数用途: 缩减后台当前轮的工具上下文并确认真正推进，失败时保留原错误而不空转重试。
-def _compact_background_active_turn(
-    execution: BackgroundExecutionDependencies,
-    thread: ConversationThread,
-    run_params: RunParams,
-    archive: list[dict[str, object]],
-    *,
-    task_id: str,
-    user_prompt: str,
-    activity_sink: BackgroundMainActivitySink,
-) -> ConversationThread:
-    from .active_turn_compact import (
-        ActiveTurnArchiveCompactRequest,
-        compact_carried_active_turn_archive,
-    )
-
-    result = compact_carried_active_turn_archive(
-        execution.agent, execution.store, thread, archive,
-        ActiveTurnArchiveCompactRequest(
-            task_attributes=run_params.task_attributes,
-            compact_context=run_params.compact_context,
-            request_id=str(run_params.request_id or task_id or ""),
-            attempt_id=str(run_params.attempt_id or run_params.request_id or ""),
-            task_prompt=user_prompt,
-            progress_callback=activity_sink.write_conversation_compact_progress,
-            interrupt_check=is_interrupted,
-        ),
-    )
-    if not result.compacted:
-        raise RuntimeError("background main thread cannot compact the overflowing active turn")
-    return result.thread
+        current, history = _refresh_background_compact_source(execution, current, history)
+        run_params.compact_context = history.compact_context
+        if history.compact_source is None or (not history.compact_source.messages and not carried_archive_tool_calls):
+            raise RuntimeError("background compact has no recoverable source")
+        recovering = True
 
 
 # LLM: 原生信封只进入当前 store/thread 的同一 transcript；与公开 final 按宿主回合编号去重，不发消息或修改 wake 生命周期。
@@ -317,67 +280,32 @@ def _persist_background_native_turn(store: ConversationStore, request: Backgroun
     }, dedupe_key=f"background-native:{request.conversation_turn_id}")
 
 
-# LLM: 原线程/CAS是重试权威；刷新冻结scope内的视图和原文，不从最新任务重建范围；窄审计不压会话历史。
-# 函数用途: 只压本片可见的已结束历史，局部摘要经同一CAS提交后保留全线程游标。
-def _compact_background_main_thread(
-    execution: BackgroundExecutionDependencies,
-    current: ConversationThread,
-    *,
-    current_prompt: str,
-    activity_sink: BackgroundMainActivitySink,
-    run_params: RunParams,
-    carried_archive_tool_calls: list[dict[str, object]],
-    history,
-) -> ConversationThread:
-    from ..tooling.tool_search_state import pending_carried_loaded_tool_names
-    from .compact import ConversationCompactOptions, prepare_conversation_context
-    from .compact_provider_surface import ConversationCompactModelSurface
-
+# LLM: 只刷新原CAS thread及已冻结范围的来源；不在真实恢复准备前摘要，narrow仍为已知空transcript来源。
+# 函数用途: 溢出后读取下一轮来源，完整请求准备后再由公共恢复器压缩。
+def _refresh_background_compact_source(execution, current, history):
     latest, load_error = execution.store.threads.load_report(current.thread_id)
     if load_error is not None or latest is None:
         raise RuntimeError("background main conversation thread could not be reloaded")
-    from .background_history_seed import refresh_background_history
-    refreshed_history = refresh_background_history(execution.agent, execution.store, latest, history)
-    run_params.compact_context = refreshed_history.compact_context
-    if refreshed_history.compact_source is None:
-        return latest
-    compact = prepare_conversation_context(
-        execution.agent,
-        execution.store,
-        latest,
-        options=ConversationCompactOptions(
-            current_prompt=str(current_prompt or ""),
-            source=refreshed_history.compact_source,
-            force=True,
-            progress_callback=activity_sink.write_conversation_compact_progress,
-            interrupt_check=is_interrupted,
-            model_surface=ConversationCompactModelSurface(
-                allowed_tools=(
-                    tuple(run_params.allowed_tools)
-                    if run_params.allowed_tools is not None
-                    else None
-                ),
-                prompt_files=tuple(run_params.prompt_files or ()),
-                system_prompt_override=run_params.system_prompt_override,
-                context_scope=str(run_params.context_scope or "conversation"),
-                loaded_tool_names=tuple(
-                    sorted(
-                        pending_carried_loaded_tool_names(carried_archive_tool_calls)
-                    )
-                ),
-                presentation_context=RuntimeContextRequest(
-                    user_prompt=current_prompt, inject=[], resume_context=False, context_scope=run_params.context_scope,
-                    allowed_tools=deepcopy(run_params.allowed_tools), write_boundary=deepcopy(run_params.write_boundary),
-                    request_id=run_params.request_id, run_id=run_params.run_id, task_id=run_params.task_id,
-                    task_attributes=deepcopy(run_params.task_attributes), source="conversation_compact_summary", save=False,
-                ),
-                capability_presentation=run_params.capability_presentation,
-                capability_presentation_turn_id=run_params.capability_presentation_turn_id,
-                capability_presentation_callback=run_params.capability_presentation_callback,
-            ),
-        ),
-    )
-    return compact.thread
+    return latest, refresh_background_history(execution.agent, execution.store, latest, history)
+
+
+# LLM: 只有真实溢出后且来源已知才装恢复宿主；finally清ContextVar，transcript或活动归档都先完整计量再同次发送。
+# 函数用途: 执行后台一次原模型尝试，恢复时同时带回获胜CAS的线程与参数事实。
+def _run_background_recovery_attempt(execution, prompt, params, history, context, *, recovering, activity_sink):
+    from ..agent_core.runtime.run_params import run_params_with_request_id
+    from ..model_request_selection import model_request_selection_scope
+    from .background_compact_recovery import prepare_background_compact_recovery
+
+    params = run_params_with_request_id(params)
+    recovery = None
+    if recovering and history.compact_source is not None:
+        recovery = prepare_background_compact_recovery(
+            execution.agent, history, context, request_id=params.request_id,
+            progress_callback=activity_sink.write_conversation_compact_progress, interrupt_check=is_interrupted,
+        )
+    with model_request_selection_scope(recovery) if recovery is not None else nullcontext():
+        result, resolved = _run_background_model_attempt(execution.agent, prompt, params)
+    return result, resolved, recovery
 
 
 # LLM: 工具成功与有副作用成功按运行时 policy 统计；不能从正文或工具名猜测，不修改工具账。

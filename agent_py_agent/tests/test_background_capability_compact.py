@@ -85,29 +85,40 @@ def test_background_runtime_binding_preserves_original_host_rejection(capability
 
 
 @pytest.mark.parametrize("mode", ["failed_decision", "cleared_selection"])
-def test_background_compact_retains_evaluated_none_without_another_decision(capability_host, monkeypatch, mode):  # noqa: F811
+def test_background_compact_reuses_evaluated_selection_without_another_decision(capability_host, monkeypatch, mode):  # noqa: F811
+    from agent_py_agent.agent.agent_core.compact_request_recovery import PreparedCompactRecovery
+
     fixture = capability_host
     thread = fixture.agent.conversation_store.threads.get_or_create({"channel": "chat", "channel_conversation_id": mode})
     append_prior_turn(fixture.agent, thread.thread_id)
     request = BackgroundRunRequest(thread_id=thread.thread_id, task_id="fallback-task", conversation_turn_id="fallback-turn")
     calls = provider(monkeypatch, fail=RuntimeError("fake unavailable") if mode == "failed_decision" else None)
     captured = capture_host_runs(monkeypatch, fixture.agent)
-    original = execution._compact_background_main_thread
+    original = PreparedCompactRecovery.select
+    selected = []
 
-    def compact(*args, **kwargs):
+    def select(self, agent, params, prompt):
+        selected.append(params)
         if mode == "cleared_selection":
-            assert kwargs["run_params"].capability_presentation is not None
+            assert captured[-1][1] is not None
             patch(fixture.agent, {"points.skill_tool.mode": "off"})
-        result = original(*args, **kwargs)
-        if mode == "cleared_selection":
-            patch(fixture.agent, {"points.skill_tool.mode": "apply"})
-        return result
+        try:
+            return original(self, agent, params, prompt)
+        finally:
+            if mode == "cleared_selection":
+                patch(fixture.agent, {"points.skill_tool.mode": "apply"})
 
-    monkeypatch.setattr(execution, "_compact_background_main_thread", compact)
+    monkeypatch.setattr(PreparedCompactRecovery, "select", select)
     result = run_slice(fixture, request)
     assert result.runtime_status == "ok" and len(calls) == 1 and len(captured) == 2
-    assert captured[1][1:] == (None, True, request.conversation_turn_id)
-    assert "method-059" in fixture.backend.model_prompts[1]
+    assert len(selected) == 1
+    assert captured[1][2:] == (True, request.conversation_turn_id)
+    assert (captured[1][1] is None) == (mode == "failed_decision")
+    if mode == "cleared_selection":
+        assert "method-059" not in fixture.backend.model_prompts[1]
+        assert fixture.backend.model_prompts[1].startswith("# System")
+    else:
+        assert "method-059" in fixture.backend.model_prompts[1]
     assert fixture.first.calls == fixture.second.calls == 0
 
 

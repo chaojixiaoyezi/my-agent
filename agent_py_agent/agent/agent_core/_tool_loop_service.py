@@ -247,8 +247,7 @@ def _empty_model_response_retry_context(params: ToolLoopExecuteParams) -> str:
     )
 
 
-# LLM: Every text/native tool round must pass through the shared context window before provider
-# preflight; do not bypass this entry for Gateway conversations or child agents.
+# LLM: 每轮在原预检前处理输入；完整恢复宿主独占本次Compact时点，避免捕获前重复摘要/CAS。
 # 函数用途: 组装本轮工具模型输入，并在真正调用模型前用统一 Compact 配置压住可见上下文。
 def build_tool_loop_prompt(agent, params: ToolLoopExecuteParams) -> str:
     # 子代理状态是当前运行事实，不属于可被 compact 摘要冻结的历史。每次 provider 安全点
@@ -261,7 +260,10 @@ def build_tool_loop_prompt(agent, params: ToolLoopExecuteParams) -> str:
     # native 下文本 tool_context 不发往 provider（IR messages 才发）。真正决定整个请求
     # 大小的是 prompt + tools schema + 完整 IR；按这份统一 token 口径整对回收旧往返，
     # 避免大 edit/write 参数被字符近似漏算后触发同 turn 重启。
-    _fit_native_ir_to_shared_budget(agent, params, prompt)
+    from ..model_request_selection import request_owns_compact
+
+    if not request_owns_compact(agent, params):
+        _fit_native_ir_to_shared_budget(agent, params, prompt)
     return prompt
 
 

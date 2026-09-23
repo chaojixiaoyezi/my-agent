@@ -23,6 +23,8 @@ from ..conversation.compact import (
 )
 from ..conversation.compact_projection import ConversationCompactSource
 from ..conversation.compact_provider_surface import ConversationCompactModelSurface
+from ..conversation.compact_scope import THREAD_COMPACT_SCOPE, CompactScope
+from ..conversation.compact_summary_view import AppliedCompactContext, resolve_compact_summary_view
 from ..conversation.native_history import (
     provider_history_messages_from_rows,
 )
@@ -65,7 +67,7 @@ class GatewayWorkspaceSelection:
     execution_sources: tuple[str, ...] = ()
 
 
-# LLM: 投影一个owner/thread与原授权目录；compact_source只给内部恢复保留原未窗口化来源，不进请求JSON或模型任务选择。
+# LLM: 投影一个owner/thread与原授权目录；compact_context冻结本次实际摘要范围，source只给内部恢复保留原未窗口化来源。
 # 类用途: 保存本轮会话、工作目录与可选只读压缩来源，展示历史不能取代原文来源。
 @dataclass(frozen=True)
 class GatewayConversationContext:
@@ -97,6 +99,7 @@ class GatewayConversationContext:
     thread_goal: dict[str, object] | None = None
     named_work: tuple[dict[str, str], ...] = ()
     load_errors: tuple[dict, ...] = ()
+    compact_context: AppliedCompactContext | None = field(default=None, repr=False)
     compact_source: ConversationCompactSource | None = field(default=None, repr=False)
 
 
@@ -182,8 +185,8 @@ def preflight_gateway_conversation(
     )
 
 
-# LLM: thread读取后按原repair/索引/来源/作用域顺序准备；defer保留上述副作用与错误传播，仅推迟摘要及提交。
-# 函数用途: 组装本轮历史、交付和目录；恢复轮带回未压缩来源，候选不重复调用本入口。
+# LLM: thread读取后按原repair/索引/来源/作用域顺序准备；同一view供摘要、原文与工具覆盖，defer仅推迟摘要及提交。
+# 函数用途: 组装本轮历史、交付和目录；恢复轮带回已绑定范围的来源，候选不重复调用本入口。
 def gateway_conversation_context(
     inputs: GatewayConversationLoadRequest,
     *,
@@ -209,7 +212,7 @@ def gateway_conversation_context(
     request_history.repair_gateway_conversation_messages(store, thread.thread_id, load_errors)
     scope = conversation_scope(agent, thread, spec)
     request_history.ensure_gateway_conversation_index(agent, store, thread.thread_id)
-    thread, history_rows, history_token_budget, recent_operation_evidence, compact_source = (
+    thread, history_rows, history_token_budget, recent_operation_evidence, compact_source, compact_context = (
         _load_gateway_compact_context(
             inputs,
             store,
@@ -258,11 +261,11 @@ def gateway_conversation_context(
             for item in (getattr(thread, "runtime_workspace_roots", ()) or ())
             if str(item or "").strip()
         ),
-        compact_summary=thread.summary,
-        compact_operation_evidence=dict(getattr(thread, "compact_operation_evidence", {}) or {}),
-        compact_operation_evidence_ref=_compact_operation_evidence_ref(
-            agent,
-            thread.thread_id,
+        compact_summary=compact_context.view.summary,
+        compact_operation_evidence=dict(compact_context.view.operation_evidence),
+        compact_operation_evidence_ref=(
+            _compact_operation_evidence_ref(agent, thread.thread_id)
+            if compact_context.scope.kind == "thread" else ""
         ),
         recent_operation_evidence=recent_operation_evidence,
         compact_generation=thread.compact_generation,
@@ -277,6 +280,7 @@ def gateway_conversation_context(
         thread_goal=thread_goal,
         named_work=named_work,
         load_errors=tuple(load_errors),
+        compact_context=compact_context,
         compact_source=compact_source,
     )
 
@@ -319,7 +323,7 @@ def _load_gateway_thread(
 # LLM: Gateway preflight shares the registered request interrupt with Compact. User stop propagates
 # unchanged; compact failures keep their own typed error code and cannot become transcript corruption.
 # 原宿主传入的同片展示面沿原入口使用；普通preflight构造原默认面，不从thread重建选择。
-# defer明确只读原来源，不量假请求；普通入口仍按原准备链压缩，所有读取/压缩错误保留独立原因。
+# defer明确只读同一范围来源，不量假请求；普通入口沿同一来源压缩，所有读取/压缩错误保留独立原因。
 # 函数用途: 加载Gateway会话来源，按内部模式立即压缩或返回待准备来源，停止与坏原文不会降级为空。
 def _load_gateway_compact_context(
     inputs: GatewayConversationLoadRequest,
@@ -327,14 +331,29 @@ def _load_gateway_compact_context(
     thread: object,
     *,
     force: bool = False,
-) -> tuple[object, object, int, dict[str, object], ConversationCompactSource | None]:
+) -> tuple[object, object, int, dict[str, object], ConversationCompactSource | None, AppliedCompactContext]:
     """Prepare compact state and preserve the original thread on a reported failure."""
     try:
+        work_scope = request_binding.gateway_message_work_scope(inputs.request)
+        scoped_audit_prepare = history_projection.is_scoped_audit_prepare(work_scope)
+        scope = (CompactScope(kind="turn", task_id=str(work_scope.get("conversation_task_id") or ""),
+                              turn_id=inputs.request_id) if scoped_audit_prepare else THREAD_COMPACT_SCOPE)
+        # LLM: Audit准备的既有可见行裁决也约束Compact来源，不能将兄弟Audit暗中写进本轮局部摘要。
+        # 函数用途: 沿原结构化工作范围筛出本轮允许归纳的历史行。
+        def selected_rows(rows):
+            if not scoped_audit_prepare:
+                return rows
+            return [row for row in rows if history_projection._history_row_visible_in_work_scope(
+                row.metadata, work_scope,
+            )]
+
+        source = load_conversation_compact_source(
+            inputs.agent, store, thread, exclude_request_id=inputs.request_id,
+            scope=scope, select_rows=selected_rows,
+        )
         if inputs.defer_compact:
-            source = load_conversation_compact_source(
-                inputs.agent, store, thread, exclude_request_id=inputs.request_id,
-            )
-            return thread, source.messages, source.policy.trigger_tokens, source.recent_operation_evidence, source
+            return (thread, source.messages, source.policy.trigger_tokens,
+                    source.recent_operation_evidence, source, source.compact_context)
         compact = prepare_conversation_context(
             inputs.agent,
             store,
@@ -342,6 +361,7 @@ def _load_gateway_compact_context(
             options=ConversationCompactOptions(
                 current_prompt=inputs.prompt,
                 exclude_request_id=inputs.request_id,
+                source=source,
                 force=force,
                 progress_callback=_gateway_compact_progress_callback(
                     inputs.on_chunk, store=store, thread=thread,
@@ -367,12 +387,19 @@ def _load_gateway_compact_context(
         raise ConversationCompactError(
             "上下文压缩未完成，原始会话记录保留不变", code=compact_exception_code(exc)
         ) from exc
+    application = source.compact_context
+    if compact.compacted:
+        application = AppliedCompactContext(
+            compact.thread.thread_id, scope,
+            resolve_compact_summary_view(inputs.agent, compact.thread, scope),
+        )
     return (
         compact.thread,
         compact.messages,
         compact.trigger_tokens,
         dict(compact.recent_operation_evidence or {}),
         None,
+        application,
     )
 
 
