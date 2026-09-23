@@ -13,7 +13,7 @@ from .models import (
 )
 from .runner_completion_payload import completion_evidence_refs, completion_handoff_payload
 
-# LLM: 本模块只负责把子代理终态或能力申请投递给正确父级；完成正文和产物引用由只读投影统一构造。
+# LLM: 本模块将终态或申请投递正确父级；精确完成交给原发布锁保留 handled，不能凭前置查询跳过半写恢复。
 # 模块用途: 可靠发送父级通知、去重并记录投递错误，保持后台 wake 和前台续轮读取同一交接内容。
 
 _LOGGER = logging.getLogger(__name__)
@@ -58,7 +58,7 @@ def notify_parent_on_activity_notice(manager: Any, task: Any, notice: dict[str, 
 # LLM: Normal runner results notify only statuses that need parent model attention. User-controlled
 # cancellation uses the sibling entry below so model-owned cancel_subagents remains an in-turn fact
 # and cannot create a duplicate background wake.
-# 投递结果是结构化事实（delivered / already_delivered / skipped / failed），供可恢复收口链判定
+# 投递结果是结构化事实（delivered / skipped / failed），供可恢复收口链判定
 # "要不要重发"，不解析任何文本。
 # 函数用途: 子代理自然结束后按既有唤醒状态集合通知直属父级，并回报投递结果。
 def notify_parent_on_runner_result(
@@ -114,8 +114,8 @@ def notify_parent_on_controlled_cancel(
 # admission rules. One exact task/thread pair updates the projection and publishes at most one
 # deduplicated root wake; nested children never skip their persisted direct parent.
 # 可恢复语义：去重键按 **exact attempt** 定身份（attempt 缺失时退回既有 task+status 形态，行为不变）。
-# 同一 attempt 的唤醒若已发出（pending/handled），本入口回报 already_delivered 而不再重发——
-# 「通知不重」；换 attempt 属新事实，绝不因旧 attempt 已交付而被吞掉——「通知不丢」。
+# 同一 attempt 的完整配对在原发布锁内保留 pending/handled，不以前置回执查询旁路半写恢复；
+# 换 attempt 属新事实，绝不因旧 attempt 已交付而被吞掉。
 # 投递异常返回 failed 并沿用既有错误落账。
 # 函数用途: 用同一结构化终态信封更新会话，并在目标直属根会话时发布一次唤醒。
 def _notify_parent_terminal(
@@ -149,14 +149,6 @@ def _notify_parent_terminal(
             if normalized_attempt
             else f"subagent-finished:{task_id}:{status}"
         )
-        # 已有同一去重键的唤醒（待消费或已消费）→ 视为已投递，绝不重发。
-        receipt = getattr(getattr(store, 'wakes', None), 'delivery_receipt', None)
-        if callable(receipt):
-            try:
-                if str(receipt(thread.thread_id, dedupe_key) or "") in {"pending", "handled"}:
-                    return "already_delivered"
-            except Exception:  # noqa: BLE001 - 回执查询失败不得阻断正常投递
-                pass
         root_task_id = str(getattr(task, "root_id", "") or task_id)
         metadata = _metadata(task, result, output_payload)
         evidence_refs = completion_evidence_refs(task, output_payload, metadata)
@@ -203,6 +195,7 @@ def _notify_parent_terminal(
                 "parent_agent_id": str(getattr(task, "parent_id", "") or ""),
                 "root_task_id": root_task_id,
                 "dedupe_key": dedupe_key,
+                "retain_handled": True,
                 "evidence_refs": evidence_refs,
                 "metadata": metadata,
             },

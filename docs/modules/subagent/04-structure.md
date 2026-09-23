@@ -7,10 +7,11 @@
 - `manager_runner_result_payload.py` 把宿主轮结束事实送入 `runner_result_state.py`，该模块仍负责 typed 状态、失败和当前尝试字段。
 - `runner_display_projection.py` 是纯展示函数，只从已裁决的 `status/failure_type` 得出中文活动标签；原状态写回入口在相同时机设置 TUI 的 `current_step/current_tool`，不改变运行事实。
 - `runner_completion_payload.py` 是完成内容的只读投影，根父通知、直属父等待和递归父级快照共用；`runner_completion_wake.py` 只拥有原状态更新、投递、去重和错误记录，不再导出完成内容构造函数。
+- 完成通知向 `store.wakes.append_observation` 显式传 `retain_handled=True`，由 `conversation/store_wake_publication.py` 在原锁内冻结完整负载、补齐配对并裁决旧消费事实；前置查询不承担去重权威。原 WAL 重试通路不增加新服务，通用 Goal 保持 handled 后新代。
 - `runner_result_admission.py` 显式接收原 `RuntimeRepository | None` 与 canonical task，在结果落盘前裁决 exact run／attempt 的接管、废弃、换代及终态冲突；拒绝诊断写同一运行账，不接收完整 manager，原结果服务不再保留旧私有准入函数。
 - `services/runner_result_service.py` 负责准入后的结果文件和任务投影；`services/runner_result_commit.py` 按原先后编排 WAL、RuntimeDB 结算与直属父级通知；`services/runtime_closeout.py` 仍是 WAL 原语、恢复扫描与已交付标记的权威实现。
 - 终态冲突由同一服务拒绝后，诊断必须写到 manager 持有的 RuntimeDB；只补原 `closeout_blocked` 事件，不让诊断成功与否改变原拒绝结果。
-- 本小片没有改 canonical run／attempt、锁、持久格式或父级 wake，后续拆分须先核对这些边界。详细迁移清单见[并行执行设计](../../design/SUBAGENT_PARALLEL_EXECUTION.md#第-7-步结果链迁移边界进行中)。
+- 结果链拆分不改 canonical run／attempt、锁或 WAL 格式；本地通知修复只将原 dedupe 记录显式升级为可恢复的 v2，旧 v1 在写入口迁移。详细边界见[发布恢复合同](../../design/closeout_state_machine.md#唤醒配对发布的半写恢复第-7-步本地实现)及[并行执行设计](../../design/SUBAGENT_PARALLEL_EXECUTION.md#第-7-步结果链迁移边界进行中)。
 
 ## 原创建锁与执行轮短事务
 

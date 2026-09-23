@@ -8,6 +8,11 @@ Shell 网关执行的取消查询现引用公共 `common/cancellation.py`，原�
 
 ## 第 7 步展示与完成交接投影小片（本地开发）
 
+配对通知半写恢复已独立本地实现：完成 wake 显式传 `retain_handled=True`，由会话原 dedupe 锁裁决，
+不再以前置查询跳过未完成观察安装。原 pending-closeout WAL 继续负责重试，RuntimeDB／标记／清 WAL 顺序不变；
+通用 Goal 仍在上一代 handled 后新发。原两个重复通知红灯已绿，故障矩阵与边界见[发布交接](../../tasks/HANDOFF_STEP7_WAKE_PUBLICATION.md)。
+此片尚未发布、未覆盖本版本真实 TUI，也不扩大成通用自动恢复服务。
+
 已把子代理当前活动的中文标签映射移到 `runner_display_projection.py`，只读取已裁决的状态码和失败类型。
 `runner_result_state.py` 仍在原结果写回时机设置 `current_step/current_tool`，不让模型正文或标签反向决定任务状态。
 `RUNNING` 继续保留当前活动，正常让出、能力等待、失败和取消的原裁决与持久收口顺序不变。

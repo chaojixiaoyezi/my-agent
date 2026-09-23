@@ -272,7 +272,8 @@ agent_py_agent/
 |   |   |-- store_claims.py             # 执行租约的领取、续租、精确终态、恢复归属与旧账归档
 |   |   |-- store_goals.py              # 目标集合、内容版本 CAS、预算结算及共享时钟依赖
 |   |   |-- store_observations.py       # 观察事件构造、追加、待处理扫描与原子确认
-|   |   |-- store_wakes.py              # 唤醒发布/去重、观察链接、投递冻结与消费确认
+|   |   |-- store_wakes.py              # 唤醒入口、观察链接、投递冻结与消费确认
+|   |   |-- store_wake_publication.py   # 原去重记录冻结完整发布、固定身份恢复与纯读回执
 |   |   |-- store_progress.py           # 进度策略、到期投影、失败退避落账与旧策略归档
 |   |   |-- process_events.py           # 受管后台命令终态到原会话 wake 的去重交接
 |   |   |-- compact_progress.py       # transcript/live-tool/turn-local Compact 来源与提交权的唯一公开进度协议
@@ -593,6 +594,7 @@ docs/
 |-- tasks/REFACTOR_PLUGIN_GOAL.md       # 同版发布部署、十步重构状态与逐步多 TUI 验收
 |-- tasks/TUI_READING_HANDOFF.md        # 阅读锚点、连续滚动、插话顺序与真实终端验收交接
 |-- tasks/HANDOFF_STEP7_SUBAGENT_LIFECYCLE.md # 第 7 步子代理结果链的代码、验证和集成交接
+|-- tasks/HANDOFF_STEP7_WAKE_PUBLICATION.md # 第 7 步唤醒配对发布半写修复与恢复边界交接
 |-- design/FEATURE-20260804-tool-runtime-unification.md # 工具唯一主链的用户行为、需求与验收规格
 |-- design/tool-runtime-unification.md  # 工具参考证据、架构、迁移删除表与并行边界
 |-- design/LONG_RUNNING_EXECUTION.md    # 慢模型、后台长等待与缓存诊断统一合同及验收矩阵
@@ -680,6 +682,7 @@ docs/
 - `docs/tasks/REFACTOR_PLUGIN_GOAL.md`：发布部署前置条件、十步执行状态、每步真实多 TUI 矩阵、证据与推进条件。
 - `docs/tasks/TUI_READING_HANDOFF.md`：本轮 TUI 修复的文件所有权、候选包、真实验收证据与部署边界。
 - `docs/tasks/HANDOFF_STEP7_SUBAGENT_LIFECYCLE.md`：子代理结果链隔离工作树的提交、受影响测试、并行边界和主线集成待办。
+- `docs/tasks/HANDOFF_STEP7_WAKE_PUBLICATION.md`：稳定 key 唤醒发布的半写恢复、v1 迁移、故障矩阵与未覆盖边界。
 
 - `agent_py_agent/agent/agent_core/agent_tree/model_view.py`：保留 run 身份、状态、原因与真实 read_order；不暴露恢复目录，省略内容可沿原工具归档完整读取。
 - `agent_py_agent/tests/test_agent_tree_model_view.py`：模型状态投影、终态报告可达性、状态不被省略及超长归档回读合同的定向验证。
@@ -733,7 +736,8 @@ docs/
 - `agent_py_agent/agent/conversation/store_claims.py`：`store.claims` 复用同一 storage 和原子文件更新；按结构化宿主、TTL、claim/task ID 领取与释放执行权，已结束旧租约由原维护周期归档。
 - `agent_py_agent/agent/conversation/store_goals.py`：`store.goals` 持有原目标集合和 CAS，显式接收线程校验、任务读取及共享时钟；不建立新的执行或恢复状态。
 - `agent_py_agent/agent/conversation/store_observations.py`：`store.observations` 管理观察账与确认回执；同一事件构造供唤醒联合发布复用，线程活动沿原子回调更新。
-- `agent_py_agent/agent/conversation/store_wakes.py`：`store.wakes` 保持先唤醒后观察、去重锁、投递冻结和处理回执的原顺序；只通过注入能力确认观察。
+- `agent_py_agent/agent/conversation/store_wakes.py`：`store.wakes` 组装唤醒和配对观察、更新线程活动，保留投递冻结与处理回执；只通过注入能力确认观察。
+- `agent_py_agent/agent/conversation/store_wake_publication.py`：只接原 storage，在原 dedupe 锁内冻结完整发布并安装原 wake／观察，按固定 ID 恢复、显式迁移 v1；查询只读，通用新代与保留 handled 分别由结构化策略决定。
 - `agent_py_agent/agent/conversation/store_progress.py`：`store.progress` 负责策略 CRUD、到期读取及失败退避事实落账；策略/claim 跨域归档仍由 Store 原维护入口顺序协调。
 - `agent_py_agent/agent/conversation/goal_clock.py`：前台、后台及控制视图共用同 owner 会话存储的目标时钟，四个计时操作直接归共享对象，整数结算保留小数余量。
 - `agent_py_agent/agent/conversation/goal_binding.py`、`goal_delegation.py`：按代理自身 thread/run 归属目标和用量；显式子目标沿同一运行器续接，不另建执行通道。

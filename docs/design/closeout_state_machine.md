@@ -5,24 +5,44 @@
 
 ## 1. 解决的问题
 
-### 唤醒配对发布的半写恢复（第 7 步，待实现）
+### 唤醒配对发布的半写恢复（第 7 步，本地实现）
 
 已从原文件写入链复现：wake 已落盘、dedupe 回执原子替换失败时，closeout 恢复发布第二条 wake；
 原 wake 尚 pending 和已经 handled 两种窗口均失败。本缺口早于第 7 步迁移，正常 TUI 成功不抵消它。
 
-拟沿原 dedupe 记录先冻结本次 signal／observation 的完整负载和身份，再安装原队列与观察账，
-最后确认发布完成；恢复只补齐同一发布，不重新执行子代理业务，也不引入第二个队列。
-观察追加必须按固定 ID 幂等；已发生或不明的配对发布不得转成随机无链 observation。
-回执查询保持只读，部分发布不能被当成已完整交付。通用调用仍合并 pending、handled 后可开始新一代，
-精确完成通知用显式保留 handled 的通用策略，在同一锁内裁决，禁止按 reason 文本特判。
+`store_wake_publication.py` 沿原 dedupe 路径和原文件锁保存 `wake_dedupe.v2`：
+
+1. 先原子写入 `prepared`，冻结本次 signal／可选 observation 的完整负载、固定身份与 `retain_handled` 策略。
+2. 安装原 wake 文件；若该固定 ID 已 pending／handled，核对不可变字段并保留原消费与投递冻结事实。
+3. 按固定 observation ID 核对原观察账，只在缺失时追加同一份冻结负载；双方引用始终互相对应。
+4. 最后原子确认 `published`。任一步失败向调用方报错；同键重试先补齐原发布，不执行子代理业务。
+
+以上步骤共用原 dedupe 锁，不新增队列、SQLite 或第二份投递状态。`prepared` 重试即使信号已被消费，
+也只补原观察并确认原发布。通用调用默认合并 pending，完整 published 且 handled 后可开始新一代；
+这是 Goal 固定 key 可以持续续跑的既有语义。精确 runner 完成显式传 `retain_handled=True`，
+同锁决定始终复用该键；新 attempt 使用新 key，禁止按 reason 文本特判。
+不再用前置回执查询跳过发布入口，否则可能绕过半写观察恢复。`delivery_receipt` 只读原子快照，
+不创建锁文件、不迁移、不恢复，prepared 返回未完整交付。已有正常发布状态只报告 pending／handled。
+
+v1 回执只在写入口显式迁移，并记录 `migration.from_schema` 和原 wake ID；原信号与配对观察必须可读，
+不能拿重试的新摘要填补旧版缺失观察。损坏、身份冲突、原内容缺失均报错并保留原账，不能清空或随机重发。
+任一配对发布失败不再追加随机无链 observation 充当成功。新模块只接收原 `ConversationStorage`，
+不接整个 Store／manager；消费、线程更新、runner WAL 和 RuntimeDB 仍各由原模块负责。
+
+恢复边界：本片只承诺有稳定 key 的未完成发布在调用方重试时恢复。runner 沿原 pending-closeout WAL
+重试；通用调用方若在 prepared 后从未重试，不会自动安装，本片不添加宿主扫队列或后台恢复服务。
+无 key 调用不承诺重试幂等。通用 published／handled 后的新调用属于下一代；要终态永久去重必须显式保留 handled。
+能力申请旧入口先写观察、再发信号且只记录通知错误，仍是独立调用链，不把本片验收写成所有通知自动恢复。
 
 参考范围：本仓 store_guidance_submission 的先冻结提交再安装投影；Hermes 的
 gateway/delivery_ledger.py 固定 obligation ID 和事务；OpenClaw 的
-src/infra/delivery-queue-sqlite.ts 显式 completion retention。只借一致性思路，
+src/infra/delivery-queue-sqlite.ts 显式 completion retention。已窄读这些实现，不宣称完整参考工程审阅。只借一致性思路，
 不迁移 SQLite、不依赖进程工具的专用 redo schema。manager 透传的依赖收窄仍是独立未完成项。
 
-验收包括信号安装前后、观察追加前后、发布完成标记失败、期间被消费、同键下一代和精确通知重放；
-同时核对 wake 数量、观察 ID、完整负载及双向引用。先合同回归，再按版本做原生 TUI 验收。
+故障回归覆盖预留前后、信号安装前后、观察追加前后、发布完成标记前后与期间消费；
+同时核对 wake 数量、观察 ID、完整负载、双向引用、并发重放、同键下一代、Goal 续跑和 v1 显式迁移。
+原 closeout 两个真实文件替换失败红灯已转绿；注入点改为安装 wake 后的最终 receipt 替换，仍保留同一故障事实和数量断言。
+这是离线文件故障与调用方验收，尚未部署或做本版本原生 TUI／硬断电验证；详见[本片交接](../tasks/HANDOFF_STEP7_WAKE_PUBLICATION.md)。
 
 历史实现在模型自然最终回复之后，还会经过交付扫描、产物清单、
 `acceptance_checks`、`verification_status` 和子代理结果格式二次裁决。同一任务

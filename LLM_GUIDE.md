@@ -198,6 +198,9 @@ Audit 共用任务账本、命名锁和任务锁；原 TaskStore 的自由函数
 目标、观察、唤醒和进度分别通过 `store.goals` / `observations` / `wakes` / `progress` 访问，
 对应实现为 `store_goals.py`、`store_observations.py`、`store_wakes.py`、`store_progress.py`；旧 Store 方法不留转发。
 Goal 显式接收原共享时钟；唤醒接收观察确认能力，发布顺序不能拆开。旧账 GC 仍在组装入口先策略后租约。
+稳定 key 的唤醒发布由 `store_wake_publication.py` 在原 dedupe 锁内先冻结完整信号／观察，再安装原文件；
+失败由调用方重试原发布，查询纯读。通用 handled 后可新发，runner 完成显式保留 handled；v1 在写入口显式迁移，
+坏账不清空、无 key 不承诺重试幂等，不新增后台恢复扫描。此修复本地验收及未覆盖项见[发布交接](docs/tasks/HANDOFF_STEP7_WAKE_PUBLICATION.md)。
 通用 JSON 对象读取及尽力删除原语归 `store_io.py`；错误口径与原持久迁移规则保持。
 首次 `/goal` 沿控制回执传递 workspace，复用 `gateway_parts/workspace_scope.py` 校验后仅初始化空 cwd；
 已有线程目录不被控制命令重定向。显式目录签入回执 v3 摘要，旧版不得携带未签名目录。

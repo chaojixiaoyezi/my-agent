@@ -2,10 +2,21 @@
 
 ## 第 7 步子代理结果链发布与验收
 
-最新未修复项：`test_closeout_wake_receipt_half_write_does_not_duplicate` 两个参数用例
-在真实文件原子替换位置注入一次回执写失败，分别覆盖原 wake 尚 pending／已经 handled；
-当前均确定性得到 2 条通知而非 1 条。属于故障回归红灯，不是验收通过，不得将当前工作区推送发布。
-原已部署包不受本地测试文件修改影响；修复和完整依赖收窄仍属第 7 步。
+配对发布半写修复已在隔离线本地验收，尚未发布：`test_closeout_wake_receipt_half_write_does_not_duplicate`
+两个参数用例在修前确定性得到 2 条通知而非 1 条；修后在 wake 安装后的最终回执原子替换处故障注入，
+pending／handled 两种重试均保留一条 wake 和完整原观察。新顺序先预留再安装，未删原数量断言。
+原已部署包不受本地修复影响；完整依赖收窄与本版本发布验收仍属第 7 步。
+
+本片 11 个直接相关测试文件 **261 passed、1 项既有 skip**；其中新文件有 32 个通过用例：
+8 个文件边界故障 × 是否消费、同键并发与重放、普通 Goal handled 后继续、旧 v1 纯读及显式迁移、
+坏账保留、原投递冻结和无 key 失败不得伪造无链观察。查询还核对文件集合不变和发布中只读 prepared 快照。
+`test_wake_publication_recovery.py` 之外，同跑 `test_dispatch_liveness_and_revive.py`、
+`test_conversation_wake_events.py`、`test_closeout_recovery_paging.py`、`test_direct_parent_lifecycle.py`、
+`test_subagent_runner_result_state.py`、`test_service_window_semantics.py`、`test_conversation_store.py`、
+`test_conversation_goal_tools.py`、`test_goal_lifecycle_recovery.py`、`test_observation_route.py`。
+具体命令、严格 gate 与未覆盖项见[配对发布交接](docs/tasks/HANDOFF_STEP7_WAKE_PUBLICATION.md)。
+本片不做宿主自动恢复扫描；prepared 成功后仍需调用方重试，runner 复用原 WAL；无 key 不承诺重试幂等。
+离线故障回归不等于真实 TUI、硬断电或所有通知入口自动恢复，线上 CI 未作为验收来源。
 
 独立工作树已拆出 runner 状态展示、完成交接信封、exact attempt 准入与
 “结果先落盘、再 WAL、再运行账、最后父通知”的初次提交编排；旧函数和导出已删除。

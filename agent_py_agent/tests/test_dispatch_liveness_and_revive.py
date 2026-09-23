@@ -1784,21 +1784,23 @@ def test_initial_delivery_marker_failure_keeps_pending_closeout(tmp_path: Path) 
 def test_closeout_wake_receipt_half_write_does_not_duplicate(
     tmp_path: Path, monkeypatch, handled_before_receipt: bool,
 ) -> None:
-    from agent_py_agent.agent.gateway_parts import io as gateway_io
+    from agent_py_agent.agent.common import json_io
     from agent_py_agent.agent.subagents.services import runtime_closeout
 
-    manager, store, task, attempt_id, _, params, _ = _closeout_fixture(
+    manager, store, task, attempt_id, _, params, _json = _closeout_fixture(
         tmp_path, owner="tui-test/wake-receipt-half-write"
     )
     thread = store.tasks.thread_for(task.id)
     key = f"subagent-finished:{task.id}:FAILED:{attempt_id}"
     receipt_path = store.storage.wake_dedupe_path(thread.thread_id, key)
-    original_replace = gateway_io._replace_with_retry
+    original_replace = json_io._replace_with_retry
     injected = False
 
     def fail_receipt_once(source, destination):
         nonlocal injected
-        if destination == receipt_path and not injected:
+        # v2 先冻结 prepared，再发布配对；只在发布完成标记替换时注入同一半写事实。
+        payload = _json.loads(source.read_text(encoding="utf-8")) if destination == receipt_path else {}
+        if destination == receipt_path and payload.get("phase") == "published" and not injected:
             injected = True
             published = _wakes_for_attempt(tmp_path, task.id, attempt_id)
             assert len(published) == 1
@@ -1808,7 +1810,7 @@ def test_closeout_wake_receipt_half_write_does_not_duplicate(
             raise OSError("injected wake receipt replacement failure")
         return original_replace(source, destination)
 
-    monkeypatch.setattr(gateway_io, "_replace_with_retry", fail_receipt_once)
+    monkeypatch.setattr(json_io, "_replace_with_retry", fail_receipt_once)
     manager.runner_result.record_runner_result(params)
     assert injected
     assert len(_wakes_for_attempt(tmp_path, task.id, attempt_id)) == 1
