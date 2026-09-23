@@ -193,9 +193,11 @@ class AnthropicCompatibleBackend(HttpBackend):
             )
         )
 
-    # LLM: Anthropic 单一组包入口只发显式采样，请求级温度覆盖优先；不套 Chat 默认、不修改后端快照。
+    # LLM: Anthropic 单一组包入口只发显式采样；仅此处将 user 媒体 refs 展开到临时 payload，不改 canonical 历史或后端快照。
     # 函数用途: 发送明确配置的连接与采样参数，未设置温度沿用服务端默认，摘要零温覆盖和流观察器保留。
     def _generate_request(self, request: _AnthropicGenerateRequest) -> ModelResponse:
+        from ..conversation.input_media import project_input_media
+
         payload: dict[str, Any] = {
             "model": self.model_name,
             "max_tokens": bounded_output_tokens(
@@ -223,13 +225,16 @@ class AnthropicCompatibleBackend(HttpBackend):
         selected_tools = tools_for_choice(request.tools, request.tool_choice)
         payload["messages"], selected_tools = anthropic_messages_with_optional_cache(
             prompt=cache_projection.prompt,
-            messages=request.messages,
+            messages=project_input_media(request.messages, self.input_media_max_bytes),
             tools=selected_tools,
             cache_enabled=self.prompt_cache_enabled,
             stable_user_prefix=cache_projection.stable_user_prefix,
             stable_system_cache_active=(cache_projection.stable_system_cache_active),
             structured_native_layout_active=(cache_projection.structured_native_layout_active),
         )
+        from ..conversation.input_media import provider_media_messages
+
+        payload["messages"] = provider_media_messages(payload["messages"])
         if selected_tools:
             from .tool_protocol_adapter import anthropic_tool_choice
 

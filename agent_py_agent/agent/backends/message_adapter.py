@@ -111,6 +111,8 @@ def _flush_results(messages: list[dict[str, Any]], pending_results: list[dict[st
     pending_results.clear()
 
 
+# LLM: 用户媒体与正文保持同一条 user 消息；本层只携带 refs，禁止编码或读取文件。
+# 函数用途: 将非工具结果的 IR 项追加为有序原生消息。
 def _append_non_result_message(messages: list[dict[str, Any]], item: HistoryItem) -> None:
     if isinstance(item, CompactionSummary):
         text = str(item.text or "")
@@ -127,11 +129,12 @@ def _append_non_result_message(messages: list[dict[str, Any]], item: HistoryItem
             )
         return
     if isinstance(item, UserTurn):
+        from ..conversation.input_media import input_media_blocks
+
         text = str(item.text or "")
-        if text.strip():
-            messages.append(
-                {"role": "user", "content": [{"type": "text", "text": text}]}
-            )
+        content = ([{"type": "text", "text": text}] if text.strip() else []) + input_media_blocks(item.media)
+        if content:
+            messages.append({"role": "user", "content": content})
         return
     if isinstance(item, AssistantTurn):
         assistant = _assistant_message(item)

@@ -7,6 +7,38 @@
 - owner：Codex TUI 资源线；已向“模块重构”和“接入决策模型”协调文件及测试环境。
 - date：2026-09-23。
 
+## 官网真模型和媒体输入补充片
+
+资源片提交为 `a2a9e0e16`，本补充片在同分支上继续；未推送、未切换默认运行环境。
+候选经官网 MiniMax-M2.7 和 MiniMax-M3 验收，旧假模型负载记录不再作为本轮真实可用依据。
+
+- 媒体入口：`/attach`、终端文件路径粘贴/拖入、本机 Ctrl+V 截图；草稿可删除、暂存、恢复，运行中媒体排入下一轮。
+- `input_media.py` 统一 owner 私有原件、内容寻址 refs、输入验证、发送投影的总字节预算。
+  Gateway ask/指纹、native UserTurn 和后端适配只传同一组结构化 refs；base64 在供应商边界临时展开。
+- 图片/视频/退出后续问经官网 M3 的真实原生 TUI 通过；私有只读请求观察器确认原件哈希和真实外发字节一致。
+  macOS 系统截图 Ctrl+V 也经官网 M3 通过，原剪贴板已恢复；本机隔离测试进程已退出。
+- M2.7 官网真实并发：1 CPU / 2 GiB，100 独立身份全部 done，50 槽峰值；204.3 秒完成。
+  原生 TUI 并行问答正确，44 帧未见未同步；cgroup 峰值 1047.1 MiB，末次 Gateway/TUI RSS 313.8/62.6 MiB。
+  `/status` 全部成功，但高峰 P95 3268 ms、最大 4897 ms，单核批量冷启动延迟仍须治理。
+- 一万行无 checkpoint 真实续聊完成，410.81 秒、4 次供应商调用、generation=1；正确回答四加四等于八。
+  千万行无 checkpoint 的 `after_compact_report` 在隔离 384 MiB 地址空间约束下立即 MemoryError，**未通过**。
+  `append_once` 仍全量读历史去重；这两处不得与千万行只读浏览通过混淆。
+- 组件矩阵 1008 passed、1 skipped（既有 HTTP stop 409）；真实验收与组件测试分别记录。
+  详细测试口径和证据名见 [TESTS](../../TESTS.md#官网真模型与tui媒体验收)，媒体合同见
+  [TUI_INPUT_MEDIA](../design/TUI_INPUT_MEDIA.md)。
+- Ruff、doc sync、strict code-size、diff check、clean-package 通过；47 个候选生产文件与专用测试机 SHA256 一致。
+- 用户新要求：后续长任务改用官网 M2.7 自主将 fd 从 Rust 复刻为 Python；此前合成大行数只作存储边界定位。
+  本线负责提交一次真实 TUI 需求和旁观资源采样，不能代写产物；该项验收尚未完成。
+
+补充片涉及 `tui_media.py`、`tui_media_clipboard.py`、TUI 草稿/按键/worker、
+`conversation/{input_media,history_display}.py`、`backends/{tool_ir,message_adapter,anthropic,openai_chat,responses_wire}.py`、
+`loop_support._native_initial_tool_ir_history`、Gateway 入站 refs/指纹与配置。
+未修改 `compact.py`、`compact_request_budget.py`、Compact scope/checkpoint/CAS 或第 7 步子代理终态链。
+“接入决策模型”负责后续有界来源读取与 Compact 组合；本线不以截断历史或伪造 checkpoint 绕过失败。
+
+主线整合须同时保留媒体字节预算与另一线的工具历史引用：前者只投影 user 媒体，后者管工具结果归档。
+停 Gateway 前除 HTTP 队列外还须检查 canonical running attempts/后台任务；processing=0 不等于进程空闲。
+
 ## 本线目标与实际完成
 
 解决长对话重复净化造成的卡顿、退出后轮询不收口、半请求长占 HTTP 工位，

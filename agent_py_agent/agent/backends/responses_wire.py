@@ -24,7 +24,7 @@ def reasoning_item(value: object) -> dict:
 
 
 # LLM: 工具结果依据 tool_use_id 匹配，助手工具依据 canonical IR；任何自然语言都不能生成 function_call。
-# 函数用途: 把一条统一原生消息转换为 Responses 的独立 items。
+# 函数用途: 转换 Responses items，图片在发送边界编码，未支持的视频显式拒绝而不静默丢失。
 def message_items(message: dict, model: str) -> list[dict]:
     role, content = message.get("role"), message.get("content")
     if isinstance(content, str):
@@ -32,6 +32,16 @@ def message_items(message: dict, model: str) -> list[dict]:
     result = []
     for block in content or []:
         kind = block.get("type")
+        if role == "user" and kind in {"image", "video"}:
+            from ..conversation.input_media import provider_media_block
+            from .errors import ProviderRequestRejectedError
+
+            if kind == "video":
+                raise ProviderRequestRejectedError("当前 Responses 适配器未配置视频输入协议，请使用支持视频的 Messages/Chat 接口。")
+            source = provider_media_block(block)["source"]
+            url = source.get("url") if source["type"] == "url" else f"data:{source['media_type']};base64,{source['data']}"
+            result.append({"role": role, "content": [{"type": "input_image", "image_url": url}]})
+            continue
         if kind == "text":
             result.append({"role": role, "content": str(block.get("text") or "")})
             continue

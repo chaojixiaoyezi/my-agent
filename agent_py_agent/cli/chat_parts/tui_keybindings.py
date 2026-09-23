@@ -86,6 +86,7 @@ class TuiCreateKeybindingsParams:
     escape_armed_at_ref: list[float] | None = field(default_factory=lambda: [0.0])
     escape_armed_text_ref: list[str] | None = field(default_factory=lambda: [""])
     local_run_ref: list = field(default_factory=lambda: [None])
+    media_importing: bool = False
 
 
 # LLM: 这些 filters 是同一次 key map 构建的不可变条件集合；不得复制条件表达式或从控件可见文本推断 mode。
@@ -402,8 +403,15 @@ def _handle_enter_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
 
 # LLM: 提交入口统一恢复 transcript follow-tail、保存历史、执行 typed command 或进入 canonical queue；补全 Enter 也必须复用它。
 # 终态 child 的拒发必须清空草稿；插件候选版本在清空前冻结，随后只交给后台命令分派。
-# 函数用途: 提交当前输入框内容，先回到最新对话，再在命令未消费时创建一个聊天任务；终态子代理只提示拒发并清空本次草稿。
+# 函数用途: 提交文字及已登记附件；运行中附件进入下一轮队列，避免纯文字 steer 丢失媒体，导入未完保留草稿。
 def _submit_input_area(event, params: TuiCreateKeybindingsParams) -> None:
+    if params.media_importing:
+        _required_tui_runtime(params).set_notice("附件仍在导入，请稍候再发送。", duration_seconds=2)
+        return
+    from .tui_media import draft_media, handle_attach_command
+
+    if handle_attach_command(event, params, str(params.input_area.text or "").strip()):
+        return
     if _replace_trailing_backslash_with_newline(params.input_area):
         return
     interaction = _required_interaction(params)
@@ -414,7 +422,9 @@ def _submit_input_area(event, params: TuiCreateKeybindingsParams) -> None:
     display_text = draft.text.strip()
     if not display_text:
         return
-    text = interaction.expand_draft(draft).strip()
+    text, media = draft_media(draft, interaction.expand_draft(draft).strip())
+    if media:
+        text = text or "请查看附件。"
     if len(text) > MAX_USER_INPUT_CHARS:
         # 会话运行时 语义：超限拒发 + 保留原文（不丢输入），避免大粘贴静默丢失。
         _set_input_draft(params, draft)
@@ -436,6 +446,9 @@ def _submit_input_area(event, params: TuiCreateKeybindingsParams) -> None:
     active_agent_id = str(
         getattr(navigation_snapshot, "active_run_id", "") or ""
     ).strip()
+    if media and (active_agent_id or text.startswith("/")):
+        _required_tui_runtime(params).set_notice("请在主对话发送附件；附件草稿已保留。", duration_seconds=3)
+        return
     if active_agent_id and bool(getattr(navigation_snapshot, "terminal", False)):
         _reset_input_after_submit(params)
         _reset_exit_arms(params)
@@ -474,23 +487,15 @@ def _submit_input_area(event, params: TuiCreateKeybindingsParams) -> None:
         _restore_stash_after_submit(params)
         event.app.invalidate()
         return
-    if text == "/permissions" or text.startswith("/permissions "):
-        from .tui_permissions_menu import open_permissions_menu
-
-        open_permissions_menu(event, params, mode=text.removeprefix("/permissions").strip() or None)
+    if _dispatch_tui_slash_input(event, params, text):
         return
-    if text == "/model":
-        from .tui_model_menu import run_model_menu
+    if media:
+        from dataclasses import replace
 
-        event.app.create_background_task(run_model_menu(
-            event.app, params.agent, str(params.current_session_id or "default"), _required_tui_runtime(params),
-        ))
-        return
-    if _tui_handle_command(params=_handle_command_params(params, text)):
-        if params.stop_event.is_set():
-            event.app.exit()
-        else:
-            _restore_stash_after_submit(params)
+        options = replace(_tui_execution_options(params), input_media=media)
+        _tui_enqueue_job(params, text, display_text=display_text, execution_options=options)
+        _restore_stash_after_submit(params)
+        event.app.invalidate()
         return
     if _tui_submit_active_turn_input(params, text, display_text=display_text):
         _restore_stash_after_submit(params)
@@ -498,6 +503,30 @@ def _submit_input_area(event, params: TuiCreateKeybindingsParams) -> None:
         return
     _tui_enqueue_job(params, text, display_text=display_text)
     _restore_stash_after_submit(params)
+
+
+# LLM: 模型/权限表单和普通 slash 都经既有控制入口；只在对应命令被消费后返回，不把普通正文当控制。
+# 函数用途: 分派本地表单与同步命令，并统一处理命令后的退出或草稿恢复。
+def _dispatch_tui_slash_input(event, params: TuiCreateKeybindingsParams, text: str) -> bool:
+    if text == "/permissions" or text.startswith("/permissions "):
+        from .tui_permissions_menu import open_permissions_menu
+
+        open_permissions_menu(event, params, mode=text.removeprefix("/permissions").strip() or None)
+        return True
+    if text == "/model":
+        from .tui_model_menu import run_model_menu
+
+        event.app.create_background_task(run_model_menu(
+            event.app, params.agent, str(params.current_session_id or "default"), _required_tui_runtime(params),
+        ))
+        return True
+    if _tui_handle_command(params=_handle_command_params(params, text)):
+        if params.stop_event.is_set():
+            event.app.exit()
+        else:
+            _restore_stash_after_submit(params)
+        return True
+    return False
 
 
 # LLM: Gateway memory I/O may traverse or update durable owner state and must never block the
@@ -932,14 +961,42 @@ def _insert_pasted_text(event, params: TuiCreateKeybindingsParams, text: str) ->
 
 
 # LLM: bracketed paste 是外部终端剪贴板的主路径；事件正文必须完整交给统一粘贴入口，不能逐字符重放。
-# 函数用途: 接收 Cmd-V、Ctrl-Shift-V 等终端生成的 bracketed-paste 文本块。
+# 函数用途: 接收终端粘贴文本；整块为图片/视频路径时在后台导入为附件。
 def _handle_bracketed_paste(event, params: TuiCreateKeybindingsParams) -> None:
+    from .tui_media import import_tui_media, pasted_media_paths
+
+    paths = pasted_media_paths(event.data)
+    if paths and not params.media_importing:
+        event.app.create_background_task(import_tui_media(event, params, paths))
+        return
     _insert_pasted_text(event, params, event.data)
 
 
-# LLM: Ctrl-V 只读取 prompt_toolkit 应用剪贴板；系统剪贴板仍由终端通过 bracketed paste 注入，不能在 TUI 内猜平台命令。
-# 函数用途: 把本 TUI 刚复制的文本粘贴到输入框，支持替换当前选区；应用剪贴板为空时给出可操作提示。
+# LLM: Ctrl-V 是用户明确读取本机图片剪贴板的动作；平台读取在后台，文本仍走既有 paste 合同。
+# 函数用途: 粘贴系统截图或 TUI 内复制的文字，不自动发送。
 def _handle_clipboard_paste(event, params: TuiCreateKeybindingsParams) -> None:
+    event.app.create_background_task(_paste_system_image_or_text(event, params))
+
+
+# LLM: 显式 Ctrl-V 在后台读取系统图片；没有图片才沿用应用文字剪贴板，不在 UI 线程执行平台命令。
+# 函数用途: 粘贴截图或已复制的文字；导入完成后删除临时图片。
+async def _paste_system_image_or_text(event, params: TuiCreateKeybindingsParams) -> None:
+    import asyncio
+
+    from .tui_media import import_tui_media
+    from .tui_media_clipboard import clipboard_image
+
+    if params.media_importing:
+        return
+    params.media_importing = True
+    path = await asyncio.to_thread(clipboard_image)
+    params.media_importing = False
+    if path is not None:
+        try:
+            await import_tui_media(event, params, (path,))
+        finally:
+            path.unlink(missing_ok=True)
+        return
     clipboard = getattr(event.app, "clipboard", None)
     get_data = getattr(clipboard, "get_data", None)
     if not callable(get_data):
@@ -1010,7 +1067,7 @@ def _tui_execution_options(
 
 
 # LLM: 用户块与 queue 状态必须先发布到同一 TuiRuntime，再把同 request_id job 放入唯一执行队列。
-# 函数用途: 构造聊天任务、显示用户输入并按当前运行快照标记排队。
+# 函数用途: 构造含媒体 refs 的聊天任务、显示原草稿并按当前运行快照排队。
 def _tui_enqueue_job(
     params: TuiCreateKeybindingsParams,
     text: str,
@@ -1043,6 +1100,7 @@ def _tui_enqueue_job(
         tool_approval=options.tool_approval,
         rich_transcript=options.rich_transcript,
         inject_complete=inject_complete,
+        input_media=options.input_media,
     )
     with params.state_lock:
         queued = bool(params.is_running_ref[0]) or int(params.pending_jobs_ref_for_enqueue[0]) > 0
@@ -2183,7 +2241,7 @@ def _handle_up_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
 
 
 # LLM: queue 回取必须原子移除 canonical Queue 项并让 runtime 发 queue_restored；Esc/Ctrl-C/Up 共用同一实现避免数量与显示分叉。
-# 函数用途: 将所有尚未执行的可编辑消息合并回当前输入，并保留当前粘贴引用。
+# 函数用途: 将尚未执行的可编辑消息合并回输入，保留其文字粘贴和媒体引用。
 def _restore_editable_queue(params: TuiCreateKeybindingsParams) -> bool:
     buffer = params.input_area.buffer
     restored = restore_queued_prompts(
@@ -2206,6 +2264,7 @@ def _restore_editable_queue(params: TuiCreateKeybindingsParams) -> bool:
             restored.text,
             restored.cursor_position,
             current.pasted_text_refs,
+            media_refs=(*restored.media_refs, *current.media_refs),
         ),
     )
     return True

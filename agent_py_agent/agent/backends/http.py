@@ -58,7 +58,7 @@ class HttpBackend(BaseBackend):
     supports_provider_request_options = True
 
     # LLM: 复制可变选项并校验 top_p；多线程仅用 request-local 身份，不能热改共享后端采样或头部。
-    # 函数用途: 初始化可安全复用的后端，非法采样在发送 HTTP 之前报错。
+    # 函数用途: 初始化可复用后端和媒体预算，非法采样在发送 HTTP 之前报错。
     def __init__(
         self,
         options: BackendOptions,
@@ -87,6 +87,7 @@ class HttpBackend(BaseBackend):
         self.top_p = validate_top_p(options.top_p)
         self.stream_enabled = bool(options.stream_enabled)
         self.prompt_cache_enabled = bool(options.prompt_cache_enabled)
+        self.input_media_max_bytes = max(1, int(options.input_media_max_bytes))
         # Streaming HTTP transports enforce request_timeout as an SSE idle
         # timeout.  The tool-loop guard therefore must not also reinterpret it
         # as a total wall-clock limit while valid events keep arriving.

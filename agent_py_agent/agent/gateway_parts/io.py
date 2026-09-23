@@ -56,6 +56,7 @@ _GATEWAY_REQUEST_FINGERPRINT_KEYS = (
     "system_task",
     "inject",
     "prompt_files",
+    "input_media",
     "save",
     "include_prompt",
     "resume_context",
@@ -80,7 +81,7 @@ class GatewayJsonReadReport:
 
 
 # LLM: The request fingerprint covers authenticated owner, conversation, prompt, task, and all
-# execution-affecting options while excluding mutable lease/status/projection fields. The filename
+# execution-affecting options including immutable input_media refs, excluding mutable lease/status/projection fields. The filename
 # request id is supplied by the caller and overrides any untrusted payload alias.
 # 函数用途: 计算 Gateway 请求不可变身份与执行内容的稳定指纹。
 def gateway_request_fingerprint(payload: dict, request_id: str) -> str:

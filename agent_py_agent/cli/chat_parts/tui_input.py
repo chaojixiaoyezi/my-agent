@@ -130,12 +130,13 @@ class TuiCompletionMenuControl(UIControl):
 
 
 # LLM: restore result 只包含编辑器投影和被移除 request ids；job 对象不会泄漏到 UI 控件成为第二执行入口。
-# 类用途: 返回一次队列回取后应写入输入框的正文、光标和任务身份。
+# 类用途: 返回队列回取后的正文、光标、任务身份和已登记媒体引用。
 @dataclass(frozen=True)
 class TuiQueuedRestore:
     text: str
     cursor_position: int
     request_ids: tuple[str, ...]
+    media_refs: tuple = ()
 
 
 # LLM: 视觉行坐标必须复用 prompt_toolkit 的逐字符显示宽度语义；软折行边界属于下一视觉行，不能退化为逻辑换行或 history 判断。
@@ -330,7 +331,11 @@ def restore_queued_prompts(
     queued_text = "\n".join(texts)
     combined = "\n".join(part for part in (*texts, str(current_text)) if part)
     cursor = len(queued_text) + (1 if queued_text and current_text else 0) + max(0, int(current_cursor))
-    return TuiQueuedRestore(combined, min(len(combined), cursor), request_ids)
+    from .tui_media import TuiMediaRef
+
+    media = tuple(TuiMediaRef(ref["placeholder"], ref) for job in removed
+                  for ref in getattr(job, "input_media", ()) if ref.get("placeholder"))
+    return TuiQueuedRestore(combined, min(len(combined), cursor), request_ids, media)
 
 
 # LLM: 默认选中只改变 completion_state 索引；用户输入在 Tab/Enter 显式接受前必须保持原样。

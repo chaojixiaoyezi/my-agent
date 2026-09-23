@@ -280,6 +280,48 @@ pending／handled 两种重试均保留一条 wake 和完整原观察。新顺�
 具体命令、严格 gate 与未覆盖项见[配对发布交接](docs/tasks/HANDOFF_STEP7_WAKE_PUBLICATION.md)。
 本片不做宿主自动恢复扫描；prepared 成功后仍需调用方重试，runner 复用原 WAL；无 key 不承诺重试幂等。
 离线故障回归不等于真实 TUI、硬断电或所有通知入口自动恢复，线上 CI 未作为验收来源。
+## 真实开发长任务验收方法
+
+用户明确要求长对话验收使用真实项目开发过程，禁止把重复生成的大行数当作真实任务通过依据。
+当前选择让官网 MiniMax-M2.7 的 my-agent 在原生 TUI 中把 GitHub `sharkdp/fd` 从 Rust 复刻为 Python，
+自行读源码、实现、运行测试、修复并提交项目产物。测试者只提交一次普通中文需求并观察，不能代写或补交产物。
+记录自然产生的模型/工具回合、Compact、TUI 状态、CPU/RSS、退出/恢复与任务结果；未实际发生的长历史边界不计为通过。
+下文合成一万/千万行记录只作为存储边界和缺陷复现，不代表此类真实开发工作负载。当前真实开发验收待完成。
+
+## 官网真模型与TUI媒体验收
+
+2026-09-23，独立候选线，专用测试机限制为 1 CPU / 2 GiB；官网直连，不通过中转，不使用假模型作为本轮验收。
+
+- 官网 MiniMax-M2.7：100 独立用户身份各发送一次中文普通请求，100/100 terminal=done；处理槽峰值 50。
+  同时一个原生 TUI 发问并正确回答 `5+6=11`。204.3 秒完成队列，44 个实拍终端帧未见“未同步/刷新失败”。
+  cgroup 峰值 1047.1 MiB（含文件缓存），末次采样 Gateway RSS 313.8 MiB、TUI RSS 62.6 MiB。
+  真实 `/status` 全部成功，但高峰 P95 3268 ms、最大 4897 ms；单核批量冷启动仍有排队和刷新延迟。
+- 官网 MiniMax-M3：实际端点 `https://api.minimax.cn/anthropic/v1/messages`，现有私有 key 短请求确认返回 M3。
+  原生 TUI `/attach` 添加 PNG，正确识别红圆、蓝方、绿三角及 `Q7N4`；终端 bracketed paste 拖入 MP4，
+  正确识别红→蓝→绿和 1→2→3。测试提问未提供答案；未代模型执行视觉工具。
+- 私有只读请求观察器确认真正外发 image/png 6484 字节与 video/mp4 5774 字节，SHA256 与素材一致；
+  观察器调用原 HTTP 函数，不替换供应商、不改变请求/响应。模型工具轮为零。
+- 真正 `/exit` 后重新启动同一会话，问图片和视频背景，M3 正确回答白色；请求再次带相同原件字节。
+- macOS 隔离 Gateway + 原生 TUI，系统图片剪贴板经 Ctrl+V 成为附件，官网 M3 正确识别同图；原剪贴板完整恢复，
+  本机隔离测试 TUI/Gateway 已退出。无改动用户日常模型/默认 Gateway。
+- `input_media_max_bytes=16 MiB` 同时限制新输入和一次供应商请求的媒体展开；新近附件完整、超预算旧附件明确
+  投影为归档引用，canonical refs 和原件不删除。owner 越界、符号链接、同长度内容变更、总量/数量超限均有合同验证。
+- 相关组件矩阵当前为 1008 passed、1 skipped；跳过项仍为原 HTTP stop fixture 的 409，自行 skip 不计入通过。
+  单测只验证协议/资源/输入边界，真实可用结论来自上述官网模型与原生 TUI。
+- 无 checkpoint 的一万行历史：真实 TUI 续聊完成，自动压缩 generation=1 后正确回答 `4+4=8`。
+  终态用时 410.81 秒；账本记录官网 M2.7 的 4 次供应商调用均 finished、0 retry，输入 294653 / 输出 1621 token。
+  该用时不能算低延迟通过，也不能仅凭单次采样栈归因给 Compact 二分预算估算。
+
+**未通过边界**：千万行浏览成功不等于千万行任意状态续聊成功。对 10,000,000 行、约 2.43 GB、
+无 Compact byte checkpoint 的历史，隔离只读子进程在 384 MiB 地址空间上限下调用 `after_compact_report`
+立即产生 `MemoryError`，还没有发起模型请求。`append_once` 的全量去重读取也需后续治理。
+相关有界读取、分批 Compact 必须与另一开发线正在修改的 scope/checkpoint/CAS 合同合并验收。
+本轮不声称无限时长、任意历史规模、100 个重工具或真实 IM 平台账号已通过。
+
+证据保存在仓库外 `tui-real-media-20260923/`：`real-model/` 的 submissions/terminals/samples，
+`media-*-tui.txt`、`media-provider-requests.jsonl`、`real-10k-history-*`、`uncompacted-10m-read.json`、本机截图粘贴验收。
+旧假模型记录仍保留用于定位，不作为本轮通过依据。未推送、未替换用户默认环境。
+
 ## TUI 资源与空闲用户验收
 
 独立资源线，未替换用户默认 Gateway。专用测试机始终只有一个真实 Gateway，TUI 为真实 tmux

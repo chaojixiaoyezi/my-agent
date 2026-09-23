@@ -625,7 +625,7 @@ def _prepared_request_digest(payload: dict[str, Any]) -> str:
 
 # LLM: Recompute immutable prepared-request facts instead of trusting the copied client digest.
 # Runtime lease/status fields are excluded because queue workers legitimately add them later.
-# 函数用途: 计算排队请求不可变身份和正文的服务端校验指纹。
+# 函数用途: 计算排队请求身份、正文、附件 refs 的服务端指纹，防止重试替换附件。
 def _prepared_payload_digest(payload: dict[str, Any]) -> str:
     immutable = {
         key: payload.get(key)
@@ -641,6 +641,7 @@ def _prepared_payload_digest(payload: dict[str, Any]) -> str:
             "system_task",
             "inject",
             "prompt_files",
+            "input_media",
             "save",
             "include_prompt",
             "resume_context",

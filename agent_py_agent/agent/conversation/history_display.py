@@ -78,7 +78,7 @@ def _turn_end_events(rows: list[object]) -> list[dict[str, object]]:
 
 
 # LLM: user/final 使用 canonical message ID；完整快照仅覆盖自己的检查点，无快照时优先公开检查点而非native副本。
-# 函数用途: 恢复同片输入和逐块过程，保留崩溃前旧工作片；最终回复独立提交，不把模型中间快照当回复。
+# 函数用途: 恢复同片输入、附件文件名和逐块过程；最终回复独立提交，不把模型中间快照当回复。
 def _turn_events(identity: str, rows: list[object]) -> list[dict[str, object]]:
     request_id = f"history:{identity}"
     # LLM: 历史回放的宿主路径策略必须与实时出口一致，且以**这条记录落账时的通道**为权威事实；
@@ -97,6 +97,10 @@ def _turn_events(identity: str, rows: list[object]) -> list[dict[str, object]]:
         for row in rows
         if row.role == "user" and getattr(row, "content", "")
     ]
+    if events:
+        labels = _input_media_labels(rows)
+        if labels:
+            events[0]["payload"]["text"] = labels + " " + str(events[0]["payload"]["text"])
     assistants = [row for row in rows if row.role == "assistant"]
     snapshots = [snapshot for row in assistants if (snapshot := background_display_turn_from_row(row))]
     checkpoints = display_checkpoint_events(rows, covered_requests={item["request_id"] for item in snapshots})
@@ -202,6 +206,20 @@ def _native_events(
             seen_calls.add(call_id)
             events.append(_tool_event(request_id, key, block, results.get(call_id), channel))
     return events
+
+
+# LLM: 附件展示只从本工作片 canonical 首条用户消息的媒体 refs 投影，不读取文件、不按正文匹配归属。
+# 函数用途: 重连后保留输入附件的文件名，避免历史看起来只有文字。
+def _input_media_labels(rows: list[object]) -> str:
+    for row in reversed(rows):
+        messages = canonical_native_messages_from_metadata(getattr(row, "metadata", None))
+        for message in messages:
+            if message.get("role") != "user":
+                continue
+            refs = [block.get("source", {}) for block in _blocks(message)
+                    if block.get("type") in {"image", "video"}]
+            return " ".join(f"[附件: {ref.get('name', '')}]" for ref in refs if ref.get("type") == "local_file")
+    return ""
 
 
 # LLM: 工具终态仅由 provider-neutral is_error 布尔值表述，不从输出中的成功/失败字样反推副作用状态。

@@ -165,7 +165,7 @@ class ModelFieldsService:
 
 
 # LLM: Gateway 限额和空闲寿命都在本入口归一，0 秒明确关闭回收；不得让非法数字进入维护循环。
-# 类用途: 统一 Gateway 的队列、连接配置与实例寿命数值校验。
+# 类用途: 统一队列、连接、实例寿命和媒体数量/字节预算的数值校验。
 class GatewayFieldsService:
     _INT_FIELD_SPECS = (
         ("gateway_heartbeat_interval", 5, None),
@@ -178,6 +178,8 @@ class GatewayFieldsService:
         ("gateway_processing_timeout_seconds", 30, None),
         ("gateway_request_max_attempts", 0, None),
         ("gateway_port", 0, 65535),
+        ("input_media_max_bytes", 1, None),
+        ("input_media_max_files", 1, None),
     )
     _FLOAT_FIELD_SPECS = (("gateway_request_poll_interval", 0.05, None),
                          ("owner_agent_idle_seconds", 0.0, None))

@@ -124,7 +124,7 @@ def test_plugin_submit_uses_real_dispatch_without_chat_guidance_or_stop(
     agent = SimpleNamespace(config=AgentConfig(), home_paths=paths,
                             conversation_store=ConversationStore(owner.home_dir / "conversations", initialize=False),
                             effective_workspace_root=tmp_path)
-    params = SimpleNamespace(
+    params = SimpleNamespace(media_importing=False,
         input_area=input_area, interaction_state=TuiInteractionState(), tui_runtime=runtime,
         agent=agent, args=SimpleNamespace(memory_limit=5), runtime_inject=[], prompt_files=[],
         use_gateway=use_gateway, paths=SimpleNamespace(root=tmp_path), state_lock=threading.Lock(),
@@ -199,7 +199,7 @@ def test_escape_queue_restore_uses_same_canonical_queue_path() -> None:
     input_area = TextArea(multiline=True)
     input_area.text = "draft"
     pending = [1]
-    params = SimpleNamespace(
+    params = SimpleNamespace(media_importing=False,
         input_area=input_area,
         jobs=jobs,
         tui_runtime=runtime,
@@ -228,7 +228,7 @@ def test_escape_stops_focused_child_and_ctrl_g_back_only_navigates(monkeypatch) 
         snapshot=lambda: snapshot,
         back=lambda: back_calls.append(True) or True,
     )
-    params = SimpleNamespace(
+    params = SimpleNamespace(media_importing=False,
         input_area=input_area,
         agent_navigation=navigation,
         exit_armed_at_ref=[0.0],
@@ -284,7 +284,7 @@ def test_empty_enter_opens_selected_goal_editor_without_submitting_prompt(monkey
         opened.append(editor_params.agent_navigation.selected_goal()["goal_id"])
 
     monkeypatch.setattr(tui_goal_editor, "open_goal_editor", open_editor)
-    params = SimpleNamespace(
+    params = SimpleNamespace(media_importing=False,
         input_area=TextArea(multiline=True),
         agent_navigation=navigation,
         exit_armed_at_ref=[0.0],
@@ -319,7 +319,7 @@ def test_terminal_child_reject_clears_unsent_draft_before_parent_navigation() ->
         ),
         active_runtime=lambda: child_runtime,
     )
-    params = SimpleNamespace(
+    params = SimpleNamespace(media_importing=False,
         input_area=input_area,
         interaction_state=TuiInteractionState(),
         agent_navigation=navigation,
@@ -355,7 +355,7 @@ def test_escape_targets_active_manual_compact_control_message() -> None:
                 on_persisted_before_dispatch(entry)
 
     app = SimpleNamespace(invalidate=lambda: None)
-    params = SimpleNamespace(
+    params = SimpleNamespace(media_importing=False,
         input_area=TextArea(multiline=True),
         agent_navigation=None,
         tui_runtime=runtime,
@@ -389,7 +389,7 @@ def test_escape_stops_canonical_background_task_while_local_worker_is_idle() -> 
 
     app = SimpleNamespace(invalidate_calls=0)
     app.invalidate = lambda: setattr(app, "invalidate_calls", app.invalidate_calls + 1)
-    params = SimpleNamespace(
+    params = SimpleNamespace(media_importing=False,
         input_area=TextArea(multiline=True),
         agent_navigation=None,
         tui_runtime=runtime,
@@ -557,7 +557,7 @@ def test_empty_down_returns_detached_transcript_live_before_agent_selection() ->
     end_calls: list[bool] = []
     selection_moves: list[int] = []
     redraws: list[bool] = []
-    params = SimpleNamespace(
+    params = SimpleNamespace(media_importing=False,
         input_area=input_area,
         transcript_area=SimpleNamespace(
             is_following=lambda: False,
@@ -591,7 +591,7 @@ def test_empty_down_at_live_tail_still_selects_child_agent() -> None:
     end_calls: list[bool] = []
     selection_moves: list[int] = []
     redraws: list[bool] = []
-    params = SimpleNamespace(
+    params = SimpleNamespace(media_importing=False,
         input_area=input_area,
         transcript_area=SimpleNamespace(
             is_following=lambda: True,
@@ -644,7 +644,12 @@ def test_bracketed_paste_normalization_strips_terminal_controls() -> None:
     assert _normalize_bracketed_paste("a\r\nb\t\x1b[31mred\x1b[0m") == "a\nb    red"
 
 
-def test_ctrl_v_replaces_selected_input_from_application_clipboard() -> None:
+def test_ctrl_v_replaces_selected_input_from_application_clipboard(monkeypatch) -> None:
+    import asyncio
+
+    from agent_py_agent.cli.chat_parts import tui_media_clipboard
+
+    monkeypatch.setattr(tui_media_clipboard, "clipboard_image", lambda: None)
     from prompt_toolkit.clipboard import InMemoryClipboard
 
     buffer = Buffer(complete_while_typing=False)
@@ -656,8 +661,8 @@ def test_ctrl_v_replaces_selected_input_from_application_clipboard() -> None:
     clipboard = InMemoryClipboard()
     clipboard.set_text("新\r\n正文")
     invalidations: list[bool] = []
-    app = SimpleNamespace(clipboard=clipboard, invalidate=lambda: invalidations.append(True))
-    params = SimpleNamespace(
+    app = SimpleNamespace(clipboard=clipboard, invalidate=lambda: invalidations.append(True), create_background_task=asyncio.run)
+    params = SimpleNamespace(media_importing=False,
         input_area=input_area,
         interaction_state=TuiInteractionState(),
         exit_armed_at_ref=[0.0],
@@ -694,7 +699,7 @@ def test_submit_expands_hidden_paste_but_keeps_placeholder_for_display(monkeypat
             display_text=display_text,
         ),
     )
-    params = SimpleNamespace(
+    params = SimpleNamespace(media_importing=False,
         input_area=input_area,
         interaction_state=interaction,
         exit_armed_at_ref=[0.0],
@@ -739,7 +744,7 @@ def test_successful_submit_repins_transcript_before_enqueue(monkeypatch) -> None
             display_text=display_text,
         ),
     )
-    params = SimpleNamespace(
+    params = SimpleNamespace(media_importing=False,
         input_area=input_area,
         transcript_area=transcript_area,
         transcript_follow_ref=[False],
@@ -773,7 +778,7 @@ def test_gateway_btw_enters_durable_control_outbox_with_exact_turn() -> None:
             if on_persisted_before_dispatch is not None:
                 on_persisted_before_dispatch(entry)
 
-    params = SimpleNamespace(
+    params = SimpleNamespace(media_importing=False,
         use_gateway=True,
         state_lock=threading.Lock(),
         is_running_ref=[True],
@@ -808,7 +813,7 @@ def test_gateway_goal_command_is_visible_only_after_durable_enqueue() -> None:
             assert on_persisted_before_dispatch is not None
             on_persisted_before_dispatch(entry)
 
-    params = SimpleNamespace(
+    params = SimpleNamespace(media_importing=False,
         use_gateway=True,
         state_lock=threading.Lock(),
         is_running_ref=[False],
@@ -850,7 +855,7 @@ def test_gateway_manual_compact_starts_visible_progress_after_durable_enqueue() 
             assert on_persisted_before_dispatch is not None
             on_persisted_before_dispatch(entry)
 
-    params = SimpleNamespace(
+    params = SimpleNamespace(media_importing=False,
         use_gateway=True,
         state_lock=threading.Lock(),
         is_running_ref=[False],
@@ -884,7 +889,7 @@ def test_gateway_manual_compact_rejects_active_task_before_animation() -> None:
                 del on_persisted_before_dispatch
                 raise AssertionError("active task must not persist manual compact")
 
-        params = SimpleNamespace(
+        params = SimpleNamespace(media_importing=False,
             use_gateway=True,
             state_lock=threading.Lock(),
             is_running_ref=[foreground_active],
@@ -912,7 +917,7 @@ def test_gateway_manual_compact_fast_terminal_cannot_overtake_start() -> None:
             on_persisted_before_dispatch(entry)
             runtime.publish_manual_compact_terminal(entry.message_id, succeeded=True)
 
-    params = SimpleNamespace(
+    params = SimpleNamespace(media_importing=False,
         use_gateway=True,
         state_lock=threading.Lock(),
         is_running_ref=[False],
@@ -934,7 +939,7 @@ def test_gateway_manual_compact_noop_closes_without_failure(tmp_path) -> None:
     runtime = TuiRuntime("control-compact-noop")
     stop_event = threading.Event()
     stop_event.set()
-    params = SimpleNamespace(
+    params = SimpleNamespace(media_importing=False,
         agent=SimpleNamespace(),
         use_gateway=True,
         current_session_id="session-noop",
@@ -991,7 +996,7 @@ def test_gateway_context_uses_current_tui_snapshot_without_control_request() -> 
         def enqueue(self, _entry) -> None:
             raise AssertionError("/context must not create a second Gateway estimate")
 
-    params = SimpleNamespace(
+    params = SimpleNamespace(media_importing=False,
         use_gateway=True,
         state_lock=threading.Lock(),
         is_running_ref=[True],
@@ -1036,7 +1041,7 @@ def test_gateway_memory_command_runs_outside_input_thread(monkeypatch) -> None:
         "_tui_handle_command",
         lambda *, params: handled.append(params) or True,
     )
-    params = SimpleNamespace(
+    params = SimpleNamespace(media_importing=False,
         use_gateway=True,
         agent=SimpleNamespace(gateway_client_only=True),
         tui_runtime=runtime,
@@ -1066,7 +1071,7 @@ def test_gateway_stop_is_not_sent_before_exact_turn_is_bound() -> None:
         def enqueue(self, _entry) -> None:
             raise AssertionError("an unbound stop must not be persisted or sent")
 
-    params = SimpleNamespace(
+    params = SimpleNamespace(media_importing=False,
         use_gateway=True,
         state_lock=threading.Lock(),
         is_running_ref=[True],
@@ -1087,7 +1092,7 @@ def test_gateway_stop_without_foreground_turn_targets_background_task() -> None:
         def enqueue(self, entry) -> None:
             captured.append(entry)
 
-    params = SimpleNamespace(
+    params = SimpleNamespace(media_importing=False,
         use_gateway=True,
         state_lock=threading.Lock(),
         is_running_ref=[False],
@@ -1110,7 +1115,7 @@ def test_gateway_status_does_not_show_mutating_confirmation_notice() -> None:
         def enqueue(self, entry) -> None:
             captured.append(entry)
 
-    params = SimpleNamespace(
+    params = SimpleNamespace(media_importing=False,
         use_gateway=True,
         state_lock=threading.Lock(),
         is_running_ref=[False],
@@ -1129,7 +1134,7 @@ def test_gateway_stop_completion_is_stable_transcript_feedback(tmp_path) -> None
     runtime = TuiRuntime("control-stop-stable-feedback")
     stop_event = threading.Event()
     stop_event.set()
-    params = SimpleNamespace(
+    params = SimpleNamespace(media_importing=False,
         agent=SimpleNamespace(),
         use_gateway=True,
         current_session_id="session-stop",
@@ -1172,7 +1177,7 @@ def test_running_gateway_submit_uses_active_turn_receipt_instead_of_job_queue(fo
         def enqueue(self, entry) -> None:
             captured["entry"] = entry
 
-    params = SimpleNamespace(
+    params = SimpleNamespace(media_importing=False,
         use_gateway=True,
         state_lock=threading.Lock(),
         is_running_ref=[foreground],
@@ -1233,7 +1238,7 @@ def test_child_input_stays_queued_until_exact_provider_consumption(monkeypatch) 
 
     invalidations: list[bool] = []
     app = SimpleNamespace(invalidate=lambda: invalidations.append(True))
-    params = SimpleNamespace(
+    params = SimpleNamespace(media_importing=False,
         agent=Agent(),
         current_session_id="session-child-input",
         stop_event=threading.Event(),
@@ -1360,7 +1365,7 @@ def test_unknown_active_turn_delivery_keeps_receipt_and_starts_same_id_reconcili
     class Reconciler:
         def enqueue(self, entry) -> None:
             persisted["entry"] = entry
-    params = SimpleNamespace(
+    params = SimpleNamespace(media_importing=False,
         use_gateway=True,
         state_lock=threading.Lock(),
         is_running_ref=[True],
@@ -1400,7 +1405,7 @@ def test_reconciliation_queues_once_only_after_explicit_rejection(monkeypatch, t
         def request_active_turn_input(self, *_args, **_kwargs):
             return ActiveTurnInputResult(ActiveTurnInputDelivery.REJECTED)
 
-    params = SimpleNamespace(
+    params = SimpleNamespace(media_importing=False,
         use_gateway=True,
         state_lock=threading.Lock(),
         is_running_ref=[True],
@@ -1463,7 +1468,7 @@ def test_gateway_queued_active_input_attaches_exact_next_turn_without_resubmit(
                 disposition="queued",
             )
 
-    params = SimpleNamespace(
+    params = SimpleNamespace(media_importing=False,
         use_gateway=True,
         state_lock=threading.Lock(),
         is_running_ref=[True],
@@ -1506,7 +1511,7 @@ def test_ctrl_c_with_transcript_selection_copies_before_interrupt(monkeypatch) -
     copied: list[str] = []
     runtime = TuiRuntime("selection-copy")
     app = SimpleNamespace(invalidate=lambda: None)
-    params = SimpleNamespace(
+    params = SimpleNamespace(media_importing=False,
         input_area=TextArea(multiline=True),
         transcript_area=SimpleNamespace(selected_text=lambda: "selected output"),
         tui_runtime=runtime,
@@ -1532,7 +1537,7 @@ def test_ctrl_c_copies_input_selection_without_clearing_highlight(monkeypatch) -
     input_area.buffer.start_selection()
     input_area.buffer.cursor_position = 4
     app = SimpleNamespace(invalidate=lambda: None)
-    params = SimpleNamespace(
+    params = SimpleNamespace(media_importing=False,
         input_area=input_area,
         transcript_area=SimpleNamespace(selected_text=lambda: "transcript"),
         tui_runtime=runtime,
@@ -1555,7 +1560,7 @@ def test_ctrl_t_toggles_todo_view_without_editing_input() -> None:
     interaction = TuiInteractionState()
     input_area = TextArea(multiline=True)
     input_area.text = "保留当前输入"
-    params = SimpleNamespace(
+    params = SimpleNamespace(media_importing=False,
         input_area=input_area,
         interaction_state=interaction,
         exit_armed_at_ref=[1.0],
@@ -1621,7 +1626,7 @@ def test_ctrl_o_freezes_current_child_runtime_instead_of_root() -> None:
         lambda width: TuiRenderContext(width=width),
         transcript_state=transcript_state,
     )
-    params = SimpleNamespace(
+    params = SimpleNamespace(media_importing=False,
         tui_runtime=root,
         agent_navigation=navigation,
         transcript_state=transcript_state,
@@ -1653,7 +1658,7 @@ def test_f6_toggles_native_copy_and_tui_mouse_without_touching_input() -> None:
     runtime = TuiRuntime("mouse-mode")
     input_area = TextArea(multiline=True)
     input_area.text = "保留输入"
-    params = SimpleNamespace(
+    params = SimpleNamespace(media_importing=False,
         input_area=input_area,
         interaction_state=interaction,
         tui_runtime=runtime,
@@ -1854,7 +1859,7 @@ def test_permission_y_n_shortcuts_use_typed_decisions(monkeypatch) -> None:
         invalidate=lambda: None,
         layout=SimpleNamespace(focus=lambda _control: None),
     )
-    params = SimpleNamespace(
+    params = SimpleNamespace(media_importing=False,
         tui_runtime=runtime,
         permission_feedback_area=TextArea(multiline=True),
         input_area=TextArea(multiline=True),

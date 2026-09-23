@@ -1645,13 +1645,14 @@ def _build_ask_request(context: _AskRequestContext) -> dict:
 # LLM: Legacy HTTP/IM callers may omit all execution options, but once any option is supplied the
 # complete normalized snapshot is persisted so active-to-queued fallback cannot depend on defaults
 # from a later process.
-# 函数用途: 判断 `/ask` 正文是否显式携带了会改变执行行为的选项。
+# 函数用途: 判断 `/ask` 是否显式携带执行选项或媒体 refs；引用仍须经过 owner 校验。
 def _ask_body_has_execution_options(body: dict[str, Any]) -> bool:
     return any(
         key in body
         for key in (
             "inject",
             "prompt_files",
+            "input_media",
             "save",
             "include_prompt",
             "resume_context",

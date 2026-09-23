@@ -22,6 +22,8 @@ from typing import Any
 from ..tooling.runtime_contracts import ToolCall, ToolResult
 
 
+# LLM: 用户媒体只保存已验证的本地内容引用；不得把二进制或文本路径推断写进 IR。
+# 类用途: 保存按时间排列的用户文字与附件，供 native 历史持久化和供应商适配。
 @dataclass(frozen=True)
 class UserTurn:
     """同一运行 turn 期间追加的一条真实用户输入。
@@ -32,6 +34,7 @@ class UserTurn:
     """
 
     text: str
+    media: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)

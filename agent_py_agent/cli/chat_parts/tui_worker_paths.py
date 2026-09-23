@@ -74,7 +74,7 @@ def _submit_gateway_job(ctx: Any):
 
 
 # LLM: 入队前只登记显示去重 ID；运行/停止快照仍在 durable submit 成功后发布，不让未提交编号获得控制权。
-# 函数用途: 提交新 TUI 请求，保持真实工作目录，并防止自己的正文经同会话观察流再显示一次。
+# 函数用途: 提交含附件 refs 的 TUI 请求，保持真实工作目录，并防止自己的正文经同会话观察流再显示一次。
 def _submit_new_gateway_job(cfg: Any, job: Any, turn_inject: list[str]):
     from .gateway_client import ChatRequestContent, submit_chat_request
 
@@ -84,6 +84,7 @@ def _submit_new_gateway_job(cfg: Any, job: Any, turn_inject: list[str]):
             prompt=job.user,
             inject=turn_inject,
             prompt_files=job.prompt_files,
+            input_media=job.input_media,
             save=job.save,
             show_prompt=job.show_prompt,
             resume_context=job.resume_context,

@@ -1,5 +1,5 @@
 # LLM: 客户端只接收结构化错误码对应的安全文案；保留模型截断事实，不公开内部异常或把思考当正文。
-# 模块用途: 统一 Gateway 请求失败和空正文截断的响应，区分模型连接、长度限制、会话读写与执行结果未确认。
+# 模块用途: 统一 Gateway 请求失败与输入附件错误，区分模型连接、长度限制、会话读写和执行结果未确认。
 from __future__ import annotations
 
 """Shared gateway request error response builders."""
@@ -87,6 +87,7 @@ def gateway_client_error_message(error_code: object) -> str:
             "当前会话记录无法可靠读取或保存，本轮已停止，避免在缺少上下文时继续执行。"
             "请查看运行诊断后再恢复。"
         ),
+        "INPUT_MEDIA_INVALID": "附件无效、已改变或超过限制，请重新添加图片/视频。",
         "CONVERSATION_TASK_BINDING_CONFLICT": (
             "当前任务的状态与执行绑定不一致，本轮未继续；不是聊天记录丢失。"
             "请核对运行诊断；确认旧执行已经停止后，可用 /goal resume 显式恢复目标。"

@@ -20,6 +20,7 @@
     |-- MANAGED_PROCESS_STDIO.md         # 原 host 字节管道、激活资源归属及旧版本恢复边界
     |-- HOST_COMMAND_EXECUTION.md        # 显式命令复用原运行链的请求身份、重送和结果回读合同
     |-- PLUGIN_SAMPLE_ACCEPTANCE.md      # 10 个自有简易插件的来源、功能范围及真实 TUI 验收计划
+    |-- TUI_INPUT_MEDIA.md               # TUI 图片视频输入、owner 原件与发送预算合同
     |-- TUI_RESOURCE_LIFETIME.md         # TUI、HTTP 和空闲 owner 的资源寿命与规模验收边界
     |-- TUI_DESIGN.md                    # 终端布局、事件、输入与生命周期规范
     |-- SUBAGENT_PARALLEL_EXECUTION.md   # 父子独立工作、逐项交付与慢任务诊断边界
@@ -71,6 +72,8 @@ agent_py_agent/
 |   |   |-- tui_shared_model_menu.py    # 管理员逐模型显式共享/撤销，普通用户只选已开放模型
 |   |   |-- tui_permissions_menu.py     # /permissions 与 F4 三档权限菜单、保存/取消及管理员确认
 |   |   |-- tui_provider_menu.py        # 服务商、多模型编辑、启停、目录发现和明确短连接测试
+|   |   |-- tui_media.py                # 文件拖入/附件命令与草稿引用
+|   |   |-- tui_media_clipboard.py      # 显式截图剪贴板读取及临时文件清理
 |   |   |-- tui_input_delivery.py       # 活动回合输入的持久 outbox、同 ID 对账与排队接管
 |   |   |-- tui_control_delivery.py     # slash 控制命令的持久 outbox、稳定操作 ID 与只读状态对账
 |   |   |-- tui_interaction.py          # stash、Ctrl-R、paste 与 `?` help 的线程安全输入状态机
@@ -320,6 +323,7 @@ agent_py_agent/
 |   |   |-- history_projection.py       # 前后台共用完整历史行选择、范围过滤和原生 metadata 保留
 |   |   |-- history_display.py          # 从 canonical 消息投影只读恢复事件，不把问答预览代替正文
 |   |   |-- history_order.py            # 按源记录恢复跨工作片顺序并去重插话显示副本
+|   |   |-- input_media.py              # owner 内容寻址原件、验证、发送编码和媒体预算
 |   |   |-- history_page.py             # canonical 字节边界向前分页和完整工作片分组
 |   |   |-- message_stream.py           # 同账本正文与显式协商的过程检查点投影，共用 ID/字节游标
 |   |   |-- task_runtime_state.py      # 后台续轮读取精确任务进度的结构化运行事实
@@ -894,3 +898,6 @@ docs/
 - `docs/design/MCP_TRANSPORT_LIFECYCLE.md`：MCP 的关闭、重连、发布顺序与未知清理边界；对应开发用例为 `agent_py_agent/tests/test_mcp_lifecycle.py`。
 
 - `agent/tooling/runtime_facts.py`：只读canonical执行事实，保留未知与独立清理确认；不复制PID、诊断正文或授予执行权。
+- `agent/conversation/input_media.py`：入站媒体唯一文件/ref 合同；`cli/chat_parts/tui_media.py`、`tui_media_clipboard.py` 只处理输入动作。
+- `docs/design/TUI_INPUT_MEDIA.md`：新媒体能力、迁移、平台和供应商边界。
+- `agent_py_agent/tests/test_input_media.py`：字节、归属、历史恢复和媒体预算合同测试。

@@ -742,11 +742,20 @@ def _require_gateway_conversation_ready(
 
 # LLM: 模型前统一 canonical task 与 RuntimeDB 身份；active Goal 跨前台/后台保持同一任务，不以请求 ID 另建树。
 # 函数用途: 构造精确运行参数，已发布的恢复身份优先，未发布时沿已经校验的活动任务或 Goal 绑定。
+# LLM: 附件先按已解析 owner 校验，仅结构化 refs 进入 run；跨 owner 或损坏附件不可退化成纯文本请求。
+# 函数用途: 构造当前请求执行参数，并验证显式输入附件的归属与资源上限。
 def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> RunParams:
     request = inputs.request
     context = inputs.context
     conversation = inputs.conversation
     attrs = _gateway_run_task_attributes(conversation, request, context.request_id)
+    if request.get("input_media"):
+        from ..conversation.input_media import input_media_root, validate_input_media
+
+        refs = validate_input_media(request["input_media"], root=input_media_root(context.agent),
+                                    max_bytes=context.agent.config.input_media_max_bytes,
+                                    max_files=context.agent.config.input_media_max_files)
+        attrs = {**(attrs or {}), "input_media": list(refs)}
     task_id = str(request_binding.gateway_runtime_authority(request, context.request_id).get("task_id") or "")
     selected_task_id = str((attrs or {}).get("conversation_task_id") or "")
     goal = conversation.thread_goal or {}

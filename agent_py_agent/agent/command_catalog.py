@@ -46,6 +46,7 @@ COMMAND_CATALOG = (
         submit_on_enter=True,
         conversation_suffix=r"(?:\s+(.*))?$",
     ),
+    CommandSpec("attach", '/attach "<图片或视频路径>"', "添加图片或视频附件（TUI）"),
     CommandSpec("model", "/model", "新增或选择模型、接口和上下文窗口", submit_on_enter=True),
     CommandSpec(
         "permissions",

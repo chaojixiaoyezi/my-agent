@@ -790,7 +790,7 @@ def _loop_attempt_id(agent, params: object) -> str:
 
 
 # LLM: Current-turn IR starts at the exact user task. Completed conversation messages are carried
-# separately as provider_history_messages so finalization persists only the new turn. Carried
+# separately as provider_history_messages so finalization persists only the new turn. Typed media refs remain with their user turn. Carried
 # handoff/input then append in real chronology.
 # 函数用途: 把当前任务和本轮续接输入按真实时间顺序变成只属于本轮的原生消息 IR。
 def _native_initial_tool_ir_history(
@@ -804,7 +804,7 @@ def _native_initial_tool_ir_history(
     history: list[object] = []
     current = str(params.user_prompt or "")
     if current:
-        history.append(UserTurn(_native_user_task_text(current)))
+        history.append(UserTurn(_native_user_task_text(current), media=tuple((params.task_attributes or {}).get("input_media") or ())))
     if carried_handoff:
         history.append(CompactionSummary(carried_handoff))
     history.extend(UserTurn(text) for text in carried_user_inputs if str(text or ""))
@@ -920,6 +920,10 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
     active_turn_user_inputs = merge_active_turn_user_inputs(params.carried_active_turn_user_inputs)
     active_turn_user_input_texts_carried = active_turn_user_input_texts(active_turn_user_inputs)
     tool_ir_history: list[object] = []
+    if (params.task_attributes or {}).get("input_media") and getattr(seed.tool_protocol_snapshot, "source_protocol", "") != "native":
+        from ...conversation.input_media import InputMediaError
+
+        raise InputMediaError("附件需要支持原生多模态消息的模型连接，当前连接未启用原生协议。")
     if getattr(seed.tool_protocol_snapshot, "source_protocol", "") == "native":
         from ...conversation.tool_context_window import native_carried_tool_handoff
         from ...memory_archive.compact_semantic_summary import semantic_summary_config
