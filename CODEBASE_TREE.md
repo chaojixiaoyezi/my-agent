@@ -419,7 +419,7 @@ agent_py_agent/
 |   |   |-- tool_input_completion.py # 明示安全默认值、可信上下文补参与脱敏 source/source_ref
 |   |   `-- sandbox.py                # bwrap 唯一策略、自检、worker/K8s readiness 硬门
 |   |-- capability/                    # 单一 SkillsService、逐轮 snapshot、能力路由与 capability tools
-|   |   |-- decision_candidates.py     # 原能力快照候选、选择槽及明确必要引用，不读取Skill正文
+|   |   |-- decision_candidates.py     # 原能力快照候选、独立适用性题及必要引用，不读取Skill正文
 |   |   |-- decision_recommendation.py # 每工作片可选推荐及采用前复核，只改变展示不改授权
 |   |   |-- skill_service.py           # bounded builtin/shared/owner/workspace discovery、policy 与缓存
 |   |   |-- skill_snapshot.py          # 不可变稳定引用、正文 hash/guard 校验与子代理收窄
@@ -452,6 +452,7 @@ agent_py_agent/
 |       |-- factory.py                 # 显式配置构造唯一后端，缺配置判据与调度共享
 |       `-- tool_protocol_adapter.py   # native 事件或显式完整 text 帧到 canonical ToolCall 的唯一适配口
 |-- tests/                             # 单元、集成、真实链路回归
+|   |-- fixtures/decision/jev_capability_rounding.json # 合成材料真实Jev响应的脱敏概率舍入replay，不含凭据
 |   |-- test_decision_model_profiles.py # 决策用途隔离、旧目录迁移、共享撤销与生成选择不退化
 |   |-- test_decision_model_operations.py # 原模型操作中的决策设置、原生HTTP测试和用量结算
 |   |-- test_decision_gateway_transport.py # 原菜单运输到本地Gateway服务和原生HTTP的组合

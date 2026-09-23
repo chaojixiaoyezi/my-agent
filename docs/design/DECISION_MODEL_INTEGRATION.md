@@ -475,7 +475,7 @@ test_orchestration_create_subagents_idempotency.py、test_memory_curator_v2.py�
 
 不能以“增加推荐文字但仍发送全部名卡/schema”代替减量目标。原Skill快照/工具Registry仍是唯一授权来源；
 宿主只为当前工作片建立不可变展示投影。None保持旧字节路径；关闭、观察、失败、弃权、无匹配和缺数据仍用原输入。
-明确not_needed表示当前选择槽无需额外能力，可产生空短名单；明确必要能力和发现入口仍保留。
+明确not_needed表示对应候选与任务无关，可产生空短名单；明确必要能力和发现入口仍保留。
 Skill选中/明确required名卡进入原动态推荐段，稳定区只保留固定发现说明；省略项可从原skill_search找回。
 任务局部范围仅在显式非None投影时展示当前run受限快照的名卡，不恢复owner人格/项目等隔离材料；isolated/control_plane保持不注入。
 工具短清单只影响展示，不约束搜索。progressive仅收起原配置明确可选类别的未选中direct schema；
@@ -490,8 +490,10 @@ Skill选中/明确required名卡进入原动态推荐段，稳定区只保留固
 原`_execute_runtime_loop`在工具循环种子前调用一次；选择沿RuntimeToolLoopSeed→ToolLoopExecuteParams→ToolSections传递。
 每轮渲染及Compact的原目录构造不请求决策模型；不同工作片可重做建议，不建立长期结果缓存。
 工具候选只取原授权运行快照并交集显式allowed，Skill只取当前scoped快照；不发送task_attributes原文，只用摘要绑定。
-候选每240项分组，每组最多8个初始展示选择槽，candidate_N引用state中的唯一候选说明；全目录仍可从原搜索找回。
-选择槽只限制初始推荐量，不限制工具数量或任务执行次数。原64题、255选项、256KiB和节点数限制仍生效；整体超限保留原输入，不截断尾部。
+真实Jev验收否定了多个选择槽跨题去重的设计：Jev各题独立并行，8槽实际全部答成无需，漏掉相关能力。
+现改为每候选独立choice（include/not_needed/缺数据等），候选说明只在对应instructions里发送一次，宿主保留原引用映射。
+不再借槽位序号暗示另一题已选结果。原适配器自设64题上限已移除，官方未声明该题数上限；仍受原JSON节点、256KiB和每Choice255选项限制。
+96题本地完整协议通过；整体材料超限仍保持原输入、不截断尾部。模型总窗口与state+最长题的额外预算检查属于12，不能用字节限冒充token限。
 缺数据选项明确区分任务目标、工具合同、Skill正文和环境事实；本接入点不自动补读/加权限，而是保持原上下文由主模型继续处理。
 消费前刷新原Skill范围及版本，检查固定handler的无副作用availability；插件沿原activation/transport检查，不按同名新工具重绑。
 原配置、实际主模型/窗口、任务属性或候选发生变化时拒绝旧建议，最后再过公开decision_outcome_is_current及绝对期限。
@@ -499,3 +501,7 @@ Skill选中/明确required名卡进入原动态推荐段，稳定区只保留固
 验证要比较真实provider输入字节/token、原搜索可达、撤销和实际cache事实，不能只检查建议对象或承诺缓存收益。
 本地原生成输入已证明名卡/schema减量，选中名卡在动态区；metadata模式保持完整native schema。
 这不证明收费token净节省、真实缓存命中率或Jev判断质量，完整窗口/缓存属于12，真实模型属于13。
+
+真实接口同时暴露逐项概率的百分位舍入：总和可为0.99/1.01。wire按每项半百分位累计误差校验总量和评分，
+高精度分布仍走严格误差；零总量、缺键、越界、非有限数、明显不一致仍拒绝，不归一化或改写供应商概率。
+原始脱敏失败样本进入协议replay，业务权限仍不来自分数。来源、实际请求和未验范围见[真实验收记录](../tasks/DECISION_MODEL_REAL_VALIDATION.md)。

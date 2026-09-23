@@ -1,5 +1,5 @@
-# LLM: TypeSafe wire 合同只接受本次题目及候选；供应商返回不控制权限、状态机或业务提交，同步协议测试。
-# 模块用途: 校验 Jev 的三类问题和逐题响应，保留实际模型、原用量与局部失败，不依赖外部 SDK。
+# LLM: TypeSafe只接受本次题目及候选；真实API两位小数分布按量化误差核对，不能归一化改写原概率或据此授予权限。
+# 模块用途: 校验三类问题和逐题响应，保留实际模型、原用量及供应商舍入值，不依赖外部SDK。
 from __future__ import annotations
 
 import math
@@ -14,8 +14,6 @@ from .decision_protocol import (
 )
 from .errors import ProviderResponseError
 
-MAX_QUESTIONS = 64
-
 
 # LLM: 固定长度是本适配器资源限制，Choice/Score 数量遵循 TypeSafe API；不按名称解释结果含义。
 # 函数用途: 检查题号和候选键，拒绝空键、过长键或非字符串。
@@ -29,12 +27,12 @@ def _entry(value: object) -> bool:
     return type(value) in (str, dict, list)
 
 
-# LLM: 发送前验证 native state/questions，未知问题类型明确失败；不得转成普通生成 prompt 或重试猜协议。
+# LLM: 原JSON节点/字节预算约束整包题量，供应商未声明64题硬限；不得把宿主旧上限当协议事实或转成生成prompt。
 # 函数用途: 生成已经校验的 Jev 请求体，不写配置、不发网络，错误不包含用户材料。
 def typesafe_payload(request: DecisionRequest, model: str) -> dict:
     payload = request.payload(model)
     questions = payload["questions"]
-    if not _entry(payload["state"]) or not 1 <= len(questions) <= MAX_QUESTIONS:
+    if not _entry(payload["state"]) or not questions:
         raise DecisionInputError("决策状态或题目数量无效。")
     for key, question in questions.items():
         _validate_question(key, question)
@@ -73,18 +71,27 @@ def _number(value: object, upper: float = 1.0) -> float:
     return float(value)
 
 
-# LLM: 分布必须覆盖原题全部候选且和为 1；容差只吸收数值舍入，不进行归一化或补候选。
+# LLM: 真实API会把各概率舍入到两位小数，和可为0.99/1.01；只允许各项半量化单位累计误差，不归一化或补候选。
 # 函数用途: 将供应商分布冻结为键值序列，坏数据让该题失效。
 def _probabilities(value: object, keys: set[str]) -> tuple[tuple[str, float], ...]:
     if type(value) is not dict or set(value) != keys:
         raise ValueError("决策响应分布与候选不一致。")
     pairs = tuple((key, _number(probability)) for key, probability in value.items())
-    if not math.isclose(sum(probability for _, probability in pairs), 1.0, abs_tol=1e-4):
+    tolerance = _probability_rounding_unit(pairs) * len(pairs) + 1e-4
+    total = sum(probability for _, probability in pairs)
+    if total <= 0 or not math.isclose(total, 1.0, abs_tol=tolerance):
         raise ValueError("决策响应分布总量无效。")
     return pairs
 
 
-# LLM: 只解释协议字段，need_data 等业务含义由宿主候选绑定决定；单题坏响应不可污染其它题。
+# LLM: 仅已观测的百分位网格允许半单位误差；更高精度分布保持原精度校验，原始浮点值不修改。
+# 函数用途: 计算TypeSafe量化概率的单项舍入边界，供总量和评分一致性共用。
+def _probability_rounding_unit(pairs: tuple[tuple[str, float], ...]) -> float:
+    return 0.005 if all(math.isclose(value, round(value, 2), abs_tol=1e-12, rel_tol=0)
+                        for _, value in pairs) else 0.0
+
+
+# LLM: 只解释协议字段，业务含义归宿主候选；评分按原概率量化误差复核，不能因舍入丢掉整题或归一化概率。
 # 函数用途: 校验一个选择、评分或是非答案，保留概率/置信度，绝不将分数变成授权。
 def _answer(key: str, question: dict, row: object) -> DecisionAnswer:
     kind = question["type"]
@@ -104,7 +111,9 @@ def _answer(key: str, question: dict, row: object) -> DecisionAnswer:
             raise ValueError("决策选择与分布不一致。")
         return DecisionAnswer(key, kind, value, confidence, probabilities)
     value = _number(row.get("score"), len(criteria) - 1)
-    if not math.isclose(value, sum(int(k) * p for k, p in probabilities), abs_tol=1e-4):
+    unit = _probability_rounding_unit(probabilities)
+    tolerance = unit * (1 + sum(int(key) for key, _ in probabilities)) + 1e-4
+    if not math.isclose(value, sum(int(k) * p for k, p in probabilities), abs_tol=tolerance):
         raise ValueError("决策评分与分布不一致。")
     legend = row.get("legend")
     if type(legend) is not dict or set(legend) != keys or any(type(v) is not str for v in legend.values()):

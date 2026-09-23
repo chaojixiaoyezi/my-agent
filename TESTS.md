@@ -7,10 +7,15 @@
 `test_decision_settings_notifications.py`、`test_tui_decision_menu.py`、`test_decision_settings_scope.py`。
 原运行准备入口→seed→params→真实PromptBuilder/native schema验证实际输入减量；重复渲染不重新调用决策。
 本地HTTP验证成功、300ms超时、在途关闭/改策略、401/500不重试及迟到终态；原搜索可找回schema，插件撤销仍阻止旧绑定执行。
-关闭/观察/不确定保持原输入；完整候选500项可形成24个合法选择槽，原总字节/节点上限继续生效，不截断尾部。
+关闭/观察/不确定保持原输入；真实接口反馈后改为独立候选题，96题完整协议通过，原总字节/节点上限继续生效，不截断尾部。
 另与`test_memory_runtime_compact_auto_continuation.py`、`test_compact_semantic_summary.py`联合回归通过。
 真实Jev质量、收费token净收益、跨模型完整窗口和provider缓存仍待12/13，不能拿夹具字节量当收益。
 命令、责任边界见 [TODO10交接](docs/tasks/DECISION_MODEL_CAPABILITY_HANDOFF.md)。
+
+真实API首批7次调用发现并修复跨题选择槽与概率舍入两个问题；保留1次真实2秒超时，不计作判断成功。
+修复后4秒配置下同需求0.728秒返回，4个相关能力include、4个无关能力not_needed；是合成材料的真实接口证据，不是完整TUI验收。
+协议、能力消费者、本地HTTP及适配器联合92项通过，脱敏原始响应replay保留0.99概率总和，不归一化。
+明细和缺口见[真实验收记录](docs/tasks/DECISION_MODEL_REAL_VALIDATION.md)。
 
 ## 决策模型 TODO11 设置与显式探测（本地）
 

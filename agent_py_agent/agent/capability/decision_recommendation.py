@@ -53,7 +53,9 @@ def recommend_capabilities(agent, params, snapshot, contract) -> CapabilityPrese
         if not questions:
             return original
         backend = agent.backend
-        outcome = decide(agent, params, stage, point="skill_tool", state=state, questions=questions,
+        # 候选说明在各自独立题中只发一次，宿主state副本保留列表仅供版本和结果映射。
+        wire_state = {key: value for key, value in state.items() if key != "candidates"}
+        outcome = decide(agent, params, stage, point="skill_tool", state=wire_state, questions=questions,
                          candidates_revision=revision)
         fallback = replace(original, finding=f"skill_tool_decision:{outcome.mode}:{outcome.status}")
         if not outcome.may_apply or outcome.response is None:

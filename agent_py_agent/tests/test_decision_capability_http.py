@@ -27,11 +27,9 @@ from agent_py_agent.tests.test_tool_presentation_projection import search
 # 函数用途: 从收到的合法候选中选择一个工具和一个 Skill，并返回完整原生逐题分布。
 def native_answer(payload):
     desired = {"presentation_optional_a", "workspace:method-001"}
-    selected = [f"candidate_{index}" for index, row in enumerate(payload["state"]["candidates"]) if row["ref"] in desired]
-    assert len(selected) == 2
     answers = {}
-    for index, (key, question) in enumerate(payload["questions"].items()):
-        choice = selected[index] if index < len(selected) else "not_needed"
+    for key, question in payload["questions"].items():
+        choice = "include" if question["instructions"]["candidate"]["ref"] in desired else "not_needed"
         assert choice in question["criteria"]
         answers[key] = {"type": "choice", "choice": choice, "confidence": 1.0,
                         "probabilities": {candidate: float(candidate == choice) for candidate in question["criteria"]}}
@@ -119,7 +117,7 @@ def test_local_http_success_reduces_actual_prompt_and_schema_and_preserves_searc
     assert len(capability_http.requests) == 1
     path, payload = capability_http.requests[0]
     assert path == "/v1/systemone" and set(payload) == {"model", "state", "questions"}
-    assert len(payload["state"]["candidates"]) > 60 and len(payload["questions"]) > 1
+    assert "candidates" not in payload["state"] and len(payload["questions"]) > 60
     assert payload["state"]["policy"]["context_policy"] == "progressive"
     records = model_call_ledger(surface.host).records()
     assert len(records) == 1 and records[0].metadata["purpose"] == "decision"

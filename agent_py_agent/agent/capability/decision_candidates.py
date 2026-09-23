@@ -1,5 +1,5 @@
 # LLM: 能力决策材料只读原授权快照；短名单不授予执行权，不读取Skill正文，不按自然语言推断必要能力。
-# 模块用途: 为一次能力推荐准备可核对的候选和有界选择槽，并将答案映射回原精确引用。
+# 模块用途: 为一次能力推荐准备可核对的候选和独立适用性题目，并将答案映射回原精确引用。
 from __future__ import annotations
 
 import hashlib
@@ -8,7 +8,7 @@ from ..backends.decision_protocol import DecisionInputError, decision_json
 from ..tooling.models import TOOL_DISCOVERY_ENTRY_NAMES
 
 _NON_SELECTIONS = {
-    "not_needed": "此槽无需额外能力，可留空；其余槽独立选择",
+    "not_needed": "此候选与用户任务无关，无需初始展示",
     "no_match": "候选不匹配，保持本轮原展示",
     "abstain": "无法可靠判断，保持本轮原展示",
     "need_goal": {"meaning": "缺少任务目标", "required_refs": ["user_request"]},
@@ -43,29 +43,24 @@ def capability_candidates(snapshot, skills, *, categories: list[str], skills_dis
     return rows
 
 
-# LLM: 每组最多240候选，每组最多8个选择槽；全部候选都进入state，槽只限制初始展示量，完整目录仍可搜索。
-# 函数用途: 让超过64项的能力目录仍可一次推荐；超出原协议资源上限时整体放弃而非隐式裁掉尾部。
+# LLM: Jev每题独立并行，不能用多个选择槽假设互相看见答案；每项候选只评一次，完整材料受原JSON/模型预算约束。
+# 函数用途: 为每个能力生成独立的适用性选择题，不预选候选或要求模型跨题去重。
 def selection_questions(rows: list[dict]) -> dict:
-    questions = {}
-    for start in range(0, len(rows), 240):
-        group = rows[start:start + 240]
-        choices = {f"candidate_{start + index}": None for index in range(len(group))}
-        for slot in range(min(8, len(group))):
-            questions[f"group_{start // 240}_slot_{slot}"] = {
-                "type": "choice", "instructions": {
-                    "question": "从本组推荐适合当前任务的不同能力。只影响初始名卡/可选schema展示，不是授权或已加载正文。",
-                    "slot": slot, "group": start // 240,
-                    "references": "candidate_N 精确引用 state.candidates[N]，候选说明只在state列出一次。",
-                    "uncertainty": "无需更多能力选not_needed；缺数据选对应need项，宿主保持原输入，不自动补读。",
-                }, "criteria": {**choices, **_NON_SELECTIONS},
-            }
-    if not 1 <= len(questions) <= 64:
-        raise DecisionInputError("能力推荐题数超出单次资源上限。")
+    if not rows:
+        raise DecisionInputError("能力推荐需要当前授权候选。")
+    questions = {f"candidate_{index}": {
+        "type": "choice", "instructions": {
+            "question": "这个candidate是否适合协助完成state.query中的任务？分别判断每项能力，多项可以同时适合。",
+            "candidate": row,
+            "boundary": "只推荐初始名卡或schema展示，不决定权限，不要求现在执行或读取正文。",
+        }, "criteria": {"include": "这项能力与任务相关，有助于完成任务，建议初始展示", **_NON_SELECTIONS},
+    } for index, row in enumerate(rows)}
+    decision_json(questions)
     return questions
 
 
 # LLM: 按原题候选读取答案，不解析模型文字；任何无效/不确定题保持全集，明确无需能力才允许空短名单。
-# 函数用途: 解码可独立选择的槽，重复推荐去重，保留缺数据的结构化原因。
+# 函数用途: 将独立适用性答案映射回对应候选；缺数据或坏答案保持原输入并保留结构化原因。
 def selected_capabilities(response, questions: dict, rows: list[dict]) -> tuple[list[dict], str]:
     answers = {answer.question_id: answer for answer in response.answers}
     indices = set()
@@ -77,7 +72,7 @@ def selected_capabilities(response, questions: dict, rows: list[dict]) -> tuple[
             continue
         if answer.value in _NON_SELECTIONS:
             return [], answer.value
-        indices.add(int(answer.value.removeprefix("candidate_")))
+        indices.add(int(key.removeprefix("candidate_")))
     return [rows[index] for index in sorted(indices)], ""
 
 

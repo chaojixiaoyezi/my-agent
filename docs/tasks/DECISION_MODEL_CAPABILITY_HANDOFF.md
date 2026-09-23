@@ -18,7 +18,7 @@
 - 显式allowed、发现入口、原loaded及宿主必要引用保持；原默认deferred类别不变。没有可见发现入口时不隐藏相关能力。
 - `points.skill_tool.context_policy`默认progressive，`optional_categories`默认`["plugins"]`，原总/点开关仍off；开放字符串列表、空列表合法。
 - 原设置登记、owner/thread CAS/reset、user_config及菜单共用字段；原v1可选覆盖加法，不写默认，不建第二存储。
-- 候选按240项分组、每组最多8槽，candidate_N引用state唯一说明，500项本地合法。原64题/255选项/256KiB/节点限制仍有效，超限整体沿原输入。
+- 初始分组选择槽在真实接口验收中发现遗漏，已替换为每候选独立适用性题，说明只在对应题中发送一次。原JSON节点/256KiB/单题255选项仍约束输入；96题本地合法，超限整体沿原输入。修复过程见真实验收记录。
 - 缺目标/工具合同/Skill步骤/环境、弃权或无匹配保持原输入；明确not_needed可留空槽，必要能力仍保留。不自动补读或扩大权限。
 - 采用前复核原Skill范围/版本、固定handler的availability、原配置/模型/窗口/任务属性和期限。插件停用不能通过同名新代重绑恢复。
 

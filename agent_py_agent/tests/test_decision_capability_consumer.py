@@ -64,10 +64,9 @@ def provider(monkeypatch, *, choice=None, during=None, fail=None):
         if fail:
             raise fail
         desired = {"presentation_optional_a", "workspace:method-001"}
-        picks = [f"candidate_{index}" for index, row in enumerate(payload["state"]["candidates"]) if row["ref"] in desired]
         answers = {}
-        for index, (key, question) in enumerate(payload["questions"].items()):
-            selected = choice or (picks[index] if index < len(picks) else "not_needed")
+        for key, question in payload["questions"].items():
+            selected = choice or ("include" if question["instructions"]["candidate"]["ref"] in desired else "not_needed")
             answers[key] = {"type": "choice", "choice": selected, "confidence": 1.0,
                 "probabilities": {candidate: float(candidate == selected) for candidate in question["criteria"]}}
         if during:
@@ -211,12 +210,11 @@ def test_original_runtime_entry_calls_decision_once_and_passes_selection_to_rend
 
 
 def test_more_than_64_candidates_keep_all_candidates_with_native_valid_bounded_slots():
-    rows = [{"kind": "tool", "ref": f"tool_{i}"} for i in range(500)]
+    rows = [{"kind": "tool", "ref": f"tool_{i}"} for i in range(96)]
     questions = selection_questions(rows)
-    request = DecisionRequest(DecisionBinding("skill_tool", "owner", "operation", "policy", "candidate"), {"candidates": rows}, questions)
+    request = DecisionRequest(DecisionBinding("skill_tool", "owner", "operation", "policy", "candidate"), {"query": "从给定材料完成任务"}, questions)
     payload = typesafe_payload(request, "decision")
-    assert len(payload["questions"]) == 24
-    selected = {rows[int(key.removeprefix("candidate_"))]["ref"] for question in questions.values()
-                for key in question["criteria"] if key.startswith("candidate_")}
+    assert len(payload["questions"]) == 96
+    selected = {question["instructions"]["candidate"]["ref"] for question in questions.values()}
     assert selected == {row["ref"] for row in rows}
     assert len(json.dumps(payload).encode()) < 262144

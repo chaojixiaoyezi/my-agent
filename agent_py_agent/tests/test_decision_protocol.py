@@ -1,6 +1,8 @@
 """原生决策协议冻结、部分失败和未知用量，不访问真实供应商。"""
 import copy
+import json
 from dataclasses import FrozenInstanceError, replace
+from pathlib import Path
 
 import pytest
 
@@ -75,6 +77,39 @@ def test_three_primitives_and_usage_stay_separate_from_execution():
     raw["usage"]["input_tokens"] = 999
     result.usage["input_tokens"] = 888
     assert result.usage["input_tokens"] == 120 and result.usage_reported
+
+
+def test_actual_jev_quantized_probabilities_replay_preserves_reported_values():
+    from agent_py_agent.agent.capability.decision_candidates import selected_capabilities
+    fixture = json.loads((Path(__file__).parent / "fixtures/decision/jev_capability_rounding.json").read_text())
+    request = DecisionRequest(binding(), fixture["request"]["state"], fixture["request"]["questions"])
+    parsed = parse_typesafe_response(request, "jev-latest", fixture["response"])
+    assert all(not answer.error_code for answer in parsed.answers)
+    reported = fixture["response"]["answers"]["candidate_0"]["probabilities"]
+    assert sum(reported.values()) == pytest.approx(0.99)
+    assert dict(next(answer for answer in parsed.answers if answer.question_id == "candidate_0").probabilities) == reported
+    questions = fixture["request"]["questions"]
+    rows = [questions[f"candidate_{i}"]["instructions"]["candidate"] for i in range(len(questions))]
+    selected, reason = selected_capabilities(parsed, questions, rows)
+    assert reason == "" and {row["ref"] for row in selected} == {"csv_reader", "plot_chart", "table_analysis", "chart_design"}
+
+
+def test_score_accepts_quantization_difference_without_normalizing_distribution():
+    raw = response()
+    raw["answers"]["priority"].update(score=0.755, probabilities={"0": 0.25, "1": 0.75})
+    parsed = parse_typesafe_response(DecisionRequest(binding(), "材料", questions()), "jev-test", raw)
+    answer = next(item for item in parsed.answers if item.question_id == "priority")
+    assert not answer.error_code and answer.value == 0.755
+    assert dict(answer.probabilities) == {"0": 0.25, "1": 0.75}
+
+
+@pytest.mark.parametrize("probabilities", [{"model-a": 0.4, "need_data": 0.4},
+    {"model-a": 0.70001, "need_data": 0.29}, {"model-a": 0.0, "need_data": 0.0}])
+def test_rounding_tolerance_does_not_accept_broken_or_high_precision_distribution(probabilities):
+    raw = response()
+    raw["answers"]["model"]["probabilities"] = probabilities
+    parsed = parse_typesafe_response(DecisionRequest(binding(), "材料", questions()), "jev-test", raw)
+    assert next(item for item in parsed.answers if item.question_id == "model").error_code == "invalid_answer"
 
 
 def test_missing_usage_is_unknown_not_zero():
