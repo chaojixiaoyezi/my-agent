@@ -1,8 +1,10 @@
 # Memory Structure
 
+`conversation/compact_text_source.py` 只管理同一来源的临时字符窗口和读取一致性，不拥有消息游标或持久覆盖。`backends/request_content.py` 拒绝将非文本块引用当成可完整分段的正文；原检查点仍由原 Compact writer 提交。
+
 ## 流式估算与消息扫描
 
-`memory_archive/tokens.py` 唯一估算器按原JSON编码顺序累积字符和UTF8字节，保持旧预算数值与异常回退；去掉完整JSON及全文UTF8副本，单个JSON值和字典排序仍可能较大。估算不写实际用量账。
+`memory_archive/tokens.py` 唯一估算器按原JSON编码顺序累积字符和UTF8字节，保持旧预算数值与异常回退；仅精确内置、无环、深度有限且最坏JSON UTF8上界不超过512 KiB的小载荷使用公开dumps，避免密集估算累积编码器闭包；其它载荷仍流式，单个JSON值和字典排序仍可能较大。估算不写实际用量账。
 `conversation/message_scan.py` 接收canonical路径，复用`store_io.complete_jsonl_end`；有界页只返回完整行和字节游标。append_once在原锁内逐行读到冻结尾界，首个key命中后仍查坏行；Unicode空白按原规则跳过，字段溢出归data_corruption，缺LF尾行禁止追加且不自动修复。分页原语不授予摘要覆盖或scope身份。
 
 

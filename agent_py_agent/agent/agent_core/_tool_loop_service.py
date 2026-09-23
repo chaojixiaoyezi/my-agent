@@ -1,7 +1,7 @@
 
 
 # LLM: 工具循环用同一 native IR 和 owner/thread Compact 权威；原生执行事实只补当前批次，不从次数推断任务完成。
-# 模块用途: 装配工具循环与原Compact，模型采纳交由窄操作入口；不改变输入账本、缓存前缀或任务状态。
+# 模块用途: 装配工具循环与原Compact；候选只借原列表，持久提交与投影分开，守住输入账本和取消边界。
 from __future__ import annotations
 
 import json
@@ -30,7 +30,7 @@ from ..conversation.compact_progress import (
     COMPACT_SOURCE_TURN_LOCAL,
     CONVERSATION_COMPACT_PROGRESS_SCHEMA,
 )
-from ..conversation.tool_context_window import record_native_ir_window, window_tool_context_params
+from ..conversation.tool_context_window import window_tool_context_params
 from ..prompting_parts.builder import ToolSections, project_runtime_workspace_context
 from ..runtime_db.operations import exec_lock_scope
 from ..settings.runtime_guard_config import runtime_guard_int
@@ -88,9 +88,11 @@ from .tool_guard.loop_hints import (
     append_tool_guardrail_action_block_hint,
 )
 from .tool_ir_compact import (
+    NativeCompactWindow,
     compact_native_ir_to_token_budget,
+    reduce_native_compact_candidate,
 )
-from .tool_ir_history import record_tool_call_ir, replace_compaction_summary_ir
+from .tool_ir_history import record_tool_call_ir
 from .tool_loop.completion import (
     ToolRoundCompletionRequest,
     completion_response_after_tool_round,
@@ -695,9 +697,8 @@ def _summarize_live_compact(
         raise
 
 
-# LLM: Mutation is transactional in memory: interruption or failure restores IR and its readable
-# marker. Only real summary/checkpoint/CAS errors share the failure circuit.
-# 函数用途: 按计划成对删减工具历史；停止或提交失败都把模型上下文完整恢复到操作前。
+# LLM: 候选与 checkpoint/CAS 失败才恢复原列表；提交成功后的投影异常必须保留已提交历史。同步检查中断与故障回归。
+# 函数用途: 沿原会话事务提交压缩候选，明确分开可回滚阶段和已提交后的展示阶段。
 def _apply_native_compact_plan(
     agent: object,
     params: ToolLoopExecuteParams,
@@ -711,24 +712,18 @@ def _apply_native_compact_plan(
     original_tool_context = list(params.tool_context)
     try:
         raise_if_compact_interrupted(lambda: _native_compact_interrupted(params))
-        dropped = compact_native_ir_to_token_budget(
-            params,
-            max_tokens=max(1, plan.target_tokens),
-            token_estimator=estimator,
-            drop_completed_tool_turns=bool(plan.semantic_summary),
+        candidate = reduce_native_compact_candidate(
+            NativeCompactWindow(
+                params.tool_ir_history, params.tool_context, params.archive_tool_calls,
+            ),
+            summary=plan.semantic_summary,
+            target_tokens=plan.target_tokens,
+            estimate_tokens=estimator,
         )
+        dropped, after_tokens = candidate.dropped_pairs, candidate.after_tokens
         if not dropped:
             _emit_native_compact_superseded(params, plan)
             return 0
-        if plan.semantic_summary:
-            replace_compaction_summary_ir(params, plan.semantic_summary)
-        dropped, after_tokens = _settle_native_ir_window(
-            params=params,
-            estimator=estimator,
-            target=plan.target_tokens,
-            dropped=dropped,
-            summary_covers_window=bool(plan.semantic_summary),
-        )
         raise_if_compact_interrupted(lambda: _native_compact_interrupted(params))
         _emit_native_compact_progress(
             params,
@@ -744,9 +739,25 @@ def _apply_native_compact_plan(
             _restore_native_compact_candidate(params, original_ir, original_tool_context)
             _emit_native_compact_superseded(params, plan, after_tokens=after_tokens)
             return 0
-        return _commit_and_publish_native_compact(
-            agent, params, plan, dropped=dropped, after_tokens=after_tokens
+        raise_if_compact_interrupted(lambda: _native_compact_interrupted(params))
+        preserved_pairs = _native_tool_result_count(params)
+        if plan.binding is not None:
+            _emit_native_compact_progress(
+                params,
+                phase="progress",
+                stage="checkpointing",
+                percent=82,
+                **_native_compact_progress_values(plan, after_tokens=after_tokens),
+            )
+        canonical_generation = _commit_native_ir_generation(
+            agent, params, plan, after_tokens=after_tokens,
         )
+        if plan.binding is None:
+            # 临时回合没有 canonical 提交；继续保持原内存事务及投影失败回滚。
+            return _publish_native_compact_result(
+                agent, params, plan, dropped=dropped, after_tokens=after_tokens,
+                preserved_pairs=preserved_pairs, canonical_generation=0,
+            )
     except InterruptedError:
         _restore_native_compact_candidate(params, original_ir, original_tool_context)
         _emit_native_compact_superseded(params, plan)
@@ -767,6 +778,11 @@ def _apply_native_compact_plan(
         )
         raise
 
+    return _publish_native_compact_result(
+        agent, params, plan, dropped=dropped, after_tokens=after_tokens,
+        preserved_pairs=preserved_pairs, canonical_generation=canonical_generation,
+    )
+
 
 # LLM: Rollback restores both provider IR and its mechanical guidance projection atomically from
 # the caller's snapshots; it never writes ConversationStore or changes the Compact circuit.
@@ -780,54 +796,18 @@ def _restore_native_compact_candidate(
     params.tool_context[:] = original_tool_context
 
 
-# LLM: Settling is a pure in-memory candidate step. It must not commit a generation or publish an
-# event until the caller verifies the full provider-visible request is below the shared trigger.
-# 函数用途: 把摘要和保留工具往返重新计量，继续成对裁剪，并返回尚未提交的候选数字。
-def _settle_native_ir_window(
-    *,
-    params: ToolLoopExecuteParams,
-    estimator: Callable[[], int],
-    target: int,
-    dropped: int,
-    summary_covers_window: bool,
-) -> tuple[int, int]:
-    dropped = _reduce_native_ir_to_target(
-        params,
-        estimator=estimator,
-        target=target,
-        dropped=dropped,
-        summary_covers_window=summary_covers_window,
-    )
-    return dropped, estimator()
-
-
-# LLM: A live-tool generation becomes durable only after the settled candidate passes another
-# interrupt check and its checkpoint/CAS wins; UI completion is emitted afterwards.
-# 函数用途: 停止检查通过后提交健康的运行中 Compact，再把已确认代次和 token 数投给 TUI。
-def _commit_and_publish_native_compact(
+# LLM: 只处理用量失效与投影；异常原样上抛，持久提交或临时回合的回滚边界由调用方掌管。
+# 函数用途: 将已应用的压缩结果投给运行态和 TUI，本函数不做历史回滚或失败记账。
+def _publish_native_compact_result(
     agent: object,
     params: ToolLoopExecuteParams,
     plan: _NativeCompactPlan,
     *,
     dropped: int,
     after_tokens: int,
+    preserved_pairs: int,
+    canonical_generation: int,
 ) -> int:
-    raise_if_compact_interrupted(lambda: _native_compact_interrupted(params))
-    preserved_pairs = _native_tool_result_count(params)
-    if plan.binding is not None:
-        _emit_native_compact_progress(
-            params,
-            phase="progress",
-            stage="checkpointing",
-            percent=82,
-            **_native_compact_progress_values(plan, after_tokens=after_tokens),
-        )
-    canonical_generation = _commit_native_ir_generation(
-        agent,
-        params,
-        plan,
-        after_tokens=after_tokens,
-    )
     # 历史已按完整工具对改写，上一次 provider 实际用量不再能作为追加基线。
     from .model.context_pressure import invalidate_provider_context_observation
 
@@ -880,42 +860,6 @@ def _log_native_compact(
         bool(plan.semantic_summary),
         len(plan.semantic_summary),
     )
-
-
-# LLM: Re-estimation includes the replacement summary and marker. Once that complete summary is
-# installed, even the newest pair may be released; without a summary ordinary windowing must keep it.
-# 函数用途: 把摘要计入预算；完整摘要已经替代旧历史时，必要时连最后一对巨型回执也成对回收。
-def _reduce_native_ir_to_target(
-    params: ToolLoopExecuteParams,
-    *,
-    estimator: Callable[[], int],
-    target: int,
-    dropped: int,
-    summary_covers_window: bool,
-) -> int:
-    record_native_ir_window(
-        params,
-        omitted_count=dropped,
-        preserved_count=_native_tool_result_count(params),
-    )
-    # handoff marker 和 summary 本身也要进入同一预算；若重新顶过 target，继续整对回收。
-    while estimator() > target:
-        additional = compact_native_ir_to_token_budget(
-            params,
-            max_tokens=max(1, target),
-            token_estimator=estimator,
-            preserve_newest_pair=not summary_covers_window,
-            drop_completed_tool_turns=summary_covers_window,
-        )
-        if additional <= 0:
-            break
-        dropped += additional
-        record_native_ir_window(
-            params,
-            omitted_count=dropped,
-            preserved_count=_native_tool_result_count(params),
-        )
-    return dropped
 
 
 # LLM: This is the only bridge from a settled native window to the canonical thread commit and it

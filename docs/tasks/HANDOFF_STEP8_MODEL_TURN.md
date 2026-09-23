@@ -39,3 +39,14 @@ Astra max四文件diff未发现阻断，三种独立导入成功。此次仅本�
 建议下一步：集成已验证候选，继续拆原prompt与Compact宿主依赖，再发布组合包跑实际TUI；不把新增扫描API或候选测试等同于完整Compact已接通。
 
 候选ef355f822已集成本地主线57baa13cb，两者源码tree均为57fabe4c78bd404cdc482efdd303c14e9de0d202；请求周期实际diff复核无阻断。未推送或部署，继续按唯一TODO处理Compact同源接线和原生验收。
+
+
+## Compact 来源与提交边界片交接
+
+- 基线9f94ffb9f，同一工作线；主代理负责原生候选／提交／来源接线，Astra max仅写tokens及其测试，另一审阅者只读核对IR边界。
+- 新增`compact_text_source.py`、`request_content.py`；原`tool_ir_compact.py`容纳窄候选，删除主服务旧settle/reduce入口。C来源去掉未启用strict参数，无v3/schema迁移。
+- 持久CAS后的projection失败不回滚；临时回合无CAS仍按原语义回滚。两个原始红灯和两个审阅新增红灯均转绿。非文本来源上层两项拒绝保持原消息和检查点。
+- tokens只对可证明有界的小内置对象用公开dumps，其它仍流式；原峰值断言和5005等值／异常核验通过，未修改GC策略或放宽阈值。
+- 14文件组合333 passed／20既有xfail；测试文件完整列表见TESTS，不追加全仓。本地Ruff、doc sync、strict code-size hard=0、diff、clean-package全通过，未改尺寸基线。未发布部署、未启动真实模型或TUI，旧scope过滤风险和业务失败保留。
+
+建议下一步：主线只集成本片已验证diff，继续剩余工具轮／结束决策与scope读回缺口；独立审阅可并行，Jev链不整枝导入。真实TUI必须在组合发布后另验。

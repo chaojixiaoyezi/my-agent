@@ -1,6 +1,6 @@
 
 # LLM: 原生工具回收复用唯一 typed IR 重写入口；摘要覆盖事实同时控制旧 assistant 与运行快照回收。
-# 模块用途: 按完整请求预算整对整理工具历史，保留配对、用户输入与当前状态，不写另一份 Compact 账。
+# 模块用途: 只用原历史、窗口提示、归档引用和估算器形成压缩候选，保留配对与当前事实，不持久写账。
 from __future__ import annotations
 
 """native 模式下 compact 对结构化 IR 历史的「整对」回收（Step 3）。
@@ -39,15 +39,78 @@ tool_use id）。直接对这串 ToolResult 套用「保最近 / 预算」策略
 
 import re
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 from ..backends.tool_ir import AssistantTurn
+from ..conversation.tool_context_window import record_native_ir_window
 from ..tooling.runtime_contracts import ToolResult
-from .tool_ir_history import drop_tool_call_pairs, native_tool_ir_history
+from .tool_ir_history import (
+    drop_tool_call_pairs,
+    native_tool_ir_history,
+    replace_compaction_summary_ir,
+)
 
 # 与 _tool_loop_service._record_tool_call 写入的文本条目头一致：
 # "[tool-record round=N index=M]\n..."。用于「文本条目 → (round,index)」反查。
 _TOOL_RECORD_MARKER_RE = re.compile(r"\[tool-record round=(\d+) index=(\d+)\]")
+
+
+# LLM: 这里只借用原回合的三个列表；不接收 Agent、Store、权限或提交能力，调用方负责事务回滚。
+# 类用途: 给压缩候选提供原历史、窗口提示和归档引用，避免把整个工具循环上下文传进来。
+@dataclass(frozen=True)
+class NativeCompactWindow:
+    tool_ir_history: list[Any]
+    tool_context: list[str]
+    archive_tool_calls: list[dict]
+
+
+# LLM: 数字只描述尚未提交的内存候选；不能据此宣称 canonical generation 已更新。
+# 类用途: 返回成对回收数量和完整请求重估结果，由原调用方决定提交或恢复。
+@dataclass(frozen=True)
+class NativeCompactCandidate:
+    dropped_pairs: int
+    after_tokens: int
+
+
+# LLM: 修改原列表而不持久化；先回收、安装摘要，再把窗口提示计入同一估算器。异常由调用方恢复快照。
+# 函数用途: 形成配对完整的压缩候选；有完整摘要时允许继续回收最后一对，始终保留用户原话与当前事实。
+def reduce_native_compact_candidate(
+    window: NativeCompactWindow,
+    *,
+    summary: str,
+    target_tokens: int,
+    estimate_tokens: Callable[[], int],
+) -> NativeCompactCandidate:
+    dropped = compact_native_ir_to_token_budget(
+        window,
+        max_tokens=max(1, target_tokens),
+        token_estimator=estimate_tokens,
+        drop_completed_tool_turns=bool(summary),
+    )
+    if not dropped:
+        return NativeCompactCandidate(dropped_pairs=0, after_tokens=0)
+    if summary:
+        replace_compaction_summary_ir(window, summary)
+    while True:
+        record_native_ir_window(
+            window,
+            omitted_count=dropped,
+            preserved_count=sum(isinstance(item, ToolResult) for item in window.tool_ir_history),
+        )
+        if estimate_tokens() <= target_tokens:
+            break
+        additional = compact_native_ir_to_token_budget(
+            window,
+            max_tokens=max(1, target_tokens),
+            token_estimator=estimate_tokens,
+            preserve_newest_pair=not bool(summary),
+            drop_completed_tool_turns=bool(summary),
+        )
+        if additional <= 0:
+            break
+        dropped += additional
+    return NativeCompactCandidate(dropped_pairs=dropped, after_tokens=estimate_tokens())
 
 
 def reclaim_oldest_native_ir_pairs(params: object, *, fraction: float) -> int:
@@ -187,6 +250,9 @@ def _nonnegative_estimate(estimator: Callable[[], int]) -> int:
 
 
 __all__ = [
+    "NativeCompactWindow",
+    "NativeCompactCandidate",
+    "reduce_native_compact_candidate",
     "compact_native_ir_to_token_budget",
     "reclaim_oldest_native_ir_pairs",
     "tool_use_ids_for_tool_records",

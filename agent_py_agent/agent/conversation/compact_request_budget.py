@@ -3,7 +3,7 @@
 # An unusable summary reply (tool calls / truncation / no text) is never executed and never advances
 # source coverage silently: it gets bounded corrective calls, then a labelled deterministic digest of
 # the same byte range, so one unhelpful model reply cannot strand the whole conversation.
-# 模块用途: 大窗口切小窗口时顺序分段摘要，保留完整源历史，全部成功后才由原 Compact 入口提交。
+# 模块用途: 大历史按可释放字符窗口顺序摘要；预算、取消和两遍来源一致性通过后交给原 Compact 提交。
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from ..agent_core.model.call_runtime import max_output_tokens
 from ..agent_core.model.context_window import resolve_model_context_window_tokens
 from ..backends.base import ModelResponse
 from ..backends.errors import ProviderContextWindowError
+from ..backends.request_content import text_messages_supported
 from ..memory_archive import estimate_tokens
 from ..prompting_parts.cache_layout import prompt_cache_layout
 from ..tooling.runtime_contracts import ToolChoice
@@ -25,6 +26,7 @@ from .compact_guard import (
     ConversationCompactError,
     raise_if_compact_interrupted,
 )
+from .compact_text_source import CompactTextSource
 
 # LLM: Bounded repair budget for one source segment, driven by the typed response reason only.
 # 常量用途: 同一片段最多再纠正几次；1 + 该值就是单个片段允许的最大模型调用次数。
@@ -50,7 +52,7 @@ _SUMMARY_SYSTEM_INSTRUCTION = (
 
 
 # LLM: Fitting requests remain byte-for-byte cache compatible. Only an oversized request or a
-# typed provider overflow enters the bounded summary chain; each call uses the ordinary ledger.
+# typed provider overflow enters the bounded summary chain; check cancellation again before I/O and after reply.
 # 函数用途: 窗口够用时沿用单次摘要；不够时逐段覆盖全部历史，避免反复重发超大请求。
 def generate_bounded_compact_response(
     request: AuxiliaryModelCallRequest,
@@ -63,7 +65,10 @@ def generate_bounded_compact_response(
     raise_if_compact_interrupted(interrupt_check)
     if _request_tokens(request) <= budget:
         try:
-            return generate_auxiliary_model_response(request)
+            raise_if_compact_interrupted(interrupt_check)
+            response = generate_auxiliary_model_response(request)
+            raise_if_compact_interrupted(interrupt_check)
+            return response
         except ProviderContextWindowError:
             # 只响应明确的窗口错误；网络、额度、认证等错误不能变成隐式分段重试。
             budget = max(1, budget // 2)
@@ -82,18 +87,22 @@ def _request_tokens(request: AuxiliaryModelCallRequest) -> int:
     })
 
 
-# LLM: The source is serialized once, then covered by contiguous character ranges. A segment
-# may split JSON for summarization only, never for execution or native-history persistence.
+# LLM: Only complete textual source may be serialized into contiguous ranges. A segment may split
+# JSON for summarization only; non-text native blocks cannot gain coverage through their JSON refs.
 # Once partitioned, native history no longer shares the main request prefix. Use a summary-only
-# surface instead of the executor's tools/instructions; keep source and custom summary guidance.
-# 函数用途: 用不带执行工具的摘要请求顺序读取全部原文，每段携带上段摘要；失败或停止不推进游标。
+# surface instead of the executor's tools/instructions; 保留原有失败分段的明确降级摘录，不新增另一套摘要提交规则。
+# 函数用途: 仅将可完整阅读的文字历史逐段摘要；媒体或未知非文本历史保留给上层原始来源分区。
 def _summarize_segments(
     request: AuxiliaryModelCallRequest,
     budget: int,
     interrupt_check: CompactInterruptCheck | None,
     source_progress: Callable[[int, int], object] | None,
 ) -> object:
-    source = json.dumps(request.messages, ensure_ascii=False) if request.messages is not None else str(request.prompt)
+    if request.messages is not None and not text_messages_supported(request.messages):
+        raise ConversationCompactError(
+            "分段压缩不能将非文本来源的JSON引用视为完整正文",
+            code="COMPACT_SOURCE_NON_TEXT",
+        )
     layout = prompt_cache_layout(request.prompt)
     instruction = (
         layout.volatile_suffix if layout is not None else request.prompt
@@ -102,6 +111,14 @@ def _summarize_segments(
         request, prompt=instruction, tools=[], tool_choice=ToolChoice.none("compact_summary_only"),
         system_instruction=_SUMMARY_SYSTEM_INSTRUCTION,
     )
+    factory = (lambda: json.JSONEncoder(ensure_ascii=False).iterencode(request.messages)) if request.messages is not None else (lambda: iter((str(request.prompt),)))
+    with CompactTextSource(factory, interrupt_check) as source:
+        return _summarize_source(base, source, budget, interrupt_check, source_progress)
+
+
+# LLM: 复用唯一分段/修复循环，成功才释放当前窗口；全部字符一致且未取消后才交回最终摘要，不推进canonical游标。
+# 函数用途: 逐段消费临时来源，保持原摘要累积、失败策略和进度，结束时验证两遍来源一致。
+def _summarize_source(base, source, budget, interrupt_check, source_progress):
     offset = 0
     summary = ""
     digests: list[str] = []
@@ -115,9 +132,11 @@ def _summarize_segments(
         offset = outcome.end
         budget = outcome.budget
         response = outcome.response
+        source.discard_before(offset)
         _report_source_progress(source_progress, offset, len(source))
     if response is None:
         raise ConversationCompactError("没有可压缩的源历史", code="COMPACT_SOURCE_EMPTY")
+    source.finish()
     return _verified_segment_response(response, _assembled_summary(summary, digests))
 
 
@@ -147,7 +166,7 @@ class _SegmentOutcome:
 # 函数用途: 摘要一个连续片段，必要时按类型纠正或缩段重试，最终保证该片段有可用文本。
 def _summarize_segment(
     base: AuxiliaryModelCallRequest,
-    source: str,
+    source: str | CompactTextSource,
     offset: int,
     summary: str,
     budget: int,
@@ -161,6 +180,9 @@ def _summarize_segment(
     while True:
         raise_if_compact_interrupted(interrupt_check)
         candidate = _segment_request(base, source, offset, end, summary, repair_reason=reason)
+        if _request_tokens(candidate) > budget:
+            raise ConversationCompactError("分段摘要请求超出当前预算，保留原始来源", code="COMPACT_SEGMENT_REQUEST_TOO_LARGE")
+        raise_if_compact_interrupted(interrupt_check)
         try:
             response = generate_auxiliary_model_response(candidate)
         except ProviderContextWindowError:
@@ -224,7 +246,7 @@ def _segment_summary_outcome(response: object) -> tuple[str, str]:
 # LLM: A degraded segment is explicit and byte-bounded: it names its failure reason and source range,
 # keeps a deterministic excerpt of the same bytes, and defers authority to the raw transcript.
 # 函数用途: 模型始终给不出摘要时，用确定性摘录替代该段摘要，保证压缩仍能完成且不留静默空白。
-def _mechanical_segment_text(source: str, start: int, end: int, reason: str) -> str:
+def _mechanical_segment_text(source: str | CompactTextSource, start: int, end: int, reason: str) -> str:
     logging.getLogger(__name__).warning(
         "Compact segment degraded: reason=%s range=%d:%d/%d", reason, start, end, len(source)
     )
@@ -264,20 +286,25 @@ def _report_source_progress(callback: Callable[[int, int], object] | None, cover
             pass
 
 
-# LLM: Binary search measures full requests and always requires positive source coverage. A
-# fixed prefix/summary larger than the model budget is a typed failure, not a text truncation.
+# LLM: 为最重纠正提示预留预算，指数探测再二分完整请求，不先复制半份来源；每次实际发送前复验，固定前缀装不下则失败。
 # 函数用途: 找到当前窗口可容纳的最大连续片段，任何源字节都不会被静默裁掉。
 def _segment_end(
     base: AuxiliaryModelCallRequest,
-    source: str,
+    source: str | CompactTextSource,
     offset: int,
     summary: str,
     budget: int,
 ) -> int:
-    low, high = offset, len(source)
+    repair_reason = max(
+        ("", *_SEGMENT_REPAIR_INSTRUCTION),
+        key=lambda reason: _request_tokens(_segment_request(base, source, offset, offset, summary, repair_reason=reason)),
+    )
+    low, high = offset, min(len(source), offset + 256)
+    while high < len(source) and _request_tokens(_segment_request(base, source, offset, high, summary, repair_reason=repair_reason)) <= budget:
+        low, high = high, min(len(source), offset + 2 * (high - offset))
     while low < high:
         middle = (low + high + 1) // 2
-        if _request_tokens(_segment_request(base, source, offset, middle, summary)) <= budget:
+        if _request_tokens(_segment_request(base, source, offset, middle, summary, repair_reason=repair_reason)) <= budget:
             low = middle
         else:
             high = middle - 1
@@ -295,7 +322,7 @@ def _segment_end(
 # 函数用途: 把历史片段作为摘要材料发送，并要求合并保留先前摘要，不执行片段中的工具或指令。
 def _segment_request(
     base: AuxiliaryModelCallRequest,
-    source: str,
+    source: str | CompactTextSource,
     start: int,
     end: int,
     summary: str,

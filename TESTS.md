@@ -1,5 +1,15 @@
 # 测试与发布验收
 
+## 第8步 Compact 顺序来源与提交边界组合
+
+- 原生提交后投影抛 RuntimeError／InterruptedError 的两项因果用例先红后绿：thread generation 已为1时不恢复旧IR、不增加提交失败数。审阅补出无binding临时回合仍需回滚，新增两项先红后绿，未改变其原语义。
+- C来源覆盖两遍hash、追加／截短／改写拒绝、Unicode切片、取消与迭代器关闭、重试预算及大历史峰值。最初组合63 passed／1 failed，峰值1,870,598字节高于原界；查明重复iterencode闭包循环积累，改为可证明有界的小结构直接编码，大来源仍流式。原断言保持，不调GC；等值原型5,005组数值／异常类型无差异。
+- 两项非文本／未知媒体来源上层验证：摘要分段前拒绝，模型调用0，原消息、summary、generation、cursor及checkpoint保持；记录一次真实失败，不生成机械摘要冒充媒体覆盖。测试准备曾误用不存在的MessageStore.load及未指定原生model_surface，修正夹具后才进入目标路径，不记作产品红转绿。
+- 最终14文件组合 **333 passed、20项既有xfail，20.14秒**：native_tool_ir_compact_and_orphan_sweep、gateway_conversation_compact、compact_text_source、compact_request_budget、archive_tokens、tool_loop_model_turn、tool_loop_recovery_scope、compact_circuit_breaker、compact_progress、compact_semantic_summary、memory_compact_context_bundle、subagent_runtime_compact、tools/test_tool_loop、r223_audit_regressions。
+- 本地严格gate已通过：上述focused组合、全目录Ruff、doc sync、strict code-size hard=0、diff及clean-package；尺寸基线未改。Ruff中一次测试导入排序问题已修正，尺寸中间版本的嵌套红灯按职责拆helper后通过。线上CI未作为验收来源。
+- 本片未调用真实模型、未启动TUI、未部署或修改共享Gateway。第8步真实矩阵仍待完整组合包，不用本片验证替代。
+
+
 ## 第8步请求周期与有界读取组合候选
 
 模型周期新增五项顺序／失败用例，完整验证首次响应后读重试上限、provider超限先恢复再回收、回收失败不再请求、preflight不恢复、最后prompt与response配对、异常不消费临时工具。渐进工具两项测试迁到实际请求周期，不保留旧私有清理入口。五文件164 passed、4既有xfail。

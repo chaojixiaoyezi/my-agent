@@ -1054,13 +1054,13 @@ def test_native_window_commits_below_trigger_when_recovery_target_is_unreachable
         },
     )
     _record_large_write_calls(agent, params, start=1, stop=10, chars=3_000)
-    original_settle = service._settle_native_ir_window
+    original_settle = service.reduce_native_compact_candidate
 
-    def settle_below_trigger(**kwargs):
-        dropped, _actual_tokens = original_settle(**kwargs)
-        return dropped, 8_500
+    def settle_below_trigger(window, **kwargs):
+        candidate = original_settle(window, **kwargs)
+        return replace(candidate, after_tokens=8_500)
 
-    monkeypatch.setattr(service, "_settle_native_ir_window", settle_below_trigger)
+    monkeypatch.setattr(service, "reduce_native_compact_candidate", settle_below_trigger)
 
     build_tool_loop_prompt(agent, params)
 
@@ -1542,10 +1542,10 @@ def test_persistent_native_interrupt_after_ir_mutation_rolls_back_without_failur
     _record_large_write_calls(agent, params, start=1, stop=6, chars=12_000, with_runtime_facts=True)
     before_ir = list(params.tool_ir_history)
     before_context = list(params.tool_context)
-    original_settle = tool_loop_service._settle_native_ir_window
+    original_settle = tool_loop_service.reduce_native_compact_candidate
 
-    def settle_then_interrupt(**kwargs):
-        result = original_settle(**kwargs)
+    def settle_then_interrupt(window, **kwargs):
+        result = original_settle(window, **kwargs)
         assert RuntimeFactsTurn("runtime-state-1") not in params.tool_ir_history
         assert RuntimeFactsTurn("runtime-state-6") in params.tool_ir_history
         assert RuntimeFactsTurn("same-workspace", source="workspace") in params.tool_ir_history
@@ -1553,7 +1553,7 @@ def test_persistent_native_interrupt_after_ir_mutation_rolls_back_without_failur
         token.cancel("stop-after-ir-mutation")
         return result
 
-    monkeypatch.setattr(tool_loop_service, "_settle_native_ir_window", settle_then_interrupt)
+    monkeypatch.setattr(tool_loop_service, "reduce_native_compact_candidate", settle_then_interrupt)
     with pytest.raises(InterruptedError, match="interrupted by user"):
         build_tool_loop_prompt(agent, params)
 
@@ -2131,3 +2131,58 @@ def test_to_provider_messages_stays_pure_translation():
             ],
         }
     ]
+
+
+@pytest.mark.parametrize("failure_type", [RuntimeError, InterruptedError])
+@pytest.mark.parametrize("persistent", [True, False])
+def test_projection_failure_preserves_native_commit_boundary(
+    tmp_path, monkeypatch, failure_type, persistent
+):
+    """有CAS时保留已提交历史；无持久绑定时保持原内存事务回滚。"""
+    from agent_py_agent.agent.agent_core import _tool_loop_service as service
+
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.threads.get_or_create({
+        "canonical_user_id": "local/main", "channel": "test",
+        "channel_conversation_id": "post-commit-projection", "channel_user_id": "local/main",
+    })
+    agent = _native_agent(tmp_path)
+    agent.backend = _SummaryBackend(10_000)
+    agent.config.model_context_window_tokens = 10_000
+    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "base-prompt")
+    agent.conversation_store = store
+    agent.home_paths = SimpleNamespace(owner_compact_dir=tmp_path / "compact")
+    sink = _ContextCompactionSink()
+    params = replace(
+        _params(), save=persistent, effective_on_chunk=sink,
+        task_attributes={CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True,
+                         "conversation_thread_id": thread.thread_id} if persistent else {},
+    )
+    _record_large_write_calls(agent, params, start=1, stop=6, chars=12_000)
+    original_ir = list(params.tool_ir_history)
+    original_context = list(params.tool_context)
+    committed = {}
+    failure = failure_type("post-commit projection failed")
+
+    def fail_projection(_params, generation, *, canonical):
+        assert canonical is persistent and generation == 1
+        assert store.threads.load(thread.thread_id).compact_generation == int(persistent)
+        committed["ir"] = list(params.tool_ir_history)
+        committed["context"] = list(params.tool_context)
+        raise failure
+
+    monkeypatch.setattr(service, "record_conversation_compact_generation", fail_projection)
+    with pytest.raises(failure_type) as caught:
+        build_tool_loop_prompt(agent, params)
+    assert caught.value is failure
+    assert committed["ir"] != original_ir
+    assert params.tool_ir_history == (committed["ir"] if persistent else original_ir)
+    assert params.tool_context == (committed["context"] if persistent else original_context)
+    stored = store.threads.load(thread.thread_id)
+    assert stored.compact_generation == int(persistent)
+    assert bool(stored.compact_checkpoint_id) is persistent
+    assert stored.compact_consecutive_failures == 0
+    failure_phases = [row["phase"] for row in sink.progress_rows if row["phase"] in {"failed", "superseded"}]
+    assert failure_phases == ([] if persistent else ["superseded" if failure_type is InterruptedError else "failed"])
+    _assert_no_orphans(_native_provider_messages(agent, params))
