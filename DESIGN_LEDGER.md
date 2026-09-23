@@ -1,5 +1,7 @@
 # 设计台账
 
+Compact通用底座按函数级闭包向主线移植，自动选模、Jev、菜单及decision配置不是必要依赖。扫描/估算/摘要窗口候选已在主线临时副本验证；scoped checkpoint、摘要基础链、宿主同源恢复与容量门须成套审查，完整保留投影最后接线。当前为交接候选、未合并，详见[容量审计](docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。
+
 12.4摘要字符来源采用只读两遍编码：总字符/hash与顺序当前窗口，不落临时文件或新增索引。共享tokens沿原估算语义流式累计；分段修复提示统一预留并在发送前复验。已实现并通过316项联合，全链来源及覆盖尚未有界；见[容量审计](docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。
 
 12.4保留历史完整投影已本地实现：显式Compact来源及候选不再套普通字符窗口，三个宿主共用原容量门；超量/未知拒绝而不删原文放行。普通展示规则保留，详见[容量审计](docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。

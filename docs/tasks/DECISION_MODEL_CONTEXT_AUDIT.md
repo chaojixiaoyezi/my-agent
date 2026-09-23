@@ -1333,3 +1333,41 @@ memory_archive/tokens.estimate_tokens复用唯一原公式，按相同sort_keys/
 最终15文件 **316 passed（24.86秒）**，日志 `/tmp/decision_stream_verified_20260923.log`，替代同范围315项中间结果，不累加。Ruff、doc sync、import boundaries零发现、strict code-size hard=0且原基线未改、diff均通过，clean-package在纳入新文件后通过。严格全链状态仍受原4个主线独占测试接口失败限制，不能称整体gate通过；没有推送、部署或真实供应商调用。审查提出的JSON失败优先于UTF8失败组合已修并纳入最终用例。
 
 主线8.1已明确整枝含decision/Jev大量历史，不能整枝合入refactor；本线正在独立核对Compact/source/projection函数级移植闭包与前置commit，菜单、决策选模和配置不作为必需功能搭载。本片不要求主线暂停其_tool_loop_service职责拆分。
+
+
+### 主线最小移植闭包交接（2026-09-23，未合并）
+
+- workstream/owner：decision-model-integration，本线实现与验证，Sol high 独立只读核对依赖。
+- 基线：主线 `85050017d687694f8167499798cbad07dd087b85`；来源 `425bcb3a9ab816e12ebc3b72b36a68ae58e5f2e0`。
+- 目标：主线可以独立取得消息扫描和摘要内存修复，不必同时接入 Jev、自动选模、菜单或 decision 配置。
+- 操作边界：仅临时 Git index 组合与仓库外导出验证；主工作区、分支、Gateway 和测试机未改。
+
+可审查补丁分三组，路径均相对 `agent_py_agent/`：
+
+| 组 | 生产文件 | 验证文件及前置 |
+| --- | --- | --- |
+| A 消息扫描 | `agent/conversation/store_io.py`、`message_scan.py`、`store_messages.py`、`history_page.py` | `tests/test_conversation_message_scan.py`；来自 `467f3cac3^..467f3cac3`，无 decision 依赖 |
+| B 等值 token 估算 | `agent/memory_archive/tokens.py` | `tests/test_archive_tokens.py`；来自 `425bcb3a9^..425bcb3a9`，独立于 A |
+| C 摘要顺序窗口 | `agent/conversation/compact_request_budget.py`、`compact_text_source.py`，以及 `agent/backends/request_content.py` | `tests/test_compact_text_source.py`；针对上述主线基线到来源的文件差异，按 B 后验证 |
+
+A 包括流式幂等去重和未终止 LF 尾行拒绝，不只是新分页 API；不包含 `5c8183651` 才增加的 `scan_message_snapshot`。B 保持原估算数值及异常优先级。C 不是只抽取最新 commit：它还带 `95ffee08a` 的可选严格摘要失败参数及 `319004926` 的非文本来源拒绝；纯谓词 `request_content.py` 是因此必需的自包含依赖，默认严格参数关闭，没有自动选模调用方。主线审查时必须明确这两个行为，不可把 C 称为纯性能改动，也不必搬入这两个前置提交的其余文件。既有 `test_compact_request_budget.py::_request` helper 在基线可直接使用。
+
+仓库外工件目录 `/tmp/decision-compact-port-20260923/` 中有三份 patch、`manifest.json` 和验证日志；工件可能被系统清理，以上固定提交、文件清单和 diff 区间可重新生成。各 patch SHA256：
+
+- A-message-scan.patch：`a7ba56bda3a15cf466465d9cd2e13e4687f36a4ca529553bf5121b536e3bc722`
+- B-token-estimate.patch：`dfe25fcb0464b17755d539908189a324c3ff6bd8587fc888e8fd4b5bfd698c79`
+- C-summary-stream.patch：`33130b9539cfa64196b88806e1f3fcb288282ab6c3a2067b45cb0e75ad04a097`
+
+三组按 A→B→C 在临时 index 逐组 `git apply --cached --check` / apply 成功，结果 tree 为 `42e46031307e36c6d3c0a4bef7197ff63c338839`。从这个树导出独立临时代码副本进行运行验证，使用原 pytest HOME 隔离 fixture，无真实供应商调用。先四文件（message_scan、archive_tokens、compact_text_source、compact_request_budget）97 项通过；再五个基线相邻文件（conversation_store、conversation_message_stream、conversation_history_paging、conversation_history_display、gateway_conversation_compact）**139 passed，6.61秒**。两批是不同测试文件，日志分别 `validation.log` / `adjacent.log`；11 个变动文件 Ruff 通过。没有运行完整发布严格 gate；补丁尚无主线文档适配，不作为可直接发布证明。
+
+scoped Compact 后续闭包不能省略：
+
+1. 只读选择器：在 A 之上抽取 `5c8183651` 的 `message_scan.scan_message_snapshot` 与 `message_selection.select_message_snapshot`。两遍同 EOF/hash 校验，仍 O(全部 ID＋选中正文)；该原语不自行建立持久覆盖权威。
+2. 持久范围：`7f473c44f` 的 `CompactScope`、v3 checkpoint、`summary_base_checkpoint_id`、精确 `source_message_ids/source_tool_refs`、提交链校验和 `resolve_compact_summary_view`。主线当前 v1/v2 全线程 cursor 不能代替局部覆盖；必须沿摘要基础链排除来源，不能把同提交链上的兄弟任务误算已压缩。
+3. 宿主同源接线：`AppliedCompactContext`、`7c73c5d96` 后台 scope/view 刷新及 `5aa08c7e4` 的 `ConversationCompactSource`/Gateway 恢复投影；后台延后正文要同时适配原 `context_bundle_report(include_messages=False)`，复用同一次任务事实。
+4. 完整下一请求预检：`002039663` 输出预留、`289f29ce1` 冻结注入、`468fec0a9` child 共享恢复、`dbb2d6983` 后台、`896cde5c4` 混合来源、`95ffee08a`/`81bdf9579` 原生重试及来源保留。按主线接口抽取通用函数，不整提交搬运；包含选模集成的 `6a65cc708` 也不是必要整包依赖。
+5. 最后才接 `f2bc98626` 的完整保留投影。仅移除字符窗却没有以上完整来源/容量门，会扩大请求但没有相应预检。
+
+需要主线协调：继续保持 `_tool_loop_service.py` 的 8.1 职责拆分独占；scoped 接口适配后，原四项 `test_background_main_agent_runtime.py` fake Store 签名由主线 owner 更新。此次 A/B/C 没有接该接口，97/139 项通过不能消除决策分支原四项失败，也不覆盖旧全仓八项历史失败。文档应由主线按实际采用切片更新，不能把本线 Jev 文档作为生产依赖整包搬运。
+
+建议下一步：主线可先审查 A/B，再审查 C 的两项额外行为并运行其发布 gate；scoped 合同按上述顺序另片接入。本线继续第 12.4 完整来源/覆盖与真实缓存验收，11/18 不变。只读审查与独立测试可以并行，共享 writer/CAS、主线拆分文件和 Gateway 保持单 owner。
