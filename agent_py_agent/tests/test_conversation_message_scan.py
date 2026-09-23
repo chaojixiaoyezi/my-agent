@@ -198,12 +198,13 @@ def test_dedupe_match_does_not_hide_later_corruption(conversation, bad_suffix):
     assert path.read_bytes() == before
 
 
-def test_dedupe_keeps_blank_crlf_and_unicode_semantics(conversation):
+@pytest.mark.parametrize("blank", [" ", "\u00a0", "\u2028"])
+def test_dedupe_keeps_blank_crlf_and_unicode_semantics(conversation, blank):
     store, tid = conversation
     row = _append(store, tid)
     original = replace(row, metadata={"dedupe_key": "same"})
     path = store.storage.message_path(tid)
-    path.write_bytes(b" \r\n" + json.dumps(original.to_dict(), ensure_ascii=False).encode() + b"\r\n")
+    path.write_bytes((blank + "\r\n").encode() + json.dumps(original.to_dict(), ensure_ascii=False).encode() + b"\r\n")
     assert store.messages.append_once({"thread_id": tid, "role": row.role, "content": row.content}, dedupe_key="same") == original
 
 
@@ -222,13 +223,13 @@ def test_dedupe_rejects_uncommitted_tail_before_any_append(conversation, ending,
     assert path.read_bytes() == before
 
 
-@pytest.mark.parametrize("raw", [b"[]\n", b"null\n", b"1\n", b"broken\n", b"{\"created_at\": []}\n", b"\xff\n"])
+@pytest.mark.parametrize("raw", [b"[]\n", b"null\n", b"1\n", b"broken\n", b"{\"created_at\": []}\n", b"\xff\n", (json.dumps({"created_at": 10**400}) + "\n").encode()])
 def test_page_bad_row_is_data_error_not_programmer_bug(conversation, raw):
     store, tid = conversation
     path = store.storage.message_path(tid)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(raw)
-    rows, cursor, errors = store.messages.page_after_offset_report(tid, max_bytes=200)
+    rows, cursor, errors = store.messages.page_after_offset_report(tid, max_bytes=max(200, len(raw)))
     assert not rows and cursor == 0
     assert errors[0]["category"] == "data_corruption"
 

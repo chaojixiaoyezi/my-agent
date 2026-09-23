@@ -1390,3 +1390,28 @@ Responses另两项捕获原_generate最终request_json参数：普通max_output_
 建议下一步：继续12.4来源/覆盖内存瓶颈和12.6配置变化组合，然后在已授权独立测试机核验Compact后的实际缓存。只读审查和独立测试可以并行；主线8.1拆分、writer/CAS和共享Gateway保持单owner，不因本片通过提前整枝合并。
 
 本片新测试Ruff、doc sync、strict code-size（hard=0，基线未改）、diff和clean-package通过；只改测试和文档，未新增生产模块/配置。原四项主线fake Store接口失败仍开放，因此不宣称整枝本地严格gate通过。
+
+
+### 12.6 跨窗口、并发与校准组合（2026-09-23，本地）
+
+解决候选只在短输入、单会话环境验证而遗漏同一Agent共享状态的问题。新增 `test_model_selection_isolation.py` 共12项，复用原Gateway队列、线程CAS、模型目录、发送前复核和调用账；仅HTTP/决策回复为内存替身，无真实网络、部署或Gateway操作。
+
+- 八项双会话组合：250K→1M及1M→250K分别与关闭决策、显式选模、可选准入忙、未知Responses投影交错。一条保留原模型，另一条采用候选；原配置、backend、窗口、请求账和ContextVar隔离。名额3验证正常并发，名额2验证原主模型保留策略，不绕过准入。事件只固定待测交错，并不证明任意竞争顺序都会采用；锁争用时仍允许原保守拒绝。
+- 两项近窗口组合：相同76万字符完整系统要求、旧原生tool_use/tool_result及实际工具schema，在原1M模型下运行；250K候选拒绝且业务仍用原模型，1M候选采用。使用真实本地估算与原容量门，输出4096不减、材料不裁剪、未生成Compact覆盖。大材料放系统要求是为了测试实际业务完整输入，并未放进超过决策运输限额的state。
+- 两项native/text校准组合：同名同profile更换连接和窗口，活动模型快照继续原参数，新工作片拒绝复用旧校准；同owner另一线程也不继承。旧持久观测保留历史，未把新连接明文写进观测账。usage为合成夹具，只证明失效机制。
+
+六文件联合 **123 passed（24.09秒）**：model_selection_isolation、gateway_model_adoption、subagent_first_request_selection、runtime_context_pressure、request_content_capacity、model_scope_dependencies（均为test_前缀）。日志 `/tmp/decision_selection_matrix_joint_20260923.log`。既有文件同时覆盖未知模态保留、候选探测失败、凭据/目录/期限变化、CAS不确定等；不把它们描述为每项均在同一并发场景下组合。初版夹具分别误触原准入保留、非阻塞写锁竞争和冻结参数赋值，调整测试编排后通过，没有为通过修改产品选模或容量规则。
+
+12.6本地验收完成；12.4全链超大来源/覆盖驻留和12.7真实缓存仍开放，18项大清单11/18不变。真实tokenizer、未知媒体能力与跨模型缓存不能由这些假HTTP推断。原四项主线独占fake Store签名及旧八项失败仍保留，不宣称整枝严格gate通过。
+
+### 消息扫描移植审查反馈与来源兼容修复（2026-09-23）
+
+主线在其独立候选 `ef355f822` 复现扫描A组的两类兼容缺陷：巨大created_at整数的float转换溢出被归成程序错误，以及byte.strip不能识别原读取器接受的Unicode空白。该提交含主线其它工作，未整提交移植。本线同步精确修复并补查后续scoped来源扫描，发现同样空白缺陷。
+
+共享私有解析器捕获OverflowError并报告data_corruption；幂等扫描先检查完整LF，再严格UTF8解码并按str.strip跳空白；来源扫描显式启用相同空白语义，普通分页保留原拒绝空白规则。所有原字节仍计入来源hash，visitor不收到空记录，不改变writer/CAS、权限或持久schema。
+
+兼容红灯3 failed/7 passed（`/tmp/decision_scan_compat_red_20260923.log`），scoped新增红灯2 failed/1 passed（`/tmp/decision_scope_blank_red_20260923.log`）。修复后五文件 **145 passed（1.46秒）**：conversation_message_scan、conversation_message_selection、conversation_store、conversation_message_stream、conversation_history_paging；日志 `/tmp/decision_scan_compat_green_20260923.log`。前述固定A补丁及hash未覆盖本次修复，也未被静默替换；主线已有其A组修复，本线额外scoped修复只在采用该来源选择器时需要。
+
+建议下一步：完成本地守卫并将精确修复交接主线，继续12.4来源内存和12.7真实缓存；已授权独立测试机可承担真实组合，部署前同步使用窗口。独立测试/只读审查可并行，主线拆分、writer/CAS与Gateway保持单owner。
+
+本片全目录Ruff、doc sync、strict code-size（hard=0，原基线未改）、diff及clean-package检查通过。两个定向测试批次互不相同，但不据数量推算完成比例；原四项主线测试适配缺口仍使整枝验收未收口。未推送，线上CI未作为验收来源。

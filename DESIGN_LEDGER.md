@@ -1,5 +1,7 @@
 # 设计台账
 
+12.6本地组合验收已完成，原目录/线程CAS/容量门和校准账仍唯一；扫描修复保持原Unicode空白与损坏分类，不增加配置或持久索引。12.4全链有界与12.7真实缓存未完成，见[容量审计](docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。
+
 Compact通用底座按函数级闭包向主线移植，自动选模、Jev、菜单及decision配置不是必要依赖。扫描/估算/摘要窗口候选已在主线临时副本验证；scoped checkpoint、摘要基础链、宿主同源恢复与容量门须成套审查，完整保留投影最后接线。当前为交接候选、未合并，详见[容量审计](docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。
 
 12.4摘要字符来源采用只读两遍编码：总字符/hash与顺序当前窗口，不落临时文件或新增索引。共享tokens沿原估算语义流式累计；分段修复提示统一预留并在发送前复验。已实现并通过316项联合，全链来源及覆盖尚未有界；见[容量审计](docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。

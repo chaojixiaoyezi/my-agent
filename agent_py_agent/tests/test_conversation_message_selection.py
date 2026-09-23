@@ -229,3 +229,14 @@ def test_bundle_message_deferral_does_not_suppress_later_canonical_error(convers
                                   SimpleNamespace(conversation_context_recent_limit=0), None, [])
     load_context_bundle(state)
     assert state.load_errors
+
+
+@pytest.mark.parametrize("blank", [" ", "\u00a0", "\u2028"])
+def test_snapshot_preserves_original_unicode_blank_row_semantics(conversation, blank):
+    store, tid = conversation
+    row = _append(store, tid, "实际完整消息")
+    path = store.storage.message_path(tid)
+    before = (blank + "\n").encode() + path.read_bytes() + (blank + "\r\n").encode()
+    path.write_bytes(before)
+    assert select_message_snapshot(store.messages, tid) == (row,)
+    assert path.read_bytes() == before

@@ -40,15 +40,18 @@ def complete_message_offset(path: Path) -> int:
         return complete_jsonl_end(handle, handle.seek(0, 2))
 
 
-# LLM: canonical分页和来源扫描共用解析/线程检查，非对象JSON与错误身份都归数据损坏，不猜空记录。
+# LLM: canonical分页和来源扫描共用严格UTF8解析；数值溢出及错误身份归数据损坏，仅来源扫描显式跳Unicode空白。
 # 函数用途: 将一条完整原字节消息解析为本线程记录，不修改正文、元数据或持久状态。
-def _message_from_line(line: bytes, thread_id: str) -> MessageLogEntry:
+def _message_from_line(line: bytes, thread_id: str, *, skip_blank: bool = False) -> MessageLogEntry | None:
     try:
-        raw = json.loads(line.decode("utf-8"))
+        text = line.decode("utf-8")
+        if skip_blank and not text.strip():
+            return None
+        raw = json.loads(text)
         if not isinstance(raw, dict):
             raise ValueError("message row must be a JSON object")
         entry = MessageLogEntry.from_dict(raw)
-    except (ValueError, TypeError, UnicodeError) as exc:
+    except (ValueError, TypeError, UnicodeError, OverflowError) as exc:
         raise DataCorruptionError("invalid canonical message row") from exc
     if entry.thread_id != thread_id:
         raise DataCorruptionError("invalid canonical message row")
@@ -103,7 +106,7 @@ def read_message_page(
     return entries, cursor
 
 
-# LLM: 幂等检查需扫描固定物理EOF前全部行，即使命中也不提前返回；沿原规则跳空白/display，保留首个key；未终止LF拒绝，避免追加拼坏行。
+# LLM: 幂等检查扫描固定物理EOF前全部行；UTF8解码后按原Unicode空白/display规则跳过，保留首key；先拒绝未终止LF，命中后仍检查后续损坏。
 # 函数用途: 用最多一行正文及首个匹配项的内存核对旧历史，调用方仍在原append-once锁内决定是否写入。
 def find_message_dedupe(path: Path, key: str) -> MessageLogEntry | None:
     try:
@@ -120,16 +123,17 @@ def find_message_dedupe(path: Path, key: str) -> MessageLogEntry | None:
                 raise DataCorruptionError("canonical transcript truncated during dedupe scan")
             if not line.endswith(b"\n"):
                 raise DataCorruptionError("canonical transcript has an incomplete final row")
-            if not line.strip():
+            text = line.decode("utf-8")
+            if not text.strip():
                 continue
-            entry = MessageLogEntry.from_dict(json.loads(line.decode("utf-8")))
+            entry = MessageLogEntry.from_dict(json.loads(text))
             if (existing is None and not is_display_checkpoint(entry)
                     and str(entry.metadata.get("dedupe_key") or "").strip() == key):
                 existing = entry
     return existing
 
 
-# LLM: 固定完整LF尾界内逐行验证原消息，visitor仅接收解析副本；完整原字节hash用于两次只读扫描一致性，不作持久权威。
+# LLM: 固定LF尾界内逐行严格解码，Unicode空白不生成记录但仍计入原字节hash；visitor只收解析副本，不作持久覆盖权威。
 # 函数用途: 不保存全量正文地扫描canonical消息，空白不生成消息，任何坏行或截断拒绝整个来源。
 def scan_message_snapshot(path: Path, thread_id: str, through: int, visitor) -> str:
     import hashlib
@@ -149,8 +153,7 @@ def scan_message_snapshot(path: Path, thread_id: str, through: int, visitor) -> 
             if not line.endswith(b"\n"):
                 raise DataCorruptionError("canonical transcript truncated during source scan")
             digest.update(line)
-            if not line.strip():
-                continue
-            entry = _message_from_line(line, thread_id)
-            visitor(entry)
+            entry = _message_from_line(line, thread_id, skip_blank=True)
+            if entry is not None:
+                visitor(entry)
     return digest.hexdigest()
