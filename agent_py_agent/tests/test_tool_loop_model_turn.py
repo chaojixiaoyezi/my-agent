@@ -108,3 +108,82 @@ def test_transient_retry_reads_current_delivery_state_before_replay(monkeypatch,
         assert caught.value is failure
         assert events == ["request"]
         assert active_turn_input_has_unconfirmed_delivery(state)
+
+
+@pytest.mark.parametrize(
+    ("source", "retry_limit", "reclaim", "expected_calls", "expected_restores"),
+    [("provider_error", 2, True, 3, 2), ("provider_error", 0, True, 1, 0),
+     ("provider_error", 2, False, 1, 1), ("preflight", 2, True, 1, 0)],
+)
+def test_request_recovery_order_and_final_prompt_pair(
+    source, retry_limit, reclaim, expected_calls, expected_restores
+):
+    from agent_py_agent.agent.agent_core.tool_loop.model_turn import request_model_response
+
+    events = []
+    prompts = []
+    responses = []
+    loaded = {"read_file"}
+
+    def build():
+        prompt = f"请求{len(prompts) + 1}"
+        prompts.append(prompt)
+        events.append(("build", prompt))
+        return prompt
+
+    def generate(prompt):
+        assert prompt is prompts[-1]
+        events.append(("generate", prompt))
+        response = ModelResponse("", "fake", runtime_status="context_overflow", runtime_source=source)
+        if len(responses) == 2:
+            response = ModelResponse("恢复成功", "fake")
+        responses.append(response)
+        return response
+
+    def limit():
+        assert len(responses) == 1
+        events.append("limit")
+        return retry_limit
+
+    def recover(prompt):
+        assert events[-1] == "restore"
+        assert prompt is prompts[-1]
+        events.append(("recover", prompt))
+        return reclaim
+
+    prompt, response = request_model_response(
+        build_prompt=build,
+        generate_response=generate,
+        restore_rejected_input=lambda: events.append("restore"),
+        recover_context=recover,
+        read_overflow_retry_limit=limit,
+        visible_loaded_tools=loaded,
+    )
+    assert len(responses) == expected_calls
+    assert prompt is prompts[-1] and response is responses[-1]
+    assert events[:3] == [("build", "请求1"), ("generate", "请求1"), "limit"]
+    assert events.count("limit") == 1
+    assert events.count("restore") == expected_restores
+    assert loaded == (set() if expected_calls == 3 else {"read_file"})
+
+
+def test_request_failure_does_not_consume_visible_tools():
+    from agent_py_agent.agent.agent_core.tool_loop.model_turn import request_model_response
+
+    loaded = {"read_file"}
+    failure = ProviderTransientError("暂未响应")
+
+    def generate(_prompt):
+        raise failure
+
+    with pytest.raises(ProviderTransientError) as caught:
+        request_model_response(
+            build_prompt=lambda: "请求",
+            generate_response=generate,
+            restore_rejected_input=lambda: pytest.fail("不能恢复未知请求"),
+            recover_context=lambda _prompt: pytest.fail("不能压缩未知请求"),
+            read_overflow_retry_limit=lambda: pytest.fail("响应返回前不能读取上限"),
+            visible_loaded_tools=loaded,
+        )
+    assert caught.value is failure
+    assert loaded == {"read_file"}

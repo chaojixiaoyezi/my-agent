@@ -1,5 +1,13 @@
 # 测试与发布验收
 
+## 第8步请求周期与有界读取组合候选
+
+模型周期新增五项顺序／失败用例，完整验证首次响应后读重试上限、provider超限先恢复再回收、回收失败不再请求、preflight不恢复、最后prompt与response配对、异常不消费临时工具。渐进工具两项测试迁到实际请求周期，不保留旧私有清理入口。五文件164 passed、4既有xfail。
+A/B最小移植原71项及相邻112项通过；独立审阅后新增三个用例真实失败：Unicode空白行被拒及极大created_at错误分类。字节预算先调整为能容纳该行，确认失败发生在解码阶段后才修生产代码；七文件复验186 passed。没有吞错误或自动修复尾行，旧游标和原幂等锁保留。
+最终18文件组合 **456 passed、24既有xfail，18.17秒**：前述模型采纳十文件，加native_tool_ir_compact_and_orphan_sweep、archive_tokens、conversation_message_scan、conversation_store、conversation_message_stream、conversation_history_paging、gateway_foreground_transcript、cli_run_conversation。分组结果有重叠；本次增删远低于全仓阈值，没有追加全仓pytest。
+本候选Ruff、doc sync（补齐memory模块文档后）、strict code-size、diff和clean-package均通过；尺寸基线未改，生成报告保留仓库外。
+本轮没有新增真实模型验收；已部署版本仍为第7步包。完整Compact scope／摘要来源链未移植，不能以此声称第8步完成。
+
 ## 第8.2首片模型采纳：本地合同验证
 
 新增 `test_tool_loop_model_turn.py` 十项：成功／中断结构化返回先计量再确认；provider超限恢复原输入、preflight不消费；请求或计量失败不确认；瞬断中实时读取submission及待确认ID，拒绝重发已提交输入；安全重试只计量最终响应。

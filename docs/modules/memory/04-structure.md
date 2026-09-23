@@ -1,5 +1,11 @@
 # Memory Structure
 
+## 流式估算与消息扫描
+
+`memory_archive/tokens.py` 唯一估算器按原JSON编码顺序累积字符和UTF8字节，保持旧预算数值与异常回退；去掉完整JSON及全文UTF8副本，单个JSON值和字典排序仍可能较大。估算不写实际用量账。
+`conversation/message_scan.py` 接收canonical路径，复用`store_io.complete_jsonl_end`；有界页只返回完整行和字节游标。append_once在原锁内逐行读到冻结尾界，首个key命中后仍查坏行；Unicode空白按原规则跳过，字段溢出归data_corruption，缺LF尾行禁止追加且不自动修复。分页原语不授予摘要覆盖或scope身份。
+
+
 ## 会话存储读取边界
 
 `curator_inputs.py` 只从同一 ConversationStore 的 `threads` 元数据和 `messages` 增量读取能力收集输入。

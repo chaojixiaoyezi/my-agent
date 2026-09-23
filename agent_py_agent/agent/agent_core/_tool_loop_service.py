@@ -99,7 +99,7 @@ from .tool_loop.completion import (
     queue_reply_for_audit_prepare,
     task_local_wait_response_for_open_subagents,
 )
-from .tool_loop.model_turn import sample_and_accept_model_response
+from .tool_loop.model_turn import request_model_response, sample_and_accept_model_response
 from .tool_loop.natural_user_reply import (
     discard_pending_natural_user_reply,
     finish_natural_user_reply,
@@ -1279,46 +1279,29 @@ def _text_conversation_history_section(seed: object) -> str:
     return "\n".join(lines)
 
 
+# LLM: 每次外层采样重新选择业务或回执参数，内部超限重试绑定同一参数；不要把辅助回执当作业务工具声明已展示。
+# 函数用途: 选择本轮真正要发给模型的上下文，并把原请求、Compact和输入恢复能力交给模型请求周期。
 def next_tool_loop_model_response(agent, params: ToolLoopExecuteParams, tool_rounds: int):
+    from .tool_context.ptl_retry import DEFAULT_PTL_RETRY_MAX
+
     _discard_stale_natural_reply_for_pending_turn_input(agent, params)
     model_params = natural_user_reply_model_params(params)
-    consumes_task_tool_surface = model_params is params
-    prompt = build_tool_loop_prompt(agent, model_params)
-    response = generate_model_response(
-        ModelGenerateParams(
-            agent=agent,
-            params=model_params,
-            prompt=prompt,
-            tool_rounds=tool_rounds,
-        )
+    return request_model_response(
+        build_prompt=partial(build_tool_loop_prompt, agent, model_params),
+        generate_response=lambda prompt: generate_model_response(
+            ModelGenerateParams(
+                agent=agent, params=model_params, prompt=prompt, tool_rounds=tool_rounds
+            )
+        ),
+        restore_rejected_input=partial(
+            restore_injected_turn_input_for_provider_retry, agent, model_params
+        ),
+        recover_context=lambda prompt: _ptl_reclaim_oldest(agent, model_params, prompt=prompt),
+        read_overflow_retry_limit=lambda: int(
+            getattr(getattr(agent, "config", None), "tool_context_ptl_retry_max", DEFAULT_PTL_RETRY_MAX) or 0
+        ),
+        visible_loaded_tools=model_params.loaded_tool_names if model_params is params else None,
     )
-    result = _retry_after_provider_context_overflow(
-        agent,
-        model_params,
-        tool_rounds,
-        first=(prompt, response),
-    )
-    _consume_ephemeral_loaded_tools(
-        model_params,
-        result[1],
-        tool_surface_was_visible=consumes_task_tool_surface,
-    )
-    return result
-
-
-def _consume_ephemeral_loaded_tools(
-    params: ToolLoopExecuteParams,
-    response: object,
-    *,
-    tool_surface_was_visible: bool = True,
-) -> None:
-    """A discovered schema is visible for exactly one successful model call."""
-
-    if not tool_surface_was_visible or not params.loaded_tool_names:
-        return
-    if str(getattr(response, "runtime_status", "") or "") == "context_overflow":
-        return
-    params.loaded_tool_names.clear()
 
 
 def _natural_user_reply_step(
@@ -1343,48 +1326,6 @@ def _natural_user_reply_step(
         response,
         accepted=accepted,
         rejection_reason=rejection_reason,
-    )
-
-
-# LLM: Provider-reported overflow reuses the same native full-request compact transaction;
-# text protocol retains its bounded PTL reduction. No native pair may disappear off-ledger.
-# 函数用途: 模型实报上下文超限时，原生协议强制走唯一 Compact，文字协议再做轻量重试。
-def _retry_after_provider_context_overflow(
-    agent,
-    params: ToolLoopExecuteParams,
-    tool_rounds: int,
-    *,
-    first: tuple[str, object],
-):
-    from .tool_context.ptl_retry import DEFAULT_PTL_RETRY_MAX
-
-    prompt, response = first
-    retry_max = int(getattr(getattr(agent, "config", None), "tool_context_ptl_retry_max", DEFAULT_PTL_RETRY_MAX) or 0)
-    retries = 0
-    while retries < retry_max and _is_provider_context_overflow(response):
-        # Provider explicitly rejected this physical call before executing the
-        # prompt. Retire its atomic submission batch before any PTL/preflight retry.
-        restore_injected_turn_input_for_provider_retry(agent, params)
-        if not _ptl_reclaim_oldest(agent, params, prompt=prompt):
-            break
-        retries += 1
-        prompt = build_tool_loop_prompt(agent, params)
-        response = generate_model_response(
-            ModelGenerateParams(
-                agent=agent,
-                params=params,
-                prompt=prompt,
-                tool_rounds=tool_rounds,
-            )
-        )
-    return prompt, response
-
-
-# 函数用途: 判定响应是不是 provider 实报的上下文超限（排除 preflight 预测）。
-def _is_provider_context_overflow(response) -> bool:
-    return (
-        str(getattr(response, "runtime_status", "") or "") == "context_overflow"
-        and str(getattr(response, "runtime_source", "") or "") == "provider_error"
     )
 
 

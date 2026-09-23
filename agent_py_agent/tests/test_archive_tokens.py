@@ -217,8 +217,8 @@ class TestAppendSessionTokenUsage:
         assert result["turn_total"] == 3500000
 
 
-class TestPayloadToText:
-    """测试 _payload_to_text 内部函数（通过 estimate_tokens 间接测试）。"""
+class TestPayloadEstimation:
+    """通过 estimate_tokens 验证不同输入类型，不绑定内部编码方式。"""
 
     def test_string_payload(self):
         """测试字符串输入直接返回。"""
@@ -288,3 +288,35 @@ class TestStructuredOverhead:
         text = "plain text"
         result = estimate_tokens(text)
         assert result >= 1
+
+
+@pytest.mark.parametrize("payload", [
+    "", "中文🪴\\\"\n", None, True, 123, float("nan"), float("inf"),
+    {"z": [1, "甲", {"b": "🪴"}], "a": False}, ("a", "b"), {1, 2},
+    {"mixed": 1, 2: "key"}, {None: "null key"}, Path("example/file.txt"),
+    {"a": "\ud800", "b": {1: "x", "str": "y"}},
+])
+def test_streamed_estimator_preserves_original_numeric_contract(payload):
+    import json
+    import math
+
+    from agent_py_agent.agent.memory_archive.tokens import estimate_tokens
+
+    try:
+        text = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        text = str(payload)
+    overhead = max(1, len(payload) // 2) if isinstance(payload, dict) else max(1, len(payload) // 4) if isinstance(payload, (list, tuple, set)) else 0
+    expected = max(1, math.ceil(len(text.encode("utf-8")) / 3), math.ceil(len(text) / 3)) + overhead if text else 1
+    assert estimate_tokens(payload) == expected
+
+
+def test_streamed_estimator_circular_fallback_and_utf8_error_stay_distinct():
+    from agent_py_agent.agent.memory_archive.tokens import estimate_tokens
+
+    circular = []
+    circular.append(circular)
+    assert estimate_tokens(circular) == 4  # 旧str回退"[[...]]"：7字节/3向上取整+1结构开销。
+    for payload in ("\ud800", {"value": "\ud800"}, ["\ud800"]):
+        with pytest.raises(UnicodeEncodeError):
+            estimate_tokens(payload)

@@ -1,5 +1,5 @@
 # LLM: 模型采样与响应采纳只使用绑定后的窄操作；保留重试、计量、输入确认顺序，禁止持有Agent或重建历史。
-# 模块用途: 接收一次模型请求的结果，按供应商事实确认补充消息；请求组装、执行权和Compact仍由原调用方负责。
+# 模块用途: 接收一次模型请求的结果，按供应商事实确认补充消息；请求组装和Compact绑定原调用方，执行权仍由外层负责。
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -33,4 +33,38 @@ def sample_and_accept_model_response(
             restore_rejected_input()
     else:
         acknowledge_input()
+    return prompt, response
+
+
+# LLM: 固定同一组请求能力完成本次采样；重试上限在首次返回后读，先恢复原输入再回收，最终prompt/response必须配对。
+# 函数用途: 组装并请求模型，遇供应商明确超限时按原策略压缩重试；仅有效业务响应消费本轮临时工具声明。
+def request_model_response(
+    *,
+    build_prompt: Callable[[], str],
+    generate_response: Callable[[str], ModelResponse],
+    restore_rejected_input: Callable[[], object],
+    recover_context: Callable[[str], bool],
+    read_overflow_retry_limit: Callable[[], int],
+    visible_loaded_tools: set[str] | None,
+) -> tuple[str, ModelResponse]:
+    prompt = build_prompt()
+    response = generate_response(prompt)
+    retry_max = read_overflow_retry_limit()
+    retries = 0
+    while (
+        retries < retry_max
+        and str(getattr(response, "runtime_status", "") or "") == "context_overflow"
+        and str(getattr(response, "runtime_source", "") or "") == "provider_error"
+    ):
+        restore_rejected_input()
+        if not recover_context(prompt):
+            break
+        retries += 1
+        prompt = build_prompt()
+        response = generate_response(prompt)
+    if (
+        visible_loaded_tools is not None
+        and str(getattr(response, "runtime_status", "") or "") != "context_overflow"
+    ):
+        visible_loaded_tools.clear()
     return prompt, response

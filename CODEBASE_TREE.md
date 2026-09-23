@@ -138,7 +138,7 @@ agent_py_agent/
 |   |   |   |-- sleep_tool.py           # clock.sleep 工具：模型主动定时等待，写 wake_queue 字条、事件提前醒取消
 |   |   |-- model/                      # 主工具循环的统一模型调用账、动态超时、上下文压力与成本统计
 |   |   |-- tool_loop/                  # 工具轮次执行、恢复与自然结束
-|   |   |-- tool_loop/model_turn.py     # 绑定原采样、用量与输入确认操作，保持响应采纳顺序
+|   |   |-- tool_loop/model_turn.py     # 绑定模型请求／超限恢复、用量与输入确认，保持原顺序
 |   |   |-- tool_loop/display_archive.py # 执行当时的公开工具原文归档与轻量预览引用
 |   |   |-- tool_context/               # 工具结果上下文：reducer、窗口、microcompact、PTL 单轮重试
 |   |   |-- orchestration/              # 创建、只读状态、消息、取消、授权五个递归直属工具与内部自动启动/恢复引擎；无兄弟 goal 广播，进展事件由宿主写入
@@ -260,6 +260,7 @@ agent_py_agent/
 |   |   |-- store_io.py                 # 无 Store 依赖的 JSONL 读取、错误报告、路径与文件归档原语
 |   |   |-- store_layout.py             # 统一持久目录和路径、只读打开及扫描上下文组装
 |   |   |-- store_threads.py            # 线程身份、通道绑定、默认模型解析与 Compact 原子更新
+|   |   |-- message_scan.py             # 固定完整尾界、有字节预算的消息页和流式幂等查找
 |   |   |-- store_messages.py           # 消息幂等追加、展示检查点及字节游标读取
 |   |   |-- store_tasks.py              # 任务关联、活动索引、工作区状态投影及终态进度关闭
 |   |   |-- store_audits.py             # Audit 准备、发布修订、终态重开与运行代提交
@@ -616,7 +617,7 @@ docs/
 
 ### 关键文件说明
 
-- `agent_py_agent/agent/agent_core/tool_loop/model_turn.py`：仅协调模型采样与响应采纳；执行权、请求准备与Compact仍归原入口。
+- `agent_py_agent/agent/agent_core/tool_loop/model_turn.py`：协调请求周期与响应采纳；实际prompt构造、Compact和执行权仍由原入口绑定。
 
 - `plugins/sdk/pyproject.toml` 与 `scripts/build_plugin_api.py`：SDK 唯一发行声明和原源码字节投影；不另存共用权限实现。
 - `plugins/workspace-peek/` 与 `scripts/build_plugin_package.py`：首个自有只读插件及标准安装包构建，独立 MCP 入口只消费宿主逐次上下文。
@@ -733,6 +734,7 @@ docs/
 - `agent_py_agent/agent/conversation/store_io.py`：各领域与 transcript 共用 JSONL 读取、结构化错误和文件归档；不导入 Store，不吞坏行，不新增持久数据源。
 - `agent_py_agent/agent/conversation/store_layout.py`：`store.storage` 的唯一目录和路径上下文；初始化可只读，路径方法不授权业务操作、不改变原文件名。
 - `agent_py_agent/agent/conversation/store_threads.py`：`store.threads` 保存唯一线程元数据和通道索引，提供同一线程锁内的 CAS；新会话模型解析器由本领域持有。
+- `agent_py_agent/agent/conversation/message_scan.py`：同一canonical文件的完整LF边界、字节预算和锁内幂等扫描；不建索引或覆盖证明。
 - `agent_py_agent/agent/conversation/store_messages.py`：`store.messages` 保持原 append-only 账本、幂等锁和字节游标；只通过显式能力校验线程及更新活动时间。
 - `agent_py_agent/agent/conversation/store_tasks.py`：`store.tasks` 保存原任务关联和线程活动索引，沿原顺序更新工作区投影并关闭终态进度；不建立第二套任务状态。
 - `agent_py_agent/agent/conversation/store_audits.py`：`store.audits` 直接实现 Audit 准备、发布和重启操作，共用 `tasks` 的命名锁、任务锁和索引更新；无旧方法转发。

@@ -10,11 +10,9 @@ from __future__ import annotations
 
 import json
 import tempfile
-from types import SimpleNamespace
 
-from agent_py_agent.agent.agent_core._tool_loop_service import (
-    _consume_ephemeral_loaded_tools,
-)
+from agent_py_agent.agent.agent_core.tool_loop.model_turn import request_model_response
+from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings import AgentConfig
 
@@ -94,33 +92,31 @@ def test_tool_search_schema_has_only_query_and_limit(tmp_path) -> None:
     assert schema["additionalProperties"] is False
 
 
-def test_loaded_tool_schema_is_consumed_after_one_successful_model_call() -> None:
-    params = SimpleNamespace(loaded_tool_names={"get_goal"})
-
-    _consume_ephemeral_loaded_tools(
-        params,
-        SimpleNamespace(runtime_status="completed"),
+# LLM: 跑实际请求周期而非旧私有清理helper；所有后端响应为本地固定值，不请求模型。
+# 函数用途: 用最小绑定能力检查临时工具集合在响应边的消费规则。
+def _request_with_loaded_tools(loaded, *, status="completed", visible=True):
+    return request_model_response(
+        build_prompt=lambda: "原请求",
+        generate_response=lambda _prompt: ModelResponse("", "fake", runtime_status=status),
+        restore_rejected_input=lambda: None,
+        recover_context=lambda _prompt: False,
+        read_overflow_retry_limit=lambda: 0,
+        visible_loaded_tools=loaded if visible else None,
     )
 
-    assert params.loaded_tool_names == set()
+
+def test_loaded_tool_schema_is_consumed_after_one_successful_model_call() -> None:
+    loaded = {"get_goal"}
+    _request_with_loaded_tools(loaded)
+    assert loaded == set()
 
 
 def test_loaded_tool_schema_survives_overflow_or_auxiliary_reply() -> None:
-    overflow = SimpleNamespace(loaded_tool_names={"get_goal"})
-    auxiliary = SimpleNamespace(loaded_tool_names={"get_goal"})
-
-    _consume_ephemeral_loaded_tools(
-        overflow,
-        SimpleNamespace(runtime_status="context_overflow"),
-    )
-    _consume_ephemeral_loaded_tools(
-        auxiliary,
-        SimpleNamespace(runtime_status="completed"),
-        tool_surface_was_visible=False,
-    )
-
-    assert overflow.loaded_tool_names == {"get_goal"}
-    assert auxiliary.loaded_tool_names == {"get_goal"}
+    overflow, auxiliary = {"get_goal"}, {"get_goal"}
+    _request_with_loaded_tools(overflow, status="context_overflow")
+    _request_with_loaded_tools(auxiliary, visible=False)
+    assert overflow == {"get_goal"}
+    assert auxiliary == {"get_goal"}
 
 
 def test_explicit_allowed_tools_are_structured_direct_exposure(tmp_path) -> None:
