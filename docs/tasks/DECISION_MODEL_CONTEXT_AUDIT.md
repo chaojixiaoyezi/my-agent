@@ -1031,3 +1031,29 @@ OpenCode DeepSeek 的真实自动派工，保留 Jev、canonical profile、首�
 已登记 child 仍照常读取原 thread、marker、attempt 并在发送前原子提交，不从 task attributes 猜身份。
 原失败文件与 `test_subagent_first_request_selection.py`、`test_subagent_effective_runtime_context.py` 联合 **55 passed**，Ruff 通过。
 这修复普通 task_local 回归，不把第 12 项完整容量/Compact/缓存验收提前算完成。
+
+## 第 12 项最新切片：原生预检与出站计量共源（本地，整体未完成）
+
+`context_pressure` 过去直接翻译 IR 并把待发送 guidance 单列估算，未执行真实发送前的孤儿工具清扫，也未应用本轮 `ToolChoice`。因此已关闭工具仍可能算入 schema，实际不发送的孤立结果仍可能触发 Compact，预检与引导提交后的口径也不同。
+
+本片让预检与原完整请求投影共用 `project_native_provider_messages` 的转换及清扫；冻结 guidance 只追加到副本，不消费原去重集合。`model_turn_tool_choice` 迁到原 `native_tool_protocol` 唯一实现，生成、主会话/子代理选择和容量核验共用。真实 IR 与 guidance 的提交顺序未改。
+
+`projected_model_context_components` 只消费已准备的 `ToolLoopRequestProjection`，沿原 `estimate_tokens` 和整数占比分摊计量，不读取宿主、注册表、文件或校准，不联网；未知投影拒绝计数，不能补成零。原外层 snapshot 仍负责运行期校准，其 hydration 不是纯操作，不能被 Compact 候选直接调用。计量口径改变后观测升为 `provider_context_observation.v3`，旧 v2 不转换估算比例，等真实模型返回新 usage 后再校准。
+
+本地四文件 **83 passed**，包含 auto/none/specific、完整/孤立工具历史、冻结材料不变、预检与实际引导提交前后总量相同、未知拒绝及旧观测失效；原 native Compact、消息流、子代理首请求、Gateway 采用/观察、上下文预算、工具统一与线程存储八文件 **266 passed**。纯投影仍是本地 token 估算，不是供应商 wire tokenizer 或模态容量上界。
+
+独立审查后将 payload 对照的实际侧接到原 `_do_backend_generate`，补上真实包装的 `thinking_disabled`。由此修正 Gateway 的 `choice.none` 候选投影：不能把筛选后的空 schema 当成“原工具参数不存在”，否则预期 payload 和实际发送不同而拒绝采用。子代理在原始工具参数为空时也不应额外关闭 thinking 或向 OpenAI 多传 `tool_choice:none`。两条宿主准备链分别覆盖 tools 开/关及 none，child 增加 Anthropic/OpenAI 双协议并核对记录的 input estimate 与最终 wire payload 原估算相同；首请求文件34项、计量及主子采用六文件153项联合通过。没有新增 provider 策略或设置开关。
+
+尚未完成：三个宿主的完整准备载体、Compact 候选的原恢复输入重建、输入加输出预留的统一接受条件，以及真实 provider 缓存证据。此次没有把旧 `_projected_context_tokens` 冒充完整投影；第 12 项继续进行中。
+
+建议下一步：以此纯计量入口连接真实恢复准备，候选必须对照恢复后首个实际 payload；子代理/后台同 turn 展示载体可按精确文件独立推进，共享 core 参数与 renderer 保持单一 owner。
+
+### 同 turn 展示接续与后台执行身份（本地续片）
+
+child 和后台宿主沿原 `RunParams` 的展示回调携带本轮选择及 evaluated 事实；明确空选择与已评估无选择分开，下一 Goal turn／后台工作片清零。Compact 仍重新核对原权限、配置和能力快照；失效时回传 `None`，即使配置恢复也不在同轮再次发决策。child 的“transcript 未推进→活动轮归档→再次准备”读取回调后的参数，不能复活第一次准备前冻结的旧选择。没有新增持久展示账或执行权。
+
+独立审查发现后台恢复已有主任务时，实际 `run_id` 可能由 core 从临时任务编号改绑为旧主 run；外层参数不会被 `replace` 自动回写。后台现复用 `LocalRunControl` 及原 `bind_runtime_authority` 发布缝隙，准确接收本次 canonical run/attempt，再交给 Compact。宿主原回调的拒绝、不可调用值、关闭和迟到发布均保留；不从推荐载体倒填身份，也不二次查询猜测 current run。
+
+后台完整 runtime、Gateway 展示 Compact、新后台12项和本地控制句柄四文件211项通过；child 新展示11项、原 Compact12项、原同 attempt Goal 续轮2项共25项通过。计量/主子采用及宿主接续三组共389项通过。这里只证明展示同轮接续与相同请求前缀/schema，仍不等于完整恢复输入计量或供应商缓存命中。
+
+建议下一步：第12项的12.1—12.3本地片已收口，接12.4完整恢复准备与12.5真实输出预留；可并行只读核对下一请求，但共享 core/Compact 由主线串行修改，不以继续添加展示载体替代完整容量验收。

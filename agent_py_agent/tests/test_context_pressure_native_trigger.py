@@ -14,13 +14,16 @@ from agent_py_agent.agent.agent_core.model.context_pressure import (
     model_visible_context_tokens,
     should_compact_before_more_tool_output,
 )
-from agent_py_agent.agent.backends.tool_ir import UserTurn
+from agent_py_agent.agent.backends.tool_ir import AssistantTurn, UserTurn
 from agent_py_agent.agent.prompting_parts.cache_layout import CacheStructuredPrompt
 from agent_py_agent.agent.tooling.runtime_contracts import (
     ToolContentBlock,
     ToolResult,
 )
-from agent_py_agent.tests._tool_runtime_harness import make_test_protocol_snapshot
+from agent_py_agent.tests._tool_runtime_harness import (
+    canonical_history_call,
+    make_test_protocol_snapshot,
+)
 
 
 def _agent(protocol: str = "native") -> SimpleNamespace:
@@ -86,12 +89,26 @@ def test_native_ir_history_with_results_triggers_compact() -> None:
         "native",
         save=True,
         history=[
+            AssistantTurn(text="读取", tool_calls=[
+                canonical_history_call("read_file", {"path": "test.txt"}, call_id=call_id)
+                for call_id in ("c1", "c2", "c3")
+            ]),
             _big_result("c1", 900),
             _big_result("c2", 900),
             _big_result("c3", 900),
         ],
     )
     assert should_compact_before_more_tool_output(agent, params, "静态前缀 prompt")
+
+
+def test_orphan_result_omitted_from_outbound_does_not_trigger_compact() -> None:
+    agent = _agent("native")
+    orphan = _big_result("without-call", 8000)
+    params = _params("native", history=[orphan])
+    empty = _params("native", history=[])
+    assert model_visible_context_tokens(agent, params, "prompt") == model_visible_context_tokens(agent, empty, "prompt")
+    assert not should_compact_before_more_tool_output(agent, params, "prompt")
+    assert params.tool_ir_history == [orphan]
 
 
 def test_native_empty_ir_history_does_not_trigger() -> None:

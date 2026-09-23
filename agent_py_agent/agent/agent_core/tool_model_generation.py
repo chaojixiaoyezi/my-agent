@@ -42,7 +42,11 @@ from .model.context_pressure import (
     preflight_context_pressure_response,
     record_provider_context_observation,
 )
-from .native_tool_protocol import native_tool_use_active, resolve_native_tools
+from .native_tool_protocol import (
+    model_turn_tool_choice,
+    native_tool_use_active,
+    resolve_native_tools,
+)
 from .runner.stage_trace import (
     RunnerModelStageTraceRequest,
     RunnerModelStreamActivityTraceRequest,
@@ -568,7 +572,7 @@ def _trace_model_start(request: ModelGenerateParams) -> None:
     )
 
 
-# LLM: 初始化必须让模型 token 经过 observed filter，同时把宿主原始 sink 单独保留给结构化运行事件。
+# LLM: 初始化沿原账本与 observed filter；工具选择共用 native_tool_protocol 规则，宿主 sink 仍只发布结构化事件。
 # 函数用途: 为一次模型请求建立调用账本、流处理器、重连显示出口和 native 参数。
 def _start_model_generation(request: ModelGenerateParams) -> _ModelGenerationState:
     _begin_model_turn_identity(request.params, request.tool_rounds)
@@ -594,7 +598,7 @@ def _start_model_generation(request: ModelGenerateParams) -> _ModelGenerationSta
         ),
     )
     tools = resolve_native_tools(request.agent, request.params)
-    tool_choice = _model_turn_tool_choice(request.params, tools)
+    tool_choice = model_turn_tool_choice(request.params, tools)
     _remember_model_turn_tool_choice(request.params, tool_choice)
     return _ModelGenerationState(
         agent=request.agent,
@@ -727,31 +731,6 @@ def _native_provider_messages(agent: object, params: object) -> list[dict] | Non
     return project_native_provider_messages(
         history, prior_messages=getattr(params, "provider_history_messages", None),
     )
-
-
-def _model_turn_tool_choice(
-    params: object,
-    tools: list[dict] | None,
-) -> ToolChoice:
-    """Read the host-owned choice fixed for this turn; provider prose cannot alter it."""
-
-    from ..contracts.required_actions import tool_choice_for_required_actions
-
-    snapshot = getattr(params, "effective_contract_snapshot", None)
-    if snapshot is not None:
-        visible_tools = tools
-        if visible_tools is None:
-            runtime_snapshot = getattr(params, "tool_runtime_snapshot", None)
-            visible_tools = [
-                {"name": name}
-                for name in sorted(getattr(runtime_snapshot, "available_tool_names", ()) or ())
-            ]
-        return tool_choice_for_required_actions(snapshot, visible_tools)
-    state = getattr(params, "live_archive_state", None)
-    candidate = state.get("tool_choice") if isinstance(state, dict) else None
-    if isinstance(candidate, ToolChoice):
-        return candidate
-    return ToolChoice.auto("ordinary_tool_turn")
 
 
 def _remember_model_turn_tool_choice(params: object, choice: ToolChoice) -> None:

@@ -1,5 +1,17 @@
 # 测试与发布验收
 
+## 第 12 项原生输入计量共源与同轮接续（本地）
+
+`test_tool_request_projection.py`、`test_runtime_context_pressure.py`、`test_tool_model_generation.py`、`test_context_pressure_native_trigger.py`：**83 passed**。预检与发送共用 guidance/孤儿配对清扫及 ToolChoice，原本用孤立 ToolResult 撑大容量的旧夹具改为合法工具往返，并新增“出站已移除的孤立结果不触发压缩”对照。`provider_context_observation.v3` 拒绝旧 v2 校准；实际 snapshot 仍可 hydrate 校准，只有抽出的投影计量是纯函数。
+
+原 native Compact/消息流、子代理首请求、Gateway 采用/观察、上下文预算、工具统一与线程存储八文件 **266 passed**。没有联网、重启或部署；本片不覆盖完整恢复请求、供应商 tokenizer/缓存或前轮全仓短期限 HTTP 失败，完整严格 gate 仍未通过。
+
+独立审查补强 payload 对照为原 `_do_backend_generate`→backend→内存 HTTP 捕获，覆盖 none/specific 的真实 `thinking_disabled`。Gateway 与 child 候选均保留原工具参数存在性，由原 backend 筛选；没有工具时不多传 choice 或关闭 thinking。子代理首请求文件 **34 passed**，包含 Anthropic/MiniMax-M3 与 OpenAI/DeepSeek-v4-flash 的 tools 开/关 × none 四种组合，逐一比较原容量估算与实际 wire payload；上述四文件加 Gateway/child 自动采用六文件联合 **153 passed**。此前只在两边直接调用 backend.generate 的对照不足以证明该包装字段，旧结论以本次证据收紧。
+
+三宿主展示接续已覆盖新任务和已有前台主 run、同片一次决策、显式空选择、失败或失效后不重决策，以及下一片重置。后台实际身份沿原 `LocalRunControl`/core 发布回传，原确认回调拒绝和关闭仍阻止执行。后台完整 runtime、Gateway 展示 Compact、新后台12项及本地控制句柄四文件 **211 passed**；child 新展示11项、原 Compact12项、原同 attempt Goal 续轮2项 **25 passed**。child 二次 prepare 在配置恢复后仍读取已清除的原参数，不复活旧 frozen surface；缺 RunParams 不伪造已评估，None/空授权、取消不重试保持。三组定向回归合计389项通过；没有真实 Jev 网络请求、重启或部署，完整恢复输入和供应商缓存仍未验收。
+
+本片 Ruff、暂存 diff 的 doc sync、导入边界（0发现）、strict code-size（hard=0、基线未改）、diff check 和 clean-package 均通过。仅保存隔离分支本地检查点，不推送/部署；下面保留的上一轮全仓失败尚未收口，不能将本片定向通过改写成全仓验收通过。
+
 ## 决策模型与插件基线合并后全仓回归（未通过）
 
 在隔离决策分支合入插件已提交基线 `f04ec3a42`，并将决策线引用迁到唯一 `common.cancellation` 后，九文件交叉测试 **298 passed**，`test_decision_*.py` **685 passed**。全仓跑到终态为 **19,869 passed、8 failed、21 skipped、35 xfailed、5 xpassed**。八处失败均为本地 HTTP/流式首事件或显式决策探测的短期限测试；相同五文件第一次重跑 **6 failed、85 passed、1 xpassed**，第二次 **1 failed、90 passed、1 xpassed**，第三次 **91 passed、1 xpassed**。单独的流式正常用例与决策探测失败用例也通过；当前高负载下尚未证明确定根因，不能把第三次通过替代全仓 gate。未推送、部署或合并到 `main`，线上 CI 未作为验收来源。

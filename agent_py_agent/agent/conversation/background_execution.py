@@ -1,18 +1,20 @@
-# LLM: 后台单片不拥有 wake/Goal/租约或外部投递；同片 Compact 保留拒绝记忆，历史、CAS 和取消仍沿原合同。
-# 模块用途: 独立后台模型工作片、压缩重试和具名执行结果，修改时同步后台历史、模型选择、取消和投递回归。
+# LLM: 后台单片不拥有 wake/Goal/租约或投递；同 conversation_turn_id 的 Compact 保留展示与已评估事实，新片清零，历史/CAS/取消仍沿原合同。
+# 模块用途: 执行后台模型工作片并压缩重试；复用本轮展示，失效清除后不重发推荐，也不保存第二份状态。
 from __future__ import annotations
 
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import dataclass, replace
 from functools import partial
 from typing import Protocol
 
-from ..agent_core.runtime.loop_models import RunParams
+from ..agent_core.runtime.loop_models import RunParams, RuntimeContextRequest
 from ..concurrency.interrupt import is_interrupted
 from ..turn_end import result_turn_end_reason, should_continue_task
 from .agent_activity import BackgroundMainActivitySink
 from .background_context import context_markdown, is_narrow_audit_event
 from .background_history_seed import background_history_seed_or_raise
 from .compact_carry import compact_overflow_carry
+from .local_run_control import LocalRunControl
 from .models import ConversationThread
 from .store import ConversationStore
 
@@ -66,6 +68,51 @@ class BackgroundCompactSliceYield(RuntimeError):
     pass
 
 
+# LLM: 复用本地调用的原身份发布句柄，先尊重已有宿主回调；不按 task 查询猜 run，不从展示载体恢复执行权。
+# 类用途: 接收后台实际执行身份，让 Compact 使用 core 已绑定的 run/attempt，同时保留原任务确认回调。
+class _BackgroundRunControl(LocalRunControl):
+    # LLM: 每次 agent.run 创建独立句柄，只保存本调用的发布投影；不跨片持久化或变更任务状态。
+    # 函数用途: 组合后台原回调与现有本地身份校验。
+    def __init__(self, request_id: str, previous: object) -> None:
+        super().__init__(request_id)
+        self._previous = previous
+
+    # LLM: 原回调拒绝或抛异常时不发布本地副本，由 core 沿原失败合同收口 attempt。
+    # 函数用途: 在模型启动前收取已经由 RuntimeDB 决定的执行身份。
+    def bind_runtime_authority(self, binding: dict[str, str]) -> bool:
+        self.check_admission()
+        publish = getattr(self._previous, "bind_runtime_authority", None)
+        if callable(publish) and publish(binding) is not True:
+            return False
+        return super().bind_runtime_authority(binding)
+
+    # LLM: 任务晋升仍交原宿主确认；无原回调时只确认本调用尚未关闭，不新增持久任务或权限。
+    # 函数用途: 保持后台已有任务链接回调的确认结果。
+    def __call__(self, link: object) -> bool:
+        if not super().__call__(link):
+            return False
+        if self._previous is None:
+            return True
+        return callable(self._previous) and self._previous(link) is True
+
+
+# LLM: 原请求默认解析和身份发布共用生产入口；只回填 core 已发布的 run/attempt，展示回调仍更新原参数，异常不吞。
+# 函数用途: 执行后台模型尝试并将准确身份交给后续 Compact，解决恢复既有主 run 时 task_id 与 run_id 不同的问题。
+def _run_background_model_attempt(agent: object, prompt: str, params: RunParams) -> tuple[object, RunParams]:
+    from ..agent_core.runtime.run_params import run_params_with_request_id
+
+    resolved = run_params_with_request_id(params)
+    control = _BackgroundRunControl(resolved.request_id, params.conversation_task_binding_callback)
+    try:
+        result = agent.run(prompt, params=replace(resolved, conversation_task_binding_callback=control))
+    finally:
+        control.finish()
+    binding = control.runtime_authority()
+    return result, replace(params, request_id=resolved.request_id,
+        run_id=binding.get("run_id", resolved.run_id), task_id=binding.get("task_id", resolved.task_id),
+        attempt_id=binding.get("attempt_id", resolved.attempt_id))
+
+
 # LLM: 调用方已冻结模型作用域与提示；执行保持同一请求和活动 sink，异常/取消不提交伪造 final。
 # 函数用途: 运行一片后台模型并整理显示快照，Compact 公平让出与真实错误分别收尾。
 def invoke_background_turn(
@@ -107,9 +154,8 @@ def invoke_background_turn(
     return result, snapshot
 
 
-# LLM: 后台生命周期唤醒继续同一个权威活动轮；超窗在同片压缩并携带已执行工具与插话，
-# 携带快照与前台共用纯 reducer，同片拒绝记忆保持原对象；mailbox 释放和历史写回顺序不变，同步 Compact 回归。
-# 函数用途: 后台主代理在同片压缩并续跑；正常/异常原生历史写回原会话，工具显示批次不改变执行身份。
+# LLM: 展示仅存于本次后台调用，绑定原 conversation_turn_id 而非跨片复用的 task/attempt；None 清选择但保留已评估，不改 mailbox/历史/CAS 顺序。
+# 函数用途: 同一后台片压缩续跑时沿用已核对的展示和拒绝记忆；新片重新评估，失败或取消沿原路径退出。
 def run_background_turn_with_compact(
     execution: BackgroundExecutionDependencies,
     thread: ConversationThread,
@@ -124,6 +170,17 @@ def run_background_turn_with_compact(
     carried_archive_tool_calls: list[dict[str, object]] | None = None
     carried_active_turn_user_inputs: list[dict[str, object]] = []
     runtime_rejected_actions: list[dict[str, str]] | None = None
+    capability_presentation = None
+    presentation_evaluated = False
+
+    # LLM: 同步回调只写当前调用的局部状态及原参数，失效 None 不清已评估事实，绝不落盘或回写请求。
+    # 函数用途: 让 Compact 和后续模型尝试都读取本后台 turn 的最新展示。
+    def retain_presentation(value) -> None:
+        nonlocal capability_presentation, presentation_evaluated
+        capability_presentation, presentation_evaluated = value, True
+        run_params.capability_presentation = value
+        run_params.capability_presentation_evaluated = True
+
     for _attempt in range(8):
         history_seed = background_history_seed_or_raise(
             execution.agent,
@@ -161,8 +218,12 @@ def run_background_turn_with_compact(
         ]
         run_params.on_chunk = activity_sink
         run_params.partial_turn_callback = partial(_persist_background_native_turn, execution.store, request)
+        run_params.capability_presentation = capability_presentation
+        run_params.capability_presentation_evaluated = presentation_evaluated
+        run_params.capability_presentation_turn_id = request.conversation_turn_id
+        run_params.capability_presentation_callback = retain_presentation
         activity_sink.begin_model_attempt(_attempt + 1)
-        result = execution.agent.run(user_prompt, params=run_params)
+        result, run_params = _run_background_model_attempt(execution.agent, user_prompt, run_params)
         if str(getattr(result, "runtime_status", "") or "").strip().lower() != ("context_overflow"):
             _persist_background_native_turn(execution.store, request, result)
             return result
@@ -253,9 +314,8 @@ def _persist_background_native_turn(store: ConversationStore, request: Backgroun
     }, dedupe_key=f"background-native:{request.conversation_turn_id}")
 
 
-# LLM: 最新线程与 canonical Compact CAS 是重试权威；临时工具从归档状态恢复，取消贯穿摘要和提交。
-# 显示快照不能推进压缩代次，修改时同步同片重试与取消回归。
-# 函数用途: 以后台主代理已完成历史和当前工具归档可中断地压缩，并返回同一轮继续用的最新线程。
+# LLM: 原线程/CAS 是重试权威；当前身份与输入只取实际 RunParams，载体不得提供授权，Compact 原回调负责清失效值，取消贯穿摘要/提交。
+# 函数用途: 压缩后台已结束历史时复用同片展示和原工具归档，返回推进代次后的线程供原重试使用。
 def _compact_background_main_thread(
     execution: BackgroundExecutionDependencies,
     current: ConversationThread,
@@ -295,6 +355,15 @@ def _compact_background_main_thread(
                         pending_carried_loaded_tool_names(carried_archive_tool_calls)
                     )
                 ),
+                presentation_context=RuntimeContextRequest(
+                    user_prompt=current_prompt, inject=[], resume_context=False, context_scope=run_params.context_scope,
+                    allowed_tools=deepcopy(run_params.allowed_tools), write_boundary=deepcopy(run_params.write_boundary),
+                    request_id=run_params.request_id, run_id=run_params.run_id, task_id=run_params.task_id,
+                    task_attributes=deepcopy(run_params.task_attributes), source="conversation_compact_summary", save=False,
+                ),
+                capability_presentation=run_params.capability_presentation,
+                capability_presentation_turn_id=run_params.capability_presentation_turn_id,
+                capability_presentation_callback=run_params.capability_presentation_callback,
             ),
         ),
     )

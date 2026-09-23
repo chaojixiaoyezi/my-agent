@@ -1,3 +1,5 @@
+# LLM: context-pressure 的展示和阈值只来自原策略；消息清扫、引导和 ToolChoice 与出站共源，纯计量不读取宿主或校准。
+# 模块用途: 估算即将发送的模型输入并给出结构化压缩信号，保持输出预留、运行期校准及纯投影的边界。
 from __future__ import annotations
 
 import hashlib
@@ -6,20 +8,22 @@ import time
 from dataclasses import dataclass
 
 from ...backends import ModelResponse, is_provider_context_window_error
+from ...backends.tool_protocol_adapter import tools_for_choice
 from ...memory_archive import estimate_tokens
 from ...model_guidance import provider_system_instruction
 from ...prompting_parts.cache_layout import prompt_cache_layout
-from ..native_tool_protocol import native_tool_use_active, resolve_native_tools
+from ..native_tool_protocol import (
+    model_turn_tool_choice,
+    native_tool_use_active,
+    resolve_native_tools,
+)
 from ..runtime.context_compactor import runtime_compact_policy
+from ..tool_request_projection import ToolLoopRequestProjection
 from .usage import provider_visible_input_token_usage
-
-# LLM: 本模块是模型调用前的 context-pressure 判定入口；展示和自动压缩阈值只来自
-# runtime_compact_policy。已知共享窗口及真实出站输出上限另作客观请求准入，不计入已用 Context。
-# 模块用途: 在输入达到压缩点、工具上下文溢出，或已知请求总量无法容纳时返回结构化压缩信号。
 
 _PROVIDER_CONTEXT_OBSERVATION_KEY = "_provider_context_observation"
 _PROVIDER_CONTEXT_HYDRATION_KEY = "_provider_context_observation_hydrated_surfaces"
-_PROVIDER_CONTEXT_OBSERVATION_SCHEMA = "provider_context_observation.v2"
+_PROVIDER_CONTEXT_OBSERVATION_SCHEMA = "provider_context_observation.v3"
 _DURABLE_CALIBRATION_SCOPE = "durable_thread"
 _CURRENT_RUN_CALIBRATION_SCOPE = "current_run"
 
@@ -464,9 +468,8 @@ def _provider_observation_matches(observation: object, fingerprint: str) -> bool
     )
 
 
-# LLM: Estimation shares the real source-keyed prompt/IR projection without committing it; neither
-# repeated facts nor a volatile prompt fingerprint may inflate preflight or defeat calibration.
-# 函数用途: 用实际发给模型的分段投影估算占比，预检查不写 IR，动态状态也不混入稳定指纹。
+# LLM: 本入口准备宿主事实；投影后交唯一纯计量，原 native 清扫/引导/ToolChoice 与发送共源，不写 IR。
+# 函数用途: 采集实际消息与工具展示后估算上下文；稳定指纹不含动态状态，校准仍归外层原合同。
 def _model_visible_context_components(
     agent: object,
     params: object | None,
@@ -474,20 +477,14 @@ def _model_visible_context_components(
 ) -> tuple[str, int, dict[str, int], str]:
     system_instruction = provider_system_instruction(getattr(agent, "backend", None))
     if not native_tool_use_active(params):
-        prompt_surface = {
-            "system_instruction": system_instruction,
-            "user_prompt": str(prompt or ""),
-        }
-        current = estimate_tokens(prompt_surface)
+        projection = ToolLoopRequestProjection(
+            "ready", provider_prompt=str(prompt or ""), system_instruction=system_instruction,
+        )
+        current, components = projected_model_context_components(projection)
         return (
             "text",
             current,
-            {
-                "prompt_tokens": current,
-                "messages_tokens": 0,
-                "runtime_guidance_tokens": 0,
-                "tool_schema_tokens": 0,
-            },
+            components,
             _stable_context_surface_fingerprint(
                 agent,
                 protocol="text",
@@ -497,24 +494,10 @@ def _model_visible_context_components(
             ),
         )
 
-    from ...backends.message_adapter import AnthropicMessageAdapter
     from ..tool_ir_guidance import unforwarded_runtime_guidance
-    from ..tool_ir_history import project_native_prompt_history
+    from ..tool_ir_history import project_native_prompt_history, project_native_provider_messages
 
     projected_prompt, history = project_native_prompt_history(params, prompt)
-    current_messages = (
-        AnthropicMessageAdapter().to_provider_messages(history)
-        if history
-        else []
-    )
-    messages = [
-        *[
-            item
-            for item in list(getattr(params, "provider_history_messages", None) or [])
-            if isinstance(item, dict)
-        ],
-        *current_messages,
-    ]
     state = getattr(params, "live_archive_state", None)
     already_forwarded = (
         set(state.get("_forwarded_runtime_guidance", set()))
@@ -523,32 +506,22 @@ def _model_visible_context_components(
     )
     guidance = unforwarded_runtime_guidance(
         getattr(params, "tool_context", None),
-        already_forwarded,
+        set(already_forwarded),
     )
-    tools = resolve_native_tools(agent, params) or []
+    messages = project_native_provider_messages(
+        history, prior_messages=getattr(params, "provider_history_messages", None),
+        tool_context=getattr(params, "tool_context", None), forwarded_guidance=already_forwarded,
+    )
+    available_tools = resolve_native_tools(agent, params)
+    choice = model_turn_tool_choice(params, available_tools)
+    tools = tools_for_choice(available_tools, choice)
     provider_prompt = _native_provider_prompt_adjunct(projected_prompt)
-    payload = {
-        "system_instruction": system_instruction,
-        "prompt_adjunct": provider_prompt,
-        "messages": messages,
-        "pending_runtime_guidance": guidance,
-        "tools": tools,
-    }
-    current = estimate_tokens(payload)
-    components = _normalize_context_component_tokens(
-        current,
-        (
-            (
-                "prompt_tokens",
-                {
-                    "system_instruction": system_instruction,
-                    "prompt_adjunct": provider_prompt,
-                },
-            ),
-            ("messages_tokens", messages),
-            ("runtime_guidance_tokens", guidance),
-            ("tool_schema_tokens", tools),
-        ),
+    projection = ToolLoopRequestProjection(
+        "ready", provider_prompt=projected_prompt, system_instruction=system_instruction,
+        messages=messages, tools=tools or None, tool_choice=choice,
+    )
+    current, components = projected_model_context_components(
+        projection, pending_runtime_guidance=guidance,
     )
     return (
         "native",
@@ -562,6 +535,44 @@ def _model_visible_context_components(
             tools=tools,
         ),
     )
+
+
+# LLM: 只消费已准备投影与分类引导，未知拒绝计数；不读宿主/校准、不改状态或发请求，provider组包和输出预留仍由调用方核验。
+# 函数用途: 以原 estimate_tokens 估算 system、prompt、原生消息和schema占比；这不是供应商精确token或完整容量准入证明。
+def projected_model_context_components(
+    projection: ToolLoopRequestProjection, *, pending_runtime_guidance: object = (),
+) -> tuple[int, dict[str, int]]:
+    if (projection.status != "ready" or projection.provider_prompt is None
+            or projection.system_instruction is None):
+        raise ValueError("complete model request projection required")
+    native = projection.messages is not None
+    prompt_surface = {
+        "system_instruction": projection.system_instruction,
+        "prompt_adjunct" if native else "user_prompt": (
+            _native_provider_prompt_adjunct(projection.provider_prompt) if native else str(projection.provider_prompt)
+        ),
+    }
+    payload = dict(prompt_surface)
+    weights = {
+        "prompt_tokens": estimate_tokens(prompt_surface),
+        "messages_tokens": 0,
+        "runtime_guidance_tokens": 0,
+        "tool_schema_tokens": 0,
+    }
+    if native:
+        tools = projection.tools or []
+        payload.update(messages=projection.messages, tools=tools)
+        message_weight = estimate_tokens(projection.messages) if projection.messages else 0
+        guidance_weight = (
+            min(message_weight, estimate_tokens(pending_runtime_guidance)) if pending_runtime_guidance else 0
+        )
+        weights.update(
+            messages_tokens=message_weight - guidance_weight,
+            runtime_guidance_tokens=guidance_weight,
+            tool_schema_tokens=estimate_tokens(tools) if tools else 0,
+        )
+    total = estimate_tokens(payload)
+    return total, _rescale_context_components(total, weights)
 
 
 # LLM: Connection fields from third-party or test backends may be opaque objects; never serialize
@@ -649,42 +660,8 @@ def _native_provider_prompt_adjunct(prompt: object) -> str:
     )
 
 
-# LLM: The estimator has per-object overhead and rounding, so independently estimated categories
-# cannot be added directly. Integer proportional allocation preserves ordering and the exact total.
-# 函数用途: 把各部分的原始估算按比例分摊到总 token，避免分类相加与状态条总数对不上。
-def _normalize_context_component_tokens(
-    total_tokens: int,
-    values: tuple[tuple[str, object], ...],
-) -> dict[str, int]:
-    total = max(0, int(total_tokens or 0))
-    weights = [
-        estimate_tokens(value) if value not in (None, "", [], (), {}) else 0
-        for _, value in values
-    ]
-    weight_total = sum(weights)
-    if weight_total <= 0:
-        return {
-            key: total if index == 0 else 0
-            for index, (key, _) in enumerate(values)
-        }
-    allocated = [weight * total // weight_total for weight in weights]
-    remainder = total - sum(allocated)
-    order = sorted(
-        range(len(values)),
-        key=lambda index: (-(weights[index] * total % weight_total), index),
-    )
-    for index in order[:remainder]:
-        allocated[index] += 1
-    return {
-        key: allocated[index]
-        for index, (key, _) in enumerate(values)
-    }
-
-
-# LLM: Provider calibration changes only the total, not the private category payloads. Rescale the
-# already-normalized numeric shares with deterministic largest-remainder allocation so the public
-# component sum remains exactly equal to current_tokens without exposing any source content.
-# 函数用途: 将 prompt/messages/tools 等原始占比缩放到校准后的总 token，保证状态条加总一致。
+# LLM: 只对原始或已归一化数值权重做最大余数分摊，不读取正文；未校准和校准总量均须精确等于分类之和。
+# 函数用途: 将 prompt/messages/tools 占比缩放到指定总 token，保持状态条分类加总一致。
 def _rescale_context_components(
     total_tokens: int,
     components: dict[str, int],

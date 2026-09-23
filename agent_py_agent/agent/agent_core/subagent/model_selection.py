@@ -101,7 +101,7 @@ def render_first_request_prompt(agent: object, params: object, request: object) 
     return render_prepared_prompt(prepared)
 
 
-# LLM: 这是有宿主状态读取的准备层，不是纯预览；使用实际 child 参数和原 tools/choice/去重生产方，不填占位历史或借父快照。
+# LLM: 本层读取实际 child 准备事实，工具选择共用 native_tool_protocol 唯一规则；不填占位历史或借父快照。
 # 函数用途: 在原生成入口提交 IR 前冻结完整请求材料；缺原规范历史时保持 unknown，取消原样传播。
 def capture_first_request_input(agent: object, params: object, prompt: str) -> None:
     preparation = first_request_preparation(agent, params)
@@ -110,9 +110,9 @@ def capture_first_request_input(agent: object, params: object, prompt: str) -> N
     from ...common.cancellation import ToolCancelled
     from ...conversation.models import ConversationHistorySeed
     from ...model_guidance import provider_system_instruction
-    from ..native_tool_protocol import resolve_native_tools
+    from ..native_tool_protocol import model_turn_tool_choice, resolve_native_tools
     from ..runtime.conversation_state import conversation_runtime_state_section
-    from ..tool_model_generation import _forwarded_guidance_seen, _model_turn_tool_choice
+    from ..tool_model_generation import _forwarded_guidance_seen
 
     preparation.request_input = None
     if not isinstance(getattr(params, "conversation_history_seed", None), ConversationHistorySeed):
@@ -124,7 +124,7 @@ def capture_first_request_input(agent: object, params: object, prompt: str) -> N
         preparation.request_input = ToolLoopRequestInput(
             prompt_input=preparation.prompt_input, system_instruction=provider_system_instruction(agent.backend),
             tool_protocol_snapshot=params.tool_protocol_snapshot, native_tools=tuple(tools or ()),
-            tool_choice=_model_turn_tool_choice(params, tools), tool_ir_history=tuple(params.tool_ir_history),
+            tool_choice=model_turn_tool_choice(params, tools), tool_ir_history=tuple(params.tool_ir_history),
             provider_history_messages=tuple(params.provider_history_messages), tool_context=tuple(params.tool_context),
             forwarded_guidance=frozenset(_forwarded_guidance_seen(params)),
             conversation_state=conversation_runtime_state_section(params),
@@ -345,7 +345,7 @@ def _prepare_candidate(agent: object, params: object, preparation: SubagentFirst
                              dependencies, candidate_params, request_input, validation, deadline)
 
 
-# LLM: 只读同一 child 的冻结 host 输入；原 provider 探针有请求预算，完整 wire payload 走实际适配器共享 builder，计数复用唯一估算器。
+# LLM: 只读同一 child 冻结输入，选择共用原 native 规则；probe 有界，payload 共用实际 builder，计数沿原估算器。
 # 函数用途: 在候选依赖中核对 native 工具支持及输入加真实输出上限，返回后续工具轮将直接使用的完整参数。
 def _candidate_request_input(agent: object, params: object, preparation: SubagentFirstRequestPreparation,
                              dependencies: object, deadline: float) -> tuple[object, ToolLoopRequestInput, dict]:
@@ -357,8 +357,12 @@ def _candidate_request_input(agent: object, params: object, preparation: Subagen
     from ...model_guidance import provider_system_instruction
     from ...settings.model_scope import model_dependencies_scope
     from ..model.context_pressure import preflight_context_pressure_response
-    from ..native_tool_protocol import resolve_native_tools, select_tool_protocol
-    from ..tool_model_generation import ModelGenerateParams, _model_turn_tool_choice
+    from ..native_tool_protocol import (
+        model_turn_tool_choice,
+        resolve_native_tools,
+        select_tool_protocol,
+    )
+    from ..tool_model_generation import ModelGenerateParams
     from ..tool_request_projection import project_tool_loop_request
 
     with model_dependencies_scope(agent, dependencies), provider_request_budget(deadline - time.monotonic()):
@@ -368,16 +372,18 @@ def _candidate_request_input(agent: object, params: object, preparation: Subagen
         tools = resolve_native_tools(agent, candidate_params)
         request_input = replace(preparation.request_input, prompt_input=prompt_input,
                                 tool_protocol_snapshot=protocol, native_tools=tuple(tools or ()),
-                                tool_choice=_model_turn_tool_choice(candidate_params, tools),
+                                tool_choice=model_turn_tool_choice(candidate_params, tools),
                                 system_instruction=provider_system_instruction(agent.backend))
         projected = project_tool_loop_request(request_input)
         projector = getattr(agent.backend, "project_generate_payload", None)
         if projected.status != "ready" or not callable(projector):
             raise _CandidateUnavailable("provider_request_surface_unknown")
-        payload = projector(projected.provider_prompt, tools=projected.tools, tool_choice=projected.tool_choice,
+        # 和真实生成包装一样，原工具参数决定 choice/thinking；筛选后空 schema 不代表原参数缺失。
+        payload = projector(projected.provider_prompt, tools=tools,
+                            tool_choice=projected.tool_choice if tools is not None else None,
                             messages=projected.messages, request_options=ProviderRequestOptions(
                                 system_instruction=projected.system_instruction,
-                                thinking_disabled=projected.tool_choice.mode != "auto",
+                                thinking_disabled=tools is not None and projected.tool_choice.mode != "auto",
                             ))
         config = dependencies.config
         window = config.model_context_window_tokens

@@ -675,6 +675,12 @@ def test_provider_observation_uses_actual_baseline_plus_conservative_growth(
         SimpleNamespace(agent=agent, params=params, prompt="prompt")
     ) is not None
 
+    # 老估算没有出站前清扫和 ToolChoice；即使其他身份相同，也不能把旧观测套到新口径。
+    observation = params.live_archive_state["_provider_context_observation"]
+    assert observation["schema"] == "provider_context_observation.v3"
+    observation["schema"] = "provider_context_observation.v2"
+    assert model_visible_context_tokens(agent, params, "prompt") == raw["tokens"]
+
 
 def test_provider_observation_invalidates_when_connection_changes(monkeypatch) -> None:
     backend = SimpleNamespace(

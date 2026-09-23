@@ -608,7 +608,7 @@ def test_successful_model_generate_records_provider_context_observation() -> Non
 
     observation = params.live_archive_state["_provider_context_observation"]
     assert response.text == "ok"
-    assert observation["schema"] == "provider_context_observation.v2"
+    assert observation["schema"] == "provider_context_observation.v3"
     assert observation["raw_estimated_tokens"] > 0
     assert observation["provider_input_tokens"] == 40_000
     assert len(observation["context_surface_fingerprint"]) == 64

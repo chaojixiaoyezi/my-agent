@@ -122,15 +122,21 @@ def project_native_prompt_history(
     return provider_prompt, history
 
 
-# LLM: 此处是实际出站和纯容量投影唯一的 IR→messages 与孤儿清扫入口；只复制入参，不改变配对失败类型。
-# 函数用途: 按原时间顺序拼接已完成历史和本轮 IR，保留图片、推理、工具参数与回执的原协议形状。
+# LLM: 实际出站和容量投影共用 IR→messages/孤儿清扫；可选未提交引导只追加到副本，不消费原 seen 或写 IR。
+# 函数用途: 按原时间顺序投影完整消息，保留图片、推理、工具往返及待发送引导，不改变运行状态。
 def project_native_provider_messages(
     history: object, *, prior_messages: object = (),
+    tool_context: object = (), forwarded_guidance: object = (),
 ) -> list[dict[str, Any]]:
     from ..backends.message_adapter import AnthropicMessageAdapter, strip_orphaned_tool_blocks
+    from .tool_ir_guidance import unforwarded_runtime_guidance
 
+    projected = SimpleNamespace(tool_ir_history=list(history or ()))
+    guidance = unforwarded_runtime_guidance(list(tool_context or ()), set(forwarded_guidance or ()))
+    if guidance:
+        record_runtime_facts_turn_ir(projected, "\n\n".join(guidance), source="runtime.guidance")
     prior = [deepcopy(item) for item in list(prior_messages or []) if isinstance(item, dict)]
-    current = AnthropicMessageAdapter().to_provider_messages(history) if history else []
+    current = AnthropicMessageAdapter().to_provider_messages(projected.tool_ir_history)
     return strip_orphaned_tool_blocks([*prior, *current])
 
 

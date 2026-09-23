@@ -16,11 +16,9 @@ from ..prompting_parts.builder import (
 )
 from ..tooling.runtime_contracts import ToolChoice, ToolProtocolSnapshot
 from .native_tool_protocol import native_tool_use_active
-from .tool_ir_guidance import unforwarded_runtime_guidance
 from .tool_ir_history import (
     project_native_prompt_history,
     project_native_provider_messages,
-    record_runtime_facts_turn_ir,
 )
 
 if TYPE_CHECKING:
@@ -114,17 +112,12 @@ def project_tool_loop_request(prepared: ToolLoopRequestInput) -> ToolLoopRequest
     provider_prompt, history = project_native_prompt_history(
         params, prompt, conversation_state=prepared.conversation_state,
     )
-    params.tool_ir_history = history
-    guidance = unforwarded_runtime_guidance(
-        list(prepared.tool_context), set(prepared.forwarded_guidance),
-    )
-    if guidance:
-        record_runtime_facts_turn_ir(params, "\n\n".join(guidance), source="runtime.guidance")
     return ToolLoopRequestProjection(
         "ready", prompt=prompt, provider_prompt=provider_prompt,
         system_instruction=prepared.system_instruction,
         messages=project_native_provider_messages(
-            params.tool_ir_history, prior_messages=prepared.provider_history_messages,
+            history, prior_messages=prepared.provider_history_messages,
+            tool_context=prepared.tool_context, forwarded_guidance=prepared.forwarded_guidance,
         ),
         tools=tools_for_choice(list(deepcopy(prepared.native_tools)), prepared.tool_choice) or None,
         tool_choice=prepared.tool_choice,

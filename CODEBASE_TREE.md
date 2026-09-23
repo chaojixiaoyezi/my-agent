@@ -548,6 +548,8 @@ agent_py_agent/
 |   |-- test_tool_presentation_projection.py # 工具schema收起、原搜索恢复及真实插件撤销
 |   |-- test_tool_request_projection.py # 完整冻结请求与实际原生出站等价、未知输入及无副作用
 |   |-- test_gateway_capability_compact.py # 同片能力展示沿 Gateway/子代理 Compact 和续跑保留
+|   |-- test_subagent_capability_compact.py # child 同轮展示沿真实 Compact 重试保留、失效清除与新轮重置
+|   |-- test_background_capability_compact.py # 后台同工作片展示复用、清除与下一片重新评估
 |   |-- test_decision_skill_tool_settings.py # 展示策略/开放类别列表的设置、CAS及原菜单编辑
 |   |-- test_user_config_owner_scope.py # 普通 owner 决策工具可见性、可信线程与本机全局配置拒绝
 |   |-- test_decision_curator.py        # 原Curator临时建议、完整材料、非选择结果和lease头寸对照
@@ -1020,6 +1022,7 @@ docs/
 - `agent_py_agent/tests/test_subagent_first_request_selection.py`、`test_model_scope_dependencies.py`：首请求/后续轮真实载荷、撤销竞争、取消与作用域生命周期的定向验证。
 - `agent_py_agent/tests/test_tool_request_projection.py`：验证完整 system/动态段/schema/IR 与真实 provider payload 一致，缺输入 unknown、原历史不改和纯渲染不读宿主。
 - `agent_py_agent/tests/test_gateway_capability_compact.py`：验证同工作片能力展示在 Gateway、子代理 transcript Compact 及重建输入中保留，并覆盖新片清空和失效回原面。
+- `agent_py_agent/tests/test_subagent_capability_compact.py`、`test_background_capability_compact.py`：实际宿主循环与 Compact 接续的展示载体回归；比较 provider 输入，并区分未评估、已评估无建议和显式空选择。
 - `agent_py_agent/agent/memory_store/decision_recall.py`：原召回预算后排序及有界补充查询，消费前复核正式来源，不扩大权限或新增记忆存储。
 - `agent_py_agent/agent/agent_core/tool_context/external_material_order.py`：原工具归档之后仅追加阅读提示，复用决策期限/账本并保留来源权威。
 - `agent_py_agent/tests/test_decision_external_material_order.py`、`test_external_material_order_integration.py`：安全输入、失效、取消、原页面归档链和设置消费的离线证据。

@@ -211,9 +211,11 @@ def test_real_child_first_request_capture_matches_actual_provider_payload(tmp_pa
             projected = project_tool_loop_request(frozen)
             assert projected.status == "ready", projected.missing_fields
             expected = agent.backend.project_generate_payload(
-                projected.provider_prompt, tools=projected.tools, tool_choice=projected.tool_choice,
+                projected.provider_prompt, tools=list(frozen.native_tools) or None,
+                tool_choice=projected.tool_choice if frozen.native_tools else None,
                 messages=projected.messages, request_options=ProviderRequestOptions(
-                    system_instruction=projected.system_instruction, thinking_disabled=projected.tool_choice.mode != "auto",
+                    system_instruction=projected.system_instruction,
+                    thinking_disabled=bool(frozen.native_tools) and projected.tool_choice.mode != "auto",
                 ),
             )
             assert wire == expected
@@ -269,7 +271,7 @@ def _automatic_child(tmp_path, *, backend="anthropic_compatible", model="MiniMax
 
 
 # LLM: 捕获原 post_json 最终 payload；探针响应使用原 nonce，业务工具经真实执行器读取文件；测试不替被测 child 执行工作。
-# 函数用途: 为两种真实适配器提供 fake provider，完整保留首个和后续工具轮出站证据。
+# 函数用途: 为两种适配器提供 fake provider，只在实际目录允许时调用读取工具，保留首轮及后续出站证据。
 def _install_automatic_provider(monkeypatch, agent, task, material, *, before_candidate_probe=None, fail_probe=False):
     import json
     import re
@@ -304,13 +306,16 @@ def _install_automatic_provider(monkeypatch, agent, task, material, *, before_ca
             if not calls:
                 projection = project_tool_loop_request(frozen)
                 expected = agent.backend.project_generate_payload(
-                    projection.provider_prompt, tools=projection.tools, tool_choice=projection.tool_choice,
+                    projection.provider_prompt, tools=list(frozen.native_tools) or None,
+                    tool_choice=projection.tool_choice if frozen.native_tools else None,
                     messages=projection.messages, request_options=ProviderRequestOptions(
-                        system_instruction=projection.system_instruction, thinking_disabled=projection.tool_choice.mode != "auto",
+                        system_instruction=projection.system_instruction,
+                        thinking_disabled=bool(frozen.native_tools) and projection.tool_choice.mode != "auto",
                     ),
                 )
                 assert wire == expected
-                tool = {"type": "tool_use", "id": "read-material", "name": "read_file", "input": {"path": str(material)}}
+                if "read_file" in names:
+                    tool = {"type": "tool_use", "id": "read-material", "name": "read_file", "input": {"path": str(material)}}
             calls.append((wire, thread))
         if native:
             return {"content": [tool] if tool else [{"type": "text", "text": "材料检查完成。"}],
@@ -369,6 +374,33 @@ def test_automatic_adoption_binds_first_and_following_tool_payloads(tmp_path, mo
     assert result is not None
     assert evidence[-1]["protocol"]["model"] == model
     assert evidence[-1]["protocol"]["native_supported"]
+
+
+@pytest.mark.parametrize("enable_tools", [False, True])
+@pytest.mark.parametrize("backend,model", [
+    ("anthropic_compatible", "MiniMax-M3"),
+    ("openai_compatible", "deepseek-v4-flash"),
+])
+def test_adopted_none_choice_capacity_matches_actual_thinking_options(tmp_path, monkeypatch, enable_tools, backend, model):
+    from agent_py_agent.agent.memory_archive import estimate_tokens
+    from agent_py_agent.agent.tooling.runtime_contracts import ToolChoice
+
+    agent, task, key = _automatic_child(tmp_path, backend=backend, model=model)
+    agent.config.enable_tools = enable_tools
+    monkeypatch.setattr(
+        "agent_py_agent.agent.contracts.required_actions.tool_choice_for_required_actions",
+        lambda _snapshot, _tools: ToolChoice.none("host_fixed_choice"),
+    )
+    calls, _ = _install_automatic_provider(monkeypatch, agent, task, tmp_path / "unused.txt")
+    agent.run_subagent(task.id, dry_run=False, probe=False)
+    assert len(calls) == 1
+    payload, thread = calls[0]
+    assert thread.model_profile_id == key
+    assert "tools" not in payload
+    assert payload.get("tool_choice") == ("none" if backend == "openai_compatible" and enable_tools else None)
+    assert payload.get("thinking") == ({"type": "disabled"} if enable_tools else None)
+    validation = thread.metadata[SUBAGENT_MODEL_ADVICE_KEY]["validation"]
+    assert validation["input_tokens_estimate"] == estimate_tokens(payload)
 
 
 @pytest.mark.parametrize("change", ["catalog", "disabled", "explicit_same", "unsupported_tools", "small_window", "old_generation"])

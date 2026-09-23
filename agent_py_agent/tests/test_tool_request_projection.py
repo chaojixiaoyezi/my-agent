@@ -8,15 +8,22 @@ import pytest
 
 from agent_py_agent.agent.agent_core import _tool_loop_service as service
 from agent_py_agent.agent.agent_core import tool_request_projection as projection
-from agent_py_agent.agent.agent_core.native_tool_protocol import resolve_native_tools
+from agent_py_agent.agent.agent_core.model.context_pressure import (
+    model_visible_context_snapshot,
+    projected_model_context_components,
+)
+from agent_py_agent.agent.agent_core.native_tool_protocol import (
+    model_turn_tool_choice,
+    resolve_native_tools,
+)
 from agent_py_agent.agent.agent_core.runner import prompts as runner
 from agent_py_agent.agent.agent_core.runtime.conversation_state import (
     conversation_runtime_state_section,
 )
 from agent_py_agent.agent.agent_core.tool_model_generation import (
     ModelGenerateParams,
+    _do_backend_generate,
     _materialize_native_prompt_facts,
-    _model_turn_tool_choice,
     _native_provider_messages,
 )
 from agent_py_agent.agent.backends.anthropic import AnthropicCompatibleBackend
@@ -68,7 +75,7 @@ def request_surface(tmp_path, skill_catalog_factory, tool_surface):  # noqa: F81
         api_base="https://example.invalid", api_key="fake-test-key", model_name="fixture-model",
         request_timeout=1, max_tokens=64, temperature=0.1, stream_enabled=False,
     ))
-    host = SimpleNamespace(prompts=builder, tools=registry, backend=backend)
+    host = SimpleNamespace(prompts=builder, tools=registry, backend=backend, config=builder.config)
     request = projection.tool_loop_prompt_request(
         params, runtime_injections=("完整运行时注入",), workspace_context=params.workspace_context_snapshot,
         execution_facts="本轮已核对的结构化执行事实",
@@ -84,7 +91,7 @@ def freeze_request(host, params, request):
         prompt_input=host.prompts.prepare_render_input(request),
         system_instruction=provider_system_instruction(host.backend),
         tool_protocol_snapshot=params.tool_protocol_snapshot,
-        native_tools=tuple(tools or ()), tool_choice=_model_turn_tool_choice(params, tools),
+        native_tools=tuple(tools or ()), tool_choice=model_turn_tool_choice(params, tools),
         tool_ir_history=tuple(params.tool_ir_history),
         provider_history_messages=tuple(params.provider_history_messages),
         tool_context=tuple(params.tool_context),
@@ -123,8 +130,15 @@ def test_pure_projection_matches_real_outbound_payload_and_preserves_sources(req
     assert "当前工具工作目录" not in projected.prompt  # 使用冻结工作区，未重新读取时钟/路径。
 
     actual_prompt = host.prompts.build(request=request)
+    snapshot = model_visible_context_snapshot(host, params, actual_prompt)
+    projected_tokens, components = projected_model_context_components(projected)
+    assert snapshot.raw_estimated_tokens == projected_tokens
+    assert sum(components.values()) == projected_tokens
+    assert before[:2] == (params.tool_ir_history, params.provider_history_messages)
+    assert params.live_archive_state["_forwarded_runtime_guidance"] == {"已转发引导"}
     materialized = _materialize_native_prompt_facts(ModelGenerateParams(host, params, actual_prompt, 0))
     actual_messages = _native_provider_messages(host, params)
+    assert model_visible_context_snapshot(host, params, materialized.prompt).raw_estimated_tokens == projected_tokens
     assert projected.prompt == actual_prompt
     assert projected.provider_prompt == materialized.prompt
     assert prompt_cache_layout(projected.provider_prompt) == prompt_cache_layout(materialized.prompt)
@@ -135,13 +149,22 @@ def test_pure_projection_matches_real_outbound_payload_and_preserves_sources(req
     monkeypatch.setattr(host.backend, "request_json", lambda _path, payload, _headers: (
         captured.append(deepcopy(payload)) or {"content": [{"type": "text", "text": "完成"}]}
     ))
-    host.backend.generate(materialized.prompt, tools=resolve_native_tools(host, params), messages=actual_messages, tool_choice=choice,
-                          request_options=ProviderRequestOptions(system_instruction=provider_system_instruction(host.backend)))
+    actual_tools = resolve_native_tools(host, params)
+    _do_backend_generate(host.backend, materialized.prompt, SimpleNamespace(
+        params=params, tools=actual_tools, tool_choice=choice, messages=actual_messages,
+        on_chunk=None, first_token_timeout_seconds=0,
+        system_instruction=provider_system_instruction(host.backend),
+    ))
     host.backend.generate(projected.provider_prompt, tools=projected.tools, messages=projected.messages, tool_choice=projected.tool_choice,
-                          request_options=ProviderRequestOptions(system_instruction=projected.system_instruction))
+                          request_options=ProviderRequestOptions(
+                              system_instruction=projected.system_instruction,
+                              thinking_disabled=bool(frozen.native_tools) and choice.mode != "auto",
+                          ))
     assert captured[0] == captured[1]
+    assert captured[0].get("thinking") == ({"type": "disabled"} if choice.mode != "auto" else None)
     if choice.mode == "none":
         assert "tools" not in captured[0] and "tool_choice" not in captured[0]
+        assert snapshot.tool_schema_tokens == 0
     else:
         assert captured[0]["tools"]
         assert captured[0]["tool_choice"]["type"] == ("tool" if choice.mode == "specific" else "auto")
@@ -162,6 +185,8 @@ def test_missing_input_is_typed_unknown_without_entering_renderer(request_surfac
     result = projection.project_tool_loop_request(frozen)
     assert result.status == "unknown" and missing in result.missing_fields
     assert result.prompt is None and result.messages is None and result.tools is None
+    with pytest.raises(ValueError, match="complete model request projection required"):
+        projected_model_context_components(result)
 
 
 def test_explicit_empty_native_facts_are_known_and_invalid_choice_keeps_original_error(request_surface):
@@ -198,6 +223,7 @@ def test_frozen_render_has_no_host_reads_and_detaches_nested_containers(request_
     monkeypatch.setattr(service, "_runtime_injections_with_delivery_contract", forbidden)
     projected = projection.project_tool_loop_request(frozen)
     assert projected == expected
+    assert projected_model_context_components(projected) == projected_model_context_components(expected)
     projected.tools[0]["name"] = "只改返回值"
     projected.messages[0]["content"] = "只改返回消息"
     assert projection.project_tool_loop_request(frozen) == expected

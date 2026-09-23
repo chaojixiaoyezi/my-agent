@@ -14,6 +14,7 @@ from agent_py_agent.agent.gateway_parts import request_execution
 from agent_py_agent.agent.gateway_parts.request_binding import MODEL_OBSERVATION_KEY
 from agent_py_agent.agent.model_request_selection import _HOST
 from agent_py_agent.agent.settings import model_profiles
+from agent_py_agent.agent.tooling.runtime_contracts import ToolChoice
 from agent_py_agent.tests.test_decision_settings import patch
 from agent_py_agent.tests.test_gateway_model_observation import (
     _optional_admission,  # noqa: F401
@@ -114,6 +115,22 @@ def test_capacity_can_select_up_or_down_without_parent_window_gate(tmp_path, mon
     request_execution._run_gateway_ask(fixture.context)
     assert [row[0]["model"] for row in business] == ["candidate-large"]
     assert business[0][1].metadata[model_adoption.MODEL_ADOPTION_KEY]["validation"]["context_window_tokens"] == window
+
+
+@pytest.mark.parametrize("tools", [False, True])
+def test_none_choice_keeps_original_thinking_options_through_adoption(tmp_path, monkeypatch, tools):
+    fixture = actual_request(tmp_path, tools=tools)
+    install_backend(monkeypatch, fixture)
+    monkeypatch.setattr(
+        "agent_py_agent.agent.contracts.required_actions.tool_choice_for_required_actions",
+        lambda _snapshot, _tools: ToolChoice.none("host_fixed_choice"),
+    )
+    business, _ = fake_http(monkeypatch, fixture)
+    request_execution._run_gateway_ask(fixture.context)
+    assert [row[0]["model"] for row in business] == ["candidate-large"]
+    payload = business[0][0]
+    assert "tools" not in payload and "tool_choice" not in payload
+    assert payload.get("thinking") == ({"type": "disabled"} if tools else None)
 
 
 def test_tool_rounds_keep_adopted_backend_schema_and_one_decision(tmp_path, monkeypatch):

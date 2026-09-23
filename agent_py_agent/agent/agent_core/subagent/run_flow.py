@@ -1,9 +1,10 @@
-# LLM: 本模块串联同一 child 的尝试、模型轮和正式结果；Goal/Compact 续接保留拒绝记忆，失败交给生命周期处理。
-# 模块用途: 执行子代理并保存结果、异常前的历史和 typed 截断说明；压缩不是重派，同步验证停止与恢复身份。
+# LLM: 同一 child turn 的 Compact 重试保留展示与已评估事实，下一 Goal turn 清零；拒绝记忆仍属原 attempt，失败沿原生命周期。
+# 模块用途: 执行子代理并保存结果、异常历史和截断说明；同轮压缩复用展示，失效回调清除后不能复活旧值。
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
 
@@ -26,7 +27,7 @@ from ...conversation.authority import (
 from ...runtime_context import restore_current_subagent_context, set_current_subagent_context
 from ...subagents.context_bundle_refs import runtime_task_attributes
 from ...turn_end import result_turn_end_reason
-from ..runtime.loop_models import RunParams
+from ..runtime.loop_models import RunParams, RuntimeContextRequest
 from ..runtime_mixin import release_active_turn_inputs_for_compact
 from .params import (
     SubagentFinalizeParams,
@@ -56,10 +57,8 @@ class SubagentModelIteration:
     runtime_rejected_actions: list[dict[str, str]]
 
 
-# LLM: This immutable request keeps one child overflow's thread generation, active archive,
-# display callback, and already-resolved model surface together; it carries no completion or
-# permission authority of its own.
-# 类用途: 收拢子代理一次溢出压缩所需的固定身份、当前代次、工具轨迹和缓存面，避免参数错位。
+# LLM: 原溢出请求不产生身份或权限；run_params 仅指向同轮宿主参数，二次准备须读取失效回调清过的当前展示，不复活 frozen surface。
+# 类用途: 收拢一次子代理压缩的代次、工具轨迹和缓存面；缺原参数时不补造已评估事实。
 @dataclass(frozen=True)
 class SubagentOverflowCompactRequest:
     prompt: str
@@ -70,6 +69,7 @@ class SubagentOverflowCompactRequest:
     progress_callback: object
     model_surface: object
     conversation_turn_id: str = ""
+    run_params: RunParams | None = None
 
 
 # LLM: exact attempt 先登记真实执行器，再开启可选首次请求准备；退出同时清理范围并记录执行器退出，不新增 task/attempt。
@@ -239,9 +239,8 @@ def _run_subagent_model_turn(lifecycle, prompt, context, task_attributes, *, tas
         prompt = continuation_prompt(goal)
 
 
-# LLM: 子代理始终使用自身 ConversationThread 和同一执行身份；只有已提交 Compact 才能续接，
-# 不以累计压缩次数判失败。拒绝列表沿同一 attempt 共享；历史回调只绑定本次 child turn，不串父线程。
-# 函数用途: 使用子代理自己的历史执行长期任务；压缩后继续原尝试，落账后按真实结束原因显示正文或截断提示。
+# LLM: 展示及已评估事实仅属于 AgentThreadTurnInput.turn_id；同 attempt 的下一 Goal turn 清零，回调只改本地参数，Compact/CAS/取消仍沿原合同。
+# 函数用途: 使用 child 自己的历史执行一轮；同轮压缩不重发推荐，清旧展示后继续基础面，不跨轮保存选择。
 def _run_subagent_conversation_turn(
     lifecycle,
     turn: AgentThreadTurnInput,
@@ -255,6 +254,7 @@ def _run_subagent_conversation_turn(
     prompt, attempt_id, conversation_turn_id = turn.prompt, turn.attempt_id, turn.turn_id
     carried_archive_tool_calls: list[dict[str, object]] = []
     carried_active_turn_user_inputs: list[dict[str, object]] = []
+    run_params = None
     thread = ensure_subagent_thread(getattr(agent, "subagents", None), task)
     if thread is None:
         raise RuntimeError("subagent ConversationStore is unavailable")
@@ -279,6 +279,7 @@ def _run_subagent_conversation_turn(
             model_iteration += 1
             if transcript_sink is not None:
                 transcript_sink.begin_model_attempt(model_iteration)
+            previous_params = run_params
             run_params = _subagent_model_run_params(
                 context=context,
                 prompt=prompt,
@@ -295,6 +296,7 @@ def _run_subagent_conversation_turn(
             run_params.partial_turn_callback = partial(
                 _persist_subagent_partial_result, agent, task, turn,
             )
+            _bind_subagent_presentation(run_params, previous_params, conversation_turn_id)
             result = agent.run(prompt, params=run_params)
             if str(getattr(result, "runtime_status", "") or "").strip().lower() != (
                 "context_overflow"
@@ -325,7 +327,9 @@ def _run_subagent_conversation_turn(
                     model_surface=_pending_subagent_compact_model_surface(
                         context,
                         carried_archive_tool_calls,
+                        run_params=run_params,
                     ),
+                    run_params=run_params,
                 ),
             )
             current = refreshed
@@ -335,6 +339,23 @@ def _run_subagent_conversation_turn(
         raise
     finally:
         _trim_subagent_transcript(agent, task, enabled=transcript_sink is not None)
+
+
+# LLM: 只在宿主明确相同 turn_id 时读取上一实际 RunParams；不从 attempt、历史或 carrier.binding 推断同轮，不持久化。
+# 函数用途: 给 child 当次运行绑定原展示回传；无上次参数就未评估，失效 None 则保持已评估，避免压缩后重发推荐。
+def _bind_subagent_presentation(params: RunParams, previous: RunParams | None, turn_id: str) -> None:
+    same_turn = bool(turn_id) and previous is not None and previous.capability_presentation_turn_id == turn_id
+    params.capability_presentation = previous.capability_presentation if same_turn else None
+    params.capability_presentation_evaluated = previous.capability_presentation_evaluated if same_turn else False
+    params.capability_presentation_turn_id = turn_id
+
+    # LLM: 回调仅修改本轮原参数；清选择不清已评估事实，不改变身份、授权、工具记录或取消合同。
+    # 函数用途: 让后续 Compact 和重试读取本次模型或压缩复核后的当前展示。
+    def retain_presentation(value) -> None:
+        params.capability_presentation = value
+        params.capability_presentation_evaluated = True
+
+    params.capability_presentation_callback = retain_presentation
 
 
 # LLM: 异常与正常结果共用 child 的 canonical 出口；不能用父 thread 或 attempt 代替本次独立 turn。
@@ -414,9 +435,8 @@ def _compact_subagent_overflowing_turn(
         )
 
 
-# LLM: This fallback owns only the unfinished active-turn archive boundary. It requires the exact
-# child thread/store binding and a committed generation before returning to the model retry loop.
-# 函数用途: 已结束历史无法压缩时，把当前 child 工具轨迹正式落入同一会话代次并复核提交结果。
+# LLM: active-turn archive 仍须原 child/store/CAS；二次加载只读回调更新后的展示，缺原 RunParams 时保留旧调用合同而不伪造已评估值。
+# 函数用途: 把当前工具轨迹正式压缩后复核代次；前次准备已清除的推荐不能因再次加载而复活。
 def _compact_subagent_active_turn_archive(
     agent: object,
     task: object,
@@ -446,13 +466,16 @@ def _compact_subagent_active_turn_archive(
     )
     if not compacted.compacted:
         raise RuntimeError("subagent thread cannot compact the overflowing active turn")
+    model_surface = request.model_surface
+    if request.run_params is not None:
+        model_surface = replace(model_surface, capability_presentation=request.run_params.capability_presentation)
     refreshed = prepare_subagent_thread_turn(
         agent,
         task,
         turn=AgentThreadTurnInput(request.prompt, request.attempt_id, request.conversation_turn_id),
         progress_callback=request.progress_callback,
         interrupt_check=is_interrupted,
-        model_surface=request.model_surface,
+        model_surface=model_surface,
     )
     if refreshed.compact_generation <= request.current.compact_generation:
         raise RuntimeError("subagent Compact generation did not advance")
@@ -538,13 +561,13 @@ def _subagent_model_run_params(
     )
 
 
-# LLM: Transcript Compact and the following child model turn must share the exact structured tool
-# ceiling, pending one-call discoveries, and system prompt. This copies only host-owned facts.
-# 函数用途: 从子代理上下文和溢出归档生成缓存面，确保 child/grandchild 压缩不另起一套 prompt。
+# LLM: 身份及当前输入只复制原 RunParams，不取 carrier.binding；没有实际参数的预运行准备不回传已评估，当前授权和原快照仍唯一。
+# 函数用途: 为 child/grandchild 压缩构造与实际模型轮一致的缓存面，同步携带本轮展示的原清除回调。
 def _subagent_compact_model_surface(
     context: object,
     *,
     loaded_tool_names: object = (),
+    run_params: RunParams | None = None,
 ) -> object:
     from ...conversation.compact_provider_surface import ConversationCompactModelSurface
     from ..runner.prompts import subagent_runner_system_prompt
@@ -563,21 +586,33 @@ def _subagent_compact_model_surface(
                 }
             )
         ),
+        presentation_context=(RuntimeContextRequest(
+            user_prompt=run_params.root_user_prompt, inject=[], resume_context=False,
+            context_scope=run_params.context_scope, allowed_tools=deepcopy(run_params.allowed_tools),
+            write_boundary=deepcopy(run_params.write_boundary), request_id=run_params.request_id,
+            run_id=run_params.run_id, task_id=run_params.task_id,
+            task_attributes=deepcopy(run_params.task_attributes), source="conversation_compact_summary", save=False,
+        ) if run_params is not None else None),
+        capability_presentation=run_params.capability_presentation if run_params is not None else None,
+        capability_presentation_turn_id=run_params.capability_presentation_turn_id if run_params is not None else "",
+        capability_presentation_callback=run_params.capability_presentation_callback if run_params is not None else None,
     )
 
 
-# LLM: Overflow restoration must use tooling's shared typed archive reducer; do not inspect model text,
-# tool names, or the transient inner loop object after Agent.run has returned.
-# 函数用途: 从子代理本轮权威工具归档恢复一次性工具 Schema，并生成下一次 transcript Compact 缓存面。
+# LLM: 工具发现只经原 typed archive reducer 恢复；可选展示只读当前 RunParams，不从归档正文推测选择或执行权。
+# 函数用途: 恢复本轮一次性 schema，并把原宿主展示交给 transcript Compact 复核。
 def _pending_subagent_compact_model_surface(
     context: object,
     records: list[dict[str, object]],
+    *,
+    run_params: RunParams | None = None,
 ) -> object:
     from ...tooling.tool_search_state import pending_carried_loaded_tool_names
 
     return _subagent_compact_model_surface(
         context,
         loaded_tool_names=pending_carried_loaded_tool_names(records),
+        run_params=run_params,
     )
 
 

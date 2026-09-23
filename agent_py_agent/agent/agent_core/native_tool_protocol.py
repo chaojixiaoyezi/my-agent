@@ -1,4 +1,4 @@
-# LLM: 工具参数只来自冻结快照，通用授权规则只在 provider system 传一次；本模块不更改运行时权限。
+# LLM: 工具参数和本轮 ToolChoice 只来自宿主冻结事实；发送与容量共用选择规则，不更改运行时权限。
 # 模块用途: 固定原生工具协议并渲染模型工具列表，避免工具说明重复堆叠系统提示。
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..tooling.runtime_contracts import ProviderToolCapability, ToolProtocolSnapshot
+from ..tooling.runtime_contracts import ProviderToolCapability, ToolChoice, ToolProtocolSnapshot
 
 _NATIVE_PROTOCOL = "native"
 
@@ -63,6 +63,26 @@ def native_tool_use_active(params: object) -> bool:
     return snapshot.source_protocol == _NATIVE_PROTOCOL
 
 
+# LLM: 仅消费结构化 required-action snapshot 或宿主 ToolChoice，不读模型正文或写运行账；生成和容量检查必须共用。
+# 函数用途: 取得本轮真实工具选择，供发送、候选投影和预检使用同一份 schema 裁决。
+def model_turn_tool_choice(params: object, tools: list[dict] | None) -> ToolChoice:
+    from ..contracts.required_actions import tool_choice_for_required_actions
+
+    snapshot = getattr(params, "effective_contract_snapshot", None)
+    if snapshot is not None:
+        visible_tools = tools
+        if visible_tools is None:
+            runtime_snapshot = getattr(params, "tool_runtime_snapshot", None)
+            visible_tools = [
+                {"name": name}
+                for name in sorted(getattr(runtime_snapshot, "available_tool_names", ()) or ())
+            ]
+        return tool_choice_for_required_actions(snapshot, visible_tools)
+    state = getattr(params, "live_archive_state", None)
+    candidate = state.get("tool_choice") if isinstance(state, dict) else None
+    return candidate if isinstance(candidate, ToolChoice) else ToolChoice.auto("ordinary_tool_turn")
+
+
 def native_tool_protocol_value(tool_protocol: object) -> str:
     value = str(tool_protocol or "").strip().lower()
     if value in {"", _NATIVE_PROTOCOL}:
@@ -116,6 +136,7 @@ def _declared_capability(
 
 __all__ = [
     "ToolProtocolSelectionError",
+    "model_turn_tool_choice",
     "native_tool_protocol_value",
     "native_tool_use_active",
     "resolve_native_tools",

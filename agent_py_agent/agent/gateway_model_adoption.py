@@ -93,12 +93,12 @@ def _portable_history(prepared: ToolLoopRequestInput) -> bool:
     return True
 
 
-# LLM: 这里只组装原生产方事实，不刷新 child/Goal/文件、不消费邮箱；未知历史不能用空列表补齐。
+# LLM: 只组装原事实和 native_tool_protocol 的唯一工具选择，不刷新 child/Goal/文件或邮箱；未知历史不补空。
 # 函数用途: 将实际首请求的冻结 system、完整 IR 和原工具选择交给唯一纯投影。
 def _request_input(agent: object, params: object, prompt_input: object) -> ToolLoopRequestInput:
-    from .agent_core.native_tool_protocol import resolve_native_tools
+    from .agent_core.native_tool_protocol import model_turn_tool_choice, resolve_native_tools
     from .agent_core.runtime.conversation_state import conversation_runtime_state_section
-    from .agent_core.tool_model_generation import _forwarded_guidance_seen, _model_turn_tool_choice
+    from .agent_core.tool_model_generation import _forwarded_guidance_seen
 
     if not isinstance(params.conversation_history_seed, ConversationHistorySeed):
         raise ValueError("history_unknown")
@@ -106,7 +106,7 @@ def _request_input(agent: object, params: object, prompt_input: object) -> ToolL
     return ToolLoopRequestInput(
         prompt_input=prompt_input, system_instruction=provider_system_instruction(agent.backend),
         tool_protocol_snapshot=params.tool_protocol_snapshot, native_tools=tuple(tools or ()),
-        tool_choice=_model_turn_tool_choice(params, tools), tool_ir_history=tuple(params.tool_ir_history),
+        tool_choice=model_turn_tool_choice(params, tools), tool_ir_history=tuple(params.tool_ir_history),
         provider_history_messages=tuple(params.provider_history_messages), tool_context=tuple(params.tool_context),
         forwarded_guidance=frozenset(_forwarded_guidance_seen(params)),
         conversation_state=conversation_runtime_state_section(params),
@@ -243,7 +243,8 @@ class GatewayModelAdoption:
             projected = project_tool_loop_request(candidate_input)
             if projected.status != "ready" or any(not _portable_content(row.get("content")) for row in projected.messages or ()):
                 raise ValueError("history_modality_or_projection_unknown")
-            payload = _payload(agent.backend, projected.provider_prompt, projected.tools, projected.tool_choice,
+            # 原始非空工具面即使被 choice.none 隐藏，也决定真实发送包装是否关闭 thinking。
+            payload = _payload(agent.backend, projected.provider_prompt, list(candidate_input.native_tools) or None, projected.tool_choice,
                                projected.messages, projected.system_instruction)
             validation = _capacity(dependencies.config, payload)
             if preflight_context_pressure_response(ModelGenerateParams(agent, candidate_params, projected.prompt, params.tool_rounds)):
