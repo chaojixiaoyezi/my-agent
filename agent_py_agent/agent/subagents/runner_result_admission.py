@@ -1,21 +1,24 @@
-# LLM: 本模块只裁决 runner 结果能否写回当前 exact run／attempt；拒绝时保留原快速回执与结构化诊断。
+# LLM: 本模块显式接收原 RuntimeDB 与 canonical task，只裁决 exact run／attempt 准入；不接收完整 manager。
 # 模块用途: 拦住被接管、已废弃、已换代或与运行账终态冲突的迟到结果，不触碰结果文件和父级通知。
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import TYPE_CHECKING
 
 from ..runtime_db.operations import AGENT_RUN_TERMINAL_STATUSES, RUN_STATUS_LEGACY_CREATED
 from ..turn_end import subagent_outcome_for_turn_end
 from .manager_runner_result_payload import RecordRunnerResultParams
 from .models import SubAgentRunnerResult, SubAgentTask, TaskStatus
 
+if TYPE_CHECKING:
+    from ..runtime_db.repository import RuntimeRepository
 
-# LLM: 准入只读取当前 canonical task 与 RuntimeDB；被拒结果不再进入文件、WAL 或通知链。
+
+# LLM: 准入只读取显式传入的 canonical task 与 RuntimeDB；None 保留原文件模式，不借 manager 获取其它能力。
 #   终态冲突仍向原运行账追加诊断，诊断故障不能反过来放行结果。
 # 函数用途: 在正式写结果前拦住旧轮、接管任务和运行时终态冲突。
 def reject_stale_runner_result(
-    manager: Any,
+    runtime_db: RuntimeRepository | None,
     task: SubAgentTask,
     params: RecordRunnerResultParams,
 ) -> SubAgentRunnerResult | None:
@@ -32,29 +35,30 @@ def reject_stale_runner_result(
             return make_rejected_runner_result(task, dry_run, False, f"ignored duplicate runner result for inactive attempt {normalized_attempt_id}")
         if active_attempt_id and active_attempt_id != normalized_attempt_id:
             return make_rejected_runner_result(task, dry_run, False, f"ignored stale runner result for non-active attempt {normalized_attempt_id}")
-        conflict = _managed_runtime_result_conflict(manager, task, params)
+        conflict = _managed_runtime_result_conflict(runtime_db, task, params)
         if conflict:
-            _record_conflict_diagnostic(manager, task, params, conflict=conflict)
+            _record_conflict_diagnostic(runtime_db, task, params, conflict=conflict)
             return make_rejected_runner_result(task, dry_run, False, conflict)
     return None
 
 
-# LLM: 冲突诊断必须写到 manager 持有的原 RuntimeDB；服务对象自己没有 runtime_db。
+# LLM: 冲突诊断只使用调用方传入的原 RuntimeDB，不从结果服务或 manager 重新解析依赖。
 #   追加事件 fail-soft，不改变已拒绝的准入裁决或尝试编号。
 # 函数用途: 记录运行时终态闸拒绝的精确 run／attempt，供恢复排障和监督。
 def _record_conflict_diagnostic(
-    manager: Any,
+    runtime_db: RuntimeRepository | None,
     task: SubAgentTask,
     params: RecordRunnerResultParams,
     *,
     conflict: str,
 ) -> None:
-    repo = getattr(manager, "runtime_db", None)
-    append = getattr(repo, "append_event", None)
+    if runtime_db is None:
+        return
+    append = getattr(runtime_db, "append_event", None)
     if not callable(append):
         return
     try:
-        authority = repo.runner_result_commit_authority(
+        authority = runtime_db.runner_result_commit_authority(
             run_id=str(task.id or ""),
             attempt_id=str(params.attempt_id or ""),
         ) or {}
@@ -101,18 +105,17 @@ def make_rejected_runner_result(
     )
 
 
-# LLM: RuntimeDB 的终态与当前 attempt 是准入权威；未知脏状态保留 runner 结论给 WAL 恢复，
+# LLM: 显式 RuntimeDB 的终态与当前 attempt 是准入权威；未知脏状态保留 runner 结论给 WAL 恢复，
 #   一致终态重入放行，冲突和换代拒绝，不能据模型正文补猜。
 # 函数用途: 核对当前运行账是否允许这条 runner 结果进入正式写回。
 def _managed_runtime_result_conflict(
-    manager: Any,
+    runtime_db: RuntimeRepository | None,
     task: SubAgentTask,
     params: RecordRunnerResultParams,
 ) -> str:
-    repo = getattr(manager, "runtime_db", None)
-    if repo is None or params.dry_run:
+    if runtime_db is None or params.dry_run:
         return ""
-    authority = repo.runner_result_commit_authority(
+    authority = runtime_db.runner_result_commit_authority(
         run_id=str(task.id or ""),
         attempt_id=str(params.attempt_id or ""),
     )

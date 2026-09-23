@@ -42,6 +42,9 @@ Audit 来源岗位的专门 metadata 与内部 wake 留在原位，不借这次�
 第三小片已把 `services/runner_result_service.py` 内的迟到／换代／冲突准入单独归到
 `runner_result_admission.py`：只读取 canonical task 和 RuntimeDB 的 exact run／attempt，
 拒绝时仍返回原快速结果，并把原 `closeout_blocked` 诊断写入 manager 持有的运行账。
+依赖复核进一步把准入参数从完整 manager 收窄为原 `RuntimeRepository | None`；
+只有结果服务负责取出这份依赖。文件模式的 None、exact attempt 裁决及诊断失败不放行的边界保持，
+准入模块不能借整个 manager 读取工作区、配置、索引或投递能力。此收窄仍为本地候选，未进入已部署包。
 结果构造、文件落盘、WAL、run 结算与父级通知维持原调用顺序；服务里的旧方法和
 私有函数已删除，不通过服务转发保留第二入口。原事故和换代回归已先通过；下一片再拆实际收口编排。
 

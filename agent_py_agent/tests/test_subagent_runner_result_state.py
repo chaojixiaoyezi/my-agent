@@ -103,11 +103,10 @@ def test_runner_conflict_records_runtime_diagnostic() -> None:
         },
         append_event=lambda **kwargs: events.append(kwargs),
     )
-    manager = SimpleNamespace(runtime_db=repo)
     task = _task()
     task.runner_active_attempt_id = "attempt-1"
     rejected = reject_stale_runner_result(
-        manager,
+        repo,
         task,
         SimpleNamespace(
             attempt_id="attempt-1", status="FAILED", turn_end_reason="error",

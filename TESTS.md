@@ -27,8 +27,20 @@ Ruff、doc sync、strict code-size、diff、clean-package 通过。
 从新版运行环境启动唯一 Gateway，并将默认入口指向同一运行环境；旧运行环境及入口回滚副本保留。
 本机仍有原任务处理，尚未切换；
 这些离线回归不能替代官方 MiniMax-M2.7 的第 7.6 项多路真实 TUI 验收。
+同一修正版 wheel 已在本机独立候选环境安装，1,273 个文件逐项一致；默认入口和 Gateway 未切换。
+本机后续核对发现 HTTP processing=0 时，canonical RuntimeDB 仍有由原 Gateway 执行的最新 running attempt。
+因此切换前必须同时核对后台执行轮，不能单靠前台请求队列判空闲；测试机首次切换前未独立保存
+后台 attempt 快照，恢复观测后须补查原运行账，不能据当时队列为 0 宣称全部后台任务空闲。
 隔离线交接见 [第 7 步交接](docs/tasks/HANDOFF_STEP7_SUBAGENT_LIFECYCLE.md)，
 正式验收矩阵见 [唯一 TODO](docs/tasks/REFACTOR_PLUGIN_GOAL.md#第-7-步当前-todo子代理状态和交接按序小片推进)。
+
+### 准入依赖收窄（本地候选，未部署）
+
+结果准入与终态冲突诊断只需要原 RuntimeDB，现改为显式接收该依赖，不再传入整个 manager。
+结果服务在原调用位置取出依赖；canonical task、exact attempt 裁决、None 文件模式和写诊断边界不变。
+两个直接受影响测试文件通过，覆盖原冲突诊断、旧轮拒绝、一致终态重入和持久恢复。
+Ruff、导入边界、doc sync、strict code-size、diff 和 clean-package 均通过，未运行全仓 pytest。
+这片代码未进入双机候选安装包，不能用 TUI195—197 的已启动任务证明它通过真实验收。
 
 ### 第 7 步首组真实 TUI（进行中，未验收通过）
 

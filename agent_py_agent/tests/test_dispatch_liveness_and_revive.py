@@ -1169,7 +1169,7 @@ def test_stream_incomplete_same_attempt_closes_authoritative_run(tmp_path: Path)
     )
     assert old_rule_accepts is False, "旧规则必须拒绝 FAILED 终态（修复前事故形态）"
     assert _runner_result_matches_settled_attempt("created", "done", params) is True
-    assert _managed_runtime_result_conflict(manager, manager.load(task.id), params) == ""
+    assert _managed_runtime_result_conflict(manager.runtime_db, manager.load(task.id), params) == ""
 
     # 真正的落账入口：写 runner_result + task 终态。
     result = manager.runner_result.record_runner_result(params)
@@ -1203,7 +1203,7 @@ def test_stream_incomplete_same_attempt_closes_authoritative_run(tmp_path: Path)
     next_attempt_id = next_prepared.runner_active_attempt_id
     assert next_attempt_id != attempt_id
     stale_conflict = _managed_runtime_result_conflict(
-        manager,
+        manager.runtime_db,
         manager.load(task.id),
         RecordRunnerResultParams(
             run_id=task.id,
@@ -1570,13 +1570,13 @@ def test_consistent_terminal_result_is_reentrant_but_conflict_is_rejected(tmp_pa
 
     # 一致终态必须可重入（修复前这里会被判成 conflicting terminal fact）。
     assert _managed_runtime_result_conflict(
-        manager, manager.load(task.id), params
+        manager.runtime_db, manager.load(task.id), params
     ) == "", "同一 exact current attempt 的一致终态必须可重入完成交付"
 
     # 冲突终态仍拒：run=failed 收到 DONE。
     conflicting = type(params)(**{**vars(params), "status": "DONE", "turn_end_reason": "completed"})
     assert _managed_runtime_result_conflict(
-        manager, manager.load(task.id), conflicting
+        manager.runtime_db, manager.load(task.id), conflicting
     ) != "", "与权威终态冲突的结论必须仍被拒绝"
 
 

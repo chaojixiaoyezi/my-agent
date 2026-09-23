@@ -176,14 +176,14 @@ class SubAgentRunnerResultService:
         self.manager.indexing.index_runner_result(result, output_payload)
         return len(memory_candidates)
 
-    # LLM: 先核对 exact attempt，再落结果文件和任务投影；提交模块随后持久化恢复事实、收口与通知。
+    # LLM: 仅向准入传入原 RuntimeDB 与 canonical task；核对 exact attempt 后再落盘，提交模块按原顺序收口与通知。
     # 函数用途: 写回通过准入的子代理结果并启动原可靠交接；旧轮被拒，UNKNOWN 不自动重跑。
     def record_runner_result(
         self,
         params: RecordRunnerResultParams,
     ) -> SubAgentRunnerResult:
         task = self.manager.load(params.run_id)
-        stale_result = reject_stale_runner_result(self.manager, task, params)
+        stale_result = reject_stale_runner_result(self.manager.runtime_db, task, params)
         if stale_result:
             return stale_result
 
