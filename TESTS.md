@@ -10,7 +10,7 @@ Gateway/child/后台首次只加载来源，在原PromptBuilder冻结完整输�
 
 Ruff、doc sync、strict code-size hard=0（基线未变）、diff及clean-package通过。没有推送、部署、重启或供应商收费请求；本片不关闭真实IR混合来源、媒体、真实缓存或旧全仓八项失败。第12.4仍未整项完成。
 
-现场隔离事故单独记录：独立诊断直接调用依赖pytest autouse的fixture，绕过临时MY_AGENT_HOME，误写本机owner模型目录及测试线程。已在原锁内隔离确证的12组测试模型/provider；根据迁移源码确认新增字段来源，显式反迁移并用真实安装版reader验证原有42模型/7provider及selected保持。原件和操作清单只存本机私有证据，不入仓库、不算产品验收。后续独立脚本必须进程启动前指定临时MY_AGENT_HOME；真实测试只使用已声明隔离home，禁止依赖导入fixture获得隐式隔离。
+现场隔离事故单独记录：独立诊断直接调用依赖pytest autouse的fixture，绕过临时MY_AGENT_HOME，误写本机owner模型目录及测试线程。已在原锁内隔离确证的12组测试模型/provider；根据迁移源码确认新增字段来源，显式反迁移并用真实安装版reader验证原有42模型/7provider及selected保持。原件和操作清单只存本机私有证据，不入仓库、不算产品验收。后续独立脚本必须进程启动前指定临时MY_AGENT_HOME；真实测试只使用已声明隔离home，禁止依赖导入fixture获得隐式隔离。 后续精确隔离测试线程/两条消息/用量/过期claim及测试快照，共7文件；两索引只移除仍指测试线程的值，其他项不变。新真实请求已更新latest快照，未触碰。独立误建local_store仅有1条该测试消息记录，确认无打开句柄后整目录隔离，日常工作区记忆库未动；不能把这次事故表述为“没有记忆写入”。共享runtime.db保留审计，原全树终态API将孤立测试TaskRun从created收口为failed，3个已failed的attempt及长期Task身份保持。
 
 ## 第 12.4 项混合来源与三宿主活动归档（本地切片已验）
 
