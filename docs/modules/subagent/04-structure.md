@@ -1,5 +1,10 @@
 # Subagent Structure
 
+第 7 步结果提交依赖已在本地候选收窄：初次提交只接原 RuntimeDB、canonical task、结构化结果、
+保存回调和绑定本轮身份的交付回调；WAL 原语只接 save，运行结算与诊断只接原 RuntimeDB。
+结果服务装配 trace→父通知，仍在 WAL→运行账之后执行；不新增状态副本或兼容转发。
+恢复扫描和父通知内部仍待下一片收窄，本片不声称第 7 步完成或已经部署。
+
 `shell_gateway_execution.py` 只从 `common/cancellation.py` 查询本次执行取消；与本模块 `cancellation.py` 的持久子树权限和资源冻结职责分开。
 
 ## 第 7 步结果链职责（本地小片）

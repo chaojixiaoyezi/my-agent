@@ -1,13 +1,15 @@
 
-# LLM: runner 结果服务先核对 exact attempt，再组装并保存结果；运行账结算和父级通知交给唯一提交模块按原顺序推进。
+# LLM: 此服务是初次结果提交的依赖装配边界；runner 结果服务先核对 exact attempt，再组装并保存结果；运行账结算和父级通知交给唯一提交模块按原顺序推进。
 # 模块用途: 保存通过准入的子代理本轮结果与文件交接，调用既有可恢复收口链。
 from __future__ import annotations
 
 """Runner result recording and debrief persistence service."""
 
 import time
+from functools import partial
 from pathlib import Path
 
+from .. import debug_trace, runner_completion_wake
 from ..manager_runner_result_payload import (
     BuildAndPersistContext,
     RecordRunnerResultParams,
@@ -30,6 +32,7 @@ from ..runner_result_admission import reject_stale_runner_result
 from ..tool_failure_ledger import record_tool_failure_ledger
 from ..utils import _apply_missing_paths
 from .runner_result_commit import commit_runner_result
+from .runtime_closeout import deliver_parent_wake
 
 
 def _runner_append_debrief(task, parsed):
@@ -176,7 +179,8 @@ class SubAgentRunnerResultService:
         self.manager.indexing.index_runner_result(result, output_payload)
         return len(memory_candidates)
 
-    # LLM: 仅向准入传入原 RuntimeDB 与 canonical task；核对 exact attempt 后再落盘，提交模块按原顺序收口与通知。
+    # LLM: 此处装配原 RuntimeDB、save 与 exact attempt 的通知／追踪回调，提交模块不再接收 manager；
+    # 仅向准入传入原 RuntimeDB 与 canonical task；核对 exact attempt 后再落盘，提交模块按原顺序收口与通知。
     # 函数用途: 写回通过准入的子代理结果并启动原可靠交接；旧轮被拒，UNKNOWN 不自动重跑。
     def record_runner_result(
         self,
@@ -205,7 +209,25 @@ class SubAgentRunnerResultService:
             result,
             _PostResultSideEffectParams(output_payload, params.dry_run, extracted.parsed, extracted.lessons),
         )
-        commit_runner_result(self.manager, task, params, result, output_payload)
+        trace_result = partial(
+            debug_trace.trace_runner_result,
+            debug_trace.SubAgentRunnerTraceRequest(self.manager, task, result, params),
+        )
+        notify_parent = partial(
+            runner_completion_wake.notify_parent_on_runner_result,
+            self.manager, task, result, output_payload, attempt_id=str(params.attempt_id or ""),
+        )
+
+        # LLM: 仅闭包绑定本轮原追踪与通知；提交模块在 WAL／RuntimeDB 结算后调用，不能提前执行。
+        # 函数用途: 先写原调试记录，再投递本轮父级通知；通知失败转为可恢复结果。
+        def deliver_result() -> str:
+            trace_result()
+            return deliver_parent_wake(notify_parent)
+
+        commit_runner_result(
+            self.manager.runtime_db, task, params, result,
+            save_task=self.manager.save, deliver_result=deliver_result,
+        )
         return result
 
     def _runner_result_build_context(

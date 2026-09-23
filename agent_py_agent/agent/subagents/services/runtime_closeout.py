@@ -12,8 +12,14 @@ from __future__ import annotations
 import json
 import logging
 import time
+from collections.abc import Callable
+from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from ...runtime_db.repository import RuntimeRepository
+    from ..models import SubAgentTask
 
 # LLM: 待重试事实挂在子代理 canonical task 的 attributes 上；它与 runtime.db 是**不同**
 # 存储域，因此 runtime.db 写失败不会连带写不进重试事实。schema 必须版本化，恢复链只认
@@ -104,12 +110,12 @@ def _error_text(exc: BaseException) -> str:
     return text[:300]
 
 
-# LLM: 收口是本模块唯一的写点。返回的 outcome 是后续"是否通知父级 / 是否落待重试事实"
+# LLM: 本函数只使用显式原 RuntimeDB 进行运行收口，不访问任务存储或通知。返回的 outcome 是后续"是否通知父级 / 是否落待重试事实"
 # 的唯一判据：committed 才允许通知，retryable 才落 WAL，rejected 只留诊断。
 # 语义不变式：只在 attempt 仍是 exact current 时收口；stale/换代保护沿用 repo 的 CAS。
 # 函数用途: 按 runner 结论收口对应 run，读取失败显式记录可重试结果，无操作分支不附加隐式覆盖字段。
 def settle_runtime_run_for_result(
-    manager: Any,
+    repo: RuntimeRepository | None,
     task: Any,
     params: Any,
     result: Any,
@@ -119,7 +125,6 @@ def settle_runtime_run_for_result(
     target = closeout_target_run_status(params, result, task)
     if not target:
         return _noop_outcome(CLOSEOUT_NOT_APPLICABLE, "non_terminal_runner_status")
-    repo = getattr(manager, "runtime_db", None)
     if repo is None:
         return _noop_outcome(CLOSEOUT_NOT_APPLICABLE, "no_runtime_db")
     run_id = str(getattr(task, "id", "") or "")
@@ -199,7 +204,9 @@ def pending_closeout(task: Any) -> dict[str, Any] | None:
     return dict(fact)
 
 
-def _store_closeout(manager: Any, task: Any, fact: dict[str, Any] | None) -> bool:
+# LLM: WAL 仅通过调用方绑定的保存入口写 canonical task，不持有 manager 或访问运行账。
+# 函数用途: 保存或移除一条收口恢复事实；保存失败显式返回 False。
+def _store_closeout(save_task: Callable[[SubAgentTask], object], task: Any, fact: dict[str, Any] | None) -> bool:
     attrs = dict(getattr(task, "attributes", {}) or {})
     if fact is None:
         attrs.pop(RUNTIME_CLOSEOUT_ATTR, None)
@@ -207,17 +214,17 @@ def _store_closeout(manager: Any, task: Any, fact: dict[str, Any] | None) -> boo
         attrs[RUNTIME_CLOSEOUT_ATTR] = fact
     task.attributes = attrs
     try:
-        manager.save(task)
+        save_task(task)
     except Exception:  # noqa: BLE001 - 事实落盘失败不能反过来伪造完成
         return False
     return True
 
 
 # LLM: 先写待重试事实再动权威账本，是"收口未提交不得冒充完成"的前置条件；
-# 事实里带足恢复所需的精确身份（run/attempt/agent_run/目标终态），恢复链不需要猜。
-# 函数用途: 落一条待重试的 runner 终态收口事实。
+# 保存回调必须绑定原 canonical task 存储；事实里带足恢复所需的精确身份（run/attempt/agent_run/目标终态），恢复链不需要猜。
+# 函数用途: 通过显式保存回调落一条待重试的 runner 终态收口事实。
 def record_pending_closeout(
-    manager: Any,
+    save_task: Callable[[SubAgentTask], object],
     task: Any,
     params: Any,
     result: Any,
@@ -247,17 +254,17 @@ def record_pending_closeout(
         "created_at": float(existing.get("created_at") or time.time()),
         "updated_at": time.time(),
     }
-    return _store_closeout(manager, task, fact)
+    return _store_closeout(save_task, task, fact)
 
 
-# LLM: 「先成功持久化再收口」必须是可判定的三态，而不是一个可能悄悄为 False 的布尔：
+# LLM: 仅调用显式保存回调；「先成功持久化再收口」必须是可判定的三态，而不是一个可能悄悄为 False 的布尔：
 #   persisted   = canonical task WAL 已落盘（唯一允许继续收口+通知的形态）；
 #   unpersisted = 两种介质都写不进去（调用方必须停止后续不可恢复动作并留响亮诊断）；
 #   not_required = 本次结论不需要 run 级收口（非终态/无 runtime 权威）。
 # 直接写 WAL 失败时先重试一次（吸收瞬时抖动），仍失败则退到 runtime 事件账本留同身份事实。
 # 函数用途: 落待重试收口事实并回报它到底有没有被持久化。
 def ensure_closeout_fact(
-    manager: Any,
+    save_task: Callable[[SubAgentTask], object],
     task: Any,
     params: Any,
     result: Any,
@@ -265,18 +272,17 @@ def ensure_closeout_fact(
     *,
     delivery: str = _DELIVERY_PENDING,
 ) -> str:
-    if record_pending_closeout(manager, task, params, result, outcome, delivery=delivery):
+    if record_pending_closeout(save_task, task, params, result, outcome, delivery=delivery):
         return "persisted"
-    if record_pending_closeout(manager, task, params, result, outcome, delivery=delivery):
+    if record_pending_closeout(save_task, task, params, result, outcome, delivery=delivery):
         return "persisted"
     return "unpersisted"
 
 
-# LLM: canonical task 写不进去时，恢复依据必须以**另一个存储域**（runtime 事件账本）留下，
+# LLM: 本入口仅持有显式 RuntimeDB；canonical task 写不进去时，恢复依据必须以**另一个存储域**（runtime 事件账本）留下，
 # 否则恢复链没有任何可达依据。事件带足重建 WAL 所需的精确身份与引用，恢复扫描据此重试。
 # 函数用途: 在 runtime 事件账本里落一条"收口事实未能落盘"的可达恢复事实。
-def record_unpersisted_closeout(manager: Any, task: Any, params: Any, result: Any) -> bool:
-    repo = getattr(manager, "runtime_db", None)
+def record_unpersisted_closeout(repo: RuntimeRepository | None, task: Any, params: Any, result: Any) -> bool:
     append = getattr(repo, "append_event", None)
     payload = {
         "schema_version": RUNTIME_CLOSEOUT_SCHEMA,
@@ -320,40 +326,39 @@ def record_unpersisted_closeout(manager: Any, task: Any, params: Any, result: An
     return False
 
 
-# LLM: 「不重」要求"已交付"本身先落盘再清账：清账失败时恢复链必须看到 delivered 并跳过重发，
+# LLM: 只调用显式保存回调；「不重」要求"已交付"本身先落盘再清账：清账失败时恢复链必须看到 delivered 并跳过重发，
 # 否则一次成功的父级唤醒会因为清账失败被再发一次。
 # 函数用途: 把收口事实标记为已交付并持久化。
 def mark_closeout_delivered(
-    manager: Any,
+    save_task: Callable[[SubAgentTask], object],
     task: Any,
     params: Any,
     result: Any,
     outcome: dict[str, Any],
 ) -> bool:
     return record_pending_closeout(
-        manager, task, params, result, outcome, delivery=_DELIVERY_DELIVERED
+        save_task, task, params, result, outcome, delivery=_DELIVERY_DELIVERED
     )
 
 
-# LLM: 收口与交付都完成后必须清掉事实，否则恢复链会反复补交付；清理失败要显式报告，
+# LLM: 只调用显式保存回调；收口与交付都完成后必须清掉事实，否则恢复链会反复补交付；清理失败要显式报告，
 # 不能静默当作已完成。
 # 函数用途: 清除已完成的收口事实。
-def clear_closeout(manager: Any, task: Any) -> bool:
-    return _store_closeout(manager, task, None)
+def clear_closeout(save_task: Callable[[SubAgentTask], object], task: Any) -> bool:
+    return _store_closeout(save_task, task, None)
 
 
-# LLM: 诊断事件只用于排障与监督，不改变任何状态判定；runtime.db 不可用时静默跳过，
+# LLM: 显式原 RuntimeDB 中的诊断事件只用于排障与监督，不改变任何状态判定；runtime.db 不可用时静默跳过，
 # 因为此时权威事实本就写不进去，事件也写不进去，不能因此改变主链语义。
 # 函数用途: 追加一条 runner 收口相关的结构化运行时事件。
 def record_closeout_event(
-    manager: Any,
+    repo: RuntimeRepository | None,
     task: Any,
     *,
     event_type: str,
     params: Any,
     outcome: dict[str, Any],
 ) -> None:
-    repo = getattr(manager, "runtime_db", None)
     append = getattr(repo, "append_event", None)
     if not callable(append):
         return
@@ -377,54 +382,47 @@ def record_closeout_event(
         return
 
 
-# LLM: 父级交付必须幂等：调用方按结构化投递结果推进 WAL，绝不按文本判断是否已通知。
+# LLM: 调用方绑定原身份与通知参数，本入口仅调用一次绑定回调。父级交付必须幂等：调用方按结构化投递结果推进 WAL，绝不按文本判断是否已通知。
 # 去重身份带 exact attempt，因此同一 attempt 重发被识别为已交付，换代后的新 attempt 不受影响。
 # "skipped"（没有可通知的父会话/状态）不是失败，不重试；"already_delivered" 由唤醒回执保证。
 # 函数用途: 把 runner 终态结果通知直属父级，并回报结构化投递结果。
-def deliver_parent_wake(
-    manager: Any,
-    task: Any,
-    result: Any,
-    output_payload: dict[str, Any],
-    *,
-    attempt_id: str = "",
-) -> str:
-    from ..runner_completion_wake import notify_parent_on_runner_result
-
+def deliver_parent_wake(notify_parent: Callable[[], str]) -> str:
     try:
-        outcome = notify_parent_on_runner_result(
-            manager, task, result, output_payload, attempt_id=str(attempt_id or "")
-        )
+        outcome = notify_parent()
     except Exception:  # noqa: BLE001 - 通知异常要落回待重试事实，不能丢
         return "failed"
     return str(outcome or "delivered")
 
 
-# LLM: 恢复链只做两件事：补收口（settle 权威 run）与补通知（父级 wake）。
+# LLM: 本入口是恢复装配边界，向收口与 WAL 原语分别传原 RuntimeDB、save 和绑定通知；
+# 恢复链只做两件事：补收口（settle 权威 run）与补通知（父级 wake）。
 # 它必须能安全重复执行：settle 是 CAS 幂等、wake 有去重键 + 回执，因此"重复恢复"不会产生
 # 重复终态事件或重复父级唤醒；已经交付过的事实直接清账。
 # 函数用途: 推进一条待重试的收口事实；返回本次是否已彻底完成。
 def advance_pending_closeout(manager: Any, task: Any, fact: dict[str, Any]) -> dict[str, Any]:
+    from ..runner_completion_wake import notify_parent_on_runner_result
+
     params = _CloseoutReplayParams(fact)
     result = _load_persisted_runner_result(fact)
     if result is None:
         # runner_result 落盘缺失说明事实与持久化结果不一致：保持事实并留诊断，绝不伪造结论。
         return {"advanced": False, "state": "runner_result_missing"}
-    outcome = settle_runtime_run_for_result(manager, params=params, task=task, result=result)
+    repo = getattr(manager, "runtime_db", None)
+    outcome = settle_runtime_run_for_result(repo, params=params, task=task, result=result)
     if outcome.get("state") in REJECTED_CLOSEOUT_STATES:
         # LLM: 被拒（与权威终态冲突 / 已换代）不是"以后可能成"——重试永远不会成功。
         # 所以诊断只写一次，然后清账：否则每个 reconcile 周期都会重复写事件，
         # 且 owner 会因为这条永久事实一直被当成硬事实反复扫描（无界重试 + 事件洪泛）。
         # 权威 run/task 事实已经成立，换代后的新 attempt 会走它自己的正常收口与通知。
-        record_closeout_event(manager, task, event_type="closeout_blocked", params=params, outcome=outcome)
-        if not clear_closeout(manager, task):
+        record_closeout_event(repo, task, event_type="closeout_blocked", params=params, outcome=outcome)
+        if not clear_closeout(manager.save, task):
             # 清账失败：事实仍在，下一轮会再次走到这里（仍然只诊断、不交付）；不报 advanced 成功。
             return {"advanced": False, "state": "cleanup_failed", "rejected": True}
         return {"advanced": False, "state": str(outcome.get("state") or ""), "rejected": True}
     if outcome.get("state") not in COMMITTED_CLOSEOUT_STATES | {CLOSEOUT_NOT_APPLICABLE}:
         # 仍未收口（写库失败 / 状态未知等可重试形态）：刷新事实里的诊断字段，等待下一次恢复。
         refreshed = record_pending_closeout(
-            manager, task, params, result, outcome,
+            manager.save, task, params, result, outcome,
             delivery=str(fact.get("delivery") or _DELIVERY_PENDING),
         )
         # LLM: 可重试形态会一直挂着（例如 run 状态一直没被修复），所以诊断事件必须有界：
@@ -432,7 +430,7 @@ def advance_pending_closeout(manager: Any, task: Any, fact: dict[str, Any]) -> d
         attempts = int((pending_closeout(task) or {}).get("attempts") or 0)
         if attempts <= 1 or attempts % 10 == 0:
             record_closeout_event(
-                manager, task, event_type="closeout_pending", params=params, outcome=outcome
+                repo, task, event_type="closeout_pending", params=params, outcome=outcome
             )
         return {
             "advanced": False,
@@ -441,27 +439,27 @@ def advance_pending_closeout(manager: Any, task: Any, fact: dict[str, Any]) -> d
         }
     if str(fact.get("delivery") or "") == _DELIVERY_DELIVERED:
         # 已交付：只需清账。清账失败**不能**报成功——事实还在，下一轮还会看到它。
-        if not clear_closeout(manager, task):
+        if not clear_closeout(manager.save, task):
             record_closeout_event(
-                manager, task, event_type="closeout_pending", params=params, outcome=outcome
+                repo, task, event_type="closeout_pending", params=params, outcome=outcome
             )
             return {"advanced": False, "state": "cleanup_failed"}
         return {"advanced": True, "state": "already_delivered"}
-    delivery = deliver_parent_wake(
-        manager, task, result, _load_persisted_output(fact),
+    delivery = deliver_parent_wake(partial(
+        notify_parent_on_runner_result, manager, task, result, _load_persisted_output(fact),
         attempt_id=str(fact.get("attempt_id") or ""),
-    )
+    ))
     if delivery == "failed":
-        record_pending_closeout(manager, task, params, result, outcome, delivery=_DELIVERY_PENDING)
+        record_pending_closeout(manager.save, task, params, result, outcome, delivery=_DELIVERY_PENDING)
         return {"advanced": False, "state": "delivery_failed"}
     # 先持久化"已交付"，再清账：清账失败时下一轮会看到 delivered 而跳过重发，避免重复通知。
-    if not mark_closeout_delivered(manager, task, params, result, outcome):
+    if not mark_closeout_delivered(manager.save, task, params, result, outcome):
         _LOGGER.error(
             "runner 收口已交付但无法持久化交付标记（不清账、不报成功）: run_id=%s attempt_id=%s",
             str(getattr(task, "id", "") or ""), str(fact.get("attempt_id") or ""),
         )
         return {"advanced": False, "state": "delivery_mark_unpersisted"}
-    if not clear_closeout(manager, task):
+    if not clear_closeout(manager.save, task):
         return {"advanced": False, "state": "cleanup_failed"}
     return {"advanced": True, "state": delivery}
 
@@ -490,7 +488,7 @@ def restore_unpersisted_closeouts(manager: Any) -> int:
     return restored
 
 
-# LLM: 只恢复 exact current 的结果引用；同身份 WAL 已存在时补消费回执，旧身份只记已淘汰，不覆盖新事实。
+# LLM: 恢复装配边界绑定原 manager.save 给 WAL 原语；只恢复 exact current 的结果引用；同身份 WAL 已存在时补消费回执，旧身份只记已淘汰，不覆盖新事实。
 # 函数用途: 还原一条事件到正式收口事实，并在成功保存后确认消费；失败会留在恢复分页中。
 def _restore_closeout_event(manager: Any, event: dict[str, Any]) -> int:
     payload = event.get("payload")
@@ -533,7 +531,7 @@ def _restore_closeout_event(manager: Any, event: dict[str, Any]) -> int:
             return 0
         if str(result.status) != target_status:
             return 0
-        if not _store_closeout(manager, task, fact):
+        if not _store_closeout(manager.save, task, fact):
             return 0
         restored = 1
     elif not stale and str(existing.get("attempt_id") or "") != attempt_id:

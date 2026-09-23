@@ -1,5 +1,9 @@
 # 测试与发布验收
 
+第 7 步初次提交依赖候选：新增无 manager 的提交边界测试，注入 WAL、运行账、trace、通知、
+已交付标记和清账失败，核对持久顺序与剩余恢复事实；原分页恢复、结果状态及 trace 定向共 64 passed、1 skipped。
+这是开发验证，尚未合入部署，不能代替真实 TUI。
+
 ## 第 7 步子代理结果链发布与验收
 
 配对发布半写修复已在隔离线本地验收，尚未发布：`test_closeout_wake_receipt_half_write_does_not_duplicate`
