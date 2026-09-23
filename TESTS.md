@@ -17,9 +17,26 @@
 
 默认运行路径的验收结论：macOS 直接后代回收／TERM 升级和原 0／7 已实证；Linux 默认沙箱直接非零及本次后代退出已实证，不能归因于同一升级路径。Linux 非 PID 隔离／Full Access 与本次 Linux 忽略 TERM 就绪仍未实证，不为取得指定信号回执放宽默认沙箱。
 
-## 第 7.8 步能力请求唤醒后的完成交付（已集成，待发布与原生复验）
+## 第 7.8 步能力请求唤醒后的完成交付（已发布双机，原生复验中）
 
-TUI212 的工作区准备失误与后续框架现象分开：原生历史已有模型完整 final、turn_end_reason=completed，ConversationTaskLink 已 completed，最后后台 claim finished；公开 assistant final 未落账。交付裁决对 capability_request_open／granted 原因无条件 suppress，初步定位为旧唤醒原因覆盖新的完成事实。原生 PTY 的确返回 exit_code=0／36 passed；最终三个样例各400行，合计1200行平方均已被模型修正正确。所有 attempt 已结束，最后 claim finished、无本线程排队唤醒；一个孩子因 thread_goal_blocked 保留 AgentRun created，整树 TaskRun 因此未闭，这是既有 BLOCKED 保留合同，不是仍活执行或另一结算 bug。只修公开完成交付，不强制改运行账终态，不补写旧212回复。最小候选979ed5c76已集成为fc17def5f。新增状态矩阵、同片孩子BLOCKED、空载荷和canonical重放共16项：旧实现6红，修复后全绿。候选组合后台运行／Gateway控制／终态检查三文件348项通过，严格gate通过；主线相同三文件348项通过，Ruff、doc sync、strict-size（hard=0、blocked=False）、diff、clean-package全部通过；尚未部署或真实复验修复。
+TUI212 的工作区准备失误与后续框架现象分开：原生历史已有模型完整 final、turn_end_reason=completed，ConversationTaskLink 已 completed，最后后台 claim finished；公开 assistant final 未落账。交付裁决对 capability_request_open／granted 原因无条件 suppress，初步定位为旧唤醒原因覆盖新的完成事实。原生 PTY 的确返回 exit_code=0／36 passed；最终三个样例各400行，合计1200行平方均已被模型修正正确。所有 attempt 已结束，最后 claim finished、无本线程排队唤醒；一个孩子因 thread_goal_blocked 保留 AgentRun created，整树 TaskRun 因此未闭，这是既有 BLOCKED 保留合同，不是仍活执行或另一结算 bug。只修公开完成交付，不强制改运行账终态，不补写旧212回复。最小候选979ed5c76已集成为fc17def5f。新增状态矩阵、同片孩子BLOCKED、空载荷和canonical重放共16项：旧实现6红，修复后全绿。候选组合后台运行／Gateway控制／终态检查三文件348项通过，严格gate通过；主线相同三文件348项通过，Ruff、doc sync、strict-size（hard=0、blocked=False）、diff、clean-package全部通过；已随6c5fe6f36推送main，同包930f59f6双机各1,274文件一致，默认入口与唯一Gateway同版；216／217／218从原生TUI选官方M2.7进行实际复验，未提前计为通过。
+
+第 7.8 新版真实验收（216／218 完成，219 未命中，217 接续停滞）：
+
+- TUI216 本机206.96秒：真实只读派工，孩子正式OPEN申请、父级grant，同一孩子第二attempt完成；300行平方／立方逐行正确，摘要和SHA256一致。父级实际独立工具核验并公开final；主子5个attempt全done、无锁、两次准确宿主均退出。最终reason为subagent_runner_finished／root_subagents_terminal，证明授权链与普通交付，**不计为能力事件完成分支命中**。
+- TUI218 本机140.92秒：三个孩子实际重叠30.88秒；初次合并表头错误由被测对象自行发现修复，600行立方、数字和180300、立方和32508090000及SHA256均正确。主子5个attempt全done、无锁、三个配对通知、准确宿主退出；公开final可见，216同期继续。测试者没有补业务产物。
+- TUI216 能力OPEN工作片确实调用父级grant，但同一background request没有公开final；孩子后续完成才由runner_finished交付。未完成能力事件保持静默的原生负向分支有证据，completed能力分支仍缺实际命中。
+- TUI219 本机125.53秒自然结束：200行平方与汇总正确，父子3个attempt全done、无锁、准确宿主退出。孩子实际未调用capability_request，canonical申请／grant均为空，状态DONE；父级最终报告和README却声称正式申请、孩子等待授权。此为场景未命中与模型报告错误，不能计修复分支通过，测试者不补申请、不改报告。
+- TUI217 测试机正式只读授权场景停滞，具体事实与后续归属见7.9；保留原TUI和状态，不额外提示、不人工恢复。
+
+## 第 7.9 步授权与旧工作片结束之间的接续（真实失败，定位中）
+
+TUI217 原生一次需求真实派read_only孩子；孩子OPEN能力申请，父级grant准确delivery写入目录。
+原grant回执为continuation=already_running／fresh_runner_session；随后旧孩子attempt结束BLOCKED，canonical被写为PENDING。
+只读核对时父2个attempt、孩子1个attempt均done，没有执行中工具或资源锁；准确宿主已退出。
+OPEN、grant和BLOCKED finished三条wake均handled，原后台claim finished、无pending wake，但父任务仍active且未创建孩子第二attempt。
+这是实际授权接续未完成，不能因所有当前attempt结束或没有锁而记为任务通过；也不能用模型“启动中”证明执行器仍活着。
+原账已私下归档，独立owner只读定位排队与收尾交错；未人工改状态或重发业务请求，尚未修复，不进入第8步。
 
 ## 第 7 步真实孩子失败及父级接手 TUI207—209
 
