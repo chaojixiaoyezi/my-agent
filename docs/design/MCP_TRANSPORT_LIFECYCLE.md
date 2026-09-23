@@ -60,10 +60,25 @@ launcher 与独立 host 从可信 root/owner/scope 还原同一安装表，不�
 initialize、initialized 和 tools/list 允许同代 preparing；业务调用只接受 active，普通未知方法不能借准备状态执行。
 原代理冻结发现 transport，重连后需发布新代理，旧 Schema 不会自动指向新连接。
 固定连接选择、请求/写队列中未创建 writer 的拒绝只结束本次调用，以结构化 `effect_outcome=not_started` 进入原操作账。
-writer 已启动则可能收到部分帧，错误继续 UNKNOWN；不能按错误码或文案把所有取消/超时都认作未执行。
+writer 已启动后未取得有效完整响应，可能收到部分帧，错误继续 UNKNOWN；不能按错误码或文案把所有取消/超时都认作未执行。
 目录发布前复查 active，但内存目录仍是投影，真正执行必须再次准入；静态 tools/list 匹配已本地组合，完整装卸和实际多 TUI 尚未验收。
 
 ## 参考与验收
+
+### 完整工具失败与未知结果（本地修复，待发布验收）
+
+实际 TUI158 的链接读取留下 `effect_outcome_unknown:TOOL_EXECUTION_FAILED`，原账未保存业务正文，
+因此不能据此断言现场已经返回某个具体路径错误。确定性组件验证另行复现：完整合法的
+`CallToolResult.isError=true` 未设置执行结局，被原协调器改记 UNKNOWN，错误正文不可读且逻辑资源锁未释放。
+代理现将这种完整响应标记 `effect_outcome=failed`，由原操作账保存失败结果、释放锁并支持只读重放。
+这证明本次调用已明确返回失败，不证明零副作用或外部变更已回滚，不自动重放同一请求，也不回写旧 UNKNOWN。
+超时、断连、非法响应、代理异常和清理未知沿原路径保持；发送前的明确拒绝仍为 `not_started`。
+
+参考 [MCP 工具错误协议](https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/docs/specification/2025-11-25/server/tools.mdx)：
+工具执行错误作为结果交回调用方，供其理解失败；与未取得结果的传输问题分开。
+本地 Codex 同版本 `core/src/tools/handlers/mcp_resource.rs` 也按 `is_error` 区分工具失败与传输异常；
+只参考协议边界，未复制实现，未执行参考项目测试。
+回归见 `test_mcp_operation_outcomes.py`：原执行器、临时 RuntimeDB、同请求重放、后续独立操作及未知对照。
 
 核对本地 Codex 源码版本 `578c1b2230288104041e880a86d0f7f3a5ca6e47`：
 `rmcp-client/src/rmcp_client.rs` 的 shutdown 先设置 Closed，再独立清理；

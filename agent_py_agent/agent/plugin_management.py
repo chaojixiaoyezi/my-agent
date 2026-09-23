@@ -1,5 +1,5 @@
-# LLM: 命令分路只消费宿主已认证身份、当前权限与原线程 Store；管理和业务复用原宿主运行及工具执行链。
-# 模块用途: 组合插件目录、装卸管理、明确工具调用与原请求查询，不初始化完整 Agent 或借用聊天回合。
+# LLM: 命令分路只消费宿主身份、权限与原线程 Store；业务和收尾状态分别投影，联测原宿主运行及重复查询。
+# 模块用途: 组合插件目录、装卸、调用和原请求查询，不借用聊天回合，也不把业务结果当作资源已释放。
 
 from __future__ import annotations
 
@@ -106,8 +106,8 @@ def plugin_management_context(
                                    approval_mode=approval_mode)
 
 
-# LLM: 一个 owner 只有一个安装事实 Store 和原 runtime.db；实例本身无后台任务、可变注册表或业务历史。
-# 类用途: 承接插件管理和业务命令，安装默认停用，调用遵守原审批，撤销清理精确资源，查询只读原结果。
+# LLM: owner 只有原安装 Store/runtime.db；实例不建后台任务或业务历史，结果投影须保留 finalization_pending。
+# 类用途: 承接管理和业务命令，安装默认停用、调用遵守审批、撤销精确资源，查询区分业务结束与运行收尾。
 class PluginManagement:
     # LLM: 构造不创建目录或线程；管理写入检查管理员，业务另检查工具策略，均须遵守插件开关。
     # 函数用途: 保存这次已鉴权入口的必要依赖。
@@ -385,8 +385,8 @@ class PluginManagement:
                 PLUGIN_ENABLE_TOOL: self.context.enable_allowed,
                 PLUGIN_REMOVE_TOOL: self.context.remove_allowed}.get(tool_name, False)
 
-    # LLM: 展示只读原结构化结果；业务正文仅展示，不能改变状态；目录刷新或清理失败不能抹掉原操作。
-    # 函数用途: 展示管理或调用结果、未确认清理和原查询编号，供 TUI/HTTP 使用。
+    # LLM: 展示只读原结果；finalization_pending 优先于业务完成文案，正文不改变状态；联测调用收尾与重复查询。
+    # 函数用途: 分开展示业务结果与运行收尾，避免连接尚在释放时提示整个命令已完成。
     def _reply(self, payload: dict, request_id: str = "") -> dict:
         payload = dict(payload)
         envelope = payload.pop("result", {})
@@ -421,14 +421,14 @@ class PluginManagement:
             message = "插件已停用并释放，可以再次启用。"
         if payload.get("cleanup_consumption", {}).get("state") == "pending":
             message += "资源或包回收尚未确认；重送原请求可继续收尾。"
-        if state in {"succeeded", "failed", "cancelled"} and payload.get("finalization_pending"):
-            message = "插件管理操作已有结果，运行收尾尚未确认。"
         if business:
             message = {"succeeded": "插件调用已完成。", "failed": "插件调用失败，请核对原结果。",
                        "approval_required": "插件调用需要审批，尚未执行。",
                        "outcome_unknown": "插件调用结果尚未确认，请查询原请求。"}.get(state, message)
             if payload.get("output"):
                 message += "\n" + payload["output"]
+        if state in {"succeeded", "failed", "cancelled"} and payload.get("finalization_pending"):
+            message = "插件调用已有结果，连接收尾尚未确认。" if business else "插件管理操作已有结果，运行收尾尚未确认。"
         if payload.get("connection_cleanup", {}).get("confirmed") is False:
             message += "\n本次插件连接退出尚未确认；原调用结果保持，请核对资源。"
         result.setdefault("message", explanations.get(payload.get("error_code"), message))

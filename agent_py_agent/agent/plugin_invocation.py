@@ -1,5 +1,5 @@
-# LLM: 显式业务命令只组合原 HostCommand、MCP 和 ToolExecutor；固定安装/目录/参数，不能重选版本或绕过审批。
-# 模块用途: 将一个已解析的插件动作接到普通工具执行链，结束后只关闭本次建立的连接。
+# LLM: 显式业务命令组合原 HostCommand/MCP/ToolExecutor；本次连接释放归原执行区间，联测拒绝、重复与收尾，不换绑版本。
+# 模块用途: 将插件动作接到普通工具执行链，在原运行收口前关闭本次连接，业务与清理结果分别保留。
 
 from __future__ import annotations
 
@@ -43,8 +43,8 @@ def plugin_invocation_context(context: PluginManagementContext, text: str, revis
     return tool_arguments_hash(values).removeprefix("sha256:")
 
 
-# LLM: select 只在原 pending 真正获得执行权后调用；重放不读新目录、不启动服务，取消只关闭本调用的 MCP。
-# 函数用途: 等待原审批并调用固定工具，业务结果和连接清理结果分开返回。
+# LLM: select/释放仅归原 pending 获得者；释放调用返回前不发布运行终态，清理未知独立保留，重放不启动或清理服务。
+# 函数用途: 等待原审批并调用固定工具，在同一执行区间释放连接，分别返回业务及清理结果。
 def execute_plugin_invocation(
     context: PluginManagementContext, repo: RuntimeRepository, request: HostCommandRequest,
     select: Callable[[], PluginInvocation], *, request_permission: Callable | None = None,
@@ -73,14 +73,17 @@ def execute_plugin_invocation(
             tool = next(tool for tool in tools if tool.model_spec.name == request.command_name)
             return _prepare_invocation(context, binding, selected.arguments, tool, token)
 
-        try:
-            result = execute_host_command(repo, request, prepare, request_permission=request_permission)
-        finally:
+        # LLM: 原宿主执行作用域调用一次；清理未知留在原资源账，不篡改已持久化的业务结果。
+        # 函数用途: 在 executor 退出前关闭本次连接，并保存独立清理回执。
+        def release_execution():
+            nonlocal cleanup
             if client is not None:
                 try:
                     cleanup = {"confirmed": client.stop().confirmed}
                 except Exception:  # noqa: BLE001 原资源账保留清理未知，不能改写业务结果或泄露异常正文
                     cleanup = {"confirmed": False}
+        result = execute_host_command(repo, request, prepare, request_permission=request_permission,
+                                      release_execution=release_execution)
     return {**result, "connection_cleanup": cleanup} if cleanup is not None else result
 
 

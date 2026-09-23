@@ -1,6 +1,12 @@
 # 设计台账
 
-通用启动观察竞态修复已本地实现，383 项相关回归通过，尚待发布和新 TUI 验收：观察 host 退出后复读同一 session 的权威终态，保持原交接事务、身份、取消及退出码裁决。详见[托管进程合同](docs/design/MANAGED_PROCESS_STDIO.md#生命周期与通道)。
+重复启用的空资源声明已本地修复：无新环境计划时不声明候选资源，使原 unchanged／缺失拒绝路径真正可达；不更改激活状态机。见 [激活权威](docs/design/PLUGIN_ACTIVATION.md)，待发布真实复验。
+
+显式插件连接收尾已本地移入原 HostCommand 执行区间，释放调用结束后才登记 executor 退出与运行终态；未启动拒绝同样延后，重送只读。详见 [宿主操作与结果](docs/design/HOST_COMMAND_EXECUTION.md#操作与结果)。状态：相关验证中，未发布，不等于所有清理均成功。
+
+MCP 完整失败回执结算已本地修复、待发布验收：合法 `isError=true` 沿原操作账记失败，保留正文、释放逻辑锁；不表示零副作用，不重写历史 UNKNOWN。传输未知仍保留，详见 [连接与结果边界](docs/design/MCP_TRANSPORT_LIFECYCLE.md#完整工具失败与未知结果本地修复待发布验收)。
+
+通用启动观察竞态修复已发布部署，383 项相关回归通过，新 TUI158／161 已实际启用复验：观察 host 退出后复读同一 session 的权威终态，保持原交接事务、身份、取消及退出码裁决。详见[托管进程合同](docs/design/MANAGED_PROCESS_STDIO.md#生命周期与通道)。
 
 发布前边界修正已本地实现：进程内取消令牌从 tooling 迁入 common，保留唯一类型与上下文，不新增兼容入口或持久状态。详见[宿主命令边界](docs/design/HOST_COMMAND_EXECUTION.md#解决问题)，完整发布验收仍待通过。
 

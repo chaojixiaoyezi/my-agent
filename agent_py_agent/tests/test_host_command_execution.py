@@ -64,6 +64,23 @@ def test_preparation_failure_records_unstarted_and_releases_execution_lock(tmp_p
         assert conn.execute("SELECT count(*) FROM resource_locks").fetchone()[0] == 0
 
 
+def test_preparation_failure_releases_owned_resources_before_rejection(tmp_path):
+    repo, request, tool, _prepare = case(tmp_path)
+    released = []
+
+    def release():
+        assert execution.query_host_command(repo, request)["state"] == "running"
+        released.append(True)
+
+    def prepare(binding):
+        raise ValueError("准备中途失败")
+
+    first = execution.execute_host_command(repo, request, prepare, release_execution=release)
+    assert first["state"] == "rejected" and not first["finalization_pending"]
+    replay = execution.execute_host_command(repo, request, prepare, release_execution=release)
+    assert replay["state"] == "rejected" and released == [True] and tool.calls == 0
+
+
 def test_concurrent_duplicate_and_query_observe_live_execution_without_reentering(tmp_path, monkeypatch):
     repo, request, tool, prepare = case(tmp_path)
     entered, release = threading.Event(), threading.Event()
