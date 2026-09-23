@@ -5,6 +5,25 @@
 
 ## 1. 解决的问题
 
+### 唤醒配对发布的半写恢复（第 7 步，待实现）
+
+已从原文件写入链复现：wake 已落盘、dedupe 回执原子替换失败时，closeout 恢复发布第二条 wake；
+原 wake 尚 pending 和已经 handled 两种窗口均失败。本缺口早于第 7 步迁移，正常 TUI 成功不抵消它。
+
+拟沿原 dedupe 记录先冻结本次 signal／observation 的完整负载和身份，再安装原队列与观察账，
+最后确认发布完成；恢复只补齐同一发布，不重新执行子代理业务，也不引入第二个队列。
+观察追加必须按固定 ID 幂等；已发生或不明的配对发布不得转成随机无链 observation。
+回执查询保持只读，部分发布不能被当成已完整交付。通用调用仍合并 pending、handled 后可开始新一代，
+精确完成通知用显式保留 handled 的通用策略，在同一锁内裁决，禁止按 reason 文本特判。
+
+参考范围：本仓 store_guidance_submission 的先冻结提交再安装投影；Hermes 的
+gateway/delivery_ledger.py 固定 obligation ID 和事务；OpenClaw 的
+src/infra/delivery-queue-sqlite.ts 显式 completion retention。只借一致性思路，
+不迁移 SQLite、不依赖进程工具的专用 redo schema。manager 透传的依赖收窄仍是独立未完成项。
+
+验收包括信号安装前后、观察追加前后、发布完成标记失败、期间被消费、同键下一代和精确通知重放；
+同时核对 wake 数量、观察 ID、完整负载及双向引用。先合同回归，再按版本做原生 TUI 验收。
+
 历史实现在模型自然最终回复之后，还会经过交付扫描、产物清单、
 `acceptance_checks`、`verification_status` 和子代理结果格式二次裁决。同一任务
 因此同时存在“模型已结束”和“机器还没验收”两套结论，导致：

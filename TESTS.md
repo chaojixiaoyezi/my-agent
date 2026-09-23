@@ -2,6 +2,11 @@
 
 ## 第 7 步子代理结果链发布与验收
 
+最新未修复项：`test_closeout_wake_receipt_half_write_does_not_duplicate` 两个参数用例
+在真实文件原子替换位置注入一次回执写失败，分别覆盖原 wake 尚 pending／已经 handled；
+当前均确定性得到 2 条通知而非 1 条。属于故障回归红灯，不是验收通过，不得将当前工作区推送发布。
+原已部署包不受本地测试文件修改影响；修复和完整依赖收窄仍属第 7 步。
+
 独立工作树已拆出 runner 状态展示、完成交接信封、exact attempt 准入与
 “结果先落盘、再 WAL、再运行账、最后父通知”的初次提交编排；旧函数和导出已删除。
 上述源码现已应用到原 checkout，与并行的 TUI／历史修复同源运行定向回归；
@@ -34,13 +39,27 @@ Ruff、doc sync、strict code-size、diff、clean-package 通过。
 隔离线交接见 [第 7 步交接](docs/tasks/HANDOFF_STEP7_SUBAGENT_LIFECYCLE.md)，
 正式验收矩阵见 [唯一 TODO](docs/tasks/REFACTOR_PLUGIN_GOAL.md#第-7-步当前-todo子代理状态和交接按序小片推进)。
 
-### 准入依赖收窄（本地候选，未部署）
+### 准入依赖收窄（测试机已部署，本机与远端待同步）
 
 结果准入与终态冲突诊断只需要原 RuntimeDB，现改为显式接收该依赖，不再传入整个 manager。
 结果服务在原调用位置取出依赖；canonical task、exact attempt 裁决、None 文件模式和写诊断边界不变。
 两个直接受影响测试文件通过，覆盖原冲突诊断、旧轮拒绝、一致终态重入和持久恢复。
 Ruff、导入边界、doc sync、strict code-size、diff 和 clean-package 均通过，未运行全仓 pytest。
-这片代码未进入双机候选安装包，不能用 TUI195—197 的已启动任务证明它通过真实验收。
+该片以 `8ca9889aa` 本地提交，发布前重新通过上述严格 gate；构建源码为 `3b5f9943e`，
+wheel SHA-256 为 `c751ee272dc66193d957c1a7802f16b8b00e6caadfdb0d37bbb64c21e1e2db90`。
+仓库的 distribution boundary 四类结果全为 0。临时自写的宽泛路径检查曾把合法内置素材和非发布脚本
+误计为禁入／漏带，随后改用仓库已有发布合同核对，没有因此修改包或放宽发布规则。
+测试机已逐项核对 1,273 个文件，保留旧运行环境和入口回滚副本后正常切换唯一 Gateway 及默认命令。
+切换前同时保存 HTTP pending／processing 为 0 和 RuntimeDB attempt 快照：本日没有未结束的执行轮；
+旧历史未结算行单列保存，没有擅自改写为终态。原 Gateway 退出、端口释放后才启动新版。
+本机原 Gateway 仍有活动后台 attempt，未切换；GitHub 连接失败，最新提交尚未推送，不把本地 gate 视为线上 CI。
+
+TUI199／200 从新版默认入口分别发起父子孙文件清单项目和三孩子并行的 Python 十六进制查看器项目。
+每个任务只提交一次业务需求；199 另在明确等待孩子时插入一次进度询问，以验收等待时插话。
+两条 canonical thread 绑定同一已核对的官方 MiniMax-M2.7 配置，后端为 anthropic_compatible，
+服务商地址为 `https://api.minimaxi.com/anthropic`，且已有实际模型响应；未记录或公开密钥。
+证据为会话绑定、私有配置白名单与原生响应，不冒充网络抓包。任务正在运行，不能先记验收通过。
+TUI195—198 仍只覆盖前一发布包，不用于证明准入收窄片通过。
 
 ### 第 7 步首组真实 TUI（基础交接已核对，完整矩阵未收口）
 

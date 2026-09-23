@@ -1778,6 +1778,48 @@ def test_initial_delivery_marker_failure_keeps_pending_closeout(tmp_path: Path) 
     assert len(_wakes_for_attempt(tmp_path, task.id, attempt_id)) == 1
 
 
+# LLM: 使用真实队列及原子替换故障，验证已发布信号而回执未保存时恢复仍认同一 attempt。
+# 函数用途: 覆盖 pending 和已被父级消费两种半写窗口，不能把恢复重发当成新通知。
+@pytest.mark.parametrize("handled_before_receipt", [False, True])
+def test_closeout_wake_receipt_half_write_does_not_duplicate(
+    tmp_path: Path, monkeypatch, handled_before_receipt: bool,
+) -> None:
+    from agent_py_agent.agent.gateway_parts import io as gateway_io
+    from agent_py_agent.agent.subagents.services import runtime_closeout
+
+    manager, store, task, attempt_id, _, params, _ = _closeout_fixture(
+        tmp_path, owner="tui-test/wake-receipt-half-write"
+    )
+    thread = store.tasks.thread_for(task.id)
+    key = f"subagent-finished:{task.id}:FAILED:{attempt_id}"
+    receipt_path = store.storage.wake_dedupe_path(thread.thread_id, key)
+    original_replace = gateway_io._replace_with_retry
+    injected = False
+
+    def fail_receipt_once(source, destination):
+        nonlocal injected
+        if destination == receipt_path and not injected:
+            injected = True
+            published = _wakes_for_attempt(tmp_path, task.id, attempt_id)
+            assert len(published) == 1
+            if handled_before_receipt:
+                signal = store.wakes.pending()[0]
+                assert store.wakes.mark_handled(signal.wake_signal_id) is not None
+            raise OSError("injected wake receipt replacement failure")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(gateway_io, "_replace_with_retry", fail_receipt_once)
+    manager.runner_result.record_runner_result(params)
+    assert injected
+    assert len(_wakes_for_attempt(tmp_path, task.id, attempt_id)) == 1
+    assert runtime_closeout.pending_closeout(manager.load(task.id)) is not None
+
+    summary = runtime_closeout.recover_pending_closeouts(manager)
+    assert summary["runtime_closeouts_recovered"] == 1
+    assert runtime_closeout.pending_closeout(manager.load(task.id)) is None
+    assert len(_wakes_for_attempt(tmp_path, task.id, attempt_id)) == 1
+
+
 # LLM: 真机缺口（104 轮注入复现）：run 状态未知/脏时，旧守卫把它当"权威冲突"直接丢弃 runner
 # 的最终结论 —— 没有 runner_result、没有待重试事实、没有父级通知，子代理永久 RUNNING。
 # 未知状态不是权威终态事实：结论必须照常落账并留下可诊断的待重试事实（不猜成功、不覆盖未知行），
