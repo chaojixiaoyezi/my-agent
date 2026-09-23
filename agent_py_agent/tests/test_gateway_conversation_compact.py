@@ -961,7 +961,7 @@ def test_invalid_summary_candidate_never_advances_cursor_and_opens_circuit(tmp_p
         assert thread is not None
         with pytest.raises(
             ConversationCompactError,
-            match="did not fall below the configured trigger",
+            match="did not fit the input trigger and known output reserve",
         ):
             prepare_conversation_context(
                 agent,
@@ -1060,6 +1060,60 @@ def test_transcript_compact_keeps_valid_candidate_below_trigger_when_target_is_u
     assert stored is not None and stored.compact_generation == 1
     assert stored.compact_consecutive_failures == 0
     assert backend.calls == 1
+
+
+@pytest.mark.parametrize("output_cap,candidate_tokens,explicit,oauth,force,accepted", [
+    (4_000, 5_999, True, False, False, True),
+    (4_000, 6_000, True, False, True, False),
+    (4_000, 7_000, True, False, True, False),
+    (2_000, 7_500, True, False, True, True),
+    (2_000, 8_000, True, False, True, False),
+    (10_000, 0, True, False, True, False),
+    (0, 8_500, True, False, True, True),
+    (4_000, 8_500, False, False, True, True),
+    (4_000, 8_500, True, True, True, True),
+    (0, 9_000, True, False, True, False),
+])
+def test_transcript_candidate_respects_output_reserve_before_target_or_fallback(
+    tmp_path, monkeypatch, output_cap, candidate_tokens, explicit, oauth, force, accepted,
+) -> None:
+    from agent_py_agent.agent.backends.base import BackendOptions
+    from agent_py_agent.agent.backends.http import HttpBackend
+    from agent_py_agent.agent.backends.responses import OpenAIResponsesBackend
+    from agent_py_agent.agent.conversation import compact as module
+
+    agent = _agent(tmp_path, context_tokens=10_000)
+    agent.config.model_context_window_explicit = explicit
+    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.config.memory_compact_recovery_target_percent = 60
+    backend_type = OpenAIResponsesBackend if oauth else HttpBackend
+    agent.backend = backend_type(BackendOptions(api_base="https://example.invalid", api_key="fake-key",
+        model_name="test-model", context_window_tokens=10_000, max_tokens=output_cap))
+    if oauth:
+        agent.backend.auth_ref = {"mode": "chatgpt"}
+    store = agent.conversation_store
+    thread = store.threads.get_or_create({"channel": "chat", "channel_conversation_id": "capacity"})
+    for role in ("user", "assistant"):
+        store.messages.append({"thread_id": thread.thread_id, "role": role, "content": "完整旧轮次",
+            "metadata": {"conversation_request_id": "prior-turn"}})
+    # 这里只隔离测量值和摘要供应商；候选分区、接受判断、checkpoint/CAS及失败记账均走生产链。
+    monkeypatch.setattr(module, "_summarize", lambda *args, **kwargs: "新摘要")
+    monkeypatch.setattr(module, "_projected_context_tokens", lambda _agent, summary, *args, **kwargs:
+                        candidate_tokens if summary else 8_500)
+    options = ConversationCompactOptions(current_prompt="继续完整任务", force=force)
+    if accepted:
+        result = prepare_conversation_context(agent, store, thread, options=options)
+        assert result.compacted and result.projected_tokens == candidate_tokens
+        assert result.trigger_tokens == 9_000
+    else:
+        with pytest.raises(ConversationCompactError) as error:
+            prepare_conversation_context(agent, store, thread, options=options)
+        assert error.value.code == "COMPACT_CANDIDATE_TOO_LARGE"
+    stored = store.threads.load(thread.thread_id)
+    assert stored.compact_generation == int(accepted)
+    if not accepted:
+        assert stored.compact_checkpoint_id == "" and stored.summary == ""
+        assert stored.compacted_through_byte_offset == 0
 
 
 def test_compact_circuit_half_opens_after_cooldown_and_success_resets_it(tmp_path) -> None:

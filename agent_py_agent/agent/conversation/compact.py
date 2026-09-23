@@ -1,5 +1,5 @@
 # LLM: 单一会话压缩链保持原文、证据、尾部、检查点和游标分离；独立请求负责结算自己的模型用量，不改普通请求收口。
-# 同片展示只经宿主传入的缓存面追加到摘要输入，不写入会话身份或扩大工具范围。
+# 同片展示只经宿主传入的缓存面追加到摘要输入；候选须同时满足输入触发线和已知输出预留，不扩大工具范围。
 # 模块用途: 在隔离的会话历史上压缩并记录真实消耗；坏摘要不得推进游标，近期完整对话仍保留原文。
 
 from __future__ import annotations
@@ -217,7 +217,7 @@ def prepare_conversation_context(
     return _execute_compact_request(prepared)
 
 
-# LLM: 预检只冻结历史与请求；无绑定请求时分配独立 operation 身份，失败后再次尝试也不能重用旧计费范围。
+# LLM: 预检冻结历史与请求，触发线和已知输出预留分别检查；无绑定请求时分配独立 operation 身份，不重用旧计费范围。
 # 函数用途: 加载历史、估算触发线并构造压缩请求，不在这里生成摘要或修改会话游标。
 def _prepare_compact_request(
     agent: SimpleAgent,
@@ -244,7 +244,7 @@ def _prepare_compact_request(
         operation_evidence=current.compact_operation_evidence,
         recent_operation_evidence=_recent_operation_evidence(pending),
     )
-    if projected < policy.trigger_tokens and not options.force:
+    if projected < _compact_request_input_ceiling(agent, policy) and not options.force:
         return ConversationCompactResult(
             thread=current,
             messages=tuple(pending),
@@ -474,10 +474,8 @@ def render_conversation_context_usage(
     return "\n".join(lines)
 
 
-# LLM: Candidate partitions share one frozen provider cache surface and are tried without state
-# mutation. The recovery target is preferred, while a candidate below the actual trigger remains a
-# valid fallback just like 会话运行时/终端交互; rejecting it would burn another summary call.
-# 函数用途: 一次冻结普通请求缓存面后依次尝试近期尾部分区，优先健康目标，否则保留低于触发线的最佳候选。
+# LLM: 候选分区共用冻结摘要面，不先改状态；恢复目标是优选，所有候选必须严格低于输入触发线与已知输出预留上界。
+# 函数用途: 依次尝试近期尾部分区，优先健康目标，否则保留仍可发送的最佳候选，避免无效提交后反复压缩。
 def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
     # LLM: A provider-pressure retry must replace the whole completed prefix once. Repeatedly
     # protecting and then re-compacting the same tail creates checkpoint churn without helping
@@ -550,10 +548,10 @@ def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
             percent=measure_percent,
             after_tokens=candidate.projected_tokens_after,
         )
+        if candidate.projected_tokens_after >= _compact_request_input_ceiling(request.agent, request.policy):
+            continue
         if candidate.projected_tokens_after <= request.policy.recovery_target_tokens:
             return _commit_compact_candidate_or_record_failure(request, candidate)
-        if candidate.projected_tokens_after >= request.policy.trigger_tokens:
-            continue
         if (
             trigger_fallback is None
             or candidate.projected_tokens_after
@@ -565,7 +563,7 @@ def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
         return _commit_compact_candidate_or_record_failure(request, trigger_fallback)
 
     error = ConversationCompactError(
-        "conversation compact candidate did not fall below the configured trigger",
+        "conversation compact candidate did not fit the input trigger and known output reserve",
         code="COMPACT_CANDIDATE_TOO_LARGE",
     )
     record_compact_failure(
@@ -575,6 +573,14 @@ def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
         now=request.attempted_at,
     )
     raise error
+
+
+# LLM: 只组合原 Compact 输入阈值与 core 唯一请求容量规则，不另配百分比、不把未来输出当已消耗 token。
+# 函数用途: 对普通触发、优选候选及保留候选使用同一接受上界；等于上界时仍交原失败/恢复链。
+def _compact_request_input_ceiling(agent: SimpleAgent, policy: RuntimeCompactPolicy) -> int:
+    from ..agent_core.model.context_pressure import model_request_input_ceiling
+
+    return min(policy.trigger_tokens, model_request_input_ceiling(agent, policy.context_window_tokens))
 
 
 # LLM: Every accepted transcript candidate reaches the same checkpoint/CAS failure bookkeeping;
@@ -598,10 +604,8 @@ def _commit_compact_candidate_or_record_failure(
         raise
 
 
-# LLM: This helper may call the model through the frozen non-executing provider surface but cannot
-# write any state. Every candidate is measured against the complete next-turn projection;
-# source coverage drives display progress, never time-based invented completion.
-# 函数用途: 按同一缓存面分段摘要并报告真实覆盖进度，再按完整下一轮输入重新计算大小。
+# LLM: 摘要可通过冻结面调用模型但不写会话；候选仍沿当前会话投影计量，完整宿主恢复输入待接入，不得把摘要缓存面当容量证明。
+# 函数用途: 分段摘要并报告真实覆盖进度，估算摘要与保留尾部后交原接受门裁决，不能提前提交游标。
 def _build_compact_candidate(
     request: _CompactRunRequest,
     compact_rows: list[MessageLogEntry],
@@ -824,10 +828,8 @@ def _without_current_request_suffix(
     return rows[:end]
 
 
-# LLM: The projection counts both the legacy prose path and the canonical native-tool path, then
-# uses the larger estimate. This prevents persisted tool calls/results from bypassing Compact
-# without charging the same turn twice when an envelope replaces its visible transcript rows.
-# 函数用途: 估算下一轮实际送入模型的摘要、原生工具历史和当前输入，用于唯一 Compact 阈值。
+# LLM: 当前投影取文字与原生会话形状的较大估算，保留工具账；未含完整宿主 memories/inject/schema，不能当换模或完整恢复容量证明。
+# 函数用途: 估算会话摘要、历史尾部和当前输入；完整恢复准备将复用原 ToolLoopRequestInput 接入，不另建 tokenizer。
 def _projected_context_tokens(
     agent: SimpleAgent,
     summary: str,

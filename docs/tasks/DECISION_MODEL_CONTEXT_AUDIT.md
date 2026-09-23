@@ -1057,3 +1057,23 @@ child 和后台宿主沿原 `RunParams` 的展示回调携带本轮选择及 eva
 后台完整 runtime、Gateway 展示 Compact、新后台12项和本地控制句柄四文件211项通过；child 新展示11项、原 Compact12项、原同 attempt Goal 续轮2项共25项通过。计量/主子采用及宿主接续三组共389项通过。这里只证明展示同轮接续与相同请求前缀/schema，仍不等于完整恢复输入计量或供应商缓存命中。
 
 建议下一步：第12项的12.1—12.3本地片已收口，接12.4完整恢复准备与12.5真实输出预留；可并行只读核对下一请求，但共享 core/Compact 由主线串行修改，不以继续添加展示载体替代完整容量验收。
+
+## 12.5 输出预留接受门（本地首片；仍依赖12.4完整计量）
+
+发现原 transcript 候选只看 recovery target/trigger：即使达到健康目标，也可能与真正请求的输出 cap 一起超过共享窗口。普通模型 preflight 已有该规则，本片直接抽出 `model_request_input_ceiling` 复用，不新增百分比、配置或 token 计数器。自动触发与候选接受共用 `min(原 trigger, window - 已知实际输出 cap)`，候选必须严格低于边界后才能按恢复目标或原保留候选提交。Context 显示仍只报输入占用和原 trigger。
+
+已知 cap 的条件仍由原实现决定：内置 HTTP、显式共享窗口和正数输出限额；OAuth Responses 实际移除输出上限、未声明窗口或未知 cap 时不猜预留。未通过的候选沿原 `COMPACT_CANDIDATE_TOO_LARGE`、失败计数和熔断链退出，不能写 checkpoint 或推进历史游标。
+
+Gateway Compact 与 runtime context pressure 两文件72项通过。新增10种受控估算矩阵覆盖：低于trigger但因输出额度触发自动Compact；候选恰好等于剩余输入边界；低于恢复目标仍不可容纳；可容纳但高于恢复目标的原保留候选；输出占满窗口；零/未知cap；非显式窗口；OAuth移除cap；原trigger边界。这里只隔离摘要响应与计量值，接受、checkpoint/CAS和失败记账走生产路径；不是供应商实际容量测量。
+
+完整 `_projected_context_tokens` 仍缺宿主恢复准备，12.4未完成，因此12.5整项暂不勾选。旧实现注释已明确收紧证据边界，不再称其为“完整下一轮输入”。
+
+建议下一步：以真实恢复后的 `ToolLoopExecuteParams` 和原冻结 `PromptRenderInput` 接12.4；`_prepare_runtime_context` 会召回并写上下文包，`_tool_loop_execute_params` 恢复归档时还可能做摘要，不能对每个候选重复调用。完整准备只能在原生命周期执行一次，候选只替换结构化历史/代次/注入，再由相同已准备请求继续发送。具体接缝须在共享core owner下串行实施。
+
+### 12.4 下一实施接缝（已核对，尚未落地）
+
+先打通 Gateway 已绑定请求的 overflow 恢复轮。它已有 `GatewayModelObservation` 的完整宿主作用域，即使模型采用关闭也存在；扩展原 render/select 时点，在原发送 IR materialize 前保存冻结 prompt 输入并进入 Compact，不放到过晚的 before_send。候选经原宿主历史投影产生预计代次的 `ConversationHistorySeed`，由原宿主 renderer 重建操作证据注入，并重算 `conversation_runtime_state_section`；其余准备沿同一次恢复参数。
+
+当前 `PromptRenderInput.injected` 已拼平，因此先保留注入的结构化位置/片段；禁止搜索自然语言正文来替换摘要。临时候选投影交原 Compact options，原 checkpoint/CAS 成功后安装获选 seed、注入和请求输入，继续本次已准备的生成，不再次退出后调用 `agent.run`。取消、CAS失败或输入/模型变化时丢弃候选，缺完整输入或自定义builder不能复用时明确unknown。此设计不改变既有持久历史权威，也不把初次加载、手动Compact或未接宿主的粗估当完整证明。
+
+首条验收应同时捕获“候选payload等于恢复后首个实际payload”、准备副作用只执行一次、CAS失败零业务发送；成功后再接child和后台。该方案尚未实施，不能计入12.4完成。

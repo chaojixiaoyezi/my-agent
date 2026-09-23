@@ -1,5 +1,11 @@
 # 测试与发布验收
 
+## 第 12 项输出预留接受门（本地首片）
+
+`test_gateway_conversation_compact.py` 与 `test_runtime_context_pressure.py` 共 **72 passed**。transcript 自动触发和候选接受现在复用普通请求的已知输出预留；先过输入容量门，再选 recovery target 或原可接受候选，Context 输入显示不加未来输出。新增10种受控估算矩阵保留原checkpoint/CAS与失败记账，覆盖等于边界、不足输出空间、原保留候选、未知cap和OAuth无cap；没有真实网络调用。完整恢复请求计量仍待12.4接入，不把此片当供应商窗口或第12项完整验收。
+
+本片 Ruff、doc sync、导入边界（0发现）、strict code-size（hard=0）、diff check、clean-package 均通过，尺寸基线未改。仅本地检查点，上一轮全仓8项短期限失败仍保持未收口；本片未重跑全仓、未推送或部署。
+
 ## 第 12 项原生输入计量共源与同轮接续（本地）
 
 `test_tool_request_projection.py`、`test_runtime_context_pressure.py`、`test_tool_model_generation.py`、`test_context_pressure_native_trigger.py`：**83 passed**。预检与发送共用 guidance/孤儿配对清扫及 ToolChoice，原本用孤立 ToolResult 撑大容量的旧夹具改为合法工具往返，并新增“出站已移除的孤立结果不触发压缩”对照。`provider_context_observation.v3` 拒绝旧 v2 校准；实际 snapshot 仍可 hydrate 校准，只有抽出的投影计量是纯函数。

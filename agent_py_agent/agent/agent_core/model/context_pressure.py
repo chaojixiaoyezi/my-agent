@@ -201,7 +201,7 @@ def preflight_context_pressure_response(request: object) -> ModelResponse | None
     if not policy.allow_persistent_apply:
         threshold = window
     output_reserve = _known_shared_window_output_reserve(getattr(request, "agent", None))
-    request_ceiling = max(0, window - output_reserve) if output_reserve else window
+    request_ceiling = model_request_input_ceiling(request.agent, window)
     if prompt_tokens < threshold and prompt_tokens < request_ceiling:
         return None
     reason = (
@@ -245,6 +245,12 @@ def _known_shared_window_output_reserve(agent: object) -> int:
     except (TypeError, ValueError):
         return 0
     return requested_output if configured_window > 0 and requested_output > 0 else 0
+
+
+# LLM: 普通生成与 transcript 候选共用已知共享窗口及实际输出 cap；未知协议不猜预留，返回值不改变 Context 的输入占用显示。
+# 函数用途: 计算本请求输入必须严格低于的容量边界，阻止压缩后仍因输出预留不足立即再次超窗。
+def model_request_input_ceiling(agent: object, context_window_tokens: int) -> int:
+    return max(0, context_window_tokens - _known_shared_window_output_reserve(agent))
 
 
 # LLM: This is the one preflight accounting path for the exact provider-visible input. Native
@@ -812,6 +818,7 @@ __all__ = [
     "model_visible_context_budget",
     "model_visible_context_snapshot",
     "model_visible_context_tokens",
+    "model_request_input_ceiling",
     "invalidate_provider_context_observation",
     "preflight_context_pressure_response",
     "record_provider_context_observation",
