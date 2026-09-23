@@ -100,7 +100,7 @@ def install_backend(monkeypatch, fixture, *, action=None, choice=None):
 def capture_main(monkeypatch):
     calls = []
 
-    def execute(context, prompt, conversation):
+    def execute(context, prompt, conversation, *, observer=None):
         calls.append((context.agent.config.model_name, context.agent.backend, prompt, conversation))
         return "original-main"
 
@@ -305,7 +305,7 @@ def test_off_matches_original_gateway_runner_input_bytes_and_io(tmp_path, monkey
         yield {"status": "running", "claim_id": "test-held-lane", "thread_id": thread_id,
                "task_id": f"gateway:{context.request_id}"}
 
-    def original_runner_input(context, prompt, conversation):
+    def original_runner_input(context, prompt, conversation, *, observer=None):
         params = request_execution._gateway_run_params(request_execution._GatewayRunParamsRequest(
             context.request, context, conversation, prompt,
         ))
@@ -375,7 +375,7 @@ def test_compact_reload_does_not_reuse_initial_observation_hook(tmp_path, monkey
     fixture = prepared(tmp_path)
     backend = install_backend(monkeypatch, fixture)
 
-    def main(context, prompt, conversation):
+    def main(context, prompt, conversation, *, observer=None):
         params = request_execution._gateway_run_params(request_execution._GatewayRunParamsRequest(
             context.request, context, conversation, prompt,
         ))

@@ -1070,10 +1070,28 @@ Gateway Compact 与 runtime context pressure 两文件72项通过。新增10种�
 
 建议下一步：以真实恢复后的 `ToolLoopExecuteParams` 和原冻结 `PromptRenderInput` 接12.4；`_prepare_runtime_context` 会召回并写上下文包，`_tool_loop_execute_params` 恢复归档时还可能做摘要，不能对每个候选重复调用。完整准备只能在原生命周期执行一次，候选只替换结构化历史/代次/注入，再由相同已准备请求继续发送。具体接缝须在共享core owner下串行实施。
 
-### 12.4 下一实施接缝（已核对，尚未落地）
+### 12.4 接缝设计（Gateway overflow已落地，其余入口未完成）
 
 先打通 Gateway 已绑定请求的 overflow 恢复轮。它已有 `GatewayModelObservation` 的完整宿主作用域，即使模型采用关闭也存在；扩展原 render/select 时点，在原发送 IR materialize 前保存冻结 prompt 输入并进入 Compact，不放到过晚的 before_send。候选经原宿主历史投影产生预计代次的 `ConversationHistorySeed`，由原宿主 renderer 重建操作证据注入，并重算 `conversation_runtime_state_section`；其余准备沿同一次恢复参数。
 
-原先 `PromptRenderInput.injected` 已拼平；现已改为冻结 `injection_fragments` 元组，`injected` 只按原 join 规则派生，不保留第二正文副本。候选可按宿主准备时已知位置替换；禁止搜索自然语言正文来替换摘要。后续临时候选投影交原 Compact options，原 checkpoint/CAS 成功后安装获选 seed、注入和请求输入，继续本次已准备的生成，不再次退出后调用 `agent.run`。取消、CAS失败或输入/模型变化时丢弃候选，缺完整输入或自定义builder不能复用时明确unknown。此设计不改变既有持久历史权威，也不把初次加载、手动Compact或未接宿主的粗估当完整证明。
+原先 `PromptRenderInput.injected` 已拼平；现已改为冻结 `injection_fragments` 元组，`injected` 只按原 join 规则派生，不保留第二正文副本。候选按宿主准备时已知位置替换，禁止搜索自然语言正文。Gateway临时候选投影已交原 Compact options，原 checkpoint/CAS 成功后安装获选 seed、注入和请求输入，继续本次已准备的生成，不再次退出后调用 `agent.run`。取消、CAS失败或输入/模型变化时丢弃候选，缺完整输入或自定义builder不能复用时明确unknown。此设计不改变既有持久历史权威，也不把初次加载、手动Compact或未接宿主的粗估当完整证明。
 
-首条验收应同时捕获“候选payload等于恢复后首个实际payload”、准备副作用只执行一次、CAS失败零业务发送；成功后再接child和后台。注入片段前置结构已验证重复文字、空片段、内嵌标题及调用方后续修改不影响冻结值；替换后原生稳定前缀保持。其余宿主接线尚未实施，不能计入12.4完成。
+首条验收同时捕获“候选payload等于恢复后首个实际payload”、准备副作用只执行一次、CAS失败零业务发送；Gateway证据见下节，再接child和后台。注入片段保留重复文字、空片段及内嵌标题，调用方后续修改不影响冻结值；替换后原生稳定前缀保持。其余宿主接线尚未实施，不能计入12.4整项完成。
+
+### Gateway overflow完整恢复请求（本地实现与验证）
+
+解决问题：旧transcript接受门仅估算摘要和历史，可能提交一个实际恢复请求仍放不下的候选；简单重跑准备又会重复记忆召回、推荐、上下文包写入和归档摘要。
+
+- `load_conversation_compact_source`复用原canonical未压缩行及当前未完成后缀排除。`GatewayConversationLoadRequest.defer_compact`是内部只读来源开关，跳过摘要/提交，保留repair、索引、历史作用域及工作区准备；`force_compact=False`继续表示原自动判断，不能当只加载。
+- 有来源时在原`GatewayModelObservation.render/select`中冻结恢复请求，复用原`ToolLoopRequestInput`、IR转换、ToolChoice、计量及provider builder；候选不重复调用整轮准备、召回、推荐、Goal或文件读取。摘要缓存面也从此次已准备材料派生，不再另行准备Registry/提示。
+- 只替换候选摘要/历史、操作证据、首次checkpoint应有的canonical引用、预计代次及运行事实。注入索引来自Gateway原组装顺序；context bundle插在完整原注入之后，因此不改变会话段位置。用户相同文本不参与定位。
+- 每个候选携带自己的临时请求材料；原checkpoint/CAS成功后才安装，并由同次工具循环继续生成。保留候选回退取回该候选的材料，不取最后一次回调结果。后续工具轮仍沿已更新的params；外层最终持久化和再次overflow读取新的conversation。
+- 无transcript来源时先走原active-turn archive Compact/CAS，再准备下一次运行；实际工具账仍完整用于去重，已覆盖工具往返不再重放。没有第二Compact账、模型目录或持久恢复计划。
+- 停止复用原线程中断与run-owned token检查；成功后在恢复业务发送前发布原typed Compact boundary。CAS冲突、取消、未知投影不安装候选；摘要瞬时错误/首事件超时包装为Compact错误，不进入普通业务重试。已领取但未提交的恢复再次进入也拒绝发送旧请求。
+- 当前真实运行仅支持`native`工具协议（`select_tool_protocol`明确拒绝text），本片沿该事实，不重新开放已移除协议。原生Anthropic与OpenAI出站、工具开/关及自动选模的逐字对照通过；这证明材料一致，不证明供应商tokenizer或真实缓存命中。
+
+验收路径保留原Gateway车道、真实SimpleAgent准备、原store/checkpoint/CAS、实际`read_file`和provider builder；HTTP为内存替身。恢复首轮与第二工具轮、无历史活动回合回退、坏原文、候选回退及失败不发送均有定向证据，准确数量见TESTS。
+
+边界：初次普通加载与手动Compact仍走原估算；child、后台完整恢复请求尚未接入。若准备中的deferred工具先触发live Compact并推进代次，原CAS会拒绝旧来源，不覆盖新状态；该组合尚未单独验收。未提交的自动模型采用与延迟Compact并存时明确拒绝，尚未实现自动撤销后恢复。12.4整体保持未完成，未部署或使用真实供应商。
+
+建议下一步：先把共享完整投影接至child/后台并补上述代次/采用组合，再做跨窗口、真实缓存和已安装TUI验收；共享生命周期由主线串行修改，可并行只读评审或独立测试文件。

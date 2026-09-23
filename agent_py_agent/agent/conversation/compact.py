@@ -1,5 +1,6 @@
 # LLM: 单一会话压缩链保持原文、证据、尾部、检查点和游标分离；独立请求负责结算自己的模型用量，不改普通请求收口。
-# 同片展示只经宿主传入的缓存面追加到摘要输入；候选须同时满足输入触发线和已知输出预留，不扩大工具范围。
+# 同片展示只经宿主冻结面进入摘要；完整恢复projector（若提供）是候选计量来源，其材料仅在原CAS成功后返回。
+# 候选须同时满足输入触发线和已知输出预留，不扩大工具范围。
 # 模块用途: 在隔离的会话历史上压缩并记录真实消耗；坏摘要不得推进游标，近期完整对话仍保留原文。
 
 from __future__ import annotations
@@ -8,7 +9,7 @@ import json
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from ..memory_archive import estimate_tokens
@@ -28,6 +29,13 @@ from .compact_progress import (
     COMPACT_AUTHORITY_CONVERSATION,
     COMPACT_SOURCE_TRANSCRIPT,
     CONVERSATION_COMPACT_PROGRESS_SCHEMA,
+)
+from .compact_projection import (
+    CompactRequestProjector,
+    ConversationCompactProjection,
+    ConversationCompactSource,
+    ConversationCompactView,
+    project_compact_request,
 )
 from .compact_provider_surface import (
     ConversationCompactModelSurface,
@@ -85,8 +93,8 @@ class ConversationScope:
     channel_user_id: str
 
 
-# LLM: Result returns the one live thread plus only the uncompacted raw tail.
-# 类用途: 把压缩后的 thread、近期原文和 token 口径交给 Gateway 拼下一轮上下文。
+# LLM: 返回原CAS确认的thread与原文尾部；request_projection只在提交成功时携带获选内存材料，不进入持久历史。
+# 类用途: 将压缩结果与对应完整请求交回宿主；宿主可沿原准备继续发送，不误用最后一个未采用候选。
 @dataclass(frozen=True)
 class ConversationCompactResult:
     thread: ConversationThread
@@ -95,6 +103,7 @@ class ConversationCompactResult:
     trigger_tokens: int
     compacted: bool = False
     recent_operation_evidence: dict[str, object] | None = None
+    request_projection: ConversationCompactProjection | None = field(default=None, repr=False)
 
 
 # LLM: This read-only projection must use the exact token estimator and compact policy used by
@@ -115,9 +124,8 @@ class ConversationContextUsage:
     has_summary: bool
 
 
-# LLM: Callers pass one immutable option object so compact authority, interruption hooks, and the
-# cache-critical ordinary-turn model surface cannot drift across foreground/manual/child entrypoints.
-# 类用途: 统一携带一次对话压缩的当前输入、强制模式、进度回调、中断检查和结构化模型缓存面。
+# LLM: 内部宿主可复用原只读来源、完整请求projector和已准备摘要面；其它入口保持原model_surface准备，不从JSON获取回调或权限。
+# 类用途: 统一压缩输入、停止检查与缓存面；完整请求准备不在候选间重复，未知投影不能改走粗估。
 @dataclass(frozen=True)
 class ConversationCompactOptions:
     current_prompt: str = ""
@@ -127,10 +135,13 @@ class ConversationCompactOptions:
     progress_callback: Callable[[dict[str, object]], object] | None = None
     interrupt_check: CompactInterruptCheck | None = None
     model_surface: ConversationCompactModelSurface | None = None
+    source: ConversationCompactSource | None = field(default=None, repr=False)
+    request_projector: CompactRequestProjector | None = field(default=None, repr=False)
+    provider_surface: ConversationCompactProviderSurface | None = field(default=None, repr=False)
 
 
-# LLM: 不可变请求绑定压缩权限与状态；standalone_usage 表示未绑定普通工作片的独立计费范围，不得靠提示文字判断。
-# 类用途: 将压缩的会话、历史、策略、中断检查和用量归属打包，供生成候选、提交与收口共用。
+# LLM: 不可变请求绑定原状态、完整投影及已准备摘要面；standalone_usage表示原独立用量范围，不得靠提示文字判断。
+# 类用途: 将会话、历史、策略和宿主准备引用交给候选及原提交链，不建立第二历史来源。
 @dataclass(frozen=True)
 class _CompactRunRequest:
     agent: SimpleAgent
@@ -151,10 +162,12 @@ class _CompactRunRequest:
     progress_callback: Callable[[dict[str, object]], object] | None = None
     interrupt_check: CompactInterruptCheck | None = None
     model_surface: ConversationCompactModelSurface | None = None
+    request_projector: CompactRequestProjector | None = field(default=None, repr=False)
+    provider_surface: ConversationCompactProviderSurface | None = field(default=None, repr=False)
 
 
-# LLM: A candidate is still non-authoritative until its checkpoint id is written and referenced.
-# 类用途: 保存一个已经生成并量过大小、但尚未推进 thread 游标的摘要候选。
+# LLM: 摘要和request_projection属于同一候选；原checkpoint/CAS前均非权威，保留候选回退时必须同时保留材料。
+# 类用途: 保存已生成、已计量但未提交的摘要及其完整恢复请求，不反写活参数。
 @dataclass(frozen=True)
 class _CompactCandidate:
     summary: str
@@ -162,6 +175,7 @@ class _CompactCandidate:
     compact_rows: tuple[MessageLogEntry, ...]
     retained_tail: tuple[MessageLogEntry, ...]
     projected_tokens_after: int
+    request_projection: ConversationCompactProjection | None = field(default=None, repr=False)
 
 
 # LLM: Auxiliary-call identity and cache material travel as one immutable value so new entrypoints
@@ -199,10 +213,8 @@ def conversation_scope(
     )
 
 
-# LLM: Generate and validate a candidate before writing its checkpoint and atomically advancing
-# the live thread pointer. A typed interrupt supersedes the candidate without recording a provider
-# failure or advancing the cursor; at most one generation can commit per invocation.
-# 函数用途: 加载未压缩历史并生成候选；若收到中断就保留原游标，否则验证后一次提交。
+# LLM: 使用原只读来源或本次加载的来源生成候选；typed取消不记供应商失败，完整材料仅随原checkpoint/CAS成功交回。
+# 函数用途: 计量并一次提交会话摘要，保留原游标及失败边界；不替宿主再次准备恢复请求。
 def prepare_conversation_context(
     agent: SimpleAgent,
     store: ConversationStore,
@@ -217,7 +229,18 @@ def prepare_conversation_context(
     return _execute_compact_request(prepared)
 
 
-# LLM: 预检冻结历史与请求，触发线和已知输出预留分别检查；无绑定请求时分配独立 operation 身份，不重用旧计费范围。
+# LLM: 原来源读取只排除当前未完成输入；读取失败原样传播，不能降级为空或从展示窗口重建来源。
+# 函数用途: 只读加载 canonical 未压缩历史和策略，不调用摘要、不写检查点、不估造完整请求大小。
+def load_conversation_compact_source(
+    agent: SimpleAgent, store: ConversationStore, thread: ConversationThread, *, exclude_request_id: str = "",
+) -> ConversationCompactSource:
+    from ..agent_core.runtime.context_compactor import runtime_compact_policy
+
+    pending = _without_current_request_suffix(_uncompacted_conversation_rows(store, thread), exclude_request_id)
+    return ConversationCompactSource(thread, tuple(pending), runtime_compact_policy(agent), dict(_recent_operation_evidence(pending) or {}))
+
+
+# LLM: 预检复用原来源与宿主完整投影（若提供），触发线和已知输出预留分别检查；独立请求不重用旧计费范围。
 # 函数用途: 加载历史、估算触发线并构造压缩请求，不在这里生成摘要或修改会话游标。
 def _prepare_compact_request(
     agent: SimpleAgent,
@@ -225,18 +248,24 @@ def _prepare_compact_request(
     thread: ConversationThread,
     options: ConversationCompactOptions,
 ) -> ConversationCompactResult | _CompactRunRequest:
-    from ..agent_core.runtime.context_compactor import runtime_compact_policy
-
-    pending = _uncompacted_conversation_rows(store, thread)
+    source = options.source or load_conversation_compact_source(
+        agent, store, thread, exclude_request_id=options.exclude_request_id,
+    )
+    if source.thread.thread_id != thread.thread_id or source.thread.compact_generation != thread.compact_generation:
+        raise ConversationCompactError("Compact source changed", code="COMPACT_SOURCE_CHANGED")
     # A gateway retry happens after the current user message was durably appended.
     # It is already represented by ``current_prompt`` and must remain outside the
     # prefix being summarized, exactly like 会话运行时 keeps the active turn input while
     # replacing older history with one compact item.
-    pending = _without_current_request_suffix(pending, options.exclude_request_id)
-    policy = runtime_compact_policy(agent)
+    pending = list(source.messages)
+    policy = source.policy
     current = thread
     attempted_at = time.time()
-    projected = _projected_context_tokens(
+    initial_projection = project_compact_request(options.request_projector, ConversationCompactView(
+        thread.thread_id, thread.compact_generation, thread.summary, source.messages,
+        thread.compact_operation_evidence, source.recent_operation_evidence, policy.trigger_tokens, False,
+    ))
+    projected = initial_projection.projected_tokens if initial_projection is not None else _projected_context_tokens(
         agent,
         current.summary,
         pending,
@@ -310,6 +339,8 @@ def _prepare_compact_request(
         progress_callback=options.progress_callback,
         interrupt_check=options.interrupt_check,
         model_surface=options.model_surface,
+        request_projector=options.request_projector,
+        provider_surface=options.provider_surface,
     )
     return request
 
@@ -474,7 +505,7 @@ def render_conversation_context_usage(
     return "\n".join(lines)
 
 
-# LLM: 候选分区共用冻结摘要面，不先改状态；恢复目标是优选，所有候选必须严格低于输入触发线与已知输出预留上界。
+# LLM: 候选分区共用宿主已准备的摘要面或原一次准备结果，不先改状态；完整投影与其材料一同保留，接受门不变。
 # 函数用途: 依次尝试近期尾部分区，优先健康目标，否则保留仍可发送的最佳候选，避免无效提交后反复压缩。
 def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
     # LLM: A provider-pressure retry must replace the whole completed prefix once. Repeatedly
@@ -492,8 +523,8 @@ def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
     )
     partition_count = max(1, len(partitions))
     trigger_fallback: _CompactCandidate | None = None
-    provider_surface: ConversationCompactProviderSurface | None = None
-    if request.model_surface is not None:
+    provider_surface = request.provider_surface
+    if provider_surface is None and request.model_surface is not None:
         try:
             provider_surface = prepare_conversation_compact_provider_surface(
                 request.agent,
@@ -604,8 +635,8 @@ def _commit_compact_candidate_or_record_failure(
         raise
 
 
-# LLM: 摘要可通过冻结面调用模型但不写会话；候选仍沿当前会话投影计量，完整宿主恢复输入待接入，不得把摘要缓存面当容量证明。
-# 函数用途: 分段摘要并报告真实覆盖进度，估算摘要与保留尾部后交原接受门裁决，不能提前提交游标。
+# LLM: 摘要可调用模型但不写会话；有完整projector时只按其计量并保留候选材料，其它入口仍用旧会话估算，不冒充完整证明。
+# 函数用途: 分段摘要并报告覆盖进度，重投影候选后交原接受门裁决，不能提前修改活请求或游标。
 def _build_compact_candidate(
     request: _CompactRunRequest,
     compact_rows: list[MessageLogEntry],
@@ -640,7 +671,11 @@ def _build_compact_candidate(
         ),
     )
     raise_if_compact_interrupted(request.interrupt_check)
-    projected_after = _projected_context_tokens(
+    projection = project_compact_request(request.request_projector, ConversationCompactView(
+        request.thread.thread_id, request.thread.compact_generation + 1, summary, tuple(retained_tail),
+        evidence, dict(_recent_operation_evidence(retained_tail) or {}), request.policy.trigger_tokens, True,
+    ))
+    projected_after = projection.projected_tokens if projection is not None else _projected_context_tokens(
         request.agent,
         summary,
         retained_tail,
@@ -654,12 +689,12 @@ def _build_compact_candidate(
         compact_rows=tuple(compact_rows),
         retained_tail=tuple(retained_tail),
         projected_tokens_after=projected_after,
+        request_projection=projection,
     )
 
 
-# LLM: This is the sole mutation boundary: write a full candidate checkpoint first, then advance
-# the thread using one ConversationCompactCommit whose checkpoint id confirms the live generation.
-# 函数用途: 将验证通过的候选先写恢复点，再原子更新 thread 摘要和游标，并返回近期原文尾部。
+# LLM: 唯一提交边界仍是原checkpoint与generation CAS；只有成功返回才携带获选request_projection，不把宿主材料写进检查点。
+# 函数用途: 将已验证候选提交为新历史代次，并返回同一候选的完整请求供宿主继续本次运行。
 def _commit_compact_candidate(
     request: _CompactRunRequest,
     candidate: _CompactCandidate,
@@ -722,6 +757,7 @@ def _commit_compact_candidate(
         projected_tokens=candidate.projected_tokens_after,
         trigger_tokens=request.policy.trigger_tokens,
         compacted=True,
+        request_projection=candidate.request_projection,
         recent_operation_evidence=_recent_operation_evidence(
             list(candidate.retained_tail)
         ),

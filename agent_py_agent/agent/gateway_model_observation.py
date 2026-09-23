@@ -1,5 +1,5 @@
 # LLM: Gateway 只在准确车道后请求一次建议；off 保持排队前原冻结，apply 仅在完整首请求和发送 CAS 验证后采用。
-# 模块用途: 绑定默认关闭的主会话模型建议及原请求安全点，失败沿原模型，不授予新的恢复权限。
+# 模块用途: 绑定默认关闭的模型建议与原请求安全点；延迟Compact沿同一作用域运行，不重新决策或授予恢复权限。
 from __future__ import annotations
 
 import hashlib
@@ -80,8 +80,8 @@ def _observation_result(outcome: decision_service.DecisionOutcome, candidates: d
     return {"status": "observed", "choice": answer.value, "adoption_eligibility": "not_evaluated"}
 
 
-# LLM: 对象仅由 request_execution 创建并绑定初次加载；内存 called 与原请求持久 marker 分别防本次重入和重启重调。
-# 类用途: 连接普通新请求的一次观察与可选采用，观察本身不修改模型，采用另经原最终发送门。
+# LLM: 只由原Gateway创建；观察marker和延迟Compact分别守原权威，Compact不借模型建议资格，也不得触发第二次决策。
+# 类用途: 连接一次模型观察、可选采用和已绑定请求的压缩恢复，采用仍经原最终发送门。
 @dataclass
 class GatewayModelObservation:
     context: object
@@ -91,6 +91,7 @@ class GatewayModelObservation:
     params: object | None = field(default=None, repr=False)
     writer: object | None = field(default=None, repr=False)
     adoption: object | None = field(default=None, repr=False)
+    compact_recovery: object | None = field(default=None, repr=False)
 
     # LLM: 宿主钩子只在原 Gateway 请求内存作用域存在；依赖退出晚于 Compact/收尾，任何异常均由原 caller 清理。
     # 函数用途: 包住本次执行并向原 core 暴露安全点，关闭时不读取任何额外状态。
@@ -105,14 +106,24 @@ class GatewayModelObservation:
                 if self.adoption is not None:
                     self.adoption.stack.close()
 
-    # LLM: 未获 apply 建议时返回 None，core 完全沿原 renderer；不改变子代理独立选择权威。
-    # 函数用途: 按需冻结原首请求的完整提示输入。
+    # LLM: 待恢复Compact优先冻结当前请求，否则按原可选采用入口；无候选时None沿原renderer，不干预child。
+    # 函数用途: 在原提示准备时点保存恢复输入或首次选模输入，避免为候选重复读取材料。
     def render(self, agent: object, params: object, request: object) -> str | None:
+        if self.compact_recovery is not None:
+            rendered = self.compact_recovery.render(agent, params, request)
+            if rendered is not None:
+                return rendered
         return self.adoption.render(agent, params, request) if self.adoption is not None else None
 
-    # LLM: 只由实际工具循环调用，不在修复/Compact/恢复路径发第二次决策。
-    # 函数用途: 可选准备本次首请求候选，普通路径保持原参数和字节。
+    # LLM: 未提交采用与延迟Compact不得混用；恢复先沿原CAS提交且不重决策，普通首请求仍按原采用入口。
+    # 函数用途: 在生成前交回已确认的恢复参数，或完成本次可选模型采用。
     def select(self, agent: object, params: object, prompt: str) -> tuple[object, str]:
+        if self.compact_recovery is not None and not self.compact_recovery.consumed:
+            if self.adoption is not None and self.adoption.candidate is not None and not self.adoption.submitted:
+                from .conversation.compact_guard import ConversationCompactError
+
+                raise ConversationCompactError("未提交的模型选择不能恢复压缩", code="COMPACT_MODEL_SELECTION_PENDING")
+            return self.compact_recovery.select(agent, params, prompt)
         return self.adoption.select(agent, params, prompt) if self.adoption is not None else (params, prompt)
 
     # LLM: 精确最终发送由原 worker 回调；没有本请求采用对象时零 I/O 返回。

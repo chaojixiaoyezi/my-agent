@@ -197,7 +197,7 @@ def test_compact_failure_keeps_its_typed_code_and_does_not_claim_data_corruption
 
     monkeypatch.setattr(request_context, "prepare_conversation_context", fail)
     inputs = SimpleNamespace(agent=object(), prompt="继续", request_id="r", on_chunk=None,
-                             request={}, loaded_tool_names=(), model_surface=None)
+                             request={}, loaded_tool_names=(), model_surface=None, defer_compact=False)
     with pytest.raises(ConversationCompactError) as caught:
         request_context._load_gateway_compact_context(inputs, object(), object())
     assert caught.value.error_code == "COMPACT_MODEL_CONTEXT_WINDOW_EXCEEDED"

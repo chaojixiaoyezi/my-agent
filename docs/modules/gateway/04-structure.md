@@ -35,6 +35,10 @@ HTTP ask/control 在原鉴权之后先经 `plugin_command_service.py` 读取可�
 
 ## 请求准备、绑定与历史边界
 
+Gateway overflow 通过内部 `GatewayConversationLoadRequest.defer_compact` 只读保留 canonical 来源，repair、索引和作用域读取仍按原顺序执行；该字段不从用户 JSON 获取，也不等同于 `force_compact=False`。
+应用层 `gateway_compact_recovery.py` 沿原 `gateway_model_observation.py` 的 render/select 安全点冻结一次真实恢复输入；`conversation/compact_projection.py` 仅声明内存来源、候选视图和投影回调，不保存第二套历史。
+候选只替换历史、证据和代次，以原请求投影计量；原 checkpoint/CAS 成功后才交回对应参数，同次运行继续生成。取消复用原 run token/线程检查，摘要错误不进入普通业务瞬时重试，恢复边界事件在业务发送前发布。其它宿主及初次/手动入口尚未接入该完整投影。
+
 `request_execution.py` 只编排已领取请求的租约、模型工作片、超窗恢复和收尾。
 `request_context.py` 在原车道内按补交、索引、Compact、历史、任务顺序准备快照；
 `request_binding.py` 保留精确 request/thread/task/run/attempt 绑定、T 锁与原子写前登记；

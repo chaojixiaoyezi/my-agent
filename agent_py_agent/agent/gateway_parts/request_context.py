@@ -1,5 +1,5 @@
 # LLM: preflight 先解析 canonical thread；车道内原读取后可执行内部观察钩子，再按 repair、索引、Compact、历史、任务取快照。
-# 同片展示输入只在原请求内存传递，不写会话结果；新请求继续从基础面准备。
+# 同片展示和延迟Compact来源只在原请求内存传递；defer只跳过摘要和提交，不跳过repair、索引及作用域读取。
 # 模块用途: 准备本轮会话和目录事实，必要时补交历史、更新索引并调用模型压缩；任务执行仍由编排层负责。
 from __future__ import annotations
 
@@ -18,8 +18,10 @@ from ..conversation.compact import (
     ConversationCompactOptions,
     ConversationScope,
     conversation_scope,
+    load_conversation_compact_source,
     prepare_conversation_context,
 )
+from ..conversation.compact_projection import ConversationCompactSource
 from ..conversation.compact_provider_surface import ConversationCompactModelSurface
 from ..conversation.native_history import (
     provider_history_messages_from_rows,
@@ -63,9 +65,8 @@ class GatewayWorkspaceSelection:
     execution_sources: tuple[str, ...] = ()
 
 
-# LLM: Gateway projects one owner/thread history plus an optional authorized execution workspace;
-# internal run records never become model-visible task choices.
-# 类用途: 保存一个持续 thread 的历史，以及本轮可继承的精确工作目录。
+# LLM: 投影一个owner/thread与原授权目录；compact_source只给内部恢复保留原未窗口化来源，不进请求JSON或模型任务选择。
+# 类用途: 保存本轮会话、工作目录与可选只读压缩来源，展示历史不能取代原文来源。
 @dataclass(frozen=True)
 class GatewayConversationContext:
     thread_id: str = ""
@@ -96,10 +97,11 @@ class GatewayConversationContext:
     thread_goal: dict[str, object] | None = None
     named_work: tuple[dict[str, str], ...] = ()
     load_errors: tuple[dict, ...] = ()
+    compact_source: ConversationCompactSource | None = field(default=None, repr=False)
 
 
-# LLM: 模型面及加载钩子仅由内部宿主构造，不从 request JSON 读取；钩子在原 thread 读取后、repair/Compact 前执行。
-# 类用途: 保存会话加载输入；新主工作片可观察车道后的线程，Compact 重载默认不重复观察。
+# LLM: 模型面/钩子/defer只由内部宿主构造，不从请求JSON读取；defer不是force=False，而是明确不执行摘要和CAS。
+# 类用途: 保存会话加载要求；恢复轮可先只读加载来源，等待完整请求准备后再压缩。
 @dataclass(frozen=True)
 class GatewayConversationLoadRequest:
     agent: SimpleAgent
@@ -110,6 +112,7 @@ class GatewayConversationLoadRequest:
     loaded_tool_names: tuple[str, ...] = ()
     model_surface: ConversationCompactModelSurface | None = None
     on_thread_loaded: Callable[[object], None] | None = None
+    defer_compact: bool = False
 
 
 # LLM: Compact start saves numeric telemetry in the exact thread before publication, using the
@@ -179,8 +182,8 @@ def preflight_gateway_conversation(
     )
 
 
-# LLM: 原 thread 读取后才运行宿主观察钩子，随后保持原 repair/Compact 顺序；钩子不来自请求 JSON，强制 Compact 不重调。
-# 函数用途: 组装本轮权威历史、直属子代理交付和工作目录；新主请求可先观察设置，原模型与恢复输入不变。
+# LLM: thread读取后按原repair/索引/来源/作用域顺序准备；defer保留上述副作用与错误传播，仅推迟摘要及提交。
+# 函数用途: 组装本轮历史、交付和目录；恢复轮带回未压缩来源，候选不重复调用本入口。
 def gateway_conversation_context(
     inputs: GatewayConversationLoadRequest,
     *,
@@ -206,7 +209,7 @@ def gateway_conversation_context(
     request_history.repair_gateway_conversation_messages(store, thread.thread_id, load_errors)
     scope = conversation_scope(agent, thread, spec)
     request_history.ensure_gateway_conversation_index(agent, store, thread.thread_id)
-    thread, history_rows, history_token_budget, recent_operation_evidence = (
+    thread, history_rows, history_token_budget, recent_operation_evidence, compact_source = (
         _load_gateway_compact_context(
             inputs,
             store,
@@ -274,6 +277,7 @@ def gateway_conversation_context(
         thread_goal=thread_goal,
         named_work=named_work,
         load_errors=tuple(load_errors),
+        compact_source=compact_source,
     )
 
 
@@ -315,16 +319,22 @@ def _load_gateway_thread(
 # LLM: Gateway preflight shares the registered request interrupt with Compact. User stop propagates
 # unchanged; compact failures keep their own typed error code and cannot become transcript corruption.
 # 原宿主传入的同片展示面沿原入口使用；普通preflight构造原默认面，不从thread重建选择。
-# 函数用途: 加载并按需压缩 Gateway 会话；停止立即退出，压缩失败保留原记录并单独报错。
+# defer明确只读原来源，不量假请求；普通入口仍按原准备链压缩，所有读取/压缩错误保留独立原因。
+# 函数用途: 加载Gateway会话来源，按内部模式立即压缩或返回待准备来源，停止与坏原文不会降级为空。
 def _load_gateway_compact_context(
     inputs: GatewayConversationLoadRequest,
     store: object,
     thread: object,
     *,
     force: bool = False,
-) -> tuple[object, object, int, dict[str, object]]:
+) -> tuple[object, object, int, dict[str, object], ConversationCompactSource | None]:
     """Prepare compact state and preserve the original thread on a reported failure."""
     try:
+        if inputs.defer_compact:
+            source = load_conversation_compact_source(
+                inputs.agent, store, thread, exclude_request_id=inputs.request_id,
+            )
+            return thread, source.messages, source.policy.trigger_tokens, source.recent_operation_evidence, source
         compact = prepare_conversation_context(
             inputs.agent,
             store,
@@ -362,6 +372,7 @@ def _load_gateway_compact_context(
         compact.messages,
         compact.trigger_tokens,
         dict(compact.recent_operation_evidence or {}),
+        None,
     )
 
 

@@ -1,5 +1,7 @@
 # Gateway 维护状态
 
+- 第 12.4 项 Gateway overflow 已本地接通完整恢复请求计量：只读保留原来源，真实请求准备后生成摘要候选，原 checkpoint/CAS 成功后直接发送获选材料。两协议、工具开关、取消/代次竞争/摘要错误及后续工具轮等 16 文件联合 337 项通过；HTTP 为内存替身，未部署。子代理、后台、初次加载及手动 Compact 仍待接入，完整进度见 `docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md`。
+
 - 主会话自动模型选择的 Stage A 已建立原线程版本事实：`model_selection_revision/source/last_explicit_revision`
   随原线程一次原子更新，显式同值选择也前进版本并终结 pending 子代理建议；旧数据全缺才归一为未知，坏字段拒绝。
   本片只提供宿主并发/恢复事实，尚未启用主会话自动采用，也不增加逐片确认或永久固定模型。

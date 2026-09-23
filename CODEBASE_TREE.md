@@ -185,6 +185,7 @@ agent_py_agent/
 |   |-- gateway_model_observation.py    # Gateway 车道后主会话的一次决策观察与来源冻结
 |   |-- gateway_model_adoption.py       # 跨 Gateway/core 的完整候选验证、临时依赖与线程发送前 CAS
 |   |-- gateway_compact_context.py      # 跨 Gateway/core 的同 turn Compact 重载展示和身份冻结
+|   |-- gateway_compact_recovery.py     # 完整恢复请求准备后执行原 transcript CAS，并用获选材料继续同次生成
 |   |-- task_progress_guidance.py        # Todo exact-id 最终回复前核对的可配置软合同；不自动判定或打勾
 |   |-- agent_core/                     # 无副作用包入口；主代理运行时、工具循环、编排与自然回合收口实现
 |   |   |-- decision_planning.py        # 原 Todo read 的当前未完成项精确优先级软建议
@@ -359,6 +360,7 @@ agent_py_agent/
 |   |   |-- agent_thread_store.py      # agent thread 精确 ID 物化、身份冲突与运行目录校验
 |   |   |-- closeout.py                # 收口状态机 decide_closeout(四改之 2): 终态 done/cancelled/wait_human/wait_handoff/resume_round
 |   |   |-- compact.py                  # 唯一 thread compact：候选验证、一次 CAS 提交与近期 raw tail
+|   |   |-- compact_projection.py       # 原 Compact 的只读来源、完整请求投影和提交后临时材料合同
 |   |   |-- compact_provider_surface.py # transcript Compact 复用普通轮 stable prompt/system/tools/messages 的缓存面
 |   |   |-- compact_request_budget.py   # 按当前模型窗口顺序分段摘要，完整覆盖历史且失败不推进游标
 |   |   |-- compact_tool_refs.py        # 从匹配原生工具往返保留原样路径线索，不靠模型摘要记忆目录
@@ -540,6 +542,10 @@ agent_py_agent/
 |   |-- test_decision_planning.py      # Todo 优先建议、精确 ID/版本/取消、设置与原 read 回执的回归
 |   |-- test_gateway_model_observation.py # Gateway 主模型观察的零副作用、请求身份与恢复边界
 |   |-- test_gateway_model_adoption.py # 原 Gateway/PromptBuilder/provider builder 的采用、容量、竞态与零 HTTP 回退
+|   |-- test_gateway_compact_deferred_source.py # 只读压缩来源、坏原文及当前未完成后缀排除
+|   |-- test_gateway_compact_recovery.py # 完整恢复请求与真实HTTP对照、CAS/取消/摘要故障不发送业务
+|   |-- test_gateway_compact_recovery_continuation.py # 新历史沿后续工具轮保留，活动轮CAS先于恢复准备
+|   |-- test_compact_request_projection.py # 原候选回退携带对应材料，未知完整输入不降级粗估
 |   |-- test_decision_external_material_order.py # 已归档页安全投影、来源复核、取消与 text/native 提示一致
 |   |-- test_external_material_order_integration.py # 原页面生产归档、决策 worker、设置工具与 TUI 接线
 |   |-- test_decision_capability_consumer.py # 原设置/worker/循环接线到实际prompt/schema减量及失效原输入
@@ -1014,11 +1020,15 @@ docs/
 - `agent_py_agent/agent/agent_core/subagent/model_selection.py`：子代理首业务模型请求前复核 Jev 建议、完整依赖与持久目录代次；原线程一次 CAS 采用或保留，未知不触发逐 child 用户操作。
 - `agent_py_agent/agent/model_request_selection.py`、`agent_py_agent/agent/gateway_model_adoption.py`：主会话经原模型请求回调验证完整输入、工具、窗口及目录代次，只在实际发送前提交准确线程的自动选择；发送前明确拒绝才沿原模型一次。
 - `agent_py_agent/agent/gateway_compact_context.py`：原 Gateway 恢复请求与 core 展示之间的应用层编排，同 turn 重载不复活已失效的展示建议。
+- `agent_py_agent/agent/gateway_compact_recovery.py`：Gateway 已绑定请求溢出后，冻结原恢复准备，只替换候选历史与证据；原 CAS 后用同一请求继续生成。
+- `agent_py_agent/agent/conversation/compact_projection.py`：只读来源与完整候选投影的临时值合同；获选材料只随原 CAS 成功返回，不形成第二持久状态。
 - `agent_py_agent/agent/runtime_context.py`：当前 runner 的线程本地属性权威供 Tooling、Conversation 与 core 共用，作用域退出清理；不保存持久任务身份。
 - `agent_py_agent/agent/settings/decision_experiment_schema.py`、`decision_experiment.py`、`agent_py_agent/agent/conversation/decision_experiment.py`、`agent_py_agent/agent/contracts/model_call_budget.py`：宿主专用有限许可、原账预留和失败关闭实验入口；没有用户授权 UI 或可靠联网输入硬门。
 - `agent_py_agent/tests/test_decision_experiment_authorization.py`、`test_model_call_input_budget.py`：原设置/模型账中的许可、并发预算、撤销、未知输入及跨代保守拒绝回归。
 - `agent_py_agent/tests/test_user_config_owner_scope.py`：普通 user 主回合 read/patch 的可信线程及 CAS 预览、跨 owner/子代理拒绝和 main_agent 原能力回归。
 - `agent_py_agent/tests/test_gateway_model_adoption.py`：Gateway 到原生成投影、最终发送和线程 CAS 的本地 HTTP 替身矩阵，不当作供应商真实验收。
+- `agent_py_agent/tests/test_gateway_compact_recovery.py`：原Gateway overflow到同次恢复发送的完整材料对照；失败边界由原CAS、停止及模型生成链验证。
+- `agent_py_agent/tests/test_gateway_compact_recovery_continuation.py`：恢复后的真实工具往返及无transcript来源的活动回合回退，核对新代次和准备顺序。
 - `agent_py_agent/tests/test_subagent_first_request_selection.py`、`test_model_scope_dependencies.py`：首请求/后续轮真实载荷、撤销竞争、取消与作用域生命周期的定向验证。
 - `agent_py_agent/tests/test_tool_request_projection.py`：验证完整 system/动态段/schema/IR 与真实 provider payload 一致，缺输入 unknown、原历史不改和纯渲染不读宿主。
 - `agent_py_agent/tests/test_gateway_capability_compact.py`：验证同工作片能力展示在 Gateway、子代理 transcript Compact 及重建输入中保留，并覆盖新片清空和失效回原面。
