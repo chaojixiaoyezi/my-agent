@@ -22,6 +22,26 @@
 - 所有外部通道只投递净化后的模型正文。内部工具协议、运行信号和宿主绝对路径不能进入用户回复；
   外部路径脱敏发生在通道出口，内部 transcript 仍保留后续工作所需的真实路径。
 
+## 后台能力事件中的最终回复
+
+能力申请或授权唤醒的是一个正常后台工作片。工作片开始于 `subagent_capability_request_open` 或
+`subagent_capability_granted`，不代表结束时仍在处理权限：父级可能已吸收孩子结果并自行完成整合。
+`conversation/runtime.py::_background_delivery_decision` 在模型返回后读取同一 `ConversationTaskLink`；
+其当前状态为 `completed` 时，模型原回复沿既有交付链发送并进入公开历史。仍未完成的能力事件继续静默，
+取消、停止和活跃 Goal 的原规则不变。空正文且无附件仍被交付层抑制；不生成替代文案、不补发历史片，
+也不因原生历史已有 final 自动重跑任务。
+
+孩子本轮结束后仍可保留 `BLOCKED` 等待权限或目标恢复；是否仍有执行器须读 exact attempt 与执行事实，
+不能只凭该状态宣称孩子已完成或仍在运行。
+父级自然完成、公开正文交付、AgentRun 终态和整棵 TaskRun 关闭分别读取各自原账本；本修复不修改
+`runtime_db` 的整树关闭条件、不清除 UNKNOWN，也不扩大路径或工具权限。
+
+参考边界：只窄读 Codex `578c1b22` 的 `codex-rs/core/src/tasks/mod.rs` 中结束事件携带
+`last_agent_message` 的路径，以及 Hermes `0a62610f1` 的 `gateway/run.py` 最终响应取回与
+`gateway/delivery_ledger.py` 的生成、尝试和送达分账。借鉴结束事实与交付事实分离；不移植它们的队列、
+重投策略或状态存储，不声称完整审阅。验收覆盖当前状态矩阵、同片子状态变化、空载荷与重复提交；
+真实同版 TUI 复验由发布主线执行，旧 TUI212 的准备失误与交付失败证据保留。
+
 ## `/goal` 持续目标
 
 - `/goal` 是同一 conversation thread 上的持久目标 overlay，不是普通任务的前置条件。

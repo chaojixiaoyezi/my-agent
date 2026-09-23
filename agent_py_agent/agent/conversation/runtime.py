@@ -2,6 +2,7 @@
 # 上下文和历史准备通过独立模块调用，修改执行顺序时同步后台历史、取消、Compact 和投递回归。
 # 进度计算和供应退避各有独立实现；本模块保留配置组装、实例寿命、读取时机、租约和持久落账。
 # Goal、投递地址、执行 claim 和恢复守卫各有窄能力组件；来源消费和能力预扫保留原编排位置。
+# 能力事件开始的工作片也可能完成任务，公开交付须读当前任务状态，不能仅凭原唤醒原因永久静默。
 # 模块用途: 编排后台唤醒和工作片，并组装执行、交付、路由、租约、恢复、策略及上下文。
 from __future__ import annotations
 
@@ -958,6 +959,7 @@ def _is_active_turn_lifecycle_continuation(
 # the canonical owner transcript even while the Goal remains active. Child lifecycle/capability
 # wakes are still internal control events; current child facts and unread envelopes, not the
 # slice-start snapshot, determine whether the integration response is ready to publish.
+# 能力控制片完成根任务后允许原模型回复进入交付；这里只读结构化状态，正文/附件过滤与幂等仍归交付层。
 # 函数用途: 决定后台模型回复是否进入用户会话；原开始快照不能吞掉长工作片已吸收结果后的最终汇报。
 def _background_delivery_decision(
     agent: object,
@@ -998,6 +1000,8 @@ def _background_delivery_decision(
     if goal_status == "active" and reason in SUBAGENT_LIFECYCLE_WAKE_REASONS:
         return False, "thread_goal_lifecycle_internal"
     if reason in {"subagent_capability_request_open", "subagent_capability_granted"}:
+        if task_completed:
+            return True, "capability_lifecycle_completion"
         # 会话运行时 treats child approvals as active-turn control events, not assistant replies.
         # Our durable wake still lets the parent route the request or continue the exact child,
         # but publishing that intermediate model draft races the child runner and can place an

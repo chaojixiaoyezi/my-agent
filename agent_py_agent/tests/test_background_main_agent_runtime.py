@@ -1763,9 +1763,11 @@ def test_unknown_external_audit_route_remains_retryable() -> None:
     "reason",
     ["subagent_capability_request_open", "subagent_capability_granted"],
 )
-def test_capability_lifecycle_turns_are_internal_until_terminal_child_report(
+@pytest.mark.parametrize("task_status", ["active", "completed", "cancelled", "interrupted"])
+def test_capability_lifecycle_delivery_uses_current_task_status(
     tmp_path,
     reason,
+    task_status,
 ) -> None:
     from agent_py_agent.agent.conversation.runtime import (
         BackgroundRunRequest,
@@ -1790,7 +1792,7 @@ def test_capability_lifecycle_turns_are_internal_until_terminal_child_report(
             "thread_id": thread.thread_id,
             "task_id": "task-root",
             "goal": "完成最小权限写入",
-            "status": "active",
+            "status": task_status,
         }
     )
     request = BackgroundRunRequest(
@@ -1804,10 +1806,93 @@ def test_capability_lifecycle_turns_are_internal_until_terminal_child_report(
         },
     )
 
-    assert _background_delivery_decision(agent, request, store=store) == (
-        False,
-        f"{reason}_internal",
+    expected = {
+        "active": (False, f"{reason}_internal"),
+        "completed": (True, "capability_lifecycle_completion"),
+        "cancelled": (False, "task_cancelled"),
+        "interrupted": (False, "task_interrupted"),
+    }
+    assert _background_delivery_decision(agent, request, store=store) == expected[task_status]
+
+
+@pytest.mark.parametrize("reason", ["subagent_capability_request_open", "subagent_capability_granted"])
+@pytest.mark.parametrize("child_ends", [False, True])
+def test_capability_slice_delivers_only_after_current_work_completes(tmp_path, monkeypatch, reason, child_ends):
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=False, memory_path="memory.jsonl", orphan_supervision_interval_seconds=0),
+        tmp_path,
     )
+    store = agent.conversation_store
+    thread = store.threads.get_or_create({"channel": "internal", "channel_conversation_id": "capability-closeout"})
+    store.tasks.bind({"thread_id": thread.thread_id, "task_id": "task-root", "goal": "处理当前任务"})
+    child = agent.subagents.create_run(goal="处理子任务", thought="", plan=["执行"], parent_id="task-root", root_id="task-root")
+    agent.subagents.lifecycle.set_status(child.id, "RUNNING")
+    backend = _CapturingBackend()
+    original_generate = backend.generate
+
+    # LLM: 替身在真实后台工作片内提交 canonical 子状态，正文不承担完成裁决；仅写 pytest 隔离目录。
+    # 函数用途: 重放能力事件唤醒后孩子在本片结束、父级完成整合的竞态，不运行真实模型或业务。
+    def generate(prompt, on_chunk=None, **kwargs):
+        if child_ends:
+            agent.subagents.lifecycle.set_status(child.id, "BLOCKED")
+        return original_generate(prompt, on_chunk=on_chunk, **kwargs)
+
+    monkeypatch.setattr(backend, "generate", generate)
+    agent.backend = backend
+    channels = FakeDeliveryService()
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=channels)
+    report = runtime.run_once({
+        "thread_id": thread.thread_id,
+        "task_id": "task-root",
+        "reason": reason,
+        "wake_signal": {"root_task_id": "task-root", "source_agent_id": child.id, "metadata": {"run_id": child.id}},
+    })
+
+    assert len(backend.prompts) == 1
+    assert store.tasks.load("task-root").status == ("completed" if child_ends else "active")
+    assert report.delivery_status == ("sent" if child_ends else "suppressed")
+    expected = ["后台主代理已检查任务树，并给出阶段汇报。"] if child_ends else []
+    assert [row.content for row in _public_background_messages(store, thread.thread_id)] == expected
+    assert [row.content for row in channels.adapter("internal").sent_messages] == expected
+    native = [row for row in store.messages.recent(thread.thread_id, limit=0) if row.metadata.get("assistant_part_id") == "native"]
+    assert len(native) == 1 and native[0].metadata["turn_end_reason"] == "completed"
+
+
+@pytest.mark.parametrize("reason", ["subagent_capability_request_open", "subagent_capability_granted"])
+@pytest.mark.parametrize("content", ["", "本轮结果正文。"])
+def test_completed_capability_reply_keeps_payload_filter_and_canonical_replay(tmp_path, reason, content):
+    from agent_py_agent.agent.conversation.channels import DeliveryContext
+    from agent_py_agent.agent.conversation.runtime import (
+        BackgroundRunRequest,
+        _background_delivery_decision,
+    )
+    from agent_py_agent.agent.delivery import DeliveryService, build_default_channel_registry
+
+    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+    store = agent.conversation_store
+    thread = store.threads.get_or_create({"channel": "tui", "channel_conversation_id": "capability-payload"})
+    store.tasks.bind({"thread_id": thread.thread_id, "task_id": "task-root", "goal": "处理当前任务", "status": "completed"})
+    runtime = BackgroundMainAgentRuntime(
+        agent=agent, store=store, channels=DeliveryService(build_default_channel_registry(agent.config)),
+    )
+    request = BackgroundRunRequest(
+        thread_id=thread.thread_id, task_id="task-root", reason=reason,
+        wake_signal={"wake_signal_id": "wake-capability-completed", "root_task_id": "task-root"},
+    )
+    deliver, delivery_reason = _background_delivery_decision(agent, request, store=store)
+    context = DeliveryContext(channel="tui", target="capability-payload", thread_id=thread.thread_id, task_id="task-root")
+    commits = [delivery_module.record_background_response(
+        _delivery_dependencies(runtime), request, context, content,
+        deliver=deliver, delivery_reason=delivery_reason,
+    ) for _ in range(2)]
+
+    rows = _public_background_messages(store, thread.thread_id)
+    assert [row.content for row in rows] == ([content] if content else [])
+    if content:
+        assert commits[0].persisted and commits[0].message_id == commits[1].message_id
+        assert rows[0].metadata["assistant_part_id"] == "final"
+    else:
+        assert all(item.delivery_status == "suppressed" and not item.persisted for item in commits)
 
 
 def test_internal_audit_finding_empty_reply_remains_retryable(
