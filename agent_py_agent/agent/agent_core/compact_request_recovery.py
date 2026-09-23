@@ -120,7 +120,8 @@ class PreparedCompactRecovery:
             raise ConversationCompactError("完整恢复输入未知", code="COMPACT_REQUEST_PROJECTION_UNKNOWN") from exc
         if not frozen.prompt_input.native_tool_use or frozen.tool_protocol_snapshot.source_protocol != "native":
             raise ConversationCompactError("恢复工具协议未知", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
-        if not self.force and self._automatic_noop(params, frozen):
+        tool_source = _recovery_tool_source(agent, source, params, frozen)
+        if not self.force and self._automatic_noop(frozen, tool_source):
             from ._tool_loop_service import _native_compact_interrupted
 
             raise_if_compact_interrupted(lambda: _native_compact_interrupted(params)
@@ -160,13 +161,13 @@ class PreparedCompactRecovery:
                     options=ConversationCompactOptions(
                         current_prompt=params.user_prompt, exclude_request_id=self.exclude_request_id, force=True,
                         source=source, request_projector=project, provider_surface=_summary_surface(frozen),
-                        tool_source=_recovery_tool_source(agent, source, params),
+                        tool_source=tool_source,
                         progress_callback=self.progress_callback,
                         interrupt_check=interrupted,
                     ),
                 )
             else:
-                result = self._compact_active_source(params, frozen, interrupted)
+                result = self._compact_active_source(params, frozen, interrupted, tool_source, handoff_max_chars)
         except (InterruptedError, ToolCancelled):
             raise
         except Exception as exc:
@@ -190,7 +191,7 @@ class PreparedCompactRecovery:
 
     # LLM: 无操作也须完整可计量；容量充足或没有可覆盖来源时不压缩，实际发送仍沿原容量门，不虚报适配。
     # 函数用途: 初次请求没有可压历史时保留原输入，让后续选模与发送预检独立裁决容量。
-    def _automatic_noop(self, params: object, frozen: ToolLoopRequestInput) -> bool:
+    def _automatic_noop(self, frozen: ToolLoopRequestInput, tool_source) -> bool:
         from ..conversation.compact import _compact_request_input_ceiling
 
         projection = project_tool_loop_request(frozen)
@@ -199,11 +200,11 @@ class PreparedCompactRecovery:
         tokens, _ = projected_model_context_components(projection)
         if tokens < _compact_request_input_ceiling(self.agent, self.source.policy):
             return True
-        return not self.source.messages and _recovery_tool_source(self.agent, self.source, params) is None
+        return not self.source.messages and tool_source is None
 
-    # LLM: carried来源复用原active-turn摘要与CAS；projector只替换冻结请求片段，不能伪造原生工具对。
-    # 函数用途: 没有已结束历史时，以完整请求计量压缩原归档交接，未知/过大不提交。
-    def _compact_active_source(self, params, frozen, interrupted):
+    # LLM: 同次归档和原生IR来源复用原active-turn摘要与CAS；projector只替换已证明完整的冻结来源。
+    # 函数用途: 没有已结束历史时，以完整请求计量压缩工具往返和归档交接，未知/过大不提交。
+    def _compact_active_source(self, params, frozen, interrupted, tool_source, handoff_max_chars):
         from ..conversation.active_turn_compact import (
             ActiveTurnArchiveCompactRequest,
             compact_carried_active_turn_archive,
@@ -222,6 +223,12 @@ class PreparedCompactRecovery:
         # 函数用途: 把活动摘要和保留区交给宿主纯投影，交回真实完整计量及同次材料。
         def project(summary, retained, generation):
             material = self.project_active_candidate(params, frozen, summary, retained, generation)
+            view = ConversationCompactView(
+                self.source.thread.thread_id, generation, summary, (), {}, {},
+                self.source.policy.trigger_tokens, True, retained_tool_records=retained,
+                retained_ir_history=tool_source.retained_ir_history if tool_source is not None else None,
+            )
+            material = _project_mixed_recovery_material(material, view, handoff_max_chars)
             expected = replace(self.source.compact_context, view=replace(
                 self.source.compact_context.view, summary=summary, generation=generation,
             ))
@@ -236,7 +243,7 @@ class PreparedCompactRecovery:
                 task_attributes=params.task_attributes, request_id=params.request_id, attempt_id=params.attempt_id,
                 task_prompt=params.user_prompt, progress_callback=self.progress_callback, interrupt_check=interrupted,
                 compact_context=self.source.compact_context, request_projector=project,
-                projected_tokens_before=before, provider_surface=_summary_surface(frozen),
+                projected_tokens_before=before, provider_surface=_summary_surface(frozen), tool_source=tool_source,
             ),
         )
 
@@ -300,22 +307,21 @@ def _committed_recovery_material(agent, source, result, material):
     return replace(material, params=params, host_state=host_state)
 
 
-# LLM: 只从本请求已应用view可见的完整归档选择来源；分区不读文件、不生成摘要，不与别的scope覆盖混合。
-# 函数用途: 给含transcript的真实恢复提供可选工具分区，未知身份保持在保留区。
-def _recovery_tool_source(agent, source, params):
-    if not params.archive_tool_calls:
-        return None
-    from ..conversation.active_turn_compact import (
-        model_visible_active_turn_tool_calls,
-        partition_carried_tool_records,
-    )
+# LLM: 从本请求已应用view可见归档及冻结IR选择来源；分区不读文件、不生成摘要，不与别的scope覆盖混合。
+# 函数用途: 给活动或混合恢复提供一次工具分区，未知身份和未配对原生记录保持在保留区。
+def _recovery_tool_source(agent, source, params, frozen):
+    from ..conversation.active_turn_compact import model_visible_active_turn_tool_calls
+    from .compact_tool_partition import partition_recovery_tool_source
 
     if source.compact_context is None:
         raise ConversationCompactError("联合恢复缺少应用视图", code="COMPACT_SOURCE_CHANGED")
     visible = model_visible_active_turn_tool_calls(
         agent, params.task_attributes, list(params.archive_tool_calls), compact_context=source.compact_context,
     )
-    return partition_carried_tool_records(visible, recent_tail_tokens=0)
+    return partition_recovery_tool_source(
+        visible, frozen.tool_ir_history, covered_tool_refs=source.compact_context.view.source_tool_refs,
+    )
+
 
 
 # LLM: 宿主先投影候选历史；显式保留工具集再替换同次冻结交接，计量和发送只使用完成两种替换后的同一材料。
@@ -328,5 +334,6 @@ def _project_mixed_recovery_material(material, view, max_chars):
     params, prepared = replace_recovery_active_tools(
         material.params, material.request_input, compact_context=material.params.compact_context,
         retained_records=view.retained_tool_records, max_chars=max_chars,
+        retained_ir_history=view.retained_ir_history,
     )
     return replace(material, params=params, request_input=prepared, projection=project_tool_loop_request(prepared))

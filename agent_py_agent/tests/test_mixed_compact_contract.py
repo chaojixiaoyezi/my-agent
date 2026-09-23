@@ -137,7 +137,8 @@ def test_mechanical_mixed_summary_keeps_every_tool_source_and_rejects_oversized_
     assert len(sent) == 1 and len(views) == 2
     supplied = sent[0].prompt + json.dumps(sent[0].messages, ensure_ascii=False)
     candidate = views[1]
-    assert candidate.summary.endswith(source_text)
+    fallback_messages = json.loads(candidate.summary.rsplit("\n\n", 1)[1])
+    assert fallback_messages == [{"role": "user", "content": [{"type": "text", "text": source_text}]}]
     for index in range(31):
         marker = f"ORIGINAL_TOOL_{index:02}_MARKER"
         assert marker in supplied and marker in candidate.summary

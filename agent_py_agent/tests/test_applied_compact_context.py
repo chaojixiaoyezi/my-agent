@@ -251,6 +251,7 @@ def test_active_turn_summary_uses_applied_view_base(monkeypatch) -> None:
         SimpleNamespace(backend=None),
         SimpleNamespace(
             thread=SimpleNamespace(workspace_task_id="task-1", summary="错误的全线程摘要"),
+            source_ir_history=(),
             source_records=({
                 "run_id": "run-1", "attempt_id": "attempt-1", "turn_id": "model-turn-2", "call_id": "new-call",
                 "tool": "read_file", "ok": True, "model_summary": "本次完整工具材料",

@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -28,7 +29,12 @@ from agent_py_agent.agent.backends.openai_chat import OpenAICompatibleBackend
 from agent_py_agent.agent.backends.tool_ir import (
     AssistantTurn,
     CompactionSummary,
+    RuntimeFactsTurn,
     UserTurn,
+)
+from agent_py_agent.agent.conversation.compact_tool_summary import (
+    compact_tool_summary_history,
+    compact_tool_summary_text,
 )
 from agent_py_agent.agent.memory_archive.compact_semantic_summary import (
     LiveToolHistorySummaryRequest,
@@ -534,6 +540,121 @@ def test_live_tool_history_empty_response_uses_bounded_typed_fallback() -> None:
     assert "status=succeeded" in summary
     assert "保留最新测试结果" in summary
     assert len(summary) <= 1_400
+
+
+def test_compact_tool_summary_history_prefers_exact_ir_and_keeps_complete_result() -> None:
+    call = canonical_history_call(
+        "read_file", {"path": "/srv/project/state.json"}, call_id="shared-call",
+        run_id="run-1", attempt_id="attempt-1", turn_id="turn-1",
+    )
+    full_result = "FULL-TOOL-RESULT-" + "x" * 5_000
+    history = [
+        UserTurn("用户插话：核对完整结果"),
+        AssistantTurn(
+            text="原 assistant 正文",
+            tool_calls=[call],
+            content_blocks=[{"type": "text", "text": "原 provider 正文"}],
+        ),
+        canonical_history_result(call, full_result),
+    ]
+    records = [
+        {
+            "run_id": "run-1", "attempt_id": "attempt-1", "turn_id": "turn-1", "call_id": "shared-call",
+            "tool": "read_file", "ok": True, "parameters": {"tool": "read_file"},
+            "output_preview": "SAME-REF-ARCHIVE-PREVIEW",
+        },
+        {
+            "run_id": "run-1", "attempt_id": "attempt-2", "turn_id": "turn-2", "call_id": "shared-call",
+            "tool": "read_file", "ok": True, "parameters": {"tool": "read_file"},
+            "output_preview": "OTHER-TURN-ARCHIVE-PREVIEW",
+        },
+    ]
+
+    combined = compact_tool_summary_history(records, history)
+    visible = compact_tool_summary_text(combined)
+
+    assert isinstance(combined[0], RuntimeFactsTurn)
+    assert "OTHER-TURN-ARCHIVE-PREVIEW" in combined[0].text
+    assert "SAME-REF-ARCHIVE-PREVIEW" not in visible
+    assert visible.count("shared-call") >= 2  # 不同轮的 archive 与真实 IR 均保留。
+    assert full_result in visible and "原 provider 正文" in visible
+    assert combined[1:] == history and all(copy is not original for copy, original in zip(combined[1:], history, strict=True))
+    history[1].content_blocks[0]["text"] = "调用方后来改写"
+    records[1]["output_preview"] = "调用方后来改写预览"
+    assert "调用方后来改写" not in compact_tool_summary_text(combined)
+
+
+def test_compact_tool_summary_history_keeps_archive_order_and_empty_source() -> None:
+    records = [
+        {
+            "run_id": "run", "attempt_id": f"attempt-{index}", "turn_id": f"turn-{index}", "call_id": "same",
+            "tool": "read_file", "ok": True, "parameters": {"tool": "read_file"},
+            "output_preview": f"SOURCE-{index}",
+        }
+        for index in range(3)
+    ]
+    combined = compact_tool_summary_history(records, [UserTurn("最后的用户补充")])
+    payload = json.loads(compact_tool_summary_text(combined))
+
+    assert len(combined) == 2 and isinstance(combined[0], RuntimeFactsTurn)
+    assert combined[0].text.index("SOURCE-0") < combined[0].text.index("SOURCE-1") < combined[0].text.index("SOURCE-2")
+    assert payload[0]["role"] == "user" and "SOURCE-2" in payload[0]["content"][0]["text"]
+    assert payload[1]["content"][0]["text"] == "最后的用户补充"
+    assert compact_tool_summary_history([], ()) == []
+    assert compact_tool_summary_text([]) == "[]"
+
+
+@pytest.mark.parametrize("returned", ["", "<minimax:tool_call>伪工具调用</minimax:tool_call>"])
+def test_live_tool_history_complete_fallback_preserves_model_visible_source(returned) -> None:
+    call = canonical_history_call("read_file", {"path": "/srv/project/large.log"}, call_id="complete-fallback")
+    full_result = "FULL-FALLBACK-RESULT-" + "z" * 5_000
+    history = [AssistantTurn(text="完整结果如下", tool_calls=[call]), canonical_history_result(call, full_result)]
+
+    summary = summarize_live_tool_history(LiveToolHistorySummaryRequest(
+        history=history, backend=_LiveSummaryBackend(text=returned), task_prompt="继续核对日志",
+        max_output_chars=1_000, preserve_complete_fallback=True,
+    ))
+
+    assert summary.startswith("[compact-mechanical-fallback]")
+    assert "complete_model_visible_history:" in summary
+    assert full_result in summary and compact_tool_summary_text(history) in summary
+    assert len(summary) > 1_000
+
+
+def test_live_tool_history_complete_fallback_forwards_strict_segment_mode(monkeypatch) -> None:
+    from agent_py_agent.agent.conversation import compact_request_budget
+
+    observed = []
+
+    def bounded(_request, **kwargs):
+        observed.append(kwargs)
+        return ModelResponse(text="", backend="stub")
+
+    monkeypatch.setattr(compact_request_budget, "generate_bounded_compact_response", bounded)
+    history = [UserTurn("完整用户来源仍需保留")]
+    summary = summarize_live_tool_history(LiveToolHistorySummaryRequest(
+        history=history, backend=_LiveSummaryBackend(), agent=object(),
+        preserve_complete_fallback=True,
+    ))
+
+    assert observed and observed[0]["preserve_complete_fallback"] is True
+    assert compact_tool_summary_text(history) in summary
+
+
+def test_live_tool_history_complete_fallback_keeps_uncut_previous_summary() -> None:
+    previous = "PREVIOUS-HEAD-" + "a" * 3_000 + "UNIQUE-INHERITED-MIDDLE" + "b" * 3_000 + "-PREVIOUS-TAIL"
+    history = [UserTurn("本轮继续原任务")]
+
+    summary = summarize_live_tool_history(LiveToolHistorySummaryRequest(
+        history=history, backend=_LiveSummaryBackend(text=""),
+        previous_summary=previous, max_output_chars=1_000,
+        preserve_complete_fallback=True,
+    ))
+
+    assert "complete_previous_summary:" in summary
+    assert previous in summary
+    assert summary.count("UNIQUE-INHERITED-MIDDLE") == 1
+    assert compact_tool_summary_text(history) in summary
 
 
 def test_live_tool_history_mechanical_fallback_has_independent_output_cap() -> None:

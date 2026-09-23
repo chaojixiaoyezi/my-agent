@@ -156,8 +156,9 @@ def test_mixed_recovery_commits_both_sources_and_sends_selected_wire(tmp_path, m
     )
     assert result.runtime_status != "context_overflow"
     assert len(all_wires) == 3 and len(business) == 2 and len(summaries) == 1
-    assert len(sources) == 1 and sources[0] is not None
-    source = sources[0]
+    # 初始容量检查与上游溢出各冻结一次来源；同次候选始终复用那一次的完整分区。
+    assert len(sources) == 2 and sources[0] is not None and sources[0] == sources[1]
+    source = sources[1]
     assert len(source.source_records) == 2
     assert len(source.retained_records) == 1
     assert source.retained_records[0]["model_summary"] == "UNKNOWN_IDENTITY_RETAINED"

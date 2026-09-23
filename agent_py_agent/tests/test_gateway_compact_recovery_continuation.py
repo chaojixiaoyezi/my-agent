@@ -8,7 +8,11 @@ from dataclasses import replace
 import pytest
 
 from agent_py_agent.agent import gateway_compact_recovery as recovery
-from agent_py_agent.agent.agent_core import _tool_loop_service, runtime_mixin
+from agent_py_agent.agent.agent_core import (
+    _tool_loop_service,
+    compact_request_recovery,
+    runtime_mixin,
+)
 from agent_py_agent.agent.agent_core.runtime import loop_support
 from agent_py_agent.agent.backends import http
 from agent_py_agent.agent.backends.errors import ProviderContextWindowError
@@ -167,6 +171,7 @@ def test_empty_transcript_overflow_compacts_active_turn_before_reprepare(
     original_loop_params = loop_support._tool_loop_execute_params
     original_compact = active_turn_compact.compact_carried_active_turn_archive
     original_project = recovery._project_gateway_active_candidate
+    original_mixed = compact_request_recovery._project_mixed_recovery_material
     original_read = _filesystem_read.ReadFileTool.execute
 
     def prepare(*args, **kwargs):
@@ -194,9 +199,13 @@ def test_empty_transcript_overflow_compacts_active_turn_before_reprepare(
     def project(*args):
         if fail_projection:
             raise ConversationCompactError("测试活动候选无法投影", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
-        value = original_project(*args)
-        candidates.append(value)
-        return value
+        return original_project(*args)
+
+    def mixed(material, view, max_chars):
+        selected = original_mixed(material, view, max_chars)
+        if view.is_candidate:
+            candidates.append(selected)
+        return selected
 
     def read(self, params):
         reads.append(dict(params))
@@ -215,6 +224,7 @@ def test_empty_transcript_overflow_compacts_active_turn_before_reprepare(
     monkeypatch.setattr(loop_support, "_tool_loop_execute_params", build_loop_params)
     monkeypatch.setattr(active_turn_compact, "compact_carried_active_turn_archive", compact)
     monkeypatch.setattr(recovery, "_project_gateway_active_candidate", project)
+    monkeypatch.setattr(compact_request_recovery, "_project_mixed_recovery_material", mixed)
     monkeypatch.setattr(_filesystem_read.ReadFileTool, "execute", read)
     context = replace(context, on_chunk=Sink())
 

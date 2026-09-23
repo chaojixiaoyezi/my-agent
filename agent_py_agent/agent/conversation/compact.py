@@ -186,9 +186,8 @@ class _CompactCandidate:
     tool_source: CarriedToolCompactSource | None = field(default=None, repr=False)
 
 
-# LLM: Auxiliary-call identity and cache material travel as one immutable value so new entrypoints
-# cannot partially forward generation, run scope, or provider surface while sharing summary logic.
-# 类用途: 收拢一次摘要模型调用的软指令、运行身份、压缩代次和已冻结缓存面。
+# LLM: 摘要调用身份、冻结缓存面及真实工具来源一起传递；严格恢复的机械回退必须完整保留旧摘要和所选原文。
+# 类用途: 收拢一次摘要模型调用的软指令、运行身份、压缩代次及来源，不拥有提交权。
 @dataclass(frozen=True)
 class _CompactSummaryCall:
     custom_instructions: str = ""
@@ -201,6 +200,8 @@ class _CompactSummaryCall:
     interrupt_check: CompactInterruptCheck | None = None
     source_progress: Callable[[int, int], object] | None = None
     tool_source_records: tuple[dict[str, object], ...] = ()
+    tool_source_ir_history: tuple[object, ...] = ()
+    preserve_complete_fallback: bool = False
 
 
 # LLM: Never derive owner or thread authority from prompt text in this projection.
@@ -763,6 +764,8 @@ def _build_compact_candidate(
             provider_surface=provider_surface,
             interrupt_check=request.interrupt_check,
             tool_source_records=request.tool_source.source_records if request.tool_source is not None else (),
+            tool_source_ir_history=request.tool_source.source_ir_history if request.tool_source is not None else (),
+            preserve_complete_fallback=request.request_projector is not None,
             source_progress=lambda covered, total: _emit_compact_progress(
                 request, phase="progress", stage="summarizing",
                 percent=progress_range[0] + int((progress_range[1] - progress_range[0]) * covered / max(1, total)),
@@ -774,6 +777,7 @@ def _build_compact_candidate(
         request.thread.thread_id, request.thread.compact_generation + 1, summary, tuple(retained_tail),
         evidence, dict(_recent_operation_evidence(retained_tail) or {}), request.policy.trigger_tokens, True,
         retained_tool_records=request.tool_source.retained_records if request.tool_source is not None else None,
+        retained_ir_history=request.tool_source.retained_ir_history if request.tool_source is not None else None,
     ))
     projected_after = projection.projected_tokens if projection is not None else _projected_context_tokens(
         request.agent,
@@ -1030,7 +1034,7 @@ def _projected_context_tokens(
 
 
 # LLM: 摘要为软上下文，操作证据另守权威；原缓存面追加完整工具模型投影，超量沿原分段器。
-# 空文本/工具调用采用机械回退且保留全部工具来源，最终完整容量门裁决；网络异常不提交、不执行工具。
+# 严格恢复空文本/工具调用回退保留旧摘要与全部消息/工具来源，最终容量门裁决；网络异常不提交、不执行工具。
 # 函数用途: 由当前模型合并旧摘要、消息和可选工具来源，再附原文锚点，保持来源与候选一起接受或拒绝。
 def _summarize(
     agent: SimpleAgent,
@@ -1041,9 +1045,11 @@ def _summarize(
     call: _CompactSummaryCall | None = None,
 ) -> str:
     selected_call = call or _CompactSummaryCall()
-    from .compact_tool_summary import carried_compact_source_messages, carried_compact_source_text
+    from ..backends.message_adapter import AnthropicMessageAdapter
+    from .compact_tool_summary import compact_tool_summary_history, compact_tool_summary_text
 
-    tool_source_text = carried_compact_source_text(selected_call.tool_source_records)
+    tool_history = compact_tool_summary_history(selected_call.tool_source_records, selected_call.tool_source_ir_history)
+    tool_source_text = compact_tool_summary_text(tool_history) if tool_history else ""
     provider_surface = selected_call.provider_surface
     foreground_rows = [
         row for row in rows if not is_audit_background_transcript_entry(row)
@@ -1080,7 +1086,7 @@ def _summarize(
         if provider_messages is None:
             prompt = f"{prompt}\n\n{tool_source_text}"
         else:
-            provider_messages = [*provider_messages, *carried_compact_source_messages(tool_source_text)]
+            provider_messages = [*provider_messages, *AnthropicMessageAdapter().to_provider_messages(tool_history)]
     from .auxiliary_model_call import AuxiliaryModelCallRequest
     from .compact_request_budget import generate_bounded_compact_response
 
@@ -1099,6 +1105,7 @@ def _summarize(
         ),
         interrupt_check=selected_call.interrupt_check,
         source_progress=selected_call.source_progress,
+        preserve_complete_fallback=selected_call.preserve_complete_fallback or bool(tool_history),
     )
     summary = (
         ""
@@ -1115,7 +1122,10 @@ def _summarize(
     summary = _summary_with_conversation_landmarks(
         summary, previous_summary, foreground_rows, max_chars=_compact_landmark_max_chars(agent),
     )
-    # 空回复时保留全部工具投影；若机械材料仍太大，由完整容量门拒绝，不能凭缺失内容取得覆盖权。
+    # 完整请求恢复继承旧覆盖权，机械回退必须保留旧摘要及本次全部原文，再由容量门决定能否提交。
+    if mechanical and selected_call.preserve_complete_fallback:
+        original = "\n\n".join([previous_summary, *[f"{row.role}: {row.content}" for row in rows], tool_source_text])
+        return f"{summary}\n\n{original}"
     return f"{summary}\n\n{tool_source_text}" if mechanical and tool_source_text else summary
 
 

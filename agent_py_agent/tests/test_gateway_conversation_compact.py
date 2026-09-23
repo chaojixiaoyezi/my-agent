@@ -532,6 +532,25 @@ def test_compact_keeps_exact_user_and_final_answer_landmarks_when_model_omits_th
     assert "我正在抓取网页，请稍候" not in summary
 
 
+def test_strict_empty_summary_keeps_full_previous_base_and_selected_rows(monkeypatch) -> None:
+    from agent_py_agent.agent.conversation import compact_request_budget
+    from agent_py_agent.agent.conversation.compact import _CompactSummaryCall
+
+    previous = "旧摘要前段" * 1000 + "旧摘要中段唯一标记" + "旧摘要后段" * 1000
+    content = "消息前段" * 1000 + "消息中段唯一标记" + "消息后段" * 1000
+    row = MessageLogEntry(message_id="long-row", thread_id="thread", role="user", content=content)
+    calls = []
+    monkeypatch.setattr(
+        compact_request_budget, "generate_bounded_compact_response",
+        lambda request, **kwargs: calls.append(kwargs) or SimpleNamespace(text="", tool_use_blocks=[]),
+    )
+    result = _summarize(SimpleNamespace(), previous, {}, [row], call=_CompactSummaryCall(
+        preserve_complete_fallback=True,
+    ))
+    assert previous in result and content in result
+    assert calls[0]["preserve_complete_fallback"] is True
+
+
 def test_compact_landmarks_survive_later_generation_without_suffix_duplication() -> None:
     backend = _SummaryBackend()
     agent = SimpleNamespace(backend=backend)

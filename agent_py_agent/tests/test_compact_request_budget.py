@@ -67,6 +67,16 @@ def test_fitting_request_preserves_exact_cache_surface(monkeypatch):
     assert calls[0] is request
 
 
+def test_strict_fitting_summary_rejects_truncated_provider_reply(monkeypatch):
+    calls = []
+    monkeypatch.setattr(budget_module, "generate_auxiliary_model_response", lambda request: calls.append(request)
+                        or ModelResponse(text="看似可用的前半段", backend="fake", truncated=True))
+    with pytest.raises(ConversationCompactError) as error:
+        budget_module.generate_bounded_compact_response(_request("短历史"), preserve_complete_fallback=True)
+    assert error.value.code == "COMPACT_SUMMARY_TRUNCATED"
+    assert len(calls) == 1
+
+
 def test_live_summary_bounds_complete_tool_arguments_results_and_reasoning(monkeypatch):
     call = canonical_history_call(
         "write_file", {"path": "original.txt", "content": "参数🪴" * 2_000}, call_id="large-original-call",
@@ -258,6 +268,24 @@ def test_final_segment_failure_returns_carried_summary_not_raw_reply(monkeypatch
     assert "第一段已确认的摘要" in response.text
     assert "[compact-segment-mechanical-fallback]" in response.text
     assert "只有后半段" not in response.text
+
+
+@pytest.mark.parametrize("response", [
+    ModelResponse(text="", backend="fake"),
+    ModelResponse(text="执行工作", backend="fake", tool_use_blocks=[{"name": "run_command"}]),
+    ModelResponse(text="残缺摘要", backend="fake", truncated=True),
+])
+def test_strict_segment_failure_does_not_claim_mechanical_source_coverage(monkeypatch, response):
+
+    progress = []
+    monkeypatch.setattr(budget_module, "generate_auxiliary_model_response", lambda request: response)
+    with pytest.raises(ConversationCompactError) as error:
+        budget_module.generate_bounded_compact_response(
+            _request("完整工具原文" * 3000), preserve_complete_fallback=True,
+            source_progress=lambda covered, total: progress.append((covered, total)),
+        )
+    assert error.value.code == "COMPACT_SEGMENT_SUMMARY_UNAVAILABLE"
+    assert not any(covered > 0 for covered, _ in progress)
 
 
 def test_auxiliary_success_metrics_are_recorded(monkeypatch):

@@ -20,9 +20,6 @@ from ..tool_request_projection import project_tool_loop_request
 # LLM: 绑定原task/run/attempt与thread；首轮用完整请求自动阈值预检，溢出恢复仍强制提交。
 # 函数用途: 给原子代理模型轮构造公共压缩器，不发网络或改持久状态。
 def prepare_subagent_compact_recovery(agent, current, task, turn, *, progress_callback, interrupt_check, force=True):
-    from ...memory_archive.compact_semantic_summary import semantic_summary_config
-
-    handoff_max_chars = semantic_summary_config(agent).max_input_chars
     # LLM: 只允许当前child的真实参数消费来源，其他局部任务和摘要保持各自路径。
     # 函数用途: 核对子代理、执行轮与独立会话身份。
     def matches(params):
@@ -33,7 +30,7 @@ def prepare_subagent_compact_recovery(agent, current, task, turn, *, progress_ca
     return PreparedCompactRecovery(
         agent, current.compact_source, current, matches, partial(_project_subagent_candidate, agent, current),
         project_active_candidate=partial(
-            _project_subagent_active_candidate, (agent, current, handoff_max_chars),
+            _project_subagent_active_candidate, (agent, current),
         ),
         exclude_request_id=turn.turn_id or turn.attempt_id, progress_callback=progress_callback,
         interrupt_check=interrupt_check, force=force,
@@ -56,12 +53,10 @@ def _project_subagent_candidate(agent, current, params, frozen, view):
     return CompactRecoveryMaterial(candidate, candidate_params, prepared, project_tool_loop_request(prepared))
 
 
-# LLM: 绑定元组冻结原child view和容量；活动候选从它生成摘要/seed，原RunParams第0宿主片段有空占位。
+# LLM: 绑定原child view，活动候选只生成摘要/seed和宿主注入；公共层负责同源IR替换，不能在此另建分区。
 # 函数用途: 把工具交接压缩后的摘要和保留归档投影到已准备的同一子代理模型请求。
 def _project_subagent_active_candidate(binding, params, frozen, summary, retained, generation):
-    from ..compact_active_projection import replace_recovery_active_tools
-
-    agent, current, max_chars = binding
+    agent, current = binding
     application = current.compact_context
     source = current.compact_source
     if application is None or source is None:
@@ -74,9 +69,5 @@ def _project_subagent_active_candidate(binding, params, frozen, summary, retaine
     candidate_params, prepared = replace_recovery_history(
         params, frozen, history_seed=candidate.history_seed, injection=candidate.injection,
         injection_index=0, compact_context=candidate_context,
-    )
-    candidate_params, prepared = replace_recovery_active_tools(
-        candidate_params, prepared, compact_context=candidate_context,
-        retained_records=retained, max_chars=max_chars,
     )
     return CompactRecoveryMaterial(candidate, candidate_params, prepared, project_tool_loop_request(prepared))

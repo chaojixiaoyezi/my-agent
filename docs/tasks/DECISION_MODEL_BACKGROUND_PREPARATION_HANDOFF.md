@@ -118,3 +118,16 @@ detached transcript 压缩推进共享游标，但创建后的全局摘要被原
 剩余风险：真实ToolCall/ToolResult混合来源、超大canonical有界读取、媒体合入和真实供应商cache usage；旧全仓八项失败继续保留。测试机尚未部署。本片不能作为P4全完成或新安装验收。
 
 建议下一步：先补真实IR来源与覆盖合同，再与媒体线合入后做完整容量组合，最后在已授权测试机隔离验收；可由子代理并行审计和写测试，原Compact writer/模型发送安全点由单一owner修改。任何独立测试脚本必须在进程启动前设置独立MY_AGENT_HOME，不能直接调用依赖pytest autouse隔离的fixture。
+
+
+## 原生 IR 来源增量交接（12.4，2026-09-23）
+
+本地增加 `compact_tool_partition.py`，以唯一四元身份和原AssistantTurn时序分组冻结真实工具往返及archive共同来源；CarriedToolCompactSource继续作为同一临时载体，精确retained IR随获选候选一起提交。没有新增状态库、摘要算法或执行路径。
+
+修改范围：公共compact_request_recovery/compact_active_projection、三宿主历史投影、原active/transcript摘要、原分段器和语义摘要回退；测试覆盖分区、投影、真实read_file/recorder→安全点→原单CAS→实际HTTP候选。完整配对回放去重handoff，未完成组不误删；零旧handoff插入剩余archive。严格失败保留全部原文或typed拒绝，原provider截断也拒绝。独立审查未发现本片新增来源遗漏或coverage阻塞；精确联合结果以TESTS为准。
+
+边界：外层overflow重跑agent.run仍从archive重建，原生IR尚未跨该边界保留；新集成只证明已经冻结完整IR的恢复安全点。媒体/超大历史/真实供应商缓存和旧全仓八项失败均保持。主线正在独立发布Shell修复与正式TUI复验，本片不操作共享入口/模型目录/Gateway；测试机1.9已授权，仍无部署重启。
+
+建议下一步：本片验收提交后，由一个owner沿原compact_overflow_carry和运行结果核对原生IR传递边界，再协调媒体线，独立测试可并行；不得把archive preview或上一次失败的未知输入冒充新请求真实材料。保持pytest临时MY_AGENT_HOME，独立脚本须启动前显式隔离。
+
+本片最终39文件1039 passed（136.66秒），日志 `/tmp/compact_ir_final_20260923.log`，文件清单同名 `.files`；本地严格gate通过，历史失败及修订保留在TESTS，无线上CI或安装版验收来源。建议下一步仍按上述外层原生IR传递边界继续，主线串行、审查/测试并行。

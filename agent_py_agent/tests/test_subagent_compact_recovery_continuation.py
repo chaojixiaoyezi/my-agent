@@ -5,7 +5,11 @@ import json
 
 import pytest
 
-from agent_py_agent.agent.agent_core import _tool_loop_service, runtime_mixin
+from agent_py_agent.agent.agent_core import (
+    _tool_loop_service,
+    compact_request_recovery,
+    runtime_mixin,
+)
 from agent_py_agent.agent.agent_core.subagent import compact_recovery
 from agent_py_agent.agent.backends import http
 from agent_py_agent.agent.backends.base import ProviderRequestOptions
@@ -181,6 +185,7 @@ def test_child_active_turn_only(tmp_path, monkeypatch, backend, fail_projection)
     original_compact = active_turn_compact.compact_carried_active_turn_archive
     original_recovery = compact_recovery.prepare_subagent_compact_recovery
     original_project = compact_recovery._project_subagent_active_candidate
+    original_mixed = compact_request_recovery._project_mixed_recovery_material
     original_read = _filesystem_read.ReadFileTool.execute
     def prepare(*args, **kwargs):
         prepares.append(agent.conversation_store.threads.require(task.agent_thread_id).compact_generation)
@@ -199,9 +204,12 @@ def test_child_active_turn_only(tmp_path, monkeypatch, backend, fail_projection)
     def project(*args):
         if fail_projection:
             raise ConversationCompactError('测试child活动候选无法投影', code='COMPACT_REQUEST_PROJECTION_UNKNOWN')
-        value = original_project(*args)
-        candidates.append(value)
-        return value
+        return original_project(*args)
+    def mixed(material, view, max_chars):
+        selected = original_mixed(material, view, max_chars)
+        if view.is_candidate:
+            candidates.append(selected)
+        return selected
     def read(self, params):
         read_calls.append(dict(params))
         return original_read(self, params)
@@ -210,6 +218,7 @@ def test_child_active_turn_only(tmp_path, monkeypatch, backend, fail_projection)
     monkeypatch.setattr(active_turn_compact, 'compact_carried_active_turn_archive', compact)
     monkeypatch.setattr(compact_recovery, 'prepare_subagent_compact_recovery', recovery)
     monkeypatch.setattr(compact_recovery, '_project_subagent_active_candidate', project)
+    monkeypatch.setattr(compact_request_recovery, '_project_mixed_recovery_material', mixed)
     monkeypatch.setattr(_filesystem_read.ReadFileTool, 'execute', read)
     def on_business(_wire, number):
         if number == 2:

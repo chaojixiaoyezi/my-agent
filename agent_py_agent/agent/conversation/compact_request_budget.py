@@ -50,24 +50,28 @@ _SUMMARY_SYSTEM_INSTRUCTION = (
 
 
 # LLM: Fitting requests remain byte-for-byte cache compatible. Only an oversized request or a
-# typed provider overflow enters the bounded summary chain; each call uses the ordinary ledger.
+# typed provider overflow enters the bounded summary chain; strict replacement sources reject degraded excerpts.
 # 函数用途: 窗口够用时沿用单次摘要；不够时逐段覆盖全部历史，避免反复重发超大请求。
 def generate_bounded_compact_response(
     request: AuxiliaryModelCallRequest,
     *,
     interrupt_check: CompactInterruptCheck | None = None,
     source_progress: Callable[[int, int], object] | None = None,
+    preserve_complete_fallback: bool = False,
 ) -> object:
     window = resolve_model_context_window_tokens(request.agent)
     budget = max(1, int(window * 0.8) - max_output_tokens(request.agent))
     raise_if_compact_interrupted(interrupt_check)
     if _request_tokens(request) <= budget:
         try:
-            return generate_auxiliary_model_response(request)
+            response = generate_auxiliary_model_response(request)
+            if preserve_complete_fallback and getattr(response, "truncated", False):
+                raise ConversationCompactError("摘要回复被截断，保留原始来源", code="COMPACT_SUMMARY_TRUNCATED")
+            return response
         except ProviderContextWindowError:
             # 只响应明确的窗口错误；网络、额度、认证等错误不能变成隐式分段重试。
             budget = max(1, budget // 2)
-    return _summarize_segments(request, budget, interrupt_check, source_progress)
+    return _summarize_segments(request, budget, interrupt_check, source_progress, preserve_complete_fallback)
 
 
 # LLM: Count the same complete surface sent by AuxiliaryModelCallRequest, including schemas and
@@ -85,13 +89,14 @@ def _request_tokens(request: AuxiliaryModelCallRequest) -> int:
 # LLM: The source is serialized once, then covered by contiguous character ranges. A segment
 # may split JSON for summarization only, never for execution or native-history persistence.
 # Once partitioned, native history no longer shares the main request prefix. Use a summary-only
-# surface instead of the executor's tools/instructions; keep source and custom summary guidance.
+# surface instead of the executor's tools/instructions; strict fallback failure never grants source coverage.
 # 函数用途: 用不带执行工具的摘要请求顺序读取全部原文，每段携带上段摘要；失败或停止不推进游标。
 def _summarize_segments(
     request: AuxiliaryModelCallRequest,
     budget: int,
     interrupt_check: CompactInterruptCheck | None,
     source_progress: Callable[[int, int], object] | None,
+    preserve_complete_fallback: bool = False,
 ) -> object:
     source = json.dumps(request.messages, ensure_ascii=False) if request.messages is not None else str(request.prompt)
     layout = prompt_cache_layout(request.prompt)
@@ -110,6 +115,8 @@ def _summarize_segments(
         raise_if_compact_interrupted(interrupt_check)
         outcome = _summarize_segment(base, source, offset, summary, budget, interrupt_check)
         summary = outcome.text
+        if outcome.degraded_text and preserve_complete_fallback:
+            raise ConversationCompactError("分段摘要失败，不能用截短摘录覆盖原始来源", code="COMPACT_SEGMENT_SUMMARY_UNAVAILABLE")
         if outcome.degraded_text:
             digests.append(outcome.degraded_text)
         offset = outcome.end

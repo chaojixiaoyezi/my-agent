@@ -77,7 +77,7 @@ def test_constructed_source_detaches_nested_records_and_refs_from_caller():
 
 @pytest.mark.parametrize("invalid", [
     "missing_source_ref", "extra_source_ref", "cross_partition", "duplicate_source",
-    "duplicate_retained", "unknown_source", "empty_source",
+    "unknown_source", "empty_source",
 ])
 def test_source_object_rejects_unread_or_ambiguous_coverage(invalid):
     first = _record("call-1", attempt="attempt-1", turn="turn-1")
@@ -97,8 +97,6 @@ def test_source_object_rejects_unread_or_ambiguous_coverage(invalid):
         args["retained_tool_refs"] = (first_ref,)
     elif invalid == "duplicate_source":
         args["source_records"] = (first, deepcopy(first))
-    elif invalid == "duplicate_retained":
-        args["retained_records"] = (second, deepcopy(second))
     elif invalid == "unknown_source":
         args["source_records"] = ({"call_id": "legacy"},)
     else:
@@ -108,6 +106,18 @@ def test_source_object_rejects_unread_or_ambiguous_coverage(invalid):
     with pytest.raises(ConversationCompactError) as error:
         CarriedToolCompactSource(**args)
     assert error.value.code == "COMPACT_TOOL_COVERAGE_UNKNOWN"
+
+
+def test_source_keeps_duplicate_retained_records_without_granting_coverage():
+    first = _record("call-1", attempt="attempt-1", turn="turn-1")
+    second = _record("call-2", attempt="attempt-2", turn="turn-2")
+    keys = ("run_id", "attempt_id", "turn_id", "call_id")
+    source = CarriedToolCompactSource(
+        (first,), (second, deepcopy(second)),
+        ({key: first[key] for key in keys},), ({key: second[key] for key in keys},),
+    )
+    assert source.retained_records == (second, second)
+    assert len(source.retained_tool_refs) == 1
 
 
 def test_partition_rejects_duplicate_exact_identity_but_accepts_reused_bare_call_id():

@@ -53,7 +53,7 @@ class ActiveTurnArchiveCompactResult:
     request_projection: ConversationCompactProjection | None = None
 
 
-# LLM: 纯来源分区只含模型可见工具记录及精确四元引用；未知旧记录保留在retained，不能获摘要覆盖权。
+# LLM: 同一临时来源包含归档与原生IR精确分区；完整正文和四元ref同进同退，未知或重复旧记录留在retained。
 # 类用途: 冻结一次工具压缩的被替代区和保留区，供活动归档与混合来源共用同一选择结果。
 @dataclass(frozen=True)
 class CarriedToolCompactSource:
@@ -61,26 +61,40 @@ class CarriedToolCompactSource:
     retained_records: tuple[dict[str, object], ...]
     source_tool_refs: tuple[dict[str, str], ...]
     retained_tool_refs: tuple[dict[str, str], ...]
+    source_ir_history: tuple[object, ...] = ()
+    retained_ir_history: tuple[object, ...] | None = None
 
     # LLM: 原archive及嵌套model_parameters以后可能改写；分区对象必须和入参完全隔离，且不新增持久权威。
     # 函数用途: 核对摘要素材与可覆盖refs完全一致并复制嵌套容器，防止未读工具获得覆盖权。
     def __post_init__(self) -> None:
-        for name in ("source_records", "retained_records", "source_tool_refs", "retained_tool_refs"):
+        for name in ("source_records", "retained_records", "source_tool_refs", "retained_tool_refs", "source_ir_history"):
             object.__setattr__(self, name, tuple(deepcopy(getattr(self, name))))
+        if self.retained_ir_history is not None:
+            object.__setattr__(self, "retained_ir_history", tuple(deepcopy(self.retained_ir_history)))
+        ir_source_refs, ir_retained_refs = (), ()
+        if self.source_ir_history or self.retained_ir_history is not None:
+            from ..agent_core.compact_tool_partition import recovery_ir_tool_refs
+
+            if self.retained_ir_history is None:
+                raise ConversationCompactError("原生工具来源缺少保留区", code="COMPACT_TOOL_COVERAGE_UNKNOWN")
+            ir_source_refs = recovery_ir_tool_refs(self.source_ir_history, require_complete=True)
+            ir_retained_refs = recovery_ir_tool_refs(self.retained_ir_history)
         source_keys = [compact_tool_ref_key(item) for item in self.source_records]
-        retained_keys = [compact_tool_ref_key(item) for item in self.retained_records]
-        known_retained = [item for item, key in zip(self.retained_records, retained_keys) if key is not None]
+        known_retained = [item for item in self.retained_records if compact_tool_ref_key(item) is not None]
+        source_refs = compact_tool_refs([*self.source_records, *ir_source_refs])
+        retained_refs = compact_tool_refs([*known_retained, *ir_retained_refs])
         if (
-            not self.source_records
+            not source_refs
             or any(not isinstance(item, dict) for item in (*self.source_records, *self.retained_records))
             or any(key is None for key in source_keys)
             or len(set(source_keys)) != len(source_keys)
-            or len({key for key in retained_keys if key is not None}) != len(known_retained)
-            or not set(source_keys).isdisjoint(key for key in retained_keys if key is not None)
-            or self.source_tool_refs != compact_tool_refs(list(self.source_records))
-            or self.retained_tool_refs != compact_tool_refs(known_retained)
+            or not {compact_tool_ref_key(ref) for ref in source_refs}.isdisjoint(
+                compact_tool_ref_key(ref) for ref in retained_refs)
+            or self.source_tool_refs != source_refs
+            or self.retained_tool_refs != retained_refs
         ):
             raise ConversationCompactError("工具压缩来源与覆盖引用不一致", code="COMPACT_TOOL_COVERAGE_UNKNOWN")
+
 
 
 # LLM: 按原四元身份划区，未知原序保留；内部近期预算0明确不保留已知尾部，供强制完整恢复使用。
@@ -132,6 +146,7 @@ class ActiveTurnArchiveCompactRequest:
     ] | None = None
     projected_tokens_before: int | None = None
     provider_surface: ConversationCompactProviderSurface | None = None
+    tool_source: CarriedToolCompactSource | None = None
 
 
 # LLM: This candidate freezes one exact checkpoint boundary before the summary model call. The
@@ -151,6 +166,7 @@ class _ActiveTurnArchiveCompactPlan:
     retained_tool_refs: tuple[dict[str, str], ...]
     projected_tokens_before: int
     progress: dict[str, object]
+    source_ir_history: tuple[object, ...] = ()
 
 
 # LLM: Runtime authority keeps all records. Explicit context hides only its own view refs;
@@ -202,7 +218,7 @@ def compact_carried_active_turn_archive(
         records,
         compact_context=request.compact_context,
     )
-    if not any(compact_tool_ref_key(item) is not None for item in visible):
+    if request.tool_source is None and not any(compact_tool_ref_key(item) is not None for item in visible):
         return ActiveTurnArchiveCompactResult(thread=thread)
 
     from ..agent_core.runtime.context_compactor import runtime_compact_policy
@@ -223,9 +239,18 @@ def compact_carried_active_turn_archive(
         return ActiveTurnArchiveCompactResult(thread=thread)
     if binding.thread.thread_id != thread.thread_id or binding.store is not store:
         raise OSError("active-turn compact binding does not match the caller thread")
-    source = partition_carried_tool_records(
-        visible, recent_tail_tokens=0 if request.request_projector is not None else policy.recent_tail_tokens,
-    )
+    source = request.tool_source
+    if source is not None:
+        from .compact import ConversationCompactOptions, _validate_compact_tool_source
+
+        _validate_compact_tool_source(
+            ConversationCompactOptions(tool_source=source, request_projector=request.request_projector),
+            request.compact_context,
+        )
+    else:
+        source = partition_carried_tool_records(
+            visible, recent_tail_tokens=0 if request.request_projector is not None else policy.recent_tail_tokens,
+        )
     if source is None:
         return ActiveTurnArchiveCompactResult(thread=thread)
     plan = _build_active_turn_compact_plan(
@@ -261,6 +286,7 @@ def _build_active_turn_compact_plan(
         policy=policy,
         visible_records=tuple(deepcopy(visible)),
         source_records=source.source_records,
+        source_ir_history=source.source_ir_history,
         source_call_ids=source_ids,
         source_tool_refs=source_refs,
         retained_records=source.retained_records,
@@ -408,7 +434,6 @@ def _active_turn_replacement_summary(
     plan: _ActiveTurnArchiveCompactPlan,
     request: ActiveTurnArchiveCompactRequest,
 ) -> str:
-    from ..backends.tool_ir import RuntimeFactsTurn
     from ..memory_archive.compact_semantic_summary import (
         LiveToolHistorySummaryRequest,
         semantic_summary_config,
@@ -418,13 +443,13 @@ def _active_turn_replacement_summary(
         conversation_compact_provider_messages,
         conversation_compact_provider_prompt,
     )
-    from .compact_tool_summary import carried_compact_source_text
+    from .compact_tool_summary import compact_tool_summary_history
 
     config = semantic_summary_config(agent)
     if not config.enabled:
         raise ValueError("active-turn carried compact semantic summary is disabled")
     scope_id = str(getattr(plan.thread, "workspace_task_id", "") or "")
-    source_text = carried_compact_source_text(plan.source_records)
+    source_history = compact_tool_summary_history(plan.source_records, plan.source_ir_history)
     context = request.compact_context
     previous_summary = str(context.view.summary if context is not None else plan.thread.summary or "")
     surface = request.provider_surface
@@ -434,7 +459,8 @@ def _active_turn_replacement_summary(
     )) if surface is not None else ()
     replacement = summarize_live_tool_history(
         LiveToolHistorySummaryRequest(
-            history=[RuntimeFactsTurn(source_text, source="compact_tool_source")],
+            history=source_history,
+            preserve_complete_fallback=request.request_projector is not None,
             backend=getattr(agent, "backend", None),
             agent=agent,
             request_id=str(request.request_id or ""),

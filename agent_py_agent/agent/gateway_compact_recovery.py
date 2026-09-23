@@ -24,9 +24,6 @@ from .gateway_parts import request_binding, request_context, request_prompt
 # 函数用途: 为一次Gateway恢复组装原历史投影和成功边界回调，公共恢复器负责实际提交。
 def prepare_gateway_compact_recovery(context, conversation, *, force=True):
     from .gateway_parts.request_execution import _publish_gateway_compact_boundary
-    from .memory_archive.compact_semantic_summary import semantic_summary_config
-
-    handoff_max_chars = semantic_summary_config(context.agent).max_input_chars
 
     # LLM: 匹配结构化身份，不从提示正文认领来源，task_local保持独立。
     # 函数用途: 把完整恢复限制到当前Gateway请求。
@@ -38,7 +35,7 @@ def prepare_gateway_compact_recovery(context, conversation, *, force=True):
         context.agent, conversation.compact_source, conversation, matches,
         partial(_project_recovery_candidate, context, conversation), exclude_request_id=context.request_id,
         project_active_candidate=partial(
-            _project_gateway_active_candidate, (context, conversation, handoff_max_chars),
+            _project_gateway_active_candidate, (context, conversation),
         ),
         progress_callback=request_context._gateway_compact_progress_callback(
             context.on_chunk, store=context.agent.conversation_store, thread=conversation.compact_source.thread,
@@ -81,12 +78,10 @@ def _project_recovery_candidate(context, conversation, params, frozen, view):
     return CompactRecoveryMaterial(candidate, candidate_params, prepared, project_tool_loop_request(prepared))
 
 
-# LLM: 绑定元组冻结原host、scope/view与容量；活动候选替换摘要和首会话注入后交公共IR投影。
+# LLM: 绑定原host和scope/view；只替换摘要与会话注入，公共层随后按同一来源替换工具IR。
 # 函数用途: 空历史但已有活动工具时，以同一候选材料计量并准备提交后的业务请求。
 def _project_gateway_active_candidate(binding, params, frozen, summary, retained, generation):
-    from .agent_core.compact_active_projection import replace_recovery_active_tools
-
-    context, conversation, max_chars = binding
+    context, conversation = binding
     application = conversation.compact_context
     if application is None:
         raise ConversationCompactError("缺少原 Compact 应用范围", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
@@ -101,9 +96,5 @@ def _project_gateway_active_candidate(binding, params, frozen, summary, retained
         params, frozen, history_seed=seed, compact_context=candidate_context,
         injection=request_prompt._conversation_prompt_section(candidate, work_scope=work_scope, include_transcript=False),
         injection_index=len(context.request.get("inject", [])),
-    )
-    candidate_params, prepared = replace_recovery_active_tools(
-        candidate_params, prepared, compact_context=candidate_context,
-        retained_records=retained, max_chars=max_chars,
     )
     return CompactRecoveryMaterial(candidate, candidate_params, prepared, project_tool_loop_request(prepared))

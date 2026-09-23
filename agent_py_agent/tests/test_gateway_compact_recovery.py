@@ -228,13 +228,13 @@ def test_initial_without_compactable_source_can_adopt_larger_model(tmp_path, mon
     evaluated = []
     original = recovery.PreparedCompactRecovery._automatic_noop
 
-    def check(self, params, frozen):
+    def check(self, frozen, tool_source):
         projection = project_tool_loop_request(frozen)
         tokens, _ = projected_model_context_components(projection)
         evaluated.append((tokens, self.source.policy.trigger_tokens,
                           model_request_input_ceiling(self.agent, self.source.policy.context_window_tokens)))
-        assert not self.source.messages and not params.archive_tool_calls
-        return original(self, params, frozen)
+        assert not self.source.messages and tool_source is None
+        return original(self, frozen, tool_source)
 
     monkeypatch.setattr(recovery.PreparedCompactRecovery, "_automatic_noop", check)
     business, _ = fake_http(monkeypatch, fixture)

@@ -6,11 +6,16 @@ from functools import partial
 
 import pytest
 
-from agent_py_agent.agent.agent_core import runtime_mixin
+from agent_py_agent.agent.agent_core import compact_request_recovery, runtime_mixin
 from agent_py_agent.agent.agent_core.tool_request_projection import project_tool_loop_request
 from agent_py_agent.agent.backends.base import ProviderRequestOptions
 from agent_py_agent.agent.backends.errors import ProviderContextWindowError, ProviderTransientError
-from agent_py_agent.agent.backends.tool_ir import AssistantTurn, CompactionSummary, ToolResult
+from agent_py_agent.agent.backends.tool_ir import (
+    AssistantTurn,
+    CompactionSummary,
+    ToolResult,
+    UserTurn,
+)
 from agent_py_agent.agent.conversation import (
     active_turn_compact,
     background_compact_recovery,
@@ -371,6 +376,7 @@ def test_active_archive_recovery_sends_selected_wire(tmp_path, monkeypatch, back
         tmp_path, backend=backend, narrow=narrow,
     )
     original_project = background_compact_recovery._project_background_active_candidate
+    original_mixed = compact_request_recovery._project_mixed_recovery_material
     original_summary = active_turn_compact._active_turn_replacement_summary
     candidates, sent_business, sent_summaries = [], [], []
     in_summary = False
@@ -382,9 +388,13 @@ def test_active_archive_recovery_sends_selected_wire(tmp_path, monkeypatch, back
         assert not any(isinstance(item, ToolResult) or (
             isinstance(item, AssistantTurn) and item.tool_calls
         ) for item in frozen_ir)
-        material = original_project(*args)
-        candidates.append(material)
-        return material
+        return original_project(*args)
+
+    def mixed(material, view, max_chars):
+        selected = original_mixed(material, view, max_chars)
+        if view.is_candidate:
+            candidates.append(selected)
+        return selected
 
     def summary(*args, **kwargs):
         nonlocal in_summary
@@ -395,6 +405,7 @@ def test_active_archive_recovery_sends_selected_wire(tmp_path, monkeypatch, back
             in_summary = False
 
     monkeypatch.setattr(background_compact_recovery, "_project_background_active_candidate", project)
+    monkeypatch.setattr(compact_request_recovery, "_project_mixed_recovery_material", mixed)
     monkeypatch.setattr(active_turn_compact, "_active_turn_replacement_summary", summary)
 
     def on_business(wire, _number):
@@ -447,16 +458,32 @@ def test_active_archive_recovery_sends_selected_wire(tmp_path, monkeypatch, back
 
 
 @pytest.mark.parametrize("failure", [
-    "candidate_too_large", "unknown_handoff", "summary_failure", "candidate_cancel", "generation_race",
+    "candidate_too_large", "unread_retained_ir", "summary_failure", "candidate_cancel", "generation_race",
 ])
 def test_uncommitted_active_recovery_sends_no_restored_business(tmp_path, monkeypatch, failure):
     agent, store, thread, request, execution, sink, _, _ = _active_background(
         tmp_path, backend="anthropic_compatible", narrow=True,
     )
     original_project = background_compact_recovery._project_background_active_candidate
+    original_mixed = compact_request_recovery._project_mixed_recovery_material
     original_summary = active_turn_compact._active_turn_replacement_summary
     sent_business, sent_summaries = [], []
+    projected_candidates = []
     in_summary = False
+
+    if failure == "unread_retained_ir":
+        from agent_py_agent.agent.agent_core.runtime import loop_support
+
+        original_initial_ir = loop_support._native_initial_tool_ir_history
+
+        def initial_ir_with_unread(*args, **kwargs):
+            history = original_initial_ir(*args, **kwargs)
+            if sent_business:
+                # 真实native初始化后的未覆盖用户原文属于下一次请求，不得被archive摘要隐藏。
+                history.append(UserTurn("未覆盖的用户原文。" * 120_000))
+            return history
+
+        monkeypatch.setattr(loop_support, "_native_initial_tool_ir_history", initial_ir_with_unread)
 
     def project(*args):
         if failure == "candidate_cancel":
@@ -466,14 +493,13 @@ def test_uncommitted_active_recovery_sends_no_restored_business(tmp_path, monkey
                 current, compact_generation=current.compact_generation + 1,
                 summary="另一个提交者已经获胜",
             ))
-        if failure == "unknown_handoff":
-            changed = tuple(
-                replace(item, source="") if isinstance(item, CompactionSummary)
-                and item.source == "carried_tool_handoff" else item
-                for item in args[3].tool_ir_history
-            )
-            args = (*args[:3], replace(args[3], tool_ir_history=changed), *args[4:])
         return original_project(*args)
+
+    def mixed(material, view, max_chars):
+        selected = original_mixed(material, view, max_chars)
+        if view.is_candidate:
+            projected_candidates.append(selected)
+        return selected
 
     def summary(*args, **kwargs):
         nonlocal in_summary
@@ -492,6 +518,7 @@ def test_uncommitted_active_recovery_sends_no_restored_business(tmp_path, monkey
             lambda *args: 1 if sent_business else original_ceiling(*args),
         )
     monkeypatch.setattr(background_compact_recovery, "_project_background_active_candidate", project)
+    monkeypatch.setattr(compact_request_recovery, "_project_mixed_recovery_material", mixed)
     monkeypatch.setattr(active_turn_compact, "_active_turn_replacement_summary", summary)
 
     def on_business(wire, _number):
@@ -512,6 +539,10 @@ def test_uncommitted_active_recovery_sends_no_restored_business(tmp_path, monkey
     assert len(sent_business) == 1
     assert len(sent_summaries) == (0 if failure == "summary_failure" else 1)
     assert len(business) == 1 + len(sent_summaries)
+    if failure == "unread_retained_ir":
+        assert len(projected_candidates) == 1
+        assert any(isinstance(item, UserTurn) and "未覆盖的用户原文" in item.text
+                   for item in projected_candidates[0].request_input.tool_ir_history)
     committed = store.threads.require(thread.thread_id)
     assert committed.compact_generation == (1 if failure == "generation_race" else 0)
     if failure == "generation_race":

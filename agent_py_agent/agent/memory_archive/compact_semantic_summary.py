@@ -35,9 +35,10 @@ from __future__ import annotations
     摘要调用异常、供应商超时或空结果时返回 None,调用方按原
     ``_reconstructed_tool_context_entry`` 逐条重建。
   - persistent + transcript-authoritative 的 live native IR 压缩不能在删历史后静默降级：
-    transport/调用异常继续在变更 IR 前失败，checkpoint/CAS 失败继续恢复原 IR；只有供应商
-    请求已经正常结束但正文为空时，才从 typed IR 构造有界机械替代摘要，避免空回复粗暴打断
-    主代理。辅助/no-save 回合仍可使用临时摘要和有界机械窗口。
+    transport/调用异常继续在变更 IR 前失败，checkpoint/CAS 失败继续恢复原 IR；供应商
+    请求正常结束但正文为空或形状无效时，从 typed IR 构造机械替代摘要。完整来源模式在
+    有界概览后附原 adapter 的全量模型可见序列，由外层容量门拒绝装不下的候选；辅助/no-save
+    回合仍可使用临时摘要和有界机械窗口。
 """
 
 import json
@@ -154,8 +155,8 @@ class SemanticSummaryRequest:
     task_id: str = ""
 
 
-# LLM: live 候选携带原历史和只读停止回调；分段必须观察同一 run/线程取消，不能在部分摘要成功后回收历史。
-# 类用途: 给运行中压缩提供旧摘要、当前工具历史、任务要求及停止信号，避免跨代丢失和取消后继续请求。
+# LLM: live 候选携带原历史和只读停止回调；完整机械回退只由显式开关启用，分段仍观察同一取消信号。
+# 类用途: 给运行中压缩提供旧摘要、工具历史与任务要求；调用方可要求空白/无效摘要保留完整模型可见来源。
 @dataclass(frozen=True)
 class LiveToolHistorySummaryRequest:
     """同一 thread 的旧摘要与 native IR 在回收工具对前生成替代摘要所需的输入。"""
@@ -174,6 +175,7 @@ class LiveToolHistorySummaryRequest:
     tools: tuple[dict[str, Any], ...] = field(default_factory=tuple)
     system_instruction: str = ""
     interrupt_check: Callable[[], bool] | None = None
+    preserve_complete_fallback: bool = False
 
 
 def semantic_summary_config(agent: object) -> SemanticSummaryConfig:
@@ -208,8 +210,8 @@ def summarize_carried_tool_context(
         return None
 
 
-# LLM: live 摘要够用时保持原 model/system/tools/message 前缀，超窗复用原连续分段；返回工具调用不执行，异常或停止不授权改写 IR。
-# 函数用途: 对完整原生历史生成可续接摘要；真实请求保持窗口边界，全部完成并复核停止后才返回候选。
+# LLM: live 摘要够用时保持原 model/system/tools/message 前缀；空白或无效回复按请求开关保留完整来源，异常或停止不授权改写 IR。
+# 函数用途: 对完整原生历史生成可续接摘要；原请求正常结束并复核停止后才返回候选，由外层容量门裁决大小。
 def summarize_live_tool_history(request: LiveToolHistorySummaryRequest) -> str:
     from ..conversation.compact_guard import raise_if_compact_interrupted
 
@@ -281,10 +283,8 @@ def summarize_live_tool_history(request: LiveToolHistorySummaryRequest) -> str:
     )
 
 
-# LLM: This fallback is built only from typed native IR after a successful provider call returned
-# no text. It is bounded, redacted through the existing output projector, and never becomes status
-# authority; canonical archives, ledgers, refs, and files remain authoritative.
-# 函数用途: 模型完成 Compact 请求却没给正文时，机械保留当前任务、插话、调用状态和最近结果，避免主代理被空摘要打断。
+# LLM: 默认机械投影保持原有界语义；显式完整回退另附旧摘要全文及原adapter序列，不截断继承覆盖或选中IR正文。
+# 函数用途: 模型返回空白或无效摘要时保留当前任务和工具结果；完整模式交由外层容量门裁决能否提交。
 def _mechanical_live_tool_history_summary(
     request: LiveToolHistorySummaryRequest,
     *,
@@ -369,7 +369,14 @@ def _mechanical_live_tool_history_summary(
                 f"operation_id={operation_id or '-'} effect_outcome={item.effect_outcome or '-'} "
                 f"refs={_bounded_inline(refs, 500)} output={_bounded_inline(projected, 900)}"
             )
-    return _bounded_head_tail_text("\n".join(rows), limit)
+    bounded = _bounded_head_tail_text("\n".join(rows), limit)
+    if not request.preserve_complete_fallback:
+        return bounded
+    from ..conversation.compact_tool_summary import compact_tool_summary_text
+
+    complete_previous = str(request.previous_summary or "")
+    inherited = f"\n- complete_previous_summary:\n{complete_previous}" if complete_previous else ""
+    return f"{bounded}{inherited}\n- complete_model_visible_history:\n{compact_tool_summary_text(request.history)}"
 
 
 # LLM: Live Compact accepts one plain-text handoff schema only. Rejecting provider tool syntax and
@@ -766,7 +773,7 @@ def _resolve_generate(
     return _call
 
 
-# LLM: 真实 live 请求共用 conversation 的有界摘要发送及逐段停止检查；普通可容纳请求面不变，分段只生成候选且不执行工具。
+# LLM: 真实 live 请求共用有界摘要发送及逐段停止检查；完整回退模式禁止分段机械截短被当作成功摘要。
 # 函数用途: 把摘要要求放到原生历史末尾，按当前窗口完整覆盖后返回正文，失败直接交原 Compact 事务处理。
 def _resolve_generate_with_messages(
     request: LiveToolHistorySummaryRequest,
@@ -818,6 +825,7 @@ def _resolve_generate_with_messages(
                     purpose="compact_live_tool_summary",
                 ),
                 interrupt_check=request.interrupt_check,
+                preserve_complete_fallback=request.preserve_complete_fallback,
             )
         else:
             kwargs: dict[str, object] = {"messages": compact_messages}

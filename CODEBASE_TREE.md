@@ -194,7 +194,8 @@ agent_py_agent/
 |   |   |-- cli_run_conversation.py     # 一次性 CLI 的权威 user/assistant transcript、幂等身份与失败分级
 |   |   |-- tool_request_capture.py    # 从真实运行参数共用捕获完整请求，不重复目录或上下文准备
 |   |   |-- compact_request_recovery.py # 三宿主一次准备、完整候选计量和原CAS后同次发送
-|   |   |-- compact_active_projection.py # 纯替换已标记的活动归档交接，保留原工具账和媒体插话
+|   |   |-- compact_active_projection.py # 精确保留IR与归档交接投影，保留原工具账和媒体插话
+|   |   |-- compact_tool_partition.py # 原生工具完整往返与归档同源分区，不完整和未知材料保留
 |   |   |-- subagent/compact_recovery.py # child独立历史与固定注入位置到公共完整恢复器的适配
 |   |   |-- tool_request_projection.py # 冻结完整 prompt/schema/IR 的纯请求投影，缺事实返回 typed unknown
 |   |   |-- subagent/model_selection.py # 首个真实子代理模型请求的宿主资格、持久选择及失败保留协调
@@ -579,6 +580,8 @@ agent_py_agent/
 |   |-- test_active_turn_compact_projection.py # 活动归档完整容量、取消、CAS及局部证据继承
 |   |-- test_gateway_child_compact_scope_application.py # Gateway和child共用view、交错游标及Audit范围隔离
 |   |-- test_compact_tool_source.py      # 同一纯来源分区、完整身份与未知保留、快照隔离
+|   |-- test_compact_tool_partition.py   # 原生完整配对、跨轮同名调用、未知/媒体/孤儿保留
+|   |-- test_compact_native_ir_recovery.py # 真实读文件原生回执、恢复安全点、原CAS及候选HTTP对等
 |   |-- test_mixed_compact_contract.py   # 双来源机械回退、整包候选回退与取消零提交
 |   |-- test_mixed_compact_recovery.py   # 两协议混合候选和实际HTTP对照、双覆盖及失败不发送
 |   |-- test_compact_tool_provenance.py  # 原归档索引四元身份、同名调用保留与产物不覆盖
@@ -1088,3 +1091,5 @@ docs/
 - `agent_py_agent/agent/conversation/background_compact_recovery.py`：将后台已准备上下文、同scope历史或活动归档投影为公共恢复候选，不拥有调度和投递状态。
 
 - `agent_py_agent/agent/conversation/compact_tool_summary.py`：完整渲染被选工具的原模型可见投影，供transcript和活动归档共用原分段摘要；不读外置全文，不将展示截断当作来源覆盖。
+
+- `agent_py_agent/agent/agent_core/compact_tool_partition.py`：复用原 ToolCall 四元身份与时序配对，冻结真实 IR/归档的共同来源及保留区；不读存储、不调用模型、不新增持久状态。

@@ -28,6 +28,7 @@ from agent_py_agent.agent.conversation.compact_summary_view import (
     AppliedCompactContext,
     CompactSummaryView,
 )
+from agent_py_agent.agent.tooling.runtime_contracts import ToolContentBlock
 
 
 # LLM: 测试的完整archive多于模型保留集，候选只能减少展示，不可缩短预算和审批事实。
@@ -182,6 +183,48 @@ def test_guidance_already_in_ir_is_not_forwarded_again():
         tool_context=prepared.tool_context, forwarded_guidance=prepared.forwarded_guidance,
     )
     assert str(messages).count("本轮未转发的运行时指引") == 1
+
+
+@pytest.mark.parametrize("complete", [False, True])
+def test_explicit_retained_ir_deduplicates_only_complete_exact_replay(complete):
+    context, params, frozen, records = _fixture()
+    records[0].update(run_id="run-1", attempt_id="attempt-1", turn_id="turn-1")
+    records[0]["model_summary"] = "归档回执标记"
+    call = ToolCall("call-a", "read_file", {}, "native", "sha256:test", "run-1", "turn-1", "attempt-1")
+    tail = [AssistantTurn(tool_calls=[call])]
+    if complete:
+        tail.append(ToolResult("call-a", "read_file", "succeeded", (
+            ToolContentBlock("text", text="原生回执全文标记"),
+        )))
+    retained_ir = (UserTurn("原任务"), *tail, RuntimeFactsTurn("后续指引", source="runtime.guidance"))
+    before = deepcopy(retained_ir)
+    candidate, prepared = replace_recovery_active_tools(
+        params, frozen, compact_context=context, retained_records=records,
+        retained_ir_history=retained_ir, max_chars=2_000,
+    )
+    messages = project_native_provider_messages(
+        prepared.tool_ir_history, prior_messages=prepared.provider_history_messages,
+        tool_context=prepared.tool_context, forwarded_guidance=prepared.forwarded_guidance,
+    )
+    assert ("归档回执标记" in str(messages)) is not complete
+    assert ("原生回执全文标记" in str(messages)) is complete
+    assert prepared.tool_ir_history[-len(tail) - 1:] == (*tail, retained_ir[-1])
+    assert retained_ir == before
+    assert candidate.archive_tool_calls is params.archive_tool_calls
+
+
+def test_explicit_retained_archive_is_inserted_without_an_original_handoff():
+    context, params, frozen, records = _fixture()
+    retained_ir = (UserTurn("原任务"), UserTurn("后续插话"), RuntimeFactsTurn("后续事实", source="runtime.state"))
+    _, prepared = replace_recovery_active_tools(
+        params, frozen, compact_context=context, retained_records=records,
+        retained_ir_history=retained_ir, max_chars=2_000,
+    )
+    assert prepared.tool_ir_history[0] == retained_ir[0]
+    assert prepared.tool_ir_history[1].source == "applied_compact"
+    assert prepared.tool_ir_history[2].source == "carried_tool_handoff"
+    assert "保留的结果" in prepared.tool_ir_history[2].text
+    assert prepared.tool_ir_history[3:] == retained_ir[1:]
 
 
 @pytest.mark.parametrize("mutation", [

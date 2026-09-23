@@ -8,7 +8,9 @@ from dataclasses import replace
 from ..backends.tool_ir import AssistantTurn, CompactionSummary, ToolResult, UserTurn
 from ..conversation.compact_guard import ConversationCompactError
 from ..conversation.compact_summary_view import AppliedCompactContext
+from ..conversation.compact_tool_identity import compact_tool_ref_key
 from ..conversation.tool_context_window import native_carried_tool_handoff
+from .compact_tool_partition import recovery_complete_ir_tool_refs
 from .runtime.conversation_state import (
     conversation_runtime_state_section,
     record_conversation_compact_generation,
@@ -18,7 +20,7 @@ from .tool_ir_guidance import unforwarded_runtime_guidance
 from .tool_request_projection import ToolLoopRequestInput
 
 
-# LLM: 只认原构造点写入的 source，不识别正文标记；混入真实调用对或缺旧交接时必须拒绝候选。
+# LLM: 只认原构造点source；IR使用同一来源精确保留区，完整原生回放去重交接；没有交接标记时插入残留归档，不丢未覆盖材料。
 # 函数用途: 以保留的归档记录重建模型可见交接，并同步IR、工具文本和Compact代次的冻结副本。
 def replace_recovery_active_tools(
     params: object,
@@ -27,6 +29,7 @@ def replace_recovery_active_tools(
     compact_context: AppliedCompactContext,
     retained_records: list[dict[str, object]] | tuple[dict[str, object], ...],
     max_chars: int,
+    retained_ir_history: tuple[object, ...] | None = None,
 ) -> tuple[object, ToolLoopRequestInput]:
     if (
         not isinstance(compact_context, AppliedCompactContext)
@@ -45,7 +48,7 @@ def replace_recovery_active_tools(
     ):
         raise ConversationCompactError("恢复活动工具输入未知", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
 
-    history = list(frozen.tool_ir_history)
+    history = list(frozen.tool_ir_history if retained_ir_history is None else retained_ir_history)
     handoff_positions = [
         index for index, item in enumerate(history)
         if isinstance(item, CompactionSummary) and item.source == "carried_tool_handoff"
@@ -55,15 +58,17 @@ def replace_recovery_active_tools(
         if isinstance(item, CompactionSummary) and item.source == "applied_compact"
     ]
     if (
-        len(handoff_positions) != 1
+        len(handoff_positions) > 1
+        or (retained_ir_history is None and len(handoff_positions) != 1)
         or len(applied_positions) > 1
-        or any(isinstance(item, ToolResult) or (
+        or (retained_ir_history is None and any(isinstance(item, ToolResult) or (
             isinstance(item, AssistantTurn) and item.tool_calls
-        ) for item in history)
+        ) for item in history))
     ):
         raise ConversationCompactError("恢复活动工具IR不可替换", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
 
-    retained = list(retained_records)
+    replayed = {compact_tool_ref_key(ref) for ref in recovery_complete_ir_tool_refs(history)}
+    retained = [record for record in retained_records if compact_tool_ref_key(record) not in replayed]
     model_tool_context = reconstructed_model_tool_context(
         retained,
         agent=None,
@@ -78,6 +83,32 @@ def replace_recovery_active_tools(
     model_tool_context.extend(unforwarded_runtime_guidance(
         list(frozen.tool_context), set(frozen.forwarded_guidance or ()),
     ))
+    projected_ir = _replace_compact_history(history, params, compact_context, handoff)
+
+    candidate_params = replace(
+        params,
+        tool_ir_history=deepcopy(projected_ir),
+        provider_history_messages=deepcopy(list(frozen.provider_history_messages)),
+        tool_context=deepcopy(model_tool_context),
+        live_archive_state=deepcopy(params.live_archive_state),
+    )
+    if not record_conversation_compact_generation(
+        candidate_params, compact_context.view.generation, canonical=True,
+    ):
+        raise ConversationCompactError("恢复Compact代次倒退", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
+    prepared = replace(
+        frozen,
+        tool_ir_history=tuple(candidate_params.tool_ir_history),
+        provider_history_messages=tuple(candidate_params.provider_history_messages),
+        tool_context=tuple(candidate_params.tool_context),
+        conversation_state=conversation_runtime_state_section(candidate_params),
+    )
+    return candidate_params, prepared
+
+
+# LLM: 来源已在调用方核验；仅替换结构化摘要，初次交接按原布局插入，其它IR项和相对顺序保持。
+# 函数用途: 纯计算新摘要与保留工具交接的IR位置，不改原历史、不读存储也不发布覆盖。
+def _replace_compact_history(history, params, compact_context, handoff):
     needs_ir_summary = getattr(params, "conversation_history_seed", None) is None
     summary_text = str(compact_context.view.summary or "").strip()
     applied = CompactionSummary(
@@ -99,26 +130,15 @@ def replace_recovery_active_tools(
     if applied is not None:
         insert_at = 1 if projected_ir and isinstance(projected_ir[0], UserTurn) else 0
         projected_ir.insert(insert_at, applied)
+    if handoff and not any(isinstance(item, CompactionSummary) and item.source == "carried_tool_handoff"
+                           for item in history):
+        insert_at = 1 if projected_ir and isinstance(projected_ir[0], UserTurn) else 0
+        if insert_at < len(projected_ir) and isinstance(projected_ir[insert_at], CompactionSummary) \
+                and projected_ir[insert_at].source == "applied_compact":
+            insert_at += 1
+        projected_ir.insert(insert_at, CompactionSummary(handoff, source="carried_tool_handoff"))
 
-    candidate_params = replace(
-        params,
-        tool_ir_history=deepcopy(projected_ir),
-        provider_history_messages=deepcopy(list(frozen.provider_history_messages)),
-        tool_context=deepcopy(model_tool_context),
-        live_archive_state=deepcopy(params.live_archive_state),
-    )
-    if not record_conversation_compact_generation(
-        candidate_params, compact_context.view.generation, canonical=True,
-    ):
-        raise ConversationCompactError("恢复Compact代次倒退", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
-    prepared = replace(
-        frozen,
-        tool_ir_history=tuple(candidate_params.tool_ir_history),
-        provider_history_messages=tuple(candidate_params.provider_history_messages),
-        tool_context=tuple(candidate_params.tool_context),
-        conversation_state=conversation_runtime_state_section(candidate_params),
-    )
-    return candidate_params, prepared
+    return projected_ir
 
 
 __all__ = ["replace_recovery_active_tools"]

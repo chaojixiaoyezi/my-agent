@@ -26,7 +26,6 @@ class BackgroundRecoveryState:
     context: PreparedBackgroundContext
     compact_generation: int
     compact_context: AppliedCompactContext
-    handoff_max_chars: int
 
 
 # LLM: 首次与恢复共用同一宿主身份和来源；force=False仅按原完整请求阈值裁决，force=True仍由overflow要求压缩。
@@ -34,10 +33,8 @@ class BackgroundRecoveryState:
 def prepare_background_compact_recovery(agent, history, context, *, request_id, progress_callback, interrupt_check,
                                         force=True):
     source = history.compact_source
-    from ..memory_archive.compact_semantic_summary import semantic_summary_config
 
-    current = BackgroundRecoveryState(history, context, source.thread.compact_generation, history.compact_context,
-                                      semantic_summary_config(agent).max_input_chars)
+    current = BackgroundRecoveryState(history, context, source.thread.compact_generation, history.compact_context)
 
     # LLM: 显式已应用scope绑定唯一宿主片，摘要子请求和别的线程不能消费其来源。
     # 函数用途: 在原模型安全点判断是否属于此次恢复。
@@ -67,7 +64,7 @@ def _project_background_candidate(agent, current, params, frozen, view):
     seed = project_background_history_seed(agent, projection, view.messages, scope_applied=True)
     history = replace(current.history, seed=seed, projection=projection, compact_context=application, compact_source=None)
     context = apply_background_compact_context(current.context, application, view.compact_generation)
-    candidate = BackgroundRecoveryState(history, context, view.compact_generation, application, current.handoff_max_chars)
+    candidate = BackgroundRecoveryState(history, context, view.compact_generation, application)
     candidate_params, prepared = replace_recovery_history(
         params, frozen, history_seed=seed, compact_context=application,
         injection=render_background_context(context), injection_index=0,
@@ -75,11 +72,9 @@ def _project_background_candidate(agent, current, params, frozen, view):
     return CompactRecoveryMaterial(candidate, candidate_params, prepared, project_tool_loop_request(prepared))
 
 
-# LLM: 活动归档候选只替换标记的交接/摘要片段；窄事件仍无seed，原媒体与插话留在冻结IR中。
+# LLM: 本回调只替换历史与注入；公共层负责精确IR分区，窄事件仍无seed，媒体与插话保留。
 # 函数用途: 将本次活动摘要投影到后台完整请求，不重跑宿主或工具循环准备。
 def _project_background_active_candidate(agent, current, params, frozen, summary, retained, generation):
-    from ..agent_core.compact_active_projection import replace_recovery_active_tools
-
     application = replace(current.compact_context, view=replace(current.compact_context.view,
                                                                summary=summary, generation=generation))
     seed = current.history.seed
@@ -87,13 +82,9 @@ def _project_background_active_candidate(agent, current, params, frozen, summary
         seed = replace(seed, compact_summary=summary, compact_generation=generation)
     context = apply_background_compact_context(current.context, application, generation)
     history = replace(current.history, seed=seed, compact_context=application, compact_source=None)
-    candidate = BackgroundRecoveryState(history, context, generation, application, current.handoff_max_chars)
+    candidate = BackgroundRecoveryState(history, context, generation, application)
     candidate_params, prepared = replace_recovery_history(
         params, frozen, history_seed=seed, compact_context=application,
         injection=render_background_context(context), injection_index=0,
-    )
-    candidate_params, prepared = replace_recovery_active_tools(
-        candidate_params, prepared, compact_context=application, retained_records=retained,
-        max_chars=current.handoff_max_chars,
     )
     return CompactRecoveryMaterial(candidate, candidate_params, prepared, project_tool_loop_request(prepared))

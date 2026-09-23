@@ -1,5 +1,15 @@
 # 测试与发布验收
 
+## 第 12.4 项原生工具 IR 来源（本地切片已验）
+
+原生工具完整往返与archive按同一四元身份分区；摘要优先真实IR正文、保留IR原序回放。完整配对回放的归档不重复生成handoff，未完成组和未知身份继续保留；无旧handoff时插入尚未覆盖的归档。严格机械回退完整附旧摘要和本次原文，分段失败或供应商标明截断时typed拒绝，均沿原容量门和单CAS。
+
+首轮38文件联合 **1027 passed、7 failed，125.15秒**，日志 `/tmp/compact_ir_joint_20260923.log`。四项旧宿主回调仍在公共IR投影前捕获候选导致wire断言失配，改捕获完整投影后的候选，保留实际HTTP逐字相等；两项旧断言预期归档纯文本后缀，现验证JSON原生消息完整还原；一项手工plan缺新增source_ir_history，补显式空元组。更早小组11项失败保留在 `/tmp/compact_ir_initial_20260923.log`：旧重复保留区拒绝、旧no-op签名、背景候选捕获点、初始+恢复各冻结一次的计数假设；未通过放宽容量或去掉实际wire核对消除失败。
+
+新增5项真实工具安全点测试：原read_file执行器及recorder生成短归档预览与完整ToolResult，两协议同ref摘要仅一次；另Anthropic仅IR、零archive仍原单CAS后发送获选HTTP，取消及过大均零CAS/业务请求。HTTP末端使用fake供应商，工具实际读取隔离目录文件，不把此证据称为真实模型或外层自动接续。外层overflow重跑仍从archive重建，原生IR传递未完成；12.4、旧全仓八项失败、媒体、缓存和超大历史边界仍开放。
+
+最终39文件联合 **1039 passed，136.66秒**，清单 `/tmp/compact_ir_final_20260923.files`，日志 `/tmp/compact_ir_final_20260923.log`。Ruff、doc sync、导入边界0发现、strict code-size hard=0（基线未改）、diff及clean-package通过；打包首检只因三个新文件尚未纳入索引失败，纳入本片后复查通过。尺寸首检发现公共投影函数过长，按IR位置变换职责拆出纯函数后通过，未放宽阈值。没有push、部署、重启、真实供应商或线上CI证据；本地严格gate通过不抵充旧全仓八项失败。
+
 ## 第 12.4 项首次自动准备与手动来源（本地切片已验）
 
 Gateway/child/后台首次只加载来源，在原PromptBuilder冻结完整输入后、选模及拒绝回退基线之前自动Compact；恢复仍必须真实提交。容量充足和已知无可覆盖来源保留原输入，未知投影/取消不伪装成no-op。无来源仍交原选模和发送压力门裁决，不修改原触发线来强行放行。手动按车道内thread-scope来源判空和估算，回执不包含未知的下一业务请求。
@@ -10,7 +20,7 @@ Gateway/child/后台首次只加载来源，在原PromptBuilder冻结完整输�
 
 Ruff、doc sync、strict code-size hard=0（基线未变）、diff及clean-package通过。没有推送、部署、重启或供应商收费请求；本片不关闭真实IR混合来源、媒体、真实缓存或旧全仓八项失败。第12.4仍未整项完成。
 
-现场隔离事故单独记录：独立诊断直接调用依赖pytest autouse的fixture，绕过临时MY_AGENT_HOME，误写本机owner模型目录及测试线程。已在原锁内隔离确证的12组测试模型/provider；根据迁移源码确认新增字段来源，显式反迁移并用真实安装版reader验证原有42模型/7provider及selected保持。原件和操作清单只存本机私有证据，不入仓库、不算产品验收。后续独立脚本必须进程启动前指定临时MY_AGENT_HOME；真实测试只使用已声明隔离home，禁止依赖导入fixture获得隐式隔离。 后续精确隔离测试线程/两条消息/用量/过期claim及测试快照，共7文件；两索引只移除仍指测试线程的值，其他项不变。新真实请求已更新latest快照，未触碰。独立误建local_store仅有1条该测试消息记录，确认无打开句柄后整目录隔离，日常工作区记忆库未动；不能把这次事故表述为“没有记忆写入”。共享runtime.db保留审计，原全树终态API将孤立测试TaskRun从created收口为failed，3个已failed的attempt及长期Task身份保持。
+现场隔离事故单独记录：独立诊断直接调用依赖pytest autouse的fixture，绕过临时MY_AGENT_HOME，误写本机owner模型目录及测试线程。已在原锁内隔离确证的12组测试模型/provider；根据迁移源码确认新增字段来源，显式反迁移并用真实安装版reader验证原有42模型/7provider及selected保持。原件和操作清单只存本机私有证据，不入仓库、不算产品验收。后续独立脚本必须进程启动前指定临时MY_AGENT_HOME；真实测试只使用已声明隔离home，禁止依赖导入fixture获得隐式隔离。 后续精确隔离测试线程/两条消息/用量/过期claim及测试快照，共7文件；后续按相同请求/任务身份及SHA另隔离1份runtime_facts/task.json，共8文件。两索引只移除仍指测试线程的值，其他项不变。新真实请求已更新latest快照，未触碰。独立误建local_store仅有1条该测试消息记录，确认无打开句柄后整目录隔离，日常工作区记忆库未动；不能把这次事故表述为“没有记忆写入”。共享runtime.db保留审计，原全树终态API将孤立测试TaskRun从created收口为failed，3个已failed的attempt及长期Task身份保持。
 
 ## 第 12.4 项混合来源与三宿主活动归档（本地切片已验）
 
