@@ -29,6 +29,8 @@
 - Ruff、doc sync、strict code-size、diff check、clean-package 通过；47 个候选生产文件与专用测试机 SHA256 一致。
 - 用户新要求：后续长任务改用官网 M2.7 自主将 fd 从 Rust 复刻为 Python；此前合成大行数只作存储边界定位。
   本线负责提交一次真实 TUI 需求和旁观资源采样，不能代写产物；该项验收尚未完成。
+  阶段记录约 57 分钟、168 模型轮、自然 Compact 1，552 次采样未见未同步；原始与 A 端正常退出且进程消失，
+  只保留 B 端观察同一任务。任务还在自主修复兼容性，后续只读监控会继续，不把 HTTP done 当项目完成。
 
 补充片涉及 `tui_media.py`、`tui_media_clipboard.py`、TUI 草稿/按键/worker、
 `conversation/{input_media,history_display}.py`、`backends/{tool_ir,message_adapter,anthropic,openai_chat,responses_wire}.py`、
@@ -74,6 +76,9 @@
 - 20 个变更生产文件与专用测试机 SHA256 一致；后续修改需重新核对受影响场景。
 
 ## 发布与风险边界
+
+独立提交链为 `c9042f5f2 → a2a9e0e16 → 3adb61904 → 9083661dc → 1b7b93bfc`；
+分别为既有基线、资源寿命、媒体输入、迟到结果和可见帧性能。主线按函数整合，保留 Compact owner 的并行修改。
 
 独立绘制片仅改 `tui_ui_setup.py` 的帧合并为 20 Hz、`tui_threading.py` 的周期动画为 4 Hz；
 原事件/模型/工具流完整保留。真实 fd 会话两个只读原生 TUI 同时对照 CPU 16.02%→10.23%，
