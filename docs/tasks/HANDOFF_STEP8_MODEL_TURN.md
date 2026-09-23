@@ -37,3 +37,5 @@ Astra max四文件diff未发现阻断，三种独立导入成功。此次仅本�
 首片已集成本地主线50cd9e7a7，源码tree与候选相同。第二片将首次组装／生成、超限恢复、临时工具消费迁到model_turn；原装配点仍选择回执参数并绑定原实现。A/B最小移植和三项兼容修复一并完成本地组合456 passed／24既有xfail（18文件）。参考源467f3cac3／425bcb3a9，具体边界见设计文档；无Jev、scope链或C摘要开关。
 本片严格gate已通过；doc sync最初指出memory模块说明缺失，补齐后通过。
 建议下一步：集成已验证候选，继续拆原prompt与Compact宿主依赖，再发布组合包跑实际TUI；不把新增扫描API或候选测试等同于完整Compact已接通。
+
+候选ef355f822已集成本地主线57baa13cb，两者源码tree均为57fabe4c78bd404cdc482efdd303c14e9de0d202；请求周期实际diff复核无阻断。未推送或部署，继续按唯一TODO处理Compact同源接线和原生验收。

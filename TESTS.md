@@ -6,6 +6,7 @@
 A/B最小移植原71项及相邻112项通过；独立审阅后新增三个用例真实失败：Unicode空白行被拒及极大created_at错误分类。字节预算先调整为能容纳该行，确认失败发生在解码阶段后才修生产代码；七文件复验186 passed。没有吞错误或自动修复尾行，旧游标和原幂等锁保留。
 最终18文件组合 **456 passed、24既有xfail，18.17秒**：前述模型采纳十文件，加native_tool_ir_compact_and_orphan_sweep、archive_tokens、conversation_message_scan、conversation_store、conversation_message_stream、conversation_history_paging、gateway_foreground_transcript、cli_run_conversation。分组结果有重叠；本次增删远低于全仓阈值，没有追加全仓pytest。
 本候选Ruff、doc sync（补齐memory模块文档后）、strict code-size、diff和clean-package均通过；尺寸基线未改，生成报告保留仓库外。
+候选ef355f822已集成本地主线57baa13cb，两者源码tree一致；集成没有改生产代码，不重复跑相同组合。
 本轮没有新增真实模型验收；已部署版本仍为第7步包。完整Compact scope／摘要来源链未移植，不能以此声称第8步完成。
 
 ## 第8.2首片模型采纳：本地合同验证
