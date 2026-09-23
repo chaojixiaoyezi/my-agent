@@ -28,9 +28,9 @@
   [TUI_INPUT_MEDIA](../design/TUI_INPUT_MEDIA.md)。
 - Ruff、doc sync、strict code-size、diff check、clean-package 通过；47 个候选生产文件与专用测试机 SHA256 一致。
 - 用户新要求：后续长任务改用官网 M2.7 自主将 fd 从 Rust 复刻为 Python；此前合成大行数只作存储边界定位。
-  本线负责提交一次真实 TUI 需求和旁观资源采样，不能代写产物；该项验收尚未完成。
+  本线仅提交一次真实 TUI 需求和旁观资源采样，没有代写产物；该项已自然结束，最终结果见下文。
   阶段记录约 57 分钟、168 模型轮、自然 Compact 1，552 次采样未见未同步；原始与 A 端正常退出且进程消失，
-  只保留 B 端观察同一任务。任务还在自主修复兼容性，后续只读监控会继续，不把 HTTP done 当项目完成。
+  当时只保留 B 端观察同一任务，之后继续采样到真实 TaskRun/AgentRun 结束，没有把 HTTP done 当项目完成。
 
 补充片涉及 `tui_media.py`、`tui_media_clipboard.py`、TUI 草稿/按键/worker、
 `conversation/{input_media,history_display}.py`、`backends/{tool_ir,message_adapter,anthropic,openai_chat,responses_wire}.py`、
@@ -76,6 +76,17 @@
 - 20 个变更生产文件与专用测试机 SHA256 一致；后续修改需重新核对受影响场景。
 
 ## 发布与风险边界
+
+后续稳定缓存补充（基于 `a2a757c80`）只改 `TuiStateStore` 快照、provider 块版本键、
+`TuiBlockRenderCache` 静态前缀和 `SafeFormattedLines`；已与集成 owner 确认函数归本线，未改 Gateway 或模型路径。
+289 项回归、等历史官网 M2.7 原生 TUI 对照及导航通过；基线/候选 CPU 4.68%/2.21%，内存未宣称大降。
+首次详细展开约 1.2 秒单列，不把后续约 30 ms 的滚动延迟套到首次展开。
+
+fd 原任务已自然结束，约 109.5 分钟、Compact 3；原工具 24/24 自测通过，不声称全部上游行为等价。
+任务期 1180 次采样未见未同步，模型产物与原失败保留；另一次同会话真实 `sleep 30`/四十二续聊通过。
+本次所有已识别测试 TUI 已正常退出且 PID 消失，Gateway 全程同一个，running attempts=0；
+未知 `product-r5-ts-fzf` 未动。清理后 Gateway CPU 2.43%、RSS 297.08 MiB，候选未切默认环境。
+私有 `fd-port/` 的原始任务、工具输出、项目归档、等历史对照、退出与空闲样本是验收来源。
 
 独立提交链为 `c9042f5f2 → a2a9e0e16 → 3adb61904 → 9083661dc → 1b7b93bfc`；
 分别为既有基线、资源寿命、媒体输入、迟到结果和可见帧性能。主线按函数整合，保留 Compact owner 的并行修改。

@@ -374,7 +374,8 @@ def test_provider_shares_frame_and_block_cache_between_controls() -> None:
     store.publish(seq.emit("assistant_started", "started", "assistant"))
     third = provider.frame(80)
     assert third is not second
-    assert provider.block_cache.stats().hits == 1
+    assert third.transcript_lines[0] is first.transcript_lines[0]
+    assert provider.block_cache.stats().misses == 2
 
 
 def test_idle_animation_tick_reuses_static_long_transcript_frame() -> None:

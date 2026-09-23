@@ -5,15 +5,108 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_py_agent.cli.chat_parts import tui_safe_lines
+from agent_py_agent.cli.chat_parts import tui_safe_lines, tui_view
 from agent_py_agent.cli.chat_parts.tui_block_renderer import (
     TuiBlockRenderCache,
     TuiRenderContext,
     TuiRenderFrame,
+    render_tui_snapshot,
     sanitize_tui_render_frame,
 )
 from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
 from agent_py_agent.cli.chat_parts.tui_view import TuiFrameProvider
+
+
+def test_frame_key_reuses_history_across_animation_and_stream_updates(monkeypatch):
+    runtime = TuiRuntime("natural-history-view")
+    for index in range(3):
+        runtime._publish("assistant_completed", "completed", f"old-{index}", {"text": f"旧消息 {index}"})
+    visits = []
+    original = tui_view._block_versions
+
+    def counted(blocks):
+        visits.append(len(blocks))
+        return original(blocks)
+
+    monkeypatch.setattr(tui_view, "_block_versions", counted)
+    context = TuiRenderContext(width=80)
+    provider = TuiFrameProvider(runtime.store, lambda _width: context)
+    first = provider.frame(80)
+    assert visits == [3, 0]
+    for index in range(8):
+        context = replace(context, notice=f"状态 {index}", spinner_index=index)
+        provider.invalidate()
+        assert provider.frame(80).transcript_lines == first.transcript_lines
+    assert visits == [3, 0]
+
+    runtime._publish("assistant_started", "started", "new")
+    runtime._publish("assistant_delta", "delta", "new", {"text": "正在回复"})
+    provider.frame(80)
+    assert visits == [3, 0, 1], "流式增量仅更新活动组版本键"
+    runtime._publish("assistant_completed", "completed", "new", {"text": "已完成回复"})
+    completed = provider.frame(80)
+    assert visits == [3, 0, 1, 4, 0]
+    assert "已完成回复" in "\n".join("".join(part[1] for part in line) for line in completed.transcript_lines)
+
+
+@pytest.mark.parametrize("width", [18, 80])
+@pytest.mark.parametrize("detailed", [False, True])
+def test_stable_prefix_preserves_interleaved_input_order_and_anchors(width, detailed):
+    runtime = TuiRuntime("interleaved-prefix")
+    runtime._publish("user_message", "completed", "old", {"text": "最早的中文消息与长行"})
+    runtime._publish("assistant_started", "started", "live")
+    runtime._publish("assistant_delta", "delta", "live", {"text": "活动正文\n下一行"})
+    runtime._publish("user_message", "completed", "steer", {"text": "中途插话"})
+    cache = TuiBlockRenderCache()
+    context = TuiRenderContext(width=width, detailed_transcript=detailed, now=1.0)
+    snapshot = runtime.store.snapshot()
+    assert render_tui_snapshot(snapshot, context, cache=cache) == render_tui_snapshot(snapshot, context)
+    assert render_tui_snapshot(snapshot, replace(context, notice="新提示"), cache=cache) == render_tui_snapshot(
+        snapshot, replace(context, notice="新提示"),
+    )
+    runtime._publish("assistant_completed", "completed", "live", {"text": "完整正文\n尾行"})
+    completed = runtime.store.snapshot()
+    assert render_tui_snapshot(completed, context, cache=cache) == render_tui_snapshot(completed, context)
+    changed = replace(completed, stable_blocks=tuple(
+        replace(block, text="替换后的原始消息", updated_seq=block.updated_seq + 100)
+        if block.block_id == "old" else block for block in completed.stable_blocks
+    ))
+    assert render_tui_snapshot(changed, context, cache=cache) == render_tui_snapshot(changed, context)
+    assert render_tui_snapshot(changed, replace(context, width=11), cache=cache) == render_tui_snapshot(
+        changed, replace(context, width=11),
+    )
+
+
+def test_aggregate_prefix_keeps_character_budget_without_hiding_overflow():
+    runtime = TuiRuntime("prefix-budget")
+    for index in range(4):
+        runtime._publish("assistant_completed", "completed", f"message-{index}", {"text": "正文" * 10})
+    cache = TuiBlockRenderCache(max_chars=45)
+    snapshot, context = runtime.store.snapshot(), TuiRenderContext(width=80)
+    assert render_tui_snapshot(snapshot, context, cache=cache) == render_tui_snapshot(snapshot, context)
+    prefix = cache.stable_prefix(snapshot.stable_blocks, context)
+    assert sum(len(fragment[1]) for line in prefix.lines for fragment in line) <= 45
+    assert len(prefix.line_ends) < len(snapshot.stable_blocks)
+
+
+def test_safe_line_groups_reuse_checked_prefix_but_sanitize_new_suffix(monkeypatch):
+    from agent_py_agent.cli.chat_parts.tui_safe_lines import SafeFormattedLines
+
+    prefix = SafeFormattedLines(((("", "原文"),),))
+    calls = []
+    original = tui_safe_lines.sanitize_terminal_text
+
+    def checked(text):
+        calls.append(text)
+        return original(text)
+
+    monkeypatch.setattr(tui_safe_lines, "sanitize_terminal_text", checked)
+    combined = SafeFormattedLines.join(prefix[:], ((("", "新文字\x1b[2J"),),))
+    frame = TuiRenderFrame(combined, (), (), (), (), ())
+    assert sanitize_tui_render_frame(frame).transcript_lines is combined
+    assert combined[0] is prefix[0]
+    assert calls == ["新文字\x1b[2J"]
+    assert "\x1b" not in combined[1][0][1]
 
 
 def test_cached_history_is_not_rescanned_when_frame_changes(monkeypatch):
