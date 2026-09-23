@@ -4,7 +4,6 @@ import os
 import subprocess
 import sys
 import time
-from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1391,15 +1390,27 @@ def _closeout_fixture(tmp_path: Path, *, owner: str):
     return manager, store, task, attempt_id, agent_run_id, params, _json
 
 
+# LLM: 测试只绑定现有 Store 与读写能力；每次构造以保留方法故障注入，不能新建持久状态。
+# 函数用途: 为恢复测试装配真实父通知器，沿实际发布链验证幂等和失败恢复。
+def _completion_notifier(manager):
+    from agent_py_agent.agent.subagents.runner_completion_wake import RunnerCompletionNotifier
+
+    store = manager.conversation_store
+    return RunnerCompletionNotifier(
+        tasks=store.tasks if store is not None else None,
+        wakes=store.wakes if store is not None else None,
+        load_task=manager.load, save_task=manager.save,
+    )
+
+
 # LLM: 测试装配真实 manager 的独立能力，产品恢复入口不接收 manager；每次重取通知便于原故障注入。
 # 函数用途: 让已有文件恢复用例按新的显式依赖合同调用同一个恢复入口。
 def _recover_closeouts(manager):
-    from agent_py_agent.agent.subagents import runner_completion_wake
     from agent_py_agent.agent.subagents.services import runtime_closeout
 
     return runtime_closeout.recover_pending_closeouts(
         manager.runtime_db, load_task=manager.load, save_task=manager.save, list_tasks=manager.list_runs,
-        notify_result=partial(runner_completion_wake.notify_parent_on_runner_result, manager),
+        notify_result=_completion_notifier(manager).notify_result,
     )
 
 
@@ -1469,12 +1480,12 @@ def test_closeout_interrupted_before_notify_recovers_once(tmp_path: Path) -> Non
     def _explode(*_args, **_kwargs):
         raise RuntimeError("interrupted before notify")
 
-    original = runner_completion_wake.notify_parent_on_runner_result
-    runner_completion_wake.notify_parent_on_runner_result = _explode
+    original = runner_completion_wake.RunnerCompletionNotifier.notify_result
+    runner_completion_wake.RunnerCompletionNotifier.notify_result = _explode
     try:
         result = manager.runner_result.record_runner_result(params)
     finally:
-        runner_completion_wake.notify_parent_on_runner_result = original
+        runner_completion_wake.RunnerCompletionNotifier.notify_result = original
     assert result.status == "FAILED"
 
     # 收口已提交（run 终态 + 事件），但父级还没收到通知。
@@ -1565,12 +1576,12 @@ def test_repeated_closeout_recovery_is_idempotent(tmp_path: Path) -> None:
     def _explode(*_args, **_kwargs):
         raise RuntimeError("interrupted before notify")
 
-    original = runner_completion_wake.notify_parent_on_runner_result
-    runner_completion_wake.notify_parent_on_runner_result = _explode
+    original = runner_completion_wake.RunnerCompletionNotifier.notify_result
+    runner_completion_wake.RunnerCompletionNotifier.notify_result = _explode
     try:
         manager.runner_result.record_runner_result(params)
     finally:
-        runner_completion_wake.notify_parent_on_runner_result = original
+        runner_completion_wake.RunnerCompletionNotifier.notify_result = original
     assert runtime_closeout.pending_closeout(manager.load(task.id)) is not None
     summaries = [_recover_closeouts(manager) for _ in range(3)]
     assert summaries[0]["runtime_closeouts_recovered"] == 1, summaries
@@ -1742,7 +1753,6 @@ def test_closeout_fact_save_failure_stops_and_stays_recoverable(tmp_path: Path) 
 # LLM: clear_closeout / mark_closeout_delivered 失败时绝不能报 advanced 成功，也不能让一次成功
 # 的父级通知因为清账失败被重发（"不重"）。函数用途: 固定清账失败时的诚实回报与去重边界。
 def test_closeout_cleanup_failure_is_not_reported_as_success(tmp_path: Path) -> None:
-    from agent_py_agent.agent.subagents import runner_completion_wake
     from agent_py_agent.agent.subagents.services import runtime_closeout
 
     manager, store, task, attempt_id, agent_run_id, params, _json = _closeout_fixture(
@@ -1768,7 +1778,7 @@ def test_closeout_cleanup_failure_is_not_reported_as_success(tmp_path: Path) -> 
         outcome = runtime_closeout.advance_pending_closeout(
             manager.runtime_db, manager.load(task.id), runtime_closeout.pending_closeout(manager.load(task.id)),
             save_task=manager.save,
-            notify_result=partial(runner_completion_wake.notify_parent_on_runner_result, manager),
+            notify_result=_completion_notifier(manager).notify_result,
         )
     finally:
         manager.save = original_save

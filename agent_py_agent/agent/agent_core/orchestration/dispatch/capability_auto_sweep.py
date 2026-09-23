@@ -19,7 +19,6 @@ from __future__ import annotations
 import logging
 import time
 from contextlib import ExitStack
-from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -309,10 +308,16 @@ def _supervise_stalled_orphans_unlocked(agent: Any) -> dict[str, object]:
     # 失败或"收口后通知前中断"由此收敛，而不是永久留成 task 终态 / runtime created 的矛盾。
     # 函数用途: 绑定原存储和父通知能力，推进待重试收口，不新增扫描器或执行入口。
     try:
+        store = manager.conversation_store
+        notifier = runner_completion_wake.RunnerCompletionNotifier(
+            tasks=store.tasks if store is not None else None,
+            wakes=store.wakes if store is not None else None,
+            load_task=manager.load, save_task=manager.save,
+        )
         summary.update(recover_pending_closeouts(
             getattr(manager, "runtime_db", None), load_task=manager.load, save_task=manager.save,
             list_tasks=manager.list_runs,
-            notify_result=partial(runner_completion_wake.notify_parent_on_runner_result, manager),
+            notify_result=notifier.notify_result,
         ))
     except Exception:
         _LOGGER.debug("supervision runtime closeout recovery failed", exc_info=True)
