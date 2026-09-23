@@ -6,7 +6,7 @@ import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from ..common.json_io import jsonl_lines, read_jsonl_text_lines
 from ..runtime_errors import DataCorruptionError, runtime_error_report
@@ -58,6 +58,23 @@ def _read_tail_bytes(path: Path, limit: int) -> tuple[bytes, int]:
             handle.seek(pos)
             data = handle.read(step) + data
     return data, pos
+
+
+# LLM: 在调用方已打开的canonical描述符上以固定物理大小倒扫LF；64KiB空间、短读拒绝，不识别业务行或覆盖。
+# 函数用途: 共用历史倒读与前向快照的完整尾界，半行不推进游标，追加留给下一次读取。
+def complete_jsonl_end(handle: BinaryIO, size: int) -> int:
+    position = size
+    while position:
+        step = min(position, 65536)
+        position -= step
+        handle.seek(position)
+        block = handle.read(step)
+        if len(block) != step:
+            raise OSError("canonical transcript truncated during snapshot")
+        index = block.rfind(b"\n")
+        if index >= 0:
+            return position + index + 1
+    return 0
 
 
 # LLM: 有界读取保持与全量读取相同的坏行和 Unicode 规则；limit 非正时读取全量，不修改账本。

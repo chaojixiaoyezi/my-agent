@@ -330,6 +330,7 @@ agent_py_agent/
 |   |   |-- store_layout.py             # 统一持久目录和路径、只读打开及扫描上下文组装
 |   |   |-- store_threads.py            # 线程身份、通道绑定、默认模型解析与 Compact 原子更新
 |   |   |-- store_messages.py           # 消息幂等追加、展示检查点及字节游标读取
+|   |   |-- message_scan.py             # 同canonical文件的固定尾界分页、字节限额与流式幂等扫描
 |   |   |-- store_tasks.py              # 任务关联、活动索引、工作区状态投影及终态进度关闭
 |   |   |-- store_audits.py             # Audit 准备、发布修订、终态重开与运行代提交
 |   |   |-- store_guidance.py           # 插话入队、精确认领、权威回执查询与组件组装
@@ -928,6 +929,8 @@ docs/
 - `agent_py_agent/agent/conversation/store_io.py`：各领域与 transcript 共用 JSONL 读取、结构化错误和文件归档；不导入 Store，不吞坏行，不新增持久数据源。
 - `agent_py_agent/agent/conversation/store_layout.py`：`store.storage` 的唯一目录和路径上下文；初始化可只读，路径方法不授权业务操作、不改变原文件名。
 - `agent_py_agent/agent/conversation/store_threads.py`：`store.threads` 保存唯一线程元数据和通道索引，提供同一线程锁内的 CAS；新会话模型解析器由本领域持有。
+- `agent_py_agent/agent/conversation/message_scan.py`：固定完整行尾界和显式页字节限额，流式幂等检查沿原消息锁，无第二账本。
+- `agent_py_agent/tests/test_conversation_message_scan.py`：冻结尾界、页预算、迟到追加、坏行回滚与大历史低内存幂等验证。
 - `agent_py_agent/agent/conversation/store_messages.py`：`store.messages` 保持原 append-only 账本、幂等锁和字节游标；只通过显式能力校验线程及更新活动时间。
 - `agent_py_agent/agent/conversation/store_tasks.py`：`store.tasks` 保存原任务关联和线程活动索引，沿原顺序更新工作区投影并关闭终态进度；不建立第二套任务状态。
 - `agent_py_agent/agent/conversation/store_audits.py`：`store.audits` 直接实现 Audit 准备、发布和重启操作，共用 `tasks` 的命名锁、任务锁和索引更新；无旧方法转发。

@@ -1,6 +1,6 @@
 # 设计台账
 
-超大canonical历史有界化已完成只读依赖审计、尚未实施：须同时约束原消息页、scope筛选、checkpoint覆盖链与幂等扫描，不能仅改limit或截断来源。后续沿原游标与CAS设计连续范围证明，详情见[容量审计](docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。
+超大canonical历史有界化已完成依赖审计，原消息固定尾界/字节页和幂等流式扫描底座已本地153项通过：须同时约束原消息页、scope筛选、checkpoint覆盖链与幂等扫描，不能仅改limit或截断来源。后续沿原游标与CAS设计连续范围证明，详情见[容量审计](docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。
 
 决策模型媒体整合本地1419项联合与严格gate通过：自动选模/Compact共用原内容完整性检查，未知模态保留原模型和原始历史；强制恢复不凭附件引用取得容量或摘要覆盖。transcript只覆盖安全文字前缀，完整媒体后缀保留。媒体原提交的M3证据与当前集成版分开，12.4仍开放，详见[容量审计](docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。
 

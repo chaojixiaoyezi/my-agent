@@ -1257,3 +1257,20 @@ Ruff、doc sync、import boundaries零发现、strict code-size hard=0且基线�
 `load_conversation_compact_source(limit=0)`不能仅替换成分页：四宿主还把完整来源冻结为tuple，scope筛选复制全量行，v3基础链合并所有source_message_ids，checkpoint reader也全量读取。现有MessageStore前向字节游标可复用，但需固定完整行EOF和页字节上限；history_page为完整工作片可越过行数目标，不能作为硬内存界。append_once及历史索引重建也存在全量化。
 
 建议先在原MessageStore补有界页/幂等扫描，再沿原writer/CAS设计可验证连续范围覆盖；task稀疏覆盖仍须精确，不以全线程游标跳过未读行。detached锚点不存在的退回语义需先有界确认，不能逐页套列表selector。只读核对Codex compact.rs发现其移除最旧消息的恢复分支不满足本项目来源覆盖要求，不直接照搬。本轮未实现此后续方案，12.4继续开放。
+
+
+### 固定尾界与扫描底座（本地实施中）
+
+MessageStore前向页复用原路径/字节游标，新增可选through和max_bytes；complete_offset_report按64KiB块确定完整LF尾界，半行与后续追加不归本次扫描。页预算不足保留下一完整行，首行超预算返回MessagePageBudgetExceeded，原游标不动；不把资源限制说成数据损坏。未传参数的显示调用保持原行为。尾界只固定append-only文件的范围，不是抗等长篡改快照，也不能代替Compact来源覆盖证明。
+
+append_once沿原锁流式扫描固定物理EOF的全部记录，命中后仍检查后续坏行、排除display并保留首个key；只保留当前行与匹配项，内存O最大单行，尚无单行硬帽，不宣称绝对内存上限。额外修复原有效JSON但缺LF尾行被当成已提交的漏洞：append_once现在拒绝所有未终止尾行，避免原追加器把新JSON拼接到半行后；原文件保持不变。线程更新及唯一JSONL追加不变。原history_page完整LF算法已移入store_io供两种方向共用。参考本地Codex rollout/ordinal.rs的BufReader逐行解析、session_index.rs的逐行索引查找；只借鉴流式读取，后者跳坏行语义不适用于本项目canonical来源，未照搬。
+
+本片不替换Compact全量tuple/scope/checkpoint链，不改变writer/schema/摘要覆盖；完成此底座后仍须接通范围冻结与分批摘要，12.4不勾选。
+
+本片交接：基线1b5c71efb，分支codex/decision-model-integration，由本线实现、Sol high只读复核；已与模块重构owner确认MessageStore/只读helper和共享完整LF算法范围无冲突。未修改Gateway/runner恢复、Compact writer/schema或测试机进程。新增message_scan与定向测试，修改store_messages/store_io/history_page及文档。
+
+六文件联合 **153 passed（3.96秒）**，日志 `/tmp/decision_message_scan_final_20260923.log`。覆盖UTF-8/长行字节界、固定EOF后迟到追加、超预算半行等待、首行预算失败、坏行后的原游标、扫描期间真实截断、命中后的损坏、display/CRLF、并发同key及2000行大历史。大历史测试禁止recent_report入口，并用tracemalloc证明峰值低于文件体积三分之一，不把此阈值说成通用内存上限。首轮五文件130通过；随后扩展命令曾误写不存在的测试文件名，收集失败且未运行测试，修正后才取得153通过。
+
+建议下一步：在原Compact来源/作用域读取接入固定尾界，再沿原writer/CAS处理连续范围证明，不能直接把tuple改成分页就声称完成。其它agent可以只读复核或独立构造存储边界测试，不并行改共享扫描、作用域选择和writer。本片仍O历史长度扫描时间，单行解析无硬帽；固定字节尾界不防违规等长替换，显示页暂未启用新字节预算，整项12.4继续开放。
+
+本片Ruff、doc sync、import boundaries零发现、strict code-size hard=0且原基线未改、diff和clean-package均通过，本地严格gate已通过；未推送、未部署，线上CI未作为验收来源。页预算约束返回行的原始字节总量，边界探测最多额外读取1字节，完整尾界查找另有最多64KiB块；解码对象和既有单行本身仍需要对应内存，不宣称进程RSS等于页预算。

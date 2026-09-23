@@ -1,4 +1,4 @@
-# LLM: 历史页仅倒读同一 canonical JSONL；临时字节游标不进入模型、Compact 或执行状态，不修改任何正文。
+# LLM: 历史页仅倒读同一canonical JSONL，共用store_io完整LF尾界；临时游标不进入模型或Compact，不改正文。
 # 模块用途: 为历史显示和精确请求原文查找提供分页读取，保持同一工作片一起返回，调用方自行按结构化身份筛选。
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import BinaryIO
 
 from .models import MessageLogEntry
+from .store_io import complete_jsonl_end
 
 
 # LLM: 显示分组只依据持久身份字段；正文、时间和任务名称不得成为分组依据。
@@ -50,7 +51,7 @@ def read_conversation_history_page(
             return ConversationHistoryPage()
         with path.open("rb") as handle:
             size = handle.seek(0, 2)
-            end = _complete_end(handle, size) if before is None else int(before)
+            end = complete_jsonl_end(handle, size) if before is None else int(before)
             if end < 0 or end > size:
                 raise ValueError("history cursor outside transcript")
             if end:
@@ -76,21 +77,6 @@ def read_conversation_history_page(
         return ConversationHistoryPage(errors=({
             "error_code": "CLIENT_HISTORY_LOAD_FAILED", "error_type": type(exc).__name__,
         },))
-
-
-# LLM: 只查最后一个换行边界；未完成尾行不能被视作损坏，也不能被实时游标跳过。
-# 函数用途: 确定当前文件中最后一条已完整写入消息的结束位置。
-def _complete_end(handle: BinaryIO, size: int) -> int:
-    position = size
-    while position:
-        step = min(position, 65536)
-        position -= step
-        handle.seek(position)
-        block = handle.read(step)
-        index = block.rfind(b"\n")
-        if index >= 0:
-            return position + index + 1
-    return 0
 
 
 # LLM: 反向块读取保留跨块 UTF-8/长行原字节；只在完整行处解码，偏移不以字符数计算。

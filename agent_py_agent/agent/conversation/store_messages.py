@@ -18,6 +18,7 @@ from .display_checkpoint import (
     display_checkpoint_event,
     is_display_checkpoint,
 )
+from .message_scan import complete_message_offset, find_message_dedupe, read_message_page
 from .models import (
     ConversationThread,
     MessageLogEntry,
@@ -153,7 +154,7 @@ class MessageStore:
         append_jsonl(self.storage.message_path(thread.thread_id), entry.to_dict(), sort_keys=True)
         return entry
 
-    # LLM: store_messages 的持久化合同：在原幂等锁内核对 dedupe_key 与输入内容，只首次追加消息并刷新活动时间；修改须同步本领域调用方与存储回归。
+    # LLM: 原幂等锁内逐行核对完整历史、dedupe_key与内容；命中不跳过后续坏行，内存随最大行而非历史总量增长。
     # 函数用途: 在原幂等锁内核对 dedupe_key 与输入内容，只首次追加消息并刷新活动时间。
     def append_once(self, request: dict, *, dedupe_key: str) -> MessageLogEntry:
         """Append one transcript event exactly once across retries and process restarts."""
@@ -164,17 +165,10 @@ class MessageStore:
         path = self.storage.message_path(thread_id)
         transition = path.with_name(f".{path.name}.append-once")
         with locked_file_transition(transition):
-            rows, load_errors = self.recent_report(thread_id, limit=0)
-            if load_errors:
-                raise DataCorruptionError(f"conversation transcript is unreadable: {thread_id}")
-            existing = next(
-                (
-                    item
-                    for item in rows
-                    if str(item.metadata.get("dedupe_key") or "").strip() == key
-                ),
-                None,
-            )
+            try:
+                existing = find_message_dedupe(path, key)
+            except Exception as exc:
+                raise DataCorruptionError(f"conversation transcript is unreadable: {thread_id}") from exc
             if existing is not None:
                 if existing.role != str(request.get("role") or "") or existing.content != str(
                     request.get("content") or ""
@@ -222,47 +216,35 @@ class MessageStore:
                 return (selected if limit <= 0 else selected[-limit:]), errors
             read_limit *= 2
 
-    # LLM: 显示流只接受同 thread JSONL 完整行后的字节游标；不回扫前缀，不改模型历史，损坏/截断不能假装空页。
-    # 函数用途: 为恢复后的实时显示顺序读取一页 canonical 消息，并返回下一条应读取的位置。
+    # LLM: 固定完整LF尾界供多页共享；只读、不产生Compact覆盖证明，半行和后续追加留待下次快照。
+    # 函数用途: 获取原消息文件的完整行结束位置，失败时返回结构化错误，不把坏读当成空历史。
+    def complete_offset_report(self, thread_id: str) -> tuple[int, list[dict[str, Any]]]:
+        path = self.storage.message_path(thread_id)
+        try:
+            return complete_message_offset(path), []
+        except Exception as exc:
+            return 0, [jsonl_error(exc, "conversation.messages.snapshot", path=path)]
+
+    # LLM: 同thread完整行游标可带固定through与页字节预算；错误保留原游标，超大单行不能假装空页或损坏。
+    # 函数用途: 顺序读取canonical消息；旧显示调用保持原行为，有界宿主显式冻结尾界和页大小。
     def page_after_offset_report(
         self,
         thread_id: str,
         *,
         after: int = 0,
         limit: int = 100,
+        through: int | None = None,
+        max_bytes: int | None = None,
     ) -> tuple[list[MessageLogEntry], int, list[dict[str, Any]]]:
         path = self.storage.message_path(thread_id)
         cursor = max(0, int(after))
-        if not path.exists() and cursor == 0:
-            return [], cursor, []
         try:
-            entries: list[MessageLogEntry] = []
-            with path.open("rb") as handle:
-                size = handle.seek(0, 2)
-                if cursor > size:
-                    raise DataCorruptionError("message cursor exceeds canonical transcript")
-                if cursor:
-                    handle.seek(cursor - 1)
-                    if handle.read(1) != b"\n":
-                        raise DataCorruptionError("message cursor is not a complete row boundary")
-                handle.seek(cursor)
-                while len(entries) < max(1, min(1000, int(limit))):
-                    line = handle.readline()
-                    if not line or not line.endswith(b"\n"):
-                        break
-                    raw = json.loads(line.decode("utf-8"))
-                    parsed, errors = _message_entries([raw])
-                    if errors or len(parsed) != 1 or parsed[0].thread_id != thread_id:
-                        raise DataCorruptionError("invalid canonical message row")
-                    entries.extend(parsed)
-                    cursor = handle.tell()
+            entries, cursor = read_message_page(
+                path, thread_id, after=cursor, limit=limit, through=through, max_bytes=max_bytes,
+            )
             return entries, cursor, []
         except Exception as exc:
-            return (
-                [],
-                max(0, int(after)),
-                [jsonl_error(exc, "conversation.messages.page", path=path)],
-            )
+            return [], max(0, int(after)), [jsonl_error(exc, "conversation.messages.page", path=path)]
 
     # LLM: Memory Curator从精确message_id后读取对话；display行既不进模型也不占批量条数，物理读取仍顺序推进。
     # 函数用途: 跳过展示记录后收集有界真实消息；不改变调用方已消费的消息编号或正式记忆。

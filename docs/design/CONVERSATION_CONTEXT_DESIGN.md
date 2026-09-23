@@ -294,3 +294,12 @@ skills/tools/workflows；随 wheel 发布的 builtin tools/skills 本身也是�
 
 实现使用 Python 接口、owner 范围的文件存储和统一运行时类型。会话语义不依赖具体 IM 通道，
 也不通过自然语言分类器改变任务归属。设计与实际验收边界以 STATUS 和对应模块代码为准。
+
+
+### Canonical消息扫描边界
+
+原MessageStore的前向页支持显式through完整LF尾界与max_bytes正整数字节预算；不传参数保持原显示分页。complete_offset_report和倒读历史共用store_io.complete_jsonl_end，64KiB分块找最后完整LF，不读取后到追加或承认半行。单行超过页预算返回MessagePageBudgetExceeded，资源限额与坏数据区分；任何错误不推进原游标。有预算而未传through时也先取得完整尾界，尚未完成的巨大尾行等待下次读取，不误报单行超限。
+
+append_once保持原幂等锁、首个同key内容校验和唯一append/update链，但逐行扫描固定物理EOF，不再载入全量消息；命中后仍校验后续记录，display不参与匹配。写前拒绝缺LF尾行，包括可解析JSON或纯空白，避免后续追加把两条JSON拼坏；不自动修复原文件。读取内存随最大行而非历史总量增长，扫描时间仍线性。
+
+这些字节边界没有授予Compact摘要覆盖或跨任务读权限，不是抗文件替换凭据；scope筛选、完整来源验证及原checkpoint/CAS仍是唯一提交合同。详见[容量审计](../tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。

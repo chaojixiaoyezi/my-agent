@@ -1,5 +1,11 @@
 # 测试与发布验收
 
+## 第12.4项消息扫描底座（2026-09-23，本地）
+
+六个文件定向联合153 passed（3.96秒），日志 `/tmp/decision_message_scan_final_20260923.log`：message_scan/message_stream/history_paging/conversation_store/cli_run_conversation/background_owner_delivery_commit。真实临时文件验证固定EOF、页字节预算与Unicode、半行等待和幂等写前拒绝、坏行游标回滚、display过滤、截断与并发同key；2000行历史禁止全量recent_report，tracemalloc峰值低于文件体积三分之一。没有真实模型调用或Gateway重启，非Compact全链/绝对内存上限证明。
+
+只读复核修正了合法JSON无LF仍可拼坏后续追加、非对象JSON错误分类和半行超预算判定；完整LF算法复用原history_page并移至store_io，未新建第二实现。首轮五文件130通过，扩展命令一次文件名错误导致零测试，修正后的最终联合才作验收。本片Ruff、doc sync、import boundaries零发现、strict code-size hard=0且基线未改、diff及clean-package均通过；本地严格gate已通过，未推送部署，线上CI未作为验收来源。建议下一步沿原scope/writer/CAS接入有界来源，独立只读审查可并行，12.4整项仍开放。
+
 ## 集成安装版真实 TUI（2026-09-23）
 
 319004926独立wheel/venv/HOME已在获授权测试机验三轮普通中文：关闭零Jev请求；2秒期限失败自动保留M2.7；4秒选模need_data及能力建议成功，均完成一次读取工具轮。新增3次Jev HTTP，累计57次；原供应商缓存读回有部分缺字段，总输入无节省结论。原终态观察字段完整，初次汇总遗漏已纠正，无生产修复。设置原CAS恢复关闭，TUI退出、队列清空、全部HTTP有终态后正常停止候选Gateway，8420无监听。完整请求ID、usage口径及局限见[真实验收](docs/tasks/DECISION_MODEL_REAL_VALIDATION.md#集成安装版原生-tui-对照2026-09-23)。
