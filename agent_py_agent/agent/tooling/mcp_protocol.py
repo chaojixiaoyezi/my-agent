@@ -9,8 +9,12 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from typing import Any
 
+from ..common.cancellation import (
+    ToolCancelled,
+    cancellation_requested,
+    register_cancellation_callback,
+)
 from ..common.log_redaction import redact_sensitive_text
-from .cancellation import ToolCancelled, cancellation_requested, register_cancellation_callback
 
 
 # LLM: 错误码是调用方映射依据；异常正文必须先脱敏，不能暴露远端回包中的凭证。

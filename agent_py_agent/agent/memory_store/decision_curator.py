@@ -1,5 +1,6 @@
 # LLM: Curator 消费可选决策仅附临时建议；owner 身份来自原宿主与本次 lease run，材料不是权限或游标来源。
 # 来源标注数是本地延迟保护，不代表供应商存在固定题数上限。
+# 取消异常直接使用跨宿主、工具与决策调用的公共类型，不能恢复已删除的 tooling 转发入口。
 # 模块用途: 在原记忆批次提取前共享预算建议标签、优先级及正式条目关系，关闭、观察或失败均保留完整原材料。
 from __future__ import annotations
 
@@ -8,12 +9,12 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 from ..backends.decision_protocol import DecisionInputError, decision_json
+from ..common.cancellation import ToolCancelled
 from ..conversation.decision_service import (
     begin_decision_stage,
     decide,
     decision_outcome_is_current,
 )
-from ..tooling.cancellation import ToolCancelled
 from .curator_backend import curator_prompt
 from .curator_inputs import CuratorDecisionAnnotation, CuratorInputBatch
 from .decision_curator_relation import annotate_curator_relations

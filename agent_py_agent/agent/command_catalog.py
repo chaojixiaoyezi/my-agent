@@ -127,7 +127,7 @@ COMMAND_CATALOG = (
         "plugins",
         "/plugins [管理动作]",
         "查看插件、管理本地安装与查询请求",
-        help_variants=(("/plugins@<插件ID> [动作] [参数]", "插件使用入口（尚未开放）"),),
+        help_variants=(("/plugins@<插件ID> [动作] [参数]", "使用已启用插件的动作"),),
         namespace_separator="@",
         actions=(
             CommandActionSpec("help", "查看管理动作的参数说明", (ArgumentSpec("action", "管理动作名称"),)),

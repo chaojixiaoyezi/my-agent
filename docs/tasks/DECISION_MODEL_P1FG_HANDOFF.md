@@ -57,7 +57,7 @@ Ruff 和 strict code-size 通过（hard=0），未放宽尺寸基线。
 ## 需要其他线协调
 
 插件任务独立推进。本线不修改其原工作区、不改变日常模型、不重启 Gateway。
-另一任务正在将 `tooling/cancellation.py` 迁到 `common/cancellation.py`，正式集成时同步直接导入，不保留 facade。
+本交接时另一任务正将 `tooling/cancellation.py` 迁到 `common/cancellation.py`；后续隔离分支合入已提交插件基线 `f04ec3a42`，本线新增调用已直接导入公共模块，未恢复旧 facade。后续未提交工作仍待集中对齐。
 
 ## 剩余风险
 

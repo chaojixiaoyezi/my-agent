@@ -14,6 +14,7 @@ from agent_py_agent.agent.backends.errors import (
     ProviderTransientError,
 )
 from agent_py_agent.agent.backends.typesafe_decision_wire import parse_typesafe_response
+from agent_py_agent.agent.common.cancellation import ToolCancelled
 from agent_py_agent.agent.common.json_io import locked_json_path
 from agent_py_agent.agent.concurrency.interrupt import InterruptHandle
 from agent_py_agent.agent.conversation import decision_model_call as calls
@@ -28,7 +29,6 @@ from agent_py_agent.agent.settings.model_profiles import (
     model_profiles_path,
     read_model_profiles,
 )
-from agent_py_agent.agent.tooling.cancellation import ToolCancelled
 from agent_py_agent.tests.test_decision_model_profiles import decision
 from agent_py_agent.tests.test_decision_protocol import questions, response
 from agent_py_agent.tests.test_decision_settings import host_at, patch

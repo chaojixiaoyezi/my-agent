@@ -172,13 +172,13 @@ def test_cancelled_batch_stops_before_materializing_and_publishing_remaining_chi
 ):
     """在途批量派工收到统一工具取消令牌后，不再落盘或启动剩余 child。"""
     from agent_py_agent.agent.agent_core import orchestration_tools
-    from agent_py_agent.agent.core import SimpleAgent
-    from agent_py_agent.agent.settings import AgentConfig
-    from agent_py_agent.agent.tooling.cancellation import (
+    from agent_py_agent.agent.common.cancellation import (
         CancellationToken,
         ToolCancelled,
         bind_cancellation_token,
     )
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
 
     agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
     token = CancellationToken()
@@ -224,9 +224,9 @@ class TestCreateSubagentsToolExecute:
     ):
         """派工安全点取消不能被 operation coordinator 降成未知副作用。"""
         from agent_py_agent.agent.agent_core import orchestration_tools
+        from agent_py_agent.agent.common.cancellation import ToolCancelled
         from agent_py_agent.agent.core import SimpleAgent
         from agent_py_agent.agent.settings import AgentConfig
-        from agent_py_agent.agent.tooling.cancellation import ToolCancelled
 
         agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
 

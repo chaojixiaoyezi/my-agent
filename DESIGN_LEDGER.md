@@ -1,5 +1,26 @@
 # 设计台账
 
+第 5 步当前状态：使用卡按现有插件包声明与设置 schema 即时投影，详情和成功启用共用格式；列表、动作帮助及补全仍读同一目录，不新增卡片缓存、权限或执行链。本地实现与 300 项相关回归已完成，发布及原生 TUI 仍待验；详见 [插件生命周期](docs/design/PLUGIN_LIFECYCLE.md#从安装完成到真正可用) 和 [唯一 TODO](docs/tasks/REFACTOR_PLUGIN_GOAL.md#当前-todo唯一执行清单)。
+
+重复启用的空资源声明已本地修复：无新环境计划时不声明候选资源，使原 unchanged／缺失拒绝路径真正可达；不更改激活状态机。见 [激活权威](docs/design/PLUGIN_ACTIVATION.md)，待发布真实复验。
+
+显式插件连接收尾已本地移入原 HostCommand 执行区间，释放调用结束后才登记 executor 退出与运行终态；未启动拒绝同样延后，重送只读。详见 [宿主操作与结果](docs/design/HOST_COMMAND_EXECUTION.md#操作与结果)。状态：相关验证中，未发布，不等于所有清理均成功。
+
+MCP 完整失败回执结算已本地修复、待发布验收：合法 `isError=true` 沿原操作账记失败，保留正文、释放逻辑锁；不表示零副作用，不重写历史 UNKNOWN。传输未知仍保留，详见 [连接与结果边界](docs/design/MCP_TRANSPORT_LIFECYCLE.md#完整工具失败与未知结果本地修复待发布验收)。
+
+通用启动观察竞态修复已发布部署，383 项相关回归通过，新 TUI158／161 已实际启用复验：观察 host 退出后复读同一 session 的权威终态，保持原交接事务、身份、取消及退出码裁决。详见[托管进程合同](docs/design/MANAGED_PROCESS_STDIO.md#生命周期与通道)。
+
+发布前边界修正已本地实现：进程内取消令牌从 tooling 迁入 common，保留唯一类型与上下文，不新增兼容入口或持久状态。详见[宿主命令边界](docs/design/HOST_COMMAND_EXECUTION.md#解决问题)，完整发布验收仍待通过。
+
+十步重构的具体 TODO 已落地于 [原 Goal 台账](docs/tasks/REFACTOR_PLUGIN_GOAL.md#当前-todo唯一执行清单)。仅细化交付顺序与汇报，不改变架构范围；当前第 4 步的本地实现、发包部署与真实 TUI 验收分开标记。
+
+第 4 步新增[插件逐次工作区读取上下文](docs/design/PLUGIN_WORKSPACE_CONTEXT.md)，状态为开发中：
+仅对固定连接明确支持扩展的自有插件传递冻结 cwd 与原读取权限，不改参数、共享进程或安装配置。
+通用运输已在本地接通；唯一源码构建期投影的轻量 SDK 与 workspace-peek 已有实际标准构建和独立 MCP 组件验证。
+真实多 TUI 装卸未验，不进入第 5 步。
+SDK 构建开始实施：原字节投影读取合同、路径策略及通用 no-follow I/O；分页读取持有原文件描述符，
+不另写链接校验旁路。workspace-peek 的命令、工具、设置从包内一份声明生成，版本和 wheel 摘要来自标准构建结果。
+
 显式业务命令本地执行链已接通：原 HostCommand v2 分别冻结工具参数摘要和宿主选择摘要，v1 身份索引不变；
 等待审批仍在原 executor 区间，经现有批准 binding 恢复同一调用，不新增审批服务或执行器。
 协议与恢复边界见 [宿主命令](docs/design/HOST_COMMAND_EXECUTION.md#请求与运行)，尚未完成端到端验收。
@@ -55,14 +76,16 @@ metadata作为对照，progressive才覆盖额外direct插件schema减量；默�
 另一任务已确认 P1-A 范围无重叠；本线独立实施，P5 纳入总完成条件，不改变对方 Goal。
 
 卸载已本地接通，完整真实验收待显式业务调用接线后进行；设计见 [卸载边界](docs/design/PLUGIN_ACTIVATION.md#卸载与重新安装边界本地实现未发布验收)。
-显式调用复用原 HostCommand/ToolExecutor/MCP 与审批请求链，下一片命令运输须携带自己的审批生命周期；
+显式调用复用原 HostCommand/ToolExecutor/MCP 与审批请求链，命令运输已携带自己的审批生命周期；
 显式 slash 不构成自动批准，旧激活的会话批准不能复用到新代，见 [业务接线](docs/design/PLUGIN_ACTIVATION.md#显式业务调用的待接线边界)。
 
 第 4 步本地源码已接通安装、配置、实际启用、普通工具组合、停用释放、重新启用及卸载。
 卸载使用释放返回的完整记录做原锁 CAS；原成功结果持久化并严格读回后，才消费退出证明和回收无人引用的旧包。
 原准备仍在执行时保留安装与环境；同包重装保留其包，旧请求不控制新安装，UNKNOWN 不因后来清理成功被改写。
 公开目录 v3 派生原提交安装引用，避免同包卸载重装后旧目录再次有效；安装表和原操作历史不新增权威副本。
-业务调用已复用上述原链；TUI/Gateway 交互审批运输及完整多 TUI 装卸仍待完成。
+业务调用和 TUI/Gateway 交互审批运输已本地接通；同机连接沿原 GatewayPaths 和服务端规范 owner 固定审批地址。
+原 HTTP 请求线程执行命令，消息流只运输审批和原结果；退出只取消自己的等待，不新增执行或审批账本。
+完整多 TUI 装卸仍待完成；运输及恢复边界见 [宿主命令](docs/design/HOST_COMMAND_EXECUTION.md#请求与运行)。
 本片未推送部署、未新增实际 TUI，不进入第 5 步。
 详细顺序、原 executor 校验、v4 保留及消费合同见 [激活释放](docs/design/PLUGIN_ACTIVATION.md#管理停用的组合边界)。
 

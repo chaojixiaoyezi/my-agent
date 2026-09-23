@@ -16,6 +16,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from ..capability.skill_snapshot import SkillSnapshotError
+from ..common.cancellation import ToolCancelled, raise_if_cancelled
 from ..common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
 from ..runtime_context import current_subagent_run_id
 from ..settings.model_profiles import ModelProfileError
@@ -25,7 +26,6 @@ from ..subagents.services.hierarchy.scheduled_role import (
     agent_name_has_trailing_identifier,
     is_placeholder_agent_name,
 )
-from ..tooling.cancellation import ToolCancelled, raise_if_cancelled
 from ..tooling.models import (
     BaseTool,
     EffectResolverPolicy,

@@ -10,7 +10,7 @@ not parse prose or recreate the deleted registry execution engine.
 from collections.abc import Callable
 from pathlib import Path
 
-from agent_py_agent.agent.tooling.cancellation import CancellationToken
+from agent_py_agent.agent.common.cancellation import CancellationToken
 from agent_py_agent.agent.tooling.executor import (
     ToolExecution,
     ToolExecutor,

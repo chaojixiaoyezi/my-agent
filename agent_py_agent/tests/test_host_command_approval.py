@@ -6,12 +6,12 @@ from threading import Event
 
 import pytest
 
+from agent_py_agent.agent.common.cancellation import CancellationToken
 from agent_py_agent.agent.contracts.tool_approval import ToolApprovalDecision
 from agent_py_agent.agent.runtime_db.host_command_execution import (
     execute_host_command,
     query_host_command,
 )
-from agent_py_agent.agent.tooling.cancellation import CancellationToken
 from agent_py_agent.agent.tooling.models import ApprovalPolicy, ToolHandlerOutcome
 from agent_py_agent.tests.test_host_command_execution import case
 

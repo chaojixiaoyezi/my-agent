@@ -51,8 +51,8 @@ git diff --check
 
 ## 协调与风险
 
-主线已确认目录/快照/loop接缝和seed/params字段无冲突；当前主线已到`d4d540c57`，本片尚未rebase合并。
-最终集成须把本基线的`tooling.cancellation`导入迁到主线`common.cancellation`，不能恢复已删除facade。
+主线已确认目录/快照/loop接缝和seed/params字段无冲突；本片原交接时主线为`d4d540c57`，当时尚未合并。
+后续本隔离分支已合入已提交的插件基线`f04ec3a42`，将本线新增的取消导入直接迁到`common.cancellation`；旧facade仍删除，交叉定向测试见TESTS。后续第7步及原仓库TUI未提交工作仍需另行整合。
 主线反馈测试机磁盘不足；本线不在测试机新增构建/压测，不重启Gateway、不改日常设置。
 Python阻塞文件IO不能强杀；最后期限检查拒绝迟到建议，原HTTP等待和实际worker资源仍有界。
 原搜索可达不等于主模型一定会选对能力，质量与遗漏率需要真实Jev和MiniMax验证。

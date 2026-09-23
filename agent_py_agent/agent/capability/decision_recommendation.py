@@ -6,6 +6,7 @@ import time
 from dataclasses import dataclass, field, replace
 
 from ..backends.decision_protocol import DecisionBinding
+from ..common.cancellation import ToolCancelled, raise_if_cancelled
 from ..concurrency.interrupt import is_interrupted
 from ..conversation.decision_policy import connection_revision
 from ..conversation.decision_service import (
@@ -15,7 +16,6 @@ from ..conversation.decision_service import (
     decision_outcome_is_current,
 )
 from ..settings.decision_settings import execute_decision_settings_operation
-from ..tooling.cancellation import ToolCancelled, raise_if_cancelled
 from .decision_candidates import (
     candidate_digest,
     capability_candidates,

@@ -1,5 +1,5 @@
-# LLM: 插件命令先识别保留命名空间，再从宿主提供的声明解析；本模块不加载插件、不绑定权限或执行目标。
-# 模块用途: 为 CLI、HTTP 与补全提供一致的插件语法和静态帮助，错误不进入聊天或旧控制分派。
+# LLM: 插件命令先识别保留命名空间，再从宿主提供的声明解析；使用卡也只投影已验证声明，不绑定权限或执行目标。
+# 模块用途: 为 CLI、HTTP 与补全提供一致的插件语法、静态帮助和使用说明，错误不进入聊天或旧控制分派。
 
 from __future__ import annotations
 
@@ -12,7 +12,12 @@ from .command_arguments import (
     CommandArgumentError,
     lex_command_arguments,
 )
-from .command_binding import BoundArguments, bind_command_arguments, render_action_help
+from .command_binding import (
+    BoundArguments,
+    bind_command_arguments,
+    render_action_help,
+    render_action_usage,
+)
 from .command_catalog import COMMAND_INDEX, system_slash_command_name
 
 _PLUGIN_ID = re.compile(r"[A-Za-z][A-Za-z0-9._-]{0,63}\Z")
@@ -153,6 +158,42 @@ def render_plugin_help(namespace: PluginNamespace, actions: tuple[CommandActionS
     lines.append(f"输入 {namespace.prefix} <动作> --help 查看参数。")
     if not namespace.plugin_id:
         lines.append("插件业务入口：/plugins@<插件ID> [动作] [参数]；可用动作以当前目录为准。")
+    return "\n".join(lines)
+
+
+# LLM: 仅从包的公开动作和设置 schema 生成展示文本；示例不是授权、参数值或模型指令，不能写回安装状态。
+# 函数用途: 给插件详情和成功启用回执生成同一张简短使用卡，不读取私有设置或启动插件。
+def render_plugin_use_card(plugin: PluginCommandSpec, settings_schema: dict) -> str:
+    namespace = f"/plugins@{plugin.plugin_id}"
+    actions = tuple(action for action in plugin.actions if action.available)
+    lines = [
+        f"{plugin.plugin_id} {plugin.package_version}（{'启用' if plugin.enabled else '停用'}）",
+        " ".join(plugin.summary.split()),
+    ]
+    if actions:
+        lines.append(f"入口：{namespace} [动作] [参数]；输入 {namespace} --help 查看全部动作。")
+    else:
+        lines.append("使用：用普通中文提出需求；此插件未声明显式命令。")
+    if not plugin.enabled:
+        lines.append(f"当前未启用；先执行 /plugins enable {plugin.plugin_id}。")
+    for action in actions[:2]:
+        lines.append("  " + render_action_usage(namespace, action))
+    lines.append("普通中文示例：")
+    for action in actions[:2]:
+        lines.append(f"  请用 {plugin.plugin_id} 插件{' '.join(action.summary.split())}。")
+    if not actions:
+        lines.append(f"  请用 {plugin.plugin_id} 插件处理我指定的内容。")
+    if len(actions) < 2:
+        lines.append(f"  请用 {plugin.plugin_id} 插件帮我完成：{' '.join(plugin.summary.split())}。")
+    properties = settings_schema.get("properties", {})
+    required = settings_schema.get("required", ())
+    names = tuple(str(name) for name in required) if isinstance(required, (tuple, list)) else ()
+    lines.append("必填设置：" + ("、".join(names[:5]) + ("等" if len(names) > 5 else "") if names else "无"))
+    if isinstance(properties, dict) and properties:
+        options = tuple(str(name) for name in properties)
+        lines.append("可配置项：" + "、".join(options[:5]) + ("等" if len(options) > 5 else ""))
+    lines.append(f"修改配置：先 /plugins disable {plugin.plugin_id}，再 /plugins configure {plugin.plugin_id} --file <JSON文件>。")
+    lines.append(f"停用：/plugins disable {plugin.plugin_id}；卸载：/plugins remove {plugin.plugin_id}。")
     return "\n".join(lines)
 
 

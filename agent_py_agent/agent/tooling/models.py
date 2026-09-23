@@ -16,6 +16,7 @@ from typing import Any
 
 from ..contracts.error_taxonomy import error_contract
 from ..retrieval.embedding import EmbeddingProvider, cosine
+from ..workspace_read_context import WorkspaceReadContext
 
 
 class ToolFailureStage(str, Enum):
@@ -1156,13 +1157,14 @@ def _tool_runtime_snapshot_hash(
     )
 
 
-# LLM: 调用上下文不向模型序列化；只读权威回调冻结原 task/run/attempt，不重复审批或预算，不能保存在工具实例上。
-# 类用途: 传递同一调用快照、取消信号及长期资源启动时需要的精确权限复查。
+# LLM: 上下文不进入模型参数或共享工具实例；权威回调只留宿主，读取快照仅向明确支持协议的插件逐次运输。
+# 类用途: 传递同一调用的快照、取消、精确权限复查和冻结工作区读取范围。
 @dataclass(frozen=True)
 class ToolInvocationContext:
     runtime_snapshot: ToolRuntimeSnapshot
     cancellation_token: object | None = None
     execution_authority_check: Callable[[], None] | None = field(default=None, repr=False, compare=False)
+    workspace_read_context: WorkspaceReadContext | None = None
 
 
 @dataclass

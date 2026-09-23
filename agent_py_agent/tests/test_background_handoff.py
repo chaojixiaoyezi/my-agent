@@ -14,14 +14,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_py_agent.agent.tooling import background_process_launch as launch
-from agent_py_agent.agent.tooling import process_registry as registry_module
-from agent_py_agent.agent.tooling import process_session_cleanup as cleanup_module
-from agent_py_agent.agent.tooling.cancellation import (
+from agent_py_agent.agent.common.cancellation import (
     CancellationToken,
     ToolCancelled,
     bind_cancellation_token,
 )
+from agent_py_agent.agent.tooling import background_process_launch as launch
+from agent_py_agent.agent.tooling import process_registry as registry_module
+from agent_py_agent.agent.tooling import process_session_cleanup as cleanup_module
 from agent_py_agent.agent.tooling.process_registry import (
     ProcessRegistry,
     ProcessSessionAuthorityError,
@@ -37,6 +37,65 @@ from agent_py_agent.agent.tooling.process_session_store import (
 )
 from agent_py_agent.agent.tooling.shell import _background_launch_failure, _background_start_outcome
 from agent_py_agent.tests._managed_process_harness import managed_request
+
+
+# LLM: 仅替换观察层的 Store/进程探测，精确安排读状态后 host 提交终态；禁止真实启动或用 sleep 等待交错。
+# 函数用途: 为启动竞态测试提供旧快照和随后提交的记录，同时记录是否只读取原会话。
+@pytest.fixture
+def startup_exit_window(monkeypatch):
+    def arrange(initial, terminal, *, token=None):
+        state = {"record": {"status": initial, "stop_requested": False}, "load_error": None}
+        events = []
+
+        def load(session_id):
+            events.append(("load", session_id))
+            return SimpleNamespace(record=dict(state["record"]), load_error=state["load_error"])
+
+        def terminated(pid, birth):
+            events.append(("terminated", pid, birth))
+            state.update(terminal)
+            if token is not None:
+                token.cancel("cancel at observed host exit")
+            return True
+
+        monkeypatch.setattr(launch, "_process_instance_terminated", terminated)
+        monkeypatch.setattr(launch.time, "sleep", lambda _: pytest.fail("退出后应立即复读，不得加等待"))
+        return SimpleNamespace(load=load), events
+
+    return arrange
+
+
+@pytest.mark.parametrize("initial", ["starting", "running"])
+@pytest.mark.parametrize("exit_code", [0, 23])
+def test_startup_rereads_committed_exit_after_host_termination(startup_exit_window, initial, exit_code):
+    terminal = {"status": "exited", "stop_requested": False, "exit_code": exit_code}
+    store, events = startup_exit_window(initial, {"record": terminal})
+    launch._observe_startup(store, "bg-original", 42, "host-birth", 3)
+    assert events == [("load", "bg-original"), ("terminated", 42, "host-birth"), ("load", "bg-original")]
+    assert store.load("bg-original").record == terminal
+
+
+@pytest.mark.parametrize("second", ["starting", "running", "unknown", "not_started", "killed", "stopped", "missing", "corrupt"])
+def test_startup_exit_reread_does_not_accept_unresolved_or_revoked_state(startup_exit_window, second):
+    record = {"status": "exited" if second == "stopped" else second, "stop_requested": second == "stopped"}
+    if second == "missing":
+        record = {}
+    store, events = startup_exit_window("running", {
+        "record": record, "load_error": {"test": True} if second == "corrupt" else None,
+    })
+    with pytest.raises((OSError, RuntimeError)):
+        launch._observe_startup(store, "bg-original", 42, "host-birth", 3)
+    assert events == [("load", "bg-original"), ("terminated", 42, "host-birth"), ("load", "bg-original")]
+
+
+def test_cancel_at_host_exit_prevents_startup_handoff(startup_exit_window):
+    token = CancellationToken()
+    store, events = startup_exit_window("running", {
+        "record": {"status": "exited", "stop_requested": False, "exit_code": 0},
+    }, token=token)
+    with bind_cancellation_token(token), pytest.raises(ToolCancelled):
+        launch._observe_startup(store, "bg-original", 42, "host-birth", 3)
+    assert events == [("load", "bg-original"), ("terminated", 42, "host-birth")]
 
 
 @pytest.mark.parametrize("checkpoint", [1, 2, 3])

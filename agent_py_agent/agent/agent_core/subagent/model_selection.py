@@ -107,9 +107,9 @@ def capture_first_request_input(agent: object, params: object, prompt: str) -> N
     preparation = first_request_preparation(agent, params)
     if preparation is None or preparation.prompt_input is None:
         return
+    from ...common.cancellation import ToolCancelled
     from ...conversation.models import ConversationHistorySeed
     from ...model_guidance import provider_system_instruction
-    from ...tooling.cancellation import ToolCancelled
     from ..native_tool_protocol import resolve_native_tools
     from ..runtime.conversation_state import conversation_runtime_state_section
     from ..tool_model_generation import _forwarded_guidance_seen, _model_turn_tool_choice
@@ -222,11 +222,11 @@ def _require_current_attempt(manager: object, params: object, run_id: str) -> st
 # 函数用途: 自动把一条 pending 建议变成经过完整请求验证的当前模型，或继续原模型；不向用户请求逐 child 操作。
 def select_first_request_model(agent: object, params: object, prompt: str) -> tuple[object, str]:
     from ...backends.bounded_call import BoundedCallTimeoutError
+    from ...common.cancellation import ToolCancelled
     from ...settings.model_scope import (
         activate_model_dependencies,
         model_dependency_lifetime_active,
     )
-    from ...tooling.cancellation import ToolCancelled
     from ..native_tool_protocol import ToolProtocolSelectionError
 
     preparation = first_request_preparation(agent, params)

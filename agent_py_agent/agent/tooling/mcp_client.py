@@ -582,10 +582,11 @@ class MCPStdioClient:
             selected.inbox.tools_changed = generation != selected.inbox.tools_generation
         return tools
 
-    # LLM: 已发布代理冻结 transport；选择失败明确未发送，实际请求后的副作用只由 transport 裁决，不转投新实例。
-    # 函数用途: 调用固定连接上的 MCP 工具，区分旧连接拒绝与已发送失败，规范化完整结果。
+    # LLM: 已发布代理冻结 transport；请求元数据与 arguments 分离，旧连接失败不转投新实例，发送后的副作用仍由 transport 裁决。
+    # 函数用途: 调用固定 MCP 工具并传递本次可选元数据，规范化完整结果。
     def call_tool(self, tool_name: str, arguments: dict[str, Any], *, transport: MCPTransport | None = None,
-                  authority_check: Callable[[], None] | None = None) -> dict[str, Any]:
+                  authority_check: Callable[[], None] | None = None,
+                  request_meta: dict[str, object] | None = None) -> dict[str, Any]:
         try:
             selected = transport if transport is not None else self.connection()
             with self._state_lock:
@@ -593,6 +594,9 @@ class MCPStdioClient:
         except MCPError as exc:
             exc.effect_outcome = "not_started"
             raise
-        result = selected.request("tools/call", {"name": tool_name, "arguments": arguments or {}},
+        params = {"name": tool_name, "arguments": arguments or {}}
+        if request_meta is not None:
+            params["_meta"] = request_meta
+        result = selected.request("tools/call", params,
                                   timeout=self.config.timeout, authority_check=authority_check)
         return _normalize_call_result(result, self.config.max_content_chars)

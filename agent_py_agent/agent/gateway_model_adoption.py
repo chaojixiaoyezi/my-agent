@@ -13,6 +13,7 @@ from .agent_core.tool_request_projection import ToolLoopRequestInput, project_to
 from .backends.base import ProviderRequestOptions
 from .backends.bounded_call import call_with_deadline
 from .backends.request_scope import foreground_model_scope, provider_request_budget
+from .common.cancellation import ToolCancelled
 from .concurrency.interrupt import is_interrupted
 from .conversation import decision_service
 from .conversation.models import ConversationHistorySeed
@@ -23,7 +24,6 @@ from .model_request_selection import ModelRequestSelectionRejected
 from .prompting_parts.builder import PromptBuilder, render_prepared_prompt
 from .settings.model_profiles import model_profile_generation, selected_model_config
 from .settings.model_scope import model_dependencies_scope, prepare_model_dependencies
-from .tooling.cancellation import ToolCancelled
 
 MODEL_ADOPTION_KEY = "gateway_model_selection.v1"
 

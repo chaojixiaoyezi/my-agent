@@ -1,4 +1,5 @@
 # LLM: 召回决策只可重排已授权候选或追加同 scope 的正式事实；原记忆源、范围、正文和预算仍是唯一权威。
+# 取消异常与当前宿主工具共用 common.cancellation 的唯一类型，取消必须传播而非当作可忽略的决策失败。
 # 模块用途: 在单次请求内重排长期事实或补充有限查询，固定 HOT/lesson，失败或非选择结果保留原召回。
 from __future__ import annotations
 
@@ -8,13 +9,13 @@ import time
 from collections.abc import Callable
 
 from ..backends.decision_protocol import DecisionInputError, decision_json
+from ..common.cancellation import ToolCancelled, raise_if_cancelled
 from ..concurrency.interrupt import is_interrupted
 from ..conversation.decision_service import (
     begin_decision_stage,
     decide,
     decision_outcome_is_current,
 )
-from ..tooling.cancellation import ToolCancelled, raise_if_cancelled
 
 _PRIORITIES = {"first": "优先参考", "normal": "按原相关性参考", "later": "稍后参考，不能删除或省略"}
 _NON_SELECTIONS = {

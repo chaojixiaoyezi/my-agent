@@ -20,7 +20,11 @@ from ...agent.conversation.compact_progress import normalize_conversation_compac
 from ...agent.conversation.model_metrics import newer_model_metrics, public_model_metrics
 from ...agent.conversation.tool_input_progress import ToolInputProgressEventProjector
 from .tui_events import JournalAppendResult, TuiEvent, TuiEventSequencer
-from .tui_permission_queue import TuiPermissionCoordinator, TuiPermissionRuntimeMixin
+from .tui_permission_queue import (
+    ExternalTuiPermissionOwner,
+    TuiPermissionCoordinator,
+    TuiPermissionRuntimeMixin,
+)
 from .tui_view_model import TuiStateStore
 
 _BACKGROUND_TRANSCRIPT_SCHEMA = "background_transcript_event.v1"
@@ -1674,6 +1678,11 @@ class TuiRuntime(
             return False
         active[-1].request_interrupt()
         return True
+
+    # LLM: 命令只创建原 FIFO 控制器，不进入 _turns、不切主任务进度；调用方必须在结束时取消未决面板。
+    # 函数用途: 给一次显式命令提供独立审批入口，让它与主子任务按原队列交互。
+    def command_permission_controller(self, request_id: str) -> _TuiPermissionController:
+        return _TuiPermissionController(ExternalTuiPermissionOwner(self, _required_request_id(request_id)))
 
     # LLM: Child requests are server-projected exact contracts. The coordinator
     # decorates only display text, queues them with foreground approvals, and

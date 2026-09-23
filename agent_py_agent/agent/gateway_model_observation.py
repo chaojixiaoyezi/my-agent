@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 from .backends.decision_protocol import decision_json
 from .command_catalog import system_slash_command_name
+from .common.cancellation import ToolCancelled
 from .contracts.idempotency import operation_id
 from .conversation import decision_service
 from .gateway_parts.request_binding import (
@@ -21,7 +22,6 @@ from .gateway_parts.request_binding import (
 )
 from .settings.decision_settings_projection import decision_point_mode_from_read
 from .settings.model_profiles import SelectedModelRead, execute_model_profile_operation
-from .tooling.cancellation import ToolCancelled
 
 _RETAIN_CHOICES = {
     "retain_original": "沿用当前冻结模型。", "need_data": "缺少作出建议的资料。",

@@ -7,6 +7,7 @@ import re
 import time
 
 from ...backends.decision_protocol import DecisionInputError, decision_json
+from ...common.cancellation import ToolCancelled, bind_cancellation_token, raise_if_cancelled
 from ...concurrency.interrupt import is_interrupted
 from ...conversation.decision_service import (
     begin_decision_stage,
@@ -14,7 +15,6 @@ from ...conversation.decision_service import (
     decision_outcome_is_current,
 )
 from ...settings.decision_settings_schema import POINT_RUNTIME_SCOPES
-from ...tooling.cancellation import ToolCancelled, bind_cancellation_token, raise_if_cancelled
 from ...tooling.output_projection import project_tool_output_body
 from ...tooling.runtime_contracts import ToolCall, ToolResult
 

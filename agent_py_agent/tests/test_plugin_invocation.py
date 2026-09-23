@@ -6,11 +6,11 @@ from threading import Event
 
 import pytest
 
+from agent_py_agent.agent.common.cancellation import CancellationToken
 from agent_py_agent.agent.plugin_management import PluginManagement
 from agent_py_agent.agent.plugin_runtime import PluginMCPClient, plugin_tool_name
 from agent_py_agent.agent.runtime_db.repository import RuntimeConflictError, RuntimeRepository
 from agent_py_agent.agent.runtime_db.schema import runtime_db_path
-from agent_py_agent.agent.tooling.cancellation import CancellationToken
 from agent_py_agent.agent.tooling.mcp_protocol import MCPInbox
 from agent_py_agent.tests.plugin_activation_fixtures import (
     _SERVER,
@@ -70,6 +70,46 @@ def test_nonadmin_explicit_call_approves_once_replays_after_remove_and_queries_o
     with repo._runtime_connection() as conn:
         count = conn.execute("SELECT count(*) FROM tool_operations WHERE operation_id=?", (result["operation_id"],)).fetchone()[0]
         assert count == 1
+
+
+@pytest.mark.parametrize("decision", ["approved", "denied"])
+def test_connection_cleanup_finishes_before_host_attempt_closes(tmp_path, monkeypatch, decision):
+    service, source, command = enabled_plugin(tmp_path)
+    entered, release = Event(), Event()
+    original = PluginMCPClient.stop
+    stops = []
+
+    def stop(client):
+        stops.append(client)
+        entered.set()
+        assert release.wait(15)
+        return original(client)
+
+    monkeypatch.setattr(PluginMCPClient, "stop", stop)
+    revision = service.catalog().revision
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(service.command, command, revision=revision, request_id="cleanup-window",
+            request_permission=lambda value, **_: {"permission_id": value["permission_id"], "decision": decision})
+        try:
+            assert entered.wait(10)
+            query = service.command("/plugins status cleanup-window", revision="", request_id="query-cleanup")
+            assert query["attempt_status"] == "running", query
+            if decision == "approved":
+                assert query["finalization_pending"] is True and query["state"] == "succeeded", query
+                assert "连接收尾尚未确认" in query["message"] and "插件调用已完成" not in query["message"]
+            else:
+                assert query["state"] == "running", query
+            duplicate = service.command(command, revision=revision, request_id="cleanup-window",
+                request_permission=lambda *_, **__: pytest.fail("重送不能再次请求审批"))
+            assert duplicate["attempt_status"] == "running" and len(stops) == 1
+            if decision == "approved":
+                assert "连接收尾尚未确认" in duplicate["message"]
+        finally:
+            release.set()
+        result = future.result(timeout=10)
+    assert result["connection_cleanup"]["confirmed"] and not result["finalization_pending"]
+    assert len(stops) == 1
+    assert source.with_suffix(".calls").exists() == (decision == "approved")
 
 
 @pytest.mark.parametrize("decision", [None, "denied", "cancelled", "approved_session"])

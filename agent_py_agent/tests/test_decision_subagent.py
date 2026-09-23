@@ -238,7 +238,7 @@ def test_owner_permission_change_invalidates_prepared_model_suggestion(prepared,
 
 @pytest.mark.parametrize("recursive", [False, True])
 def test_cancellation_between_prepared_children_leaves_only_committed_prefix(prepared, monkeypatch, recursive):
-    from agent_py_agent.agent.tooling.cancellation import ToolCancelled
+    from agent_py_agent.agent.common.cancellation import ToolCancelled
 
     agent, (a, _), _ = prepared
     if recursive:

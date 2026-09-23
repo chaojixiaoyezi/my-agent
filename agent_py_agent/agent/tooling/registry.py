@@ -18,10 +18,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ..common.cancellation import CancellationToken
 from ..contracts.tool_manifest_contract import tool_manifest_payload
 from ..settings.defaults import default_config_int
 from .artifact import ReadArtifactTool
-from .cancellation import CancellationToken
 from .content_transport_policy import (
     MAX_INLINE_WRITE_CONTENT_CHARS,
     tool_content_transport_protocol,

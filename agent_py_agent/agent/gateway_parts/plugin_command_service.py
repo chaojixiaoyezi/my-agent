@@ -91,8 +91,8 @@ def _management(handler, server, body: dict) -> PluginManagement:
     return PluginManagement(context)
 
 
-# LLM: 来源检查先于正文读取；catalog/command 是唯一显式操作，非法载荷不能隐式转换成业务请求。
-# 函数用途: 读取插件命令声明或提交一次插件命令，错误时保留原任务不动。
+# LLM: 来源检查先于正文读取；交互只接受布尔声明，路径和 owner 由原服务器绑定，命令仍在原 HTTP 线程执行一次。
+# 函数用途: 读取目录或提交命令，按显式客户端能力选择原 JSON 回执或持续审批流。
 def handle_client_plugins(handler, server) -> None:
     from ..plugin_commands import plugin_namespace
     from .http_handlers import require_trusted_source
@@ -103,6 +103,8 @@ def handle_client_plugins(handler, server) -> None:
         body = handler._read_json()
         if not isinstance(body, dict) or body.get("operation") not in {"catalog", "command"}:
             raise ValueError("请求操作无效")
+        if "interactive" in body and type(body["interactive"]) is not bool:
+            raise ValueError("交互能力必须是布尔值")
         text = body.get("command") if body["operation"] == "command" else None
         if body["operation"] == "command" and (
             not isinstance(text, str) or plugin_namespace(text) is None
@@ -118,7 +120,45 @@ def handle_client_plugins(handler, server) -> None:
             },
         )
         return
+    if text is not None and body.get("interactive") is True:
+        _interactive_command(handler, server, body, text)
+        return
     result = plugin_http_response(handler, server, body, text=text)
     handler._send_json(
         503 if result.get("error_code") == "PLUGIN_CATALOG_UNAVAILABLE" else 200, result
     )
+
+
+# LLM: 认证后的 manager 和 server.paths 是唯一身份与地址来源；错误不暴露私有配置，HTTP 不能指定审批路径。
+# 函数用途: 为一次本机命令连接原审批运输，仍由原服务完成授权与执行。
+def _interactive_command(handler, server, body: dict, text: str) -> None:
+    from ..auth.middleware import _handler_peer_ip, _is_loopback_peer
+    from ..common.opaque_id import validate_opaque_id
+    from .command_stream import serve_command_stream
+
+    request_id = body.get("plugin_request_id", "")
+    try:
+        peer = _handler_peer_ip(handler)
+        if peer is None or not _is_loopback_peer(peer):
+            raise ValueError("当前交互审批需要同机客户端")
+        validate_opaque_id(request_id, kind="host_command_request")
+        revision = body.get("catalog_revision", "")
+        if not isinstance(revision, str):
+            raise ValueError("目录版本必须是字符串")
+        manager = _management(handler, server, body)
+        paths = server.paths
+    except Exception:  # noqa: BLE001 准备失败不能暴露路径、认证详情或创建旁路执行
+        handler._send_json(400, {"ok": False, "error_code": "INVALID_COMMAND_ARGUMENTS",
+                                 "message": "插件交互请求或连接无效。"})
+        return
+
+    # LLM: 原服务接收当前请求的唯一消费者与令牌；异常保持原请求可查，不重试或另建业务执行线程。
+    # 函数用途: 在 HTTP 执行区间提交命令并保留无法确认的原结果。
+    def execute(request_permission, cancellation_token) -> dict:
+        try:
+            return manager.command(text, revision=revision, request_id=request_id,
+                                   request_permission=request_permission, cancellation_token=cancellation_token)
+        except Exception:  # noqa: BLE001 已执行与清理状态只由原账本裁决
+            return plugin_command_unknown(request_id)
+
+    serve_command_stream(handler, paths, manager.context.owner.identity, request_id, execute)

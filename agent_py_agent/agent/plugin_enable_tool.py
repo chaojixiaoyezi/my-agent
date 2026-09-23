@@ -1,5 +1,5 @@
-# LLM: 启用复用原 HostCommand/ToolExecutor 和安装表；固定计划先声明、领取后才建环境，不建立第二套运行账。
-# 模块用途: 验证一个插件的完整隔离环境和实际工具目录，再发布同代启用事实，私有值不进入回执。
+# LLM: 启用复用原 HostCommand/ToolExecutor 和安装表；只有新计划声明候选资源，联测重复启用和缺失拒绝，不建立第二套账。
+# 模块用途: 验证隔离环境及工具目录后发布贡献；已启用版本保持原代，不创建空资源声明或新候选，私有值不进回执。
 
 from __future__ import annotations
 
@@ -28,11 +28,11 @@ from .tooling.models import (
 )
 
 
-# LLM: owner/binding/installation 均由宿主冻结；构造只生成原 claim 所需计划，不能提前写文件或启动进程。
-# 类用途: 将显式管理员启用接入原幂等与权限链，保持准备失败不可用。
+# LLM: owner/binding/installation 由宿主冻结；构造只为新激活声明计划，无计划路径不得创建资源，保持原幂等链。
+# 类用途: 接入明确管理员启用，对已启用版本保持不变，对准备失败继续拒绝使用。
 class PluginEnableTool(BaseTool):
-    # LLM: never 仅免显式管理动作的重复询问，原工具禁用和执行权仍须成立；计划只为未激活的固定版本生成。
-    # 函数用途: 保存启用依赖并在原执行器领取前声明完整候选环境身份。
+    # LLM: never 仅免管理动作重复询问；只有未激活版本生成计划及资源声明，无计划分支只核对原激活或返回拒绝。
+    # 函数用途: 在领取前声明新环境身份，已启用或缺失插件不构造非法空资源域。
     def __init__(self, owner, repository, binding, installation, catalog_revision):
         self.owner, self.repository, self.binding = owner, repository, binding
         self.installation, self.catalog_revision = installation, catalog_revision
@@ -46,7 +46,8 @@ class PluginEnableTool(BaseTool):
         self.runtime_policy = ToolRuntimePolicy(
             effect_resolver=EffectResolverPolicy("dangerous"), approval_policy=ApprovalPolicy("never"),
             idempotency_policy=IdempotencyPolicy("operation"), mutates_workspace=False,
-            resource_scopes=ResourceScopePolicy("declared", static_scopes=(self.plan.resource_scope,) if self.plan else ()),
+            resource_scopes=(ResourceScopePolicy("declared", static_scopes=(self.plan.resource_scope,))
+                             if self.plan else ResourceScopePolicy("none")),
         )
 
     # LLM: 原请求重放由执行器完成；失败保留原准备事实与资源，不换 operation 或重建候选来掩盖未知结果。

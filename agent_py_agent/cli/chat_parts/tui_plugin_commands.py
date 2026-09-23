@@ -4,9 +4,13 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+import uuid
 from dataclasses import dataclass, replace
 
+from ...agent.common.cancellation import CancellationToken
 from ...agent.plugin_commands import plugin_namespace
+from .command_interaction import CommandInteraction
 from .plugin_command_client import PluginCommandClient
 
 
@@ -48,29 +52,40 @@ def bind_plugin_input(buffer, client: PluginCommandClient) -> None:
     buffer.on_text_changed += changed
 
 
-# LLM: 只处理已识别插件命令，复用共享 dispatcher；线程外执行一次，无业务重试，不影响原控制/普通任务。
-# 函数用途: 在后台读取目录或提交命令，将宿主回执交回当前 TUI。
+# LLM: 每次 Enter 固定独立编号与审批控制器；只取消自身令牌，不借主任务身份，不在 UI 线程执行资源清理。
+# 函数用途: 在后台提交一次命令，排队展示原审批，结束或退出时关闭本命令的等待。
 def submit_plugin_command(
     event, params, text: str, binding: PluginInputBinding | None, revision: str
 ) -> bool:
     if plugin_namespace(text) is None:
         return False
     from .tui import _tui_handle_command
-    from .tui_keybindings import _handle_command_params
+    from .tui_keybindings import _handle_command_params, _required_tui_runtime
+
+    request_id = uuid.uuid4().hex
+    controller = _required_tui_runtime(params).command_permission_controller(request_id)
+    stopped = threading.Event()
+    interaction = CommandInteraction(
+        request_id, controller.request_permission,
+        CancellationToken(_external_check=stopped.is_set), params.paths,
+    )
 
     command_params = replace(
         _handle_command_params(params, text),
         plugin_client=binding.client if binding else None,
         plugin_revision=revision,
+        command_interaction=interaction,
     )
     app = event.app
 
-    # LLM: 原会话参数在发起时冻结；异常或结束不重发命令，重绘只影响本客户端。
-    # 函数用途: 让网络或宿主目录故障不会冻结 TUI 编辑和中断按键。
+    # LLM: UI 只置本请求的取消位，清理由工作线程观察；finally 必须移除自身审批，不能清空全局 FIFO。
+    # 函数用途: 等待后台命令并在客户端退出、取消或完成时释放本地交互引用。
     async def execute() -> None:
         try:
             await asyncio.to_thread(_tui_handle_command, params=command_params)
         finally:
+            stopped.set()
+            controller.cancel_pending()
             app.invalidate()
 
     app.create_background_task(execute())

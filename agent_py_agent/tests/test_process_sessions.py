@@ -13,13 +13,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_py_agent.agent.tooling.action_policy import ActionPolicy, ActionPolicyRequest
-from agent_py_agent.agent.tooling.background_process_launch import start_background_process
-from agent_py_agent.agent.tooling.cancellation import (
+from agent_py_agent.agent.common.cancellation import (
     CancellationToken,
     ToolCancelled,
     bind_cancellation_token,
 )
+from agent_py_agent.agent.tooling.action_policy import ActionPolicy, ActionPolicyRequest
+from agent_py_agent.agent.tooling.background_process_launch import start_background_process
 from agent_py_agent.agent.tooling.process_registry import process_registry
 from agent_py_agent.agent.tooling.process_session_records import LEGACY_PROCESS_SESSION_SCHEMA
 from agent_py_agent.agent.tooling.process_session_store import (

@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 from ..backends.decision_protocol import decision_json
+from ..common.cancellation import ToolCancelled, raise_if_cancelled
 from ..concurrency.interrupt import is_interrupted
 from ..conversation.decision_service import (
     begin_decision_stage,
@@ -22,7 +23,6 @@ from ..task_progress import (
     task_progress_display_items,
     task_progress_status_is_closed,
 )
-from ..tooling.cancellation import ToolCancelled, raise_if_cancelled
 from .orchestration.dispatch_progress_seed import _known_child_run_ids
 from .runtime.task_identity import progress_ledger_id
 

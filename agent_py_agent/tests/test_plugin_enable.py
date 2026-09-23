@@ -20,6 +20,22 @@ from agent_py_agent.tests.plugin_activation_fixtures import (
 )
 
 
+def test_enable_active_is_unchanged_and_missing_plugin_has_explicit_failure(tmp_path, monkeypatch):
+    service = installed_runtime_plugin(tmp_path)
+    initial = service.command("/plugins enable sample-peek", revision=service.catalog().revision, request_id="enable")
+    assert initial["state"] == "succeeded", initial
+    before = service.installations.snapshot()
+    def unexpected(*args, **kwargs):
+        pytest.fail("已启用或不存在的插件不得准备新环境或连接")
+    monkeypatch.setattr(PluginMCPClient, "__init__", unexpected)
+    repeated = service.command("/plugins enable sample-peek", revision=service.catalog().revision, request_id="repeat")
+    assert repeated["state"] == "succeeded" and repeated["details"]["outcome"] == "unchanged", repeated
+    assert service.installations.snapshot() == before
+    missing = service.command("/plugins enable missing-peek", revision=service.catalog().revision, request_id="missing")
+    assert missing["state"] == "failed" and missing["details"]["reason"] == "plugin_missing", missing
+    assert service.installations.snapshot() == before
+
+
 def test_actual_enable_and_registry_view_call_then_disable(tmp_path):
     service = installed_runtime_plugin(tmp_path, configure=True)
     registry = plugin_registry(service)

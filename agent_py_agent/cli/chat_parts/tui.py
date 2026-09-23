@@ -108,7 +108,7 @@ def _make_tui_exit_refs(params: TuiHandleCommandParams) -> TuiExitRefs:
     )
 
 
-# LLM: 命令共用原分派与控制句柄；插件依赖携带宿主模式及用户所选 revision，调用方负责把网络工作移出 UI 线程。
+# LLM: 命令共用原分派；插件版本及独立交互引用原样传递，不能借聊天控制句柄，调用方负责把 I/O 移出 UI 线程。
 # 函数用途: 为 TUI 处理一条明确命令，不把处理结果再次投递为普通聊天。
 def _tui_handle_command(*, params: TuiHandleCommandParams) -> bool:
     from .control_runtime import ChatControlExecution, execute_chat_control
@@ -132,6 +132,7 @@ def _tui_handle_command(*, params: TuiHandleCommandParams) -> bool:
             use_gateway=params.use_gateway,
             plugin_client=params.plugin_client,
             plugin_revision=params.plugin_revision,
+            command_interaction=params.command_interaction,
             control_executor=lambda command: execute_chat_control(
                 ChatControlExecution(
                     agent=params.agent,

@@ -1,5 +1,7 @@
 # Gateway Structure
 
+`command_stream.py` 的进程内 CancellationToken 统一来自 `common/cancellation.py`；请求线程及消息流仍由本模块管理，令牌不拥有持久任务状态。
+
 ## 子代理插话重放边界
 
 `conversation/agent_control.py` 只决定准确旧/新轮和启动需求；`GuidanceRecovery.prepare_pending_replay` 一次排序锁定两轮，
@@ -7,6 +9,12 @@
 单条改绑复用原回执与索引写入；不引入新的邮箱或执行器，启动在所有这些控制锁之外。
 
 ## 公共命令边界
+
+显式命令交互使用 `command_stream_protocol.py` 的有界 JSONL；首帧固定服务端规范 owner，所有帧绑定原命令编号。
+`command_stream.py` 在原 HTTP 线程调用原服务，独立心跳只更新当前连接取消位；不增加执行队列、操作状态或重放器。
+原 StreamApproval/permission_bridge 读写同机共享地址：父目录由可信 GatewayPaths、规范 owner 哈希及原编号派生。
+客户端不能提交路径，面板等待与读流分离；关闭只取消本命令，原结果和资源退出分别裁决。
+命令审批与聊天审批共用原 TUI FIFO，但不创建聊天回合或借主/子任务身份。该接线尚待产品实际 TUI 验收。
 
 `agent/command_catalog.py` 提供核心名称、别名、会话尾部语法及保留命名空间的唯一声明。
 HTTP ask/control 在原鉴权之后先经 `plugin_command_service.py` 读取可信 owner 目录并核对输入版本，其余控制继续经原会话解析器；

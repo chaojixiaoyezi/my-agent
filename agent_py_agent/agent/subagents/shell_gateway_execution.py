@@ -1,3 +1,4 @@
+# LLM: 进程内取消查询直接依赖 common.cancellation；持久子树权限与资源回收仍沿本模块原合同。
 
 # LLM: 受控 shell 仅执行结构化决策批准的批处理命令，不能继承控制宿主的输入；PTY/MCP 有独立输入通道。
 # 模块用途: 执行受控命令并留存限额输出、超时回执和审计证据，不让多个代理共享终端输入。
@@ -13,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from ..tooling.cancellation import cancellation_requested
+from ..common.cancellation import cancellation_requested
 from ..tooling.process_registry import terminate_process_tree
 from .shell_gateway import (
     ShellGatewayDecision,

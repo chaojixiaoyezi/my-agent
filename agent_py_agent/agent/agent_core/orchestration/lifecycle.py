@@ -8,9 +8,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from ...common.cancellation import raise_if_cancelled
 from ...runtime_errors import runtime_error_report
 from ...subagents.models import TaskStatus, normalize_task_status
-from ...tooling.cancellation import raise_if_cancelled
 from .background.dispatch import auto_start_tasks
 from .run_scope import remember_orchestration_run_ids
 

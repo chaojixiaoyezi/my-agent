@@ -7,8 +7,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from .command_interaction import CommandInteraction
 
-# LLM: 控制执行与插件目录客户端分别传入；use_gateway 是原 CLI 模式，plugin_revision 仅保存用户所选目录版本。
+
+# LLM: 控制执行与命令交互分别传入；use_gateway 是原 CLI 模式，plugin_revision 只保存原选择，交互引用不授予权限。
 # 类用途: 把 agent、记忆限制、运行注入、提示文件和输出函数交给通用命令处理器。
 @dataclass
 class SlashCommandContext:
@@ -22,6 +24,7 @@ class SlashCommandContext:
     use_gateway: bool = False
     plugin_client: Any = None
     plugin_revision: str = ""
+    command_interaction: CommandInteraction | None = None
 
 
 __all__ = ["SlashCommandContext"]

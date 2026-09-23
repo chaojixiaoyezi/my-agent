@@ -1,0 +1,212 @@
+{
+  "plugin_id": "workspace-peek",
+  "summary": "预览工作区文件和分页查看目录",
+  "entry_module": "workspace_peek",
+  "default_action": "show",
+  "actions": [
+    {
+      "name": "show",
+      "summary": "预览 UTF-8 文件",
+      "arguments": [
+        {
+          "name": "path",
+          "summary": "文件路径",
+          "options": [],
+          "value_type": "string",
+          "required": true,
+          "multiple": false,
+          "default": null,
+          "choices": [],
+          "path": true
+        },
+        {
+          "name": "bytes",
+          "summary": "每页字节数",
+          "options": [
+            "--bytes",
+            "-b"
+          ],
+          "value_type": "integer",
+          "required": false,
+          "multiple": false,
+          "default": null,
+          "choices": [],
+          "path": false
+        },
+        {
+          "name": "cursor",
+          "summary": "下一页游标",
+          "options": [
+            "--cursor"
+          ],
+          "value_type": "string",
+          "required": false,
+          "multiple": false,
+          "default": null,
+          "choices": [],
+          "path": false
+        }
+      ],
+      "kind": "tool",
+      "target": "show",
+      "available": true
+    },
+    {
+      "name": "tree",
+      "summary": "查看目录",
+      "arguments": [
+        {
+          "name": "path",
+          "summary": "目录路径",
+          "options": [],
+          "value_type": "string",
+          "required": false,
+          "multiple": false,
+          "default": ".",
+          "choices": [],
+          "path": true
+        },
+        {
+          "name": "depth",
+          "summary": "查看深度",
+          "options": [
+            "--depth",
+            "-d"
+          ],
+          "value_type": "integer",
+          "required": false,
+          "multiple": false,
+          "default": 1,
+          "choices": [],
+          "path": false
+        },
+        {
+          "name": "limit",
+          "summary": "每页条目数",
+          "options": [
+            "--limit",
+            "-n"
+          ],
+          "value_type": "integer",
+          "required": false,
+          "multiple": false,
+          "default": null,
+          "choices": [],
+          "path": false
+        },
+        {
+          "name": "cursor",
+          "summary": "下一页游标",
+          "options": [
+            "--cursor"
+          ],
+          "value_type": "string",
+          "required": false,
+          "multiple": false,
+          "default": null,
+          "choices": [],
+          "path": false
+        }
+      ],
+      "kind": "tool",
+      "target": "tree",
+      "available": true
+    }
+  ],
+  "tools": [
+    {
+      "name": "show",
+      "description": "按字节预算预览当前工作区的 UTF-8 文本；返回下一页游标。",
+      "requested_effect": "read_only",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "description": "文件路径"
+          },
+          "bytes": {
+            "type": "integer",
+            "description": "每页字节数",
+            "minimum": 4,
+            "maximum": 16384
+          },
+          "cursor": {
+            "type": "string",
+            "description": "上一页返回的游标",
+            "maxLength": 512
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "tree",
+      "description": "按深度和扫描预算查看当前工作区目录，排序后分页。",
+      "requested_effect": "read_only",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "default": ".",
+            "description": "目录路径"
+          },
+          "depth": {
+            "type": "integer",
+            "description": "查看深度",
+            "minimum": 1,
+            "maximum": 5,
+            "default": 1
+          },
+          "limit": {
+            "type": "integer",
+            "description": "每页条目数",
+            "minimum": 1,
+            "maximum": 200
+          },
+          "cursor": {
+            "type": "string",
+            "description": "上一页返回的游标",
+            "maxLength": 512
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "settings_schema": {
+    "type": "object",
+    "properties": {
+      "page_bytes": {
+        "type": "integer",
+        "description": "默认预览字节数",
+        "minimum": 4,
+        "maximum": 16384,
+        "default": 4096
+      },
+      "page_entries": {
+        "type": "integer",
+        "description": "默认目录页条目数",
+        "minimum": 1,
+        "maximum": 200,
+        "default": 100
+      },
+      "scan_entries": {
+        "type": "integer",
+        "description": "目录扫描总上限",
+        "minimum": 1,
+        "maximum": 10000,
+        "default": 2000
+      }
+    },
+    "required": [],
+    "additionalProperties": false
+  }
+}

@@ -19,6 +19,9 @@
 - 成功交接后，返回的本地 Popen 管道归调用方；启动失败由 launcher 关闭尚未交出的管道。
 - 原 session 预留、host/child 出生身份、交接、截止时间、停止意图和终态提交保持。
   关闭 stdin 只表示输入结束；进程是否退出仍以原账本和精确资源回执为准。
+- 启动观察若先读到运行中、随后发现 host 已退出，立即复读同一 session 的权威记录，避免把已提交终态误报为启动失败。
+  复读只接受未撤销的 `exited`；缺失、损坏、未知和仍未终态照常失败，不延时等待或重启命令。
+  退出码保留给原调用方判断，观察成功不等于命令成功；实际交接仍在原事务内复核身份、执行权和取消。
 - 管道字节没有持久重放，launcher 退出后必须停止原 child；普通 log 后台的独立寿命不改变。
 
 同一 session Store 当前写 `managed_process_session.v4`，保留 v3 引入的严格可选 `activation_scope`。
@@ -46,6 +49,10 @@ v4 增加宿主固定的 `retain_until_consumed`，普通任务默认 false；ve
 定向读取本地 Codex `578c1b22` 的 `rmcp-client/src/stdio_server_launcher.rs`：
 本地路径创建独立 stdin/stdout/stderr；executor 路径使用 `tty=false`、`pipe_stdin=true`。
 只参考字节与生命周期边界，不复制实现，不借用其远端 executor，也未运行参考项目测试。
+
+启动观察竞态修复另定向读取本地 Codex `core/src/unified_exec/process.rs` 的早期退出接纳与退出码读取，
+以及 Hermes `tools/process_registry.py` 的进程等待收口和等待前刷新；仅参考进程退出与业务成功分离的边界。
+本项目保持自己的原 Store 权威及交接事务，不移植它们的状态源；原插件准备等待已有退出后复读，现补齐更早的通用启动观察窗口。
 
 开发验证覆盖原样双向字节及大于管道容量的输出、stderr 分离、子进程关闭输出后的 EOF、
 自然退出码、交接前失败、launcher 消失及精确停止与其他 session 隔离。

@@ -17,13 +17,13 @@ from agent_py_agent.agent.backends.decision_protocol import (
     DecisionBinding,
     DecisionResponse,
 )
+from agent_py_agent.agent.common.cancellation import ToolCancelled
 from agent_py_agent.agent.settings.decision_settings import execute_decision_settings_operation
 from agent_py_agent.agent.task_progress import (
     read_task_progress,
     with_task_progress_display_plan,
     write_task_progress,
 )
-from agent_py_agent.agent.tooling.cancellation import ToolCancelled
 from agent_py_agent.cli.chat_parts.tui_decision_menu import _fields
 from agent_py_agent.tests.test_decision_settings import host_at, patch
 

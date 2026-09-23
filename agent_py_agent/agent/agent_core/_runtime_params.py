@@ -7,8 +7,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..action_protocol import RunScope
+from ..common.cancellation import CancellationToken
 from ..concurrency.interrupt import is_interrupted
-from ..tooling.cancellation import CancellationToken
 
 
 @dataclass(frozen=True)

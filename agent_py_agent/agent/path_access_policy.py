@@ -1,4 +1,5 @@
-"""Shared path access policy for main agents and subagents."""
+# LLM: 路径裁决只有这一份实现；每个策略在构造时冻结宿主根，跨进程运输不得重新猜测。核心墙外复核保留显式新策略构造，联查 owner、文件工具与读取上下文测试。
+# 模块用途: 判断目标是否处于当前 owner、已授权工作根或普通路径策略允许的范围，不读取文件内容。
 
 from __future__ import annotations
 
@@ -59,6 +60,8 @@ def _is_credential_filename(name: str) -> bool:
     return n == ".env" or n.startswith(".env.")
 
 
+# LLM: 结构化决定供宿主和插件共同消费；code 保留原权限分类，不从消息正文推导放行。
+# 类用途: 表达路径是否允许以及明确拒绝原因。
 @dataclass(frozen=True)
 class PathAccessDecision:
     allowed: bool
@@ -67,6 +70,8 @@ class PathAccessDecision:
     dangerous_root: str = ""
 
 
+# LLM: 所有根在宿主构造时固定；owner 墙优先于 full，隔离进程应恢复原字段而非调用 from_values 重读环境。
+# 类用途: 保存不可变的路径权限，统一核心文件工具和插件读取的裁决。
 @dataclass(frozen=True)
 class PathAccessPolicy:
     mode: str = DEFAULT_PATH_ACCESS_MODE
@@ -76,7 +81,10 @@ class PathAccessPolicy:
     #   根级模板和运行数据一律拒绝；即使 path_access_mode=full 也不能跨过租户边界。
     #   不设 = 本地管理员/单租户原行为(整个 .my-agent 豁免)。
     owner_scope_root: Path | None = None
+    agent_home_root: Path | None = None
 
+    # LLM: 配置读取只在构造处发生；配置切换应重建策略，不原地改变已在执行的调用。
+    # 函数用途: 从当前配置创建冻结路径策略。
     @classmethod
     def from_config(cls, config: object | None) -> PathAccessPolicy:
         return cls.from_values(
@@ -84,6 +92,8 @@ class PathAccessPolicy:
             dangerous_roots=getattr(config, "path_dangerous_roots", DEFAULT_DANGEROUS_PATH_ROOTS),
         )
 
+    # LLM: 当前用户 home 过滤与数据根豁免必须由宿主计算一次；直接恢复协议字段不得再次应用此环境归一化。
+    # 函数用途: 规范化模式和危险根，并固定 owner 及数据根事实。
     @classmethod
     def from_values(
         cls,
@@ -103,11 +113,12 @@ class PathAccessPolicy:
             roots = tuple(root for root in roots if root is not None and root != home)
         else:
             roots = tuple(root for root in roots if root is not None)
-        return cls(mode=normalized_mode, dangerous_roots=roots, owner_scope_root=scope)
+        roots = tuple(dict.fromkeys(roots))
+        return cls(mode=normalized_mode, dangerous_roots=roots, owner_scope_root=scope,
+                   agent_home_root=_home_root_from_owner_scope(scope) if scope else _my_agent_home_root())
 
-    # LLM: This is the canonical read/path fence. Owner scope is stronger than path mode; inside
-    # the owner's own home no filename heuristic applies, and explicit admin full mode is open.
-    # 函数用途: 判断一个已解析目标是否位于当前 owner 或管理员允许访问的路径范围。
+    # LLM: owner 墙强于模式；只读构造时冻结的根，不受另一个会话或子进程环境影响，原凭据与危险根顺序保持。
+    # 函数用途: 解析目标并判断是否位于当前 owner 或管理员允许访问的路径范围，不读取内容。
     def check(self, path: str | Path) -> PathAccessDecision:
         try:
             resolved = Path(path).expanduser().resolve(strict=False)
@@ -116,11 +127,7 @@ class PathAccessPolicy:
         # owner 隔离是租户边界，不是普通安全模式。远程 owner 的文件可见面
         # 只有自己 home + shared；不仅是 .my-agent 里的其他目录，宿主其他位置也默认拒绝。
         # 必须先于 full 判定，避免 path_access_mode=full 变成跨租户/跨宿主读权。
-        home_root = (
-            _home_root_from_owner_scope(self.owner_scope_root)
-            if self.owner_scope_root is not None
-            else _my_agent_home_root()
-        )
+        home_root = self.agent_home_root
         if self.owner_scope_root is not None:
             # WorkspaceOnly 的唯一硬边界就是 owner home。用户自己的文件（包含项目自用
             # .env/认证配置）不再被第二层文件名 denylist 误伤；凭据仍不会被日志主动输出，
@@ -150,7 +157,6 @@ class PathAccessPolicy:
         # agent 写自己的产物/记忆/审计天经地义。否则 root 用户场景下 /root 被列危险目录,会误伤
         # /root/.my-agent/.../output(agent 自己的产物目录)。豁免精确到 home 子树——/root/.ssh 等敏感
         # 目录不在 my-agent home 下,仍被 dangerous_roots 拦截,口子不扩大(resolve 已展开 .. 防逃逸)。
-        home_root = _my_agent_home_root()
         if home_root is not None and _is_relative_to(resolved, home_root):
             return PathAccessDecision(True)
         for root in self.dangerous_roots:
@@ -162,6 +168,20 @@ class PathAccessPolicy:
                     str(root),
                 )
         return PathAccessDecision(True)
+
+    # LLM: 只有 owner 普通墙拒绝允许原明确授权根复核，跨 owner/控制面等拒绝不能覆盖；插件须传宿主冻结的 external_policy。
+    # 函数用途: 为核心文件工具和隔离插件统一检查已授权的墙外工作路径。
+    def check_with_external_roots(
+        self, resolved: Path, granted_external_roots: tuple[Path, ...],
+        *, external_policy: PathAccessPolicy | None = None,
+    ) -> PathAccessDecision:
+        decision = self.check(resolved)
+        if decision.allowed or decision.code != "PATH_OWNER_SCOPE_BLOCKED":
+            return decision
+        if not any(_is_relative_to(resolved, root) for root in granted_external_roots):
+            return decision
+        policy = external_policy or PathAccessPolicy.from_values(mode=self.mode, dangerous_roots=self.dangerous_roots)
+        return policy.check(resolved)
 
     def _owner_scope_decision(self, resolved: Path, home_root: Path) -> PathAccessDecision:
         """多用户隔离:my-agent 数据目录内的 owner 级判定。

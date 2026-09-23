@@ -8,6 +8,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass, replace
 
 from ..action_protocol import subagent_schedule_envelope_from_payload
+from ..common.cancellation import raise_if_cancelled
 from ..common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
 from ..runtime_context import current_subagent_run_id
 from ..runtime_errors import runtime_error_report
@@ -20,7 +21,6 @@ from ..subagents.services.hierarchy.scheduler import (
     HierarchyScheduleResult,
     _child_create_params,
 )
-from ..tooling.cancellation import raise_if_cancelled
 from ..tooling.models import ToolHandlerOutcome
 from .orchestration.capacity import (
     checked_creation_capacity,

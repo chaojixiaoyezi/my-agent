@@ -71,6 +71,17 @@ def read_text_beneath(
     return content.decode("utf-8") if content is not None else None
 
 
+# LLM: 严格只读打开复用原逐段目录和普通单链接文件校验；调用方拥有返回 fd，权限仍由原业务合同检查。
+# 函数用途: 安全打开需要 seek/fstat/分页读取的普通文件，平台能力不足不降级跟随路径。
+def open_readonly_file_beneath(root: str | Path, relative_parts: tuple[str, ...]) -> int:
+    _validate_relative_parts(relative_parts)
+    parent_fd = open_directory_beneath(root, relative_parts[:-1], require_dir_fd=True)
+    try:
+        return _openat_file(parent_fd, relative_parts[-1], os.O_RDONLY, 0o600)
+    finally:
+        os.close(parent_fd)
+
+
 # LLM: 与文本读取共用 no-follow 链；严格来源读取可要求 dirfd，能力不足不能降级 portable；预算限制实际读取而非仅相信 stat。
 # 函数用途: 有界读取宿主管理的普通二进制文件，不跟随链接，也不创建目录。
 def read_bytes_beneath(
@@ -304,17 +315,19 @@ def list_names_beneath(root: str | Path, relative_parts: tuple[str, ...]) -> lis
         os.close(descriptor)
 
 
-# LLM: Directory traversal owns and returns only the final descriptor. Every component is opened
-# relative to the prior fd; callers must close the returned descriptor.
-# 函数用途: 从受信根逐层打开内部目录，可选安全创建缺失的固定目录段。
+# LLM: 每段相对前一 fd 打开，调用方关闭最终 fd；严格读取模式要求实际 no-follow/dirfd 能力，不能用 portable 分支替代。
+# 函数用途: 从受信根逐层打开内部目录，可选安全创建固定目录段，或要求严格只读打开能力。
 def open_directory_beneath(
     root: str | Path,
     relative_parts: tuple[str, ...],
     *,
     create: bool = False,
     mode: int = 0o700,
+    require_dir_fd: bool = False,
 ) -> int:
     _validate_relative_parts(relative_parts, allow_empty=True)
+    if require_dir_fd and (not _supports_dir_fd() or not getattr(os, "O_NOFOLLOW", 0) or not getattr(os, "O_DIRECTORY", 0)):
+        raise NoFollowPathError("strict no-follow opening is unavailable")
     descriptor = _open_verified_root(Path(root).expanduser())
     try:
         for part in relative_parts:
@@ -569,6 +582,7 @@ __all__ = [
     "open_private_lock_beneath",
     "list_names_beneath",
     "open_directory_beneath",
+    "open_readonly_file_beneath",
     "read_text_beneath",
     "read_bytes_beneath",
     "regular_file_exists_beneath",

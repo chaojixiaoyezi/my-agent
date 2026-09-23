@@ -1,6 +1,6 @@
 
-# LLM: MCP 代理冻结发现连接并沿本次上下文复查权限；清理异常保留原资源事实，联测注册、共享视图和激活撤销。
-# 模块用途: 将远端工具接到原执行链，发布完整目录并阻止旧代理追随重连，未知清理不改报成功。
+# LLM: MCP 代理冻结连接并逐次复查权限；完整业务失败与传输未知分开落原账，联测操作结算、共享视图和激活撤销。
+# 模块用途: 将远端工具接到原执行链，保留完整失败回执，阻止旧代理追随重连，未知清理不改报成功。
 from __future__ import annotations
 
 """把 MCP server 发现的工具动态注册进 my-agent 的 ToolRegistry。
@@ -102,14 +102,14 @@ def mcp_schema_parameters(input_schema: dict[str, Any]) -> dict[str, str]:
     return parameters
 
 
-# LLM: MCP proxy 的 Schema 只在它绑定的已握手子进程仍存活时暴露，执行仍走统一 effect/approval 门。
-# 类用途: 把一个已发现 MCP remote tool 映射为 my-agent 的受控本地工具代理。
+# LLM: Schema 只在固定连接存活时暴露，执行走统一 effect/approval 门；完整 isError 只证明本次失败，不证明外部变更回滚。
+# 类用途: 把远端工具映射为受控代理，分别报告业务失败和无法确认结果的通信异常。
 class MCPProxyTool(BaseTool):
     """一个把调用转发给某 MCP server ``tools/call`` 的代理工具。
 
     ``execute`` 把模型传来的 dict 参数（去掉内部 ``tool`` 字段）转发给 server，
     再把结果归一化成 ``ToolHandlerOutcome``。server 自报的工具错（isError=true）
-    映射成 ``error_code=TOOL_EXECUTION_FAILED``（可重试语义）；客户端层异常按其
+    映射成 ``error_code=TOOL_EXECUTION_FAILED`` 与确定失败事实；客户端层异常按其
     ``MCPError.code`` 映射成 my-agent 错误码。
     """
 
@@ -151,8 +151,13 @@ class MCPProxyTool(BaseTool):
     def execute_scoped(self, params: dict[str, Any], context: ToolInvocationContext) -> ToolHandlerOutcome:
         return self._execute(params, context)
 
-    # LLM: 两个 BaseTool 入口共用同一执行链，context 缺失不伪造快照；清理和权限错误继续留给原结果/操作处理。
-    # 函数用途: 转发当前参数和可选调用权限，保留完整内容及结构化失败。
+    # LLM: 普通 MCP 不因服务自述能力获得宿主路径；只有受控插件子类可投影已声明支持的逐次上下文。
+    # 函数用途: 保持普通外部 MCP 的请求不携带宿主元数据。
+    def _request_meta(self, context: ToolInvocationContext | None) -> dict[str, object] | None:
+        return None
+
+    # LLM: 两入口共用执行链；完整 CallToolResult 的 isError 按失败结算，不声称未执行；传输与清理异常仍保留未知。
+    # 函数用途: 向固定连接发送本次参数和权限，保留可读失败回执，使原操作可查询且不阻塞后续独立调用。
     def _execute(self, params: dict[str, Any], context: ToolInvocationContext | None) -> ToolHandlerOutcome:
         arguments = {
             key: value
@@ -165,6 +170,9 @@ class MCPProxyTool(BaseTool):
                 options["transport"] = self.transport
             if context is not None and context.execution_authority_check is not None:
                 options["authority_check"] = context.execution_authority_check
+            request_meta = self._request_meta(context)
+            if request_meta is not None:
+                options["request_meta"] = request_meta
             result = self.client.call_tool(self.remote_tool, arguments, **options)
         except ProcessSessionCleanupError as exc:
             return self._error_result("插件原进程清理尚未确认", "TOOL_EXECUTION_FAILED",
@@ -195,6 +203,7 @@ class MCPProxyTool(BaseTool):
             not failed,
             json.dumps(payload, ensure_ascii=False),
             error_code="TOOL_EXECUTION_FAILED" if failed else "",
+            effect_outcome="failed" if failed else "",
         )
 
     # LLM: 发送事实只接受 transport 的结构化结论；未发送拒绝不得记 UNKNOWN，已启动 writer 和清理异常不能改成未发生。

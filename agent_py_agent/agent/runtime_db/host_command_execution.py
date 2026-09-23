@@ -1,10 +1,11 @@
-# LLM: 显式宿主命令复用原运行、执行器及操作账；本模块不鉴权、不读业务文件、不重开 UNKNOWN，也不启动模型。
-# 模块用途: 精确启动原 pending 命令、收口原运行，并从唯一原操作或未启动事件查询结果。
+# LLM: 显式宿主命令复用原运行、执行器及操作账；资源释放属于原执行区间，联测插件收尾和重复请求，不重开 UNKNOWN。
+# 模块用途: 精确启动原 pending 命令，在本次资源释放后收口原运行，从唯一原操作或未启动事件查询结果。
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from contextlib import ExitStack
 from dataclasses import replace
 
 from ..common.strict_json import load_strict_json
@@ -24,12 +25,13 @@ _UNSTARTED_SCHEMA = "host_command_not_started.v1"
 _LOGGER = logging.getLogger(__name__)
 
 
-# LLM: 只接受已授权请求和原 ToolExecutorRequest；审批等待保留同一执行区间，批准只恢复尚未执行的原 call。
-# 函数用途: 领取原 pending、经原审批/工具链执行一次，再从原账读取结果，不换代或重跑 handler。
+# LLM: 只有原 pending 领取者拥有执行及释放回调；审批与资源收尾都在同一执行区间，重送只读原结果。
+# 函数用途: 经原审批/工具链执行一次，先释放调用方本次资源再关闭原运行，不换代或重跑 handler。
 def execute_host_command(
     repo: RuntimeRepository, request: HostCommandRequest,
     prepare: Callable[[HostCommandBinding], ToolExecutorRequest],
     *, request_permission: Callable | None = None,
+    release_execution: Callable[[], None] | None = None,
 ) -> dict:
     binding = repo.register_host_command(request)
     try:
@@ -43,8 +45,11 @@ def execute_host_command(
             _finalize_execution(repo, binding)
         return query_host_command(repo, request)
     entered_executor = False
+    unstarted = None
     try:
-        with attempt_executor(repo, binding.run_id, binding.attempt_id):
+        with attempt_executor(repo, binding.run_id, binding.attempt_id), ExitStack() as resources:
+            if release_execution is not None:
+                resources.callback(release_execution)
             prepared = prepare(binding)
             _validate_execution(binding, prepared)
             original_gate = prepared.pre_handler_gate
@@ -66,12 +71,14 @@ def execute_host_command(
             execution = resolve_host_command_approval(prepared, execution, request_id=request.request_id,
                                                        consumer=request_permission)
             if _operation(repo, binding) is None and not execution.result.handler_executed:
-                _settle_unstarted(repo, binding, execution.result.reported_error_code,
-                                  state="approval_required" if execution.decision.status == "ask" else "rejected")
+                unstarted = (execution.result.reported_error_code,
+                             "approval_required" if execution.decision.status == "ask" else "rejected")
     except Exception as exc:  # noqa: BLE001 不输出参数或私有路径，进入执行链之后只能核对原账
         _LOGGER.warning("宿主命令执行中断: operation=%s error=%s", request.operation_id, type(exc).__name__)
         if not entered_executor:
-            _settle_unstarted(repo, binding, "HOST_COMMAND_PREPARATION_FAILED")
+            unstarted = ("HOST_COMMAND_PREPARATION_FAILED", "rejected")
+    if unstarted is not None:
+        _settle_unstarted(repo, binding, unstarted[0], state=unstarted[1])
     _finalize_execution(repo, binding)
     return query_host_command(repo, request)
 

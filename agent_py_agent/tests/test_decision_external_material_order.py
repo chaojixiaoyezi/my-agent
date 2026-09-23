@@ -22,7 +22,7 @@ from agent_py_agent.agent.backends.decision_protocol import (
     DecisionResponse,
 )
 from agent_py_agent.agent.backends.message_adapter import AnthropicMessageAdapter
-from agent_py_agent.agent.tooling.cancellation import ToolCancelled
+from agent_py_agent.agent.common.cancellation import ToolCancelled
 from agent_py_agent.agent.tooling.output_projection import project_tool_output_body
 from agent_py_agent.agent.tooling.runtime_contracts import ToolResult, ToolSuccessFacts
 from agent_py_agent.tests._tool_runtime_harness import (

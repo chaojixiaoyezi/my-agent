@@ -26,6 +26,7 @@ Issues = "https://github.com/chaojixiaoyezi/my-agent/issues"
 
 [project.optional-dependencies]
 dev = [
+  "setuptools>=77",  # 自有插件离线标准构建所需后端；只用于开发，不进入插件或宿主运行依赖
   "coverage>=7.6",
   "pytest>=8.0",
   "pytest-timeout>=2",

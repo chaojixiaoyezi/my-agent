@@ -12,7 +12,7 @@ from html import unescape
 from html.parser import HTMLParser
 from typing import Any
 
-from .cancellation import (
+from ..common.cancellation import (
     ToolCancelled,
     cancellation_requested,
     register_cancellation_callback,
