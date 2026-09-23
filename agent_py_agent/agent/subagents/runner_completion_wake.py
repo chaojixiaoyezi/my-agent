@@ -1,4 +1,4 @@
-# LLM: 终态通知器只接收明确 Store 与 task 读写能力，申请／阶段提醒保留原入口；精确完成交给原发布锁保留 handled，不能凭前置查询跳过半写恢复。
+# LLM: 终态通知器只接收明确 Store 与 task 读写能力；历史 BLOCKED 发布后复读 canonical 修正关联，避免盖掉并发授权；精确完成交给原发布锁保留 handled，联测授权收口与直属父级。
 # 模块用途: 可靠发送父级通知、去重并记录投递错误，保持后台 wake 和前台续轮读取同一交接内容。
 from __future__ import annotations
 
@@ -62,6 +62,7 @@ def notify_parent_on_activity_notice(manager: Any, task: Any, notice: dict[str, 
 
 # LLM: 此通知器只持有原任务关联、唤醒 Store 及 task 读写能力；不持有 manager，不派工或另建状态。
 #   完成和受控取消共用同一真实投递实现，调用方须同步迁移结果服务、恢复装配和 agent_control。
+#   历史 BLOCKED 信封保持原 attempt，当前关联以 canonical 为准；并发授权和停止由原 CAS 保持。
 # 类用途: 把子代理终态交给准确的直属父级，更新原关联、发布幂等通知并保存错误。
 @dataclass(frozen=True)
 class RunnerCompletionNotifier:
@@ -119,7 +120,8 @@ class RunnerCompletionNotifier:
         )
 
     # LLM: 自然结果与外部取消经过各自准入后共用此处；先更新原任务关联，再发布原 wake／观察配对。
-    #   只读取绑定的父任务加载能力，嵌套孩子不能跳过持久化直属父级。
+    #   BLOCKED 关联更新后复读当前 canonical，再以 CAS 保留已授权接续或控制终态；旧 result/wake 历史不改。
+    #   只读取绑定的任务加载能力，嵌套孩子不能跳过持久化直属父级。
     # 可恢复语义：去重键按 **exact attempt** 定身份（attempt 缺失时退回既有 task+status 形态，行为不变）。
     # 同一 attempt 的完整配对在原发布锁内保留 pending/handled，不以前置回执查询旁路半写恢复；
     # 换 attempt 属新事实，绝不因旧 attempt 已交付而被吞掉。
@@ -144,7 +146,10 @@ class RunnerCompletionNotifier:
             thread = parent_thread or self.tasks.thread_for(task_id)
             if thread is None:
                 return "skipped"
-            self.tasks.update_status({"task_id": task_id, "status": status})
+            if status == TaskStatus.BLOCKED.value and self.load_task is not None:
+                self._project_blocked_attempt(task_id)
+            else:
+                self.tasks.update_status({"task_id": task_id, "status": status})
             if _has_persisted_subagent_parent(self.load_task, task):
                 return "skipped"
             # 去重身份 = task + status + exact attempt（attempt 未知时保持既有 task+status 形态）。
@@ -210,6 +215,18 @@ class RunnerCompletionNotifier:
         except Exception as exc:
             self._record_wake_error(task, result, exc)
             return "failed"
+
+    # LLM: BLOCKED 属于结束的 attempt，不一定属于当前 run；先 CAS 写原投影，再读 canonical，避免授权在读写间完成后被旧快照盖回。
+    # 授权在复读之后提交时由原 lifecycle grant 更新关联；所有修正只 CAS blocked，不能覆盖已落盘 stop 或新终态。
+    # 函数用途: 保留旧轮阻塞通知，同时让当前已接续或已关闭任务的会话索引遵从权威状态。
+    def _project_blocked_attempt(self, task_id: str) -> None:
+        self.tasks.update_status({"task_id": task_id, "status": "BLOCKED", "expected_status": "active"})
+        current = self.load_task(task_id)
+        current_status = str(current.status or "").strip().upper()
+        if not current_status or current_status == TaskStatus.BLOCKED.value:
+            return
+        projected = "active" if current_status in {"PLANNING", "PENDING", "RUNNING"} else current_status
+        self.tasks.update_status({"task_id": task_id, "status": projected, "expected_status": "blocked"})
 
     # LLM: 错误只通过显式 save_task 写回原 canonical task；记录失败不覆盖原发布失败结果。
     # 函数用途: 保存父通知失败的诊断，保存本身失败时记录日志。

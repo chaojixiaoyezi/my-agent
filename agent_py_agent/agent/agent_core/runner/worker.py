@@ -1,7 +1,7 @@
 
 from __future__ import annotations
 
-# LLM: 子代理执行器复用原 attempt、权限与心跳；活动诊断不另开执行者，也不改变显式超时。
+# LLM: 子代理执行器复用原 attempt、权限与心跳；退出后只读同 run 最新 canonical 决定接续，旧 result 仅保留历史；联测授权收口交错、超时及准确启动。
 # 模块用途: 启动和收口子代理工作片，并把新结果交回直属父级。
 import logging
 import threading
@@ -42,8 +42,8 @@ class RunSubagentWorkerParams:
     expected_attempt_id: str | None = None
 
 
-# LLM: worker 先精确激活再发布 session；拒绝接纳不写 runner 结果或租约，不能覆盖后来轮次。
-# 函数用途: 运行子代理工作片，续租并诊断长等待，落盘结果后继续来源岗位或唤醒直属父级。
+# LLM: worker 先精确激活再发布 session，退出后把原 attempt 传给待续跑核对；拒绝接纳不写 runner 结果或租约，不能覆盖后来轮次。
+# 函数用途: 运行子代理工作片，续租并诊断长等待，落盘后继续同一 run 的待执行工作或唤醒直属父级。
 def _run_subagent_worker(params: RunSubagentWorkerParams) -> SubAgentRunnerResult:
     from ...core import SimpleAgent
 
@@ -112,32 +112,32 @@ def _run_subagent_worker(params: RunSubagentWorkerParams) -> SubAgentRunnerResul
         result,
         timeout_seconds=params.timeout_seconds,
     )
-    _continue_source_worker_after_session(worker, params.run_id, result)
+    _continue_pending_run_after_session(worker, params.run_id, attempt_id=attempt_id)
     _resume_direct_parent_after_session(worker, params.run_id)
     return result
 
 
-# LLM: The ordinary result writer runs inside runner_session_lease, so a
-# PENDING source slice cannot be redispatched there: the current session still
-# has a fresh "running" heartbeat and correctly vetoes double execution.  Once
-# the context manager has persisted the terminal session, start the exact same
-# logical run through the canonical durable auto-start path.  Do not enqueue
-# this behind the owner-facing wake lane: a finding report or ordinary chat can
-# occupy that lane for a full model turn while source analysis silently waits.
-# Periodic orphan supervision remains the crash-safe fallback.
-# 函数用途：来源工作者一轮结束后立即续派同一 run，不再等待周期性孤儿巡检。
-def _continue_source_worker_after_session(worker, run_id: str, result) -> None:
-    if str(getattr(result, "status", "") or "").strip().upper() != "PENDING":
+# LLM: 原 result 可能早于并发授权；session 结束后复读 canonical，只为原 attempt 的 PENDING 接续。
+# 不改历史结果，不复活 BLOCKED/控制终态；等待、session、RuntimeDB 与启动防重仍由原 auto-start 守门。
+# 函数用途: 工作片退出后把最新待续跑状态交给原派工入口，避免已消费的授权事件留下无人接续的任务。
+def _continue_pending_run_after_session(worker, run_id: str, *, attempt_id: str) -> None:
+    if not attempt_id:
         return
     try:
         from ...subagents.direct_parent_lifecycle import parent_wait_blocks_dispatch
 
         manager = getattr(worker, "subagents", None)
-        if manager is not None:
-            task = manager.load(run_id)
-            if parent_wait_blocks_dispatch(task):
-                # This PENDING state is an intentional event wait, not an orphan.
-                return
+        if manager is None:
+            return
+        task = manager.load(run_id)
+        if str(task.status or "").strip().upper() != "PENDING":
+            return
+        session = (getattr(task, "attributes", {}) or {}).get("runner_session") or {}
+        if getattr(task, "runner_active_attempt_id", "") or str(session.get("attempt_id") or "") != attempt_id:
+            return
+        if parent_wait_blocks_dispatch(task):
+            # This PENDING state is an intentional event wait, not an orphan.
+            return
         from ..orchestration.dispatch.capability_auto_sweep import (
             auto_start_orphan_run,
         )

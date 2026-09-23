@@ -7,6 +7,7 @@
 #   改动时同步检查 tests/test_resolve_capability_requests_tool.py、
 #   子代理聚合记录与 docs/audits/R4-goattack-20260611.md。
 #   裁决后的排队必须在原 creation guard 内复读控制终态，不能由旧快照复活已停止的孩子。
+#   wake 账本只经 canonical mutate 窄写自身字段，不能用裁决前快照覆盖 runner/session；联测授权与退出交错。
 # 模块用途: 子代理 capability_request 的显式、结构化、可审计处理入口。
 from __future__ import annotations
 
@@ -603,22 +604,24 @@ def _resolution_signal(thread: Any, ctx: _ResolveContext, run_id: str, observati
     }
 
 
-# 函数用途: 落结构化裁决账本（attributes.capability_resolution_wake）并保存任务。
+# LLM: 裁决的 ctx.task 可能早于 runner 退出，只允许在 canonical 锁内修改 wake 字段；联测 session 完成与新 attempt，禁止全快照保存。
+# 函数用途: 记录授权事件的发布进度，保留期间已经更新的任务状态和执行会话。
 def _record_resolution_wake(agent: Any, ctx: _ResolveContext, *, status: str, wake_signal_id: str) -> None:
-    attrs = dict(getattr(ctx.task, "attributes", {}) or {})
-    attrs["capability_resolution_wake"] = {
+    fact = {
         "schema_version": "capability_resolution_wake.v1",
         "decision": ctx.decision,
         "wake_signal_id": wake_signal_id,
         "status": status,
     }
-    ctx.task.attributes = attrs
+    # LLM: 此 reducer 只更新本次发布事实，不触碰 runner、权限和任务状态，也不执行外部操作。
+    # 函数用途: 合并 wake 发布字段到锁内最新任务。
+    def record(task: Any) -> None:
+        task.attributes = {**dict(getattr(task, "attributes", {}) or {}), "capability_resolution_wake": fact}
+
     try:
-        agent.subagents.save(ctx.task)
+        agent.subagents.mutate(str(ctx.task.id), record)
     except Exception:
-        # capability 裁决账本是授权决策的权威记录,丢失要可查(error 级)。in-memory
-        # attribute 已先写,这里只是持久化失败;不抛——本函数也用于 wake 成功后落账,
-        # 抛出会把已成功的唤醒回滚成整体失败。
+        # grant/request 已独立落盘；发布账本失败只记错误，不能把已成功的唤醒回滚成整体失败。
         logging.getLogger(__name__).error(
             "capability_resolution_wake ledger save failed (run_id=%s decision=%s status=%s)",
             str(getattr(ctx.task, "id", "") or ""),

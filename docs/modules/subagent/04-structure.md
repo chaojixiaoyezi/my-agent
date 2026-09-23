@@ -1,5 +1,12 @@
 # Subagent Structure
 
+授权收口的状态所有权：`runner_completion_wake.py::_project_blocked_attempt` 保留原 attempt 通知，
+同时按最新 canonical 修正会话关联；`runner/worker.py::_continue_pending_run_after_session` 只接
+worker/run_id/准确 attempt，读取 canonical 后复用原 auto-start，不再以历史 result 决定下一片。
+`orchestration/tools/capability.py::_record_resolution_wake` 通过原 mutate 窄写发布事实，保留执行会话。
+没有新增调度器、timer、状态副本或 lifecycle gate 例外；原控制、授权、session 和 RuntimeDB 门继续守边界。
+具体交错、局部参考和定向回归见 [runbook](SUBAGENT_RUNBOOK.md#capability-阻塞与续跑)。
+
 第 7 步父终态通知已在本地集成，将实际逻辑归入 `RunnerCompletionNotifier`：只持任务关联、WakeStore、
 读取父任务和保存错误四项依赖，完成／受控取消共用原投递路径；结果服务和外部停止端负责装配。
 保留 exact attempt、直属父级、文件模式及内部监督者信号语义；阶段提醒和能力申请入口不扩改。

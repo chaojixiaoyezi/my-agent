@@ -10,7 +10,11 @@ from __future__ import annotations
 
 import json
 import tempfile
+import time
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings.config import AgentConfig
@@ -48,6 +52,286 @@ def _tool(agent: SimpleAgent):
     from agent_py_agent.agent.core import ResolveCapabilityRequestsTool
 
     return ResolveCapabilityRequestsTool(agent)
+
+
+# LLM: 只在 tmp_path 的真实 canonical/ConversationStore 上冻结旧结果和授权的交错；不启动模型或宿主进程。
+# 函数用途: 复现旧 runner 已按 OPEN 构造 BLOCKED、父级在旧结果保存前授权的边界。
+def _capability_closeout_race(tmp_path, *, grant=True, real_attempt=False):
+    agent, task, request = _agent_and_blocked_task(str(tmp_path))
+    store = agent.conversation_store
+    thread = store.threads.get_or_create({
+        "canonical_user_id": "race-owner", "channel": "local",
+        "channel_conversation_id": "race-thread", "channel_user_id": "race-owner",
+    })
+    parent_id = "parent-capability-race"
+    store.tasks.bind({"thread_id": thread.thread_id, "task_id": parent_id, "status": "active"})
+    store.tasks.bind({"thread_id": thread.thread_id, "task_id": task.id, "status": "active"})
+    current = (agent.subagents.lifecycle.prepare_runner_attempt(task.id)
+               if real_attempt else agent.subagents.load(task.id))
+    attempt_id = current.runner_active_attempt_id if real_attempt else "attempt-original"
+    current.status = "RUNNING"
+    current.runner_active_attempt_id = attempt_id
+    current.runner_attempts = 1
+    current.attributes.update({
+        "conversation_thread_id": thread.thread_id,
+        "conversation_task_id": parent_id,
+        "runner_session": {
+            "session_id": "session-original", "attempt_id": attempt_id,
+            "status": "running", "heartbeat_at": time.time(), "ended_at": 0.0,
+        },
+    })
+    agent.subagents.save(current)
+    old_result_task = agent.subagents.load(task.id)
+    old_result_task.status = "BLOCKED"
+    old_result_task.failure_type = "capability_request"
+    old_result_task.runner_active_attempt_id = ""
+    old_result_task.turn_end_reason = "blocked"
+    result = SimpleNamespace(
+        run_id=task.id, status="BLOCKED", dry_run=False, turn_end_reason="blocked",
+    )
+    if real_attempt:
+        repo = agent.subagents.runtime_db
+        assert repo is not None
+        run = repo.agent_run_for_run_id(task.id)
+        repo.settle_agent_run(agent_run_id=run["agent_run_id"], attempt_id=attempt_id, status="done")
+    if grant:
+        granted = _tool(agent).execute({
+            "run_id": task.id, "request_id": request.id, "decision": "grant", "reason": "同一任务授权",
+        })
+        assert granted.ok, granted.output
+        assert json.loads(granted.output)["continuation"]["status"] == "already_running"
+    agent.subagents.save(old_result_task)
+    assert agent.subagents.load(task.id).status == ("PENDING" if grant else "BLOCKED")
+    return agent, old_result_task, result
+
+
+def test_capability_closeout_race_notifier_projects_current_run(tmp_path):
+    from agent_py_agent.agent.subagents.runner_completion_wake import RunnerCompletionNotifier
+
+    agent, old_task, result = _capability_closeout_race(tmp_path)
+    store = agent.conversation_store
+    notifier = RunnerCompletionNotifier(store.tasks, store.wakes, agent.subagents.load, agent.subagents.save)
+    assert notifier.notify_result(old_task, result, {}, attempt_id="attempt-original") == "delivered"
+    assert store.tasks.load(old_task.id).status == "active"
+    assert result.status == "BLOCKED"  # 原工作片历史不能被重新解释成成功或下一工作片。
+    wakes = [w for w in store.wakes.pending(limit=0) if w.reason == "subagent_runner_finished"]
+    assert len(wakes) == 1 and wakes[0].metadata["status"] == "BLOCKED"
+    store.wakes.mark_handled(wakes[0].wake_signal_id)
+    assert notifier.notify_result(old_task, result, {}, attempt_id="attempt-original") == "delivered"
+    assert not [w for w in store.wakes.pending(limit=0) if w.reason == "subagent_runner_finished"]
+    assert store.tasks.load(old_task.id).status == "active"
+
+
+def test_capability_closeout_race_worker_reads_canonical_after_session(tmp_path, monkeypatch):
+    from agent_py_agent.agent.agent_core.orchestration.dispatch import capability_auto_sweep
+    from agent_py_agent.agent.agent_core.runner.worker import _continue_pending_run_after_session
+
+    agent, old_task, result = _capability_closeout_race(tmp_path)
+    current = agent.subagents.load(old_task.id)
+    session = {**current.attributes["runner_session"], "status": "completed", "ended_at": time.time()}
+    assert agent.subagents.save_runner_session(old_task.id, session, now=time.time())
+    started = []
+
+    def start_next_slice(_worker, run_id):
+        started.append(run_id)
+        current = agent.subagents.load(run_id)
+        current.runner_active_attempt_id = "attempt-next"
+        current.attributes["runner_session"] = {**session, "attempt_id": "attempt-next", "status": "running"}
+        agent.subagents.save(current)
+        return {"started": 1, "run_ids": [run_id]}
+
+    monkeypatch.setattr(capability_auto_sweep, "auto_start_orphan_run", start_next_slice)
+    _continue_pending_run_after_session(agent, old_task.id, attempt_id="attempt-original")
+    assert started == [old_task.id]
+    _continue_pending_run_after_session(agent, old_task.id, attempt_id="attempt-original")
+    assert started == [old_task.id]
+
+
+@pytest.mark.parametrize("transition", ["completed", "cancelled", "new_attempt"])
+def test_capability_closeout_race_wake_write_preserves_finished_session(tmp_path, transition):
+    from agent_py_agent.agent.agent_core.orchestration.tools.capability import (
+        _record_resolution_wake,
+        _ResolveContext,
+    )
+
+    agent, old_task, _result = _capability_closeout_race(tmp_path)
+    stale = agent.subagents.load(old_task.id)
+    finished = {**stale.attributes["runner_session"], "status": "completed", "ended_at": time.time()}
+    assert agent.subagents.save_runner_session(old_task.id, finished, now=time.time())
+    if transition != "completed":
+        current = agent.subagents.load(old_task.id)
+        current.status = "CANCELLED" if transition == "cancelled" else "RUNNING"
+        current.runner_active_attempt_id = "attempt-next" if transition == "new_attempt" else ""
+        current.attributes["runner_session"] = {
+            **finished, "status": "cancelled" if transition == "cancelled" else "running",
+            "attempt_id": current.runner_active_attempt_id or "attempt-original",
+        }
+        agent.subagents.save(current)
+        finished = agent.subagents.load(old_task.id).attributes["runner_session"]
+    _record_resolution_wake(
+        agent, _ResolveContext(stale, "grant", {}, "已授权"), status="raised", wake_signal_id="wake-grant",
+    )
+    current = agent.subagents.load(old_task.id)
+    assert current.attributes["runner_session"] == finished
+    assert current.attributes["capability_resolution_wake"]["wake_signal_id"] == "wake-grant"
+    assert current.status == {"completed": "PENDING", "cancelled": "CANCELLED", "new_attempt": "RUNNING"}[transition]
+
+
+@pytest.mark.parametrize("current_status", ["CANCELLED", "ABANDONED", "TAKEN_OVER", "RUNNING", "PENDING"])
+def test_capability_closeout_race_old_attempt_cannot_change_new_control_or_launch(tmp_path, monkeypatch, current_status):
+    from agent_py_agent.agent.agent_core.orchestration.dispatch import capability_auto_sweep
+    from agent_py_agent.agent.agent_core.runner.worker import _continue_pending_run_after_session
+    from agent_py_agent.agent.subagents.runner_completion_wake import RunnerCompletionNotifier
+
+    agent, old_task, result = _capability_closeout_race(tmp_path)
+    current = agent.subagents.load(old_task.id)
+    current.status = current_status
+    current.attributes["runner_session"] = {
+        **current.attributes["runner_session"], "attempt_id": "attempt-newer",
+        "status": "completed" if current_status == "PENDING" else "running",
+    }
+    current.runner_active_attempt_id = "attempt-newer" if current_status == "RUNNING" else ""
+    agent.subagents.save(current)
+    expected_link = "active" if current_status in {"RUNNING", "PENDING"} else current_status.lower()
+    store = agent.conversation_store
+    store.tasks.update_status({"task_id": old_task.id, "status": expected_link})
+    notifier = RunnerCompletionNotifier(store.tasks, store.wakes, agent.subagents.load, agent.subagents.save)
+    assert notifier.notify_result(old_task, result, {}, attempt_id="attempt-original") == "delivered"
+    assert store.tasks.load(old_task.id).status == expected_link
+    monkeypatch.setattr(capability_auto_sweep, "auto_start_orphan_run", lambda *_args: pytest.fail("旧执行轮不能派工"))
+    _continue_pending_run_after_session(agent, old_task.id, attempt_id="attempt-original")
+    assert agent.subagents.load(old_task.id).status == current_status
+
+
+def test_capability_closeout_race_ungranted_blocked_stays_waiting(tmp_path, monkeypatch):
+    from agent_py_agent.agent.agent_core.orchestration.dispatch import capability_auto_sweep
+    from agent_py_agent.agent.agent_core.runner.worker import _continue_pending_run_after_session
+
+    agent, task, _request = _agent_and_blocked_task(str(tmp_path))
+    current = agent.subagents.load(task.id)
+    current.status = "BLOCKED"
+    agent.subagents.save(current)
+    monkeypatch.setattr(capability_auto_sweep, "auto_start_orphan_run", lambda *_args: pytest.fail("OPEN 请求不能派工"))
+    _continue_pending_run_after_session(agent, task.id, attempt_id="attempt-old")
+    assert agent.subagents.load(task.id).capability_requests[0].status == "OPEN"
+
+
+def test_capability_closeout_race_stop_during_projection_cas_is_preserved(tmp_path, monkeypatch):
+    from agent_py_agent.agent.subagents.runner_completion_wake import RunnerCompletionNotifier
+
+    agent, old_task, result = _capability_closeout_race(tmp_path)
+    store = agent.conversation_store
+    update = store.tasks.update_status
+
+    def stop_before_reopen(request):
+        if request.get("expected_status") == "blocked" and request["status"] == "active":
+            update({"task_id": old_task.id, "status": "cancelled"})
+        return update(request)
+
+    monkeypatch.setattr(store.tasks, "update_status", stop_before_reopen)
+    notifier = RunnerCompletionNotifier(store.tasks, store.wakes, agent.subagents.load, agent.subagents.save)
+    assert notifier.notify_result(old_task, result, {}, attempt_id="attempt-original") == "delivered"
+    assert store.tasks.load(old_task.id).status == "cancelled"
+
+
+def test_capability_closeout_race_grant_between_projection_read_and_write(tmp_path, monkeypatch):
+    from agent_py_agent.agent.agent_core.orchestration.dispatch.conversation_lifecycle_gate import (
+        conversation_lifecycle_decisions,
+    )
+    from agent_py_agent.agent.subagents.runner_completion_wake import RunnerCompletionNotifier
+
+    agent, old_task, result = _capability_closeout_race(tmp_path, grant=False)
+    store = agent.conversation_store
+    update = store.tasks.update_status
+    observed = []
+
+    def grant_before_blocked_projection(request):
+        if request["status"] != "BLOCKED":
+            return update(request)
+        granted = _tool(agent).execute({"run_id": old_task.id, "decision": "grant", "reason": "收口期间授权"})
+        assert granted.ok, granted.output
+        link = update(request)
+        current = agent.subagents.load(old_task.id)
+        decision = conversation_lifecycle_decisions(agent, [current])[old_task.id]
+        observed.append((decision.allowed, decision.should_cancel, current.status))
+        assert old_task.id in store.threads.load(link.thread_id).active_task_ids
+        return link
+
+    monkeypatch.setattr(store.tasks, "update_status", grant_before_blocked_projection)
+    monkeypatch.setattr(store.tasks, "_disable_task_progress_policies", lambda *_args, **_kwargs: pytest.fail("BLOCKED 不能关闭进度策略"))
+    notifier = RunnerCompletionNotifier(store.tasks, store.wakes, agent.subagents.load, agent.subagents.save)
+    assert notifier.notify_result(old_task, result, {}, attempt_id="attempt-original") == "delivered"
+    assert observed == [(False, False, "PENDING")]
+    assert store.tasks.load(old_task.id).status == "active"
+
+
+def test_capability_closeout_race_ungranted_notifier_keeps_blocked(tmp_path):
+    from agent_py_agent.agent.subagents.runner_completion_wake import RunnerCompletionNotifier
+
+    agent, old_task, result = _capability_closeout_race(tmp_path, grant=False)
+    store = agent.conversation_store
+    notifier = RunnerCompletionNotifier(store.tasks, store.wakes, agent.subagents.load, agent.subagents.save)
+    assert notifier.notify_result(old_task, result, {}, attempt_id="attempt-original") == "delivered"
+    assert agent.subagents.load(old_task.id).status == "BLOCKED"
+    assert store.tasks.load(old_task.id).status == "BLOCKED"
+
+
+@pytest.mark.parametrize("parent_status", ["active", "interrupted", "cancelled"])
+def test_capability_closeout_race_real_dispatch_reopens_done_run_once(tmp_path, monkeypatch, parent_status):
+    from agent_py_agent.agent.agent_core.orchestration.background import dispatch
+    from agent_py_agent.agent.agent_core.runner.worker import _continue_pending_run_after_session
+    from agent_py_agent.agent.subagents.runner_completion_wake import RunnerCompletionNotifier
+
+    agent, old_task, result = _capability_closeout_race(tmp_path, real_attempt=True)
+    manager = agent.subagents
+    repo = manager.runtime_db
+    original = manager.load(old_task.id)
+    old_attempt_id = original.attributes["runner_session"]["attempt_id"]
+    before = repo.agent_run_for_run_id(old_task.id)
+    assert before["status"] == "done"
+    assert repo.get_attempt(old_attempt_id)["status"] == "done"
+    assert len(repo.attempts_for_run(before["agent_run_id"])) == 1
+    store = agent.conversation_store
+    notifier = RunnerCompletionNotifier(store.tasks, store.wakes, manager.load, manager.save)
+    assert notifier.notify_result(old_task, result, {}, attempt_id=old_attempt_id) == "delivered"
+    session = {**original.attributes["runner_session"], "status": "completed", "ended_at": time.time()}
+    assert manager.save_runner_session(old_task.id, session, now=time.time())
+    for wake in store.wakes.pending(limit=0):
+        store.wakes.mark_handled(wake.wake_signal_id)
+    store.tasks.update_status({"task_id": original.attributes["conversation_task_id"], "status": parent_status})
+    started = []
+
+    # LLM: 只替换真实线程/模型入口；保留原 auto-start、creation guard、RuntimeDB 排队与准确 attempt 激活。
+    # 函数用途: 消费调度器实际登记的新 attempt，证明同 run 接续不依赖把旧 done 账改成 created。
+    def fake_worker(_agent, request, _mark_errors):
+        next_id = request.params.expected_attempt_ids[old_task.id]
+        assert next_id != old_attempt_id and repo.get_attempt(next_id)["status"] == "pending"
+        prepared = manager.lifecycle.prepare_runner_attempt(old_task.id, expected_attempt_id=next_id)
+        started.append(prepared.runner_active_attempt_id)
+        return {"status": "started", "run_ids": request.run_ids}
+
+    monkeypatch.setattr(dispatch, "_use_inprocess_autostart", lambda _agent: True)
+    monkeypatch.setattr(dispatch, "_start_inprocess_dispatch", fake_worker)
+    _continue_pending_run_after_session(agent, old_task.id, attempt_id=old_attempt_id)
+    if parent_status != "active":
+        assert not started
+        assert len(repo.attempts_for_run(before["agent_run_id"])) == 1
+        assert repo.agent_run_for_run_id(old_task.id)["status"] == "done"
+        assert manager.load(old_task.id).status == "PENDING"
+        return
+    assert len(started) == 1
+    after = repo.agent_run_for_run_id(old_task.id)
+    assert after["agent_run_id"] == before["agent_run_id"]
+    assert after["current_attempt_id"] == started[0]
+    assert after["current_attempt_generation"] == before["current_attempt_generation"] + 1
+    attempts = repo.attempts_for_run(before["agent_run_id"])
+    assert len(attempts) == 2 and {row["status"] for row in attempts} == {"done", "running"}
+    assert _tool(agent).execute({"run_id": old_task.id, "decision": "grant", "reason": "重复裁决"}).ok
+    assert notifier.notify_result(old_task, result, {}, attempt_id=old_attempt_id) == "delivered"
+    _continue_pending_run_after_session(agent, old_task.id, attempt_id=old_attempt_id)
+    assert len(repo.attempts_for_run(before["agent_run_id"])) == 2
+    assert store.tasks.load(old_task.id).status == "active"
+    assert not store.wakes.pending(limit=0)
 
 
 def test_parent_resolution_is_mutating_within_existing_authority() -> None:

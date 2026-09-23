@@ -80,6 +80,25 @@ OPEN 或非法未闭合 capability request 是宿主掌握的结构化阻塞事�
 `DONE`。直属父级 grant 或 deny 后，宿主把同一个 run 重排为 `PENDING`、恢复 conversation link，并由
 裁决事件触发 dispatcher 续跑；不得另建 replacement，也不需要父级调用推动工具。
 
+授权可以与旧工作片收口交错：旧 `result.status=BLOCKED` 和完成通知仍是该 attempt 的历史，
+canonical 合并授权后得到的 `PENDING` 才决定同一 run 是否继续。完成通知写关联后复读 canonical，
+仅通过原 `blocked` CAS 修正为 `active` 或当前控制终态；原 `BLOCKED` 只是临时等待状态，不移出
+活动索引、不关闭进度策略，生命周期门只暂缓派工，不能据此取消。并发 stop 已改变关联时 CAS 不生效。
+runner-session 结束后，`_continue_pending_run_after_session` 读取当前 canonical 和原 attempt 身份，
+经既有 `auto_start_orphan_run` 接续；新 attempt、未授权 `BLOCKED`、父子等待和控制终态仍受原门保护。
+授权 wake 账本使用 canonical 窄 mutation，不能把旧完整快照写回并擦除已终结的 session。
+
+RuntimeDB 中旧 AgentRun/attempt 的 `done` 不等于禁止合法同 run 接续；是否可重跑由当前任务生命周期门
+决定，原 `queue_pending_attempt/create_attempt` 登记新一代身份。合同测试保留旧 `done`，走真实派工与
+数据库准入，只替换线程/模型入口，验证下一 attempt 实际登记、激活且重放后仍只有两轮。
+
+本次局部参考 Codex `578c1b22` 的 `codex-rs/core/src/tasks/mod.rs`（结束旧 active turn 后再检查
+pending work，保留 turn 身份检查），以及 Hermes `0a62610f1` 的 `gateway/run.py`（当前轮结束后从
+pending event 构造后续轮，继续前复核任务状态）。只借鉴结束边界重核持久工作和身份的顺序；未移植
+其调度器或消息实现，也不表示完成了两仓全量审计。回归入口为
+`test_resolve_capability_requests_tool.py` 的独立交错及真实 RuntimeDB 接续测试，结合原启动、session、
+父子生命周期和 orphan dispatcher 合同；真实 TUI 仍须同版包另行验收。
+
 grant/deny 是直属父级在自己既有 authority 内的编排裁决，运行层按 mutating 控制执行，不再为 grant
 额外要求普通用户理解内部 run/path/tool 后再确认。可授权范围仍只能来自 direct-parent、owner wall、父级
 workspace/write roots 和当前 Skill/Tool 快照；任何越界、跨 owner 或父级本身没有的能力都必须结构化拒绝或

@@ -1,5 +1,12 @@
 # 子代理维护状态
 
+授权与旧工作片收口交错的本地候选已修正三个来源：完成通知保留原 attempt 的 `BLOCKED` 历史，
+当前会话关联复读 canonical 后用 CAS 投影；session 退出后按同 run 与原 attempt 核对接续；授权 wake
+只窄写自身账本，不覆盖新 session。三个旧红灯分别验证，另覆盖 grant/stop 交错、新 attempt 与重放。
+真实 RuntimeDB/dispatcher 合同从旧 AgentRun/attempt 都 `done` 开始，只替换线程入口，确认第二轮
+实际登记并激活且重复交付不多开；父关联 `interrupted/cancelled` 仍禁止接续。原 TUI217 保留失败证据，
+本候选不等于同版真实验收通过；细节见 [runbook](SUBAGENT_RUNBOOK.md#capability-阻塞与续跑)。
+
 第 7 步父终态通知已在本地集成，将实际逻辑归入 `RunnerCompletionNotifier`：只持任务关联、WakeStore、
 读取父任务和保存错误四项依赖，完成／受控取消共用原投递路径；结果服务和外部停止端负责装配。
 保留 exact attempt、直属父级、文件模式及内部监督者信号语义；阶段提醒和能力申请入口不扩改。
