@@ -105,7 +105,7 @@ def _render_runtime_direct_children(agent: object, params: object) -> str:
             row["activity_diagnostic"] = diagnostic
         # 根父级通过耐久事件接收正文，快照不再重复装入一遍；递归父级没有根邮箱，需在这里交接。
         if current_subagent_run_id(agent) and (task_status_in(status, SUBAGENT_ENDED_STATUSES) or status == "BLOCKED"):
-            from ...subagents.runner_completion_wake import completion_handoff_payload
+            from ...subagents.runner_completion_payload import completion_handoff_payload
 
             row.update(completion_handoff_payload(task))
             row["turn_end_reason"] = str(getattr(task, "turn_end_reason", "") or "")

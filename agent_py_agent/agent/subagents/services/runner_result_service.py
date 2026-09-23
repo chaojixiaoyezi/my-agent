@@ -1,6 +1,6 @@
 
-# LLM: runner 结果、自然回复与工具产物共用 canonical 收口；保持 attempt 校验、状态和直属通知的原子顺序。
-# 模块用途: 保存子代理本轮结果和文件交接，再由现有生命周期唤醒父级。
+# LLM: runner 结果服务先核对 exact attempt，再组装并保存结果；运行账结算和父级通知交给唯一提交模块按原顺序推进。
+# 模块用途: 保存通过准入的子代理本轮结果与文件交接，调用既有可恢复收口链。
 from __future__ import annotations
 
 """Runner result recording and debrief persistence service."""
@@ -8,8 +8,6 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from ...runtime_db.operations import AGENT_RUN_TERMINAL_STATUSES, RUN_STATUS_LEGACY_CREATED
-from ...turn_end import subagent_outcome_for_turn_end
 from ..manager_runner_result_payload import (
     BuildAndPersistContext,
     RecordRunnerResultParams,
@@ -28,20 +26,10 @@ from ..result_processors import (
 )
 from ..result_registered_artifacts import collect_registered_artifacts
 from ..runner_rendering import render_runner_result_markdown
+from ..runner_result_admission import reject_stale_runner_result
 from ..tool_failure_ledger import record_tool_failure_ledger
 from ..utils import _apply_missing_paths
-from .runtime_closeout import (
-    REJECTED_CLOSEOUT_STATES,
-    RETRYABLE_CLOSEOUT_STATES,
-    clear_closeout,
-    closeout_target_run_status,
-    deliver_parent_wake,
-    ensure_closeout_fact,
-    mark_closeout_delivered,
-    record_closeout_event,
-    record_unpersisted_closeout,
-    settle_runtime_run_for_result,
-)
+from .runner_result_commit import commit_runner_result
 
 
 def _runner_append_debrief(task, parsed):
@@ -66,8 +54,8 @@ class _RunnerResultBuildParams:
         self.now = now
 
 
-# LLM: 结果保存、产物投影和通知都属于同一 canonical 收口；不要旁路写终态或抢占其它 attempt。
-# 类用途: 收集子代理的自然与结构化结果，再持久化并通知直属父级。
+# LLM: 此服务编排准入和结果持久化；终态提交与父级通知由 runner_result_commit 按原顺序推进，不能旁路写终态。
+# 类用途: 收集子代理的自然与结构化结果，保存后交给唯一可恢复收口入口。
 class SubAgentRunnerResultService:
     """Persist parsed runner output and update the owning subagent task."""
 
@@ -188,14 +176,14 @@ class SubAgentRunnerResultService:
         self.manager.indexing.index_runner_result(result, output_payload)
         return len(memory_candidates)
 
-    # LLM: 正式结果先持久化恢复事实再收口和通知；执行器退出且副作用未知的 BLOCKED 也保留通知 WAL。
-    # 函数用途: 写回当前子代理结果并可靠通知父级，旧 attempt 不得覆盖新轮，UNKNOWN 不得自动重跑。
+    # LLM: 先核对 exact attempt，再落结果文件和任务投影；提交模块随后持久化恢复事实、收口与通知。
+    # 函数用途: 写回通过准入的子代理结果并启动原可靠交接；旧轮被拒，UNKNOWN 不自动重跑。
     def record_runner_result(
         self,
         params: RecordRunnerResultParams,
     ) -> SubAgentRunnerResult:
         task = self.manager.load(params.run_id)
-        stale_result = self._check_stale_runner_result(task, params)
+        stale_result = reject_stale_runner_result(self.manager, task, params)
         if stale_result:
             return stale_result
 
@@ -217,55 +205,7 @@ class SubAgentRunnerResultService:
             result,
             _PostResultSideEffectParams(output_payload, params.dry_run, extracted.parsed, extracted.lessons),
         )
-        # 顺序（可恢复）：先写待重试事实 → runtime 权威 run 收口 → 提交成功才通知父级 → 持久化"已交付"再清账。
-        # 1) 事实先行：收口写库失败、或进程在收口后通知前中断时，"还要补收口/补通知"必须已经
-        #    持久化，否则 task/wake 终态而 runtime 仍 created 的矛盾会永久留档。
-        # 2) 事实必须以**某种**权威介质落下来才算数：canonical task WAL 写不进去时，退到 runtime
-        #    事件账本（另一个存储域）留同身份的可达恢复事实；两处都写不进去时**不再继续**收口与
-        #    通知（否则会留下"父级永远收不到通知且无人可查"的窗口），改为留下响亮诊断后返回。
-        target_run_status = closeout_target_run_status(params, result, task)
-        wal_state = "not_required"
-        if target_run_status or params.failure_type == "executor_effects_unknown":
-            wal_state = ensure_closeout_fact(
-                self.manager, task, params, result,
-                {"state": "pending", "target_run_status": target_run_status},
-            )
-            if wal_state == "unpersisted":
-                record_unpersisted_closeout(self.manager, task, params, result)
-                return result
-        outcome = settle_runtime_run_for_result(self.manager, task, params, result)
-        state = str(outcome.get("state") or "")
-        if state in RETRYABLE_CLOSEOUT_STATES:
-            # 权威事实尚未落成：刷新待重试事实，由确定性恢复链补收口与补通知，本片不冒充完成。
-            if wal_state != "not_required":
-                ensure_closeout_fact(self.manager, task, params, result, outcome)
-            record_closeout_event(
-                self.manager, task, event_type="closeout_pending", params=params, outcome=outcome
-            )
-            return result
-        if state in REJECTED_CLOSEOUT_STATES:
-            # 与权威终态冲突或已换代：拒绝交付，只留诊断（绝不覆盖既有终态）。
-            record_closeout_event(
-                self.manager, task, event_type="closeout_blocked", params=params, outcome=outcome
-            )
-            if wal_state == "persisted":
-                clear_closeout(self.manager, task)
-            return result
-        from ..debug_trace import SubAgentRunnerTraceRequest, trace_runner_result
-
-        trace_runner_result(SubAgentRunnerTraceRequest(self.manager, task, result, params))
-        delivery = deliver_parent_wake(
-            self.manager, task, result, output_payload,
-            attempt_id=str(getattr(params, "attempt_id", "") or ""),
-        )
-        if wal_state == "persisted":
-            if delivery == "failed":
-                # 收口已提交但通知未成：事实留档，恢复链只补通知，不重跑业务。
-                ensure_closeout_fact(self.manager, task, params, result, outcome)
-            else:
-                # 「不重」要求先把"已交付"持久化再清账：清账失败时恢复链会看到 delivered 而跳过重发。
-                mark_closeout_delivered(self.manager, task, params, result, outcome)
-                clear_closeout(self.manager, task)
+        commit_runner_result(self.manager, task, params, result, output_payload)
         return result
 
     def _runner_result_build_context(
@@ -303,227 +243,3 @@ class SubAgentRunnerResultService:
         # Override params in context with actual params object for full field access
         build_ctx.params = params
         return output_payload, build_ctx
-
-    # LLM: Canonical task projection and runtime.db form one commit fence. In
-    # MANAGED mode an exact current attempt may project while active, after its
-    # resumable slice was settled with the AgentRun still created, after a
-    # successful completed run, or after matching cancelled/failed settlement;
-    # a mismatched late result is archival evidence only.
-    # 函数用途: 在写入子代理最终状态前，拦住旧轮次和与已取消/失败事实冲突的迟到回复。
-    def _check_stale_runner_result(
-        self,
-        task: SubAgentTask,
-        params: RecordRunnerResultParams,
-    ) -> SubAgentRunnerResult | None:
-        attempt_id = params.attempt_id
-        dry_run = params.dry_run
-        if not dry_run and (_task_text_attr(task, "status").upper() == "TAKEN_OVER" or _task_text_attr(task, "takeover_by")):
-            return self._make_quick_result(task, dry_run, False, "ignored runner result for already taken-over run")
-        normalized_attempt_id = str(attempt_id or "").strip()
-        if normalized_attempt_id:
-            if normalized_attempt_id in _task_list_attr(task, "runner_abandoned_attempt_ids"):
-                return self._make_quick_result(task, dry_run, False, f"ignored stale runner result for abandoned attempt {normalized_attempt_id}")
-            active_attempt_id = _task_text_attr(task, "runner_active_attempt_id")
-            if not active_attempt_id:
-                return self._make_quick_result(task, dry_run, False, f"ignored duplicate runner result for inactive attempt {normalized_attempt_id}")
-            if active_attempt_id and active_attempt_id != normalized_attempt_id:
-                return self._make_quick_result(task, dry_run, False, f"ignored stale runner result for non-active attempt {normalized_attempt_id}")
-            conflict = self._managed_runtime_result_conflict(task, params)
-            if conflict:
-                # 终态冲突绝不能静默：真实事故里 run=created + attempt=done 的组合被这里拒掉，
-                # 既不写 runner_result 也不写任何诊断，任务永久停在 RUNNING 且无人可查。
-                self._record_conflict_diagnostic(task, params, conflict=conflict)
-                return self._make_quick_result(task, dry_run, False, conflict)
-        return None
-
-    # LLM: 终态冲突是"账本已收口、任务投影未收口"的唯一信号源；必须落一条结构化事件
-    # （closeout_blocked + reason=runner_result_conflict）才能被恢复链与排障看到。
-    # 诊断写入本身 fail-soft：诊断失败不得改变拒绝语义，也不能吞掉原始冲突原因。
-    # 函数用途: 记录一次被运行时终态闸拒绝的 runner 结果。
-    def _record_conflict_diagnostic(
-        self,
-        task: SubAgentTask,
-        params: RecordRunnerResultParams,
-        *,
-        conflict: str,
-    ) -> None:
-        repo = getattr(self, "runtime_db", None)
-        append = getattr(repo, "append_event", None)
-        if not callable(append):
-            return
-        try:
-            authority = repo.runner_result_commit_authority(
-                run_id=str(task.id or ""),
-                attempt_id=str(params.attempt_id or ""),
-            ) or {}
-        except Exception:
-            authority = {}
-        try:
-            append(
-                event_type="closeout_blocked",
-                attempt_id=str(params.attempt_id or ""),
-                agent_run_id=str((authority or {}).get("agent_run_id") or ""),
-                task_run_id=str((authority or {}).get("task_run_id") or ""),
-                payload={
-                    "schema_version": "subagent-closeout-conflict.v1",
-                    "reason": "runner_result_conflict",
-                    "conflict": str(conflict),
-                    "run_status": str((authority or {}).get("run_status") or ""),
-                    "attempt_status": str((authority or {}).get("attempt_status") or ""),
-                    "incoming_status": str(getattr(params, "status", "") or ""),
-                    "incoming_turn_end_reason": str(getattr(params, "turn_end_reason", "") or ""),
-                    "task_status": str(_task_text_attr(task, "status") or ""),
-                },
-            )
-        except Exception:
-            return
-
-    # LLM: Keep the service class as orchestration only; the commit-fence rules
-    # live in one module helper so adding lifecycle cases does not grow this class.
-    # 函数用途: 核对 runtime.db 的当前 attempt 与本次回写是否同一事实。
-    def _managed_runtime_result_conflict(
-        self,
-        task: SubAgentTask,
-        params: RecordRunnerResultParams,
-    ) -> str:
-        return _managed_runtime_result_conflict(self.manager, task, params)
-
-    def _make_quick_result(self, task, dry_run, ok, message):
-        return SubAgentRunnerResult(
-            run_id=task.id, dry_run=dry_run, ok=ok, status=task.status,
-            verification_status=task.verification_status, message=message,
-            turn_end_reason=str(getattr(task, "turn_end_reason", "") or ""),
-            runner_attempts=task.runner_attempts, runner_last_error=task.runner_last_error,
-            execution_context_json=task.execution_context_json, execution_context_file=task.execution_context_file,
-            prompt_file=task.runner_prompt_file, response_file=task.runner_response_file,
-            result_file=task.runner_result_file, result_json=task.runner_result_json,
-            output_json=task.output_json, created_at=time.time(),
-        )
-
-
-# LLM: Runtime terminal states are host-owned facts. A settled nonterminal
-# slice accepts only the matching host turn reason; completed/cancelled/failed
-# results still require the corresponding run-level settlement.
-# 函数用途: 按 runtime.db 权威链判断 runner 结果是否与当前轮次冲突。
-def _managed_runtime_result_conflict(
-    manager: object,
-    task: SubAgentTask,
-    params: RecordRunnerResultParams,
-) -> str:
-    repo = getattr(manager, "runtime_db", None)
-    if repo is None or params.dry_run:
-        return ""
-    authority = repo.runner_result_commit_authority(
-        run_id=str(task.id or ""),
-        attempt_id=str(params.attempt_id or ""),
-    )
-    if authority is None:
-        return f"ignored runner result without runtime authority for attempt {params.attempt_id}"
-    if not bool(authority.get("is_current")):
-        return f"ignored stale runner result for superseded attempt {params.attempt_id}"
-    run_status = str(authority.get("run_status") or "")
-    attempt_status = str(authority.get("attempt_status") or "")
-    if run_status in {"", "created"} and attempt_status == "running":
-        return ""
-    if run_status not in RUN_STATUS_LEGACY_CREATED and run_status not in AGENT_RUN_TERMINAL_STATUSES:
-        # LLM: 未知/脏 run 状态**不是**"权威终态事实"，不能据此丢弃 runner 的最终结论。
-        # 真机缺口：状态未知时这里直接判冲突，结论被静默丢掉——没有 runner_result、没有待重试
-        # 事实、没有父级通知，子代理永久 RUNNING（现场：注入后 status_conflict + 挂住）。
-        # 现在让结论照常落账，run 收口由 closeout 记为 unknown_status 待重试：不猜成功、不覆盖
-        # 未知状态、不改写权威行；记录修复后再补收口与通知（恢复只补状态与通知）。
-        return ""
-    incoming_terminal = _runner_runtime_terminal_status(params)
-    if _runner_result_matches_settled_attempt(run_status, attempt_status, params):
-        return ""
-    if run_status in AGENT_RUN_TERMINAL_STATUSES:
-        # 权威 run 已终态：只接受**同一 exact current attempt 的一致终态**重入。
-        # 这是"run 收口后、父级通知前中断"以及重复交付的幂等补写路径：
-        # 收口可能只写了 run（settle_agent_run 不动已 ended 的 attempt），因此
-        # run=failed + attempt=done + incoming=failed 是**一致**组合，必须放行；
-        # 过期/换代在更上面已拒，冲突终态（run=done 收 FAILED 等）仍一律拒绝。
-        if incoming_terminal and incoming_terminal == run_status:
-            return ""
-        if not incoming_terminal and run_status == "done" and attempt_status == "done":
-            # 既有非终态投影放行规则保持不变，不引入新的拒绝面。
-            return ""
-    return (
-        "ignored runner result conflicting with runtime terminal fact "
-        f"run={run_status or 'unknown'} attempt={attempt_status or 'unknown'} "
-        f"incoming={incoming_terminal or 'nonterminal'}"
-    )
-
-
-def _task_text_attr(task, name: str) -> str:
-    value = getattr(task, name, "")
-    return value.strip() if isinstance(value, str) else ""
-
-
-def _task_list_attr(task, name: str) -> list[str]:
-    value = getattr(task, name, [])
-    if not isinstance(value, list | tuple | set):
-        return []
-    return [str(item) for item in value if str(item or "").strip()]
-
-
-# LLM: This mapping consumes only the structured runner status contract. It is
-# deliberately narrower than task display statuses and never reads response text.
-# 函数用途: 把子代理回写状态归一到 runtime.db 的三种终态，供冲突校验。
-def _runner_runtime_terminal_status(params: RecordRunnerResultParams) -> str:
-    raw_status = str(params.status or "").strip().upper()
-    if not raw_status and params.structured_output is not None:
-        raw_status = str(getattr(params.structured_output, "status", "") or "").strip().upper()
-    if raw_status == TaskStatus.DONE.value:
-        return "done"
-    if raw_status in {
-        TaskStatus.CANCELLED.value,
-        TaskStatus.ABANDONED.value,
-        TaskStatus.TAKEN_OVER.value,
-    }:
-        return "cancelled"
-    if raw_status in {
-        TaskStatus.FAILED.value,
-        TaskStatus.TIMEOUT.value,
-        TaskStatus.CHANNEL_ERROR.value,
-    }:
-        return "failed"
-    return ""
-
-
-# LLM: A settled current attempt may update only to the exact host-facing
-# nonterminal state derived from its typed turn_end_reason while AgentRun stays
-# created. Model prose and parsed output cannot obtain post-settlement authority.
-# 函数用途: 判断一次已结束的执行片段是否正把同一子代理交回可续跑或等待状态。
-def _runner_result_matches_settled_attempt(
-    run_status: str,
-    attempt_status: str,
-    params: RecordRunnerResultParams,
-) -> bool:
-    """Decide whether one exact attempt's settled state still accepts this result.
-
-    ``run=created + attempt=done`` 是宿主按"可续跑族"（如 MODEL_STREAM_INCOMPLETE）
-    提前结清 attempt、把 run 留给 resume 的签名。此时该 attempt 已经没有后续产出，
-    runner 对**同一个 attempt** 的终态回写是唯一事实来源：
-      - turn_end 映射为 PENDING/BLOCKED（可续跑）→ 按原规则接受；
-      - 映射为 FAILED/CANCELLED（本次事故形态）→ 也要接受并按该终态收口 run，
-        否则任务永久停在 RUNNING，且 runner_result/唤醒全部写不出来。
-    过期与换代保护不变：调用方只在 authority.is_current 为真时走到这里，
-    stale/superseded/abandoned 的 attempt 仍在前面被拒。
-    """
-
-    if run_status not in {"", "created"} or attempt_status != "done":
-        return False
-    raw_status = str(params.status or "").strip().upper()
-    expected_status, _failure_type, _ok = subagent_outcome_for_turn_end(
-        params.turn_end_reason
-    )
-    if expected_status in {
-        TaskStatus.PENDING.value,
-        TaskStatus.BLOCKED.value,
-    }:
-        return raw_status == expected_status
-    if expected_status in {
-        TaskStatus.FAILED.value,
-        TaskStatus.CANCELLED.value,
-    }:
-        return raw_status == expected_status
-    return False

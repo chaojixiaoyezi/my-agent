@@ -166,6 +166,9 @@ agent_py_agent/
 |   |   |-- models.py                   # 子代理数据模型
 |   |   |-- process_control.py          # 子代理宿主存活/启动事实，复用公共进程树终止并保留核对回执
 |   |   |-- direct_parent_lifecycle.py # 直属父子等待、事件唤醒、同批合并与结果上下文
+|   |   |-- runner_completion_payload.py # 完成正文、产物引用与父级交接信封的只读投影
+|   |   |-- runner_display_projection.py # 已裁决子代理状态到 TUI 活动标签的纯投影
+|   |   |-- runner_result_admission.py # exact run／attempt 的迟到与终态冲突准入、拒绝诊断
 |   |   |-- tool_failure_ledger.py      # 系统级工具失败账本：archive ok=False 摘要 -> attributes/对账投影
 |   |   |-- result_registered_artifacts.py # 自然/结构化收口共用的 exact run 工具产物投影
 |   |   |-- services/                   # 子代理业务服务
@@ -175,6 +178,7 @@ agent_py_agent/
 |   |   |   |-- dispatch/               # dispatch/watch/parent planner 报告
 |   |   |   |-- runner_context_service.py # 执行上下文和边界文件
 |   |   |   |-- runner_result_service.py # runner result 写回和副作用
+|   |   |   |-- runner_result_commit.py # 已落盘 runner 结果的 WAL、run 结算及父级通知初次编排
 |   |   |   |-- runtime_closeout.py    # runner 终态收口的可恢复 WAL + 一致终态重入 + 恢复扫描
 |   |   |   |-- executor_recovery.py   # 执行器确证退出后的失败/未知副作用投影与父级通知
 |   |   |   |-- board/                  # board、due-check、action-plan
@@ -588,6 +592,7 @@ docs/
 |-- tasks/completed/TASK-20260818-终端交互-tui-parity.md # 已完成 TUI 复刻实施、测试机边界和验收记录
 |-- tasks/REFACTOR_PLUGIN_GOAL.md       # 同版发布部署、十步重构状态与逐步多 TUI 验收
 |-- tasks/TUI_READING_HANDOFF.md        # 阅读锚点、连续滚动、插话顺序与真实终端验收交接
+|-- tasks/HANDOFF_STEP7_SUBAGENT_LIFECYCLE.md # 第 7 步子代理结果链的代码、验证和集成交接
 |-- design/FEATURE-20260804-tool-runtime-unification.md # 工具唯一主链的用户行为、需求与验收规格
 |-- design/tool-runtime-unification.md  # 工具参考证据、架构、迁移删除表与并行边界
 |-- design/LONG_RUNNING_EXECUTION.md    # 慢模型、后台长等待与缓存诊断统一合同及验收矩阵
@@ -674,10 +679,15 @@ docs/
 - `docs/design/PLUGIN_SAMPLE_ACCEPTANCE.md`：社区候选抽样与热度快照、10 个简易插件的最小功能、分批实现顺序和组合卸载验收；不代表已实现。
 - `docs/tasks/REFACTOR_PLUGIN_GOAL.md`：发布部署前置条件、十步执行状态、每步真实多 TUI 矩阵、证据与推进条件。
 - `docs/tasks/TUI_READING_HANDOFF.md`：本轮 TUI 修复的文件所有权、候选包、真实验收证据与部署边界。
+- `docs/tasks/HANDOFF_STEP7_SUBAGENT_LIFECYCLE.md`：子代理结果链隔离工作树的提交、受影响测试、并行边界和主线集成待办。
 
 - `agent_py_agent/agent/agent_core/agent_tree/model_view.py`：保留 run 身份、状态、原因与真实 read_order；不暴露恢复目录，省略内容可沿原工具归档完整读取。
 - `agent_py_agent/tests/test_agent_tree_model_view.py`：模型状态投影、终态报告可达性、状态不被省略及超长归档回读合同的定向验证。
 - `agent_py_agent/agent/subagents/result_registered_artifacts.py`：从 exact run 的工具产物账本投影真实文件；自然最终回复与结构化收口共用，不扫描目录或搬运文件。
+- `agent_py_agent/agent/subagents/runner_display_projection.py`：仅从已裁决的状态码和失败类型计算 TUI 标签；不读取模型正文或改变生命周期。
+- `agent_py_agent/agent/subagents/runner_result_admission.py`：在正式写结果前核对 canonical task 与 RuntimeDB 的当前轮，拒绝迟到／冲突结果并写原诊断事件；不保存结果或通知父级。
+- `agent_py_agent/agent/subagents/services/runner_result_commit.py`：在结果文件与 task 投影落盘后按原 WAL→运行账→父通知→已交付→清账顺序推进；使用既有 runtime_closeout 恢复原语，不建立第二份权威。
+- `agent_py_agent/agent/subagents/runner_completion_payload.py`：从已有子代理结果构造有界完成正文和规范产物引用；根通知、递归父级和直属父交接共用，既不写状态也不投递通知。
 - `agent_py_agent/agent/subagents/runner_start.py`：在原创建锁内预留准确 pending 并核对原身份；启动记录实际写入归既有 lifecycle 服务，CLI 与进程内入口直接调用服务，不保留旧转发函数。
 - `agent_py_agent/agent/subagents/file_runner_start.py`：显式无数据库模式在原 canonical 启动记录中预留和消费准确身份；停止可撤销，旧快照不能覆盖新预留或激活，普通保存只可回收同一身份。
 - `agent_py_agent/agent/subagents/coordination.py`：复用原 owner 创建锁协调 canonical 创建、执行轮变更和插话预留；只记录本线程持锁事实，不保存任务状态，启动和退出等待不得持锁。

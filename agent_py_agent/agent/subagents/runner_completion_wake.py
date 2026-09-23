@@ -4,25 +4,19 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from ..contracts.subagent_completion import SUBAGENT_COMPLETION_SCHEMA_VERSION
-from ..memory_archive.tokens import estimate_tokens
-from ..model_visible_refs import current_model_ref, current_model_ref_list
 from ..runtime_errors import runtime_error_report
 from .capability_scope import request_scope_snapshot
-from .context_bundle_contracts import declared_output_refs
 from .models import (
     SUBAGENT_WAKE_STATUSES,
     TaskStatus,
     task_status_in,
 )
+from .runner_completion_payload import completion_evidence_refs, completion_handoff_payload
 
-# LLM: This module publishes one versioned terminal/capability envelope from a child to its direct
-# parent; background wakes and ordinary foreground continuation must consume that same schema.
-# 模块用途: 把子代理结束结果和能力申请可靠交给父级，并为后台唤醒与前台续轮统一状态、回复和产物引用。
+# LLM: 本模块只负责把子代理终态或能力申请投递给正确父级；完成正文和产物引用由只读投影统一构造。
+# 模块用途: 可靠发送父级通知、去重并记录投递错误，保持后台 wake 和前台续轮读取同一交接内容。
 
 _LOGGER = logging.getLogger(__name__)
-_COMPLETION_MESSAGE_MAX_TOKENS = 1_000
-_COMPLETION_EVIDENCE_REF_LIMIT = 20
 
 
 # LLM: 活动提醒走原 wake/observation 原子对，按 run+attempt+阶段去重；不是终态，不触发强杀。
@@ -165,7 +159,7 @@ def _notify_parent_terminal(
                 pass
         root_task_id = str(getattr(task, "root_id", "") or task_id)
         metadata = _metadata(task, result, output_payload)
-        evidence_refs = _completion_evidence_refs(task, output_payload, metadata)
+        evidence_refs = completion_evidence_refs(task, output_payload, metadata)
         if _is_internal_audit_source_lifecycle(status, metadata):
             # A bounded source-worker slice is a continuation of one durable
             # logical worker, not a child completion that needs owner attention.
@@ -323,108 +317,6 @@ def _metadata(task: Any, result: Any, output_payload: dict[str, object]) -> dict
             }
         )
     return payload
-
-
-# LLM: Root wakes and recursively resumed parents must consume one identical
-# 会话运行时 child handoff. Status remains external; this payload carries only
-# bounded final content and canonical refs, never completion authority.
-# 函数用途: 生成子代理结束后的统一交接包，让直属父级直接看到最终回复和交付位置而不用猜目录。
-def completion_handoff_payload(
-    task: Any,
-    result: Any | None = None,
-    output_payload: dict[str, object] | None = None,
-) -> dict[str, object]:
-    selected_result = result if result is not None else task
-    selected_output = output_payload if isinstance(output_payload, dict) else {}
-    completion_message, completion_truncated, completion_tokens = _completion_message(
-        task,
-        selected_result,
-        selected_output,
-    )
-    selected_artifacts = selected_output.get("artifacts")
-    artifact_refs: list[str] = []
-    if isinstance(selected_artifacts, list):
-        for item in selected_artifacts:
-            ref = current_model_ref(item.get("path") if isinstance(item, dict) else item)
-            if ref and ref not in artifact_refs:
-                artifact_refs.append(ref)
-    else:
-        artifact_refs = current_model_ref_list(
-            getattr(task, "artifact_refs", []) or [],
-            limit=_COMPLETION_EVIDENCE_REF_LIMIT,
-        )
-    payload: dict[str, object] = {
-        "completion_schema_version": SUBAGENT_COMPLETION_SCHEMA_VERSION,
-        "completion_message": completion_message,
-        "final_report_ref": current_model_ref(
-            getattr(task, "agent_run_final_report_md", "")
-            or getattr(task, "debrief_file", "")
-        ),
-        "declared_output_refs": declared_output_refs(task)[:_COMPLETION_EVIDENCE_REF_LIMIT],
-        "artifact_refs": artifact_refs[:_COMPLETION_EVIDENCE_REF_LIMIT],
-    }
-    if completion_truncated:
-        payload["completion_message_truncated"] = True
-        payload["completion_message_original_tokens"] = completion_tokens
-    return payload
-
-
-# LLM: The host-owned terminal status remains the lifecycle authority; this
-# bounded prose is only the 会话运行时 child result payload for parent integration.
-# 函数用途: 从子代理当前结果中取最终回复，并限制完成信封体积；长正文可按报告引用继续读取。
-def _completion_message(
-    task: Any,
-    result: Any,
-    output_payload: dict[str, object],
-) -> tuple[str, bool, int]:
-    candidates = (
-        getattr(task, "result", ""),
-        output_payload.get("response", ""),
-        output_payload.get("summary", ""),
-        getattr(result, "message", ""),
-        getattr(task, "latest_summary", ""),
-    )
-    text = next((str(value).strip() for value in candidates if str(value or "").strip()), "")
-    original_tokens = estimate_tokens(text) if text else 0
-    if original_tokens <= _COMPLETION_MESSAGE_MAX_TOKENS:
-        return text, False, original_tokens
-
-    marker = "\n...[完成消息已截断；完整内容见 final_report_ref]...\n"
-    low = 0
-    high = len(text)
-    best = marker.strip()
-    while low <= high:
-        keep = (low + high) // 2
-        head_chars = (keep * 3) // 4
-        tail_chars = keep - head_chars
-        tail = text[-tail_chars:] if tail_chars else ""
-        candidate = text[:head_chars] + marker + tail
-        if estimate_tokens(candidate) <= _COMPLETION_MESSAGE_MAX_TOKENS:
-            best = candidate
-            low = keep + 1
-        else:
-            high = keep - 1
-    return best, True, original_tokens
-
-
-# LLM: Completion evidence refs are a read-only delivery index. They never
-# decide status, acceptance, permissions, retry, or root-task completion.
-# 函数用途: 汇总完成报告和真实产物位置，让父代理无需猜目录即可读取子代理交付。
-def _completion_evidence_refs(
-    task: Any,
-    output_payload: dict[str, object],
-    metadata: dict[str, object],
-) -> list[str]:
-    refs = [current_model_ref(metadata.get("final_report_ref"))]
-    refs.extend(current_model_ref_list(getattr(task, "artifact_refs", []) or []))
-    artifacts = output_payload.get("artifacts")
-    if isinstance(artifacts, list):
-        for item in artifacts:
-            if isinstance(item, dict):
-                refs.append(current_model_ref(item.get("path")))
-            else:
-                refs.append(current_model_ref(item))
-    return list(dict.fromkeys(ref for ref in refs if ref))[:_COMPLETION_EVIDENCE_REF_LIMIT]
 
 
 def _is_internal_audit_source_lifecycle(
@@ -627,7 +519,6 @@ def _record_wake_error(manager: Any, task: Any, result: Any, exc: BaseException)
 
 
 __all__ = [
-    "completion_handoff_payload",
     "notify_parent_on_capability_request",
     "notify_parent_on_controlled_cancel",
     "notify_parent_on_runner_result",

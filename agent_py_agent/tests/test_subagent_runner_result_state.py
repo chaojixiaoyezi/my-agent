@@ -14,6 +14,7 @@ from agent_py_agent.agent.agent_core.subagent.finalize_helpers import (
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.manager_runner_result_payload import RecordRunnerResultParams
 from agent_py_agent.agent.subagents.models import SubAgentParsedOutput, SubAgentTask
+from agent_py_agent.agent.subagents.runner_result_admission import reject_stale_runner_result
 from agent_py_agent.agent.subagents.runner_result_state import (
     RunnerResultFieldParams,
     apply_runner_result_fields,
@@ -90,6 +91,40 @@ def test_runner_result_state_does_not_store_unknown_context_failure_type() -> No
     assert task.failure_type == "runner_error"
 
 
+def test_runner_conflict_records_runtime_diagnostic() -> None:
+    events: list[dict[str, object]] = []
+    repo = SimpleNamespace(
+        runner_result_commit_authority=lambda **_kwargs: {
+            "agent_run_id": "agent-1",
+            "task_run_id": "task-1",
+            "is_current": True,
+            "run_status": "done",
+            "attempt_status": "done",
+        },
+        append_event=lambda **kwargs: events.append(kwargs),
+    )
+    manager = SimpleNamespace(runtime_db=repo)
+    task = _task()
+    task.runner_active_attempt_id = "attempt-1"
+    rejected = reject_stale_runner_result(
+        manager,
+        task,
+        SimpleNamespace(
+            attempt_id="attempt-1", status="FAILED", turn_end_reason="error",
+            dry_run=False, structured_output=None,
+        ),
+    )
+
+    assert rejected is not None and rejected.ok is False
+    assert len(events) == 1
+    assert events[0]["event_type"] == "closeout_blocked"
+    assert events[0]["attempt_id"] == "attempt-1"
+    assert events[0]["agent_run_id"] == "agent-1"
+    assert events[0]["task_run_id"] == "task-1"
+    assert events[0]["payload"]["reason"] == "runner_result_conflict"
+    assert events[0]["payload"]["run_status"] == "done"
+
+
 @pytest.mark.parametrize("reason,status,failure,ok", [
     ("completed", "DONE", "", True),
     ("interrupted", "PENDING", "", False),
@@ -162,8 +197,7 @@ def test_unfinished_result_keeps_unproven_or_explicit_failure(tmp_path, reason, 
 # 函数用途: 验证 settled attempt 判定对"精确 attempt 的终态回写"放行、对过期 attempt 保持拒绝。
 def test_settled_attempt_accepts_exact_attempt_terminal_closure() -> None:
     from agent_py_agent.agent.subagents.models import TaskStatus
-    from agent_py_agent.agent.subagents.services.runner_result_service import (
-        RecordRunnerResultParams,
+    from agent_py_agent.agent.subagents.runner_result_admission import (
         _runner_result_matches_settled_attempt,
     )
 

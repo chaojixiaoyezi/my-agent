@@ -26,7 +26,9 @@ from agent_py_agent.agent.ingestion.watch_state import new_state, persist_state,
 from agent_py_agent.agent.runtime_db.operations import AGENT_RUN_TERMINAL_STATUSES
 from agent_py_agent.agent.settings.config import AgentConfig
 from agent_py_agent.agent.subagents.manager import SubAgentManager
+from agent_py_agent.agent.subagents.manager_runner_result_payload import RecordRunnerResultParams
 from agent_py_agent.agent.subagents.process_control import is_pid_alive
+from agent_py_agent.agent.subagents.runner_result_admission import make_rejected_runner_result
 from agent_py_agent.agent.subagents.runner_session_liveness import has_fresh_runner_session
 
 
@@ -1104,8 +1106,7 @@ def test_stream_incomplete_same_attempt_closes_authoritative_run(tmp_path: Path)
     import json as _json
 
     from agent_py_agent.agent.conversation import ConversationStore
-    from agent_py_agent.agent.subagents.services.runner_result_service import (
-        RecordRunnerResultParams,
+    from agent_py_agent.agent.subagents.runner_result_admission import (
         _managed_runtime_result_conflict,
         _runner_result_matches_settled_attempt,
     )
@@ -1546,7 +1547,7 @@ def test_repeated_closeout_recovery_is_idempotent(tmp_path: Path) -> None:
 # 冲突终态仍拒——修复前 run=failed + attempt=done + incoming=failed 会被误判为冲突。
 # 函数用途: 验证终态一致性规则不再拒绝可重入的一致终态。
 def test_consistent_terminal_result_is_reentrant_but_conflict_is_rejected(tmp_path: Path) -> None:
-    from agent_py_agent.agent.subagents.services.runner_result_service import (
+    from agent_py_agent.agent.subagents.runner_result_admission import (
         _managed_runtime_result_conflict,
     )
 
@@ -1594,7 +1595,7 @@ def test_rejected_closeout_fact_is_cleared_once_not_retried(tmp_path: Path) -> N
     task_loaded = manager.load(task.id)
     superseded = type(params)(**{**vars(params), "attempt_id": "attempt-superseded-not-current"})
     assert runtime_closeout.record_pending_closeout(
-        manager, task_loaded, superseded, manager.runner_result._make_quick_result(
+        manager, task_loaded, superseded, make_rejected_runner_result(
             task_loaded, False, False, params.message
         ),
         {"state": "pending", "target_run_status": "failed", "agent_run_id": agent_run_id,
@@ -1712,7 +1713,7 @@ def test_closeout_cleanup_failure_is_not_reported_as_success(tmp_path: Path) -> 
     task_loaded = manager.load(task.id)
     assert runtime_closeout.record_pending_closeout(
         manager, task_loaded, params,
-        manager.runner_result._make_quick_result(task_loaded, False, False, params.message),
+        make_rejected_runner_result(task_loaded, False, False, params.message),
         {"state": "already_consistent", "target_run_status": "failed",
          "agent_run_id": agent_run_id, "attempt_id": attempt_id},
     )
@@ -1739,6 +1740,42 @@ def test_closeout_cleanup_failure_is_not_reported_as_success(tmp_path: Path) -> 
     assert summary["runtime_closeouts_recovered"] == 1, summary
     assert runtime_closeout.pending_closeout(manager.load(task.id)) is None
     assert len(_wakes_for_attempt(tmp_path, task.id, attempt_id)) == 1, "已交付的通知不得重发"
+
+
+# LLM: 初次 runner 交付与恢复交付都必须先持久标记 delivered 再清 WAL；单次标记失败时，
+#   原 pending WAL 必须留给恢复扫描，已发出的 exact attempt wake 不能重发。
+# 函数用途: 验证首次交付的已通知标记落盘失败不会把唯一恢复事实清掉。
+def test_initial_delivery_marker_failure_keeps_pending_closeout(tmp_path: Path) -> None:
+    from agent_py_agent.agent.subagents.services import runtime_closeout
+
+    manager, _store, task, attempt_id, _agent_run_id, params, _json = _closeout_fixture(
+        tmp_path, owner="tui-test/initial-delivery-marker-fail"
+    )
+    original_save = manager.save
+    failures = 0
+
+    def fail_first_delivered_marker(saved_task, **kwargs):
+        nonlocal failures
+        fact = (getattr(saved_task, "attributes", {}) or {}).get("runtime_closeout_pending")
+        if isinstance(fact, dict) and fact.get("delivery") == "delivered" and failures == 0:
+            failures += 1
+            raise OSError("injected first delivered marker failure")
+        return original_save(saved_task, **kwargs)
+
+    manager.save = fail_first_delivered_marker
+    try:
+        result = manager.runner_result.record_runner_result(params)
+    finally:
+        manager.save = original_save
+    assert result.status == "FAILED" and failures == 1
+    assert len(_wakes_for_attempt(tmp_path, task.id, attempt_id)) == 1
+    fact = runtime_closeout.pending_closeout(manager.load(task.id))
+    assert fact is not None and fact["delivery"] == "pending"
+
+    summary = runtime_closeout.recover_pending_closeouts(manager)
+    assert summary["runtime_closeouts_recovered"] == 1
+    assert runtime_closeout.pending_closeout(manager.load(task.id)) is None
+    assert len(_wakes_for_attempt(tmp_path, task.id, attempt_id)) == 1
 
 
 # LLM: 真机缺口（104 轮注入复现）：run 状态未知/脏时，旧守卫把它当"权威冲突"直接丢弃 runner

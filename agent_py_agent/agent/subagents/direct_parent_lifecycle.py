@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 """LLM: Own the recursive parent-child wait contract for every subagent depth.
+Completion handoff content comes from the shared read-only payload projection;
+keep this module responsible for wait markers and direct-parent wake decisions.
 
 模块用途: 子代理与孙代理主动让出时登记等待；任一新结果可唤醒直属父级，不等待最慢兄弟。
+交接正文复用只读投影，本模块只负责等待和唤醒状态。
 """
 
 import time
@@ -17,7 +20,9 @@ from .models import (
     task_has_ended_status,
     task_status_in,
 )
-from .runner_completion_wake import completion_handoff_payload
+# LLM: 交接正文只读共享投影；等待标记和唤醒裁决仍由本模块持有。
+# 模块用途: 引用统一完成信封，避免各层父代理各自拼接不同正文。
+from .runner_completion_payload import completion_handoff_payload
 
 DIRECT_CHILD_WAIT_ATTR = "direct_child_wait"
 _WAIT_SCHEMA_VERSION = "direct-child-wait.v1"
