@@ -1074,6 +1074,6 @@ Gateway Compact 与 runtime context pressure 两文件72项通过。新增10种�
 
 先打通 Gateway 已绑定请求的 overflow 恢复轮。它已有 `GatewayModelObservation` 的完整宿主作用域，即使模型采用关闭也存在；扩展原 render/select 时点，在原发送 IR materialize 前保存冻结 prompt 输入并进入 Compact，不放到过晚的 before_send。候选经原宿主历史投影产生预计代次的 `ConversationHistorySeed`，由原宿主 renderer 重建操作证据注入，并重算 `conversation_runtime_state_section`；其余准备沿同一次恢复参数。
 
-当前 `PromptRenderInput.injected` 已拼平，因此先保留注入的结构化位置/片段；禁止搜索自然语言正文来替换摘要。临时候选投影交原 Compact options，原 checkpoint/CAS 成功后安装获选 seed、注入和请求输入，继续本次已准备的生成，不再次退出后调用 `agent.run`。取消、CAS失败或输入/模型变化时丢弃候选，缺完整输入或自定义builder不能复用时明确unknown。此设计不改变既有持久历史权威，也不把初次加载、手动Compact或未接宿主的粗估当完整证明。
+原先 `PromptRenderInput.injected` 已拼平；现已改为冻结 `injection_fragments` 元组，`injected` 只按原 join 规则派生，不保留第二正文副本。候选可按宿主准备时已知位置替换；禁止搜索自然语言正文来替换摘要。后续临时候选投影交原 Compact options，原 checkpoint/CAS 成功后安装获选 seed、注入和请求输入，继续本次已准备的生成，不再次退出后调用 `agent.run`。取消、CAS失败或输入/模型变化时丢弃候选，缺完整输入或自定义builder不能复用时明确unknown。此设计不改变既有持久历史权威，也不把初次加载、手动Compact或未接宿主的粗估当完整证明。
 
-首条验收应同时捕获“候选payload等于恢复后首个实际payload”、准备副作用只执行一次、CAS失败零业务发送；成功后再接child和后台。该方案尚未实施，不能计入12.4完成。
+首条验收应同时捕获“候选payload等于恢复后首个实际payload”、准备副作用只执行一次、CAS失败零业务发送；成功后再接child和后台。注入片段前置结构已验证重复文字、空片段、内嵌标题及调用方后续修改不影响冻结值；替换后原生稳定前缀保持。其余宿主接线尚未实施，不能计入12.4完成。

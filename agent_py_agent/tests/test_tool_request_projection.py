@@ -271,6 +271,34 @@ def test_builder_legacy_and_prepared_render_match_frozen_bytes(tmp_path, monkeyp
     assert prompt_cache_layout(prompting.render_prepared_prompt(prepared)) == prompt_cache_layout(expected)
 
 
+@pytest.mark.parametrize("native", [False, True])
+def test_prepared_injection_replacement_preserves_unrelated_fragments_and_cache(tmp_path, monkeypatch, native):
+    builder = prompting.PromptBuilder(AgentConfig(prompt_files=[]), tmp_path)
+    # 用户可以输入和宿主完全相同的文字，甚至内嵌段落标题；替换只能依赖宿主已知位置。
+    original = ["重复历史\n# Conversation Context", "", "重复历史\n# Conversation Context", "Goal 原文"]
+    request = prompting.PromptBuildRequest(
+        "任务原文", [], inject=original, system_prompt_override="固定 system",
+        workspace_context_override="冻结的时间与目录",
+        tools=prompting.ToolSections(native_tool_use=native),
+    )
+    prepared = builder.prepare_render_input(request)
+    before = prompting.render_prepared_prompt(prepared)
+    expected = builder.build(request=replace(request, inject=[*original[:2], "新历史\n第二行", original[3]]))
+    original[:] = ["准备后调用方改变了容器"]
+    monkeypatch.setattr(builder, "prepare_render_input", lambda *_a, **_k: pytest.fail("候选重新准备提示"))
+    monkeypatch.setattr(prompting, "_workspace_context_text", lambda *_a, **_k: pytest.fail("候选重新读时间"))
+    fragments = prepared.injection_fragments
+    candidate = replace(prepared, injection_fragments=(*fragments[:2], "新历史\n第二行", *fragments[3:]))
+    actual = prompting.render_prepared_prompt(candidate)
+    assert actual == expected
+    assert prepared.injection_fragments == ("重复历史\n# Conversation Context", "", "重复历史\n# Conversation Context", "Goal 原文")
+    assert prompting.render_prepared_prompt(prepared) == before
+    assert candidate.injected == "重复历史\n# Conversation Context\n\n新历史\n第二行\nGoal 原文"
+    if native:
+        assert prompt_cache_layout(actual).stable_prefix == prompt_cache_layout(before).stable_prefix
+        assert prompt_cache_layout(actual) == prompt_cache_layout(expected)
+
+
 @pytest.mark.parametrize("kind", ["normal", "audit_source_binding", "audit_source_worker"])
 def test_runner_prepared_render_does_not_read_context_or_refs(monkeypatch, kind):
     context = SubAgentExecutionContext("child", 1.0, "原派工", "原思考", ["原计划"],

@@ -1,4 +1,4 @@
-# LLM: 宿主材料采集与纯渲染分开；真实请求和容量投影共用唯一布局，渲染不得读文件、刷新状态或裁决权限。
+# LLM: 宿主材料采集与纯渲染分开；注入按原片段冻结，真实请求和容量投影共用唯一布局，渲染不得读文件、刷新状态或裁决权限。
 # 模块用途: 先冻结主/子代理的完整提示材料，再按原文本或原生缓存布局生成模型输入。
 from __future__ import annotations
 
@@ -83,8 +83,9 @@ class _PromptBuildFields:
     workspace_context_override: str | None
 
 
-# LLM: 所有字段均为已采集的值；空字符串是显式空材料，不允许纯渲染再读取配置、文件、时钟或 Router。
-# 类用途: 冻结一次完整 prompt 的所有段落，供真实发送与创建前容量检查使用同一格式化器。
+# LLM: 所有字段均为已采集的值；注入片段按原位置冻结，不解析正文识别来源，不另存合并副本。
+# 空字符串是显式空材料；纯渲染不得再读取配置、文件、时钟或 Router，修改布局须同步请求投影测试。
+# 类用途: 冻结完整提示并保留注入边界，让宿主只替换自己拥有的片段，真实发送与容量检查共用格式化器。
 @dataclass(frozen=True)
 class PromptRenderInput:
     system_prompt: str
@@ -92,13 +93,24 @@ class PromptRenderInput:
     owner_scope: str
     dynamic: str
     workspace_context: str
-    injected: str
+    injection_fragments: tuple[str, ...]
     tool_catalog: str
     recommendations: str
     execution_facts: str
     user_prompt: str
     task_and_transcript: str
     native_tool_use: bool
+
+    # LLM: 冻结调用方容器，片段包括空串和内嵌换行；不得按正文去重或猜测历史来源。
+    # 函数用途: 避免准备完成后修改原注入列表影响当前请求，只有新候选可以显式替换片段。
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "injection_fragments", tuple(self.injection_fragments))
+
+    # LLM: 只从唯一片段元组派生原 join 字节；不读状态、不做缓存或有副作用的准备。
+    # 函数用途: 向文本与原生 renderer 提供原有合并文本，保留分段前的模型输入格式。
+    @property
+    def injected(self) -> str:
+        return "\n".join(self.injection_fragments)
 
 
 # LLM: builder 可供并发请求复用；准备阶段只采集本次材料，纯格式化共享 render_prepared_prompt，不在实例挂临时状态。
@@ -180,8 +192,8 @@ class PromptBuilder:
         )
         return render_prepared_prompt(self.prepare_render_input(request))
 
-    # LLM: 这是有读取行为的宿主准备层；保持文件、persona、Skill、时钟的原采集顺序，纯投影只能消费返回值。
-    # 函数用途: 把原 build 所需材料冻结成值对象，不发请求、不写状态，也不为缺失输入猜造子代理事实。
+    # LLM: 这是有读取行为的宿主准备层；保持文件、persona、Skill、时钟的原采集顺序，注入列表复制为元组，纯投影只消费返回值。
+    # 函数用途: 把原 build 材料和注入边界冻结成值对象，不发请求、不写状态，也不为缺失输入猜造子代理事实。
     def prepare_render_input(self, request: PromptBuildRequest) -> PromptRenderInput:
         _tools = request.tools or ToolSections()
         system_prompt = request.system_prompt_override or self.config.system_prompt
@@ -191,7 +203,7 @@ class PromptBuilder:
         if home_guide := _home_directory_guide(self):
             owner_scope += "\n\n" + home_guide
         dynamic = _dynamic_prompt_text(self, request, task_local)
-        injected = "\n".join(request.inject or [])
+        injection_fragments = tuple(request.inject or ())
         workspace_context = (
             _workspace_context_text(self)
             if request.workspace_context_override is None
@@ -205,7 +217,7 @@ class PromptBuilder:
             recommendations += "\n\n" + selected_skills
         return PromptRenderInput(
             system_prompt=system_prompt, memory_text=memory_text, owner_scope=owner_scope,
-            dynamic=dynamic, workspace_context=workspace_context, injected=injected,
+            dynamic=dynamic, workspace_context=workspace_context, injection_fragments=injection_fragments,
             tool_catalog=_tools.tool_catalog_section or default_tools,
             recommendations=recommendations, execution_facts=_tools.execution_facts_section,
             user_prompt=request.user_prompt, native_tool_use=_tools.native_tool_use,

@@ -1,5 +1,11 @@
 # 测试与发布验收
 
+## 第 12.4 项注入片段准备（本地前置片）
+
+`test_tool_request_projection.py`、`test_gateway_model_adoption.py` 共 **65 passed**；`test_prompting_builder.py`、`test_prompting.py`、`test_subagent_first_request_selection.py` 共 **139 passed**，合计 **204 passed**。原 PromptRenderInput 保存注入片段元组，文本与原生路径保留原 join 和缓存布局；新增两协议用例验证重复正文、空片段、内嵌标题及调用方改动不会使候选误改其它片段，纯渲染不会重新准备提示或读取时间。没有实际模型调用；完整 Compact 候选与恢复请求的 payload 对照尚未接线，不计为12.4完成，也不覆盖前轮全仓失败。
+
+本片 Ruff、doc sync、导入边界（0发现）、strict code-size（hard=0）、diff check 和 clean-package 均通过；未新增配置或长期文件，尺寸基线不变。只在独立开发工作区保存，未推送、部署或重启测试机。
+
 ## 第 12 项输出预留接受门（本地首片）
 
 `test_gateway_conversation_compact.py` 与 `test_runtime_context_pressure.py` 共 **72 passed**。transcript 自动触发和候选接受现在复用普通请求的已知输出预留；先过输入容量门，再选 recovery target 或原可接受候选，Context 输入显示不加未来输出。新增10种受控估算矩阵保留原checkpoint/CAS与失败记账，覆盖等于边界、不足输出空间、原保留候选、未知cap和OAuth无cap；没有真实网络调用。完整恢复请求计量仍待12.4接入，不把此片当供应商窗口或第12项完整验收。
