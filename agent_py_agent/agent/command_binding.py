@@ -138,13 +138,11 @@ def bind_command_arguments(
     return BoundArguments(MappingProxyType(values), help_requested, frozenset(seen), ended, position, awaiting)
 
 
-# LLM: 帮助从参数声明生成，不另存一份用法字符串；只展示，不触发目标或文件访问。
-# 函数用途: 显示某个动作的完整用法、参数和未开放状态。
-def render_action_help(prefix: str, action: CommandActionSpec) -> str:
+# LLM: 用法只从动作参数声明生成，供静态帮助和插件使用卡复用；不能从展示文案反推可执行参数。
+# 函数用途: 生成一行可输入的动作语法，不执行目标或读取文件。
+def render_action_usage(prefix: str, action: CommandActionSpec) -> str:
     usage = [prefix, action.name]
-    details = []
     for spec in action.arguments:
-        label = ", ".join(spec.options) if spec.options else spec.name
         value = "" if spec.value_type == "boolean" else f" <{spec.name}>"
         part = (spec.options[-1] + value) if spec.options else spec.name
         part += "..." if spec.multiple else ""
@@ -153,6 +151,16 @@ def render_action_help(prefix: str, action: CommandActionSpec) -> str:
         elif not spec.options:
             part = f"<{part}>"
         usage.append(part)
+    return "用法：" + " ".join(usage)
+
+
+# LLM: 帮助从参数声明及公共用法生成，不另存一份语法；只展示，不触发目标或文件访问。
+# 函数用途: 显示某个动作的完整用法、参数和未开放状态。
+def render_action_help(prefix: str, action: CommandActionSpec) -> str:
+    details = []
+    for spec in action.arguments:
+        label = ", ".join(spec.options) if spec.options else spec.name
+        value = "" if spec.value_type == "boolean" else f" <{spec.name}>"
         facts = [spec.summary]
         if spec.choices:
             facts.append("候选：" + "、".join(str(item) for item in spec.choices))
@@ -160,4 +168,4 @@ def render_action_help(prefix: str, action: CommandActionSpec) -> str:
             facts.append(f"默认：{spec.default}")
         details.append(f"  {label}{value if spec.options else ''}  {'；'.join(facts)}")
     state = "" if action.available else "（业务尚未开放，仅可查看声明）"
-    return "\n".join((f"{action.summary}{state}", "用法：" + " ".join(usage), *details, "  -h, --help  查看帮助；-- 之后全部作为位置参数"))
+    return "\n".join((f"{action.summary}{state}", render_action_usage(prefix, action), *details, "  -h, --help  查看帮助；-- 之后全部作为位置参数"))

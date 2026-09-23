@@ -622,8 +622,8 @@ docs/
 - `agent_py_agent/agent/tooling/process_session_cleanup.py`：只清理原 Store 冻结的 host/child 出生实例；完整证明保存到原 termination.cleanup，原命令终态不改写，未确认及待恢复回执保留。
 - `agent_py_agent/agent/tooling/process_session_records.py`：纯数据校验与单调合并；`process_session_commit.py` 只安装固定记录，目录互斥归公共 `common/directory_lock.py`，原锁名不变。v1 不隐式升级或获得任务停止授权。
 - `agent_py_agent/agent/command_catalog.py`：无 UI/执行依赖的公共命令声明；原控制参数仍归会话模块，插件后缀识别不等于身份校验或可执行授权。
-- `agent_py_agent/agent/command_arguments.py` 与 `command_binding.py`：参数定义、字面词法及值绑定的权威实现；部分输入也使用同一协议，帮助不从展示文字反推规则。
-- `agent_py_agent/agent/plugin_commands.py`：接收宿主提供的动作描述，统一参数解析和静态错误；安装表与实际执行由管理服务沿原链处理。
+- `agent_py_agent/agent/command_arguments.py` 与 `command_binding.py`：参数定义、字面词法及值绑定的权威实现；部分输入及帮助／使用卡用法共用同一协议，不从展示文字反推规则。
+- `agent_py_agent/agent/plugin_commands.py`：接收宿主提供的动作描述，统一参数解析、静态错误和公开使用卡；安装表与实际执行由管理服务沿原链处理。
 - `agent_py_agent/agent/plugin_command_catalog.py`：冻结及校验完整管理/插件声明，内容摘要绑定 owner 视图、版本和激活引用；不提供权限凭证。
 - `agent_py_agent/agent/command_declarations.py`：命令 JSON 的唯一读取器，包和宿主目录共用，旧目录私有 decoder 已删除。
 - `agent_py_agent/agent/plugin_manifest.py` 与 `plugin_package.py`：只读校验包并保留同一字节快照；不接受宿主身份，不代表已安装、已授权或已隔离。
@@ -637,7 +637,7 @@ docs/
 - `docs/design/PLUGIN_ACTIVATION.md`：激活身份、持久撤销、释放/证据消费及重新启用；卸载、显式业务命令及实际多 TUI 仍待完成。
 - `docs/design/MANAGED_PROCESS_STDIO.md`：原托管器的字节通道、v4 显式保留和激活归属，旧 v2/v3 原版本恢复边界。
 - `agent_py_agent/agent/plugin_configure_tool.py` 与 `plugin_sources.py`：隐藏管理工具通过原执行链读取授权来源，配置值只进 owner 私有安装表；包与配置共用有界安全读取。
-- `agent_py_agent/agent/plugin_install_tool.py` 与 `plugin_management.py`：管理服务核对原授权并走唯一执行器；安装默认停用，配置与启停同源，查询只读原请求。
+- `agent_py_agent/agent/plugin_install_tool.py` 与 `plugin_management.py`：管理服务核对原授权并走唯一执行器；安装默认停用，配置与启停同源，列表／详情投影当前安装快照，查询只读原请求。
 - `agent_py_agent/agent/plugin_enable_tool.py`：在原管理操作中准备环境、完整验证候选目录，确认退出后才发布同代 active。
 - `agent_py_agent/agent/plugin_runtime.py` 与 `tooling/plugin_registration.py`：固定激活的 MCP 适配和新运行组合；原客户端共享连接，权限视图单独生成目录，不新建激活缓存权威。
 - `agent_py_agent/tests/test_mcp_operation_outcomes.py`：通过原执行器和临时 RuntimeDB 区分完整失败回执与未知结果，核对重放及逻辑资源释放。

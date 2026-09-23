@@ -258,6 +258,14 @@ def test_actual_package_original_install_call_disable_reenable_remove(installed_
     replay = service.command(f'/plugins install "{source}"', revision=revision, request_id="install")
     assert replay["state"] == "succeeded" and replay["operation_id"] == installed["operation_id"]
     assert not service.installations.snapshot()[0].enabled
+    listed = service.command("/plugins list", revision=service.catalog().revision, request_id="list")
+    assert listed["ok"] and "workspace-peek 0.1.0（停用）" in listed["message"]
+    assert service.installations.snapshot()[0].manifest.summary in listed["message"]
+    info = service.command("/plugins info workspace-peek", revision=service.catalog().revision, request_id="info")
+    assert info["ok"] and "workspace-peek 0.1.0（停用）" in info["message"]
+    assert "/plugins@workspace-peek show" in info["message"]
+    assert "普通中文示例：" in info["message"] and "必填设置：无" in info["message"]
+    assert "page_bytes" in info["message"] and "先执行 /plugins enable workspace-peek" in info["message"]
     text = "abcdefghijklmnop"
     (tmp_path / "input.txt").write_text(text)
     settings = tmp_path / "settings.json"
@@ -270,6 +278,9 @@ def test_actual_package_original_install_call_disable_reenable_remove(installed_
     manage(service, f'/plugins configure workspace-peek --file "{settings}"', "configure")
     enabled = manage(service, "/plugins enable workspace-peek", "enable")
     assert enabled["details"]["candidate_cleanup"]["confirmed"]
+    assert "workspace-peek 0.1.0（启用）" in enabled["message"]
+    assert "普通中文示例：" in enabled["message"] and "/plugins remove workspace-peek" in enabled["message"]
+    assert enabled["message"].endswith("查询：/plugins status enable")
     explicit = manage(service, "/plugins@workspace-peek show input.txt", "explicit")
     assert json.loads(json.loads(explicit["output"])["result"])["text"] == text[:4]
     assert explicit["connection_cleanup"]["confirmed"]
@@ -288,8 +299,11 @@ def test_actual_package_original_install_call_disable_reenable_remove(installed_
         assert rejected["state"] == "failed", rejected
         registry.prepare_for_run()
         assert name not in registry.tools and "read_file" in registry.tools
-        manage(service, "/plugins enable workspace-peek", "reenable")
+        reenabled = manage(service, "/plugins enable workspace-peek", "reenable")
+        assert "普通中文示例：" in reenabled["message"]
         assert service.installations.snapshot()[0].activation_id != activation_id
+        old_enable = service.command("/plugins status enable", revision="", request_id="old-enable-query")
+        assert old_enable["state"] == "succeeded" and "普通中文示例：" not in old_enable["message"]
         again = manage(service, "/plugins@workspace-peek show input.txt --bytes 16", "again")
         assert json.loads(json.loads(again["output"])["result"])["text"] == text
         removed = manage(service, "/plugins remove workspace-peek", "remove")

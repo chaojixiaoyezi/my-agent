@@ -1,5 +1,7 @@
 # 设计台账
 
+第 5 步当前状态：使用卡按现有插件包声明与设置 schema 即时投影，详情和成功启用共用格式；列表、动作帮助及补全仍读同一目录，不新增卡片缓存、权限或执行链。本地实现与 300 项相关回归已完成，发布及原生 TUI 仍待验；详见 [插件生命周期](docs/design/PLUGIN_LIFECYCLE.md#从安装完成到真正可用) 和 [唯一 TODO](docs/tasks/REFACTOR_PLUGIN_GOAL.md#当前-todo唯一执行清单)。
+
 重复启用的空资源声明已本地修复：无新环境计划时不声明候选资源，使原 unchanged／缺失拒绝路径真正可达；不更改激活状态机。见 [激活权威](docs/design/PLUGIN_ACTIVATION.md)，待发布真实复验。
 
 显式插件连接收尾已本地移入原 HostCommand 执行区间，释放调用结束后才登记 executor 退出与运行终态；未启动拒绝同样延后，重送只读。详见 [宿主操作与结果](docs/design/HOST_COMMAND_EXECUTION.md#操作与结果)。状态：相关验证中，未发布，不等于所有清理均成功。

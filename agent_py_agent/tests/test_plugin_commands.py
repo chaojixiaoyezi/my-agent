@@ -11,12 +11,15 @@ from agent_py_agent.agent.command_arguments import (
     CommandActionSpec,
     CommandArgumentError,
 )
+from agent_py_agent.agent.command_binding import render_action_help
 from agent_py_agent.agent.plugin_commands import (
     PluginCommandSpec,
     parse_plugin_command,
     plugin_command_response,
+    render_plugin_use_card,
 )
 from agent_py_agent.agent.plugin_completion import complete_plugin_command
+from agent_py_agent.cli.chat_parts.slash_commands import CHAT_HELP_TEXT
 from agent_py_agent.cli.chat_parts.tui_input import TuiInputCompleter
 
 
@@ -67,6 +70,26 @@ def test_host_description_selects_target_without_executing_it(plugin):
     with pytest.raises(CommandArgumentError) as caught:
         parse_plugin_command("/plugins@demo", plugins=(plugin,))
     assert caught.value.reason == "unknown_plugin"
+
+
+def test_use_card_reads_action_and_settings_declarations_without_private_values(plugin):
+    card = render_plugin_use_card(plugin, {
+        "properties": {"token": {"type": "string"}, "mode": {"type": "string"}},
+        "required": ["token"],
+    })
+    assert "/plugins@Demo run" in card and "普通中文示例：" in card
+    assert render_action_help("/plugins@Demo", plugin.actions[0]).splitlines()[1] in card
+    assert card.count("请用 Demo 插件") == 2
+    assert "必填设置：token" in card and "可配置项：token、mode" in card
+    assert "使用已启用插件的动作" in CHAT_HELP_TEXT
+    assert "插件使用入口（尚未开放）" not in CHAT_HELP_TEXT
+
+
+def test_use_card_does_not_invent_slash_action_for_tool_only_plugin():
+    plugin = PluginCommandSpec("only-tools", "提供工具", (), enabled=True, package_version="1.0")
+    card = render_plugin_use_card(plugin, {"type": "object", "properties": {}, "required": []})
+    assert "未声明显式命令" in card and "/plugins@only-tools" not in card
+    assert card.count("请用 only-tools 插件") == 2
 
 
 def test_stopped_plugin_help_remains_static_and_business_is_not_authorized(plugin):

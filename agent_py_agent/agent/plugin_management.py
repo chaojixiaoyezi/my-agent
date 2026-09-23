@@ -14,7 +14,12 @@ from .common.cancellation import CancellationToken
 from .path_access_policy import PathAccessPolicy
 from .plugin_cleanup import consume_plugin_cleanup
 from .plugin_command_service import execute_plugin_command, read_plugin_catalog
-from .plugin_commands import parse_plugin_command, plugin_command_response, plugin_namespace
+from .plugin_commands import (
+    parse_plugin_command,
+    plugin_command_response,
+    plugin_namespace,
+    render_plugin_use_card,
+)
 from .plugin_configure_tool import PLUGIN_CONFIGURE_TOOL, PluginConfigureTool
 from .plugin_disable_tool import PLUGIN_DISABLE_TOOL, PluginDisableTool
 from .plugin_enable_tool import PLUGIN_ENABLE_TOOL, PluginEnableTool
@@ -137,8 +142,8 @@ class PluginManagement:
                                              enabled=row.enabled, activation_id=row.activation_id)
                                      for row in entries))
 
-    # LLM: 已接受请求先读原账，不先读来源或新插件；帮助沿公共解析，审批消费者与取消信号由宿主独立绑定。
-    # 函数用途: 分派明确的管理或业务命令，不进入聊天；业务批准只恢复同一原调用。
+    # LLM: 已接受请求先读原账，不先读来源或新插件；详情只从同次安装快照和声明生成使用卡，审批仍由宿主绑定。
+    # 函数用途: 分派明确的管理或业务命令，不进入聊天；详情说明不启动插件，业务批准只恢复同一原调用。
     def command(self, text: str, *, revision: str, request_id: str,
                 request_permission: Callable | None = None,
                 cancellation_token: CancellationToken | None = None) -> dict:
@@ -160,19 +165,21 @@ class PluginManagement:
             tool_name = _MANAGEMENT_TOOLS[parsed.action.name]
             return self._reply(self._submit(tool_name, dict(values), revision, request_id,
                                            request_permission, cancellation_token), request_id)
-        catalog = self.catalog()
+        entries = self.installations.snapshot()
+        catalog = self._catalog(entries)
         if not revision or revision != catalog.revision:
             return execute_plugin_command(catalog, text, revision=revision)
         if parsed.action.name == "list":
             entries = [item for item in catalog.plugins if not values.get("enabled") or item.enabled]
             return self._reply({"ok": True, "message": "\n".join(
-                f"{item.plugin_id} {item.package_version}（{'启用' if item.enabled else '停用'}）"
+                f"{item.plugin_id} {item.package_version}（{'启用' if item.enabled else '停用'}）  {item.summary}"
                 for item in entries) or "当前没有符合条件的已安装插件。"})
         if parsed.action.name == "info":
             plugin = next((item for item in catalog.plugins if item.plugin_id == values["plugin"]), None)
-            return self._reply({"ok": plugin is not None, "message": (
-                f"{plugin.plugin_id} {plugin.package_version}（{'启用' if plugin.enabled else '停用'}）\n{plugin.summary}"
-                if plugin else "未找到该插件。")})
+            entry = next((item for item in entries if item.manifest.plugin_id == values["plugin"]), None)
+            return self._reply({"ok": plugin is not None and entry is not None, "message": (
+                render_plugin_use_card(plugin, entry.manifest.settings_schema)
+                if plugin is not None and entry is not None else "未找到该插件。")})
         return execute_plugin_command(catalog, text, revision=revision)
 
     # LLM: 先按原身份查冻结请求，再解释当前目录；旧终态不启动新连接，原 pending 只能在原选择仍成立时执行。
@@ -385,8 +392,8 @@ class PluginManagement:
                 PLUGIN_ENABLE_TOOL: self.context.enable_allowed,
                 PLUGIN_REMOVE_TOOL: self.context.remove_allowed}.get(tool_name, False)
 
-    # LLM: 展示只读原结果；finalization_pending 优先于业务完成文案，正文不改变状态；联测调用收尾与重复查询。
-    # 函数用途: 分开展示业务结果与运行收尾，避免连接尚在释放时提示整个命令已完成。
+    # LLM: 展示只读原结果；成功启用卡片只投影当前安装声明，finalization_pending 优先于可用文案。
+    # 函数用途: 分开展示业务结果与运行收尾，启用确实完成时告知使用方法并保留原查询编号。
     def _reply(self, payload: dict, request_id: str = "") -> dict:
         payload = dict(payload)
         envelope = payload.pop("result", {})
@@ -432,12 +439,22 @@ class PluginManagement:
         if payload.get("connection_cleanup", {}).get("confirmed") is False:
             message += "\n本次插件连接退出尚未确认；原调用结果保持，请核对资源。"
         result.setdefault("message", explanations.get(payload.get("error_code"), message))
-        if request_id:
-            result["message"] += f"\n查询：/plugins status {request_id}"
         try:
-            result["catalog"] = self.catalog().to_payload()
+            entries = self.installations.snapshot()
+            catalog = self._catalog(entries)
+            result["catalog"] = catalog.to_payload()
+            if (state == "succeeded" and payload.get("tool_name") == PLUGIN_ENABLE_TOOL
+                    and details.get("enabled") is True and not payload.get("finalization_pending")):
+                plugin_id = details.get("plugin_id")
+                plugin = next((item for item in catalog.plugins if item.plugin_id == plugin_id and item.enabled
+                               and item.activation_id == details.get("activation_id")), None)
+                entry = next((item for item in entries if item.manifest.plugin_id == plugin_id), None)
+                if plugin is not None and entry is not None:
+                    result["message"] += "\n" + render_plugin_use_card(plugin, entry.manifest.settings_schema)
         except (OSError, ValueError):
             result["catalog_error"] = True
+        if request_id:
+            result["message"] += f"\n查询：/plugins status {request_id}"
         return result
 
 

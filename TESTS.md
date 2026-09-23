@@ -1,5 +1,13 @@
 # 测试与发布验收
 
+## 第 5 步使用卡与目录同源的本地验证
+
+解决问题：旧版 TUI163 的 `/plugins info` 只有简介，顶层 `/help` 误说显式插件入口未开放；启用成功后也没有可直接使用的说明。当前片只修改公开展示投影，不改变安装表、授权或执行链。
+
+本地源码已让列表展示包简介，详情和成功启用回执共用从当前包声明、动作及设置 schema 生成的使用卡；旧启用请求只有在激活代次仍相同时才附卡。公共动作用法由同一参数声明生成，顶层 `/help` 文案已纠正。设置仅展示公开键名，不读取或展示私有配置值。既有目录 v3、客户端 revision、Tab 刷新和提交链未新增状态或轮询。
+
+`test_plugin_commands.py`、`test_plugin_command_catalog.py`、`test_plugin_command_client.py`、`test_plugin_management.py`、`test_plugin_configure_management.py`、`test_plugin_removal.py`、`test_plugin_removal_store.py`、`test_gateway_plugin_commands.py`、`test_gateway_plugin_management.py`、`test_tui_input.py`、`test_workspace_peek_package.py` 共 300 项通过。覆盖使用卡与帮助用法一致、无显式动作时不虚构 slash 入口、旧启用回执不宣传新代次、列表简介和原请求查询位置。发布前本地严格 gate 的全目录 Ruff、文档同步、严格尺寸、diff 和 clean-package 均通过；尺寸报告仅由检查脚本生成，不随本片提交。新版原生 TUI 尚未执行，本节不算第 5 步真实验收。
+
 ## 第 4 步三项修复发布后的原生 TUI 验收
 
 解决问题：旧版实际验收中，完整插件错误被记为 UNKNOWN、目录第三页碰到连接释放窗口、重复启用被空资源域挡住；必须由安装版原生 TUI 证明修复，而非把定向回归当作交付。
