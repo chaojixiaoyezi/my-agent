@@ -881,6 +881,11 @@ class _TuiConversationBoundaryRuntimeMixin:
             ):
                 continue
             display_payload = {key: value for key, value in payload.items() if key not in _HISTORY_LIVE_PLAN_FIELDS}
+            if kind == "user_message" and payload.get("message_id") and any(
+                block.role == "user" and block.metadata.get("message_id") == payload["message_id"]
+                for block in self.store.snapshot().stable_blocks
+            ):
+                continue
             display_payload.pop("foreground_gateway_request_id", None)
             if isinstance(gateway_id, str) and gateway_id:
                 display_payload["foreground_gateway_request_id"] = gateway_id
@@ -1761,6 +1766,7 @@ class TuiTurnEventAdapter:
         self._assistant_block_id = ""
         self._assistant_text = ""
         self._terminal_response_text = ""
+        self._submitted_input_boundaries: set[tuple[str, tuple[str, ...]]] = set()
         self._output_chars = 0
         self._output_bytes = 0
         self._defer_assistant_display = bool(defer_assistant_display)
@@ -1928,8 +1934,8 @@ class TuiTurnEventAdapter:
             )
 
     # LLM: Gateway 的 submitted 行早于任何模型正文到达,只表示"已进入本次提供方调用的 prompt"。
-    # 它不等于确认,因此只推进展示状态,绝不结算回复欠账或写回执。
-    # 函数用途: 显示已提交当前回合的补充消息(正文按原提交位置进入历史)。
+    # 它不等于确认；首次精确调用边界先冻结旧回答，重复回执不切断新回答，不结算回复欠账。
+    # 函数用途: 在新模型调用前分开插话前后的回答，用户消息沿原提交位置显示。
     def submit_gateway_active_turn_input(
         self,
         client_message_ids: tuple[str, ...],
@@ -1937,6 +1943,10 @@ class TuiTurnEventAdapter:
         provider_call_id: str = "",
     ) -> None:
         with self._lock:
+            boundary = (str(provider_call_id), tuple(client_message_ids))
+            if client_message_ids and boundary not in self._submitted_input_boundaries:
+                self._complete_active_assistant()
+                self._submitted_input_boundaries.add(boundary)
             _submit_active_turn_input_ids(
                 self.runtime,
                 client_message_ids,

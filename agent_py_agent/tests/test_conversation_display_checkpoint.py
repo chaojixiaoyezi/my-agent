@@ -56,6 +56,23 @@ def _work(sink):
 
 
 @pytest.mark.parametrize("surface", ["main", "background", "child"])
+def test_input_checkpoint_keeps_submission_position_after_late_consumption(tmp_path, surface):
+    store, thread, _user, _agent, sink = _session(tmp_path, surface=surface)
+    sink.write_model("插话之前")
+    sink.begin_active_turn_input(("input-1",))
+    sink.submit_active_turn_input(("input-1",), provider_call_id="call-2", client_messages=(("input-1", "用户补充"),))
+    sink.write_thinking_delta("插话之后")
+    sink.write_thinking("插话之后")
+    store.messages.append({"thread_id": thread.thread_id, "role": "user", "content": "用户补充",
+                           "channel_message_id": "input-1", "metadata": {"kind": "active_turn_user_input", "task_id": "run-a"}})
+    rows = store.messages.history_page_report(thread.thread_id, limit=800).rows
+    events = conversation_history_display_events(rows)
+    texts = [event["payload"].get("text", "") for event in events]
+    assert texts.count("用户补充") == 1
+    assert texts.index("插话之前") < texts.index("用户补充") < texts.index("插话之后")
+
+
+@pytest.mark.parametrize("surface", ["main", "background", "child"])
 def test_completed_blocks_survive_before_final_without_model_input_or_activity_change(tmp_path, surface):
     store, thread, user, _, sink = _session(tmp_path, surface)
     before = store.context_bundle(thread.thread_id)

@@ -188,14 +188,35 @@ class TuiTranscriptModeState:
         self._notify()
         return enabled
 
-    # LLM: 原文页只由当前冻结快照构造一次，切页不读文件、不调用模型、不更新持久历史。
-    # 函数用途: 返回完整浏览的当前有界页，所有页面均可继续翻阅。
+    # LLM: 单页读取复用唯一稀疏索引和归档缓存；不调用模型、不更新持久历史。
+    # 函数用途: 返回指定当前页，供显式页导航和完整性验证使用。
     def complete_page_lines(self, width: int) -> tuple[FormattedLine, ...]:
+        page = self._complete_page_content(self.snapshot().complete_page)
+        return page.render(width) if page is not None else ()
+
+    # LLM: 锚点只按精确块ID/逻辑行定位稀疏段，不扫描归档、不按文本或时间猜来源。
+    # 函数用途: 原地展开时直接打开正在阅读的消息附近，无需从原文第一页翻起。
+    def focus_complete_block(self, block_id: str, source_row: int = 0) -> None:
+        with self._lock:
+            self._ensure_complete_pages_locked()
+            start, target = 0, None
+            for page in getattr(self._complete_pages, "segments", ()):
+                if page.block_id == block_id or any(key == block_id and row <= source_row for key, row in page.origins):
+                    target = start
+                start += int(page.reference["page_count"]) if page.reference else 1
+            if target is not None:
+                self._complete_page = target
+                self._reset_search_locked()
+        self._notify()
+
+    # LLM: 锁外调用原只读归档加载器；占位携带同一块身份，不能把等待当作已读全文。
+    # 函数用途: 从本地页或缓存取一页，缺页时请求异步加载并返回有界占位。
+    def _complete_page_content(self, index: int) -> CompleteDetailPage | None:
         with self._lock:
             if not self._active or not self._show_all or self._frozen_snapshot is None:
-                return ()
+                return None
             self._ensure_complete_pages_locked()
-            page = self._complete_pages[self._complete_page]
+            page = self._complete_pages[index]
             if page.reference is not None:
                 key = (str(page.reference["archive_id"]), page.remote_page)
                 cached = self._complete_cache.get(key)
@@ -208,8 +229,8 @@ class TuiTranscriptModeState:
         if page.reference is not None:
             if callback is not None:
                 callback(page.reference, page.remote_page)
-            return ((("class:tui-muted", "正在读取完整原文…（不会调用模型）"),),)
-        return page.render(width)
+            return CompleteDetailPage((("class:tui-muted", "正在读取完整原文…（不会调用模型）"),), block_id=page.block_id, loading=True)
+        return page
 
     # LLM: 归档结果按opaque archive_id/page定位；不直接操作模型历史，缓存最多八页，失败也有可重试提示。
     # 函数用途: 接收一页公开原文，丢弃已退出或已切换代理的迟到结果。
@@ -225,7 +246,9 @@ class TuiTranscriptModeState:
             try:
                 if payload.get("ok") is not True or payload.get("page_index") != page_index:
                     raise ValueError("invalid page response")
-                page = archive_page_rows(rows)
+                segment = next(page for page in self._complete_pages.segments
+                               if page.reference and page.reference.get("archive_id") == key[0])
+                page = archive_page_rows(rows, block_id=segment.block_id)
             except (TypeError, ValueError):
                 page = CompleteDetailPage((("class:tui-error", "完整原文读取失败；按 R 重试，原预览保留。"),))
             self._complete_cache[key] = page
@@ -382,8 +405,8 @@ class TuiTranscriptModeState:
         if show_all and not preserve_footer:
             state = self.snapshot()
             footer = (("class:tui-muted", (
-                f"完整原文 {state.complete_page + 1}/{max(1, state.complete_page_count)} 页"
-                " · [ 上一页 · ] 下一页 · Ctrl+E 收起 · / 搜本页"
+                f"完整原文 · 第 {state.complete_page + 1}/{max(1, state.complete_page_count)} 段附近"
+                " · 滚轮/↑↓ 连续阅读 · Ctrl+E 收起 · / 搜已加载窗口"
             )),)
         return replace(frame, transcript_lines=highlighted, footer=footer)
 
@@ -420,6 +443,27 @@ class TuiTranscriptModeState:
             callback = self._invalidate
         if callback is not None:
             callback()
+
+
+# LLM: 仅组合当前位置附近至多四页，远端沿原异步读取与八页缓存，不拥有第二份阅读状态。
+# 函数用途: 把内部数据页接成有界连续窗口，同时保留逐行来源和页内定位。
+def complete_detail_window(state: TuiTranscriptModeState, width: int) -> tuple:
+    with state._lock:
+        state._ensure_complete_pages_locked()
+        start = max(0, state._complete_page - 1)
+        stop = min(len(state._complete_pages), state._complete_page + 3)
+    lines, origins, offsets, pending = [], [], [], []
+    for index in range(start, stop):
+        page = state._complete_page_content(index)
+        if page is None:
+            continue
+        rendered, located = page.render_located(width)
+        offsets.append((index, len(lines), len(rendered)))
+        lines.extend(rendered)
+        origins.extend(located)
+        if page.loading:
+            pending.append(page.block_id)
+    return tuple(lines), tuple(origins), tuple(offsets), tuple(pending)
 
 
 # LLM: 搜索只索引实际可见 formatted lines 并使用 casefold；隐藏 metadata、模型上下文和未渲染 thinking 都不产生 phantom match。

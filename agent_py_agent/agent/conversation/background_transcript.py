@@ -220,11 +220,11 @@ class BackgroundTranscriptSink(AgentToolApprovalSinkMixin, ToolInputProgressSink
         self._retry_index = 0
         self._active_input_index = 0
 
-    # LLM: A real active-turn user message invalidates any uncommitted model
-    # candidate that preceded it. The client ids are correlation only; canonical
-    # delivery remains in ConversationStore and no display event is emitted yet.
-    # 函数用途: 子代理开始处理用户插话时丢弃旧候选回复，并为新的公开回复重新分段。
+    # LLM: 插话令旧候选失效，但公开片段需在显示账本封口；不得写入正式 assistant 历史。
+    # client ids 仅用于关联，正式投递与消费仍以 ConversationStore 的结构化记录为准。
+    # 函数用途: 插话开始前保留已展示的旧候选片段，仅写显示检查点，不把候选升级为模型正式回复。
     def begin_active_turn_input(self, client_message_ids: tuple[str, ...]) -> None:
+        _freeze_input_boundary_candidate(self)
         self._model_text = ""
         del client_message_ids
 
@@ -653,6 +653,7 @@ def _emit_active_input_submitted(
     message_ids = _normalized_active_input_ids(client_message_ids)
     if not message_ids:
         return
+    _record_active_input_display(sink, message_ids, client_messages)
     accepted = set(message_ids)
     messages = [
         {
@@ -675,6 +676,37 @@ def _emit_active_input_submitted(
             **({"messages": messages} if messages else {}),
         },
     )
+
+
+# LLM: 候选只冻结到显示历史，不进入 committed commentary 或工具完成判定。
+# 函数用途: 插话切断候选回答时保留用户已经看到的内容，下一段回答使用新块。
+def _freeze_input_boundary_candidate(sink: BackgroundTranscriptSink) -> None:
+    if sink._model_text:
+        sink._assistant_index += 1
+        sink._event("assistant_completed", "completed", f"{sink.request_id}:assistant:{sink._assistant_index}", {
+            "text": public_background_transcript_text(sink._model_text, limit=0, channel=sink.channel),
+            "process": True,
+        })
+
+
+# LLM: 同一输入的显示位置在提交边界写入现有 checkpoint/final 快照；消费账仍由 guidance 独占。
+# 函数用途: 让重连历史保留插话的实际位置，重复提交覆盖同一显示块，不重复输入模型。
+def _record_active_input_display(sink: BackgroundTranscriptSink, message_ids: tuple[str, ...],
+                                 messages: tuple[tuple[str, str], ...]) -> None:
+    accepted = set(message_ids)
+    for message_id, text in messages:
+        if message_id not in accepted:
+            continue
+        block_id = f"{sink.request_id}:input-message:{message_id}"
+        payload = {"text": public_background_transcript_text(text, limit=0, channel=sink.channel),
+                   "message_id": message_id, "input_state": "submitted"}
+        if sink._display_history is not None:
+            sink._display_history.record("user_message", "completed", block_id, payload)
+        sink._checkpoint_writer.record({
+            "thread_id": sink.thread_id, "task_id": sink.task_id, "request_id": sink.request_id,
+            "gateway_request_id": sink.gateway_request_id, "kind": "user_message", "phase": "completed",
+            "block_id": block_id, "payload": payload,
+        })
 
 
 # LLM: The lock lives on the shared Agent, so every background scheduler thread

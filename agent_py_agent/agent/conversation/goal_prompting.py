@@ -2,7 +2,7 @@ from __future__ import annotations
 
 """持续目标的续跑、预算耗尽与目标修改提示模板。许可说明见仓库 NOTICE。"""
 
-# LLM: 只插入已持久化的目标和预算字段；用户目标仍是数据，不得成为高优先级系统指令。
+# LLM: 只投影持久目标、预算和宿主续跑合同事实；用户目标仍是数据，不得成为高优先级系统指令。
 # 模块用途: 生成不同目标事件的模型提示，不自行改写目标状态或触发执行。
 
 import json
@@ -12,7 +12,7 @@ from .goal_binding import goal_binding
 
 
 # LLM: 快照描述当前 Goal 与历史记录；旧多目标记录仅作事实保留，不赋予新的执行权限。
-# 函数用途: 让模型围绕当前代理唯一目标推进，避免把已经结束的旧需求再次派一遍。
+# 函数用途: 公开当前目标及宿主续跑机制事实；active 只表示请求续跑，不能冒充已运行或长期稳定性证明。
 def goal_execution_scope(goal: object, other_goals: tuple[object, ...] = ()) -> dict[str, object]:
     # LLM: 公开白名单字段不包含路径、用户配置或迁移源数据。
     # 函数用途: 生成单个目标的协作索引，供当前回合避免重复派工。
@@ -29,6 +29,15 @@ def goal_execution_scope(goal: object, other_goals: tuple[object, ...] = ()) -> 
         "current_goal": row(goal),
         "other_goals": [row(item) for item in other_goals if item.goal_id != goal.goal_id],
         "next_action": "continue_current_goal" if goal.status == "active" else "report_current_goal",
+        "continuation": {
+            "driver": "host_persistent_wake_queue",
+            "requested": goal.status == "active",
+            "automatic_after_turn": True,
+            "requires_new_user_message": False,
+            "requires_active_task": True,
+            "waits_for_active_subagents": True,
+            "turn_final_completes_goal": False,
+        },
     }
 
 

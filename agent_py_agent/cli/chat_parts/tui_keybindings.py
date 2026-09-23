@@ -2350,14 +2350,13 @@ def _handle_f6_mouse_keybinding(event, params: TuiCreateKeybindingsParams) -> No
 
 # LLM: Ctrl-O freezes the navigation stack's active runtime, not the root runtime.
 # This preserves child identity while reusing the one transcript state and renderer.
-# 函数用途: 展开当前主代理或子代理页面的详细 transcript，不切换代理视角。
+# 函数用途: 原地展开当前代理的详细 transcript，保持阅读消息及屏幕位置。
 def _handle_ctrl_o_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
     state = _required_transcript_state(params)
     if state.snapshot().active:
         _exit_transcript_mode(event, params)
         return
-    state.enter(_active_tui_runtime(params).store.snapshot())
-    params.transcript_area.modal_control.move_end()
+    params.transcript_area.enter_transcript(_active_tui_runtime(params).store.snapshot())
     event.app.layout.focus(params.transcript_area.modal_window)
     event.app.invalidate()
 
@@ -2379,11 +2378,10 @@ def _handle_ctrl_e_keybinding(event, params: TuiCreateKeybindingsParams) -> None
     buffer.cursor_position += buffer.document.get_end_of_line_position()
 
 
-# LLM: Ctrl-E 只切换 transcript state 的 show_all 字段；renderer 读取该结构化字段展开折叠块。
-# 函数用途: 在详细 transcript 中显示全部或恢复折叠。
+# LLM: Ctrl-E 经共享阅读锚点切换 show_all 和原文窗口，不强制跳到历史开头。
+# 函数用途: 在正在阅读的消息处显示完整内容或恢复折叠。
 def _handle_transcript_show_all(event, params: TuiCreateKeybindingsParams) -> None:
-    _required_transcript_state(params).toggle_show_all()
-    params.transcript_area.modal_control.jump_to(0)
+    params.transcript_area.toggle_full_detail()
     event.app.invalidate()
 
 
@@ -2391,7 +2389,7 @@ def _handle_transcript_show_all(event, params: TuiCreateKeybindingsParams) -> No
 # 函数用途: 在完整查看时翻页，普通详细预览中不生效。
 def _handle_complete_page(event, params: TuiCreateKeybindingsParams, delta: int) -> None:
     if _required_transcript_state(params).move_complete_page(delta):
-        params.transcript_area.modal_control.jump_to(0)
+        params.transcript_area.modal_control.jump_to_detail_page()
         event.app.invalidate()
 
 
@@ -2412,10 +2410,9 @@ def _jump_latest_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
 
 
 # LLM: 退出动作统一销毁 frozen/search 状态、清搜索 Buffer 并把焦点还给 chat；q/Esc/Ctrl-C/Ctrl-O 必须共用此入口。
-# 函数用途: 退出详细 transcript 回到普通输入界面。
+# 函数用途: 退出详细 transcript 并保留阅读位置，把键盘焦点还给输入框。
 def _exit_transcript_mode(event, params: TuiCreateKeybindingsParams) -> None:
-    state = _required_transcript_state(params)
-    state.exit()
+    params.transcript_area.exit_transcript()
     params.transcript_search_area.text = ""
     event.app.layout.focus(params.input_area)
     event.app.invalidate()

@@ -14,7 +14,7 @@ from typing import TypedDict
 DISPLAY_CHECKPOINT_ROLE = "display"
 DISPLAY_CHECKPOINT_SCHEMA = "conversation_display_event.v1"
 _TERMINAL_KINDS = frozenset({
-    "assistant_completed", "thinking_completed", "tool_completed", "tool_failed", "system_message",
+    "assistant_completed", "thinking_completed", "tool_completed", "tool_failed", "system_message", "user_message",
 })
 _START_KINDS = frozenset({"tool_started"})
 

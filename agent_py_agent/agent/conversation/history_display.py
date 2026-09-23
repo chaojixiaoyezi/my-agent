@@ -10,6 +10,7 @@ from ..turn_end import turn_end_notice
 from .background_history import background_display_turn_from_row
 from .background_transcript import public_background_transcript_text
 from .display_checkpoint import DISPLAY_CHECKPOINT_ROLE, display_checkpoint_events
+from .history_order import order_history_events
 from .history_page import history_group_identity
 from .models import is_audit_background_transcript_entry
 from .native_history import canonical_native_messages_from_metadata
@@ -17,18 +18,25 @@ from .native_history import canonical_native_messages_from_metadata
 HISTORY_DISPLAY_SCHEMA = "conversation_history_display.v1"
 
 
-# LLM: 已授权同会话记录按工作片组合；前台 ID 仅供发起页去重，后台续片不得借原请求号被过滤。
-# 函数用途: 按canonical来源投影公开消息、完整检查点与结束提示；display不能引入控制或运行状态。
+# LLM: 同一 conversation turn 的 native 与投递快照归同一显示片，按精确ID关联；前台ID只供发起页去重。
+# 函数用途: 按canonical来源投影并恢复跨片事件顺序，插话不能被分组挤到回复后；不改变运行状态。
 def conversation_history_display_events(
     rows: Sequence[object],
 ) -> tuple[dict[str, object], ...]:
+    delivery_groups = {
+        (getattr(row, "thread_id", ""), str(row.metadata["conversation_request_id"])): history_group_identity(row)
+        for row in rows
+        if background_display_turn_from_row(row) and row.metadata.get("conversation_request_id")
+    }
     groups: dict[str, list[object]] = {}
     for row in rows:
         if is_audit_background_transcript_entry(row):
             continue
         if getattr(row, "role", "") not in {"user", "assistant", DISPLAY_CHECKPOINT_ROLE}:
             continue
-        identity = history_group_identity(row)
+        metadata = getattr(row, "metadata", {})
+        turn = str(metadata.get("conversation_request_id") or "") if isinstance(metadata, Mapping) else ""
+        identity = delivery_groups.get((getattr(row, "thread_id", ""), turn), history_group_identity(row))
         groups.setdefault(identity, []).append(row)
     events: list[dict[str, object]] = []
     for identity in groups:
@@ -38,7 +46,7 @@ def conversation_history_display_events(
             gateway_id = ""
         projected = [*_turn_events(identity, group), *_turn_end_events(group)]
         events.extend({**event, **({"gateway_request_id": gateway_id} if gateway_id else {})} for event in projected)
-    return tuple(events)
+    return order_history_events(rows, events)
 
 
 # LLM: 只读取宿主 metadata 的精确请求关联；后台续片虽可携带原编号，仍是独立应显示的工作片。

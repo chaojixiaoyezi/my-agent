@@ -120,6 +120,27 @@ def test_frozen_transcript_gets_old_page_but_not_new_live_response():
     assert view.transcript_state.snapshot().active
 
 
+def test_complete_detail_requests_older_history_and_preserves_source_after_prepend():
+    pager, runtime, view = _pager()
+    view.enter_transcript(runtime.store.snapshot())
+    view.toggle_full_detail()
+    control = view.modal_control
+    control.create_content(60, 5)
+    control.move_home()
+    requests = []
+    control.set_older_history_callback(requests.append)
+    control.move(-1)
+    assert requests == [False]
+    control.move(12)
+    control.create_content(60, 5)
+    before = control.reading_anchor()
+    page = GatewayChatHistorySnapshot(display_events=_events("older"), before_message_cursor=0)
+    pager._apply(500, False, page)
+    control.create_content(60, 5)
+    assert control.reading_anchor().block_id == before.block_id
+    assert "older-0" in "\n".join(map(fragments_text, view.provider.frame(60).transcript_lines))
+
+
 def test_background_reorder_survives_actual_renderer_sorting():
     pager, runtime, view = _pager()
     rid, final = "bg-main:root:attempt", "history:thread:final:assistant"

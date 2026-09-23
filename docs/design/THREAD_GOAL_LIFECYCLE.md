@@ -34,6 +34,9 @@ workspace 是控制输入的一部分，必须纳入持久回执的版本化摘�
 - 普通聊天不会自动建立 Goal。模型只有在用户或系统明确要求时才调用 `create_goal`；说“已建立”或写 Todo 不是创建事实。
 - `get_goal/create_goal/update_goal` 默认进入首轮工具 schema；显式工具授权与用户配置的延迟目录仍有效。
 - 模型最终回复只结束一次 turn。持久 Goal 的 `active/paused/blocked/complete` 与用量限制才控制目标生命周期。
+- 每轮 scope 与目标工具回执共用结构化 `continuation` 事实：宿主持久 wake 驱动续轮、单轮 final 不完成 Goal。
+  `automatic_after_turn=true`、`requires_new_user_message=false` 说明续轮无需用户再次催促，不从模型口头说明反推调度状态。
+  `requested` 只说明目标请求自动续跑；任务仍须 active，子代理等待与原准入限制保持，不能把它解释为当前已运行或 100 小时稳定性证明。
 - 同一子代理 attempt 内的 Goal 自动续轮沿原宿主拒绝列表；主/子活动回合的 Compact 也保留该列表。
   `RunParams` → `RuntimeLoopParams` → `ToolLoopExecuteParams` 共享同一对象，拒绝只由真实审批决定追加，
   不从自然语言、摘要或 task attributes 恢复。按原 `tool_name + args_hash` 判同参，新的 provider call id 不重置拒绝。

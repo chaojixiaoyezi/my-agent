@@ -456,6 +456,13 @@ auth 表单取消和参数拒绝已验，官方设备码在两处环境被 HTTP 
   尚未把模型的时间参数改为必须由用户控制面授权的方案，不通过解析用户正文判断。
 - 详细现象和优先级以 [STATUS](STATUS.md) 与 [ROADMAP](docs/ROADMAP.md) 为准。
 
+## TUI 阅读位置与插话时序
+
+本轮 TUI 原地阅读与插话时序修复已实现，验收按 [交接记录](docs/tasks/TUI_READING_HANDOFF.md) 的精确版本与范围核对。普通/详细/原文共用阅读锚点，
+内部有界分页连续滚动；插话提交边界、显示检查点与跨片历史排序共用精确输入身份。
+Goal scope 同时公开宿主续跑机制事实，不把 active 或单轮 final 当作长期运行证明。
+边界和验收见 [完整原文](docs/design/TUI_COMPLETE_DETAIL.md) 与 [目标控制](docs/design/THREAD_GOAL_LIFECYCLE.md)。
+
 ## 发布资料约定
 
 产品统一命名为 my-agent。文档只保留使用、部署、功能和开发资料；示例使用保留域名或虚构用户。真实凭据、个人数据、临时评估产物、机器现场配置不进仓库。
