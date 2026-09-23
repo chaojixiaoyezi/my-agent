@@ -1595,7 +1595,7 @@ def test_rejected_closeout_fact_is_cleared_once_not_retried(tmp_path: Path) -> N
     task_loaded = manager.load(task.id)
     superseded = type(params)(**{**vars(params), "attempt_id": "attempt-superseded-not-current"})
     assert runtime_closeout.record_pending_closeout(
-        manager, task_loaded, superseded, make_rejected_runner_result(
+        manager.save, task_loaded, superseded, make_rejected_runner_result(
             task_loaded, False, False, params.message
         ),
         {"state": "pending", "target_run_status": "failed", "agent_run_id": agent_run_id,
@@ -1712,7 +1712,7 @@ def test_closeout_cleanup_failure_is_not_reported_as_success(tmp_path: Path) -> 
     assert len(_wakes_for_attempt(tmp_path, task.id, attempt_id)) == 1
     task_loaded = manager.load(task.id)
     assert runtime_closeout.record_pending_closeout(
-        manager, task_loaded, params,
+        manager.save, task_loaded, params,
         make_rejected_runner_result(task_loaded, False, False, params.message),
         {"state": "already_consistent", "target_run_status": "failed",
          "agent_run_id": agent_run_id, "attempt_id": attempt_id},

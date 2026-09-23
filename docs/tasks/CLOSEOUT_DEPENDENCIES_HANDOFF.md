@@ -13,11 +13,11 @@ runtime_closeout，新增提交顺序与故障测试；不修改另一条线的�
 
 ## 验证与集成注意
 
-5 个定向文件 64 passed、1 skipped；严格尺寸通过。完整相关回归和发布 gate 仍待组合源码执行。
-旧 dispatch_liveness 测试两处 record_pending_closeout 调用须从 manager 改传 manager.save，待配对发布分支先合入。
-当前基线含另一条线负责修复的两项半写红灯，不能推送本候选。
+候选 5 个定向文件 64 passed、1 skipped；集成配对发布修复后，18 个组合文件 391 passed、2 skipped。
+dispatch_liveness 两处 record_pending_closeout 已改传 manager.save，原半写红灯转绿。
+新版尚未推送部署，本地严格 gate 已通过；真实 TUI 结果按运行包分别记录于 TESTS／STATUS。
 
 ## 建议下一步
 
-先合入配对发布修复，再迁移两处测试调用并跑组合 focused 与严格 gate。随后收窄恢复扫描和
+组合修复已合入并通过 focused；完成发布 gate，随后收窄恢复扫描和
 父通知内部依赖；这两个写入区域按单负责人推进，不与配对发布线同时修改同文件。

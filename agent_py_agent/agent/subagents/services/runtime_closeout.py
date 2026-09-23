@@ -257,12 +257,9 @@ def record_pending_closeout(
     return _store_closeout(save_task, task, fact)
 
 
-# LLM: 仅调用显式保存回调；「先成功持久化再收口」必须是可判定的三态，而不是一个可能悄悄为 False 的布尔：
-#   persisted   = canonical task WAL 已落盘（唯一允许继续收口+通知的形态）；
-#   unpersisted = 两种介质都写不进去（调用方必须停止后续不可恢复动作并留响亮诊断）；
-#   not_required = 本次结论不需要 run 级收口（非终态/无 runtime 权威）。
-# 直接写 WAL 失败时先重试一次（吸收瞬时抖动），仍失败则退到 runtime 事件账本留同身份事实。
-# 函数用途: 落待重试收口事实并回报它到底有没有被持久化。
+# LLM: WAL 仅通过显式 save 写入，首次失败再尝试一次；只有 persisted 才允许继续运行收口。
+#   两次均失败返回 unpersisted，调用方负责向另一存储域记录可达事件，本函数不持有 RuntimeDB。
+# 函数用途: 保存待重试收口事实并回报是否成功落盘，不能把内存修改当成持久化完成。
 def ensure_closeout_fact(
     save_task: Callable[[SubAgentTask], object],
     task: Any,
