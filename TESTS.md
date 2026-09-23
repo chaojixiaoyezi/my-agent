@@ -1,5 +1,15 @@
 # 测试与发布验收
 
+## 第12.4项顺序摘要字符来源（2026-09-23，本地）
+
+复用原摘要循环，移除整份JSON副本及二分半份来源复制，共享tokens改等值流式累计。定向初始43项、新源/估算62项、9文件176项、发送/响应取消补齐后15文件315项通过（24.59秒），这些计数重叠不累加；异常优先级审查补充后最终15文件 **316 passed（24.86秒）**，日志 `/tmp/decision_stream_verified_20260923.log`；它替代同范围315项中间结果。新1200条消息测试逐段hash全覆盖，tracemalloc峰值低于编码字符数一半；不是RSS或整个Compact绝对内存界。
+
+三类摘要无效回复的纠正也必须保持同一预算，EOF取消、估算/响应后取消、UTF8错误和来源变动拒绝返回覆盖。Astra max独立只读复核的异常优先级问题已修：先前surrogate不能遮蔽后续JSON失败应有的str回退。实际模型调用仍为内存替身；未启动Gateway、未部署、未访问供应商，线上CI未作为证据。原4项主线fake Store签名适配失败仍开放，不以本轮通过宣称整体严格gate通过。
+
+Ruff、doc sync、import boundaries零发现、strict code-size hard=0且原基线未改及diff均通过；clean-package在纳入新文件后通过。
+
+建议下一步：继续原来源与覆盖链的正文常驻问题；只读审查可并行，writer/CAS保持单owner。
+
 ## 第12.4项保留历史完整投影（2026-09-23，本地）
 
 六文件73 passed（15.88秒），日志 `/tmp/decision_retained_joint_20260923.log`：compact_retained_history、gateway_compact_recovery、subagent_compact_recovery、background_compact_recovery、gateway_child_compact_scope_application、compact_transcript_media_partition，均为test_前缀。新增16项中三宿主seed及同次真实冻结候选完整保留最早媒体/工具回合；两个原生协议small最终post_json载荷完整，large60万字符先完整捕获，后容量压力与未知模态明确失败、零业务HTTP和零CAS。HTTP为内存替身，未真实联网，不能当作供应商媒体容量验收。

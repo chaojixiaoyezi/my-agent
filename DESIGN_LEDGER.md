@@ -1,5 +1,7 @@
 # 设计台账
 
+12.4摘要字符来源采用只读两遍编码：总字符/hash与顺序当前窗口，不落临时文件或新增索引。共享tokens沿原估算语义流式累计；分段修复提示统一预留并在发送前复验。已实现并通过316项联合，全链来源及覆盖尚未有界；见[容量审计](docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。
+
 12.4保留历史完整投影已本地实现：显式Compact来源及候选不再套普通字符窗口，三个宿主共用原容量门；超量/未知拒绝而不删原文放行。普通展示规则保留，详见[容量审计](docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。
 
 12.4固定来源范围筛选已本地实现、待主线接口集成：两遍同EOF原字节校验，先解析完整锚点再保留范围内未覆盖正文，后台operational和native共用谓词；ID位置与未压正文仍常驻，完整有界Compact尚未完成。见[容量审计](docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。

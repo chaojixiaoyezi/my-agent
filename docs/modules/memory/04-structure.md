@@ -1,5 +1,7 @@
 # Memory Structure
 
+12.4摘要分段本地15文件316项通过：复用原循环顺序读取JSON字符、消费后释放窗口；共享估算器改流式累计且数值保持。修复提示纳入预算，发送及来源EOF后复查取消；writer/CAS不变。全链仍有原消息/覆盖驻留，11/18不变。见[容量审计](../../tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。
+
 `tool_output_externalizer.py` 从原ToolCall参数接收attempt/turn，并写入原artifact/index；`compact_tool_output_refs.py` 原样带回并按四元身份区分调用。完整身份参与新artifact命名，索引位置和scoped_call_id展示格式保持；旧缺维度只能保留，不能用裸ID隐藏。
 
 Curator 与召回的可选决策入口直接导入 `common.cancellation` 的 `ToolCancelled` 和取消检查；这是与插件宿主共用的唯一进程内异常类型。已删除的 `tooling/cancellation.py` 不再作为兼容入口，记忆来源、游标和正式写入路径没有变化。

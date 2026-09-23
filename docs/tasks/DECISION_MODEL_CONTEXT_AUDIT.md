@@ -1312,3 +1312,24 @@ Sol high独立只读复核未发现可确认的新增缺陷：核对普通0/1窗
 建议下一步：联合验证保留候选与发送载荷，再沿原摘要分段器减少全量正文常驻。独立测试和审查可并行，writer/CAS和共享Gateway保持单owner。
 
 本片Ruff、doc sync、import boundaries零发现、strict code-size hard=0且原基线未改、diff和clean-package通过；初次Ruff的测试lambda/导入已改partial及格式，模块文档已同步。Sol high再次只读核对五个生产diff，未发现新增缺陷，确认角色/当前请求/Audit/任务范围过滤仍在完整保留前执行。新测试HTTP为post_json最终JSON捕获，不是socket或供应商验收。原4个主线fake签名失败仍保留，整体严格gate未通过；不推送部署，线上CI未作为验收来源。主线7.10发布窗口继续独占本机/.10 Gateway，本线未操作任何测试机进程。
+
+
+### 摘要序列化与当前片段窗口（本地已验，基线f2bc98626）
+
+解决摘要分段前整份json.dumps及二分第一次复制半份来源的问题。compact_text_source只为既有摘要循环提供字符视图：JSONEncoder.iterencode首遍测总字符/hash，第二遍按需取窗口，分段成功才释放前缀，全部结束核对EOF/hash；不写文件或增加持久索引。两遍hash只证明读取到的编码序列一致，不承诺原对象在读过以后永久未变。字符位置不作为canonical消息字节游标或摘要覆盖权威。
+
+分段器先指数探测再二分有限窗口，沿原累计摘要、纠正次数、供应商窗口错误缩预算、usage和取消链；单次小请求保留同一request对象与原缓存面。Astra max只读复核验出旧纠正预算缺口：1472预算首次刚好1472，EMPTY/TOOL_CALL/TRUNCATED纠正后分别1508/1531/1517。现按完整空材料请求选最重纠正提示预留，并在每次实际发送前复验；不新增重试策略或降级权限。来源EOF后、估算后与fitting响应后补取消检查，迟到结果不能成为成功摘要。
+
+memory_archive/tokens.estimate_tokens复用唯一原公式，按相同sort_keys/default JSON编码流累计UTF8/字符长度及原结构开销；未新建估算器，TypeError/ValueError只捕获编码迭代，UnicodeEncodeError先暂存，编码流正常结束才抛出，后续JSON失败仍优先走原str回退；因此连“前面孤立surrogate、后面混合key排序失败”的异常优先级也保持。审查曾发现嵌套孤立surrogate误被当ValueError回退，本片在验收前修正并补测试。删除只有原估算器调用的旧_payload_to_text，不加兼容转发。
+
+本片内存边界：仍持有原messages和最大JSON单字符串，排序需最大字典宽度，异常str(payload)及非strict机械digests仍可随来源增长；只移除全量序列化副本和无界二分探测，不能称整个Compact已有绝对内存上限。新1200条约两百万字符样本通过完整源hash、连续首中尾及tracemalloc峰值低于编码字符数一半断言；这不是RSS保证。单大消息、Unicode、替换/追加/截短、当前片段重读、释放旧段、EOF取消和迭代器关闭均按各自合同验证。
+
+交接：主线明确确认compact_request_budget、新source helper及tokens.estimate_tokens和独立tests/docs无冲突；writer/schema/runtime/claim和主线独占后台runtime测试未改。参考前片原摘要/存储合同以及本地Codex整体历史替换，未另建摘要循环或照搬其丢旧输入行为。全链初始原文载入、检查点精确ID覆盖与供应商实测仍待推进，原4项主线fake Store签名失败保持；11/18与12.4仍开放。
+
+验证：初始43项通过；新增流式与估算回归62项通过（3.65秒）；9文件176项通过（11.67秒），补发送估算/响应取消后15文件315项通过（24.59秒）；审查再补UTF8错误与后续JSON失败组合的异常优先级用例后重跑最终联合。此前计数相互重叠不累加。无真实网络请求、Gateway操作或部署，线上CI未作为证据。
+
+建议下一步：完成最终联合与守卫后给主线可审查本地提交，继续沿原source/coverage减少正文全量驻留，保持原生信封跨分页完整分组。只读复核和独立测试可并行，来源及writer各守单owner。
+
+最终15文件 **316 passed（24.86秒）**，日志 `/tmp/decision_stream_verified_20260923.log`，替代同范围315项中间结果，不累加。Ruff、doc sync、import boundaries零发现、strict code-size hard=0且原基线未改、diff均通过，clean-package在纳入新文件后通过。严格全链状态仍受原4个主线独占测试接口失败限制，不能称整体gate通过；没有推送、部署或真实供应商调用。审查提出的JSON失败优先于UTF8失败组合已修并纳入最终用例。
+
+主线8.1已明确整枝含decision/Jev大量历史，不能整枝合入refactor；本线正在独立核对Compact/source/projection函数级移植闭包与前置commit，菜单、决策选模和配置不作为必需功能搭载。本片不要求主线暂停其_tool_loop_service职责拆分。
