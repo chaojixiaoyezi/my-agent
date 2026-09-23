@@ -44,6 +44,7 @@ from .compact_provider_surface import (
     conversation_compact_provider_prompt,
     prepare_conversation_compact_provider_surface,
 )
+from .compact_scope import CompactScope
 from .models import (
     ConversationCompactCommit,
     ConversationThread,
@@ -61,6 +62,7 @@ from .tool_context_window import (
 if TYPE_CHECKING:
     from ..agent_core.runtime.context_compactor import RuntimeCompactPolicy
     from ..core import SimpleAgent
+    from .compact_summary_view import AppliedCompactContext
     from .store import ConversationStore
 
 _MAX_COMPACT_OPERATION_EVENTS = 32
@@ -140,8 +142,8 @@ class ConversationCompactOptions:
     provider_surface: ConversationCompactProviderSurface | None = field(default=None, repr=False)
 
 
-# LLM: 不可变请求绑定原状态、完整投影及已准备摘要面；standalone_usage表示原独立用量范围，不得靠提示文字判断。
-# 类用途: 将会话、历史、策略和宿主准备引用交给候选及原提交链，不建立第二历史来源。
+# LLM: 不可变请求绑定原CAS状态、显式摘要作用域和已准备投影；局部候选不能回读全线程摘要。
+# 类用途: 将会话、历史、作用域、策略和宿主准备引用交给候选及原提交链，不建立第二历史来源。
 @dataclass(frozen=True)
 class _CompactRunRequest:
     agent: SimpleAgent
@@ -164,6 +166,7 @@ class _CompactRunRequest:
     model_surface: ConversationCompactModelSurface | None = None
     request_projector: CompactRequestProjector | None = field(default=None, repr=False)
     provider_surface: ConversationCompactProviderSurface | None = field(default=None, repr=False)
+    compact_context: AppliedCompactContext | None = field(default=None, repr=False)
 
 
 # LLM: 摘要和request_projection属于同一候选；原checkpoint/CAS前均非权威，保留候选回退时必须同时保留材料。
@@ -240,8 +243,8 @@ def load_conversation_compact_source(
     return ConversationCompactSource(thread, tuple(pending), runtime_compact_policy(agent), dict(_recent_operation_evidence(pending) or {}))
 
 
-# LLM: 预检复用原来源与宿主完整投影（若提供），触发线和已知输出预留分别检查；独立请求不重用旧计费范围。
-# 函数用途: 加载历史、估算触发线并构造压缩请求，不在这里生成摘要或修改会话游标。
+# LLM: 显式来源在预检时校验同线程、精确行和已提交视图；只读核对后候选不重复读链或重建宿主准备。
+# 函数用途: 加载历史、估算触发线并构造压缩请求，局部来源沿原摘要范围而不修改全线程游标。
 def _prepare_compact_request(
     agent: SimpleAgent,
     store: ConversationStore,
@@ -251,8 +254,11 @@ def _prepare_compact_request(
     source = options.source or load_conversation_compact_source(
         agent, store, thread, exclude_request_id=options.exclude_request_id,
     )
-    if source.thread.thread_id != thread.thread_id or source.thread.compact_generation != thread.compact_generation:
+    if (source.thread.thread_id != thread.thread_id
+            or source.thread.compact_generation != thread.compact_generation
+            or source.thread.compact_checkpoint_id != thread.compact_checkpoint_id):
         raise ConversationCompactError("Compact source changed", code="COMPACT_SOURCE_CHANGED")
+    compact_context = _validated_compact_source_context(agent, thread, source)
     # A gateway retry happens after the current user message was durably appended.
     # It is already represented by ``current_prompt`` and must remain outside the
     # prefix being summarized, exactly like 会话运行时 keeps the active turn input while
@@ -260,17 +266,20 @@ def _prepare_compact_request(
     pending = list(source.messages)
     policy = source.policy
     current = thread
+    base_summary = compact_context.view.summary if compact_context is not None else current.summary
+    base_evidence = (compact_context.view.operation_evidence if compact_context is not None
+                     else current.compact_operation_evidence)
     attempted_at = time.time()
     initial_projection = project_compact_request(options.request_projector, ConversationCompactView(
-        thread.thread_id, thread.compact_generation, thread.summary, source.messages,
-        thread.compact_operation_evidence, source.recent_operation_evidence, policy.trigger_tokens, False,
+        thread.thread_id, thread.compact_generation, base_summary, source.messages,
+        base_evidence, source.recent_operation_evidence, policy.trigger_tokens, False,
     ))
     projected = initial_projection.projected_tokens if initial_projection is not None else _projected_context_tokens(
         agent,
-        current.summary,
+        base_summary,
         pending,
         options.current_prompt,
-        operation_evidence=current.compact_operation_evidence,
+        operation_evidence=base_evidence,
         recent_operation_evidence=_recent_operation_evidence(pending),
     )
     if projected < _compact_request_input_ceiling(agent, policy) and not options.force:
@@ -282,7 +291,7 @@ def _prepare_compact_request(
             compacted=False,
             recent_operation_evidence=_recent_operation_evidence(pending),
         )
-    if not pending and options.force:
+    if not pending and (options.force or compact_context is not None):
         # The active Gateway turn is deliberately excluded from durable history
         # until its assistant reply commits.  A second pressure boundary in that
         # same turn can therefore have no additional completed transcript prefix
@@ -341,8 +350,34 @@ def _prepare_compact_request(
         model_surface=options.model_surface,
         request_projector=options.request_projector,
         provider_surface=options.provider_surface,
+        compact_context=compact_context,
     )
     return request
+
+
+# LLM: 宿主显式source只是冻结候选，必须与此线程当前已提交scope视图相同；空或旧摘要不得由thread.summary补造。
+# 函数用途: 在摘要/计量之前核对来源行与持久视图，发现错线程、重复行或过期范围就报错。
+def _validated_compact_source_context(
+    agent: SimpleAgent,
+    thread: ConversationThread,
+    source: ConversationCompactSource,
+) -> AppliedCompactContext | None:
+    context = source.compact_context
+    if context is None:
+        return None
+    if context.thread_id != thread.thread_id or not isinstance(context.scope, CompactScope):
+        raise ConversationCompactError("Compact source scope mismatches thread", code="COMPACT_SOURCE_CHANGED")
+    ids = [row.message_id for row in source.messages if isinstance(row, MessageLogEntry)]
+    if (len(ids) != len(source.messages) or any(row.thread_id != thread.thread_id for row in source.messages)
+            or any(not message_id for message_id in ids) or len(set(ids)) != len(ids)):
+        raise ConversationCompactError("Compact source messages are invalid", code="COMPACT_SOURCE_CHANGED")
+    from .compact_summary_view import resolve_compact_summary_view
+
+    if context.view != resolve_compact_summary_view(agent, thread, context.scope):
+        raise ConversationCompactError("Compact source summary changed", code="COMPACT_SOURCE_CHANGED")
+    if set(ids) & context.view.source_message_ids:
+        raise ConversationCompactError("Compact source repeats covered messages", code="COMPACT_SOURCE_CHANGED")
+    return context
 
 
 # LLM: 进度围绕候选与提交，独立模型用量在成功/失败后均结算；计费失败不覆盖压缩异常或改变终态。
@@ -635,8 +670,8 @@ def _commit_compact_candidate_or_record_failure(
         raise
 
 
-# LLM: 摘要可调用模型但不写会话；有完整projector时只按其计量并保留候选材料，其它入口仍用旧会话估算，不冒充完整证明。
-# 函数用途: 分段摘要并报告覆盖进度，重投影候选后交原接受门裁决，不能提前修改活请求或游标。
+# LLM: 候选继承显式scope的摘要和操作证据；无context才读原thread投影，模型正文不裁决范围。
+# 函数用途: 分段摘要并报告覆盖进度，重投影候选后交原接受门裁决，不提前修改活请求或游标。
 def _build_compact_candidate(
     request: _CompactRunRequest,
     compact_rows: list[MessageLogEntry],
@@ -646,13 +681,14 @@ def _build_compact_candidate(
     progress_range: tuple[int, int] = (15, 65),
 ) -> _CompactCandidate:
     raise_if_compact_interrupted(request.interrupt_check)
-    evidence = _merge_compact_operation_evidence(
-        request.thread.compact_operation_evidence,
-        compact_rows,
-    )
+    base_summary = (request.compact_context.view.summary if request.compact_context is not None
+                    else request.thread.summary)
+    base_evidence = (request.compact_context.view.operation_evidence if request.compact_context is not None
+                     else request.thread.compact_operation_evidence)
+    evidence = _merge_compact_operation_evidence(base_evidence, compact_rows)
     summary = _summarize(
         request.agent,
-        request.thread.summary,
+        base_summary,
         evidence,
         compact_rows,
         call=_CompactSummaryCall(
@@ -693,8 +729,8 @@ def _build_compact_candidate(
     )
 
 
-# LLM: 唯一提交边界仍是原checkpoint与generation CAS；只有成功返回才携带获选request_projection，不把宿主材料写进检查点。
-# 函数用途: 将已验证候选提交为新历史代次，并返回同一候选的完整请求供宿主继续本次运行。
+# LLM: 原checkpoint与generation CAS仍唯一；显式scope/base写入同一候选，局部提交只推进链head不发布全线程摘要/游标。
+# 函数用途: 将已验证候选提交为新代次，并返回同一完整请求，保持局部和全线程投影边界。
 def _commit_compact_candidate(
     request: _CompactRunRequest,
     candidate: _CompactCandidate,
@@ -725,6 +761,10 @@ def _commit_compact_candidate(
             projected_tokens_after=candidate.projected_tokens_after,
             policy=request.policy,
             forced=request.forced,
+            **({
+                "scope": request.compact_context.scope,
+                "summary_base_checkpoint_id": request.compact_context.view.checkpoint_id,
+            } if request.compact_context is not None else {}),
         ),
     )
     raise_if_compact_interrupted(request.interrupt_check)
@@ -748,6 +788,8 @@ def _commit_compact_candidate(
                 + len(candidate.compact_rows)
             ),
             source_tool_pairs=request.thread.compact_source_tool_pairs,
+            publish_thread_view=(request.compact_context is None
+                                 or request.compact_context.scope.kind == "thread"),
         ),
         expected_generation=request.thread.compact_generation,
     )

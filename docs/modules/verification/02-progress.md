@@ -1,5 +1,7 @@
 # Verification：开发推进
 
+后台Compact已本地接同一scope/view的摘要注入和精确覆盖，局部来源/提交不改全线程摘要和游标；18文件联合420项通过，最终验证见TESTS。此片不证明完整恢复payload，Gateway/child准备同view、初次/手动和真实缓存仍待验；唯一TODO的12.4保持未完成。
+
 Compact来源覆盖现沿实际执行的run/attempt/模型turn/call四元身份；归档不再用当前runner覆盖原ToolCall。原摘要检查点v3封印scope/base/精确覆盖，旧未知身份保留。只验证来源和检查点合同，完整后台摘要应用与HTTP恢复仍待接。
 
 ## 2026-09-22 可选外部材料阅读优先级

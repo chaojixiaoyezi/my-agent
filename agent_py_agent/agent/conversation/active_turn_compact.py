@@ -21,6 +21,7 @@ from .compact_progress import (
     COMPACT_SOURCE_ACTIVE_TURN,
     CONVERSATION_COMPACT_PROGRESS_SCHEMA,
 )
+from .compact_summary_view import AppliedCompactContext
 from .compact_tool_identity import compact_tool_ref_key, compact_tool_refs
 from .live_tool_compact import (
     LiveToolCompactCommitRequest,
@@ -41,9 +42,9 @@ class ActiveTurnArchiveCompactResult:
     projected_tokens_after: int = 0
 
 
-# LLM: The caller supplies one immutable overflow identity, UI projection and typed interrupt
-# check; the request contains no task status or completion authority and cannot change binding.
-# 类用途: 打包跨工作片压缩所需的请求、尝试、原任务、进度回调和当前停止检查。
+# LLM: The caller supplies one immutable overflow identity and optional applied scope/view; the
+# request cannot change task status or enlarge the selected Compact coverage.
+# 类用途: 打包跨工作片压缩所需身份、已应用摘要视图、进度回调和停止检查。
 @dataclass(frozen=True)
 class ActiveTurnArchiveCompactRequest:
     task_attributes: object
@@ -52,6 +53,7 @@ class ActiveTurnArchiveCompactRequest:
     task_prompt: str = ""
     progress_callback: Callable[[dict[str, object]], object] | None = None
     interrupt_check: CompactInterruptCheck | None = None
+    compact_context: AppliedCompactContext | None = None
 
 
 # LLM: This candidate freezes one exact checkpoint boundary before the summary model call. The
@@ -72,19 +74,31 @@ class _ActiveTurnArchiveCompactPlan:
     progress: dict[str, object]
 
 
-# LLM: 运行权威仍保留全部记录，模型只按适用摘要base链中的四元refs隐藏来源，旧未知不能当通配。
-# 当前默认全线程视图；局部宿主必须先接同一实际应用view，不得把这个默认调用误当局部恢复已完成。
-# 函数用途: 从完整工具账筛出尚未被摘要精确覆盖的记录，读取坏权威时拒绝投影。
+# LLM: Runtime authority keeps all records. Explicit context hides only its own view refs;
+# callers without context retain the original thread-wide checkpoint lookup.
+# 函数用途: 先核对摘要与当前线程，即使无工具也不能串线程；再保留未覆盖和旧未知记录。
 def model_visible_active_turn_tool_calls(
     agent: object,
     task_attributes: object,
     records: list[dict[str, object]],
+    *,
+    compact_context: AppliedCompactContext | None = None,
 ) -> list[dict[str, object]]:
     values = [dict(item) for item in records if isinstance(item, dict)]
+    if compact_context is not None:
+        if not isinstance(compact_context, AppliedCompactContext):
+            raise TypeError("Compact 应用上下文类型无效")
+        _assert_context_thread(task_attributes, compact_context)
+        if compact_context.view.source_tool_refs and not compact_context.view.summary.strip():
+            raise OSError("Compact 来源已覆盖但适用摘要缺失")
     if not values or not _transcript_authoritative(task_attributes):
         return values
-    thread = _load_authoritative_thread(agent, task_attributes)
-    hidden = {compact_tool_ref_key(ref) for ref in committed_live_tool_compact_source_refs(agent, thread)}
+    if compact_context is not None:
+        refs = compact_context.view.source_tool_refs
+    else:
+        thread = _load_authoritative_thread(agent, task_attributes)
+        refs = committed_live_tool_compact_source_refs(agent, thread)
+    hidden = {compact_tool_ref_key(ref) for ref in refs}
     hidden.discard(None)
     if not hidden:
         return values
@@ -108,6 +122,7 @@ def compact_carried_active_turn_archive(
         agent,
         request.task_attributes,
         records,
+        compact_context=request.compact_context,
     )
     indexed = [(item, _record_call_id(item)) for item in visible]
     indexed = [(item, call_id) for item, call_id in indexed if call_id]
@@ -126,6 +141,7 @@ def compact_carried_active_turn_archive(
         agent,
         task_attributes=request.task_attributes,
         policy=policy,
+        compact_context=request.compact_context,
     )
     if binding is None:
         return ActiveTurnArchiveCompactResult(thread=thread)
@@ -278,9 +294,9 @@ def _execute_active_turn_compact(
     )
 
 
-# LLM: The one summary call merges the previous canonical summary with a bounded typed handoff and
-# must return the validated live Compact replacement shape before any checkpoint is written.
-# 函数用途: 生成可独立替代上一代摘要的六字段交接，不叠加无界摘要链。
+# LLM: The one summary call uses the same applied summary as source hiding and checkpoint base;
+# no-context callers keep the original thread summary behavior.
+# 函数用途: 以本次真正适用的前摘要生成可独立替代上一代摘要的交接。
 def _active_turn_replacement_summary(
     agent: object,
     plan: _ActiveTurnArchiveCompactPlan,
@@ -320,7 +336,10 @@ def _active_turn_replacement_summary(
             run_id=scope_id,
             task_id=scope_id,
             task_prompt=str(request.task_prompt or "继续当前任务。"),
-            previous_summary=str(plan.thread.summary or ""),
+            previous_summary=str(
+                request.compact_context.view.summary
+                if request.compact_context is not None else plan.thread.summary or ""
+            ),
             max_output_chars=config.max_input_chars,
         )
     )
@@ -329,9 +348,9 @@ def _active_turn_replacement_summary(
     return replacement
 
 
-# LLM: This helper is the sole checkpoint/CAS writer for the recovery candidate and forwards the
-# same interrupt check. Progress at 92% remains between checkpoint append and CAS.
-# 函数用途: 用冻结边界可中断地提交 active-turn Compact，并在恢复点后更新进度。
+# LLM: This helper forwards the frozen scope and summary base alongside the same interrupt check;
+# progress at 92% remains between checkpoint append and CAS.
+# 函数用途: 用冻结范围与摘要基础提交 active-turn Compact，并在恢复点后更新进度。
 def _commit_active_turn_compact(
     agent: object,
     plan: _ActiveTurnArchiveCompactPlan,
@@ -353,6 +372,10 @@ def _commit_active_turn_compact(
             policy=plan.policy,
             request_id=str(request.request_id or ""),
             attempt_id=str(request.attempt_id or request.request_id or ""),
+            summary_base_checkpoint_id=(
+                request.compact_context.view.checkpoint_id
+                if request.compact_context is not None else None
+            ),
             forced=True,
             interrupt_check=request.interrupt_check,
             after_checkpoint=lambda: _emit_progress(
@@ -406,6 +429,16 @@ def _load_authoritative_thread(agent: object, task_attributes: object) -> Conver
     if load_error is not None or thread is None:
         raise OSError("authoritative active turn conversation thread is unavailable")
     return thread
+
+
+# LLM: A transient applied view may hide calls only in the exact thread named by the structured
+# task attributes; do not load a newer thread view or fall back to a parent conversation id.
+# 函数用途: 核对临时摘要视图属于当前代理线程，防止错线程来源被隐藏。
+def _assert_context_thread(task_attributes: object, context: AppliedCompactContext) -> None:
+    attrs = task_attributes if isinstance(task_attributes, Mapping) else {}
+    thread_id = str(attrs.get(AGENT_THREAD_ID_ATTR) or attrs.get("conversation_thread_id") or "").strip()
+    if thread_id != context.thread_id:
+        raise OSError("Compact 应用视图与当前线程不匹配")
 
 
 # LLM: UI progress is a volatile projection. Callback failure never cancels a checkpoint/CAS.

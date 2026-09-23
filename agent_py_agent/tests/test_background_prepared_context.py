@@ -34,6 +34,7 @@ def _request(thread, *, task_id="", reason="scheduled_progress_report", wake_sig
         task_id=task_id,
         reason=reason,
         wake_signal=wake_signal,
+        conversation_turn_id="prepared-turn",
     )
 
 
@@ -180,10 +181,10 @@ def test_unknown_and_unreadable_history_never_fabricate_projection(
     assert unknown.status == "unreadable"
     assert unknown.seed is None and unknown.projection is None
 
-    def unreadable(_thread):
+    def unreadable(_thread, **_kwargs):
         raise OSError("transcript unavailable")
 
-    monkeypatch.setattr(store.messages, "after_compact_report", unreadable)
+    monkeypatch.setattr(store.messages, "recent_report", unreadable)
     result = history_module.background_conversation_history_seed(agent, store, thread, request)
     assert result.status == "unreadable"
     assert result.load_errors

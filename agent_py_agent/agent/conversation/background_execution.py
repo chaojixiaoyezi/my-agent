@@ -11,8 +11,13 @@ from ..agent_core.runtime.loop_models import RunParams, RuntimeContextRequest
 from ..concurrency.interrupt import is_interrupted
 from ..turn_end import result_turn_end_reason, should_continue_task
 from .agent_activity import BackgroundMainActivitySink
-from .background_context import context_markdown, is_narrow_audit_event
-from .background_history_seed import background_history_seed_or_raise
+from .background_compact_context import apply_background_compact_context
+from .background_context import (
+    is_narrow_audit_event,
+    prepare_background_context,
+    render_background_context,
+)
+from .background_history_seed import prepare_background_history_or_raise
 from .compact_carry import compact_overflow_carry
 from .local_run_control import LocalRunControl
 from .models import ConversationThread
@@ -154,8 +159,8 @@ def invoke_background_turn(
     return result, snapshot
 
 
-# LLM: 展示仅存于本次后台调用，绑定原 conversation_turn_id 而非跨片复用的 task/attempt；None 清选择但保留已评估，不改 mailbox/历史/CAS 顺序。
-# 函数用途: 同一后台片压缩续跑时沿用已核对的展示和拒绝记忆；新片重新评估，失败或取消沿原路径退出。
+# LLM: 本片冻结摘要范围及覆盖，与原历史种子和工具参数一同传递；展示绑定宿主turn，局部Compact不发布全线程摘要。
+# 函数用途: 用同一适用摘要准备后台模型片，压缩续跑沿用展示和拒绝记录，失败或取消沿原路径退出。
 def run_background_turn_with_compact(
     execution: BackgroundExecutionDependencies,
     thread: ConversationThread,
@@ -182,18 +187,20 @@ def run_background_turn_with_compact(
         run_params.capability_presentation_evaluated = True
 
     for _attempt in range(8):
-        history_seed = background_history_seed_or_raise(
+        history = prepare_background_history_or_raise(
             execution.agent,
             execution.store,
             current,
             request,
             proactive_delivery_available=proactive_delivery_available,
         )
+        history_seed = history.seed
         run_params = execution.prepare_run(
             current.thread_id,
             thread=current,
             history_seed=history_seed,
         )
+        run_params.compact_context = history.compact_context
         if carried_archive_tool_calls is None:
             carried_archive_tool_calls = list(run_params.carried_archive_tool_calls or [])
         else:
@@ -203,19 +210,13 @@ def run_background_turn_with_compact(
             runtime_rejected_actions = run_params.runtime_rejected_actions
         else:
             run_params.runtime_rejected_actions = runtime_rejected_actions
-        run_params.inject = [
-            context_markdown(
-                agent=execution.agent,
-                store=execution.store,
-                thread=current,
-                request=request,
-                proactive_delivery_available=proactive_delivery_available,
-                # 已经带上 canonical 历史时不再重复注入最近消息副本：
-                # 两份历史会重复计费、并且摘要副本没有工具细节。
-                include_recent_messages=history_seed is None,
-            ),
-            *continuation_injection,
-        ]
+        prepared_context = prepare_background_context(
+            agent=execution.agent, store=execution.store, thread=current, request=request,
+            proactive_delivery_available=proactive_delivery_available,
+            include_recent_messages=history_seed is None, context_bundle=history.context_bundle,
+        )
+        prepared_context = apply_background_compact_context(prepared_context, history.compact_context, current.compact_generation)
+        run_params.inject = [render_background_context(prepared_context), *continuation_injection]
         run_params.on_chunk = activity_sink
         run_params.partial_turn_callback = partial(_persist_background_native_turn, execution.store, request)
         run_params.capability_presentation = capability_presentation
@@ -244,6 +245,7 @@ def run_background_turn_with_compact(
             activity_sink=activity_sink,
             run_params=run_params,
             carried_archive_tool_calls=carried_archive_tool_calls,
+            history=history,
         )
         if refreshed.compact_generation <= current.compact_generation:
             refreshed = _compact_background_active_turn(
@@ -277,6 +279,7 @@ def _compact_background_active_turn(
         execution.agent, execution.store, thread, archive,
         ActiveTurnArchiveCompactRequest(
             task_attributes=run_params.task_attributes,
+            compact_context=run_params.compact_context,
             request_id=str(run_params.request_id or task_id or ""),
             attempt_id=str(run_params.attempt_id or run_params.request_id or ""),
             task_prompt=user_prompt,
@@ -314,8 +317,8 @@ def _persist_background_native_turn(store: ConversationStore, request: Backgroun
     }, dedupe_key=f"background-native:{request.conversation_turn_id}")
 
 
-# LLM: 原线程/CAS 是重试权威；当前身份与输入只取实际 RunParams，载体不得提供授权，Compact 原回调负责清失效值，取消贯穿摘要/提交。
-# 函数用途: 压缩后台已结束历史时复用同片展示和原工具归档，返回推进代次后的线程供原重试使用。
+# LLM: 原线程/CAS是重试权威；刷新冻结scope内的视图和原文，不从最新任务重建范围；窄审计不压会话历史。
+# 函数用途: 只压本片可见的已结束历史，局部摘要经同一CAS提交后保留全线程游标。
 def _compact_background_main_thread(
     execution: BackgroundExecutionDependencies,
     current: ConversationThread,
@@ -324,6 +327,7 @@ def _compact_background_main_thread(
     activity_sink: BackgroundMainActivitySink,
     run_params: RunParams,
     carried_archive_tool_calls: list[dict[str, object]],
+    history,
 ) -> ConversationThread:
     from ..tooling.tool_search_state import pending_carried_loaded_tool_names
     from .compact import ConversationCompactOptions, prepare_conversation_context
@@ -332,12 +336,18 @@ def _compact_background_main_thread(
     latest, load_error = execution.store.threads.load_report(current.thread_id)
     if load_error is not None or latest is None:
         raise RuntimeError("background main conversation thread could not be reloaded")
+    from .background_history_seed import refresh_background_history
+    refreshed_history = refresh_background_history(execution.agent, execution.store, latest, history)
+    run_params.compact_context = refreshed_history.compact_context
+    if refreshed_history.compact_source is None:
+        return latest
     compact = prepare_conversation_context(
         execution.agent,
         execution.store,
         latest,
         options=ConversationCompactOptions(
             current_prompt=str(current_prompt or ""),
+            source=refreshed_history.compact_source,
             force=True,
             progress_callback=activity_sink.write_conversation_compact_progress,
             interrupt_check=is_interrupted,

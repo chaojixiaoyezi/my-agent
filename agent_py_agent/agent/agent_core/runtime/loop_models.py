@@ -11,8 +11,8 @@ if TYPE_CHECKING:
     from ...capability.decision_recommendation import CapabilityPresentationSelection
 
 
-# LLM: 消息/运行/尝试身份独立；展示及已评估事实只由同片宿主传入/回收，不能复用到新Goal轮或作为能力授权。
-# 类用途: 收拢一次代理调用的配置、上下文和内存回调，不执行模型、工具或写文件；新片默认没有旧展示。
+# LLM: 消息/运行/尝试身份独立；展示和已应用Compact视图只由同片宿主传入，不能作为持久权限或状态。
+# 类用途: 收拢一次代理调用的配置、上下文和内存回调，不执行模型、工具或写文件。
 @dataclass
 class RunParams:
     inject: list[str] | None = None
@@ -53,6 +53,8 @@ class RunParams:
     # The conversation layer supplies one immutable, already-bounded completed transcript seed.
     # Native protocol maps it to provider messages; text protocol renders it once.
     conversation_history_seed: object = None
+    # 本次实际采用的摘要范围和视图只在运行参数链中传递，不写入任务或线程持久态。
+    compact_context: object | None = None
     # 宿主绑定本次精确 owner/thread/turn 的异常历史出口；只保存已有事实，不投递回复或续跑。
     partial_turn_callback: object = None
     capability_presentation: CapabilityPresentationSelection | None = None
@@ -98,6 +100,9 @@ class RuntimeContextRequest:
 
 # LLM: 已解析参数保留宿主回调/拒绝列表；展示纯值和已评估事实只供原推荐接缝核对，不送入模型或结果，也不能替代快照。
 # 类用途: 将冻结工具、权限、会话上下文及本片展示接到原循环；异常与展示回传分别使用各自宿主出口。
+# LLM: Prepared runtime parameters carry the applied Compact view unchanged into the one tool
+# loop; this transient view cannot authorize calls or replace the full archive.
+# 类用途: 保存准备后的循环输入与本次摘要视图，交给唯一工具循环而不写持久状态。
 @dataclass
 class RuntimeLoopParams:
     user_prompt: str
@@ -127,6 +132,7 @@ class RuntimeLoopParams:
     tool_runtime_snapshot: object = None
     tool_protocol_snapshot: object = None
     conversation_history_seed: object = None
+    compact_context: object | None = None
     partial_turn_callback: object = None
     capability_presentation: CapabilityPresentationSelection | None = None
     capability_presentation_evaluated: bool = False

@@ -58,6 +58,42 @@ def _delivery_dependencies(runtime):
         task_status=partial(_background_task_link_status, runtime.agent, store=runtime.store),
     )
 
+
+# LLM: 这些续片单测的假线程没有持久checkpoint；空视图明确表示无摘要覆盖，不从thread.summary猜来源。
+# 函数用途: 为只验证重试/归档接续的假运行提供当前只读scope视图，避免假线程冒充已提交摘要。
+def _stub_empty_compact_views(monkeypatch):
+    from agent_py_agent.agent.conversation import background_compact_context, compact_summary_view
+    from agent_py_agent.agent.conversation.compact_summary_view import CompactSummaryView
+
+    def empty_view(_agent, _thread, _scope):
+        return CompactSummaryView()
+
+    monkeypatch.setattr(background_compact_context, "resolve_compact_summary_view", empty_view)
+    monkeypatch.setattr(compact_summary_view, "resolve_compact_summary_view", empty_view)
+
+
+# LLM: 假上下文仍走原apply和render接缝，准备仅提供结构化thread代次，不替生产读取进度/任务。
+# 函数用途: 为溢出控制流测试构造一次冻结的后台上下文，供当前宿主投影代次。
+def _stub_prepared_background_context(**values):
+    from agent_py_agent.agent.conversation.background_context import PreparedBackgroundContext
+    from agent_py_agent.agent.conversation.context_budget import BackgroundContextPayloadRequest
+
+    thread = values["thread"]
+    return PreparedBackgroundContext(
+        payload=BackgroundContextPayloadRequest(
+            bundle={"thread": {"thread_id": thread.thread_id, "compact_generation": thread.compact_generation}},
+            active_wake_signal=None, pending_wake_signals=[], agent_tree={},
+        ),
+        header=(), control_policy={}, control_actions=(), task_id=values["request"].task_id,
+        narrow_audit_event=False, include_recent_messages=False,
+    )
+
+
+# LLM: 渲染使用apply后冻结的原payload代次；不读取假thread.summary，也不伪造摘要文本。
+# 函数用途: 让溢出重试测试继续核对每轮真实采用的准备代次。
+def _stub_render_background_context(prepared):
+    return f"ctx-generation-{prepared.payload.bundle['thread']['compact_generation']}"
+
 def test_background_run_params_carry_structured_conversation_task_identity() -> None:
     from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest, _run_params
 
@@ -121,7 +157,7 @@ def test_background_context_overflow_compacts_and_retries_same_slice(monkeypatch
     class Store:
         def __init__(self, *args, **kwargs):
             self.threads = _StoreDomain(load_report=self._fake_load_thread_report)
-            self.messages = _StoreDomain(after_compact_report=self._fake_messages_after_compact_report)
+            self.messages = _StoreDomain(recent_report=self._fake_messages_recent_report)
 
         def _fake_load_thread_report(self, thread_id):
             assert thread_id == original.thread_id
@@ -131,7 +167,8 @@ def test_background_context_overflow_compacts_and_retries_same_slice(monkeypatch
             del recent_limit
             return {"thread": {"thread_id": thread_id}}, []
 
-        def _fake_messages_after_compact_report(self, _thread):
+        def _fake_messages_recent_report(self, _thread_id, *, limit=0):
+            assert limit == 0
             return [], []
 
 
@@ -165,11 +202,9 @@ def test_background_context_overflow_compacts_and_retries_same_slice(monkeypatch
         )
 
     monkeypatch.setattr(runtime_module, "_run_params", fake_run_params)
-    monkeypatch.setattr(
-        execution_module,
-        "context_markdown",
-        lambda **values: f"ctx-generation-{values['thread'].compact_generation}",
-    )
+    _stub_empty_compact_views(monkeypatch)
+    monkeypatch.setattr(execution_module, "prepare_background_context", _stub_prepared_background_context)
+    monkeypatch.setattr(execution_module, "render_background_context", _stub_render_background_context)
     monkeypatch.setattr(compact_module, "prepare_conversation_context", fake_prepare)
     monkeypatch.setattr(
         runtime_mixin,
@@ -235,9 +270,10 @@ def test_background_compact_slice_yields_after_eight_progressful_generations(mon
             return {"thread": {"thread_id": thread_id}}, []
 
         def __init__(self, *args, **kwargs):
-            self.messages = _StoreDomain(after_compact_report=self._fake_messages_after_compact_report)
+            self.messages = _StoreDomain(recent_report=self._fake_messages_recent_report)
 
-        def _fake_messages_after_compact_report(self, _thread):
+        def _fake_messages_recent_report(self, _thread_id, *, limit=0):
+            assert limit == 0
             return [], []
 
 
@@ -257,7 +293,9 @@ def test_background_compact_slice_yields_after_eight_progressful_generations(mon
         return replace(current, compact_generation=generation)
 
     monkeypatch.setattr(runtime_module, "_run_params", fake_run_params)
-    monkeypatch.setattr(execution_module, "context_markdown", lambda **_values: "context")
+    _stub_empty_compact_views(monkeypatch)
+    monkeypatch.setattr(execution_module, "prepare_background_context", _stub_prepared_background_context)
+    monkeypatch.setattr(execution_module, "render_background_context", _stub_render_background_context)
     monkeypatch.setattr(execution_module, "_compact_background_main_thread", advancing_compact)
     monkeypatch.setattr(
         runtime_mixin,
@@ -390,7 +428,7 @@ def test_background_overflow_compacts_carried_active_turn_when_transcript_is_emp
     class Store:
         def __init__(self, *args, **kwargs):
             self.threads = _StoreDomain(load_report=self._fake_load_thread_report)
-            self.messages = _StoreDomain(after_compact_report=self._fake_messages_after_compact_report)
+            self.messages = _StoreDomain(recent_report=self._fake_messages_recent_report)
 
         def _fake_load_thread_report(self, thread_id):
             assert thread_id == original.thread_id
@@ -400,7 +438,8 @@ def test_background_overflow_compacts_carried_active_turn_when_transcript_is_emp
             del recent_limit
             return {"thread": {"thread_id": thread_id}}, []
 
-        def _fake_messages_after_compact_report(self, _thread):
+        def _fake_messages_recent_report(self, _thread_id, *, limit=0):
+            assert limit == 0
             return [], []
 
     class Sink:
@@ -436,11 +475,9 @@ def test_background_overflow_compacts_carried_active_turn_when_transcript_is_emp
         )
 
     monkeypatch.setattr(runtime_module, "_run_params", fake_run_params)
-    monkeypatch.setattr(
-        execution_module,
-        "context_markdown",
-        lambda **values: f"ctx-generation-{values['thread'].compact_generation}",
-    )
+    _stub_empty_compact_views(monkeypatch)
+    monkeypatch.setattr(execution_module, "prepare_background_context", _stub_prepared_background_context)
+    monkeypatch.setattr(execution_module, "render_background_context", _stub_render_background_context)
     monkeypatch.setattr(compact_module, "prepare_conversation_context", no_transcript_compact)
     monkeypatch.setattr(active_module, "compact_carried_active_turn_archive", active_compact)
     monkeypatch.setattr(
@@ -2782,6 +2819,13 @@ def test_completed_task_drops_queued_scheduled_continuation(tmp_path) -> None:
 
 
 def test_task_continuation_uses_the_same_thread_history_and_compact(tmp_path) -> None:
+    from agent_py_agent.agent.agent_core.runtime.context_compactor import runtime_compact_policy
+    from agent_py_agent.agent.conversation.compact_checkpoint import (
+        CompactCheckpointRequest,
+        write_compact_checkpoint,
+    )
+    from agent_py_agent.agent.conversation.models import ConversationCompactCommit
+
     agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
     backend = _CapturingBackend()
     agent.backend = backend
@@ -2798,7 +2842,7 @@ def test_task_continuation_uses_the_same_thread_history_and_compact(tmp_path) ->
             "now": 10.0,
         }
     )
-    store.messages.append(
+    initial_request = store.messages.append(
         {
             "thread_id": thread.thread_id,
             "role": "user",
@@ -2824,7 +2868,43 @@ def test_task_continuation_uses_the_same_thread_history_and_compact(tmp_path) ->
             "now": 13.0,
         }
     )
-    store.threads.update_summary(thread.thread_id, "普通聊天压缩摘要-青柚47", now=14.0)
+    # 首条任务请求由原 checkpoint/CAS 纳入摘要；后续普通聊天和当前续接仍保留未覆盖原文。
+    before_compact = store.threads.require(thread.thread_id)
+    compact_summary = "普通聊天压缩摘要-青柚47；请完成任务甲的七天晚餐方案。"
+    checkpoint_id = write_compact_checkpoint(
+        agent,
+        CompactCheckpointRequest(
+            thread=before_compact,
+            summary=compact_summary,
+            operation_evidence={},
+            compact_rows=(initial_request,),
+            retained_tail=(),
+            source_end_byte_offset=store.messages.byte_offset_after(
+                thread.thread_id, initial_request.message_id,
+            ),
+            projected_tokens_before=900,
+            projected_tokens_after=300,
+            policy=runtime_compact_policy(agent),
+            forced=False,
+        ),
+    )
+    committed = store.threads.update_compact_state(
+        thread.thread_id,
+        commit=ConversationCompactCommit(
+            summary=compact_summary,
+            operation_evidence={},
+            checkpoint_id=checkpoint_id,
+            compacted_through_message_id=initial_request.message_id,
+            compacted_through_byte_offset=store.messages.byte_offset_after(
+                thread.thread_id, initial_request.message_id,
+            ),
+            source_messages=1,
+            source_tool_pairs=0,
+        ),
+        expected_generation=before_compact.compact_generation,
+        now=14.0,
+    )
+    assert committed.compact_generation == 1
     store.messages.append(
         {
             "thread_id": thread.thread_id,

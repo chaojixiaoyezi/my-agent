@@ -62,3 +62,16 @@ detached transcript 压缩推进共享游标，但创建后的全局摘要被原
 模型轮原生成函数已补唯一nonce，修复同run/attempt跨Goal工作片重置局部序号造成的四元身份碰撞；只改`tool_model_generation.py::_begin_model_turn_identity`，未动媒体线的IR/provider编码。21文件562项通过；最后旧摘要完整性补强组三文件74项通过。具体本地guard与剩余边界以TESTS为准，未推送部署。
 
 重要边界：生产宿主仍使用默认thread作用域，未把后台注入/过滤绑定同一个适用view，也未把初次/手动Compact接入完整请求。新检查点底座通过不代表原后台三类缺陷已关闭。下一片继续实施宿主scope与view应用，归档与恢复测试可并行，共享CAS/source串行；大历史流式读取另与TUI线对齐，当前千万行无cursor样本未通过。
+
+
+## 后续后台scope/view接线（基线7f473c44f）
+
+后台现选择thread/task/turn范围，种子、操作上下文、工具过滤及摘要器共同消费AppliedCompactContext。detached先筛canonical原文后排除view覆盖，narrow保持seed=None且只继承本conversation_turn_id摘要。原transcript source与live/carried提交显式传scope/base，局部CAS保留全局摘要/游标。
+
+后台运行仍沿既有溢出重试，完整请求计量未在本片收口；Gateway/child准备边界的同view绑定亦待下一片统一。新增测试使用原Store/checkpoint/CAS与真实模型消息投影，不把分层回归称为完整HTTP恢复。无部署、重启或真实供应商调用；共享wake存储由模块重构线负责，本线未碰。
+
+建议下一步：接公共PreparedCompactRecovery，候选只替换历史与宿主已知注入位置；成功CAS后从获胜结果发布实际view。narrow空历史与活动IR不能伪造空seed。独立测试可并行，公共恢复和源码整合串行；前轮全仓8失败、真实缓存和超大原文读取失败继续单列。
+
+本片联合18文件420项通过，最终补充验证和严格guard见TESTS；没有将重复运行相加。作用域测试由独立审查代理实现，控制流旧夹具由另一代理适配，生产共享文件由各自认领者修改后主代理整合。
+
+末次补验102项及空工具线程绑定29项通过；严格本地guard通过，尺寸基线未变。空archive不跳过显式context的线程校验，防止首轮摘要错绑。独立源码复核未发现本片阻塞问题。

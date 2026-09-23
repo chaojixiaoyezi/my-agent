@@ -27,6 +27,7 @@ from .compact_guard import (
     record_compact_failure,
 )
 from .compact_scope import THREAD_COMPACT_SCOPE, CompactScope
+from .compact_summary_view import AppliedCompactContext
 from .compact_tool_identity import compact_tool_ref_key, compact_tool_refs
 from .models import ConversationCompactCommit, ConversationThread
 
@@ -45,8 +46,9 @@ class LiveToolCompactBinding:
     scope: CompactScope = THREAD_COMPACT_SCOPE
 
 
-# LLM: 精确source/retained refs随同摘要经过原checkpoint/CAS，UI回调只有观察权，未知来源不能补当前runner。
-# 类用途: 打包活动摘要、四元调用边界、计量和停止检查；同名调用仍按不同执行身份分别处理。
+# LLM: Exact source/retained refs and an explicit summary base travel through the original
+# checkpoint/CAS; UI callback cannot grant authority or infer unknown source identity.
+# 类用途: 打包活动摘要、四元调用边界、冻结摘要基础、计量和停止检查。
 @dataclass(frozen=True)
 class LiveToolCompactCommitRequest:
     summary: str
@@ -59,6 +61,7 @@ class LiveToolCompactCommitRequest:
     attempt_id: str
     source_tool_refs: tuple[dict[str, str], ...]
     retained_tool_refs: tuple[dict[str, str], ...] = ()
+    summary_base_checkpoint_id: str | None = None
     forced: bool = False
     after_checkpoint: Callable[[], None] | None = None
     interrupt_check: CompactInterruptCheck | None = None
@@ -66,13 +69,14 @@ class LiveToolCompactCommitRequest:
 
 # LLM: Only a policy-approved transcript-authoritative turn may persist a live-tool Compact.
 # save=True and an exact authoritative background slice are the two valid policy paths; agent
-# threads take precedence over inherited parent conversation ids by explicit typed identity.
-# 函数用途: 找到当前 main/child/grandchild 自己的压缩线程；辅助展示回合返回空，不写账。
+# threads take precedence over inherited parent ids; an explicit context fixes the same thread/scope.
+# 函数用途: 找到当前代理压缩线程并绑定本次适用范围；辅助展示回合返回空，不写账。
 def resolve_live_tool_compact_binding(
     agent: SimpleAgent,
     *,
     task_attributes: object,
     policy: RuntimeCompactPolicy,
+    compact_context: AppliedCompactContext | None = None,
 ) -> LiveToolCompactBinding | None:
     if not bool(getattr(policy, "allow_persistent_apply", False)):
         return None
@@ -89,6 +93,14 @@ def resolve_live_tool_compact_binding(
             "authoritative live tool compact has no conversation thread",
             code="COMPACT_THREAD_ID_MISSING",
         )
+    if compact_context is not None:
+        if not isinstance(compact_context, AppliedCompactContext):
+            raise TypeError("Compact 应用上下文类型无效")
+        if compact_context.thread_id != thread_id:
+            raise ConversationCompactError(
+                "applied compact context does not match the active thread",
+                code="COMPACT_THREAD_ID_MISMATCH",
+            )
     store = getattr(agent, "conversation_store", None)
     if store is None:
         raise ConversationCompactError(
@@ -106,12 +118,16 @@ def resolve_live_tool_compact_binding(
             "conversation compact is cooling down after repeated failures",
             code="COMPACT_CIRCUIT_OPEN",
         )
-    return LiveToolCompactBinding(store=store, thread=thread)
+    return LiveToolCompactBinding(
+        store=store,
+        thread=thread,
+        scope=compact_context.scope if compact_context is not None else THREAD_COMPACT_SCOPE,
+    )
 
 
-# LLM: The checkpoint is written before one generation CAS, with the shared interrupt check on
-# both sides of that write. Once CAS wins it is authoritative and must not be rolled back.
-# 函数用途: 可中断地提交工具历史压缩；停止时最多留下孤立恢复点，不推进代次或游标。
+# LLM: Checkpoint scope and explicit summary base stay paired before the original CAS; once CAS
+# wins it is authoritative and must not be rolled back.
+# 函数用途: 按冻结范围与摘要基础可中断地提交工具压缩，停止时最多留下孤立恢复点。
 def commit_live_tool_compact(
     agent: SimpleAgent,
     binding: LiveToolCompactBinding,
@@ -135,6 +151,7 @@ def commit_live_tool_compact(
             retained_tool_refs=request.retained_tool_refs,
             forced=bool(request.forced),
             scope=binding.scope,
+            summary_base_checkpoint_id=request.summary_base_checkpoint_id,
         ),
     )
     if request.after_checkpoint is not None:

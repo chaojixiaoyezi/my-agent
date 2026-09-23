@@ -804,10 +804,10 @@ def test_background_history_seed_distinguishes_empty_from_unreadable(tmp_path, m
     assert empty.seed is not None and empty.seed.messages == ()
 
     # ② 真实读取失败（OSError 注入）：unreadable + load_errors 保留。
-    def boom(_thread):
+    def boom(_thread, **_kwargs):
         raise OSError("disk read failed")
 
-    monkeypatch.setattr(store.messages, 'after_compact_report', boom, raising=False)
+    monkeypatch.setattr(store.messages, 'recent_report', boom, raising=False)
     unreadable = history_module.background_conversation_history_seed(agent, store, thread, request)
     assert unreadable.status == "unreadable"
     assert unreadable.seed is None

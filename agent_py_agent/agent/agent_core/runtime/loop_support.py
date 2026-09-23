@@ -96,8 +96,8 @@ def run_params_from_values(
     return replace(params, **updates)
 
 
-# LLM: 拒绝列表、展示及已评估事实沿原宿主参数链传递；同片失效不得再决策，批准仍归每次精确调用。
-# 函数用途: 把已准备上下文和同一执行链的宿主状态传给公共工具循环，不写盘或改变快照。
+# LLM: 拒绝列表、展示及已应用Compact视图沿原宿主参数链传递；同片失效不得再决策，批准仍归每次精确调用。
+# 函数用途: 把已准备上下文、冻结摘要视图和宿主状态传给公共工具循环，不写盘。
 def _runtime_loop_params(
     user_prompt: str,
     prepared: PreparedRuntimeContext,
@@ -131,6 +131,7 @@ def _runtime_loop_params(
         tool_runtime_snapshot=prepared.tool_runtime_snapshot,
         tool_protocol_snapshot=prepared.tool_protocol_snapshot,
         conversation_history_seed=params.conversation_history_seed,
+        compact_context=params.compact_context,
         partial_turn_callback=params.partial_turn_callback,
         capability_presentation=params.capability_presentation,
         capability_presentation_evaluated=params.capability_presentation_evaluated,
@@ -883,10 +884,49 @@ def _native_initial_tool_ir_history(
     return history
 
 
-# LLM: Completed native messages remain byte-stable until Conversation Compact. New envelopes
-# retain exact tool calls/results; legacy rows are converted once from the bounded role/text seed.
-# 函数用途: 生成当前 run 之前的原生消息前缀，并把已提交 Compact 摘要固定放在最前面。
-def _native_provider_history_messages(params: RuntimeLoopParams) -> list[dict[str, object]]:
+# LLM: The transient view must be typed; an arbitrary caller object cannot silently enable
+# source hiding or replace a provider-visible summary.
+# 函数用途: 校验本片显式Compact载体，缺失时沿原线程路径，不猜测视图。
+def _applied_compact_context(value: object):
+    from ...conversation.compact_summary_view import AppliedCompactContext
+
+    if value is None:
+        return None
+    if not isinstance(value, AppliedCompactContext):
+        raise TypeError("Compact 应用上下文类型无效")
+    return value
+
+
+# LLM: A narrow history seed may be None even when an applied scoped summary exists. Add that
+# summary to current-turn IR after the media-owning initializer, leaving its carried handoff intact.
+# 函数用途: 无历史种子时把本次适用摘要插入当前原生回合，保留原交接和媒体块。
+def _native_ir_with_applied_summary(
+    history: list[object],
+    *,
+    compact_context: object,
+    has_history_seed: bool,
+) -> list[object]:
+    from ...backends.tool_ir import CompactionSummary, UserTurn
+
+    context = _applied_compact_context(compact_context)
+    if context is None or has_history_seed or not context.view.summary.strip():
+        return history
+    summary = CompactionSummary(
+        f"# Earlier Conversation Summary (generation {context.view.generation})\n{context.view.summary}"
+    )
+    insert_at = 1 if history and isinstance(history[0], UserTurn) else 0
+    history.insert(insert_at, summary)
+    return history
+
+
+# LLM: Explicit applied Compact context selects the initial prefix summary. After a native Compact,
+# the new current-turn IR summary owns that view, so callers may omit only this synthetic prefix.
+# 函数用途: 生成原生历史，按本次视图选择或省略前置摘要，同时保留原消息与媒体块。
+def _native_provider_history_messages(
+    params: RuntimeLoopParams | ToolLoopExecuteParams,
+    *,
+    include_compact_summary: bool = True,
+) -> list[dict[str, object]]:
     from ...backends.message_adapter import AnthropicMessageAdapter
     from ...backends.tool_ir import AssistantTurn, CompactionSummary, UserTurn
 
@@ -894,9 +934,10 @@ def _native_provider_history_messages(params: RuntimeLoopParams) -> list[dict[st
     if seed is None:
         return []
     prefix_items: list[object] = []
-    summary = str(getattr(seed, "compact_summary", "") or "").strip()
-    generation = max(0, int(getattr(seed, "compact_generation", 0) or 0))
-    if summary:
+    context = _applied_compact_context(getattr(params, "compact_context", None))
+    summary = str(context.view.summary if context is not None else getattr(seed, "compact_summary", "") or "").strip()
+    generation = max(0, int(context.view.generation if context is not None else getattr(seed, "compact_generation", 0) or 0))
+    if summary and include_compact_summary:
         prefix_items.append(
             CompactionSummary(
                 f"# Earlier Conversation Summary (generation {generation})\n{summary}"
@@ -922,6 +963,44 @@ def _native_provider_history_messages(params: RuntimeLoopParams) -> list[dict[st
         elif role == "assistant" and content:
             legacy.append(AssistantTurn(text=content))
     return [*prefix, *adapter.to_provider_messages(legacy)]
+
+
+# LLM: The media-owning native initializer stays unchanged. A narrow seed with an applied view
+# must expose that summary in native IR or text tool context before covered calls are hidden.
+# 函数用途: 按工具协议把窄历史种子的真实适用摘要放进原生IR或文本工具上下文。
+def _reconstructed_native_initial_ir(
+    agent: object,
+    seed: RuntimeToolLoopSeed,
+    tool_context: list[str],
+    visible_records: list[dict[str, object]],
+    carried_user_inputs: list[str],
+) -> list[object]:
+    if getattr(seed.tool_protocol_snapshot, "source_protocol", "") != "native":
+        context = _applied_compact_context(seed.params.compact_context)
+        if context is not None and seed.params.conversation_history_seed is None and context.view.summary.strip():
+            tool_context.insert(
+                0,
+                f"# Earlier Conversation Summary (generation {context.view.generation})\n{context.view.summary}",
+            )
+        return []
+    from ...conversation.tool_context_window import native_carried_tool_handoff
+    from ...memory_archive.compact_semantic_summary import semantic_summary_config
+
+    handoff = native_carried_tool_handoff(
+        tool_context,
+        visible_records,
+        max_chars=semantic_summary_config(agent).max_input_chars,
+    )
+    history = _native_initial_tool_ir_history(
+        seed.params,
+        carried_handoff=handoff,
+        carried_user_inputs=carried_user_inputs,
+    )
+    return _native_ir_with_applied_summary(
+        history,
+        compact_context=seed.params.compact_context,
+        has_history_seed=seed.params.conversation_history_seed is not None,
+    )
 
 
 # LLM: Persist only this run's provider-neutral IR plus the terminal assistant response. The
@@ -958,8 +1037,8 @@ def _native_user_task_text(value: object) -> str:
 
 
 # LLM: Resume reconstruction has two projections: the complete owner archive restores budgets,
-# dedupe and effect state, while only calls not covered by committed Compact checkpoints reach the
-# provider. Never use the bounded model projection as runtime authority. Exact rejection memory
+# dedupe and effect state, while the explicit applied view hides only its own source refs.
+# Never use the bounded model projection as runtime authority. Exact rejection memory
 # remains the same host-owned list across automatic continuations, independent of model history.
 # Skill presentation travels with this seed only; it cannot mutate the original grant or loaded-tool facts.
 # 函数用途: 从当前请求与完整续跑账本组装循环参数，传递本片名卡选择，并只展示未压缩的近期轨迹。
@@ -972,6 +1051,7 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
         agent,
         params.task_attributes,
         archive_tool_calls,
+        compact_context=params.compact_context,
     )
     # H1：compact 自动续跑会重建一个全新的 ToolLoopExecuteParams。除了已重建的 pending_deferred，
     # 还必须从 carried 的 archive 记录里重建这四项运行时状态，否则续跑相当于「失忆重来」：
@@ -992,21 +1072,10 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
     tool_context: list[str] = reconstructed.tool_context
     active_turn_user_inputs = merge_active_turn_user_inputs(params.carried_active_turn_user_inputs)
     active_turn_user_input_texts_carried = active_turn_user_input_texts(active_turn_user_inputs)
-    tool_ir_history: list[object] = []
-    if getattr(seed.tool_protocol_snapshot, "source_protocol", "") == "native":
-        from ...conversation.tool_context_window import native_carried_tool_handoff
-        from ...memory_archive.compact_semantic_summary import semantic_summary_config
-
-        handoff = native_carried_tool_handoff(
-            tool_context,
-            model_visible_archive_tool_calls,
-            max_chars=semantic_summary_config(agent).max_input_chars,
-        )
-        tool_ir_history = _native_initial_tool_ir_history(
-            params,
-            carried_handoff=handoff,
-            carried_user_inputs=active_turn_user_input_texts_carried,
-        )
+    tool_ir_history = _reconstructed_native_initial_ir(
+        agent, seed, tool_context, model_visible_archive_tool_calls,
+        active_turn_user_input_texts_carried,
+    )
     tool_context.extend(
         f"[ACTIVE_TURN_USER_INPUT]\n{text}" for text in active_turn_user_input_texts_carried
     )
@@ -1059,6 +1128,7 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
         active_turn_transition_callback=params.active_turn_transition_callback,
         runtime_rejected_actions=params.runtime_rejected_actions,
         conversation_history_seed=params.conversation_history_seed,
+        compact_context=params.compact_context,
         context_scope=params.context_scope,
         loaded_tool_names={*reconstructed.loaded_tool_names, *required_tool_names},
         workspace_context_snapshot=_workspace_context_snapshot(agent, params),

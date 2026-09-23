@@ -1,5 +1,6 @@
 # Gateway Structure
 
+`background_compact_context.py` 选择原后台thread/task/turn范围，`background_history_seed.py` 从完整原文按范围及实际覆盖准备seed/source；临时AppliedCompactContext沿原参数链交给摘要与工具过滤。
 `compact_scope.py` 定义冻结适用范围；`compact_summary_view.py` 只沿已提交的适用摘要base链解析覆盖；`compact_checkpoint.py` 统一v3来源、版本封印及追加，提交仍走原thread CAS。此底座不拥有任务权限，宿主完整恢复接线仍由原执行入口负责。
 
 后台上下文的 `prepare_background_context` 保留原事实读取与进度对账，`render_background_context` 只消费冻结值并调用原预算器；`BackgroundHistoryProjection` 保存同次任务范围与摘要投影，纯种子投影不重读任务。完整后台Compact接线仍待作用域检查点边界闭合，不能把全局新摘要给detached或窄审计事件。

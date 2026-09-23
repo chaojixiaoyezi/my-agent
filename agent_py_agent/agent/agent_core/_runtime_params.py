@@ -49,8 +49,8 @@ class FinalizeContext:
     on_chunk: object = None
 
 
-# LLM: ToolLoopExecuteParams 是工具调用的 run 级事实源；批准/拒绝来自原审批链，Skill展示选择不授予权限或证明正文已加载。
-# 类用途: 汇总本轮上下文、快照、取消及只读名卡选择；循环渲染不重复请求决策模型。
+# LLM: ToolLoopExecuteParams 是工具调用的 run 级事实源；临时Compact视图只限模型展示，批准/拒绝仍来自原审批链。
+# 类用途: 汇总本轮上下文、快照、取消、只读展示和已应用摘要范围；原工具账保持完整。
 @dataclass(frozen=True)
 class ToolLoopExecuteParams:
     user_prompt: str
@@ -117,6 +117,8 @@ class ToolLoopExecuteParams:
     # Completed conversation history stays separate from the current run's tool IR. The seed is
     # immutable and already bounded/compacted by ConversationStore.
     conversation_history_seed: object = None
+    # 本次应用的 Compact 视图仅供模型展示与来源隐藏，原 archive 仍保留全部调用。
+    compact_context: object | None = None
     # Progressive disclosure: an explicit tool_search selection makes these
     # already-authorized deferred tools visible to the next model call only.
     loaded_tool_names: set[str] = field(default_factory=set)

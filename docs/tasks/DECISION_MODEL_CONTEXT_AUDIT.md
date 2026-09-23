@@ -1146,3 +1146,16 @@ child的 `prepare_subagent_thread_turn(defer_compact=True)` 保留原消息幂�
 本片未将detached/narrow宿主绑定到新scope，也未完成同一个应用view的摘要注入/来源隐藏与完整恢复首请求。普通路径目前默认thread范围，后台原三类复现不能据此宣布修复。下一片仍须沿原准备与TaskScopeDecision绑定来源、支持窄审计seed=None的活动IR摘要、接公共完整计量并做实际payload对照；不能做普通后台可用而其它范围回旧旁路的收尾。
 
 另有并行TUI线的合成历史容量证据：1.11一万行M2.7续聊410.81秒后成功，generation=1、4次provider调用、0重试，仅证明该样本；千万行无compact字节游标的after_compact_report在384MiB受限子进程立即MemoryError。后者明确未通过，需有界原文读取和append去重组合验收，不能替代真实长开发任务验收。对_segment_end的O(N²)初步判断已撤回（原实现已有二分），本线未据此修改预算算法。
+
+
+#### 后台实际应用视图接线（本地，完整容量仍待接）
+
+解决问题：全线程cursor不能替代detached任务的摘要覆盖，活动工具被隐藏前必须确认该请求实际使用同一摘要。`AppliedCompactContext`只是原checkpoint的请求内投影，经RunParams/RuntimeLoopParams/ToolLoopExecuteParams传递，不建立另一权威或权限。
+
+后台普通轮选thread范围，detached复用原TaskScopeDecision的创建锚点、时间及精确lineage，narrow只选原conversation_turn_id与task_id。历史从完整canonical行先按原范围筛选，再排除同view覆盖；v1前缀终点在完整行中验证，不借全局cursor删除局部材料。operational准备复用已读bundle，再将摘要/证据对齐该view。窄事件保持seed=None，不吞旧聊天。
+
+transcript source携同context，预检验证原链和来源身份；摘要候选使用view.summary/evidence，writer显式固定scope/base，原CAS仅thread范围发布全局摘要/游标。native/carried摘要也使用该base，活动归档只按该view四元refs隐藏；旧冻结view不会因为后来提交而偷偷多隐藏。原完整archive、运行预算和去重仍保留。
+
+本片不关闭12.4：后台仍需接共享PreparedCompactRecovery的完整候选与首个实际payload；narrow已知空历史及active IR来源须接同一容量合同。Gateway/child原种子也须在其准备边界绑定同view，消除旧摘要/最新覆盖竞态；不能保留双轨作为最终实现。CAS后候选context要按获胜提交更新，不能继承候选旧base或重读别人更晚的head。初次/手动入口、超大历史有界读取、真实缓存均另验。
+
+建议下一步：直接接公共完整恢复器并以实际HTTP材料核对，不继续扩新状态；Gateway/child准备可独立核对，公共捕获与CAS接缝串行。测试机1.9已只读确认可达，尚未部署；不能将本地测试当安装版验收。

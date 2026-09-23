@@ -10,17 +10,19 @@ from .compact_guard import ConversationCompactError
 
 if TYPE_CHECKING:
     from ..agent_core.runtime.context_compactor import RuntimeCompactPolicy
+    from .compact_summary_view import AppliedCompactContext
     from .models import ConversationThread, MessageLogEntry
 
 
-# LLM: 来源只由原未压缩行读取及当前请求后缀排除生成；它是短生命周期快照，不授予提交权。
-# 类用途: 让只加载的宿主与后续 Compact 共用相同历史、策略和近期证据，不把展示窗口当作来源。
+# LLM: 显式宿主可附加同线程的已裁决scope/view；来源行已按该视图筛选，不能再用全线程摘要或游标覆盖。
+# 类用途: 让只加载的宿主与后续 Compact 共用同一历史范围、摘要、策略和近期证据，不授予提交权。
 @dataclass(frozen=True)
 class ConversationCompactSource:
     thread: ConversationThread
     messages: tuple[MessageLogEntry, ...]
     policy: RuntimeCompactPolicy
     recent_operation_evidence: dict[str, object]
+    compact_context: AppliedCompactContext | None = None
 
 
 # LLM: 宿主只投影这些结构化字段；is_candidate 区分尚未提交的预计代次，不能提前写活参数或持久状态。

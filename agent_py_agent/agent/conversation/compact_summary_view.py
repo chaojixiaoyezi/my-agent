@@ -1,10 +1,11 @@
-# LLM: 本模块只读取原 committed checkpoint chain；提交指针和账本仍是唯一权威。
+# LLM: 本模块只读取原 committed checkpoint chain，并携带本次采用的临时视图；提交指针和账本仍是唯一权威。
 # 摘要替代关系沿 summary_base_checkpoint_id，不得把提交链的局部覆盖无条件合并。
-# 模块用途: 为一个冻结作用域解析可用摘要及其真正覆盖的消息和工具来源。
+# 模块用途: 为冻结作用域解析可用摘要与真实覆盖，并向运行链传递只读应用视图。
 from __future__ import annotations
 
 import hashlib
 import math
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -27,6 +28,26 @@ class CompactSummaryView:
     source_tool_refs: tuple[dict[str, object], ...] = ()
     legacy_message_end_ids: tuple[str, ...] = ()
     generation: int = 0
+
+
+# LLM: Applied context is a per-run immutable snapshot of the chosen scope and its summary view;
+# it is never a second checkpoint or a source of authority outside the matching thread.
+# 类用途: 暂存本次请求实际采用的线程、摘要范围和视图，供历史与工具投影同次复用。
+@dataclass(frozen=True)
+class AppliedCompactContext:
+    thread_id: str
+    scope: CompactScope
+    view: CompactSummaryView
+
+    # LLM: Reject wrong types and detach nested ref/evidence dicts from the caller before source
+    # hiding; the thread binding itself is checked at each runtime entry.
+    # 函数用途: 校验线程与视图并复制内部字典，避免调用方随后改动本次覆盖范围。
+    def __post_init__(self) -> None:
+        if not isinstance(self.thread_id, str) or not self.thread_id.strip():
+            raise ValueError("Compact 应用线程身份缺失")
+        if not isinstance(self.scope, CompactScope) or not isinstance(self.view, CompactSummaryView):
+            raise TypeError("Compact 应用范围或摘要视图类型无效")
+        object.__setattr__(self, "view", deepcopy(self.view))
 
 
 # LLM: v1/v2 的摘要属于全线程，previous 兼任摘要 base；v3 读取严格显式字段。
@@ -202,4 +223,4 @@ def resolve_compact_summary_view(
     )
 
 
-__all__ = ["CompactSummaryView", "resolve_compact_summary_view"]
+__all__ = ["AppliedCompactContext", "CompactSummaryView", "resolve_compact_summary_view"]

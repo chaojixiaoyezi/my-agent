@@ -126,18 +126,19 @@ def context_markdown(
     ))
 
 
-# LLM: 原wake净化、上下文读取和task_runtime_state对账仅执行一次；返回的预算/策略已冻结，不在候选之间刷新。
+# LLM: 原wake净化和task_runtime_state对账仅执行一次；宿主可交同次历史已读bundle避免重读范围，返回预算/策略不在候选间刷新。
 # 函数用途: 收集后台请求所需事实；可能更新原进度账，后续render无副作用。
 def prepare_background_context(
     *, agent: object, store: ConversationStore, thread: ConversationThread,
     request: BackgroundContextRequest, proactive_delivery_available: bool | None = None,
-    include_recent_messages: bool = True,
+    include_recent_messages: bool = True, context_bundle: dict[str, Any] | None = None,
 ) -> PreparedBackgroundContext:
     policy_request = tool_policy_request(agent, request, proactive_delivery_available=proactive_delivery_available)
     task_id = str(getattr(request, "task_id", "") or "").strip()
     payload = _prepare_context_payload(
         agent, store, thread, task_id, policy_request,
         active_wake_signal=model_visible_wake_signal(getattr(request, "wake_signal", None)),
+        context_bundle=context_bundle,
     )
     return PreparedBackgroundContext(
         payload=payload, header=tuple(_context_header(request, thread)),
@@ -269,7 +270,7 @@ def _audit_event_source_ids(wake_signal: object) -> set[str]:
 
 
 # LLM: 维持原读取与进度对账顺序，返回唯一预算器的输入；task_runtime_state可能写账，错误保留供render展示。
-# 函数用途: 一次准备后台事实与原预算配置，之后候选纯渲染不重做这些副作用。
+# 函数用途: 一次准备后台事实与预算，复用宿主已读bundle；进度对账可能写盘，后续纯渲染不重做。
 def _prepare_context_payload(
     agent: object,
     store: ConversationStore,
@@ -278,6 +279,7 @@ def _prepare_context_payload(
     policy_request: BackgroundToolPolicyRequest,
     *,
     active_wake_signal: dict[str, Any] | None = None,
+    context_bundle: dict[str, Any] | None = None,
 ) -> BackgroundContextPayloadRequest:
     config = getattr(agent, "config", None)
     load_errors: list[dict[str, Any]] = []
@@ -287,7 +289,7 @@ def _prepare_context_payload(
     narrow_audit_event = is_narrow_audit_event(policy_request.reason)
     visible_run_ids = [] if narrow_audit_event else _thread_active_task_ids(state)
     agent_tree = {} if narrow_audit_event else _agent_tree_payload(state, visible_run_ids)
-    bundle = load_context_bundle(state)
+    bundle = load_context_bundle(state) if context_bundle is None else deepcopy(context_bundle)
     if narrow_audit_event:
         bundle = _narrow_audit_event_bundle(bundle, task_id=task_id)
     pending_wake_signals = [] if narrow_audit_event else _pending_wake_signals(state)

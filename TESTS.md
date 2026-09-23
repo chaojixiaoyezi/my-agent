@@ -1,5 +1,15 @@
 # 测试与发布验收
 
+## 第 12.4 项后台实际摘要视图接线（本地）
+
+后台普通/task/turn范围现把同一AppliedCompactContext传给历史种子、上下文、工具过滤和摘要器。局部transcript与live/carried均显式写scope/base，仍复用原检查点/CAS；完整归档与运行预算保留。原历史读取错误测试已改为真实canonical入口，旧无checkpoint的假摘要夹具改为真实writer/CAS。
+
+18文件联合 **420 passed**，日志 `/tmp/background_scope_joint_20260923.log`。新增scoped transcript覆盖交错范围、无提交和竞争CAS；后台4项使用真实SimpleAgent/Store/checkpoint/CAS和原工具循环到模型消息投影，仅摘要替身，确认原三类材料丢失已修且正文只注入一次。应用视图测试另外覆盖旧view不跟随新链隐藏、错线程拒绝、未知身份保留、narrow无seed、native/text摘要消费和媒体块保持。
+
+最后native/text分支和普通历史摘要去重补强后，应用视图、后台范围、native IR、Gateway/child恢复及接续七文件 **102 passed**；空工具记录也核对显式view线程后，应用视图/后台范围/能力展示三文件 **29 passed**。这些是后续定向复验，不与420相加。Ruff、doc sync、导入边界（0发现）、strict code-size（hard=0，基线未变）、diff与clean-package均通过。
+
+此片没有真实HTTP、供应商、部署、重启或线上CI证据。后台完整恢复候选与首个实际payload、narrow活动IR完整计量、Gateway/child准备边界的同view绑定仍未完成；不勾选12.4，不抵充前轮全仓8项失败。超大原文读取也仍未验通过。
+
 ## 第 12.4 项作用域检查点与工具来源底座（本地）
 
 原writer现统一写v3，scope、摘要基础与精确覆盖沿同一提交链，原generation CAS保持唯一；局部提交可以保留全线程摘要/游标。新reader只收集实际适用摘要的base覆盖。旧v1/v2显式读取并核对原摘要hash，未知旧工具身份不伪装为精确引用。

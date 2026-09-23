@@ -539,9 +539,9 @@ def _native_compact_floor_tokens(
     return estimator()
 
 
-# LLM: An authoritative turn binds its exact thread before summary generation and rechecks stop
-# before classifying an empty result; only real empty summaries consume the shared circuit.
-# 函数用途: 找到本代理线程并可中断地生成完整摘要，真实失败时才记录统一熔断事实。
+# LLM: An authoritative turn binds the applied scope/view to its exact thread before summary
+# generation; only real empty summaries consume the shared circuit.
+# 函数用途: 按本次摘要范围绑定代理线程并生成摘要，真实失败才记录熔断事实。
 def _live_compact_binding_and_summary(
     agent: object,
     params: ToolLoopExecuteParams,
@@ -561,6 +561,7 @@ def _live_compact_binding_and_summary(
         agent,
         task_attributes=params.task_attributes,
         policy=policy,
+        compact_context=params.compact_context,
     )
     progress_generation = _native_compact_progress_generation(params, binding)
     progress_operation_id = f"live-tool:{uuid.uuid4().hex}"
@@ -628,9 +629,9 @@ def _live_compact_binding_and_summary(
     raise error
 
 
-# LLM: The slow summary call checks both cancellation sources before and after provider I/O.
-# Interruption closes the block neutrally; only real failure enters the live Compact circuit.
-# 函数用途: 可中断地调用 Compact 摘要模型，并把停止和真实失败投影成不同终态。
+# LLM: The slow summary call uses the applied view as its semantic base when present, matching
+# source hiding and checkpoint base; interruption remains neutral.
+# 函数用途: 按本次适用摘要可中断地调用模型，并区分停止与真实失败。
 def _summarize_live_compact(
     agent: object,
     params: ToolLoopExecuteParams,
@@ -651,7 +652,11 @@ def _summarize_live_compact(
         summary = _native_tool_history_summary(
             agent,
             params,
-            previous_summary=(binding.thread.summary if binding is not None else ""),
+            previous_summary=(
+                params.compact_context.view.summary
+                if params.compact_context is not None
+                else binding.thread.summary if binding is not None else ""
+            ),
             provider_prompt=provider_prompt,
         )
         raise_if_compact_interrupted(interrupt_check)
@@ -912,9 +917,9 @@ def _reduce_native_ir_to_target(
     return dropped
 
 
-# LLM: This is the only bridge from a settled native window to the canonical thread commit and it
-# forwards the run-owned interrupt check across checkpoint/CAS.
-# 函数用途: 计算精确调用边界并可中断地把稳定窗口提交为下一代 Compact。
+# LLM: This bridge carries the same applied scope and semantic base through checkpoint/CAS; after
+# success it updates only the transient view while the complete archive stays untouched.
+# 函数用途: 提交精确工具边界，并把成功后的同范围摘要视图留给下一模型轮。
 def _commit_native_ir_generation(
     agent: object,
     params: ToolLoopExecuteParams,
@@ -949,6 +954,10 @@ def _commit_native_ir_generation(
             policy=plan.policy,
             request_id=params.request_id,
             attempt_id=params.attempt_id,
+            summary_base_checkpoint_id=(
+                params.compact_context.view.checkpoint_id
+                if params.compact_context is not None else None
+            ),
             forced=plan.forced,
             interrupt_check=lambda: _native_compact_interrupted(params),
             after_checkpoint=lambda: _emit_native_compact_progress(
@@ -960,7 +969,51 @@ def _commit_native_ir_generation(
             ),
         ),
     )
+    if params.compact_context is not None:
+        _refresh_native_compact_context(
+            params,
+            updated_thread,
+            summary=plan.semantic_summary,
+            source_refs=source_refs,
+        )
     return max(0, int(updated_thread.compact_generation or 0))
+
+
+# LLM: A winning CAS fixed the checkpoint. Extend its run-local view from the frozen base/refs;
+# the new current-turn IR summary then replaces only the synthetic old provider-history prefix.
+# 函数用途: 提交后更新同范围视图，并从前置历史移除已由本轮IR替代的旧摘要。
+def _refresh_native_compact_context(
+    params: ToolLoopExecuteParams,
+    thread: object,
+    *,
+    summary: str,
+    source_refs: tuple[dict[str, str], ...],
+) -> None:
+    from ..conversation.compact_summary_view import AppliedCompactContext, CompactSummaryView
+
+    previous = params.compact_context
+    if not isinstance(previous, AppliedCompactContext):
+        raise TypeError("Compact 应用上下文类型无效")
+    view = previous.view
+    updated_view = CompactSummaryView(
+        checkpoint_id=str(getattr(thread, "compact_checkpoint_id", "") or ""),
+        summary=str(summary or ""),
+        operation_evidence=dict(view.operation_evidence),
+        source_message_ids=view.source_message_ids,
+        source_tool_refs=(*view.source_tool_refs, *(dict(ref) for ref in source_refs)),
+        legacy_message_end_ids=view.legacy_message_end_ids,
+        generation=max(0, int(getattr(thread, "compact_generation", 0) or 0)),
+    )
+    object.__setattr__(params, "compact_context", AppliedCompactContext(
+        thread_id=previous.thread_id,
+        scope=previous.scope,
+        view=updated_view,
+    ))
+    history = getattr(params, "provider_history_messages", None)
+    if isinstance(history, list) and getattr(params, "conversation_history_seed", None) is not None:
+        from .runtime.loop_support import _native_provider_history_messages
+
+        history[:] = _native_provider_history_messages(params, include_compact_summary=False)
 
 
 # LLM: Native Compact observes both the runner thread interrupt and the run-owned cancellation
@@ -1236,13 +1289,15 @@ def _native_tool_history_summary(
     )
 
 
-# LLM: 注入副本追加当前目标事实，不修改历史容器或堆积逐轮副本；正文和状态分别保留既有权威。
-# 函数用途: 组装文本历史、投递要求与本轮 Goal 归属，前后台和原生工具协议共用。
+# LLM: Text history must use the same applied summary as source hiding; injections remain a copy
+# and the original seed/message containers are untouched.
+# 函数用途: 按本次摘要视图组装文本历史、投递要求与 Goal 归属，不修改原容器。
 def _runtime_injections_with_delivery_contract(params: ToolLoopExecuteParams, *, agent: object | None = None) -> list:
     injections = list(params.runtime_injections)
     if not native_tool_use_active(params):
         conversation = _text_conversation_history_section(
-            params.conversation_history_seed
+            params.conversation_history_seed,
+            compact_context=params.compact_context,
         )
         if conversation:
             injections.append(conversation)
@@ -1260,15 +1315,24 @@ def _runtime_injections_with_delivery_contract(params: ToolLoopExecuteParams, *,
     return injections
 
 
-# LLM: Text protocol receives the same already-bounded conversation seed as native protocol,
-# rendered once without reloading the transcript. Role labels are display context only and never
-# become lifecycle, routing, or completion authority.
-# 函数用途: 为不支持原生 messages 的模型补回摘要和完整历史，保持与旧文本链路等价。
-def _text_conversation_history_section(seed: object) -> str:
+# LLM: Text protocol renders the bounded seed once but selects the explicit applied summary when
+# present; role labels and prose never become lifecycle or coverage authority.
+# 函数用途: 给文本模型补回本次真正适用的摘要和原有历史消息，缺少视图时沿原线程路径。
+def _text_conversation_history_section(seed: object, *, compact_context: object = None) -> str:
     if seed is None:
         return ""
-    summary = str(getattr(seed, "compact_summary", "") or "").strip()
-    generation = max(0, int(getattr(seed, "compact_generation", 0) or 0))
+    from ..conversation.compact_summary_view import AppliedCompactContext
+
+    if compact_context is not None and not isinstance(compact_context, AppliedCompactContext):
+        raise TypeError("Compact 应用上下文类型无效")
+    summary = str(
+        compact_context.view.summary
+        if compact_context is not None else getattr(seed, "compact_summary", "") or ""
+    ).strip()
+    generation = max(0, int(
+        compact_context.view.generation
+        if compact_context is not None else getattr(seed, "compact_generation", 0) or 0
+    ))
     messages = tuple(getattr(seed, "messages", ()) or ())
     if not summary and not messages:
         return ""

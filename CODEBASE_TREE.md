@@ -391,7 +391,8 @@ agent_py_agent/
 |   |   |-- background_recovery.py      # 按次查询权威恢复阻断，只去重日志、不缓存执行资格
 |   |   |-- background_tool_policy.py   # 无副作用的后台工具目录、owner/task 收紧及展示投影
 |   |   |-- background_context.py       # 后台一次性事实准备与纯渲染，保留任务范围和原预算
-|   |   |-- background_history_seed.py  # 后台历史范围冻结、纯种子投影与读取失败合同
+|   |   |-- background_history_seed.py  # 后台范围与应用视图冻结、精确消息覆盖、种子及压缩来源
+|   |   |-- background_compact_context.py # 后台范围选择、旧边界解析与同视图上下文投影
 |   |   |-- background_execution.py     # 后台单片执行、Compact 重试、原生历史保存与具名结果
 |   |   |-- background_delivery.py      # 后台投递、canonical 回复提交、整封冻结与耐久去重
 |   |   |-- control_commands.py        # CLI/IM 共用 typed slash dispatcher、task command 与状态渲染
@@ -567,6 +568,9 @@ agent_py_agent/
 |   |-- test_subagent_capability_compact.py # child 同轮展示沿真实 Compact 重试保留、失效清除与新轮重置
 |   |-- test_background_prepared_context.py # 后台重复纯渲染无写账、冻结输入、任务范围与窄审计隔离
 |   |-- test_compact_scoped_checkpoint.py # 交错作用域、摘要基础、局部CAS、版本篡改与精确覆盖
+|   |-- test_compact_scoped_transcript.py # 局部历史来源、交错摘要基础与竞争CAS
+|   |-- test_applied_compact_context.py # 同一应用视图的参数传递、工具过滤和摘要注入
+|   |-- test_background_scoped_compact.py # 独立任务与窄事件原Store压缩及实际模型材料回归
 |   |-- test_compact_tool_provenance.py  # 原归档索引四元身份、同名调用保留与产物不覆盖
 |   |-- test_model_turn_identity.py     # 同run/attempt跨真实模型轮的身份碰撞及错误隐藏回归
 |   |-- test_background_capability_compact.py # 后台同工作片展示复用、清除与下一片重新评估
@@ -884,7 +888,8 @@ docs/
 - `agent_py_agent/agent/conversation/background_claim.py`：仅持有原 claims 域及精确能力；领取后重查终态/恢复，运行中复用共享心跳，退出先停心跳再结算本 claim，普通失败最后记账。
 - `agent_py_agent/agent/conversation/background_recovery.py`：每次解析并查询当前权威恢复入口；指纹只抑制重复日志，unknown/不可读阻断不消费原来源。
 - `agent_py_agent/agent/conversation/background_context.py`：显式请求接口一次准备原会话事实，再纯渲染；原任务进度对账不在重复候选渲染中执行。
-- `agent_py_agent/agent/conversation/background_history_seed.py`：复用canonical未压缩历史与provider投影，同次冻结任务范围、摘要和预算；禁用/不可读不伪造投影依据。
+- `agent_py_agent/agent/conversation/background_history_seed.py`：先按原任务范围筛选canonical原文，再按实际采用摘要覆盖移除消息；原种子和Compact来源共用视图，读取失败不伪造空历史。
+- `agent_py_agent/agent/conversation/background_compact_context.py`：只读选择thread/task/turn范围，解析旧覆盖边界并对齐后台上下文摘要；不拥有持久状态或任务权限。
 - `agent_py_agent/agent/conversation/background_execution.py`：显式接收执行、存储与参数准备能力，保留同片取消、Compact 和原生历史；不选择唤醒、不投递外部消息。
 - `agent_py_agent/agent/conversation/background_delivery.py`：显式交付能力连接原渠道和唯一 store；外发、过程/final 提交、审计回执与整封冻结保持原顺序，不运行模型或拥有调度状态。
 - `agent_py_agent/agent/gateway_parts/workspace_scope.py`：普通消息和首次 Goal 共用目录校验；只接受宿主已存在的合法路径，声明本身不增加权限。

@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from ..runtime_errors import runtime_error_report
+from .background_compact_context import background_compact_application, compact_covered_message_ids
 from .background_context import (
     BackgroundContextLoad,
     BackgroundContextRequest,
@@ -18,6 +19,8 @@ from .background_context import (
     tool_policy_request,
 )
 from .background_tool_policy import BackgroundToolPolicyRequest
+from .compact_projection import ConversationCompactSource
+from .compact_summary_view import AppliedCompactContext
 from .models import ConversationHistorySeed, ConversationThread, MessageLogEntry
 from .store import ConversationStore
 
@@ -53,15 +56,15 @@ def history_scope_rows(
 
 # LLM: 解析种子并把"历史读不到"升级成 typed 错误：读不到时不许退回有界摘要继续跑模型，
 # 那会把"读取失败"伪装成"上下文骤降"，让模型在缺历史时作答。抛错 → 本片失败、唤醒不确认、可重试。
-# 函数用途: 取得本片可用的历史种子，或抛出 BackgroundHistoryUnavailableError。
-def background_history_seed_or_raise(
+# 函数用途: 取得同次历史种子、摘要视图和压缩来源，或抛出 BackgroundHistoryUnavailableError。
+def prepare_background_history_or_raise(
     agent: object,
     store: ConversationStore | None,
     thread: ConversationThread | None,
     request: BackgroundContextRequest,
     *,
     proactive_delivery_available: bool | None = None,
-) -> object | None:
+) -> BackgroundHistorySeedResult:
     result = background_conversation_history_seed(
         agent,
         store,
@@ -79,7 +82,7 @@ def background_history_seed_or_raise(
             load_errors=list(result.load_errors),
             detail=result.detail,
         )
-    return result.seed
+    return result
 
 
 # LLM: 后台历史不可读是可恢复的运行事实，不是"空历史"。抛这个 typed 错误让上层：
@@ -102,13 +105,15 @@ class BackgroundHistoryUnavailableError(RuntimeError):
 
 
 # LLM: 范围只来自同次已成功加载的bundle；复制锚点/lineage和thread投影，不让后续任务变化或渲染重新扩大权限。
-# 类用途: 固定一次后台历史准备的范围、摘要与预算，供原准备和后续候选纯投影共用。
+# 类用途: 固定一次后台历史的范围、实际摘要覆盖与预算，供原准备和后续候选纯投影共用。
 @dataclass(frozen=True)
 class BackgroundHistoryProjection:
     thread_id: str
     scope: TaskScopeDecision
     thread: dict[str, Any] = field(repr=False)
     token_budget: int
+    compact_context: AppliedCompactContext | None = None
+    covered_message_ids: frozenset[str] = frozenset()
 
     # LLM: frozen dataclass中的嵌套字典同样须隔离，不能借后来的任务link或线程修改改变已冻结范围。
     # 函数用途: 复制实际scope和摘要字段，不产生额外读盘或持久状态。
@@ -117,14 +122,15 @@ class BackgroundHistoryProjection:
         object.__setattr__(self, "thread", deepcopy(self.thread))
 
 
-# LLM: 显式rows是唯一历史输入，范围与摘要来自同次准备；不重读task/store或按正文推断归属，读取失败不得在这里补空。
+# LLM: 显式rows是唯一历史输入，范围与摘要来自同次准备；scope_applied只用于原Compact已筛选候选，不能重用全局cursor。
 # 函数用途: 从已读行生成后台原生历史种子，使用原筛选、预算和provider消息投影。
-def project_background_history_seed(agent, prepared: BackgroundHistoryProjection, rows) -> ConversationHistorySeed:
+def project_background_history_seed(agent, prepared: BackgroundHistoryProjection, rows, *, scope_applied: bool = False) -> ConversationHistorySeed:
     from .history_projection import conversation_history_rows
     from .native_history import provider_history_messages_from_rows
 
+    scoped = list(rows) if scope_applied else history_scope_rows(prepared.scope, list(rows))
     selected_rows = conversation_history_rows(
-        agent, prepared.thread_id, "", [], rows=tuple(history_scope_rows(prepared.scope, list(rows))),
+        agent, prepared.thread_id, "", [], rows=tuple(row for row in scoped if row.message_id not in prepared.covered_message_ids),
         token_budget=prepared.token_budget,
     )
     return ConversationHistorySeed(
@@ -142,7 +148,7 @@ def project_background_history_seed(agent, prepared: BackgroundHistoryProjection
 #   伪装成"上下文骤降"；
 # - disabled: 窄范围审计事件等按设计不使用会话历史。
 # 调用方（background_execution.run_background_turn_with_compact）读 status 决定是否继续，load_errors 一路带出去。
-# 类用途: 承载三态结果、错误及同次纯投影依据；disabled/unreadable不伪造可用范围。
+# 类用途: 承载三态历史与实际摘要范围；disabled只允许当前活动轮摘要，unreadable不伪造可用范围。
 @dataclass(frozen=True)
 class BackgroundHistorySeedResult:
     status: str
@@ -150,6 +156,9 @@ class BackgroundHistorySeedResult:
     load_errors: tuple[dict[str, Any], ...] = ()
     detail: str = ""
     projection: BackgroundHistoryProjection | None = field(default=None, repr=False)
+    compact_context: AppliedCompactContext | None = field(default=None, repr=False)
+    compact_source: ConversationCompactSource | None = field(default=None, repr=False)
+    context_bundle: dict[str, Any] | None = field(default=None, repr=False)
 
 
 # LLM: 后台工作片必须与前台共用同一份 canonical 历史投影与同一个 Compact 权威：
@@ -174,7 +183,14 @@ def background_conversation_history_seed(
     # 窄范围审计事件（finding/capacity）是"一条结构化事件"，不是会话续接：
     # 它们必须只看到事件事实与审计目标，不能把 owner 的旧聊天历史带进模型输入。
     if is_narrow_audit_event(getattr(request, "reason", "")):
-        return BackgroundHistorySeedResult("disabled", detail="narrow audit event")
+        try:
+            application = background_compact_application(agent, thread, request)
+        except Exception as exc:
+            return BackgroundHistorySeedResult(
+                "unreadable", load_errors=(runtime_error_report(exc, context="background_history.compact_scope"),),
+                detail=f"narrow compact scope failed: {type(exc).__name__}",
+            )
+        return BackgroundHistorySeedResult("disabled", detail="narrow audit event", compact_context=application)
     load_errors: list[dict[str, Any]] = []
     scope_state = BackgroundContextLoad(
         agent,
@@ -202,15 +218,10 @@ def background_conversation_history_seed(
             detail="conversation context reported load errors",
         )
     try:
-        from ..agent_core.runtime.context_compactor import runtime_compact_policy
-        from .compact import _uncompacted_conversation_rows
-        rows = _uncompacted_conversation_rows(store, thread)
-        prepared = BackgroundHistoryProjection(
-            thread_id=thread_id, scope=task_scope_decision(scope_state, scoped),
-            thread=scoped.get("thread") if isinstance(scoped.get("thread"), dict) else {},
-            token_budget=int(getattr(runtime_compact_policy(agent), "trigger_tokens", 0) or 0),
-        )
-        seed = project_background_history_seed(agent, prepared, rows)
+        decision = task_scope_decision(scope_state, scoped)
+        application = background_compact_application(agent, thread, request, decision)
+        loaded = _load_scoped_history(agent, store, thread, decision, application, dict(scoped.get("thread") or {}))
+        return replace(loaded, context_bundle=deepcopy(scoped))
     except InterruptedError:
         raise
     except Exception as exc:
@@ -220,10 +231,45 @@ def background_conversation_history_seed(
             load_errors=tuple(load_errors),
             detail=f"history projection failed: {type(exc).__name__}",
         )
-    if load_errors:
-        return BackgroundHistorySeedResult(
-            "unreadable",
-            load_errors=tuple(load_errors),
-            detail="history projection reported load errors",
-        )
-    return BackgroundHistorySeedResult("ready", seed=seed, projection=prepared)
+
+
+# LLM: 只刷新同一冻结范围的原检查点和消息；不得重读任务link扩大范围，narrow始终不加载会话历史。
+# 函数用途: 溢出后用最新CAS代次准备同一任务的压缩来源，保留宿主原范围裁决。
+def refresh_background_history(agent, store, thread, previous: BackgroundHistorySeedResult) -> BackgroundHistorySeedResult:
+    from .compact_summary_view import resolve_compact_summary_view
+
+    old = previous.compact_context
+    if old is None or old.thread_id != thread.thread_id:
+        raise BackgroundHistoryUnavailableError("background compact scope is unavailable")
+    application = replace(old, view=resolve_compact_summary_view(agent, thread, old.scope))
+    if old.scope.kind == "turn":
+        return BackgroundHistorySeedResult("disabled", detail="narrow audit event", compact_context=application)
+    if previous.projection is None:
+        raise BackgroundHistoryUnavailableError("background history projection is unavailable")
+    return _load_scoped_history(agent, store, thread, previous.projection.scope, application, previous.projection.thread)
+
+
+# LLM: 全局cursor不代表局部摘要覆盖；先按原任务事实筛选完整行，再按实际采用的view精确替代，不修改原记录。
+# 函数用途: 共用首次和溢出准备的历史读取、范围过滤和来源构造；坏原文不能当成空历史。
+def _load_scoped_history(agent, store, thread, decision, application, scoped_thread) -> BackgroundHistorySeedResult:
+    from ..agent_core.runtime.context_compactor import runtime_compact_policy
+    from .compact import _recent_operation_evidence
+
+    rows, errors = store.messages.recent_report(thread.thread_id, limit=0)
+    if errors:
+        raise BackgroundHistoryUnavailableError("canonical background history is unreadable", load_errors=errors)
+    covered = compact_covered_message_ids(application.view, rows)
+    projected_thread = dict(scoped_thread)
+    projected_thread.update(summary=application.view.summary, compact_generation=thread.compact_generation,
+                            compact_operation_evidence=deepcopy(application.view.operation_evidence))
+    policy = runtime_compact_policy(agent)
+    prepared = BackgroundHistoryProjection(
+        thread_id=thread.thread_id, scope=decision, thread=projected_thread,
+        token_budget=int(getattr(policy, "trigger_tokens", 0) or 0),
+        compact_context=application, covered_message_ids=covered,
+    )
+    pending = tuple(row for row in history_scope_rows(decision, rows) if row.message_id not in covered)
+    source = ConversationCompactSource(thread, pending, policy, dict(_recent_operation_evidence(pending) or {}),
+                                       compact_context=application)
+    return BackgroundHistorySeedResult("ready", seed=project_background_history_seed(agent, prepared, rows),
+                                       projection=prepared, compact_context=application, compact_source=source)

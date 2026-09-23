@@ -51,7 +51,7 @@ assert not any(name.startswith('agent_py_agent.agent.gateway_parts.') for name i
     "from agent_py_agent.agent.backends import ModelResponse; ModelResponse(text='', backend='test')",
     "from agent_py_agent.agent.conversation.background_tool_policy import background_tool_policy_decision; background_tool_policy_decision()",
     "from agent_py_agent.agent.conversation.background_context import context_markdown; assert callable(context_markdown)",
-    "from agent_py_agent.agent.conversation.background_history_seed import background_history_seed_or_raise; assert callable(background_history_seed_or_raise)",
+    "from agent_py_agent.agent.conversation.background_history_seed import prepare_background_history_or_raise; assert callable(prepare_background_history_or_raise)",
     "from agent_py_agent.agent.gateway_parts.workspace_scope import gateway_request_workspace_scope; assert callable(gateway_request_workspace_scope)",
     "from agent_py_agent.agent.conversation.background_execution import invoke_background_turn; assert callable(invoke_background_turn)",
     "from agent_py_agent.agent.conversation.background_claim import run_claimed; assert callable(run_claimed)",

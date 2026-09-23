@@ -76,7 +76,7 @@ system/tools/messages 前缀，超窗时按原分段合同覆盖完整历史。�
 
 1. **读不到历史不再静默降级**：`_background_conversation_history_seed` 返回三态
    （`ready` / `unreadable` / `disabled`），异常与 load_errors 都带结构化错误；
-   `_background_history_seed_or_raise` 对 `unreadable` 抛 `BackgroundHistoryUnavailableError`
+   `prepare_background_history_or_raise` 对 `unreadable` 抛 `BackgroundHistoryUnavailableError`
    （error_code `BACKGROUND_HISTORY_UNAVAILABLE`，带 load_errors/detail）→ 本片失败、唤醒不确认、可重试。
    以前 `except Exception: return None` 会让调用方 `include_recent_messages=True` 退回有界摘要继续跑模型，
    把"历史读取失败"伪装成"上下文骤降"。
