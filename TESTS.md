@@ -29,7 +29,18 @@ TUI212 的工作区准备失误与后续框架现象分开：原生历史已有�
 - TUI219 本机125.53秒自然结束：200行平方与汇总正确，父子3个attempt全done、无锁、准确宿主退出。孩子实际未调用capability_request，canonical申请／grant均为空，状态DONE；父级最终报告和README却声称正式申请、孩子等待授权。此为场景未命中与模型报告错误，不能计修复分支通过，测试者不补申请、不改报告。
 - TUI217 测试机正式只读授权场景停滞，具体事实与后续归属见7.9；保留原TUI和状态，不额外提示、不人工恢复。
 
-## 第 7.9 步授权与旧工作片结束之间的接续（真实失败，定位中）
+## 新版 TUI220—224：授权接续与能力事件最终交付
+
+安装源码67bb7817e、wheel83975aff，普通测试均由原生TUI一次中文需求发起，实际会话选择官方MiniMax-M2.7；日常默认模型未改。原始模型、请求、工具、claim、产物与进程证据留仓库外。
+
+- TUI223本机87.24秒：三个孩子原DB执行区间重叠21.08秒，主子5个attempt均done，资源锁为零，三条完成通知各发布并消费；原共享孩子宿主退出。模型自行修正合并脚本错误，最终600行编号及立方逐项正确，数字和180300、立方和32508090000，摘要哈希一致。完成后的公开final走原root_subagents_terminal。
+- TUI222本机148.68秒：真实孩子capability_request保持OPEN且无grant，父级接手生成240行数据，实际逐行验证工具已执行，外部只读核对数据、汇总和哈希一致。父子2个attempt均done、无锁、孩子宿主退出；最终回复在原前台轮完成，因此不计后台能力事件分支命中。
+- TUI224本机122.96秒：父级先回复已派出并结束前台轮，原capability_request_open唤醒后台处理；同一后台工作片完成后公开final带capability_lifecycle_completion。原任务done、3个attempt均done、无锁，孩子仍BLOCKED，正式申请OPEN／grant为空，准确宿主退出。两条公开final分别为派出确认与最终交付，无同一后台请求重复final。第7.8所修正的真实正向分支通过，未人工改wake、任务状态或旧回复。
+- TUI224业务核验另列：外部只读检查240行平方立方均正确、CSV哈希与摘要一致；但被测对象实际只运行行数、首尾／中间抽样和哈希，没有执行需求中的逐行核验及汇总合计。不能用观察者的完整检查补算模型已履约，不把框架交付成功记成完整业务验收通过。
+- TUI220本机215.42秒：正式授权后同一孩子第二attempt实际执行，5个父子attempt均done、无锁，300行正确，父级自行修正孩子错误平方和及缺失哈希。grant在旧session退出后约0.18秒，故正常接续成立，准确旧片退出交错未命中。原生历史另见先由subagent_non_success_terminal交付，再由root_subagents_terminal回复上一轮已完成；只读已确认：旧BLOCKED通知先在前台handled，后被后台旧pending快照再次选中；此时孩子已DONE，旧非成功分支直接公开final，新DONE通知后续又公开一次。该通用通知缺陷归7.10，不提前计完全通过。第二attempt为Gateway内进程执行，不能因共享Gateway仍活就判资源泄漏或停止服务。
+- TUI221测试机同题376.47秒自然完成，同一孩子两次正式申请／授权、三轮attempt，最终DONE；300行、数字和45150、平方和9045050、立方和2038522500及哈希正确，父模型自行修正孩子错误平方和并执行16项复核。7条wake均handled、无锁／WAL、三个准确宿主退出。两次授权分别在旧session退出约13.28／11.48秒后，准确交错仍未命中。公开final恰两条：前台等待确认和唯一后台root_subagents_terminal最终交付，没有220的重复后台完成回复。
+
+## 第 7.9 步授权与旧工作片结束之间的接续（修复已部署，原生复验中）
 
 TUI217 原生一次需求真实派read_only孩子；孩子OPEN能力申请，父级grant准确delivery写入目录。
 原grant回执为continuation=already_running／fresh_runner_session；随后旧孩子attempt结束BLOCKED，canonical被写为PENDING。
@@ -38,7 +49,7 @@ OPEN、grant和BLOCKED finished三条wake均handled，原后台claim finished、
 这是实际授权接续未完成，不能因所有当前attempt结束或没有锁而记为任务通过；也不能用模型“启动中”证明执行器仍活着。
 冻结快照377秒后再次读回，原状态、attempt和wake均未变化；准确TUI客户端保留，原宿主不存在。
 源码交错定位：grant进入时旧工作片已生成BLOCKED结果，canonical归约为已授PENDING，但结束通知用旧结果把child link写BLOCKED，worker又按旧结果跳过接续；原生命周期门因此持续HOLD。独立owner在隔离目录先做确定性交错红灯，再修通知投影、当前状态接续和唤醒窄字段持久化，不通过放宽启动门掩盖失配。
-原账已私下归档，冻结和五分钟后复核阶段未人工改状态或重发业务请求。定位不再依赖活现场后，测试者通过原生/stop结束旧217：父link=interrupted，孩子仍PENDING/link BLOCKED，原attempt全部done、无锁；随后原生/exit，准确客户端与旧宿主都不存在。这是失败测试的控制收尾，不是修复通过或孩子已取消的证明。候选634d12daf已集成为911a53245；三个独立旧红灯转绿，17个交错用例通过，9文件组合236通过／1项既有Linux /proc跳过，严格gate通过。真实RuntimeDB合同确认旧done经原派工入口登记同run第二attempt，重放不多开；父任务interrupted／cancelled均禁止新登记。主线授权／worker／后台交付三文件组合通过，严格gate通过；待发布新版与原生复验，不进入第8步。
+原账已私下归档，冻结和五分钟后复核阶段未人工改状态或重发业务请求。定位不再依赖活现场后，测试者通过原生/stop结束旧217：父link=interrupted，孩子仍PENDING/link BLOCKED，原attempt全部done、无锁；随后原生/exit，准确客户端与旧宿主都不存在。这是失败测试的控制收尾，不是修复通过或孩子已取消的证明。候选634d12daf已集成为911a53245；三个独立旧红灯转绿，17个交错用例通过，9文件组合236通过／1项既有Linux /proc跳过，严格gate通过。真实RuntimeDB合同确认旧done经原派工入口登记同run第二attempt，重放不多开；父任务interrupted／cancelled均禁止新登记。主线授权／worker／后台交付三文件组合通过，严格gate通过；源码随67bb7817e推送main；同一wheel（83975aff）双机各1,274包文件逐项一致，默认入口和Gateway同版。TUI220／221复验授权续跑，222覆盖前台接手，223为三孩子并行对照，224命中后台能力完成交付；当前结果及缺口见上节，不进入第8步。
 
 部署操作证据纠正：旧私有切换脚本把本机conversation存储key用于远端，远端930f59f6的切换前wake归档实际为空。数据库与旧运行环境备份仍保留；补存的是测试后的当前wake快照，不能冒充切换前备份或覆盖新任务结果。后续切换脚本按各主机真实canonical目录发现claim与wake，禁止跨机复用目录key；这是部署脚本缺陷，不计产品框架失败或通过。
 
