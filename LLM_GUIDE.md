@@ -1,5 +1,7 @@
 # LLM_GUIDE
 
+12.5本地组合已完成：三宿主完整候选保留当前要求、工具schema及输出cap，容量不足不提交；Responses未知cap单列。十文件187项通过，增强断言后新14项复验通过（重叠不累加）。12.4/12.6/12.7仍开放，18项清单11/18不变。见[容量验收](docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。
+
 主线最小移植闭包已核对：扫描、等值估算、摘要窗口三组在固定主线临时副本通过97项及相邻139项；无Jev配置依赖，尚未合入或发布。scoped来源/覆盖必须另按合同闭包接入，11/18及12.4不变。见[移植交接](docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。
 
 12.4摘要分段本地15文件316项通过：复用原循环顺序读取JSON字符、消费后释放窗口；共享估算器改流式累计且数值保持。修复提示纳入预算，发送及来源EOF后复查取消；writer/CAS不变。全链仍有原消息/覆盖驻留，11/18不变。见[容量审计](docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。

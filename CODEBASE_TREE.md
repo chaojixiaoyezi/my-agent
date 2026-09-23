@@ -591,6 +591,7 @@ agent_py_agent/
 |   |-- test_compact_tool_partition.py   # 原生完整配对、跨轮同名调用、未知/媒体/孤儿保留
 |   |-- test_compact_native_ir_recovery.py # 真实读文件原生回执、恢复安全点、原CAS及候选HTTP对等
 |   |-- test_compact_text_source.py   # 顺序完整覆盖、源改写/取消、纠正预算与序列化峰值回归
+|   |-- test_compact_output_reserve.py # 三宿主完整输入和原输出cap、容量拒绝无提交及Responses字段对照
 |   |-- test_compact_retained_history.py # 三宿主完整保留行、媒体/工具回放和超容量不丢来源
 |   |-- test_compact_media_recovery.py  # 两协议媒体工具轮及溢出后原文保留、无摘要和无CAS
 |   |-- test_compact_transcript_media_partition.py # 文字前缀覆盖与媒体完整后缀、分段拒绝
@@ -1124,3 +1125,5 @@ docs/
 
 - `agent_py_agent/agent/conversation/compact_text_source.py`：原摘要循环的临时顺序字符源，EOF/hash验证后才能返回摘要；不落盘、不写检查点。
 - `agent_py_agent/tests/test_compact_text_source.py`：编码源完整性、有限窗口、取消与迭代器释放、纠正请求预算及大批消息峰值验证。
+
+- `agent_py_agent/tests/test_compact_output_reserve.py`：真实冻结请求与本地输出预留门组合，当前要求和工具schema保留，过界零业务发送/覆盖提交，Responses普通及OAuth未知上限分开验证。

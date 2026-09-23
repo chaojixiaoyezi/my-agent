@@ -1371,3 +1371,22 @@ scoped Compact 后续闭包不能省略：
 需要主线协调：继续保持 `_tool_loop_service.py` 的 8.1 职责拆分独占；scoped 接口适配后，原四项 `test_background_main_agent_runtime.py` fake Store 签名由主线 owner 更新。此次 A/B/C 没有接该接口，97/139 项通过不能消除决策分支原四项失败，也不覆盖旧全仓八项历史失败。文档应由主线按实际采用切片更新，不能把本线 Jev 文档作为生产依赖整包搬运。
 
 建议下一步：主线可先审查 A/B，再审查 C 的两项额外行为并运行其发布 gate；scoped 合同按上述顺序另片接入。本线继续第 12.4 完整来源/覆盖与真实缓存验收，11/18 不变。只读审查与独立测试可以并行，共享 writer/CAS、主线拆分文件和 Gateway 保持单 owner。
+
+
+### 12.5 完整请求与输出预留组合收口（本地）
+
+解决此前只用固定token数字验证接受公式、缺少真实宿主完整输入组合证据的问题。本片不改生产代码或输出政策；沿现有200K显式共享窗口、50K实际输出cap，使用原Gateway/child/后台入口、完整冻结投影、原估算和唯一Compact提交。Chat与Anthropic各覆盖可容纳与拒绝场景，Gateway启用原生工具schema；摘要内容和末端HTTP返回为测试替身，供应商usage不作证据。
+
+当前不可压缩要求含明确首尾与完整正文：Gateway/后台使用原系统配置，child使用原runner instruction入口，不能假定父system_prompt会成为child系统提示。候选和实际payload必须完整保留该正文与50K输出cap；允许的候选只提交一次并与首个实际payload相同。拒绝组完整输入仍低于180K原trigger，却高于或等于150K剩余输入界，返回原COMPACT_CANDIDATE_TOO_LARGE；无业务HTTP、无checkpoint/summary/byte cursor推进。并未为通过而缩短当前要求、减输出或修改估算数字。
+
+Responses另两项捕获原_generate最终request_json参数：普通max_output_tokens等于原预留，OAuth明确不发送该字段、预留保持未知；返回0只表示不推断额外预留，不是零输出耗用保证。Responses当前完整纯payload投影返回None，不能借Chat继承冒充自动模型采用已支持。等号、窗口未知、cap未知、未知投影与active来源的精确失败边界沿本轮联跑的已有测试，不宣称新HTTP组合覆盖每一个单元边界。
+
+新增 `test_compact_output_reserve.py` 14项；最初child fixture错误依赖父system_prompt，后改成真实instruction入口；工具schema启用后首次大样本高于trigger，调整输入尺寸使它明确落在输出预留独有的拒绝区间。生产门未修改，测试失败不是产品修复证明。Sol high只读审查未发现明确生产缺口；自定义HttpBackend子类仍不能凭父类字段假定真实出站行为，本片严格证据限于所测内置协议。
+
+十文件联合 **187 passed（25.52秒）**，日志 `/tmp/decision_output_reserve_joint_20260923.log`。包含新组合、gateway_conversation_compact、runtime_context_pressure、active_turn_compact_projection、三宿主recovery、mixed contract/recovery和responses_backend。随后增强Gateway schema非空及持久失败码断言，14项重新通过；日志 `/tmp/decision_output_reserve_20260923.log`，与187重叠不累加。估算不是供应商精确token保证，也不证明真实缓存命中。
+
+本片12.5本地合同与组合完成，18项大清单仍11/18。12.4全链大来源/覆盖驻留、12.6跨窗口协议故障组合、12.7真实缓存继续开放；原四项主线独占fake Store签名和旧八项全仓失败不在此片修复或抹除。没有真实网络、Gateway重启、部署或远端提交，线上CI未作为验收来源。
+
+建议下一步：继续12.4来源/覆盖内存瓶颈和12.6配置变化组合，然后在已授权独立测试机核验Compact后的实际缓存。只读审查和独立测试可以并行；主线8.1拆分、writer/CAS和共享Gateway保持单owner，不因本片通过提前整枝合并。
+
+本片新测试Ruff、doc sync、strict code-size（hard=0，基线未改）、diff和clean-package通过；只改测试和文档，未新增生产模块/配置。原四项主线fake Store接口失败仍开放，因此不宣称整枝本地严格gate通过。
