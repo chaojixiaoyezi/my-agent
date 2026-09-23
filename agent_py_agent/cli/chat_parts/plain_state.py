@@ -152,7 +152,7 @@ def resume_context_override(args) -> str | None:
 
 
 # LLM: ChatJob 是 plain/TUI worker 队列中的唯一任务对象；user 是模型正文，display_text 只保存用户原始输入用于队列编辑投影。
-# 类用途: 携带一次待执行聊天输入、注入、文件、请求身份和结构化系统任务。
+# 类用途: 携带一次待执行聊天输入、注入、附件 refs、请求身份和结构化系统任务。
 class ChatJob:
 
     __slots__ = (
@@ -170,10 +170,11 @@ class ChatJob:
         "tool_approval",
         "rich_transcript",
         "inject_complete",
+        "input_media",
     )
 
     # LLM: display_text 缺省回落到 user，只影响可编辑队列显示；request_id/system_task 仍是执行与控制的机器事实。
-    # 函数用途: 创建一条可由 plain 或 TUI worker 串行消费的聊天任务。
+    # 函数用途: 创建一条可由 plain 或 TUI worker 串行消费的聊天任务，冻结附件 refs。
     def __init__(
         self,
         *,
@@ -191,6 +192,7 @@ class ChatJob:
         tool_approval: bool = False,
         rich_transcript: bool = False,
         inject_complete: bool = False,
+        input_media: tuple[dict, ...] = (),
     ) -> None:
         self.user = user
         self.show_prompt = show_prompt
@@ -206,3 +208,4 @@ class ChatJob:
         self.tool_approval = bool(tool_approval)
         self.rich_transcript = bool(rich_transcript)
         self.inject_complete = bool(inject_complete)
+        self.input_media = tuple(input_media)

@@ -377,13 +377,14 @@ def _prepare_candidate(agent: object, params: object, preparation: SubagentFirst
                              dependencies, candidate_params, request_input, validation, deadline)
 
 
-# LLM: 只读同一 child 冻结输入，选择共用原 native 规则；probe 有界，payload 共用实际 builder，计数沿原估算器。
+# LLM: 同一child冻结输入先核对跨模型内容可移植性，未知媒体/签名不探测或采用；probe有界，payload共用实际builder。
 # 函数用途: 在候选依赖中核对 native 工具支持及输入加真实输出上限，返回后续工具轮将直接使用的完整参数。
 def _candidate_request_input(agent: object, params: object, preparation: SubagentFirstRequestPreparation,
                              dependencies: object, deadline: float) -> tuple[object, ToolLoopRequestInput, dict]:
     import time
 
     from ...backends.base import ProviderRequestOptions
+    from ...backends.request_content import text_messages_supported
     from ...backends.request_scope import provider_request_budget
     from ...memory_archive import estimate_tokens
     from ...model_guidance import provider_system_instruction
@@ -395,8 +396,10 @@ def _candidate_request_input(agent: object, params: object, preparation: Subagen
         select_tool_protocol,
     )
     from ..tool_model_generation import ModelGenerateParams
-    from ..tool_request_projection import project_tool_loop_request
+    from ..tool_request_projection import project_tool_loop_request, text_request_capacity_known
 
+    if not text_request_capacity_known(preparation.request_input, allow_reasoning=False):
+        raise _CandidateUnavailable("history_modality_unknown")
     with model_dependencies_scope(agent, dependencies), provider_request_budget(deadline - time.monotonic()):
         protocol = select_tool_protocol(agent, run_id=params.run_id)
         candidate_params = replace(params, tool_protocol_snapshot=protocol)
@@ -410,6 +413,8 @@ def _candidate_request_input(agent: object, params: object, preparation: Subagen
         projector = getattr(agent.backend, "project_generate_payload", None)
         if projected.status != "ready" or not callable(projector):
             raise _CandidateUnavailable("provider_request_surface_unknown")
+        if not text_messages_supported(projected.messages or (), allow_reasoning=False):
+            raise _CandidateUnavailable("history_modality_unknown")
         # 和真实生成包装一样，原工具参数决定 choice/thinking；筛选后空 schema 不代表原参数缺失。
         payload = projector(projected.provider_prompt, tools=tools,
                             tool_choice=projected.tool_choice if tools is not None else None,

@@ -185,8 +185,8 @@ class OpenAICompatibleBackend(HttpBackend):
             payload["stream"] = True
         return deepcopy(payload)
 
-    # LLM: typed request 的角色、思考与采样继续由原适配规则处理；这是发送和预览唯一组包，不修改 canonical 历史。
-    # 函数用途: 纯构造 Chat 的历史、工具和输出格式，保留已核对端点的思考兼容语义。
+    # LLM: 发送和预览共用唯一组包；媒体按预算读文件并校验hash后编码，不修改canonical历史或推断模态容量。
+    # 函数用途: 构造Chat历史、工具和输出格式，保留原思考语义；媒体输入包含有界文件读取。
     def _request_payload(self, request: _OpenAIGenerateRequest) -> dict[str, Any]:
         from .sampling import chat_sampling_fields
 
@@ -201,9 +201,11 @@ class OpenAICompatibleBackend(HttpBackend):
             # 参考 轻量运行时 的 thinkingFormat 适配：官方与 Zen/Go 都默认开思考，强制工具探针须显式关闭；
             # 不是通用 OpenAI 字段，因此只在已核对端点的分支里写入。
             _disable_thinking_for(payload, api_base=self.api_base)
+        from ..conversation.input_media import project_input_media
+
         if request.messages is not None:
             payload["messages"] = _openai_messages_from_native(
-                request.messages,
+                project_input_media(request.messages, self.input_media_max_bytes),
                 initial_user_prompt=request.prompt,
                 system_instruction=request.system_instruction,
             )
@@ -607,36 +609,38 @@ def _openai_function_call(block: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-# LLM: Chat 工具结果保持调用配对及原顺序；普通文本只在相邻区间合并，需联合 native IR 回归。
-# 函数用途: 把用户内容块展开成 user/tool 消息，避免文本跨工具结果重排。
+# LLM: Chat 转换保留同一 user 消息内的文字/媒体顺序；媒体到发送边界才编码，不丢附件或跨 tool_result 合并。
+# 函数用途: 把用户内容块展开为 Chat user/tool 消息，支持图片和视频 URL 内容块。
 def _openai_user_messages(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    translated: list[dict[str, Any]] = []
-    pending_text: list[str] = []
+    from ..conversation.input_media import provider_media_block
 
-    # LLM: 该局部刷新只消费当前连续文本区间，不跨 tool_result 合并；调用方负责维持块顺序。
-    # 函数用途: 将待处理文字追加为一条用户消息，并清空局部缓冲。
-    def flush_text() -> None:
-        if pending_text:
-            translated.append({"role": "user", "content": "".join(pending_text)})
-            pending_text.clear()
+    translated: list[dict[str, Any]] = []
+    pending: list[dict] = []
+
+    # LLM: 纯文本沿用旧 wire 形态，含媒体时保留 typed content 数组；不修改原历史。
+    # 函数用途: 将连续的用户内容追加成一条消息，并清空局部缓冲。
+    def flush() -> None:
+        if pending:
+            content = "".join(item["text"] for item in pending) if all(item["type"] == "text" for item in pending) else list(pending)
+            translated.append({"role": "user", "content": content})
+            pending.clear()
 
     for block in blocks:
         if not isinstance(block, dict):
             continue
-        if block.get("type") == "text":
-            pending_text.append(str(block.get("text") or ""))
-            continue
-        if block.get("type") != "tool_result":
-            continue
-        flush_text()
-        translated.append(
-            {
-                "role": "tool",
-                "tool_call_id": str(block.get("tool_use_id") or ""),
-                "content": str(block.get("content") or ""),
-            }
-        )
-    flush_text()
+        kind = block.get("type")
+        if kind == "text":
+            pending.append({"type": "text", "text": str(block.get("text") or "")})
+        elif kind in {"image", "video"}:
+            source = provider_media_block(block)["source"]
+            url = source.get("url") if source["type"] == "url" else f"data:{source['media_type']};base64,{source['data']}"
+            key = f"{kind}_url"
+            pending.append({"type": key, key: {"url": url}})
+        elif kind == "tool_result":
+            flush()
+            translated.append({"role": "tool", "tool_call_id": str(block.get("tool_use_id") or ""),
+                               "content": str(block.get("content") or "")})
+    flush()
     return translated
 
 

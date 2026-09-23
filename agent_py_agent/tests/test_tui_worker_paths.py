@@ -77,7 +77,7 @@ def test_gateway_job_is_durably_submitted_before_running_snapshot(monkeypatch) -
         use_gateway=True,
         build_history_context=lambda: "must not be injected by thin client",
     )
-    job = SimpleNamespace(
+    job = SimpleNamespace(input_media=(),
         request_id="chat-local",
         gateway_request_id="",
         inject=["runtime rule"],
@@ -129,7 +129,7 @@ def test_thin_tui_initial_gateway_job_carries_client_workspace(tmp_path, monkeyp
         return write_request(target, payload)
 
     monkeypatch.setattr(request_client, "write_gateway_request", inspect_before_admission)
-    job = SimpleNamespace(
+    job = SimpleNamespace(input_media=(),
         user="创建项目",
         prompt_files=[],
         save=True,

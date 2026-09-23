@@ -216,9 +216,11 @@ class AnthropicCompatibleBackend(HttpBackend):
             payload["stream"] = True
         return deepcopy(payload)
 
-    # LLM: 此纯组包是普通发送、短 JSON 和只读投影的唯一 Messages payload 生产方；不执行传输和回调。
-    # 函数用途: 按原缓存、采样和工具合同构造内容，保留请求级覆盖且不修改调用方历史。
+    # LLM: 普通发送、短JSON和只读投影共用组包；媒体按同预算有界读盘及核对哈希，不执行传输或修改canonical引用。
+    # 函数用途: 按原缓存、采样和工具合同构造内容，在此将已验证媒体引用展开为临时字节。
     def _request_payload(self, request: _AnthropicGenerateRequest) -> dict[str, Any]:
+        from ..conversation.input_media import project_input_media
+
         payload: dict[str, Any] = {
             "model": self.model_name,
             "max_tokens": bounded_output_tokens(
@@ -246,13 +248,16 @@ class AnthropicCompatibleBackend(HttpBackend):
         selected_tools = tools_for_choice(request.tools, request.tool_choice)
         payload["messages"], selected_tools = anthropic_messages_with_optional_cache(
             prompt=cache_projection.prompt,
-            messages=request.messages,
+            messages=project_input_media(request.messages, self.input_media_max_bytes),
             tools=selected_tools,
             cache_enabled=self.prompt_cache_enabled,
             stable_user_prefix=cache_projection.stable_user_prefix,
             stable_system_cache_active=(cache_projection.stable_system_cache_active),
             structured_native_layout_active=(cache_projection.structured_native_layout_active),
         )
+        from ..conversation.input_media import provider_media_messages
+
+        payload["messages"] = provider_media_messages(payload["messages"])
         if selected_tools:
             from .tool_protocol_adapter import anthropic_tool_choice
 

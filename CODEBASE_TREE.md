@@ -35,6 +35,7 @@
 `-- docs/design/
     |-- MAINTAINABILITY_AND_JEV_REVIEW.md # 可维护性评估、渐进重构建议及 Computer Use/Jev 能力边界
     |-- DECISION_MODEL_INTEGRATION.md    # 可选决策模型的短期限、失败隔离、接入点、缓存与并行实施计划
+    |-- TUI_INPUT_MEDIA.md               # TUI 图片视频输入、owner 原件与发送预算合同
     |-- PLUGIN_LIFECYCLE.md              # 可装卸插件、动态命令、版本切换与故障回收的待实施方案
     |-- PLUGIN_PACKAGES.md               # 本地包静态校验与待接线的安装事实、隔离和撤销边界
     |-- PLUGIN_WORKSPACE_CONTEXT.md      # 逐次只读工作区协议、路径裁决与轻量 SDK 构建边界
@@ -112,6 +113,8 @@ agent_py_agent/
 |   |   |-- tui_plugin_commands.py     # 输入候选版本绑定与不阻塞输入的插件命令分派
 |   |   |-- slash_command_types.py     # CLI 命令处理器的可信上下文，不另设命令目录
 |   |   |-- tui_input.py                # 真实 slash/path 补全、菜单、history suggest 与排队占位投影
+|   |   |-- tui_media_clipboard.py      # 显式截图剪贴板读取及临时文件清理
+|   |   |-- tui_media.py                # 文件拖入/附件命令与草稿引用
 |   |   |-- tui_decision_menu.py        # 原模型菜单的决策范围、模式、秒数、恢复继承和显式原生连接测试
 |   |   |-- tui_model_menu.py           # /model 新增/选择/退出浮层，私密密钥与显式上下文窗口
 |   |   |-- tui_model_auth.py           # 私密设备码登录、通用参数编辑、取消及退出账号
@@ -382,6 +385,7 @@ agent_py_agent/
 |   |   |-- native_history.py           # 完成回合的 provider 原生消息信封、校验与按请求替换式恢复
 |   |   |-- history_projection.py       # 前后台共用完整历史行选择、范围过滤和原生 metadata 保留
 |   |   |-- history_display.py          # 从 canonical 消息投影只读恢复事件，不把问答预览代替正文
+|   |   |-- input_media.py              # owner 内容寻址原件、验证、发送编码和媒体预算
 |   |   |-- history_page.py             # canonical 字节边界向前分页和完整工作片分组
 |   |   |-- message_stream.py           # 同账本正文与显式协商的过程检查点投影，共用 ID/字节游标
 |   |   |-- task_runtime_state.py      # 后台续轮读取精确任务进度的结构化运行事实
@@ -529,6 +533,7 @@ agent_py_agent/
 |       |-- base.py                    # 模型响应、冻结选项和公共后端接口；本地 echo/缺配置实现
 |       |-- http.py                    # HTTP 传输、请求局部控制、工具探针与模型目录读取
 |       |-- openai_chat.py             # Chat Completions 请求、原生历史、思考和流式结果转换
+|       |-- request_content.py         # 原始内容的文字计量适用性，未知模态保留原请求
 |       |-- anthropic.py               # Messages 请求对象、缓存布局、思考及工具结果转换
 |       |-- factory.py                 # 显式配置构造唯一后端，缺配置判据与调度共享
 |       `-- tool_protocol_adapter.py   # native 事件或显式完整 text 帧到 canonical ToolCall 的唯一适配口
@@ -582,6 +587,10 @@ agent_py_agent/
 |   |-- test_compact_tool_source.py      # 同一纯来源分区、完整身份与未知保留、快照隔离
 |   |-- test_compact_tool_partition.py   # 原生完整配对、跨轮同名调用、未知/媒体/孤儿保留
 |   |-- test_compact_native_ir_recovery.py # 真实读文件原生回执、恢复安全点、原CAS及候选HTTP对等
+|   |-- test_compact_media_recovery.py  # 两协议媒体工具轮及溢出后原文保留、无摘要和无CAS
+|   |-- test_compact_transcript_media_partition.py # 文字前缀覆盖与媒体完整后缀、分段拒绝
+|   |-- test_request_content_capacity.py # 当前思考与跨模型内容边界、child保留原模型
+|   |-- test_input_media.py             # 媒体归属、字节、预算和原生后端投影
 |   |-- test_native_compact_carry.py   # 同回合携带身份、深复制、精确释放和工具轮标记隔离
 |   |-- test_native_user_input_identity.py # 原生UserTurn绑定原插话包ID，不按正文推断消费
 |   |-- test_mixed_compact_contract.py   # 双来源机械回退、整包候选回退与取消零提交
@@ -1095,3 +1104,9 @@ docs/
 - `agent_py_agent/agent/conversation/compact_tool_summary.py`：完整渲染被选工具的原模型可见投影，供transcript和活动归档共用原分段摘要；不读外置全文，不将展示截断当作来源覆盖。
 
 - `agent_py_agent/agent/agent_core/compact_tool_partition.py`：复用原 ToolCall 四元身份与时序配对，冻结真实 IR/归档的共同来源及保留区；不读存储、不调用模型、不新增持久状态。
+- `agent/conversation/input_media.py`：入站媒体唯一文件/ref 合同；`cli/chat_parts/tui_media.py`、`tui_media_clipboard.py` 只处理输入动作。
+- `docs/design/TUI_INPUT_MEDIA.md`：新媒体能力、迁移、平台和供应商边界。
+- `agent_py_agent/tests/test_input_media.py`：字节、归属、历史恢复和媒体预算合同测试。
+
+- `agent/backends/request_content.py`：原内容完整性检查，不读文件、不估算视觉token；主子选模与Compact共用。
+- `agent_py_agent/tests/test_compact_media_recovery.py`、`test_compact_transcript_media_partition.py`、`test_request_content_capacity.py`：媒体完整往返、准确覆盖和未知容量保留的隔离验收。

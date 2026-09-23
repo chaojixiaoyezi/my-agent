@@ -1,5 +1,11 @@
 # 设计台账
 
+决策模型媒体整合本地1419项联合与严格gate通过：自动选模/Compact共用原内容完整性检查，未知模态保留原模型和原始历史；强制恢复不凭附件引用取得容量或摘要覆盖。transcript只覆盖安全文字前缀，完整媒体后缀保留。媒体原提交的M3证据与当前集成版分开，12.4仍开放，详见[容量审计](docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。
+
+长对话验收方法已按用户要求调整：用 my-agent 自主完成真实 GitHub 项目跨语言实现产生自然历史；合成大文件仅保留存储边界定位用途。官网 M2.7 的 fd→Python 原生 TUI 验收待完成，方法见 [TESTS](TESTS.md#真实开发长任务验收方法)。
+
+TUI 原生媒体输入已实现、专用测试机官网 M3 验收通过：内容寻址原件、owner 校验、草稿 refs、发送边界编码与历史媒体预算复用原主链。旧纯文本记录无需迁移。详细合同见 [TUI 图片视频](docs/design/TUI_INPUT_MEDIA.md)；候选未默认部署。
+
 第 5 步当前状态：使用卡按现有插件包声明与设置 schema 即时投影，详情和成功启用共用格式；列表、动作帮助及补全仍读同一目录，不新增卡片缓存、权限或执行链。本地实现与 300 项相关回归已完成，发布及原生 TUI 仍待验；详见 [插件生命周期](docs/design/PLUGIN_LIFECYCLE.md#从安装完成到真正可用) 和 [唯一 TODO](docs/tasks/REFACTOR_PLUGIN_GOAL.md#当前-todo唯一执行清单)。
 
 重复启用的空资源声明已本地修复：无新环境计划时不声明候选资源，使原 unchanged／缺失拒绝路径真正可达；不更改激活状态机。见 [激活权威](docs/design/PLUGIN_ACTIVATION.md)，待发布真实复验。

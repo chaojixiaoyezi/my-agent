@@ -22,8 +22,8 @@ from typing import Any
 from ..tooling.runtime_contracts import ToolCall, ToolResult
 
 
-# LLM: input_ids 与原插话包来自同一批 guidance，供后续 Compact 按身份回收；后端只投影 text。
-# 类用途: 保存活动回合的真实用户输入及内部身份，普通初始用户输入仍可只传正文。
+# LLM: 媒体保留已验证的内容引用，input_ids沿原插话包用于Compact释放；只向provider投影正文与媒体。
+# 类用途: 保存原顺序的真实用户输入、附件及内部身份，不能由文本猜附件或输入消费。
 @dataclass(frozen=True)
 class UserTurn:
     """同一运行 turn 期间追加的一条真实用户输入。
@@ -31,11 +31,12 @@ class UserTurn:
     这不是运行时策略或系统提示。它用于保存 会话运行时 steer：用户在模型或工具
     正在工作时补充的输入必须留在原有工具往返历史中的准确时间位置，并在后续采样
     继续作为 ``role=user`` 可见，不能只在下一次请求临时出现一次。``input_ids``
-    只用于内部按插话身份追踪和回收，供应商只看到 ``text``。
+    只用于内部按插话身份追踪和回收，供应商只看到文字和媒体。
     """
 
     text: str
     input_ids: tuple[str, ...] = ()
+    media: tuple[dict[str, Any], ...] = ()
 
 
 # LLM: 摘要仍非权威；source由原构造点赋值，候选只能按结构化来源替换，不解析正文，provider不发送该字段。

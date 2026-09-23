@@ -420,6 +420,11 @@ background_threads_per_owner: 4
 # per-owner 作用域 agent 实例池上限（有界 LRU，超出逐出最久未用）。多用户高并发时按
 # 常驻活跃用户数调；每个实例含独立 home/记忆/local_store 句柄。
 owner_agent_pool_max_agents: 64
+# 用户显式添加的图片/视频：单条消息原始附件总字节上限与数量上限。
+# 历史只保存引用；同一字节上限也约束每次模型请求，较旧附件超预算时只发归档引用。
+# 模型和接口仍须支持对应模态，不自动换模型。
+input_media_max_bytes: 16777216
+input_media_max_files: 8
 # 磁盘级 owner 唤醒发现间隔（秒，0=关）：后台循环周期性扫 owners/ 把「有 enabled 进度策略/
 # 待处理唤醒信号」的 owner 种回活跃登记表。治网关重启/LRU 逐出后 scoped owner 的到点唤醒
 # 无人消费（盯守睡死）；登记表是易失的进程内结构，只有新入站请求才补记。

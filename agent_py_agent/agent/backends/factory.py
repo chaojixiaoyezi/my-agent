@@ -20,7 +20,7 @@ def model_configuration_missing(name: str, config: Any | None = None) -> bool:
 
 
 # LLM: 只按显式协议构造后端；缺配置判据与后台准入共用，OAuth 引用附加认证层，不因失败换接口。
-# 函数用途: 创建用户指定的适配器；尚未配置也能打开设置，但所有真实调用都明确拒绝。
+# 函数用途: 创建用户指定的适配器并透传媒体预算；尚未配置时真实调用明确拒绝。
 def get_backend(name: str, config: Any | None = None) -> BaseBackend:
     """Resolve a configured backend name to a backend adapter instance."""
 
@@ -35,6 +35,7 @@ def get_backend(name: str, config: Any | None = None) -> BaseBackend:
         api_base=config.api_base,
         api_key=config.api_key,
         model_name=config.model_name,
+        input_media_max_bytes=getattr(config, "input_media_max_bytes", 16 * 1024 * 1024),
         request_timeout=config.request_timeout,
         max_tokens=config.max_tokens,
         context_window_tokens=getattr(config, "model_context_window_tokens", 0),

@@ -437,9 +437,8 @@ def _native_compact_policy(agent: object, params: ToolLoopExecuteParams) -> obje
     )
 
 
-# LLM: Planning checks the run interrupt before it may call the summary backend; it still cannot
-# mutate native IR or advance generation.
-# 函数用途: 停止检查通过后算清触发线、健康尾部、线程绑定和完整替代摘要。
+# LLM: 规划先检查停止及完整内容可计量性；未知媒体不摘要、不改IR、不推进代次，同模型文字推理仍沿原合同。
+# 函数用途: 确认可用文本计量后算触发线、健康尾部、线程绑定和完整替代摘要。
 def _prepare_native_compact_plan(
     agent: object,
     params: ToolLoopExecuteParams,
@@ -449,8 +448,11 @@ def _prepare_native_compact_plan(
     force: bool,
 ) -> _NativeCompactPlan | None:
     from .model.context_pressure import model_visible_context_tokens
+    from .tool_request_projection import text_request_capacity_known
 
     raise_if_compact_interrupted(lambda: _native_compact_interrupted(params))
+    if not text_request_capacity_known(params):
+        return None
     policy = _native_compact_policy(agent, params)
     limit = int(
         policy.trigger_tokens

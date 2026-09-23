@@ -7,6 +7,7 @@ import threading
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
+from .tui_media import TuiMediaRef
 from .tui_paste import (
     TuiPastedTextRef,
     collapse_tui_paste,
@@ -15,13 +16,14 @@ from .tui_paste import (
 
 
 # LLM: TuiDraft 冻结编辑器内容、光标、粘贴 refs 及用户选中目录的 revision；恢复草稿不能按新目录升级原输入含义。
-# 类用途: 保存一份可恢复的输入草稿。
+# 类用途: 保存含媒体引用的一份可恢复输入草稿；文字和附件一起暂存。
 @dataclass(frozen=True)
 class TuiDraft:
     text: str
     cursor_position: int
     pasted_text_refs: tuple[TuiPastedTextRef, ...] = ()
     plugin_revision: str = ""
+    media_refs: tuple[TuiMediaRef, ...] = ()
 
     # LLM: 光标必须被限制在正文边界内，坏输入不能让 prompt_toolkit Document 构造失败。
     # 函数用途: 规范草稿文本和光标位置。
@@ -65,7 +67,7 @@ class _HistorySearchSession:
 # 类用途: 管理单槽 stash、可取消历史搜索、快捷键帮助和短暂粘贴状态。
 class TuiInteractionState:
     # LLM: invalidate callback 只能请求重绘，不能重入本状态机或执行业务动作。
-    # 函数用途: 创建空交互状态，设定本次 TUI 的初始鼠标模式，并可绑定界面刷新函数。
+    # 函数用途: 创建空文字/媒体草稿状态、鼠标模式，并绑定轻量刷新函数。
     def __init__(
         self,
         invalidate: Callable[[], None] | None = None,
@@ -79,6 +81,7 @@ class TuiInteractionState:
         self._todos_expanded = False
         self._mouse_capture_enabled = bool(mouse_capture_enabled)
         self._current_pasted_text_refs: tuple[TuiPastedTextRef, ...] = ()
+        self._current_media_refs: tuple[TuiMediaRef, ...] = ()
         self._next_paste_id = 1
         self._invalidate = invalidate
         self._lock = threading.RLock()
@@ -277,23 +280,32 @@ class TuiInteractionState:
         self._notify()
 
     # LLM: capture_draft 将当前 paste refs 与编辑器文本一起冻结；调用方不得只保存可见占位符，否则 stash/取消搜索会丢失真实正文。
-    # 函数用途: 从当前 Buffer 文本和光标建立完整草稿快照。
+    # 函数用途: 从当前 Buffer、光标和文字/媒体 refs 建立完整草稿快照。
     def capture_draft(self, text: str, cursor_position: int) -> TuiDraft:
         with self._lock:
             references = self._current_pasted_text_refs
-        return TuiDraft(str(text or ""), int(cursor_position or 0), references)
+            media = self._current_media_refs
+        return TuiDraft(str(text or ""), int(cursor_position or 0), references, media_refs=media)
 
     # LLM: install_draft 原子替换当前 paste refs；空草稿必须清除旧隐藏正文，防止下一次提交夹带已删除内容。
-    # 函数用途: 将一份 stash/history 草稿设为当前输入的结构化状态。
+    # 函数用途: 恢复草稿的文字和媒体 refs；空草稿同时清理隐藏附件。
     def install_draft(self, draft: TuiDraft) -> None:
         references = tuple(draft.pasted_text_refs or ())
         with self._lock:
             self._current_pasted_text_refs = references
+            self._current_media_refs = tuple(draft.media_refs)
             if references:
                 self._next_paste_id = max(
                     self._next_paste_id,
                     max(reference.paste_id for reference in references) + 1,
                 )
+
+    # LLM: 附件登记仅关联本草稿，引用来自显式导入；占位符本身无权读取文件。
+    # 函数用途: 将新导入的附件加入草稿，删除占位符后提交会自动排除该附件。
+    def register_media(self, reference: TuiMediaRef) -> None:
+        with self._lock:
+            self._current_media_refs = (*self._current_media_refs, reference)
+        self._notify()
 
     # LLM: register_text_paste 使用单调 id 将长 paste 折叠，并把新引用追加到当前草稿；短 paste 不改变引用集合。
     # 函数用途: 返回应一次性插入 Buffer 的可见文本。

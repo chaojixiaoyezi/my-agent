@@ -2,6 +2,7 @@
 # 模块用途: 支持 /responses 的显式采样、文本、工具调用、流式摘要、JSON 输出及用量统计。
 from __future__ import annotations
 
+from ..conversation.input_media import project_input_media
 from .base import ModelResponse
 from .http import bounded_output_tokens
 from .openai_chat import OpenAICompatibleBackend
@@ -28,7 +29,7 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
     def _generate(self, request) -> ModelResponse:
         payload = {"model": self.model_name, "store": False, "include": ["reasoning.encrypted_content"],
                    "max_output_tokens": bounded_output_tokens(self.max_tokens, request.max_output_tokens),
-                   "input": input_items(request.prompt, request.messages, request.system_instruction, self.model_name)}
+                   "input": input_items(request.prompt, project_input_media(request.messages, self.input_media_max_bytes), request.system_instruction, self.model_name)}
         if self.temperature_explicit:
             payload["temperature"] = self.temperature
         if self.top_p is not None:

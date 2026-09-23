@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
 
 # LLM: GatewayAskExecutionOptions is the immutable, transport-neutral execution option set for one
-# ordinary ask. Active-turn fallback must persist this snapshot before POST so a later queued turn
+# ordinary ask including immutable media refs. Active-turn fallback must persist this snapshot before POST so a later queued turn
 # has exactly the same inject/files/save/resume/client-capability semantics as direct submission.
 # 类用途: 保存一次普通请求会改变模型执行方式的选项，并在 TUI、HTTP 和队列请求之间无损转换。
 @dataclass(frozen=True)
@@ -34,14 +34,16 @@ class GatewayAskExecutionOptions:
     resume_context: bool | None = None
     tool_approval: bool = False
     rich_transcript: bool = False
+    input_media: tuple[dict, ...] = ()
 
     # LLM: Serialization emits explicit defaults so idempotency digests cover behavior rather than
     # whichever client happened to omit a false/default field.
-    # 函数用途: 转成 Gateway `/ask` 可直接传输和持久化的结构化字段。
+    # 函数用途: 转成 Gateway `/ask` 可直接传输和持久化的结构化字段；附件只传 refs。
     def to_payload(self) -> dict[str, object]:
         payload: dict[str, object] = {
             "inject": list(self.inject),
             "prompt_files": list(self.prompt_files),
+            "input_media": list(self.input_media),
             "save": self.save,
             "include_prompt": self.include_prompt,
             "client_capabilities": {
@@ -55,7 +57,7 @@ class GatewayAskExecutionOptions:
 
     # LLM: Only the public allowlist is accepted. Invalid open-world body values fall back to the
     # same execution defaults used by Gateway workers; arbitrary metadata is never copied through.
-    # 函数用途: 从 HTTP/outbox 对象规范化允许改变执行行为的字段。
+    # 函数用途: 规范化执行选项；媒体仍由 worker 按认证 owner 校验，不能在这里信任路径。
     @classmethod
     def from_payload(cls, payload: object) -> GatewayAskExecutionOptions:
         raw = payload if isinstance(payload, dict) else {}
@@ -66,6 +68,7 @@ class GatewayAskExecutionOptions:
         return cls(
             inject=_string_tuple(raw.get("inject")),
             prompt_files=_string_tuple(raw.get("prompt_files")),
+            input_media=_media_tuple(raw.get("input_media")),
             save=raw.get("save") if isinstance(raw.get("save"), bool) else True,
             include_prompt=(
                 raw.get("include_prompt")
@@ -87,8 +90,20 @@ def _string_tuple(value: Any) -> tuple[str, ...]:
     return tuple(str(item) for item in value)
 
 
+# LLM: 无效媒体载荷必须显式失败，不能丢附件后继续发送文字；磁盘与 owner 校验留给 worker。
+# 函数用途: 在 HTTP/outbox 反序列化时检查附件引用数组的形状。
+def _media_tuple(value: object) -> tuple[dict, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, (list, tuple)) or not all(isinstance(item, dict) for item in value):
+        from ..conversation.input_media import InputMediaError
+
+        raise InputMediaError("input_media 必须是附件引用对象数组。")
+    return tuple(dict(item) for item in value)
+
+
 # LLM: GatewayAskParams 只声明客户端真实支持的交互能力；审批与富 transcript 都必须显式 opt-in，服务端不能按 source 或终端形态猜测。
-# 类用途: 描述一次 Gateway ask 请求及其会话、持久化和客户端能力。
+# 类用途: 描述一次 Gateway ask 请求及其会话、附件引用、持久化和客户端能力。
 @dataclass
 class GatewayAskParams:
     prompt: str
@@ -107,6 +122,7 @@ class GatewayAskParams:
     system_task: dict[str, object] | None = None
     interactive_approvals: bool = False
     rich_transcript: bool = False
+    input_media: tuple[dict, ...] = ()
     workspace_root: str = ""
     workspace_roots: list[str] | None = None
 
@@ -115,7 +131,7 @@ _DEFAULT_GATEWAY_CLI_SESSION_ID = "default"
 
 
 # LLM: 入队前回调只登记宿主分配的显示关联，不能改 ID/载荷；回调失败不得入队，执行权仍由 admission 决定。
-# 函数用途: 校验请求，先通知调用页真实编号，再原子入队，防止观察流比本地登记先到。
+# 函数用途: 校验正文并保留结构化附件，先通知调用页真实编号，再原子入队，防止观察流比本地登记先到。
 def submit_gateway_ask(
     paths: GatewayPaths,
     *,
@@ -130,6 +146,7 @@ def submit_gateway_ask(
         "prompt": prompt,
         "inject": params.inject or [],
         "prompt_files": params.prompt_files or [],
+        "input_media": list(params.input_media),
         "save": params.save,
         "include_prompt": params.include_prompt,
         "created_at": time.time(),

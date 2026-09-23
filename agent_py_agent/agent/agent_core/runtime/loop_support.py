@@ -869,7 +869,7 @@ def _loop_attempt_id(agent, params: object) -> str:
 
 
 # LLM: Current-turn IR starts at the exact user task. Completed conversation messages are carried
-# separately as provider_history_messages so finalization persists only the new turn. Carried
+# separately as provider_history_messages so finalization persists only the new turn. Typed media refs remain with their user turn. Carried
 # handoff/input then append in real chronology.
 # 函数用途: 按时间生成当前任务与插话IR；内部ID沿原包保留，供释放核对而不外发。
 def _native_initial_tool_ir_history(
@@ -883,7 +883,7 @@ def _native_initial_tool_ir_history(
     history: list[object] = []
     current = str(params.user_prompt or "")
     if current:
-        history.append(UserTurn(_native_user_task_text(current)))
+        history.append(UserTurn(_native_user_task_text(current), media=tuple((params.task_attributes or {}).get("input_media") or ())))
     if carried_handoff:
         history.append(CompactionSummary(carried_handoff))
     packets = merge_active_turn_user_inputs(params.carried_active_turn_user_inputs)
@@ -1064,6 +1064,10 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
     from ...backends.tool_ir import CompactionSummary
     from ...conversation.compact_carry import restore_native_compact_carry
 
+    if (params.task_attributes or {}).get("input_media") and getattr(seed.tool_protocol_snapshot, "source_protocol", "") != "native":
+        from ...conversation.input_media import InputMediaError
+
+        raise InputMediaError("附件需要支持原生多模态消息的模型连接，当前连接未启用原生协议。")
     native_carry = restore_native_compact_carry(agent, params)
     archive_tool_calls: list[dict[str, object]] = list(params.carried_archive_tool_calls or [])
     from ...conversation.active_turn_compact import model_visible_active_turn_tool_calls

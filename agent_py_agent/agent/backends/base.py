@@ -51,7 +51,7 @@ class ModelResponse:
 
 
 # LLM: 后端连接与 top_p/温度是工作片冻结快照；请求头和模型名/密钥一起缓存，流式请求中不可热改。
-# 类用途: 保存 HTTP 模型后端的连接、采样和兼容选项。
+# 类用途: 保存 HTTP 模型后端的连接、采样和媒体发送预算。
 @dataclass(frozen=True)
 class BackendOptions:
     """Connection and generation options shared by HTTP model backends."""
@@ -69,6 +69,7 @@ class BackendOptions:
     prompt_cache_enabled: bool = True
     custom_headers: dict[str, str] = field(default_factory=dict)
     session_header: str = ""
+    input_media_max_bytes: int = 16 * 1024 * 1024
     top_p: float | None = None
 
 

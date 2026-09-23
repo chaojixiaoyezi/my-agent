@@ -147,5 +147,37 @@ def _missing_request_fields(prepared: ToolLoopRequestInput) -> tuple[str, ...]:
 
 __all__ = [
     "ToolLoopRequestInput", "ToolLoopRequestProjection",
-    "project_tool_loop_request", "tool_loop_prompt_request",
+    "project_tool_loop_request", "tool_loop_prompt_request", "text_request_capacity_known",
 ]
+
+
+# LLM: 适配前检查原IR/历史，未知媒体不假报已量；同模型保留文字推理，跨模型须allow_reasoning=False，不阻止普通生成。
+# 函数用途: 判断现有文本计量可覆盖一次请求的全部内容，媒体引用字节数不当作视觉token。
+def text_request_capacity_known(prepared: object, *, allow_reasoning: bool = True) -> bool:
+    from ..backends.request_content import text_messages_supported
+
+    if not text_messages_supported(getattr(prepared, "provider_history_messages", None) or (), allow_reasoning=allow_reasoning):
+        return False
+    return all(_text_ir_item_supported(item, allow_reasoning=allow_reasoning)
+               for item in getattr(prepared, "tool_ir_history", None) or ())
+
+
+# LLM: 本层只认可原IR合同，工具结果以原模型投影呈现；未知类型不可先经adapter过滤，UserTurn媒体保留但不可按refs量容量。
+# 函数用途: 分类单个原生历史项，隔离同模型思考与跨模型签名的不同要求。
+def _text_ir_item_supported(item: object, *, allow_reasoning: bool) -> bool:
+    from ..backends.request_content import text_content_supported
+    from ..backends.tool_ir import (
+        AssistantTurn,
+        CompactionSummary,
+        RuntimeFactsTurn,
+        ToolResult,
+        UserTurn,
+    )
+
+    if isinstance(item, AssistantTurn):
+        return text_content_supported(item.content_blocks, allow_reasoning=allow_reasoning)
+    if isinstance(item, UserTurn):
+        return not item.media
+    if isinstance(item, (list, tuple)):
+        return all(isinstance(result, ToolResult) for result in item)
+    return isinstance(item, (CompactionSummary, RuntimeFactsTurn, ToolResult))

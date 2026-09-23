@@ -229,8 +229,8 @@ def test_raw_history_rejects_unknown_before_adapter_can_discard(block):
     from agent_py_agent.agent.agent_core.tool_request_projection import ToolLoopRequestInput
     from agent_py_agent.agent.backends.tool_ir import AssistantTurn
 
-    assert not model_adoption._portable_history(ToolLoopRequestInput(tool_ir_history=(AssistantTurn(content_blocks=[block]),)))
-    assert not model_adoption._portable_history(ToolLoopRequestInput(provider_history_messages=({"role": "assistant", "content": [block]},)))
+    assert not model_adoption.text_request_capacity_known(ToolLoopRequestInput(tool_ir_history=(AssistantTurn(content_blocks=[block]),)), allow_reasoning=False)
+    assert not model_adoption.text_request_capacity_known(ToolLoopRequestInput(provider_history_messages=({"role": "assistant", "content": [block]},)), allow_reasoning=False)
 
 
 def test_http_failure_never_sends_original_model_or_redraws_decision(tmp_path, monkeypatch):
@@ -351,7 +351,7 @@ def test_text_tool_history_allows_actual_list_and_frozen_tuple():
 
     blocks = [{"type": "text", "text": "普通中文"}, {"type": "tool_use", "id": "t", "name": "read_file", "input": {"path": "材料"}}]
     for content in (blocks, tuple(blocks)):
-        assert model_adoption._portable_history(ToolLoopRequestInput(tool_ir_history=(AssistantTurn(content_blocks=content),)))
+        assert model_adoption.text_request_capacity_known(ToolLoopRequestInput(tool_ir_history=(AssistantTurn(content_blocks=content),)))
 
 
 def test_noncooperative_probe_timeout_retains_without_late_adoption(tmp_path, monkeypatch):

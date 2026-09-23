@@ -1856,3 +1856,6 @@ Gateway/child的carried活动归档恢复现由各自已准备参数投影历史
 GatewayModelObservation现承接render/prepare_request/select三个顺序点：公共PreparedCompactRecovery先交回已确认上下文，再构建选模和拒绝回退基线；不重跑业务准备、不改变选择revision守门。control_service的手动入口按同一THREAD_COMPACT_SCOPE来源执行原writer/CAS，没有未来业务容量承诺。
 
 `request_execution.py`沿原RunParams/结果传递临时native_compact_carry和逻辑turn；`conversation/compact_carry.py`负责身份/view校验、精确释放ID与IR深复制，`runtime/loop_support.py`在真实工具循环边界捕获。observer仍拥有完整恢复安全点及原CAS，无新增持久表。
+
+<!-- 媒体来源片 3adb61904 的既有记录；不代表当前 Compact 集成已验。 -->
+媒体原件权威位于 owner_home/media/input/<sha256>，通用实现为 agent/conversation/input_media.py。GatewayAskExecutionOptions / GatewayAskParams 携带小 refs，request_execution 在认证 owner 下验证后写入 task_attributes.input_media，UserTurn.media 保留原生历史；后端网络边界才编码，不新增队列或 provider 状态库。

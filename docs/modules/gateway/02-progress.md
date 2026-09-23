@@ -1,5 +1,7 @@
 # Gateway 维护状态
 
+决策模型第12.4媒体整合本地1419项联合与严格gate通过：普通媒体沿原模型发送，未知模态不自动切模型或提交强制Compact；摘要覆盖只到完整文字前缀，原生媒体后缀保留。原媒体M3验收不替代集成版证据；11/18和旧全仓八项失败状态不变，详见[容量审计](../../tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。
+
 Gateway/child的无transcript活动归档已移除先粗估提交再重新准备的旁路，统一复用完整请求候选与同次发送。混合transcript+carried在公共恢复器同时替换原历史及已标记工具交接，单次CAS封印双来源；普通摘要失败、未知IR、超量及取消不发送恢复业务。本片32文件738项与严格gate通过，准确边界见TESTS；初次/手动与真实native工具IR组合仍未完成。
 
 Gateway/child现通过原canonical loader绑定同一Compact scope/view，真实恢复参数在CAS后取得获胜checkpoint。后台也已接公共完整请求恢复及活动归档纯投影；定向验收见TESTS。初次/手动、其它宿主活动归档和混合超大来源仍待统一，12.4保持未完成，未部署。
@@ -163,3 +165,6 @@ Gateway恢复协调已抽到 `agent_core/compact_request_recovery.py` 与child�
 首次自动Compact已本地接公共完整请求准备：原会话加载暂缓提交，PromptBuilder冻结后先压缩再自动选模。手动Compact在车道内按全线程来源判空，回执只报告历史估算。组合验收见TESTS，真实供应商与完整IR边界仍待验。
 
 外层typed overflow已接同宿主原生IR carry；真实循环释放未提交插话，Gateway按ID过滤后交下一次完整准备，原ToolCall身份和完整正文保留。恢复权限和模型前缀重新准备；无可压来源显式拒绝。此片隔离联验中，实际安装版与供应商证据仍待补。
+
+<!-- 媒体来源片 3adb61904 的既有记录；不代表当前 Compact 集成已验。 -->
+TUI 媒体请求已接通：input_media refs 与 ask 执行选项及幂等指纹同行，worker 在 owner 解析后验证路径/大小，再进入原 native user history。官网 M3 图片、视频与重连续问通过；官网 M2.7 100 请求/50 槽全部完成。详细资源口径见 TESTS。

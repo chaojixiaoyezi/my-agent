@@ -12,6 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from ..backends.request_content import text_messages_supported
 from ..common.cancellation import ToolCancelled
 from ..memory_archive import estimate_tokens
 from .channels import project_user_reply
@@ -52,7 +53,11 @@ from .models import (
     MessageLogEntry,
     is_audit_background_transcript_entry,
 )
-from .native_history import provider_history_messages_from_rows
+from .native_history import (
+    _row_turn_identity,
+    canonical_native_messages_from_metadata,
+    provider_history_messages_from_rows,
+)
 from .tool_context_window import (
     TERMINAL_TOOL_FOLD_METADATA_KEY,
     conversation_message_with_terminal_tool_fold,
@@ -602,18 +607,53 @@ def render_conversation_context_usage(
     return "\n".join(lines)
 
 
-# LLM: 候选分区共用宿主已准备的摘要面或原一次准备结果，不先改状态；完整投影与其材料一同保留，接受门不变。
+# LLM: 原生信封是媒体完整性的权威；从首个不可文字概括的逻辑回合起保护全部原始行，禁止摘要后越过该游标。
+# 函数用途: 找到可以完整摘要的历史前缀，以及必须按原顺序留给后续模型的媒体后缀。
+def _split_nontext_transcript_suffix(
+    rows: list[MessageLogEntry],
+) -> tuple[list[MessageLogEntry], list[MessageLogEntry]]:
+    for index, row in enumerate(rows):
+        native = canonical_native_messages_from_metadata(row.metadata)
+        if native and not text_messages_supported(native):
+            start = _nontext_turn_start(rows, index)
+            return rows[:start], rows[start:]
+    return rows, []
+
+
+# LLM: 回合边界优先采用宿主写入的结构化身份；旧行无身份时退到最近用户行，不以正文内容猜测配对。
+# 函数用途: 定位媒体信封所属完整问答的第一行，确保用户输入和工具往返一起留在历史中。
+def _nontext_turn_start(rows: list[MessageLogEntry], index: int) -> int:
+    identity = _row_turn_identity(rows[index])
+    start = next(
+        (
+            position for position, row in enumerate(rows[: index + 1])
+            if identity and _row_turn_identity(row) == identity
+        ),
+        index,
+    )
+    if rows[start].role == "user":
+        return start
+    return next(
+        (position for position in range(start, -1, -1) if rows[position].role == "user"),
+        0,
+    )
+
+
+# LLM: 原生媒体或未知非文本块所在逻辑turn起的完整后缀必须保留；仅安全前缀进入原forced/auto分区与checkpoint覆盖。
 # 函数用途: 依次尝试近期尾部分区，优先健康目标，否则保留仍可发送的最佳候选，避免无效提交后反复压缩。
 def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
     # LLM: A provider-pressure retry must replace the whole completed prefix once. Repeatedly
     # protecting and then re-compacting the same tail creates checkpoint churn without helping
     # the active turn fit. Normal threshold compaction still protects bounded complete turns.
     # 逻辑说明: 平时到 90% 时保留近期完整问答；供应商已报压力时一次压完旧段，避免同一尾部连压多代。
+    safe_prefix, protected_suffix = _split_nontext_transcript_suffix(list(request.pending))
+    if not safe_prefix:
+        raise ConversationCompactError("没有可完整文字摘要的历史前缀，保留原始媒体", code="COMPACT_SOURCE_EMPTY")
     partitions = (
-        ((list(request.pending), []),)
+        ((safe_prefix, []),)
         if request.forced
         else compact_partitions(
-            list(request.pending),
+            safe_prefix,
             max_turns=request.policy.recent_tail_max_turns,
             max_tail_tokens=request.policy.recent_tail_tokens,
         )
@@ -636,7 +676,8 @@ def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
                 now=request.attempted_at,
             )
             raise
-    for partition_index, (compact_rows, retained_tail) in enumerate(partitions):
+    for partition_index, (compact_rows, ordinary_tail) in enumerate(partitions):
+        retained_tail = [*ordinary_tail, *protected_suffix]
         raise_if_compact_interrupted(request.interrupt_check)
         summarize_percent = 15 + int(partition_index * 50 / partition_count)
         measure_percent = 15 + int((partition_index + 0.75) * 50 / partition_count)

@@ -21,8 +21,16 @@ from .tui_worker_paths import _model_length_error, _nonnegative_int
 
 
 # LLM: local adapter 交给 core 同一个 worker 句柄；模型前绑定真实身份，启动前中断不能随线程注册丢失。
-# 函数用途: 执行本地回合，返回完整或被截断的实际回复与明确终态提示。
+# 函数用途: 验证媒体后执行本地回合，返回完整或被截断的实际回复与明确终态提示。
 def _worker_local_path(ctx: Any) -> tuple[str, bool, TuiTurnSummary]:
+    from ...agent.conversation.input_media import input_media_root, validate_input_media
+
+    attrs = conversation_task_attributes(ctx.job.system_task)
+    if ctx.job.input_media:
+        refs = validate_input_media(ctx.job.input_media, root=input_media_root(ctx.cfg.agent),
+                                    max_bytes=ctx.cfg.agent.config.input_media_max_bytes,
+                                    max_files=ctx.cfg.agent.config.input_media_max_files)
+        attrs = {**attrs, "input_media": list(refs)}
     control = ctx.cfg.local_run_ref[0]
     if control is None or control.request_id != ctx.job.request_id:
         raise ValueError("本地 TUI 缺少本轮控制句柄")
@@ -39,7 +47,7 @@ def _worker_local_path(ctx: Any) -> tuple[str, bool, TuiTurnSummary]:
             resume_context=ctx.job.resume_context,
             recovery_next_actions=["如需恢复本轮 chat，先用 memory-resume 搜索用户消息或时间范围。"],
             on_chunk=ctx.turn_adapter,
-            task_attributes=conversation_task_attributes(ctx.job.system_task),
+            task_attributes=attrs,
         )
     if is_silent_user_stop(result):
         return "", False, TuiTurnSummary(ok=False, interrupted=True)

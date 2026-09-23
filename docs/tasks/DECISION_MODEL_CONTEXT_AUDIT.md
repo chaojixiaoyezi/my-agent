@@ -1235,3 +1235,19 @@ Gateway/child真实read_file、完整中段标记、IR-only零archive、候选�
 建议下一步：先收口本片定向与严格gate，再协调媒体合入及授权1.9隔离安装验收；只读审查和测试可并行，writer/身份/共享Gateway由单一owner操作。
 
 本片最终44文件联合1154 passed、4项既有xfail（135.39秒），日志 `/tmp/compact_carry_final_20260923.log`，清单同名 `.files`；taskless不误建会话任务补充断言后两协议另跑2 passed。Ruff、doc sync、import boundaries 0、strict code-size hard=0且基线未改、diff与clean-package通过。没有push、部署或真实供应商调用，线上CI没有作为验收来源。12.4仍开放，11/18清单数不变；建议下一步协调媒体集成与授权1.9隔离验收，公共状态单owner、独立测试可并行。
+
+## 第 12.4 项媒体集成与未知模态边界（本地切片已验）
+
+解决媒体引用被当作完整文字计量、或未读附件却取得摘要覆盖的问题。以 `81bdf9579` 为基线整合媒体线 `3adb61904`；媒体原件仍在原owner内容寻址目录，UserTurn保留input_ids及media，三宿主原生carry不另建存储。原生发送和出站投影复用同一后端组包。
+
+共享 `backends/request_content.py` 在适配器过滤前检查原IR和原始消息。当前模型可继续携带原文字思考；跨模型候选不搬运供应商推理签名。未知模态不额外探测候选，保留原模型；普通原模型媒体请求继续发送。自动Compact跳过未知计量，供应商已报overflow的强制恢复返回COMPACT_REQUEST_PROJECTION_UNKNOWN，不摘要、不提交checkpoint。字节预算只约束文件展开，不是视觉token或窗口容量证明。
+
+transcript Compact只摘要首个非文本原生信封所在完整回合之前的安全前缀，媒体回合及其后所有行原序保留，游标不越过未读来源。分段器在JSON化前拒绝非文本块，不能通过引用字符串取得覆盖；工具原账和旧检查点事实不重写。无完整文字前缀时typed拒绝，不伪造空摘要。
+
+媒体线此前官方M3图片/视频/重连证据属于原提交，不能当作本次集成版真实验收。本次pytest采用隔离HOME、真实本地媒体读取和业务工具，仅末端HTTP替身；尚未部署测试机或重启共享Gateway。12.4、真实缓存、超大历史及旧全仓八项失败仍开放，11/18清单数不变。
+
+建议下一步：联合定向与严格gate后保留可审查本地提交，再协调192.168.1.9验收窗口。测试和只读审查可并行，共享Gateway及恢复writer保持单一owner。
+
+本片55文件联合 **1419 passed、4项既有xfail**，退出码0；清单 `/tmp/compact_media_joint_20260923.files`，日志同名 `.log`。pytest配置和命令各带一次-q，原日志只有逐项结果和进度；统计为1419个通过标记及4个预期失败标记，不补猜运行秒数。初次媒体兼容检查144 passed、2 failed来自UserTurn新增字段的旧位置参数，已改显式media关键字并纳入上述联验；容量/选模91项、媒体工具轮4项、transcript26项均被最终联合覆盖，不累加计数。首次guard的导入排序和深层嵌套已修，新增文件暂未登记的打包提示在纳入本片后消除。
+
+Ruff、doc sync、import boundaries零发现、strict code-size hard=0且基线未改、diff和clean-package通过。本地严格gate已通过；没有push、部署、真实供应商调用或Gateway重启，线上CI没有作为验收来源。未知媒体的强制恢复仍明确拒绝，不能宣称已实现完整多模态容量计量；旧全仓八项失败保持。

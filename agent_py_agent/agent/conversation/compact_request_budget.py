@@ -16,6 +16,7 @@ from ..agent_core.model.call_runtime import max_output_tokens
 from ..agent_core.model.context_window import resolve_model_context_window_tokens
 from ..backends.base import ModelResponse
 from ..backends.errors import ProviderContextWindowError
+from ..backends.request_content import text_messages_supported
 from ..memory_archive import estimate_tokens
 from ..prompting_parts.cache_layout import prompt_cache_layout
 from ..tooling.runtime_contracts import ToolChoice
@@ -86,11 +87,11 @@ def _request_tokens(request: AuxiliaryModelCallRequest) -> int:
     })
 
 
-# LLM: The source is serialized once, then covered by contiguous character ranges. A segment
-# may split JSON for summarization only, never for execution or native-history persistence.
+# LLM: Only complete textual source may be serialized into contiguous ranges. A segment may split
+# JSON for summarization only; non-text native blocks cannot gain coverage through their JSON refs.
 # Once partitioned, native history no longer shares the main request prefix. Use a summary-only
 # surface instead of the executor's tools/instructions; strict fallback failure never grants source coverage.
-# 函数用途: 用不带执行工具的摘要请求顺序读取全部原文，每段携带上段摘要；失败或停止不推进游标。
+# 函数用途: 仅将可完整阅读的文字历史逐段摘要；媒体或未知非文本历史保留给上层原始来源分区。
 def _summarize_segments(
     request: AuxiliaryModelCallRequest,
     budget: int,
@@ -98,6 +99,11 @@ def _summarize_segments(
     source_progress: Callable[[int, int], object] | None,
     preserve_complete_fallback: bool = False,
 ) -> object:
+    if request.messages is not None and not text_messages_supported(request.messages):
+        raise ConversationCompactError(
+            "分段压缩不能将非文本来源的JSON引用视为完整正文",
+            code="COMPACT_SOURCE_NON_TEXT",
+        )
     source = json.dumps(request.messages, ensure_ascii=False) if request.messages is not None else str(request.prompt)
     layout = prompt_cache_layout(request.prompt)
     instruction = (

@@ -1,5 +1,21 @@
 # 测试与发布验收
 
+## 第 12.4 项媒体集成与未知模态边界（本地切片已验）
+
+解决媒体引用被当作完整文字计量、或未读附件却取得摘要覆盖的问题。以 `81bdf9579` 为基线整合媒体线 `3adb61904`；媒体原件仍在原owner内容寻址目录，UserTurn保留input_ids及media，三宿主原生carry不另建存储。原生发送和出站投影复用同一后端组包。
+
+共享 `backends/request_content.py` 在适配器过滤前检查原IR和原始消息。当前模型可继续携带原文字思考；跨模型候选不搬运供应商推理签名。未知模态不额外探测候选，保留原模型；普通原模型媒体请求继续发送。自动Compact跳过未知计量，供应商已报overflow的强制恢复返回COMPACT_REQUEST_PROJECTION_UNKNOWN，不摘要、不提交checkpoint。字节预算只约束文件展开，不是视觉token或窗口容量证明。
+
+transcript Compact只摘要首个非文本原生信封所在完整回合之前的安全前缀，媒体回合及其后所有行原序保留，游标不越过未读来源。分段器在JSON化前拒绝非文本块，不能通过引用字符串取得覆盖；工具原账和旧检查点事实不重写。无完整文字前缀时typed拒绝，不伪造空摘要。
+
+媒体线此前官方M3图片/视频/重连证据属于原提交，不能当作本次集成版真实验收。本次pytest采用隔离HOME、真实本地媒体读取和业务工具，仅末端HTTP替身；尚未部署测试机或重启共享Gateway。12.4、真实缓存、超大历史及旧全仓八项失败仍开放，11/18清单数不变。
+
+建议下一步：联合定向与严格gate后保留可审查本地提交，再协调192.168.1.9验收窗口。测试和只读审查可并行，共享Gateway及恢复writer保持单一owner。
+
+本片55文件联合 **1419 passed、4项既有xfail**，退出码0；清单 `/tmp/compact_media_joint_20260923.files`，日志同名 `.log`。pytest配置和命令各带一次-q，原日志只有逐项结果和进度；统计为1419个通过标记及4个预期失败标记，不补猜运行秒数。初次媒体兼容检查144 passed、2 failed来自UserTurn新增字段的旧位置参数，已改显式media关键字并纳入上述联验；容量/选模91项、媒体工具轮4项、transcript26项均被最终联合覆盖，不累加计数。首次guard的导入排序和深层嵌套已修，新增文件暂未登记的打包提示在纳入本片后消除。
+
+Ruff、doc sync、import boundaries零发现、strict code-size hard=0且基线未改、diff和clean-package通过。本地严格gate已通过；没有push、部署、真实供应商调用或Gateway重启，线上CI没有作为验收来源。未知媒体的强制恢复仍明确拒绝，不能宣称已实现完整多模态容量计量；旧全仓八项失败保持。
+
 ## 第 12.4 项外层溢出原生历史接续（本地切片已验）
 
 Gateway、后台及child的同宿主逻辑回合现在携带真实原生IR，不从归档短预览重建正文。原循环在typed overflow后按准确attempt释放未提交插话，携带精确input_ids；释放失败仍经原partial出口保存已完成事实。恢复重新准备权限和provider前缀，旧调用四元引用保持，私有tool_round归并标记清除。摘要由prefix或IR唯一承载，强制恢复没有可压来源报告COMPACT_SOURCE_EMPTY。
@@ -1752,3 +1768,46 @@ python3 scripts/check_clean_package.py .
 ## 发布资料清理验证
 
 注释与示例清理要比较生产 Python AST、默认配置值、协议与依赖标识。允许的人类展示字符串变化需单列；构建包检查 LICENSE/NOTICE、vendor 许可和不含秘密数据。历史重写须先备份、只改授权引用、带 lease 更新，验证发布树不变。
+
+<!-- 媒体来源片 3adb61904 的既有记录；不代表当前 Compact 集成已验。 -->
+## 真实开发长任务验收方法
+
+用户明确要求长对话验收使用真实项目开发过程，禁止把重复生成的大行数当作真实任务通过依据。
+当前选择让官网 MiniMax-M2.7 的 my-agent 在原生 TUI 中把 GitHub `sharkdp/fd` 从 Rust 复刻为 Python，
+自行读源码、实现、运行测试、修复并提交项目产物。测试者只提交一次普通中文需求并观察，不能代写或补交产物。
+记录自然产生的模型/工具回合、Compact、TUI 状态、CPU/RSS、退出/恢复与任务结果；未实际发生的长历史边界不计为通过。
+下文合成一万/千万行记录只作为存储边界和缺陷复现，不代表此类真实开发工作负载。当前真实开发验收待完成。
+
+## 官网真模型与TUI媒体验收
+
+2026-09-23，独立候选线，专用测试机限制为 1 CPU / 2 GiB；官网直连，不通过中转，不使用假模型作为本轮验收。
+
+- 官网 MiniMax-M2.7：100 独立用户身份各发送一次中文普通请求，100/100 terminal=done；处理槽峰值 50。
+  同时一个原生 TUI 发问并正确回答 `5+6=11`。204.3 秒完成队列，44 个实拍终端帧未见“未同步/刷新失败”。
+  cgroup 峰值 1047.1 MiB（含文件缓存），末次采样 Gateway RSS 313.8 MiB、TUI RSS 62.6 MiB。
+  真实 `/status` 全部成功，但高峰 P95 3268 ms、最大 4897 ms；单核批量冷启动仍有排队和刷新延迟。
+- 官网 MiniMax-M3：实际端点 `https://api.minimax.cn/anthropic/v1/messages`，现有私有 key 短请求确认返回 M3。
+  原生 TUI `/attach` 添加 PNG，正确识别红圆、蓝方、绿三角及 `Q7N4`；终端 bracketed paste 拖入 MP4，
+  正确识别红→蓝→绿和 1→2→3。测试提问未提供答案；未代模型执行视觉工具。
+- 私有只读请求观察器确认真正外发 image/png 6484 字节与 video/mp4 5774 字节，SHA256 与素材一致；
+  观察器调用原 HTTP 函数，不替换供应商、不改变请求/响应。模型工具轮为零。
+- 真正 `/exit` 后重新启动同一会话，问图片和视频背景，M3 正确回答白色；请求再次带相同原件字节。
+- macOS 隔离 Gateway + 原生 TUI，系统图片剪贴板经 Ctrl+V 成为附件，官网 M3 正确识别同图；原剪贴板完整恢复，
+  本机隔离测试 TUI/Gateway 已退出。无改动用户日常模型/默认 Gateway。
+- `input_media_max_bytes=16 MiB` 同时限制新输入和一次供应商请求的媒体展开；新近附件完整、超预算旧附件明确
+  投影为归档引用，canonical refs 和原件不删除。owner 越界、符号链接、同长度内容变更、总量/数量超限均有合同验证。
+- 相关组件矩阵当前为 1008 passed、1 skipped；跳过项仍为原 HTTP stop fixture 的 409，自行 skip 不计入通过。
+  单测只验证协议/资源/输入边界，真实可用结论来自上述官网模型与原生 TUI。
+- 无 checkpoint 的一万行历史：真实 TUI 续聊完成，自动压缩 generation=1 后正确回答 `4+4=8`。
+  终态用时 410.81 秒；账本记录官网 M2.7 的 4 次供应商调用均 finished、0 retry，输入 294653 / 输出 1621 token。
+  该用时不能算低延迟通过，也不能仅凭单次采样栈归因给 Compact 二分预算估算。
+
+**未通过边界**：千万行浏览成功不等于千万行任意状态续聊成功。对 10,000,000 行、约 2.43 GB、
+无 Compact byte checkpoint 的历史，隔离只读子进程在 384 MiB 地址空间上限下调用 `after_compact_report`
+立即产生 `MemoryError`，还没有发起模型请求。`append_once` 的全量去重读取也需后续治理。
+相关有界读取、分批 Compact 必须与另一开发线正在修改的 scope/checkpoint/CAS 合同合并验收。
+本轮不声称无限时长、任意历史规模、100 个重工具或真实 IM 平台账号已通过。
+
+证据保存在仓库外 `tui-real-media-20260923/`：`real-model/` 的 submissions/terminals/samples，
+`media-*-tui.txt`、`media-provider-requests.jsonl`、`real-10k-history-*`、`uncompacted-10m-read.json`、本机截图粘贴验收。
+旧假模型记录仍保留用于定位，不作为本轮通过依据。未推送、未替换用户默认环境。

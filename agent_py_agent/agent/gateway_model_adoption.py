@@ -10,9 +10,14 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 
 from .agent_core.tool_request_capture import capture_tool_loop_request
-from .agent_core.tool_request_projection import ToolLoopRequestInput, project_tool_loop_request
+from .agent_core.tool_request_projection import (
+    ToolLoopRequestInput,
+    project_tool_loop_request,
+    text_request_capacity_known,
+)
 from .backends.base import ProviderRequestOptions
 from .backends.bounded_call import call_with_deadline
+from .backends.request_content import text_content_supported
 from .backends.request_scope import foreground_model_scope, provider_request_budget
 from .common.cancellation import ToolCancelled
 from .concurrency.interrupt import is_interrupted
@@ -46,51 +51,6 @@ def freeze_selection_candidates(agent: object, candidates: dict, deadline: float
                            "model_backend": config.model_backend,
                            "declared_context_window_tokens": config.model_context_window_tokens}
     return rows, generations
-
-
-# LLM: 原 native 消息没有跨模型 reasoning 签名/模态能力的完整证明；未知块不能经适配器静默丢弃或按文本价格估算。
-# 函数用途: 只接受当前原适配器明确支持的文本与工具往返，图像、签名推理及其它未知材料保持原模型。
-def _portable_content(content: object) -> bool:
-    if isinstance(content, str):
-        return True
-    if not isinstance(content, (list, tuple)):
-        return False
-    for block in content:
-        if not isinstance(block, dict):
-            return False
-        kind = block.get("type")
-        if kind == "tool_result":
-            if not _portable_content(block.get("content", "")):
-                return False
-        elif kind not in {"text", "tool_use"}:
-            return False
-    return True
-
-
-# LLM: 先检查原 IR/历史，再经过会过滤未知块的 adapter；否则被丢弃的推理/模态可能造成虚假的容量证明。
-# 函数用途: 验证冻结历史均属于原文本与工具合同，未知类型只限制可选切换，不限制原模型正常生成。
-def _portable_history(prepared: ToolLoopRequestInput) -> bool:
-    from .backends.tool_ir import (
-        AssistantTurn,
-        CompactionSummary,
-        RuntimeFactsTurn,
-        ToolResult,
-        UserTurn,
-    )
-
-    for row in prepared.provider_history_messages or ():
-        if set(row) - {"role", "content"} or not _portable_content(row.get("content")):
-            return False
-    for item in prepared.tool_ir_history or ():
-        if isinstance(item, AssistantTurn):
-            if not _portable_content(item.content_blocks):
-                return False
-        elif isinstance(item, (list, tuple)):
-            if not all(isinstance(result, ToolResult) for result in item):
-                return False
-        elif not isinstance(item, (CompactionSummary, RuntimeFactsTurn, ToolResult, UserTurn)):
-            return False
-    return True
 
 
 # LLM: 原 schema 消费口径来自实际 backend builder，thinking_disabled 仅在实际 tools 参数存在时生效；不生成替代载荷。
@@ -181,7 +141,7 @@ class GatewayModelAdoption:
             if dependencies is None:
                 raise ValueError("model_dependencies_unknown")
             prepared = capture_tool_loop_request(agent, params, self.prompt_input)
-            if not _portable_history(prepared):
+            if not text_request_capacity_known(prepared, allow_reasoning=False):
                 raise ValueError("history_modality_unknown")
             frozen_params = replace(params, tool_ir_history=deepcopy(params.tool_ir_history),
                                     provider_history_messages=deepcopy(params.provider_history_messages),
@@ -218,10 +178,10 @@ class GatewayModelAdoption:
             candidate_params = replace(params, tool_protocol_snapshot=protocol)
             candidate_input = replace(prepared, tool_protocol_snapshot=protocol,
                                       system_instruction=provider_system_instruction(agent.backend))
-            if not _portable_history(candidate_input):
+            if not text_request_capacity_known(candidate_input, allow_reasoning=False):
                 raise ValueError("history_modality_unknown")
             projected = project_tool_loop_request(candidate_input)
-            if projected.status != "ready" or any(not _portable_content(row.get("content")) for row in projected.messages or ()):
+            if projected.status != "ready" or any(not text_content_supported(row.get("content"), allow_reasoning=False) for row in projected.messages or ()):
                 raise ValueError("history_modality_or_projection_unknown")
             # 原始非空工具面即使被 choice.none 隐藏，也决定真实发送包装是否关闭 thinking。
             payload = _payload(agent.backend, projected.provider_prompt, list(candidate_input.native_tools) or None, projected.tool_choice,

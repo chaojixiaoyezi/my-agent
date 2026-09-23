@@ -32,6 +32,7 @@ from .tool_request_projection import (
     ToolLoopRequestInput,
     ToolLoopRequestProjection,
     project_tool_loop_request,
+    text_request_capacity_known,
 )
 
 
@@ -120,6 +121,8 @@ class PreparedCompactRecovery:
             raise ConversationCompactError("完整恢复输入未知", code="COMPACT_REQUEST_PROJECTION_UNKNOWN") from exc
         if not frozen.prompt_input.native_tool_use or frozen.tool_protocol_snapshot.source_protocol != "native":
             raise ConversationCompactError("恢复工具协议未知", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
+        if self.force and not text_request_capacity_known(frozen):
+            raise ConversationCompactError("完整请求包含尚无法计量的模态，保留原始材料", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
         tool_source = _recovery_tool_source(agent, source, params, frozen)
         if self.force and not source.messages and tool_source is None:
             raise ConversationCompactError("没有可压缩的源历史", code="COMPACT_SOURCE_EMPTY")
@@ -191,14 +194,16 @@ class PreparedCompactRecovery:
             self.on_commit(result.thread.compact_generation)
         return material.params, material.projection.prompt
 
-    # LLM: 无操作也须完整可计量；容量充足或没有可覆盖来源时不压缩，实际发送仍沿原容量门，不虚报适配。
-    # 函数用途: 初次请求没有可压历史时保留原输入，让后续选模与发送预检独立裁决容量。
+    # LLM: 冻结投影须完整；未知模态只跳过可选自动压缩，不赋予容量证明，强制恢复在select提前拒绝。
+    # 函数用途: 容量充足、没有来源或模态计量未知时保留原请求，普通媒体仍交给原选定模型。
     def _automatic_noop(self, frozen: ToolLoopRequestInput, tool_source) -> bool:
         from ..conversation.compact import _compact_request_input_ceiling
 
         projection = project_tool_loop_request(frozen)
         if projection.status != "ready":
             raise ConversationCompactError("完整请求投影未知", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
+        if not text_request_capacity_known(frozen):
+            return True
         tokens, _ = projected_model_context_components(projection)
         if tokens < _compact_request_input_ceiling(self.agent, self.source.policy):
             return True

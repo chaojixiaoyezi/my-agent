@@ -164,6 +164,8 @@ class ModelFieldsService:
         return out, warnings
 
 
+# LLM: 数值校验沿原Gateway配置入口，媒体数量/字节预算必须为正，不扩展执行权限。
+# 类用途: 统一队列、连接和媒体输入资源预算的配置范围。
 class GatewayFieldsService:
     _INT_FIELD_SPECS = (
         ("gateway_heartbeat_interval", 5, None),
@@ -176,6 +178,8 @@ class GatewayFieldsService:
         ("gateway_processing_timeout_seconds", 30, None),
         ("gateway_request_max_attempts", 0, None),
         ("gateway_port", 0, 65535),
+        ("input_media_max_bytes", 1, None),
+        ("input_media_max_files", 1, None),
     )
     _FLOAT_FIELD_SPECS = (("gateway_request_poll_interval", 0.05, None),)
 

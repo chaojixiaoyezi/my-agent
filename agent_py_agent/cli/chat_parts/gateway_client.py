@@ -24,7 +24,7 @@ from ...agent.gateway_parts.response_renderer import (
 
 
 # LLM: ChatRequestContent 声明当前 CLI 表面真实可消费的交互能力；只有 TUI 主链开启审批和富 transcript，plain/其它调用保持最小输出。
-# 类用途: 汇总一次聊天请求正文、上下文、会话和交互能力。
+# 类用途: 汇总一次聊天请求正文、附件引用、上下文、会话和交互能力。
 @dataclass
 class ChatRequestContent:
     prompt: str
@@ -37,6 +37,7 @@ class ChatRequestContent:
     system_task: dict[str, object] | None = None
     interactive_approvals: bool = False
     rich_transcript: bool = False
+    input_media: tuple[dict, ...] = ()
 
 
 # LLM: GatewayChunkPollRequest carries the canonical terminal path as the only completion fact;
@@ -77,7 +78,7 @@ class ChunkFilePollRequest:
 
 
 # LLM: submit 保留可信身份/工作区；可选分配回调在原子入队前登记显示关联，不改变权限、请求正文或模型配置。
-# 函数用途: 提交聊天请求并返回真实编号和路径，让发起页提前识别后到的同源消息。
+# 函数用途: 原样传递附件 refs 并提交请求，返回真实编号，让发起页提前识别后到的同源消息。
 def submit_chat_request(
     paths,
     content: ChatRequestContent,
@@ -99,6 +100,7 @@ def submit_chat_request(
             prompt=content.prompt,
             inject=content.inject,
             prompt_files=content.prompt_files,
+            input_media=content.input_media,
             save=content.save,
             include_prompt=content.show_prompt,
             resume_context=content.resume_context,
