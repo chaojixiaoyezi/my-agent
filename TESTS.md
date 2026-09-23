@@ -1,5 +1,17 @@
 # 测试与发布验收
 
+## 决策模型 TODO10 能力推荐与上下文减量（本地）
+
+8文件父侧联合127项通过：`test_decision_capability_consumer.py`、`test_decision_capability_http.py`、
+`test_decision_skill_projection.py`、`test_tool_presentation_projection.py`、`test_decision_skill_tool_settings.py`、
+`test_decision_settings_notifications.py`、`test_tui_decision_menu.py`、`test_decision_settings_scope.py`。
+原运行准备入口→seed→params→真实PromptBuilder/native schema验证实际输入减量；重复渲染不重新调用决策。
+本地HTTP验证成功、300ms超时、在途关闭/改策略、401/500不重试及迟到终态；原搜索可找回schema，插件撤销仍阻止旧绑定执行。
+关闭/观察/不确定保持原输入；完整候选500项可形成24个合法选择槽，原总字节/节点上限继续生效，不截断尾部。
+另与`test_memory_runtime_compact_auto_continuation.py`、`test_compact_semantic_summary.py`联合回归通过。
+真实Jev质量、收费token净收益、跨模型完整窗口和provider缓存仍待12/13，不能拿夹具字节量当收益。
+命令、责任边界见 [TODO10交接](docs/tasks/DECISION_MODEL_CAPABILITY_HANDOFF.md)。
+
 ## 决策模型 TODO11 设置与显式探测（本地）
 
 最终14文件联合243项通过，包含原ToolExecutor→user_config→原生HTTP→原会话用量结算及失败真实工具状态。

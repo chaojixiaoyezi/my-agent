@@ -1,5 +1,5 @@
-# LLM: 本模块集中定义一次 Agent run、工具循环和收口阶段的参数合同；新增控制状态必须是宿主注入的结构化字段并随 replace/续跑传播。
-# 模块用途: 保存模型循环、工具执行、压缩和归档阶段共享的不可变参数束。
+# LLM: 本模块定义一次run和工具循环的宿主参数；控制状态随replace/续跑传播，能力展示字段不拥有权限或加载状态。
+# 模块用途: 保存模型循环、工具执行、压缩和归档的不可变参数束，避免并发请求共享临时选择。
 
 from __future__ import annotations
 
@@ -49,8 +49,8 @@ class FinalizeContext:
     on_chunk: object = None
 
 
-# LLM: ToolLoopExecuteParams 是工具调用的 run 级事实源；临时批准/拒绝只能由当前审批等待链追加，不能来自模型参数。
-# 类用途: 汇总工具循环的上下文、快照和取消令牌；批准只在本轮使用，拒绝记忆可由同一执行链承接。
+# LLM: ToolLoopExecuteParams 是工具调用的 run 级事实源；批准/拒绝来自原审批链，Skill展示选择不授予权限或证明正文已加载。
+# 类用途: 汇总本轮上下文、快照、取消及只读名卡选择；循环渲染不重复请求决策模型。
 @dataclass(frozen=True)
 class ToolLoopExecuteParams:
     user_prompt: str
@@ -79,6 +79,8 @@ class ToolLoopExecuteParams:
     tool_protocol_snapshot: Any = None
     # The existing EffectiveContractSnapshot remains the sole task obligation authority.
     effective_contract_snapshot: Any = None
+    selected_skill_ids: tuple[str, ...] | None = None
+    required_skill_ids: tuple[str, ...] = ()
     # One host-owned token follows this run through shell/MCP/HTTP/long-poll boundaries.
     cancellation_token: CancellationToken = field(
         default_factory=lambda: CancellationToken(_external_check=is_interrupted)

@@ -564,8 +564,8 @@ def _runtime_injections_with_bundle(
     return injections
 
 
-# LLM: 工具快照逐 run 固定；异常退出先经宿主回调保存当前 IR，再原样抛错，不把中断当成功或重新执行工具。
-# 函数用途: 驱动模型工具循环，正常返回完整结果，异常也保留已经发生的会话事实。
+# LLM: 工具绑定逐run固定，可选决策只改变本片展示；异常先保存当前IR再抛错，Compact渲染不另发决策请求。
+# 函数用途: 准备一次能力推荐并驱动模型工具循环，失败保持原展示，异常也保留已发生的会话事实。
 def _execute_runtime_loop(agent, params: RuntimeLoopParams):
     write_runtime_fact_start_if_enabled(agent, params)
     audit_source_provision = _provision_audit_sources_before_model(agent, params)
@@ -583,6 +583,10 @@ def _execute_runtime_loop(agent, params: RuntimeLoopParams):
         params,
         tool_runtime_snapshot,
     )
+    from ...capability.decision_recommendation import recommend_capabilities
+
+    presentation = recommend_capabilities(agent, params, tool_runtime_snapshot, effective_contract_snapshot)
+    tool_runtime_snapshot = presentation.tool_snapshot
     tool_catalog_section, tool_recommendations_section = _resolve_tool_sections(
         ToolSectionsRequest(
             agent=agent,
@@ -602,6 +606,8 @@ def _execute_runtime_loop(agent, params: RuntimeLoopParams):
             tool_runtime_snapshot=tool_runtime_snapshot,
             tool_protocol_snapshot=tool_protocol_snapshot,
             effective_contract_snapshot=effective_contract_snapshot,
+            selected_skill_ids=presentation.selected_skill_ids,
+            required_skill_ids=presentation.required_skill_ids,
         ),
     )
     _queue_audit_source_provision_reply(loop_params, audit_source_provision)
@@ -912,7 +918,8 @@ def _native_user_task_text(value: object) -> str:
 # dedupe and effect state, while only calls not covered by committed Compact checkpoints reach the
 # provider. Never use the bounded model projection as runtime authority. Exact rejection memory
 # remains the same host-owned list across automatic continuations, independent of model history.
-# 函数用途: 从当前请求与完整续跑账本组装工具循环参数，并只把未压缩的近期轨迹展示给模型。
+# Skill presentation travels with this seed only; it cannot mutate the original grant or loaded-tool facts.
+# 函数用途: 从当前请求与完整续跑账本组装循环参数，传递本片名卡选择，并只展示未压缩的近期轨迹。
 def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecuteParams:
     params = seed.params
     archive_tool_calls: list[dict[str, object]] = list(params.carried_archive_tool_calls or [])
@@ -998,6 +1005,8 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
         tool_runtime_snapshot=seed.tool_runtime_snapshot,
         tool_protocol_snapshot=seed.tool_protocol_snapshot,
         effective_contract_snapshot=seed.effective_contract_snapshot,
+        selected_skill_ids=seed.selected_skill_ids,
+        required_skill_ids=seed.required_skill_ids,
         tool_rounds=tool_rounds,
         save=params.save,
         live_archive_state=live_archive_state,

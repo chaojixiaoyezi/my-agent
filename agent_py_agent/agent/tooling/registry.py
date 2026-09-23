@@ -1,5 +1,5 @@
-# LLM: 注册表与工作片权限视图共用 owner 策略读取器；可见性、Schema 和执行保持同一快照，不能热改共享工具。
-# 模块用途: 装配工具实现并把规范调用交给唯一执行器，提供不重建存储或 MCP 的权限视图。
+# LLM: 原权限、Schema、搜索和执行共用快照；宿主展示投影只折叠本轮名称，不热改共享工具、注册身份或真实loaded状态。
+# 模块用途: 装配工具并交给唯一执行器，沿原目录与搜索展示可找回的可选工具。
 from __future__ import annotations
 
 """Bind tools into one immutable runtime snapshot and delegate canonical calls.
@@ -28,6 +28,7 @@ from .content_transport_policy import (
 )
 from .executor import ToolExecution, ToolExecutor, ToolExecutorRequest, ToolOutputProjection
 from .models import (
+    TOOL_DISCOVERY_ENTRY_NAMES,
     BaseTool,
     ConcurrencyPolicy,
     EffectResolverPolicy,
@@ -379,8 +380,8 @@ def _live_tool_manifest_payload(payload: dict[str, object]) -> dict[str, object]
     }
 
 
-# LLM: Registry 是工具事实窄腰；注册、可见、搜索、Schema 与执行必须从同一请求快照派生。
-# 类用途: 组合进程级工具实现，并为每个 Agent run 生成权限与可用性的不可变交集。
+# LLM: 注册、Schema、搜索和执行由同一原快照派生；展示投影不能重建注册表、改变handler或伪造真实加载。
+# 类用途: 组合工具实现与原权限快照，在同一发现链中呈现本工作片可忽略的工具短名单。
 class ToolRegistry:
     # LLM: 保存唯一构造配置供工作片派生权限视图；普通 MCP 保持初始连接，插件只在新运行准备时启动，视图共用客户端与关闭标记。
     # 函数用途: 初始化一个 owner 的工具表、检索和审批读取器，运行时按同一注册表完成授权与调用。
@@ -553,8 +554,8 @@ class ToolRegistry:
             specs = [spec for spec in specs if spec.category != "orchestration"]
         return specs
 
-    # LLM: 原生 Schema 只能在请求快照中选择 direct/deferred，不得重新扫描注册表。
-    # 函数用途: 返回本轮直接工具与已由真实 tool_search 加载的 deferred 工具。
+    # LLM: 宿主额外折叠只能减当前快照；显式allowed及真实搜索loaded优先，短名单不生成loaded或改变注册身份。
+    # 函数用途: 返回原直接工具、未被本轮收起的可选工具，以及真实搜索已加载的完整Schema。
     def model_visible_specs(
         self,
         *,
@@ -569,19 +570,24 @@ class ToolRegistry:
         the unrestricted foreground surface uses progressive disclosure.
         """
 
+        snapshot = runtime_snapshot or self.runtime_snapshot(allowed_tools=allowed_tools)
         specs = self.specs(
             allowed_tools=allowed_tools,
             include_orchestration=True,
-            runtime_snapshot=runtime_snapshot,
+            runtime_snapshot=snapshot,
         )
-        if allowed_tools is not None or not self.catalog_deferred_categories:
+        if allowed_tools is not None or (snapshot.allowed_tools is not None and
+                (snapshot.presentation_deferred_names is not None or snapshot.presentation_shortlist_names is not None)):
+            return specs
+        extra_deferred = _presentation_deferred_names(snapshot, self.catalog_deferred_categories, allowed_tools=allowed_tools)
+        if not self.catalog_deferred_categories and not extra_deferred:
             return specs
         deferred = set(self.catalog_deferred_categories)
         loaded = {str(item).strip() for item in loaded_tool_names or set() if str(item).strip()}
-        return [spec for spec in specs if spec.category not in deferred or spec.name in loaded]
+        return [spec for spec in specs if (spec.category not in deferred and spec.name not in extra_deferred) or spec.name in loaded]
 
-    # LLM: deferred 搜索只能缩小快照，检索分数或模型文字都不能创建新权限。
-    # 函数用途: 在当前请求快照的 deferred 类别中返回相关工具说明。
+    # LLM: 原deferred类别与本轮额外收起名共同进入同一retriever；展示短名单不能裁掉搜索，命中不得扩展快照权限。
+    # 函数用途: 从原授权快照找回被折叠工具的精确说明和Schema，仍由真实tool_search产生加载事实。
     def search_deferred_specs(
         self,
         query: str,
@@ -592,21 +598,23 @@ class ToolRegistry:
     ) -> list[ToolModelSpec]:
         """Search only structurally deferred specs; searching never grants authority."""
 
+        snapshot = runtime_snapshot or self.runtime_snapshot(allowed_tools=allowed_tools)
         specs = self.specs(
             allowed_tools=allowed_tools,
             include_orchestration=True,
-            runtime_snapshot=runtime_snapshot,
+            runtime_snapshot=snapshot,
         )
         deferred = set(self.catalog_deferred_categories)
-        searchable = [spec for spec in specs if spec.category in deferred]
+        extra_deferred = _presentation_deferred_names(snapshot, self.catalog_deferred_categories, allowed_tools=allowed_tools)
+        searchable = [spec for spec in specs if spec.category in deferred or spec.name in extra_deferred]
         if not searchable:
             return []
         hits = self.retriever.search(str(query or ""), searchable, max(1, min(20, int(limit))))
         by_name = {spec.name: spec for spec in searchable}
         return [by_name[hit.name] for hit in hits if hit.name in by_name]
 
-    # LLM: 文本协议目录与原生 Schema 共享同一快照，协议差异只影响渲染形式。
-    # 函数用途: 把本轮工具快照渲染成有界文本目录。
+    # LLM: 目录沿同一原快照展示；可选短名单仅缩名卡，显式allowed忽略自适应投影，原完整list_tools仍可发现全部授权工具。
+    # 函数用途: 渲染本轮工具提示和可找回的折叠清单，不把展示选择变成权限或加载事实。
     def render_catalog_section(
         self,
         *,
@@ -614,16 +622,20 @@ class ToolRegistry:
         tool_protocol: str = "native",
         runtime_snapshot: ToolRuntimeSnapshot | None = None,
     ) -> str:
+        snapshot = runtime_snapshot or self.runtime_snapshot(allowed_tools=allowed_tools)
         specs = self.specs(
             allowed_tools=allowed_tools,
             include_orchestration=True,
-            runtime_snapshot=runtime_snapshot,
+            runtime_snapshot=snapshot,
         )
+        presentation = allowed_tools is None and snapshot.allowed_tools is None
         return _render_registry_catalog_section(
             specs,
             self._catalog_render_config(),
             write_inline_max_chars=self._write_inline_max_chars(),
             tool_protocol=tool_protocol,
+            presentation_deferred_names=_presentation_deferred_names(snapshot, self.catalog_deferred_categories, allowed_tools=allowed_tools),
+            presentation_shortlist_names=snapshot.presentation_shortlist_names if presentation else None,
         )
 
     def _catalog_render_config(self) -> CatalogRenderConfig:
@@ -668,8 +680,8 @@ class ToolRegistry:
         by_name = {spec.name: spec for spec in specs}
         return [by_name[hit.name] for hit in hits if hit.name in by_name]
 
-    # LLM: Recommended Tools 只解释快照内的选择，绝不能成为旁路授权或可用性列表。
-    # 函数用途: 为当前用户请求渲染少量相关且本轮可用的工具建议。
+    # LLM: 推荐名卡可按宿主短名单做减法，基础发现入口保留；未loaded的原deferred工具不能因此出现在原生Schema。
+    # 函数用途: 在原快照内显示本轮相关工具名称，保持搜索可达与权限范围不变。
     def render_recommended_tools_section(
         self,
         query: str,
@@ -678,10 +690,12 @@ class ToolRegistry:
         tool_protocol: str = "native",
         runtime_snapshot: ToolRuntimeSnapshot | None = None,
     ) -> str:
+        snapshot = runtime_snapshot or self.runtime_snapshot(allowed_tools=allowed_tools)
         specs = self.model_visible_specs(
             allowed_tools=allowed_tools,
-            runtime_snapshot=runtime_snapshot,
+            runtime_snapshot=snapshot,
         )
+        presentation = allowed_tools is None and snapshot.allowed_tools is None
         return _render_recommended_tools(
             query,
             specs,
@@ -689,6 +703,7 @@ class ToolRegistry:
             retrieval_limit=self.retrieval_limit,
             detail_max_chars=self.tool_detail_max_chars,
             tool_protocol=tool_protocol,
+            presentation_shortlist_names=snapshot.presentation_shortlist_names if presentation else None,
         )
 
     # LLM: Every gate and handler in one invocation must receive the same host-authored effective
@@ -860,12 +875,29 @@ def _reconnect_registry_client_if_due(registry: ToolRegistry, client: object) ->
         )
 
 
+# LLM: 仅核对原显式allowed与原tool_search是否直接可见，不推断可选类别；宿主已有类别策略是名称集合的来源。
+# 函数用途: 当原发现入口被既有目录设置收起时放弃额外折叠，避免把直接工具隐藏后无法找回。
+def _presentation_deferred_names(snapshot: ToolRuntimeSnapshot, deferred_categories: list[str], *,
+                                 allowed_tools: list[str] | None = None) -> frozenset[str]:
+    names = snapshot.presentation_deferred_names
+    if not names or allowed_tools is not None or snapshot.allowed_tools is not None:
+        return frozenset()
+    search = snapshot.runtime("tool_search")
+    if search is None or search.model_spec.category in deferred_categories:
+        return frozenset()
+    return names
+
+
+# LLM: 默认投影为None时保持原目录字节；额外折叠与短名单仅影响提示，不改变传入的完整授权specs。
+# 函数用途: 组合原工具协议、传输说明和本工作片的折叠发现提示。
 def _render_registry_catalog_section(
     specs: list[ToolModelSpec],
     render_config: CatalogRenderConfig,
     *,
     write_inline_max_chars: int,
     tool_protocol: str,
+    presentation_deferred_names: frozenset[str] | None = None,
+    presentation_shortlist_names: frozenset[str] | None = None,
 ) -> str:
     if str(tool_protocol or "").strip().lower() == "native":
         # Native providers already receive canonical schemas in their
@@ -874,16 +906,18 @@ def _render_registry_catalog_section(
         _, deferred = _split_deferred_specs(
             _filter_catalog_specs(specs, render_config.categories),
             render_config.deferred_categories,
+            presentation_deferred_names=presentation_deferred_names,
         )
         entries = [
             "- 当前直接工具的名称、说明和参数 Schema 已通过原生工具通道提供；"
             "以该结构化 Schema 为准，不在提示词中重复展开。",
         ]
-        deferred_notice = _render_deferred_notice(deferred)
+        deferred_notice = _render_deferred_notice(deferred, presentation_shortlist_names=presentation_shortlist_names)
         if deferred_notice:
             entries.append(deferred_notice)
     else:
-        entries = render_catalog_entries(specs, render_config)
+        entries = render_catalog_entries(specs, render_config, presentation_deferred_names=presentation_deferred_names,
+                                         presentation_shortlist_names=presentation_shortlist_names)
     transport_protocol = (
         tool_content_transport_protocol(write_inline_max_chars)
         if any(
@@ -906,6 +940,8 @@ def _render_registry_catalog_section(
     )
 
 
+# LLM: 推荐只筛名卡候选，不覆盖权限或loaded；短名单为空不等于没有授权，默认None保持原检索与输出。
+# 函数用途: 用原retriever渲染相关工具名字，省略未选名卡时仍保留原发现入口。
 def _render_recommended_tools(
     query: str,
     specs: list[ToolModelSpec],
@@ -914,13 +950,17 @@ def _render_recommended_tools(
     retrieval_limit: int,
     detail_max_chars: int,
     tool_protocol: str,
+    presentation_shortlist_names: frozenset[str] | None = None,
 ) -> str:
     if not specs:
         return (
             "# Recommended Tools\n"
             "当前执行上下文没有授权工具。若缺少能力，请提交 capability_request。"
         )
-    hits = retriever.search(query, specs, retrieval_limit)
+    candidates = specs if presentation_shortlist_names is None else [
+        spec for spec in specs if spec.name in presentation_shortlist_names or spec.name in TOOL_DISCOVERY_ENTRY_NAMES
+    ]
+    hits = retriever.search(query, candidates, retrieval_limit) if candidates else []
     if not hits:
         return (
             "# Recommended Tools\n"
@@ -1004,7 +1044,11 @@ def _native_tool_call_protocol() -> str:
     )
 
 
-def render_catalog_entries(specs: list[ToolModelSpec], config: CatalogRenderConfig) -> list[str]:
+# LLM: 展示分页只消费原specs；宿主短名单不能写回注册表，默认None不改变既有目录语义。
+# 函数用途: 在原目录模式和分页设置中渲染本轮名卡及折叠提示。
+def render_catalog_entries(specs: list[ToolModelSpec], config: CatalogRenderConfig, *,
+                           presentation_deferred_names: frozenset[str] | None = None,
+                           presentation_shortlist_names: frozenset[str] | None = None) -> list[str]:
     filtered = _filter_catalog_specs(specs, config.categories)
     if config.mode == "off":
         return ["- disabled：tool_catalog_mode=off，当前 prompt 不注入工具目录。"]
@@ -1012,41 +1056,55 @@ def render_catalog_entries(specs: list[ToolModelSpec], config: CatalogRenderConf
         return [
             "- retrieval_only：工具目录精简隐藏，请依赖 Recommended Tools；缺少工具时用 tool_search 加载。"
         ]
-    primary, deferred = _split_deferred_specs(filtered, config.deferred_categories)
+    primary, deferred = _split_deferred_specs(filtered, config.deferred_categories,
+                                             presentation_deferred_names=presentation_deferred_names)
+    if presentation_shortlist_names is not None:
+        primary = [spec for spec in primary if spec.name in presentation_shortlist_names or spec.name in TOOL_DISCOVERY_ENTRY_NAMES]
     page = primary[config.offset : config.offset + max(0, config.limit)]
     entries = [_render_catalog_spec(spec, config) for spec in page]
     if config.show_truncated_notice:
         notice = _catalog_page_notice(config, total=len(primary), returned=len(page))
         if notice:
             entries.append(notice)
-    deferred_notice = _render_deferred_notice(deferred)
+    deferred_notice = _render_deferred_notice(deferred, presentation_shortlist_names=presentation_shortlist_names)
     if deferred_notice:
         entries.append(deferred_notice)
     return entries
 
 
+# LLM: 原category折叠与宿主本轮名称集合取并集，不因短名单选中原deferred工具就伪造已加载。
+# 函数用途: 把原授权工具分成直接名卡与可经原搜索找回的折叠名卡。
 def _split_deferred_specs(
     specs: list[ToolModelSpec],
     deferred_categories: list[str],
+    *,
+    presentation_deferred_names: frozenset[str] | None = None,
 ) -> tuple[list[ToolModelSpec], list[ToolModelSpec]]:
     """渐进式披露:把 deferred category 的工具从主目录分出去(只在末尾留折叠清单)。"""
-    if not deferred_categories:
+    if not deferred_categories and not presentation_deferred_names:
         return specs, []
     deferred_set = set(deferred_categories)
-    primary = [spec for spec in specs if spec.category not in deferred_set]
-    deferred = [spec for spec in specs if spec.category in deferred_set]
+    names = presentation_deferred_names or frozenset()
+    primary = [spec for spec in specs if spec.category not in deferred_set and spec.name not in names]
+    deferred = [spec for spec in specs if spec.category in deferred_set or spec.name in names]
     return primary, deferred
 
 
-def _render_deferred_notice(specs: list[ToolModelSpec]) -> str:
+# LLM: 短名单只缩名字，完整数目和原tool_search/list_tools入口保留；省略名称不能成为权限或loaded事实。
+# 函数用途: 显示有界的本轮折叠名称提示，默认None逐字保留原完整折叠清单。
+def _render_deferred_notice(specs: list[ToolModelSpec], *, presentation_shortlist_names: frozenset[str] | None = None) -> str:
     """折叠清单:只列被 defer 工具的名字，按 会话运行时 方式用 tool_search 再加载。"""
     if not specs:
         return ""
-    names = ", ".join(sorted(spec.name for spec in specs))
-    return (
+    shown = [spec.name for spec in specs if presentation_shortlist_names is None or spec.name in presentation_shortlist_names]
+    names = ", ".join(sorted(shown))
+    notice = (
         f"- ⊞ 另有 {len(specs)} 个工具已注册但未直接展开；需要时先用 tool_search 搜索并加载，"
-        f"也可用 list_tools 查看完整清单：{names}"
+        "也可用 list_tools 查看完整清单"
     )
+    if presentation_shortlist_names is None:
+        return notice + f"：{names}"
+    return notice + (f"。本轮提示 {len(shown)} 个：{names}" if shown else "。本轮未列短名单，仍可按能力搜索。")
 
 
 def _filter_catalog_specs(specs: list[ToolModelSpec], categories: list[str]) -> list[ToolModelSpec]:

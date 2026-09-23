@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from copy import deepcopy
 from types import MappingProxyType
 from uuid import UUID
 
@@ -16,6 +17,29 @@ POINT_RUNTIME_SCOPES = MappingProxyType({
 POINTS = tuple(POINT_RUNTIME_SCOPES)
 GENERAL_FIELDS = ("enabled", "timeout_seconds", "stage_timeout_seconds", "background_timeout_seconds", "profile_id")
 POINT_FIELDS = ("mode", "timeout_seconds", "profile_id")
+_POINT_EXTRA_SCHEMAS = {"skill_tool": {
+    "context_policy": {"type": "string", "enum": ["metadata", "progressive"]},
+    "optional_categories": {"type": "array", "items": {"type": "string", "minLength": 1}},
+}}
+
+
+# LLM: 接入点专属字段只在此登记，配置投影和 schema 消费同一字段集合，不给其它点注入无用字段。
+# 函数用途: 返回指定原接入点的完整可配置字段。
+def decision_point_fields(point: str) -> tuple[str, ...]:
+    return (*POINT_FIELDS, *_POINT_EXTRA_SCHEMAS.get(point, {}))
+
+
+# LLM: 返回副本，模型工具不能修改全局字段登记；宿主运行时仍须调用 validate_decision_field。
+# 函数用途: 提供原配置工具需要的 JSON 字段类型与选项。
+def decision_field_schema(path: str) -> dict:
+    if path.startswith("points."):
+        _, point, field = path.split(".")
+        if field in _POINT_EXTRA_SCHEMAS.get(point, {}):
+            return deepcopy(_POINT_EXTRA_SCHEMAS[point][field])
+    return ({"type": "boolean"} if path == "enabled" else
+            {"type": "number", "exclusiveMinimum": 0} if path.endswith("timeout_seconds") else
+            {"type": "string", "enum": ["off", "observe", "apply"]} if path.endswith(".mode") else
+            {"type": "string", "description": "原模型目录的 Decision 编号或 shared:编号；空字符串明确不绑定。"})
 
 
 # LLM: 配置冲突是独立机器类型，入口应重新读取而非用旧整份快照重试覆盖。
@@ -69,7 +93,7 @@ def profile_reference(value: object) -> str:
 def decision_field_scopes() -> dict[str, list[str]]:
     result = {key: ["owner"] if key == "background_timeout_seconds" else ["owner", "thread"] for key in GENERAL_FIELDS}
     for point, runtime_scope in POINT_RUNTIME_SCOPES.items():
-        for field in POINT_FIELDS:
+        for field in decision_point_fields(point):
             result[f"points.{point}.{field}"] = ["owner"] if runtime_scope == "owner_background" else ["owner", "thread"]
     return result
 
@@ -91,6 +115,14 @@ def validate_decision_field(path: object, value: object, *, scope: str | None = 
         return positive_seconds(value)
     if field == "profile_id":
         return profile_reference(value)
+    if field == "optional_categories":
+        if type(value) is not list or any(type(item) is not str or not item.strip() for item in value):
+            raise ModelProfileError("可选工具类别必须是字符串列表；空列表表示不额外收起任何类别。")
+        return list(value)
+    if field == "context_policy":
+        if type(value) is not str or value not in decision_field_schema(path)["enum"]:
+            raise ModelProfileError("上下文策略只能是 metadata 或 progressive。")
+        return value
     if type(value) is not str or value not in {"off", "observe", "apply"}:
         raise ModelProfileError("决策模式只能是 off、observe 或 apply。")
     return value
@@ -104,7 +136,7 @@ def validate_decision_settings(value: object) -> dict:
     if value["schema"] != DECISION_SETTINGS_SCHEMA or type(value["revision"]) is not int or value["revision"] < 0:
         raise ModelProfileError("决策覆盖版本无效，原配置未修改。")
     overrides = value["overrides"]
-    if type(overrides) is not dict or len(overrides) > len(GENERAL_FIELDS) + len(POINTS) * len(POINT_FIELDS):
+    if type(overrides) is not dict or len(overrides) > len(decision_field_scopes()):
         raise ModelProfileError("决策覆盖字段无效，原配置未修改。")
     return {"schema": DECISION_SETTINGS_SCHEMA, "revision": value["revision"],
             "overrides": {key: validate_decision_field(key, item) for key, item in overrides.items()}}

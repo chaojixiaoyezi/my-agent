@@ -471,16 +471,31 @@ test_orchestration_create_subagents_idempotency.py、test_memory_curator_v2.py�
 建议下一步：先确认 P1 的共享入口归属，完成“默认关闭 + 用户/agent 共用可调时间与开关 + 可取消的短期限决策 + 故障走原流程”的最小切片。
 插件线继续其当前工作；本线先做协议、假服务与记忆输入准备，避免等待共享文件时停工，也避免提前改对方代码。
 
-## TODO10 上下文减量实施约定（2026-09-22，实施中）
+## TODO10 上下文减量实施约定（2026-09-22，本地验收通过）
 
 不能以“增加推荐文字但仍发送全部名卡/schema”代替减量目标。原Skill快照/工具Registry仍是唯一授权来源；
-宿主只为当前工作片建立不可变展示投影。None保持旧字节路径；关闭、观察、失败和非选择仍用原输入。
+宿主只为当前工作片建立不可变展示投影。None保持旧字节路径；关闭、观察、失败、弃权、无匹配和缺数据仍用原输入。
+明确not_needed表示当前选择槽无需额外能力，可产生空短名单；明确必要能力和发现入口仍保留。
 Skill选中/明确required名卡进入原动态推荐段，稳定区只保留固定发现说明；省略项可从原skill_search找回。
 任务局部范围仅在显式非None投影时展示当前run受限快照的名卡，不恢复owner人格/项目等隔离材料；isolated/control_plane保持不注入。
 工具短清单只影响展示，不约束搜索。progressive仅收起原配置明确可选类别的未选中direct schema；
 原发现入口、显式allowed和真实loaded保持，原tool_search必须能返回被收起项的完整原schema，否则拒绝该隐藏投影。
 不暗改默认deferred类别，不伪造loaded或权限，不跟随同名插件新activation/transport。
 原ToolRuntimeSnapshot新增的host-only展示字段不改变注册snapshot_hash，真实执行仍在原ToolExecutor/MCP发送前准入。
-context_policy计划区分metadata/progressive，可选类别由原capability配置及同一决策设置入口管理；默认关闭，具体配置与测试随实现同步。
+`points.skill_tool.context_policy`已区分metadata/progressive，默认progressive；`points.skill_tool.optional_categories`
+默认`["plugins"]`，空列表不额外收起工具schema，类别是开放字符串，不增写死分类枚举。
+默认值只归原CapabilityConfig/YAML；同一owner/thread设置服务、原user_config及原菜单支持修改/恢复继承。
+决策总开关与接入点仍默认关闭。原decision_settings.v1覆盖加法接受这两个可选字段，旧记录不补默认；旧程序不认识新字段时明确拒绝，
+不能静默抹除覆盖。有效值变更纳入原在途取消签名和采用前版本复核；不建立第二份设置或目录。
+原`_execute_runtime_loop`在工具循环种子前调用一次；选择沿RuntimeToolLoopSeed→ToolLoopExecuteParams→ToolSections传递。
+每轮渲染及Compact的原目录构造不请求决策模型；不同工作片可重做建议，不建立长期结果缓存。
+工具候选只取原授权运行快照并交集显式allowed，Skill只取当前scoped快照；不发送task_attributes原文，只用摘要绑定。
+候选每240项分组，每组最多8个初始展示选择槽，candidate_N引用state中的唯一候选说明；全目录仍可从原搜索找回。
+选择槽只限制初始推荐量，不限制工具数量或任务执行次数。原64题、255选项、256KiB和节点数限制仍生效；整体超限保留原输入，不截断尾部。
+缺数据选项明确区分任务目标、工具合同、Skill正文和环境事实；本接入点不自动补读/加权限，而是保持原上下文由主模型继续处理。
+消费前刷新原Skill范围及版本，检查固定handler的无副作用availability；插件沿原activation/transport检查，不按同名新工具重绑。
+原配置、实际主模型/窗口、任务属性或候选发生变化时拒绝旧建议，最后再过公开decision_outcome_is_current及绝对期限。
 普通自然语言没有可信required refs时，不靠字符串匹配宣称“已识别明确工具”；保留完整用户需求与原搜索找回路径。
 验证要比较真实provider输入字节/token、原搜索可达、撤销和实际cache事实，不能只检查建议对象或承诺缓存收益。
+本地原生成输入已证明名卡/schema减量，选中名卡在动态区；metadata模式保持完整native schema。
+这不证明收费token净节省、真实缓存命中率或Jev判断质量，完整窗口/缓存属于12，真实模型属于13。

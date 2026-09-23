@@ -102,14 +102,17 @@ def record_failure(key: tuple[str, str, str], revision: str, error: Exception) -
     return status
 
 
-# LLM: 只比较影响在途建议采用权的有效开关/模式/绑定；时间变化不延长旧请求，也不在通知中重置时钟。
+# LLM: 比较有效开关/模式/绑定及 Skill/tool 展示策略；时间变化不延长旧请求，也不在通知中重置时钟。
 # 函数用途: 从原模块默认与两层覆盖得到一个接入点的实际路由，供精准设置撤销比较。
 def routing_signature(context: object, settings: dict, point: str) -> tuple:
     values, _ = decision_defaults(context)
     values.update(settings["overrides"]["owner"])
     values.update(settings["overrides"]["thread"])
     mode = values[f"points.{point}.mode"] if values["enabled"] else "off"
-    return mode, values.get(f"points.{point}.profile_id", values["profile_id"])
+    routing = (mode, values.get(f"points.{point}.profile_id", values["profile_id"]))
+    if point == "skill_tool":
+        routing += (values["points.skill_tool.context_policy"], tuple(values["points.skill_tool.optional_categories"]))
+    return routing
 
 
 # LLM: 必须在 owner/thread 文件锁外调用；按提交后的覆盖重算有效值，reset 和 thread 遮蔽不能用字段名猜。

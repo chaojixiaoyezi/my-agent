@@ -419,6 +419,8 @@ agent_py_agent/
 |   |   |-- tool_input_completion.py # 明示安全默认值、可信上下文补参与脱敏 source/source_ref
 |   |   `-- sandbox.py                # bwrap 唯一策略、自检、worker/K8s readiness 硬门
 |   |-- capability/                    # 单一 SkillsService、逐轮 snapshot、能力路由与 capability tools
+|   |   |-- decision_candidates.py     # 原能力快照候选、选择槽及明确必要引用，不读取Skill正文
+|   |   |-- decision_recommendation.py # 每工作片可选推荐及采用前复核，只改变展示不改授权
 |   |   |-- skill_service.py           # bounded builtin/shared/owner/workspace discovery、policy 与缓存
 |   |   |-- skill_snapshot.py          # 不可变稳定引用、正文 hash/guard 校验与子代理收窄
 |   |   |-- persona_repository.py      # owner SOUL/USER/AGENTS 受控加载、版本/CAS/回滚唯一入口
@@ -463,6 +465,11 @@ agent_py_agent/
 |   |-- test_decision_owner_scope.py    # 用户后台run/空thread、原身份冲突、后台期限与配置隔离
 |   |-- test_decision_subagent.py      # 原根/递归创建、有工具真实快照、逐项模型选择及幂等
 |   |-- test_decision_recall.py        # 预算先行、固定保护槽位、来源撤销及原完整准备入口复用
+|   |-- test_decision_capability_consumer.py # 原设置/worker/循环接线到实际prompt/schema减量及失效原输入
+|   |-- test_decision_capability_http.py # 能力消费者经本地原生HTTP的成功/期限/在途设置变化
+|   |-- test_decision_skill_projection.py # Skill名卡动态投影、原搜索可达及None旧字节等价
+|   |-- test_tool_presentation_projection.py # 工具schema收起、原搜索恢复及真实插件撤销
+|   |-- test_decision_skill_tool_settings.py # 展示策略/开放类别列表的设置、CAS及原菜单编辑
 |   |-- test_decision_curator.py        # 原Curator临时建议、完整材料、非选择结果和lease头寸对照
 |   |-- test_decision_model_call.py     # 实际 worker 账本保留、HTTP 尝试、身份、准入与取消
 |   |-- test_model_call_ledger_partitions.py # 原账本用途、字段真值、单调终态及 worker 精确保留
@@ -863,6 +870,7 @@ docs/
 
 - `agent_py_agent/agent/agent_core/orchestration/decision_subagent.py`：创建前可选模型建议，复用原目录、准备/物化、原工具快照和幂等身份。
 - `agent_py_agent/agent/memory_store/decision_recall.py`：原召回预算后排序及消费前来源复核，不扩大权限或新增记忆存储。
+- `agent_py_agent/agent/capability/decision_candidates.py`、`decision_recommendation.py`：原授权能力候选与单工作片推荐消费者；一次调用、旧建议复核、按需展示，原Registry/Skill快照及搜索执行仍唯一。
 - `docs/tasks/DECISION_MODEL_P2_SUBAGENT_HANDOFF.md`：子代理选择生产接线、联合验证和完整窗口待验边界。
 - `docs/tasks/DECISION_MODEL_P3_RECALL_HANDOFF.md`：记忆排序、来源撤销、原本轮复用及本地验证交接。
 

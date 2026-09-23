@@ -40,6 +40,8 @@ _BUILTIN_PROMPT_PREFIX = "builtin:"
 _LEGACY_DEFAULT_PROMPT = "prompts/default.md"
 
 
+# LLM: 字段只属于本次 build；Skill ID 是展示投影，不能修改共享 builder/Router 或替代执行授权。
+# 类用途: 把工具段落及可选 Skill 名卡选择一起传给本次 prompt，None 保留原布局。
 @dataclass
 class ToolSections:
     """Bundle for PromptBuilder.build tool-related parameters."""
@@ -51,6 +53,8 @@ class ToolSections:
     # native tool_use 下工具往返由原生 messages 携带，prompt 不再折入 tool_context 文本
     # （避免文本+原生双份重复）。text 协议默认 False，行为不变。
     native_tool_use: bool = False
+    selected_skill_ids: tuple[str, ...] | None = None
+    required_skill_ids: tuple[str, ...] = ()
 
 
 @dataclass
@@ -79,6 +83,8 @@ class _PromptBuildFields:
     workspace_context_override: str | None
 
 
+# LLM: builder 可供同一 agent 多个请求复用；所有动态选择必须来自本次 request，禁止在实例挂展示或授权状态。
+# 类用途: 按原稳定前缀和动态来源拼接模型上下文，Skill 正文继续通过工具按需读取。
 class PromptBuilder:
     """负责构造每一轮发给模型的完整 prompt。"""
 
@@ -122,7 +128,7 @@ class PromptBuilder:
 
     # LLM: Every root and delegated model turn must receive the same evidence boundary. Native
     # prompts carry source-keyed volatile sections so changes do not duplicate unrelated facts.
-    # 函数用途: 拼出完整模型输入；原生工具协议同时标出各动态字段来源，未变化分段由 IR 留在原位置。
+    # 函数用途: 拼出完整模型输入；可选 Skill 选择只进动态推荐段，原生协议按来源复用未变化分段。
     def build(
         self,
         user_prompt: str = "",
@@ -171,6 +177,10 @@ class PromptBuilder:
         )
         default_tools = "# Tools\n（当前未启用工具）"
         default_recommendations = "# Recommended Tools\n（当前无候选工具详情）"
+        recommendations = _tools.tool_recommendations_section or default_recommendations
+        selected_skills = _selected_skill_context(self, request, task_local)
+        if selected_skills:
+            recommendations += "\n\n" + selected_skills
         if _tools.native_tool_use:
             return CacheStructuredPrompt(
                 _native_cache_stable_prefix(
@@ -181,9 +191,7 @@ class PromptBuilder:
                 ),
                 volatile_sections=_native_cache_volatile_sections(
                     memory_text=memory_text,
-                    tool_recommendations=(
-                        _tools.tool_recommendations_section or default_recommendations
-                    ),
+                    tool_recommendations=recommendations,
                     workspace_context=workspace_context,
                     injected=injected,
                     execution_facts=_tools.execution_facts_section,
@@ -201,7 +209,7 @@ class PromptBuilder:
             f"# Workspace Context\n{workspace_context}\n\n"
             f"# Runtime Injection\n{injected or '（无）'}\n\n"
             f"{_tools.tool_catalog_section or default_tools}\n\n"
-            f"{_tools.tool_recommendations_section or default_recommendations}\n\n"
+            f"{recommendations}\n\n"
             f"{task_and_transcript}\n\n"
             f"{_tools.execution_facts_section}\n"
         )
@@ -438,11 +446,16 @@ def _home_directory_guide(builder: PromptBuilder) -> str:
     )
 
 
+# LLM: Skill 展示选择通过当前 request 传递；不影响 prompt 文件、owner 上下文和隔离范围。
+# 函数用途: 组织原稳定内容，选择模式下只在这里留下固定发现说明。
 def _dynamic_prompt_text(builder: PromptBuilder, request: PromptBuildRequest, isolated: bool) -> str:
+    selected = request.tools.selected_skill_ids if request.tools else None
+    if str(request.context_scope or "").strip().lower() == "isolated":
+        selected = None
     chunks = [
         *builder.read_prompt_files(request.prompt_files, include_config=not isolated),
         *([] if isolated else builder.read_home_context(request.user_prompt)),
-        *([] if isolated else _skill_context_chunks(builder, request.user_prompt)),
+        *([] if isolated else _skill_context_chunks(builder, request.user_prompt, selected_skill_ids=selected)),
     ]
     return "\n".join(chunks)
 
@@ -451,12 +464,16 @@ def _dynamic_prompt_text(builder: PromptBuilder, request: PromptBuildRequest, is
 #   Skill snapshot 的 name+description+stable id，正文仍须模型显式 skill_search
 #   get 后才进入上下文。这里不按用户自然语言自动选择/执行 Skill，也不赋权。
 # 函数用途: 让模型看见每本可用 Skill 的短卡，匹配后再按 stable id 读取正文；
-#   没有合适技能时继续走普通任务。
-def _skill_context_chunks(builder: PromptBuilder, user_prompt: str) -> list[str]:
+#   选择模式只输出固定发现说明，选中名卡另进动态推荐段；没有合适技能时继续走普通任务。
+def _skill_context_chunks(
+    builder: PromptBuilder, user_prompt: str, *, selected_skill_ids: tuple[str, ...] | None = None,
+) -> list[str]:
     del user_prompt
     router = getattr(builder, "capability_router", None)
     if router is None:
         return []
+    if selected_skill_ids is not None:
+        return ["# Skill Discovery\n当前授权 Skill 可用 skill_search(action=search) 按需求检索；使用前用 action=get 和返回的稳定 skill_id 读取正文。"]
     try:
         config = getattr(builder, "config", None)
         index = router.render_skill_metadata_index(
@@ -465,6 +482,26 @@ def _skill_context_chunks(builder: PromptBuilder, user_prompt: str) -> list[str]
         return [index] if index else []
     except Exception:
         return []
+
+
+# LLM: 名卡与原 scoped Router 相交；task_local 仅接受显式投影，isolated/control_plane 不新增，None 保持旧行为。
+# 函数用途: 为当前 build 生成动态 Skill 名卡，复用原预算，并保留宿主明确的必要引用。
+def _selected_skill_context(builder: PromptBuilder, request: PromptBuildRequest, isolated: bool) -> str:
+    tools = request.tools
+    router = getattr(builder, "capability_router", None)
+    scope = str(request.context_scope or "").strip().lower()
+    if scope in {"isolated", "control_plane"} or (isolated and scope != "task_local"):
+        return ""
+    if router is None or tools is None or tools.selected_skill_ids is None:
+        return ""
+    try:
+        return router.render_skill_metadata_index(
+            context_window_tokens=getattr(builder.config, "model_context_window_tokens", 0),
+            selected_skill_ids=tools.selected_skill_ids,
+            required_skill_ids=tools.required_skill_ids,
+        )
+    except Exception:
+        return ""
 
 
 # LLM: 工作区块只提供时间/cwd 事实与交付软提示；不得强制所有诊断写文件，也不与系统的复杂任务计划纪律相反。

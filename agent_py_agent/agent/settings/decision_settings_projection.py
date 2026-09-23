@@ -6,6 +6,7 @@ from .decision_settings_defaults import decision_defaults
 from .decision_settings_schema import (
     POINT_RUNTIME_SCOPES,
     decision_field_scopes,
+    decision_point_fields,
     empty_decision_settings,
     validate_decision_settings,
 )
@@ -60,9 +61,9 @@ def decision_settings_projection(context: object, data: dict, thread: object = N
             if prefix + field not in values:
                 values[prefix + field] = values[fallback]
                 origins[prefix + field] = f"inherit:{fallback}:{origins[fallback]}"
-        sources.update({prefix + field: origins[prefix + field] for field in ("mode", "timeout_seconds", "profile_id")})
+        sources.update({prefix + field: origins[prefix + field] for field in decision_point_fields(point)})
         seconds = values[prefix + "timeout_seconds"]
-        points[point] = {field: values[prefix + field] for field in ("mode", "timeout_seconds", "profile_id")}
+        points[point] = {field: values[prefix + field] for field in decision_point_fields(point)}
         points[point].update(
             runtime_scope=runtime_scope, enabled=values["enabled"], enabled_source=origins["enabled"],
             effective_mode=points[point]["mode"] if values["enabled"] else "off",

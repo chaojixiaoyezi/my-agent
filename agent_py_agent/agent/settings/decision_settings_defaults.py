@@ -5,7 +5,12 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 
-from .decision_settings_schema import GENERAL_FIELDS, POINT_FIELDS, POINTS, validate_decision_field
+from .decision_settings_schema import (
+    GENERAL_FIELDS,
+    POINTS,
+    decision_point_fields,
+    validate_decision_field,
+)
 
 
 # LLM: 注册表只确定字段归属；能力点不能混入 AgentConfig，记忆点沿原记忆配置。
@@ -15,7 +20,7 @@ def decision_config_fields() -> dict[str, tuple[str, str]]:
     for point in POINTS:
         domain = "capability" if point in {"subagent_model", "skill_tool"} else "memory" if point in {"recall", "curator"} else "agent"
         prefix = "memory_decision_" if domain == "memory" else "decision_"
-        for field in POINT_FIELDS:
+        for field in decision_point_fields(point):
             result[f"points.{point}.{field}"] = (domain, f"{prefix}{point}_{field}")
     return result
 
@@ -27,7 +32,7 @@ def validate_config_decision_fields(values: Mapping, *, domain: str) -> dict:
     for path, (owner, field) in decision_config_fields().items():
         if (owner == domain or domain == "agent" and owner == "memory") and field in values:
             value = values[field]
-            optional = path.startswith("points.") and not path.endswith(".mode")
+            optional = path.startswith("points.") and path.rsplit(".", 1)[-1] in {"timeout_seconds", "profile_id"}
             if optional and (value is None or value == "null"):
                 normalized[field] = None
                 continue
@@ -55,7 +60,7 @@ def decision_defaults(context: object) -> tuple[dict, dict]:
     values, sources = {}, {}
     for path, (domain, field) in decision_config_fields().items():
         value = getattr(inputs[domain], field, getattr(defaults[domain], field))
-        if value is None and path.startswith("points.") and not path.endswith(".mode"):
+        if value is None and path.startswith("points.") and path.rsplit(".", 1)[-1] in {"timeout_seconds", "profile_id"}:
             continue
         values[path] = validate_decision_field(path, value)
         sources[path] = f"{domain}_config.{field}"

@@ -1,3 +1,5 @@
+# LLM: 能力卡来自原注册及逐轮 Skill 快照；展示选择只能缩小元数据，不能修改检索范围、正文读取或授权。
+# 模块用途: 提供原能力检索和有界 Skill 名卡渲染，按本次宿主选择减少上下文中的无关名卡。
 from __future__ import annotations
 
 """统一能力路由模块。
@@ -134,6 +136,8 @@ class CapabilitySearchHit:
     reasons: list[str]
 
 
+# LLM: 原快照及静态注册仍是能力目录；名卡展示子集只用于本次上下文，不修改检索或读取权限。
+# 类用途: 为模型检索可用能力，渲染完整预算索引或宿主选定的 Skill 短卡。
 class CapabilityRouter:
     """统一能力路由器。
 
@@ -218,7 +222,13 @@ class CapabilityRouter:
             )
         return "\n".join(lines)
 
-    def render_skill_metadata_index(self, *, context_window_tokens: int | None = None) -> str:
+    # LLM: None 保持原有序索引字节；宿主 ID 只与当前授权卡相交，必需引用保留最低行，不读正文或改变 Router。
+    # 函数用途: 渲染完整预算索引或本次选中的短卡；省略项仍由原 skill_search 找回。
+    def render_skill_metadata_index(
+        self, *, context_window_tokens: int | None = None,
+        selected_skill_ids: tuple[str, ...] | None = None,
+        required_skill_ids: tuple[str, ...] = (),
+    ) -> str:
         """Render 会话运行时 model-visible Skill metadata within a 2% budget.
 
         The model sees each included skill's name, short description, and stable
@@ -237,6 +247,8 @@ class CapabilityRouter:
         if not skills:
             return ""
         budget = _skill_metadata_budget(context_window_tokens)
+        if selected_skill_ids is not None:
+            return _render_selected_skill_metadata(skills, budget, selected_skill_ids, required_skill_ids)
         rendered, omitted, descriptions_shortened = _render_skill_metadata_lines(skills, budget)
         lines = [
             "# Available Skills",
@@ -450,6 +462,29 @@ class _SkillMetadataBudget:
                 len(text.encode("utf-8")) + _APPROX_BYTES_PER_TOKEN - 1
             ) // _APPROX_BYTES_PER_TOKEN
         return len(text)
+
+
+# LLM: ID 仅匹配原 stable_id，不接受名称别名；required 也必须处于授权卡内，预算不足只省略可选项。
+# 函数用途: 在当前名卡中渲染宿主选择和必要引用，准确报告省略数，完整检索目录保持原样。
+def _render_selected_skill_metadata(skills, budget, selected_skill_ids, required_skill_ids) -> str:
+    selected = set(selected_skill_ids)
+    required = set(required_skill_ids)
+    mandatory = [card for card in skills if card.metadata.get("stable_id") in required]
+    optional = [card for card in skills if card.metadata.get("stable_id") in selected - required]
+    minimum = sum(_line_cost(budget, _skill_line(card, "")) for card in mandatory)
+    required_lines, _, _ = _render_skill_metadata_lines(
+        mandatory, _SkillMetadataBudget(max(budget.limit, minimum), budget.token_based),
+    )
+    remaining = max(0, budget.limit - sum(_line_cost(budget, line) for line in required_lines))
+    selected_lines, _, _ = _render_skill_metadata_lines(optional, _SkillMetadataBudget(remaining, budget.token_based))
+    shown = [*required_lines, *selected_lines]
+    if not shown:
+        return ""
+    omitted = len(skills) - len(shown)
+    lines = ["# Selected Skills", "以下仅是本工作片展示的 Skill 名卡；使用前仍须 skill_search(action=get) 读取正文。", *shown]
+    if omitted:
+        lines.append(f"- 另有 {omitted} 个授权 Skill 未展示；仍可用 skill_search(action=search) 按需求检索。")
+    return "\n".join(lines)
 
 
 def _skill_metadata_budget(context_window_tokens: int | None) -> _SkillMetadataBudget:

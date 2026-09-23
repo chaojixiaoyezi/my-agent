@@ -11,6 +11,7 @@ from .decision_settings_projection import decision_profile, decision_settings_pr
 from .decision_settings_schema import (
     DecisionSettingsAccessError,
     DecisionSettingsConflict,
+    decision_field_scopes,
     empty_decision_settings,
     validate_decision_field,
     validate_decision_settings,
@@ -53,7 +54,7 @@ def _patch_settings(context: object, data: dict, current: dict, operation: str, 
     overrides = dict(current["overrides"])
     if operation == "patch":
         changes = payload.get("changes")
-        if type(changes) is not dict or not changes or len(changes) > 20:
+        if type(changes) is not dict or not changes or len(changes) > len(decision_field_scopes()):
             raise ModelProfileError("字段修改需要非空 changes 对象。")
         for key, value in changes.items():
             normalized = validate_decision_field(key, value, scope=scope)
@@ -62,12 +63,12 @@ def _patch_settings(context: object, data: dict, current: dict, operation: str, 
             overrides[key] = normalized
     else:
         fields = payload.get("fields")
-        if type(fields) is not list or not fields or len(fields) > 20 or any(type(key) is not str for key in fields):
+        if type(fields) is not list or not fields or len(fields) > len(decision_field_scopes()) or any(type(key) is not str for key in fields):
             raise ModelProfileError("恢复继承需要非空 fields 字段路径列表。")
         for key in fields:
             # 恢复继承不限制当前可写范围，否则旧版本遗留的线程后台字段将无法清理。
-            sample = False if key == "enabled" else "off" if key.endswith(".mode") else "" if key.endswith("profile_id") else 1.0
-            validate_decision_field(key, sample)
+            if key not in decision_field_scopes():
+                raise ModelProfileError("决策设置包含未登记的字段或接入点。")
             overrides.pop(key, None)
     return {**current, "revision": current["revision"] + 1, "overrides": overrides}
 

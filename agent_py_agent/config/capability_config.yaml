@@ -52,6 +52,11 @@ subagent_tool_wait_notice_seconds: 900
 decision_subagent_model_mode: off
 decision_subagent_model_timeout_seconds: null  # 有限正秒数；留空继承通用前台期限，零不是无限
 decision_subagent_model_profile_id: null  # 留空继承通用 Decision 模型引用
+# 总开关与本点仍默认关闭。采用时 metadata 只缩减名卡/推荐，progressive 还延迟可选类别的未选中工具。
+# 减量可能改变工作片间的缓存前缀/schema，不能把省输入等同于缓存命中；原工具搜索与执行权限不变。
+decision_skill_tool_context_policy: progressive
+# 可额外收起的工具类别是开放字符串列表；[] 不额外收起。不会修改原 tool_catalog_deferred_categories。
+decision_skill_tool_optional_categories: ["plugins"]
 decision_skill_tool_mode: off
 decision_skill_tool_timeout_seconds: null  # 有限正秒数；留空继承通用前台期限
 decision_skill_tool_profile_id: null  # 留空继承通用 Decision 模型引用

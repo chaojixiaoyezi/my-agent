@@ -173,6 +173,8 @@ class RuntimeLoopResult:
 
 
 
+# LLM: 原执行种子只传本工作片展示选择；工具和Skill授权仍来自原快照，None保持旧展示，不写共享Agent状态。
+# 类用途: 将准备好的目录和能力名卡选择交给工具循环，不再次请求决策模型。
 @dataclass
 class RuntimeToolLoopSeed:
     params: RuntimeLoopParams
@@ -182,3 +184,5 @@ class RuntimeToolLoopSeed:
     tool_runtime_snapshot: object = None
     tool_protocol_snapshot: object = None
     effective_contract_snapshot: object = None
+    selected_skill_ids: tuple[str, ...] | None = None
+    required_skill_ids: tuple[str, ...] = ()

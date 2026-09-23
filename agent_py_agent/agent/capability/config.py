@@ -7,7 +7,7 @@ from __future__ import annotations
 它刻意和 `agent_config.yaml` 分开，避免主配置文件越来越像一个杂物间。
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..settings.config import load_simple_yaml
@@ -16,7 +16,7 @@ from ..settings.config import load_simple_yaml
 # 模块用途: 集中读取协作能力设置，不把阶段提醒时间当成执行超时或权限授予。
 
 # LLM: 能力决策字段只定义推荐模式和绑定，不授予工具/子代理权限；时间限制与活动提醒仍分开。
-# 类用途: 定义子代理能力和观测选项；数值为零的阶段提醒表示关闭该阶段。
+# 类用途: 定义子代理能力和观测选项，以及关闭时不生效的能力上下文减量策略；数值为零的阶段提醒表示关闭该阶段。
 @dataclass
 class CapabilityConfig:
     """能力路由与子代理运行配置总表。
@@ -30,6 +30,8 @@ class CapabilityConfig:
     decision_skill_tool_mode: str = "off"
     decision_skill_tool_timeout_seconds: float | None = None
     decision_skill_tool_profile_id: str | None = None
+    decision_skill_tool_context_policy: str = "progressive"
+    decision_skill_tool_optional_categories: list[str] = field(default_factory=lambda: ["plugins"])
     enable_capability_routing: bool = False
     capability_request_max_tokens: int = 600
     capability_escalation_max_hops: int = 0

@@ -35,15 +35,9 @@ from .models import (
 # LLM: schema 字段来自同一决策登记表，不通过任意属性路径扩大可修改范围；运行时仍由服务严格校验。
 # 函数用途: 构造模型可见的字段 patch 描述，使用数值秒数和明确布尔开关。
 def _decision_change_properties() -> dict:
-    from ..settings.decision_settings_defaults import decision_config_fields
+    from ..settings.decision_settings_schema import decision_field_schema, decision_field_scopes
 
-    properties = {}
-    for path in decision_config_fields():
-        properties[path] = ({"type": "boolean"} if path == "enabled" else
-                            {"type": "number", "exclusiveMinimum": 0} if path.endswith("timeout_seconds") else
-                            {"type": "string", "enum": ["off", "observe", "apply"]} if path.endswith(".mode") else
-                            {"type": "string", "description": "原模型目录的 Decision 编号或 shared:编号；空字符串明确不绑定。"})
-    return properties
+    return {path: decision_field_schema(path) for path in decision_field_scopes()}
 
 
 # LLM: 保留原 main_agent 注册及中央策略；目录只读，探测只接受已存引用和显式预算，当前 runner 身份不可由模型覆盖。

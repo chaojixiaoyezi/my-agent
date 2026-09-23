@@ -1,7 +1,7 @@
 
 
-# LLM: 工具循环用同一 native IR 和 owner/thread Compact 权威；原生执行事实只补当前批次，不从次数推断任务完成。
-# 模块用途: 组装工具请求并协调压缩与提交，避免重复复制执行摘要；不改已有用户输入、账本、缓存前缀或任务状态。
+# LLM: 工具循环沿同一native IR和Compact权威；能力名卡只读当前params，渲染不发决策请求，执行事实不从次数推断。
+# 模块用途: 组装当前展示选择和工具请求并协调压缩提交，原授权、用户输入、账本和任务状态保持各自权威。
 from __future__ import annotations
 
 import json
@@ -263,8 +263,8 @@ def build_tool_loop_prompt(agent, params: ToolLoopExecuteParams) -> str:
     return prompt
 
 
-# LLM: Goal 临时投影不改变预算或权限；原生执行事实只生成最近批次，后续按原 IR 来源追加机制持久化。
-# 函数用途: 渲染本轮目标和真实上下文，只补最近工具批次的执行状态，避免原生请求反复抄账。
+# LLM: Goal与Skill临时展示不改变权限；选择只读本次params，原生执行事实仍按IR来源持久化，不在渲染中请求决策。
+# 函数用途: 渲染本轮目标、选中名卡及真实上下文，保留原执行事实和缓存分段。
 def _render_tool_loop_prompt(agent, params: ToolLoopExecuteParams) -> str:
     return agent.prompts.build(
         params.user_prompt,
@@ -275,6 +275,8 @@ def _render_tool_loop_prompt(agent, params: ToolLoopExecuteParams) -> str:
         context_scope=params.context_scope,
         workspace_context_override=_runtime_workspace_context(agent, params),
         tools=ToolSections(
+            selected_skill_ids=params.selected_skill_ids,
+            required_skill_ids=params.required_skill_ids,
             tool_catalog_section=params.tool_catalog_section,
             tool_recommendations_section=params.tool_recommendations_section,
             tool_context=params.tool_context,

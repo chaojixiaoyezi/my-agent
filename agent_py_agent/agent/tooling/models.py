@@ -1,5 +1,5 @@
-# LLM: 本模块定义工具元数据与不可变调用合同；执行权威回调只留在宿主上下文，不能进入模型参数或跨调用缓存。
-# 模块用途: 统一工具声明、结果与调用上下文，让执行器和实现按同一份结构化协议协作。
+# LLM: 本模块定义不可变工具合同；宿主展示投影不改注册身份或权限，执行权威回调只留在当前调用上下文。
+# 模块用途: 统一工具声明、结果、展示投影与调用上下文，让原执行器始终使用同一份真实工具绑定。
 from __future__ import annotations
 
 """Defines stable tool metadata, retrieval hits, and base execution contracts."""
@@ -1052,8 +1052,13 @@ def _validate_trusted_source_ref(tool_name: str, source_ref: object) -> None:
         raise ValueError(f"invalid trusted source_ref: {tool_name}: {text or '<empty>'}")
 
 
-# LLM: 该快照是一次 Agent run 的工具事实面；Schema、目录、搜索与最终调用只能在它上面继续做减法。
-# 类用途: 固定一次请求开始时已授权且已就绪的工具集合，并保留授权范围内不可用工具的结构化原因。
+# LLM: 发现入口不能被自适应展示收起；此集合不是权限白名单，只保护当前快照中本来存在的入口。
+# 常量用途: 保留查找完整工具和 Skill 的原发现路径。
+TOOL_DISCOVERY_ENTRY_NAMES = frozenset({"tool_search", "list_tools", "skill_search"})
+
+
+# LLM: 该快照固定原授权/就绪绑定；可选展示名集合只属本工作片，由宿主按原配置生成，不参与权限或snapshot_hash。
+# 类用途: 保存真实工具集合与不可用原因，附带可忽略的展示投影；收起工具必须仍可经原搜索找回。
 @dataclass(frozen=True)
 class ToolRuntimeSnapshot:
     run_id: str
@@ -1063,7 +1068,11 @@ class ToolRuntimeSnapshot:
     allowed_tools: frozenset[str] | None
     owner_type: str = "main_agent"
     snapshot_hash: str = ""
+    presentation_deferred_names: frozenset[str] | None = None
+    presentation_shortlist_names: frozenset[str] | None = None
 
+    # LLM: 仅校验名称子集、不可变类型与原发现入口，不复制配置或授权算法；展示字段不产生新注册代次。
+    # 函数用途: 在创建快照或宿主替换展示投影时拒绝越界名称和无法找回的额外折叠。
     def __post_init__(self) -> None:
         names = [runtime.model_spec.name for runtime in self.runtimes]
         if len(names) != len(set(names)):
@@ -1076,6 +1085,16 @@ class ToolRuntimeSnapshot:
             raise ValueError("tool runtime snapshot contains duplicate unavailable names")
         if expected_available.intersection(unavailable_names):
             raise ValueError("tool runtime cannot be both available and unavailable")
+        for selection in (self.presentation_deferred_names, self.presentation_shortlist_names):
+            if selection is not None and (type(selection) is not frozenset or any(type(name) is not str for name in selection)
+                                          or not selection.issubset(expected_available)):
+                raise ValueError("tool presentation names must be an immutable subset of the runtime snapshot")
+        if self.presentation_deferred_names:
+            if self.presentation_deferred_names.intersection(TOOL_DISCOVERY_ENTRY_NAMES):
+                raise ValueError("tool discovery entries cannot be deferred by presentation")
+            search = next((runtime for runtime in self.runtimes if runtime.model_spec.name == "tool_search"), None)
+            if search is None or not search.availability.available or not search.exposure.model_visible:
+                raise ValueError("deferred tool presentation requires the original available tool_search")
         for runtime in self.runtimes:
             runtime.model_spec.assert_schema_hash()
         digest = _tool_runtime_snapshot_hash(self.run_id, self.runtimes, self.owner_type)

@@ -16,6 +16,7 @@ from agent_py_agent.agent.settings.decision_settings_schema import (
     POINT_RUNTIME_SCOPES,
     DecisionSettingsConflict,
     decision_field_scopes,
+    decision_point_fields,
 )
 from agent_py_agent.agent.settings.model_profiles import model_profiles_path
 from agent_py_agent.agent.settings.model_provider_schema import ModelProfileError
@@ -49,7 +50,7 @@ def test_metadata_is_one_complete_field_registry_and_returns_independent_views(c
     host, thread, _key = configured
     view = execute(host, "read", {"scope": "thread"}, thread_id=thread.thread_id)
     fields = view["field_scopes"]
-    expected = set(GENERAL_FIELDS) | {f"points.{point}.{field}" for point in POINT_RUNTIME_SCOPES for field in POINT_FIELDS}
+    expected = set(GENERAL_FIELDS) | {f"points.{point}.{field}" for point in POINT_RUNTIME_SCOPES for field in decision_point_fields(point)}
     assert set(fields) == expected
     assert fields["background_timeout_seconds"] == ["owner"]
     assert all(fields[f"points.curator.{field}"] == ["owner"] for field in POINT_FIELDS)
