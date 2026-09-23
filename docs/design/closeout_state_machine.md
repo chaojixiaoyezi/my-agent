@@ -9,7 +9,28 @@
 run／attempt 的交付回调。交付回调按原顺序写调试 trace、通知父级；提交函数在 WAL 持久化和
 运行账结算之后才调用。运行账失败不得通知，trace 失败保留 WAL，通知失败仍落待重试事实。
 WAL 原语只能调用显式 save；settle 与诊断只能使用显式 RuntimeDB，不能经 manager 取得其它服务。
-这不是新增状态或执行器，原恢复扫描及父通知内部的 manager 依赖仍待独立迁移。
+这不是新增状态或执行器；恢复扫描的显式依赖见下一节，父通知内部的 manager 依赖由独立工作线迁移。
+
+## 第 7 步恢复扫描的依赖边界（本地候选）
+
+`runtime_closeout.py` 的恢复入口不再接收完整 manager，也不导入父通知实现：
+
+| 入口 | 必要能力 |
+| --- | --- |
+| `restore_unpersisted_closeouts`／`_restore_closeout_event` | 原 RuntimeDB、按 run 读取 task、保存 canonical task |
+| `advance_pending_closeout` | 原 RuntimeDB、保存当前 task、通知当前结果 |
+| `recover_pending_closeouts` | 上述能力与列出已有 task |
+
+通知的窄 Protocol 只接当前 task、已持久结果、output payload 与命名参数 `attempt_id`。
+既有 `capability_auto_sweep.py` 是唯一生产装配点，绑定原 manager 的方法和当前通知实现；
+恢复模块不会经回调访问新的服务，也不创建 context、代理 facade 或第二个扫描器。
+监督入口原回收计数提为独立摘要合并函数，只有记录和输出摘要两个参数；逐项写回保留原诊断及异常边界。
+
+顺序仍为：分页读未消费事件 → 校验 exact current → 保存 WAL → 记录消费；随后列出 task，
+从原结果文件补运行结算 → 必要时补父通知 → 保存 delivered → 清 WAL。
+一条错误不挡后续 task，分页游标与消费回执分离，已有 delivered 不再通知。`repo=None` 仍不恢复运行事件，
+但可推进原文件 WAL 和交付；缺失结果保持 pending。schema、路径、权限、去重策略、调度频率均未改。
+本片复用此前核对的原恢复合同与文件发布设计，未引入新的第三方实现；验收和并行边界见[恢复交接](../tasks/HANDOFF_STEP7_CLOSEOUT_RECOVERY.md)。
 
 ## 1. 解决的问题
 

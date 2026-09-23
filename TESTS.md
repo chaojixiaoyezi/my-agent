@@ -7,6 +7,16 @@ Goal／观察路由、结果状态、调试 trace、运行守卫、owner 唤醒�
 本地严格 gate 已通过：相关 focused、Ruff、doc sync、strict code-size、diff、clean-package 均无阻塞；
 新增行隐私模式扫描未命中。未运行全仓 pytest，线上 CI 没有作为验收来源；远端查询本轮超时。
 
+### 恢复扫描显式依赖（独立本地候选）
+
+基线 `9bbfc0a01` 上继续收窄 `restore/_restore/advance/recover`，唯一生产装配仍在原 capability sweep；
+既有分页、半写、旧 attempt、通知与清账故障用例逐一迁移到显式依赖，不重跑业务。
+新增 9 项无 manager 的恢复合同用例，覆盖 `repo=None`、精确通知负载、已交付只清账、坏结果不挡后项、
+先 WAL 后事件消费及消费标记失败后重入；另有 1 项从原监督入口推进真实临时文件 WAL 的装配回归。
+10 个直接相关文件联合 **291 passed、1 项既有 skipped**；Ruff、导入边界、doc sync、strict code-size、
+diff、clean-package 通过，新增行隐私扫描无命中。命令与未覆盖范围见[本片交接](docs/tasks/HANDOFF_STEP7_CLOSEOUT_RECOVERY.md)。
+前述 391 项组合结果属于基线，不冒充本片或并行父通知新实现的已发布验收。
+
 ## 第 7 步子代理结果链发布与验收
 
 配对发布半写修复已在隔离线本地验收，尚未发布：`test_closeout_wake_receipt_half_write_does_not_duplicate`

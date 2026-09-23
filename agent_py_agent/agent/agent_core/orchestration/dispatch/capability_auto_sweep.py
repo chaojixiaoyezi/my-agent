@@ -12,15 +12,18 @@ from __future__ import annotations
 #   接入点)、tests/test_capability_auto_grant.py。
 #   正常工作片次数不构成存活上限；续跑与故障重试统一复用 runner candidate，UNKNOWN 仍由运行账裁决。
 #   失联重排在原 creation guard 内复核 attempt/session；不能拿巡检旧快照覆盖新执行者。
-# 模块用途: 在唤醒和监督阶段核对能力及运行生命周期；允许长期父子协作接续，不把工作片数量当失败次数。
+#   收口恢复的 repo/load/save/list/notify 在本模块原调用点装配，不把整个 manager 交给恢复扫描。
+# 模块用途: 在唤醒和监督阶段装配能力与生命周期巡查；允许长期父子协作接续，不把工作片数量当失败次数。
 """Mechanism-level capability sweep before subagent-lifecycle wake turns."""
 
 import logging
 import time
 from contextlib import ExitStack
+from functools import partial
 from pathlib import Path
 from typing import Any
 
+from ....subagents import runner_completion_wake
 from ....subagents.capability_auto_grant import auto_grant_open_requests
 from ....subagents.models import (
     SUBAGENT_ENDED_STATUSES,
@@ -262,8 +265,7 @@ def supervise_stalled_orphans(agent: Any) -> dict[str, object]:
         return _supervise_stalled_orphans_unlocked(agent)
 
 
-# LLM: This is the ordered crash-recovery pass under the owner lock. Typed
-# direct-parent waits are reconciled before generic orphan revival.
+# LLM: 本入口在原 owner 锁下按序巡查并装配收口恢复的必要能力；直属父级等待先于通用孤儿复活。
 # 函数用途: 在锁内修复失联 runner、释放已满足的父级等待，再复活真正的孤儿。
 def _supervise_stalled_orphans_unlocked(agent: Any) -> dict[str, object]:
     summary: dict[str, object] = {
@@ -299,43 +301,19 @@ def _supervise_stalled_orphans_unlocked(agent: Any) -> dict[str, object]:
         _LOGGER.debug("supervision parent lifecycle reconcile failed", exc_info=True)
     try:
         reclaimed = _reclaim_dead_running_runs(agent)
-        summary["running_reclaimed"] = len(reclaimed)
-        summary["running_terminal_projected"] = sum(
-            1
-            for item in reclaimed
-            if item.get("recovery_action") == "terminal_projected"
-        )
-        summary["running_source_stalls_reclaimed"] = sum(
-            1 for item in reclaimed if item.get("reason") == "runner_session_stalled"
-        )
-        summary["running_source_ended_reclaimed"] = sum(
-            1 for item in reclaimed if item.get("reason") == "runner_session_ended"
-        )
-        cleanup_rows = [item for item in reclaimed if str(item.get("host_cleanup_status") or "")]
-        summary["stalled_source_hosts_cleanup_attempted"] = len(
-            {
-                int(item.get("worker_pid") or 0)
-                for item in cleanup_rows
-                if int(item.get("worker_pid") or 0) > 0
-            }
-        )
-        summary["stalled_source_hosts_terminated"] = len(
-            {
-                int(item.get("worker_pid") or 0)
-                for item in cleanup_rows
-                if str(item.get("host_cleanup_status") or "")
-                in {"terminated", "killed", "not_alive"}
-                and int(item.get("worker_pid") or 0) > 0
-            }
-        )
+        _merge_running_reclaim_summary(summary, reclaimed)
     except Exception:
         _LOGGER.debug("supervision running reclaim failed", exc_info=True)
     # LLM: runner 终态收口的待重试事实由这个既有关键sweep确定性推进：只补记账（settle 权威
     # run）与补通知（父级 wake），不重跑业务、不建新任务、不读任何自然语言。收口写库临时
     # 失败或"收口后通知前中断"由此收敛，而不是永久留成 task 终态 / runtime created 的矛盾。
-    # 函数用途: 推进所有待重试的子代理 runner 收口事实。
+    # 函数用途: 绑定原存储和父通知能力，推进待重试收口，不新增扫描器或执行入口。
     try:
-        summary.update(recover_pending_closeouts(manager))
+        summary.update(recover_pending_closeouts(
+            getattr(manager, "runtime_db", None), load_task=manager.load, save_task=manager.save,
+            list_tasks=manager.list_runs,
+            notify_result=partial(runner_completion_wake.notify_parent_on_runner_result, manager),
+        ))
     except Exception:
         _LOGGER.debug("supervision runtime closeout recovery failed", exc_info=True)
     summary.update(_reconcile_direct_parent_waits(agent))
@@ -376,6 +354,42 @@ def _supervise_stalled_orphans_unlocked(agent: Any) -> dict[str, object]:
                     exc_info=True,
                 )
     return summary
+
+
+# LLM: 只将既有回收记录投影到当前监督摘要，不读取 manager、不改运行账；逐项写回保持原异常时已算出的诊断。
+# 函数用途: 合并运行回收与宿主清理计数，让监督入口只保留有序调用和错误边界。
+def _merge_running_reclaim_summary(
+    summary: dict[str, object], reclaimed: list[dict[str, Any]],
+) -> None:
+    summary["running_reclaimed"] = len(reclaimed)
+    summary["running_terminal_projected"] = sum(
+        1
+        for item in reclaimed
+        if item.get("recovery_action") == "terminal_projected"
+    )
+    summary["running_source_stalls_reclaimed"] = sum(
+        1 for item in reclaimed if item.get("reason") == "runner_session_stalled"
+    )
+    summary["running_source_ended_reclaimed"] = sum(
+        1 for item in reclaimed if item.get("reason") == "runner_session_ended"
+    )
+    cleanup_rows = [item for item in reclaimed if str(item.get("host_cleanup_status") or "")]
+    summary["stalled_source_hosts_cleanup_attempted"] = len(
+        {
+            int(item.get("worker_pid") or 0)
+            for item in cleanup_rows
+            if int(item.get("worker_pid") or 0) > 0
+        }
+    )
+    summary["stalled_source_hosts_terminated"] = len(
+        {
+            int(item.get("worker_pid") or 0)
+            for item in cleanup_rows
+            if str(item.get("host_cleanup_status") or "")
+            in {"terminated", "killed", "not_alive"}
+            and int(item.get("worker_pid") or 0) > 0
+        }
+    )
 
 
 # LLM: Supervisor reporting must distinguish accepted starts from authority
