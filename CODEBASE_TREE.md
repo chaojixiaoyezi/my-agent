@@ -580,6 +580,7 @@ agent_py_agent/
 |   |-- test_gateway_capability_compact.py # 同片能力展示沿 Gateway/子代理 Compact 和续跑保留
 |   |-- test_subagent_capability_compact.py # child 同轮展示沿真实 Compact 重试保留、失效清除与新轮重置
 |   |-- test_background_prepared_context.py # 后台重复纯渲染无写账、冻结输入、任务范围与窄审计隔离
+|   |-- test_native_history_projection_memory.py # 原生历史嵌套复制峰值、canonical及输出别名隔离
 |   |-- test_compact_checkpoint_stream.py # 旧摘要读取内存、JSONL兼容、改写及文件关闭回归
 |   |-- test_compact_scoped_checkpoint.py # 交错作用域、摘要基础、局部CAS、版本篡改与精确覆盖
 |   |-- test_compact_scoped_transcript.py # 局部历史来源、交错摘要基础与竞争CAS
@@ -1135,3 +1136,5 @@ docs/
 
 - `agent_py_agent/agent/conversation/compact_checkpoint_scan.py`：固定单次账本描述符及EOF，完整解析后按行地址/hash读取已提交候选，内存索引随作用域释放。
 - `agent_py_agent/tests/test_compact_checkpoint_stream.py`：对照原检查点读取峰值并验证坏orphan、重复ID、Unicode/末行、晚追加、改写和异常关闭。
+
+- `agent_py_agent/tests/test_native_history_projection_memory.py`：单次隔离复制与完整Compact投影内存对照、不同调用及匿名重复输出隔离、原生往返与孤儿修补保真。

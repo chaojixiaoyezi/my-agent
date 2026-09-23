@@ -1,5 +1,7 @@
 # 设计台账
 
+原生历史只在canonical读取边界做必要深拷贝，后续只读投影接收该独占副本；匿名重复输出各自隔离。token估算复用主线有界小JSON直接编码/大JSON流式选择，异常顺序和数值保持；本地已实现，无持久状态或新配置。第12.4全链有界仍待完成，见[容量审计](docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。
+
 12.4检查点读取使用同次描述符内的临时ID→行地址/hash，原文件及thread head仍唯一权威；全部行先解码检查，已提交链逐条验封后只保留适用摘要及覆盖元数据。无持久索引、缓存或新开关，已本地实现，整体有界来源仍未完成。见[容量审计](docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。
 
 12.6本地组合验收已完成，原目录/线程CAS/容量门和校准账仍唯一；扫描修复保持原Unicode空白与损坏分类，不增加配置或持久索引。12.4全链有界与12.7真实缓存未完成，见[容量审计](docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。

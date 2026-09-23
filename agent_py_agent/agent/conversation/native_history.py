@@ -8,7 +8,7 @@ that raw tail with a summary.
 
 # LLM: This module owns the sole persisted provider-neutral native-message envelope used by both
 # Gateway and child threads; changes must keep schema validation, turn grouping and Compact aligned.
-# 模块用途: 保存正常或中断回合的原生消息；停止的空正文只携带历史，不生成替代回复或丢失工具往返。
+# 模块用途: 保存并隔离回放正常或中断回合的原生消息；停止空正文仍保留工具往返，展示不生成替代回复。
 
 from __future__ import annotations
 
@@ -53,6 +53,7 @@ def canonical_native_messages_from_metadata(metadata: object) -> tuple[dict[str,
 # request identity for provider replay only. Visible prose is still preserved independently for
 # TUI/search/text backends, and turns without an envelope keep the legacy role/text projection.
 # display rows are excluded before envelope selection, including malformed or forged display metadata.
+# 原metadata读取已深拷贝；每份输出直接接收独占副本，匿名重复输出仍另复制以避免互相修改。
 # 函数用途: 排除纯展示行后恢复原生消息；display中即使有伪造native metadata也不能污染下一轮缓存或输入。
 def provider_history_messages_from_rows(rows: Iterable[object]) -> tuple[dict[str, Any], ...]:
     selected = [row for row in rows if not is_display_checkpoint(row)]
@@ -69,19 +70,21 @@ def provider_history_messages_from_rows(rows: Iterable[object]) -> tuple[dict[st
             anonymous_envelopes[str(getattr(row, "message_id", "") or id(row))] = messages
 
     emitted: set[str] = set()
+    emitted_anonymous: set[str] = set()
     result: list[dict[str, Any]] = []
     for row in selected:
         identity = _row_turn_identity(row)
         envelope = envelopes.get(identity) if identity else None
         if envelope:
             if identity not in emitted:
-                result.extend(deepcopy(list(envelope)))
+                result.extend(envelope)
                 emitted.add(identity)
             continue
         anonymous_key = str(getattr(row, "message_id", "") or id(row))
         anonymous = anonymous_envelopes.get(anonymous_key)
         if anonymous:
-            result.extend(deepcopy(list(anonymous)))
+            result.extend(deepcopy(list(anonymous)) if anonymous_key in emitted_anonymous else anonymous)
+            emitted_anonymous.add(anonymous_key)
             continue
         legacy = _legacy_row_message(row)
         if legacy is not None:

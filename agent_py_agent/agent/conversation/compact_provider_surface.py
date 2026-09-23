@@ -2,7 +2,7 @@
 # same tool snapshot and PromptBuilder contracts as an ordinary model turn. It must never execute
 # tools, infer cache boundaries from prose, or mutate ConversationThread state. Same-turn display
 # is revalidated from host inputs; failure clears the host carrier without another decision call.
-# 模块用途: 为会话压缩复用普通请求的system、工具和动态展示，摘要由原有界调用链生成，不执行工具。
+# 模块用途: 为会话压缩复用普通请求的system、工具和动态展示；历史在原读取边界隔离后直接使用，不执行工具。
 
 from __future__ import annotations
 
@@ -200,6 +200,7 @@ def conversation_compact_provider_prompt(
 # LLM: Previous committed summary uses the exact ordinary-run envelope, followed by the selected
 # canonical transcript prefix and typed current display facts. The ordinary IR adapter owns their
 # provider shape; orphan repair is provider validation only and never changes canonical storage.
+# canonical读取已给出本次独占的嵌套副本；纯孤儿修补可直接消费，不重复复制整份历史。
 # 函数用途: 回放待压缩历史并追加同片动态名卡，原生工具往返与稳定前缀不变，摘要指令仍位于最后。
 def conversation_compact_provider_messages(
     previous_summary: str,
@@ -219,11 +220,7 @@ def conversation_compact_provider_messages(
                 )
             ]
         )
-    canonical = [
-        deepcopy(item)
-        for item in provider_history_messages_from_rows(rows)
-        if isinstance(item, dict)
-    ]
+    canonical = provider_history_messages_from_rows(rows)
     current_display = AnthropicMessageAdapter().to_provider_messages(
         [RuntimeFactsTurn(text=text, source=source) for source, text in volatile_sections]
     )

@@ -4,6 +4,8 @@
 """
 from __future__ import annotations
 
+import json
+import math
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -217,8 +219,8 @@ class TestAppendSessionTokenUsage:
         assert result["turn_total"] == 3500000
 
 
-class TestPayloadToText:
-    """测试 _payload_to_text 内部函数（通过 estimate_tokens 间接测试）。"""
+class TestPayloadEstimation:
+    """通过 estimate_tokens 验证不同输入类型，不绑定内部编码方式。"""
 
     def test_string_payload(self):
         """测试字符串输入直接返回。"""
@@ -290,25 +292,27 @@ class TestStructuredOverhead:
         assert result >= 1
 
 
+# LLM: 保留原完整JSON及UTF8顺序作为独立数值基准，不调用产品内部长度或结构上界帮助函数。
+# 函数用途: 对照编码优化前的预算口径及异常优先级，只在隔离测试内计算，不写账或发请求。
+def _legacy_token_estimate(payload: object) -> int:
+    try:
+        text = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        text = str(payload)
+    overhead = max(1, len(payload) // 2) if isinstance(payload, dict) else max(1, len(payload) // 4) if isinstance(payload, (list, tuple, set)) else 0
+    return max(1, math.ceil(len(text.encode("utf-8")) / 3), math.ceil(len(text) / 3)) + overhead if text else 1
+
+
 @pytest.mark.parametrize("payload", [
     "", "中文🪴\\\"\n", None, True, 123, float("nan"), float("inf"),
     {"z": [1, "甲", {"b": "🪴"}], "a": False}, ("a", "b"), {1, 2},
     {"mixed": 1, 2: "key"}, {None: "null key"}, Path("example/file.txt"),
     {"a": "\ud800", "b": {1: "x", "str": "y"}},
 ])
-def test_streamed_estimator_preserves_original_numeric_contract(payload):
-    import json
-    import math
-
+def test_estimator_preserves_original_numeric_contract(payload):
     from agent_py_agent.agent.memory_archive.tokens import estimate_tokens
 
-    try:
-        text = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
-    except (TypeError, ValueError):
-        text = str(payload)
-    overhead = max(1, len(payload) // 2) if isinstance(payload, dict) else max(1, len(payload) // 4) if isinstance(payload, (list, tuple, set)) else 0
-    expected = max(1, math.ceil(len(text.encode("utf-8")) / 3), math.ceil(len(text) / 3)) + overhead if text else 1
-    assert estimate_tokens(payload) == expected
+    assert estimate_tokens(payload) == _legacy_token_estimate(payload)
 
 
 def test_streamed_estimator_circular_fallback_and_utf8_error_stay_distinct():
@@ -320,3 +324,104 @@ def test_streamed_estimator_circular_fallback_and_utf8_error_stay_distinct():
     for payload in ("\ud800", {"value": "\ud800"}, ["\ud800"]):
         with pytest.raises(UnicodeEncodeError):
             estimate_tokens(payload)
+
+
+def test_small_json_uses_direct_encoding_and_large_payload_stays_streamed(monkeypatch):
+    from agent_py_agent.agent.memory_archive import tokens
+
+    small = {"history": ["正文🪴\n" * 100], "counts": (None, True, -1000, 1.25)}
+    large = {"history": ["x" * (tokens._SMALL_JSON_MAX_BYTES + 1)]}
+    expected = [_legacy_token_estimate(payload) for payload in (small, large)]
+    original = json.dumps
+    calls = []
+
+    def bounded_dumps(payload, **kwargs):
+        assert payload is small, "大来源不能恢复整份JSON副本"
+        calls.append(payload)
+        return original(payload, **kwargs)
+
+    monkeypatch.setattr(json, "dumps", bounded_dumps)
+    assert [tokens.estimate_tokens(payload) for payload in (small, large)] == expected
+    assert calls == [small]
+
+
+@pytest.mark.parametrize("payload", [
+    {"value": "\x00\x01\t\n\r\\\"中🪴"},
+    {1: -10**70, 2: [None, False, -5e-324, 1.7976931348623157e308]},
+    {None: (float("nan"), float("inf"))},
+    {False: "布尔键"},
+    {-1.25: "浮点键"},
+])
+def test_small_json_upper_bound_covers_encoded_utf8(payload):
+    from agent_py_agent.agent.memory_archive import tokens
+
+    size = tokens._bounded_json_size(payload, tokens._SMALL_JSON_MAX_BYTES)
+    assert size is not None
+    assert len(json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")) <= size
+    assert tokens._bounded_json_size(payload, size) == size
+    assert tokens._bounded_json_size(payload, size - 1) is None
+
+
+@pytest.mark.parametrize("shape", ["circular", "deep", "unknown", "subclass"])
+def test_unproven_shapes_keep_original_streaming_semantics(monkeypatch, shape):
+    from agent_py_agent.agent.memory_archive import tokens
+
+    class CustomList(list):
+        pass
+
+    if shape == "circular":
+        payload = []
+        payload.append(payload)
+    elif shape == "deep":
+        payload = "leaf"
+        for _ in range(tokens._SMALL_JSON_MAX_DEPTH + 1):
+            payload = [payload]
+    else:
+        payload = Path("example/file.txt") if shape == "unknown" else CustomList([1, "中文"])
+    expected = _legacy_token_estimate(payload)
+
+    def reject_direct_encoding(*_args, **_kwargs):
+        pytest.fail("未证明有界的结构必须保留流式编码")
+
+    monkeypatch.setattr(json, "dumps", reject_direct_encoding)
+    assert tokens.estimate_tokens(payload) == expected
+
+
+def test_size_probe_does_not_invoke_custom_conversion_or_type_comparison():
+    from agent_py_agent.agent.memory_archive import tokens
+
+    calls = []
+
+    class CustomType(type):
+        def __eq__(cls, other):
+            pytest.fail("上界检查只能按类型身份判断，不能执行自定义比较")
+
+    class CustomValue(metaclass=CustomType):
+        def __str__(self):
+            calls.append(True)
+            return "完整内容"
+
+    payload = {"value": CustomValue()}
+    assert tokens._bounded_json_size(payload, tokens._SMALL_JSON_MAX_BYTES) is None
+    assert not calls
+    actual = tokens.estimate_tokens(payload)
+    assert calls == [True]
+    assert actual == _legacy_token_estimate(payload)
+    assert calls == [True, True]
+
+
+@pytest.mark.parametrize("large", [False, True])
+@pytest.mark.parametrize("json_failure", [False, True])
+def test_json_failure_still_precedes_utf8_failure_in_both_encoding_paths(large, json_failure):
+    from agent_py_agent.agent.memory_archive import tokens
+
+    payload = {"a": "\ud800"}
+    if json_failure:
+        payload["b"] = {1: "integer", "key": "string"}
+    if large:
+        payload["padding"] = "x" * (tokens._SMALL_JSON_MAX_BYTES + 1)
+    if json_failure:
+        assert tokens.estimate_tokens(payload) == _legacy_token_estimate(payload)
+    else:
+        with pytest.raises(UnicodeEncodeError):
+            tokens.estimate_tokens(payload)

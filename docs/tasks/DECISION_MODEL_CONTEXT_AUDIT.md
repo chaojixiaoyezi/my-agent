@@ -1435,3 +1435,21 @@ Responses另两项捕获原_generate最终request_json参数：普通max_output_
 
 
 Sol high独立只读复核未发现必须修复的scope/base/legacy回归，确认未选orphan改写边界；建议的公开完整chain显式closing已补齐。随后新增空head不读取坏orphan、非空head缺文件报缺链两项，并在完整chain关闭修改后复验新文件 **15 passed（0.48秒）**；两组峰值686,105/1,230,902 bytes，日志 `/tmp/decision_checkpoint_final_20260923.log`，与98项有重叠不累加。全目录Ruff、doc sync、strict code-size（hard=0，基线不改）、diff通过；clean-package在纳入新文件后通过。原四项主线测试适配缺口仍开放，不称整枝本地严格gate通过；线上CI未作为证据。
+
+
+### 12.4 原生历史隔离复制与估算修复复用（2026-09-23，本地）
+
+解决 `canonical_native_messages_from_metadata` 已经复制嵌套content后，`provider_history_messages_from_rows` 和 `conversation_compact_provider_messages` 又重复deepcopy的问题。前者直接转交本次独占的已隔离副本，identified回合仍只输出一次；匿名相同key重复出现时，第二份起仍另复制以保持输出之间不互相修改。Compact复用该独占投影，原 `strip_orphaned_tool_blocks` 纯函数仍负责孤儿结果/缺失结果修补，schema、顺序、内容、权限及canonical写入不变。
+
+独立只读复核确认两条输出分支都产生dict，删除再次过滤不扩大原生消息类型；normalizer仍只认user/assistant顶层角色并允许未来content类型。工具schema冻结的复制不在本片删除范围。不把所有字符串说成重复正文副本：Python deepcopy通常复用不可变字符串，本片节省的是大量嵌套list/dict容器及复制期间memo。
+
+新增六项实际函数测试，首轮2 failed/4 passed：4000块嵌套结果的单次隔离基线3,021,668 bytes，原Compact投影有identity/匿名峰值4,888,715 / 4,880,596 bytes。修复后3,030,107 / 3,021,988 bytes，约接近一次必要复制。验证修改输出不会改canonical或另一调用，修改canonical不会改已返回投影，重复匿名行的两份输出独立，identified回合覆盖可见行一次及孤儿修补逐值相同。tracemalloc只统计读取期Python分配，不是整个Compact峰值、生产RSS或供应商成本证据。日志 `/tmp/decision_native_projection_red_20260923.log`、`/tmp/decision_projection_tokens_green_20260923.log`。
+
+同时复用主线已提交 `b4ffb34755434bd8dffb0ae19b81aebc4bed71f8` 的 `memory_archive/tokens.py` 和 `test_archive_tokens.py` 精确文件差异：`_payload_lengths` 在只读证明内置无环结构的JSON UTF8上界不超过512KiB时调用公开dumps，未知类型/子类/深层/大来源仍流式，不私调编码器或GC。该结构上界不是tokenizer或业务容量门；原数值、sort/default、UTF8/JSON异常顺序和str回退保持。原主线反馈的反复小请求iterencode闭包积累是此片原因；不移入其IR/CAS变更，也不整提交合并。两边唯一实现同步，无新增依赖、持久状态或配置。
+
+三文件（新native测试、archive_tokens、compact_text_source） **72 passed（3.34秒）**；随后11文件组合 **350 passed / 1 failed（23.73秒）**，失败为主线认领 `test_native_tool_use_ir_messages_flow.py::test_native_completed_conversation_precedes_current_user_without_rewriting` 的旧SimpleNamespace缺task_attributes，原loop_support随后还需carried_active_turn_user_inputs。HEAD eb9efc129的函数已直接读取两字段，本片未改该生产入口或IR测试。已向owner发出仅适配该fixture两字段的协调请求，业务断言不改；尚不能称该联合通过。日志 `/tmp/decision_native_projection_joint_20260923.log`。
+
+建议下一步：按所有权协调完成该测试接口适配，再继续选中消息正文的内存生命周期与真实缓存；旧四项后台fake Store及旧八项失败不由本片抹除。只读审查可并行，IR/主线共享入口仍由原owner改动，未触碰Gateway或测试机。
+
+
+主线owner随后明确授权本线仅在该SimpleNamespace补 `task_attributes={}` 与 `carried_active_turn_user_inputs=[]`，生产IR及业务断言保持。适配后整个IR测试文件 **29 passed（0.38秒）**，日志 `/tmp/decision_native_ir_fixture_20260923.log`；该数与原350有重叠，不累加为379。独立Sol high复核native两函数未发现必须修复的别名或调用者回归。全目录Ruff、doc sync、strict code-size（hard=0，基线不改）及diff通过；clean-package在登记新测试后通过。原四项后台fixture缺口及旧全仓失败仍开放，尚不称整枝严格gate通过，线上CI未作为证据。
