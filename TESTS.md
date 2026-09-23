@@ -1,5 +1,19 @@
 # 测试与发布验收
 
+## 集成安装版真实 TUI（2026-09-23）
+
+319004926独立wheel/venv/HOME已在获授权测试机验三轮普通中文：关闭零Jev请求；2秒期限失败自动保留M2.7；4秒选模need_data及能力建议成功，均完成一次读取工具轮。新增3次Jev HTTP，累计57次；原供应商缓存读回有部分缺字段，总输入无节省结论。原终态观察字段完整，初次汇总遗漏已纠正，无生产修复。设置原CAS恢复关闭，TUI退出、队列清空、全部HTTP有终态后正常停止候选Gateway，8420无监听。完整请求ID、usage口径及局限见[真实验收](docs/tasks/DECISION_MODEL_REAL_VALIDATION.md#集成安装版原生-tui-对照2026-09-23)。
+
+本轮只证明集成文字链与失败保留，不抵充媒体、超大历史、Compact后缓存或跨模型主会话验收。建议下一步继续12.4有界来源读取；只读审核可并行，测试机与恢复writer单一owner。
+
+## 短期限回归阶段分离（2026-09-23，本地）
+
+旧全仓8项失败按原node ID复核：未修改前定向8 passed。原healthy-long失败堆栈明确在loopback socket.connect阶段超时；其余首行0或first_event结果不能证明发生了stream_idle错误。原loopback provider明确禁用代理，web_fetch走校验IP直连；web_fetch的5秒超时尚缺阶段证据，不归因为环境代理或直接宣称已修。两项决策探测原1秒期限发生worker尚未退出，不能据此推断协议结果。
+
+四个测试文件现在区分连接/首事件与短idle：非首事件用例显式首事件10秒，原短idle、有效data数量及typed stage保持；时间断言从第一条data计算，失败附阶段和耗时。成功/invalid-answer探测显式5秒，专用timeout/cancel及非法参数仍用原短预算。没有修改生产默认期限、重试或失败保留逻辑。四文件85 passed、1既有xpassed；与原web_fetch文件联合 **91 passed、1既有xpassed（14.99秒）**，日志 `/tmp/decision_timeout_stages_20260923.log`。这消除了成功/idle测试对极短连接调度的依赖，不抵充全仓通过，web_fetch历史根因继续开放。 本片Ruff、doc sync、strict code-size（hard=0）、diff及clean-package通过；本地严格gate已通过，未推送远端，线上CI没有作为验收来源。
+
+建议下一步：以本片分阶段断言检查下一次自然回归；web_fetch若再现，先采集连接/handler/首字节证据，不再循环重跑到绿。独立只读审查可并行，生产HTTP期限保持原owner负责。
+
 ## 第 12.4 项媒体集成与未知模态边界（本地切片已验）
 
 解决媒体引用被当作完整文字计量、或未读附件却取得摘要覆盖的问题。以 `81bdf9579` 为基线整合媒体线 `3adb61904`；媒体原件仍在原owner内容寻址目录，UserTurn保留input_ids及media，三宿主原生carry不另建存储。原生发送和出站投影复用同一后端组包。

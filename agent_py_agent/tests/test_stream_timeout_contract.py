@@ -75,7 +75,8 @@ def _request(
 
 def test_valid_data_can_outlive_old_total_wall(sse_server: ThreadingHTTPServer) -> None:
     started = time.monotonic()
-    lines = list(post_stream_iter(_request(sse_server, "/healthy-long", idle=0.4)))
+    # 首事件含本地服务器调度/连接；本用例只锁定有效数据之后的短 idle 与长总流。
+    lines = list(post_stream_iter(_request(sse_server, "/healthy-long", idle=0.4, first_event=10.0)))
     elapsed = time.monotonic() - started
     assert len(lines) == 6
     assert elapsed > 0.9
@@ -84,7 +85,7 @@ def test_valid_data_can_outlive_old_total_wall(sse_server: ThreadingHTTPServer) 
 def test_request_local_first_event_budget_exceeds_idle(sse_server: ThreadingHTTPServer) -> None:
     lines = list(
         post_stream_iter(
-            _request(sse_server, "/slow-first", idle=0.25, first_event=2.0)
+            _request(sse_server, "/slow-first", idle=0.25, first_event=10.0)
         )
     )
     assert len(lines) == 1
@@ -98,7 +99,7 @@ def test_first_event_timeout_is_typed(sse_server: ThreadingHTTPServer) -> None:
 
 def test_idle_after_first_event_is_typed(sse_server: ThreadingHTTPServer) -> None:
     with pytest.raises(ProviderTimeoutError) as error:
-        list(post_stream_iter(_request(sse_server, "/first-then-idle", idle=0.25)))
+        list(post_stream_iter(_request(sse_server, "/first-then-idle", idle=0.25, first_event=10.0)))
     assert error.value.stage == "stream_idle"
 
 

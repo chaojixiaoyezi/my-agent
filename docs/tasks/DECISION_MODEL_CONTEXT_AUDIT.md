@@ -1251,3 +1251,9 @@ transcript Compact只摘要首个非文本原生信封所在完整回合之前�
 本片55文件联合 **1419 passed、4项既有xfail**，退出码0；清单 `/tmp/compact_media_joint_20260923.files`，日志同名 `.log`。pytest配置和命令各带一次-q，原日志只有逐项结果和进度；统计为1419个通过标记及4个预期失败标记，不补猜运行秒数。初次媒体兼容检查144 passed、2 failed来自UserTurn新增字段的旧位置参数，已改显式media关键字并纳入上述联验；容量/选模91项、媒体工具轮4项、transcript26项均被最终联合覆盖，不累加计数。首次guard的导入排序和深层嵌套已修，新增文件暂未登记的打包提示在纳入本片后消除。
 
 Ruff、doc sync、import boundaries零发现、strict code-size hard=0且基线未改、diff和clean-package通过。本地严格gate已通过；没有push、部署、真实供应商调用或Gateway重启，线上CI没有作为验收来源。未知媒体的强制恢复仍明确拒绝，不能宣称已实现完整多模态容量计量；旧全仓八项失败保持。
+
+### 超大canonical来源剩余工作（只读审计，未实施）
+
+`load_conversation_compact_source(limit=0)`不能仅替换成分页：四宿主还把完整来源冻结为tuple，scope筛选复制全量行，v3基础链合并所有source_message_ids，checkpoint reader也全量读取。现有MessageStore前向字节游标可复用，但需固定完整行EOF和页字节上限；history_page为完整工作片可越过行数目标，不能作为硬内存界。append_once及历史索引重建也存在全量化。
+
+建议先在原MessageStore补有界页/幂等扫描，再沿原writer/CAS设计可验证连续范围覆盖；task稀疏覆盖仍须精确，不以全线程游标跳过未读行。detached锚点不存在的退回语义需先有界确认，不能逐页套列表selector。只读核对Codex compact.rs发现其移除最旧消息的恢复分支不满足本项目来源覆盖要求，不直接照搬。本轮未实现此后续方案，12.4继续开放。

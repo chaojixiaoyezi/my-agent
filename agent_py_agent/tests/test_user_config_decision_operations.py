@@ -143,7 +143,7 @@ def test_explicit_probe_runs_original_http_and_records_usage_for_current_thread(
     try:
         tool = UserConfigTool(host)
         execution = execute_canonical_test_call(tmp_path, tools={"user_config": tool}, tool_name="user_config",
-            arguments={"action": "decision_probe", "profile_id": key, "timeout_seconds": 1})
+            arguments={"action": "decision_probe", "profile_id": key, "timeout_seconds": 5})
     finally:
         restore_current_subagent_context(host, previous)
     assert execution.result.status == "succeeded", execution.result
@@ -162,13 +162,13 @@ def test_real_probe_failure_keeps_false_tool_status_and_original_safe_report(tmp
         "type": "choice", "choice": "unknown", "confidence": 1.0, "probabilities": {"ready": 0.0, "unknown": 1.0}}}})
     previous = set_current_subagent_context(host, run_id="active-run", task_attributes={"agent_thread_id": thread.thread_id})
     try:
-        outcome = UserConfigTool(host).execute({"action": "decision_probe", "profile_id": key, "timeout_seconds": 1})
+        outcome = UserConfigTool(host).execute({"action": "decision_probe", "profile_id": key, "timeout_seconds": 5})
     finally:
         restore_current_subagent_context(host, previous)
     assert not outcome.ok and outcome.error_code == "TOOL_EXECUTION_FAILED"
     assert outcome.reported_error_code == "DECISION_PROBE_FAILED"
     report = json.loads(outcome.output)
-    assert report["ok"] is False and report["error_type"] == "DecisionProbeAnswerInvalid"
+    assert report["ok"] is False and report["error_type"] == "DecisionProbeAnswerInvalid", report
     assert outcome.result_envelope["decision_report"] == report
     assert report["usage"]["input_tokens"] is None
     assert "only-private-secret" not in outcome.output and len(server.requests) == 1

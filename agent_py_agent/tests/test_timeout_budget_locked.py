@@ -286,7 +286,15 @@ def sse_server() -> ThreadingHTTPServer:
     server.server_close()
 
 
-def _call_stream(sse_server: ThreadingHTTPServer, path: str, timeout: int = 1) -> tuple[float, int, Exception | None]:
+# LLM: 通过真实 loopback HTTP 测滚动 idle；首事件余量只隔离连接调度，首行后的计时仍使用生产传输超时。
+# 函数用途: 返回真实流的首行和结束时间，供测试核对后续空闲期限及数据条数。
+def _call_stream(
+    sse_server: ThreadingHTTPServer,
+    path: str,
+    timeout: int = 1,
+    *,
+    first_event_timeout: float = 10.0,
+) -> tuple[float, int, Exception | None, float | None]:
     port = int(sse_server.server_address[1])
     request = GatewayRequest(
         api_base=f"http://127.0.0.1:{port}",
@@ -295,43 +303,50 @@ def _call_stream(sse_server: ThreadingHTTPServer, path: str, timeout: int = 1) -
         payload={"model": "evidence"},
         headers={},
         timeout=timeout,
+        # 首行前连接/serve 调度不属于下方验证的滚动 idle 窗口。
+        first_event_timeout=first_event_timeout,
     )
     started = time.monotonic()
     lines = 0
+    first_line_elapsed: float | None = None
     exc: Exception | None = None
     try:
         for _ in post_stream_iter(request):
             lines += 1
+            if first_line_elapsed is None:
+                first_line_elapsed = time.monotonic() - started
     except ProviderTimeoutError as err:
         exc = err
-    return time.monotonic() - started, lines, exc
+    return time.monotonic() - started, lines, exc, first_line_elapsed
 
 
 def test_sse_silence_cut_off_after_request_timeout(sse_server: ThreadingHTTPServer) -> None:
     """静默(无数据行)约 request.timeout 秒被掐断, 抛 ProviderTimeoutError。"""
-    elapsed, lines, exc = _call_stream(sse_server, "/hang", timeout=1)
-    assert lines == 1  # 首行已到, 之后静默
+    elapsed, lines, exc, first_line_elapsed = _call_stream(sse_server, "/hang", timeout=1)
+    assert lines == 1, f"first_line={first_line_elapsed}, stage={getattr(exc, 'stage', None)}, elapsed={elapsed:.3f}"  # 首行已到, 之后静默
     assert isinstance(exc, ProviderTimeoutError)
-    assert elapsed < 3.0  # 掐断时间≈timeout=1, 远小于 600s 墙钟
-    assert elapsed >= 0.8
+    assert exc.stage == "stream_idle", f"stage={exc.stage}, elapsed={elapsed:.3f}"
+    assert first_line_elapsed is not None
+    idle_elapsed = elapsed - first_line_elapsed
+    assert 0.8 <= idle_elapsed < 3.0  # 首行之后≈timeout=1，远小于 600s 墙钟。
 
 
 def test_sse_periodic_data_can_outlive_idle_window(sse_server: ThreadingHTTPServer) -> None:
     """每条有效 data 都重置 idle，健康慢流总时长超过单窗也能完成。"""
-    elapsed, lines, exc = _call_stream(sse_server, "/live", timeout=1)
-    assert lines == 6
+    elapsed, lines, exc, first_line_elapsed = _call_stream(sse_server, "/live", timeout=1)
+    assert lines == 6, f"first_line={first_line_elapsed}, stage={getattr(exc, 'stage', None)}, elapsed={elapsed:.3f}"
     assert exc is None
-    assert elapsed >= 1.2
+    assert first_line_elapsed is not None and elapsed - first_line_elapsed >= 1.2
 
 
 def test_sse_periodic_data_with_generous_idle_completes(
     sse_server: ThreadingHTTPServer,
 ) -> None:
     """更宽 idle 同样正常完成，证明合同不依赖旧 wall budget。"""
-    elapsed, lines, exc = _call_stream(sse_server, "/live", timeout=5)
-    assert lines == 6
+    elapsed, lines, exc, first_line_elapsed = _call_stream(sse_server, "/live", timeout=5)
+    assert lines == 6, f"first_line={first_line_elapsed}, stage={getattr(exc, 'stage', None)}, elapsed={elapsed:.3f}"
     assert exc is None
-    assert elapsed >= 1.2  # 总时长超过单次 timeout 语义(0.3s 间隔), 靠 idle 续命
+    assert first_line_elapsed is not None and elapsed - first_line_elapsed >= 1.2  # 0.3s 间隔，靠 idle 续命。
 
 
 # ---------------------------------------------------------------- 4. ledger 形态

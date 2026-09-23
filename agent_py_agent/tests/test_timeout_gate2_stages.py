@@ -278,9 +278,15 @@ def sse_server() -> ThreadingHTTPServer:
     server.server_close()
 
 
+# LLM: 用真实 loopback HTTP 区分 first_event 与 stream_idle；首行后仍按原短 idle 判断，不修改生产超时。
+# 函数用途: 记录本地流首行和超时阶段，使阶段测试能排除连接调度时间。
 def _call_stream(
-    sse_server: ThreadingHTTPServer, path: str, timeout: int = 1
-) -> tuple[float, ProviderTimeoutError]:
+    sse_server: ThreadingHTTPServer,
+    path: str,
+    timeout: int = 1,
+    *,
+    first_event_timeout: float | None = None,
+) -> tuple[float, int, float | None, ProviderTimeoutError]:
     port = int(sse_server.server_address[1])
     request = GatewayRequest(
         api_base=f"http://127.0.0.1:{port}",
@@ -289,21 +295,27 @@ def _call_stream(
         payload={"model": "evidence"},
         headers={},
         timeout=timeout,
+        first_event_timeout=first_event_timeout,
     )
     started = time.monotonic()
+    lines = 0
+    first_line_elapsed: float | None = None
     exc: ProviderTimeoutError | None = None
     try:
         for _ in post_stream_iter(request):
-            pass
+            lines += 1
+            if first_line_elapsed is None:
+                first_line_elapsed = time.monotonic() - started
     except ProviderTimeoutError as err:
         exc = err
-    assert exc is not None, f"{path} 应抛 ProviderTimeoutError"
-    return time.monotonic() - started, exc
+    assert exc is not None, f"{path} 应抛 ProviderTimeoutError; lines={lines}"
+    return time.monotonic() - started, lines, first_line_elapsed, exc
 
 
 def test_sse_noreply_raises_first_event(sse_server: ThreadingHTTPServer) -> None:
     """连接建立但响应头永不到达: 流式首事件预算超时 -> stage=first_event。"""
-    elapsed, exc = _call_stream(sse_server, "/noreply", timeout=1)
+    elapsed, lines, _first_line_elapsed, exc = _call_stream(sse_server, "/noreply", timeout=1)
+    assert lines == 0
     assert exc.stage == "first_event"
     assert elapsed < 3.0
     assert elapsed >= 0.8
@@ -313,10 +325,14 @@ def test_sse_keepalive_without_data_raises_stream_idle(
     sse_server: ThreadingHTTPServer,
 ) -> None:
     """连接持续有保活数据但 data 行空闲: SSE idle 掐断 -> stage=stream_idle。"""
-    elapsed, exc = _call_stream(sse_server, "/keepalive", timeout=1)
-    assert exc.stage == "stream_idle"
-    assert elapsed < 3.0
-    assert elapsed >= 0.8
+    elapsed, lines, first_line_elapsed, exc = _call_stream(
+        sse_server, "/keepalive", timeout=1, first_event_timeout=10.0
+    )
+    assert lines == 1, f"stage={exc.stage}, elapsed={elapsed:.3f}"
+    assert first_line_elapsed is not None
+    idle_elapsed = elapsed - first_line_elapsed
+    assert exc.stage == "stream_idle", f"stage={exc.stage}, idle_elapsed={idle_elapsed:.3f}"
+    assert 0.8 <= idle_elapsed < 3.0
 
 
 class _BlockingBackend:
