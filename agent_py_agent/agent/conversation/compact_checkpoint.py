@@ -1,12 +1,13 @@
 # LLM: v3候选在原owner账本追加，thread head/CAS仍是唯一提交权威；scope/base/精确覆盖与摘要一起封印，
 # v1/v2仅通过原版本合同读取。局部摘要不能因在同一提交链就扩大适用范围，孤立候选不可用于隐藏来源。
-# 模块用途: 保存消息与工具可联合覆盖的恢复点，分开提交前驱与摘要基础，再由原线程CAS确认。
+# 模块用途: 保存双来源恢复点并由原线程CAS确认；读取按同次行地址逐行校验，旧摘要无需全驻留。
 
 from __future__ import annotations
 
 import hashlib
 import json
 import time
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -192,72 +193,61 @@ def write_live_tool_compact_checkpoint(agent: SimpleAgent, request: LiveToolComp
     return _append_checkpoint(agent, row)
 
 
-# LLM: Only the chain ending at ConversationThread.compact_checkpoint_id is committed. Readers
-# must follow previous_checkpoint_id backwards and reject a missing/corrupt link instead of treating
-# an orphan candidate as authority or replaying already-compacted active-turn effects.
-# v3版本前缀、schema及内容封印必须一致，旧schema不得夹带新scope字段以绕过范围检查。
-# 函数用途: 读取当前 thread 真正提交过的 Compact 快照链，供恢复时识别已被摘要替代的工具调用。
-def committed_compact_checkpoint_chain(
-    agent: SimpleAgent,
-    thread: ConversationThread,
-) -> tuple[dict[str, object], ...]:
+# LLM: 完整chain接口保留旧顺序及行形状，校验共用唯一逆向reader；完整返回者仍承担全部正文内存。
+# 函数用途: 为需要检查全部快照的调用方返回从旧到新的已提交链，不把orphan算入结果。
+def committed_compact_checkpoint_chain(agent: SimpleAgent, thread: ConversationThread) -> tuple[dict[str, object], ...]:
+    with closing(iter_committed_compact_checkpoints(agent, thread)) as chain:
+        return tuple(reversed(tuple(chain)))
+
+
+# LLM: 从原thread head逆序逐行校验后yield；消费者必须完整耗尽后才能采用，失败/提前退出须close以释放描述符。
+# v3内容封印及旧版本合同不变，原writer/CAS唯一；不常驻整份账本或未提交候选正文。
+# 函数用途: 为摘要视图提供最新到最旧的只读检查点，完整链不成立时拒绝恢复。
+def iter_committed_compact_checkpoints(agent: SimpleAgent, thread: ConversationThread):
     checkpoint_id = str(thread.compact_checkpoint_id or "").strip()
     generation = max(0, int(thread.compact_generation or 0))
     if not checkpoint_id and generation == 0:
-        return ()
+        return
     if not checkpoint_id or generation <= 0:
         raise OSError("conversation compact pointer is incomplete")
     home = getattr(agent, "home_paths", None)
     raw_root = str(getattr(home, "owner_compact_dir", "") or "").strip()
     if not raw_root:
         raise OSError("owner compact directory is unavailable")
-    from ..common.json_io import read_jsonl_objects_report
+    from .compact_checkpoint_scan import checkpoint_row_lookup
 
     path = Path(raw_root) / "conversations" / f"{thread.thread_id}.jsonl"
-    report = read_jsonl_objects_report(
-        path,
-        context="conversation.compact_checkpoint_chain",
-    )
-    if report.load_errors:
-        raise OSError("conversation compact checkpoint ledger is unreadable")
-    by_id = {
-        str(row.get("checkpoint_id") or "").strip(): row
-        for row in report.records
-        if isinstance(row, dict) and str(row.get("checkpoint_id") or "").strip()
-    }
-    chain: list[dict[str, object]] = []
-    visited: set[str] = set()
-    current_id = checkpoint_id
-    expected_generation = generation
-    while current_id:
-        if current_id in visited:
-            raise OSError("conversation compact checkpoint chain contains a cycle")
-        visited.add(current_id)
-        row = by_id.get(current_id)
-        if row is None:
-            raise OSError("conversation compact checkpoint chain is incomplete")
-        if str(row.get("thread_id") or "").strip() != thread.thread_id:
-            raise OSError("conversation compact checkpoint thread identity mismatches")
-        try:
-            row_generation = int(row.get("generation") or 0)
-        except (TypeError, ValueError) as exc:
-            raise OSError("conversation compact checkpoint generation is invalid") from exc
-        if row_generation != expected_generation:
-            raise OSError("conversation compact checkpoint generation chain mismatches")
-        is_v3 = row.get("schema") == "conversation_compact_checkpoint.v3"
-        if is_v3 != current_id.startswith("compact-v3-"):
-            raise OSError("conversation compact checkpoint version identity mismatches")
-        if not is_v3 and any(key in row for key in ("scope", "summary_base_checkpoint_id", "source_tool_refs", "source_message_ids")):
-            raise OSError("legacy conversation compact checkpoint contains new scope fields")
-        if is_v3 and scoped_compact_checkpoint_id(row) != current_id:
-            raise OSError("conversation compact checkpoint content identity mismatches")
-        chain.append(dict(row))
-        current_id = str(row.get("previous_checkpoint_id") or "").strip()
-        expected_generation -= 1
-    if expected_generation != 0:
-        raise OSError("conversation compact checkpoint chain ended early")
-    chain.reverse()
-    return tuple(chain)
+    with checkpoint_row_lookup(path) as lookup:
+        visited: set[str] = set()
+        current_id = checkpoint_id
+        expected_generation = generation
+        while current_id:
+            if current_id in visited:
+                raise OSError("conversation compact checkpoint chain contains a cycle")
+            visited.add(current_id)
+            row = lookup(current_id)
+            if row is None:
+                raise OSError("conversation compact checkpoint chain is incomplete")
+            if str(row.get("thread_id") or "").strip() != thread.thread_id:
+                raise OSError("conversation compact checkpoint thread identity mismatches")
+            try:
+                row_generation = int(row.get("generation") or 0)
+            except (TypeError, ValueError) as exc:
+                raise OSError("conversation compact checkpoint generation is invalid") from exc
+            if row_generation != expected_generation:
+                raise OSError("conversation compact checkpoint generation chain mismatches")
+            is_v3 = row.get("schema") == "conversation_compact_checkpoint.v3"
+            if is_v3 != current_id.startswith("compact-v3-"):
+                raise OSError("conversation compact checkpoint version identity mismatches")
+            if not is_v3 and any(key in row for key in ("scope", "summary_base_checkpoint_id", "source_tool_refs", "source_message_ids")):
+                raise OSError("legacy conversation compact checkpoint contains new scope fields")
+            if is_v3 and scoped_compact_checkpoint_id(row) != current_id:
+                raise OSError("conversation compact checkpoint content identity mismatches")
+            current_id = str(row.get("previous_checkpoint_id") or "").strip()
+            expected_generation -= 1
+            yield row
+        if expected_generation != 0:
+            raise OSError("conversation compact checkpoint chain ended early")
 
 
 # LLM: 覆盖来自实际适用摘要的语义基础链，不能把同提交链其它任务的来源一起隐藏。

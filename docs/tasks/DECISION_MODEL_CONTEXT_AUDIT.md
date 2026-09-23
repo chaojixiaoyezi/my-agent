@@ -1415,3 +1415,23 @@ Responses另两项捕获原_generate最终request_json参数：普通max_output_
 建议下一步：完成本地守卫并将精确修复交接主线，继续12.4来源内存和12.7真实缓存；已授权独立测试机可承担真实组合，部署前同步使用窗口。独立测试/只读审查可并行，主线拆分、writer/CAS与Gateway保持单owner。
 
 本片全目录Ruff、doc sync、strict code-size（hard=0，原基线未改）、diff及clean-package检查通过。两个定向测试批次互不相同，但不据数量推算完成比例；原四项主线测试适配缺口仍使整枝验收未收口。未推送，线上CI未作为验收来源。
+
+
+### 12.4 检查点读取释放旧摘要正文（2026-09-23，本地）
+
+解决原 `committed_compact_checkpoint_chain` 经通用JSONL reader把全账本文本、每行文本、所有记录及orphan一并读入，恢复视图又保留全部历史摘要的问题。实现仍读取同一owner账本及原thread head，writer、v3身份封印、scope/base、generation CAS、公开完整chain的tuple形状和旧到新顺序不变。
+
+`compact_checkpoint_scan.py` 在单次同一文件描述符内冻结EOF，完整扫描严格UTF8/JSON对象；只保留ID到字节位置、长度、原行hash的临时地址。重复ID沿原last-wins；Unicode空白、CRLF、合法无LF末行仍接受，损坏的orphan仍拒绝。按head逆向读取时重验原行hash、线程、代次、版本及封印。`resolve_compact_summary_view` 完整消费并检查每个已提交摘要/范围/覆盖，再验证全部base关系，只留一个适用摘要及必要覆盖元数据；不能找到适用摘要就提前返回。公开完整chain接口仍会驻留其返回的全部正文，生产view不走该接口。
+
+边界：晚追加留给下一次读取；文件描述符固定原inode，选中行在首扫后原地改写或截短拒绝。孤儿行首扫后等长改写不会再次全文件hash，本片继续依赖canonical append-only合同，不承诺对任意外部改写提供原子文件快照。索引/精确覆盖仍为O(ID数量及refs)，读取至少容纳最大单行及适用摘要；不是整条Compact常量内存。异常/提前退出关闭描述符，不增加持久索引、后台线程或配置开关。
+
+参考核对：本仓库common/json_io.py的Unicode空白、仅LF合同与对象错误报告；Pi的 `packages/agent/src/harness/session/jsonl-storage.ts` 保留parentId及结构化坏行事实。相邻 `pi_contract_code_files.xlsx` 按jsonl-storage/session-tree查找未命中对应条目，不能据此称索引全面覆盖。Pi仍有整份读取，本片不复制其实现，也未新增依赖。
+
+首批新增13项测试，其中两组内存先红：50条、每摘要131072字符、共约6.5MB账本，旧峰值 **26,349,731 / 26,341,779 bytes**。实现后三文件30项通过，两组峰值 **685,993 / 1,230,734 bytes**（1提交+49orphan / 50提交）。使用tracemalloc只度量读取期Python分配；不是生产RSS、延迟承诺或整个Compact峰值。坏orphan JSON/UTF8/非对象、重复ID最后值、Unicode内部换行字符、空白、CRLF及无LF末行、固定EOF晚追加、原地等长改写/截断、未采用范围的坏summary仍失败及文件关闭均有断言。日志 `/tmp/decision_checkpoint_stream_red_20260923.log`、`/tmp/decision_checkpoint_stream_green_20260923.log`。
+
+九文件联合 **98 passed（10.84秒）**：compact_checkpoint_stream、compact_scoped_checkpoint、compact_scoped_transcript、background_scoped_compact、active_turn_compact_projection、mixed_compact_contract、mixed_compact_recovery、gateway_child_compact_scope_application、compact_output_reserve（均为test_前缀），日志 `/tmp/decision_checkpoint_joint_20260923.log`；30项包含其中，不累加。没有真实供应商、Gateway操作、部署或推送。原四项主线fake Store签名与旧八项失败仍未被本片修复，不称整枝严格gate通过。
+
+建议下一步：继续原生历史投影的重复深拷贝和选中消息正文驻留，再在授权独立测试机验证实际缓存；本片不触碰主线tokens/IR职责。只读审查可并行，writer/CAS、主线文件与Gateway保持单owner。
+
+
+Sol high独立只读复核未发现必须修复的scope/base/legacy回归，确认未选orphan改写边界；建议的公开完整chain显式closing已补齐。随后新增空head不读取坏orphan、非空head缺文件报缺链两项，并在完整chain关闭修改后复验新文件 **15 passed（0.48秒）**；两组峰值686,105/1,230,902 bytes，日志 `/tmp/decision_checkpoint_final_20260923.log`，与98项有重叠不累加。全目录Ruff、doc sync、strict code-size（hard=0，基线不改）、diff通过；clean-package在纳入新文件后通过。原四项主线测试适配缺口仍开放，不称整枝本地严格gate通过；线上CI未作为证据。

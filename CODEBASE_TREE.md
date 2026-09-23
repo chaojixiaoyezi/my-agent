@@ -378,6 +378,7 @@ agent_py_agent/
 |   |   |-- compact_request_budget.py   # 按当前模型窗口顺序分段摘要，完整覆盖历史且失败不推进游标
 |   |   |-- compact_tool_refs.py        # 从匹配原生工具往返保留原样路径线索，不靠模型摘要记忆目录
 |   |   |-- compact_guard.py            # 结构化完整回合选择、连续失败冷却与 typed compact 错误
+|   |   |-- compact_checkpoint_scan.py  # 同次固定EOF临时行地址与hash读取，不新增持久索引
 |   |   |-- compact_checkpoint.py       # 原提交链v3检查点、版本封印与scope/base精确来源
 |   |   |-- compact_scope.py            # 全线程、任务和活动轮的结构化摘要适用范围
 |   |   |-- compact_summary_view.py     # 沿实际摘要基础链解析覆盖，旧版本显式读取
@@ -579,6 +580,7 @@ agent_py_agent/
 |   |-- test_gateway_capability_compact.py # 同片能力展示沿 Gateway/子代理 Compact 和续跑保留
 |   |-- test_subagent_capability_compact.py # child 同轮展示沿真实 Compact 重试保留、失效清除与新轮重置
 |   |-- test_background_prepared_context.py # 后台重复纯渲染无写账、冻结输入、任务范围与窄审计隔离
+|   |-- test_compact_checkpoint_stream.py # 旧摘要读取内存、JSONL兼容、改写及文件关闭回归
 |   |-- test_compact_scoped_checkpoint.py # 交错作用域、摘要基础、局部CAS、版本篡改与精确覆盖
 |   |-- test_compact_scoped_transcript.py # 局部历史来源、交错摘要基础与竞争CAS
 |   |-- test_applied_compact_context.py # 同一应用视图的参数传递、工具过滤和摘要注入
@@ -1130,3 +1132,6 @@ docs/
 - `agent_py_agent/tests/test_compact_output_reserve.py`：真实冻结请求与本地输出预留门组合，当前要求和工具schema保留，过界零业务发送/覆盖提交，Responses普通及OAuth未知上限分开验证。
 
 - `agent_py_agent/tests/test_model_selection_isolation.py`：复用原Gateway、线程CAS、模型目录与校准入口验证并发隔离和窗口变化；仅HTTP与决策回复为替身。
+
+- `agent_py_agent/agent/conversation/compact_checkpoint_scan.py`：固定单次账本描述符及EOF，完整解析后按行地址/hash读取已提交候选，内存索引随作用域释放。
+- `agent_py_agent/tests/test_compact_checkpoint_stream.py`：对照原检查点读取峰值并验证坏orphan、重复ID、Unicode/末行、晚追加、改写和异常关闭。

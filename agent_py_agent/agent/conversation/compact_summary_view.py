@@ -1,15 +1,16 @@
 # LLM: 本模块只读取原 committed checkpoint chain，并携带本次采用的临时视图；提交指针和账本仍是唯一权威。
 # 摘要替代关系沿 summary_base_checkpoint_id，不得把提交链的局部覆盖无条件合并。
-# 模块用途: 为冻结作用域解析可用摘要与真实覆盖，并向运行链传递只读应用视图。
+# 模块用途: 逐行验证全部已提交快照，只留适用摘要及覆盖元数据，向冻结作用域提供只读应用视图。
 from __future__ import annotations
 
 import hashlib
 import math
+from contextlib import closing
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from .compact_checkpoint import committed_compact_checkpoint_chain
+from .compact_checkpoint import iter_committed_compact_checkpoints
 from .compact_scope import THREAD_COMPACT_SCOPE, CompactScope, scope_can_inherit
 
 if TYPE_CHECKING:
@@ -160,32 +161,40 @@ def _row_sources(row: dict[str, object]) -> tuple[tuple[str, ...], tuple[dict[st
     } for call_id in call_ids), ()
 
 
-# LLM: 提交链验证由原 reader 负责；这里额外验证摘要 base 较旧且对当前摘要作用域适用。
-# 函数用途: 构造摘要基础索引并拒绝跨范围、未来代次或缺失的基础引用。
-def _indexed_rows(chain: tuple[dict[str, object], ...]) -> dict[str, dict[str, object]]:
-    by_id = {str(row["checkpoint_id"]): row for row in chain}
+# LLM: 原reader逆序给出已提交行；所有摘要/覆盖先验证，旧正文随消费释放，只保留基础链元数据和首个适用摘要。
+# 函数用途: 构造本次只读摘要基础索引，完整消费及范围校验后才能返回，不因先找到摘要而忽略后面的坏链。
+def _indexed_rows(chain, scope: CompactScope):
+    by_id: dict[str, dict[str, object]] = {}
+    selected = None
+    keys = ("checkpoint_id", "schema", "generation", "created_at", "scope", "previous_checkpoint_id",
+            "summary_base_checkpoint_id", "source_kind", "source_message_ids", "source_tool_refs",
+            "source_end_message_id", "source_tool_call_ids", "request_id", "attempt_id")
     for row in chain:
-        scope = _checkpoint_scope(row)
+        row_scope = _checkpoint_scope(row)
         _validate_summary(row)
-        base_id = _summary_base_id(row)
+        _summary_base_id(row)
         created_at = row.get("created_at")
         if type(created_at) not in {int, float} or not math.isfinite(created_at) or created_at <= 0:
             raise OSError("conversation compact checkpoint creation time is invalid")
         if row.get("schema") == "conversation_compact_checkpoint.v3":
             _validated_v3_sources(row)
+        by_id[str(row["checkpoint_id"])] = {key: row[key] for key in keys if key in row}
+        if selected is None and scope_can_inherit(scope, row_scope, created_at):
+            selected = {**by_id[str(row["checkpoint_id"])], "summary": row["summary"],
+                        "operation_evidence": row.get("operation_evidence")}
+    for row in by_id.values():
+        base_id = _summary_base_id(row)
         if not base_id:
             continue
         base = by_id.get(base_id)
         if base is None or int(base["generation"]) >= int(row["generation"]):
             raise OSError("conversation compact summary base is missing or newer")
-        base_created = base.get("created_at")
-        if (type(base_created) not in {int, float} or not math.isfinite(base_created)
-                or not scope_can_inherit(scope, _checkpoint_scope(base), base_created)):
+        if not scope_can_inherit(_checkpoint_scope(row), _checkpoint_scope(base), base["created_at"]):
             raise OSError("conversation compact summary base crosses scope")
-    return by_id
+    return by_id, selected
 
 
-# LLM: 仅沿选中摘要的语义基础链累计覆盖；链中其他局部提交不属于该摘要。
+# LLM: 完整消费逆向提交链并释放旧正文后，仅沿选中摘要的基础链累计覆盖；异常/提前退出关闭原描述符。
 # 函数用途: 只读解析当前请求实际适用的摘要与来源，空范围返回空视图。
 def resolve_compact_summary_view(
     agent: SimpleAgent,
@@ -194,11 +203,8 @@ def resolve_compact_summary_view(
 ) -> CompactSummaryView:
     if not isinstance(scope, CompactScope):
         raise TypeError("Compact 作用域类型无效")
-    chain = committed_compact_checkpoint_chain(agent, thread)
-    by_id = _indexed_rows(chain)
-    selected = next((row for row in reversed(chain) if scope_can_inherit(
-        scope, _checkpoint_scope(row), row.get("created_at"),
-    )), None)
+    with closing(iter_committed_compact_checkpoints(agent, thread)) as chain:
+        by_id, selected = _indexed_rows(chain, scope)
     if selected is None:
         return CompactSummaryView()
     messages: set[str] = set()
