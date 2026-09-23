@@ -17,11 +17,6 @@ from agent_py_agent.agent.agent_core._tool_loop_service import (
     build_tool_loop_prompt,
     execute_tool_loop,
 )
-from agent_py_agent.agent.agent_core.runner.context import (
-    ThreadLocalAgentAttribute,
-    restore_current_subagent_context,
-    set_current_subagent_context,
-)
 from agent_py_agent.agent.agent_core.runtime.guidance import (
     acknowledge_injected_turn_input,
     active_turn_user_reply_required,
@@ -66,6 +61,11 @@ from agent_py_agent.agent.conversation.authority import (
     CONVERSATION_WORK_NAME_ATTR,
 )
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.runtime_context import (
+    ThreadLocalAgentAttribute,
+    restore_current_subagent_context,
+    set_current_subagent_context,
+)
 from agent_py_agent.agent.runtime_errors import DataCorruptionError
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.subagents.models import TaskStatus

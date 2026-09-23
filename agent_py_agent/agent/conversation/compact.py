@@ -1,4 +1,5 @@
 # LLM: 单一会话压缩链保持原文、证据、尾部、检查点和游标分离；独立请求负责结算自己的模型用量，不改普通请求收口。
+# 同片展示只经宿主传入的缓存面追加到摘要输入，不写入会话身份或扩大工具范围。
 # 模块用途: 在隔离的会话历史上压缩并记录真实消耗；坏摘要不得推进游标，近期完整对话仍保留原文。
 
 from __future__ import annotations
@@ -879,8 +880,8 @@ def _projected_context_tokens(
 
 # LLM: Summary prose is soft context; structured operation evidence remains separate authority.
 # Production callers preserve the ordinary system/tools/history cache surface and append only the
-# synthetic Compact request. A completed response with no text or any tool call uses a bounded
-# transcript projection; transport exceptions still leave the checkpoint untouched.
+# synthetic Compact request after validated typed display facts. A response with no text or any
+# tool call uses a bounded transcript projection; transport exceptions leave the checkpoint untouched.
 # 函数用途: 让当前模型低成本合并旧摘要和新段，再附上有上限的原文锚点；摘要过程不能执行工具或推进事实状态。
 def _summarize(
     agent: SimpleAgent,
@@ -915,6 +916,7 @@ def _summarize(
             previous_summary,
             selected_call.compact_generation,
             foreground_rows,
+            volatile_sections=provider_surface.volatile_sections,
         )
         provider_tools = (
             list(provider_surface.tools)

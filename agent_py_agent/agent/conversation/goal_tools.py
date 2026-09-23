@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
-from ..agent_core.runner.context import current_subagent_run_id
+from ..runtime_context import current_subagent_run_id
 from ..tooling.models import (
     BaseTool,
     ConcurrencyPolicy,

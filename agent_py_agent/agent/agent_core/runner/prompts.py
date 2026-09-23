@@ -1,4 +1,5 @@
-
+# LLM: runner 提示采集原上下文后交给纯格式化器；容量投影必须复用冻结材料，不借渲染读取或准备子代理运行。
+# 模块用途: 用原 canonical 上下文生成子代理系统说明和任务提示，保持角色、工具与共享分工边界一致。
 from __future__ import annotations
 
 """LLM: 从 canonical 执行上下文构造 runner 提示；当前角色快照、工具授权与共享分工说明须一致。
@@ -8,6 +9,7 @@ from __future__ import annotations
 """
 
 import json
+from dataclasses import dataclass
 
 from ...settings.config import DEFAULT_DELEGATED_EXECUTION_PERSISTENCE
 from ...subagents import SubAgentExecutionContext
@@ -24,6 +26,17 @@ from .prompt_context_summary import runner_context_summary_payload
 # 子代理默认 thought / plan 模板的权威位置；create_policy 派工链路只引用不复制。
 SUBAGENT_DEFAULT_THOUGHT = "根据父代理派工执行，并保留真实结果与引用。"
 SUBAGENT_DEFAULT_PLAN: tuple[str, ...] = ("理解目标", "执行任务", "核对真实结果", "交回结果和引用")
+
+
+# LLM: 只保存宿主已采集的字符串；读取 refs 存在性和角色模板只发生在 prepare，不在纯 render 重读。
+# 类用途: 冻结子代理任务提示的完整动态材料，供真实启动和容量投影共用同一格式。
+@dataclass(frozen=True)
+class SubagentRunnerPromptInput:
+    extra: str
+    execution_contract: str
+    context_gate: str
+    context_json: str
+    audit_source_prompt: str | None = None
 
 
 # LLM: 主子共用的执行纪律不能要求协调者亲手重写已委派成果；身份、文件交接与消息消费仍读结构化事实。
@@ -62,31 +75,50 @@ def subagent_runner_system_prompt(context: SubAgentExecutionContext) -> str:
     )
 
 
+# LLM: 原真实启动入口保留上下文读取顺序；唯一格式化器也供准备前容量使用，不能另造简化 runner prompt。
+# 函数用途: 读取完整 runner 提示材料后渲染，输出与原子代理启动提示逐字一致。
 def _build_subagent_runner_prompt(
     context: SubAgentExecutionContext,
     instruction: str = "",
 ) -> str:
-    if _audit_source_runtime_profile(context):
-        return _build_audit_source_runner_prompt(context, instruction)
+    return render_subagent_runner_prompt(prepare_subagent_runner_prompt(context, instruction))
 
+
+# LLM: 准备层可能读取 refs 和角色目录；只接受原执行上下文，不创建任务、不消费邮箱、不准备或探测后端。
+# 函数用途: 冻结启动提示的上下文 JSON、角色纪律及输入合同，纯投影从此值对象继续。
+def prepare_subagent_runner_prompt(
+    context: SubAgentExecutionContext, instruction: str = "",
+) -> SubagentRunnerPromptInput:
+    if _audit_source_runtime_profile(context):
+        return SubagentRunnerPromptInput(
+            "", "", "", "", audit_source_prompt=_build_audit_source_runner_prompt(context, instruction),
+        )
     payload = json.dumps(runner_context_summary_payload(context), ensure_ascii=False, indent=2)
     extra = instruction.strip() or "按执行上下文完成任务；如果能力不足，如实说明缺少什么。"
     execution_contract = "\n".join(_runner_execution_contract_lines(context))
     context_gate = "\n".join(context_gate_prompt_lines(context.context_bundle))
+    return SubagentRunnerPromptInput(extra, execution_contract, context_gate, payload)
+
+
+# LLM: 纯格式化不读取上下文、目录或文件；普通路径与原 audit 专用格式分别保持既有字节，不改变运行合同。
+# 函数用途: 从冻结字符串恢复完整子代理任务提示，可重复用于真实请求和创建前容量检查。
+def render_subagent_runner_prompt(prepared: SubagentRunnerPromptInput) -> str:
+    if prepared.audit_source_prompt is not None:
+        return prepared.audit_source_prompt
     return (
         "# SubAgent Runner Task\n\n"
         "你是一个被父代理授权的子代理，只能依据下面的执行上下文工作。\n"
         "不要使用上下文之外的 skill/tool，也不要编造已经完成的动作。\n\n"
         "## Extra Instruction\n\n"
-        f"{extra}\n\n"
+        f"{prepared.extra}\n\n"
         "## Runner Contract\n\n"
-        f"{execution_contract}\n\n"
+        f"{prepared.execution_contract}\n\n"
         "## Context Bundle Gate\n\n"
-        f"{context_gate}\n\n"
+        f"{prepared.context_gate}\n\n"
         "## Execution Context JSON\n\n"
         "下面是瘦身后的执行摘要；完整上下文请按 refs 读取，不要让模型一次吞完整大 JSON。\n\n"
         "```json\n"
-        f"{payload}\n"
+        f"{prepared.context_json}\n"
         "```\n\n"
         "## Required Output\n\n"
         "像普通协作者一样给出简洁最终回复：说明完成了什么、重要文件或结果在哪里、"

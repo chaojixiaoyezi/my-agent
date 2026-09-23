@@ -1,28 +1,32 @@
 # LLM: This module builds the cache-critical provider surface for transcript Compact from the
 # same tool snapshot and PromptBuilder contracts as an ordinary model turn. It must never execute
-# tools, infer cache boundaries from prose, or mutate ConversationThread state.
-# 模块用途: 为会话压缩复用普通请求的 system、工具和历史消息缓存前缀，摘要调用本身只有一次只读模型请求。
+# tools, infer cache boundaries from prose, or mutate ConversationThread state. Same-turn display
+# is revalidated from host inputs; failure clears the host carrier without another decision call.
+# 模块用途: 为会话压缩复用普通请求的system、工具和动态展示，摘要由原有界调用链生成，不执行工具。
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..agent_core.native_tool_protocol import resolve_native_tools
 from ..backends.message_adapter import AnthropicMessageAdapter, strip_orphaned_tool_blocks
-from ..backends.tool_ir import CompactionSummary
+from ..backends.tool_ir import CompactionSummary, RuntimeFactsTurn
 from ..model_guidance import provider_system_instruction
 from ..prompting_parts.builder import ToolSections
 from ..prompting_parts.cache_layout import CacheStructuredPrompt, prompt_cache_layout
 from .native_history import provider_history_messages_from_rows
 
+if TYPE_CHECKING:
+    from ..agent_core.runtime.loop_models import RuntimeContextRequest
+    from ..capability.decision_recommendation import CapabilityPresentationSelection
 
-# LLM: Callers provide only structured run inputs that also shape an ordinary request. The tuple
-# fields preserve None-versus-empty authorization semantics and cannot be rewritten by summary text.
-# 类用途: 描述一次 transcript Compact 应与随后普通模型轮保持一致的权限、prompt 文件和系统提示范围。
+
+# LLM: 当前身份只取宿主RuntimeContextRequest，不从carrier借身份；callback仅在内存清旧值，不进结果或持久化。
+# 类用途: 描述压缩与随后模型轮的同一输入面，保留None/空授权和同片展示，手动或新轮默认不继承。
 @dataclass(frozen=True)
 class ConversationCompactModelSurface:
     allowed_tools: tuple[str, ...] | None = None
@@ -30,22 +34,28 @@ class ConversationCompactModelSurface:
     system_prompt_override: str | None = None
     context_scope: str = "default"
     loaded_tool_names: tuple[str, ...] = ()
+    presentation_context: RuntimeContextRequest | None = None
+    capability_presentation: CapabilityPresentationSelection | None = None
+    capability_presentation_turn_id: str = ""
+    capability_presentation_callback: Callable[[CapabilityPresentationSelection | None], object] | None = field(
+        default=None, repr=False, compare=False,
+    )
 
 
-# LLM: This prepared value contains only immutable cache-key material. Provider history remains
-# candidate-specific because Compact may try several oldest-prefix partitions before committing.
-# 类用途: 保存一次压缩期间可复用的稳定 prompt 前缀、原生工具 Schema 和供应商 system 指令。
+# LLM: 这里只保存请求展示，不含callback/handler/权限；动态段沿原typed source转原生历史，不能混进稳定前缀。
+# 类用途: 保存一次压缩的稳定prompt、工具Schema、system及同片动态名卡，各候选仍使用自己的历史前缀。
 @dataclass(frozen=True)
 class ConversationCompactProviderSurface:
     stable_prompt_prefix: str
     tools: tuple[dict[str, Any], ...] | None
     system_instruction: str
+    volatile_sections: tuple[tuple[str, str], ...] = ()
 
 
 # LLM: Tool registration, protocol selection, catalog rendering, and native schemas intentionally
-# reuse the ordinary runtime helpers. Any failure aborts Compact before provider submission rather
-# than silently sending a cache-incompatible giant prompt.
-# 函数用途: 按普通模型轮的同一底座合同冻结 transcript Compact 的缓存关键面。
+# reuse ordinary helpers; original preparation may synchronize tools/probe capability. Carried
+# display is optional and read-only; this entry is not a pure capacity renderer or inspect path.
+# 函数用途: 按原准备链冻结压缩缓存面，复核同片展示并回传采用结果；准备失败仍在摘要发送前抛出。
 def prepare_conversation_compact_provider_surface(
     agent: object,
     model_surface: ConversationCompactModelSurface,
@@ -74,9 +84,9 @@ def prepare_conversation_compact_provider_surface(
         if model_surface.allowed_tools is not None
         else None
     )
-    runtime_snapshot, protocol_snapshot = _tool_snapshots_for_run(
-        agent,
-        RuntimeContextRequest(
+    runtime_request = model_surface.presentation_context
+    if not isinstance(runtime_request, RuntimeContextRequest):
+        runtime_request = RuntimeContextRequest(
             user_prompt="",
             inject=[],
             resume_context=False,
@@ -85,19 +95,24 @@ def prepare_conversation_compact_provider_surface(
             run_id=str(run_id or ""),
             source="conversation_compact_summary",
             save=False,
-        ),
+        )
+    runtime_snapshot, protocol_snapshot = _tool_snapshots_for_run(
+        agent, replace(runtime_request, allowed_tools=allowed_tools, context_scope=model_surface.context_scope),
     )
+    presentation = _compact_capability_presentation(agent, model_surface, runtime_snapshot, protocol_snapshot)
+    runtime_snapshot = presentation.tool_snapshot
+    user_prompt = runtime_request.user_prompt if presentation.selection is not None else ""
     tool_catalog, tool_recommendations = _resolve_tool_sections(
         ToolSectionsRequest(
             agent=agent,
-            user_prompt="",
+            user_prompt=user_prompt,
             allowed_tools=allowed_tools,
             runtime_snapshot=runtime_snapshot,
             protocol_snapshot=protocol_snapshot,
         )
     )
     parent_prompt = agent.prompts.build(
-        "",
+        user_prompt,
         [],
         inject=[],
         prompt_files=list(model_surface.prompt_files),
@@ -108,6 +123,8 @@ def prepare_conversation_compact_provider_surface(
             tool_catalog_section=tool_catalog,
             tool_recommendations_section=tool_recommendations,
             native_tool_use=True,
+            selected_skill_ids=presentation.selected_skill_ids,
+            required_skill_ids=presentation.required_skill_ids,
         ),
     )
     layout = prompt_cache_layout(parent_prompt)
@@ -130,7 +147,41 @@ def prepare_conversation_compact_provider_surface(
             else None
         ),
         system_instruction=provider_system_instruction(getattr(agent, "backend", None)),
+        volatile_sections=tuple(
+            section for section in layout.volatile_sections
+            if presentation.selection is not None and section[0] == "prompt.tool_recommendations"
+        ),
     )
+
+
+# LLM: 原推荐入口只在非None载体下调用；当前快照/身份/配置失效即基础面并清宿主值，绝不重决策或恢复执行权。
+# 函数用途: 用当前宿主输入复核压缩前已采用的展示，沿同一内存回调通知后续重试是否继续保留。
+def _compact_capability_presentation(agent, surface, runtime_snapshot, protocol_snapshot):
+    from ..agent_core.runtime.loop_models import RuntimeContextRequest, RuntimeLoopParams
+    from ..agent_core.runtime.loop_support import _required_action_contract_snapshot
+    from ..capability.decision_recommendation import CapabilityPresentation, recommend_capabilities
+
+    presentation = CapabilityPresentation(runtime_snapshot)
+    context = surface.presentation_context
+    if (surface.capability_presentation is not None and isinstance(context, RuntimeContextRequest)
+            and surface.capability_presentation_turn_id):
+        params = RuntimeLoopParams(
+            user_prompt=context.user_prompt, root_user_prompt=context.user_prompt,
+            memories=[], runtime_injections=[], routed_context=None, resume_context_section="",
+            request_id=context.request_id, run_id=context.run_id, task_id=context.task_id,
+            task_attributes=context.task_attributes,
+            allowed_tools=list(surface.allowed_tools) if surface.allowed_tools is not None else None,
+            context_scope=surface.context_scope, tool_runtime_snapshot=runtime_snapshot,
+            tool_protocol_snapshot=protocol_snapshot, capability_presentation=surface.capability_presentation,
+            capability_presentation_evaluated=True,
+            capability_presentation_turn_id=surface.capability_presentation_turn_id,
+        )
+        contract = _required_action_contract_snapshot(agent, params, runtime_snapshot)
+        presentation = recommend_capabilities(agent, params, runtime_snapshot, contract)
+    callback = surface.capability_presentation_callback
+    if callable(callback):
+        callback(presentation.selection)
+    return presentation
 
 
 # LLM: The synthetic request is the sole volatile suffix. Keeping it out of stable system and
@@ -147,12 +198,15 @@ def conversation_compact_provider_prompt(
 
 
 # LLM: Previous committed summary uses the exact ordinary-run envelope, followed by the selected
-# canonical transcript prefix. Orphan repair is provider validation only and never changes storage.
-# 函数用途: 按普通会话回放顺序生成待压缩历史，保留原生工具调用/结果并让摘要指令随后追加。
+# canonical transcript prefix and typed current display facts. The ordinary IR adapter owns their
+# provider shape; orphan repair is provider validation only and never changes canonical storage.
+# 函数用途: 回放待压缩历史并追加同片动态名卡，原生工具往返与稳定前缀不变，摘要指令仍位于最后。
 def conversation_compact_provider_messages(
     previous_summary: str,
     compact_generation: int,
     rows: Iterable[object],
+    *,
+    volatile_sections: tuple[tuple[str, str], ...] = (),
 ) -> list[dict[str, Any]]:
     prefix: list[dict[str, Any]] = []
     summary = str(previous_summary or "").strip()
@@ -170,7 +224,10 @@ def conversation_compact_provider_messages(
         for item in provider_history_messages_from_rows(rows)
         if isinstance(item, dict)
     ]
-    return strip_orphaned_tool_blocks([*prefix, *canonical])
+    current_display = AnthropicMessageAdapter().to_provider_messages(
+        [RuntimeFactsTurn(text=text, source=source) for source, text in volatile_sections]
+    )
+    return strip_orphaned_tool_blocks([*prefix, *canonical, *current_display])
 
 
 __all__ = [

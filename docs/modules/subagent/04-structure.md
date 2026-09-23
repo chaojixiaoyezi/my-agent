@@ -2,12 +2,54 @@
 
 ## 创建前可选模型建议
 
-`agent_core/orchestration/decision_subagent.py` 只保存一次批次的候选/规格摘要；模型引用仍写原 host_model_profile.v1。
-`orchestration_tools.py` 与 `hierarchy_tools.py` 沿原创建锁准备→锁外建议→锁内重新准备/采用/物化；关闭时沿一次原事务。
+`agent_core/orchestration/decision_subagent.py` 只保存本批候选/规格摘要；返回 typed `PendingSubagentModelAdvice`，不更改模型引用。
+`orchestration_tools.py` 与 `hierarchy_tools.py` 沿原创建锁准备→锁外建议→锁内重冻/绑定初始化建议/物化；关闭时沿一次原事务。
 `execute_scoped` 引用原 ToolRuntimeSnapshot，ContextVar 仅活到本次工具返回，不给 RunParams 增加第二快照。
 候选只取原 owner/shared agentic 配置；冷候选由原 child runner 探测，建议不证明实际工具支持。
-采用前复核配置/连接/期限、原规格和候选版本。默认名字来源由宿主规范化前记录；仅相同显式幂等身份可忽略序号变化。
-当前窗口是创建前估算（内联材料、当前工具 schema、输出预留）；完整 child prompt、模态和缓存验证仍属 TODO12。
+接纳 pending 前复核配置/连接/期限、原规格和候选版本。默认名字来源由宿主规范化前记录；仅相同显式幂等身份可忽略序号变化。
+父工具快照与 goal/schema 粗估不能证明完整 child 首请求。创建时只保存建议；真实 runner 在首个业务请求前
+以自己的完整输入、原工具 probe 和真实发送适配器核验，再自动采用或保留，见末节首次请求合同。
+逐候选输出 cap 已复用最终配置与原 HTTP 发送判据：`selected_model_config` →
+`project_task_runtime_config_overlay` → 原 `get_backend` 本地构造 → 原共享窗口输出预留。
+未知保留为 `None`，尤其不能把 OAuth Responses 的未发送输出字段解释成零上限；候选不会提前探针。
+`candidate_request_limits` 分别报告窗口、输出 cap 和工具支持，最终配置只以进程盐 HMAC 参与失效复核。
+这些摘要只活在原批次，不能随 pending 持久化。`settings/thread_model_selection.py::PendingSubagentModelAdvice`
+只含稳定 profile ID、来源设置 revision、operation、parent/child 身份和原 ModelProfileGeneration 的随机代次；无时钟、HMAC、原响应或计费字段。
+`conversation/agent_thread.py` 显式接收宿主准备参数，`agent_thread_store.py` 仅在新建 thread 的同次写入加入 pending。
+已有线程沿 `update_atomic` 读取最新记录，只补身份；重复创建不能覆盖模型、Compact 或重植已终结建议。
+`thread_model_profile_id(select=...)` 在同一线程原子更新内处理显式模型和 pending→retained，即使 profile 未变也保留用户优先。
+普通读取、配置恢复和原 worker 只认 `model_profile_id`，不消费 pending；多存储创建和网络请求不属于单一原子事务。
+pending 是宿主自动验证的中间状态，不是用户审批队列；显式 model/菜单选择仅作为既有硬约束防竞态。
+最终主代理派工必须自动完成建议、核验、采用或保留和执行；本片不是 P2/P4 全链验收完成。
+
+## 同一创建对象与只读上下文投影（四个有界切片）
+
+- `services/base.py::PreparedSubagentRun` 是一次原创建的内存准备结果，保存规范化参数、
+  原 `SubAgentTask`、run ID、创建时间、父 `state_revision` 及可选 init-only advice；建议不进入 task attributes。
+- `prepare_run(params=...)` 复用原角色、路径、权限和会话身份算法。上层可在原创建锁内准备、
+  锁外等待；正式提交仍只经 `create_run(params=..., prepared=...)`，锁内重读并拒绝输入、父代次、
+  身份或权限漂移及重复发布。同一 task 对象沿原线程、权威记录、保存顺序提交。
+- `refreeze_run(params=..., prepared=...)` 只在原创建锁内对未发布对象更新当前规范化字段；
+  兄弟提交更新父代次后仍保留原 ID、创建时间、父/root/thread/session 身份；参数或有效权限变化会丢弃旧初始化建议。
+  已发布任务在任何对象或文件变更前拒绝重新冻结，最终 `create_run` 继续严格复核。
+- 根 `PreparedSubagentCreation` 与递归 `HierarchyScheduleRequest` 的 `prepared_runs` 只活在当前批次内存中。
+  两条原幂等 resolver 均先复用已存在任务，再重新冻结并提交新任务；锁外 Jev 不持创建锁，
+  返回后的原取消、配额、规格和权限检查不被准备对象替代。选择指纹绑定真实 task 身份及有效权限。
+- `services/task_workspace_adapter.py::project_task_workspace_fields` 返回任务副本；它与正式 sync 共用静态字段映射，
+  只消费 `memory_archive/task_workspace` 中原 root/run/task 推导和路径算法。工单、runner、共享目录及 artifact
+  索引地址保持同一来源；日账路径和事件 ID 只由原 `ensure` 成功写入后同步，不拿预览默认值冒充事件。
+- `services/runner_context_service.py::prepare_execution_context(task)` 在该路径副本上只读收集原 context bundle、
+  role、write boundary、直属孩子和协作事实，冻结生成时间；`ExecutionContextBuildRequest` 只作为投影输入。
+- `project_execution_context(request)` 不查询 manager、时间或网络，独立返回数据副本；
+  原 `build_execution_context(run_id)` 也走 prepare/project，持久写出仍归原 `write_execution_context`。
+- `unresolved_fields` 只报告缺少的 `task_workspace_dir`、`agent_run_workspace_dir`；静态路径现在可以提前算出，
+  空值不证明目录已物化或完整模型请求已冻结。创建链已消费准备对象，首请求 prompt 和工具/Skill 展示尚未接通。
+- `settings/services/runtime_config_task.py::project_task_runtime_config_overlay` 与原 worker 的 apply 共用
+  路径、合并优先级和规范化；只有正式 apply 才改变日志设置。候选配置变化使旧建议失效，不能借父输出预算排除小窗口。
+- 模型引用变化必须先通过原规范化和授权复核，再调用显式重新冻结；不能直接修改准备任务、
+  另建预览任务或在选择器复制路径/renderer。缺少完整请求面时保留继承，测试中的已知容量只检验绑定合同。
+- 定向入口：`test_subagent_manager_core.py`、`test_subagent_effective_runtime_context.py`、`test_decision_subagent.py`；
+  设计和完整容量尚缺的接缝见 [容量审计](../../tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。
 
 ## 原创建锁与执行轮短事务
 
@@ -783,6 +825,7 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
   grandchild 分别保存 summary/cursor/generation/checkpoint/CAS，不共享正文。
 - `conversation/agent_thread.py` 是 delegated adapter：创建/恢复时按稳定 `agent_thread_id` 幂等物化线程；
   精确 ID 落盘和身份/谱系冲突检查由 `conversation/agent_thread_store.py` 单独负责，避免通道会话 store 吸收 agent runtime 策略；
+  已有 thread 的缺失身份补齐使用原 `ThreadStore.update_atomic` 复读最新快照：`.agent-thread` 过渡锁只保护物化顺序，不能替代模型选择/Compact 共用的 thread 文件锁；不从旧 payload 整体写回模型或压缩字段。
   每个 attempt 按 `conversation_request_id` 写入 user/assistant，轮前与 provider overflow 后调用
   `conversation/compact.py`。task-local 仍控制 Memory、工具权限和工作区，不再拥有第二条持久 Compact 链。
 - delegated runtime 同时携带两类不可互换的 thread 身份：继承的 `conversation_thread_id` 与
@@ -1137,3 +1180,25 @@ thread/client cwd。child 不能从 goal、绝对路径或 manager daemon root �
 每个 child provider turn 可产生 `commentary:1..N` 与一个 `final` assistant part。part id 由宿主按真实工具
 边界生成并参与幂等键；commentary 保留完整用户可见正文，final 承载 terminal tool fold 与运行终态 metadata。
 历史投影保留全部 part，但轮次预览只把 final 当终答，不能把过程消息误当成第二个任务或完成事实。
+
+### 首次请求资格、材料与发送栅栏
+
+`conversation/agent_thread_store.py` 只在新 thread 接到 typed advice 时初始化
+`host_subagent_first_request.v1`；已有线程不能靠旧 pending 或空账本补发资格。
+原 `run_flow` 在 `attempt_executor` 之后进入 `subagent/model_selection.py` 的临时准备范围，
+实际 PromptBuilder/工具模型轮生产完整 `ToolLoopRequestInput`，使用本 child 原历史、schema 与运行事实。
+`_invoke_backend_generate` 的原物理发送边界先核对 canonical run/attempt，再原子保存发送意图与保留终态。
+该事务与独立 guidance/RuntimeDB 事务各守原权威，不能宣传成跨文件单一原子提交。
+
+显式候选依赖通过原 `model_scope` 的准备/绑定接口隔离，`RuntimeMixin` 为同片 finalization 保留清理范围；
+不修改共享 Agent。原 Anthropic/Chat 发送和纯 payload 投影共用组包入口，预览不触发探针、认证、私有 dump 或网络。
+真实首轮已接 `select_first_request_model`：先捕获目录代次再解析配置，锁外有界运行原 probe，在原
+owner→来源目录→父 thread→creation→child thread 锁序下复核设置、权限与精确 attempt。
+`model_profile_id`、通用选择版本、pending→adopted 与 first-request→reserved 在一次原 thread CAS 提交；
+provider 边界随后保存 submitted/call_id。数据库、线程、guidance 和 HTTP 不是一个事务。
+ToolLoopService 接纳整份候选 params，后续模型、工具轮、异常历史和最终协议证据都使用同一快照。
+同片依赖一直保留到 finalization；Goal 续轮、重启与溢出 Compact 从 canonical child 已有效 profile 重新绑定，不消费旧建议。
+未知自动保留原模型，用户不参与逐 child 选择或确认；当前 fake provider 已验，隔离 Gateway 另有官方
+M3 与受限候选 OpenCode DeepSeek 各一条自动采用并完成实际工具轮的样本。图片/其它模态的候选能力与
+token 口径尚无完整证据，不能将文本/native 样本扩写为全部首请求资格已验；结构证据见
+`docs/tasks/DECISION_MODEL_CHILD_LIVE_HANDOFF.md`。

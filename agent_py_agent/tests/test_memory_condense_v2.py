@@ -57,6 +57,39 @@ def test_touch_survives_reload_from_disk(tmp_path: Path) -> None:
     assert by_id["memory-a"].last_accessed_at > 0.0
 
 
+def test_scoped_candidates_only_touch_after_final_confirmation(tmp_path: Path) -> None:
+    memory = _memory(tmp_path)
+    _fact(memory, "memory-a", "祥子买了两次车。", origin="user_explicit")
+    candidates = memory.search_scoped_candidates(
+        "祥子买车", top_k=5, predicate=lambda record: True,
+    )
+
+    assert [record.entry_id for record in candidates] == ["memory-a"]
+    assert memory.flush_access_events() == 0
+    assert memory.confirm_scoped_access(candidates, lambda record: True) == candidates
+    assert memory.flush_access_events() == 1
+    assert memory.all()[0].last_accessed_at > 0.0
+
+
+def test_scoped_candidate_replaced_or_out_of_scope_is_not_touched(tmp_path: Path) -> None:
+    memory = _memory(tmp_path)
+    original = _fact(memory, "memory-a", "祥子买了两次车。", origin="user_explicit")
+    candidates = memory.search_scoped_candidates(
+        "祥子买车", top_k=5, predicate=lambda record: True,
+    )
+    memory.remove(original.entry_id, expected_version=original.version)
+
+    assert memory.confirm_scoped_access(candidates, lambda record: True) == []
+    assert memory.flush_access_events() == 0
+
+    _fact(memory, "memory-b", "祥子买了两次车。", origin="user_explicit")
+    fresh = memory.search_scoped_candidates(
+        "祥子买车", top_k=5, predicate=lambda record: True,
+    )
+    assert memory.confirm_scoped_access(fresh, lambda record: False) == []
+    assert memory.flush_access_events() == 0
+
+
 def test_condense_removes_coldest_non_user_explicit_only(tmp_path: Path) -> None:
     memory = _memory(tmp_path)
     _fact(memory, "memory-a", "事实一。", origin="user_explicit")

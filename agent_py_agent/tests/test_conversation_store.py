@@ -357,6 +357,48 @@ def test_exact_agent_thread_is_idempotent_unbound_and_rejects_run_collision(
         )
 
 
+def test_existing_agent_thread_ensure_keeps_newer_model_and_compact_state(tmp_path, monkeypatch) -> None:
+    from dataclasses import replace
+
+    from agent_py_agent.agent.conversation import agent_thread_store
+
+    store = ConversationStore(tmp_path / "conversations")
+    request = {
+        "thread_id": "thread-run-child-race", "agent_run_id": "run-child-race",
+        "canonical_user_id": "local/main", "owner_id": "local/main",
+        "owner_home": str(tmp_path / "owner"), "now": 10.0,
+    }
+    store.threads.ensure_agent(request)
+    original_read = agent_thread_store.read_json_object_report
+    changed = False
+
+    def read_then_change_model(*args, **kwargs):
+        nonlocal changed
+        payload, error = original_read(*args, **kwargs)
+        if not changed:
+            changed = True
+            store.threads.update_atomic(
+                request["thread_id"],
+                lambda latest: replace(
+                    latest, model_profile_id="selected-by-user", compact_generation=3,
+                    model_selection_revision=latest.model_selection_revision + 1,
+                    model_selection_source="explicit",
+                    model_selection_last_explicit_revision=latest.model_selection_revision + 1,
+                    metadata={**latest.metadata, "model_decision": {"status": "retained"}},
+                ),
+            )
+        return payload, error
+
+    monkeypatch.setattr(agent_thread_store, "read_json_object_report", read_then_change_model)
+    ensured = store.threads.ensure_agent({**request, "now": 20.0})
+
+    assert changed
+    assert ensured.model_profile_id == "selected-by-user"
+    assert ensured.compact_generation == 3
+    assert ensured.metadata["model_decision"] == {"status": "retained"}
+    assert store.threads.load(request["thread_id"]) == ensured
+
+
 def test_detached_named_task_binds_exact_existing_message_anchor(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
     thread = store.threads.get_or_create(

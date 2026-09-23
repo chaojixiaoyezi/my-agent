@@ -185,9 +185,9 @@ def test_cancelled_batch_stops_before_materializing_and_publishing_remaining_chi
     real_resolve = orchestration_tools.resolve_create_run
     resolved = 0
 
-    def resolve_then_cancel(manager, params):
+    def resolve_then_cancel(manager, params, *, prepared=None):
         nonlocal resolved
-        result = real_resolve(manager, params)
+        result = real_resolve(manager, params, prepared=prepared)
         resolved += 1
         if resolved == 1:
             token.cancel("interrupted")

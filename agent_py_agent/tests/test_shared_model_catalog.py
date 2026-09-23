@@ -157,8 +157,6 @@ def test_corrupt_catalog_does_not_block_private_menu(tmp_path):
 
 
 def test_revoked_legacy_default_can_be_replaced_and_is_not_shown_as_default(tmp_path):
-    from dataclasses import replace
-
     from agent_py_agent.agent.settings.thread_model_selection import execute_local_model_operation
     from agent_py_agent.tests.test_thread_model_selection import host_with_store
 
@@ -168,7 +166,12 @@ def test_revoked_legacy_default_can_be_replaced_and_is_not_shown_as_default(tmp_
     execute_model_profile_operation(alice, "set_default", {"profile_id": "shared:" + key})
     one = execute_local_model_operation(alice, "one", "list", {})
     thread = alice.conversation_store.threads.load(one["thread_id"])
-    alice.conversation_store.threads.update_atomic(thread.thread_id, lambda current: replace(current, model_profile_id=""))
+    path = alice.conversation_store.threads.storage.thread_path(thread.thread_id)
+    legacy = json.loads(path.read_text())
+    legacy["model_profile_id"] = ""
+    for field in ("model_selection_revision", "model_selection_source", "model_selection_last_explicit_revision"):
+        legacy.pop(field)
+    path.write_text(json.dumps(legacy))
     set_shared_profile(admin, key, False)
     unavailable = execute_local_model_operation(alice, "one", "list", {})
     assert unavailable["ok"] and not unavailable["selection_available"]

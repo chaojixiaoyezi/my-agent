@@ -131,17 +131,25 @@ Gateway 模式须读宿主目录，plain 持有完整 Agent 也不能回退本�
 
 Jev 的最新产品方向与独立开发顺序读 [可选决策模型计划](docs/design/DECISION_MODEL_INTEGRATION.md)，P1—P5 已授权独立实施；
 本地已有 decision 用途、生成隔离和原生 decide 适配器；原目录当前 v4、会话 v10，旧数据显式迁移。
-完整清单见 [执行 Goal](docs/tasks/DECISION_MODEL_GOAL.md)；子代理选择、Curator 标注和召回重排已本地接通，原设置菜单、原运输与原生探测已本地接通，真实模型与安装版尚未验。
+完整清单见 [执行 Goal](docs/tasks/DECISION_MODEL_GOAL.md)；子代理选择、Curator 标注和召回重排已本地接通，原设置菜单、原运输与原生探测已本地接通，隔离真实模型/TUI 部分已验，安装版尚未验。
 严格 HTTP 与协议联合 216 项本地验证通过；后续有界等待/精确取消/原准入及 Curator 迁移联合 315 项通过。
 共用决策设置与原 user_config 已接 read/patch/reset、owner/thread CAS、有效值读回；失效配置不能阻止关闭。
 原账本终态不再被迟到回调复活，用途分区和字段来源保留至原累计容器，worker 可准确保留未退出调用。
-原用量快照以范围和内容去重；同一 TUI 行已增加决策输入，输出留白、不显示价格，部分缺报显示未知。
+原用量快照以范围和内容去重；同一 TUI 行已增加决策输入，输出留白，部分缺报显示未知。决策请求不做 USD 价格估算或 owner/run 成本累计，本地决策模型无需价格配置；原调用账仍保留真实请求状态和用量。
 实际决策服务的策略/冷却、原 HTTP/账本及活动用量行已本地组合接通，短决策不等待持久显示写锁。
 原设置菜单已接通，能力推荐已在原工作片准备处接线；原Skill快照/Registry仍唯一，展示选择不能当作授权或已加载正文。
 关闭/观察/失败保持原展示；成功时短名单沿原动态段和native工具展示进入模型，省略项仍由原搜索找回。
 真实Jev已开始并修复独立选题与百分位概率舍入，脱敏失败样本已replay；不能把接口小样本当作完整业务或已安装TUI可用。
-完整窗口/缓存、官方MiniMax组合与实际TUI验收继续，记录见`docs/tasks/DECISION_MODEL_REAL_VALIDATION.md`。
+Jev官方总64k与state加最长题32k现有发送前保守容量门，超量回基础方案；它使用UTF-8字节上界，不冒充供应商token计数。
+子代理决策候选范围可按原模型配置 ID 经 owner/thread 设置缩小；空数组保留原全部授权目录，配置变化使旧建议失效，官方 MiniMax 来源须查连接而非名字。
+子代理实际选模是主代理派工后的自动链：Jev 建议、宿主首轮请求与候选能力核验、采用或保留继承模型、创建执行，不要求用户逐子代理确认或选模型；pending 建议不能被当作已切换。
+原私有模型目录当前 v5、共享发布 v2 增加随机持久代次和原锁 guard；模型/凭据/OAuth/发布变更令旧建议失效，普通读取不写。此[目录代次片](docs/tasks/DECISION_MODEL_CATALOG_GENERATION_HANDOFF.md)已定向验证，仍要由首发送链真正消费，未知事实自动保留继承模型。
+隔离官方 MiniMax-M2.7 与 Gateway TUI 已跑通普通会话和三子代理保留原模型；完整子代理窗口/缓存与 M3/DeepSeek 真实切换仍待验，记录见`docs/tasks/DECISION_MODEL_REAL_VALIDATION.md`。
 Curator 已本地消费用户后台临时标注，完整材料/提取/验证/游标仍沿原链；后台原 run 不冒用前台会话。
+P5-B 新增独立 `curator_relation` 首片：仅本批完整消息与有版本的短 long-term 正文可获临时关系提示；原候选/晋升不由 Jev 直接控制，见 [P5-B 交接](docs/tasks/DECISION_MODEL_P5B_HANDOFF.md)。task_local/control_plane 及 owner 关闭记忆时已不扫描正式库；普通会话召回前跳过尚未开放。[P5-A 审计](docs/tasks/DECISION_MODEL_PRE_RECALL_AUDIT.md)要求未来只做不删原结果的补充检索，先有可信查询候选和无副作用候选检索接缝。
+P5-C 的 `external_material_order` 首片已本地接通，默认关闭：原 web_fetch 多页归档后只追加页序建议，原结果、引用、归档和工具权限不变；隔离真实Jev已验非选择保留及一次自动追加2→3→1，页面源为本地受控材料，其它检索/规划点未验，见 [P5-C 交接](docs/tasks/DECISION_MODEL_EXTERNAL_MATERIAL_ORDER_HANDOFF.md)。
+P5-D 主会话自动选模已完成[只读合同审计](docs/tasks/DECISION_MODEL_MAIN_MODEL_AUDIT.md)及[原线程选择版本首片](docs/tasks/DECISION_MODEL_MAIN_MODEL_SELECTION_HANDOFF.md)：显式同值选择也递增版本，旧线程不伪造手动事件；Gateway 准确车道、首请求容量、跨模型历史兼容和实际自动采用仍待实现，不把版本合同当作切换通过。
+P5-E/F/G/H 的[只读审计](docs/tasks/DECISION_MODEL_SELF_EXPERIMENT_AUDIT.md)已明确原 Goal/调用账与验证证据的复用边界；原设置服务增加同次 `set/unset`、完整双层 CAS 的内部 `restore` 基础原语，默认行为不变。它尚无实验授权、请求前输入硬预算、可信收益指标或自动调参，不能把恢复能力当成整项完成。
 缺数据等非选择结果分别保留，额外等待被原 lease 头寸限制；子代理选择、召回及真实模型验收继续。
 消费者在刷新候选后统一复核 `decision_outcome_is_current`，不能把服务返回时的 may_apply 当作永久有效授权。
 默认关闭、短总期限、失败沿原流程、配置/账本复用，不加入当前插件重构 Goal，也不改变普通主模型慢流合同。
@@ -300,7 +308,7 @@ Goal 显式接收原共享时钟；唤醒接收观察确认能力，发布顺序
 - 思考结束默认折叠，正文/final 完整显示；空思考占位可撤下，完整思考保持原顺序，不能在 final 后重放。
   每个主子页面独立滚动锚点，手动上翻不追尾，回到底部或发送消息才恢复跟随；滚轮每格一行。
 - 长期记忆只在本 owner 维护，USER/AGENTS 与普通 memory 可自主更新；SOUL 修改仍需用户本人确认，
-  不允许文件工具绕过。Skill 逐轮冻结索引、按需读正文；自学习默认关，仅候选可自动生成，正式 Skill 要确认。
+  不允许文件工具绕过。Skill 逐轮冻结索引、按需读正文；现行 runner 可生成记忆 Candidate，尚无生产 Skill 自学习草稿链，正式 Skill 提案未来仍须用户确认。
 - 生产包不得带开发验收 harness、tests、运行数据或废弃源码。包边界、import 边界与定向测试都要过；
   不通过增加 baseline、skip/xfail 或删除真实失败证据“清绿”。完整发布门见 AGENTS.md。
 

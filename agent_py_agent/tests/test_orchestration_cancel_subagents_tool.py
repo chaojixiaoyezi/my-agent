@@ -69,11 +69,11 @@ def test_cancel_model_cannot_skip_child_and_cancel_grandchild(tmp_path):
     from agent_py_agent.agent.agent_core.orchestration.tools.cancel import (
         CancelSubagentsTool,
     )
-    from agent_py_agent.agent.agent_core.runner.context import (
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.runtime_context import (
         restore_current_subagent_context,
         set_current_subagent_context,
     )
-    from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings import AgentConfig
 
     agent = SimpleAgent(
@@ -108,11 +108,11 @@ def test_cancel_direct_child_closes_its_live_descendant_branch(tmp_path):
     from agent_py_agent.agent.agent_core.orchestration.tools.cancel import (
         CancelSubagentsTool,
     )
-    from agent_py_agent.agent.agent_core.runner.context import (
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.runtime_context import (
         restore_current_subagent_context,
         set_current_subagent_context,
     )
-    from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings import AgentConfig
 
     agent = SimpleAgent(

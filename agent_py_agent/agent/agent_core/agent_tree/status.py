@@ -9,12 +9,12 @@
 from __future__ import annotations
 
 from ...model_visible_refs import current_model_ref
+from ...runtime_context import current_subagent_run_id
 from ...runtime_errors import runtime_error_report
 from ...subagents.kernel import SubagentKernelQuery
 from ..orchestration.child_result_index import child_result_index_from_nodes
 from ..orchestration.run_scope import remembered_orchestration_run_ids
 from ..orchestration.scope_resolution import scope_resolution_payload, tree_scope_resolution
-from ..runner.context import current_subagent_run_id
 from .node_rendering import attach_task_progress, node_from_kernel_run
 from .scope_filter import (
     coordination_advice,

@@ -310,11 +310,11 @@ def test_descendant_batch_respects_shared_owner_capacity_atomically(tmp_path):
 def test_descendant_create_normalizes_relative_outputs_to_explicit_cwd(tmp_path):
     """递归派工使用同 owner 的显式 cwd，不从 run 归档推导业务路径。"""
     from agent_py_agent.agent.agent_core.hierarchy_tools import _hierarchy_child_spec
-    from agent_py_agent.agent.agent_core.runner.context import (
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.runtime_context import (
         restore_current_subagent_context,
         set_current_subagent_context,
     )
-    from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings import AgentConfig
     from agent_py_agent.agent.subagents.context_bundle import build_context_bundle
     from agent_py_agent.agent.subagents.services.hierarchy.scheduler import (

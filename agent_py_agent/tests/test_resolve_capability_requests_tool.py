@@ -258,7 +258,7 @@ def test_mcp_grant_enters_next_runner_tool_snapshot():
 
 def test_nested_parent_can_regrant_only_its_effective_mcp_tool():
     """A prior MCP grant is durable parent authority for the exact grandchild tool."""
-    from agent_py_agent.agent.agent_core.runner.context import (
+    from agent_py_agent.agent.runtime_context import (
         restore_current_subagent_context,
         set_current_subagent_context,
     )
@@ -465,7 +465,7 @@ def test_request_id_mismatch_lists_actual_pending_ids():
 
 
 def test_parent_cannot_resolve_grandchild_capability_request():
-    from agent_py_agent.agent.agent_core.runner.context import (
+    from agent_py_agent.agent.runtime_context import (
         restore_current_subagent_context,
         set_current_subagent_context,
     )
@@ -548,8 +548,8 @@ def test_cancelled_child_closes_leftover_open_request():
 
 def test_capability_request_submission_notifies_parent_thread():
     # R4 根因:子代理提交请求后主代理全程不知道。提交端必须发 requires_main_agent 观察。
+    from agent_py_agent.agent import runtime_context as runner_context
     from agent_py_agent.agent.agent_core.capability_request_tool import CapabilityRequestTool
-    from agent_py_agent.agent.agent_core.runner import context as runner_context
 
     with tempfile.TemporaryDirectory() as td:
         agent = SimpleAgent(
@@ -591,8 +591,8 @@ def test_capability_request_submission_notifies_parent_thread():
 
 def test_capability_request_wake_carries_parent_tool_authority_and_separate_approval_fact():
     """The parent wake exposes exact grantability without turning grant into user approval."""
+    from agent_py_agent.agent import runtime_context as runner_context
     from agent_py_agent.agent.agent_core.capability_request_tool import CapabilityRequestTool
-    from agent_py_agent.agent.agent_core.runner import context as runner_context
 
     with tempfile.TemporaryDirectory() as td:
         agent = SimpleAgent(

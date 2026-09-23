@@ -1,5 +1,6 @@
 # LLM: Curator 消费可选决策仅附临时建议；owner 身份来自原宿主与本次 lease run，材料不是权限或游标来源。
-# 模块用途: 在原记忆批次提取前建议标签和优先级，关闭、观察或失败均保留完整原批次。
+# 来源标注数是本地延迟保护，不代表供应商存在固定题数上限。
+# 模块用途: 在原记忆批次提取前共享预算建议标签、优先级及正式条目关系，关闭、观察或失败均保留完整原材料。
 from __future__ import annotations
 
 import hashlib
@@ -15,8 +16,9 @@ from ..conversation.decision_service import (
 from ..tooling.cancellation import ToolCancelled
 from .curator_backend import curator_prompt
 from .curator_inputs import CuratorDecisionAnnotation, CuratorInputBatch
+from .decision_curator_relation import annotate_curator_relations
 
-_MAX_ANNOTATED_ITEMS = 32  # 每来源两题，遵守原生接口单请求 64 题上限；未标注材料仍完整提取。
+_MAX_ANNOTATED_ITEMS = 32  # 每来源两题；这是本地延迟/输入保护，不是供应商题数上限，未标注材料仍完整提取。
 _TAGS = {
     "fact": "可能包含可核验事实", "preference": "可能包含用户偏好",
     "lesson": "可能包含可复用经验", "event": "可能包含经历或事件",
@@ -28,7 +30,7 @@ _NON_SELECTIONS = {
 _PRIORITIES = {"high": "建议优先核对", "normal": "按原顺序核对", "low": "建议稍后核对，但不可跳过"}
 
 
-# LLM: 每个lease仅建一次阶段；准备注释后用公共门复查身份/配置/期限，不能在服务返回至采用的间隙忽略关闭，不创建新Agent或存储。
+# LLM: 每个 lease 仅建一次阶段，两个独立开关共用绝对期限；后续建议不能延长前一结果的有效期，不创建新 Agent 或存储。
 # 函数用途: 可选调用决策模型并返回附建议的原批次；所有普通增强失败只记无正文 warning，继续原提取。
 def annotate_curator_batch(agent: object, batch: CuratorInputBatch, run_id: str, *, max_input_chars: int, caller_deadline: float | None = None) -> tuple[CuratorInputBatch, tuple[str, ...]]:
     try:
@@ -36,33 +38,57 @@ def annotate_curator_batch(agent: object, batch: CuratorInputBatch, run_id: str,
         stage = begin_decision_stage(agent, params, operation_id=run_id, scope="owner_background", caller_deadline=caller_deadline)
         if stage.error_code:
             return batch, ("memory_curator_decision:unknown:stage_unavailable",)
-        if "curator" not in stage.enabled_points:
-            return batch, ()
-        state, questions, sources, revision = _decision_material(batch)
-        if not questions:
-            return batch, ()
-        outcome = decide(agent, params, stage, point="curator", state=state, questions=questions,
-                         candidates_revision=revision, source_refs=tuple(sources))
-        warning = f"memory_curator_decision:{outcome.mode}:{outcome.status}"
-        if not outcome.may_apply or outcome.response is None:
-            return batch, (() if outcome.status == "off" else (warning,))
-        response = outcome.response
-        if response.binding.candidates_revision != revision or _decision_material(batch)[3] != revision:
-            return batch, ("memory_curator_decision:apply:stale",)
-        annotations = _annotations(response, sources)
-        if not annotations:
-            return batch, (warning,)
-        annotated = replace(batch, decision_annotations=annotations)
-        # 可选提示不能挤掉原材料或让原先合法的提取超过预算，超量就完整放弃提示。
-        if len(curator_prompt(annotated)) > max_input_chars:
-            return batch, ("memory_curator_decision:apply:annotation_budget",)
-        if not decision_outcome_is_current(agent, params, stage, outcome):
-            return batch, ("memory_curator_decision:apply:stale",)
-        return annotated, (warning,)
     except (InterruptedError, ToolCancelled):
         raise
     except Exception:
         return batch, ("memory_curator_decision:off:enhancement_failed",)
+    annotated, warnings, tag_outcome = batch, (), None
+    if "curator" in stage.enabled_points:
+        annotated, warnings, tag_outcome = _annotate_source_tags(agent, batch, params, stage, max_input_chars=max_input_chars)
+    if "curator_relation" in stage.enabled_points:
+        try:
+            annotated, relation_warnings = annotate_curator_relations(agent, annotated, params, stage, max_input_chars=max_input_chars)
+            warnings += relation_warnings
+        except (InterruptedError, ToolCancelled):
+            raise
+        except Exception:
+            warnings += ("memory_curator_relation:off:enhancement_failed",)
+        # 第二个请求的等待期间可能关闭或耗尽第一个请求的期限；不能把较早成功当永久授权。
+        if tag_outcome is not None and not decision_outcome_is_current(agent, params, stage, tag_outcome):
+            annotated = replace(annotated, decision_annotations=batch.decision_annotations)
+            warnings += ("memory_curator_decision:apply:stale",)
+    return annotated, warnings
+
+
+# LLM: 原标签/优先级协议和失败行为保持；仅将阶段由外层传入，并交回成功回执供后续等待后的失效复核。
+# 函数用途: 给当前来源添加可选临时标注，普通增强失败不会阻断另一独立点或原提取。
+def _annotate_source_tags(agent, batch, params, stage, *, max_input_chars):
+    try:
+        state, questions, sources, revision = _decision_material(batch)
+        if not questions:
+            return batch, (), None
+        outcome = decide(agent, params, stage, point="curator", state=state, questions=questions,
+                         candidates_revision=revision, source_refs=tuple(sources))
+        warning = f"memory_curator_decision:{outcome.mode}:{outcome.status}"
+        if not outcome.may_apply or outcome.response is None:
+            return batch, (() if outcome.status == "off" else (warning,)), None
+        response = outcome.response
+        if response.binding.candidates_revision != revision or _decision_material(batch)[3] != revision:
+            return batch, ("memory_curator_decision:apply:stale",), None
+        annotations = _annotations(response, sources)
+        if not annotations:
+            return batch, (warning,), None
+        annotated = replace(batch, decision_annotations=annotations)
+        # 可选提示不能挤掉原材料或让原先合法的提取超过预算，超量就完整放弃提示。
+        if len(curator_prompt(annotated)) > max_input_chars:
+            return batch, ("memory_curator_decision:apply:annotation_budget",), None
+        if not decision_outcome_is_current(agent, params, stage, outcome):
+            return batch, ("memory_curator_decision:apply:stale",), None
+        return annotated, (warning,), outcome
+    except (InterruptedError, ToolCancelled):
+        raise
+    except Exception:
+        return batch, ("memory_curator_decision:off:enhancement_failed",), None
 
 
 # LLM: 原始批次全部作为上下文，只有有限前缀来源被提问；没有删除、重排材料或把历史身份借作当前执行身份。

@@ -197,7 +197,7 @@ def test_front_and_background_entrypoints_use_exact_thread(tmp_path, monkeypatch
     thread = host.conversation_store.threads.load(row["thread_id"])
     monkeypatch.setattr(request_context, 'preflight_gateway_conversation', lambda inputs: SimpleNamespace(thread_id=thread.thread_id))
     monkeypatch.setattr(request_execution, "_require_gateway_conversation_ready", lambda *args: None)
-    monkeypatch.setattr(request_execution, "_run_gateway_ask_with_model", lambda context: context.agent.config.model_name)
+    monkeypatch.setattr(request_execution, "_run_gateway_ask_with_model", lambda context, **_kwargs: context.agent.config.model_name)
     context = SimpleNamespace(agent=host, request={"prompt": "继续"}, request_id="req", on_chunk=None)
     assert request_execution._run_gateway_ask(context) == "A"
     monkeypatch.setattr(runtime, "_invoke_background_main_agent_with_model", lambda rt, *args: rt.agent.config.model_name)

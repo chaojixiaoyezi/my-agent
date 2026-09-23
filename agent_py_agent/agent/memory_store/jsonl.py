@@ -555,6 +555,50 @@ class _JsonlMemorySearchMixin:
         top_k: int,
         predicate: Callable[[MemoryRecord], bool],
     ) -> list[MemoryRecord]:
+        return self._search_scoped(query, top_k, predicate, record_access=True)
+
+    # LLM: 候选检索复用正式 allowlist 与混合排序，但候选尚未注入上下文，不能写访问信号。
+    # 函数用途: 为可选的补充召回寻找候选；只有最终采用的记录可交给 confirm_scoped_access。
+    def search_scoped_candidates(
+        self,
+        query: str,
+        top_k: int,
+        predicate: Callable[[MemoryRecord], bool],
+    ) -> list[MemoryRecord]:
+        return self._search_scoped(query, top_k, predicate, record_access=False)
+
+    # LLM: 访问确认重读正式源并核对原 scope、ID、版本及正文；撤销或替换的候选不得留下 touch。
+    # 函数用途: 在最终注入记忆后，给仍然有效的候选记录登记访问信号并返回已确认记录。
+    def confirm_scoped_access(
+        self,
+        records: Iterable[MemoryRecord],
+        predicate: Callable[[MemoryRecord], bool],
+    ) -> list[MemoryRecord]:
+        current = {record.entry_id: record for record in self.all() if predicate(record)}
+        confirmed: list[MemoryRecord] = []
+        seen: set[str] = set()
+        for record in records:
+            active = current.get(record.entry_id)
+            if (active is None or active.entry_id in seen or active.version != record.version
+                    or active.content != record.content or active.attributes != record.attributes
+                    or active.source != record.source or active.kind != record.kind
+                    or active.role != record.role or active.expires_at != record.expires_at):
+                continue
+            seen.add(active.entry_id)
+            confirmed.append(active)
+            self._note_access(active.entry_id)
+        return confirmed
+
+    # LLM: 正式与候选检索只能在访问确认时分叉；索引、scope 与排序必须完全相同。
+    # 函数用途: 执行原 scoped 检索；正式召回记录访问，候选检索只返回记录。
+    def _search_scoped(
+        self,
+        query: str,
+        top_k: int,
+        predicate: Callable[[MemoryRecord], bool],
+        *,
+        record_access: bool,
+    ) -> list[MemoryRecord]:
         if top_k <= 0:
             return []
         active = [record for record in self.all() if predicate(record)]
@@ -589,8 +633,9 @@ class _JsonlMemorySearchMixin:
         else:
             keyword = []
         selected = _rerank_memory_records(keyword, query, top_k)
-        for record in selected:
-            self._note_access(record.entry_id)
+        if record_access:
+            for record in selected:
+                self._note_access(record.entry_id)
         return selected
 
     # LLM: RRF 只融合两个可重建候选列表，返回前仍使用稳定 entry ID 对齐。

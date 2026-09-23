@@ -1,9 +1,9 @@
 
 from __future__ import annotations
 
+from ...runtime_context import current_subagent_attempt_id, current_subagent_run_id
 from ...runtime_errors import runtime_error_report
 from ...tooling.models import ToolHandlerOutcome
-from ..runner.context import current_subagent_attempt_id, current_subagent_run_id
 
 
 def stale_subagent_attempt_result(agent, payload: object) -> ToolHandlerOutcome | None:

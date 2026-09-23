@@ -1,14 +1,15 @@
 
-# LLM: 递归创建在全部规格校验成功后才物化；建议请求在创建锁外，回来后必须复查原权限和持久复用。
-# 模块用途: 创建当前 child 的下一层，显式模型优先，可选决策不改变父级或现有孩子。
+# LLM: 递归创建在全部规格校验成功后才物化；锁外建议返回后重冻同一准备身份，仍先复查原权限和持久复用。
+# 模块用途: 沿原调度器提交当前 child 的下一层准备对象，显式模型优先，现有孩子保持原记录。
 from __future__ import annotations
 
 import json
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from ..action_protocol import subagent_schedule_envelope_from_payload
 from ..common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
+from ..runtime_context import current_subagent_run_id
 from ..runtime_errors import runtime_error_report
 from ..settings.model_profiles import ModelProfileError
 from ..subagents.services.hierarchy.qa_scheduler import quality_advice_payload
@@ -44,7 +45,6 @@ from .orchestration.lifecycle import (
 )
 from .orchestration.write_guard import ExternalWriteTargetRequest, external_write_target_error
 from .parameters import _bool_param, _non_negative_int
-from .runner.context import current_subagent_run_id
 
 
 @dataclass(frozen=True)
@@ -62,8 +62,8 @@ class ScheduleLifecyclePayload:
     conversation_bind_errors: list[dict[str, object]]
 
 
-# LLM: 递归入口自己持有原 manager 锁，外层不得覆盖锁外网络阶段；最终仍只调用原 schedule_child_runs。
-# 函数用途: 在当前子代理名下创建下一层，可选请求一次整批模型建议并在物化前重新校验。
+# LLM: 原 manager 锁只覆盖准备/物化，Jev 锁外；typed pending 绑定原 prepared run，schedule_child_runs 仍唯一创建，不更换模型。
+# 函数用途: 在当前子代理名下创建下一层，只为新孩子保存经重新核验的待验证建议。
 def execute_child_creation(
     agent: object,
     params: dict[str, object],
@@ -81,10 +81,13 @@ def execute_child_creation(
     outcome = decide_subagent_models(agent, decision)
     with _creation_guard(agent):
         raise_if_cancelled()
-        prepared = _prepare_child_creation(agent, params, tool_name=tool_name)
-        if isinstance(prepared, ToolHandlerOutcome):
-            return prepared
-        apply_subagent_model_decision(agent, decision, outcome, _decision_children(agent, params, prepared))
+        current = _prepare_child_creation(agent, params, tool_name=tool_name)
+        if isinstance(current, ToolHandlerOutcome):
+            return current
+        prepared = replace(current, prepared_runs=prepared.prepared_runs)
+        advice = apply_subagent_model_decision(agent, decision, outcome, _decision_children(agent, params, prepared))
+        for index, proposal in advice.items():
+            prepared.prepared_runs[index] = replace(prepared.prepared_runs[index], model_advice=proposal)
         return _materialize_child_creation(agent, params, prepared, tool_name=tool_name)
 
 
@@ -125,15 +128,23 @@ def _prepare_child_creation(agent: object, params: dict, *, tool_name: str) -> H
         return _schedule_error(_schedule_validation_error_message(exc), tool_name=tool_name)
 
 
-# LLM: 复用原 scheduler 的准确参数装配和查重函数，不通过自然语言目标推断任务身份；本函数不物化记录。
-# 函数用途: 标记递归批次中已有的孩子，避免恢复重放再调用决策模型。
+# LLM: 复用原 scheduler 参数和持久查重；仅新项取得真实准备身份，网络后同对象重冻当前父权限，不能按目标文本猜身份或物化。
+# 函数用途: 将递归建议绑定到原待提交孩子，复用项不新增身份或重选模型。
 def _decision_children(agent: object, params: dict, prepared: HierarchyScheduleRequest) -> list[SubagentModelInput]:
     raw = _json_list_param(params.get("children"))
     parent = agent.subagents.load(prepared.parent_run_id)
+    while len(prepared.prepared_runs) < len(prepared.child_specs):
+        prepared.prepared_runs.append(None)
     result = []
-    for offset, (item, spec) in enumerate(zip(raw, prepared.child_specs, strict=True), start=len(parent.child_ids) + 1):
-        canonical = _child_create_params(parent, spec, sibling_index=offset)
-        result.append(SubagentModelInput(item, spec, find_reusable_scheduled_child(agent.subagents, canonical) is not None, canonical))
+    for index, (item, spec) in enumerate(zip(raw, prepared.child_specs, strict=True)):
+        canonical = _child_create_params(parent, spec, sibling_index=len(parent.child_ids) + 1 + index)
+        reused = find_reusable_scheduled_child(agent.subagents, canonical) is not None
+        run = prepared.prepared_runs[index]
+        if not reused:
+            service = agent.subagents.base_service
+            run = service.refreeze_run(params=canonical, prepared=run) if run else service.prepare_run(params=canonical)
+        prepared.prepared_runs[index] = None if reused else run
+        result.append(SubagentModelInput(item, spec, reused, run.task if run and not reused else canonical))
     return result
 
 

@@ -1,25 +1,49 @@
-
+# LLM: 子代理静态路径映射只有这一份；只读投影复制任务，原 sync 才物化工作区和写回运行引用，不能把预览当保存成功。
+# 模块用途: 将原 task workspace 路径同步到任务字段，支持无文件副作用的上下文预览。
 from __future__ import annotations
 
 """sync subagent task records into runtime memory task workspaces."""
 
+from copy import deepcopy
 from pathlib import Path
 
 from ...common.opaque_id import OpaqueIdError, validate_opaque_id
-from ...memory_archive.task_workspace import ensure_subagent_task_workspace
+from ...memory_archive.task_workspace import (
+    TaskWorkspacePaths,
+    ensure_subagent_task_workspace,
+    subagent_task_workspace_paths,
+)
 from ...runtime_db.operations import directory_id_for_opaque
 from ..models import SubAgentTask
 
 
+# LLM: 原保存入口调用本方法物化工作区，再写回同一 task；所有文件与日账副作用仍由原 ensure 负责，不能从预览路径调用。
+# 函数用途: 正式保存子代理时同步静态路径和已发生的运行账本引用。
 def sync_task_workspace_fields(workspace: str | Path, task: SubAgentTask) -> None:
     """Create/update the task workspace adapter and copy its paths onto the task."""
 
     task_workspace_paths = ensure_subagent_task_workspace(workspace, task)
+    _sync_static_workspace_paths(workspace, task, task_workspace_paths)
+    _sync_runtime_refs(task, task_workspace_paths)
+
+
+# LLM: 路径算法与正式 sync 完全共享，但只写独立 task 副本，不调用 ensure、日账或 artifact 同步；返回值不是第二任务或新授权。
+# 函数用途: 为创建前上下文补齐 canonical 静态路径，保持调用方准备对象和文件系统不变。
+def project_task_workspace_fields(workspace: str | Path, task: SubAgentTask) -> SubAgentTask:
+    projected = deepcopy(task)
+    _sync_static_workspace_paths(workspace, projected, subagent_task_workspace_paths(workspace, projected))
+    return projected
+
+
+# LLM: 此处是预览与原保存共用的静态字段映射，沿原算法收敛写根；不复制运行事件，不写任何文件。
+# 函数用途: 把已计算的工作区、工单、runner 和产物索引地址写到调用方指定对象。
+def _sync_static_workspace_paths(workspace: str | Path, task: SubAgentTask, task_workspace_paths: TaskWorkspacePaths) -> None:
     _sync_task_workspace_paths(task, task_workspace_paths)
     _sync_agent_run_paths(task, task_workspace_paths)
     _sync_work_order_paths(task, task_workspace_paths, workspace)
     _sync_runner_io_paths(task, task_workspace_paths)
-    _sync_runtime_refs(task, task_workspace_paths)
+    task.task_artifact_manifest_jsonl = str(task_workspace_paths.artifact_manifest.task_manifest_jsonl)
+    task.agent_run_artifact_manifest_jsonl = str(task_workspace_paths.artifact_manifest.agent_manifest_jsonl)
 
 
 def _sync_task_workspace_paths(task: SubAgentTask, task_workspace_paths) -> None:
@@ -146,8 +170,8 @@ def _sync_runner_io_paths(task: SubAgentTask, task_workspace_paths) -> None:
     task.output_json = str(root / "output.json")
 
 
-def _sync_runtime_refs(task: SubAgentTask, task_workspace_paths) -> None:
+# LLM: 仅由正式 sync 使用 ensure 返回的日账结果；纯路径投影不能生成或覆盖这些运行事实。
+# 函数用途: 保存实际写入后的日账路径和事件 ID，静态产物索引地址由共享路径映射负责。
+def _sync_runtime_refs(task: SubAgentTask, task_workspace_paths: TaskWorkspacePaths) -> None:
     task.daily_ledger_file = str(task_workspace_paths.daily_ledger.events_jsonl)
     task.daily_ledger_last_event_id = task_workspace_paths.daily_ledger.event_id
-    task.task_artifact_manifest_jsonl = str(task_workspace_paths.artifact_manifest.task_manifest_jsonl)
-    task.agent_run_artifact_manifest_jsonl = str(task_workspace_paths.artifact_manifest.agent_manifest_jsonl)

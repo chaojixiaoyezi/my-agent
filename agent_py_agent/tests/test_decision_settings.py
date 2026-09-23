@@ -98,6 +98,97 @@ def test_thread_override_reset_owner_cas_and_original_state_preserved(tmp_path):
     assert stored.decision_settings["overrides"] == {}
 
 
+def test_restore_owner_sets_and_unsets_in_one_revision_without_intermediate_state(tmp_path):
+    host = host_at(tmp_path)
+    original = patch(host, {"enabled": True, "timeout_seconds": 3})
+    changed = patch(host, {"enabled": False, "points.recall.mode": "observe"})
+    result = execute(host, "restore", {"expected_revision": changed["revision"],
+        "set": {"enabled": original["overrides"]["owner"]["enabled"]},
+        "unset": ["points.recall.mode"]})
+    assert result["revision"] == {"owner": changed["revision"]["owner"] + 1, "thread": 0}
+    assert result["before"]["overrides"]["owner"] == changed["overrides"]["owner"]
+    assert result["overrides"]["owner"] == original["overrides"]["owner"]
+    assert read_model_profiles(model_profiles_path(host.home_paths))["decision_settings"]["revision"] == result["revision"]["owner"]
+
+
+def test_restore_owner_stale_revision_never_overwrites_later_user_edit(tmp_path):
+    host = host_at(tmp_path)
+    original = patch(host, {"enabled": True})
+    patch(host, {"enabled": False})
+    path = model_profiles_path(host.home_paths)
+    before = path.read_bytes()
+    with pytest.raises(DecisionSettingsConflict):
+        execute(host, "restore", {"expected_revision": original["revision"],
+            "set": {"enabled": True}, "unset": []})
+    assert path.read_bytes() == before
+
+
+def test_restore_preserves_explicit_empty_value_distinct_from_inheritance(tmp_path):
+    host = host_at(tmp_path)
+    original = patch(host, {"profile_id": ""})
+    changed = patch(host, {"enabled": True, "profile_id": ""})
+    restored = execute(host, "restore", {"expected_revision": changed["revision"],
+        "set": {"profile_id": original["overrides"]["owner"]["profile_id"]},
+        "unset": ["enabled"]})
+    assert restored["overrides"]["owner"] == {"profile_id": ""}
+    assert "profile_id" in restored["overrides"]["owner"]
+    assert "enabled" not in restored["overrides"]["owner"]
+
+
+def test_restore_thread_preserves_other_state_and_later_user_edit_wins(tmp_path):
+    host = host_at(tmp_path)
+    thread = host.conversation_store.threads.get_or_create({"canonical_user_id": "alice", "owner_id": "alice"})
+    host.conversation_store.threads.update_atomic(thread.thread_id,
+        lambda row: replace(row, compact_generation=11, summary="保留历史", metadata={"other": True}))
+    original = patch(host, {"timeout_seconds": 3}, thread_id=thread.thread_id, scope="thread")
+    changed = patch(host, {"timeout_seconds": 5, "points.recall.mode": "observe"},
+        thread_id=thread.thread_id, scope="thread")
+    # 用户在实验之后先改了别的字段，旧恢复必须因完整 owner/thread CAS 失败，不能覆盖其操作。
+    latest = patch(host, {"enabled": True}, thread_id=thread.thread_id, scope="thread")
+    before = host.conversation_store.threads.storage.thread_path(thread.thread_id).read_bytes()
+    with pytest.raises(DecisionSettingsConflict):
+        execute(host, "restore", {"scope": "thread", "expected_revision": changed["revision"],
+            "set": {"timeout_seconds": 3}, "unset": ["points.recall.mode"]}, thread_id=thread.thread_id)
+    assert host.conversation_store.threads.storage.thread_path(thread.thread_id).read_bytes() == before
+    restored = execute(host, "restore", {"scope": "thread", "expected_revision": latest["revision"],
+        "set": {"timeout_seconds": original["overrides"]["thread"]["timeout_seconds"]},
+        "unset": ["points.recall.mode"]}, thread_id=thread.thread_id)
+    stored = host.conversation_store.threads.load(thread.thread_id)
+    assert restored["revision"] == {"owner": 0, "thread": latest["revision"]["thread"] + 1}
+    assert restored["overrides"]["thread"] == {"timeout_seconds": 3, "enabled": True}
+    assert (stored.compact_generation, stored.summary, stored.metadata) == (11, "保留历史", {"other": True})
+
+
+@pytest.mark.parametrize("set_values,unset", [
+    ({}, []), ({"enabled": True}, ["enabled"]), ({}, ["enabled", "enabled"]),
+    ({"points.other.mode": "apply"}, []), ({}, ["points.other.mode"]),
+    ({"enabled": 1}, []), ({"background_timeout_seconds": 3}, []),
+])
+def test_restore_invalid_or_wrong_scope_leaves_thread_bytes_unchanged(tmp_path, set_values, unset):
+    host = host_at(tmp_path)
+    thread = host.conversation_store.threads.get_or_create({"canonical_user_id": "alice", "owner_id": "alice"})
+    path = host.conversation_store.threads.storage.thread_path(thread.thread_id)
+    before = path.read_bytes()
+    revision = execute(host, "read", {}, thread_id=thread.thread_id)["revision"]
+    with pytest.raises(ModelProfileError):
+        execute(host, "restore", {"scope": "thread", "expected_revision": revision,
+            "set": set_values, "unset": unset}, thread_id=thread.thread_id)
+    assert path.read_bytes() == before
+
+
+def test_restore_does_not_revive_deleted_decision_profile(tmp_path):
+    host = host_at(tmp_path)
+    key, _ = decision(host)
+    result = patch(host, {"enabled": True})
+    execute_model_profile_operation(host, "delete_model", {"profile_id": key})
+    path = model_profiles_path(host.home_paths)
+    before = path.read_bytes()
+    with pytest.raises(ModelProfileError):
+        execute(host, "restore", {"expected_revision": result["revision"],
+            "set": {"profile_id": key}, "unset": []})
+    assert path.read_bytes() == before
+
+
 @pytest.mark.parametrize("scope", ["owner", "thread"])
 def test_same_revision_has_exactly_one_concurrent_winner(tmp_path, scope):
     host = host_at(tmp_path)
@@ -228,6 +319,7 @@ def test_v3_owner_migration_preserves_existing_fields_until_explicit_write(tmp_p
     legacy = json.loads(path.read_text())
     legacy["schema"] = "owner_model_profiles.v3"
     legacy.pop("decision_settings")
+    legacy.pop("catalog_generation", None)
     legacy["extension"] = {"retained": True}
     path.write_text(json.dumps(legacy))
     before = path.read_bytes()
@@ -235,7 +327,8 @@ def test_v3_owner_migration_preserves_existing_fields_until_explicit_write(tmp_p
     assert path.read_bytes() == before
     patch(host, {"enabled": False})
     migrated = json.loads(path.read_text())
-    assert migrated["schema"] == "owner_model_profiles.v4"
+    assert migrated["schema"] == "owner_model_profiles.v5"
+    assert isinstance(migrated["catalog_generation"], str) and migrated["catalog_generation"]
     assert migrated["extension"] == legacy["extension"]
     assert migrated["providers"] == legacy["providers"] and migrated["profiles"][key] == legacy["profiles"][key]
 
@@ -270,16 +363,20 @@ def test_unknown_thread_schema_and_invalid_current_envelope_rejected(data):
 
 def test_defaults_follow_original_config_domains_and_fractional_yaml(tmp_path):
     host = host_at(tmp_path)
-    host.config = AgentConfig(decision_timeout_seconds=2.5, memory_decision_recall_mode="observe")
+    host.config = AgentConfig(decision_timeout_seconds=2.5, memory_decision_recall_mode="observe",
+                              memory_decision_pre_recall_mode="apply")
     host.capability_config = CapabilityConfig(decision_subagent_model_mode="apply", decision_subagent_model_timeout_seconds=0.75)
     result = execute(host, "read", {})
     assert result["effective"]["points"]["recall"]["mode"] == "observe"
+    assert result["effective"]["points"]["pre_recall"]["mode"] == "apply"
     assert result["effective"]["points"]["subagent_model"]["timeout_seconds"] == 0.75
     assert result["sources"]["points.subagent_model.mode"] == "capability_config.decision_subagent_model_mode"
     path = tmp_path / "agent.yaml"
-    path.write_text("decision_timeout_seconds: 0.75\nmemory_decision_recall_timeout_seconds: null\n")
+    path.write_text("decision_timeout_seconds: 0.75\nmemory_decision_recall_timeout_seconds: null\n"
+                    "memory_decision_pre_recall_timeout_seconds: null\n")
     config = load_config(path)
     assert config.decision_timeout_seconds == 0.75 and config.memory_decision_recall_timeout_seconds is None
+    assert config.memory_decision_pre_recall_timeout_seconds is None
     capability = tmp_path / "capability.yaml"
     capability.write_text("decision_skill_tool_timeout_seconds: 0.25\n")
     assert load_capability_config(capability).decision_skill_tool_timeout_seconds == 0.25

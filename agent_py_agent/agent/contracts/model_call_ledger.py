@@ -8,7 +8,14 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-# LLM: 本模块是调用及累计用量的唯一事实源；终态单调，显式保留句柄覆盖迟到 HTTP 生命周期，字段来源与用途累计不能受明细裁剪影响。
+from .model_call_budget import (
+    ModelCallBudgetError,
+    ModelCallInputBudget,
+    ModelCallInputBudgetMethods,
+    ModelCallInputBudgetState,
+)
+
+# LLM: 本模块是调用、累计用量及显式输入预留的唯一事实源；预算只在原锁/容器扩展，普通调用行为及首个终态保持。
 # 模块用途: 记录模型调用、真实用量和后台传输事实，按 request/run 提供主调用、辅助调用及决策统计。
 
 # 门槛2 终审边界②(steward seq1622-2): stage 合同单一事实源下沉到账本层。
@@ -413,10 +420,11 @@ def _model_call_purpose(record: ModelCallRecord) -> str:
     return "auxiliary" if record.metadata.get("auxiliary") is True else "main"
 
 
-# LLM: 每个 request/run 只有一个累计容器和代次；用途分区复用同一计数实现，不能从裁剪后的明细重算。
-# 类用途: 在原累计账内维护总量及主调用、辅助调用、决策调用三个分区。
+# LLM: 用途分区和显式输入预算附着原 scope 容器；普通累计守原 LRU 配额，预算仅在固定期限前额外保留，不建另一事实源。
+# 类用途: 在原累计账内维护用途总量或宿主显式创建的输入预算。
 @dataclass
 class _ModelCallAggregate(_ModelCallTotals):
+    input_budget: ModelCallInputBudgetState | None = None
     usage_scope_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     purpose_totals: dict[str, _ModelCallTotals] = field(default_factory=lambda: {name: _ModelCallTotals() for name in _PURPOSE_BUCKETS})
 
@@ -481,10 +489,10 @@ class ModelCallRetention:
         self._ledger._release_retained_call(self)
 
 
-# LLM: ledger 是唯一调用事实源；首个终态不可撤销，HTTP 观察只补物理事实，显式保留须由宿主现有有界 worker 生命周期约束。
+# LLM: ledger 是唯一调用事实源；显式预算原语不接普通调用，HTTP 观察不充当发送硬门，保留仍沿原 worker 生命周期。
 # 类用途: 线程安全地登记调用及用途用量，并保留仍有物理观察来源的准确记录，避免迟到响应重新打开终态。
-class ModelCallLedger:
-    # LLM: 普通 scope 保持原有界 LRU；只有显式 pin 的准确调用及 scope 豁免，宿主必须在 worker 退出后释放。
+class ModelCallLedger(ModelCallInputBudgetMethods):
+    # LLM: 普通 scope 保持原有界 LRU；实例代次只用于拒绝旧实验重建余额，初始化不建立任何实验容器。
     # 函数用途: 初始化原调用账、累计统计和保留令牌集合，不另建执行池或记账入口。
     def __init__(
         self,
@@ -498,6 +506,26 @@ class ModelCallLedger:
         self._scope_aggregates: dict[tuple[str, str], _ModelCallAggregate] = {}
         self._retained_calls: dict[str, set[ModelCallRetention]] = {}
         self._lock = threading.RLock()
+        self.ledger_id = uuid.uuid4().hex
+
+    # LLM: 仅宿主明确新授权建立原累计容器；同编号绝不重置，异进程代次拒绝，普通调用不进入此方法。
+    # 函数用途: 在原模型账中登记固定预算；丢失账本后的旧授权不能重新使用。
+    def begin_input_budget(self, limits: ModelCallInputBudget) -> dict:
+        if not isinstance(limits, ModelCallInputBudget) or limits.ledger_id != self.ledger_id:
+            raise ModelCallBudgetError("budget_ledger_mismatch")
+        with self._lock:
+            key = ("input_budget", limits.budget_id)
+            aggregate = self._scope_aggregates.get(key)
+            if aggregate is not None:
+                if aggregate.input_budget is None or aggregate.input_budget.limits != limits:
+                    raise ModelCallBudgetError("budget_conflict")
+                return aggregate.input_budget.snapshot(float(self.context.now()))
+            if float(self.context.now()) >= limits.deadline:
+                raise ModelCallBudgetError("budget_expired")
+            state = ModelCallInputBudgetState(limits)
+            self._scope_aggregates[key] = _ModelCallAggregate(input_budget=state)
+            self._trim_scope_aggregates()
+            return state.snapshot(float(self.context.now()))
 
     # LLM: 只保留已经存在的 call；caller 和 worker 可各持令牌，各自 finally 释放，worker 总量沿原 bounded 准入限制。
     # 函数用途: 立即为准确调用登记一个保留句柄，避免正常裁剪先于逻辑收尾或物理退出。
@@ -799,13 +827,18 @@ class ModelCallLedger:
         self._trim_scope_aggregates()
         return tuple(aggregates)
 
-    # LLM: 仅在原 LRU 最新窗口之外追加 pin 作用域；无 pin 时完全保留旧上限和淘汰顺序。
-    # 函数用途: 清理历史累计容器，同时保留仍有实际观察来源的调用所属统计代次。
+    # LLM: 普通 scope 保持原 LRU；原输入预算在固定期限前保留，包括撤销态，避免裁剪后同编号重建额度。
+    # 函数用途: 清理历史累计容器，同时保留物理调用来源及尚未过期的显式预算原账。
     def _trim_scope_aggregates(self) -> None:
         max_scopes = max(2, max(1, int(self.options.max_records)) * 2)
         if len(self._scope_aggregates) <= max_scopes:
             return
-        keep = set(tuple(self._scope_aggregates)[-max_scopes:])
+        budgets = {key: aggregate.input_budget for key, aggregate in self._scope_aggregates.items()
+                   if aggregate.input_budget is not None}
+        keep = set(tuple(key for key in self._scope_aggregates if key not in budgets)[-max_scopes:])
+        if budgets:
+            now = float(self.context.now())
+            keep.update(key for key, budget in budgets.items() if now < budget.limits.deadline)
         for call_id in self._retained_calls:
             keep.update(_model_call_scope_keys(self._require_record(call_id)))
         for scope_key in tuple(self._scope_aggregates):

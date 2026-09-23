@@ -53,4 +53,4 @@ python3 -m pytest agent_py_agent/tests/test_user_config_decision_operations.py a
 ## 建议下一步
 
 父侧将本片与原 decision_models/decision_probe、设置作用域和菜单联合验收，再统一同步共享文档和提交。
-菜单侧可继续并行，只消费原模型操作；不要让读取目录或保存配置自动追加探测，也不要把探测失败或未知用量显示为成功或零费用。
+菜单侧可继续并行，只消费原模型操作；不要让读取目录或保存配置自动追加探测，也不要把探测失败或未知用量显示为成功或零输入 token。

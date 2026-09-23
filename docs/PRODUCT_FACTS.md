@@ -30,7 +30,7 @@
 - 普通回合保留已提交历史的稳定前缀；真正摘要替换才走 Compact。主、子、孙代理各自使用同一套
   checkpoint 与 generation 协议，不共享彼此的正文或长期记忆。
 - 长期记忆由所属用户的代理维护；普通记忆可自主更新，SOUL 修改需要用户确认。技能索引按需发现、
-  正文显式读取；自学习默认关闭，学习候选不自动成为正式技能。
+  正文显式读取；现行 runner 可生成记忆候选，尚无生产 Skill 提案链，候选不会自动成为正式技能。
 
 详细说明见 [家目录布局](architecture/MY_AGENT_HOME_LAYOUT.md)、[上下文](design/CONVERSATION_CONTEXT_DESIGN.md)、
 [Gateway](design/GATEWAY_DESIGN.md) 和 [子代理运行协议](modules/subagent/SUBAGENT_RUNBOOK.md)。

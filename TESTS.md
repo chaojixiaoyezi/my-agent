@@ -1,5 +1,106 @@
 # 测试与发布验收
 
+## 决策模型早期全仓集成 gate（未通过）
+
+使用仓库现有虚拟环境（全局 Python 缺 dev extra 的 `hypothesis`、`pyte`）跑全仓 pytest。第一轮在 9,554 passed 时中断并定位六项 Jev 字节窗口误拦及一项插件命令用例；修复 Jev 后，排除该插件命令测试的第二轮在 10,490 passed 时定位普通 `task_local` 误入子代理发送栅栏；修复后第三轮在 11,840 passed 时定位旧记忆路由测试形参，三处相关 focused 均已通过。随后从记忆路由文件向后扫，在 1,542 passed 后由 `test_packaging.py::test_current_production_import_boundaries_have_no_unapproved_findings` 停止：本线新增的 Gateway 模型采用/观察、Compact 重建和 `user_config` 共有 **13 处**跨层导入。该守卫是架构硬门；不能加入白名单冒充通过。插件命令单测属并行“模块重构”线，本工作区没有修改对应实现或测试，待其 owner 交接后共同复核。当时 50 个新增文件未跟踪，`check_clean_package.py .` 因此失败；后续结构修复与暂存的结果见下文。**完整本地严格 gate 未通过，未提交/推送/合并/部署，也没有线上 CI 验收。**
+
+后续结构修复把主会话选模应用编排移出 `gateway_parts`、同 turn Compact 跨层构造移到应用层，并将唯一 runner 线程本地上下文移到 `agent/runtime_context.py`；旧路径没有转发模块。`check_import_boundaries.py` 现为 **0 findings**。Gateway 观察/采用移位后 **65 passed**，Gateway/Compact **85 passed**，运行身份、设置、子代理、规划和 packaging 的 10 文件组合 **268 passed、4 xfailed**；Ruff 与生产模块 compileall 通过。插件命令用例仍待并行线基线对齐；打包门的后续结果见下文。
+
+移位后全仓重跑曾在后台主代理 CLI 用例处看到空的中间消息；该用例单独重跑即通过。原等待条件只要任意消息出现就立即停止 worker，可能在最终正文持久化前读取占位消息。现等待期只以预期最终正文为完成条件，保留 5 秒有界期限；同用例独立重复 5 次均通过。此为测试时序修复，不改变后台主代理运行代码，也不把单独通过当作全仓通过。
+
+该修复后的第一轮全仓在 **14,704 passed** 停于旧审计测试仍 patch 已拆走的 `_execute_create_subagents`；改为当前准备入口后，审计文件 **54 passed**。第二轮在 6,952 passed 遇到协作存储并发测试失败，该用例独立重复 30 次均通过；第三轮越过该位置，在 **14,789 passed** 停于恢复分类守卫：决策响应无效、探测失败、设置冲突及供应商响应超限四码未登记。现已按可选增强保留原主链、CAS 重读和响应缩小语义补入唯一 `ERROR_CONTRACTS`，恢复策略文件 **16 passed**，Ruff 与 strict code-size 通过。全仓尚需重跑到终态；并发偶发失败尚无稳定复现，不能当作已根除。排除并行插件命令用例的运行不等于完整严格 gate 通过。
+
+补齐错误合同后的全仓回归（仅排除并行插件命令测试）跑到终态：**19,755 passed、1 failed、21 skipped、35 xfailed、5 xpassed、8 deselected**。唯一失败是旧 `test_tool_operation_managed_gate.py` 测试桩缺 `home_paths.root`，而已有插件 owner 装配需要这个可信根；与插件线负责人确认该测试不在其当前认领范围，且原仓库新版本已补同一字段。本隔离树同步测试桩后，该失败用例单独通过，工具装配、恢复策略与旧审计组合 **94 passed**。被排除的插件命令参数化用例独立执行为 **7 passed、1 failed**：旧基线对 `/plugins enable demo` 的期望文案与当前拒绝/查询回执不一致；不在本线修改插件产品语义。新增项目文件暂存后 `check_clean_package.py .` 与 `git diff --cached --check` 通过。完整全仓仍未在这些修复后再跑到终态，插件线基线尚未对齐，故完整严格 gate 仍未通过。
+
+## 决策模型第 12 项 task_local 发送栅栏回归
+
+全仓回归的新增定位：普通 `task_local` 带 `run_id` 却没有 canonical 子代理记录，首次发送栅栏误抛 `FileNotFoundError`。现只对这种未登记的局部运行跳过子代理专用标记；原局部运行、首次请求选模和 child 上下文三个文件联合 **55 passed**，Ruff 通过。全仓复跑仍在进行，不能因此宣称整体通过；详见[容量交接](docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。
+
+同轮全仓回归发现旧 `test_memory_routing_context.py` 的唯一直接调用仍传 `_routed_memory_context_for_request(task_local=...)`，而 P5-A/记忆总闸已将该私有形参改为 `skip_formal_recall`；原测试期望的非隔离路由语义不变。同步参数后，路由、召回前、首轮记忆和原召回四文件 **57 passed**，Ruff 通过；不将此测试接线失败当成真实 Jev 质量问题。
+
+## 决策模型 P5-E1 授权与输入预算原语（本地）
+
+原 `decision_settings` v1→v2 保留 revision/overrides，增加默认关闭的实验能力和有界 thread 授权信封；原 `ModelCallLedger` 同锁内串行预留声明的完整输入量及请求数，未知发送/缺 usage 保守占用。新原语 52 项通过；设置、决策调用、账本、工具及 TUI 共 13 文件 347 项，加菜单索引集成 9 项，合计 **356 passed**。Ruff、doc sync、strict AST/code-size、diff 通过。TUI 只可开关能力，不建立实验许可；当前无可靠输入 token 上界、宿主用户授权入口与发送前硬门，实验联网仍失败关闭。本片不代表完整 E1/E2 或真实试验验收，见[交接](docs/tasks/DECISION_MODEL_EXPERIMENT_E1_HANDOFF.md)。
+
+## 决策模型 P5-D 主会话三轮隔离真实样本
+
+原 Gateway TUI、隔离普通 user owner、`model_selection=apply` 做三次普通中文新会话任务。默认 2 秒 Jev 期限取消一次，自动保留官方 M2.7；原设置 CAS 临时延至单次 8 秒/阶段 10 秒后，Jev 分别给 `need_data`、当前 M2.7，主会话均完成且线程保持默认选择。真实 HTTP 旁观为 Jev 5 次（4 成功、1 取消）与官方 M2.7 4 次成功，无 M3/DeepSeek 请求；首轮决策输入未知，不能补零。测试后一次原 CAS 恢复三个字段，owner overrides hash 与开跑前相同，8431 停止，日常 8420 未动。此证据只证明安全保留，**没有**真实跨模型采用、容量或历史通过，见[交接](docs/tasks/DECISION_MODEL_MAIN_MODEL_LIVE_HANDOFF.md)。
+
+## 决策模型 P4-B 普通 user owner 中文配置复测
+
+第一次隔离真实样本确认 `user_config` decision-only 已在主模型工具清单，但当前 Gateway 主回合拿不到可信 thread、约 8.9k 的 read 回执在原 4000 字符模型预览内缺 `revision`，实际五次 read 后 thread patch 被拒、四次猜测 owner revision 均 `STALE_VERSION`；设置未被修改。底层只修原工具的可信主回合 RunParams 线程来源和原投影序列化顺序，子代理缺自身线程不借父线程、legacy view/set 仍双门拒绝；相关两组本地 **91 + 63 passed**。第二次新 TUI 普通中文任务，模型自主 read(thread,14/0)→patch(thread,14/0) 成功，原持久回执及线程文件均为 14/1、enabled=true、stage_timeout=6、subagent_model=observe，最终回复准确；模型没有另发第三次 read。测试者仅在结束后用原 CAS reset 三项，thread 升至 14/2、overrides 清空，8431 停止，8420 不动。详见[交接](docs/tasks/DECISION_MODEL_NATURAL_CONFIG_FIX_HANDOFF.md)。
+
+主线加固缺失 owner 身份不能获得 legacy 动作的防护用例后，和设置、Gateway 模型采用及子代理首次请求的 13 文件组合 **353 passed**，相关 Ruff 通过；这是本地合同证据，不另算真实 Jev 样本。
+
+## 决策模型 P5-C 自学习候选只读审计
+
+[自学习审计](docs/tasks/DECISION_MODEL_SELF_LEARNING_AUDIT.md)核对现行 runner lesson Candidate、旧草稿迁移、Skill 快照和 guard；四个已有 focused 文件 **48 passed**。生产尚无 `enable_self_learning` / `my-agent learn`、Skill 提案/确认/写入服务，因此没有 Jev 自学习消费、正式 Skill 写入或真实验收；旧 README/指南的已实现说法已校正。正式 Skill 必须用户确认的开发规则仍有效。
+
+## 决策模型原模型目录持久代次（本地）
+
+私有目录 v5、共享发布 v2 在原保存事务轮换随机代次；已启用准备可在原锁自动初始化旧目录，普通读取与关闭不写。原快照/最终锁 guard 覆盖 provider/model/凭据/OAuth/shared 变化，缺来源保持未知。目录、Provider、OAuth、Gateway 八文件 focused **142 passed**，包括新 Python 进程读回、原 OS 锁竞争、保存失败和部分迁移；Ruff、strict AST、doc sync、diff 通过。此片尚无子代理自动采用或真实异模执行；见[目录代次交接](docs/tasks/DECISION_MODEL_CATALOG_GENERATION_HANDOFF.md)。
+主线将该八文件与下方恢复原语五文件同跑，**280 passed**；原目录换代没有破坏设置 CAS 与恢复前值。
+
+## 决策模型 P5-A 召回前补充查询首片
+
+[P5-A 审计与实施记录](docs/tasks/DECISION_MODEL_PRE_RECALL_AUDIT.md)确认普通聊天尚无可信显式查历史结构化意图，Jev 不能直接跳过原召回。默认关闭的独立 `pre_recall` 点现已接正式上下文准备：原完整查询先召回；仅有剩余槽位和字符预算时，Jev 可建议一次有界补充查询，同原 scope 追加已确认的正式事实。候选检索不提前 touch，最终采用重读正式源；与 P3 召回后排序共用原阶段绝对期限。`test_decision_pre_recall.py`、`test_decision_recall.py`、`test_memory_condense_v2.py`、`test_memory_recall_v2.py`、`test_memory_first_loop.py`、`test_decision_settings.py` 联合 **136 passed**，相关 Ruff 通过；新增真实 JSONL 的受控漏召回样本证明可只追加第二条事实、只确认它的访问。隔离真实 Jev 两轮 off/observe/apply 共4次官方 HTTP，关闭零请求、每轮观察和应用各1次且实际版本 `jev-1.13.0`；应用样本原词面检索已命中两条事实，没有新增，诊断 `no_addition`，不可算召回质量收益。仍缺真实 Jev 已知漏召回与 Gateway 真实聊天对照，不计 P5-A 全项通过。
+
+## 决策模型 P5-C 现有 Todo 优先建议首片
+
+[规划审计](docs/tasks/DECISION_MODEL_PLANNING_AUDIT.md)核对现有 Todo、workflow plan、Goal、子代理创建的权威边界。默认关闭的 `planning` 首片现只在当前主代理 `task_progress(read)` 的原 canonical 回执后，对2–24个 open exact ID 建议一个优先评估项；观察、非选择、错误、超时或旧账本保持原回执，apply 也不改计划/Goal/派工。原 Todo 工具/设置/TUI 等六文件联合 **133 passed**，本线 Ruff 通过。隔离真实 Jev 两轮共3次HTTP尝试：4秒观察超时而原回执不变，8秒设置下关闭零请求、观察和应用成功且各输入783；应用仅追加 `todo-rollback` 软提示，原 Todo账未变。见[交接](docs/tasks/DECISION_MODEL_PLANNING_HANDOFF.md)。没有 Gateway TUI 或实际业务规划收益证明。
+
+## 决策模型 P5-C 交付质量提示只读审计
+
+[质量提示审计](docs/tasks/DECISION_MODEL_DELIVERY_QUALITY_AUDIT.md)核对原 verification、ready artifact、closeout、Goal 与 child 权威；推荐仅用原工具归档后的精确引用给主模型一个软复核焦点。六个现有测试文件 **4931 passed**，doc sync/diff 通过；这是原链回归，没有 Jev 生产接线或真实质量收益。
+
+## 决策模型 P5-C 动作候选只读审计
+
+[动作候选审计](docs/tasks/DECISION_MODEL_ACTION_CANDIDATE_AUDIT.md)核对现行 Computer Use/MCP/审批与尚未接生产的 Browser/OCR 候选；当前缺可信 observation/candidate ID 与失效代次，不接 Jev 生成坐标、命令或输入。原链 focused **128 passed**，doc sync/diff 通过；未接生产决策点或真实视觉任务。
+
+扩大子代理工具循环回归发现旧 fake backend 的无约束 Mock `api_base` 不能被 JSON 编码，触发连接校准指纹异常。底层现只将标准 JSON 连接字段送入原加盐摘要；不透明值以进程内对象身份参与版本比较、不输出 `repr`。原失败测试与 context-pressure 整文件 **25 passed**，不涉及 Jev 网络或模型切换。
+
+## 决策模型 P5-G 设置恢复基础原语（本地）
+
+原 `decision_settings` 服务新增内部 `restore`，在原 owner→thread 锁序与完整两层 CAS 下同次写回 set/unset，成功只前进一次版本；后续用户修改、非法字段/范围及已删除模型引用不被旧恢复覆盖。设置、通知、作用范围、模型操作与主代理设置工具五文件联合 **138 passed**，Ruff、doc sync、diff 通过。它只是恢复原语，尚无自动实验、授权、请求前硬预算或真实收益验收；设计与缺口见[自实验审计](docs/tasks/DECISION_MODEL_SELF_EXPERIMENT_AUDIT.md)。
+
+## 决策模型 P5-D 原线程选择版本首片（本地）
+
+原 `ConversationThread` 增加单调模型选择版本、来源和最近显式版本；同 ID 显式选择也前进并终结 pending，旧 v10 全缺字段只在内存归一未知，部分或矛盾字段拒绝。与子代理新线程初始化联合 **170 passed**；Ruff、doc sync、diff 和原 strict AST 判据通过。尚无 Gateway 自动采用、真实异模主会话或持久恢复验收；见[交接](docs/tasks/DECISION_MODEL_MAIN_MODEL_SELECTION_HANDOFF.md)。
+
+Gateway 在准确会话车道后已有请求级 observe-only 建议首片：关闭时与原 Gateway 输入字节及文件读写路径等价，开启观察只记录建议与原回退事实，typed recovery/Compact 不重问。定向组合 **382 passed**，见[观察交接](docs/tasks/DECISION_MODEL_MAIN_MODEL_OBSERVE_HANDOFF.md)；实际采用与跨模型执行仍待验。
+Stage C 已把建议接到同一主请求的真实首次发送前：原 PromptBuilder 完整材料、IR/native 工具、候选 provider payload 与最终字节复核后，以目录代次→准确车道 T→原 thread CAS 提交；局部拒绝沿原模型一次，已提交/不确定不跨模型重发。最新本片 **34 passed**，此前 11 文件联合 **302 passed**，Ruff/doc sync/diff/严格 AST 通过；容量仍是有余量的工程估计，fake HTTP 不等于真实供应商验收。见[采用交接](docs/tasks/DECISION_MODEL_MAIN_MODEL_ADOPTION_HANDOFF.md)。
+普通中文配置请求的[P4-B 审计](docs/tasks/DECISION_MODEL_NATURAL_CONFIG_AUDIT.md)曾用原工具、服务和 TUI 四文件联合 **86 passed**；该阶段只证明结构化 read/patch/reset、CAS 和菜单接线。首次[真实中文设置验收](docs/tasks/DECISION_MODEL_NATURAL_CONFIG_LIVE_HANDOFF.md)失败：隔离 user owner 原 manifest 中没有 `user_config`，原配置版本/hash 不变。其后修复及成功复测见本文件开头的 P4-B 记录；旧失败仍保留为定位证据，不代表当前状态。
+子代理真实异模续验见[隔离交接](docs/tasks/DECISION_MODEL_CHILD_LIVE_HANDOFF.md)：六轮普通中文父任务均 completed，十个 child 均 DONE；三候选自然建议的官方 M3 和只允许 DeepSeek 作为替代候选时的 OpenCode DeepSeek 各有一条自动采用、真实首请求/工具后续轮及终态。该线新增20次 Jev HTTP，19次报告输入263,256，一次超时用量未知；和前序合计47次。原4秒下第五轮超时/冷却仍保留 M2.7，第六轮 DeepSeek 成功，无需用户逐 child 操作。第四轮 `selection_changed` 当时提交分支未留证、图片模态与多 owner 故障矩阵未验，P2-B/12/13 整项仍不关闭。
+
+## 决策模型 P5-D 主会话选模只读审计
+
+Gateway、原显式选模、model scope、history/Compact、250K/1M 窗口及 Responses 历史回放的源码边界已在 [P5-D 审计](docs/tasks/DECISION_MODEL_MAIN_MODEL_AUDIT.md)登记。原五文件 focused **75 passed**，doc sync/文档空白检查通过；这是已有合同回归，尚未实现主会话自动采用或真实异模切换。
+
+## 决策模型子代理 pending 建议合同（本地）
+
+创建前批量 Jev 建议仅作为 host-owned pending 原子写入新 child thread；有效模型保持继承，已存在 thread 不重植，显式同值/异值选模在原 CAS 内终结 pending。根/子/孙、refreeze、配置/连接变化、伪造属性及断点重试等 10 文件组合 **278 passed**，Ruff、doc sync、定向 diff 与原 strict AST 判据通过。旧 pending 仍可能对应已按继承模型执行过的 child，必须补首次请求资格与发送前栅栏后才能自动采用；详见[容量审计与交接](docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。
+
+## 决策模型 P5-C 已归档网页阅读顺序首片（本地）
+
+`external_material_order` 默认关闭，原 web_fetch extract 的 producer、Executor、归档、refs、账本及 text/native 展示接缝保持。独立设置与 TUI、完整来源、脱敏安全投影、期限/取消和原结果对照共 11 文件 **349 passed**；Ruff、doc sync、diff 与本片只读 AST strict 检查通过。通用 TUI 测试 helper 将固定 120ms 等待改为 3 秒内核对真实 UI 状态，两次旧 CAS 时序失败及最终复测均留证。随后隔离真实 Jev 5 次 HTTP 尝试：4 次成功，输入共8530，1次短期限用量未知；首轮 not_needed 保留原展示，第二样本完整建议自动追加2→3→1，原 archive/refs/hash/账均相同。页面源为本地受控材料，不证明真实互联网检索质量或安装版 TUI；详见 [P5-C 交接](docs/tasks/DECISION_MODEL_EXTERNAL_MATERIAL_ORDER_HANDOFF.md)。
+
+## 决策模型只统计输入，不做价格计费
+
+用户明确决策模型以后可用本地模型，因此原生决策调用已停止调用通用 USD 价格估算和 owner/run 成本累计；普通生成模型的原成本路径不变。`test_decision_model_call.py` 的成功调用断言决策价格指标和成本账均无写入，原请求终态与实际输入 token 仍在同一 ModelCallLedger；加原 HTTP 服务、设置探测和用量展示四文件联合 **63 passed**。Ruff、doc sync 与 `git diff --check` 通过。
+
+## 决策模型 P5-B 正式记忆关系首片（本地）
+
+新 `curator_relation` 默认关闭、限 owner 后台，和已有 Curator 标签共用一次阶段及原 lease 期限。完整消息与带真实版本的短 long-term 条目可得到仅供原提取参考的关系提示；截断、缺版本、正式条目变化、关闭和故障保留原批次。`test_decision_curator_relation.py`、`test_decision_curator.py`、`test_decision_settings_scope.py` 联合 105 项，原 Curator/Candidate/Promotion/设置/TUI 六文件 188 项，合计 293 项通过；随后隔离真实Jev的12对短样本符合预设，后续提取仍是本地替身，未证明广泛关系质量或全库覆盖。文件与命令见 [P5-B 交接](docs/tasks/DECISION_MODEL_P5B_HANDOFF.md)。
+
+## 决策模型 TODO12 Jev容量门与实际接口（进行中）
+
+`test_decision_protocol.py`、`test_typesafe_decision.py` 曾联合69项通过；后续全仓回归发现 UTF-8 字节直接比较 token 上限误拦 78,419 字节批量请求，使六项 localhost HTTP 用例无法发网。改为复用原 token 估算并留一成余量后，`test_typesafe_decision.py` 与 `test_decision_capability_http.py` 联合 **24 passed**，覆盖明显超窗提前拒绝、正常批量发送、超时、在途设置更改及 401/500 回退。该估算不是精确供应商 tokenizer 或硬容量证明，原 JSON 字节资源帽不变。
+容量核对使用序列化UTF-8字节上界，不把它当实际token计数；这组测试不覆盖完整子代理换模、Compact或真实缓存。
+隔离 owner 下官方 Jev 已累计20次实际HTTP尝试：前13次包含协议、Gateway TUI 普通中文回复及三子代理保留原模型派工；P5-B 新增一次成功和一次50ms期限取消；P5-C 新增五次，含一次完整页序自动追加与一次短期限取消。官方 M3 与 OpenCode DeepSeek 的短连接探针均成功，但 Jev 改选后的真实执行仍待验；完整记录见[真实验收](docs/tasks/DECISION_MODEL_REAL_VALIDATION.md)。
+子代理候选配置新增原 profile ID 列表，经同一设置服务和 TUI 字段校验；空数组沿授权目录，非空数组只缩小候选，变更使在途建议失效。设置复核时的用户取消须原样传出。`test_decision_subagent.py`、`test_decision_settings_scope.py`、`test_tui_decision_menu.py` 联合62项通过，不能替代三模型真实切换。
+创建前容量旧粗估已撤销；子代理准备/逐候选最终配置和原输出 cap 复用同一生产入口，完整首请求尚缺激活后状态、child 历史和工具证明，因此当前不自动改选。28 个相关文件 427 项定向测试通过；离线抓到三候选实际适配器输出 cap，但这不证明完整 wire/schema 或真实换模，详见 [容量审计](docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。
+另修 exact child thread 的旧快照写回竞态：`test_conversation_store.py` 含读后模型/Compact 状态更新的定向回归，52 项通过；现有记录复读原 thread 文件最新值并只补缺失身份，不覆盖用户选择。
+
 ## 决策模型 TODO10 能力推荐与上下文减量（本地）
 
 8文件父侧联合127项通过：`test_decision_capability_consumer.py`、`test_decision_capability_http.py`、
@@ -9,7 +110,7 @@
 本地HTTP验证成功、300ms超时、在途关闭/改策略、401/500不重试及迟到终态；原搜索可找回schema，插件撤销仍阻止旧绑定执行。
 关闭/观察/不确定保持原输入；真实接口反馈后改为独立候选题，96题完整协议通过，原总字节/节点上限继续生效，不截断尾部。
 另与`test_memory_runtime_compact_auto_continuation.py`、`test_compact_semantic_summary.py`联合回归通过。
-真实Jev质量、收费token净收益、跨模型完整窗口和provider缓存仍待12/13，不能拿夹具字节量当收益。
+真实Jev质量、输入token净收益、跨模型完整窗口和provider缓存仍待12/13，不能拿夹具字节量当收益。
 命令、责任边界见 [TODO10交接](docs/tasks/DECISION_MODEL_CAPABILITY_HANDOFF.md)。
 
 真实API首批7次调用发现并修复跨题选择槽与概率舍入两个问题；保留1次真实2秒超时，不计作判断成功。

@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 from ....common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
+from ....runtime_context import current_subagent_run_id
 from ....subagents.models import TaskStatus, task_has_status
 from ...parameters import _bool_param, _non_negative_int
-from ...runner.context import current_subagent_run_id
 from ..run_scope import remembered_orchestration_run_ids
 
 

@@ -322,6 +322,42 @@ def test_task_overlay_preserves_model_reference_and_full_selected_profile(tmp_pa
     assert grandchild.model_context_window_tokens == 96000
 
 
+@pytest.mark.parametrize("with_overlay", [False, True])
+def test_task_config_projection_matches_worker_without_log_or_file_side_effects(tmp_path, monkeypatch, with_overlay):
+    from copy import deepcopy
+    from dataclasses import asdict
+
+    from agent_py_agent.agent.settings.services import runtime_config_task
+
+    host = Host(tmp_path)
+    key, _ = add(host)
+    config = selected_model_config(host, profile_id=key)
+    overlay = tmp_path / "task-runtime.yaml"
+    overlay.write_text("log_level: debug\nrunner_timeout_seconds: 31\nmax_tokens: 1234\n", encoding="utf-8")
+    task = SimpleNamespace(runtime_identity=SimpleNamespace(
+        config_overlay_ref=str(overlay) if with_overlay else "", config_scope="task"))
+    original = deepcopy(asdict(config))
+    before = {str(path.relative_to(tmp_path)): path.read_bytes() if path.is_file() else None for path in tmp_path.rglob("*")}
+    applied = []
+    monkeypatch.setattr(runtime_config_task, "apply_log_level", applied.append)
+
+    projected = runtime_config_task.project_task_runtime_config_overlay(config, task, workspace_root=tmp_path)
+    assert not applied
+    actual = runtime_config_task.apply_task_runtime_config_overlay(config, task, workspace_root=tmp_path)
+
+    assert asdict(projected) == asdict(actual)
+    assert asdict(config) == original
+    assert len(applied) == int(with_overlay)
+    assert before == {str(path.relative_to(tmp_path)): path.read_bytes() if path.is_file() else None for path in tmp_path.rglob("*")}
+    if with_overlay:
+        assert projected is not config
+        assert projected.runner_timeout_seconds == "31"
+        assert projected.max_tokens == config.max_tokens  # 原模型配置优先级仍高于 task overlay。
+        assert applied[0] is actual
+    else:
+        assert projected is actual is config
+
+
 def test_explicit_window_does_not_call_metadata():
     def forbidden():
         raise AssertionError("explicit window must not probe")

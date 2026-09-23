@@ -1,6 +1,7 @@
 # LLM: 这里只编排单个已领取请求：身份先绑定再领取车道，随后准备上下文、执行、提交历史与响应。
 # 上下文、绑定、历史、输入渲染分别归 request_context/request_binding/request_history/request_prompt；
 # 修改须联测停止、Compact、repair 与重启恢复，保持原锁、提交顺序和 typed 错误，不另建兼容执行链。
+# 同turn展示及已评估事实仅由本请求局部回调持有，失效清除后本turn不再推荐，不进恢复账或结果。
 # 模块用途: 协调 Gateway 一轮请求的租约、模型执行、超窗恢复和收尾，复用各组件的唯一事实源。
 from __future__ import annotations
 
@@ -8,7 +9,7 @@ import json
 import logging
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -35,6 +36,7 @@ from ..conversation.authority import (
 )
 from ..conversation.compact_carry import compact_overflow_carry
 from ..conversation.control_commands import conversation_task_attributes
+from ..gateway_compact_context import build_gateway_compact_load_request
 from ..tooling.operation_verification import public_operation_verification
 from . import request_binding, request_context, request_history, request_prompt
 from .approval_session import (
@@ -281,9 +283,10 @@ def _start_gateway_request_lease(
     )
 
 
-# LLM: 先解析 canonical thread 再冻结其模型；后续 Compact/执行共用快照，不能在绑定身份前读 owner 全局选择。
-# 函数用途: 执行 Gateway 对话并固定本会话模型；其他窗口切换或修改默认模型不改变进行中的请求。
+# LLM: 原模型仍在排队前冻结；只捕获此次已有 owner 设置读取，退出清理。观察不能移动冻结点或改有效模型。
+# 函数用途: 执行 Gateway 对话并固定本会话模型，关闭观察不增加配置读盘或改变出站输入。
 def _run_gateway_ask(context: request_context.GatewayAskRunContext):
+    from ..settings.model_profiles import capture_selected_model_read
     from ..settings.model_scope import selected_model_scope
 
     prompt = str(context.request.get("prompt") or context.request.get("goal") or "").strip()
@@ -291,13 +294,15 @@ def _run_gateway_ask(context: request_context.GatewayAskRunContext):
         context.agent, context.request, context.request_id, prompt, context.on_chunk,
     ))
     _require_gateway_conversation_ready(context.request, preflight)
-    with selected_model_scope(context.agent, thread_id=preflight.thread_id):
-        return _run_gateway_ask_with_model(context)
+    with capture_selected_model_read() as captured, selected_model_scope(context.agent, thread_id=preflight.thread_id):
+        return _run_gateway_ask_with_model(context, captured=captured[0] if captured else None)
 
 
-# LLM: 主工作片已绑定不可变模型快照，预检查、Compact 和实际执行必须共用该配置。
-# 函数用途: 执行已选模型的会话主链，等待车道与授权不会改变本轮接口或密钥。
-def _run_gateway_ask_with_model(context: request_context.GatewayAskRunContext):
+# LLM: 原模型快照覆盖排队；apply 候选在实际首请求通过发送 CAS 后绑定至 Compact/收尾，重复执行不重新决策。
+# 函数用途: 取得准确执行权后可选观察一次建议，实际采用由原完整请求和发送安全点核对。
+def _run_gateway_ask_with_model(context: request_context.GatewayAskRunContext, *, captured=None):
+    from ..gateway_model_observation import GatewayModelObservation
+
     request = context.request
     prompt = str(request.get("prompt") or request.get("goal") or "").strip()
     if not prompt:
@@ -314,21 +319,24 @@ def _run_gateway_ask_with_model(context: request_context.GatewayAskRunContext):
     with request_binding.gateway_conversation_execution_lane(
         context,
         preflight.thread_id,
-    ):
+    ) as claim:
         # Reserve the thread before reading compact/history/task state.  A turn
         # queued behind another turn must see that prior turn's final transcript,
         # not the stale snapshot from the time it entered the Gateway.
         _conversation_prep_started = time.monotonic()
-        conversation = request_context.gateway_conversation_context(load_request)
-        _record_gateway_stage(context.stages, "conversation_prep_ms", _conversation_prep_started)
-        _require_gateway_conversation_ready(request, conversation)
-        _configure_gateway_main_activity(context, conversation)
-        if conversation.compact_generation > preflight.compact_generation:
-            _publish_gateway_compact_boundary(
-                context.on_chunk,
-                conversation.compact_generation,
-            )
-        return _execute_gateway_conversation_turn(context, prompt, conversation)
+        observer = GatewayModelObservation(context, captured, claim)
+        with observer.scope():
+            try:
+                conversation = request_context.gateway_conversation_context(replace(load_request, on_thread_loaded=observer))
+                _record_gateway_stage(context.stages, "conversation_prep_ms", _conversation_prep_started)
+                _require_gateway_conversation_ready(request, conversation)
+                _configure_gateway_main_activity(context, conversation)
+                if conversation.compact_generation > preflight.compact_generation:
+                    _publish_gateway_compact_boundary(context.on_chunk, conversation.compact_generation)
+                return _execute_gateway_conversation_turn(context, prompt, conversation)
+            except BaseException:
+                observer.settle_preparation_failure()
+                raise
 
 
 # LLM: 只在取得会话执行车道后调用，绑定宿主解析的 owner/thread/task，普通客户端不扩展公开范围。
@@ -491,6 +499,7 @@ def _register_named_system_task(
 # same canonical Compact generation before retry. Full carried archives remain effect authority;
 # the same active request retains exact host rejection memory without inheriting approval grants.
 # 与后台共用携带 reducer；先按原身份释放 mailbox，再计算携带快照，不能由模型正文猜测消费。
+# 展示callback同步更新本turn局部值及当前宿主参数；新请求重置，失效None与已评估事实阻止额外决策。
 # 函数用途: 在同一用户回合内处理上下文超限，正式压缩旧会话或本轮工具历史后继续执行。
 def _run_gateway_turn_with_conversation_compact(
     context: request_context.GatewayAskRunContext,
@@ -504,6 +513,17 @@ def _run_gateway_turn_with_conversation_compact(
     _recover_gateway_active_turn_authority(context, carried_archive_tool_calls)
     carried_active_turn_user_inputs: list[dict[str, object]] = []
     runtime_rejected_actions: list[dict[str, str]] = []
+    capability_presentation = None
+    presentation_evaluated = False
+
+    # LLM: 回调只由原运行/Compact同步调用；不持久化或改活快照，清旧值后仍保留本turn已评估事实。
+    # 函数用途: 在当前请求内保存真实采用结果，让压缩和后续重试使用同一展示或基础面。
+    def retain_presentation(value) -> None:
+        nonlocal capability_presentation, presentation_evaluated
+        capability_presentation, presentation_evaluated = value, True
+        run_params.capability_presentation = value
+        run_params.capability_presentation_evaluated = True
+
     for _attempt in range(8):
         run_params = _gateway_run_params(
             _GatewayRunParamsRequest(
@@ -516,6 +536,10 @@ def _run_gateway_turn_with_conversation_compact(
             )
         )
         run_params.runtime_rejected_actions = runtime_rejected_actions
+        run_params.capability_presentation = capability_presentation
+        run_params.capability_presentation_evaluated = presentation_evaluated
+        run_params.capability_presentation_turn_id = str(request.get("execution_attempt_id") or context.request_id)
+        run_params.capability_presentation_callback = retain_presentation
         _run_started = time.monotonic()
         result = context.agent.run(
             prompt,
@@ -543,7 +567,8 @@ def _run_gateway_turn_with_conversation_compact(
 
 
 # LLM: Transcript Compact has first claim on completed history and reuses pending one-call tools
-# from tooling's pure archive reducer. Otherwise only the same thread's active-turn checkpoint/CAS may retry.
+# from tooling's pure archive reducer and current host display. Otherwise only the same thread's
+# active-turn checkpoint/CAS may retry; neither path recovers presentation from persisted results.
 # 函数用途: 携带溢出工具缓存面，为 Gateway 推进 transcript 或 active-turn Compact，并刷新会话上下文。
 def _gateway_compact_overflowing_turn(
     context: request_context.GatewayAskRunContext,
@@ -552,22 +577,9 @@ def _gateway_compact_overflowing_turn(
     run_params: RunParams,
     carried_archive_tool_calls: list[dict[str, object]],
 ) -> request_context.GatewayConversationContext:
-    from ..tooling.tool_search_state import pending_carried_loaded_tool_names
-
     request = context.request
     refreshed = request_context.gateway_conversation_context(
-        request_context.GatewayConversationLoadRequest(
-            context.agent,
-            request,
-            context.request_id,
-            prompt,
-            context.on_chunk,
-            tuple(
-                sorted(
-                    pending_carried_loaded_tool_names(carried_archive_tool_calls)
-                )
-            ),
-        ),
+        build_gateway_compact_load_request(context, prompt, run_params, carried_archive_tool_calls),
         force_compact=True,
     )
     _require_gateway_conversation_ready(request, refreshed)
@@ -606,13 +618,7 @@ def _gateway_compact_overflowing_turn(
     if not compacted.compacted:
         raise ConversationPersistenceError("当前会话无法继续压缩，请稍后重试")
     refreshed = request_context.gateway_conversation_context(
-        request_context.GatewayConversationLoadRequest(
-            context.agent,
-            request,
-            context.request_id,
-            prompt,
-            context.on_chunk,
-        ),
+        build_gateway_compact_load_request(context, prompt, run_params, carried_archive_tool_calls),
         force_compact=False,
     )
     _require_gateway_conversation_ready(request, refreshed)

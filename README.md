@@ -496,7 +496,7 @@ agent_py_agent/config/agent_config.yaml
 - gateway 工作区和请求超时。
 - daemon / runner / 调度策略。
 - 工具开关和工具返回长度。
-- 自学习总开关预留项。
+- 决策模型总开关与逐点模式；旧自学习开关当前未接入生产链。
 
 能力路由配置：
 
@@ -528,7 +528,7 @@ agent_py_agent/config/capability_config.yaml
 7. `subagent-run` 默认 dry-run，显式 `--execute` 才调用真实模型。
 8. runner 输出 `[SUBAGENT_RESULT]` JSON 后，系统会把 evidence、artifacts、tests、patches、lessons、next_actions 写回工单。
 9. workflow plan 已能进入真实任务创建：父任务保存 `workflow_plan`，`auto` apply 可物化 worker 子工单。
-10. `enable_self_learning=true` 时，成功 runner 的 lessons 会生成 learning draft 候选，由 `my-agent learn` 管理。
+10. 成功 runner 的结构化 lessons/findings 可进入 owner 的记忆 CandidateService；Skill 提案、确认与正式写入链尚未接通。
 11. CLI 构造 agent 时支持 `MY_AGENT_RUNTIME_CONFIG` / `MY_AGENT_RUNTIME_CONFIG_LAYERS` 注入 owner/task/run/runtime scoped 配置 overlay，并保留 `config_sources` / `config_layers` 来源链。
 12. 后台 dispatch 启动标记和启动恢复摘要会暴露结构化读取/保存错误，避免把坏账本误判成“没有任务”。
 
@@ -539,7 +539,7 @@ agent_py_agent/config/capability_config.yaml
 - patch 自动集成后的更强 owner / 权限策略、批量验证和失败恢复编排。
 - 运行时错误报告已经覆盖更多恢复入口，但仍需继续清理 gateway/http/lease/audit 等剩余 `except Exception` best-effort 路径。
 - 配置层已支持 CLI runtime overlay，后续还要把 agent-local/task-local overlay ref 接到子代理创建、接管和远端 session 入口。
-- accepted learning draft 到正式 skill / rule / profile 的人工确认提升流程。
+- 记忆候选之外的 Skill 提案、用户确认与正式写入流程。
 - 完整 ACP / 外部 agent session / 远端执行器接入。
 
 ## 安全边界
@@ -554,7 +554,7 @@ agent_py_agent/config/capability_config.yaml
 - 默认容器安装只挂当前工作目录和 `~/.my-agent`，不挂 Docker socket，也不暴露宿主其他目录。
 - runner 写出结构化结果后直接进入 `DONE/VERIFIED` 或明确失败态；父级只读取代理树和产物 refs 继续调度或汇总，不再有单独最终收口阶段。
 - `patches` 当前只记录补丁意图和状态，不会自动 apply。
-- `lessons` 会写入 `output.json` / `DEBRIEF.md`；打开 `enable_self_learning=true` 后还会生成 learning draft 候选，但不会自动写正式 skill。
+- `lessons` 会写入 `output.json` / `DEBRIEF.md`；成功 runner 可形成带来源的 owner 记忆 Candidate，不会自动写正式 Skill。
 
 ## 关键文档
 

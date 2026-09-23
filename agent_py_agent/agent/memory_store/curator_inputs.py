@@ -2,7 +2,7 @@ from __future__ import annotations
 
 """从 ConversationStore 与 owner audit 增量构造有界 Curator 输入。"""
 
-# LLM: 本模块只读权威经历并生成预览；不写 cursor、不推断候选、不复制工具大输出。
+# LLM: 本模块只读权威经历并生成预览；临时关系注释须同时绑定来源和正式版本，不写 cursor、不推断候选、不复制工具大输出。
 # 模块用途: 把精确 message/audit 游标后的新事件整理为后台模型的有限 JSON 输入。
 
 import hashlib
@@ -181,7 +181,25 @@ class CuratorDecisionAnnotation:
     required_refs: tuple[tuple[str, str], ...] = ()
 
 
-# LLM: batch 保存的是这次 lease 看到的精确输入顺序；模型声明只能引用这里的 ID。
+# LLM: 关系只覆盖精确来源与正式条目的一对，不是候选、证据、动作或全库覆盖证明；版本归原仓库。
+# 类用途: 保存提取前可选关系建议，既不持久化也不能触发记忆修改。
+@dataclass(frozen=True)
+class CuratorRelationAnnotation:
+    source_kind: str
+    source_id: str
+    content_hash: str
+    authority_type: str
+    authority_id: str
+    authority_ref: str
+    authority_version: int
+    formal_content_hash: str
+    relation: str
+    model: str
+    input_digest: str
+    coverage: str = "presented_pair_only"
+
+
+# LLM: batch 保存的是这次 lease 看到的精确输入顺序；关系注释只附当前双边引用，不成为候选或正式记忆的第二状态。
 # 类用途: 为 prompt、证据核验和 cursor 计算提供同一输入快照。
 @dataclass(frozen=True)
 class CuratorInputBatch:
@@ -192,8 +210,9 @@ class CuratorInputBatch:
     # 可降级读取错误(如 formal 记忆整体失败):与 load_errors 严格语义不同,只记不阻断。
     formal_memory_errors: tuple[dict[str, object], ...] = ()
     decision_annotations: tuple[CuratorDecisionAnnotation, ...] = ()
+    relation_annotations: tuple[CuratorRelationAnnotation, ...] = ()
 
-    # LLM: 保持原材料顺序；临时决策标注只投影仍在本批且 hash 一致的来源，缩批不能遗留尾部建议。
+    # LLM: 保持原材料顺序；标签校验来源 hash，关系同时校验正式 ref/hash/版本；缩批不能遗留尾部建议。
     # 函数用途: 生成一次后台模型调用的完整结构化输入。
     def to_model_payload(self) -> dict[str, object]:
         payload = {
@@ -207,6 +226,13 @@ class CuratorInputBatch:
                        for item in self.decision_annotations if (item.source_kind, item.source_id, item.content_hash) in refs]
         if annotations:
             payload["decision_annotations"] = annotations
+        formal_refs = {(item.authority_type, item.authority_id, item.authority_ref, item.authority_version, item.content_hash)
+                       for item in self.formal_memories}
+        relations = [dict(vars(item)) for item in self.relation_annotations
+                     if (item.source_kind, item.source_id, item.content_hash) in refs
+                     and (item.authority_type, item.authority_id, item.authority_ref, item.authority_version, item.formal_content_hash) in formal_refs]
+        if relations:
+            payload["relation_annotations"] = relations
         return payload
 
     # LLM: 轮次阈值只统计结构化 role=user 的新消息，不解析正文或 assistant 摘要。

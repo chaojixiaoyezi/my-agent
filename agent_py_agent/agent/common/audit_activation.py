@@ -237,7 +237,7 @@ def attributes_request_audit(attrs: Any) -> bool:
 # 函数用途: 读取当前实际执行者的 Audit 属性，兼容主代理与线程隔离的子代理上下文。
 def current_audit_attributes(agent: object) -> dict[str, Any] | None:
     try:
-        from ..agent_core.runner.context import current_task_attributes
+        from ..runtime_context import current_task_attributes
 
         attrs = current_task_attributes(agent)
         if isinstance(attrs, dict) and attrs:

@@ -1,4 +1,4 @@
-# LLM: 子代理精确线程通过 ThreadStore 写入原目录；不建通道/用户索引，不反向加载存储组装入口。
+# LLM: 子代理精确线程通过 ThreadStore 写入原目录；已有线程补齐必须在原线程锁内读最新状态，不能覆盖并发模型选择或 Compact。
 # 模块用途: 按稳定运行身份创建或恢复子代理线程，保留原 owner、谱系和目录冲突校验。
 """Agent ConversationThread exact-id materialization and collision checks."""
 
@@ -9,20 +9,25 @@ from typing import TYPE_CHECKING, Any
 
 from ..gateway_parts.io import locked_file_transition
 from ..runtime_errors import DataCorruptionError
+from ..settings.thread_model_selection import SUBAGENT_MODEL_ADVICE_KEY, PendingSubagentModelAdvice
 from .models import ConversationThread
 from .store_io import now, read_json_object_report, safe_file_stem
 from .store_threads import (
     normalized_runtime_workspace_roots,
 )
 
+# 仅真正新建且携带宿主建议的 child 获得资格；旧 thread / 旧 pending 绝不补发。
+SUBAGENT_FIRST_REQUEST_KEY = "host_subagent_first_request.v1"
+
 if TYPE_CHECKING:
     from .store_threads import ThreadStore
 
 
 # LLM: Agent threads use a host-generated exact id and no channel/user indexes. Existing
-# ids must match the same run lineage; this is the only durable materializer used by
-# child/grandchild transcript Compact and resume.
-# 函数用途: 为一个确定的子代理运行创建或校验独立会话线程，不把它绑定成用户聊天会话。
+# records are re-read under the original thread transaction before filling missing identity;
+# the transition lock only serializes materialization and cannot guard model/Compact updates.
+# LLM: typed advice 与首次请求资格仅初始化新 thread；existing 不重放 pending/资格；资格不等于尚未发送证明，发送须另走原子栅栏。
+# 函数用途: 为确定运行物化独立线程及待验证建议，已有记录只在原线程锁内补缺失身份。
 def ensure_agent_thread_record(
     store: ThreadStore,
     request: dict[str, Any],
@@ -55,13 +60,25 @@ def ensure_agent_thread_record(
         if error is not None:
             raise DataCorruptionError(str(error))
         if payload:
-            return _ensure_existing_agent_thread(
-                store,
-                payload,
-                request=request,
-                expected_metadata=expected_metadata,
-                current=current,
+            return store.update_atomic(
+                thread_id,
+                lambda latest: _ensure_existing_agent_thread(
+                    latest,
+                    request=request,
+                    expected_metadata=expected_metadata,
+                    current=current,
+                ),
             )
+        advice = request.get("model_advice")
+        if advice is not None:
+            if not isinstance(advice, PendingSubagentModelAdvice):
+                raise ValueError("subagent model advice requires a host preparation")
+            expected_metadata[SUBAGENT_MODEL_ADVICE_KEY] = advice.pending_metadata(run_id=agent_run_id, thread_id=thread_id)
+            expected_metadata[SUBAGENT_FIRST_REQUEST_KEY] = {
+                "schema": SUBAGENT_FIRST_REQUEST_KEY, "status": "unsubmitted",
+                "operation_id": advice.operation_id, "child_run_id": agent_run_id,
+                "child_thread_id": thread_id,
+            }
         thread = ConversationThread(
             thread_id=thread_id,
             canonical_user_id=str(
@@ -70,6 +87,9 @@ def ensure_agent_thread_record(
             owner_id=str(request.get("owner_id") or "").strip(),
             owner_home=str(request.get("owner_home") or "").strip(),
             model_profile_id=str(request.get("model_profile_id") or "default"),
+            model_selection_revision=1,
+            model_selection_source="inherited",
+            model_selection_last_explicit_revision=0,
             title=str(request.get("title") or agent_run_id).strip()[:240],
             created_at=current,
             updated_at=current,
@@ -83,19 +103,16 @@ def ensure_agent_thread_record(
         return thread
 
 
-# LLM: Idempotent migration may fill only missing descriptive scope on the same exact
-# agent thread. A channel binding, owner mismatch, run mismatch, or changed lineage is a
-# collision and must never be silently converted into the requested child thread.
-# 函数用途: 校验已存在的子代理线程身份，并只补齐旧记录缺失的目录和元数据。
+# LLM: Called only with the current record from ThreadStore.update_atomic; preserve model,
+# Compact, pending decision metadata and unknown extension fields. Changed lineage is a collision.
+# 函数用途: 在原线程文件锁中补缺失身份，确需补空模型时同次前进继承版本；不补首次资格、不自行写盘。
 def _ensure_existing_agent_thread(
-    store: ThreadStore,
-    payload: dict[str, Any],
+    thread: ConversationThread,
     *,
     request: dict[str, Any],
     expected_metadata: dict[str, object],
     current: float,
 ) -> ConversationThread:
-    thread = ConversationThread.from_dict(payload)
     expected_id = str(request.get("thread_id") or "").strip()
     if thread.thread_id != expected_id:
         raise DataCorruptionError(f"agent thread identity is invalid: {expected_id}")
@@ -158,12 +175,12 @@ def _ensure_existing_agent_thread(
         owner_id=thread.owner_id or expected_owner,
         owner_home=thread.owner_home or expected_owner_home,
         model_profile_id=thread.model_profile_id or str(request.get("model_profile_id") or "default"),
+        model_selection_revision=thread.model_selection_revision + (not thread.model_profile_id),
+        model_selection_source=thread.model_selection_source if thread.model_profile_id else "inherited",
         title=thread.title or str(request.get("title") or "").strip()[:240],
         cwd=thread.cwd or requested_cwd,
         runtime_workspace_roots=thread.runtime_workspace_roots or requested_roots,
         metadata=metadata,
         updated_at=max(thread.updated_at, current),
     )
-    if updated != thread:
-        store.write(updated)
     return updated

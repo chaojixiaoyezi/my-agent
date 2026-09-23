@@ -2,20 +2,19 @@ from __future__ import annotations
 
 """为后台 Curator 提供有界、只读的现有正式记忆上下文。"""
 
-# LLM: The Curator may compare new experience with formal memory, but this adapter exposes
-# active owner-local records only and never grants repository mutation methods to the model.
+# LLM: 只暴露当前 owner 的 active 正式材料，不向模型授予仓库修改方法；关系建议所需原版本/正文长度只留宿主。
+# 普通 Curator 投影不随可选增强改变；同步核对 curator_inputs 与关系建议的完整性/失效测试。
 # 模块用途: 将 long-term、lesson 和 HOT 投影成短预览，供冲突判断而不复制派生索引或旧版本。
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 _ITEM_PREVIEW_CHARS = 1_200
 
 
-# LLM: Formal inputs carry stable authority identity and typed scope; the preview remains
-# historical data inside the non-authoritative Curator prompt.
+# LLM: 正式输入携带稳定身份和结构化 scope；预览始终是非权威历史上下文，宿主字段不能给无版本仓库伪造版本。
 # 类用途: 表示一条可供策展比较、但不能由模型修改的现有正式记忆。
 @dataclass(frozen=True)
 class CuratorFormalMemoryInput:
@@ -28,6 +27,8 @@ class CuratorFormalMemoryInput:
     scope_type: str
     scope_key: str
     updated_at: str
+    authority_version: int | None = None
+    content_chars: int | None = None
 
     # LLM: Only bounded scalar metadata crosses the provider boundary; candidate review and
     # persona internals are intentionally absent.
@@ -77,8 +78,7 @@ class FormalMemorySource:
         return tuple(selected)
 
 
-# LLM: JsonlMemory.all() already materializes active entries and rejects superseded/deleted
-# versions, so the Curator never sees a stale index hit as formal truth.
+# LLM: JsonlMemory.all() 已物化 active 记录并排除替换/删除旧版；保留其真实版本供关系建议复核，不把索引命中当正文。
 # 函数用途: 投影 active long-term 记录。
 def _long_term_items(repository: object) -> list[CuratorFormalMemoryInput]:
     reader = getattr(repository, "all", None)
@@ -88,7 +88,7 @@ def _long_term_items(repository: object) -> list[CuratorFormalMemoryInput]:
     for record in reader():
         attrs = record.attributes if isinstance(record.attributes, dict) else {}
         result.append(
-            _formal_item(
+            replace(_formal_item(
                 authority_type="long_term",
                 authority_id=str(record.entry_id or ""),
                 authority_ref=f"memory/long_term/memory.jsonl#{record.entry_id}",
@@ -97,7 +97,7 @@ def _long_term_items(repository: object) -> list[CuratorFormalMemoryInput]:
                 scope_type=str(attrs.get("scope_type") or ""),
                 scope_key=str(attrs.get("scope_key") or ""),
                 updated_at=str(record.updated_at or record.created_at or ""),
-            )
+            ), authority_version=getattr(record, "version", None))
         )
     return result
 
@@ -154,8 +154,7 @@ def _hot_items(repository: object, lessons: object) -> list[CuratorFormalMemoryI
     return result
 
 
-# LLM: Content hashes use the complete formal body while provider-visible content is capped;
-# this preserves exact identity without expanding the prompt.
+# LLM: hash 来自原规范化全正文，宿主长度用于核对短预览是否完整；普通 provider 投影仍有界，不加入第二种版本或正文来源。
 # 函数用途: 规范化一条正式记忆投影。
 def _formal_item(
     *,
@@ -179,6 +178,7 @@ def _formal_item(
         scope_type=scope_type,
         scope_key=scope_key,
         updated_at=updated_at,
+        content_chars=len(body),
     )
 
 

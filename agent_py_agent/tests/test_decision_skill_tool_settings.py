@@ -81,12 +81,12 @@ def test_owner_thread_cas_reset_and_open_categories_use_original_store(tmp_path)
     assert result["effective"]["points"]["skill_tool"]["optional_categories"] == ["plugins", "vendor.custom/工具"]
     data = read_model_profiles(model_profiles_path(host.home_paths))
     assert data["decision_settings"]["overrides"] == {POLICY: "metadata", CATEGORIES: ["plugins", "vendor.custom/工具"]}
-    assert data["decision_settings"]["schema"] == "decision_settings.v1"
+    assert data["decision_settings"]["schema"] == "decision_settings.v2"
 
 
 def test_v1_additive_fields_keep_old_overrides_revision_and_do_not_add_defaults():
     old = {"schema": "decision_settings.v1", "revision": 9, "overrides": {"enabled": False, "points.recall.mode": "observe"}}
-    assert validate_decision_settings(old) == old
+    assert validate_decision_settings(old) == {**old, "schema": "decision_settings.v2", "experiment_authorization": None}
     assert validate_decision_settings({**old, "overrides": {**old["overrides"], POLICY: "metadata", CATEGORIES: []}})["revision"] == 9
 
 
@@ -149,13 +149,13 @@ def test_pipe_edits_policy_and_strict_category_array_then_resets(tmp_path):
         gateway = Gateway(tmp_path)
         async with running(tmp_path, gateway) as ui:
             await open_scope(ui)
-            await choose(ui, 5)
+            await choose(ui, 6)
             await choose(ui, 2)
             assert "上下文减量策略" in visible(ui.app) and "可选工具类别" in visible(ui.app)
             await choose(ui, 3)
             await press(ui, b"\x1b[A\r")
             assert settings(gateway.host, "read", {})["effective"]["points"]["skill_tool"]["context_policy"] == "metadata"
-            await choose(ui, 5)
+            await choose(ui, 6)
             await choose(ui, 2)
             await choose(ui, 4)
             await press(ui, b"\x01\x0b")
@@ -166,7 +166,7 @@ def test_pipe_edits_policy_and_strict_category_array_then_resets(tmp_path):
             await press(ui, '["plugins", "custom.extra"]\t\r')
             assert sum(op == "decision_patch" for op, _ in gateway.calls) == before + 1
             assert settings(gateway.host, "read", {})["effective"]["points"]["skill_tool"]["optional_categories"] == ["plugins", "custom.extra"]
-            await choose(ui, 6)
+            await choose(ui, 7)
             await choose(ui, 0)
             assert POLICY not in settings(gateway.host, "read", {})["overrides"]["owner"]
             assert not any(op == "decision_probe" for op, _ in gateway.calls)

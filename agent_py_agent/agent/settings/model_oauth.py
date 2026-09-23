@@ -1,5 +1,5 @@
-# LLM: OAuth 复用 owner model-profiles 的唯一持久源；网络放在配置锁外，登录代次 CAS 防止取消、退出或改端点后迟到写回。
-# 模块用途: 管理显式登录、轮询、取消、退出和实际请求前的令牌刷新，不创建后台登录线程。
+# LLM: OAuth 只写原 owner 目录，所有保存含刷新均轮换目录代次；登录会话代次仍按原 CAS，网络始终在配置锁外。
+# 模块用途: 管理登录和令牌刷新，并让旧模型建议识别凭据变化，不创建第二份认证状态或后台线程。
 from __future__ import annotations
 
 import time
@@ -117,8 +117,8 @@ def execute_oauth(agent: object, operation: str, payload: dict) -> dict:
     return _commit(path, provider_id, binding, attempt, {"pending": pending})
 
 
-# LLM: auth_ref 只由 canonical owner 解析生成；每次 HTTP 调用核验代次和完整端点绑定，缓存后端不能绕过登出。
-# 函数用途: 获取本次请求使用的访问令牌；同 owner 同 provider 跨进程串行刷新，避免轮换令牌竞争。
+# LLM: auth_ref 保持原登录会话语义；刷新沿 _save_profiles 原事务轮换目录代次，使旧 pending 失效但不伪造换账号。
+# 函数用途: 核验本次凭据并按原跨进程锁刷新；网络在目录锁外，不能在 generation guard 内调用。
 def request_credentials(ref: dict, api_base: str) -> tuple[str, dict[str, str]]:
     from .model_profiles import _save_profiles
 

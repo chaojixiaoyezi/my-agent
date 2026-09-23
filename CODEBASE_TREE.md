@@ -8,6 +8,28 @@
 |-- STATUS.md                            # 当前能力、开放问题与证据边界
 |-- DESIGN_LEDGER.md                     # 当前架构决策及模块设计导航
 |-- TESTS.md                             # 开发测试、真实 TUI 与发布 gate
+|-- docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md # 决策容量、完整请求投影与 Compact 的源码证据和分片交接
+|-- docs/tasks/DECISION_MODEL_CHILD_LIVE_HANDOFF.md # Jev 自动建议到真实异模子代理首轮/工具轮的隔离验收
+|-- docs/tasks/DECISION_MODEL_P5B_HANDOFF.md # 来源—正式记忆关系建议的第一片、原权威边界与离线验收
+|-- docs/tasks/DECISION_MODEL_EXTERNAL_MATERIAL_ORDER_HANDOFF.md # 已归档网页阅读提示的首片、原来源边界与离线验收
+|-- docs/tasks/DECISION_MODEL_MAIN_MODEL_AUDIT.md # 主会话自动选模型的真实工作片顺序、历史兼容与实施边界审计
+|-- docs/tasks/DECISION_MODEL_MAIN_MODEL_SELECTION_HANDOFF.md # 主会话选择版本、显式覆盖和旧线程迁移的本地交接
+|-- docs/tasks/DECISION_MODEL_MAIN_MODEL_OBSERVE_HANDOFF.md # Gateway 准确工作片后的只观察建议与关闭等价验收
+|-- docs/tasks/DECISION_MODEL_MAIN_MODEL_ADOPTION_HANDOFF.md # 主会话实际首请求发送前的模型采用、失败保留与测试交接
+|-- docs/tasks/DECISION_MODEL_MAIN_MODEL_LIVE_HANDOFF.md # 隔离真实主会话的超时、缺资料与保留原模型样本
+|-- docs/tasks/DECISION_MODEL_SELF_EXPERIMENT_AUDIT.md # 自动对照、授权、输入预算及精确恢复缺口审计
+|-- docs/tasks/DECISION_MODEL_EXPERIMENT_E1_HANDOFF.md # 仅授权/预算原语、实际实验联网失败关闭与验证边界交接
+|-- docs/tasks/DECISION_MODEL_SETTINGS_RESTORE_HANDOFF.md # 原设置事务内 set/unset 恢复与 CAS 验证交接
+|-- docs/tasks/DECISION_MODEL_PRE_RECALL_AUDIT.md # 召回前建议的结构化意图、检索副作用与权限边界审计
+|-- docs/tasks/DECISION_MODEL_SELF_LEARNING_AUDIT.md # 自学习候选、Skill 提案与确认缺口的源码审计
+|-- docs/tasks/DECISION_MODEL_PLANNING_AUDIT.md # 规划 Todo 精确 ID 建议与原派工权限边界审计
+|-- docs/tasks/DECISION_MODEL_PLANNING_HANDOFF.md # 原 Todo read 上的精确优先级软建议、设置与失败保留交接
+|-- docs/tasks/DECISION_MODEL_DELIVERY_QUALITY_AUDIT.md # 交付复核提示的结构化证据与原收口权威审计
+|-- docs/tasks/DECISION_MODEL_ACTION_CANDIDATE_AUDIT.md # DOM/OCR/工具动作候选的观察来源与原审批边界审计
+|-- docs/tasks/DECISION_MODEL_NATURAL_CONFIG_AUDIT.md # 普通中文配置要求到原 user_config 工具及真实读回的证据边界
+|-- docs/tasks/DECISION_MODEL_NATURAL_CONFIG_LIVE_HANDOFF.md # 普通 user owner 真实中文设置失败的工具快照、原因与隔离收尾
+|-- docs/tasks/DECISION_MODEL_NATURAL_CONFIG_FIX_HANDOFF.md # 普通 owner 配置工具可信线程/CAS 预览修复及真实读写验收
+|-- docs/tasks/DECISION_MODEL_CATALOG_GENERATION_HANDOFF.md # 原私有/共享模型目录持久代次及原锁 guard 交接
 `-- docs/design/
     |-- MAINTAINABILITY_AND_JEV_REVIEW.md # 可维护性评估、渐进重构建议及 Computer Use/Jev 能力边界
     |-- DECISION_MODEL_INTEGRATION.md    # 可选决策模型的短期限、失败隔离、接入点、缓存与并行实施计划
@@ -30,6 +52,27 @@ P1-C/D 有界调用组件交接：`docs/tasks/DECISION_MODEL_P1CD_HANDOFF.md`。
 P1-E 共用设置交接：`docs/tasks/DECISION_MODEL_P1E_HANDOFF.md`。
 P1-F/G 实际服务与用量组合交接：`docs/tasks/DECISION_MODEL_P1FG_HANDOFF.md`。
 P2 Curator 前置标注交接：`docs/tasks/DECISION_MODEL_P2_CURATOR_HANDOFF.md`。
+P5-B 正式条目关系建议交接：`docs/tasks/DECISION_MODEL_P5B_HANDOFF.md`。
+子代理自动选模真实隔离验收：`docs/tasks/DECISION_MODEL_CHILD_LIVE_HANDOFF.md`。
+P5-C 已归档网页阅读建议交接：`docs/tasks/DECISION_MODEL_EXTERNAL_MATERIAL_ORDER_HANDOFF.md`。
+P5-D 主会话选模型合同审计：`docs/tasks/DECISION_MODEL_MAIN_MODEL_AUDIT.md`。
+P5-D 原线程模型选择版本交接：`docs/tasks/DECISION_MODEL_MAIN_MODEL_SELECTION_HANDOFF.md`。
+P5-D Gateway 观察首片交接：`docs/tasks/DECISION_MODEL_MAIN_MODEL_OBSERVE_HANDOFF.md`。
+P5-D Gateway 首请求自动采用交接：`docs/tasks/DECISION_MODEL_MAIN_MODEL_ADOPTION_HANDOFF.md`。
+P5-D 主会话隔离真实样本：`docs/tasks/DECISION_MODEL_MAIN_MODEL_LIVE_HANDOFF.md`。
+P5-E/F/G/H 自动对照与恢复合同审计：`docs/tasks/DECISION_MODEL_SELF_EXPERIMENT_AUDIT.md`。
+P5-E1 授权/预算原语交接：`docs/tasks/DECISION_MODEL_EXPERIMENT_E1_HANDOFF.md`。
+P5-G 设置恢复基础原语交接：`docs/tasks/DECISION_MODEL_SETTINGS_RESTORE_HANDOFF.md`。
+P5-A 召回前安全接缝审计：`docs/tasks/DECISION_MODEL_PRE_RECALL_AUDIT.md`。
+P5-C 自学习候选筛选审计：`docs/tasks/DECISION_MODEL_SELF_LEARNING_AUDIT.md`。
+P5-C 规划派工建议审计：`docs/tasks/DECISION_MODEL_PLANNING_AUDIT.md`。
+P5-C 原 Todo 优先级建议首片：`docs/tasks/DECISION_MODEL_PLANNING_HANDOFF.md`。
+P5-C 交付质量软提示审计：`docs/tasks/DECISION_MODEL_DELIVERY_QUALITY_AUDIT.md`。
+P5-C 动作候选观察来源审计：`docs/tasks/DECISION_MODEL_ACTION_CANDIDATE_AUDIT.md`。
+P4-B 普通中文代操作审计：`docs/tasks/DECISION_MODEL_NATURAL_CONFIG_AUDIT.md`。
+P4-B 首次真实失败与注册边界：`docs/tasks/DECISION_MODEL_NATURAL_CONFIG_LIVE_HANDOFF.md`。
+P4-B 普通 owner 工具修复与真实复测：`docs/tasks/DECISION_MODEL_NATURAL_CONFIG_FIX_HANDOFF.md`。
+子代理模型目录持久代次交接：`docs/tasks/DECISION_MODEL_CATALOG_GENERATION_HANDOFF.md`。
 
 这份树只描述当前主链路。旧迁移入口、过渡计划和已删除模块不在这里保留。
 
@@ -132,9 +175,17 @@ agent_py_agent/
 |   |-- core.py                         # SimpleAgent 组合入口
 |   |-- turn_end.py                     # 主/子代理共用的结束原因及技术续跑判据
 |   |-- model_guidance.py               # 完整 Prompt 与有副作用工具共用的验证/授权软提示唯一正文
+|   |-- runtime_context.py              # Tooling、Conversation 与 core 共用的线程本地 runner 身份和任务属性
+|   |-- model_request_selection.py      # 主请求渲染与发送前的可选宿主回调，不持有目录或执行权
+|   |-- gateway_model_observation.py    # Gateway 车道后主会话的一次决策观察与来源冻结
+|   |-- gateway_model_adoption.py       # 跨 Gateway/core 的完整候选验证、临时依赖与线程发送前 CAS
+|   |-- gateway_compact_context.py      # 跨 Gateway/core 的同 turn Compact 重载展示和身份冻结
 |   |-- task_progress_guidance.py        # Todo exact-id 最终回复前核对的可配置软合同；不自动判定或打勾
 |   |-- agent_core/                     # 无副作用包入口；主代理运行时、工具循环、编排与自然回合收口实现
+|   |   |-- decision_planning.py        # 原 Todo read 的当前未完成项精确优先级软建议
 |   |   |-- cli_run_conversation.py     # 一次性 CLI 的权威 user/assistant transcript、幂等身份与失败分级
+|   |   |-- tool_request_projection.py # 冻结完整 prompt/schema/IR 的纯请求投影，缺事实返回 typed unknown
+|   |   |-- subagent/model_selection.py # 首个真实子代理模型请求的宿主资格、持久选择及失败保留协调
 |   |   |-- runtime/                    # 单 child guidance、active-turn compact carrier、sleep 闹钟与 loop support
 |   |   |   |-- conversation_state.py  # 主/子代理当前 Compact 代次的结构化模型事实投影
 |   |   |   |-- sleep_tool.py           # clock.sleep 工具：模型主动定时等待，写 wake_queue 字条、事件提前醒取消
@@ -142,6 +193,7 @@ agent_py_agent/
 |   |   |-- tool_loop/                  # 工具轮次执行、恢复与自然结束
 |   |   |-- tool_loop/display_archive.py # 执行当时的公开工具原文归档与轻量预览引用
 |   |   |-- tool_context/               # 工具结果上下文：reducer、窗口、microcompact、PTL 单轮重试
+|   |   |   `-- external_material_order.py # 原已归档页的可选阅读顺序提示，保留正式结果与 refs
 |   |   |-- orchestration/              # 创建、只读状态、消息、取消、授权五个递归直属工具与内部自动启动/恢复引擎；无兄弟 goal 广播，进展事件由宿主写入
 |   |   |   |-- decision_subagent.py # 原批次创建前模型建议，锁外请求、锁内复核，不另建任务账
 |   |   |   |-- create_context.py     # 显式资料与合同装配；已移除 work_scope.py 的自动 IO 身份，引用不合并派工
@@ -201,8 +253,9 @@ agent_py_agent/
 |   |   |-- candidates.py             # owner candidates.jsonl 唯一候选账本和唯一状态机
 |   |   |-- curator.py                # 后台策展统一 Service、reason、lease、增量 cursor 与有界重试
 |   |   |-- curator_backend.py        # 无工具辅助模型调用适配；只返回严格结构化结果
-|   |   |-- decision_recall.py        # 原预算后仅重排长期记忆槽位，来源复核并复用本轮上下文
+|   |   |-- decision_recall.py        # 原预算后重排长期事实或追加同范围补充查询，复核来源并复用本轮上下文
 |   |   |-- decision_curator.py       # 可选用户后台分类/优先级标注，失败保留原批次且不拥有记忆写权限
+|   |   |-- decision_curator_relation.py # 同阶段的完整来源—正式条目关系建议，精确版本复查且不直接合并或晋升
 |   |   |-- curator_commit.py         # Daily/Candidate/state/run audit 整批提交与崩溃恢复
 |   |   |-- curator_*.py              # Curator 输入、Schema、正式记忆快照、状态与运行审计辅助模块
 |   |   |-- daily.py                  # v2 DailyMemoryEvent 稳定序列、幂等合并与按天账本
@@ -292,6 +345,7 @@ agent_py_agent/
 |   |   |-- decision_service.py       # 可选决策阶段预算、设置/身份复核和建议返回，不执行业务动作
 |   |   |-- decision_policy.py        # 有界连接冷却与同进程设置取消通知，不拥有 worker 或持久状态
 |   |   |-- decision_model_call.py    # 实际决策 worker 复用原准入、身份头、HTTP 观察和唯一调用账
+|   |   |-- decision_experiment.py    # 可选实验预备入口只读原授权及账本，缺输入证明时失败关闭
 |   |   |-- tool_context_window.py    # text/native 共用的有界工具历史窗口与稳定前缀投影
 |   |   |-- tool_input_progress.py     # provider 大工具参数生成期的脱敏临时展示合同
 |   |   |-- agent_thread.py            # child/grandchild 独立 thread、逐 attempt transcript 与统一 Compact 适配
@@ -354,6 +408,8 @@ agent_py_agent/
 |   |   |-- decision_settings_schema.py # 决策字段/范围校验及旧会话覆盖迁移，不持有默认值
 |   |   |-- decision_settings_defaults.py # 投影原 Agent/能力/记忆配置默认值和继承来源
 |   |   |-- decision_settings_projection.py # 原模型引用可用性与有效设置读回，不发请求、不暴露凭据
+|   |   |-- decision_experiment_schema.py # 准确线程实验授权的来源/范围/期限/有限预算严格信封
+|   |   |-- decision_experiment.py    # 宿主显式授权保存与撤销原语；普通模型不能建立许可
 |   |   |-- model_oauth.py              # owner 登录代次、取消与刷新并发控制，复用私有配置源
 |   |   |-- model_oauth_schema.py       # 授权配置、凭据目的地、私有状态与绑定校验
 |   |   |-- model_oauth_wire.py         # 设备码、兑换和刷新协议的有界无重定向 HTTP
@@ -377,6 +433,7 @@ agent_py_agent/
 |   |-- scale_runtime.py               # scale role/release channel/S3 配置 fail-closed
 |   |-- continuous_monitor_entry.py    # 真实 wall-clock 异构来源 proof 长守入口
 |   |-- contracts/                     # 安全/协议/错误分类与格式校验合同；无旧任务质量 acceptance 判官
+|   |   |-- model_call_budget.py       # 原模型调用账复用的显式实验输入预留、保守结算与同代拒绝
 |   |   |-- subagent_completion.py     # Gateway/后台续片共用的中立 child 完成信封与直属结果投影
 |   |   |-- tool_approval.py           # 工具审批 request/decision/binding 与跨层调用身份协议
 |   |   `-- tool_input_schema.py       # 工具参数有限 JSON Schema 纠正/完整校验与脱敏问题路径
@@ -465,14 +522,30 @@ agent_py_agent/
 |   |-- test_decision_service_http.py   # 原配置到真实本地 HTTP、账本与活动用量行的组合
 |   |-- test_decision_owner_scope.py    # 用户后台run/空thread、原身份冲突、后台期限与配置隔离
 |   |-- test_decision_subagent.py      # 原根/递归创建、有工具真实快照、逐项模型选择及幂等
+|   |-- test_subagent_first_request_selection.py # 首发送模型资格、原子采用、撤销竞争与失败保留
+|   |-- test_model_scope_dependencies.py # 候选依赖视图、作用域生命周期与后续工具轮协议一致性
+|   |-- test_thread_model_selection_revision.py # 原线程选择版本、显式同值覆盖及旧记录迁移
+|   |-- test_model_profile_catalog_generation.py # 原模型目录/共享发布代次、迁移、跨进程与锁竞争
 |   |-- test_decision_recall.py        # 预算先行、固定保护槽位、来源撤销及原完整准备入口复用
+|   |-- test_decision_pre_recall.py    # 补充查询的关闭、非选择、预算、撤销、取消与原阶段共用
+|   |-- test_decision_planning.py      # Todo 优先建议、精确 ID/版本/取消、设置与原 read 回执的回归
+|   |-- test_gateway_model_observation.py # Gateway 主模型观察的零副作用、请求身份与恢复边界
+|   |-- test_gateway_model_adoption.py # 原 Gateway/PromptBuilder/provider builder 的采用、容量、竞态与零 HTTP 回退
+|   |-- test_decision_external_material_order.py # 已归档页安全投影、来源复核、取消与 text/native 提示一致
+|   |-- test_external_material_order_integration.py # 原页面生产归档、决策 worker、设置工具与 TUI 接线
 |   |-- test_decision_capability_consumer.py # 原设置/worker/循环接线到实际prompt/schema减量及失效原输入
 |   |-- test_decision_capability_http.py # 能力消费者经本地原生HTTP的成功/期限/在途设置变化
 |   |-- test_decision_skill_projection.py # Skill名卡动态投影、原搜索可达及None旧字节等价
 |   |-- test_tool_presentation_projection.py # 工具schema收起、原搜索恢复及真实插件撤销
+|   |-- test_tool_request_projection.py # 完整冻结请求与实际原生出站等价、未知输入及无副作用
+|   |-- test_gateway_capability_compact.py # 同片能力展示沿 Gateway/子代理 Compact 和续跑保留
 |   |-- test_decision_skill_tool_settings.py # 展示策略/开放类别列表的设置、CAS及原菜单编辑
+|   |-- test_user_config_owner_scope.py # 普通 owner 决策工具可见性、可信线程与本机全局配置拒绝
 |   |-- test_decision_curator.py        # 原Curator临时建议、完整材料、非选择结果和lease头寸对照
+|   |-- test_decision_curator_relation.py # 正式版本/完整性、独立后台设置、关系注释与原提取提交边界
 |   |-- test_decision_model_call.py     # 实际 worker 账本保留、HTTP 尝试、身份、准入与取消
+|   |-- test_decision_experiment_authorization.py # 设置授权来源、CAS/撤销与实际实验路径失败关闭
+|   |-- test_model_call_input_budget.py # 原账有限 HTTP/input 预留、并发/未知结算与代次/LRU 隔离
 |   |-- test_model_call_ledger_partitions.py # 原账本用途、字段真值、单调终态及 worker 精确保留
 |   |-- test_decision_usage_metrics.py  # 决策用途增量、迟到补账、未知输入与原 TUI 一行展示
 |   |-- test_decision_protocol.py       # 决策快照、复杂度上限、逐题失败与用量未知合同
@@ -686,6 +759,8 @@ docs/
 - `agent_py_agent/agent/settings/decision_settings.py`：原设置界面和工具共用服务；原 owner 模型目录及线程字段保存覆盖，锁序 owner→thread，版本冲突拒绝覆写。
 - `agent_py_agent/agent/conversation/decision_service.py`、`decision_policy.py`、`decision_model_call.py`：分别负责建议策略、连接隔离和实际模型调用；复用原存储/准入/取消/账本，不建立第二份任务权威。
 - `agent_py_agent/agent/memory_store/decision_curator.py`：原用户后台批次的临时分类/优先级建议；关闭不准备，失败保留完整输入，原提取/提交仍唯一。
+- `agent_py_agent/agent/memory_store/decision_curator_relation.py`：完整来源和正式 long-term 版本的可选关系注释；复用同一阶段、原仓库和账本，没有直接合并/晋升权限。
+- `agent_py_agent/tests/test_decision_curator_relation.py`：验证关系输入完整性、失效、原模型账本、作用域和 Curator 提取提交，fake 模型不代表真实语义质量。
 - `agent_py_agent/agent/settings/decision_settings_schema.py`、`decision_settings_defaults.py`、`decision_settings_projection.py`：分别负责严格结构、原模块默认值映射及脱敏有效值投影，不增加配置权威位置。
 - `agent_py_agent/tests/test_decision_usage_metrics.py`：验证用途分区复用原增量规则，决策输入与 LLM 总量不双计、缺报保留未知、历史基数随原文件更新。
 - `agent_py_agent/agent/backends/decision_protocol.py`：冻结宿主决策材料、来源和候选版本；结果只有建议权，消费者仍要复查。
@@ -703,6 +778,30 @@ docs/
 - `docs/tasks/DECISION_MODEL_P1CD_HANDOFF.md`：精确取消、有界资源、Curator 迁移和原准入组合证据，保留尚未接线的设置/账本边界。
 - `docs/tasks/DECISION_MODEL_P1E_HANDOFF.md`、`DECISION_MODEL_P1FG_HANDOFF.md`：共用设置、实际短决策调用及原用量展示的本地交接；真实服务与业务消费者另行验收。
 - `docs/tasks/DECISION_MODEL_P2_CURATOR_HANDOFF.md`：用户后台身份、临时标注、非选择结果、lease头寸和原Curator对照证据。
+- `docs/tasks/DECISION_MODEL_P5B_HANDOFF.md`：来源—正式条目关系建议的完整性/版本要求、原权限边界和 293 项离线验收交接。
+- `docs/tasks/DECISION_MODEL_CHILD_LIVE_HANDOFF.md`：真实 Jev 建议与官方 M3/OpenCode 子代理实际请求、工具后续轮及失败回退的隔离证据边界。
+- `docs/tasks/DECISION_MODEL_EXTERNAL_MATERIAL_ORDER_HANDOFF.md`：默认关闭的已归档网页阅读提示、原生产/消费接缝及尚未验真的效果边界。
+- `docs/tasks/DECISION_MODEL_MAIN_MODEL_AUDIT.md`：主会话获得准确车道后的自动选模时点、手动覆盖、请求容量与恢复缺口；只读审计，未实现采用。
+- `docs/tasks/DECISION_MODEL_MAIN_MODEL_SELECTION_HANDOFF.md`：原线程单调选择版本、显式覆盖和旧记录迁移的定向验证；尚无主会话自动采用。
+- `docs/tasks/DECISION_MODEL_MAIN_MODEL_OBSERVE_HANDOFF.md`：准确 Gateway 车道后的请求级只观察建议、关闭路径与恢复诊断；自动采用另验。
+- `docs/tasks/DECISION_MODEL_MAIN_MODEL_ADOPTION_HANDOFF.md`：同一准确 Gateway 工作片内的完整载荷验证、发送意图和局部失败保留；真实供应商调用仍另验。
+- `docs/tasks/DECISION_MODEL_MAIN_MODEL_LIVE_HANDOFF.md`：三次普通中文隔离会话的真实 Jev/官方 MiniMax 请求、原模型安全保留及异模未验边界。
+- `docs/tasks/DECISION_MODEL_NATURAL_CONFIG_FIX_HANDOFF.md`：普通 user owner 决策工具注册、可信会话、可见 CAS 回执修复及隔离 TUI 成功样本。
+- `docs/tasks/DECISION_MODEL_SELF_EXPERIMENT_AUDIT.md`：原任务/用量/验证/设置权威可复用点与实验授权、请求前预算、恢复资格缺口；只读审计。
+- `docs/tasks/DECISION_MODEL_EXPERIMENT_E1_HANDOFF.md`：原设置授权信封和原账预留首片；未有可信用户入口、完整输入 proof 或发送硬门，实验联网保持关闭。
+- `docs/tasks/DECISION_MODEL_SETTINGS_RESTORE_HANDOFF.md`：同一原设置事务内 set/unset、完整 CAS、通知与后改优先的本地交接。
+- `docs/tasks/DECISION_MODEL_PRE_RECALL_AUDIT.md`：说明普通聊天缺可信显式查历史意图、Jev 只选有限候选，以及额外检索前需拆开访问计数的只读审计。
+- `agent_py_agent/tests/test_decision_pre_recall.py`：默认关闭、建议非选择、正式预算、来源撤销、可选检索失败与取消的定向验收。
+- `agent_py_agent/agent/gateway_model_observation.py`、`agent_py_agent/tests/test_gateway_model_observation.py`：主会话请求级 Jev 观察、工作片来源冻结与关闭等价的实现和验证。
+- `docs/tasks/DECISION_MODEL_SELF_LEARNING_AUDIT.md`：核对现行 lesson Candidate 来源与 Skill 提案/用户确认缺口；Jev 目前不得写正式 Skill。
+- `docs/tasks/DECISION_MODEL_PLANNING_AUDIT.md`：核对已有 Todo、workflow plan、Goal 和 create_subagents 的权威边界；规划建议只提供软上下文。
+- `docs/tasks/DECISION_MODEL_PLANNING_HANDOFF.md`：当前主代理的 Todo read 只追加精确已有项优先提示；保留原账本、Goal 和派工权威。
+- `docs/tasks/DECISION_MODEL_DELIVERY_QUALITY_AUDIT.md`：核对原 verification、ready artifact、final/Goal/子代理权威，质量判断只能给主模型软复核焦点。
+- `docs/tasks/DECISION_MODEL_ACTION_CANDIDATE_AUDIT.md`：现行 Computer Use/MCP 与未接生产的 Browser/OCR 候选边界；动作建议先需要可信 observation/candidate ID。
+- `docs/tasks/DECISION_MODEL_NATURAL_CONFIG_AUDIT.md`：核对原 user_config 设置 CAS 和普通中文入口，区分工具本地通过与真实主模型实际选择、读回生效。
+- `docs/tasks/DECISION_MODEL_NATURAL_CONFIG_LIVE_HANDOFF.md`：普通 user owner 的原工具快照缺 user_config，真实模型搜索文件后未修改设置；记录修复边界和隔离恢复。
+- `agent_py_agent/agent/agent_core/decision_planning.py`、`agent_py_agent/tests/test_decision_planning.py`：默认关闭的 Todo 软建议、版本复核、非选择与原 read 回执等价的实现和验证。
+- `docs/tasks/DECISION_MODEL_CATALOG_GENERATION_HANDOFF.md`：原私有 v5/共享 v2 随机代次、旧目录自动迁移和最终配置锁复核的定向证据。
 
 - `agent_py_agent/agent/agent_core/agent_tree/model_view.py`：保留 run 身份、状态、原因与真实 read_order；不暴露恢复目录，省略内容可沿原工具归档完整读取。
 - `agent_py_agent/tests/test_agent_tree_model_view.py`：模型状态投影、终态报告可达性、状态不被省略及超长归档回读合同的定向验证。
@@ -870,10 +969,26 @@ docs/
 - `docs/design/MCP_TRANSPORT_LIFECYCLE.md`：MCP 的关闭、重连、发布顺序与未知清理边界；对应开发用例为 `agent_py_agent/tests/test_mcp_lifecycle.py`。
 
 - `agent_py_agent/agent/agent_core/orchestration/decision_subagent.py`：创建前可选模型建议，复用原目录、准备/物化、原工具快照和幂等身份。
-- `agent_py_agent/agent/memory_store/decision_recall.py`：原召回预算后排序及消费前来源复核，不扩大权限或新增记忆存储。
+- `agent_py_agent/agent/agent_core/tool_request_projection.py`：真实工具轮与创建前容量共用 PromptBuilder/IR 格式，不刷新宿主、不探测或发送；完整输入缺失时明确返回 unknown。
+- `agent_py_agent/agent/agent_core/subagent/model_selection.py`：子代理首业务模型请求前复核 Jev 建议、完整依赖与持久目录代次；原线程一次 CAS 采用或保留，未知不触发逐 child 用户操作。
+- `agent_py_agent/agent/model_request_selection.py`、`agent_py_agent/agent/gateway_model_adoption.py`：主会话经原模型请求回调验证完整输入、工具、窗口及目录代次，只在实际发送前提交准确线程的自动选择；发送前明确拒绝才沿原模型一次。
+- `agent_py_agent/agent/gateway_compact_context.py`：原 Gateway 恢复请求与 core 展示之间的应用层编排，同 turn 重载不复活已失效的展示建议。
+- `agent_py_agent/agent/runtime_context.py`：当前 runner 的线程本地属性权威供 Tooling、Conversation 与 core 共用，作用域退出清理；不保存持久任务身份。
+- `agent_py_agent/agent/settings/decision_experiment_schema.py`、`decision_experiment.py`、`agent_py_agent/agent/conversation/decision_experiment.py`、`agent_py_agent/agent/contracts/model_call_budget.py`：宿主专用有限许可、原账预留和失败关闭实验入口；没有用户授权 UI 或可靠联网输入硬门。
+- `agent_py_agent/tests/test_decision_experiment_authorization.py`、`test_model_call_input_budget.py`：原设置/模型账中的许可、并发预算、撤销、未知输入及跨代保守拒绝回归。
+- `agent_py_agent/tests/test_user_config_owner_scope.py`：普通 user 主回合 read/patch 的可信线程及 CAS 预览、跨 owner/子代理拒绝和 main_agent 原能力回归。
+- `agent_py_agent/tests/test_gateway_model_adoption.py`：Gateway 到原生成投影、最终发送和线程 CAS 的本地 HTTP 替身矩阵，不当作供应商真实验收。
+- `agent_py_agent/tests/test_subagent_first_request_selection.py`、`test_model_scope_dependencies.py`：首请求/后续轮真实载荷、撤销竞争、取消与作用域生命周期的定向验证。
+- `agent_py_agent/tests/test_tool_request_projection.py`：验证完整 system/动态段/schema/IR 与真实 provider payload 一致，缺输入 unknown、原历史不改和纯渲染不读宿主。
+- `agent_py_agent/tests/test_gateway_capability_compact.py`：验证同工作片能力展示在 Gateway、子代理 transcript Compact 及重建输入中保留，并覆盖新片清空和失效回原面。
+- `agent_py_agent/agent/memory_store/decision_recall.py`：原召回预算后排序及有界补充查询，消费前复核正式来源，不扩大权限或新增记忆存储。
+- `agent_py_agent/agent/agent_core/tool_context/external_material_order.py`：原工具归档之后仅追加阅读提示，复用决策期限/账本并保留来源权威。
+- `agent_py_agent/tests/test_decision_external_material_order.py`、`test_external_material_order_integration.py`：安全输入、失效、取消、原页面归档链和设置消费的离线证据。
 - `agent_py_agent/agent/capability/decision_candidates.py`、`decision_recommendation.py`：原授权能力候选与单工作片推荐消费者；一次调用、旧建议复核、按需展示，原Registry/Skill快照及搜索执行仍唯一。
 - `docs/tasks/DECISION_MODEL_P2_SUBAGENT_HANDOFF.md`：子代理选择生产接线、联合验证和完整窗口待验边界。
 - `docs/tasks/DECISION_MODEL_P3_RECALL_HANDOFF.md`：记忆排序、来源撤销、原本轮复用及本地验证交接。
+- `docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md`：完整请求、创建前容量与 Compact 展示面的实际诊断和分工边界。
+- `docs/tasks/DECISION_MODEL_REAL_VALIDATION.md`：隔离 Jev、官方 MiniMax 与 TUI 的真实调用、失败和验收证据。
 
 - `agent_py_agent/agent/settings/decision_probe.py`：显式连接测试，复用唯一原生后端、调用账和独立用量结算，不改变设置。
 - `agent_py_agent/cli/chat_parts/tui_decision_menu.py`：从原 `/model` 进入的共用设置表单和探测回执；当前有效值与来源由原服务给出。

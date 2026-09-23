@@ -21,6 +21,9 @@ from agent_py_agent.agent.agent_core.model.context_pressure import (
 from agent_py_agent.agent.agent_core.model.usage import (
     provider_visible_input_token_usage,
 )
+from agent_py_agent.agent.backends.base import BackendOptions
+from agent_py_agent.agent.backends.http import HttpBackend
+from agent_py_agent.agent.backends.responses import OpenAIResponsesBackend
 from agent_py_agent.agent.conversation.authority import (
     CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR,
 )
@@ -310,6 +313,103 @@ def test_preflight_uses_configured_threshold_without_a_second_ceiling(monkeypatc
     assert "compact_threshold=700" in response.text
 
 
+def test_preflight_checks_explicit_shared_window_against_sent_output_cap(monkeypatch) -> None:
+    backend = HttpBackend(BackendOptions(
+        api_base="https://example.invalid", api_key="test-key", model_name="test-model",
+        context_window_tokens=1_000, max_tokens=300,
+    ))
+    agent = SimpleNamespace(
+        config=AgentConfig(
+            auto_save_memory=True, model_context_window_tokens=1_000,
+            model_context_window_explicit=True, memory_compact_auto_trigger_percent=90,
+        ),
+        backend=backend,
+    )
+    params = SimpleNamespace(
+        context_scope="default", live_archive_state={},
+        tool_protocol_snapshot=make_test_protocol_snapshot(source_protocol="text"),
+    )
+    request = SimpleNamespace(agent=agent, params=params, prompt="测试", tool_rounds=0)
+    monkeypatch.setattr(
+        "agent_py_agent.agent.agent_core.model.context_pressure.estimate_tokens",
+        lambda _value: 699,
+    )
+    assert preflight_context_pressure_response(request) is None
+    monkeypatch.setattr(
+        "agent_py_agent.agent.agent_core.model.context_pressure.estimate_tokens",
+        lambda _value: 700,
+    )
+    response = preflight_context_pressure_response(request)
+    assert response is not None
+    assert response.runtime_status == "context_overflow"
+    assert "request_output_reserve=300" in response.text
+    assert "request_input_ceiling=700" in response.text
+    snapshot = model_visible_context_snapshot(agent, params, "测试")
+    assert snapshot.compact_trigger_tokens == 900
+    assert snapshot.current_tokens == 700
+
+
+def test_preflight_does_not_invent_output_reserve_without_wire_cap(monkeypatch) -> None:
+    backend = OpenAIResponsesBackend(BackendOptions(
+        api_base="https://example.invalid", api_key="test-key", model_name="test-model",
+        context_window_tokens=1_000, max_tokens=300,
+    ))
+    backend.auth_ref = {"mode": "chatgpt"}
+    agent = SimpleNamespace(
+        config=AgentConfig(
+            auto_save_memory=True, model_context_window_tokens=1_000,
+            model_context_window_explicit=True, memory_compact_auto_trigger_percent=90,
+        ),
+        backend=backend,
+    )
+    params = SimpleNamespace(
+        context_scope="default", live_archive_state={},
+        tool_protocol_snapshot=make_test_protocol_snapshot(source_protocol="text"),
+    )
+    request = SimpleNamespace(agent=agent, params=params, prompt="测试", tool_rounds=0)
+    monkeypatch.setattr(
+        "agent_py_agent.agent.agent_core.model.context_pressure.estimate_tokens",
+        lambda _value: 700,
+    )
+    assert preflight_context_pressure_response(request) is None
+    agent.config.model_context_window_explicit = False
+    backend.auth_ref = {}
+    assert preflight_context_pressure_response(request) is None
+
+
+def test_configured_250k_and_1m_windows_admit_only_fitting_requests(monkeypatch) -> None:
+    estimate = {"tokens": 0}
+    monkeypatch.setattr(
+        "agent_py_agent.agent.agent_core.model.context_pressure.estimate_tokens",
+        lambda _value: estimate["tokens"],
+    )
+    for window in (250_000, 1_000_000):
+        backend = HttpBackend(BackendOptions(
+            api_base="https://example.invalid", api_key="test-key", model_name="test-model",
+            context_window_tokens=window, max_tokens=window // 5,
+        ))
+        agent = SimpleNamespace(
+            config=AgentConfig(
+                auto_save_memory=True, model_context_window_tokens=window,
+                model_context_window_explicit=True, memory_compact_auto_trigger_percent=90,
+            ),
+            backend=backend,
+        )
+        request = SimpleNamespace(
+            agent=agent, prompt="测试", tool_rounds=0,
+            params=SimpleNamespace(
+                context_scope="default", live_archive_state={},
+                tool_protocol_snapshot=make_test_protocol_snapshot(source_protocol="text"),
+            ),
+        )
+        estimate["tokens"] = window * 4 // 5 - 1
+        assert preflight_context_pressure_response(request) is None
+        estimate["tokens"] += 1
+        response = preflight_context_pressure_response(request)
+        assert response is not None
+        assert f"request_input_ceiling={window * 4 // 5}" in response.text
+
+
 def test_preflight_native_counts_tool_schemas_before_first_tool_call(monkeypatch) -> None:
     agent = SimpleNamespace(
         config=AgentConfig(
@@ -574,6 +674,42 @@ def test_provider_observation_uses_actual_baseline_plus_conservative_growth(
     assert preflight_context_pressure_response(
         SimpleNamespace(agent=agent, params=params, prompt="prompt")
     ) is not None
+
+
+def test_provider_observation_invalidates_when_connection_changes(monkeypatch) -> None:
+    backend = SimpleNamespace(
+        context_window_tokens=100_000, name="fake", model_name="same-model",
+        api_base="https://first.invalid", api_key="first-secret", custom_headers={},
+    )
+    agent = SimpleNamespace(
+        config=AgentConfig(auto_save_memory=True, model_context_window_tokens=100_000),
+        backend=backend,
+    )
+    params = SimpleNamespace(
+        context_scope="conversation", save=True,
+        tool_protocol_snapshot=make_test_protocol_snapshot(source_protocol="text"),
+        live_archive_state={},
+    )
+    raw = {"tokens": 80_000}
+    monkeypatch.setattr(
+        "agent_py_agent.agent.agent_core.model.context_pressure.estimate_tokens",
+        lambda _payload: raw["tokens"],
+    )
+    initial = model_visible_context_snapshot(agent, params, "prompt")
+    assert record_provider_context_observation(
+        agent, params, raw_estimated_tokens=80_000,
+        context_surface_fingerprint=initial.context_surface_fingerprint,
+        response=SimpleNamespace(usage={"input_tokens": 40_000}),
+    )
+    raw["tokens"] = 85_000
+    assert model_visible_context_tokens(agent, params, "prompt") == 45_000
+    backend.api_base = "https://second.invalid"
+    assert model_visible_context_tokens(agent, params, "prompt") == 85_000
+    backend.api_base = "https://first.invalid"
+    assert model_visible_context_tokens(agent, params, "prompt") == 45_000
+    backend.api_key = "second-secret"
+    assert model_visible_context_tokens(agent, params, "prompt") == 85_000
+    assert "first-secret" not in str(params.live_archive_state)
 
 
 def test_provider_observation_falls_back_after_rewrite_or_missing_usage(monkeypatch) -> None:

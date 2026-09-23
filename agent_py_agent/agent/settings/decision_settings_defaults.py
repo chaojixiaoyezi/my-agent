@@ -1,4 +1,4 @@
-# LLM: 默认值仍归 AgentConfig、CapabilityConfig、MemorySettings；本模块仅映射和读取，不维护第二份默认。
+# LLM: 默认值仍归 AgentConfig、CapabilityConfig、MemorySettings；Curator 两点同归 memory，仅映射和读取，不维护第二份默认。
 # 模块用途: 将各模块的决策设置投影成共用服务的字段，并保留默认来源。
 from __future__ import annotations
 
@@ -13,12 +13,12 @@ from .decision_settings_schema import (
 )
 
 
-# LLM: 注册表只确定字段归属；能力点不能混入 AgentConfig，记忆点沿原记忆配置。
+# LLM: 注册表只确定字段归属；能力点不能混入 AgentConfig，召回前/后及整理/关系点沿原记忆配置，各自独立开关。
 # 函数用途: 返回公共字段路径对应的原配置模块和字段名。
 def decision_config_fields() -> dict[str, tuple[str, str]]:
     result = {key: ("agent", "decision_" + key) for key in GENERAL_FIELDS}
     for point in POINTS:
-        domain = "capability" if point in {"subagent_model", "skill_tool"} else "memory" if point in {"recall", "curator"} else "agent"
+        domain = "capability" if point in {"subagent_model", "skill_tool"} else "memory" if point in {"pre_recall", "recall", "curator", "curator_relation"} else "agent"
         prefix = "memory_decision_" if domain == "memory" else "decision_"
         for field in decision_point_fields(point):
             result[f"points.{point}.{field}"] = (domain, f"{prefix}{point}_{field}")

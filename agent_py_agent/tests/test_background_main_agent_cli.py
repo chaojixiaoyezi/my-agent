@@ -71,11 +71,11 @@ def test_gateway_background_loop_runs_due_progress_policy(tmp_path) -> None:
     worker = threading.Thread(target=_gateway_background_main_loop, args=(context, stop_event), daemon=True)
 
     worker.start()
-    deadline = time.time() + 2.0
-    while (
-        time.time() < deadline
-        and not agent.conversation_store.messages.recent(thread.thread_id)
-    ):
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        messages = agent.conversation_store.messages.recent(thread.thread_id)
+        if any(message.content == "后台主代理 CLI 汇报。" for message in messages):
+            break
         time.sleep(0.05)
     stop_event.set()
     worker.join(timeout=2)

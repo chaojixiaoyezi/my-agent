@@ -1,5 +1,13 @@
 # Gateway 维护状态
 
+- 主会话自动模型选择的 Stage A 已建立原线程版本事实：`model_selection_revision/source/last_explicit_revision`
+  随原线程一次原子更新，显式同值选择也前进版本并终结 pending 子代理建议；旧数据全缺才归一为未知，坏字段拒绝。
+  本片只提供宿主并发/恢复事实，尚未启用主会话自动采用，也不增加逐片确认或永久固定模型。
+- P5-D Stage C 在后续独立片已把 Gateway 请求级建议接到主会话首次真实发送前：原完整请求与候选 provider payload 验证、目录代次→准确车道 T→线程 CAS；发送前明确拒绝才回原模型一次，HTTP 后不跨模型重发。fake HTTP 本片34项、联合302项通过，真实供应商验收待做；工程容量估计不能称为精确 token 上界，详见 `docs/tasks/DECISION_MODEL_MAIN_MODEL_ADOPTION_HANDOFF.md`。
+  详见 `docs/tasks/DECISION_MODEL_MAIN_MODEL_SELECTION_HANDOFF.md`；Gateway 的 lane/模型作用域重排仍待后续片。
+
+- Jev 能力推荐的同一 Gateway 请求展示复用已核对的内存选择：原执行回调保存是否评估过和采用的 Skill/工具展示，transcript Compact 与超窗重试按当前身份、权限和连接重新核验。无效则清除本回合旧值，已评估回合不再次调用 Jev；新请求从基础面开始。122 项本地组合覆盖 DB attempt 轮换、动态名卡/schema、失效和单次建议；原溢出及更多回归仍在收口，尚非真实 TUI 验收。
+
 - 配置命令已有本地接线：HTTP/direct 共用原管理员、来源权限、宿主请求和 ToolExecutor；正文只含文件引用，值只写私有安装表。
   安装表 v2 同次保存配置与版本，旧 v1 显式迁移；目录 v2 带安装版本使旧配置请求过期。Gateway/客户端开发回归已覆盖原入口。
   查询仍只读原结果，UNKNOWN 不重跑；没有新增队列、Agent 初始化或后台进程。启用、撤销与真实 TUI 装卸尚未完成。

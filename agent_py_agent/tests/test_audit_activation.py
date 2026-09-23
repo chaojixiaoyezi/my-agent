@@ -21,10 +21,6 @@ from agent.agent_core.orchestration.create_policy import (
     create_task_attributes,
 )
 from agent.agent_core.orchestration.tool_grants import CODING_SUBAGENT_TOOLS
-from agent.agent_core.runner.context import (
-    restore_current_subagent_context,
-    set_current_subagent_context,
-)
 from agent.common.audit_activation import (
     AUDIT_ATTR,
     AUDIT_DEADLINE_ATTR,
@@ -55,6 +51,10 @@ from agent.ingestion import harvester as hv
 from agent.ingestion import watch_state as ws
 from agent.ingestion import watch_tool as wt
 from agent.ingestion.watch_tool import WatchStreamTool
+from agent.runtime_context import (
+    restore_current_subagent_context,
+    set_current_subagent_context,
+)
 from agent.tooling.runtime_contracts import ProviderToolCapability, ToolProtocolSnapshot
 
 _BASE_URL = "http://127.0.0.1:9/pull"

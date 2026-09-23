@@ -1,6 +1,6 @@
 
-# LLM: 子代理创建在原 owner 创建锁内发布 canonical 身份、继承清单及权限；登记与落盘不能生成第二套身份来源。
-# 模块用途: 完整创建和组织子代理任务，把已发布的运行身份交给后续 worker 和持久仓库。
+# LLM: 准备沿同一 canonical task；init-only 模型建议只写新 thread，不是权限/采用证明，正式创建仍走原 owner 锁和持久入口。
+# 模块用途: 复用原身份准备和创建子代理，将可选待验证建议交给其独立线程，不建立预览任务。
 """base task creation and lifecycle service.
 
 这里承接子代理任务创建、分割、注册卡等基础能力。
@@ -17,11 +17,13 @@ if TYPE_CHECKING:
 
 import logging
 import time
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import Any
 
 from ...common.id_generator import new_id as _framework_new_id
+from ...settings.thread_model_selection import PendingSubagentModelAdvice
 from ..authorization_gate import (
     AuthorizationError,
     OperationRequest,
@@ -75,6 +77,18 @@ class CreateRunParams:
     destroy_summary_required: bool = True
 
 
+# LLM: task 是原样提交的同一对象；model_advice 仅供新 thread 初始化，不进 task attrs、不赋予模型采用权，重冻须保留精确关联。
+# 类用途: 保存原创建身份、参数和可选待验证建议，让只读投影与正式创建复用同一子代理。
+@dataclass(frozen=True)
+class PreparedSubagentRun:
+    params: CreateRunParams
+    task: SubAgentTask
+    run_id: str
+    created_at: float
+    parent_revision: int | None
+    model_advice: PendingSubagentModelAdvice | None = None
+
+
 @dataclass(frozen=True)
 class OutputRefRebinding:
     field: str
@@ -92,6 +106,12 @@ def _load_parent_task(manager: Any, parent_id: str):
         return manager.load(parent_id)
     except FileNotFoundError:
         return None
+
+
+# LLM: 只读取原 canonical state_revision；缺父与零代父必须区分，不从时间或状态文案推断版本。
+# 函数用途: 为一次准备记录父任务代次，供锁外等待后的原提交入口检测停止或其他更新。
+def _creation_parent_revision(parent: SubAgentTask | None) -> int | None:
+    return None if parent is None else int(parent.state_revision or 0)
 
 
 # LLM: 路径比对只用于结构化 workspace/allow/deny 的精确同路径调和，不解析 goal。
@@ -394,8 +414,8 @@ def _store_rebindings(task: SubAgentTask, rewrites: list[OutputRefRebinding]) ->
     task.attributes = attrs
 
 
-# LLM: 新孩子在原 creation guard 内完成线程、权限与 canonical 发布；上层批次可重入同一原锁。
-# 类用途: 把创建参数物化为可运行的子代理任务，保持父子关系和权限身份一致。
+# LLM: 本服务仍是原创建与物化的唯一入口；准备结果不持锁、不落盘，跨等待后的提交必须重新校验，不得跳过上层原授权、幂等或取消门。
+# 类用途: 管理子代理准备、创建和接管，保持同一任务身份及原持久发布顺序。
 class SubAgentBaseService:
     """Base task creation and lifecycle service."""
 
@@ -433,35 +453,102 @@ class SubAgentBaseService:
         """Register a subagent role card."""
         self.manager.cards[card.name] = card
 
-    # LLM: 原创建锁覆盖线程、DB 权威和 canonical 发布；服务层已持同一路径锁时只重入，不建立第二份身份。
-    # 函数用途: 在停止扫描之前完整发布一个孩子及独立会话，创建中途不会被误判为空树。
+    # LLM: 原创建锁串行线程/DB/canonical 发布但不提供跨存储回滚；准备结果锁内复核，同一对象的建议只初始化新 thread。
+    # 函数用途: 创建孩子及独立会话；复用只读准备时拒绝输入、父代次、权限或对象漂移，不重新生成身份。
     def create_run(
         self,
         *,
         params: CreateRunParams,
+        prepared: PreparedSubagentRun | None = None,
     ) -> SubAgentTask:
         """Create one explicit subagent task record."""
         with self.manager.creation_guard():
-            from ..role_contracts import apply_role_contract_to_create_params
-
-            params = apply_role_contract_to_create_params(
-                params,
-                role_template_dirs=getattr(self.manager, "role_template_dirs", None),
+            prepared = (
+                self.prepare_run(params=params)
+                if prepared is None
+                else self._validated_prepared_run(params, prepared)
             )
-            prepared = self._prepare_run(params)
-            task = self._build_task(params, prepared)
-            self._materialize_agent_thread(task)
-            self._write_authority_records(task, params)
-            self._finalize_task(task, params.parent_id)
+            task = prepared.task
+            self._materialize_agent_thread(task, model_advice=prepared.model_advice)
+            self._write_authority_records(task, prepared.params)
+            self._finalize_task(task, prepared.params.parent_id)
             return task
 
-    # LLM: A delegated run receives its exact ConversationThread and explicitly requested Goal before lifecycle publication.
-    # Standalone unmanaged managers without a ConversationStore remain valid test/index adapters.
-    # 函数用途: 创建子代理任务时同步建立它自己的会话线程，供后续 Compact 和恢复使用。
-    def _materialize_agent_thread(self, task: SubAgentTask) -> None:
+    # LLM: 只读原角色、父任务和 owner 事实并分配正式待提交身份，不写 task/thread/DB；调用方在原创建锁内取得一致快照，锁外等待后仍由 create_run 复核。
+    # 函数用途: 准备之后会原样提交的子代理对象；复制嵌套输入，避免预览或调用方修改意外污染原规格。
+    def prepare_run(self, *, params: CreateRunParams) -> PreparedSubagentRun:
+        normalized = self._normalized_create_params(params)
+        seed = self._prepare_run(normalized)
+        return PreparedSubagentRun(
+            params=normalized,
+            task=self._build_task(deepcopy(normalized), seed),
+            run_id=str(seed["run_id"]),
+            created_at=float(seed["now"]),
+            parent_revision=_creation_parent_revision(seed["parent_task"]),
+        )
+
+    # LLM: 沿原算法重算但保留未发布 task 身份；参数/有效权限变化丢弃 init-only 建议，单纯父 revision 变化可保留，不重新授权。
+    # 函数用途: 重新冻结原对象，拒绝已发布或身份漂移，让建议始终关联同一份创建事实。
+    def refreeze_run(self, *, params: CreateRunParams, prepared: PreparedSubagentRun) -> PreparedSubagentRun:
+        with self.manager.creation_guard():
+            self._require_unpublished_preparation(prepared)
+            normalized = self._normalized_create_params(params)
+            seed = self._prepare_run(normalized, run_id=prepared.run_id, created_at=prepared.created_at)
+            current = self._build_task(deepcopy(normalized), seed)
+            identity = ("id", "created_at", "parent_id", "root_id", "depth", "agent_thread_id",
+                        "subagent_session_id", "parent_subagent_session_id", "root_subagent_session_id")
+            if any(getattr(current, name) != getattr(prepared.task, name) for name in identity):
+                raise ValueError("子代理准备身份已变化，不能重新冻结。")
+            advice = prepared.model_advice
+            if normalized != prepared.params or any(
+                getattr(current, name) != getattr(prepared.task, name)
+                for name in ("effective_permissions", "allowed_write_roots", "forbidden_write_roots")
+            ):
+                advice = None
+            for item in fields(current):
+                setattr(prepared.task, item.name, getattr(current, item.name))
+            return replace(prepared, params=normalized, parent_revision=_creation_parent_revision(seed["parent_task"]), model_advice=advice)
+
+    # LLM: 角色归一和权限收缩只复用原合同，返回独立数据副本；没有保存、网络或新授权。
+    # 函数用途: 在准备和提交复核时使用相同的角色规则，保留外部传入参数不被改动。
+    def _normalized_create_params(self, params: CreateRunParams) -> CreateRunParams:
+        from ..role_contracts import apply_role_contract_to_create_params
+
+        return deepcopy(apply_role_contract_to_create_params(
+            params, role_template_dirs=getattr(self.manager, "role_template_dirs", None),
+        ))
+
+    # LLM: 仅由持原 creation_guard 的 create_run 调用；重新构造只是同一身份的比较投影，不提交第二对象，已发布或任何漂移均在首个写入前拒绝。
+    # 函数用途: 防止旧准备对象、被修改的预览或重复提交覆盖最新任务与权限；失败时原准备对象仍不落盘。
+    def _validated_prepared_run(self, params: CreateRunParams, prepared: PreparedSubagentRun) -> PreparedSubagentRun:
+        normalized = self._normalized_create_params(params)
+        if normalized != prepared.params:
+            raise ValueError("子代理创建输入已变化，请重新准备。")
+        seed = self._prepare_run(normalized, run_id=prepared.run_id, created_at=prepared.created_at)
+        if _creation_parent_revision(seed["parent_task"]) != prepared.parent_revision:
+            raise ValueError("子代理父任务已变化，请重新准备。")
+        if self._build_task(deepcopy(normalized), seed) != prepared.task:
+            raise ValueError("子代理准备对象或权限已变化，请重新准备。")
+        self._require_unpublished_preparation(prepared)
+        return prepared
+
+    # LLM: 只查原 canonical 发布事实；不能因 task 路径预览存在就视为已创建，已发布准备对象不得重冻或覆盖。
+    # 函数用途: 在任何准备对象更新或正式写入前拒绝重复发布与被篡改的主身份。
+    def _require_unpublished_preparation(self, prepared: PreparedSubagentRun) -> None:
+        if prepared.task.id != prepared.run_id or prepared.task.created_at != prepared.created_at:
+            raise ValueError("子代理准备身份已变化，请重新准备。")
+        try:
+            self.manager.load(prepared.run_id)
+        except FileNotFoundError:
+            return
+        raise ValueError("子代理准备对象已经发布，不能重复创建。")
+
+    # LLM: 生命周期发布前沿原入口物化准确线程和显式 Goal；建议来自准备载体而非 attrs，已有 thread 不重植 pending。
+    # 函数用途: 建立孩子会话并只在新线程初始化待验证建议，实际模型保持原继承或用户显式选择。
+    def _materialize_agent_thread(self, task: SubAgentTask, *, model_advice: PendingSubagentModelAdvice | None = None) -> None:
         from ...conversation.agent_thread import ensure_subagent_thread
 
-        ensure_subagent_thread(self.manager, task)
+        ensure_subagent_thread(self.manager, task, model_advice=model_advice)
         from ...conversation.goal_delegation import seed_delegated_goal
 
         seed_delegated_goal(self.manager, task)
@@ -513,26 +600,28 @@ class SubAgentBaseService:
         # run scope 携带 DB task_id（授权门比对键）都要从这里拿，不另起查询。
         _persist_runtime_authority_attrs(task, record)
 
-    def _prepare_run(self, params: CreateRunParams) -> dict[str, object]:
+    # LLM: 路径来自原 manager 算法，父状态只读一次；复核只使用原准备身份和时间，不调用 ID 生成或物化工作区。
+    # 函数用途: 计算一个新任务或原准备对象的创建材料，不写文件、线程或权威数据库。
+    def _prepare_run(self, params: CreateRunParams, *, run_id: str | None = None, created_at: float | None = None) -> dict[str, object]:
         """Prepare run paths and the caller-provided acceptance contract."""
-        run_id = _framework_new_id("run_id")
+        run_id = _framework_new_id("run_id") if run_id is None else run_id
         paths = self.manager._build_work_order_paths(run_id, extra_write_roots=params.extra_write_roots)
         return {
             "run_id": run_id,
             "paths": paths,
             "acceptance_checks": list(params.acceptance_checks or []),
-            "now": time.time(),
+            "now": time.time() if created_at is None else created_at,
+            "parent_task": _load_parent_task(self.manager, params.parent_id),
         }
 
-    # LLM: The canonical task record receives normalized creation fields once;
-    # later display adapters may truncate description but cannot rewrite goal.
-    # 函数用途: 用准备好的路径、身份和职责短标题组装可持久化子代理任务。
+    # LLM: canonical 对象仅使用原准备材料中的身份、父状态和路径；复核投影不得写入，展示短标题仍不改变目标与权限。
+    # 函数用途: 从已冻结的创建材料组装子代理；正式提交沿用原对象，比较投影只用于拒绝漂移。
     def _build_task(self, params: CreateRunParams, prepared: dict[str, object]) -> SubAgentTask:
         """Build SubAgentTask from params and prepared context."""
         run_id = prepared["run_id"]
         now = prepared["now"]
 
-        parent_task = _load_parent_task(self.manager, params.parent_id)
+        parent_task = prepared["parent_task"]
         task = SubAgentTask(
             id=run_id,
             goal=params.goal,

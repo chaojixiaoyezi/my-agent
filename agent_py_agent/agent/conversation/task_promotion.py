@@ -47,7 +47,7 @@ def promote_current_conversation_task(
     store = getattr(agent, "conversation_store", None)
     if not thread_id or not task_id or store is None or not callable(getattr(getattr(store, 'tasks', None), 'bind', None)):
         return None
-    from ..agent_core.runner.context import current_subagent_run_id
+    from ..runtime_context import current_subagent_run_id
 
     child_run_id = current_subagent_run_id(agent)
     if attrs.get(CONVERSATION_TRANSIENT_WORKSPACE_ATTR) is True and not child_run_id:

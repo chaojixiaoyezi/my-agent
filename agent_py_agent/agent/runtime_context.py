@@ -1,4 +1,5 @@
-
+# LLM: 当前 runner 身份是线程本地临时事实，Tooling、Conversation 与 core 共用此唯一入口；持久身份仍以原任务/会话账为准。
+# 模块用途: 隔离同一 Agent 并发执行时的当前任务属性和 runner 身份，退出作用域时清理，避免跨线程串状态。
 from __future__ import annotations
 
 """Thread-local transient runtime state for a shared Agent instance.
@@ -6,7 +7,7 @@ from __future__ import annotations
 LLM: Durable task identity belongs to structured stores; this module contains only scoped in-process state and
 must clean it when a scope or agent ends.
 
-模块用途: 隔离同一 Agent 并发执行时的当前 prompt、任务和 runner 参数，避免跨线程串状态。
+模块用途: 为不同运行层提供同一份当前线程的临时身份、任务属性和 runner 参数，不代替持久任务记录。
 """
 
 import threading

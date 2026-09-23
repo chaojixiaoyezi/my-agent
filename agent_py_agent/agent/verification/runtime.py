@@ -13,9 +13,9 @@ from pathlib import Path
 from typing import Any
 
 from ..agent_core.run_task_workspace_writer import current_run_task_workspace_root
-from ..agent_core.runner.context import current_subagent_run_id, current_task_attributes
 from ..agent_core.runtime.owner_roots import runtime_owner_root
 from ..agent_core.runtime.task_identity import durable_task_id
+from ..runtime_context import current_subagent_run_id, current_task_attributes
 from ..tooling.runtime_contracts import ToolCall, ToolResult
 from ..tooling.write_boundary import WRITE_TOOL_NAMES, declared_write_paths
 from .project_facts import classify_verification_command, project_facts_for

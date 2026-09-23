@@ -6,10 +6,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_py_agent.agent.agent_core.runner.context import (
-    restore_current_subagent_context,
-    set_current_subagent_context,
-)
 from agent_py_agent.agent.agent_core.runtime.goal_accounting import account_goal_model_response
 from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
 from agent_py_agent.agent.backends.base import ModelResponse
@@ -18,6 +14,10 @@ from agent_py_agent.agent.conversation.goal_control import execute_agent_goal_co
 from agent_py_agent.agent.conversation.goal_delegation import active_delegated_goal_after_turn
 from agent_py_agent.agent.conversation.goal_prompting import current_goal_scope_prompt
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.runtime_context import (
+    restore_current_subagent_context,
+    set_current_subagent_context,
+)
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.cli.chat_parts.tui_goal_editor import _request_goal
 from agent_py_agent.tests.test_conversation_goal_tools import _goal_agent

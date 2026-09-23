@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..runtime_context import current_subagent_run_id
 from ..task_progress import (
     invalid_coverage_statuses,
     invalid_item_statuses,
@@ -40,7 +41,6 @@ from .orchestration.dispatch_progress_seed import (
     reconcile_completed_child_items,
 )
 from .orchestration.tool_specs import build_task_progress_model_spec
-from .runner.context import current_subagent_run_id
 from .runtime.owner_roots import runtime_owner_root
 from .runtime.task_identity import (
     conversation_task_progress_ledger_id,
@@ -80,8 +80,8 @@ class TaskProgressTool(BaseTool):
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
 
-    # LLM: 默认写入当前账本；显式历史目标须属于同 owner/thread 的已存在账本，不能据读取或正文自动改绑运行。
-    # 函数用途: 按精确账本 ID 读写软进度；允许主代理补充自己的旧计划，子代理仍只写自己，任务生命周期不变。
+    # LLM: 默认写入当前账本；显式历史目标须属于同 owner/thread 的已存在账本。read 的可选 Jev 建议只追加软提示，不改账本或原工具回执；停止仍传播。
+    # 函数用途: 按精确账本 ID 读写软进度；主代理读取已有计划时可收到现有项的优先级建议，任务生命周期不变。
     def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         action = _normalized_action(params.get("action"))
         if action_error := _invalid_action_result(action):
@@ -130,6 +130,12 @@ class TaskProgressTool(BaseTool):
         generation_id, plan_revision = task_progress_display_identity(payload)
         model_payload = dict(payload)
         model_payload.pop("display_plan", None)
+        if action == "read":
+            from .decision_planning import todo_priority_hint
+
+            priority = todo_priority_hint(self.agent, root, run_id, payload)
+            if priority is not None:
+                model_payload["planning_priority_hint"] = priority
         return ToolHandlerOutcome(
             "task_progress",
             True,

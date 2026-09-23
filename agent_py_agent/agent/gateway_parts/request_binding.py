@@ -1,5 +1,5 @@
-# LLM: Gateway 请求绑定只投影已由宿主确认的 thread/task/run/attempt；写前绑定、T 锁和 claim 释放顺序不可更改。
-# 模块用途: 将精确请求接到共用执行车道和运行身份，保留原 JSON 原子更新与停止裁决，不复制生命周期。
+# LLM: Gateway 绑定与一次观察只使用宿主确认的 thread/task/run/attempt；T/JSON 锁及 claim 释放顺序不变，建议不授予执行权。
+# 模块用途: 将精确请求接到原执行车道、运行身份和观察标记，保留原原子更新与停止裁决，不复制生命周期。
 from __future__ import annotations
 
 from contextlib import nullcontext
@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     from . import request_context
 
 _GATEWAY_FOREGROUND_CLAIM_REASON = "gateway_foreground_turn"
+MODEL_OBSERVATION_KEY = "model_selection_observation"
 
 
 # LLM: This writer is the only bridge from a promoted conversation task back to the exact
@@ -188,6 +189,84 @@ class GatewayActiveTurnTransition:
             ):
                 raise InterruptedError("Gateway active turn closed before provider admission")
             return operation()
+
+
+# LLM: 观察标记属于原请求事实，仅准确 attempt/车道下可写；它不是模型选择、恢复权限或执行快照。
+# 类用途: 在原回合事务内预留一次模型建议并记录脱敏回执，崩溃后的同请求不会再次请求决策模型。
+@dataclass(frozen=True)
+class GatewayModelObservationWriter:
+    context: object
+    thread_id: str
+    claim_id: str
+    operation_id: str
+
+    # LLM: 先写再发，既存任何标记均不重放；T 后原 JSON 锁保持 heartbeat/取消事实，不持锁调用模型。
+    # 函数用途: 为本次已领取车道的请求预留一次观察，失败时不获得发送资格。
+    def reserve(self) -> bool:
+        context = self.context
+        marker = {
+            "schema": "gateway_model_selection_observation.v1", "request_id": context.request_id,
+            "thread_id": self.thread_id, "claim_id": self.claim_id, "operation_id": self.operation_id,
+            "execution_attempt_id": context.request["execution_attempt_id"],
+            "status": "started", "adopted": False,
+        }
+        reserved = False
+
+        # LLM: 同请求的既存标记不可覆盖，车道绑定只能来自原宿主事务；正文或客户端字段不授予资格。
+        # 函数用途: 在原 JSON 更新锁内核对归属并留下唯一发送前事实。
+        def update(current: dict) -> dict:
+            nonlocal reserved
+            expected = {"schema_version": "gateway_conversation_claim.v1", "request_id": context.request_id,
+                        "thread_id": self.thread_id, "task_id": f"gateway:{context.request_id}"}
+            if current.get("conversation_claim") != expected:
+                raise ConversationPersistenceError("模型观察与本请求车道绑定不一致")
+            if MODEL_OBSERVATION_KEY in current:
+                return current
+            reserved = True
+            return {**current, MODEL_OBSERVATION_KEY: marker}
+
+        saved = self._transition("reserve", update)
+        if reserved:
+            context.request[MODEL_OBSERVATION_KEY] = saved[MODEL_OBSERVATION_KEY]
+        return reserved
+
+    # LLM: 只合并同一次观察的宿主结构化结果；closing 可收口，不能覆盖后来 attempt 或再次发送。
+    # 函数用途: 将建议编号和状态记在原请求里，不改线程模型、历史、运行绑定或正文。
+    def finish(self, result: dict) -> None:
+        # LLM: 回执由内部适配器构造；adopted 固定为 false，原始回复、配置、密钥不进入标记。
+        # 函数用途: 核对原标记并完成本次观察，重复收口保留已有终态。
+        def update(current: dict) -> dict:
+            marker = current.get(MODEL_OBSERVATION_KEY)
+            if (not isinstance(marker, dict) or marker.get("operation_id") != self.operation_id
+                    or marker.get("claim_id") != self.claim_id or marker.get("status") != "started"):
+                return current
+            return {**current, MODEL_OBSERVATION_KEY: {**marker, **result, "adopted": False}}
+
+        saved = self._transition("acknowledge", update)
+        self.context.request[MODEL_OBSERVATION_KEY] = saved[MODEL_OBSERVATION_KEY]
+
+    # LLM: 仅原观察终态的同一建议可以更新采用投影；线程 CAS 才是模型选择权威，发送意图不能写成 HTTP 已接收。
+    # 函数用途: 记录本请求候选保留或发送意图，终态后重试不覆盖既存事实。
+    def record_adoption(self, result: dict) -> None:
+        # LLM: 原 JSON 锁内比较 op/claim/status，旧请求或重复调用不能重新启用建议。
+        # 函数用途: 在原请求中替换可采用建议的展示结果。
+        def update(current: dict) -> dict:
+            marker = current.get(MODEL_OBSERVATION_KEY)
+            if (not isinstance(marker, dict) or marker.get("operation_id") != self.operation_id
+                    or marker.get("claim_id") != self.claim_id or marker.get("status") != "observed"):
+                return current
+            return {**current, MODEL_OBSERVATION_KEY: {**marker, **result}}
+
+        saved = self._transition("acknowledge", update)
+        self.context.request[MODEL_OBSERVATION_KEY] = saved[MODEL_OBSERVATION_KEY]
+
+    # LLM: 复用原 active-turn 准入及 JSON 原子写，准确 attempt 不可由观察结果替换。
+    # 函数用途: 在原锁序内执行小型标记更新，锁内绝不准备候选或发网络请求。
+    def _transition(self, phase: str, update):
+        context = self.context
+        transition = GatewayActiveTurnTransition(context.request_path, context.request_id,
+                                                context.request["execution_attempt_id"])
+        return transition(phase, lambda: update_json_file_atomic(context.request_path, update, require_existing=True))
 
 
 # LLM: Transport owns this persisted projection, RuntimeDB owns the identity. Validate request

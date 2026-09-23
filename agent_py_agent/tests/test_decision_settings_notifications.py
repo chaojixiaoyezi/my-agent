@@ -60,6 +60,26 @@ def test_shadowed_owner_disable_then_thread_reset_cancels_immediately(prepared):
         policy.unregister_active(token, row)
 
 
+def test_restore_notifies_once_and_cancels_newly_disabled_decision(prepared):
+    host, params, _ = prepared
+    thread_id = params.task_attributes["conversation_thread_id"]
+    patch(host, {"enabled": True, "points.recall.mode": "observe"}, scope="thread", thread_id=thread_id)
+    view = settings(host, "read", {}, thread_id=thread_id)
+    row = policy.ActiveDecision(policy.decision_owner_ref(host), thread_id, "recall", InterruptHandle(), host, view)
+    token = uuid.uuid4().hex
+    assert policy.register_active(token, row)
+    try:
+        patch(host, {"enabled": False})
+        assert not row.handle.cancelled
+        current = settings(host, "read", {"scope": "thread"}, thread_id=thread_id)
+        restored = settings(host, "restore", {"scope": "thread", "expected_revision": current["revision"],
+            "set": {}, "unset": ["enabled"]}, thread_id=thread_id)
+        assert restored["revision"]["thread"] == current["revision"]["thread"] + 1
+        assert row.handle.cancelled and row.settings_cancelled
+    finally:
+        policy.unregister_active(token, row)
+
+
 def test_reverse_notifications_cannot_revert_newer_snapshot(active, prepared, monkeypatch):
     host, _params, _ = prepared
     original = policy.notify_decision_settings_changed

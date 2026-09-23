@@ -1,9 +1,10 @@
-# LLM: 此模块独占 Chat Completions 转换；探针与传输共用地址归一，保持历史、思考、工具、采样与用量合同。
+# LLM: 此模块独占 Chat Completions 转换；只读出站投影与真实发送共用组包，保持历史、思考、工具、采样与用量合同。
 # 模块用途: 调用 Chat 接口，转换消息和流式结果；网络、回调及显式启用的私有诊断写入均在既有边界内。
 from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
@@ -162,10 +163,31 @@ class OpenAICompatibleBackend(HttpBackend):
             )
         )
 
-    # LLM: 角色与思考控制来自 typed request；精确端点/型号可采用采样默认，显式温度保留，
-    # 已知 DeepSeek/Zen 出站补空 reasoning 不修改 canonical 或声称找回思考。
-    # 函数用途: 组装 Chat 的采样、历史与工具请求；不改会话编号或添加失败重试。
-    def _generate(self, request: _OpenAIGenerateRequest) -> ModelResponse:
+    # LLM: 普通 generate 投影复用 Chat 唯一组包；Responses 或自定义重写不能借继承冒充该发送语义。
+    # 函数用途: 只读返回实际出站 JSON，不探针、不写诊断、不发网络，未知适配器返回 None。
+    def project_generate_payload(
+        self, prompt: str, *, tools: list[dict[str, Any]] | None = None,
+        tool_choice: ToolChoice | None = None, messages: list[dict[str, Any]] | None = None,
+        request_options: ProviderRequestOptions | None = None,
+    ) -> dict[str, Any] | None:
+        if (type(self).generate is not OpenAICompatibleBackend.generate
+                or type(self)._generate is not OpenAICompatibleBackend._generate
+                or type(self)._request_payload is not OpenAICompatibleBackend._request_payload
+                or type(self)._generate_stream is not OpenAICompatibleBackend._generate_stream):
+            return None
+        options = request_options or ProviderRequestOptions()
+        payload = self._request_payload(_OpenAIGenerateRequest(
+            prompt=prompt, tools=tools, tool_choice=tool_choice, messages=messages,
+            system_instruction=options.system_instruction, thinking_disabled=options.thinking_disabled,
+        ))
+        if self.stream_enabled:
+            payload = openai_stream_payload(payload)
+            payload["stream"] = True
+        return deepcopy(payload)
+
+    # LLM: typed request 的角色、思考与采样继续由原适配规则处理；这是发送和预览唯一组包，不修改 canonical 历史。
+    # 函数用途: 纯构造 Chat 的历史、工具和输出格式，保留已核对端点的思考兼容语义。
+    def _request_payload(self, request: _OpenAIGenerateRequest) -> dict[str, Any]:
         from .sampling import chat_sampling_fields
 
         payload = {
@@ -214,6 +236,12 @@ class OpenAICompatibleBackend(HttpBackend):
             }
         elif request.json_object:
             payload["response_format"] = {"type": "json_object"}
+        return payload
+
+    # LLM: 发送只消费同源 payload；认证、私有诊断、网络和响应解析仍在原边界发生，预览不触发它们。
+    # 函数用途: 发起一次 Chat 请求，沿用原流式或非流式响应处理。
+    def _generate(self, request: _OpenAIGenerateRequest) -> ModelResponse:
+        payload = self._request_payload(request)
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_key}",
@@ -232,7 +260,7 @@ class OpenAICompatibleBackend(HttpBackend):
         return _openai_non_stream_response(
             obj,
             backend_name=self.name,
-            tools_requested=bool(tools),
+            tools_requested=bool(payload.get("tools")),
         )
 
     # LLM: reasoning_content 与正文必须走不同观察器，并在正文/工具或流结束前封口思考块；

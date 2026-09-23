@@ -246,7 +246,7 @@ def test_runtime_formal_recall_uses_only_long_term_routed_lesson_and_hot() -> No
         routed,
         recall_scope=scope,
         long_term_memories=[long_term],
-        task_local=False,
+        skip_formal_recall=False,
     )
     rendered = memory_context_text(memories)
 

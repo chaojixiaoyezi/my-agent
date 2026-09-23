@@ -1,5 +1,6 @@
-# LLM: 原模型目录仍是唯一文件源；决策读写/探测在生成选择前独立分派，子代理只引用已存配置，密钥不进投影。
-# 模块用途: 管理主/子模型与决策入口；配置、目录和显式测试各守原权限，派工不能新增连接或切换主模型。
+# LLM: 原目录保存同时轮换持久代次；pending 采用沿原锁复核，普通读不迁移落盘，密钥不进快照或公开投影。
+# 原选择读取的可选上下文捕获仅复用此次开关事实，退出清理；不能移动既有模型冻结点或成为配置缓存。
+# 模块用途: 管理主/子模型与决策入口，为自动增强提供可跨重启核对的原目录版本，不另建配置或请求路径。
 
 from __future__ import annotations
 
@@ -7,18 +8,24 @@ import hashlib
 import json
 import os
 import tempfile
-from dataclasses import replace
+from contextlib import ExitStack, contextmanager
+from contextvars import ContextVar
+from copy import deepcopy
+from dataclasses import dataclass, replace
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from ..common.json_io import locked_json_path
 from .model_provider_schema import (
     SCHEMA,
     ModelProfileError,
+    ModelProfileGeneration,
     migrate_v1,
     migrate_v2,
     migrate_v3,
+    migrate_v4,
     resolved_model,
+    validate_catalog_generation,
     validate_model,
     validate_model_profile,
     validate_provider,
@@ -32,6 +39,29 @@ from .shared_model_catalog import (
 )
 
 
+# LLM: 只捕获原选择路径已读取的脱敏设置，不读第二次目录；上下文退出清理，不能作为授权或长期缓存。
+# 类用途: 为宿主同一工作片提供原模型冻结时的选择编号及决策开关。
+@dataclass(frozen=True)
+class SelectedModelRead:
+    profile_id: str
+    decision_settings: dict
+
+
+_SELECTED_MODEL_READ: ContextVar[list[SelectedModelRead] | None] = ContextVar("selected_model_read", default=None)
+
+
+# LLM: 仅原 selected_model_config 的首次读取填充当前作用域；不改变解析顺序、网络或文件读写，嵌套退出还原。
+# 函数用途: 让 Gateway 在原模型冻结期间复用已读设置，关闭增强时不为检查开关额外读盘。
+@contextmanager
+def capture_selected_model_read():
+    captured: list[SelectedModelRead] = []
+    token = _SELECTED_MODEL_READ.set(captured)
+    try:
+        yield captured
+    finally:
+        _SELECTED_MODEL_READ.reset(token)
+
+
 # LLM: 路径只由可信 home/owner 身份决定，不接受客户端指定路径或从模型名拼文件名。
 # 函数用途: 返回当前用户配置文件的位置，不创建目录。
 def model_profiles_path(home_paths: object) -> Path:
@@ -40,23 +70,31 @@ def model_profiles_path(home_paths: object) -> Path:
     return Path(home_paths.config_dir) / "model-profiles" / f"{digest}.json"
 
 
-# LLM: 只认显式 schema，v1/v2/v3 迁移不落盘；v4 覆盖严格校验，损坏和未知版本不覆盖秘密。
-# 函数用途: 读取当前用户的唯一模型配置，显式迁移旧目录并检查引用完整性。
+# LLM: 旧 schema 只经对应显式迁移，新版必须已有有效代次；未知版本不能用默认迁移猜测。
+# 函数用途: 归一原目录版本且保持只读，把版本分派与模型内容校验分开。
+def _migrated_profile_data(data: dict) -> dict:
+    migrations = {"owner_model_profiles.v1": migrate_v1, "owner_model_profiles.v2": migrate_v2,
+                  "owner_model_profiles.v3": migrate_v3, "owner_model_profiles.v4": migrate_v4}
+    migration = migrations.get(data["schema"])
+    if migration is not None:
+        return migration(data)
+    if data["schema"] != SCHEMA:
+        raise ModelProfileError("模型配置结构无效。")
+    validate_catalog_generation(data["catalog_generation"])
+    return data
+
+
+# LLM: v1—v4 只读迁移的代次明确未知，v5 必须有真实随机代次；未知/损坏不覆盖，不能从读取伪造旧事件。
+# 函数用途: 读取原模型目录并校验用途、引用与持久版本，普通读取不会写文件。
 def read_model_profiles(path: Path) -> dict:
     from .decision_settings_schema import empty_decision_settings, validate_decision_settings
 
     if not path.exists():
         return {"schema": SCHEMA, "selected": "default", "providers": {}, "profiles": {},
-                "decision_settings": empty_decision_settings()}
+                "decision_settings": empty_decision_settings(), "catalog_generation": None}
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        if data["schema"] == "owner_model_profiles.v1":
-            data = migrate_v1(data)
-        elif data["schema"] == "owner_model_profiles.v2":
-            data = migrate_v2(data)
-        elif data["schema"] == "owner_model_profiles.v3":
-            data = migrate_v3(data)
-        if data["schema"] != SCHEMA or not isinstance(data["profiles"], dict) or not isinstance(data["providers"], dict):
+        data = _migrated_profile_data(json.loads(path.read_text(encoding="utf-8")))
+        if not isinstance(data["profiles"], dict) or not isinstance(data["providers"], dict):
             raise ModelProfileError("模型配置结构无效。")
         data["decision_settings"] = validate_decision_settings(data["decision_settings"])
         data["providers"] = {validate_provider_id(key): validate_provider(row) for key, row in data["providers"].items()}
@@ -72,18 +110,103 @@ def read_model_profiles(path: Path) -> dict:
     return data
 
 
-# LLM: 临时文件在写入第一个 secret 字节之前即为 0600；同目录 replace 保证断电/并发不会留下半份配置。
-# 函数用途: 原子保存私有模型配置，失败时保留原文件并清理临时文件。
+# LLM: 必须持原目录锁；所有管理/OAuth/设置写入与随机代次同次 replace，0600 临时文件及失败旧版本保持。
+# 函数用途: 原子保存唯一私有目录，成功后才更新调用方内存版本，使旧 pending 失效。
 def _save_profiles(path: Path, data: dict) -> None:
+    saved = {**data, "schema": SCHEMA, "catalog_generation": uuid4().hex}
     fd, name = tempfile.mkstemp(prefix=".models-", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            json.dump(data, stream, ensure_ascii=False)
+            json.dump(saved, stream, ensure_ascii=False)
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(name, path)
+        data.update(saved)
     finally:
         Path(name).unlink(missing_ok=True)
+
+
+# LLM: 锁路径只来自可信宿主；统一当前 owner→管理员→发布目录，重复路径去重，不接受快照提供路径。
+# 函数用途: 给准备和最终采用返回同一原目录锁序；后续线程 CAS 必须在这些锁之后。
+def _generation_paths(agent: object, profile_id: str) -> tuple[Path, ...]:
+    from .shared_model_catalog import _admin_profiles_path, shared_catalog_path
+
+    home = agent.home_paths
+    if any(not isinstance(getattr(home, key, None), str) or not getattr(home, key).strip()
+           for key in ("owner_provider", "owner_kind", "owner_id")):
+        raise ModelProfileError("模型目录版本需要已验证的用户身份。")
+    paths = [model_profiles_path(home)]
+    if shared_profile_key(profile_id):
+        paths.extend((_admin_profiles_path(home), shared_catalog_path(home)))
+    return tuple(dict.fromkeys(path.resolve() for path in paths))
+
+
+# LLM: 复用原线程/OS 锁，不新增锁表；先配置后调用方原线程锁，锁内禁止网络或重入配置/OAuth 管理。
+# 函数用途: 在异常和非阻塞竞争时正确释放已持目录锁，让可选增强及时保留原方案。
+@contextmanager
+def _locked_model_catalogs(agent: object, profile_id: str, *, blocking: bool):
+    with ExitStack() as stack:
+        for path in _generation_paths(agent, profile_id):
+            stack.enter_context(locked_json_path(path, blocking=blocking))
+        yield
+
+
+# LLM: 初始化只能在已持有全部原目录锁且有权修改来源时调用；代次和解析读取同一来源，秘密不进入返回值。
+# 函数用途: 读取或初始化一个已授权模型的原目录版本，共享同时需要发布和管理员来源代次。
+def _profile_generation(agent: object, profile_id: str, *, initialize: bool) -> ModelProfileGeneration | None:
+    from .shared_model_catalog import _admin_profiles_path, _save_catalog, _shared_source
+
+    paths = _generation_paths(agent, profile_id)
+    shared_key = shared_profile_key(profile_id)
+    if shared_key:
+        data, catalog = _shared_source(agent.home_paths, profile_id)
+        resolved_model(data, shared_key)
+        path = _admin_profiles_path(agent.home_paths)
+    else:
+        path = paths[0]
+        data, catalog = read_model_profiles(path), None
+        _resolved_profile(agent, data, profile_id)
+    if initialize:
+        if data["catalog_generation"] is None:
+            _save_profiles(path, data)
+        if catalog is not None and catalog["catalog_generation"] is None:
+            _save_catalog(agent.home_paths, catalog)
+    generation = data["catalog_generation"]
+    shared_generation = catalog["catalog_generation"] if catalog is not None else None
+    if generation is None or catalog is not None and shared_generation is None:
+        return None
+    authority = hashlib.sha256(str(path.resolve()).encode("utf-8")).hexdigest()
+    return ModelProfileGeneration(profile_id, authority, generation, shared_generation)
+
+
+# LLM: 普通 read/off 不写；只有宿主已确认增强启用才传 initialize，旧 shared 非管理员未知须 retain；先快照后解析配置再 guard。
+# 函数用途: 返回可持久化的模型版本，必要时自动迁移本 owner 旧目录；默认部署模型无可证明目录版本。
+def model_profile_generation(agent: object, profile_id: str, *, initialize: bool = False) -> ModelProfileGeneration | None:
+    from ..user_space.approval_mode import is_permission_admin
+
+    if profile_id == "default":
+        return None
+    if not initialize or shared_profile_key(profile_id) and not is_permission_admin(agent.home_paths):
+        return _profile_generation(agent, profile_id, initialize=False)
+    with _locked_model_catalogs(agent, profile_id, blocking=False):
+        return _profile_generation(agent, profile_id, initialize=True)
+
+
+# LLM: True 区间持所有原配置锁到调用方 CAS 完成；失效/旧未知为 False，竞争非阻塞抛出；不得锁内探针或重入 settings。
+# 函数用途: 防止准备后的配置、凭据、OAuth 或共享撤销变化被旧建议覆盖，不自行采用模型或发送请求。
+@contextmanager
+def model_profile_generation_guard(agent: object, expected: ModelProfileGeneration | None, *, blocking: bool = False):
+    if expected is None:
+        yield False
+        return
+    if not isinstance(expected, ModelProfileGeneration):
+        raise ModelProfileError("模型目录版本需要原类型快照。")
+    with _locked_model_catalogs(agent, expected.profile_id, blocking=blocking):
+        try:
+            current = _profile_generation(agent, expected.profile_id, initialize=False)
+        except (ModelProfileError, OSError):
+            current = None
+        yield current == expected
 
 
 # LLM: available 保持聊天可选语义，available_for 显式声明用途；OAuth 不暴露 token，不能误选 decision。
@@ -209,11 +332,14 @@ def _model_selection_projection(agent: object, data: dict, thread_id: str) -> di
     return result
 
 
-# LLM: provider/model/secret/protocol 按选择的私有或授权共享引用整组冻结，旧 task overlay 不得拆开该组合。
-# 函数用途: 新工作片解析选定模型，已执行快照不改；禁用、删除或撤销共享均明确报错，不偷偷换模型。
+# LLM: provider/model/secret/protocol 仍按原引用整组冻结；可选宿主捕获仅复制本次已读公开选择与决策设置，不另读目录。
+# 函数用途: 新工作片解析选定模型并复用其开关事实；禁用、删除或撤销共享均明确报错，不偷偷换模型。
 def selected_model_config(agent: object, *, profile_id: str | None = None):
     data = read_model_profiles(model_profiles_path(agent.home_paths))
     selected = data["selected"] if profile_id is None else profile_id
+    captured = _SELECTED_MODEL_READ.get()
+    if captured is not None and not captured:
+        captured.append(SelectedModelRead(selected, deepcopy(data["decision_settings"])))
     if selected == "default":
         return agent.config
     row = _resolved_profile(agent, data, selected)

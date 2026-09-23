@@ -1,5 +1,17 @@
 # Verification：开发推进
 
+## 2026-09-22 可选外部材料阅读优先级
+
+`external_material_order` 仅消费原 `web_fetch mode=extract` 已归档页，默认关闭；原 owner/thread 设置、
+主代理配置工具与 TUI 共用独立模式、超时和模型绑定。开启后按原安全投影发送有界摘录与当前问题，
+text/native 共用附加提示；原页、失败项、refs、下载顺序、账本与权限不变。
+
+定向覆盖原页面生产/Executor/归档、设置与 worker 用量、来源失效和超时取消边界。真实页面链仅替换
+网络响应，真实决策链仅替换供应商；尚无真实任务证明质量或效率提高，不作为验收门。
+联合定向 349 项通过；原 TUI pipe CAS 的固定短等待改为真实绘制状态的有界等待，仅修改测试 helper。
+命令、结果及两次原时序失败证据见
+[P5-C 首片交接](../../tasks/DECISION_MODEL_EXTERNAL_MATERIAL_ORDER_HANDOFF.md)。
+
 ## 仅思考续跑保存
 
 真实成功响应生成约 3.7 万字符思考但未给正文/工具，旧空响应重试丢弃了该轮历史及正常用量结算。

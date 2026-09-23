@@ -1,4 +1,4 @@
-# LLM: 决策菜单只走原认证配置运输；字段 CAS 失败重读不重放，主动 probe 不启用决策或切换当前聊天模型。
+# LLM: 决策菜单只走原认证配置运输；实验能力开关不授予许可，不提供 authorize UI，字段范围和 CAS 仍由原设置服务控制。
 # 模块用途: 在现有 TUI 浮层设置用户/会话决策覆盖、恢复继承，并显式测试已保存的决策连接。
 from __future__ import annotations
 
@@ -12,11 +12,15 @@ from ...agent.settings.decision_settings_schema import validate_decision_field
 from .tui_model_menu import _dialog, _request
 
 _POINTS = {"model_selection": "模型选择", "subagent_model": "子代理模型", "skill_tool": "Skill / 工具推荐",
-           "recall": "记忆召回后重排", "curator": "后台记忆整理（用户长期）"}
+           "recall": "记忆召回后重排", "curator": "后台记忆整理（用户长期）",
+           "curator_relation": "正式记忆关系建议（用户后台）", "external_material_order": "外部材料阅读优先级",
+           "planning": "现有待办优先级"}
 _GENERAL = {"enabled": "总开关", "profile_id": "默认决策模型", "timeout_seconds": "前台单次上限（秒）",
-            "stage_timeout_seconds": "前台阶段上限（秒）", "background_timeout_seconds": "后台阶段上限（秒）"}
+            "stage_timeout_seconds": "前台阶段上限（秒）", "background_timeout_seconds": "后台阶段上限（秒）",
+            "experiment_enabled": "实验能力（仍需独立授权）"}
 _POINT_FIELDS = {"mode": "模式", "profile_id": "决策模型", "timeout_seconds": "单次上限（秒）",
-                 "context_policy": "上下文减量策略", "optional_categories": "可选工具类别"}
+                 "context_policy": "上下文减量策略", "optional_categories": "可选工具类别",
+                 "candidate_profile_ids": "子代理执行模型候选"}
 _MODES = {"off": "关闭", "observe": "仅观察", "apply": "采用建议"}
 _CONTEXT_POLICIES = {"metadata": "仅精简名卡与推荐", "progressive": "名卡与可选工具渐进披露"}
 
@@ -41,14 +45,14 @@ def _value(view: dict, field: str):
     return value
 
 
-# LLM: 展示与操作键分离；标识符仅来自原设置，不展示配置秘密或收费价格。
-# 函数用途: 为字段菜单组合名称、已确认值和继承来源。
+# LLM: 展示与操作键分离；实验布尔值只展示能力开关，不能把开启文案当授权事实，不展示秘密或收费价格。
+# 函数用途: 为字段菜单和恢复列表组合名称、准确布尔值及继承来源。
 def _field_label(view: dict, field: str) -> str:
     parts = field.split(".")
     name = _GENERAL[field] if len(parts) == 1 else f"{_POINTS[parts[1]]} · {_POINT_FIELDS[parts[2]]}"
     value = _value(view, field)
-    shown = ("开启" if value else "关闭") if field == "enabled" else _MODES.get(value, value) if field.endswith(".mode") else value or "未绑定"
-    if field.endswith(".optional_categories"):
+    shown = ("开启" if value else "关闭") if field in {"enabled", "experiment_enabled"} else _MODES.get(value, value) if field.endswith(".mode") else value or "未绑定"
+    if field.endswith((".optional_categories", ".candidate_profile_ids")):
         shown = json.dumps(value, ensure_ascii=False)
     elif field.endswith(".context_policy"):
         shown = _CONTEXT_POLICIES[value]
@@ -174,29 +178,31 @@ def _seconds(text: str) -> float:
     return value
 
 
-# LLM: 类别编辑只解码为结构化数组再交共用校验；字符串、bool、数字不能被静默转成类别。
+# LLM: 列表编辑只解码为结构化数组再交共用校验；字符串、bool、数字不能被静默转成类别或模型候选。
 # 函数用途: 将本次表单文本转为原设置字段值，非法输入留在表单且不发保存请求。
 def _field_text_value(field: str, text: str):
-    if field.endswith(".optional_categories"):
+    if field.endswith((".optional_categories", ".candidate_profile_ids")):
         return validate_decision_field(field, json.loads(text))
     return _seconds(text)
 
 
-# LLM: 每次只提交一个字段或删除覆盖，明确清空模型与恢复继承分开；CAS 来自打开表单时的原回执。
-# 函数用途: 编辑开关、模式、模型或时间，保存后回到范围菜单重读，不自动测试服务。
+# LLM: 每次只提交原字段/CAS；两个布尔开关都不构造授权信封，实验能力编辑必须说明当前联网不可用。
+# 函数用途: 编辑普通开关、实验能力或点级配置，保存后读回，不触发实验或探测。
 async def _edit_field(app, agent, session: str, view: dict, field: str) -> str:
     value = _value(view, field)
     if field.endswith("profile_id"):
         control = await _profile_choices(app, agent, session, value)
         if control is None:
             return "模型目录不可用；仍可返回修改开关或恢复继承。"
-    elif field == "enabled" or field.endswith((".mode", ".context_policy")):
-        rows = ([(False, "关闭"), (True, "开启")] if field == "enabled" else
+    elif field in {"enabled", "experiment_enabled"} or field.endswith((".mode", ".context_policy")):
+        rows = ([(False, "关闭"), (True, "开启")] if field in {"enabled", "experiment_enabled"} else
                 list(_CONTEXT_POLICIES.items()) if field.endswith(".context_policy") else list(_MODES.items()))
         control = RadioList(rows, default=value, select_on_focus=True)
     else:
         control = TextArea(text=json.dumps(value, ensure_ascii=False) if isinstance(value, list) else str(value), height=1, multiline=False)
-    notice = Label("类别请填 JSON 字符串数组，如 [\"plugins\", \"自定义类别\"]；[] 不额外收起。" if field.endswith(".optional_categories") else
+    notice = Label("这里只开启能力，不建立实验许可；当前联网实验不可用。" if field == "experiment_enabled" else
+                   "候选请填原模型目录 ID 的 JSON 字符串数组；[] 表示全部当前授权生成模型。" if field.endswith(".candidate_profile_ids") else
+                   "类别请填 JSON 字符串数组，如 [\"plugins\", \"自定义类别\"]；[] 不额外收起。" if field.endswith(".optional_categories") else
                    "减量可改变缓存前缀/schema；原搜索和权限不变，仅在开启并采用建议时生效。" if field.endswith(".context_policy") else
                    "恢复继承会删除本范围覆盖；清空模型只表示不绑定。")
     while True:
@@ -209,7 +215,7 @@ async def _edit_field(app, agent, session: str, view: dict, field: str) -> str:
         try:
             chosen = control.current_value if isinstance(control, RadioList) else _field_text_value(field, control.text)
         except ValueError:
-            notice.text = "请输入 JSON 字符串数组，修改尚未保存。" if field.endswith(".optional_categories") else "请输入有限且大于 0 的秒数，修改尚未保存。"
+            notice.text = "请输入合法的 JSON 模型编号数组，修改尚未保存。" if field.endswith(".candidate_profile_ids") else "请输入 JSON 字符串数组，修改尚未保存。" if field.endswith(".optional_categories") else "请输入有限且大于 0 的秒数，修改尚未保存。"
             continue
         return await _save(app, agent, session, view, field, value=chosen)
 

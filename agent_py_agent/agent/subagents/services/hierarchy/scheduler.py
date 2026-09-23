@@ -1,11 +1,12 @@
-
+# LLM: 递归调度保留原父快照、限制和持久幂等；可选准备对象只沿原 resolver 提交，不重建身份或绕过取消安全点。
+# 模块用途: 根据父级授权规划和创建孩子，把锁外建议所用的同一 task 交给原保存链。
 from __future__ import annotations
 
 from typing import Any
 
 from ...debug_trace import trace_hierarchy_schedule
 from ...models import SubAgentTask
-from ..base import CreateRunParams
+from ..base import CreateRunParams, PreparedSubagentRun
 from . import context as hctx
 from .qa_scheduler import qa_orchestration_advice
 from .schedule_idempotency import (
@@ -97,10 +98,8 @@ def _explicit_limit_reason(parent: SubAgentTask, request: HierarchyScheduleReque
     return ""
 
 
-# LLM: Apply exactly the names and ordinals prepared in the build request so a later nested batch
-# cannot reset display identities to one.  A host cancellation check runs only between durable
-# children; any partial prefix remains canonical for stop-side lineage reconciliation.
-# 函数用途: 逐项创建递归下级，在每个安全点响应停止，再汇总本次真实创建或复用结果。
+# LLM: 原批次名字/序号和逐项取消安全点不变，可选准备列表只透传同一 task；部分创建仍由 canonical 父链供停止协调发现。
+# 函数用途: 逐项创建或复用递归下级，提交原准备身份并在安全点响应停止。
 def _apply_result(
     manager: Any,
     build: HierarchyResultBuildRequest,
@@ -115,23 +114,29 @@ def _apply_result(
         if request.interrupt_check is not None:
             request.interrupt_check()
         resolutions.append(
-            _resolve_child(manager, parent, spec, sibling_index=index)
+            _resolve_child(manager, parent, spec, sibling_index=index,
+                prepared=request.prepared_runs[index - build.sibling_start_index]
+                if request.prepared_runs else None)
         )
     if request.interrupt_check is not None:
         request.interrupt_check()
     return applied_schedule_result(build, resolutions)
 
 
+# LLM: 最终参数仍由原 scheduler 从当前批次父快照装配；准备对象只传给原持久幂等解析器，不绕过它直接创建。
+# 函数用途: 将一项当前规范参数及可选准备对象交给原复用/保存边界。
 def _resolve_child(
     manager: Any,
     parent: SubAgentTask,
     spec: HierarchyChildSpec,
     *,
     sibling_index: int,
+    prepared: PreparedSubagentRun | None = None,
 ) -> ScheduledChildResolution:
     return resolve_scheduled_child(
         manager,
         _child_create_params(parent, spec, sibling_index=sibling_index),
+        prepared=prepared,
     )
 
 

@@ -1,5 +1,5 @@
-# LLM: 本模块装配运行恢复状态与上下文，工具发现复用 tooling 投影，拒绝列表沿宿主参数传递；禁止反向依赖 Gateway。
-# 模块用途: 为主链准备记忆、工具及续跑输入，异常退出前交回原生历史；缓存面与权限仍由各自权威模块维护。
+# LLM: 装配原运行上下文与宿主回调；展示纯值只经推荐接缝/回调传递，不能写入结果、Agent共享属性或扩大原快照权限。
+# 模块用途: 为主链准备记忆、工具和续跑输入，回传本片展示与异常历史；不反向依赖 Gateway。
 
 from __future__ import annotations
 
@@ -96,8 +96,8 @@ def run_params_from_values(
     return replace(params, **updates)
 
 
-# LLM: 宿主拒绝列表必须沿参数链共享，不能复制为空或从模型历史推导；批准仍由每次精确调用自己获取。
-# 函数用途: 把已准备上下文和同一执行链的宿主状态传给公共工具循环。
+# LLM: 拒绝列表、展示及已评估事实沿原宿主参数链传递；同片失效不得再决策，批准仍归每次精确调用。
+# 函数用途: 把已准备上下文和同一执行链的宿主状态传给公共工具循环，不写盘或改变快照。
 def _runtime_loop_params(
     user_prompt: str,
     prepared: PreparedRuntimeContext,
@@ -132,6 +132,10 @@ def _runtime_loop_params(
         tool_protocol_snapshot=prepared.tool_protocol_snapshot,
         conversation_history_seed=params.conversation_history_seed,
         partial_turn_callback=params.partial_turn_callback,
+        capability_presentation=params.capability_presentation,
+        capability_presentation_evaluated=params.capability_presentation_evaluated,
+        capability_presentation_turn_id=params.capability_presentation_turn_id,
+        capability_presentation_callback=params.capability_presentation_callback,
     )
 
 
@@ -189,16 +193,23 @@ def _resolve_tool_sections(request: ToolSectionsRequest):
     return tool_catalog, tool_recommendations
 
 
-# LLM: Runtime recall uses only active long-term plus formal lesson/HOT under structured scope, then one memory-context envelope.
-# 函数用途: 为一轮主代理请求准备 owner 隔离的 Memory、路由收据、恢复上下文与运行注入。
+# LLM: Runtime recall uses only active long-term plus formal lesson/HOT under structured scope;
+# task-local and explicit owner memory-off never read the formal repositories or project index.
+# 函数用途: 为一轮主代理请求准备 owner 隔离的 Memory、路由收据、恢复上下文与运行注入，隔离/总闸关闭时跳过正式记忆读取。
 def _prepare_runtime_context(agent, request: RuntimeContextRequest):
     tool_runtime_snapshot, tool_protocol_snapshot = _tool_snapshots_for_run(
         agent,
         request,
     )
     task_local = _is_task_local_context(request.context_scope)
+    owner_policy = getattr(agent, "owner_policy", None)
+    recall_suppressed = task_local or (
+        owner_policy is not None and not bool(getattr(owner_policy, "memory_enabled", True))
+    )
     memory_top_k = max(1, int(agent.config.memory_top_k or 1))
-    routed_context = _routed_memory_context_for_request(agent, request, task_local=task_local)
+    routed_context = _routed_memory_context_for_request(
+        agent, request, skip_formal_recall=recall_suppressed,
+    )
     recall_scope = MemoryRecallScope.from_runtime(
         task_id=request.task_id,
         task_attributes=request.task_attributes,
@@ -207,26 +218,27 @@ def _prepare_runtime_context(agent, request: RuntimeContextRequest):
     # 用户喂入的小说知识库,scope=project:novel:xxx)不被召回 → 问小说"信息不足"。这里把
     # 记忆库中实际存在的 project scope 追加进召回范围(用户明确要求记住的项目知识可召回),
     # 有 task 时仍按 task 精确。纯结构化:只扫描 long_term 的 attributes.scope_type/key。
-    # gateway 的 request_id 会被当 task_id,故不能以 task_id 判"普通对话"。始终追加记忆库中
+    # gateway 的 request_id 会被当 task_id,故不能以 task_id 判"普通对话"。启用召回时追加
     # 实际存在的 project scope(用户明确要求记住的项目知识可召回),与 task 的 project:task 并存。
-    try:
-        project_pairs: list[tuple[str, str]] = []
-        for record in agent.memory.all():
-            attrs = record.attributes if isinstance(record.attributes, dict) else {}
-            st = str(attrs.get("scope_type") or "").strip().lower()
-            sk = str(attrs.get("scope_key") or "").strip()
-            if st == "project" and sk:
-                project_pairs.append(("project", sk))
-        if project_pairs:
-            recall_scope = MemoryRecallScope(
-                tuple(dict.fromkeys([*recall_scope.keys, *project_pairs]))
-            )
-    except Exception:
-        pass
+    if not recall_suppressed:
+        try:
+            project_pairs: list[tuple[str, str]] = []
+            for record in agent.memory.all():
+                attrs = record.attributes if isinstance(record.attributes, dict) else {}
+                st = str(attrs.get("scope_type") or "").strip().lower()
+                sk = str(attrs.get("scope_key") or "").strip()
+                if st == "project" and sk:
+                    project_pairs.append(("project", sk))
+            if project_pairs:
+                recall_scope = MemoryRecallScope(
+                    tuple(dict.fromkeys([*recall_scope.keys, *project_pairs]))
+                )
+        except Exception:
+            pass
 
     long_term_memories = (
         []
-        if task_local
+        if recall_suppressed
         else agent.memory.search_scoped(
             request.user_prompt,
             memory_top_k,
@@ -240,7 +252,7 @@ def _prepare_runtime_context(agent, request: RuntimeContextRequest):
         routed_context,
         recall_scope=recall_scope,
         long_term_memories=long_term_memories,
-        task_local=task_local,
+        skip_formal_recall=recall_suppressed,
     )
 
     resume_context_result, resume_context_section = _resume_context_for_request(
@@ -393,12 +405,13 @@ def _tool_runtime_for_context_bundle(
         ]
 
 
-# LLM: Routing reads only the owner formal index; missing/invalid authority disables this projection with a typed finding.
-# 函数用途: 为当前请求构造 lesson 路由收据，且 Memory 故障不使正常用户任务崩溃。
-def _routed_memory_context_for_request(agent, request: RuntimeContextRequest, *, task_local: bool):
+# LLM: Routing reads only the owner formal index when formal recall is allowed;
+# missing/invalid authority disables this projection with a typed finding.
+# 函数用途: 为当前请求构造 lesson 路由收据；隔离或记忆总闸关闭时不读取正式索引。
+def _routed_memory_context_for_request(agent, request: RuntimeContextRequest, *, skip_formal_recall: bool):
     route_mode = str(getattr(agent.config, "memory_rule_routing_mode", "soft") or "soft")
     route_enabled = (
-        not task_local
+        not skip_formal_recall
         and bool(getattr(agent.config, "memory_rule_routing_enabled", True))
         and route_mode != "off"
     )
@@ -426,8 +439,8 @@ def _routed_memory_context_for_request(agent, request: RuntimeContextRequest, *,
     )
 
 
-# LLM: 原授权与预算先固定记忆集合；可选决策只改长期事实槽位顺序，HOT/lesson、正文和后续原投影保持权威。
-# 函数用途: 合并适用的 HOT、已成功路由 lesson 和 active long-term，并清空旧 routing 文本注入。
+# LLM: 原授权与预算先固定记忆集合；隔离/总闸关闭不读正式库；召回前后两点共用一次原阶段期限。
+# 函数用途: 合并 HOT、已路由 lesson 和长期记忆；可选排序与补充只在原权限/预算内生效。
 def _formal_memories_for_request(
     agent,
     request: RuntimeContextRequest,
@@ -435,9 +448,9 @@ def _formal_memories_for_request(
     *,
     recall_scope: MemoryRecallScope,
     long_term_memories: list,
-    task_local: bool,
+    skip_formal_recall: bool,
 ) -> list:
-    if task_local:
+    if skip_formal_recall:
         routed_context.injected_sections = []
         return []
     read_paths = [
@@ -466,14 +479,40 @@ def _formal_memories_for_request(
         hot, lessons = [], []
     routed_context.injected_sections = []
     memories = _budgeted_formal_memories(_dedupe_formal_memories([*hot, *lessons, *long_term_memories]))
-    from ...memory_store.decision_recall import rerank_recalled_memories
+    from ...conversation.decision_service import begin_decision_stage
+    from ...memory_store.decision_recall import (
+        _operation_id,
+        rerank_recalled_memories,
+        supplement_recalled_memories,
+        supplemental_query_candidates,
+    )
+
+    queries = supplemental_query_candidates(getattr(request, "user_prompt", ""))
+    top_k = max(1, int(getattr(agent.config, "memory_top_k", 1) or 1))
+    slots = max(0, top_k - len(long_term_memories))
+    remaining = _FORMAL_MEMORY_BUDGET_CHARS - sum(len(str(getattr(row, "content", "") or "")) for row in memories)
+    post_eligible = sum(str(getattr(row, "kind", "") or "") not in {"hot", "lesson"} for row in memories) >= 2
+    pre_eligible = bool(queries and slots and remaining > 0)
+    operation = _operation_id(request)
+    stage = (begin_decision_stage(agent, request, operation_id=operation)
+             if operation and (post_eligible or pre_eligible) else None)
 
     memories, finding = rerank_recalled_memories(
         agent, request, memories, recall_scope=recall_scope,
         refresh=lambda: _refresh_recall_candidates(agent, memories, read_paths, recall_scope),
+        stage=stage,
     )
     if finding:
         routed_context.findings.append(finding)
+    if pre_eligible and stage is not None:
+        remaining = _FORMAL_MEMORY_BUDGET_CHARS - sum(len(str(getattr(row, "content", "") or "")) for row in memories)
+        memories, finding = supplement_recalled_memories(
+            agent, request, memories, recall_scope=recall_scope, stage=stage, queries=queries,
+            slots=slots, search_top_k=top_k, remaining_chars=remaining,
+            refresh=lambda: _refresh_recall_candidates(agent, memories, read_paths, recall_scope),
+        )
+        if finding:
+            routed_context.findings.append(finding)
     return memories
 
 
@@ -564,8 +603,8 @@ def _runtime_injections_with_bundle(
     return injections
 
 
-# LLM: 工具绑定逐run固定，可选决策只改变本片展示；异常先保存当前IR再抛错，Compact渲染不另发决策请求。
-# 函数用途: 准备一次能力推荐并驱动模型工具循环，失败保持原展示，异常也保留已发生的会话事实。
+# LLM: 原推荐接缝只采用合法展示；循环可交回已验证 child 的完整协议参数，未交回时沿原初始参数收口，不把活快照写入结果。
+# 函数用途: 驱动原模型工具循环，并以最终实际模型的协议和 IR 生成证据及异常历史。
 def _execute_runtime_loop(agent, params: RuntimeLoopParams):
     write_runtime_fact_start_if_enabled(agent, params)
     audit_source_provision = _provision_audit_sources_before_model(agent, params)
@@ -586,6 +625,8 @@ def _execute_runtime_loop(agent, params: RuntimeLoopParams):
     from ...capability.decision_recommendation import recommend_capabilities
 
     presentation = recommend_capabilities(agent, params, tool_runtime_snapshot, effective_contract_snapshot)
+    if callable(params.capability_presentation_callback):
+        params.capability_presentation_callback(presentation.selection)
     tool_runtime_snapshot = presentation.tool_snapshot
     tool_catalog_section, tool_recommendations_section = _resolve_tool_sections(
         ToolSectionsRequest(
@@ -613,11 +654,13 @@ def _execute_runtime_loop(agent, params: RuntimeLoopParams):
     _queue_audit_source_provision_reply(loop_params, audit_source_provision)
     # 每个 run 都有自己的工具循环状态；同一 owner 的并发聊天/后台轮
     # 不能共享一个 ToolLoopService 实例。
+    service = ToolLoopService(agent)
     try:
-        final_prompt, final_response, tool_rounds = ToolLoopService(agent).execute(loop_params)
+        final_prompt, final_response, tool_rounds = service.execute(loop_params)
     except (Exception, KeyboardInterrupt) as exc:
-        _persist_partial_native_turn(params.partial_turn_callback, loop_params, exc)
+        _persist_partial_native_turn(params.partial_turn_callback, service.current_params or loop_params, exc)
         raise
+    loop_params = service.current_params or loop_params
     return RuntimeLoopResult(
         final_prompt=final_prompt,
         final_response=final_response,
@@ -629,9 +672,9 @@ def _execute_runtime_loop(agent, params: RuntimeLoopParams):
         archive_tool_calls=loop_params.archive_tool_calls,
         active_turn_user_inputs=list(loop_params.active_turn_user_inputs),
         tool_runtime_evidence=_tool_runtime_evidence(
-            tool_runtime_snapshot,
-            tool_protocol_snapshot,
-            effective_contract_snapshot,
+            loop_params.tool_runtime_snapshot,
+            loop_params.tool_protocol_snapshot,
+            loop_params.effective_contract_snapshot,
             loop_params.live_archive_state,
             final_response,
         ),
@@ -813,7 +856,7 @@ def _loop_attempt_id(agent, params: object) -> str:
     构造时已把 attempt_id 兜底为 attempt-{ns} 投影（run_params.py），params 值
     恒非空，放前面会短路掉 runner 上下文；主代理/唤醒轮上下文为空，回落
     params 原值（与既有行为一致）。"""
-    from ..runner.context import current_subagent_attempt_id
+    from ...runtime_context import current_subagent_attempt_id
 
     return current_subagent_attempt_id(agent) or str(params.attempt_id or "").strip()
 

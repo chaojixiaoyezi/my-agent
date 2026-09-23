@@ -4,19 +4,38 @@
 等待审批仍在原 executor 区间，经现有批准 binding 恢复同一调用，不新增审批服务或执行器。
 协议与恢复边界见 [宿主命令](docs/design/HOST_COMMAND_EXECUTION.md#请求与运行)，尚未完成端到端验收。
 
-**可选决策模型：P1—P5 完整实施已授权，P1 与 Curator 已本地验收，子代理/召回已本地验收，原设置入口、原生测试与 agent 代操作已本地联合验收，10 能力减量已本地验收，12窗口/缓存开始。**
+**可选决策模型：P1—P5 完整实施已授权，P1 与 Curator 已本地验收，子代理/召回已本地验收，原设置入口、原生测试与 agent 代操作已本地联合验收，10 能力减量已本地验收，12窗口/缓存进行中。**
+P5-B 首片已本地接入独立 `curator_relation`：只比较本批完整消息与有真实版本、完整短正文的正式 long-term 条目，提示可能重复/更新/冲突；原提取、候选、验证和晋升仍唯一，缺版本/截断/变更保留原流程。默认关闭、owner 后台设置、同一阶段期限；隔离真实 Jev 的12对短样本符合预设、超时保留原输入，后续提取仅本地替身，更广质量和真实晋升未验，详见[交接](docs/tasks/DECISION_MODEL_P5B_HANDOFF.md)。
+P5-A 召回前省略普通会话记忆仍缺可保证用户显式查历史不被跳过的可信结构化意图；普通用户回合继续原召回。默认关闭的 `pre_recall` 首片已接正式上下文：原完整查询、HOT、lesson 和既选长期事实先保留，Jev 只从至多四个有界片段中选一次补充查询；仅用原 scope、剩余 top_k/字符预算追加经正式源确认的事实，未注入候选不记访问，P3 排序与本点共用阶段期限。离线136项通过，其中受控 JSONL 漏召回样本可只补确认缺失事实；隔离 Jev 两轮均建议查询，但词面基线已覆盖两条事实，应用无新增并标注 `no_addition`，真实质量收益未证，默认维持关闭，见[审计与实施记录](docs/tasks/DECISION_MODEL_PRE_RECALL_AUDIT.md)。P5-C 的已归档 web_fetch 多页阅读顺序首片默认关闭，只向原 text/native 展示追加有界页序；隔离真实 Jev 首轮 not_needed 保留原展示、第二样本自动追加2→3→1，原结果/refs/归档/账本不变。本地页面源不证明互联网检索总体质量，其余接入点未验，见[交接](docs/tasks/DECISION_MODEL_EXTERNAL_MATERIAL_ORDER_HANDOFF.md)。
+Jev官方64k整包/32k单题容量与声明的更小窗口现做发送前估算筛查，原 JSON 256 KiB 仍是资源硬帽。全仓回归曾发现把 UTF-8 字节数当 token 上界误拒 78 KB 合法批量候选并使 HTTP 零请求，现改复用原 `estimate_tokens` 且留一成余量；估算不冒充供应商精确 tokenizer 或硬容量保证，供应商超窗错误沿原业务回退。完整子代理模型容量、Compact面和真实缓存仍待核对。
+召回后排序已移除旧的固定64题拦截；原记录完整性不变，过量请求由共用协议资源帽与Jev窗口门拒绝，失败沿原顺序。Curator每批最多标注32个来源是本地延迟保护，不是供应商题数限制。
+子代理执行模型候选现能在同一决策设置服务按 profile ID 缩小；空列表沿原授权目录。当前用户指定的隔离验收范围是官方 MiniMax-M2.7、官方 MiniMax-M3 和 OpenCode DeepSeek-V4-Flash，不按名称猜来源；实际改选执行仍待验。
+用户明确：主代理收到派工需求后，子代理模型建议、首轮请求能力核验、采用或回退及继续运行都由宿主自动完成，不设置逐子代理用户选择、确认或补资料步骤。显式模型设置只提供已有的结构化约束与竞态优先级；创建时的 pending 建议尚无执行效力，不可算作实际切换验收。
+子代理首次采用所需的模型连接来源现有原私有目录 v5、共享发布 v2 的随机持久代次；所有原保存、凭据/OAuth 刷新及共享撤销均使旧快照失效，已启用准备才初始化旧目录，普通读取不写。原锁 guard 可覆盖最终 child thread CAS，缺代次或非管理员旧 shared 自动保留原模型；当前仅目录合同通过142项，首次发送消费与真实异模仍待验，见[交接](docs/tasks/DECISION_MODEL_CATALOG_GENERATION_HANDOFF.md)。
+P5-D 主会话自动选模只读审计及原线程选择版本首片已完成：同值显式选择也前进单调版本，旧线程三字段全缺归一未知、不伪造历史；Gateway 仍先于准确会话车道冻结模型，真实首请求容量和跨 provider 历史可回放事实尚缺。须在获车道后、首次模型相关准备前自动选择一次，未知保留原合法模型，不要求逐片用户确认。版本首片不等于已自动采用，详见[审计](docs/tasks/DECISION_MODEL_MAIN_MODEL_AUDIT.md)与[交接](docs/tasks/DECISION_MODEL_MAIN_MODEL_SELECTION_HANDOFF.md)。
+P5-D 后续 Stage C 已在准确 Gateway 车道内用原完整请求准备、同源 provider payload、候选目录代次和原线程 CAS 实现首请求自动采用；发送前明确拒绝才沿原模型一次，已提交或结果未知不跨模型重发，未知模态/容量保留原模型。容量仅是 UTF-8 字节加协议余量的工程估计，不是供应商精确 token 保证；本地 fake HTTP 联合302项、最新本片34项通过，真实主会话跨供应商仍待验，见[采用交接](docs/tasks/DECISION_MODEL_MAIN_MODEL_ADOPTION_HANDOFF.md)。
+P4-B 普通 user owner 的原 `user_config` 现仅展示/执行 decision-only 动作，主 Gateway 回合从宿主当前 RunParams 取可信 thread，子代理只能用自己 runner 身份；原设置回执保持 `revision` 出现在有界模型预览内，CAS 不放宽。隔离真实中文第二轮由模型自主 `decision_read(thread)`、`decision_patch(thread,14/0)`，原事务回执与线程文件显示 14/1 和预期三项生效，模型准确回复；没有第三次独立 read。首轮失败、底层修复、私有恢复及单 Gateway 证据见[交接](docs/tasks/DECISION_MODEL_NATURAL_CONFIG_FIX_HANDOFF.md)。
+隔离主会话 `apply` 三条普通中文新会话已验短期限、`need_data`、选择当前 M2.7 三种真实保留：5 次官方 Jev HTTP（1 次超时输入未知）、4 次官方 M2.7 HTTP 200，三轮都完成且无异模业务请求。调整期限只作用私有测试设置，最终原 CAS 恢复为 off；**真实跨 provider 自动采用仍未出现**，不能用 fake 阳性代替，见[真实交接](docs/tasks/DECISION_MODEL_MAIN_MODEL_LIVE_HANDOFF.md)。
+P5-E/F/G/H 的只读审计已完成：原 Goal 事后 token 口径不是决策 input-only 的请求前预算，ModelCallLedger/验证证据也不能自行授予实验权或证明业务收益。首片在原设置事务加入内部 `restore`：同一层 set/unset、完整 owner/thread CAS、一次版本前进和读回；后改冲突保留用户值。实验授权、请求前限额、对照质量及自动应用尚未实现，详见[审计](docs/tasks/DECISION_MODEL_SELF_EXPERIMENT_AUDIT.md)。
+E1 原语已把默认关闭的实验开关、有界 thread 授权信封与撤销放入原决策设置 v2，并在原 ModelCallLedger 同锁内串行预留请求数/声明的完整输入量；本地组合 356 项通过。当前没有宿主用户授权入口及原操作提交证据，声明输入量也不是可靠 token 上界，发送前硬门尚未接通，因此实验联网依旧失败关闭，不能称完整 E1；后续 E2/F/G/H 未实现。见[交接](docs/tasks/DECISION_MODEL_EXPERIMENT_E1_HANDOFF.md)。
+E1 后续只读核验发现官方示例的 `usage.input_tokens` 高于该请求 JSON 字节数，公开 64k/32k 上下文说明也没有明确绑定完整服务端包装后的实际输入账。因此不能把 UTF-8 大小、原估算器或自填整数当硬预算证明；优先取得供应商固定 endpoint/模型/计数口径的完整输入上限，再于原实际发送接缝绑定最终 wire、授权回执、业务身份与账本预留。原观察器吞异常，不能承担硬门；在此之前实验继续关闭，详见同一 E1 交接。
+P5-C 自学习点的[只读审计](docs/tasks/DECISION_MODEL_SELF_LEARNING_AUDIT.md)确认：现行 runner lesson 进入 owner CandidateService，旧 learning_drafts 只有迁移读；没有受用户确认约束的 Skill 提案/正式写入链。Jev 可在来源明确时观察候选，不能凭评分写 `SKILL.md`；apply 须先建唯一提案与确认入口。旧 README/指南的 `enable_self_learning` 和 `my-agent learn` 已实现说法已按当前代码校正，AGENTS.md 的确认规则仍为后续实现约束。
+P5-C 规划点的[审计](docs/tasks/DECISION_MODEL_PLANNING_AUDIT.md)区分现有 Todo、workflow plan、Goal 与 create_subagents 的权威。默认关闭的 `planning` 首片已接当前主代理原 `task_progress(read)`：只对2–24个 exact open Todo ID 提示一个优先评估项，版本/本轮问题失效不采用；原账本、Goal、派工均不变。离线133项通过；隔离 Jev 先遇4秒真实超时并保留原回执，8秒对照成功建议精确ID且只追加软提示。Gateway TUI 质量和多次读取延迟待验，见[交接](docs/tasks/DECISION_MODEL_PLANNING_HANDOFF.md)。
+P5-C 交付质量点的[只读审计](docs/tasks/DECISION_MODEL_DELIVERY_QUALITY_AUDIT.md)限定 Jev 只能从本轮原 verification 或已确认 ready artifact 的精确引用中建议一个复核焦点，供主模型参考；不得评分设硬门、造产物、改 Goal/child/最终回复状态。原归档后的 text/native 共用展示接缝可复用，候选 ready 来源与独立设置尚未实施。
+P5-C 动作候选的[只读审计](docs/tasks/DECISION_MODEL_ACTION_CANDIDATE_AUDIT.md)发现本机 Browser ref 模块尚无生产工具引用，Computer Use 经原 MCP/审批链但 OCR 内容没有宿主验证的 observation/candidate ID 与代次；Jev 暂不能直接选坐标、命令或输入。先让现有工具来源产生可绑定、可失效的结构化候选，再做归档后软提示，不重复 `skill_tool` 工具路由。
+早期全仓集成 gate 发现本线新增 13 处跨层导入：Gateway 模型采用/观察直接调用 `agent_core`，Compact 重建从 Gateway 反向读 core 运行类型，`user_config` 从 Tooling 反向读 runner context。现已把同一请求选择及可信运行上下文移至 `agent/` 共用层、跨 Gateway/core 的采用和 Compact 编排移至应用层，删除旧模块，没有扩宽 import 白名单或新增只转发 facade；守卫 **0 findings**，相关 10 文件 **268 passed、4 xfailed**。完整严格 gate 仍未通过，见[测试总览](TESTS.md)。
 
-最新展示约定：决策用量沿原 LLM 用量行增加输入 token，不显示价格；输出位置预留且当前留白，原 usage 与预算保留。
+最新用量合同：决策用量沿原 LLM 用量行增加输入 token，输出位置预留且当前留白；原 usage、请求状态、期限与资源预算保留。决策请求不进入 USD 价格估算或 owner/run 成本累计，本地决策模型沿用同一合同；普通生成模型原有成本机制不在本设计变更范围。
 用户要求可见进度：完整 Goal 顶部维护 18 项验收 TODO，组件与可用产品分开；先打通可用链路，再扩接业务，不用测试数量代替整体完成度。
-开发调度最高推理档明确为 Astra max，常规独立工作用 high；不使用 ultra。
+开发调度按任务难度选模型：普通实现、测试和文档可用 Astra high 或 GPT-6 Sol high；较难的独立开发可用 GPT-6 Sol xhigh，复杂跨模块状态、并发与模型切换审查用 Astra max（最高档，不使用 ultra）。这是开发代理的算力分配，不进入 my-agent 子代理逐次模型选择的人机流程。
 已本地接入工作片展示投影，减少Skill名卡/工具目录及明确可选类别schema；原权限/快照身份保持，被收起项由原搜索找回，本地HTTP及原运行接线组合已验。
 metadata作为对照，progressive才覆盖额外direct插件schema减量；默认总开关关闭，完整细节见模块计划。
 策略/开放类别列表复用原设置、CAS和菜单；真实Jev否定跨题选择槽，已改每候选独立适用性题，候选说明只发一次，超限沿原输入。
-真实API概率会按百分位舍入，wire按量化边界检查并保留原值；原失败样本replay及实际复测见真实验收记录，完整窗口和TUI尚未通过。
+真实API概率会按百分位舍入，wire按量化边界检查并保留原值；原失败样本replay及实际复测见真实验收记录。隔离 Gateway TUI 已跑通普通回合与保留原模型的子代理批次，完整窗口和跨模型切换未通过。
 缺目标/合同/步骤/环境保留原输入，明确无需才可空短名单；采用前复核原Skill范围和固定插件代次，不自动补资料或扩大授权。
 设置范围现以同一登记表约束投影与运行：Curator 仅 owner 后台，旧线程后台覆盖仅可清理。原菜单和 agent 共用显式探测，读取/保存不发模型请求。
 
-原模型目录当前 v4、会话当前 v10，显式迁移旧记录并保存原 owner/thread 决策覆盖；不新增配置文件。
+原模型目录当前私有 v5、共享发布 v2，会话当前 v10，显式迁移旧记录并保存原 owner/thread 决策覆盖；不新增配置文件。
 共用设置服务与原 user_config 的读取/修改/恢复继承已本地接线，双层版本 CAS、时间校验、失效服务仍可关闭。
 原账本增加互斥用途分区、逐字段真实用量、单调终态及 worker 精确保留；原用量增量及同一行决策输入已接线。
 原生 Jev、严格 HTTP、有界调用与取消/准入已接入实际决策服务；配置/本地 HTTP/原账本/活动显示联合通过。

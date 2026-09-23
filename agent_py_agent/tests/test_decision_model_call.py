@@ -40,7 +40,7 @@ def _agent(*, max_records=128):
     return SimpleNamespace(
         backend=SimpleNamespace(name="ordinary-backend", model_name="ordinary-model"),
         home_paths=SimpleNamespace(owner_provider="local", owner_kind="user", owner_id="owner-header"),
-        config=SimpleNamespace(my_agent_owner_id="owner-cost"),
+        config=SimpleNamespace(my_agent_owner_id="owner-test"),
         _model_call_ledger=ModelCallLedger(ModelCallLedgerOptions(max_records=max_records)),
     )
 
@@ -139,8 +139,7 @@ def test_worker_installs_http_observer_copies_context_and_uses_decision_identity
     assert record.accounted_input_tokens == 21 and record.output_tokens == 4
     assert agent._model_call_ledger._retained_calls == {}
     assert metrics["calls"][0][0] == "decision-backend" and metrics["calls"][0][3] is True
-    assert metrics["cost"] == [("decision-model", result)]
-    assert metrics["run_cost"] == [("owner-cost", "run", "decision-model", result)]
+    assert metrics["cost"] == [] and metrics["run_cost"] == []
     assert metrics["inflight"] == [(1, backend.threads[0].ident), (-1, backend.threads[0].ident)]
 
 
@@ -364,7 +363,7 @@ def test_cancel_after_worker_return_still_wins_before_caller_finish(monkeypatch)
     assert agent._model_call_ledger.records()[0].status == "failed"
 
 
-@pytest.mark.parametrize("metric", ["llm_inflight", "record_llm_call", "record_llm_cost", "record_run_cost"])
+@pytest.mark.parametrize("metric", ["llm_inflight", "record_llm_call"])
 def test_metric_failure_does_not_change_success_or_retention(metric, monkeypatch):
     def fail(*args, **kwargs):
         raise RuntimeError("metric unavailable")

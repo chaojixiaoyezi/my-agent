@@ -1,11 +1,12 @@
 """Runner execution-context construction and persistence service."""
 
-# LLM: 子代理执行边界只来自继承权限、正式授权和可信 cwd，内部恢复目录不构成业务输出约定。
-# 模块用途: 构造 runner 的工具权限与路径上下文，不替模型变更输出地址。
+# LLM: 上下文组装只消费原任务和冻结事实；准备对象与 live runner 共用原 canonical 路径和纯投影，路径存在性仍不能当成保存或完整容量证明。
+# 模块用途: 只读准备并构造 runner 的工具权限与路径上下文，路径计算与原持久化共用一份算法。
 from __future__ import annotations
 
 import json
 import time
+from copy import deepcopy
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -36,17 +37,27 @@ from ..utils import (
     _apply_missing_paths,
     _merge_list,
 )
+from .task_workspace_adapter import project_task_workspace_fields
 
 
+# LLM: 本请求是一次纯上下文投影的只读输入，不是新任务或权限仓库；unresolved_fields 只反映缺失路径字段，空值不证明已物化或首请求完整。
+# 类用途: 冻结模型上下文所需事实，使组装不再读取 manager 或改写调用方任务。
 @dataclass(frozen=True)
 class ExecutionContextBuildRequest:
-    task: object
+    task: SubAgentTask
     allowed_skills: list[str]
     allowed_tools: list[str]
     grants: list[dict[str, object]]
     max_cards: int
+    context_bundle: dict[str, object]
+    write_boundary: dict[str, object]
+    role_template: dict[str, object]
+    generated_at: float
+    unresolved_fields: tuple[str, ...]
 
 
+# LLM: 原 runner 与未物化 task 都先收集事实再走同一纯投影；本服务不得为创建前估算启动工具、网络或保存临时任务。
+# 类用途: 准备只读执行上下文，并在真实 runner 请求时沿原方法写出文件和索引。
 class SubAgentRunnerContextService:
     """Build and persist the execution context for one subagent runner."""
 
@@ -175,6 +186,8 @@ class SubAgentRunnerContextService:
             "dependencies_json": task.dependencies_json,
         }
 
+    # LLM: 只读加载 canonical task 后共用 prepare/project，不改变原 ID、权限或持久状态；完整落盘仍由 write_execution_context 负责。
+    # 函数用途: 为已存在的子代理构造当前执行上下文，沿同一投影保留 live 直属孩子与协作事实。
     def build_execution_context(
         self,
         run_id: str,
@@ -183,27 +196,16 @@ class SubAgentRunnerContextService:
     ) -> SubAgentExecutionContext:
         """生成单个子代理执行器可读取的最小上下文。"""
 
-        task = self.manager.load(run_id)
+        return project_execution_context(self.prepare_execution_context(self.manager.load(run_id), max_cards=max_cards))
+
+    # LLM: 本入口接受原准备对象或 canonical task，但不把它保存；先在副本投影原 canonical 路径，再读取直属孩子/协作，不触发 ensure 或把路径计算当容量完整。
+    # 函数用途: 收集一次执行上下文的只读材料，调用结果可多次纯投影，调用方任务和已有文件保持不变。
+    def prepare_execution_context(self, task: SubAgentTask, *, max_cards: int = 0) -> ExecutionContextBuildRequest:
+        task = project_task_workspace_fields(self.manager.workspace, task)
         _apply_missing_paths(task, self.manager._build_work_order_paths(task.id, task.task_dir or None))
         granted_skills, granted_tools, grants = self._extract_granted_caps(task)
         allowed_skills = _merge_list(task.allowed_skills, granted_skills)
         allowed_tools = _runner_allowed_tools(task, _merge_list(task.allowed_tools, granted_tools))
-        return self._make_execution_context(
-            ExecutionContextBuildRequest(
-                task=task,
-                allowed_skills=allowed_skills,
-                allowed_tools=allowed_tools,
-                grants=grants,
-                max_cards=max_cards,
-            )
-        )
-
-    # LLM: Every new task-local slice rebuilds context from canonical state,
-    # including bounded direct-child lifecycle facts after an event wake.
-    # 函数用途: 为子代理新工作片组装权限、工作区、直属孩子结果和恢复信息。
-    def _make_execution_context(self, request: ExecutionContextBuildRequest) -> SubAgentExecutionContext:
-        task = request.task
-        controlled_exec_grants = controlled_exec_grant_refs(list(task.capability_grants or []))
         context_bundle = execution_context_bundle(task)
         from ..direct_parent_lifecycle import direct_children_context_payload
 
@@ -213,31 +215,20 @@ class SubAgentRunnerContextService:
         collaboration = collaboration_context_payload(self.manager, task)
         if collaboration:
             context_bundle["collaboration"] = collaboration
-        return SubAgentExecutionContext(
-            **_execution_context_task_fields(task),
-            allowed_skills=request.allowed_skills,
-            allowed_tools=request.allowed_tools,
-            effective_permissions=dict(getattr(task, "effective_permissions", {}) or {}),
-            granted_cards=_dedupe_granted_cards(task.capability_grants, max_cards=request.max_cards),
-            grants=request.grants,
-            controlled_exec_grants=controlled_exec_grants,
-            acceptance_checks=task.acceptance_checks,
-            evidence=[asdict(item) for item in task.evidence],
-            quality_contract=task.quality_contract,
-            context_manifest=task.context_manifest,
-            context_packs=task.context_packs,
+        return ExecutionContextBuildRequest(
+            task=task,
+            allowed_skills=allowed_skills,
+            allowed_tools=allowed_tools,
+            grants=grants,
+            max_cards=max_cards,
             context_bundle=context_bundle,
-            context_bundle_file=str(Path(_model_task_dir(task)) / "CONTEXT_BUNDLE.md"),
-            context_bundle_json=str(Path(_model_task_dir(task)) / "context_bundle.json"),
             role_template=role_template_snapshot_for_task(task),
             write_boundary=self._build_write_boundary(task),
-            pending_requests=[
-                asdict(item)
-                for item in task.capability_requests
-                if capability_request_counts_as_open(getattr(item, "status", "OPEN"))
-            ],
-            open_gaps=[asdict(item) for item in task.capability_gaps if item.status == "OPEN"],
-            instructions=_execution_context_instructions(),
+            generated_at=time.time(),
+            unresolved_fields=tuple(
+                name for name in ("task_workspace_dir", "agent_run_workspace_dir")
+                if not getattr(task, name, "")
+            ),
         )
 
     def write_execution_context(
@@ -270,11 +261,42 @@ class SubAgentRunnerContextService:
         return context
 
 
-def _execution_context_task_fields(task: SubAgentTask) -> dict[str, object]:
+# LLM: 纯投影只用已冻结 task/facts/time，不查询 manager、系统时间或网络；返回完整数据副本，预览消费方不能经引用修改原准备对象。
+# 函数用途: 为 live runner 和创建前检查组装同一执行上下文；缺路径信息仍由 request.unresolved_fields 表达。
+def project_execution_context(request: ExecutionContextBuildRequest) -> SubAgentExecutionContext:
+    task = request.task
+    return deepcopy(SubAgentExecutionContext(
+        **_execution_context_task_fields(task, generated_at=request.generated_at),
+        allowed_skills=request.allowed_skills,
+        allowed_tools=request.allowed_tools,
+        effective_permissions=dict(getattr(task, "effective_permissions", {}) or {}),
+        granted_cards=_dedupe_granted_cards(task.capability_grants, max_cards=request.max_cards),
+        grants=request.grants,
+        controlled_exec_grants=controlled_exec_grant_refs(list(task.capability_grants or [])),
+        acceptance_checks=task.acceptance_checks,
+        evidence=[asdict(item) for item in task.evidence],
+        quality_contract=task.quality_contract,
+        context_manifest=task.context_manifest,
+        context_packs=task.context_packs,
+        context_bundle=request.context_bundle,
+        context_bundle_file=str(Path(_model_task_dir(task)) / "CONTEXT_BUNDLE.md"),
+        context_bundle_json=str(Path(_model_task_dir(task)) / "context_bundle.json"),
+        role_template=request.role_template,
+        write_boundary=request.write_boundary,
+        pending_requests=[asdict(item) for item in task.capability_requests
+            if capability_request_counts_as_open(getattr(item, "status", "OPEN"))],
+        open_gaps=[asdict(item) for item in task.capability_gaps if item.status == "OPEN"],
+        instructions=_execution_context_instructions(),
+    ))
+
+
+# LLM: task 字段与生成时间均由 prepare 冻结；纯投影不得隐式读取时间或补出另一份身份。
+# 函数用途: 复制上下文的身份、任务和路径基础字段，不改变原任务或文件。
+def _execution_context_task_fields(task: SubAgentTask, *, generated_at: float) -> dict[str, object]:
     task_dir = _model_task_dir(task)
     return {
         "run_id": task.id,
-        "generated_at": time.time(),
+        "generated_at": generated_at,
         "goal": task.goal,
         "thought": task.thought,
         "plan": task.plan,

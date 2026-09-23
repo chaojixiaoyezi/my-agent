@@ -90,7 +90,7 @@ def test_v1_read_only_migration_preserves_profile_uuid(tmp_path):
     assert selected_model_config(host).model_session_header == "X-Session"
     assert path.read_bytes() == before
     op(host, "set_default", {"profile_id": key})
-    assert read_model_profiles(path)["schema"] == "owner_model_profiles.v4"
+    assert read_model_profiles(path)["schema"] == "owner_model_profiles.v5"
     assert op(host, "list", {})["selected"] == key
 
 

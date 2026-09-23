@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 
+from ..memory_archive.tokens import estimate_tokens
 from .decision_protocol import (
     MAX_DECISION_RESPONSE_BYTES,
     DecisionAnswer,
@@ -13,6 +14,9 @@ from .decision_protocol import (
     decision_json,
 )
 from .errors import ProviderResponseError
+
+JEV_REQUEST_CONTEXT_TOKENS = 64_000
+JEV_STATE_QUESTION_TOKENS = 32_000
 
 
 # LLM: 固定长度是本适配器资源限制，Choice/Score 数量遵循 TypeSafe API；不按名称解释结果含义。
@@ -38,6 +42,22 @@ def typesafe_payload(request: DecisionRequest, model: str) -> dict:
         _validate_question(key, question)
     decision_json(payload)
     return payload
+
+
+# LLM: Jev的64k整包和32k共享state加最长题是供应商token窗口；复用原估算器留余量，但它不是供应商tokenizer或硬容量证明。
+# 函数用途: 提前筛掉明显超窗的请求，供应商仍负责最终容量判定，拒绝后调用方沿原方案继续。
+def validate_typesafe_request_window(payload: dict, configured_window_tokens: int) -> None:
+    window = configured_window_tokens if type(configured_window_tokens) is int and configured_window_tokens > 0 else JEV_REQUEST_CONTEXT_TOKENS
+    total_limit = min(window, JEV_REQUEST_CONTEXT_TOKENS)
+    # 直接拿 UTF-8 字节数当 token 数会误拒合法的批量短题；保留一成服务端包装余量。
+    if estimate_tokens(payload) > int(total_limit * 0.9):
+        raise DecisionInputError("决策请求超过模型总输入窗口。")
+    longest_question = max(
+        estimate_tokens({"state": payload["state"], "questions": {key: question}})
+        for key, question in payload["questions"].items()
+    )
+    if longest_question > int(min(window, JEV_STATE_QUESTION_TOKENS) * 0.9):
+        raise DecisionInputError("决策状态和最长题目超过模型单题输入窗口。")
 
 
 # LLM: 校验单题 wire 类型与供应商候选上限，无网络或状态副作用；业务可否跳过仍由宿主决定。

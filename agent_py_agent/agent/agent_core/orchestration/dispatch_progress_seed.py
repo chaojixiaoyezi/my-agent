@@ -18,6 +18,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from ...runtime_context import current_subagent_run_id
 from ...subagents.models import (
     SUBAGENT_FAILURE_STATUSES,
     SUBAGENT_HANDLED_TERMINAL_STATUSES,
@@ -33,7 +34,6 @@ from ...task_progress import (
     with_task_progress_display_plan,
     write_task_progress,
 )
-from ..runner.context import current_subagent_run_id
 from ..runtime.task_identity import (
     durable_task_id,
     progress_display_generation_id,

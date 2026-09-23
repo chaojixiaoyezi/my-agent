@@ -1,7 +1,7 @@
 
 
-# LLM: 工具循环沿同一native IR和Compact权威；能力名卡只读当前params，渲染不发决策请求，执行事实不从次数推断。
-# 模块用途: 组装当前展示选择和工具请求并协调压缩提交，原授权、用户输入、账本和任务状态保持各自权威。
+# LLM: 工具循环沿同一 IR 和 Compact 权威；真实渲染先准备事实再复用纯布局，预投影不得准备副作用；阅读建议仅追加共用展示。
+# 模块用途: 组装展示选择、可忽略的阅读提示和真实请求并协调压缩提交，原授权、用户输入、账本和任务状态保持各自权威。
 from __future__ import annotations
 
 import json
@@ -31,7 +31,8 @@ from ..conversation.compact_progress import (
     CONVERSATION_COMPACT_PROGRESS_SCHEMA,
 )
 from ..conversation.tool_context_window import record_native_ir_window, window_tool_context_params
-from ..prompting_parts.builder import ToolSections, project_runtime_workspace_context
+from ..prompting_parts.builder import project_runtime_workspace_context
+from ..runtime_context import current_task_attributes
 from ..runtime_db.operations import exec_lock_scope
 from ..settings.runtime_guard_config import runtime_guard_int
 from ..subagents.services.session_progress import record_runtime_subagent_tool_progress
@@ -41,7 +42,6 @@ from ._runtime_params import ToolLoopExecuteParams
 from .delivery_contract_prompting import render_delivery_contract_section
 from .native_tool_protocol import native_tool_use_active
 from .provider_transient_auto_resume import run_with_provider_transient_auto_resume
-from .runner.context import current_task_attributes
 from .runner.stage_trace import (
     trace_runner_tool_call_started,
 )
@@ -123,6 +123,7 @@ from .tool_loop.round_execution import (
     execute_tool_round,
 )
 from .tool_model_generation import ModelGenerateParams, generate_model_response
+from .tool_request_projection import tool_loop_prompt_request
 from .tool_runtime_ledger import persist_tool_runtime_ledger, write_boundary_with_runtime_ledger
 
 _LOGGER = logging.getLogger(__name__)
@@ -263,32 +264,21 @@ def build_tool_loop_prompt(agent, params: ToolLoopExecuteParams) -> str:
     return prompt
 
 
-# LLM: Goal与Skill临时展示不改变权限；选择只读本次params，原生执行事实仍按IR来源持久化，不在渲染中请求决策。
-# 函数用途: 渲染本轮目标、选中名卡及真实上下文，保留原执行事实和缓存分段。
+# LLM: 保持 Goal/workspace/execution facts 原准备顺序；宿主与 child 只冻结同一次 gather，纯预览不得调用这里改变 Goal 修订号。
+# 函数用途: 读取本轮真实宿主事实并交给原 PromptBuilder，保留选中名卡、执行事实和缓存分段。
 def _render_tool_loop_prompt(agent, params: ToolLoopExecuteParams) -> str:
-    return agent.prompts.build(
-        params.user_prompt,
-        params.memories,
-        inject=_runtime_injections_with_delivery_contract(params, agent=agent),
-        prompt_files=params.prompt_files,
-        system_prompt_override=params.system_prompt_override,
-        context_scope=params.context_scope,
-        workspace_context_override=_runtime_workspace_context(agent, params),
-        tools=ToolSections(
-            selected_skill_ids=params.selected_skill_ids,
-            required_skill_ids=params.required_skill_ids,
-            tool_catalog_section=params.tool_catalog_section,
-            tool_recommendations_section=params.tool_recommendations_section,
-            tool_context=params.tool_context,
-            execution_facts_section=(
-                render_current_turn_execution_facts(agent, params.archive_tool_calls)
-                if params.tool_catalog_section
-                else ""
-            ),
-            # native 下工具往返由原生 messages 携带，prompt 旁路 tool_context 文本折入。
-            native_tool_use=native_tool_use_active(params),
+    request = tool_loop_prompt_request(
+        params,
+        runtime_injections=_runtime_injections_with_delivery_contract(params, agent=agent),
+        workspace_context=_runtime_workspace_context(agent, params),
+        execution_facts=(
+            render_current_turn_execution_facts(agent, params.archive_tool_calls)
+            if params.tool_catalog_section else ""
         ),
     )
+    from ..model_request_selection import render_selected_request
+
+    return render_selected_request(agent, params, request)
 
 
 # LLM: Workspace Context must mirror the same cwd used by ToolRegistry.  For
@@ -1168,9 +1158,8 @@ def _native_tool_call_ids(params: ToolLoopExecuteParams) -> tuple[str, ...]:
     )
 
 
-# LLM: native compact passes the full typed IR to the memory-archive summarizer; that boundary
-# removes only duplicate task/thread projections and must retain an independent carried handoff.
-# 函数用途: 在旧工具对尚未回收时生成可持续回放的当前 turn 续接摘要，并保留真实交接上下文。
+# LLM: native Compact 传完整 typed IR 和同一 run/线程停止回调；分段取消须在回收前生效，原 handoff 不能被重复摘要投影吞掉。
+# 函数用途: 在旧工具对尚未回收时生成当前 turn 续接摘要，保留真实交接并让每段模型请求服从原停止信号。
 def _native_tool_history_summary(
     agent: object,
     params: ToolLoopExecuteParams,
@@ -1215,6 +1204,7 @@ def _native_tool_history_summary(
             system_instruction=provider_system_instruction(
                 getattr(agent, "backend", None)
             ),
+            interrupt_check=partial(_native_compact_interrupted, params),
         )
     )
 
@@ -1280,19 +1270,36 @@ def _text_conversation_history_section(seed: object) -> str:
     return "\n".join(lines)
 
 
-def next_tool_loop_model_response(agent, params: ToolLoopExecuteParams, tool_rounds: int):
+# LLM: 原完整 prompt 后验证可选 child/宿主建议；采用交回完整 params，只有 typed 发送前拒绝可恢复一次原模型，HTTP 后不切回。
+# 函数用途: 生成一次模型响应，把已验证的首次模型参数交给原循环 owner；普通调用保留原返回合同。
+def next_tool_loop_model_response(agent, params: ToolLoopExecuteParams, tool_rounds: int, *, accept_params=None):
     _discard_stale_natural_reply_for_pending_turn_input(agent, params)
     model_params = natural_user_reply_model_params(params)
     consumes_task_tool_surface = model_params is params
     prompt = build_tool_loop_prompt(agent, model_params)
-    response = generate_model_response(
-        ModelGenerateParams(
-            agent=agent,
-            params=model_params,
-            prompt=prompt,
-            tool_rounds=tool_rounds,
-        )
+    if consumes_task_tool_surface and accept_params is not None:
+        from .subagent.model_selection import select_first_request_model
+
+        model_params, prompt = select_first_request_model(agent, model_params, prompt)
+        accept_params(model_params)
+    from ..model_request_selection import (
+        ModelRequestSelectionRejected,
+        reject_request_selection,
+        select_request_model,
     )
+
+    original_params, original_prompt = model_params, prompt
+    if consumes_task_tool_surface and accept_params is not None:
+        model_params, prompt = select_request_model(agent, model_params, prompt)
+        if model_params is not original_params:
+            accept_params(model_params)
+    try:
+        response = generate_model_response(ModelGenerateParams(agent, model_params, prompt, tool_rounds))
+    except ModelRequestSelectionRejected:
+        reject_request_selection(agent, model_params)
+        model_params, prompt = original_params, original_prompt
+        accept_params(model_params)
+        response = generate_model_response(ModelGenerateParams(agent, model_params, prompt, tool_rounds))
     result = _retry_after_provider_context_overflow(
         agent,
         model_params,
@@ -1491,6 +1498,7 @@ def _pending_turn_input_invalidates_response(agent, params: ToolLoopExecuteParam
 # LLM: 工作片只按结构化响应/中断/预算推进，不能从有无正文猜停工或改写用户请求；重复观察走工具结果账。
 # 函数用途: 执行主子共用的模型工具循环，保留连续工具工作；等待直属孩子时安全让出而不假报完成。
 def _execute_tool_loop_service(service: ToolLoopService, params: ToolLoopExecuteParams):
+    service.current_params = params
     final_prompt, final_response = "", None
     tool_rounds = params.tool_rounds
     repair_counters, provider_response_repairs = ToolLoopRepairCounters(), 0
@@ -1519,6 +1527,7 @@ def _execute_tool_loop_service(service: ToolLoopService, params: ToolLoopExecute
             retry_after_provider_response,
             provider_response_repairs,
         ) = service._model_turn_or_retry(params, tool_rounds, provider_response_repairs)
+        params = service.current_params
         if retry_after_provider_response:
             continue
         if is_interrupted():
@@ -1622,20 +1631,35 @@ def _pending_drain_outcome(service, params, tool_rounds):
     return pending.tool_rounds, pending.final_response, True, pending.final_prompt
 
 
+# LLM: 单个 run 的原循环 owner 保存当前完整参数；自动采用只替换此引用，不修改冻结 dataclass 或共享 Agent。
+# 类用途: 使首轮验证后的协议与模型依赖贯穿后续工具执行、异常保存和最终证据。
 class ToolLoopService:
+    # LLM: 构造只拥有本片参数引用，不登记第二任务或持久状态。
+    # 函数用途: 为当前 run 建立独立工具循环实例。
     def __init__(self, agent):
         self._agent = agent
+        self.current_params = None
 
+    # LLM: 原循环入口先固定参数，后续通过显式回调替换整份；退出仍由调用方 finalization 负责。
+    # 函数用途: 执行本片并保留最终使用的协议参数，供调用方收口。
     def execute(self, params: ToolLoopExecuteParams):
+        self.current_params = params
         return _execute_tool_loop_service(self, params)
 
+    # LLM: 只接受原首次验证入口交回的同一运行参数；无写盘、探针或模型选择副作用。
+    # 函数用途: 让循环后续步骤读取已采用的完整协议快照。
+    def _accept_params(self, params: ToolLoopExecuteParams):
+        self.current_params = params
+
+    # LLM: 原重试函数持有可更新的参数引用，自动采用后重试不能再使用旧协议。
+    # 函数用途: 处理一次模型轮并向原循环交回真实参数。
     def _model_turn_or_retry(
         self,
         params: ToolLoopExecuteParams,
         tool_rounds: int,
         provider_response_repairs: int,
     ):
-        return _model_turn_or_retry(self._agent, params, tool_rounds, provider_response_repairs)
+        return _model_turn_or_retry(self._agent, params, tool_rounds, provider_response_repairs, accept_params=self._accept_params)
 
     def _run_tool_round(self, request: ToolRoundExecutionRequest):
         return _run_tool_round(self._agent, request)
@@ -1703,11 +1727,15 @@ def _drain_pending_deferred_tool_calls(
     return _PendingDeferredToolDrainResult(next_round, final_response)
 
 
+# LLM: 本轮的可选参数采用只更新原局部闭包；重试、Goal 计量、插话确认和异常处理始终消费同一最终模型协议。
+# 函数用途: 运行模型轮及既有重试，首次采用后同步后续重试和外层循环参数。
 def _model_turn_or_retry(
     agent,
     loop_params: ToolLoopExecuteParams,
     tool_rounds: int,
     provider_response_repairs: int,
+    *,
+    accept_params=None,
 ):
     stale_message = stale_subagent_attempt_message(agent)
     if stale_message is not None:
@@ -1720,9 +1748,17 @@ def _model_turn_or_retry(
             provider_response_repairs,
         )
     try:
+        # LLM: 替换局部与循环 owner 必须在实际生成前完成，不丢失共享的工具账和中断对象。
+        # 函数用途: 把同一运行的新协议参数用于本次调用以及重试。
+        def accept(current):
+            nonlocal loop_params
+            loop_params = current
+            if accept_params is not None:
+                accept_params(current)
+
         begin_goal_model_turn(agent, loop_params)
         prompt, response = run_with_provider_transient_auto_resume(
-            lambda: next_tool_loop_model_response(agent, loop_params, tool_rounds),
+            lambda: next_tool_loop_model_response(agent, loop_params, tool_rounds, accept_params=accept),
             on_chunk=loop_params.effective_on_chunk,
             policy=getattr(agent, "runtime_guard_policy", None),
             retry_guard=lambda: not _active_turn_input_delivery_is_ambiguous(
@@ -1951,7 +1987,7 @@ def _repeated_failure_halt_threshold(params: ToolLoopExecuteParams) -> int:
 def _active_goal_continuation_available(agent, params: ToolLoopExecuteParams) -> bool:
     try:
         from ..conversation.goal_binding import goal_binding
-        from .runner.context import current_subagent_run_id
+        from ..runtime_context import current_subagent_run_id
 
         store = getattr(agent, "conversation_store", None)
         thread_id, task_id, goal_id, _ = goal_binding(agent, params)
@@ -2250,11 +2286,11 @@ def _final_response_after_no_action_gate(
     return final_prompt, final_response
 
 
-# LLM: Archive once, then feed the same bounded projection to text and native histories before any
-# later compact/window logic; do not let raw result refs bypass this choke point.
-# 函数用途: 记录一次工具调用、更新运行事实，并把安全结果投影续入下一轮模型上下文。
+# LLM: 原结果只归档一次；可选阅读提示只追加到 text/native 共用展示，不改结果、账本或 refs；同步核对关闭等价与原恢复锚点。
+# 函数用途: 记录一次工具调用、更新运行事实，并把安全结果及可忽略的阅读建议续入下一轮模型上下文。
 def _record_tool_call(agent, record: ToolCallRecordParams) -> None:
     from ..contracts.required_actions import settle_required_action
+    from .tool_context.external_material_order import external_material_order_hint
 
     payload = record.payload
     settle_required_action(
@@ -2285,6 +2321,9 @@ def _record_tool_call(agent, record: ToolCallRecordParams) -> None:
     record.params.archive_tool_calls.append(archive_record)
     update_runtime_fact_progress_if_enabled(agent, record.params, tool_round=record.tool_rounds)
     result_rendered = render_tool_result_for_live_prompt(record.result, archive_record)
+    reading_hint = external_material_order_hint(agent, record, archive_record)
+    if reading_hint:
+        result_rendered += "\n" + reading_hint
     record.params.tool_context.append(
         f"[tool-record round={record.tool_rounds} index={record.idx}]\n"
         f"{render_tool_payload_for_live_prompt(record.model_payload)}\n"

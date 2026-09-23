@@ -84,6 +84,13 @@ HTTP/IM/未知来源不能凭 rich transcript 获得私有路径展示，后台�
 
 ## 异常回合历史
 
+`request_execution.py` 在同一 Gateway 用户回合内仅用内存回调携带已评估标记与能力展示选择；
+宿主回合编号来自原 `execution_attempt_id`（缺省 `request_id`），不借用每次 `agent.run` 可轮换的 DB attempt。
+`request_context.py` 只在原 Compact 调用传该面，`compact_provider_surface.py` 用当前请求身份、工具快照、
+必需动作和连接版本复核后生成动态 Skill 名卡及原生 schema；失效清空携带值，仍保持本回合已评估，
+后续重试不重复调用 Jev。动态展示沿 typed `RuntimeFactsTurn` 进入摘要请求，不挪进稳定缓存前缀；
+手动 Compact 和新请求没有内存载体时继续原默认面。该选择不进入会话持久状态，也不授予执行权。
+
 Gateway 的同一活动请求与后台工作片各自持有 `RunParams.runtime_rejected_actions`，Compact 重建参数时共享原列表。
 该宿主内存只记录用户拒绝/取消的工具名和参数指纹，沿公共运行参数进入原审批判断；不从模型历史重建，也不承接批准。
 新调用默认独立，子代理由自己的 attempt 持有；它不是持久授权表，不能替代 `/stop` 或 Goal 状态。
@@ -1788,3 +1795,31 @@ blocked，由 Gateway 停止该 request，避免重复副作用。
 
 `model_profile_service.handle_client_models` 为 `/client/models` 提供 owner 认证后的 list/add/select。
 密钥不进入 ask/control/notice 队列；私有配置文件和运行快照分别由 settings/model_profiles 与 model_scope 负责。
+
+## 会话模型选择版本（P5-D Stage A）
+
+`ConversationThread.model_profile_id` 仍是唯一有效模型引用。原 `conversation_thread.v10` 加法保存
+`model_selection_revision`、`model_selection_source`、`model_selection_last_explicit_revision`：旧三字段全缺时
+归一为 `0/unknown/0`，读取不写盘、不推断过去的手动意图；部分缺失、坏类型或矛盾事实拒绝，不能静默清零。
+首次真实默认/继承绑定记 `1/default/0` 或 `1/inherited/0`，已有非空旧模型不能冒充新初始化。
+
+`thread_model_profile_id(select=...)` 先验证原模型权限，在原 `ThreadStore.update_atomic` 中从最新版本加一。
+同值显式选择也写 `source=explicit`、`last_explicit_revision=本次版本`，并在同一提交终结原 pending 建议；
+实际模型引用改变才清上下文校准。普通读取、Compact 和其他线程状态更新不增加选择版本。
+`update_atomic` 拒绝选择回退、跳号、未增版本就换引用，以及改写已发生的显式覆盖版本。
+
+宿主后续自动采用可以在原 updater 比较预期 version/profile 和原 pending/workpiece 身份，再写
+`source=automatic` 并保留最近显式版本；这些字段本身不授权采用、不表示容量足够，也不构成永久 pin。
+旧请求迟到与配置/连接变更仍要分别复核，禁止把选择版本当连接版本。所有增强由宿主在原设置边界内自动运行，
+失败保留原合法模型；不增加用户逐工作片确认。该片未改变 Gateway 当前模型冻结时点或正在执行的 backend。
+
+## 2026-09-22 主会话首次请求自动采用（P5-D Stage C）
+
+后续 Stage C 已把采用点移至准确 Gateway 车道内、原 PromptBuilder 完整准备之后。应用层 `gateway_model_observation.py` 只产生
+本请求的一次 Jev 建议；`gateway_model_adoption.py` 用原模型请求回调检查同一冻结材料、provider payload、工具与历史，
+在实际发送前按模型目录 generation guard → Gateway active-turn T → 原 thread CAS 的顺序提交。
+同一事务保存 `source=automatic`、递增选择版本和 `send_intent_uncertain`；该状态只证明发送意图，HTTP 事实仍读原观察账。
+发送前明确拒绝可沿原模型执行一次；提交后或写盘结果未知不跨模型重发。容量记录为有余量的工程估计，
+未知模态/协议保持原模型。fake HTTP 联合302项通过，真实供应商主会话仍待验；细节见
+`docs/tasks/DECISION_MODEL_MAIN_MODEL_ADOPTION_HANDOFF.md`。
+集成时把跨 Gateway/core 的模型选择与 Compact 重载编排移至 `agent/` 应用层，并把 Tooling、Conversation、core 共用的线程本地 runner 身份移至 `runtime_context.py`。底层 Gateway/Tooling 不再反向导入 core；当前 import-boundary 守卫零发现，相关 10 文件 **268 passed、4 xfailed**。这项结构整理不改变原车道/发送 CAS 或已测真实请求结论。

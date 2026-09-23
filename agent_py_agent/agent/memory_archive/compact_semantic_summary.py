@@ -1,4 +1,5 @@
-
+# LLM: 本模块只生成原 Compact 的候选摘要；live 调用复用有界发送和原账本，完整覆盖/取消检查完成前不得回收 IR 或提交会话。
+# 模块用途: 为历史续跑和运行中压缩生成摘要，保留原取消、缓存和失败合同，不创建另一份历史或清理线程。
 from __future__ import annotations
 
 """compact 续跑历史的 LLM 语义摘要（短板6 子项，长期助手 trajectory_compressor 蓝本）。
@@ -153,8 +154,8 @@ class SemanticSummaryRequest:
     task_id: str = ""
 
 
-# LLM: A live summary request carries both the previous canonical summary and current native IR.
-# 类用途: 给运行中压缩摘要器提供旧摘要、当前工具历史和任务要求，避免跨代信息丢失。
+# LLM: live 候选携带原历史和只读停止回调；分段必须观察同一 run/线程取消，不能在部分摘要成功后回收历史。
+# 类用途: 给运行中压缩提供旧摘要、当前工具历史、任务要求及停止信号，避免跨代丢失和取消后继续请求。
 @dataclass(frozen=True)
 class LiveToolHistorySummaryRequest:
     """同一 thread 的旧摘要与 native IR 在回收工具对前生成替代摘要所需的输入。"""
@@ -172,6 +173,7 @@ class LiveToolHistorySummaryRequest:
     provider_history_messages: tuple[dict[str, Any], ...] = field(default_factory=tuple)
     tools: tuple[dict[str, Any], ...] = field(default_factory=tuple)
     system_instruction: str = ""
+    interrupt_check: Callable[[], bool] | None = None
 
 
 def semantic_summary_config(agent: object) -> SemanticSummaryConfig:
@@ -206,13 +208,12 @@ def summarize_carried_tool_context(
         return None
 
 
-# LLM: Live Compact preserves the parent model/system/tools/message prefix when a typed provider
-# prompt is supplied, then appends one synthetic instruction as the only volatile suffix. This is a
-# one-shot non-executing fork: returned tool calls are rejected, never run. Legacy/test callers keep
-# the older task-first wire. Empty/invalid text uses a typed bounded projection; transport failures
-# still abort the mutation.
-# 函数用途: 对即将回收的完整原生工具历史生成续接摘要；真实运行尽量复用主请求缓存，空回复仍保住任务与工具事实。
+# LLM: live 摘要够用时保持原 model/system/tools/message 前缀，超窗复用原连续分段；返回工具调用不执行，异常或停止不授权改写 IR。
+# 函数用途: 对完整原生历史生成可续接摘要；真实请求保持窗口边界，全部完成并复核停止后才返回候选。
 def summarize_live_tool_history(request: LiveToolHistorySummaryRequest) -> str:
+    from ..conversation.compact_guard import raise_if_compact_interrupted
+
+    raise_if_compact_interrupted(request.interrupt_check)
     if not request.history:
         return ""
     from ..backends.message_adapter import (
@@ -253,6 +254,7 @@ def summarize_live_tool_history(request: LiveToolHistorySummaryRequest) -> str:
     # A second daemon-thread deadline cannot cancel blocking HTTP and would
     # leave an orphan summary call consuming quota beside the resumed turn.
     summary = generate(summary_instruction).strip()
+    raise_if_compact_interrupted(request.interrupt_check)
     limit = max(1_000, int(request.max_output_chars or _DEFAULT_MAX_INPUT_CHARS))
     fallback_limit = min(limit, _LIVE_FALLBACK_MAX_OUTPUT_CHARS)
     if not summary:
@@ -764,9 +766,8 @@ def _resolve_generate(
     return _call
 
 
-# LLM: Live compaction is a distinct synthetic turn: preserve provider-native history first and
-# append exactly one non-tool user instruction last, matching 会话运行时 compaction request order.
-# 函数用途: 把摘要要求放到工具历史末尾再调用模型，防止模型把它当旧消息后继续普通工作。
+# LLM: 真实 live 请求共用 conversation 的有界摘要发送及逐段停止检查；普通可容纳请求面不变，分段只生成候选且不执行工具。
+# 函数用途: 把摘要要求放到原生历史末尾，按当前窗口完整覆盖后返回正文，失败直接交原 Compact 事务处理。
 def _resolve_generate_with_messages(
     request: LiveToolHistorySummaryRequest,
     messages: list[dict[str, Any]],
@@ -783,6 +784,8 @@ def _resolve_generate_with_messages(
     if not callable(generate):
         return None
 
+    # LLM: 仅实际 agent 调用接原有界入口及账本；无 agent 的后端适配保持原直接调用，均不修改源历史。
+    # 函数用途: 发送一次摘要或原有界分段链，拒绝返回的工具调用，保留真实停止和传输异常。
     def _call(prompt: str) -> str:
         compact_messages = list(messages)
         outgoing_prompt: str = cache_safe_prompt or str(
@@ -799,12 +802,10 @@ def _resolve_generate_with_messages(
         # 缓存路径的任务已经在完整原生历史里，outgoing_prompt 只携带稳定前缀与动态尾部。
         tools = list(request.tools) or None
         if request.agent is not None:
-            from ..conversation.auxiliary_model_call import (
-                AuxiliaryModelCallRequest,
-                generate_auxiliary_model_response,
-            )
+            from ..conversation.auxiliary_model_call import AuxiliaryModelCallRequest
+            from ..conversation.compact_request_budget import generate_bounded_compact_response
 
-            response = generate_auxiliary_model_response(
+            response = generate_bounded_compact_response(
                 AuxiliaryModelCallRequest(
                     agent=request.agent,
                     prompt=outgoing_prompt,
@@ -815,7 +816,8 @@ def _resolve_generate_with_messages(
                     run_id=request.run_id,
                     task_id=request.task_id,
                     purpose="compact_live_tool_summary",
-                )
+                ),
+                interrupt_check=request.interrupt_check,
             )
         else:
             kwargs: dict[str, object] = {"messages": compact_messages}

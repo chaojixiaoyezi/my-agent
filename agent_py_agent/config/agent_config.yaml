@@ -993,16 +993,29 @@ watchdog_max_restarts: 3
 watchdog_restart_delay: 10
 # 决策增强：默认关闭；保存设置不发网络请求。修改时间只作用后续请求，不重置已开始阶段的预算。
 decision_enabled: false
+decision_experiment_enabled: false  # 仅实验能力开关；另需宿主显式有界授权，当前缺可靠输入上界时禁止实验联网
 decision_timeout_seconds: 2.0  # 前台单次等待；必须为有限正秒数
 decision_stage_timeout_seconds: 4.0  # 同一阶段累计等待；必须为有限正秒数
 decision_background_timeout_seconds: 4.0  # 后台单次等待；必须为有限正秒数
 decision_profile_id: ""  # 原模型目录的 Decision 引用；空表示未绑定，不保存第二份凭据
-decision_model_selection_mode: off  # off 关闭 / observe 付费用量观察 / apply 采用合法建议
+decision_model_selection_mode: off  # off 关闭 / observe 仅观察建议与输入 token / apply 采用合法建议；不计算决策模型价格
 decision_model_selection_timeout_seconds: null  # 留空继承通用单次期限
 decision_model_selection_profile_id: null  # 留空继承通用模型；空字符串明确不绑定
+decision_external_material_order_mode: off  # 已归档批量网页的阅读优先级提示；observe 仅观察，apply 追加建议，不删改原页或来源
+decision_external_material_order_timeout_seconds: null  # 留空继承前台单次期限，准备/发送/采用共用同一阶段绝对期限
+decision_external_material_order_profile_id: null  # 留空继承通用决策模型；仅发送安全摘录和当前问题，不补读正文或发送 URL 查询串
+decision_planning_mode: off  # 现有 Todo 优先级建议；observe 仅观察，apply 只附软提示，不创建目标、待办或子代理
+decision_planning_timeout_seconds: null  # 留空继承前台单次期限；原阶段和采用前复核共用绝对期限
+decision_planning_profile_id: null  # 留空继承通用决策模型；只发送当前请求与有界现有 Todo 候选
+memory_decision_pre_recall_mode: off  # 召回前补充查询建议；始终先执行原召回，不依据自然语言或决策跳过历史
+memory_decision_pre_recall_timeout_seconds: null  # 留空继承前台单次期限，和召回后排序共用阶段绝对期限
+memory_decision_pre_recall_profile_id: null  # 留空继承通用决策模型；补充检索仍守原 owner/scope/数量/字符预算
 memory_decision_recall_mode: off  # 记忆召回决策；不绕过原读取权限
 memory_decision_recall_timeout_seconds: null  # 留空继承前台期限
 memory_decision_recall_profile_id: null  # 留空继承通用模型引用
 memory_decision_curator_mode: off  # 记忆整理决策；不授予写人格或晋升权限
 memory_decision_curator_timeout_seconds: null  # 留空继承后台期限
 memory_decision_curator_profile_id: null  # 留空继承通用模型引用
+memory_decision_curator_relation_mode: off  # 用户后台独立开关：新来源与完整、带版本正式条目的关系建议；不直接合并或晋升
+memory_decision_curator_relation_timeout_seconds: null  # 留空继承后台期限，与整理标注共用同一阶段总预算
+memory_decision_curator_relation_profile_id: null  # 留空继承通用模型引用；保存不发请求

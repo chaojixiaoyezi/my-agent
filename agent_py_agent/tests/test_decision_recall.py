@@ -21,6 +21,22 @@ from agent_py_agent.agent.memory_store.recall import MemoryRecallScope
 from agent_py_agent.agent.tooling.cancellation import ToolCancelled
 
 
+def test_supplemental_queries_are_finite_parts_of_the_original_prompt():
+    prompt = "请分析这份报告的主要结论。对比去年同季度的数据变化。指出需要核对的异常指标。"
+    candidates = module.supplemental_query_candidates(prompt)
+
+    assert [query for _, query in candidates] == [
+        "请分析这份报告的主要结论", "对比去年同季度的数据变化", "指出需要核对的异常指标",
+    ]
+    assert len({key for key, _ in candidates}) == len(candidates)
+
+
+def test_supplemental_queries_do_not_use_partial_oversized_or_simple_prompt():
+    assert module.supplemental_query_candidates("请帮我总结今天的情况") == ()
+    assert module.supplemental_query_candidates("甲" * 4097 + "。查找历史记录") == ()
+    assert len(module.supplemental_query_candidates("。".join(f"核对第{i}项材料的来源" for i in range(12)))) <= 4
+
+
 @pytest.fixture
 def prepared():
     records = [MemoryRecord("user", f"记忆正文{i}", entry_id=f"m{i}", kind="fact", version=1,
@@ -159,18 +175,20 @@ def test_user_interrupt_propagates(prepared, monkeypatch, error):
         run(prepared)
 
 
-def test_too_many_candidates_skips_enhancement_without_dropping_records(prepared, monkeypatch):
+def test_more_than_64_candidates_use_original_protocol_budget_without_dropping_records(prepared, monkeypatch):
     host, request, records, scope = prepared
     many = [replace(records[0], entry_id=f"m{index}") for index in range(65)]
     calls = install(monkeypatch)
-    assert run((host, request, many, scope))[0] is many and not calls
+    result, _ = run((host, request, many, scope))
+    assert len(calls) == 1 and len(calls[0][1]["questions"]) == 65
+    assert sorted(map(id, result)) == sorted(map(id, many))
 
 
 def test_task_local_context_never_reaches_recall_decision(prepared, monkeypatch):
     host, request, records, scope = prepared
     monkeypatch.setattr(module, "rerank_recalled_memories", lambda *_args, **_kwargs: pytest.fail("task_local cannot recall"))
     routed = SimpleNamespace(injected_sections=["old"], findings=[])
-    assert _formal_memories_for_request(host, request, routed, recall_scope=scope, long_term_memories=records, task_local=True) == []
+    assert _formal_memories_for_request(host, request, routed, recall_scope=scope, long_term_memories=records, skip_formal_recall=True) == []
     assert routed.injected_sections == []
 
 
@@ -248,7 +266,7 @@ def test_formal_budgeted_recall_enters_real_service_worker_and_usage(tmp_path, p
     calls = install_backend(monkeypatch)
     records = host.memory.all()
     routed = SimpleNamespace(receipts=[], findings=[], injected_sections=[])
-    result = _formal_memories_for_request(host, request, routed, recall_scope=prepared[3], long_term_memories=records, task_local=False)
+    result = _formal_memories_for_request(host, request, routed, recall_scope=prepared[3], long_term_memories=records, skip_formal_recall=False)
     assert [record.entry_id for record in result] == (["m1", "m2", "m0"] if mode == "apply" else ["m0", "m1", "m2"]), routed.findings
     assert len(calls) == (0 if mode == "off" else 1)
     if calls:
@@ -265,7 +283,7 @@ def test_existing_budget_selects_candidates_before_optional_ranking(tmp_path, pr
     host, request = real_host(tmp_path, records, "apply")
     calls = install_backend(monkeypatch)
     routed = SimpleNamespace(receipts=[], findings=[], injected_sections=[])
-    result = _formal_memories_for_request(host, request, routed, recall_scope=prepared[3], long_term_memories=host.memory.all(), task_local=False)
+    result = _formal_memories_for_request(host, request, routed, recall_scope=prepared[3], long_term_memories=host.memory.all(), skip_formal_recall=False)
     assert len(calls[0].payload("model")["state"]["memories"]) == 2
     assert [record.entry_id for record in result] == ["m1", "m0"]
     assert sum(len(record.content) for record in result) == 8000
@@ -284,7 +302,7 @@ def test_configuration_disabled_during_source_refresh_rejects_old_order(tmp_path
 
 
 def test_thread_identity_conflict_never_calls_provider(tmp_path, prepared, monkeypatch):
-    from agent_py_agent.agent.agent_core.runner.context import (
+    from agent_py_agent.agent.runtime_context import (
         restore_current_subagent_context,
         set_current_subagent_context,
     )
@@ -323,7 +341,7 @@ def test_prepare_context_reuses_sorted_records_in_original_loop_without_second_c
 
 
 def test_child_uses_exact_child_thread_not_parent_conversation(tmp_path, prepared, monkeypatch):
-    from agent_py_agent.agent.agent_core.runner.context import (
+    from agent_py_agent.agent.runtime_context import (
         restore_current_subagent_context,
         set_current_subagent_context,
     )

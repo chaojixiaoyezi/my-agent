@@ -18,6 +18,7 @@ Step 4（出站孤儿净化 sweep，最后防线）：
 """
 
 import json
+import re
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -216,6 +217,8 @@ def _valid_live_handoff(label: str = "") -> str:
     )
 
 
+# LLM: fake 后端接受真实辅助请求的完整签名，工具禁用和 system 指令不得为迁就夹具而从生产请求中删除。
+# 类用途: 记录无网络摘要请求，支持原单次缓存面和新的有界分段验证。
 class _SummaryBackend:
     name = "anthropic_compatible"
 
@@ -223,12 +226,16 @@ class _SummaryBackend:
         self.context_window_tokens = context_window_tokens
         self.calls = []
 
-    def generate(self, prompt, on_chunk=None, tools=None, messages=None):
-        del on_chunk, tools
+    # LLM: 此夹具只记录请求不执行 tools；分段的显式 none 与摘要角色保持在真实发送合同中。
+    # 函数用途: 返回当前六字段交接摘要，供原 Compact 事务及源覆盖测试使用。
+    def generate(self, prompt, on_chunk=None, tools=None, messages=None, tool_choice=None, request_options=None):
+        del on_chunk, tools, tool_choice, request_options
         self.calls.append((prompt, list(messages or [])))
         return SimpleNamespace(text=_valid_live_handoff(str(len(self.calls))))
 
 
+# LLM: 空响应夹具仍接受真实分段协议，不允许用不兼容的函数签名阻止预算路径。
+# 类用途: 测试有界重试耗尽后的机械投影与原 Compact 提交。
 class _EmptySummaryBackend:
     name = "anthropic_compatible"
 
@@ -236,10 +243,34 @@ class _EmptySummaryBackend:
         self.context_window_tokens = context_window_tokens
         self.calls = []
 
-    def generate(self, prompt, on_chunk=None, tools=None, messages=None):
-        del on_chunk, tools
+    # LLM: 每次请求都正常返回空正文，不能将其伪造为网络异常或工具执行。
+    # 函数用途: 记录所有无网络摘要尝试，触发原有界空正文处理。
+    def generate(self, prompt, on_chunk=None, tools=None, messages=None, tool_choice=None, request_options=None):
+        del on_chunk, tools, tool_choice, request_options
         self.calls.append((prompt, list(messages or [])))
         return SimpleNamespace(text="")
+
+
+# LLM: 只解析测试捕获的宿主分段信封，核对连续覆盖后重建原消息；产品决策不读取这些自然语言标记。
+# 函数用途: 让原单次摘要与多次分段测试共用完整历史断言，不把最后一段误当全部来源。
+def _summary_source_messages(calls):
+    first_messages = calls[0][1]
+    first_text = first_messages[0]["content"][0].get("text", "")
+    if "\n历史 JSON 连续片段 [" not in first_text:
+        assert len(calls) == 1
+        return first_messages
+    source = ""
+    total = 0
+    for _prompt, messages in calls:
+        text = messages[0]["content"][0]["text"]
+        match = re.search(r"\n历史 JSON 连续片段 \[(\d+):(\d+)/(\d+)\]：\n", text)
+        assert match is not None
+        start, end, total = map(int, match.groups())
+        part = text[match.end():]
+        assert start == len(source) and len(part) == end - start
+        source += part
+    assert len(source) == total
+    return json.loads(source)
 
 
 class _ContextCompactionSink:
@@ -589,7 +620,10 @@ def test_conversation_prompt_at_200k_90_percent_uses_shared_native_ir_window(tmp
     assert "toolu_8" not in tool_use
     summaries = [item for item in params.tool_ir_history if isinstance(item, CompactionSummary)]
     assert len(summaries) == 1
-    assert len(agent.backend.calls) == 1
+    assert len(agent.backend.calls) > 1
+    assert _message_block_ids(_summary_source_messages(agent.backend.calls))[0] == {
+        f"toolu_{index}" for index in range(1, 9)
+    }
     assert "真实 rg=/opt/reference/rg" in summaries[0].text
 
 
@@ -837,7 +871,7 @@ def test_native_window_summary_may_replace_latest_pair_to_reach_recovery_target(
     prompt = build_tool_loop_prompt(agent, params)
 
     assert params.tool_ir_history != before_ir
-    assert summary_calls == [True]
+    assert len(summary_calls) > 1
     updated = store.threads.load(thread.thread_id)
     assert updated is not None and updated.compact_generation == 1
     assert sink.progress_rows[-1]["phase"] == "completed"
@@ -942,13 +976,15 @@ def test_native_window_reclaims_old_runtime_facts_across_two_generations(tmp_pat
         latest = RuntimeFactsTurn(f"current-state-{generation}")
         params.tool_ir_history.append(latest)
         archive_before = list(params.archive_tool_calls)
+        call_start = len(agent.backend.calls)
         assert model_visible_context_tokens(agent, params, "base-prompt") > 9_000
 
         prompt = build_tool_loop_prompt(agent, params)
 
         assert store.threads.load(thread.thread_id).compact_generation == generation
-        assert len(agent.backend.calls) == generation
-        sent_history = json.dumps(agent.backend.calls[-1][1], ensure_ascii=False)
+        call_end = len(agent.backend.calls)
+        assert call_end > call_start
+        sent_history = json.dumps(_summary_source_messages(agent.backend.calls[call_start:]), ensure_ascii=False)
         assert old_facts[0].text in sent_history
         assert old_facts[-1].text in sent_history
         assert latest in params.tool_ir_history
@@ -960,7 +996,7 @@ def test_native_window_reclaims_old_runtime_facts_across_two_generations(tmp_pat
         ir_before = list(params.tool_ir_history)
         build_tool_loop_prompt(agent, params)
         assert params.tool_ir_history == ir_before
-        assert len(agent.backend.calls) == generation
+        assert len(agent.backend.calls) == call_end
 
 
 def test_native_window_floor_keeps_ir_facts_that_live_compact_cannot_delete(tmp_path):
@@ -1252,6 +1288,7 @@ def test_shared_native_window_commits_main_or_child_conversation_compact(
     assert len(sink.rows) == 1
     assert store.threads.load(thread.thread_id).compact_generation == 1
 
+    first_call_count = len(agent.backend.calls)
     _record_large_write_calls(agent, params, start=7, stop=12, chars=12_000)
     build_tool_loop_prompt(agent, params)
     second = store.threads.load(thread.thread_id)
@@ -1261,10 +1298,11 @@ def test_shared_native_window_commits_main_or_child_conversation_compact(
     assert '"compact_generation":2' in conversation_runtime_state_section(params)
     assert second.compact_source_tool_pairs > first.compact_source_tool_pairs
     assert agent.backend.calls[-1][0] == "x"
-    final_blocks = agent.backend.calls[-1][1][-1]["content"]
+    source_messages = _summary_source_messages(agent.backend.calls[first_call_count:])
+    final_blocks = source_messages[-1]["content"]
     final_text = "".join(str(block.get("text") or "") for block in final_blocks)
     assert first.summary in final_text
-    assert "摘要-1" not in str(agent.backend.calls[-1][1][:-1])
+    assert f"摘要-{first_call_count}" not in json.dumps(source_messages[:-1], ensure_ascii=False)
 
 
 def test_background_main_run_params_commit_live_compact_despite_save_false(tmp_path):
@@ -1363,7 +1401,8 @@ def test_persistent_native_window_commits_completed_empty_summary_fallback(tmp_p
     assert updated.compact_generation == 1
     assert updated.compact_consecutive_failures == 0
     assert updated.compact_source_tool_pairs > 0
-    assert len(agent.backend.calls) == 1
+    # 空段沿原有界纠正后生成机械候选；调用数不再等于逻辑 Compact 代数。
+    assert len(agent.backend.calls) >= 3 and len(agent.backend.calls) % 3 == 0
     assert len(summaries) == 1
     assert summaries[0].text.startswith("[compact-mechanical-fallback]")
     assert "checkpoint" in summaries[0].text
@@ -1415,6 +1454,67 @@ def test_persistent_native_window_restores_ir_when_summary_fails(tmp_path):
         "failed",
     ]
     assert not any(row["phase"] == "completed" for row in sink.progress_rows)
+
+
+@pytest.mark.parametrize("thread_attr", ["conversation_thread_id", AGENT_THREAD_ID_ATTR])
+@pytest.mark.parametrize("ending", ["failure", "cancel"])
+def test_live_segment_failure_or_run_cancel_never_retires_ir_or_commits(tmp_path, thread_attr, ending):
+    from agent_py_agent.agent.conversation.auxiliary_model_call import AuxiliaryModelCallRequest
+    from agent_py_agent.agent.conversation.compact_request_budget import _request_tokens
+    from agent_py_agent.agent.prompting_parts.cache_layout import CacheStructuredPrompt
+
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.threads.get_or_create({
+        "canonical_user_id": "local/main", "channel": "test",
+        "channel_conversation_id": f"segmented-{ending}-{thread_attr}", "channel_user_id": "local/main",
+    })
+    agent = _native_agent(tmp_path)
+    backend = _SummaryBackend(10_000)
+    backend.max_tokens = 128
+    agent.backend = backend
+    agent.config.model_context_window_tokens = 10_000
+    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: CacheStructuredPrompt("原稳定前缀", "运行事实"))
+    agent.conversation_store = store
+    agent.home_paths = SimpleNamespace(owner_compact_dir=tmp_path / "compact")
+    token = CancellationToken()
+    params = replace(_params(), save=True, cancellation_token=token,
+        effective_on_chunk=(sink := _ContextCompactionSink()), task_attributes={
+            CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True, thread_attr: thread.thread_id,
+        })
+    _record_large_write_calls(agent, params, start=1, stop=6, chars=12_000)
+    before_ir, before_context = list(params.tool_ir_history), list(params.tool_context)
+    captured = []
+
+    def generate(prompt, **kwargs):
+        current = store.threads.load(thread.thread_id)
+        assert current.compact_generation == 0 and current.compact_checkpoint_id == ""
+        assert params.tool_ir_history == before_ir and params.tool_context == before_context
+        assert kwargs["tools"] == [] and kwargs["tool_choice"].mode == "none"
+        assert _request_tokens(AuxiliaryModelCallRequest(
+            agent=agent, prompt=prompt, messages=kwargs["messages"], tools=kwargs["tools"],
+            system_instruction=kwargs["request_options"].system_instruction,
+        )) <= 7_872
+        captured.append(kwargs)
+        if ending == "failure" and len(captured) == 2:
+            raise RuntimeError("second segment failed")
+        if ending == "cancel":
+            token.cancel("stop between live summary segments")
+        return SimpleNamespace(text=_valid_live_handoff("covered-segment"))
+
+    backend.generate = generate
+    with pytest.raises(RuntimeError if ending == "failure" else InterruptedError):
+        build_tool_loop_prompt(agent, params)
+
+    unchanged = store.threads.load(thread.thread_id)
+    assert len(captured) == (2 if ending == "failure" else 1)
+    assert params.tool_ir_history == before_ir and params.tool_context == before_context
+    assert unchanged.compact_generation == 0 and unchanged.compact_checkpoint_id == ""
+    assert unchanged.compact_source_tool_pairs == 0
+    assert unchanged.compact_consecutive_failures == (1 if ending == "failure" else 0)
+    assert sink.progress_rows[-1]["phase"] == ("failed" if ending == "failure" else "superseded")
+    assert not any(row["phase"] == "completed" for row in sink.progress_rows)
+    assert not (tmp_path / "compact" / "conversations" / f"{thread.thread_id}.jsonl").exists()
 
 
 def test_persistent_native_interrupt_after_summary_restores_ir_without_failure(tmp_path):
@@ -1744,7 +1844,8 @@ def test_shared_native_window_reuses_semantic_summary_across_repeated_pressure(t
     summaries = [item for item in params.tool_ir_history if isinstance(item, CompactionSummary)]
     assert len(summaries) == 1
     assert "真实 rg=/opt/reference/rg" in summaries[0].text
-    assert len(agent.backend.calls) == 1
+    first_call_count = len(agent.backend.calls)
+    assert first_call_count > 1
     messages = _native_provider_messages(agent, params)
     assert messages is not None
     assert str(messages).count("真实 rg=/opt/reference/rg") == 1
@@ -1753,18 +1854,19 @@ def test_shared_native_window_reuses_semantic_summary_across_repeated_pressure(t
 
     build_tool_loop_prompt(agent, params)
 
-    assert len(agent.backend.calls) == 1
+    assert len(agent.backend.calls) == first_call_count
     assert str(_native_provider_messages(agent, params)).count("真实 rg=/opt/reference/rg") == 1
 
     _record_large_write_calls(agent, params, start=11, stop=20, chars=10_000)
     build_tool_loop_prompt(agent, params)
 
-    assert len(agent.backend.calls) == 2
-    assert "摘要-1" in str(agent.backend.calls[1][1])
+    second_call_count = len(agent.backend.calls)
+    assert second_call_count > first_call_count
+    assert f"摘要-{first_call_count}" in str(_summary_source_messages(agent.backend.calls[first_call_count:]))
     summaries = [item for item in params.tool_ir_history if isinstance(item, CompactionSummary)]
     assert len(summaries) == 1
-    assert "摘要-2" in summaries[0].text
-    assert "摘要-1" not in summaries[0].text
+    assert f"摘要-{second_call_count}" in summaries[0].text
+    assert f"摘要-{first_call_count}；" not in summaries[0].text
     messages = _native_provider_messages(agent, params)
     assert messages is not None
     assert str(messages).count("真实 rg=/opt/reference/rg") == 1

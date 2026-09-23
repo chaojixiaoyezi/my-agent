@@ -13,9 +13,9 @@ from ...conversation.authority import (
 )
 from ...conversation.models import SUBAGENT_LIFECYCLE_WAKE_REASONS, WakeSignal
 from ...conversation.process_events import PROCESS_COMPLETION_REASON, reconcile_process_completions
+from ...runtime_context import current_subagent_run_id
 from ...runtime_errors import runtime_error_report
 from ...subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
-from ..runner.context import current_subagent_run_id
 from .task_identity import durable_task_id
 
 _TASK_EVENT_LIMIT = 20

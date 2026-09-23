@@ -25,10 +25,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from agent.agent_core.runner.context import (
-    restore_current_subagent_context,
-    set_current_subagent_context,
-)
 from agent.agent_core.runtime.record_finding_tool import execute_record_finding
 from agent.common.audit_activation import (
     AUDIT_ATTR,
@@ -56,6 +52,10 @@ from agent.ingestion import watch_tool as wt
 from agent.ingestion.watch_state import new_state as _runtime_new_state
 from agent.ingestion.watch_state import persist_state
 from agent.ingestion.watch_tool import WatchStreamTool
+from agent.runtime_context import (
+    restore_current_subagent_context,
+    set_current_subagent_context,
+)
 from agent.settings import AgentConfig
 from agent.tooling.runtime_contracts import (
     ProviderToolCapability,

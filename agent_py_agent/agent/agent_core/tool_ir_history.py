@@ -1,6 +1,6 @@
 
-# LLM: 本模块维护模型可见的 typed IR；普通请求只追加，摘要覆盖后的回收保留用户输入和当前运行事实。
-# 模块用途: 保存原生工具往返及无工具续跑响应；须核对配对、缓存前缀、Compact 和取消回滚。
+# LLM: typed IR 是唯一历史；纯请求投影与真实发送共享原生转换和配对清扫，普通请求只追加，Compact 才回收。
+# 模块用途: 保存工具与模型历史，提供不修改原 IR 的出站投影；须核对配对、缓存前缀和取消回滚。
 from __future__ import annotations
 
 """原生 tool_use 协议下的 IR 历史维护（Step 2 接线层）。
@@ -96,9 +96,11 @@ def record_runtime_facts_turn_ir(params: object, text: str, *, source: str = "")
     return True
 
 
-# LLM: 预检查与实际发送共用同一个无副作用投影；来源来自布局字段，IR 副本是唯一去重基线。
-# 函数用途: 在历史浅副本中追加变化状态，返回去掉重复尾部的 prompt；不改原 IR、用量账或会话状态。
-def project_native_prompt_history(params: object, prompt: str) -> tuple[str, list[Any]]:
+# LLM: 预检查与发送共享同一投影；显式 conversation_state 是冻结事实，None 才读取原 params 的内存快照。
+# 函数用途: 在历史副本追加变化状态并移除 prompt 重复尾部，不改原 IR、用量账或会话状态。
+def project_native_prompt_history(
+    params: object, prompt: str, *, conversation_state: str | None = None,
+) -> tuple[str, list[Any]]:
     history = list(getattr(params, "tool_ir_history", None) or [])
     layout = prompt_cache_layout(prompt)
     if layout is None:
@@ -108,7 +110,9 @@ def project_native_prompt_history(params: object, prompt: str) -> tuple[str, lis
     for source, text in sections:
         record_runtime_facts_turn_ir(projected, text, source=source)
     record_runtime_facts_turn_ir(
-        projected, conversation_runtime_state_section(params), source="conversation.runtime",
+        projected,
+        conversation_runtime_state_section(params) if conversation_state is None else conversation_state,
+        source="conversation.runtime",
     )
     provider_prompt = CacheStructuredPrompt(
         layout.stable_prefix,
@@ -116,6 +120,18 @@ def project_native_prompt_history(params: object, prompt: str) -> tuple[str, lis
         canonical_user_turn=layout.canonical_user_turn,
     )
     return provider_prompt, history
+
+
+# LLM: 此处是实际出站和纯容量投影唯一的 IR→messages 与孤儿清扫入口；只复制入参，不改变配对失败类型。
+# 函数用途: 按原时间顺序拼接已完成历史和本轮 IR，保留图片、推理、工具参数与回执的原协议形状。
+def project_native_provider_messages(
+    history: object, *, prior_messages: object = (),
+) -> list[dict[str, Any]]:
+    from ..backends.message_adapter import AnthropicMessageAdapter, strip_orphaned_tool_blocks
+
+    prior = [deepcopy(item) for item in list(prior_messages or []) if isinstance(item, dict)]
+    current = AnthropicMessageAdapter().to_provider_messages(history) if history else []
+    return strip_orphaned_tool_blocks([*prior, *current])
 
 
 # LLM: compact 摘要与真实 UserTurn 类型分开；每次安装只替换 thread/live summary，

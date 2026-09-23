@@ -1,4 +1,4 @@
-# LLM: 此入口只执行一次已配置的原生 decide；worker 持有原准入、身份头和 HTTP 观察，caller 决定原账本终态，不拥有设置、冷却或业务提交权。
+# LLM: 此入口只执行普通原生 decide；实验缺可靠输入上界与发送硬门时在估算/建账前拒绝，原 worker/终态/普通调用行为保持。
 # 模块用途: 把短决策接入原有界 worker 与模型调用账，超时及时返回并保留真实后台资源及迟到传输事实。
 from __future__ import annotations
 
@@ -29,6 +29,7 @@ from ..backends.gateway_helpers import provider_attempt_observer
 from ..backends.gateway_request_limits import remaining_deadline_seconds
 from ..backends.provider_headers import provider_runtime_scope
 from ..concurrency.interrupt import InterruptHandle, is_interrupted
+from ..contracts.model_call_budget import ModelCallBudgetError
 from ..contracts.model_call_ledger import (
     TIMEOUT_STAGES,
     ModelCallFailureParams,
@@ -41,8 +42,8 @@ from ..observability.concurrency_metrics import llm_inflight
 from .model_metrics import publish_model_metrics
 
 
-# LLM: deadline 沿宿主准备阶段的绝对 monotonic 时刻；resource_key 由宿主提供稳定身份，禁止改用 backend id，异常原样交回外层分类且不重试。
-# 函数用途: 执行一次可选决策并写入原调用账、刷新当前用量行；超时不释放 worker 的资源，不为显示等待会话写锁。
+# LLM: 非空实验编号在任何输入估算或建账前失败关闭；该标签不是授权，普通调用仍沿原绝对期限/准入/worker 且不重试。
+# 函数用途: 执行一次普通可选决策并记原账；当前实验入口没有可靠 provider-input 证明，不能发请求。
 def invoke_decision_model_call(
     agent: object,
     params: object,
@@ -52,7 +53,10 @@ def invoke_decision_model_call(
     deadline: float,
     resource_key: Hashable,
     interrupt_handle: InterruptHandle | None = None,
+    experiment_id: str = "",
 ) -> DecisionResponse:
+    if type(experiment_id) is not str or experiment_id:
+        raise ModelCallBudgetError("input_bound_unavailable")
     started_at = time.monotonic()
     if not isinstance(request, DecisionRequest) or not callable(getattr(backend, "decide", None)):
         raise DecisionInputError("决策调用需要原生请求与 decide 后端。")
@@ -74,7 +78,7 @@ def invoke_decision_model_call(
             _record_error(ledger, record.call_id, exc, started_at=started_at, deadline=deadline)
             raise
         finally:
-            _record_metrics(agent, params, backend, time.monotonic() - started_at, response if succeeded else None)
+            _record_metrics(backend, time.monotonic() - started_at, response if succeeded else None)
             publish_model_metrics(agent, params, pending=False, usage_only=True)
 
 
@@ -140,16 +144,11 @@ def _record_inflight(delta: int) -> None:
         pass
 
 
-# LLM: caller 只记录一次结果指标；成本复用原模型定价，未知模型价格是内部保守估算而非供应商账单，不能写回权威 usage。
-# 函数用途: 将决策结果与实际配置模型的估算成本送入原全局及 owner/run 指标，不建立价格表或显示账。
-def _record_metrics(agent: object, params: object, backend: object, elapsed: float, response: DecisionResponse | None) -> None:
+# LLM: caller 只记录一次结果指标；决策请求不调用原价格估算或 USD 成本账，保留原调用账中的实际输入与请求终态。
+# 函数用途: 记录决策请求的成功、失败、耗时和供应商用量；本地决策模型也不需要价格配置。
+def _record_metrics(backend: object, elapsed: float, response: DecisionResponse | None) -> None:
     try:
         llm_metrics.record_llm_call(str(getattr(backend, "name", "") or ""), elapsed, response, ok=response is not None)
-        if response is not None:
-            model = str(getattr(backend, "model_name", "") or "")
-            llm_metrics.record_llm_cost(model, response)
-            owner = str(getattr(getattr(agent, "config", None), "my_agent_owner_id", "") or "")
-            llm_metrics.record_run_cost(owner, str(getattr(params, "run_id", "") or ""), model, response)
     except Exception:
         pass
 

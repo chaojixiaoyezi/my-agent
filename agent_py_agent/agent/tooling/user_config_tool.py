@@ -5,7 +5,7 @@ from __future__ import annotations
 # LLM: 这个工具解决的真机问题是"用户问能不能改 compact 阈值，模型直接答'我没有权限'"——模型既不知道
 #   用户配置在哪，也没有任何入口，于是凭空断言。这里给出结构化事实：生效值、来源（用户配置 vs 随包默认）、
 #   白名单可改项、安全边界不可改项及原因、保存位置与生效时机。
-#   决策覆盖沿原设置服务，目录与显式探测沿原模型操作；身份只取可信 runner，不开放凭据或任意线程参数。
+#   决策覆盖沿原设置服务；模型只读/撤销实验许可，建立许可必须是宿主显式用户控制，身份不取模型参数。
 # 模块用途: 让原获授权主代理读取/修改配置、列出决策模型或按用户要求测试连接，保留统一权限与失败事实。
 import json
 
@@ -17,6 +17,7 @@ from ..settings.user_config_capability import (
     set_tunable_value,
     user_config_path,
 )
+from ..user_space.owner_access import is_local_admin_owner
 from .models import (
     BaseTool,
     ConcurrencyPolicy,
@@ -40,8 +41,62 @@ def _decision_change_properties() -> dict:
     return {path: decision_field_schema(path) for path in decision_field_scopes()}
 
 
-# LLM: 保留原 main_agent 注册及中央策略；目录只读，探测只接受已存引用和显式预算，当前 runner 身份不可由模型覆盖。
-# 类用途: 原配置工具的受控入口；读取、保存与显式联网测试分别复用原服务，不开放凭据写入。
+# LLM: 身份只来自 Agent 的已解析 home；缺失上下文绝不能因空 provider/kind 被当作本机管理员。
+# 函数用途: 决定 legacy view/set 是否能展示和执行，普通 user 始终只能操作自己的决策设置。
+def _is_main_owner(agent: object | None) -> bool:
+    home_paths = getattr(agent, "home_paths", None)
+    # 原 owner 判据兼容空 provider/kind；工具提权入口必须额外要求已解析的完整身份。
+    return (home_paths is not None
+            and all(type(getattr(home_paths, field, None)) is str and getattr(home_paths, field).strip()
+                    for field in ("owner_provider", "owner_kind", "owner_id"))
+            and is_local_admin_owner(home_paths))
+
+
+# LLM: 普通 owner 的模型 schema 只保留决策字段，action 必填；运行时仍须二次拒绝 legacy，不能只依赖展示。
+# 函数用途: 从原工具声明裁剪出同名 decision-only 视图，不复制设置服务或模型目录逻辑。
+def _decision_only_spec(full_spec: ToolModelSpec) -> ToolModelSpec:
+    properties = {key: value for key, value in full_spec.input_schema["properties"].items() if key not in {"key", "value"}}
+    properties["action"] = {**properties["action"],
+        "enum": ["decision_read", "decision_patch", "decision_reset", "decision_models", "decision_probe", "decision_experiment_revoke"],
+        "description": "仅管理当前可信 owner 的决策设置；读取后携完整 revision 修改。连接测试须用户明确要求。"}
+    return ToolModelSpec(
+        name=full_spec.name,
+        description=("读取或修改当前用户自己的决策设置。先 decision_read 获取 owner/thread revision，"
+                     "再用 decision_patch 或 decision_reset 修改并读回生效值；scope=thread 只用于当前可信会话。"
+                     "decision_models 只读脱敏目录；decision_probe 仅在用户明确要求测试连接时使用，会联网并产生用量。"
+                     "decision_experiment_revoke 只能撤销当前会话已有授权，不能建立授权。"
+                     "本工具不开放本机全局配置、凭据或其他用户设置。"),
+        input_schema={"type": "object", "properties": properties, "required": ["action"], "additionalProperties": False},
+        hints=ToolModelHints(category="system", use_cases=(
+            "用户要求开启、关闭或调整自己的决策模型等待时间与接入点",
+            "用户要求查看自己的决策模型设置、已保存模型或撤销当前实验授权",
+            "用户明确要求测试已保存决策模型连接",
+        ), avoid_when=("需要本机全局配置、凭据或其他用户设置时",)),
+    )
+
+
+# LLM: 子代理自己的 thread 优先；仅非子代理主回合可从线程本地 RunParams 读取 Gateway 绑定，绝不接受模型参数或父线程回退。
+# 函数用途: 统一决策覆盖与模型目录所需的当前可信会话，保留身份来源给原工具回执。
+def _decision_thread_scope(agent: object) -> tuple[str, str]:
+    from ..runtime_context import current_subagent_run_id, current_task_attributes
+
+    attrs = current_task_attributes(agent) or {}
+    value = attrs.get("agent_thread_id") or attrs.get("conversation_thread_id")
+    if type(value) is str and value.strip():
+        return value.strip(), "current_runner_context"
+    if current_subagent_run_id(agent):
+        return "", "current_runner_context"
+    current = getattr(agent, "_current_run_params", None)
+    run_attrs = getattr(current, "task_attributes", None)
+    if isinstance(run_attrs, dict):
+        value = run_attrs.get("agent_thread_id") or run_attrs.get("conversation_thread_id")
+        if type(value) is str and value.strip():
+            return value.strip(), "current_run_params"
+    return "", "current_runner_context"
+
+
+# LLM: main_agent 保留完整配置能力，普通 owner 仅得 decision-only 视图；目录只读，探测只接受已存引用和显式预算。
+# 类用途: 按可信 owner 身份展示配置工具，读取、保存与显式联网测试仍复用原服务。
 class UserConfigTool(BaseTool):
     model_spec = ToolModelSpec(
         name="user_config",
@@ -53,6 +108,7 @@ class UserConfigTool(BaseTool):
             "action=set 只接受白名单内的键，会校验取值、原子写入用户配置，并报告保存位置与生效时机"
             "（当前进程不会热加载）。安全边界（权限模式、危险路径、凭据）永远不可写。"
             "decision_read/decision_patch/decision_reset 读取、字段修改或恢复决策设置继承；"
+            "decision_experiment_revoke 可用当前授权编号撤销本会话实验；本工具不能建立实验授权，能力开关不代表用户授权。"
             "先读 revision 再作为 expected_revision 提交。scope=owner 为长期设置，thread 仅当前可信会话；"
             "时间使用有限正秒数，reset 的 fields 删除覆盖。总开关关闭保留各点模式，observe 也会产生用量；"
             "保存不联网，时间只用于后续请求且不重置正在进行的阶段预算。"
@@ -65,7 +121,7 @@ class UserConfigTool(BaseTool):
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["view", "set", "decision_read", "decision_patch", "decision_reset", "decision_models", "decision_probe"],
+                    "enum": ["view", "set", "decision_read", "decision_patch", "decision_reset", "decision_experiment_revoke", "decision_models", "decision_probe"],
                     "description": "view/set 管理本机配置；decision_read/patch/reset 管理覆盖，decision_models 只读目录，decision_probe 显式测试连接。",
                 },
                 "key": {
@@ -82,6 +138,7 @@ class UserConfigTool(BaseTool):
                 "fields": {"type": "array", "items": {"type": "string", "enum": list(_decision_change_properties())}, "minItems": 1, "description": "decision_reset 删除这些覆盖字段以恢复继承。"},
                 "profile_id": {"type": "string", "description": "decision_probe 必填：decision_models 返回的已保存 Decision 编号或 shared:编号，不能传模型名称、地址或凭据。"},
                 "timeout_seconds": {"type": "number", "exclusiveMinimum": 0, "description": "decision_probe 必填：用户明确要求的有限正测试预算秒数，包含准备与完整请求。"},
+                "authorization_id": {"type": "string", "description": "decision_experiment_revoke 必填：decision_read 返回的当前完整实验授权编号；不能用来建立许可。"},
             },
             "additionalProperties": False,
         },
@@ -112,19 +169,24 @@ class UserConfigTool(BaseTool):
         mutates_workspace=False,
     )
 
-    # LLM: 只保留宿主 Agent 引用，决策动作从其可信 runner/owner 获取身份，不构造新 Agent。
-    # 函数用途: 接受原工具注册上下文，供决策服务复用原配置及线程存储。
+    # LLM: 缺主 owner 身份时生成 decision-only 模型声明；后续执行再复核身份，不能依赖模型 schema 当权限门。
+    # 函数用途: 接受原工具注册上下文，并按当前可信 owner 缩窄普通用户可见动作。
     def __init__(self, agent: object | None = None) -> None:
         self._agent = agent
+        if not _is_main_owner(agent):
+            self.model_spec = _decision_only_spec(type(self).model_spec)
 
-    # LLM: action 结构化分派；目录和显式探测使用原模型操作，覆盖仍走原 CAS，失败不解析正文或冒充成功。
-    # 函数用途: 处理获授权配置操作，将用户要求的联网测试与普通读取、保存明确分开。
+    # LLM: decision-only 的非决策动作在 handler 内再次拒绝，即使绕开模型 schema 也不能触及进程级 MY_AGENT_CONFIG。
+    # 函数用途: 按结构化 action 分派原设置服务，并对普通 owner 阻断 legacy view/set。
     def execute(self, params: dict) -> ToolHandlerOutcome:
         action = str(params.get("action") or "view").strip().lower()
-        if action in {"decision_read", "decision_patch", "decision_reset"}:
+        if action in {"decision_read", "decision_patch", "decision_reset", "decision_experiment_revoke"}:
             return self._decision(action.removeprefix("decision_"), params)
         if action in {"decision_models", "decision_probe"}:
             return self._decision_model_operation(action, params)
+        if not _is_main_owner(self._agent):
+            return ToolHandlerOutcome("user_config", False, "当前用户不能访问本机全局配置。",
+                error_code="TOOL_PERMISSION_DENIED", effect_outcome="not_started")
         key = str(params.get("key") or "").strip()
         if action == "view":
             return self._view(key)
@@ -143,10 +205,9 @@ class UserConfigTool(BaseTool):
             error_code="TOOL_INVALID_ARGUMENTS",
         )
 
-    # LLM: 线程只来自 current_task_attributes；显式身份参数被原服务白名单拒绝，旧 revision 不自动重试。
-    # 函数用途: 调用共同决策设置服务，并将权限、版本冲突及字段错误映射为原工具结构化失败。
+    # LLM: 主会话可读取宿主线程本地 RunParams，子代理只读自身 runner 身份；撤销只能引用原许可并使用完整 CAS。
+    # 函数用途: 调用共同决策设置服务修改原覆盖或撤销许可，身份与过期版本不能由模型覆盖。
     def _decision(self, operation: str, params: dict) -> ToolHandlerOutcome:
-        from ..agent_core.runner.context import current_task_attributes
         from ..settings.decision_settings import execute_decision_settings_operation
         from ..settings.decision_settings_schema import (
             DecisionSettingsAccessError,
@@ -156,9 +217,7 @@ class UserConfigTool(BaseTool):
 
         if self._agent is None:
             return ToolHandlerOutcome("user_config", False, "缺少可信用户配置上下文。", error_code="TOOL_PERMISSION_DENIED", effect_outcome="not_started")
-        attrs = current_task_attributes(self._agent) or {}
-        thread = attrs.get("agent_thread_id") or attrs.get("conversation_thread_id") or ""
-        thread_id = thread.strip() if type(thread) is str else ""
+        thread_id, source = _decision_thread_scope(self._agent)
         payload = {key: value for key, value in params.items() if key != "action"}
         if payload.get("scope") == "thread" and not thread_id:
             return ToolHandlerOutcome("user_config", False, "当前运行没有可信会话，不能写入临时覆盖。", error_code="TOOL_PERMISSION_DENIED", effect_outcome="not_started")
@@ -172,13 +231,13 @@ class UserConfigTool(BaseTool):
             return ToolHandlerOutcome("user_config", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS", effect_outcome="not_started")
         except OSError:
             return ToolHandlerOutcome("user_config", False, "配置存储读写失败，请重新读取核对是否保存。", error_code="TOOL_PERSISTENCE_FAILED", effect_outcome="unknown")
-        report["scope_resolution"] = {"source": "current_runner_context", "effective": {"thread_id": thread_id, "scope": report["scope"]}}
-        return ToolHandlerOutcome("user_config", True, json.dumps(report, ensure_ascii=False, sort_keys=True))
+        report["scope_resolution"] = {"source": source, "effective": {"thread_id": thread_id, "scope": report["scope"]}}
+        # 原投影先列 revision，再列大段字段目录；排序会把 CAS 版本挤出有界模型预览。
+        return ToolHandlerOutcome("user_config", True, json.dumps(report, ensure_ascii=False))
 
-    # LLM: 只转交原脱敏目录/原探测，不重建后端或配置器；拒绝显式身份和秘密，probe 预算必填，取消原样传播。
+    # LLM: 目录与探测复用同一可信 thread 裁决；不重建后端或配置器，拒绝显式身份和秘密，取消原样传播。
     # 函数用途: 按当前可信会话列出决策配置或发起一次用户要求的测试；真实测试失败保持工具失败及结构化报告。
     def _decision_model_operation(self, operation: str, params: dict) -> ToolHandlerOutcome:
-        from ..agent_core.runner.context import current_task_attributes
         from ..settings.decision_settings_schema import (
             DecisionSettingsAccessError,
             positive_seconds,
@@ -189,9 +248,7 @@ class UserConfigTool(BaseTool):
 
         if self._agent is None:
             return ToolHandlerOutcome("user_config", False, "缺少可信用户配置上下文。", error_code="TOOL_PERMISSION_DENIED", effect_outcome="not_started")
-        attrs = current_task_attributes(self._agent) or {}
-        thread = attrs.get("agent_thread_id") or attrs.get("conversation_thread_id") or ""
-        thread_id = thread.strip() if type(thread) is str else ""
+        thread_id, source = _decision_thread_scope(self._agent)
         try:
             required = {"action", "profile_id", "timeout_seconds"} if operation == "decision_probe" else {"action"}
             if set(params) != required:
@@ -213,7 +270,7 @@ class UserConfigTool(BaseTool):
         except OSError:
             return ToolHandlerOutcome("user_config", False, "决策配置读取或测试记录保存失败，请重新读取核对。", error_code="TOOL_PERSISTENCE_FAILED", effect_outcome="unknown")
         scope = "thread" if operation == "decision_probe" else "owner"
-        report = {**report, "scope_resolution": {"source": "current_runner_context", "effective": {"thread_id": thread_id, "scope": scope}}}
+        report = {**report, "scope_resolution": {"source": source, "effective": {"thread_id": thread_id, "scope": scope}}}
         output = json.dumps(report, ensure_ascii=False, sort_keys=True)
         if report.get("ok") is not True:
             return ToolHandlerOutcome("user_config", False, output, result_envelope={"decision_report": report},

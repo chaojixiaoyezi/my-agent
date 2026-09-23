@@ -1,9 +1,10 @@
-# LLM: 此模块独占 Messages 转换；探针与传输共用地址归一，保持缓存、思考、工具及错误合同，联合 native IR 回归。
+# LLM: 此模块独占 Messages 转换；只读出站投影与真实发送共用组包，保持缓存、思考、工具及错误合同，联合 native IR 回归。
 # 模块用途: 调用 Messages 接口并规范化流式或完整响应，保留历史、用量和请求局部控制。
 from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
@@ -193,9 +194,31 @@ class AnthropicCompatibleBackend(HttpBackend):
             )
         )
 
-    # LLM: Anthropic 单一组包入口只发显式采样，请求级温度覆盖优先；不套 Chat 默认、不修改后端快照。
-    # 函数用途: 发送明确配置的连接与采样参数，未设置温度沿用服务端默认，摘要零温覆盖和流观察器保留。
-    def _generate_request(self, request: _AnthropicGenerateRequest) -> ModelResponse:
+    # LLM: 普通 generate 的只读出站投影复用原组包；不读认证、不探针、不记录诊断，也不证明窗口或工具能力。
+    # 函数用途: 返回本后端实际发送的 JSON 内容供宿主验证，未知重写实现返回 None，输入与结果不共享可变容器。
+    def project_generate_payload(
+        self, prompt: str, *, tools: list[dict[str, Any]] | None = None,
+        tool_choice: ToolChoice | None = None, messages: list[dict[str, Any]] | None = None,
+        request_options: ProviderRequestOptions | None = None,
+    ) -> dict[str, Any] | None:
+        if (type(self).generate is not AnthropicCompatibleBackend.generate
+                or type(self)._generate_request is not AnthropicCompatibleBackend._generate_request
+                or type(self)._request_payload is not AnthropicCompatibleBackend._request_payload
+                or type(self)._generate_stream is not AnthropicCompatibleBackend._generate_stream
+                or type(self)._generate_non_stream is not AnthropicCompatibleBackend._generate_non_stream):
+            return None
+        options = request_options or ProviderRequestOptions()
+        payload = self._request_payload(_AnthropicGenerateRequest(
+            prompt=prompt, tools=tools, tool_choice=tool_choice, messages=messages,
+            system_instruction=options.system_instruction, thinking_disabled=options.thinking_disabled,
+        ))
+        if self.stream_enabled:
+            payload["stream"] = True
+        return deepcopy(payload)
+
+    # LLM: 此纯组包是普通发送、短 JSON 和只读投影的唯一 Messages payload 生产方；不执行传输和回调。
+    # 函数用途: 按原缓存、采样和工具合同构造内容，保留请求级覆盖且不修改调用方历史。
+    def _request_payload(self, request: _AnthropicGenerateRequest) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self.model_name,
             "max_tokens": bounded_output_tokens(
@@ -235,6 +258,12 @@ class AnthropicCompatibleBackend(HttpBackend):
 
             payload["tools"] = selected_tools
             payload["tool_choice"] = anthropic_tool_choice(request.tool_choice or ToolChoice.auto())
+        return payload
+
+    # LLM: 真正发送仅消费同源 payload；认证头、网络、流观察器和错误处理继续由原入口唯一执行。
+    # 函数用途: 发送 Messages 请求，未设置温度沿用服务端默认，保留摘要覆盖及请求局部时限。
+    def _generate_request(self, request: _AnthropicGenerateRequest) -> ModelResponse:
+        payload = self._request_payload(request)
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_key}",

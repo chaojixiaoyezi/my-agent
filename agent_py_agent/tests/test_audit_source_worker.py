@@ -7,10 +7,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_py_agent.agent.agent_core.runner.context import (
-    restore_current_subagent_context,
-    set_current_subagent_context,
-)
 from agent_py_agent.agent.agent_core.runner.prompts import (
     _build_subagent_runner_prompt,
     subagent_runner_system_prompt,
@@ -79,6 +75,10 @@ from agent_py_agent.agent.ingestion.watch_state import (
     persist_state,
     state_dir,
     watch_id_for,
+)
+from agent_py_agent.agent.runtime_context import (
+    restore_current_subagent_context,
+    set_current_subagent_context,
 )
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.model_capabilities import CapabilityRequest

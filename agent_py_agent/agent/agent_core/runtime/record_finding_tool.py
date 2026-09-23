@@ -27,8 +27,8 @@ from ...common.json_io import (
     read_jsonl_objects_report,
 )
 from ...conversation.authority import CONVERSATION_REQUEST_ID_ATTR
+from ...runtime_context import current_subagent_attempt_id, current_subagent_run_id
 from ...tooling.models import ToolHandlerOutcome
-from ..runner.context import current_subagent_attempt_id, current_subagent_run_id
 
 _MAX_CLAIM_CHARS = 2000
 _MAX_REFS = 20

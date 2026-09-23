@@ -1,4 +1,4 @@
-# LLM: 可选决策只有建议权；接入点运行范围复用设置schema，后台不冒用材料thread，阶段期限和配置引用发送前后复核。
+# LLM: 可选决策只有建议权；实验阶段另读原授权且当前联网失败关闭，普通增强保留原路径，期限及身份发送前后复核。
 # 模块用途: 为原业务批次执行准确会话或用户后台范围的可选决策，不授予业务写入权。
 from __future__ import annotations
 
@@ -9,7 +9,6 @@ import time
 import uuid
 from dataclasses import dataclass, field
 
-from ..agent_core.runner.context import current_subagent_run_id, current_task_attributes
 from ..backends.bounded_call import BoundedCallBusyError, BoundedCallTimeoutError
 from ..backends.decision_protocol import (
     DecisionBinding,
@@ -25,6 +24,7 @@ from ..backends.errors import (
 from ..backends.typesafe_decision import decision_backend_from_profile
 from ..concurrency.interrupt import InterruptHandle, is_interrupted
 from ..llm_scale.concurrency import ConcurrencyTimeout
+from ..runtime_context import current_subagent_run_id, current_task_attributes
 from ..settings.decision_settings import execute_decision_settings_operation
 from ..settings.decision_settings_projection import decision_profile
 from ..settings.decision_settings_schema import POINT_RUNTIME_SCOPES
@@ -42,7 +42,7 @@ from .decision_policy import (
 )
 
 
-# LLM: 宿主准备前创建；enabled_points仅供关闭时跳过额外准备，不是授权，发送/采用仍复读；scope和deadline不能跨身份复用。
+# LLM: 宿主准备前创建；experiment 只标记路径而非许可，当前无输入证明时 enabled_points 为空；scope/deadline 不跨身份复用。
 # 类用途: 保存同一原业务批次共用的绝对预算与可信身份。
 @dataclass(frozen=True)
 class DecisionStage:
@@ -56,6 +56,7 @@ class DecisionStage:
     error_code: str = ""
     scope: str = "thread"
     enabled_points: tuple[str, ...] = ()
+    experiment: bool = False
 
 
 # LLM: may_apply仅表示返回时信封有效；消费前用同一helper核验内存连接摘要/绝对期限，逐题error仍由消费者处理，不授予写入权。
@@ -127,15 +128,15 @@ def _check_interrupted() -> None:
         raise InterruptedError("当前决策随用户任务停止。")
 
 
-# LLM: 开始时刻在读配置前取得；非阻塞读原设置，后台使用owner预算且只发布同scope接入点，caller期限只能缩短。
-# 函数用途: 在输入准备前建立准确会话或用户后台批次预算；无效配置保留原业务，不创建身份或额外租约。
+# LLM: 开始时刻在读配置前取得；实验资格先于材料准备且不能重置总期限，当前可靠输入上界缺失时不发布可准备点。
+# 函数用途: 建立原决策阶段；实验关闭、撤销或未具备发送合同均返回结构化原因，不调用后端或建立预算。
 def begin_decision_stage(agent: object, params: object, *, operation_id: str, caller_deadline: float | None = None,
-                         scope: str = "thread") -> DecisionStage:
+                         scope: str = "thread", experiment: bool = False) -> DecisionStage:
     started = time.monotonic()
     _check_interrupted()
     identity = ("", "", "", "")
     try:
-        if type(operation_id) is not str or not operation_id or len(operation_id) > 1024:
+        if type(operation_id) is not str or not operation_id or len(operation_id) > 1024 or type(experiment) is not bool:
             raise DecisionInputError("决策阶段需要宿主操作编号。")
         identity = _identity(agent, params, scope=scope)
         caller = _deadline(caller_deadline)
@@ -145,6 +146,12 @@ def begin_decision_stage(agent: object, params: object, *, operation_id: str, ca
         if caller is not None:
             deadline = min(deadline, caller)
         _check_interrupted()
+        if experiment:
+            from .decision_experiment import experiment_admission
+
+            reason, experiment_deadline = experiment_admission(agent, params, settings)
+            return DecisionStage(operation_id, *identity, started, min(deadline, experiment_deadline), reason,
+                                 scope=scope, experiment=True)
         points = tuple(point for point, row in settings["effective"]["points"].items()
                        if row["effective_mode"] != "off" and POINT_RUNTIME_SCOPES[point] == scope)
         return DecisionStage(operation_id, *identity, started, deadline, scope=scope, enabled_points=points)
@@ -152,7 +159,8 @@ def begin_decision_stage(agent: object, params: object, *, operation_id: str, ca
         raise
     except Exception as exc:
         code = "settings_busy" if isinstance(exc, BlockingIOError) else "invalid_identity" if isinstance(exc, DecisionInputError) else "configuration_unavailable"
-        return DecisionStage(operation_id if type(operation_id) is str else "", *identity, started, started, code, scope=scope)
+        return DecisionStage(operation_id if type(operation_id) is str else "", *identity, started, started, code, scope=scope,
+                             experiment=experiment is True)
 
 
 # LLM: 策略版本绑定两层CAS及实际有效值；连接摘要另外绑定，模型目录改动不能借未变的设置revision混过。
@@ -191,8 +199,8 @@ def _stale(agent: object, params: object, stage: DecisionStage, point: str, revi
     return ""
 
 
-# LLM: 发送前按唯一schema拒绝接入点与stage范围不符；caller独占逻辑收口，provider/账本/worker仍由原调用边界负责。
-# 函数用途: 在同一合法范围的批次剩余预算内请求建议，观察不应用，普通失败保留原方案。
+# LLM: 实验 stage 在构造请求/后端前复读并失败关闭，不能凭伪造 stage 放行；普通点仍沿原 schema/身份/期限及调用账。
+# 函数用途: 在合法范围请求普通建议；实验当前只返回资格或缺少输入证明的原因，保留原业务。
 def decide(agent: object, params: object, stage: DecisionStage, *, point: str, state: object, questions: dict,
            candidates_revision: str, source_refs: tuple[str, ...] = (), caller_deadline: float | None = None,
            explicit_retry: bool = False) -> DecisionOutcome:
@@ -203,6 +211,12 @@ def decide(agent: object, params: object, stage: DecisionStage, *, point: str, s
             raise DecisionInputError("决策接入点或重试标志无效。")
         if not isinstance(stage, DecisionStage) or _identity(agent, params, scope=stage.scope) != (stage.owner_ref, stage.thread_id, stage.run_id, stage.task_id):
             return DecisionOutcome(mode, "stale", reason="identity_changed")
+        if stage.experiment:
+            from .decision_experiment import experiment_admission
+
+            settings = execute_decision_settings_operation(agent, "read", {}, thread_id=stage.thread_id, blocking=False)
+            reason, _ = experiment_admission(agent, params, settings, point=point)
+            return DecisionOutcome(mode, "off" if reason == "experiment_disabled" else "experiment_unavailable", reason=reason)
         if stage.error_code:
             return DecisionOutcome(mode, "error" if stage.error_code == "settings_busy" else "configuration_required", reason=stage.error_code)
         if POINT_RUNTIME_SCOPES[point] != stage.scope:

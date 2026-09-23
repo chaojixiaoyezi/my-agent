@@ -1,10 +1,38 @@
 # Memory Structure
 
+## 子代理任务工作区的路径与物化边界
+
+`task_workspace/__init__.py::_task_workspace_path_inputs` 统一计算原 root/run/task 身份；
+`subagent_task_workspace_paths` 与原 `ensure_subagent_task_workspace` 共用该输入及 `_paths_for`。
+前者只计算路径，后者保持原目录创建、父状态锁内合并、共享状态、agent run、artifact 和日账写入顺序。
+路径对象中默认 runtime refs 不构成已写入事实，只读消费方不能据此生成日账事件。
+
+`subagents/services/task_workspace_adapter.py` 将静态字段映射同时用于正式 sync 和任务副本投影；
+runner 准备只消费副本，不修改待提交任务。正式 `persistence/service.py` 的 sync 调用保持唯一，未增加另一条保存路径。
+这一接缝只解决 canonical 路径差异，不能证明完整首请求容量、模型候选输出 cap 或目录存在性。
+
+## 运行中原生工具历史摘要的窗口与取消边界
+
+`agent_core/_tool_loop_service.py::_native_tool_history_summary` 将同一工作片的停止检查传给
+`memory_archive/compact_semantic_summary.py::summarize_live_tool_history`。真实 agent 请求沿原
+`conversation/compact_request_budget.py::generate_bounded_compact_response` 发出：可容纳时保持原生
+system/tools/messages 前缀，超窗时按原分段合同覆盖完整历史。每段取消和传输失败只使候选失败；
+源 IR 回收及 Compact 代次提交仍由上层原事务控制。裸 backend 测试适配保持直接调用，不能当作真实窗口保证。
+
 ## 原召回结果中的可选排序
 
-`memory_store/decision_recall.py` 经共用决策服务提供临时优先级；唯一接线位于
+`JsonlMemory.search_scoped_candidates` 与正式 `search_scoped` 共用 active JSONL allowlist、scope predicate 和混合排序，
+但不提前登记访问。只有最终注入的补充候选可经 `confirm_scoped_access` 重读正式源，核对 ID、版本、正文和来源范围后登记 touch；
+被裁剪、替换或撤销的候选不能写访问信号。原 `search_scoped` 的即时访问语义不变。
+`decision_recall.supplemental_query_candidates` 只从完整用户问题的有界语句片段产生至多四个检索文本和局部编号；
+原完整查询仍是基线，不从语句解释权限或“无需历史”。原正式上下文准备已有独立 `pre_recall` 消费：
+在原召回和预算之后、尚有空位时选一次补充查询，只追加同范围的确认事实；P3 排序与本点共用一个阶段期限。
+
+`memory_store/decision_recall.py` 经共用决策服务提供临时优先级与补充查询；唯一接线位于
 `agent_core/runtime/loop_support.py::_formal_memories_for_request` 原预算之后。
-当前选中集合完整保留，HOT/lesson 只绑定不参与排序。来源刷新只查原正式仓库并投影原 ID，不新增检索或访问计数。
+读取之前即检查原 `task_local`/`control_plane` 范围和 owner `memory_enabled`，不在禁用范围继续扫描正式项目记忆；
+原任务本地与控制材料仍按其自身来源准备，此门不删除历史或改变工具权限。
+当前选中集合完整保留，HOT/lesson 只绑定不参与排序。P3 排序的来源刷新只查原正式仓库并投影原 ID，不新增检索或访问计数；P5-A 补充查询至多一次，候选未确认前不记访问。
 候选、请求属性、主模型或设置变更时拒绝旧建议；最后采用沿 `decision_outcome_is_current`。
 结果驻留原 PreparedRuntimeContext.memories，工具循环/Compact 复用该轮材料。同步本地文件 I/O 不承诺强制中断，迟到建议不会采用。
 
@@ -19,6 +47,8 @@
 `backends/cache_diagnostics.py` 在 HTTP 实际出站处生成摘要，`ModelCallLedger` 按同 thread 比较。
 只追加、历史缩短及 system/tools/model/选项变化分开，超过 512 消息明确部分比较；不改变 Compact 或记忆。
 配置 `cache_diagnostics_enabled` 控制采集，关闭不计算摘要，不新增另一份用量账。
+原 context-pressure 的连接校准指纹只把可 JSON 化的连接字段送入进程加盐摘要；非标准后端给出的不透明属性用进程内对象身份区分，
+不序列化其 `repr` 或凭据，且不因测试替身字段不可编码而阻断模型请求。
 
 ## 前台优先与后台请求预算
 
@@ -266,7 +296,7 @@ task workspace 摘要同步）同样改用它，避免"读时切开、写回落�
   读取 thread 覆盖。活动会话 runner 与 owner 后台身份冲突时，不允许调用。
 - `DecisionStage.enabled_points` 来自 begin 的同一次设置读取，明确关闭时立即返回原批次，不准备或编码材料；
   它只决定是否准备，发送/采用仍由共用服务复读原设置，不能作为采用权限。
-- 原批次完整进入决策上下文；最多为 32 条来源各问分类和优先级两题，保持原生接口 64 题上限。
+- 原批次完整进入决策上下文；最多为 32 条来源各问分类和优先级两题，64 题是本地延迟/输入保护，不是 Jev 官方协议限制。
   超出部分只是不加注释，原提取仍收到全部材料。逐题失败只丢对应建议，原候选绑定与整个输入
   摘要在消费前再次核对；不使用置信度直接入库、删材料或推进游标。
 - 每题提供显式 `not_needed`、`need_data`、`no_match`、`abstain` 候选，分别保存在
@@ -293,3 +323,25 @@ task workspace 摘要同步）同样改用它，避免"读时切开、写回落�
 
 Curator 设置读回的 `runtime_scope=owner_background` 与实际服务一致：后台阶段预算不受前台 stage_timeout_seconds 限制，
 线程 enabled/profile 不覆盖 owner 后台有效值。历史线程后台覆盖只展示供清理，实际标注不消费它们。
+
+## P5-B 来源与正式条目关系提示（第一片，本地实现）
+
+`decision_curator.py::annotate_curator_batch` 只创建一个后台阶段，独立检查 `curator` 和 `curator_relation`。
+标签与关系共用绝对 caller deadline；后续关系等待结束后还会复核较早标签的配置与期限。
+`decision_curator_relation.py` 只消费当前批次，不新建候选 store、后台代理、提取入口或晋升动作。
+
+- `CuratorFormalMemoryInput.authority_version/content_chars` 是宿主事实：long-term 版本取原 `MemoryRecord.version`，
+  正文长度取原规范化全正文。原 `to_model` 不增加字段，因此增强关闭时原 Curator 输入字节不变。
+- 完整消息用原消息哈希校验；正式条目需 long_term、精确 ref/ID、正整数版本、完整长度及正文哈希匹配。
+  lesson/HOT 不用时间或 hash 冒充版本，audit 不凭 preview 冒充完整工具输出；不满足时保留原处理并记录 `need_data`。
+- 每次最多 32 个明确来源—条目对，独立 Choice，不要求题目互相依赖。正文在 state 中只出现一次，
+  `coverage=presented_pair_only` 不证明完整正式库覆盖；未比较材料仍原样交提取。
+- 发送前与采用前均用当前 owner 原 `JsonlMemory.all()` 复核精确正式快照；原版本、正文、范围或删除变化使建议失效。
+  本地同步读取不承诺强杀；检查前后使用同一绝对期限，迟到结果不发送/采用，模型调用仍走原有界 worker。
+- `CuratorRelationAnnotation` 只保留双方 ref/hash、正式版本、关系、实际模型和输入摘要；不含 candidate ID、动作或晋升状态。
+  缩批/正式绑定变化后 `to_model_payload` 排除旧关系。超出原提取输入预算则放弃本点提示，不挤掉原材料。
+- 原 `curator_prompt` 仅在存在关系时增加非权威说明；输出 schema、`validate_extraction`、`_prepare_outputs`、
+  CandidateService/Promotion 和事务保持唯一。默认 `off`，线程不得新增此后台覆盖；有效值与菜单沿原设置元数据。
+
+本地测试使用真实临时正式仓库、fake 决策、原 worker/模型账本和提取提交链；不证明真实语义质量，
+不覆盖全库候选合并，也未部署。详见 [P5-B 交接](../../tasks/DECISION_MODEL_P5B_HANDOFF.md)。

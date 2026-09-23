@@ -249,7 +249,7 @@ def test_runtime_memory_routing_uses_home_index_when_project_index_missing(tmp_p
     context = _routed_memory_context_for_request(
         agent,
         RuntimeContextRequest("真实测试失败后要用普通中文提示词，不要写专项模板", [], True),
-        task_local=False,
+        skip_formal_recall=False,
     )
 
     assert context.routes_count >= 1

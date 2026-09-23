@@ -1,5 +1,5 @@
-# LLM: 本模块从宿主字段构造 prompt；原生动态来源和诊断正文共用布局，目录取名仅为共享软纪律，不能按标题裁决状态。
-# 模块用途: 为主/子代理组织模型输入；文本协议保留原格式，原生协议让未变化状态留在已缓存历史里。
+# LLM: 宿主材料采集与纯渲染分开；真实请求和容量投影共用唯一布局，渲染不得读文件、刷新状态或裁决权限。
+# 模块用途: 先冻结主/子代理的完整提示材料，再按原文本或原生缓存布局生成模型输入。
 from __future__ import annotations
 
 """主智能体使用的 prompt 拼装器。
@@ -83,8 +83,26 @@ class _PromptBuildFields:
     workspace_context_override: str | None
 
 
-# LLM: builder 可供同一 agent 多个请求复用；所有动态选择必须来自本次 request，禁止在实例挂展示或授权状态。
-# 类用途: 按原稳定前缀和动态来源拼接模型上下文，Skill 正文继续通过工具按需读取。
+# LLM: 所有字段均为已采集的值；空字符串是显式空材料，不允许纯渲染再读取配置、文件、时钟或 Router。
+# 类用途: 冻结一次完整 prompt 的所有段落，供真实发送与创建前容量检查使用同一格式化器。
+@dataclass(frozen=True)
+class PromptRenderInput:
+    system_prompt: str
+    memory_text: str
+    owner_scope: str
+    dynamic: str
+    workspace_context: str
+    injected: str
+    tool_catalog: str
+    recommendations: str
+    execution_facts: str
+    user_prompt: str
+    task_and_transcript: str
+    native_tool_use: bool
+
+
+# LLM: builder 可供并发请求复用；准备阶段只采集本次材料，纯格式化共享 render_prepared_prompt，不在实例挂临时状态。
+# 类用途: 读取原配置和授权名卡后冻结提示材料；Skill 正文仍通过工具按需读取。
 class PromptBuilder:
     """负责构造每一轮发给模型的完整 prompt。"""
 
@@ -126,9 +144,8 @@ class PromptBuilder:
                 chunks.append(chunk)
         return chunks
 
-    # LLM: Every root and delegated model turn must receive the same evidence boundary. Native
-    # prompts carry source-keyed volatile sections so changes do not duplicate unrelated facts.
-    # 函数用途: 拼出完整模型输入；可选 Skill 选择只进动态推荐段，原生协议按来源复用未变化分段。
+    # LLM: 原调用方仍走同一准备顺序；真正格式化只在 render_prepared_prompt，容量投影不得复制此布局。
+    # 函数用途: 按原配置读取动态材料并生成完整提示，保留 Skill 选择、缓存分段及文本输出字节。
     def build(
         self,
         user_prompt: str = "",
@@ -161,6 +178,11 @@ class PromptBuilder:
                 workspace_context_override,
             ),
         )
+        return render_prepared_prompt(self.prepare_render_input(request))
+
+    # LLM: 这是有读取行为的宿主准备层；保持文件、persona、Skill、时钟的原采集顺序，纯投影只能消费返回值。
+    # 函数用途: 把原 build 所需材料冻结成值对象，不发请求、不写状态，也不为缺失输入猜造子代理事实。
+    def prepare_render_input(self, request: PromptBuildRequest) -> PromptRenderInput:
         _tools = request.tools or ToolSections()
         system_prompt = request.system_prompt_override or self.config.system_prompt
         task_local = _is_task_local_context(request.context_scope)
@@ -181,37 +203,17 @@ class PromptBuilder:
         selected_skills = _selected_skill_context(self, request, task_local)
         if selected_skills:
             recommendations += "\n\n" + selected_skills
-        if _tools.native_tool_use:
-            return CacheStructuredPrompt(
-                _native_cache_stable_prefix(
-                    system_prompt=system_prompt,
-                    owner_scope=owner_scope,
-                    dynamic=dynamic,
-                    tool_catalog=_tools.tool_catalog_section or default_tools,
-                ),
-                volatile_sections=_native_cache_volatile_sections(
-                    memory_text=memory_text,
-                    tool_recommendations=recommendations,
-                    workspace_context=workspace_context,
-                    injected=injected,
-                    execution_facts=_tools.execution_facts_section,
-                ),
-                canonical_user_turn=f"# User Task\n{request.user_prompt}",
-            )
-        task_and_transcript = _task_and_transcript_section(
-            self.config, request.user_prompt, _transcript_tool_context(_tools)
-        )
-        return (
-            f"# System\n{system_prompt}\n\n"
-            f"# Related Memory\n{memory_text}\n\n"
-            f"# Owner Scope\n{owner_scope}\n\n"
-            f"# Dynamic Prompt Files\n{dynamic or '（无）'}\n\n"
-            f"# Workspace Context\n{workspace_context}\n\n"
-            f"# Runtime Injection\n{injected or '（无）'}\n\n"
-            f"{_tools.tool_catalog_section or default_tools}\n\n"
-            f"{recommendations}\n\n"
-            f"{task_and_transcript}\n\n"
-            f"{_tools.execution_facts_section}\n"
+        return PromptRenderInput(
+            system_prompt=system_prompt, memory_text=memory_text, owner_scope=owner_scope,
+            dynamic=dynamic, workspace_context=workspace_context, injected=injected,
+            tool_catalog=_tools.tool_catalog_section or default_tools,
+            recommendations=recommendations, execution_facts=_tools.execution_facts_section,
+            user_prompt=request.user_prompt, native_tool_use=_tools.native_tool_use,
+            task_and_transcript=(
+                "" if _tools.native_tool_use else _task_and_transcript_section(
+                    self.config, request.user_prompt, _transcript_tool_context(_tools)
+                )
+            ),
         )
 
     def read_home_context(self, user_prompt: str) -> list[str]:
@@ -224,6 +226,36 @@ class PromptBuilder:
         """Freeze date/time and workspace facts for one model turn."""
 
         return _workspace_context_text(self, facts_only=facts_only)
+
+
+# LLM: 真实 build 和创建前投影必须共用此纯入口；仅格式化已冻结字符串，不能补读宿主、文件或模型状态。
+# 函数用途: 复现原提示字节和原生缓存来源布局，允许同一输入重复投影而不产生副作用。
+def render_prepared_prompt(prepared: PromptRenderInput) -> str:
+    if prepared.native_tool_use:
+        return CacheStructuredPrompt(
+            _native_cache_stable_prefix(
+                system_prompt=prepared.system_prompt, owner_scope=prepared.owner_scope,
+                dynamic=prepared.dynamic, tool_catalog=prepared.tool_catalog,
+            ),
+            volatile_sections=_native_cache_volatile_sections(
+                memory_text=prepared.memory_text, tool_recommendations=prepared.recommendations,
+                workspace_context=prepared.workspace_context, injected=prepared.injected,
+                execution_facts=prepared.execution_facts,
+            ),
+            canonical_user_turn=f"# User Task\n{prepared.user_prompt}",
+        )
+    return (
+        f"# System\n{prepared.system_prompt}\n\n"
+        f"# Related Memory\n{prepared.memory_text}\n\n"
+        f"# Owner Scope\n{prepared.owner_scope}\n\n"
+        f"# Dynamic Prompt Files\n{prepared.dynamic or '（无）'}\n\n"
+        f"# Workspace Context\n{prepared.workspace_context}\n\n"
+        f"# Runtime Injection\n{prepared.injected or '（无）'}\n\n"
+        f"{prepared.tool_catalog}\n\n"
+        f"{prepared.recommendations}\n\n"
+        f"{prepared.task_and_transcript}\n\n"
+        f"{prepared.execution_facts}\n"
+    )
 
 
 # LLM: Stable native content is restricted to run-invariant instructions, owner scope, prompt files,

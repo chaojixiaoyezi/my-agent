@@ -6,7 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from ...common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
-from ..runner.context import current_subagent_run_id
+from ...runtime_context import current_subagent_run_id
 
 _OVERRIDE_WARNING = "explicit_scope_overridden_by_current_runner"
 

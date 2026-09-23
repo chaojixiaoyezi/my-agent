@@ -1,6 +1,6 @@
 
-# LLM: 本模块定义 canonical 会话状态；v10 增加原地决策覆盖，旧版本显式迁移，显示遥测不替代计费事实。
-# 模块用途: 保存会话、消息、运行关联和独立数值快照的结构化协议。
+# LLM: 本模块定义 canonical 会话状态；v10 模型选择三字段全缺时迁移为未知，部分或坏事实拒绝，不能伪造旧手动事件。
+# 模块用途: 保存会话、消息、模型选择版本和独立数值快照；选择来源不代表自动采用授权或永久固定。
 from __future__ import annotations
 
 import uuid
@@ -10,6 +10,34 @@ from typing import Any
 from ..settings.decision_settings_schema import empty_decision_settings
 
 SCHEMA_VERSION = "conversation_thread.v10"
+_MODEL_SELECTION_FIELDS = (
+    "model_selection_revision", "model_selection_source", "model_selection_last_explicit_revision",
+)
+
+
+# LLM: 原 v10 及更早记录只能在三字段全缺时归一为未知；出现部分新字段不得当旧数据重置，未知来源也不得猜测。
+# 函数用途: 读取原线程中的模型选择事实，保留缺失历史与坏数据的区别，不写文件。
+def _model_selection_fields(data: dict[str, Any]) -> dict[str, Any]:
+    present = set(_MODEL_SELECTION_FIELDS).intersection(data)
+    if not present:
+        return dict(zip(_MODEL_SELECTION_FIELDS, (0, "unknown", 0)))
+    if len(present) != len(_MODEL_SELECTION_FIELDS):
+        raise ValueError("会话模型选择事实不完整，原记录未修改。")
+    return {key: data[key] for key in _MODEL_SELECTION_FIELDS}
+
+
+# LLM: 来源是有限的宿主状态而非模型标签；显式版本只记录已发生覆盖，不构成永久 pin，自动采用仍由原宿主负责。
+# 函数用途: 拒绝无效计数及互相矛盾的选择事实，供反序列化和原子更新共用。
+def _validate_model_selection_fields(revision: int, source: str, last_explicit: int) -> None:
+    if (type(revision) is not int or type(last_explicit) is not int or revision < 0
+            or not 0 <= last_explicit <= revision or type(source) is not str
+            or source not in {"unknown", "default", "inherited", "explicit", "automatic"}):
+        raise ValueError("会话模型选择事实无效，原记录未修改。")
+    if ((source == "unknown" and (revision or last_explicit)) or (source != "unknown" and not revision)
+            or (source == "explicit" and last_explicit != revision)
+            or (source == "automatic" and last_explicit == revision)
+            or (source in {"default", "inherited"} and (revision != 1 or last_explicit))):
+        raise ValueError("会话模型选择版本与来源冲突，原记录未修改。")
 
 THREAD_TASK_LINK_ACTIVE_STATUS = "active"
 THREAD_TASK_LINK_INACTIVE_STATUSES = frozenset(
@@ -311,10 +339,9 @@ class ConversationCompactCommit:
     source_tool_pairs: int
 
 
-# LLM: ConversationThread is the sole durable authority for transcript, compact cursor/checkpoint,
-# model profile reference, versioned decision overrides, provider context calibration, display-only preflight usage, compact failure circuit, and the latest workspace projection; task
-# lifecycle remains in ThreadTaskLink.
-# 类用途: 保存会话模型选择、临时决策覆盖、压缩点和上下文快照，任务运行状态仍由 task link 保存。
+# LLM: ConversationThread 是历史、压缩点、模型引用与选择版本、决策覆盖及上下文投影的唯一持久权威；
+# 选择版本不能代替连接版本或授权，任务生命周期仍由 ThreadTaskLink 拥有，改动须核对线程存储与选择测试。
+# 类用途: 保存会话模型引用与选择版本、临时决策覆盖和压缩点；选择来源不替代任务状态或自动采用权限。
 @dataclass(frozen=True)
 class ConversationThread:
     thread_id: str
@@ -324,6 +351,11 @@ class ConversationThread:
     # LLM: 仅存 owner 配置引用，不保存密钥；空串表示旧记录尚未首次冻结，不是每轮跟随用户默认。
     # 字段用途: 固定当前会话的模型，多个窗口打开同一会话共享，不同会话互不改变。
     model_profile_id: str = ""
+    # LLM: 三字段共同描述已记录选择；旧数据为 0/unknown/0，不从现有 profile 反推历史操作。
+    # 字段用途: 用稳定版本识别迟到建议，最近显式版本只表示覆盖事实，不锁定未来工作片。
+    model_selection_revision: int = field(default=0, kw_only=True)
+    model_selection_source: str = field(default="unknown", kw_only=True)
+    model_selection_last_explicit_revision: int = field(default=0, kw_only=True)
     # LLM: 覆盖信封只存字段及 revision，不复制默认值、凭据或阶段计时；旧记录显式迁移为空覆盖。
     # 字段用途: 保存本会话临时决策偏好，删除字段即可恢复 owner/部署配置的继承。
     decision_settings: dict[str, Any] = field(default_factory=empty_decision_settings)
@@ -370,9 +402,17 @@ class ConversationThread:
     runtime_workspace_roots: tuple[str, ...] = ()
     metadata: dict[str, Any] = field(default_factory=dict)
 
-    # LLM: Persist v10 decision overrides, model reference, transcript/tool compact sources, calibration, numeric display usage, guards, latest
-    # workspace projection and client cwd together.
-    # 函数用途: 将会话模型引用和上下文状态一并写成 JSON，供重启恢复读取，不保存模型密钥。
+    # LLM: 构造与 replace 都验证同一事实类型；有已知选择事件必须有原 profile 引用，不能靠空引用承载假事件。
+    # 函数用途: 在持久化前拒绝坏模型选择字段；默认未知仍允许读取历史线程。
+    def __post_init__(self) -> None:
+        _validate_model_selection_fields(
+            self.model_selection_revision, self.model_selection_source, self.model_selection_last_explicit_revision,
+        )
+        if self.model_selection_revision and not self.model_profile_id:
+            raise ValueError("已知模型选择缺少模型引用，原记录未修改。")
+
+    # LLM: 原 v10 同次序列化选择事实、设置和历史/Compact/校准投影；不另写事件账或模型秘密，须同步旧记录迁移测试。
+    # 函数用途: 将会话模型引用、选择版本和上下文状态一并写成 JSON，不保存模型密钥或第二份选择索引。
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["schema_version"] = SCHEMA_VERSION
@@ -381,8 +421,8 @@ class ConversationThread:
         payload["active_task_ids"] = list(self.active_task_ids)
         return payload
 
-    # LLM: v1-v9/无版本记录显式补空决策覆盖；未知版本拒绝，运行事实不从 summary 推断。
-    # 函数用途: 迁移旧会话的可选设置，同时保持既有上下文、绑定和用量字段。
+    # LLM: 原 v10 及更早记录三选择字段全缺才归一为未知；坏/部分字段和未知 thread 版本拒绝，不补造手动事件。
+    # 函数用途: 读取旧会话的设置与选择事实，保留原上下文；归一只在内存，后续真实写入才保存新字段。
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ConversationThread:
         from ..settings.decision_settings_schema import thread_decision_settings
@@ -398,6 +438,7 @@ class ConversationThread:
             owner_id=str(data.get("owner_id") or ""),
             owner_home=str(data.get("owner_home") or ""),
             model_profile_id=str(data.get("model_profile_id") or ""),
+            **_model_selection_fields(data),
             decision_settings=decision_settings,
             title=str(data.get("title") or ""),
             status=str(data.get("status") or "active"),

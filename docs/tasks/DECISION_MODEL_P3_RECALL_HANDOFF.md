@@ -20,7 +20,7 @@
 - `RuntimeContextRequest` 原样给共用服务；只从已有 request_id/run_id/task_id 派生稳定 operation 引用，不从用户正文或记忆借身份。主/子请求依原 agent_thread_id 和 runner 身份；无合法身份沿原链。
 - 原 task_local/control_plane 路径继续直接空召回，不调用决策。Compact 不新建召回决策，本轮原 memories 列表沿现有循环参数复用；新请求重新走原准备流程。
 - begin 一次冻结阶段，`enabled_points` 明确关闭立即原样返回，不编码额外材料。不可用设置/普通错误/超时/冷却/observe 都保留原顺序。
-- 每条长期事实一题 priority choice，最多 64 题；超过题数不截断候选，只跳过增强。HOT/lesson 仅进入绑定上下文，不作为可排序题。
+- 每条长期事实一题 priority choice；已删除没有供应商依据的 64 题固定上限，题量由原决策协议资源帽和 Jev 请求窗口门把关，超限时不截断原记忆而保留原排序。HOT/lesson 仅进入绑定上下文，不作为可排序题。
 - 每题显式提供 not_needed/need_data/no_match/abstain；need_data 只绑定本记录的 memory_source_ref，没有补资料读取权。任一题非选择或失败保留整批当前顺序，诊断保留各非选择与 invalid/missing answer 的区别，不猜补分数。
 - 全部有效时只对长期事实原槽位做稳定排序，同分保留原序。记录数量、对象内容、HOT/lesson 位置、选中集合和原预算不因建议改变；低优先级不意味着删除或省略。
 - 采用前 `_refresh_recall_candidates` 只读取原正式 HOT/lesson/active long-term 仓库，复用原 scope 和预算，只投影原选中的 entry_id；不重新检索，不增加 touch，不把新 ID 混入候选。

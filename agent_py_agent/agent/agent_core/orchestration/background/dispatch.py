@@ -12,10 +12,10 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from ....concurrency.interrupt import register_interruptible
+from ....runtime_context import current_subagent_run_id
 from ....runtime_errors import runtime_error_report
 from ....subagents.models import FailureType
 from ...parameters import _bool_param
-from ...runner.context import current_subagent_run_id
 from ..create_constraints import dispatchable_tasks
 from ..dispatch.conversation_lifecycle_gate import conversation_lifecycle_decisions
 from ..dispatch.params import DispatchExecutionPlan, DispatchParams

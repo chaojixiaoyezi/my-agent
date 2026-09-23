@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ..common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
+from ..runtime_context import current_subagent_run_id
 from ..subagents.capability_scope import (
     canonical_capability_tool_request_fields,
     capability_request_declares_target,
@@ -35,7 +36,6 @@ from .orchestration.scope_resolution import (
     identity_scope_resolution,
     scope_resolution_payload,
 )
-from .runner.context import current_subagent_run_id
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent

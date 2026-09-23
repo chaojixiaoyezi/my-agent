@@ -13,8 +13,9 @@ from ..native_tool_protocol import native_tool_use_active, resolve_native_tools
 from ..runtime.context_compactor import runtime_compact_policy
 from .usage import provider_visible_input_token_usage
 
-# LLM: 本模块是模型调用前的 context-pressure 判定入口；阈值必须只来自 runtime_compact_policy，不能再加隐藏百分比或未来输出预留。
-# 模块用途: 在当前输入达到配置的 compact 阈值或工具上下文溢出时，返回结构化压缩信号并阻止继续堆入大输出。
+# LLM: 本模块是模型调用前的 context-pressure 判定入口；展示和自动压缩阈值只来自
+# runtime_compact_policy。已知共享窗口及真实出站输出上限另作客观请求准入，不计入已用 Context。
+# 模块用途: 在输入达到压缩点、工具上下文溢出，或已知请求总量无法容纳时返回结构化压缩信号。
 
 _PROVIDER_CONTEXT_OBSERVATION_KEY = "_provider_context_observation"
 _PROVIDER_CONTEXT_HYDRATION_KEY = "_provider_context_observation_hydrated_surfaces"
@@ -161,8 +162,9 @@ def safe_inline_tool_result_tokens(
     return budget.remaining_to_compact_tokens
 
 
-# LLM: preflight 只按当前 prompt/token 事实判断；主代理和 task_local 子代理共用同一条 compact 链。
-# 函数用途: 每次调用模型前检查上下文是否达到配置阈值，达到后要求先压缩再继续原任务。
+# LLM: 输入阈值仍只按当前 Context 算；内置 HTTP 后端有明确共享窗口和实际发送的
+# max_tokens 时，另检查本次请求可容纳性。OAuth Responses 不发送输出上限，不能猜测。
+# 函数用途: 每次模型请求前检查输入压缩点和已知协议容量，超出时沿原 Compact 链恢复。
 def preflight_context_pressure_response(request: object) -> ModelResponse | None:
     params = getattr(request, "params", None)
     policy = runtime_compact_policy(
@@ -194,17 +196,51 @@ def preflight_context_pressure_response(request: object) -> ModelResponse | None
     threshold = policy.trigger_tokens
     if not policy.allow_persistent_apply:
         threshold = window
-    if prompt_tokens < threshold and prompt_tokens < window:
+    output_reserve = _known_shared_window_output_reserve(getattr(request, "agent", None))
+    request_ceiling = max(0, window - output_reserve) if output_reserve else window
+    if prompt_tokens < threshold and prompt_tokens < request_ceiling:
         return None
+    reason = (
+        f"request_output_reserve={output_reserve} request_input_ceiling={request_ceiling} "
+        if prompt_tokens >= request_ceiling and output_reserve else ""
+    )
     return context_pressure_response(
         request,
         source="preflight",
         prompt_tokens=prompt_tokens,
         detail=(
             f"model_visible_tokens={prompt_tokens} "
-            f"context_window={window} compact_threshold={threshold}"
+            f"context_window={window} compact_threshold={threshold} {reason}".strip()
         ),
     )
+
+
+# LLM: 只有内置 HTTP 后端的配置共享窗口与实际发送的正数输出上限同时可证时才预留；
+# OAuth Responses 会移除 max_output_tokens，未知/仅 input limit 元数据不得当成共享窗口。
+# 函数用途: 读取本轮可证明会进入请求体的输出上限，无法证明时保持原输入预检。
+def _known_shared_window_output_reserve(agent: object) -> int:
+    from ...backends.http import HttpBackend
+
+    backend = getattr(agent, "backend", None)
+    config = getattr(agent, "config", None)
+    if not isinstance(backend, HttpBackend):
+        return 0
+    if not bool(getattr(config, "model_context_window_explicit", False)):
+        return 0
+    if str(getattr(backend, "name", "")) == "openai_responses":
+        auth_ref = getattr(backend, "auth_ref", None)
+        if isinstance(auth_ref, dict) and auth_ref.get("mode") == "chatgpt":
+            return 0
+    try:
+        configured_window = int(
+            getattr(config, "model_context_window_tokens", 0)
+            or getattr(backend, "configured_context_window_tokens", 0)
+            or 0
+        )
+        requested_output = int(getattr(backend, "max_tokens", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+    return requested_output if configured_window > 0 and requested_output > 0 else 0
 
 
 # LLM: This is the one preflight accounting path for the exact provider-visible input. Native
@@ -528,10 +564,27 @@ def _model_visible_context_components(
     )
 
 
-# LLM: This digest names only byte-stable provider request surfaces. Conversation messages,
+# LLM: Connection fields from third-party or test backends may be opaque objects; never serialize
+# their repr (which can expose secrets), and keep each unknown object distinct within this process.
+# 函数用途: 将可证明的连接字段保留为 JSON 值，未知对象以进程内身份标记供 HMAC 比较。
+def _connection_fact(value: object) -> object:
+    if value is None or type(value) in (str, int, bool, float):
+        return value
+    if type(value) in (dict, list, tuple):
+        try:
+            json.dumps(value, sort_keys=True, allow_nan=False)
+        except (TypeError, ValueError, RecursionError):
+            pass
+        else:
+            return value
+    return {"opaque_type": type(value).__qualname__, "object_id": id(value)}
+
+
+# LLM: This digest names provider request surfaces stable within one process. Conversation messages,
 # current-turn tool results and runtime guidance remain append-only variable input and are excluded;
-# changing the backend, model, system prefix, stable prompt adjunct or tool schema invalidates reuse.
-# 函数用途: 为跨后台轮次的模型校准生成稳定指纹，只保存哈希而不把提示词或工具定义写进线程状态。
+# changing the backend, connection profile, model, system prefix, stable prompt adjunct or tool
+# schema invalidates reuse; the process-salted connection revision hides credentials and headers.
+# 函数用途: 为跨后台轮次的模型校准生成稳定指纹，换连接或展示面时失效旧观测，只保存哈希。
 def _stable_context_surface_fingerprint(
     agent: object,
     *,
@@ -540,7 +593,13 @@ def _stable_context_surface_fingerprint(
     prompt_surface: str,
     tools: object,
 ) -> str:
+    from ...conversation.decision_policy import connection_revision
+
     backend = getattr(agent, "backend", None)
+    config = getattr(agent, "config", None)
+    sources = getattr(config, "config_sources", None)
+    model_source = sources.get("model_name", {}) if isinstance(sources, dict) else {}
+    model_source = model_source if isinstance(model_source, dict) else {}
     payload = {
         "backend": str(getattr(backend, "name", "") or ""),
         "model": str(
@@ -549,6 +608,15 @@ def _stable_context_surface_fingerprint(
             or ""
         ),
         "protocol": str(protocol or ""),
+        "connection_revision": connection_revision({
+            "profile_id": str(model_source.get("profile_id") or ""),
+            "backend": {key: _connection_fact(getattr(backend, key, None)) for key in (
+                "name", "api_base", "api_key", "auth_ref", "custom_headers", "session_header",
+            )},
+            "config": {key: _connection_fact(getattr(config, key, None)) for key in (
+                "model_backend", "api_base", "api_key", "api_key_env", "model_custom_headers", "model_auth_ref",
+            )},
+        }),
         "system_instruction": str(system_instruction or ""),
         "prompt_surface": str(prompt_surface or ""),
         "tools": tools if isinstance(tools, list) else [],

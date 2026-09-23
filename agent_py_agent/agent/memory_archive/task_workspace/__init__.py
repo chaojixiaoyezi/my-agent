@@ -1,4 +1,5 @@
-
+# LLM: task/root/run 的路径只由此模块计算；只读投影与原 ensure 共用同一算法，只有 ensure 才能写目录、共享状态、产物索引或日账。
+# 模块用途: 计算并物化子代理的任务工作区，供创建前上下文引用路径，同时保留原持久化入口。
 from __future__ import annotations
 
 """filesystem task workspace skeletons for runtime memory.
@@ -186,6 +187,23 @@ def _task_segment(value: str) -> str:
     return safe_path_segment(value, default="task", replacement="_")
 
 
+# LLM: 本入口只沿原 ID 和受信 workspace 规则计算路径，不写文件、不读时间或产生日账事件；runtime refs 的默认值不构成落盘事实。
+# 函数用途: 为尚未保存的任务提供与正式保存相同的工作区路径，消费方只使用静态路径字段。
+def subagent_task_workspace_paths(workspace: str | Path, task: Any) -> TaskWorkspacePaths:
+    return _paths_for(_task_workspace_path_inputs(workspace, task))
+
+
+# LLM: 统一冻结原 root/run/task 身份推导，供纯路径投影和 ensure 使用；不得根据 goal 或已存在目录猜身份。
+# 函数用途: 从原结构化任务字段计算路径输入，不改写任务或创建工作区。
+def _task_workspace_path_inputs(workspace: str | Path, task: Any) -> _TaskWorkspacePathInputs:
+    raw_task_id = str(getattr(task, "root_id", "") or getattr(task, "id", "task"))
+    run_id = str(getattr(task, "id", "") or raw_task_id)
+    root = resolve_task_workspace_root(workspace, task, raw_task_id)
+    return _TaskWorkspacePathInputs(root, _workspace_task_id(task, raw_task_id, run_id), run_id)
+
+
+# LLM: 原唯一物化入口沿共享路径计算后写目录、任务与子运行状态、共享账本、产物索引和日账；不能为创建前估算调用。
+# 函数用途: 保存子代理对应的工作区和运行引用，保留父任务状态的锁内合并及原写入顺序。
 def ensure_subagent_task_workspace(
     request: EnsureSubagentTaskWorkspaceRequest | str | Path | None = None,
     task: Any | None = None,
@@ -199,11 +217,8 @@ def ensure_subagent_task_workspace(
     """
 
     inputs = _coerce_ensure_request(request, task, workspace=workspace)
-    raw_task_id = str(getattr(inputs.task, "root_id", "") or getattr(inputs.task, "id", "task"))
-    run_id = str(getattr(inputs.task, "id", "") or raw_task_id)
-    root = resolve_task_workspace_root(inputs.workspace, inputs.task, raw_task_id)
-    task_id = _workspace_task_id(inputs.task, raw_task_id, run_id)
-    path_inputs = _TaskWorkspacePathInputs(root, task_id, run_id)
+    path_inputs = _task_workspace_path_inputs(inputs.workspace, inputs.task)
+    task_id, run_id = path_inputs.task_id, path_inputs.run_id
     now = float(getattr(inputs.task, "updated_at", 0.0) or time.time())
     paths = _paths_for(path_inputs)
     _ensure_directories(paths)
@@ -392,5 +407,6 @@ __all__ = [
     "EnsureSubagentTaskWorkspaceRequest",
     "TaskWorkspacePaths",
     "ensure_subagent_task_workspace",
+    "subagent_task_workspace_paths",
     "task_workspace_path",
 ]

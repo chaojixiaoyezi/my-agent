@@ -19,7 +19,11 @@ from .provider_headers import (
     validate_headers,
     validate_session_header,
 )
-from .typesafe_decision_wire import parse_typesafe_response, typesafe_payload
+from .typesafe_decision_wire import (
+    parse_typesafe_response,
+    typesafe_payload,
+    validate_typesafe_request_window,
+)
 
 
 # LLM: 连接复用 BackendOptions，决策不实现 generate；角色解析须由原 model_profiles 在构造前完成。
@@ -33,6 +37,7 @@ class TypesafeDecisionBackend:
         self.api_base, self._path = endpoint_parts(options.api_base, "/v1/systemone")
         self._api_key = options.api_key
         self.model_name = options.model_name
+        self.context_window_tokens = options.context_window_tokens
         self._custom_headers = validate_headers(options.custom_headers)
         self._session_header = validate_session_header(options.session_header)
 
@@ -47,6 +52,7 @@ class TypesafeDecisionBackend:
             raise DecisionInputError("决策期限须为有限时间。")
         remaining_deadline_seconds(deadline)
         payload = typesafe_payload(request, self.model_name)
+        validate_typesafe_request_window(payload, self.context_window_tokens)
         headers = request_headers({"Authorization": "Bearer " + self._api_key, "Content-Type": "application/json"},
                                   self._custom_headers, self._session_header)
         remaining = remaining_deadline_seconds(deadline)

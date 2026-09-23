@@ -143,7 +143,7 @@ def _provision_published_audit_source_workers(agent: object) -> dict[str, object
     # A descendant may inherit the Audit lineage for investigation or
     # coordination.  Only the ordinary root turn owns mandatory source
     # cardinality; descendants must never recursively provision siblings.
-    from ..agent_core.runner.context import current_subagent_run_id
+    from ..runtime_context import current_subagent_run_id
 
     if current_subagent_run_id(agent):
         return {}
@@ -296,7 +296,7 @@ def authorize_source_worker_action(
             "AUDIT_SOURCE_CONTEXT_REFRESH_REQUIRED",
             "来源配置已更新；当前工作片可签收已经领取的完整批次，但不能再领取新批次。",
         )
-    from ..agent_core.runner.context import (
+    from ..runtime_context import (
         current_subagent_attempt_id,
         current_subagent_run_id,
     )
@@ -2878,7 +2878,7 @@ def _adopt_current_audit_subagent(
     state: WatchState,
     worker_key: str,
 ) -> dict[str, object] | None:
-    from ..agent_core.runner.context import (
+    from ..runtime_context import (
         current_subagent_run_id,
         current_task_attributes,
     )
@@ -3111,13 +3111,13 @@ def _source_worker_goal(state: WatchState) -> str:
 # run.  The Audit root prompt and source URL are never used to synthesize it.
 # 函数用途: 首次 open 时把协调代理交给这个叶子子代理的原始目标钉进 watch，供崩溃补岗复用。
 def current_audit_source_task_goal(agent: object) -> str:
-    from ..agent_core.runner.context import (
-        current_subagent_run_id,
-        current_task_attributes,
-    )
     from ..common.audit_activation import (
         structured_audit_source_binding_attributes,
         structured_audit_source_worker_attributes,
+    )
+    from ..runtime_context import (
+        current_subagent_run_id,
+        current_task_attributes,
     )
 
     attrs = current_task_attributes(agent)

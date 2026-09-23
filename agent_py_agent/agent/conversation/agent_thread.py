@@ -1,7 +1,5 @@
-# LLM: This module adapts delegated agent runs to the same durable ConversationThread and
-# Compact engine used by foreground turns. Each run owns one transcript; parent/child lineage
-# is metadata only and never causes prompt history to be shared or inferred from prose.
-# 模块用途: 给子代理和孙代理建立独立会话历史，保存正文与真实结束原因，自动压缩并保留后续恢复上下文。
+# LLM: 每个 delegated run 使用原 ConversationThread/Compact；谱系不共享历史，模型建议仅由宿主参数初始化新 thread，读取/恢复不采用。
+# 模块用途: 为子孙代理建立独立会话、保存待验证建议与正文，沿原 Compact 和恢复合同管理历史。
 
 from __future__ import annotations
 
@@ -10,6 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from ..settings.thread_model_selection import PendingSubagentModelAdvice
 from ..tooling.operation_verification import public_operation_verification
 from ..turn_end import result_turn_end_reason
 from .compact_guard import CompactInterruptCheck
@@ -53,10 +52,9 @@ class AgentThreadTurnContext:
     history_seed: ConversationHistorySeed | None = None
 
 
-# LLM: Exact agent lineage comes from SubAgentTask fields and its persisted parent task. The
-# root user conversation may be a parent metadata link, but its transcript is never copied.
-# 函数用途: 创建或校验一个子代理自己的持久线程；旧任务在首次恢复时也可幂等补建。
-def ensure_subagent_thread(manager: object, task: object) -> ConversationThread | None:
+# LLM: 谱系只读 canonical task/父；建议仅接受宿主准备载体的显式参数，绝不从 task attrs 恢复，既有线程不重植 pending。
+# 函数用途: 物化或校验孩子独立会话，新线程可保存待验证模型建议，读取/恢复不改其有效模型。
+def ensure_subagent_thread(manager: object, task: object, *, model_advice: PendingSubagentModelAdvice | None = None) -> ConversationThread | None:
     store = getattr(manager, "conversation_store", None)
     if store is None:
         return None
@@ -120,6 +118,7 @@ def ensure_subagent_thread(manager: object, task: object) -> ConversationThread 
             "title": title,
             "cwd": cwd,
             "runtime_workspace_roots": roots,
+            "model_advice": model_advice,
         }
     )
 

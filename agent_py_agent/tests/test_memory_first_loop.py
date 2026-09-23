@@ -227,6 +227,29 @@ def _runtime_context_capture_agent(captured: dict[str, object]):
     return Agent()
 
 
+@pytest.mark.parametrize("scope,memory_enabled", [("task_local", True), ("control_plane", True), ("default", False)])
+def test_runtime_context_skips_formal_memory_reads_when_isolated_or_disabled(scope, memory_enabled):
+    agent = _runtime_context_capture_agent({})
+    agent.owner_policy = SimpleNamespace(memory_enabled=memory_enabled)
+    reads = {"all": 0, "search": 0}
+
+    def all_rows():
+        reads["all"] += 1
+        return []
+
+    def search(*_args, **_kwargs):
+        reads["search"] += 1
+        return []
+
+    agent.memory.all = all_rows
+    agent.memory.search_scoped = search
+    prepared = runtime_loop_support._prepare_runtime_context(
+        agent, runtime_loop_support.RuntimeContextRequest("普通请求", [], False, context_scope=scope),
+    )
+    assert reads == {"all": 0, "search": 0}
+    assert prepared.memories == [] and prepared.routed_context.enabled is False
+
+
 def test_memory_route_validate_reports_keyword_conflict_and_dead_link(tmp_path, capsys):
     """LLM: verify memory-route --validate detects conflicts and missing source files.
 

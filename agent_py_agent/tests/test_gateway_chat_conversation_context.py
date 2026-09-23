@@ -21,10 +21,6 @@ from agent_py_agent.agent.agent_core.orchestration.create_policy import (
 from agent_py_agent.agent.agent_core.run_task_workspace_writer import (
     write_run_task_workspace_if_needed,
 )
-from agent_py_agent.agent.agent_core.runner.context import (
-    restore_current_subagent_context,
-    set_current_subagent_context,
-)
 from agent_py_agent.agent.agent_core.runtime.loop_models import RuntimeContextRequest
 from agent_py_agent.agent.agent_core.runtime.loop_support import RunParams, _prepare_runtime_context
 from agent_py_agent.agent.agent_core.runtime.task_identity import (
@@ -107,6 +103,10 @@ from agent_py_agent.agent.gateway_parts.workspace_scope import GatewayWorkspaceS
 from agent_py_agent.agent.memory_archive.tool_output_externalizer import (
     ExternalizeToolOutputRequest,
     externalize_tool_output_record,
+)
+from agent_py_agent.agent.runtime_context import (
+    restore_current_subagent_context,
+    set_current_subagent_context,
 )
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.task_progress import (

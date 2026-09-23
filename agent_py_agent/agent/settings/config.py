@@ -1,7 +1,7 @@
 
 from __future__ import annotations
 
-# LLM: 默认值须与随包 YAML 一致；决策通用字段严格校验，覆盖由原 owner/thread 保存，权限与终态仍读结构化事实。
+# LLM: 默认值须与随包 YAML 一致；各决策点独立默认关闭，覆盖由原 owner/thread 保存，召回前建议和外部材料建议都不改变权限或终态。
 # 模块用途: 定义并加载 Agent 配置，统一显式采样、人格、持续执行、插件管理与用户确认口径。
 """智能体配置加载工具。
 
@@ -310,13 +310,14 @@ class _RuntimeBudgetConfigFields:
     background_main_agent_allowed_tools: list[str] = field(default_factory=list)
 
 
-# LLM: AgentConfig 拥有通用决策默认与模型选择点，能力点归 CapabilityConfig，Memory 字段对齐 MemorySettings。
+# LLM: AgentConfig 拥有通用决策和实验能力默认；实验开关不授予额外请求许可，能力点归 CapabilityConfig，Memory 四点对齐 MemorySettings。
 # 类用途: 汇总模型和运行配置；决策默认关闭，有限正时间只为后续请求提供默认，不管理阶段时钟。
 @dataclass
 class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetConfigFields):
 
     # 决策增强默认关闭；有限正秒数只作用后续请求，不重置已开始阶段的预算。
     decision_enabled: bool = False
+    decision_experiment_enabled: bool = False
     decision_timeout_seconds: float = 2.0
     decision_stage_timeout_seconds: float = 4.0
     decision_background_timeout_seconds: float = 4.0
@@ -324,6 +325,12 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     decision_model_selection_mode: str = "off"
     decision_model_selection_timeout_seconds: float | None = None
     decision_model_selection_profile_id: str | None = None
+    decision_external_material_order_mode: str = "off"
+    decision_external_material_order_timeout_seconds: float | None = None
+    decision_external_material_order_profile_id: str | None = None
+    decision_planning_mode: str = "off"
+    decision_planning_timeout_seconds: float | None = None
+    decision_planning_profile_id: str | None = None
     agent_name: str = "myagent"
     # 默认沿 终端交互 主链由 TUI 接管滚轮、点击与应用内选区；F6 仍可临时退回宿主终端原生复制。
     # 关闭后备用屏幕收不到物理滚轮，历史只能用 PgUp/Ctrl+Home，因此不再作为开箱默认。
@@ -334,12 +341,18 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     model_backend: str = ""
     memory_path: str = ""
     # 记忆决策默认定义归 MemorySettings；这里镜像供现有 YAML 配置加载与展示。
+    memory_decision_pre_recall_mode: str = "off"
+    memory_decision_pre_recall_timeout_seconds: float | None = None
+    memory_decision_pre_recall_profile_id: str | None = None
     memory_decision_recall_mode: str = "off"
     memory_decision_recall_timeout_seconds: float | None = None
     memory_decision_recall_profile_id: str | None = None
     memory_decision_curator_mode: str = "off"
     memory_decision_curator_timeout_seconds: float | None = None
     memory_decision_curator_profile_id: str | None = None
+    memory_decision_curator_relation_mode: str = "off"
+    memory_decision_curator_relation_timeout_seconds: float | None = None
+    memory_decision_curator_relation_profile_id: str | None = None
     memory_top_k: int = 5
     auto_save_memory: bool = True
     # 记忆语义召回(检索拓宽 #1,默认关=现状纯关键词):开后记忆召回在关键词(FTS5/BM25)外再加一路

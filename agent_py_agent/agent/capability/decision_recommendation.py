@@ -1,12 +1,15 @@
-# LLM: 可选推荐只返回本工作片展示值；原快照、权限、搜索、加载和执行仍是权威，失败不能改变基础输入。
-# 模块用途: 在原模型循环之前请求一次能力短名单，采用前核对期限、配置、Skill范围及固定工具代次。
+# LLM: 可选推荐和已采用展示的携带都只投影原快照；纯值不持有handler，权限/搜索/加载仍归原合同，失效保留基础输入。
+# 模块用途: 在原模型循环前请求或复用本片短名单；复用不再次联网，不从历史或结果序列化恢复选择。
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
+from ..backends.decision_protocol import DecisionBinding
 from ..concurrency.interrupt import is_interrupted
+from ..conversation.decision_policy import connection_revision
 from ..conversation.decision_service import (
+    _stale,
     begin_decision_stage,
     decide,
     decision_outcome_is_current,
@@ -22,21 +25,58 @@ from .decision_candidates import (
 )
 
 
-# LLM: 返回值仅在本次RuntimeToolLoopSeed内传递；None选择维持旧PromptBuilder路径，不写Agent共享状态。
-# 类用途: 把已验证短名单与原工具绑定一起交给当前循环，附带非权限用途的诊断。
+# LLM: 只保存已采用展示的不可变名称与原绑定摘要，不含原响应/期限/handler；宿主只能在同一工作片内存中传递。
+# 类用途: 让同片重建复用选中名卡和schema展示；None与空选择不同，不能用它授予权限或证明正文已加载。
+@dataclass(frozen=True)
+class CapabilityPresentationSelection:
+    binding: DecisionBinding
+    connection_revision: str = field(repr=False)
+    presentation_revision: str
+    attempt_id: str
+    selected_skill_ids: tuple[str, ...] | None
+    required_skill_ids: tuple[str, ...]
+    presentation_deferred_names: frozenset[str] | None
+    presentation_shortlist_names: frozenset[str] | None
+
+    # LLM: 冻结载体只接受原绑定及纯字符串集合；验证失败由可选消费者保留原展示，不产生授权或写盘。
+    # 函数用途: 防止可变容器、活对象和错误接入点混进本片展示值。
+    def __post_init__(self) -> None:
+        if type(self.binding) is not DecisionBinding or self.binding.point != "skill_tool":
+            raise ValueError("能力展示需要原 skill_tool 绑定")
+        if any(type(value) is not str or not value for value in (self.connection_revision, self.presentation_revision)):
+            raise ValueError("能力展示需要原配置及候选版本")
+        if type(self.attempt_id) is not str:
+            raise ValueError("能力展示尝试身份须为字符串")
+        for value, expected, optional in (
+            (self.selected_skill_ids, tuple, True), (self.required_skill_ids, tuple, False),
+            (self.presentation_deferred_names, frozenset, True), (self.presentation_shortlist_names, frozenset, True),
+        ):
+            if value is None and optional:
+                continue
+            if type(value) is not expected or any(type(name) is not str for name in value):
+                raise ValueError("能力展示名称须为不可变字符串集合")
+
+
+# LLM: 原活快照仅在本次RuntimeToolLoopSeed使用；跨接缝只能回传selection纯值，不将本对象写入AgentRunResult。
+# 类用途: 把当前合法短名单交给循环，另提供宿主可在本片内存中携带的展示值。
 @dataclass(frozen=True)
 class CapabilityPresentation:
     tool_snapshot: object
     selected_skill_ids: tuple[str, ...] | None = None
     required_skill_ids: tuple[str, ...] = ()
     finding: str = ""
+    selection: CapabilityPresentationSelection | None = None
 
 
-# LLM: 总期限在配置/候选准备之前开始，网络调用仅此一次；用户取消继续抛出，普通增强错误沿原输入。
-# 函数用途: 为一个原工作片取得可撤销的能力展示建议，关闭/观察/失败不会缩减输入。
+# LLM: 新建议仍受原总期限和采用门约束；已采用纯值只读复核，宿主标记本片已评估后不重发决策，取消继续抛出。
+# 函数用途: 为原工作片取得或复用展示建议；关闭、失效携带和普通失败都保持当前原始输入。
 def recommend_capabilities(agent, params, snapshot, contract) -> CapabilityPresentation:
     original = CapabilityPresentation(snapshot)
     try:
+        carried = getattr(params, "capability_presentation", None)
+        if carried is None and getattr(params, "capability_presentation_evaluated", False):
+            _check_cancelled()
+            return original
         if (not getattr(agent.config, "enable_tools", True)
                 or getattr(params, "context_scope", "default") in {"isolated", "control_plane"}):
             return original
@@ -46,12 +86,15 @@ def recommend_capabilities(agent, params, snapshot, contract) -> CapabilityPrese
         stage = begin_decision_stage(agent, params, operation_id="skill_tool:" + candidate_digest(operation))
         if stage.error_code or "skill_tool" not in stage.enabled_points:
             return original
+        if carried is not None:
+            return _restore_presentation(agent, params, snapshot, contract, stage, carried)
         policy = _policy(agent, stage.thread_id)
         skills = agent.current_skill_snapshot()
         discoverable = _skill_discoverable(agent, params, snapshot)
         state, questions, revision = _material(agent, params, snapshot, skills, policy, discoverable)
         if not questions:
             return original
+        presentation_revision = _presentation_revision(agent, params, snapshot, contract, skills, policy)
         backend = agent.backend
         # 候选说明在各自独立题中只发一次，宿主state副本保留列表仅供版本和结果映射。
         wire_state = {key: value for key, value in state.items() if key != "candidates"}
@@ -65,19 +108,96 @@ def recommend_capabilities(agent, params, snapshot, contract) -> CapabilityPrese
             return replace(fallback, finding="skill_tool_decision:retain_original:" + reason)
         fresh = agent.skill_snapshot_for_run_scope(skills.workspace_root)
         if (_material(agent, params, snapshot, fresh, policy, discoverable)[2] != revision
+                or _presentation_revision(agent, params, snapshot, contract, fresh, policy) != presentation_revision
                 or not _tools_current(snapshot) or agent.backend is not backend
                 or _policy(agent, stage.thread_id) != policy
                 or outcome.response.binding.candidates_revision != revision):
             return replace(fallback, finding="skill_tool_decision:stale")
         projected = _project(params, snapshot, contract, fresh, selected, policy, discoverable)
+        selection = CapabilityPresentationSelection(
+            outcome.response.binding, outcome.connection_revision,
+            presentation_revision,
+            _presentation_turn_id(params), projected.selected_skill_ids, projected.required_skill_ids,
+            projected.tool_snapshot.presentation_deferred_names, projected.tool_snapshot.presentation_shortlist_names,
+        )
         _check_cancelled()
         if not decision_outcome_is_current(agent, params, stage, outcome) or time.monotonic() >= stage.deadline:
             return replace(fallback, finding="skill_tool_decision:stale")
-        return projected
+        return replace(projected, selection=selection)
     except (InterruptedError, ToolCancelled):
         raise
     except Exception:
         return replace(original, finding="skill_tool_decision:enhancement_failed")
+
+
+# LLM: 版本比较结构化能力/必要引用、输入与生成连接摘要；不保存凭据、活快照或将Compact代际当作新权限。
+# 函数用途: 为本片展示生成可重算版本，能力、范围或同名生成连接变化后旧值不能继续采用。
+def _presentation_revision(agent, params, snapshot, contract, skills, policy: dict) -> str:
+    required_tools, required_skills = required_capabilities(params, contract, skills)
+    capability = getattr(getattr(params, "tool_protocol_snapshot", None), "capability", None)
+    return candidate_digest({
+        "query": params.user_prompt, "context_scope": params.context_scope,
+        "allowed_tools": params.allowed_tools,
+        "snapshot_allowed_tools": sorted(snapshot.allowed_tools) if snapshot.allowed_tools is not None else None,
+        "tool_snapshot": snapshot.snapshot_hash, "skill_snapshot": skills.fingerprint, "policy": policy,
+        "required_tools": sorted(required_tools), "required_skills": list(required_skills),
+        "model": str(getattr(agent.backend, "model_name", "")),
+        "generation_connection": _generation_connection_revision(agent),
+        "window": getattr(agent.config, "model_context_window_tokens", None),
+        "protocol": [getattr(capability, key, None) for key in ("provider", "endpoint", "model", "native_supported")],
+    })
+
+
+# LLM: 复用原进程盐HMAC；只读已冻结backend/config，不读凭据库、不probe；密钥、自定义头和连接原文只在哈希输入存活。
+# 函数用途: 为生成连接生成不暴露秘密的版本，使同名模型换端点、认证或请求头时展示建议失效。
+def _generation_connection_revision(agent) -> str:
+    backend, config = agent.backend, agent.config
+    sources = getattr(config, "config_sources", None)
+    model_source = sources.get("model_name", {}) if isinstance(sources, dict) else {}
+    return connection_revision({
+        "backend": str(getattr(backend, "name", "") or ""),
+        "profile_id": model_source.get("profile_id", "") if isinstance(model_source, dict) else "",
+        "runtime": {key: getattr(backend, key, None) for key in ("api_base", "api_key", "custom_headers", "auth_ref")},
+        "config": {key: getattr(config, key, None) for key in (
+            "model_backend", "api_base", "api_key", "api_key_env", "model_custom_headers", "model_auth_ref",
+        )},
+    })
+
+
+# LLM: 原service核对配置/连接/身份，原snapshot核对范围；宿主turn独立于可轮换DB attempt，仅替换展示字段不换handler。
+# 函数用途: 只读恢复同片已采用的展示，失效返回原快照，让宿主清掉携带值；没有模型、工具执行或文件写入。
+def _restore_presentation(agent, params, snapshot, contract, stage, carried) -> CapabilityPresentation:
+    original = CapabilityPresentation(snapshot, finding="skill_tool_decision:carried_stale")
+    if type(carried) is not CapabilityPresentationSelection:
+        return original
+    binding = carried.binding
+    if ((binding.owner_ref, binding.thread_id, binding.run_id, binding.task_id, binding.operation_id) !=
+            (stage.owner_ref, stage.thread_id, stage.run_id, stage.task_id, stage.operation_id)
+            or carried.attempt_id != _presentation_turn_id(params)):
+        return original
+    policy = _policy(agent, stage.thread_id)
+    skills = agent.current_skill_snapshot()
+    discoverable = _skill_discoverable(agent, params, snapshot)
+    fresh = agent.skill_snapshot_for_run_scope(skills.workspace_root)
+    if (carried.presentation_revision != _presentation_revision(agent, params, snapshot, contract, fresh, policy)
+            or not _tools_current(snapshot) or (carried.selected_skill_ids is not None and not discoverable)
+            or _stale(agent, params, stage, "skill_tool", binding.policy_revision, carried.connection_revision)):
+        return original
+    restored = snapshot
+    if (snapshot.presentation_deferred_names, snapshot.presentation_shortlist_names) != (
+        carried.presentation_deferred_names, carried.presentation_shortlist_names,
+    ):
+        restored = replace(snapshot, presentation_deferred_names=carried.presentation_deferred_names,
+                           presentation_shortlist_names=carried.presentation_shortlist_names)
+    _check_cancelled()
+    return CapabilityPresentation(restored, carried.selected_skill_ids, carried.required_skill_ids,
+                                  "skill_tool_decision:apply:carried", carried)
+
+
+# LLM: 仅接受本次参数中宿主明确提供的turn；缺省保持原attempt核对，不从携带值或历史借身份。
+# 函数用途: 为同一真实回合的展示确定寿命，允许DB重试换attempt而不允许跨宿主回合复用。
+def _presentation_turn_id(params) -> str:
+    return str(getattr(params, "capability_presentation_turn_id", "") or getattr(params, "attempt_id", "") or "")
 
 
 # LLM: 只从原设置服务非阻塞读取有效值，不建第二默认表；同一字段变化必须使在途结果失效。

@@ -202,7 +202,7 @@ def test_creation_storage_error_is_not_invalid_arguments(monkeypatch):
     from agent_py_agent.agent.agent_core import orchestration_tools as orchestration
     def fail(*args):
         raise OSError("storage unavailable")
-    monkeypatch.setattr(orchestration, "_execute_create_subagents", fail)
+    monkeypatch.setattr(orchestration, "_prepare_create_subagents", fail)
     result = orchestration.execute_create_subagents_service(SimpleNamespace(), {"goal": "valid"})
     assert result.error_code == "TOOL_EXECUTION_FAILED"
     assert result.effect_outcome == "unknown"

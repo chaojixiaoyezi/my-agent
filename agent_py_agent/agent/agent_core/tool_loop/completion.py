@@ -75,10 +75,10 @@ def task_local_wait_response_for_open_subagents(
 ) -> ModelResponse | None:
     if str(getattr(params, "context_scope", "") or "") != "task_local":
         return None
+    from ...runtime_context import current_subagent_run_id
     from ...subagents.direct_parent_lifecycle import (
         mark_parent_waiting_for_direct_children,
     )
-    from ..runner.context import current_subagent_run_id
 
     parent_run_id = current_subagent_run_id(agent) or str(getattr(params, "run_id", "") or "")
     waiting = mark_parent_waiting_for_direct_children(

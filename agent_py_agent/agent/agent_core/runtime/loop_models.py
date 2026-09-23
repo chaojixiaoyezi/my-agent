@@ -1,14 +1,18 @@
-# LLM: 运行参数只携带当前调用的身份、上下文与宿主回调；回调和拒绝记忆不写进模型输入或持久配置，自动续接须保留。
-# 模块用途: 定义主链执行与收口的参数结构，让前台、子代理及 CLI 共享同一运行协议。
+# LLM: 运行参数只携带当前身份、上下文与宿主回调；本片展示及已评估事实不进序列化结果，新工作片须重置。
+# 模块用途: 定义主链执行与收口参数；拒绝记忆和可选展示分别沿原宿主生命周期传递。
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from ...capability.decision_recommendation import CapabilityPresentationSelection
 
 
-# LLM: 消息、运行、尝试身份独立；绑定回调同时服务正式身份发布和任务链接确认，Compact 续接须保留同一宿主对象。
-# 类用途: 收拢一次代理调用的配置和上下文，不自行执行模型、工具或文件写入。
+# LLM: 消息/运行/尝试身份独立；展示及已评估事实只由同片宿主传入/回收，不能复用到新Goal轮或作为能力授权。
+# 类用途: 收拢一次代理调用的配置、上下文和内存回调，不执行模型、工具或写文件；新片默认没有旧展示。
 @dataclass
 class RunParams:
     inject: list[str] | None = None
@@ -51,6 +55,12 @@ class RunParams:
     conversation_history_seed: object = None
     # 宿主绑定本次精确 owner/thread/turn 的异常历史出口；只保存已有事实，不投递回复或续跑。
     partial_turn_callback: object = None
+    capability_presentation: CapabilityPresentationSelection | None = None
+    capability_presentation_evaluated: bool = False
+    capability_presentation_turn_id: str = ""
+    capability_presentation_callback: Callable[[CapabilityPresentationSelection | None], object] | None = field(
+        default=None, repr=False, compare=False,
+    )
     # CLI 自动续跑契约(2026-08-14 根因3 设计 v2): 首轮创建后贯穿所有续跑轮,
     # 保证同一 task/run/thread 链路(不每轮隐式生成新根)。
     # - continuation_seq: 0=首轮, 1..N=续跑轮(事件账本/终态分层用)
@@ -86,8 +96,8 @@ class RuntimeContextRequest:
     task_attributes: dict | None = None
 
 
-# LLM: 已解析参数保留原历史回调和同一拒绝列表；不得猜测 owner/thread 或将宿主状态转为 prompt。
-# 类用途: 把冻结的工具、权限与会话上下文交给工具循环，异常出口仍使用原宿主落账方式。
+# LLM: 已解析参数保留宿主回调/拒绝列表；展示纯值和已评估事实只供原推荐接缝核对，不送入模型或结果，也不能替代快照。
+# 类用途: 将冻结工具、权限、会话上下文及本片展示接到原循环；异常与展示回传分别使用各自宿主出口。
 @dataclass
 class RuntimeLoopParams:
     user_prompt: str
@@ -118,6 +128,12 @@ class RuntimeLoopParams:
     tool_protocol_snapshot: object = None
     conversation_history_seed: object = None
     partial_turn_callback: object = None
+    capability_presentation: CapabilityPresentationSelection | None = None
+    capability_presentation_evaluated: bool = False
+    capability_presentation_turn_id: str = ""
+    capability_presentation_callback: Callable[[CapabilityPresentationSelection | None], object] | None = field(
+        default=None, repr=False, compare=False,
+    )
 
 
 @dataclass

@@ -28,7 +28,6 @@ from .agent_core.parameters import (
 from .agent_core.planner_service import (
     PARENT_PLANNER_READ_TOOLS,
 )
-from .agent_core.runner.context import ThreadLocalAgentAttribute, current_subagent_run_id
 from .agent_core.runtime.guidance_tool import SendGuidanceTool
 from .agent_core.runtime.owner_roots import runtime_owner_root
 from .agent_core.runtime_mixin import SimpleAgentRuntimeMixin
@@ -89,6 +88,7 @@ from .memory_store.promotion import (
     MemoryPromotionService,
 )
 from .prompting_parts import PromptBuilder
+from .runtime_context import ThreadLocalAgentAttribute, current_subagent_run_id
 from .runtime_db.operation_store_selector import select_operation_store
 from .scheduler import SchedulerDueIndex, SchedulerRepository, SchedulerService, ScheduleTool
 from .settings import AgentConfig
@@ -934,15 +934,15 @@ def _add_skill_snapshot_hashes(target: dict[str, str], value: object) -> None:
             target[stable_id] = content_sha256
 
 
-# LLM: 主代理通用工作工具在这里统一注册；send_message 是唯一通道发送入口，不增加平台专用旁路。
-# 函数用途: 把编排、检索、记忆、消息和协作工具装入主代理 registry。
+# LLM: Gateway 状态仍限本机管理员；user_config 按可信 owner 身份自行缩窄模型 schema 与执行动作，不能把 legacy 配置能力给普通用户。
+# 函数用途: 把配置、编排、检索、记忆、消息和协作工具装入当前 owner 的 registry。
 def _register_orchestration_tools(agent: SimpleAgent) -> None:
     # Gateway 状态包含宿主 PID、配置和日志路径，只向本机管理员主代理提供；普通 owner
     # 不注册这项能力，从工具快照源头避免跨用户泄露。
     if str(getattr(agent.tools, "owner_type", "") or "") == "main_agent":
         agent.tools.register(GatewayStatusTool(agent))
-        # 用户级配置的受控入口：读生效值/来源，改白名单项；安全边界不可写。
-        # 真机问题：用户问"能不能改 compact 阈值"，模型没有任何入口，只能凭空答"我没权限"。
+    # 普通 user 也能经原 owner/thread 设置服务操作自己的决策覆盖；group/未知 owner 不扩权。
+    if str(getattr(agent.tools, "owner_type", "") or "") in {"main_agent", "user"}:
         agent.tools.register(UserConfigTool(agent))
     agent.tools.register(CapabilityRequestTool(agent))
     agent.tools.register(TaskProgressTool(agent))

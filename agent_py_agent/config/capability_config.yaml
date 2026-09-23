@@ -52,6 +52,8 @@ subagent_tool_wait_notice_seconds: 900
 decision_subagent_model_mode: off
 decision_subagent_model_timeout_seconds: null  # 有限正秒数；留空继承通用前台期限，零不是无限
 decision_subagent_model_profile_id: null  # 留空继承通用 Decision 模型引用
+# 子代理执行模型候选的原模型目录 ID；[] 使用全部当前授权的 agentic 模型。可按用户长期或会话设置覆盖，不按名称猜服务商。
+decision_subagent_model_candidate_profile_ids: []
 # 总开关与本点仍默认关闭。采用时 metadata 只缩减名卡/推荐，progressive 还延迟可选类别的未选中工具。
 # 减量可能改变工作片间的缓存前缀/schema，不能把省输入等同于缓存命中；原工具搜索与执行权限不变。
 decision_skill_tool_context_policy: progressive

@@ -1,6 +1,6 @@
 """Dataclasses for effective memory config and default warnings."""
 
-# LLM: These immutable values are the normalized Memory runtime contract; YAML and AgentConfig defaults must stay aligned.
+# LLM: 不可变 Memory 生效字段含召回前/后及 Curator 独立决策点；YAML 与 AgentConfig 默认必须一致，配置不构成写入权。
 # 模块用途: 定义 Memory/Curator 生效配置和配置回退警告的数据结构。
 
 from __future__ import annotations
@@ -9,17 +9,23 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 
-# LLM: Curator/召回的决策默认归此类；可选时间和模型引用为 None 时继承通用策略，不改变记忆证据规则。
+# LLM: Curator 标签、关系与召回前/后各自默认关闭；可选时间和模型引用为 None 时继承通用策略，不改变记忆证据规则。
 # 类用途: 保存校验后真正供 Memory 运行时使用的全部配置。
 @dataclass(frozen=True)
 class MemorySettings:
     """Effective memory config after validation and default normalization."""
+    memory_decision_pre_recall_mode: str = "off"
+    memory_decision_pre_recall_timeout_seconds: float | None = None
+    memory_decision_pre_recall_profile_id: str | None = None
     memory_decision_recall_mode: str = "off"
     memory_decision_recall_timeout_seconds: float | None = None
     memory_decision_recall_profile_id: str | None = None
     memory_decision_curator_mode: str = "off"
     memory_decision_curator_timeout_seconds: float | None = None
     memory_decision_curator_profile_id: str | None = None
+    memory_decision_curator_relation_mode: str = "off"
+    memory_decision_curator_relation_timeout_seconds: float | None = None
+    memory_decision_curator_relation_profile_id: str | None = None
     memory_archive_level: int = 3
     memory_hook_enabled: bool = True
     memory_hook_archive_level: int = 3

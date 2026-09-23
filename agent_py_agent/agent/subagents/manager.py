@@ -1,5 +1,5 @@
-# LLM: manager 组合原 canonical 服务；创建、换轮和控制使用同一 owner guard，不把普通保存改成新的生命周期入口。
-# 模块用途: 组装子代理状态、创建和执行服务，提供统一的短事务协调入口。
+# LLM: manager 组合原 canonical 服务；原创建入口透传同一待提交对象，创建、换轮和控制使用同一 owner guard，不另立身份或生命周期入口。
+# 模块用途: 组装子代理状态、准备对象提交和执行服务，提供统一的短事务协调入口。
 """Subagent orchestration manager."""
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from .manager_work_orders import (
 from .models import SubAgentCard, SubAgentTask, TakeoverRecord, WorkOrderValidation
 from .patch.patch_service import SubAgentPatchService
 from .services.actions import SubAgentActionService
-from .services.base import CreateRunParams, SubAgentBaseService
+from .services.base import CreateRunParams, PreparedSubagentRun, SubAgentBaseService
 from .services.board.service import SubAgentBoardService
 from .services.budget import SubAgentBudgetService
 from .services.capability_service import SubAgentCapabilityService
@@ -164,14 +164,13 @@ class SubAgentManager(SubagentKernelMixin):
     def register_card(self, card: SubAgentCard) -> None:
         self.cards[card.name] = card
 
-    # LLM: This public creation facade preserves the full normalized contract,
-    # including display-only description, while delegating all persistence,
-    # authority, workspace, and lineage work to SubAgentBaseService.
-    # 函数用途: 创建子代理任务；职责短标题会随任务保存，但不影响权限或运行状态。
+    # LLM: 原公开创建入口透传完整规范参数及可选的同一准备对象；身份复核、物化、权限和父链仍唯一归 base_service，不在 facade 重建任务。
+    # 函数用途: 创建子代理，或提交宿主已只读准备的同一任务；职责短标题仍只用于展示。
     def create_run(
         self,
         *,
         params: CreateRunParams | None = None,
+        prepared: PreparedSubagentRun | None = None,
         goal: str = "",
         thought: str = "",
         plan: list[str] | None = None,
@@ -198,7 +197,7 @@ class SubAgentManager(SubagentKernelMixin):
         destroy_summary_required: bool = True,
     ) -> SubAgentTask:
         params = params or _create_run_params_from_kwargs(locals())
-        return self.base_service.create_run(params=params)
+        return self.base_service.create_run(params=params, prepared=prepared)
 
     def record_takeover(
         self,

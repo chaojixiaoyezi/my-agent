@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent_py_agent.agent.capability.config import load_capability_config
 from agent_py_agent.agent.conversation import decision_model_call as calls
 from agent_py_agent.agent.conversation import decision_policy as policy
 from agent_py_agent.agent.conversation import decision_service as service
@@ -58,6 +59,30 @@ def test_metadata_is_one_complete_field_registry_and_returns_independent_views(c
     assert {point: row["runtime_scope"] for point, row in view["effective"]["points"].items()} == dict(POINT_RUNTIME_SCOPES)
     fields["points.curator.mode"].append("thread")
     assert decision_field_scopes()["points.curator.mode"] == ["owner"]
+
+
+def test_subagent_candidate_ids_are_structured_owner_and_thread_settings(configured):
+    host, thread, key = configured
+    field = "points.subagent_model.candidate_profile_ids"
+    owner = patch(host, {field: [key]})
+    assert owner["effective"]["points"]["subagent_model"]["candidate_profile_ids"] == [key]
+    scoped = patch(host, {field: ["shared:" + key]}, scope="thread", thread_id=thread.thread_id)
+    assert scoped["effective"]["points"]["subagent_model"]["candidate_profile_ids"] == ["shared:" + key]
+    assert scoped["sources"][field] == "thread"
+    for invalid in ("all", [key, key], [""], ["not-a-profile"]):
+        with pytest.raises(ModelProfileError):
+            patch(host, {field: invalid}, scope="thread", thread_id=thread.thread_id)
+    assert execute(host, "read", {"scope": "thread"}, thread_id=thread.thread_id)["effective"]["points"]["subagent_model"]["candidate_profile_ids"] == ["shared:" + key]
+
+
+def test_capability_yaml_candidate_ids_validate_as_model_refs(configured, tmp_path):
+    _host, _thread, key = configured
+    path = tmp_path / "capability.yaml"
+    path.write_text(f'decision_subagent_model_candidate_profile_ids: ["{key}"]\n', encoding="utf-8")
+    assert load_capability_config(path).decision_subagent_model_candidate_profile_ids == [key]
+    path.write_text('decision_subagent_model_candidate_profile_ids: ["not-a-profile"]\n', encoding="utf-8")
+    with pytest.raises(ModelProfileError):
+        load_capability_config(path)
 
 
 @pytest.mark.parametrize("key,value", [
@@ -162,8 +187,8 @@ def test_point_runtime_scope_filters_stage_and_rejects_wrong_host_without_networ
     background = SimpleNamespace(run_id="background", task_attributes={})
     front_stage = service.begin_decision_stage(host, front, operation_id="front")
     background_stage = service.begin_decision_stage(host, background, operation_id="background", scope="owner_background")
-    assert set(front_stage.enabled_points) == set(POINT_RUNTIME_SCOPES) - {"curator"}
-    assert background_stage.enabled_points == ("curator",)
+    assert set(front_stage.enabled_points) == {point for point, scope in POINT_RUNTIME_SCOPES.items() if scope == "thread"}
+    assert set(background_stage.enabled_points) == {point for point, scope in POINT_RUNTIME_SCOPES.items() if scope == "owner_background"}
     monkeypatch.setattr(calls, "invoke_decision_model_call", lambda *_a, **_kw: pytest.fail("范围错误不得发送请求"))
     for point, runtime_scope in POINT_RUNTIME_SCOPES.items():
         params, stage = (front, front_stage) if runtime_scope == "owner_background" else (background, background_stage)

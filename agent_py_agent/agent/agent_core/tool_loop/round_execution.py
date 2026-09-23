@@ -740,7 +740,7 @@ def _execute_parallel_call(
     restore_values = _install_parallel_thread_context(request.agent, context)
     previous_runner: dict[str, object] | None = None
     if context.subagent_run_id:
-        from ..runner.context import set_current_subagent_context
+        from ...runtime_context import set_current_subagent_context
 
         previous_runner = set_current_subagent_context(
             request.agent,
@@ -760,7 +760,7 @@ def _execute_parallel_call(
         )
     finally:
         if previous_runner is not None:
-            from ..runner.context import restore_current_subagent_context
+            from ...runtime_context import restore_current_subagent_context
 
             restore_current_subagent_context(request.agent, previous_runner)
         _restore_parallel_thread_context(request.agent, restore_values)
@@ -769,7 +769,7 @@ def _execute_parallel_call(
 # LLM: 并行工具只继承本线程显式依赖与 runner 身份，不能读取其它会话的模型连接；接收线程必须对称恢复。
 # 函数用途: 冻结派工等工具需要的临时上下文，保留显式替身注入但不共享跨线程可变字段。
 def _capture_parallel_thread_context(agent: object) -> _ParallelThreadContext:
-    from ..runner.context import (
+    from ...runtime_context import (
         ThreadLocalAgentAttribute,
         current_subagent_attempt_id,
         current_subagent_run_id,

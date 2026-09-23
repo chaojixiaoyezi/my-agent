@@ -2,8 +2,8 @@
 # 模块用途: 主子代理共用目标归属解析；子代理有自己的目标，不能读写父代理目标或给父代理记账。
 from __future__ import annotations
 
-from ..agent_core.runner.context import current_subagent_run_id
 from ..agent_core.runtime.task_identity import durable_task_id
+from ..runtime_context import current_subagent_run_id
 
 
 # LLM: 子代理仅使用自身 agent_thread_id/run；独立 cli_run 使用其明确任务身份，不提前建立会话任务链接；无写入。

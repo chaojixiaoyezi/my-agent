@@ -1,6 +1,6 @@
 
-# LLM: 根级/递归派工保持统一创建边界；可选模型决策在创建锁外等待，物化前重校验，不得扩大凭据权限。
-# 模块用途: 模型可调用的创建、插话与停止工具；显式模型优先，建议只能影响尚未创建的当前批次。
+# LLM: 根级/递归派工保持统一创建边界；锁外建议前后共用待提交身份，物化前重校验并先查持久复用，不得扩大权限。
+# 模块用途: 模型可调用的创建、插话与停止工具；显式模型优先，只重冻当前批次尚未创建的对象。
 from __future__ import annotations
 
 """exposes model-callable orchestration tools backed by SimpleAgent subagent workflows.
@@ -12,14 +12,15 @@ from __future__ import annotations
 import json
 import re
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from ..capability.skill_snapshot import SkillSnapshotError
 from ..common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
+from ..runtime_context import current_subagent_run_id
 from ..settings.model_profiles import ModelProfileError
 from ..subagents.capability_scope import bind_creation_tool_authority
-from ..subagents.services.base import CreateRunParams
+from ..subagents.services.base import CreateRunParams, PreparedSubagentRun
 from ..subagents.services.hierarchy.scheduled_role import (
     agent_name_has_trailing_identifier,
     is_placeholder_agent_name,
@@ -113,7 +114,6 @@ from .orchestration.write_guard import (
     external_write_target_error,
 )
 from .parameters import subagent_intent_identity
-from .runner.context import current_subagent_run_id
 from .runtime.guidance_tool import SendGuidanceTool as SendGuidanceTool
 from .task_progress_tool import TaskProgressTool as TaskProgressTool
 
@@ -132,8 +132,8 @@ class CreatedItemsResultRequest:
     capped_items: list[CreateSubagentItem]
 
 
-# LLM: 只保存原校验已经构造的规格；没有 task ID 或创建副作用，网络后必须重建本对象再物化。
-# 类用途: 将原根创建流程的准备结果交给锁外模型建议，再回到同一个保存和发布入口。
+# LLM: 原规格与可选待提交 task 驻留同一批次；网络后重建规格但复用 prepared_runs 身份，不持久化准备列表或把它当授权。
+# 类用途: 在锁外建议前后传递原准备对象，再沿同一幂等、保存和发布入口提交。
 @dataclass(frozen=True)
 class PreparedSubagentCreation:
     task_params: list[CreateRunParams]
@@ -141,6 +141,7 @@ class PreparedSubagentCreation:
     allowed_tools: list[list[str] | None]
     request_params: dict[str, object]
     batch: bool = False
+    prepared_runs: list[PreparedSubagentRun | None] = field(default_factory=list, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -350,7 +351,7 @@ def _nested_create_params(
 
 
 # LLM: 关闭路径仍在一次原事务内准备/物化；增强只在两次原校验间释放锁，不得绕过停止、容量或持久幂等检查。
-# 函数用途: 在原创建服务中可选地请求整批模型建议，等待期间允许取消和其他创建继续推进。
+# 函数用途: 在原创建服务批量建议模型，复核后只把 pending 绑定原准备载体，等待期间仍可取消。
 def execute_create_subagents_service(
     agent: SimpleAgent,
     params: dict[str, object],
@@ -368,10 +369,13 @@ def execute_create_subagents_service(
         outcome = decide_subagent_models(agent, decision)
         with _create_subagents_transaction(agent):
             raise_if_cancelled()
-            prepared = _prepare_create_subagents(agent, params)
-            if isinstance(prepared, ToolHandlerOutcome):
-                return prepared
-            apply_subagent_model_decision(agent, decision, outcome, _decision_children(agent, prepared))
+            current = _prepare_create_subagents(agent, params)
+            if isinstance(current, ToolHandlerOutcome):
+                return current
+            prepared = replace(current, prepared_runs=prepared.prepared_runs)
+            advice = apply_subagent_model_decision(agent, decision, outcome, _decision_children(agent, prepared))
+            for index, proposal in advice.items():
+                prepared.prepared_runs[index] = replace(prepared.prepared_runs[index], model_advice=proposal)
             return _materialize_create_subagents(agent, prepared)
     except (ToolCancelled, InterruptedError):
         raise
@@ -608,17 +612,27 @@ def _prepare_items(
     return PreparedSubagentCreation(task_params, capped, allowed_tool_values, request_params, batch=True)
 
 
-# LLM: 查询复用只读取原持久合同；生成建议不能制造第二套按目标或模型名称去重的记录。
-# 函数用途: 给模型建议适配器提供本次原规格和已经存在的孩子事实。
+# LLM: 先查原持久复用；仅新孩子只读准备一次身份，第二次校验沿同一 task 重冻当前规格和权限，不物化或新建去重记录。
+# 函数用途: 将模型建议绑定到随后提交的真实准备对象，现有孩子不分配准备身份或重新选模型。
 def _decision_children(agent: SimpleAgent, prepared: PreparedSubagentCreation) -> list[SubagentModelInput]:
-    return [SubagentModelInput(item.params, params, find_reusable_named_child(agent.subagents, params) is not None)
-            for item, params in zip(prepared.items, prepared.task_params, strict=True)]
+    while len(prepared.prepared_runs) < len(prepared.task_params):
+        prepared.prepared_runs.append(None)
+    result = []
+    for index, (item, params) in enumerate(zip(prepared.items, prepared.task_params, strict=True)):
+        reused = find_reusable_named_child(agent.subagents, params) is not None
+        run = prepared.prepared_runs[index]
+        if not reused:
+            service = agent.subagents.base_service
+            run = service.refreeze_run(params=params, prepared=run) if run else service.prepare_run(params=params)
+        prepared.prepared_runs[index] = None if reused else run
+        result.append(SubagentModelInput(item.params, params, reused, run.task if run and not reused else None))
+    return result
 
 
 # LLM: 这是原保存、替换、发布链的唯一物化出口；调用方必须持有 manager.creation_guard，迟到建议不得另建任务。
 # 函数用途: 把最终验证过的单项或批量规格沿原幂等和发布机制落盘。
 def _materialize_create_subagents(agent: SimpleAgent, prepared: PreparedSubagentCreation) -> ToolHandlerOutcome:
-    resolutions = _resolve_task_params(agent, prepared.task_params)
+    resolutions = _resolve_task_params(agent, prepared.task_params, prepared.prepared_runs)
     if not prepared.batch:
         return _created_tasks_result(agent, resolutions, prepared.allowed_tools[0], prepared.request_params)
     return _created_items_result(CreatedItemsResultRequest(
@@ -976,15 +990,14 @@ def _validate_single_goal(request: ValidateSingleGoalRequest) -> str:
     return target_error or ""
 
 
-# LLM: Resolve/materialize one child at a time and observe the already-propagated tool token
-# between durable records.  A partial prefix remains structurally linked to the request so the
-# asynchronous stop reconciler can cancel it after the creation guard is released.
-# 函数用途: 逐个创建子代理，并在每个安全点响应用户停止，避免仍把整批剩余任务落盘。
-def _resolve_task_params(agent: SimpleAgent, task_params: list[CreateRunParams]) -> list[CreateTaskResolution]:
+# LLM: 逐项取消检查和原持久幂等不变；可选准备身份只透传，部分创建仍由原 canonical 父链供停止协调发现。
+# 函数用途: 逐个创建或复用子代理，保持准备对象并在安全点响应停止，避免整批继续落盘。
+def _resolve_task_params(agent: SimpleAgent, task_params: list[CreateRunParams], prepared_runs: list[PreparedSubagentRun | None] | None = None) -> list[CreateTaskResolution]:
     resolutions: list[CreateTaskResolution] = []
-    for item in task_params:
+    for index, item in enumerate(task_params):
         raise_if_cancelled()
-        resolutions.append(resolve_create_run(agent.subagents, item))
+        prepared = prepared_runs[index] if prepared_runs and index < len(prepared_runs) else None
+        resolutions.append(resolve_create_run(agent.subagents, item, prepared=prepared))
     raise_if_cancelled()
     return resolutions
 

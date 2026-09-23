@@ -1,5 +1,5 @@
-# LLM: 子代理授权来自显式配置、owner 和真实父级身份；目标与产物不生成权限，创建去重保持持久幂等。
-# 模块用途: 计算家目录或精确 worker 写范围并复用合法创建记录；调整时保持 owner 隔离与任务身份不变。
+# LLM: 子代理授权来自显式配置、owner 和真实父级身份；原持久幂等优先于内存准备对象，目标与产物不生成权限。
+# 模块用途: 计算写范围并复用合法创建记录，仅新项沿原服务提交同一准备对象。
 
 from __future__ import annotations
 
@@ -21,14 +21,14 @@ from ...path_access_policy import (
     UNINHERITABLE_ROOT_DIRS,
     inheritable_declared_work_roots,
 )
+from ...runtime_context import current_subagent_run_id
 from ...subagents.models import SUBAGENT_REUSABLE_STATUSES, task_status_in
 from ...subagents.role_templates import role_template_snapshot_for_role
-from ...subagents.services.base import CreateRunParams
+from ...subagents.services.base import CreateRunParams, PreparedSubagentRun
 from ...subagents.services.contract_identity import (
     idempotency_contract_identity_from_context_packs,
     repair_contract_identity_from_context_packs,
 )
-from ..runner.context import current_subagent_run_id
 from ..runner.ref_fields import params_output_refs
 from .create_context import (
     is_relative_to,
@@ -248,7 +248,9 @@ class CreateTaskResolution:
     reused: bool = False
 
 
-def resolve_create_run(manager: Any, params: CreateRunParams) -> CreateTaskResolution:
+# LLM: 原幂等锁和持久复用优先于内存准备对象；准备只透传到唯一创建入口，不为已存在孩子重冻或重新选模型。
+# 函数用途: 原子解析本项复用或创建，只有未找到原任务时才提交宿主准备对象。
+def resolve_create_run(manager: Any, params: CreateRunParams, *, prepared: PreparedSubagentRun | None = None) -> CreateTaskResolution:
     if _has_reusable_create_identity(params):
         workspace = getattr(manager, "workspace", None)
         if isinstance(workspace, str | Path):
@@ -260,17 +262,24 @@ def resolve_create_run(manager: Any, params: CreateRunParams) -> CreateTaskResol
             # work scope.
             guard = Path(workspace) / ".create-run-idempotency.guard"
             with locked_json_path(guard):
-                return _resolve_create_run_unlocked(manager, params)
-    return _resolve_create_run_unlocked(manager, params)
+                return _resolve_create_run_unlocked(manager, params, prepared=prepared)
+    return _resolve_create_run_unlocked(manager, params, prepared=prepared)
 
 
+# LLM: 调用方持原创建/幂等边界；复用直接返回 canonical，新的准备对象先按当前父代次重新冻结，再交原 manager 创建。
+# 函数用途: 保留已有子代理，否则提交同一待创建对象；同批前序孩子更新父 revision 不会误杀后序项。
 def _resolve_create_run_unlocked(
     manager: Any,
     params: CreateRunParams,
+    *,
+    prepared: PreparedSubagentRun | None = None,
 ) -> CreateTaskResolution:
     existing = find_reusable_named_child(manager, params)
     if existing is not None:
         return CreateTaskResolution(task=existing, reused=True)
+    if prepared is not None:
+        prepared = manager.base_service.refreeze_run(params=params, prepared=prepared)
+        return CreateTaskResolution(task=manager.create_run(params=params, prepared=prepared), reused=False)
     return CreateTaskResolution(task=manager.create_run(params=params), reused=False)
 
 

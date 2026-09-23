@@ -1,5 +1,5 @@
-# LLM: 递归复用只依赖原显式合同、父级和权限范围；系统展示序号可以变化，但不能从名称文本推断来源。
-# 模块用途: 在原层级创建入口查找可复用孩子，宿主命名来源允许默认续号的幂等重放不重复创建。
+# LLM: 递归复用只依赖原合同、父级和权限范围，优先于待提交准备对象；不能重选已有孩子或从名称文本推断身份。
+# 模块用途: 在原层级入口优先复用孩子，只有新项重新冻结并提交原准备对象。
 from __future__ import annotations
 
 """Schedule idempotency using shared TaskStatus lifecycle sets."""
@@ -9,7 +9,7 @@ from typing import Any
 
 from ....common.value_parsing import text_value
 from ...models import SUBAGENT_DISPATCH_READY_STATUSES, SUBAGENT_REUSABLE_STATUSES, task_status_in
-from ..base import CreateRunParams
+from ..base import CreateRunParams, PreparedSubagentRun
 from ..contract_identity import (
     idempotency_contract_identity_from_context_packs,
     repair_contract_identity_from_context_packs,
@@ -22,10 +22,15 @@ class ScheduledChildResolution:
     reused: bool = False
 
 
-def resolve_scheduled_child(manager: Any, params: CreateRunParams) -> ScheduledChildResolution:
+# LLM: 原持久复用始终优先；只有新项沿当前父状态重新冻结并提交同一 task，不能给复用项改模型或生成新身份。
+# 函数用途: 解析递归项的复用或创建，在同批父 revision 变化后安全提交原准备对象。
+def resolve_scheduled_child(manager: Any, params: CreateRunParams, *, prepared: PreparedSubagentRun | None = None) -> ScheduledChildResolution:
     existing = find_reusable_scheduled_child(manager, params)
     if existing is not None:
         return ScheduledChildResolution(task=existing, reused=True)
+    if prepared is not None:
+        prepared = manager.base_service.refreeze_run(params=params, prepared=prepared)
+        return ScheduledChildResolution(task=manager.create_run(params=params, prepared=prepared), reused=False)
     return ScheduledChildResolution(task=manager.create_run(params=params), reused=False)
 
 

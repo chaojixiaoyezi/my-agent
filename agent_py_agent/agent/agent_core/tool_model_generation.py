@@ -1,5 +1,5 @@
-# LLM: Model generation owns the transport guard; preserve the caller's frozen model/owner context and typed interruption in that thread. Keep profile-switch and timeout tests together.
-# 模块用途: 统一模型调用、超时与流式输出，把当前模型配置和停止信号传到真正的请求线程，避免显示与实际模型不一致。
+# LLM: 模型生成拥有传输守卫；保持冻结身份、中断和原 IR 提交时机，出站消息与纯容量投影共用一个转换入口。
+# 模块用途: 统一模型调用、超时与流输出，使当前模型、原生消息和停止信号准确进入实际请求线程。
 from __future__ import annotations
 
 import os
@@ -57,6 +57,7 @@ from .tool_ir_guidance import unforwarded_runtime_guidance
 from .tool_ir_history import (
     native_tool_ir_history,
     project_native_prompt_history,
+    project_native_provider_messages,
     record_runtime_facts_turn_ir,
 )
 from .tool_stream import (
@@ -147,9 +148,12 @@ class _ModelGenerationState:
     context_surface_fingerprint: str = ""
 
 
-# LLM: 这是工具模型轮的统一生成入口；preflight compact、成本和完成追踪必须保持同一路径，变更要同步生成测试。
+# LLM: 工具模型轮先按可选真实 child 范围冻结输入，再沿原 IR/preflight/调用/用量路径；冻结未知不改变有效模型。
 # 函数用途: 在上下文预检后调用模型，记录真实 native 工具使用和成本，再完成本轮响应归档。
 def generate_model_response(request: ModelGenerateParams):
+    from .subagent.model_selection import capture_first_request_input
+
+    capture_first_request_input(request.agent, request.params, request.prompt)
     request = _materialize_native_prompt_facts(request)
     if preflight := preflight_context_pressure_response(request):
         return preflight
@@ -691,8 +695,8 @@ def _publish_runner_model_stream_activity(
     )
 
 
-# LLM: 追加未转发的宿主引导后翻译 IR；来源与普通状态分开，不重排 provider 已有前缀或改写用户输入。
-# 函数用途: 组装本轮原生消息并检查工具配对；唯一副作用是将新运行指引加入当前 IR。
+# LLM: 保持原引导提交时机，转换及孤儿清扫复用纯投影；来源与普通状态分开，不能重排历史或改写用户输入。
+# 函数用途: 把新运行指引加入原 IR 后构造出站消息，与创建前容量投影保持相同协议字节和失败分类。
 def _native_provider_messages(agent: object, params: object) -> list[dict] | None:
     """native 下把 IR 历史和宿主运行时指引翻成厂商原生 messages。
 
@@ -706,8 +710,6 @@ def _native_provider_messages(agent: object, params: object) -> list[dict] | Non
     if not native_tool_use_active(params):
         return None
     history = getattr(params, "tool_ir_history", None)
-    from ..backends.message_adapter import AnthropicMessageAdapter, strip_orphaned_tool_blocks
-
     seen = _forwarded_guidance_seen(params)
     guidance = unforwarded_runtime_guidance(
         getattr(params, "tool_context", None),
@@ -716,21 +718,15 @@ def _native_provider_messages(agent: object, params: object) -> list[dict] | Non
     if guidance:
         record_runtime_facts_turn_ir(params, "\n\n".join(guidance), source="runtime.guidance")
         history = getattr(params, "tool_ir_history", None)
-    prior = [
-        deepcopy(item)
-        for item in list(getattr(params, "provider_history_messages", None) or [])
-        if isinstance(item, dict)
-    ]
-    current = AnthropicMessageAdapter().to_provider_messages(history) if history else []
-    messages = [*prior, *current]
     # Step 4 最后防线：发请求前再扫一遍孤儿（Step3 的整对回收漏了截断/异常中断/subagent
     # 提前结束/resume 等边界时，IR 仍可能残留「有 tool_use 无配对 tool_result」或反之）。
     # Anthropic 对孤儿一律 HTTP 400，这道 sweep 给孤儿 tool_use 补 stub、剔除孤儿
     # tool_result，保证出站永不带孤儿。
-    messages = strip_orphaned_tool_blocks(messages)
     # 非工具运行时指引已经在翻译前写入 RuntimeFactsTurn；后续请求会永久带着它，
     # 不再出现“首轮发送、下一轮因 seen 去重反而消失”的瞬态消息。
-    return messages
+    return project_native_provider_messages(
+        history, prior_messages=getattr(params, "provider_history_messages", None),
+    )
 
 
 def _model_turn_tool_choice(
@@ -1144,7 +1140,7 @@ def _generate_backend_response(
         backend.request_timeout = original
 
 
-# LLM: backend 调用必须在 provider attempt observer 和全局并发槽内；observer 先落 canonical ledger 再投影 retry UI。
+# LLM: 原 observer/并发槽内核对宿主最终请求，再提交 child/guidance 意图；发送前拒绝 HTTP 为零，网络开始后不跨模型重发。
 # 函数用途: 调用真实模型后端，并记录物理请求尝试、耗时、并发和费用。
 def _invoke_backend_generate(backend, prompt: str, state: _ModelGenerationState):
     # LLM 热路径 RED + token + USD 成本埋点(审计 #19):计时 + 成败 + token + cost 发到默认
@@ -1173,7 +1169,15 @@ def _invoke_backend_generate(backend, prompt: str, state: _ModelGenerationState)
             llm_inflight(1)
             try:
                 from .runtime.guidance import mark_injected_turn_input_submitted
+                from .subagent.model_selection import mark_subagent_business_request_submitted
 
+                mark_subagent_business_request_submitted(
+                    state.agent, state.params, provider_call_id=state.call_id,
+                )
+
+                from ..model_request_selection import before_model_request_send
+
+                before_model_request_send(backend, prompt, state)
                 # This is the last local statement before backend.generate may
                 # touch the network. Failure leaves provider I/O unstarted.
                 mark_injected_turn_input_submitted(

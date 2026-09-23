@@ -15,10 +15,10 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from ...runtime_context import current_subagent_run_id
 from ...runtime_errors import runtime_error_report
 from ...subagents.models import TaskStatus, task_has_status
 from ...tooling.runtime_contracts import ToolCall, ToolResult
-from .context import current_subagent_run_id
 
 _LOGGER = logging.getLogger(__name__)
 

@@ -65,10 +65,10 @@ def _mark_recursive_parent_wait(
 ) -> None:
     if not run_ids or bool(request.request_params.get("defer_start")):
         return
+    from ...runtime_context import current_subagent_run_id
     from ...subagents.direct_parent_lifecycle import (
         mark_parent_waiting_for_direct_children,
     )
-    from ..runner.context import current_subagent_run_id
 
     parent_run_id = current_subagent_run_id(request.agent)
     if parent_run_id:

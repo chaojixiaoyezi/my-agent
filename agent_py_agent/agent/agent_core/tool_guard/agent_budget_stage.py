@@ -4,12 +4,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import ClassVar
 
+from ...runtime_context import current_subagent_run_id
 from ...tooling.models import (
     ToolFailureStage,
     ToolHandlerOutcome,
     apply_tool_execution_facts,
 )
-from ..runner.context import current_subagent_run_id
 from ..tool_loop.round_execution import ToolCallExecuteParams
 from .agent_budget import (
     ToolAgentBudgetRequest,

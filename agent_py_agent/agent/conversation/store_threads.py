@@ -1,5 +1,5 @@
-# LLM: 原线程文件锁内核对身份及 Compact/设置 CAS；只合并当前模型字段，保留旧扩展，不增加状态源。
-# 模块用途: 保存会话元数据与通道绑定，原子更新不覆盖并发状态；模型默认仅影响新线程。
+# LLM: 原线程文件锁内核对身份及 Compact/设置 CAS；模型选择变化必须逐次前进且保留显式覆盖版本，不增加状态源。
+# 模块用途: 保存会话元数据与通道绑定，原子更新保留并发状态；新默认绑定记录真实初始化事实。
 from __future__ import annotations
 
 import hashlib
@@ -26,6 +26,22 @@ from .store_io import (
     read_json_object_report,
 )
 from .store_layout import ConversationStorage
+
+
+# LLM: 只校验当前原子事务的选择变化，不提供授权、采用或重试；元数据/Compact 普通更新保持选择事实原样。
+# 函数用途: 阻止旧模型版本覆盖新选择，保证引用、来源和最近显式覆盖事实在同次线程写入中前进。
+def _validate_model_selection_update(previous: ConversationThread, updated: ConversationThread) -> None:
+    fields = ("model_profile_id", "model_selection_revision", "model_selection_source", "model_selection_last_explicit_revision")
+    if all(getattr(previous, name) == getattr(updated, name) for name in fields):
+        return
+    if updated.model_selection_revision != previous.model_selection_revision + 1:
+        raise DataCorruptionError("会话模型选择版本必须从当前版本前进一步")
+    expected_explicit = (updated.model_selection_revision if updated.model_selection_source == "explicit"
+                         else previous.model_selection_last_explicit_revision)
+    if updated.model_selection_last_explicit_revision != expected_explicit:
+        raise DataCorruptionError("会话模型选择不能改写已发生的显式覆盖事实")
+    if updated.model_selection_source in {"default", "inherited"} and previous.model_profile_id:
+        raise DataCorruptionError("已有模型选择不能重新声明为初始绑定")
 
 
 # LLM: Store commands may receive lists or tuples; normalize them before comparing exact
@@ -91,8 +107,8 @@ def _get_or_create_bound_thread(store, request: dict) -> ConversationThread:
     return store._create(request)
 
 
-# LLM: 线程元数据与通道绑定；同一文件锁内完成身份校验和 Compact CAS，模型默认仅影响新线程；修改须核对直接调用方与原子存储测试。
-# 类用途: 线程元数据与通道绑定；同一文件锁内完成身份校验和 Compact CAS，模型默认仅影响新线程。
+# LLM: 原线程元数据与通道绑定唯一存储；同一文件锁内守住身份、Compact CAS 和模型选择单调版本，不建立第二选择账。
+# 类用途: 保存线程和通道绑定，防止迟到更新回退模型选择；默认模型只初始化新线程。
 class ThreadStore:
     # LLM: 同一 ConversationStorage 与默认解析器由组装入口注入；构造不读写线程或通道索引。
     # 函数用途: 绑定线程文件目录和新会话模型来源，已有会话不会因构造重新选择模型。
@@ -390,8 +406,8 @@ class ThreadStore:
     def write(self, thread: ConversationThread) -> None:
         write_json_file_atomic(self.storage.thread_path(thread.thread_id), thread.to_dict())
 
-    # LLM: Compact/设置 CAS 与写回共用原文件锁，保留未由当前模型声明的旧扩展字段；未知版本由 from_dict 拒绝。
-    # 函数用途: 在原锁内校验和写回 thread，避免覆盖并发状态或迁移时丢掉其他持久字段。
+    # LLM: Compact/设置/模型选择写回共用原文件锁；拒绝选择回退、跳号或漏记，保留未知扩展，不能在 updater 中联网。
+    # 函数用途: 在原锁内保存线程和单调选择事实，避免覆盖并发状态；不因此授予模型自动采用能力。
     def update_atomic(
         self,
         thread_id: str,
@@ -399,8 +415,8 @@ class ThreadStore:
     ) -> ConversationThread:
         path = self.storage.thread_path(thread_id)
 
-        # LLM: store_threads 的持久化合同：在文件事务内校验原线程和更新结果身份，拒绝换线程后再序列化；修改须同步本领域调用方与存储回归。
-        # 函数用途: 在文件事务内校验原线程和更新结果身份，拒绝换线程后再序列化。
+        # LLM: 原文件事务内校验身份与选择版本；更新失败不序列化，不让旧 updater 抹掉新显式选择或 pending 终态。
+        # 函数用途: 合并同一线程的合法更新，保留旧扩展字段与模型选择的单调性。
         def apply(payload: dict) -> dict:
             thread = ConversationThread.from_dict(payload)
             if not thread.thread_id:
@@ -412,6 +428,7 @@ class ThreadStore:
                 raise DataCorruptionError(
                     f"conversation thread updater changed identity: {thread_id}"
                 )
+            _validate_model_selection_update(thread, updated)
             return {**payload, **updated.to_dict()}
 
         payload = update_json_file_atomic(path, apply, require_existing=True)
@@ -446,16 +463,19 @@ class ThreadStore:
             }
         )
 
-    # LLM: 新 thread 原子保存当前 owner 默认模型引用；已有 thread 的模型绝不在重新绑定通道时更新。
-    # 函数用途: 创建持久会话并冻结其初始模型，再登记通道索引，后续默认变化只影响将来新会话。
+    # LLM: 新 thread 同次保存真实默认绑定事件；没有默认引用仍为未知，既有线程不补造初始化或手动事件。
+    # 函数用途: 创建会话并记录初始模型版本，再登记原通道索引；后续默认变化只影响新会话。
     def _create(self, kwargs: dict) -> ConversationThread:
         current = now(kwargs.get("now"))
+        initial_model = self.model_default() if self.model_default is not None else ""
         thread = ConversationThread(
             thread_id=new_id("thread"),
             canonical_user_id=kwargs.get("canonical_user_id", ""),
             owner_id=str(kwargs.get("owner_id") or ""),
             owner_home=str(kwargs.get("owner_home") or ""),
-            model_profile_id=self.model_default() if self.model_default is not None else "",
+            model_profile_id=initial_model,
+            model_selection_revision=1 if initial_model else 0,
+            model_selection_source="default" if initial_model else "unknown",
             title=kwargs.get("title", ""),
             created_at=current,
             updated_at=current,

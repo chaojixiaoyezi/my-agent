@@ -1,4 +1,4 @@
-# LLM: 决策字段及运行范围由此唯一登记；持久校验保留旧覆盖可清理，新的写入须检查 scope；同步设置投影与服务范围测试。
+# LLM: 决策字段及范围由此唯一登记；v1 显式迁移为无实验授权的 v2，授权独立于可 patch 字段，写入仍检查 scope。
 # 模块用途: 校验原 owner/thread 决策覆盖，并提供界面和运行服务共用的字段作用范围。
 from __future__ import annotations
 
@@ -9,15 +9,18 @@ from uuid import UUID
 
 from .model_provider_schema import ModelProfileError
 
-DECISION_SETTINGS_SCHEMA = "decision_settings.v1"
+DECISION_SETTINGS_SCHEMA = "decision_settings.v2"
 POINT_RUNTIME_SCOPES = MappingProxyType({
     "model_selection": "thread", "subagent_model": "thread", "skill_tool": "thread",
-    "recall": "thread", "curator": "owner_background",
+    "pre_recall": "thread", "recall": "thread", "curator": "owner_background", "curator_relation": "owner_background",
+    "external_material_order": "thread", "planning": "thread",
 })
 POINTS = tuple(POINT_RUNTIME_SCOPES)
-GENERAL_FIELDS = ("enabled", "timeout_seconds", "stage_timeout_seconds", "background_timeout_seconds", "profile_id")
+GENERAL_FIELDS = ("enabled", "experiment_enabled", "timeout_seconds", "stage_timeout_seconds", "background_timeout_seconds", "profile_id")
 POINT_FIELDS = ("mode", "timeout_seconds", "profile_id")
-_POINT_EXTRA_SCHEMAS = {"skill_tool": {
+_POINT_EXTRA_SCHEMAS = {"subagent_model": {
+    "candidate_profile_ids": {"type": "array", "items": {"type": "string", "minLength": 1}},
+}, "skill_tool": {
     "context_policy": {"type": "string", "enum": ["metadata", "progressive"]},
     "optional_categories": {"type": "array", "items": {"type": "string", "minLength": 1}},
 }}
@@ -36,7 +39,7 @@ def decision_field_schema(path: str) -> dict:
         _, point, field = path.split(".")
         if field in _POINT_EXTRA_SCHEMAS.get(point, {}):
             return deepcopy(_POINT_EXTRA_SCHEMAS[point][field])
-    return ({"type": "boolean"} if path == "enabled" else
+    return ({"type": "boolean"} if path in {"enabled", "experiment_enabled"} else
             {"type": "number", "exclusiveMinimum": 0} if path.endswith("timeout_seconds") else
             {"type": "string", "enum": ["off", "observe", "apply"]} if path.endswith(".mode") else
             {"type": "string", "description": "原模型目录的 Decision 编号或 shared:编号；空字符串明确不绑定。"})
@@ -54,10 +57,10 @@ class DecisionSettingsAccessError(ModelProfileError):
     code = "decision_settings_access_denied"
 
 
-# LLM: 缺配置只产生空覆盖，默认值由原模块拥有；此函数不写文件。
+# LLM: 缺配置只产生空覆盖及空实验授权，默认值由原模块拥有；此函数不写文件或建立实验预算。
 # 函数用途: 为新 owner 或迁移的旧线程构造初始覆盖信封。
 def empty_decision_settings() -> dict:
-    return {"schema": DECISION_SETTINGS_SCHEMA, "revision": 0, "overrides": {}}
+    return {"schema": DECISION_SETTINGS_SCHEMA, "revision": 0, "overrides": {}, "experiment_authorization": None}
 
 
 # LLM: 不把 bool 当秒数，也不以零表示关闭或无限等待；此校验供 YAML 和覆盖共用。
@@ -72,7 +75,7 @@ def positive_seconds(value: object) -> float:
     return float(value)
 
 
-# LLM: 引用只能指向原模型目录或原共享命名空间，不能携带路径、凭据或任意服务地址。
+# LLM: 引用只能指向原模型目录或原共享命名空间，不能携带路径、凭据或任意服务地址；候选列表逐项复用此校验。
 # 函数用途: 校验决策模型引用的语法；空字符串明确表示未绑定。
 def profile_reference(value: object) -> str:
     if type(value) is not str:
@@ -107,7 +110,7 @@ def validate_decision_field(path: object, value: object, *, scope: str | None = 
     if scope is not None and scope not in scopes[path]:
         raise ModelProfileError("该决策设置不支持当前作用范围；后台字段请使用用户长期设置，线程旧覆盖仍可恢复继承。")
     field = path.rsplit(".", 1)[-1]
-    if field == "enabled":
+    if field in {"enabled", "experiment_enabled"}:
         if type(value) is not bool:
             raise ModelProfileError("决策总开关必须是布尔值。")
         return value
@@ -115,6 +118,13 @@ def validate_decision_field(path: object, value: object, *, scope: str | None = 
         return positive_seconds(value)
     if field == "profile_id":
         return profile_reference(value)
+    if field == "candidate_profile_ids":
+        if type(value) is not list:
+            raise ModelProfileError("子代理模型候选必须是模型编号列表。")
+        result = [profile_reference(item) for item in value]
+        if any(not item for item in result) or len(result) != len(set(result)):
+            raise ModelProfileError("子代理模型候选不能包含空编号或重复编号。")
+        return result
     if field == "optional_categories":
         if type(value) is not list or any(type(item) is not str or not item.strip() for item in value):
             raise ModelProfileError("可选工具类别必须是字符串列表；空列表表示不额外收起任何类别。")
@@ -128,18 +138,25 @@ def validate_decision_field(path: object, value: object, *, scope: str | None = 
     return value
 
 
-# LLM: 持久结构严格校验，不丢未知覆盖；保留历史线程后台字段供显式 reset，不能在读取时静默删改或重新授权。
-# 函数用途: 复制有效的版本化覆盖；当前不适用的旧范围仍可读取，损坏结构保持失败。
+# LLM: v1 只显式补无授权字段且不写盘；v2 严格保留唯一授权信封，普通覆盖不能授予或合并实验许可。
+# 函数用途: 校验并复制决策设置，旧覆盖及 revision 原样迁移，未知版本与损坏授权拒绝读取。
 def validate_decision_settings(value: object) -> dict:
-    if type(value) is not dict or set(value) != {"schema", "revision", "overrides"}:
+    if type(value) is not dict:
+        raise ModelProfileError("决策覆盖结构无效，原配置未修改。")
+    if value.get("schema") == "decision_settings.v1" and set(value) == {"schema", "revision", "overrides"}:
+        value = {**value, "schema": DECISION_SETTINGS_SCHEMA, "experiment_authorization": None}
+    if set(value) != {"schema", "revision", "overrides", "experiment_authorization"}:
         raise ModelProfileError("决策覆盖结构无效，原配置未修改。")
     if value["schema"] != DECISION_SETTINGS_SCHEMA or type(value["revision"]) is not int or value["revision"] < 0:
         raise ModelProfileError("决策覆盖版本无效，原配置未修改。")
     overrides = value["overrides"]
     if type(overrides) is not dict or len(overrides) > len(decision_field_scopes()):
         raise ModelProfileError("决策覆盖字段无效，原配置未修改。")
+    from .decision_experiment_schema import validate_experiment_authorization
+
     return {"schema": DECISION_SETTINGS_SCHEMA, "revision": value["revision"],
-            "overrides": {key: validate_decision_field(key, item) for key, item in overrides.items()}}
+            "overrides": {key: validate_decision_field(key, item) for key, item in overrides.items()},
+            "experiment_authorization": validate_experiment_authorization(value["experiment_authorization"])}
 
 
 # LLM: 会话 v1-v9/无版本旧记录只补空覆盖；未知线程版本拒绝写回，不能降级清除未来状态。

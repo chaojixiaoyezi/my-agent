@@ -324,7 +324,7 @@ def _bind_main_agent_authority(agent, params: RunParams) -> RunParams:
     LOCAL_UNMANAGED（无 repo）/无 run 上下文/子代理上下文 → 原样返回，
     投影 id 行为不变。
     """
-    from .runner.context import current_subagent_run_id
+    from ..runtime_context import current_subagent_run_id
 
     if current_subagent_run_id(agent):
         return params  # 子代理 runner：登记链已由 create_run + prepare_runner_attempt 建立
@@ -698,7 +698,7 @@ def _log_run_stage(
     )
 
 
-# LLM: 所有异常路径必须结算已知调用和真实 attempt；费用收口失败不得覆盖原异常，禁止猜补未知费用。
+# LLM: 原执行片为已验证候选保留依赖到 finalization；所有异常仍结算真实 attempt/用量，清理不得热改 Agent 或猜补消耗。
 # 函数用途: 执行一轮模型工具循环，成功或中断都保留实际消耗与运行终态。
 def _run_once_with_params(agent, user_prompt: str, params: RunParams):
     _run_stage_started = time.monotonic()
@@ -707,8 +707,11 @@ def _run_once_with_params(agent, user_prompt: str, params: RunParams):
     # with the exact RuntimeDB attempt.  Keep this function execution-only so the
     # caller retains the same params object for final settlement.
     root_user_prompt = params.root_user_prompt or user_prompt
+    from ..settings.model_scope import model_dependency_lifetime
+    from .subagent.model_selection import canonical_subagent_model_scope
+
     try:
-        with current_prompt_scope(agent, user_prompt, params):
+        with canonical_subagent_model_scope(agent, params.run_id, task_local=params.context_scope == "task_local"), model_dependency_lifetime(agent), current_prompt_scope(agent, user_prompt, params):
             if agent.config.enable_tools:
                 agent.tools.prepare_for_run()
             prepared = _prepare_runtime_context(

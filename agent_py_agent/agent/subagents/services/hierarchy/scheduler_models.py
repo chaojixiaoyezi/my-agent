@@ -1,10 +1,12 @@
-
+# LLM: 原层级调度合同可携带仅进程内的准备 task 与取消检查，不把它们保存或当作权限事实。
+# 模块用途: 表达递归规格、同一准备对象传递和调度结果，保持原父子身份来源。
 from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from ...models import SubAgentTask
+from ..base import PreparedSubagentRun
 from .qa_scheduler import QaOrchestrationAdvice
 
 
@@ -30,9 +32,8 @@ class HierarchyChildSpec:
     attributes: dict[str, object] = field(default_factory=dict)
 
 
-# LLM: The scheduler request may carry a host-supplied cancellation safe point.  It is process-local,
-# excluded from equality/repr, and never persisted or interpreted as lifecycle authority.
-# 类用途: 描述一次递归派工；可选回调用于批量落盘之间及时响应当前回合的停止信号。
+# LLM: 原调度请求可携带进程内停止检查与待提交 task，均不参与 equality/repr 或持久化；准备列表不是生命周期授权或第二任务仓库。
+# 类用途: 描述一次递归派工，在锁外建议前后保留原准备身份，逐项落盘间响应停止。
 @dataclass(frozen=True)
 class HierarchyScheduleRequest:
     parent_run_id: str
@@ -46,6 +47,7 @@ class HierarchyScheduleRequest:
         repr=False,
         compare=False,
     )
+    prepared_runs: list[PreparedSubagentRun | None] = field(default_factory=list, repr=False, compare=False)
 
 
 @dataclass(frozen=True)

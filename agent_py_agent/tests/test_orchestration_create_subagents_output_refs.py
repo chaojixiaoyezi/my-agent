@@ -132,7 +132,7 @@ def test_descendant_workspace_inheritance_prefers_runner_identity():
     from agent_py_agent.agent.agent_core.orchestration.create_constraints import (
         resolved_extra_write_roots,
     )
-    from agent_py_agent.agent.agent_core.runner.context import (
+    from agent_py_agent.agent.runtime_context import (
         restore_current_subagent_context,
         set_current_subagent_context,
     )

@@ -7,13 +7,13 @@ from typing import Any
 from ...action_protocol import RunScope
 from ...backends import ModelResponse
 from ...common.value_parsing import text_value
+from ...runtime_context import current_subagent_run_id
 from ...runtime_errors import runtime_error_report
 from ...tooling.content_recovery_mode import (
     LongContentRecoveryRequest,
     long_content_recovery_context,
 )
 from .._runtime_params import ToolLoopExecuteParams
-from ..runner.context import current_subagent_run_id
 from ..runtime.task_identity import durable_task_id
 from .round_execution import ToolCallRecordParams
 

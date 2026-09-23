@@ -108,6 +108,39 @@ def test_cancellation_propagates_without_retry(monkeypatch):
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize("state,question_text,window", [
+    ("甲" * 40_000, "判断", 64_000),
+    ("材料", "乙" * 40_000, 64_000),
+    ("材料", "判断", 10),
+])
+def test_jev_state_and_longest_question_window_rejects_before_network(state, question_text, window, monkeypatch):
+    monkeypatch.setattr(adapter, "post_json", lambda _request: pytest.fail("超窗口不得发送"))
+    backend = adapter.TypesafeDecisionBackend(BackendOptions("https://example.test", "key", "jev-test",
+        context_window_tokens=window))
+    request = DecisionRequest(binding(), state, {"q": {"type": "noul", "instructions": question_text}})
+    with pytest.raises(DecisionInputError, match="输入窗口"):
+        backend.decide(request, deadline=time.monotonic() + 2)
+
+
+def test_jev_combined_question_window_rejects_before_network(monkeypatch):
+    monkeypatch.setattr(adapter, "post_json", lambda _request: pytest.fail("超窗口不得发送"))
+    backend = adapter.TypesafeDecisionBackend(BackendOptions("https://example.test", "key", "jev-test",
+        context_window_tokens=64_000))
+    questions = {str(index): {"type": "noul", "instructions": "a" * 2_000} for index in range(100)}
+    request = DecisionRequest(binding(), "材料", questions)
+    with pytest.raises(DecisionInputError, match="总输入窗口"):
+        backend.decide(request, deadline=time.monotonic() + 2)
+
+
+def test_jev_request_within_both_windows_reaches_transport(monkeypatch):
+    captured = []
+    monkeypatch.setattr(adapter, "post_json", lambda request: (captured.append(request), response())[1])
+    backend = adapter.TypesafeDecisionBackend(BackendOptions("https://example.test", "key", "jev-test",
+        context_window_tokens=64_000))
+    backend.decide(DecisionRequest(binding(), "材料" * 100, questions()), deadline=time.monotonic() + 2)
+    assert len(captured) == 1
+
+
 def test_native_adapter_over_real_local_http_records_exact_request_and_response():
     captured = []
 

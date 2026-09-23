@@ -1308,7 +1308,7 @@ def _pending_audit_source_binding_conflict(
 
 def _current_run_id(agent: object) -> str:
     """当前消费者 run id；用于 durable inflight 的租约与重投身份。"""
-    from ..agent_core.runner.context import current_subagent_run_id
+    from ..runtime_context import current_subagent_run_id
 
     run_id = current_subagent_run_id(agent)
     if run_id:

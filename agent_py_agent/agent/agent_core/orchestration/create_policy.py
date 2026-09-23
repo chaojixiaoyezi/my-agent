@@ -19,6 +19,7 @@ from ...conversation.authority import (
     conversation_runtime_workspace_roots,
     current_conversation_task_attributes,
 )
+from ...runtime_context import current_task_root
 from ...runtime_errors import runtime_error_report
 from ...settings.defaults import DEFAULT_COMMAND_ACCESS_MODE
 from ...subagents.capability_scope import (
@@ -32,7 +33,6 @@ from ...subagents.role_templates import (
 )
 from ...subagents.services.base import CreateRunParams
 from ..parameters import _bool_param, _positive_int
-from ..runner.context import current_task_root
 from ..runner.prompts import SUBAGENT_DEFAULT_PLAN, SUBAGENT_DEFAULT_THOUGHT
 from ..runner.ref_fields import params_input_refs, params_output_refs
 from ..spawn_role_seed import is_explicit_root_role
@@ -378,7 +378,7 @@ def _current_conversation_task_id(agent) -> str:
 # fall back to the current request/run id. Keep create/guidance/cancel/capability on this seam.
 # 函数用途: 返回当前代理在创建、插话、停止和权限裁决时使用的稳定父级编号。
 def current_orchestration_requester_run_id(agent) -> str:
-    from ..runner.context import current_subagent_run_id
+    from ...runtime_context import current_subagent_run_id
 
     return (
         current_subagent_run_id(agent)
@@ -475,7 +475,7 @@ def _config_bool(agent, key: str, default: bool) -> bool:
 
 
 # LLM: 根/递归共用属性装配，宿主工具上限和模型引用覆盖伪造值，决策与命名来源只能由宿主在准备后写入。
-# 函数用途: 保留显式属性并绑定父工具上限和原模型引用；移除伪造建议，无效显式模型在整批创建前报错。
+# 函数用途: 保留显式属性并绑定父工具上限和原模型引用；移除伪造建议及线程 pending，无效显式模型在整批创建前报错。
 def create_task_attributes(raw_params: dict[str, object], agent=None) -> dict[str, object]:
     attrs = (
         dict(raw_params.get("attributes") or {})
@@ -484,6 +484,7 @@ def create_task_attributes(raw_params: dict[str, object], agent=None) -> dict[st
     )
     attrs.pop(DIRECT_PARENT_TOOL_AUTHORITY_ATTR, None)
     attrs.pop("host_model_decision.v1", None)
+    attrs.pop("host_subagent_model_advice.v1", None)
     attrs.pop("host_agent_name_origin.v1", None)
     if parent_authority := current_creation_tool_authority():
         attrs[DIRECT_PARENT_TOOL_AUTHORITY_ATTR] = parent_authority
@@ -581,7 +582,7 @@ def _inherit_audit_guarantee(attrs: dict[str, object], agent) -> None:
             )
         return
     try:
-        from ..runner.context import current_task_attributes
+        from ...runtime_context import current_task_attributes
 
         runner_attrs = current_task_attributes(agent)
         if attributes_request_audit(runner_attrs):

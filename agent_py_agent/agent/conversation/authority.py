@@ -79,7 +79,7 @@ def current_conversation_task_attributes(agent: object) -> dict[str, object]:
     if isinstance(attributes, dict):
         return attributes
     try:
-        from ..agent_core.runner.context import current_task_attributes
+        from ..runtime_context import current_task_attributes
 
         delegated = current_task_attributes(agent)
     except (AttributeError, ImportError, RuntimeError):

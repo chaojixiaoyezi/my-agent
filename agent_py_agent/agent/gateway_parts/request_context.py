@@ -1,4 +1,5 @@
-# LLM: preflight 先解析 canonical thread；完整准备须在原车道内按 repair、索引、Compact、历史、任务取快照，修改联测压缩与恢复。
+# LLM: preflight 先解析 canonical thread；车道内原读取后可执行内部观察钩子，再按 repair、索引、Compact、历史、任务取快照。
+# 同片展示输入只在原请求内存传递，不写会话结果；新请求继续从基础面准备。
 # 模块用途: 准备本轮会话和目录事实，必要时补交历史、更新索引并调用模型压缩；任务执行仍由编排层负责。
 from __future__ import annotations
 
@@ -97,9 +98,8 @@ class GatewayConversationContext:
     load_errors: tuple[dict, ...] = ()
 
 
-# LLM: The gateway preflight carries only host-resolved request inputs plus any one-call deferred
-# tool surface retained after a provider overflow; it cannot infer authorization from chat prose.
-# 类用途: 保存 Gateway 加载会话与 Compact 所需的请求快照，确保溢出恢复沿用同一工具缓存面。
+# LLM: 模型面及加载钩子仅由内部宿主构造，不从 request JSON 读取；钩子在原 thread 读取后、repair/Compact 前执行。
+# 类用途: 保存会话加载输入；新主工作片可观察车道后的线程，Compact 重载默认不重复观察。
 @dataclass(frozen=True)
 class GatewayConversationLoadRequest:
     agent: SimpleAgent
@@ -108,6 +108,8 @@ class GatewayConversationLoadRequest:
     prompt: str
     on_chunk: object | None = None
     loaded_tool_names: tuple[str, ...] = ()
+    model_surface: ConversationCompactModelSurface | None = None
+    on_thread_loaded: Callable[[object], None] | None = None
 
 
 # LLM: Compact start saves numeric telemetry in the exact thread before publication, using the
@@ -177,9 +179,8 @@ def preflight_gateway_conversation(
     )
 
 
-# LLM: One thread context combines canonical chat history, exact-root child completion inputs and
-# recent artifacts. Runner-private payloads and sibling roots never enter the foreground prompt.
-# 函数用途: 组装本轮 Gateway 对话所需的权威历史、直属子代理交付、工作目录和产物上下文。
+# LLM: 原 thread 读取后才运行宿主观察钩子，随后保持原 repair/Compact 顺序；钩子不来自请求 JSON，强制 Compact 不重调。
+# 函数用途: 组装本轮权威历史、直属子代理交付和工作目录；新主请求可先观察设置，原模型与恢复输入不变。
 def gateway_conversation_context(
     inputs: GatewayConversationLoadRequest,
     *,
@@ -200,6 +201,8 @@ def gateway_conversation_context(
         return GatewayConversationContext(
             load_errors=(thread_error or {"error_code": "thread_unavailable"},)
         )
+    if inputs.on_thread_loaded is not None and not force_compact:
+        inputs.on_thread_loaded(thread)
     request_history.repair_gateway_conversation_messages(store, thread.thread_id, load_errors)
     scope = conversation_scope(agent, thread, spec)
     request_history.ensure_gateway_conversation_index(agent, store, thread.thread_id)
@@ -311,6 +314,7 @@ def _load_gateway_thread(
 
 # LLM: Gateway preflight shares the registered request interrupt with Compact. User stop propagates
 # unchanged; compact failures keep their own typed error code and cannot become transcript corruption.
+# 原宿主传入的同片展示面沿原入口使用；普通preflight构造原默认面，不从thread重建选择。
 # 函数用途: 加载并按需压缩 Gateway 会话；停止立即退出，压缩失败保留原记录并单独报错。
 def _load_gateway_compact_context(
     inputs: GatewayConversationLoadRequest,
@@ -333,7 +337,7 @@ def _load_gateway_compact_context(
                     inputs.on_chunk, store=store, thread=thread,
                 ),
                 interrupt_check=is_interrupted,
-                model_surface=ConversationCompactModelSurface(
+                model_surface=inputs.model_surface or ConversationCompactModelSurface(
                     prompt_files=tuple(
                         str(item)
                         for item in inputs.request.get("prompt_files", [])

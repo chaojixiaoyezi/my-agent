@@ -6,6 +6,7 @@
 #   历史读取失败保留待恢复工作；任务绑定冲突先核对身份，不用重放任务掩盖不一致。
 #   资源停止未确认必须核对原回执，未知控制必须修正调用；两者均不得原样重放或扩大停止范围。
 #   插件管理超时须查询原请求；管理权限、配置禁用和执行准备失败分别呈现，不能因错误而再次安装。
+#   决策模型是可选增强；连接探测或响应失败保留普通模型主链，设置版本冲突则读取新版本后再修改。
 # 模块用途: 给工具结果、恢复状态机和用户汇报提供一致的错误类别、重试性与处理建议。
 
 from __future__ import annotations
@@ -47,6 +48,11 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         code="STALE_VERSION", category="state", retryable=True,
         recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
         recovery_hint="文件版本已变化；重新 read_file，合并其他修改，并使用新版本号。不要直接重放旧写入。",
+    ),
+    "DECISION_SETTINGS_CONFLICT": ErrorContract(
+        code="DECISION_SETTINGS_CONFLICT", category="state", retryable=True,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="决策设置版本已变化；重新读取当前生效值和 revision，再按新版本提交修改，不重放旧覆盖。",
     ),
     "PTY_UNAVAILABLE": ErrorContract(
         code="PTY_UNAVAILABLE", category="tool", retryable=False,
@@ -1269,6 +1275,27 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         retryable=False,
         recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
         recovery_hint="模型供应商明确拒绝了请求；按结构化错误修正请求或切换后端，不要原样重放。",
+    ),
+    "PROVIDER_RESPONSE_TOO_LARGE": ErrorContract(
+        code="PROVIDER_RESPONSE_TOO_LARGE",
+        category="resource",
+        retryable=True,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="供应商响应超过当前请求的字节上限；缩小响应范围或调整已授权的请求配置，不原样重试。",
+    ),
+    "DECISION_PROBE_FAILED": ErrorContract(
+        code="DECISION_PROBE_FAILED",
+        category="model",
+        retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="决策模型连接测试未通过；读取结构化测试报告修复配置，普通模型任务继续使用原链路。",
+    ),
+    "DECISION_RESPONSE_INVALID": ErrorContract(
+        code="DECISION_RESPONSE_INVALID",
+        category="model",
+        retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="决策模型响应不符合协议；本次建议失效并保留原方案，核对后端协议后再测试。",
     ),
     "OWNER_DISK_QUOTA_EXCEEDED": ErrorContract(
         code="OWNER_DISK_QUOTA_EXCEEDED",

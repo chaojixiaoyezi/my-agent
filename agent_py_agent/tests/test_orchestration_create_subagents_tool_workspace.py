@@ -176,7 +176,7 @@ class TestCreateSubagentsToolTaskWorkspaceGuards:
         from agent_py_agent.agent.agent_core.orchestration.create_policy import (
             create_task_attributes,
         )
-        from agent_py_agent.agent.agent_core.runner.context import (
+        from agent_py_agent.agent.runtime_context import (
             restore_current_subagent_context,
             set_current_subagent_context,
         )

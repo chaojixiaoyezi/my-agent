@@ -20,6 +20,18 @@
 内联和已分页读取保留整页及继续参数，之后共用脱敏/信任投影、canonical ToolResult 与 native IR。
 `output_preview` 仍为有界日志字段，`projection_truncated` 描述模型正文是否缩成预览，不能用归档存在与否代替。
 
+## 外部材料的可选阅读提示
+
+`tool_context.external_material_order` 在 `_record_tool_call` 完成原归档后读取 canonical extract 页面元数据，
+仅向同一 text/native 的 `result_rendered` 追加有界页序提示。`external_material_order` 独立默认关闭；
+关闭不准备页面或当前问题。启用后复用原 `external_data/default` 脱敏和外部数据边界，拒绝摘录内的
+URL 查询串，不发送 URL 字段、原调用参数、headers/body 或未读 artifact 内容。
+
+适配器沿原 decision service/worker/调用账工作，准备至采用共用一个绝对阶段期限，页集合、归档 hash、
+run/task、原权限和配置变化均使建议失效。它只返回覆盖所有原页的稳定优先级；缺数据、非选择、超时或
+普通故障返回空提示，宿主取消继续传播。不产生新缓存、账本、读取或下载，不修改正式结果与 refs；
+不能作为授权、工具成功或业务完成的判据。其它检索消费者仍保持原合同。
+
 ## 长等待与完成通知
 
 `process_session` 的 wait 使用宿主取消令牌与单调时钟，不持锁长等，默认 30/上限 600 秒。

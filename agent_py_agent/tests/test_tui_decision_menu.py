@@ -1,4 +1,6 @@
-"""真实 prompt_toolkit pipe 驱动决策菜单，使用原临时配置与 Gateway stub，不访问收费模型。"""
+# LLM: 真实 pipe 和原配置服务验证设置合同；按界面就绪事实有界等待，不用固定延迟代替异步确认。
+# 模块用途: 在本地 Gateway stub 上测试决策菜单，不发模型请求，不改产品事件循环或设置行为。
+"""真实 prompt_toolkit pipe 驱动决策菜单，使用原临时配置与 Gateway stub。"""
 import asyncio
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -16,7 +18,7 @@ from agent_py_agent.agent.settings.model_profiles import (
     ModelProfileError,
     execute_model_profile_operation,
 )
-from agent_py_agent.cli.chat_parts.tui_decision_menu import _fields, _seconds
+from agent_py_agent.cli.chat_parts.tui_decision_menu import _field_text_value, _fields, _seconds
 from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
 from agent_py_agent.cli.chat_parts.tui_ui_setup import make_tui_app
 from agent_py_agent.tests.test_decision_model_profiles import decision
@@ -68,18 +70,43 @@ def visible(app):
     return "\n".join(parts)
 
 
-# LLM: 按键进入实际 Application 的输入管道；短等待只让原事件循环和线程配置请求完成。
-# 函数用途: 发送一次真实终端输入并等待界面稳定。
+# LLM: 只观察原浮层和焦点；_request 的只读等待框不是可交互菜单，不能因浮层出现就认定请求完成。
+# 函数用途: 取得可交互界面的身份和内容，避免 Enter 后误把临时等待浮层当成操作完成。
+def ready_state(app):
+    floats = tuple(app._my_agent_model_float_container.floats)
+    focused_buffer = getattr(app.layout.current_control, "buffer", None)
+    if floats and focused_buffer is not None and focused_buffer.read_only():
+        return None
+    return floats, visible(app)
+
+
+# LLM: 只轮询测试谓词，固定总截止时间；不重复发键、不改原 Future/handler，不将超时当成功。
+# 函数用途: 等待真实 UI 出现目标状态，超时直接附当前界面帮助定位。
+async def wait_ui(ui, predicate):
+    deadline = asyncio.get_running_loop().time() + 3
+    while not predicate():
+        if asyncio.get_running_loop().time() >= deadline:
+            raise AssertionError("等待 TUI 状态超时：\n" + visible(ui.app))
+        await asyncio.sleep(0.01)
+
+
+# LLM: Enter/Esc 等新浮层已真实绘制再继续，避免布局已变但按键缓存未刷新；编辑键也等待对应控件绘制。
+# 函数用途: 发送一次真实输入，按原界面状态变化等待，不重放键盘操作或替代设置请求。
 async def press(ui, keys):
+    before = ready_state(ui.app)
+    assert before is not None, "按键前仍在等待配置操作"
+    encoded = keys if isinstance(keys, bytes) else keys.encode()
+    transition = b"\r" in encoded or encoded == b"\x1b"
     if isinstance(keys, bytes):
         ui.pipe.send_bytes(keys)
     else:
         ui.pipe.send_text(keys)
-    await asyncio.sleep(0.3 if keys == b"\x1b" else 0.12)
+    await wait_ui(ui, lambda: (after := ui.rendered_state) is not None and after == ready_state(ui.app)
+                  and (after[0] != before[0] if transition else after != before))
 
 
-# LLM: 现有 make_tui_app / model 浮层负责全部键盘处理；只替换 Gateway 的传输对象，退出必回收 Application。
-# 函数用途: 启动真实 TUI 测试应用，保留原聊天任务队列和模型显示用于隔离断言。
+# LLM: 原 make_tui_app / model 浮层处理按键，after_render 只观察已绘制状态；只替换 Gateway 运输，退出必回收 Application。
+# 函数用途: 启动真实 TUI 并保留绘制事实、聊天任务队列和模型显示，供操作等待与隔离断言。
 @asynccontextmanager
 async def running(tmp_path, gateway):
     runtime = TuiRuntime("decision-menu")
@@ -89,10 +116,17 @@ async def running(tmp_path, gateway):
     params.agent.request_models = gateway.request_models
     with create_pipe_input() as pipe, create_app_session(input=pipe, output=DummyOutput()):
         app = make_tui_app(params)
+        ui = SimpleNamespace(app=app, pipe=pipe, runtime=runtime, params=params, rendered_state=None)
+
+        # LLM: 仅记录已绘制的原浮层，不触发输入或变更产品状态。
+        # 函数用途: 给后续按键提供明确的控件就绪证据。
+        def rendered(current):
+            ui.rendered_state = ready_state(current)
+
+        app.after_render += rendered
         task = asyncio.create_task(app.run_async(set_exception_handler=False))
-        ui = SimpleNamespace(app=app, pipe=pipe, runtime=runtime, params=params)
         try:
-            await asyncio.sleep(0.12)
+            await wait_ui(ui, lambda: app.is_running and ui.rendered_state is not None)
             yield ui
         finally:
             app.exit()
@@ -108,6 +142,16 @@ async def open_scope(ui, *, thread=False):
 
 async def choose(ui, index):
     await press(ui, b"\x1b[B" * index + b"\r")
+
+
+def test_candidate_profile_ids_form_uses_structured_json(tmp_path):
+    gateway = Gateway(tmp_path)
+    field = "points.subagent_model.candidate_profile_ids"
+    view = settings(gateway.host, "read", {})
+    assert field in _fields(view)
+    assert _field_text_value(field, '["' + gateway.key + '"]') == [gateway.key]
+    with pytest.raises(ValueError):
+        _field_text_value(field, '"' + gateway.key + '"')
 
 
 def test_pipe_owner_fields_model_mode_seconds_reset_and_provider_reuse(tmp_path):
@@ -128,15 +172,15 @@ def test_pipe_owner_fields_model_mode_seconds_reset_and_provider_reuse(tmp_path)
                 await press(ui, number + "\t\r")
             view = settings(gateway.host, "read", {})
             assert [view["effective"][key] for key in ("timeout_seconds", "stage_timeout_seconds", "background_timeout_seconds")] == [2.5, 5.5, 6.5]
-            await choose(ui, 5)  # 接入点
+            await choose(ui, 6)  # 接入点；前面有独立实验能力开关
             await choose(ui, 3)  # recall
             await choose(ui, 0)  # mode
             await press(ui, b"\x1b[B\x1b[B\r")
             assert settings(gateway.host, "read", {})["effective"]["points"]["recall"]["mode"] == "apply"
-            await choose(ui, 6)  # reset 列表
+            await choose(ui, 7)  # reset 列表
             await choose(ui, 0)  # enabled
             assert "enabled" not in settings(gateway.host, "read", {})["overrides"]["owner"]
-            await choose(ui, 7)  # 原服务商管理入口
+            await choose(ui, 8)  # 原服务商管理入口
             assert "服务商列表" in visible(ui.app)
             await press(ui, b"\x1b")
             assert ui.runtime.store.snapshot().selected_model_name == "ordinary-main"
@@ -160,7 +204,7 @@ def test_pipe_thread_scope_hides_owner_background_and_changes_only_current_threa
             current = settings(gateway.host, "read", {"scope": "thread"}, thread_id=gateway.thread.thread_id)
             assert owner["effective"]["enabled"] is True and current["effective"]["enabled"] is False
             assert current["sources"]["enabled"] == "thread"
-            await choose(ui, 4)  # thread 接入点菜单
+            await choose(ui, 5)  # thread 接入点菜单
             assert "后台记忆整理（用户长期）" not in visible(ui.app)
             await choose(ui, 3)  # recall
             await choose(ui, 2)  # 单次时间
@@ -199,7 +243,7 @@ def test_pipe_probe_requires_explicit_start_and_hides_price_output_and_secret(tm
         gateway = Gateway(tmp_path)
         async with running(tmp_path, gateway) as ui:
             await open_scope(ui)
-            await choose(ui, 9)
+            await choose(ui, 10)
             await press(ui, b"\x1b[B\r")  # 只选择模型
             assert not any(operation == "decision_probe" for operation, _ in gateway.calls)
             assert "开始测试" in visible(ui.app)
@@ -249,7 +293,7 @@ def test_pipe_invalid_seconds_cancel_and_explicit_model_clear_are_distinct(tmp_p
             await choose(ui, 1)
             await press(ui, "\t\t\r")  # 恢复继承按钮删除覆盖
             assert "profile_id" not in settings(gateway.host, "read", {})["overrides"]["owner"]
-            await choose(ui, 9)
+            await choose(ui, 10)
             await press(ui, b"\x1b[B\r")
             await press(ui, b"\x1b")  # 取消探测确认
             assert not any(op == "decision_probe" for op, _ in gateway.calls)
@@ -269,7 +313,7 @@ def test_pipe_thread_can_clean_legacy_background_override_without_offering_new_p
         )
         async with running(tmp_path, gateway) as ui:
             await open_scope(ui, thread=True)
-            await choose(ui, 5)  # 恢复继承仅清理旧存储，不重新授权新覆盖
+            await choose(ui, 6)  # 恢复继承仅清理旧存储，不重新授权新覆盖
             assert "此范围不消费，仅可清理" in visible(ui.app)
             await press(ui, "\r")
             view = settings(gateway.host, "read", {"scope": "thread"}, thread_id=gateway.thread.thread_id)
@@ -277,4 +321,27 @@ def test_pipe_thread_can_clean_legacy_background_override_without_offering_new_p
             assert [(op, body["decision"]["fields"]) for op, body in gateway.calls if op == "decision_reset"] == [
                 ("decision_reset", ["points.curator.mode"])]
             assert not any(op == "decision_patch" for op, _ in gateway.calls)
+    asyncio.run(scenario())
+
+
+def test_pipe_experiment_boolean_can_save_and_reset_without_creating_authorization(tmp_path):
+    async def scenario():
+        gateway = Gateway(tmp_path)
+        async with running(tmp_path, gateway) as ui:
+            await open_scope(ui, thread=True)
+            assert "实验能力（仍需独立授权）：关闭" in visible(ui.app)
+            await choose(ui, 4)
+            assert "不建立实验许可" in visible(ui.app) and "当前联网实验不可用" in visible(ui.app)
+            await press(ui, b"\x1b[B\r")
+            view = settings(gateway.host, "read", {"scope": "thread"}, thread_id=gateway.thread.thread_id)
+            assert view["effective"]["experiment_enabled"] is True
+            assert view["experiment_authorization"] is None
+            await choose(ui, 6)  # 原恢复列表也必须能显示新布尔字段
+            assert "实验能力（仍需独立授权）：开启" in visible(ui.app)
+            await press(ui, "\r")
+            view = settings(gateway.host, "read", {"scope": "thread"}, thread_id=gateway.thread.thread_id)
+            assert "experiment_enabled" not in view["overrides"]["thread"]
+            assert view["effective"]["experiment_enabled"] is False and view["experiment_authorization"] is None
+            assert not hasattr(gateway.host, "_model_call_ledger")
+            assert not any(op in {"probe", "decision_probe", "decision_experiment_authorize"} for op, _ in gateway.calls)
     asyncio.run(scenario())

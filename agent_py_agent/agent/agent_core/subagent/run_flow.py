@@ -23,9 +23,9 @@ from ...conversation.authority import (
     CONVERSATION_REQUEST_ID_ATTR,
     CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR,
 )
+from ...runtime_context import restore_current_subagent_context, set_current_subagent_context
 from ...subagents.context_bundle_refs import runtime_task_attributes
 from ...turn_end import result_turn_end_reason
-from ..runner.context import restore_current_subagent_context, set_current_subagent_context
 from ..runtime.loop_models import RunParams
 from ..runtime_mixin import release_active_turn_inputs_for_compact
 from .params import (
@@ -72,7 +72,7 @@ class SubagentOverflowCompactRequest:
     conversation_turn_id: str = ""
 
 
-# LLM: 真实执行区间在 exact attempt 下登记，finally 记录退出；探测/提示构造/模型/结果异常都可被监督发现。
+# LLM: exact attempt 先登记真实执行器，再开启可选首次请求准备；退出同时清理范围并记录执行器退出，不新增 task/attempt。
 # 函数用途: 执行并记录同一子代理工作片，干跑不登记执行器，不改变原取消和结果收口语义。
 def run_subagent_flow(lifecycle, options: SubagentRunParams):
     """Run one subagent task from prompt construction through result persistence."""
@@ -82,8 +82,11 @@ def run_subagent_flow(lifecycle, options: SubagentRunParams):
         return lifecycle.record_dry_run(options.run_id, active_attempt_id, prompt)
 
     from ...runtime_db.executor_liveness import attempt_executor
+    from .model_selection import subagent_first_request_scope
 
-    with attempt_executor(lifecycle.agent.subagents.runtime_db, options.run_id, active_attempt_id):
+    with attempt_executor(lifecycle.agent.subagents.runtime_db, options.run_id, active_attempt_id), subagent_first_request_scope(
+        lifecycle.agent, options.run_id, active_attempt_id,
+    ):
         return _run_prepared_subagent(lifecycle, options, active_attempt_id)
 
 
@@ -389,23 +392,26 @@ def _compact_subagent_overflowing_turn(
     task: object,
     request: SubagentOverflowCompactRequest,
 ) -> object:
-    refreshed = prepare_subagent_thread_turn(
-        agent,
-        task,
-        turn=AgentThreadTurnInput(request.prompt, request.attempt_id, request.conversation_turn_id),
-        force=True,
-        progress_callback=request.progress_callback,
-        interrupt_check=is_interrupted,
-        model_surface=request.model_surface,
-    )
-    if refreshed.compact_generation > request.current.compact_generation:
-        return refreshed
-    return _compact_subagent_active_turn_archive(
-        agent,
-        task,
-        request,
-        refreshed,
-    )
+    from .model_selection import canonical_subagent_model_scope
+
+    with canonical_subagent_model_scope(agent, task.id):
+        refreshed = prepare_subagent_thread_turn(
+            agent,
+            task,
+            turn=AgentThreadTurnInput(request.prompt, request.attempt_id, request.conversation_turn_id),
+            force=True,
+            progress_callback=request.progress_callback,
+            interrupt_check=is_interrupted,
+            model_surface=request.model_surface,
+        )
+        if refreshed.compact_generation > request.current.compact_generation:
+            return refreshed
+        return _compact_subagent_active_turn_archive(
+            agent,
+            task,
+            request,
+            refreshed,
+        )
 
 
 # LLM: This fallback owns only the unfinished active-turn archive boundary. It requires the exact

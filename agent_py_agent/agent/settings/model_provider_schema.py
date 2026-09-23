@@ -1,15 +1,17 @@
-# LLM: provider/model 用途与协议校验只有这个事实源；decision 不可解析为生成模型，公开投影不含秘密。
-# 模块用途: 校验服务商、模型引用与采样，让聊天和决策模型复用私有连接存储且保持用途隔离。
+# LLM: provider/model 用途、持久目录代次与迁移只有这个事实源；代次不能从凭据推导，decision 不可解析为生成模型。
+# 模块用途: 校验原模型目录与不含秘密的版本快照，让聊天和决策共用存储并保持用途、恢复边界。
 from __future__ import annotations
 
 import math
 import re
+from dataclasses import asdict, dataclass
 from urllib.parse import urlsplit
+from uuid import UUID
 
 from ..backends.provider_headers import validate_headers, validate_session_header
 from ..backends.sampling import validate_top_p
 
-SCHEMA = "owner_model_profiles.v4"
+SCHEMA = "owner_model_profiles.v5"
 BACKENDS = {"openai_compatible", "anthropic_compatible", "openai_responses", "typesafe_decision"}
 CAPABILITIES = {"agentic", "embedding", "decision"}
 
@@ -18,6 +20,64 @@ CAPABILITIES = {"agentic", "embedding", "decision"}
 # 类用途: 表示用户可以在模型表单中修正的配置错误。
 class ModelProfileError(ValueError):
     pass
+
+
+# LLM: 持久代次由原保存事务生成 UUID4，不接受秘密摘要或任意展示文本；缺失只在显式旧版迁移中表示未知。
+# 函数用途: 严格检查可公开比较的随机目录版本，错误不包含输入值。
+def validate_catalog_generation(value: object) -> str:
+    if not isinstance(value, str) or len(value) != 32:
+        raise ModelProfileError("模型目录代次格式无效。")
+    try:
+        token = UUID(value)
+        if token.hex != value or token.version != 4:
+            raise ValueError("generation")
+    except ValueError:
+        raise ModelProfileError("模型目录代次格式无效。") from None
+    return value
+
+
+# LLM: 这里只存原引用、可信目录位置标识和随机代次，不携带凭据或配置；共享快照必须同时覆盖来源及发布。
+# 类用途: 为 pending 建议保存可跨重启核对的模型目录版本，旧未知值不能伪装成有效快照。
+@dataclass(frozen=True)
+class ModelProfileGeneration:
+    profile_id: str
+    authority_id: str
+    catalog_generation: str
+    shared_generation: str | None = None
+
+    # LLM: 直接构造和反序列化共用严格验证；这里只检查结构，不授予 owner/shared 权限。
+    # 函数用途: 拒绝伪造格式、默认模型和不完整共享版本，后续仍须读原目录复核。
+    def __post_init__(self) -> None:
+        try:
+            if not isinstance(self.profile_id, str):
+                raise ValueError("profile")
+            profile = UUID(self.profile_id.removeprefix("shared:"))
+            if self.profile_id.startswith("shared:") and self.profile_id != "shared:" + str(profile):
+                raise ValueError("shared profile")
+        except ValueError:
+            raise ModelProfileError("模型目录版本引用无效。") from None
+        if not isinstance(self.authority_id, str) or not re.fullmatch(r"[0-9a-f]{64}", self.authority_id):
+            raise ModelProfileError("模型目录版本归属无效。")
+        validate_catalog_generation(self.catalog_generation)
+        if self.profile_id.startswith("shared:"):
+            validate_catalog_generation(self.shared_generation)
+        elif self.shared_generation is not None:
+            raise ModelProfileError("私有模型不能携带共享发布代次。")
+
+    # LLM: 序列化只能输出这个冻结合同的字段，不能从配置补入路径或秘密。
+    # 函数用途: 生成 pending 可以保存的原目录版本信封。
+    def to_dict(self) -> dict:
+        return {"schema": "model_profile_generation.v1", **asdict(self)}
+
+    # LLM: 未知/缺失字段不得被默认填成可采用版本；旧 pending 缺整个信封由调用方保留原模型。
+    # 函数用途: 从持久 pending 严格恢复版本快照，不读盘也不初始化目录。
+    @classmethod
+    def from_dict(cls, value: object) -> ModelProfileGeneration:
+        fields = {"profile_id", "authority_id", "catalog_generation", "shared_generation"}
+        if (type(value) is not dict or set(value) != fields | {"schema"}
+                or value["schema"] != "model_profile_generation.v1"):
+            raise ModelProfileError("模型目录版本信封无效。")
+        return cls(**{key: value[key] for key in fields})
 
 
 # LLM: 地址只接受显式 HTTP(S)，不接受内嵌认证/query；不对内网地址做模型名称猜测。
@@ -172,14 +232,22 @@ def migrate_v2(data: dict) -> dict:
     return migrate_v3({**data, "schema": "owner_model_profiles.v3"})
 
 
-# LLM: v3 没有决策覆盖；迁移保留全部已有根字段，不允许旧版本夹带未来覆盖后被静默清除。
-# 函数用途: 只在内存新增空的版本化决策覆盖，下一次原目录管理写入才保存 v4。
+# LLM: v3 没有决策覆盖；迁移串到 v4 的显式代次迁移，不允许夹带未来字段后被静默清除。
+# 函数用途: 只在内存新增空决策覆盖和未知目录代次，下一次原事务保存才写当前版本。
 def migrate_v3(data: dict) -> dict:
     from .decision_settings_schema import empty_decision_settings
 
     if "decision_settings" in data:
         raise ModelProfileError("旧模型目录不能包含新版本决策覆盖。")
-    return {**data, "schema": SCHEMA, "decision_settings": empty_decision_settings()}
+    return migrate_v4({**data, "schema": "owner_model_profiles.v4", "decision_settings": empty_decision_settings()})
+
+
+# LLM: 旧目录没有持久代次，不能由读取生成历史证明；拒绝旧 schema 夹带未来版本字段。
+# 函数用途: 将 v4 在内存归一成未知版本，原保存或已启用准备才初始化随机代次。
+def migrate_v4(data: dict) -> dict:
+    if "catalog_generation" in data:
+        raise ModelProfileError("旧模型目录不能包含新版本目录代次。")
+    return {**data, "schema": SCHEMA, "catalog_generation": None}
 
 
 # LLM: 唯一解析点校验调用方所需用途，即使跳过启用检查也不能混用；OAuth 只返回绑定引用。
