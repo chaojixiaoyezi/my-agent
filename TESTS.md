@@ -39,6 +39,20 @@ Ruff、doc sync、strict code-size、diff、clean-package 通过。
 隔离线交接见 [第 7 步交接](docs/tasks/HANDOFF_STEP7_SUBAGENT_LIFECYCLE.md)，
 正式验收矩阵见 [唯一 TODO](docs/tasks/REFACTOR_PLUGIN_GOAL.md#第-7-步当前-todo子代理状态和交接按序小片推进)。
 
+### TUI200 有效长任务自然收尾（准入收窄运行包）
+
+官方 MiniMax-M2.7 的原生 TUI200 从单次需求持续工作 1,952.8 秒（约 32.5 分钟），
+三个并行孩子均 DONE，主代理在所有孩子结束后自然完成；期间发生一次 Compact，之后继续读文件、
+修复偏移和导入错误并运行测试。原生 run_command 回执为退出码 0、`62 passed in 5.87s`，
+磁盘测试文件确有 62 个测试函数，源码／README／RESULT 已读回；观察者未执行或修补被测项目。
+三份 canonical 子任务均无待处理 WAL 或 runner_last_error，三条精确完成通知各一条且已 handled，
+全部五个执行轮的资源锁为零，子代理宿主进程已退出，共享 Gateway 保持原 PID。
+本轮证明有效长任务、工具错误自修、多孩子交接和一次压缩后继续工作，不替代第 8 步完整 Compact 合同。
+交付仍有缺证：DESIGN 只写上游版本标签，未读回可追踪提交号／来源核对证据；
+测试通过不证明全部兼容性说明正确，不能把这一项写成完整业务交付通过。
+199／200／201 均核对终态后从原生 `/exit` 正常退出，仅保留 tmux 死窗及仓库外证据；未停止 Gateway。
+原页超时的 197 保留排查，通知半写修复仍待新包验收，本结果不能代替该故障修复。
+
 ### 准入依赖收窄（测试机已部署，本机与远端待同步）
 
 结果准入与终态冲突诊断只需要原 RuntimeDB，现改为显式接收该依赖，不再传入整个 manager。
