@@ -11,6 +11,7 @@ import pytest
 from agent_py_agent.agent.agent_core.runtime.context_compactor import runtime_compact_policy
 from agent_py_agent.agent.backends.base import BackendOptions
 from agent_py_agent.agent.backends.http import HttpBackend
+from agent_py_agent.agent.common.cancellation import ToolCancelled
 from agent_py_agent.agent.conversation import compact as compact_module
 from agent_py_agent.agent.conversation.active_turn_compact import (
     ActiveTurnArchiveCompactRequest,
@@ -139,7 +140,7 @@ def test_complete_projection_commits_its_exact_material_and_full_measurement(car
     )
 
     assert len(calls) == len(case.summaries) == 1
-    assert calls == [(_SUMMARY, tuple(case.records[1:]), 1)]
+    assert calls == [(_SUMMARY, (), 1)]
     assert result.compacted and result.request_projection is projections[0]
     assert result.request_projection.material["tools"] is frozen["tools"]
     assert result.request_projection.material["media"] is frozen["media"]
@@ -152,7 +153,7 @@ def test_complete_projection_commits_its_exact_material_and_full_measurement(car
     assert checkpoint["projected_tokens_before"] == 12_345
     assert checkpoint["projected_tokens_after"] == projections[0].projected_tokens
     assert checkpoint["source_tool_refs"][0]["attempt_id"] == "origin-attempt"
-    assert model_visible_active_turn_tool_calls(case.agent, case.attrs, case.records) == case.records[1:]
+    assert model_visible_active_turn_tool_calls(case.agent, case.attrs, case.records) == []
     assert {event["before_tokens"] for event in case.progress} == {12_345}
     assert case.progress[-1]["after_tokens"] == projections[0].projected_tokens
 
@@ -172,11 +173,11 @@ def test_candidate_retains_unknown_archive_identity_in_original_order(carried_ca
 
     result = _compact(case, request_projector=project)
     assert result.compacted and case.records == original
-    assert retained == case.records[1:]
-    assert result.retained_call_ids == ("call-1", "call-2")
+    assert retained == [unknown]
+    assert result.retained_call_ids == ()
     checkpoint, = committed_compact_checkpoint_chain(case.agent, result.thread)
-    assert checkpoint["source_tool_call_ids"] == ["call-0"]
-    assert [ref["call_id"] for ref in checkpoint["retained_tool_refs"]] == ["call-1", "call-2"]
+    assert checkpoint["source_tool_call_ids"] == ["call-0", "call-1", "call-2"]
+    assert checkpoint["retained_tool_refs"] == []
     assert model_visible_active_turn_tool_calls(case.agent, case.attrs, case.records) == retained
 
 
@@ -249,6 +250,54 @@ def test_cancellation_discards_projected_material_without_publishing(carried_cas
     assert len(projections) == (0 if stop_at == "summary" else 1)
     assert case.progress[-1]["stage"] == "candidate_discarded"
     assert case.checkpoint_path.exists() is (stop_at == "committing")
+
+
+@pytest.mark.parametrize("stop_at", ["summary", "projection"])
+def test_typed_cancellation_without_token_state_does_not_open_circuit(carried_case, monkeypatch, stop_at):
+    case = carried_case
+
+    def cancel_summary(_request):
+        raise ToolCancelled("摘要直接取消")
+
+    def cancel_projection(*_args):
+        raise ToolCancelled("候选投影直接取消")
+
+    if stop_at == "summary":
+        monkeypatch.setattr(compact_semantic_summary, "summarize_live_tool_history", cancel_summary)
+    with pytest.raises(ToolCancelled):
+        _compact(
+            case,
+            request_projector=cancel_projection if stop_at == "projection" else None,
+            interrupt_check=lambda: False,
+            progress_callback=lambda event: case.progress.append(event),
+        )
+    current = _assert_uncommitted(case)
+    assert current.compact_consecutive_failures == 0
+    assert not case.checkpoint_path.exists()
+    assert case.progress[-1]["stage"] == "candidate_discarded"
+
+
+def test_typed_cancellation_at_after_checkpoint_without_token_state_prevents_cas(carried_case):
+    case = carried_case
+
+    def progress(event):
+        case.progress.append(event)
+        if event["percent"] == 92:
+            raise ToolCancelled("checkpoint之后直接取消")
+
+    with pytest.raises(ToolCancelled):
+        _compact(
+            case,
+            request_projector=lambda *_: ConversationCompactProjection(100, object()),
+            interrupt_check=lambda: False,
+            progress_callback=progress,
+        )
+    current = _assert_uncommitted(case)
+    assert current.compact_consecutive_failures == 0
+    assert case.checkpoint_path.exists()
+    assert len(case.checkpoint_path.read_text(encoding="utf-8").splitlines()) == 1
+    assert any(event["percent"] == 92 for event in case.progress)
+    assert case.progress[-1]["stage"] == "candidate_discarded"
 
 
 def test_projection_does_not_bypass_real_generation_cas(carried_case):

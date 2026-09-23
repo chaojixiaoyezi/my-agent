@@ -574,9 +574,9 @@ def _run_gateway_turn_with_conversation_compact(
     raise ConversationPersistenceError("当前会话压缩后仍超过模型上下文上限")
 
 
-# LLM: 有宿主时只读加载同view的transcript来源，延迟CAS到完整恢复；无来源的active-turn Compact也必须用刷新后的同scope载体。
-# 未绑定宿主的内部调用保持原入口；每次overflow清前一恢复载体，不借持久结果重建展示选择。
-# 函数用途: 决定本次恢复先处理活动工具账，还是等待完整请求后压缩历史，仍共用原checkpoint及停止语义。
+# LLM: 有宿主时transcript或活动工具都只刷新来源，下一真实render/select才计量和CAS；无宿主不能粗估压活动归档。
+# 每次overflow清前一恢复载体，不借持久结果重建展示选择；唯一产品调用方始终提供observer。
+# 函数用途: 给同轮下一模型请求安装完整恢复，缺少可压来源时明确停止而不账外重试。
 def _gateway_compact_overflowing_turn(
     context: request_context.GatewayAskRunContext,
     prompt: str,
@@ -593,7 +593,8 @@ def _gateway_compact_overflowing_turn(
         replace(load, defer_compact=observer is not None), force_compact=observer is None,
     )
     _require_gateway_conversation_ready(request, refreshed)
-    if observer is not None and refreshed.compact_source is not None and refreshed.compact_source.messages:
+    if (observer is not None and refreshed.compact_source is not None
+            and (refreshed.compact_source.messages or carried_archive_tool_calls)):
         from ..gateway_compact_recovery import prepare_gateway_compact_recovery
 
         observer.compact_recovery = prepare_gateway_compact_recovery(context, refreshed)
@@ -601,46 +602,7 @@ def _gateway_compact_overflowing_turn(
     if refreshed.compact_generation > current.compact_generation:
         _publish_gateway_compact_boundary(context.on_chunk, refreshed.compact_generation)
         return refreshed
-    from ..conversation.active_turn_compact import (
-        ActiveTurnArchiveCompactRequest,
-        compact_carried_active_turn_archive,
-    )
-
-    store = getattr(context.agent, "conversation_store", None)
-    latest, load_error = (
-        store.threads.load_report(refreshed.thread_id)
-        if store is not None and refreshed.thread_id
-        else (None, {"code": "CONVERSATION_STORE_UNAVAILABLE"})
-    )
-    if load_error is not None or latest is None:
-        raise ConversationPersistenceError("当前会话无法继续压缩，请稍后重试")
-    compacted = compact_carried_active_turn_archive(
-        context.agent,
-        store,
-        latest,
-        carried_archive_tool_calls,
-        ActiveTurnArchiveCompactRequest(
-            task_attributes=run_params.task_attributes,
-            compact_context=refreshed.compact_context,
-            request_id=context.request_id,
-            attempt_id=str(request.get("execution_attempt_id") or context.request_id),
-            task_prompt=prompt,
-            progress_callback=request_context._gateway_compact_progress_callback(
-                context.on_chunk, store=store, thread=latest,
-            ),
-            interrupt_check=is_interrupted,
-        ),
-    )
-    if not compacted.compacted:
-        raise ConversationPersistenceError("当前会话无法继续压缩，请稍后重试")
-    refreshed = request_context.gateway_conversation_context(
-        replace(build_gateway_compact_load_request(context, prompt, run_params, carried_archive_tool_calls),
-                defer_compact=observer is not None),
-        force_compact=False,
-    )
-    _require_gateway_conversation_ready(request, refreshed)
-    _publish_gateway_compact_boundary(context.on_chunk, compacted.thread.compact_generation)
-    return refreshed
+    raise ConversationPersistenceError("当前会话无法继续压缩，请稍后重试")
 
 
 # LLM: A reclaimed Gateway request is the same active turn, not a new turn. Restore only exact

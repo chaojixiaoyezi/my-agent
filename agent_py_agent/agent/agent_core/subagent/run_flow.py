@@ -352,7 +352,8 @@ def _run_subagent_recovery_attempt(agent, params, current, *, task, turn, progre
     from .compact_recovery import prepare_subagent_compact_recovery
 
     recovery = None
-    if current.compact_source is not None and current.compact_source.messages:
+    if (current.compact_source is not None
+            and (current.compact_source.messages or params.carried_archive_tool_calls)):
         recovery = prepare_subagent_compact_recovery(
             agent, current, task, turn, progress_callback=progress_callback, interrupt_check=is_interrupted,
         )
@@ -423,12 +424,8 @@ def _next_subagent_overflow_carry(
     return next_archive, next_inputs
 
 
-# LLM: A child provider-overflow retry must advance the same ConversationThread generation before
-# rebuilding RunParams. Transcript Compact gets first claim; if the unfinished turn is the pressure
-# source, the canonical active-turn archive checkpoint/CAS is the only valid fallback. Never treat a
-# freshly rendered handoff or newly archived tool record as an uncounted Compact.
-# 完整恢复模式只加载transcript来源，提交延迟到真实请求select；无来源仍先走原active-turn提交。
-# 函数用途: 子代理上下文溢出时先压已结束历史，再正式压当前工具轨迹；成功推进代次后才继续原尝试。
+# LLM: transcript与活动归档都必须在下一真实render/select完整计量后推进同一ConversationThread代次；缺来源不能重试。
+# 函数用途: 子代理上下文溢出时刷新同scope来源并安排恢复，提交延迟到真实模型请求。
 def _compact_subagent_overflowing_turn(
     agent: object,
     task: object,
@@ -436,6 +433,10 @@ def _compact_subagent_overflowing_turn(
 ) -> object:
     from .model_selection import canonical_subagent_model_scope
 
+    # 前一真实请求可在摘要前清除推荐；下一准备必须看当前参数，不能复活旧展示快照。
+    model_surface = request.model_surface
+    if request.run_params is not None:
+        model_surface = replace(model_surface, capability_presentation=request.run_params.capability_presentation)
     with canonical_subagent_model_scope(agent, task.id):
         refreshed = prepare_subagent_thread_turn(
             agent,
@@ -444,81 +445,14 @@ def _compact_subagent_overflowing_turn(
             force=not request.defer_compact, defer_compact=request.defer_compact,
             progress_callback=request.progress_callback,
             interrupt_check=is_interrupted,
-            model_surface=request.model_surface,
+            model_surface=model_surface,
         )
-        if request.defer_compact and refreshed.compact_source is not None and refreshed.compact_source.messages:
+        if (request.defer_compact and refreshed.compact_source is not None
+                and (refreshed.compact_source.messages or request.carried_archive_tool_calls)):
             return refreshed
         if refreshed.compact_generation > request.current.compact_generation:
             return refreshed
-        return _compact_subagent_active_turn_archive(
-            agent,
-            task,
-            request,
-            refreshed,
-        )
-
-
-# LLM: active-turn archive仍须原child/store/CAS与刷新后的同scope view；二次加载只读回调更新后的展示。
-# 函数用途: 先提交活动工具轨迹再加载新历史；defer模式不在二次加载时重做摘要，已清除推荐不复活。
-def _compact_subagent_active_turn_archive(
-    agent: object,
-    task: object,
-    request: SubagentOverflowCompactRequest,
-    refreshed: object,
-) -> object:
-    store, latest = _load_subagent_compact_thread(agent, refreshed)
-
-    from ...conversation.active_turn_compact import (
-        ActiveTurnArchiveCompactRequest,
-        compact_carried_active_turn_archive,
-    )
-
-    compacted = compact_carried_active_turn_archive(
-        agent,
-        store,
-        latest,
-        request.carried_archive_tool_calls,
-        ActiveTurnArchiveCompactRequest(
-            task_attributes=request.task_attributes,
-            compact_context=refreshed.compact_context,
-            request_id=str(request.conversation_turn_id or request.attempt_id or ""),
-            attempt_id=str(request.attempt_id or ""),
-            task_prompt=request.prompt,
-            progress_callback=request.progress_callback,
-            interrupt_check=is_interrupted,
-        ),
-    )
-    if not compacted.compacted:
-        raise RuntimeError("subagent thread cannot compact the overflowing active turn")
-    model_surface = request.model_surface
-    if request.run_params is not None:
-        model_surface = replace(model_surface, capability_presentation=request.run_params.capability_presentation)
-    refreshed = prepare_subagent_thread_turn(
-        agent,
-        task,
-        turn=AgentThreadTurnInput(request.prompt, request.attempt_id, request.conversation_turn_id),
-        progress_callback=request.progress_callback,
-        interrupt_check=is_interrupted,
-        model_surface=model_surface, defer_compact=request.defer_compact,
-    )
-    if refreshed.compact_generation <= request.current.compact_generation:
-        raise RuntimeError("subagent Compact generation did not advance")
-    return refreshed
-
-
-# LLM: Store/thread loading is fail-closed because a child may never compact against its parent or
-# a guessed fallback thread. The returned pair has already passed exact readable authority checks.
-# 函数用途: 读取子代理当前唯一会话线程；存储缺失或记录损坏时直接停止本次恢复。
-def _load_subagent_compact_thread(agent: object, refreshed: object) -> tuple[object, object]:
-    store = getattr(agent, "conversation_store", None)
-    latest, load_error = (
-        store.threads.load_report(refreshed.thread_id)
-        if store is not None and refreshed.thread_id
-        else (None, {"code": "CONVERSATION_STORE_UNAVAILABLE"})
-    )
-    if load_error is not None or latest is None:
-        raise RuntimeError("subagent conversation thread is unavailable during Compact")
-    return store, latest
+        raise RuntimeError("subagent thread cannot compact without a prepared source")
 
 
 # LLM: Public display setup is explicitly best effort and must remain separate from
@@ -549,7 +483,8 @@ def _open_subagent_transcript_sink(agent, task: object, current, attempt_id: str
 
 
 # LLM: Every compact generation reuses this exact task-local RunParams contract and its applied
-# Compact scope; later tool coverage must not read a different checkpoint than the seed.
+# Compact scope; its first injection slot exists even when empty, so recovery can replace the same frozen fragment.
+# Later tool coverage must not read a different checkpoint than the seed.
 # display callbacks are observers and cannot alter ids, permissions, or carry state. Rejections
 # share the outer attempt's list; approvals are never promoted into this carrier.
 # 函数用途: 组装一次子代理模型调用参数，让初轮和 Compact 后续轮保持同一身份与权限。
@@ -564,7 +499,7 @@ def _subagent_model_run_params(
     from ..runner.prompts import subagent_runner_system_prompt
 
     return RunParams(
-        inject=[iteration.current.injection] if iteration.current.injection else [],
+        inject=[iteration.current.injection],
         save=True,
         allowed_tools=context.allowed_tools,
         write_boundary=context.write_boundary,

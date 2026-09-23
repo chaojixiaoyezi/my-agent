@@ -1,6 +1,6 @@
 # LLM: 单一会话压缩链保持原文、证据、尾部、检查点和游标分离；独立请求负责结算自己的模型用量，不改普通请求收口。
 # 同片展示只经宿主冻结面进入摘要；完整恢复projector（若提供）是候选计量来源，其材料仅在原CAS成功后返回。
-# 候选须同时满足输入触发线和已知输出预留，不扩大工具范围。
+# 联合候选绑定消息及工具分区，须同时满足输入触发线和已知输出预留；取消不提交、不计熔断。
 # 模块用途: 在隔离的会话历史上压缩并记录真实消耗；坏摘要不得推进游标，近期完整对话仍保留原文。
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from ..common.cancellation import ToolCancelled
 from ..memory_archive import estimate_tokens
 from .channels import project_user_reply
 from .compact_checkpoint import CompactCheckpointRequest, write_compact_checkpoint
@@ -62,6 +63,7 @@ from .tool_context_window import (
 if TYPE_CHECKING:
     from ..agent_core.runtime.context_compactor import RuntimeCompactPolicy
     from ..core import SimpleAgent
+    from .active_turn_compact import CarriedToolCompactSource
     from .compact_summary_view import AppliedCompactContext
     from .store import ConversationStore
 
@@ -126,7 +128,7 @@ class ConversationContextUsage:
     has_summary: bool
 
 
-# LLM: 内部宿主可复用原只读来源、完整请求projector和已准备摘要面；其它入口保持原model_surface准备，不从JSON获取回调或权限。
+# LLM: 内部宿主复用原来源/projector/摘要面；tool_source只用于有完整投影的联合候选，不从JSON获取回调或权限。
 # 类用途: 统一压缩输入、停止检查与缓存面；完整请求准备不在候选间重复，未知投影不能改走粗估。
 @dataclass(frozen=True)
 class ConversationCompactOptions:
@@ -140,6 +142,7 @@ class ConversationCompactOptions:
     source: ConversationCompactSource | None = field(default=None, repr=False)
     request_projector: CompactRequestProjector | None = field(default=None, repr=False)
     provider_surface: ConversationCompactProviderSurface | None = field(default=None, repr=False)
+    tool_source: CarriedToolCompactSource | None = field(default=None, repr=False)
 
 
 # LLM: 不可变请求绑定原CAS状态、显式摘要作用域和已准备投影；局部候选不能回读全线程摘要。
@@ -166,10 +169,11 @@ class _CompactRunRequest:
     model_surface: ConversationCompactModelSurface | None = None
     request_projector: CompactRequestProjector | None = field(default=None, repr=False)
     provider_surface: ConversationCompactProviderSurface | None = field(default=None, repr=False)
+    tool_source: CarriedToolCompactSource | None = field(default=None, repr=False)
     compact_context: AppliedCompactContext | None = field(default=None, repr=False)
 
 
-# LLM: 摘要和request_projection属于同一候选；原checkpoint/CAS前均非权威，保留候选回退时必须同时保留材料。
+# LLM: 摘要、双来源分区及request_projection属于同一候选；保留候选回退时必须同时采用，不能取循环最后一次分区。
 # 类用途: 保存已生成、已计量但未提交的摘要及其完整恢复请求，不反写活参数。
 @dataclass(frozen=True)
 class _CompactCandidate:
@@ -179,6 +183,7 @@ class _CompactCandidate:
     retained_tail: tuple[MessageLogEntry, ...]
     projected_tokens_after: int
     request_projection: ConversationCompactProjection | None = field(default=None, repr=False)
+    tool_source: CarriedToolCompactSource | None = field(default=None, repr=False)
 
 
 # LLM: Auxiliary-call identity and cache material travel as one immutable value so new entrypoints
@@ -195,6 +200,7 @@ class _CompactSummaryCall:
     provider_surface: ConversationCompactProviderSurface | None = None
     interrupt_check: CompactInterruptCheck | None = None
     source_progress: Callable[[int, int], object] | None = None
+    tool_source_records: tuple[dict[str, object], ...] = ()
 
 
 # LLM: Never derive owner or thread authority from prompt text in this projection.
@@ -297,6 +303,7 @@ def _prepare_compact_request(
             or source.thread.compact_checkpoint_id != thread.compact_checkpoint_id):
         raise ConversationCompactError("Compact source changed", code="COMPACT_SOURCE_CHANGED")
     compact_context = _validated_compact_source_context(agent, thread, source)
+    _validate_compact_tool_source(options, compact_context)
     # A gateway retry happens after the current user message was durably appended.
     # It is already represented by ``current_prompt`` and must remain outside the
     # prefix being summarized, exactly like 会话运行时 keeps the active turn input while
@@ -389,6 +396,7 @@ def _prepare_compact_request(
         request_projector=options.request_projector,
         provider_surface=options.provider_surface,
         compact_context=compact_context,
+        tool_source=options.tool_source,
     )
     return request
 
@@ -418,13 +426,28 @@ def _validated_compact_source_context(
     return context
 
 
+# LLM: 双来源候选必须有完整projector和原scope；已覆盖工具不得重复归纳，无来源时保持普通transcript合同。
+# 函数用途: 在摘要前验证工具分区属于同一应用视图，不允许降级为只估会话的旧入口。
+def _validate_compact_tool_source(options, context):
+    if options.tool_source is None:
+        return
+    from .active_turn_compact import CarriedToolCompactSource
+    from .compact_tool_identity import compact_tool_ref_key
+
+    source = options.tool_source
+    if (not isinstance(source, CarriedToolCompactSource) or options.request_projector is None or context is None
+            or {compact_tool_ref_key(ref) for ref in source.source_tool_refs}
+            & {compact_tool_ref_key(ref) for ref in context.view.source_tool_refs}):
+        raise ConversationCompactError("联合压缩来源或完整投影未知", code="COMPACT_SOURCE_CHANGED")
+
+
 # LLM: 进度围绕候选与提交，独立模型用量在成功/失败后均结算；计费失败不覆盖压缩异常或改变终态。
 # 函数用途: 执行压缩并上报开始、完成、中断或失败，同时让独立压缩的消耗不依赖后续聊天才能入账。
 def _execute_compact_request(request: _CompactRunRequest) -> ConversationCompactResult:
     _emit_compact_progress(request, phase="started", stage="preparing", percent=5)
     try:
         result = _compact_pending(request)
-    except InterruptedError:
+    except (InterruptedError, ToolCancelled):
         _emit_compact_progress(
             request,
             phase="superseded",
@@ -630,9 +653,10 @@ def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
                 provider_surface=provider_surface,
                 progress_range=(summarize_percent, measure_percent),
             )
-        except InterruptedError:
+        except (InterruptedError, ToolCancelled):
             raise
         except Exception as exc:
+            raise_if_compact_interrupted(request.interrupt_check)
             if trigger_fallback is not None:
                 return _commit_compact_candidate_or_record_failure(
                     request,
@@ -696,7 +720,7 @@ def _commit_compact_candidate_or_record_failure(
 ) -> ConversationCompactResult:
     try:
         return _commit_compact_candidate(request, candidate)
-    except InterruptedError:
+    except (InterruptedError, ToolCancelled):
         raise
     except Exception as exc:
         record_compact_failure(
@@ -708,7 +732,7 @@ def _commit_compact_candidate_or_record_failure(
         raise
 
 
-# LLM: 候选继承显式scope的摘要和操作证据；无context才读原thread投影，模型正文不裁决范围。
+# LLM: 候选继承同scope摘要和证据，携带自己的工具分区；双来源共同摘要和完整计量，不能提前提交任何一侧。
 # 函数用途: 分段摘要并报告覆盖进度，重投影候选后交原接受门裁决，不提前修改活请求或游标。
 def _build_compact_candidate(
     request: _CompactRunRequest,
@@ -738,6 +762,7 @@ def _build_compact_candidate(
             compact_generation=request.thread.compact_generation,
             provider_surface=provider_surface,
             interrupt_check=request.interrupt_check,
+            tool_source_records=request.tool_source.source_records if request.tool_source is not None else (),
             source_progress=lambda covered, total: _emit_compact_progress(
                 request, phase="progress", stage="summarizing",
                 percent=progress_range[0] + int((progress_range[1] - progress_range[0]) * covered / max(1, total)),
@@ -748,6 +773,7 @@ def _build_compact_candidate(
     projection = project_compact_request(request.request_projector, ConversationCompactView(
         request.thread.thread_id, request.thread.compact_generation + 1, summary, tuple(retained_tail),
         evidence, dict(_recent_operation_evidence(retained_tail) or {}), request.policy.trigger_tokens, True,
+        retained_tool_records=request.tool_source.retained_records if request.tool_source is not None else None,
     ))
     projected_after = projection.projected_tokens if projection is not None else _projected_context_tokens(
         request.agent,
@@ -764,6 +790,7 @@ def _build_compact_candidate(
         retained_tail=tuple(retained_tail),
         projected_tokens_after=projected_after,
         request_projection=projection,
+        tool_source=request.tool_source,
     )
 
 
@@ -799,6 +826,8 @@ def _commit_compact_candidate(
             projected_tokens_after=candidate.projected_tokens_after,
             policy=request.policy,
             forced=request.forced,
+            source_tool_refs=candidate.tool_source.source_tool_refs if candidate.tool_source is not None else (),
+            retained_tool_refs=candidate.tool_source.retained_tool_refs if candidate.tool_source is not None else (),
             **({
                 "scope": request.compact_context.scope,
                 "summary_base_checkpoint_id": request.compact_context.view.checkpoint_id,
@@ -813,6 +842,7 @@ def _commit_compact_candidate(
         percent=92,
         after_tokens=candidate.projected_tokens_after,
     )
+    raise_if_compact_interrupted(request.interrupt_check)
     updated = request.store.threads.update_compact_state(
         request.thread.thread_id,
         commit=ConversationCompactCommit(
@@ -825,7 +855,9 @@ def _commit_compact_candidate(
                 request.thread.compact_source_messages
                 + len(candidate.compact_rows)
             ),
-            source_tool_pairs=request.thread.compact_source_tool_pairs,
+            source_tool_pairs=request.thread.compact_source_tool_pairs + (
+                len(candidate.tool_source.source_tool_refs) if candidate.tool_source is not None else 0
+            ),
             publish_thread_view=(request.compact_context is None
                                  or request.compact_context.scope.kind == "thread"),
         ),
@@ -844,9 +876,8 @@ def _commit_compact_candidate(
     )
 
 
-# LLM: progress callback is a read-only projection. A failed terminal may carry only the typed,
-# bounded error code and frozen policy window; callback failures must not alter compact state or replace the real error.
-# 函数用途: 将真实 Compact 阶段和失败时的结构化错误码以有界数据发给 TUI。
+# LLM: 进度回调仅作展示，普通错误不改提交；显式取消透传，失败只展示结构化错误码及冻结窗口。
+# 函数用途: 将真实Compact阶段发送给TUI，断连可忽略，但不能吞掉用户停止信号。
 def _emit_compact_progress(
     request: _CompactRunRequest,
     *,
@@ -877,6 +908,8 @@ def _emit_compact_progress(
     }
     try:
         callback(payload)
+    except (InterruptedError, ToolCancelled):
+        raise
     except Exception:
         return
 
@@ -996,11 +1029,9 @@ def _projected_context_tokens(
     return max(legacy_tokens, native_tokens)
 
 
-# LLM: Summary prose is soft context; structured operation evidence remains separate authority.
-# Production callers preserve the ordinary system/tools/history cache surface and append only the
-# synthetic Compact request after validated typed display facts. A response with no text or any
-# tool call uses a bounded transcript projection; transport exceptions leave the checkpoint untouched.
-# 函数用途: 让当前模型低成本合并旧摘要和新段，再附上有上限的原文锚点；摘要过程不能执行工具或推进事实状态。
+# LLM: 摘要为软上下文，操作证据另守权威；原缓存面追加完整工具模型投影，超量沿原分段器。
+# 空文本/工具调用采用机械回退且保留全部工具来源，最终完整容量门裁决；网络异常不提交、不执行工具。
+# 函数用途: 由当前模型合并旧摘要、消息和可选工具来源，再附原文锚点，保持来源与候选一起接受或拒绝。
 def _summarize(
     agent: SimpleAgent,
     previous_summary: str,
@@ -1010,6 +1041,9 @@ def _summarize(
     call: _CompactSummaryCall | None = None,
 ) -> str:
     selected_call = call or _CompactSummaryCall()
+    from .compact_tool_summary import carried_compact_source_messages, carried_compact_source_text
+
+    tool_source_text = carried_compact_source_text(selected_call.tool_source_records)
     provider_surface = selected_call.provider_surface
     foreground_rows = [
         row for row in rows if not is_audit_background_transcript_entry(row)
@@ -1042,6 +1076,11 @@ def _summarize(
             else None
         )
         system_instruction = provider_surface.system_instruction
+    if tool_source_text:
+        if provider_messages is None:
+            prompt = f"{prompt}\n\n{tool_source_text}"
+        else:
+            provider_messages = [*provider_messages, *carried_compact_source_messages(tool_source_text)]
     from .auxiliary_model_call import AuxiliaryModelCallRequest
     from .compact_request_budget import generate_bounded_compact_response
 
@@ -1066,18 +1105,18 @@ def _summarize(
         if list(getattr(response, "tool_use_blocks", None) or [])
         else str(getattr(response, "text", "") or "").strip()
     )
-    if not summary:
+    mechanical = not summary
+    if mechanical:
         summary = _mechanical_conversation_summary(
             previous_summary,
             operation_evidence,
             foreground_rows,
         )
-    return _summary_with_conversation_landmarks(
-        summary,
-        previous_summary,
-        foreground_rows,
-        max_chars=_compact_landmark_max_chars(agent),
+    summary = _summary_with_conversation_landmarks(
+        summary, previous_summary, foreground_rows, max_chars=_compact_landmark_max_chars(agent),
     )
+    # 空回复时保留全部工具投影；若机械材料仍太大，由完整容量门拒绝，不能凭缺失内容取得覆盖权。
+    return f"{summary}\n\n{tool_source_text}" if mechanical and tool_source_text else summary
 
 
 # LLM: These shared rules are content guidance only. The cache-safe flag describes where the rows

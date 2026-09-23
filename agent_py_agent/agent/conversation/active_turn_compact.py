@@ -1,14 +1,16 @@
 # LLM: 跨片工具压缩仍只写原 checkpoint/CAS；完整请求 projector 由宿主纯替换冻结材料，
 # 容量未知或越界不得提交，也不能重建运行准备。完整归档始终是运行事实源。
-# 模块用途: 将跨进程工具历史压成正式摘要，提交前验证宿主实际请求，并原样交回获选材料。
+# 模块用途: 共用工具来源分区与完整模型投影，将跨片工具压成正式摘要，验证完整请求后提交并返回获选材料。
 
 from __future__ import annotations
 
 import uuid
 from collections.abc import Callable, Mapping
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from ..common.cancellation import ToolCancelled
 from ..memory_archive import estimate_tokens
 from .authority import (
     AGENT_THREAD_ID_ATTR,
@@ -51,6 +53,68 @@ class ActiveTurnArchiveCompactResult:
     request_projection: ConversationCompactProjection | None = None
 
 
+# LLM: 纯来源分区只含模型可见工具记录及精确四元引用；未知旧记录保留在retained，不能获摘要覆盖权。
+# 类用途: 冻结一次工具压缩的被替代区和保留区，供活动归档与混合来源共用同一选择结果。
+@dataclass(frozen=True)
+class CarriedToolCompactSource:
+    source_records: tuple[dict[str, object], ...]
+    retained_records: tuple[dict[str, object], ...]
+    source_tool_refs: tuple[dict[str, str], ...]
+    retained_tool_refs: tuple[dict[str, str], ...]
+
+    # LLM: 原archive及嵌套model_parameters以后可能改写；分区对象必须和入参完全隔离，且不新增持久权威。
+    # 函数用途: 核对摘要素材与可覆盖refs完全一致并复制嵌套容器，防止未读工具获得覆盖权。
+    def __post_init__(self) -> None:
+        for name in ("source_records", "retained_records", "source_tool_refs", "retained_tool_refs"):
+            object.__setattr__(self, name, tuple(deepcopy(getattr(self, name))))
+        source_keys = [compact_tool_ref_key(item) for item in self.source_records]
+        retained_keys = [compact_tool_ref_key(item) for item in self.retained_records]
+        known_retained = [item for item, key in zip(self.retained_records, retained_keys) if key is not None]
+        if (
+            not self.source_records
+            or any(not isinstance(item, dict) for item in (*self.source_records, *self.retained_records))
+            or any(key is None for key in source_keys)
+            or len(set(source_keys)) != len(source_keys)
+            or len({key for key in retained_keys if key is not None}) != len(known_retained)
+            or not set(source_keys).isdisjoint(key for key in retained_keys if key is not None)
+            or self.source_tool_refs != compact_tool_refs(list(self.source_records))
+            or self.retained_tool_refs != compact_tool_refs(known_retained)
+        ):
+            raise ConversationCompactError("工具压缩来源与覆盖引用不一致", code="COMPACT_TOOL_COVERAGE_UNKNOWN")
+
+
+# LLM: 按原四元身份划区，未知原序保留；内部近期预算0明确不保留已知尾部，供强制完整恢复使用。
+# 函数用途: 纯计算最近工具保留区和摘要来源，供各种Compact宿主同源投影与提交。
+def partition_carried_tool_records(
+    records: list[dict[str, object]] | tuple[dict[str, object], ...],
+    *,
+    recent_tail_tokens: int,
+) -> CarriedToolCompactSource | None:
+    if not isinstance(records, (list, tuple)) or any(not isinstance(item, dict) for item in records):
+        raise TypeError("工具压缩来源必须是归档记录序列")
+    if type(recent_tail_tokens) is not int or recent_tail_tokens < 0:
+        raise ValueError("工具压缩近期预算无效")
+    known = [item for item in records if compact_tool_ref_key(item) is not None]
+    if not known:
+        return None
+    recent = _recent_records_within_budget(known, recent_tail_tokens) if recent_tail_tokens else []
+    retained_keys = {compact_tool_ref_key(item) for item in recent}
+    source_keys = {compact_tool_ref_key(item) for item in known if compact_tool_ref_key(item) not in retained_keys}
+    if not source_keys:
+        # 真实overflow时即使只有一条完整调用，也应摘要该调用并让原未知记录继续可见。
+        source_keys = {compact_tool_ref_key(known[0])}
+    source_records = tuple(item for item in records if compact_tool_ref_key(item) in source_keys)
+    retained_records = tuple(item for item in records if compact_tool_ref_key(item) not in source_keys)
+    return CarriedToolCompactSource(
+        source_records=source_records,
+        retained_records=retained_records,
+        source_tool_refs=compact_tool_refs(list(source_records)),
+        retained_tool_refs=compact_tool_refs([
+            item for item in retained_records if compact_tool_ref_key(item) is not None
+        ]),
+    )
+
+
 # LLM: projector 只按摘要、保留记录、预计提交代次替换原材料；provider_surface 沿原准备复用，
 # 不授予重新准备、状态变更或扩范围权限。未接 projector 的宿主保留原局部计量行为。
 # 类用途: 冻结本次身份、摘要视图和完整请求投影入口，供跨片压缩在同次准备内计量与提交。
@@ -79,6 +143,7 @@ class _ActiveTurnArchiveCompactPlan:
     binding: object
     policy: object
     visible_records: tuple[dict[str, object], ...]
+    source_records: tuple[dict[str, object], ...]
     source_call_ids: tuple[str, ...]
     source_tool_refs: tuple[dict[str, str], ...]
     retained_records: tuple[dict[str, object], ...]
@@ -137,8 +202,7 @@ def compact_carried_active_turn_archive(
         records,
         compact_context=request.compact_context,
     )
-    indexed = [(item, _record_call_id(item)) for item in visible if compact_tool_ref_key(item) is not None]
-    if not indexed:
+    if not any(compact_tool_ref_key(item) is not None for item in visible):
         return ActiveTurnArchiveCompactResult(thread=thread)
 
     from ..agent_core.runtime.context_compactor import runtime_compact_policy
@@ -159,8 +223,13 @@ def compact_carried_active_turn_archive(
         return ActiveTurnArchiveCompactResult(thread=thread)
     if binding.thread.thread_id != thread.thread_id or binding.store is not store:
         raise OSError("active-turn compact binding does not match the caller thread")
+    source = partition_carried_tool_records(
+        visible, recent_tail_tokens=0 if request.request_projector is not None else policy.recent_tail_tokens,
+    )
+    if source is None:
+        return ActiveTurnArchiveCompactResult(thread=thread)
     plan = _build_active_turn_compact_plan(
-        binding, policy, visible, indexed, projected_tokens_before=request.projected_tokens_before,
+        binding, policy, visible, source, projected_tokens_before=request.projected_tokens_before,
     )
     return _execute_active_turn_compact(agent, plan, request)
 
@@ -171,26 +240,14 @@ def _build_active_turn_compact_plan(
     binding: object,
     policy: object,
     visible: list[dict[str, object]],
-    indexed: list[tuple[dict[str, object], str]],
+    source: CarriedToolCompactSource,
     *,
     projected_tokens_before: int | None = None,
 ) -> _ActiveTurnArchiveCompactPlan:
-    retained = _recent_records_within_budget(indexed, policy.recent_tail_tokens)
-    retained_ids = tuple(call_id for _item, call_id in retained)
-    retained_refs = compact_tool_refs([item for item, _call_id in retained])
-    retained_set = {compact_tool_ref_key(ref) for ref in retained_refs}
-    source_records = [item for item, _call_id in indexed if compact_tool_ref_key(item) not in retained_set]
-    source_refs = compact_tool_refs(source_records)
+    source_refs = source.source_tool_refs
+    retained_refs = source.retained_tool_refs
     source_ids = tuple(ref["call_id"] for ref in source_refs)
-    if not source_ids:
-        # A single huge result must still be replaceable after an actual provider overflow.
-        source_ids = (indexed[0][1],)
-        retained = indexed[1:]
-        retained_ids = tuple(call_id for _item, call_id in retained)
-        source_refs = compact_tool_refs([indexed[0][0]])
-        retained_refs = compact_tool_refs([item for item, _call_id in retained])
-    source_set = {compact_tool_ref_key(ref) for ref in source_refs}
-    retained_records = tuple(item for item in visible if compact_tool_ref_key(item) not in source_set)
+    retained_ids = tuple(ref["call_id"] for ref in retained_refs)
     thread = binding.thread
     generation = max(0, int(thread.compact_generation or 0)) + 1
     before_tokens = projected_tokens_before
@@ -202,10 +259,11 @@ def _build_active_turn_compact_plan(
         thread=thread,
         binding=binding,
         policy=policy,
-        visible_records=tuple(visible),
+        visible_records=tuple(deepcopy(visible)),
+        source_records=source.source_records,
         source_call_ids=source_ids,
         source_tool_refs=source_refs,
-        retained_records=retained_records,
+        retained_records=source.retained_records,
         retained_call_ids=retained_ids,
         retained_tool_refs=retained_refs,
         projected_tokens_before=before_tokens,
@@ -264,7 +322,7 @@ def _execute_active_turn_compact(
             after_tokens=after_tokens,
         )
         updated = _commit_active_turn_compact(agent, plan, request, replacement, after_tokens)
-    except InterruptedError:
+    except (InterruptedError, ToolCancelled):
         _emit_progress(
             callback,
             progress,
@@ -278,7 +336,7 @@ def _execute_active_turn_compact(
         # typed interruption before classifying that close as a Compact/provider failure.
         try:
             raise_if_compact_interrupted(request.interrupt_check)
-        except InterruptedError:
+        except (InterruptedError, ToolCancelled):
             _emit_progress(
                 callback,
                 progress,
@@ -343,15 +401,13 @@ def _project_active_turn_request(
     return projection
 
 
-# LLM: 摘要、隐藏范围和 checkpoint base 使用同一已应用视图；显式 provider_surface 只沿原 helper 渲染，
-# 不重新选择工具或准备 prompt。摘要指令与分段仍归原 LiveToolHistorySummaryRequest 主链。
+# LLM: 摘要读取全部选中工具的原逐条模型投影，不使用截短handoff；scope/base与provider面保持，过长沿原分段器。
 # 函数用途: 复用已冻结供应商缓存面与停止信号，生成可独立替代前摘要的跨片交接。
 def _active_turn_replacement_summary(
     agent: object,
     plan: _ActiveTurnArchiveCompactPlan,
     request: ActiveTurnArchiveCompactRequest,
 ) -> str:
-    from ..agent_core.runtime.loop_support import reconstructed_model_tool_context
     from ..backends.tool_ir import RuntimeFactsTurn
     from ..memory_archive.compact_semantic_summary import (
         LiveToolHistorySummaryRequest,
@@ -362,24 +418,13 @@ def _active_turn_replacement_summary(
         conversation_compact_provider_messages,
         conversation_compact_provider_prompt,
     )
-    from .tool_context_window import native_carried_tool_handoff
+    from .compact_tool_summary import carried_compact_source_text
 
     config = semantic_summary_config(agent)
     if not config.enabled:
         raise ValueError("active-turn carried compact semantic summary is disabled")
     scope_id = str(getattr(plan.thread, "workspace_task_id", "") or "")
-    tool_context = reconstructed_model_tool_context(
-        list(plan.visible_records),
-        agent=None,
-        request_id=request.request_id,
-        run_id=scope_id,
-        task_id=scope_id,
-    )
-    handoff = native_carried_tool_handoff(
-        tool_context,
-        plan.visible_records,
-        max_chars=config.max_input_chars,
-    )
+    source_text = carried_compact_source_text(plan.source_records)
     context = request.compact_context
     previous_summary = str(context.view.summary if context is not None else plan.thread.summary or "")
     surface = request.provider_surface
@@ -389,7 +434,7 @@ def _active_turn_replacement_summary(
     )) if surface is not None else ()
     replacement = summarize_live_tool_history(
         LiveToolHistorySummaryRequest(
-            history=[RuntimeFactsTurn(handoff)],
+            history=[RuntimeFactsTurn(source_text, source="compact_tool_source")],
             backend=getattr(agent, "backend", None),
             agent=agent,
             request_id=str(request.request_id or ""),
@@ -456,16 +501,16 @@ def _commit_active_turn_compact(
 # one older record remains eligible for replacement when possible; no record body is clipped.
 # 函数用途: 从尾部选择仍直接给模型看的近期完整调用，超预算的旧调用交给摘要。
 def _recent_records_within_budget(
-    indexed: list[tuple[dict[str, object], str]],
+    known_records: list[dict[str, object]],
     token_budget: int,
-) -> list[tuple[dict[str, object], str]]:
-    if len(indexed) <= 1:
+) -> list[dict[str, object]]:
+    if len(known_records) <= 1:
         return []
     budget = max(1, int(token_budget or 0))
-    selected: list[tuple[dict[str, object], str]] = []
+    selected: list[dict[str, object]] = []
     used = 0
-    for item in reversed(indexed[1:]):
-        cost = max(1, estimate_tokens(item[0]))
+    for item in reversed(known_records[1:]):
+        cost = max(1, estimate_tokens(item))
         if selected and used + cost > budget:
             break
         if not selected and cost > budget:
@@ -503,8 +548,8 @@ def _assert_context_thread(task_attributes: object, context: AppliedCompactConte
         raise OSError("Compact 应用视图与当前线程不匹配")
 
 
-# LLM: UI progress is a volatile projection. Callback failure never cancels a checkpoint/CAS.
-# 函数用途: 发出同一 compact 操作的阶段与百分比，断开的界面不会影响真实提交。
+# LLM: 进度只是展示投影，普通回调错误不影响提交；显式typed取消必须透传，不能被UI容错吞掉。
+# 函数用途: 发出同一压缩操作的阶段与百分比，保留真正停止信号，忽略界面断连错误。
 def _emit_progress(
     callback: Callable[[dict[str, object]], object] | None,
     base: dict[str, object],
@@ -528,6 +573,8 @@ def _emit_progress(
     }
     try:
         callback(payload)
+    except (InterruptedError, ToolCancelled):
+        raise
     except Exception:
         return
 
@@ -541,15 +588,11 @@ def _transcript_authoritative(attributes: object) -> bool:
     )
 
 
-# LLM: Compact boundaries use provider call identity only; tool names and prose are never identities.
-# 函数用途: 从归档记录提取用于 checkpoint 的精确工具调用编号。
-def _record_call_id(record: dict[str, object]) -> str:
-    return str(record.get("call_id") or record.get("id") or "").strip()
-
-
 __all__ = [
     "ActiveTurnArchiveCompactRequest",
     "ActiveTurnArchiveCompactResult",
+    "CarriedToolCompactSource",
     "compact_carried_active_turn_archive",
     "model_visible_active_turn_tool_calls",
+    "partition_carried_tool_records",
 ]

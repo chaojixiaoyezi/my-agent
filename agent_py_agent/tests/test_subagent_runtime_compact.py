@@ -6,12 +6,15 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent_py_agent.agent.agent_core import _tool_loop_service
 from agent_py_agent.agent.agent_core.model.context_pressure import (
     preflight_context_pressure_response,
 )
 from agent_py_agent.agent.agent_core.models import AgentRunResult
 from agent_py_agent.agent.agent_core.runtime.owner_roots import runtime_scope_root
+from agent_py_agent.agent.backends import http
 from agent_py_agent.agent.backends.base import ModelResponse
+from agent_py_agent.agent.backends.errors import ProviderContextWindowError
 from agent_py_agent.agent.conversation.agent_thread import (
     AgentThreadTurnInput,
     prepare_subagent_thread_turn,
@@ -30,6 +33,12 @@ from agent_py_agent.agent.subagents.services.control_plane_projection import (
     runtime_compact_count,
 )
 from agent_py_agent.tests._tool_runtime_harness import make_test_protocol_snapshot
+from agent_py_agent.tests.test_subagent_compact_recovery import _http
+from agent_py_agent.tests.test_subagent_compact_recovery_continuation import (
+    _is_probe,
+    _material,
+    _response,
+)
 
 
 class _OverflowThenCompleteChildBackend:
@@ -202,29 +211,6 @@ class _OverflowThenListThenCompleteChildBackend(_OverflowThenCompleteChildBacken
         return ModelResponse(text="压缩后工具调用成功，子任务完成。", backend=self.name)
 
 
-class _ActiveTurnSummaryChildBackend:
-    """只承担测试里的 active-turn Compact 摘要调用。"""
-
-    name = "active-turn-summary-child"
-    context_window_tokens = 128_000
-
-    def generate(self, _prompt: str, on_chunk=None, **_kwargs):
-        del on_chunk
-        return ModelResponse(
-            text=(
-                "[compact-live-handoff.v1]\n"
-                "current_progress: 已完成多项工具核对，正在继续同一个子任务。\n"
-                "user_constraints: 保持原任务范围与当前工作目录，不重复已经成功的副作用。\n"
-                "completed: 已读取并核对五个输入文件，精确调用记录保存在 owner archive。\n"
-                "failures: none。\n"
-                "unresolved: 仍需形成最终结论并回复直接父代理。\n"
-                "next_step: 基于当前文件和保留的近期记录完成汇总。"
-            ),
-            backend=self.name,
-            usage={"input_tokens": 2_000, "output_tokens": 180},
-        )
-
-
 def test_subagent_uses_own_conversation_thread_for_forced_compact_and_retry(
     tmp_path: Path,
 ) -> None:
@@ -309,91 +295,83 @@ def test_subagent_provider_overflow_compacts_unfinished_tool_archive_before_retr
 ) -> None:
     """有新工具进展的 child 可跨过旧的 8 次上限，始终在原尝试推进正式代次。"""
 
-    agent = SimpleAgent(
-        AgentConfig(
-            model_backend="echo",
-            enable_tools=True,
-            my_agent_home=str(tmp_path / "home"),
-            tool_context_ptl_retry_max=0,
-            model_context_window_tokens=128_000,
-            memory_compact_auto_trigger_percent=90,
-        ),
-        tmp_path,
-    )
+    agent = SimpleAgent(AgentConfig(
+        model_backend="anthropic_compatible", model_name="MiniMax-M2.7",
+        api_base="https://api.minimaxi.com/anthropic", api_key="fake-private-key",
+        enable_tools=True, stream_enabled=False, my_agent_home=str(tmp_path / "home"),
+        tool_context_ptl_retry_max=0, max_tool_rounds=0,
+        model_context_window_tokens=128_000, model_context_window_explicit=True,
+        memory_compact_auto_trigger_percent=90,
+    ), tmp_path)
     task = agent.subagents.create_run(
         goal="在长工具链发生上下文压力后继续完成子任务",
         thought="使用当前子代理自己的 Compact 账本续接。",
         plan=["读取输入", "形成结论"],
-        role="worker",
+        role="worker", allowed_tools=["read_file"],
     )
-    records = [
-        {
-            "call_id": f"call-active-{index}",
-            "run_id": "run",
-            "attempt_id": "attempt-active",
-            "turn_id": f"run:model:{index}",
-            "scoped_call_id": f"run:call-active-{index}",
-            "tool": "read_file",
-            "ok": True,
-            "model_parameters": {
-                "tool": "read_file",
-                "path": f"input-{index}.txt",
-            },
-            "output_preview": f"result-{index}",
-            "effect_outcome": "succeeded",
-        }
-        for index in range(1, 5 * overflow_count + 1)
+    materials = [
+        _material(agent, f"input-{index}.txt", f"第 {index} 批真实工具结果。")
+        for index in range(1, overflow_count + 1)
     ]
-    agent.backend = _ActiveTurnSummaryChildBackend()
-    run_params_seen = []
+    generations = []
+    model_calls = []
+    original_generate = _tool_loop_service.generate_model_response
 
-    def fake_run(prompt: str, *, params):
-        run_params_seen.append(params)
-        if len(run_params_seen) <= overflow_count:
-            params.on_chunk.write_progress({
-                "round": 1,
-                "call_index": 1,
-                "tool": "read_file",
-                "phase": "completed",
-                "ok": True,
-                "output": f"第 {len(run_params_seen)} 批工具结果",
+    def generate(request):
+        params = request.params
+        model_calls.append((
+            params.run_id, params.attempt_id, params.conversation_history_seed.compact_generation,
+            tuple(row["call_id"] for row in params.archive_tool_calls),
+        ))
+        return original_generate(request)
+
+    monkeypatch.setattr(_tool_loop_service, "generate_model_response", generate)
+
+    def on_business(_wire, number):
+        generations.append(agent.conversation_store.threads.require(task.agent_thread_id).compact_generation)
+        if number <= 3 * overflow_count and number % 3 == 2:
+            raise ProviderContextWindowError(f"测试第 {(number + 1) // 3} 批工具后溢出")
+
+    business, _probes = _http(monkeypatch, backend="anthropic_compatible", on_business=on_business)
+    original_http = http.post_json
+
+    def send(request):
+        response = original_http(request)
+        if _is_probe(request.payload):
+            return response
+        number = len(business)
+        if number <= 3 * overflow_count and number % 3 == 1:
+            index = number // 3
+            return _response("anthropic_compatible", tool={
+                "type": "tool_use", "id": f"call-active-{index + 1}", "name": "read_file",
+                "input": {"path": str(materials[index])},
             })
-            return AgentRunResult(
-                prompt=prompt,
-                response="provider reported context pressure",
-                backend=agent.backend.name,
-                used_memories=0,
-                archive_tool_calls=records[:5 * len(run_params_seen)],
-                runtime_status="context_overflow",
-                runtime_reason="context_overflow",
-                runtime_source="preflight",
-                turn_end_reason="max-tokens",
-            )
-        return AgentRunResult(
-            prompt=prompt,
-            response="子代理已基于压缩后的上下文完成结论。",
-            backend=agent.backend.name,
-            used_memories=0,
-            archive_tool_calls=records,
-            runtime_status="ok",
-            turn_end_reason="completed",
-        )
+        if number <= 3 * overflow_count and number % 3 == 0:
+            return _response("anthropic_compatible", (
+                "[compact-live-handoff.v1]\ncurrent_progress: 已读取当前材料。\n"
+                "user_constraints: 保持任务范围。\ncompleted: 工具调用已完成。\n"
+                "failures: none。\nunresolved: 继续执行。\nnext_step: 读取下一项并形成结论。"
+            ))
+        return response
 
-    monkeypatch.setattr(agent, "run", fake_run)
+    monkeypatch.setattr(http, "post_json", send)
 
     result = agent.run_subagent(task.id, dry_run=False, probe=False)
 
     thread = agent.conversation_store.threads.load(task.agent_thread_id)
     assert result.ok
-    assert len(run_params_seen) == overflow_count + 1
-    assert len({params.attempt_id for params in run_params_seen}) == 1
-    assert {params.run_id for params in run_params_seen} == {task.id}
+    assert len(business) == 3 * overflow_count + 1
+    assert generations == [generation for cycle in range(overflow_count)
+                           for generation in (cycle, cycle, cycle)] + [overflow_count]
+    assert len(model_calls) == 2 * overflow_count + 1
+    assert {row[0] for row in model_calls} == {task.id}
+    assert len({row[1] for row in model_calls}) == 1 and model_calls[0][1]
+    assert [row[2] for row in model_calls] == [generation for generation in range(overflow_count)
+                                               for _ in (0, 1)] + [overflow_count]
+    assert model_calls[-1][3] == tuple(f"call-active-{index}" for index in range(1, overflow_count + 1))
     assert thread is not None and thread.compact_generation == overflow_count
     assert thread.compact_checkpoint_id
     assert runtime_compact_count(task, agent.conversation_store) == overflow_count
-    assert run_params_seen[1].conversation_history_seed.compact_generation == 1
-    assert run_params_seen[-1].conversation_history_seed.compact_generation == overflow_count
-    assert run_params_seen[-1].carried_archive_tool_calls == records
     events = read_agent_transcript_events(agent, run_id=task.id, after=0)["events"]
     completed = [
         row
@@ -438,7 +416,7 @@ def test_subagent_overflow_without_compactable_progress_still_fails(tmp_path, mo
     ended = agent.subagents.load(task.id)
     assert ended.status == "FAILED"
     assert ended.failure_type == "runner_error"
-    assert "cannot compact the overflowing active turn" in ended.runner_last_error
+    assert "cannot compact without a prepared source" in ended.runner_last_error
     assert agent.conversation_store.threads.load(task.agent_thread_id).compact_generation == 0
 
 

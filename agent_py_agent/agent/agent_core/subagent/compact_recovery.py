@@ -2,10 +2,12 @@
 # 模块用途: 在child真实恢复准备后投影其历史和第一个宿主注入片段，再继续同次工具循环。
 from __future__ import annotations
 
+from dataclasses import replace
 from functools import partial
 
 from ...conversation.agent_thread import project_agent_thread_context
 from ...conversation.compact_guard import ConversationCompactError
+from ...conversation.compact_projection import ConversationCompactView
 from ..compact_request_recovery import (
     CompactRecoveryMaterial,
     PreparedCompactRecovery,
@@ -15,9 +17,12 @@ from ..compact_request_recovery import (
 from ..tool_request_projection import project_tool_loop_request
 
 
-# LLM: 绑定原task/run/attempt与thread；不从正文或父参数推断身份，来源为空时由原active-turn路径处理。
+# LLM: 绑定原task/run/attempt与thread；空transcript但有工具归档时也使用下一真实请求的active候选。
 # 函数用途: 给原子代理恢复轮构造公共恢复器，不发网络或改持久状态。
 def prepare_subagent_compact_recovery(agent, current, task, turn, *, progress_callback, interrupt_check):
+    from ...memory_archive.compact_semantic_summary import semantic_summary_config
+
+    handoff_max_chars = semantic_summary_config(agent).max_input_chars
     # LLM: 只允许当前child的真实参数消费来源，其他局部任务和摘要保持各自路径。
     # 函数用途: 核对子代理、执行轮与独立会话身份。
     def matches(params):
@@ -27,6 +32,9 @@ def prepare_subagent_compact_recovery(agent, current, task, turn, *, progress_ca
 
     return PreparedCompactRecovery(
         agent, current.compact_source, current, matches, partial(_project_subagent_candidate, agent, current),
+        project_active_candidate=partial(
+            _project_subagent_active_candidate, (agent, current, handoff_max_chars),
+        ),
         exclude_request_id=turn.turn_id or turn.attempt_id, progress_callback=progress_callback,
         interrupt_check=interrupt_check,
     )
@@ -44,5 +52,31 @@ def _project_subagent_candidate(agent, current, params, frozen, view):
     candidate_params, prepared = replace_recovery_history(
         params, frozen, history_seed=candidate.history_seed, injection=candidate.injection, injection_index=0,
         compact_context=candidate_context,
+    )
+    return CompactRecoveryMaterial(candidate, candidate_params, prepared, project_tool_loop_request(prepared))
+
+
+# LLM: 绑定元组冻结原child view和容量；活动候选从它生成摘要/seed，原RunParams第0宿主片段有空占位。
+# 函数用途: 把工具交接压缩后的摘要和保留归档投影到已准备的同一子代理模型请求。
+def _project_subagent_active_candidate(binding, params, frozen, summary, retained, generation):
+    from ..compact_active_projection import replace_recovery_active_tools
+
+    agent, current, max_chars = binding
+    application = current.compact_context
+    source = current.compact_source
+    if application is None or source is None:
+        raise ConversationCompactError("子代理活动恢复范围缺失", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
+    candidate_context = replace(application, view=replace(application.view, summary=summary, generation=generation))
+    candidate = project_agent_thread_context(agent, ConversationCompactView(
+        current.thread_id, generation, summary, (), candidate_context.view.operation_evidence,
+        {}, source.policy.trigger_tokens, True,
+    ), compact_context=candidate_context)
+    candidate_params, prepared = replace_recovery_history(
+        params, frozen, history_seed=candidate.history_seed, injection=candidate.injection,
+        injection_index=0, compact_context=candidate_context,
+    )
+    candidate_params, prepared = replace_recovery_active_tools(
+        candidate_params, prepared, compact_context=candidate_context,
+        retained_records=retained, max_chars=max_chars,
     )
     return CompactRecoveryMaterial(candidate, candidate_params, prepared, project_tool_loop_request(prepared))

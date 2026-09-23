@@ -1,5 +1,7 @@
 # Gateway 维护状态
 
+Gateway/child的无transcript活动归档已移除先粗估提交再重新准备的旁路，统一复用完整请求候选与同次发送。混合transcript+carried在公共恢复器同时替换原历史及已标记工具交接，单次CAS封印双来源；普通摘要失败、未知IR、超量及取消不发送恢复业务。本片32文件738项与严格gate通过，准确边界见TESTS；初次/手动与真实native工具IR组合仍未完成。
+
 Gateway/child现通过原canonical loader绑定同一Compact scope/view，真实恢复参数在CAS后取得获胜checkpoint。后台也已接公共完整请求恢复及活动归档纯投影；定向验收见TESTS。初次/手动、其它宿主活动归档和混合超大来源仍待统一，12.4保持未完成，未部署。
 
 后台Compact已本地接同一scope/view的摘要注入和精确覆盖，局部来源/提交不改全线程摘要和游标；18文件联合420项通过，最终验证见TESTS。此片不证明完整恢复payload，Gateway/child准备同view、初次/手动和真实缓存仍待验；唯一TODO的12.4保持未完成。

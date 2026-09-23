@@ -90,3 +90,18 @@ detached transcript 压缩推进共享游标，但创建后的全局摘要被原
 建议下一步：先将本片定向测试和严格检查收口，再迁移其它活动入口及联合候选；公共状态/CAS由主线串行整合，可并行独立协议测试或只读审查。部署前与插件主线同步目标、现有Gateway和回滚版本。
 
 本片最终验收：25文件657 passed（67.69秒），日志 `/tmp/compact_complete_recovery_final_20260923.log`；Ruff、doc sync、导入边界0发现、strict code-size hard=0（基线未改）、diff与clean-package通过。候选/发送一致性在实际provider builder和HTTP入口替身核对，未调用真实供应商；前轮全仓失败不抵扣。
+
+
+## 后续混合来源及活动归档片（基线dbb2d6983，本地）
+
+解决问题：此前Gateway/child无transcript时先按工具局部大小提交、再重新准备业务请求；transcript与carried都大时，单压一侧仍溢出。现三宿主共用完整准备，混合来源在一个候选里同时摘要和替换，原writer封印消息/工具双覆盖，经一次generation CAS后直接发获选材料。
+
+文件归属：root拥有公共恢复器与conversation Compact/source/projection/checkpoint/取消；Sol分别负责Gateway/child宿主及HTTP测试、纯分区与混合HTTP测试；Astra max独立审查并实现混合机械/回退/取消合同测试。新纯模块compact_tool_summary只组织全部所选记录的模型投影，复用现有分段器；不读取外置全文，不新增依赖或持久状态。完整archive保留，未知身份不授覆盖权。取消中性丢弃并在92%回调后、CAS之前检查；普通界面错误仍不影响提交。
+
+复核重点：每个候选保存自己的完整材料与来源分区；非空机械回退仍包含全部工具投影，过大不提交；不可拿被截断的展示handoff声明所有工具都已摘要。child空第0注入槽字节等价，下一prepare使用已清除的展示，旧推荐不复活。完整payload对照走真实provider builder及HTTP入口替身，不把模型正文当调用身份。
+
+边界：初次/手动入口、真实ToolCall/ToolResult混入的native IR、媒体集成、超大canonical读取及真实供应商缓存未完成。12.4继续进行中；早期全仓八项失败保持。测试机1.9已授权且只读确认可达，本片未部署、重启或调用供应商；模块重构线当前共享Gateway发布与本线独立，无测试占用冲突。
+
+建议下一步：联合定向和严格gate收口后继续初次/手动及真实IR恢复接缝；共享状态由主线串行实施，独立验收可并行。部署前先与共享Gateway负责人对齐，保留原版本及真实任务证据。
+
+本片最终32文件738 passed（75.48秒），日志 `/tmp/compact_mixed_final_20260923.log`；Ruff、doc sync、导入边界0发现、strict code-size hard=0且基线未改、diff与clean-package通过。首次四项旧夹具失败及修订在TESTS保留；真实子代理9次恢复、原读文件工具和每代CAS已验。无真实供应商、部署、重启和线上CI证据。建议下一步按上述范围继续12.4其余接缝，公共状态串行、独立验收可并行。

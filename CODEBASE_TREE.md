@@ -374,6 +374,7 @@ agent_py_agent/
 |   |   |-- compact_checkpoint.py       # 原提交链v3检查点、版本封印与scope/base精确来源
 |   |   |-- compact_scope.py            # 全线程、任务和活动轮的结构化摘要适用范围
 |   |   |-- compact_summary_view.py     # 沿实际摘要基础链解析覆盖，旧版本显式读取
+|   |   |-- compact_tool_summary.py     # 将所选工具的完整模型可见投影送入原摘要分段器
 |   |   |-- compact_tool_identity.py    # 原调用四元身份与精确覆盖键，旧未知不伪造
 |   |   |-- active_turn_compact.py      # 跨工作片工具 archive 到同一 checkpoint/CAS 的恢复压缩与模型投影
 |   |   |-- live_tool_compact.py        # 运行中原生工具历史到同一 thread checkpoint/CAS 的适配层
@@ -557,7 +558,7 @@ agent_py_agent/
 |   |-- test_subagent_compact_recovery.py # child真实runner到HTTP载荷等价及取消/冲突/摘要故障隔离
 |   |-- test_subagent_compact_recovery_continuation.py # child恢复后真实工具轮、活动归档提交与其它child隔离
 |   |-- test_gateway_compact_recovery.py # 完整恢复请求与真实HTTP对照、CAS/取消/摘要故障不发送业务
-|   |-- test_gateway_compact_recovery_continuation.py # 新历史沿后续工具轮保留，活动轮CAS先于恢复准备
+|   |-- test_gateway_compact_recovery_continuation.py # 新历史沿后续工具轮保留，活动轮先完整准备和计量再CAS
 |   |-- test_compact_request_projection.py # 原候选回退携带对应材料，未知完整输入不降级粗估
 |   |-- test_decision_external_material_order.py # 已归档页安全投影、来源复核、取消与 text/native 提示一致
 |   |-- test_external_material_order_integration.py # 原页面生产归档、决策 worker、设置工具与 TUI 接线
@@ -577,6 +578,9 @@ agent_py_agent/
 |   |-- test_compact_active_projection.py # 原生交接纯替换、媒体插话与guidance保留、未知IR拒绝
 |   |-- test_active_turn_compact_projection.py # 活动归档完整容量、取消、CAS及局部证据继承
 |   |-- test_gateway_child_compact_scope_application.py # Gateway和child共用view、交错游标及Audit范围隔离
+|   |-- test_compact_tool_source.py      # 同一纯来源分区、完整身份与未知保留、快照隔离
+|   |-- test_mixed_compact_contract.py   # 双来源机械回退、整包候选回退与取消零提交
+|   |-- test_mixed_compact_recovery.py   # 两协议混合候选和实际HTTP对照、双覆盖及失败不发送
 |   |-- test_compact_tool_provenance.py  # 原归档索引四元身份、同名调用保留与产物不覆盖
 |   |-- test_model_turn_identity.py     # 同run/attempt跨真实模型轮的身份碰撞及错误隐藏回归
 |   |-- test_background_capability_compact.py # 后台同工作片展示复用、清除与下一片重新评估
@@ -1082,3 +1086,5 @@ docs/
 
 - `agent_py_agent/agent/agent_core/compact_active_projection.py`：按IR结构化source替换carried交接和活动摘要，冻结请求计量与发送共用；完整归档不裁剪。
 - `agent_py_agent/agent/conversation/background_compact_recovery.py`：将后台已准备上下文、同scope历史或活动归档投影为公共恢复候选，不拥有调度和投递状态。
+
+- `agent_py_agent/agent/conversation/compact_tool_summary.py`：完整渲染被选工具的原模型可见投影，供transcript和活动归档共用原分段摘要；不读外置全文，不将展示截断当作来源覆盖。

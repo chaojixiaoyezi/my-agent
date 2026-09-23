@@ -235,12 +235,7 @@ def test_text_history_seed_uses_applied_summary_and_keeps_messages() -> None:
 
 
 def test_active_turn_summary_uses_applied_view_base(monkeypatch) -> None:
-    from agent_py_agent.agent.agent_core.runtime import loop_support
-    from agent_py_agent.agent.conversation import tool_context_window
     from agent_py_agent.agent.memory_archive import compact_semantic_summary
-
-    monkeypatch.setattr(loop_support, "reconstructed_model_tool_context", lambda *_args, **_kwargs: [])
-    monkeypatch.setattr(tool_context_window, "native_carried_tool_handoff", lambda *_args, **_kwargs: "handoff")
     monkeypatch.setattr(
         compact_semantic_summary, "semantic_summary_config",
         lambda _agent: SimpleNamespace(enabled=True, max_input_chars=1000),
@@ -256,7 +251,11 @@ def test_active_turn_summary_uses_applied_view_base(monkeypatch) -> None:
         SimpleNamespace(backend=None),
         SimpleNamespace(
             thread=SimpleNamespace(workspace_task_id="task-1", summary="错误的全线程摘要"),
-            visible_records=(),
+            source_records=({
+                "run_id": "run-1", "attempt_id": "attempt-1", "turn_id": "model-turn-2", "call_id": "new-call",
+                "tool": "read_file", "ok": True, "model_summary": "本次完整工具材料",
+                "model_parameters": {"path": "source.txt"},
+            },),
         ),
         ActiveTurnArchiveCompactRequest(
             task_attributes={}, request_id="request-1", attempt_id="attempt-1",
@@ -265,6 +264,8 @@ def test_active_turn_summary_uses_applied_view_base(monkeypatch) -> None:
     )
     assert result == "下一轮摘要"
     assert requests[0].previous_summary == "本轮局部摘要"
+    assert "本次完整工具材料" in requests[0].history[0].text
+    assert "model-turn-2" in requests[0].history[0].text
 
 
 def test_live_binding_and_writer_keep_applied_scope_and_base(monkeypatch) -> None:

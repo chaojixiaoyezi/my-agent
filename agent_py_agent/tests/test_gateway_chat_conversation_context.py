@@ -5551,8 +5551,8 @@ def test_gateway_recovery_rehydrates_exact_active_turn_tool_history(
     assert attempt["status"] == "recovered"
 
 
-def test_gateway_overflow_without_transcript_commits_active_turn_compact(tmp_path) -> None:
-    """当前请求工具历史已经撑爆窗口时，Gateway 必须记一代 Compact 后再试，不能无账重放。"""
+def test_gateway_overflow_without_observer_refuses_unprepared_active_compact(tmp_path) -> None:
+    """内部裸入口没有真实 render/select 时不能对活动工具账做粗估提交。"""
 
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
@@ -5609,41 +5609,15 @@ def test_gateway_overflow_without_transcript_commits_active_turn_compact(tmp_pat
         return SimpleNamespace(runtime_status="ok", response="已继续")
 
     agent.run = run
-    result, refreshed = _run_gateway_turn_with_conversation_compact(
-        context,
-        prompt,
-        conversation,
-    )
+    with pytest.raises(ConversationPersistenceError, match="无法继续压缩"):
+        _run_gateway_turn_with_conversation_compact(context, prompt, conversation)
 
-    assert result.runtime_status == "ok"
-    assert refreshed.compact_generation == 1
-    assert len(captured) == 2
-    assert captured[1].runtime_rejected_actions == [rejection]
-    assert captured[1].runtime_rejected_actions is captured[0].runtime_rejected_actions
+    assert len(captured) == 1
+    assert captured[0].runtime_rejected_actions == [rejection]
     assert RunParams().runtime_rejected_actions == []
-    assert [item["call_id"] for item in captured[1].carried_archive_tool_calls] == [
-        "overflow-1",
-        "overflow-2",
-        "overflow-3",
-        "overflow-4",
-    ]
     stored = agent.conversation_store.threads.load(conversation.thread_id)
-    assert stored is not None and stored.compact_generation == 1
-    assert stored.compact_source_tool_pairs == 1
-    from agent_py_agent.agent.conversation.active_turn_compact import (
-        model_visible_active_turn_tool_calls,
-    )
-
-    visible = model_visible_active_turn_tool_calls(
-        agent,
-        captured[1].task_attributes,
-        records,
-    )
-    assert [item["call_id"] for item in visible] == [
-        "overflow-2",
-        "overflow-3",
-        "overflow-4",
-    ]
+    assert stored is not None and stored.compact_generation == 0
+    assert stored.compact_checkpoint_id == ""
 
 
 def test_gateway_recovery_marker_cannot_replay_another_request_history(tmp_path) -> None:

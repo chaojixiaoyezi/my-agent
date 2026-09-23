@@ -1849,3 +1849,6 @@ blocked，由 Gateway 停止该 request，避免重复副作用。
 `GatewayConversationContext.compact_context` 与 `AgentThreadTurnContext.compact_context` 保存本次原checkpoint解析的只读view，经RunParams交给历史、活动工具过滤及恢复器。scope显式传给原`load_conversation_compact_source`；thread与窄审计turn来源分别绑定真实宿主身份，不从最新局部摘要推断全线程历史。
 
 `PreparedCompactRecovery`在原render/select捕获一次完整准备，候选只替换既有注入位置和历史；其拥有本次Compact时原自动压缩不能抢先写代次。成功CAS后按返回的获胜thread补齐实际checkpoint/base/coverage，已计量payload不重渲染。后台也通过该入口，新增的`background_compact_recovery`仅持请求内候选，不拥有wake/Goal/投递。初次/手动及其它活动归档入口仍按容量审计迁移，不能将现有本地切片当成全部宿主完成。
+
+
+Gateway/child的carried活动归档恢复现由各自已准备参数投影历史和活动交接，均走PreparedCompactRecovery。child第0注入槽即使为空也保留，渲染仍为空串，确保纯替换位置固定；清除后的能力展示同步到下一次恢复surface，不能复活旧推荐。混合来源由公共恢复器先完成宿主历史替换，再统一替换已标记工具交接，最终投影与实际发送共用同一材料；原完整归档不裁剪，未知身份保留。

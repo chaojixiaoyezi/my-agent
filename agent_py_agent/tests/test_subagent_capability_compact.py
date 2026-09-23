@@ -1,4 +1,5 @@
 """child 同一业务 turn 的原展示载体：真实运行、快照和 Compact，供应商仅用本地 fake。"""
+from contextlib import nullcontext
 from dataclasses import asdict
 from types import SimpleNamespace
 
@@ -224,8 +225,8 @@ def test_child_compact_cancellation_does_not_retry_or_redecide(capability_host, 
 
 def test_child_second_prepare_uses_cleared_current_params_instead_of_old_frozen_surface(decision_surface, monkeypatch):  # noqa: F811
     from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
+    from agent_py_agent.agent.agent_core.subagent import model_selection
     from agent_py_agent.agent.capability import decision_recommendation as recommendations
-    from agent_py_agent.agent.conversation import active_turn_compact
     from agent_py_agent.agent.conversation.agent_thread import AgentThreadTurnContext
     from agent_py_agent.agent.conversation.compact_provider_surface import (
         prepare_conversation_compact_provider_surface,
@@ -248,21 +249,26 @@ def test_child_second_prepare_uses_cleared_current_params_instead_of_old_frozen_
     observed = []
     current = AgentThreadTurnContext(fixture.params.task_attributes["agent_thread_id"], 0, False, "")
 
-    # LLM: 本用例只替代已在原 Compact 回归覆盖的归档提交；两次 provider surface 仍走真实快照及展示复核，不能手拼选择。
-    # 函数用途: 捕获活动归档后的第二次准备，证明配置恢复不会让旧 frozen surface 再次显示名卡。
+    # LLM: 本用例只隔离真实 HTTP 回归已经覆盖的恢复提交；第二次准备在CAS前，仍使用已清展示载体。
+    # 函数用途: 捕获下一真实恢复准备，证明配置恢复不会让旧 frozen surface 再次显示名卡。
     def prepare(agent, task, *, turn, model_surface, **kwargs):
         assert turn.turn_id == "child-turn"
+        assert kwargs["defer_compact"] is True
         observed.append(model_surface.capability_presentation)
         actual = prepare_conversation_compact_provider_surface(agent, model_surface, run_id="summary-operation")
         assert actual.volatile_sections == ()
-        return AgentThreadTurnContext(current.thread_id, 1, False, "")
+        return AgentThreadTurnContext(
+            current.thread_id, 0, False, "", compact_source=SimpleNamespace(messages=()),
+        )
 
     monkeypatch.setattr(run_flow, "prepare_subagent_thread_turn", prepare)
-    monkeypatch.setattr(active_turn_compact, "compact_carried_active_turn_archive", lambda *args, **kwargs: SimpleNamespace(compacted=True))
-    request = run_flow.SubagentOverflowCompactRequest("核对来源", "attempt", {}, current, [], None, frozen,
-        conversation_turn_id="child-turn", run_params=params)
-    refreshed = run_flow._compact_subagent_active_turn_archive(fixture.host, SimpleNamespace(id="child"), request, current)
-    assert refreshed.compact_generation == 1 and observed == [None] and len(calls) == 1
+    monkeypatch.setattr(model_selection, "canonical_subagent_model_scope", lambda *_: nullcontext())
+    request = run_flow.SubagentOverflowCompactRequest("核对来源", "attempt", {}, current,
+        [{"call_id": "already-carried"}], None, frozen,
+        conversation_turn_id="child-turn", run_params=params, defer_compact=True)
+    refreshed = run_flow._compact_subagent_overflowing_turn(fixture.host, SimpleNamespace(id="child"), request)
+    assert refreshed.compact_generation == 0 and refreshed.compact_source is not None
+    assert observed == [None] and len(calls) == 1
     assert params.capability_presentation is None and params.capability_presentation_evaluated is True
 
 

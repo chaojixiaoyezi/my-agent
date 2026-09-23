@@ -9,6 +9,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from ..common.cancellation import ToolCancelled
 from .authority import (
     AGENT_THREAD_ID_ATTR,
     conversation_transcript_is_authoritative,
@@ -125,8 +126,7 @@ def resolve_live_tool_compact_binding(
     )
 
 
-# LLM: Checkpoint scope and explicit summary base stay paired before the original CAS; once CAS
-# wins it is authoritative and must not be rolled back.
+# LLM: scope/base在原CAS前保持同源；回调显式取消必须透传并在CAS前复查令牌，获胜提交不回滚。
 # 函数用途: 按冻结范围与摘要基础可中断地提交工具压缩，停止时最多留下孤立恢复点。
 def commit_live_tool_compact(
     agent: SimpleAgent,
@@ -157,6 +157,8 @@ def commit_live_tool_compact(
     if request.after_checkpoint is not None:
         try:
             request.after_checkpoint()
+        except (InterruptedError, ToolCancelled):
+            raise
         except Exception:
             # 进度投影不是 Compact 权威；即使 TUI 已断开也必须继续完成同一 CAS。
             pass
@@ -217,14 +219,13 @@ def _validated_live_tool_request(
     return source_ids, retained_ids, replacement
 
 
-# LLM: Failure accounting shares the transcript Compact circuit, but typed user interruption is a
-# neutral discarded candidate and must never consume the failure budget.
+# LLM: 失败共用transcript熔断账；InterruptedError和ToolCancelled均为中性丢弃，不消耗失败预算。
 # 函数用途: 真实压缩失败才累加同一 thread 的熔断事实；用户停止不算失败也不推进代次。
 def record_live_tool_compact_failure(
     binding: LiveToolCompactBinding | None,
     exc: BaseException,
 ) -> None:
-    if binding is None or isinstance(exc, InterruptedError):
+    if binding is None or isinstance(exc, (InterruptedError, ToolCancelled)):
         return
     record_compact_failure(
         binding.store,

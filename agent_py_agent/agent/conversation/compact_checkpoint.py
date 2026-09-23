@@ -1,6 +1,6 @@
 # LLM: v3候选在原owner账本追加，thread head/CAS仍是唯一提交权威；scope/base/精确覆盖与摘要一起封印，
 # v1/v2仅通过原版本合同读取。局部摘要不能因在同一提交链就扩大适用范围，孤立候选不可用于隐藏来源。
-# 模块用途: 保存完整压缩恢复点，分开提交前驱与摘要基础，再由原线程CAS确认。
+# 模块用途: 保存消息与工具可联合覆盖的恢复点，分开提交前驱与摘要基础，再由原线程CAS确认。
 
 from __future__ import annotations
 
@@ -37,6 +37,8 @@ class CompactCheckpointRequest:
     forced: bool
     scope: CompactScope = THREAD_COMPACT_SCOPE
     summary_base_checkpoint_id: str | None = None
+    source_tool_refs: tuple[dict[str, str], ...] = ()
+    retained_tool_refs: tuple[dict[str, str], ...] = ()
 
 
 # LLM: 工具来源/保留区均以原四元refs为权威，call_id仅作展示；与scope/base共同写入原owner账本。
@@ -126,7 +128,7 @@ def _append_checkpoint(agent, row: dict[str, object]) -> str:
     return row["checkpoint_id"]
 
 
-# LLM: transcript候选记录精确message IDs；局部范围的末尾offset仅是来源证据，不能当全线程跳过游标。
+# LLM: 同一候选可记录消息和工具双覆盖；局部offset不当全线程游标，双refs与摘要一起封印后只经一次CAS发布。
 # 函数用途: 保存本次真实摘要覆盖的原消息和保留尾部，再由宿主原CAS提交。
 def write_compact_checkpoint(agent: SimpleAgent, request: CompactCheckpointRequest) -> str:
     compact_rows = request.compact_rows
@@ -135,13 +137,23 @@ def write_compact_checkpoint(agent: SimpleAgent, request: CompactCheckpointReque
     source_ids = [item.message_id for item in compact_rows]
     if any(not isinstance(item, str) or not item.strip() for item in source_ids) or len(set(source_ids)) != len(source_ids):
         raise ValueError("conversation compact source messages need distinct identities")
+    refs = compact_tool_refs(list(request.source_tool_refs))
+    retained_refs = compact_tool_refs(list(request.retained_tool_refs))
+    from .compact_tool_identity import compact_tool_ref_key
+
+    if {compact_tool_ref_key(ref) for ref in refs} & {compact_tool_ref_key(ref) for ref in retained_refs}:
+        raise ValueError("compact source and retained tools overlap")
     row = _checkpoint_payload(agent, request)
     row.update({
-        "source_kind": "transcript", "source_start_message_id": compact_rows[0].message_id,
+        "source_kind": "transcript_and_tool_archive" if refs else "transcript", "source_start_message_id": compact_rows[0].message_id,
         "source_end_message_id": compact_rows[-1].message_id,
         "source_end_byte_offset": max(0, int(request.source_end_byte_offset)),
         "source_message_ids": [item.message_id for item in compact_rows],
         "source_messages": len(compact_rows),
+        "source_tool_refs": list(refs), "source_tool_call_ids": [ref["call_id"] for ref in refs],
+        "source_tool_pairs": len(refs), "source_tool_pairs_total": request.thread.compact_source_tool_pairs + len(refs),
+        "retained_tool_refs": list(retained_refs), "retained_tool_call_ids": [ref["call_id"] for ref in retained_refs],
+        "retained_tool_pairs": len(retained_refs),
         "source_messages_total": request.thread.compact_source_messages + len(compact_rows),
         "retained_tail_start_message_id": request.retained_tail[0].message_id if request.retained_tail else "",
         "retained_tail_end_message_id": request.retained_tail[-1].message_id if request.retained_tail else "",

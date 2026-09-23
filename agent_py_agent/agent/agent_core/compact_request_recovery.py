@@ -1,4 +1,4 @@
-# LLM: 共用宿主完整恢复准备与原Compact/CAS；回调只投影宿主历史，不能重跑准备、建立持久状态或改变模型。
+# LLM: 共用宿主完整准备与原Compact/CAS；宿主投影历史，公共层合并工具交接替换，不能重跑准备或建立持久状态。
 # 模块用途: 让Gateway、子代理及后台复用一次准备、候选计量和取消失败隔离。
 from __future__ import annotations
 
@@ -28,7 +28,11 @@ from .model.context_pressure import (
 from .runtime.conversation_state import conversation_runtime_state_section
 from .runtime.loop_support import _native_provider_history_messages
 from .tool_request_capture import capture_tool_loop_request
-from .tool_request_projection import ToolLoopRequestInput, ToolLoopRequestProjection
+from .tool_request_projection import (
+    ToolLoopRequestInput,
+    ToolLoopRequestProjection,
+    project_tool_loop_request,
+)
 
 
 # LLM: 每个候选绑定自己的宿主上下文、参数与投影，成功CAS前只在内存，不能使用最后一个未选中候选。
@@ -101,6 +105,9 @@ class PreparedCompactRecovery:
             raise ConversationCompactError("恢复工具协议未知", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
         backend = agent.backend
         config = agent.config
+        from ..memory_archive.compact_semantic_summary import semantic_summary_config
+
+        handoff_max_chars = semantic_summary_config(agent).max_input_chars
         from ._tool_loop_service import _native_compact_interrupted
 
         # LLM: 复用原运行中Compact的线程与token停止语义；异常由原guard按取消处理，不新增停止权威。
@@ -112,6 +119,7 @@ class PreparedCompactRecovery:
         # 函数用途: 将每个摘要候选映射为原请求材料，并沿唯一纯计量入口得到接受数字。
         def project(view: ConversationCompactView) -> ConversationCompactProjection:
             material = self.project_candidate(params, frozen, view)
+            material = _project_mixed_recovery_material(material, view, handoff_max_chars)
             if source.compact_context is not None:
                 expected = project_recovery_compact_context(source.compact_context, view)
                 if getattr(material.params, "compact_context", None) != expected:
@@ -128,6 +136,7 @@ class PreparedCompactRecovery:
                     options=ConversationCompactOptions(
                         current_prompt=params.user_prompt, exclude_request_id=self.exclude_request_id, force=True,
                         source=source, request_projector=project, provider_surface=_summary_surface(frozen),
+                        tool_source=_recovery_tool_source(agent, source, params),
                         progress_callback=self.progress_callback,
                         interrupt_check=interrupted,
                     ),
@@ -251,3 +260,35 @@ def _committed_recovery_material(agent, source, result, material):
     params = replace(material.params, compact_context=applied)
     host_state = replace(material.host_state, compact_context=applied)
     return replace(material, params=params, host_state=host_state)
+
+
+# LLM: 只从本请求已应用view可见的完整归档选择来源；分区不读文件、不生成摘要，不与别的scope覆盖混合。
+# 函数用途: 给含transcript的真实恢复提供可选工具分区，未知身份保持在保留区。
+def _recovery_tool_source(agent, source, params):
+    if not params.archive_tool_calls:
+        return None
+    from ..conversation.active_turn_compact import (
+        model_visible_active_turn_tool_calls,
+        partition_carried_tool_records,
+    )
+
+    if source.compact_context is None:
+        raise ConversationCompactError("联合恢复缺少应用视图", code="COMPACT_SOURCE_CHANGED")
+    visible = model_visible_active_turn_tool_calls(
+        agent, params.task_attributes, list(params.archive_tool_calls), compact_context=source.compact_context,
+    )
+    return partition_carried_tool_records(visible, recent_tail_tokens=0)
+
+
+# LLM: 宿主先投影候选历史；显式保留工具集再替换同次冻结交接，计量和发送只使用完成两种替换后的同一材料。
+# 函数用途: 统一三宿主的联合来源候选，保留控制/媒体/指导，未知IR不能降级成只压聊天。
+def _project_mixed_recovery_material(material, view, max_chars):
+    if view.retained_tool_records is None:
+        return material
+    from .compact_active_projection import replace_recovery_active_tools
+
+    params, prepared = replace_recovery_active_tools(
+        material.params, material.request_input, compact_context=material.params.compact_context,
+        retained_records=view.retained_tool_records, max_chars=max_chars,
+    )
+    return replace(material, params=params, request_input=prepared, projection=project_tool_loop_request(prepared))

@@ -8,8 +8,10 @@ import pytest
 from agent_py_agent.agent.agent_core import _tool_loop_service, runtime_mixin
 from agent_py_agent.agent.agent_core.subagent import compact_recovery
 from agent_py_agent.agent.backends import http
+from agent_py_agent.agent.backends.base import ProviderRequestOptions
 from agent_py_agent.agent.backends.errors import ProviderContextWindowError
 from agent_py_agent.agent.conversation import active_turn_compact
+from agent_py_agent.agent.conversation.compact_guard import ConversationCompactError
 from agent_py_agent.agent.tooling import _filesystem_read
 from agent_py_agent.tests.test_subagent_compact_recovery import _child, _http
 
@@ -121,16 +123,19 @@ def test_child_transcript_then_tool(tmp_path, monkeypatch, backend):
 
 
 @pytest.mark.parametrize("backend", ["anthropic_compatible", "openai_compatible"])
-def test_child_active_turn_only(tmp_path, monkeypatch, backend):
+@pytest.mark.parametrize("fail_projection", [False, True])
+def test_child_active_turn_only(tmp_path, monkeypatch, backend, fail_projection):
     agent, prior_task = _child(tmp_path, backend=backend, tools=True)
     task = agent.subagents.create_run(goal='读取当前资料并汇报', thought='', plan=[], allowed_tools=['read_file'])
     agent.config.max_tool_rounds = 0
     material = _material(agent, 'active-material.txt', '只允许一次读取的活动回合材料。')
-    prepares, model_calls, compact_results, recoveries, read_calls = ([], [], [], [], [])
+    following_material = _material(agent, 'following-material.txt', '恢复后的下一次工具读取材料。')
+    prepares, model_calls, compact_results, recoveries, read_calls, candidates = ([], [], [], [], [], [])
     original_prepare = runtime_mixin._prepare_runtime_context
     original_generate = _tool_loop_service.generate_model_response
     original_compact = active_turn_compact.compact_carried_active_turn_archive
     original_recovery = compact_recovery.prepare_subagent_compact_recovery
+    original_project = compact_recovery._project_subagent_active_candidate
     original_read = _filesystem_read.ReadFileTool.execute
     def prepare(*args, **kwargs):
         prepares.append(agent.conversation_store.threads.require(task.agent_thread_id).compact_generation)
@@ -146,6 +151,12 @@ def test_child_active_turn_only(tmp_path, monkeypatch, backend):
         result = original_recovery(*args, **kwargs)
         recoveries.append(result)
         return result
+    def project(*args):
+        if fail_projection:
+            raise ConversationCompactError('测试child活动候选无法投影', code='COMPACT_REQUEST_PROJECTION_UNKNOWN')
+        value = original_project(*args)
+        candidates.append(value)
+        return value
     def read(self, params):
         read_calls.append(dict(params))
         return original_read(self, params)
@@ -153,10 +164,24 @@ def test_child_active_turn_only(tmp_path, monkeypatch, backend):
     monkeypatch.setattr(_tool_loop_service, 'generate_model_response', generate)
     monkeypatch.setattr(active_turn_compact, 'compact_carried_active_turn_archive', compact)
     monkeypatch.setattr(compact_recovery, 'prepare_subagent_compact_recovery', recovery)
+    monkeypatch.setattr(compact_recovery, '_project_subagent_active_candidate', project)
     monkeypatch.setattr(_filesystem_read.ReadFileTool, 'execute', read)
     def on_business(_wire, number):
         if number == 2:
             raise ProviderContextWindowError('测试活动回合单次工具后溢出')
+        if number == 4:
+            material = candidates[-1]
+            projection = material.projection
+            frozen = material.request_input
+            expected = agent.backend.project_generate_payload(
+                projection.provider_prompt, tools=list(frozen.native_tools) or None,
+                tool_choice=projection.tool_choice if frozen.native_tools else None,
+                messages=projection.messages, request_options=ProviderRequestOptions(
+                    system_instruction=projection.system_instruction,
+                    thinking_disabled=bool(frozen.native_tools) and projection.tool_choice.mode != 'auto',
+                ),
+            )
+            assert _wire == expected
     business, _probes = _http(monkeypatch, backend=backend, on_business=on_business)
     original_http = http.post_json
     def send(request):
@@ -167,17 +192,36 @@ def test_child_active_turn_only(tmp_path, monkeypatch, backend):
             return _response(backend, tool={'type': 'tool_use', 'id': 'read-active-once', 'name': 'read_file', 'input': {'path': str(material)}})
         if len(business) == 3:
             return _response(backend, '[compact-live-handoff.v1]\ncurrent_progress: 已读取当前材料。\nuser_constraints: 保持任务范围，不重复读取。\ncompleted: 文件读取成功，调用记录保留。\nfailures: none。\nunresolved: 形成最终答复。\nnext_step: 依据已读材料汇报。')
+        if len(business) == 4:
+            return _response(backend, tool={'type': 'tool_use', 'id': 'read-following-child-tool', 'name': 'read_file', 'input': {'path': str(following_material)}})
         return result
     monkeypatch.setattr(http, 'post_json', send)
     result = agent.run_subagent(task.id, dry_run=False, probe=False)
+    if fail_projection:
+        assert not result.ok and len(business) == 3 and prepares == [0, 0]
+        assert [row['path'] for row in read_calls] == [str(material)]
+        assert len(recoveries) == 1 and not recoveries[0].committed
+        assert not compact_results and not candidates
+        assert agent.conversation_store.threads.require(task.agent_thread_id).compact_generation == 0
+        return
     assert result.ok, result
-    assert len(business) == 4 and prepares == [0, 1], (len(business), prepares)
-    assert len(read_calls) == 1 and read_calls[0]['path'] == str(material)
-    assert not recoveries
-    assert len(compact_results) == 1 and compact_results[0].compacted
+    assert len(business) == 5 and prepares == [0, 0], (len(business), prepares)
+    assert [row['path'] for row in read_calls] == [str(material), str(following_material)]
+    assert len(recoveries) == 1 and recoveries[0].committed
+    assert len(compact_results) == len(candidates) == 1 and compact_results[0].compacted
     assert compact_results[0].source_call_ids == ('read-active-once',)
-    assert [params.conversation_history_seed.compact_generation for params in model_calls] == [0, 0, 1]
-    assert len(model_calls[-1].archive_tool_calls) == 1
-    assert 'current_progress' in json.dumps(business[-1], ensure_ascii=False)
+    assert [params.conversation_history_seed.compact_generation for params in model_calls] == [0, 0, 1, 1]
+    assert model_calls[0].runtime_injections[0] == ''
+    assert model_calls[-1] is model_calls[-2] and model_calls[-2] is not candidates[0].params
+    assert model_calls[-2].compact_context.view.checkpoint_id == agent.conversation_store.threads.require(
+        task.agent_thread_id,
+    ).compact_checkpoint_id
+    assert candidates[0].params.compact_context.view.checkpoint_id == ''
+    assert model_calls[-2].compact_context.view.summary == candidates[0].params.compact_context.view.summary
+    assert [row['call_id'] for row in model_calls[-1].archive_tool_calls] == [
+        'read-active-once', 'read-following-child-tool',
+    ]
+    assert 'current_progress' in json.dumps(business[3], ensure_ascii=False)
+    assert '恢复后的下一次工具读取材料' in json.dumps(business[-1], ensure_ascii=False)
     assert agent.conversation_store.threads.require(task.agent_thread_id).compact_generation == 1
     assert agent.conversation_store.threads.require(prior_task.agent_thread_id).compact_generation == 0

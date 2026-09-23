@@ -1,5 +1,5 @@
 # LLM: 仅描述当前 Compact 的临时来源与候选投影；不新增历史权威、持久计划或 tokenizer，提交仍由 compact 原 checkpoint/CAS 控制。
-# 模块用途: 让宿主把已经准备的完整恢复请求交给原 Compact 计量，并在成功提交后取回同一个候选材料。
+# 模块用途: 携带历史及可选保留工具区，让完整恢复请求在原Compact计量，成功提交后取回同一候选。
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -25,7 +25,7 @@ class ConversationCompactSource:
     compact_context: AppliedCompactContext | None = None
 
 
-# LLM: 宿主只投影这些结构化字段；is_candidate 区分尚未提交的预计代次，不能提前写活参数或持久状态。
+# LLM: is_candidate区分未提交代次；retained_tool_records为None表示不替换工具，空tuple表示已知全压，不可混淆。
 # 类用途: 给完整请求投影提供候选摘要、保留原文、证据及预计代次；其它材料由宿主复用原准备。
 @dataclass(frozen=True)
 class ConversationCompactView:
@@ -37,6 +37,7 @@ class ConversationCompactView:
     recent_operation_evidence: dict[str, object]
     history_token_budget: int
     is_candidate: bool
+    retained_tool_records: tuple[dict[str, object], ...] | None = field(default=None, repr=False)
 
 
 # LLM: 计量必须来自完整请求，unknown 应抛结构化错误而非填零；material 属宿主，Compact 不解释也不持久化。
