@@ -291,7 +291,11 @@ def test_mixed_recovery_failure_sends_no_second_business(tmp_path, monkeypatch, 
             in_summary = False
 
     if failure == "too_large":
-        monkeypatch.setattr(compact, "_compact_request_input_ceiling", lambda *_: 1)
+        original_ceiling = compact._compact_request_input_ceiling
+        monkeypatch.setattr(
+            compact, "_compact_request_input_ceiling",
+            lambda *args: 1 if business else original_ceiling(*args),
+        )
     monkeypatch.setattr(recovery_core, "_project_mixed_recovery_material", project)
     monkeypatch.setattr(compact, "_summarize", summary)
 

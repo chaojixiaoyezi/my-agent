@@ -70,6 +70,69 @@ def _http(monkeypatch, *, backend: str, on_business):
 
 
 @pytest.mark.parametrize("backend", ["anthropic_compatible", "openai_compatible"])
+def test_child_first_request_auto_compact_uses_one_preparation_and_real_cas(tmp_path, monkeypatch, backend):
+    agent, task = _child(tmp_path, backend=backend, tools=False)
+    agent.config.model_context_window_tokens = 40_000
+    agent.backend.context_window_tokens = 40_000
+    agent.config.memory_compact_auto_trigger_percent = 50
+    agent.config.max_tokens = 1024
+    for index in range(12):
+        agent.conversation_store.messages.append({
+            "thread_id": task.agent_thread_id, "role": "user" if index % 2 == 0 else "assistant",
+            "content": f"历史第{index}段：" + "资料核对记录。" * 1000,
+            "metadata": {"conversation_request_id": f"older-{index // 2}"},
+        })
+    prepares, candidates, recoveries = [], [], []
+    original_prepare = runtime_mixin._prepare_runtime_context
+    original_project = compact_recovery._project_subagent_candidate
+    original_recovery = compact_recovery.prepare_subagent_compact_recovery
+
+    def prepare(*args, **kwargs):
+        prepares.append(1)
+        return original_prepare(*args, **kwargs)
+
+    def project(*args):
+        material = original_project(*args)
+        if args[-1].is_candidate:
+            candidates.append(material)
+        return material
+
+    def recovery(*args, **kwargs):
+        value = original_recovery(*args, **kwargs)
+        recoveries.append(value)
+        return value
+
+    monkeypatch.setattr(runtime_mixin, "_prepare_runtime_context", prepare)
+    monkeypatch.setattr(compact_recovery, "_project_subagent_candidate", project)
+    monkeypatch.setattr(compact_recovery, "prepare_subagent_compact_recovery", recovery)
+    monkeypatch.setattr(compact, "_summarize", lambda *_a, **_k: "旧段已核对，保留当前任务范围。")
+
+    def on_business(wire, number):
+        assert number == 1
+        assert agent.conversation_store.threads.require(task.agent_thread_id).compact_generation == 1
+        material = candidates[-1]
+        projection = material.projection
+        frozen = material.request_input
+        assert wire == agent.backend.project_generate_payload(
+            projection.provider_prompt, tools=list(frozen.native_tools) or None,
+            tool_choice=projection.tool_choice if frozen.native_tools else None,
+            messages=projection.messages, request_options=ProviderRequestOptions(
+                system_instruction=projection.system_instruction,
+                thinking_disabled=bool(frozen.native_tools) and projection.tool_choice.mode != "auto",
+            ),
+        )
+
+    business, _ = _http(monkeypatch, backend=backend, on_business=on_business)
+    result = agent.run_subagent(task.id, dry_run=False, probe=False)
+    assert result.ok
+    assert len(business) == len(prepares) == len(recoveries) == 1
+    assert recoveries[0].force is False and recoveries[0].committed
+    assert recoveries[0].resolved_input is candidates[-1].request_input
+    thread = agent.conversation_store.threads.require(task.agent_thread_id)
+    assert thread.compact_generation == 1 and thread.compact_checkpoint_id
+
+
+@pytest.mark.parametrize("backend", ["anthropic_compatible", "openai_compatible"])
 @pytest.mark.parametrize("tools", [False, True])
 def test_child_overflow_commits_full_candidate_and_sends_identical_wire(tmp_path, monkeypatch, backend, tools):
     agent, task = _child(tmp_path, backend=backend, tools=tools)
@@ -132,7 +195,10 @@ def test_child_overflow_commits_full_candidate_and_sends_identical_wire(tmp_path
     assert candidates[0].params.run_id == task.id
     assert candidates[0].params.attempt_id == sent_attempts[0]
     assert bool(probes) is tools
-    assert len(recovery_instances) == 1 and recovery_instances[0].committed
+    assert len(recovery_instances) == 2
+    assert recovery_instances[0].consumed and not recovery_instances[0].committed
+    assert recovery_instances[0].resolved_input is not None
+    assert recovery_instances[1].committed
     thread = agent.conversation_store.threads.require(task.agent_thread_id)
     assert thread.compact_generation == 1
     assert len(model_contexts) == 2
@@ -159,7 +225,7 @@ def test_child_uncommitted_recovery_never_sends_restored_business(tmp_path, monk
     def project(*args):
         if args[-1].is_candidate:
             if failure == "cancel_token":
-                recoveries[0].render_params.cancellation_token.cancel("只取消当前运行令牌")
+                recoveries[-1].render_params.cancellation_token.cancel("只取消当前运行令牌")
             elif failure == "generation":
                 agent.conversation_store.threads.update_atomic(task.agent_thread_id, lambda thread: replace(
                     thread, compact_generation=thread.compact_generation + 1, summary="并发提交已获胜",
@@ -181,7 +247,8 @@ def test_child_uncommitted_recovery_never_sends_restored_business(tmp_path, monk
     result = agent.run_subagent(task.id, dry_run=False, probe=False)
     assert not result.ok
     assert len(business) == (1 if failure == "summary_transient" else 2)
-    assert len(recoveries) == 1 and not recoveries[0].committed
+    assert len(recoveries) == 2 and not recoveries[0].committed and not recoveries[1].committed
+    assert recoveries[0].resolved_input is not None
     assert waits == []
     thread = agent.conversation_store.threads.require(task.agent_thread_id)
     assert thread.compact_generation == (1 if failure == "generation" else 0)

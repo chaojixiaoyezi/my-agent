@@ -20,9 +20,9 @@ from .conversation.native_history import provider_history_messages_from_rows
 from .gateway_parts import request_binding, request_context, request_prompt
 
 
-# LLM: 只由原overflow入口调用；作用域绑定准确agent/request/thread，摘要和child不能消费Gateway来源。
+# LLM: 初次自动准备和原overflow入口共用；作用域绑定准确agent/request/thread，摘要和child不能消费Gateway来源。
 # 函数用途: 为一次Gateway恢复组装原历史投影和成功边界回调，公共恢复器负责实际提交。
-def prepare_gateway_compact_recovery(context, conversation):
+def prepare_gateway_compact_recovery(context, conversation, *, force=True):
     from .gateway_parts.request_execution import _publish_gateway_compact_boundary
     from .memory_archive.compact_semantic_summary import semantic_summary_config
 
@@ -42,7 +42,7 @@ def prepare_gateway_compact_recovery(context, conversation):
         ),
         progress_callback=request_context._gateway_compact_progress_callback(
             context.on_chunk, store=context.agent.conversation_store, thread=conversation.compact_source.thread,
-        ), on_commit=partial(_publish_gateway_compact_boundary, context.on_chunk),
+        ), on_commit=partial(_publish_gateway_compact_boundary, context.on_chunk), force=force,
     )
 
 

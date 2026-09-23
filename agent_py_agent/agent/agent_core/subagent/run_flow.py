@@ -268,14 +268,7 @@ def _run_subagent_conversation_turn(
     )
     model_surface = _subagent_compact_model_surface(context)
     try:
-        current = prepare_subagent_thread_turn(
-            agent,
-            task,
-            turn=turn,
-            progress_callback=compact_progress,
-            interrupt_check=is_interrupted,
-            model_surface=model_surface,
-        )
+        current = _prepare_initial_subagent_context(agent, task, turn, compact_progress, model_surface)
         model_iteration = 0
         while True:
             model_iteration += 1
@@ -301,6 +294,7 @@ def _run_subagent_conversation_turn(
             _bind_subagent_presentation(run_params, previous_params, conversation_turn_id)
             result, current = _run_subagent_recovery_attempt(
                 agent, run_params, current, task=task, turn=turn, progress_callback=compact_progress,
+                force_compact=model_iteration != 1,
             )
             if str(getattr(result, "runtime_status", "") or "").strip().lower() != (
                 "context_overflow"
@@ -345,9 +339,18 @@ def _run_subagent_conversation_turn(
         _trim_subagent_transcript(agent, task, enabled=transcript_sink is not None)
 
 
-# LLM: scope仅覆盖一次原agent.run，异常必清理；成功CAS后的host_state回到原循环，其余路径不创建恢复器。
+# LLM: 初轮只读独立child来源并保留原停止检查；真实提示和工具面必须等请求安全点冻结后才评估自动阈值。
+# 函数用途: 为子代理首个模型轮记录用户输入、冻结当前历史，不提前执行压缩或重复采集提示。
+def _prepare_initial_subagent_context(agent, task, turn, compact_progress, model_surface):
+    return prepare_subagent_thread_turn(
+        agent, task, turn=turn, progress_callback=compact_progress,
+        interrupt_check=is_interrupted, model_surface=model_surface, defer_compact=True,
+    )
+
+
+# LLM: 首轮有历史时自动预检，溢出轮强制恢复；scope仅覆盖一次原agent.run，成功CAS后的host_state回到原循环。
 # 函数用途: 用当前子代理完整准备执行一次模型尝试，并带回实际已提交的新历史。
-def _run_subagent_recovery_attempt(agent, params, current, *, task, turn, progress_callback):
+def _run_subagent_recovery_attempt(agent, params, current, *, task, turn, progress_callback, force_compact=True):
     from ...model_request_selection import model_request_selection_scope
     from .compact_recovery import prepare_subagent_compact_recovery
 
@@ -356,6 +359,7 @@ def _run_subagent_recovery_attempt(agent, params, current, *, task, turn, progre
             and (current.compact_source.messages or params.carried_archive_tool_calls)):
         recovery = prepare_subagent_compact_recovery(
             agent, current, task, turn, progress_callback=progress_callback, interrupt_check=is_interrupted,
+            force=force_compact,
         )
     with model_request_selection_scope(recovery) if recovery is not None else nullcontext():
         result = agent.run(turn.prompt, params=params)

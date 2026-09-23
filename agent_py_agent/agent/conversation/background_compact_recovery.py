@@ -29,9 +29,10 @@ class BackgroundRecoveryState:
     handoff_max_chars: int
 
 
-# LLM: 匹配当前宿主thread及完整scope，run/attempt由原core绑定；不从展示或自然语言猜本轮身份。
-# 函数用途: 给已有历史来源的后台恢复轮安装公共恢复器，不执行模型或修改持久状态。
-def prepare_background_compact_recovery(agent, history, context, *, request_id, progress_callback, interrupt_check):
+# LLM: 首次与恢复共用同一宿主身份和来源；force=False仅按原完整请求阈值裁决，force=True仍由overflow要求压缩。
+# 函数用途: 给后台一次模型尝试安装公共Compact宿主，不执行模型或修改持久状态。
+def prepare_background_compact_recovery(agent, history, context, *, request_id, progress_callback, interrupt_check,
+                                        force=True):
     source = history.compact_source
     from ..memory_archive.compact_semantic_summary import semantic_summary_config
 
@@ -49,7 +50,7 @@ def prepare_background_compact_recovery(agent, history, context, *, request_id, 
     return PreparedCompactRecovery(
         agent, source, current, matches, partial(_project_background_candidate, agent, current),
         project_active_candidate=partial(_project_background_active_candidate, agent, current),
-        progress_callback=progress_callback, interrupt_check=interrupt_check,
+        progress_callback=progress_callback, interrupt_check=interrupt_check, force=force,
     )
 
 

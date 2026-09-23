@@ -105,3 +105,16 @@ detached transcript 压缩推进共享游标，但创建后的全局摘要被原
 建议下一步：联合定向和严格gate收口后继续初次/手动及真实IR恢复接缝；共享状态由主线串行实施，独立验收可并行。部署前先与共享Gateway负责人对齐，保留原版本及真实任务证据。
 
 本片最终32文件738 passed（75.48秒），日志 `/tmp/compact_mixed_final_20260923.log`；Ruff、doc sync、导入边界0发现、strict code-size hard=0且基线未改、diff与clean-package通过。首次四项旧夹具失败及修订在TESTS保留；真实子代理9次恢复、原读文件工具和每代CAS已验。无真实供应商、部署、重启和线上CI证据。建议下一步按上述范围继续12.4其余接缝，公共状态串行、独立验收可并行。
+
+
+## 首次自动与手动入口后续切片（基线896cde5c4，本地）
+
+实际完成：公共prepare_request_context在原PromptBuilder冻结后、child/主代理选模及拒绝回退基线之前执行Compact。首次force=False只按完整容量决定是否压缩；恢复force=True仍必须真实提交。子代理复用原首次资格并同步注入/工具上下文，Gateway只更新选模的Compact代次。后台计数包含首次真实提交，每工作片最多8次，不把无操作算进展。手动在原车道读取thread-scope来源，历史估算复用原计量器，不声称未来请求已适配，也不把保留尾部算成全部纳入摘要。
+
+改动范围：公共Compact恢复/主生成顺序；Gateway observation/加载/手动控制；child首次准备及后台恢复接线；相关测试。没有改wake/WAL或媒体输入归属。并行代理各改本宿主接线与测试，公共接口、最终文档和严格gate由root收口。
+
+验收：准确联合计数见TESTS。未推送、部署、重启或收费调用。一次独立诊断绕过pytest临时home，误写本机正式模型目录；已按精确测试ID隔离新增行，并依据迁移源码显式恢复旧schema及移出迁移新增字段。安装版原reader验证既有配置保持，现场证据仅存私有目录，不计入产品验收。
+
+剩余风险：真实ToolCall/ToolResult混合来源、超大canonical有界读取、媒体合入和真实供应商cache usage；旧全仓八项失败继续保留。测试机尚未部署。本片不能作为P4全完成或新安装验收。
+
+建议下一步：先补真实IR来源与覆盖合同，再与媒体线合入后做完整容量组合，最后在已授权测试机隔离验收；可由子代理并行审计和写测试，原Compact writer/模型发送安全点由单一owner修改。任何独立测试脚本必须在进程启动前设置独立MY_AGENT_HOME，不能直接调用依赖pytest autouse隔离的fixture。

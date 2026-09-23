@@ -776,9 +776,9 @@ def _execute_compact_control(
         )
 
 
-# LLM: The registered manual Compact may mutate only the exact idle owner/thread, holds the shared
-# lane, and uses the ordinary native model surface with the selected owner model snapshot. Interruption never advances cursor/generation.
-# 函数用途: 以普通模型缓存面执行已登记的手动压缩，并区分用户停止、占用冲突和真实失败。
+# LLM: 手动Compact只覆盖车道内冻结的全线程已完成来源；没有未来业务prompt，回执的历史估算不能冒充下一请求容量证明。
+# 原摘要面仍只准备一次，取消或冲突不推进来源游标；按source.messages裁决空来源，不能凭旧全局游标猜。
+# 函数用途: 对精确空闲会话提交一次全线程摘要，并清楚区分无来源、用户停止、占用与真实失败。
 def _execute_registered_compact_control(
     base_agent: object,
     paths: GatewayPaths,
@@ -802,20 +802,20 @@ def _execute_registered_compact_control(
                 True,
                 "当前会话还没有可压缩的历史。",
             )
-        before = inspect_conversation_context(owner_agent, store, thread)
-        if before.pending_messages <= 0:
-            return ConversationControlResult(
-                "compact",
-                True,
-                "当前会话没有新的已完成历史需要压缩。",
-            )
+        from ..conversation.compact import load_conversation_compact_source
+        from ..conversation.compact_scope import THREAD_COMPACT_SCOPE
         from ..settings.model_scope import selected_model_scope
 
         with _manual_compact_lane(owner_agent, store, thread.thread_id), selected_model_scope(owner_agent, thread_id=thread.thread_id):
             refreshed = store.threads.load(thread.thread_id)
             if refreshed is None:
                 raise OSError("conversation thread disappeared before manual compact")
-            before = inspect_conversation_context(owner_agent, store, refreshed)
+            source = load_conversation_compact_source(
+                owner_agent, store, refreshed, scope=THREAD_COMPACT_SCOPE,
+            )
+            if not source.messages:
+                return _manual_compact_noop_result()
+            before = _manual_compact_source_tokens(owner_agent, source)
             compacted = prepare_conversation_context(
                 owner_agent,
                 store,
@@ -824,25 +824,22 @@ def _execute_registered_compact_control(
                     force=True,
                     custom_instructions=command.value,
                     interrupt_check=is_interrupted,
+                    source=source,
                     model_surface=ConversationCompactModelSurface(
                         context_scope="conversation",
                     ),
                 ),
             )
         if not compacted.compacted:
-            return ConversationControlResult(
-                "compact",
-                True,
-                "当前会话没有新的已完成历史需要压缩。",
-            )
+            return _manual_compact_noop_result()
         return ConversationControlResult(
             "compact",
             True,
             (
                 f"Context compacted · generation {compacted.thread.compact_generation}\n"
-                f"上下文估算：{before.projected_tokens:,} → "
+                f"会话历史估算（不含下一请求）：{before:,} → "
                 f"{compacted.projected_tokens:,} tokens；"
-                f"本次纳入摘要 {before.pending_messages} 条已完成消息。"
+                f"压缩前待处理历史 {len(source.messages)} 条已完成消息。"
             ),
             status=ConversationTaskStatus(
                 state="idle",
@@ -882,6 +879,26 @@ def _execute_registered_compact_control(
             "手动 compact 未完成，会话游标保持原状；请稍后重试。",
             error_code="COMPACT_FAILED",
         )
+
+
+# LLM: 只估算车道内冻结的thread来源；复用原计量器，不读取更晚head或将数字当未来业务容量证明。
+# 函数用途: 给手动回执计算与本次摘要同范围的压缩前历史大小。
+def _manual_compact_source_tokens(agent: object, source: object) -> int:
+    from ..conversation.compact import _projected_context_tokens
+
+    context = source.compact_context
+    return _projected_context_tokens(
+        agent, context.view.summary if context is not None else source.thread.summary,
+        list(source.messages), "",
+        operation_evidence=(context.view.operation_evidence if context is not None else source.thread.compact_operation_evidence),
+        recent_operation_evidence=source.recent_operation_evidence,
+    )
+
+
+# LLM: source为空或原Compact返回未提交时均只投影同一个成功no-op，不能补写空摘要或推进代次。
+# 函数用途: 返回手动压缩没有新历史时的统一回执。
+def _manual_compact_noop_result() -> ConversationControlResult:
+    return ConversationControlResult("compact", True, "当前会话没有新的已完成历史需要压缩。")
 
 
 # LLM: The lane has a short admission deadline and also observes the registered user-interrupt

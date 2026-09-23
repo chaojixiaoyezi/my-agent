@@ -159,3 +159,5 @@ Gateway恢复协调已抽到 `agent_core/compact_request_recovery.py` 与child�
 ## 修改入口与验证
 
 结构见 [04-structure](04-structure.md)。改生命周期或恢复时，检查运行账本、队列、wake 回执和 TUI 可见终态。最终验收按 [TESTS](../../../TESTS.md) 走真实 TUI；生产用户会话、秘密配置及私有日志不纳入仓库。
+
+首次自动Compact已本地接公共完整请求准备：原会话加载暂缓提交，PromptBuilder冻结后先压缩再自动选模。手动Compact在车道内按全线程来源判空，回执只报告历史估算。组合验收见TESTS，真实供应商与完整IR边界仍待验。

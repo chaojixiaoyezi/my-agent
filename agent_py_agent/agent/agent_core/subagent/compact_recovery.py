@@ -17,9 +17,9 @@ from ..compact_request_recovery import (
 from ..tool_request_projection import project_tool_loop_request
 
 
-# LLM: 绑定原task/run/attempt与thread；空transcript但有工具归档时也使用下一真实请求的active候选。
-# 函数用途: 给原子代理恢复轮构造公共恢复器，不发网络或改持久状态。
-def prepare_subagent_compact_recovery(agent, current, task, turn, *, progress_callback, interrupt_check):
+# LLM: 绑定原task/run/attempt与thread；首轮用完整请求自动阈值预检，溢出恢复仍强制提交。
+# 函数用途: 给原子代理模型轮构造公共压缩器，不发网络或改持久状态。
+def prepare_subagent_compact_recovery(agent, current, task, turn, *, progress_callback, interrupt_check, force=True):
     from ...memory_archive.compact_semantic_summary import semantic_summary_config
 
     handoff_max_chars = semantic_summary_config(agent).max_input_chars
@@ -36,7 +36,7 @@ def prepare_subagent_compact_recovery(agent, current, task, turn, *, progress_ca
             _project_subagent_active_candidate, (agent, current, handoff_max_chars),
         ),
         exclude_request_id=turn.turn_id or turn.attempt_id, progress_callback=progress_callback,
-        interrupt_check=interrupt_check,
+        interrupt_check=interrupt_check, force=force,
     )
 
 

@@ -299,8 +299,8 @@ def _run_gateway_ask(context: request_context.GatewayAskRunContext):
         return _run_gateway_ask_with_model(context, captured=captured[0] if captured else None)
 
 
-# LLM: 原模型快照覆盖排队；apply 候选在实际首请求通过发送 CAS 后绑定至 Compact/收尾，重复执行不重新决策。
-# 函数用途: 取得准确执行权后可选观察一次建议，实际采用由原完整请求和发送安全点核对。
+# LLM: 原模型快照覆盖排队；首次只加载Compact来源，完整准备后先压缩再选模，发送拒绝沿新上下文回退；重复执行不重新决策。
+# 函数用途: 取得准确执行权后冻结来源与可选建议，在原生成安全点完成自动压缩和选模。
 def _run_gateway_ask_with_model(context: request_context.GatewayAskRunContext, *, captured=None):
     from ..gateway_model_observation import GatewayModelObservation
 
@@ -328,9 +328,12 @@ def _run_gateway_ask_with_model(context: request_context.GatewayAskRunContext, *
         observer = GatewayModelObservation(context, captured, claim)
         with observer.scope():
             try:
-                conversation = request_context.gateway_conversation_context(replace(load_request, on_thread_loaded=observer))
+                conversation = request_context.gateway_conversation_context(replace(load_request, on_thread_loaded=observer, defer_compact=True))
                 _record_gateway_stage(context.stages, "conversation_prep_ms", _conversation_prep_started)
                 _require_gateway_conversation_ready(request, conversation)
+                from ..gateway_compact_recovery import prepare_gateway_compact_recovery
+
+                observer.compact_recovery = prepare_gateway_compact_recovery(context, conversation, force=False)
                 _configure_gateway_main_activity(context, conversation)
                 if conversation.compact_generation > preflight.compact_generation:
                     _publish_gateway_compact_boundary(context.on_chunk, conversation.compact_generation)

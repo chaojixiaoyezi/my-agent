@@ -6,11 +6,14 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent_py_agent.agent.agent_core import runtime_mixin
+from agent_py_agent.agent.agent_core.subagent import compact_recovery
 from agent_py_agent.agent.agent_core.subagent.model_selection import (
     mark_subagent_business_request_submitted,
 )
 from agent_py_agent.agent.agent_core.tool_model_generation import _invoke_backend_generate
 from agent_py_agent.agent.backends.base import ModelResponse
+from agent_py_agent.agent.conversation import compact
 from agent_py_agent.agent.conversation.agent_thread import ensure_subagent_thread
 from agent_py_agent.agent.conversation.agent_thread_store import SUBAGENT_FIRST_REQUEST_KEY
 from agent_py_agent.agent.conversation.store import ConversationStore
@@ -374,6 +377,55 @@ def test_automatic_adoption_binds_first_and_following_tool_payloads(tmp_path, mo
     assert result is not None
     assert evidence[-1]["protocol"]["model"] == model
     assert evidence[-1]["protocol"]["native_supported"]
+
+
+@pytest.mark.parametrize("backend, model", [
+    ("anthropic_compatible", "MiniMax-M3"),
+    ("openai_compatible", "deepseek-v4-flash"),
+])
+def test_first_request_auto_compact_precedes_child_model_adoption(tmp_path, monkeypatch, backend, model):
+    agent, task, key = _automatic_child(tmp_path, backend=backend, model=model, window=1_000_000)
+    agent.config.model_context_window_tokens = 40_000
+    agent.backend.context_window_tokens = 40_000
+    agent.config.memory_compact_auto_trigger_percent = 50
+    agent.config.max_tokens = 1024
+    for index in range(12):
+        agent.conversation_store.messages.append({
+            "thread_id": task.agent_thread_id, "role": "user" if index % 2 == 0 else "assistant",
+            "content": f"子代理旧材料第{index}段：" + "资料核对记录。" * 1000,
+            "metadata": {"conversation_request_id": f"older-{index // 2}"},
+        })
+    material = tmp_path / "adopt-after-compact.txt"
+    material.write_text("先压缩后采用候选模型。", encoding="utf-8")
+    prepares, recoveries = [], []
+    original_prepare = runtime_mixin._prepare_runtime_context
+    original_recovery = compact_recovery.prepare_subagent_compact_recovery
+
+    def prepare(*args, **kwargs):
+        prepares.append(1)
+        return original_prepare(*args, **kwargs)
+
+    def recovery(*args, **kwargs):
+        value = original_recovery(*args, **kwargs)
+        recoveries.append(value)
+        return value
+
+    monkeypatch.setattr(runtime_mixin, "_prepare_runtime_context", prepare)
+    monkeypatch.setattr(compact_recovery, "prepare_subagent_compact_recovery", recovery)
+    monkeypatch.setattr(compact, "_summarize", lambda *_a, **_k: "旧材料已压缩并保留任务边界。")
+    calls, probes = _install_automatic_provider(monkeypatch, agent, task, material)
+    result = agent.run_subagent(task.id, dry_run=False, probe=False)
+    assert result.ok
+    assert len(prepares) == len(recoveries) == 1
+    assert recoveries[0].force is False and recoveries[0].committed
+    assert len(calls) == 2 and [wire["model"] for wire, _ in calls] == [model, model]
+    assert {wire["model"] for wire in probes} == {"inherited", model}
+    first_wire, first_thread = calls[0]
+    assert first_thread.compact_generation == 1 and first_thread.compact_checkpoint_id
+    assert first_thread.model_profile_id == key
+    assert first_thread.metadata[SUBAGENT_MODEL_ADVICE_KEY]["status"] == "adopted"
+    assert "旧材料已压缩" in str(first_wire)
+    assert "read-material" in str(calls[1][0]["messages"])
 
 
 @pytest.mark.parametrize("enable_tools", [False, True])

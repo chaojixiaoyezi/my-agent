@@ -59,6 +59,8 @@ class PreparedCompactRecovery:
     progress_callback: Callable[[dict[str, object]], object] | None = field(default=None, repr=False)
     interrupt_check: Callable[[], bool] | None = field(default=None, repr=False)
     on_commit: Callable[[int], object] | None = field(default=None, repr=False)
+    force: bool = True
+    resolved_input: ToolLoopRequestInput | None = field(default=None, repr=False)
     consumed: bool = False
     prompt_input: PromptRenderInput | None = field(default=None, repr=False)
     render_params: object | None = field(default=None, repr=False)
@@ -76,7 +78,7 @@ class PreparedCompactRecovery:
         if not (agent is self.agent and self.matches_request(params)):
             return None
         if self.consumed:
-            if not self.committed:
+            if self.resolved_input is None:
                 raise ConversationCompactError("恢复压缩未提交，不能发送旧请求", code="COMPACT_RECOVERY_NOT_COMMITTED")
             return None
         builder = agent.prompts
@@ -84,7 +86,22 @@ class PreparedCompactRecovery:
             raise ConversationCompactError("完整恢复提示未知", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
         self.prompt_input = builder.prepare_render_input(request)
         self.render_params = params
+        from .subagent.model_selection import record_first_request_prompt
+
+        record_first_request_prompt(agent, params, request, self.prompt_input)
         return render_prepared_prompt(self.prompt_input)
+
+    # LLM: 上下文阶段早于候选模型和回退基线；只刷新已有child首请求资格，不重新收集提示材料。
+    # 函数用途: 将同次压缩后的冻结输入交给后续自动选模。
+    def prepare_request(self, agent: object, params: object, prompt: str) -> tuple[object, str]:
+        if self.consumed or not (agent is self.agent and self.matches_request(params)):
+            return params, prompt
+        prepared_params, prepared_prompt = self.select(agent, params, prompt)
+        if self.resolved_input is not None and agent is self.agent and self.matches_request(params):
+            from .subagent.model_selection import refresh_first_request_prompt
+
+            refresh_first_request_prompt(agent, prepared_params, self.resolved_input)
+        return prepared_params, prepared_prompt
 
     # LLM: 进入时领取防摘要重入；准备/投影失败不发送业务，原 CAS 成功后不再调用 agent.run 或重新读取宿主材料。
     # 函数用途: 用完整当前输入选择摘要候选，提交后返回同次恢复轮的新参数与已检查提示。
@@ -103,6 +120,13 @@ class PreparedCompactRecovery:
             raise ConversationCompactError("完整恢复输入未知", code="COMPACT_REQUEST_PROJECTION_UNKNOWN") from exc
         if not frozen.prompt_input.native_tool_use or frozen.tool_protocol_snapshot.source_protocol != "native":
             raise ConversationCompactError("恢复工具协议未知", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
+        if not self.force and self._automatic_noop(params, frozen):
+            from ._tool_loop_service import _native_compact_interrupted
+
+            raise_if_compact_interrupted(lambda: _native_compact_interrupted(params)
+                                         or bool(self.interrupt_check and self.interrupt_check()))
+            self.resolved_input = frozen
+            return params, prompt
         backend = agent.backend
         config = agent.config
         from ..memory_archive.compact_semantic_summary import semantic_summary_config
@@ -156,12 +180,26 @@ class PreparedCompactRecovery:
             raise ConversationCompactError("压缩后的请求材料不一致", code="COMPACT_REQUEST_PROJECTION_CHANGED")
         material = _committed_recovery_material(agent, source, result, material)
         invalidate_provider_context_observation(material.params)
+        self.resolved_input = material.request_input
         self.host_state = material.host_state
         self.committed = True
         self.committed_thread = result.thread
         if self.on_commit is not None:
             self.on_commit(result.thread.compact_generation)
         return material.params, material.projection.prompt
+
+    # LLM: 无操作也须完整可计量；容量充足或没有可覆盖来源时不压缩，实际发送仍沿原容量门，不虚报适配。
+    # 函数用途: 初次请求没有可压历史时保留原输入，让后续选模与发送预检独立裁决容量。
+    def _automatic_noop(self, params: object, frozen: ToolLoopRequestInput) -> bool:
+        from ..conversation.compact import _compact_request_input_ceiling
+
+        projection = project_tool_loop_request(frozen)
+        if projection.status != "ready":
+            raise ConversationCompactError("完整请求投影未知", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
+        tokens, _ = projected_model_context_components(projection)
+        if tokens < _compact_request_input_ceiling(self.agent, self.source.policy):
+            return True
+        return not self.source.messages and _recovery_tool_source(self.agent, self.source, params) is None
 
     # LLM: carried来源复用原active-turn摘要与CAS；projector只替换冻结请求片段，不能伪造原生工具对。
     # 函数用途: 没有已结束历史时，以完整请求计量压缩原归档交接，未知/过大不提交。

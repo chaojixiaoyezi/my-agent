@@ -1363,7 +1363,7 @@ def _text_conversation_history_section(seed: object, *, compact_context: object 
     return "\n".join(lines)
 
 
-# LLM: 原完整 prompt 后验证可选 child/宿主建议；采用交回完整 params，只有 typed 发送前拒绝可恢复一次原模型，HTTP 后不切回。
+# LLM: 原完整 prompt 后先确定压缩上下文，再验证可选 child/宿主建议；采用交回完整 params，只有 typed 发送前拒绝可恢复一次原模型，HTTP 后不切回。
 # 函数用途: 生成一次模型响应，把已验证的首次模型参数交给原循环 owner；普通调用保留原返回合同。
 def next_tool_loop_model_response(agent, params: ToolLoopExecuteParams, tool_rounds: int, *, accept_params=None):
     _discard_stale_natural_reply_for_pending_turn_input(agent, params)
@@ -1371,8 +1371,10 @@ def next_tool_loop_model_response(agent, params: ToolLoopExecuteParams, tool_rou
     consumes_task_tool_surface = model_params is params
     prompt = build_tool_loop_prompt(agent, model_params)
     if consumes_task_tool_surface and accept_params is not None:
+        from ..model_request_selection import prepare_request_context
         from .subagent.model_selection import select_first_request_model
 
+        model_params, prompt = prepare_request_context(agent, model_params, prompt)
         model_params, prompt = select_first_request_model(agent, model_params, prompt)
         accept_params(model_params)
     from ..model_request_selection import (

@@ -7,6 +7,7 @@ from functools import partial
 import pytest
 
 from agent_py_agent.agent.agent_core import runtime_mixin
+from agent_py_agent.agent.agent_core.tool_request_projection import project_tool_loop_request
 from agent_py_agent.agent.backends.base import ProviderRequestOptions
 from agent_py_agent.agent.backends.errors import ProviderContextWindowError, ProviderTransientError
 from agent_py_agent.agent.backends.tool_ir import AssistantTurn, CompactionSummary, ToolResult
@@ -147,6 +148,133 @@ def test_background_overflow_reuses_selected_candidate_wire(tmp_path, monkeypatc
     assert len(prepares) == len(runs) == 2
     assert prepare_run_indices == [1, 2]
     assert store.threads.require(thread.thread_id).compact_generation == 1
+
+
+@pytest.mark.parametrize("backend", ["anthropic_compatible", "openai_compatible"])
+def test_background_first_request_compacts_after_complete_prepare(tmp_path, monkeypatch, backend):
+    agent, store, thread, request, execution, sink = _background(
+        tmp_path, backend=backend, detached=False,
+    )
+    agent.config.model_context_window_tokens = 15_500
+    agent.config.max_tokens = agent.backend.max_tokens = 1_024
+    for role in ("user", "assistant"):
+        store.messages.append({
+            "thread_id": thread.thread_id, "role": role,
+            "content": "补充的构建、测试与发布记录" * 250,
+            "metadata": {"conversation_request_id": f"completed-extra-{role}", "task_id": request.task_id},
+            "now": 14.0 if role == "user" else 15.0,
+        })
+    original_run = agent.run
+    original_prepare = runtime_mixin._prepare_runtime_context
+    original_summary = compact._summarize
+    runs, prepares, summaries, business, candidates = [], [], [], [], []
+    in_summary = False
+
+    def run(*args, **kwargs):
+        runs.append(args)
+        return original_run(*args, **kwargs)
+
+    def prepare(*args, **kwargs):
+        prepares.append(args)
+        return original_prepare(*args, **kwargs)
+
+    def summary(*args, **kwargs):
+        nonlocal in_summary
+        in_summary = True
+        try:
+            return original_summary(*args, **kwargs)
+        finally:
+            in_summary = False
+
+    original_project = background_compact_recovery._project_background_candidate
+
+    def project(*args):
+        material = original_project(*args)
+        if args[-1].is_candidate:
+            candidates.append(material)
+        return material
+
+    monkeypatch.setattr(agent, "run", run)
+    monkeypatch.setattr(runtime_mixin, "_prepare_runtime_context", prepare)
+    monkeypatch.setattr(compact, "_summarize", summary)
+    monkeypatch.setattr(background_compact_recovery, "_project_background_candidate", project)
+
+    def on_http(wire, _number):
+        if in_summary:
+            summaries.append(wire)
+        else:
+            business.append((wire, store.threads.require(thread.thread_id).compact_generation))
+
+    all_wires, _ = _http(monkeypatch, backend=backend, on_business=on_http)
+    result = background_execution.run_background_turn_with_compact(
+        execution, thread, request, user_prompt="继续核对本轮资料", continuation_injection=[],
+        proactive_delivery_available=False, activity_sink=sink,
+    )
+    assert result.runtime_status != "context_overflow"
+    assert len(runs) == len(prepares) == 1
+    assert len(candidates) == 1 and len(summaries) == 1 and len(business) == 1
+    assert len(all_wires) == 2
+    assert business[0][1] == store.threads.require(thread.thread_id).compact_generation == 1
+    projected = candidates[0].projection
+    frozen = candidates[0].request_input
+    expected = agent.backend.project_generate_payload(
+        projected.provider_prompt, tools=list(frozen.native_tools) or None,
+        tool_choice=projected.tool_choice if frozen.native_tools else None,
+        messages=projected.messages,
+        request_options=ProviderRequestOptions(
+            system_instruction=projected.system_instruction,
+            thinking_disabled=bool(frozen.native_tools) and projected.tool_choice.mode != "auto",
+        ),
+    )
+    assert business[0][0] == expected
+
+
+@pytest.mark.parametrize("backend", ["anthropic_compatible", "openai_compatible"])
+def test_background_first_request_below_ceiling_uses_same_frozen_wire(tmp_path, monkeypatch, backend):
+    agent, store, thread, request, execution, sink = _background(
+        tmp_path, backend=backend, detached=False,
+    )
+    original_factory = background_compact_recovery.prepare_background_compact_recovery
+    original_prepare = runtime_mixin._prepare_runtime_context
+    hosts, prepares, business = [], [], []
+
+    def factory(*args, **kwargs):
+        host = original_factory(*args, **kwargs)
+        hosts.append(host)
+        return host
+
+    def prepare(*args, **kwargs):
+        prepares.append(args)
+        return original_prepare(*args, **kwargs)
+
+    monkeypatch.setattr(background_compact_recovery, "prepare_background_compact_recovery", factory)
+    monkeypatch.setattr(runtime_mixin, "_prepare_runtime_context", prepare)
+    monkeypatch.setattr(compact, "_summarize", lambda *_args, **_kwargs: pytest.fail("未超容量却发送摘要"))
+
+    def on_http(wire, _number):
+        business.append((wire, store.threads.require(thread.thread_id).compact_generation))
+
+    all_wires, _ = _http(monkeypatch, backend=backend, on_business=on_http)
+    result = background_execution.run_background_turn_with_compact(
+        execution, thread, request, user_prompt="继续核对本轮资料", continuation_injection=[],
+        proactive_delivery_available=False, activity_sink=sink,
+    )
+    assert result.runtime_status != "context_overflow"
+    assert len(prepares) == len(hosts) == len(business) == len(all_wires) == 1
+    assert business[0][1] == store.threads.require(thread.thread_id).compact_generation == 0
+    host = hosts[0]
+    assert not host.committed and host.resolved_input is not None
+    projected = project_tool_loop_request(host.resolved_input)
+    expected = agent.backend.project_generate_payload(
+        projected.provider_prompt, tools=list(host.resolved_input.native_tools) or None,
+        tool_choice=projected.tool_choice if host.resolved_input.native_tools else None,
+        messages=projected.messages,
+        request_options=ProviderRequestOptions(
+            system_instruction=projected.system_instruction,
+            thinking_disabled=bool(host.resolved_input.native_tools) and projected.tool_choice.mode != "auto",
+        ),
+    )
+    assert business[0][0] == expected
 
 
 @pytest.mark.parametrize("failure", ["summary_failure", "candidate_cancel", "generation_race"])
@@ -358,7 +486,11 @@ def test_uncommitted_active_recovery_sends_no_restored_business(tmp_path, monkey
             in_summary = False
 
     if failure == "candidate_too_large":
-        monkeypatch.setattr(compact, "_compact_request_input_ceiling", lambda *_: 1)
+        original_ceiling = compact._compact_request_input_ceiling
+        monkeypatch.setattr(
+            compact, "_compact_request_input_ceiling",
+            lambda *args: 1 if sent_business else original_ceiling(*args),
+        )
     monkeypatch.setattr(background_compact_recovery, "_project_background_active_candidate", project)
     monkeypatch.setattr(active_turn_compact, "_active_turn_replacement_summary", summary)
 

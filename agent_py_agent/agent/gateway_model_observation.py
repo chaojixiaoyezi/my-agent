@@ -6,7 +6,7 @@ import hashlib
 import logging
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 
 from .backends.decision_protocol import decision_json
@@ -114,6 +114,26 @@ class GatewayModelObservation:
             if rendered is not None:
                 return rendered
         return self.adoption.render(agent, params, request) if self.adoption is not None else None
+
+    # LLM: 初次及恢复压缩独占当前完整请求准备时点；辅助回复和其它scope不得消费本请求来源。
+    # 函数用途: 在冻结提示前暂缓旧自动压缩路径。
+    def owns_compact(self, agent: object, params: object) -> bool:
+        return self.compact_recovery is not None and self.compact_recovery.owns_compact(agent, params)
+
+    # LLM: 先提交上下文再绑定候选；只更新本次CAS得到的compact代次，选模revision和profile守门不变。
+    # 函数用途: 让选模使用压缩后的冻结提示，并让原模型回退基线保留已提交摘要。
+    def prepare_request(self, agent: object, params: object, prompt: str) -> tuple[object, str]:
+        recovery = self.compact_recovery
+        if recovery is None or recovery.consumed:
+            return params, prompt
+        params, prompt = recovery.prepare_request(agent, params, prompt)
+        if self.adoption is not None and recovery.resolved_input is not None:
+            self.adoption.prompt_input = recovery.resolved_input.prompt_input
+            if recovery.committed:
+                self.adoption.thread = replace(
+                    self.adoption.thread, compact_generation=recovery.committed_thread.compact_generation,
+                )
+        return params, prompt
 
     # LLM: 未提交采用与延迟Compact不得混用；恢复先沿原CAS提交且不重决策，普通首请求仍按原采用入口。
     # 函数用途: 在生成前交回已确认的恢复参数，或完成本次可选模型采用。

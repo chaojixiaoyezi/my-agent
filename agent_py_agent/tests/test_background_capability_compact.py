@@ -98,14 +98,16 @@ def test_background_compact_reuses_evaluated_selection_without_another_decision(
     selected = []
 
     def select(self, agent, params, prompt):
-        selected.append(params)
-        if mode == "cleared_selection":
+        recovery_decision = self.force and not self.consumed
+        if recovery_decision:
+            selected.append(params)
+        if recovery_decision and mode == "cleared_selection":
             assert captured[-1][1] is not None
             patch(fixture.agent, {"points.skill_tool.mode": "off"})
         try:
             return original(self, agent, params, prompt)
         finally:
-            if mode == "cleared_selection":
+            if recovery_decision and mode == "cleared_selection":
                 patch(fixture.agent, {"points.skill_tool.mode": "apply"})
 
     monkeypatch.setattr(PreparedCompactRecovery, "select", select)

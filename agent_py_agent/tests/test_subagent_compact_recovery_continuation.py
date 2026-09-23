@@ -51,6 +51,49 @@ def _material(agent, name, content):
 
 
 @pytest.mark.parametrize("backend", ["anthropic_compatible", "openai_compatible"])
+def test_child_first_request_compact_noop_keeps_following_tool_round(tmp_path, monkeypatch, backend):
+    agent, task = _child(tmp_path, backend=backend, tools=True)
+    material = _material(agent, "first-noop-tool.txt", "首轮预检后仍需保留的工具结果。")
+    recoveries, preparations = [], []
+    original_recovery = compact_recovery.prepare_subagent_compact_recovery
+    original_prepare = runtime_mixin._prepare_runtime_context
+
+    def recovery(*args, **kwargs):
+        value = original_recovery(*args, **kwargs)
+        recoveries.append(value)
+        return value
+
+    def prepare(*args, **kwargs):
+        preparations.append(1)
+        return original_prepare(*args, **kwargs)
+
+    monkeypatch.setattr(compact_recovery, "prepare_subagent_compact_recovery", recovery)
+    monkeypatch.setattr(runtime_mixin, "_prepare_runtime_context", prepare)
+    business, _ = _http(monkeypatch, backend=backend, on_business=lambda *_: None)
+    original_http = http.post_json
+
+    def send(request):
+        response = original_http(request)
+        if len(business) == 1 and not _is_probe(request.payload):
+            return _response(backend, tool={
+                "type": "tool_use", "id": "read-after-first-noop", "name": "read_file",
+                "input": {"path": str(material)},
+            })
+        return response
+
+    monkeypatch.setattr(http, "post_json", send)
+    result = agent.run_subagent(task.id, dry_run=False, probe=False)
+    assert result.ok
+    assert len(preparations) == len(recoveries) == 1
+    assert recoveries[0].consumed and recoveries[0].resolved_input is not None
+    assert not recoveries[0].committed
+    assert agent.conversation_store.threads.require(task.agent_thread_id).compact_generation == 0
+    assert len(business) == 2
+    assert "read-after-first-noop" in json.dumps(business[1], ensure_ascii=False)
+    assert "首轮预检后仍需保留的工具结果。" in json.dumps(business[1], ensure_ascii=False)
+
+
+@pytest.mark.parametrize("backend", ["anthropic_compatible", "openai_compatible"])
 def test_child_transcript_then_tool(tmp_path, monkeypatch, backend):
     agent, task = _child(tmp_path, backend=backend, tools=True)
     agent.config.max_tool_rounds = 0
@@ -93,7 +136,9 @@ def test_child_transcript_then_tool(tmp_path, monkeypatch, backend):
     result = agent.run_subagent(task.id, dry_run=False, probe=False)
     assert result.ok, result
     assert len(business) == 4
-    assert len(preparations) == 2 and len(recoveries) == len(candidates) == 1
+    assert len(preparations) == len(recoveries) == 2 and len(candidates) == 1
+    assert recoveries[0].consumed and not recoveries[0].committed
+    assert recoveries[0].resolved_input is not None and recoveries[1].committed
     assert len(model_calls) == 3
     first, restored, after_tool = model_calls
     assert first[0].conversation_history_seed.compact_generation == 0
@@ -110,7 +155,7 @@ def test_child_transcript_then_tool(tmp_path, monkeypatch, backend):
         task.agent_thread_id,
     ).compact_checkpoint_id
     assert restored[0].compact_context.view.source_message_ids
-    assert restored[0].cancellation_token is recoveries[0].render_params.cancellation_token
+    assert restored[0].cancellation_token is recoveries[1].render_params.cancellation_token
     assert restored[0].conversation_history_seed.compact_generation == 1
     assert after_tool[0].conversation_history_seed.compact_generation == 1
     assert restored[1:] == after_tool[1:] and restored[2] != first[2]

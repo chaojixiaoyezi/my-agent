@@ -11,7 +11,12 @@ from types import SimpleNamespace
 
 from ...concurrency.interrupt import is_interrupted
 from ...conversation.agent_thread_store import SUBAGENT_FIRST_REQUEST_KEY
-from ...prompting_parts.builder import PromptBuilder, PromptRenderInput, render_prepared_prompt
+from ...prompting_parts.builder import (
+    PromptBuilder,
+    PromptBuildRequest,
+    PromptRenderInput,
+    render_prepared_prompt,
+)
 from ...settings.thread_model_selection import SUBAGENT_MODEL_ADVICE_KEY
 from ...subagents.runner_control import runner_attempt_cancelled
 from ..tool_request_projection import ToolLoopRequestInput
@@ -85,6 +90,48 @@ def first_request_preparation(agent: object, params: object) -> SubagentFirstReq
     return preparation
 
 
+# LLM: 首次请求只记原run/attempt同次冻结提示与可重渲染请求；不重新读取 Goal、文件或 Skill，也不创建资格。
+# 函数用途: 将公共Compact宿主已冻结的提示材料交给子代理首次选模，供原候选配置纯重渲染。
+def record_first_request_prompt(agent: object, params: object, request: PromptBuildRequest, prompt_input: PromptRenderInput) -> None:
+    preparation = first_request_preparation(agent, params)
+    if preparation is None:
+        return
+    if not isinstance(request, PromptBuildRequest) or not isinstance(prompt_input, PromptRenderInput):
+        preparation.selection_reason = "request_facts_unknown"
+        return
+    preparation.prompt_input = prompt_input
+    preparation.prompt_request = deepcopy(request)
+    preparation.request_input = None
+
+
+# LLM: Compact获选输入只覆盖原注入与工具上下文，其余原请求字段逐值保留；缺冻结事实时首选按unknown保留原模型。
+# 函数用途: 将同次已验候选提示更新到首次选模载体，不再次运行宿主准备或改变首请求资格。
+def refresh_first_request_prompt(agent: object, params: object, prepared_input: ToolLoopRequestInput) -> None:
+    preparation = first_request_preparation(agent, params)
+    if preparation is None:
+        return
+    if (not isinstance(prepared_input, ToolLoopRequestInput)
+            or not isinstance(prepared_input.prompt_input, PromptRenderInput)
+            or not isinstance(preparation.prompt_request, PromptBuildRequest)):
+        preparation.prompt_input = None
+        preparation.request_input = None
+        preparation.selection_reason = "request_facts_unknown"
+        return
+    request = deepcopy(preparation.prompt_request)
+    request.inject = list(prepared_input.prompt_input.injection_fragments)
+    if request.tools is None:
+        if prepared_input.tool_context:
+            preparation.prompt_input = None
+            preparation.request_input = None
+            preparation.selection_reason = "request_facts_unknown"
+            return
+    else:
+        request.tools.tool_context = list(prepared_input.tool_context or ())
+    preparation.prompt_request = request
+    preparation.prompt_input = prepared_input.prompt_input
+    preparation.request_input = None
+
+
 # LLM: 只有原 PromptBuilder 可分离一次宿主读取与纯渲染；自定义 renderer 继续原 build 并保持输入未知，不重复采集 Goal/文件/Skill。
 # 函数用途: 保存实际首请求使用的提示输入，调用原纯渲染器，默认关闭时完全沿用原 build。
 def render_first_request_prompt(agent: object, params: object, request: object) -> str:
@@ -96,8 +143,7 @@ def render_first_request_prompt(agent: object, params: object, request: object) 
                              system_prompt_override=request.system_prompt_override, context_scope=request.context_scope,
                              workspace_context_override=request.workspace_context_override)
     prepared = builder.prepare_render_input(request)
-    preparation.prompt_input = prepared
-    preparation.prompt_request = deepcopy(request)
+    record_first_request_prompt(agent, params, request, prepared)
     return render_prepared_prompt(prepared)
 
 

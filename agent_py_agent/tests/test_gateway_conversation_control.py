@@ -5,6 +5,7 @@ import socket
 import threading
 import time
 import urllib.request
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -37,6 +38,13 @@ from agent_py_agent.agent.conversation.authority import (
     CONVERSATION_REQUEST_ID_ATTR,
     CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR,
 )
+from agent_py_agent.agent.conversation.compact import (
+    ConversationCompactOptions,
+    load_conversation_compact_source,
+    prepare_conversation_context,
+)
+from agent_py_agent.agent.conversation.compact_checkpoint import committed_compact_checkpoint_chain
+from agent_py_agent.agent.conversation.compact_scope import THREAD_COMPACT_SCOPE, CompactScope
 from agent_py_agent.agent.conversation.control_commands import parse_conversation_control
 from agent_py_agent.agent.conversation.runtime import (
     BackgroundRunRequest,
@@ -44,6 +52,10 @@ from agent_py_agent.agent.conversation.runtime import (
 )
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.gateway_parts import control_service
+from agent_py_agent.agent.gateway_parts.control_operation_service import (
+    execute_gateway_control_operation,
+    gateway_control_operation_status_payload,
+)
 from agent_py_agent.agent.gateway_parts.control_service import (
     GatewayControlScope,
     execute_gateway_conversation_control,
@@ -3083,7 +3095,7 @@ def test_context_control_reads_the_same_thread_and_auto_compact_policy(tmp_path)
     assert unchanged is not None and unchanged.compact_generation == 0
 
 
-def test_manual_compact_uses_canonical_checkpoint_lane_and_custom_instructions(tmp_path) -> None:
+def test_manual_compact_uses_canonical_checkpoint_lane_and_custom_instructions(tmp_path, monkeypatch) -> None:
     prompts: list[str] = []
 
     class SummaryBackend:
@@ -3128,6 +3140,8 @@ def test_manual_compact_uses_canonical_checkpoint_lane_and_custom_instructions(t
                 "channel": "feishu",
             }
         )
+    original_rows = agent.conversation_store.messages.recent(thread.thread_id, limit=0)
+    monkeypatch.setattr(agent, "run", lambda *_args, **_kwargs: pytest.fail("手动压缩发送了业务请求"))
 
     result = execute_gateway_conversation_control(
         agent,
@@ -3144,6 +3158,8 @@ def test_manual_compact_uses_canonical_checkpoint_lane_and_custom_instructions(t
     assert compacted is not None and compacted.compact_generation == 1
     assert compacted.compact_checkpoint_id
     assert "优先保留未完成事项" in prompts[0]
+    assert "会话历史估算" in result.message
+    assert agent.conversation_store.messages.recent(thread.thread_id, limit=0) == original_rows
 
 
 def test_manual_compact_without_history_is_a_successful_noop(tmp_path) -> None:
@@ -3166,6 +3182,88 @@ def test_manual_compact_without_history_is_a_successful_noop(tmp_path) -> None:
     assert result.status is None
     assert result.message == "当前会话还没有可压缩的历史。"
     assert agent.conversation_store.threads.list() == []
+
+
+def test_manual_compact_after_task_head_uses_thread_source_and_replays_receipt(tmp_path, monkeypatch) -> None:
+    from agent_py_agent.agent.conversation import compact as compact_module
+
+    prompts: list[str] = []
+
+    class SummaryBackend:
+        name = "manual-thread-scope-test"
+
+        def probe_tool_capability(self):
+            return _native_test_capability(self.name, "local://manual-thread-scope-test")
+
+        def generate(self, prompt: str, **_kwargs) -> ModelResponse:
+            prompts.append(prompt)
+            return ModelResponse(text="全线程已完成历史摘要", backend=self.name)
+
+    agent = SimpleAgent(AgentConfig(
+        model_backend="echo", model_context_window_tokens=20_000, max_tokens=4_096,
+        gateway_per_user_owner_scoping=False,
+    ), tmp_path)
+    agent.backend = SummaryBackend()
+    store = agent.conversation_store
+    thread = store.threads.get_or_create({
+        "canonical_user_id": "u-1", "channel": "feishu",
+        "channel_conversation_id": "c-1", "channel_user_id": "u-1",
+    })
+    rows = [store.messages.append({
+        "thread_id": thread.thread_id, "role": role, "content": f"原始历史 {role}",
+        "channel": "feishu", "metadata": {"conversation_request_id": f"prior-{role}"},
+    }) for role in ("user", "assistant")]
+    local_source = load_conversation_compact_source(
+        agent, store, thread, scope=CompactScope(kind="task", task_id="task-A", created_at=1.0),
+        select_rows=lambda canonical: canonical[:1],
+    )
+    with monkeypatch.context() as local_patch:
+        local_patch.setattr(compact_module, "_summarize", lambda *_args, **_kwargs: "仅任务A的摘要")
+        local = prepare_conversation_context(
+            agent, store, thread, options=ConversationCompactOptions(force=True, source=local_source),
+        )
+    assert local.compacted and local.thread.compact_generation == 1
+    assert local.thread.summary == ""
+    thread_source = load_conversation_compact_source(
+        agent, store, local.thread, scope=THREAD_COMPACT_SCOPE,
+    )
+    expected_before = compact_module._projected_context_tokens(
+        agent, thread_source.compact_context.view.summary, list(thread_source.messages), "",
+        operation_evidence=thread_source.compact_context.view.operation_evidence,
+        recent_operation_evidence=thread_source.recent_operation_evidence,
+    )
+    monkeypatch.setattr(agent, "run", lambda *_args, **_kwargs: pytest.fail("手动压缩发送了业务请求"))
+    paths = gateway_paths(agent)
+    command = _command("/compact")
+    scope = GatewayControlScope("u-1", "feishu", "c-1", metadata={"message_id": "manual-thread-1"})
+    first = execute_gateway_control_operation(agent, paths, command, scope, command_text="/compact")
+    replay = execute_gateway_control_operation(agent, paths, command, scope, command_text="/compact")
+
+    assert first.state == replay.state == "completed"
+    assert json.loads(json.dumps(gateway_control_operation_status_payload(first))) == (
+        gateway_control_operation_status_payload(replay)
+    )
+    assert gateway_control_operation_status_payload(replay)["ok"] is True
+    assert f"会话历史估算（不含下一请求）：{expected_before:,} →" in first.result["message"]
+    assert "压缩前待处理历史 2 条已完成消息" in first.result["message"]
+    assert len(prompts) == 1
+    assert store.messages.recent(thread.thread_id, limit=0) == rows
+    committed = store.threads.require(thread.thread_id)
+    assert committed.compact_generation == 2
+    checkpoints = committed_compact_checkpoint_chain(agent, committed)
+    assert len(checkpoints) == 2
+    assert checkpoints[0]["scope"]["kind"] == "task"
+    assert checkpoints[1]["scope"] == THREAD_COMPACT_SCOPE.to_dict()
+    assert checkpoints[1]["source_message_ids"] == [row.message_id for row in rows]
+    again = execute_gateway_control_operation(
+        agent, paths, command,
+        GatewayControlScope("u-1", "feishu", "c-1", metadata={"message_id": "manual-thread-2"}),
+        command_text="/compact",
+    )
+    assert again.state == "completed" and again.result["ok"] is True
+    assert "没有新的已完成历史" in again.result["message"]
+    assert len(prompts) == 1
+    assert store.threads.require(thread.thread_id).compact_generation == 2
 
 
 def test_manual_compact_rejects_a_live_turn_and_effort_never_fakes_a_setting(tmp_path) -> None:
@@ -3202,6 +3300,44 @@ def test_manual_compact_rejects_a_live_turn_and_effort_never_fakes_a_setting(tmp
     assert "未改变任何模型参数" in effort.message
     assert effort_status.ok is True
     assert "供应商管理推理强度" in effort_status.message
+
+
+def test_manual_compact_cas_race_does_not_replace_winning_head(tmp_path, monkeypatch) -> None:
+    from agent_py_agent.agent.conversation import compact as compact_module
+
+    agent = SimpleAgent(AgentConfig(
+        model_backend="echo", model_context_window_tokens=20_000, max_tokens=4_096,
+        gateway_per_user_owner_scoping=False,
+    ), tmp_path)
+    store = agent.conversation_store
+    thread = store.threads.get_or_create({
+        "canonical_user_id": "u-1", "channel": "feishu",
+        "channel_conversation_id": "c-1", "channel_user_id": "u-1",
+    })
+    rows = [store.messages.append({
+        "thread_id": thread.thread_id, "role": role, "content": f"并发前历史 {role}",
+        "channel": "feishu",
+    }) for role in ("user", "assistant")]
+    original_commit = compact_module._commit_compact_candidate
+    monkeypatch.setattr(compact_module, "_summarize", lambda *_args, **_kwargs: "本次候选摘要")
+    monkeypatch.setattr(agent, "run", lambda *_args, **_kwargs: pytest.fail("手动压缩发送了业务请求"))
+
+    def concurrent_commit(request, candidate):
+        store.threads.update_atomic(thread.thread_id, lambda current: replace(
+            current, compact_generation=current.compact_generation + 1,
+            summary="并发提交者的摘要",
+        ))
+        return original_commit(request, candidate)
+
+    monkeypatch.setattr(compact_module, "_commit_compact_candidate", concurrent_commit)
+    result = execute_gateway_conversation_control(
+        agent, gateway_paths(agent), _command("/compact"), _scope(),
+    )
+    winner = store.threads.require(thread.thread_id)
+    assert result.ok is False
+    assert winner.compact_generation == 1
+    assert winner.summary == "并发提交者的摘要"
+    assert store.messages.recent(thread.thread_id, limit=0) == rows
 
 
 def test_manual_compact_stop_interrupts_provider_and_preserves_generation(tmp_path) -> None:

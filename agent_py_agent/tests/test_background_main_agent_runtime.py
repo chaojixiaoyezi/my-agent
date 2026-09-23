@@ -94,19 +94,24 @@ def _stub_render_background_context(prepared):
     return f"ctx-generation-{prepared.payload.bundle['thread']['compact_generation']}"
 
 
-# LLM: 控制流桩只在模拟的模型发送边界明确宣布提交；原CAS和真实wire另由专门HTTP测试覆盖。
-# 函数用途: 让旧后台重试/公平让出测试沿新的PreparedCompactRecovery宿主观察成功提交。
-def _stub_committing_background_recovery(monkeypatch, advance):
+# LLM: 首次自动宿主在低压下不提交，只有已报溢出的强制宿主推进代次；原CAS和真实wire由专门HTTP测试覆盖。
+# 函数用途: 让后台重试/公平让出测试按真实恢复次数观察成功提交。
+def _stub_committing_background_recovery(monkeypatch, advance, *, initial_commit=False):
     from agent_py_agent.agent.conversation import background_compact_recovery
 
     prepared = []
 
-    def prepare(_agent, history, _context, **_kwargs):
+    def prepare(_agent, history, _context, **kwargs):
+        forced = kwargs.get("force") is True
+        will_commit = forced or initial_commit
         recovery = SimpleNamespace(
             committed=False,
-            committed_thread=advance(history.compact_source.thread),
+            force=forced,
+            will_commit=will_commit,
+            committed_thread=advance(history.compact_source.thread) if will_commit else None,
         )
-        prepared.append((history, recovery))
+        if will_commit:
+            prepared.append((history, recovery))
         return recovery
 
     monkeypatch.setattr(background_compact_recovery, "prepare_background_compact_recovery", prepare)
@@ -245,8 +250,9 @@ def test_background_context_overflow_resumes_after_committed_recovery_same_slice
     assert observed_params[1].on_chunk is sink
 
 
-def test_background_compact_slice_yields_after_eight_progressful_generations(monkeypatch) -> None:
-    """连续压缩达到公平性上限时应让出调度片，而不是伪造程序崩溃。"""
+@pytest.mark.parametrize("initial_commit", [False, True])
+def test_background_compact_slice_yields_after_eight_progressful_generations(monkeypatch, initial_commit) -> None:
+    """首次自动压缩无论是否提交，真实提交满八代便让出调度片。"""
     from dataclasses import replace
 
     from agent_py_agent.agent.agent_core import runtime_mixin
@@ -271,7 +277,7 @@ def test_background_compact_slice_yields_after_eight_progressful_generations(mon
         def run(self, _prompt, *, params):
             del params
             recovery = _HOST.get()
-            if recovery is not None:
+            if recovery is not None and recovery.will_commit:
                 assert recovery.committed is False
                 recovery.committed = True
                 latest[0] = recovery.committed_thread
@@ -312,7 +318,9 @@ def test_background_compact_slice_yields_after_eight_progressful_generations(mon
 
     monkeypatch.setattr(runtime_module, "_run_params", fake_run_params)
     _stub_empty_compact_views(monkeypatch)
-    recoveries = _stub_committing_background_recovery(monkeypatch, advancing_recovery)
+    recoveries = _stub_committing_background_recovery(
+        monkeypatch, advancing_recovery, initial_commit=initial_commit,
+    )
     monkeypatch.setattr(execution_module, "prepare_background_context", _stub_prepared_background_context)
     monkeypatch.setattr(execution_module, "render_background_context", _stub_render_background_context)
     monkeypatch.setattr(

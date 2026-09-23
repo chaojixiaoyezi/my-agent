@@ -24,8 +24,8 @@ from agent_py_agent.tests.test_gateway_model_observation import install_backend
 
 # LLM: 初始化真实owner/thread和历史；只用测试模型配置，不伪造恢复参数、来源或Compact提交。
 # 函数用途: 给恢复链验收准备一条旧历史与带重复注入文本的普通新请求。
-def _history_request(tmp_path, *, tools=False, mode="disabled", candidate_backend="anthropic_compatible"):
-    fixture = actual_request(tmp_path, mode=mode, tools=tools, candidate_backend=candidate_backend)
+def _history_request(tmp_path, *, tools=False, mode="disabled", candidate_backend="anthropic_compatible", original_window=250_000, history_repeat=100):
+    fixture = actual_request(tmp_path, mode=mode, tools=tools, candidate_backend=candidate_backend, original_window=original_window)
     agent = fixture.agent
     context = fixture.context
     context.request["inject"] = ["# Conversation Context", "", "# Conversation Context"]
@@ -34,7 +34,7 @@ def _history_request(tmp_path, *, tools=False, mode="disabled", candidate_backen
     ))
     for role in ("user", "assistant"):
         assert append_gateway_conversation_message(agent, {}, conversation, request_id="previous-" + role,
-                                                   role=role, content="之前核对过的原始资料" * 100)
+                                                   role=role, content="之前核对过的原始资料" * history_repeat)
     return fixture
 
 
@@ -94,7 +94,7 @@ def test_full_gateway_recovery_reuses_preparation_and_sends_selected_payload(tmp
     request_execution._run_gateway_ask(context)
     assert seen == ["overflow", "summary", "restored"]
     assert len(business) == 3
-    assert len(prepares) == 2 and len(rendered) == 1 and len(projections) == 1
+    assert len(prepares) == 2 and len(rendered) == 2 and len(projections) == 1
     material = projections[0]
     assert material.request_input.prompt_input.injection_fragments[:3] == tuple(context.request["inject"])
     assert material.host_state.compact_operation_evidence_ref
@@ -159,3 +159,89 @@ def test_uncommitted_recovery_never_sends_business_request(tmp_path, monkeypatch
     assert thread.compact_generation == (1 if failure == "generation" else 0)
     if failure == "generation":
         assert thread.summary == "另一个提交者已经获胜"
+
+
+@pytest.mark.parametrize("mode,reject", [("disabled", False), ("apply", False), ("apply", True)])
+def test_initial_compact_precedes_model_adoption_and_rejection_baseline(tmp_path, monkeypatch, mode, reject):
+    from agent_py_agent.tests.test_decision_settings import patch
+    from agent_py_agent.tests.test_gateway_model_adoption import before_final_check
+
+    fixture = _history_request(tmp_path, mode=mode, original_window=20_000, history_repeat=2500)
+    decision = install_backend(monkeypatch, fixture)
+    prepares, summaries, sends, candidates = [], [], [], []
+    original = runtime_mixin._prepare_runtime_context
+    original_project = recovery._project_recovery_candidate
+
+    def project(*args):
+        material = original_project(*args)
+        if args[-1].is_candidate:
+            candidates.append(material)
+        return material
+
+    monkeypatch.setattr(recovery, "_project_recovery_candidate", project)
+
+    def prepare(*args, **kwargs):
+        prepares.append(True)
+        return original(*args, **kwargs)
+
+    def on_business(wire):
+        host = _HOST.get()
+        compact_host = host.compact_recovery
+        if not compact_host.committed:
+            assert not compact_host.force
+            summaries.append(wire)
+        else:
+            sends.append(wire)
+            assert compact_host.committed_thread.compact_generation == 1
+            assert compact_host.resolved_input is not None
+            material = candidates[-1]
+            assert material.params.conversation_history_seed.compact_generation == 1
+            if wire["model"] == "original-model":
+                projected = material.projection
+                assert wire == _payload(fixture.agent.backend, projected.provider_prompt,
+                                        list(material.request_input.native_tools) or None,
+                                        projected.tool_choice, projected.messages, projected.system_instruction)
+
+    monkeypatch.setattr(runtime_mixin, "_prepare_runtime_context", prepare)
+    if reject:
+        before_final_check(monkeypatch, lambda *_: patch(fixture.agent, {"points.model_selection.mode": "off"}))
+    fake_http(monkeypatch, fixture, on_business=on_business)
+    request_execution._run_gateway_ask(fixture.context)
+    assert len(prepares) == 1 and summaries and len(sends) == 1
+    assert all(wire["model"] == "original-model" for wire in summaries)
+    assert sends[0]["model"] == ("candidate-large" if mode == "apply" and not reject else "original-model")
+    assert len(decision.calls) == (mode == "apply")
+    thread = fixture.agent.conversation_store.threads.require(fixture.thread_id)
+    assert thread.compact_generation == 1
+
+
+def test_initial_without_compactable_source_can_adopt_larger_model(tmp_path, monkeypatch):
+    from agent_py_agent.agent.agent_core.model.context_pressure import (
+        model_request_input_ceiling,
+        projected_model_context_components,
+    )
+    from agent_py_agent.agent.agent_core.tool_request_projection import project_tool_loop_request
+
+    fixture = actual_request(tmp_path, original_window=15_000)
+    fixture.agent.config.memory_compact_auto_trigger_percent = 50
+    decision = install_backend(monkeypatch, fixture)
+    evaluated = []
+    original = recovery.PreparedCompactRecovery._automatic_noop
+
+    def check(self, params, frozen):
+        projection = project_tool_loop_request(frozen)
+        tokens, _ = projected_model_context_components(projection)
+        evaluated.append((tokens, self.source.policy.trigger_tokens,
+                          model_request_input_ceiling(self.agent, self.source.policy.context_window_tokens)))
+        assert not self.source.messages and not params.archive_tool_calls
+        return original(self, params, frozen)
+
+    monkeypatch.setattr(recovery.PreparedCompactRecovery, "_automatic_noop", check)
+    business, _ = fake_http(monkeypatch, fixture)
+    request_execution._run_gateway_ask(fixture.context)
+    assert len(evaluated) == 1
+    tokens, trigger, ceiling = evaluated[0]
+    assert trigger < tokens < ceiling
+    assert [wire["model"] for wire, _ in business] == ["candidate-large"]
+    assert len(decision.calls) == 1
+    assert fixture.agent.conversation_store.threads.require(fixture.thread_id).compact_generation == 0

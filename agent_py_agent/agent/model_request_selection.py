@@ -35,6 +35,13 @@ def render_selected_request(agent: object, params: object, request: object) -> s
     return rendered if rendered is not None else render_first_request_prompt(agent, params, request)
 
 
+# LLM: 只在真实业务请求选模前调用；先确定上下文，再保存模型拒绝回退基线，不重新准备提示。
+# 函数用途: 让宿主在首次选模之前完成同次输入的自动压缩或恢复。
+def prepare_request_context(agent: object, params: object, prompt: str) -> tuple[object, str]:
+    callback = getattr(_HOST.get(), "prepare_request", None)
+    return callback(agent, params, prompt) if callback is not None else (params, prompt)
+
+
 # LLM: 只把原完整模型参数交给请求宿主；无作用域时返回同一对象和同一字节，不改变子代理采用策略。
 # 函数用途: 在首请求完整准备后选定本工作片依赖，工具后续轮次保持已采用配置。
 def select_request_model(agent: object, params: object, prompt: str) -> tuple[object, str]:

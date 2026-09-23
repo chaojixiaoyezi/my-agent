@@ -159,8 +159,8 @@ def invoke_background_turn(
     return result, snapshot
 
 
-# LLM: 本片冻结摘要范围及覆盖，与原历史种子和工具参数一同传递；展示绑定宿主turn，局部Compact不发布全线程摘要。
-# 函数用途: 用同一适用摘要准备后台模型片，压缩续跑沿用展示和拒绝记录，失败或取消沿原路径退出。
+# LLM: 本片冻结摘要范围及覆盖，与原历史种子和工具参数一同传递；首次和恢复提交共用八代上限，局部Compact不发布全线程摘要。
+# 函数用途: 用同一适用摘要准备后台模型片，压缩续跑沿用展示和拒绝记录，成功提交计入公平让出预算。
 def run_background_turn_with_compact(
     execution: BackgroundExecutionDependencies,
     thread: ConversationThread,
@@ -178,6 +178,7 @@ def run_background_turn_with_compact(
     capability_presentation = None
     presentation_evaluated = False
     recovering = False
+    committed_generations = 0
 
     # LLM: 同步回调只写当前调用的局部状态及原参数，失效 None 不清已评估事实，绝不落盘或回写请求。
     # 函数用途: 让 Compact 和后续模型尝试都读取本后台 turn 的最新展示。
@@ -191,7 +192,7 @@ def run_background_turn_with_compact(
         execution.agent, execution.store, current, request,
         proactive_delivery_available=proactive_delivery_available,
     )
-    # 首次业务尝试不消耗Compact配额，之后每次必须真实提交才可继续。
+    # 首次业务尝试只有真实提交才消耗Compact配额，之后每次恢复必须真实提交才可继续。
     for _attempt in range(9):
         history_seed = history.seed
         run_params = execution.prepare_run(
@@ -231,6 +232,7 @@ def run_background_turn_with_compact(
             raise RuntimeError("background compact recovery did not commit")
         if recovery is not None and recovery.committed:
             current = recovery.committed_thread
+            committed_generations += 1
         if str(getattr(result, "runtime_status", "") or "").strip().lower() != ("context_overflow"):
             _persist_background_native_turn(execution.store, request, result)
             return result
@@ -244,7 +246,7 @@ def run_background_turn_with_compact(
             result_active_turn_user_inputs=getattr(result, "active_turn_user_inputs", None),
             released_input_ids=released_input_ids,
         )
-        if _attempt == 8:
+        if committed_generations >= 8:
             raise BackgroundCompactSliceYield(
                 "background main compact slice advanced eight generations and will resume"
             )
@@ -289,8 +291,8 @@ def _refresh_background_compact_source(execution, current, history):
     return latest, refresh_background_history(execution.agent, execution.store, latest, history)
 
 
-# LLM: 只有真实溢出后且来源已知才装恢复宿主；finally清ContextVar，transcript或活动归档都先完整计量再同次发送。
-# 函数用途: 执行后台一次原模型尝试，恢复时同时带回获胜CAS的线程与参数事实。
+# LLM: 首次自动和溢出恢复均绑定同次已冻结来源；force只区分阈值与已报溢出，完整准备前不得另路粗估提交。
+# 函数用途: 执行后台一次原模型尝试，并将可能获胜的Compact线程及原运行身份交回宿主。
 def _run_background_recovery_attempt(execution, prompt, params, history, context, *, recovering, activity_sink):
     from ..agent_core.runtime.run_params import run_params_with_request_id
     from ..model_request_selection import model_request_selection_scope
@@ -298,10 +300,11 @@ def _run_background_recovery_attempt(execution, prompt, params, history, context
 
     params = run_params_with_request_id(params)
     recovery = None
-    if recovering and history.compact_source is not None:
+    if history.compact_source is not None:
         recovery = prepare_background_compact_recovery(
             execution.agent, history, context, request_id=params.request_id,
             progress_callback=activity_sink.write_conversation_compact_progress, interrupt_check=is_interrupted,
+            force=recovering,
         )
     with model_request_selection_scope(recovery) if recovery is not None else nullcontext():
         result, resolved = _run_background_model_attempt(execution.agent, prompt, params)
