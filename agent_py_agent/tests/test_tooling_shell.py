@@ -437,19 +437,18 @@ class TestShellToolEdgeCases:
     @patch("subprocess.Popen")
     def test_full_access_allows_external_working_dir(self, mock_popen, tmp_path: Path):
         """full-access 允许显式使用工作区外的已有目录(cwd 现传给 Popen)。"""
+        import subprocess
+
         from agent_py_agent.agent.tooling.shell import ShellTool, ShellToolOptions
 
         workspace = tmp_path / "workspace"
         external = tmp_path / "external"
         workspace.mkdir()
         external.mkdir()
-        proc = mock_popen.return_value
-        proc.pid = 999999
-        proc.communicate.return_value = ("", "")
-        proc.returncode = 0
-
-        tool = ShellTool(workspace, options=ShellToolOptions(access_mode="full-access", default_timeout=30))
-        result = tool.execute({"command": "pwd", "working_dir": str(external)})
+        completed = subprocess.CompletedProcess("pwd", 0, "", "")
+        with patch("agent_py_agent.agent.tooling.shell._communicate_process", return_value=completed):
+            tool = ShellTool(workspace, options=ShellToolOptions(access_mode="full-access", default_timeout=30))
+            result = tool.execute({"command": "pwd", "working_dir": str(external)})
 
         assert result.ok is True
         assert mock_popen.call_args.kwargs["cwd"] == str(external)

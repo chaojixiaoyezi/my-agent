@@ -1,6 +1,7 @@
 
-# LLM: 访问与归属读取 process_scope；v2/v3 复用原出生标识和终止回执，共享激活不向业务会话暴露；联测 Store/host/shell。
-# 模块用途: 从同一持久账查询或精确停止受管进程，不让普通任务控制共享插件连接，不把发信号当清理完成。
+# LLM: 访问与归属读取 process_scope；v2/v3 复用原出生标识和终止回执，共享激活不向业务会话暴露。
+# 前台自然退出也须在回收组长前按启动出生身份清理原组；联测 Store/host/shell，不用旧 PID 重建归属。
+# 模块用途: 查询或精确停止受管进程，并收回前台命令退出后的原组残留；发送信号和命令退出均不等于清理完成。
 from __future__ import annotations
 
 import json
@@ -486,7 +487,23 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
-# LLM: 前台超时、后台停止和 runner 清理共用唯一终止入口；冻结资源可要求指定出生标识，快照不匹配时绝不发信号。
+# LLM: 仅前台输出采集完成后调用；POSIX 用内核退出事实观测，不先 poll 丢失组长，启动身份缺失或变化必须保留未知。
+# Windows 保留原 Popen 退出路径；本入口不选择后台/PTY，不持久化另一套资源账，联测 shell foreground cleanup。
+# 函数用途: 父进程确实退出后，先回收可证明属于该前台调用的残留，再返回原退出码和独立清理回执。
+def finish_foreground_process(
+    proc: subprocess.Popen,
+    *,
+    expected_birth_token: str | None,
+) -> tuple[int | None, ProcessTerminationReceipt | None]:
+    if _IS_WINDOWS:
+        return proc.poll(), None
+    if proc.returncode is None and not _process_instance_terminated(proc.pid, expected_birth_token or ""):
+        return None, None
+    termination = terminate_process_tree(proc.pid, proc, expected_birth_token=expected_birth_token or "")
+    return proc.poll(), termination
+
+
+# LLM: 前台自然退出/超时、后台停止和 runner 清理共用唯一终止入口；冻结资源可要求指定出生标识，快照不匹配时绝不发信号。
 # 函数用途: 有界发送 TERM/KILL 并回收直接子进程，返回核对回执；无法读取进程信息时不冒充确认。
 def terminate_process_tree(
     pid: int,
@@ -595,14 +612,14 @@ def _process_tree_snapshot(root_pid: int) -> tuple[dict[int, str], bool]:
 
 
 # LLM: 仅独立组长且出生身份在枚举前后相同才拥有整组；不恢复已回收 root 的旧 PGID，不读取命令文字或扩大到宿主组。
-# 函数用途: 找出仍由本次组长证明归属的进程组成员，避免外层 Shell 退出后漏掉被系统接管的子进程。
+# 函数用途: 用关闭 stdin 的只读探测找出原组成员，避免外层 Shell 退出后漏掉被系统接管的子进程或抢读宿主输入。
 def _exclusive_group_members(root_pid: int) -> tuple[list[int], bool]:
     birth = capture_process_birth_token(root_pid)
     if not birth:
         return [], _process_instance_terminated(root_pid, "")
     try:
         result = subprocess.run(
-            ["ps", "-axo", "pid=,pgid="], capture_output=True, text=True,
+            ["ps", "-axo", "pid=,pgid="], stdin=subprocess.DEVNULL, capture_output=True, text=True,
             timeout=1, check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
@@ -630,7 +647,7 @@ def _exclusive_group_members(root_pid: int) -> tuple[list[int], bool]:
 
 
 # LLM: 进程枚举只使用系统结构化字段；无法访问或解析时返回不完整，禁止用空表证明退出。
-# 函数用途: 读取宿主机父子进程关系；进程恰好消失不算错误，其余读取失败保留核对缺口。
+# 函数用途: 读取宿主机父子关系，探测命令关闭 stdin；进程消失不算错误，其余读取失败保留核对缺口。
 def _process_parent_map() -> tuple[dict[int, int], bool]:
     proc_root = Path("/proc")
     if proc_root.is_dir():
@@ -655,6 +672,7 @@ def _process_parent_map() -> tuple[dict[int, int], bool]:
     try:
         completed = subprocess.run(
             ["ps", "-axo", "pid=,ppid="],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=1,
@@ -691,7 +709,7 @@ def _process_instance_terminated(pid: int, birth_token: str) -> bool:
 
 # LLM: Linux 从 proc、其它 POSIX 从 ps 读取内核进程状态；读取失败不等于已死。
 #   只读探测不回收进程，保留持有 Popen 的调用方获取真实退出码的权利。
-# 函数用途: 确认尚未被父进程回收、但已不能继续写文件的进程，包括 macOS 的僵尸。
+# 函数用途: 确认尚未回收但已不能继续写文件的进程；macOS 探测关闭 stdin，保留原父进程退出码。
 def _process_is_zombie(pid: int) -> bool:
     if _IS_WINDOWS:
         return False
@@ -704,6 +722,7 @@ def _process_is_zombie(pid: int) -> bool:
     try:
         result = subprocess.run(
             ["ps", "-o", "stat=", "-p", str(pid)],
+            stdin=subprocess.DEVNULL,
             capture_output=True, text=True, timeout=1, check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
@@ -713,7 +732,7 @@ def _process_is_zombie(pid: int) -> bool:
 
 # LLM: Persisted process control must pair a PID with a stable birth identity.
 # Linux uses proc start ticks; other hosts use their native start timestamp command.
-# 函数用途: 读取一个进程的启动指纹，供跨进程状态核对和防 PID 复用误杀。
+# 函数用途: 读取启动指纹防 PID 复用误杀，宿主探测关闭 stdin，不能抢读 Gateway/TUI 输入。
 def capture_process_birth_token(pid: int) -> str:
     try:
         stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
@@ -731,6 +750,7 @@ def capture_process_birth_token(pid: int) -> str:
     try:
         completed = subprocess.run(
             argv,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=1,
@@ -826,6 +846,7 @@ __all__ = [
     "ProcessRegistry",
     "ProcessTerminationReceipt",
     "capture_process_birth_token",
+    "finish_foreground_process",
     "process_registry",
     "terminate_process_tree",
 ]

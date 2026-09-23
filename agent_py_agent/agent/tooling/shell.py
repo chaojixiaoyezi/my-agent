@@ -2,7 +2,8 @@
 # 捕获全文与模型预览分离，展示归档不得拿裁剪预览充全文；修改执行入口需联测参数、危险命令和 owner 沙箱。
 # 输出行数按采集正文的 LF 分隔计算，模型回执、截断说明与展示事实必须共用口径。
 # 后台访问身份由 process_scope 规范，不能拿其会话回退值推断任务执行归属。
-# 模块用途: 在用户权限内执行命令并整理输出、进程及产物保护记录，保留有界采集原文和真实缺失事实。
+# 前台从启动保留出生身份，普通退出先清理原组再回收组长；命令结果和清理未知分开，不影响显式后台。
+# 模块用途: 在用户权限内执行命令、收回前台资源并整理输出及产物记录，保留原退出码和真实清理缺口。
 from __future__ import annotations
 
 import hashlib
@@ -74,6 +75,8 @@ from .process_output_capture import ProcessOutputCapture
 from .process_registry import (
     BackgroundProcess,
     ProcessTerminationReceipt,
+    capture_process_birth_token,
+    finish_foreground_process,
     process_registry,
     terminate_process_tree,
 )
@@ -455,12 +458,13 @@ _MAX_BG_LOG_BYTES = (
     1_000_000_000  # 后台命令日志字节上限(1GB);超限杀进程组,防失控/恶意命令写满磁盘(审计 #16)
 )
 _PROCESS_PIPE_DRAIN_SECONDS = 2.0
+_FOREGROUND_EXIT_PROBE_SECONDS = 0.25
 
 
-# LLM: 前台和后台必须共享同一个终止实现；返回可信回执，不能凭函数被调用就宣称清理成功。
-# 函数用途: 终止指定命令的可观察进程树，并把退出核对信息交回超时路径。
-def _kill_process_group(proc: subprocess.Popen) -> ProcessTerminationReceipt:
-    return terminate_process_tree(proc.pid, proc)
+# LLM: 前台和后台共用原终止实现；前台传入启动时冻结的出生身份，不能凭旧 PID 或函数被调用就宣称清理成功。
+# 函数用途: 终止指定命令的可观察进程树，并把身份与退出核对信息交回取消/超时路径。
+def _kill_process_group(proc: subprocess.Popen, expected_birth_token: str | None = None) -> ProcessTerminationReceipt:
+    return terminate_process_tree(proc.pid, proc, expected_birth_token=expected_birth_token)
 
 
 # LLM: subprocess 的 TimeoutExpired 在 text 模式也可能携带 bytes；此处仅做展示解码。
@@ -469,8 +473,9 @@ def _process_output_text(value: str | bytes | None) -> str:
     return value.decode("utf-8", errors="replace") if isinstance(value, bytes) else str(value or "")
 
 
-# LLM: 前台宿主与沙箱共用采集和进程树终止；管道结束前不得 poll 回收组长，否则孤儿后代失去可核对的组归属；联测 shell orphan kill。
-# 函数用途: 等待命令及输出管道完成；取消/超时清理原进程树和独立组成员，保留有限输出与真实终止事实。
+# LLM: 前台宿主与沙箱共用采集和终止；从启动冻结出生身份，管道 EOF 后也不能先 poll，必须先清理可验证的原组。
+# EOF 后父仍活时限制内核探测频率；取消与 deadline 继续每轮检查，不把短期探测变成持久轮询器。
+# 函数用途: 等待命令与管道完成并收回前台后代；保留原退出码、有限输出及独立清理回执，联测 foreground/orphan cleanup。
 def _communicate_process(
     proc: subprocess.Popen[str],
     *,
@@ -478,27 +483,34 @@ def _communicate_process(
     timeout: int,
 ) -> subprocess.CompletedProcess[str]:
     deadline = time.monotonic() + max(0.0, float(timeout))
+    birth_token = capture_process_birth_token(proc.pid) if os.name != "nt" else None
     capture = ProcessOutputCapture(proc)
-    with register_cancellation_callback(lambda: _kill_process_group(proc)):
+    next_exit_probe = 0.0
+    with register_cancellation_callback(lambda: _kill_process_group(proc, birth_token)):
         while True:
             if is_interrupted() or cancellation_requested():
-                _kill_process_group(proc)
+                _kill_process_group(proc, birth_token)
                 capture.finish(_PROCESS_PIPE_DRAIN_SECONDS)
                 raise CommandInterruptedError(command)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                termination = _kill_process_group(proc)
+                termination = _kill_process_group(proc, birth_token)
                 drained = capture.finish(_PROCESS_PIPE_DRAIN_SECONDS)
                 out, err, facts = capture.result()
                 error = CommandTimeoutError(command, timeout, out, err, termination, drained)
                 error.capture = facts
                 raise error
-            if capture.done() and proc.poll() is not None:
+            code, termination = None, None
+            if capture.done() and time.monotonic() >= next_exit_probe:
+                code, termination = finish_foreground_process(proc, expected_birth_token=birth_token)
+                next_exit_probe = time.monotonic() + _FOREGROUND_EXIT_PROBE_SECONDS
+            if code is not None:
                 out, err, facts = capture.result()
                 if cancellation_requested():
                     raise CommandInterruptedError(command)
-                result = subprocess.CompletedProcess(command, proc.returncode, out, err)
+                result = subprocess.CompletedProcess(command, code, out, err)
                 result.capture = facts
+                result.termination = termination
                 return result
             time.sleep(min(0.02, remaining))
 
@@ -1522,8 +1534,8 @@ def _shell_execution_target(
     )
 
 
-# LLM: 只读取本地执行器生成的进程状态、退出码和终止回执；127/stderr/命令分类均不能证明零副作用。
-# 函数用途: 区分未启动、已终止的失败与未知执行；failed 仍可能有部分写入，不等同于可自动重放。
+# LLM: 只读取执行器的进程状态、退出码和终止回执；普通退出后的清理未知不能被零退出码或 COMMAND_FAILED 掩盖。
+# 函数用途: 区分未启动、已终止的失败与未知执行；命令失败仍可能有部分写入，不等同于可自动重放。
 def _shell_failure_effect_outcome(
     command: str,
     ok: bool,
@@ -1534,6 +1546,8 @@ def _shell_failure_effect_outcome(
     _ = command, output
     if ok or not error_code:
         return ""
+    if error_code == "TOOL_OPERATION_OUTCOME_UNKNOWN":
+        return "unknown"
     if error_code == "TOOL_TIMEOUT":
         facts = process_facts or {}
         termination = facts.get("termination")
@@ -1557,8 +1571,8 @@ def _shell_failure_effect_outcome(
     return ""
 
 
-# LLM: 各退出路径保留独立进程事实；模型body受限，display保留本次有界采集全文，不能重新运行命令补齐显示。
-# 函数用途: 运行前台命令并分别返回模型预览与原文展示；超时和取消不冒充成功或回滚。
+# LLM: 命令退出码、成功标志与清理回执分开；清理未确认使工具保持 UNKNOWN，不能改写原命令结果或自动重放。
+# 函数用途: 运行前台命令并保留预览与有界采集原文；命令成功也要明确报告未收回的进程资源。
 def _run_shell_process_text(
     tool: ShellTool,
     command: str,
@@ -1581,22 +1595,27 @@ def _run_shell_process_text(
         capture = getattr(result, "capture", {})
         if capture and not capture.get("complete", True):
             output += "\n[输出不完整] 管道采集达到保留上限或读取失败；如需完整内容，请将命令输出重定向到文件后分页读取。"
-        ok = result.returncode == 0
-        if not ok:
+        command_succeeded = result.returncode == 0
+        termination = getattr(result, "termination", None)
+        cleanup_unknown = termination is not None and not termination.confirmed
+        if not command_succeeded:
             output += (
                 f"\n[note] 退出码 {result.returncode} 非零"
                 "(测试失败/grep无匹配/diff有差异等常见,非命令本身故障);"
                 "看上方 stdout/stderr 定位修正,勿当工具不可用。"
             )
+        if cleanup_unknown:
+            output += "\n[进程清理未确认] 命令已退出，但原前台进程资源尚未确认收回；保留本次结果，不自动重放命令。"
         stderr = str(getattr(result, "stderr", "") or "")
         return (
             output,
-            ok,
-            "" if ok else "COMMAND_FAILED",
+            command_succeeded and not cleanup_unknown,
+            "TOOL_OPERATION_OUTCOME_UNKNOWN" if cleanup_unknown else "" if command_succeeded else "COMMAND_FAILED",
             {
                 "status": "exited",
                 "return_code": int(result.returncode),
-                "command_succeeded": ok,
+                "command_succeeded": command_succeeded,
+                **({"termination": asdict(termination)} if termination is not None else {}),
                 "stderr_chars": len(stderr),
                 "capture": capture,
                 "stderr_head": stderr[:80],

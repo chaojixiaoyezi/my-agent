@@ -54,7 +54,8 @@ def test_batch_shell_never_consumes_host_stdin(tmp_path, monkeypatch, entry, exp
             monkeypatch.setattr(sandbox, "build_argv", lambda args: args)
             result = sandbox.run(argv, timeout=5)
             output = result.stdout
-        assert observed == [subprocess.DEVNULL]
+        # 前台收尾可能启动只读身份探测；所有命令都必须关闭宿主输入。
+        assert observed and all(stdin == subprocess.DEVNULL for stdin in observed)
         assert output.strip() == ("'provided\\n'" if explicit_pipe else "''")
         assert os.read(read_fd, 100) == b"gateway-private-input\n"
     finally:
