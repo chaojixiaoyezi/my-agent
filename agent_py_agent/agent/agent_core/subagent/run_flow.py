@@ -10,10 +10,6 @@ from functools import partial
 from pathlib import Path
 
 from ...concurrency.interrupt import is_interrupted
-from ...conversation.active_turn_input import (
-    exclude_active_turn_user_input_ids,
-    merge_active_turn_user_inputs,
-)
 from ...conversation.agent_thread import (
     AgentThreadTurnInput,
     append_subagent_thread_result,
@@ -29,7 +25,6 @@ from ...runtime_context import restore_current_subagent_context, set_current_sub
 from ...subagents.context_bundle_refs import runtime_task_attributes
 from ...turn_end import result_turn_end_reason
 from ..runtime.loop_models import RunParams, RuntimeContextRequest
-from ..runtime_mixin import release_active_turn_inputs_for_compact
 from .params import (
     SubagentFinalizeParams,
     SubagentProbeParams,
@@ -256,6 +251,7 @@ def _run_subagent_conversation_turn(
     prompt, attempt_id, conversation_turn_id = turn.prompt, turn.attempt_id, turn.turn_id
     carried_archive_tool_calls: list[dict[str, object]] = []
     carried_active_turn_user_inputs: list[dict[str, object]] = []
+    native_compact_carry = None
     run_params = None
     thread = ensure_subagent_thread(getattr(agent, "subagents", None), task)
     if thread is None:
@@ -291,6 +287,8 @@ def _run_subagent_conversation_turn(
             run_params.partial_turn_callback = partial(
                 _persist_subagent_partial_result, agent, task, turn,
             )
+            run_params.native_compact_carry = native_compact_carry
+            run_params.conversation_turn_id = conversation_turn_id
             _bind_subagent_presentation(run_params, previous_params, conversation_turn_id)
             result, current = _run_subagent_recovery_attempt(
                 agent, run_params, current, task=task, turn=turn, progress_callback=compact_progress,
@@ -304,13 +302,13 @@ def _run_subagent_conversation_turn(
             (
                 carried_archive_tool_calls,
                 carried_active_turn_user_inputs,
+                native_compact_carry,
             ) = _next_subagent_overflow_carry(
-                agent,
-                run_params,
                 result,
                 carried_archive_tool_calls,
                 carried_active_turn_user_inputs,
             )
+            run_params.native_compact_carry = native_compact_carry
             refreshed = _compact_subagent_overflowing_turn(
                 agent,
                 task,
@@ -356,7 +354,8 @@ def _run_subagent_recovery_attempt(agent, params, current, *, task, turn, progre
 
     recovery = None
     if (current.compact_source is not None
-            and (current.compact_source.messages or params.carried_archive_tool_calls)):
+            and (current.compact_source.messages or params.carried_archive_tool_calls
+                 or params.native_compact_carry is not None)):
         recovery = prepare_subagent_compact_recovery(
             agent, current, task, turn, progress_callback=progress_callback, interrupt_check=is_interrupted,
             force=force_compact,
@@ -403,29 +402,27 @@ def _complete_subagent_conversation_turn(agent, task, turn, result, transcript_s
 
 # LLM: Overflow retries may carry only typed tool progress and active-turn input records. These
 # values prevent replay but never authorize a retry without a committed Compact generation.
-# 函数用途: 合并子代理超限轮次的工具与插话事实，过滤已消费输入后交给正式 Compact 续接。
+# 函数用途: 复用公共归并器携带原生IR、完整工具账与插话，过滤原循环已经释放的输入后交给正式Compact。
 def _next_subagent_overflow_carry(
-    agent,
-    run_params: RunParams,
     result: object,
     carried_archive_tool_calls: list[dict[str, object]],
     carried_active_turn_user_inputs: list[dict[str, object]],
-) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
-    released_input_ids = release_active_turn_inputs_for_compact(agent, run_params)
-    result_archive = [
-        dict(item)
-        for item in list(getattr(result, "archive_tool_calls", None) or [])
-        if isinstance(item, dict)
-    ]
-    next_archive = result_archive or carried_archive_tool_calls
-    next_inputs = exclude_active_turn_user_input_ids(
-        merge_active_turn_user_inputs(
-            carried_active_turn_user_inputs,
-            getattr(result, "active_turn_user_inputs", None),
-        ),
-        released_input_ids,
+) -> tuple[list[dict[str, object]], list[dict[str, object]], object]:
+    from ...conversation.compact_carry import (
+        compact_overflow_carry,
+        native_compact_carry_from_result,
     )
-    return next_archive, next_inputs
+
+    native_carry = native_compact_carry_from_result(result)
+    released_input_ids = native_carry.released_input_ids if native_carry is not None else ()
+    next_archive, next_inputs = compact_overflow_carry(
+        carried_archive_tool_calls=carried_archive_tool_calls,
+        carried_active_turn_user_inputs=carried_active_turn_user_inputs,
+        result_archive_tool_calls=getattr(result, "archive_tool_calls", None),
+        result_active_turn_user_inputs=getattr(result, "active_turn_user_inputs", None),
+        released_input_ids=released_input_ids,
+    )
+    return next_archive, next_inputs, native_carry
 
 
 # LLM: transcript与活动归档都必须在下一真实render/select完整计量后推进同一ConversationThread代次；缺来源不能重试。
@@ -452,7 +449,8 @@ def _compact_subagent_overflowing_turn(
             model_surface=model_surface,
         )
         if (request.defer_compact and refreshed.compact_source is not None
-                and (refreshed.compact_source.messages or request.carried_archive_tool_calls)):
+                and (refreshed.compact_source.messages or request.carried_archive_tool_calls
+                     or (request.run_params is not None and request.run_params.native_compact_carry is not None))):
             return refreshed
         if refreshed.compact_generation > request.current.compact_generation:
             return refreshed

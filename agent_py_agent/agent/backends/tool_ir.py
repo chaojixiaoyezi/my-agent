@@ -1,4 +1,4 @@
-# LLM: 原生消息仅保存结构化调用、时间顺序和宿主事实来源；不成为副作用或权限的第二事实源。
+# LLM: 原生消息保存调用、时间顺序及用户输入内部身份；身份不外发，也不成为权限的第二事实源。
 # 模块用途: 定义主/子代理共用的原生历史记录类型，供后端翻译、Compact 和缓存续接使用。
 from __future__ import annotations
 
@@ -22,16 +22,20 @@ from typing import Any
 from ..tooling.runtime_contracts import ToolCall, ToolResult
 
 
+# LLM: input_ids 与原插话包来自同一批 guidance，供后续 Compact 按身份回收；后端只投影 text。
+# 类用途: 保存活动回合的真实用户输入及内部身份，普通初始用户输入仍可只传正文。
 @dataclass(frozen=True)
 class UserTurn:
     """同一运行 turn 期间追加的一条真实用户输入。
 
     这不是运行时策略或系统提示。它用于保存 会话运行时 steer：用户在模型或工具
     正在工作时补充的输入必须留在原有工具往返历史中的准确时间位置，并在后续采样
-    继续作为 ``role=user`` 可见，不能只在下一次请求临时出现一次。
+    继续作为 ``role=user`` 可见，不能只在下一次请求临时出现一次。``input_ids``
+    只用于内部按插话身份追踪和回收，供应商只看到 ``text``。
     """
 
     text: str
+    input_ids: tuple[str, ...] = ()
 
 
 # LLM: 摘要仍非权威；source由原构造点赋值，候选只能按结构化来源替换，不解析正文，provider不发送该字段。

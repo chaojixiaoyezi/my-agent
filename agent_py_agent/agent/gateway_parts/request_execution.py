@@ -3,6 +3,7 @@
 # 修改须联测停止、Compact、repair 与重启恢复，保持原锁、提交顺序和 typed 错误，不另建兼容执行链。
 # 同turn展示及已评估事实仅由本请求局部回调持有，失效清除后本turn不再推荐，不进恢复账或结果。
 # 延迟transcript Compact沿同次恢复准备提交；原CAS后的上下文必须回传至下一溢出或最终持久化。
+# typed overflow携带原生IR与精确插话ID，下一轮重建权限/前缀，不能用归档preview替代原完整工具回执。
 # 模块用途: 协调 Gateway 一轮请求的租约、模型执行、超窗恢复和收尾，复用各组件的唯一事实源。
 from __future__ import annotations
 
@@ -15,7 +16,7 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ..agent_core.runtime_mixin import RunParams, release_active_turn_inputs_for_compact
+from ..agent_core.runtime_mixin import RunParams
 from ..command_catalog import system_slash_command_name
 from ..concurrency.interrupt import is_interrupted
 from ..conversation.audit_lifecycle import (
@@ -504,7 +505,7 @@ def _register_named_system_task(
 # LLM: One Gateway request may cross several provider slices, but every overflow must advance the
 # same canonical Compact generation before retry. Full carried archives remain effect authority;
 # the same active request retains exact host rejection memory without inheriting approval grants.
-# 与后台共用携带 reducer；先按原身份释放 mailbox，再计算携带快照，不能由模型正文猜测消费。
+# 与后台共用携带 reducer；真实工具循环已按原身份释放 mailbox，这里只按释放ID排除插话并携带原IR。
 # 展示callback同步更新本turn局部值及当前宿主参数；新请求重置，失效None与已评估事实阻止额外决策。
 # 有宿主时transcript延迟到完整恢复输入就绪后提交；成功材料从同次run回传，后续overflow/最终持久化不复活旧上下文。
 # 函数用途: 在同一用户回合内处理上下文超限，正式压缩旧会话或本轮工具历史后继续执行。
@@ -520,6 +521,7 @@ def _run_gateway_turn_with_conversation_compact(
     carried_archive_tool_calls = _gateway_recovered_active_turn_tool_calls(context)
     _recover_gateway_active_turn_authority(context, carried_archive_tool_calls)
     carried_active_turn_user_inputs: list[dict[str, object]] = []
+    native_compact_carry = None
     runtime_rejected_actions: list[dict[str, str]] = []
     capability_presentation = None
     presentation_evaluated = False
@@ -544,6 +546,8 @@ def _run_gateway_turn_with_conversation_compact(
             )
         )
         run_params.runtime_rejected_actions = runtime_rejected_actions
+        run_params.native_compact_carry = native_compact_carry
+        run_params.conversation_turn_id = context.request_id
         run_params.capability_presentation = capability_presentation
         run_params.capability_presentation_evaluated = presentation_evaluated
         run_params.capability_presentation_turn_id = str(request.get("execution_attempt_id") or context.request_id)
@@ -558,7 +562,11 @@ def _run_gateway_turn_with_conversation_compact(
         _record_gateway_stage(context.stages, "run_ms", _run_started)
         if str(getattr(result, "runtime_status", "") or "").strip().lower() != "context_overflow":
             return result, current
-        released_input_ids = release_active_turn_inputs_for_compact(context.agent, run_params)
+        from ..conversation.compact_carry import native_compact_carry_from_result
+
+        native_compact_carry = native_compact_carry_from_result(result)
+        released_input_ids = native_compact_carry.released_input_ids if native_compact_carry is not None else ()
+        run_params.native_compact_carry = native_compact_carry
         carried_archive_tool_calls, carried_active_turn_user_inputs = compact_overflow_carry(
             carried_archive_tool_calls=carried_archive_tool_calls,
             carried_active_turn_user_inputs=carried_active_turn_user_inputs,
@@ -597,7 +605,7 @@ def _gateway_compact_overflowing_turn(
     )
     _require_gateway_conversation_ready(request, refreshed)
     if (observer is not None and refreshed.compact_source is not None
-            and (refreshed.compact_source.messages or carried_archive_tool_calls)):
+            and (refreshed.compact_source.messages or carried_archive_tool_calls or run_params.native_compact_carry is not None)):
         from ..gateway_compact_recovery import prepare_gateway_compact_recovery
 
         observer.compact_recovery = prepare_gateway_compact_recovery(context, refreshed)

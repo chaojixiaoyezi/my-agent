@@ -1,6 +1,7 @@
 """活动工具完整恢复只替换结构化IR来源，并保留冻结输入及控制事实。"""
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 from dataclasses import replace
 from types import SimpleNamespace
@@ -9,6 +10,7 @@ import pytest
 
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
 from agent_py_agent.agent.agent_core.compact_active_projection import replace_recovery_active_tools
+from agent_py_agent.agent.agent_core.compact_request_recovery import replace_recovery_history
 from agent_py_agent.agent.agent_core.runtime.conversation_state import (
     conversation_runtime_state_section,
 )
@@ -28,6 +30,7 @@ from agent_py_agent.agent.conversation.compact_summary_view import (
     AppliedCompactContext,
     CompactSummaryView,
 )
+from agent_py_agent.agent.prompting_parts.builder import PromptRenderInput
 from agent_py_agent.agent.tooling.runtime_contracts import ToolContentBlock
 
 
@@ -88,6 +91,31 @@ def _fixture(*, seed=None, source="carried_tool_handoff", guidance_forwarded=Fal
         ), conversation_state=conversation_runtime_state_section(params),
     )
     return context, params, frozen, full_archive[:1]
+
+
+def test_transcript_recovery_replaces_carried_summary_without_tool_partition():
+    context, params, frozen, _ = _fixture()
+    seed = SimpleNamespace(messages=(), canonical_messages=())
+    prompt = PromptRenderInput(
+        system_prompt="", memory_text="", owner_scope="", dynamic="", workspace_context="",
+        injection_fragments=("原注入",), tool_catalog="", recommendations="", execution_facts="",
+        user_prompt="继续", task_and_transcript="继续", native_tool_use=True,
+    )
+    frozen = replace(frozen, prompt_input=prompt)
+    candidate, prepared = replace_recovery_history(
+        params, frozen, history_seed=seed, injection="新注入", injection_index=0,
+        compact_context=context,
+    )
+    messages = project_native_provider_messages(
+        prepared.tool_ir_history, prior_messages=prepared.provider_history_messages,
+    )
+    wire_text = json.dumps(messages, ensure_ascii=False)
+    assert wire_text.count("新范围摘要") == 1 and "旧摘要" not in wire_text
+    assert "当前控制事实" in wire_text and "用户在模型运行时补充的新要求" in wire_text
+    assert "[active-turn-tool-handoff] 只是正文" in wire_text
+    assert candidate.tool_ir_history == list(prepared.tool_ir_history)
+    assert any(isinstance(item, CompactionSummary) and item.source == "applied_compact"
+               for item in frozen.tool_ir_history)
 
 
 def test_replaces_only_structured_handoff_and_applied_summary_without_mutating_inputs():

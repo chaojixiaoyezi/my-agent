@@ -699,7 +699,7 @@ def _log_run_stage(
 
 
 # LLM: 原执行片为已验证候选保留依赖到 finalization；所有异常仍结算真实 attempt/用量，清理不得热改 Agent 或猜补消耗。
-# 函数用途: 执行一轮模型工具循环，成功或中断都保留实际消耗与运行终态。
+# 函数用途: 执行模型工具循环及原收尾，typed overflow向宿主交回同次冻结IR，其它结束仍按实际消耗和终态处理。
 def _run_once_with_params(agent, user_prompt: str, params: RunParams):
     _run_stage_started = time.monotonic()
     _log_run_stage("run_started", params)
@@ -741,6 +741,7 @@ def _run_once_with_params(agent, user_prompt: str, params: RunParams):
                 _finalize_params(root_user_prompt, prepared, loop_result, params)
             )
             result = agent._get_services().finalization.finalize(ctx)
+            result.native_compact_carry = loop_result.native_compact_carry
             _log_run_stage("finalize_done", params, started_mono=_run_stage_started)
             return result
     except BaseException as exc:

@@ -103,7 +103,7 @@ class PreparedCompactRecovery:
             refresh_first_request_prompt(agent, prepared_params, self.resolved_input)
         return prepared_params, prepared_prompt
 
-    # LLM: 进入时领取防摘要重入；准备/投影失败不发送业务，原 CAS 成功后不再调用 agent.run 或重新读取宿主材料。
+    # LLM: 进入时领取防摘要重入；强制恢复没有消息或完整工具来源时显式拒绝，准备/投影失败不发送业务，CAS后沿同次材料发送。
     # 函数用途: 用完整当前输入选择摘要候选，提交后返回同次恢复轮的新参数与已检查提示。
     def select(self, agent: object, params: object, prompt: str) -> tuple[object, str]:
         if self.consumed or not (agent is self.agent and self.matches_request(params)):
@@ -121,6 +121,8 @@ class PreparedCompactRecovery:
         if not frozen.prompt_input.native_tool_use or frozen.tool_protocol_snapshot.source_protocol != "native":
             raise ConversationCompactError("恢复工具协议未知", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
         tool_source = _recovery_tool_source(agent, source, params, frozen)
+        if self.force and not source.messages and tool_source is None:
+            raise ConversationCompactError("没有可压缩的源历史", code="COMPACT_SOURCE_EMPTY")
         if not self.force and self._automatic_noop(frozen, tool_source):
             from ._tool_loop_service import _native_compact_interrupted
 
@@ -258,19 +260,25 @@ def _summary_surface(prepared: ToolLoopRequestInput) -> ConversationCompactProvi
     )
 
 
-# LLM: 注入索引由宿主原组装顺序提供，不能从正文搜索；副本只替换历史/代次和该片段，其余准备与IR保持。
+# LLM: 注入索引由宿主提供；历史种子接管摘要时移除旧applied_compact IR，参数与冻结输入同时更新，不依赖工具分区。
 # 函数用途: 将一个摘要候选投影成同次请求的参数和冻结输入，供各宿主统一计量后发送。
 def replace_recovery_history(params, frozen, *, history_seed, injection: str, injection_index: int, compact_context):
+    from ..backends.tool_ir import CompactionSummary
+
     injections, fragments = list(params.runtime_injections), list(frozen.prompt_input.injection_fragments)
     if injection_index < 0 or injection_index >= len(injections) or injection_index >= len(fragments):
         raise ConversationCompactError("恢复注入位置未知", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
     injections[injection_index] = fragments[injection_index] = injection
+    history = tuple(item for item in frozen.tool_ir_history if not (
+        history_seed is not None and isinstance(item, CompactionSummary) and item.source == "applied_compact"
+    ))
     candidate_params = replace(params, conversation_history_seed=history_seed, compact_context=compact_context,
-                               runtime_injections=injections, live_archive_state=deepcopy(params.live_archive_state))
+                               runtime_injections=injections, live_archive_state=deepcopy(params.live_archive_state),
+                               tool_ir_history=deepcopy(list(history)))
     candidate_params = replace(candidate_params, provider_history_messages=_native_provider_history_messages(candidate_params))
     prepared = replace(frozen, prompt_input=replace(frozen.prompt_input, injection_fragments=tuple(fragments)),
                        provider_history_messages=tuple(candidate_params.provider_history_messages),
-                       conversation_state=conversation_runtime_state_section(candidate_params))
+                       conversation_state=conversation_runtime_state_section(candidate_params), tool_ir_history=history)
     return candidate_params, prepared
 
 

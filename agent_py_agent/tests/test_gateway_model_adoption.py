@@ -395,7 +395,7 @@ def test_actual_provider_overflow_stays_on_adopted_model(tmp_path, monkeypatch):
         if len(attempted) == 1:
             raise ProviderContextWindowError("typed test overflow")
 
-    from agent_py_agent.agent.gateway_parts.request_errors import ConversationPersistenceError
+    from agent_py_agent.agent.conversation.compact_guard import ConversationCompactError
 
     business, _ = fake_http(monkeypatch, fixture, on_business=overflow_once)
     compact_models = []
@@ -406,10 +406,14 @@ def test_actual_provider_overflow_stays_on_adopted_model(tmp_path, monkeypatch):
         return original_compact(context, *args, **kwargs)
 
     monkeypatch.setattr(request_execution, "_gateway_compact_overflowing_turn", compact)
-    with pytest.raises(ConversationPersistenceError, match="无法继续压缩"):
+    before = fixture.agent.conversation_store.threads.require(fixture.thread_id)
+    with pytest.raises(ConversationCompactError) as raised:
         request_execution._run_gateway_ask(fixture.context)
+    assert raised.value.code == "COMPACT_SOURCE_EMPTY"
+    after = fixture.agent.conversation_store.threads.require(fixture.thread_id)
+    assert (after.compact_generation, after.compact_checkpoint_id) == (before.compact_generation, before.compact_checkpoint_id)
     assert compact_models == ["candidate-large"]
-    assert business and {row[0]["model"] for row in business} == {"candidate-large"}
+    assert len(business) == 1 and business[0][0]["model"] == "candidate-large"
     assert len(decision.calls) == 1 and _HOST.get() is None
 
 

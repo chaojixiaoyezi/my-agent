@@ -49,8 +49,8 @@ class FinalizeContext:
     on_chunk: object = None
 
 
-# LLM: ToolLoopExecuteParams 是工具调用的 run 级事实源；临时Compact视图只限模型展示，批准/拒绝仍来自原审批链。
-# 类用途: 汇总本轮上下文、快照、取消、只读展示和已应用摘要范围；原工具账保持完整。
+# LLM: ToolLoopExecuteParams 是工具调用的run级事实源；逻辑turn与当前attempt分别保留，临时Compact视图不替代原审批链。
+# 类用途: 汇总本轮上下文、快照、取消和摘要范围；overflow携带原IR时据此核对逻辑回合，工具账保持完整。
 @dataclass(frozen=True)
 class ToolLoopExecuteParams:
     user_prompt: str
@@ -92,6 +92,7 @@ class ToolLoopExecuteParams:
     # （AssistantTurn / ToolResult / UserTurn / CompactionSummary）；text 协议下恒为空，
     # 由 message_adapter 翻成厂商原生 messages。详见 agent_core/tool_ir_history.py。
     tool_ir_history: list = field(default_factory=list)
+    conversation_turn_id: str = ""
     # LLM: Completed prior turns stay separate from current-turn IR so finalization can persist
     # only the new turn while provider requests still receive one chronological message list.
     # 字段用途: 保存已结束会话回合的原生消息前缀，当前 run 只在其后追加新 IR。

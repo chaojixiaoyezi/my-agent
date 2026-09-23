@@ -131,3 +131,16 @@ detached transcript 压缩推进共享游标，但创建后的全局摘要被原
 建议下一步：本片验收提交后，由一个owner沿原compact_overflow_carry和运行结果核对原生IR传递边界，再协调媒体线，独立测试可并行；不得把archive preview或上一次失败的未知输入冒充新请求真实材料。保持pytest临时MY_AGENT_HOME，独立脚本须启动前显式隔离。
 
 本片最终39文件1039 passed（136.66秒），日志 `/tmp/compact_ir_final_20260923.log`，文件清单同名 `.files`；本地严格gate通过，历史失败及修订保留在TESTS，无线上CI或安装版验收来源。建议下一步仍按上述外层原生IR传递边界继续，主线串行、审查/测试并行。
+
+
+## 外层carry接续增量（基线95ffee08a，2026-09-23）
+
+解决原生工具正文在外层重跑时退化为archive preview的问题。root负责运行参数/capture/公共恢复及文档；Sol分别负责插话ID和taskless后台、Gateway/child真实续跑测试；Astra max只读审查身份、摘要归属、异常保存和空来源。
+
+三宿主沿同逻辑turn临时carry完整IR，重新准备快照/前缀；源工具身份保留，当前attempt仍由原运行绑定。实际ToolLoop参数释放插话并记录精确input_ids，释放错误沿原partial保存；摘要唯一性和typed空来源已修。后台空task不补任务属性；同轮request_id稳定，匹配使用宿主完整typed view。未改runtime.py、wake/WAL、Shell、正式模型目录或共享Gateway。
+
+验证以TESTS首节和本片最终日志为准；真实模型、媒体线及安装版尚未覆盖。旧全仓八项失败保持，12.4仍未完成。
+
+建议下一步：本片联合gate通过后本地提交，再由root协调媒体集成；独立测试可并行，公共compact/参数由单一owner修改。1.9已授权可用于隔离验收，部署前继续核对共享环境，不借用户日常模型目录跑fixture。
+
+本片最终44文件联合1154 passed、4项既有xfail（135.39秒），日志 `/tmp/compact_carry_final_20260923.log`，清单同名 `.files`；taskless不误建会话任务补充断言后两协议另跑2 passed。Ruff、doc sync、import boundaries 0、strict code-size hard=0且基线未改、diff与clean-package通过。没有push、部署或真实供应商调用，线上CI没有作为验收来源。12.4仍开放，11/18清单数不变；建议下一步协调媒体集成与授权1.9隔离验收，公共状态单owner、独立测试可并行。

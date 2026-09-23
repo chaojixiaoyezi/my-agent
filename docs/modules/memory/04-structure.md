@@ -351,3 +351,5 @@ Curator 设置读回的 `runtime_scope=owner_background` 与实际服务一致�
 不覆盖全库候选合并，也未部署。详见 [P5-B 交接](../../tasks/DECISION_MODEL_P5B_HANDOFF.md)。
 
 恢复摘要来源扩展至同一次冻结的真实原生工具往返，与归档同ref去重后沿原adapter和有界分段器处理。严格恢复空回复/工具调用的机械回退完整保留旧摘要与原模型可见材料；分段修复失败拒绝提交，避免截断摘录获得完整coverage。不新增记忆库或持久状态，不读取外置全文。此片本地联验中，外层重跑传递原生IR仍待实现；见决策模型容量审计末节与TESTS。
+
+`compact_carry.py`仅在同进程同逻辑回合携带原生IR、tool_context和已转发guidance；源attempt保留调用引用，下一执行身份由原DB发布。`active_turn_compact.py`核对显式线程声明与typed宿主视图；无任务后台不借task属性补身份，原transcript授权门独立保持。

@@ -524,3 +524,7 @@ auth 表单取消和参数拒绝已验，官方设备码在两处环境被 HTTP 
 决策模型12.4首次准备切片进行中：完整请求压缩放在 child/主代理候选选模及发送前拒绝回退基线之前；无压缩也只消费同次冻结输入，不重复准备。手动 Compact 没有下一轮业务输入，只证明当前会话历史估算与原覆盖/CAS，下一轮独立验证完整容量，不能把手动成功展示为未来请求容量通过。
 
 决策模型12.4真实IR来源切片进行中：同一临时工具来源扩展保存完整原AssistantTurn/ToolResult分区及保留IR，覆盖仍取原ToolCall四元ref，不以archive preview代替真实模型可见正文。未知/不完整/媒体组保留，关联archive也不获得覆盖；同ref原IR优先归档投影。机械回退须保留全部所选来源，分段退化无法证明完整时拒绝提交，仍用原writer/CAS及完整容量门。
+
+决策模型12.4外层overflow原生IR接续进行中：同一宿主回合只在context_overflow返回临时冻结的typed IR/工具上下文/已转发指引，沿原RunParams回入；新请求、跨任务、跨scope/view不得沿用。主代理attempt由原DB轮换，旧ToolCall的原四元身份保持，carrier不授予执行权；权限/工具快照/provider历史前缀仍重新准备。插话UserTurn增加仅内部input_ids，与原mailbox packet同源，释放只按ID剔除，禁止正文匹配。保留原用户IR和媒体引用，不重复初始化用户轮。仍只有原archive恢复执行预算、原Compact writer/CAS提交。
+
+外层原生IR接续补充（已本地实现，验收中）：宿主冻结的typed AppliedCompactContext是摘要线程来源；taskless后台缺task属性时不补写以免误升任务，已有当前线程声明仍按child优先核对。request_id同逻辑回合稳定；强制恢复必须有消息或完整工具来源，carry本身不证明可压。详细边界见容量审计末节。

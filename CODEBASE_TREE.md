@@ -344,7 +344,7 @@ agent_py_agent/
 |   |   |-- store_progress.py           # 进度策略、到期投影、失败退避落账与旧策略归档
 |   |   |-- process_events.py           # 受管后台命令终态到原会话 wake 的去重交接
 |   |   |-- compact_progress.py       # transcript/live-tool/turn-local Compact 来源与提交权的唯一公开进度协议
-|   |   |-- compact_carry.py           # 前后台同片超窗重试的工具快照与插话携带纯计算
+|   |   |-- compact_carry.py           # 同宿主溢出原生IR携带、精确插话释放与归档归并
 |   |   |-- context_usage.py          # 主/子 preflight 数字的 canonical thread 保存、代次检查与无正文展示
 |   |   |-- model_metrics.py          # 主/子模型调用账与历史用量的只读显示投影，不回灌模型上下文
 |   |   |-- agent_activity.py          # active task link + canonical child run 到 TUI/Web 共用有界活动投影
@@ -582,6 +582,8 @@ agent_py_agent/
 |   |-- test_compact_tool_source.py      # 同一纯来源分区、完整身份与未知保留、快照隔离
 |   |-- test_compact_tool_partition.py   # 原生完整配对、跨轮同名调用、未知/媒体/孤儿保留
 |   |-- test_compact_native_ir_recovery.py # 真实读文件原生回执、恢复安全点、原CAS及候选HTTP对等
+|   |-- test_native_compact_carry.py   # 同回合携带身份、深复制、精确释放和工具轮标记隔离
+|   |-- test_native_user_input_identity.py # 原生UserTurn绑定原插话包ID，不按正文推断消费
 |   |-- test_mixed_compact_contract.py   # 双来源机械回退、整包候选回退与取消零提交
 |   |-- test_mixed_compact_recovery.py   # 两协议混合候选和实际HTTP对照、双覆盖及失败不发送
 |   |-- test_compact_tool_provenance.py  # 原归档索引四元身份、同名调用保留与产物不覆盖
@@ -912,7 +914,7 @@ docs/
 - `agent_py_agent/agent/gateway_parts/request_prompt.py`：纯渲染已有上下文和历史种子，不重新读盘或通过文字裁决权限。
 - `agent_py_agent/agent/conversation/history_projection.py`：完整行窗口供正文和原生回放共用，后台历史准备无需导入 Gateway 请求执行器。
 - `agent_py_agent/agent/gateway_parts/stream_writer.py`：维护请求级缓冲与事件顺序，组合 `stream_events.py` 的公开投影及 `stream_approval.py` 的审批交互；不拥有 canonical 历史或执行权。
-- `agent_py_agent/agent/conversation/compact_carry.py`：前后台共享完整工具归档替换和结构化插话合并；mailbox 释放仍由各运行器在原位置执行。
+- `agent_py_agent/agent/conversation/compact_carry.py`：三宿主共享完整工具归档替换和插话合并；真实循环溢出边界沿原mailbox释放，并携带完整原生IR及准确释放ID，不恢复权限或新建持久状态。
 - `agent_py_agent/agent/conversation/store_usage.py`：显式接收原用量目录和线程读取/原子更新能力，持有用量事件、累计增量及数字显示，不继承消息、任务或 Goal 存储。
 - `agent_py_agent/agent/conversation/store_io.py`：各领域与 transcript 共用 JSONL 读取、结构化错误和文件归档；不导入 Store，不吞坏行，不新增持久数据源。
 - `agent_py_agent/agent/conversation/store_layout.py`：`store.storage` 的唯一目录和路径上下文；初始化可只读，路径方法不授权业务操作、不改变原文件名。

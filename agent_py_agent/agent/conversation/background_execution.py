@@ -159,7 +159,7 @@ def invoke_background_turn(
     return result, snapshot
 
 
-# LLM: 本片冻结摘要范围及覆盖，与原历史种子和工具参数一同传递；首次和恢复提交共用八代上限，局部Compact不发布全线程摘要。
+# LLM: 本片冻结摘要范围、覆盖和首次解析的请求身份；后续准备复用该 request_id，run/attempt 仍由原绑定。
 # 函数用途: 用同一适用摘要准备后台模型片，压缩续跑沿用展示和拒绝记录，成功提交计入公平让出预算。
 def run_background_turn_with_compact(
     execution: BackgroundExecutionDependencies,
@@ -174,11 +174,13 @@ def run_background_turn_with_compact(
     current = thread
     carried_archive_tool_calls: list[dict[str, object]] | None = None
     carried_active_turn_user_inputs: list[dict[str, object]] = []
+    native_compact_carry = None
     runtime_rejected_actions: list[dict[str, str]] | None = None
     capability_presentation = None
     presentation_evaluated = False
     recovering = False
     committed_generations = 0
+    slice_request_id = ""
 
     # LLM: 同步回调只写当前调用的局部状态及原参数，失效 None 不清已评估事实，绝不落盘或回写请求。
     # 函数用途: 让 Compact 和后续模型尝试都读取本后台 turn 的最新展示。
@@ -200,12 +202,15 @@ def run_background_turn_with_compact(
             thread=current,
             history_seed=history_seed,
         )
+        run_params.request_id = slice_request_id or run_params.request_id
         run_params.compact_context = history.compact_context
         if carried_archive_tool_calls is None:
             carried_archive_tool_calls = list(run_params.carried_archive_tool_calls or [])
         else:
             run_params.carried_archive_tool_calls = list(carried_archive_tool_calls)
         run_params.carried_active_turn_user_inputs = list(carried_active_turn_user_inputs)
+        run_params.native_compact_carry = native_compact_carry
+        run_params.conversation_turn_id = request.conversation_turn_id
         if runtime_rejected_actions is None:
             runtime_rejected_actions = run_params.runtime_rejected_actions
         else:
@@ -228,6 +233,7 @@ def run_background_turn_with_compact(
             execution, user_prompt, run_params, history, prepared_context,
             recovering=recovering, activity_sink=activity_sink,
         )
+        slice_request_id = slice_request_id or run_params.request_id
         if recovering and (recovery is None or not recovery.committed):
             raise RuntimeError("background compact recovery did not commit")
         if recovery is not None and recovery.committed:
@@ -236,9 +242,10 @@ def run_background_turn_with_compact(
         if str(getattr(result, "runtime_status", "") or "").strip().lower() != ("context_overflow"):
             _persist_background_native_turn(execution.store, request, result)
             return result
-        from ..agent_core.runtime_mixin import release_active_turn_inputs_for_compact
+        from .compact_carry import native_compact_carry_from_result
 
-        released_input_ids = release_active_turn_inputs_for_compact(execution.agent, run_params)
+        native_compact_carry = native_compact_carry_from_result(result)
+        released_input_ids = native_compact_carry.released_input_ids if native_compact_carry is not None else ()
         carried_archive_tool_calls, carried_active_turn_user_inputs = compact_overflow_carry(
             carried_archive_tool_calls=carried_archive_tool_calls,
             carried_active_turn_user_inputs=carried_active_turn_user_inputs,
@@ -252,7 +259,8 @@ def run_background_turn_with_compact(
             )
         current, history = _refresh_background_compact_source(execution, current, history)
         run_params.compact_context = history.compact_context
-        if history.compact_source is None or (not history.compact_source.messages and not carried_archive_tool_calls):
+        if history.compact_source is None or (not history.compact_source.messages and not carried_archive_tool_calls
+                                             and native_compact_carry is None):
             raise RuntimeError("background compact has no recoverable source")
         recovering = True
 

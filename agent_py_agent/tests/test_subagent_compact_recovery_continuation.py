@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -10,10 +11,11 @@ from agent_py_agent.agent.agent_core import (
     compact_request_recovery,
     runtime_mixin,
 )
-from agent_py_agent.agent.agent_core.subagent import compact_recovery
+from agent_py_agent.agent.agent_core.subagent import compact_recovery, run_flow
 from agent_py_agent.agent.backends import http
 from agent_py_agent.agent.backends.base import ProviderRequestOptions
 from agent_py_agent.agent.backends.errors import ProviderContextWindowError
+from agent_py_agent.agent.backends.tool_ir import AssistantTurn, ToolResult
 from agent_py_agent.agent.conversation import active_turn_compact
 from agent_py_agent.agent.conversation.compact_guard import ConversationCompactError
 from agent_py_agent.agent.tooling import _filesystem_read
@@ -173,20 +175,26 @@ def test_child_transcript_then_tool(tmp_path, monkeypatch, backend):
 
 @pytest.mark.parametrize("backend", ["anthropic_compatible", "openai_compatible"])
 @pytest.mark.parametrize("fail_projection", [False, True])
-def test_child_active_turn_only(tmp_path, monkeypatch, backend, fail_projection):
+@pytest.mark.parametrize("archive_present", [True, False])
+def test_child_active_turn_only(tmp_path, monkeypatch, backend, fail_projection, archive_present):
     agent, prior_task = _child(tmp_path, backend=backend, tools=True)
     task = agent.subagents.create_run(goal='读取当前资料并汇报', thought='', plan=[], allowed_tools=['read_file'])
     agent.config.max_tool_rounds = 0
-    material = _material(agent, 'active-material.txt', '只允许一次读取的活动回合材料。')
+    full_body = 'SOURCE-HEAD-' + '甲' * 2_500 + 'EXACT-IR-MIDDLE-CHILD' + '乙' * 2_500 + '-SOURCE-TAIL'
+    material = _material(agent, 'active-material.txt', full_body)
     following_material = _material(agent, 'following-material.txt', '恢复后的下一次工具读取材料。')
     prepares, model_calls, compact_results, recoveries, read_calls, candidates = ([], [], [], [], [], [])
+    source_plans = []
     original_prepare = runtime_mixin._prepare_runtime_context
     original_generate = _tool_loop_service.generate_model_response
     original_compact = active_turn_compact.compact_carried_active_turn_archive
     original_recovery = compact_recovery.prepare_subagent_compact_recovery
     original_project = compact_recovery._project_subagent_active_candidate
     original_mixed = compact_request_recovery._project_mixed_recovery_material
+    original_summary = active_turn_compact._active_turn_replacement_summary
+    original_attempt = run_flow._run_subagent_recovery_attempt
     original_read = _filesystem_read.ReadFileTool.execute
+    overflow_sources = []
     def prepare(*args, **kwargs):
         prepares.append(agent.conversation_store.threads.require(task.agent_thread_id).compact_generation)
         return original_prepare(*args, **kwargs)
@@ -210,6 +218,22 @@ def test_child_active_turn_only(tmp_path, monkeypatch, backend, fail_projection)
         if view.is_candidate:
             candidates.append(selected)
         return selected
+    def summarize(*args, **kwargs):
+        source_plans.append(args[1])
+        return original_summary(*args, **kwargs)
+    def attempt(*args, **kwargs):
+        result, current = original_attempt(*args, **kwargs)
+        if result.runtime_status == 'context_overflow' and not overflow_sources:
+            carry = result.native_compact_carry
+            assert carry is not None
+            native_results = [item for item in carry.history if isinstance(item, ToolResult)]
+            assert len(native_results) == 1 and full_body in native_results[0].output
+            archive = list(result.archive_tool_calls or [])
+            assert len(archive) == 1 and archive[0]['call_id'] == native_results[0].call_id
+            overflow_sources.append((carry, archive))
+            if not archive_present:
+                result = replace(result, archive_tool_calls=[])
+        return result, current
     def read(self, params):
         read_calls.append(dict(params))
         return original_read(self, params)
@@ -219,6 +243,8 @@ def test_child_active_turn_only(tmp_path, monkeypatch, backend, fail_projection)
     monkeypatch.setattr(compact_recovery, 'prepare_subagent_compact_recovery', recovery)
     monkeypatch.setattr(compact_recovery, '_project_subagent_active_candidate', project)
     monkeypatch.setattr(compact_request_recovery, '_project_mixed_recovery_material', mixed)
+    monkeypatch.setattr(active_turn_compact, '_active_turn_replacement_summary', summarize)
+    monkeypatch.setattr(run_flow, '_run_subagent_recovery_attempt', attempt)
     monkeypatch.setattr(_filesystem_read.ReadFileTool, 'execute', read)
     def on_business(_wire, number):
         if number == 2:
@@ -251,6 +277,7 @@ def test_child_active_turn_only(tmp_path, monkeypatch, backend, fail_projection)
         return result
     monkeypatch.setattr(http, 'post_json', send)
     result = agent.run_subagent(task.id, dry_run=False, probe=False)
+    assert len(overflow_sources) == 1
     if fail_projection:
         assert not result.ok and len(business) == 3 and prepares == [0, 0]
         assert [row['path'] for row in read_calls] == [str(material)]
@@ -264,6 +291,23 @@ def test_child_active_turn_only(tmp_path, monkeypatch, backend, fail_projection)
     assert len(recoveries) == 1 and recoveries[0].committed
     assert len(compact_results) == len(candidates) == 1 and compact_results[0].compacted
     assert compact_results[0].source_call_ids == ('read-active-once',)
+    assert len(source_plans) == 1
+    source_ir = source_plans[0].source_ir_history
+    assert len(source_ir) == 2 and isinstance(source_ir[0], AssistantTurn) and isinstance(source_ir[1], ToolResult)
+    assert source_ir[0].tool_calls[0].call_id == source_ir[1].call_id == 'read-active-once'
+    source_call = source_ir[0].tool_calls[0]
+    assert len(source_plans[0].source_records) == int(archive_present)
+    assert len(source_plans[0].source_tool_refs) == 1
+    if archive_present:
+        assert all(source_plans[0].source_records[0][field] == getattr(source_call, field)
+                   for field in ('run_id', 'attempt_id', 'turn_id', 'call_id'))
+    assert all(source_plans[0].source_tool_refs[0][field] == getattr(source_call, field)
+               for field in ('run_id', 'attempt_id', 'turn_id', 'call_id'))
+    assert full_body in source_ir[1].output
+    assert len(overflow_sources[0][1][0]['output_preview']) < len(source_ir[1].output)
+    summary_wire = json.dumps(business[2], ensure_ascii=False)
+    assert summary_wire.count('EXACT-IR-MIDDLE-CHILD') == 1
+    assert not any(isinstance(item, (AssistantTurn, ToolResult)) for item in candidates[0].request_input.tool_ir_history)
     assert [params.conversation_history_seed.compact_generation for params in model_calls] == [0, 0, 1, 1]
     assert model_calls[0].runtime_injections[0] == ''
     assert model_calls[-1] is model_calls[-2] and model_calls[-2] is not candidates[0].params
@@ -272,9 +316,10 @@ def test_child_active_turn_only(tmp_path, monkeypatch, backend, fail_projection)
     ).compact_checkpoint_id
     assert candidates[0].params.compact_context.view.checkpoint_id == ''
     assert model_calls[-2].compact_context.view.summary == candidates[0].params.compact_context.view.summary
-    assert [row['call_id'] for row in model_calls[-1].archive_tool_calls] == [
-        'read-active-once', 'read-following-child-tool',
-    ]
+    assert [row['call_id'] for row in model_calls[-1].archive_tool_calls] == (
+        ['read-active-once', 'read-following-child-tool'] if archive_present
+        else ['read-following-child-tool']
+    )
     assert 'current_progress' in json.dumps(business[3], ensure_ascii=False)
     assert '恢复后的下一次工具读取材料' in json.dumps(business[-1], ensure_ascii=False)
     assert agent.conversation_store.threads.require(task.agent_thread_id).compact_generation == 1

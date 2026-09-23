@@ -564,13 +564,12 @@ def _load_authoritative_thread(agent: object, task_attributes: object) -> Conver
     return thread
 
 
-# LLM: A transient applied view may hide calls only in the exact thread named by the structured
-# task attributes; do not load a newer thread view or fall back to a parent conversation id.
-# 函数用途: 核对临时摘要视图属于当前代理线程，防止错线程来源被隐藏。
+# LLM: typed应用视图由宿主冻结；显式当前线程必须匹配，child优先自身线程。无任务后台可缺任务属性，不补属性以免误升任务。
+# 函数用途: 核对已有线程声明与适用摘要一致；缺声明时沿原视图，独立transcript权限门仍负责覆盖和提交。
 def _assert_context_thread(task_attributes: object, context: AppliedCompactContext) -> None:
     attrs = task_attributes if isinstance(task_attributes, Mapping) else {}
     thread_id = str(attrs.get(AGENT_THREAD_ID_ATTR) or attrs.get("conversation_thread_id") or "").strip()
-    if thread_id != context.thread_id:
+    if thread_id and thread_id != context.thread_id:
         raise OSError("Compact 应用视图与当前线程不匹配")
 
 

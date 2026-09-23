@@ -21,6 +21,7 @@ from agent_py_agent.agent.conversation import (
     background_compact_recovery,
     background_execution,
     compact,
+    compact_carry,
 )
 from agent_py_agent.agent.conversation.agent_activity import BackgroundMainActivitySink
 from agent_py_agent.agent.conversation.background_history_seed import (
@@ -34,9 +35,9 @@ from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.tests.test_subagent_compact_recovery import _http
 
 
-# LLM: 使用原 SimpleAgent、唯一会话 store 与后台真实入口；只有 HTTP 模型响应由既有替身提供。
-# 函数用途: 为普通或拆出的后台任务建立足够长的已结束历史，并返回同一片执行依赖。
-def _background(tmp_path, *, backend: str, detached: bool, with_history: bool = True):
+# LLM: 使用原 SimpleAgent、唯一会话 store 与后台真实入口；无任务场景不伪造任务绑定，只有 HTTP 响应由替身提供。
+# 函数用途: 为普通、拆出或无任务的后台轮建立已结束历史，并返回同一片执行依赖。
+def _background(tmp_path, *, backend: str, detached: bool, with_history: bool = True, taskless: bool = False):
     api_base = "https://api.minimaxi.com/anthropic" if backend == "anthropic_compatible" else "https://opencode.ai/zen/go/v1"
     model_name = "MiniMax-M2.7" if backend == "anthropic_compatible" else "deepseek-v4-flash"
     agent = SimpleAgent(AgentConfig(
@@ -51,12 +52,13 @@ def _background(tmp_path, *, backend: str, detached: bool, with_history: bool = 
         "canonical_user_id": "owner", "channel": "tui", "channel_conversation_id": "compact-recovery",
         "channel_user_id": "owner", "now": 10.0,
     })
-    task_id = "detached-1" if detached else "ordinary-1"
-    store.tasks.bind({
-        "thread_id": thread.thread_id, "task_id": task_id, "goal": "持续核对旧资料",
-        "work_kind": "goal" if detached else "general", "work_name": "旧资料监测",
-        "cancellation_scope": "detached" if detached else "shared", "now": 11.0,
-    })
+    task_id = "" if taskless else ("detached-1" if detached else "ordinary-1")
+    if task_id:
+        store.tasks.bind({
+            "thread_id": thread.thread_id, "task_id": task_id, "goal": "持续核对旧资料",
+            "work_kind": "goal" if detached else "general", "work_name": "旧资料监测",
+            "cancellation_scope": "detached" if detached else "shared", "now": 11.0,
+        })
     for position, (role, content) in enumerate((
         ("user", "之前需要核对的原始材料" * 100),
         ("assistant", "已核对旧材料，等待下一步" * 100),
@@ -152,6 +154,91 @@ def test_background_overflow_reuses_selected_candidate_wire(tmp_path, monkeypatc
     assert len(candidates) == 1
     assert len(prepares) == len(runs) == 2
     assert prepare_run_indices == [1, 2]
+    assert store.threads.require(thread.thread_id).compact_generation == 1
+
+
+# LLM: 无 task 的后台工作片由第一次真实模型尝试解析 request_id；第二次 prepare 不得换身份或借 carry 倒灌执行权。
+# 函数用途: 两协议用真实后台循环和原恢复器证明空请求编号的 overflow 能沿同一请求续接。
+@pytest.mark.parametrize("backend", ["anthropic_compatible", "openai_compatible"])
+def test_taskless_background_overflow_keeps_first_resolved_request_id(tmp_path, monkeypatch, backend):
+    agent, store, thread, request, execution, sink = _background(
+        tmp_path, backend=backend, detached=False, taskless=True,
+    )
+    assert request.task_id == ""
+    assert store.tasks.list(thread.thread_id) == []
+    from agent_py_agent.agent.conversation.runtime import _run_params
+
+    assert _run_params(thread.thread_id, request, agent).request_id == ""
+    history = prepare_background_history_or_raise(agent, store, thread, request)
+    assert history.compact_source is not None and history.compact_source.messages
+    original_prepare_run = execution.prepare_run
+    original_run = agent.run
+    original_model_attempt = background_execution._run_background_model_attempt
+    original_restore = compact_carry.restore_native_compact_carry
+    original_summary = compact._summarize
+    prepared_ids, sent_ids, bound_ids, restored, business, summaries = [], [], [], [], [], []
+    in_summary = False
+
+    def prepare_run(*args, **kwargs):
+        params = original_prepare_run(*args, **kwargs)
+        prepared_ids.append(params.request_id)
+        return params
+
+    def run(*args, **kwargs):
+        params = kwargs["params"]
+        sent_ids.append((params.request_id, params.run_id, params.attempt_id))
+        return original_run(*args, **kwargs)
+
+    def model_attempt(*args, **kwargs):
+        result, bound = original_model_attempt(*args, **kwargs)
+        bound_ids.append((bound.request_id, bound.run_id, bound.attempt_id))
+        return result, bound
+
+    def restore(agent_arg, params):
+        carry = params.native_compact_carry
+        if carry is not None:
+            restored.append((carry.request_id, params.request_id, carry.source_attempt_id))
+        return original_restore(agent_arg, params)
+
+    def summary(*args, **kwargs):
+        nonlocal in_summary
+        in_summary = True
+        try:
+            return original_summary(*args, **kwargs)
+        finally:
+            in_summary = False
+
+    execution = replace(execution, prepare_run=prepare_run)
+    monkeypatch.setattr(agent, "run", run)
+    monkeypatch.setattr(background_execution, "_run_background_model_attempt", model_attempt)
+    monkeypatch.setattr(compact_carry, "restore_native_compact_carry", restore)
+    monkeypatch.setattr(compact, "_summarize", summary)
+
+    def on_business(wire, _number):
+        if in_summary:
+            summaries.append(wire)
+            return
+        business.append(wire)
+        if len(business) == 1:
+            raise ProviderContextWindowError("测试无 task 后台首请求溢出")
+
+    all_wires, _ = _http(monkeypatch, backend=backend, on_business=on_business)
+    result = background_execution.run_background_turn_with_compact(
+        execution, thread, request, user_prompt="继续核对本轮资料", continuation_injection=[],
+        proactive_delivery_available=False, activity_sink=sink,
+    )
+
+    assert result.runtime_status != "context_overflow"
+    assert prepared_ids == ["", ""]
+    assert len(sent_ids) == 2 and sent_ids[0][0] and sent_ids[0][0] == sent_ids[1][0]
+    assert sent_ids[0][1] == sent_ids[1][1]
+    assert sent_ids[0][2] != sent_ids[1][2]
+    assert len(bound_ids) == 2 and bound_ids[0][0] == bound_ids[1][0] == sent_ids[0][0]
+    assert bound_ids[0][2] != bound_ids[1][2]
+    assert len(restored) == 1 and restored[0][0] == restored[0][1] == sent_ids[0][0]
+    assert restored[0][2] == bound_ids[0][2]
+    assert store.tasks.list(thread.thread_id) == []
+    assert len(business) == 2 and len(summaries) == 1 and len(all_wires) == 3
     assert store.threads.require(thread.thread_id).compact_generation == 1
 
 
@@ -474,16 +561,16 @@ def test_uncommitted_active_recovery_sends_no_restored_business(tmp_path, monkey
     if failure == "unread_retained_ir":
         from agent_py_agent.agent.agent_core.runtime import loop_support
 
-        original_initial_ir = loop_support._native_initial_tool_ir_history
+        original_loop_params = loop_support._tool_loop_execute_params
 
-        def initial_ir_with_unread(*args, **kwargs):
-            history = original_initial_ir(*args, **kwargs)
+        def loop_params_with_unread(*args, **kwargs):
+            params = original_loop_params(*args, **kwargs)
             if sent_business:
-                # 真实native初始化后的未覆盖用户原文属于下一次请求，不得被archive摘要隐藏。
-                history.append(UserTurn("未覆盖的用户原文。" * 120_000))
-            return history
+                # 已采用原IR后到达的未覆盖用户原文仍属于下一次完整请求，不能被工具摘要隐藏。
+                params.tool_ir_history.append(UserTurn("未覆盖的用户原文。" * 120_000))
+            return params
 
-        monkeypatch.setattr(loop_support, "_native_initial_tool_ir_history", initial_ir_with_unread)
+        monkeypatch.setattr(loop_support, "_tool_loop_execute_params", loop_params_with_unread)
 
     def project(*args):
         if failure == "candidate_cancel":

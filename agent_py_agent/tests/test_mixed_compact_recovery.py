@@ -13,7 +13,7 @@ from agent_py_agent.agent.agent_core.model.context_pressure import (
 from agent_py_agent.agent.agent_core.runtime.context_compactor import runtime_compact_policy
 from agent_py_agent.agent.backends.base import ProviderRequestOptions
 from agent_py_agent.agent.backends.errors import ProviderContextWindowError, ProviderTransientError
-from agent_py_agent.agent.backends.tool_ir import CompactionSummary
+from agent_py_agent.agent.backends.tool_ir import CompactionSummary, RuntimeFactsTurn
 from agent_py_agent.agent.conversation import background_execution, compact
 from agent_py_agent.agent.conversation.background_compact_context import (
     apply_background_compact_context,
@@ -156,8 +156,14 @@ def test_mixed_recovery_commits_both_sources_and_sends_selected_wire(tmp_path, m
     )
     assert result.runtime_status != "context_overflow"
     assert len(all_wires) == 3 and len(business) == 2 and len(summaries) == 1
-    # 初始容量检查与上游溢出各冻结一次来源；同次候选始终复用那一次的完整分区。
-    assert len(sources) == 2 and sources[0] is not None and sources[0] == sources[1]
+    # 两次冻结的工具来源不变；外层carry保留首次实际发送追加的控制事实，不能丢弃后再假装来源相等。
+    assert len(sources) == 2 and sources[0] is not None
+    initial, recovered = sources
+    assert replace(recovered, retained_ir_history=initial.retained_ir_history) == initial
+    assert recovered.retained_ir_history[:len(initial.retained_ir_history)] == initial.retained_ir_history
+    extra = recovered.retained_ir_history[len(initial.retained_ir_history):]
+    assert extra and all(isinstance(item, RuntimeFactsTurn) for item in extra)
+    assert extra[-1].source == "conversation.runtime"
     source = sources[1]
     assert len(source.source_records) == 2
     assert len(source.retained_records) == 1

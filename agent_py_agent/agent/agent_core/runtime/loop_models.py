@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from ...capability.decision_recommendation import CapabilityPresentationSelection
 
 
-# LLM: 消息/运行/尝试身份独立；展示和已应用Compact视图只由同片宿主传入，不能作为持久权限或状态。
+# LLM: 消息/逻辑回合/运行/尝试身份独立；原生carry与已应用视图只由同片宿主传入，不能作为持久权限或状态。
 # 类用途: 收拢一次代理调用的配置、上下文和内存回调，不执行模型、工具或写文件。
 @dataclass
 class RunParams:
@@ -42,6 +42,9 @@ class RunParams:
     root_user_prompt: str = ""
     carried_archive_tool_calls: list[dict[str, object]] | None = None
     carried_active_turn_user_inputs: list[dict[str, object]] | None = None
+    # 同进程overflow的原生历史，只用于相同宿主请求恢复；不恢复执行权、快照或持久状态。
+    native_compact_carry: object | None = None
+    conversation_turn_id: str = ""
     # 宿主在同一活动回合或子代理 attempt 内共享；不从 task_attributes、提示词或模型历史恢复批准。
     runtime_rejected_actions: list[dict[str, str]] = field(default_factory=list)
     # Gateway injects one exact-turn transition callback. Runtime invokes it at
@@ -98,11 +101,8 @@ class RuntimeContextRequest:
     task_attributes: dict | None = None
 
 
-# LLM: 已解析参数保留宿主回调/拒绝列表；展示纯值和已评估事实只供原推荐接缝核对，不送入模型或结果，也不能替代快照。
-# 类用途: 将冻结工具、权限、会话上下文及本片展示接到原循环；异常与展示回传分别使用各自宿主出口。
-# LLM: Prepared runtime parameters carry the applied Compact view unchanged into the one tool
-# loop; this transient view cannot authorize calls or replace the full archive.
-# 类用途: 保存准备后的循环输入与本次摘要视图，交给唯一工具循环而不写持久状态。
+# LLM: 已解析参数保留宿主回调/拒绝与逻辑turn；临时IR carry和Compact视图不授权，不替代本次工具/权限快照或完整archive。
+# 类用途: 将准备后的会话、展示、原生接续材料交给唯一工具循环；异常与展示仍分别沿原宿主出口回传。
 @dataclass
 class RuntimeLoopParams:
     user_prompt: str
@@ -127,6 +127,8 @@ class RuntimeLoopParams:
     save: bool | None = None
     carried_archive_tool_calls: list[dict[str, object]] | None = None
     carried_active_turn_user_inputs: list[dict[str, object]] | None = None
+    native_compact_carry: object | None = None
+    conversation_turn_id: str = ""
     runtime_rejected_actions: list[dict[str, str]] = field(default_factory=list)
     active_turn_transition_callback: object = None
     tool_runtime_snapshot: object = None
@@ -178,6 +180,8 @@ class PreparedRuntimeContext:
     tool_protocol_snapshot: object = None
 
 
+# LLM: 原循环结果仅在typed overflow交回临时carry，不使用canonical消息反推ToolCall身份。
+# 类用途: 将执行结果交给原收尾，让宿主保留同轮完整IR及准确插话释放ID。
 @dataclass
 class RuntimeLoopResult:
     final_prompt: str
@@ -191,6 +195,7 @@ class RuntimeLoopResult:
     active_turn_user_inputs: list[dict[str, object]]
     tool_runtime_evidence: dict[str, object]
     canonical_native_messages: list[dict[str, object]]
+    native_compact_carry: object | None = None
 
 
 

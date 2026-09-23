@@ -1854,3 +1854,5 @@ blocked，由 Gateway 停止该 request，避免重复副作用。
 Gateway/child的carried活动归档恢复现由各自已准备参数投影历史和活动交接，均走PreparedCompactRecovery。child第0注入槽即使为空也保留，渲染仍为空串，确保纯替换位置固定；清除后的能力展示同步到下一次恢复surface，不能复活旧推荐。混合来源由公共恢复器先完成宿主历史替换，再统一替换已标记工具交接，最终投影与实际发送共用同一材料；原完整归档不裁剪，未知身份保留。
 
 GatewayModelObservation现承接render/prepare_request/select三个顺序点：公共PreparedCompactRecovery先交回已确认上下文，再构建选模和拒绝回退基线；不重跑业务准备、不改变选择revision守门。control_service的手动入口按同一THREAD_COMPACT_SCOPE来源执行原writer/CAS，没有未来业务容量承诺。
+
+`request_execution.py`沿原RunParams/结果传递临时native_compact_carry和逻辑turn；`conversation/compact_carry.py`负责身份/view校验、精确释放ID与IR深复制，`runtime/loop_support.py`在真实工具循环边界捕获。observer仍拥有完整恢复安全点及原CAS，无新增持久表。

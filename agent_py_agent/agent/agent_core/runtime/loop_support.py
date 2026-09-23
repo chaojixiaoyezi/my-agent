@@ -126,6 +126,8 @@ def _runtime_loop_params(
         save=params.save,
         carried_archive_tool_calls=params.carried_archive_tool_calls,
         carried_active_turn_user_inputs=params.carried_active_turn_user_inputs,
+        native_compact_carry=params.native_compact_carry,
+        conversation_turn_id=params.conversation_turn_id,
         runtime_rejected_actions=params.runtime_rejected_actions,
         active_turn_transition_callback=params.active_turn_transition_callback,
         tool_runtime_snapshot=prepared.tool_runtime_snapshot,
@@ -605,7 +607,7 @@ def _runtime_injections_with_bundle(
 
 
 # LLM: 原推荐接缝只采用合法展示；循环可交回已验证 child 的完整协议参数，未交回时沿原初始参数收口，不把活快照写入结果。
-# 函数用途: 驱动原模型工具循环，并以最终实际模型的协议和 IR 生成证据及异常历史。
+# 函数用途: 驱动工具循环；溢出时释放未提交插话并冻结IR，释放失败也沿原异常出口保存已完成事实。
 def _execute_runtime_loop(agent, params: RuntimeLoopParams):
     write_runtime_fact_start_if_enabled(agent, params)
     audit_source_provision = _provision_audit_sources_before_model(agent, params)
@@ -658,10 +660,13 @@ def _execute_runtime_loop(agent, params: RuntimeLoopParams):
     service = ToolLoopService(agent)
     try:
         final_prompt, final_response, tool_rounds = service.execute(loop_params)
+        loop_params = service.current_params or loop_params
+        from ...conversation.compact_carry import capture_native_compact_carry
+
+        native_carry = capture_native_compact_carry(agent, loop_params, final_response)
     except (Exception, KeyboardInterrupt) as exc:
         _persist_partial_native_turn(params.partial_turn_callback, service.current_params or loop_params, exc)
         raise
-    loop_params = service.current_params or loop_params
     return RuntimeLoopResult(
         final_prompt=final_prompt,
         final_response=final_response,
@@ -672,6 +677,7 @@ def _execute_runtime_loop(agent, params: RuntimeLoopParams):
         executed_tools=loop_params.executed_tools,
         archive_tool_calls=loop_params.archive_tool_calls,
         active_turn_user_inputs=list(loop_params.active_turn_user_inputs),
+        native_compact_carry=native_carry,
         tool_runtime_evidence=_tool_runtime_evidence(
             loop_params.tool_runtime_snapshot,
             loop_params.tool_protocol_snapshot,
@@ -865,7 +871,7 @@ def _loop_attempt_id(agent, params: object) -> str:
 # LLM: Current-turn IR starts at the exact user task. Completed conversation messages are carried
 # separately as provider_history_messages so finalization persists only the new turn. Carried
 # handoff/input then append in real chronology.
-# 函数用途: 把当前任务和本轮续接输入按真实时间顺序变成只属于本轮的原生消息 IR。
+# 函数用途: 按时间生成当前任务与插话IR；内部ID沿原包保留，供释放核对而不外发。
 def _native_initial_tool_ir_history(
     params: RuntimeLoopParams,
     *,
@@ -880,7 +886,11 @@ def _native_initial_tool_ir_history(
         history.append(UserTurn(_native_user_task_text(current)))
     if carried_handoff:
         history.append(CompactionSummary(carried_handoff))
-    history.extend(UserTurn(text) for text in carried_user_inputs if str(text or ""))
+    packets = merge_active_turn_user_inputs(params.carried_active_turn_user_inputs)
+    if packets and len(packets) != len(carried_user_inputs):
+        raise ValueError("插话携带包与原生输入数量不一致")
+    history.extend(UserTurn(text, input_ids=tuple(packets[index]["input_ids"]) if packets else ())
+                   for index, text in enumerate(carried_user_inputs) if str(text or ""))
     return history
 
 
@@ -1048,9 +1058,13 @@ def _native_user_task_text(value: object) -> str:
 # Never use the bounded model projection as runtime authority. Exact rejection memory
 # remains the same host-owned list across automatic continuations, independent of model history.
 # Skill presentation travels with this seed only; it cannot mutate the original grant or loaded-tool facts.
-# 函数用途: 从当前请求与完整续跑账本组装循环参数，传递本片名卡选择，并只展示未压缩的近期轨迹。
+# 函数用途: 从新权限快照及完整归档恢复执行状态；同进程carry保留原IR，不重跑归档摘要或用户轮初始化。
 def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecuteParams:
     params = seed.params
+    from ...backends.tool_ir import CompactionSummary
+    from ...conversation.compact_carry import restore_native_compact_carry
+
+    native_carry = restore_native_compact_carry(agent, params)
     archive_tool_calls: list[dict[str, object]] = list(params.carried_archive_tool_calls or [])
     from ...conversation.active_turn_compact import model_visible_active_turn_tool_calls
 
@@ -1070,26 +1084,27 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
     # 这是已有 pending_deferred 重建（_live_archive_state_from_carried_archive_tool_calls）的同源补全。
     reconstructed = _reconstructed_runtime_state(
         archive_tool_calls,
-        model_visible_records=model_visible_archive_tool_calls,
-        agent=agent,
+        model_visible_records=[] if native_carry is not None else model_visible_archive_tool_calls,
+        agent=None if native_carry is not None else agent,
         request_id=params.request_id,
         run_id=params.run_id,
         task_id=params.task_id,
     )
-    tool_context: list[str] = reconstructed.tool_context
+    tool_context: list[str] = list(native_carry.tool_context) if native_carry is not None else reconstructed.tool_context
     active_turn_user_inputs = merge_active_turn_user_inputs(params.carried_active_turn_user_inputs)
     active_turn_user_input_texts_carried = active_turn_user_input_texts(active_turn_user_inputs)
-    tool_ir_history = _reconstructed_native_initial_ir(
+    tool_ir_history = list(native_carry.history) if native_carry is not None else _reconstructed_native_initial_ir(
         agent, seed, tool_context, model_visible_archive_tool_calls,
         active_turn_user_input_texts_carried,
     )
-    tool_context.extend(
-        f"[ACTIVE_TURN_USER_INPUT]\n{text}" for text in active_turn_user_input_texts_carried
-    )
+    if native_carry is None:
+        tool_context.extend(f"[ACTIVE_TURN_USER_INPUT]\n{text}" for text in active_turn_user_input_texts_carried)
     tool_rounds = reconstructed.tool_rounds
     one_shot_tool_calls: set[str] = reconstructed.one_shot_tool_calls
     executed_tools: list[str] = reconstructed.executed_tools
     live_archive_state = _live_archive_state_from_carried_archive_tool_calls(archive_tool_calls)
+    if native_carry is not None:
+        live_archive_state["_forwarded_runtime_guidance"] = set(native_carry.forwarded_guidance)
     required_tool_names = {
         name
         for action in tuple(getattr(seed.effective_contract_snapshot, "required_actions", ()) or ())
@@ -1130,7 +1145,9 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
         save=params.save,
         live_archive_state=live_archive_state,
         tool_ir_history=tool_ir_history,
-        provider_history_messages=_native_provider_history_messages(params),
+        conversation_turn_id=params.conversation_turn_id,
+        provider_history_messages=_native_provider_history_messages(params, include_compact_summary=not any(
+            isinstance(item, CompactionSummary) and item.source == "applied_compact" for item in tool_ir_history)),
         active_turn_user_inputs=active_turn_user_inputs,
         active_turn_transition_callback=params.active_turn_transition_callback,
         runtime_rejected_actions=params.runtime_rejected_actions,

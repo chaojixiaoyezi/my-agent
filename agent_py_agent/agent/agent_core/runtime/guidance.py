@@ -537,9 +537,8 @@ def _run_active_turn_transition(params: object, phase: str, operation):
     return operation()
 
 
-# LLM: Caller holds the exact turn transition guard from receipt claim through every prompt/state
-# mutation. Terminalization cannot reject or archive between claim and this local admission edge.
-# 函数用途: 把已认领补充消息加入当前模型提示，并登记稍后的消费确认。
+# LLM: 精确回合转换锁覆盖认领到注入；原 packet 的 input_ids 同时写入 UserTurn，供 Compact 按身份回收。
+# 函数用途: 把已认领补充消息加入当前模型提示和原生历史，并登记稍后的消费确认。
 def _inject_claimed_guidance(
     params: object,
     entries: list[Any],
@@ -549,10 +548,11 @@ def _inject_claimed_guidance(
         return
     user_input = _render_guidance_user_input(entries)
     if user_input:
+        packet = packet_from_guidance(entries, user_input)
         # 会话运行时 steer is a real user turn, not a system/runtime hint.  Keep one
         # chronological text marker for the text protocol and one provider-neutral
-        # UserTurn for native messages.  The latter remains visible after later tool
-        # rounds instead of disappearing after the first sampling request.
+        # UserTurn for native messages.  Both carry the same input ids, while only
+        # the text reaches the provider across later tool rounds.
         if isinstance(tool_context, list):
             tool_context.append(f"[ACTIVE_TURN_USER_INPUT]\n{user_input}")
         from ..native_tool_protocol import native_tool_use_active
@@ -560,8 +560,11 @@ def _inject_claimed_guidance(
         if native_tool_use_active(params):
             from ..tool_ir_history import record_user_turn_ir
 
-            record_user_turn_ir(params, user_input)
-        append_active_turn_user_input(params, packet_from_guidance(entries, user_input))
+            record_user_turn_ir(
+                params, user_input,
+                input_ids=tuple(packet["input_ids"]) if packet is not None else (),
+            )
+        append_active_turn_user_input(params, packet)
         _begin_active_turn_user_reply_segment(
             params,
             _guidance_client_message_ids(entries),

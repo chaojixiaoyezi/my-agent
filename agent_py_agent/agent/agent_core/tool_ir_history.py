@@ -16,7 +16,7 @@ text 协议路径一字不动。
 
     AssistantTurn(text=该轮模型文本, tool_calls=[ToolCall, ...])
     ToolResult, ToolResult, ...        # 紧随其后、与上面调用一一配对的回执
-    UserTurn(text=运行中补充输入)       # 留在到达时的准确时间位置
+    UserTurn(text=运行中补充输入, input_ids=原插话身份)  # 留在到达时的准确时间位置
     CompactionSummary(text=续接摘要)    # thread/live 摘要最多一条；carried handoff 独立保留
 
 实现要点：
@@ -70,12 +70,14 @@ def native_tool_ir_history(params: object) -> list[Any]:
     return history
 
 
-def record_user_turn_ir(params: object, text: str) -> None:
+# LLM: 插话身份由原 guidance packet 传入并与正文一起留在 IR；普通初始用户输入保持空身份。
+# 函数用途: 把运行中用户补充输入追加到当前 turn 的原生消息历史，不在这里按正文去重。
+def record_user_turn_ir(params: object, text: str, *, input_ids: tuple[str, ...] = ()) -> None:
     """把运行中用户补充输入永久插入当前 turn 的原生消息历史。"""
     content = str(text or "")
     if not content.strip():
         return
-    native_tool_ir_history(params).append(UserTurn(content))
+    native_tool_ir_history(params).append(UserTurn(content, input_ids=tuple(input_ids)))
 
 
 # LLM: A dynamic prompt suffix becomes an append-only typed history item before provider
@@ -141,14 +143,14 @@ def project_native_provider_messages(
 
 
 # LLM: compact 摘要与真实 UserTurn 类型分开；每次安装只替换 thread/live summary，
-# schema-marked carried handoff 是当前 turn 的独立事实，必须原位保留到后续压缩代次。
+# writer-owned摘要标记applied_compact；carried handoff原位保留，重跑不得重复恢复摘要前缀。
 # 函数用途: 在最近工具尾部之前安装唯一一条当前 turn 压缩摘要，并保留运行交接摘要。
 def replace_compaction_summary_ir(params: object, text: str) -> bool:
     content = str(text or "").strip()
     if not content:
         return False
     history = native_tool_ir_history(params)
-    replacement = CompactionSummary(content)
+    replacement = CompactionSummary(content, source="applied_compact")
     rebuilt: list[Any] = []
     installed = False
     for item in history:

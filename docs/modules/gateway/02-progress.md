@@ -161,3 +161,5 @@ Gateway恢复协调已抽到 `agent_core/compact_request_recovery.py` 与child�
 结构见 [04-structure](04-structure.md)。改生命周期或恢复时，检查运行账本、队列、wake 回执和 TUI 可见终态。最终验收按 [TESTS](../../../TESTS.md) 走真实 TUI；生产用户会话、秘密配置及私有日志不纳入仓库。
 
 首次自动Compact已本地接公共完整请求准备：原会话加载暂缓提交，PromptBuilder冻结后先压缩再自动选模。手动Compact在车道内按全线程来源判空，回执只报告历史估算。组合验收见TESTS，真实供应商与完整IR边界仍待验。
+
+外层typed overflow已接同宿主原生IR carry；真实循环释放未提交插话，Gateway按ID过滤后交下一次完整准备，原ToolCall身份和完整正文保留。恢复权限和模型前缀重新准备；无可压来源显式拒绝。此片隔离联验中，实际安装版与供应商证据仍待补。

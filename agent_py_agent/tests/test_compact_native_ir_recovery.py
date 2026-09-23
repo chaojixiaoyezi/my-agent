@@ -13,6 +13,7 @@ from agent_py_agent.agent.agent_core.tool_loop.round_execution import (
     ToolCallExecuteParams,
     ToolCallRecordParams,
 )
+from agent_py_agent.agent.backends.errors import ProviderContextWindowError
 from agent_py_agent.agent.backends.tool_ir import AssistantTurn, ToolResult
 from agent_py_agent.agent.conversation import active_turn_compact, background_execution, compact
 from agent_py_agent.agent.conversation.background_compact_context import (
@@ -240,3 +241,32 @@ def test_native_ir_recovery_failure_sends_no_business_or_commit(tmp_path, monkey
         assert raised.value.code == "COMPACT_CANDIDATE_TOO_LARGE"
     committed = store.threads.require(thread.thread_id)
     assert committed.compact_generation == 0 and not committed.compact_checkpoint_id
+
+
+def test_overflow_capture_release_error_preserves_completed_native_turn(tmp_path, monkeypatch):
+    from agent_py_agent.agent.agent_core.runtime import guidance
+
+    marker = "COMPLETED_BEFORE_RELEASE_ERROR"
+    agent, store, thread, execution, sink, history, params, context, recorded = _native_ir_attempt(
+        tmp_path, monkeypatch, backend="anthropic_compatible", full_result=marker,
+    )
+    persisted = []
+    params.partial_turn_callback = persisted.append
+
+    def release_failure(_agent, actual_params):
+        assert any(isinstance(item, ToolResult) and marker in item.output
+                   for item in actual_params.tool_ir_history)
+        raise OSError("测试插话账本释放失败")
+
+    def overflow(_wire, _number):
+        raise ProviderContextWindowError("测试供应商超窗")
+
+    monkeypatch.setattr(guidance, "release_reserved_turn_input_after_attempt", release_failure)
+    _http(monkeypatch, backend="anthropic_compatible", on_business=overflow)
+    with pytest.raises(OSError, match="插话账本释放失败"):
+        background_execution._run_background_recovery_attempt(
+            execution, "继续核对", params, history, context, recovering=False, activity_sink=sink,
+        )
+    assert len(recorded) == len(persisted) == 1
+    assert marker in json.dumps(persisted[0].canonical_native_messages, ensure_ascii=False)
+    assert store.threads.require(thread.thread_id).compact_generation == 0

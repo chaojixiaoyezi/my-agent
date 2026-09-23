@@ -1222,3 +1222,16 @@ Gateway/child无transcript的活动归档已删除先粗估提交后重新prepar
 证据边界：纯冻结 IR 的下层安全点验收与外层溢出自动接续分开。当前外层重跑 agent.run 会从归档重建交接，未保留前轮原生 ToolCall/ToolResult；本切片不能宣称外层原生 IR 接续完成。媒体线、真实供应商缓存、超大历史有界读取及旧全仓八项失败仍开放，12.4不勾选。测试机192.168.1.9可用于后续已协调的隔离验收，本片尚未部署或重启。
 
 建议下一步：先完成本切片隔离联验，再接外层原生 IR 传递与媒体整合；共享执行参数和恢复桥接由一个 owner 修改，独立测试和只读审查可并行。
+
+
+### 12.4 外层原生IR carry（基线95ffee08a，本地联验中）
+
+三宿主同进程、同owner/request/run/task/逻辑turn/view携带真实IR和tool_context，主attempt可由原DB轮换，child保持来源attempt；原工具四元引用不改。深复制后AssistantTurn恢复普通类型，旧工具轮归并标记不跨循环。UserTurn沿原插话包带input_ids，真实循环在overflow后沿原ledger释放，宿主只按精确释放ID过滤；部分包释放拒绝，异常仍先保存完成事实。
+
+每轮重新准备权限/工具/provider前缀；完整archive只恢复预算、幂等及工具载入，不重复做待丢弃的语义摘要。prefix接管新摘要时同步移除IR中旧applied_compact；没有transcript或完整工具来源的强制恢复明确COMPACT_SOURCE_EMPTY。历史能力卡原序保留，当前展示读最新结构来源。无任务后台保持首次解析request_id，typed视图与显式当前线程交叉校验，不通过task属性误升任务。
+
+Gateway/child真实read_file、完整中段标记、IR-only零archive、候选实际HTTP等价及单CAS均有隔离测试；fake HTTP不能作为供应商/TUI验收。最终联合结果和首轮失败见TESTS。媒体线、真实缓存、超大历史及旧全仓八项失败仍开放，12.4不勾选。
+
+建议下一步：先收口本片定向与严格gate，再协调媒体合入及授权1.9隔离安装验收；只读审查和测试可并行，writer/身份/共享Gateway由单一owner操作。
+
+本片最终44文件联合1154 passed、4项既有xfail（135.39秒），日志 `/tmp/compact_carry_final_20260923.log`，清单同名 `.files`；taskless不误建会话任务补充断言后两协议另跑2 passed。Ruff、doc sync、import boundaries 0、strict code-size hard=0且基线未改、diff与clean-package通过。没有push、部署或真实供应商调用，线上CI没有作为验收来源。12.4仍开放，11/18清单数不变；建议下一步协调媒体集成与授权1.9隔离验收，公共状态单owner、独立测试可并行。

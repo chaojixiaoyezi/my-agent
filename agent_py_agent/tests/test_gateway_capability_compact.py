@@ -1,13 +1,13 @@
-"""Gateway同一真实turn的展示恢复：原设置/Registry/Skill/Compact/DB，只有模型回答与最终循环为fake。"""
+"""Gateway同一真实turn的展示恢复：原设置/Registry/Skill/Compact/DB，仅模型答复为fake。"""
 import json
 from dataclasses import asdict, replace
 from types import SimpleNamespace
 
 import pytest
 
+from agent_py_agent.agent.agent_core import _tool_loop_service
 from agent_py_agent.agent.agent_core._tool_loop_service import _render_tool_loop_prompt
 from agent_py_agent.agent.agent_core.native_tool_protocol import resolve_native_tools
-from agent_py_agent.agent.agent_core.runtime import loop_support
 from agent_py_agent.agent.agent_core.runtime.loop_models import RuntimeContextRequest
 from agent_py_agent.agent.backends.base import ModelResponse
 from agent_py_agent.agent.capability import decision_recommendation as recommendations
@@ -22,6 +22,7 @@ from agent_py_agent.agent.gateway_parts import request_execution
 from agent_py_agent.agent.gateway_parts.paths import gateway_paths
 from agent_py_agent.agent.gateway_parts.request_context import GatewayAskRunContext
 from agent_py_agent.agent.gateway_parts.request_history import append_gateway_conversation_message
+from agent_py_agent.agent.gateway_parts.request_worker import _finish_claimed_gateway_request
 from agent_py_agent.agent.prompting_parts.cache_layout import prompt_cache_layout
 from agent_py_agent.tests.test_decision_capability_consumer import (
     model_input,
@@ -152,7 +153,8 @@ def gateway_surface(tmp_path, tool_surface, skill_catalog_factory):  # noqa: F81
     agent.backend = backend
     profile, _ = decision(agent)
     patch(agent, {"enabled": True, "profile_id": profile, "points.skill_tool.mode": "apply"})
-    request = {**_request(), "id": "gateway-display", "execution_attempt_id": "gateway-turn-1", "status": "processing"}
+    request = {**_request(), "id": "gateway-display", "kind": "ask", "prompt": "核对来源",
+               "execution_attempt_id": "gateway-turn-1", "status": "processing"}
     conversation = _context(agent, request, request["id"], "核对来源")
     for role in ("user", "assistant"):
         assert append_gateway_conversation_message(agent, {}, conversation, request_id="old-" + role,
@@ -166,19 +168,19 @@ def gateway_surface(tmp_path, tool_surface, skill_catalog_factory):  # noqa: F81
     return SimpleNamespace(agent=agent, context=context, conversation=conversation, first=first, second=second, backend=backend)
 
 
-# LLM: 捕获真实RuntimeToolLoopParams并使用原renderer/schema；仅用typed response决定模拟压力，不伪造身份或选中值。
-# 函数用途: 在同一Gateway请求中留下原始和恢复后的模型面，允许调用方在首次失败后改变原配置。
+# LLM: 保留原工具循环和Gateway observer；仅在模型生成边界返回typed假答复，不能跳过deferred恢复的render/select。
+# 函数用途: 在同一真实Gateway请求中捕获原始和恢复后的模型面，并可在首次溢出后改变配置。
 def capture_gateway_loop(monkeypatch, *, after_overflow=None):
     captured = []
-    def execute(service, params):
-        prompt = _render_tool_loop_prompt(service._agent, params)
-        captured.append((params, prompt, resolve_native_tools(service._agent, params)))
+    def generate(request):
+        params = request.params
+        captured.append((params, request.prompt, resolve_native_tools(request.agent, params)))
         overflow = len(captured) == 1
         if overflow and after_overflow:
             after_overflow()
-        return prompt, ModelResponse(text="继续核对", backend="fixture",
-                                     runtime_status="context_overflow" if overflow else "ok"), 0
-    monkeypatch.setattr(loop_support.ToolLoopService, "execute", execute)
+        return ModelResponse(text="继续核对", backend="fixture",
+                             runtime_status="context_overflow" if overflow else "ok")
+    monkeypatch.setattr(_tool_loop_service, "generate_model_response", generate)
     return captured
 
 
@@ -194,10 +196,9 @@ def test_real_gateway_retry_rotates_db_attempt_but_keeps_one_decision_and_compac
                          params.capability_presentation_turn_id))
         return original_run(prompt, params=params)
     monkeypatch.setattr(fixture.agent, "run", run)
-    result, refreshed = request_execution._run_gateway_turn_with_conversation_compact(
-        fixture.context, "核对来源", fixture.conversation,
-    )
-    assert result.runtime_status == "ok" and refreshed.compact_generation == 1
+    result = request_execution._run_gateway_ask(fixture.context)
+    assert result.response == "继续核对"
+    assert fixture.agent.conversation_store.threads.require(fixture.conversation.thread_id).compact_generation == 1
     assert len(calls) == 1 and len(captured) == 2 and fixture.backend.calls == 1
     first, second = captured
     assert first[0].attempt_id != second[0].attempt_id
@@ -216,13 +217,19 @@ def test_real_gateway_retry_rotates_db_attempt_but_keeps_one_decision_and_compac
     assert fixture.first.calls == fixture.second.calls == 0
     assert starting[0] == (None, False, "gateway-turn-1")
     assert starting[1][0] is not None and starting[1][1:] == (True, "gateway-turn-1")
-    new_request = {**_request(), "id": "gateway-display-next", "execution_attempt_id": "gateway-turn-2", "status": "processing"}
+    # 实际 Gateway 车道由终态提交释放；第二条请求必须经过原终态入口才能领取同线程。
+    _finish_claimed_gateway_request(
+        gateway_paths(fixture.agent), fixture.context.request_path, fixture.context.request_id,
+        {**asdict(result), "id": fixture.context.request_id, "status": "done", "ok": True},
+        conversation_store=fixture.agent.conversation_store,
+    )
+    new_request = {**_request(), "id": "gateway-display-next", "kind": "ask", "prompt": "核对来源",
+                   "execution_attempt_id": "gateway-turn-2", "status": "processing"}
     new_path = fixture.context.request_path.with_name("gateway-display-next.json")
     new_path.write_text(json.dumps(new_request), encoding="utf-8")
     next_context = replace(fixture.context, request=new_request, request_id=new_request["id"], request_path=new_path)
-    next_conversation = _context(fixture.agent, new_request, new_request["id"], "核对来源")
-    next_result, _ = request_execution._run_gateway_turn_with_conversation_compact(next_context, "核对来源", next_conversation)
-    assert next_result.runtime_status == "ok" and starting[2] == (None, False, "gateway-turn-2")
+    next_result = request_execution._run_gateway_ask(next_context)
+    assert next_result.response == "继续核对" and starting[2] == (None, False, "gateway-turn-2")
     assert len(calls) == 2
 
 
@@ -236,8 +243,8 @@ def test_compact_rejects_then_never_revives_display_or_redecides_after_configura
         del fixture.backend.api_base
         return response
     monkeypatch.setattr(fixture.backend, "generate", summary)
-    result, _ = request_execution._run_gateway_turn_with_conversation_compact(fixture.context, "核对来源", fixture.conversation)
-    assert result.runtime_status == "ok" and len(calls) == 1 and len(captured) == 2
+    result = request_execution._run_gateway_ask(fixture.context)
+    assert result.response == "继续核对" and len(calls) == 1 and len(captured) == 2
     assert captured[0][0].selected_skill_ids == ("workspace:method-001",)
     assert captured[1][0].selected_skill_ids is None
     assert "method-059" in prompt_cache_layout(fixture.backend.prompts[0]).stable_prefix
@@ -258,8 +265,8 @@ def test_same_gateway_turn_retains_baseline_after_no_selection_without_repeating
         patch(fixture.agent, {"points.skill_tool.mode": "apply"})
         return response
     monkeypatch.setattr(fixture.backend, "generate", summary)
-    result, _ = request_execution._run_gateway_turn_with_conversation_compact(fixture.context, "核对来源", fixture.conversation)
-    assert result.runtime_status == "ok" and len(captured) == 2
+    result = request_execution._run_gateway_ask(fixture.context)
+    assert result.response == "继续核对" and len(captured) == 2
     assert len(calls) == (mode != "off")
     assert all(params.selected_skill_ids is None for params, _, _ in captured)
     assert captured[0][2] == captured[1][2] == fixture.backend.kwargs[0]["tools"]

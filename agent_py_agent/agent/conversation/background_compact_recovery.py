@@ -36,13 +36,11 @@ def prepare_background_compact_recovery(agent, history, context, *, request_id, 
 
     current = BackgroundRecoveryState(history, context, source.thread.compact_generation, history.compact_context)
 
-    # LLM: 显式已应用scope绑定唯一宿主片，摘要子请求和别的线程不能消费其来源。
+    # LLM: request及宿主冻结的typed视图绑定唯一工作片；无任务后台无需task属性，已有线程声明仍由原工具准备交叉校验。
     # 函数用途: 在原模型安全点判断是否属于此次恢复。
     def matches(params):
         application = getattr(params, "compact_context", None)
-        return (params.request_id == request_id and application is not None and application.thread_id == current.compact_context.thread_id
-                and application.scope == current.compact_context.scope
-                and (params.task_attributes or {}).get("conversation_thread_id") == application.thread_id)
+        return params.request_id == request_id and application == current.compact_context
 
     return PreparedCompactRecovery(
         agent, source, current, matches, partial(_project_background_candidate, agent, current),

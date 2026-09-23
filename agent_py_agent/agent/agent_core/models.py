@@ -1,3 +1,5 @@
+# LLM: typed overflow可携带同进程原生恢复材料；该字段不进入公开回复或持久权限，宿主只在同一逻辑回合消费。
+# 模块用途: 定义运行结果及内部交接数据，不调用模型、不管理执行状态。
 from __future__ import annotations
 
 """defines agent runtime DTOs shared across the core mixins.
@@ -9,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-# LLM: 运行结果保留内部 response，同时允许 Gateway 附加结构化 channel_delivery 用户投影；两者不能混用。
+# LLM: response与channel_delivery保持独立；native_compact_carry只供同进程overflow，不从持久结果反序列化或恢复执行权。
 # 类用途: 描述一次主代理运行的完整内部结果及可选通道交付投影。
 @dataclass
 class AgentRunResult:
@@ -114,3 +116,5 @@ class AgentRunResult:
     # Internal provider-neutral history for this completed turn. Channel responses exclude it;
     # owner-scoped conversation metadata consumes it for exact native replay.
     canonical_native_messages: list[dict[str, object]] | None = None
+    # 仅context_overflow提供的同进程typed IR，不用于对外回复或持久历史重建。
+    native_compact_carry: object | None = None

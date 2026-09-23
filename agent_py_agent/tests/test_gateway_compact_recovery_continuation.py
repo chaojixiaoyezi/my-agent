@@ -144,8 +144,8 @@ def test_recovered_tool_round_keeps_committed_history_and_boundary_order(tmp_pat
     assert agent.conversation_store.threads.require(fixture.thread_id).compact_generation == 1
 
 
-# LLM: 首个真实工具对后由供应商触发溢出；候选经同次原生请求计量，提交后工具轮继续沿已获胜的参数。
-# 函数用途: 两协议验证空 transcript 的下一次准备发生在CAS前，实际HTTP与候选相同且没有重复旧读取。
+# LLM: 首个真实工具对后由供应商触发溢出；原生IR连完整正文跨外层恢复，候选经同次请求计量并发送。
+# 函数用途: 两协议验证空 transcript 的下一次准备发生在CAS前，完整工具正文进入摘要且不会重复旧读取。
 @pytest.mark.parametrize("mode,candidate_backend", [
     ("disabled", "anthropic_compatible"), ("apply", "openai_compatible"),
 ])
@@ -157,7 +157,8 @@ def test_empty_transcript_overflow_compacts_active_turn_before_reprepare(
     agent, context = fixture.agent, fixture.context
     material = agent.home_paths.owner_workspace_dir / "active-turn-material.txt"
     material.parent.mkdir(parents=True, exist_ok=True)
-    material.write_text("只读取一次的活动回合资料。", encoding="utf-8")
+    full_body = "SOURCE-HEAD-" + "甲" * 2_500 + "EXACT-IR-MIDDLE-GATEWAY" + "乙" * 2_500 + "-SOURCE-TAIL"
+    material.write_text(full_body, encoding="utf-8")
     following_material = agent.home_paths.owner_workspace_dir / "following-turn-material.txt"
     following_material.write_text("恢复后继续读取的新材料。", encoding="utf-8")
     decision = install_backend(monkeypatch, fixture)
@@ -166,12 +167,14 @@ def test_empty_transcript_overflow_compacts_active_turn_before_reprepare(
     loop_params = []
     compact_results = []
     candidates = []
+    source_plans = []
     reads = []
     original_prepare = runtime_mixin._prepare_runtime_context
     original_loop_params = loop_support._tool_loop_execute_params
     original_compact = active_turn_compact.compact_carried_active_turn_archive
     original_project = recovery._project_gateway_active_candidate
     original_mixed = compact_request_recovery._project_mixed_recovery_material
+    original_summary = active_turn_compact._active_turn_replacement_summary
     original_read = _filesystem_read.ReadFileTool.execute
 
     def prepare(*args, **kwargs):
@@ -207,6 +210,10 @@ def test_empty_transcript_overflow_compacts_active_turn_before_reprepare(
             candidates.append(selected)
         return selected
 
+    def summarize(*args, **kwargs):
+        source_plans.append(args[1])
+        return original_summary(*args, **kwargs)
+
     def read(self, params):
         reads.append(dict(params))
         outcome = original_read(self, params)
@@ -225,6 +232,7 @@ def test_empty_transcript_overflow_compacts_active_turn_before_reprepare(
     monkeypatch.setattr(active_turn_compact, "compact_carried_active_turn_archive", compact)
     monkeypatch.setattr(recovery, "_project_gateway_active_candidate", project)
     monkeypatch.setattr(compact_request_recovery, "_project_mixed_recovery_material", mixed)
+    monkeypatch.setattr(active_turn_compact, "_active_turn_replacement_summary", summarize)
     monkeypatch.setattr(_filesystem_read.ReadFileTool, "execute", read)
     context = replace(context, on_chunk=Sink())
 
@@ -316,7 +324,20 @@ def test_empty_transcript_overflow_compacts_active_turn_before_reprepare(
     assert stored.compacted_through_byte_offset == 0
     assert candidates[0].params.compact_context.view.checkpoint_id == ""
     assert len(decision.calls) == (1 if mode == "apply" else 0)
-    assert not any(isinstance(item, (AssistantTurn, ToolResult)) for item in loop_params[1].tool_ir_history)
+    source_ir = source_plans[0].source_ir_history
+    assert len(source_plans) == len(source_ir) // 2 == 1
+    assert isinstance(source_ir[0], AssistantTurn) and isinstance(source_ir[1], ToolResult)
+    assert source_ir[0].tool_calls[0].call_id == source_ir[1].call_id == "active-read-once"
+    source_call = source_ir[0].tool_calls[0]
+    assert len(source_plans[0].source_records) == len(source_plans[0].source_tool_refs) == 1
+    assert all(source_plans[0].source_records[0][field] == getattr(source_call, field)
+               for field in ("run_id", "attempt_id", "turn_id", "call_id"))
+    assert full_body in source_ir[1].output
+    assert len(loop_params[1].archive_tool_calls[0]["output_preview"]) < len(source_ir[1].output)
+    summary_wire = json.dumps(business[2][0]["messages"], ensure_ascii=False)
+    assert "EXACT-IR-MIDDLE-GATEWAY" in summary_wire
+    assert summary_wire.count("EXACT-IR-MIDDLE-GATEWAY") == 1
+    assert not any(isinstance(item, (AssistantTurn, ToolResult)) for item in candidates[0].request_input.tool_ir_history)
     assert not any(
         message.get("tool_call_id") == "active-read-once"
         or any(call.get("id") == "active-read-once" for call in message.get("tool_calls") or [])

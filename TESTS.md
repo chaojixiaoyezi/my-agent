@@ -1,5 +1,15 @@
 # 测试与发布验收
 
+## 第 12.4 项外层溢出原生历史接续（本地切片已验）
+
+Gateway、后台及child的同宿主逻辑回合现在携带真实原生IR，不从归档短预览重建正文。原循环在typed overflow后按准确attempt释放未提交插话，携带精确input_ids；释放失败仍经原partial出口保存已完成事实。恢复重新准备权限和provider前缀，旧调用四元引用保持，私有tool_round归并标记清除。摘要由prefix或IR唯一承载，强制恢复没有可压来源报告COMPACT_SOURCE_EMPTY。
+
+首轮44文件联合 **1131 passed、12 failed、4 xfailed，129.37秒**，日志 `/tmp/compact_carry_joint_20260923.log`。6项Gateway旧fixture绕过observer触发eager提交导致旧view身份拒绝；1项child旧断言把历史第一张卡当当前卡；4项mixed来源忽略carry新增真实运行事实；1项真实空来源被误报投影变化。分别迁移真实安全点、核对最新卡并保留历史、保持工具来源/覆盖不变而保留控制事实、修正typed空来源判定。没有放宽来源身份或容量门。
+
+新增同owner/request/run/task/逻辑turn/view校验、主新attempt与child固定attempt、深复制、同文不同input_ids、部分释放拒绝、完整工具IR-only零archive、释放错误保存和transcript-only摘要唯一性回归。无任务后台另验证同轮request_id固定、冻结thread视图无须补task属性，不误建持久任务。最终44文件联合 **1154 passed、4 xfailed，135.39秒**；清单 `/tmp/compact_carry_final_20260923.files`，日志同名 `.log`。四项均为既有预期失败，本片未新增xfail；taskless不新建会话任务的断言补充后两协议另跑 **2 passed，5.92秒**。Ruff、doc sync、导入边界0发现、strict code-size hard=0（基线未改）、diff和clean-package均通过；本地严格gate已通过，线上CI没有作为验收来源。
+
+测试仅使用pytest隔离HOME、隔离文件和fake末端HTTP；没有真实供应商、部署或Gateway重启。192.168.1.9已获用户授权用于后续隔离验收。媒体线合入、真实缓存、超大历史和旧全仓八项失败仍开放，12.4不勾选。
+
 ## 第 12.4 项原生工具 IR 来源（本地切片已验）
 
 原生工具完整往返与archive按同一四元身份分区；摘要优先真实IR正文、保留IR原序回放。完整配对回放的归档不重复生成handoff，未完成组和未知身份继续保留；无旧handoff时插入尚未覆盖的归档。严格机械回退完整附旧摘要和本次原文，分段失败或供应商标明截断时typed拒绝，均沿原容量门和单CAS。
