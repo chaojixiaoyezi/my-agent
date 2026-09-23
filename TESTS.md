@@ -36,7 +36,9 @@ TUI217 原生一次需求真实派read_only孩子；孩子OPEN能力申请，父
 只读核对时父2个attempt、孩子1个attempt均done，没有执行中工具或资源锁；准确宿主已退出。
 OPEN、grant和BLOCKED finished三条wake均handled，原后台claim finished、无pending wake，但父任务仍active且未创建孩子第二attempt。
 这是实际授权接续未完成，不能因所有当前attempt结束或没有锁而记为任务通过；也不能用模型“启动中”证明执行器仍活着。
-原账已私下归档，独立owner只读定位排队与收尾交错；未人工改状态或重发业务请求，尚未修复，不进入第8步。
+冻结快照377秒后再次读回，原状态、attempt和wake均未变化；准确TUI客户端保留，原宿主不存在。
+源码交错定位：grant进入时旧工作片已生成BLOCKED结果，canonical归约为已授PENDING，但结束通知用旧结果把child link写BLOCKED，worker又按旧结果跳过接续；原生命周期门因此持续HOLD。独立owner在隔离目录先做确定性交错红灯，再修通知投影、当前状态接续和唤醒窄字段持久化，不通过放宽启动门掩盖失配。
+原账已私下归档，未人工改状态或重发业务请求；候选尚未验证／部署，不进入第8步。
 
 ## 第 7 步真实孩子失败及父级接手 TUI207—209
 
