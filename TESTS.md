@@ -1,12 +1,27 @@
 # 测试与发布验收
 
+## 第 5 步使用卡发布与原生 TUI 阶段验收
+
+`689e83e85` 已推送 main；发布 wheel 的 SHA-256 为 `868f3882c23ca317abcfeef835c4fc5694c67a47c3bdf83db76b01c5b0b48d1f`。本机与测试机从同一包安装，各 1,267 个包文件逐项匹配，默认入口与每机唯一 Gateway 同版；切换前核对无活动任务并保留旧运行环境及回滚证据。测试机非保留磁盘可用空间为零，后续重负载优先本机。线上 CI 未作为验收来源。
+
+新版原生 TUI168—170 在测试机共用一个 Gateway，TUI171 在本机另一台唯一 Gateway。四个 TUI 均从菜单选择官方 `MiniMax-M2.7`；测试机端点为 `api.minimaxi.com/anthropic`，本机为 `api.minimax.cn/anthropic/v1`。源会话、原操作、审批和产物的详细记录留在仓库外；下表只列已核对的事实，不把短任务计作长任务。
+
+| TUI／tmux 会话 | 实际操作与读回 | 当前结论 |
+| --- | --- | --- |
+| 168／`release-0920-step5-remote-manage` | 原生 `/help` 更正显式入口；安装后的 `/plugins list` 展示简介，`/plugins info` 与启用回执展示相同来源的动作、两条中文示例和设置键名；随后原生停用、重新启用。 | 展示与管理回执符合本片预期；停启的原管理账仍待合并核对。 |
+| 169／`release-0920-step5-remote-explicit` | 带中文及空格的路径以显式命令读三页，范围 0—31、31—63、63—95，三次原业务操作均 SUCCEEDED，合并文本与 95 字节源文件一致；每页经原生 TUI 明确审批。管理端停用后，旧目录版本提交被拒且没有执行；Tab 只保留帮助候选，重新启用并刷新后动作候选恢复。 | 显式参数、分页、审批、旧候选拒绝与目录刷新通过；尚未验证真实粘贴及长输出。 |
+| 170／`release-0920-step5-remote-chinese` | 一次普通中文需求，模型自行调用 `workspace-peek show` 并通过 TUI 审批，再调用 `write_file`；原任务和主代理均 done，两项工具操作均 SUCCEEDED，116 字节结果包含源文件的两项安排。 | 普通中文到插件及内置写入的短任务通过。 |
+| 171／`release-0920-step5-local-smoke` | 一次普通中文需求，模型调用 `write_file` 创建两行文件；原任务和主代理均 done，工具操作 SUCCEEDED，磁盘读回两行内容一致。 | 本机新版 Gateway 与真实模型／内置工具链冒烟通过。 |
+
+第 5 步仍需补原生 TUI 重连、粘贴、滚动／复制和长输出，复核管理原账后再做 5.5 证据收口；不能把当前短任务当作后续步骤的连续长任务、多子代理或故障恢复验收。查看测试机 TUI 用 `ssh testbox 'tmux attach -t <上表会话名>'`，本机 TUI171 用 `tmux attach -t release-0920-step5-local-smoke`。
+
 ## 第 5 步使用卡与目录同源的本地验证
 
 解决问题：旧版 TUI163 的 `/plugins info` 只有简介，顶层 `/help` 误说显式插件入口未开放；启用成功后也没有可直接使用的说明。当前片只修改公开展示投影，不改变安装表、授权或执行链。
 
 本地源码已让列表展示包简介，详情和成功启用回执共用从当前包声明、动作及设置 schema 生成的使用卡；旧启用请求只有在激活代次仍相同时才附卡。公共动作用法由同一参数声明生成，顶层 `/help` 文案已纠正。设置仅展示公开键名，不读取或展示私有配置值。既有目录 v3、客户端 revision、Tab 刷新和提交链未新增状态或轮询。
 
-`test_plugin_commands.py`、`test_plugin_command_catalog.py`、`test_plugin_command_client.py`、`test_plugin_management.py`、`test_plugin_configure_management.py`、`test_plugin_removal.py`、`test_plugin_removal_store.py`、`test_gateway_plugin_commands.py`、`test_gateway_plugin_management.py`、`test_tui_input.py`、`test_workspace_peek_package.py` 共 300 项通过。覆盖使用卡与帮助用法一致、无显式动作时不虚构 slash 入口、旧启用回执不宣传新代次、列表简介和原请求查询位置。发布前本地严格 gate 的全目录 Ruff、文档同步、严格尺寸、diff 和 clean-package 均通过；尺寸报告仅由检查脚本生成，不随本片提交。新版原生 TUI 尚未执行，本节不算第 5 步真实验收。
+`test_plugin_commands.py`、`test_plugin_command_catalog.py`、`test_plugin_command_client.py`、`test_plugin_management.py`、`test_plugin_configure_management.py`、`test_plugin_removal.py`、`test_plugin_removal_store.py`、`test_gateway_plugin_commands.py`、`test_gateway_plugin_management.py`、`test_tui_input.py`、`test_workspace_peek_package.py` 共 300 项通过。覆盖使用卡与帮助用法一致、无显式动作时不虚构 slash 入口、旧启用回执不宣传新代次、列表简介和原请求查询位置。发布前本地严格 gate 的全目录 Ruff、文档同步、严格尺寸、diff 和 clean-package 均通过；尺寸报告仅由检查脚本生成，不随本片提交。此处只记录源码验收；发布后的新版原生 TUI 证据见上节。
 
 ## 第 4 步三项修复发布后的原生 TUI 验收
 
