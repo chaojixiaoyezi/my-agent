@@ -1,6 +1,6 @@
 # LLM: 本模块只启动 TUI worker 与轻量动画刷新线程；业务事件仍由 worker/runtime 发布，刷新线程不得改 reducer 状态。
 # 过程轮询按流身份与序号一起确认；换进程只重基易失游标，不重置 canonical 消息位置。
-# 模块用途: 组装后台任务参数，驱动 spinner/提示重绘；后台读取失败显式显示，不能假装状态仍实时。
+# 模块用途: 组装后台参数，以低频动画刷新降低等待中的 CPU；后台读取失败仍显式显示。
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from pathlib import Path
 from .tui_identity_window import TuiIdentityWindow
 from .tui_params import StartWorkerParams, WorkerConfigParams
 
-TUI_REFRESH_INTERVAL_SECONDS = 0.125
+TUI_REFRESH_INTERVAL_SECONDS = 0.25
 # S-BG1: 后台主代理轮和子代理面板走 Gateway 轻量快照。会话运行时 用服务端事件推送；
 # 当前 HTTP 兼容协议在有任务时按 1 秒刷新，完全空闲时降到 5 秒，兼顾近实时与单 Gateway 负载。
 TUI_BACKGROUND_NOTICE_INTERVAL_SECONDS = 1.0
@@ -642,7 +642,7 @@ def _publish_background_notice_row(
 
 
 # LLM: refresh loop 只在 runtime 报告存在可见动画/短提示时 invalidate；typed event 自带 redraw，空闲时必须零周期整屏重绘。
-# 函数用途: 在应用存活期间按需驱动 spinner 和短提示，不让长历史在空闲时持续占用 CPU。
+# 函数用途: 仅在有活动时以 4 Hz 驱动动画；实际输入和流式事件独立触发重绘，空闲页不反复刷新。
 def _refresh_loop(
     refresh_stop: threading.Event,
     app_ref: list,

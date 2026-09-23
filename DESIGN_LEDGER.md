@@ -43,6 +43,8 @@
 第 7 步依赖收窄（本地候选）：runner 结果准入只接收 canonical task、结果参数和原 RuntimeDB，
 不接收完整 manager；文件模式仍显式传 None，诊断仍写原账。已部署结果链与此候选分开验收，
 边界见[子代理迁移设计](docs/design/SUBAGENT_PARALLEL_EXECUTION.md#第-7-步结果链迁移边界进行中)。
+TUI 绘制合并已改为 20 Hz、周期动画 4 Hz，事件与模型执行不变。同一 fd 真任务的并行原生 TUI 对照 CPU 16.02%→10.23%，候选翻页中位 38 ms；长任务仍在验收，见 TESTS。
+
 TUI 观察超时与业务终态分离已实现：截止点先查 canonical terminal，原页存活时按同一请求/游标退避续等，退出仅释放观察；plain 有限等待保留。官网 M2.7 原生 TUI 已通过真实短等待窗口和暂停客户端后接收终态，见 [资源寿命](docs/design/TUI_RESOURCE_LIFETIME.md)。
 
 长对话验收方法已按用户要求调整：用 my-agent 自主完成真实 GitHub 项目跨语言实现产生自然历史；合成大文件仅保留存储边界定位用途。官网 M2.7 的 fd→Python 原生 TUI 验收待完成，方法见 [TESTS](TESTS.md#真实开发长任务验收方法)。

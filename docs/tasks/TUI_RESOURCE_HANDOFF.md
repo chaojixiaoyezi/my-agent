@@ -75,6 +75,11 @@
 
 ## 发布与风险边界
 
+独立绘制片仅改 `tui_ui_setup.py` 的帧合并为 20 Hz、`tui_threading.py` 的周期动画为 4 Hz；
+原事件/模型/工具流完整保留。真实 fd 会话两个只读原生 TUI 同时对照 CPU 16.02%→10.23%，
+候选翻页中位/最大 38/68 ms；实际方向键、滚轮和当前处 Ctrl+O/Ctrl+E 通过，157 项相关测试通过。
+相同 Gateway 和原业务任务始终继续，不为对照重复下发开发任务。原始帧及采样在私有 `fd-perf/`。
+
 迟到终态补充片：`gateway_client.poll_gateway_chunks` 截止时先读终态，TUI 显式回调续等并用原游标退避；
 `tui_worker_paths._worker_gateway_path` 绑定页面停止事件，不重复入队。plain 有限等待不变。
 109 项定向回归通过；官网 M2.7 真 TUI 0.2 秒窗口复现基线原页缺回复，候选原页接收成功；

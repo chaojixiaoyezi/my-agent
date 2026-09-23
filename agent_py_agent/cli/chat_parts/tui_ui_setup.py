@@ -39,8 +39,10 @@ from .tui_view import (
     make_tui_transcript_view,
 )
 
-APP_REDRAW_INTERVAL_SECONDS = 1 / 60
-APP_RENDER_POSTPONE_SECONDS = 1 / 60
+# LLM: 仅合并可见帧，不延迟工具/消息账和按键处理；终端整屏布局需限制频率，避免流式 token 占满单核。
+# 常量用途: 流式输出最多每秒绘制 20 帧，输入和滚动事件仍立即请求下一帧。
+APP_REDRAW_INTERVAL_SECONDS = 1 / 20
+APP_RENDER_POSTPONE_SECONDS = 1 / 20
 ESCAPE_SEQUENCE_TIMEOUT_SECONDS = 0.1
 TERMINAL_ESCAPE_PREFIX_TIMEOUT_SECONDS = 0.05
 
@@ -695,7 +697,7 @@ def _make_transcript_tui_body(parts: _TuiAppParts) -> Any:
     )
 
 
-# LLM: Application 组装必须保留同一个 parts 生命周期、alternate screen、显式块状输入光标、60Hz 合并上限、事件/活动动画触发重绘、动态鼠标 filter 与 before_render 焦点同步；不得另建 runtime。
+# LLM: Application 组装必须保留同一个 parts 生命周期、alternate screen、显式块状输入光标、20Hz 合并上限、事件/活动动画触发重绘、动态鼠标 filter 与 before_render 焦点同步；不得另建 runtime。
 # 函数用途: 用准备好的控件和两个模式布局创建可在 会话运行时 原生鼠标与 终端交互 TUI 鼠标间切换的全屏 Application。
 def _assemble_tui_application(
     params: MakeTuiAppParams,
