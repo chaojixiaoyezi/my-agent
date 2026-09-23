@@ -25,6 +25,10 @@
   载入 TUI，也不能删掉早期历史来伪装内存稳定。
 - Gateway 连接有容量和寿命边界；离开的客户端不留下永久占槽的半请求。
   状态传输失败不代表任务失败，不静默补发任务或改变消息身份。
+- TUI 请求观察到达等待截止点仍先读取 canonical terminal。无终态时只显示等待提示并沿同一请求、
+  同一 chunk byte cursor 继续观察；无活动轮询从 0.1 秒退避到最多 1 秒，活动恢复后回到短间隔。
+  页面退出终止本地观察，不写取消、不重提请求。plain 和其它未声明续等的调用方仍保持有限等待。
+  `gateway_request_timeout` 在 TUI 中是无活动提醒窗口，不是服务端任务终态或客户端永久放弃结果的依据。
 - 空闲 owner 的轻量身份与持久状态保留；重资源仅由准确在途使用持有，释放不能取消
   活动子代理、审批、持久唤醒或共享插件连接。需要跨模块调整时先核对各调用者。
 
@@ -34,6 +38,9 @@
 与 owner 池实现。对照 Codex 的 `tui/src/transcript_reflow.rs`：仅布局变化触发稳定回滚区
 重排、变化合并与流结束修复分开；对照 OpenCode 的 `tui/app.tsx::createTuiLifecycle`：
 统一且幂等的退出清理，SIGHUP 与正常退出收口。只核对这些入口，不声称完成整库审阅。
+迟到结果修复另核对 OpenClaw `src/gateway/server-methods/agent-job.ts::waitForAgentJob`：
+先检查已存在的终态快照，等待超时与任务结果分开。本仓库复用原 canonical terminal 和原 TUI observer，
+不复制其状态缓存或另建回补队列。
 
 ## GitHub 源码复核
 

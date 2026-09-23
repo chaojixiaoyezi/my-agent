@@ -473,6 +473,66 @@ def test_chat_gateway_poll_uses_processing_activity_as_inactivity_lease(tmp_path
     assert response["response"] == "finished after initial deadline"
 
 
+def test_chat_poll_reads_existing_terminal_even_after_wait_deadline(tmp_path):
+    from agent_py_agent.cli.chat_parts.gateway_client import GatewayChunkPollRequest
+
+    terminal = tmp_path / "finished.json"
+    terminal.write_text(json.dumps(_terminal_envelope(
+        "finished", {"ok": True, "response": "主机恢复时已经完成"},
+    )), encoding="utf-8")
+    response = poll_gateway_chunks(GatewayChunkPollRequest(
+        tmp_path / "old-processing.chunks.jsonl", terminal, time.time() - 10,
+        lambda _: False, [0],
+    ))
+    assert response["response"] == "主机恢复时已经完成"
+
+
+def test_tui_wait_timeout_keeps_original_cursor_until_late_terminal(tmp_path, monkeypatch):
+    from agent_py_agent.cli.chat_parts import gateway_client as client
+
+    ticks, waits, delays, seen = [0.0], [], [], []
+    terminal, chunks = tmp_path / "req.json", tmp_path / "req.chunks.jsonl"
+    chunks.write_text(json.dumps({"text": "先到"}) + "\n", encoding="utf-8")
+
+    def advance(seconds):
+        ticks[0] += seconds
+        delays.append(seconds)
+        if ticks[0] >= 1.5 and not terminal.exists():
+            with chunks.open("a", encoding="utf-8") as target:
+                target.write(json.dumps({"text": "后到"}) + "\n")
+            terminal.write_text(json.dumps(_terminal_envelope(
+                "req", {"ok": True, "response": "原请求的完成结果"},
+            )), encoding="utf-8")
+
+    monkeypatch.setattr(client, "time", SimpleNamespace(
+        time=lambda: 100 + ticks[0], monotonic=lambda: ticks[0], sleep=advance,
+    ))
+    cursor, count = [0], [0]
+    response = client.poll_gateway_chunks(client.GatewayChunkPollRequest(
+        chunks, terminal, 100.15, lambda text: seen.append(text) or True, count,
+        chunk_offset_ref=cursor, inactivity_timeout_seconds=0.15,
+        on_wait_timeout=lambda: waits.append(ticks[0]), is_wait_cancelled=lambda: False,
+    ))
+    assert waits and response["response"] == "原请求的完成结果"
+    assert seen == ["先到", "后到"] and count == [2]
+    assert cursor == [chunks.stat().st_size]
+    assert max(delays) <= 1.0 and len(delays) < 12
+
+
+def test_tui_exit_stops_only_local_observation(tmp_path):
+    from agent_py_agent.cli.chat_parts.gateway_client import GatewayChunkPollRequest
+
+    processing = tmp_path / "processing.json"
+    processing.write_text('{"status":"processing"}', encoding="utf-8")
+    with pytest.raises(InterruptedError, match="观察已退出"):
+        poll_gateway_chunks(GatewayChunkPollRequest(
+            tmp_path / "req.chunks.jsonl", tmp_path / "terminal.json", time.time() + 100,
+            lambda _: False, [0], is_wait_cancelled=lambda: True,
+        ))
+    assert processing.read_text() == '{"status":"processing"}'
+    assert not (tmp_path / "terminal.json").exists()
+
+
 @pytest.mark.parametrize("clock_jump", [3600.0, -3600.0])
 def test_chat_poll_ignores_wall_clock_adjustment(tmp_path, monkeypatch, clock_jump):
     from agent_py_agent.cli.chat_parts import gateway_client as client

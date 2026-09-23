@@ -235,6 +235,7 @@ def _context(*, show_prompt: bool = False):
         state_lock=threading.Lock(),
         last_token_estimate_ref=[0],
         tui_runtime=runtime,
+        stop_event=threading.Event(),
     )
     return SimpleNamespace(cfg=cfg, job=SimpleNamespace(show_prompt=show_prompt)), runtime
 

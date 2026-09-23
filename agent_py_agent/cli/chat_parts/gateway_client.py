@@ -42,7 +42,7 @@ class ChatRequestContent:
 
 # LLM: GatewayChunkPollRequest carries the canonical terminal path as the only completion fact;
 # on_event consumes typed chunks while on_chunk remains the plain-UI compatibility projection.
-# 类用途: 描述一次 Gateway 流式轮询所需的终态路径、游标、回调和活跃租约。
+# 类用途: 描述流式观察的终态路径、游标和活跃租约；TUI 可显式续等并随页面退出取消观察。
 @dataclass(frozen=True)
 class GatewayChunkPollRequest:
     chunk_path: Path
@@ -55,6 +55,8 @@ class GatewayChunkPollRequest:
     activity_paths: tuple[Path, ...] = ()
     inactivity_timeout_seconds: float = 0.0
     on_event: object | None = None
+    on_wait_timeout: Callable[[], None] | None = None
+    is_wait_cancelled: Callable[[], bool] | None = None
 
 
 @dataclass(frozen=True)
@@ -166,8 +168,8 @@ def _gateway_submit_workspace(
 
 
 # LLM: 终态仍只认 canonical envelope；入口绝对 deadline 仅转换一次为单调时钟，
-# 后续活动续租不受 NTP/手动校时影响。chunk/response 投影不得成为完成事实。
-# 函数用途: 持续读取新增事件与唯一终态，使用稳定计时等待，并写回调用方游标。
+# 后续活动续租不受校时影响。截止时先检查终态；显式 TUI 续等不重新提交请求或重置游标。
+# 函数用途: 读取事件和唯一终态；无活动时退避，TUI 等待超时仅提示继续观察，退出只停止本地观察。
 def poll_gateway_chunks(request: GatewayChunkPollRequest) -> dict:
     chunks_printed = request.chunks_printed_ref[0]
     visible_chunks = request.visible_chunks_ref[0] if request.visible_chunks_ref else 0
@@ -178,14 +180,16 @@ def poll_gateway_chunks(request: GatewayChunkPollRequest) -> dict:
     activity_fingerprints = {
         path: _path_activity_fingerprint(path) for path in request.activity_paths
     }
+    poll_interval = 0.1
     while True:
+        if request.is_wait_cancelled is not None and request.is_wait_cancelled():
+            raise InterruptedError("Gateway 请求观察已退出")
+        previous_deadline, previous_offset = deadline, chunk_offset
         deadline = _extend_active_request_deadline(
             request,
             activity_fingerprints,
             deadline=deadline,
         )
-        if time.monotonic() > deadline:
-            break
         chunks_printed, visible_chunks, chunk_offset = _poll_chunk_file(
             ChunkFilePollRequest(
                 request.chunk_path,
@@ -214,7 +218,15 @@ def poll_gateway_chunks(request: GatewayChunkPollRequest) -> dict:
                 )
             )
             break
-        time.sleep(0.1)
+        now = time.monotonic()
+        active = deadline > previous_deadline or chunk_offset != previous_offset
+        if now > deadline:
+            if request.on_wait_timeout is None:
+                break
+            request.on_wait_timeout()
+            deadline = now + max(1.0, request.inactivity_timeout_seconds)
+        poll_interval = 0.1 if active else min(1.0, poll_interval * 2)
+        time.sleep(min(poll_interval, max(0.01, deadline - now)))
     request.chunks_printed_ref[0] = chunks_printed
     if request.visible_chunks_ref is not None:
         request.visible_chunks_ref[0] = visible_chunks

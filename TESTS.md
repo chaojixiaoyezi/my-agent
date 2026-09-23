@@ -280,6 +280,19 @@ pending／handled 两种重试均保留一条 wake 和完整原观察。新顺�
 具体命令、严格 gate 与未覆盖项见[配对发布交接](docs/tasks/HANDOFF_STEP7_WAKE_PUBLICATION.md)。
 本片不做宿主自动恢复扫描；prepared 成功后仍需调用方重试，runner 复用原 WAL；无 key 不承诺重试幂等。
 离线故障回归不等于真实 TUI、硬断电或所有通知入口自动恢复，线上 CI 未作为验收来源。
+## TUI 等待超时与迟到终态
+
+并行真实测试发现原请求已经 done，而原 TUI 停在等待超时、只有重连才读到最终回复。
+当前客户端补充片让 canonical terminal 优先于观察截止点，并保留同一请求和 chunk cursor 继续观察；
+超时不创建新任务、也不把展示去重归属留给一个已放弃接收的 worker。无活动时轮询退避至 1 Hz，页面退出收口。
+plain 等有限等待语义保持。Gateway client、TUI worker/threading、CLI parser 定向测试 **109 passed**。
+
+官网 M2.7、专用测试机同一 Gateway 的真实对照：观察窗口设为 0.2 秒，普通中文要求实际等待三秒后回答。
+基线服务端 11 秒后 done，原 TUI 始终停在等待超时，没有“十七”；候选同场景在原页显示工具过程和“十七”。
+再只对测试客户端 SIGSTOP 9.28 秒，原任务在暂停期间完成，SIGCONT 后原页显示“四十二”，无重复提问或回复。
+Gateway 全程同 PID，fd 开发任务与子代理没有停止；两条候选请求各只有一个 canonical request id。
+原生 `/exit` 后测试客户端退出。私有证据在 `late-wait/` 的 baseline/fixed/paused terminal、TUI 与 timing 文件。
+
 ## 真实开发长任务验收方法
 
 用户明确要求长对话验收使用真实项目开发过程，禁止把重复生成的大行数当作真实任务通过依据。

@@ -392,7 +392,8 @@ gateway_stop_timeout: 20
 # - responses：模型响应，`gateway result <request_id>` 读取这里。
 # - gateway_requests.jsonl：一行一条审计日志。
 # gateway_request_timeout 是 CLI 等待结果的默认时长，单位秒；交互 chat
-# 把它作为连续无请求租约/流式活动的超时，不用总墙钟误杀仍在工作的长任务。
+# 把它作为连续无请求租约/流式活动的等待窗；TUI 超窗仅提示并继续观察同一请求，
+# 页面退出只停止本地观察，不取消服务端任务。plain/一次性等待仍在超窗时返回。
 # gateway_request_poll_interval 是后台 worker 空闲时多久检查一次 pending，单位秒，可填小数。
 gateway_request_timeout: 300
 gateway_request_poll_interval: 0.2
