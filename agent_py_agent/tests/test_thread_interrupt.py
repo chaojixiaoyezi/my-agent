@@ -195,6 +195,7 @@ def test_background_main_run_registers_the_durable_task_control_name(monkeypatch
 
     class Store:
         claims = Claims()
+        wakes = SimpleNamespace(pending_one=lambda _signal_id: None)
 
     scheduler = BackgroundMainAgentScheduler({"runtime": Runtime(), "store": Store()})
     monkeypatch.setattr(
@@ -241,6 +242,7 @@ def test_background_main_user_interrupt_closes_claim_without_runtime_failure(mon
 
     class Store:
         claims = Claims()
+        wakes = SimpleNamespace(pending_one=lambda _signal_id: None)
 
     scheduler = BackgroundMainAgentScheduler({"runtime": Runtime(), "store": Store()})
     monkeypatch.setattr(
