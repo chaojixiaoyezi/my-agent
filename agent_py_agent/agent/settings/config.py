@@ -457,6 +457,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     subagent_memory_retention_policy: str = "parent_review_or_cleanup"
     subagent_memory_delete_after_days: int = 0
     subagent_destroy_summary_required: bool = True
+    # 自学习默认关闭；开启后子代理 lesson 只生成待用户 CLI 确认的 Skill 提案，确认前不写正式 Skill。
+    enable_self_learning: bool = False
     result_check_execute_tests: bool = False
     result_check_timeout_seconds: int = 120
     dynamic_timeout_safety_margin: float = 2.0

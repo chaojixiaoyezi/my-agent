@@ -88,7 +88,7 @@
 建议目录：
 
 ```text
-agent_py_agent/data/learning_drafts/          # 自学习候选草稿
+<owner_home>/data/skill_proposals/<proposal_id>.json  # 自学习 Skill 提案（待用户 confirm 后才安装到 <owner_home>/skills/）；不得改用 learning_drafts，Curator 迁移会清理该名字的目录
 agent_py_agent/skills/                        # 内置 skill，随仓库发布
 ~/.my-agent/skills/                           # 用户长期 skill，默认不进仓库
 <workspace>/.agent/skills/                    # 项目专属 skill

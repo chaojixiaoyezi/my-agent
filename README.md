@@ -496,7 +496,7 @@ agent_py_agent/config/agent_config.yaml
 - gateway 工作区和请求超时。
 - daemon / runner / 调度策略。
 - 工具开关和工具返回长度。
-- 决策模型总开关与逐点模式；旧自学习开关当前未接入生产链。
+- 决策模型总开关与逐点模式；自学习开关 `enable_self_learning` 默认关闭，开启后子代理 lesson 只生成待 `my-agent skills proposals confirm` 确认的 Skill 提案。
 
 能力路由配置：
 

@@ -1,6 +1,7 @@
 # 决策模型 P5-C：自学习候选筛选只读审计
 
 状态：2026-09-22 只读审计完成，建议待主线评审；未实现自学习决策点、未调用真实 Jev、未创建或修改正式 Skill。审计工作台 `codex/decision-model-integration`，HEAD `ef497a904`；仅拥有本文件。
+后续（2026-09-24）：本文建议的唯一 Skill 提案/确认主链（S1）已在本地分支 `claude/self-learning-skill-proposals` 实施、待审，见 [DESIGN_LEDGER](../../DESIGN_LEDGER.md) 顶部“自学习 S1”条目；下文“当前事实”描述的是审计当时的代码，自学习决策点（S2）仍未实现。
 
 ## 结论与当前事实
 

@@ -41,6 +41,7 @@ from .capability.persona_repository import PersonaRepository
 from .capability.persona_tool import UpdatePersonaTool
 from .capability.runtime_config_reload import default_capability_config_path
 from .capability.session_search_tool import SessionSearchTool
+from .capability.skill_proposals import SkillProposalService
 from .capability.skill_search_tool import SkillSearchTool
 from .capability.skill_service import SkillsService
 from .collaboration import CollaborationStore
@@ -712,7 +713,9 @@ def _register_owner_ref_if_possible(paths, owner) -> None:
 # LLM: Child agents inherit the parent's effective project roots but never inherit an absent
 # owner wall from an administrator's Full Access session. Child permissions are independently
 # capped to WorkspaceWrite and stay inside the structured owner/task scope.
-# 函数用途: 创建子代理管理器；共享任务工作区事实，但不把管理员的全盘权限递归传给下级。
+# manager.skill_proposals is the owner Skill-proposal service only when enable_self_learning is on (else None).
+# 函数用途: 创建子代理管理器；共享任务工作区事实，但不把管理员的全盘权限递归传给下级；
+# 同时按自学习开关接上当前 owner 的 Skill 提案服务。
 def _build_subagent_manager(agent: SimpleAgent, paths: dict) -> SubAgentManager:
     workspace_root = agent.effective_workspace_root
     workspace_roots = agent.effective_workspace_roots
@@ -736,7 +739,17 @@ def _build_subagent_manager(agent: SimpleAgent, paths: dict) -> SubAgentManager:
         owner_policy_snapshot=agent.owner_policy.to_dict(),
     )
     manager.home_paths = agent.home_paths
+    manager.skill_proposals = _skill_proposal_service(agent)
     return manager
+
+
+# LLM: enable_self_learning 只控制子代理 lesson 是否自动生成提案；关闭时返回 None，结果链不创建提案目录。
+# 服务本身没有确认权：确认只走用户 CLI，这里不注册任何模型可调用的确认工具。
+# 函数用途: 按自学习开关为当前 owner 创建 Skill 提案服务，关闭时返回 None。
+def _skill_proposal_service(agent: SimpleAgent) -> SkillProposalService | None:
+    if not agent.config.enable_self_learning:
+        return None
+    return SkillProposalService(agent.home_paths, config=agent.config)
 
 
 # F11④ 多用户隔离 / admin 降权：任何 owner 默认只看/写自己的 owner home 与 shared。

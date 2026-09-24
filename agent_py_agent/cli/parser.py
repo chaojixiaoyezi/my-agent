@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 
 # LLM: Full parser compatibility remains the authority for every non-interactive command. Keep
 # registrations unchanged and pass an already loaded extension registry from main().
+# `skills` is the only user entry that may confirm self-learning Skill proposals.
 # 函数用途: 构建包含全部内置命令和扩展命令的解析器，供管理命令、测试和帮助页使用。
 def build_parser(extension_registry: ExtensionRegistry | None = None) -> argparse.ArgumentParser:
     parser = _build_root_parser()
@@ -44,6 +45,7 @@ def build_parser(extension_registry: ExtensionRegistry | None = None) -> argpars
     from .contracts_commands import add_contracts_subcommand
     from .feishu_cmd import add_feishu_subcommands
     from .gateway_client import cmd_default
+    from .skill_proposal_commands import add_skill_subcommands
     from .subagents import add_subagents_subcommands
     from .subcommands_basic import (
         add_basic_subcommands,
@@ -64,6 +66,7 @@ def build_parser(extension_registry: ExtensionRegistry | None = None) -> argpars
     add_bench_model_command(subparsers)
     add_contracts_subcommand(subparsers)
     add_memory_subcommands(subparsers)
+    add_skill_subcommands(subparsers)
     add_local_store_subcommands(subparsers)
     add_guidance_subcommand(subparsers)
     add_subagents_subcommands(subparsers)

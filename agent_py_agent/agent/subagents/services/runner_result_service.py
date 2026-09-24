@@ -40,6 +40,20 @@ def _runner_append_debrief(task, parsed):
     _append_runner_debrief_content(task, parsed)
 
 
+# LLM: 自学习提案是结果交付后的可选旁支：manager.skill_proposals 仅在 enable_self_learning 开启时由组合根注入；
+#   这里只把本批已落盘的 Candidate 交给它，任何异常只变成工作日志片段，绝不影响结果保存、提交或父级通知。
+# 函数用途: 尝试为本次 lesson 候选生成待确认 Skill 提案，返回追加到工作日志的简短结果。
+def _skill_proposal_note(manager, memory_candidates: list) -> str:
+    service = getattr(manager, "skill_proposals", None)
+    if service is None or not memory_candidates:
+        return ""
+    try:
+        created = service.propose_from_candidates(memory_candidates)
+    except Exception as exc:  # noqa: BLE001 - 可选提案失败不得影响子代理结果交付。
+        return f" skill_proposals_error={type(exc).__name__}"
+    return f" skill_proposals={len(created)}"
+
+
 class _PostResultSideEffectParams:
 
     def __init__(self, output_payload: dict, dry_run: bool, parsed: SubAgentParsedOutput, lessons: list):
@@ -144,6 +158,9 @@ class SubAgentRunnerResultService:
         """Apply status to task and build output payload."""
         return apply_status_and_build_payload(params, extracted, now)
 
+    # LLM: 结果保存后的副作用顺序固定：保存 task→debrief→统一 Memory 候选→可选 Skill 提案→工作日志→索引；
+    #   Skill 提案只在记录候选之后尝试，失败只写工作日志，返回值仍是候选数量。
+    # 函数用途: 处理子代理结果落盘后的保存、交接、候选、提案与索引副作用。
     def _post_result_side_effects(
         self,
         task: SubAgentTask,
@@ -171,10 +188,11 @@ class SubAgentRunnerResultService:
                 lessons=params.lessons,
                 findings=list(getattr(task, "findings", []) or []),
             )
+        proposal_note = _skill_proposal_note(self.manager, memory_candidates)
         self.manager.actions._append_task_work_log(
             task,
             f"subagent_runner: dry_run={params.dry_run} ok={result.ok} status={task.status} "
-            f"message={result.message} memory_candidates={len(memory_candidates)}",
+            f"message={result.message} memory_candidates={len(memory_candidates)}{proposal_note}",
         )
         self.manager.indexing.index_runner_result(result, output_payload)
         return len(memory_candidates)

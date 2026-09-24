@@ -301,6 +301,14 @@ subagent_memory_retention_policy: "parent_review_or_cleanup"
 subagent_memory_delete_after_days: 0
 subagent_destroy_summary_required: true
 
+# 自学习（默认关闭）：
+# - false：子代理的 lesson 只进入统一记忆候选账本，不生成任何 Skill 提案，也不创建提案目录。
+# - true：带精确任务/运行来源的子代理 lesson 会在 owner 的 data/skill_proposals/ 下生成待确认的 Skill 提案；
+#   提案不会自动安装，必须由用户执行 `my-agent skills proposals confirm <提案ID> --expected-revision <版本>`，
+#   并通过来源复核与安全扫描后，才会安装到 owner 的 skills 目录；未确认前不修改任何正式 Skill。
+# - 开关只控制自动生成提案；已生成的提案仍可用 `my-agent skills proposals list/show/confirm/reject` 管理。
+enable_self_learning: false
+
 # 用户身份配置
 # - user_id: 当前本地用户标识，默认为 admin
 user_id: "admin"
