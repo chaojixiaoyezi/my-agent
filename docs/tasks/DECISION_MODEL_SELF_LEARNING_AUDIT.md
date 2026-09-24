@@ -11,7 +11,7 @@
 
 现行真实来源是 `subagents/services/runner_result_service.py::_post_result_side_effects`：成功、非 dry-run 的结构化 runner lessons/findings 经 `SubAgentMemoryCandidateService.record_result_candidates` 进入 owner 唯一 `memory/candidates.jsonl`。失败自省也只生成 `model_inferred` lesson Candidate。`CandidateService` 管候选身份、证据、幂等、状态；`MemoryPromotionService` 只支持 long-term、Persona、lesson、HOT 等正式记忆落点，`candidate_models.PROMOTION_TARGETS` **没有 Skill**。这些是记忆候选，不能改名当 Skill 草稿，也不能让 Jev 直接改审核状态或晋升目标。
 
-2026-09-25 补充（本地分支 `claude/subagent-lesson-ledger`，待审）：真实子代理只做自然回复、不出结构化输出，上面的来源在产品里实际走不到。现在增加第二个结构化来源：子代理用 `record_lesson` 写本 run 的 `lessons.jsonl`，同一出口读回账本，自然回复也会把账本经验记成带账本引用的 `subagent_lesson` 候选。宿主仍不从回复正文提取经验。
+2026-09-25 补充（分支 `claude/subagent-lesson-ledger`，待合入；已端到端真实验收）：真实子代理只做自然回复、不出结构化输出，上面的来源在产品里实际走不到。现在增加第二个结构化来源：子代理用 `record_lesson` 写本 run 的 `lessons.jsonl`，同一出口读回账本，自然回复也会把账本经验记成带账本引用的 `subagent_lesson` 候选。宿主仍不从回复正文提取经验。
 
 每个子代理工作区会建 `SKILL_SPARKS.md` 模板，说明需后续审核；目前只有模板生成和文件路径接入，没有结构化提案读取、确认或正式 Skill 提交链。`SkillsService` 从 owner/workspace/shared/builtin 的现有 `SKILL.md` 生成逐轮快照；`SkillSnapshot.read_body` 校验 hash 和 guard；`skill_guard` 为读取/安装风险检查，不是“用户已确认写入”的凭据。源码中未找到独立的 Skill 草稿状态机或带确认回执的正式写入口。通用文件工具仍受其自身权限控制，但不能据此宣称已经有受治理的自学习晋升。
 

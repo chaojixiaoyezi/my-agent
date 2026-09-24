@@ -2,7 +2,7 @@
 
 child不展示历史正文时的读取回归先复现1 failed/1 passed，修复后test_compact_retained_history、test_subagent_compact_recovery、test_gateway_child_compact_scope_application三文件31 passed（8.48秒）。三宿主seed仓外基线仅验证测量和完整性，不算内存目标通过；细节见容量审计的宿主生命周期基线。
 
-## 子代理 lesson 结构化来源 `record_lesson`（2026-09-25，本地分支 `claude/subagent-lesson-ledger`，待审）
+## 子代理 lesson 结构化来源 `record_lesson`（2026-09-25，分支 `claude/subagent-lesson-ledger`，待合入；已端到端真实验收）
 
 - **改动**：
   - 新增账本合同 `subagents/lesson_ledger.py` 与子代理专属工具 `agent_core/runtime/record_lesson_tool.py`。
@@ -36,7 +36,7 @@ child不展示历史正文时的读取回归先复现1 failed/1 passed，修复�
 - **改动的原有测试**：`test_decision_experiment_command.py` 把 apply 从无效用例移出（改用 `promote`/`Apply`/`["apply"]` 等无效形态）；`test_model_call_input_budget.py` 断言结算视图额外的结算码/调用编号/估算/上界字段，快照部分与原值相同。
 - **结果**：相关 10 文件从干净字节码 246 passed；全部 `test_decision_*.py` 与 `test_gateway_*.py` 90 文件（变基到 `1132fd9d0` 后，含主线新增的两个 S2 文件）2196 passed、2 skipped；相邻 20 文件 604 passed；`check_import_boundaries.py` 0 findings。变异 37 项 36 项被杀（清单与唯一等价变异说明见 [E1 交接第三片](docs/tasks/DECISION_MODEL_EXPERIMENT_E1_HANDOFF.md#第三片e2-对照记录f1-证据评估与授权内自动晋升2026-09-25)），每项 `PYTHONDONTWRITEBYTECODE=1` 子进程运行、sha256 原样恢复。未启动 Gateway、未调用真实供应商；真实 `/experiment apply` 验收待做。
 
-## 自学习 S2：待确认 Skill 提案审核顺序 `skill_proposal_review`（2026-09-24，本地分支 `claude/self-learning-proposal-review-order`，待审）
+## 自学习 S2：待确认 Skill 提案审核顺序 `skill_proposal_review`（2026-09-24，已合入 main `1132fd9d0`）
 
 - **改动**：新增 `capability/decision_skill_proposal_review.py`；`POINT_RUNTIME_SCOPES` 登记 `skill_proposal_review: owner_background`；AgentConfig/YAML 三字段默认 off/null/null；TUI 决策菜单加“Skill 提案审核顺序（用户长期）”；`skills proposals list` 在点返回采用结果时才重排展示、加标签和 `review_order` 块。设计见[接入设计 P5-C 自学习 S2](docs/design/DECISION_MODEL_INTEGRATION.md#p5-c-自学习-s2待确认-skill-提案的审核顺序-skill_proposal_review)。
 - **新测试** `test_decision_skill_proposal_review.py` 42 项。用真实 S1 提案，只替换决策服务三个边界；替身签名与原服务的显式关键字参数一致。

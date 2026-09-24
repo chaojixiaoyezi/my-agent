@@ -704,3 +704,27 @@ P4-B 普通 user owner 的两轮隔离真实中文配置各有 **1 次 Jev HTTP*
 - 首片只对子代理开放，子代理提示只加一句可选引导。
 - 实现后再做一次端到端真实验收。
 - 私有证据：该隔离目录的 `artifacts/s1-real-evidence.json`。本次没有 Jev 调用。
+
+## 15 自学习 S1/S2 端到端真实验收（2026-09-25，分支 `claude/subagent-lesson-ledger` `f585487e0`）
+
+**环境**：
+- 测试机新隔离目录，wheel SHA256 前缀 `ad35b1b7`，`enable_self_learning: true`，唯一 Gateway 8431。
+- 需求与上一次尝试逐字相同：并行 3 个子代理写三个小函数，其中两个 CSV 分组求和刻意相似，并要求各自总结可复用经验。测试者只输入这一条，之后只观察并使用产品自带的 CLI。
+
+**结果**：
+- **子代理与提案**：主请求 30.9 秒完成，3 个子代理都是 DONE。其中 2 个主动调用了 `record_lesson`：各自的 `lessons.jsonl` 有 1 条，`output.json` 的 `lessons` 有 1 条。字符串清理那个没有记录（记录本就可选）。由此产生 2 条 `subagent_lesson` 候选，S1 生成 2 条待确认提案：一条是"CSV 清洗先 strip() 再 isnumeric()"，一条是"CSV 分组求和用 csv 模块加字典累加"。
+- **S2 审核顺序**（`my-agent skills proposals list`）：
+  - 关闭时零请求。
+  - observe 时 1 次 Jev（8.7 KB、2 题、0.80 秒），文本输出与关闭时逐字节一致。
+  - apply 时每次列表 1 次 Jev（0.71 / 0.63 秒）。两条都判为 `normal`：两条经验内容确实不同，不是重复。因此顺序不变、没有标签，只附审核顺序说明行和 `review_order` 块。
+  - 三次列表前后，提案目录、skills 目录与候选账本的哈希都没变。
+- **外发隐私**：在请求正文上放置标记检查，只出现别名 `proposal_1`（阳性对照）。真实提案编号、owner 路径片段、候选编号前缀与提案目录名都没有出现。
+- **S1 确认安装**：用户 CLI `skills proposals confirm <id> --expected-revision 1` 把一条提案安装为 `lesson-15b076f4df9f/SKILL.md`。提案变为 committed（版本 2），guard 结论 safe（agent_generated）。
+- **新会话可见**：
+  - 新会话主模型请求正文里出现了已确认的 `lesson-15b076f4df9f`；未确认的 `lesson-d39b381d1b9e` 没有出现，它也不在 owner 的 skills 目录里。
+  - 被问到"有没有 CSV 分组求和相关 Skill"时，模型准确说明现有这条是"CSV 清洗时先 strip() 再 isnumeric()"的经验，不是分组求和。
+
+**结论**：
+- 真实子代理 lesson → 提案 → S2 排序 → 用户确认安装 → 新会话可见，整条链路成立，写入只发生在用户确认这一步。
+- 本批 Jev 4 次（observe 1、apply 2、隐私检查 1），累计 98 次。结束后经原 CAS 恢复决策设置，8431 已释放。
+- 限制：只有一个样本；S2 这次没有给出非 `normal` 的顺序，排序能否帮上用户还没有证据。
