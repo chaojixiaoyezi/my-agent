@@ -39,6 +39,14 @@ run/task、原权限和配置变化均使建议失效。它只返回覆盖所有
 普通故障返回空提示，宿主取消继续传播。不产生新缓存、账本、读取或下载，不修改正式结果与 refs；
 不能作为授权、工具成功或业务完成的判据。其它检索消费者仍保持原合同。
 
+## 交付复核焦点的可选提示
+
+`tool_context.decision_delivery_quality` 是验证事实的只读消费者：`_record_tool_call` 完成原归档后经 `_optional_result_hints`
+读取同 run/task 归档信封里的 `verification_evidence` 与 `verification_state`，不访问验证 SQLite、工具输出或文件。
+每个 (root, kind, scope) 只取最新事件，其后同 root 的 stale 状态记为“其后有修改”；只在 `run_command` 刚产生新事件时评估。
+默认关闭；开启后外发只有脱敏当前请求与焦点别名事实，采用时只把被选焦点的编号/kind/scope/status 追加到 text/native
+共用展示。它不新造验证事件、不把 targeted 说成全量、不改原结果/归档/验证账/收口，不能作为验收或完成判据。
+
 ## 长等待与完成通知
 
 `process_session` 的 wait 使用宿主取消令牌与单调时钟，不持锁长等，默认 30/上限 600 秒。

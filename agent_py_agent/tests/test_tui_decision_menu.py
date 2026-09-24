@@ -18,7 +18,12 @@ from agent_py_agent.agent.settings.model_profiles import (
     ModelProfileError,
     execute_model_profile_operation,
 )
-from agent_py_agent.cli.chat_parts.tui_decision_menu import _field_text_value, _fields, _seconds
+from agent_py_agent.cli.chat_parts.tui_decision_menu import (
+    _POINTS,
+    _field_text_value,
+    _fields,
+    _seconds,
+)
 from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
 from agent_py_agent.cli.chat_parts.tui_ui_setup import make_tui_app
 from agent_py_agent.tests.test_decision_model_profiles import decision
@@ -144,6 +149,14 @@ async def choose(ui, index):
     await press(ui, b"\x1b[B" * index + b"\r")
 
 
+# LLM: 位置只由菜单 _POINTS 顺序与原服务 field_scopes 推出，和 _edit_point 的列表口径一致；不写死下标。
+# 函数用途: 按原菜单的接入点顺序算出某接入点在当前作用域菜单里的位置，新增接入点时测试不必写死下标。
+def point_index(gateway, point, *, thread=False):
+    view = (settings(gateway.host, "read", {"scope": "thread"}, thread_id=gateway.thread.thread_id)
+            if thread else settings(gateway.host, "read", {}))
+    return [key for key in _POINTS if f"points.{key}.mode" in _fields(view)].index(point)
+
+
 def test_candidate_profile_ids_form_uses_structured_json(tmp_path):
     gateway = Gateway(tmp_path)
     field = "points.subagent_model.candidate_profile_ids"
@@ -173,7 +186,7 @@ def test_pipe_owner_fields_model_mode_seconds_reset_and_provider_reuse(tmp_path)
             view = settings(gateway.host, "read", {})
             assert [view["effective"][key] for key in ("timeout_seconds", "stage_timeout_seconds", "background_timeout_seconds")] == [2.5, 5.5, 6.5]
             await choose(ui, 6)  # 接入点；前面有独立实验能力开关
-            await choose(ui, 3)  # recall
+            await choose(ui, point_index(gateway, "recall"))
             await choose(ui, 0)  # mode
             await press(ui, b"\x1b[B\x1b[B\r")
             assert settings(gateway.host, "read", {})["effective"]["points"]["recall"]["mode"] == "apply"
@@ -206,7 +219,7 @@ def test_pipe_thread_scope_hides_owner_background_and_changes_only_current_threa
             assert current["sources"]["enabled"] == "thread"
             await choose(ui, 5)  # thread 接入点菜单
             assert "后台记忆整理（用户长期）" not in visible(ui.app)
-            await choose(ui, 3)  # recall
+            await choose(ui, point_index(gateway, "recall", thread=True))
             await choose(ui, 2)  # 单次时间
             await press(ui, b"\x01\x0b")
             await press(ui, "1.25\t\r")
@@ -345,3 +358,15 @@ def test_pipe_experiment_boolean_can_save_and_reset_without_creating_authorizati
             assert not hasattr(gateway.host, "_model_call_ledger")
             assert not any(op in {"probe", "decision_probe", "decision_experiment_authorize"} for op, _ in gateway.calls)
     asyncio.run(scenario())
+
+
+def test_menu_points_follow_the_schema_registry_and_reset_can_list_pre_recall(tmp_path):
+    from agent_py_agent.agent.settings.decision_settings_schema import POINTS
+    from agent_py_agent.cli.chat_parts.tui_decision_menu import _reset_label
+
+    gateway = Gateway(tmp_path)
+    assert list(_POINTS) == list(POINTS), "菜单接入点必须与 schema 登记一致，不能另维护一份会漏项的清单"
+    patch(gateway.host, {"points.pre_recall.mode": "apply"})
+    view = settings(gateway.host, "read", {})
+    assert "points.pre_recall.mode" in _fields(view)
+    assert "记忆召回前补充查询" in _reset_label(view, "points.pre_recall.mode"), "已有覆盖的恢复列表不能因缺显示名崩溃"

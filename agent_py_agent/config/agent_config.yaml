@@ -1043,6 +1043,9 @@ decision_external_material_order_profile_id: null  # 留空继承通用决策模
 decision_planning_mode: off  # 现有 Todo 优先级建议；observe 仅观察，apply 只附软提示，不创建目标、待办或子代理
 decision_planning_timeout_seconds: null  # 留空继承前台单次期限；原阶段和采用前复核共用绝对期限
 decision_planning_profile_id: null  # 留空继承通用决策模型；只发送当前请求与有界现有 Todo 候选
+decision_delivery_quality_mode: off  # 交付复核焦点：run_command 产生新验证事件后建议先复核哪个已有焦点；observe 仅观察，apply 只追加提示，不跑测试、不改结果或完成状态
+decision_delivery_quality_timeout_seconds: null  # 留空继承前台单次期限；准备、发送与采用共用同一阶段绝对期限
+decision_delivery_quality_profile_id: null  # 留空继承通用决策模型；只发送脱敏的当前请求及焦点类型/范围/状态，不发送路径、命令或输出
 memory_decision_pre_recall_mode: off  # 召回前补充查询建议；始终先执行原召回，不依据自然语言或决策跳过历史
 memory_decision_pre_recall_timeout_seconds: null  # 留空继承前台单次期限，和召回后排序共用阶段绝对期限
 memory_decision_pre_recall_profile_id: null  # 留空继承通用决策模型；补充检索仍守原 owner/scope/数量/字符预算

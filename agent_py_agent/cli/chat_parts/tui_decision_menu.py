@@ -8,13 +8,15 @@ import math
 from prompt_toolkit.layout import HSplit, ScrollablePane
 from prompt_toolkit.widgets import Label, RadioList, TextArea
 
-from ...agent.settings.decision_settings_schema import validate_decision_field
+from ...agent.settings.decision_settings_schema import POINTS, validate_decision_field
 from .tui_model_menu import _dialog, _request
 
-_POINTS = {"model_selection": "模型选择", "subagent_model": "子代理模型", "skill_tool": "Skill / 工具推荐",
-           "recall": "记忆召回后重排", "curator": "后台记忆整理（用户长期）",
-           "curator_relation": "正式记忆关系建议（用户后台）", "external_material_order": "外部材料阅读优先级",
-           "planning": "现有待办优先级"}
+# 接入点集合以 schema 登记的 POINTS 为唯一权威；这里只配中文显示名，缺显示名时直接显示原键，不能漏项或让菜单崩溃。
+_POINT_NAMES = {"model_selection": "模型选择", "subagent_model": "子代理模型", "skill_tool": "Skill / 工具推荐",
+                "pre_recall": "记忆召回前补充查询", "recall": "记忆召回后重排", "curator": "后台记忆整理（用户长期）",
+                "curator_relation": "正式记忆关系建议（用户后台）", "external_material_order": "外部材料阅读优先级",
+                "planning": "现有待办优先级", "delivery_quality": "交付复核焦点"}
+_POINTS = {point: _POINT_NAMES.get(point, point) for point in POINTS}
 _GENERAL = {"enabled": "总开关", "profile_id": "默认决策模型", "timeout_seconds": "前台单次上限（秒）",
             "stage_timeout_seconds": "前台阶段上限（秒）", "background_timeout_seconds": "后台阶段上限（秒）",
             "experiment_enabled": "实验能力（仍需独立授权）"}

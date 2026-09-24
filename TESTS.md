@@ -2,6 +2,21 @@
 
 child不展示历史正文时的读取回归先复现1 failed/1 passed，修复后test_compact_retained_history、test_subagent_compact_recovery、test_gateway_child_compact_scope_application三文件31 passed（8.48秒）。三宿主seed仓外基线仅验证测量和完整性，不算内存目标通过；细节见容量审计的宿主生命周期基线。
 
+## TUI 决策菜单接入点跟随 schema（2026-09-25，本地分支 `claude/decision-tui-points`）
+
+- **新测试** `test_tui_decision_menu.py::test_menu_points_follow_the_schema_registry_and_reset_can_list_pre_recall`：菜单接入点与 schema `POINTS` 逐项一致；owner 覆盖 `points.pre_recall.mode` 后，该字段可编辑，恢复继承标签不崩溃并显示中文名。
+- 两个旧真实按键测试原先写死"召回后重排在第 4 项"，现改为按菜单顺序算位置。
+- **变异验证**：菜单漏掉 `pre_recall`、缺中文显示名两种变异都使新测试失败；还原后逐字节一致（变异子进程带 `PYTHONDONTWRITEBYTECODE=1`）。
+- **回归**：`test_tui_decision_menu.py` 与 `test_external_material_order_integration.py` 26 passed。
+
+## 交付复核焦点 `delivery_quality`（2026-09-24，本地分支 `claude/decision-delivery-quality`）
+
+- **改动**：新增 `tool_context/decision_delivery_quality.py`；`_tool_loop_service._record_tool_call` 的原阅读提示接缝改为 `_optional_result_hints`，依次调用 `external_material_order_hint` 与 `delivery_quality_hint`（按工具名互斥）；`POINT_RUNTIME_SCOPES` 登记 `delivery_quality: thread`；AgentConfig/YAML 三字段默认 off/null/null；TUI 决策菜单加“交付复核焦点”。设计见[接入设计 P5-C 质量提示首片](docs/design/DECISION_MODEL_INTEGRATION.md#p5-c-质量提示首片交付复核焦点-delivery_quality)。
+- **新测试** `test_decision_delivery_quality.py` 102 项（只替换决策服务边界）：未登记严格空操作；off/阶段错误/他 run 阶段不准备材料；observe 与 deadline/cooldown/error/stale 保留原结果；apply 只渲染被选焦点的宿主事实（含其后修改、targeted 说明）；外发只有脱敏请求与焦点别名事实（无路径/命令/输出/时间/改动路径），不同项目根得到不同别名；28 种不合格来源零请求（单焦点、全通过、13 个焦点、非 run_command、归档 id/run/task/scoped/事件不一致、未归档、重复归档、他 run/task 来源、两种收口标记、超长/空请求、无事件、重放、重复事件号、坏 id/kind/退出码/root、坏 state、非 stale 状态、请求含两种 URL 查询串）；12 种身份不符在扫描归档前返回；子代理零请求；2/12 个焦点、仅修改、仅失败的边界各一次请求；同 project/kind/scope 只留最新事件；11 种非选择或坏答案（四种保留项、两种越界编号、多答、逐题错误、错类型、错题号、缺答）无提示；选中本次事件无提示；9 种等待期间来源/参数/收口变化、期限/候选版本/配置失效、配置复核期间来源变化与超期消费均丢弃；4 种可选错误保留原结果；取消在决策后、配置复核中和与可选错误同时发生时都上抛，中断上抛；原 `_record_tool_call` 下 off/observe/apply 的 text/native/IR 同一展示与原结果/归档不变；run_command 记录只触发本点一次请求。
+- **新测试** `test_decision_delivery_quality_integration.py` 5 项：真实 `record_tool_verification`（局部测试失败→改文件→全量测试失败）逐步经原 `_record_tool_call`，原设置/模型目录/worker/调用账，只替换 `TypesafeDecisionBackend.decide`；off/observe/apply 下 text/native/IR 同一段、apply 恰好一段提示、决策请求与 purpose=decision 账各 0/1/1 条、请求绑定本 run/thread/归档引用且不含私有路径/命令/输出、决策时刻与结束时 owner 根文件字节及归档列表不变；YAML/dataclass 默认与 owner/thread 范围；原 TUI 菜单可把本会话模式改为采用建议。
+- **变异验证**：59 种各自使新测试失败，改回后按 sha256 核对原文件：接线丢点/丢换行、未登记不空操作、非 run_command 扫描归档、接受重放/子代理/两种收口/超长请求/无请求、去掉归档事件/id/run/task/scoped 一致、焦点下限 2→1、上限 12→13 与 12→11、不要求当前事件、去掉或只看 failed/只看修改、接受重复事件号、保留最早而非最新、修改方向反转、修改不比项目根、非 stale 算修改、去掉短标识与 id 校验、扫描不按 run/task 过滤、外发项目根、请求不脱敏、不拒 URL 查询串、忽略阶段错误/关闭/他 run、observe 被采用、不查候选版本/当前配置/最终来源/参数版本/绝对期限、接受多答/错题号/错类型/逐题错误、渲染当前事件、提示丢修改事实/targeted 说明、去掉 512 字符预算、决策后与配置复核后不查取消、中断被吞、可选错误掩盖取消、点未登记、TUI 缺菜单、dataclass/YAML 默认非 off。每次均以 `PYTHONDONTWRITEBYTECODE=1` 运行；全部完成后删除被变异模块的 `__pycache__` 并从干净字节码重跑 107 passed。
+- **结果**（基于 main `ab23a2666`）：与改动直接相关的 56 个测试文件 1443 passed、1 xpassed（`test_timeout_budget_locked.py::test_native_protocol_unified_counts_ir` 为既有非严格 xfail，main 上同样 xpass）。同组合共跑 8 次，第 1 次出现 1 failed，因输出被截断未记下用例名，其后 7 次全量均通过，新文件单独 25 次、时序敏感的 10 个既有文件 5 次也均通过，未能复现，暂按机器负载下的偶发记录；Ruff、doc sync、strict code-size（blocked=False；与 main 的 findings 按 identity+severity 逐项对比无新增，`_record_tool_call` 的临界长度项因接缝抽出而消失）、`git diff --check`、clean-package 通过。没有真实 Jev、真实主模型或 TUI 验收，不证明交付质量提升；线上 CI 未作为验收来源。
+
 ## 自学习 S1：子代理经验生成待确认的 Skill 提案（2026-09-24，本地分支 `claude/self-learning-skill-proposals`，待审）
 
 - **改动**：新增 `capability/skill_proposals.py`（提案 schema `my-agent.skill-proposal.v1` 与 `SkillProposalService`）和 CLI `my-agent skills proposals list|show|confirm|reject`；配置 `enable_self_learning`（默认 false，YAML、AgentConfig 与布尔规范化同步）；owner 布局登记 `owner_skill_proposals_dir = <owner_home>/data/skill_proposals`（不进初始化目录清单，首次生成提案才创建）；组合根只在开关开启时给子代理 manager 注入服务，`runner_result_service` 在记录候选之后调用，异常只写工作日志。
@@ -23,6 +38,7 @@ child不展示历史正文时的读取回归先复现1 failed/1 passed，修复�
 - **新测试** `test_decision_pre_recall.py` 2 项：正式召回只把补充查询真正追加的记录编号记进 `supplement_entry_ids`，来源清单区分 baseline/supplement 且不含正文；上下文包写出 `recalled_refs`、`recall_findings`，提示段字节与不带证据时逐字相同。
 - **变异验证**：4 种各自使测试失败——不记补充编号、来源恒为 baseline、丢发现码、提示段泄露来源清单。改回后通过（变异子进程带 `PYTHONDONTWRITEBYTECODE=1`）。
 - **相关回归**：上下文包、召回决策、记忆路由、运行上下文相关 15 个文件 314 passed。
+
 ## 主会话选模采用模式的问题说明（2026-09-24，本地分支 `claude/decision-selection-question`）
 
 - **新测试** `test_gateway_model_observation.py::test_question_explains_usage_tags_and_apply_asks_for_the_best_semantic_match`（observe/apply 两档）：从冻结的决策请求体读回问题说明，两种模式都含用途标签说明；采用模式要求按任务语义挑最合适的候选且不再写"本次只观察"，观察模式保留"本次只观察"。
