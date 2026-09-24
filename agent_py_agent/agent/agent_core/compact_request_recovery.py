@@ -125,6 +125,9 @@ class PreparedCompactRecovery:
             raise ConversationCompactError("完整请求包含尚无法计量的模态，保留原始材料", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
         tool_source = _recovery_tool_source(agent, source, params, frozen)
         if self.force and not source.messages and tool_source is None:
+            if _recovery_tool_records_present(agent, source, params, frozen):
+                # 有工具记录但身份无法证明（旧索引缺 attempt/turn、歧义或孤立）：原记录保持可见，报结构化原因而不是"没有来源"。
+                raise ConversationCompactError("当前轮工具来源身份无法证明，原记录保持可见", code="COMPACT_TOOL_COVERAGE_UNKNOWN")
             raise ConversationCompactError("没有可压缩的源历史", code="COMPACT_SOURCE_EMPTY")
         if not self.force and self._automatic_noop(frozen, tool_source):
             from ._tool_loop_service import _native_compact_interrupted
@@ -318,6 +321,18 @@ def _committed_recovery_material(agent, source, result, material):
     params = replace(material.params, compact_context=applied)
     host_state = replace(material.host_state, compact_context=applied)
     return replace(material, params=params, host_state=host_state)
+
+
+# LLM: 只判断本请求可见的归档记录或冻结原生工具往返是否存在，不证明身份、不读文件；用于区分"无来源"与"来源身份不可证明"。
+# 函数用途: 强制恢复找不到可压工具来源时，判断是确实没有工具记录，还是记录存在但身份无法证明。
+def _recovery_tool_records_present(agent, source, params, frozen) -> bool:
+    from ..backends.tool_ir import AssistantTurn, ToolResult
+    from ..conversation.active_turn_compact import model_visible_active_turn_tool_calls
+
+    visible = model_visible_active_turn_tool_calls(
+        agent, params.task_attributes, list(params.archive_tool_calls), compact_context=source.compact_context,
+    )
+    return bool(visible) or any(isinstance(item, (AssistantTurn, ToolResult)) for item in frozen.tool_ir_history)
 
 
 # LLM: 从本请求已应用view可见归档及冻结IR选择来源；分区不读文件、不生成摘要，不与别的scope覆盖混合。

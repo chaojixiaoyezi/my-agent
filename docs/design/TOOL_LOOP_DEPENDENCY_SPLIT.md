@@ -165,6 +165,7 @@ segment_planning只接受调用列表／起点、有效批上限和原位Compact
 - `tooling/runtime_facts.py` 与 `tool_process` 耐久索引、第 8 步的 closeout、segment_planning、请求周期、执行器及取消顺序都不变。
 - 原生 Compact 的候选回收，以及"持久 CAS 成功后投影失败不回滚"的保证不变。同范围视图刷新放在提交后阶段，位于回滚边界之外。
 - 来源与编号不一致时，改为抛带类型的 `COMPACT_TOOL_BOUNDARY_INVALID`。
+- 强制恢复找不到可压来源时区分两种情况：确实没有工具记录，仍报 `COMPACT_SOURCE_EMPTY`；记录存在但身份无法证明（旧索引行缺 attempt/turn、歧义或孤立），报 `COMPACT_TOOL_COVERAGE_UNKNOWN`，原记录保持可见。Gateway、子代理、后台三个宿主共用 `PreparedCompactRecovery.select`，一处生效。主线当时的 `COMPACT_SOURCE_REF_UNCERTAIN` 没有随合并保留，同一概念只用本线已有的这个码。
 
 **模型轮参数显式交回**：
 - 首请求选模（子代理首轮和主会话候选）仍在每次瞬断尝试内完成，保证 prompt、response、params 属于同一次尝试。

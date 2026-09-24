@@ -31,6 +31,7 @@ child不展示历史正文时的读取回归先复现1 failed/1 passed，修复�
     - 接续插话保留 `input_ids`；
     - 摘要来源改走流式 `message_source`，替身物化同一来源后再检查覆盖。
   - 验证：上述 6 个文件及相邻 Gateway/媒体/恢复共 12 个文件，350 passed、1 skipped、3 xfailed。
+- **来源身份不可证明的结构化原因**（review 发现 1，原场景：部署前写入的工具索引行缺 attempt_id；当前轮只剩这类记录时，原因在调用方丢失）：合并后三宿主共用的强制恢复把这种情况报成 `COMPACT_SOURCE_EMPTY`（"没有可压缩的源历史"），现改报 `COMPACT_TOOL_COVERAGE_UNKNOWN`，原记录保持可见，不发业务请求，也不提交。新用例 `test_forced_recovery_with_identityless_carried_records_reports_coverage_unknown` 在修复前失败（得到 EMPTY），修复后通过；所有涉及这两个码的恢复测试共 12 个文件，179 passed。
 
 ## 第12.4项选中来源到摘要生命周期（2026-09-23，本地）
 

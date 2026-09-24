@@ -391,3 +391,44 @@ def test_overflow_capture_release_error_preserves_completed_native_turn(tmp_path
     assert len(recorded) == len(persisted) == 1
     assert marker in json.dumps(persisted[0].canonical_native_messages, ensure_ascii=False)
     assert store.threads.require(thread.thread_id).compact_generation == 0
+
+
+# 原场景（发现 1）：部署前写入的工具索引行没有 attempt/turn 身份。当前轮只剩这类旧记录、又没有已结束的
+# transcript 时，强制恢复不能把原因报成"没有来源"，要报结构化的来源身份不可证明，且不发业务请求、不提交。
+def test_forced_recovery_with_identityless_carried_records_reports_coverage_unknown(tmp_path, monkeypatch) -> None:
+    agent, store, thread, execution, sink, history, params, context, recorded = _native_ir_attempt(
+        tmp_path, monkeypatch, backend="anthropic_compatible", full_result="LEGACY-ROW-" + "z" * 2_000,
+    )
+    recorded_loop = loop_support._tool_loop_execute_params
+
+    # 模拟重启后从旧耐久索引恢复的记录：只剩归档行且缺 attempt/turn，当前参数里没有对应的原生往返。
+    def legacy_rows(*args, **kwargs):
+        loop_params = recorded_loop(*args, **kwargs)
+        assert loop_params.archive_tool_calls
+        for record in loop_params.archive_tool_calls:
+            record.pop("attempt_id", None)
+            record.pop("turn_id", None)
+        loop_params.tool_ir_history[:] = [
+            item for item in loop_params.tool_ir_history if not isinstance(item, (AssistantTurn, ToolResult))
+        ]
+        return loop_params
+
+    monkeypatch.setattr(loop_support, "_tool_loop_execute_params", legacy_rows)
+    business, cas_calls = [], []
+    original_cas = store.threads.update_compact_state
+
+    def commit(*args, **kwargs):
+        cas_calls.append((args, kwargs))
+        return original_cas(*args, **kwargs)
+
+    monkeypatch.setattr(store.threads, "update_compact_state", commit)
+    _http(monkeypatch, backend="anthropic_compatible", on_business=lambda wire, _number: business.append(wire))
+    with pytest.raises(ConversationCompactError) as raised:
+        background_execution._run_background_recovery_attempt(
+            execution, "继续核对完整工具结果", params, history, context,
+            recovering=True, activity_sink=sink,
+        )
+    assert raised.value.code == "COMPACT_TOOL_COVERAGE_UNKNOWN"
+    assert not business and not cas_calls
+    committed = store.threads.require(thread.thread_id)
+    assert committed.compact_generation == 0 and not committed.compact_checkpoint_id

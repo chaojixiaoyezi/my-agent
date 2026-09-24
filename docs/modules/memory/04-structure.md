@@ -54,6 +54,7 @@ system/tools/messages 前缀，超窗时按原分段合同覆盖完整历史。�
 `conversation/compact_tool_identity.py` 是唯一工具来源身份，只接受完整的 run/attempt/turn/call 四元 refs。`conversation/compact_checkpoint.py` 写 `conversation_compact_checkpoint.v3`，包含 `source_tool_refs`、`retained_tool_refs`；候选编号 `compact-v3-{generation}-{digest}` 对 scope、摘要基础、来源、保留 refs 及创建时间做内容寻址，读取时逐行复核，篡改的行拒绝读取。裸 call id 只作展示，可以重复或交叉。顶层 request/attempt 仍是提交者，原有"写 checkpoint → 锁内 generation CAS"顺序不变。
 - v1/v2 旧行照常读取，但不提供四元来源，因此不隐藏任何记录。这也包括主线 `66a598cf3` 写出的 `source_tool_call_refs` 三元引用：部署前被运行中压缩的旧调用会重新进入模型上下文，不丢失，也不误隐藏。
 - `active_turn_compact.py` 只凭已提交的四元 refs 隐藏记录，按记录位置选择来源与尾部。缺完整身份的记录保持可见；全部未知时返回 `compacted=False`，并带 `source_resolution=uncertain` 和 `uncertain_call_count`。
+- 完整恢复宿主（`agent_core/compact_request_recovery.py`）在强制恢复且没有 transcript 时，若工具记录存在但身份都无法证明，报 `COMPACT_TOOL_COVERAGE_UNKNOWN`；只有确实没有记录时才报 `COMPACT_SOURCE_EMPTY`。
 - `tool_output_externalizer.py` 直接传递原 call 的 attempt/turn；`compact_tool_output_refs.py` 只对完整四元身份去重，字节完全相同的未知行才合并。不解析 scoped 字符串，也不从 operation 哈希反推缺失身份。
 - 旧的无身份大历史可能无法安全恢复 Compact，这里不做静默身份迁移。兼容与回滚边界见[依赖拆分合并节](../../design/TOOL_LOOP_DEPENDENCY_SPLIT.md#两线合并后的来源身份与模型轮结果决策分支吸收-main2026-09-23)。
 
