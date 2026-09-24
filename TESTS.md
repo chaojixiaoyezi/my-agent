@@ -11,6 +11,7 @@ child不展示历史正文时的读取回归先复现1 failed/1 passed，修复�
     - 自动 noop 原样发送原请求，旧历史不解绑。
     - 候选与原参数共享 `tool_context` 的合同。
   - `test_conversation_history_seed.py` 新增 1 项：空的只读来源在原生边界只读一次，不走旧文本回退。
+  - 审阅后补 2 项（`test_rows_native_drops_but_text_keeps_do_not_change_native_output`）：来源里只有 native 过滤、text 保留的行（后台空正文行、child 规则 display 行）时，跳过旧文本回退前后原生输出一致（均为空）。
 - **变异验证**：
   - 去掉解绑：全链 3 项与 Gateway 7 项失败（后台夹具没有旧历史，不能区分）。
   - 在收尾路径加一次读取：9 项失败。

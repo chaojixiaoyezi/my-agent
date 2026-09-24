@@ -277,3 +277,42 @@ def test_empty_source_seed_is_read_once_at_native_boundary(monkeypatch):
     expected = _native(ConversationHistorySeed())
     monkeypatch.setattr(history_seed, "seed_text_messages", second_read)
     assert _native(source) == expected == []
+
+
+# LLM: 与 loop_support 原旧文本回退逐字同规则，仅用于对照"跳过回退"前后的结果。
+# 函数用途: 按改前逻辑计算只读来源在原生边界的旧文本回退输出。
+def _legacy_fallback(seed):
+    from agent_py_agent.agent.agent_core.runtime.loop_support import _native_user_task_text
+    from agent_py_agent.agent.backends.message_adapter import AnthropicMessageAdapter
+    from agent_py_agent.agent.backends.tool_ir import AssistantTurn, UserTurn
+
+    legacy = []
+    for role, content in seed_text_messages(seed):
+        if role == "user" and content:
+            legacy.append(UserTurn(_native_user_task_text(content)))
+        elif role == "assistant" and content:
+            legacy.append(AssistantTurn(text=content))
+    return AnthropicMessageAdapter().to_provider_messages(legacy) if legacy else []
+
+
+@pytest.mark.parametrize("case", ["background_empty_rows", "agent_thread_display_rows"])
+def test_rows_native_drops_but_text_keeps_do_not_change_native_output(tmp_path, case):
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.threads.get_or_create({"canonical_user_id": "owner", "now": 1})
+    if case == "background_empty_rows":
+        # 后台规则保留空正文行：text 有 ("assistant", "")，native 无消息；旧回退本来就跳过空正文。
+        for role in ("user", "assistant"):
+            store.messages.append({"thread_id": thread.thread_id, "role": role, "content": "",
+                                   "metadata": {"conversation_request_id": "turn-empty"}})
+        rows = tuple(store.messages.recent(thread.thread_id, limit=0))
+        source = freeze_history_source(rows, project_row=project_history_row, keep_empty_text=True,
+                                       select=partial(history_row_selected, current_request_id="", work_scope=None))
+    else:
+        # child 规则不做选择：display 行进入冻结行，native 过滤它，text 也只保留 user/assistant。
+        store.messages.append({"thread_id": thread.thread_id, "role": DISPLAY_CHECKPOINT_ROLE, "content": "显示检查点"})
+        rows = tuple(store.messages.recent(thread.thread_id, limit=0))
+        source = freeze_history_source(rows, project_row=project_agent_history_row)
+    seed = ConversationHistorySeed(source=source)
+    text = seed_text_messages(seed)
+    assert (text == (("user", ""), ("assistant", ""))) if case == "background_empty_rows" else (text == ())
+    assert _native(seed) == _legacy_fallback(seed) == [], "跳过旧文本回退前后，原生边界输出一致"
