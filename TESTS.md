@@ -1,5 +1,12 @@
 # 测试与发布验收
 
+## 第 9 步 TUI 拆分首片：按键动作外移（本地，待发布）
+
+- 纯搬移，行为不变：`tui_keybindings.py`（2656→1744 行）中的副作用动作移到新模块 `tui_actions.py`：记忆命令后台执行、本地/Gateway 排队、执行选项快照、控制命令提交与对账器、补充消息提交与对账器、子代理插话/停止、Esc 中断，以及只被它们使用或需被双方共享的 `_handle_command_params`、`_required_tui_runtime`、`_active_tui_runtime`、`_agent_guidance_sent_notice`、`_restore_failed_agent_input`、`_safe_http_status` 和两个重试间隔常量；`_run_clipboard_tool`、`_load_tmux_clipboard_buffer` 移到 `tui_clipboard.py`。
+- `tui_actions.py` 运行时不导入 `tui_keybindings`；唯一延迟导入是 `_restore_failed_agent_input` 回调内的 `_set_input_draft`。`tui_plugin_commands.py` 的延迟导入改指 `tui_actions`。
+- 测试只改 monkeypatch/调用路径到实际解析位置（`test_tui_input.py`、`test_tui_plugin_panels.py`、`test_host_command_stream.py`），断言不变；`CODE_SIZE_BASELINE.json` 两条既有函数豁免的路径随函数改到 `tui_actions.py`，数值不变。
+- 验证：test_tui_*、test_chat_parts、test_cli_chat、test_chat_prompt_queue、test_chat_control_runtime、test_plugin_command*、test_architecture_guardrails、test_host_command_stream 共 42 个文件 862 passed；ruff、strict code-size、doc sync、diff check 通过。
+
 ## 第 9 步插件面板（本地，待发布）
 
 - 协议与服务：`test_plugin_display_service.py`（19 项），覆盖声明校验、展示描述截断与控制字符过滤、包描述 v1 字节不变与 v2 往返、首次加载、同输入不重复渲染、最新输入合并、撤销与停用回收、无展示能力、失败退避、空闲关闭和请求数上限；测试中发现并修复"错误结果被当成最新、退避后永不重试"。

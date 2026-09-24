@@ -64,7 +64,7 @@ def submit_plugin_command(
     if binding is not None and toggle_plugin_panel(params, text, binding):
         return True
     from .tui import _tui_handle_command
-    from .tui_keybindings import _handle_command_params, _required_tui_runtime
+    from .tui_actions import _handle_command_params, _required_tui_runtime
 
     request_id = uuid.uuid4().hex
     controller = _required_tui_runtime(params).command_permission_controller(request_id)
@@ -102,7 +102,7 @@ def submit_plugin_command(
 def toggle_plugin_panel(params, text: str, binding: PluginInputBinding) -> bool:
     from ...agent.command_arguments import CommandArgumentError
     from ...agent.plugin_commands import parse_plugin_command
-    from .tui_keybindings import _required_tui_runtime
+    from .tui_actions import _required_tui_runtime
 
     catalog = binding.client.snapshot()
     if binding.panels is None or catalog is None:

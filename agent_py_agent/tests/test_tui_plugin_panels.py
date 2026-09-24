@@ -142,7 +142,7 @@ _CATALOG = SimpleNamespace(plugins=(), management_actions=())
 
 def _intercept(monkeypatch, *, kind="display", enabled=True, catalog=_CATALOG):
     runtime = _Runtime()
-    monkeypatch.setattr("agent_py_agent.cli.chat_parts.tui_keybindings._required_tui_runtime", lambda _p: runtime)
+    monkeypatch.setattr("agent_py_agent.cli.chat_parts.tui_actions._required_tui_runtime", lambda _p: runtime)
     parsed = SimpleNamespace(
         plugin=SimpleNamespace(plugin_id="activity-line", enabled=enabled),
         action=SimpleNamespace(kind=kind, target="line", summary="打开或关闭活动面板"),

@@ -92,8 +92,9 @@ agent_py_agent/
 |   |   |-- tui_events.py               # TUI 唯一 versioned event 信封、单调 sequencer 与幂等有界 journal
 |   |   |-- tui_view_model.py           # typed event reducer：稳定/活动 block、权限 overlay、输入队列与状态快照
 |   |   |-- tui_ui_setup.py             # alternate-screen prompt_toolkit 布局、控件、style 与 focus 接线
-|   |   |-- tui_keybindings.py          # 输入、帮助、权限、队列、滚动、transcript、中断与退出 typed key intents
-|   |   |-- tui_clipboard.py            # 单应用有界复制顺序与分通道结果，防止旧选区覆盖新复制
+|   |   |-- tui_keybindings.py          # 按键注册与处理：输入、帮助、权限、队列、滚动、transcript、中断与退出 typed key intents
+|   |   |-- tui_actions.py              # 按键触发的副作用边界：Gateway 提交/控制对账、后台线程、子代理插话与中断
+|   |   |-- tui_clipboard.py            # 单应用有界复制顺序与分通道结果，及本机/tmux 复制子进程 helper
 |   |   `-- control_runtime.py          # CLI 对共享会话控制协议及窗口级精确中断的运行适配
 |   |-- home_runtime_commands.py        # owner home 状态、daily/task workspace/index 维护命令
 |   |-- gateway_process.py              # gateway 进程入口
@@ -802,7 +803,8 @@ docs/
 - `agent/conversation/display_archive.py`、`agent/gateway_parts/display_archive_service.py`：完整原文以 owner 私有不可变页保存，前端只有引用；跨 owner、无关会话或任意磁盘路径均拒绝。
 - `agent/agent_core/tool_loop/display_archive.py`：在工具显示投影裁剪之前存真实执行快照；不读取当前文件重建历史，也不改变 LLM 工具输入。
 
-- `agent_py_agent/cli/chat_parts/tui_clipboard.py`：串行投影显式选区，最新代次回执与退出清理，不读取或持久化系统剪贴板。
+- `agent_py_agent/cli/chat_parts/tui_clipboard.py`：串行投影显式选区，最新代次回执与退出清理，不读取或持久化系统剪贴板；本机复制命令与 tmux 缓冲子进程 helper 也在此处，均有两秒超时。
+- `agent_py_agent/cli/chat_parts/tui_actions.py`：TUI 按键的副作用动作（Gateway 记忆/控制/补充消息提交与持久对账、本地排队、子代理插话/停止、Esc 中断）；运行时不导入 tui_keybindings。
 
 - `agent/conversation/compact_tool_refs.py`：checkpoint 的历史路径投影；仅认结构化原生调用和成功回执，不解析命令/摘要或赋予权限。
 - `agent/conversation/compact_text_source.py`：两遍长度/hash 校验与可释放顺序窗口；取消或来源变化时拒绝候选，不推进 canonical 游标。

@@ -52,6 +52,7 @@ Gateway chat 等待使用单调时钟。入口绝对 deadline 只在进入轮询
 - `tui_runtime.py`、`tui_threading.py`：Gateway 事件投影与线程边界。
 - `tui_view.py`、`tui_block_renderer.py`、`tui_markdown.py`：布局、缓存、样式和宽字符渲染。
 - `tui_input.py`、`tui_interaction.py`、`tui_keybindings.py`：输入、快捷键、滚动和控制。
+- `tui_actions.py`：快捷键触发的副作用动作（Gateway 请求、控制与补充消息对账、后台线程、子代理插话与中断）；`tui_keybindings.py` 只注册按键并调用它。
 - `tui_input_delivery.py`、`tui_clipboard.py`、`tui_history.py`：投递、剪贴板与异步历史读取。
 - `tui_plugin_panels.py`：插件面板的本地显示偏好、有界后台刷新与纯排版；宿主报告不可用即移除面板。
 
