@@ -511,6 +511,7 @@ OAuth 传输、采样和模型菜单回归。覆盖保存无网络、公开字�
 ## 第 10 步第二批宿主补充（本地，待发布）
 
 - `test_plugin_skills.py`：包描述 v3 往返与名单校验（空、非法名、重复均拒绝，v1 不带 skills）；只取已启用且声明 Skill 的插件目录；插件 Skill 来源为 `plugin:<ID>`、不覆盖同名用户 Skill；提供方不再返回后下一次快照即消失；总闸关闭时不出现。
+- `test_genui_lite_package.py`（11 项）：从源码构建 genui-lite 包，确认包描述 v3、`skills == ["genui-table"]` 且 wheel 内有 SKILL.md；起真实 MCP 进程覆盖两种数据格式的 table、`--chart` 条形图等比长度、非数字/缺失列与坏 JSON/格式/列不一致报错、行数截断与大小上限；export 写出独立 HTML（无脚本、无外部资源引用、特殊字符转义、权限 0644）、输出已存在拒绝与 `--overwrite`、非 .html/上溯/越界/父目录链接拒绝、读写范围裁决、缺写入上下文失败。
 - `test_plugin_display_service.py::test_sessions_topic_is_lazy_and_whitelisted`：会话列表提供方只在订阅时调用，坏行丢弃、metadata 不转发、读取失败按空列表。
 
 ## 第 10 步第一批真实 TUI（1be5753ff / wheel 2d049be8，模型 MiniMax-M2.7）

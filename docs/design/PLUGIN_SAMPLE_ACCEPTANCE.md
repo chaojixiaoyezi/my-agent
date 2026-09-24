@@ -55,7 +55,7 @@ PC2005-cloud/dsh-pet
 | [dsh-worktable](https://github.com/Aisland-SJL/dsh-worktable) · 652 | `worktable-lite`：`/plugins@worktable-lite list` | 展示当前 owner 的会话/任务列表，定位到原会话；仅保存自己的显示偏好 | 多会话隔离、公共状态投影、配置持久化；不新建任务账本或 Gateway |
 | [working-activity](https://github.com/ccch1mneyyy/working-activity) · 660 | `activity-line`：`/plugins@activity-line show` | 在面板显示当前工具、耗时和最近结构化进展，随事件更新 | 只读订阅、事件顺序、队列边界及停用回收；不解析模型自述决定状态 |
 | [dsh-pet](https://github.com/PC2005-cloud/dsh-pet) · 692 | `status-pet`：`/plugins@status-pet show --style whale` | 用文字/符号显示工作、等待、空闲状态，提供外观配置 | 展示贡献、设置生效、面板重绘及撤销；不用第三方动画素材，不加余额请求或自动对话 |
-| [dsh-genui](https://github.com/omdsh-dev/dsh-genui) · 468 | `genui-lite`：`/plugins@genui-lite render ./data.json` | 将结构化数据渲染成表格、简单图表，可导出独立 HTML 文件 | 参数 schema、结构化渲染、产物引用、Skill 随插件装卸；首版不做完整 Web UI 框架 |
+| [dsh-genui](https://github.com/omdsh-dev/dsh-genui) · 468 | `genui-lite`：`/plugins@genui-lite table --path data.json`（导出用 `export --output x.html`） | 将结构化数据渲染成表格、简单图表，可导出独立 HTML 文件 | 参数 schema、结构化渲染、产物引用、Skill 随插件装卸；首版不做完整 Web UI 框架 |
 | [deepseek-design](https://github.com/Devin-AXIS/deepseek-design) · 1,368 | `design-lite`：`/plugins@design-lite create --template card` | 按模板生成一个 HTML 设计文件，并支持修改标题、颜色等局部字段 | 多动作命令、写权限、文件读回、Skill 按需加载；不做 PPT/视频或完整可视化编辑器 |
 | [ModLens](https://github.com/liustack/modlens) · 3,998 | `image-text`：`/plugins@image-text read ./sample.png` | 提取图片文字与结构化结果；需要模型视觉理解时经原模型链使用官方 MiniMax-M3 | 可选依赖隔离、图片输入、密钥引用复用、失败与取消；不另建模型执行器 |
 | [dsh-undo-savepoint](https://github.com/lire1131/dsh-undo-savepoint) · 160 | `savepoint-lite`：`/plugins@savepoint-lite save ./sample.txt` | 对明确指定的测试文件创建、列出和恢复快照，恢复前核对当前版本 | 多步读写、配置/数据归属、冲突与权限；不快照或改写核心源码、私密配置和正式历史 |
