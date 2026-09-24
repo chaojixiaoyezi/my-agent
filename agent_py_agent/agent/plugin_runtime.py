@@ -10,6 +10,7 @@ from dataclasses import asdict, replace
 from .common.nofollow_fs import open_directory_beneath
 from .common.strict_json import load_strict_json
 from .plugin_activation_ref import PluginActivationRef
+from .plugin_host_api import HOST_API_READ, issue_host_api_env
 from .plugin_installation import PluginInstallation
 from .plugin_manifest import canonical_plugin_settings
 from .tooling.input_schema import canonicalize_tool_input_schema
@@ -90,7 +91,8 @@ def plugin_data_dir(owner, plugin_id: str):
 # 类用途: 保存插件连接和同连接已验工具，供共享权限视图分别生成目录。
 class PluginMCPClient(MCPStdioClient):
     # LLM: 构造只读规范环境和设置；私有值只放子进程环境，包声明的 effect 不降低原危险工具门。
-#   同时 no-follow 创建插件数据目录（有副作用：可能新建目录），经 MY_AGENT_PLUGIN_DATA_DIR 传给子进程。
+#   同时 no-follow 创建插件数据目录（有副作用：可能新建目录），经 MY_AGENT_PLUGIN_DATA_DIR 传给子进程；
+#   声明了 host_api=["read"] 的包另获宿主只读 API 地址与令牌（有副作用：登记令牌）。
     # 函数用途: 将已准备 Python 环境接到原 MCP 客户端，不在构造时启动进程。
     def __init__(self, owner, installation: PluginInstallation):
         activation = installation.activation
@@ -111,11 +113,15 @@ class PluginMCPClient(MCPStdioClient):
                                              installation.manifest.settings_schema)
         self.installation = installation
         self.validated_tools: tuple[PluginProxyTool, ...] = ()
+        # 只有声明了宿主只读 API 的包才拿到地址和令牌；令牌绑定本激活，停用/换代后宿主侧即失效
+        host_api_env = (issue_host_api_env(self.activation_ref, installation.manifest.plugin_id)
+                        if HOST_API_READ in getattr(installation.manifest, "host_api", ()) else {})
         super().__init__(MCPServerConfig(
             name="plugin_" + installation.manifest.plugin_id,
             command=str(environment / "python" / "bin" / "python"),
             args=["-I", "-m", installation.manifest.entry_module], cwd=str(environment),
-            env={"MY_AGENT_PLUGIN_SETTINGS": settings, PLUGIN_DATA_DIR_ENV: str(data_dir)}, catalog_category="plugins",
+            env={"MY_AGENT_PLUGIN_SETTINGS": settings, PLUGIN_DATA_DIR_ENV: str(data_dir), **host_api_env},
+            catalog_category="plugins",
         ), activation=self.activation_ref)
 
     # LLM: 原 Store 同代资源是唯一事实源；其他运行实例可共存，未知和未确认停止不能靠新客户端绕过。

@@ -203,6 +203,11 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
 
             handle_client_plugins(self, _server_instance)
             return
+        if self.path == "/plugin-host/query":
+            from ..plugin_host_api import handle_plugin_host_query
+
+            handle_plugin_host_query(self, _server_instance)
+            return
         if self.path == "/client/plugin-panels":
             from .plugin_panels_http import handle_client_plugin_panels
 
@@ -402,6 +407,10 @@ class GatewayHTTPServer:
 
         self._thread = threading.Thread(target=self._serve, daemon=True)
         self._thread.start()
+        # 插件宿主只读 API 只在本服务运行时可用，地址固定为回环
+        from ..plugin_host_api import set_host_api_base
+
+        set_host_api_base(f"http://127.0.0.1:{self.server.server_address[1]}")
 
     def _serve(self) -> None:
         if self.server is None:
@@ -435,6 +444,9 @@ class GatewayHTTPServer:
 
     def stop(self, timeout: float = 5.0) -> None:
         global _server_instance
+        from ..plugin_host_api import set_host_api_base
+
+        set_host_api_base(None)
         if self.server:
             self.server.shutdown()
             self.server.server_close()

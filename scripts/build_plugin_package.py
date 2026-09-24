@@ -21,6 +21,7 @@ from agent_py_agent.agent.plugin_manifest import (
     PLUGIN_PACKAGE_SCHEMA,
     PLUGIN_PACKAGE_SCHEMA_V2,
     PLUGIN_PACKAGE_SCHEMA_V3,
+    PLUGIN_PACKAGE_SCHEMA_V4,
 )
 from agent_py_agent.agent.plugin_package import inspect_plugin_package
 from agent_py_agent.agent.plugin_wheels import inspect_plugin_wheels
@@ -50,8 +51,14 @@ def build_plugin_package(project: Path, declaration_path: str, dependencies: tup
         wheel_bytes = {"wheels/" + item.name: item.read_bytes() for item in (wheel, *dependencies)}
         if len(wheel_bytes) != len(dependencies) + 1:
             raise ValueError("依赖 wheel 文件重名")
-        # 声明了随包 Skill 的包用 v3，声明了面板的包用 v2；其余保持 v1，已发布包重建后的描述不变
-        if manifest.get("skills"):
+        # 声明了宿主 API 权限的包用 v4，声明了随包 Skill 的包用 v3，声明了面板的包用 v2；其余保持 v1，已发布包重建后的描述不变
+        if manifest.get("host_api"):
+            if manifest.get("skills"):
+                _check_declared_skills(manifest, wheel_names)
+            manifest.setdefault("panels", [])
+            manifest.setdefault("skills", [])
+            schema = PLUGIN_PACKAGE_SCHEMA_V4
+        elif manifest.get("skills"):
             _check_declared_skills(manifest, wheel_names)
             manifest.setdefault("panels", [])
             schema = PLUGIN_PACKAGE_SCHEMA_V3

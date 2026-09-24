@@ -43,6 +43,7 @@
     |-- PLUGIN_PACKAGES.md               # 本地包静态校验与待接线的安装事实、隔离和撤销边界
     |-- PLUGIN_WORKSPACE_CONTEXT.md      # 逐次只读工作区协议、路径裁决与轻量 SDK 构建边界
     |-- PLUGIN_WORKSPACE_WRITE.md        # 逐次写入工作区协议，与内置写工具同一裁决且只可能更严
+    |-- PLUGIN_HOST_API.md               # 界面型插件的宿主只读 API：v4 声明、按激活发令牌、主题白名单
     |-- WORKSPACE_PEEK.md                # 首个自有只读插件的预览、分页、安全打开与构建边界
     |-- PLUGIN_ACTIVATION.md             # 唯一安装表的激活 CAS、撤销、显式迁移及待接线资源边界
     |-- MANAGED_PROCESS_STDIO.md         # 原 host 字节管道、激活资源归属及旧版本恢复边界
@@ -187,6 +188,7 @@ agent_py_agent/
 |   |-- plugin_activation.py           # 原安装版本上的激活迁移、阶段重放与旧代拒绝
 |   |-- plugin_runtime.py              # 固定代次的 MCP 服务、完整目录校验与原工具代理
 |   |-- plugin_skills.py               # 已启用插件自带 Skill 目录的唯一定位规则（来源 plugin:<ID>，最低优先级）
+|   |-- plugin_host_api.py             # 插件宿主只读 API：令牌发放与复核、/plugin-host/query 主题投影
 |   |-- workspace_read_context.py      # 宿主与插件共用的冻结读取协议及逐项路径检查
 |   |-- workspace_write_context.py     # 宿主与插件共用的冻结写入协议及逐项写入裁决
 |   |-- plugin_invocation.py           # 显式业务选择摘要、原执行器组装及单次 MCP 连接收尾
@@ -729,6 +731,7 @@ agent_py_agent/
 |   |-- test_plugin_release.py        # 原 handler 退出、环境删除、结果落账与重送消费边界
 |   |-- test_plugin_removal.py        # 管理卸载、权限、旧请求重放、准备未退与持久成功后包回收
 |   |-- test_plugin_skills.py         # 随包 Skill：v3 描述往返与校验、只取已启用插件、最低优先级、停用即消失
+|   |-- test_plugin_host_api.py       # 宿主只读 API：令牌随激活失效、主题白名单、线程公开字段、v4 描述
 |   |-- test_plugin_removal_store.py  # 安装删除 CAS、提交故障、符号链接与并发重新安装隔离
 |   |-- test_plugin_registry.py       # 共享视图、可信 owner 注入、关闭登记交错与未知保留
 |   |-- test_process_cleanup_evidence.py # 完整清理证明、自然终态保持、单调合并与 redo 恢复

@@ -19,6 +19,9 @@ PLUGIN_PACKAGE_SCHEMA = "plugin_package.v1"
 PLUGIN_PACKAGE_SCHEMA_V2 = "plugin_package.v2"
 # v3 在 v2 基础上增加随包 Skill 名单（面板可为空）；v1/v2 包的读写字节保持不变
 PLUGIN_PACKAGE_SCHEMA_V3 = "plugin_package.v3"
+# v4 在 v3 基础上增加宿主 API 权限名单（目前只有 "read"：只读查询宿主运行状态）；v1–v3 包的读写字节保持不变
+PLUGIN_PACKAGE_SCHEMA_V4 = "plugin_package.v4"
+PLUGIN_HOST_API_PERMISSIONS = ("read",)
 _SKILL_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
 MAX_PLUGIN_SKILLS = 8
 PLUGIN_SETTINGS_BYTES = 64 * 1024
@@ -98,6 +101,8 @@ class PluginManifest:
     panels: tuple[PanelDeclaration, ...] = ()
     # 随包 Skill 名单：文件在入口包的 skills/<名称>/SKILL.md，启用期间由宿主作为最低优先级 Skill 根暴露
     skills: tuple[str, ...] = ()
+    # 宿主 API 权限：声明 "read" 的插件启动时获得只读宿主 API 地址与令牌（见 plugin_host_api）
+    host_api: tuple[str, ...] = ()
 
     # LLM: 直接构造与 JSON 读取共用约束；只开放工具动作和指向本包面板的展示动作，不接受包指定管理操作。
     #   有面板的纯展示包可以没有工具；两者都没有则拒绝。
@@ -126,6 +131,9 @@ class PluginManifest:
                 or len(set(self.skills)) != len(self.skills)
                 or any(not isinstance(name, str) or not _SKILL_NAME.fullmatch(name) for name in self.skills)):
             raise ValueError("随包 Skill 名单无效")
+        if (not isinstance(self.host_api, tuple) or len(set(self.host_api)) != len(self.host_api)
+                or any(item not in PLUGIN_HOST_API_PERMISSIONS for item in self.host_api)):
+            raise ValueError("宿主 API 权限名单无效")
         tool_names = {tool.name for tool in self.tools}
         panel_ids = {panel.id for panel in self.panels}
         if len(tool_names) != len(self.tools) or not (tool_names or panel_ids):
@@ -185,6 +193,9 @@ class PluginManifest:
                         "schema_version": PLUGIN_PACKAGE_SCHEMA_V2} if self.panels else {}),
                     **({"panels": [panel.to_payload() for panel in self.panels], "skills": list(self.skills),
                         "schema_version": PLUGIN_PACKAGE_SCHEMA_V3} if self.skills else {}),
+                    **({"panels": [panel.to_payload() for panel in self.panels], "skills": list(self.skills),
+                        "host_api": list(self.host_api), "schema_version": PLUGIN_PACKAGE_SCHEMA_V4}
+                       if self.host_api else {}),
                 }
             )
         )
@@ -201,6 +212,8 @@ class PluginManifest:
                 names += " panels"
             elif version == PLUGIN_PACKAGE_SCHEMA_V3:
                 names += " panels skills"
+            elif version == PLUGIN_PACKAGE_SCHEMA_V4:
+                names += " panels skills host_api"
             elif version != PLUGIN_PACKAGE_SCHEMA:
                 raise ValueError("包协议版本无效")
             row = _fields(payload, names)
@@ -210,6 +223,9 @@ class PluginManifest:
             skills = tuple(declaration_list(row.get("skills", [])))
             if version == PLUGIN_PACKAGE_SCHEMA_V3 and not skills:
                 raise ValueError("v3 包必须声明随包 Skill")
+            host_api = tuple(declaration_list(row.get("host_api", [])))
+            if version == PLUGIN_PACKAGE_SCHEMA_V4 and not host_api:
+                raise ValueError("v4 包必须声明宿主 API 权限")
             wheels = tuple(
                 PluginWheel(**_fields(item, "path sha256"))
                 for item in declaration_list(row["wheels"])
@@ -240,6 +256,7 @@ class PluginManifest:
                 settings_schema_json=_json(row["settings_schema"]),
                 panels=panels,
                 skills=skills,
+                host_api=host_api,
             )
         except (ValueError, TypeError, KeyError, AttributeError, RecursionError) as exc:
             raise PluginPackageError("invalid_manifest", "插件包描述无效。") from exc

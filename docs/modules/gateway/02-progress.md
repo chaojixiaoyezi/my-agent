@@ -38,6 +38,7 @@ TUI 观察超时不再标记业务失败：canonical terminal 优先检查，同
 - 插件面板入口 `/client/plugin-panels`（第 9 步，本地开发）：可信来源检查先于读正文，owner 只由 Gateway 作用域解析，冷 owner 不加载实例；
   活动投影复用 `conversation_agent_activity` 只读结果，交给进程内唯一展示服务；服务随 HTTP server 停止关闭。合同测试见 test_gateway_plugin_panels。
   第 10 步：另附本 owner 会话列表的惰性读取函数（只在面板订阅 `sessions` 主题时调用，白名单字段，读取失败按空列表）。
+- 插件宿主只读 API `/plugin-host/query`（第 10 步）：回环来源 + 按插件激活发放的令牌，只读主题白名单；服务启动时登记回环地址、停止时清空全部令牌。
 
 插件命令流的取消原语现直接引用 `common/cancellation.py`，不再越层依赖 tooling。保持逐请求取消和原审批运输，发布前回归进行中。
 
