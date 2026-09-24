@@ -981,7 +981,7 @@ def test_task_local_waiting_parent_replies_to_consumed_guidance_before_yield(
         allowed_tools=[],
     )
 
-    _, response, _ = execute_tool_loop(agent, params)
+    response = execute_tool_loop(agent, params).final_response
 
     assert len(prompts) == 2
     assert response.text == "已经收到你的补充；研究员保持运行，我继续等待它完成。"
@@ -1623,7 +1623,7 @@ def test_steer_arriving_during_receipt_generation_discards_stale_receipt(tmp_pat
         facts={"reply_is_interim": True},
     )
 
-    _, response, _ = execute_tool_loop(agent, params)
+    response = execute_tool_loop(agent, params).final_response
 
     assert len(prompts) == 2
     assert response.text == "已按最新补充继续当前任务。"
@@ -1661,7 +1661,7 @@ def test_steer_survives_empty_stale_provider_response_in_same_turn(tmp_path) -> 
     agent.backend = EmptyWhileSteeredBackend()
     params = _tool_loop_params(task_id="task-1")
 
-    _, response, _ = execute_tool_loop(agent, params)
+    response = execute_tool_loop(agent, params).final_response
 
     assert len(prompts) == 2
     assert response.text == "已按刚才的补充完成收口。"
@@ -1705,7 +1705,7 @@ def test_steer_supersedes_incomplete_stale_provider_response_in_same_turn(tmp_pa
     agent.backend = IncompleteWhileSteeredBackend()
     params = _tool_loop_params(task_id="task-1")
 
-    _, response, _ = execute_tool_loop(agent, params)
+    response = execute_tool_loop(agent, params).final_response
 
     assert len(prompts) == 2
     assert response.text == "已丢弃旧生成并按最新边界收口。"
@@ -1991,7 +1991,7 @@ def test_active_named_audit_replaces_premature_final_with_model_interim(
     assert pending_natural_user_reply(params)["kind"] == "named_work_active"
     discard_pending_natural_user_reply(params)
 
-    _, response, _ = execute_tool_loop(agent, params)
+    response = execute_tool_loop(agent, params).final_response
 
     assert len(backend.prompts) == 2
     assert response.text.startswith("采集和后续处理仍在继续")
@@ -2103,7 +2103,7 @@ def test_pending_audit_prepare_rewrites_false_publish_claim_with_turn_evidence(
     assert "draft" not in phase
     discard_pending_natural_user_reply(params)
 
-    _, response, _ = execute_tool_loop(agent, params)
+    response = execute_tool_loop(agent, params).final_response
 
     assert len(backend.prompts) == 2
     assert "实际检查" in response.text
@@ -2211,7 +2211,7 @@ def test_published_audit_prepare_rewrites_false_source_binding_claim_from_typed_
         live_archive_state={},
     )
 
-    _, response, _ = execute_tool_loop(agent, params)
+    response = execute_tool_loop(agent, params).final_response
 
     assert len(backend.prompts) == 2
     assert "没有新增或更新来源绑定" in response.text
@@ -2354,7 +2354,7 @@ def test_published_audit_prepare_uses_durable_outcome_not_repaired_attempts(
         live_archive_state={},
     )
 
-    _, response, _ = execute_tool_loop(agent, params)
+    response = execute_tool_loop(agent, params).final_response
 
     assert len(backend.prompts) == 1
     assert "成功探测并发布" in response.text
@@ -2773,14 +2773,14 @@ def test_direct_root_final_is_replaced_by_model_interim_while_child_runs(
         ],
     )
 
-    _, response, _ = execute_tool_loop(
+    response = execute_tool_loop(
         agent,
         _tool_loop_params(
             task_id="task-1",
             root_user_prompt="并行完成三项检查后汇总",
             allowed_tools=[],
         ),
-    )
+    ).final_response
 
     # 契约变更（R279 复审）：子代理仍活跃只作为状态/展示事实，宿主不再用回执替换模型正文。
     # 模型自己写的终答就是用户看到的答复，本轮正常结束；后续由子代理生命周期事件唤醒。
@@ -2848,7 +2848,7 @@ def test_natural_reply_returns_unauthorized_tool_call_as_failed_result_before_re
         facts={"reply_is_interim": True},
     )
 
-    _, response, _ = execute_tool_loop(agent, params)
+    response = execute_tool_loop(agent, params).final_response
 
     assert len(prompts) == 2
     assert all("[natural-user-reply]" in prompt for prompt in prompts)
@@ -2895,7 +2895,7 @@ def test_natural_reply_never_promotes_tool_preamble_after_bounded_retry(tmp_path
         facts={"reply_is_interim": True},
     )
 
-    _, response, _ = execute_tool_loop(agent, params)
+    response = execute_tool_loop(agent, params).final_response
 
     assert len(prompts) == 2
     assert "我换个思路" not in response.text
@@ -2932,7 +2932,7 @@ def test_natural_reply_does_not_salvage_internal_protocol_from_rejected_tool_cal
         facts={"reply_is_interim": True},
     )
 
-    _, response, _ = execute_tool_loop(agent, params)
+    response = execute_tool_loop(agent, params).final_response
 
     assert response.text == "这次回复没有完整生成，其中附带的操作没有执行。请重试查看结果。"
     assert response.tool_use_blocks == []

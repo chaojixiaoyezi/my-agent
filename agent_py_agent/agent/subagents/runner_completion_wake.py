@@ -1,35 +1,34 @@
-
+# LLM: 终态通知器只接收明确 Store 与 task 读写能力；历史 BLOCKED 发布后复读 canonical 修正关联，避免盖掉并发授权；精确完成交给原发布锁保留 handled，联测授权收口与直属父级。
+# 模块用途: 可靠发送父级通知、去重并记录投递错误，保持后台 wake 和前台续轮读取同一交接内容。
 from __future__ import annotations
 
 import logging
-from typing import Any
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
-from ..contracts.subagent_completion import SUBAGENT_COMPLETION_SCHEMA_VERSION
-from ..memory_archive.tokens import estimate_tokens
-from ..model_visible_refs import current_model_ref, current_model_ref_list
+if TYPE_CHECKING:
+    from ..conversation.store_tasks import TaskStore
+    from ..conversation.store_wakes import WakeStore
+    from .models import SubAgentTask
+
 from ..runtime_errors import runtime_error_report
 from .capability_scope import request_scope_snapshot
-from .context_bundle_contracts import declared_output_refs
 from .models import (
     SUBAGENT_WAKE_STATUSES,
     TaskStatus,
     task_status_in,
 )
-
-# LLM: This module publishes one versioned terminal/capability envelope from a child to its direct
-# parent; background wakes and ordinary foreground continuation must consume that same schema.
-# 模块用途: 把子代理结束结果和能力申请可靠交给父级，并为后台唤醒与前台续轮统一状态、回复和产物引用。
+from .runner_completion_payload import completion_evidence_refs, completion_handoff_payload
 
 _LOGGER = logging.getLogger(__name__)
-_COMPLETION_MESSAGE_MAX_TOKENS = 1_000
-_COMPLETION_EVIDENCE_REF_LIMIT = 20
 
 
 # LLM: 活动提醒走原 wake/observation 原子对，按 run+attempt+阶段去重；不是终态，不触发强杀。
 #   递归父级从 canonical 直属快照和等待调和读取同一诊断，不把孙代理通知越级广播给根。
 # 函数用途: 把长时间没有新活动的观测交给直属父级，让它决定查看、插话或继续等。
 def notify_parent_on_activity_notice(manager: Any, task: Any, notice: dict[str, Any]) -> bool:
-    if _has_persisted_subagent_parent(manager, task):
+    if _has_persisted_subagent_parent(getattr(manager, "load", None), task):
         return True
     store = getattr(manager, "conversation_store", None)
     if store is None:
@@ -61,166 +60,197 @@ def notify_parent_on_activity_notice(manager: Any, task: Any, notice: dict[str, 
     return True
 
 
-# LLM: Normal runner results notify only statuses that need parent model attention. User-controlled
-# cancellation uses the sibling entry below so model-owned cancel_subagents remains an in-turn fact
-# and cannot create a duplicate background wake.
-# 投递结果是结构化事实（delivered / already_delivered / skipped / failed），供可恢复收口链判定
-# "要不要重发"，不解析任何文本。
-# 函数用途: 子代理自然结束后按既有唤醒状态集合通知直属父级，并回报投递结果。
-def notify_parent_on_runner_result(
-    manager: Any,
-    task: Any,
-    result: Any,
-    output_payload: dict[str, object],
-    *,
-    parent_thread: Any | None = None,
-    attempt_id: str = "",
-) -> str:
-    store = getattr(manager, "conversation_store", None)
-    if store is None or bool(getattr(result, "dry_run", False)):
-        return "skipped"
-    status = str(getattr(result, "status", "") or getattr(task, "status", "") or "").strip()
-    if not task_status_in(status, SUBAGENT_WAKE_STATUSES):
-        return "skipped"
-    return _notify_parent_terminal(
-        manager,
-        task,
-        result,
-        output_payload,
-        status=status,
-        parent_thread=parent_thread,
-        attempt_id=attempt_id,
-    )
+# LLM: 此通知器只持有原任务关联、唤醒 Store 及 task 读写能力；不持有 manager，不派工或另建状态。
+#   完成和受控取消共用同一真实投递实现，调用方须同步迁移结果服务、恢复装配和 agent_control。
+#   历史 BLOCKED 信封保持原 attempt，当前关联以 canonical 为准；并发授权和停止由原 CAS 保持。
+# 类用途: 把子代理终态交给准确的直属父级，更新原关联、发布幂等通知并保存错误。
+@dataclass(frozen=True)
+class RunnerCompletionNotifier:
+    tasks: TaskStore | None
+    wakes: WakeStore | None
+    load_task: Callable[[str], SubAgentTask] | None
+    save_task: Callable[[SubAgentTask], object] | None
 
-
-# LLM: An external TUI/Web stop is not a model-owned handled cancellation: after the whole branch
-# is closed, it must surface the exact CANCELLED fact to the root conversation. The authorized
-# thread is carried across link retirement; nested children still stop at their direct parent.
-# 函数用途: 用户从代理详情页停止任务后，复用标准交接信封通知正确父级。
-def notify_parent_on_controlled_cancel(
-    manager: Any,
-    task: Any,
-    *,
-    parent_thread: Any,
-) -> None:
-    status = str(getattr(task, "status", "") or "").strip()
-    if not task_status_in(status, {TaskStatus.CANCELLED.value}):
-        return
-    _notify_parent_terminal(
-        manager,
-        task,
-        None,
-        {},
-        status=status,
-        parent_thread=parent_thread,
-    )
-
-
-# LLM: Natural completion and authorized external cancellation converge here after their distinct
-# admission rules. One exact task/thread pair updates the projection and publishes at most one
-# deduplicated root wake; nested children never skip their persisted direct parent.
-# 可恢复语义：去重键按 **exact attempt** 定身份（attempt 缺失时退回既有 task+status 形态，行为不变）。
-# 同一 attempt 的唤醒若已发出（pending/handled），本入口回报 already_delivered 而不再重发——
-# 「通知不重」；换 attempt 属新事实，绝不因旧 attempt 已交付而被吞掉——「通知不丢」。
-# 投递异常返回 failed 并沿用既有错误落账。
-# 函数用途: 用同一结构化终态信封更新会话，并在目标直属根会话时发布一次唤醒。
-def _notify_parent_terminal(
-    manager: Any,
-    task: Any,
-    result: Any,
-    output_payload: dict[str, object],
-    *,
-    status: str,
-    parent_thread: Any | None,
-    attempt_id: str = "",
-) -> str:
-    store = getattr(manager, "conversation_store", None)
-    if store is None:
-        return "skipped"
-    task_id = str(getattr(task, "id", "") or getattr(result, "run_id", "") or "").strip()
-    if not task_id:
-        return "skipped"
-    try:
-        thread = parent_thread or store.tasks.thread_for(task_id)
-        if thread is None:
+    # LLM: 只按结构化状态准入自然结果；模型主动取消不重复发后台通知，外部控制取消走独立入口。
+    #   此方法只使用构造时绑定的四项能力，修改须联测结果服务、恢复与直属父级。
+    # 投递结果是结构化事实（delivered / skipped / failed），供可恢复收口链判定
+    # "要不要重发"，不解析任何文本。
+    # 函数用途: 子代理自然结束后按既有唤醒状态集合通知直属父级，并回报投递结果。
+    def notify_result(
+        self,
+        task: Any,
+        result: Any,
+        output_payload: dict[str, object],
+        *,
+        parent_thread: Any | None = None,
+        attempt_id: str = "",
+    ) -> str:
+        if self.tasks is None or self.wakes is None or bool(getattr(result, "dry_run", False)):
             return "skipped"
-        store.tasks.update_status({"task_id": task_id, "status": status})
-        if _has_persisted_subagent_parent(manager, task):
+        status = str(getattr(result, "status", "") or getattr(task, "status", "") or "").strip()
+        if not task_status_in(status, SUBAGENT_WAKE_STATUSES):
             return "skipped"
-        # 去重身份 = task + status + exact attempt（attempt 未知时保持既有 task+status 形态）。
-        # 这样同一 attempt 的重复投递会被识别，而换代后的新 attempt 仍能正常通知父级。
-        normalized_attempt = str(attempt_id or "").strip()
-        dedupe_key = (
-            f"subagent-finished:{task_id}:{status}:{normalized_attempt}"
-            if normalized_attempt
-            else f"subagent-finished:{task_id}:{status}"
+        return self._notify_parent_terminal(
+            task,
+            result,
+            output_payload,
+            status=status,
+            parent_thread=parent_thread,
+            attempt_id=attempt_id,
         )
-        # 已有同一去重键的唤醒（待消费或已消费）→ 视为已投递，绝不重发。
-        receipt = getattr(getattr(store, 'wakes', None), 'delivery_receipt', None)
-        if callable(receipt):
-            try:
-                if str(receipt(thread.thread_id, dedupe_key) or "") in {"pending", "handled"}:
-                    return "already_delivered"
-            except Exception:  # noqa: BLE001 - 回执查询失败不得阻断正常投递
-                pass
-        root_task_id = str(getattr(task, "root_id", "") or task_id)
-        metadata = _metadata(task, result, output_payload)
-        evidence_refs = _completion_evidence_refs(task, output_payload, metadata)
-        if _is_internal_audit_source_lifecycle(status, metadata):
-            # A bounded source-worker slice is a continuation of one durable
-            # logical worker, not a child completion that needs owner attention.
-            # Still publish a machine-only wake *after* the terminal task row is
-            # durable.  The background scheduler consumes this without a model
-            # turn and reruns the canonical root terminal gate.  Without this
-            # edge, the last source worker can reach its durable terminal state after the
-            # collector's earlier settle check and leave the root Audit stuck in
-            # "waiting for closeout" until an unrelated later request happens.
-            _raise_internal_audit_source_wake(
-                store,
-                thread=thread,
-                task=task,
-                task_id=task_id,
-                root_task_id=root_task_id,
-                status=status,
-                metadata=metadata,
+
+    # LLM: 外部停止已关闭原分支后才调用；使用控制端跨关联撤销保留的准确父会话，不能越过直属父级。
+    #   与自然结果共用实际投递，只把明确 CANCELLED 事实交给正确父级。
+    # 函数用途: 用户从代理详情页停止任务后，复用标准交接信封通知正确父级。
+    def notify_controlled_cancel(
+        self,
+        task: Any,
+        *,
+        parent_thread: Any,
+    ) -> None:
+        status = str(getattr(task, "status", "") or "").strip()
+        if not task_status_in(status, {TaskStatus.CANCELLED.value}):
+            return
+        self._notify_parent_terminal(
+            task,
+            None,
+            {},
+            status=status,
+            parent_thread=parent_thread,
+        )
+
+    # LLM: 自然结果与外部取消经过各自准入后共用此处；先更新原任务关联，再发布原 wake／观察配对。
+    #   BLOCKED 关联更新后复读当前 canonical，再以 CAS 保留已授权接续或控制终态；旧 result/wake 历史不改。
+    #   只读取绑定的任务加载能力，嵌套孩子不能跳过持久化直属父级。
+    # 可恢复语义：去重键按 **exact attempt** 定身份（attempt 缺失时退回既有 task+status 形态，行为不变）。
+    # 同一 attempt 的完整配对在原发布锁内保留 pending/handled，不以前置回执查询旁路半写恢复；
+    # 换 attempt 属新事实，绝不因旧 attempt 已交付而被吞掉。
+    # 投递异常返回 failed 并沿用既有错误落账。
+    # 函数用途: 用同一结构化终态信封更新会话，并在目标直属根会话时发布一次唤醒。
+    def _notify_parent_terminal(
+        self,
+        task: Any,
+        result: Any,
+        output_payload: dict[str, object],
+        *,
+        status: str,
+        parent_thread: Any | None,
+        attempt_id: str = "",
+    ) -> str:
+        if self.tasks is None or self.wakes is None:
+            return "skipped"
+        task_id = str(getattr(task, "id", "") or getattr(result, "run_id", "") or "").strip()
+        if not task_id:
+            return "skipped"
+        try:
+            thread = parent_thread or self.tasks.thread_for(task_id)
+            if thread is None:
+                return "skipped"
+            if status == TaskStatus.BLOCKED.value and self.load_task is not None:
+                self._project_blocked_attempt(task_id)
+            else:
+                self.tasks.update_status({"task_id": task_id, "status": status})
+            if _has_persisted_subagent_parent(self.load_task, task):
+                return "skipped"
+            # 去重身份 = task + status + exact attempt（attempt 未知时保持既有 task+status 形态）。
+            # 这样同一 attempt 的重复投递会被识别，而换代后的新 attempt 仍能正常通知父级。
+            normalized_attempt = str(attempt_id or "").strip()
+            dedupe_key = (
+                f"subagent-finished:{task_id}:{status}:{normalized_attempt}"
+                if normalized_attempt
+                else f"subagent-finished:{task_id}:{status}"
+            )
+            root_task_id = str(getattr(task, "root_id", "") or task_id)
+            metadata = _metadata(task, result, output_payload)
+            evidence_refs = completion_evidence_refs(task, output_payload, metadata)
+            if _is_internal_audit_source_lifecycle(status, metadata):
+                # A bounded source-worker slice is a continuation of one durable
+                # logical worker, not a child completion that needs owner attention.
+                # Still publish a machine-only wake *after* the terminal task row is
+                # durable.  The background scheduler consumes this without a model
+                # turn and reruns the canonical root terminal gate.  Without this
+                # edge, the last source worker can reach its durable terminal state after the
+                # collector's earlier settle check and leave the root Audit stuck in
+                # "waiting for closeout" until an unrelated later request happens.
+                _raise_internal_audit_source_wake(
+                    self.wakes,
+                    thread=thread,
+                    task=task,
+                    task_id=task_id,
+                    root_task_id=root_task_id,
+                    status=status,
+                    metadata=metadata,
+                )
+                return "delivered"
+            # Publish through the store's wake-first pair operation. Two separate writes let the
+            # scheduler consume the observation in the tiny gap before its wake existed, causing
+            # duplicate background turns and duplicate IM progress fragments.
+            self.wakes.append_observation(
+                {
+                    "thread_id": thread.thread_id,
+                    "event_type": "subagent_runner_finished",
+                    "summary": _summary(task, result, status),
+                    "urgency": "normal",
+                    "source_agent_id": task_id,
+                    "parent_agent_id": str(getattr(task, "parent_id", "") or ""),
+                    "root_task_id": root_task_id,
+                    "requires_main_agent": True,
+                    "evidence_refs": evidence_refs,
+                    "metadata": metadata,
+                },
+                {
+                    "thread_id": thread.thread_id,
+                    "urgency": "normal",
+                    "reason": "subagent_runner_finished",
+                    "source_agent_id": task_id,
+                    "parent_agent_id": str(getattr(task, "parent_id", "") or ""),
+                    "root_task_id": root_task_id,
+                    "dedupe_key": dedupe_key,
+                    "retain_handled": True,
+                    "evidence_refs": evidence_refs,
+                    "metadata": metadata,
+                },
             )
             return "delivered"
-        # Publish through the store's wake-first pair operation. Two separate writes let the
-        # scheduler consume the observation in the tiny gap before its wake existed, causing
-        # duplicate background turns and duplicate IM progress fragments.
-        store.wakes.append_observation(
-            {
-                "thread_id": thread.thread_id,
-                "event_type": "subagent_runner_finished",
-                "summary": _summary(task, result, status),
-                "urgency": "normal",
-                "source_agent_id": task_id,
-                "parent_agent_id": str(getattr(task, "parent_id", "") or ""),
-                "root_task_id": root_task_id,
-                "requires_main_agent": True,
-                "evidence_refs": evidence_refs,
-                "metadata": metadata,
-            },
-            {
-                "thread_id": thread.thread_id,
-                "urgency": "normal",
-                "reason": "subagent_runner_finished",
-                "source_agent_id": task_id,
-                "parent_agent_id": str(getattr(task, "parent_id", "") or ""),
-                "root_task_id": root_task_id,
-                "dedupe_key": dedupe_key,
-                "evidence_refs": evidence_refs,
-                "metadata": metadata,
-            },
-        )
-        return "delivered"
-    except Exception as exc:
-        _record_wake_error(manager, task, result, exc)
-        return "failed"
+        except Exception as exc:
+            self._record_wake_error(task, result, exc)
+            return "failed"
+
+    # LLM: BLOCKED 属于结束的 attempt，不一定属于当前 run；先 CAS 写原投影，再读 canonical，避免授权在读写间完成后被旧快照盖回。
+    # 授权在复读之后提交时由原 lifecycle grant 更新关联；所有修正只 CAS blocked，不能覆盖已落盘 stop 或新终态。
+    # 函数用途: 保留旧轮阻塞通知，同时让当前已接续或已关闭任务的会话索引遵从权威状态。
+    def _project_blocked_attempt(self, task_id: str) -> None:
+        self.tasks.update_status({"task_id": task_id, "status": "BLOCKED", "expected_status": "active"})
+        current = self.load_task(task_id)
+        current_status = str(current.status or "").strip().upper()
+        if not current_status or current_status == TaskStatus.BLOCKED.value:
+            return
+        projected = "active" if current_status in {"PLANNING", "PENDING", "RUNNING"} else current_status
+        self.tasks.update_status({"task_id": task_id, "status": projected, "expected_status": "blocked"})
+
+    # LLM: 错误只通过显式 save_task 写回原 canonical task；记录失败不覆盖原发布失败结果。
+    # 函数用途: 保存父通知失败的诊断，保存本身失败时记录日志。
+    def _record_wake_error(self, task: Any, result: Any, exc: BaseException) -> None:
+        status = str(getattr(result, "status", "") or getattr(task, "status", "") or "").strip()
+        attrs = dict(getattr(task, "attributes", {}) or {})
+        attrs["runner_completion_wake_error"] = {
+            "status": status,
+            "run_id": str(getattr(task, "id", "") or getattr(result, "run_id", "") or ""),
+            "error": runtime_error_report(exc, context="subagent_runner_completion_wake.notify_parent"),
+        }
+        task.attributes = attrs
+        try:
+            self.save_task(task)
+        except Exception as save_exc:
+            report = runtime_error_report(save_exc, context="subagent_runner_completion_wake.record_error")
+            report["run_id"] = str(getattr(task, "id", "") or getattr(result, "run_id", "") or "")
+            _LOGGER.warning("subagent runner completion wake error could not be saved: %s", report)
 
 
+# LLM: 保留内部监督者原 reason/去重与信号顺序，只持有显式 WakeStore，不触碰 Audit 的其它合同。
+# 函数用途: 将原内部生命周期事实送到监督者队列，不创建面向用户的观察。
 def _raise_internal_audit_source_wake(
-    store: Any,
+    wakes: WakeStore,
     *,
     thread: Any,
     task: Any,
@@ -233,7 +263,7 @@ def _raise_internal_audit_source_wake(
 
     runner_attempts = max(0, int(getattr(task, "runner_attempts", 0) or 0))
     ended_at = max(0, int(float(getattr(task, "ended_at", 0.0) or 0.0) * 1_000_000))
-    store.wakes.raise_signal(
+    wakes.raise_signal(
         {
             "thread_id": thread.thread_id,
             "urgency": "normal",
@@ -325,108 +355,6 @@ def _metadata(task: Any, result: Any, output_payload: dict[str, object]) -> dict
     return payload
 
 
-# LLM: Root wakes and recursively resumed parents must consume one identical
-# 会话运行时 child handoff. Status remains external; this payload carries only
-# bounded final content and canonical refs, never completion authority.
-# 函数用途: 生成子代理结束后的统一交接包，让直属父级直接看到最终回复和交付位置而不用猜目录。
-def completion_handoff_payload(
-    task: Any,
-    result: Any | None = None,
-    output_payload: dict[str, object] | None = None,
-) -> dict[str, object]:
-    selected_result = result if result is not None else task
-    selected_output = output_payload if isinstance(output_payload, dict) else {}
-    completion_message, completion_truncated, completion_tokens = _completion_message(
-        task,
-        selected_result,
-        selected_output,
-    )
-    selected_artifacts = selected_output.get("artifacts")
-    artifact_refs: list[str] = []
-    if isinstance(selected_artifacts, list):
-        for item in selected_artifacts:
-            ref = current_model_ref(item.get("path") if isinstance(item, dict) else item)
-            if ref and ref not in artifact_refs:
-                artifact_refs.append(ref)
-    else:
-        artifact_refs = current_model_ref_list(
-            getattr(task, "artifact_refs", []) or [],
-            limit=_COMPLETION_EVIDENCE_REF_LIMIT,
-        )
-    payload: dict[str, object] = {
-        "completion_schema_version": SUBAGENT_COMPLETION_SCHEMA_VERSION,
-        "completion_message": completion_message,
-        "final_report_ref": current_model_ref(
-            getattr(task, "agent_run_final_report_md", "")
-            or getattr(task, "debrief_file", "")
-        ),
-        "declared_output_refs": declared_output_refs(task)[:_COMPLETION_EVIDENCE_REF_LIMIT],
-        "artifact_refs": artifact_refs[:_COMPLETION_EVIDENCE_REF_LIMIT],
-    }
-    if completion_truncated:
-        payload["completion_message_truncated"] = True
-        payload["completion_message_original_tokens"] = completion_tokens
-    return payload
-
-
-# LLM: The host-owned terminal status remains the lifecycle authority; this
-# bounded prose is only the 会话运行时 child result payload for parent integration.
-# 函数用途: 从子代理当前结果中取最终回复，并限制完成信封体积；长正文可按报告引用继续读取。
-def _completion_message(
-    task: Any,
-    result: Any,
-    output_payload: dict[str, object],
-) -> tuple[str, bool, int]:
-    candidates = (
-        getattr(task, "result", ""),
-        output_payload.get("response", ""),
-        output_payload.get("summary", ""),
-        getattr(result, "message", ""),
-        getattr(task, "latest_summary", ""),
-    )
-    text = next((str(value).strip() for value in candidates if str(value or "").strip()), "")
-    original_tokens = estimate_tokens(text) if text else 0
-    if original_tokens <= _COMPLETION_MESSAGE_MAX_TOKENS:
-        return text, False, original_tokens
-
-    marker = "\n...[完成消息已截断；完整内容见 final_report_ref]...\n"
-    low = 0
-    high = len(text)
-    best = marker.strip()
-    while low <= high:
-        keep = (low + high) // 2
-        head_chars = (keep * 3) // 4
-        tail_chars = keep - head_chars
-        tail = text[-tail_chars:] if tail_chars else ""
-        candidate = text[:head_chars] + marker + tail
-        if estimate_tokens(candidate) <= _COMPLETION_MESSAGE_MAX_TOKENS:
-            best = candidate
-            low = keep + 1
-        else:
-            high = keep - 1
-    return best, True, original_tokens
-
-
-# LLM: Completion evidence refs are a read-only delivery index. They never
-# decide status, acceptance, permissions, retry, or root-task completion.
-# 函数用途: 汇总完成报告和真实产物位置，让父代理无需猜目录即可读取子代理交付。
-def _completion_evidence_refs(
-    task: Any,
-    output_payload: dict[str, object],
-    metadata: dict[str, object],
-) -> list[str]:
-    refs = [current_model_ref(metadata.get("final_report_ref"))]
-    refs.extend(current_model_ref_list(getattr(task, "artifact_refs", []) or []))
-    artifacts = output_payload.get("artifacts")
-    if isinstance(artifacts, list):
-        for item in artifacts:
-            if isinstance(item, dict):
-                refs.append(current_model_ref(item.get("path")))
-            else:
-                refs.append(current_model_ref(item))
-    return list(dict.fromkeys(ref for ref in refs if ref))[:_COMPLETION_EVIDENCE_REF_LIMIT]
-
-
 def _is_internal_audit_source_lifecycle(
     status: str,
     metadata: dict[str, object],
@@ -471,7 +399,7 @@ def notify_parent_on_capability_request(
     store = getattr(manager, "conversation_store", None)
     if store is None:
         return
-    if _has_persisted_subagent_parent(manager, task):
+    if _has_persisted_subagent_parent(getattr(manager, "load", None), task):
         return
     run_id = str(getattr(task, "id", "") or "").strip()
     request_id = str(getattr(request, "id", "") or "").strip()
@@ -510,15 +438,15 @@ def notify_parent_on_capability_request(
             _LOGGER.warning("capability request notify error could not be saved for %s", run_id)
 
 
-# LLM: A parent id is considered nested only when it resolves to a canonical
+# LLM: 仅通过显式 load_task 读取原父任务，读取失败不改写任何状态。A parent id is considered nested only when it resolves to a canonical
 # subagent task; gateway/root request ids deliberately do not resolve here.
 # 函数用途: 判断当前孩子的直属父级是不是另一个真实子代理。
-def _has_persisted_subagent_parent(manager: Any, task: Any) -> bool:
+def _has_persisted_subagent_parent(load_task: Callable[[str], SubAgentTask] | None, task: Any) -> bool:
     parent_id = str(getattr(task, "parent_id", "") or "").strip()
-    if not parent_id or not callable(getattr(manager, "load", None)):
+    if not parent_id or not callable(load_task):
         return False
     try:
-        parent = manager.load(parent_id)
+        parent = load_task(parent_id)
     except (FileNotFoundError, TypeError, ValueError):
         return False
     return str(getattr(parent, "id", "") or "").strip() == parent_id
@@ -609,26 +537,9 @@ def _capability_authority_summary(authority: dict[str, object]) -> str:
     return "宿主父级权限快照不可用，grant 必须失败关闭；"
 
 
-def _record_wake_error(manager: Any, task: Any, result: Any, exc: BaseException) -> None:
-    status = str(getattr(result, "status", "") or getattr(task, "status", "") or "").strip()
-    attrs = dict(getattr(task, "attributes", {}) or {})
-    attrs["runner_completion_wake_error"] = {
-        "status": status,
-        "run_id": str(getattr(task, "id", "") or getattr(result, "run_id", "") or ""),
-        "error": runtime_error_report(exc, context="subagent_runner_completion_wake.notify_parent"),
-    }
-    task.attributes = attrs
-    try:
-        manager.save(task)
-    except Exception as save_exc:
-        report = runtime_error_report(save_exc, context="subagent_runner_completion_wake.record_error")
-        report["run_id"] = str(getattr(task, "id", "") or getattr(result, "run_id", "") or "")
-        _LOGGER.warning("subagent runner completion wake error could not be saved: %s", report)
 
 
 __all__ = [
-    "completion_handoff_payload",
     "notify_parent_on_capability_request",
-    "notify_parent_on_controlled_cancel",
-    "notify_parent_on_runner_result",
+    "RunnerCompletionNotifier",
 ]

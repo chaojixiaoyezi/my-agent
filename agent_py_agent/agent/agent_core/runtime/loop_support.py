@@ -1,5 +1,6 @@
-# LLM: 装配原运行上下文与宿主回调；展示纯值只经推荐接缝/回调传递，不能写入结果、Agent共享属性或扩大原快照权限。
-# 模块用途: 为主链准备记忆、工具和续跑输入，回传本片展示与异常历史；不反向依赖 Gateway。
+# LLM: 本模块逐run装配参数并调用execute_tool_loop，工具发现复用tooling投影；展示纯值只经推荐接缝/回调传递，
+# 不能写入结果、Agent共享属性或扩大原快照权限；拒绝列表、异常原生历史与权限沿原权威，禁止反向依赖Gateway。
+# 模块用途: 为主链准备记忆、工具和续跑输入，恢复同源核验与清理事实，直接驱动唯一循环；回传本片展示与异常历史。
 
 from __future__ import annotations
 
@@ -29,12 +30,13 @@ from ...memory_store import (
     routed_lesson_records,
 )
 from ...runtime_errors import runtime_error_report
-from ...tooling.output_projection import project_tool_output_body
+from ...tooling.output_projection import project_tool_output_body, redact_tool_output_text
+from ...tooling.runtime_facts import render_tool_runtime_facts
 from ...tooling.tool_search_state import pending_carried_loaded_tool_names
 from ...user_space.context_bundle import MainContextBundleRequest, build_main_context_bundle
 from ...user_space.home_layout import runtime_route_root_and_index
 from .._runtime_params import ToolLoopExecuteParams
-from .._tool_loop_service import ToolLoopService
+from .._tool_loop_service import execute_tool_loop
 from ..parameters import _one_shot_tool_call_keys
 from ..tool_context.call_reducer import render_tool_payload_for_live_prompt
 from .live_archive import write_runtime_fact_start_if_enabled
@@ -606,8 +608,9 @@ def _runtime_injections_with_bundle(
     return injections
 
 
-# LLM: 原推荐接缝只采用合法展示；循环可交回已验证 child 的完整协议参数，未交回时沿原初始参数收口，不把活快照写入结果。
-# 函数用途: 驱动工具循环；溢出时释放未提交插话并冻结IR，释放失败也沿原异常出口保存已完成事实。
+# LLM: 原推荐接缝只采用合法展示；工具快照与循环参数逐 run 固定，直接调用唯一循环函数。首请求选模采用的完整参数
+# 由循环结果显式交回；异常先保存当前 IR 再原样抛错（候选只换协议快照、共享同一 IR），需核对原生历史与中断回归。
+# 函数用途: 驱动工具循环，正常返回完整结果；溢出时释放未提交插话并冻结IR，异常也经宿主回调保存已发生的会话事实。
 def _execute_runtime_loop(agent, params: RuntimeLoopParams):
     write_runtime_fact_start_if_enabled(agent, params)
     audit_source_provision = _provision_audit_sources_before_model(agent, params)
@@ -655,17 +658,17 @@ def _execute_runtime_loop(agent, params: RuntimeLoopParams):
         ),
     )
     _queue_audit_source_provision_reply(loop_params, audit_source_provision)
-    # 每个 run 都有自己的工具循环状态；同一 owner 的并发聊天/后台轮
-    # 不能共享一个 ToolLoopService 实例。
-    service = ToolLoopService(agent)
+    # 每个 run 独占本次参数与循环局部计数，同一 owner 的并发聊天或后台轮也不能共享。
     try:
-        final_prompt, final_response, tool_rounds = service.execute(loop_params)
-        loop_params = service.current_params or loop_params
+        loop_result = execute_tool_loop(agent, loop_params)
+        final_prompt, final_response = loop_result.final_prompt, loop_result.final_response
+        tool_rounds = loop_result.tool_rounds
+        loop_params = loop_result.params
         from ...conversation.compact_carry import capture_native_compact_carry
 
         native_carry = capture_native_compact_carry(agent, loop_params, final_response)
     except (Exception, KeyboardInterrupt) as exc:
-        _persist_partial_native_turn(params.partial_turn_callback, service.current_params or loop_params, exc)
+        _persist_partial_native_turn(params.partial_turn_callback, loop_params, exc)
         raise
     return RuntimeLoopResult(
         final_prompt=final_prompt,
@@ -1364,8 +1367,9 @@ def _carried_one_shot_keys(record: dict[str, object]) -> set[str]:
 
 # LLM: Compact continuation may rebuild only typed archive fields. Reuse the live prompt payload
 # reducer after redaction so large write bodies stay behind hashes/previews instead of being copied
-# verbatim into every background slice; effect state still comes only from typed archive fields.
-# 函数用途: 把一条归档工具记录脱敏、限长后恢复为模型/守卫可读文本，并保留路径、失败、未知与重放事实。
+# verbatim into every background slice; shared verification/process projection must read the typed
+# envelope and pass final redaction. Effect state still comes only from typed archive fields.
+# 函数用途: 将原归档恢复为模型可读文本，保留核验、清理、失败和未知事实，不从输出猜测状态。
 def _reconstructed_tool_context_entry(record: dict[str, object]) -> str:
     payload = model_visible_tool_parameters(record)
     payload = payload or {"tool": str(record.get("tool") or "")}
@@ -1406,6 +1410,11 @@ def _reconstructed_tool_context_entry(record: dict[str, object]) -> str:
         value = str(record.get(key) or "").strip()
         if value:
             result_lines.append(f"- {key}: {value}")
+    details = record.get("tool_result_envelope")
+    if isinstance(details, dict) and (facts := render_tool_runtime_facts(details)):
+        result_lines.append(redact_tool_output_text(
+            facts, redaction=str(record.get("tool_output_redaction") or "default"),
+        ))
     result_lines.append(f"- handler_executed: {record.get('handler_executed') is True}")
     result_lines.append(f"- duration_ms: {_nonnegative_tool_duration(record.get('duration_ms'))}")
     if "tool_operation_replayed" in record:

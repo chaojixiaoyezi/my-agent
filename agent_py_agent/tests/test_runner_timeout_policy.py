@@ -315,7 +315,7 @@ def test_pending_source_slice_starts_exact_run_without_parent_wake(monkeypatch):
         capability_auto_sweep,
     )
     from agent_py_agent.agent.agent_core.runner.worker import (
-        _continue_source_worker_after_session,
+        _continue_pending_run_after_session,
     )
 
     started: list[str] = []
@@ -326,15 +326,19 @@ def test_pending_source_slice_starts_exact_run_without_parent_wake(monkeypatch):
         or {"started": 1, "status": "started", "run_ids": [run_id]},
     )
 
-    _continue_source_worker_after_session(
-        SimpleNamespace(),
+    worker = SimpleNamespace(subagents=SimpleNamespace(load=lambda run_id: SimpleNamespace(
+        status="PENDING" if run_id == "source-run-1" else "DONE",
+        attributes={"runner_session": {"attempt_id": "attempt-source"}}, runner_active_attempt_id="",
+    )))
+    _continue_pending_run_after_session(
+        worker,
         "source-run-1",
-        SimpleNamespace(status="PENDING"),
+        attempt_id="attempt-source",
     )
-    _continue_source_worker_after_session(
-        SimpleNamespace(),
+    _continue_pending_run_after_session(
+        worker,
         "ordinary-done-run",
-        SimpleNamespace(status="DONE"),
+        attempt_id="attempt-done",
     )
 
     assert started == ["source-run-1"]

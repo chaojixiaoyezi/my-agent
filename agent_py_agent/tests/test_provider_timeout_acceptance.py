@@ -11,7 +11,7 @@
   探针带工具调用 -> 登记被消费且不参与交付投影，工具按既有工具轮路径执行。
 
 本文件与作者单测 ``test_provider_timeout_continuation.py`` 的分工：**不复用其断言**，只做四类对抗检查：
-1. 重复工具副作用：真实 ``_execute_tool_loop_service`` + 真实工具 handler 计数 + 真实产品记账
+1. 重复工具副作用：真实 ``execute_tool_loop`` + 真实工具 handler 计数 + 真实产品记账
    （``_record_tool_call`` / IR 账本）。证明探针只多发一次模型采样、探针零工具调用时只做一次
    无损交付合成（两条候选按到达顺序逐字保留），``_run_tool_round``、
    工具 handler、工具账本在探针前后完全一致；并单独构造「工具已执行但结果尚未回灌」窗口的反例。
@@ -237,7 +237,7 @@ def _ledger_fingerprint(params: object) -> dict[str, object]:
 
 
 # LLM: 一次真实工具轮循环的全部可观测事实；测试只读这些结构字段，不读模型正文做判定。
-# 类用途: 承载真实 _execute_tool_loop_service 跑完后的账本/时序证据。
+# 类用途: 承载真实 execute_tool_loop 跑完后的账本/时序证据。
 @dataclass
 class _LoopRun:
     backend: _ScriptedBackend
@@ -252,28 +252,29 @@ class _LoopRun:
 
 # LLM: 真实循环 + 真实工具执行 + 真实产品记账路径都保留，只把「哪个工具 handler」换成计数
 #   只读工具（canonical ToolExecutor 真跑），因此工具副作用次数不是桩件自证。
-# 函数用途: 用剧本后端跑一次真实工具轮循环，返回结构化证据。
+# 函数用途: 局部替换测试工具后运行真实循环，立即还原替换，再返回结构化证据。
 def _drive_loop(monkeypatch, tmp_path: Path, script: list[object], *, run_id: str) -> _LoopRun:
     from agent_py_agent.agent.agent_core import _tool_loop_service as tls
-    from agent_py_agent.agent.agent_core._tool_loop_service import (
-        ToolLoopService,
-        _execute_tool_loop_service,
-    )
 
     params = _params(run_id=run_id)
     tool = _CountingReadTool()
     backend = _ScriptedBackend(script, fingerprint=lambda: _ledger_fingerprint(params))
     agent = _FakeAgent(backend, _RecordingPrompts(), tmp_path)
-    service = ToolLoopService(agent)
 
     counts = {"rounds": [], "exec_one": 0}
     real_run_tool_round = tls._run_tool_round
 
-    def counting_tool_round(request):
+    # LLM: 包装真实工具轮，仅记录进入次数；显式核对宿主，防止多次驱动串用上一轮闭包。
+    # 函数用途: 记录当前轮号后继续执行原工具轮及产品记账。
+    def counting_tool_round(loop_agent, request):
+        assert loop_agent is agent and request.agent is agent
         counts["rounds"].append(request.tool_rounds)
-        return real_run_tool_round(agent, request)
+        return real_run_tool_round(loop_agent, request)
 
-    def counting_execute_one(request):
+    # LLM: 只替换具体工具 handler，canonical ToolExecutor 仍实际执行，不能靠计数桩件自证成功。
+    # 函数用途: 核对当前宿主并计数，再让隔离工具执行器运行真实测试工具。
+    def counting_execute_one(loop_agent, request):
+        assert loop_agent is agent
         counts["exec_one"] += 1
         return execute_canonical_test_call(
             tmp_path,
@@ -284,17 +285,18 @@ def _drive_loop(monkeypatch, tmp_path: Path, script: list[object], *, run_id: st
             run_id=run_id,
         )
 
-    # 实例属性赋值不会绑定 self：循环以 service._run_tool_round(request) 单参形式调用。
-    monkeypatch.setattr(service, "_run_tool_round", counting_tool_round)
-    monkeypatch.setattr(service, "_execute_one_tool_call", counting_execute_one)
-    # 真实 prompt 组装需要完整 agent 装配；这里只替换组装入口，保留产品渲染函数本身。
-    monkeypatch.setattr(
-        tls,
-        "build_tool_loop_prompt",
-        lambda _agent, loop_params: tls._render_tool_loop_prompt(agent, loop_params),
-    )
-
-    _prompt, response, rounds = _execute_tool_loop_service(service, params)
+    # 每次驱动结束即还原模块替换，避免同一测试的后一次驱动包住前一次计数闭包。
+    with monkeypatch.context() as loop_patch:
+        loop_patch.setattr(tls, "_run_tool_round", counting_tool_round)
+        loop_patch.setattr(tls, "execute_one_tool_call", counting_execute_one)
+        # 只替换 prompt 装配入口，产品渲染与后续工具记账保持原路径。
+        loop_patch.setattr(
+            tls,
+            "build_tool_loop_prompt",
+            lambda _agent, loop_params: tls._render_tool_loop_prompt(agent, loop_params),
+        )
+        loop_result = tls.execute_tool_loop(agent, params)
+        _prompt, response, rounds = loop_result.final_prompt, loop_result.final_response, loop_result.tool_rounds
     return _LoopRun(
         backend=backend,
         tool=tool,

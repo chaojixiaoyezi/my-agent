@@ -2,6 +2,21 @@
 
 child不展示历史正文时的读取回归先复现1 failed/1 passed，修复后test_compact_retained_history、test_subagent_compact_recovery、test_gateway_child_compact_scope_application三文件31 passed（8.48秒）。三宿主seed仓外基线仅验证测量和完整性，不算内存目标通过；细节见容量审计的宿主生命周期基线。
 
+## 18-A 吸收 main `66a598cf3` 合并回归（2026-09-23，本地）
+
+- **基线**：合并前对两侧 git-archive 快照各跑一次 8 分片全量。决策 `46ac29601` 有 12 项失败，其中 10 项稳定；另 2 项分别依赖 git 仓库环境、对时序敏感。main `66a598cf3` 有 16 项失败，其中 15 项是旧夹具问题，已由主线 `d54fc0c98` 修复。
+- **合并后全量**：20,623 passed，29 failed。24 项在任一基线中已经失败，逐项对照无新增原因。合并新引入 5 项，均已修复：
+  - main 新增的 `test_nontext_segment_source_does_not_commit_mechanical_summary`（2 项）：本线摘要改走 `conversation_compact_provider_source` 流式来源，替身换到这个接缝，断言不变。
+  - `test_shared_native_window_commits_main_or_child_conversation_compact`（2 项）：改读 v3 的 `source_tool_refs`，并补非空和四元字段断言。
+  - `test_applied_compact_context`：全量启动后该用例才改名，属旧名残留，复跑通过。
+- **定向结果**（重叠不累加）：
+  - `test_compact_tool_call_refs` 28 项：原三元场景逐条迁到四元；用主线 `66a598cf3` writer 实际写出的 v2 行，验证按 legacy 读取、不隐藏、不丢行；篡改的 v3 行拒绝读取。
+  - 机械改写的 5 个文件：120 passed、20 xfailed。
+  - `test_applied_compact_context`：13 项。
+  - 修复后的 nontext 与原生 IR 两个文件：全部通过。
+- **Gate**：全目录 Ruff、doc sync、strict code-size（hard=0、blocked=False，基线不改）、diff 与 clean-package 全部通过。
+- **未覆盖**：未运行真实模型或 TUI，线上 CI 未作为验收来源。原场景到新测试的对照清单随交接提交给主线 owner。
+
 ## 第12.4项选中来源到摘要生命周期（2026-09-23，本地）
 
 解决选中canonical正文与完整摘要provider数组同时常驻的问题，复用原扫描、JSON、token估算、native/orphan规则及checkpoint/CAS。真实临时文件到load→摘要分段→提交的红绿测试：4,195,620字符旧峰值9,683,703 bytes，新峰值1,448,802；8,391,460字符新峰值1,532,904。完整JSON hash、95/189段连续覆盖和精确消息ID通过。该数来自专项独立进程，联合运行受分配器影响约1.19/1.53MB；只证明本Python路径，不等同RSS或三宿主峰值。
@@ -446,6 +461,437 @@ OAuth 传输、采样和模型菜单回归。覆盖保存无网络、公开字�
 `test_shared_model_catalog.py`、`test_thread_model_selection.py`、`test_gateway_model_profiles.py` 运行 focused pytest，
 再覆盖 `test_model_oauth.py`、`test_model_oauth_transport.py`、`test_tui_model_menu.py`、`test_provider_sampling.py`；
 最终联合命令使用 `python3 -m pytest <以上十个文件> -o addopts='' -q --tb=short`，213 passed in 4.29s。
+
+## 第8步精确来源与耐久清理事实组合（本地，未发布）
+
+- 合入逐调用来源：来源为 canonical run/attempt/call，旧无来源记录保留 uncertain；来源/尾部和同号跨请求不能混淆，旧无 refs 的编号算法不变。
+- 耐久恢复缺口：原测试仅从内存 archive 恢复。新测试使用真实 executor → externalizer → 磁盘索引 → carried reader → 模型上下文；短／外置输出原有 2 项实际失败，修复后相关四文件106项通过。索引只保留共享有界 process，不含 PID；调用身份保持。
+- 发布组合首轮：48个直接相关文件1212 passed、24项既有xfail（49.55秒）。不同轮次的数字不累计作验收总数。
+- 独立末审发现新 ID 未包含未知尾部的逐位裸 ID，合法候选可碰撞；真实 Store 提交赢家后写入 CAS 败者，读取的尾部实际被改为另一值。新增用例红转绿，新 ID 纳入 retained IDs；旧 ID 不改。最终受影响四文件159 passed（5.24秒），覆盖来源、原生 Compact、Gateway Compact、清理事实恢复。
+- 旧无身份大历史仍可能无法安全 Compact；不制造身份或误删，不声称 provider overflow 已兼容。旧 reader 不能直接读取新混源账本，回滚须保持新增数据与可读运行时。
+- 本地严格 gate 已通过：全目录 Ruff、doc sync、strict code-size（hard=0、blocked=False，基线未变）、diff、clean-package。未运行真实模型或新版 TUI；本轮不是双机部署，线上 CI 未作为验收来源。
+
+## 第8步并发段与收口组合
+
+并发段片0c19b2e3c精选为8468998b6，两个直接测试文件65 passed，包含21项新增因果／交错用例；原取消、审批、线程执行和provider顺序记账未移动。当前组合另把no-action两项常量移到唯一执行模块，原数值和测试断言不变。
+
+最终11文件组合 **283 passed／20项既有xfail（11.52秒）**：上一节收口九文件加tool_round_execution和tool_segment_planning。覆盖顺序屏障、冲突后继续串行且不丢结果、逐候选动态Compact查询、异常前零工具执行／零记账、配置按需读取和原批上限。原请求／响应、unknown与Goal收口合同同时验证。
+
+本地Ruff、doc sync、strict-size hard=0、diff与clean-package全部通过，尺寸基线未改。无真实模型、TUI、Gateway操作，仍待Compact来源引用片后做发布及原生验收，线上CI不是本片证据。
+
+## 第8步收口依赖
+
+相同三文件基线81 passed／20既有xfail；新增窄收口及绑定用例后四文件95 passed／20既有xfail。最终九文件组合218 passed／20既有xfail（11.43秒）：tool_loop_closeout、cli_resume_contract、unknown_outcome_tool_halt、test_tools/test_tool_loop、no_action_gate_round、tool_call_guardrail_runtime、timeout_recovery_delivery、runtime_gate_ledger、conversation_goal_tools。
+
+新增14项覆盖请求／响应与用量归属、build→generate→strip→原因读取顺序，四阶段普通异常与中断均不重试、不调用后续操作；四种宿主绑定保持同一Agent/params和轮号。unknown用例在strip时改变halt，证明读取发生在生成和剥离之后；合同读取失败不能产生可续跑结论。原taxonomy与should_continue_task断言仅迁调用入口，未放宽。
+
+Ruff、doc sync、strict code-size hard=0通过，尺寸基线未改；完整发布验收仍待来源修复和并发段组合。本片未启动真实模型、TUI或Gateway，不代替第8步真实矩阵。
+
+## 第8步工具事实与唯一循环入口组合
+
+工具事实7482a40d6与去空转发c6f45425b合并后，16个相关文件运行退出码0，**349 passed、20项既有xfail**。仓库默认-q叠加命令-q不显示尾部汇总，此处按完整进度符号计数；没有重跑相同测试以补数字。
+
+组合包含tool_context_reducer、mcp_registration、tool_output_externalizer、runtime_gate_ledger、memory_compact_runtime_handoff、subagent_runtime_compact、compact_semantic_summary、tool_call_guardrail_runtime，以及provider_timeout_acceptance／continuation／resume_narrowing／resume_probe、subagent_runtime_guards、thread_interrupt、timeout_recovery_delivery、test_tools/test_tool_loop。独立入口片另验runtime_guidance、native_tool_use_ir_messages_flow为104 passed／4既有xfail。各组不能累加为唯一覆盖数。
+
+保持原执行／审批／中断顺序和所有既有断言，局部monkeypatch避免测试多次驱动串用旧闭包；唯一合并冲突仅是模块注释。全目录Ruff、doc sync、strict-size hard=0通过；完整发布与真实TUI仍待剩余第8步边界收口。
+
+## 第8步工具执行事实与恢复投影
+
+10项因果用例先红后绿：process清理事实在内联、指定live输出、外置摘要及最终脱敏中保持，命令非零／清理成功与清理未确认分开。只读审阅补出巨整数和非有限浮点导致异常／非标准JSON，三项红转绿；缺失、畸形类型不补成成功，PID／实例列表只投影数量。verification原块保持。
+Fake handler经过产品executor、输出归档、循环记录和native适配，两种长度分支逐字比较同源投影；保留原status=failed与effect_outcome=unknown的独立合同。carried恢复再读同一有界process，数量不丢。MCP fake服务的structuredContent伪process只留外部正文，不被提升为宿主事实。测试准备曾遗漏MCP默认审批和误认unknown effect等于unknown status，按真实合同修正测试；没有改生产执行语义迁就断言。
+最终8文件组合 **241 passed，8.45秒**：tool_context_reducer、mcp_registration、tool_output_externalizer、runtime_gate_ledger、memory_compact_runtime_handoff、subagent_runtime_compact、compact_semantic_summary、tool_call_guardrail_runtime。没有真实模型或TUI调用，没有启动／停止共享Gateway。
+本地Ruff、doc sync、strict code-size hard=0已通过，尺寸基线未改；完整发布仍待与空转发清理组合，线上CI不作为本片验收来源。
+
+
+## 第8步 Compact 顺序来源与提交边界组合
+
+- 原生提交后投影抛 RuntimeError／InterruptedError 的两项因果用例先红后绿：thread generation 已为1时不恢复旧IR、不增加提交失败数。审阅补出无binding临时回合仍需回滚，新增两项先红后绿，未改变其原语义。
+- C来源覆盖两遍hash、追加／截短／改写拒绝、Unicode切片、取消与迭代器关闭、重试预算及大历史峰值。最初组合63 passed／1 failed，峰值1,870,598字节高于原界；查明重复iterencode闭包循环积累，改为可证明有界的小结构直接编码，大来源仍流式。原断言保持，不调GC；等值原型5,005组数值／异常类型无差异。
+- 两项非文本／未知媒体来源上层验证：摘要分段前拒绝，模型调用0，原消息、summary、generation、cursor及checkpoint保持；记录一次真实失败，不生成机械摘要冒充媒体覆盖。测试准备曾误用不存在的MessageStore.load及未指定原生model_surface，修正夹具后才进入目标路径，不记作产品红转绿。
+- 最终14文件组合 **333 passed、20项既有xfail，20.14秒**：native_tool_ir_compact_and_orphan_sweep、gateway_conversation_compact、compact_text_source、compact_request_budget、archive_tokens、tool_loop_model_turn、tool_loop_recovery_scope、compact_circuit_breaker、compact_progress、compact_semantic_summary、memory_compact_context_bundle、subagent_runtime_compact、tools/test_tool_loop、r223_audit_regressions。
+- 本地严格gate已通过：上述focused组合、全目录Ruff、doc sync、strict code-size hard=0、diff及clean-package；尺寸基线未改。Ruff中一次测试导入排序问题已修正，尺寸中间版本的嵌套红灯按职责拆helper后通过。线上CI未作为验收来源。
+- 本片未调用真实模型、未启动TUI、未部署或修改共享Gateway。第8步真实矩阵仍待完整组合包，不用本片验证替代。
+
+
+## 第8步请求周期与有界读取组合候选
+
+模型周期新增五项顺序／失败用例，完整验证首次响应后读重试上限、provider超限先恢复再回收、回收失败不再请求、preflight不恢复、最后prompt与response配对、异常不消费临时工具。渐进工具两项测试迁到实际请求周期，不保留旧私有清理入口。五文件164 passed、4既有xfail。
+A/B最小移植原71项及相邻112项通过；独立审阅后新增三个用例真实失败：Unicode空白行被拒及极大created_at错误分类。字节预算先调整为能容纳该行，确认失败发生在解码阶段后才修生产代码；七文件复验186 passed。没有吞错误或自动修复尾行，旧游标和原幂等锁保留。
+最终18文件组合 **456 passed、24既有xfail，18.17秒**：前述模型采纳十文件，加native_tool_ir_compact_and_orphan_sweep、archive_tokens、conversation_message_scan、conversation_store、conversation_message_stream、conversation_history_paging、gateway_foreground_transcript、cli_run_conversation。分组结果有重叠；本次增删远低于全仓阈值，没有追加全仓pytest。
+本候选Ruff、doc sync（补齐memory模块文档后）、strict code-size、diff和clean-package均通过；尺寸基线未改，生成报告保留仓库外。
+候选ef355f822已集成本地主线57baa13cb，两者源码tree一致；集成没有改生产代码，不重复跑相同组合。
+本轮没有新增真实模型验收；已部署版本仍为第7步包。完整Compact scope／摘要来源链未移植，不能以此声称第8步完成。
+
+## 第8.2首片模型采纳：本地合同验证
+
+新增 `test_tool_loop_model_turn.py` 十项：成功／中断结构化返回先计量再确认；provider超限恢复原输入、preflight不消费；请求或计量失败不确认；瞬断中实时读取submission及待确认ID，拒绝重发已提交输入；安全重试只计量最终响应。
+三个空响应旧xfail已迁为native假后端：补齐generate关键字和空text字段、用实际工作目录准备文件、从messages读取工具结果与恢复引导、为第二次工具使用独立call id。保留原3／3／5次调用、单次read／write、产物内容和操作核验断言；最初失败来自过期夹具，没有为通过而改变生产行为。
+十文件组合：模型采纳、tool_loop、runtime_guidance、tool_context_ptl_retry、thread_interrupt、tool_model_generation、provider_timeout_acceptance、provider_transient_auto_resume、subagent_runtime_guards、tool_progressive_disclosure，结果 **212 passed、24既有xfail，14.47秒**。基线两项中断替身错误已显式修复，三个空响应xfail转为真实通过，其余既有xfail未改。
+诊断准备失误单列：一次直接Python诊断漏用了pytest的HOME隔离，触及日常模型配置；已终止该准确诊断进程并改在独立临时HOME执行。该调用不是原生TUI、不计验收证据，共享Gateway未操作。后续本片测试均为隔离假后端；本片Ruff、doc sync、strict code-size、diff和登记后的clean-package均通过；第8步新版原生TUI仍待组合实现。
+
+## 第8步基线发现的中断测试替身遗漏
+
+在85050017d开始模型／工具循环拆分前，四文件基线为112 passed、27既有xfail、2 failed。两项失败均发生于后台claim依赖装配：test_thread_interrupt中的两个最小Store未提供7.10已要求的wakes.pending_one，尚未进入中断／结束断言。仅为这两个替身补显式只读查询接口；同文件12项通过，生产代码与默认部署不变，不用默认旁路掩盖遗漏。此前365项相关测试没有覆盖这两个替身，保留失败记录；这不是新片重构造成的回归，也不宣称第8步验收完成。
+
+## 新版 TUI225—227：第7步框架收口与业务失败分账
+
+发布源码7280c5b3e、wheel SHA256前缀c3f1242f；双机各1,274包文件逐项一致，默认入口／唯一Gateway同版。常规Git HTTPS运输失败后，经GitHub Git Database API逐项核对原blob、tree、commit SHA，远端main非强制快进到相同提交；没有重写提交或跳过本地严格gate。线上CI没有对应运行记录，未作为验收依据。
+三路真实原生TUI分别为225本机授权续跑、226本机保留OPEN接手、227测试机与225同题；各一次普通中文需求，原生/model选择并核对官方MiniMax-M2.7服务端点，日常默认不改。原始线程／请求／claim／工具账、提示词哈希、模型来源、最终产物归档及进程证据留仓库外。
+
+- TUI225：224.71秒，同run两次grant、三次孩子attempt，主子共7个attempt均done，无锁，三个孩子宿主退出。两条公开final为派出回执和唯一root_subagents_terminal交付，7条wake全部handled；未出现220重复收尾。两个grant均在旧session退出后，不能算217时序命中。
+- TUI225业务失败：300行CSV逐行正确，父级实际执行完整逐行校验，并写入正确汇总；约34.23秒后孩子再次覆盖summary，最终平方和9025450、立方和2038532250均错，正确值分别9045050、2038522500。原工具账与孩子原生write_file参数证实覆盖顺序；父级之后未读回最终摘要，仍报告全部通过。观察者保留错误文件，不补产物、不发修复提示；这是共享文件交接与验证时机样本，不据此新增CSV专项核心门。
+- TUI226：92.97秒，真实正式申请保持OPEN／无grant，孩子BLOCKED，父级接手；3个attempt均done、无锁、准确宿主退出。初始回执后只有一次subagent_non_success_terminal交付，未命中能力completed分支。240行逐行正确，父级实际检查平方立方和哈希；summary遗漏汇总合计，完整业务验收仍失败，外部读回不能补算模型履约。
+- TUI227：332.56秒，两次grant、同run三次孩子attempt，主子6个attempt均done、无锁、三个准确宿主退出，7条wake全部handled。第二次grant在旧attempt DB结束后0.328秒、executor退出前0.556秒、session退出前0.593秒；同run随后第三attempt真实执行，**已命中217的原始接续交错且未永久PENDING**。公开final为初始回执加唯一capability_lifecycle_completion，能力事件下的完成交付实际命中，未出现重复完成回复。
+- TUI227业务限制：父级实际校验并修正孩子错误平方和、补全哈希，最终300行与全部摘要正确；但自写检查程序在发现summary不一致时仍输出“全部校验通过”，后由模型读取差异修正。孩子再申请不存在的shell工具形成GAP／BLOCKED，完整“孩子交付两文件后父级复核”流程未达成。父级提出cancel_subagents，经原生界面只批准一次；回执为preserved既有BLOCKED、原执行权已done、无活资源，不能说产生了新CANCELLED状态。
+
+三路终态后均通过原生/exit退出，准确客户端与孩子宿主不存在；只停本轮只读观察进程，共享Gateway保留。第7.9精确时序由227证实，第7.10两个因果红转绿用例和本轮真实无重复结果共同支持当前框架收口；本轮未证明必然撞上220相同的瞬时旧快照交错。旧220／217失败证据和所有业务失败不改报成功。第7步既有长任务、递归、取消／隔离、恢复矩阵继续见后文；本次修复没有改变Compact／长任务执行机制，不用重复空跑时长替代针对性验证。
+
+## 第 7.7 步前台自然退出清理（默认双机运行路径已核对）
+
+前台自然退出修复已集成为 `9330ee385`：从新 Popen 冻结出生身份，内核退出探测不回收组长，沿原终止链清理可验证后代后再获取原退出码；清理未知单列，不扩大后台／PTY 归属。
+12 项新增定向覆盖包含 macOS 实际进程、Linux `/proc` 替身、身份拒绝及清理结果；联合 8 文件 215 项通过。旧 stdin 断言改为所有进程均关闭宿主输入，未降低隔离要求。
+本地候选与主线均已过 Ruff、文档、严格尺寸、diff 和打包边界；`ed20fd061` 已推送远端 main，同一 wheel 双机各 1,274 文件一致，默认入口和唯一 Gateway 已切换并保留回滚。测试机发布脚本在切换后因清单哈希字段名差异未写完报告，已只读核对新进程、旧进程退出及包哈希后补齐私有报告，没有再次重启。TUI210／213 已核对本机直接回收与原退出码，214 核对 Linux 默认沙箱的直接非零退出和精确后代退出，215 正常三孩子并行与产物正确。211 未覆盖到位和212工作区准备失误单列；Windows 沿原路径不作新增回收承诺。线上未查到本提交的 CI 运行，验收来源为本地严格 gate。
+
+## 第 7.7 步新版原生复验（按实际运行路径和缺口分账）
+
+- TUI210 官方 MiniMax-M2.7 本机 329.8 秒自然结束，四组合重复完成的原工具账分别确认 TERM／TERM→KILL 后代回收，外部只读检查在最后一组孩子的 120 秒自然寿命前确认 PID 已消失；100 行平方逐项正确，合计 338350，原 attempt done、无锁。场景命令末尾 echo 覆盖了工具退出码，不能证明工具直接收到 7；模型夹具错误、两次真实超时和一次未执行的删除拒绝均保留。
+- TUI213 独立原生任务 86.0 秒自然结束：模型先加 echo 后自行去掉，实际前台原命令 `COMMAND_FAILED`／return_code=7；原清理回执 `SIGTERM->SIGKILL`、confirmed=true、observed_processes=2、unresolved_pids=[]。原生后续只读检查返回 ESRCH，再次前台计算写出 20100；attempt done、无锁，测试者没有执行或修补业务脚本。
+- TUI214 官方 MiniMax-M2.7 Linux 默认 bwrap 任务 141.0 秒自然 done：第三次前台工具真实 return_code=7／COMMAND_FAILED、stderr 空；原回执 SIGTERM、observed_processes=1、confirmed=true。宿主只读采样核对本次孩子的出生标识、NSpid 和两条私有输出管道，其在 120 秒自然寿命前消失；26 个已采样实例最终均无、原锁清零，后续计算 20100 正确。该回执只证明 bwrap 根快照，不能外推宿主直接对子进程 TERM→KILL；前两次 FD 错误后模型沿用了旧 ready，本次忽略 TERM 就绪未验证。模型把另一命名空间 ps 的 PID 当孤儿的报告错误保留。
+- TUI215 在正确的 owner 内部工作区完成独立三孩子对照：143.2 秒自然完成，三个孩子实际重叠 31.6 秒、主子共五个 attempt 均 done；900 行逐项正确，number 合计 405450、square 合计 243405150、SHA256 与 summary.json 一致。三条直属通知 published 并 handled，无 closeout WAL／锁，已知执行宿主 PID 已消失。初次重复表头由模型在同一任务内自行发现并修正，测试者没有补产物；与仍运行的 212 时间重叠。
+- 两次报告的自动系统回收归因没有证据。原生 IR 读回进一步确认：模型收到 stdout／stderr／return_code，但没有收到原账 `process.termination`；结构化清理事实的模型可见投影缺口留给第 8 步，不把原账成功冒充报告正确。
+- TUI211 Linux 480.3 秒自然结束，初始夹具和后续模型改写偏离私有管道／就绪要求，不能算完整自然退出复验；四次最终外层退出码均为 0，子 PID 属不同 bwrap 命名空间，跨调用检查不能证明同一实例。初次真实超时的宿主六个已知 PID 已消失，正常平方和 333383335000 正确；TUI214 另开独立直接非零场景。TUI212 已运行长任务与 Compact，但本轮测试者把外部 cwd 选在默认 owner 墙外，孩子相对路径触发 PATH_OWNER_SCOPE_BLOCKED；按 owner_access 合同这是测试准备失误，不放宽权限，也不算正常三孩子对照通过。原任务后续自行整合并修正样例，正常三孩子验证由独立 TUI215 补齐。212 的 BLOCKED 运行账保留已确认符合既有合同；公开 final 被抑制另列7.8，不提前勾第 7 步。
+
+默认运行路径的验收结论：macOS 直接后代回收／TERM 升级和原 0／7 已实证；Linux 默认沙箱直接非零及本次后代退出已实证，不能归因于同一升级路径。Linux 非 PID 隔离／Full Access 与本次 Linux 忽略 TERM 就绪仍未实证，不为取得指定信号回执放宽默认沙箱。
+
+## 第 7.8 步能力请求唤醒后的完成交付（已发布双机，原生复验中）
+
+TUI212 的工作区准备失误与后续框架现象分开：原生历史已有模型完整 final、turn_end_reason=completed，ConversationTaskLink 已 completed，最后后台 claim finished；公开 assistant final 未落账。交付裁决对 capability_request_open／granted 原因无条件 suppress，初步定位为旧唤醒原因覆盖新的完成事实。原生 PTY 的确返回 exit_code=0／36 passed；最终三个样例各400行，合计1200行平方均已被模型修正正确。所有 attempt 已结束，最后 claim finished、无本线程排队唤醒；一个孩子因 thread_goal_blocked 保留 AgentRun created，整树 TaskRun 因此未闭，这是既有 BLOCKED 保留合同，不是仍活执行或另一结算 bug。只修公开完成交付，不强制改运行账终态，不补写旧212回复。最小候选979ed5c76已集成为fc17def5f。新增状态矩阵、同片孩子BLOCKED、空载荷和canonical重放共16项：旧实现6红，修复后全绿。候选组合后台运行／Gateway控制／终态检查三文件348项通过，严格gate通过；主线相同三文件348项通过，Ruff、doc sync、strict-size（hard=0、blocked=False）、diff、clean-package全部通过；已随6c5fe6f36推送main，同包930f59f6双机各1,274文件一致，默认入口与唯一Gateway同版；216／217／218从原生TUI选官方M2.7进行实际复验，未提前计为通过。
+
+第 7.8 新版真实验收（216／218 完成，219 未命中，217 接续停滞）：
+
+- TUI216 本机206.96秒：真实只读派工，孩子正式OPEN申请、父级grant，同一孩子第二attempt完成；300行平方／立方逐行正确，摘要和SHA256一致。父级实际独立工具核验并公开final；主子5个attempt全done、无锁、两次准确宿主均退出。最终reason为subagent_runner_finished／root_subagents_terminal，证明授权链与普通交付，**不计为能力事件完成分支命中**。
+- TUI218 本机140.92秒：三个孩子实际重叠30.88秒；初次合并表头错误由被测对象自行发现修复，600行立方、数字和180300、立方和32508090000及SHA256均正确。主子5个attempt全done、无锁、三个配对通知、准确宿主退出；公开final可见，216同期继续。测试者没有补业务产物。
+- TUI216 能力OPEN工作片确实调用父级grant，但同一background request没有公开final；孩子后续完成才由runner_finished交付。未完成能力事件保持静默的原生负向分支有证据，completed能力分支仍缺实际命中。
+- TUI219 本机125.53秒自然结束：200行平方与汇总正确，父子3个attempt全done、无锁、准确宿主退出。孩子实际未调用capability_request，canonical申请／grant均为空，状态DONE；父级最终报告和README却声称正式申请、孩子等待授权。此为场景未命中与模型报告错误，不能计修复分支通过，测试者不补申请、不改报告。
+- TUI217 测试机正式只读授权场景停滞，具体事实与后续归属见7.9；保留原TUI和状态，不额外提示、不人工恢复。
+
+## 新版 TUI220—224：授权接续与能力事件最终交付
+
+安装源码67bb7817e、wheel83975aff，普通测试均由原生TUI一次中文需求发起，实际会话选择官方MiniMax-M2.7；日常默认模型未改。原始模型、请求、工具、claim、产物与进程证据留仓库外。
+
+- TUI223本机87.24秒：三个孩子原DB执行区间重叠21.08秒，主子5个attempt均done，资源锁为零，三条完成通知各发布并消费；原共享孩子宿主退出。模型自行修正合并脚本错误，最终600行编号及立方逐项正确，数字和180300、立方和32508090000，摘要哈希一致。完成后的公开final走原root_subagents_terminal。
+- TUI222本机148.68秒：真实孩子capability_request保持OPEN且无grant，父级接手生成240行数据，实际逐行验证工具已执行，外部只读核对数据、汇总和哈希一致。父子2个attempt均done、无锁、孩子宿主退出；最终回复在原前台轮完成，因此不计后台能力事件分支命中。
+- TUI224本机122.96秒：父级先回复已派出并结束前台轮，原capability_request_open唤醒后台处理；同一后台工作片完成后公开final带capability_lifecycle_completion。原任务done、3个attempt均done、无锁，孩子仍BLOCKED，正式申请OPEN／grant为空，准确宿主退出。两条公开final分别为派出确认与最终交付，无同一后台请求重复final。第7.8所修正的真实正向分支通过，未人工改wake、任务状态或旧回复。
+- TUI224业务核验另列：外部只读检查240行平方立方均正确、CSV哈希与摘要一致；但被测对象实际只运行行数、首尾／中间抽样和哈希，没有执行需求中的逐行核验及汇总合计。不能用观察者的完整检查补算模型已履约，不把框架交付成功记成完整业务验收通过。
+- TUI220本机215.42秒：正式授权后同一孩子第二attempt实际执行，5个父子attempt均done、无锁，300行正确，父级自行修正孩子错误平方和及缺失哈希。grant在旧session退出后约0.18秒，故正常接续成立，准确旧片退出交错未命中。原生历史另见先由subagent_non_success_terminal交付，再由root_subagents_terminal回复上一轮已完成；只读已确认：旧BLOCKED通知先在前台handled，后被后台旧pending快照再次选中；此时孩子已DONE，旧非成功分支直接公开final，新DONE通知后续又公开一次。该通用通知缺陷归7.10，不提前计完全通过。第二attempt为Gateway内进程执行，不能因共享Gateway仍活就判资源泄漏或停止服务。
+- TUI221测试机同题376.47秒自然完成，同一孩子两次正式申请／授权、三轮attempt，最终DONE；300行、数字和45150、平方和9045050、立方和2038522500及哈希正确，父模型自行修正孩子错误平方和并执行16项复核。7条wake均handled、无锁／WAL、三个准确宿主退出。两次授权分别在旧session退出约13.28／11.48秒后，准确交错仍未命中。公开final恰两条：前台等待确认和唯一后台root_subagents_terminal最终交付，没有220的重复后台完成回复。
+
+## 第 7.10 步旧唤醒快照与重复最终回复（已发布并完成当前框架复验）
+
+基线67bb7817e的两个独立因果用例先红后绿：预扫期间前台已handled的旧BLOCKED信封不得再开模型轮；当前来源已DONE且另有未读DONE信封时，旧BLOCKED不得绕过原完成邮箱判断直接公开回复。当前实现仅在原队列读取时机、claim后的窄来源准入及当前子树交付裁决收口，不新建执行器或持久状态。批次中真实失败、来源读取错误、控制、冻结重投及第7.8能力完成分支已进入六文件304项通过的组合。集成前发现资源停止夹具遗漏新显式依赖，实测1失败／13通过；补齐夹具后14项通过并纳入304项，不增加生产默认旁路。候选6c63e8cfd／9afe0417e已集成为f7742dcf0／965f7cf86，主线额外授权、runner收尾和持久交付三文件61项通过。自动回归不能代替最终验收；后续新版TUI225—227事实见本文件首节。
+
+部署准备只清理测试机两份确认无进程或默认入口引用的旧安装环境；当前环境、上一版回滚环境、仍被旧客户端引用的环境和全部测试原账保留。私有切换脚本等待旧进程退出时改核对出生身份与进程状态，避免退出过程中command变化被误当PID换代；启动前还须确认原端口无监听。准备完成后已切换c3f1242f双机默认Gateway，保留83975aff回滚及切换前真实队列／运行账副本。
+
+## 第 7.9 步授权与旧工作片结束之间的接续（修复已部署，原生复验中）
+
+TUI217 原生一次需求真实派read_only孩子；孩子OPEN能力申请，父级grant准确delivery写入目录。
+原grant回执为continuation=already_running／fresh_runner_session；随后旧孩子attempt结束BLOCKED，canonical被写为PENDING。
+只读核对时父2个attempt、孩子1个attempt均done，没有执行中工具或资源锁；准确宿主已退出。
+OPEN、grant和BLOCKED finished三条wake均handled，原后台claim finished、无pending wake，但父任务仍active且未创建孩子第二attempt。
+这是实际授权接续未完成，不能因所有当前attempt结束或没有锁而记为任务通过；也不能用模型“启动中”证明执行器仍活着。
+冻结快照377秒后再次读回，原状态、attempt和wake均未变化；准确TUI客户端保留，原宿主不存在。
+源码交错定位：grant进入时旧工作片已生成BLOCKED结果，canonical归约为已授PENDING，但结束通知用旧结果把child link写BLOCKED，worker又按旧结果跳过接续；原生命周期门因此持续HOLD。独立owner在隔离目录先做确定性交错红灯，再修通知投影、当前状态接续和唤醒窄字段持久化，不通过放宽启动门掩盖失配。
+原账已私下归档，冻结和五分钟后复核阶段未人工改状态或重发业务请求。定位不再依赖活现场后，测试者通过原生/stop结束旧217：父link=interrupted，孩子仍PENDING/link BLOCKED，原attempt全部done、无锁；随后原生/exit，准确客户端与旧宿主都不存在。这是失败测试的控制收尾，不是修复通过或孩子已取消的证明。候选634d12daf已集成为911a53245；三个独立旧红灯转绿，17个交错用例通过，9文件组合236通过／1项既有Linux /proc跳过，严格gate通过。真实RuntimeDB合同确认旧done经原派工入口登记同run第二attempt，重放不多开；父任务interrupted／cancelled均禁止新登记。主线授权／worker／后台交付三文件组合通过，严格gate通过；源码随67bb7817e推送main；同一wheel（83975aff）双机各1,274包文件逐项一致，默认入口和Gateway同版。TUI220／221复验授权续跑，222覆盖前台接手，223为三孩子并行对照，224命中后台能力完成交付；当前结果及缺口见上节，不进入第8步。
+
+部署操作证据纠正：旧私有切换脚本把本机conversation存储key用于远端，远端930f59f6的切换前wake归档实际为空。数据库与旧运行环境备份仍保留；补存的是测试后的当前wake快照，不能冒充切换前备份或覆盖新任务结果。后续切换脚本按各主机真实canonical目录发现claim与wake，禁止跨机复用目录key；这是部署脚本缺陷，不计产品框架失败或通过。
+
+## 第 7 步真实孩子失败及父级接手 TUI207—209
+
+TUI207 先用独立原生模型配置经私有 loopback 夹具透传到官方 MiniMax-M2.7，主子 11 条请求均返回 200，未注入；60.6 秒自然完成，120 行立方数据与摘要／哈希正确，三个 attempt 均 done。
+夹具正式入口固定官方上游，正文和认证透传，只按宿主稳定会话哈希及一次性 nonce 选中请求；测试会话头不发上游，原始内容／凭据不入日志，不更改系统网络或日常模型默认。
+TUI208 的观察脚本误取线程最后一个关联任务，没有通过主角色定位根运行，故一直安全透传；两孩子和主任务完成、1,600 行正确，但没有故障注入，不计失败场景通过。
+修正测试观察器后，TUI209 精确选中已有真实官方业务响应的一个运行中 child attempt，只注入一次 HTTP 400；该孩子原账 FAILED，另一孩子 DONE，未将故障扩散到父级或其它会话。
+父代理收到原失败通知后自行运行孩子已写的脚本、补齐缺失产物并合并；99.9 秒自然结束，四个 attempt（含一个 failed）终态明确，失败孩子没有被后台重跑。
+两条直属观察及两个 v2 published／retain_handled 回执均各一条、wake 均 handled，canonical 无收尾 WAL、作用域内无锁，共用孩子宿主已退出。
+最终 1,600 行连续数字和平方逐行正确，数字和 1,280,800、平方和 1,366,613,600，summary 与文件 SHA256 一致。观察者只读核对，不执行或修补业务文件。
+成功透传与一次拒绝证据分别保存；HTTP 400 故障不证明断网、任意进程崩溃或所有供应商重试。夹具已恢复 relay，后续停用只关闭本测试夹具。
+
+## 第 7 步三子代理长任务 TUI202（生命周期完成，业务未通过）
+
+同一新版测试机 Gateway 上持续 43 分 11 秒，三个孩子实际同时运行 213.2 秒，主任务及三孩子均 done；主代理和测试孩子各提交一次 Compact，随后继续执行至自然结束。
+三条 exact attempt 完成通知均 handled、v2 发布回执均 published，三个 canonical 无收尾 WAL，作用域无锁／root claim，已知共用 dispatch 宿主退出；不外推为任意后代进程都已扫描。
+原生工具账有孩子 105 passed、主代理 115 passed／10 warnings；10 个 smoke 函数以 return bool 代替 assert，pytest 明确警告，不能把该 10 项算成有效断言。
+后续复合验证先输出 115 passed，随后 IndexError 使命令退出 1；另三项函数检查退出 0，原失败保留。
+最终源码只读审阅发现 CLI 缺少可调用入口、文件分支全量物化、时区重标和符号错误、stdin 计数快照时机错误；报告 21 份样例中 19 项行数与磁盘不符。
+因此自然长任务、Compact 和子代理交接按实测范围通过，完整业务交付未通过；没有补发修复提示、代跑程序／测试或补产物。
+
+## 第 7 步本机核心长任务 TUI204（运行完成，交付未全通过）
+
+同一新版 Gateway 下原生官方模型任务持续 1,888.1 秒，主 TaskRun／AgentRun／唯一 attempt 均 done，期间 205 停止另一子树、206 制造发布故障未中断该 attempt。
+原生历史完整保存 62 项 pytest 输出（62 passed，2.68 秒）及三个示例输出；最终文件确有 62 个测试函数。命令使用了管道，因此管道退出 0 本身不能代替 pytest 输出证据。
+观察者只读源码与原账，未导入或执行被测程序／测试。最终源码静态分支追踪发现相减在右侧集合先耗尽后漏掉左侧剩余区间，另有布尔边界被当整数、双集合字典分支未解包等问题；自写测试通过不证明完整交付。
+例如左侧 `[1,5), [10,15)` 减去 `[2,3)`，源码尾部只追加当前余段，遗漏 `[10,15)`。这是一项静态审阅结论，不冒充额外真实 TUI 执行。
+终态后无该 attempt 的资源锁，但两个早期前台测试的嵌套 Python 子进程仍存活并占 CPU：一条业务脚本仅杀父进程后返回 0，另一条 communicate 超时未清孩子后返回 1。它们不是宿主 Shell 超时分支，也不是后续 PTY。
+原生 `/stop` 返回没有运行内容，两进程仍存活；普通退出路径未清理前台进程组后代，作为生产框架缺口继续修复。私有证据保留出生时刻、命令、cwd、进程组和原工具账，历史父子关系没有直接持久记录，归属是多项事实强关联。
+取证后仅向重新核对出生时刻／命令／cwd 的两个准确 PID 发 SIGTERM，确认退出；这是人工测试资源清理，不能算产品停止通过。
+本机曾被独立决策模型测试夹具误写共享配置，造成随后新 TUI207 的模型菜单失败；按原迁移源码核对后精确反迁移并隔离测试项，已由实际安装版重新读取成功。未重启 Gateway、未修改日常默认；该操作是测试环境修复，不是产品验收通过。
+
+## 第 7 步原生 TUI206 发布失败与自动恢复（通过）
+
+新版 TUI206 在官方模型原生单孩子任务中命中受控发布失败：只在新 thread 原本不存在的观察 JSONL 路径建立空目录，未替换既有记录或业务产物。
+孩子完成后留有 v2 prepared 与 canonical runtime_closeout_pending；保存证据后仅 rmdir 撤掉同一空目录，没有调用恢复 API、追加业务提示、重启 Gateway 或手动改状态。
+原 sweep 自动将同一 signal ID 补成 published，只有一条 handled 通知及一条配对观察，WAL 清除；孩子仅一个 attempt，父级自然续接，三个 attempt 和 TaskRun 均 done。
+最终 squares.csv 600 行、逐行数字与平方正确，数字和 180,300、平方和 72,180,100，summary 一致；无资源锁，原孩子宿主退出，普通对照 TUI204 同期继续。
+该用例证明实际发布失败后的幂等补齐和父级交接，不冒充孩子 FAILED、硬断电、任意 JSONL 字节损坏或进程强杀恢复；初次失败时信号可能已安装，不能说通知从未可见。
+观察者只读核验数据和运行账，除上述精确空目录故障夹具外未写被测数据；206 已正常退出客户端。
+
+
+## 第 7 步新版递归协作 TUI203（已核对）
+
+新版 TUI203 递归协作已独立核账通过：请求到 TaskRun 关闭 259.9 秒；主代理、协调代理和两孙代理共 6 个 attempt 全部 done，孙代理实际重叠 19.3 秒。
+两分片各 1,200 行，合并 2,400 行、单表头、数字连续无遗漏重复，逐行平方、数字和 2,881,200、平方和 4,610,880,400 及三份 CSV 哈希全部正确。
+主代理另有两次真实工具核验且退出 0。协调中途曾出现重复表头、命令退出 1／141，由被测对象自行修正，观察者没有补文件。
+直属协调仅发布一条 exact attempt 的 handled wake，v2 回执 published、retain_handled=true，配对观察一条；孙代理没有越级通知根会话。
+本树 canonical 全 DONE、无 WAL／锁／root claim，四个子代理宿主均有 exited 记录且准确 PID 已消失。
+这项仅覆盖新版递归自然交接与任务交付，不覆盖发布半写、进程重启或长任务 Compact。
+
+
+## 第 7 步新版双机部署与原生 TUI（进行中）
+
+第 7 步组合源码 `a067baddd` 已构建同一 non-editable wheel（SHA256 前缀 `e36a9ee2`），
+本机与测试机各 1,274 个安装文件逐项一致，默认入口和各自唯一 Gateway 已正常切换；旧环境及切换前记录保留。
+新版使用 v2 唤醒发布记录后，不能直接换回旧写入进程或用快照覆盖新结果；回退须先协调数据格式和新任务事实。
+本机 TUI204／205、测试机 TUI202／203 均从原生界面选择官方 MiniMax-M2.7，实际 provider/base 与会话绑定已私下读回；
+本机另通过原生模型菜单新增本轮独立官方地址配置，日常默认和原配置不变。两端均已收到真实模型响应。
+当前 202 项目长任务、204 普通对照继续运行；203 递归产物、生命周期和资源退出已核对通过；205 原生停止后 152.3 秒复核：两孩子仍取消、无新 attempt／锁，原宿主已退出，204 继续运行、Gateway 未变；205 已原生退出并保留画面。
+本轮远端查询仍超时，最新代码未推送，线上 CI 未作为验收来源；不能把部署冒充第 7 步完整验收。
+
+
+## 第 7 步恢复与父通知组合验证（本地）
+
+第 7 步恢复扫描与父终态通知已组合到原 checkout：原 sweep 绑定同一窄通知器，恢复／清账故障测试迁到类方法，旧全局接口调用已清零。
+27 个相关测试文件联合 **665 passed、2 项既有 skipped**（55.68 秒），覆盖发布恢复、父子交接、结果提交、调度、控制和资源停止；没有把两条独立测试计数相加。
+Ruff、导入边界、doc sync、严格尺寸、diff、clean-package 已通过；此组合随后已双机部署，最新代码远端待推送，线上 CI 未作为验收来源。
+本片不改变原 WAL→运行结算→通知→delivered→清账顺序；未扩改阶段提醒或能力申请。后续只做发布及本版本原生 TUI 验收。
+
+
+父终态通知候选：直属父级／服务窗口／活动提醒 56 项，加外部代理控制／资源停止／结果状态 74 项通过，
+共 6 个直接受影响文件 130 passed。待恢复扫描片组合后迁移其通知装配及故障替身，不能单独发布，
+不以本地合同回归代替新版真实 TUI。
+
+第 7 步通知配对修复与初次提交依赖收窄已合入原 checkout。18 个组合定向文件 **391 passed、2 项既有 skipped**，
+包括原两项半写红灯、配对恢复矩阵、无 manager 提交的顺序与各写点失败、分页恢复、父级交接、
+Goal／观察路由、结果状态、调试 trace、运行守卫、owner 唤醒发现、后台读回和调度。
+这轮只证明本地组合源码；尚未发布／部署，TUI199—201 属于前一运行包，不能替代新版本验收。
+本地严格 gate 已通过：相关 focused、Ruff、doc sync、strict code-size、diff、clean-package 均无阻塞；
+新增行隐私模式扫描未命中。未运行全仓 pytest，线上 CI 没有作为验收来源；远端查询本轮超时。
+
+### 恢复扫描显式依赖（独立本地候选）
+
+基线 `9bbfc0a01` 上继续收窄 `restore/_restore/advance/recover`，唯一生产装配仍在原 capability sweep；
+既有分页、半写、旧 attempt、通知与清账故障用例逐一迁移到显式依赖，不重跑业务。
+新增 9 项无 manager 的恢复合同用例，覆盖 `repo=None`、精确通知负载、已交付只清账、坏结果不挡后项、
+先 WAL 后事件消费及消费标记失败后重入；另有 1 项从原监督入口推进真实临时文件 WAL 的装配回归。
+10 个直接相关文件联合 **291 passed、1 项既有 skipped**；Ruff、导入边界、doc sync、strict code-size、
+diff、clean-package 通过，新增行隐私扫描无命中。命令与未覆盖范围见[本片交接](docs/tasks/HANDOFF_STEP7_CLOSEOUT_RECOVERY.md)。
+前述 391 项组合结果属于基线，不冒充本片或并行父通知新实现的已发布验收。
+
+## 第 7 步子代理结果链发布与验收
+
+配对发布半写修复已在隔离线本地验收，尚未发布：`test_closeout_wake_receipt_half_write_does_not_duplicate`
+两个参数用例在修前确定性得到 2 条通知而非 1 条；修后在 wake 安装后的最终回执原子替换处故障注入，
+pending／handled 两种重试均保留一条 wake 和完整原观察。新顺序先预留再安装，未删原数量断言。
+原已部署包不受本地修复影响；完整依赖收窄与本版本发布验收仍属第 7 步。
+
+本片 11 个直接相关测试文件 **261 passed、1 项既有 skip**；其中新文件有 32 个通过用例：
+8 个文件边界故障 × 是否消费、同键并发与重放、普通 Goal handled 后继续、旧 v1 纯读及显式迁移、
+坏账保留、原投递冻结和无 key 失败不得伪造无链观察。查询还核对文件集合不变和发布中只读 prepared 快照。
+`test_wake_publication_recovery.py` 之外，同跑 `test_dispatch_liveness_and_revive.py`、
+`test_conversation_wake_events.py`、`test_closeout_recovery_paging.py`、`test_direct_parent_lifecycle.py`、
+`test_subagent_runner_result_state.py`、`test_service_window_semantics.py`、`test_conversation_store.py`、
+`test_conversation_goal_tools.py`、`test_goal_lifecycle_recovery.py`、`test_observation_route.py`。
+具体命令、严格 gate 与未覆盖项见[配对发布交接](docs/tasks/HANDOFF_STEP7_WAKE_PUBLICATION.md)。
+本片不做宿主自动恢复扫描；prepared 成功后仍需调用方重试，runner 复用原 WAL；无 key 不承诺重试幂等。
+离线故障回归不等于真实 TUI、硬断电或所有通知入口自动恢复，线上 CI 未作为验收来源。
+
+独立工作树已拆出 runner 状态展示、完成交接信封、exact attempt 准入与
+“结果先落盘、再 WAL、再运行账、最后父通知”的初次提交编排；旧函数和导出已删除。
+上述源码现已应用到原 checkout，与并行的 TUI／历史修复同源运行定向回归；
+组合源码又跑过 17 个跨线定向文件及 9 个恢复／资源／层级文件，均无失败。
+Ruff、导入边界、doc sync、strict code-size、diff、clean-package 均通过。
+组合 wheel 发布边界检查为 forbidden／source_missing／source_mismatched／resource_missing 全部 0；
+SHA-256 为 `6b66d2a4f9dc3f3df8902bdbd4181c733a9c15dc224c474c2c5ca9d36b62ce71`，
+四个新模块与 TUI 阅读模块均在包内。原生 TUI 验收仍待完成。
+首次推送后复查发现同文件注释插入 import 组触发 Ruff I001；该版本未切换任何 Gateway，
+本次移正注释并重新通过 focused tests、Ruff、导入边界、doc sync、strict code-size、
+diff、clean-package 与修正 wheel 的发布边界，以上 SHA 只指修正包。
+终态冲突原先漏记 `closeout_blocked`，现写入 manager 的原 RuntimeDB。
+首次父通知后若 `delivered` 标记落盘失败，保留 pending WAL；
+故障注入验证恢复后同一 attempt 的 wake 仍恰好一条。
+
+10 个直接受影响文件 **229 passed、4 项既有 xfail、1 项既有 skip**；
+另 7 个多层恢复、资源停止、登记产物和离线工作流文件 **68 passed、1 项既有 xfail**；
+再补 5 个 worker pool、作用域、创建幂等和层级合同文件 **47 passed**。
+Ruff、doc sync、strict code-size、diff、clean-package 通过。
+仓库外构建的候选 wheel 含四个新模块，包内 `agent_py_agent/` 文件共 1,271 个。
+组合源码与注释排序修正已推送远端 main（`c9042f5f2`）；测试机安装的 1,273 个包文件与修正 wheel 逐项一致。
+原 Gateway 在 pending／processing 均为 0 时正常终止，确认旧 PID 和端口监听均消失后，
+从新版运行环境启动唯一 Gateway，并将默认入口指向同一运行环境；旧运行环境及入口回滚副本保留。
+本机仍有原任务处理，尚未切换；
+这些离线回归不能替代官方 MiniMax-M2.7 的第 7.6 项多路真实 TUI 验收。
+同一修正版 wheel 已在本机独立候选环境安装，1,273 个文件逐项一致；默认入口和 Gateway 未切换。
+本机后续核对发现 HTTP processing=0 时，canonical RuntimeDB 仍有由原 Gateway 执行的最新 running attempt。
+因此切换前必须同时核对后台执行轮，不能单靠前台请求队列判空闲；测试机首次切换前未独立保存
+后台 attempt 快照，恢复观测后须补查原运行账，不能据当时队列为 0 宣称全部后台任务空闲。
+隔离线交接见 [第 7 步交接](docs/tasks/HANDOFF_STEP7_SUBAGENT_LIFECYCLE.md)，
+正式验收矩阵见 [唯一 TODO](docs/tasks/REFACTOR_PLUGIN_GOAL.md#第-7-步当前-todo子代理状态和交接按序小片推进)。
+
+### TUI200 有效长任务自然收尾（准入收窄运行包）
+
+官方 MiniMax-M2.7 的原生 TUI200 从单次需求持续工作 1,952.8 秒（约 32.5 分钟），
+三个并行孩子均 DONE，主代理在所有孩子结束后自然完成；期间发生一次 Compact，之后继续读文件、
+修复偏移和导入错误并运行测试。原生 run_command 回执为退出码 0、`62 passed in 5.87s`，
+磁盘测试文件确有 62 个测试函数，源码／README／RESULT 已读回；观察者未执行或修补被测项目。
+三份 canonical 子任务均无待处理 WAL 或 runner_last_error，三条精确完成通知各一条且已 handled，
+全部五个执行轮的资源锁为零，子代理宿主进程已退出，共享 Gateway 保持原 PID。
+本轮证明有效长任务、工具错误自修、多孩子交接和一次压缩后继续工作，不替代第 8 步完整 Compact 合同。
+交付仍有缺证：DESIGN 只写上游版本标签，未读回可追踪提交号／来源核对证据；
+测试通过不证明全部兼容性说明正确，不能把这一项写成完整业务交付通过。
+199／200／201 均核对终态后从原生 `/exit` 正常退出，仅保留 tmux 死窗及仓库外证据；未停止 Gateway。
+原页超时的 197 保留排查，通知半写修复仍待新包验收，本结果不能代替该故障修复。
+
+### 准入依赖收窄（测试机已部署，本机与远端待同步）
+
+结果准入与终态冲突诊断只需要原 RuntimeDB，现改为显式接收该依赖，不再传入整个 manager。
+结果服务在原调用位置取出依赖；canonical task、exact attempt 裁决、None 文件模式和写诊断边界不变。
+两个直接受影响测试文件通过，覆盖原冲突诊断、旧轮拒绝、一致终态重入和持久恢复。
+Ruff、导入边界、doc sync、strict code-size、diff 和 clean-package 均通过，未运行全仓 pytest。
+该片以 `8ca9889aa` 本地提交，发布前重新通过上述严格 gate；构建源码为 `3b5f9943e`，
+wheel SHA-256 为 `c751ee272dc66193d957c1a7802f16b8b00e6caadfdb0d37bbb64c21e1e2db90`。
+仓库的 distribution boundary 四类结果全为 0。临时自写的宽泛路径检查曾把合法内置素材和非发布脚本
+误计为禁入／漏带，随后改用仓库已有发布合同核对，没有因此修改包或放宽发布规则。
+测试机已逐项核对 1,273 个文件，保留旧运行环境和入口回滚副本后正常切换唯一 Gateway 及默认命令。
+切换前同时保存 HTTP pending／processing 为 0 和 RuntimeDB attempt 快照：本日没有未结束的执行轮；
+旧历史未结算行单列保存，没有擅自改写为终态。原 Gateway 退出、端口释放后才启动新版。
+本机原 Gateway 仍有活动后台 attempt，未切换；GitHub 连接失败，最新提交尚未推送，不把本地 gate 视为线上 CI。
+
+TUI199／200 从新版默认入口分别发起父子孙文件清单项目和三孩子并行的 Python 十六进制查看器项目。
+每个任务只提交一次业务需求；199 另在明确等待孩子时插入一次进度询问，以验收等待时插话。
+两条 canonical thread 绑定同一已核对的官方 MiniMax-M2.7 配置，后端为 anthropic_compatible，
+服务商地址为 `https://api.minimaxi.com/anthropic`，且已有实际模型响应；未记录或公开密钥。
+证据为会话绑定、私有配置白名单与原生响应，不冒充网络抓包。
+
+199 已自然完成：原生历史包含 20 项 pytest 通过的工具输出，磁盘独立只读重算得到
+26 个样例文件、2,397,671 字节、两组各三个重复内容文件，与原报告一致。
+权威树只有一个协调孩子、两个孙代理；三个下级的终态／pending closeout／执行进程退出均核对，
+每一级最终完成时间晚于它的孩子。根会话只有协调孩子的一条完成通知，且已 handled，
+没有把孙代理的完成越级广播给根。等待时进度询问在原生历史出现一次，模型回答进度后继续原任务，
+原树没有重复派工。此任务约六分钟，不算所需长任务；测试使用 pytest 而非全标准库、
+个别断言覆盖较弱、最终报告对测试编写者有不一致归属，交付限制与框架通过分开记录。
+200 仍在整合代码和修复实际测试，已持续超过十五分钟；最终交付和长任务完整验收尚未收口。
+201 由原生 TUI 派出两名孩子，确认两个原 attempt 均运行后通过 `/stop` 停止当前任务。
+两孩子的 run／attempt 和 canonical 状态均取消，runner session 为 cancelled、无 pending closeout，
+共同执行宿主已退出。约 139 秒后复核没有新增 attempt，三个原执行轮的资源锁均为 0；
+200 仍由同一 Gateway、同一后台 attempt 持续运行。201 根的前一已完成执行轮保留 done，
+不能改写成该历史轮被取消；原 TUI 正确显示两个孩子已停止。
+TUI195—198 仍只覆盖前一发布包，不用于证明准入收窄片通过。
+
+### 第 7 步首组真实 TUI（基础交接已核对，完整矩阵未收口）
+
+TUI195、196、197 分别测试单孩子交接、三个并行孩子合并和独立主任务对照。
+三个客户端均由新版默认入口启动，通过原生模型菜单为各自会话选择官方 MiniMax-M2.7，
+服务商端点为 `api.minimaxi.com/anthropic`，没有改变日常默认模型。每个 TUI 只提交一次中文需求；
+首轮画面已观察到 195 的 create_subagents(items=1)、196 的 create_subagents(items=3)，
+197 则独立准备写入数据，真实模型响应和终端流留在仓库外。
+
+提交后的 SSH 观察命令等待约七分钟仍未返回，随后只终止该本地只读观察进程；
+另一次有界连接在横幅交换阶段超时。TCP 端口可连接不证明业务就绪，SSH 超时也不证明任务已结束。
+SSH 恢复后读取原生运行账、父子通知和磁盘产物，Gateway 保持原 PID，没有重启任务或补写产物。
+195 的 240 行数据、196 的三个分片及 1,200 行合并结果、197 的 600 条记录和各自统计均逐条读回正确。
+196 三个孩子真实共同执行约 32.6 秒；四个孩子的 canonical 状态均为 DONE、错误为空、
+没有残留 pending closeout，runner session 均 completed。每个 exact attempt 各有一条完成去重回执，
+四条对应 wake 均为 handled；父级随后接续完成，两个原执行宿主 PID 均已退出。
+这证明本组正常收口和消费，不等于已经在真实 TUI 注入并验证重复通知、写盘失败或重启恢复。
+
+195／196 原生页面显示最终结果；197 原生页面停在“gateway 请求等待超时”，
+但原请求 terminal 为 done／ok，原任务和实际产物均已完成。保留为客户端最终结果展示缺口，
+不能用业务成功抵消。TUI198 只通过原生 resume 重连 197 原会话，未发新业务需求，
+已显示完整工具历史和最终报告；重连可读不证明原页面能自动回补。
+原始 ANSI 没有逐块时间戳，文件 mtime 不能作为精确超时时点，先后时序仍由 TUI 工作线定位。
+
+请求耗时约 32 分钟主要包含测试机停顿；有用工作时长不足以证明 15—30 分钟长任务验收。
+模型菜单及真实响应已核对，实际请求端点的单请求日志证明仍须与菜单证据分开。
+本组覆盖发布包 `c9042f5f2`，不覆盖尚未部署的准入依赖收窄候选。
+递归、等待时插话、失败／取消、重复通知、恢复和有效长任务仍待后续矩阵；
+测试机内存和交换区紧张单列环境因素，没有进行真实断网注入。原日志、身份和产物留仓库外。
+
+## TUI 阅读与插话并行修复（已发布 main，未双机切换）
+
+这条线独立于十步 Goal 的第 7 步子代理结果链；它修复运行中插话的历史顺序、
+后台 native 回复重复显示，以及普通／详细／原文视图的阅读锚点和连续滚动。
+15 个相关测试文件 **381 passed**；Ruff、导入边界、doc sync、strict code-size、
+diff、clean-package 和候选 wheel 的发布边界检查通过。全仓 pytest 与线上 CI
+没有作为本轮验收来源。
+
+真实验收在用户授权的独立测试环境，由原生 tmux 测试会话发起，
+同机只用一个 Gateway。实际模型为官方 `MiniMax-M2.7`，请求端点
+`api.minimax.cn/anthropic/v1`；密钥及原始运行身份保留在仓库外。
+真实会话名和 `tmux attach -t <会话名>` 所需参数见私有证据账。
+完整交互矩阵所用 wheel SHA-256 为
+`218fe2bc4b52875b3cfbcd240a14ec0a9bb32d3f3f3b74e35b811e1ecda94d`；
+最终交接 wheel SHA-256 为
+`b2bd4258b66574e9d3d756b73c16939351296d6e84e4d7de1c912a2db649d330`。
+后者只同步模块注释，运行实现相同；切换后另由新原生 TUI 的官方模型完成
+`37 × 19 = 703`，并补验展开和滚动。34 段双向完整矩阵属于前一个功能相同的包，
+不能写成最终包逐项重跑。
+
+运行中插话提交时，原 claim 仍为 running；原生 TUI 顺序为原工具调用、
+用户补充、后续思考、收到补充后的回答，重连后用户输入仅一份。
+后台命令结束后自动追加的 native 回复也按精确回合身份只显示一次。
+34 段长记录向下和向上分别采样 159 次，段号没有反向跳动；
+普通／详细／原文展开收起、单次上下键、鼠标 SGR 滚轮、84↔120 列调整均保留当前消息位置。
+独立短 Goal 在真实等待 45 秒后读回第 600 条并置为 complete，模型正确解释无需再次发送用户消息。
+原始终端字节、截图和精确会话／请求 ID 留仓库外，候选失败记录未计为最终通过。
+
+本轮只验证 root TUI 与已有历史恢复；没有覆盖全部子／孙代理、IM、长达 100 小时的耐久，
+也不证明所有重复正文问题均已解决。代码已在原 checkout 单独本地提交 `c297c52f3`，
+已随本轮快进推送远端 main，并随第 7 步组合包切换测试机默认 Gateway；本机尚未切换；
+此候选的真实验收不能冒充第 7 步新版子代理 TUI 验收。
+文件归属、逐项证据与未测边界见 [TUI 阅读交接](docs/tasks/TUI_READING_HANDOFF.md)。
+
+## 第 6 步插件故障与并发长任务阶段记录（框架验收收口）
+
+当前运行包仍为第 5 步已发布的同一 wheel，尚无第 6 步产品代码改动。故障插件是仓库外构造的标准本地包，原包、合成输入和原始运行账均保存在私有测试目录，不随仓库发布。该包独立验证了 `probe`、完整 `isError`、受控阻塞和非零退出；停用与恢复没有按插件 ID 加核心特判。受影响的停用竞态、发布、调用及宿主命令 focused tests 已通过；本段真实 TUI 结论单列，不以组件测试代替。
+
+本机 TUI179—185、187—194 共用原 Gateway，均在各自会话选择并核对官方 `MiniMax-M2.7`，请求端点为 `api.minimax.cn/anthropic/v1`。测试机 TUI174—178、186 也共用该机原 Gateway，官方端点为 `api.minimaxi.com/anthropic`。查看本机管理、插件长任务、核心长任务、故障、逐页长任务、源码审阅、审批及卸载后基线，分别用 `tmux attach -t release-0920-step6-local-manage`、`release-0920-step6-local-plugin-long`、`release-0920-step6-local-core-long`、`release-0920-step6-local-fault`、`release-0920-step6-local-ledger-long`、`release-0920-step6-local-core-review-long`、`release-0920-step6-local-approval`、`release-0920-step6-local-post-clean`。188—194 的新会话后缀依次为 `local-triple-plugin`、`local-triple-core`、`local-final-plugin`、`local-final-core`、`local-random600-plugin`、`local-random600-core`、`local-random600-core-retry`，均加在 `release-0920-step6-` 后；测试机用 `ssh testbox 'tmux attach -t release-0920-step6-remote-manage'` 查看管理 TUI，原故障 TUI 已正常退出，重连 TUI 用 `release-0920-step6-remote-resume`，其它后缀为 `remote-core`、`remote-plugin-long`、`remote-core-long`。原生 TUI 发起业务或管理；测试者只准备合成输入、控制明确审批／中断并只读核对原账和产物。
+
+| TUI | 已核对的原生事实 | 结论与边界 |
+| --- | --- | --- |
+| 174、175，测试机管理／故障 | 真 TUI 安装、启用、`probe`、`fail`、`crash`、`stall`、停用与卸载。完整错误回执使原业务 FAILED，独立 `probe` 随后成功；审批 Esc 的原事件 `CANCELLED` 且 `handler_executed=false`、无业务工具操作。获批后异常退出留下原操作 UNKNOWN，新调用成功但不回写旧 UNKNOWN。 | 退出、完整错误、审批取消与未知结果边界部分通过；再启用曾在 `preparation_launch` 失败，测试机当时可用内存极低且交换区已满，原因尚未确定，不记为产品通过。最终故障包已停用卸载。 |
+| 176、177，测试机并发业务 | 首次长请求在实际工具轮前因测试者误删正在使用的派生检索索引而碰到缺表；重建 schema 后，新 TUI 可真实调用工具。177 后续被精确中断当前回合，未停 Gateway。 | 测试准备失误；旧索引内容未恢复。两条原失败及中断均保留，不计长任务通过。 |
+| 178，测试机核心 | 16 批共 4,800 行输入，原任务约 221 秒并完成；明细 4,800 行的数值正确。 | 质量报告把跨三个文件的重复编号误写成同一文件三次，并把退款排除口径与实际汇总写得不一致；属于模型产物内容失败，不能以任务 done 代替交付通过。 |
+| 179、180、181，本机三路并发 | 管理 TUI 安装／启用故障包时，180 通过插件读 24 份文件，26 条操作中 24 次 `show` 成功，2,880 行、金额 273,909、72 条 review 与输入一致；181 用核心工具生成 4,800 行明细、汇总、代码与测试，原任务约 310 秒，独立逐行语义核对 0 错误，区域／产品计数、退款和金额均一致。 | 首轮插件任务约 287 秒，核心任务约 310 秒；管理可并行响应，核心产物通过当前数据核验，但两个任务都不足 15 分钟，不能计为连续长任务。 |
+| 179、182，本机故障与撤销 | `stall` 已进入原业务操作 EXECUTING；管理 TUI 在同一调用约 17 秒后停用并释放原激活。原业务结算 UNKNOWN／`effect_outcome_unknown:TOOL_EXECUTION_FAILED`；该停用原回执 `cleanup_confirmed=true`、`released=true`，同代 3 个准备 session 均 `exited`、2 个 activation session 均 `killed` 且退出确认。再次启用并从刷新目录调用 `probe` 成功，旧 UNKNOWN 保持。重复停用也返回已释放。另一次 `stall` 超时在停用前发生，旧操作 UNKNOWN／`TOOL_TIMEOUT`。 | 执行中撤销与超时后停用是两份不同证据；管理不被阻塞调用锁死，旧结果不复活且准确 session 的清理有原账证明。审批等待期间停用、断连与受控清理失败还要继续核对。 |
+| 180，本机第二轮插件任务 | 对 80 份合成日文件的一次中文请求约 119 秒完成；原账只含 1 次 `tree`、6 次 `show`，其余数据由模型改走核心 `run_command`。汇总数值与输入一致。 | 明确要求逐份经插件读取，模型没有遵守；这是本轮模型履约失败，不能算插件长任务或 80 份插件覆盖通过。 |
+| 181，本机第二轮核心任务 | 80 份合成日文件共 1,920 行，原任务约 207 秒完成；独立按输入逐行比对明细的来源、字段与金额，语义错误为 0；80 天和 4 类汇总与输入一致。 | 核心多工具任务的当前数据交付通过；时长不足 15 分钟，仍不计连续长任务。 |
+| 183，本机插件逐页长任务 | 新会话一次中文需求；原任务 `taskrun-1790142148-31de9a66` 完成于 1,221.5 秒，`ledger_page` 1—80 页恰好各成功一次，另有 1 次目录调用；主代理与 3 个孩子 done、2 个孩子 cancelled。`per_page.csv` 80 页的行数、原始金额和反冲金额逐页与合成源数据一致。 | 原生插件长任务的时长、页覆盖和运行框架成立；交付内容失败：分类行 `gross` 合计 343,307、`net` 合计 333,816，表内 `TOTAL gross` 却是 352,798、`TOTAL net` 343,307，报告宣称无异常。原中间账还保留派工无效、参数缺失及取消引起的失败／UNKNOWN；不把最终 done 洗成全链路零错误。 |
+| 184，本机核心源码审阅长任务 | 新会话一次中文需求；原任务 `taskrun-1790142450-1a62b2d7` 完成于 983.2 秒，8 个子任务均 done，四类主产物及 8 份链路子报告实际落盘；162 个已跟踪源码快照文件逐一核对未被修改。 | 核心长任务、八路子代理及产物持久化成立；报告内容失败：目录分组写成 20／58／84，实际是 31／51／80；`findings.md` 称环境准备无超时，源码已有 120 秒预算和明确 deadline；又称 preparation 错误可能仍使 `cleanup_confirmed=true`，与 `not report["errors"]` 条件相反。该报告不能作为重构依据。 |
+| 179、185，本机清理失败与恢复 | 私有故障包 v0.3 的 `arm_cleanup` 在本激活安装环境内创建无权限测试目录，原业务成功。TUI179 首次停用的原操作 `0009702ae476466dbe5790c74a8b23fe` 为 UNKNOWN／`PLUGIN_CLEANUP_UNCONFIRMED`，安装激活保持 revoked；旧 TUI185 的 `probe` 被旧目录版本拒绝。测试者只恢复该夹具目录的权限，未替产品删除环境或改原账；第二次停用原操作 `5eac1255d68e4b43a2e8c97c2b985bcc` 成功，`cleanup_confirmed=true`、`released=true`、错误列表为空，环境才消失，旧 UNKNOWN 保留。随后新代启用的 `probe` 成功，最后经真实 TUI 停用并卸载。 | 仅证明安装环境回收失败及可恢复收尾，不冒充进程退出失败；未确认阶段没有把 revoked 当 released，旧代没有复活。 |
+| 174、175，测试机审批等待撤销 | 在默认确认模式下，TUI175 原生 `/plugins@fault-lab crash` 出现“允许一次／拒绝”弹窗；审批等待期间 TUI174 停用同一激活成功，随后 TUI175 才选择允许一次。原任务 `taskrun-1790145592-b2d90dc8` 最终 failed，业务工具操作 FAILED／`effect_outcome=not_started`，输出为 MCP 连接已关闭或被替换；这里 `handler_executed=true` 仅指宿主代理 handler 被进入，不证明插件实际 `tools/call` 发送，亦没有发生预设的插件 crash。TUI174 随后卸载成功。TUI175 打开权限菜单后关闭菜单的 Esc 还曾中断一个既有模型轮，此为测试控制误操作，不能计作产品审批取消。 | 审批后复查阻止了已撤销代次的插件调用；不能写成“零宿主操作”，也不能把弹窗关闭时的中断当成计划内验收。该次 TUI 提示连接退出未确认，须将连接清理提示与安装资源释放分开核对。 |
+| 175→186，测试机原会话断连重连 | TUI175 通过 `/exit` 正常退出客户端；TUI186 用原 session ID 在新 tmux `release-0920-step6-remote-resume` 恢复，同一 Gateway 未重启。原生 `/plugins list` 仅见 `workspace-peek`，随后 `/plugins@fault-lab crash` 在目录层回复当前无此插件，并给出查询编号。 | 已卸载包没有因会话重连重新进入目录；此处只证明 TUI 命令目录拒绝，不从界面文案推断历史原账改变。 |
+| 187，本机卸载后核心基线 | 新工作区、新原生 TUI 在本会话模型菜单选中官方 `MiniMax-M2.7`；`/plugins list` 只显示 `workspace-peek`。原任务 `taskrun-1790147053-1e12bb93`、主 AgentRun 均 done，4 条工具操作均 SUCCEEDED。普通中文需求由核心工具生成 12 行平方表、实际读回并写报告；测试者独立核对每行 n²、行数及总和 650，均正确。双机原 Gateway PID 保持，测试机已卸载故障包的受管进程记录无该插件归属。 | 卸载后新会话的核心写入、读取和模型链路可用；这是一条短基线，不抵充长任务，也不证明前两份模型内容失败已修复。 |
+| 179、188、189，本机三路真实重叠 | 两条新任务同在 00:27:14 建立并进入工具轮；188 用已启用的 `fault-lab`，189 以核心工具和子代理审阅独立源码快照。两者未结束期间，179 的独立 `control-lab` 安装、启用、`probe`、停用、卸载原工具操作分别在 00:27:56、00:28:28—33、00:29:08、00:29:22—23、00:29:41 完成，五条均 SUCCEEDED。控制包是仓库外独立校验的标准本地包，只管理自己的激活；两条业务任务没有因其装卸被停止。 | 原持久时间证明三路并发的装卸可响应；这段管理窗口约 2 分钟，不冒充三路都持续 15 分钟。此前 183／184 的两条长任务重叠约 15 分钟，另行证明长负载并发。 |
+| 188，本机插件逐页新任务失败 | 官方模型新 TUI，一次中文需求；原任务 `taskrun-1790148434-864ed158`。80 次 `ledger_page` 原操作全部 SUCCEEDED，独立从每条工具输出解析，1—80 页各一次、24 行／页、所有字段与测试源 0 错，真实原金额 352,798、反冲金额 9,491、净额 343,307。模型随后试图把大量数据展开成单次 Bash 参数，界面报模型输出长度限制；原 attempt 已结束但 TaskRun 保持 created，原事件为 `runtime_status=unfinished`／`MODEL_RESPONSE_TRUNCATED`／`runtime_source=model_provider`，工作区无所求产物。 | 不能计任务完成或长任务通过。80 页读取链本身正确，模型中途打印的原金额 744,522 与原工具数据不符；供应商截断的 Bash 参数没有执行。当前轮内截断续写仅适用于进入最终答复裁决的路径，供应商级未闭合工具参数在该路径之前收口；此通用模型／工具循环缺口列入第 8 步，不按插件 ID 或本次数据样例特判。 |
+| 189，本机核心多子代理长任务 | 原任务 `taskrun-1790148434-ce125910` done，运行 979.2 秒；主代理和 7 个 researcher 子代理均 done，42 条工具操作中 41 条 SUCCEEDED，1 条路径错误 `run_command` FAILED 后模型自行修正。162 个源 Python 文件的快照哈希未改变；`file_roles.csv` 162 行唯一、`call_graph.json` 162 节点，两个文件集合均与源码快照完全相同，7 份链报告及主报告实际落盘。 | 核心 16.3 分钟持续工作、子代理持久收口和产物覆盖成立；用户需求中的“至少 8 个子代理”只完成 7 个，模型总结仍称八链。`findings.md` 有 18 条表项，最终回复却称 1 高／7 中／5 低，仅合计 13；风险判断未逐条独立证实，不能直接当重构依据。框架成功与模型履约／报告内容失败分开记录。 |
+| 179、190、191，再次三路重叠 | 原插件任务与核心任务同在 00:56:43 建立；管理 179 在它们运行中安装、启用、`probe`、停用、卸载独立 `control-lab`，五条原工具操作在 00:57:35—01:00:10 均 SUCCEEDED。190 随后在约 502 秒 done；191 在约 827 秒 done。管理过程没有取消两条业务任务，同一 Gateway 未重启。 | 原装卸并发通过；190／191 分别不足 15 分钟，不能用这段替代 183／184 已有的长任务重叠，也不能把两条最终报告称为质量通过。 |
+| 190，插件页任务交付失败 | 原任务 `taskrun-1790150203-23adfd25` done，主代理仅成功调用 1 次 `ledger_catalog`，四个孩子的原账中 **0 次** `ledger_page`。其中一名子代理留下 OPEN 能力申请，工具回执明确要求不要伪造能力结果；主代理仍用子代理生成的确定性推算表交付 80 页报告，宣称逐页读取。独立比对 `per_page.csv`：80 页齐全但 59 页至少一个字段错误，其中 21—40 页的 20 页原金额全错；其它 39 页净额错误。 | 插件分页覆盖为 0，不能计插件任务通过。能力申请和子代理阻塞按原状态保留，主代理的完成宣称与原工具账矛盾；属于通用派工／交付核验缺口，后续第 7、8、10 步分别核对身份、事实与组合，不在核心按插件 ID 修补。 |
+| 191，核心审阅近长任务 | 原任务 `taskrun-1790150203-6de8cfe6` done，运行 827 秒，主代理与 4 个孩子均 done；25 条原工具操作中 23 条 SUCCEEDED。`file_roles.csv` 覆盖 162 个源 Python 文件且哈希未变，调用图 2,188 个 AST 节点、11,898 条边与实际 JSON 相符。 | 13.8 分钟低于本步约 15 分钟长任务阈值；产物存在与索引覆盖成立，报告风险判断未逐条独立核实，不能当维护性问题事实源。 |
+| 193，本机扩大源码样本派工失败 | 以 321 个已跟踪 Python 文件快照审阅，派工前发生供应商级 `MODEL_TOOL_ARGUMENTS_INVALID`；该工具调用未执行，原 TaskRun 留 created。 | 不计核心任务完成或长任务通过；新 TUI194 独立重做较小的 162 文件源码快照。 |
+| 192，本机 600 页插件长任务 | 仓库外标准测试包 v0.4 独立验证 600 页、每页 24 条不可由页号推算的合成记录；原始包 SHA-256 为 `847aef3563983a0552b159c436a70aac9850a7044a6033a3a9a22360a40c45be`，仅私有测试目录保存。一次中文需求的原任务 `taskrun-1790151726-b6fdd70b` 为 done，持续 3,053.6 秒；主代理 done。600 次 `ledger_page` 原操作全为 SUCCEEDED，页 1—600 恰好各一次，24 行／页的原返回与包内合成源逐字节相同。24 个批文件、600 行 `per_page.csv`、分类汇总和报告均实际落盘。 | 插件执行、长任务持续、Compact 五次后的分页覆盖与持久产物链路成立；**模型内容交付失败**：600 页中 306 页的最终逐页金额不符，另有 50 页反冲额不符。实际原金额／反冲／净额为 3,702,951／103,431／3,599,520，交付为 3,225,970／88,815／3,137,155。批 1—9 各 50 页，批 10—24 各 10 页，报告却称每批 25 页、已读回核验；内部行数和页覆盖正确不能替代源数据准确性。测试者未补文件或改原结果。 |
+| 179、192、194，本机长任务和管理同窗口 | 192 与 194 都在运行时，179 对独立 `control-lab` 实际执行 `probe`、停用、卸载；安装和启用则发生在 192／193 活动时。停用与卸载紧接提交触发一次 `PLUGIN_CATALOG_STALE`，随后停用原请求成功；179 重新查看管理帮助和安装目录后卸载，原回执成功。两条长任务自然完成后，179 也按刷新后的目录停用并卸载 `fault-lab` v0.4，最终原生目录只剩 `workspace-peek`。本机和测试机 Gateway 均保持原进程。 | 管理目录版本拒绝按原协议处理，不将首次过期请求算成功；管理未中断业务，两个受控测试插件都已卸载。192／194 各自超过 15 分钟且有实际工作，管理命令在两任务同时运行的窗口内执行；不声称全部管理操作与两条任务持续重叠 15 分钟。 |
+| 194，本机核心长任务自然结束 | 新 TUI 原任务 `taskrun-1790152078-d95d6029` 为 done，持续 973.9 秒；主代理和 2 个 worker 均 done。162 个 Python 源文件快照与当前源码哈希逐一相同，`file_roles.csv` 有 162 个唯一源路径，`call_graph.json` 有 162 个文件节点，二者路径集合均与快照一致；四份主产物实际存在。 | 核心约 16.2 分钟持续工作、子代理收口和文件覆盖成立。报告的架构判断未逐条独立验证，不能直接作为重构事实。 |
+
+测试机清理已确认的旧资料后，根分区非保留空间约 1.3 GiB，但可用内存不足 0.1 GiB，交换区满；不把 `preparation_launch` 的相关性直接写成因果。清理时误删当前工作区的派生检索索引，旧内容丢失；重建 schema 只证明后续新调用可继续，不证明历史已恢复。该失误独立于插件产品验收。TUI183／184 的 20.4／16.4 分钟任务、TUI192／194 的 50.9／16.2 分钟任务及管理重叠形成第 6 步长任务与并发框架证据；内容交付失败分别保留，不把它们当作质量验收通过。审批等待撤销、重连、可恢复清理失败及卸载后核心基线已补证；测试机原生业务连接退出未确认的提示与安装资源释放分开记录，旧结果仍不改写。第 6 步框架验收收口；本步未改产品代码，通用交付核验和模型／工具循环问题移交第 7、8 步对应合同，不能写成已修复。
 
 ## 第 5 步使用卡发布与原生 TUI 阶段验收
 

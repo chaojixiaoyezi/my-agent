@@ -15,7 +15,10 @@ from types import SimpleNamespace
 import pytest
 
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
-from agent_py_agent.agent.agent_core._tool_loop_service import ToolCallRecordParams, ToolLoopService
+from agent_py_agent.agent.agent_core._tool_loop_service import (
+    ToolCallRecordParams,
+    _record_tool_call,
+)
 from agent_py_agent.agent.agent_core.tool_call_archive_record import archive_tool_output_projection
 from agent_py_agent.agent.agent_core.tool_context.call_reducer import (
     AssistantToolRoundContextRequest,
@@ -114,11 +117,12 @@ def _canonical_record(
 
 
 def test_tool_loop_externalizes_large_tool_output_for_archive(tmp_path: Path) -> None:
-    service = ToolLoopService(SimpleNamespace(root=tmp_path))
+    agent = SimpleNamespace(root=tmp_path)
     params = _tool_loop_params(request_id="req-tool", run_id="run-tool", task_id="task-tool")
     large_output = "line\n" + ("x" * 250_000)
 
-    service._record_tool_call(
+    _record_tool_call(
+        agent,
         _canonical_record(
             params,
             tool_rounds=1,
@@ -317,11 +321,18 @@ def test_production_file_read_keeps_bounded_body_and_continuation(
     assert "... [truncated" not in rendered
     assert result.metadata["projection_truncated"] is False
     assert len(archive["output_preview"]) < len(outcome.output)
-    ToolLoopService(agent)._record_tool_call(ToolCallRecordParams(
+    _record_tool_call(agent, ToolCallRecordParams(
         params=params, tool_rounds=1, idx=1, call=execution.call, result=result,
     ))
     native = AnthropicMessageAdapter().to_provider_messages(params.tool_ir_history)
     assert outcome.output in native[-1]["content"][0]["content"]
+    from agent_py_agent.agent.memory_archive.compact_tool_output_refs import (
+        carried_tool_call_records,
+    )
+
+    carried, = carried_tool_call_records(tmp_path, {"run_id": execution.call.run_id})
+    assert carried["attempt_id"] == archive["attempt_id"] == execution.call.attempt_id
+    assert carried["turn_id"] == archive["turn_id"] == execution.call.turn_id
 
 
 def test_production_artifact_page_keeps_valid_json_and_next_cursor(tmp_path: Path) -> None:
@@ -378,7 +389,7 @@ def test_compact_carried_create_subagents_keeps_structured_child_recovery_facts(
         _reconstructed_tool_context_entry,
     )
 
-    service = ToolLoopService(SimpleNamespace(root=tmp_path))
+    agent = SimpleNamespace(root=tmp_path)
     params = _tool_loop_params(
         request_id="req-tree",
         run_id="run-main",
@@ -410,7 +421,8 @@ def test_compact_carried_create_subagents_keeps_structured_child_recovery_facts(
         ensure_ascii=False,
     )
 
-    service._record_tool_call(
+    _record_tool_call(
+        agent,
         _canonical_record(
             params,
             tool_rounds=3,
@@ -828,11 +840,12 @@ def test_tool_output_index_persists_value_free_input_sources(tmp_path: Path) -> 
 
 
 def test_tool_loop_keeps_moderate_tool_output_inline_for_model_context(tmp_path: Path) -> None:
-    service = ToolLoopService(SimpleNamespace(root=tmp_path))
+    agent = SimpleNamespace(root=tmp_path)
     params = _tool_loop_params(request_id="req-tool", run_id="run-tool", task_id="task-tool")
     output = "\n".join(f"章节 {idx:03d}: CP-{idx:03d}-{idx:03d}" for idx in range(1, 81))
 
-    service._record_tool_call(
+    _record_tool_call(
+        agent,
         _canonical_record(
             params,
             tool_rounds=1,
@@ -851,10 +864,10 @@ def test_tool_loop_keeps_moderate_tool_output_inline_for_model_context(tmp_path:
 
 def test_tool_loop_records_live_raw_archive_for_each_tool_result(tmp_path: Path) -> None:
     agent = SimpleNamespace(root=tmp_path, config=AgentConfig(), session_id="session-live")
-    service = ToolLoopService(agent)
     params = _tool_loop_params(request_id="req-live", run_id="run-live", task_id="task-live")
 
-    service._record_tool_call(
+    _record_tool_call(
+        agent,
         _canonical_record(
             params,
             tool_rounds=3,
@@ -876,12 +889,13 @@ def test_tool_loop_records_live_raw_archive_for_each_tool_result(tmp_path: Path)
     assert raw_records[-1]["request_id"] == "req-live"
 
 
-def test_tool_loop_externalizer_preserves_record_call_run_id(tmp_path: Path) -> None:
-    service = ToolLoopService(SimpleNamespace(root=tmp_path, _current_subagent_run_id="runner-42"))
+def test_tool_loop_externalizer_preserves_call_origin_over_current_subagent(tmp_path: Path) -> None:
+    agent = SimpleNamespace(root=tmp_path, _current_subagent_run_id="runner-42")
     params = _tool_loop_params(request_id="", run_id="", task_id="")
     large_output = "line\n" + ("x" * 250_000)
 
-    service._record_tool_call(
+    _record_tool_call(
+        agent,
         _canonical_record(
             params,
             tool_rounds=7,
@@ -897,6 +911,8 @@ def test_tool_loop_externalizer_preserves_record_call_run_id(tmp_path: Path) -> 
     assert record["run_id"] == "archive-test-run"
     assert record["scoped_call_id"] == "archive-test-run:7-1"
     assert artifact["run_id"] == "archive-test-run"
+    assert artifact["attempt_id"] == "archive-test-attempt"
+    assert artifact["turn_id"] == "archive-test-run:round-7"
 
 
 def test_externalizer_preserves_internal_tool_outputs_without_path_sanitizer(
@@ -1008,11 +1024,11 @@ def test_externalizer_archives_read_file_when_utf8_bytes_cross_threshold(tmp_pat
 
 def test_tool_loop_read_file_archive_does_not_hide_live_result(tmp_path: Path) -> None:
     agent = SimpleNamespace(root=tmp_path, config=AgentConfig(), session_id="session-live")
-    service = ToolLoopService(agent)
     params = _tool_loop_params(request_id="req-read", run_id="run-read", task_id="task-read")
     output = "CPX-001-ABCDEF1234\n" + ("x" * 250_000)
 
-    service._record_tool_call(
+    _record_tool_call(
+        agent,
         _canonical_record(
             params,
             tool_rounds=2,
@@ -1124,11 +1140,12 @@ def test_tool_loop_summarizes_large_tool_call_payload_for_live_prompt() -> None:
 
 
 def test_tool_call_record_summarizes_large_payload_for_live_prompt(tmp_path: Path) -> None:
-    service = ToolLoopService(SimpleNamespace(root=tmp_path))
+    agent = SimpleNamespace(root=tmp_path)
     params = _tool_loop_params(request_id="req-tool", run_id="run-tool", task_id="task-tool")
     huge_html = "<html>" + ("x" * 9000) + "</html>"
 
-    service._record_tool_call(
+    _record_tool_call(
+        agent,
         _canonical_record(
             params,
             tool_rounds=1,
@@ -1148,10 +1165,11 @@ def test_tool_call_record_summarizes_large_payload_for_live_prompt(tmp_path: Pat
 
 
 def test_tool_call_archive_keeps_runtime_gate_for_replay(tmp_path: Path) -> None:
-    service = ToolLoopService(SimpleNamespace(root=tmp_path))
+    agent = SimpleNamespace(root=tmp_path)
     params = _tool_loop_params(request_id="req-tool", run_id="run-tool", task_id="task-tool")
 
-    service._record_tool_call(
+    _record_tool_call(
+        agent,
         _canonical_record(
             params,
             tool_rounds=1,
@@ -1181,11 +1199,12 @@ def test_render_tool_payload_keeps_small_payload_readable() -> None:
 def test_tool_loop_writes_fail_safe_checkpoint_before_externalizing_large_output(
     tmp_path: Path,
 ) -> None:
-    service = ToolLoopService(SimpleNamespace(root=tmp_path))
+    agent = SimpleNamespace(root=tmp_path)
     params = _tool_loop_params(request_id="req-tool", run_id="run-tool", task_id="task-tool")
     large_output = "danger\n" + ("x" * 250_000)
 
-    service._record_tool_call(
+    _record_tool_call(
+        agent,
         _canonical_record(
             params,
             tool_rounds=1,

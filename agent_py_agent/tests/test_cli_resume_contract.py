@@ -1262,7 +1262,7 @@ def test_unknown_halt_reason_aligns_with_taxonomy(monkeypatch):
 
     # COMMAND_FAILED + 执行器声明非 unknown(not_started/handler 未执行)
     # → REPEATED_TOOL_FAILURE 可续跑
-    resp = svc._final_response_after_unknown_outcome_halt(None, _P(), 5)
+    resp = svc._final_response_after_halt(None, _P(), 5, reason="unknown_outcome")
     final = resp[1]
     assert final.runtime_reason == "REPEATED_TOOL_FAILURE"
     assert should_continue_task(final)[0] is True
@@ -1270,14 +1270,14 @@ def test_unknown_halt_reason_aligns_with_taxonomy(monkeypatch):
     # 保持 UNKNOWN 人工核对闸, 不自动续跑
     p1b = _P()
     p1b.unknown_outcome_halt = ("run_command", "COMMAND_FAILED", "unknown", True)
-    resp1b = svc._final_response_after_unknown_outcome_halt(None, p1b, 5)
+    resp1b = svc._final_response_after_halt(None, p1b, 5, reason="unknown_outcome")
     final1b = resp1b[1]
     assert final1b.runtime_reason == "TOOL_OPERATION_OUTCOME_UNKNOWN"
     assert should_continue_task(final1b)[0] is False
     # 真未知(无码) → TOOL_OPERATION_OUTCOME_UNKNOWN 不续跑
     p2 = _P()
     p2.unknown_outcome_halt = ("run_command", "", "unknown", True)
-    resp2 = svc._final_response_after_unknown_outcome_halt(None, p2, 5)
+    resp2 = svc._final_response_after_halt(None, p2, 5, reason="unknown_outcome")
     final2 = resp2[1]
     assert final2.runtime_reason == "TOOL_OPERATION_OUTCOME_UNKNOWN"
     assert should_continue_task(final2)[0] is False

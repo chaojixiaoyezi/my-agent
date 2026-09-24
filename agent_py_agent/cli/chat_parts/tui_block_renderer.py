@@ -386,7 +386,7 @@ def tui_render_context_key(
 
 
 # LLM: TuiRenderFrame 分离各显示区，并以 block ID 给出正文行锚点；布局不能从正文猜位置或执行状态。
-# 类用途: 返回不可变画面及分页后保持阅读位置所需的块起始行。
+# 类用途: 返回不可变画面及阅读定位；原文行来源和内部页偏移只服务显示，不改变历史身份。
 @dataclass(frozen=True)
 class TuiRenderFrame:
     transcript_lines: tuple[FormattedLine, ...]
@@ -396,6 +396,9 @@ class TuiRenderFrame:
     agent_lines: tuple[FormattedLine, ...]
     footer: FormattedLine
     block_line_offsets: tuple[tuple[str, int], ...] = ()
+    line_origins: tuple[tuple[str, int], ...] = ()
+    detail_page_offsets: tuple[tuple[int, int, int], ...] = ()
+    pending_detail_blocks: tuple[str, ...] = ()
 
 
 # LLM: TuiRenderCacheStats 是只读诊断，不参与渲染决策或业务状态。
@@ -588,7 +591,8 @@ def render_tui_snapshot(
 # 函数用途: 在画面交给 prompt_toolkit 前统一净化 transcript、覆盖层、输入状态、Todo、代理面板和 footer，确保
 # provider、工具、路径和搜索内容都不能向宿主终端注入控制序列。
 def sanitize_tui_render_frame(frame: TuiRenderFrame) -> TuiRenderFrame:
-    return TuiRenderFrame(
+    return replace(
+        frame,
         transcript_lines=tuple(_sanitize_formatted_line(line) for line in frame.transcript_lines),
         overlay_lines=tuple(_sanitize_formatted_line(line) for line in frame.overlay_lines),
         input_status_lines=tuple(
@@ -597,7 +601,6 @@ def sanitize_tui_render_frame(frame: TuiRenderFrame) -> TuiRenderFrame:
         todo_lines=tuple(_sanitize_formatted_line(line) for line in frame.todo_lines),
         agent_lines=tuple(_sanitize_formatted_line(line) for line in frame.agent_lines),
         footer=_sanitize_formatted_line(frame.footer),
-        block_line_offsets=frame.block_line_offsets,
     )
 
 

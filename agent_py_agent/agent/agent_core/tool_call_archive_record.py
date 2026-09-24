@@ -1,6 +1,6 @@
 
 # LLM: 工具回执、文件引用及删除记录进入同一 exact run 账本；不从正文提取路径或完成状态。
-# 模块用途: 归档工具输出与文件交接，供父子代理继续工作和恢复使用，不代写业务文件。
+# 模块用途: 归档输出、原始调用身份和文件交接；复用 tooling 的有界清理投影，与耐久索引恢复保持一致。
 from __future__ import annotations
 
 from pathlib import Path
@@ -19,6 +19,7 @@ from ..tooling.executor import ToolOutputProjection
 from ..tooling.models import ToolHandlerOutcome, output_policy_for_outcome
 from ..tooling.output_projection import project_tool_output_body
 from ..tooling.runtime_contracts import ToolCall, ToolContentBlock, ToolResultRef
+from ..tooling.runtime_facts import project_process_runtime_facts
 from .run_task_workspace_writer import (
     current_run_task_workspace_root,
     current_run_tool_output_archive_root,
@@ -553,8 +554,8 @@ def _tool_result_refs_from_result(result: object) -> list[dict[str, object]]:
     return refs
 
 
-# LLM: 归档白名单可保留参数来源/类型/摘要，但绝不能复制原参数值或任意私有 result envelope。
-# 函数用途: 压缩工具结果中恢复与收口所需的安全结构化事实，忽略未明确登记的实现私有字段。
+# LLM: 只保留恢复所需结构字段；process复用模型有界投影，禁止复制原PID/实例明细、参数值或任意私有envelope。
+# 函数用途: 保留核验、清理及恢复必要事实，让下一工作片按同一口径读取，不修改执行状态。
 def _compact_result_envelope(result: object) -> dict[str, object]:
     envelope = _result_details(result)
     if not envelope:
@@ -579,6 +580,8 @@ def _compact_result_envelope(result: object) -> dict[str, object]:
         "input_facts",
     )
     compact = {key: envelope[key] for key in keys if key in envelope}
+    if process := project_process_runtime_facts(envelope.get("process")):
+        compact["process"] = process
     artifact_integrity = _compact_artifact_integrity(envelope.get("artifact_integrity"))
     if artifact_integrity:
         compact["artifact_integrity"] = artifact_integrity

@@ -52,8 +52,36 @@ pending 是宿主自动验证的中间状态，不是用户审批队列；显式
   另建预览任务或在选择器复制路径/renderer。缺少完整请求面时保留继承，测试中的已知容量只检验绑定合同。
 - 定向入口：`test_subagent_manager_core.py`、`test_subagent_effective_runtime_context.py`、`test_decision_subagent.py`；
   设计和完整容量尚缺的接缝见 [容量审计](../../tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。
+授权收口的状态所有权：`runner_completion_wake.py::_project_blocked_attempt` 保留原 attempt 通知，
+同时按最新 canonical 修正会话关联；`runner/worker.py::_continue_pending_run_after_session` 只接
+worker/run_id/准确 attempt，读取 canonical 后复用原 auto-start，不再以历史 result 决定下一片。
+`orchestration/tools/capability.py::_record_resolution_wake` 通过原 mutate 窄写发布事实，保留执行会话。
+没有新增调度器、timer、状态副本或 lifecycle gate 例外；原控制、授权、session 和 RuntimeDB 门继续守边界。
+具体交错、局部参考和定向回归见 [runbook](SUBAGENT_RUNBOOK.md#capability-阻塞与续跑)。
+
+第 7 步父终态通知已在本地集成，将实际逻辑归入 `RunnerCompletionNotifier`：只持任务关联、WakeStore、
+读取父任务和保存错误四项依赖，完成／受控取消共用原投递路径；结果服务和外部停止端负责装配。
+保留 exact attempt、直属父级、文件模式及内部监督者信号语义；阶段提醒和能力申请入口不扩改。
+已与恢复扫描接口片组合，原 sweep 和恢复测试均绑定同一通知器；旧接口调用删除；组合包 a067baddd 已双机部署，实际验收进行中，详见 STATUS。
+
+第 7 步结果提交依赖已在本地候选收窄：初次提交只接原 RuntimeDB、canonical task、结构化结果、
+保存回调和绑定本轮身份的交付回调；WAL 原语只接 save，运行结算与诊断只接原 RuntimeDB。
+结果服务装配 trace→父通知，仍在 WAL→运行账之后执行；不新增状态副本或兼容转发。
+恢复扫描已集成为显式 repo/load/save/list/notify，原 sweep 绑定窄父通知器；恢复模块不再持有完整 manager。
+本片不新增扫描器或业务重跑入口，不声称第 7 步完成；新版部署和原生验收分列 STATUS。
 
 `shell_gateway_execution.py` 只从 `common/cancellation.py` 查询本次执行取消；与本模块 `cancellation.py` 的持久子树权限和资源冻结职责分开。
+
+## 第 7 步结果链职责（本地小片）
+
+- `manager_runner_result_payload.py` 把宿主轮结束事实送入 `runner_result_state.py`，该模块仍负责 typed 状态、失败和当前尝试字段。
+- `runner_display_projection.py` 是纯展示函数，只从已裁决的 `status/failure_type` 得出中文活动标签；原状态写回入口在相同时机设置 TUI 的 `current_step/current_tool`，不改变运行事实。
+- `runner_completion_payload.py` 是完成内容的只读投影，根父通知、直属父等待和递归父级快照共用；`runner_completion_wake.py` 只拥有原状态更新、投递、去重和错误记录，不再导出完成内容构造函数。
+- 完成通知向 `store.wakes.append_observation` 显式传 `retain_handled=True`，由 `conversation/store_wake_publication.py` 在原锁内冻结完整负载、补齐配对并裁决旧消费事实；前置查询不承担去重权威。原 WAL 重试通路不增加新服务，通用 Goal 保持 handled 后新代。
+- `runner_result_admission.py` 显式接收原 `RuntimeRepository | None` 与 canonical task，在结果落盘前裁决 exact run／attempt 的接管、废弃、换代及终态冲突；拒绝诊断写同一运行账，不接收完整 manager，原结果服务不再保留旧私有准入函数。
+- `services/runner_result_service.py` 负责准入后的结果文件和任务投影；`services/runner_result_commit.py` 按原先后编排 WAL、RuntimeDB 结算与直属父级通知；`services/runtime_closeout.py` 仍是 WAL 原语、恢复扫描与已交付标记的权威实现。
+- 终态冲突由同一服务拒绝后，诊断必须写到 manager 持有的 RuntimeDB；只补原 `closeout_blocked` 事件，不让诊断成功与否改变原拒绝结果。
+- 结果链拆分不改 canonical run／attempt、锁或 WAL 格式；本地通知修复只将原 dedupe 记录显式升级为可恢复的 v2，旧 v1 在写入口迁移。详细边界见[发布恢复合同](../../design/closeout_state_machine.md#唤醒配对发布的半写恢复第-7-步本地实现)及[并行执行设计](../../design/SUBAGENT_PARALLEL_EXECUTION.md#第-7-步结果链迁移边界进行中)。
 
 ## 原创建锁与执行轮短事务
 

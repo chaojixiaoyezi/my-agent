@@ -9,14 +9,18 @@ from typing import Any
 
 from ..common.json_io import jsonl_lines
 from ..common.tool_output_paths import tool_output_index_paths_for_lookup
+from ..tooling.runtime_facts import project_process_runtime_facts
 from .tool_output_externalizer import model_visible_tool_parameters
 
 _INTERNAL_LEDGER_TOOLS = {"task_progress"}
+# 与 conversation/compact_tool_identity.TOOL_REF_FIELDS 同一四元身份；本层不上引 conversation。
+_CALL_IDENTITY_FIELDS = ("run_id", "attempt_id", "turn_id", "call_id")
 
 
-# LLM: Child lifecycle wakes share the originating conversation turn. Deduplicate complete
-# run/attempt/turn/call identities; unknown legacy identities collapse only for identical index rows.
-# 函数用途: 从任务原索引恢复调用历史；旧身份未知时只合并完全相同的索引行。
+# LLM: Child lifecycle wakes share the originating conversation turn. Deduplicate only complete
+# run/attempt/turn/call identities whose fields are real strings; unknown legacy identities stay
+# visible and collapse only for byte-identical index rows. Scoped aliases never prove equality.
+# 函数用途: 从任务原索引恢复调用历史；跨 attempt/turn 的同号调用都保留，旧身份未知时只合并完全相同的索引行。
 def carried_tool_call_records(
     workspace: str | Path,
     scope: dict[str, Any],
@@ -29,11 +33,9 @@ def carried_tool_call_records(
         if not _is_indexed_call_fact(row) or not _matches_scope(row, scope):
             continue
         record = _carried_tool_call_record(row)
-        identity = tuple(
-            str(record.get(key) or "").strip()
-            for key in ("run_id", "attempt_id", "turn_id", "call_id")
-        )
-        if all(identity):
+        values = tuple(record.get(key) for key in _CALL_IDENTITY_FIELDS)
+        if all(isinstance(item, str) and item.strip() for item in values):
+            identity = tuple(item.strip() for item in values)
             if identity in seen:
                 continue
             seen.add(identity)
@@ -162,7 +164,7 @@ def _is_tool_call_row(row: dict[str, Any]) -> bool:
 
 
 # LLM: A small output is indexed as tool_call and an externalized output as tool_output;
-# both are one exact invocation, distinguished by scoped_call_id rather than filename.
+# both are indexed calls; exact identity validation and deduplication happen in carried_tool_call_records.
 # 函数用途: 判断索引行能否作为一次历史工具调用恢复。
 def _is_indexed_call_fact(row: dict[str, Any]) -> bool:
     return (
@@ -172,9 +174,10 @@ def _is_indexed_call_fact(row: dict[str, Any]) -> bool:
     )
 
 
-# LLM: Convert index metadata into the carried archive contract without inventing absent
-# attempt/turn ids; failed legacy rows remain fail-closed. Artifact paths stay refs.
-# 函数用途: 把工具索引转换成保留真实调用身份、参数和结果引用的轻量记录。
+# LLM: Convert index metadata into the carried archive contract. Successful indexed calls prove the
+# handler ran; failed legacy rows remain fail-closed. Copy run/attempt/turn exactly from the original
+# row without coercion or recovery-request fallback; artifact paths stay refs, process facts stay bounded.
+# 函数用途: 恢复原始调用身份、执行参数、结果引用与有界进程事实；缺字段或非字符串身份保持未知，不猜来源或清理成功。
 def _carried_tool_call_record(row: dict[str, Any]) -> dict[str, Any]:
     path = str(row.get("path") or "").strip()
     digest = str(row.get("sha256") or "").strip()
@@ -184,14 +187,14 @@ def _carried_tool_call_record(row: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(handler_executed, bool):
         handler_executed = row.get("ok") is True
     record: dict[str, Any] = {
-        "id": str(row.get("call_id") or ""),
-        "call_id": str(row.get("call_id") or ""),
+        "id": row.get("call_id", ""),
+        "call_id": row.get("call_id", ""),
         "scoped_call_id": str(row.get("scoped_call_id") or ""),
         "request_id": str(row.get("request_id") or ""),
         "conversation_request_id": str(row.get("conversation_request_id") or ""),
-        "run_id": str(row.get("run_id") or ""),
-        "attempt_id": str(row.get("attempt_id") or ""),
-        "turn_id": str(row.get("turn_id") or ""),
+        "run_id": row.get("run_id", ""),
+        "attempt_id": row.get("attempt_id", ""),
+        "turn_id": row.get("turn_id", ""),
         "task_id": str(row.get("task_id") or ""),
         "tool": str(row.get("tool") or ""),
         "parameters": dict(row.get("parameters") or {})
@@ -221,6 +224,8 @@ def _carried_tool_call_record(row: dict[str, Any]) -> dict[str, Any]:
         value = row.get(key)
         if isinstance(value, dict):
             record[key] = dict(value)
+    if process := project_process_runtime_facts(row.get("tool_process")):
+        record["tool_result_envelope"] = {"process": process}
     _attach_carried_operation_facts(record, row.get("tool_operation"))
     return record
 

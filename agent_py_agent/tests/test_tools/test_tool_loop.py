@@ -13,10 +13,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from agent_py_agent.agent.agent_core import _tool_loop_service as tool_loop_module
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
 from agent_py_agent.agent.agent_core._tool_loop_service import (
-    ToolLoopService,
     _runtime_workspace_context,
+    execute_one_tool_call,
+    execute_tool_loop,
 )
 from agent_py_agent.agent.agent_core.tool_loop.round_execution import (
     ToolCallExecuteParams,
@@ -343,16 +345,23 @@ class _RepeatedMissingReadBackend(_NativeFakeBackend):
         return ModelResponse(text="已看到提示，改用其他路径继续推进。", backend=self.name)
 
 
+# LLM: 只模拟原生模型响应；工具操作仍由实际测试执行链完成，不能靠文本伪造工具结果。
+# 类用途: 首轮读取后持续抛空响应，验证修复次数有界。
 class _EmptyAfterToolBackend(_NativeFakeBackend):
     name = "fake_empty_after_tool_backend"
 
+    # LLM: 每个测试实例独立计数，不共享调用状态。
+    # 函数用途: 初始化本例模型调用次数。
     def __init__(self):
         self.calls = 0
 
-    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+    # LLM: 接受原生messages并返回唯一工具call id；不发网络请求。
+    # 函数用途: 按调用序号提供工具响应、空响应异常或最终回答。
+    def generate(self, prompt: str, on_chunk=None, **kwargs) -> ModelResponse:
         self.calls += 1
         if self.calls == 1:
             return ModelResponse(
+                text="",
                 tool_use_blocks=[{"id": "call_auto", "name": 'read_file', "input": {"path": "notes.txt"}}],
                 backend=self.name,
             )
@@ -361,16 +370,23 @@ class _EmptyAfterToolBackend(_NativeFakeBackend):
         )
 
 
+# LLM: 只模拟原生模型响应；工具操作仍由实际测试执行链完成，不能靠文本伪造工具结果。
+# 类用途: 读取后只空一次，验证原生结果保留且不重复执行。
 class _EmptyThenFinalAfterToolBackend(_NativeFakeBackend):
     name = "fake_empty_then_final_after_tool_backend"
 
+    # LLM: 每个测试实例独立计数，不共享调用状态。
+    # 函数用途: 初始化本例模型调用次数。
     def __init__(self):
         self.calls = 0
 
-    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+    # LLM: 接受原生messages并返回唯一工具call id；不发网络请求。
+    # 函数用途: 按调用序号提供工具响应、空响应异常或最终回答。
+    def generate(self, prompt: str, on_chunk=None, **kwargs) -> ModelResponse:
         self.calls += 1
         if self.calls == 1:
             return ModelResponse(
+                text="",
                 tool_use_blocks=[{"id": "call_auto", "name": 'read_file', "input": {"path": "notes.txt"}}],
                 backend=self.name,
             )
@@ -378,30 +394,38 @@ class _EmptyThenFinalAfterToolBackend(_NativeFakeBackend):
             raise ProviderResponseError(
                 "Anthropic-compatible 流式响应没有文本内容", error_code="MODEL_EMPTY_RESPONSE"
             )
-        assert "上一轮模型接口返回了空文本" in prompt
-        assert "hello empty repair" in prompt
+        assert "上一轮模型接口返回了空文本" in json.dumps(kwargs.get("messages"), ensure_ascii=False)
+        assert "hello empty repair" in json.dumps(kwargs.get("messages"), ensure_ascii=False)
         return ModelResponse(text="已根据工具结果继续完成。", backend=self.name)
 
 
+# LLM: 只模拟原生模型响应；工具操作仍由实际测试执行链完成，不能靠文本伪造工具结果。
+# 类用途: 两次工具成功之间分别空响应，验证修复额度逐轮重置。
 class _SeparatedEmptyResponsesBackend(_NativeFakeBackend):
     name = "fake_separated_empty_responses_backend"
 
+    # LLM: 每个测试实例独立计数，不共享调用状态。
+    # 函数用途: 初始化本例模型调用次数。
     def __init__(self):
         self.calls = 0
 
-    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+    # LLM: 接受原生messages并返回唯一工具call id；不发网络请求。
+    # 函数用途: 按调用序号提供工具响应、空响应异常或最终回答。
+    def generate(self, prompt: str, on_chunk=None, **kwargs) -> ModelResponse:
         self.calls += 1
         if self.calls == 1:
             return ModelResponse(
+                text="",
                 tool_use_blocks=[{"id": "call_auto", "name": 'read_file', "input": {"path": "notes.txt"}}],
                 backend=self.name,
             )
         if self.calls == 2:
             raise ProviderResponseError("first empty response", error_code="MODEL_EMPTY_RESPONSE")
         if self.calls == 3:
-            assert "上一轮模型接口返回了空文本" in prompt
+            assert "上一轮模型接口返回了空文本" in json.dumps(kwargs.get("messages"), ensure_ascii=False)
             return ModelResponse(
-                tool_use_blocks=[{"id": "call_auto", "name": "write_file",
+                text="",
+                tool_use_blocks=[{"id": "call_recovered_write", "name": "write_file",
                     "input": {"path": "summary.txt",
                               "content": "first recovery succeeded"}}],
                 backend=self.name,
@@ -410,7 +434,7 @@ class _SeparatedEmptyResponsesBackend(_NativeFakeBackend):
             raise ProviderResponseError(
                 "second isolated empty response", error_code="MODEL_EMPTY_RESPONSE"
             )
-        assert "上一轮模型接口返回了空文本" in prompt
+        assert "上一轮模型接口返回了空文本" in json.dumps(kwargs.get("messages"), ensure_ascii=False)
         return ModelResponse(text="两次独立空响应后仍完成。", backend=self.name)
 
 
@@ -781,28 +805,28 @@ def test_runtime_tool_sections_only_collapse_catalog_when_native_is_effective(tm
     assert len(native_catalog) < len(text_catalog) // 2
 
 
-@pytest.mark.xfail(reason="EXEC-31b: text 驱动 fake 待 native 适配")
 def test_tool_loop_reports_empty_final_model_response_after_retry():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
-        (workspace / "notes.txt").write_text("hello empty model response", encoding="utf-8")
         cfg = _text_agent_config(enable_tools=True, memory_path="memory.jsonl")
         agent = SimpleAgent(cfg, workspace)
         agent.backend = _EmptyAfterToolBackend()
+        workspace = agent.effective_workspace_root
+        (workspace / "notes.txt").write_text("hello empty model response", encoding="utf-8")
 
         with pytest.raises(ProviderResponseError, match="流式响应没有文本内容"):
             agent.run("读取 notes 后总结", save=False, allowed_tools=["read_file"])
         assert agent.backend.calls == 3
 
 
-@pytest.mark.xfail(reason="EXEC-31b: text 驱动 fake 待 native 适配")
 def test_tool_loop_retries_once_when_final_model_response_is_empty_after_tool():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
-        (workspace / "notes.txt").write_text("hello empty repair", encoding="utf-8")
         cfg = _text_agent_config(enable_tools=True, memory_path="memory.jsonl")
         agent = SimpleAgent(cfg, workspace)
         agent.backend = _EmptyThenFinalAfterToolBackend()
+        workspace = agent.effective_workspace_root
+        (workspace / "notes.txt").write_text("hello empty repair", encoding="utf-8")
 
         result = agent.run("读取 notes 后继续总结", save=False, allowed_tools=["read_file"])
 
@@ -811,14 +835,14 @@ def test_tool_loop_retries_once_when_final_model_response_is_empty_after_tool():
         assert agent.backend.calls == 3
 
 
-@pytest.mark.xfail(reason="EXEC-31b: text 驱动 fake 待 native 适配")
 def test_tool_loop_resets_empty_response_retry_after_successful_model_turn():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
-        (workspace / "notes.txt").write_text("hello separated empty repairs", encoding="utf-8")
         cfg = _text_agent_config(enable_tools=True, memory_path="memory.jsonl")
         agent = SimpleAgent(cfg, workspace)
         agent.backend = _SeparatedEmptyResponsesBackend()
+        workspace = agent.effective_workspace_root
+        (workspace / "notes.txt").write_text("hello separated empty repairs", encoding="utf-8")
 
         result = agent.run(
             "读取 notes，写出摘要后继续总结",
@@ -1315,7 +1339,6 @@ def test_non_mutating_schedule_result_does_not_consume_one_shot_key():
         archive_tool_calls=[],
     )
     agent = _OneShotHarnessAgent(_BlockedScheduleTools())
-    service = ToolLoopService(agent)
     arguments = {"dry_run": False, "children": [{"goal": "cart"}]}
     first_call = _canonical_test_call(
         "schedule_child_subagents",
@@ -1330,8 +1353,8 @@ def test_non_mutating_schedule_result_does_not_consume_one_shot_key():
         run_id="run-one-shot-blocked",
     )
 
-    first = service._execute_one_tool_call(ToolCallExecuteParams(params, 1, 1, first_call))
-    second = service._execute_one_tool_call(ToolCallExecuteParams(params, 2, 1, second_call))
+    first = execute_one_tool_call(agent, ToolCallExecuteParams(params, 1, 1, first_call))
+    second = execute_one_tool_call(agent, ToolCallExecuteParams(params, 2, 1, second_call))
 
     assert first.result.ok is True
     assert second.result.ok is True
@@ -1361,14 +1384,14 @@ def test_batch_create_blocks_overlapping_single_child_calls_in_same_turn():
     )
     tools = _SuccessfulCreateTools()
     agent = _OneShotHarnessAgent(tools)
-    service = ToolLoopService(agent)
     goals = ["研究营养均衡", "研究采购预算", "研究食材复用"]
     batch = {
         "goal": "并行研究营养计划",
         "items": [{"goal": goal, "role": "worker"} for goal in goals],
     }
 
-    first = service._execute_one_tool_call(
+    first = execute_one_tool_call(
+        agent,
         ToolCallExecuteParams(
             params,
             1,
@@ -1382,7 +1405,8 @@ def test_batch_create_blocks_overlapping_single_child_calls_in_same_turn():
         )
     )
     repeated = [
-        service._execute_one_tool_call(
+        execute_one_tool_call(
+            agent,
             ToolCallExecuteParams(
                 params,
                 1,
@@ -1405,7 +1429,7 @@ def test_batch_create_blocks_overlapping_single_child_calls_in_same_turn():
     )
 
 
-def test_tool_loop_drains_pending_deferred_tool_calls_before_model_turn(tmp_path):
+def test_tool_loop_drains_pending_deferred_tool_calls_before_model_turn(monkeypatch, tmp_path):
     run_id = "run-deferred-drain"
     agent = SimpleAgent(
         _text_agent_config(enable_tools=True, memory_path="memory.jsonl"),
@@ -1437,23 +1461,31 @@ def test_tool_loop_drains_pending_deferred_tool_calls_before_model_turn(tmp_path
             ]
         },
     )
-    service = ToolLoopService(agent)
     drained: list[list[ToolCall]] = []
     model_calls: list[int] = []
 
-    def fake_run_tool_round(request):
+    # LLM: 只观察排队工具被转交的时点，宿主身份和模型请求前的轮号仍由真实主循环决定。
+    # 函数用途: 收集待执行调用并让循环继续，以核对先排空队列再采样的顺序。
+    def fake_run_tool_round(loop_agent, request):
+        assert loop_agent is agent and request.agent is agent
         drained.append(list(request.calls))
         return request.tool_rounds, None
 
-    def fake_model_turn_or_retry(params_arg, tool_rounds, empty_repairs):
-        del params_arg, empty_repairs
+    # LLM: 接收真实循环递交的参数与轮数，不能自行推进轮号掩盖延迟工具未排空。
+    # 函数用途: 记录首次模型轮所见轮号，再返回固定终答结束本次测试。
+    def fake_model_turn_or_retry(loop_agent, params_arg, tool_rounds, empty_repairs):
+        assert loop_agent is agent and params_arg is params
+        del empty_repairs
         model_calls.append(tool_rounds)
-        return "prompt", ModelResponse(text="done", backend="test"), True, False, 0
+        return tool_loop_module._ModelTurnOutcome(
+            "prompt", ModelResponse(text="done", backend="test"), True, False, 0, params_arg,
+        )
 
-    service._run_tool_round = fake_run_tool_round
-    service._model_turn_or_retry = fake_model_turn_or_retry
-
-    final_prompt, response, tool_rounds = service.execute(params)
+    with monkeypatch.context() as loop_patch:
+        loop_patch.setattr(tool_loop_module, "_run_tool_round", fake_run_tool_round)
+        loop_patch.setattr(tool_loop_module, "_model_turn_or_retry", fake_model_turn_or_retry)
+        loop_result = execute_tool_loop(agent, params)
+        final_prompt, response, tool_rounds = loop_result.final_prompt, loop_result.final_response, loop_result.tool_rounds
 
     assert [[call.tool_name for call in calls] for calls in drained] == [["read_file"]]
     assert drained[0][0].arguments == {

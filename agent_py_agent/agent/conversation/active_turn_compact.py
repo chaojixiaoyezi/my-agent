@@ -41,7 +41,9 @@ if TYPE_CHECKING:
 
 
 # LLM: 结果区分持久提交和完整归档；request_projection 必须是已量且获选的原对象，不能重新准备。
-# 类用途: 返回原 CAS 的线程、替代边界和真实容量，并保留随后发送应采用的同一候选材料。
+# source_resolution 是结构化来源裁决：not_evaluated 未尝试，uncertain 表示存在四元身份不完整的记录
+# （全部未知时不提交），complete 表示保留区也无未知记录；调用方不得把 uncertain 报成可重试的临时故障。
+# 类用途: 返回原 CAS 的线程、替代边界、真实容量和来源不确定计数，并保留随后发送应采用的同一候选材料。
 @dataclass(frozen=True)
 class ActiveTurnArchiveCompactResult:
     thread: ConversationThread
@@ -51,6 +53,8 @@ class ActiveTurnArchiveCompactResult:
     projected_tokens_before: int = 0
     projected_tokens_after: int = 0
     request_projection: ConversationCompactProjection | None = None
+    uncertain_call_count: int = 0
+    source_resolution: str = "not_evaluated"
 
 
 # LLM: 同一临时来源包含归档与原生IR精确分区；完整正文和四元ref同进同退，未知或重复旧记录留在retained。
@@ -219,7 +223,12 @@ def compact_carried_active_turn_archive(
         compact_context=request.compact_context,
     )
     if request.tool_source is None and not any(compact_tool_ref_key(item) is not None for item in visible):
-        return ActiveTurnArchiveCompactResult(thread=thread)
+        # 全部可见记录都缺完整四元身份时不能借当前身份提交；显式返回不确定事实，供调用方给出准确原因。
+        return ActiveTurnArchiveCompactResult(
+            thread=thread,
+            uncertain_call_count=len(visible),
+            source_resolution="uncertain" if visible else "not_evaluated",
+        )
 
     from ..agent_core.runtime.context_compactor import runtime_compact_policy
     from .live_tool_compact import resolve_live_tool_compact_binding
@@ -389,6 +398,7 @@ def _execute_active_turn_compact(
         percent=100,
         after_tokens=after_tokens,
     )
+    unknown = sum(compact_tool_ref_key(item) is None for item in plan.retained_records)
     return ActiveTurnArchiveCompactResult(
         thread=updated,
         compacted=True,
@@ -397,6 +407,8 @@ def _execute_active_turn_compact(
         projected_tokens_before=plan.projected_tokens_before,
         projected_tokens_after=after_tokens,
         request_projection=projection,
+        uncertain_call_count=unknown,
+        source_resolution="uncertain" if unknown else "complete",
     )
 
 

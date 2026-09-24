@@ -3,7 +3,75 @@
 > 参考：会话运行时 的模型/工具 active turn 和 任务运行时 `turn/end.reason`。
 > 本文只定义“一轮为什么停”，不定义通用业务质量验收。
 
+## 第 7 步初次收口的依赖边界（本地候选）
+
+结果服务是装配点：它向初次提交传入原 RuntimeDB、保存 canonical task 的回调和绑定当前
+run／attempt 的交付回调。交付回调按原顺序写调试 trace、通知父级；提交函数在 WAL 持久化和
+运行账结算之后才调用。运行账失败不得通知，trace 失败保留 WAL，通知失败仍落待重试事实。
+WAL 原语只能调用显式 save；settle 与诊断只能使用显式 RuntimeDB，不能经 manager 取得其它服务。
+这不是新增状态或执行器；恢复扫描的显式依赖见下一节，父通知内部的 manager 依赖由独立工作线迁移。
+
+## 第 7 步恢复扫描的依赖边界（本地候选）
+
+`runtime_closeout.py` 的恢复入口不再接收完整 manager，也不导入父通知实现：
+
+| 入口 | 必要能力 |
+| --- | --- |
+| `restore_unpersisted_closeouts`／`_restore_closeout_event` | 原 RuntimeDB、按 run 读取 task、保存 canonical task |
+| `advance_pending_closeout` | 原 RuntimeDB、保存当前 task、通知当前结果 |
+| `recover_pending_closeouts` | 上述能力与列出已有 task |
+
+通知的窄 Protocol 只接当前 task、已持久结果、output payload 与命名参数 `attempt_id`。
+既有 `capability_auto_sweep.py` 是唯一生产装配点，绑定原 manager 的方法和当前通知实现；
+恢复模块不会经回调访问新的服务，也不创建 context、代理 facade 或第二个扫描器。
+监督入口原回收计数提为独立摘要合并函数，只有记录和输出摘要两个参数；逐项写回保留原诊断及异常边界。
+
+顺序仍为：分页读未消费事件 → 校验 exact current → 保存 WAL → 记录消费；随后列出 task，
+从原结果文件补运行结算 → 必要时补父通知 → 保存 delivered → 清 WAL。
+一条错误不挡后续 task，分页游标与消费回执分离，已有 delivered 不再通知。`repo=None` 仍不恢复运行事件，
+但可推进原文件 WAL 和交付；缺失结果保持 pending。schema、路径、权限、去重策略、调度频率均未改。
+本片复用此前核对的原恢复合同与文件发布设计，未引入新的第三方实现；验收和并行边界见[恢复交接](../tasks/HANDOFF_STEP7_CLOSEOUT_RECOVERY.md)。
+
 ## 1. 解决的问题
+
+### 唤醒配对发布的半写恢复（第 7 步，本地实现）
+
+已从原文件写入链复现：wake 已落盘、dedupe 回执原子替换失败时，closeout 恢复发布第二条 wake；
+原 wake 尚 pending 和已经 handled 两种窗口均失败。本缺口早于第 7 步迁移，正常 TUI 成功不抵消它。
+
+`store_wake_publication.py` 沿原 dedupe 路径和原文件锁保存 `wake_dedupe.v2`：
+
+1. 先原子写入 `prepared`，冻结本次 signal／可选 observation 的完整负载、固定身份与 `retain_handled` 策略。
+2. 安装原 wake 文件；若该固定 ID 已 pending／handled，核对不可变字段并保留原消费与投递冻结事实。
+3. 按固定 observation ID 核对原观察账，只在缺失时追加同一份冻结负载；双方引用始终互相对应。
+4. 最后原子确认 `published`。任一步失败向调用方报错；同键重试先补齐原发布，不执行子代理业务。
+
+以上步骤共用原 dedupe 锁，不新增队列、SQLite 或第二份投递状态。`prepared` 重试即使信号已被消费，
+也只补原观察并确认原发布。通用调用默认合并 pending，完整 published 且 handled 后可开始新一代；
+这是 Goal 固定 key 可以持续续跑的既有语义。精确 runner 完成显式传 `retain_handled=True`，
+同锁决定始终复用该键；新 attempt 使用新 key，禁止按 reason 文本特判。
+不再用前置回执查询跳过发布入口，否则可能绕过半写观察恢复。`delivery_receipt` 只读原子快照，
+不创建锁文件、不迁移、不恢复，prepared 返回未完整交付。已有正常发布状态只报告 pending／handled。
+
+v1 回执只在写入口显式迁移，并记录 `migration.from_schema` 和原 wake ID；原信号与配对观察必须可读，
+不能拿重试的新摘要填补旧版缺失观察。损坏、身份冲突、原内容缺失均报错并保留原账，不能清空或随机重发。
+任一配对发布失败不再追加随机无链 observation 充当成功。新模块只接收原 `ConversationStorage`，
+不接整个 Store／manager；消费、线程更新、runner WAL 和 RuntimeDB 仍各由原模块负责。
+
+恢复边界：本片只承诺有稳定 key 的未完成发布在调用方重试时恢复。runner 沿原 pending-closeout WAL
+重试；通用调用方若在 prepared 后从未重试，不会自动安装，本片不添加宿主扫队列或后台恢复服务。
+无 key 调用不承诺重试幂等。通用 published／handled 后的新调用属于下一代；要终态永久去重必须显式保留 handled。
+能力申请旧入口先写观察、再发信号且只记录通知错误，仍是独立调用链，不把本片验收写成所有通知自动恢复。
+
+参考范围：本仓 store_guidance_submission 的先冻结提交再安装投影；Hermes 的
+gateway/delivery_ledger.py 固定 obligation ID 和事务；OpenClaw 的
+src/infra/delivery-queue-sqlite.ts 显式 completion retention。已窄读这些实现，不宣称完整参考工程审阅。只借一致性思路，
+不迁移 SQLite、不依赖进程工具的专用 redo schema。manager 透传的依赖收窄仍是独立未完成项。
+
+故障回归覆盖预留前后、信号安装前后、观察追加前后、发布完成标记前后与期间消费；
+同时核对 wake 数量、观察 ID、完整负载、双向引用、并发重放、同键下一代、Goal 续跑和 v1 显式迁移。
+原 closeout 两个真实文件替换失败红灯已转绿；注入点改为安装 wake 后的最终 receipt 替换，仍保留同一故障事实和数量断言。
+这是离线文件故障与调用方验收，尚未部署或做本版本原生 TUI／硬断电验证；详见[本片交接](../tasks/HANDOFF_STEP7_WAKE_PUBLICATION.md)。
 
 历史实现在模型自然最终回复之后，还会经过交付扫描、产物清单、
 `acceptance_checks`、`verification_status` 和子代理结果格式二次裁决。同一任务

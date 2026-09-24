@@ -1,8 +1,73 @@
 # 父子并行与活动诊断
 
+## 第 7 步父终态通知依赖（本地候选）
+
+第 7 步父终态通知候选已将实际逻辑归入 `RunnerCompletionNotifier`：只持任务关联、WakeStore、
+读取父任务和保存错误四项依赖，完成／受控取消共用原投递路径；结果服务和外部停止端负责装配。
+保留 exact attempt、直属父级、文件模式及内部监督者信号语义；阶段提醒和能力申请入口不扩改。
+必须与恢复扫描接口片一并集成并替换其通知装配，不能单独发布；真实验收仍待新版运行包。
+通知器保存的是四个原能力引用，不是 manager 别名，不复制状态、权限或索引；
+类内包含真实的自然结果准入、受控取消准入、直属父级判断、关联更新、配对发布和错误保存。
+原全 manager 的两个终态函数删除，调用方直接使用方法，不保留转发兼容入口。
+父任务加载 helper 显式接 load callback；阶段提醒与能力申请只跟随该 helper 的参数迁移，
+它们的发布和恢复语义不在本片扩大。没有会话 Store 时仍跳过通知；已有错误仍保存到 canonical task。
+
+
 状态：并行主链、真实孙级交接、补丁文件登记与派工说明去冲突已验收；故障组合与分工质量仍开放。
 
 ## 解决问题
+
+### 第 7 步结果链迁移边界（进行中）
+
+`SubAgentRunnerResultService.record_runner_result` 是当前 runner 结果的唯一组装入口。它按
+`run_id` 读取 canonical 子任务，先用当前 `attempt_id` 与 RuntimeDB 状态拒绝迟到或冲突结果；
+再把宿主 `turn_end.reason`、能力申请和实际工具／产物事实投影到任务及输出文件。
+自然回复不能改判状态，`ok=False` 的正常让出也不能自动成为失败。
+
+收口的既有顺序是：保存结果文件和当前任务投影 → 先持久化待收口事实 → 以原 run／attempt
+结算 RuntimeDB → 投递直属父级结果 → 持久标记已投递 → 清除待收口事实。结算、通知或清账失败
+沿 `services/runtime_closeout.py` 的原 WAL 与恢复扫描重试；同一 attempt 的父级 wake
+按原去重键和投递回执避免重发。第 7 步不得重排这些提交、扩大原锁范围或复制身份账。
+
+当前状态裁决位于 `runner_result_state.py`，输出载荷由 `manager_runner_result_payload.py`
+和 `result_processors.py` 生成，持久收口由 `services/runner_result_service.py` 与
+`services/runtime_closeout.py` 持有，直属父级通知由 `runner_completion_wake.py` 投递。
+第一小片只把生命周期模块里的中文活动标签映射抽成纯展示投影：输入已裁决的状态码和失败类型，
+输出短标签；原调用位置再写 `current_step/current_tool`。不移动状态判定、Audit 来源岗位规则、
+结果文件写入、run 结算或父级 wake；这些职责各按后续小片核对。
+
+参考只读核对了 Hermes `agent/subagent_lifecycle.py` 的不可变 handle／status／result
+公开合同、Codex `codex-rs/core/src/context/subagent_notification.rs` 的状态通知投影，
+以及 Free-Code `src/query.ts`／`src/query/stopHooks.ts` 以 `agentId` 限定子代理与主会话动作的局部。
+Hermes 所读部分为进程内注册，不适合替代本仓持久 run／attempt 与恢复账；这些参考仅界定职责，
+不移植它们的状态库、锁或通知实现。
+
+本地核对还发现结果服务的冲突诊断误从自身读取 `runtime_db`，而权威库实际由 manager 持有；
+原冲突仍被拒绝，却缺 `closeout_blocked` 事件。定向回归先复现零事件，再改为读取原 manager 依赖；
+只恢复既有诊断落账，不改状态裁决、可恢复 WAL 或父级通知。
+
+本小片已把通用的完成正文截断、产物 refs 和交接信封构造从 `runner_completion_wake.py`
+移到纯投影模块。`direct_parent_lifecycle.py` 与活动回合 guidance 直接读取该投影；
+`runner_completion_wake.py` 继续拥有根父级 observation／wake 的发布、去重和错误回执。
+Audit 来源岗位的专门 metadata 与内部 wake 留在原位，不借这次结构整理重写摄取链。
+迁移后删除旧导出，不保留空转发；完成信封字段、截断预算、引用上限和投递时序逐项保持。
+
+第三小片已把 `services/runner_result_service.py` 内的迟到／换代／冲突准入单独归到
+`runner_result_admission.py`：只读取 canonical task 和 RuntimeDB 的 exact run／attempt，
+拒绝时仍返回原快速结果，并把原 `closeout_blocked` 诊断写入 manager 持有的运行账。
+依赖复核进一步把准入参数从完整 manager 收窄为原 `RuntimeRepository | None`；
+只有结果服务负责取出这份依赖。文件模式的 None、exact attempt 裁决及诊断失败不放行的边界保持，
+准入模块不能借整个 manager 读取工作区、配置、索引或投递能力。此收窄仍为本地候选，未进入已部署包。
+结果构造、文件落盘、WAL、run 结算与父级通知维持原调用顺序；服务里的旧方法和
+私有函数已删除，不通过服务转发保留第二入口。原事故和换代回归已先通过；下一片再拆实际收口编排。
+
+第四小片已把初次 runner 结果的 WAL→RuntimeDB→直属父 wake→已投递标记→清账编排归到
+`services/runner_result_commit.py`。该模块只接受已持久化的 `task/result/output_payload` 与原
+`manager/params`，复用 `runtime_closeout.py` 的唯一 WAL／结算／恢复原语；结果服务在保存结果、
+任务投影和索引后调用它，不由新模块重复写业务结果。恢复扫描继续只在原模块，不新增队列。
+迁移时发现初次交付原本忽略 `mark_closeout_delivered` 的失败回执，仍继续清账；
+现在标记写盘失败即保留 pending WAL，由原恢复扫描核对 wake 回执后补清，避免恢复事实丢失。
+定向故障注入验证了首次标记失败后原 WAL 仍在、父 wake 只有一条，恢复后清账且不重发。
 
 ### 结果交接与路径一致性补修
 

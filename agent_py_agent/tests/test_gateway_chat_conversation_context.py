@@ -1393,12 +1393,16 @@ def test_gateway_fake_run_preserves_two_pressure_carries_without_unrendered_comm
     first_tool = {
         "tool": "read_file",
         "call_id": "call-read-1",
+        "run_id": "pressure-run",
+        "attempt_id": "pressure-attempt",
         "ok": True,
         "parameters": {"path": "input/one.md"},
     }
     second_tool = {
         "tool": "read_file",
         "call_id": "call-read-2",
+        "run_id": "pressure-run",
+        "attempt_id": "pressure-attempt",
         "ok": True,
         "parameters": {"path": "input/two.md"},
     }
@@ -1483,6 +1487,8 @@ def test_gateway_fake_run_repeated_pressure_stops_without_unrendered_commit(tmp_
     tool_record = {
         "tool": "read_file",
         "call_id": "call-read-stable",
+        "run_id": "pressure-stable-run",
+        "attempt_id": "pressure-stable-attempt",
         "ok": True,
         "parameters": {"path": "input/one.md"},
     }

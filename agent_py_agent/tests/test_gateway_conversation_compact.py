@@ -1804,3 +1804,47 @@ def test_conversation_search_index_does_not_cross_owner_local_stores(tmp_path) -
 
     assert alice.local_store.search("银杏计划", source_type="conversation_message")
     assert bob.local_store.search("银杏计划", source_type="conversation_message") == []
+
+
+@pytest.mark.parametrize("block", [
+    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "test"}},
+    {"type": "future_media", "ref": "opaque-source"},
+])
+def test_nontext_segment_source_does_not_commit_mechanical_summary(tmp_path, monkeypatch, block):
+    from agent_py_agent.agent.conversation import compact, compact_request_budget
+    from agent_py_agent.agent.conversation.compact_message_source import CompactMessageSource
+    from agent_py_agent.agent.conversation.compact_provider_surface import (
+        ConversationCompactModelSurface,
+    )
+
+    agent = _agent(tmp_path, context_tokens=1_000_000)
+    agent.backend = _SummaryBackend()
+    context = _context(agent, _request("nontext_compact"), "create", "开始")
+    for role in ("user", "assistant"):
+        assert append_gateway_conversation_message(
+            agent, {"metadata": {"channel": "feishu"}}, context,
+            request_id=f"source-{role}", role=role, content=f"原始来源 {role}",
+        )
+    thread = agent.conversation_store.threads.load(context.thread_id)
+    original_messages = agent.conversation_store.messages.recent(thread.thread_id)
+    # 来源投影夹具保留未知媒体块；真实分段器、失败处理与Store提交路径照常运行。
+    monkeypatch.setattr(compact, "conversation_compact_provider_source", lambda *_args, **_kwargs: CompactMessageSource(
+        lambda: iter(({"role": "user", "content": [block]},)),
+    ))
+    monkeypatch.setattr(compact_request_budget, "resolve_model_context_window_tokens", lambda _agent: 1)
+    with pytest.raises(ConversationCompactError) as error:
+        prepare_conversation_context(
+            agent, agent.conversation_store, thread,
+            options=ConversationCompactOptions(
+                current_prompt="继续", force=True, model_surface=ConversationCompactModelSurface(),
+            ),
+        )
+    assert error.value.code == "COMPACT_SOURCE_NON_TEXT"
+    stored = agent.conversation_store.threads.load(thread.thread_id)
+    assert stored.compact_generation == 0
+    assert stored.compacted_through_byte_offset == 0
+    assert stored.compact_checkpoint_id == ""
+    assert stored.summary == thread.summary
+    assert stored.compact_consecutive_failures == 1
+    assert agent.conversation_store.messages.recent(thread.thread_id) == original_messages
+    assert agent.backend.calls == 0

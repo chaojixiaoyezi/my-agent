@@ -12,7 +12,10 @@ from agent_py_agent.agent.backends.base import ModelResponse
 from agent_py_agent.agent.conversation.agent_control import AgentControlError, read_agent_view
 from agent_py_agent.agent.conversation.goal_control import execute_agent_goal_control
 from agent_py_agent.agent.conversation.goal_delegation import active_delegated_goal_after_turn
-from agent_py_agent.agent.conversation.goal_prompting import current_goal_scope_prompt
+from agent_py_agent.agent.conversation.goal_prompting import (
+    current_goal_scope_prompt,
+    goal_execution_scope,
+)
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.runtime_context import (
     restore_current_subagent_context,
@@ -102,6 +105,20 @@ def test_child_goal_tools_and_accounting_do_not_use_parent_goal(tmp_path):
         assert store.goals.load(child.agent_thread_id).goal_id == goal.goal_id
     finally:
         restore_current_subagent_context(agent, previous)
+
+
+def test_continuation_scope_distinguishes_active_request_from_turn_completion(tmp_path):
+    agent, _scope, child = _bound_agent_tree(tmp_path)
+    goal = agent.conversation_store.goals.create({"thread_id": child.agent_thread_id, "task_id": child.id, "objective": "持续检查"})
+    running = goal_execution_scope(goal)["continuation"]
+    assert running["requested"] and running["requires_active_task"]
+    assert running["driver"] == "host_persistent_wake_queue"
+    assert running["automatic_after_turn"] is True
+    assert running["requires_new_user_message"] is False
+    assert running["turn_final_completes_goal"] is False
+    paused = agent.conversation_store.goals.update({"thread_id": child.agent_thread_id, "goal_id": goal.goal_id, "status": "paused"})
+    assert goal_execution_scope(paused)["continuation"]["requested"] is False
+    assert agent.conversation_store.goals.load(child.agent_thread_id).status == "paused"
 
 
 def test_parent_can_revise_direct_child_goal_without_changing_its_own(tmp_path):

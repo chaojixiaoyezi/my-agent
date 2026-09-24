@@ -1,5 +1,5 @@
-# LLM: 唤醒及其去重/投递回执保留原权威文件，观察发布与确认顺序不能改变；修改须联测调度、交付与恢复。
-# 模块用途: 保存唤醒信号、冻结投递和确认处理，显式依赖线程与观察能力，不运行模型。
+# LLM: 唤醒沿原文件发布；稳定键由 store_wake_publication 在原锁内冻结完整配对后安装，查询不补账。
+# 模块用途: 保存唤醒、可靠交接配对观察并确认处理，显式依赖线程与观察能力，不运行模型。
 from __future__ import annotations
 
 import json
@@ -28,6 +28,7 @@ from .store_io import (
 )
 from .store_layout import ConversationStorage, wake_urgency
 from .store_observations import observation_from_request
+from .store_wake_publication import publication_receipt, publish_deduped
 
 
 # LLM: 显式 refs 优先于观察 refs，沿原有值归一，不推断证据真实性。
@@ -141,44 +142,28 @@ class WakeStore:
         self._update_thread_atomic = update_thread_atomic
         self._mark_observations_handled = mark_observations_handled
 
-    # LLM: 投递回执只回答"这个精确去重键的唤醒是否已经发出/已被消费"，供可恢复通知判定
-    # "不重"；它不创建、不修改任何唤醒，也不改变 pending/handled 的既有语义。
-    # 函数用途: 查询某去重键对应的唤醒当前处于 pending、handled 还是从未发出。
+    # LLM: 回执纯读，prepared 不冒充完整交付，坏账显式报错；重试和保留 handled 由发布锁内裁决。
+    # 函数用途: 查询某个键的完整发布是否 pending/handled，不迁移或修复任何记录。
     def delivery_receipt(self, thread_id: str, dedupe_key: str) -> str:
         """Return 'pending' | 'handled' | '' for one exact dedupe key."""
 
-        if not thread_id or not dedupe_key:
-            return ""
-        try:
-            receipt = read_json_file(self.storage.wake_dedupe_path(thread_id, dedupe_key))
-        except Exception:
-            return ""
-        if not isinstance(receipt, dict):
-            return ""
-        wake_signal_id = str(receipt.get("wake_signal_id") or "").strip()
-        if not wake_signal_id:
-            return ""
-        if self._find_path(wake_signal_id) is not None:
-            return "pending"
-        if (self.storage.wake_handled_dir / f"{wake_signal_id}.json").exists():
-            return "handled"
-        return ""
+        return publication_receipt(self.storage, thread_id, dedupe_key)
 
-    # LLM: Wake and observation ledgers retain their publish order, while the thread activity
-    # projection must merge with the newest record on both success and fallback paths.
-    # 函数用途: 原子发布观察与唤醒信号，并防止迟到的后台事件回滚当前会话工作区。
+    # LLM: 有键配对先冻结原负载，再安装 wake/观察；部分提交原样报错，不追加随机无链观察。
+    #   retain_handled 是显式通用策略；无键调用不承诺重试幂等，线程活动仍原子合并。
+    # 函数用途: 可靠发布或恢复同一对观察与唤醒，不把迟到请求内容覆盖到原发布。
     def append_observation(
         self,
         observation_request: dict,
         wake_request: dict,
     ) -> tuple[ObservationEvent, WakeSignal]:
-        """Publish the wake before its observation so the scheduler cannot race the pair."""
+        """Freeze keyed content, then publish the wake before its linked observation."""
         thread_id = str(observation_request.get("thread_id") or "")
         thread = self._require_thread(thread_id)
         wake_thread_id = str(wake_request.get("thread_id") or thread_id)
         if wake_thread_id != thread.thread_id:
             raise ValueError("observation and wake signal must use the same thread")
-        observation, observed_at = observation_from_request(thread.thread_id, observation_request)
+        observation, _observed_at = observation_from_request(thread.thread_id, observation_request)
         kwargs = {
             "observation": observation,
             "urgency": wake_request.get("urgency", "urgent"),
@@ -193,31 +178,20 @@ class WakeStore:
             "metadata": wake_request.get("metadata") or {},
         }
         signal = _wake_signal(thread.thread_id, now(wake_request.get("now")), kwargs)
-        try:
-            selected = self._raise_deduped(signal) if signal.dedupe_key else self._write_new(signal)
-        except Exception:
-            # Keep the old observation-only fallback if the wake queue itself is unavailable.
-            append_jsonl(
-                self.storage.observation_path(thread_id), observation.to_dict(), sort_keys=True
+        if signal.dedupe_key:
+            linked, selected = publish_deduped(
+                self.storage, signal, observation=observation,
+                retain_handled=wake_request.get("retain_handled", False),
             )
-            self._update_thread_atomic(
-                thread.thread_id,
-                lambda latest: replace(
-                    latest,
-                    updated_at=max(latest.updated_at, observed_at),
-                ),
-            )
-            raise
-        linked = replace(observation, wake_signal_id=selected.wake_signal_id)
-        if selected.wake_signal_id == signal.wake_signal_id:
+            assert linked is not None
+        else:
+            selected = self._write_new(signal)
+            linked = replace(observation, wake_signal_id=selected.wake_signal_id)
             append_jsonl(self.storage.observation_path(thread_id), linked.to_dict(), sort_keys=True)
-            self._update_thread_atomic(
-                thread.thread_id,
-                lambda latest: replace(
-                    latest,
-                    updated_at=max(latest.updated_at, observed_at),
-                ),
-            )
+        self._update_thread_atomic(
+            thread.thread_id,
+            lambda latest: replace(latest, updated_at=max(latest.updated_at, linked.observed_at)),
+        )
         return linked, selected
 
     # LLM: 写入原 canonical 队列文件，不另写观察或去重状态。
@@ -226,8 +200,8 @@ class WakeStore:
         write_json_file_atomic(self.storage.wake_signal_path(signal), signal.to_dict())
         return signal
 
-    # LLM: 先确认线程身份，再按结构化去重键写入原队列；不能从正文决定紧急程度。
-    # 函数用途: 由外部事件创建唤醒，需要时沿原原子去重入口提交。
+    # LLM: 稳定键沿原发布锁冻结信号，显式 retain_handled 控制已消费重发；无键仍直接发布。
+    # 函数用途: 创建或恢复一个信号，普通 Goal 在上一代处理后仍能正常继续。
     def raise_signal(self, request: dict) -> WakeSignal:
         thread_id = str(request.get("thread_id") or "")
         thread = self._require_thread(thread_id)
@@ -246,7 +220,9 @@ class WakeStore:
         }
         signal = _wake_signal(thread.thread_id, now(request.get("now")), kwargs)
         if signal.dedupe_key:
-            return self._raise_deduped(signal)
+            return publish_deduped(
+                self.storage, signal, retain_handled=request.get("retain_handled", False),
+            )[1]
         write_json_file_atomic(self.storage.wake_signal_path(signal), signal.to_dict())
         return signal
 
@@ -376,34 +352,6 @@ class WakeStore:
             if signal is not None and signal.status == "pending":
                 signals.append(signal)
         return signals, load_errors
-
-    # LLM: 去重回执的文件锁围绕查旧、发布新信号和记录 ID，不能拆成独立保存。
-    # 函数用途: 按线程与去重键领取或复用现有待处理信号。
-    def _raise_deduped(self, signal: WakeSignal) -> WakeSignal:
-        selected: WakeSignal | None = None
-
-        # LLM: 在去重锁内先核对原 pending 信号归属，再决定是否发布新文件。
-        # 函数用途: 复用同线程有效信号，或写入新信号并返回相应去重回执。
-        def updater(data: dict[str, Any]) -> dict[str, Any]:
-            nonlocal selected
-            existing = self._pending_by_id(str(data.get("wake_signal_id") or ""))
-            if existing is not None and existing.thread_id == signal.thread_id:
-                selected = existing
-                return data
-            write_json_file_atomic(self.storage.wake_signal_path(signal), signal.to_dict())
-            selected = signal
-            return {
-                "schema_version": "wake_dedupe.v1",
-                "thread_id": signal.thread_id,
-                "dedupe_key": signal.dedupe_key,
-                "wake_signal_id": signal.wake_signal_id,
-                "updated_at": signal.created_at,
-            }
-
-        update_json_file_atomic(
-            self.storage.wake_dedupe_path(signal.thread_id, signal.dedupe_key), updater
-        )
-        return selected or signal
 
     # LLM: 精确路径只接受 pending 状态，已处理信号不重新激活。
     # 函数用途: 按 ID 读回待处理唤醒对象。

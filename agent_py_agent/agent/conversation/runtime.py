@@ -2,6 +2,8 @@
 # 上下文和历史准备通过独立模块调用，修改执行顺序时同步后台历史、取消、Compact 和投递回归。
 # 进度计算和供应退避各有独立实现；本模块保留配置组装、实例寿命、读取时机、租约和持久落账。
 # Goal、投递地址、执行 claim 和恢复守卫各有窄能力组件；来源消费和能力预扫保留原编排位置。
+# 能力事件开始的工作片也可能完成任务，公开交付须读当前任务状态，不能仅凭原唤醒原因永久静默。
+# 原 wake 队列在预扫及领取后重查；历史失败不能绕过已接续子代理的当前状态与未读完成信封。
 # 模块用途: 编排后台唤醒和工作片，并组装执行、交付、路由、租约、恢复、策略及上下文。
 from __future__ import annotations
 
@@ -958,6 +960,8 @@ def _is_active_turn_lifecycle_continuation(
 # the canonical owner transcript even while the Goal remains active. Child lifecycle/capability
 # wakes are still internal control events; current child facts and unread envelopes, not the
 # slice-start snapshot, determine whether the integration response is ready to publish.
+# 能力控制片完成根任务后允许原模型回复进入交付；旧失败遇到已接续的源 run 也读当前子树和邮箱。
+# 这里只读结构化状态，正文/附件过滤与幂等仍归交付层；同步当前失败、能力完成和旧信封交错回归。
 # 函数用途: 决定后台模型回复是否进入用户会话；原开始快照不能吞掉长工作片已吸收结果后的最终汇报。
 def _background_delivery_decision(
     agent: object,
@@ -998,6 +1002,8 @@ def _background_delivery_decision(
     if goal_status == "active" and reason in SUBAGENT_LIFECYCLE_WAKE_REASONS:
         return False, "thread_goal_lifecycle_internal"
     if reason in {"subagent_capability_request_open", "subagent_capability_granted"}:
+        if task_completed:
+            return True, "capability_lifecycle_completion"
         # 会话运行时 treats child approvals as active-turn control events, not assistant replies.
         # Our durable wake still lets the parent route the request or continue the exact child,
         # but publishing that intermediate model draft races the child runner and can place an
@@ -1044,12 +1050,14 @@ def _background_delivery_decision(
     if reason != "subagent_runner_finished":
         return True, "non_subagent_completion"
     status = str(metadata.get("status") or "").strip().upper()
-    if status != "DONE":
-        return True, "subagent_non_success_terminal"
     root_task_id = str(wake.get("root_task_id") or request.task_id or "").strip()
     if not root_task_id:
         return True, "subagent_root_unknown"
     related, state_error = _related_subagent_runs(agent, root_task_id)
+    if status != "DONE" and not state_error:
+        continued, state_error = _completion_sources_have_continued(related, wake)
+        if not continued and not state_error:
+            return True, "subagent_non_success_terminal"
     if state_error:
         # A broken or missing child record cannot prove that the current task tree
         # has settled.  Keep the model's integration turn internal unless the exact
@@ -1066,6 +1074,39 @@ def _background_delivery_decision(
     ):
         return False, "partial_subagent_success"
     return _terminal_subagent_delivery_decision(agent, store, wake, root_task_id)
+
+
+# LLM: 只读本次 canonical 根查询和信封成员；当前失败及时通知，缺失/未知沿原收口错误规则，不退回历史状态。
+# 函数用途: 判断失败事件的全部来源是否已接续，覆盖普通批次及观察后备，保留仍需处理的真实失败。
+def _completion_sources_have_continued(
+    related: list[object], wake: dict[str, Any],
+) -> tuple[bool, str]:
+    from ..subagents.models import (
+        SUBAGENT_ENDED_STATUSES,
+        SUBAGENT_REUSABLE_STATUSES,
+        task_status_in,
+    )
+
+    metadata = wake.get("metadata") if isinstance(wake.get("metadata"), dict) else {}
+    events = metadata.get("events")
+    envelopes = [wake, *(item for item in events if isinstance(item, dict))] if isinstance(events, list) else [wake]
+    run_ids = set()
+    for envelope in envelopes:
+        sources = envelope.get("source_agent_ids")
+        if isinstance(sources, list):
+            run_ids.update(str(item).strip() for item in sources if str(item).strip())
+        source_id = str(envelope.get("source_agent_id") or "").strip()
+        if source_id:
+            run_ids.add(source_id)
+    current = {str(getattr(task, "id", "")): task for task in related}
+    if not run_ids or not run_ids.issubset(current):
+        return False, "subagent_completion_source_unknown"
+    statuses = [getattr(current[run_id], "status", "") for run_id in run_ids]
+    if not all(task_status_in(status, SUBAGENT_ENDED_STATUSES | SUBAGENT_REUSABLE_STATUSES) for status in statuses):
+        return False, "subagent_state_unknown"
+    if any(task_status_in(status, SUBAGENT_ENDED_STATUSES - {"DONE"}) for status in statuses):
+        return False, ""
+    return True, ""
 
 
 # LLM: Owner delivery follows the same durable mailbox barrier as task closeout.
@@ -3454,8 +3495,8 @@ def _claim_scheduler_wake(
     return _WakeClaimState(claim=result.claim, heartbeat=heartbeat)
 
 
-# LLM: 冻结交付先于业务执行分支，重投不调用模型；原位置通过只读路由能力选址，跳过、消费、租约释放顺序不变。
-# 函数用途: 为一条已选唤醒执行清理、交付恢复或新的后台工作片。
+# LLM: 预扫可能同步续跑孩子，前后都须读回原 pending 信封；领取后还会复核，冻结重投不调用模型。
+# 函数用途: 为仍待处理的精确信封执行清理、交付恢复或后台工作片，旧快照不能重开已经消费的事件。
 def _execute_wake_signal(
     scheduler: BackgroundMainAgentScheduler,
     signal: WakeSignal,
@@ -3465,6 +3506,12 @@ def _execute_wake_signal(
     claim: object | None,
     now: float,
 ) -> _WakeExecution:
+    refreshed = _refresh_pending_wake_signal(scheduler.store.wakes.pending_one, signal)
+    if refreshed is None:
+        if claim is not None:
+            scheduler.scheduler_service.release(claim, now=now)
+        return _WakeExecution(terminal=True)
+    signal = refreshed
     if _wake_signal_should_skip(
         scheduler.runtime.agent,
         scheduler.store,
@@ -3481,6 +3528,12 @@ def _execute_wake_signal(
     if signal.wake_signal_id in scheduler._quota_fallback_wakes:
         return _WakeExecution(_provider_quota_fallback_report(scheduler, signal, now=now))
     scheduler._pre_wake_capability_sweep(lifecycle_reason, signal)
+    refreshed = _refresh_pending_wake_signal(scheduler.store.wakes.pending_one, signal)
+    if refreshed is None:
+        if claim is not None:
+            scheduler.scheduler_service.release(claim, now=now)
+        return _WakeExecution(terminal=True)
+    signal = refreshed
     cached = cached_owner_delivery(signal)
     if cached is not None:
         channel, target = resolve_background_route(
@@ -3926,8 +3979,8 @@ def _background_recovery_checker(runtime: object):
     return getattr(repo, "main_agent_recovery_block_for_task", None)
 
 
-# LLM: 只绑定本次所需领域和能力；任务/归属/终态读取仍在原准入分支，来源退休和失败写账仍归 runtime。
-# 函数用途: 为一片后台执行列明依赖，沿已有模型入口与 claim 账本运行，不另造执行上下文。
+# LLM: 只绑定本次所需窄查询；原来源在 claim 后重读，不缓存准入结论，来源退休和失败写账仍归 runtime。
+# 函数用途: 为一片后台执行列明依赖，沿原模型入口与 claim 账本运行，避免领取间隙已消费的快照再次执行。
 def _background_claim_dependencies(
     scheduler: BackgroundMainAgentScheduler,
 ) -> background_claim.BackgroundClaimDependencies:
@@ -3941,6 +3994,7 @@ def _background_claim_dependencies(
             scheduler.runtime.agent, scheduler.store, kwargs,
         ),
         recovery_block=scheduler._recovery_guard.block_for_task,
+        source_admission=partial(_background_wake_source_admission, scheduler.store.wakes.pending_one),
         retire_source=partial(_retire_terminal_background_source, scheduler.store),
         run_once=scheduler.runtime.run_once,
         runtime_facts=scheduler._runtime_facts,
@@ -3948,6 +4002,38 @@ def _background_claim_dependencies(
         lease_seconds=scheduler.claim_ttl_seconds,
         heartbeat_interval_seconds=scheduler.claim_heartbeat_interval_seconds,
     )
+
+
+# LLM: 只按原信封 ID 读 pending 队列并核对 thread/task/reason；任一成员已消费则保留其余成员等待重新选批。
+# 函数用途: 从原权威队列刷新已选批次，保留冻结交付和最新元数据，不创建状态副本或消费回执。
+def _refresh_pending_wake_signal(pending_one, signal: WakeSignal) -> WakeSignal | None:
+    signals = []
+    for wake_id in _background_wake_signal_ids(signal.to_dict()):
+        current = pending_one(wake_id)
+        if (
+            current is None
+            or current.wake_signal_id != wake_id
+            or current.thread_id != signal.thread_id
+            or current.root_task_id != signal.root_task_id
+            or current.reason != signal.reason
+        ):
+            return None
+        signals.append(current)
+    return _batched_wake_signal(tuple(signals)) if signals else None
+
+
+# LLM: claim 模块只持有本只读来源查询；已处理、变化与损坏不得开模型轮，原 policy/observation 后备语义不变。
+# 函数用途: 在取得精确执行租约后最后核对信封，已消费或冻结内容变化时释放本片，留给原队列重新选择。
+def _background_wake_source_admission(pending_one, signal: object) -> str:
+    if not isinstance(signal, WakeSignal):
+        return ""
+    try:
+        current = _refresh_pending_wake_signal(pending_one, signal)
+    except Exception:
+        return "wake_source_unreadable"
+    if current is None:
+        return "wake_source_not_pending"
+    return "wake_source_changed" if current != signal else ""
 
 
 # LLM: 策略执行经独立 claim 组件领取和结算；执行后才重读进度账，来源确认及写账顺序保持。

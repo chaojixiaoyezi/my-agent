@@ -29,9 +29,9 @@ def test_complete_detail_pages_retain_every_line_and_bound_each_render():
     _, _, state, view = _fixture("assistant_completed", text)
     collected = []
     while True:
-        frame = view.provider.frame(80)
-        collected.extend(fragments_text(line) for line in frame.transcript_lines)
-        assert len(frame.transcript_lines) <= 1024
+        lines = state.complete_page_lines(80)
+        collected.extend(fragments_text(line) for line in lines)
+        assert len(lines) <= 1024
         if not state.move_complete_page(1):
             break
     rendered = "\n".join(collected)

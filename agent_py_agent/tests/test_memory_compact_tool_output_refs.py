@@ -335,7 +335,7 @@ def test_carried_tool_call_records_restore_exact_conversation_turn_across_durabl
     assert [item["call_id"] for item in legacy_records] == ["legacy-child"]
 
 
-def test_carried_tool_call_records_dedupe_same_scoped_call_id(tmp_path: Path) -> None:
+def test_carried_tool_call_records_dedupe_same_exact_call_ref(tmp_path: Path) -> None:
     root = tmp_path / "work"
     index = root / "blobs" / "tool_outputs" / "index.jsonl"
     index.parent.mkdir(parents=True)
@@ -343,6 +343,8 @@ def test_carried_tool_call_records_dedupe_same_scoped_call_id(tmp_path: Path) ->
         "kind": "tool_call",
         "tool": "create_subagents",
         "call_id": "same-call",
+        "attempt_id": "root-attempt",
+        "turn_id": "root-turn",
         "scoped_call_id": "root-run:same-call",
         "request_id": "request-root",
         "run_id": "root-run",

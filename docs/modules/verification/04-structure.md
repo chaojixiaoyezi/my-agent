@@ -1,6 +1,11 @@
 # Verification：结构
 
 `tool_call_archive_record.py` 两个外置输出入口均传原ToolCall的执行身份；`conversation/compact_tool_identity.py` 共用精确引用。native候选在摘要前捕获原IR配对身份，活动归档按同一四元键切分来源与保留区，裸call_id仅作展示。
+第8步索引恢复补齐：externalizer 保存有界 `tool_process`，carried reader 恢复原 process 信封；投影唯一位于 `tooling/runtime_facts.py`，旧索引不推定清理成功。组件验证与真实 TUI 分开。
+
+`tool_call_archive_record.py` 从实际 canonical `ToolCall` 向 `ExternalizeToolOutputRequest` 传递 run/attempt/turn；大小输出索引与 carried 恢复保持同一身份。`conversation/compact_tool_identity.py` 的四元引用只表达来源，不提供执行、验收或完成权威。legacy 缺字段保留并标 `uncertain`，不读取自然语言或解析 scoped 字符串来补身份。
+
+`tooling/runtime_facts.py`接canonical handler_details，输出原verification块和有界process字段；`reducer.py`统一脱敏，`tool_call_archive_record.py`保留同一有界process，`runtime/loop_support.py`恢复后同口径展示。它们不改变执行状态或持久schema。
 
 ## 零工具续跑原生历史
 

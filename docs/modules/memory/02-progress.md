@@ -45,6 +45,20 @@ lesson/HOT、截断、缺版本或 audit 正文覆盖未知时保留原批次并
 默认与显式工作区下的 root/child/grandchild 路径、写入边界及原父状态合并已纳入 136 项定向测试并通过。
 这是创建前容量的路径切片，尚不涵盖选中模型引用重新冻结、完整首请求展示或逐候选输出预算；
 交接与限制见 [容量审计](../../tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。
+第8步索引恢复补齐：externalizer 保存有界 `tool_process`，carried reader 恢复原 process 信封；投影唯一位于 `tooling/runtime_facts.py`，旧索引不推定清理成功。组件验证与真实 TUI 分开。
+
+## 第8步逐调用 Compact 来源修复
+
+新 live-tool checkpoint 显式追加 `tool_call_ref.v1` 来源与尾部数组，使用原始 `run_id/attempt_id/call_id` 匹配；裸编号允许跨域重号，计数按记录保存。新 refs 参与新候选内容地址，防止同号 orphan 覆盖已提交来源。旧无 refs ID 和账本不迁移。
+工具输出索引现在保留 canonical attempt/turn，恢复去重不再使用 scoped 字符串。旧无身份记录保持完整并标为 `uncertain`；全未知大历史返回未压缩，provider overflow 可能无法恢复，这是实际兼容限制。旧 reader 不可直接读取新混源 checkpoint；回滚须保留新账并匹配运行时与数据快照。定向证据见 [独立交接](../../tasks/HANDOFF_STEP8_COMPACT_CALL_REFS.md)。
+决策分支吸收 main 后（本地，未合入 main），上述三元 `tool_call_ref.v1` 由 v3 四元身份取代：`tooling/call_ref.py` 已删除；主线写出的 v2 refs 行按 legacy 读取、不隐藏任何记录，未知来源的可见性和 uncertain 结果仍保留。见[依赖拆分合并节](../../design/TOOL_LOOP_DEPENDENCY_SPLIT.md#两线合并后的来源身份与模型轮结果决策分支吸收-main2026-09-23)。
+
+本地开发 C 顺序摘要来源：两遍长度/hash 与可释放字符窗口替代整份 JSON 副本。密集 iterencode 估算闭包循环积累已由有界小载荷编码修复；14文件组合333 passed、20项既有xfail，真实TUI尚未验收。
+
+## 第8步本地候选
+
+消息分页与幂等扫描已按完整LF边界拆出，固定尾界／字节预算由调用方显式传入；原锁、目录、游标及错误事实保留。token估算按原JSON顺序流式计数，原数值、结构开销与异常优先级不变。七文件186项通过，模型链组合18文件456 passed／24既有xfail；未部署和真实TUI验收，不代表Compact scope来源链已完成。
+
 
 ## 边界
 

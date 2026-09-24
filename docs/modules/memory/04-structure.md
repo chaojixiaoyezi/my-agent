@@ -47,6 +47,23 @@ system/tools/messages 前缀，超窗时按原分段合同覆盖完整历史。�
 当前选中集合完整保留，HOT/lesson 只绑定不参与排序。P3 排序的来源刷新只查原正式仓库并投影原 ID，不新增检索或访问计数；P5-A 补充查询至多一次，候选未确认前不记访问。
 候选、请求属性、主模型或设置变更时拒绝旧建议；最后采用沿 `decision_outcome_is_current`。
 结果驻留原 PreparedRuntimeContext.memories，工具循环/Compact 复用该轮材料。同步本地文件 I/O 不承诺强制中断，迟到建议不会采用。
+第8步索引恢复补齐：externalizer 保存有界 `tool_process`，carried reader 恢复原 process 信封；投影唯一位于 `tooling/runtime_facts.py`，旧索引不推定清理成功。组件验证与真实 TUI 分开。
+
+## Live-tool 逐调用来源
+
+`conversation/compact_tool_identity.py` 是唯一工具来源身份，只接受完整的 run/attempt/turn/call 四元 refs。`conversation/compact_checkpoint.py` 写 `conversation_compact_checkpoint.v3`，包含 `source_tool_refs`、`retained_tool_refs`；候选编号 `compact-v3-{generation}-{digest}` 对 scope、摘要基础、来源、保留 refs 及创建时间做内容寻址，读取时逐行复核，篡改的行拒绝读取。裸 call id 只作展示，可以重复或交叉。顶层 request/attempt 仍是提交者，原有"写 checkpoint → 锁内 generation CAS"顺序不变。
+- v1/v2 旧行照常读取，但不提供四元来源，因此不隐藏任何记录。这也包括主线 `66a598cf3` 写出的 `source_tool_call_refs` 三元引用：部署前被运行中压缩的旧调用会重新进入模型上下文，不丢失，也不误隐藏。
+- `active_turn_compact.py` 只凭已提交的四元 refs 隐藏记录，按记录位置选择来源与尾部。缺完整身份的记录保持可见；全部未知时返回 `compacted=False`，并带 `source_resolution=uncertain` 和 `uncertain_call_count`。
+- `tool_output_externalizer.py` 直接传递原 call 的 attempt/turn；`compact_tool_output_refs.py` 只对完整四元身份去重，字节完全相同的未知行才合并。不解析 scoped 字符串，也不从 operation 哈希反推缺失身份。
+- 旧的无身份大历史可能无法安全恢复 Compact，这里不做静默身份迁移。兼容与回滚边界见[依赖拆分合并节](../../design/TOOL_LOOP_DEPENDENCY_SPLIT.md#两线合并后的来源身份与模型轮结果决策分支吸收-main2026-09-23)。
+
+`conversation/compact_text_source.py` 只管理同一来源的临时字符窗口和读取一致性，不拥有消息游标或持久覆盖。`backends/request_content.py` 拒绝将非文本块引用当成可完整分段的正文；原检查点仍由原 Compact writer 提交。
+
+## 流式估算与消息扫描
+
+`memory_archive/tokens.py` 唯一估算器按原JSON编码顺序累积字符和UTF8字节，保持旧预算数值与异常回退；仅精确内置、无环、深度有限且最坏JSON UTF8上界不超过512 KiB的小载荷使用公开dumps，避免密集估算累积编码器闭包；其它载荷仍流式，单个JSON值和字典排序仍可能较大。估算不写实际用量账。
+`conversation/message_scan.py` 接收canonical路径，复用`store_io.complete_jsonl_end`；有界页只返回完整行和字节游标。append_once在原锁内逐行读到冻结尾界，首个key命中后仍查坏行；Unicode空白按原规则跳过，字段溢出归data_corruption，缺LF尾行禁止追加且不自动修复。分页原语不授予摘要覆盖或scope身份。
+
 
 ## 会话存储读取边界
 

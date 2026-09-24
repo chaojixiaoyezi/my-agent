@@ -205,6 +205,7 @@ def test_stopped_old_background_slice_cannot_bind_after_task_becomes_active_agai
         claim_scope_id=lambda thread_id, _task_id: thread_id,
         child_owns_task=lambda _task_id: False, terminal_task=lambda _kwargs: False,
         recovery_block=lambda _task_id: None, retire_source=lambda _kwargs: None,
+        source_admission=lambda signal: "" if signal is None else "unexpected_source",
         run_once=run_once, runtime_facts=lambda: {}, record_policy_failure=lambda _kwargs: None,
         lease_seconds=10, heartbeat_interval_seconds=1,
     )

@@ -340,7 +340,7 @@ def test_native_success_refreshes_only_run_local_view() -> None:
     assert params.tool_ir_history == [CompactionSummary("下一轮摘要")]
 
 
-def test_native_commit_forwards_base_and_refreshes_context(monkeypatch) -> None:
+def test_native_commit_forwards_base_and_returns_commit_facts(monkeypatch) -> None:
     context = _context()
     params = SimpleNamespace(
         compact_context=context, request_id="request-1", attempt_id="attempt-2",
@@ -359,12 +359,13 @@ def test_native_commit_forwards_base_and_refreshes_context(monkeypatch) -> None:
         return SimpleNamespace(compact_checkpoint_id="checkpoint-2", compact_generation=2)
 
     monkeypatch.setattr(live_tool_compact, "commit_live_tool_compact", commit)
-    generation = _tool_loop_service._commit_native_ir_generation(
+    commit = _tool_loop_service._commit_native_ir_generation(
         SimpleNamespace(), params, plan, after_tokens=50,
     )
-    assert generation == 2
+    assert commit.generation == 2
+    assert commit.thread.compact_checkpoint_id == "checkpoint-2"
+    assert commit.source_refs == (ref,)
     assert captured[0].summary_base_checkpoint_id == "checkpoint-1"
     assert captured[0].source_tool_refs == (ref,)
-    assert params.compact_context.scope == context.scope
-    assert params.compact_context.view.checkpoint_id == "checkpoint-2"
-    assert params.compact_context.view.source_tool_refs == (*context.view.source_tool_refs, ref)
+    # 同范围视图刷新属于提交后阶段（回滚边界之外），提交函数本身不改运行中视图。
+    assert params.compact_context is context

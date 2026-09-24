@@ -116,7 +116,8 @@ def test_tool_loop_retries_until_provider_recovers():
                 source_protocol="text",
             ),
         )
-        prompt, response = next_tool_loop_model_response(agent, params, tool_rounds=1)
+        turn = next_tool_loop_model_response(agent, params, tool_rounds=1)
+        prompt, response = turn.prompt, turn.response
 
         assert agent.backend.calls == 3
         assert response.text == "恢复成功，继续任务。"
@@ -175,7 +176,8 @@ def test_tool_loop_falls_back_to_compact_when_disabled():
                 source_protocol="text",
             ),
         )
-        prompt, response = next_tool_loop_model_response(agent, params, tool_rounds=1)
+        turn = next_tool_loop_model_response(agent, params, tool_rounds=1)
+        prompt, response = turn.prompt, turn.response
 
         assert _AlwaysOverflowBackend.calls == 1  # 关闭时不重试
         assert response.runtime_status == "context_overflow"

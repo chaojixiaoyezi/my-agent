@@ -17,21 +17,33 @@ DETAIL_ROW_CHARS = 2_000
 
 
 # LLM: 页只持有公开字符串及样式，不持有执行回调；字符预算限制单次排版工作量。
-# 类用途: 保存一页原文以及其中每行的样式，避免把长历史一次渲染到终端。
+# 类用途: 保存有界原文页、逐行来源和归档块身份，让展开与跨页保持同一阅读位置。
 @dataclass(frozen=True)
 class CompleteDetailPage:
     rows: tuple[tuple[str, str], ...]
     reference: dict[str, object] | None = None
     remote_page: int = 0
+    origins: tuple[tuple[str, int], ...] = ()
+    block_id: str = ""
+    loading: bool = False
 
     # LLM: 只对当前页做净化与显示宽度换行，原始页字符串不被改变。
     # 函数用途: 在当前终端宽度下完整显示一页，不裁掉长行右侧内容。
     def render(self, width: int) -> tuple[FormattedLine, ...]:
+        return self.render_located(width)[0]
+
+    # LLM: 来源位置来自构建时的块ID/逻辑行，换行只复制位置，不以正文相似度匹配。
+    # 函数用途: 同时返回原文行和来源映射，供切换展示与异步加载后恢复阅读位置。
+    def render_located(self, width: int) -> tuple[tuple[FormattedLine, ...], tuple[tuple[str, int], ...]]:
         rendered: list[FormattedLine] = []
-        for style, text in self.rows:
+        origins: list[tuple[str, int]] = []
+        for index, (style, text) in enumerate(self.rows):
             safe = sanitize_terminal_text(text).replace("\t", "    ")
-            rendered.extend(wrap_fragments(((style, safe),), width=max(1, width)) or ((),))
-        return tuple(rendered)
+            wrapped = wrap_fragments(((style, safe),), width=max(1, width)) or ((),)
+            rendered.extend(wrapped)
+            origin = self.origins[index] if index < len(self.origins) else (self.block_id, index)
+            origins.extend([origin] * len(wrapped))
+        return tuple(rendered), tuple(origins)
 
 
 # LLM: 归档只保存每个输出的一条引用，不为百万远端页分配百万对象；页数不授权文件读取。
@@ -69,6 +81,7 @@ class CompleteDetailPages(Sequence[CompleteDetailPage]):
 def build_complete_detail_pages(snapshot: TuiViewSnapshot) -> CompleteDetailPages:
     pages: list[CompleteDetailPage] = []
     rows: list[tuple[str, str]] = []
+    origins: list[tuple[str, int]] = []
     chars = 0
     blocks = sorted((*snapshot.stable_blocks, *snapshot.active_blocks),
                     key=lambda block: (block.created_seq, block.updated_seq, block.block_id))
@@ -78,22 +91,23 @@ def build_complete_detail_pages(snapshot: TuiViewSnapshot) -> CompleteDetailPage
                 and isinstance(reference.get("archive_id"), str)
                 and type(reference.get("page_count")) is int and reference["page_count"] > 0):
             if rows:
-                pages.append(CompleteDetailPage(tuple(rows)))
-                rows, chars = [], 0
-            pages.append(CompleteDetailPage((), dict(reference)))
+                pages.append(CompleteDetailPage(tuple(rows), origins=tuple(origins)))
+                rows, origins, chars = [], [], 0
+            pages.append(CompleteDetailPage((), dict(reference), block_id=block.block_id))
             continue
-        for style, text in _block_rows(block):
+        for row_index, (style, text) in enumerate(_block_rows(block)):
             for part_index, part in enumerate(_split_row(text)):
                 if rows and (len(rows) >= DETAIL_PAGE_ROWS or chars + len(part) > DETAIL_PAGE_CHARS):
-                    pages.append(CompleteDetailPage(tuple(rows)))
-                    rows, chars = [], 0
+                    pages.append(CompleteDetailPage(tuple(rows), origins=tuple(origins)))
+                    rows, origins, chars = [], [], 0
                 if part_index and rows:
                     rows[-1] = (style, rows[-1][1] + part)
                 else:
                     rows.append((style, part))
+                    origins.append((block.block_id, row_index))
                 chars += len(part)
     if rows or not pages:
-        pages.append(CompleteDetailPage(tuple(rows)))
+        pages.append(CompleteDetailPage(tuple(rows), origins=tuple(origins)))
     return CompleteDetailPages(pages)
 
 
@@ -171,7 +185,7 @@ def _display_rows(display: dict[str, Any]) -> Iterator[tuple[str, str]]:
 
 # LLM: Gateway返回的kind只是公开显示样式，不得进入状态裁决；未知类型按普通原文处理。
 # 函数用途: 把已鉴权的一页归档行映射为本地样式，保留分片的所有字符。
-def archive_page_rows(rows: object) -> CompleteDetailPage:
+def archive_page_rows(rows: object, *, block_id: str = "") -> CompleteDetailPage:
     if not isinstance(rows, list) or len(rows) > DETAIL_PAGE_ROWS:
         raise ValueError("invalid archive rows")
     if any(not isinstance(row, dict) or not isinstance(row.get("text"), str)
@@ -183,6 +197,7 @@ def archive_page_rows(rows: object) -> CompleteDetailPage:
               "stderr": "class:tui-error", "header": "class:tui-tool-title",
               "notice": "class:tui-muted", "thinking": "class:tui-thinking-detail"}
     rendered: list[tuple[str, str]] = []
+    origins: list[tuple[str, int]] = []
     previous_row = None
     for row in rows:
         style = styles.get(str(row.get("kind")), "class:tui-tool-output")
@@ -190,5 +205,7 @@ def archive_page_rows(rows: object) -> CompleteDetailPage:
             rendered[-1] = (style, rendered[-1][1] + row["text"])
         else:
             rendered.append((style, row["text"]))
+            row_index = row.get("row_index")
+            origins.append((block_id, row_index if type(row_index) is int else len(origins)))
         previous_row = row.get("row_index")
-    return CompleteDetailPage(tuple(rendered))
+    return CompleteDetailPage(tuple(rendered), origins=tuple(origins), block_id=block_id)

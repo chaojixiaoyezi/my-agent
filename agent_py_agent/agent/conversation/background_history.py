@@ -9,7 +9,7 @@ from collections.abc import Mapping
 
 BACKGROUND_DISPLAY_TURN_SCHEMA = "background_display_turn.v1"
 _TERMINAL_KINDS = frozenset({
-    "assistant_completed", "thinking_completed", "tool_completed", "tool_failed", "system_message",
+    "assistant_completed", "thinking_completed", "tool_completed", "tool_failed", "system_message", "user_message",
 })
 
 

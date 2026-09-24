@@ -18,6 +18,7 @@ from agent_py_agent.cli.chat_parts import tui_keybindings
 from agent_py_agent.cli.chat_parts.chat_style import CHAT_RESPONSE_STYLE_INJECT
 from agent_py_agent.cli.chat_parts.plain_state import ChatJob
 from agent_py_agent.cli.chat_parts.tui_agent_navigation import TuiAgentNavigationState
+from agent_py_agent.cli.chat_parts.tui_block_renderer import TuiRenderContext
 from agent_py_agent.cli.chat_parts.tui_events import TuiEventSequencer
 from agent_py_agent.cli.chat_parts.tui_input import (
     QUEUE_EDIT_PLACEHOLDER,
@@ -34,6 +35,7 @@ from agent_py_agent.cli.chat_parts.tui_interaction import TuiInteractionState
 from agent_py_agent.cli.chat_parts.tui_keybindings import _normalize_bracketed_paste
 from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
 from agent_py_agent.cli.chat_parts.tui_transcript import TuiTranscriptModeState
+from agent_py_agent.cli.chat_parts.tui_view import make_tui_transcript_view
 
 
 def test_plugin_namespace_completion_only_edits_without_path_scan(tmp_path, monkeypatch) -> None:
@@ -1618,17 +1620,17 @@ def test_ctrl_o_freezes_current_child_runtime_instead_of_root() -> None:
         },
     )
     transcript_state = TuiTranscriptModeState()
-    moved: list[bool] = []
     focused: list[object] = []
-    modal_window = object()
+    transcript_area = make_tui_transcript_view(
+        navigation.active_runtime().store,
+        lambda width: TuiRenderContext(width=width),
+        transcript_state=transcript_state,
+    )
     params = SimpleNamespace(media_importing=False,
         tui_runtime=root,
         agent_navigation=navigation,
         transcript_state=transcript_state,
-        transcript_area=SimpleNamespace(
-            modal_control=SimpleNamespace(move_end=lambda: moved.append(True)),
-            modal_window=modal_window,
-        ),
+        transcript_area=transcript_area,
     )
     event = SimpleNamespace(
         app=SimpleNamespace(
@@ -1646,8 +1648,8 @@ def test_ctrl_o_freezes_current_child_runtime_instead_of_root() -> None:
         for block in frozen.stable_blocks
     )
     assert all("主代理正文" not in block.text for block in frozen.stable_blocks)
-    assert moved == [True]
-    assert focused == [modal_window]
+    assert transcript_area.modal_control.is_following() is False
+    assert focused == [transcript_area.modal_window]
 
 
 def test_f6_toggles_native_copy_and_tui_mouse_without_touching_input() -> None:

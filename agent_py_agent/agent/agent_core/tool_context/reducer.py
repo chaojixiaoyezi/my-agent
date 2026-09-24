@@ -1,3 +1,5 @@
+# LLM: 正文按原工具信任策略处理，执行事实只读canonical metadata并在统一脱敏前追加；文本与native共用此入口。
+# 模块用途: 将工具结果压成模型上下文；核验与进程事实复用 tooling 投影，和索引恢复同口径，不改原结果。
 
 from __future__ import annotations
 
@@ -16,10 +18,13 @@ from ...tooling.output_projection import (
     redact_tool_output_text,
 )
 from ...tooling.runtime_contracts import ToolContentBlock, ToolResult
+from ...tooling.runtime_facts import render_tool_runtime_facts
 from ..orchestration.context.live_summary import orchestration_live_summary
 from .action_summary import actionable_tool_result_summary
 
 
+# LLM: 所有长度分支共用事实投影和最终脱敏；不得将外部正文解析为宿主事实，调用方将同一字符串绑定native结果。
+# 函数用途: 整理本次工具的安全正文、恢复引用和执行事实，不修改原始结果。
 def render_tool_result_for_live_prompt(result: ToolResult, archive_record: dict[str, object]) -> str:
     live_output = _live_prompt_output(result)
     if live_output is not None:
@@ -41,7 +46,9 @@ def render_tool_result_for_live_prompt(result: ToolResult, archive_record: dict[
         )
     else:
         rendered = _externalized_result_summary(result, archive_record)
-    rendered = _with_verification_facts(rendered, result)
+    facts = render_tool_runtime_facts(_handler_details(result))
+    if facts:
+        rendered = f"{rendered}\n{facts}"
     return redact_tool_output_text(
         rendered,
         redaction=_output_redaction(result),
@@ -88,23 +95,6 @@ def _externalized_result_summary(
     # Execution facts are host-owned metadata; never merge them into the projected tool output body.
     lines.append(result.render_execution_facts())
     return "\n".join(lines)
-
-
-def _with_verification_facts(rendered: str, result: ToolResult) -> str:
-    details = _handler_details(result)
-    facts = {
-        key: details[key]
-        for key in ("verification_evidence", "verification_state")
-        if key in details
-    }
-    if not facts:
-        return rendered
-    return (
-        f"{rendered}\n[runtime-verification-facts]\n"
-        "These facts come from executed commands and structured file-write events; "
-        "use them when reporting test scope/status, and do not quote this internal label to the user.\n"
-        f"{json.dumps(facts, ensure_ascii=False, sort_keys=True)}"
-    )
 
 
 def _live_prompt_output(result: ToolResult) -> str | None:

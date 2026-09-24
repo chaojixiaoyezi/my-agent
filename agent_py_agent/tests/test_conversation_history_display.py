@@ -195,6 +195,28 @@ def test_background_commentary_does_not_count_as_twenty_extra_user_turns():
     assert len([event for event in events if event["kind"] == "assistant_completed"]) == 34
 
 
+def test_background_native_and_delivery_share_exact_turn_display():
+    from agent_py_agent.agent.conversation.background_transcript import BackgroundTranscriptSink
+
+    sink = BackgroundTranscriptSink(SimpleNamespace(), thread_id="thread-1", task_id="task-1")
+    sink.write_model("开始检查")
+    sink._flush_model_commentary()
+    sink.finish()
+    native = _rows()[-1].metadata["canonical_native_messages"]
+    shared = {"conversation_request_id": "background-turn-1", "task_id": "task-1"}
+    rows = [
+        SimpleNamespace(role="assistant", content="", thread_id="thread-1", message_id="native", metadata={
+            **shared, "assistant_part_id": "native", "canonical_native_messages": native,
+        }),
+        SimpleNamespace(role="assistant", content="这是完整汇报。", thread_id="thread-1", message_id="delivery", metadata={
+            **shared, "assistant_part_id": "final", "background_delivery_reason": "managed_process_exited",
+            "background_transcript_request_id": sink.request_id, "background_display_turn": sink.display_history_snapshot(),
+        }),
+    ]
+    events = conversation_history_display_events(rows)
+    assert [event["payload"].get("text") for event in events] == ["开始检查", "这是完整汇报。"]
+
+
 def test_background_snapshot_rebases_old_buffer_but_keeps_active_turn():
     from agent_py_agent.agent.conversation.background_transcript import (
         BackgroundTranscriptSink,

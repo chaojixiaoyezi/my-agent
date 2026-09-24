@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
 from agent_py_agent.agent.subagents.services import runtime_closeout
-from agent_py_agent.tests.test_dispatch_liveness_and_revive import _closeout_fixture
+from agent_py_agent.tests.test_dispatch_liveness_and_revive import (
+    _closeout_fixture,
+    _recover_closeouts,
+)
 
 
 def _event(repo, index, kind="closeout_unpersisted"):
@@ -55,8 +58,8 @@ def test_restore_reaches_real_fact_behind_fifty_unreadable_events(tmp_path):
         manager.runner_result.record_runner_result(params)
     finally:
         runtime_closeout._store_closeout = original
-    assert runtime_closeout.recover_pending_closeouts(manager)["runtime_closeouts_restored"] == 0
-    assert runtime_closeout.recover_pending_closeouts(manager)["runtime_closeouts_restored"] == 1
+    assert _recover_closeouts(manager)["runtime_closeouts_restored"] == 0
+    assert _recover_closeouts(manager)["runtime_closeouts_restored"] == 1
     assert manager.runtime_db.agent_run_for_run_id(task.id)["status"] == "failed"
     for _ in range(3):
-        assert runtime_closeout.recover_pending_closeouts(manager)["runtime_closeouts_restored"] == 0
+        assert _recover_closeouts(manager)["runtime_closeouts_restored"] == 0

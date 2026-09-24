@@ -1,4 +1,4 @@
-# LLM: 后台执行只沿原 claims 领取、续租和结算；最终准入与退出顺序须联测取消、Compact、恢复和来源消费。
+# LLM: 后台执行只沿原 claims 领取、续租和结算；领取后重查精确来源，须联测取消、Compact、恢复和来源消费。
 # 不持有 Agent/完整 Store，不消费普通来源或创建执行器；共享心跳继续使用 run_claim.py。
 # 模块用途: 领取一个后台执行车道，在模型执行前重查状态，并按本次真实结果释放精确租约。
 from __future__ import annotations
@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from .store_claims import ClaimStore
 
 
-# LLM: 状态、任务归属和来源查询在原分支调用；claims 为唯一持久域，配置来自原 scheduler 归一值。
+# LLM: 状态、任务归属和来源查询在原分支调用；来源只读查询不能消费信封，claims 为唯一持久域。
 # 类用途: 列明一片后台执行需要的能力，不缓存准入结论、不暴露模型权限或其它存储领域。
 @dataclass(frozen=True)
 class BackgroundClaimDependencies:
@@ -31,6 +31,7 @@ class BackgroundClaimDependencies:
     child_owns_task: Callable[[object], bool]
     terminal_task: Callable[[dict], bool]
     recovery_block: Callable[[str], dict[str, str] | None]
+    source_admission: Callable[[object], str]
     retire_source: Callable[[dict], None]
     run_once: Callable[[dict], BackgroundMainAgentReport | None]
     runtime_facts: Callable[[], dict]
@@ -56,8 +57,8 @@ def _subagent_owned_report(kwargs: dict) -> BackgroundMainAgentReport:
     )
 
 
-# LLM: 领取前登记中断身份，直到本片结算后才释放；终态先关闭 claim 再退休来源，回合中断只关闭 claim。
-# 函数用途: 防止排队期间已停止或待恢复的任务开始新副作用，忙碌车道不启动心跳或模型。
+# LLM: 领取前登记中断身份，直到本片结算后释放；控制与恢复先裁决，过期来源只关闭 claim，不消费其它信封。
+# 函数用途: 防止排队期间已停止、待恢复或已被处理的工作开始副作用，忙碌车道不启动心跳或模型。
 def run_claimed(
     dependencies: BackgroundClaimDependencies,
     kwargs: dict,
@@ -108,6 +109,13 @@ def run_claimed(
                 claim_id=str(claim.get("claim_id") or ""),
                 admission="authority_recovery_required",
                 recovery_block=recovery_block,
+            )
+            return None
+        source_admission = dependencies.source_admission(kwargs.get("wake_signal"))
+        if source_admission:
+            _finish_nonexecuted_claim(
+                dependencies, kwargs, claim_scope_id=claim_scope_id,
+                claim_id=str(claim.get("claim_id") or ""), admission=source_admission,
             )
             return None
         return run_with_heartbeat(

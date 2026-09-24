@@ -1,5 +1,5 @@
 # LLM: 用户插话与直属孩子事件在安全点注入；按 canonical 身份隔离，窗口事实复用中性合同。
-# 模块用途: 交付新消息和孩子的结构化交接，在模型接受后确认投递，不解析正文决定调度。
+# 模块用途: 交付新消息和孩子的结构化交接，统一查询未确认投递并在模型接受后确认，不解析正文决定调度。
 from __future__ import annotations
 
 import json
@@ -21,6 +21,18 @@ from .task_identity import durable_task_id
 _TASK_EVENT_LIMIT = 20
 _DIRECT_CHILDREN_MARKER = "[RUNTIME_DIRECT_CHILDREN]"
 _ACTIVE_TURN_REPLY_REQUIRED_IDS = "_active_turn_reply_required_guidance_ids"
+
+
+# LLM: 只读取当前工作片的原输入投递字段；模型轮和物理超时重试必须共用此判据，不能据此确认或重发消息。
+# 函数用途: 判断补充消息是否仍未获得明确消费确认，避免两层重试把同一用户消息再次发给模型。
+def active_turn_input_has_unconfirmed_delivery(live_archive_state: object) -> bool:
+    if not isinstance(live_archive_state, dict):
+        return False
+    pending = live_archive_state.get("_guidance_ack_ids")
+    return bool(
+        str(live_archive_state.get("_guidance_submission_id") or "").strip()
+        or (isinstance(pending, set) and pending)
+    )
 
 
 # LLM: This volatile suffix is rebuilt from canonical direct-child rows at every provider safe
@@ -105,7 +117,7 @@ def _render_runtime_direct_children(agent: object, params: object) -> str:
             row["activity_diagnostic"] = diagnostic
         # 根父级通过耐久事件接收正文，快照不再重复装入一遍；递归父级没有根邮箱，需在这里交接。
         if current_subagent_run_id(agent) and (task_status_in(status, SUBAGENT_ENDED_STATUSES) or status == "BLOCKED"):
-            from ...subagents.runner_completion_wake import completion_handoff_payload
+            from ...subagents.runner_completion_payload import completion_handoff_payload
 
             row.update(completion_handoff_payload(task))
             row["turn_end_reason"] = str(getattr(task, "turn_end_reason", "") or "")

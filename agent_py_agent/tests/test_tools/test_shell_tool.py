@@ -319,7 +319,11 @@ def test_shell_tool_pipeline_cannot_hide_failed_gate(shell_tool: ShellTool) -> N
     assert result.ok is False
     assert result.error_code == "COMMAND_FAILED"
     assert "return_code=7" in result.output
-    assert result.result_envelope["process"] == {
+    facts = dict(result.result_envelope["process"])
+    termination = facts.pop("termination")
+    assert termination["confirmed"] is True
+    assert termination["return_code"] == 7
+    assert facts == {
         "status": "exited",
         "return_code": 7,
         "command_succeeded": False,

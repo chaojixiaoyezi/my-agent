@@ -1,7 +1,7 @@
 
 
-# LLM: 工具循环沿同一 IR 和 Compact 权威；真实渲染先准备事实再复用纯布局，预投影不得准备副作用；阅读建议仅追加共用展示。
-# 模块用途: 组装展示选择、可忽略的阅读提示和真实请求并协调压缩提交，原授权、用户输入、账本和任务状态保持各自权威。
+# LLM: execute_tool_loop 是主子共用的唯一循环入口；逐 run 参数和局部计数不共享，native IR 与 owner/thread Compact 权威不变。
+# 模块用途: 装配模型采样、工具执行、原Compact和窄收口操作；保持输入账本、取消顺序、原请求归属及持久提交边界。
 from __future__ import annotations
 
 import json
@@ -30,7 +30,7 @@ from ..conversation.compact_progress import (
     COMPACT_SOURCE_TURN_LOCAL,
     CONVERSATION_COMPACT_PROGRESS_SCHEMA,
 )
-from ..conversation.tool_context_window import record_native_ir_window, window_tool_context_params
+from ..conversation.tool_context_window import window_tool_context_params
 from ..prompting_parts.builder import project_runtime_workspace_context
 from ..runtime_context import current_task_attributes
 from ..runtime_db.operations import exec_lock_scope
@@ -41,7 +41,6 @@ from ..tooling.registry_workspace import effective_registry_cwd
 from ._runtime_params import ToolLoopExecuteParams
 from .delivery_contract_prompting import render_delivery_contract_section
 from .native_tool_protocol import native_tool_use_active
-from .provider_transient_auto_resume import run_with_provider_transient_auto_resume
 from .runner.stage_trace import (
     trace_runner_tool_call_started,
 )
@@ -52,6 +51,7 @@ from .runtime.conversation_state import (
 from .runtime.goal_accounting import account_goal_model_response, begin_goal_model_turn
 from .runtime.guidance import (
     acknowledge_injected_turn_input,
+    active_turn_input_has_unconfirmed_delivery,
     has_pending_turn_input,
     inject_pending_turn_input,
     refresh_runtime_direct_children_snapshot,
@@ -88,9 +88,12 @@ from .tool_guard.loop_hints import (
     append_tool_guardrail_action_block_hint,
 )
 from .tool_ir_compact import (
+    NativeCompactWindow,
     compact_native_ir_to_token_budget,
+    reduce_native_compact_candidate,
 )
-from .tool_ir_history import record_tool_call_ir, replace_compaction_summary_ir
+from .tool_ir_history import record_tool_call_ir
+from .tool_loop.closeout import generate_tool_loop_closeout, unknown_outcome_runtime_reason
 from .tool_loop.completion import (
     ToolRoundCompletionRequest,
     completion_response_after_tool_round,
@@ -98,6 +101,11 @@ from .tool_loop.completion import (
     queue_interim_reply_for_tool_round_limit,
     queue_reply_for_audit_prepare,
     task_local_wait_response_for_open_subagents,
+)
+from .tool_loop.model_turn import (
+    ModelTurnRequest,
+    request_model_response,
+    sample_and_accept_model_response,
 )
 from .tool_loop.natural_user_reply import (
     discard_pending_natural_user_reply,
@@ -158,9 +166,33 @@ class _PendingDeferredToolDrainResult:
     final_prompt: str = ""
 
 
+# LLM: 一次模型轮的具名结果；params 是实际产出这次 response 的循环参数（首请求选模采用、拒绝回退或原对象），
+# 循环只能从这里显式换参数，不能靠回调或闭包暗改。
+# 类用途: 交回模型轮的 prompt/response、停止与返工判定、修复计数以及后续应沿用的完整参数。
+@dataclass(frozen=True)
+class _ModelTurnOutcome:
+    prompt: str
+    response: ModelResponse | None
+    should_stop: bool
+    retry_after_provider_response: bool
+    provider_response_repairs: int
+    params: ToolLoopExecuteParams
+
+
+# LLM: 唯一循环入口的具名结果；params 是循环结束时实际使用的完整参数，调用方据此收口证据、原生历史与续接。
+# 类用途: 交回最终 prompt/response、工具轮数及循环最后使用的参数，替代无法表达参数的三元组。
+@dataclass(frozen=True)
+class ToolLoopRunResult:
+    final_prompt: str
+    final_response: ModelResponse | None
+    tool_rounds: int
+    params: ToolLoopExecuteParams
+
+
 # LLM: This is one immutable candidate for reducing native history; binding and generation are
-# point-in-time facts and the plan must be discarded after either commit or rollback.
-# 类用途: 固定一次运行中 Compact 的阈值、摘要、线程绑定和工具调用边界，供提交与回滚共用。
+# point-in-time facts and four-part run/attempt/turn/call refs are frozen from actual IR calls before
+# mutation. Discard the plan after commit or rollback; current request identity never replaces them.
+# 类用途: 固定运行中 Compact 的阈值、摘要、线程绑定和原始四元调用来源，供提交与回滚共用。
 @dataclass(frozen=True)
 class _NativeCompactPlan:
     policy: object
@@ -177,6 +209,16 @@ class _NativeCompactPlan:
     progress_source_kind: str
     progress_commit_authority: str
     forced: bool
+
+
+# LLM: 仅承载一次已赢得原线程 CAS 的提交事实；调用方在提交后阶段用它刷新同范围视图与投影，
+# 此阶段的异常只能上抛，不能回滚已被 canonical 提交替换的 IR 或计为 Compact 失败。
+# 类用途: 交回提交代次、提交后的线程和被替代的精确来源，供运行中视图刷新复用。
+@dataclass(frozen=True)
+class _NativeCompactCommit:
+    generation: int
+    thread: object
+    source_refs: tuple[dict[str, str], ...]
 
 
 def _effective_max_tool_rounds(agent, params: ToolLoopExecuteParams) -> int:
@@ -247,7 +289,9 @@ def _empty_model_response_retry_context(params: ToolLoopExecuteParams) -> str:
     )
 
 
-# LLM: 每轮在原预检前处理输入；完整恢复宿主独占本次Compact时点，避免捕获前重复摘要/CAS。
+# LLM: Every text/native tool round passes the shared context window before provider preflight;
+# only a full-recovery request host that owns this Compact moment may defer the native fit, so the
+# same source is not summarized/CAS-committed twice before capture. Do not bypass it otherwise.
 # 函数用途: 组装本轮工具模型输入，并在真正调用模型前用统一 Compact 配置压住可见上下文。
 def build_tool_loop_prompt(agent, params: ToolLoopExecuteParams) -> str:
     # 子代理状态是当前运行事实，不属于可被 compact 摘要冻结的历史。每次 provider 安全点
@@ -437,8 +481,9 @@ def _native_compact_policy(agent: object, params: ToolLoopExecuteParams) -> obje
     )
 
 
-# LLM: 规划先检查停止及完整内容可计量性；未知媒体不摘要、不改IR、不推进代次，同模型文字推理仍沿原合同。
-# 函数用途: 确认可用文本计量后算触发线、健康尾部、线程绑定和完整替代摘要。
+# LLM: 规划先检查停止及完整内容可计量性；未知媒体不摘要、不改IR、不推进代次。摘要调用前冻结 IR 原始四元来源，
+# 来源歧义以typed Compact错误拒绝，不能用当前请求身份补齐；本入口不改 IR 或推进代次。
+# 函数用途: 确认可用文本计量后算清触发线、健康尾部和线程绑定，并保存压缩前逐调用身份及完整替代摘要。
 def _prepare_native_compact_plan(
     agent: object,
     params: ToolLoopExecuteParams,
@@ -544,8 +589,9 @@ def _native_compact_floor_tokens(
 
 
 # LLM: An authoritative turn binds the applied scope/view to its exact thread before summary
-# generation; only real empty summaries consume the shared circuit.
-# 函数用途: 按本次摘要范围绑定代理线程并生成摘要，真实失败才记录熔断事实。
+# generation and rechecks stop before classifying an empty result; only real empty summaries
+# consume the shared circuit.
+# 函数用途: 按本次摘要范围绑定代理线程并可中断地生成完整摘要，真实失败时才记录统一熔断事实。
 def _live_compact_binding_and_summary(
     agent: object,
     params: ToolLoopExecuteParams,
@@ -633,9 +679,10 @@ def _live_compact_binding_and_summary(
     raise error
 
 
-# LLM: The slow summary call uses the applied view as its semantic base when present, matching
-# source hiding and checkpoint base; interruption remains neutral.
-# 函数用途: 按本次适用摘要可中断地调用模型，并区分停止与真实失败。
+# LLM: The slow summary call checks both cancellation sources before and after provider I/O and
+# uses the applied view as its semantic base when present, matching source hiding and checkpoint
+# base. Interruption closes the block neutrally; only real failure enters the live Compact circuit.
+# 函数用途: 按本次适用摘要可中断地调用 Compact 摘要模型，并把停止和真实失败投影成不同终态。
 def _summarize_live_compact(
     agent: object,
     params: ToolLoopExecuteParams,
@@ -698,9 +745,8 @@ def _summarize_live_compact(
         raise
 
 
-# LLM: Mutation is transactional in memory: interruption or failure restores IR and its readable
-# marker. Only real summary/checkpoint/CAS errors share the failure circuit.
-# 函数用途: 按计划成对删减工具历史；停止或提交失败都把模型上下文完整恢复到操作前。
+# LLM: 候选与 checkpoint/CAS 失败才恢复原列表；提交成功后的投影异常必须保留已提交历史。同步检查中断与故障回归。
+# 函数用途: 沿原会话事务提交压缩候选，明确分开可回滚阶段和已提交后的展示阶段。
 def _apply_native_compact_plan(
     agent: object,
     params: ToolLoopExecuteParams,
@@ -714,24 +760,18 @@ def _apply_native_compact_plan(
     original_tool_context = list(params.tool_context)
     try:
         raise_if_compact_interrupted(lambda: _native_compact_interrupted(params))
-        dropped = compact_native_ir_to_token_budget(
-            params,
-            max_tokens=max(1, plan.target_tokens),
-            token_estimator=estimator,
-            drop_completed_tool_turns=bool(plan.semantic_summary),
+        candidate = reduce_native_compact_candidate(
+            NativeCompactWindow(
+                params.tool_ir_history, params.tool_context, params.archive_tool_calls,
+            ),
+            summary=plan.semantic_summary,
+            target_tokens=plan.target_tokens,
+            estimate_tokens=estimator,
         )
+        dropped, after_tokens = candidate.dropped_pairs, candidate.after_tokens
         if not dropped:
             _emit_native_compact_superseded(params, plan)
             return 0
-        if plan.semantic_summary:
-            replace_compaction_summary_ir(params, plan.semantic_summary)
-        dropped, after_tokens = _settle_native_ir_window(
-            params=params,
-            estimator=estimator,
-            target=plan.target_tokens,
-            dropped=dropped,
-            summary_covers_window=bool(plan.semantic_summary),
-        )
         raise_if_compact_interrupted(lambda: _native_compact_interrupted(params))
         _emit_native_compact_progress(
             params,
@@ -747,9 +787,25 @@ def _apply_native_compact_plan(
             _restore_native_compact_candidate(params, original_ir, original_tool_context)
             _emit_native_compact_superseded(params, plan, after_tokens=after_tokens)
             return 0
-        return _commit_and_publish_native_compact(
-            agent, params, plan, dropped=dropped, after_tokens=after_tokens
+        raise_if_compact_interrupted(lambda: _native_compact_interrupted(params))
+        preserved_pairs = _native_tool_result_count(params)
+        if plan.binding is not None:
+            _emit_native_compact_progress(
+                params,
+                phase="progress",
+                stage="checkpointing",
+                percent=82,
+                **_native_compact_progress_values(plan, after_tokens=after_tokens),
+            )
+        commit = _commit_native_ir_generation(
+            agent, params, plan, after_tokens=after_tokens,
         )
+        if plan.binding is None:
+            # 临时回合没有 canonical 提交；继续保持原内存事务及投影失败回滚。
+            return _publish_native_compact_result(
+                agent, params, plan, dropped=dropped, after_tokens=after_tokens,
+                preserved_pairs=preserved_pairs, canonical_generation=0,
+            )
     except InterruptedError:
         _restore_native_compact_candidate(params, original_ir, original_tool_context)
         _emit_native_compact_superseded(params, plan)
@@ -770,6 +826,16 @@ def _apply_native_compact_plan(
         )
         raise
 
+    # 已赢得 CAS：同范围视图刷新与投影异常原样上抛，不回滚已提交历史，也不记作压缩失败。
+    if params.compact_context is not None:
+        _refresh_native_compact_context(
+            params, commit.thread, summary=plan.semantic_summary, source_refs=commit.source_refs,
+        )
+    return _publish_native_compact_result(
+        agent, params, plan, dropped=dropped, after_tokens=after_tokens,
+        preserved_pairs=preserved_pairs, canonical_generation=commit.generation,
+    )
+
 
 # LLM: Rollback restores both provider IR and its mechanical guidance projection atomically from
 # the caller's snapshots; it never writes ConversationStore or changes the Compact circuit.
@@ -783,54 +849,18 @@ def _restore_native_compact_candidate(
     params.tool_context[:] = original_tool_context
 
 
-# LLM: Settling is a pure in-memory candidate step. It must not commit a generation or publish an
-# event until the caller verifies the full provider-visible request is below the shared trigger.
-# 函数用途: 把摘要和保留工具往返重新计量，继续成对裁剪，并返回尚未提交的候选数字。
-def _settle_native_ir_window(
-    *,
-    params: ToolLoopExecuteParams,
-    estimator: Callable[[], int],
-    target: int,
-    dropped: int,
-    summary_covers_window: bool,
-) -> tuple[int, int]:
-    dropped = _reduce_native_ir_to_target(
-        params,
-        estimator=estimator,
-        target=target,
-        dropped=dropped,
-        summary_covers_window=summary_covers_window,
-    )
-    return dropped, estimator()
-
-
-# LLM: A live-tool generation becomes durable only after the settled candidate passes another
-# interrupt check and its checkpoint/CAS wins; UI completion is emitted afterwards.
-# 函数用途: 停止检查通过后提交健康的运行中 Compact，再把已确认代次和 token 数投给 TUI。
-def _commit_and_publish_native_compact(
+# LLM: 只处理用量失效与投影；异常原样上抛，持久提交或临时回合的回滚边界由调用方掌管。
+# 函数用途: 将已应用的压缩结果投给运行态和 TUI，本函数不做历史回滚或失败记账。
+def _publish_native_compact_result(
     agent: object,
     params: ToolLoopExecuteParams,
     plan: _NativeCompactPlan,
     *,
     dropped: int,
     after_tokens: int,
+    preserved_pairs: int,
+    canonical_generation: int,
 ) -> int:
-    raise_if_compact_interrupted(lambda: _native_compact_interrupted(params))
-    preserved_pairs = _native_tool_result_count(params)
-    if plan.binding is not None:
-        _emit_native_compact_progress(
-            params,
-            phase="progress",
-            stage="checkpointing",
-            percent=82,
-            **_native_compact_progress_values(plan, after_tokens=after_tokens),
-        )
-    canonical_generation = _commit_native_ir_generation(
-        agent,
-        params,
-        plan,
-        after_tokens=after_tokens,
-    )
     # 历史已按完整工具对改写，上一次 provider 实际用量不再能作为追加基线。
     from .model.context_pressure import invalidate_provider_context_observation
 
@@ -885,54 +915,20 @@ def _log_native_compact(
     )
 
 
-# LLM: Re-estimation includes the replacement summary and marker. Once that complete summary is
-# installed, even the newest pair may be released; without a summary ordinary windowing must keep it.
-# 函数用途: 把摘要计入预算；完整摘要已经替代旧历史时，必要时连最后一对巨型回执也成对回收。
-def _reduce_native_ir_to_target(
-    params: ToolLoopExecuteParams,
-    *,
-    estimator: Callable[[], int],
-    target: int,
-    dropped: int,
-    summary_covers_window: bool,
-) -> int:
-    record_native_ir_window(
-        params,
-        omitted_count=dropped,
-        preserved_count=_native_tool_result_count(params),
-    )
-    # handoff marker 和 summary 本身也要进入同一预算；若重新顶过 target，继续整对回收。
-    while estimator() > target:
-        additional = compact_native_ir_to_token_budget(
-            params,
-            max_tokens=max(1, target),
-            token_estimator=estimator,
-            preserve_newest_pair=not summary_covers_window,
-            drop_completed_tool_turns=summary_covers_window,
-        )
-        if additional <= 0:
-            break
-        dropped += additional
-        record_native_ir_window(
-            params,
-            omitted_count=dropped,
-            preserved_count=_native_tool_result_count(params),
-        )
-    return dropped
-
-
-# LLM: This bridge carries the same applied scope and semantic base through checkpoint/CAS; after
-# success it updates only the transient view while the complete archive stays untouched.
-# 函数用途: 提交精确工具边界，并把成功后的同范围摘要视图留给下一模型轮。
+# LLM: This is the only bridge from a settled native window to the canonical thread commit. It
+# compares frozen four-part run/attempt/turn/call refs with the current IR, never bare ids, and
+# carries the applied scope/summary base plus the run-owned interrupt check through checkpoint/CAS.
+# It returns commit facts only; the caller refreshes the run-local view after the rollback boundary.
+# 函数用途: 按压缩前冻结的原始来源计算边界并可中断地提交下一代 Compact，交回代次、提交后线程和替代来源。
 def _commit_native_ir_generation(
     agent: object,
     params: ToolLoopExecuteParams,
     plan: _NativeCompactPlan,
     *,
     after_tokens: int,
-) -> int:
+) -> _NativeCompactCommit | None:
     if plan.binding is None:
-        return 0
+        return None
     from ..conversation.compact_tool_identity import compact_tool_ref_key
     from ..conversation.live_tool_compact import (
         LiveToolCompactCommitRequest,
@@ -941,18 +937,18 @@ def _commit_native_ir_generation(
 
     retained_refs = _native_tool_refs(params)
     retained_keys = {compact_tool_ref_key(ref) for ref in retained_refs}
-    source_refs = tuple(ref for ref in plan.before_tool_refs if compact_tool_ref_key(ref) not in retained_keys)
-    source_call_ids = tuple(ref["call_id"] for ref in source_refs)
-    retained_call_ids = tuple(ref["call_id"] for ref in retained_refs)
+    source_refs = tuple(
+        ref for ref in plan.before_tool_refs if compact_tool_ref_key(ref) not in retained_keys
+    )
     updated_thread = commit_live_tool_compact(
         agent,
         plan.binding,
         LiveToolCompactCommitRequest(
             summary=plan.semantic_summary,
-            source_tool_call_ids=source_call_ids,
+            source_tool_call_ids=tuple(ref["call_id"] for ref in source_refs),
+            retained_tool_call_ids=tuple(ref["call_id"] for ref in retained_refs),
             source_tool_refs=source_refs,
             retained_tool_refs=retained_refs,
-            retained_tool_call_ids=retained_call_ids,
             projected_tokens_before=plan.before_tokens,
             projected_tokens_after=after_tokens,
             policy=plan.policy,
@@ -973,14 +969,11 @@ def _commit_native_ir_generation(
             ),
         ),
     )
-    if params.compact_context is not None:
-        _refresh_native_compact_context(
-            params,
-            updated_thread,
-            summary=plan.semantic_summary,
-            source_refs=source_refs,
-        )
-    return max(0, int(updated_thread.compact_generation or 0))
+    return _NativeCompactCommit(
+        generation=max(0, int(updated_thread.compact_generation or 0)),
+        thread=updated_thread,
+        source_refs=source_refs,
+    )
 
 
 # LLM: A winning CAS fixed the checkpoint. Extend its run-local view from the frozen base/refs;
@@ -1220,6 +1213,7 @@ def _native_tool_call_ids(params: ToolLoopExecuteParams) -> tuple[str, ...]:
 
 
 # LLM: 原typed IR中的ToolCall携带执行四元身份；必须在删减前读取，不能用本次摘要请求补历史attempt。
+# 同轮重复待配对编号或缺原调用的结果都视为来源歧义，以typed Compact错误拒绝，不给覆盖权。
 # 函数用途: 固定运行中Compact的来源引用，检查点与归档恢复用同一身份匹配。
 def _native_tool_refs(params: ToolLoopExecuteParams) -> tuple[dict[str, str], ...]:
     from ..backends.tool_ir import AssistantTurn, ToolResult
@@ -1242,8 +1236,9 @@ def _native_tool_refs(params: ToolLoopExecuteParams) -> tuple[dict[str, str], ..
     return compact_tool_refs(completed)
 
 
-# LLM: native Compact 传完整 typed IR 和同一 run/线程停止回调；分段取消须在回收前生效，原 handoff 不能被重复摘要投影吞掉。
-# 函数用途: 在旧工具对尚未回收时生成当前 turn 续接摘要，保留真实交接并让每段模型请求服从原停止信号。
+# LLM: native compact passes the full typed IR to the memory-archive summarizer; that boundary
+# removes only duplicate task/thread projections and must retain an independent carried handoff.
+# 函数用途: 在旧工具对尚未回收时生成可持续回放的当前 turn 续接摘要，并保留真实交接上下文。
 def _native_tool_history_summary(
     agent: object,
     params: ToolLoopExecuteParams,
@@ -1293,9 +1288,9 @@ def _native_tool_history_summary(
     )
 
 
-# LLM: Text history must use the same applied summary as source hiding; injections remain a copy
-# and the original seed/message containers are untouched.
-# 函数用途: 按本次摘要视图组装文本历史、投递要求与 Goal 归属，不修改原容器。
+# LLM: Text history must use the same applied summary as source hiding; injections remain a copy,
+# append current Goal facts without mutating the original seed/message containers.
+# 函数用途: 按本次摘要视图组装文本历史、投递要求与本轮 Goal 归属，前后台和原生工具协议共用。
 def _runtime_injections_with_delivery_contract(params: ToolLoopExecuteParams, *, agent: object | None = None) -> list:
     injections = list(params.runtime_injections)
     if not native_tool_use_active(params):
@@ -1319,8 +1314,9 @@ def _runtime_injections_with_delivery_contract(params: ToolLoopExecuteParams, *,
     return injections
 
 
-# LLM: Text protocol renders the bounded seed once but selects the explicit applied summary when
-# present; role labels and prose never become lifecycle or coverage authority.
+# LLM: Text protocol renders the same already-bounded seed once without reloading the transcript,
+# but selects the explicit applied summary when present; role labels and prose never become
+# lifecycle, routing, completion or coverage authority.
 # 函数用途: 给文本模型补回本次真正适用的摘要和原有历史消息，缺少视图时沿原线程路径。
 def _text_conversation_history_section(seed: object, *, compact_context: object = None) -> str:
     if seed is None:
@@ -1365,65 +1361,90 @@ def _text_conversation_history_section(seed: object, *, compact_context: object 
     return "\n".join(lines)
 
 
-# LLM: 原完整 prompt 后先确定压缩上下文，再验证可选 child/宿主建议；采用交回完整 params，只有 typed 发送前拒绝可恢复一次原模型，HTTP 后不切回。
-# 函数用途: 生成一次模型响应，把已验证的首次模型参数交给原循环 owner；普通调用保留原返回合同。
-def next_tool_loop_model_response(agent, params: ToolLoopExecuteParams, tool_rounds: int, *, accept_params=None):
+# LLM: 每次外层采样尝试都在瞬断包装器内重新选择业务或回执参数：真实业务请求先按原顺序构建完整 prompt，
+# 再由请求宿主准备同次上下文并核对子代理首请求与主会话候选；内部超限重试绑定该次采用的参数。只有宿主
+# 在首次 HTTP 前抛出的 typed 拒绝可退回同一次尝试的原参数与原 prompt，之后错误原样上抛。返回具名结果，
+# params 是实际产出 response 的循环参数；不要把辅助回执当作业务工具声明已展示。
+# 函数用途: 选择本轮真正要发给模型的上下文与模型依赖，并把原请求、Compact和输入恢复能力交给模型请求周期。
+def next_tool_loop_model_response(
+    agent, params: ToolLoopExecuteParams, tool_rounds: int,
+) -> ModelTurnRequest:
     _discard_stale_natural_reply_for_pending_turn_input(agent, params)
     model_params = natural_user_reply_model_params(params)
-    consumes_task_tool_surface = model_params is params
-    prompt = build_tool_loop_prompt(agent, model_params)
-    if consumes_task_tool_surface and accept_params is not None:
-        from ..model_request_selection import prepare_request_context
-        from .subagent.model_selection import select_first_request_model
-
-        model_params, prompt = prepare_request_context(agent, model_params, prompt)
-        model_params, prompt = select_first_request_model(agent, model_params, prompt)
-        accept_params(model_params)
+    if model_params is not params:
+        prompt, response = _request_tool_loop_model_response(
+            agent, model_params, tool_rounds, consumes_task_tool_surface=False,
+        )
+        return ModelTurnRequest(prompt, response, params)
     from ..model_request_selection import (
         ModelRequestSelectionRejected,
+        prepare_request_context,
         reject_request_selection,
         select_request_model,
     )
+    from .subagent.model_selection import select_first_request_model
 
-    original_params, original_prompt = model_params, prompt
-    if consumes_task_tool_surface and accept_params is not None:
-        model_params, prompt = select_request_model(agent, model_params, prompt)
-        if model_params is not original_params:
-            accept_params(model_params)
+    prompt = build_tool_loop_prompt(agent, params)
+    prepared, prompt = prepare_request_context(agent, params, prompt)
+    baseline, baseline_prompt = select_first_request_model(agent, prepared, prompt)
+    selected, selected_prompt = select_request_model(agent, baseline, baseline_prompt)
     try:
-        response = generate_model_response(ModelGenerateParams(agent, model_params, prompt, tool_rounds))
+        prompt, response = _request_tool_loop_model_response(
+            agent, selected, tool_rounds, first_prompt=selected_prompt,
+        )
+        return ModelTurnRequest(prompt, response, selected)
     except ModelRequestSelectionRejected:
-        reject_request_selection(agent, model_params)
-        model_params, prompt = original_params, original_prompt
-        accept_params(model_params)
-        response = generate_model_response(ModelGenerateParams(agent, model_params, prompt, tool_rounds))
-    result = _retry_after_provider_context_overflow(
-        agent,
-        model_params,
-        tool_rounds,
-        first=(prompt, response),
-    )
-    _consume_ephemeral_loaded_tools(
-        model_params,
-        result[1],
-        tool_surface_was_visible=consumes_task_tool_surface,
-    )
-    return result
+        # 宿主只在候选首次发送前拒绝；撤销候选后沿同一次准备的原参数与原 prompt 执行一次。
+        reject_request_selection(agent, selected)
+        prompt, response = _request_tool_loop_model_response(
+            agent, baseline, tool_rounds, first_prompt=baseline_prompt,
+        )
+        return ModelTurnRequest(prompt, response, baseline)
 
 
-def _consume_ephemeral_loaded_tools(
-    params: ToolLoopExecuteParams,
-    response: object,
+# LLM: 固定同一份参数完成原请求周期；首发可复用已准备的 prompt，超限重试照原方式重建，prompt/response 成对。
+# 只有真实业务请求消费本轮临时工具声明；回执轮不消费。
+# 函数用途: 把请求组装、实际生成、输入恢复与原 Compact 回收绑定到同一份参数后交给模型请求周期。
+def _request_tool_loop_model_response(
+    agent,
+    model_params: ToolLoopExecuteParams,
+    tool_rounds: int,
     *,
-    tool_surface_was_visible: bool = True,
-) -> None:
-    """A discovered schema is visible for exactly one successful model call."""
+    first_prompt: str | None = None,
+    consumes_task_tool_surface: bool = True,
+) -> tuple[str, ModelResponse]:
+    from .tool_context.ptl_retry import DEFAULT_PTL_RETRY_MAX
 
-    if not tool_surface_was_visible or not params.loaded_tool_names:
-        return
-    if str(getattr(response, "runtime_status", "") or "") == "context_overflow":
-        return
-    params.loaded_tool_names.clear()
+    rebuild = partial(build_tool_loop_prompt, agent, model_params)
+    return request_model_response(
+        build_prompt=rebuild if first_prompt is None else _prebuilt_prompt_first(first_prompt, rebuild),
+        generate_response=lambda prompt: generate_model_response(
+            ModelGenerateParams(
+                agent=agent, params=model_params, prompt=prompt, tool_rounds=tool_rounds
+            )
+        ),
+        restore_rejected_input=partial(
+            restore_injected_turn_input_for_provider_retry, agent, model_params
+        ),
+        recover_context=lambda prompt: _ptl_reclaim_oldest(agent, model_params, prompt=prompt),
+        read_overflow_retry_limit=lambda: int(
+            getattr(getattr(agent, "config", None), "tool_context_ptl_retry_max", DEFAULT_PTL_RETRY_MAX) or 0
+        ),
+        visible_loaded_tools=model_params.loaded_tool_names if consumes_task_tool_surface else None,
+    )
+
+
+# LLM: 已准备 prompt 只能用于本请求周期的第一次发送，之后每次都经原 build 重建，不跨请求周期缓存。
+# 函数用途: 生成一次性复用首发 prompt 的组装回调，避免选模后重复准备同一请求。
+def _prebuilt_prompt_first(prompt: str, rebuild: Callable[[], str]) -> Callable[[], str]:
+    pending = [prompt]
+
+    # LLM: 首次调用取走已准备 prompt，之后只委托原 build；不保存其它状态。
+    # 函数用途: 按调用次序返回首发 prompt 或新组装的 prompt。
+    def build() -> str:
+        return pending.pop() if pending else rebuild()
+
+    return build
 
 
 def _natural_user_reply_step(
@@ -1448,48 +1469,6 @@ def _natural_user_reply_step(
         response,
         accepted=accepted,
         rejection_reason=rejection_reason,
-    )
-
-
-# LLM: Provider-reported overflow reuses the same native full-request compact transaction;
-# text protocol retains its bounded PTL reduction. No native pair may disappear off-ledger.
-# 函数用途: 模型实报上下文超限时，原生协议强制走唯一 Compact，文字协议再做轻量重试。
-def _retry_after_provider_context_overflow(
-    agent,
-    params: ToolLoopExecuteParams,
-    tool_rounds: int,
-    *,
-    first: tuple[str, object],
-):
-    from .tool_context.ptl_retry import DEFAULT_PTL_RETRY_MAX
-
-    prompt, response = first
-    retry_max = int(getattr(getattr(agent, "config", None), "tool_context_ptl_retry_max", DEFAULT_PTL_RETRY_MAX) or 0)
-    retries = 0
-    while retries < retry_max and _is_provider_context_overflow(response):
-        # Provider explicitly rejected this physical call before executing the
-        # prompt. Retire its atomic submission batch before any PTL/preflight retry.
-        restore_injected_turn_input_for_provider_retry(agent, params)
-        if not _ptl_reclaim_oldest(agent, params, prompt=prompt):
-            break
-        retries += 1
-        prompt = build_tool_loop_prompt(agent, params)
-        response = generate_model_response(
-            ModelGenerateParams(
-                agent=agent,
-                params=params,
-                prompt=prompt,
-                tool_rounds=tool_rounds,
-            )
-        )
-    return prompt, response
-
-
-# 函数用途: 判定响应是不是 provider 实报的上下文超限（排除 preflight 预测）。
-def _is_provider_context_overflow(response) -> bool:
-    return (
-        str(getattr(response, "runtime_status", "") or "") == "context_overflow"
-        and str(getattr(response, "runtime_source", "") or "") == "provider_error"
     )
 
 
@@ -1541,10 +1520,6 @@ def _restore_tool_loop_params(agent, previous: object, sentinel: object) -> None
     agent._current_tool_loop_params = previous
 
 
-def execute_tool_loop(agent, params: ToolLoopExecuteParams):
-    return _execute_tool_loop_service(ToolLoopService(agent), params)
-
-
 def _renew_exec_lock_if_held(agent, params: ToolLoopExecuteParams) -> None:
     """R1-03 工具循环每轮续租执行权锁（lease 60s，fail-silent）。
 
@@ -1592,22 +1567,22 @@ def _pending_turn_input_invalidates_response(agent, params: ToolLoopExecuteParam
     return True
 
 
-# LLM: 工作片只按结构化响应/中断/预算推进，不能从有无正文猜停工或改写用户请求；重复观察走工具结果账。
-# 函数用途: 执行主子共用的模型工具循环，保留连续工具工作；等待直属孩子时安全让出而不假报完成。
-def _execute_tool_loop_service(service: ToolLoopService, params: ToolLoopExecuteParams):
-    service.current_params = params
+# LLM: 本入口直接调用既有采样、工具和记账函数；每次调用独占计数与 params，只从模型轮具名结果显式换用采用后的参数。
+# 裁决顺序须同步核对中断、续跑和工具循环测试；返回具名结果，调用方从 result.params 取最终参数。
+# 函数用途: 执行主子共用的模型工具循环，会请求模型、运行工具及更新原账；只按结构化响应、中断和预算推进。
+def execute_tool_loop(agent, params: ToolLoopExecuteParams) -> ToolLoopRunResult:
     final_prompt, final_response = "", None
     tool_rounds = params.tool_rounds
     repair_counters, provider_response_repairs = ToolLoopRepairCounters(), 0
 
     while True:
         if is_interrupted():
-            final_response = _interrupted_conversation_response(service._agent)
+            final_response = _interrupted_conversation_response(agent)
             break
         # R1-03：每轮续租执行权锁（fail-silent），活 worker 持续占有防误接管。
-        _renew_exec_lock_if_held(service._agent, params)
+        _renew_exec_lock_if_held(agent, params)
         tool_rounds, pending_final, drained, pending_prompt = _pending_drain_outcome(
-            service, params, tool_rounds
+            agent, params, tool_rounds
         )
         if drained and pending_final is None:
             continue
@@ -1617,35 +1592,31 @@ def _execute_tool_loop_service(service: ToolLoopService, params: ToolLoopExecute
             # （没有自带 prompt 的宿主合成回复保持上一轮的值，语义不变）。
             final_prompt = pending_prompt or final_prompt
             break
-        (
-            final_prompt,
-            final_response,
-            should_stop,
-            retry_after_provider_response,
-            provider_response_repairs,
-        ) = service._model_turn_or_retry(params, tool_rounds, provider_response_repairs)
-        params = service.current_params
-        if retry_after_provider_response:
+        turn = _model_turn_or_retry(agent, params, tool_rounds, provider_response_repairs)
+        params = turn.params
+        final_prompt, final_response = turn.prompt, turn.response
+        provider_response_repairs = turn.provider_response_repairs
+        if turn.retry_after_provider_response:
             continue
         if is_interrupted():
-            final_response = _interrupted_conversation_response(service._agent)
+            final_response = _interrupted_conversation_response(agent)
             break
-        if should_stop:
+        if turn.should_stop:
             break
         # /btw 可能在 provider 正在生成时到达；旧响应此时已过期，不能据此开工具或结束任务。
-        if _pending_turn_input_invalidates_response(service._agent, params):
+        if _pending_turn_input_invalidates_response(agent, params):
             continue
         natural_reply_verdict, final_response = _natural_user_reply_step(params, final_response)
         if natural_reply_verdict == "retry":
             continue
         if natural_reply_verdict == "finish":
             break
-        repair_counters, action = _response_action(service._agent, params, final_response, repair_counters)
+        repair_counters, action = _response_action(agent, params, final_response, repair_counters)
         # 会话运行时 root/child lifecycle boundary: only a plain final response is
         # deferred.  Real tool calls remain executable while children run.
         if action.action == "break":
             if wait_response := task_local_wait_response_for_open_subagents(
-                service._agent,
+                agent,
                 params,
                 response=final_response,
             ):
@@ -1655,13 +1626,13 @@ def _execute_tool_loop_service(service: ToolLoopService, params: ToolLoopExecute
             # 也不改写 turn-end。task_local 的等待由 completion.py 的 direct_child_wait marker
             # + 子代理生命周期事件负责；主/子递归同规则。
             if queue_interim_reply_for_active_named_work(
-                service._agent,
+                agent,
                 params,
                 tool_rounds=tool_rounds,
             ):
                 continue
             if queue_reply_for_audit_prepare(
-                service._agent,
+                agent,
                 params,
                 response=final_response,
                 tool_rounds=tool_rounds,
@@ -1677,7 +1648,7 @@ def _execute_tool_loop_service(service: ToolLoopService, params: ToolLoopExecute
             final_response = routed_response if routed_response is not None else final_response
             break
         final_prompt, final_response, tool_rounds = _tool_step_or_limit(
-            service,
+            agent,
             _ToolStepRequest(
                 params=params,
                 tool_rounds=tool_rounds,
@@ -1688,7 +1659,7 @@ def _execute_tool_loop_service(service: ToolLoopService, params: ToolLoopExecute
         if final_response:
             break
 
-    return final_prompt, final_response, tool_rounds
+    return ToolLoopRunResult(final_prompt, final_response, tool_rounds, params)
 
 
 # LLM: Interrupt exits the main loop without asking the model to reinterpret a cancellation flag.
@@ -1720,202 +1691,103 @@ def _routed_action_step(action):
 
 
 
-# 函数用途: 把 pending 延迟工具调用的双分支收成一次裁决,返回(轮数, 最终回复, 是否命中, 产出回复的 prompt)。
-def _pending_drain_outcome(service, params, tool_rounds):
-    pending = _drain_pending_deferred_tool_calls(service, params, tool_rounds)
+# LLM: 消费延迟工具时沿用本 run 的宿主与参数，保持回复及其来源 prompt 成对返回；需核对延迟收口归属测试。
+# 函数用途: 驱动待处理工具并归一化有无结果的分支，返回轮数、回复、是否命中及来源 prompt。
+def _pending_drain_outcome(agent, params, tool_rounds):
+    pending = _drain_pending_deferred_tool_calls(agent, params, tool_rounds)
     if pending is None:
         return tool_rounds, None, False, ""
     return pending.tool_rounds, pending.final_response, True, pending.final_prompt
 
 
-# LLM: 单个 run 的原循环 owner 保存当前完整参数；自动采用只替换此引用，不修改冻结 dataclass 或共享 Agent。
-# 类用途: 使首轮验证后的协议与模型依赖贯穿后续工具执行、异常保存和最终证据。
-class ToolLoopService:
-    # LLM: 构造只拥有本片参数引用，不登记第二任务或持久状态。
-    # 函数用途: 为当前 run 建立独立工具循环实例。
-    def __init__(self, agent):
-        self._agent = agent
-        self.current_params = None
-
-    # LLM: 原循环入口先固定参数，后续通过显式回调替换整份；退出仍由调用方 finalization 负责。
-    # 函数用途: 执行本片并保留最终使用的协议参数，供调用方收口。
-    def execute(self, params: ToolLoopExecuteParams):
-        self.current_params = params
-        return _execute_tool_loop_service(self, params)
-
-    # LLM: 只接受原首次验证入口交回的同一运行参数；无写盘、探针或模型选择副作用。
-    # 函数用途: 让循环后续步骤读取已采用的完整协议快照。
-    def _accept_params(self, params: ToolLoopExecuteParams):
-        self.current_params = params
-
-    # LLM: 原重试函数持有可更新的参数引用，自动采用后重试不能再使用旧协议。
-    # 函数用途: 处理一次模型轮并向原循环交回真实参数。
-    def _model_turn_or_retry(
-        self,
-        params: ToolLoopExecuteParams,
-        tool_rounds: int,
-        provider_response_repairs: int,
-    ):
-        return _model_turn_or_retry(self._agent, params, tool_rounds, provider_response_repairs, accept_params=self._accept_params)
-
-    def _run_tool_round(self, request: ToolRoundExecutionRequest):
-        return _run_tool_round(self._agent, request)
-
-    def _tool_round_limit_reached(self, params: ToolLoopExecuteParams, tool_rounds: int) -> bool:
-        return _tool_round_limit_reached(self._agent, params, tool_rounds)
-
-    def _final_response_after_tool_limit(self, params: ToolLoopExecuteParams, tool_rounds: int):
-        return _final_response_after_tool_limit(self._agent, params, tool_rounds)
-
-    def _final_response_after_repeated_failure(
-        self, params: ToolLoopExecuteParams, tool_rounds: int
-    ):
-        return _final_response_after_repeated_failure(self._agent, params, tool_rounds)
-
-    def _final_response_after_unknown_outcome_halt(
-        self, params: ToolLoopExecuteParams, tool_rounds: int
-    ):
-        return _final_response_after_unknown_outcome_halt(self._agent, params, tool_rounds)
-
-    def _final_response_after_no_action_gate(
-        self, params: ToolLoopExecuteParams, tool_rounds: int
-    ):
-        return _final_response_after_no_action_gate(self._agent, params, tool_rounds)
-
-    def _execute_one_tool_call(self, request: ToolCallExecuteParams):
-        return execute_one_tool_call(self._agent, request)
-
-    def _record_tool_call(self, record: ToolCallRecordParams) -> None:
-        _record_tool_call(self._agent, record)
-
-
+# LLM: 延迟队列只消费一次，执行和记账回调仍绑定同一 agent；上限收口保持原请求、回复和用量归属。
+# 函数用途: 先取出本 run 排队的工具，再执行一轮或请求模型收口，会更新工具账和延迟队列。
 def _drain_pending_deferred_tool_calls(
-    service: ToolLoopService,
+    agent,
     params: ToolLoopExecuteParams,
     tool_rounds: int,
 ) -> _PendingDeferredToolDrainResult | None:
     pending_calls = _pop_pending_deferred_tool_calls(params)
     if not pending_calls:
         return None
-    if service._tool_round_limit_reached(params, tool_rounds):
+    if _tool_round_limit_reached(agent, params, tool_rounds):
         if queue_interim_reply_for_tool_round_limit(
-            service._agent,
+            agent,
             params,
             tool_rounds=tool_rounds,
         ):
             return _PendingDeferredToolDrainResult(tool_rounds)
-        final_prompt, final_response = service._final_response_after_tool_limit(params, tool_rounds)
+        final_prompt, final_response = _final_response_after_tool_limit(agent, params, tool_rounds)
         # 这一枪是真的模型生成：它的 prompt 必须跟着回复一起回到主循环，否则返回给调用方的
         # prompt 会是上一轮的（跨请求配对）。这里只传递归属，不改任何裁决。
         return _PendingDeferredToolDrainResult(tool_rounds, final_response, final_prompt)
     next_round = tool_rounds + 1
-    next_round, final_response = service._run_tool_round(
+    next_round, final_response = _run_tool_round(
+        agent,
         ToolRoundExecutionRequest(
-            service._agent,
+            agent,
             params,
             next_round,
             ModelResponse(text="[PENDING_DEFERRED_TOOL_CALLS]", backend="tool_loop"),
             pending_calls,
-            service._execute_one_tool_call,
-            service._record_tool_call,
-            _deferred_drain_prompt(service._agent, params),
+            partial(execute_one_tool_call, agent),
+            partial(_record_tool_call, agent),
+            _deferred_drain_prompt(agent, params),
         ),
     )
     return _PendingDeferredToolDrainResult(next_round, final_response)
 
 
-# LLM: 本轮的可选参数采用只更新原局部闭包；重试、Goal 计量、插话确认和异常处理始终消费同一最终模型协议。
-# 函数用途: 运行模型轮及既有重试，首次采用后同步后续重试和外层循环参数。
+# LLM: 原执行权和Goal开始仍在本装配点；仅将采样／响应确认交给窄操作，空响应返工及插话注入保持当前循环内。
+# 计量、恢复与确认显式接收实际产出响应的那份参数；返回具名结果，由循环显式换参。
+# 函数用途: 在有效工作片内请求下一轮模型，绑定原计量和消息账本，处理无可用响应时的一次修复。
 def _model_turn_or_retry(
     agent,
     loop_params: ToolLoopExecuteParams,
     tool_rounds: int,
     provider_response_repairs: int,
-    *,
-    accept_params=None,
-):
+) -> _ModelTurnOutcome:
     stale_message = stale_subagent_attempt_message(agent)
     if stale_message is not None:
         backend = str(getattr(getattr(agent, "backend", None), "name", "") or "")
-        return (
-            "",
-            ModelResponse(text=stale_message, backend=backend),
-            True,
-            False,
-            provider_response_repairs,
+        return _ModelTurnOutcome(
+            "", ModelResponse(text=stale_message, backend=backend), True, False,
+            provider_response_repairs, loop_params,
         )
     try:
-        # LLM: 替换局部与循环 owner 必须在实际生成前完成，不丢失共享的工具账和中断对象。
-        # 函数用途: 把同一运行的新协议参数用于本次调用以及重试。
-        def accept(current):
-            nonlocal loop_params
-            loop_params = current
-            if accept_params is not None:
-                accept_params(current)
-
         begin_goal_model_turn(agent, loop_params)
-        prompt, response = run_with_provider_transient_auto_resume(
-            lambda: next_tool_loop_model_response(agent, loop_params, tool_rounds, accept_params=accept),
+        turn = sample_and_accept_model_response(
+            lambda: next_tool_loop_model_response(agent, loop_params, tool_rounds),
+            retry_allowed=lambda: not active_turn_input_has_unconfirmed_delivery(
+                getattr(loop_params, "live_archive_state", None)
+            ),
+            account_response=partial(account_goal_model_response, agent),
+            restore_rejected_input=partial(restore_injected_turn_input_for_provider_retry, agent),
+            acknowledge_input=partial(acknowledge_injected_turn_input, agent),
             on_chunk=loop_params.effective_on_chunk,
             policy=getattr(agent, "runtime_guard_policy", None),
-            retry_guard=lambda: not _active_turn_input_delivery_is_ambiguous(
-                loop_params
-            ),
         )
-        account_goal_model_response(agent, loop_params, response)
-        # Provider submission is already durable and therefore never blindly
-        # replayed after an ambiguous transport failure. Successful response is
-        # the only edge that advances the exact batch to consumed.
-        if _model_response_deferred_prompt_consumption(response):
-            if str(getattr(response, "runtime_source", "") or "") == "provider_error":
-                restore_injected_turn_input_for_provider_retry(agent, loop_params)
-        else:
-            acknowledge_injected_turn_input(agent, loop_params)
         # 会话运行时/长期助手 scope stream retries to one sampling request.  A later
         # successful model turn proves the provider recovered, so an isolated
         # empty response many tool rounds later gets its own bounded repair
         # instead of inheriting a stale retry count from the whole long task.
-        return prompt, response, False, False, 0
+        return _ModelTurnOutcome(turn.prompt, turn.response, False, False, 0, turn.params)
     except Exception as exc:
         # 会话运行时 queues steer input on the active turn.  If the provider call
         # that was already in flight then ends without a usable response, that
         # stale empty output is not the turn's terminal result: consume the
         # typed mailbox item at this safe point and run the same turn again.
         if _pending_turn_input_supersedes_unusable_response(agent, loop_params, exc):
-            return "", None, False, True, provider_response_repairs
+            return _ModelTurnOutcome("", None, False, True, provider_response_repairs, loop_params)
         if _should_retry_empty_model_response(loop_params, exc, provider_response_repairs):
             context = _empty_model_response_retry_context(loop_params)
         else:
             raise
         loop_params.tool_context.append(context)
-        return (
-            build_tool_loop_prompt(agent, loop_params),
-            None,
-            False,
-            True,
-            provider_response_repairs + 1,
+        return _ModelTurnOutcome(
+            build_tool_loop_prompt(agent, loop_params), None, False, True,
+            provider_response_repairs + 1, loop_params,
         )
-
-
-# LLM: A transient exception after active-turn input reached provider admission is delivery
-# unknown. The model-turn auto-resumer must not rebuild the prompt under a new provider call id.
-# 函数用途: 判断本轮是否携带不能安全自动重发的用户补充消息。
-def _active_turn_input_delivery_is_ambiguous(loop_params: object) -> bool:
-    state = getattr(loop_params, "live_archive_state", None)
-    if not isinstance(state, dict):
-        return False
-    pending = state.get("_guidance_ack_ids")
-    return bool(
-        str(state.get("_guidance_submission_id") or "").strip()
-        or (isinstance(pending, set) and pending)
-    )
-
-
-# LLM: Context-pressure responses are lifecycle signals, not provider acceptance of the prompt.
-# Preflight never crossed I/O; provider_error is an explicit pre-execution rejection safe to retry.
-# 函数用途: 判断本次结构化响应是否要求先压缩并保留待确认输入，而不是确认已消费。
-def _model_response_deferred_prompt_consumption(response: object) -> bool:
-    return str(getattr(response, "runtime_status", "") or "") == "context_overflow"
 
 
 def _response_action(agent, loop_params: ToolLoopExecuteParams, response, repair_counters: ToolLoopRepairCounters):
@@ -1937,66 +1809,75 @@ def _response_action(agent, loop_params: ToolLoopExecuteParams, response, repair
     return decision.counters, decision
 
 
-# LLM: 执行一批工具后只尊重 typed interrupt、预算和显式安全/硬门；普通可恢复
-# 工具失败必须留在当前模型循环内返工，不能由宿主按次数替模型结束 turn。
-# 函数用途: 推进一个工具轮，并在明确的中断或硬边界命中时返回收口响应。
-def _tool_step_or_limit(service: ToolLoopService, request: _ToolStepRequest):
+# LLM: 工具请求的执行、记账回调绑定同一 agent；只按 typed interrupt、预算和显式硬门收口，需同步核对工具及中断测试。
+# 函数用途: 运行一批工具并更新原账，硬边界命中时请求模型收口；普通可恢复失败留在当前循环内返工。
+def _tool_step_or_limit(agent, request: _ToolStepRequest):
     if is_interrupted():
         return (
             request.current_prompt,
-            _interrupted_conversation_response(service._agent),
+            _interrupted_conversation_response(agent),
             request.tool_rounds,
         )
-    if has_pending_turn_input(service._agent, request.params):
+    if has_pending_turn_input(agent, request.params):
         return request.current_prompt, None, request.tool_rounds
-    if service._tool_round_limit_reached(request.params, request.tool_rounds):
+    if _tool_round_limit_reached(agent, request.params, request.tool_rounds):
         if queue_interim_reply_for_tool_round_limit(
-            service._agent,
+            agent,
             request.params,
             tool_rounds=request.tool_rounds,
         ):
             return request.current_prompt, None, request.tool_rounds
-        final_prompt, final_response = service._final_response_after_tool_limit(
+        final_prompt, final_response = _final_response_after_tool_limit(
+            agent,
             request.params,
             request.tool_rounds,
         )
         return final_prompt, final_response, request.tool_rounds
     next_round = request.tool_rounds + 1
-    next_round, final_response = service._run_tool_round(
+    next_round, final_response = _run_tool_round(
+        agent,
         ToolRoundExecutionRequest(
-            service._agent,
+            agent,
             request.params,
             next_round,
             request.action.response,
             request.action.calls,
-            service._execute_one_tool_call,
-            service._record_tool_call,
+            partial(execute_one_tool_call, agent),
+            partial(_record_tool_call, agent),
             request.current_prompt,
         ),
     )
     # 这里只处理部署者显式开启的 hard_failure_halt。默认同类失败只会把
     # 结构化错误和换路提示交还模型，不会设置 repeated_failure_halt。
     if request.params.repeated_failure_halt is not None:
-        final_prompt, final_response = service._final_response_after_repeated_failure(
+        final_prompt, final_response = _final_response_after_halt(
+            agent,
             request.params,
             next_round,
+            reason="repeated_failure_exhausted",
+            runtime_reason="REPEATED_TOOL_FAILURE_EXHAUSTED",
         )
         return final_prompt, final_response, next_round
     # unknown 副作用收口(T-USER-001):副作用结果不确定(单次即收口,对齐错误合同
     # retryable=False)后不再给模型工具权,按未完成收口并如实汇报
     # (与 repeated_failure_halt 正交,不自动续跑)。
     if getattr(request.params, "unknown_outcome_halt", None) is not None:
-        final_prompt, final_response = service._final_response_after_unknown_outcome_halt(
+        final_prompt, final_response = _final_response_after_halt(
+            agent,
             request.params,
             next_round,
+            reason="unknown_outcome",
         )
         return final_prompt, final_response, next_round
     # no-action 闸收口(复核 seq 339):informational 轮模型反复抗拦截仍提调用,
     # 连续达限后不再给工具权,收口轮等用户明确指示(与 unknown 收口正交)。
     if getattr(request.params, "no_action_gate_halt", False):
-        final_prompt, final_response = service._final_response_after_no_action_gate(
+        final_prompt, final_response = _final_response_after_halt(
+            agent,
             request.params,
             next_round,
+            reason="no_action_gate",
+            runtime_reason="TOOL_ACTION_NOT_REQUIRED",
         )
         return final_prompt, final_response, next_round
     return request.current_prompt, final_response, next_round
@@ -2024,9 +1905,7 @@ def _tool_round_limit_reached(agent, params: ToolLoopExecuteParams, tool_rounds:
     return limit > 0 and tool_rounds >= limit
 
 
-# LLM: 工具轮数耗尽后只允许模型基于真实已执行结果收口；若本轮创建了 child，
-# wait for the exact lifecycle wake. Only an explicit active Goal promises a
-# future host-driven turn; ordinary chat must honestly stop for user input.
+# LLM: 轮限先按直属孩子和当前持久Goal选择交接提示，再调用唯一收口流程；孩子等待优先，不得凭缓存Goal承诺续跑。
 # 函数用途: 工具轮数到顶后生成诚实阶段回复，并区分等待子代理、Goal 续跑和普通暂停。
 def _final_response_after_tool_limit(agent, params: ToolLoopExecuteParams, tool_rounds: int):
     waiting_for_children = _executed_subagent_orchestration(params)
@@ -2054,29 +1933,7 @@ def _final_response_after_tool_limit(agent, params: ToolLoopExecuteParams, tool_
             "本次交接后暂停自动推进；"
             "请如实告诉用户：回复『继续』可让我接着做。"
         )
-    final_prompt = build_tool_loop_prompt(agent, params)
-    final_response = generate_model_response(
-        ModelGenerateParams(
-            agent=agent,
-            params=params,
-            prompt=final_prompt,
-            tool_rounds=tool_rounds,
-        )
-    )
-    final_response = without_tool_call_after_limit(params, final_response)
-    final_response = replace(
-        final_response,
-        runtime_status="unfinished",
-        runtime_reason="TOOL_ROUND_LIMIT_REACHED",
-        runtime_source="tool_loop",
-    )
-    return final_prompt, final_response
-
-
-def _repeated_failure_halt_threshold(params: ToolLoopExecuteParams) -> int:
-    # L2 阶梯:同工具同类失败连续达阈值即诚实收口(不再跟随 guardrail
-    # 3N DENY;默认 8,可经 task_attributes/runtime_guard_policy 覆盖)。
-    return configured_repeated_failure_halt_threshold(params)
+    return _final_response_after_halt(agent, params, tool_rounds)
 
 
 # LLM: 轮限承诺必须重读 exact thread/task/goal 的 active 状态；缓存编号仅用于定位，不能证明仍有续跑权。
@@ -2130,8 +1987,8 @@ def _mark_repeated_failure_halt(agent, record: ToolCallRecordParams) -> None:
         record.call.tool_name,
         failure_class,
     )
-    _soft_hint_after_failures(agent, record, count, failure_class)
-    if count < _repeated_failure_halt_threshold(record.params):
+    _soft_hint_after_failures(record, count, failure_class)
+    if count < configured_repeated_failure_halt_threshold(record.params):
         return
     if _hard_halt_hit(record, count):
         object.__setattr__(
@@ -2206,14 +2063,6 @@ def _mark_unknown_outcome_halt(agent, record: ToolCallRecordParams) -> None:
     )
 
 
-# no-action 结构化闸(复核 seq 339 第 2 点):评估判 informational(requires_action=False)
-# 时模型仍提出 ToolCall,不能直接进 handler——由执行层拦截(TOOL_ACTION_NOT_REQUIRED,
-# handler 不执行),有界拦截(连续 2 轮)后走收口轮等用户明确指示。
-# 判定只用结构化信号(assessment 状态 + 调用出现与否 + 轮数),不解析模型话术。
-_NO_ACTION_GATE_STREAK_ATTR = "_no_action_gate_streak"
-_NO_ACTION_GATE_HALT_LIMIT = 2
-
-
 # LLM: repeated failure 硬收口不是默认主链；必须由结构化配置显式启用并达到阈值。
 # 函数用途: 判断部署者是否明确要求把连续失败升级成人工介入硬门。
 def _hard_halt_hit(record: ToolCallRecordParams, count: int) -> bool:
@@ -2245,8 +2094,9 @@ _RECOVERY_HINT_BY_CODE_PREFIX: tuple[tuple[tuple[str, ...], str], ...] = (
 )
 
 
+# LLM: 只消费当前记录和已有失败分类／次数；提示不改变权限、状态或重试规则。
+# 函数用途: 连续两次失败时把原错误合同的换路提示放入当前模型上下文，不再依赖整个Agent。
 def _soft_hint_after_failures(
-    agent,
     record: ToolCallRecordParams,
     count: int,
     failure_class: str,
@@ -2271,119 +2121,32 @@ def _recovery_hint_for_failure_class(failure_class: str) -> str:
     )
 
 
-# LLM: 只有部署者显式开启的 repeated failure 硬门会进入这里；普通可恢复
-# 失败已在当前工具循环内返给模型修正，不能再借此入口替模型结束 turn。
-# 函数用途: 显式硬门命中后让模型基于真实工具记录给出未完成交接。
-def _final_response_after_repeated_failure(
-    agent, params: ToolLoopExecuteParams, tool_rounds: int
+# LLM: 在唯一装配点绑定原模型运输和收口响应处理；unknown原因延后读当前halt，保留原顺序与prompt/response归属。
+# 函数用途: 为轮限、显式硬门、未知副作用和无动作闸共用收口过程，不新增模型重试或执行工具。
+def _final_response_after_halt(
+    agent,
+    params: ToolLoopExecuteParams,
+    tool_rounds: int,
+    *,
+    reason: str = "",
+    runtime_reason: str = "TOOL_ROUND_LIMIT_REACHED",
 ):
-    final_prompt = build_tool_loop_prompt(agent, params)
-    final_response = generate_model_response(
-        ModelGenerateParams(
-            agent=agent,
-            params=params,
-            prompt=final_prompt,
-            tool_rounds=tool_rounds,
-        )
+    return generate_tool_loop_closeout(
+        build_prompt=partial(build_tool_loop_prompt, agent, params),
+        generate_response=lambda prompt: generate_model_response(
+            ModelGenerateParams(agent=agent, params=params, prompt=prompt, tool_rounds=tool_rounds)
+        ),
+        prepare_handoff_response=partial(without_tool_call_after_limit, params, reason=reason),
+        read_runtime_reason=lambda: (
+            unknown_outcome_runtime_reason(getattr(params, "unknown_outcome_halt", None))
+            if reason == "unknown_outcome" else runtime_reason
+        ),
     )
-    final_response = without_tool_call_after_limit(
-        params,
-        final_response,
-        reason="repeated_failure_exhausted",
-    )
-    final_response = replace(
-        final_response,
-        runtime_status="unfinished",
-        runtime_reason="REPEATED_TOOL_FAILURE_EXHAUSTED",
-        runtime_source="tool_loop",
-    )
-    return final_prompt, final_response
 
 
-# T-USER-001 收口:unknown 副作用出现(单次即收口,对齐错误合同)后模型不再有
-# 工具权,基于真实工具记录给诚实总结;不自动续跑(用户未必要求继续,续跑会再造
-# 一轮不确定副作用)。
-def _final_response_after_unknown_outcome_halt(
-    agent, params: ToolLoopExecuteParams, tool_rounds: int
-):
-    final_prompt = build_tool_loop_prompt(agent, params)
-    final_response = generate_model_response(
-        ModelGenerateParams(
-            agent=agent,
-            params=params,
-            prompt=final_prompt,
-            tool_rounds=tool_rounds,
-        )
-    )
-    final_response = without_tool_call_after_limit(
-        params, final_response, reason="unknown_outcome"
-    )
-    # 2026-08-15 3×3 cell1 真机: 错误合同对齐——UNKNOWN 的触发报码若属
-    # taxonomy retryable=True 的「结果已知失败」(COMMAND_FAILED 命令失败读
-    # 输出修正等), 收口按 REPEATED_TOOL_FAILURE(可续跑族, 模型开新轮读
-    # reported_output_preview 修复); 「真未知」(retryable=False: 超时/
-    # 执行者死/无码) 保持 TOOL_OPERATION_OUTCOME_UNKNOWN 单次收口不续跑。
-    # 双席 seq1992 收紧: 仅凭报码不足——「进程非零」不自动等于「无部分
-    # 副作用」。转 REPEATED_TOOL_FAILURE 必须叠加 handler_executed=False
-    # 或 effect_outcome 非 unknown(执行器已声明副作用边界): handler 真实
-    # 执行过的写命令失败(effect_outcome=unknown) 保持 UNKNOWN 人工核对闸。
-    halt = getattr(params, "unknown_outcome_halt", None) or ()
-    reported_code = str(halt[1] if len(halt) > 1 else "").strip().upper()
-    effect = str(halt[2] if len(halt) > 2 else "").strip().lower()
-    handler_executed = bool(halt[3] if len(halt) > 3 else True)
-    try:
-        from ..contracts.error_taxonomy import error_contract
-
-        contract = error_contract(reported_code) if reported_code else None
-        known_retryable_failure = bool(
-            contract is not None
-            and contract.retryable
-            and reported_code
-            and (not handler_executed or effect != "unknown")
-        )
-    except Exception:  # noqa: BLE001 判据失败保守走 unknown 不续跑
-        known_retryable_failure = False
-    runtime_reason = (
-        "REPEATED_TOOL_FAILURE"
-        if known_retryable_failure
-        else "TOOL_OPERATION_OUTCOME_UNKNOWN"
-    )
-    final_response = replace(
-        final_response,
-        runtime_status="unfinished",
-        runtime_reason=runtime_reason,
-        runtime_source="tool_loop",
-    )
-    return final_prompt, final_response
-
-
-# no-action 闸收口:informational 轮模型连续抗拦截提调用达限后不再给工具权,
-# 收口轮剥掉工具调用并按未完成交接(等用户明确指示,而非自动执行或自动完成)。
-def _final_response_after_no_action_gate(
-    agent, params: ToolLoopExecuteParams, tool_rounds: int
-):
-    final_prompt = build_tool_loop_prompt(agent, params)
-    final_response = generate_model_response(
-        ModelGenerateParams(
-            agent=agent,
-            params=params,
-            prompt=final_prompt,
-            tool_rounds=tool_rounds,
-        )
-    )
-    final_response = without_tool_call_after_limit(
-        params, final_response, reason="no_action_gate"
-    )
-    final_response = replace(
-        final_response,
-        runtime_status="unfinished",
-        runtime_reason="TOOL_ACTION_NOT_REQUIRED",
-        runtime_source="tool_loop",
-    )
-    return final_prompt, final_response
-
-
-# LLM: 原结果只归档一次；可选阅读提示只追加到 text/native 共用展示，不改结果、账本或 refs；同步核对关闭等价与原恢复锚点。
+# LLM: Archive once, then feed the same bounded projection to text and native histories before any
+# later compact/window logic; do not let raw result refs bypass this choke point. The optional
+# reading hint only appends to that shared display and never changes results, ledgers or refs.
 # 函数用途: 记录一次工具调用、更新运行事实，并把安全结果及可忽略的阅读建议续入下一轮模型上下文。
 def _record_tool_call(agent, record: ToolCallRecordParams) -> None:
     from ..contracts.required_actions import settle_required_action

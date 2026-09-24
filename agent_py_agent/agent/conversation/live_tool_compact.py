@@ -199,7 +199,10 @@ def _validated_live_tool_request(
     source_ids = tuple(ref["call_id"] for ref in source_refs)
     retained_ids = tuple(ref["call_id"] for ref in retained_refs)
     if source_ids != request.source_tool_call_ids or retained_ids != request.retained_tool_call_ids:
-        raise ValueError("compact display call ids do not match exact source references")
+        raise ConversationCompactError(
+            "compact display call ids mismatch exact source references",
+            code="COMPACT_TOOL_BOUNDARY_INVALID",
+        )
     replacement = str(request.summary or "").strip()
     if not source_ids:
         raise ConversationCompactError(

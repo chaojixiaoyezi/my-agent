@@ -201,11 +201,11 @@ def test_original_runtime_entry_calls_decision_once_and_passes_selection_to_rend
     captured = []
     class FinishedProbe(Exception):
         pass
-    def execute(service, params):
-        captured.append((params, str(_render_tool_loop_prompt(service._agent, params))))
-        assert str(_render_tool_loop_prompt(service._agent, params)) == captured[0][1]
+    def execute(agent, params):
+        captured.append((params, str(_render_tool_loop_prompt(agent, params))))
+        assert str(_render_tool_loop_prompt(agent, params)) == captured[0][1]
         raise FinishedProbe
-    monkeypatch.setattr(loop_support.ToolLoopService, "execute", execute)
+    monkeypatch.setattr(loop_support, "execute_tool_loop", execute)
     with pytest.raises(FinishedProbe):
         loop_support._execute_runtime_loop(surface.host, surface.params)
     assert len(calls) == 1 and len(captured) == 1
@@ -433,12 +433,14 @@ def capture_runtime_loop(monkeypatch, captured):
     from agent_py_agent.agent.agent_core.runtime import loop_support
     from agent_py_agent.agent.backends.base import ModelResponse
 
-    def execute(service, params):
+    def execute(agent, params):
+        from agent_py_agent.agent.agent_core._tool_loop_service import ToolLoopRunResult
+
         actual = replace(params, workspace_context_snapshot="固定工作区")
-        prompt = _render_tool_loop_prompt(service._agent, actual)
+        prompt = _render_tool_loop_prompt(agent, actual)
         captured.append((actual, str(prompt)))
-        return prompt, ModelResponse(text="完成", backend="fixture"), 0
-    monkeypatch.setattr(loop_support.ToolLoopService, "execute", execute)
+        return ToolLoopRunResult(prompt, ModelResponse(text="完成", backend="fixture"), 0, params)
+    monkeypatch.setattr(loop_support, "execute_tool_loop", execute)
     return loop_support
 
 

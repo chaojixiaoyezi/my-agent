@@ -26,7 +26,9 @@ from agent_py_agent.agent.ingestion.watch_state import new_state, persist_state,
 from agent_py_agent.agent.runtime_db.operations import AGENT_RUN_TERMINAL_STATUSES
 from agent_py_agent.agent.settings.config import AgentConfig
 from agent_py_agent.agent.subagents.manager import SubAgentManager
+from agent_py_agent.agent.subagents.manager_runner_result_payload import RecordRunnerResultParams
 from agent_py_agent.agent.subagents.process_control import is_pid_alive
+from agent_py_agent.agent.subagents.runner_result_admission import make_rejected_runner_result
 from agent_py_agent.agent.subagents.runner_session_liveness import has_fresh_runner_session
 
 
@@ -1104,8 +1106,7 @@ def test_stream_incomplete_same_attempt_closes_authoritative_run(tmp_path: Path)
     import json as _json
 
     from agent_py_agent.agent.conversation import ConversationStore
-    from agent_py_agent.agent.subagents.services.runner_result_service import (
-        RecordRunnerResultParams,
+    from agent_py_agent.agent.subagents.runner_result_admission import (
         _managed_runtime_result_conflict,
         _runner_result_matches_settled_attempt,
     )
@@ -1168,7 +1169,7 @@ def test_stream_incomplete_same_attempt_closes_authoritative_run(tmp_path: Path)
     )
     assert old_rule_accepts is False, "旧规则必须拒绝 FAILED 终态（修复前事故形态）"
     assert _runner_result_matches_settled_attempt("created", "done", params) is True
-    assert _managed_runtime_result_conflict(manager, manager.load(task.id), params) == ""
+    assert _managed_runtime_result_conflict(manager.runtime_db, manager.load(task.id), params) == ""
 
     # 真正的落账入口：写 runner_result + task 终态。
     result = manager.runner_result.record_runner_result(params)
@@ -1202,7 +1203,7 @@ def test_stream_incomplete_same_attempt_closes_authoritative_run(tmp_path: Path)
     next_attempt_id = next_prepared.runner_active_attempt_id
     assert next_attempt_id != attempt_id
     stale_conflict = _managed_runtime_result_conflict(
-        manager,
+        manager.runtime_db,
         manager.load(task.id),
         RecordRunnerResultParams(
             run_id=task.id,
@@ -1389,6 +1390,57 @@ def _closeout_fixture(tmp_path: Path, *, owner: str):
     return manager, store, task, attempt_id, agent_run_id, params, _json
 
 
+# LLM: 测试只绑定现有 Store 与读写能力；每次构造以保留方法故障注入，不能新建持久状态。
+# 函数用途: 为恢复测试装配真实父通知器，沿实际发布链验证幂等和失败恢复。
+def _completion_notifier(manager):
+    from agent_py_agent.agent.subagents.runner_completion_wake import RunnerCompletionNotifier
+
+    store = manager.conversation_store
+    return RunnerCompletionNotifier(
+        tasks=store.tasks if store is not None else None,
+        wakes=store.wakes if store is not None else None,
+        load_task=manager.load, save_task=manager.save,
+    )
+
+
+# LLM: 测试装配真实 manager 的独立能力，产品恢复入口不接收 manager；每次重取通知便于原故障注入。
+# 函数用途: 让已有文件恢复用例按新的显式依赖合同调用同一个恢复入口。
+def _recover_closeouts(manager):
+    from agent_py_agent.agent.subagents.services import runtime_closeout
+
+    return runtime_closeout.recover_pending_closeouts(
+        manager.runtime_db, load_task=manager.load, save_task=manager.save, list_tasks=manager.list_runs,
+        notify_result=_completion_notifier(manager).notify_result,
+    )
+
+
+def test_supervision_assembles_recovery_and_delivers_original_attempt(tmp_path, monkeypatch):
+    from agent_py_agent.agent.ingestion import source_worker
+    from agent_py_agent.agent.subagents.services import runtime_closeout
+
+    manager, _, task, attempt_id, _, params, _ = _closeout_fixture(tmp_path, owner="test/sweep-closeout")
+
+    def unavailable(**kwargs):
+        raise OSError("injected initial settle failure")
+
+    with monkeypatch.context() as failure:
+        failure.setattr(manager.runtime_db, "settle_agent_run", unavailable)
+        manager.runner_result.record_runner_result(params)
+    assert runtime_closeout.pending_closeout(manager.load(task.id))
+    assert _wakes_for_attempt(tmp_path, task.id, attempt_id) == []
+    # 只隔离与本片无关的监督动作；恢复与通知装配仍执行真实生产入口。
+    monkeypatch.setattr(capability_auto_sweep, "_reconcile_conversation_parent_lifecycle", lambda agent: {})
+    monkeypatch.setattr(capability_auto_sweep, "_reclaim_dead_running_runs", lambda agent: [])
+    monkeypatch.setattr(capability_auto_sweep, "_reconcile_direct_parent_waits", lambda agent: {})
+    monkeypatch.setattr(capability_auto_sweep, "auto_start_stalled_orphans", lambda agent: {"started": 0})
+    monkeypatch.setattr(source_worker, "reconcile_audit_source_workers", lambda agent: {})
+    summary = capability_auto_sweep._supervise_stalled_orphans_unlocked(_agent(tmp_path, manager))
+    assert summary["runtime_closeouts_recovered"] == 1
+    assert runtime_closeout.pending_closeout(manager.load(task.id)) is None
+    assert len(_wakes_for_attempt(tmp_path, task.id, attempt_id)) == 1
+    assert manager.runtime_db.agent_run_for_run_id(task.id)["status"] == "failed"
+
+
 # LLM: 只统计"这个 exact attempt 的真实唤醒信号"：按 wake_signal_id 去重 pending/handled 两份，
 # 去重回执文件（wake_dedupe.v1，无 reason）不是唤醒，换代后的新 attempt 也不能被算成重复。
 # 函数用途: 统计唤醒队列里属于某 attempt 的结构化唤醒数量。
@@ -1428,12 +1480,12 @@ def test_closeout_interrupted_before_notify_recovers_once(tmp_path: Path) -> Non
     def _explode(*_args, **_kwargs):
         raise RuntimeError("interrupted before notify")
 
-    original = runner_completion_wake.notify_parent_on_runner_result
-    runner_completion_wake.notify_parent_on_runner_result = _explode
+    original = runner_completion_wake.RunnerCompletionNotifier.notify_result
+    runner_completion_wake.RunnerCompletionNotifier.notify_result = _explode
     try:
         result = manager.runner_result.record_runner_result(params)
     finally:
-        runner_completion_wake.notify_parent_on_runner_result = original
+        runner_completion_wake.RunnerCompletionNotifier.notify_result = original
     assert result.status == "FAILED"
 
     # 收口已提交（run 终态 + 事件），但父级还没收到通知。
@@ -1446,7 +1498,7 @@ def test_closeout_interrupted_before_notify_recovers_once(tmp_path: Path) -> Non
     assert str(fact["target_run_status"]) == "failed"
 
     # 恢复：补通知且只补一次。
-    summary = runtime_closeout.recover_pending_closeouts(manager)
+    summary = _recover_closeouts(manager)
     assert summary["runtime_closeouts_recovered"] == 1, summary
     wakes = _wakes_for_attempt(tmp_path, task.id, attempt_id)
     assert len(wakes) == 1, f"恢复必须恰好补一次通知，实际 {len(wakes)}"
@@ -1454,7 +1506,7 @@ def test_closeout_interrupted_before_notify_recovers_once(tmp_path: Path) -> Non
     assert runtime_closeout.pending_closeout(manager.load(task.id)) is None, "交付完成后必须清账"
 
     # 重复恢复：不得再发一次。
-    again = runtime_closeout.recover_pending_closeouts(manager)
+    again = _recover_closeouts(manager)
     assert again["runtime_closeouts_recovered"] == 0, again
     assert len(_wakes_for_attempt(tmp_path, task.id, attempt_id)) == 1, "重复恢复不得重复通知"
 
@@ -1499,7 +1551,7 @@ def test_closeout_write_failure_leaves_retryable_fact_then_recovers(tmp_path: Pa
     assert "unavailable" in str(fact["closeout_detail"]), fact["closeout_detail"]
 
     # 恢复：先补收口，再补通知。
-    summary = runtime_closeout.recover_pending_closeouts(manager)
+    summary = _recover_closeouts(manager)
     assert summary["runtime_closeouts_recovered"] == 1, summary
     run_after = manager.runtime_db.agent_run_for_run_id(task.id)
     assert str(run_after["status"] or "") == "failed", dict(run_after)
@@ -1524,14 +1576,14 @@ def test_repeated_closeout_recovery_is_idempotent(tmp_path: Path) -> None:
     def _explode(*_args, **_kwargs):
         raise RuntimeError("interrupted before notify")
 
-    original = runner_completion_wake.notify_parent_on_runner_result
-    runner_completion_wake.notify_parent_on_runner_result = _explode
+    original = runner_completion_wake.RunnerCompletionNotifier.notify_result
+    runner_completion_wake.RunnerCompletionNotifier.notify_result = _explode
     try:
         manager.runner_result.record_runner_result(params)
     finally:
-        runner_completion_wake.notify_parent_on_runner_result = original
+        runner_completion_wake.RunnerCompletionNotifier.notify_result = original
     assert runtime_closeout.pending_closeout(manager.load(task.id)) is not None
-    summaries = [runtime_closeout.recover_pending_closeouts(manager) for _ in range(3)]
+    summaries = [_recover_closeouts(manager) for _ in range(3)]
     assert summaries[0]["runtime_closeouts_recovered"] == 1, summaries
     assert all(item["runtime_closeouts_recovered"] == 0 for item in summaries[1:]), summaries
     events = manager.runtime_db.events_for_attempt(attempt_id, limit=100)
@@ -1546,7 +1598,7 @@ def test_repeated_closeout_recovery_is_idempotent(tmp_path: Path) -> None:
 # 冲突终态仍拒——修复前 run=failed + attempt=done + incoming=failed 会被误判为冲突。
 # 函数用途: 验证终态一致性规则不再拒绝可重入的一致终态。
 def test_consistent_terminal_result_is_reentrant_but_conflict_is_rejected(tmp_path: Path) -> None:
-    from agent_py_agent.agent.subagents.services.runner_result_service import (
+    from agent_py_agent.agent.subagents.runner_result_admission import (
         _managed_runtime_result_conflict,
     )
 
@@ -1569,13 +1621,13 @@ def test_consistent_terminal_result_is_reentrant_but_conflict_is_rejected(tmp_pa
 
     # 一致终态必须可重入（修复前这里会被判成 conflicting terminal fact）。
     assert _managed_runtime_result_conflict(
-        manager, manager.load(task.id), params
+        manager.runtime_db, manager.load(task.id), params
     ) == "", "同一 exact current attempt 的一致终态必须可重入完成交付"
 
     # 冲突终态仍拒：run=failed 收到 DONE。
     conflicting = type(params)(**{**vars(params), "status": "DONE", "turn_end_reason": "completed"})
     assert _managed_runtime_result_conflict(
-        manager, manager.load(task.id), conflicting
+        manager.runtime_db, manager.load(task.id), conflicting
     ) != "", "与权威终态冲突的结论必须仍被拒绝"
 
 
@@ -1594,7 +1646,7 @@ def test_rejected_closeout_fact_is_cleared_once_not_retried(tmp_path: Path) -> N
     task_loaded = manager.load(task.id)
     superseded = type(params)(**{**vars(params), "attempt_id": "attempt-superseded-not-current"})
     assert runtime_closeout.record_pending_closeout(
-        manager, task_loaded, superseded, manager.runner_result._make_quick_result(
+        manager.save, task_loaded, superseded, make_rejected_runner_result(
             task_loaded, False, False, params.message
         ),
         {"state": "pending", "target_run_status": "failed", "agent_run_id": agent_run_id,
@@ -1604,7 +1656,7 @@ def test_rejected_closeout_fact_is_cleared_once_not_retried(tmp_path: Path) -> N
     assert fact is not None
     assert str(fact["attempt_id"]) == "attempt-superseded-not-current"
 
-    first = runtime_closeout.recover_pending_closeouts(manager)
+    first = _recover_closeouts(manager)
     assert first["runtime_closeouts_rejected"] == 1, first
     assert runtime_closeout.pending_closeout(manager.load(task.id)) is None, (
         "被拒事实必须清账，不能每个周期重复重试"
@@ -1616,7 +1668,7 @@ def test_rejected_closeout_fact_is_cleared_once_not_retried(tmp_path: Path) -> N
         1 for item in events_before if str(item["event_type"] or "") == "closeout_blocked"
     )
     for _ in range(3):
-        again = runtime_closeout.recover_pending_closeouts(manager)
+        again = _recover_closeouts(manager)
         assert again["runtime_closeouts_rejected"] == 0, again
         assert again["runtime_closeouts_pending"] == 0, again
     events_after = manager.runtime_db.events_for_attempt(attempt_id, limit=200)
@@ -1680,7 +1732,7 @@ def test_closeout_fact_save_failure_stops_and_stays_recoverable(tmp_path: Path) 
     assert str(payload.get("agent_run_id") or "") == agent_run_id
 
     # 存储恢复可写后：恢复链把事件还原成 WAL，再补收口与补通知，恰好一次。
-    summary = runtime_closeout.recover_pending_closeouts(manager)
+    summary = _recover_closeouts(manager)
     assert summary["runtime_closeouts_restored"] == 1, summary
     assert summary["runtime_closeouts_recovered"] == 1, summary
     run_after = manager.runtime_db.agent_run_for_run_id(task.id)
@@ -1693,7 +1745,7 @@ def test_closeout_fact_save_failure_stops_and_stays_recoverable(tmp_path: Path) 
     assert runtime_closeout.pending_closeout(manager.load(task.id)) is None
 
     # 重复恢复仍然幂等。
-    again = runtime_closeout.recover_pending_closeouts(manager)
+    again = _recover_closeouts(manager)
     assert again["runtime_closeouts_recovered"] == 0, again
     assert len(_wakes_for_attempt(tmp_path, task.id, attempt_id)) == 1
 
@@ -1711,8 +1763,8 @@ def test_closeout_cleanup_failure_is_not_reported_as_success(tmp_path: Path) -> 
     assert len(_wakes_for_attempt(tmp_path, task.id, attempt_id)) == 1
     task_loaded = manager.load(task.id)
     assert runtime_closeout.record_pending_closeout(
-        manager, task_loaded, params,
-        manager.runner_result._make_quick_result(task_loaded, False, False, params.message),
+        manager.save, task_loaded, params,
+        make_rejected_runner_result(task_loaded, False, False, params.message),
         {"state": "already_consistent", "target_run_status": "failed",
          "agent_run_id": agent_run_id, "attempt_id": attempt_id},
     )
@@ -1724,7 +1776,9 @@ def test_closeout_cleanup_failure_is_not_reported_as_success(tmp_path: Path) -> 
     manager.save = failing_save
     try:
         outcome = runtime_closeout.advance_pending_closeout(
-            manager, manager.load(task.id), runtime_closeout.pending_closeout(manager.load(task.id))
+            manager.runtime_db, manager.load(task.id), runtime_closeout.pending_closeout(manager.load(task.id)),
+            save_task=manager.save,
+            notify_result=_completion_notifier(manager).notify_result,
         )
     finally:
         manager.save = original_save
@@ -1735,10 +1789,90 @@ def test_closeout_cleanup_failure_is_not_reported_as_success(tmp_path: Path) -> 
     assert len(_wakes_for_attempt(tmp_path, task.id, attempt_id)) == 1
 
     # 存储恢复后，恢复链清账且不再重发。
-    summary = runtime_closeout.recover_pending_closeouts(manager)
+    summary = _recover_closeouts(manager)
     assert summary["runtime_closeouts_recovered"] == 1, summary
     assert runtime_closeout.pending_closeout(manager.load(task.id)) is None
     assert len(_wakes_for_attempt(tmp_path, task.id, attempt_id)) == 1, "已交付的通知不得重发"
+
+
+# LLM: 初次 runner 交付与恢复交付都必须先持久标记 delivered 再清 WAL；单次标记失败时，
+#   原 pending WAL 必须留给恢复扫描，已发出的 exact attempt wake 不能重发。
+# 函数用途: 验证首次交付的已通知标记落盘失败不会把唯一恢复事实清掉。
+def test_initial_delivery_marker_failure_keeps_pending_closeout(tmp_path: Path) -> None:
+    from agent_py_agent.agent.subagents.services import runtime_closeout
+
+    manager, _store, task, attempt_id, _agent_run_id, params, _json = _closeout_fixture(
+        tmp_path, owner="tui-test/initial-delivery-marker-fail"
+    )
+    original_save = manager.save
+    failures = 0
+
+    def fail_first_delivered_marker(saved_task, **kwargs):
+        nonlocal failures
+        fact = (getattr(saved_task, "attributes", {}) or {}).get("runtime_closeout_pending")
+        if isinstance(fact, dict) and fact.get("delivery") == "delivered" and failures == 0:
+            failures += 1
+            raise OSError("injected first delivered marker failure")
+        return original_save(saved_task, **kwargs)
+
+    manager.save = fail_first_delivered_marker
+    try:
+        result = manager.runner_result.record_runner_result(params)
+    finally:
+        manager.save = original_save
+    assert result.status == "FAILED" and failures == 1
+    assert len(_wakes_for_attempt(tmp_path, task.id, attempt_id)) == 1
+    fact = runtime_closeout.pending_closeout(manager.load(task.id))
+    assert fact is not None and fact["delivery"] == "pending"
+
+    summary = _recover_closeouts(manager)
+    assert summary["runtime_closeouts_recovered"] == 1
+    assert runtime_closeout.pending_closeout(manager.load(task.id)) is None
+    assert len(_wakes_for_attempt(tmp_path, task.id, attempt_id)) == 1
+
+
+# LLM: 使用真实队列及原子替换故障，验证已发布信号而回执未保存时恢复仍认同一 attempt。
+# 函数用途: 覆盖 pending 和已被父级消费两种半写窗口，不能把恢复重发当成新通知。
+@pytest.mark.parametrize("handled_before_receipt", [False, True])
+def test_closeout_wake_receipt_half_write_does_not_duplicate(
+    tmp_path: Path, monkeypatch, handled_before_receipt: bool,
+) -> None:
+    from agent_py_agent.agent.common import json_io
+    from agent_py_agent.agent.subagents.services import runtime_closeout
+
+    manager, store, task, attempt_id, _, params, _json = _closeout_fixture(
+        tmp_path, owner="tui-test/wake-receipt-half-write"
+    )
+    thread = store.tasks.thread_for(task.id)
+    key = f"subagent-finished:{task.id}:FAILED:{attempt_id}"
+    receipt_path = store.storage.wake_dedupe_path(thread.thread_id, key)
+    original_replace = json_io._replace_with_retry
+    injected = False
+
+    def fail_receipt_once(source, destination):
+        nonlocal injected
+        # v2 先冻结 prepared，再发布配对；只在发布完成标记替换时注入同一半写事实。
+        payload = _json.loads(source.read_text(encoding="utf-8")) if destination == receipt_path else {}
+        if destination == receipt_path and payload.get("phase") == "published" and not injected:
+            injected = True
+            published = _wakes_for_attempt(tmp_path, task.id, attempt_id)
+            assert len(published) == 1
+            if handled_before_receipt:
+                signal = store.wakes.pending()[0]
+                assert store.wakes.mark_handled(signal.wake_signal_id) is not None
+            raise OSError("injected wake receipt replacement failure")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(json_io, "_replace_with_retry", fail_receipt_once)
+    manager.runner_result.record_runner_result(params)
+    assert injected
+    assert len(_wakes_for_attempt(tmp_path, task.id, attempt_id)) == 1
+    assert runtime_closeout.pending_closeout(manager.load(task.id)) is not None
+
+    summary = _recover_closeouts(manager)
+    assert summary["runtime_closeouts_recovered"] == 1
+    assert runtime_closeout.pending_closeout(manager.load(task.id)) is None
+    assert len(_wakes_for_attempt(tmp_path, task.id, attempt_id)) == 1
 
 
 # LLM: 真机缺口（104 轮注入复现）：run 状态未知/脏时，旧守卫把它当"权威冲突"直接丢弃 runner
@@ -1778,7 +1912,7 @@ def test_unknown_run_status_keeps_conclusion_diagnosable_not_silently_dropped(tm
     # 记录被修复 → 恢复链补收口与补通知，恰好一次。
     with manager.runtime_db.transaction() as conn:
         conn.execute("UPDATE agent_runs SET status='created' WHERE agent_run_id=?", (agent_run_id,))
-    summary = runtime_closeout.recover_pending_closeouts(manager)
+    summary = _recover_closeouts(manager)
     assert summary["runtime_closeouts_recovered"] == 1, summary
     assert str(manager.runtime_db.agent_run_for_run_id(task.id)["status"] or "") == "failed"
     events_after = manager.runtime_db.events_for_attempt(attempt_id, limit=200)

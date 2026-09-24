@@ -1,5 +1,5 @@
-# LLM: 模型生成拥有传输守卫和每次调用的唯一原 turn_id；保持冻结身份、中断和原 IR 提交时机，出站消息与纯容量投影共用一个转换入口。
-# 模块用途: 统一模型调用、超时与流输出，使当前模型、原生消息和停止信号准确进入实际请求线程。
+# LLM: 模型生成拥有传输守卫和每次调用的唯一原 turn_id；保持冻结身份、中断和原 IR 提交时机，出站消息与纯容量投影共用一个转换入口；瞬断重试共用原输入投递判据。
+# 模块用途: 统一模型调用、超时与流输出；重试共用原输入投递判据，使当前模型、原生消息和停止信号准确进入实际请求线程。
 from __future__ import annotations
 
 import os
@@ -58,6 +58,7 @@ from .runner.stage_trace import (
     trace_runner_model_stream_active,
     trace_runner_provider_retry_scheduled,
 )
+from .runtime.guidance import active_turn_input_has_unconfirmed_delivery
 from .tool_ir_guidance import unforwarded_runtime_guidance
 from .tool_ir_history import (
     native_tool_ir_history,
@@ -444,6 +445,8 @@ def _generate_or_recover_context_pressure(
         raise
 
 
+# LLM: 物理超时重试与模型轮共用guidance投递判据；保留当前IR配对、调用次数和原物理账本，不移动pre-I/O提交边。
+# 函数用途: 没有未确认补充消息且工具回执完整时，沿原生成路径最多重试一次超时请求。
 def _retry_once_after_timeout(
     request: ModelGenerateParams,
     exc: ProviderTimeoutError,
@@ -465,7 +468,9 @@ def _retry_once_after_timeout(
     # 造成总尝试数多于配置。外层仍会用同一 typed guidance guard 拒绝歧义重放。
     if exc.stage in {"first_event", "stream_idle"}:
         return None
-    if _has_ambiguous_active_turn_input(request):
+    if active_turn_input_has_unconfirmed_delivery(
+        getattr(request.params, "live_archive_state", None)
+    ):
         return None
     if not _ir_last_tool_use_confirmed(request):
         return None
@@ -487,20 +492,6 @@ def _retry_once_after_timeout(
     except ProviderTimeoutError as exc:
         _record_provider_timeout(_provider_timeout_record(request, retry_state, exc))
         return None  # 无第三次
-
-
-# LLM: A timeout after provider admission has no reliable execution answer. When the same prompt
-# carries active-turn input, a second physical call could deliver that user message twice.
-# 函数用途: 判断当前模型请求是否带有已经越过或可能越过模型边界的补充消息。
-def _has_ambiguous_active_turn_input(request: ModelGenerateParams) -> bool:
-    state = getattr(request.params, "live_archive_state", None)
-    if not isinstance(state, dict):
-        return False
-    pending = state.get("_guidance_ack_ids")
-    return bool(
-        str(state.get("_guidance_submission_id") or "").strip()
-        or (isinstance(pending, set) and pending)
-    )
 
 
 def _ir_last_tool_use_confirmed(request: ModelGenerateParams) -> bool:

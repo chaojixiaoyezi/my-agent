@@ -580,8 +580,10 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
         self._task_progress_turn_id = generation_id
 
     # LLM: 用户消息始终直接进入稳定历史，不能留在 active 后被模型终态覆盖。
-    # 函数用途: 追加一个用户输入块。
+    # 函数用途: 按精确输入编号去重实时回执与历史检查点，再追加稳定用户块。
     def _handle_user_message(self, event: TuiEvent) -> None:
+        if _has_visible_input(self, event.payload.get("message_id")):
+            return
         self._append_stable(
             self._block_from_event(event, role="user", phase="completed"),
             event,
@@ -1059,6 +1061,8 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
     # move only ahead of same-turn blocks that began after the user's real local submission.
     # 函数用途: 把迟到确认的插话插到同回合后续思考/工具/回答之前，不重排其他历史块。
     def _insert_promoted_user(self, block: TuiBlock, event: TuiEvent) -> None:
+        if _has_visible_input(self, event.payload.get("message_id")):
+            return
         if block.block_id in self._stable_ids:
             self.record_diagnostic("STABLE_BLOCK_REPLAY", event)
             return
@@ -1394,6 +1398,8 @@ def _context_usage_from_mapping(
 # 函数用途: 统一实时与恢复的安全元数据，允许同一工具结果补齐缺口，不回读原始参数。
 def _public_metadata(payload: dict[str, Any]) -> dict[str, Any]:
     allowed = {
+        "message_id",
+        "input_state",
         "foreground_gateway_request_id",
         "severity",
         "tool",
@@ -1592,6 +1598,15 @@ def _nonnegative_int(value: Any, default: int) -> int:
         return max(0, int(value))
     except (TypeError, ValueError):
         return default
+
+
+# LLM: 输入身份在当前会话投影内去重；内容相同的不同消息仍独立显示，不从文字推断已消费。
+# 函数用途: 识别同一插话的实时、检查点和重连副本，保留首次显示位置。
+def _has_visible_input(model: TuiViewModelReducer, message_id: object) -> bool:
+    return isinstance(message_id, str) and bool(message_id) and any(
+        block.role == "user" and block.metadata.get("message_id") == message_id
+        for block in model.stable_blocks
+    )
 
 
 __all__ = [

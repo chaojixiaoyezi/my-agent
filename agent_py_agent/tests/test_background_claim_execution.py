@@ -22,7 +22,7 @@ from agent_py_agent.agent.concurrency.interrupt import (
 from agent_py_agent.agent.conversation import background_claim as claim_module
 from agent_py_agent.agent.conversation import runtime as runtime_module
 from agent_py_agent.agent.conversation.background_execution import BackgroundCompactSliceYield
-from agent_py_agent.agent.conversation.models import WakeSignal
+from agent_py_agent.agent.conversation.models import ConversationThread, WakeSignal
 from agent_py_agent.agent.conversation.store import ConversationStore
 from agent_py_agent.agent.settings.model_profiles import ModelProfileError
 
@@ -110,7 +110,7 @@ def _claim_fixture(monkeypatch):
     store = SimpleNamespace(
         claims=SimpleNamespace(acquire=acquire, finish=finish),
         tasks=SimpleNamespace(list_report=links),
-        wakes=SimpleNamespace(mark_handled=retire),
+        wakes=SimpleNamespace(mark_handled=retire, pending_one=lambda _wake_id: None),
         progress=SimpleNamespace(disable=retire),
     )
     agent = SimpleNamespace(subagents=SimpleNamespace(
@@ -145,6 +145,64 @@ def test_interrupt_during_claim_acquire_is_latched_and_releases_exact_claim(monk
     assert not case.records["retire"] and "run" not in case.trace and "start" not in case.trace
     assert not is_interrupted() and not is_interruptible_registered("conversation-request:task")
     case.state.after_acquire = lambda: None
+    assert _run_case(case) is case.state.result
+
+
+@pytest.mark.parametrize("change,admission", [
+    ("handled", "wake_source_not_pending"),
+    ("frozen", "wake_source_changed"),
+    ("unreadable", "wake_source_unreadable"),
+])
+def test_wake_changed_during_claim_acquire_never_starts_model(tmp_path, monkeypatch, change, admission):
+    """真实 wake 账在领取间隙变化；只释放本次租约，不退休通知或调用模型。"""
+    case = _claim_fixture(monkeypatch)
+    source_store = ConversationStore(tmp_path / "sources")
+    source_store.threads.write(ConversationThread(thread_id="thread", canonical_user_id="owner"))
+    case.scheduler.store.wakes = source_store.wakes
+    signal = source_store.wakes.raise_signal({
+        "thread_id": "thread", "root_task_id": "task", "reason": "subagent_runner_finished",
+        "source_agent_id": "child", "metadata": {"status": "BLOCKED"}, "now": 1.0,
+    })
+    case.request.update(reason=signal.reason, wake_signal=signal)
+
+    def after_acquire():
+        if change == "handled":
+            source_store.wakes.mark_handled(signal.wake_signal_id, now=2.0)
+        elif change == "frozen":
+            source_store.wakes.cache_delivery(signal.wake_signal_id, {"response": "已冻结原回复"})
+        else:
+            def unreadable(_wake_id):
+                raise OSError("原信封暂不可读")
+            monkeypatch.setattr(source_store.wakes, "_pending_by_id", unreadable)
+
+    case.state.after_acquire = after_acquire
+
+    assert _run_case(case) is None
+    assert case.records["finish"][0]["runtime_facts"]["admission"] == admission
+    assert not case.records["retire"] and not case.records["policy"]
+    assert "start" not in case.trace and "run" not in case.trace
+    assert [wake.wake_signal_id for wake in source_store.wakes.pending()] == (
+        [] if change == "handled" else [signal.wake_signal_id]
+    )
+
+
+def test_partially_consumed_wake_batch_preserves_unsampled_sibling(tmp_path, monkeypatch):
+    case = _claim_fixture(monkeypatch)
+    source_store = ConversationStore(tmp_path / "sources")
+    source_store.threads.write(ConversationThread(thread_id="thread", canonical_user_id="owner"))
+    case.scheduler.store.wakes = source_store.wakes
+    signals = [source_store.wakes.raise_signal({
+        "thread_id": "thread", "root_task_id": "task", "reason": "subagent_capability_granted",
+        "source_agent_id": f"child-{index}", "now": float(index + 1),
+    }) for index in range(2)]
+    case.request.update(reason=signals[0].reason, wake_signal=runtime_module._batched_wake_signal(tuple(signals)))
+    case.state.after_acquire = lambda: source_store.wakes.mark_handled(signals[0].wake_signal_id, now=3.0)
+
+    assert _run_case(case) is None
+    assert "run" not in case.trace
+    assert [wake.wake_signal_id for wake in source_store.wakes.pending()] == [signals[1].wake_signal_id]
+    case.state.after_acquire = lambda: None
+    case.request["wake_signal"] = signals[1]
     assert _run_case(case) is case.state.result
 
 

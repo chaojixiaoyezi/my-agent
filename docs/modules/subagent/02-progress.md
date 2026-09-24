@@ -45,8 +45,62 @@ runner 将事实收集与纯上下文投影分开；已存在任务和未物化�
 以及前两片的默认/显式工作区、无落盘投影和原工作区状态回归。模型采纳绑定测试显式使用测试容量事实，未冒充真实容量；
 新增配置投影与 worker 等价、无日志/文件副作用、配置变更撤销、原协议请求体 cap 及 OAuth 未知上限回归。
 设计、证据和下一切片见 [容量审计](../../tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。
+授权与旧工作片收口交错的本地候选已修正三个来源：完成通知保留原 attempt 的 `BLOCKED` 历史，
+当前会话关联复读 canonical 后用 CAS 投影；session 退出后按同 run 与原 attempt 核对接续；授权 wake
+只窄写自身账本，不覆盖新 session。三个旧红灯分别验证，另覆盖 grant/stop 交错、新 attempt 与重放。
+真实 RuntimeDB/dispatcher 合同从旧 AgentRun/attempt 都 `done` 开始，只替换线程入口，确认第二轮
+实际登记并激活且重复交付不多开；父关联 `interrupted/cancelled` 仍禁止接续。原 TUI217 保留失败证据，
+本候选不等于同版真实验收通过；细节见 [runbook](SUBAGENT_RUNBOOK.md#capability-阻塞与续跑)。
+
+第 7 步父终态通知已在本地集成，将实际逻辑归入 `RunnerCompletionNotifier`：只持任务关联、WakeStore、
+读取父任务和保存错误四项依赖，完成／受控取消共用原投递路径；结果服务和外部停止端负责装配。
+保留 exact attempt、直属父级、文件模式及内部监督者信号语义；阶段提醒和能力申请入口不扩改。
+已与恢复扫描接口片组合，原 sweep 和恢复测试均绑定同一通知器；旧接口调用删除；组合包 a067baddd 已双机部署，实际验收进行中，详见 STATUS。
+
+第 7 步结果提交依赖已在本地候选收窄：初次提交只接原 RuntimeDB、canonical task、结构化结果、
+保存回调和绑定本轮身份的交付回调；WAL 原语只接 save，运行结算与诊断只接原 RuntimeDB。
+结果服务装配 trace→父通知，仍在 WAL→运行账之后执行；不新增状态副本或兼容转发。
+恢复扫描已集成为显式 repo/load/save/list/notify，原 sweep 绑定窄父通知器；恢复模块不再持有完整 manager。
+本片不新增扫描器或业务重跑入口，不声称第 7 步完成；新版部署和原生验收分列 STATUS。
+
+第 7 步依赖复核：结果准入的参数已在本地从完整 manager 收窄为原 RuntimeDB；
+换代、同轮重入、终态冲突诊断和文件模式的既有合同保持，两个直接受影响测试文件通过。
+此接口收窄尚未发布或安装，不由测试机 TUI195—197 的旧包实测覆盖；完整状态见唯一 Goal 台账。
 
 Shell 网关执行的取消查询现引用公共 `common/cancellation.py`，原令牌和退出语义不变；子树持久取消仍在本模块原合同中。
+
+## 第 7 步展示与完成交接投影小片（本地开发）
+
+配对通知半写恢复已独立本地实现：完成 wake 显式传 `retain_handled=True`，由会话原 dedupe 锁裁决，
+不再以前置查询跳过未完成观察安装。原 pending-closeout WAL 继续负责重试，RuntimeDB／标记／清 WAL 顺序不变；
+通用 Goal 仍在上一代 handled 后新发。原两个重复通知红灯已绿，故障矩阵与边界见[发布交接](../../tasks/HANDOFF_STEP7_WAKE_PUBLICATION.md)。
+此片尚未发布、未覆盖本版本真实 TUI，也不扩大成通用自动恢复服务。
+
+已把子代理当前活动的中文标签映射移到 `runner_display_projection.py`，只读取已裁决的状态码和失败类型。
+`runner_result_state.py` 仍在原结果写回时机设置 `current_step/current_tool`，不让模型正文或标签反向决定任务状态。
+`RUNNING` 继续保留当前活动，正常让出、能力等待、失败和取消的原裁决与持久收口顺序不变。
+同片还修复终态冲突诊断的依赖引用：结果服务原从自身读取不存在的 `runtime_db`，导致拒绝结果后
+没有写出约定的 `closeout_blocked` 事件；现在读取 manager 的原 RuntimeDB，不改变拒绝裁决。
+新增回归先在旧代码复现零事件，再验精确 attempt／run 的原事件落账；对应 42 项状态／续跑／服务窗口
+定向回归通过，另 91 项执行器恢复、结果持久化、直属父交接和工具失败账本回归通过、1 项既有跳过。
+这是源码小片，尚未发布或计入真实 TUI 验收。
+
+完成正文截断、已登记产物引用和版本化交接信封也已从通知模块移到
+`runner_completion_payload.py`。根通知、递归父级安全点和直属父等待读取同一只读投影；
+`runner_completion_wake.py` 继续负责原会话状态更新、通知去重、wake 原子发布和错误回执。
+旧函数定义和旧导出已删除，没有兼容转发；既有 53 项直属父／窗口／结果状态回归通过。
+持久收口的事务顺序未改；新版真实 TUI 和发布仍待完成。
+
+第三小片把接管、废弃轮、换代和 RuntimeDB 终态冲突准入移到
+`runner_result_admission.py`。结果服务在读出 canonical task 后立即调用准入，拒绝时仍返回原快速结果；
+冲突诊断仍写原运行账，允许同一 exact current attempt 的一致终态重入。
+旧类方法和同文件私有判据已删除，原事故与派工恢复两个测试文件共 60 项结束（1 项既有跳过），
+未改变结果文件、WAL 或父级 wake 的提交顺序。
+
+第四小片把初次结果的持久收口与父通知编排移到 `services/runner_result_commit.py`，
+结果服务只在业务结果和任务投影保存后调用它。原 WAL／RuntimeDB／通知原语及恢复扫描保持唯一；
+首次通知后写 `delivered` 标记若失败，现在保留 pending WAL，恢复时依据原回执去重并清账。
+故障注入覆盖标记失败后的持久事实、单次 wake 和恢复，不把本地测试冒充新版真实 TUI。
 
 ## 创建、换轮与停止协调（已发布）
 

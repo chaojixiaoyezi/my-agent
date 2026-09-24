@@ -23,7 +23,15 @@ from .tui_block_renderer import (
     tui_render_context_key,
 )
 from .tui_markdown import FormattedLine, fragments_text
-from .tui_transcript import TuiTranscriptModeState
+from .tui_reading import (
+    ReadingAnchor,
+    capture_reading_anchor,
+    detail_reflow_top,
+    reading_anchor_top,
+    scroll_detail_window,
+    scrollable_line_count,
+)
+from .tui_transcript import TuiTranscriptModeState, complete_detail_window
 from .tui_view_model import TuiStateStore, TuiViewSnapshot
 
 DEFAULT_TRANSCRIPT_WIDTH = 80
@@ -153,11 +161,13 @@ class TuiFrameProvider:
             if key == self._cached_key and self._cached_frame is not None:
                 return self._cached_frame
         if self.transcript_state is not None and self.transcript_state.snapshot().show_all:
-            # 原文分页不先渲染全量块；完整历史仅建立轻量页索引，当前页独立排版。
+            # 原文仅排版锚点附近的有界窗口，页边界不再成为用户必须手动跨越的边界。
             rendered = render_tui_snapshot(
                 replace(snapshot, stable_blocks=(), active_blocks=()), context,
             )
-            rendered = replace(rendered, transcript_lines=self.transcript_state.complete_page_lines(normalized_width))
+            lines, origins, pages, pending = complete_detail_window(self.transcript_state, normalized_width)
+            rendered = replace(rendered, transcript_lines=lines, line_origins=origins, detail_page_offsets=pages,
+                               pending_detail_blocks=pending)
         else:
             rendered = render_tui_snapshot(snapshot, context, cache=self.block_cache)
         if self.transcript_state is not None:
@@ -215,6 +225,8 @@ def _switch_transcript_control_store(
             _HEAD_VIEWPORT_STATE if start_at_top_if_new else _TAIL_VIEWPORT_STATE,
         )
         control._state_store = state_store
+        control._pending_reading_anchor = None
+        control._last_reading_frame = None
         (
             control.follow,
             control.cursor_line,
@@ -239,7 +251,7 @@ def _switch_transcript_control_store(
 
 
 # LLM: TuiTranscriptControl 只投影 provider transcript 行并维护可视 cursor anchor；它不复制 transcript 字符串。
-# 类用途: 给 prompt_toolkit Window 提供按需 formatted lines、follow-tail 和手动滚动。
+# 类用途: 给 Window 提供有界正文、阅读位置、follow-tail 和直接移动视口的滚动。
 class TuiTranscriptControl(UIControl):
     # LLM: cursor_line 是渲染锚点而非会话位置；新消息仅在 follow=True 时把锚点推进末尾。
     # 函数用途: 创建滚动控件、各页面视口和按需旧页回调；没有后台模型或文件读取。
@@ -261,6 +273,8 @@ class TuiTranscriptControl(UIControl):
         self._older_history: Callable[[bool], None] | None = None
         self._selection_width = 0
         self._last_lines: tuple[FormattedLine, ...] = ()
+        self._pending_reading_anchor: ReadingAnchor | None = None
+        self._last_reading_frame: TuiRenderFrame | None = None
         self._lock = threading.Lock()
 
     # LLM: A source switch saves only viewport state under the exact typed store,
@@ -285,13 +299,23 @@ class TuiTranscriptControl(UIControl):
         return True
 
     # LLM: create_content 每次只取共享 frame 引用，不拼整份字符串；空 transcript 仍返回一行合法 UIContent。
-    # 函数用途: 生成 prompt_toolkit 当前宽度的行访问器和滚动光标。
+    # 函数用途: 生成行访问器；窗口中任何归档未就绪时保留来源锚点，前文加载也不能推走正在看的消息。
     def create_content(self, width: int, height: int) -> UIContent:
-        lines = self.provider.frame(width).transcript_lines or ((),)
+        frame = self.provider.frame(width)
+        lines = frame.transcript_lines or ((),)
+        line_count = scrollable_line_count(frame, max(1, height), self.provider.transcript_state)
+        lines = (*lines, *((),) * (line_count - len(lines)))
         visible_block_ids = _counted_message_block_ids(
             self.provider.state_store.snapshot()
         )
         with self._lock:
+            anchor = self._pending_reading_anchor
+            detail_top = None
+            if anchor is None and not self.follow and self._last_reading_frame is not None and frame is not self._last_reading_frame:
+                if self._selection_width == width:
+                    detail_top = detail_reflow_top(self, self._last_reading_frame, frame)
+                if detail_top is None:
+                    anchor = capture_reading_anchor(self, self._last_reading_frame)
             if self._selection_width and self._selection_width != width:
                 self._selection = None
                 self._selection_dragging = False
@@ -300,6 +324,12 @@ class TuiTranscriptControl(UIControl):
             self._last_lines = tuple(lines)
             self._line_count = len(lines)
             self._last_render_height = max(1, int(height or 1))
+            if detail_top is not None:
+                self.cursor_line = min(len(lines) - 1, detail_top + self._last_render_height - 1)
+            if anchor is not None and (top := reading_anchor_top(anchor, frame)) is not None:
+                self.cursor_line = min(len(lines) - 1, top + self._last_render_height - 1)
+                self._pending_reading_anchor = anchor if frame.pending_detail_blocks else None
+            self._last_reading_frame = frame
             if self.follow:
                 self.cursor_line = len(lines) - 1
                 self._unseen_baseline = None
@@ -348,34 +378,41 @@ class TuiTranscriptControl(UIControl):
         with self._lock:
             return bool(self.follow)
 
-    # LLM: Upward/manual movement breaks sticky-tail, while a downward move that reaches the
-    # current last rendered line restores it. This mirrors 终端交互's isSticky contract and
-    # must clear unseen state without relying on footer text.
-    # 函数用途: 上下移动 transcript；向下回到底部时自动恢复跟随新消息。
+    # LLM: 滚动直接移动视口顶部；内部原文页只换有界窗口，不恢复实时跟随或触发模型。
+    # 函数用途: 每次上下键和滚轮立即移动画面，原文到页边界自动接续。
     def move(self, delta: int) -> None:
+        frame = self.provider.frame(self.provider.last_width)
+        frame, top = scroll_detail_window(self, frame, int(delta))
+        line_count = scrollable_line_count(frame, self._last_render_height, self.provider.transcript_state)
         visible_block_ids = _counted_message_block_ids(
             self.provider.state_store.snapshot()
         )
         with self._lock:
             self._begin_manual_scroll_locked(visible_block_ids)
-            target = max(
-                0,
-                min(self._line_count - 1, self.cursor_line + int(delta)),
-            )
+            self._pending_reading_anchor = None
+            self._line_count = line_count
+            self._last_reading_frame = frame
+            target = max(0, min(self._line_count - 1, top + self._last_render_height - 1))
             self.cursor_line = target
-            if int(delta) > 0 and target >= self._line_count - 1:
+            if int(delta) > 0 and target >= self._line_count - 1 and not frame.detail_page_offsets:
                 self.follow = True
                 self._unseen_baseline = None
                 self._unseen_block_ids = frozenset()
             else:
                 self.follow = False
-            request_older = int(delta) < 0 and target < self._last_render_height
+            first_page = not frame.detail_page_offsets or frame.detail_page_offsets[0][0] == 0
+            request_older = int(delta) < 0 and top == 0 and first_page
         if request_older and self._older_history is not None:
             self._older_history(False)
 
     # LLM: home 显式离开 follow-tail 并把 anchor 设为首行。
     # 函数用途: 跳到 transcript 顶部。
     def move_home(self) -> None:
+        mode = self.provider.transcript_state
+        if mode is not None and mode.snapshot().show_all:
+            mode.move_complete_page(-mode.snapshot().complete_page)
+        self._last_reading_frame = None
+        self._pending_reading_anchor = None
         visible_block_ids = _counted_message_block_ids(
             self.provider.state_store.snapshot()
         )
@@ -391,7 +428,7 @@ class TuiTranscriptControl(UIControl):
     def set_older_history_callback(self, callback: Callable[[bool], None]) -> None:
         self._older_history = callback
 
-    # LLM: 滚动锚点使用渲染器给出的 block ID 和块内行号，不从正文匹配或总行数差推测位置。
+    # LLM: 预览沿用块内渲染行，完整模式保存来源行；不得用正文匹配或总行数差推测位置。
     # 函数用途: 保存分页之前正在看的确切正文位置，流式尾部增长不影响它。
     def history_anchor(self) -> tuple[str, int] | None:
         frame = self.provider.frame(self.provider.last_width)
@@ -399,17 +436,24 @@ class TuiTranscriptControl(UIControl):
             if self.follow:
                 return None
             line = self.cursor_line
+            if frame.line_origins:
+                anchor = capture_reading_anchor(self, frame)
+                return (anchor.block_id, anchor.line_offset) if anchor else None
         candidates = [(key, offset) for key, offset in frame.block_line_offsets if offset <= line]
         if not candidates:
             return None
         key, offset = candidates[-1]
         return key, line - offset
 
-    # LLM: 只恢复同页块位置，旧页加入已读基线而非新消息；不改变 tail-follow，失效选区不能误用于复制。
+    # LLM: 原文先定位来源页再恢复；旧页加入已读基线而非新消息，失效选区不能误用于复制。
     # 函数用途: 插入旧历史后保留阅读位置，旧内容不增加未读提示，并清掉失效坐标选区。
     def restore_history_anchor(
         self, anchor: tuple[str, int] | None, *, home: bool = False, block_ids: tuple[str, ...] = (),
     ) -> None:
+        state = self.provider.transcript_state
+        if state is not None and state.snapshot().show_all and anchor is not None and not home:
+            state.focus_complete_block(*anchor)
+            self.restore_reading_anchor(ReadingAnchor(*anchor))
         offsets = dict(self.provider.frame(self.provider.last_width).block_line_offsets)
         with self._lock:
             self._selection = None
@@ -434,13 +478,40 @@ class TuiTranscriptControl(UIControl):
     # LLM: jump_to 使用已渲染行坐标并关闭 follow；搜索命中不会通过修改 Window 私有 scroll 字段实现。
     # 函数用途: 将 transcript 锚点跳到指定可见行。
     def jump_to(self, line_index: int) -> None:
+        frame = self.provider.frame(self.provider.last_width)
         visible_block_ids = _counted_message_block_ids(
             self.provider.state_store.snapshot()
         )
         with self._lock:
+            self._pending_reading_anchor = None
+            self._last_reading_frame = frame
+            self._line_count = max(1, len(self._last_reading_frame.transcript_lines))
             self._begin_manual_scroll_locked(visible_block_ids)
             self.follow = False
             self.cursor_line = max(0, min(self._line_count - 1, int(line_index or 0)))
+
+    # LLM: 未渲染的快捷切换必须继续携带原锚点，不读取已经失效的旧模式坐标。
+    # 函数用途: 读取当前消息位置，快速连按 Ctrl+O/Ctrl+E 也不会丢失来源。
+    def reading_anchor(self) -> ReadingAnchor | None:
+        frame = self.provider.frame(self.provider.last_width)
+        with self._lock:
+            return self._pending_reading_anchor or capture_reading_anchor(self, frame)
+
+    # LLM: 显式页快捷键仍按原文页索引工作，但窗口包含前后文，不能错误跳到前一页。
+    # 函数用途: 将选中的原文段直接放到视口顶部。
+    def jump_to_detail_page(self) -> None:
+        frame = self.provider.frame(self.provider.last_width)
+        state = self.provider.transcript_state.snapshot()
+        top = next((start for page, start, _count in frame.detail_page_offsets if page == state.complete_page), 0)
+        self.jump_to(top + self._last_render_height - 1)
+
+    # LLM: 延迟到下一真实布局高度再恢复位置；只影响本视口，不改变另一代理或输入焦点。
+    # 函数用途: 为模式切换记录待恢复的阅读位置。
+    def restore_reading_anchor(self, anchor: ReadingAnchor | None) -> None:
+        with self._lock:
+            self.follow = False
+            self._pending_reading_anchor = anchor
+            self._last_reading_frame = None
 
     # LLM: current_line 返回 control 自己的结构化锚点，搜索入口无需读取 prompt_toolkit render_info 私有字段。
     # 函数用途: 取得当前 transcript 滚动行。
@@ -682,6 +753,29 @@ class TuiTranscriptView:
     def scroll(self, delta: int) -> None:
         self._active_control().move(delta)
 
+    # LLM: 模式改变先保存原视口的块身份，下一次排版恢复；不把入场解释为回到最新。
+    # 函数用途: 在当前阅读位置打开详细视图，保留冻结语义。
+    def enter_transcript(self, snapshot: TuiViewSnapshot) -> None:
+        anchor = self.control.reading_anchor()
+        self.transcript_state.enter(snapshot)
+        self.modal_control.restore_reading_anchor(anchor)
+
+    # LLM: 完整视图按当前块定位稀疏索引，收起也传递同一来源锚点；不扫描未加载归档。
+    # 函数用途: 原地展开或收起完整内容，快速连续按键保持同一消息位置。
+    def toggle_full_detail(self) -> None:
+        anchor = self.modal_control.reading_anchor()
+        enabled = self.transcript_state.toggle_show_all()
+        if enabled and anchor is not None:
+            self.transcript_state.focus_complete_block(anchor.block_id, anchor.line_offset)
+        self.modal_control.restore_reading_anchor(anchor)
+
+    # LLM: 退出详情恢复当前阅读来源，显式回到最新仍使用独立 end 入口。
+    # 函数用途: 收起详细界面后留在刚才读到的消息，用户可以继续输入。
+    def exit_transcript(self) -> None:
+        anchor = self.modal_control.reading_anchor()
+        self.transcript_state.exit()
+        self.control.restore_reading_anchor(anchor)
+
     # LLM: home 委托 control 的结构化锚点，不访问私有 Window scroll 字段。
     # 函数用途: 跳到 transcript 首行。
     def home(self) -> None:
@@ -886,7 +980,7 @@ def _detail_page_mouse_handler(provider: TuiFrameProvider, control: TuiTranscrip
     def handle(mouse_event: MouseEvent):
         if mouse_event.event_type == MouseEventType.MOUSE_UP and mouse_event.button == MouseButton.LEFT:
             if provider.transcript_state is not None and provider.transcript_state.move_complete_page(delta):
-                control.jump_to(0)
+                control.jump_to_detail_page()
                 provider.invalidate()
             return None
         return NotImplemented

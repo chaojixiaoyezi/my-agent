@@ -370,6 +370,7 @@ def test_background_scheduler_treats_compact_slice_yield_as_clean_continuation(
 
     class Store:
         claims = Claims()
+        wakes = _StoreDomain(pending_one=lambda _wake_id: None)
 
         def context_bundle_report(self, thread_id, *, recent_limit=0, include_messages=True):
             assert type(include_messages) is bool
@@ -1814,9 +1815,11 @@ def test_unknown_external_audit_route_remains_retryable() -> None:
     "reason",
     ["subagent_capability_request_open", "subagent_capability_granted"],
 )
-def test_capability_lifecycle_turns_are_internal_until_terminal_child_report(
+@pytest.mark.parametrize("task_status", ["active", "completed", "cancelled", "interrupted"])
+def test_capability_lifecycle_delivery_uses_current_task_status(
     tmp_path,
     reason,
+    task_status,
 ) -> None:
     from agent_py_agent.agent.conversation.runtime import (
         BackgroundRunRequest,
@@ -1841,7 +1844,7 @@ def test_capability_lifecycle_turns_are_internal_until_terminal_child_report(
             "thread_id": thread.thread_id,
             "task_id": "task-root",
             "goal": "完成最小权限写入",
-            "status": "active",
+            "status": task_status,
         }
     )
     request = BackgroundRunRequest(
@@ -1855,10 +1858,101 @@ def test_capability_lifecycle_turns_are_internal_until_terminal_child_report(
         },
     )
 
-    assert _background_delivery_decision(agent, request, store=store) == (
-        False,
-        f"{reason}_internal",
+    expected = {
+        "active": (False, f"{reason}_internal"),
+        "completed": (True, "capability_lifecycle_completion"),
+        "cancelled": (False, "task_cancelled"),
+        "interrupted": (False, "task_interrupted"),
+    }
+    assert _background_delivery_decision(agent, request, store=store) == expected[task_status]
+
+
+@pytest.mark.parametrize("reason", ["subagent_capability_request_open", "subagent_capability_granted"])
+@pytest.mark.parametrize("child_ends", [False, True])
+@pytest.mark.parametrize("scheduled", [False, True])
+def test_capability_slice_delivers_only_after_current_work_completes(tmp_path, monkeypatch, reason, child_ends, scheduled):
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=False, memory_path="memory.jsonl", orphan_supervision_interval_seconds=0),
+        tmp_path,
     )
+    store = agent.conversation_store
+    thread = store.threads.get_or_create({"channel": "internal", "channel_conversation_id": "capability-closeout"})
+    store.tasks.bind({"thread_id": thread.thread_id, "task_id": "task-root", "goal": "处理当前任务"})
+    child = agent.subagents.create_run(goal="处理子任务", thought="", plan=["执行"], parent_id="task-root", root_id="task-root")
+    agent.subagents.lifecycle.set_status(child.id, "RUNNING")
+    backend = _CapturingBackend()
+    original_generate = backend.generate
+
+    # LLM: 替身在真实后台工作片内提交 canonical 子状态，正文不承担完成裁决；仅写 pytest 隔离目录。
+    # 函数用途: 重放能力事件唤醒后孩子在本片结束、父级完成整合的竞态，不运行真实模型或业务。
+    def generate(prompt, on_chunk=None, **kwargs):
+        if child_ends:
+            agent.subagents.lifecycle.set_status(child.id, "BLOCKED")
+        return original_generate(prompt, on_chunk=on_chunk, **kwargs)
+
+    monkeypatch.setattr(backend, "generate", generate)
+    agent.backend = backend
+    channels = FakeDeliveryService()
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=channels)
+    signal = store.wakes.raise_signal({
+        "thread_id": thread.thread_id, "root_task_id": "task-root", "reason": reason,
+        "source_agent_id": child.id, "metadata": {"run_id": child.id},
+    })
+    if scheduled:
+        scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": store})
+        report = scheduler._run_wake_signal(signal, now=time.time())
+    else:
+        report = runtime.run_once({
+            "thread_id": thread.thread_id, "task_id": "task-root", "reason": reason,
+            "wake_signal": signal.to_dict(),
+        })
+
+    assert len(backend.prompts) == 1
+    assert store.tasks.load("task-root").status == ("completed" if child_ends else "active")
+    assert report.delivery_status == ("sent" if child_ends else "suppressed")
+    assert report.delivery_reason == ("capability_lifecycle_completion" if child_ends else f"{reason}_internal")
+    expected = ["后台主代理已检查任务树，并给出阶段汇报。"] if child_ends else []
+    assert [row.content for row in _public_background_messages(store, thread.thread_id)] == expected
+    assert [row.content for row in channels.adapter("internal").sent_messages] == expected
+    native = [row for row in store.messages.recent(thread.thread_id, limit=0) if row.metadata.get("assistant_part_id") == "native"]
+    assert len(native) == 1 and native[0].metadata["turn_end_reason"] == "completed"
+
+
+@pytest.mark.parametrize("reason", ["subagent_capability_request_open", "subagent_capability_granted"])
+@pytest.mark.parametrize("content", ["", "本轮结果正文。"])
+def test_completed_capability_reply_keeps_payload_filter_and_canonical_replay(tmp_path, reason, content):
+    from agent_py_agent.agent.conversation.channels import DeliveryContext
+    from agent_py_agent.agent.conversation.runtime import (
+        BackgroundRunRequest,
+        _background_delivery_decision,
+    )
+    from agent_py_agent.agent.delivery import DeliveryService, build_default_channel_registry
+
+    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+    store = agent.conversation_store
+    thread = store.threads.get_or_create({"channel": "tui", "channel_conversation_id": "capability-payload"})
+    store.tasks.bind({"thread_id": thread.thread_id, "task_id": "task-root", "goal": "处理当前任务", "status": "completed"})
+    runtime = BackgroundMainAgentRuntime(
+        agent=agent, store=store, channels=DeliveryService(build_default_channel_registry(agent.config)),
+    )
+    request = BackgroundRunRequest(
+        thread_id=thread.thread_id, task_id="task-root", reason=reason,
+        wake_signal={"wake_signal_id": "wake-capability-completed", "root_task_id": "task-root"},
+    )
+    deliver, delivery_reason = _background_delivery_decision(agent, request, store=store)
+    context = DeliveryContext(channel="tui", target="capability-payload", thread_id=thread.thread_id, task_id="task-root")
+    commits = [delivery_module.record_background_response(
+        _delivery_dependencies(runtime), request, context, content,
+        deliver=deliver, delivery_reason=delivery_reason,
+    ) for _ in range(2)]
+
+    rows = _public_background_messages(store, thread.thread_id)
+    assert [row.content for row in rows] == ([content] if content else [])
+    if content:
+        assert commits[0].persisted and commits[0].message_id == commits[1].message_id
+        assert rows[0].metadata["assistant_part_id"] == "final"
+    else:
+        assert all(item.delivery_status == "suppressed" and not item.persisted for item in commits)
 
 
 def test_internal_audit_finding_empty_reply_remains_retryable(
@@ -3582,6 +3676,187 @@ def _run_child_done_wake(runtime, thread_id: str, child_id: str, *, now: float):
             },
             "now": now,
         }
+    )
+
+
+# LLM: 信封沿真实 wake store 登记，历史状态不随 canonical 子代理续跑而改写。
+# 函数用途: 为旧阻塞与当前完成交错创建可单独核对、消费的生命周期通知。
+def _raise_child_completion_signal(store, thread_id, child_id, status, *, now):
+    return store.wakes.raise_signal({
+        "thread_id": thread_id, "reason": "subagent_runner_finished",
+        "root_task_id": "task-root", "source_agent_id": child_id,
+        "metadata": {"task_id": child_id, "status": status}, "now": now,
+    })
+
+
+def test_handled_completion_snapshot_after_sweep_cannot_start_another_turn(tmp_path, monkeypatch):
+    """预扫期间前台已接收旧 BLOCKED，后台只能保留新的 DONE 供下一轮消费。"""
+    agent, store, thread, runtime, _first, child = _child_settlement_fixture(tmp_path)
+    backend = _NaturalCompletionBackend()
+    agent.backend = backend
+    agent.subagents.lifecycle.set_status(child.id, "BLOCKED")
+    old = _raise_child_completion_signal(store, thread.thread_id, child.id, "BLOCKED", now=20.0)
+    selected = store.wakes.pending(limit=0)[0]
+    scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": store})
+    completions = []
+
+    def sweep(_reason, signal):
+        assert signal.wake_signal_id == old.wake_signal_id
+        store.wakes.mark_handled(old.wake_signal_id, now=21.0)
+        agent.subagents.lifecycle.set_status(child.id, "DONE")
+        completions.append(_raise_child_completion_signal(
+            store, thread.thread_id, child.id, "DONE", now=22.0,
+        ))
+
+    monkeypatch.setattr(scheduler, "_pre_wake_capability_sweep", sweep)
+
+    report = scheduler._run_wake_signal(selected, now=20.0)
+
+    assert report is None
+    assert backend.prompts == []
+    assert _public_background_messages(store, thread.thread_id) == []
+    assert store.tasks.load("task-root").status == "active"
+    assert [wake.wake_signal_id for wake in store.wakes.pending()] == [completions[0].wake_signal_id]
+    monkeypatch.setattr(scheduler, "_pre_wake_capability_sweep", lambda *_args: None)
+    reports = scheduler.tick(now=40.0)
+    assert len(reports) == 1 and reports[0].delivery_reason == "root_subagents_terminal"
+    assert len(backend.prompts) == 1
+    assert len(_public_background_messages(store, thread.thread_id)) == 1
+    assert store.tasks.load("task-root").status == "completed"
+    assert store.wakes.pending() == []
+
+
+def test_old_blocked_completion_cannot_bypass_current_done_mailbox(tmp_path):
+    """历史 BLOCKED 不得绕过当前子树及尚未采样的 DONE 信封直接公开最终回复。"""
+    from agent_py_agent.agent.conversation.runtime import (
+        BackgroundRunRequest,
+        _background_delivery_decision,
+    )
+
+    agent, store, thread, _runtime, _first, child = _child_settlement_fixture(tmp_path)
+    agent.subagents.lifecycle.set_status(child.id, "DONE")
+    old = _raise_child_completion_signal(store, thread.thread_id, child.id, "BLOCKED", now=20.0)
+    current = _raise_child_completion_signal(store, thread.thread_id, child.id, "DONE", now=22.0)
+    request = BackgroundRunRequest(
+        thread_id=thread.thread_id, task_id="task-root",
+        reason="subagent_runner_finished", wake_signal=old.to_dict(),
+    )
+
+    assert _background_delivery_decision(agent, request, store=store) == (
+        False, "subagent_completion_mailbox_pending",
+    )
+    assert store.wakes.pending_one(current.wake_signal_id) is not None
+    assert old.metadata["status"] == "BLOCKED"
+
+
+@pytest.mark.parametrize("reason", ["subagent_runner_finished", "subagent_capability_request_open", "subagent_capability_granted"])
+def test_already_handled_snapshot_never_runs_capability_sweep(tmp_path, monkeypatch, reason):
+    agent, store, thread, runtime, _first, child = _child_settlement_fixture(tmp_path)
+    backend = _NaturalCompletionBackend()
+    agent.backend = backend
+    signal = store.wakes.raise_signal({
+        "thread_id": thread.thread_id, "root_task_id": "task-root", "reason": reason,
+        "source_agent_id": child.id, "metadata": {"status": "BLOCKED"},
+    })
+    store.wakes.mark_handled(signal.wake_signal_id)
+    scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": store})
+    swept = []
+    monkeypatch.setattr(scheduler, "_pre_wake_capability_sweep", lambda *_args: swept.append(True))
+
+    assert scheduler._run_wake_signal(signal, now=time.time()) is None
+    assert not swept and not backend.prompts
+    assert store.claims.load(thread.thread_id) == {}
+
+
+@pytest.mark.parametrize("status", ["cancelled", "interrupted"])
+def test_stop_during_sweep_prevents_lifecycle_model_turn(tmp_path, monkeypatch, status):
+    agent, store, thread, runtime, _first, child = _child_settlement_fixture(tmp_path)
+    backend = _NaturalCompletionBackend()
+    agent.backend = backend
+    agent.subagents.lifecycle.set_status(child.id, "BLOCKED")
+    signal = _raise_child_completion_signal(store, thread.thread_id, child.id, "BLOCKED", now=20.0)
+    scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": store})
+    monkeypatch.setattr(scheduler, "_pre_wake_capability_sweep", lambda *_args: store.tasks.update_status({
+        "task_id": "task-root", "status": status,
+    }))
+
+    assert scheduler._run_wake_signal(signal, now=20.0) is None
+    assert not backend.prompts
+    assert store.tasks.load("task-root").status == status
+    assert agent.subagents.load(child.id).status == "BLOCKED"
+    assert store.wakes.pending_one(signal.wake_signal_id) is None
+
+
+@pytest.mark.parametrize("status", ["BLOCKED", "FAILED"])
+@pytest.mark.parametrize("projection", ["batch", "observation"])
+def test_current_failure_sibling_keeps_immediate_notification(tmp_path, status, projection):
+    """旧主信封的孩子已完成，也不能吞掉同批另一个来源当前的真实失败。"""
+    from agent_py_agent.agent.conversation.runtime import (
+        BackgroundRunRequest,
+        _background_delivery_decision,
+        _batched_wake_signal,
+    )
+
+    agent, store, thread, _runtime, first, child = _child_settlement_fixture(tmp_path)
+    agent.subagents.lifecycle.set_status(child.id, status)
+    agent.subagents.create_run(
+        goal="独立未完成部分", thought="", plan=["执行"], parent_id="task-root", root_id="task-root",
+    )
+    old = _raise_child_completion_signal(store, thread.thread_id, first.id, "BLOCKED", now=20.0)
+    current = _raise_child_completion_signal(store, thread.thread_id, child.id, status, now=22.0)
+    wake = _batched_wake_signal((old, current)).to_dict() if projection == "batch" else {
+        "kind": "observation_fallback", "root_task_id": "task-root",
+        "source_agent_ids": [first.id, child.id], "metadata": {"status": status},
+    }
+    request = BackgroundRunRequest(
+        thread_id=thread.thread_id, task_id="task-root", reason="subagent_runner_finished", wake_signal=wake,
+    )
+
+    assert _background_delivery_decision(agent, request, store=store) == (True, "subagent_non_success_terminal")
+    assert agent.subagents.load(child.id).status == status
+
+
+@pytest.mark.parametrize("status", ["PLANNING", "PENDING", "RUNNING", "PAUSED"])
+def test_old_failure_for_continued_child_stays_internal(tmp_path, status):
+    from agent_py_agent.agent.conversation.runtime import (
+        BackgroundRunRequest,
+        _background_delivery_decision,
+    )
+
+    agent, store, thread, _runtime, _first, child = _child_settlement_fixture(tmp_path)
+    agent.subagents.lifecycle.set_status(child.id, status)
+    old = _raise_child_completion_signal(store, thread.thread_id, child.id, "BLOCKED", now=20.0)
+    request = BackgroundRunRequest(
+        thread_id=thread.thread_id, task_id="task-root", reason="subagent_runner_finished", wake_signal=old.to_dict(),
+    )
+
+    assert _background_delivery_decision(agent, request, store=store) == (False, "partial_subagent_success")
+    assert agent.subagents.load(child.id).status == status
+
+
+@pytest.mark.parametrize("completed", [False, True])
+def test_old_failure_with_unreadable_current_tree_uses_existing_unknown_gate(tmp_path, monkeypatch, completed):
+    from agent_py_agent.agent.conversation.runtime import (
+        BackgroundRunRequest,
+        _background_delivery_decision,
+    )
+
+    agent, store, thread, _runtime, _first, child = _child_settlement_fixture(tmp_path)
+    old = _raise_child_completion_signal(store, thread.thread_id, child.id, "BLOCKED", now=20.0)
+    if completed:
+        store.tasks.update_status({"task_id": "task-root", "status": "completed"})
+
+    def unreadable(_root_id):
+        raise OSError("canonical 暂不可读")
+
+    monkeypatch.setattr(agent.subagents, "list_runs_for_root_report", unreadable)
+    request = BackgroundRunRequest(
+        thread_id=thread.thread_id, task_id="task-root", reason="subagent_runner_finished", wake_signal=old.to_dict(),
+    )
+
+    assert _background_delivery_decision(agent, request, store=store) == (
+        (True, "root_task_completed_with_subagent_state_load_error")
+        if completed else (False, "subagent_state_load_error")
     )
 
 
@@ -5857,13 +6132,17 @@ def test_failed_subagent_completion_wake_is_not_delayed_by_success_coalescing(tm
     store.tasks.bind(
         {"thread_id": thread.thread_id, "task_id": "task-root", "goal": "失败立即处理", "now": 11.0}
     )
+    child = agent.subagents.create_run(
+        goal="失败部分", thought="", plan=["执行"], parent_id="task-root", root_id="task-root",
+    )
+    agent.subagents.lifecycle.set_status(child.id, "FAILED")
     store.wakes.raise_signal(
         {
             "thread_id": thread.thread_id,
             "reason": "subagent_runner_finished",
             "root_task_id": "task-root",
-            "source_agent_id": "child-failed",
-            "metadata": {"task_id": "child-failed", "status": "FAILED"},
+            "source_agent_id": child.id,
+            "metadata": {"task_id": child.id, "status": "FAILED"},
             "now": 20.0,
         }
     )
@@ -6426,8 +6705,10 @@ def test_capacity_wake_channel_failure_stays_retryable_and_out_of_transcript(
     assert store.messages.recent(thread.thread_id) == []
 
 
+@pytest.mark.parametrize("stale_snapshot", [False, True])
 def test_capacity_wake_retry_reuses_frozen_reply_without_second_model_turn(
     tmp_path,
+    stale_snapshot,
 ) -> None:
     class _RejectedDelivery:
         def supports_proactive(self, channel: str) -> bool:
@@ -6519,7 +6800,10 @@ def test_capacity_wake_retry_reuses_frozen_reply_without_second_model_turn(
     cached = store.wakes.pending_one(signal.wake_signal_id)
     assert cached is not None
     assert cached.metadata["owner_delivery"]["schema_version"] == ("wake-owner-delivery.v2")
-    assert scheduler.tick(now=51.0) == []
+    if stale_snapshot:
+        assert scheduler._run_wake_signal(signal, now=51.0) is None
+    else:
+        assert scheduler.tick(now=51.0) == []
     assert len(backend.prompts) == 1
     assert store.wakes.pending_one(signal.wake_signal_id) is not None
     assert [
@@ -6549,6 +6833,10 @@ def test_audit_source_worker_quota_wakes_owner_model_and_is_delivered(tmp_path) 
     )
     audit_id = "audit-quota"
     watch_id = "watch-quota"
+    child = agent.subagents.create_run(
+        goal="持续来源", thought="", plan=["读取来源"], parent_id=audit_id, root_id=audit_id,
+    )
+    agent.subagents.lifecycle.set_status(child.id, "BLOCKED")
     store.tasks.bind(
         {
             "thread_id": thread.thread_id,
@@ -6564,9 +6852,9 @@ def test_audit_source_worker_quota_wakes_owner_model_and_is_delivered(tmp_path) 
             "thread_id": thread.thread_id,
             "reason": "subagent_runner_finished",
             "root_task_id": audit_id,
-            "source_agent_id": "source-worker-1",
+            "source_agent_id": child.id,
             "metadata": {
-                "task_id": "source-worker-1",
+                "task_id": child.id,
                 "status": "BLOCKED",
                 "failure_type": FailureType.PROVIDER_QUOTA_EXHAUSTED.value,
                 "audit_source_worker": True,

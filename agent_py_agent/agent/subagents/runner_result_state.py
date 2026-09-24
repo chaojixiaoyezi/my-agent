@@ -33,6 +33,7 @@ from .models import (
     task_status_reason_code,
 )
 from .policies import _status_from_structured_output, _verification_from_runner_status
+from .runner_display_projection import runner_display_label
 from .service_window import service_window_remaining_seconds
 
 _RUNNER_FAILURE_STATUSES = SUBAGENT_FAILURE_STATUSES
@@ -61,8 +62,8 @@ class RunnerAttemptParams:
     turn_end_reason: str
 
 
-# LLM: 宿主授权事实优先；显式结束原因与状态共同分类失败，不能把未完成当异常；保持租约释放和 attempt 顺序。
-# 函数用途: 更新 runner 任务、尝试计数与当前活动，正常让出保留可恢复状态并清除旧错误投影。
+# LLM: 宿主授权事实优先；显式结束原因与状态共同分类失败，不能把未完成当异常；展示标签只在状态裁决后投影，保持租约释放和 attempt 顺序。
+# 函数用途: 更新 runner 任务和尝试计数，再把已裁决的状态显示给 TUI；正常让出保留可恢复状态并清除旧错误投影。
 def apply_runner_result_fields(params: RunnerResultFieldParams) -> None:
     """Apply parsed runner status and raw status text to a task in place."""
     task = params.task
@@ -99,7 +100,12 @@ def apply_runner_result_fields(params: RunnerResultFieldParams) -> None:
     _apply_runner_attempt_fields(RunnerAttemptParams(
         task, dry_run, ok, message, params.now, status_context.get("turn_end_reason", ""),
     ))
-    apply_runner_display_status(task)
+    label = runner_display_label(
+        getattr(task, "status", ""), getattr(task, "failure_type", "")
+    )
+    if label:
+        task.current_step = label
+        task.current_tool = ""
     _release_source_worker_lease_after_result(task, dry_run=dry_run)
     _reclaim_settled_runner_launch(task)
     if ok and not dry_run:
@@ -108,43 +114,6 @@ def apply_runner_result_fields(params: RunnerResultFieldParams) -> None:
         record_source_worker_progress(task, now=params.now)
     result_meta["ok"] = ok
     result_meta["message"] = message
-
-
-# LLM: Display text is a projection of typed status/failure facts only. It may
-# never copy model prose into a terminal activity label or affect lifecycle.
-# 函数用途: 把子代理结束、等待或失败状态投影成 TUI 可读的当前步骤。
-def apply_runner_display_status(task: object) -> None:
-    """Project typed lifecycle facts into a short display-only activity label."""
-    status = str(getattr(task, "status", "") or "").strip().upper()
-    if status == TaskStatus.RUNNING.value:
-        return
-    failure_type = str(getattr(task, "failure_type", "") or "").strip()
-    detail_by_failure = {
-        FailureType.CAPABILITY_REQUEST.value: "等待父级授权",
-        FailureType.PERMISSION_BLOCKED.value: "等待授权",
-        FailureType.WRITE_PERMISSION_BLOCKED.value: "等待授权",
-        FailureType.PROVIDER_QUOTA_EXHAUSTED.value: "额度不足",
-        FailureType.STRUCTURED_OUTPUT_PARSE_ERROR.value: "结果格式异常",
-    }
-    label = detail_by_failure.get(failure_type, "")
-    if not label:
-        label = {
-            TaskStatus.DONE.value: "已完成",
-            TaskStatus.FAILED.value: "失败",
-            TaskStatus.TIMEOUT.value: "超时",
-            TaskStatus.CHANNEL_ERROR.value: "连接失败",
-            TaskStatus.CANCELLED.value: "已停止",
-            TaskStatus.ABANDONED.value: "已停止",
-            TaskStatus.TAKEN_OVER.value: "已接管",
-            TaskStatus.BLOCKED.value: "等待处理",
-            TaskStatus.PAUSED.value: "已暂停",
-            TaskStatus.PENDING.value: "等待继续",
-            TaskStatus.PLANNING.value: "等待继续",
-        }.get(status, status or "")
-    if not label:
-        return
-    task.current_step = label
-    task.current_tool = ""
 
 
 def _consume_source_binding_transition_response(task: object) -> bool:

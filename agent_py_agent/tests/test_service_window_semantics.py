@@ -31,14 +31,25 @@ from agent_py_agent.agent.subagents.models import (
     VerificationStatus,
 )
 from agent_py_agent.agent.subagents.runner_completion_wake import (
+    RunnerCompletionNotifier,
     _metadata,
     _summary,
-    notify_parent_on_runner_result,
 )
 from agent_py_agent.agent.subagents.runner_result_state import (
     _apply_structured_failure_state,
 )
 from agent_py_agent.agent.subagents.service_window import service_window_remaining_seconds
+
+
+# LLM: 测试装配只传终态通知实际所需的四项能力；缺少的测试端口显式为 None，不添加生产兼容入口。
+# 函数用途: 将本文件现有真实 Store／最小替身绑定到通知器，保留原场景断言。
+def _completion_notifier(manager):
+    store = getattr(manager, "conversation_store", None)
+    return RunnerCompletionNotifier(
+        tasks=store.tasks if store is not None else None,
+        wakes=store.wakes if store is not None else None,
+        load_task=getattr(manager, "load", None), save_task=getattr(manager, "save", None),
+    )
 
 
 def _task(*, long_running: bool = True, window: int = 600, created_ago: float = 10.0) -> SimpleNamespace:
@@ -272,6 +283,7 @@ def test_pending_source_continuation_does_not_enter_parent_wake_lane():
     class _Store:
         def __init__(self, *args, **kwargs):
             self.tasks = _StoreDomain(thread_for=self._fake_thread_for_task)
+            self.wakes = object()
 
         def _fake_thread_for_task(self, _task_id):
             raise AssertionError("PENDING source continuation must not publish a wake")
@@ -297,12 +309,7 @@ def test_pending_source_continuation_does_not_enter_parent_wake_lane():
         dry_run=False,
     )
 
-    notify_parent_on_runner_result(
-        SimpleNamespace(conversation_store=_Store()),
-        task,
-        result,
-        {},
-    )
+    assert _completion_notifier(SimpleNamespace(conversation_store=_Store())).notify_result(task, result, {}) == "skipped"
 
 
 @pytest.mark.parametrize("created_ago", [10.0, 700.0])
@@ -363,12 +370,7 @@ def test_completed_audit_source_slice_updates_state_and_wakes_only_supervisor(
     )
     store = _Store()
 
-    notify_parent_on_runner_result(
-        SimpleNamespace(conversation_store=store),
-        task,
-        result,
-        {},
-    )
+    _completion_notifier(SimpleNamespace(conversation_store=store)).notify_result(task, result, {})
 
     assert store.status_updates == [
         {"task_id": task.id, "status": TaskStatus.DONE.value}
@@ -436,12 +438,7 @@ def test_retryable_audit_provider_failure_updates_state_without_parent_wake():
     )
     store = _Store()
 
-    notify_parent_on_runner_result(
-        SimpleNamespace(conversation_store=store),
-        task,
-        result,
-        {},
-    )
+    _completion_notifier(SimpleNamespace(conversation_store=store)).notify_result(task, result, {})
 
     assert store.status_updates == [
         {"task_id": task.id, "status": TaskStatus.BLOCKED.value}
@@ -497,12 +494,7 @@ def test_pending_audit_source_failure_wakes_only_supervisor():
     )
     store = _Store()
 
-    notify_parent_on_runner_result(
-        SimpleNamespace(conversation_store=store),
-        task,
-        result,
-        {},
-    )
+    _completion_notifier(SimpleNamespace(conversation_store=store)).notify_result(task, result, {})
 
     assert store.status_updates == [
         {"task_id": task.id, "status": TaskStatus.BLOCKED.value}
@@ -515,6 +507,7 @@ def test_pending_ordinary_agent_does_not_publish_continuation_wake():
     class _Store:
         def __init__(self, *args, **kwargs):
             self.tasks = _StoreDomain(thread_for=self._fake_thread_for_task)
+            self.wakes = object()
 
         def _fake_thread_for_task(self, _task_id):
             raise AssertionError("ordinary PENDING task must not publish a wake")
@@ -529,9 +522,4 @@ def test_pending_ordinary_agent_does_not_publish_continuation_wake():
         dry_run=False,
     )
 
-    notify_parent_on_runner_result(
-        SimpleNamespace(conversation_store=_Store()),
-        task,
-        result,
-        {},
-    )
+    assert _completion_notifier(SimpleNamespace(conversation_store=_Store())).notify_result(task, result, {}) == "skipped"

@@ -15,6 +15,11 @@ text/native 共用附加提示；原页、失败项、refs、下载顺序、账�
 联合定向 349 项通过；原 TUI pipe CAS 的固定短等待改为真实绘制状态的有界等待，仅修改测试 helper。
 命令、结果及两次原时序失败证据见
 [P5-C 首片交接](../../tasks/DECISION_MODEL_EXTERNAL_MATERIAL_ORDER_HANDOFF.md)。
+第8步索引恢复补齐：externalizer 保存有界 `tool_process`，carried reader 恢复原 process 信封；投影唯一位于 `tooling/runtime_facts.py`，旧索引不推定清理成功。组件验证与真实 TUI 分开。
+
+第8步逐调用 Compact 来源修复：归档索引显式保留实际 canonical call 的 run/attempt/turn，当前 runner 不再改写来源。精确已压调用隐藏、跨 request/attempt 同号保留、混合来源、旧未知保留及同 ID orphan 覆盖均有定向因果测试；未知身份不会被升级为执行或过滤成功。详见 [独立交接](../../tasks/HANDOFF_STEP8_COMPACT_CALL_REFS.md)。
+
+第8步本地补齐工具清理事实：当前结果与跨工作片恢复共用runtime_facts，命令成功和资源清理不互相推断；fake executor到native及MCP来源负例通过，与唯一循环入口16文件组合349 passed／20项既有xfail；真实TUI待组合包。
 
 ## 仅思考续跑保存
 
