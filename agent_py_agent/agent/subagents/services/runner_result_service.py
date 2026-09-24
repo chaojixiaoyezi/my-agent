@@ -1,15 +1,23 @@
 
 # LLM: 此服务是初次结果提交的依赖装配边界；runner 结果服务先核对 exact attempt，再组装并保存结果；运行账结算和父级通知交给唯一提交模块按原顺序推进。
+#   lesson 账本（record_lesson 工具写的 lessons.jsonl）在提取阶段读回并合并进 lessons；账本经验不依赖结构化输出也会记成候选。
 # 模块用途: 保存通过准入的子代理本轮结果与文件交接，调用既有可恢复收口链。
 from __future__ import annotations
 
 """Runner result recording and debrief persistence service."""
 
 import time
+from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 
 from .. import debug_trace, runner_completion_wake
+from ..lesson_ledger import (
+    LEDGER_ABSENT,
+    LessonLedgerReport,
+    merge_lesson_texts,
+    read_lesson_ledger,
+)
 from ..manager_runner_result_payload import (
     BuildAndPersistContext,
     RecordRunnerResultParams,
@@ -54,13 +62,56 @@ def _skill_proposal_note(manager, memory_candidates: list) -> str:
     return f" skill_proposals={len(created)}"
 
 
+# LLM: lessons 为合并后的最终列表；lesson_ledger 默认 absent，保持旧调用方按位置构造不变。
+# 类用途: 打包结果落盘后副作用需要的载荷、解析结果与经验来源。
+@dataclass
 class _PostResultSideEffectParams:
+    output_payload: dict
+    dry_run: bool
+    parsed: SubAgentParsedOutput
+    lessons: list
+    lesson_ledger: LessonLedgerReport = field(default_factory=LessonLedgerReport)
 
-    def __init__(self, output_payload: dict, dry_run: bool, parsed: SubAgentParsedOutput, lessons: list):
-        self.output_payload = output_payload
-        self.dry_run = dry_run
-        self.parsed = parsed
-        self.lessons = lessons
+
+# LLM: 账本是 record_lesson 写下的宿主事实源，与结构化输出里的 lessons 并列；只按账本合同读回、合并去重，
+#   不解析模型正文。读回报告挂到 extracted 上供候选使用；路径为空或文件不存在时 lessons 原样不变。
+# 函数用途: 把本 run 账本里的经验合并进结果 lessons（结构化在前、账本在后、保持顺序去重）。
+def _merge_lesson_ledger(task: SubAgentTask, extracted: _ExtractedOutput) -> None:
+    ledger = read_lesson_ledger(str(getattr(task, "agent_run_lessons_jsonl", "") or ""), run_id=str(task.id or ""))
+    extracted.lesson_ledger = ledger
+    extracted.lessons = merge_lesson_texts(extracted.lessons, ledger.entries)
+
+
+# LLM: 结构化输出的 lesson/finding 仍只在解析成功时记录；账本经验来自 record_lesson 工具，自然回复（没有结构化输出）
+#   也记录。候选是结果交付后的旁支，任何异常只变成工作日志片段，不能阻断结果保存、提交与父级通知。
+# 函数用途: 按结构化输出与 lesson 账本记录本次 owner 记忆候选，返回候选列表和工作日志附注。
+def _record_memory_candidates(manager, task: SubAgentTask, params: _PostResultSideEffectParams) -> tuple[list, str]:
+    structured = params.parsed.found and params.parsed.ok
+    entries = params.lesson_ledger.entries
+    note = _lesson_ledger_note(params.lesson_ledger)
+    if params.dry_run or not (structured or entries):
+        return [], note
+    try:
+        candidates = manager.memory_candidates.record_result_candidates(
+            task,
+            lessons=params.lessons,
+            findings=list(getattr(task, "findings", []) or []) if structured else [],
+            lesson_entries=entries,
+        )
+    except Exception as exc:  # noqa: BLE001 - 可选候选失败不得影响子代理结果交付。
+        return [], f"{note} memory_candidates_error={type(exc).__name__}"
+    return list(candidates), note
+
+
+# LLM: 只在账本存在时写附注，状态/采用/拒绝数都是结构化计数，账本不存在时保持旧日志格式。
+# 函数用途: 生成 lesson 账本读回情况的工作日志片段。
+def _lesson_ledger_note(ledger: LessonLedgerReport) -> str:
+    if ledger.status == LEDGER_ABSENT and not ledger.rejected:
+        return ""
+    return (
+        f" lesson_ledger={ledger.status} lesson_ledger_entries={len(ledger.entries)}"
+        f" lesson_ledger_rejected={ledger.rejected}"
+    )
 
 
 class _RunnerResultBuildParams:
@@ -112,8 +163,8 @@ class SubAgentRunnerResultService:
         Path(ctx.task.runner_result_file).write_text(render_runner_result_markdown(result), encoding="utf-8")
         return result
 
-    # LLM: 结构化输出是可选内容，工具账本是独立事实源；自然 final 同样交付产物，不要求模型复述 JSON。
-    # 函数用途: 收集合规的结果字段和真实文件记录，修改 task 的交接投影但不代写业务文件。
+    # LLM: 结构化输出是可选内容，工具账本是独立事实源；自然 final 同样交付产物与 lesson 账本经验，不要求模型复述 JSON。
+    # 函数用途: 收集合规的结果字段、真实文件记录与 lesson 账本，修改 task 的交接投影但不代写业务文件。
     def _extract_parsed_output(
         self,
         task: SubAgentTask,
@@ -147,6 +198,7 @@ class SubAgentRunnerResultService:
         by_path = {str(item.get("path") or ""): item for item in extracted.artifacts}
         by_path.update({str(item["path"]): item for item in observed})
         extracted.artifacts = list(by_path.values())
+        _merge_lesson_ledger(task, extracted)
         return extracted
 
     def _apply_status_and_build_payload(
@@ -159,7 +211,7 @@ class SubAgentRunnerResultService:
         return apply_status_and_build_payload(params, extracted, now)
 
     # LLM: 结果保存后的副作用顺序固定：保存 task→debrief→统一 Memory 候选→可选 Skill 提案→工作日志→索引；
-    #   Skill 提案只在记录候选之后尝试，失败只写工作日志，返回值仍是候选数量。
+    #   候选含结构化输出与 lesson 账本两个来源；候选与 Skill 提案失败都只写工作日志，返回值仍是候选数量。
     # 函数用途: 处理子代理结果落盘后的保存、交接、候选、提案与索引副作用。
     def _post_result_side_effects(
         self,
@@ -181,24 +233,19 @@ class SubAgentRunnerResultService:
         self.manager.save(task)
         if parsed.found and parsed.ok:
             _runner_append_debrief(task, parsed)
-        memory_candidates = []
-        if not params.dry_run and parsed.found and parsed.ok:
-            memory_candidates = self.manager.memory_candidates.record_result_candidates(
-                task,
-                lessons=params.lessons,
-                findings=list(getattr(task, "findings", []) or []),
-            )
+        memory_candidates, candidate_note = _record_memory_candidates(self.manager, task, params)
         proposal_note = _skill_proposal_note(self.manager, memory_candidates)
         self.manager.actions._append_task_work_log(
             task,
             f"subagent_runner: dry_run={params.dry_run} ok={result.ok} status={task.status} "
-            f"message={result.message} memory_candidates={len(memory_candidates)}{proposal_note}",
+            f"message={result.message} memory_candidates={len(memory_candidates)}{candidate_note}{proposal_note}",
         )
         self.manager.indexing.index_runner_result(result, output_payload)
         return len(memory_candidates)
 
     # LLM: 此处装配原 RuntimeDB、save 及只持四项必要依赖的通知器；提交和终态通知均不接收 manager；
     # 仅向准入传入原 RuntimeDB 与 canonical task；核对 exact attempt 后再落盘，提交模块按原顺序收口与通知。
+    # lesson 账本读回报告随副作用参数交给候选记录；重放同一结果不会重复候选（observation_id 幂等）。
     # 函数用途: 写回通过准入的子代理结果并启动原可靠交接；旧轮被拒，UNKNOWN 不自动重跑。
     def record_runner_result(
         self,
@@ -225,7 +272,9 @@ class SubAgentRunnerResultService:
         self._post_result_side_effects(
             task,
             result,
-            _PostResultSideEffectParams(output_payload, params.dry_run, extracted.parsed, extracted.lessons),
+            _PostResultSideEffectParams(
+                output_payload, params.dry_run, extracted.parsed, extracted.lessons, extracted.lesson_ledger
+            ),
         )
         trace_result = partial(
             debug_trace.trace_runner_result,

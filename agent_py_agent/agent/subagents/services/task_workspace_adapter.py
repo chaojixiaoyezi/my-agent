@@ -63,6 +63,8 @@ def _sync_task_workspace_paths(task: SubAgentTask, task_workspace_paths) -> None
     task.agent_run_workspace_dir = str(task_workspace_paths.agent_adapter_dir)
 
 
+# LLM: 只把 AgentRunWorkspacePaths 的声明原样投影到任务字段，不创建文件；lessons.jsonl 由 record_lesson 工具独占追加。
+# 函数用途: 把 run 工作区里各文件的路径写回任务记录，供工具与结果收口按字段定位。
 def _sync_agent_run_paths(task: SubAgentTask, task_workspace_paths) -> None:
     task.agent_run_agent_yaml = str(task_workspace_paths.agent_run.agent_yaml)
     task.agent_run_state_json = str(task_workspace_paths.agent_run.state_json)
@@ -72,6 +74,7 @@ def _sync_agent_run_paths(task: SubAgentTask, task_workspace_paths) -> None:
     task.agent_run_summary_md = str(task_workspace_paths.agent_run.summary_md)
     task.agent_run_final_report_md = str(task_workspace_paths.agent_run.final_report_md)
     task.agent_run_findings_jsonl = str(task_workspace_paths.agent_run.findings_jsonl)
+    task.agent_run_lessons_jsonl = str(task_workspace_paths.agent_run.lessons_jsonl)
     task.agent_run_inbox_dir = str(task_workspace_paths.agent_run.inbox_dir)
     task.agent_run_outbox_dir = str(task_workspace_paths.agent_run.outbox_dir)
     task.agent_run_artifacts_dir = str(task_workspace_paths.agent_run.artifacts_dir)

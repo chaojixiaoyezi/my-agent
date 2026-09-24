@@ -15,6 +15,7 @@ from ...settings.config import DEFAULT_DELEGATED_EXECUTION_PERSISTENCE
 from ...subagents import SubAgentExecutionContext
 from ...subagents.context_bundle import context_gate_prompt_lines
 from ...subagents.role_templates import (
+    RECORD_LESSON_TOOL,
     role_template_index_text,
     role_template_snapshot_for_role,
     template_for_role_identity,
@@ -262,6 +263,8 @@ def _build_audit_source_runner_prompt(
     )
 
 
+# LLM: 条款只作软引导，按结构化上下文（工作区、授权工具、角色）条件渲染；不得重新要求状态 JSON 或结果块。
+# 函数用途: 生成子代理任务提示里 Runner Contract 一节的全部条款。
 def _runner_execution_contract_lines(context: SubAgentExecutionContext) -> list[str]:
     lines = [
         *_takeover_execution_contract_lines(context),
@@ -288,6 +291,7 @@ def _runner_execution_contract_lines(context: SubAgentExecutionContext) -> list[
         "不要在产物目录写 capability_request.json，也不要改 execution_context.json 伪造 pending_requests。",
         "- capability_request 工具返回 OPEN 后，停止猜测并在最终回复里如实说明等待哪项能力，"
         "不要继续假装能力已经授权或命令已经执行。",
+        *_lesson_ledger_lines(context),
     ]
     lines.extend(_targeted_request_lines(context))
     lines.extend(_controlled_exec_contract_lines(context))
@@ -296,6 +300,18 @@ def _runner_execution_contract_lines(context: SubAgentExecutionContext) -> list[
     if _is_coordinator_context(context):
         lines.extend(_coordinator_execution_contract_lines())
     return lines
+
+
+# LLM: 只有本轮 allowed_tools 真含 record_lesson 时才渲染这一条软引导；它是可选提示，不是完成门，
+#   也不要求任何结构化结果块。宿主只从 lesson 账本读经验，从不解析这里或最终回复的文字。
+# 函数用途: 提示子代理可以（非必须）用 record_lesson 记下以后同类任务可复用的做法。
+def _lesson_ledger_lines(context: SubAgentExecutionContext) -> list[str]:
+    if RECORD_LESSON_TOOL not in (context.allowed_tools or []):
+        return []
+    return [
+        "- 本次工作若形成以后同类任务可复用的具体做法，可以调用 record_lesson 记一条（可选；只记可复用做法，"
+        "不记本任务的事实结论，结论照常写在最终回复里）。"
+    ]
 
 
 # LLM: Prompt wording mirrors the typed execution_cwd consumed by tools. Task

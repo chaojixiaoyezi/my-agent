@@ -1,4 +1,6 @@
-
+# LLM: 层级调度孙代理的工具只能在父级已过滤快照内收窄；缺省候选含 capability_request 与 record_lesson，
+#   父级没有的工具不会因缺省候选而出现。改候选须同步 hierarchy 调度测试。
+# 模块用途: 为层级调度生成的下级代理计算不超过父级上界的工具集合。
 from __future__ import annotations
 
 """Tool selection policy for scheduled hierarchy children."""
@@ -11,6 +13,7 @@ from ...role_templates import (
     AGENT_PROGRESS_TOOLS,
     COORDINATOR_TOOLS,
     DIRECT_CHILD_CONTROL_TOOLS,
+    RECORD_LESSON_TOOL,
     active_model_subagent_tools,
     role_template_snapshot_for_role,
 )
@@ -28,6 +31,7 @@ _DEFAULT_LEAF_CODING_TOOLS = [
     "web_fetch",
     *WRITE_TOOL_ORDER,
     "capability_request",
+    RECORD_LESSON_TOOL,
 ]
 
 _DIRECT_CHILD_CONTROL_TOOLS = frozenset(DIRECT_CHILD_CONTROL_TOOLS)

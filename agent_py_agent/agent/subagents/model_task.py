@@ -1,4 +1,6 @@
 
+# LLM: 子代理任务持久模型的字段是运行记录协议；新增字段必须带默认值，旧 task.json 读回时缺字段按默认处理。
+# 模块用途: 定义子代理任务、质量与学习候选相关的数据类。
 from __future__ import annotations
 
 """Subagent task, quality, and learning-candidate dataclasses."""
@@ -203,6 +205,9 @@ class SecuritySignal:
     created_at: float = 0.0
 
 
+# LLM: 子代理 run 的持久记录；各 *_jsonl/*_md 路径字段由 task_workspace_adapter 在每次保存时按 canonical
+#   工作区布局写回，读取方只认这些字段，不自行拼路径。新增路径字段须同步 adapter 与相关读取方测试。
+# 类用途: 保存一个子代理任务的目标、状态、权限、工作区路径与结果引用。
 @dataclass
 class SubAgentTask:
     """Persistent run record for one subagent task."""
@@ -315,6 +320,8 @@ class SubAgentTask:
     agent_run_summary_md: str = ""
     agent_run_final_report_md: str = ""
     agent_run_findings_jsonl: str = ""
+    # record_lesson 工具独占追加的经验账本；runner 结果收口从这里读回并合并进 lessons。
+    agent_run_lessons_jsonl: str = ""
     agent_run_inbox_dir: str = ""
     agent_run_outbox_dir: str = ""
     agent_run_artifacts_dir: str = ""

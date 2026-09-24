@@ -2,8 +2,8 @@ from __future__ import annotations
 
 """把子代理结构化结果投递到 owner 唯一 Memory CandidateService。"""
 
-# LLM: 子代理 workspace 只保留原始 output/finding/evidence；候选当前态只能写 owner candidates.jsonl。
-# 模块用途: 将父代理已接收的 lesson/finding 转成统一 CandidateObservation，不做审核或晋升。
+# LLM: 子代理 workspace 只保留原始 output/finding/evidence 与 lesson 账本；候选当前态只能写 owner candidates.jsonl。
+# 模块用途: 将父代理已接收的 lesson（含 record_lesson 账本条目）/finding 转成统一 CandidateObservation，不做审核或晋升。
 
 import hashlib
 import json
@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 
 from ...memory_store.candidate_models import CandidateObservation, MemoryScope
 from ...memory_store.candidates import CandidateService
+from ..lesson_ledger import LessonLedgerEntry
 from ..models import SubAgentTask
 
 
@@ -26,6 +27,8 @@ class SubAgentMemoryCandidateService:
         self.manager = manager
 
     # LLM: 一批结果先完整构造，再由 CandidateService.observe_many 原子落盘；部分失败不得半写。
+    #   lesson_entries 是 lesson 账本读回的已校验条目，先于纯文本 lessons 记录并带账本结构化来源；
+    #   与账本渲染正文完全相同的纯文本 lesson 不再另记，避免同一经验两种来源、两个适用场景。
     # 函数用途: 返回本次已创建或幂等合并的 owner 级候选。
     def record_result_candidates(
         self,
@@ -33,12 +36,15 @@ class SubAgentMemoryCandidateService:
         *,
         lessons: list[str],
         findings: list[object],
+        lesson_entries: tuple[LessonLedgerEntry, ...] | list[LessonLedgerEntry] = (),
     ) -> list[object]:
         service = getattr(self.manager, "candidate_service", None)
         if not isinstance(service, CandidateService):
             return []
+        ledger_texts = {entry.text for entry in lesson_entries}
         observations = [
-            *(_lesson_observation(task, text) for text in _dedupe_text(lessons)),
+            *(_ledger_lesson_observation(task, entry) for entry in lesson_entries),
+            *(_lesson_observation(task, text) for text in _dedupe_text(lessons) if text not in ledger_texts),
             *(
                 observation
                 for finding in findings
@@ -128,6 +134,40 @@ def _lesson_observation(task: SubAgentTask, text: str) -> CandidateObservation:
     )
 
 
+# LLM: 账本经验的正文是固定模板渲染结果，适用场景取 when_to_use（不再用任务 goal）；身份只来自宿主 task，
+#   证据引用指向账本条目（ledger#lesson_id）并带 task/run/attempt。observation_id 按 lesson_id 稳定，重放不增计数。
+# 函数用途: 将一条 lesson 账本条目转成带结构化来源的 subagent_lesson 候选观察。
+def _ledger_lesson_observation(task: SubAgentTask, entry: LessonLedgerEntry) -> CandidateObservation:
+    content = entry.text
+    task_id, run_id = _task_identity(task)
+    return CandidateObservation(
+        candidate_type="lesson",
+        content=content,
+        subject_key=f"subagent.lesson.{_digest(content)}",
+        scope=_task_scope(task, task_id, applies_when=entry.fields.when_to_use),
+        origin="subagent_lesson",
+        evidence_refs=(
+            {
+                "source_ref": f"{entry.ledger_ref}#{entry.lesson_id}",
+                "evidence_type": "subagent_lesson_ledger",
+                "ledger_ref": entry.ledger_ref,
+                "lesson_id": entry.lesson_id,
+                "task_id": task_id,
+                "run_id": run_id,
+                "attempt_id": entry.attempt_id,
+            },
+        ),
+        source_artifact_refs=tuple(_output_refs(task, task_id=task_id, run_id=run_id)),
+        source_task_ids=(task_id,),
+        source_run_ids=(run_id,),
+        observed_at=_iso_time(entry.created_at) or _observed_at(task),
+        confidence=0.5,
+        proposed_action="add",
+        promotion_target="lesson",
+        observation_id=f"subagent:{run_id}:lesson:{entry.lesson_id}",
+    )
+
+
 # LLM: finding 的 claim 是提议，不因为子代理置信度或时间较新就变成正式项目事实。
 # 函数用途: 将一条结构化 finding 转成 project-scope 长期事实候选。
 def _finding_observation(
@@ -173,19 +213,20 @@ def _finding_observation(
     )
 
 
-# LLM: task/root ID 决定 typed scope；自然语言 goal 只作为 applies_when 人类说明。
+# LLM: task/root ID 决定 typed scope；applies_when 只作人类说明：默认取任务 goal，账本经验显式传入 when_to_use。
 # 新持久化一律 project:<id>（单一权威，task:<id> 仅旧账本召回别名），并经共享
 # 写侧合同归一，不允许以 task:<id> 新持久化（避免 project/task 双正式身份）。
 # 函数用途: 构造项目范围并保证 scope_key 符合统一稳定键合同。
-def _task_scope(task: SubAgentTask, task_id: str) -> MemoryScope:
+def _task_scope(task: SubAgentTask, task_id: str, *, applies_when: str | None = None) -> MemoryScope:
     safe_id = re.sub(r"[^A-Za-z0-9_.:/-]+", "-", task_id).strip("-")[:140]
     if not safe_id:
         safe_id = _digest(task_id or str(getattr(task, "goal", "") or "task"))
+    condition = str(getattr(task, "goal", "") or "") if applies_when is None else applies_when
     return MemoryScope.for_new_observation(
         {
             "scope_type": "project",
             "scope_key": f"project:{safe_id}",
-            "applies_when": str(getattr(task, "goal", "") or "")[:500],
+            "applies_when": condition[:500],
         }
     )
 

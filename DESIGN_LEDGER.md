@@ -14,6 +14,14 @@
 - **自学习的 lesson 来源在当前产品里是死路**（2026-09-25，真实验收发现；修复进行中：分支 `claude/subagent-lesson-ledger`）：
   - 子代理提示要求"像普通协作者一样回复、不输出状态 JSON"，`output.json` 由宿主生成，没有结构化通道填 `lessons`。所以真实子代理即使在回复里写了经验，也不会产生 `subagent_lesson` 候选，S1 提案与 S2 排序都无法触发。
   - 宿主不能从自然语言回复抽取经验。修复为仿照 `record_finding` 的独立结构化工具 `record_lesson`，见[真实验收](docs/tasks/DECISION_MODEL_REAL_VALIDATION.md)第 15 节。
+- **自学习 lesson 的结构化来源 `record_lesson`（第 15 项 P5-C，S1/S2 的上游）**（2026-09-25，已实施：本地分支 `claude/subagent-lesson-ledger`，待审；未做真实 TUI 验收）：
+  - **工具**：子代理专属，参数只有 `title`/`when_to_use`/`procedure`/`applies_to` 四个必填字段（上限 120/500/1000/200 字，Schema 禁止额外字段）。run/attempt 取当前 runner 上下文，task 取该 run 的任务记录，模型不能自报身份。写本 run 工作区的 `lessons.jsonl`：与 `findings.jsonl` 同目录，路径登记在 `AgentRunWorkspacePaths.lessons_jsonl` 与 `SubAgentTask.agent_run_lessons_jsonl`。
+  - **账本规则**：沿用 record_finding 的账本口径，锁内先读再判再写，有坏行就拒绝追加；另加 O_NOFOLLOW，防止借符号链接写到工作区外。id 取四字段内容 hash，同 run 相同参数只记一次，返回 `already_recorded`。每 run 最多 5 条、16 KiB，超限返回结构化拒绝（`LESSON_LIMIT_REACHED`/`LESSON_LEDGER_BYTES_EXCEEDED`，`effect_outcome=not_started`），不静默丢弃。拒绝码借用已登记的 `TOOL_GUARDRAIL_DENIED`/`TOOL_INVALID_ARGUMENTS`，因为错误分类表不归本线维护。
+  - **暴露**：与 `capability_request` 同一路径。注册表默认隐藏，主线程工具面、tool_search、list_tools 都看不到；直属子代理的 coding/read_only 预设、角色默认工具和层级调度缺省候选都带上它。主线程没有 child run，调用返回 `TOOL_UNAVAILABLE`。要关闭，在 owner 工具策略 `disabled_tools` 里加 `record_lesson`，子代理的 allowed_tools 和提示行会随之去掉；不另加配置项。
+  - **结果收口**：`runner_result_service` 在提取阶段读回账本，逐行复核版本、字段、id 与 run 归属，最多采用 5 条。之后与结构化输出的 `lessons` 去重合并（结构化在前），写进 `output.json` 和 runner result 的 `lessons`/`lesson_count`。自然回复没有结构化输出时，账本经验也会记成 `subagent_lesson` 候选：正文用固定四行模板，`applies_when` 取 `when_to_use`，证据引用 `lessons.jsonl#<lesson_id>` 并带 task/run/attempt。
+  - **下游**：`enable_self_learning` 开启时，S1 照原链为每条经验生成一个待确认提案。重放不重复：候选靠 observation_id，提案靠 O_EXCL。候选记录失败只写工作日志，不阻断结果交付。
+  - **提示**：Runner Contract 只在授权含 `record_lesson` 时多一条可选软引导，不恢复任何状态 JSON 要求；宿主从不解析回复正文。
+  - **留给后续**：主线程的经验记录；被取消 run 账本的收取（账本保留，但取消路径不经结果收口）；S1 草稿 `when_to_use` 仍写"来源任务目标："，而账本候选的场景其实是 `when_to_use`。证据见 [TESTS](TESTS.md) 顶部本节。
 - **设计（未实施）：动作候选接入需先有插件层通用的"观察候选"结构**（2026-09-25，第 15 项剩余点，依据[动作候选审计](docs/tasks/DECISION_MODEL_ACTION_CANDIDATE_AUDIT.md)）：
   - **现状**：插件线已合入 browser-lite 与 desktop-lite。browser-lite 的 `read` 会返回有限元素清单（标签、文字、name/id、是否可见），`click`/`fill` 按唯一匹配的选择器执行；但宿主没有经过验证的 `observation_id`/`candidate_id`，也没有观察内容哈希与代次。
   - **原则**：不能为 browser-lite 写专项解析，这会违反禁止专项合同的铁律；也不能用截图坐标、自由文本或工具名推荐冒充动作候选。

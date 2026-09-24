@@ -2,6 +2,30 @@
 
 child不展示历史正文时的读取回归先复现1 failed/1 passed，修复后test_compact_retained_history、test_subagent_compact_recovery、test_gateway_child_compact_scope_application三文件31 passed（8.48秒）。三宿主seed仓外基线仅验证测量和完整性，不算内存目标通过；细节见容量审计的宿主生命周期基线。
 
+## 子代理 lesson 结构化来源 `record_lesson`（2026-09-25，本地分支 `claude/subagent-lesson-ledger`，待审）
+
+- **改动**：
+  - 新增账本合同 `subagents/lesson_ledger.py` 与子代理专属工具 `agent_core/runtime/record_lesson_tool.py`。
+  - 路径登记在 `AgentRunWorkspacePaths.lessons_jsonl` 与 `SubAgentTask.agent_run_lessons_jsonl`。
+  - coding/read_only 预设、`ROLE_BASE_TOOLS` 和层级缺省候选都带上该工具，`_DEFAULT_HIDDEN_TOOL_NAMES` 对主线程隐藏它。
+  - `runner_result_service` 读回账本合并进 `lessons`；没有结构化输出时也记账本候选。
+  - `memory_candidates` 为账本条目生成 `subagent_lesson` 候选：`applies_when` 取 `when_to_use`，证据引用账本条目。
+  - runner 提示在有授权时多一条可选软引导。设计见 DESIGN_LEDGER 同名条目。
+- **新测试** `test_subagent_lesson_ledger.py` 31 项，只用假件，不调 provider：
+  - 工具：身份只取 runner 上下文，参数里伪造的 run/task/attempt 被忽略。主线程、未知 run、没有 manager 时都返回 `TOOL_UNAVAILABLE` 与 `not_started`，也不建账本。Schema 只有四个有界必填字段，`additionalProperties=false`。
+  - 工具（续）：缺失、空白、非字符串、超长逐项结构化拒绝，边界值通过；空白规范成单行，渲染固定四行。同参数（含空白变体）只记一次。第 6 条报 `LESSON_LIMIT_REACHED`，重试已记条目仍按幂等返回。两条满长中文之后第 3 条报 `LESSON_LEDGER_BYTES_EXCEEDED` 且不写入。坏行与符号链接都 fail-closed，外部文件不变；底层追加使用 O_NOFOLLOW。
+  - 读回：篡改、他 run、非规范、错版本（含 `true`）、重复与坏 JSON 行全部拒绝并计数。超过 5 条只取前 5 条，超字节整本不采用，加锁失败报 `unreadable` 且不阻断交付。
+  - 收口：自然回复（没有结构化输出）时，`output.json` 与 runner result 的 `lessons`/`lesson_count` 含账本经验。结构化 lessons 在前、账本在后，按文本去重。没有账本时输出与工作日志保持原样；dry-run 不记候选。
+  - 候选与提案：账本经验成为 `pending_review` 的 `subagent_lesson` 候选，带 task/run 来源，`applies_when` 取 `when_to_use`，证据引用 `lessons.jsonl#<lesson_id>` 并带 task/run/attempt。开启自学习时每条经验一个待确认提案；重放同一结果后候选 occurrence 仍为 1，提案文件不变。关闭自学习时只有候选。候选服务抛错时结果照常交付，工作日志记 `memory_candidates_error`。
+  - 暴露与提示：coding/read_only 预设、角色默认和层级缺省候选都含该工具，并受父级上界约束；后台主代理默认目录不含。真实 SimpleAgent 注册表里，主线程快照、tool_search、list_tools 都看不到它，子代理快照可见；关闭子代理时不注册。提示只在有授权时多一条可选引导，并保留"不要输出 SUBAGENT_RESULT、状态 JSON"。
+- **变异验证**：24 种全部被杀死。覆盖身份、不可用、条数/字节/字段上限、幂等、读回 id 与 run 归属、合并与去重、自然回复记候选、适用场景、账本引用、主线程隐藏、预设暴露、提示条件、候选失败隔离、符号链接与 O_NOFOLLOW、注册、`not_started`、重复纯文本、dry-run、读回异常。
+  - 首轮有 2 种存活：他 run 行与合法行同 id，被去重先挡住；符号链接目标是坏 JSON，被坏行判定先挡住。补强测试后两者都被杀死。
+  - 每种变异在 `PYTHONDONTWRITEBYTECODE=1` 子进程运行，逐字节还原并用 sha256 核对；全部完成后删除 `__pycache__`，从干净字节码复跑。
+- **收集 focused 文件时必须排除 `agent_py_agent/tests/run_tests.py`**：它在 import 阶段就执行真实 CLI 冒烟，包括一次真实 provider 请求，且 owner home 仍是 live 目录（conftest 的隔离夹具只作用于测试函数）。本轮按名字 grep 时误收过一次，影响见交接。
+- **结果**（基于 main `019dd0dcd`）：新测试 31 passed。focused 共 262 个文件，按名字 grep 出引用改动面的全部 pytest 文件，排除 `run_tests.py`，另加 `test_architecture_guardrails.py`。合计 5001 passed、3 skipped、28 xfailed、4 xpassed。xfail/xpass 集合与 origin/main 相同，均为既有 EXEC-31b/AUDIT-02 标记。无需修改任何既有测试。
+  - 其余门：Ruff、doc sync、import boundaries 通过；strict code-size blocked=False，与 origin/main 按 identity+severity 逐项比对无新增；`git diff --check` 与 clean-package 通过。产品代码与新测试都没有 `*args/**kwargs` 形参。线上 CI 没有作为验收来源。
+- **未验**：没有真实 TUI 验收；被取消 run 的账本不经结果收口；主线程经验记录不在本片范围。
+
 ## 决策实验对照记录、证据评估与授权内自动晋升（2026-09-25，本地分支 `claude/decision-experiment-records`，待审）
 
 - **改动**：只观察实验调用经原账结算后，结算视图随 `DecisionOutcome.experiment` 带回，生成 `decision_experiment_record.v1`（身份、配置版本、基线/候选名单、结算）写进 Gateway 请求记录 `experiment_records`；回合正常收尾按结构化工具账补写实际用量；只读评估（≥3 可比较、全部 charged、召回 1.0、有节省）沿授权回执指针回读原请求记录，经 `user_config decision_read` 暴露；`/experiment apply` 授权内经原设置 CAS 一次性晋升 `points.skill_tool.mode`，回执写在请求记录。

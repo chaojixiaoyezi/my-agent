@@ -233,6 +233,7 @@ agent_py_agent/
 |   |   |-- runtime/                    # 单 child guidance、active-turn compact carrier、sleep 闹钟与 loop support
 |   |   |   |-- conversation_state.py  # 主/子代理当前 Compact 代次的结构化模型事实投影
 |   |   |   |-- sleep_tool.py           # clock.sleep 工具：模型主动定时等待，写 wake_queue 字条、事件提前醒取消
+|   |   |   |-- record_lesson_tool.py   # 子代理专属 record_lesson：身份取 runner 上下文，把一条可复用做法记进本 run 的 lessons.jsonl
 |   |   |-- model/                      # 主工具循环的统一模型调用账、动态超时、上下文压力与成本统计
 |   |   |-- tool_loop/                  # 工具轮次执行、恢复与自然结束
 |   |   |-- tool_loop/segment_planning.py # 仅按调用和实时查询选择并发段，不执行工具
@@ -275,6 +276,7 @@ agent_py_agent/
 |   |   |-- runner_result_admission.py # exact run／attempt 的迟到与终态冲突准入、拒绝诊断
 |   |   |-- tool_failure_ledger.py      # 系统级工具失败账本：archive ok=False 摘要 -> attributes/对账投影
 |   |   |-- result_registered_artifacts.py # 自然/结构化收口共用的 exact run 工具产物投影
+|   |   |-- lesson_ledger.py            # lessons.jsonl 账本唯一合同：四字段边界、固定渲染模板、幂等追加、每 run 上限与读回复核
 |   |   |-- services/                   # 子代理业务服务
 |   |   |   |-- base.py                 # create_run/split/owner/runtime config scope
 |   |   |   |-- output_alignment.py    # 声明按可信 cwd 解析，不重定位、不搬运、不增权
@@ -603,6 +605,7 @@ agent_py_agent/
 |-- tests/                             # 单元、集成、真实链路回归
 |   |-- fixtures/decision/jev_capability_rounding.json # 合成材料真实Jev响应的脱敏概率舍入replay，不含凭据
 |   |-- test_skill_proposals.py         # 自学习 S1：默认关闭、幂等提案、迁移不碰、确认拒绝矩阵、快照可见、runner 隔离与 CLI 往返
+|   |-- test_subagent_lesson_ledger.py  # record_lesson：身份与 Schema、字段/条数/字节上限、幂等、账本复核、结果合并、候选与 S1 提案、暴露面与提示
 |   |-- test_decision_skill_proposal_review.py # 自学习 S2 审核顺序点：资格边界、别名与脱敏、逐题校验、采用前复核、取消传播、零写入
 |   |-- test_decision_skill_proposal_review_integration.py # 自学习 S2 经真实 CLI/设置/决策服务（只替换 HTTP）：输出字节、observe 记账、冷却超时、菜单与默认值
 |   |-- test_decision_model_profiles.py # 决策用途隔离、旧目录迁移、共享撤销与生成选择不退化
@@ -1027,6 +1030,9 @@ docs/
 
 - `agent_py_agent/agent/capability/skill_proposals.py`：自学习 Skill 提案唯一权威；只收 `subagent_lesson` 且带 task/run 来源的 Candidate，固定模板渲染、O_EXCL 幂等写 `<owner_home>/data/skill_proposals/`；confirm 在 owner 锁内复核版本、草稿 hash、来源 Candidate 与目标不存在，经 frontmatter 解析和 `agent_generated` guard（不 force）后 `os.replace` 安装，失败不写目标。
 - `agent_py_agent/cli/skill_proposal_commands.py`：`my-agent skills proposals list/show/confirm/reject` 的注册与输出，只委托上面的服务；确认必须带 `--expected-revision`，不提供模型工具。
+- `agent_py_agent/agent/subagents/lesson_ledger.py`：子代理经验账本 `lessons.jsonl` 的唯一合同。字段规范成单行且有界，id 取内容 hash（同 run 相同参数只记一次），每 run 最多 5 条、16 KiB，超限返回结构化结论；读回逐行复核版本、字段、id 与 run 归属。工具写入与 runner 结果收口共用，宿主从不解析模型回复正文。
+- `agent_py_agent/agent/agent_core/runtime/record_lesson_tool.py`：子代理专属 `record_lesson` 工具。run/attempt 取 runner 上下文、task 取任务记录，Schema 只含四个经验字段；注册表默认隐藏，随子代理 allowed_tools 下发，主线程调用返回 `TOOL_UNAVAILABLE`；所有拒绝都声明 `effect_outcome=not_started`。
+- `agent_py_agent/tests/test_subagent_lesson_ledger.py`：record_lesson 链路的离线合同（只用假件）：身份与 Schema、字段/条数/字节上限、幂等、坏账本与符号链接、读回复核、合并进 output.json、`subagent_lesson` 候选与 S1 提案（含重放不重复）、候选失败不阻断交付、暴露面与 runner 提示。
 - `agent_py_agent/tests/test_skill_proposals.py`：自学习 S1 的默认关闭、幂等、忽略非法来源、Curator 迁移不碰提案目录、确认拒绝矩阵、安装/回执失败回滚、快照可见性、runner 结果隔离与真实 CLI 入口往返验证。
 - `agent_py_agent/agent/capability/decision_skill_proposal_review.py`：自学习 S2 的唯一审核顺序点 `skill_proposal_review`（owner_background，默认 off）；只读 `SkillProposalService.list`，外发别名、来源计数与经 `external_data/default` 投影的草稿摘要，采用前重读待确认提案核对版本与草稿 hash，只重排 CLI 展示并附宿主标签；关闭、observe 或任何失败都返回 None 保持原输出，取消上抛。
 - `agent_py_agent/tests/test_decision_skill_proposal_review.py`、`test_decision_skill_proposal_review_integration.py`：前者只替换决策服务边界，覆盖资格、隐私、逐题校验、并发变化与取消；后者经真实 CLI、设置、模型目录、决策服务与调用账，只替换 HTTP 发送，覆盖输出逐字节不变、observe 记账、错误/冷却/超时、中断、30 条窗口门、默认值与 TUI 菜单。

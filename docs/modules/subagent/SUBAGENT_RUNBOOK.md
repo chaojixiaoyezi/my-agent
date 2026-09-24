@@ -24,7 +24,9 @@
 - `resolve_capability_requests`：批准或拒绝直属 child 的结构化权限申请；它不是催办、推进或验收工具。
 
 worker、researcher、tester、writer、bug-finder 等普通 leaf 不创建下级，所以五个直属控制入口全部从其
-工具快照移除；leaf 只保留执行工具和给自己申请权限的 `capability_request`。某个 child 确实需要继续拆分
+工具快照移除；leaf 只保留执行工具、给自己申请权限的 `capability_request`，以及可选记录可复用做法的
+`record_lesson`（只写本 run 的 `lessons.jsonl`，宿主收口时并入 `lessons` 并登记为待审核经验候选；主线程
+看不到这个工具）。某个 child 确实需要继续拆分
 时，应在创建时明确选择 coordinator，不能靠 goal、展示名或历史 grant 临时扩权。
 
 模型没有旧 `inspect_agent_tree`、`wait`、`dispatch_subagents` 或

@@ -1,5 +1,7 @@
 # 子代理维护状态
 
+子代理 lesson 结构化来源 `record_lesson`（2026-09-25，本地分支 `claude/subagent-lesson-ledger`，待审）：真实 TUI 发现子代理按提示自然回复、不出状态 JSON，`output.json` 的 `lessons` 永远为空，S1 提案无从触发。现在子代理可调用专属工具 `record_lesson`，填 title/when_to_use/procedure/applies_to 四个有界字段，写入本 run 的 `lessons.jsonl`。同 run 相同参数只记一次；每 run 最多 5 条、16 KiB，超限返回结构化拒绝；run/attempt/task 身份只取宿主上下文。结果收口读回账本，逐行复核后合并进 `lessons`，没有结构化输出也会记成带账本引用的 `subagent_lesson` 候选。候选失败只写工作日志（`memory_candidates_error=<类型>`），不再阻断结果交付。工具由注册表默认隐藏，只随子代理授权下发；Runner Contract 在有授权时多一条可选软引导。离线证据见 TESTS 顶部本节；真实验收未做。
+
 自学习 S1（2026-09-24，本地分支 `claude/self-learning-skill-proposals`，待审）：`enable_self_learning` 开启时，runner 结果记录 lesson Candidate 之后，会把本批候选交给 owner Skill 提案服务生成待用户确认的提案；提案失败只写工作日志（`skill_proposals_error=<类型>`），不影响结果交付。默认关闭时不注入服务、不建目录。确认只走 `my-agent skills proposals confirm`，子代理链不安装 Skill。证据见 TESTS 顶部自学习 S1 节。
 
 child overflow完整恢复已本地接入：原来源延迟至真实请求render/select，候选只改独立线程历史和第0注入，原CAS成功后同次生成。共享恢复器沿run token停止与摘要错误边界；首请求选模、权限和attempt不变。初次/手动与后台入口尚待接入；证据见TESTS及决策容量审计。

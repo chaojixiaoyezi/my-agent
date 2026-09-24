@@ -1,4 +1,7 @@
 
+# LLM: agent-run 工作区路径与同步写入的唯一入口；findings/lessons 等工具账本只在这里登记路径，
+#   同步写入只合并 findings，从不创建或覆盖工具独占的 lessons.jsonl。
+# 模块用途: 为每个子代理 run 建立并同步 tasks/<task_id>/work/agents/<run_id>/ 下的恢复与接管文件。
 from __future__ import annotations
 
 """minimal agent-run workspaces inside a runtime-memory task workspace.
@@ -22,6 +25,9 @@ from ..common.json_io import (
 )
 
 
+# LLM: 这里是 agent-run 工作区各文件路径的唯一声明；lessons_jsonl 只登记位置，由 record_lesson 工具经
+#   subagents/lesson_ledger.py 追加，本模块的同步写入（ensure_agent_run_workspace）不得创建或覆盖它。
+# 类用途: 列出一个子代理 run 工作区里的全部固定文件与目录路径。
 @dataclass(frozen=True)
 class AgentRunWorkspacePaths:
     """Concrete files for one task-local agent run workspace."""
@@ -36,6 +42,7 @@ class AgentRunWorkspacePaths:
     summary_md: Path
     final_report_md: Path
     findings_jsonl: Path
+    lessons_jsonl: Path
     artifacts_jsonl: Path
     inbox_dir: Path
     outbox_dir: Path
@@ -100,6 +107,8 @@ def _coerce_ensure_request(
     )
 
 
+# LLM: 纯路径计算、不触碰文件；lessons.jsonl 与 findings.jsonl 同在 run 根目录，改名会让已有账本失联。
+# 函数用途: 按 run 工作区根目录算出全部固定文件路径。
 def agent_run_workspace_paths(root: Path) -> AgentRunWorkspacePaths:
     """Return all Phase 1 files for an agent-run workspace root."""
 
@@ -114,6 +123,7 @@ def agent_run_workspace_paths(root: Path) -> AgentRunWorkspacePaths:
         summary_md=root / "summary.md",
         final_report_md=root / "final_report.md",
         findings_jsonl=root / "findings.jsonl",
+        lessons_jsonl=root / "lessons.jsonl",
         artifacts_jsonl=root / "artifacts.jsonl",
         inbox_dir=root / "inbox",
         outbox_dir=root / "outbox",

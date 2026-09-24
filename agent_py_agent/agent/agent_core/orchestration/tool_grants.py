@@ -1,8 +1,12 @@
+# LLM: 直属子代理工具预设的唯一来源；record_lesson 与 capability_request 同属父子控制面，读写两种预设都默认带上，
+#   实际可见仍经 active_model_subagent_tools、owner 禁用表与注册表快照收窄。改预设须同步工具常量与派工测试。
+# 模块用途: 定义直属子代理的 coding/read_only 工具预设，并把显式授权与预设合并成 child 工具快照。
 from __future__ import annotations
 
 from ...common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
 from ...subagents.role_templates import (
     AGENT_PROGRESS_TOOLS,
+    RECORD_LESSON_TOOL,
     SHELL_SESSION_TOOLS,
     active_model_subagent_tools,
 )
@@ -21,6 +25,7 @@ CODING_SUBAGENT_TOOLS = [
     *WRITE_TOOL_ORDER,
     *SHELL_SESSION_TOOLS,
     "capability_request",
+    RECORD_LESSON_TOOL,
 ]
 READ_ONLY_SUBAGENT_TOOLS = [
     *AGENT_PROGRESS_TOOLS,
@@ -33,6 +38,8 @@ READ_ONLY_SUBAGENT_TOOLS = [
     "web_fetch",
     # 只读限制约束的是业务工具；能力申请属于父子控制面，必须始终可达。
     "capability_request",
+    # 经验账只写本 run 自己的 lessons.jsonl（内部记账面，不碰用户空间）；研读类任务同样会形成可复用做法。
+    RECORD_LESSON_TOOL,
 ]
 _CODING_TOOL_PRESETS = {"coding"}
 

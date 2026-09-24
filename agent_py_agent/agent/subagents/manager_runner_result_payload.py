@@ -7,6 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from ..turn_end import infer_turn_end_reason
+from .lesson_ledger import LessonLedgerReport
 from .models import (
     SUBAGENT_FAILURE_STATUSES,
     SubAgentParsedOutput,
@@ -117,6 +118,9 @@ class _BuildContextParams:
     now: float
 
 
+# LLM: lessons 是结构化输出与 lesson 账本合并去重后的最终列表；lesson_ledger 保留账本读回报告，
+#   候选记录据它为账本经验挂结构化来源。两者只由 runner_result_service 写入。
+# 类用途: 打包一次结果提取得到的工具、证据、产物、经验等字段，供状态写回与副作用复用。
 @dataclass
 class _ExtractedOutput:
     """Bundle for _extract_parsed_output result tuple."""
@@ -134,6 +138,7 @@ class _ExtractedOutput:
     patches: list = field(default_factory=list)
     lessons: list = field(default_factory=list)
     next_actions: list = field(default_factory=list)
+    lesson_ledger: LessonLedgerReport = field(default_factory=LessonLedgerReport)
 
 
 @dataclass

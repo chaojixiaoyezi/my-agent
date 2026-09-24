@@ -32,6 +32,10 @@ PROCESS_SESSION_TOOL = "process_session"
 # 常量用途: 普通执行子代理开箱携带命令、后台续接与交互终端，不依靠主代理逐项补工具。
 SHELL_SESSION_TOOLS = (SHELL_TOOL, PROCESS_SESSION_TOOL, "terminal_session")
 CAPABILITY_REQUEST_TOOL = "capability_request"
+# LLM: 子代理专属的结构化经验入口；只写本 run 的 lessons.jsonl，不碰用户空间。与 capability_request 一样由
+#   注册表默认隐藏、只随子代理 allowed_tools 显式下发；主线程没有 child run，不提供。
+# 常量用途: 统一引用 record_lesson 工具名，供角色默认、派工预设、层级调度与 runner 提示共用。
+RECORD_LESSON_TOOL = "record_lesson"
 COLLABORATION_TOOLS: list[str] = []
 # LLM: Self-management is separate from delegation and business writes; explicit exact grants and owner caps still apply.
 # 常量用途: 主子代理复用 Goal 与 Todo 工具；叶子可管理自己的目标和清单，不因此获得派工权限。
@@ -48,6 +52,7 @@ RETIRED_MODEL_SUBAGENT_CONTROL_TOOLS = frozenset(
 # depth. Host lifecycle owns activity reporting; do not add polling, manual
 # dispatch, model self-report events, or ancestor-wide controls here.
 # 配置用途: worker 保留通用执行能力；coordinator 额外获得创建、只读状态、直属插话、取消和权限裁决，进展由宿主回传。
+# 每个角色默认都能用 record_lesson 记可复用做法（可选），经验随结果交回宿主。
 ROLE_BASE_TOOLS = [
     *AGENT_PROGRESS_TOOLS,
     *READ_ONLY_TOOLS,
@@ -55,6 +60,7 @@ ROLE_BASE_TOOLS = [
     *SHELL_SESSION_TOOLS,
     *COLLABORATION_TOOLS,
     CAPABILITY_REQUEST_TOOL,
+    RECORD_LESSON_TOOL,
 ]
 # LLM: This is the complete edge-local management surface. Leaf role snapshots
 # remove every item; only a typed can_spawn_children coordinator may inherit it.

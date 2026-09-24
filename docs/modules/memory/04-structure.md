@@ -23,6 +23,8 @@ Curator 与召回的可选决策入口直接导入 `common.cancellation` 的 `To
 runner 准备只消费副本，不修改待提交任务。正式 `persistence/service.py` 的 sync 调用保持唯一，未增加另一条保存路径。
 这一接缝只解决 canonical 路径差异，不能证明完整首请求容量、模型候选输出 cap 或目录存在性。
 
+`agent_run_workspace.py::AgentRunWorkspacePaths` 同时登记 `findings.jsonl` 与 `lessons.jsonl` 两个工具账本路径。`ensure_agent_run_workspace` 只按 id 合并 findings，从不创建或覆盖 lessons；lessons 由子代理 `record_lesson` 经 `subagents/lesson_ledger.py` 追加，结果收口读回后才进入 owner 候选主链。
+
 ## 运行中原生工具历史摘要的窗口与取消边界
 
 `agent_core/_tool_loop_service.py::_native_tool_history_summary` 将同一工作片的停止检查传给

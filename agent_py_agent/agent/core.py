@@ -30,6 +30,7 @@ from .agent_core.planner_service import (
 )
 from .agent_core.runtime.guidance_tool import SendGuidanceTool
 from .agent_core.runtime.owner_roots import runtime_owner_root
+from .agent_core.runtime.record_lesson_tool import RecordLessonTool
 from .agent_core.runtime_mixin import SimpleAgentRuntimeMixin
 from .agent_core.subagent_mixin import SimpleAgentSubagentMixin
 from .agent_core.task_progress_tool import TaskProgressTool
@@ -959,6 +960,7 @@ def _add_skill_snapshot_hashes(target: dict[str, str], value: object) -> None:
 
 
 # LLM: Gateway 状态仍限本机管理员；user_config 按可信 owner 身份自行缩窄模型 schema 与执行动作，不能把 legacy 配置能力给普通用户。
+#   record_lesson 只在启用子代理时注册，并由注册表默认隐藏，主线程工具面、tool_search 与 list_tools 都看不到它。
 # 函数用途: 把配置、编排、检索、记忆、消息和协作工具装入当前 owner 的 registry。
 def _register_orchestration_tools(agent: SimpleAgent) -> None:
     # Gateway 状态包含宿主 PID、配置和日志路径，只向本机管理员主代理提供；普通 owner
@@ -1004,6 +1006,9 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
     agent.tools.register(CancelSubagentsTool(agent))
     agent.tools.register(SendGuidanceTool(agent))
     agent.tools.register(ResolveCapabilityRequestsTool(agent))
+    # 子代理可复用经验账(record_lesson):只写当前 child run 的 lessons.jsonl,结果收口合并成经验候选;
+    # 注册表默认隐藏,只随子代理 allowed_tools 显式下发,主线程没有 child run 不提供。
+    agent.tools.register(RecordLessonTool(agent))
 
 
 __all__ = [

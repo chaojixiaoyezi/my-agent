@@ -51,11 +51,12 @@ if TYPE_CHECKING:
     from ..user_space.owner_resolver import OwnerHomeResult
 
 _allowed_tool_set = allowed_tool_set
-# LLM: 这两项都只允许宿主显式下发给受控 runner；普通 root 会话既不能直接
+# LLM: 这些工具都只允许宿主显式下发给受控 runner；普通 root 会话既不能直接
 # 调用，也不能经 tool_search 重新发现。capability_request 的 run_id 由 child
-# runner 注入，root 没有上级可申请，暴露后只会制造缺 run_id 的未知副作用账。
-# 常量用途: 把内部执行器和子代理专属能力申请入口从普通主代理工具面隐藏。
-_DEFAULT_HIDDEN_TOOL_NAMES = frozenset({"controlled_exec", "capability_request"})
+# runner 注入，root 没有上级可申请，暴露后只会制造缺 run_id 的未知副作用账；
+# record_lesson 只写当前 child run 的经验账本，主线程没有 child run 可归属。
+# 常量用途: 把内部执行器和子代理专属的能力申请、经验记录入口从普通主代理工具面隐藏。
+_DEFAULT_HIDDEN_TOOL_NAMES = frozenset({"controlled_exec", "capability_request", "record_lesson"})
 
 
 def _agent_config_int(key: str) -> int:
