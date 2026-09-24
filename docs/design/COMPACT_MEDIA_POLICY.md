@@ -1,6 +1,6 @@
 # 媒体会话的压缩策略：归档引用为主链，视觉摘要按结构化能力事实开启
 
-状态：设计草案（2026-09-24），用户已定方向——A（旧媒体降级为可重新附上的归档引用）是主链和默认；B（含图轮次随文字进摘要）只在模型的视觉能力事实为 `supported` 时启用，事实只能来自档案声明或结构化探针，不能来自模型自述。实现分三片，A 先落。上位合同见 [TUI 图片视频](TUI_INPUT_MEDIA.md)、[容量审计](../tasks/DECISION_MODEL_CONTEXT_AUDIT.md#媒体会话越过压缩点2026-09-24本地修复)。
+状态：用户已定方向（2026-09-24）——A（旧媒体降级为可重新附上的归档引用）是主链和默认；B（含图轮次随文字进摘要）只在模型的视觉能力事实为 `supported` 时启用，事实只能来自档案声明或结构化探针，不能来自模型自述。决策线评审意见已并入本稿（见"评审并入的决定"）。片 A 已本地实现（分支 `claude/compact-media-policy`）；片 B/C 待实施。上位合同见 [TUI 图片视频](TUI_INPUT_MEDIA.md)、[容量审计](../tasks/DECISION_MODEL_CONTEXT_AUDIT.md#媒体会话越过压缩点2026-09-24本地修复)。
 
 ## 解决问题
 
@@ -13,7 +13,7 @@
 - 主链优先：A 是默认路径，不依赖任何模型能力；B 是按结构化事实开启的增强。B 的摘要调用失败时沿现有规则不提交、原文保留，**不在同一次请求里悄悄退回 A**；改走 A 只能由持久化的结构化条件触发（见"B 失败后的切换"）。
 - 一个概念一个权威位置：canonical 消息行与 `local_file` 引用永不改写；策略选择、命中的能力事实、被归档的附件引用都写进 checkpoint payload 的结构化字段。
 - 硬门只守客观事实：图片 token 没有计量器，B 的容量只按配置声明的每块预留计算，不猜；算不下就是算不下。
-- 开放世界：`image`/`video` 且 `source.type == local_file` 是已知媒体；其它未知非文本块沿现行规则继续保护后缀，不摘要。
+- 开放世界：已知媒体严格等于运输层 `provider_media_messages` 会展开的集合——顶层 user 行里 `source.type == local_file` 的 `image`/`video` 块；嵌在 `tool_result` 里或 assistant 一侧的媒体块、base64 块与其它未知非文本块，沿现行规则继续保护后缀，不摘要。分类器与投影函数必须用同一判定，避免"分类说能摘、投影却漏换"。
 
 ## 结构化事实与判定
 
@@ -28,7 +28,9 @@
    - 探针 `HttpBackend.probe_vision_capability()`：与 `probe_tool_capability` 同款——按后端实例单飞、只发一次；请求为一张进程内生成的 8×8 纯色 PNG（base64，不落盘）加固定说明，附工具 `my_agent_vision_probe(color: enum[red, green, blue, yellow])`，只认与真实颜色一致的结构化 tool_use 为 `supported`。供应商对媒体块的 typed 拒绝（`ProviderRequestRejected` 类）或答错/不调用 → `unsupported`；网络、额度、认证等 `ProviderRecoverableError/ProviderConfigurationError` 原样上抛、不缓存、本次按 A。阳性与阴性都只缓存在后端实例内（同一 Gateway 进程、同一模型），进程重启即重探；不写档案文件。
    - 事实来源枚举 `fact_source ∈ {declared, probe_supported, probe_unsupported, probe_unavailable, policy_forced}` 进 checkpoint。
 
-## A 路径：归档引用
+## A 路径：归档引用（片 A，已本地实现）
+
+- 实现落点：`backends/request_content.py`（`classify_nontext_content`/`compact_source_supported`/`is_local_media_block`）、`conversation/compact_media_policy.py`（策略解析、`project_archived_media_message`、`media_archive_facts`）、`agent_core/tool_request_projection.compact_request_source_supported`、`compact.py`/`compact_provider_surface.py`/`compact_checkpoint.py` 的接线、`context_pressure.py` 与 `compact_request_recovery.py` 两处门、`AgentConfig.compact_media_policy` 与 YAML。`_summarize_segments` 保持严格 `text_messages_supported`，作为媒体块漏换时的最后一道安全网。旧语义测试全部按 `off` 钉住，`auto` 语义另写。
 
 - 位置：摘要来源构造（`compact_provider_surface.conversation_compact_provider_source` 的 replay 与 `compact._legacy_conversation_summary_prompt` 的 `_summary_content`）。对 user 行里的 `local_file` 媒体块做只读投影，替换为文字块 `[附件引用 image sha256:<前 12 位> 名称:<name> 大小:<bytes>；已归档，未随本次摘要发送；需要重看时请重新添加同一附件]`。不带 owner 目录绝对路径（现有 `project_input_media` 的归档文字带路径，是运输层的另一处，本片不改它）。
 - `_split_nontext_transcript_suffix` 的保护判据改为"存在 unknown 非文本块"；media 块不再保护，因此含图回合进入安全前缀，由原分区/checkpoint 覆盖。近期尾部保护（`compact_partitions`）不变，最近的含图回合通常仍留在尾部原样保留。
@@ -43,6 +45,19 @@
 - `_summarize_segments` 的 `COMPACT_SOURCE_NON_TEXT` 检查改为 `compact_source_supported`，unknown 块仍拒绝。
 - checkpoint 字段：`media_policy=vision_summary`、`media_fact_source`、`media_blocks_summarized`、`media_refs`。
 - B 失败后的切换：B 的摘要调用以 typed 错误失败（供应商窗口/媒体拒绝、截断）时，沿现有 `record_compact_failure` 把码写到线程（新增 `COMPACT_VISION_SUMMARY_FAILED`，`compact_failure_code` 与 `compact_failure_updated_at` 已是结构化字段）；同一代次内下一次压缩读到这个持久事实即选 A，并把 `media_fact_source=policy_forced`、`media_policy_reason=COMPACT_VISION_SUMMARY_FAILED` 写进 checkpoint。谁切：恢复/自动压缩宿主在解析策略时切；条件：线程上记录的最近一次压缩失败码属于 `COMPACT_VISION_*` 且 `compact_generation` 未推进。
+
+## 评审并入的决定（2026-09-24，决策线评审）
+
+- B 不接单请求的供应商窗口错误回退：`generate_bounded_compact_response` 在 B 模式下遇 `ProviderContextWindowError` 直接抛 typed `COMPACT_VISION_SUMMARY_FAILED`，不减半预算转分段（分段不能承载图片，转分段等于同一请求内静默退回 A）。
+- B 的请求前决定再加运输层字节预算：`Σ size_bytes <= input_media_max_bytes`，否则选 A；B 模式下 `InputMediaError` 一律归到 `COMPACT_VISION_SUMMARY_FAILED`，避免 `project_input_media` 的归档文字（含绝对路径）进入摘要。
+- B 只用于压缩点的自动压缩；强制恢复（窗口或供应商施压，`forced=True`）一律走 A。这是按 force 标志做的请求前决定。
+- B 失败的切换条件用专用结构化字段 `compact_vision_failed_generation`（线程上），不用会被无关失败覆盖的 `compact_failure_code`；B 的 typed 失败不计入 `compact_consecutive_failures` 熔断，避免让随后的 A 等 300s 冷却。
+- 探针：只有供应商对图片块的 typed 拒绝缓存为 `probe_unsupported`；答错或不调用工具记 `probe_inconclusive`，按工具探针方式有界重试且不永久缓存；探针依赖工具调用，须在 `probe_tool_capability().native_supported` 为真后再发，否则记 `probe_unavailable`。策略解析（读 `input_modalities` 或跑探针）必须与摘要调用处于同一个模型绑定（`model_dependencies_scope`）。
+- 探针缓存位置：实测同一 Gateway 进程内 owner Agent 在空闲 60s 后被 `release_idle_owner_agents` 释放，后端实例缓存随之清空，所以"每进程每模型一次"不成立。片 B 采用进程级缓存，键为 provider endpoint + model + 连接修订，放在 owner Agent 之外；阴性口径不变。
+- `input_modalities` 校验为任意小写标识符列表（开放世界），解析器只处理认识的值，不认识的保留并忽略；决策线的用途标签平行字段按同一规则。
+- 计量缺口：三处门放开后，preflight、`_automatic_noop`、候选接受数仍按"媒体引用字节不算视觉 token"估算，会低估并依赖供应商窗口错误那条恢复路径兜底；片 B 把同一个 `input_media_token_reserve` 加进这几处估算。
+- 新近可达路径：会话没有已完成历史、只有本轮带图时，恢复宿主走 `_compact_active_source`（来源只有工具记录与 IR，UserTurn 的图原样留在候选里，不需要 A 投影）；片 A 后续补一例"新会话首条带图、工具循环越过压缩点"的回归。
+- `_prepare_native_compact_plan`、模型切换判定（`gateway_model_adoption`/`subagent.model_selection` 里的 `text_request_capacity_known`）保持严格语义不变：它们回答的是"能否换给另一个模型"，要等 `input_modalities` 落地后由决策线处理。
 
 ## 配置与错误码
 

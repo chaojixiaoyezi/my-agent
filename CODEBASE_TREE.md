@@ -409,6 +409,7 @@ agent_py_agent/
 |   |   |-- compact.py                  # 唯一 thread compact：候选验证、一次 CAS 提交与近期 raw tail
 |   |   |-- compact_projection.py       # 原 Compact 的只读来源、完整请求投影和提交后临时材料合同
 |   |   |-- compact_provider_surface.py # transcript Compact 复用普通轮 stable prompt/system/tools/messages 的缓存面
+|   |   |-- compact_media_policy.py     # 媒体压缩策略：归档引用投影、策略解析与 checkpoint 媒体事实（B 路径待接）
 |   |   |-- compact_text_source.py      # 只读两遍编码校验与当前字符窗口，消费后释放，不拥有覆盖
 |   |   |-- compact_message_source.py   # 可重放原生摘要消息与完整JSON数组编码，复用唯一token估算
 |   |   |-- compact_request_budget.py   # 按当前模型窗口顺序分段摘要，完整覆盖历史且失败不推进游标
@@ -651,7 +652,8 @@ agent_py_agent/
 |   |-- test_compact_recovery_release.py # 恢复宿主解绑旧历史：失败/取消/超限收尾不读、noop保留、tool_context共享合同
 |   |-- test_compact_media_recovery.py  # 两协议媒体工具轮及溢出后原文保留、无摘要和无CAS
 |   |-- test_compact_transcript_media_partition.py # 文字前缀覆盖与媒体完整后缀、分段拒绝
-|   |-- test_media_compact_preflight.py # 媒体会话越过压缩点：preflight 只守窗口、越窗 COMPACT_REQUEST_NON_TEXT
+|   |-- test_media_compact_preflight.py # 媒体会话越过压缩点：off 只守窗口/越窗 NON_TEXT，auto 归档引用后按压缩点压缩
+|   |-- test_compact_media_policy.py    # 媒体压缩策略片 A：分类、投影、后缀保护按策略与 checkpoint 媒体事实
 |   |-- test_request_content_capacity.py # 当前思考与跨模型内容边界、child保留原模型
 |   |-- test_input_media.py             # 媒体归属、字节、预算和原生后端投影
 |   |-- test_native_compact_carry.py   # 同回合携带身份、深复制、精确释放和工具轮标记隔离

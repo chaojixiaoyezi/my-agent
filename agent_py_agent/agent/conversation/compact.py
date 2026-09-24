@@ -12,7 +12,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
-from ..backends.request_content import text_messages_supported
+from ..backends.request_content import compact_source_supported
 from ..common.cancellation import ToolCancelled
 from ..memory_archive import estimate_tokens
 from .channels import project_user_reply
@@ -26,6 +26,14 @@ from .compact_guard import (
     compact_partitions,
     raise_if_compact_interrupted,
     record_compact_failure,
+)
+from .compact_media_policy import (
+    MEDIA_POLICY_OFF,
+    CompactMediaDecision,
+    MediaArchiveFacts,
+    media_archive_facts,
+    project_archived_media_message,
+    resolve_compact_media_policy,
 )
 from .compact_message_source import CompactMessageSource, estimate_compact_payload
 from .compact_progress import (
@@ -199,6 +207,9 @@ class _CompactCandidate:
     projected_tokens_after: int
     request_projection: ConversationCompactProjection | None = field(default=None, repr=False)
     tool_source: CarriedToolCompactSource | None = field(default=None, repr=False)
+    # LLM: 本候选对媒体块采取的策略与将被归档的媒体事实；None/空表示本次范围内没有媒体或策略为 off，提交时据此决定是否写 checkpoint 字段。
+    media_decision: CompactMediaDecision | None = field(default=None, repr=False)
+    media_facts: MediaArchiveFacts = field(default_factory=MediaArchiveFacts, repr=False)
 
 
 # LLM: 摘要调用身份、冻结缓存面及真实工具来源一起传递；严格恢复的机械回退必须完整保留旧摘要和所选原文。
@@ -217,6 +228,9 @@ class _CompactSummaryCall:
     tool_source_records: tuple[dict[str, object], ...] = ()
     tool_source_ir_history: tuple[object, ...] = ()
     preserve_complete_fallback: bool = False
+    # LLM: media_policy 决定摘要来源重放时是否把媒体块投影为归档引用；media_archived 只影响摘要软指令，不参与判定。
+    media_policy: str = MEDIA_POLICY_OFF
+    media_archived: bool = False
 
 
 # LLM: Never derive owner or thread authority from prompt text in this projection.
@@ -613,15 +627,18 @@ def render_conversation_context_usage(
     return "\n".join(lines)
 
 
-# LLM: 原生信封是媒体完整性的权威；首个非文本回合起保护全部后缀，短路时关闭读取，禁止摘要越过该游标。
-# 函数用途: 在可重放地址上划分可摘要前缀和媒体保护后缀，不复制全量行。
+# LLM: 原生信封是媒体完整性的权威；首个"不能进入压缩链"的回合起保护全部后缀，短路时关闭读取，禁止摘要越过该游标。
+# 媒体策略为 off 时任何非文本块都保护（旧行为）；否则只有 unknown 非文本块保护，已知媒体块交给策略投影或随图摘要。
+# 函数用途: 在可重放地址上划分可摘要前缀和保护后缀，不复制全量行。
 def _split_nontext_transcript_suffix(
     rows: Sequence[MessageLogEntry],
+    *,
+    media_policy: str = MEDIA_POLICY_OFF,
 ) -> tuple[Sequence[MessageLogEntry], Sequence[MessageLogEntry]]:
     with message_rows_iterator(rows) as iterator:
         for index, row in enumerate(iterator):
             native = canonical_native_messages_from_metadata(row.metadata)
-            if native and not text_messages_supported(native):
+            if native and not compact_source_supported(native, media_policy=media_policy):
                 start = _nontext_turn_start(rows, index)
                 return rows[:start], rows[start:]
     return rows, []
@@ -648,7 +665,8 @@ def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
     # protecting and then re-compacting the same tail creates checkpoint churn without helping
     # the active turn fit. Normal threshold compaction still protects bounded complete turns.
     # 逻辑说明: 平时到 90% 时保留近期完整问答；供应商已报压力时一次压完旧段，避免同一尾部连压多代。
-    safe_prefix, protected_suffix = _split_nontext_transcript_suffix(request.pending)
+    media_decision = resolve_compact_media_policy(request.agent)
+    safe_prefix, protected_suffix = _split_nontext_transcript_suffix(request.pending, media_policy=media_decision.policy)
     if not safe_prefix:
         raise ConversationCompactError("没有可完整文字摘要的历史前缀，保留原始媒体", code="COMPACT_SOURCE_EMPTY")
     partitions = (
@@ -662,22 +680,7 @@ def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
     )
     partition_count = max(1, len(partitions))
     trigger_fallback: _CompactCandidate | None = None
-    provider_surface = request.provider_surface
-    if provider_surface is None and request.model_surface is not None:
-        try:
-            provider_surface = prepare_conversation_compact_provider_surface(
-                request.agent,
-                request.model_surface,
-                run_id=request.run_id,
-            )
-        except Exception as exc:
-            record_compact_failure(
-                request.store,
-                request.thread,
-                code=compact_exception_code(exc),
-                now=request.attempted_at,
-            )
-            raise
+    provider_surface = _resolved_provider_surface(request)
     for partition_index, (compact_rows, ordinary_tail) in enumerate(partitions):
         retained_tail = concatenate_message_rows((ordinary_tail, protected_suffix))
         raise_if_compact_interrupted(request.interrupt_check)
@@ -696,6 +699,7 @@ def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
                 retained_tail,
                 provider_surface=provider_surface,
                 progress_range=(summarize_percent, measure_percent),
+                media_decision=media_decision,
             )
         except (InterruptedError, ToolCancelled):
             raise
@@ -748,6 +752,19 @@ def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
     raise error
 
 
+# LLM: 宿主已备好的 provider_surface 原样沿用；只有给了 model_surface 才在此准备，准备失败先记原失败码再上抛，不进入候选循环。
+# 函数用途: 为本次 Compact 取得摘要请求的缓存面，准备失败与候选失败共用同一记账。
+def _resolved_provider_surface(request: _CompactRunRequest) -> ConversationCompactProviderSurface | None:
+    provider_surface = request.provider_surface
+    if provider_surface is not None or request.model_surface is None:
+        return provider_surface
+    try:
+        return prepare_conversation_compact_provider_surface(request.agent, request.model_surface, run_id=request.run_id)
+    except Exception as exc:
+        record_compact_failure(request.store, request.thread, code=compact_exception_code(exc), now=request.attempted_at)
+        raise
+
+
 # LLM: 只组合原 Compact 输入阈值与 core 唯一请求容量规则，不另配百分比、不把未来输出当已消耗 token。
 # 函数用途: 对普通触发、优选候选及保留候选使用同一接受上界；等于上界时仍交原失败/恢复链。
 def _compact_request_input_ceiling(agent: SimpleAgent, policy: RuntimeCompactPolicy) -> int:
@@ -786,8 +803,12 @@ def _build_compact_candidate(
     *,
     provider_surface: ConversationCompactProviderSurface | None,
     progress_range: tuple[int, int] = (15, 65),
+    media_decision: CompactMediaDecision | None = None,
 ) -> _CompactCandidate:
     raise_if_compact_interrupted(request.interrupt_check)
+    # 媒体事实只从 canonical 信封统计；策略为 off 或没有决定时不统计、也不写 checkpoint 字段。
+    media_facts = (media_archive_facts(compact_rows)
+                   if media_decision is not None and media_decision.policy != MEDIA_POLICY_OFF else MediaArchiveFacts())
     base_summary = (request.compact_context.view.summary if request.compact_context is not None
                     else request.thread.summary)
     base_evidence = (request.compact_context.view.operation_evidence if request.compact_context is not None
@@ -810,6 +831,8 @@ def _build_compact_candidate(
             tool_source_records=request.tool_source.source_records if request.tool_source is not None else (),
             tool_source_ir_history=request.tool_source.source_ir_history if request.tool_source is not None else (),
             preserve_complete_fallback=request.request_projector is not None,
+            media_policy=media_decision.policy if media_decision is not None else MEDIA_POLICY_OFF,
+            media_archived=media_facts.blocks > 0,
             source_progress=lambda covered, total: _emit_compact_progress(
                 request, phase="progress", stage="summarizing",
                 percent=progress_range[0] + int((progress_range[1] - progress_range[0]) * covered / max(1, total)),
@@ -839,6 +862,8 @@ def _build_compact_candidate(
         projected_tokens_after=projected_after,
         request_projection=projection,
         tool_source=request.tool_source,
+        media_decision=media_decision,
+        media_facts=media_facts,
     )
 
 
@@ -879,6 +904,10 @@ def _commit_compact_candidate(
             forced=request.forced,
             source_tool_refs=candidate.tool_source.source_tool_refs if candidate.tool_source is not None else (),
             retained_tool_refs=candidate.tool_source.retained_tool_refs if candidate.tool_source is not None else (),
+            media_policy=candidate.media_decision.policy if candidate.media_decision is not None else "",
+            media_fact_source=candidate.media_decision.fact_source if candidate.media_decision is not None else "",
+            media_blocks_archived=candidate.media_facts.blocks,
+            media_refs=candidate.media_facts.refs,
             **({
                 "scope": request.compact_context.scope,
                 "summary_base_checkpoint_id": request.compact_context.view.checkpoint_id,
@@ -1102,6 +1131,7 @@ def _summarize(
         operation_evidence,
         custom_instructions=selected_call.custom_instructions,
         cache_safe=provider_surface is not None,
+        media_archived=selected_call.media_archived,
     )
     if provider_surface is None:
         prompt = _legacy_conversation_summary_prompt(
@@ -1119,6 +1149,8 @@ def _summarize(
             selected_call.compact_generation,
             foreground_rows,
             volatile_sections=provider_surface.volatile_sections,
+            project_message=(project_archived_media_message
+                             if selected_call.media_policy != MEDIA_POLICY_OFF else None),
         )
         provider_tools = (
             list(provider_surface.tools)
@@ -1182,6 +1214,7 @@ def _conversation_summary_instruction(
     *,
     custom_instructions: str,
     cache_safe: bool,
+    media_archived: bool = False,
 ) -> str:
     row_location = (
         "The chronological provider messages immediately before this request are the new "
@@ -1199,6 +1232,9 @@ def _conversation_summary_instruction(
             "small tasks. Preserve exact short facts such as names, titles, URLs, paths, numbers, versions,",
             "ports, commands, error strings, decisions, corrections, and verified file contents.",
             "Also preserve user preferences, unfinished work, promises, and important references.",
+            *(["Image or video attachments in the rows were replaced by [附件引用 ...] reference blocks; keep those",
+               "references and the conclusions drawn from them at the time. Do not claim the media itself is present."]
+              if media_archived else []),
             "Use separate sections for the user's primary goal, current work, exact project/file paths,",
             "verified results, unfinished tasks, and the next step. A progress-check request does not",
             "replace the larger task it refers to. Retain the original requirements unless the user changed them.",

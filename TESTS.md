@@ -2,6 +2,13 @@
 
 child不展示历史正文时的读取回归先复现1 failed/1 passed，修复后test_compact_retained_history、test_subagent_compact_recovery、test_gateway_child_compact_scope_application三文件31 passed（8.48秒）。三宿主seed仓外基线仅验证测量和完整性，不算内存目标通过；细节见容量审计的宿主生命周期基线。
 
+## 媒体压缩策略片 A：归档引用主链（2026-09-24，本地分支 `claude/compact-media-policy`）
+
+- **改动**：新增 `backends/request_content.classify_nontext_content` / `compact_source_supported` / `is_local_media_block`、`conversation/compact_media_policy.py`、`tool_request_projection.compact_request_source_supported`；`compact._split_nontext_transcript_suffix` 按策略只保护 unknown 块，`conversation_compact_provider_source` 支持逐条只读投影，checkpoint 新增 `media_policy` / `media_fact_source` / `media_blocks_archived` / `media_refs`；preflight 与恢复宿主两处门改用"能否摘要"判定；配置 `compact_media_policy`（默认 `auto`，片 A 等价于 `archived_refs`）。`_summarize_segments` 与 `text_request_capacity_known` 保持严格语义不变。已知媒体严格等于运输层会展开的集合（顶层 user 行的 local_file image/video），嵌套或 assistant 侧一律 unknown。
+- **新测试** `test_compact_media_policy.py` 22 项：分类矩阵（嵌套 / assistant 侧媒体计 unknown）、策略解析与非法值 fail closed、投影只改顶层 user 的 local_file 块且不含路径、来源多遍重放一致、后缀保护按策略切换、归档引用压缩覆盖含图回合并写 checkpoint 事实、`off` 下旧行为且不写媒体字段、unknown 块在 `archived_refs` 下仍保护。
+- **改写用例**：`test_media_compact_preflight.py` 九项矩阵与 Gateway 四档按 `off`/`auto` 参数化，图片夹具改为 canonical 的 local_file 引用；`auto` 下带图历史越过压缩点先归档引用再压缩、业务请求 0 个图片块、摘要请求含"附件引用"且不含 local_file，越窗时强制恢复同样走归档引用后发送。`test_compact_media_recovery.py`、`test_compact_retained_history.py` 显式钉住 `off`。
+- **结果**：直接相关 10 个文件 230 项通过；相关 90 个测试文件 2059 passed、1 skipped、3 xfailed、1 xpassed；ruff 通过。真实 TUI 验收待部署后进行（M3 会话贴图后读长文越过压缩点）。
+
 ## Gateway 消息文件流式读取（2026-09-24，本地分支 `claude/decision-gateway-message-reads`）
 
 - **新测试** `test_message_tail_streaming.py` 124 项，以不改的 `read_jsonl_tail_report`、`recent_report` 作参照逐项比对：

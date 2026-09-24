@@ -148,6 +148,7 @@ def _missing_request_fields(prepared: ToolLoopRequestInput) -> tuple[str, ...]:
 __all__ = [
     "ToolLoopRequestInput", "ToolLoopRequestProjection",
     "project_tool_loop_request", "tool_loop_prompt_request", "text_request_capacity_known",
+    "compact_request_source_supported",
 ]
 
 
@@ -160,6 +161,28 @@ def text_request_capacity_known(prepared: object, *, allow_reasoning: bool = Tru
         return False
     return all(_text_ir_item_supported(item, allow_reasoning=allow_reasoning)
                for item in getattr(prepared, "tool_ir_history", None) or ())
+
+
+# LLM: 回答"能否进入压缩链"而不是"能否计量"：unknown 非文本块与 text_request_capacity_known 一样拒绝；
+# 已知媒体块（原生历史里的 local_file 引用、UserTurn 的 media refs）在媒体策略不为 off 时放行，由压缩链按策略投影或随图摘要。
+# 函数用途: 供 preflight 与恢复宿主判断当前请求的历史能不能压缩，媒体不再让压缩链整体不可用。
+def compact_request_source_supported(prepared: object, *, media_policy: str, allow_reasoning: bool = True) -> bool:
+    from ..backends.request_content import compact_source_supported
+
+    if not compact_source_supported(getattr(prepared, "provider_history_messages", None) or (), media_policy=media_policy,
+                                    allow_reasoning=allow_reasoning):
+        return False
+    return all(_compact_ir_item_supported(item, media_policy=media_policy, allow_reasoning=allow_reasoning)
+               for item in getattr(prepared, "tool_ir_history", None) or ())
+
+
+# 函数用途: 单个 IR 项的压缩链放行规则；只有带媒体的 UserTurn 与文字计量规则不同。
+def _compact_ir_item_supported(item: object, *, media_policy: str, allow_reasoning: bool) -> bool:
+    from ..backends.tool_ir import UserTurn
+
+    if isinstance(item, UserTurn):
+        return not item.media or media_policy != "off"
+    return _text_ir_item_supported(item, allow_reasoning=allow_reasoning)
 
 
 # LLM: 本层只认可原IR合同，工具结果以原模型投影呈现；未知类型不可先经adapter过滤，UserTurn媒体保留但不可按refs量容量。

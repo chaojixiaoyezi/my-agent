@@ -98,6 +98,8 @@ def test_complete_projection_requires_explicit_source():
 def test_retained_media_reaches_wire_or_fails_capacity_without_dropping(tmp_path, monkeypatch, host, backend, large):
     if host == "gateway":
         fixture = actual_request(tmp_path, mode="disabled", tools=False, original_window=200_000)
+        # 本文件钉住 compact_media_policy=off 的旧合同；归档引用路径见 test_compact_media_policy / test_media_compact_preflight。
+        fixture.agent.config.compact_media_policy = "off"
         agent, tid = fixture.agent, fixture.thread_id
         if backend == "openai_compatible":
             profile, _ = add(agent, model_name="original-openai", model_backend=backend, model_context_window_tokens=200_000)

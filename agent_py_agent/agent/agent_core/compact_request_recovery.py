@@ -13,6 +13,7 @@ from ..conversation.compact_guard import (
     compact_exception_code,
     raise_if_compact_interrupted,
 )
+from ..conversation.compact_media_policy import configured_media_policy
 from ..conversation.compact_projection import (
     ConversationCompactProjection,
     ConversationCompactSource,
@@ -31,8 +32,8 @@ from .tool_request_capture import capture_tool_loop_request
 from .tool_request_projection import (
     ToolLoopRequestInput,
     ToolLoopRequestProjection,
+    compact_request_source_supported,
     project_tool_loop_request,
-    text_request_capacity_known,
 )
 
 
@@ -108,7 +109,8 @@ class PreparedCompactRecovery:
         return prepared_params, prepared_prompt
 
     # LLM: 进入时领取防摘要重入；强制恢复没有消息或完整工具来源时显式拒绝，准备/投影失败不发送业务，CAS后沿同次材料发送。
-    # 强制恢复遇媒体等非文本内容报 COMPACT_REQUEST_NON_TEXT（preflight 此时只在窗口上限触发）；自动遇同类内容走 noop。
+    # 强制恢复遇 unknown 非文本内容（或媒体策略 off 且含媒体）报 COMPACT_REQUEST_NON_TEXT（preflight 此时只在窗口上限触发）；自动遇同类内容走 noop。
+    # 已知媒体在策略不为 off 时进入压缩链，由 compact 按策略投影为归档引用或随图摘要。
     # 自动 noop 先原样返回原请求；决定摘要后解绑原参数与冻结输入的完整原生历史，失败/取消/超限收尾都不得再读它。
     # 函数用途: 用完整当前输入选择摘要候选，提交后返回同次恢复轮的新参数与已检查提示。
     def select(self, agent: object, params: object, prompt: str) -> tuple[object, str]:
@@ -126,9 +128,9 @@ class PreparedCompactRecovery:
             raise ConversationCompactError("完整恢复输入未知", code="COMPACT_REQUEST_PROJECTION_UNKNOWN") from exc
         if not frozen.prompt_input.native_tool_use or frozen.tool_protocol_snapshot.source_protocol != "native":
             raise ConversationCompactError("恢复工具协议未知", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
-        if self.force and not text_request_capacity_known(frozen):
-            # 结构化原因单列：媒体等非文本内容使压缩不可用，宿主和 TUI 据此说明为何不能继续，不与内部投影失配混码。
-            raise ConversationCompactError("会话包含图片等非文本内容，当前无法压缩上下文；原始记录已保留", code="COMPACT_REQUEST_NON_TEXT")
+        if self.force and not compact_request_source_supported(frozen, media_policy=configured_media_policy(agent)):
+            # 结构化原因单列：无法摘要的非文本内容使压缩不可用，宿主和 TUI 据此说明为何不能继续，不与内部投影失配混码。
+            raise ConversationCompactError("会话包含无法摘要的非文本内容，当前无法压缩上下文；原始记录已保留", code="COMPACT_REQUEST_NON_TEXT")
         tool_source = _recovery_tool_source(agent, source, params, frozen)
         if self.force and not source.messages and tool_source is None:
             if _recovery_tool_records_present(agent, source, params, frozen):
@@ -228,7 +230,7 @@ class PreparedCompactRecovery:
         projection = project_tool_loop_request(frozen)
         if projection.status != "ready":
             raise ConversationCompactError("完整请求投影未知", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
-        if not text_request_capacity_known(frozen):
+        if not compact_request_source_supported(frozen, media_policy=configured_media_policy(self.agent)):
             return True
         tokens, _ = projected_model_context_components(projection)
         if tokens < _compact_request_input_ceiling(self.agent, self.source.policy):

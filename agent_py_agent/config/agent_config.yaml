@@ -196,6 +196,14 @@ memory_compact_semantic_summary_min_middle: 4
 # 同时限制 native carried active-turn handoff 的最大字符数，避免后台 wake 把旧工具轨迹无限塞回上下文。
 memory_compact_semantic_summary_max_input_chars: 12000
 
+# 含图片/视频历史的压缩策略（设计见 docs/design/COMPACT_MEDIA_POLICY.md）：
+# - auto：默认。旧附件在压缩时降级为"[附件引用 sha256 前缀 / 文件名 / 大小]"文字块，只摘要文字；
+#   模型视觉能力事实（档案声明或结构化探针）接入后，支持视觉的模型才会把含图轮次随图摘要。
+# - archived_refs：固定走归档引用，不探针、不随图摘要。
+# - off：保持旧行为——从首个媒体回合起保护全部后缀不摘要，会话容量等于窗口减去图片之后的全部内容。
+# 附件原件与 canonical 历史在任何策略下都不删；需要重看旧图时重新添加同一附件即可。
+compact_media_policy: "auto"
+
 # Memory / compact / artifact 默认预算：
 # - 这些值只控制“默认读取多少、预览多少、扫描多少”，不是数据保留上限。
 # - 用户后续觉得太保守或太激进时，可以只改这里，不需要改 Python 代码。

@@ -42,6 +42,11 @@ class CompactCheckpointRequest:
     summary_base_checkpoint_id: str | None = None
     source_tool_refs: tuple[dict[str, str], ...] = ()
     retained_tool_refs: tuple[dict[str, str], ...] = ()
+    # LLM: 媒体策略事实只在本次覆盖范围含媒体块时写入 checkpoint；refs 为完整 sha256，供审计与用户按内容地址重新附上。
+    media_policy: str = ""
+    media_fact_source: str = ""
+    media_blocks_archived: int = 0
+    media_refs: tuple[str, ...] = ()
 
 
 # LLM: 工具来源/保留区均以原四元refs为权威，call_id仅作展示；与scope/base共同写入原owner账本。
@@ -166,6 +171,11 @@ def write_compact_checkpoint(agent: SimpleAgent, request: CompactCheckpointReque
         "retained_tail_messages": len(request.retained_tail),
         "operation_evidence": json.loads(json.dumps(request.operation_evidence, ensure_ascii=False)),
     })
+    if request.media_policy and request.media_blocks_archived > 0:
+        row.update({
+            "media_policy": request.media_policy, "media_fact_source": request.media_fact_source,
+            "media_blocks_archived": int(request.media_blocks_archived), "media_refs": list(request.media_refs),
+        })
     return _append_checkpoint(agent, row)
 
 

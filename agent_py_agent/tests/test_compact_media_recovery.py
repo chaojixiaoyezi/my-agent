@@ -24,6 +24,8 @@ from agent_py_agent.tests.test_subagent_compact_recovery_continuation import _re
 # 函数用途: 为真实 Gateway 入口准备同一用户文字、图片及稍后由 read_file 返回的长材料。
 def _media_request(tmp_path, protocol):
     fixture = actual_request(tmp_path, mode="disabled", tools=True)
+    # 本文件钉住 compact_media_policy=off 的旧合同；归档引用路径见 test_compact_media_policy / test_media_compact_preflight。
+    fixture.agent.config.compact_media_policy = "off"
     agent = fixture.agent
     if protocol == "openai_compatible":
         profile, _ = add(agent, model_name="original-openai", model_backend=protocol,

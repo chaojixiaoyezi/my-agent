@@ -215,8 +215,9 @@ def conversation_compact_provider_messages(
 
 
 # LLM: 各遍重放同一rows，原生最后信封与orphan规则共用原实现；不缓存完整provider数组，不授予历史覆盖。
+# project_message 是每遍重放都重新应用的纯投影（如把媒体块换成归档引用），只改交给摘要的临时消息，不改 rows。
 # 函数用途: 为摘要计量与分段提供同一可重放缓存面，完整旧摘要和展示段仍原样保留。
-def conversation_compact_provider_source(previous_summary, compact_generation, rows, *, volatile_sections=()):
+def conversation_compact_provider_source(previous_summary, compact_generation, rows, *, volatile_sections=(), project_message=None):
     rows = rows if isinstance(rows, Sequence) else tuple(rows)
     prefix: list[dict[str, Any]] = []
     summary = str(previous_summary or "").strip()
@@ -236,7 +237,8 @@ def conversation_compact_provider_source(previous_summary, compact_generation, r
     # 函数用途: 在原生历史前后加原摘要和展示消息，保持原数组顺序。
     def replay():
         yield from prefix
-        yield from iter_provider_history_messages_from_rows(rows)
+        history = iter_provider_history_messages_from_rows(rows)
+        yield from (map(project_message, history) if project_message is not None else history)
         yield from current_display
 
     return CompactMessageSource(lambda: iter_strip_orphaned_tool_blocks(replay))
