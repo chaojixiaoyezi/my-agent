@@ -1368,27 +1368,35 @@ def _text_conversation_history_section(seed: object, *, compact_context: object 
 # 再由请求宿主准备同次上下文并核对子代理首请求与主会话候选；内部超限重试绑定该次采用的参数。只有宿主
 # 在首次 HTTP 前抛出的 typed 拒绝可退回同一次尝试的原参数与原 prompt，之后错误原样上抛。返回具名结果，
 # params 是实际产出 response 的循环参数；不要把辅助回执当作业务工具声明已展示。
+# 同一次模型请求的瞬断重试若宿主已提交恢复候选，直接复用该候选，不在旧参数上 build、回收或注入插话；
+# 选模仍在每次尝试内重新进行。
 # 函数用途: 选择本轮真正要发给模型的上下文与模型依赖，并把原请求、Compact和输入恢复能力交给模型请求周期。
 def next_tool_loop_model_response(
     agent, params: ToolLoopExecuteParams, tool_rounds: int,
 ) -> ModelTurnRequest:
-    _discard_stale_natural_reply_for_pending_turn_input(agent, params)
-    model_params = natural_user_reply_model_params(params)
-    if model_params is not params:
-        prompt, response = _request_tool_loop_model_response(
-            agent, model_params, tool_rounds, consumes_task_tool_surface=False,
-        )
-        return ModelTurnRequest(prompt, response, params)
     from ..model_request_selection import (
         ModelRequestSelectionRejected,
+        committed_request_selection,
         prepare_request_context,
         reject_request_selection,
         select_request_model,
     )
     from .subagent.model_selection import select_first_request_model
 
-    prompt = build_tool_loop_prompt(agent, params)
-    prepared, prompt = prepare_request_context(agent, params, prompt)
+    committed = committed_request_selection(agent, params)
+    if committed is not None:
+        # 恢复候选已提交：重试原样复用，旧请求不再发送；新插话留到下一轮由新参数送出。
+        prepared, prompt = committed
+    else:
+        _discard_stale_natural_reply_for_pending_turn_input(agent, params)
+        model_params = natural_user_reply_model_params(params)
+        if model_params is not params:
+            prompt, response = _request_tool_loop_model_response(
+                agent, model_params, tool_rounds, consumes_task_tool_surface=False,
+            )
+            return ModelTurnRequest(prompt, response, params)
+        prompt = build_tool_loop_prompt(agent, params)
+        prepared, prompt = prepare_request_context(agent, params, prompt)
     baseline, baseline_prompt = select_first_request_model(agent, prepared, prompt)
     selected, selected_prompt = select_request_model(agent, baseline, baseline_prompt)
     try:

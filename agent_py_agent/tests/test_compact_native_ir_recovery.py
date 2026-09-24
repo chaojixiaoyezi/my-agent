@@ -432,3 +432,80 @@ def test_forced_recovery_with_identityless_carried_records_reports_coverage_unkn
     assert not business and not cas_calls
     committed = store.threads.require(thread.thread_id)
     assert committed.compact_generation == 0 and not committed.compact_checkpoint_id
+
+
+# 后台宿主直接安装 PreparedCompactRecovery：提交候选后的瞬断重试沿同一原参数命中已提交记录，
+# 重试原样发送同一候选，不在旧参数上重建或做共享预算回收；摘要一次、代次保持 1。
+def test_background_transient_retry_after_commit_resends_committed_candidate(tmp_path, monkeypatch) -> None:
+    from agent_py_agent.agent.agent_core import _tool_loop_service as service
+    from agent_py_agent.agent.agent_core import provider_transient_auto_resume
+    from agent_py_agent.agent.backends import http
+    from agent_py_agent.agent.backends.errors import ProviderTransientError
+
+    body = "OVER_BUDGET_TOOL_BODY_" + "资料核对" * 3_700
+    agent, store, thread, execution, sink, history, params, context, recorded = _native_ir_attempt(
+        tmp_path, monkeypatch, backend="anthropic_compatible", full_result=body, pairs=4,
+        context_window_tokens=60_000,
+    )
+    shared_fits, builds, candidates, summaries, business, waits = [], [], [], [], [], []
+    original_fit = service._fit_native_ir_to_shared_budget
+    original_build = service.build_tool_loop_prompt
+    original_project = recovery_core._project_mixed_recovery_material
+    original_summary = active_turn_compact._active_turn_replacement_summary
+    in_summary = False
+
+    def fit(*args, **kwargs):
+        shared_fits.append(True)
+        return original_fit(*args, **kwargs)
+
+    def build(*args, **kwargs):
+        builds.append(True)
+        return original_build(*args, **kwargs)
+
+    def project(*args):
+        material = original_project(*args)
+        if args[1].is_candidate:
+            candidates.append(material)
+        return material
+
+    def summary(*args, **kwargs):
+        nonlocal in_summary
+        in_summary = True
+        try:
+            return original_summary(*args, **kwargs)
+        finally:
+            in_summary = False
+
+    def send(request):
+        wire = json.loads(json.dumps(request.payload, ensure_ascii=False))
+        names = [row.get("name") for row in wire.get("tools", [])]
+        if names == ["my_agent_capability_probe"]:
+            nonce = re.search(r"nonce ([0-9a-f]+)", json.dumps(wire))[1]
+            probe = {"type": "tool_use", "id": "probe", "name": names[0], "input": {"nonce": nonce}}
+            return {"content": [probe], "stop_reason": "tool_use"}
+        if in_summary:
+            summaries.append(wire)
+            return {"content": [{"type": "text", "text": _live_handoff_text()}], "stop_reason": "end_turn"}
+        business.append((wire, len(builds), len(shared_fits)))
+        if len(business) == 1:
+            raise ProviderTransientError("503 after commit")
+        return {"content": [{"type": "text", "text": "资料核对完成。"}], "stop_reason": "end_turn"}
+
+    monkeypatch.setattr(service, "_fit_native_ir_to_shared_budget", fit)
+    monkeypatch.setattr(service, "build_tool_loop_prompt", build)
+    monkeypatch.setattr(recovery_core, "_project_mixed_recovery_material", project)
+    monkeypatch.setattr(active_turn_compact, "_active_turn_replacement_summary", summary)
+    monkeypatch.setattr(provider_transient_auto_resume, "_wait_before_retry", lambda *_: waits.append(True))
+    monkeypatch.setattr(http, "post_json", send)
+    result, _, recovery = background_execution._run_background_recovery_attempt(
+        execution, "继续核对完整工具结果", params, history, context, recovering=False, activity_sink=sink,
+    )
+
+    assert recovery is not None and recovery.committed and len(candidates) == 1 and summaries
+    assert len(waits) == 1 and len(business) == 2
+    expected = _wire_from_material(agent, candidates[0])
+    assert [wire == expected for wire, _, _ in business] == [True, True]
+    assert business[0][1:] == business[1][1:], "重试没有重建，也没有共享预算回收"
+    assert shared_fits == []
+    assert result.runtime_status != "context_overflow"
+    assert store.threads.require(thread.thread_id).compact_generation == 1

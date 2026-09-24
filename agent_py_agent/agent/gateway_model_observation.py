@@ -120,6 +120,11 @@ class GatewayModelObservation:
     def owns_compact(self, agent: object, params: object) -> bool:
         return self.compact_recovery is not None and self.compact_recovery.owns_compact(agent, params)
 
+    # LLM: 只转交恢复宿主的同请求重试记录；没有恢复宿主时为 None，不读额外状态。
+    # 函数用途: 让瞬断重试复用本请求已提交的恢复请求。
+    def committed_selection(self, agent: object, params: object) -> tuple[object, str] | None:
+        return self.compact_recovery.committed_selection(agent, params) if self.compact_recovery is not None else None
+
     # LLM: 先提交上下文再绑定候选；只更新本次CAS得到的compact代次，选模revision和profile守门不变。
     # 函数用途: 让选模使用压缩后的冻结提示，并让原模型回退基线保留已提交摘要。
     def prepare_request(self, agent: object, params: object, prompt: str) -> tuple[object, str]:

@@ -42,6 +42,13 @@ def prepare_request_context(agent: object, params: object, prompt: str) -> tuple
     return callback(agent, params, prompt) if callback is not None else (params, prompt)
 
 
+# LLM: 宿主已为同一次模型请求提交恢复候选时交回（参数, prompt），否则 None；按对象身份匹配，不读 I/O、不跨请求。
+# 函数用途: 让瞬断重试复用已提交的恢复请求，而不是在旧参数上重建压缩前的请求。
+def committed_request_selection(agent: object, params: object) -> tuple[object, str] | None:
+    callback = getattr(_HOST.get(), "committed_selection", None)
+    return callback(agent, params) if callback is not None else None
+
+
 # LLM: 只把原完整模型参数交给请求宿主；无作用域时返回同一对象和同一字节，不改变子代理采用策略。
 # 函数用途: 在首请求完整准备后选定本工作片依赖，工具后续轮次保持已采用配置。
 def select_request_model(agent: object, params: object, prompt: str) -> tuple[object, str]:

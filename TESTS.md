@@ -2,6 +2,25 @@
 
 child不展示历史正文时的读取回归先复现1 failed/1 passed，修复后test_compact_retained_history、test_subagent_compact_recovery、test_gateway_child_compact_scope_application三文件31 passed（8.48秒）。三宿主seed仓外基线仅验证测量和完整性，不算内存目标通过；细节见容量审计的宿主生命周期基线。
 
+## 恢复候选提交后的同请求重试（2026-09-24，本地分支 `claude/decision-retry-committed`）
+
+- **新测试**：
+  - `test_gateway_compact_recovery.py::test_transient_retry_after_commit_resends_committed_candidate`（2 项）：Gateway 溢出 → 摘要 → CAS → 候选瞬断。
+    - 重试成功：两次发送都是同一候选，两次之间没有重建，也没有共享预算回收。候选回的工具调用进入下一工具轮，下一轮按候选参数正常重建（带工具结果），不再命中。
+    - 重试耗尽：每次都发送候选，最后原样抛 `ProviderTransientError`。
+    - 两种结局都只有一次摘要、一行 v3 checkpoint，代次为 1。
+  - `test_compact_native_ir_recovery.py::test_background_transient_retry_after_commit_resends_committed_candidate`：后台宿主直接安装恢复宿主。首个候选瞬断后重发同一候选，前后没有重建和共享预算回收，代次为 1。
+  - `test_tool_loop_model_turn.py` 两项：
+    - 记录只对同一份原参数、同一 agent 命中；换参数对象即清除；未提交或宿主没有回调时不命中。
+    - 命中时不调用过期自然回复丢弃、自然回复切换、build、插话注入、共享预算回收和 prepare，只做首请求选模、选模和发送。
+- **变异验证**：
+  - 取记录始终返回 None：Gateway 2 项、后台 1 项失败。Gateway 重试发回重建的旧请求；后台在原参数上做共享预算回收，抛 `compact summary base changed`。
+  - 服务层不查记录：命中路径单测失败。
+  - 换参数对象不清除记录：记录单测失败。
+  - 改回后全部通过。
+- **结果**：引用改动模块或其入口的全部 57 个测试文件：1,612 passed、24 xfailed、1 xpassed；Ruff、doc sync、strict code-size（hard=0，高风险项与基线相同）、diff 检查通过。
+- **未覆盖**：空响应修复和插话取代两个同轮重跑分支，提交后仍用原参数重建（已用探针确认，见[依赖拆分同名节](docs/design/TOOL_LOOP_DEPENDENCY_SPLIT.md#恢复候选提交后的同请求重试决策分支2026-09-24本地)）。没有跑真实模型。
+
 ## 第12.4项第二片 2a：宿主历史种子只读来源（2026-09-23，本地分支）
 
 - **新测试**：
