@@ -105,7 +105,7 @@ Compact／媒体开发线与主线存在大量decision/Jev前置改动。以f2bc
 
 旧committed_live_tool_compact_source_ids把整条thread链的source_tool_call_ids合并为裸编号集合，active_turn_compact再按call_id／id／scoped_call_id任一命中隐藏。后续普通请求或另一attempt复用厂商编号时，新结果会从恢复模型上下文消失；原执行账仍存在。仅比较checkpoint的request_id／attempt_id不够：它们标识提交者，后台与子代理carried来源可能混合多个早先请求。
 
-修复边界：在现有live-tool checkpoint增加显式版本的逐调用来源引用，复用原canonical run_id／attempt_id／call_id，按存在性保留turn／operation等一致性事实。保留原checkpoint编号算法、顶层提交者语义、既有字段及锁／CAS顺序，不移植独立Jev的v3摘要scope链。新字段是来源引用，不另造工具执行身份或第二份状态。
+修复边界：在现有live-tool checkpoint增加显式版本的逐调用来源引用，复用原canonical run_id／attempt_id／call_id，按存在性保留turn／operation等一致性事实。保留已有checkpoint编号、无refs旧输入的编号结果、顶层提交者语义、既有字段及锁／CAS顺序，不移植独立Jev的v3摘要scope链。新字段是来源引用，不另造工具执行身份或第二份状态。
 
 - native在压缩前从真实ToolCall及配对结果冻结来源；carried逐条读原归档身份，不能用当前运行补齐，不解析scoped_call_id字符串猜身份。
 - 源／尾选择按实际记录位置和精确来源，不能用裸编号集合相减；不同来源的同号调用允许分别属于源和尾。计数按真实来源，不因同号去重少算。
@@ -123,3 +123,12 @@ Compact／媒体开发线与主线存在大量decision/Jev前置改动。以f2bc
 顺序保持build→generate→strip→读取原因→typed unfinished，返回产出这份响应的实际prompt。未知副作用的原因不能提前读：已执行且effect未知时，即使错误码可重试，也不得改成可自动续跑。新模块无执行器、请求重试、工具执行或持久写账。对应模型／工具请求仍由原ModelGenerateParams和原without_tool_call_after_limit执行。
 
 验证比较本地基线和候选，并单独覆盖四阶段异常／中断不重试、不执行后续步骤、当前宿主绑定、响应与用量保留以及剥离后才读halt事实。未代替真实TUI。
+
+
+### 来源引用修复的兼容与回滚边界
+
+同代次／提交attempt／裸调用编号／摘要相同而逐调用来源不同，会产生旧算法同ID；迟到candidate即使CAS失败，旧by_id读取仍可能让它覆盖已提交来源。该路径已由因果红灯复现。新writer显式传入source与retained refs时必须把规范refs纳入内容地址，无refs旧调用保留原ID结果；不改已有账或提交指针。
+
+旧durable只读工具索引通常没有attempt_id，也没有可反查的tool_operation，不透明operation_id不能拆出执行片。缺来源的旧carried记录不得套当前身份；全来源不确定时保持完整历史、原generation，返回compacted=false与结构化source_resolution=uncertain。此时provider overflow后的自动压缩恢复受限，必须作为兼容限制单列，不能宣称旧大历史已完整通过。
+
+新行显式追加引用字段，JSON格式可读不等于旧reader语义安全：旧reader仍按裸编号过滤，不能直接消费新混源同号记录。部署回滚必须核对checkpoint数据与reader兼容，保留新产生的账和用户记录；不能只切旧wheel并声称安全，也不能为回滚悄悄丢弃新历史。详细字段及最终验证在来源片交接中记录。
