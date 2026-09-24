@@ -2308,3 +2308,66 @@ def test_projection_failure_preserves_native_commit_boundary(
     failure_phases = [row["phase"] for row in sink.progress_rows if row["phase"] in {"failed", "superseded"}]
     assert failure_phases == ([] if persistent else ["superseded" if failure_type is InterruptedError else "failed"])
     _assert_no_orphans(_native_provider_messages(agent, params))
+
+
+@pytest.mark.parametrize("failure_type", [RuntimeError, InterruptedError])
+def test_post_commit_context_refresh_failure_keeps_committed_history(tmp_path, monkeypatch, failure_type):
+    """同范围视图刷新位于CAS之后、回滚边界之外：失败原样上抛，不回滚已提交历史，也不记压缩失败。"""
+    from agent_py_agent.agent.agent_core import _tool_loop_service as service
+    from agent_py_agent.agent.conversation.compact_scope import THREAD_COMPACT_SCOPE
+    from agent_py_agent.agent.conversation.compact_summary_view import (
+        AppliedCompactContext,
+        resolve_compact_summary_view,
+    )
+
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.threads.get_or_create({
+        "canonical_user_id": "local/main", "channel": "test",
+        "channel_conversation_id": "post-commit-refresh", "channel_user_id": "local/main",
+    })
+    agent = _native_agent(tmp_path)
+    agent.backend = _SummaryBackend(10_000)
+    agent.config.model_context_window_tokens = 10_000
+    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "base-prompt")
+    agent.conversation_store = store
+    agent.home_paths = SimpleNamespace(owner_compact_dir=tmp_path / "compact")
+    sink = _ContextCompactionSink()
+    context = AppliedCompactContext(
+        thread_id=thread.thread_id, scope=THREAD_COMPACT_SCOPE,
+        view=resolve_compact_summary_view(agent, thread, THREAD_COMPACT_SCOPE),
+    )
+    params = replace(
+        _params(), save=True, effective_on_chunk=sink, compact_context=context,
+        task_attributes={CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True,
+                         "conversation_thread_id": thread.thread_id},
+    )
+    _record_large_write_calls(agent, params, start=1, stop=6, chars=12_000)
+    original_ir = list(params.tool_ir_history)
+    committed, published = {}, []
+    failure = failure_type("post-commit context refresh failed")
+
+    def fail_refresh(refresh_params, refreshed_thread, *, summary, source_refs):
+        assert refresh_params is params and source_refs
+        assert refreshed_thread.compact_generation == 1
+        assert store.threads.load(thread.thread_id).compact_generation == 1
+        committed["ir"] = list(params.tool_ir_history)
+        committed["context"] = list(params.tool_context)
+        raise failure
+
+    monkeypatch.setattr(service, "_refresh_native_compact_context", fail_refresh)
+    monkeypatch.setattr(service, "record_conversation_compact_generation",
+                        lambda *args, **kwargs: published.append(args))
+    with pytest.raises(failure_type) as caught:
+        build_tool_loop_prompt(agent, params)
+    assert caught.value is failure
+    assert committed["ir"] != original_ir
+    assert params.tool_ir_history == committed["ir"]
+    assert params.tool_context == committed["context"]
+    assert params.compact_context is context
+    assert published == []
+    stored = store.threads.load(thread.thread_id)
+    assert stored.compact_generation == 1 and stored.compact_checkpoint_id
+    assert stored.compact_consecutive_failures == 0
+    assert not [row for row in sink.progress_rows if row["phase"] in {"failed", "superseded"}]
+    _assert_no_orphans(_native_provider_messages(agent, params))

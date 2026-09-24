@@ -202,3 +202,68 @@ def test_request_failure_does_not_consume_visible_tools():
         )
     assert caught.value is failure
     assert loaded == {"read_file"}
+
+
+@pytest.mark.parametrize(
+    ("final", "expected"),
+    [
+        (ModelResponse("重试成功", "fake"), ["account", "ack"]),
+        (ModelResponse("", "fake", runtime_status="context_overflow", runtime_source="provider_error"),
+         ["account", "restore"]),
+    ],
+)
+def test_transient_retry_reselects_and_accepts_only_final_attempt_params(monkeypatch, final, expected):
+    """瞬断后第二次尝试重新选模；计量、恢复、确认只收到最终成功那次尝试的参数。"""
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core import _tool_loop_service as service
+    from agent_py_agent.agent.agent_core.subagent import model_selection
+    from agent_py_agent.agent.model_request_selection import model_request_selection_scope
+
+    agent = SimpleNamespace(runtime_guard_policy=None)
+    loop_params = SimpleNamespace(effective_on_chunk=None, live_archive_state=None)
+    selected, events = [], []
+    failure = ProviderTransientError("首次尝试瞬断")
+
+    # 每次尝试都产出新的参数对象，模拟宿主在第二次尝试重新选模。
+    class _ReselectingHost:
+        def select(self, _agent, params, prompt):
+            assert params is loop_params
+            choice = SimpleNamespace(label=f"attempt-{len(selected) + 1}")
+            selected.append(choice)
+            return choice, f"{prompt}@{choice.label}"
+
+    def request(_agent, params, _rounds, *, first_prompt=None, consumes_task_tool_surface=True):
+        assert params is selected[-1] and first_prompt == f"原请求@{params.label}"
+        if len(selected) == 1:
+            raise failure
+        return first_prompt, final
+
+    monkeypatch.setattr(retry, "provider_transient_retry_delays", lambda _policy: (1.0,))
+    monkeypatch.setattr(retry, "wait_interruptibly", lambda _delay: None)
+    monkeypatch.setattr(service, "stale_subagent_attempt_message", lambda _agent: None)
+    monkeypatch.setattr(service, "begin_goal_model_turn", lambda _agent, _params: None)
+    monkeypatch.setattr(service, "_discard_stale_natural_reply_for_pending_turn_input",
+                        lambda _agent, _params: False)
+    monkeypatch.setattr(service, "natural_user_reply_model_params", lambda params: params)
+    monkeypatch.setattr(service, "build_tool_loop_prompt", lambda _agent, _params: "原请求")
+    monkeypatch.setattr(model_selection, "select_first_request_model",
+                        lambda _agent, params, prompt: (params, prompt))
+    monkeypatch.setattr(service, "_request_tool_loop_model_response", request)
+    monkeypatch.setattr(service, "account_goal_model_response",
+                        lambda _agent, params, response: events.append(("account", params, response)))
+    monkeypatch.setattr(service, "restore_injected_turn_input_for_provider_retry",
+                        lambda _agent, params: events.append(("restore", params)))
+    monkeypatch.setattr(service, "acknowledge_injected_turn_input",
+                        lambda _agent, params: events.append(("ack", params)))
+
+    with model_request_selection_scope(_ReselectingHost()):
+        outcome = service._model_turn_or_retry(agent, loop_params, 0, 0)
+
+    first, second = selected
+    assert outcome.params is second and outcome.response is final
+    assert outcome.prompt == "原请求@attempt-2"
+    assert [event[0] for event in events] == expected
+    assert all(event[1] is second for event in events)
+    assert not any(event[1] is first for event in events)
+    assert events[0][2] is final

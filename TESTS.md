@@ -17,6 +17,11 @@ child不展示历史正文时的读取回归先复现1 failed/1 passed，修复�
 - **Gate**：全目录 Ruff、doc sync、strict code-size（hard=0、blocked=False，基线不改）、diff 与 clean-package 全部通过。
 - **未覆盖**：未运行真实模型或 TUI，线上 CI 未作为验收来源。原场景到新测试的对照清单随交接提交给主线 owner。
 - **随后吸收 `0d02bb272`**：主线 15 项夹具修复已随之进入。决策线原有的架构守卫失败源于 `concatenate_message_rows(*parts)` 的可变位置参数，已改为显式元组；守卫及 7 个 Compact 分区/来源测试文件共 141 项通过。
+- **主线 owner 要求的新测试**（每条都做了变异验证：把对应实现改坏后测试失败，改回后通过）：
+  - `test_transient_retry_reselects_and_accepts_only_final_attempt_params`：首次尝试瞬断后重新选模，计量、恢复、确认只收到第二次尝试的参数，覆盖正常响应和供应商超限两种结果。变异：让选模参数不交回，2 项失败。
+  - `test_owned_recovery_fits_over_budget_native_history_before_business_request`：构造 4 对真实 read_file 原生往返，冻结的原始完整请求超过共享预算。在自动和强制两种恢复模式下，都断言发送前共享预算回收没有介入、宿主已提交候选、候选的完整计量低于输入上界、业务线上没有原文。变异：去掉领取门，2 项失败；自动宿主不压缩，自动模式失败。
+  - `test_post_commit_context_refresh_failure_keeps_committed_history`：CAS 之后同范围视图刷新失败时，异常原样上抛，不回滚已提交的 IR 与上下文，不记压缩失败，也不发布结果。变异：把刷新挪回回滚 try 内，2 项失败。
+  - b4ffb3475 的三个用例（候选回收两项、提交后投影失败不回滚一项）正文和断言与 main 逐字一致，均通过。它们共用的 `_SummaryBackend` 只多接收两个关键字参数（`tool_choice`、`request_options`，本线摘要请求会传入），返回值不变。
 
 ## 第12.4项选中来源到摘要生命周期（2026-09-23，本地）
 

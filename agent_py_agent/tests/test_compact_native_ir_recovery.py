@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import replace
 from functools import partial
 
@@ -36,18 +37,30 @@ from agent_py_agent.tests.test_subagent_compact_recovery import _http
 
 
 # LLM: 原后台完整准备仍只执行一次；read_file 经原执行器与 recorder 生成工具对，随后恢复宿主在同次冻结输入上裁决。
+# pairs>1 时每对读取独立文件，使用独立轮次与 call/turn 身份；pairs=1 的文件名、轮次与身份保持原样。
+# context_window_tokens 必须在历史准备前生效，使恢复来源策略与运行中策略读取同一窗口。
 # 函数用途: 为纯 IR、空 transcript 的恢复安全点安装真实文件读取记录，并保留原 HTTP builder 与 CAS。
-def _native_ir_attempt(tmp_path, monkeypatch, *, backend: str, full_result: str, archive_present: bool = True):
+def _native_ir_attempt(
+    tmp_path, monkeypatch, *, backend: str, full_result: str, archive_present: bool = True, pairs: int = 1,
+    context_window_tokens: int | None = None,
+):
     agent, store, thread, request, _, sink = _background(
         tmp_path, backend=backend, detached=True, with_history=False,
     )
+    if context_window_tokens is not None:
+        agent.config.model_context_window_tokens = context_window_tokens
+        agent.backend.context_window_tokens = context_window_tokens
     request = replace(request, reason="audit_finding")
     agent.config.enable_tools = True
     agent.config.tool_output_preview_chars = 64
     agent.config.tool_output_externalize_min_chars = 10_000_000
-    source_path = agent.home_paths.owner_workspace_dir / "source.txt"
-    source_path.parent.mkdir(parents=True, exist_ok=True)
-    source_path.write_text(full_result, encoding="utf-8")
+    source_paths = [
+        agent.home_paths.owner_workspace_dir / ("source.txt" if index == 0 else f"source-{index}.txt")
+        for index in range(pairs)
+    ]
+    source_paths[0].parent.mkdir(parents=True, exist_ok=True)
+    for source_path in source_paths:
+        source_path.write_text(full_result, encoding="utf-8")
     execution = background_execution.BackgroundExecutionDependencies(
         agent, store, partial(_run_params, request=request, agent=agent),
     )
@@ -60,29 +73,31 @@ def _native_ir_attempt(tmp_path, monkeypatch, *, backend: str, full_result: str,
     def freeze_ir(*args, **kwargs):
         params = original_loop(*args, **kwargs)
         assert not params.archive_tool_calls
-        call = canonical_history_call(
-            "read_file", {"path": str(source_path)},
-            call_id="native-source-call", run_id=params.run_id,
-            attempt_id=params.attempt_id, turn_id=f"{params.run_id}:source-turn",
-        )
-        runtime = params.tool_runtime_snapshot.runtime("read_file")
-        assert runtime is not None
-        call = replace(call, schema_hash=runtime.model_spec.schema_hash)
         from agent_py_agent.agent.agent_core._tool_loop_service import (
             _record_tool_call,
             execute_one_tool_call,
         )
 
-        executed = execute_one_tool_call(agent, ToolCallExecuteParams(params, 1, 0, call))
-        assert executed.result.ok and full_result in executed.result.output
+        for index, source_path in enumerate(source_paths):
+            suffix = f"-{index}" if index else ""
+            call = canonical_history_call(
+                "read_file", {"path": str(source_path)},
+                call_id=f"native-source-call{suffix}", run_id=params.run_id,
+                attempt_id=params.attempt_id, turn_id=f"{params.run_id}:source-turn{suffix}",
+            )
+            runtime = params.tool_runtime_snapshot.runtime("read_file")
+            assert runtime is not None
+            call = replace(call, schema_hash=runtime.model_spec.schema_hash)
+            executed = execute_one_tool_call(agent, ToolCallExecuteParams(params, 1 + index, 0, call))
+            assert executed.result.ok and full_result in executed.result.output
 
-        _record_tool_call(agent, ToolCallRecordParams(
-            params=params, tool_rounds=1, idx=0, call=executed.call,
-            result=executed.result, execution_states=executed.states, model_call=call,
-        ))
-        assert isinstance(params.tool_ir_history[-2], AssistantTurn)
-        assert isinstance(params.tool_ir_history[-1], ToolResult)
-        recorded.append((params.tool_ir_history[-2:], params.archive_tool_calls[-1]))
+            _record_tool_call(agent, ToolCallRecordParams(
+                params=params, tool_rounds=1 + index, idx=0, call=executed.call,
+                result=executed.result, execution_states=executed.states, model_call=call,
+            ))
+            assert isinstance(params.tool_ir_history[-2], AssistantTurn)
+            assert isinstance(params.tool_ir_history[-1], ToolResult)
+            recorded.append((params.tool_ir_history[-2:], params.archive_tool_calls[-1]))
         if not archive_present:
             params.archive_tool_calls.clear()
         return params
@@ -179,6 +194,112 @@ def test_empty_transcript_native_ir_recovery_summarizes_full_result_once_and_sen
     view = resolve_compact_summary_view(agent, committed, history.compact_context.scope)
     assert view.source_tool_refs == tuple(source_plans[0].source_tool_refs)
     assert (archived in candidate.params.archive_tool_calls) is archive_present
+
+
+# LLM: 满足生产六字段交接合同的摘要正文，只作摘要回复替身；不能作为执行事实或验收结论。
+# 函数用途: 让恢复摘要走真实模型摘要分支而非机械兜底，候选大小由真实摘要决定。
+def _live_handoff_text() -> str:
+    return (
+        "[compact-live-handoff.v1]\n"
+        "current_progress: 已读取全部原始资料文件，并完成第一轮逐项核对，核对记录保存在工具账中。\n"
+        "user_constraints: 保留原始文件与已有记录，不改写任何资料，只输出核对结论。\n"
+        "completed: 多个原始资料文件均已通过 read_file 完整读取，读取结果已记录。\n"
+        "failures: 本轮没有工具失败。\n"
+        "unresolved: 还需要根据已读取的资料给出最终核对结论。\n"
+        "next_step: 直接依据本摘要继续核对，不再重复读取同一批文件。"
+    )
+
+
+# 第8步行为变化的回归：恢复宿主领取本次 Compact 时，build 跳过共享预算回收，
+# 由宿主在发送前用同次完整计量把超预算原生历史收进窗口。
+@pytest.mark.parametrize("recovering", [False, True])
+def test_owned_recovery_fits_over_budget_native_history_before_business_request(
+    tmp_path, monkeypatch, recovering,
+) -> None:
+    from agent_py_agent.agent.agent_core import _tool_loop_service as service
+    from agent_py_agent.agent.agent_core.model.context_pressure import (
+        projected_model_context_components,
+    )
+    from agent_py_agent.agent.agent_core.tool_request_projection import project_tool_loop_request
+    from agent_py_agent.agent.backends import http
+    from agent_py_agent.agent.model_request_selection import request_owns_compact
+
+    body = "OVER_BUDGET_TOOL_BODY_" + "资料核对" * 3_700
+    agent, store, thread, execution, sink, history, params, context, recorded = _native_ir_attempt(
+        tmp_path, monkeypatch, backend="anthropic_compatible", full_result=body, pairs=4,
+        context_window_tokens=60_000,
+    )
+    ceiling = compact._compact_request_input_ceiling(agent, history.compact_source.policy)
+    frozen_requests, shared_fits, candidates, summaries, business = [], [], [], [], []
+    original_capture = recovery_core.capture_tool_loop_request
+    original_fit = service._fit_native_ir_to_shared_budget
+    original_project = recovery_core._project_mixed_recovery_material
+    original_summary = active_turn_compact._active_turn_replacement_summary
+    in_summary = False
+
+    def capture(agent_, params_, prompt_input):
+        frozen = original_capture(agent_, params_, prompt_input)
+        tokens, _ = projected_model_context_components(project_tool_loop_request(frozen))
+        policy = service._native_compact_policy(agent_, params_)
+        frozen_requests.append((tokens, policy.trigger_tokens, len(service._native_tool_call_ids(params_))))
+        return frozen
+
+    def fit(agent_, params_, prompt, **kwargs):
+        shared_fits.append(request_owns_compact(agent_, params_))
+        return original_fit(agent_, params_, prompt, **kwargs)
+
+    def project(*args):
+        material = original_project(*args)
+        if args[1].is_candidate:
+            candidates.append(material)
+        return material
+
+    def summary(*args, **kwargs):
+        nonlocal in_summary
+        in_summary = True
+        try:
+            return original_summary(*args, **kwargs)
+        finally:
+            in_summary = False
+
+    def send(request):
+        wire = json.loads(json.dumps(request.payload, ensure_ascii=False))
+        names = [row.get("name") for row in wire.get("tools", [])]
+        if names == ["my_agent_capability_probe"]:
+            nonce = re.search(r"nonce ([0-9a-f]+)", json.dumps(wire))[1]
+            probe = {"type": "tool_use", "id": "probe", "name": names[0], "input": {"nonce": nonce}}
+            return {"content": [probe], "stop_reason": "tool_use"}
+        if in_summary:
+            summaries.append(wire)
+            text = _live_handoff_text()
+        else:
+            business.append(wire)
+            # 发送前：共享预算回收没有介入；宿主已提交候选，并用同次完整计量证明它低于输入上界。
+            assert shared_fits == []
+            assert len(candidates) == 1 and wire == _wire_from_material(agent, candidates[0])
+            assert projected_model_context_components(candidates[0].projection)[0] < ceiling
+            assert "OVER_BUDGET_TOOL_BODY_" not in json.dumps(wire, ensure_ascii=False)
+            text = "资料核对完成。"
+        return {"content": [{"type": "text", "text": text}], "stop_reason": "end_turn"}
+
+    monkeypatch.setattr(recovery_core, "capture_tool_loop_request", capture)
+    monkeypatch.setattr(service, "_fit_native_ir_to_shared_budget", fit)
+    monkeypatch.setattr(recovery_core, "_project_mixed_recovery_material", project)
+    monkeypatch.setattr(active_turn_compact, "_active_turn_replacement_summary", summary)
+    monkeypatch.setattr(http, "post_json", send)
+    result, _, recovery = background_execution._run_background_recovery_attempt(
+        execution, "继续核对完整工具结果", params, history, context,
+        recovering=recovering, activity_sink=sink,
+    )
+
+    # 对照：同次冻结的原始完整请求确实超过共享预算，且包含多对可回收的原生工具往返。
+    raw_tokens, shared_trigger, native_pairs = frozen_requests[0]
+    assert raw_tokens >= shared_trigger > ceiling - 1
+    assert native_pairs == len(recorded) == 4
+    assert result.runtime_status != "context_overflow"
+    assert recovery is not None and recovery.committed
+    assert summaries and len(business) == 1
+    assert store.threads.require(thread.thread_id).compact_generation == 1
 
 
 @pytest.mark.parametrize("failure", ["cancel", "too_large"])
