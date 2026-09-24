@@ -810,6 +810,15 @@ plugins/
 |       |-- __init__.py                #
 |       |-- __main__.py                # python -m context_inspector 启动 stdio 服务
 |       `-- server.py                  # 握手声明展示能力，把 context 主题数字渲染成状态字段
+|-- status-pet/                        # 自有纯展示插件：文字小宠物显示工作/等待审批/空闲，外观与名字可配置，无工具、无依赖
+|   |-- README.md                      # 构建、面板用法与改外观步骤
+|   |-- pyproject.toml                 # 插件发行身份，无运行依赖
+|   `-- src/status_pet/
+|       |-- declaration.json           # 展示动作、text 面板（run_state、activity 主题）与 style/name 设置的唯一声明
+|       |-- __init__.py                #
+|       |-- __main__.py                # python -m status_pet 启动 stdio 服务
+|       |-- art.py                     # 三种外观 × 三种状态的自绘字符小图
+|       `-- server.py                  # 启动时校验设置，只实现只读 my-agent/display.render
 |-- savepoint-lite/                    # 自有文件快照插件：保存/列出/恢复，快照只存插件数据目录
 |   |-- README.md                      # 构建、三个动作用法与中文示例
 |   |-- pyproject.toml                 # 插件发行身份及精确 SDK 依赖
