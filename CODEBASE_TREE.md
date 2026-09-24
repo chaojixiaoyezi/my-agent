@@ -821,18 +821,26 @@ plugins/
 |       |-- declarations.py            # 读取同源声明并验证平面参数和设置
 |       |-- operations.py              # 保存、列出、恢复流程；恢复先核对 --expect 再经写入上下文写回
 |       `-- snapshots.py               # 工作区 no-follow 读取与哈希，插件数据目录内的快照存取
-`-- workspace-peek/                    # 自有文件预览插件；不依赖完整宿主运行包
-    |-- README.md                      # 离线构建、命令示例与当前验收边界
-    |-- pyproject.toml                 # 插件发行身份及精确 SDK 依赖
-    `-- src/workspace_peek/
-        |-- declaration.json           # 命令、工具、输入与设置的唯一声明
-        |-- __init__.py                # 独立插件包入口
-        |-- __main__.py                # 标准模块执行入口
-        |-- server.py                  # 有界 stdio MCP 请求与逐次读取上下文接入
-        |-- declarations.py            # 读取同源声明并验证样本平面输入和配置
-        |-- reading.py                 # 路径授权、对象身份与进度游标
-        |-- preview.py                 # 固定 fd 上的 UTF-8 文件分页
-        `-- tree.py                    # 预算内目录枚举、变化检测与稳定分页
+|-- workspace-peek/                    # 自有文件预览插件；不依赖完整宿主运行包
+|   |-- README.md                      # 离线构建、命令示例与当前验收边界
+|   |-- pyproject.toml                 # 插件发行身份及精确 SDK 依赖
+|   `-- src/workspace_peek/
+|       |-- declaration.json           # 命令、工具、输入与设置的唯一声明
+|       |-- __init__.py                # 独立插件包入口
+|       |-- __main__.py                # 标准模块执行入口
+|       |-- server.py                  # 有界 stdio MCP 请求与逐次读取上下文接入
+|       |-- declarations.py            # 读取同源声明并验证样本平面输入和配置
+|       |-- reading.py                 # 路径授权、对象身份与进度游标
+|       |-- preview.py                 # 固定 fd 上的 UTF-8 文件分页
+|       `-- tree.py                    # 预算内目录枚举、变化检测与稳定分页
+`-- worktable-lite/                    # 自有纯展示插件：面板查看本用户最近会话并提示 resume 命令，无工具、无依赖，只有显示偏好设置
+    |-- README.md                      # 构建、显示偏好设置与面板用法
+    |-- pyproject.toml                 # 插件发行身份，无运行依赖
+    `-- src/worktable_lite/
+        |-- declaration.json           # 展示动作、text 面板（sessions 主题）与 max_rows/hide_current 设置的唯一声明
+        |-- __init__.py                #
+        |-- __main__.py                # python -m worktable_lite 启动 stdio 服务
+        `-- server.py                  # 握手声明展示能力，把 sessions 主题渲染成带相对时间的会话行
 deploy/
 |-- Dockerfile                         # 内置系统 bubblewrap+tini，构建期 binary probe
 |-- seccomp-bwrap.json                 # 固定 Moby 默认 profile，仅放行 bwrap namespace/mount 系统调用

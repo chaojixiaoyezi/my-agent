@@ -1,0 +1,39 @@
+{
+  "plugin_id": "worktable-lite",
+  "summary": "在面板查看本用户最近的会话，并给出回到原会话的命令",
+  "entry_module": "worktable_lite",
+  "default_action": "list",
+  "actions": [
+    {
+      "name": "list",
+      "summary": "打开或关闭会话列表面板",
+      "arguments": [],
+      "kind": "display",
+      "target": "sessions",
+      "available": true
+    }
+  ],
+  "tools": [],
+  "panels": [
+    {"id": "sessions", "title": "最近会话", "kind": "text", "topics": ["sessions"]}
+  ],
+  "settings_schema": {
+    "type": "object",
+    "properties": {
+      "max_rows": {
+        "type": "integer",
+        "description": "面板最多显示的会话条数",
+        "minimum": 1,
+        "maximum": 20,
+        "default": 8
+      },
+      "hide_current": {
+        "type": "boolean",
+        "description": "是否隐藏当前会话那一行",
+        "default": false
+      }
+    },
+    "required": [],
+    "additionalProperties": false
+  }
+}

@@ -512,6 +512,7 @@ OAuth 传输、采样和模型菜单回归。覆盖保存无网络、公开字�
 
 - `test_plugin_skills.py`：包描述 v3 往返与名单校验（空、非法名、重复均拒绝，v1 不带 skills）；只取已启用且声明 Skill 的插件目录；插件 Skill 来源为 `plugin:<ID>`、不覆盖同名用户 Skill；提供方不再返回后下一次快照即消失；总闸关闭时不出现。
 - `test_plugin_display_service.py::test_sessions_topic_is_lazy_and_whitelisted`：会话列表提供方只在订阅时调用，坏行丢弃、metadata 不转发、读取失败按空列表。
+- `test_worktable_lite_package.py`：从源码构建 worktable-lite 并在独立解释器真实进程渲染 sessions 面板：空列表、多条含当前会话与相对时间、`max_rows` 截断（20 条时让出一行给提示）、`hide_current`、时间缺失；设置经 `MY_AGENT_PLUGIN_SETTINGS` 注入，坏设置退出码 2 且不回显值；输出过 `normalize_display` 且不截断。
 
 ## 第 10 步第一批真实 TUI（1be5753ff / wheel 2d049be8，模型 MiniMax-M2.7）
 

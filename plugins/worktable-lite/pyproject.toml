@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "my-agent-worktable-lite"
+version = "0.1.0"
+description = "在面板查看本用户最近的会话，并给出回到原会话的命令"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+dependencies = []
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+license-files = ["LICENSE", "NOTICE"]
+
+[tool.setuptools.package-data]
+worktable_lite = ["declaration.json"]
