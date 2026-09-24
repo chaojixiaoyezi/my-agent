@@ -473,3 +473,30 @@ P4-B 普通 user owner 的两轮隔离真实中文配置各有 **1 次 Jev HTTP*
 **结论**：
 - 连续失败翻倍冷却在真实 Gateway 上生效。第二次失败后冷却变为 60 秒，R3 没有再付一次挂起期限，B 的业务请求 1.2 秒就发出；冷却过期后照常重试。A 的成功路径不受影响。
 - 本轮官方 Jev 端点尝试 4 次，全部 HTTP 200，按尝试累计 75 次。
+
+## 12.4 请求准备阶段压缩的真实触发（2026-09-24，main `3933b1db1`）
+
+此前的真实验收里，每轮结束时运行中压缩都已把上下文压到压缩点以下，请求准备阶段对超长历史的压缩从未在真实运行中触发，只由 fake HTTP 全链测试覆盖。本样本让一轮在压缩点之上开始，专门走这条路径。
+
+**安装与配置**：
+- 同一 `3933b1db1` wheel（SHA256 `82a3c658…`），测试机新建隔离目录和 venv；唯一 Gateway 8431，原生 TUI，决策模型关闭，主模型官方 MiniMax-M2.7（目录声明窗口 200k），压缩点 50%。
+- 工作区两份各约 30,500 字的中文盘点资料。
+
+**过程**（同一会话 `sess_1790270160_559c517c`，每轮只给一次 prompt）：
+1. R1：读两份资料并各用一句话概括、说出首行标记。1 个工具轮，两份标记都对；Context 约 51.4k/200k（26%），未压缩。
+2. 停 TUI 与 Gateway，把两份配置的压缩点从 50% 改成 15%，重启后续接同一会话。R2（只回一个字）后仍显示"压缩点 50%"、未压缩：`compact_trigger_percent` 把低于 50 的值一律夹到 50。改动已恢复原文件（前后 SHA256 记在 `trigger-change.json`）。
+3. 再停，改为只把隔离目录里 M2.7 的声明窗口从 200,000 改成 90,000（测试专用，前后 SHA256 记在 `window-change.json`）。这样压缩点变为 45k，低于已有的约 64k 历史。重启并续接同一会话，R3 只回两个字。
+
+**R3 结果**：
+- 出站顺序：新 Gateway 进程的工具能力探针，然后是摘要请求（197,673 字节，无工具，2 条消息，HTTP 200，3.1 秒），之后才是业务请求（152,084 字节，7 条消息；R2 为 17 条，HTTP 200）。业务请求之前没有任何业务发送。
+- 请求的流式事件：`conversation_compaction_progress` 依次为 started（stage=preparing）→ summarizing → measuring → checkpointing → committing → completed，随后 `conversation_compacted`（generation 1），业务请求在其后 0.06 秒发出。
+- 线程：compact generation 0→1，摘要 1,102 字，连续失败 0。TUI 显示 `Context compacted · generation 1`，Context 约 32.4k/90.0k。
+- 调用账（线程 model_usage）：R3 为 auxiliary 1 次（输入 28,010）加 main 1 次（输入 22,495）；R2 的 main 输入为 45,554。回答正确（"收到"）。
+
+**清理**：TUI `/exit`，Gateway 经原 CLI 停止，PID 不存活，8431 无监听，pending/processing 都是 0，done 3 条；10 条出站观察都有终态。M2.7 窗口已改回 200,000（记在 `window-change.json`）。证据：测试机隔离目录 `artifacts/staging.json`（SHA256 `3e491e5e76c6bc3d9923963a954a12a2808f02ed434c41acd66fbb393a5b0c0f`）、`artifacts/cleanup-current.json`（SHA256 `e4c46783382545c1db6f72384229c6185721dfa61302d1a8601f14a2abc278f7`，含出站、压缩事件、线程状态和两次测试改动）；本机副本在 `~/.my-agent/decision-evidence/prep-3933b1db1-20260924/`（仓库外）。
+
+**结论**：
+- 请求准备阶段压缩在真实 TUI 中走通：一轮在压缩点之上开始时，先摘要、写检查点、CAS 提交，再发业务请求，业务请求只带压缩后的历史。
+- 12.4 最后一条真实验收缺口关闭。
+- 另记一个配置不一致：运行时把压缩点夹在 50–100%、恢复目标夹在 25–80%（YAML 注释写明了），但 `user_config` 自助修改对两者都接受 25–95。于是压缩点 25–49、恢复目标 81–95 会被接受却不生效。已在单独分支修正，让校验范围与运行时一致。
+- 本轮 Jev 调用 0 次，累计仍为 75 次。
