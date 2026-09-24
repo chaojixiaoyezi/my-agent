@@ -537,6 +537,7 @@ OAuth 传输、采样和模型菜单回归。覆盖保存无网络、公开字�
 ## 第 10 步第三批插件（本地，待发布）
 
 - `test_image_text_package.py`（10 项）：从源码构建 image-text 包并起真实 MCP 进程；本机有 tesseract 时用测试内极简 PNG 编码器画的点阵英文图实识别（无 tesseract 时 skip），另覆盖 tesseract 缺失返回 OCR_UNAVAILABLE 且仍带元数据（PNG/伪装扩展名/GIF/JPEG/WebP 宽高）、非图片与损坏头部、超上限、链接/上溯/越界、非法语言名、语言包缺失列出已装语言、假 tesseract 超时被杀且临时文件删除、坏设置启动失败。
+- `test_web_board_package.py`（6 项）：从源码构建 web-board 包并起真实 MCP 进程，用 urllib 真实访问插件网页：只绑 127.0.0.1 随机端口；无/错令牌 403、查询令牌 200 并下发 HttpOnly cookie、cookie 单独可访问；目录列表与子目录；含 `<script>` 文本转义、Markdown `<pre>`、HTML 走 sandbox iframe、图片 `<img>`+`/raw`；`..`/绝对路径 400，指向外部或内部的符号链接 403，缺失 404；POST/PUT 405、HEAD 无正文；status 字段与请求计数；再次 serve 停旧端口，坏根目录不影响旧服务；stop 与空闲超时后端口连不上；MCP 客户端回收与 stdin EOF 退出后端口连不上；坏设置启动失败。
 
 ## 第 10 步第二批宿主补充（本地，待发布）
 

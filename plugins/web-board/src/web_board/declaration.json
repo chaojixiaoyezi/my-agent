@@ -1,0 +1,111 @@
+{
+  "plugin_id": "web-board",
+  "summary": "在本机回环端口用浏览器只读浏览工作区目录",
+  "entry_module": "web_board",
+  "default_action": "status",
+  "actions": [
+    {
+      "name": "serve",
+      "summary": "启动本地只读网页（再次启动会先停旧服务）",
+      "arguments": [
+        {
+          "name": "path",
+          "summary": "要浏览的工作区目录",
+          "options": [
+            "--path",
+            "-p"
+          ],
+          "value_type": "string",
+          "required": false,
+          "multiple": false,
+          "default": ".",
+          "choices": [],
+          "path": true
+        }
+      ],
+      "kind": "tool",
+      "target": "serve",
+      "available": true
+    },
+    {
+      "name": "status",
+      "summary": "查看网页服务状态和地址",
+      "arguments": [],
+      "kind": "tool",
+      "target": "status",
+      "available": true
+    },
+    {
+      "name": "stop",
+      "summary": "停止网页服务并释放端口",
+      "arguments": [],
+      "kind": "tool",
+      "target": "stop",
+      "available": true
+    }
+  ],
+  "tools": [
+    {
+      "name": "serve",
+      "description": "在插件进程内启动只绑定 127.0.0.1 随机端口的只读网页，浏览指定工作区目录（目录列表、文本/Markdown/HTML/图片预览）；返回带访问令牌的地址。同一时间只有一个服务，再次调用先停旧服务；空闲超时自动停止。",
+      "requested_effect": "mutating",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "default": ".",
+            "description": "要浏览的工作区目录"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "status",
+      "description": "返回网页服务是否在运行、访问地址（含令牌）、浏览目录和已处理请求数。",
+      "requested_effect": "read_only",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "stop",
+      "description": "停止网页服务并释放本地端口；没有服务时直接返回未运行。",
+      "requested_effect": "mutating",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "settings_schema": {
+    "type": "object",
+    "properties": {
+      "max_preview_bytes": {
+        "type": "integer",
+        "description": "文本/HTML 预览最多读取的字节数",
+        "minimum": 1024,
+        "maximum": 16777216,
+        "default": 262144
+      },
+      "idle_stop_seconds": {
+        "type": "integer",
+        "description": "无请求多少秒后自动停止服务",
+        "minimum": 1,
+        "maximum": 86400,
+        "default": 600
+      }
+    },
+    "required": [],
+    "additionalProperties": false
+  }
+}
