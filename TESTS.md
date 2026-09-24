@@ -2,6 +2,16 @@
 
 child不展示历史正文时的读取回归先复现1 failed/1 passed，修复后test_compact_retained_history、test_subagent_compact_recovery、test_gateway_child_compact_scope_application三文件31 passed（8.48秒）。三宿主seed仓外基线仅验证测量和完整性，不算内存目标通过；细节见容量审计的宿主生命周期基线。
 
+## 决策服务故障矩阵与同 owner 并发（2026-09-24，本地分支 `claude/decision-fault-matrix`）
+
+- **新测试** `test_decision_fault_matrix.py` 10 项，全部经真实传输栈（本机 HTTP，不访问外网）：
+  - 8 种故障各自首次结果、冷却期内零新尝试、到期（或设置修订变化）后恰好一次新尝试：连接被拒、DNS（只拦截一个保留域名的解析）、明文端口上发 https 的 TLS 失败、429 额度、429 限流、402、503、慢响应。
+  - 同一 owner 12 个不同会话并发决策各自成功（12 次 HTTP）；同一会话同时两次，第二次 `admission_busy`。
+  - 模型目录写锁被占用时，决策按已提交设置照常完成，不再是 `settings_busy`。
+- **改写用例**：`test_decision_service_http.py` 与 `test_decision_service.py` 各一条原先钉住"写锁占用即 settings_busy"的用例，改为"不等待、照常完成"；后者补替换调用边界，避免真的解析保留域名。夹具增加可选错误体。
+- **变异验证**：去掉无锁读取，3 项失败（并发、目录锁、线程锁）；额度冷却改成 30 秒，2 项失败（429 两档）；配置类故障改成定时冷却，2 项失败（402、TLS）。改回后全部通过；新文件连跑 5 遍稳定。
+- **结果**：决策相关 39 个测试文件 908 passed。
+
 ## 后台上下文预算只估算渲染节（2026-09-24，本地分支 `claude/decision-background-context-budget`）
 
 - **新测试** `test_background_context_budget.py` 5 项：

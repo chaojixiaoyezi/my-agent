@@ -152,10 +152,15 @@ def _owner_operation(context: object, path, data: dict, thread: object, operatio
 
 
 # LLM: 锁顺序固定 owner→thread，返回前已完成持久读回；不得在文件锁内执行设置通知或取消逻辑。
+# 宿主非阻塞读取不取锁：目录与线程文件都经临时文件替换原子写入，单次写事务只改其中一个文件，
+# 读到的总是已提交版本；读者之间不再互相挤成 settings_busy，调用方仍在调用前后复核版本。
 # 函数用途: 执行一次设置文件事务，供公共入口在锁外发布成功提交通知。
 def _execute_transaction(context: object, operation: str, payload: dict, thread_id: str, scope: str, blocking: bool,
                          authorization: dict | None) -> dict:
     path = model_profiles_path(context.home_paths)
+    if operation == "read" and not blocking:
+        thread = _load_thread(context, thread_id) if thread_id else None
+        return _owner_operation(context, path, read_model_profiles(path), thread, operation, payload, scope)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     path.parent.chmod(0o700)
     with locked_json_path(path, blocking=blocking):

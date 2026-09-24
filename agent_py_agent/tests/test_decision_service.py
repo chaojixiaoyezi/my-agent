@@ -147,8 +147,9 @@ def test_stage_start_precedes_settings_read_and_corruption_keeps_baseline(prepar
 
 
 @pytest.mark.parametrize("lock_scope", ["owner", "thread"])
-def test_runtime_reads_do_not_wait_for_original_file_locks(prepared, lock_scope):
+def test_runtime_reads_do_not_wait_for_original_file_locks(prepared, lock_scope, monkeypatch):
     host, params, _ = prepared
+    monkeypatch.setattr(calls, "invoke_decision_model_call", successful)
     thread_id = params.task_attributes["conversation_thread_id"]
     path = model_profiles_path(host.home_paths) if lock_scope == "owner" else host.conversation_store.threads.storage.thread_path(thread_id)
     entered, release = threading.Event(), threading.Event()
@@ -162,8 +163,10 @@ def test_runtime_reads_do_not_wait_for_original_file_locks(prepared, lock_scope)
         try:
             started = time.monotonic()
             stage = service.begin_decision_stage(host, params, operation_id="batch")
+            outcome = decide(host, params, stage)
+            # 写锁被占用时运行时读取既不等待也不失败：设置按已提交版本无锁读取，采用前仍复核版本。
             assert time.monotonic() - started < 0.5
-            assert decide(host, params, stage).reason == "settings_busy"
+            assert outcome.reason != "settings_busy" and outcome.status == "success"
         finally:
             release.set()
         future.result()
