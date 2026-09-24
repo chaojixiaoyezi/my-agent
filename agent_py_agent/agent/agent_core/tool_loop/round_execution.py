@@ -526,6 +526,9 @@ def _with_applied_approval_fact(
     approval_request: object,
     decision: ToolApprovalDecision,
 ) -> ToolExecution:
+    if str(execution.decision.evidence.get("precheck") or "") == "post_approval":
+        # 批准后、执行前复核已把调用拦下：不能贴"已批准且已应用"的事实，否则模型会以为执行过；结果文案已说明原因。
+        return execution
     applied = AppliedToolApproval(
         permission_id=str(getattr(approval_request, "permission_id", "") or ""),
         decision=decision.decision,

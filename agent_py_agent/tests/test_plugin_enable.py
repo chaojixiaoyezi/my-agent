@@ -81,7 +81,8 @@ def test_actual_enable_and_registry_view_call_then_disable(tmp_path):
         assert not (owner.plugins_dir / "environments" / old_entry.activation.plan.environment_ref).exists()
         assert not registry.tools[name].availability().available
         rejected = invoke_registered_tool(service, registry, name, {"path": str(source)}, request_id="old-call", snapshot=old)
-        assert rejected["state"] == "failed" and rejected["error_code"] == "TOOL_EXECUTION_FAILED", rejected
+        # 停用先撤销激活：旧快照上的调用在发送前按激活失效拒绝（TOOL_UNAVAILABLE，不建议重试），不再是可重试的执行失败。
+        assert rejected["state"] == "failed" and rejected["error_code"] == "TOOL_UNAVAILABLE", rejected
         view.prepare_for_run()
         registry.prepare_for_run()
         assert name not in view.tools and name not in registry.tools

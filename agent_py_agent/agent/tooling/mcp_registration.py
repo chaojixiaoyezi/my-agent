@@ -141,6 +141,14 @@ class MCPProxyTool(BaseTool):
                 pass
         return ToolAvailability.unavailable("MCP stdio server 当前未运行")
 
+    # LLM: 只读原连接的内存状态（is_running 与连接身份），不启动进程、不建连接；不可用时用具体码 MCP_CONNECTION_CLOSED 供执行器放进 reported_error_code。
+    # 函数用途: 审批前/批准后执行前复核原 MCP 连接是否还在。
+    def precheck_availability(self) -> ToolAvailability:
+        availability = self.availability()
+        if availability.available:
+            return availability
+        return ToolAvailability.unavailable(availability.reason, error_code="MCP_CONNECTION_CLOSED")
+
     # LLM: 无上下文入口保留原 BaseTool 接口；正式执行应由 executor 使用 execute_scoped 注入本次权限。
     # 函数用途: 执行直接调用，复用同一结果处理链，不生成权限或任务身份。
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:

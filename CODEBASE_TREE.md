@@ -739,6 +739,7 @@ agent_py_agent/
 |   |-- test_plugin_deactivation_races.py # 阻塞业务停用、另一插件/任务隔离与独立 host 创建交错
 |   |-- plugin_activation_fixtures.py # 实际临时 wheel/MCP、原管理链和业务工具执行夹具
 |   |-- test_plugin_enable.py         # 实际启用、坏目录、原执行器调用与旧快照停用验证
+|   |-- test_tool_call_precheck.py    # 审批前/批准后执行前复核：代理 opt-in、TOOL_UNAVAILABLE 提前拦下、内置工具不复核
 |   |-- test_plugin_release.py        # 原 handler 退出、环境删除、结果落账与重送消费边界
 |   |-- test_plugin_removal.py        # 管理卸载、权限、旧请求重放、准备未退与持久成功后包回收
 |   |-- test_plugin_skills.py         # 随包 Skill：v3 描述往返与校验、只取已启用插件、最低优先级、停用即消失

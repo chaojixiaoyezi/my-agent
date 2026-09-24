@@ -159,7 +159,7 @@ class ActionPolicy:
         if idempotency_decision is not None:
             return idempotency_decision
 
-        approval_decision = _approval_decision(request, runtime, effect)
+        approval_decision, approval_applied = _approval_decision(request, runtime, effect)
         if approval_decision is not None:
             return approval_decision
 
@@ -191,6 +191,7 @@ class ActionPolicy:
                 "snapshot_hash": snapshot.snapshot_hash,
                 "args_hash": call.args_hash,
                 "approval_mode": request.approval_mode,
+                **({"approval_applied": True} if approval_applied else {}),
             },
             sandbox_plan=_sandbox_plan(request, runtime, effect),
             resolved_effect=effect,
@@ -415,12 +416,13 @@ def _task_boundary_decision(
 
 
 # LLM: auto 只免去当前权限内的可选交互确认；此前路径/命令/身份硬门及随后护栏继续执行，always 本人确认不可绕过。
+# 第二个返回值只在精确批准 binding 匹配时为 True（用户确实批准过这次调用），沙箱内自动执行、策略不要求、auto 模式都为 False；执行器据此决定批准后是否再复核。
 # 函数用途: 结合用户审批选择、工具策略和精确批准记录决定是否需要弹窗，不把自主模式变成 Full Access。
 def _approval_decision(
     request: ActionPolicyRequest,
     runtime: ToolRuntime,
     effect: str,
-) -> ActionDecision | None:
+) -> tuple[ActionDecision | None, bool]:
     mode = runtime.runtime_policy.approval_policy.mode
     sandbox_mode = runtime.runtime_policy.sandbox_policy.mode
     effect_contained = sandbox_effect_is_contained(
@@ -433,16 +435,16 @@ def _approval_decision(
         and effect == "dangerous"
         and effect_contained
     ):
-        return None
+        return None, False
     required = (
         mode == "always"
         or (mode == "mutating" and effect in {"mutating", "dangerous"})
         or (mode == "dangerous" and effect == "dangerous")
     )
     if not required:
-        return None
+        return None, False
     if request.approval_mode == "auto" and mode != "always":
-        return None
+        return None, False
     boundary = request.write_boundary if isinstance(request.write_boundary, dict) else {}
     approved = boundary.get("approved_actions")
     approved_actions = tuple(approved) if isinstance(approved, (list, tuple)) else ()
@@ -457,20 +459,20 @@ def _approval_decision(
         )
     )
     if decision.allowed:
-        return None
+        return None, True
     if "APPROVAL_BINDING_MISMATCH" in decision.finding_codes:
         return _deny(
             "APPROVAL_BINDING_MISMATCH",
             effect=effect,
             evidence={"gate": decision.to_dict()},
-        )
+        ), False
     return _ask(
         request.call,
         "APPROVAL_REQUIRED",
         effect=effect,
         evidence={"gate": decision.to_dict()},
         approval_kind="tool_action",
-    )
+    ), False
 
 
 def _guardrail_decision(

@@ -25,6 +25,7 @@ from ..runtime_db.managed_operation_store import (
 from .action_policy import ActionDecision, ActionPolicy, ActionPolicyRequest
 from .models import (
     ResourceScopeResolutionError,
+    ToolAvailability,
     ToolFailureStage,
     ToolHandlerOutcome,
     ToolInvocationContext,
@@ -187,6 +188,8 @@ class ToolExecutor:
                 require_model_visibility=request.require_model_visibility,
             )
         )
+        if decision.status == "ask":
+            decision = _precheck_before_approval(runtime, decision)
         states.extend(("validated", "authorized"))
         if not decision.allowed:
             states.append("approval_pending" if decision.status == "ask" else "failed")
@@ -214,6 +217,14 @@ def _execute_authorized(
     states: list[str],
 ) -> ToolExecution:
     """Execute a call only after normalization and ActionPolicy authorization."""
+    # 只对"经过用户审批"的调用在 claim 之前再复核一次，覆盖审批等待期间被停用的时序；免审批调用沿冻结快照，不逐次复核。
+    if decision.evidence.get("approval_applied") is True:
+        availability = _pre_execution_precheck(runtime)
+        if availability is not None:
+            denial = _precheck_denial(decision, availability, "post_approval")
+            states.append("failed")
+            return ToolExecution(call, denial, _decision_result(call, denial, started_at, input_sources=sources),
+                                 (*states, "persisted", "projected"))
     progress = _AuthorizedExecutionProgress(sources, started_at, states)
     states.append("approved")
     if decision.sandbox_plan:
@@ -407,20 +418,53 @@ def _decision_result(
     code = decision.reason_codes[0] if decision.reason_codes else "RUNTIME_GATE_DENIED"
     stage = str(decision.evidence.get("failure_stage") or "authorization")
     status = "approval_required" if decision.status == "ask" else "failed"
+    metadata: dict[str, object] = {"action_decision": decision.to_dict(), "input_sources": _source_dicts(input_sources)}
+    # 复核给出的具体原因码只进 reported_error_code；error_code 仍是分类表里的通用码，恢复逻辑不会遇到未登记码。
+    reported = str(decision.evidence.get("reported_error_code") or "").strip().upper()
+    if reported:
+        metadata["reported_error_code"] = reported
     return ToolResult.failed(
         call,
         _decision_message(decision),
         error_code=code,
         failure_stage=stage,
-        facts=ToolFailureFacts(
-            duration_ms=_elapsed_ms(started_at),
-            status=status,
-            metadata={
-                "action_decision": decision.to_dict(),
-                "input_sources": _source_dicts(input_sources),
-            },
-        ),
+        facts=ToolFailureFacts(duration_ms=_elapsed_ms(started_at), status=status, metadata=metadata),
     )
+
+
+# LLM: 只调用 handler 的可选 precheck_availability（没有就跳过：内置工具零成本、零 I/O）；异常按不可用处理；
+# 不构造连接、不启动进程、不写状态，也不改变冻结快照或其哈希。
+# 函数用途: 在弹审批前和批准后执行前复核代理工具是否还能执行，返回 None 表示放行。
+def _pre_execution_precheck(runtime: ToolRuntime) -> ToolAvailability | None:
+    method = getattr(runtime.handler, "precheck_availability", None)
+    if not callable(method):
+        return None
+    try:
+        availability = method()
+    except Exception as exc:
+        return ToolAvailability.unavailable(f"precheck failed: {type(exc).__name__}")
+    if not isinstance(availability, ToolAvailability) or availability.available:
+        return None
+    return availability
+
+
+# LLM: 复核失败统一按 TOOL_UNAVAILABLE 拒绝（不可重试、建议申请能力），具体原因码只进 reported_error_code；
+# 不带原 ask 裁决的 gate 证据，只保留 approval_applied 标记与 resolved_effect，让渲染层能区分"审批前"与"批准后"。
+# 函数用途: 把一次复核不可用的事实变成结构化拒绝裁决。
+def _precheck_denial(decision: ActionDecision, availability: ToolAvailability, precheck: str) -> ActionDecision:
+    evidence: dict[str, object] = {
+        "failure_stage": "runtime_gate", "precheck": precheck, "reason": availability.reason,
+        "reported_error_code": availability.error_code or "TOOL_UNAVAILABLE",
+    }
+    if decision.evidence.get("approval_applied") is True:
+        evidence["approval_applied"] = True
+    return ActionDecision("deny", ("TOOL_UNAVAILABLE",), evidence, resolved_effect=decision.resolved_effect)
+
+
+# 函数用途: ask 裁决在弹审批框之前复核一次，代理已失效就直接拒绝，不写审批事件。
+def _precheck_before_approval(runtime: ToolRuntime, decision: ActionDecision) -> ActionDecision:
+    availability = _pre_execution_precheck(runtime)
+    return decision if availability is None else _precheck_denial(decision, availability, "pre_approval")
 
 
 def _invoke_with_operation_policy(
@@ -1010,6 +1054,11 @@ def _decision_message(decision: ActionDecision) -> str:
     boundary_error = str(decision.evidence.get("boundary_error") or "").strip()
     if boundary_error:
         message += f". {boundary_error}"
+    precheck = str(decision.evidence.get("precheck") or "")
+    if precheck:
+        when = "审批前" if precheck == "pre_approval" else "批准后、执行前"
+        message += (f"。工具在{when}复核时已不可用：{decision.evidence.get('reason') or ''}。"
+                    "本次未执行，也不会再等待审批；请换用其它可执行工具或申请能力。")
     rendered_issues = _render_validation_issues(decision.evidence.get("issues"))
     if rendered_issues:
         message += " 参数问题: " + rendered_issues

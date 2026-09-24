@@ -144,7 +144,7 @@ MCP 完整失败回执结算已本地修复、待发布验收：合法 `isError=
 
 第 10 步已实施（本地）：随包 Skill（包描述 v3，来源 `plugin:<ID>`，优先级低于工作区 > 用户 > 共享 > 内置），详见 [可装卸插件方案](docs/design/PLUGIN_LIFECYCLE.md)。
 
-第 10 步待确认设计：[工具调用审批前的有效性复核](docs/design/TOOL_CALL_PRECHECK.md)——同一回合内插件被停用后仍先弹审批、批准后才失败；
+第 10 步审批前复核已实现（2026-09-24 用户批准，分支 `claude/tool-precheck`，代理工具 opt-in 复核、两码登记、停用链改报激活失效，待真实复验）：[工具调用审批前的有效性复核](docs/design/TOOL_CALL_PRECHECK.md)——同一回合内插件被停用后仍先弹审批、批准后才失败；
 设计为统一权限门在 `ask` 之后、审批事件之前，以及审批通过后 claim 之前，用处理器自己的 `availability()` 复核，失效按 `TOOL_UNAVAILABLE` 拦下。
 改动统一权限门，须用户确认并经决策线评审后实现。插件数据清理命令、SDK 的"一致才替换"写入原语仍在待设计列表。
 

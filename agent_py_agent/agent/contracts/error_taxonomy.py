@@ -362,6 +362,16 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.REPORT_BLOCKER.value,
         recovery_hint="按原请求编号查询，不根据断连或超时重复安装。",
     ),
+    "PLUGIN_ACTIVATION_UNAVAILABLE": ErrorContract(
+        code="PLUGIN_ACTIVATION_UNAVAILABLE", category="tool", retryable=False,
+        recommended_action=RecoveryAction.REQUEST_CAPABILITY.value,
+        recovery_hint="原插件已停用或激活失效；不要重试同一调用，换可执行工具或申请能力，是否重新启用由用户决定。",
+    ),
+    "MCP_CONNECTION_CLOSED": ErrorContract(
+        code="MCP_CONNECTION_CLOSED", category="tool", retryable=False,
+        recommended_action=RecoveryAction.REQUEST_CAPABILITY.value,
+        recovery_hint="原 MCP 连接已关闭，本运行内不会自动重连；换其它工具或申请能力。",
+    ),
     "HOST_COMMAND_PREPARATION_FAILED": ErrorContract(
         code="HOST_COMMAND_PREPARATION_FAILED", category="state", retryable=False,
         recommended_action=RecoveryAction.REPORT_BLOCKER.value,

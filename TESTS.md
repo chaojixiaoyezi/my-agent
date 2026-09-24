@@ -2,6 +2,13 @@
 
 child不展示历史正文时的读取回归先复现1 failed/1 passed，修复后test_compact_retained_history、test_subagent_compact_recovery、test_gateway_child_compact_scope_application三文件31 passed（8.48秒）。三宿主seed仓外基线仅验证测量和完整性，不算内存目标通过；细节见容量审计的宿主生命周期基线。
 
+## 工具调用审批前/批准后复核（2026-09-24，本地分支 `claude/tool-precheck`）
+
+- **改动**：`BaseTool.precheck_availability()` 默认 None（不复核），`MCPProxyTool` / `PluginProxyTool` 覆盖并给出 `MCP_CONNECTION_CLOSED` / `PLUGIN_ACTIVATION_UNAVAILABLE`；`ToolExecutor.execute` 在 ask 之后、返回 approval_required 之前复核一次，`_execute_authorized` 只对带 `approval_applied` 的裁决在 claim 前再复核一次；复核失败按 `TOOL_UNAVAILABLE` 拒绝、具体码进 `reported_error_code`、文案点明"审批前 / 批准后、执行前"；`ActionPolicy` 只在精确 binding 匹配时在 allow 证据里写 `approval_applied=true`；批准后拦下的结果不再贴"已批准"事实；两码登记进错误分类表；`mcp_managed_process.require` 先核对激活再看进程记录，停用导致的关闭报激活失效（→`TOOL_UNAVAILABLE`），`test_plugin_enable` 的旧期望 `TOOL_EXECUTION_FAILED` 同步改。
+- **与设计稿的偏差**：内置工具的 `availability()` 会做 I/O（shell 沙箱探测等），复核改为代理工具 opt-in；`_execute_authorized` 参数已到上限，挂点 2 不加参数、放在函数入口按 `approval_applied` 判断。详见设计稿"实现偏差"。
+- **新测试** `test_tool_call_precheck.py` 9 项：审批前拦下不弹框、批准后 claim 前拦下、复核通过则执行且复核恰好两次、内置工具 availability 不被再调、免审批调用不复核、复核异常按不可用、批准后拦下不带 applied_approval、两码登记且不可重试。
+- **结果**：相关 59 个测试文件 1187 passed、20 xfailed（含新文件）；ruff 通过。真实 TUI 复验待部署后在测试机默认确认模式下进行（审批等待期间停用插件 → 批准后按 TOOL_UNAVAILABLE 拦下且无执行记录）。
+
 ## 媒体压缩策略片 A：归档引用主链（2026-09-24，本地分支 `claude/compact-media-policy`）
 
 - **改动**：新增 `backends/request_content.classify_nontext_content` / `compact_source_supported` / `is_local_media_block`、`conversation/compact_media_policy.py`、`tool_request_projection.compact_request_source_supported`；`compact._split_nontext_transcript_suffix` 按策略只保护 unknown 块，`conversation_compact_provider_source` 支持逐条只读投影，checkpoint 新增 `media_policy` / `media_fact_source` / `media_blocks_archived` / `media_refs`；preflight 与恢复宿主两处门改用"能否摘要"判定；配置 `compact_media_policy`（默认 `auto`，片 A 等价于 `archived_refs`）。`_summarize_segments` 与 `text_request_capacity_known` 保持严格语义不变。已知媒体严格等于运输层会展开的集合（顶层 user 行的 local_file image/video），嵌套或 assistant 侧一律 unknown。

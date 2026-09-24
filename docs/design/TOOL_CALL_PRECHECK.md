@@ -1,6 +1,6 @@
 # 工具调用审批前的有效性复核
 
-状态：设计草案，已经决策线评审（2026-09-24，方向同意，三处缺口与两处文档错误已并入本稿），待用户确认后实现；改动统一权限门，两条开发线共用。上位合同见 [可装卸插件方案](PLUGIN_LIFECYCLE.md) 与工具运行时合同（`agent/tooling/models.py`）。
+状态：已实现（2026-09-24，用户批准现稿后实现于分支 `claude/tool-precheck`，合同测试通过；真实 TUI 复验见 TESTS.md）。实现与本稿的三处偏差见文末"实现偏差"。改动统一权限门，两条开发线共用。上位合同见 [可装卸插件方案](PLUGIN_LIFECYCLE.md) 与工具运行时合同（`agent/tooling/models.py`）。
 
 ## 解决问题
 
@@ -57,6 +57,14 @@
 
 不做：等待审批期间逐次轮询复核（`permission_bridge` 每次 poll 再查）——目前"不可用"在 `round_execution` 里会回退成 approval_required，要先改那条回退才有意义，另开一片。
 非插件 MCP 服务在回合中途死亡的情况，同一复核（连接存活事实）自然覆盖，不单独写分支。
+
+## 实现偏差（2026-09-24，按代码事实调整，不改原则）
+
+- **复核是代理工具的 opt-in，不是对所有 handler 调 `availability()`**：`ShellTool.availability` 在 Linux 上会起 `bwrap --version` 进程，审计/记忆/人格工具的可用性还依赖当前任务属性，逐次复核既有 I/O 又可能与快照时不一致。所以新增 `BaseTool.precheck_availability()` 默认返回 None（不复核、沿用冻结快照），只有 `MCPProxyTool`（内存里的连接状态）和 `PluginProxyTool`（一次有界安装表读取 + 连接状态）覆盖。原则"内置工具零成本、零 I/O"由此成立。
+- **具体原因码**：两个代理的 `availability()` 之前只报通用 `TOOL_UNAVAILABLE`；复核入口分别给出 `PLUGIN_ACTIVATION_UNAVAILABLE` / `MCP_CONNECTION_CLOSED`，执行器只把它放进 `reported_error_code`，`error_code` 仍是 `TOOL_UNAVAILABLE`；两码已登记到错误分类表（tool、不可重试、REQUEST_CAPABILITY）。
+- **挂点 2 的位置**：`_execute_authorized` 已到 8 个参数的硬上限，复核放在该函数入口、按 allow 裁决证据里的 `approval_applied=true` 判断，不加参数；`approval_applied` 只在 `_approval_decision` 的精确 binding 匹配分支为真（沙箱内自动执行、策略不要求、auto 模式都为假）。
+- **渲染**：批准后被拦下的结果在 `_with_applied_approval_fact` 里跳过"已批准且已应用"事实，避免模型误以为执行过；拒绝文案由 `_decision_message` 按 `precheck=pre_approval|post_approval` 点明"审批前"或"批准后、执行前"。
+- **停用链**：`mcp_managed_process.require` 改为先核对激活再看进程记录，因停用而关闭的调用报 `PLUGIN_ACTIVATION_UNAVAILABLE`（→`TOOL_UNAVAILABLE`），不再是可重试的 `TOOL_EXECUTION_FAILED`；进程消失后的 EOF 路径仍报 `MCP_CONNECTION_CLOSED`。
 
 ## 验收
 

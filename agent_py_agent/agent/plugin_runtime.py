@@ -43,6 +43,15 @@ class PluginProxyTool(MCPProxyTool):
             return ToolAvailability.unavailable("原插件已停用或激活不可用")
         return super().availability()
 
+    # LLM: 先复核原激活（一次有界安装表读取），失效报 PLUGIN_ACTIVATION_UNAVAILABLE；再复核连接内存状态。不启动进程、不追随新代次。
+    # 函数用途: 审批前/批准后执行前复核原插件是否仍启用且连接仍在。
+    def precheck_availability(self) -> ToolAvailability:
+        try:
+            self.client.activation_ref.require()
+        except (OSError, ValueError):
+            return ToolAvailability.unavailable("原插件已停用或激活不可用", error_code="PLUGIN_ACTIVATION_UNAVAILABLE")
+        return super().precheck_availability()
+
     # LLM: 只看代理固定 transport 的声明；普通 arguments 不能伪造元数据，缺可信上下文须在发送前失败。
     #   写入上下文只给协商了写入扩展、且本工具声明 mutating/dangerous 的调用；只读工具永远拿不到写权限。
     # 函数用途: 为支持当前扩展版本的插件生成本次工作区读取/写入元数据。

@@ -67,7 +67,8 @@ class ManagedMCPProcess:
     def transaction(self, wait_check):
         return ProcessSessionStore(self.hosted.store_root).transaction(wait_check=wait_check)
 
-    # LLM: 调用方持原资源锁；先复读原 session 再读安装表，撤销后冻结会包含所有此前准入的实例。
+    # LLM: 调用方持原资源锁；先核对原激活再看进程记录——停用会先撤销激活再请求停止，所以因停用而关闭的调用报 PLUGIN_ACTIVATION_UNAVAILABLE（→TOOL_UNAVAILABLE，不建议重试），
+    # 只有激活仍有效而进程缺失/已停时才报 MCP_CONNECTION_CLOSED；撤销后冻结会包含所有此前准入的实例。
     # 函数用途: 拒绝缺失、停止、换代或尚未发布的业务调用，不关闭别的调用共用的连接。
     def require(self, transaction: ProcessSessionTransaction, *, allow_preparing: bool) -> None:
         original = self.hosted.record
@@ -75,9 +76,9 @@ class ManagedMCPProcess:
         if current is None:
             raise MCPError("插件原进程记录缺失", code="MCP_CONNECTION_CLOSED")
         merge_process_record(original, current)
+        self.activation.require(allow_preparing=allow_preparing)
         if current["stop_requested"] or current["status"] != "running" or not current["handoff_confirmed"]:
             raise MCPError("插件原进程已停止或不可用", code="MCP_CONNECTION_CLOSED")
-        self.activation.require(allow_preparing=allow_preparing)
 
     # LLM: 返回原 ProcessSessionCleanup，异常继续携带原提交/redo/终止事实，不能压成裸 host 的树清理成功。
     # 函数用途: 按启动时固定的 host/child 身份收回本连接资源，未知结果保持未知。

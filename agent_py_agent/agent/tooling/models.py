@@ -1310,6 +1310,12 @@ class BaseTool:
     def availability(self) -> ToolAvailability:
         return ToolAvailability.ready()
 
+    # LLM: 审批前/批准后执行前复核的可选入口：默认 None 表示"不复核、沿用冻结快照"，因为内置工具的 availability 可能做进程或文件 I/O，不能每次调用都跑；
+    # 只有以进程/激活事实为依据、无业务副作用的代理工具才覆盖，不可用时给出具体 error_code 供执行器放进 reported_error_code。
+    # 函数用途: 让插件与 MCP 代理在快照冻结后再次报告是否还能执行，其它工具返回 None。
+    def precheck_availability(self) -> ToolAvailability | None:
+        return None
+
     # LLM: 只有需要请求快照的工具覆盖本方法；其余 handler 由这个唯一受权入口委托 execute。
     # 函数用途: 在统一调用入口传递请求快照，同时向后兼容现有工具实现。
     def execute_scoped(
