@@ -1,6 +1,6 @@
 # LLM: This module bridges a provider-overflowing carried active turn into the existing canonical
-# Conversation Compact ledger. Full archives remain runtime authority; committed checkpoint call ids
-# only decide which old records are replaced by the model-facing summary on later process slices.
+# Conversation Compact ledger. Full archives remain runtime authority; only committed exact call
+# refs decide which records are replaced. Missing origin remains visible with structured uncertainty.
 # 模块用途: 将跨进程续跑的长工具历史正式记成 Compact，并在恢复时只向模型展示摘要与近期调用。
 
 from __future__ import annotations
@@ -10,11 +10,12 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
 from ..memory_archive import estimate_tokens
+from ..tooling.call_ref import ToolCallRef, tool_call_ref_from_record
 from .authority import (
     AGENT_THREAD_ID_ATTR,
     CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR,
 )
-from .compact_checkpoint import committed_live_tool_compact_source_ids
+from .compact_checkpoint import committed_live_tool_compact_sources
 from .compact_guard import CompactInterruptCheck, raise_if_compact_interrupted
 from .compact_progress import (
     COMPACT_AUTHORITY_CONVERSATION,
@@ -29,7 +30,7 @@ from .models import ConversationThread
 
 
 # LLM: The result separates canonical generation movement from the unchanged full archive records.
-# 类用途: 返回本次是否提交、替代与保留了哪些调用，以及提交后的唯一 thread。
+# 类用途: 返回是否提交、替代与保留边界及来源不确定计数；未知来源不会借当前身份提交。
 @dataclass(frozen=True)
 class ActiveTurnArchiveCompactResult:
     thread: ConversationThread
@@ -38,6 +39,8 @@ class ActiveTurnArchiveCompactResult:
     retained_call_ids: tuple[str, ...] = ()
     projected_tokens_before: int = 0
     projected_tokens_after: int = 0
+    uncertain_call_count: int = 0
+    source_resolution: str = "not_evaluated"
 
 
 # LLM: The caller supplies one immutable overflow identity, UI projection and typed interrupt
@@ -65,12 +68,15 @@ class _ActiveTurnArchiveCompactPlan:
     source_call_ids: tuple[str, ...]
     retained_records: tuple[dict[str, object], ...]
     retained_call_ids: tuple[str, ...]
+    source_call_refs: tuple[ToolCallRef, ...]
+    retained_call_refs: tuple[ToolCallRef | None, ...]
     projected_tokens_before: int
     progress: dict[str, object]
 
 
 # LLM: Runtime dedupe/audit continues to receive every record. Only the model projection excludes
-# calls named by the committed checkpoint chain; unreadable authority fails closed.
+# exact calls named by the committed checkpoint chain; unreadable authority fails closed. Legacy
+# bare ids and records without canonical origin remain visible and explicitly uncertain.
 # 函数用途: 从完整本轮工具账中筛出尚未被 Compact 摘要替代、仍需直接展示给模型的记录。
 def model_visible_active_turn_tool_calls(
     agent: object,
@@ -81,10 +87,24 @@ def model_visible_active_turn_tool_calls(
     if not values or not _transcript_authoritative(task_attributes):
         return values
     thread = _load_authoritative_thread(agent, task_attributes)
-    hidden = committed_live_tool_compact_source_ids(agent, thread)
-    if not hidden:
-        return values
-    return [item for item in values if not _record_matches_call_ids(item, hidden)]
+    sources = committed_live_tool_compact_sources(agent, thread)
+    visible: list[dict[str, object]] = []
+    for item in values:
+        ref = tool_call_ref_from_record(item)
+        if ref is not None and ref in sources.refs:
+            continue
+        reasons = []
+        if ref is None:
+            reasons.append("missing_tool_call_ref")
+        if _record_call_id(item) in sources.uncertain_call_ids:
+            reasons.append("checkpoint_source_unknown")
+        if reasons:
+            item["compact_source_resolution"] = {
+                "status": "uncertain", "reasons": reasons,
+                "checkpoint_ids": list(sources.uncertain_checkpoint_ids),
+            }
+        visible.append(item)
+    return visible
 
 
 # LLM: This is the recovery counterpart of the in-process native IR compactor. It runs only after
@@ -106,9 +126,13 @@ def compact_carried_active_turn_archive(
         records,
     )
     indexed = [(item, _record_call_id(item)) for item in visible]
-    indexed = [(item, call_id) for item, call_id in indexed if call_id]
     if not indexed:
         return ActiveTurnArchiveCompactResult(thread=thread)
+    uncertain_count = sum(tool_call_ref_from_record(item) is None for item, _call_id in indexed)
+    if uncertain_count == len(indexed):
+        return ActiveTurnArchiveCompactResult(
+            thread=thread, uncertain_call_count=uncertain_count, source_resolution="uncertain",
+        )
 
     from ..agent_core.runtime.context_compactor import runtime_compact_policy
     from .live_tool_compact import resolve_live_tool_compact_binding
@@ -132,7 +156,8 @@ def compact_carried_active_turn_archive(
 
 
 # LLM: Boundaries are selected from whole records before any model call. The newest complete tail is
-# retained and at least one overflowing call remains in the replacement source.
+# retained and at least one known call remains in the source. Unknown-origin records always stay
+# visible; source/tail selection uses positions and exact refs, never a bare-id set.
 # 函数用途: 按统一近期 token 预算冻结一代 active-turn Compact 的移除区和保留区。
 def _build_active_turn_compact_plan(
     binding: object,
@@ -141,14 +166,15 @@ def _build_active_turn_compact_plan(
     indexed: list[tuple[dict[str, object], str]],
 ) -> _ActiveTurnArchiveCompactPlan:
     retained = _recent_records_within_budget(indexed, policy.recent_tail_tokens)
+    tail_start = len(indexed) - len(retained)
+    refs = [tool_call_ref_from_record(item) for item, _call_id in indexed]
+    source_positions = {index for index, ref in enumerate(refs) if index < tail_start and ref is not None}
+    if not source_positions:
+        # 溢出时至少替换一条已知来源；未知记录不能因位置靠前被强行归入当前身份。
+        source_positions = {next(index for index, ref in enumerate(refs) if ref is not None)}
+    source_ids = tuple(call_id for index, (_item, call_id) in enumerate(indexed) if index in source_positions)
+    retained = [item for index, item in enumerate(indexed) if index not in source_positions]
     retained_ids = tuple(call_id for _item, call_id in retained)
-    retained_set = set(retained_ids)
-    source_ids = tuple(call_id for _item, call_id in indexed if call_id not in retained_set)
-    if not source_ids:
-        # A single huge result must still be replaceable after an actual provider overflow.
-        source_ids = (indexed[0][1],)
-        retained = indexed[1:]
-        retained_ids = tuple(call_id for _item, call_id in retained)
     thread = binding.thread
     generation = max(0, int(thread.compact_generation or 0)) + 1
     before_tokens = estimate_tokens({"active_turn_tool_calls": visible})
@@ -160,6 +186,8 @@ def _build_active_turn_compact_plan(
         source_call_ids=source_ids,
         retained_records=tuple(item for item, _call_id in retained),
         retained_call_ids=retained_ids,
+        source_call_refs=tuple(ref for index, ref in enumerate(refs) if index in source_positions),
+        retained_call_refs=tuple(ref for index, ref in enumerate(refs) if index not in source_positions),
         projected_tokens_before=before_tokens,
         progress={
             "generation": generation,
@@ -264,6 +292,8 @@ def _execute_active_turn_compact(
         retained_call_ids=plan.retained_call_ids,
         projected_tokens_before=plan.projected_tokens_before,
         projected_tokens_after=after_tokens,
+        uncertain_call_count=sum(ref is None for ref in plan.retained_call_refs),
+        source_resolution="uncertain" if None in plan.retained_call_refs else "complete",
     )
 
 
@@ -335,6 +365,8 @@ def _commit_active_turn_compact(
             summary=replacement,
             source_tool_call_ids=plan.source_call_ids,
             retained_tool_call_ids=plan.retained_call_ids,
+            source_tool_call_refs=plan.source_call_refs,
+            retained_tool_call_refs=plan.retained_call_refs,
             projected_tokens_before=plan.projected_tokens_before,
             projected_tokens_after=after_tokens,
             policy=plan.policy,
@@ -433,20 +465,10 @@ def _transcript_authoritative(attributes: object) -> bool:
     )
 
 
-# LLM: Compact boundaries use provider call identity only; tool names and prose are never identities.
-# 函数用途: 从归档记录提取用于 checkpoint 的精确工具调用编号。
+# LLM: 这里只提取审计编号；过滤权威来自完整 ToolCallRef，不能用此函数补全来源。
+# 函数用途: 保留已有归档的工具编号展示口径，不将别名解析成运行身份。
 def _record_call_id(record: dict[str, object]) -> str:
     return str(record.get("call_id") or record.get("id") or "").strip()
-
-
-# LLM: Recovery accepts every structured alias emitted by the archive writer, but compares exact ids.
-# 函数用途: 判断一条完整工具记录是否已被某个已提交 Compact 摘要替代。
-def _record_matches_call_ids(record: dict[str, object], values: frozenset[str]) -> bool:
-    return any(
-        str(record.get(key) or "").strip() in values
-        for key in ("call_id", "id", "scoped_call_id")
-        if str(record.get(key) or "").strip()
-    )
 
 
 __all__ = [

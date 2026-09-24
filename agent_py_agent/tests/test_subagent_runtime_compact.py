@@ -346,6 +346,11 @@ def test_subagent_provider_overflow_compacts_unfinished_tool_archive_before_retr
 
     def fake_run(prompt: str, *, params):
         run_params_seen.append(params)
+        if len(run_params_seen) == 1:
+            # Fake canonical calls originate in this child attempt; retries keep these facts.
+            for record in records:
+                record.update(run_id=params.run_id, attempt_id=params.attempt_id,
+                              request_id=params.request_id, conversation_request_id=params.request_id)
         if len(run_params_seen) <= overflow_count:
             params.on_chunk.write_progress({
                 "round": 1,

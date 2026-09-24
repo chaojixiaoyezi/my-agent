@@ -10,12 +10,14 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from ..tooling.call_ref import ToolCallRef
 from .authority import (
     AGENT_THREAD_ID_ATTR,
     conversation_transcript_is_authoritative,
 )
 from .compact_checkpoint import (
     LiveToolCompactCheckpointRequest,
+    validate_live_tool_call_boundary,
     write_live_tool_compact_checkpoint,
 )
 from .compact_guard import (
@@ -44,8 +46,9 @@ class LiveToolCompactBinding:
 
 
 # LLM: This immutable request keeps one live-tool candidate's summary, boundaries, usage and
-# interruption check aligned through checkpoint/CAS; the UI callback remains observation-only.
-# 类用途: 打包一次运行中压缩的摘要、调用编号、token、请求身份和停止检查，避免提交阶段参数错位。
+# interruption check aligned through checkpoint/CAS; source refs carry original call identity,
+# never the submitter identity. The UI callback remains observation-only.
+# 类用途: 打包摘要、逐调用来源、token、提交者身份和停止检查，避免提交阶段参数错位。
 @dataclass(frozen=True)
 class LiveToolCompactCommitRequest:
     summary: str
@@ -56,6 +59,8 @@ class LiveToolCompactCommitRequest:
     policy: RuntimeCompactPolicy
     request_id: str
     attempt_id: str
+    source_tool_call_refs: tuple[ToolCallRef, ...]
+    retained_tool_call_refs: tuple[ToolCallRef | None, ...]
     forced: bool = False
     after_checkpoint: Callable[[], None] | None = None
     interrupt_check: CompactInterruptCheck | None = None
@@ -123,6 +128,8 @@ def commit_live_tool_compact(
             summary=replacement,
             source_tool_call_ids=source_ids,
             retained_tool_call_ids=retained_ids,
+            source_tool_call_refs=request.source_tool_call_refs,
+            retained_tool_call_refs=request.retained_tool_call_refs,
             projected_tokens_before=request.projected_tokens_before,
             projected_tokens_after=request.projected_tokens_after,
             policy=request.policy,
@@ -163,13 +170,13 @@ def commit_live_tool_compact(
     )
 
 
-# LLM: Structural call boundaries and the replacement summary must be valid before checkpoint I/O.
+# LLM: 写账前验证精确来源；裸编号允许跨域重号，不去重，也不用于判定来源和尾部重叠。
 # 函数用途: 在写账前校验一次工具历史 Compact 的移除区、保留区和完整摘要。
 def _validated_live_tool_request(
     request: LiveToolCompactCommitRequest,
 ) -> tuple[tuple[str, ...], tuple[str, ...], str]:
-    source_ids = _normalized_ids(request.source_tool_call_ids)
-    retained_ids = _normalized_ids(request.retained_tool_call_ids)
+    source_ids = request.source_tool_call_ids
+    retained_ids = request.retained_tool_call_ids
     replacement = str(request.summary or "").strip()
     if not source_ids:
         raise ConversationCompactError(
@@ -181,11 +188,16 @@ def _validated_live_tool_request(
             "live tool compact summary is empty",
             code="COMPACT_EMPTY_SUMMARY",
         )
-    if set(source_ids) & set(retained_ids):
-        raise ConversationCompactError(
-            "live tool compact source and retained calls overlap",
-            code="COMPACT_TOOL_BOUNDARY_INVALID",
+    try:
+        validate_live_tool_call_boundary(
+            source_ids, retained_ids,
+            request.source_tool_call_refs, request.retained_tool_call_refs,
         )
+    except ValueError as exc:
+        raise ConversationCompactError(
+            str(exc),
+            code="COMPACT_TOOL_BOUNDARY_INVALID",
+        ) from exc
     return source_ids, retained_ids, replacement
 
 
@@ -203,14 +215,6 @@ def record_live_tool_compact_failure(
         binding.thread,
         code=compact_exception_code(exc),
         now=time.time(),
-    )
-
-
-# LLM: Checkpoint boundaries are ordered, non-empty exact ids; prose and tool names never join them.
-# 函数用途: 将工具调用编号去空、去重并保持原执行顺序。
-def _normalized_ids(values: tuple[str, ...]) -> tuple[str, ...]:
-    return tuple(
-        dict.fromkeys(str(item).strip() for item in values if str(item or "").strip())
     )
 
 

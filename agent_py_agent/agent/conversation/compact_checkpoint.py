@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..io.jsonl import append_jsonl
+from ..tooling.call_ref import ToolCallRef
 from .models import ConversationThread, MessageLogEntry
 
 if TYPE_CHECKING:
@@ -37,7 +38,7 @@ class CompactCheckpointRequest:
 
 
 # LLM: This request records a mid-turn native IR replacement in the same owner/thread ledger.
-# 类用途: 保存一次正在运行回合的工具往返压缩候选，以及被移除和保留的精确调用编号。
+# 类用途: 保存运行中压缩候选；裸编号用于审计，逐调用引用才是恢复过滤权威。
 @dataclass(frozen=True)
 class LiveToolCompactCheckpointRequest:
     thread: ConversationThread
@@ -49,6 +50,8 @@ class LiveToolCompactCheckpointRequest:
     policy: RuntimeCompactPolicy
     request_id: str
     attempt_id: str
+    source_tool_call_refs: tuple[ToolCallRef, ...]
+    retained_tool_call_refs: tuple[ToolCallRef | None, ...]
     forced: bool = False
 
 
@@ -73,14 +76,17 @@ def compact_checkpoint_id(
     return f"compact-{thread.compact_generation + 1}-{digest}"
 
 
-# LLM: Live-tool checkpoint identity includes the exact dropped calls and intended generation.
-# 函数用途: 为同一回合的一次工具历史压缩生成稳定编号，重试不会造出竞争 checkpoint。
+# LLM: 无 refs 的旧调用保持原 ID；新候选显式把规范来源和尾部 refs 加入内容地址，避免同裸编号的
+# 迟到候选在 CAS 失败后仍以同 ID 遮蔽已提交行。旧持久 ID 不重算。
+# 函数用途: 为一次工具历史压缩生成稳定编号，并隔离不同原始来源的竞争候选。
 def live_tool_compact_checkpoint_id(
     thread: ConversationThread,
     *,
     summary: str,
     source_tool_call_ids: tuple[str, ...],
     attempt_id: str,
+    source_tool_call_refs: tuple[ToolCallRef, ...] | None = None,
+    retained_tool_call_refs: tuple[ToolCallRef | None, ...] = (),
 ) -> str:
     payload = "\0".join(
         [
@@ -92,6 +98,16 @@ def live_tool_compact_checkpoint_id(
             str(summary),
         ]
     )
+    if source_tool_call_refs is not None:
+        payload += "\0" + json.dumps(
+            {
+                "source_tool_call_refs": [ref.to_dict() for ref in source_tool_call_refs],
+                "retained_tool_call_refs": [
+                    ref.to_dict() if ref is not None else None for ref in retained_tool_call_refs
+                ],
+            },
+            ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        )
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:20]
     return f"compact-{thread.compact_generation + 1}-{digest}"
 
@@ -170,8 +186,7 @@ def write_compact_checkpoint(
     return checkpoint_id
 
 
-# LLM: Persist a complete live-tool candidate before the ConversationThread generation advances;
-# the unchanged transcript cursor and exact call ids make recovery source boundaries explicit.
+# LLM: 写账前验证逐调用来源；保留 v2 顶层提交者和游标语义，新 refs 显式参与新候选 ID。
 # 函数用途: 把当前回合被替换的工具往返先写入 owner Compact 账本，成功后才允许 thread 提交。
 def write_live_tool_compact_checkpoint(
     agent: SimpleAgent,
@@ -179,19 +194,11 @@ def write_live_tool_compact_checkpoint(
 ) -> str:
     thread = request.thread
     summary = str(request.summary or "").strip()
-    source_ids = tuple(
-        dict.fromkeys(
-            str(item).strip()
-            for item in request.source_tool_call_ids
-            if str(item or "").strip()
-        )
-    )
-    retained_ids = tuple(
-        dict.fromkeys(
-            str(item).strip()
-            for item in request.retained_tool_call_ids
-            if str(item or "").strip()
-        )
+    source_ids = request.source_tool_call_ids
+    retained_ids = request.retained_tool_call_ids
+    validate_live_tool_call_boundary(
+        source_ids, retained_ids,
+        request.source_tool_call_refs, request.retained_tool_call_refs,
     )
     if not source_ids:
         raise ValueError("live tool compact checkpoint requires source tool pairs")
@@ -206,6 +213,8 @@ def write_live_tool_compact_checkpoint(
         summary=summary,
         source_tool_call_ids=source_ids,
         attempt_id=request.attempt_id,
+        source_tool_call_refs=request.source_tool_call_refs,
+        retained_tool_call_refs=request.retained_tool_call_refs,
     )
     backend = getattr(agent, "backend", None)
     append_jsonl(
@@ -228,11 +237,15 @@ def write_live_tool_compact_checkpoint(
             "source_messages": 0,
             "source_messages_total": thread.compact_source_messages,
             "source_tool_call_ids": list(source_ids),
+            "source_tool_call_refs": [ref.to_dict() for ref in request.source_tool_call_refs],
             "source_tool_pairs": len(source_ids),
             "source_tool_pairs_total": (
                 thread.compact_source_tool_pairs + len(source_ids)
             ),
             "retained_tool_call_ids": list(retained_ids),
+            "retained_tool_call_refs": [
+                ref.to_dict() if ref is not None else None for ref in request.retained_tool_call_refs
+            ],
             "retained_tool_pairs": len(retained_ids),
             "projected_tokens_before": max(
                 0,
@@ -323,25 +336,77 @@ def committed_compact_checkpoint_chain(
     return tuple(chain)
 
 
-# LLM: Active-turn replay suppression is derived only from committed live_tool_ir checkpoints.
-# Transcript checkpoints and unreferenced candidates never hide archive records.
-# 函数用途: 汇总已提交运行中 Compact 精确替代掉的工具 call id，恢复时仍保留完整账本但不再重复喂模型。
-def committed_live_tool_compact_source_ids(
+# LLM: 引用数组与审计编号逐位对应；来源必须明确，未知保留项用 None 表示，绝不能删除。
+# 函数用途: 校验一次压缩的来源和尾部身份边界，计数按实际记录保留，不按裸编号去重。
+def validate_live_tool_call_boundary(
+    source_ids: tuple[str, ...],
+    retained_ids: tuple[str, ...],
+    source_refs: tuple[ToolCallRef, ...],
+    retained_refs: tuple[ToolCallRef | None, ...],
+) -> None:
+    if not source_ids or len(source_ids) != len(source_refs) or len(retained_ids) != len(retained_refs):
+        raise ValueError("live tool compact ref boundary lengths are invalid")
+    for ids, refs, allow_unknown in (
+        (source_ids, source_refs, False), (retained_ids, retained_refs, True),
+    ):
+        for call_id, ref in zip(ids, refs):
+            if ref is None and allow_unknown and isinstance(call_id, str):
+                continue
+            if not isinstance(call_id, str) or not call_id.strip():
+                raise ValueError("live tool compact call id is invalid")
+            if not isinstance(ref, ToolCallRef) or ref.call_id != call_id:
+                raise ValueError("live tool compact source ref is missing or mismatches call id")
+        known = [ref for ref in refs if ref is not None]
+        if len(known) != len(set(known)):
+            raise ValueError("live tool compact contains duplicate exact refs")
+    if set(source_refs) & set(retained_refs):
+        raise ValueError("live tool compact exact source and retained refs overlap")
+
+
+# LLM: 旧 checkpoint 或无效 refs 仅提供不确定性事实；只有完整、已提交的引用可以隐藏记录。
+# 类用途: 区分已确认的精确来源与仍不能确定归属的旧裸编号。
+@dataclass(frozen=True)
+class CommittedLiveToolSources:
+    refs: frozenset[ToolCallRef]
+    uncertain_call_ids: frozenset[str]
+    uncertain_checkpoint_ids: tuple[str, ...]
+
+
+# LLM: 只读取 thread 指针确认的 live_tool_ir 链；不读取 orphan、不把顶层提交者套给来源。
+# 函数用途: 提取已提交压缩的精确来源，旧行或无效扩展明确返回来源不确定。
+def committed_live_tool_compact_sources(
     agent: SimpleAgent,
     thread: ConversationThread,
-) -> frozenset[str]:
-    values = {
-        str(call_id or "").strip()
-        for row in committed_compact_checkpoint_chain(agent, thread)
-        if str(row.get("source_kind") or "").strip() == "live_tool_ir"
-        for call_id in (
-            row.get("source_tool_call_ids")
-            if isinstance(row.get("source_tool_call_ids"), list)
-            else ()
-        )
-        if str(call_id or "").strip()
-    }
-    return frozenset(values)
+) -> CommittedLiveToolSources:
+    refs: set[ToolCallRef] = set()
+    uncertain_ids: set[str] = set()
+    uncertain_checkpoints: list[str] = []
+    for row in committed_compact_checkpoint_chain(agent, thread):
+        if row.get("source_kind") != "live_tool_ir":
+            continue
+        try:
+            if any(not isinstance(row.get(key), list) for key in (
+                "source_tool_call_ids", "retained_tool_call_ids",
+                "source_tool_call_refs", "retained_tool_call_refs",
+            )):
+                raise ValueError("live tool compact ref arrays are missing or invalid")
+            source_refs = tuple(ToolCallRef.from_dict(value) for value in row["source_tool_call_refs"])
+            retained_refs = tuple(
+                ToolCallRef.from_dict(value) if value is not None else None
+                for value in row["retained_tool_call_refs"]
+            )
+            validate_live_tool_call_boundary(
+                tuple(row["source_tool_call_ids"]), tuple(row["retained_tool_call_ids"]),
+                source_refs, retained_refs,
+            )
+        except (KeyError, TypeError, ValueError):
+            uncertain_checkpoints.append(str(row["checkpoint_id"]))
+            values = row.get("source_tool_call_ids")
+            if isinstance(values, list):
+                uncertain_ids.update(value for value in values if isinstance(value, str))
+            continue
+        refs.update(source_refs)
+    return CommittedLiveToolSources(frozenset(refs), frozenset(uncertain_ids), tuple(uncertain_checkpoints))
 
 
 __all__ = [
@@ -349,8 +414,9 @@ __all__ = [
     "LiveToolCompactCheckpointRequest",
     "compact_checkpoint_id",
     "committed_compact_checkpoint_chain",
-    "committed_live_tool_compact_source_ids",
+    "committed_live_tool_compact_sources",
     "live_tool_compact_checkpoint_id",
     "write_live_tool_compact_checkpoint",
     "write_compact_checkpoint",
+    "validate_live_tool_call_boundary",
 ]

@@ -1,5 +1,10 @@
 # Memory Structure
 
+## Live-tool 逐调用来源
+
+`tooling/call_ref.py` 只校验 canonical 三元身份。`conversation/compact_checkpoint.py` 的 v2 行追加 `source_tool_call_refs`、`retained_tool_call_refs`；来源必须完整，未知保留项为 `null`。两组精确 refs 不可重复或重叠，裸 call id 可重复或交叉。带 refs 的新候选把规范 refs 加入内容地址；旧无 refs ID 输出和旧行不重算。顶层 request/attempt 仍是提交者，原写 checkpoint → 锁内 generation CAS 不变。
+`active_turn_compact.py` 只凭已提交精确 refs 隐藏，按记录位置选择来源与尾部；未知记录保留并暴露结构化 `uncertain`。`tool_output_externalizer.py` 直接传递原 call 的 attempt/turn，`compact_tool_output_refs.py` 按完整三元组恢复去重；不解析 scoped 字符串或从 operation 哈希反推缺失身份。旧大历史可能无法安全恢复 Compact，不存在静默身份迁移。
+
 `conversation/compact_text_source.py` 只管理同一来源的临时字符窗口和读取一致性，不拥有消息游标或持久覆盖。`backends/request_content.py` 拒绝将非文本块引用当成可完整分段的正文；原检查点仍由原 Compact writer 提交。
 
 ## 流式估算与消息扫描

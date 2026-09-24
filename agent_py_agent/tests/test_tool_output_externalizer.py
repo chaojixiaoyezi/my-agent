@@ -326,6 +326,13 @@ def test_production_file_read_keeps_bounded_body_and_continuation(
     ))
     native = AnthropicMessageAdapter().to_provider_messages(params.tool_ir_history)
     assert outcome.output in native[-1]["content"][0]["content"]
+    from agent_py_agent.agent.memory_archive.compact_tool_output_refs import (
+        carried_tool_call_records,
+    )
+
+    carried, = carried_tool_call_records(tmp_path, {"run_id": execution.call.run_id})
+    assert carried["attempt_id"] == archive["attempt_id"] == execution.call.attempt_id
+    assert carried["turn_id"] == archive["turn_id"] == execution.call.turn_id
 
 
 def test_production_artifact_page_keeps_valid_json_and_next_cursor(tmp_path: Path) -> None:
@@ -882,7 +889,7 @@ def test_tool_loop_records_live_raw_archive_for_each_tool_result(tmp_path: Path)
     assert raw_records[-1]["request_id"] == "req-live"
 
 
-def test_tool_loop_externalizer_falls_back_to_current_subagent_run_id(tmp_path: Path) -> None:
+def test_tool_loop_externalizer_preserves_call_origin_over_current_subagent(tmp_path: Path) -> None:
     agent = SimpleNamespace(root=tmp_path, _current_subagent_run_id="runner-42")
     params = _tool_loop_params(request_id="", run_id="", task_id="")
     large_output = "line\n" + ("x" * 250_000)
@@ -901,9 +908,11 @@ def test_tool_loop_externalizer_falls_back_to_current_subagent_run_id(tmp_path: 
     record = params.archive_tool_calls[0]
     artifact = json.loads(Path(record["output_path"]).read_text(encoding="utf-8"))
 
-    assert record["run_id"] == "runner-42"
-    assert record["scoped_call_id"] == "runner-42:7-1"
-    assert artifact["run_id"] == "runner-42"
+    assert record["run_id"] == "archive-test-run"
+    assert record["scoped_call_id"] == "archive-test-run:7-1"
+    assert artifact["run_id"] == "archive-test-run"
+    assert artifact["attempt_id"] == "archive-test-attempt"
+    assert artifact["turn_id"] == "archive-test-run:round-7"
 
 
 def test_externalizer_preserves_internal_tool_outputs_without_path_sanitizer(

@@ -1,6 +1,6 @@
 
 # LLM: 工具回执、文件引用及删除记录进入同一 exact run 账本；不从正文提取路径或完成状态。
-# 模块用途: 归档工具输出与文件交接，保留有界清理事实供续跑投影；不代写业务文件或改变执行结果。
+# 模块用途: 归档输出、原始调用身份和文件交接，保留有界清理事实供续跑投影；不改变执行结果。
 from __future__ import annotations
 
 from pathlib import Path
@@ -25,7 +25,7 @@ from .run_task_workspace_writer import (
 )
 from .runtime.owner_roots import runtime_owner_root
 from .tool_context.runtime_facts import project_process_runtime_facts
-from .tool_loop.recovery import runtime_run_id, runtime_run_scope
+from .tool_loop.recovery import runtime_run_scope
 from .tool_loop.round_execution import ToolCallRecordParams
 from .tool_output_failsafe import write_tool_output_fail_safe_checkpoint
 
@@ -33,8 +33,8 @@ _MODEL_SUMMARY_MAX_CHARS = 12_000
 
 
 # LLM: 原始输出先按 owner/run 归档；仅真正外置且未声明保留正文的结果使用预览。读取器已分页的正文、
-# 游标及文件版本必须完整进入 canonical ToolResult；同步检查 reducer、原生历史及外置输出回归。
-# 函数用途: 写入工具归档并生成安全的模型结果；日志预览不能代替有界正文，否则会丢尾部并诱发重复读取。
+# 游标及文件版本必须完整进入 canonical ToolResult；索引身份取原始 call，不取当前请求。
+# 函数用途: 写入含原始身份的工具归档并生成安全结果；日志预览不能代替有界正文。
 def archive_tool_output_projection(
     agent: object,
     params: object,
@@ -73,6 +73,8 @@ def archive_tool_output_projection(
         request_id=str(getattr(params, "request_id", "") or ""),
         conversation_request_id=_conversation_request_id(params),
         run_id=call.run_id,
+        attempt_id=call.attempt_id,
+        turn_id=call.turn_id,
         task_id=str(getattr(params, "task_id", "") or ""),
         min_chars=_config_int(agent, "tool_output_externalize_min_chars"),
         preview_chars=_config_int(agent, "tool_output_preview_chars"),
@@ -155,8 +157,9 @@ def _projection_refs(
 
 
 # LLM: The canonical archive row must reuse the output already externalized at execution time;
-# direct/fallback callers still receive the same typed lifecycle envelope before persistence.
-# 函数用途: 汇总一次工具调用的耐久记录、执行事实、操作终态和产物引用，供当前轮与后台续接共用。
+# direct/fallback callers persist the actual canonical call origin before indexing; never use the
+# current runner identity to relabel a carried call.
+# 函数用途: 汇总原始调用身份、执行事实、操作终态和引用，供当前轮与后台续接共用。
 def archive_tool_call_record(agent: object, record: ToolCallRecordParams) -> dict[str, object]:
     call_id = record.call.call_id
     cached = record.result.metadata.get("archive_output_record")
@@ -173,7 +176,9 @@ def archive_tool_call_record(agent: object, record: ToolCallRecordParams) -> dic
             reported_error_code=record.result.reported_error_code,
             request_id=record.params.request_id,
             conversation_request_id=_conversation_request_id(record.params),
-            run_id=runtime_run_id(agent, record.params),
+            run_id=record.call.run_id,
+            attempt_id=record.call.attempt_id,
+            turn_id=record.call.turn_id,
             task_id=record.params.task_id,
             min_chars=_config_int(agent, "tool_output_externalize_min_chars"),
             preview_chars=_config_int(agent, "tool_output_preview_chars"),

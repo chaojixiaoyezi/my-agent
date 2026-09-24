@@ -1,5 +1,7 @@
 # Verification：结构
 
+`tool_call_archive_record.py` 从实际 canonical `ToolCall` 向 `ExternalizeToolOutputRequest` 传递 run/attempt/turn；大小输出索引与 carried 恢复保持同一身份。`tooling/call_ref.py` 的三元引用只表达来源，不提供执行、验收或完成权威。legacy 缺字段保留并标 `uncertain`，不读取自然语言或解析 scoped 字符串来补身份。
+
 `tool_context/runtime_facts.py`接canonical handler_details，输出原verification块和有界process字段；`reducer.py`统一脱敏，`tool_call_archive_record.py`保留同一有界process，`runtime/loop_support.py`恢复后同口径展示。它们不改变执行状态或持久schema。
 
 ## 零工具续跑原生历史

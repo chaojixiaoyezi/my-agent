@@ -262,6 +262,11 @@ def _carried_record(index: int, *, tool: str = "read_file") -> dict[str, object]
     return {
         "call_id": call_id,
         "scoped_call_id": f"run:{call_id}",
+        "run_id": "run",
+        "attempt_id": "carried-attempt",
+        "turn_id": f"run:round-{index}",
+        "request_id": "carried-request",
+        "conversation_request_id": "carried-request",
         "tool": tool,
         "ok": True,
         "parameters": dict(parameters),
@@ -1247,6 +1252,10 @@ def test_shared_native_window_commits_main_or_child_conversation_compact(
     assert checkpoints[-1]["generation"] == 1
     assert checkpoints[-1]["checkpoint_id"] == first.compact_checkpoint_id
     assert checkpoints[-1]["source_tool_pairs"] == first.compact_source_tool_pairs
+    assert checkpoints[-1]["request_id"] == params.request_id
+    assert checkpoints[-1]["attempt_id"] == params.attempt_id
+    assert all(ref["run_id"] == "run-child" for ref in checkpoints[-1]["source_tool_call_refs"])
+    assert all(ref["attempt_id"] == "attempt-child" for ref in checkpoints[-1]["source_tool_call_refs"])
 
     build_tool_loop_prompt(agent, params)
     assert len(sink.rows) == 1

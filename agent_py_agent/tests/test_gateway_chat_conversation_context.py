@@ -1391,12 +1391,16 @@ def test_gateway_same_turn_can_cross_pressure_twice_without_recompacting_transcr
     first_tool = {
         "tool": "read_file",
         "call_id": "call-read-1",
+        "run_id": "pressure-run",
+        "attempt_id": "pressure-attempt",
         "ok": True,
         "parameters": {"path": "input/one.md"},
     }
     second_tool = {
         "tool": "read_file",
         "call_id": "call-read-2",
+        "run_id": "pressure-run",
+        "attempt_id": "pressure-attempt",
         "ok": True,
         "parameters": {"path": "input/two.md"},
     }
@@ -1481,6 +1485,8 @@ def test_gateway_same_turn_pressure_without_new_structured_progress_stops(tmp_pa
     tool_record = {
         "tool": "read_file",
         "call_id": "call-read-stable",
+        "run_id": "pressure-stable-run",
+        "attempt_id": "pressure-stable-attempt",
         "ok": True,
         "parameters": {"path": "input/one.md"},
     }
@@ -5581,6 +5587,11 @@ def test_gateway_overflow_without_transcript_commits_active_turn_compact(tmp_pat
     records = [
         {
             "call_id": f"overflow-{index}",
+            "run_id": "overflow-run",
+            "attempt_id": "overflow-attempt",
+            "turn_id": f"overflow-turn-{index}",
+            "request_id": request_id,
+            "conversation_request_id": request_id,
             "tool": "read_file",
             "ok": True,
             "parameters": {"tool": "read_file", "path": f"part-{index}.txt"},

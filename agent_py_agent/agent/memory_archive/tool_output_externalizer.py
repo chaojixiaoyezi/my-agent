@@ -1,4 +1,7 @@
 
+# LLM: 工具输出归档保留 canonical 调用来源；attempt/turn 只取执行方传入事实，不由 request/scoped 别名推导。
+# 模块用途: 保存大小输出及恢复索引，并把执行身份完整传给后续 Compact 过滤。
+
 from __future__ import annotations
 
 """externalizes large runtime tool outputs into artifact files.
@@ -45,8 +48,9 @@ _SAFE_PARAMETER_MAX_ITEMS = 20
 
 
 # LLM: The request deliberately carries two parameter views: execution parameters may contain
-# host bindings, while model_parameters is the only durable provider-replay authority.
-# 类用途: 描述一次工具输出归档，并分开保存实际执行参数与模型原始参数。
+# host bindings, while model_parameters is the only durable provider-replay authority. Canonical
+# run/attempt/call origin remains independent of request and conversation request routing.
+# 类用途: 描述一次工具归档，保存原始调用身份并分开保存实际执行参数与模型原始参数。
 @dataclass(frozen=True)
 class ExternalizeToolOutputRequest:
     root: str | Path
@@ -59,6 +63,8 @@ class ExternalizeToolOutputRequest:
     # Control flow uses error_code; diagnosis keeps the source/tool code separately.
     reported_error_code: str = ""
     run_id: str = ""
+    attempt_id: str = ""
+    turn_id: str = ""
     task_id: str = ""
     request_id: str = ""
     # 同一个 durable task 可经历多个普通用户回合；该字段固定工具真正所属的
@@ -180,8 +186,8 @@ def _request_status(request: ExternalizeToolOutputRequest) -> str:
 
 
 # LLM: Base records keep model parameters bounded/redacted beside host execution metadata; callers
-# may enrich the returned record but must not collapse the two parameter views.
-# 函数用途: 构造工具输出归档的基础记录和安全预览。
+# may enrich the returned record but must not collapse the parameter views or synthesize call origin.
+# 函数用途: 构造包含原始调用身份的基础记录和安全预览。
 def _base_record(request: ExternalizeToolOutputRequest, output: str, digest: str, *, preview_chars: int) -> dict[str, Any]:
     created_at = datetime.now(tz=timezone.utc).isoformat()
     _trust, redaction = tool_output_projection_policy(request.result_envelope)
@@ -194,6 +200,8 @@ def _base_record(request: ExternalizeToolOutputRequest, output: str, digest: str
         "request_id": request.request_id,
         "conversation_request_id": request.conversation_request_id,
         "run_id": request.run_id,
+        "attempt_id": request.attempt_id,
+        "turn_id": request.turn_id,
         "task_id": request.task_id,
         "scoped_call_id": _scoped_call_id(request),
         "ok": request.ok,
@@ -220,8 +228,8 @@ def _base_record(request: ExternalizeToolOutputRequest, output: str, digest: str
 
 
 # LLM: Artifact bodies are owner-scoped audit evidence. Persist both parameter views, then append
-# the same bounded metadata to the canonical lookup index before returning the path.
-# 函数用途: 把完整大输出及其执行、模型参数写入归档文件和索引。
+# the same bounded metadata and original call identity to the canonical index before returning.
+# 函数用途: 把完整大输出、原始身份和两套参数写入归档文件及索引。
 def _write_output_artifact(request: ExternalizeToolOutputRequest, output: str, digest: str) -> Path:
     path = _artifact_path(request, digest)
     created_at = datetime.now(tz=timezone.utc).isoformat()
@@ -239,6 +247,8 @@ def _write_output_artifact(request: ExternalizeToolOutputRequest, output: str, d
         "request_id": request.request_id,
         "conversation_request_id": request.conversation_request_id,
         "run_id": request.run_id,
+        "attempt_id": request.attempt_id,
+        "turn_id": request.turn_id,
         "task_id": request.task_id,
         "parameters": _safe_parameters(request.parameters),
         "model_parameters": _safe_parameters(
@@ -260,8 +270,8 @@ def _write_output_artifact(request: ExternalizeToolOutputRequest, output: str, d
 
 
 # LLM: The append-only index is the cross-process recovery source; model_parameters must survive
-# independently from execution parameters without copying raw output content.
-# 函数用途: 为一份已外置工具输出追加可检索、可续跑的轻量索引行。
+# independently from execution parameters and preserve original attempt/turn without inferring them.
+# 函数用途: 为外置输出追加轻量索引，保留完整调用来源供跨工作片精确匹配。
 def _append_index(path: Path, payload: dict[str, Any]) -> None:
     record = {
         "version": TOOL_OUTPUT_INDEX_SCHEMA.version,
@@ -273,6 +283,8 @@ def _append_index(path: Path, payload: dict[str, Any]) -> None:
         "request_id": payload["request_id"],
         "conversation_request_id": str(payload.get("conversation_request_id") or ""),
         "run_id": payload["run_id"],
+        "attempt_id": payload["attempt_id"],
+        "turn_id": payload["turn_id"],
         "task_id": payload["task_id"],
         "ok": bool(payload.get("ok")),
         "status": str(payload.get("status") or ""),
@@ -293,8 +305,8 @@ def _append_index(path: Path, payload: dict[str, Any]) -> None:
 
 
 # LLM: Small outputs still need the same dual-parameter recovery contract even though no artifact
-# body is written; keep this row append-only and content-free.
-# 函数用途: 为无需外置正文的小工具调用追加轻量索引行。
+# body is written; keep original run/attempt/turn here as well as in externalized rows.
+# 函数用途: 为小工具调用追加包含原始身份的轻量索引行。
 def _append_tool_call_index(request: ExternalizeToolOutputRequest, record: dict[str, Any], digest: str) -> None:
     created_at = str(record.get("created_at") or datetime.now(tz=timezone.utc).isoformat())
     payload = {
@@ -307,6 +319,8 @@ def _append_tool_call_index(request: ExternalizeToolOutputRequest, record: dict[
         "request_id": request.request_id,
         "conversation_request_id": request.conversation_request_id,
         "run_id": request.run_id,
+        "attempt_id": request.attempt_id,
+        "turn_id": request.turn_id,
         "task_id": request.task_id,
         "ok": request.ok,
         "status": str(record.get("status") or _request_status(request)),

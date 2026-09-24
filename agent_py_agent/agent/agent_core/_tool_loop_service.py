@@ -35,6 +35,7 @@ from ..prompting_parts.builder import ToolSections, project_runtime_workspace_co
 from ..runtime_db.operations import exec_lock_scope
 from ..settings.runtime_guard_config import runtime_guard_int
 from ..subagents.services.session_progress import record_runtime_subagent_tool_progress
+from ..tooling.call_ref import ToolCallRef
 from ..tooling.operation_verification import render_current_turn_execution_facts
 from ..tooling.registry_workspace import effective_registry_cwd
 from ._runtime_params import ToolLoopExecuteParams
@@ -162,8 +163,9 @@ class _PendingDeferredToolDrainResult:
 
 
 # LLM: This is one immutable candidate for reducing native history; binding and generation are
-# point-in-time facts and the plan must be discarded after either commit or rollback.
-# 类用途: 固定一次运行中 Compact 的阈值、摘要、线程绑定和工具调用边界，供提交与回滚共用。
+# point-in-time facts and source refs are frozen from actual IR calls before mutation. Discard the
+# plan after commit or rollback; current request identity must never replace original call identity.
+# 类用途: 固定运行中 Compact 的阈值、摘要、线程绑定和原始逐调用来源，供提交与回滚共用。
 @dataclass(frozen=True)
 class _NativeCompactPlan:
     policy: object
@@ -173,6 +175,7 @@ class _NativeCompactPlan:
     target_tokens: int
     before_tokens: int
     before_call_ids: tuple[str, ...]
+    before_call_refs: tuple[ToolCallRef | None, ...]
     semantic_summary: str
     progress_generation: int
     progress_operation_id: str
@@ -446,9 +449,8 @@ def _native_compact_policy(agent: object, params: ToolLoopExecuteParams) -> obje
     )
 
 
-# LLM: Planning checks the run interrupt before it may call the summary backend; it still cannot
-# mutate native IR or advance generation.
-# 函数用途: 停止检查通过后算清触发线、健康尾部、线程绑定和完整替代摘要。
+# LLM: 规划先检查停止，摘要调用前冻结 IR 原始来源；本入口不改 IR 或推进代次。
+# 函数用途: 算清触发线、健康尾部和线程绑定，并保存压缩前逐调用身份及完整替代摘要。
 def _prepare_native_compact_plan(
     agent: object,
     params: ToolLoopExecuteParams,
@@ -470,6 +472,7 @@ def _prepare_native_compact_plan(
     before_call_ids = _native_tool_call_ids(params)
     if limit <= 0 or (before_tokens < limit and not force) or len(before_call_ids) <= 1:
         return None
+    before_call_refs = _native_tool_call_refs(params)
     base_tokens = _native_compact_floor_tokens(agent, params, prompt)
     recent_tail_tokens = max(1, int(policy.recent_tail_tokens or 0))
     recovery_target = (
@@ -507,6 +510,7 @@ def _prepare_native_compact_plan(
         target_tokens=target,
         before_tokens=before_tokens,
         before_call_ids=before_call_ids,
+        before_call_refs=before_call_refs,
         semantic_summary=summary,
         progress_generation=progress_generation,
         progress_operation_id=progress_operation_id,
@@ -864,8 +868,9 @@ def _log_native_compact(
 
 
 # LLM: This is the only bridge from a settled native window to the canonical thread commit and it
-# forwards the run-owned interrupt check across checkpoint/CAS.
-# 函数用途: 计算精确调用边界并可中断地把稳定窗口提交为下一代 Compact。
+# forwards the run-owned interrupt check across checkpoint/CAS. Compare frozen canonical refs,
+# not bare call ids, so mixed attempts cannot change one another's source boundary.
+# 函数用途: 按压缩前冻结的原始来源计算边界，并可中断地提交下一代 Compact。
 def _commit_native_ir_generation(
     agent: object,
     params: ToolLoopExecuteParams,
@@ -875,25 +880,28 @@ def _commit_native_ir_generation(
 ) -> int:
     if plan.binding is None:
         return 0
+    from ..conversation.compact_guard import ConversationCompactError
     from ..conversation.live_tool_compact import (
         LiveToolCompactCommitRequest,
         commit_live_tool_compact,
     )
 
-    retained_call_ids = _native_tool_call_ids(params)
-    retained_call_id_set = set(retained_call_ids)
-    source_call_ids = tuple(
-        call_id
-        for call_id in plan.before_call_ids
-        if call_id not in retained_call_id_set
-    )
+    retained_refs = _native_tool_call_refs(params)
+    if None in plan.before_call_refs or None in retained_refs:
+        raise ConversationCompactError(
+            "native compact call source is uncertain", code="COMPACT_SOURCE_REF_UNCERTAIN",
+        )
+    retained_ref_set = set(retained_refs)
+    source_refs = tuple(ref for ref in plan.before_call_refs if ref not in retained_ref_set)
     updated_thread = commit_live_tool_compact(
         agent,
         plan.binding,
         LiveToolCompactCommitRequest(
             summary=plan.semantic_summary,
-            source_tool_call_ids=source_call_ids,
-            retained_tool_call_ids=retained_call_ids,
+            source_tool_call_ids=tuple(ref.call_id for ref in source_refs),
+            retained_tool_call_ids=tuple(ref.call_id for ref in retained_refs),
+            source_tool_call_refs=source_refs,
+            retained_tool_call_refs=retained_refs,
             projected_tokens_before=plan.before_tokens,
             projected_tokens_after=after_tokens,
             policy=plan.policy,
@@ -1110,6 +1118,25 @@ def _native_tool_call_ids(params: ToolLoopExecuteParams) -> tuple[str, ...]:
         for item in list(getattr(params, "tool_ir_history", None) or [])
         if isinstance(item, ToolResult) and str(item.call_id or "").strip()
     )
+
+
+# LLM: 只读取 IR 中原始 ToolCall 的三元身份，并按结果顺序冻结；缺配对的结果没有删除权。
+# 函数用途: 将当前原生结果逐条关联到实际调用来源，不借用 params 的当前请求或 attempt。
+def _native_tool_call_refs(params: ToolLoopExecuteParams) -> tuple[ToolCallRef | None, ...]:
+    from collections import defaultdict, deque
+
+    from ..backends.tool_ir import AssistantTurn, ToolResult
+
+    pending: dict[str, deque[ToolCallRef]] = defaultdict(deque)
+    refs: list[ToolCallRef | None] = []
+    for item in params.tool_ir_history:
+        if isinstance(item, AssistantTurn):
+            for call in item.tool_calls:
+                pending[call.call_id].append(ToolCallRef(call.run_id, call.attempt_id, call.call_id))
+        elif isinstance(item, ToolResult) and str(item.call_id or "").strip():
+            matches = pending[item.call_id]
+            refs.append(matches.popleft() if matches else None)
+    return tuple(refs)
 
 
 # LLM: native compact passes the full typed IR to the memory-archive summarizer; that boundary

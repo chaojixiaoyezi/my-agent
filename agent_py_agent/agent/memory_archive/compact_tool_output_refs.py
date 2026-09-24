@@ -9,29 +9,36 @@ from typing import Any
 
 from ..common.json_io import jsonl_lines
 from ..common.tool_output_paths import tool_output_index_paths_for_lookup
+from ..tooling.call_ref import ToolCallRef, tool_call_ref_from_record
 from .tool_output_externalizer import model_visible_tool_parameters
 
 _INTERNAL_LEDGER_TOOLS = {"task_progress"}
 
 
 # LLM: Child lifecycle wakes are another slice of the originating conversation turn. Rehydrate
-# only exact typed turn rows, preserve append order, and never scan child workspaces or prose.
-# 函数用途: 从一个任务自己的工具索引恢复跨后台工作片所需的调用历史。
+# only exact typed turn rows, preserve append order, and dedupe only full canonical call refs.
+# Unknown-origin legacy rows stay visible; scoped aliases cannot prove two invocations are equal.
+# 函数用途: 从任务索引恢复调用历史，跨 attempt 的同号调用和来源不明旧行都保留。
 def carried_tool_call_records(
     workspace: str | Path,
     scope: dict[str, Any],
 ) -> list[dict[str, Any]]:
     rows = _read_tool_output_index(Path(workspace))
     records: list[dict[str, Any]] = []
-    seen: set[str] = set()
+    seen: set[ToolCallRef] = set()
     for row in rows:
         if not _is_indexed_call_fact(row) or not _matches_scope(row, scope):
             continue
         record = _carried_tool_call_record(row)
-        identity = str(record.get("scoped_call_id") or record.get("call_id") or "").strip()
-        if not identity or identity in seen:
+        identity = tool_call_ref_from_record(record)
+        if identity is not None and identity in seen:
             continue
-        seen.add(identity)
+        if identity is not None:
+            seen.add(identity)
+        else:
+            record["compact_source_resolution"] = {
+                "status": "uncertain", "reasons": ["missing_tool_call_ref"],
+            }
         records.append(record)
     return records
 
@@ -161,8 +168,8 @@ def _is_indexed_call_fact(row: dict[str, Any]) -> bool:
 
 # LLM: Convert index metadata into the existing carried archive contract. Successful indexed
 # calls prove the handler ran; failed legacy rows remain fail-closed because the index does not
-# claim a handler boundary. Artifact paths are refs, never eagerly loaded into the prompt.
-# 函数用途: 把一条工具索引转换成工具循环可重建去重、参数和结果引用的轻量记录。
+# claim a handler boundary. Copy attempt/turn from the original row, never the recovery request.
+# 函数用途: 恢复索引行的原始调用身份、执行参数和结果引用；缺字段仍为空，不猜来源。
 def _carried_tool_call_record(row: dict[str, Any]) -> dict[str, Any]:
     path = str(row.get("path") or "").strip()
     digest = str(row.get("sha256") or "").strip()
@@ -172,12 +179,14 @@ def _carried_tool_call_record(row: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(handler_executed, bool):
         handler_executed = row.get("ok") is True
     record: dict[str, Any] = {
-        "id": str(row.get("call_id") or ""),
-        "call_id": str(row.get("call_id") or ""),
+        "id": row.get("call_id", ""),
+        "call_id": row.get("call_id", ""),
         "scoped_call_id": str(row.get("scoped_call_id") or ""),
         "request_id": str(row.get("request_id") or ""),
         "conversation_request_id": str(row.get("conversation_request_id") or ""),
-        "run_id": str(row.get("run_id") or ""),
+        "run_id": row.get("run_id", ""),
+        "attempt_id": row.get("attempt_id", ""),
+        "turn_id": row.get("turn_id", ""),
         "task_id": str(row.get("task_id") or ""),
         "tool": str(row.get("tool") or ""),
         "parameters": dict(row.get("parameters") or {})
