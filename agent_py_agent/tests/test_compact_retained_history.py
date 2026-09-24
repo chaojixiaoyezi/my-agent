@@ -170,3 +170,30 @@ def test_retained_media_reaches_wire_or_fails_capacity_without_dropping(tmp_path
             assert row.content in projected
         assert not recovery.committed, "纯候选投影不能取得摘要覆盖或修改原检查点"
     assert agent.conversation_store.threads.require(tid).compact_generation == 0
+
+
+@pytest.mark.parametrize("include_transcript", [False, True])
+def test_child_context_reads_transcript_only_when_rendered(tmp_path, include_transcript):
+    from collections.abc import Sequence
+
+    from agent_py_agent.agent.conversation.agent_thread import _render_agent_thread_context
+    from agent_py_agent.agent.conversation.models import MessageLogEntry
+
+    reads = []
+
+    class ObservedRows(Sequence):
+        def __len__(self):
+            return 1
+
+        def __getitem__(self, index):
+            if index != 0:
+                raise IndexError(index)
+            reads.append(index)
+            return MessageLogEntry(message_id="m1", thread_id="thread", role="user", content="完整历史原文")
+
+    view = ConversationCompactView("thread", 3, "已有摘要", ObservedRows(), {"verified": True}, {}, 1000, False)
+    rendered = _render_agent_thread_context(SimpleNamespace(), view, include_transcript=include_transcript)
+    assert "thread" in rendered and '"verified":true' in rendered
+    assert ("完整历史原文" in rendered) is include_transcript
+    assert ("已有摘要" in rendered) is include_transcript
+    assert bool(reads) is include_transcript

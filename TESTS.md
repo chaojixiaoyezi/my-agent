@@ -1,5 +1,7 @@
 # 测试与发布验收
 
+child不展示历史正文时的读取回归先复现1 failed/1 passed，修复后test_compact_retained_history、test_subagent_compact_recovery、test_gateway_child_compact_scope_application三文件31 passed（8.48秒）。三宿主seed仓外基线仅验证测量和完整性，不算内存目标通过；细节见容量审计的宿主生命周期基线。
+
 ## 第12.4项选中来源到摘要生命周期（2026-09-23，本地）
 
 解决选中canonical正文与完整摘要provider数组同时常驻的问题，复用原扫描、JSON、token估算、native/orphan规则及checkpoint/CAS。真实临时文件到load→摘要分段→提交的红绿测试：4,195,620字符旧峰值9,683,703 bytes，新峰值1,448,802；8,391,460字符新峰值1,532,904。完整JSON hash、95/189段连续覆盖和精确消息ID通过。该数来自专项独立进程，联合运行受分配器影响约1.19/1.53MB；只证明本Python路径，不等同RSS或三宿主峰值。

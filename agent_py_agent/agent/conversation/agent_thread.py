@@ -387,16 +387,15 @@ def _agent_message_dedupe_key(task: object, attempt_id: str, role: str) -> str:
     )
 
 
-# LLM: 摘要、证据和原文从显式view投影且彼此分离；预计候选不是提交证明，renderer只施加原展示预算。
-# 函数用途: 将子代理自己更早的历史整理成下一次模型可理解的上下文片段。
+# LLM: 摘要、证据与原文从同次view分离投影；未展示正文时不得读取来源，预计候选不授予提交权。
+# 函数用途: 生成子代理历史说明及核验信息；原生模式的正文另由history seed交付，不提前物化。
 def _render_agent_thread_context(
     agent: object,
     view: ConversationCompactView,
     *,
     include_transcript: bool = True,
 ) -> str:
-    rows = list(view.messages)
-    if not view.summary and not rows and not view.operation_evidence:
+    if not view.summary and not view.messages and not view.operation_evidence:
         return ""
     lines = [
         "# Agent Thread Context",
@@ -422,8 +421,8 @@ def _render_agent_thread_context(
                 ),
             ]
         )
-    bounded = _bounded_agent_history(agent, rows, view.history_token_budget)
-    if include_transcript and bounded:
+    bounded = _bounded_agent_history(agent, list(view.messages), view.history_token_budget) if include_transcript else ()
+    if bounded:
         lines.append("## Recent Agent History")
         for row in bounded:
             content = (

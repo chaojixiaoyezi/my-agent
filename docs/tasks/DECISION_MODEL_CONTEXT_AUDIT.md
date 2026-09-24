@@ -1455,6 +1455,22 @@ Sol high独立只读复核未发现必须修复的scope/base/legacy回归，确�
 主线owner随后明确授权本线仅在该SimpleNamespace补 `task_attributes={}` 与 `carried_active_turn_user_inputs=[]`，生产IR及业务断言保持。适配后整个IR测试文件 **29 passed（0.38秒）**，日志 `/tmp/decision_native_ir_fixture_20260923.log`；该数与原350有重叠，不累加为379。独立Sol high复核native两函数未发现必须修复的别名或调用者回归。全目录Ruff、doc sync、strict code-size（hard=0，基线不改）及diff通过；clean-package在登记新测试后通过。原四项后台fixture缺口及旧全仓失败仍开放，尚不称整枝严格gate通过，线上CI未作为证据。
 
 
+### 宿主历史种子生命周期基线（2026-09-23，第二片进行中）
+
+在464df65c1固定生产基线上，对真实临时JSONL→scoped loader→三宿主原seed准备做仓外测量；输入128行、4,195,620字符，三种seed的完整canonical JSON SHA256及行数均与来源一致。未运行SimpleAgent或真实HTTP；只是宿主seed准备边界，不是capture/select/完整发送峰值。脚本 `/tmp/decision_host_seed_baseline.py`，日志 `/tmp/decision_host_seed_baseline_20260923.log`，3项通过只表示测量及完整性成功，不表示内存目标通过。
+
+| 宿主 | 来源峰值bytes | seed驻留bytes | seed准备峰值bytes |
+| --- | ---: | ---: | ---: |
+| Gateway | 281614 | 8561838 | 8979675 |
+| child | 270351 | 8513368 | 8584530 |
+| background | 270319 | 8513864 | 8968172 |
+
+证据确认上一片地址视图未被宿主保持：history_projection、child/background seed及Gateway seed重新物化完整历史。下一片须同时核对这些准备、runtime原生历史、capture与恢复闭包；不能仅删除select局部变量就声称宿主释放。纯ToolLoopRequestInput继续只接已准备内存材料；范围/摘要/媒体与完整实际请求必须保持。
+
+本轮已先修一个独立确定的提前读取：child `_render_agent_thread_context(include_transcript=False)` 原来仍读取完整来源并算展示窗口。现只在确实展示正文时读取；原线程说明及程序核验保持，native正文仍交原seed。新增读计数回归先得到1 failed/1 passed，修复后相关三文件31 passed（8.48秒）；日志 `/tmp/decision_child_render_red_20260923.log` 与 `/tmp/decision_child_render_green_20260923.log`。这只消除未使用的展示读取，不计为seed或全宿主峰值收口。
+
+建议下一步：按调用者审计确定延后物化及旧请求释放的最小接口，先与共享runtime owner确认精确函数，再接三宿主并测完整准备/摘要/首发送；只读审查可并行，生产单owner，12.4仍开放。
+
 ### 选中正文生命周期方案（2026-09-23，首片本地验收）
 
 Astra max只读复核5e5122b04后确认：仅将source.messages改为Sequence不构成完整修复；分区、原生信封投影、摘要请求及宿主seed会立即重新物化，PreparedCompactRecovery的params/frozen/回调闭包也持有旧请求。实施分为两片，均不新增持久权威：
