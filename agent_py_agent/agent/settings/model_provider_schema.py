@@ -14,6 +14,9 @@ from ..backends.sampling import validate_top_p
 SCHEMA = "owner_model_profiles.v5"
 BACKENDS = {"openai_compatible", "anthropic_compatible", "openai_responses", "typesafe_decision"}
 CAPABILITIES = {"agentic", "embedding", "decision"}
+# 用途标签是开放的小写标识符（不是封闭枚举）；数量与长度只防止滥填撑大决策材料。
+_USAGE_TAG = re.compile(r"[a-z][a-z0-9_]{0,39}")
+_MAX_USAGE_TAGS = 16
 
 
 # LLM: 此类错误必须仅使用固定脱敏文案；HTTP/TUI 可直接公开。
@@ -139,7 +142,8 @@ def validate_provider(value: object) -> dict:
 
 
 # LLM: 模型引用不持有第二份 secret；decision 只走独立决策协议，不能进入生成适配器；同步用途隔离测试。
-# 函数用途: 检查模型协议、用途、容量和适用采样；型号允许透传，决策模型不接受无效的生成参数。
+#   目录读取也经本函数重校验，未登记的字段会被丢弃；可选用途标签在此登记，决策模型不接受。
+# 函数用途: 检查模型协议、用途、容量、适用采样和可选用途标签；型号允许透传，决策模型不接受无效的生成参数。
 def validate_model(value: object) -> dict:
     if not isinstance(value, dict) or not isinstance(value.get("model_backend"), str) or value["model_backend"] not in BACKENDS:
         raise ModelProfileError("请选择 OpenAI Chat、OpenAI Responses、Anthropic 或 TypeSafe 决策接口。")
@@ -156,9 +160,10 @@ def validate_model(value: object) -> dict:
         raise ModelProfileError("TypeSafe 决策接口必须配合 Decision 用途，不能用于聊天生成。")
     if capability == "decision" and any(value.get(key) not in (None, "") for key in ("temperature", "top_p", "model_queue_wait_seconds")):
         raise ModelProfileError("决策模型不使用温度、top_p 或生成排队预算；等待时间由决策设置控制。")
+    # 可选扁平列表字段紧挨用途放：用途标签在此；将来的 input_modalities 按同一格式并列放这里。
     result = {"provider_id": validate_provider_id(value.get("provider_id")), "model_name": name.strip(),
             "model_backend": value["model_backend"], "model_context_window_tokens": int(window),
-            "capability": capability, "enabled": value.get("enabled", True)}
+            "capability": capability, "enabled": value.get("enabled", True), **_usage_tags_field(value, capability)}
     temperature = value.get("temperature")
     if temperature not in (None, ""):
         try:
@@ -186,6 +191,34 @@ def validate_model(value: object) -> dict:
     return result
 
 
+# LLM: 只在填写了标签时返回字段，缺省不写键；决策模型不接受标签，与它不接受生成采样字段同一口径。
+# 函数用途: 为模型记录生成可选的用途标签字段，供 validate_model 合并。
+def _usage_tags_field(value: dict, capability: str) -> dict:
+    tags = validate_usage_tags(value.get("usage_tags"))
+    if tags and capability == "decision":
+        raise ModelProfileError("用途标签只用于对话/工具或向量模型，决策模型不填写。")
+    return {"usage_tags": tags} if tags else {}
+
+
+# LLM: 用途标签是用户显式填写的开放小写标识符（如 long_document、vision、low_cost），只作决策模型比较候选时的语义材料，
+#   不是能力、容量或授权证明，宿主不据此路由；不维护封闭枚举，未知标签照存。缺省或空返回空列表，调用方不写键。
+#   不进 resolved_model：它的结果会整体覆盖 AgentConfig，而运行时没有标签的消费者；决策材料从公开目录行读取。
+# 函数用途: 把列表或逗号分隔的文本规范成去重排序的标识符列表，格式不对明确拒绝。
+def validate_usage_tags(value: object) -> list[str]:
+    if value in (None, "", []):
+        return []
+    if isinstance(value, str):
+        items = [item for item in re.split(r"[,，\s]+", value) if item]
+    elif isinstance(value, list) and all(isinstance(item, str) for item in value):
+        items = [item.strip() for item in value if item.strip()]
+    else:
+        raise ModelProfileError("用途标签请填写逗号分隔的小写英文标识，例如 long_document, low_cost。")
+    tags = sorted(set(items))
+    if len(tags) > _MAX_USAGE_TAGS or any(not _USAGE_TAG.fullmatch(tag) for tag in tags):
+        raise ModelProfileError(f"用途标签最多 {_MAX_USAGE_TAGS} 个，每个以小写英文字母开头，只含小写字母、数字或下划线，长度不超过 40。")
+    return tags
+
+
 # LLM: 扁平输入立即变成 provider 引用；用途必须保留，不能在快捷新增中把 decision 降为 agentic。
 # 函数用途: 校验快捷新增的完整连接信息及用途；秘密仍只保存到服务商，非生成字段不传入 AgentConfig。
 def validate_model_profile(value: object) -> dict:
@@ -196,7 +229,7 @@ def validate_model_profile(value: object) -> dict:
         "custom_headers": value.get("model_custom_headers", {}), "session_header": value.get("model_session_header", "")})
     if not provider["api_key"]:
         raise ModelProfileError("模型名称、地址和密钥不能为空。")
-    row = {key: model[key] for key in ("model_name", "model_backend", "model_context_window_tokens", "temperature", "top_p", "model_queue_wait_seconds", "capability", "enabled") if key in model}
+    row = {key: model[key] for key in ("model_name", "model_backend", "model_context_window_tokens", "temperature", "top_p", "model_queue_wait_seconds", "capability", "enabled", "usage_tags") if key in model}
     row.update(api_base=provider["api_base"], api_key=provider["api_key"])
     if provider["custom_headers"]:
         row["model_custom_headers"] = provider["custom_headers"]

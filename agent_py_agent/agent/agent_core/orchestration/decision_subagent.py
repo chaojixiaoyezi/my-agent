@@ -88,6 +88,7 @@ def _child_fingerprint(child: SubagentModelInput) -> str:
 
 
 # LLM: 原目录负责授权；启用准备先非阻塞冻结原目录代次再解析配置，不探针。未知代次可建议但不能在首请求采用。
+#   用户填写了用途标签才带 usage_tags（语义参考，不是能力证明）；它进入候选版本摘要，改标签会使在途建议失效。
 # 函数用途: 从原目录取公开候选和持久版本；只有首次启用准备可迁移旧目录，复核绝不写配置。
 def _candidates(agent: object, *, deadline: float, candidate_profile_ids: tuple[str, ...] = (), initialize_generation: bool = False) -> dict:
     public = execute_model_profile_operation(agent, "list", {})
@@ -109,6 +110,7 @@ def _candidates(agent: object, *, deadline: float, candidate_profile_ids: tuple[
             "context_window_tokens": config["model_context_window_tokens"],
             "capability": "agentic",
             "provider_tool_support": "unknown_until_original_runner_probe",
+            **({"usage_tags": list(row["usage_tags"])} if row.get("usage_tags") else {}),
         }
     return result
 
@@ -178,7 +180,7 @@ def prepare_subagent_model_decision(agent: object, raw_params: dict, children: C
             fingerprint = _child_fingerprint(child)
             snapshots[key] = {"fingerprint": fingerprint, "candidates": list(allowed), "estimated_input_tokens": needed,
                               "candidate_request_limits": limits}
-            questions[key] = {"type": "choice", "instructions": {"question": "为子任务建议一个候选模型；这是待验证建议，容量和工具支持尚未验证，不确定时保留原模型。", "goal": child.prepared.goal},
+            questions[key] = {"type": "choice", "instructions": {"question": "为子任务建议一个候选模型；这是待验证建议，容量和工具支持尚未验证，不确定时保留原模型。部分候选带用户填写的用途标签 usage_tags，可用来判断与子任务的语义匹配，但不是能力或容量证明。", "goal": child.prepared.goal},
                 "criteria": {**{ref: {field: value for field, value in row.items() if field not in {"revision", "runtime_config_revision", "source_model_generation"}}
                                 for ref, row in allowed.items()}, **_RETAIN_CHOICES}}
         if not questions:

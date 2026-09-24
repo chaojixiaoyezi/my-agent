@@ -30,6 +30,7 @@ _RETAIN_CHOICES = {
 
 
 # LLM: 只引用原目录的当前可访问生成模型，字段白名单不含端点、凭据或价格；不探针、不迁移、不保存选择。
+#   用户填写了用途标签才带上 usage_tags，作为语义参考；它和窗口一样只是声明，不是能力或容量证明。
 # 函数用途: 准备本次观察的公开模型候选，窗口是配置声明，不代表完整输入能容纳。
 def _candidates(agent: object, deadline: float) -> dict:
     public = execute_model_profile_operation(agent, "list", {})
@@ -44,6 +45,7 @@ def _candidates(agent: object, deadline: float) -> dict:
             "declared_context_window_tokens": row["model_context_window_tokens"],
             "capacity_status": "unknown_until_full_request_projection",
             "tool_support": "unknown_until_original_probe",
+            **({"usage_tags": list(row["usage_tags"])} if row.get("usage_tags") else {}),
         }
     return result
 
@@ -64,6 +66,7 @@ def _observation_input(context: object, thread: object, captured: SelectedModelR
     questions = {"model": {"type": "choice", "instructions": (
         "根据当前任务对已授权目录提出一项模型建议。本次只观察，宿主保持原模型。"
         "候选只含配置声明，不能把模型名或窗口当成能力、完整容量或授权证明；资料不足可选择 need_data。"
+        "部分候选带用户填写的用途标签 usage_tags，可用来判断候选与本任务的语义匹配，但同样不是能力或容量证明。"
     ), "criteria": {**candidates, **_RETAIN_CHOICES}}}
     return state, questions
 

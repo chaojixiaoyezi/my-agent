@@ -2,6 +2,17 @@
 
 child不展示历史正文时的读取回归先复现1 failed/1 passed，修复后test_compact_retained_history、test_subagent_compact_recovery、test_gateway_child_compact_scope_application三文件31 passed（8.48秒）。三宿主seed仓外基线仅验证测量和完整性，不算内存目标通过；细节见容量审计的宿主生命周期基线。
 
+## 模型用途标签（2026-09-24，本地分支 `claude/decision-usage-tags`）
+
+- **新测试** `test_model_usage_tags.py` 12 项：
+  - 快捷新增的标签去重、排序（全角逗号也能分隔）、持久化并出现在公开模型列表；没填不写键。
+  - 大写、连字符、数字开头、超过 40 字、非字符串、字典、超过 16 个都拒绝，且不落盘；决策模型带标签被拒。
+  - 标签不进 `resolved_model`，选定带标签的模型后运行时配置正常、没有标签属性。
+  - 主会话与子代理的决策候选只在填写了时带 `usage_tags`。
+  - `/model` 编辑表单预填并原样回存标签，编辑其它字段不会丢。
+- **变异验证**：7 种各自使测试失败——校验结果丢标签、快捷新增白名单漏标签、决策模型可带标签、允许大写、主会话候选不带、子代理候选不带、表单不发送。改回后全部通过（变异子进程带 `PYTHONDONTWRITEBYTECODE=1`）。
+- **相关回归**：模型目录、服务商与采样、共享目录、决策全部、Gateway 选模观察与采用、子代理首请求选模、TUI 模型与决策菜单共 63 个文件 1399 passed。
+
 ## 工具调用审批前/批准后复核（2026-09-24，本地分支 `claude/tool-precheck`）
 
 - **改动**：`BaseTool.precheck_availability()` 默认 None（不复核），`MCPProxyTool` / `PluginProxyTool` 覆盖并给出 `MCP_CONNECTION_CLOSED` / `PLUGIN_ACTIVATION_UNAVAILABLE`；`ToolExecutor.execute` 在 ask 之后、返回 approval_required 之前复核一次，`_execute_authorized` 只对带 `approval_applied` 的裁决在 claim 前再复核一次；复核失败按 `TOOL_UNAVAILABLE` 拒绝、具体码进 `reported_error_code`、文案点明"审批前 / 批准后、执行前"；`ActionPolicy` 只在精确 binding 匹配时在 allow 证据里写 `approval_applied=true`；批准后拦下的结果不再贴"已批准"事实；两码登记进错误分类表；`mcp_managed_process.require` 先核对激活再看进程记录，停用导致的关闭报激活失效（→`TOOL_UNAVAILABLE`），`test_plugin_enable` 的旧期望 `TOOL_EXECUTION_FAILED` 同步改。
