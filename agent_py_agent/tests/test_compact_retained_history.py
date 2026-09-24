@@ -18,6 +18,10 @@ from agent_py_agent.agent.conversation.background_history_seed import (
 from agent_py_agent.agent.conversation.compact_guard import ConversationCompactError
 from agent_py_agent.agent.conversation.compact_projection import ConversationCompactView
 from agent_py_agent.agent.conversation.history_projection import conversation_history_rows
+from agent_py_agent.agent.conversation.history_seed import (
+    seed_provider_history_messages,
+    seed_text_messages,
+)
 from agent_py_agent.agent.conversation.native_history import (
     CANONICAL_NATIVE_MESSAGES_METADATA_KEY,
     canonical_native_messages_envelope,
@@ -69,15 +73,14 @@ def test_preselected_seed_keeps_all_rows_and_native_envelope(tmp_path, monkeypat
         projection = BackgroundHistoryProjection(thread.thread_id, TaskScopeDecision("", frozenset(), None, False), {}, 1)
         seed = project_background_history_seed(agent, projection, rows, scope_applied=True)
     else:
-        monkeypatch.setattr(request_context.request_history, "gateway_recent_artifacts", lambda *_: ())
-        history, canonical, _ = request_context._gateway_conversation_refs(
-            agent, thread.thread_id, "", [], history_rows=rows, history_token_budget=1,
-        )
+        source = request_context._gateway_history_source(rows, "", None)
         seed = request_prompt.gateway_conversation_history_seed(request_context.GatewayConversationContext(
-            thread_id=thread.thread_id, history=history, canonical_history_messages=canonical,
+            thread_id=thread.thread_id, history_source=source,
         ))
-    assert seed.messages == tuple((row.role, row.content) for row in rows)
-    encoded = json.dumps(seed.canonical_messages, ensure_ascii=False)
+    # 种子只带只读来源；完整内容在原 native/text 准备边界解析，不能丢行或媒体。
+    assert seed.source is not None and not seed.messages and not seed.canonical_messages
+    assert seed_text_messages(seed) == tuple((row.role, row.content) for row in rows)
+    encoded = json.dumps(seed_provider_history_messages(seed), ensure_ascii=False)
     assert "EARLIEST-MEDIA-TURN" in encoded and "RETAINED-TOOL-RESULT" in encoded
     assert PNG in encoded and "retained-call" in encoded
     for row in rows[1:]:
@@ -162,7 +165,7 @@ def test_retained_media_reaches_wire_or_fails_capacity_without_dropping(tmp_path
         agent.config.conversation_history_max_chars = 1000
         view = ConversationCompactView(tid, 1, "候选只总结更早的已读文字", rows, {}, {}, 1, True)
         material = recovery.project_candidate(recovery.render_params, captured[0], view)
-        assert material.params.conversation_history_seed.messages == tuple((row.role, row.content) for row in rows)
+        assert seed_text_messages(material.params.conversation_history_seed) == tuple((row.role, row.content) for row in rows)
         assert material.projection.status == "ready"
         projected = json.dumps(material.projection.messages, ensure_ascii=False)
         assert "EARLIEST-MEDIA-TURN" in projected and PNG in projected

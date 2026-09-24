@@ -14,6 +14,10 @@ from agent_py_agent.agent.conversation.compact_checkpoint import (
     write_compact_checkpoint,
 )
 from agent_py_agent.agent.conversation.compact_scope import THREAD_COMPACT_SCOPE, CompactScope
+from agent_py_agent.agent.conversation.history_seed import (
+    history_source_text_messages,
+    seed_text_messages,
+)
 from agent_py_agent.agent.conversation.models import ConversationCompactCommit
 from agent_py_agent.agent.gateway_parts.request_binding import gateway_message_work_scope
 from agent_py_agent.agent.gateway_parts.request_context import (
@@ -24,9 +28,15 @@ from agent_py_agent.agent.gateway_parts.request_prompt import gateway_conversati
 from agent_py_agent.tests.test_gateway_conversation_compact import _agent, _request
 from agent_py_agent.tests.test_subagent_compact_recovery import _child
 
-
 # LLM: 测试账本经真实 writer 与线程 CAS 提交，允许交错 scope，但不替换 resolver 或宿主读取。
 # 函数用途: 写入一条指定摘要范围的检查点，验证准备边界不会误用提交链最新局部摘要。
+
+# LLM: 测试只经生产文本规则从上下文只读来源解析历史，替代已移除的具体副本字段。
+# 函数用途: 取得 Gateway 上下文的 (role, content) 历史供断言。
+def _context_history(conversation):
+    source = conversation.history_source
+    return () if source is None else history_source_text_messages(source)
+
 def _commit_row(agent, thread_id, *, row, summary, scope, publish):
     store = agent.conversation_store
     thread = store.threads.require(thread_id)
@@ -88,10 +98,10 @@ def test_gateway_thread_seed_keeps_interleaved_local_row_after_global_cursor(tmp
     assert loaded.compact_source is not None
     assert loaded.compact_source.compact_context == loaded.compact_context
     assert [row.message_id for row in loaded.compact_source.messages] == [local.message_id]
-    assert [text for _role, text in loaded.history] == ["局部任务原文"]
+    assert [text for _role, text in _context_history(loaded)] == ["局部任务原文"]
     seed = gateway_conversation_history_seed(loaded)
     assert seed is not None and seed.compact_summary == "全线程摘要二"
-    assert seed.messages == (("assistant", "局部任务原文"),)
+    assert seed_text_messages(seed) == (("assistant", "局部任务原文"),)
 
 
 def test_child_thread_seed_ignores_latest_local_checkpoint(tmp_path):
@@ -152,4 +162,4 @@ def test_gateway_audit_prepare_does_not_inherit_thread_or_sibling_summary(tmp_pa
     assert ordinary.message_id in source_ids and sibling.message_id not in source_ids
     seed = gateway_conversation_history_seed(loaded, work_scope=gateway_message_work_scope(audit_request))
     assert seed is not None and seed.compact_summary == ""
-    assert "兄弟Audit隐私" not in str(seed.messages)
+    assert "兄弟Audit隐私" not in str(seed_text_messages(seed))

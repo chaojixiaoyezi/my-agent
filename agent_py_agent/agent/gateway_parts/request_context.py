@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -25,9 +26,7 @@ from ..conversation.compact_projection import ConversationCompactSource
 from ..conversation.compact_provider_surface import ConversationCompactModelSurface
 from ..conversation.compact_scope import THREAD_COMPACT_SCOPE, CompactScope
 from ..conversation.compact_summary_view import AppliedCompactContext, resolve_compact_summary_view
-from ..conversation.native_history import (
-    provider_history_messages_from_rows,
-)
+from ..conversation.history_seed import ConversationHistorySource, freeze_history_source
 from ..runtime_errors import runtime_error_report
 from . import request_binding, request_history
 from .stream_events import CONTEXT_USAGE_SCHEMA
@@ -84,8 +83,10 @@ class GatewayConversationContext:
     compact_generation: int = 0
     verbose_level: str = "off"
     scope: ConversationScope | None = None
-    history: tuple[tuple[str, str], ...] = ()
-    canonical_history_messages: tuple[dict[str, object], ...] = ()
+    # LLM: 已裁决的完整历史只以只读来源保存（同次冻结地址加原单行规则），只在原 native/text 准备边界解析；
+    # Gateway 上下文不再同时持有具体副本，避免准备阶段两份完整正文。
+    # 字段用途: 供会话种子和转录注入按原规则重放本轮历史。
+    history_source: ConversationHistorySource | None = field(default=None, repr=False)
     recent_artifacts: tuple[dict[str, object], ...] = ()
     workspace_task: GatewayWorkspaceSelection | None = None
     # LLM: These exact owner/thread completed-task refs are model-visible candidates only;
@@ -212,7 +213,7 @@ def gateway_conversation_context(
     request_history.repair_gateway_conversation_messages(store, thread.thread_id, load_errors)
     scope = conversation_scope(agent, thread, spec)
     request_history.ensure_gateway_conversation_index(agent, store, thread.thread_id)
-    thread, history_rows, history_token_budget, recent_operation_evidence, compact_source, compact_context = (
+    thread, history_rows, _history_token_budget, recent_operation_evidence, compact_source, compact_context = (
         _load_gateway_compact_context(
             inputs,
             store,
@@ -220,15 +221,10 @@ def gateway_conversation_context(
             force=force_compact,
         )
     )
-    history, canonical_history_messages, recent_artifacts = _gateway_conversation_refs(
-        agent,
-        thread.thread_id,
-        inputs.request_id,
-        load_errors,
-        history_rows=history_rows,
-        history_token_budget=history_token_budget,
-        work_scope=request_binding.gateway_message_work_scope(inputs.request),
+    history_source = _gateway_history_source(
+        history_rows, inputs.request_id, request_binding.gateway_message_work_scope(inputs.request),
     )
+    recent_artifacts = request_history.gateway_recent_artifacts(agent, thread.thread_id, inputs.request_id, load_errors)
     thread_goal = _gateway_thread_goal(store, thread.thread_id, load_errors)
     named_work = _gateway_named_work(store, thread.thread_id, load_errors)
     workspace_task = _gateway_workspace_task(
@@ -271,8 +267,7 @@ def gateway_conversation_context(
         compact_generation=thread.compact_generation,
         verbose_level=thread.verbose_level,
         scope=scope,
-        history=history,
-        canonical_history_messages=canonical_history_messages,
+        history_source=history_source,
         recent_artifacts=recent_artifacts,
         workspace_task=workspace_task,
         recent_task_workspaces=recent_task_workspaces,
@@ -818,33 +813,15 @@ def _gateway_recent_task_workspaces(
     return tuple(rows)
 
 
-# LLM: Compact显式来源完整进入正文及原生回放，禁止先套展示窗口少算容量；非显式读取保留原窗口，产物引用独立。
-# 函数用途: 显式来源含只读序列时也完整投影，不能按容器类型误走展示窗口；宿主物化流程不变。
-def _gateway_conversation_refs(
-    agent: SimpleAgent,
-    thread_id: str,
+# LLM: 完整历史只冻结选择结果与原单行投影规则，不物化正文；选择沿 history_projection 唯一规则，范围只裁决这一次。
+# 函数用途: 把本轮已裁决的历史行变成只读来源，交给会话种子在发送边界重放。
+def _gateway_history_source(
+    history_rows: object,
     request_id: str,
-    load_errors: list[dict],
-    *,
-    history_rows: object = None,
-    history_token_budget: int = 0,
-    work_scope: dict[str, object] | None = None,
-) -> tuple[
-    tuple[tuple[str, str], ...],
-    tuple[dict[str, object], ...],
-    tuple[dict[str, object], ...],
-]:
-    selected_rows = history_projection.conversation_history_rows(
-        agent,
-        thread_id,
-        request_id,
-        load_errors,
-        rows=history_rows,
-        preserve_complete=history_rows is not None,
-        token_budget=history_token_budget,
-        work_scope=work_scope,
+    work_scope: dict[str, object] | None,
+) -> ConversationHistorySource:
+    return freeze_history_source(
+        history_rows,
+        project_row=history_projection.project_history_row,
+        select=partial(history_projection.history_row_selected, current_request_id=request_id, work_scope=work_scope),
     )
-    history = tuple((row.role, row.content) for row in selected_rows)
-    canonical_history = provider_history_messages_from_rows(selected_rows)
-    artifacts = request_history.gateway_recent_artifacts(agent, thread_id, request_id, load_errors)
-    return history, canonical_history, artifacts

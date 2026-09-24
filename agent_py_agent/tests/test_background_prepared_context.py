@@ -8,6 +8,10 @@ import pytest
 
 from agent_py_agent.agent.conversation import background_context as context_module
 from agent_py_agent.agent.conversation import background_history_seed as history_module
+from agent_py_agent.agent.conversation.history_seed import (
+    seed_provider_history_messages,
+    seed_text_messages,
+)
 from agent_py_agent.agent.conversation.store import ConversationStore
 
 
@@ -149,8 +153,13 @@ def test_history_projection_reuses_frozen_detached_anchor_and_scope(
     monkeypatch.setattr(store.messages, "recent_report", forbidden)
     monkeypatch.setattr(store.messages, "after_compact_report", forbidden)
     replayed = history_module.project_background_history_seed(agent, result.projection, rows)
-    assert replayed == result.seed
-    assert [content for _, content in replayed.messages] == ["创建前聊天", "A 的工作"]
+    # 准备时的种子是只读来源，重投影是具体种子；两者按原规则解析后必须逐项相等。
+    assert (replayed.compact_summary, replayed.compact_generation) == (
+        result.seed.compact_summary, result.seed.compact_generation,
+    )
+    assert seed_text_messages(replayed) == seed_text_messages(result.seed)
+    assert seed_provider_history_messages(replayed) == seed_provider_history_messages(result.seed)
+    assert [content for _, content in seed_text_messages(replayed)] == ["创建前聊天", "A 的工作"]
 
 
 def test_detached_history_rejects_summary_created_after_task(tmp_path):

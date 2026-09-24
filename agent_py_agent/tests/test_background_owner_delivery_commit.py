@@ -27,6 +27,10 @@ from agent_py_agent.agent.conversation import (
 from agent_py_agent.agent.conversation import background_delivery as delivery_module
 from agent_py_agent.agent.conversation import background_history_seed as history_module
 from agent_py_agent.agent.conversation.channels import DeliveryContext, ReplyEnvelope
+from agent_py_agent.agent.conversation.history_seed import (
+    seed_provider_history_messages,
+    seed_text_messages,
+)
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.delivery import DeliveryService, build_default_channel_registry
 from agent_py_agent.agent.settings import AgentConfig
@@ -801,7 +805,7 @@ def test_background_history_seed_distinguishes_empty_from_unreadable(tmp_path, m
     # ① 正常空历史：合法空，不报错。
     empty = history_module.background_conversation_history_seed(agent, store, thread, request)
     assert empty.status == "ready"
-    assert empty.seed is not None and empty.seed.messages == ()
+    assert empty.seed is not None and seed_text_messages(empty.seed) == ()
 
     # ② 真实读取失败（OSError 注入）：unreadable + load_errors 保留。
     def boom(_thread, **_kwargs):
@@ -874,7 +878,7 @@ def test_background_history_seed_keeps_detached_named_task_scope(tmp_path) -> No
     assert result.status == "ready", result.detail
     assert result.seed is not None
     rendered = json.dumps(
-        {"messages": list(result.seed.messages), "canonical": list(result.seed.canonical_messages)},
+        {"messages": list(seed_text_messages(result.seed)), "canonical": list(seed_provider_history_messages(result.seed))},
         ensure_ascii=False,
     )
     assert "FUTURE_UNRELATED_TASK_B" not in rendered, "detached 工作不得吞入后续别任务的消息"
@@ -910,10 +914,10 @@ def test_background_history_seed_keeps_full_uncompacted_history(tmp_path, row_co
     )
 
     assert result.status == "ready", result.detail
-    rendered = json.dumps(list(result.seed.messages), ensure_ascii=False)
+    rendered = json.dumps(list(seed_text_messages(result.seed)), ensure_ascii=False)
     assert "ordinary-history-0" in rendered, "最早的历史不得被展示索引截掉"
     assert f"ordinary-history-{row_count - 1}" in rendered
-    assert len(result.seed.messages) == row_count
+    assert len(seed_text_messages(result.seed)) == row_count
 
 
 # LLM: display 行是展示投影，不属于模型历史；穿插大量 display 行不能影响权威历史条数。
@@ -952,7 +956,7 @@ def test_background_history_seed_ignores_display_rows_when_scoping(tmp_path) -> 
     )
 
     assert result.status == "ready", result.detail
-    rendered = json.dumps(list(result.seed.messages), ensure_ascii=False)
+    rendered = json.dumps(list(seed_text_messages(result.seed)), ensure_ascii=False)
     assert "history-0" in rendered and "history-39" in rendered
     assert "display_checkpoint" not in rendered
 

@@ -40,6 +40,7 @@ from agent_py_agent.agent.conversation.compact_checkpoint import (
     committed_compact_checkpoint_chain,
 )
 from agent_py_agent.agent.conversation.compact_tool_identity import compact_tool_ref
+from agent_py_agent.agent.conversation.history_seed import seed_text_messages
 from agent_py_agent.agent.conversation.runtime import (
     BackgroundRunRequest,
     _background_task_attributes,
@@ -182,7 +183,7 @@ def test_detached_history_survives_later_global_compact_without_sibling_summary(
 
     assert before.status == after.status == "ready"
     assert after.compact_context.scope.kind == "task"
-    assert before.seed.messages == after.seed.messages == (
+    assert seed_text_messages(before.seed) == seed_text_messages(after.seed) == (
         ("user", "PRE_CREATION_EVIDENCE"), ("user", "TASK_A_LATER_EVIDENCE"),
     )
     assert after.seed.compact_summary == after.compact_context.view.summary == ""
@@ -218,7 +219,7 @@ def test_detached_transcript_source_commits_locally_and_preserves_global_project
     refreshed = refresh_background_history(case.agent, case.store, result.thread, history)
     assert refreshed.compact_context.scope == history.compact_context.scope
     assert refreshed.compact_context.view.checkpoint_id == result.thread.compact_checkpoint_id
-    assert refreshed.seed.messages == ()
+    assert seed_text_messages(refreshed.seed) == ()
     assert refreshed.compact_source.messages == ()
     assert "UNRELATED_TASK_B_SECRET" not in refreshed.seed.compact_summary
     _, payload = _native_request(case, refreshed, request, [])

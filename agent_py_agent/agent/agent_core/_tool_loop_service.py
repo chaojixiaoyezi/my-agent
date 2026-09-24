@@ -1316,8 +1316,8 @@ def _runtime_injections_with_delivery_contract(params: ToolLoopExecuteParams, *,
 
 # LLM: Text protocol renders the same already-bounded seed once without reloading the transcript,
 # but selects the explicit applied summary when present; role labels and prose never become
-# lifecycle, routing, completion or coverage authority.
-# 函数用途: 给文本模型补回本次真正适用的摘要和原有历史消息，缺少视图时沿原线程路径。
+# lifecycle, routing, completion or coverage authority. A read-only seed source resolves here.
+# 函数用途: 给文本模型补回本次真正适用的摘要和原有历史消息，缺少视图时沿原线程路径；只读来源在此解析。
 def _text_conversation_history_section(seed: object, *, compact_context: object = None) -> str:
     if seed is None:
         return ""
@@ -1333,7 +1333,10 @@ def _text_conversation_history_section(seed: object, *, compact_context: object 
         compact_context.view.generation
         if compact_context is not None else getattr(seed, "compact_generation", 0) or 0
     ))
-    messages = tuple(getattr(seed, "messages", ()) or ())
+    from ..conversation.history_seed import seed_text_messages
+
+    # 只读来源在文本准备边界解析成与具体种子相同的 (role, content) 序列。
+    messages = seed_text_messages(seed)
     if not summary and not messages:
         return ""
     lines = [

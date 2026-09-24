@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
+from functools import partial
 from typing import Any
 
 from ..runtime_errors import runtime_error_report
@@ -22,6 +23,7 @@ from .background_context import (
 from .background_tool_policy import BackgroundToolPolicyRequest
 from .compact_projection import ConversationCompactSource
 from .compact_summary_view import AppliedCompactContext, compact_covered_message_ids
+from .history_seed import freeze_history_source
 from .models import ConversationHistorySeed, ConversationThread, MessageLogEntry
 from .store import ConversationStore
 
@@ -123,11 +125,26 @@ class BackgroundHistoryProjection:
 
 
 # LLM: 显式rows按同次范围/覆盖裁决后必须完整投影给容量门；scope_applied只跳过重复范围裁决，不得再按展示窗口裁剪。
+# scope_applied 时历史以只读来源冻结，发送边界才物化；未预选入口保留原范围算法与具体种子。
 # 函数用途: 从已读来源生成完整后台历史种子，沿原范围与provider投影，超容量交原Compact处理。
 def project_background_history_seed(agent, prepared: BackgroundHistoryProjection, rows, *, scope_applied: bool = False) -> ConversationHistorySeed:
-    from .history_projection import conversation_history_rows
+    from .history_projection import (
+        conversation_history_rows,
+        history_row_selected,
+        project_history_row,
+    )
     from .native_history import provider_history_messages_from_rows
 
+    if scope_applied:
+        # 范围与覆盖已由同次来源裁决：只冻结原单行选择与投影规则，发送边界再物化，不持有具体副本。
+        return ConversationHistorySeed(
+            compact_summary=str(prepared.thread.get("summary") or ""),
+            compact_generation=max(0, int(prepared.thread.get("compact_generation", 0) or 0)),
+            source=freeze_history_source(
+                rows, project_row=project_history_row,
+                select=partial(history_row_selected, current_request_id="", work_scope=None),
+            ),
+        )
     canonical = list(rows)
     covered = (compact_covered_message_ids(prepared.compact_context.view, canonical)
                if not scope_applied and prepared.compact_context is not None else frozenset())

@@ -14,9 +14,7 @@ from .agent_core.compact_request_recovery import (
     replace_recovery_history,
 )
 from .agent_core.tool_request_projection import project_tool_loop_request
-from .conversation import history_projection
 from .conversation.compact_guard import ConversationCompactError
-from .conversation.native_history import provider_history_messages_from_rows
 from .gateway_parts import request_binding, request_context, request_prompt
 
 
@@ -44,15 +42,13 @@ def prepare_gateway_compact_recovery(context, conversation, *, force=True):
 
 
 # LLM: 候选保留行必须完整投影给容量门，不套展示窗口；只改已有注入位置和同scope视图，CAS前不发布。
+# 候选历史与普通准备共用同一只读来源规则，只在发送边界物化。
 # 函数用途: 生成候选的完整下一请求和对应参数，所有更改都在副本，成功 CAS 前不安装。
 def _project_recovery_candidate(context, conversation, params, frozen, view):
     if not view.is_candidate:
         return CompactRecoveryMaterial(conversation, params, frozen, project_tool_loop_request(frozen))
     work_scope = request_binding.gateway_message_work_scope(context.request)
-    rows = history_projection.conversation_history_rows(
-        context.agent, view.thread_id, context.request_id, [], rows=view.messages,
-        token_budget=view.history_token_budget, work_scope=work_scope, preserve_complete=True,
-    )
+    history_source = request_context._gateway_history_source(view.messages, context.request_id, work_scope)
     root = str(getattr(getattr(context.agent, "home_paths", None), "owner_compact_dir", "") or "")
     if not root:
         raise ConversationCompactError("缺少原 Compact 证据地址", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
@@ -65,9 +61,7 @@ def _project_recovery_candidate(context, conversation, params, frozen, view):
             str(Path(root) / "conversations" / f"{view.thread_id}.jsonl")
             if candidate_context is None or candidate_context.scope.kind == "thread" else ""
         ),
-        history=tuple((row.role, row.content) for row in rows),
-        canonical_history_messages=provider_history_messages_from_rows(rows),
-        compact_context=candidate_context, compact_source=None,
+        history_source=history_source, compact_context=candidate_context, compact_source=None,
     )
     seed = request_prompt.gateway_conversation_history_seed(candidate, work_scope=work_scope)
     candidate_params, prepared = replace_recovery_history(

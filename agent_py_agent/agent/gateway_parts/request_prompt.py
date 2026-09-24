@@ -48,8 +48,9 @@ def gateway_injections(request: dict, conversation: request_context.GatewayConve
 
 
 # LLM: Native seed uses the frozen applied view; Audit prepare may use only its exact turn summary,
-# never the thread summary. Native runtime must not reload raw transcript or parse rendered prose.
-# 函数用途: 把本轮已经裁定好的摘要和历史消息封装成模型运行时的只读会话种子。
+# never the thread summary. History travels as the context's read-only source and is resolved only at
+# the native/text preparation boundary; native runtime must not reload raw transcript or parse prose.
+# 函数用途: 把本轮已经裁定好的摘要和历史来源封装成模型运行时的只读会话种子。
 def gateway_conversation_history_seed(
     conversation: request_context.GatewayConversationContext,
     *,
@@ -68,16 +69,7 @@ def gateway_conversation_history_seed(
         ),
         compact_generation=(conversation.compact_context.view.generation if conversation.compact_context is not None
                             else max(0, int(conversation.compact_generation or 0))),
-        messages=tuple(
-            (str(role or ""), str(content or ""))
-            for role, content in conversation.history
-            if str(role or "").strip().lower() in {"user", "assistant"} and str(content or "")
-        ),
-        canonical_messages=tuple(
-            dict(message)
-            for message in conversation.canonical_history_messages
-            if isinstance(message, dict)
-        ),
+        source=conversation.history_source,
     )
 
 
@@ -205,7 +197,11 @@ def _conversation_prompt_section(
         conversation,
         scoped_audit_prepare=scoped_audit_prepare and not scoped_compact,
     )
-    if include_transcript and conversation.history:
+    transcript = (
+        tuple((row.role, row.content) for row in conversation.history_source.projected_rows())
+        if include_transcript and conversation.history_source is not None else ()
+    )
+    if transcript:
         lines.extend(
             [
                 "- 以下是同一会话中已经结束的历史对话，仅用于理解指代和偏好。",
@@ -213,7 +209,7 @@ def _conversation_prompt_section(
                 "## Recent Conversation History",
             ]
         )
-        for role, content in conversation.history:
+        for role, content in transcript:
             lines.append(f"- {role}: {json.dumps(content, ensure_ascii=False)}")
     if not scoped_audit_prepare:
         _append_subagent_completions_prompt(lines, conversation.subagent_completions)

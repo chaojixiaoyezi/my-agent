@@ -15,6 +15,7 @@ from agent_py_agent.agent.agent_core.model.call_runtime import model_call_summar
 from agent_py_agent.agent.backends import gateway_helpers
 from agent_py_agent.agent.backends.decision_protocol import DecisionAnswer, DecisionResponse
 from agent_py_agent.agent.conversation import decision_policy, decision_service
+from agent_py_agent.agent.conversation.history_seed import history_source_provider_messages
 from agent_py_agent.agent.gateway_parts import (
     request_binding,
     request_context,
@@ -311,7 +312,7 @@ def test_off_matches_original_gateway_runner_input_bytes_and_io(tmp_path, monkey
         ))
         observed.append(json.dumps({"prompt": prompt, "inject": params.inject, "prompt_files": params.prompt_files,
             "system_prompt_override": params.system_prompt_override, "resume_context": params.resume_context,
-            "history": conversation.canonical_history_messages, "summary": conversation.compact_summary,
+            "history": ([] if conversation.history_source is None else list(history_source_provider_messages(conversation.history_source))), "summary": conversation.compact_summary,
             "model_name": context.agent.config.model_name, "backend": context.agent.config.model_backend},
             ensure_ascii=False, sort_keys=True).encode())
         return "ok"

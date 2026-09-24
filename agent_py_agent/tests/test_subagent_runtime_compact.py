@@ -26,6 +26,7 @@ from agent_py_agent.agent.conversation.authority import (
     CONVERSATION_EXECUTION_CWD_ATTR,
     CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR,
 )
+from agent_py_agent.agent.conversation.history_seed import seed_text_messages
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.prompting_parts.cache_layout import prompt_cache_layout
 from agent_py_agent.agent.settings import AgentConfig
@@ -542,7 +543,7 @@ def test_child_transcript_thread_does_not_rebind_parent_conversation_task(
 
     assert followup.compact_generation == 0
     assert followup.history_seed is not None
-    history = json.dumps(followup.history_seed.messages, ensure_ascii=False)
+    history = json.dumps(seed_text_messages(followup.history_seed), ensure_ascii=False)
     assert "conversation-terminal-tool-fold" in history
     assert "我先写入子代理负责的文件。" in history
     assert "write_file" in history

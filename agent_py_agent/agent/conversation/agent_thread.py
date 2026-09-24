@@ -15,11 +15,11 @@ from .compact_guard import CompactInterruptCheck, raise_if_compact_interrupted
 from .compact_projection import ConversationCompactSource, ConversationCompactView
 from .compact_scope import THREAD_COMPACT_SCOPE
 from .compact_summary_view import AppliedCompactContext, resolve_compact_summary_view
+from .history_seed import freeze_history_source
 from .models import ConversationHistorySeed, ConversationThread, MessageLogEntry
 from .native_history import (
     CANONICAL_NATIVE_MESSAGES_METADATA_KEY,
     canonical_native_messages_envelope,
-    provider_history_messages_from_rows,
 )
 from .tool_context_window import (
     TERMINAL_TOOL_FOLD_METADATA_KEY,
@@ -440,34 +440,16 @@ def _render_agent_thread_context(
 
 
 # LLM: 普通Compact来源与候选完整保留于seed，不能再按展示字符窗少算容量；终态工具折叠仍沿原规则，不重读Store。
+# 历史以只读来源冻结（地址视图或原内存行加子代理单行投影），只在发送边界物化，准备阶段不持有具体副本。
 # 函数用途: 把子代理已经结束的历史轮次整理成下一次运行可复用的强类型会话种子。
 def _agent_thread_history_seed(
     agent: object,
     view: ConversationCompactView,
 ) -> ConversationHistorySeed:
-    rows = _bounded_agent_history(
-        agent,
-        list(view.messages),
-        view.history_token_budget,
-        preserve_complete=True,
-    )
-    messages: list[tuple[str, str]] = []
-    for row in rows:
-        role = str(row.role or "").strip().lower()
-        if role not in {"user", "assistant"}:
-            continue
-        content = (
-            conversation_message_with_terminal_tool_fold(row.content, row.metadata)
-            if role == "assistant"
-            else row.content
-        )
-        if content:
-            messages.append((role, str(content)))
     return ConversationHistorySeed(
         compact_summary=str(view.summary or ""),
         compact_generation=max(0, int(view.compact_generation or 0)),
-        messages=tuple(messages),
-        canonical_messages=provider_history_messages_from_rows(rows),
+        source=freeze_history_source(view.messages, project_row=project_agent_history_row),
     )
 
 
@@ -489,35 +471,38 @@ def _bounded_agent_history(
     selected: list[MessageLogEntry] = []
     used = 0
     for row in reversed(rows):
-        content = (
-            conversation_message_with_terminal_tool_fold(
-                row.content,
-                row.metadata,
-            )
-            if row.role == "assistant"
-            else str(row.content or "")
-        )
-        if not preserve_complete and selected and used + len(content) > total_limit:
+        projected = project_agent_history_row(row)
+        if not preserve_complete and selected and used + len(projected.content) > total_limit:
             break
-        selected.append(
-            MessageLogEntry(
-                message_id=row.message_id,
-                thread_id=row.thread_id,
-                role=row.role,
-                content=content,
-                channel=row.channel,
-                channel_message_id=row.channel_message_id,
-                created_at=row.created_at,
-                metadata={
-                    key: value
-                    for key, value in row.metadata.items()
-                    if key != TERMINAL_TOOL_FOLD_METADATA_KEY
-                },
-            )
-        )
-        used += len(content)
+        selected.append(projected)
+        used += len(projected.content)
     selected.reverse()
     return tuple(selected)
+
+
+# LLM: 子代理历史唯一的单行投影：assistant 追加终态工具折叠，metadata 去掉折叠键，其余字段原样；
+# 具体投影与只读来源种子重放共用它，不读 Store、不按正文判断范围。
+# 函数用途: 把一条子代理线程原始记录变成模型历史行。
+def project_agent_history_row(row: MessageLogEntry) -> MessageLogEntry:
+    content = (
+        conversation_message_with_terminal_tool_fold(row.content, row.metadata)
+        if row.role == "assistant"
+        else str(row.content or "")
+    )
+    return MessageLogEntry(
+        message_id=row.message_id,
+        thread_id=row.thread_id,
+        role=row.role,
+        content=content,
+        channel=row.channel,
+        channel_message_id=row.channel_message_id,
+        created_at=row.created_at,
+        metadata={
+            key: value
+            for key, value in row.metadata.items()
+            if key != TERMINAL_TOOL_FOLD_METADATA_KEY
+        },
+    )
 __all__ = [
     "AgentThreadTurnContext",
     "append_subagent_thread_result",

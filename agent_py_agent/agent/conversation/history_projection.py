@@ -64,6 +64,40 @@ def _history_row_visible_in_work_scope(
     return bool(current_name and row_name and row_name == current_name)
 
 
+# LLM: 唯一的单行选择规则：只看结构化 role、请求身份、Audit 投递标记与工作范围，不读正文判断；
+# Gateway/后台的具体投影与只读来源种子必须共用它，不能另抄一套选择算法。
+# 函数用途: 判断一条原始会话记录是否进入本轮模型历史。
+def history_row_selected(row: object, *, current_request_id: str, work_scope: dict[str, object] | None) -> bool:
+    role = str(getattr(row, "role", "") or "").strip().lower()
+    metadata = getattr(row, "metadata", None)
+    metadata = metadata if isinstance(metadata, dict) else {}
+    return not (
+        role not in {"user", "assistant"}
+        or metadata.get("gateway_request_id") == current_request_id
+        or is_audit_background_transcript_entry(row)
+        or not _history_row_visible_in_work_scope(metadata, work_scope)
+    )
+
+
+# LLM: 唯一的单行正文投影：assistant 先做用户回复投影再追加终态工具折叠，metadata 完整复制给原生回放；
+# 调用方须先用 history_row_selected 过滤，本函数不再判断范围。
+# 函数用途: 把一条已选中的原始记录变成模型历史行，供具体投影和来源种子重放共用。
+def project_history_row(row: object) -> ConversationHistoryRow:
+    role = str(getattr(row, "role", "") or "").strip().lower()
+    metadata = getattr(row, "metadata", None)
+    metadata = metadata if isinstance(metadata, dict) else {}
+    content = str(getattr(row, "content", "") or "")
+    if role == "assistant":
+        content = project_user_reply(content).content
+        content = conversation_message_with_terminal_tool_fold(content, metadata)
+    return ConversationHistoryRow(
+        message_id=str(getattr(row, "message_id", "") or ""),
+        role=role,
+        content=content,
+        metadata=dict(metadata),
+    )
+
+
 # LLM: 前后台共用同一行选择；preserve_complete仅用于已裁决Compact来源，必须完整进入容量门，普通读取保留展示窗口。
 # 函数用途: 接受显式只读Sequence并保持原选择顺序；已裁决来源不误回Store或再次窗口化，宿主物化仍沿原入口。
 def conversation_history_rows(
@@ -102,30 +136,11 @@ def conversation_history_rows(
             load_errors.append(runtime_error_report(exc, context="gateway.conversation.messages"))
             return ()
         load_errors.extend(error for error in errors if isinstance(error, dict))
-    candidates: list[ConversationHistoryRow] = []
-    for row in message_rows:
-        role = str(getattr(row, "role", "") or "").strip().lower()
-        metadata = getattr(row, "metadata", None)
-        metadata = metadata if isinstance(metadata, dict) else {}
-        if (
-            role not in {"user", "assistant"}
-            or metadata.get("gateway_request_id") == current_request_id
-            or is_audit_background_transcript_entry(row)
-            or not _history_row_visible_in_work_scope(metadata, work_scope)
-        ):
-            continue
-        content = str(getattr(row, "content", "") or "")
-        if role == "assistant":
-            content = project_user_reply(content).content
-            content = conversation_message_with_terminal_tool_fold(content, metadata)
-        candidates.append(
-            ConversationHistoryRow(
-                message_id=str(getattr(row, "message_id", "") or ""),
-                role=role,
-                content=content,
-                metadata=dict(metadata),
-            )
-        )
+    candidates = [
+        project_history_row(row)
+        for row in message_rows
+        if history_row_selected(row, current_request_id=current_request_id, work_scope=work_scope)
+    ]
     if preserve_complete:
         return tuple(candidates)
     history_chars = total_chars

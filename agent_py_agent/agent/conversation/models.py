@@ -142,15 +142,26 @@ class MessageLogEntry:
 
 
 # LLM: This immutable projection is the only provider-facing seed for completed conversation
-# history. It carries already-bounded raw turns plus one committed Compact summary; runtime
-# adapters may change role encoding but must not re-read or re-window the transcript.
-# 类用途: 把已经由会话层裁定好的摘要和完整历史消息交给模型运行时，避免再拼成每轮变化的大段字符串。
+# history. It carries already-bounded raw turns (or one frozen read-only source of them) plus one
+# committed Compact summary; runtime adapters may change role encoding but must not re-window the
+# transcript, and a source is resolved only at the native/text preparation boundary.
+# 类用途: 把已经由会话层裁定好的摘要和完整历史（具体消息或只读来源）交给模型运行时，避免再拼成每轮变化的大段字符串。
 @dataclass(frozen=True)
 class ConversationHistorySeed:
     compact_summary: str = ""
     compact_generation: int = 0
     messages: tuple[tuple[str, str], ...] = ()
     canonical_messages: tuple[dict[str, Any], ...] = ()
+    # LLM: 只读来源（history_seed.ConversationHistorySource）与上面两个具体字段严格二选一；
+    # 只在原 native/text 准备边界解析，不能与具体内容同时成为权威。
+    # 字段用途: 让宿主延后物化已裁决的完整历史。
+    source: Any = None
+
+    # LLM: 互斥在构造时校验，发现同时携带来源与具体内容即拒绝，避免两份权威。
+    # 函数用途: 保证种子要么是具体历史、要么是只读来源。
+    def __post_init__(self) -> None:
+        if self.source is not None and (self.messages or self.canonical_messages):
+            raise ValueError("conversation history seed source and concrete messages are exclusive")
 
 
 def is_audit_background_transcript_entry(entry: MessageLogEntry) -> bool:
