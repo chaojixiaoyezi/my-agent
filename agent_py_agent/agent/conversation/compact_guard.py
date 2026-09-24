@@ -4,13 +4,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, TypeAlias
 
-from ..memory_archive import estimate_tokens
 from ..runtime_errors import RecoverableRuntimeError
+from .compact_message_source import CompactMessageSource, estimate_compact_messages
+from .message_replay import message_rows_iterator
 from .models import ConversationThread, MessageLogEntry
-from .native_history import provider_history_messages_from_rows
+from .native_history import iter_provider_history_messages_from_rows
 
 if TYPE_CHECKING:
     from .store import ConversationStore
@@ -58,13 +59,13 @@ def raise_if_compact_interrupted(check: CompactInterruptCheck | None) -> None:
 
 # LLM: Prefer one bounded suffix of complete user/assistant turns, then retry once with no tail.
 # The second partition prevents a very large recent turn from making compaction impossible.
-# 函数用途: 先尝试保留近期完整对话；若候选仍太大，再用完整旧段生成一个无尾部候选。
+# 函数用途: 以只读范围先保留近期完整对话，必要时用完整来源重试，不物化全部行。
 def compact_partitions(
-    rows: list[MessageLogEntry],
+    rows: Sequence[MessageLogEntry],
     *,
     max_turns: int,
     max_tail_tokens: int,
-) -> tuple[tuple[list[MessageLogEntry], list[MessageLogEntry]], ...]:
+) -> tuple[tuple[Sequence[MessageLogEntry], Sequence[MessageLogEntry]], ...]:
     prefix, tail = split_recent_complete_turns(
         rows,
         max_turns=max_turns,
@@ -77,13 +78,13 @@ def compact_partitions(
 
 # LLM: A protected turn is structural: one user message followed by at least one assistant
 # message before the next user. No natural-language wording participates in this decision.
-# 函数用途: 从历史末尾保留最多若干个完整问答，受统一 token 上限约束，其余旧段交给摘要。
+# 函数用途: 在同一可重放历史上选择完整问答尾部，原token上限不变，分区只保存范围。
 def split_recent_complete_turns(
-    rows: list[MessageLogEntry],
+    rows: Sequence[MessageLogEntry],
     *,
     max_turns: int,
     max_tail_tokens: int,
-) -> tuple[list[MessageLogEntry], list[MessageLogEntry]]:
+) -> tuple[Sequence[MessageLogEntry], Sequence[MessageLogEntry]]:
     if max_turns <= 0 or max_tail_tokens <= 0 or len(rows) < 2:
         return rows, []
     user_starts = [index for index, row in enumerate(rows) if row.role == "user"]
@@ -100,27 +101,28 @@ def split_recent_complete_turns(
     return rows[:selected_start], rows[selected_start:]
 
 
-# LLM: Completion is role-structural and deliberately ignores prose and message language.
-# 函数用途: 找出含有 assistant 回复的 user 起点，供近期完整回合选择使用。
+# LLM: 完整回合只依角色裁决；找到assistant即短路时也关闭地址读取，不依赖生成器GC。
+# 函数用途: 在同一只读范围找出含assistant回复的user起点，不复制正文。
 def _complete_turn_starts(
-    rows: list[MessageLogEntry],
+    rows: Sequence[MessageLogEntry],
     user_starts: list[int],
 ) -> list[int]:
     complete: list[int] = []
     for position, start in enumerate(user_starts):
         end = user_starts[position + 1] if position + 1 < len(user_starts) else len(rows)
-        if any(row.role == "assistant" for row in rows[start + 1 : end]):
-            complete.append(start)
+        with message_rows_iterator(rows[start + 1 : end]) as turn:
+            if any(row.role == "assistant" for row in turn):
+                complete.append(start)
     return complete
 
 
 # LLM: Tail budgeting includes canonical native tool history, not only visible prose;
 # otherwise a short final reply can hide hundreds of thousands of retained tokens.
-# 函数用途: 按正文和真实原生工具历史的较大值计算尾部，避免保留区暗藏整轮巨大工具输出。
-def _message_rows_tokens(rows: list[MessageLogEntry]) -> int:
+# 函数用途: 流式计量可见正文和真实原生历史，避免试算巨大完整回合时物化全部正文。
+def _message_rows_tokens(rows: Sequence[MessageLogEntry]) -> int:
     return max(
-        estimate_tokens([{"role": row.role, "content": row.content} for row in rows]),
-        estimate_tokens(provider_history_messages_from_rows(rows)),
+        estimate_compact_messages(CompactMessageSource(lambda: ({'role': row.role, 'content': row.content} for row in rows))),
+        estimate_compact_messages(CompactMessageSource(lambda: iter_provider_history_messages_from_rows(rows))),
     )
 
 

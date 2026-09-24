@@ -180,9 +180,9 @@ def test_fitting_summary_honors_cancellation_after_estimate_or_reply(monkeypatch
     cancelled, calls = False, []
     original = budget._request_tokens
 
-    def estimate(request):
+    def estimate(request, source=None):
         nonlocal cancelled
-        tokens = original(request)
+        tokens = original(request, source)
         if cancel_stage == "estimate":
             cancelled = True
         return tokens

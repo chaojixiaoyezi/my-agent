@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import gc
 import tracemalloc
+from collections.abc import Sequence
 from copy import deepcopy
 from types import SimpleNamespace
 
@@ -99,3 +100,28 @@ def test_identified_final_replaces_prose_once_and_orphan_repair_stays_exact():
     expected = strip_orphaned_tool_blocks(deepcopy(list(raw)))
     assert conversation_compact_provider_messages('', 0, rows) == expected
     assert rows[1].metadata[CANONICAL_NATIVE_MESSAGES_METADATA_KEY]['messages'] == missing
+
+
+def test_compact_projection_keeps_single_pass_iterable_contract():
+    rows, native = _rows()
+    assert conversation_compact_provider_messages('', 0, iter(rows)) == native
+
+
+def test_anonymous_no_id_rebuilt_sequence_keeps_native_envelopes():
+    rows, native = _rows(anonymous=True)
+    rows[0].message_id = ''
+
+    class FreshRows(Sequence):
+        def __len__(self):
+            return 2
+
+        def __getitem__(self, index):
+            if index not in (0, 1):
+                raise IndexError(index)
+            return deepcopy(rows[0])
+
+    projected = provider_history_messages_from_rows(FreshRows())
+    assert list(projected) == native + native
+    projected[1]['content'][0]['input']['paths'].append('changed')
+    assert projected[len(native) + 1] == native[1]
+    assert list(provider_history_messages_from_rows([rows[0], rows[0]])) == native + native

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Sequence
+from contextlib import contextmanager
 from typing import Any
 
 from .tool_ir import (
@@ -236,6 +237,8 @@ _ORPHAN_TOOL_RESULT_STUB = (
 )
 
 
+# LLM: 列表API和摘要流式API共用唯一清扫核心；原输出是独立列表但不改变输入嵌套内容。
+# 函数用途: 物化原出站孤儿清扫结果，保留工具往返与缺失结果stub语义。
 def strip_orphaned_tool_blocks(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """净化出站 messages，保证 tool_use / tool_result 一一配对（Anthropic 强约束）。
 
@@ -252,17 +255,37 @@ def strip_orphaned_tool_blocks(messages: list[dict[str, Any]]) -> list[dict[str,
 
     纯函数：返回新 list，不改入参。非 native/无工具 block 的 messages 原样返回。
     """
-    if not messages:
-        return list(messages)
-    tool_use_ids = _collect_block_ids(messages, "tool_use", "id")
-    result_ids = _collect_block_ids(messages, "tool_result", "tool_use_id")
-    swept: list[dict[str, Any]] = []
-    for message in messages:
-        kept = _message_without_orphan_results(message, tool_use_ids)
-        if kept is not None:
-            swept.append(kept)
-        _append_stub_for_orphan_tool_use(swept, message, result_ids)
-    return swept
+    return list(iter_strip_orphaned_tool_blocks(lambda: iter(messages)))
+
+
+# LLM: factory必须重放同一原消息；先收全部工具ID，再逐条调用原修补器，不保存全文或创建第二清扫规则。
+# 函数用途: 为大摘要来源顺序生成与原列表API相同的清扫结果，内存仅保留ID集合和当前消息。
+def iter_strip_orphaned_tool_blocks(factory):
+    with _closing_message_replay(factory) as messages:
+        tool_use_ids = _collect_block_ids(messages, "tool_use", "id")
+    with _closing_message_replay(factory) as messages:
+        result_ids = _collect_block_ids(messages, "tool_result", "tool_use_id")
+    with _closing_message_replay(factory) as messages:
+        for message in messages:
+            kept = _message_without_orphan_results(message, tool_use_ids)
+            if kept is not None:
+                yield kept
+            stubs = []
+            _append_stub_for_orphan_tool_use(stubs, message, result_ids)
+            yield from stubs
+
+
+# LLM: factory可返回普通list迭代器或持有文件的生成器；显式关闭当前遍，不依赖垃圾回收的时机。
+# 函数用途: 给清扫的每次重放统一释放资源，取消与异常也适用。
+@contextmanager
+def _closing_message_replay(factory):
+    iterator = iter(factory())
+    try:
+        yield iterator
+    finally:
+        close = getattr(iterator, "close", None)
+        if close is not None:
+            close()
 
 
 def _collect_block_ids(messages: list[dict[str, Any]], block_type: str, id_key: str) -> set[str]:

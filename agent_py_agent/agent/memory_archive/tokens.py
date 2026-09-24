@@ -92,9 +92,31 @@ def check_token_budget(
 # 函数用途: 有界估算输入，避免大历史副本和高频小请求的编码器积累，保持既有预算口径，不发请求或写账。
 def estimate_tokens(payload: Any) -> int:
     chars, utf8_bytes = _payload_lengths(payload)
+    return _tokens_from_lengths(chars, utf8_bytes, payload)
+
+
+# LLM: 已序列化片段必须来自原JSON格式；structure只保留原顶层形状供同一开销公式，不承担内容权威或错误修复。
+# 函数用途: 对可重放大数组的JSON字符流使用原token估算，避免先物化整份数组；不发请求或写账。
+def estimate_tokens_from_json_parts(parts, *, structure: Any) -> int:
+    chars = utf8_bytes = 0
+    iterator = iter(parts)
+    try:
+        for part in iterator:
+            chars += len(part)
+            utf8_bytes += sum(len(part[offset:offset + 8192].encode('utf-8')) for offset in range(0, len(part), 8192))
+    finally:
+        close = getattr(iterator, 'close', None)
+        if close is not None:
+            close()
+    return _tokens_from_lengths(chars, utf8_bytes, structure)
+
+
+# LLM: 普通值与显式JSON流共享唯一舍入和结构开销口径，不新增tokenizer或供应商usage推断。
+# 函数用途: 根据完整字符/UTF8计数计算原保守token上界。
+def _tokens_from_lengths(chars: int, utf8_bytes: int, structure: Any) -> int:
     if not chars:
         return 1
-    return max(1, math.ceil(utf8_bytes / 3), math.ceil(chars / 3)) + _structured_overhead(payload)
+    return max(1, math.ceil(utf8_bytes / 3), math.ceil(chars / 3)) + _structured_overhead(structure)
 
 
 def token_ledger_dir(root: str | Path) -> Path:

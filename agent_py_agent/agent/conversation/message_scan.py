@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import BinaryIO
 
@@ -133,11 +134,15 @@ def find_message_dedupe(path: Path, key: str) -> MessageLogEntry | None:
     return existing
 
 
-# LLM: 固定LF尾界内逐行严格解码，Unicode空白不生成记录但仍计入原字节hash；visitor只收解析副本，不作持久覆盖权威。
-# 函数用途: 不保存全量正文地扫描canonical消息，空白不生成消息，任何坏行或截断拒绝整个来源。
-def scan_message_snapshot(path: Path, thread_id: str, through: int, visitor) -> str:
+# LLM: 固定LF尾界内严格解析，空白仍计hash；可选地址visitor只生成临时引用，原inode及取消在读取边界检查。
+# 函数用途: 不保存全量正文地扫描canonical消息及原行地址，坏行、截断或换文件拒绝整个来源。
+def scan_message_snapshot(path: Path, thread_id: str, through: int, visitor, *, address_visitor=None,
+                          expected_identity=None, interrupt_check=None) -> str:
     import hashlib
 
+    from .compact_guard import raise_if_compact_interrupted
+
+    raise_if_compact_interrupted(interrupt_check)
     digest = hashlib.sha256()
     try:
         handle = path.open("rb")
@@ -146,9 +151,14 @@ def scan_message_snapshot(path: Path, thread_id: str, through: int, visitor) -> 
             return digest.hexdigest()
         raise
     with handle:
+        stat = os.fstat(handle.fileno())
+        if expected_identity is not None and expected_identity != (stat.st_dev, stat.st_ino):
+            raise DataCorruptionError("canonical message source changed during selection")
         _validate_boundary(handle, through, handle.seek(0, 2))
         handle.seek(0)
         while handle.tell() < through:
+            raise_if_compact_interrupted(interrupt_check)
+            offset = handle.tell()
             line = handle.readline(through - handle.tell())
             if not line.endswith(b"\n"):
                 raise DataCorruptionError("canonical transcript truncated during source scan")
@@ -156,4 +166,8 @@ def scan_message_snapshot(path: Path, thread_id: str, through: int, visitor) -> 
             entry = _message_from_line(line, thread_id, skip_blank=True)
             if entry is not None:
                 visitor(entry)
+                if address_visitor is not None:
+                    address_visitor(entry, offset, len(line), hashlib.sha256(line).digest())
+            del entry, line
+        raise_if_compact_interrupted(interrupt_check)
     return digest.hexdigest()

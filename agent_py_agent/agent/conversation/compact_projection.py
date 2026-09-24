@@ -2,7 +2,7 @@
 # 模块用途: 携带历史及可选保留工具区，让完整恢复请求在原Compact计量，成功提交后取回同一候选。
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -15,24 +15,24 @@ if TYPE_CHECKING:
 
 
 # LLM: 显式宿主可附加同线程的已裁决scope/view；来源行已按该视图筛选，不能再用全线程摘要或游标覆盖。
-# 类用途: 让只加载的宿主与后续 Compact 共用同一历史范围、摘要、策略和近期证据，不授予提交权。
+# 类用途: 让宿主与Compact共享只读可重放消息范围、摘要、策略和证据，不缓存正文或授予提交权。
 @dataclass(frozen=True)
 class ConversationCompactSource:
     thread: ConversationThread
-    messages: tuple[MessageLogEntry, ...]
+    messages: Sequence[MessageLogEntry]
     policy: RuntimeCompactPolicy
     recent_operation_evidence: dict[str, object]
     compact_context: AppliedCompactContext | None = None
 
 
 # LLM: is_candidate区分未提交代次；retained_tool_records为None表示不替换工具，空tuple表示已知全压，不可混淆。
-# 类用途: 绑定候选摘要、保留原文/IR、证据及预计代次；IR的None是不替换，空元组是已知全压。
+# 类用途: 绑定候选摘要、可重放保留原文/IR、证据及预计代次；IR的None是不替换，空元组是已知全压。
 @dataclass(frozen=True)
 class ConversationCompactView:
     thread_id: str
     compact_generation: int
     summary: str
-    messages: tuple[MessageLogEntry, ...]
+    messages: Sequence[MessageLogEntry]
     operation_evidence: dict[str, object]
     recent_operation_evidence: dict[str, object]
     history_token_budget: int

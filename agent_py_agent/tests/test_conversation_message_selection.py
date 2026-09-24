@@ -240,3 +240,93 @@ def test_snapshot_preserves_original_unicode_blank_row_semantics(conversation, b
     path.write_bytes(before)
     assert select_message_snapshot(store.messages, tid) == (row,)
     assert path.read_bytes() == before
+
+
+def test_selected_snapshot_replays_slices_and_isolates_metadata(conversation):
+    store, tid = conversation
+    rows = [_append(store, tid, f'完整行-{index}', task='mine') for index in range(4)]
+    selected = select_message_snapshot(store.messages, tid)
+    selected[0].metadata['task_id'] = 'changed'
+    assert tuple(selected) == tuple(rows) == tuple(selected)
+    assert selected[1:3] == tuple(rows[1:3])
+    assert selected[::-1] == tuple(reversed(rows))
+    assert selected[-1] == rows[-1]
+    _append(store, tid, '迟到追加')
+    assert tuple(selected) == tuple(rows)
+    assert len(select_message_snapshot(store.messages, tid)) == 5
+
+
+@pytest.mark.parametrize('mutation', ['rewrite', 'truncate', 'replace'])
+def test_replay_rejects_source_change_after_selection(conversation, mutation):
+    store, tid = conversation
+    _append(store, tid, 'original')
+    selected = select_message_snapshot(store.messages, tid)
+    path = store.storage.message_path(tid)
+    original = path.read_bytes()
+    if mutation == 'replace':
+        path.rename(path.with_suffix('.previous'))
+        path.write_bytes(original)
+    else:
+        path.write_bytes(original.replace(b'original', b'tampered') if mutation == 'rewrite' else original[:-1])
+    with pytest.raises(DataCorruptionError):
+        tuple(selected)
+
+
+def test_replay_cancel_and_early_close_release_file(conversation, monkeypatch):
+    from pathlib import Path
+
+    store, tid = conversation
+    _append(store, tid, '第一条')
+    _append(store, tid, '第二条')
+    stop = [False]
+    selected = select_message_snapshot(store.messages, tid, interrupt_check=lambda: stop[0])
+    handles, original_open = [], Path.open
+
+    def opened(path, *args, **kwargs):
+        handle = original_open(path, *args, **kwargs)
+        handles.append(handle)
+        return handle
+
+    monkeypatch.setattr(Path, 'open', opened)
+    iterator = iter(selected)
+    next(iterator)
+    iterator.close()
+    assert handles and all(handle.closed for handle in handles)
+    iterator = iter(selected)
+    next(iterator)
+    stop[0] = True
+    with pytest.raises(InterruptedError):
+        next(iterator)
+    assert all(handle.closed for handle in handles)
+
+
+def test_selection_cancellation_is_checked_during_first_scan(conversation):
+    store, tid = conversation
+    for _ in range(3):
+        _append(store, tid, '正文')
+    calls = []
+
+    def interrupted():
+        calls.append(True)
+        return len(calls) >= 3
+
+    with pytest.raises(InterruptedError):
+        select_message_snapshot(store.messages, tid, interrupt_check=interrupted)
+
+
+def test_replacement_during_eof_read_cannot_rebind_old_boundary(conversation, monkeypatch):
+    store, tid = conversation
+    _append(store, tid, 'original')
+    path = store.storage.message_path(tid)
+    original = store.messages.complete_offset_report
+
+    def replace_after_boundary(thread_id):
+        report = original(thread_id)
+        before = path.read_bytes()
+        path.rename(path.with_suffix('.old'))
+        path.write_bytes(before.replace(b'original', b'tampered'))
+        return report
+
+    monkeypatch.setattr(store.messages, 'complete_offset_report', replace_after_boundary)
+    with pytest.raises(DataCorruptionError, match='source changed'):
+        select_message_snapshot(store.messages, tid)

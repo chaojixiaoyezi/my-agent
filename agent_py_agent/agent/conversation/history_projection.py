@@ -2,6 +2,7 @@
 # 模块用途: 从既有会话行生成有界历史投影，保留 metadata、完整消息和读取错误，不改写或补造历史。
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -64,7 +65,7 @@ def _history_row_visible_in_work_scope(
 
 
 # LLM: 前后台共用同一行选择；preserve_complete仅用于已裁决Compact来源，必须完整进入容量门，普通读取保留展示窗口。
-# 函数用途: 筛选会话行并保留原生metadata；已选来源不再次按字符截掉旧行，修改时联测三个宿主。
+# 函数用途: 接受显式只读Sequence并保持原选择顺序；已裁决来源不误回Store或再次窗口化，宿主物化仍沿原入口。
 def conversation_history_rows(
     agent: SimpleAgent,
     thread_id: str,
@@ -86,7 +87,7 @@ def conversation_history_rows(
         1000,
         int(getattr(config, "conversation_history_max_chars", 48_000) or 48_000),
     )
-    supplied_rows = isinstance(rows, (list, tuple))
+    supplied_rows = isinstance(rows, Sequence) and not isinstance(rows, (str, bytes, bytearray))
     if preserve_complete and not supplied_rows:
         raise ValueError("complete history projection requires explicit source rows")
     if supplied_rows:

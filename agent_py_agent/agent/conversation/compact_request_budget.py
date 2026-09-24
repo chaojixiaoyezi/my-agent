@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable
+from contextlib import closing
 from dataclasses import dataclass, replace
 
 from ..agent_core.model.call_runtime import max_output_tokens
@@ -26,6 +27,7 @@ from .compact_guard import (
     ConversationCompactError,
     raise_if_compact_interrupted,
 )
+from .compact_message_source import CompactMessageSource, estimate_compact_payload
 from .compact_text_source import CompactTextSource
 
 # LLM: Bounded repair budget for one source segment, driven by the typed response reason only.
@@ -53,7 +55,7 @@ _SUMMARY_SYSTEM_INSTRUCTION = (
 
 # LLM: Fitting requests remain byte-for-byte cache compatible. Only an oversized request or a
 # typed provider overflow enters the bounded summary chain; check cancellation again before I/O and after reply.
-# Strict replacement sources reject degraded excerpts.
+# Strict replacement sources reject degraded excerpts; 显式message_source只在准备层读取，不能与request.messages竞争权威。
 # 函数用途: 窗口够用时沿用单次摘要；不够时逐段覆盖全部历史，避免反复重发超大请求。
 def generate_bounded_compact_response(
     request: AuxiliaryModelCallRequest,
@@ -61,14 +63,17 @@ def generate_bounded_compact_response(
     interrupt_check: CompactInterruptCheck | None = None,
     source_progress: Callable[[int, int], object] | None = None,
     preserve_complete_fallback: bool = False,
+    message_source: CompactMessageSource | None = None,
 ) -> object:
+    if message_source is not None and request.messages is not None:
+        raise ValueError('compact summary requires one message source')
     window = resolve_model_context_window_tokens(request.agent)
     budget = max(1, int(window * 0.8) - max_output_tokens(request.agent))
     raise_if_compact_interrupted(interrupt_check)
-    if _request_tokens(request) <= budget:
+    if _request_tokens(request, message_source) <= budget:
         try:
             raise_if_compact_interrupted(interrupt_check)
-            response = generate_auxiliary_model_response(request)
+            response = _generate_materialized_response(request, message_source)
             raise_if_compact_interrupted(interrupt_check)
             if preserve_complete_fallback and getattr(response, "truncated", False):
                 raise ConversationCompactError("摘要回复被截断，保留原始来源", code="COMPACT_SUMMARY_TRUNCATED")
@@ -76,16 +81,22 @@ def generate_bounded_compact_response(
         except ProviderContextWindowError:
             # 只响应明确的窗口错误；网络、额度、认证等错误不能变成隐式分段重试。
             budget = max(1, budget // 2)
-    return _summarize_segments(request, budget, interrupt_check, source_progress, preserve_complete_fallback)
+    return _summarize_segments(request, budget, interrupt_check, source_progress, preserve_complete_fallback, message_source)
+
+
+# LLM: 只在完整来源已容纳时物化原运输列表；请求失败退出本帧后释放临时数组，外层仍持可重放来源。
+# 函数用途: 保持AuxiliaryModelCallRequest及供应商接口不接磁盘视图，普通列表请求原对象直传。
+def _generate_materialized_response(request, source):
+    return generate_auxiliary_model_response(request if source is None else replace(request, messages=list(source)))
 
 
 # LLM: Count the same complete surface sent by AuxiliaryModelCallRequest, including schemas and
-# summary carry. This is admission estimation, never billing or a provider token assertion.
+# summary carry；显式流式数组使用同一JSON计量，不用对象repr冒充历史。This is admission estimation, never billing.
 # 函数用途: 估算摘要真实请求大小，避免只算可见正文而漏掉工具历史和固定前缀。
-def _request_tokens(request: AuxiliaryModelCallRequest) -> int:
-    return estimate_tokens({
+def _request_tokens(request: AuxiliaryModelCallRequest, source=None) -> int:
+    return estimate_compact_payload({
         "prompt": request.prompt,
-        "messages": request.messages or [],
+        "messages": source if source is not None else request.messages or [],
         "tools": request.tools or [],
         "system_instruction": request.system_instruction,
     })
@@ -94,7 +105,7 @@ def _request_tokens(request: AuxiliaryModelCallRequest) -> int:
 # LLM: Only complete textual source may be serialized into contiguous ranges. A segment may split
 # JSON for summarization only; non-text native blocks cannot gain coverage through their JSON refs.
 # Once partitioned, native history no longer shares the main request prefix. Use a summary-only
-# surface instead of the executor's tools/instructions; strict fallback failure never grants source coverage.
+# surface instead of the executor's tools/instructions; 可重放来源直接编码，不先物化完整数组；失败不给覆盖。
 # 函数用途: 仅将可完整阅读的文字历史逐段摘要；媒体或未知非文本历史保留给上层原始来源分区。
 def _summarize_segments(
     request: AuxiliaryModelCallRequest,
@@ -102,8 +113,15 @@ def _summarize_segments(
     interrupt_check: CompactInterruptCheck | None,
     source_progress: Callable[[int, int], object] | None,
     preserve_complete_fallback: bool = False,
+    message_source: CompactMessageSource | None = None,
 ) -> object:
-    if request.messages is not None and not text_messages_supported(request.messages):
+    native = message_source is not None or request.messages is not None
+    if message_source is not None:
+        with closing(iter(message_source)) as messages:
+            supported = all(text_messages_supported((item,)) for item in messages)
+    else:
+        supported = request.messages is None or text_messages_supported(request.messages)
+    if not supported:
         raise ConversationCompactError(
             "分段压缩不能将非文本来源的JSON引用视为完整正文",
             code="COMPACT_SOURCE_NON_TEXT",
@@ -111,12 +129,14 @@ def _summarize_segments(
     layout = prompt_cache_layout(request.prompt)
     instruction = (
         layout.volatile_suffix if layout is not None else request.prompt
-    ) if request.messages is not None else "保留用户要求、当前进展、未完成工作和文件引用。"
+    ) if native else "保留用户要求、当前进展、未完成工作和文件引用。"
     base = replace(
         request, prompt=instruction, tools=[], tool_choice=ToolChoice.none("compact_summary_only"),
         system_instruction=_SUMMARY_SYSTEM_INSTRUCTION,
     )
-    factory = (lambda: json.JSONEncoder(ensure_ascii=False).iterencode(request.messages)) if request.messages is not None else (lambda: iter((str(request.prompt),)))
+    factory = (message_source.json_parts if message_source is not None else
+               (lambda: json.JSONEncoder(ensure_ascii=False).iterencode(request.messages)) if native else
+               (lambda: iter((str(request.prompt),))))
     with CompactTextSource(factory, interrupt_check) as source:
         return _summarize_source(base, source, budget, interrupt_check, source_progress, preserve_complete_fallback)
 

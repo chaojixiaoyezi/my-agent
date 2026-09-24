@@ -1,5 +1,7 @@
 # 后续开发与验证
 
+12.4来源到摘要生命周期首片已本地验收：选中消息保存同源地址视图，原生摘要按原JSON和token口径重放，不常驻整份正文/provider数组。26文件530项通过、独立末审无新确定缺陷；约4.2M字符旧峰值9.68MB降至约1.45MB，翻倍来源约1.53MB，完整hash与覆盖ID保持。三宿主旧请求与无scope入口仍待处理，12.4及总清单11/18不变。见[容量审计](tasks/DECISION_MODEL_CONTEXT_AUDIT.md#选中正文生命周期方案2026-09-23首片本地验收)。
+
 12.7固定5e5122b04安装版缓存对照已收口：M2.7压缩后续聊、on4保留、官方M3/OpenCode DeepSeek显式跨模型工具轮有真实回执。第12项6/7已验，剩12.4来源正文及宿主生命周期；其第一片并行实现中。总清单11/18不变，自动异模仍归13/16，详见[真实验收](tasks/DECISION_MODEL_REAL_VALIDATION.md)。
 
 此前4项后台Compact测试接口缺口已按owner授权收口：先复现4 failed/158 passed，再补fake Store的include_messages及临时canonical消息域，整文件162 passed。原业务断言及生产路径不改；旧全仓八项历史问题另列，第12.4及11/18仍未完成。见[验收记录](tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。

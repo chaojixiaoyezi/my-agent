@@ -1455,6 +1455,27 @@ Sol high独立只读复核未发现必须修复的scope/base/legacy回归，确�
 主线owner随后明确授权本线仅在该SimpleNamespace补 `task_attributes={}` 与 `carried_active_turn_user_inputs=[]`，生产IR及业务断言保持。适配后整个IR测试文件 **29 passed（0.38秒）**，日志 `/tmp/decision_native_ir_fixture_20260923.log`；该数与原350有重叠，不累加为379。独立Sol high复核native两函数未发现必须修复的别名或调用者回归。全目录Ruff、doc sync、strict code-size（hard=0，基线不改）及diff通过；clean-package在登记新测试后通过。原四项后台fixture缺口及旧全仓失败仍开放，尚不称整枝严格gate通过，线上CI未作为证据。
 
 
+### 选中正文生命周期方案（2026-09-23，首片本地验收）
+
+Astra max只读复核5e5122b04后确认：仅将source.messages改为Sequence不构成完整修复；分区、原生信封投影、摘要请求及宿主seed会立即重新物化，PreparedCompactRecovery的params/frozen/回调闭包也持有旧请求。实施分为两片，均不新增持久权威：
+
+1. 原选择器以固定尾界、完整来源hash、行地址/长度/hash及身份元数据保存可重放视图；初始完整校验与scope predicate保持，后续不重新裁决范围。来源、分区、原生摘要、预算及字符窗口贯穿同一读取合同。晚追加不进入本次来源，替换/截短/选中行改写拒绝；每次迭代的对象独立，异常关闭文件。连续切片不驻留正文，精确ID元数据仍为O(N)。
+2. 三宿主在原准备边界重放来源并释放不再需要的旧全量材料；不能将磁盘Sequence塞进ToolLoopRequestInput，使原本纯projector隐式读文件。共享loop_support与宿主准备需另与owner明确认领，首片不能代替这片。
+
+摘要JSON数组必须保持原编码及token估算，不能由任意Sequence经default=str变成对象字符串。孤儿工具清扫复用原全局ID规则；identified/匿名信封顺序和隔离、完整媒体后缀、第一候选回用、取消/CAS失败保持。全部选中大正文测试须从load前计量，区分加载峰值、摘要驻留和实际发送峰值，测试桩不能自行保留全历史。实际完整请求、最大物理行和必要覆盖元数据仍有成本，不宣称O(1)或随历史完全不增长。
+
+参考检查本地Pi的jsonl-storage与Codex compact实现：借鉴原历史与提交替换的分离；所查路径本身仍整份读取/克隆，不把它们当常量内存证据。对应合同索引关键词没有命中，不声称索引证明已覆盖。
+
+首片已实现：`MessageSnapshotRows` 只保存同次文件身份、固定尾界和行地址/hash；`CompactMessageSource` 复用原native/orphan规则与JSON编码，完整计量后仅在可发送边界物化。无新依赖、配置或持久schema；原writer、generation CAS及精确覆盖继续为唯一权威。来源初扫与重放支持取消；短路、异常及关闭显式释放读取器。独立Sol high最终diff审查未发现新的确定缺陷。
+
+真实临时canonical文件→范围loader→原摘要分段→checkpoint/CAS的内存红绿：128条、正文4,195,620字符，旧峰值9,683,703 bytes、摘要驻留9,183,070；最终独立两节点进程新峰值1,448,802、驻留883,521，95段。翻倍256条、正文8,391,460字符，新峰值1,532,904、驻留648,710，189段。完整JSON SHA256及精确checkpoint消息ID均校验；测试从load前测量，HTTP响应为fake，不是生产RSS或真实模型质量证据。日志 `/tmp/decision_source_lifetime_red_20260923.log` 与 `/tmp/decision_source_lifetime_final_isolated_20260923.log`（2项独立内存节点通过）；17项来源专项另见 `/tmp/decision_source_lifetime_final_memory_20260923.log`。
+
+失败合同覆盖传输、摘要中取消/改写、提交前取消/改写、CAS冲突、迟到追加、两候选回用；失败不推进已提交摘要、覆盖或游标。首轮联合暴露一处旧媒体测试fake仅接单参 `_request_tokens`，只补可选source参数，生产判断及业务断言保持。最终26文件 **530 passed（31.38秒）**，日志 `/tmp/decision_source_focused_final_20260923.log`，含后台162项及native IR29项；与专项有重叠，不累加。联合测量约1.19/1.53MB，专项与联合的分配器状态不同。全目录Ruff、最终文档同步、strict code-size（hard=0，基线不改）、工作树/暂存diff检查通过；四个新文件登记后clean-package通过。生成的尺寸报告已恢复，未推送/部署，线上CI未作为验收来源。
+
+仍未覆盖：无scope及`/context`旧加载入口、三宿主seed/旧params/frozen/回调的完整请求驻留；原landmark投影仍先收集每行最多1200字符再取最终窗口。精确身份/覆盖元数据随行数增长，最大物理行、必要发送请求及媒体后缀仍占内存。canonical依赖append-only合同，不承诺抵御最终复验与CAS之间任意外部改写。12.4继续开放；12.7已在固定旧包5e5122b04完成限定真实验收，新片尚未安装或部署。
+
+建议下一步：先集成本片，再按原准备边界处理三宿主旧请求生命周期；可并行只读审查和独立测试，生产共享接缝先与模块重构owner确认，不能在纯ToolLoopRequestInput/projector内隐藏读盘。
+
 ### 旧后台测试接口缺口收口与真实环境准备（2026-09-23）
 
 主线owner明确转交本分支 `test_background_main_agent_runtime.py` 的四处fake `Store.context_bundle_report` 接口和必要scope夹具适配；生产 `_tool_loop_service.py`、`runtime/loop_support.py`、IR及主线其它测试仍不触碰。

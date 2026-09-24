@@ -819,7 +819,7 @@ def _gateway_recent_task_workspaces(
 
 
 # LLM: Compact显式来源完整进入正文及原生回放，禁止先套展示窗口少算容量；非显式读取保留原窗口，产物引用独立。
-# 函数用途: 从本轮原来源投影正文和原生消息，再读取近期产物；已裁决保留行交由完整容量合同处理。
+# 函数用途: 显式来源含只读序列时也完整投影，不能按容器类型误走展示窗口；宿主物化流程不变。
 def _gateway_conversation_refs(
     agent: SimpleAgent,
     thread_id: str,
@@ -840,7 +840,7 @@ def _gateway_conversation_refs(
         request_id,
         load_errors,
         rows=history_rows,
-        preserve_complete=isinstance(history_rows, (list, tuple)),
+        preserve_complete=history_rows is not None,
         token_budget=history_token_budget,
         work_scope=work_scope,
     )

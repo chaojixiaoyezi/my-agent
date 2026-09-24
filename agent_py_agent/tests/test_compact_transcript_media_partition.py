@@ -163,7 +163,7 @@ def test_segmented_summary_rejects_nontext_before_serializing_or_calling_model(m
         messages=[{"role": "user", "content": [{"type": "future_nontext", "source": {"ref": "opaque"}}]}],
         purpose="conversation_compact_summary",
     )
-    monkeypatch.setattr(budget_module, "_request_tokens", lambda _request: 9_000)
+    monkeypatch.setattr(budget_module, "_request_tokens", lambda _request, _source=None: 9_000)
     monkeypatch.setattr(
         budget_module, "generate_auxiliary_model_response",
         lambda _request: pytest.fail("unknown source reached the model"),

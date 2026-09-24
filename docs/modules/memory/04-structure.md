@@ -1,5 +1,7 @@
 # Memory Structure
 
+`tokens.py::estimate_tokens_from_json_parts`消费已序列化JSON片段，与原`estimate_tokens`共用长度/结构开销计算；调用者必须保持原JSON编码及原顶层结构，不能以Sequence的字符串表示计量。原`_payload_lengths`/有界小JSON判定不变；新增入口不计费、不写账、不引入第二tokenizer。Compact的可重放数组位于conversation模块，普通模型出站仍物化原协议消息。
+
 12.4原生历史投影保留一次canonical隔离复制，已隔离副本直接用于模型/摘要，匿名重复输出仍独立；嵌套容器测试峰值约4.89MB降至3.03MB。复用主线b4ffb3475的小JSON有界直接编码修复，估算口径不变；三文件72项通过。来源正文/覆盖ID仍驻留，12.4及11/18不变。详见[容量审计](../../tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。
 
 12.4摘要分段本地15文件316项通过：复用原循环顺序读取JSON字符、消费后释放窗口；共享估算器改流式累计且数值保持。修复提示纳入预算，发送及来源EOF后复查取消；writer/CAS不变。全链仍有原消息/覆盖驻留，11/18不变。见[容量审计](../../tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。

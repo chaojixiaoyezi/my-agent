@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+from collections.abc import Sequence
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +16,7 @@ from typing import TYPE_CHECKING
 from ..io.jsonl import append_jsonl
 from .compact_scope import THREAD_COMPACT_SCOPE, CompactScope
 from .compact_tool_identity import compact_tool_refs
+from .message_replay import message_rows_iterator
 from .models import ConversationThread, MessageLogEntry
 
 if TYPE_CHECKING:
@@ -23,14 +25,14 @@ if TYPE_CHECKING:
 
 
 # LLM: 同一候选的scope/base、原消息和计量必须对齐；引用是同链读取投影，不授予任务权限。
-# 类用途: 汇总摘要的适用范围、来源和近期尾部，交给原检查点写入。
+# 类用途: 汇总摘要范围、可重放来源及近期尾部，交给原检查点写入，不要求正文tuple常驻。
 @dataclass(frozen=True)
 class CompactCheckpointRequest:
     thread: ConversationThread
     summary: str
     operation_evidence: dict[str, object]
-    compact_rows: tuple[MessageLogEntry, ...]
-    retained_tail: tuple[MessageLogEntry, ...]
+    compact_rows: Sequence[MessageLogEntry]
+    retained_tail: Sequence[MessageLogEntry]
     source_end_byte_offset: int
     projected_tokens_before: int
     projected_tokens_after: int
@@ -129,11 +131,13 @@ def _append_checkpoint(agent, row: dict[str, object]) -> str:
     return row["checkpoint_id"]
 
 
-# LLM: 同一候选可记录消息和工具双覆盖；局部offset不当全线程游标，双refs与摘要一起封印后只经一次CAS发布。
-# 函数用途: 保存本次真实摘要覆盖的原消息和保留尾部，再由宿主原CAS提交。
+# LLM: 同一候选记录双覆盖；短路校验显式关闭来源，双refs与摘要封印后只经一次CAS发布，不改live-tool写入。
+# 函数用途: 从同一只读消息序列保存精确覆盖和保留IDs，持久schema及原CAS不变。
 def write_compact_checkpoint(agent: SimpleAgent, request: CompactCheckpointRequest) -> str:
     compact_rows = request.compact_rows
-    if not compact_rows or any(row.thread_id != request.thread.thread_id for row in compact_rows):
+    with message_rows_iterator(compact_rows) as rows:
+        foreign_source = any(row.thread_id != request.thread.thread_id for row in rows)
+    if not compact_rows or foreign_source:
         raise ValueError("conversation compact checkpoint requires source messages from its thread")
     source_ids = [item.message_id for item in compact_rows]
     if any(not isinstance(item, str) or not item.strip() for item in source_ids) or len(set(source_ids)) != len(source_ids):
@@ -149,7 +153,7 @@ def write_compact_checkpoint(agent: SimpleAgent, request: CompactCheckpointReque
         "source_kind": "transcript_and_tool_archive" if refs else "transcript", "source_start_message_id": compact_rows[0].message_id,
         "source_end_message_id": compact_rows[-1].message_id,
         "source_end_byte_offset": max(0, int(request.source_end_byte_offset)),
-        "source_message_ids": [item.message_id for item in compact_rows],
+        "source_message_ids": source_ids,
         "source_messages": len(compact_rows),
         "source_tool_refs": list(refs), "source_tool_call_ids": [ref["call_id"] for ref in refs],
         "source_tool_pairs": len(refs), "source_tool_pairs_total": request.thread.compact_source_tool_pairs + len(refs),

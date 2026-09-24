@@ -1,5 +1,13 @@
 # 测试与发布验收
 
+## 第12.4项选中来源到摘要生命周期（2026-09-23，本地）
+
+解决选中canonical正文与完整摘要provider数组同时常驻的问题，复用原扫描、JSON、token估算、native/orphan规则及checkpoint/CAS。真实临时文件到load→摘要分段→提交的红绿测试：4,195,620字符旧峰值9,683,703 bytes，新峰值1,448,802；8,391,460字符新峰值1,532,904。完整JSON hash、95/189段连续覆盖和精确消息ID通过。该数来自专项独立进程，联合运行受分配器影响约1.19/1.53MB；只证明本Python路径，不等同RSS或三宿主峰值。
+
+最终26文件 **530 passed（31.38秒）**，日志 `/tmp/decision_source_focused_final_20260923.log`；包含选择器/扫描、source生命周期、JSON估算、媒体、两候选、原后台162项及native IR29项。失败/取消/改写/CAS不推进覆盖、append下轮可见；原媒体fake补可选source参数，业务断言不改。独立只读末审无新确定缺陷。全目录Ruff、doc sync、strict code-size（hard=0、基线不改）、diff及登记新文件后的clean-package通过。
+
+无scope旧入口、三宿主旧seed/frozen/回调仍待后续处理，精确ID和landmark仍随行数增长；没有部署、真实模型调用或全仓通过声明。12.4不勾选，线上CI未作为验收来源。
+
 12.7固定5e5122b04安装候选：19个变更测试文件613 passed、1既有xpassed，Ruff/doc sync/strict size/diff/clean源码与wheel通过；不重新裁定旧全仓失败，线上CI未作证据。同一原生TUI七轮业务全部完成，覆盖M2.7 Compact前后、on4保留、官方M3及OpenCode DeepSeek显式切换的真实工具/缓存。原ledger逐字段来源区分未知和零，摘要独立计量；显式选模不算自动采用。详见[真实验收](docs/tasks/DECISION_MODEL_REAL_VALIDATION.md)。
 
 此前4项后台Compact测试接口缺口已按owner授权收口：先复现4 failed/158 passed，再补fake Store的include_messages及临时canonical消息域，整文件162 passed。原业务断言及生产路径不改；旧全仓八项历史问题另列，第12.4及11/18仍未完成。见[验收记录](docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。

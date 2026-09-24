@@ -8,8 +8,8 @@ from __future__ import annotations
 import json
 import time
 import uuid
-from collections.abc import Callable
-from dataclasses import dataclass, field
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from ..backends.request_content import text_messages_supported
@@ -27,6 +27,7 @@ from .compact_guard import (
     raise_if_compact_interrupted,
     record_compact_failure,
 )
+from .compact_message_source import CompactMessageSource, estimate_compact_payload
 from .compact_progress import (
     COMPACT_AUTHORITY_CONVERSATION,
     COMPACT_SOURCE_TRANSCRIPT,
@@ -44,9 +45,16 @@ from .compact_provider_surface import (
     ConversationCompactProviderSurface,
     conversation_compact_provider_messages,
     conversation_compact_provider_prompt,
+    conversation_compact_provider_source,
     prepare_conversation_compact_provider_surface,
 )
 from .compact_scope import CompactScope
+from .message_replay import (
+    MessageSnapshotRows,
+    concatenate_message_rows,
+    filtered_message_rows,
+    message_rows_iterator,
+)
 from .message_selection import MessageSelectorFactory, select_message_snapshot
 from .models import (
     ConversationCompactCommit,
@@ -57,6 +65,7 @@ from .models import (
 from .native_history import (
     _row_turn_identity,
     canonical_native_messages_from_metadata,
+    iter_provider_history_messages_from_rows,
     provider_history_messages_from_rows,
 )
 from .tool_context_window import (
@@ -104,11 +113,11 @@ class ConversationScope:
 
 
 # LLM: 返回原CAS确认的thread与原文尾部；request_projection只在提交成功时携带获选内存材料，不进入持久历史。
-# 类用途: 将压缩结果与对应完整请求交回宿主；宿主可沿原准备继续发送，不误用最后一个未采用候选。
+# 类用途: 将压缩结果、同源只读尾部及完整请求交回宿主，不误用最后一个未采用候选。
 @dataclass(frozen=True)
 class ConversationCompactResult:
     thread: ConversationThread
-    messages: tuple[MessageLogEntry, ...]
+    messages: Sequence[MessageLogEntry]
     projected_tokens: int
     trigger_tokens: int
     compacted: bool = False
@@ -152,14 +161,14 @@ class ConversationCompactOptions:
 
 
 # LLM: 不可变请求绑定原CAS状态、显式摘要作用域和已准备投影；局部候选不能回读全线程摘要。
-# 类用途: 将会话、历史、作用域、策略和宿主准备引用交给候选及原提交链，不建立第二历史来源。
+# 类用途: 将会话、可重放历史、范围及宿主准备交给候选和原提交链，不建立第二历史来源。
 @dataclass(frozen=True)
 class _CompactRunRequest:
     agent: SimpleAgent
     store: ConversationStore
     thread: ConversationThread
     current_prompt: str
-    pending: tuple[MessageLogEntry, ...]
+    pending: Sequence[MessageLogEntry]
     policy: RuntimeCompactPolicy
     projected_tokens: int
     forced: bool
@@ -180,13 +189,13 @@ class _CompactRunRequest:
 
 
 # LLM: 摘要、双来源分区及request_projection属于同一候选；保留候选回退时必须同时采用，不能取循环最后一次分区。
-# 类用途: 保存已生成、已计量但未提交的摘要及其完整恢复请求，不反写活参数。
+# 类用途: 保存未提交摘要、同源范围及完整恢复请求，不物化来源正文或反写活参数。
 @dataclass(frozen=True)
 class _CompactCandidate:
     summary: str
     operation_evidence: dict[str, object]
-    compact_rows: tuple[MessageLogEntry, ...]
-    retained_tail: tuple[MessageLogEntry, ...]
+    compact_rows: Sequence[MessageLogEntry]
+    retained_tail: Sequence[MessageLogEntry]
     projected_tokens_after: int
     request_projection: ConversationCompactProjection | None = field(default=None, repr=False)
     tool_source: CarriedToolCompactSource | None = field(default=None, repr=False)
@@ -245,12 +254,13 @@ def prepare_conversation_context(
     return _execute_compact_request(prepared)
 
 
-# LLM: 显式scope沿固定尾界先验证身份/锚点，再流式按原宿主范围与同次view去覆盖；不提前截短来源，旧全局游标入口不混用。
-# 函数用途: 只读加载原始历史和策略，显式范围时冻结摘要载体，不调用摘要或推进检查点。
+# LLM: 显式scope沿固定尾界先验证身份/锚点，再流式按原宿主范围与同次view去覆盖；可选取消贯穿扫描，不截短来源或混旧游标。
+# 函数用途: 只读冻结历史地址及策略，显式范围时不驻留选中正文，不调用摘要或推进检查点。
 def load_conversation_compact_source(
     agent: SimpleAgent, store: ConversationStore, thread: ConversationThread, *, exclude_request_id: str = "",
     scope: CompactScope | None = None,
     selector_factory: MessageSelectorFactory | None = None,
+    interrupt_check: CompactInterruptCheck | None = None,
 ) -> ConversationCompactSource:
     from ..agent_core.runtime.context_compactor import runtime_compact_policy
 
@@ -268,36 +278,47 @@ def load_conversation_compact_source(
     selected = select_message_snapshot(
         store.messages, thread.thread_id, selector_factory=selector_factory,
         exclude_message_ids=view.source_message_ids, exclude_through_message_ids=view.legacy_message_end_ids,
+        interrupt_check=interrupt_check,
     )
-    pending = _without_current_request_suffix(list(selected), exclude_request_id)
+    pending = _without_current_request_suffix(selected, exclude_request_id)
     return ConversationCompactSource(
-        thread, tuple(pending), runtime_compact_policy(agent), dict(_recent_operation_evidence(pending) or {}),
+        thread, pending, runtime_compact_policy(agent), dict(_recent_operation_evidence(pending) or {}),
         compact_context=AppliedCompactContext(thread.thread_id, scope, view),
     )
 
 
-# LLM: 显式来源在预检时校验同线程、精确行和已提交视图；只读核对后候选不重复读链或重建宿主准备。
-# 函数用途: 加载历史、估算触发线并构造压缩请求，局部来源沿原摘要范围而不修改全线程游标。
-def _prepare_compact_request(
-    agent: SimpleAgent,
-    store: ConversationStore,
-    thread: ConversationThread,
-    options: ConversationCompactOptions,
-) -> ConversationCompactResult | _CompactRunRequest:
+# LLM: 同线程/代次/视图统一校验；显式本次取消覆盖旧回调，未提供则保留来源取消；不拥有CAS或宿主准备权。
+# 函数用途: 加载或复用冻结来源，检查作用域并绑定取消回调，不物化正文。
+def _prepare_compact_source(agent, store, thread, options):
     source = options.source or load_conversation_compact_source(
         agent, store, thread, exclude_request_id=options.exclude_request_id,
+        interrupt_check=options.interrupt_check,
     )
+    if isinstance(source.messages, MessageSnapshotRows) and options.interrupt_check is not None:
+        source = replace(source, messages=replace(source.messages, interrupt_check=options.interrupt_check))
     if (source.thread.thread_id != thread.thread_id
             or source.thread.compact_generation != thread.compact_generation
             or source.thread.compact_checkpoint_id != thread.compact_checkpoint_id):
         raise ConversationCompactError("Compact source changed", code="COMPACT_SOURCE_CHANGED")
     compact_context = _validated_compact_source_context(agent, thread, source)
     _validate_compact_tool_source(options, compact_context)
+    return source, compact_context
+
+
+# LLM: 显式来源在预检时校验同线程、精确行和已提交视图；只读核对后候选不重复读链或重建宿主准备。
+# 函数用途: 复用只读来源、估算触发线并构造请求，地址重放携带原取消检查，不修改全线程游标。
+def _prepare_compact_request(
+    agent: SimpleAgent,
+    store: ConversationStore,
+    thread: ConversationThread,
+    options: ConversationCompactOptions,
+) -> ConversationCompactResult | _CompactRunRequest:
+    source, compact_context = _prepare_compact_source(agent, store, thread, options)
     # A gateway retry happens after the current user message was durably appended.
     # It is already represented by ``current_prompt`` and must remain outside the
     # prefix being summarized, exactly like 会话运行时 keeps the active turn input while
     # replacing older history with one compact item.
-    pending = list(source.messages)
+    pending = source.messages
     policy = source.policy
     current = thread
     base_summary = compact_context.view.summary if compact_context is not None else current.summary
@@ -319,7 +340,7 @@ def _prepare_compact_request(
     if projected < _compact_request_input_ceiling(agent, policy) and not options.force:
         return ConversationCompactResult(
             thread=current,
-            messages=tuple(pending),
+            messages=pending,
             projected_tokens=projected,
             trigger_tokens=policy.trigger_tokens,
             compacted=False,
@@ -357,7 +378,7 @@ def _prepare_compact_request(
         store=store,
         thread=current,
         current_prompt=options.current_prompt,
-        pending=tuple(pending),
+        pending=pending,
         policy=policy,
         projected_tokens=projected,
         forced=bool(options.force),
@@ -390,7 +411,7 @@ def _prepare_compact_request(
     return request
 
 
-# LLM: 宿主显式source只是冻结候选，必须与此线程当前已提交scope视图相同；空或旧摘要不得由thread.summary补造。
+# LLM: 显式source须与此线程当前scope视图相同；错线程短路仍关闭来源，空/旧摘要不得由thread.summary补造。
 # 函数用途: 在摘要/计量之前核对来源行与持久视图，发现错线程、重复行或过期范围就报错。
 def _validated_compact_source_context(
     agent: SimpleAgent,
@@ -403,7 +424,9 @@ def _validated_compact_source_context(
     if context.thread_id != thread.thread_id or not isinstance(context.scope, CompactScope):
         raise ConversationCompactError("Compact source scope mismatches thread", code="COMPACT_SOURCE_CHANGED")
     ids = [row.message_id for row in source.messages if isinstance(row, MessageLogEntry)]
-    if (len(ids) != len(source.messages) or any(row.thread_id != thread.thread_id for row in source.messages)
+    with message_rows_iterator(source.messages) as rows:
+        foreign_source = any(row.thread_id != thread.thread_id for row in rows)
+    if (len(ids) != len(source.messages) or foreign_source
             or any(not message_id for message_id in ids) or len(set(ids)) != len(ids)):
         raise ConversationCompactError("Compact source messages are invalid", code="COMPACT_SOURCE_CHANGED")
     from .compact_summary_view import resolve_compact_summary_view
@@ -590,30 +613,26 @@ def render_conversation_context_usage(
     return "\n".join(lines)
 
 
-# LLM: 原生信封是媒体完整性的权威；从首个不可文字概括的逻辑回合起保护全部原始行，禁止摘要后越过该游标。
-# 函数用途: 找到可以完整摘要的历史前缀，以及必须按原顺序留给后续模型的媒体后缀。
+# LLM: 原生信封是媒体完整性的权威；首个非文本回合起保护全部后缀，短路时关闭读取，禁止摘要越过该游标。
+# 函数用途: 在可重放地址上划分可摘要前缀和媒体保护后缀，不复制全量行。
 def _split_nontext_transcript_suffix(
-    rows: list[MessageLogEntry],
-) -> tuple[list[MessageLogEntry], list[MessageLogEntry]]:
-    for index, row in enumerate(rows):
-        native = canonical_native_messages_from_metadata(row.metadata)
-        if native and not text_messages_supported(native):
-            start = _nontext_turn_start(rows, index)
-            return rows[:start], rows[start:]
+    rows: Sequence[MessageLogEntry],
+) -> tuple[Sequence[MessageLogEntry], Sequence[MessageLogEntry]]:
+    with message_rows_iterator(rows) as iterator:
+        for index, row in enumerate(iterator):
+            native = canonical_native_messages_from_metadata(row.metadata)
+            if native and not text_messages_supported(native):
+                start = _nontext_turn_start(rows, index)
+                return rows[:start], rows[start:]
     return rows, []
 
 
-# LLM: 回合边界优先采用宿主写入的结构化身份；旧行无身份时退到最近用户行，不以正文内容猜测配对。
-# 函数用途: 定位媒体信封所属完整问答的第一行，确保用户输入和工具往返一起留在历史中。
-def _nontext_turn_start(rows: list[MessageLogEntry], index: int) -> int:
+# LLM: 边界优先采用结构化身份；首次匹配后关闭重放，旧行退到最近用户行，不以正文猜配对。
+# 函数用途: 在同一只读来源定位媒体所属完整问答，保留用户输入与工具往返。
+def _nontext_turn_start(rows: Sequence[MessageLogEntry], index: int) -> int:
     identity = _row_turn_identity(rows[index])
-    start = next(
-        (
-            position for position, row in enumerate(rows[: index + 1])
-            if identity and _row_turn_identity(row) == identity
-        ),
-        index,
-    )
+    with message_rows_iterator(rows[: index + 1]) as iterator:
+        start = next((position for position, row in enumerate(iterator) if identity and _row_turn_identity(row) == identity), index)
     if rows[start].role == "user":
         return start
     return next(
@@ -623,13 +642,13 @@ def _nontext_turn_start(rows: list[MessageLogEntry], index: int) -> int:
 
 
 # LLM: 原生媒体或未知非文本块所在逻辑turn起的完整后缀必须保留；仅安全前缀进入原forced/auto分区与checkpoint覆盖。
-# 函数用途: 依次尝试近期尾部分区，优先健康目标，否则保留仍可发送的最佳候选，避免无效提交后反复压缩。
+# 函数用途: 以地址分区尝试候选，立即释放超量候选；保留候选与自己的请求一起采用。
 def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
     # LLM: A provider-pressure retry must replace the whole completed prefix once. Repeatedly
     # protecting and then re-compacting the same tail creates checkpoint churn without helping
     # the active turn fit. Normal threshold compaction still protects bounded complete turns.
     # 逻辑说明: 平时到 90% 时保留近期完整问答；供应商已报压力时一次压完旧段，避免同一尾部连压多代。
-    safe_prefix, protected_suffix = _split_nontext_transcript_suffix(list(request.pending))
+    safe_prefix, protected_suffix = _split_nontext_transcript_suffix(request.pending)
     if not safe_prefix:
         raise ConversationCompactError("没有可完整文字摘要的历史前缀，保留原始媒体", code="COMPACT_SOURCE_EMPTY")
     partitions = (
@@ -660,7 +679,7 @@ def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
             )
             raise
     for partition_index, (compact_rows, ordinary_tail) in enumerate(partitions):
-        retained_tail = [*ordinary_tail, *protected_suffix]
+        retained_tail = concatenate_message_rows(ordinary_tail, protected_suffix)
         raise_if_compact_interrupted(request.interrupt_check)
         summarize_percent = 15 + int(partition_index * 50 / partition_count)
         measure_percent = 15 + int((partition_index + 0.75) * 50 / partition_count)
@@ -702,6 +721,7 @@ def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
             after_tokens=candidate.projected_tokens_after,
         )
         if candidate.projected_tokens_after >= _compact_request_input_ceiling(request.agent, request.policy):
+            candidate = None
             continue
         if candidate.projected_tokens_after <= request.policy.recovery_target_tokens:
             return _commit_compact_candidate_or_record_failure(request, candidate)
@@ -758,11 +778,11 @@ def _commit_compact_candidate_or_record_failure(
 
 
 # LLM: 候选继承同scope摘要和证据，携带自己的工具分区；双来源共同摘要和完整计量，不能提前提交任何一侧。
-# 函数用途: 分段摘要并报告覆盖进度，重投影候选后交原接受门裁决，不提前修改活请求或游标。
+# 函数用途: 流式消费同源地址并报告进度，候选保留范围视图，交原接受门而不提前改游标。
 def _build_compact_candidate(
     request: _CompactRunRequest,
-    compact_rows: list[MessageLogEntry],
-    retained_tail: list[MessageLogEntry],
+    compact_rows: Sequence[MessageLogEntry],
+    retained_tail: Sequence[MessageLogEntry],
     *,
     provider_surface: ConversationCompactProviderSurface | None,
     progress_range: tuple[int, int] = (15, 65),
@@ -798,7 +818,7 @@ def _build_compact_candidate(
     )
     raise_if_compact_interrupted(request.interrupt_check)
     projection = project_compact_request(request.request_projector, ConversationCompactView(
-        request.thread.thread_id, request.thread.compact_generation + 1, summary, tuple(retained_tail),
+        request.thread.thread_id, request.thread.compact_generation + 1, summary, retained_tail,
         evidence, dict(_recent_operation_evidence(retained_tail) or {}), request.policy.trigger_tokens, True,
         retained_tool_records=request.tool_source.retained_records if request.tool_source is not None else None,
         retained_ir_history=request.tool_source.retained_ir_history if request.tool_source is not None else None,
@@ -814,8 +834,8 @@ def _build_compact_candidate(
     return _CompactCandidate(
         summary=summary,
         operation_evidence=evidence,
-        compact_rows=tuple(compact_rows),
-        retained_tail=tuple(retained_tail),
+        compact_rows=compact_rows,
+        retained_tail=retained_tail,
         projected_tokens_after=projected_after,
         request_projection=projection,
         tool_source=request.tool_source,
@@ -823,12 +843,15 @@ def _build_compact_candidate(
 
 
 # LLM: 原checkpoint与generation CAS仍唯一；显式scope/base写入同一候选，局部提交只推进链head不发布全线程摘要/游标。
-# 函数用途: 将已验证候选提交为新代次，并返回同一完整请求，保持局部和全线程投影边界。
+# 函数用途: 复验实际覆盖及保留来源后沿原CAS提交同一候选，局部范围和原始文件不变。
 def _commit_compact_candidate(
     request: _CompactRunRequest,
     candidate: _CompactCandidate,
 ) -> ConversationCompactResult:
     raise_if_compact_interrupted(request.interrupt_check)
+    for rows in (candidate.compact_rows, candidate.retained_tail):
+        if isinstance(rows, MessageSnapshotRows):
+            rows.validate()
     last_row = candidate.compact_rows[-1]
     byte_offset = request.store.messages.byte_offset_after(
         request.thread.thread_id,
@@ -871,6 +894,9 @@ def _commit_compact_candidate(
         after_tokens=candidate.projected_tokens_after,
     )
     raise_if_compact_interrupted(request.interrupt_check)
+    for rows in (candidate.compact_rows, candidate.retained_tail):
+        if isinstance(rows, MessageSnapshotRows):
+            rows.validate()
     updated = request.store.threads.update_compact_state(
         request.thread.thread_id,
         commit=ConversationCompactCommit(
@@ -899,7 +925,7 @@ def _commit_compact_candidate(
         compacted=True,
         request_projection=candidate.request_projection,
         recent_operation_evidence=_recent_operation_evidence(
-            list(candidate.retained_tail)
+            candidate.retained_tail
         ),
     )
 
@@ -975,11 +1001,11 @@ def _uncompacted_conversation_rows(
 # inputs that have not yet produced a durable assistant checkpoint. Once the same request has an
 # assistant row, 会话运行时 mid-turn Compact must summarize that completed prefix instead of
 # hiding the whole request and repeatedly returning context_overflow.
-# 函数用途: 按结构化请求身份排除末尾尚未产生回复的当前用户输入；同一请求已落盘的阶段回复可进入运行中 Compact。
+# 函数用途: 按结构化身份切去尚未结束的用户后缀，只切地址；已落盘阶段回复仍可进入Compact。
 def _without_current_request_suffix(
-    rows: list[MessageLogEntry],
+    rows: Sequence[MessageLogEntry],
     request_id: str,
-) -> list[MessageLogEntry]:
+) -> Sequence[MessageLogEntry]:
     """Exclude only uncommitted trailing user inputs from compact input."""
     expected = str(request_id or "").strip()
     if not expected:
@@ -1006,11 +1032,11 @@ def _without_current_request_suffix(
 
 
 # LLM: 当前投影取文字与原生会话形状的较大估算，保留工具账；未含完整宿主 memories/inject/schema，不能当换模或完整恢复容量证明。
-# 函数用途: 估算会话摘要、历史尾部和当前输入；完整恢复准备将复用原 ToolLoopRequestInput 接入，不另建 tokenizer。
+# 函数用途: 流式编码完整会话历史并复用原估算公式；不把此局部估算当完整恢复容量证明。
 def _projected_context_tokens(
     agent: SimpleAgent,
     summary: str,
-    rows: list[MessageLogEntry],
+    rows: Sequence[MessageLogEntry],
     current_prompt: str,
     *,
     operation_evidence: dict[str, object] | None = None,
@@ -1020,19 +1046,17 @@ def _projected_context_tokens(
         base = agent.prompts.build(current_prompt, [], inject=[])
     except Exception:
         base = current_prompt
-    foreground_rows = [
-        row for row in rows if not is_audit_background_transcript_entry(row)
-    ]
+    foreground_rows = filtered_message_rows(rows, lambda row: not is_audit_background_transcript_entry(row))
     common = {
         "base_prompt": base,
         "conversation_summary": summary,
         "conversation_operation_evidence": operation_evidence or {},
         "conversation_recent_operation_evidence": recent_operation_evidence or {},
     }
-    legacy_tokens = estimate_tokens(
+    legacy_tokens = estimate_compact_payload(
         {
             **common,
-            "conversation_messages": [
+            "conversation_messages": CompactMessageSource(lambda: (
                 {
                     "role": row.role,
                     "content": conversation_message_with_terminal_tool_fold(
@@ -1043,15 +1067,13 @@ def _projected_context_tokens(
                     else row.content,
                 }
                 for row in foreground_rows
-            ],
+            )),
         }
     )
-    native_tokens = estimate_tokens(
+    native_tokens = estimate_compact_payload(
         {
             **common,
-            "conversation_native_messages": provider_history_messages_from_rows(
-                foreground_rows
-            ),
+            "conversation_native_messages": CompactMessageSource(lambda: iter_provider_history_messages_from_rows(foreground_rows)),
         }
     )
     return max(legacy_tokens, native_tokens)
@@ -1059,12 +1081,12 @@ def _projected_context_tokens(
 
 # LLM: 摘要为软上下文，操作证据另守权威；原缓存面追加完整工具模型投影，超量沿原分段器。
 # 严格恢复空文本/工具调用回退保留旧摘要与全部消息/工具来源，最终容量门裁决；网络异常不提交、不执行工具。
-# 函数用途: 由当前模型合并旧摘要、消息和可选工具来源，再附原文锚点，保持来源与候选一起接受或拒绝。
+# 函数用途: 从可重放原生投影分段归纳完整来源，再附原文锚点；只在可容纳的实际请求边界物化正文。
 def _summarize(
     agent: SimpleAgent,
     previous_summary: str,
     operation_evidence: dict[str, object],
-    rows: list[MessageLogEntry],
+    rows: Sequence[MessageLogEntry],
     *,
     call: _CompactSummaryCall | None = None,
 ) -> str:
@@ -1075,9 +1097,7 @@ def _summarize(
     tool_history = compact_tool_summary_history(selected_call.tool_source_records, selected_call.tool_source_ir_history)
     tool_source_text = compact_tool_summary_text(tool_history) if tool_history else ""
     provider_surface = selected_call.provider_surface
-    foreground_rows = [
-        row for row in rows if not is_audit_background_transcript_entry(row)
-    ]
+    foreground_rows = filtered_message_rows(rows, lambda row: not is_audit_background_transcript_entry(row))
     instruction = _conversation_summary_instruction(
         operation_evidence,
         custom_instructions=selected_call.custom_instructions,
@@ -1089,12 +1109,12 @@ def _summarize(
             previous_summary,
             foreground_rows,
         )
-        provider_messages = None
+        message_source = None
         provider_tools = None
         system_instruction = ""
     else:
         prompt = conversation_compact_provider_prompt(provider_surface, instruction)
-        provider_messages = conversation_compact_provider_messages(
+        message_source = conversation_compact_provider_source(
             previous_summary,
             selected_call.compact_generation,
             foreground_rows,
@@ -1107,10 +1127,10 @@ def _summarize(
         )
         system_instruction = provider_surface.system_instruction
     if tool_source_text:
-        if provider_messages is None:
+        if message_source is None:
             prompt = f"{prompt}\n\n{tool_source_text}"
         else:
-            provider_messages = [*provider_messages, *AnthropicMessageAdapter().to_provider_messages(tool_history)]
+            message_source = message_source.with_tail(AnthropicMessageAdapter().to_provider_messages(tool_history))
     from .auxiliary_model_call import AuxiliaryModelCallRequest
     from .compact_request_budget import generate_bounded_compact_response
 
@@ -1118,7 +1138,7 @@ def _summarize(
         AuxiliaryModelCallRequest(
             agent=agent,
             prompt=prompt,
-            messages=provider_messages,
+            messages=None,
             tools=provider_tools,
             system_instruction=system_instruction,
             request_id=selected_call.request_id,
@@ -1130,6 +1150,7 @@ def _summarize(
         interrupt_check=selected_call.interrupt_check,
         source_progress=selected_call.source_progress,
         preserve_complete_fallback=selected_call.preserve_complete_fallback or bool(tool_history),
+        message_source=message_source,
     )
     summary = (
         ""
@@ -1491,19 +1512,20 @@ def _merge_compact_operation_evidence(
     }
 
 
-# LLM: Recent raw turns keep their own structured operation projection until those turns are
-# compacted; this prevents retaining prose while temporarily dropping its verification metadata.
+# LLM: 原始近期回合保留自己的结构化核验；有证据即短路时关闭文件，不能仅保留正文而丢掉核验。
 # 函数用途: 从尚未压缩的近期 assistant metadata 提取操作核验；没有 assistant 时不注入空账本。
 def _recent_operation_evidence(
-    rows: list[MessageLogEntry],
+    rows: Sequence[MessageLogEntry],
 ) -> dict[str, object] | None:
-    if not any(
-        row.role == "assistant"
-        and not is_audit_background_transcript_entry(row)
-        and isinstance(row.metadata, dict)
-        and isinstance(row.metadata.get("operation_verification"), dict)
-        for row in rows
-    ):
+    with message_rows_iterator(rows) as iterator:
+        has_evidence = any(
+            row.role == "assistant"
+            and not is_audit_background_transcript_entry(row)
+            and isinstance(row.metadata, dict)
+            and isinstance(row.metadata.get("operation_verification"), dict)
+            for row in iterator
+        )
+    if not has_evidence:
         return None
     return _merge_compact_operation_evidence({}, rows)
 

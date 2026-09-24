@@ -332,6 +332,7 @@ agent_py_agent/
 |   |   |-- store_messages.py           # 消息幂等追加、展示检查点及字节游标读取
 |   |   |-- message_scan.py             # 同canonical文件的固定尾界分页、字节限额与流式幂等扫描
 |   |   |-- message_selection.py        # 固定EOF两遍来源校验与逐行范围/覆盖筛选，无第二消息存储
+|   |   |-- message_replay.py           # 固定原文件身份及行地址/hash的只读消息重放，切片不驻留正文
 |   |   |-- store_tasks.py              # 任务关联、活动索引、工作区状态投影及终态进度关闭
 |   |   |-- store_audits.py             # Audit 准备、发布修订、终态重开与运行代提交
 |   |   |-- store_guidance.py           # 插话入队、精确认领、权威回执查询与组件组装
@@ -375,6 +376,7 @@ agent_py_agent/
 |   |   |-- compact_projection.py       # 原 Compact 的只读来源、完整请求投影和提交后临时材料合同
 |   |   |-- compact_provider_surface.py # transcript Compact 复用普通轮 stable prompt/system/tools/messages 的缓存面
 |   |   |-- compact_text_source.py      # 只读两遍编码校验与当前字符窗口，消费后释放，不拥有覆盖
+|   |   |-- compact_message_source.py   # 可重放原生摘要消息与完整JSON数组编码，复用唯一token估算
 |   |   |-- compact_request_budget.py   # 按当前模型窗口顺序分段摘要，完整覆盖历史且失败不推进游标
 |   |   |-- compact_tool_refs.py        # 从匹配原生工具往返保留原样路径线索，不靠模型摘要记忆目录
 |   |   |-- compact_guard.py            # 结构化完整回合选择、连续失败冷却与 typed compact 错误
@@ -594,6 +596,8 @@ agent_py_agent/
 |   |-- test_compact_tool_partition.py   # 原生完整配对、跨轮同名调用、未知/媒体/孤儿保留
 |   |-- test_compact_native_ir_recovery.py # 真实读文件原生回执、恢复安全点、原CAS及候选HTTP对等
 |   |-- test_compact_text_source.py   # 顺序完整覆盖、源改写/取消、纠正预算与序列化峰值回归
+|   |-- test_compact_message_source.py # 可重放摘要消息的编码/估算等价及迭代关闭验证
+|   |-- test_compact_source_lifetime.py # 全选真实JSONL到摘要提交的正文驻留、完整覆盖及峰值验证
 |   |-- test_model_selection_isolation.py # 双会话选模故障隔离、近窗口完整材料和连接校准失效组合
 |   |-- test_compact_output_reserve.py # 三宿主完整输入和原输出cap、容量拒绝无提交及Responses字段对照
 |   |-- test_compact_retained_history.py # 三宿主完整保留行、媒体/工具回放和超容量不丢来源
@@ -939,6 +943,10 @@ docs/
 - `agent_py_agent/agent/conversation/store_layout.py`：`store.storage` 的唯一目录和路径上下文；初始化可只读，路径方法不授权业务操作、不改变原文件名。
 - `agent_py_agent/agent/conversation/store_threads.py`：`store.threads` 保存唯一线程元数据和通道索引，提供同一线程锁内的 CAS；新会话模型解析器由本领域持有。
 - `agent_py_agent/agent/conversation/message_selection.py`：先冻结身份/锚点再筛正文，复用原文件，两遍原字节一致后才返回选中来源。
+- `agent_py_agent/agent/conversation/message_replay.py`：保存临时行地址而非完整正文，每次重放核对原文件身份及行hash，不新增持久索引。
+- `agent_py_agent/agent/conversation/compact_message_source.py`：原摘要链的可重放原生消息视图，完整数组编码和估算共用原规则，普通可发送请求仍物化原消息。
+- `agent_py_agent/tests/test_compact_source_lifetime.py`：从真实canonical加载前开始测量摘要链内存，并核对完整字符、精确ID及原CAS结果，不代替三宿主峰值验收。
+- `agent_py_agent/tests/test_compact_message_source.py`：完整JSON标点和结构开销等价、不同Unicode与native消息及取消关闭的窄回归。
 - `agent_py_agent/tests/test_conversation_message_selection.py`：锚点先于覆盖、缺锚点隔离、迟到追加/改写/坏行和大范围外正文低内存回归。
 - `agent_py_agent/agent/conversation/message_scan.py`：固定完整行尾界和显式页字节限额，流式幂等检查沿原消息锁，无第二账本。
 - `agent_py_agent/tests/test_conversation_message_scan.py`：冻结尾界、页预算、迟到追加、坏行回滚与大历史低内存幂等验证。

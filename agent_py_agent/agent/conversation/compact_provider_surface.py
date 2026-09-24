@@ -6,19 +6,20 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 from ..agent_core.native_tool_protocol import resolve_native_tools
-from ..backends.message_adapter import AnthropicMessageAdapter, strip_orphaned_tool_blocks
+from ..backends.message_adapter import AnthropicMessageAdapter, iter_strip_orphaned_tool_blocks
 from ..backends.tool_ir import CompactionSummary, RuntimeFactsTurn
 from ..model_guidance import provider_system_instruction
 from ..prompting_parts.builder import ToolSections
 from ..prompting_parts.cache_layout import CacheStructuredPrompt, prompt_cache_layout
-from .native_history import provider_history_messages_from_rows
+from .compact_message_source import CompactMessageSource
+from .native_history import iter_provider_history_messages_from_rows
 
 if TYPE_CHECKING:
     from ..agent_core.runtime.loop_models import RuntimeContextRequest
@@ -200,8 +201,8 @@ def conversation_compact_provider_prompt(
 # LLM: Previous committed summary uses the exact ordinary-run envelope, followed by the selected
 # canonical transcript prefix and typed current display facts. The ordinary IR adapter owns their
 # provider shape; orphan repair is provider validation only and never changes canonical storage.
-# canonical读取已给出本次独占的嵌套副本；纯孤儿修补可直接消费，不重复复制整份历史。
-# 函数用途: 回放待压缩历史并追加同片动态名卡，原生工具往返与稳定前缀不变，摘要指令仍位于最后。
+# 唯一可重放核心拥有相同原生转换和清扫；此公开列表接口在需要完整内存结果时物化。
+# 函数用途: 返回与普通缓存面一致的完整provider数组，不改变原工具往返或动态段。
 def conversation_compact_provider_messages(
     previous_summary: str,
     compact_generation: int,
@@ -209,6 +210,14 @@ def conversation_compact_provider_messages(
     *,
     volatile_sections: tuple[tuple[str, str], ...] = (),
 ) -> list[dict[str, Any]]:
+    return list(conversation_compact_provider_source(previous_summary, compact_generation, rows,
+                                                     volatile_sections=volatile_sections))
+
+
+# LLM: 各遍重放同一rows，原生最后信封与orphan规则共用原实现；不缓存完整provider数组，不授予历史覆盖。
+# 函数用途: 为摘要计量与分段提供同一可重放缓存面，完整旧摘要和展示段仍原样保留。
+def conversation_compact_provider_source(previous_summary, compact_generation, rows, *, volatile_sections=()):
+    rows = rows if isinstance(rows, Sequence) else tuple(rows)
     prefix: list[dict[str, Any]] = []
     summary = str(previous_summary or "").strip()
     if summary:
@@ -220,11 +229,17 @@ def conversation_compact_provider_messages(
                 )
             ]
         )
-    canonical = provider_history_messages_from_rows(rows)
     current_display = AnthropicMessageAdapter().to_provider_messages(
         [RuntimeFactsTurn(text=text, source=source) for source, text in volatile_sections]
     )
-    return strip_orphaned_tool_blocks([*prefix, *canonical, *current_display])
+    # LLM: 每次重放都沿同一冻结rows，yield from向native迭代器传播提前关闭，不能留下文件句柄。
+    # 函数用途: 在原生历史前后加原摘要和展示消息，保持原数组顺序。
+    def replay():
+        yield from prefix
+        yield from iter_provider_history_messages_from_rows(rows)
+        yield from current_display
+
+    return CompactMessageSource(lambda: iter_strip_orphaned_tool_blocks(replay))
 
 
 __all__ = [
