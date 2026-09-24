@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "my-agent-harness-console"
+version = "0.1.0"
+description = "本机网页/桌面窗口工作台：经宿主只读 API 展示 my-agent 线程、运行状态、上下文用量与插件"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+dependencies = []
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+license-files = ["LICENSE", "NOTICE"]
+
+[tool.setuptools.package-data]
+harness_console = ["declaration.json"]

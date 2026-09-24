@@ -1,0 +1,101 @@
+{
+  "plugin_id": "harness-console",
+  "summary": "agent 工作台界面：用网页或桌面窗口查看线程、运行状态、上下文用量与插件",
+  "entry_module": "harness_console",
+  "default_action": "open",
+  "host_api": ["read"],
+  "actions": [
+    {
+      "name": "open",
+      "summary": "启动（或复用）工作台网页并用默认浏览器打开",
+      "arguments": [],
+      "kind": "tool",
+      "target": "open",
+      "available": true
+    },
+    {
+      "name": "desktop",
+      "summary": "启动（或复用）工作台并以独立桌面应用窗口打开",
+      "arguments": [],
+      "kind": "tool",
+      "target": "desktop",
+      "available": true
+    },
+    {
+      "name": "stop",
+      "summary": "停止工作台服务并关闭它启动的桌面窗口",
+      "arguments": [],
+      "kind": "tool",
+      "target": "stop",
+      "available": true
+    }
+  ],
+  "tools": [
+    {
+      "name": "open",
+      "description": "打开 my-agent 工作台网页：在插件进程内启动（已在运行则复用）只绑 127.0.0.1 随机端口的只读网页，展示最近线程、选中线程的运行状态与上下文用量、已安装插件；按设置用系统默认浏览器打开。返回不含令牌的地址，完整链接写入插件数据目录的 last-link.txt。",
+      "requested_effect": "mutating",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "desktop",
+      "description": "以桌面窗口打开 my-agent 工作台：启动（或复用）工作台网页，用本机 Chrome/Chromium 的独立应用窗口（无地址栏、专属 profile）打开；找不到浏览器时回退到系统默认浏览器，二者都不行时说明桌面窗口不可用。",
+      "requested_effect": "mutating",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "stop",
+      "description": "停止工作台网页服务、释放端口，并关闭由 desktop 启动的应用窗口；没有服务时直接返回未运行。",
+      "requested_effect": "mutating",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "settings_schema": {
+    "type": "object",
+    "properties": {
+      "open_browser": {
+        "type": "boolean",
+        "description": "open 后是否用系统默认浏览器直接打开带令牌的链接",
+        "default": true
+      },
+      "chrome_path": {
+        "type": "string",
+        "minLength": 0,
+        "maxLength": 4096,
+        "default": "",
+        "description": "desktop 用的 Chrome/Chromium 可执行文件路径；留空时按平台自动探测常见位置"
+      },
+      "idle_stop_seconds": {
+        "type": "integer",
+        "description": "无请求多少秒后自动停止服务（页面打开时每次轮询都算请求）",
+        "minimum": 1,
+        "maximum": 86400,
+        "default": 1800
+      },
+      "poll_seconds": {
+        "type": "integer",
+        "description": "页面刷新运行状态的间隔秒数",
+        "minimum": 1,
+        "maximum": 30,
+        "default": 2
+      }
+    },
+    "required": [],
+    "additionalProperties": false
+  }
+}
