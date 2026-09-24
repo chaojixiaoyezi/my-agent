@@ -27,3 +27,27 @@
 本片没有因真实回退改生产代码，因此没有把既有 fake 合同测试重复算作真实采用通过。主线已跑 doc sync、Ruff、E1 语法及 diff；汇总严格 gate 须在 P4-B 修复稳定后再跑。
 
 建议下一步：先修普通 owner 的可信会话来源与设置回执截断问题，再用同一 8431 串行复测；P5-D 可在不人为指定候选的任务中继续观察异模建议，并只在原完整请求、目录、线程 CAS 和实际发送事实都成立时计为自动采用。其它 agent 可并行只读核对其容量/模态边界，不得同时改 Gateway 原发送接缝。
+
+## 第四个样本：明显超出当前窗口的长资料任务（2026-09-24，main `3d2424786`）
+
+**环境**：
+- 授权测试机上的新隔离目录，由 main `3d2424786` 构建 wheel（SHA256 `425bc2385005c655cb9d184df0c72be7d58a20a2d8c9c86750c65fbeaf7db1ea`，5,589,594 字节；git archive SHA256 `b0727492519a3278544c1d40e9c68f0d4fffcd5f99edec178369765d5d055401`）。
+- 唯一 Gateway 监听 `127.0.0.1:8431`，原生 TUI。
+- 模型目录原样复制，不改任何字段：默认官方 MiniMax-M2.7（声明窗口 200,000）；候选另有官方 MiniMax-M3 与 OpenCode deepseek-v4-flash（都声明 1,000,000）。
+- 决策设置经原 CAS 只开 `points.model_selection.mode=apply`，关掉 skill_tool 与 subagent_model，减少干扰；期限 8 秒单次、10 秒阶段。压缩点 50%。
+- 材料：8 份中文盘点资料，合计 325,451 字。
+
+**需求**（新会话，只给一次普通中文 prompt，不点名模型）：完整阅读 8 份资料（合计约 32 万字），逐份核对每个仓位的差异件数与原因，最后给出交叉对比结论。
+
+**结果**：
+- Jev 真实调用 1 次（HTTP 200，1.04 秒，决策输入 1,120 tokens）。结构化观察 `model_selection_observation`：`status=observed`、`choice` 等于当前 M2.7 的 profile、`adopted=false`、`adoption_eligibility=not_evaluated`（选的就是当前模型，不需要采用）。
+- 请求 `gwreq-1790261260-7e8ced84d9894cadaf77826e6b897f5d` 为 done/completed，8 个工具轮，202 秒；全程在 M2.7 上执行，线程压缩到第 2 代，模型来源仍是 `default`。
+- 用量：主模型 M2.7 9 次、输入 293,291；摘要 2 次、输入 179,680；决策 1 次、输入 1,120。出站 16 次（Jev 1 次、MiniMax 15 次）全部 HTTP 200。
+- 回答质量不因 done 自动通过：最终回答把"每份约 670 条记录"说成了"每份差异总件数都是 670"，与材料不符。这是模型的计算/归纳错误，不加针对样例的分支。
+
+**结论**：
+- 即使任务明显超出 M2.7 的声明窗口，Jev 仍建议保留当前模型；容量由宿主靠压缩解决，符合"容量由代码判断、Jev 只比较语义"的设计。
+- 至此主会话共 4 个真实样本：超时、need_data、两次选当前模型。真实跨模型自动采用仍未出现，P5-D 不关闭。
+- 候选材料只有模型名、后端和声明窗口，指令又要求"候选声明不是实际能力证明"，Jev 缺少语义依据。要让自然的跨模型采用有机会出现，需要给候选补上由用户授权的结构化用途说明。这是设计方向，未实施，已记入 [DESIGN_LEDGER](../../DESIGN_LEDGER.md)。
+
+**清理**：TUI `/exit`，Gateway 经原 CLI 停止，PID 不存活，8431 无监听，pending/processing 为 0；原 CAS 恢复隔离 owner 设置（owner revision 25，enabled=false）。清理记录 `artifacts/cleanup-current.json`（SHA256 `57c36820d4424616d6146abfdcf55d90ef7b96568b32410513e43223f6704a40`），本机副本在 `~/.my-agent/decision-evidence/p5d-3d2424786-20260924/`（仓库外）。本轮 Jev 1 次，累计 66 次。
