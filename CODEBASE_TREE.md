@@ -802,6 +802,22 @@ plugins/
 |       |-- __init__.py                #
 |       |-- __main__.py                # python -m activity_line 启动 stdio 服务
 |       `-- server.py                  # 握手声明展示能力，只实现只读 my-agent/display.render
+|-- browser-lite/                     # 自有浏览器插件：标准库最小 CDP 客户端驱动本机 Chrome，打开/读取/点击/填写受控页面
+|   |-- README.md                      # 构建、依赖准备、五个动作用法与安全边界
+|   |-- pyproject.toml                 # 插件发行身份及精确 SDK 依赖，不含浏览器
+|   `-- src/browser_lite/
+|       |-- declaration.json           # 动作、工具（read 只读，其余 mutating）与设置的唯一声明
+|       |-- __init__.py                # 独立插件包入口
+|       |-- __main__.py                # python -m browser_lite 启动 stdio 服务
+|       |-- server.py                  # MCP 握手声明读取上下文扩展，逐次分派；EOF/SIGTERM 时关闭浏览器
+|       |-- declarations.py            # 读取同源声明并验证参数和设置（含字符串数组）
+|       |-- errors.py                  # 带稳定错误码的中文业务错误
+|       |-- access.py                  # 地址守卫：工作区 file:// 经读取上下文裁决，http(s) 只放行 allowed_hosts
+|       |-- launcher.py                # 浏览器探测、专属 profile 启动、调试端口读取与进程回收
+|       |-- websocket.py               # 最小 WebSocket 客户端：握手、掩码帧编解码、分片、ping/pong、close
+|       |-- cdp.py                     # 页面级 CDP 命令/事件收发、请求拦截与崩溃检测
+|       |-- page.py                    # open/read/click/fill 页面脚本与结果结构
+|       `-- session.py                 # 单浏览器会话：启动复用、空闲回收、致命错误后关闭
 |-- context-inspector/                # 自有纯展示插件：面板查看上下文用量、组成与压缩次数，无工具、无设置、无依赖
 |   |-- README.md                      # 构建与面板用法
 |   |-- pyproject.toml                 # 插件发行身份，无运行依赖
@@ -936,6 +952,7 @@ docs/
 - `plugins/genui-lite/`：首个随包带 Skill（包描述 v3）的自有插件，table 只读渲染、export 经写入上下文导出独立 HTML；`agent_py_agent/tests/test_genui_lite_package.py` 为其实际包与 MCP 进程组件验收。
 - `plugins/image-text/`：本地 OCR 工具插件，只调用系统 tesseract、不调用模型；`agent_py_agent/tests/test_image_text_package.py` 为其实际包与 MCP 进程组件验收。
 - `plugins/design-lite/`：首个带随包 Skill（包描述 v3）的自有插件，生成与修改 HTML 设计文件都走写入上下文；`agent_py_agent/tests/test_design_lite_package.py` 为其实际包、Skill 打包与 MCP 进程组件验收。
+- `plugins/browser-lite/`：首个驱动外部进程的自有插件，浏览器不随包分发，专属 profile 在插件数据目录，地址经读取上下文与 allowed_hosts 双重裁决；`agent_py_agent/tests/test_browser_lite_package.py` 为其实际包、帧编解码与真实浏览器组件验收。
 - `plugins/savepoint-lite/`：首个写工作区的自有插件，快照只存宿主插件数据目录，恢复走写入上下文；`agent_py_agent/tests/test_savepoint_lite_package.py` 为其实际包与 MCP 进程组件验收。
 - `agent_py_agent/tests/test_plugin_api_build.py`、`agent_py_agent/tests/test_workspace_peek_package.py`：实际标准包、独立环境和原 MCP/宿主管理链的开发验证，不代替真实 TUI。
 

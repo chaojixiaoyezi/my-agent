@@ -1,0 +1,263 @@
+{
+  "plugin_id": "browser-lite",
+  "summary": "在专属无头浏览器里打开受控页面、读取元素、点击和填写测试表单",
+  "entry_module": "browser_lite",
+  "default_action": "read",
+  "actions": [
+    {
+      "name": "open",
+      "summary": "打开受控页面",
+      "arguments": [
+        {
+          "name": "url",
+          "summary": "页面地址（工作区文件路径、file:// 或允许主机的 http(s)）",
+          "options": [
+            "--url",
+            "-u"
+          ],
+          "value_type": "string",
+          "required": true,
+          "multiple": false,
+          "default": null,
+          "choices": [],
+          "path": false
+        }
+      ],
+      "kind": "tool",
+      "target": "open",
+      "available": true
+    },
+    {
+      "name": "read",
+      "summary": "读取页面元素",
+      "arguments": [
+        {
+          "name": "selector",
+          "summary": "CSS 选择器（不填列出表单控件与按钮）",
+          "options": [
+            "--selector",
+            "-s"
+          ],
+          "value_type": "string",
+          "required": false,
+          "multiple": false,
+          "default": null,
+          "choices": [],
+          "path": false
+        }
+      ],
+      "kind": "tool",
+      "target": "read",
+      "available": true
+    },
+    {
+      "name": "click",
+      "summary": "点击唯一匹配元素",
+      "arguments": [
+        {
+          "name": "selector",
+          "summary": "CSS 选择器",
+          "options": [
+            "--selector",
+            "-s"
+          ],
+          "value_type": "string",
+          "required": true,
+          "multiple": false,
+          "default": null,
+          "choices": [],
+          "path": false
+        }
+      ],
+      "kind": "tool",
+      "target": "click",
+      "available": true
+    },
+    {
+      "name": "fill",
+      "summary": "填写唯一匹配表单控件",
+      "arguments": [
+        {
+          "name": "selector",
+          "summary": "CSS 选择器",
+          "options": [
+            "--selector",
+            "-s"
+          ],
+          "value_type": "string",
+          "required": true,
+          "multiple": false,
+          "default": null,
+          "choices": [],
+          "path": false
+        },
+        {
+          "name": "value",
+          "summary": "要填写的文本或下拉选项",
+          "options": [
+            "--value",
+            "-v"
+          ],
+          "value_type": "string",
+          "required": true,
+          "multiple": false,
+          "default": null,
+          "choices": [],
+          "path": false
+        }
+      ],
+      "kind": "tool",
+      "target": "fill",
+      "available": true
+    },
+    {
+      "name": "close",
+      "summary": "关闭浏览器并清理缓存",
+      "arguments": [],
+      "kind": "tool",
+      "target": "close",
+      "available": true
+    }
+  ],
+  "tools": [
+    {
+      "name": "open",
+      "description": "在插件专属的无头浏览器里打开地址并等待加载，返回最终 URL、标题和可见文字前 2000 字。只允许当前工作区内的文件页面（可写相对路径或 file://）和设置 allowed_hosts 里的 http(s) 主机；会启动浏览器进程。",
+      "requested_effect": "mutating",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": "工作区文件路径、file:// 地址或允许主机的 http(s) 地址"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "read",
+      "description": "读取当前页面匹配 CSS 选择器的元素（最多 50 个）：标签、文字、value、name/id、是否可见；不给 selector 时列出表单控件与按钮。",
+      "requested_effect": "read_only",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "selector": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024,
+            "description": "CSS 选择器；省略时列出 input/textarea/select/button"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "click",
+      "description": "点击当前页面里唯一匹配 CSS 选择器的元素（0 个或多个都报错），等待导航或 500ms 稳定后返回新 URL 与标题。",
+      "requested_effect": "mutating",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "selector": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024,
+            "description": "只匹配一个元素的 CSS 选择器"
+          }
+        },
+        "required": [
+          "selector"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "fill",
+      "description": "填写当前页面里唯一匹配的 input/textarea/select（下拉可按选项 value 或文字），并触发 input/change 事件。",
+      "requested_effect": "mutating",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "selector": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024,
+            "description": "只匹配一个表单控件的 CSS 选择器"
+          },
+          "value": {
+            "type": "string",
+            "minLength": 0,
+            "maxLength": 10000,
+            "description": "要填写的文本或下拉选项"
+          }
+        },
+        "required": [
+          "selector",
+          "value"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "close",
+      "description": "关闭插件专属浏览器并删除本次 profile 下的缓存。",
+      "requested_effect": "mutating",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "settings_schema": {
+    "type": "object",
+    "properties": {
+      "chrome_path": {
+        "type": "string",
+        "minLength": 0,
+        "maxLength": 4096,
+        "default": "",
+        "description": "Chrome/Chromium 可执行文件路径；留空时按平台自动探测常见位置"
+      },
+      "allowed_hosts": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 253
+        },
+        "minItems": 0,
+        "maxItems": 32,
+        "default": [
+          "127.0.0.1",
+          "localhost"
+        ],
+        "description": "允许访问的 http(s) 主机名（精确匹配，不含端口）"
+      },
+      "idle_close_seconds": {
+        "type": "integer",
+        "minimum": 5,
+        "maximum": 86400,
+        "default": 120,
+        "description": "浏览器空闲多少秒后自动关闭"
+      },
+      "command_timeout_seconds": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 120,
+        "default": 15,
+        "description": "每个浏览器命令（含启动与页面加载）的超时秒数"
+      }
+    },
+    "required": [],
+    "additionalProperties": false
+  }
+}
