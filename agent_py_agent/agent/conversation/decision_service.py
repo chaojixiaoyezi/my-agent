@@ -37,6 +37,7 @@ from .decision_policy import (
     cooldown_state,
     decision_owner_ref,
     record_failure,
+    record_success,
     register_active,
     unregister_active,
 )
@@ -260,6 +261,7 @@ def decide(agent: object, params: object, stage: DecisionStage, *, point: str, s
 
 
 # LLM: 注册取消后再次复查堵住关闭/启动竞态；用户中断必须传播，设置取消仅使建议失效，不能冒充用户停止。
+# 连接一返回响应就复位该连接的退避阶梯（进程内冷却表），之后的复核失败不算连接故障。
 # 函数用途: 调用原模型边界并核验响应绑定、摘要、请求模型和最新配置；不执行任何业务变更。
 def _invoke(params, stage, request, backend, deadline, key, active) -> DecisionOutcome:
     from .decision_model_call import invoke_decision_model_call
@@ -275,6 +277,7 @@ def _invoke(params, stage, request, backend, deadline, key, active) -> DecisionO
             return DecisionOutcome(mode, "deadline", reason="budget_exhausted")
         response = invoke_decision_model_call(agent, params, request, backend, deadline=deadline,
             resource_key=("decision", stage.owner_ref, stage.thread_id, key[1], key[2]), interrupt_handle=active.handle)
+        record_success(key)
         _check_interrupted()
         if active.settings_cancelled:
             return DecisionOutcome(mode, "stale", reason="settings_changed")

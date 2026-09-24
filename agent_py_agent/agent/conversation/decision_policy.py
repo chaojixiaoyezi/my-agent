@@ -1,5 +1,5 @@
-# LLM: 这里只保存有界的冷却摘要和在途取消索引，不是 worker/资源池；实际退出仍由 bounded_call 跟踪。
-# 模块用途: 隔离决策连接故障，并将同进程设置撤销转交给原精确中断句柄。
+# LLM: 这里只保存有界的冷却摘要（含连续失败次数）和在途取消索引，不是 worker/资源池；实际退出仍由 bounded_call 跟踪。
+# 模块用途: 隔离决策连接故障并按连续失败逐步加长冷却，同时将同进程设置撤销转交给原精确中断句柄。
 from __future__ import annotations
 
 import hashlib
@@ -24,7 +24,11 @@ _LOCK = threading.Lock()
 _SALT = secrets.token_bytes(32)
 _MAX_FAILURES = 512
 _MAX_ACTIVE = 256
-_FAILURES: OrderedDict[tuple[str, str, str], tuple[str, str, float | None]] = OrderedDict()
+# 瞬时失败与超时的首次冷却；同一连接冷却过后再次失败时翻倍，封顶与额度冷却相同。
+_BASE_COOLDOWN_SECONDS = 30.0
+_MAX_COOLDOWN_SECONDS = 300.0
+# 值为 (状态, 设置修订, 冷却截止或 None, 连续失败次数)；冷却过期后保留次数，成功或显式重试才清除。
+_FAILURES: OrderedDict[tuple[str, str, str], tuple[str, str, float | None, int]] = OrderedDict()
 _ACTIVE: dict[str, ActiveDecision] = {}
 
 
@@ -72,34 +76,65 @@ def unregister_active(key: str, active: ActiveDecision) -> None:
             del _ACTIVE[key]
 
 
-# LLM: 显式 retry 只清一个准确连接的冷却；配置错误在配置修订改变前不热循环重发。
+# LLM: 显式 retry 清除一个准确连接的冷却及连续失败次数；配置错误在配置修订改变前不热循环重发。
+# 冷却过期只放行本次尝试，不删记录：下一次失败要据此加长冷却，成功才由 record_success 清除。
 # 函数用途: 返回当前连接的阻塞原因和剩余冷却秒数，未知连接不受其他 owner 故障影响。
 def cooldown_state(key: tuple[str, str, str], revision: str, *, retry: bool = False) -> tuple[str, float]:
     with _LOCK:
         item = _FAILURES.get(key)
         if item is None:
             return "", 0.0
-        status, old_revision, until = item
-        remaining = max(0.0, until - time.monotonic()) if until is not None else 0.0
-        if retry or until is not None and remaining <= 0 or until is None and revision != old_revision:
+        status, old_revision, until, _streak = item
+        if retry or until is None and revision != old_revision:
             _FAILURES.pop(key, None)
+            return "", 0.0
+        remaining = max(0.0, until - time.monotonic()) if until is not None else 0.0
+        if until is not None and remaining <= 0:
             return "", 0.0
         _FAILURES.move_to_end(key)
         return status, remaining
 
 
 # LLM: 只按异常类型分类，不能解析中文/服务商正文；不改变主 LLM 配置或其重试策略。
-# 函数用途: 记录一个连接的配置等待或有界冷却，额度 300 秒，其他增强故障 30 秒。
+# 冷却期内返回的并发失败属于同一次故障，不加长阶梯；只有冷却过期后的重试再失败才翻倍。
+# 函数用途: 记录一个连接的配置等待或有界冷却：额度 300 秒，其他故障 30 秒起、连续失败翻倍、封顶 300 秒。
 def record_failure(key: tuple[str, str, str], revision: str, error: Exception) -> str:
-    blocked = isinstance(error, ProviderConfigurationError)
-    status = "configuration_required" if blocked else "cooldown"
-    delay = 300.0 if isinstance(error, (ProviderQuotaExhaustedError, ProviderUsageLimitError)) else 30.0
+    if isinstance(error, ProviderConfigurationError):
+        with _LOCK:
+            _store_failure(key, ("configuration_required", revision, None, 0))
+        return "configuration_required"
+    quota = isinstance(error, (ProviderQuotaExhaustedError, ProviderUsageLimitError))
     with _LOCK:
-        _FAILURES[key] = (status, revision, None if blocked else time.monotonic() + delay)
-        _FAILURES.move_to_end(key)
-        while len(_FAILURES) > _MAX_FAILURES:
-            _FAILURES.popitem(last=False)
-    return status
+        streak, until = _next_cooldown(_FAILURES.get(key), time.monotonic(), quota)
+        _store_failure(key, ("cooldown", revision, until, streak))
+    return "cooldown"
+
+
+# LLM: 调用方持有 _LOCK；配置等待不计入阶梯，额度固定 300 秒但仍累计连续失败次数。
+# 函数用途: 按上一条记录算出本次失败后的连续次数和冷却截止时刻。
+def _next_cooldown(previous: tuple | None, now: float, quota: bool) -> tuple[int, float]:
+    cooling = previous is not None and previous[0] == "cooldown" and previous[2] is not None
+    if cooling and previous[2] > now:
+        return previous[3], max(previous[2], now + _MAX_COOLDOWN_SECONDS) if quota else previous[2]
+    streak = previous[3] + 1 if cooling else 1
+    delay = _MAX_COOLDOWN_SECONDS if quota else _BASE_COOLDOWN_SECONDS * 2 ** min(streak - 1, 4)
+    return streak, now + min(delay, _MAX_COOLDOWN_SECONDS)
+
+
+# LLM: 调用方持有 _LOCK；表有界，满时淘汰最久未用的连接记录，淘汰只会让该连接从 30 秒重新计起。
+# 函数用途: 写入一条连接失败记录并维持表的上限。
+def _store_failure(key: tuple[str, str, str], item: tuple[str, str, float | None, int]) -> None:
+    _FAILURES[key] = item
+    _FAILURES.move_to_end(key)
+    while len(_FAILURES) > _MAX_FAILURES:
+        _FAILURES.popitem(last=False)
+
+
+# LLM: 连接真实返回过响应即清除该连接的冷却和连续失败次数；响应之后的绑定/期限复核失败不属于连接故障。
+# 函数用途: 在决策调用成功返回后复位这个连接的退避阶梯。
+def record_success(key: tuple[str, str, str]) -> None:
+    with _LOCK:
+        _FAILURES.pop(key, None)
 
 
 # LLM: 比较有效开关/模式/绑定及 Skill/tool 展示策略；时间变化不延长旧请求，也不在通知中重置时钟。

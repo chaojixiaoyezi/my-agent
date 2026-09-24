@@ -126,6 +126,11 @@ def test_transport_faults_fall_back_then_recover_on_the_declared_boundary(tmp_pa
     last = decide(host, params, stage)
     assert last.status == recovered and _attempts(host, params) == attempts + 1
     assert last.may_apply is (recovered == "success")
+    if cooldown and recovered != "success":
+        # 故障仍在：冷却过期后的重试再失败，冷却按连续失败翻倍。
+        backoff = decide(host, params, stage)
+        assert (backoff.status, backoff.reason) == ("cooldown", "connection_backoff")
+        assert 2 * cooldown - 1 < backoff.retry_after_seconds <= 2 * cooldown
 
 
 # LLM: 同一 owner 的不同会话各自一条 canonical 线程；同会话的资源键相同，只能有一个决策在途。
