@@ -2,6 +2,16 @@
 
 child不展示历史正文时的读取回归先复现1 failed/1 passed，修复后test_compact_retained_history、test_subagent_compact_recovery、test_gateway_child_compact_scope_application三文件31 passed（8.48秒）。三宿主seed仓外基线仅验证测量和完整性，不算内存目标通过；细节见容量审计的宿主生命周期基线。
 
+## 验证命令分类：cd 前缀与管道（2026-09-25，本地分支 `claude/verification-command-shapes`）
+
+- **新测试** `test_verification_project_facts.py`：
+  - `cd <绝对路径> && python3 -m pytest …` 与 `cd "相对目录" && pytest` 都按 cd 目标归类，记录的 cwd 与项目根为该目录。
+  - cd 到不存在的目录、cd 后再接多段、`cd …;`、`cd … ||` 都不算证据。
+  - 管道、`|&`、后台 `&`，以及 cd 前缀后接管道，都不算证据；引号内的 `|` 仍能归类。
+- **新测试** `test_verification_runtime.py`：真实 `record_tool_verification` 把 `cd` 前缀的失败测试记在 cd 目标项目下。
+- **变异验证**：去掉管道检查、关闭 cd 剥离、去掉目录存在检查、记录原 cwd、放行后台 `&`、cd 前缀放行 `;`、项目根按原 cwd 查找，7 种变异各自使新测试失败。其中"去掉目录存在检查"最初未被杀死：测试用的缺失目录在项目外，本来就找不到项目。改为项目内的缺失子目录后被杀死。还原后逐字节一致（`PYTHONDONTWRITEBYTECODE=1`）。
+- **回归**：引用验证账或分类器的 8 个测试文件 193 passed，含交付复核焦点的单元与组合测试。
+
 ## TUI 决策菜单接入点跟随 schema（2026-09-25，本地分支 `claude/decision-tui-points`）
 
 - **新测试** `test_tui_decision_menu.py::test_menu_points_follow_the_schema_registry_and_reset_can_list_pre_recall`：菜单接入点与 schema `POINTS` 逐项一致；owner 覆盖 `points.pre_recall.mode` 后，该字段可编辑，恢复继承标签不崩溃并显示中文名。

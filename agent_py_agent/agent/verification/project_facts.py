@@ -8,6 +8,7 @@ exact shell tokens; it never treats user prose or a command's output as authorit
 """
 
 import json
+import os
 import re
 import shlex
 from dataclasses import dataclass
@@ -33,6 +34,11 @@ _JS_LOCKFILES = (
 )
 _VERIFY_TARGETS = ("test", "tests", "lint", "typecheck", "check", "build", "fmt", "format")
 _SHELL_SPLIT_RE = re.compile(r"\s*(?:&&|\|\||;)\s*")
+# 铁律：一次返回码只能证明一条命令。管道取末段返回码、后台立即返回 0，返回码都不再属于测试命令本身，一律不算证据。
+_EXIT_CODE_HIDING_TOKENS = frozenset({"|", "|&", "&"})
+# 同一铁律决定放行边界：只放行开头一个 `cd <目录> &&`。&& 在 cd 失败时短路，而目录存在且可进入由文件系统事实判定
+# （不解析输出），这时返回码只可能来自后一条命令；其余链式写法仍拒绝。
+_CD_PREFIX_RE = re.compile(r"^\s*cd\s+(?P<target>\"[^\"]*\"|'[^']*'|[^\s;&|]+)\s*&&\s*(?P<rest>.+)$", re.S)
 _MAX_FACT_FILE_BYTES = 256 * 1024
 _MAX_VERIFY_COMMANDS = 8
 _MAX_OUTPUT_SUMMARY_CHARS = 2000
@@ -84,8 +90,9 @@ def project_facts_for(cwd: str | Path | None) -> ProjectFacts | None:
 
 
 # LLM: only exact commands discovered from the current project can become
-# evidence; a successful arbitrary shell command is not verification.
-# 函数用途: 把一次真实命令结果归类成 targeted/full 验证证据。
+# evidence; a successful arbitrary shell command is not verification.  A single leading
+# `cd <existing dir> &&` moves the project lookup and recorded cwd to that directory.
+# 函数用途: 把一次真实命令结果归类成 targeted/full 验证证据；开头带 cd 前缀时按 cd 目标目录归类。
 def classify_verification_command(
     command: str,
     *,
@@ -93,10 +100,13 @@ def classify_verification_command(
     exit_code: int,
     output: str,
 ) -> ClassifiedVerification | None:
-    facts = project_facts_for(cwd)
-    if facts is None or not facts.verify_commands or not isinstance(command, str) or not command.strip():
+    if not isinstance(command, str) or not command.strip():
         return None
-    match = _find_canonical_match(command, facts.verify_commands)
+    effective_cwd, body = _cd_prefix(command, cwd)
+    facts = project_facts_for(effective_cwd)
+    if facts is None or not facts.verify_commands or body is None:
+        return None
+    match = _find_canonical_match(body, facts.verify_commands)
     if match is None:
         return None
     canonical, trailing_args = match
@@ -107,7 +117,7 @@ def classify_verification_command(
         scope="targeted" if any(_looks_like_target(arg) for arg in trailing_args) else "full",
         status="passed" if int(exit_code) == 0 else "failed",
         exit_code=int(exit_code),
-        cwd=str(Path(cwd or ".").expanduser().resolve(strict=False)),
+        cwd=str(Path(effective_cwd or ".").expanduser().resolve(strict=False)),
         root=str(facts.root),
         output_summary=_summarize_output(output),
     )
@@ -172,6 +182,35 @@ def _find_canonical_match(
     return None
 
 
+# LLM: 依"一次返回码只能证明一条命令"，只接受开头一个 `cd <目标> && <其余>`；目标按原 cwd 解析，是否为可进入的
+#   现有目录只看文件系统事实，不解析命令输出；否则返回 (cwd, None) 表示不可作为证据。没有 cd 前缀时原样返回，
+#   其余链式写法仍由 _command_segments 整体拒绝。
+# 函数用途: 拆出命令开头的 cd 前缀，返回实际工作目录和剩余命令文本。
+def _cd_prefix(command: str, cwd: str | Path | None) -> tuple[str | Path | None, str | None]:
+    match = _CD_PREFIX_RE.match(command)
+    if match is None:
+        return cwd, command
+    try:
+        (target,) = shlex.split(match.group("target"))
+        directory = (Path(cwd or ".").expanduser() / Path(target).expanduser()).resolve(strict=False)
+    except (ValueError, OSError, RuntimeError):
+        return cwd, None
+    if not directory.is_dir() or not os.access(directory, os.X_OK):
+        return cwd, None
+    return directory, match.group("rest")
+
+
+# LLM: 按带引号语义的 shell 记号判断；引号内的 | 或 & 只是参数，不算管道或后台。
+# 函数用途: 判断一段命令是否含有会让返回码不属于测试命令本身的管道或后台符号。
+def _hides_exit_code(raw: str) -> bool:
+    lexer = shlex.shlex(raw, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    return any(token in _EXIT_CODE_HIDING_TOKENS for token in lexer)
+
+
+# LLM: 一次 shell 返回码只能证明一条命令：多段链式、管道或后台写法都返回空列表，调用方不得据此生成验证证据；
+#   开头的 cd 前缀已由 _cd_prefix 先行剥离，不经过这里。
+# 函数用途: 把命令拆成可比对的记号段，只有恰好一段且返回码属于该段时才返回它。
 def _command_segments(command: str) -> list[list[str]]:
     segments: list[list[str]] = []
     for raw in _SHELL_SPLIT_RE.split(command.strip()):
@@ -179,6 +218,8 @@ def _command_segments(command: str) -> list[list[str]]:
             tokens = _tokens(raw)
         except ValueError:
             continue
+        if tokens and _hides_exit_code(raw):
+            return []
         if tokens:
             segments.append(tokens)
     # One shell return code can only prove one command.  Chained commands can
