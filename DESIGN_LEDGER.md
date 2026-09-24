@@ -15,7 +15,7 @@
 - 4.2M 字符来源下，种子准备后驻留从约 8.5MB 降到 32–54KB；运行结束后的驻留减少 8.4–9.4MB；Gateway 首次发送前峰值从 29.8MB 降到 21.3MB。
 - 摘要期峰值约 10–11MB 不变，属于 2b（旧请求释放）。
 
-恢复候选提交后的同请求重试（本地分支 `claude/decision-retry-committed`，待审）：候选发送瞬断后，重试原样复用已提交的（候选参数，prompt），不再在压缩前的原参数上重建。记录按原参数对象身份命中，换参数即清除。`_model_turn_or_retry` 的空响应修复和插话取代两个重跑分支仍在原参数上重建，已确认会崩溃，待定。详见[依赖拆分](docs/design/TOOL_LOOP_DEPENDENCY_SPLIT.md#恢复候选提交后的同请求重试决策分支2026-09-24本地)。
+恢复候选提交后的同请求重试（本地分支 `claude/decision-retry-committed`，待审）：候选发送瞬断后，重试原样复用已提交的（候选参数，prompt），不再在压缩前的原参数上重建。记录按原参数对象身份命中，换参数即清除。`_model_turn_or_retry` 的空响应修复和插话取代两个重跑分支也改为先换成候选参数，不再在原参数上重建或注入。详见[依赖拆分](docs/design/TOOL_LOOP_DEPENDENCY_SPLIT.md#恢复候选提交后的同请求重试决策分支2026-09-24本地)。
 
 详见[接入设计](docs/design/DECISION_MODEL_INTEGRATION.md#todo124-宿主历史来源与请求生命周期2026-09-23实施中)和[容量审计](docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md#宿主历史种子只读来源2a2026-09-23本地)。
 

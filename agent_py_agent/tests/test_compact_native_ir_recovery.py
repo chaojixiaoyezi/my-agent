@@ -434,38 +434,43 @@ def test_forced_recovery_with_identityless_carried_records_reports_coverage_unkn
     assert committed.compact_generation == 0 and not committed.compact_checkpoint_id
 
 
-# 后台宿主直接安装 PreparedCompactRecovery：提交候选后的瞬断重试沿同一原参数命中已提交记录，
-# 重试原样发送同一候选，不在旧参数上重建或做共享预算回收；摘要一次、代次保持 1。
-def test_background_transient_retry_after_commit_resends_committed_candidate(tmp_path, monkeypatch) -> None:
+# LLM: 后台宿主直接安装 PreparedCompactRecovery：首请求超预算，由宿主自动恢复并提交候选；业务响应按发送序号由
+# respond 脚本决定（可抛错），摘要走真实模型摘要分支。只记录事实，不改变被测流程。
+# 函数用途: 跑一次"提交候选后发送"的后台尝试，记录每次业务发送、发送前的重建与共享回收次数、回收是否落在原参数上、已提交候选。
+def _committed_background_attempt(tmp_path, monkeypatch, respond):
+    from types import SimpleNamespace
+
     from agent_py_agent.agent.agent_core import _tool_loop_service as service
     from agent_py_agent.agent.agent_core import provider_transient_auto_resume
     from agent_py_agent.agent.backends import http
-    from agent_py_agent.agent.backends.errors import ProviderTransientError
+    from agent_py_agent.agent.model_request_selection import _HOST
 
     body = "OVER_BUDGET_TOOL_BODY_" + "资料核对" * 3_700
-    agent, store, thread, execution, sink, history, params, context, recorded = _native_ir_attempt(
+    agent, store, thread, execution, sink, history, params, context, _recorded = _native_ir_attempt(
         tmp_path, monkeypatch, backend="anthropic_compatible", full_result=body, pairs=4,
         context_window_tokens=60_000,
     )
-    shared_fits, builds, candidates, summaries, business, waits = [], [], [], [], [], []
+    run = SimpleNamespace(agent=agent, store=store, thread=thread, candidates=[], summaries=[], business=[],
+                          builds=[], stale_fits=[], committed=[], waits=[], result=None, recovery=None)
     original_fit = service._fit_native_ir_to_shared_budget
     original_build = service.build_tool_loop_prompt
     original_project = recovery_core._project_mixed_recovery_material
     original_summary = active_turn_compact._active_turn_replacement_summary
+    original_select = recovery_core.PreparedCompactRecovery.select
     in_summary = False
 
-    def fit(*args, **kwargs):
-        shared_fits.append(True)
-        return original_fit(*args, **kwargs)
+    def fit(agent_, params_, *args, **kwargs):
+        run.stale_fits.append(params_ is getattr(_HOST.get(), "render_params", None))
+        return original_fit(agent_, params_, *args, **kwargs)
 
     def build(*args, **kwargs):
-        builds.append(True)
+        run.builds.append(True)
         return original_build(*args, **kwargs)
 
     def project(*args):
         material = original_project(*args)
         if args[1].is_candidate:
-            candidates.append(material)
+            run.candidates.append(material)
         return material
 
     def summary(*args, **kwargs):
@@ -476,6 +481,12 @@ def test_background_transient_retry_after_commit_resends_committed_candidate(tmp
         finally:
             in_summary = False
 
+    def select(self, *args):
+        value = original_select(self, *args)
+        if self.committed and not run.committed:
+            run.committed.append(value[0])
+        return value
+
     def send(request):
         wire = json.loads(json.dumps(request.payload, ensure_ascii=False))
         names = [row.get("name") for row in wire.get("tools", [])]
@@ -484,28 +495,82 @@ def test_background_transient_retry_after_commit_resends_committed_candidate(tmp
             probe = {"type": "tool_use", "id": "probe", "name": names[0], "input": {"nonce": nonce}}
             return {"content": [probe], "stop_reason": "tool_use"}
         if in_summary:
-            summaries.append(wire)
+            run.summaries.append(wire)
             return {"content": [{"type": "text", "text": _live_handoff_text()}], "stop_reason": "end_turn"}
-        business.append((wire, len(builds), len(shared_fits)))
-        if len(business) == 1:
-            raise ProviderTransientError("503 after commit")
-        return {"content": [{"type": "text", "text": "资料核对完成。"}], "stop_reason": "end_turn"}
+        run.business.append((wire, len(run.builds), len(run.stale_fits)))
+        return respond(run, len(run.business))
 
     monkeypatch.setattr(service, "_fit_native_ir_to_shared_budget", fit)
     monkeypatch.setattr(service, "build_tool_loop_prompt", build)
     monkeypatch.setattr(recovery_core, "_project_mixed_recovery_material", project)
     monkeypatch.setattr(active_turn_compact, "_active_turn_replacement_summary", summary)
-    monkeypatch.setattr(provider_transient_auto_resume, "_wait_before_retry", lambda *_: waits.append(True))
+    monkeypatch.setattr(recovery_core.PreparedCompactRecovery, "select", select)
+    monkeypatch.setattr(provider_transient_auto_resume, "_wait_before_retry", lambda *_: run.waits.append(True))
     monkeypatch.setattr(http, "post_json", send)
-    result, _, recovery = background_execution._run_background_recovery_attempt(
+    run.result, _, run.recovery = background_execution._run_background_recovery_attempt(
         execution, "继续核对完整工具结果", params, history, context, recovering=False, activity_sink=sink,
     )
-
-    assert recovery is not None and recovery.committed and len(candidates) == 1 and summaries
-    assert len(waits) == 1 and len(business) == 2
-    expected = _wire_from_material(agent, candidates[0])
-    assert [wire == expected for wire, _, _ in business] == [True, True]
-    assert business[0][1:] == business[1][1:], "重试没有重建，也没有共享预算回收"
-    assert shared_fits == []
-    assert result.runtime_status != "context_overflow"
+    assert run.recovery is not None and run.recovery.committed and len(run.candidates) == 1 and run.summaries
     assert store.threads.require(thread.thread_id).compact_generation == 1
+    return run
+
+
+_DONE = {"content": [{"type": "text", "text": "资料核对完成。"}], "stop_reason": "end_turn"}
+_EMPTY = {"content": [], "stop_reason": "end_turn"}
+
+
+# 提交候选后的瞬断重试沿同一原参数命中已提交记录：原样重发同一候选，不在原参数上重建或做共享预算回收。
+def test_background_transient_retry_after_commit_resends_committed_candidate(tmp_path, monkeypatch) -> None:
+    from agent_py_agent.agent.backends.errors import ProviderTransientError
+
+    def respond(_run, index):
+        if index == 1:
+            raise ProviderTransientError("503 after commit")
+        return _DONE
+
+    run = _committed_background_attempt(tmp_path, monkeypatch, respond)
+    expected = _wire_from_material(run.agent, run.candidates[0])
+    assert len(run.waits) == 1 and [wire == expected for wire, _, _ in run.business] == [True, True]
+    assert run.business[0][1:] == run.business[1][1:], "重试没有重建，也没有共享预算回收"
+    assert run.stale_fits == []
+    assert run.result.runtime_status != "context_overflow"
+
+
+# 候选返回空响应：同轮空响应修复沿候选参数重建并附修复提示；原参数上不发生共享预算回收（否则抛 compact summary base changed）。
+def test_background_empty_response_after_commit_repairs_on_candidate_params(tmp_path, monkeypatch) -> None:
+    run = _committed_background_attempt(tmp_path, monkeypatch, lambda _run, index: _EMPTY if index == 1 else _DONE)
+    expected = _wire_from_material(run.agent, run.candidates[0])
+    assert len(run.business) == 2
+    (first, *_), (repaired, *_) = run.business
+    hint = "上一轮模型接口返回了空文本"
+    assert first == expected and hint not in json.dumps(first, ensure_ascii=False)
+    assert repaired != expected and json.dumps(repaired, ensure_ascii=False).count(hint) == 1
+    assert run.stale_fits and not any(run.stale_fits), "共享预算回收只落在候选参数上"
+    assert run.result.runtime_status == "ok"
+
+
+# 候选在途时到达插话且候选返回空响应：插话取代分支把插话注入候选参数，只注入一次；重跑请求带这条插话，确认后邮箱清空。
+def test_background_steer_after_commit_injects_once_on_candidate_params(tmp_path, monkeypatch) -> None:
+    from agent_py_agent.agent.model_request_selection import _HOST
+
+    message = "补充要求：核对结论按文件名排序。"
+    targets = []
+
+    def respond(run, index):
+        if index == 1:
+            request_id = _HOST.get().render_params.request_id
+            targets.append(request_id)
+            run.store.guidance.append({"target_type": "request", "target_id": request_id, "message": message, "now": 10.0})
+            return _EMPTY
+        return _DONE
+
+    run = _committed_background_attempt(tmp_path, monkeypatch, respond)
+    expected = _wire_from_material(run.agent, run.candidates[0])
+    assert len(run.business) == 2, "空响应后只重跑一次，重跑即带插话"
+    (first, *_), (rerun, *_) = run.business
+    assert first == expected and message not in json.dumps(first, ensure_ascii=False)
+    assert json.dumps(rerun, ensure_ascii=False).count(message) == 1
+    committed = run.committed[0]
+    assert sum(message in str(item) for item in committed.tool_context) == 1, "插话只在候选参数上注入一次"
+    assert run.store.guidance.pending("request", targets[0]) == []
+    assert run.stale_fits and not any(run.stale_fits)

@@ -203,7 +203,7 @@ class PreparedCompactRecovery:
 
     # LLM: 已提交后，凡传入渲染时记录的那份原参数对象（按对象身份，不按请求 ID）都命中同一候选，覆盖瞬断重试。
     # 传入别的参数对象即清除：成功后循环改用候选参数，下一工具轮必然清除；宿主随回合作用域结束释放，不能跨请求复用。
-    # 同轮重跑分支（空响应修复、插话取代）仍先在原参数上重建，属已知缺陷，见依赖拆分文档同名节。
+    # 同轮重跑分支（空响应修复、插话取代）由 _model_turn_or_retry 先换成候选参数，不会再拿原参数进来。
     # 函数用途: 让重试直接复用已提交的恢复请求，不在旧参数上重建、回收或注入插话。
     def committed_selection(self, agent: object, params: object) -> tuple[object, str] | None:
         if self.committed_request is None or agent is not self.agent:

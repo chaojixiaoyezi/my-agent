@@ -1751,6 +1751,7 @@ def _drain_pending_deferred_tool_calls(
 
 # LLM: 原执行权和Goal开始仍在本装配点；仅将采样／响应确认交给窄操作，空响应返工及插话注入保持当前循环内。
 # 计量、恢复与确认显式接收实际产出响应的那份参数；返回具名结果，由循环显式换参。
+# 恢复宿主已提交候选时，异常分支先换成候选参数：同轮重跑不能在压缩前的原参数上重建或回收。
 # 函数用途: 在有效工作片内请求下一轮模型，绑定原计量和消息账本，处理无可用响应时的一次修复。
 def _model_turn_or_retry(
     agent,
@@ -1784,6 +1785,11 @@ def _model_turn_or_retry(
         # instead of inheriting a stale retry count from the whole long task.
         return _ModelTurnOutcome(turn.prompt, turn.response, False, False, 0, turn.params)
     except Exception as exc:
+        from ..model_request_selection import committed_request_selection
+
+        committed = committed_request_selection(agent, loop_params)
+        if committed is not None:
+            loop_params = committed[0]
         # 会话运行时 queues steer input on the active turn.  If the provider call
         # that was already in flight then ends without a usable response, that
         # stale empty output is not the turn's terminal result: consume the
