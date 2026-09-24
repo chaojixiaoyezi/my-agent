@@ -1,5 +1,7 @@
 # 设计台账
 
+- **第8步Compact逐调用来源修复中**：已确认裸call_id跨请求过滤会误隐藏新工具结果；沿现有live-tool账增加精确来源引用，保留旧ID／提交者语义／CAS，存量不确定来源保留并显式标记。工具并发段窄依赖独立并行，详见[职责拆分](docs/design/TOOL_LOOP_DEPENDENCY_SPLIT.md#发布前缺口compact逐调用来源已确认修复中)。尚未发布验收。
+
 第8步 Compact 边界在本地开发：候选只借原三个列表和估算回调；checkpoint/CAS 成功后投影失败不得回滚内存历史。C 顺序来源保持原持久格式与降级语义，不隐式引入 v3/scope 迁移；旧跨 request 调用编号过滤风险仍待处理。详见[模型与工具循环](docs/design/TOOL_LOOP_DEPENDENCY_SPLIT.md#第8步-compact-候选与提交边界)。
 
 第8步模型／工具循环已本地分离采纳与请求周期：只绑定原操作，不接完整Agent／params，不移动pre-I/O提交；有界消息扫描和等值token估算作为独立底座移植，未启用scope摘要链或第二执行器。18文件456 passed／24既有xfail，真实TUI未验，详见[职责和移植边界](docs/design/TOOL_LOOP_DEPENDENCY_SPLIT.md)。

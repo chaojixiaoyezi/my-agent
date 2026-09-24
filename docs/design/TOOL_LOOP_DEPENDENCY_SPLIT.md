@@ -99,3 +99,18 @@ Compact／媒体开发线与主线存在大量decision/Jev前置改动。以f2bc
 删除只保存agent并转发同名函数的ToolLoopService及旧私有入口。runtime/loop_support直接调用execute_tool_loop；原循环仍按中断、租约、延迟工具、模型采纳、插话重检、自然回复及工具轮的既定顺序运行。工具回调仅用partial绑定原agent，不新增执行器或状态。
 
 原11文件218 passed／20项既有xfail，相邻两文件104 passed／4项既有xfail；保留原断言并核对当前宿主身份。多次驱动同一测试时使用局部monkeypatch作用域，避免上一轮闭包污染下一轮。与工具事实片的组合验收另列TESTS。
+
+
+## 发布前缺口：Compact逐调用来源（已确认，修复中）
+
+旧committed_live_tool_compact_source_ids把整条thread链的source_tool_call_ids合并为裸编号集合，active_turn_compact再按call_id／id／scoped_call_id任一命中隐藏。后续普通请求或另一attempt复用厂商编号时，新结果会从恢复模型上下文消失；原执行账仍存在。仅比较checkpoint的request_id／attempt_id不够：它们标识提交者，后台与子代理carried来源可能混合多个早先请求。
+
+修复边界：在现有live-tool checkpoint增加显式版本的逐调用来源引用，复用原canonical run_id／attempt_id／call_id，按存在性保留turn／operation等一致性事实。保留原checkpoint编号算法、顶层提交者语义、既有字段及锁／CAS顺序，不移植独立Jev的v3摘要scope链。新字段是来源引用，不另造工具执行身份或第二份状态。
+
+- native在压缩前从真实ToolCall及配对结果冻结来源；carried逐条读原归档身份，不能用当前运行补齐，不解析scoped_call_id字符串猜身份。
+- 源／尾选择按实际记录位置和精确来源，不能用裸编号集合相减；不同来源的同号调用允许分别属于源和尾。计数按真实来源，不因同号去重少算。
+- archive、工具索引及carried重建贯穿已有attempt／turn字段，避免上游有身份、下游又丢掉。
+- 新记录的精确来源才能授权隐藏；存量裸编号缺足够来源时保留并暴露结构化不确定事实，不静默绑定当前请求。孤立candidate仍不能隐藏任何内容。
+- 验证需覆盖跨请求／attempt同号、混合来源checkpoint、精确旧调用隐藏而新调用保留、来源缺失、孤立候选及取消／CAS边界。当前为修复设计，不是已验证实现。
+
+并行范围：逐调用来源片独立写上述入口；工具并发段判定片只写round_execution的段选择及窄模块，不移动真实线程执行、审批和记录顺序。其余完整Agent依赖有真实消费者，不能仅改context名称假装拆完。
