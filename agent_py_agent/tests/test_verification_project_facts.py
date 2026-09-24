@@ -127,3 +127,51 @@ def test_go_manifest_exposes_build_and_test_verification_without_prompt_inferenc
         "targeted",
         "failed",
     )
+
+
+def test_leading_cd_into_an_existing_directory_is_classified_in_that_directory(tmp_path: Path):
+    root = _python_project(tmp_path)
+
+    absolute = classify_verification_command(
+        f"cd {root} && python3 -m pytest tests/ -v 2>&1",
+        cwd=tmp_path,
+        exit_code=1,
+        output="2 failed, 2 passed",
+    )
+    relative = classify_verification_command(
+        'cd "project" && pytest -q',
+        cwd=tmp_path,
+        exit_code=0,
+        output="4 passed",
+    )
+
+    assert absolute is not None and relative is not None
+    assert (absolute.status, absolute.cwd, absolute.root) == ("failed", str(root.resolve()), str(root.resolve()))
+    assert (relative.scope, relative.status, relative.cwd) == ("full", "passed", str(root.resolve()))
+
+
+def test_cd_prefix_only_counts_for_one_command_into_a_real_directory(tmp_path: Path):
+    root = _python_project(tmp_path)
+
+    for command in (
+        f"cd {root / 'missing'} && pytest -q",  # 项目内不存在的目录：cd 会失败，返回码不属于 pytest
+        f"cd {root} && pytest -q && echo done",
+        f"cd {root}; pytest -q",
+        f"cd {root} || pytest -q",
+    ):
+        assert classify_verification_command(command, cwd=tmp_path, exit_code=0, output="passed") is None, command
+
+
+def test_pipes_and_background_runs_never_become_verification(tmp_path: Path):
+    root = _python_project(tmp_path)
+
+    for command in (
+        "python -m pytest -q | head -60",
+        "python -m pytest -q|tee log.txt",
+        "pytest -q |& tee log.txt",
+        "pytest -q &",
+        f"cd {root} && pytest -q | tail -5",
+    ):
+        assert classify_verification_command(command, cwd=root, exit_code=0, output="failed") is None, command
+    quoted = classify_verification_command('pytest -k "fast|slow" -q', cwd=root, exit_code=0, output="passed")
+    assert quoted is not None and quoted.status == "passed", "引号内的 | 只是参数，不是管道"

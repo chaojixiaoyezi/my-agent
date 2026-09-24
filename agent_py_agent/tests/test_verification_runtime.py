@@ -138,3 +138,14 @@ def test_failed_write_and_arbitrary_command_do_not_change_evidence(tmp_path: Pat
     assert "verification_evidence" not in arbitrary.metadata.get("handler_details", {})
     assert "verification_state" not in failed_write.metadata.get("handler_details", {})
     assert repository.status(context, root=project)["status"] == "unverified"
+
+
+def test_runtime_records_a_cd_prefixed_test_run_at_the_cd_target(tmp_path: Path):
+    agent, project, owner_home = _agent(tmp_path)
+    call = _call("run_command", {"command": f"cd {project} && python3 -m pytest tests/ -v 2>&1"})
+    result = _success(call, "1 failed", {"process": {"status": "exited", "return_code": 1, "command_succeeded": False}})
+
+    result = record_tool_verification(agent, call, result)
+
+    fact = result.metadata["handler_details"]["verification_evidence"]
+    assert (fact["status"], fact["root"]) == ("failed", str(project.resolve()))

@@ -581,3 +581,14 @@ FT-158/160 两份旧业务文件直接修改，未再出现路径回绑或改写
   manifest，UNKNOWN 不清；幂等 replay 再通知一次。
 - shell、artifact registry、tool archive、LocalStore 幂等主链 focused 已通过。下一步部署到 `.10` 唯一
   Gateway，用 fresh MiniMax-M2.7 TUI 连续产生归档和命令，核对 snapshot/manifest 数量不再随调用数增长。
+
+## 2026-09-25 验证命令分类：cd 前缀与管道
+
+- **发现**：在测试机隔离真实 TUI 样本（交付复核焦点）里，MiniMax-M2.7 跑的 3 次 pytest 都写成 `cd <项目绝对路径> && python3 -m pytest tests/ -v`。验证账 `verification_events` 一条都没记：`cd … &&` 被当作两段链式命令整体拒绝。这类写法在模型里最常见，依赖验证账的交付复核焦点与交付前核对都因此看不到这些真实测试。
+- **同时发现**：单个管道没有被拆段，`python -m pytest -q | head -60` 会按 `head` 的返回码 0 记成 passed，违背"一次返回码只能证明一条命令"的原设计。
+- **修复**（分支 `claude/verification-command-shapes`）：
+  - 按带引号语义的 shell 记号检查，未加引号的 `|`、`|&`、`&` 一律不算证据；引号内的 `|` 只是参数。
+  - 只放行开头一个 `cd <可进入的现有目录> && <单条命令>`：`&&` 在 cd 失败时短路，所以返回码只可能来自后一条命令。项目根与记录的 cwd 都改用 cd 目标。
+  - 其余链式写法（`;`、`||`、多段 `&&`）仍整体拒绝；cd 目标不存在或不可进入时也不算证据。
+- **已知限制，未改**：`pytest tests/` 这类带目录参数的写法仍按原规则记为 targeted，即使该目录就是全部测试。
+- 回归与变异见 [TESTS](../../../TESTS.md)。
