@@ -1,5 +1,7 @@
 # Gateway 维护状态
 
+媒体会话越过压缩点（本地分支 `claude/decision-media-preflight`，待审）：未压历史带图时，preflight 只守窗口硬上限，越过压缩点也不再整轮失败；越过窗口时强制恢复报 `COMPACT_REQUEST_NON_TEXT`，客户端文案说明是图片等非文本内容使压缩不可用。详见[容量审计](../../tasks/DECISION_MODEL_CONTEXT_AUDIT.md#媒体会话越过压缩点2026-09-24本地修复)。
+
 12.4来源生命周期首片仅机械兼容显式只读Sequence：`_gateway_conversation_refs`按是否给出来源启用完整投影，防止换容器后误走普通展示窗口；history_projection接受非字符串Sequence。宿主的完整请求冻结/释放尚未重构，相邻回归另行记录，不把本片当全链内存收口。12.7固定旧包的同会话压缩/显式跨模型真实缓存另有证据，详见[真实验收](../../tasks/DECISION_MODEL_REAL_VALIDATION.md)。
 
 12.4 第二片 2a（本地分支 `claude/decision-12.4-2a`，未合入）：Gateway 上下文与恢复候选只保存只读历史来源，移除 `_gateway_conversation_refs` 和具体副本；4.2M 字符下种子准备驻留约 54KB，首次发送前峰值从 29.8MB 降到 21.3MB，摘要期峰值留给 2b。独立评审后：来源冻结投影时刻，终态折叠不随解析时间变化；删除 `_conversation_prompt_section` 生产不可达的 `include_transcript` 正文/摘要分支，原先断言该分支的两个用例改为断言生产路径（摘要只在种子历史段，操作证据只在上下文段）。详见[容量审计](../../tasks/DECISION_MODEL_CONTEXT_AUDIT.md#宿主历史种子只读来源2a2026-09-23本地)。

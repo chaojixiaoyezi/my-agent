@@ -253,3 +253,55 @@ P4-B 普通 user owner 的两轮隔离真实中文配置各有 **1 次 Jev HTTP*
 - 活动工具精确来源压缩（exact-refs）已在真实 M2.7 TUI 中走通：进度事件、v3 四元 refs、线程 JSON、下一请求原生历史、无兜底前缀五项证据齐全。
 - 同一线程的会话级长历史压缩（`transcript_and_tool_archive`）也在真实运行中写出四元 refs，并在下一请求中移除了旧原文。
 - 12.4 仍开放：2b、媒体、准备阶段超长历史的真实触发。本轮 Jev 调用 0 次，累计仍为 65 次。
+
+## 12.4 媒体与 Compact 集成版真实验收（2026-09-24，main `5dcdfd463`）
+
+**安装**：
+- 源码 main `5dcdfd463`（tree `b2a7f0efbba433e7041d5b7c5b55f9e0bbe09eab`），git archive SHA256 `a7a77c5fe820653510377aba28463090c1bfbc8a4ecdc4a74e4826cc3748fb45`。
+- 由它构建 wheel，SHA256 `485e1bbeda1e4654b6a095272ee467fb82f53f262cc7196d4aaf4b7606e20448`（5,587,451 字节）。
+- 装进授权测试机上新建的隔离目录和 venv。旧安装与旧证据不动，其它 agent 的运行环境不动。
+- 这个 head 含 2a、2b、提交后重试、插件分组出题和后台预算修复，这是它们第一次一起安装。
+
+**配置**：
+- 唯一 Gateway 监听 `127.0.0.1:8431`，使用原生 TUI `chat --gateway`；决策模型关闭。
+- 模型为官方 MiniMax-M3（anthropic_compatible）。隔离目录的模型目录里只做了两处测试用改动，原值记在 `staging.json`：M3 窗口从 1,000,000 改为 200,000；M3 设为新会话默认。
+- `memory_compact_auto_trigger_percent` 设为 50，对应 trigger_tokens=100,000。
+- 材料：6 个自编中文文件，每个约 15k 字，首行是 `MEDIA-TEXT-MARK-NN`；另有一张 240×240 的四象限 PNG（左上红、右上绿、左下蓝、右下黄），SHA256 `f066d90679a14702f03dc7de13f4516f45dc4fea5d9a71fb4176aee84f7b7c26`。
+- 旁观器沿用窄版：只记块类型、标记是否出现、工具名和 HTTP 终态，不存正文和图片字节。
+
+**过程**（同一会话，每轮只给一次 prompt）：
+
+| 轮 | 请求 | 需求 | 结果 |
+| --- | --- | --- | --- |
+| R1 | `gwreq-1790248198-7a6a4a60b3e348a2938473e8d2cd6511` | 读 text-01～03 后总结 | done/completed，tool_rounds 3，9.9 秒；Context 约 58k |
+| R2 | `gwreq-1790248370-c2d76594f912453fab781d3650311c8e` | `/attach quad.png`，问四块各是什么颜色 | done，0 次工具，5.4 秒，四块全对 |
+| R3 | `gwreq-1790248426-7dc5e1dc2f84440a9b68146942a9e5cb` | 读 text-04～06 后总结 | done，tool_rounds 3，10.2 秒；Context 约 92.7k |
+| — | 手动 `/compact` | — | generation 1；估算 108,473 → 61,719；压缩前待处理 6 条已完成消息 |
+| R4 | `gwreq-1790248532-648fa9cc97824e978638bafe584c484e` | 不许读文件、不许调工具，问前面那张图的左上角和右下角 | done，0 次工具，2.9 秒，答"左上角是红色，右下角是黄色。" |
+
+**证据**：
+- 图片确实进了请求：R2 terminal 记录里 `input_media` 的 sha256 与原图一致；从 R2 起，每个业务请求都带 1 个 image 块。
+- checkpoint `compact-v3-1-412111a10e15995ac2ae`：
+  - v3、`validated_candidate`、`source_kind=transcript`、forced，generation 0→1，`commit_authority=conversation_thread.compact_checkpoint_id`；线程 JSON 的 `compact_checkpoint_id` 指向这一行。
+  - 来源只有 R1 的两行；保留尾是 R2（图片轮）和 R3，共 4 行。这符合"只摘要首个媒体回合之前的安全前缀"。
+- 摘要请求：18 条消息，带 R1 的 3 对工具往返，只含 01–03 标记，没有 image 块，图片轮没有进摘要。摘要 2,494 字，不以机械兜底前缀开头。
+- 压缩后 R4 请求：1 个 image 块，3 对工具往返（R3 的 04–06）。R1 的工具原文不再发送；请求里仍能看到 01–03 标记，那是摘要正文里的。模型没调工具就答对了。
+- model_usage：main 10 次、auxiliary 1 次（手动压缩的摘要），models 都是 `["MiniMax-M3"]`；decision 0 次，因为决策模型关闭。
+- 出站 17 次全部 HTTP 200：能力探针 2 次；业务与摘要 11 次；`my_agent_structured_output` 4 次，是后台结构化输出调用，时间上与 memory curator 的写入吻合，不属于本会话业务。
+- 2b 已随本版安装，但手动 `/compact` 走 control_service，不经过恢复宿主，所以本轮不算 2b 的真实验收。
+
+**发现**：
+- 按本次会话的余量，再读一两个文件、越过 100k，就会整轮失败：preflight 在压缩点报溢出，强制恢复又拒绝含图片的请求。
+- 本地复现与修复见[容量审计](DECISION_MODEL_CONTEXT_AUDIT.md#媒体会话越过压缩点2026-09-24本地修复)。修复版的真实验收另行记录。
+- 媒体屏障（首张图之后的文字轮永远进不了摘要）写进 [DESIGN_LEDGER](../../DESIGN_LEDGER.md) 待用户决策。
+
+**清理**：
+- TUI 用 `/exit` 正常退出；Gateway 经原 CLI `gateway stop` 停止。Gateway 与 TUI 的 PID 都不存活，8431 无监听，pending/processing 都是 0。
+- 原 CAS 恢复隔离 owner 设置：enabled=false，owner revision 25。
+- 17 条出站观察都有 HTTP 终态。
+- 证据（测试机隔离目录）：`artifacts/media-evidence.json`（SHA256 `d2719f09e1acad769eb262e302f3fcf4b3ee75a6d38074be4e7f5dc50c6b9096`）、`artifacts/cleanup-current.json`（SHA256 `f3ce049790d0cba487d9910881e4dfed02b12c044aa9d231c1f52a77df6e638f`）。本机副本和收集脚本在 `~/.my-agent/decision-evidence/media-5dcdfd463-20260924/`（仓库外）。
+
+**结论**：
+- 集成版的媒体与 Compact 组合已在真实 M3 TUI 中走通：图片原样进入请求；手动压缩只摘要图片之前的文字前缀，图片轮原样保留；压缩后模型仍能依据原图作答；没有机械兜底。
+- 12.4 的"集成版媒体真实验收"完成。同时发现两件事：越过压缩点即失败的缺陷（已本地修复，待审、待真实验收），以及媒体屏障（待用户决策）。
+- 本轮 Jev 调用 0 次，累计仍为 65 次。

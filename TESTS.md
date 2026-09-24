@@ -2,7 +2,16 @@
 
 child不展示历史正文时的读取回归先复现1 failed/1 passed，修复后test_compact_retained_history、test_subagent_compact_recovery、test_gateway_child_compact_scope_application三文件31 passed（8.48秒）。三宿主seed仓外基线仅验证测量和完整性，不算内存目标通过；细节见容量审计的宿主生命周期基线。
 
-## 后台上下文预算只估算渲染节（2026-09-24，本地分支 `claude/decision-background-context-budget`）
+## 媒体会话越过压缩点：preflight 只守窗口、越窗结构化拒绝（2026-09-24，本地分支 `claude/decision-media-preflight`）
+
+- **新测试** `test_media_compact_preflight.py` 13 项：
+  - preflight 9 项矩阵：纯文字按压缩点；带图时压缩点与窗口之间放行、到窗口拦截，诊断串带 `compact_capacity=non_text`；`save=false` 下纯文字与带图都按窗口（主线 owner 要求钉住的原行为）。
+  - Gateway 真实链四档（只替换末端 HTTP，图片经原导入入口，窗口 60k、压缩点 50%）：带图在压缩点以下发送 1 个图片块；越过压缩点、低于窗口时带图发送且不压缩（修复前整轮失败、业务 HTTP 0 次）；越过窗口时报 `COMPACT_REQUEST_NON_TEXT`，业务 HTTP 0 次、原始记录原序保留，客户端文案点明是图片等非文本内容所致；纯文字对照照常先压缩再发送。
+- **改期望码**：`test_compact_media_recovery.py`（供应商报溢出）和 `test_compact_retained_history.py`（大历史）的媒体强制恢复，从 `COMPACT_REQUEST_PROJECTION_UNKNOWN` 改为 `COMPACT_REQUEST_NON_TEXT`。
+- **变异验证**：去掉 preflight 的媒体门槛，3 项失败（2 项矩阵、Gateway 越压缩点档）；恢复旧码，7 项失败（越窗档、2 项供应商溢出、4 项大历史）；去掉 `COMPACT_REQUEST_NON_TEXT` 的专门文案，越窗档失败。改回后全部通过。
+- **结果**：72 个相关测试文件 6460 passed、2 skipped、2 xfailed、5 xpassed。5 个 xpassed 在同一 main 上完全一样，与本片无关。
+
+## 后台上下文预算只估算渲染节（2026-09-24，已合入 main `5dcdfd463`）
 
 - **新测试** `test_background_context_budget.py` 5 项：
   - 有种子时预算不计入不渲染的最近消息（shape_pass 为 0，12 条观察全留）；无种子时照常计入并收缩。

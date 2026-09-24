@@ -433,6 +433,7 @@ task workspace 摘要同步）同样改用它，避免"读时切开、写回落�
 
 `request_errors.gateway_client_error_message` 只按结构化错误码选择文案，PROVIDER_REQUEST_REJECTED
 不等同配置或凭据错误，不声称此前没有工具执行；内部异常仍不直接公开。
+`COMPACT_REQUEST_NON_TEXT` 先于通用 `COMPACT_` 前缀匹配，说明是会话里的图片等非文本内容使压缩不可用。
 前台 request 所有权只用于客户端显示去重，不能改变 Gateway canonical 消息、执行状态与消费游标。
 `runtime_error_report` 在配置父类之前归类 typed 请求拒绝；`provider_error_http_status` 只读合法整数属性，
 供分类与 `gateway_provider_error_projection` 共用。私有 response body/details/headers 不进入公开错误提示。

@@ -18,7 +18,7 @@ from ..native_tool_protocol import (
     resolve_native_tools,
 )
 from ..runtime.context_compactor import runtime_compact_policy
-from ..tool_request_projection import ToolLoopRequestProjection
+from ..tool_request_projection import ToolLoopRequestProjection, text_request_capacity_known
 from .usage import provider_visible_input_token_usage
 
 _PROVIDER_CONTEXT_OBSERVATION_KEY = "_provider_context_observation"
@@ -168,6 +168,8 @@ def safe_inline_tool_result_tokens(
 
 # LLM: 输入阈值仍只按当前 Context 算；内置 HTTP 后端有明确共享窗口和实际发送的
 # max_tokens 时，另检查本次请求可容纳性。OAuth Responses 不发送输出上限，不能猜测。
+# 请求含媒体等无法文本计量的内容时，自动/轮内压缩跳过、强制恢复拒绝，压缩点不再是客观门槛，
+# 此时只守窗口与输出预留的硬上限；与 compact_request_recovery 的 _automatic_noop/select 同口径，改动须同步。
 # 函数用途: 每次模型请求前检查输入压缩点和已知协议容量，超出时沿原 Compact 链恢复。
 def preflight_context_pressure_response(request: object) -> ModelResponse | None:
     params = getattr(request, "params", None)
@@ -198,7 +200,11 @@ def preflight_context_pressure_response(request: object) -> ModelResponse | None
             ),
         )
     threshold = policy.trigger_tokens
+    compact_capacity_known = params is None or text_request_capacity_known(params)
     if not policy.allow_persistent_apply:
+        threshold = window
+    elif not compact_capacity_known:
+        # 压缩链对此请求不可用，在压缩点失败不是客观事实；越过窗口时仍由强制恢复给出结构化拒绝。
         threshold = window
     output_reserve = _known_shared_window_output_reserve(getattr(request, "agent", None))
     request_ceiling = model_request_input_ceiling(request.agent, window)
@@ -208,13 +214,14 @@ def preflight_context_pressure_response(request: object) -> ModelResponse | None
         f"request_output_reserve={output_reserve} request_input_ceiling={request_ceiling} "
         if prompt_tokens >= request_ceiling and output_reserve else ""
     )
+    capacity = "" if compact_capacity_known else "compact_capacity=non_text "
     return context_pressure_response(
         request,
         source="preflight",
         prompt_tokens=prompt_tokens,
         detail=(
             f"model_visible_tokens={prompt_tokens} "
-            f"context_window={window} compact_threshold={threshold} {reason}".strip()
+            f"context_window={window} compact_threshold={threshold} {capacity}{reason}".strip()
         ),
     )
 

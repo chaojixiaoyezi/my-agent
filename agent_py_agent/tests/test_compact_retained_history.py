@@ -146,7 +146,7 @@ def test_retained_media_reaches_wire_or_fails_capacity_without_dropping(tmp_path
     if large and host != "child":
         with pytest.raises((ConversationCompactError, RuntimeError)) as failure:
             run()
-        assert getattr(failure.value, "error_code", None) == "COMPACT_REQUEST_PROJECTION_UNKNOWN"
+        assert getattr(failure.value, "error_code", None) == "COMPACT_REQUEST_NON_TEXT"
     else:
         result = run()
         if host == "child":

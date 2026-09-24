@@ -108,6 +108,7 @@ class PreparedCompactRecovery:
         return prepared_params, prepared_prompt
 
     # LLM: 进入时领取防摘要重入；强制恢复没有消息或完整工具来源时显式拒绝，准备/投影失败不发送业务，CAS后沿同次材料发送。
+    # 强制恢复遇媒体等非文本内容报 COMPACT_REQUEST_NON_TEXT（preflight 此时只在窗口上限触发）；自动遇同类内容走 noop。
     # 自动 noop 先原样返回原请求；决定摘要后解绑原参数与冻结输入的完整原生历史，失败/取消/超限收尾都不得再读它。
     # 函数用途: 用完整当前输入选择摘要候选，提交后返回同次恢复轮的新参数与已检查提示。
     def select(self, agent: object, params: object, prompt: str) -> tuple[object, str]:
@@ -126,7 +127,8 @@ class PreparedCompactRecovery:
         if not frozen.prompt_input.native_tool_use or frozen.tool_protocol_snapshot.source_protocol != "native":
             raise ConversationCompactError("恢复工具协议未知", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
         if self.force and not text_request_capacity_known(frozen):
-            raise ConversationCompactError("完整请求包含尚无法计量的模态，保留原始材料", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
+            # 结构化原因单列：媒体等非文本内容使压缩不可用，宿主和 TUI 据此说明为何不能继续，不与内部投影失配混码。
+            raise ConversationCompactError("会话包含图片等非文本内容，当前无法压缩上下文；原始记录已保留", code="COMPACT_REQUEST_NON_TEXT")
         tool_source = _recovery_tool_source(agent, source, params, frozen)
         if self.force and not source.messages and tool_source is None:
             if _recovery_tool_records_present(agent, source, params, frozen):

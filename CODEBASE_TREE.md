@@ -648,6 +648,7 @@ agent_py_agent/
 |   |-- test_compact_recovery_release.py # 恢复宿主解绑旧历史：失败/取消/超限收尾不读、noop保留、tool_context共享合同
 |   |-- test_compact_media_recovery.py  # 两协议媒体工具轮及溢出后原文保留、无摘要和无CAS
 |   |-- test_compact_transcript_media_partition.py # 文字前缀覆盖与媒体完整后缀、分段拒绝
+|   |-- test_media_compact_preflight.py # 媒体会话越过压缩点：preflight 只守窗口、越窗 COMPACT_REQUEST_NON_TEXT
 |   |-- test_request_content_capacity.py # 当前思考与跨模型内容边界、child保留原模型
 |   |-- test_input_media.py             # 媒体归属、字节、预算和原生后端投影
 |   |-- test_native_compact_carry.py   # 同回合携带身份、深复制、精确释放和工具轮标记隔离

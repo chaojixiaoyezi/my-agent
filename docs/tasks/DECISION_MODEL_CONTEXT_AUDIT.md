@@ -1590,7 +1590,7 @@ Sol high独立只读复核未发现必须修复的scope/base/legacy回归，确�
 
 ### 后台上下文预算只估算渲染节，有种子时不保留最近消息（2026-09-24，本地）
 
-分支 `claude/decision-background-context-budget`，基于 main `a2e26178b`，方案经主线 owner 同意，未合入、未部署。纯 bug 修复，不加开关。
+分支 `claude/decision-background-context-budget`，基于 main `a2e26178b`，方案经主线 owner 同意，已合入 main `5dcdfd463`，并随 .9 媒体验收的安装版安装（见[真实验收](DECISION_MODEL_REAL_VALIDATION.md)）。纯 bug 修复，不加开关。
 
 **问题**：
 - 后台就绪路径一定带历史种子，此时 `include_recent_messages=False`，"Recent Messages"不渲染。可 `background_history_seed` 仍把含最近 `conversation_context_recent_limit` 条完整消息的 `context_bundle` 保留给整个后台回合；4.2M 夹具下约 1.32MB。
@@ -1632,6 +1632,73 @@ Sol high独立只读复核未发现必须修复的scope/base/legacy回归，确�
   - 渲染方不传 `rendered_keys`：3 项失败；
   - 就绪路径改回保留消息：3 项失败。
 - 后台相关 29 个测试文件：840 passed。
+
+### 按需物化原生历史（方案 B）的测量结论：不做（2026-09-24）
+
+2b 之后，三宿主的摘要前峰值仍在（child 约 10.1MB、后台约 10.5MB、Gateway 约 21.3MB）。方案 B 设想把 `provider_history_messages` 改成按需物化，这里先测它能不能降峰。
+
+**测量**：
+- 仓外探针 `decision_lazy_history_probe.py`（放在 pytest 隔离 HOME 下运行），基于 2b 之后的 main `911d0d14d`。
+- 与 2b 同一夹具：128 行、4,194,304 字符正文，窗口 40k，压缩点 50%。
+- 用 tracemalloc 统计，只算 Python 堆，不是 RSS。每格是"阶段点驻留 / 该段峰值"，单位 MB。
+
+| 宿主 | 完整历史读取 | 原生解析耗时 | 原生解析 | 冻结输入 | 摘要入口 | 首次业务发送 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| child | len 1 次、迭代 1 次 | 23.0 ms | 9.51 / 9.62 | 9.72 / 9.76 | 1.32 / 10.08 | 1.52 / 2.33 |
+| Gateway | len 1 次、迭代 1 次 | 145.5 ms | 8.68 / 21.28 | 8.82 / 8.86 | 0.34 / 9.07 | 0.48 / 1.39 |
+| 后台 | len 1 次、迭代 1 次 | 140.1 ms | 9.98 / 10.45 | 10.17 / 10.21 | 1.69 / 10.47 | 1.94 / 2.79 |
+
+**结论**：
+- 每次请求只读一次完整历史。按需物化只是把这次物化从建循环挪到第一次读取，读取次数和峰值都不变。
+- 峰值集中在原生解析阶段：child 和后台约 10MB，等于一份完整原生历史。
+- Gateway 在原生解析阶段另有约 12.6MB 的瞬时峰值（驻留 8.68MB，峰值 21.28MB），来自准备阶段的中间对象，与是否按需物化无关，另做只读分析。
+- 摘要期驻留已由 2b 降到 0.34–1.69MB，首次业务发送峰值为 1.39–2.79MB。
+- 方案 B 要把所有读取 `provider_history_messages` 的调用方改成惰性接口，改动面大而收益为零，所以不做。主线 owner 已同意。
+- 探针原始输出没有落盘，以上数字取自当次会话的控制台记录；探针脚本在 `~/.my-agent/decision-evidence/tools/`（仓库外）。
+
+**剩余**：Gateway 原生解析阶段的 21.3MB 峰值，只读分析中；改代码前须经主线 owner 同意。
+
+### 媒体会话越过压缩点（2026-09-24，本地修复）
+
+来源：.9 的 M3 媒体验收（main `5dcdfd463`，见[真实验收](DECISION_MODEL_REAL_VALIDATION.md)）之后，本地复现"图片之后还能走多远"。
+
+**问题**：
+- 会话的未压历史里只要有图片，估算一越过自动压缩点，Gateway 请求就整轮失败：报 `COMPACT_REQUEST_PROJECTION_UNKNOWN`，业务 HTTP 0 次。即使离窗口还很远也一样。
+- 回合中途越线同样失败，例如先贴图，再让模型连读几个大文件。
+
+**根因**：三处口径不一致。
+1. 自动恢复的 `PreparedCompactRecovery._automatic_noop` 遇未知模态直接 noop。
+2. 轮内压缩的 `_prepare_native_compact_plan` 遇未知模态返回 None。
+3. 但 `preflight_context_pressure_response` 仍按压缩点报 `context_overflow`，随后强制恢复（`select`，force）又拒绝未知模态。
+
+结果是在压缩点而不是窗口处硬失败。压缩点不是客观事实门，这违反"硬门只守客观事实"。
+
+**本地复现**：Gateway 真实链，只替换末端 HTTP；图片经 `import_input_media` 导入 owner 附件目录；窗口 40k，压缩点 50%。可见 token 取 preflight 的估算。
+
+| 未压历史 | 可见 token | 修复前 | 纯文字对照 |
+| --- | ---: | --- | --- |
+| 带图 + 4 行长文字 | 压缩点以下 | 发送，带 1 个图片块 | 发送 |
+| 带图 + 8 行 | 25,013 | 整轮失败，业务 HTTP 0 次 | 先压缩再发送 |
+| 带图 + 12 行 | 33,111 | 整轮失败，业务 HTTP 0 次 | 先压缩再发送 |
+| 带图 + 20 行 | 49,305（超窗口） | 整轮失败，业务 HTTP 0 次 | 先压缩再发送 |
+
+**修复**：分支 `claude/decision-media-preflight`，主线 owner 已同意。纯 bug 修复，不加开关，纯文字会话行为不变。
+- preflight：请求的文字容量不可知时（`text_request_capacity_known(params)` 为 False，即含媒体等非文本块），门槛从压缩点改为窗口，只守 `request_input_ceiling` 这个硬上限；诊断串加 `compact_capacity=non_text`。
+- `save=false`（`allow_persistent_apply=False`）原本就按窗口，不变，另有回归钉住。
+- 强制恢复遇非文本内容，改报结构化码 `COMPACT_REQUEST_NON_TEXT`。原先它与 20 多处内部投影失配共用 `COMPACT_REQUEST_PROJECTION_UNKNOWN`，宿主和 TUI 分不出"会话含图片、无法压缩"。三宿主共用 `select`，一处生效。
+- 客户端文案：`gateway_client_error_message` 对 `COMPACT_REQUEST_NON_TEXT` 单独说明原因（会话含图片等非文本内容，无法压缩且超出可用窗口；可换更大上下文的模型或新开会话），先于通用 `COMPACT_` 前缀匹配。.9 第一次验收时结构化码已进失败记录，但 TUI 仍显示通用的压缩失败文案，由此补上。
+
+**验证**：
+- 新文件 `test_media_compact_preflight.py` 13 项：
+  - preflight 9 项矩阵：纯文字按压缩点；媒体在压缩点与窗口之间放行、到窗口拦截；`save=false` 下纯文字和媒体都按窗口。
+  - Gateway 真实链四档（窗口 60k）：带图在压缩点以下发送；越过压缩点、低于窗口时带图发送且不压缩；越过窗口时报 `COMPACT_REQUEST_NON_TEXT`，业务 HTTP 0 次、原始记录原序保留，客户端文案点明图片原因；纯文字对照照常先压缩再发送。
+- 原媒体用例 `test_compact_media_recovery.py`、`test_compact_retained_history.py` 的期望码改为 `COMPACT_REQUEST_NON_TEXT`。
+- 变异验证：去掉 preflight 改动，3 项失败；恢复旧码，7 项失败；去掉专门文案，越窗档失败。
+
+**仍未解决**（媒体屏障已写进 [DESIGN_LEDGER](../../DESIGN_LEDGER.md) 待决策）：
+1. 媒体屏障：transcript checkpoint 只覆盖连续前缀，从首个媒体回合起的全部后缀都保留，首张图之后的文字轮永远进不了摘要。会话余量等于窗口减去图片之后的全部内容；越过窗口只能 typed 拒绝，需要新开会话。方向待用户定：把旧媒体降级为可重新附上的引用，还是用能看图的摘要模型摘要媒体回合。
+2. 强制恢复遇媒体时整体拒绝。能否只压媒体之前的文字前缀（媒体后缀原样保留，压缩前后差值可知），尚待设计。
+3. 越过压缩点后仍按压缩点收缩的软行为：大工具结果按"距压缩点余量"缩成引用视图（`safe_inline_tool_result_tokens`）；非会话运行的内容工具会延后（`_should_defer_for_compact`，Gateway 会话不走这条）。在媒体会话里，它们等不到压缩，待 .9 真实观察后再定。
 
 ### 宿主历史种子生命周期基线（2026-09-23，第二片进行中）
 

@@ -142,7 +142,7 @@ def test_gateway_media_tool_round_and_unknown_capacity_recovery(tmp_path, monkey
     if overflow:
         with pytest.raises(RuntimeError) as failure:
             request_execution._run_gateway_ask(context)
-        assert getattr(failure.value, "error_code", None) == "COMPACT_REQUEST_PROJECTION_UNKNOWN"
+        assert getattr(failure.value, "error_code", None) == "COMPACT_REQUEST_NON_TEXT"
     else:
         result = request_execution._run_gateway_ask(context)
         assert result.response == "资料整理完成。"
