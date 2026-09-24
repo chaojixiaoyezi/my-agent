@@ -1,5 +1,13 @@
 # 测试与发布验收
 
+## 第8步工具事实与唯一循环入口组合
+
+工具事实7482a40d6与去空转发c6f45425b合并后，16个相关文件运行退出码0，**349 passed、20项既有xfail**。仓库默认-q叠加命令-q不显示尾部汇总，此处按完整进度符号计数；没有重跑相同测试以补数字。
+
+组合包含tool_context_reducer、mcp_registration、tool_output_externalizer、runtime_gate_ledger、memory_compact_runtime_handoff、subagent_runtime_compact、compact_semantic_summary、tool_call_guardrail_runtime，以及provider_timeout_acceptance／continuation／resume_narrowing／resume_probe、subagent_runtime_guards、thread_interrupt、timeout_recovery_delivery、test_tools/test_tool_loop。独立入口片另验runtime_guidance、native_tool_use_ir_messages_flow为104 passed／4既有xfail。各组不能累加为唯一覆盖数。
+
+保持原执行／审批／中断顺序和所有既有断言，局部monkeypatch避免测试多次驱动串用旧闭包；唯一合并冲突仅是模块注释。全目录Ruff、doc sync、strict-size hard=0通过；完整发布与真实TUI仍待剩余第8步边界收口。
+
 ## 第8步工具执行事实与恢复投影
 
 10项因果用例先红后绿：process清理事实在内联、指定live输出、外置摘要及最终脱敏中保持，命令非零／清理成功与清理未确认分开。只读审阅补出巨整数和非有限浮点导致异常／非标准JSON，三项红转绿；缺失、畸形类型不补成成功，PID／实例列表只投影数量。verification原块保持。

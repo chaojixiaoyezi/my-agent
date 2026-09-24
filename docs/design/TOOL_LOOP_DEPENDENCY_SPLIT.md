@@ -16,7 +16,7 @@
 | 职责 | 现有权威入口 | 拆分约束 |
 | --- | --- | --- |
 | 工作片身份 | `runner/attempt_guard.py` | 旧attempt在开始Goal计量或发请求前拒绝；新模块不自行领取执行权 |
-| 当前回合 | `_execute_tool_loop_service` | 中断、续租、已排队工具、模型采纳、插话重检、自然回复、结束／工具分派顺序不变 |
+| 当前回合 | `execute_tool_loop` | 中断、续租、已排队工具、模型采纳、插话重检、自然回复、结束／工具分派顺序不变 |
 | 请求准备 | `build_tool_loop_prompt`、`next_tool_loop_model_response` | 工具快照、孩子当前状态、原生历史和上下文压力仍沿原路径；恢复用当前请求配对，不混用上一轮prompt |
 | 模型运输 | `generate_model_response` | 超时、流式、供应商调用账和取消仍用现有线程／执行器，不另起请求旁路 |
 | 模型响应采纳 | `_model_turn_or_retry` | Goal开始→原瞬断重试→Goal用量→输入确认／恢复；异常中只有既有结构化条件允许返工 |
@@ -92,3 +92,10 @@ Compact／媒体开发线与主线存在大量decision/Jev前置改动。以f2bc
 - 局部核对Codex `tools/mod.rs::format_exec_output_for_model`的正文／执行事实分离和Hermes `agent/tool_executor.py`归档后统一模型投影，不移植其执行链。
 
 本片先以fake handler经过真实executor、archiver、循环记录和native adapter验证；不把组件测试称为原生TUI验收。建议下一步与空转发层清理组合后，继续完整第8步发布矩阵；两个生产范围分开写入。
+
+
+## 唯一工具循环入口
+
+删除只保存agent并转发同名函数的ToolLoopService及旧私有入口。runtime/loop_support直接调用execute_tool_loop；原循环仍按中断、租约、延迟工具、模型采纳、插话重检、自然回复及工具轮的既定顺序运行。工具回调仅用partial绑定原agent，不新增执行器或状态。
+
+原11文件218 passed／20项既有xfail，相邻两文件104 passed／4项既有xfail；保留原断言并核对当前宿主身份。多次驱动同一测试时使用局部monkeypatch作用域，避免上一轮闭包污染下一轮。与工具事实片的组合验收另列TESTS。

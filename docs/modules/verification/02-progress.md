@@ -1,6 +1,6 @@
 # Verification：开发推进
 
-第8步本地补齐工具清理事实：当前结果与跨工作片恢复共用runtime_facts，命令成功和资源清理不互相推断；fake executor到native及MCP来源负例通过，真实TUI待组合包。
+第8步本地补齐工具清理事实：当前结果与跨工作片恢复共用runtime_facts，命令成功和资源清理不互相推断；fake executor到native及MCP来源负例通过，与唯一循环入口16文件组合349 passed／20项既有xfail；真实TUI待组合包。
 
 ## 仅思考续跑保存
 
