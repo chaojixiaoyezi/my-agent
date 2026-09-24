@@ -644,7 +644,7 @@ auth 表单取消和参数拒绝已验，官方设备码在两处环境被 HTTP 
   TUI 通过方向键和 Enter 打开目标草稿，明确保存才生效，退出丢弃；保存使用内容版本比较，计费刷新不制造编辑冲突。
   修改内容不隐式恢复暂停目标，不改变 run/task、历史和权限。主子目标保存、放弃、停止以及父子消息隔离已实测；孙级、IM 和旧数据迁移仍待专项验证。详见 [目标控制](docs/design/THREAD_GOAL_LIFECYCLE.md)。
 
-- 已修、真实复验待做（2026-09-24）：后台唤醒续跑的工具目录不再是封闭名单。默认 profile 决策带 `extension_tools=inherit`，
+- 已修并真实复验通过（2026-09-24，main `4ec0e11f3`，双机 runtime-step10o；本机两段式派工/唤醒任务与测试机停用重启用均通过，见 TESTS）：后台唤醒续跑的工具目录不再是封闭名单。默认 profile 决策带 `extension_tools=inherit`，
   运行构造方按注册表代理类型事实并入当前已启用插件/MCP 工具；显式配置或任务白名单标 `none`。停用撤销与禁用表仍在注册表/快照
   fail-closed。同批：停止重试可按 PID 出生标识结清实例已消失的旧 unknown 进程记录，插件停用不再卡在 `activation_unsettled`。
   见 [后台工具策略边界](docs/modules/gateway/04-structure.md#后台工具策略边界) 与 [受管后台进程](docs/design/MANAGED_BACKGROUND_PROCESS_SESSIONS.md#重试结清旧未知记录)。
