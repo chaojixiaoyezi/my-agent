@@ -35,10 +35,10 @@ class SafeFormattedLines(tuple):
             return lines
         return super().__new__(cls, (SafeFormattedLine(line) for line in lines))
 
-    # LLM: 所有输入先经构造器检查；仅在组合已确认安全的行组时走 tuple 原语，不接受外部信任标记。
-    # 函数用途: 拼接稳定前缀与新增行组，避免再次过滤旧正文。
+    # LLM: groups 是显式的行组序列；所有输入先经构造器检查，仅在组合已确认安全的行组时走 tuple 原语，不接受外部信任标记。
+    # 函数用途: 按顺序拼接稳定前缀与新增行组，避免再次过滤旧正文。
     @classmethod
-    def join(cls, *groups):
+    def join(cls, groups):
         checked = tuple(cls(group) for group in groups)
         return tuple.__new__(cls, chain.from_iterable(checked))
 

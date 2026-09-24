@@ -101,7 +101,7 @@ def test_safe_line_groups_reuse_checked_prefix_but_sanitize_new_suffix(monkeypat
         return original(text)
 
     monkeypatch.setattr(tui_safe_lines, "sanitize_terminal_text", checked)
-    combined = SafeFormattedLines.join(prefix[:], ((("", "新文字\x1b[2J"),),))
+    combined = SafeFormattedLines.join((prefix[:], ((("", "新文字\x1b[2J"),),)))
     frame = TuiRenderFrame(combined, (), (), (), (), ())
     assert sanitize_tui_render_frame(frame).transcript_lines is combined
     assert combined[0] is prefix[0]

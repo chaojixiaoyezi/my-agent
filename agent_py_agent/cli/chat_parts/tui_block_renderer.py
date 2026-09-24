@@ -618,7 +618,7 @@ def render_tui_snapshot(
     start = len(prefix_lines) + len(separator)
     return sanitize_tui_render_frame(
         TuiRenderFrame(
-            SafeFormattedLines.join(prefix_lines, separator, lines),
+            SafeFormattedLines.join((prefix_lines, separator, lines)),
             tuple(overlay),
             _render_input_status(snapshot, context),
             _render_fixed_todo(snapshot, context),
