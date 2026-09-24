@@ -259,10 +259,10 @@ def test_actual_package_original_install_call_disable_reenable_remove(installed_
     assert replay["state"] == "succeeded" and replay["operation_id"] == installed["operation_id"]
     assert not service.installations.snapshot()[0].enabled
     listed = service.command("/plugins list", revision=service.catalog().revision, request_id="list")
-    assert listed["ok"] and "workspace-peek 0.1.0（停用）" in listed["message"]
+    assert listed["ok"] and "workspace-peek 0.1.1（停用）" in listed["message"]
     assert service.installations.snapshot()[0].manifest.summary in listed["message"]
     info = service.command("/plugins info workspace-peek", revision=service.catalog().revision, request_id="info")
-    assert info["ok"] and "workspace-peek 0.1.0（停用）" in info["message"]
+    assert info["ok"] and "workspace-peek 0.1.1（停用）" in info["message"]
     assert "/plugins@workspace-peek show" in info["message"]
     assert "普通中文示例：" in info["message"] and "必填设置：无" in info["message"]
     assert "page_bytes" in info["message"] and "先执行 /plugins enable workspace-peek" in info["message"]
@@ -278,7 +278,7 @@ def test_actual_package_original_install_call_disable_reenable_remove(installed_
     manage(service, f'/plugins configure workspace-peek --file "{settings}"', "configure")
     enabled = manage(service, "/plugins enable workspace-peek", "enable")
     assert enabled["details"]["candidate_cleanup"]["confirmed"]
-    assert "workspace-peek 0.1.0（启用）" in enabled["message"]
+    assert "workspace-peek 0.1.1（启用）" in enabled["message"]
     assert "普通中文示例：" in enabled["message"] and "/plugins remove workspace-peek" in enabled["message"]
     assert enabled["message"].endswith("查询：/plugins status enable")
     explicit = manage(service, "/plugins@workspace-peek show input.txt", "explicit")

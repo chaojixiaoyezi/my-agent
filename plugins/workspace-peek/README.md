@@ -13,7 +13,7 @@ python scripts/build_plugin_api.py --wheel-dir /tmp/plugin-build/wheels
 python scripts/build_plugin_package.py \
   --project plugins/workspace-peek \
   --declaration workspace_peek/declaration.json \
-  --wheel /tmp/plugin-build/wheels/my_agent_plugin_api-0.1.0-py3-none-any.whl \
+  --wheel /tmp/plugin-build/wheels/my_agent_plugin_api-0.2.0-py3-none-any.whl \
   --output /tmp/plugin-build/workspace-peek.zip
 ```
 

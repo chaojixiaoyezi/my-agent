@@ -17,6 +17,7 @@ from typing import Any
 from ..contracts.error_taxonomy import error_contract
 from ..retrieval.embedding import EmbeddingProvider, cosine
 from ..workspace_read_context import WorkspaceReadContext
+from ..workspace_write_context import WorkspaceWriteContext
 
 
 class ToolFailureStage(str, Enum):
@@ -1165,6 +1166,7 @@ class ToolInvocationContext:
     cancellation_token: object | None = None
     execution_authority_check: Callable[[], None] | None = field(default=None, repr=False, compare=False)
     workspace_read_context: WorkspaceReadContext | None = None
+    workspace_write_context: WorkspaceWriteContext | None = None
 
 
 @dataclass

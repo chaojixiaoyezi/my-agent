@@ -18,6 +18,7 @@ from .tooling.mcp_registration import MCPProxyTool, build_proxy_tool, sanitize_n
 from .tooling.models import ResourceScopePolicy, ToolAvailability, ToolInvocationContext
 from .tooling.process_session_store import ProcessSessionStore, process_session_store_root
 from .workspace_read_context import WORKSPACE_READ_EXTENSION, WORKSPACE_READ_VERSION
+from .workspace_write_context import WORKSPACE_WRITE_EXTENSION, WORKSPACE_WRITE_VERSION
 
 
 # LLM: 展示名由完整大小写敏感身份派生，截断只作用于可读部分；发布还必须检测实际名称冲突，不能覆盖核心工具。
@@ -42,17 +43,38 @@ class PluginProxyTool(MCPProxyTool):
         return super().availability()
 
     # LLM: 只看代理固定 transport 的声明；普通 arguments 不能伪造元数据，缺可信上下文须在发送前失败。
-    # 函数用途: 为支持当前扩展版本的插件生成本次工作区读取元数据。
+    #   写入上下文只给协商了写入扩展、且本工具声明 mutating/dangerous 的调用；只读工具永远拿不到写权限。
+    # 函数用途: 为支持当前扩展版本的插件生成本次工作区读取/写入元数据。
     def _request_meta(self, context: ToolInvocationContext | None) -> dict[str, object] | None:
+        meta: dict[str, object] = {}
+        if self._negotiated(WORKSPACE_READ_EXTENSION, WORKSPACE_READ_VERSION):
+            if context is None or context.workspace_read_context is None:
+                raise MCPError("插件缺少本次工作区读取上下文", code="MCP_PROTOCOL_ERROR", effect_outcome="not_started")
+            meta[WORKSPACE_READ_EXTENSION] = context.workspace_read_context.to_payload()
+        if (self._negotiated(WORKSPACE_WRITE_EXTENSION, WORKSPACE_WRITE_VERSION)
+                and self._declared_effect() in {"mutating", "dangerous"}):
+            if context is None or context.workspace_write_context is None:
+                raise MCPError("插件缺少本次工作区写入上下文", code="MCP_PROTOCOL_ERROR", effect_outcome="not_started")
+            meta[WORKSPACE_WRITE_EXTENSION] = context.workspace_write_context.to_payload()
+        return meta or None
+
+    # LLM: 只读固定 transport 握手时的 experimental 声明；声明不授予权限，仅决定是否附带宿主上下文。
+    # 函数用途: 判断插件是否声明支持某个扩展的指定版本。
+    def _negotiated(self, extension: str, version: str) -> bool:
         capabilities = self.transport.capabilities if self.transport is not None else {}
         experimental = capabilities.get("experimental")
-        declared = experimental.get(WORKSPACE_READ_EXTENSION) if isinstance(experimental, dict) else None
+        declared = experimental.get(extension) if isinstance(experimental, dict) else None
         versions = declared.get("versions") if isinstance(declared, dict) else None
-        if not isinstance(versions, list) or WORKSPACE_READ_VERSION not in versions:
-            return None
-        if context is None or context.workspace_read_context is None:
-            raise MCPError("插件缺少本次工作区读取上下文", code="MCP_PROTOCOL_ERROR", effect_outcome="not_started")
-        return {WORKSPACE_READ_EXTENSION: context.workspace_read_context.to_payload()}
+        return isinstance(versions, list) and version in versions
+
+    # LLM: 效果来自已安装包描述中同名工具的声明；找不到按只读处理，不放宽。
+    # 函数用途: 读取本工具声明的副作用类型。
+    def _declared_effect(self) -> str:
+        tools = getattr(getattr(self.client, "installation", None), "manifest", None)
+        for tool in getattr(tools, "tools", ()):
+            if tool.name == self.remote_tool:
+                return tool.requested_effect
+        return "read_only"
 
 
 # LLM: 一个客户端只属于安装表中的固定代次；沿原 MCP 重连/关闭与资源登记，不接收包提供的 owner、argv 或宿主地址。

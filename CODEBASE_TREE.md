@@ -42,6 +42,7 @@
     |-- PLUGIN_LIFECYCLE.md              # 可装卸插件、动态命令、版本切换与故障回收的待实施方案
     |-- PLUGIN_PACKAGES.md               # 本地包静态校验与待接线的安装事实、隔离和撤销边界
     |-- PLUGIN_WORKSPACE_CONTEXT.md      # 逐次只读工作区协议、路径裁决与轻量 SDK 构建边界
+    |-- PLUGIN_WORKSPACE_WRITE.md        # 逐次写入工作区协议，与内置写工具同一裁决且只可能更严
     |-- WORKSPACE_PEEK.md                # 首个自有只读插件的预览、分页、安全打开与构建边界
     |-- PLUGIN_ACTIVATION.md             # 唯一安装表的激活 CAS、撤销、显式迁移及待接线资源边界
     |-- MANAGED_PROCESS_STDIO.md         # 原 host 字节管道、激活资源归属及旧版本恢复边界
@@ -186,6 +187,7 @@ agent_py_agent/
 |   |-- plugin_activation.py           # 原安装版本上的激活迁移、阶段重放与旧代拒绝
 |   |-- plugin_runtime.py              # 固定代次的 MCP 服务、完整目录校验与原工具代理
 |   |-- workspace_read_context.py      # 宿主与插件共用的冻结读取协议及逐项路径检查
+|   |-- workspace_write_context.py     # 宿主与插件共用的冻结写入协议及逐项写入裁决
 |   |-- plugin_invocation.py           # 显式业务选择摘要、原执行器组装及单次 MCP 连接收尾
 |   |-- plugin_deactivation.py         # 撤销原代、关闭准备执行权并清理两类精确资源
 |   |-- plugin_release.py              # 原准备执行器退出与完整资源证据核验，不改写 UNKNOWN
@@ -519,6 +521,7 @@ agent_py_agent/
 |   |   |-- executor.py               # approval、sandbox、handler、账本、核对、持久化与投影状态机
 |   |   |-- runtime_boundary.py       # task 相对路径归一与精确读边界检查
 |   |   |-- workspace_read_scope.py   # 沿原 exact 与墙外授权生成本次 cwd 内的读取上界
+|   |   |-- workspace_write_scope.py  # 按原写入边界解析生成本次写入范围，无范围时只允许 cwd
 |   |   |-- capabilities_tool.py      # 从真实工具目录与唯一 channel registry 投影模型能力
 |   |   |-- _filesystem_display.py   # 文件工具共用的有界 diff/write 富终端展示事实构造器
 |   |   |-- _persona_write_guard.py   # SOUL/USER/AGENTS 统一强制走 update_persona
@@ -892,6 +895,7 @@ docs/
 - `agent_py_agent/agent/plugin_runtime.py` 与 `tooling/plugin_registration.py`：固定激活的 MCP 适配和新运行组合；原客户端共享连接，权限视图单独生成目录，不新建激活缓存权威。
 - `agent_py_agent/tests/test_mcp_operation_outcomes.py`：通过原执行器和临时 RuntimeDB 区分完整失败回执与未知结果，核对重放及逻辑资源释放。
 - `agent_py_agent/agent/workspace_read_context.py` 与 `tooling/workspace_read_scope.py`：纯读取协议和宿主组装分开，插件复用唯一 `path_access_policy.py` 裁决；范围为空明确拒绝，不从隔离进程环境补权限。
+- `agent_py_agent/agent/workspace_write_context.py` 与 `tooling/workspace_write_scope.py`：写入协议同样分层；只对协商且声明写效果的插件工具下发，裁决与 `write_boundary.py` 一致且只可能更严。
 - `agent_py_agent/agent/plugin_invocation.py`：显式业务调用固定原选择，工具输入不混入管理字段；原审批/执行链之外只管理本次 MCP 连接的建立与准确关闭。
 - `agent_py_agent/agent/plugin_deactivation.py` 与 `plugin_disable_tool.py`：先关闭原激活与准备任务权限，再冻结两类准确资源并锁外清理；保留原退出记录，不能将撤销等同清理成功。
 - `agent_py_agent/agent/plugin_release.py` 与 `plugin_cleanup.py`：前者从原 enable 执行器和资源账核验退出，后者只在 disable/remove 原结果严格成功读回后消费固定引用，并回收无人引用的旧包；不改写 UNKNOWN，不重新选择当前代。

@@ -19,6 +19,7 @@ from scripts.plugin_build import build_wheel, publish_artifact, wheel_metadata
 SDK_SOURCES = {
     "path_access_policy.py": "agent_py_agent/agent/path_access_policy.py",
     "workspace_read_context.py": "agent_py_agent/agent/workspace_read_context.py",
+    "workspace_write_context.py": "agent_py_agent/agent/workspace_write_context.py",
     "nofollow_fs.py": "agent_py_agent/agent/common/nofollow_fs.py",
 }
 

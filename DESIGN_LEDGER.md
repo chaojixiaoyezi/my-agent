@@ -107,6 +107,9 @@ MCP 完整失败回执结算已本地修复、待发布验收：合法 `isError=
 
 十步重构的具体 TODO 已落地于 [原 Goal 台账](docs/tasks/REFACTOR_PLUGIN_GOAL.md#当前-todo唯一执行清单)。仅细化交付顺序与汇报，不改变架构范围；当前第 4 步的本地实现、发包部署与真实 TUI 验收分开标记。
 
+第 10 步新增[插件逐次工作区写入上下文](docs/design/PLUGIN_WORKSPACE_WRITE.md)，状态为本地已实施、真实 TUI 未验：
+只对协商扩展且声明写效果的工具下发冻结写入范围，裁决与内置写工具一致且只可能更严，由逐项比对测试强制。
+
 第 4 步新增[插件逐次工作区读取上下文](docs/design/PLUGIN_WORKSPACE_CONTEXT.md)，状态为开发中：
 仅对固定连接明确支持扩展的自有插件传递冻结 cwd 与原读取权限，不改参数、共享进程或安装配置。
 通用运输已在本地接通；唯一源码构建期投影的轻量 SDK 与 workspace-peek 已有实际标准构建和独立 MCP 组件验证。

@@ -479,6 +479,10 @@ OAuth 传输、采样和模型菜单回归。覆盖保存无网络、公开字�
 再覆盖 `test_model_oauth.py`、`test_model_oauth_transport.py`、`test_tui_model_menu.py`、`test_provider_sampling.py`；
 最终联合命令使用 `python3 -m pytest <以上十个文件> -o addopts='' -q --tb=short`，213 passed in 4.29s。
 
+## 第 10 步插件写入上下文（本地，待发布）
+
+- `test_workspace_write_context.py`（10 项）：2000 组随机写入边界 × 4 个目标路径，逐项断言「插件允许 ⇔ 宿主 `validate_write_boundary` 允许且目标在写入根之内」，并验证序列化往返后裁决不变；另覆盖无范围时只允许 cwd、owner 墙、畸形载荷拒绝、锚点取最具体根，以及只对协商且声明写效果的工具下发、缺上下文时发送前 `not_started`。
+
 ## 第 9 步 TUI 拆分首片：按键动作外移（本地，待发布）
 
 - 纯搬移，行为不变：`tui_keybindings.py`（2656→1744 行）中的副作用动作移到新模块 `tui_actions.py`：记忆命令后台执行、本地/Gateway 排队、执行选项快照、控制命令提交与对账器、补充消息提交与对账器、子代理插话/停止、Esc 中断，以及只被它们使用或需被双方共享的 `_handle_command_params`、`_required_tui_runtime`、`_active_tui_runtime`、`_agent_guidance_sent_notice`、`_restore_failed_agent_input`、`_safe_http_status` 和两个重试间隔常量；`_run_clipboard_tool`、`_load_tmux_clipboard_buffer` 移到 `tui_clipboard.py`。

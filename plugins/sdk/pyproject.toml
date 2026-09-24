@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "my-agent-plugin-api"
-version = "0.1.0"
-description = "my-agent 插件的纯工作区读取协议与共用路径裁决"
+version = "0.2.0"
+description = "my-agent 插件的纯工作区读写协议与共用路径裁决"
 requires-python = ">=3.10"
 license = "Apache-2.0"
 dependencies = []

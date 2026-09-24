@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "my-agent-workspace-peek"
-version = "0.1.0"
+version = "0.1.1"
 description = "工作区文件预览与有界目录查看"
 requires-python = ">=3.10"
 license = "Apache-2.0"
-dependencies = ["my-agent-plugin-api==0.1.0"]
+dependencies = ["my-agent-plugin-api==0.2.0"]
 
 [tool.setuptools]
 package-dir = {"" = "src"}

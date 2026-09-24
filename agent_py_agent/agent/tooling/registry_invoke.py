@@ -31,6 +31,7 @@ from .runtime_boundary import (
     exact_read_boundary_error,
 )
 from .workspace_read_scope import build_workspace_read_context
+from .workspace_write_scope import build_workspace_write_context
 from .write_boundary import WRITE_TOOL_NAMES, validate_write_boundary
 
 _MAX_EXCEPTION_MESSAGE_CHARS = 500
@@ -209,8 +210,9 @@ def invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolHandlerOutco
     )
 
 
-# LLM: 读取范围只读当前请求的宿主字段，与业务 arguments 分离；沿原墙外授权派生，不按 workspace 列表猜权限。
-# 函数用途: 冻结本次调用的执行权、取消和插件读取上下文，不修改共享 handler。
+# LLM: 读取/写入范围只读当前请求的宿主字段，与业务 arguments 分离；沿原墙外授权派生，不按 workspace 列表猜权限。
+#   写入上下文只在插件代理协商且工具声明写效果时才下发（见 PluginProxyTool._request_meta）。
+# 函数用途: 冻结本次调用的执行权、取消和插件读取/写入上下文，不修改共享 handler。
 def _invocation_context(request: RegistryToolInvokeRequest) -> ToolInvocationContext:
     policy = PathAccessPolicy.from_values(mode=request.path_access_mode, dangerous_roots=request.path_dangerous_roots,
                                          owner_scope_root=request.owner_scope_root)
@@ -220,6 +222,9 @@ def _invocation_context(request: RegistryToolInvokeRequest) -> ToolInvocationCon
         workspace_read_context=build_workspace_read_context(
             cwd=request.workspace_root, write_boundary=request.write_boundary, path_policy=policy,
             granted_external_roots=_granted_external_work_roots(request, request.owner_scope_root),
+        ),
+        workspace_write_context=build_workspace_write_context(
+            cwd=request.workspace_root, write_boundary=request.write_boundary, path_policy=policy,
         ),
     )
 
