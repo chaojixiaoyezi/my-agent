@@ -40,7 +40,16 @@ child不展示历史正文时的读取回归先复现1 failed/1 passed，修复�
 - **变异验证**：去掉 preflight 的媒体门槛，3 项失败（2 项矩阵、Gateway 越压缩点档）；恢复旧码，7 项失败（越窗档、2 项供应商溢出、4 项大历史）；去掉 `COMPACT_REQUEST_NON_TEXT` 的专门文案，越窗档失败。改回后全部通过。
 - **结果**：72 个相关测试文件 6460 passed、2 skipped、2 xfailed、5 xpassed。5 个 xpassed 在同一 main 上完全一样，与本片无关。
 
-## 决策连接连续失败的冷却退避（2026-09-24，本地分支 `claude/decision-slow-sample`）
+## 子代理自动选模提交阶段的结构化原因码（2026-09-24，本地分支 `claude/decision-child-commit-reasons`）
+
+- **扩展** `test_subagent_first_request_selection.py` 的自动验证失败矩阵：新增"父线程级设置变化"档，得 `settings_changed`；原有各档改为逐一断言原因码——改目录、关闭决策都得 `model_catalog_changed`（owner 级设置写在目录里），显式同值选择得 `explicit_model_selection`，此前前两档只会记成 `selection_changed`。
+- **新测试** 同文件 3 项：
+  - 目录锁或父线程锁在提交时被占用，分别记 `model_catalog_busy`、`source_thread_busy`，业务照常用继承模型发出。替身只在探针前换上，准备阶段不受影响。
+  - `_adoption_conflict` 表：期限最先判定 `commit_deadline`；建议变化 `advice_changed`；首请求资格被消费（标记缺失、非 preparing、attempt 或 operation 不符）`first_request_consumed`；选择版本变化 `selection_revision_changed`；全部一致返回空串。
+- **变异验证**：7 种各自使测试失败——收拢回 `selection_changed`（5 项失败）、两把锁的原因码互换（各 1 项）、`settings_changed` 记成目录变化、期限改到最后判定、资格被消费记成建议变化、忽略选择版本变化。改回后全部通过。
+- **结果**：见本分支交接。
+
+## 决策连接连续失败的冷却退避（2026-09-24，已合入 main `3933b1db1`）
 
 - **新测试** `test_decision_cooldown_backoff.py` 6 项：
   - 冷却表：每次冷却过期后再失败，冷却依次为 30、60、120、240、300、300 秒；冷却期内才返回的失败不改截止时刻、不加级；成功和显式重试都从 30 秒重新计起；额度失败固定 300 秒并延长正在进行的冷却，但不加级；配置错误不随时间解除，修订变化后的失败从 30 秒计起。

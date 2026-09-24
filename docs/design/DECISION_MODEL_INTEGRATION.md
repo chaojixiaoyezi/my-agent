@@ -236,6 +236,12 @@ not_needed、need_data、no_match、abstain 与调用错误分开；缺项只引
 已执行的模型选择和配置版本跟随原 operation/run 记录；同一创建请求重送、恢复和重试不得重新抽签换模型。
 子代理执行模型候选复用原 `agentic` 模型目录和决策设置的结构化 `candidate_profile_ids`：空数组沿原可用目录，非空数组只缩小候选集合，用户和 agent 经原设置服务按 owner 或 thread 修改。列表仅保存原 profile ID，不能按模型名称猜服务商，也不授予共享模型或工具权限；禁用、撤销、连接或列表版本变化使在途建议失效。隔离验收仅允许官方 MiniMax-M2.7、官方 MiniMax-M3 与 OpenCode DeepSeek-V4-Flash 的三个已核对 profile，日常模型保持原状。
 子代理的逐次模型选择是主代理发起派工后的自动执行链：宿主准备合法候选、请求 Jev 建议、核对该 child 的实际首轮输入与工具/窗口能力，然后自动采用合法建议或保留原继承模型并继续创建运行。用户不逐个选择、确认、补决策资料或触发采用；现有显式模型配置若存在，只作为宿主硬约束和并发覆盖事实，不是本流程所需的人机步骤。创建阶段只拿到建议而首轮事实未知时，建议暂存于 canonical child thread，启动核对后自动决定；暂存本身不算切换成功。
+保留时 child thread 的建议记录 `status=retained` 与结构化原因码。提交阶段（锁内最后复核）每个失败点各有原因码，以便真实样本直接归因：
+- 目录与锁：`model_catalog_busy`、`model_catalog_changed`、`source_thread_busy`、`source_thread_missing`。
+- 复核：`settings_changed`、`task_changed`、`permission_changed`、`commit_deadline`。
+- child 线程 CAS：`advice_changed`、`first_request_consumed`、`selection_revision_changed`。
+- 其它：`advice_source_is_child`，以及锁内其它非阻塞锁占用的 `commit_lock_busy`。
+owner 级决策设置写在模型目录里，改它会先表现为 `model_catalog_changed`。此前这些都记成 `selection_changed`，第四轮真实样本因此无法补推原因。
 
 ## 5. 配置、界面与自己操作的边界
 
