@@ -15,11 +15,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from ..backends.provider_headers import provider_session_scope
 from ..common.json_io import read_json_object_report
+from ..common.log_redaction import redact_sensitive_text
 from .candidate_models import CandidateObservation, host_promotion_mode, utc_now_iso
 from .candidates import CandidateService
 from .curator_backend import (
     CuratorModelAttempt,
+    CuratorModelCallError,
     CuratorModelTimeoutError,
     attempt_shape_payload,
     extract_with_retries,
@@ -423,6 +426,8 @@ class _CuratorLifecycleMixin:
 # 类用途: 提供 Curator 的持 lease 执行链。
 class _CuratorExecutionMixin:
     # LLM: 可选前置标注只能附于临时输入；提取/证据验证在任何权威提交前完成，材料及游标仍由原链持有。
+    # 后台提取自带宿主会话:按 owner_id + run_id 走与前台同一原语 provider_session_scope,不冒用前台线程会话;
+    # 同一 run 的同输入重试/缩批共享同一会话值,退出即复位。改动时同步 test_memory_curator_v2 的会话头用例。
     # 函数用途: 执行一个已持 lease 的提取、整批提交与提交后晋升。
     def _execute(self, context: _RunContext) -> CuratorRunResult:
         migration_warnings = self._preflight_migration()
@@ -439,7 +444,10 @@ class _CuratorExecutionMixin:
             migration_warnings = (*migration_warnings, *decision_warnings)
         # 提取可能因超时按比例缩批重试,返回的 batch 才是本次真正喂给模型的输入快照:
         # 证据验证、processed 前缀和游标推进都必须按同一快照计算,否则等待重放时引用不上。
-        attempt = extract_with_retries(self.backend, self.config, batch)
+        # 会话头绑定必须包住整次提取:要求会话头的服务商在发请求前就会拒绝无会话请求,而后台线程
+        # 没有前台的 ContextVar;bounded_call 的 copy_context 会把这里的值带进供应商调用线程。
+        with provider_session_scope((self.owner_id,), context.run_id):
+            attempt = extract_with_retries(self.backend, self.config, batch)
         if attempt.shrink_attempts:
             migration_warnings = (
                 *migration_warnings,
@@ -1005,13 +1013,15 @@ def _corrupt_run_id(quarantine: dict[str, object]) -> str:
     return "memory-curator-corrupt-" + digest[:16]
 
 
-# LLM: Failure audit preserves the acquired lease and recovery provenance but never serializes
-# exception text that may contain provider payload or user data.
-# 函数用途: 构造失败 run audit。
+# LLM: Failure audit preserves the acquired lease and recovery provenance; the exception message is
+# persisted only after the shared log redaction and a hard 200-char cut, never prompt/response bodies.
+# 函数用途: 构造失败 run audit 的诊断字典(类名、HTTP 状态码、脱敏截断后的异常正文)。
 def _failure_diagnostic(exc: BaseException) -> dict[str, object]:
-    """只提取机器可判定的失败形状：异常类名 + 供应商 HTTP 状态码（能拿到才记）。
+    """提取机器可判定的失败形状：异常类名 + 供应商 HTTP 状态码（能拿到才记）+ 脱敏异常正文。
 
-    供应商异常正文、请求体、记忆内容一律不进入账本；没有状态码就不写这个键，避免伪装成已知。
+    正文只取 `str(exc)` 经 redact_sensitive_text 脱敏后的前 200 字,便于事后归因(真机 2026-09-13 起
+    只有 error_type=ValueError 时看不出是缺会话头);请求体、响应体、记忆内容仍不进入账本。
+    没有状态码/正文就不写对应键,避免伪装成已知。
     """
     diagnostic: dict[str, object] = {"error_type": type(exc).__name__}
     for attr in ("http_status", "status_code"):
@@ -1023,14 +1033,33 @@ def _failure_diagnostic(exc: BaseException) -> dict[str, object]:
         if status > 0:
             diagnostic["provider_http_status"] = status
             break
+    message = redact_sensitive_text(str(exc or ""))[:200]
+    if message:
+        diagnostic["message"] = message
     return diagnostic
 
 
 # LLM: run 账的字段集是**严格 v2 契约**（`from_record` 要求键集合完全一致，历史行必须能读回来），
 # 所以诊断不能新增 dataclass 字段——那会让所有既有行校验失败，把失败记账本身变成
 # CURATOR_RUN_AUDIT_FAILED（本仓库真机踩过）。改为写进既有 `warnings`（v2 字段、有界、可解析）。
-# 函数用途: 把失败诊断编码为一条稳定的 warning 文本，供运维读账定位。
+# 单条 warning 上限 300 字符由 curator_run_log._bounded_warnings 把关;超限只缩短 message,
+# 绝不裁 JSON 本体(否则账读不回来)。每个字符 JSON 编码后至少占 1 位,砍掉超出的字符数一次就够。
+# 函数用途: 把失败诊断编码为一条稳定、有界、可解析的 warning 文本，供运维读账定位。
 def _failure_diagnostic_warning(diagnostic: dict[str, object]) -> str:
+    text = _encode_failure_diagnostic(diagnostic)
+    overflow = len(text) - 300
+    message = str(diagnostic.get("message") or "")
+    if overflow > 0 and message:
+        trimmed = {**diagnostic, "message": message[: max(0, len(message) - overflow)]}
+        if not trimmed["message"]:
+            del trimmed["message"]
+        text = _encode_failure_diagnostic(trimmed)
+    return text
+
+
+# LLM: 前缀与 JSON 形态是读账方(测试、运维脚本)按 `=` 切分后 json.loads 的稳定契约,不能改成多段或非 JSON。
+# 函数用途: 失败诊断的唯一编码形式(固定前缀 + 紧凑排序 JSON),读账方按 `=` 一次切分即可解析。
+def _encode_failure_diagnostic(diagnostic: dict[str, object]) -> str:
     return "failure_diagnostic=" + json.dumps(
         diagnostic, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     )
@@ -1132,11 +1161,15 @@ def _cursor_payload(cursors: dict[str, str], audit_event_id: str) -> dict[str, o
     }
 
 
-# LLM: Failure taxonomy contains stable codes only; provider exception text is never persisted.
+# LLM: Failure taxonomy contains stable codes only; classification reads exception types, never text.
+# 供应商调用阶段的 ValueError/TypeError 已由 extract_with_retries 包成 CuratorModelCallError,
+# 归 CURATOR_MODEL_FAILED;裸 ValueError 只剩宿主解析/校验失败,仍归 CURATOR_SCHEMA_INVALID。
 # 函数用途: 将 Curator 异常分类为恢复和运维使用的错误码。
 def _failure_code(exc: BaseException) -> str:
     if isinstance(exc, CuratorModelTimeoutError):
         return "CURATOR_MODEL_TIMEOUT"
+    if isinstance(exc, CuratorModelCallError):
+        return "CURATOR_MODEL_FAILED"
     if isinstance(exc, CuratorCommitRecoveryError):
         return "CURATOR_COMMIT_RECOVERY_FAILED"
     if isinstance(exc, CuratorBatchCommitError):
@@ -1256,6 +1289,7 @@ def _parse_time(value: str) -> datetime | None:
 
 __all__ = [
     "CuratorInputError",
+    "CuratorModelCallError",
     "CuratorModelTimeoutError",
     "MemoryCuratorDependencies",
     "MemoryCuratorIdentity",

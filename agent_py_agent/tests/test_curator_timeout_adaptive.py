@@ -28,6 +28,7 @@ from agent_py_agent.agent.memory_store.curator import (
 )
 from agent_py_agent.agent.memory_store.curator_backend import (
     _TIMEOUT_SHRINK_LIMIT,
+    CuratorModelCallError,
     CuratorModelTimeoutError,
     adaptive_timeout_seconds,
     call_backend_with_timeout,
@@ -370,14 +371,16 @@ def test_extract_without_timeout_keeps_existing_prompt_and_timeout(monkeypatch) 
     assert attempt.shrink_attempts == 0
 
 
-# 函数用途: (c) 非超时失败仍然是"同输入重试 max_retries 次",一次都不缩批。
+# 函数用途: (c) 非超时失败仍然是"同输入重试 max_retries 次",一次都不缩批;供应商阶段的 ValueError
+# 出口时带上阶段标记 CuratorModelCallError,原异常保留在 __cause__ 供诊断。
 def test_non_timeout_failure_retries_identical_prompt_without_shrinking() -> None:
-    backend = _ScriptedBackend([ValueError("CURATOR_SCHEMA_INVALID")])
+    backend = _ScriptedBackend([ValueError("provider rejected the request")])
     config = _config(**{**_SHRINK_CONFIG, "max_retries": 2})
 
-    with pytest.raises(ValueError, match="CURATOR_SCHEMA_INVALID"):
+    with pytest.raises(CuratorModelCallError) as raised:
         extract_with_retries(backend, config, _batch(8))
 
+    assert isinstance(raised.value.__cause__, ValueError)
     assert len(backend.prompts) == 3  # max_retries + 1
     assert len(set(backend.prompts)) == 1  # 逐字相同的输入
 
@@ -532,7 +535,7 @@ def test_repeated_timeouts_stop_at_bound_with_typed_failure(tmp_path: Path) -> N
     # 既有 failure_diagnostic= 形状逐字保留,且不夹带供应商正文;它前面新增的是每次调用的
     # 无正文形状(见 test_curator_timeout_observability.py),让失败路径也能看出缩批真的发生过。
     assert records[0].warnings[-1] == (
-        'failure_diagnostic={"error_type":"ProviderTimeoutError"}'
+        'failure_diagnostic={"error_type":"ProviderTimeoutError","message":"idle"}'
     )
     shapes = [
         json.loads(item.split("=", 1)[1])
@@ -559,7 +562,8 @@ def test_host_bound_timeout_keeps_timeout_code_and_diagnostic_shape(tmp_path: Pa
     records = service.run_log.list()
     # failure_diagnostic= 仍是最后一条且形状逐字不变;前面多出的是本次唯一一次调用的无正文形状。
     assert records[0].warnings[-1] == (
-        'failure_diagnostic={"error_type":"CuratorModelTimeoutError"}'
+        'failure_diagnostic={"error_type":"CuratorModelTimeoutError",'
+        '"message":"memory curator model request timed out"}'
     )
     assert len(records[0].warnings) == 2
     assert records[0].warnings[0].startswith("curator_model_attempt=")
