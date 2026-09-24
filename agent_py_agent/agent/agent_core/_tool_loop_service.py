@@ -1874,14 +1874,6 @@ def _mark_unknown_outcome_halt(agent, record: ToolCallRecordParams) -> None:
     )
 
 
-# no-action 结构化闸(复核 seq 339 第 2 点):评估判 informational(requires_action=False)
-# 时模型仍提出 ToolCall,不能直接进 handler——由执行层拦截(TOOL_ACTION_NOT_REQUIRED,
-# handler 不执行),有界拦截(连续 2 轮)后走收口轮等用户明确指示。
-# 判定只用结构化信号(assessment 状态 + 调用出现与否 + 轮数),不解析模型话术。
-_NO_ACTION_GATE_STREAK_ATTR = "_no_action_gate_streak"
-_NO_ACTION_GATE_HALT_LIMIT = 2
-
-
 # LLM: repeated failure 硬收口不是默认主链；必须由结构化配置显式启用并达到阈值。
 # 函数用途: 判断部署者是否明确要求把连续失败升级成人工介入硬门。
 def _hard_halt_hit(record: ToolCallRecordParams, count: int) -> bool:

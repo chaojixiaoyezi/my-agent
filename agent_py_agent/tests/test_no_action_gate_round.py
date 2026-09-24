@@ -9,8 +9,8 @@ handler——全部转 TOOL_ACTION_NOT_REQUIRED 拦截结果;连续 _NO_ACTION_G
 
 from types import SimpleNamespace
 
-from agent_py_agent.agent.agent_core._tool_loop_service import _NO_ACTION_GATE_HALT_LIMIT
 from agent_py_agent.agent.agent_core.tool_loop.round_execution import (
+    _NO_ACTION_GATE_HALT_LIMIT,
     ToolRoundExecutionRequest,
     execute_tool_round,
 )

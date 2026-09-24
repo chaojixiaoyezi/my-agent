@@ -44,6 +44,10 @@ from .segment_planning import (
     resolve_parallel_batch_limit,
 )
 
+# 无动作闸只由执行轮消费和计数；收口层读取原halt事实，不另设阈值副本。
+_NO_ACTION_GATE_STREAK_ATTR = "_no_action_gate_streak"
+_NO_ACTION_GATE_HALT_LIMIT = 2
+
 _STATEFUL_ORCHESTRATION_TOOLS = {
     "create_subagents",
 }
@@ -239,6 +243,7 @@ def _no_action_gated_result(call: ToolCall) -> ToolResult:
     )
 
 
+# LLM: 无动作闸的计数和阈值唯一归执行轮；只读结构化assessment，保留逐调用失败记录、halt时机及零handler执行。
 # 函数用途: informational 轮对模型提出的全部调用做有界结构化拦截——handler 不执行、
 # 每调用一条拦截结果(模型可读),连续 _NO_ACTION_GATE_HALT_LIMIT 轮拦截后设
 # no_action_gate_halt,由 _tool_step_or_limit 收口轮接管(剥工具调用,等用户明确指示)。
@@ -246,8 +251,6 @@ def _gate_all_calls_for_no_action(
     request: ToolRoundExecutionRequest,
     calls: list[ToolCall],
 ) -> bool:
-    from .._tool_loop_service import _NO_ACTION_GATE_HALT_LIMIT, _NO_ACTION_GATE_STREAK_ATTR
-
     streak = 0
     try:
         streak = int(getattr(request.params, _NO_ACTION_GATE_STREAK_ATTR, 0) or 0)

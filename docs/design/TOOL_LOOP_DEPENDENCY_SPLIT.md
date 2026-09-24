@@ -132,3 +132,10 @@ Compact／媒体开发线与主线存在大量decision/Jev前置改动。以f2bc
 旧durable只读工具索引通常没有attempt_id，也没有可反查的tool_operation，不透明operation_id不能拆出执行片。缺来源的旧carried记录不得套当前身份；全来源不确定时保持完整历史、原generation，返回compacted=false与结构化source_resolution=uncertain。此时provider overflow后的自动压缩恢复受限，必须作为兼容限制单列，不能宣称旧大历史已完整通过。
 
 新行显式追加引用字段，JSON格式可读不等于旧reader语义安全：旧reader仍按裸编号过滤，不能直接消费新混源同号记录。部署回滚必须核对checkpoint数据与reader兼容，保留新产生的账和用户记录；不能只切旧wheel并声称安全，也不能为回滚悄悄丢弃新历史。详细字段及最终验证在来源片交接中记录。
+
+
+## 工具并发段窄判定
+
+segment_planning只接受调用列表／起点、有效批上限和原位Compact／调度描述查询。每条候选仍先查Compact再读取该调用快照、工作根和写边界，命中屏障／冲突／批上限就停止扫描，异常原样传播。执行轮持有原线程身份、审批、取消、配对记录和完整provider调用序列；批大小只分批，不丢尾部调用。
+
+删除迁完的旧段扫描、批大小和整数转换helper；任务属性优先、缺省才读配置，0／负数原语义不变。不接整个Agent或request换名context。无动作闸的两项常量迁到唯一消费执行轮，移除反向导入主循环服务，值及判断不变。独立两文件65项通过（包含21项新增边界／真实轮交错测试）；与收口片组合另记TESTS。

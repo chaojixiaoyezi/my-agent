@@ -138,6 +138,7 @@ agent_py_agent/
 |   |   |   |-- sleep_tool.py           # clock.sleep 工具：模型主动定时等待，写 wake_queue 字条、事件提前醒取消
 |   |   |-- model/                      # 主工具循环的统一模型调用账、动态超时、上下文压力与成本统计
 |   |   |-- tool_loop/                  # 工具轮次执行、恢复与自然结束
+|   |   |-- tool_loop/segment_planning.py # 仅按调用和实时查询选择并发段，不执行工具
 |   |   |-- tool_loop/closeout.py       # 绑定原收口操作，按结构化副作用事实生成未完成交接
 |   |   |-- tool_loop/model_turn.py     # 绑定模型请求／超限恢复、用量与输入确认，保持原顺序
 |   |   |-- tool_loop/display_archive.py # 执行当时的公开工具原文归档与轻量预览引用
@@ -621,6 +622,7 @@ docs/
 
 ### 关键文件说明
 
+- `agent_py_agent/agent/agent_core/tool_loop/segment_planning.py`：只接canonical调用、有效批上限、Compact及并发描述查询；审批、线程和provider顺序记账仍归原执行轮。
 - `agent_py_agent/agent/agent_core/tool_loop/closeout.py`：统一请求、收口响应处理和延后结束原因读取，不持有Agent或完整回合参数，不执行工具或增加模型重试。
 - `agent_py_agent/agent/agent_core/tool_loop/model_turn.py`：协调请求周期与响应采纳；实际prompt构造、Compact和执行权仍由原入口绑定。
 

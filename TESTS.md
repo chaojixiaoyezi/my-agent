@@ -1,5 +1,13 @@
 # 测试与发布验收
 
+## 第8步并发段与收口组合
+
+并发段片0c19b2e3c精选为8468998b6，两个直接测试文件65 passed，包含21项新增因果／交错用例；原取消、审批、线程执行和provider顺序记账未移动。当前组合另把no-action两项常量移到唯一执行模块，原数值和测试断言不变。
+
+最终11文件组合 **283 passed／20项既有xfail（11.52秒）**：上一节收口九文件加tool_round_execution和tool_segment_planning。覆盖顺序屏障、冲突后继续串行且不丢结果、逐候选动态Compact查询、异常前零工具执行／零记账、配置按需读取和原批上限。原请求／响应、unknown与Goal收口合同同时验证。
+
+本地Ruff、doc sync、strict-size hard=0、diff与clean-package全部通过，尺寸基线未改。无真实模型、TUI、Gateway操作，仍待Compact来源引用片后做发布及原生验收，线上CI不是本片证据。
+
 ## 第8步收口依赖
 
 相同三文件基线81 passed／20既有xfail；新增窄收口及绑定用例后四文件95 passed／20既有xfail。最终九文件组合218 passed／20既有xfail（11.43秒）：tool_loop_closeout、cli_resume_contract、unknown_outcome_tool_halt、test_tools/test_tool_loop、no_action_gate_round、tool_call_guardrail_runtime、timeout_recovery_delivery、runtime_gate_ledger、conversation_goal_tools。
