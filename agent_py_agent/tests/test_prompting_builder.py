@@ -245,6 +245,9 @@ class TestReadPromptFiles:
         assert "不能成为主代理静默接管功能实现的授权" in result[0]
         assert "让一个刚回来的用户也能单独看懂" in result[0]
         assert "不要只回复“任务已完成”" in result[0]
+        # 所有代理共用的证据规则：数字来自工具输出，表内矛盾回到工具重算（TUI239 父级心算样本）。
+        assert "不做心算合计" in result[0]
+        assert "不要编造原因来解释差异" in result[0]
 
     def test_legacy_default_prompt_alias_falls_back_to_builtin(self, tmp_path):
         builder = PromptBuilder(AgentConfig(prompt_files=["prompts/default.md"]), tmp_path)
