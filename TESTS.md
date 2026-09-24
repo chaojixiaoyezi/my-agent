@@ -2,6 +2,17 @@
 
 child不展示历史正文时的读取回归先复现1 failed/1 passed，修复后test_compact_retained_history、test_subagent_compact_recovery、test_gateway_child_compact_scope_application三文件31 passed（8.48秒）。三宿主seed仓外基线仅验证测量和完整性，不算内存目标通过；细节见容量审计的宿主生命周期基线。
 
+## 后台上下文预算只估算渲染节（2026-09-24，本地分支 `claude/decision-background-context-budget`）
+
+- **新测试** `test_background_context_budget.py` 5 项：
+  - 有种子时预算不计入不渲染的最近消息（shape_pass 为 0，12 条观察全留）；无种子时照常计入并收缩。
+  - 渲染只在无种子时出现 Recent Messages。
+  - 合同：预算估算的节集合等于实际渲染的节集合，覆盖普通有种子、普通无种子、审计窄事件三种情况。
+- **改写用例**：`test_background_scoped_compact.py` 的独立任务用例。原先把就绪路径保留的 bundle 当作"运行视图"核对消息范围；现在断言 bundle 不带消息正文，并改在真实无种子路径的渲染结果上核对任务范围。
+- **新增界限**：`test_host_summary_phase_lifetime.py` 的后台宿主，摘要入口驻留低于历史正文的 3/8（修复前约 2.48MB，修复后约 1.15MB）。
+- **变异验证**：预算忽略 `rendered_keys`，4 项失败；渲染方不传，3 项失败；就绪路径保留消息，3 项失败。改回后全部通过。
+- **结果**：后台相关 29 个测试文件，840 passed。
+
 ## 决策线能力推荐按插件分组出题（2026-09-24，本地分支 `claude/decision-plugin-grouping`）
 
 - **新测试** `test_decision_capability_provider_grouping.py` 2 项：

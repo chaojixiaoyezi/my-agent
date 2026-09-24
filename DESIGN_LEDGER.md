@@ -15,7 +15,9 @@
 - 4.2M 字符来源下，种子准备后驻留从约 8.5MB 降到 32–54KB；运行结束后的驻留减少 8.4–9.4MB；Gateway 首次发送前峰值从 29.8MB 降到 21.3MB。
 - 摘要期峰值约 10–11MB 不变，属于 2b（旧请求释放）。
 
-决策线能力推荐按插件分组出题（本地分支 `claude/decision-plugin-grouping`，待审）：只按结构化 `ToolModelHints.provider_id` 把同一插件的工具合成一题；选中展开全部成员，未选中整体延迟；内置工具与 Skill 仍逐项。内置插件 21 个工具下题数 21→8、题目大小 −36%。详见[接入设计](docs/design/DECISION_MODEL_INTEGRATION.md)。
+后台上下文预算只估算将渲染的节（本地分支 `claude/decision-background-context-budget`，待审）：渲染开关作为结构化 `rendered_keys` 传给预算；有历史种子时不渲染的最近消息不再挤占总预算，也不再保留正文。后台回合各阶段约少 1.34MB，可见运行事实不再被过度截断。详见[容量审计](docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md#后台上下文预算只估算渲染节有种子时不保留最近消息2026-09-24本地)。
+
+决策线能力推荐按插件分组出题（已合入 main `a2e26178b`）：只按结构化 `ToolModelHints.provider_id` 把同一插件的工具合成一题；选中展开全部成员，未选中整体延迟；内置工具与 Skill 仍逐项。内置插件 21 个工具下题数 21→8、题目大小 −36%。详见[接入设计](docs/design/DECISION_MODEL_INTEGRATION.md)。
 
 12.4 第二片 2b 已由主线 owner 审阅合入 main `911d0d14d`，尚未部署：恢复宿主决定摘要后解绑旧请求的完整原生历史（原参数与 frozen，只解绑这一对象，不原地清空）。4.2M 字符下摘要期峰值从 10.2–11.7MB 降到 1.7–3.3MB。建循环时的首次物化峰值仍在，要降低需把 `provider_history_messages` 改为按需物化，不在 2b。详见[容量审计](docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md#摘要期释放旧请求历史2b2026-09-24本地)。
 

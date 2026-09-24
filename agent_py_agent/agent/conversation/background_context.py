@@ -149,32 +149,41 @@ def prepare_background_context(
     )
 
 
+# LLM: 后台上下文节表是"标题 → payload 键 → 缺省值"的唯一来源；渲染与预算估算都由它派生，估算的节必须等于渲染的节。
+# Recent Messages 只在没有历史种子（include_recent_messages）时渲染；审计窄事件只渲染唤醒、精确目标与错误。
+_BACKGROUND_SECTIONS: tuple[tuple[str, str, type], ...] = (
+    ("Active Wake Signal", "active_wake_signal", dict),
+    ("Subagent Completion Inputs", "subagent_completions", dict),
+    ("Conversation Thread", "thread", dict),
+    ("Runtime Load Errors", "load_errors", list),
+    ("Task Runtime State", "task_runtime_state", dict),
+    ("Recent Messages", "messages", list),
+    ("Bound Tasks", "tasks", list),
+    ("Channel Bindings", "channel_bindings", list),
+    ("Recent Observations", "observations", list),
+    ("Guidance", "guidance", list),
+    ("Pending Wake Signals", "pending_wake_signals", list),
+    ("Recovery Snapshot", "recovery_snapshot", dict),
+    ("Agent Tree Snapshot", "agent_tree", dict),
+)
+_NARROW_AUDIT_KEYS = frozenset({"active_wake_signal", "tasks", "load_errors"})
+
+
+# LLM: 只由结构化渲染开关决定，不看字段是否为空；预算与渲染共用这一结果。
+# 函数用途: 返回本次后台上下文将渲染的 payload 键集合。
+def background_rendered_payload_keys(*, include_recent_messages: bool, narrow_audit_event: bool) -> frozenset[str]:
+    if narrow_audit_event:
+        return _NARROW_AUDIT_KEYS
+    return frozenset(key for _title, key, _empty in _BACKGROUND_SECTIONS if include_recent_messages or key != "messages")
+
+
 # LLM: 只消费冻结材料并调用原预算器；不得读取agent/store/时间，不以展示标题裁决身份或范围。
+# 预算只估算将渲染的键（background_rendered_payload_keys），不渲染的节不再挤占总预算。
 # 函数用途: 纯渲染完整后台上下文，重复候选使用同一输入时输出一致。
 def render_background_context(prepared: PreparedBackgroundContext) -> str:
-    bounded = bounded_background_context_payload(prepared.payload)
-    sections = [
-        ("Active Wake Signal", bounded.get("active_wake_signal") or {}),
-        (
-            "Subagent Completion Inputs",
-            bounded.get("subagent_completions") or {},
-        ),
-        ("Conversation Thread", bounded.get("thread") or {}),
-        ("Runtime Load Errors", bounded.get("load_errors") or []),
-        ("Task Runtime State", bounded.get("task_runtime_state") or {}),
-        ("Bound Tasks", bounded.get("tasks") or []),
-        ("Channel Bindings", bounded.get("channel_bindings") or []),
-        ("Recent Observations", bounded.get("observations") or []),
-        ("Guidance", bounded.get("guidance") or []),
-        ("Pending Wake Signals", bounded.get("pending_wake_signals") or []),
-        ("Recovery Snapshot", bounded.get("recovery_snapshot") or {}),
-        ("Agent Tree Snapshot", bounded.get("agent_tree") or {}),
-        ("Background Context Projection", bounded.get("_projection") or {}),
-        ("Control Action Policy", prepared.control_policy),
-    ]
-    if prepared.include_recent_messages:
-        # 只有"没有 canonical 历史种子"的历史遗留路径才需要这份有界摘要副本。
-        sections.insert(5, ("Recent Messages", bounded.get("messages") or []))
+    keys = background_rendered_payload_keys(
+        include_recent_messages=prepared.include_recent_messages, narrow_audit_event=prepared.narrow_audit_event)
+    bounded = bounded_background_context_payload(prepared.payload, rendered_keys=keys)
     if prepared.narrow_audit_event:
         # 审计发现或容量事件只投影当前权威事实与精确审计目标，防止无关历史干扰。
         # 完整持久账仍可通过原工具读取，这里不修改它。
@@ -195,6 +204,12 @@ def render_background_context(prepared: PreparedBackgroundContext) -> str:
             ),
             ("Control Action Policy", prepared.control_policy),
         ]
+    else:
+        sections = [(title, bounded.get(key) or empty()) for title, key, empty in _BACKGROUND_SECTIONS if key in keys]
+        sections.extend([
+            ("Background Context Projection", bounded.get("_projection") or {}),
+            ("Control Action Policy", prepared.control_policy),
+        ])
     lines = list(prepared.header)
     for title, payload in sections:
         lines.extend(["", f"## {title}", json_block(payload)])

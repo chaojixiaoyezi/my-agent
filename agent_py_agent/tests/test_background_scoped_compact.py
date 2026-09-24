@@ -350,6 +350,13 @@ def test_detached_operational_and_native_source_do_not_load_all_bodies(backgroun
     history = prepare_background_history_or_raise(case.agent, case.store, case.thread, request)
     assert history.status == "ready"
     assert [row.content for row in history.compact_source.messages] == ["PRE_CREATION_EVIDENCE", "TASK_A_LATER_EVIDENCE"]
-    visible = json.dumps(history.context_bundle, ensure_ascii=False)
+    # 就绪路径一定带历史种子，保留给后续尝试的 bundle 不带消息正文（Recent Messages 只在无种子时渲染）。
+    retained = json.dumps(history.context_bundle, ensure_ascii=False)
+    assert history.context_bundle["messages"] == []
+    assert "UNRELATED_TASK_B_SECRET" not in retained
+    # 无种子路径才渲染最近消息：同一任务范围只含创建前与本任务后续消息，不含无关任务。
+    prepared = prepare_background_context(agent=case.agent, store=case.store, thread=case.thread, request=request,
+                                          include_recent_messages=True)
+    visible = render_background_context(prepared)
     assert "PRE_CREATION_EVIDENCE" in visible and "TASK_A_LATER_EVIDENCE" in visible
     assert "UNRELATED_TASK_B_SECRET" not in visible

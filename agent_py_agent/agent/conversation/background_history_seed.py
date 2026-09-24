@@ -189,6 +189,7 @@ class BackgroundHistorySeedResult:
 #      不能直接吞全 thread 未压缩行（会把后来别的任务的消息带进 detached 工作）；
 #   ② 读取失败给 typed 结果，绝不静默退回摘要；
 #   ③ 只读：不在后台切片里另起一次压缩（压缩由本片 context_overflow 路径与前台 Compact 负责）。
+# 就绪结果一定带历史种子，保留的 context_bundle 不含消息正文（Recent Messages 只在无种子时渲染）。
 # 函数用途: 为后台片一次读取历史并冻结范围，返回同源种子及可重复纯投影的内部材料。
 def background_conversation_history_seed(
     agent: object,
@@ -246,7 +247,9 @@ def background_conversation_history_seed(
         decision = task_scope_decision(scope_state, scoped)
         scope = background_compact_scope(request, decision)
         loaded = _load_scoped_history(agent, store, thread, decision, scope, dict(scoped.get("thread") or {}))
-        return replace(loaded, context_bundle=deepcopy(scoped))
+        # 就绪路径一定带历史种子，Recent Messages 不渲染：留给后续尝试的 bundle 不带、也不拷贝消息正文。
+        retained = {key: deepcopy(value) for key, value in scoped.items() if key != "messages"}
+        return replace(loaded, context_bundle={**retained, "messages": []})
     except InterruptedError:
         raise
     except Exception as exc:

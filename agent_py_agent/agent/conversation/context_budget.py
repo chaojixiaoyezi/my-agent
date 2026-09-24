@@ -58,76 +58,54 @@ def background_context_budget_from_config(config: object | None) -> BackgroundCo
     )
 
 
-def bounded_background_context_payload(request: BackgroundContextPayloadRequest) -> dict[str, Any]:
-    limits = request.budget or DEFAULT_BACKGROUND_CONTEXT_BUDGET
-    initial = _bounded_payload(request, limits)
-    return _fit_total_budget(request, limits, initial)
+# LLM: rendered_keys 是渲染方按结构化开关（include_recent_messages、narrow_audit_event）算出的将渲染键集合；
+# 只对这些键做有界投影和总预算估算，不按字段是否为空推断。None 保持原行为：全部键都参与。
+# 函数用途: 生成后台上下文的有界展示副本，并按总预算收缩；不会渲染的节不占预算。
+def bounded_background_context_payload(
+    request: BackgroundContextPayloadRequest,
+    *,
+    rendered_keys: frozenset[str] | None = None,
+) -> dict[str, Any]:
+    return _fit_total_budget(request, request.budget or DEFAULT_BACKGROUND_CONTEXT_BUDGET, rendered_keys)
 
 
+# LLM: 唯一的"payload 键 → 有界投影"表；新增后台上下文节时须同时登记到这里和渲染方的节表，合同测试核对两边一致。
+# 函数用途: 只为将渲染的键生成有界投影，其余键不计算、不进入预算。
 def _bounded_payload(
     request: BackgroundContextPayloadRequest,
     limits: BackgroundContextBudget,
+    rendered_keys: frozenset[str] | None = None,
 ) -> dict[str, Any]:
-    return {
-        "thread": _bounded_value(request.bundle.get("thread"), limits),
-        "active_wake_signal": _bounded_active_wake_signal(
-            request.active_wake_signal or {},
-            limits,
-        ),
-        "subagent_completions": _bounded_subagent_completions(
-            request.subagent_completions or {},
-            limits,
-        ),
-        "messages": _bounded_top_level_list(
-            request.bundle.get("messages"),
-            limits,
-            render=_bounded_message,
-            keep_tail=True,
-        ),
-        "tasks": _bounded_top_level_list(
-            request.bundle.get("tasks"),
-            limits,
-            render=_bounded_value,
-        ),
-        "channel_bindings": _bounded_top_level_list(
-            request.bundle.get("channel_bindings"),
-            limits,
-            render=_bounded_value,
-        ),
-        "observations": _bounded_top_level_list(
-            request.bundle.get("observations"),
-            limits,
-            render=_bounded_observation,
-            keep_tail=True,
-        ),
-        "guidance": _bounded_top_level_list(
-            request.bundle.get("guidance"),
-            limits,
-            render=_bounded_observation,
-            keep_tail=True,
-        ),
-        "pending_wake_signals": _bounded_top_level_list(
-            request.pending_wake_signals,
-            limits,
-            render=_bounded_observation,
-        ),
-        "task_runtime_state": _bounded_task_runtime_state(
-            request.task_runtime_state,
-            limits,
-        ),
-        "recovery_snapshot": _bounded_value(request.recovery_snapshot or {}, limits),
-        "agent_tree": _bounded_value(request.agent_tree, limits),
-        "load_errors": _bounded_value(request.load_errors, limits),
+    builders = {
+        "thread": lambda: _bounded_value(request.bundle.get("thread"), limits),
+        "active_wake_signal": lambda: _bounded_active_wake_signal(request.active_wake_signal or {}, limits),
+        "subagent_completions": lambda: _bounded_subagent_completions(request.subagent_completions or {}, limits),
+        "messages": lambda: _bounded_top_level_list(
+            request.bundle.get("messages"), limits, render=_bounded_message, keep_tail=True),
+        "tasks": lambda: _bounded_top_level_list(request.bundle.get("tasks"), limits, render=_bounded_value),
+        "channel_bindings": lambda: _bounded_top_level_list(
+            request.bundle.get("channel_bindings"), limits, render=_bounded_value),
+        "observations": lambda: _bounded_top_level_list(
+            request.bundle.get("observations"), limits, render=_bounded_observation, keep_tail=True),
+        "guidance": lambda: _bounded_top_level_list(
+            request.bundle.get("guidance"), limits, render=_bounded_observation, keep_tail=True),
+        "pending_wake_signals": lambda: _bounded_top_level_list(
+            request.pending_wake_signals, limits, render=_bounded_observation),
+        "task_runtime_state": lambda: _bounded_task_runtime_state(request.task_runtime_state, limits),
+        "recovery_snapshot": lambda: _bounded_value(request.recovery_snapshot or {}, limits),
+        "agent_tree": lambda: _bounded_value(request.agent_tree, limits),
+        "load_errors": lambda: _bounded_value(request.load_errors, limits),
     }
+    return {key: build() for key, build in builders.items() if rendered_keys is None or key in rendered_keys}
 
 
-def _fit_total_budget(
-    request: BackgroundContextPayloadRequest,
-    limits: BackgroundContextBudget,
-    initial: dict[str, Any],
-) -> dict[str, Any]:
+# LLM: 总预算只估算将渲染的键；逐级缩小各节上限，仍超预算时退到最小结构投影。不改持久账。
+# 函数用途: 把后台展示副本压进总 token 预算，并记录投影元数据。
+def _fit_total_budget(request: BackgroundContextPayloadRequest, limits: BackgroundContextBudget,
+                      rendered_keys: frozenset[str] | None) -> dict[str, Any]:
     """Fit the whole background projection while keeping durable state intact."""
 
+    initial = _bounded_payload(request, limits, rendered_keys)
     configured = int(limits.max_total_tokens or 0)
     if configured <= 0:
         return initial
@@ -135,27 +113,15 @@ def _fit_total_budget(
     payload_limit = max(1024, max_total_tokens - 256)
     initial_tokens = estimate_tokens(initial)
     candidates = [limits, *(_scaled_budget(limits, divisor) for divisor in (2, 4, 8, 16))]
-    candidates.append(
-        BackgroundContextBudget(
-            max_string_chars=64,
-            max_list_items=1,
-            max_dict_items=8,
-            max_depth=2,
-            max_total_tokens=max_total_tokens,
-        )
-    )
+    candidates.append(BackgroundContextBudget(max_string_chars=64, max_list_items=1, max_dict_items=8, max_depth=2,
+                                              max_total_tokens=max_total_tokens))
     seen: set[tuple[int, int, int, int]] = set()
     for pass_index, candidate in enumerate(candidates):
-        signature = (
-            candidate.max_string_chars,
-            candidate.max_list_items,
-            candidate.max_dict_items,
-            candidate.max_depth,
-        )
+        signature = (candidate.max_string_chars, candidate.max_list_items, candidate.max_dict_items, candidate.max_depth)
         if signature in seen:
             continue
         seen.add(signature)
-        payload = initial if pass_index == 0 else _bounded_payload(request, candidate)
+        payload = initial if pass_index == 0 else _bounded_payload(request, candidate, rendered_keys)
         if estimate_tokens(payload) <= payload_limit:
             return _with_projection_metadata(
                 payload,
@@ -163,11 +129,8 @@ def _fit_total_budget(
                 initial_tokens=initial_tokens,
                 pass_index=pass_index,
             )
-    return _minimal_projection(
-        request,
-        max_total_tokens=max_total_tokens,
-        initial_tokens=initial_tokens,
-    )
+    return _minimal_projection(request, max_total_tokens=max_total_tokens, initial_tokens=initial_tokens,
+                               rendered_keys=rendered_keys)
 
 
 def _scaled_budget(budget: BackgroundContextBudget, divisor: int) -> BackgroundContextBudget:
@@ -199,11 +162,14 @@ def _with_projection_metadata(
     return result
 
 
+# LLM: 极端密集状态的最后结构兜底；同样只投影将渲染的键。
+# 函数用途: 用最小上限生成后台展示副本。
 def _minimal_projection(
     request: BackgroundContextPayloadRequest,
     *,
     max_total_tokens: int,
     initial_tokens: int,
+    rendered_keys: frozenset[str] | None = None,
 ) -> dict[str, Any]:
     """Last structural fallback for an exceptionally dense background state."""
 
@@ -215,7 +181,7 @@ def _minimal_projection(
         max_total_tokens=max_total_tokens,
     )
     return _with_projection_metadata(
-        _bounded_payload(request, tiny),
+        _bounded_payload(request, tiny, rendered_keys),
         max_total_tokens=max_total_tokens,
         initial_tokens=initial_tokens,
         pass_index=99,

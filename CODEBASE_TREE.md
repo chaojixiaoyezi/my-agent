@@ -628,6 +628,7 @@ agent_py_agent/
 |   |-- test_compact_scoped_transcript.py # 局部历史来源、交错摘要基础与竞争CAS
 |   |-- test_applied_compact_context.py # 同一应用视图的参数传递、工具过滤和摘要注入
 |   |-- test_background_scoped_compact.py # 独立任务与窄事件原Store压缩及实际模型材料回归
+|   |-- test_background_context_budget.py # 后台上下文预算只估算将渲染的节、有种子时不计最近消息及节集合合同
 |   |-- test_background_compact_recovery.py # 后台transcript及活动归档候选和实际HTTP材料对照、失败不恢复发送
 |   |-- test_compact_active_projection.py # 原生交接纯替换、媒体插话与guidance保留、未知IR拒绝
 |   |-- test_active_turn_compact_projection.py # 活动归档完整容量、取消、CAS及局部证据继承

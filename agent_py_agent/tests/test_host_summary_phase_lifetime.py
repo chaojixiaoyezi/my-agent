@@ -132,6 +132,9 @@ def test_summary_phase_does_not_hold_old_request_history(tmp_path, monkeypatch, 
     # 解绑前三宿主摘要入口驻留 8.9–10.2MB（旧历史约 8.4MB）；解绑后低于一份历史正文的四分之三。
     assert facts["released"] is True, "进入摘要时原参数的旧历史已解绑"
     assert facts["entry_bytes"] is not None and facts["entry_bytes"] < body_chars * 3 // 4
+    if host == "background":
+        # 有种子时后台不再保留最近消息正文（原约 1.32MB）：摘要入口从约 2.48MB 降到约 1.15MB。
+        assert facts["entry_bytes"] < body_chars * 3 // 8
     thread = agent.conversation_store.threads.require(thread_id)
     chain = committed_compact_checkpoint_chain(agent, thread)
     assert ok and thread.compact_generation == 1

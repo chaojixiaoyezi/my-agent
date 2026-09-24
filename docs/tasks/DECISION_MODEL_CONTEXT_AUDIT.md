@@ -1588,6 +1588,51 @@ Sol high独立只读复核未发现必须修复的scope/base/legacy回归，确�
 
 12.4 仍开放。
 
+### 后台上下文预算只估算渲染节，有种子时不保留最近消息（2026-09-24，本地）
+
+分支 `claude/decision-background-context-budget`，基于 main `a2e26178b`，方案经主线 owner 同意，未合入、未部署。纯 bug 修复，不加开关。
+
+**问题**：
+- 后台就绪路径一定带历史种子，此时 `include_recent_messages=False`，"Recent Messages"不渲染。可 `background_history_seed` 仍把含最近 `conversation_context_recent_limit` 条完整消息的 `context_bundle` 保留给整个后台回合；4.2M 夹具下约 1.32MB。
+- 更要紧的是 `context_budget._fit_total_budget` 用整个 payload（含 bounded 后的 messages）估算总 token，超过 `background_context_max_total_tokens`（默认 8000）就按 2/4/8/16 缩小所有节的上限。于是不渲染的消息挤掉了真正渲染的 tasks、observations、guidance。
+
+**修复**：
+- `background_context._BACKGROUND_SECTIONS` 是"标题 → payload 键 → 缺省值"的唯一节表。`background_rendered_payload_keys(include_recent_messages, narrow_audit_event)` 只按结构化开关算出将渲染的键，不看字段是否为空。
+- 渲染方把这个集合作为 `rendered_keys` 传给 `bounded_background_context_payload`。预算只为这些键做有界投影和总预算估算；`None` 保持原行为，全部键参与。
+- 就绪路径保留给后续尝试的 bundle 不再带消息正文（`messages: []`），payload 也不再拷贝它；refresh 路径沿用。没有种子的旧路径不变，照常渲染并计入 Recent Messages。
+
+**渲染差异**（有意的行为变化）：
+- 有种子的普通后台回合：总预算不再计入不渲染的最近消息，tasks、observations、guidance 等不再被过度截断。`Background Context Projection` 的 `estimated_tokens_before`、`total_budget_applied`、`shape_pass` 只反映将渲染的节。
+  - 构造实测（6 个任务、12 条观察、40 条约 3.2 万字的最近消息）：
+    - 修复前：估算 29,558，shape_pass 2；observations 只留 6 条，每条截到 67 字；可见部分约 2,464 token。
+    - 修复后：估算 4,412，shape_pass 0；observations 12 条全留，每条 276 字；可见部分约 4,406 token。
+- 审计窄事件：预算只估算实际渲染的唤醒、任务目标和加载错误，投影元数据随之变化。
+- 没有种子的旧路径：不变。
+
+**全链对照**（2b 同一基线脚本，后台宿主，前后连续各跑两次，结果一致；单位 bytes）：
+
+| 指标 | 修复前（main `a2e26178b`） | 修复后 |
+| --- | ---: | ---: |
+| 摘要入口驻留 | 2,484,671 | 1,146,951 |
+| 摘要期峰值 | 3,592,224 | 2,254,809 |
+| 摘要前峰值 | 11,255,117 | 9,917,816 |
+| 运行后驻留 | 1,331,602 | 1,326,325 |
+
+最近消息正文从历史准备起一直驻留到回合结束，所以各阶段都降了约 1.34MB，运行后不变。
+
+**验证**：
+- `test_background_context_budget.py` 5 项：
+  - 有种子时预算不计入最近消息，shape_pass 为 0、观察全留；无种子时照常计入并收缩；
+  - 渲染只在无种子时出现 Recent Messages；
+  - 合同：预算估算的节集合与实际渲染的节集合一致，覆盖普通有种子、普通无种子、审计窄事件三种情况。
+- `test_background_scoped_compact.py` 的独立任务用例：保留的 bundle 不带消息正文；任务范围的最近消息改在真实无种子路径（`prepare_background_context(include_recent_messages=True)` 加渲染）上核对，仍只含创建前与本任务后续消息，不含无关任务；不全量读正文的守卫保持。
+- `test_host_summary_phase_lifetime.py` 后台宿主新增界限：摘要入口低于历史正文的 3/8。
+- 变异验证：
+  - 预算忽略 `rendered_keys`：4 项失败；
+  - 渲染方不传 `rendered_keys`：3 项失败；
+  - 就绪路径改回保留消息：3 项失败。
+- 后台相关 29 个测试文件：840 passed。
+
 ### 宿主历史种子生命周期基线（2026-09-23，第二片进行中）
 
 在464df65c1固定生产基线上，对真实临时JSONL→scoped loader→三宿主原seed准备做仓外测量；输入128行、4,195,620字符，三种seed的完整canonical JSON SHA256及行数均与来源一致。未运行SimpleAgent或真实HTTP；只是宿主seed准备边界，不是capture/select/完整发送峰值。脚本 `/tmp/decision_host_seed_baseline.py`，日志 `/tmp/decision_host_seed_baseline_20260923.log`，3项通过只表示测量及完整性成功，不表示内存目标通过。
