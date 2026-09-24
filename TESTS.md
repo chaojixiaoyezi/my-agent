@@ -2,7 +2,20 @@
 
 child不展示历史正文时的读取回归先复现1 failed/1 passed，修复后test_compact_retained_history、test_subagent_compact_recovery、test_gateway_child_compact_scope_application三文件31 passed（8.48秒）。三宿主seed仓外基线仅验证测量和完整性，不算内存目标通过；细节见容量审计的宿主生命周期基线。
 
-## 第12.4项第二片 2b：摘要期释放旧请求历史（2026-09-24，本地分支 `claude/decision-12.4-2b`）
+## 决策线能力推荐按插件分组出题（2026-09-24，本地分支 `claude/decision-plugin-grouping`）
+
+- **新测试** `test_decision_capability_provider_grouping.py` 2 项：
+  - 分组单测：只按结构化 `provider_id` 合并，题的位置取第一个成员；描述写着"插件 alpha"但没有 `provider_id` 的内置工具仍单独成题；任一成员版本变化时，合并行的版本随之变化；插件题带整体判断说明。
+  - 消费者用例：在真实 Registry 与 Skill 快照上注册两个插件（alpha 2 个工具，beta 1 个）。3 个插件工具只出 2 题；alpha 选中时两个工具都进入短名单，beta 未选中时整体不在短名单，并进入延迟名单。
+- **变异验证**：
+  - `_material` 不分组：消费者用例失败。
+  - `_project` 不展开：消费者用例失败。
+  - 按描述文字归组：单测失败。
+  - 改回后通过。
+- **回归**：原能力推荐 4 个测试文件共 93 项通过，行为不变（这些夹具里没有插件工具）。
+- **量化**：用仓库内置插件声明（8 个插件，21 个工具）按 `plugin_runtime` 同一格式生成候选。题数 21→8，题目序列化 30,691→19,520 字节。
+
+## 第12.4项第二片 2b：摘要期释放旧请求历史（2026-09-24，已合入 main `911d0d14d`）
 
 - **新测试**：
   - `test_host_summary_phase_lifetime.py` 3 项（`slow`，约 12 秒）：Gateway、child、后台三宿主各写入 128 行、约 4.2M 字符的历史，跑完整链。第一次进入摘要时，原参数的旧历史已解绑，驻留低于历史正文的 3/4；摘要逐条覆盖全部历史；首业务请求带当前任务。

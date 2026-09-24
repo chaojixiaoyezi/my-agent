@@ -15,7 +15,9 @@
 - 4.2M 字符来源下，种子准备后驻留从约 8.5MB 降到 32–54KB；运行结束后的驻留减少 8.4–9.4MB；Gateway 首次发送前峰值从 29.8MB 降到 21.3MB。
 - 摘要期峰值约 10–11MB 不变，属于 2b（旧请求释放）。
 
-12.4 第二片 2b 已在本地分支 `claude/decision-12.4-2b` 实现，未合入、未部署：恢复宿主决定摘要后解绑旧请求的完整原生历史（原参数与 frozen，只解绑这一对象，不原地清空）。4.2M 字符下摘要期峰值从 10.2–11.7MB 降到 1.7–3.3MB。建循环时的首次物化峰值仍在，要降低需把 `provider_history_messages` 改为按需物化，不在 2b。详见[容量审计](docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md#摘要期释放旧请求历史2b2026-09-24本地)。
+决策线能力推荐按插件分组出题（本地分支 `claude/decision-plugin-grouping`，待审）：只按结构化 `ToolModelHints.provider_id` 把同一插件的工具合成一题；选中展开全部成员，未选中整体延迟；内置工具与 Skill 仍逐项。内置插件 21 个工具下题数 21→8、题目大小 −36%。详见[接入设计](docs/design/DECISION_MODEL_INTEGRATION.md)。
+
+12.4 第二片 2b 已由主线 owner 审阅合入 main `911d0d14d`，尚未部署：恢复宿主决定摘要后解绑旧请求的完整原生历史（原参数与 frozen，只解绑这一对象，不原地清空）。4.2M 字符下摘要期峰值从 10.2–11.7MB 降到 1.7–3.3MB。建循环时的首次物化峰值仍在，要降低需把 `provider_history_messages` 改为按需物化，不在 2b。详见[容量审计](docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md#摘要期释放旧请求历史2b2026-09-24本地)。
 
 恢复候选提交后的同请求重试（已合入 main `c9794b9ca`，尚未部署）：候选发送瞬断后，重试原样复用已提交的（候选参数，prompt），不再在压缩前的原参数上重建。记录按原参数对象身份命中，换参数即清除。`_model_turn_or_retry` 的空响应修复和插话取代两个重跑分支也改为先换成候选参数，不再在原参数上重建或注入。详见[依赖拆分](docs/design/TOOL_LOOP_DEPENDENCY_SPLIT.md#恢复候选提交后的同请求重试决策分支2026-09-24本地)。
 候选参数与原参数共享同一个 `tool_context` 列表（`replace_recovery_history` 的既有行为）；2b 已把它写成显式合同并加断言测试，行为不变。

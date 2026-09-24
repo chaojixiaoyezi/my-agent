@@ -1534,7 +1534,7 @@ Sol high独立只读复核未发现必须修复的scope/base/legacy回归，确�
 
 ### 摘要期释放旧请求历史（2b，2026-09-24，本地）
 
-分支 `claude/decision-12.4-2b`，基于 main `c18519d90`，方案经主线 owner 同意（选"解绑"而非原地清空），未合入、未部署。
+分支 `claude/decision-12.4-2b`，基于 main `c18519d90`，方案经主线 owner 同意（选"解绑"而非原地清空），已审阅合入 main `911d0d14d`，尚未部署。
 
 **持有者分析**：同一 4.2M 三宿主全链夹具，在第一次进入摘要时用 tracemalloc 取 25 层栈快照。
 - 三宿主摘要入口驻留 8.87–10.22MB，其中 8.40–8.43MB 是同一个持有者：`params.provider_history_messages`，也就是 `loop_support.py:1157` 建循环时从只读来源解析出的完整原生历史。

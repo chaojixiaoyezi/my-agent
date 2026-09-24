@@ -24,13 +24,24 @@ def candidate_digest(value: object) -> str:
     return hashlib.sha256(decision_json(value)).hexdigest()
 
 
+# LLM: 工具候选行只取模型规格；provider_id 是宿主写入的结构化归属（插件代理为 "plugin:<ID>"），为空时不写该键，
+# 内置工具行形状与版本摘要保持不变。
+# 函数用途: 生成一条工具候选行。
+def _tool_row(runtime) -> dict:
+    spec = runtime.model_spec
+    row = {"kind": "tool", "ref": spec.name, "name": spec.name, "description": spec.description,
+           "category": spec.category, "version": spec.schema_hash}
+    provider = str(getattr(spec.hints, "provider_id", "") or "").strip()
+    if provider:
+        row["provider_id"] = provider
+    return row
+
+
 # LLM: 工具取真实ToolRuntimeSnapshot，Skill取原scoped snapshot；不查另一注册表或从外部字符串扩权。
 # 函数用途: 提取指定可选类别的工具及可发现Skill名卡，保留所有候选、不预读正文。
 def capability_candidates(snapshot, skills, *, categories: list[str], skills_discoverable: bool,
                           allowed_tools: list[str] | None = None) -> list[dict]:
-    rows = [{"kind": "tool", "ref": runtime.model_spec.name, "name": runtime.model_spec.name,
-             "description": runtime.model_spec.description, "category": runtime.model_spec.category,
-             "version": runtime.model_spec.schema_hash}
+    rows = [_tool_row(runtime)
             for runtime in snapshot.runtimes
             if runtime.exposure.model_visible and runtime.model_spec.category in categories
             and (allowed_tools is None or runtime.model_spec.name in allowed_tools)
@@ -43,6 +54,29 @@ def capability_candidates(snapshot, skills, *, categories: list[str], skills_dis
     return rows
 
 
+# LLM: 只按结构化 provider_id 合并同一插件的工具，一个插件一题；不读描述、关键词或用户原话判断归属。
+# 内置工具与 Skill 原样逐项；合并行保留成员工具的精确引用，采用时展开回原工具；位置取第一个成员的位置。
+# 函数用途: 把同一插件的工具候选并成一行，减少题数，并避免同一插件的工具被部分隐藏。
+def group_provider_candidates(rows: list[dict]) -> list[dict]:
+    grouped: list[dict] = []
+    providers: dict[str, dict] = {}
+    for row in rows:
+        provider = row.get("provider_id") if row.get("kind") == "tool" else None
+        if not provider:
+            grouped.append(row)
+            continue
+        entry = providers.get(provider)
+        if entry is None:
+            entry = providers[provider] = {"kind": "provider", "ref": provider, "name": provider,
+                                           "tools": [], "tool_refs": []}
+            grouped.append(entry)
+        entry["tools"].append({"name": row["name"], "description": row["description"], "version": row["version"]})
+        entry["tool_refs"].append(row["ref"])
+    for entry in providers.values():
+        entry["version"] = candidate_digest([[tool["name"], tool["version"]] for tool in entry["tools"]])
+    return grouped
+
+
 # LLM: Jev每题独立并行，不能用多个选择槽假设互相看见答案；每项候选只评一次，完整材料受原JSON/模型预算约束。
 # 函数用途: 为每个能力生成独立的适用性选择题，不预选候选或要求模型跨题去重。
 def selection_questions(rows: list[dict]) -> dict:
@@ -53,6 +87,8 @@ def selection_questions(rows: list[dict]) -> dict:
             "question": "这个candidate是否适合协助完成state.query中的任务？分别判断每项能力，多项可以同时适合。",
             "candidate": row,
             "boundary": "只推荐初始名卡或schema展示，不决定权限，不要求现在执行或读取正文。",
+            **({"provider": "kind=provider 表示同一插件提供的全部工具，按插件整体判断；适合时展示它的全部工具。"}
+               if row.get("kind") == "provider" else {}),
         }, "criteria": {"include": "这项能力与任务相关，有助于完成任务，建议初始展示", **_NON_SELECTIONS},
     } for index, row in enumerate(rows)}
     decision_json(questions)
