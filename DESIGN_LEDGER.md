@@ -50,7 +50,7 @@ Compact通用底座按函数级闭包向主线移植，自动选模、Jev、菜�
 
 12.4 集成版媒体真实验收已通过（main `5dcdfd463`，.9 官方 M3，2026-09-24）：图片原样进入请求；手动压缩只摘要图片之前的文字前缀，图片轮原样保留；压缩后模型仍能依据原图作答。见[真实验收](docs/tasks/DECISION_MODEL_REAL_VALIDATION.md#124-媒体与-compact-集成版真实验收2026-09-24main-5dcdfd463)。
 
-媒体会话越过压缩点的修复（本地分支 `claude/decision-media-preflight`，主线 owner 已同意方案，待审）：
+媒体会话越过压缩点的修复（本地分支 `claude/decision-media-preflight`，主线 owner 已同意方案，.9 真实验收已通过，待审）：
 - 问题：未压历史带图时，估算一越过自动压缩点，请求就整轮失败，即使离窗口还远。原因是 preflight 仍按压缩点报溢出，而自动和轮内压缩遇未知模态会跳过、强制恢复又拒绝。
 - 修复：请求的文字容量不可知时，preflight 只守窗口硬上限；越过窗口时，强制恢复报结构化码 `COMPACT_REQUEST_NON_TEXT`，不再与内部投影失配共用 `COMPACT_REQUEST_PROJECTION_UNKNOWN`，客户端文案据此说明是图片等非文本内容所致。`save=false` 与纯文字会话行为不变。
 - 详见[容量审计](docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md#媒体会话越过压缩点2026-09-24本地修复)。

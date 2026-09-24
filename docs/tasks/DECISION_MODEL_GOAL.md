@@ -266,7 +266,7 @@ P1-F 只读调查已用无网络小复现确认：原账本 failed/timed_out 可
 - 种子的具体历史与只读来源二选一，已实现，并通过等价测试和 4.2M 字符前后对照，详见[容量审计](DECISION_MODEL_CONTEXT_AUDIT.md#宿主历史种子只读来源2a2026-09-23本地)。
 - 2b（摘要期旧请求释放）已由主线 owner 审阅合入 main `911d0d14d`（尚未部署）：摘要期峰值从 10.2–11.7MB 降到 1.7–3.3MB，详见[容量审计](DECISION_MODEL_CONTEXT_AUDIT.md#摘要期释放旧请求历史2b2026-09-24本地)。建循环首次物化峰值：实测按需物化只会挪动峰值、不降峰，不做（方案 B 结论见[容量审计](DECISION_MODEL_CONTEXT_AUDIT.md#按需物化原生历史方案-b的测量结论不做2026-09-24)）；Gateway 原生解析阶段 21.3MB 的瞬时峰值另做只读分析。后台 messages 驻留与预算挤占的修复已合入 main `5dcdfd463`。
 
-**.9 媒体真实验收（main `5dcdfd463`，2026-09-24）**：集成版的图片输入与手动压缩组合在真实 M3 TUI 中走通：图片原样进请求，压缩只摘要图片前的文字前缀，压缩后仍能依据原图作答。验收后本地复现一个缺陷：未压历史带图时，一越过压缩点，请求就整轮失败。修复在本地分支 `claude/decision-media-preflight`（主线 owner 已同意方案，待审、待真实验收）。媒体屏障写进 DESIGN_LEDGER 待用户决策。详见[真实验收](DECISION_MODEL_REAL_VALIDATION.md#124-媒体与-compact-集成版真实验收2026-09-24main-5dcdfd463)和[容量审计](DECISION_MODEL_CONTEXT_AUDIT.md#媒体会话越过压缩点2026-09-24本地修复)。12.4 仍开放：修复版真实验收、媒体屏障决策、Gateway 21.3MB 峰值。
+**.9 媒体真实验收（main `5dcdfd463`，2026-09-24）**：集成版的图片输入与手动压缩组合在真实 M3 TUI 中走通：图片原样进请求，压缩只摘要图片前的文字前缀，压缩后仍能依据原图作答。验收后本地复现一个缺陷：未压历史带图时，一越过压缩点，请求就整轮失败。修复在本地分支 `claude/decision-media-preflight`（主线 owner 已同意方案，.9 真实验收已通过，待审）。媒体屏障写进 DESIGN_LEDGER 待用户决策。详见[真实验收](DECISION_MODEL_REAL_VALIDATION.md#124-媒体与-compact-集成版真实验收2026-09-24main-5dcdfd463)和[容量审计](DECISION_MODEL_CONTEXT_AUDIT.md#媒体会话越过压缩点2026-09-24本地修复)。12.4 仍开放：媒体屏障决策、Gateway 21.3MB 峰值。
 
 **恢复候选提交后的同请求重试**（主线 owner 审阅通过，main 快进到 `c9794b9ca`）：18-A 合并后用探针发现，候选发送瞬断后重试会发回压缩前的旧请求；现改为复用已提交候选；经主线 owner 同意，空响应修复和插话取代两个重跑分支的同类问题一并修复（先换成候选参数）。补了 Gateway、后台和单元回归，每条都做了变异验证。详见[依赖拆分](../design/TOOL_LOOP_DEPENDENCY_SPLIT.md#恢复候选提交后的同请求重试决策分支2026-09-24本地)。
 

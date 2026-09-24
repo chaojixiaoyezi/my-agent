@@ -305,3 +305,48 @@ P4-B 普通 user owner 的两轮隔离真实中文配置各有 **1 次 Jev HTTP*
 - 集成版的媒体与 Compact 组合已在真实 M3 TUI 中走通：图片原样进入请求；手动压缩只摘要图片之前的文字前缀，图片轮原样保留；压缩后模型仍能依据原图作答；没有机械兜底。
 - 12.4 的"集成版媒体真实验收"完成。同时发现两件事：越过压缩点即失败的缺陷（已本地修复，待审、待真实验收），以及媒体屏障（待用户决策）。
 - 本轮 Jev 调用 0 次，累计仍为 65 次。
+
+## 12.4 媒体会话越过压缩点修复的真实验收（2026-09-24，分支 `claude/decision-media-preflight`）
+
+**安装**：
+- R1–R3 使用 `058902a8b`（tree `f46b29aede233e7464585337f7d745486b251eb6`，git archive SHA256 `93b38d8532623821fbbc1df0b88ecde13bce0fb3f5425e74745d870e5832eb4e`）。wheel SHA256 `1c224b59910850c90f8ccfca6a686e9c198f8a09815df9f709a970ccca217590`，5,589,283 字节。
+- R3 后补上客户端文案，head 变为 `e90d2ec60`（tree `9c86816a5360d59a57e0918170602d3d83c0f719`，git archive SHA256 `cb00b4aa1a73be0b2181fb1c7f065f469088b2eba14a902899789aacfc7e895f`）。wheel SHA256 `31d72940dc9ee048e4f81cff724bb9b72f1548756da36bc88ddb8c198c0b37f8`，5,589,433 字节。
+- 两版相差只有 `gateway_client_error_message` 的一条文案映射及其测试和文档。
+- 两个 wheel 和源码都通过 clean-package。装在测试机新建的隔离目录和 venv；换装第二版时先停 Gateway 和 TUI，重启后用原 `resume` 命令接回同一会话。
+
+**配置**：
+- 同上一节：唯一 Gateway `127.0.0.1:8431`，原生 TUI，决策模型关闭，官方 MiniMax-M3。
+- 隔离模型目录把 M3 窗口改为 120,000（原值 1,000,000，记在 `staging.json`），`max_tokens` 16,314。
+- 压缩点 50%，即 60,000；请求输入上限约为 120,000 − 16,314 = 103,686。
+- 材料与图片同上一节（图片 SHA256 `f066d906…`）。
+
+**过程**（同一会话，每轮只给一次 prompt）：
+
+| 轮 | 请求 | 需求 | 结果 |
+| --- | --- | --- | --- |
+| R1 | `gwreq-1790252921-81cc782cd9424e5ea7d738d99b21a735` | `/attach quad.png`，问四块各是什么颜色 | done，0 次工具，5.0 秒，四块全对；Context 约 31.4k |
+| R2 | `gwreq-1790252966-c38e7622951c4e50933944b79547db86` | 读 text-01～04 后列标记 | done，1 个工具轮（4 个读取并行），6.8 秒，4 个标记全对；Context 约 83.7k（70%），compact 0 |
+| R3 | `gwreq-1790253057-1e1643ab70ae4669a5e9d6f93b086ce4` | 再读 text-05、06、01 | failed，`COMPACT_REQUEST_NON_TEXT`，5.3 秒；TUI 仍显示通用压缩失败文案 |
+| R4（`e90d2ec60`） | `gwreq-1790253677-522c96d851584e49a050c7943f8f6731` | 再读 text-05、06、01、02 | failed，`COMPACT_REQUEST_NON_TEXT`，0 个模型轮；TUI 显示"会话里有图片等非文本内容，上下文无法压缩，已超出模型可用窗口……可切换更大上下文的模型后继续原会话，或新开会话继续。" |
+
+**证据**：
+- 越过压缩点照常发送：R2 第二次业务调用 504,683 字节，含 17 条消息、1 个 image 块、4 对工具往返，HTTP 200。它在压缩点（60k）之上、上限之下，修复前在这里会整轮失败。
+- 越过上限时结构化拒绝：R3 首次调用（517,563 字节）返回 3 个读取后，下一次调用在发送前被拒；R4 第一次调用前就被拒。两次都是 `COMPACT_REQUEST_NON_TEXT`，失败记录的 error 为"会话包含图片等非文本内容，当前无法压缩上下文；原始记录已保留"。
+- 全程没有压缩：thread generation 0，没有 checkpoint；model_usage 为 main 4 次、auxiliary 0 次，models 都是 `["MiniMax-M3"]`。
+- 出站 9 次全部 HTTP 200：能力探针 3 次、业务 4 次、`my_agent_structured_output`（后台 curator）2 次。
+- 原始记录保留：失败的 R3 在规范历史里留下用户行，以及一条正文为空、带 3 对工具往返原生信封的助手行（58,648 字符）；下一请求会原样重放。
+
+**观察**：
+- 失败回合之后，TUI 的 Context 读数是 67.1k，但下一请求的估算已超过上限，R4 在第 0 个模型轮就被拒。推断读数没有计入失败回合留下、会被重放的工具往返。这是 TUI 显示问题，已告知主线 owner，本片不改。
+- 越过压缩点后的大工具结果会不会按"距压缩点余量"缩成引用视图，本轮没能观察到：越点后的读取所在回合随即越过上限被拒。
+- 会话在 R3 之后就无法继续（除非换更大窗口的模型或新开会话），这正是媒体屏障的后果，已列为待决策。
+
+**清理**：
+- TUI 用 `/exit` 退出；Gateway 两次都经原 CLI `gateway stop` 停止，两个 PID 都不存活，8431 无监听，pending/processing 都是 0。
+- 原 CAS 恢复隔离 owner 设置：enabled=false，owner revision 27。
+- 9 条出站观察都有 HTTP 终态。
+- 证据（测试机隔离目录）：`artifacts/fix-evidence.json`（SHA256 `70f3f6346da663eb225df349561f440c3a481805906d61cfe648ac50100eedce`）、`artifacts/cleanup-current.json`（SHA256 `e35ca4f837652ab7d8530869321107ffafdfb3db5a8c0ea5627337cd85671bf8`）。本机副本在 `~/.my-agent/decision-evidence/media-fix-e90d2ec60-20260924/`（仓库外）。
+
+**结论**：
+- 修复在真实 M3 TUI 中生效：带图会话越过压缩点后照常发送；越过上限时给出结构化的 `COMPACT_REQUEST_NON_TEXT`，TUI 文案说明是图片等非文本内容导致无法压缩；没有摘要、没有机械兜底、原始记录保留。
+- 本轮 Jev 调用 0 次，累计仍为 65 次。
