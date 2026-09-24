@@ -12,6 +12,7 @@ from ...agent.common.cancellation import CancellationToken
 from ...agent.plugin_commands import plugin_namespace
 from .command_interaction import CommandInteraction
 from .plugin_command_client import PluginCommandClient
+from .tui_plugin_panels import PluginPanelBoard
 
 
 # LLM: binding 属于一个输入框；编辑参数保留所选版本，清空或更换命名空间即撤销，不自动换成新目录版本。
@@ -21,6 +22,7 @@ class PluginInputBinding:
     client: PluginCommandClient
     namespace: str = ""
     revision: str = ""
+    panels: PluginPanelBoard | None = None
 
     # LLM: 只比较明确插件命名空间，正文参数不是机器身份；该回调不请求宿主或执行命令。
     # 函数用途: 编辑输入时丢弃已离开命名空间的旧候选绑定。
@@ -40,8 +42,8 @@ class PluginInputBinding:
 
 # LLM: 回调跟随原 buffer 生命周期；变更只更新易失版本绑定，不创建额外后台轮询或持久状态。
 # 函数用途: 把一个会话的插件客户端及候选版本管理连接到输入框。
-def bind_plugin_input(buffer, client: PluginCommandClient) -> None:
-    binding = PluginInputBinding(client)
+def bind_plugin_input(buffer, client: PluginCommandClient, panels: PluginPanelBoard | None = None) -> None:
+    binding = PluginInputBinding(client, panels=panels)
     buffer._my_agent_plugin_input = binding
 
     # LLM: Buffer 负责发送原文本变化事件，回调不能改写输入或重新接受候选。
@@ -59,8 +61,10 @@ def submit_plugin_command(
 ) -> bool:
     if plugin_namespace(text) is None:
         return False
+    if binding is not None and toggle_plugin_panel(params, text, binding):
+        return True
     from .tui import _tui_handle_command
-    from .tui_keybindings import _handle_command_params, _required_tui_runtime
+    from .tui_actions import _handle_command_params, _required_tui_runtime
 
     request_id = uuid.uuid4().hex
     controller = _required_tui_runtime(params).command_permission_controller(request_id)
@@ -89,4 +93,34 @@ def submit_plugin_command(
             app.invalidate()
 
     app.create_background_task(execute())
+    return True
+
+
+# LLM: 只用客户端已缓存的目录在本地解析；命中已启用插件的 display 动作才切换面板，不发宿主请求、不执行插件。
+#   目录未缓存、插件未启用或不是展示动作时返回 False，交回原命令链（宿主会给出明确拒绝）。
+# 函数用途: 处理 /plugins@插件 <面板动作>，在本地打开或关闭对应面板并给出提示。
+def toggle_plugin_panel(params, text: str, binding: PluginInputBinding) -> bool:
+    from ...agent.command_arguments import CommandArgumentError
+    from ...agent.plugin_commands import parse_plugin_command
+    from .tui_actions import _required_tui_runtime
+
+    catalog = binding.client.snapshot()
+    if binding.panels is None or catalog is None:
+        return False
+    try:
+        parsed = parse_plugin_command(text, plugins=catalog.plugins, management_actions=catalog.management_actions)
+    except CommandArgumentError:
+        return False
+    action = getattr(parsed, "action", None) if parsed is not None else None
+    plugin = getattr(parsed, "plugin", None) if parsed is not None else None
+    if action is None or plugin is None or action.kind != "display" or parsed.help_requested:
+        return False
+    runtime = _required_tui_runtime(params)
+    if not plugin.enabled:
+        runtime.set_notice(f"插件 {plugin.plugin_id} 未启用，无法打开面板。")
+        return True
+    outcome = binding.panels.toggle(plugin.plugin_id, action.target, action.summary)
+    message = {"opened": "已打开", "closed": "已关闭"}.get(outcome)
+    runtime.set_notice(f"{message}插件面板 {plugin.plugin_id}/{action.target}。" if message
+                       else "最多同时打开两个插件面板，请先关闭一个。")
     return True

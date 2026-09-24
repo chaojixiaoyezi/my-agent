@@ -14,7 +14,7 @@ from prompt_toolkit.document import Document
 from prompt_toolkit.widgets import TextArea
 
 from agent_py_agent.agent.conversation.control_commands import ConversationControlResult
-from agent_py_agent.cli.chat_parts import tui_keybindings
+from agent_py_agent.cli.chat_parts import tui_actions, tui_clipboard, tui_keybindings
 from agent_py_agent.cli.chat_parts.chat_style import CHAT_RESPONSE_STYLE_INJECT
 from agent_py_agent.cli.chat_parts.plain_state import ChatJob
 from agent_py_agent.cli.chat_parts.tui_agent_navigation import TuiAgentNavigationState
@@ -787,7 +787,7 @@ def test_gateway_btw_enters_durable_control_outbox_with_exact_turn() -> None:
         control_operation_reconciler=Reconciler(),
     )
 
-    assert tui_keybindings._tui_submit_control_operation(
+    assert tui_actions._tui_submit_control_operation(
         params,
         "/btw 先检查现有结果",
     )
@@ -823,7 +823,7 @@ def test_gateway_goal_command_is_visible_only_after_durable_enqueue() -> None:
     )
 
     command = "/goal 1d 底座验证 验证所有 TUI 交互"
-    assert tui_keybindings._tui_submit_control_operation(params, command)
+    assert tui_actions._tui_submit_control_operation(params, command)
     assert captured[0].command_kind == "goal"
     snapshot = runtime.store.snapshot()
     assert [
@@ -864,7 +864,7 @@ def test_gateway_manual_compact_starts_visible_progress_after_durable_enqueue() 
         control_operation_reconciler=Reconciler(),
     )
 
-    assert tui_keybindings._tui_submit_control_operation(params, "/compact")
+    assert tui_actions._tui_submit_control_operation(params, "/compact")
     assert captured[0].command_kind == "compact"
     active = runtime.store.snapshot().active_blocks
     assert len(active) == 1
@@ -898,7 +898,7 @@ def test_gateway_manual_compact_rejects_active_task_before_animation() -> None:
             control_operation_reconciler=Reconciler(),
         )
 
-        assert tui_keybindings._tui_submit_control_operation(params, "/compact")
+        assert tui_actions._tui_submit_control_operation(params, "/compact")
         snapshot = runtime.store.snapshot()
         assert all(block.role != "compact" for block in snapshot.active_blocks)
         assert all(block.role != "compact" for block in snapshot.stable_blocks)
@@ -926,7 +926,7 @@ def test_gateway_manual_compact_fast_terminal_cannot_overtake_start() -> None:
         control_operation_reconciler=Reconciler(),
     )
 
-    assert tui_keybindings._tui_submit_control_operation(params, "/compact")
+    assert tui_actions._tui_submit_control_operation(params, "/compact")
     snapshot = runtime.store.snapshot()
     assert snapshot.active_blocks == ()
     assert all(
@@ -948,7 +948,7 @@ def test_gateway_manual_compact_noop_closes_without_failure(tmp_path) -> None:
         tui_runtime=runtime,
         control_operation_reconciler=None,
     )
-    reconciler = tui_keybindings._ensure_control_operation_reconciler(params)
+    reconciler = tui_actions._ensure_control_operation_reconciler(params)
     entry = SimpleNamespace(
         message_id="control-compact-noop",
         command_kind="compact",
@@ -1006,7 +1006,7 @@ def test_gateway_context_uses_current_tui_snapshot_without_control_request() -> 
         control_operation_reconciler=Reconciler(),
     )
 
-    assert tui_keybindings._tui_submit_control_operation(params, "/context")
+    assert tui_actions._tui_submit_control_operation(params, "/context")
     snapshot = runtime.store.snapshot()
     assert snapshot.status.context_usage is not None
     reports = [block.text for block in snapshot.stable_blocks if block.role == "system"]
@@ -1030,14 +1030,14 @@ def test_gateway_memory_command_runs_outside_input_thread(monkeypatch) -> None:
         def start(self) -> None:
             return None
 
-    monkeypatch.setattr(tui_keybindings.threading, "Thread", FakeThread)
+    monkeypatch.setattr(tui_actions.threading, "Thread", FakeThread)
     monkeypatch.setattr(
-        tui_keybindings,
+        tui_actions,
         "_handle_command_params",
         lambda _params, text: ("command", text),
     )
     monkeypatch.setattr(
-        tui_keybindings,
+        tui_actions,
         "_tui_handle_command",
         lambda *, params: handled.append(params) or True,
     )
@@ -1050,7 +1050,7 @@ def test_gateway_memory_command_runs_outside_input_thread(monkeypatch) -> None:
         app=SimpleNamespace(invalidate=lambda: invalidations.append(True)),
     )
 
-    assert tui_keybindings._tui_submit_gateway_memory_command(
+    assert tui_actions._tui_submit_gateway_memory_command(
         event,
         params,
         "/remember 不阻塞输入",
@@ -1080,7 +1080,7 @@ def test_gateway_stop_is_not_sent_before_exact_turn_is_bound() -> None:
         control_operation_reconciler=Reconciler(),
     )
 
-    assert tui_keybindings._tui_submit_control_operation(params, "/stop")
+    assert tui_actions._tui_submit_control_operation(params, "/stop")
     assert "当前没有可精确绑定的运行回合" in runtime.notice()
 
 
@@ -1101,7 +1101,7 @@ def test_gateway_stop_without_foreground_turn_targets_background_task() -> None:
         control_operation_reconciler=Reconciler(),
     )
 
-    assert tui_keybindings._tui_submit_control_operation(params, "/stop")
+    assert tui_actions._tui_submit_control_operation(params, "/stop")
     assert len(captured) == 1
     assert captured[0].command_kind == "stop"
     assert captured[0].expected_turn_id == ""
@@ -1124,7 +1124,7 @@ def test_gateway_status_does_not_show_mutating_confirmation_notice() -> None:
         control_operation_reconciler=Reconciler(),
     )
 
-    assert tui_keybindings._tui_submit_control_operation(params, "/status")
+    assert tui_actions._tui_submit_control_operation(params, "/status")
     assert len(captured) == 1
     assert captured[0].command_kind == "status"
     assert runtime.notice() == ""
@@ -1143,7 +1143,7 @@ def test_gateway_stop_completion_is_stable_transcript_feedback(tmp_path) -> None
         tui_runtime=runtime,
         control_operation_reconciler=None,
     )
-    reconciler = tui_keybindings._ensure_control_operation_reconciler(params)
+    reconciler = tui_actions._ensure_control_operation_reconciler(params)
     entry = SimpleNamespace(message_id="control-stop-one", command_kind="stop")
 
     reconciler.on_complete(
@@ -1192,7 +1192,7 @@ def test_running_gateway_submit_uses_active_turn_receipt_instead_of_job_queue(fo
         active_input_reconciler=Reconciler(),
     )
 
-    assert tui_keybindings._tui_submit_active_turn_input(
+    assert tui_actions._tui_submit_active_turn_input(
         params,
         "继续原任务并改成 JSON",
         display_text="继续原任务并改成 JSON",
@@ -1246,13 +1246,13 @@ def test_child_input_stays_queued_until_exact_provider_consumption(monkeypatch) 
         agent_navigation=None,
     )
     monkeypatch.setattr(
-        tui_keybindings.threading.Thread,
+        tui_actions.threading.Thread,
         "start",
         lambda worker: worker.run(),
     )
 
     for text in ("第一条用户插话", "第二条用户插话"):
-        tui_keybindings._tui_submit_agent_input(
+        tui_actions._tui_submit_agent_input(
             SimpleNamespace(app=app),
             params,
             run_id="child-a",
@@ -1380,7 +1380,7 @@ def test_unknown_active_turn_delivery_keeps_receipt_and_starts_same_id_reconcili
         active_input_reconciler=Reconciler(),
     )
 
-    assert tui_keybindings._tui_submit_active_turn_input(
+    assert tui_actions._tui_submit_active_turn_input(
         params,
         "网络慢时不能重复排队",
         display_text="网络慢时不能重复排队",
@@ -1422,9 +1422,9 @@ def test_reconciliation_queues_once_only_after_explicit_rejection(monkeypatch, t
         paths=SimpleNamespace(root=tmp_path),
         active_input_reconciler=None,
     )
-    monkeypatch.setattr(tui_keybindings, "ACTIVE_TURN_RETRY_INITIAL_SECONDS", 0.05)
+    monkeypatch.setattr(tui_actions, "ACTIVE_TURN_RETRY_INITIAL_SECONDS", 0.05)
 
-    assert tui_keybindings._tui_submit_active_turn_input(
+    assert tui_actions._tui_submit_active_turn_input(
         params,
         "原回合结束后排队",
         display_text="原回合结束后排队",
@@ -1485,9 +1485,9 @@ def test_gateway_queued_active_input_attaches_exact_next_turn_without_resubmit(
         paths=SimpleNamespace(root=tmp_path),
         active_input_reconciler=None,
     )
-    monkeypatch.setattr(tui_keybindings, "ACTIVE_TURN_RETRY_INITIAL_SECONDS", 0.05)
+    monkeypatch.setattr(tui_actions, "ACTIVE_TURN_RETRY_INITIAL_SECONDS", 0.05)
 
-    assert tui_keybindings._tui_submit_active_turn_input(
+    assert tui_actions._tui_submit_active_turn_input(
         params,
         "当前回合来不及就直接进入下一回合",
         display_text="当前回合来不及就直接进入下一回合",
@@ -1782,9 +1782,9 @@ def test_tmux_clipboard_buffer_uses_documented_set_buffer_write_through(monkeypa
         return Result()
 
     monkeypatch.delenv("LC_TERMINAL", raising=False)
-    monkeypatch.setattr(tui_keybindings.subprocess, "run", fake_run)
+    monkeypatch.setattr(tui_clipboard.subprocess, "run", fake_run)
 
-    assert tui_keybindings._load_tmux_clipboard_buffer("甲乙")
+    assert tui_clipboard._load_tmux_clipboard_buffer("甲乙")
     assert calls == [(["tmux", "set-buffer", "-w", "--", "甲乙"], None)]
 
 
@@ -1799,9 +1799,9 @@ def test_tmux_clipboard_buffer_uses_stdin_only_for_iterm2(monkeypatch) -> None:
         return Result()
 
     monkeypatch.setenv("LC_TERMINAL", "iTerm2")
-    monkeypatch.setattr(tui_keybindings.subprocess, "run", fake_run)
+    monkeypatch.setattr(tui_clipboard.subprocess, "run", fake_run)
 
-    assert tui_keybindings._load_tmux_clipboard_buffer("copy")
+    assert tui_clipboard._load_tmux_clipboard_buffer("copy")
     assert calls == [(["tmux", "load-buffer", "-"], "copy")]
 
 
@@ -1899,9 +1899,9 @@ def test_native_clipboard_runs_pbcopy_when_local_macos(monkeypatch) -> None:
 
     monkeypatch.delenv("SSH_CONNECTION", raising=False)
     monkeypatch.setattr(tui_keybindings.sys, "platform", "darwin")
-    monkeypatch.setattr(tui_keybindings.subprocess, "run", fake_run)
+    monkeypatch.setattr(tui_clipboard.subprocess, "run", fake_run)
 
-    assert tui_keybindings._run_clipboard_tool(["pbcopy"], "正文") is True
+    assert tui_clipboard._run_clipboard_tool(["pbcopy"], "正文") is True
     assert tui_keybindings._copy_native_clipboard("正文") is True
     assert calls[1] == (["pbcopy"], "正文")
 
@@ -1915,7 +1915,7 @@ def test_native_clipboard_skipped_over_ssh(monkeypatch) -> None:
 
     monkeypatch.setenv("SSH_CONNECTION", "10.0.0.13 54321 10.0.0.1 22")
     monkeypatch.setattr(tui_keybindings.sys, "platform", "darwin")
-    monkeypatch.setattr(tui_keybindings.subprocess, "run", fake_run)
+    monkeypatch.setattr(tui_clipboard.subprocess, "run", fake_run)
 
     tui_keybindings._copy_native_clipboard("远端不写本机剪贴板")
     assert calls == []
@@ -2005,9 +2005,9 @@ def test_large_selection_uses_native_and_tmux_without_oversized_osc(monkeypatch)
 def test_large_tmux_selection_uses_stdin_instead_of_argv(monkeypatch) -> None:
     calls = []
     monkeypatch.delenv("LC_TERMINAL", raising=False)
-    monkeypatch.setattr(tui_keybindings.subprocess, "run",
+    monkeypatch.setattr(tui_clipboard.subprocess, "run",
                         lambda args, **kwargs: calls.append((args, kwargs)) or SimpleNamespace(returncode=0))
     text = "长选区" * 50000
-    assert tui_keybindings._load_tmux_clipboard_buffer(text)
+    assert tui_clipboard._load_tmux_clipboard_buffer(text)
     assert calls[0][0] == ["tmux", "load-buffer", "-"]
     assert calls[0][1]["input"] == text

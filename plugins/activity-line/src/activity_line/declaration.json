@@ -1,0 +1,21 @@
+{
+  "plugin_id": "activity-line",
+  "summary": "在面板显示当前运行状态、活动与耗时",
+  "entry_module": "activity_line",
+  "default_action": "show",
+  "actions": [
+    {
+      "name": "show",
+      "summary": "打开或关闭活动面板",
+      "arguments": [],
+      "kind": "display",
+      "target": "line",
+      "available": true
+    }
+  ],
+  "tools": [],
+  "panels": [
+    {"id": "line", "title": "活动", "kind": "text", "topics": ["activity", "run_state"]}
+  ],
+  "settings_schema": {"type": "object", "properties": {}}
+}

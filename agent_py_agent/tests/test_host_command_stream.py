@@ -274,7 +274,7 @@ def test_invalid_interactive_body_cannot_supply_a_path_or_start_execution(tmp_pa
 
 @pytest.mark.parametrize("phase", ["before_open", "visible", "queued"])
 def test_tui_coroutine_cancellation_releases_only_its_command(monkeypatch, phase):
-    from agent_py_agent.cli.chat_parts import tui, tui_keybindings
+    from agent_py_agent.cli.chat_parts import tui, tui_actions
     from agent_py_agent.cli.chat_parts.tui_params import TuiHandleCommandParams
     from agent_py_agent.cli.chat_parts.tui_plugin_commands import submit_plugin_command
 
@@ -287,7 +287,7 @@ def test_tui_coroutine_cancellation_releases_only_its_command(monkeypatch, phase
         "/plugins list", None, None, [], [], False, None, threading.Lock(),
         [True], [0], ["core"], ["core"], [0], [False], threading.Event(), [],
     )
-    monkeypatch.setattr(tui_keybindings, "_handle_command_params", lambda *_: template)
+    monkeypatch.setattr(tui_actions, "_handle_command_params", lambda *_: template)
     started, release, finished = (threading.Event() for _ in range(3))
     observed = {}
 

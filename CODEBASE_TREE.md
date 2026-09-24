@@ -118,7 +118,8 @@ agent_py_agent/
 |   |   |-- plugin_command_client.py   # 显式宿主模式、会话目录缓存与原版本提交
 |   |   |-- command_interaction.py     # 单次命令的编号、审批消费者及独立取消引用
 |   |   |-- plugin_command_stream.py   # 持续读原命令流并异步回写完整审批绑定
-|   |   |-- tui_plugin_commands.py     # 输入候选版本绑定与不阻塞输入的插件命令分派
+|   |   |-- tui_plugin_commands.py     # 输入候选版本绑定与不阻塞输入的插件命令分派；面板动作本地切换
+|   |   |-- tui_plugin_panels.py       # 插件面板本地显示偏好、有界后台刷新与纯排版，不运行插件代码
 |   |   |-- slash_command_types.py     # CLI 命令处理器的可信上下文，不另设命令目录
 |   |   |-- tui_input.py                # 真实 slash/path 补全、菜单、history suggest 与排队占位投影
 |   |   |-- tui_media_clipboard.py      # 显式截图剪贴板读取及临时文件清理
@@ -149,8 +150,9 @@ agent_py_agent/
 |   |   |-- tui_events.py               # TUI 唯一 versioned event 信封、单调 sequencer 与幂等有界 journal
 |   |   |-- tui_view_model.py           # typed event reducer：稳定/活动 block、权限 overlay、输入队列与状态快照
 |   |   |-- tui_ui_setup.py             # alternate-screen prompt_toolkit 布局、控件、style 与 focus 接线
-|   |   |-- tui_keybindings.py          # 输入、帮助、权限、队列、滚动、transcript、中断与退出 typed key intents
-|   |   |-- tui_clipboard.py            # 单应用有界复制顺序与分通道结果，防止旧选区覆盖新复制
+|   |   |-- tui_keybindings.py          # 按键注册与处理：输入、帮助、权限、队列、滚动、transcript、中断与退出 typed key intents
+|   |   |-- tui_actions.py              # 按键触发的副作用边界：Gateway 提交/控制对账、后台线程、子代理插话与中断
+|   |   |-- tui_clipboard.py            # 单应用有界复制顺序与分通道结果，及本机/tmux 复制子进程 helper
 |   |   `-- control_runtime.py          # CLI 对共享会话控制协议及窗口级精确中断的运行适配
 |   |-- home_runtime_commands.py        # owner home 状态、daily/task workspace/index 维护命令
 |   |-- gateway_process.py              # gateway 进程入口
@@ -166,7 +168,10 @@ agent_py_agent/
 |   |-- plugin_command_catalog.py      # 可验证的不可变目录快照、JSON 合同及内容版本
 |   |-- plugin_command_service.py      # 宿主作用域目录与旧版本拒绝，不拥有安装和执行权
 |   |-- plugin_completion.py           # 用公共词法和绑定事实生成只编辑输入的候选
-|   |-- plugin_manifest.py             # 静态包描述、不可变 schema 与默认停用的命令投影
+|   |-- plugin_manifest.py             # 静态包描述、不可变 schema 与默认停用的命令投影；v2 可选声明展示面板
+|   |-- plugin_display/                # 插件声明式面板与只读订阅（第 9 步）
+|   |   |-- protocol.py                # 面板声明、公开主题与展示描述校验/截断，纯协议无 IO
+|   |   `-- service.py                 # Gateway 进程内展示服务：固定代次连接、单在途、撤销与空闲回收
 |   |-- plugin_package.py              # 有界 ZIP 读取、成员与摘要核对，不安装或导入插件
 |   |-- plugin_wheels.py               # wheel 标准元数据、RECORD、平台与本地依赖闭包预检
 |   |-- plugin_wheel_layout.py         # 环境内文件计划、引导文件保护与宿主只读核对
@@ -318,6 +323,7 @@ agent_py_agent/
 |   |   `-- executor_liveness.py        # exact attempt 执行区间和 OS 退出事实；慢模型不按时长判死
 |   |-- gateway_parts/                 # gateway request/worker/lease/http/renderer
 |   |   |-- plugin_command_service.py  # 原管理员授权、可信 owner 目录与插件 HTTP 命令入口
+|   |   |-- plugin_panels_http.py      # /client/plugin-panels：作用域解析、只读活动投影与展示服务调用
 |   |   |-- command_stream_protocol.py # 命令有界消息、规范 owner 握手与原审批路径
 |   |   |-- command_stream.py          # 原 HTTP 线程执行、审批运输和断连取消
 |   |   |-- owner_conversation_store.py # 模型配置与插件管理共用的原 owner 会话 Store 组装
@@ -780,6 +786,14 @@ scripts/
 `-- reproject_model_usage.py           # 历史用量账本的只读重算投影（exact/partial/incomplete，不覆盖原账本）
 plugins/
 |-- sdk/pyproject.toml                  # 独立 SDK 的唯一发行版本及标准构建声明
+|-- activity-line/                     # 自有纯展示插件：面板显示运行状态、活动与耗时，无工具、无依赖
+|   |-- README.md                      # 构建与面板用法
+|   |-- pyproject.toml                 # 插件发行身份，无运行依赖
+|   `-- src/activity_line/
+|       |-- declaration.json           # 展示动作与 text 面板（activity、run_state 主题）的唯一声明
+|       |-- __init__.py                #
+|       |-- __main__.py                # python -m activity_line 启动 stdio 服务
+|       `-- server.py                  # 握手声明展示能力，只实现只读 my-agent/display.render
 `-- workspace-peek/                    # 自有文件预览插件；不依赖完整宿主运行包
     |-- README.md                      # 离线构建、命令示例与当前验收边界
     |-- pyproject.toml                 # 插件发行身份及精确 SDK 依赖
@@ -887,6 +901,7 @@ docs/
 - `agent_py_agent/agent/common/cancellation.py`：原取消令牌、异常、ContextVar 和回调的唯一实现；全部调用方直接依赖公共层，旧 tooling 入口删除，不管理持久任务或 OS 资源。
 - `agent_py_agent/agent/common/directory_lock.py`、`nofollow_fs.py` 与 `strict_json.py`：分别维护永久互斥、受信根文件原语和严格 JSON；这些公共原语不裁决领域授权或替代操作账本。
 - `agent_py_agent/agent/plugin_command_service.py`：从原安装表生成静态命令目录，旧或缺失版本明确拒绝；显式业务动作尚未接执行，普通工具贡献归 Registry。
+- `agent_py_agent/agent/plugin_display/`：插件面板只读取已有公开活动投影，经固定代次连接调用只读 `display.render`，结果按类型校验截断；停用/换代即丢弃结果并关闭连接，见 [插件展示](docs/design/PLUGIN_DISPLAY.md)。
 - `agent_py_agent/agent/gateway_parts/plugin_command_service.py`：三个 HTTP 入口共用原管理员与可信 owner；只读不初始化冷用户，获授权安装才登记原独立运行。
 - `agent_py_agent/cli/chat_parts/plugin_command_client.py`：TUI、plain Gateway 与 direct 共用模式、声明缓存及查询语义；传输失败保留原编号与未知，不降级或自动重送。
 - `agent_py_agent/cli/chat_parts/command_interaction.py`：每次 Enter 单独绑定审批回调、取消令牌和原 Gateway 连接；并发命令不共享可变回调或借聊天身份。
@@ -1031,7 +1046,8 @@ docs/
 - `agent/conversation/display_archive.py`、`agent/gateway_parts/display_archive_service.py`：完整原文以 owner 私有不可变页保存，前端只有引用；跨 owner、无关会话或任意磁盘路径均拒绝。
 - `agent/agent_core/tool_loop/display_archive.py`：在工具显示投影裁剪之前存真实执行快照；不读取当前文件重建历史，也不改变 LLM 工具输入。
 
-- `agent_py_agent/cli/chat_parts/tui_clipboard.py`：串行投影显式选区，最新代次回执与退出清理，不读取或持久化系统剪贴板。
+- `agent_py_agent/cli/chat_parts/tui_clipboard.py`：串行投影显式选区，最新代次回执与退出清理，不读取或持久化系统剪贴板；本机复制命令与 tmux 缓冲子进程 helper 也在此处，均有两秒超时。
+- `agent_py_agent/cli/chat_parts/tui_actions.py`：TUI 按键的副作用动作（Gateway 记忆/控制/补充消息提交与持久对账、本地排队、子代理插话/停止、Esc 中断）；运行时不导入 tui_keybindings。
 
 - `agent/conversation/compact_tool_refs.py`：checkpoint 的历史路径投影；仅认结构化原生调用和成功回执，不解析命令/摘要或赋予权限。
 - `agent/conversation/compact_text_source.py`：两遍长度/hash 校验与可释放顺序窗口；取消或来源变化时拒绝候选，不推进 canonical 游标。

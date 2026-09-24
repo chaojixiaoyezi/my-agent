@@ -1774,17 +1774,17 @@
       "name": "_process_claimed_gateway_request_path"
     },
     {
-      "identity": "function:agent_py_agent/cli/chat_parts/tui_keybindings.py:_ensure_active_input_reconciler",
+      "identity": "function:agent_py_agent/cli/chat_parts/tui_actions.py:_ensure_active_input_reconciler",
       "severity": "hard",
       "kind": "function",
-      "path": "agent_py_agent/cli/chat_parts/tui_keybindings.py",
+      "path": "agent_py_agent/cli/chat_parts/tui_actions.py",
       "name": "_ensure_active_input_reconciler"
     },
     {
-      "identity": "function:agent_py_agent/cli/chat_parts/tui_keybindings.py:_ensure_control_operation_reconciler",
+      "identity": "function:agent_py_agent/cli/chat_parts/tui_actions.py:_ensure_control_operation_reconciler",
       "severity": "hard",
       "kind": "function",
-      "path": "agent_py_agent/cli/chat_parts/tui_keybindings.py",
+      "path": "agent_py_agent/cli/chat_parts/tui_actions.py",
       "name": "_ensure_control_operation_reconciler"
     },
     {

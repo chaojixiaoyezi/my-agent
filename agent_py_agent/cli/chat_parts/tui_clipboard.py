@@ -1,11 +1,15 @@
 # LLM: 本模块只串行投影显式用户选区，不读取系统剪贴板或会话；每 app 至多一个在途和一个最新待处理选区。
+#   同时持有本机复制命令与 tmux 缓冲这两个有超时的子进程 helper；按键层只注入它们，不自行起子进程。
 # 模块用途: 避免较慢的旧复制覆盖新复制，并按实际通道结果生成准确回执；退出后不启动剩余复制。
 
 from __future__ import annotations
 
+import os
+import subprocess
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 
 # LLM: native/tmux 的 None 表示未尝试，False 表示失败；OSC sent 仅说明写控制序列，不证明终端授权或接收。
@@ -120,3 +124,47 @@ class ClipboardProjector:
             return copy(text) is True
         except Exception:  # noqa: BLE001 系统复制失败不应破坏 TUI，也不输出私有选区
             return False
+
+
+# LLM: native helper 的 stdin 只来自显式选区；stdout/stderr 不进入日志，单次子进程有两秒上限并返回真实 exit 状态。
+# 函数用途: 执行一个本机复制命令，失败不清空任何剪贴板，也不泄露选区。
+def _run_clipboard_tool(args: list[str], text: str) -> bool:
+    try:
+        result = subprocess.run(
+            args,
+            input=str(text or ""),
+            text=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=2.0,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
+# LLM: Documented tmux releases put clipboard write-through on `set-buffer -w`,
+# not `load-buffer`. iTerm2 keeps the stdin-only buffer path because tmux OSC 52
+# write-through can terminate that SSH client; large selections also use stdin to avoid ARG_MAX.
+# 函数用途: 把选区放进 tmux 缓冲；长文本不塞命令参数或超大 OSC，普通文本才尝试外层剪贴板转发。
+def _load_tmux_clipboard_buffer(text: str) -> bool:
+    normalized = str(text or "")
+    if os.environ.get("LC_TERMINAL") == "iTerm2" or len(normalized.encode("utf-8")) > 100_000:
+        args = ["tmux", "load-buffer", "-"]
+        run_kwargs: dict[str, Any] = {"input": normalized, "text": True}
+    else:
+        args = ["tmux", "set-buffer", "-w", "--", normalized]
+        run_kwargs = {}
+    try:
+        result = subprocess.run(
+            args,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=2.0,
+            check=False,
+            **run_kwargs,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0

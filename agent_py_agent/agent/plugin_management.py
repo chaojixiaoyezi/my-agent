@@ -221,8 +221,8 @@ class PluginManagement:
         return execute_plugin_invocation(self.context, repo, request, select,
                                          request_permission=request_permission, cancellation_token=cancellation_token)
 
-    # LLM: 同一快照绑定安装、目录和公共参数；仅 kind=tool 可调用本包目标，包自述不降低宿主权限。
-    # 函数用途: 在建立运行和连接前处理静态帮助、目录过期、停用与策略拒绝，并取实际工具参数。
+    # LLM: 同一快照绑定安装、目录和公共参数；仅 kind=tool 可调用本包目标，kind=display 只由客户端本地切换面板、宿主明确拒绝；包自述不降低宿主权限。
+    # 函数用途: 在建立运行和连接前处理静态帮助、目录过期、停用、面板动作与策略拒绝，并取实际工具参数。
     def _business_selection(self, text: str, revision: str) -> PluginInvocation | dict:
         entries = self.installations.snapshot()
         catalog = self._catalog(entries)
@@ -234,6 +234,10 @@ class PluginManagement:
         parsed = parse_plugin_command(text, plugins=catalog.plugins, management_actions=catalog.management_actions)
         if not parsed.plugin.enabled:
             return {"ok": False, "state": "rejected", "error_code": "PLUGIN_NOT_ENABLED"}
+        if parsed.action.kind == "display":
+            # 面板动作只切换客户端本地显示，宿主不执行；沿用原静态回执结构，用结构化 reason 区分
+            return dict(static, reason="display_client_only",
+                        message="这是插件面板动作，只能在支持面板的 TUI 中打开；本次没有执行操作。")
         if parsed.action.kind != "tool" or not parsed.action.available:
             return static
         name = plugin_tool_name(parsed.plugin.plugin_id, parsed.action.target)
