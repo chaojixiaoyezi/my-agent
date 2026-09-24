@@ -262,6 +262,8 @@ P1-F 只读调查已用无网络小复现确认：原账本 failed/timed_out 可
   5. "原场景 → 新测试"对照表和受影响测试文件清单写入[交接](HANDOFF_18A_DECISION_MERGE_MAIN.md)。
 - 结果：合并分支又吸收了 main 的 tui-scalability 整合和第 9 步，由主线 owner 审阅后合入 main（合并头 `67d10d626`，main `fae9d5855`）。18-A 完成；主线 owner 在新包上跑真实 TUI 矩阵。
 
-**12.4 第二片 2a**（本地分支 `claude/decision-12.4-2a`，已接到 main `fae9d5855` 上，待主线 owner 审阅）：
+**12.4 第二片 2a**（主线 owner 审阅通过，main 快进到 `931f83739`，尚未部署）：
 - 种子的具体历史与只读来源二选一，已实现，并通过等价测试和 4.2M 字符前后对照，详见[容量审计](DECISION_MODEL_CONTEXT_AUDIT.md#宿主历史种子只读来源2a2026-09-23本地)。
 - 2b（摘要期旧请求释放）尚未开始；12.4 仍开放。
+
+**恢复候选提交后的同请求重试**（本地分支 `claude/decision-retry-committed`，待主线 owner 审阅）：18-A 合并后用探针发现，候选发送瞬断后重试会发回压缩前的旧请求；现改为复用已提交候选；经主线 owner 同意，空响应修复和插话取代两个重跑分支的同类问题一并修复（先换成候选参数）。补了 Gateway、后台和单元回归，每条都做了变异验证。详见[依赖拆分](../design/TOOL_LOOP_DEPENDENCY_SPLIT.md#恢复候选提交后的同请求重试决策分支2026-09-24本地)。

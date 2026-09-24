@@ -67,6 +67,9 @@ class PreparedCompactRecovery:
     render_params: object | None = field(default=None, repr=False)
     committed: bool = False
     committed_thread: object | None = field(default=None, repr=False)
+    # LLM: 已提交候选的（参数, prompt）；只供仍拿着渲染时原参数对象的后续尝试（瞬断重试）复用，换参数对象或回合结束即失效。
+    # 字段用途: 让重试发送与首次尝试相同的已提交恢复请求，而不是压缩前的旧请求。
+    committed_request: tuple[object, str] | None = field(default=None, repr=False)
 
     # LLM: 恢复宿主在原生成安全点独占本次Compact；普通工具轮和其它请求仍走原自动压缩。
     # 函数用途: 防止完整输入捕获前的自动压缩先推进同一来源代次。
@@ -193,9 +196,22 @@ class PreparedCompactRecovery:
         self.host_state = material.host_state
         self.committed = True
         self.committed_thread = result.thread
+        self.committed_request = (material.params, material.projection.prompt)
         if self.on_commit is not None:
             self.on_commit(result.thread.compact_generation)
-        return material.params, material.projection.prompt
+        return self.committed_request
+
+    # LLM: 已提交后，凡传入渲染时记录的那份原参数对象（按对象身份，不按请求 ID）都命中同一候选，覆盖瞬断重试。
+    # 传入别的参数对象即清除：成功后循环改用候选参数，下一工具轮必然清除；宿主随回合作用域结束释放，不能跨请求复用。
+    # 同轮重跑分支（空响应修复、插话取代）由 _model_turn_or_retry 先换成候选参数，不会再拿原参数进来。
+    # 函数用途: 让重试直接复用已提交的恢复请求，不在旧参数上重建、回收或注入插话。
+    def committed_selection(self, agent: object, params: object) -> tuple[object, str] | None:
+        if self.committed_request is None or agent is not self.agent:
+            return None
+        if params is not self.render_params:
+            self.committed_request = None
+            return None
+        return self.committed_request
 
     # LLM: 冻结投影须完整；未知模态只跳过可选自动压缩，不赋予容量证明，强制恢复在select提前拒绝。
     # 函数用途: 容量充足、没有来源或模态计量未知时保留原请求，普通媒体仍交给原选定模型。

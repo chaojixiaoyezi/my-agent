@@ -1,12 +1,15 @@
 """Gateway overflow 走原恢复准备、Compact CAS 与真实 provider builder；仅 HTTP 为内存替身。"""
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 
 import pytest
 
 from agent_py_agent.agent import gateway_compact_recovery as recovery
+from agent_py_agent.agent.agent_core import _tool_loop_service as service
 from agent_py_agent.agent.agent_core import provider_transient_auto_resume, runtime_mixin
+from agent_py_agent.agent.backends import http
 from agent_py_agent.agent.backends.errors import (
     ProviderContextWindowError,
     ProviderTimeoutError,
@@ -245,3 +248,91 @@ def test_initial_without_compactable_source_can_adopt_larger_model(tmp_path, mon
     assert [wire["model"] for wire, _ in business] == ["candidate-large"]
     assert len(decision.calls) == 1
     assert fixture.agent.conversation_store.threads.require(fixture.thread_id).compact_generation == 0
+
+
+# LLM: 复现"提交恢复候选后瞬断重试发回压缩前旧请求"：同一次模型请求的每次重试都必须原样发送已提交候选，
+# 不在旧参数上重建、共享预算回收或注入插话；摘要与 CAS 各一次，代次保持 1，重试耗尽也不会再恢复一次。
+# 成功后下一工具轮沿候选参数正常重建，不再命中该记录。
+@pytest.mark.parametrize("outcome", ["recovers", "exhausted"])
+def test_transient_retry_after_commit_resends_committed_candidate(tmp_path, monkeypatch, outcome):
+    fixture = _history_request(tmp_path, tools=outcome == "recovers")
+    agent = fixture.agent
+    material_path = agent.root / "material.txt"
+    material_path.write_text("需要继续核对的资料", encoding="utf-8")
+    projections, builds, fits, waits = [], [], [], []
+    original_project = recovery._project_recovery_candidate
+    original_build = service.build_tool_loop_prompt
+    original_fit = service._fit_native_ir_to_shared_budget
+
+    def project(*args):
+        value = original_project(*args)
+        if args[-1].is_candidate:
+            projections.append(value)
+        return value
+
+    def build(*args, **kwargs):
+        builds.append(True)
+        return original_build(*args, **kwargs)
+
+    def fit(*args, **kwargs):
+        fits.append(True)
+        return original_fit(*args, **kwargs)
+
+    monkeypatch.setattr(recovery, "_project_recovery_candidate", project)
+    monkeypatch.setattr(service, "build_tool_loop_prompt", build)
+    monkeypatch.setattr(service, "_fit_native_ir_to_shared_budget", fit)
+    monkeypatch.setattr(provider_transient_auto_resume, "_wait_before_retry", lambda *_: waits.append(True))
+    seen, marks, wires = [], [], []
+
+    def on_business(wire):
+        host = _HOST.get()
+        if not seen:
+            seen.append("overflow")
+            raise ProviderContextWindowError("测试供应商上下文溢出")
+        if not host.compact_recovery.committed:
+            seen.append("summary")
+            return
+        material = projections[-1]
+        projected = material.projection
+        expected = _payload(agent.backend, projected.provider_prompt, list(material.request_input.native_tools) or None,
+                            projected.tool_choice, projected.messages, projected.system_instruction)
+        seen.append("candidate" if wire == expected else "rebuilt")
+        marks.append((len(builds), len(fits)))
+        wires.append(wire)
+        if outcome == "exhausted" or seen.count("candidate") == 1:
+            raise ProviderTransientError("503 after commit")
+
+    fake_http(monkeypatch, fixture, on_business=on_business)
+    installed = http.post_json
+
+    # 重试成功的那次候选回一个工具调用，让本回合进入下一工具轮。
+    def send(request):
+        result = installed(request)
+        if outcome == "recovers" and seen[-1:] == ["candidate"] and seen.count("candidate") == 2 and len(wires) == 2:
+            return {"content": [{"type": "tool_use", "id": "read-material", "name": "read_file",
+                                 "input": {"path": str(material_path)}}],
+                    "stop_reason": "tool_use", "usage": {"input_tokens": 101, "output_tokens": 5}}
+        return result
+
+    monkeypatch.setattr(http, "post_json", send)
+    if outcome == "recovers":
+        request_execution._run_gateway_ask(fixture.context)
+    else:
+        with pytest.raises(ProviderTransientError):
+            request_execution._run_gateway_ask(fixture.context)
+
+    sends = seen[2:]
+    assert seen[:2] == ["overflow", "summary"]
+    if outcome == "recovers":
+        assert sends == ["candidate", "candidate", "rebuilt"]
+        # 重试与首次候选之间没有重建、没有共享预算回收；下一工具轮才按候选参数正常重建。
+        assert marks[0] == marks[1] and marks[2][0] > marks[1][0]
+        assert "read-material" in json.dumps(wires[2], ensure_ascii=False)
+    else:
+        assert waits and sends == ["candidate"] * (1 + len(waits))
+        assert len(set(marks)) == 1
+    thread = agent.conversation_store.threads.require(fixture.thread_id)
+    assert thread.compact_generation == 1
+    checkpoints = agent.home_paths.owner_compact_dir / "conversations" / f"{fixture.thread_id}.jsonl"
+    rows = [json.loads(line) for line in checkpoints.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert [row["generation"] for row in rows if row.get("schema") == "conversation_compact_checkpoint.v3"] == [1]

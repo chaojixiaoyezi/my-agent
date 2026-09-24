@@ -267,3 +267,80 @@ def test_transient_retry_reselects_and_accepts_only_final_attempt_params(monkeyp
     assert all(event[1] is second for event in events)
     assert not any(event[1] is first for event in events)
     assert events[0][2] is final
+
+
+def test_committed_recovery_record_serves_only_retries_of_the_same_request():
+    """已提交恢复候选只供同一份原参数的重试复用；换参数对象（下一工具轮）即清除，别的 agent 不命中也不清除。"""
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.compact_request_recovery import PreparedCompactRecovery
+    from agent_py_agent.agent.model_request_selection import (
+        committed_request_selection,
+        model_request_selection_scope,
+    )
+
+    agent, original, candidate = object(), SimpleNamespace(), SimpleNamespace()
+    host = PreparedCompactRecovery(agent=agent, source=None, host_state=None,
+                                   matches_request=lambda _params: True, project_candidate=lambda *_args: None)
+    assert committed_request_selection(agent, original) is None, "没有宿主时不命中"
+    with model_request_selection_scope(host):
+        assert committed_request_selection(agent, original) is None, "未提交时不命中"
+        host.render_params, host.committed_request = original, (candidate, "已提交候选请求")
+        assert committed_request_selection(object(), original) is None
+        assert committed_request_selection(agent, original) == (candidate, "已提交候选请求")
+        assert committed_request_selection(agent, original) == (candidate, "已提交候选请求"), "多次重试都复用同一候选"
+        assert committed_request_selection(agent, candidate) is None
+        assert host.committed_request is None
+        assert committed_request_selection(agent, original) is None, "清除后原参数也不再命中"
+    with model_request_selection_scope(SimpleNamespace()):
+        assert committed_request_selection(agent, original) is None, "宿主没有该回调时不命中"
+
+
+def test_committed_retry_skips_rebuild_recycle_and_input_injection(monkeypatch):
+    """命中已提交候选：不重建、不做共享预算回收、不注入新插话、不重新准备，只在本次尝试内重新选模后发送同一请求。"""
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core import _tool_loop_service as service
+    from agent_py_agent.agent.agent_core.subagent import model_selection
+    from agent_py_agent.agent.model_request_selection import model_request_selection_scope
+
+    agent = SimpleNamespace(runtime_guard_policy=None)
+    params, committed = SimpleNamespace(label="原参数"), SimpleNamespace(label="已提交候选")
+    calls = []
+
+    # 测试宿主：只有同一份原参数命中；准备入口被调用即说明走了重建路径。
+    class _CommittedHost:
+        def committed_selection(self, _agent, params_):
+            return (committed, "已提交候选请求") if params_ is params else None
+
+        def prepare_request(self, *_args):
+            raise AssertionError("命中已提交候选时不得重新准备")
+
+        def select(self, _agent, params_, prompt):
+            calls.append(("select", params_, prompt))
+            return params_, prompt
+
+    def forbidden(name):
+        def fail(*_args, **_kwargs):
+            raise AssertionError(f"命中已提交候选时不得调用 {name}")
+        return fail
+
+    for name in ("_discard_stale_natural_reply_for_pending_turn_input", "natural_user_reply_model_params",
+                 "build_tool_loop_prompt", "inject_pending_turn_input", "_fit_native_ir_to_shared_budget"):
+        monkeypatch.setattr(service, name, forbidden(name))
+    monkeypatch.setattr(model_selection, "select_first_request_model",
+                        lambda _agent, params_, prompt: (calls.append(("first", params_, prompt)), (params_, prompt))[1])
+
+    def request(_agent, params_, _rounds, *, first_prompt=None, consumes_task_tool_surface=True):
+        calls.append(("request", params_, first_prompt))
+        return first_prompt, "响应"
+
+    monkeypatch.setattr(service, "_request_tool_loop_model_response", request)
+    with model_request_selection_scope(_CommittedHost()):
+        turn = service.next_tool_loop_model_response(agent, params, 0)
+    assert turn.params is committed and turn.prompt == "已提交候选请求" and turn.response == "响应"
+    assert calls == [
+        ("first", committed, "已提交候选请求"),
+        ("select", committed, "已提交候选请求"),
+        ("request", committed, "已提交候选请求"),
+    ]

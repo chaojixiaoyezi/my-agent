@@ -1368,27 +1368,35 @@ def _text_conversation_history_section(seed: object, *, compact_context: object 
 # 再由请求宿主准备同次上下文并核对子代理首请求与主会话候选；内部超限重试绑定该次采用的参数。只有宿主
 # 在首次 HTTP 前抛出的 typed 拒绝可退回同一次尝试的原参数与原 prompt，之后错误原样上抛。返回具名结果，
 # params 是实际产出 response 的循环参数；不要把辅助回执当作业务工具声明已展示。
+# 同一次模型请求的瞬断重试若宿主已提交恢复候选，直接复用该候选，不在旧参数上 build、回收或注入插话；
+# 选模仍在每次尝试内重新进行。
 # 函数用途: 选择本轮真正要发给模型的上下文与模型依赖，并把原请求、Compact和输入恢复能力交给模型请求周期。
 def next_tool_loop_model_response(
     agent, params: ToolLoopExecuteParams, tool_rounds: int,
 ) -> ModelTurnRequest:
-    _discard_stale_natural_reply_for_pending_turn_input(agent, params)
-    model_params = natural_user_reply_model_params(params)
-    if model_params is not params:
-        prompt, response = _request_tool_loop_model_response(
-            agent, model_params, tool_rounds, consumes_task_tool_surface=False,
-        )
-        return ModelTurnRequest(prompt, response, params)
     from ..model_request_selection import (
         ModelRequestSelectionRejected,
+        committed_request_selection,
         prepare_request_context,
         reject_request_selection,
         select_request_model,
     )
     from .subagent.model_selection import select_first_request_model
 
-    prompt = build_tool_loop_prompt(agent, params)
-    prepared, prompt = prepare_request_context(agent, params, prompt)
+    committed = committed_request_selection(agent, params)
+    if committed is not None:
+        # 恢复候选已提交：重试原样复用，旧请求不再发送；新插话留到下一轮由新参数送出。
+        prepared, prompt = committed
+    else:
+        _discard_stale_natural_reply_for_pending_turn_input(agent, params)
+        model_params = natural_user_reply_model_params(params)
+        if model_params is not params:
+            prompt, response = _request_tool_loop_model_response(
+                agent, model_params, tool_rounds, consumes_task_tool_surface=False,
+            )
+            return ModelTurnRequest(prompt, response, params)
+        prompt = build_tool_loop_prompt(agent, params)
+        prepared, prompt = prepare_request_context(agent, params, prompt)
     baseline, baseline_prompt = select_first_request_model(agent, prepared, prompt)
     selected, selected_prompt = select_request_model(agent, baseline, baseline_prompt)
     try:
@@ -1743,6 +1751,7 @@ def _drain_pending_deferred_tool_calls(
 
 # LLM: 原执行权和Goal开始仍在本装配点；仅将采样／响应确认交给窄操作，空响应返工及插话注入保持当前循环内。
 # 计量、恢复与确认显式接收实际产出响应的那份参数；返回具名结果，由循环显式换参。
+# 恢复宿主已提交候选时，异常分支先换成候选参数：同轮重跑不能在压缩前的原参数上重建或回收。
 # 函数用途: 在有效工作片内请求下一轮模型，绑定原计量和消息账本，处理无可用响应时的一次修复。
 def _model_turn_or_retry(
     agent,
@@ -1776,6 +1785,11 @@ def _model_turn_or_retry(
         # instead of inheriting a stale retry count from the whole long task.
         return _ModelTurnOutcome(turn.prompt, turn.response, False, False, 0, turn.params)
     except Exception as exc:
+        from ..model_request_selection import committed_request_selection
+
+        committed = committed_request_selection(agent, loop_params)
+        if committed is not None:
+            loop_params = committed[0]
         # 会话运行时 queues steer input on the active turn.  If the provider call
         # that was already in flight then ends without a usable response, that
         # stale empty output is not the turn's terminal result: consume the

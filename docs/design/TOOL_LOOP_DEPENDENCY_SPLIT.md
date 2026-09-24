@@ -176,3 +176,32 @@ segment_planning只接受调用列表／起点、有效批上限和原位Compact
 **数据兼容**：主线 `66a598cf3` 写出的 v2 行（带 `source_tool_call_refs`，即 tool_call_ref.v1 三元引用）仍可读取，但按 legacy 处理：三元引用缺 turn，不能冒充四元来源，因此不隐藏任何记录。后果是：在合并版部署前、由 `66a598cf3` 做过运行中压缩的线程，其已压缩的旧调用会重新出现在模型上下文里，只多占上下文，不会丢数据，也不会误隐藏。畸形的 v1 引用同样按 legacy 处理，而被篡改的 v3 行因内容寻址校验失败会拒绝读取。
 
 **回滚边界**：合并版部署后写出的 v3 行，旧版本运行时无法读取。回滚必须把运行时和数据成对核对，保留新产生的账和用户记录；只切回旧 wheel 不算安全回滚，也不能为了回滚丢弃新历史。
+
+## 恢复候选提交后的同请求重试（决策分支，2026-09-24，本地）
+
+状态：本地分支 `claude/decision-retry-committed`，基于 main `931f83739`，待主线 owner 审阅，未部署。
+
+**问题**：恢复宿主在 `select` 里完成摘要和 CAS，把候选请求交给本次尝试发送。候选发送遇到瞬断时，原瞬断恢复器再次调用 `next_tool_loop_model_response`，而宿主已经消费，只能在压缩前的原参数上重建：
+- Gateway 会把压缩前的旧请求重新发出去。探针中发送大小依次为 16,119（溢出）→ 18,491（候选，瞬断）→ 16,119（重试，旧请求）。
+- 后台与子代理的重建还会在原参数上做共享预算回收，触发第二次运行中压缩，并抛 `ValueError: compact summary base changed or is outside the requested scope`。
+
+**修复**：
+- `PreparedCompactRecovery.select` 提交后保存 `committed_request`（候选参数，已检查的 prompt）。
+- `model_request_selection.committed_request_selection(agent, params)` 经宿主回调取出记录。Gateway 由 `GatewayModelObservation.committed_selection` 转交；子代理和后台直接安装恢复宿主。
+- `next_tool_loop_model_response` 命中时直接使用该记录，跳过过期自然回复丢弃、自然回复辅助请求、`build_tool_loop_prompt`（含插话注入与共享预算回收）和 `prepare_request_context`。首请求选模和 `select_request_model` 仍在本次尝试内执行，然后发送。
+
+**命中条件**：
+- 记录已提交，且 agent 相同；
+- 传入的参数正是渲染时记录的原参数对象。按对象身份匹配，不按请求 ID。
+- 传入别的参数对象就清除记录。成功后循环改用 `turn.params`（候选参数），所以下一工具轮一定清除；宿主作用域随回合结束释放。
+
+**保证**：
+- 同一次模型请求的每次重试都发送同一候选；摘要和 CAS 各一次，代次不变。
+- 重试耗尽时原样抛出，不会第二次恢复。
+- 新到的插话不在重试里注入，留到下一轮由候选参数正常送出。
+- 已在候选里的插话沿原 `retry_allowed` 守门：注入过插话的请求本来就不做瞬断重试。
+
+**同轮重跑分支（主线 owner 同意并入本片）**：`_model_turn_or_retry` 有两个同轮重跑分支：空响应修复，以及插话取代不可用响应。原来它们在提交后仍用压缩前的原参数：
+- 空响应修复在原参数上调用 `build_tool_loop_prompt`，共享预算回收在原参数上触发运行中压缩，抛上面的 `ValueError`。
+- 插话取代把插话注入原参数；下一次迭代又拿原参数命中已提交记录，重发不带插话的候选。这次响应随后因插话未处理而作废，第三次请求才送出插话，白白多一次请求。
+- 修复：`except` 开头只做一件事——有已提交记录就把 `loop_params` 换成候选参数，其它判断照旧。修复提示和插话都落在候选参数上；下一次迭代传入的是候选参数，记录按原规则清除，然后正常重建。
