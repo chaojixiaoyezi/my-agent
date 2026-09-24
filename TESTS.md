@@ -20,6 +20,7 @@ child不展示历史正文时的读取回归先复现1 failed/1 passed，修复�
   - 相关 114 个测试文件 2,932 passed、24 xfailed、1 xpassed。
   - 接到 main `fae9d5855` 后，加上第 10 步改动过的测试文件共 118 个：2,976 passed、24 xfailed、1 xpassed。
   - 独立评审修复后，同一 118 个文件：2,985 passed、24 xfailed、1 xpassed（新增 9 项种子用例）。最后删掉 `freeze_history_source` 未使用的 `current_epoch` 参数（避免新增参数过多的 code-size 高风险项）后，13 个改动测试文件再跑 358 passed。
+  - 变基到 main `1be5753ff` 后，上述 118 个文件加 main 新改动的 6 个测试文件共 124 个：3,087 passed、24 xfailed、1 xpassed；Ruff、doc sync、strict code-size（hard=0，高风险项与基线相同）、diff 检查、clean-package 全部通过。
   - 完整链前后对照见容量审计同名一节。
 - **未覆盖**：没有跑真实模型或 TUI，线上 CI 未作为验收来源。2b 未开始。
 

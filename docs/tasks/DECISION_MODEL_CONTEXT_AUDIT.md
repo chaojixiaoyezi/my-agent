@@ -1457,7 +1457,7 @@ Sol high独立只读复核未发现必须修复的scope/base/legacy回归，确�
 
 ### 宿主历史种子只读来源（2a，2026-09-23，本地）
 
-分支 `claude/decision-12.4-2a`，基于 main `fae9d5855`，未合入、未部署。修改前的数据在 `94fbeb7a6` 上测量；2a 涉及的文件在这两个提交之间没有变化，数据可以直接对比。
+分支 `claude/decision-12.4-2a`，原基于 main `fae9d5855`，评审修复后变基到 main `1be5753ff`，未合入、未部署。修改前的数据在 `94fbeb7a6` 上测量；2a 涉及的文件在这两个提交之间没有变化，数据可以直接对比。
 
 **实现**：
 - 种子的具体 messages/canonical_messages 与只读来源 `source` 严格二选一，构造时校验。
