@@ -43,6 +43,10 @@ def capability_manager():
             self._work_logs = []
             # 与生产 SubAgentManager 对齐:验收机器执行的沙箱门(空 = 普通执行)。
             self.owner_scope_root = ""
+            # 与生产 _attach_runtime_db 对齐:本地非托管模式显式挂 None,准入走原文件模式。
+            self.runtime_db = None
+            # 与生产构造默认值对齐:无会话 store 时父级唤醒不投递。
+            self.conversation_store = None
             self.actions = SimpleNamespace(_append_task_work_log=self._append_task_work_log)
             self.indexing = SimpleNamespace(index_runner_result=self._index_runner_result)
             self.memory_candidates = SimpleNamespace(record_result_candidates=self.record_result_candidates)

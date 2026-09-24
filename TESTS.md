@@ -462,6 +462,28 @@ OAuth 传输、采样和模型菜单回归。覆盖保存无网络、公开字�
 再覆盖 `test_model_oauth.py`、`test_model_oauth_transport.py`、`test_tui_model_menu.py`、`test_provider_sampling.py`；
 最终联合命令使用 `python3 -m pytest <以上十个文件> -o addopts='' -q --tb=short`，213 passed in 4.29s。
 
+## 第8步新版原生 TUI 矩阵（TUI228—237，已部署版本 66a598cf3）
+
+- 环境：本机与测试机各一个 Gateway，默认入口同版；每个 TUI 都经 `/model` 选择官方 MiniMax-M2.7，并核对实际端点；每个任务只提交一次中文需求，测试者只操作 Esc、`/stop`、审批和客户端断连这类明确的控制。
+- 长任务（本机 233）：连续约 27 分钟的实际工作；模型自行派出 24 个孩子，全部结清；主线程提交 2 次会话 Compact（约 19.4 万和 19.9 万 tokens 时触发，窗口 20 万），两份摘要都逐字保留了原需求、规则和目录；工具失败 3 次后模型自行换路；13 个工作片均为 done，无残留锁和进程。
+- 多孩子（本机 229）：三个孩子并行、时间重叠，完成通知已消费；combined.csv 只有一行表头，TUI58 的重复表头问题未复现。
+- 普通对照（测试机 228、230）：run、attempt、task_run 均结清，工具操作全部成功。
+- Esc 中断（测试机 231）：前台命令执行中按 Esc，run 与 attempt 变为 cancelled，命令如实记为 UNKNOWN（`effect_outcome_unknown:CANCELLED`），无锁。
+- 断连与停止（测试机 232）：只杀 TUI 客户端进程后，Gateway → bwrap → bash → python 这棵进程树继续运行；`resume` 后恢复实时状态；从重连后的客户端发 `/stop`，15 秒内整棵进程树被回收；runtime_reason 为 `conversation_user_stop`，来源是结构化控制。
+- 审批（测试机 236/237）：审批框显示精确的命令。选拒绝时没有产生任何工具操作，模型也没有绕路；选允许一次时命令恰好执行一次，执行时刻就是批准时刻。删除请求（234/235）：Shell 删除按设计被硬门拦截，补丁删除工作区文件属于"修改"类，不弹审批。
+- 未覆盖：单轮内实时工具压缩时的逐调用精确来源路径（本批任务均未触发）；被中断的前台调用没有持久化的进程清理事实，只有实时进程快照可作证据。
+- 业务交付（与框架结论分开）：228 完全正确。230 的 totals.csv 缺日期维度。229、233 的部分孩子没有用工具计算，而是心算合计，写出了错误数字（233 中 24 个核对文件有 10 个出错，每个都写着"通过"），父级也没有用原始数据回核，最终报告失实。这与 TUI58、225—227 属于同一类通用交付核验缺口，不按 CSV 或提示词加专项分支。
+
+## 第8步发布后全仓回归修复（本地，未发布）
+
+- 起因：66a598cf3 发布前只跑了相关文件，没有跑全仓。之后全仓复验共 19,034 项，其中 15 项是真实失败（另有 1 项因复验用的快照不是 git 仓库而失败，属于环境原因，在真实 checkout 中通过）。
+- 11 项 `test_manager_runner_capability_requests`：第 7 步把准入和收口依赖收窄为 `manager.runtime_db` 和 `manager.conversation_store` 以后，轻量 manager 替身没有跟着补上这两个属性。现在按生产 `_attach_runtime_db` 和构造默认值显式设为 None，走原来的非托管路径。
+- 1 项 `test_silent_swallow_stage2`：911a53245 以后，发布账本改为经锁内 `mutate` 写入，但替身仍然让 `save` 失败，因此断言的错误日志从未触发。改为让 `mutate` 失败，断言意图不变。
+- 1 项 `test_observation_route`：7.10 在执行前按 id 重读待处理信封，2707fbbe3 当时漏补了这一个替身。改为使用真实 `WakeSignal`，并由 `pending_one` 返回仍处于 pending 的原信封。
+- 1 项架构守卫：`compact_text_source.py` 的 `__exit__` 改为显式三参数签名，行为不变（不吞异常）。
+- 验证：上述文件、`test_cli_update` 以及所有引用 `compact_text_source` 的测试，共 68 项通过；另外 Ruff、doc sync、diff 检查通过。除一处签名外，生产行为没有改动。教训：远端发布前至少要把直接受影响模块的全部测试文件纳入，只跑定向文件会漏掉夹具。
+
+
 ## 第8步精确来源与耐久清理事实组合（本地，未发布）
 
 - 合入逐调用来源：来源为 canonical run/attempt/call，旧无来源记录保留 uncertain；来源/尾部和同号跨请求不能混淆，旧无 refs 的编号算法不变。

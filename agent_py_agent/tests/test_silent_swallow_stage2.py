@@ -138,7 +138,8 @@ class TestSilentSwallowNowLogs:
 
         task = SimpleNamespace(id="run-cap", attributes={})
         agent = SimpleNamespace(subagents=MagicMock())
-        agent.subagents.save.side_effect = RuntimeError("save boom")
+        # 发布账本经锁内 mutate 写入(911a53245 起不再直接 save),故让 mutate 失败。
+        agent.subagents.mutate.side_effect = RuntimeError("save boom")
         ctx = SimpleNamespace(task=task, decision="grant", reason="")
         with caplog.at_level(logging.ERROR):
             capability._record_resolution_wake(agent, ctx, status="raised", wake_signal_id="ws-1")

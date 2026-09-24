@@ -120,7 +120,7 @@ class CompactTextSource:
 
     # LLM: 正常或异常退出都释放窗口和生成器，不能吞掉供应商错误、取消或来源不一致。
     # 函数用途: 离开分段链时解除临时正文引用。
-    def __exit__(self, *_exc):
+    def __exit__(self, exc_type, exc, tb) -> None:
         try:
             self._iterator.close()
         finally:
