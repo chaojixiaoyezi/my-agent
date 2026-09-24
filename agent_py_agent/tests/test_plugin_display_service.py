@@ -309,3 +309,18 @@ def test_requested_panel_count_is_bounded():
     many = tuple(("pet", "line") for _ in range(display_service.MAX_REQUESTED_PANELS + 5))
     out = h.service.panels(PanelQuery(object(), "owner", "thread:t1", {}, many))
     assert len(out) == display_service.MAX_REQUESTED_PANELS
+
+
+def test_context_topic_forwards_only_public_numbers():
+    from agent_py_agent.agent.plugin_display.service import project_topics
+
+    activity = {"compact_count": 2, "context_usage": {
+        "schema": "x", "estimated": True, "context_window_tokens": 200000, "compact_trigger_tokens": 180000,
+        "current_tokens": 36900, "messages_tokens": 9950, "runtime_guidance_tokens": 1200,
+        "tool_schema_tokens": 25000, "protocol": "native", "prompt": "不应转发"}}
+    context = project_topics(activity, ("context",))["context"]
+    assert context == {"known": True, "compact_count": 2, "context_window_tokens": 200000,
+                       "compact_trigger_tokens": 180000, "current_tokens": 36900, "messages_tokens": 9950,
+                       "runtime_guidance_tokens": 1200, "tool_schema_tokens": 25000, "estimated": True}
+    empty = project_topics({}, ("context",))["context"]
+    assert empty["known"] is False and empty["current_tokens"] == 0

@@ -77,10 +77,20 @@ class PluginProxyTool(MCPProxyTool):
         return "read_only"
 
 
+PLUGIN_DATA_DIR_ENV = "MY_AGENT_PLUGIN_DATA_DIR"
+
+
+# LLM: 唯一插件数据位置；只由 owner 与已校验的插件 ID 推出，不接受包声明的路径。调用方负责 no-follow 创建。
+# 函数用途: 返回某 owner 下某插件的私有数据目录，供启动插件进程和管理命令共用。
+def plugin_data_dir(owner, plugin_id: str):
+    return owner.plugins_dir / "data" / plugin_id
+
+
 # LLM: 一个客户端只属于安装表中的固定代次；沿原 MCP 重连/关闭与资源登记，不接收包提供的 owner、argv 或宿主地址。
 # 类用途: 保存插件连接和同连接已验工具，供共享权限视图分别生成目录。
 class PluginMCPClient(MCPStdioClient):
     # LLM: 构造只读规范环境和设置；私有值只放子进程环境，包声明的 effect 不降低原危险工具门。
+#   同时 no-follow 创建插件数据目录（有副作用：可能新建目录），经 MY_AGENT_PLUGIN_DATA_DIR 传给子进程。
     # 函数用途: 将已准备 Python 环境接到原 MCP 客户端，不在构造时启动进程。
     def __init__(self, owner, installation: PluginInstallation):
         activation = installation.activation
@@ -93,6 +103,10 @@ class PluginMCPClient(MCPStdioClient):
         environment = owner.plugins_dir / "environments" / activation.plan.environment_ref
         descriptor = open_directory_beneath(owner.root, (*environment.relative_to(owner.root).parts, "python", "bin"))
         os.close(descriptor)
+        # 插件自有数据按 owner + 插件 ID 固定一处，跨版本、停用和重新启用保留；卸载默认也不清（见 PLUGIN_LIFECYCLE）
+        data_dir = plugin_data_dir(owner, installation.manifest.plugin_id)
+        descriptor = open_directory_beneath(owner.root, data_dir.relative_to(owner.root).parts, create=True)
+        os.close(descriptor)
         settings = canonical_plugin_settings(load_strict_json(installation.settings_json or "{}"),
                                              installation.manifest.settings_schema)
         self.installation = installation
@@ -101,7 +115,7 @@ class PluginMCPClient(MCPStdioClient):
             name="plugin_" + installation.manifest.plugin_id,
             command=str(environment / "python" / "bin" / "python"),
             args=["-I", "-m", installation.manifest.entry_module], cwd=str(environment),
-            env={"MY_AGENT_PLUGIN_SETTINGS": settings}, catalog_category="plugins",
+            env={"MY_AGENT_PLUGIN_SETTINGS": settings, PLUGIN_DATA_DIR_ENV: str(data_dir)}, catalog_category="plugins",
         ), activation=self.activation_ref)
 
     # LLM: 原 Store 同代资源是唯一事实源；其他运行实例可共存，未知和未确认停止不能靠新客户端绕过。

@@ -244,6 +244,7 @@ def _require_current(activation_ref, installation) -> None:
 
 # LLM: 只读 ConversationAgentActivity.to_dict() 的公开有界字段，不含路径、正文、配置或身份编号；
 #   run_state 只按宿主写入的确切阶段值（agent_activity 的活动阶段白名单）和计数推出，不解析模型文字。
+#   context 只转发 context_usage 公开白名单中的数字和压缩次数，不含正文、路径或工具参数。
 # 函数用途: 按面板订阅的主题裁剪公开活动投影，作为 display.render 的唯一输入。
 def project_topics(activity: dict, topics: tuple[str, ...]) -> dict:
     main = activity.get("main_activity") if isinstance(activity.get("main_activity"), dict) else {}
@@ -270,7 +271,20 @@ def project_topics(activity: dict, topics: tuple[str, ...]) -> dict:
         else:
             state = "idle"
         result["run_state"] = {"state": state, "active_task_count": active_tasks, "subagent_count": len(subagents)}
+    if "context" in topics:
+        # 只转发宿主已清洗的上下文数字白名单（最近一次模型调用前的快照），缺快照时标记未知而不是补估算
+        usage = activity.get("context_usage") if isinstance(activity.get("context_usage"), dict) else {}
+        result["context"] = {
+            "known": bool(usage),
+            "compact_count": _int(activity.get("compact_count")),
+            **{key: _int(usage.get(key)) for key in _CONTEXT_FIELDS},
+            "estimated": usage.get("estimated") is True,
+        }
     return result
+
+
+_CONTEXT_FIELDS = ("context_window_tokens", "compact_trigger_tokens", "current_tokens", "messages_tokens",
+                   "runtime_guidance_tokens", "tool_schema_tokens")
 
 
 # LLM: 摘要只用于判断输入是否变化，不作身份或持久键。

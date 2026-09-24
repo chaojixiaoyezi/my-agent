@@ -486,6 +486,11 @@ OAuth 传输、采样和模型菜单回归。覆盖保存无网络、公开字�
 - 已知缺口：纯模型思考阶段面板显示空闲，见 [插件展示](docs/design/PLUGIN_DISPLAY.md#已知缺口)。
 - 断连重连：本轮样本中模型改用后台终端并误用参数，回合在断连前已按"结果无法确认"结束，未构成有效断连样本；断连/重连/停止仍以 TUI232 为准。
 
+## 第 10 步第一批宿主补充（本地，待发布）
+
+- `test_plugin_display_service.py::test_context_topic_forwards_only_public_numbers`：`context` 主题只转发上下文公开数字白名单和压缩次数，缺快照标记未知。
+- `test_plugin_enable.py`：真实启用的插件进程环境带 `MY_AGENT_PLUGIN_DATA_DIR`，目录已按 owner + 插件 ID 创建。
+
 ## 第 10 步插件写入上下文（本地，待发布）
 
 - `test_workspace_write_context.py`（10 项）：2000 组随机写入边界 × 4 个目标路径，逐项断言「插件允许 ⇔ 宿主 `validate_write_boundary` 允许且目标在写入根之内」，并验证序列化往返后裁决不变；另覆盖无范围时只允许 cwd、owner 墙、畸形载荷拒绝、锚点取最具体根，以及只对协商且声明写效果的工具下发、缺上下文时发送前 `not_started`。

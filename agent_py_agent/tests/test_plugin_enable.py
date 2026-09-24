@@ -62,6 +62,8 @@ def test_actual_enable_and_registry_view_call_then_disable(tmp_path):
         assert name in view.tools and name not in registry.tools
         client = next(item for item in registry._mcp_clients if isinstance(item, PluginMCPClient))
         assert client.validated_tools[0].runtime_policy.effect_resolver.default_effect == "dangerous"
+        data_dir = owner.plugins_dir / "data" / "sample-peek"
+        assert client.config.env["MY_AGENT_PLUGIN_DATA_DIR"] == str(data_dir) and data_dir.is_dir()
         registry.prepare_for_run()
         assert registry.tools[name] is view.tools[name]
         assert len([item for item in registry._mcp_clients if isinstance(item, PluginMCPClient)]) == 1

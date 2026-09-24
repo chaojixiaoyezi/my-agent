@@ -16,7 +16,7 @@ activity-line、status-pet 等展示类插件需要持续显示当前运行状�
 | `id` | 小写字母、数字和连字符，1–32 字符，同包内唯一 |
 | `title` | 1–40 字符 |
 | `kind` | `text` / `table` / `status` 三者之一 |
-| `topics` | 从核心公开主题中选择，至少一个：`activity`（当前工具、阶段、耗时）、`run_state`（working / waiting / idle / blocked） |
+| `topics` | 从核心公开主题中选择，至少一个：`activity`（当前工具、阶段、耗时）、`run_state`（working / waiting / idle / blocked）、`context`（最近一次模型调用前的上下文组成数字与压缩次数，第 10 步新增） |
 
 声明随包校验、随安装固定，不可在运行时增加主题或面板。未声明 `panels` 的插件与现状完全一致。
 
