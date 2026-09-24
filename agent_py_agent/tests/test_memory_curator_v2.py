@@ -6,6 +6,7 @@ import threading
 import time
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,6 +14,10 @@ import pytest
 
 from agent_py_agent.agent.agent_core._finalization_service import _request_memory_curator
 from agent_py_agent.agent.backends import ModelResponse
+from agent_py_agent.agent.backends.anthropic import AnthropicCompatibleBackend
+from agent_py_agent.agent.backends.base import BackendOptions
+from agent_py_agent.agent.backends.openai_chat import OpenAICompatibleBackend
+from agent_py_agent.agent.backends.provider_headers import provider_session_scope, request_headers
 from agent_py_agent.agent.conversation import ConversationStore
 from agent_py_agent.agent.gateway_parts.http_handlers import handle_ask
 from agent_py_agent.agent.memory_archive.control_plane import (
@@ -167,6 +172,7 @@ def _service(
     formal_memory_source: object | None = None,
     provider: str = "fake-structured",
     model: str = "curator-test",
+    owner_id: str = "",
     timezone_name: str = "",
     tool_reference_source: CuratorToolReferenceSource | None = None,
 ) -> MemoryCuratorService:
@@ -191,6 +197,7 @@ def _service(
             identity=MemoryCuratorIdentity(
                 provider=provider,
                 model=model,
+                owner_id=owner_id,
                 timezone_name=timezone_name,
             ),
             formal_memory_source=formal_memory_source,
@@ -884,6 +891,153 @@ def test_curator_timeout_and_model_failure_keep_cursor_and_stable_code(
     assert state.last_failure_code == failure_code
     assert state.active_lease == {}
     assert [record.failure_code for record in service.run_log.list()] == [failure_code]
+
+
+# 函数用途: 按协议把策展输出包成供应商非流式响应体(OpenAI content 字符串 / Anthropic 强制工具块)。
+def _provider_structured_response(protocol: str, output: dict[str, object]) -> dict[str, object]:
+    if protocol == "anthropic_compatible":
+        return {
+            "id": "msg-1",
+            "type": "message",
+            "role": "assistant",
+            "stop_reason": "tool_use",
+            "content": [
+                {"type": "tool_use", "id": "toolu-1", "name": "my_agent_structured_output", "input": output}
+            ],
+            "usage": {"input_tokens": 10, "output_tokens": 5},
+        }
+    return {
+        "id": "chatcmpl-1",
+        "object": "chat.completion",
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": json.dumps(output, ensure_ascii=False)},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+    }
+
+
+# 函数用途: 起一个回放合法策展输出的本地 HTTP 服务,并记录每次请求实际携带的会话头值。
+def _session_header_server(protocol: str, output: dict[str, object]):
+    seen: list[str] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            seen.append(str(self.headers.get("x-test-session") or ""))
+            encoded = json.dumps(_provider_structured_response(protocol, output), ensure_ascii=False).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    worker = threading.Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+    return server, worker, seen
+
+
+# 函数用途: 真机 2026-09-13 起主 owner 零提取的根因:要求会话头的服务商在发请求前就拒绝无会话请求,
+# 而后台线程没有前台 ContextVar。用真实 OpenAI/Anthropic 兼容后端 + 本地传输验证 run 自带会话头。
+@pytest.mark.parametrize("protocol", ["openai_compatible", "anthropic_compatible"])
+def test_curator_binds_host_session_for_session_header_provider(tmp_path: Path, protocol: str) -> None:
+    store, thread, message = _conversation(tmp_path)
+    server, worker, seen = _session_header_server(
+        protocol, _valid_output(thread.thread_id, message.message_id, message.content)
+    )
+    options = BackendOptions(
+        api_base=f"http://127.0.0.1:{server.server_port}/v1",
+        api_key="test-key",
+        model_name="curator-model",
+        session_header="x-test-session",
+        stream_enabled=False,
+    )
+    backend = (
+        AnthropicCompatibleBackend(options)
+        if protocol == "anthropic_compatible"
+        else OpenAICompatibleBackend(options)
+    )
+    service = _service(tmp_path, backend, store, provider=protocol, owner_id="local/main")
+    try:
+        result = service.run(reason="admin")
+    finally:
+        server.shutdown()
+        server.server_close()
+        worker.join(2)
+
+    assert result.status == "succeeded", result.failure_code
+    assert len(seen) == 1 and seen[0]
+    # 会话值只由结构化事实 owner_id + run_id 派生:同一原语在测试线程重放即得同值。
+    with provider_session_scope(("local/main",), result.run_id):
+        assert seen[0] == request_headers({}, {}, "x-test-session")["x-test-session"]
+    with pytest.raises(ValueError):
+        request_headers({}, {}, "x-test-session")  # run 结束后当前线程不再持有会话
+
+
+# 函数用途: 在供应商调用线程里读取当前会话头值,并可按脚本先失败再成功,用来验证重试共享同一会话。
+class _SessionRecordingBackend(_StaticStructuredBackend):
+    def __init__(self, payload: dict[str, object], *, failures: tuple[BaseException, ...] = ()) -> None:
+        super().__init__(payload)
+        self.failures = list(failures)
+        self.sessions: list[str] = []
+
+    def generate_structured(self, prompt: str, *, response_schema: dict[str, object]):
+        self.sessions.append(request_headers({}, {}, "x-test-session")["x-test-session"])
+        if self.failures:
+            raise self.failures.pop(0)
+        return super().generate_structured(prompt, response_schema=response_schema)
+
+
+def test_curator_session_is_shared_by_retries_and_distinct_per_run_and_owner(tmp_path: Path) -> None:
+    store, thread, message = _conversation(tmp_path)
+    backend = _SessionRecordingBackend(
+        _valid_output(thread.thread_id, message.message_id, message.content),
+        failures=(ConnectionError("provider unavailable"),),
+    )
+    config = MemoryCuratorConfig(interval_seconds=60, turn_threshold=1, timeout_seconds=2, max_retries=1)
+    service = _service(tmp_path / "owner-a", backend, store, config=config, owner_id="owner-a")
+
+    first = service.run(reason="admin")
+
+    assert first.status == "succeeded"
+    assert backend.sessions[0] and backend.sessions == [backend.sessions[0]] * 2  # 同 run 两次调用同一会话
+    with provider_session_scope(("owner-a",), first.run_id):
+        assert backend.sessions[0] == request_headers({}, {}, "x-test-session")["x-test-session"]
+    with pytest.raises(ValueError):
+        request_headers({}, {}, "x-test-session")  # run 结束后 ContextVar 已复位
+
+    second_message = store.messages.append(
+        {
+            "thread_id": thread.thread_id,
+            "role": "user",
+            "content": "公司服务器使用 Linux。",
+            "channel": "internal",
+            "metadata": {"session_id": "session-1", "request_id": "request-2", "task_id": "task-1", "run_id": "run-1"},
+            "now": 12.0,
+        }
+    )
+    backend.payload = _valid_output(thread.thread_id, second_message.message_id, second_message.content)
+    second = service.run(reason="admin")
+    assert second.status == "succeeded" and second.run_id != first.run_id
+    assert backend.sessions[2] != backend.sessions[0]  # 不同 run 不同会话
+
+    other_store, other_thread, other_message = _conversation(tmp_path / "owner-b")
+    other_backend = _SessionRecordingBackend(
+        _valid_output(other_thread.thread_id, other_message.message_id, other_message.content)
+    )
+    other = _service(tmp_path / "owner-b", other_backend, other_store, owner_id="owner-b").run(reason="admin")
+    assert other.status == "succeeded"
+    with provider_session_scope(("owner-b",), other.run_id):
+        assert other_backend.sessions == [request_headers({}, {}, "x-test-session")["x-test-session"]]
+    with provider_session_scope(("owner-a",), other.run_id):
+        assert other_backend.sessions[0] != request_headers({}, {}, "x-test-session")["x-test-session"]  # owner 参与派生
 
 
 def test_curator_rejects_model_claim_of_host_owned_review_origin(tmp_path: Path) -> None:
@@ -1833,19 +1987,23 @@ def test_curator_task_alias_replay_does_not_duplicate_occurrence(tmp_path: Path)
 # LLM: 通用失败码（如 CURATOR_MODEL_FAILED）必须能带出机器可判定的形状，否则真机故障无法定位；
 # 同时不得落供应商异常正文。这条锁住诊断字段的存在与边界。
 # 函数用途: 验证失败诊断只含异常类名与（可选）HTTP 状态码。
-def test_curator_failure_diagnostic_records_shape_not_provider_text() -> None:
+def test_curator_failure_diagnostic_records_shape_and_redacted_message() -> None:
     import agent_py_agent.agent.memory_store.curator as curator_module
     from agent_py_agent.agent.memory_store.curator import _failure_diagnostic
 
     class _Rejected(RuntimeError):
         http_status = 429
 
-    diagnostic = _failure_diagnostic(_Rejected("provider said: secret-token-xyz"))
-    assert diagnostic == {"error_type": "_Rejected", "provider_http_status": 429}
-    assert "secret-token-xyz" not in json.dumps(diagnostic, ensure_ascii=False)
+    # 正文经共用日志脱敏后落账:已知密钥形状被遮蔽,可归因的其余文字保留。
+    diagnostic = _failure_diagnostic(_Rejected("provider said: sk-abcdefghijklmnopqrstuvwxyz"))
+    assert diagnostic["error_type"] == "_Rejected"
+    assert diagnostic["provider_http_status"] == 429
+    assert "sk-abcdefghijklmnopqrstuvwxyz" not in json.dumps(diagnostic, ensure_ascii=False)
+    assert str(diagnostic["message"]).startswith("provider said: ")
 
-    plain = _failure_diagnostic(RuntimeError("boom"))
-    assert plain == {"error_type": "RuntimeError"}
+    assert _failure_diagnostic(RuntimeError("boom")) == {"error_type": "RuntimeError", "message": "boom"}
+    assert _failure_diagnostic(RuntimeError("")) == {"error_type": "RuntimeError"}
+    assert len(str(_failure_diagnostic(RuntimeError("x" * 500))["message"])) == 200
 
     # 诊断只能走既有 warnings 字段：新增 dataclass 字段会让 from_record 的严格 v2 键集校验
     # 拒绝所有历史行，把失败记账变成 CURATOR_RUN_AUDIT_FAILED（真机踩过）。
@@ -1855,3 +2013,8 @@ def test_curator_failure_diagnostic_records_shape_not_provider_text() -> None:
     encoded = curator_module._failure_diagnostic_warning(diagnostic)
     assert encoded.startswith("failure_diagnostic=")
     assert json.loads(encoded.split("=", 1)[1])["provider_http_status"] == 429
+    # 200 字正文经 JSON 转义可能突破单条 warning 300 字符上限:只缩短 message,整条仍可解析,
+    # 否则失败记账本身会变成 CURATOR_RUN_AUDIT_FAILED。
+    quoted = curator_module._failure_diagnostic_warning(_failure_diagnostic(RuntimeError('"' * 200)))
+    assert len(quoted) <= 300
+    assert json.loads(quoted.split("=", 1)[1])["error_type"] == "RuntimeError"

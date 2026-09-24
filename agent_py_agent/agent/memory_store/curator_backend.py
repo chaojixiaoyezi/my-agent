@@ -52,6 +52,16 @@ class CuratorModelStillRunningError(CuratorModelTimeoutError):
     pass
 
 
+# LLM: 供应商调用阶段抛出的 ValueError/TypeError(如请求头缺宿主会话、后端契约不符)与宿主解析
+# parse_curator_extraction 的失败共用 Python 类型,只有"发生在哪个阶段"这个结构化事实能区分二者。
+# extract_with_retries 用本类型标记前者,curator._failure_code 据此归 CURATOR_MODEL_FAILED;
+# 超时/still-running 与其它供应商异常类型原样抛出,既有分类不变。真机 2026-09-13 起主 owner
+# 就是因为这类失败被记成 CURATOR_SCHEMA_INVALID 而无法归因。
+# 类用途: 标记"供应商调用没跑出来"的非超时失败,避免它被误记成 schema 错误。
+class CuratorModelCallError(RuntimeError):
+    pass
+
+
 # LLM: Curator 原合同按同一个 backend 实例隔离；强引用防对象 ID 复用，通用原语自身不推断服务身份。
 # 类用途: 把 Curator 已有的对象身份规则交给通用资源登记表，不维护第二份 inflight 集合。
 @dataclass(frozen=True, eq=False, repr=False)
@@ -205,6 +215,8 @@ def extraction_budget_seconds(config: MemoryCuratorConfig) -> int:
 
 
 # LLM: 超时只有在旧调用退出后才能缩批重试；仍存活的后端线程禁止重叠调用，游标/证据合同不变。
+# 供应商调用阶段的 ValueError/TypeError 出口前包成 CuratorModelCallError(阶段事实),解析失败原样冒出;
+# 宿主会话头由调用方(curator._execute)在外层绑定,本函数不生成会话身份。
 # 函数用途: 调用后台模型并返回实际使用的输入快照与严格解析的 CuratorExtraction。
 def extract_with_retries(
     backend: object,
@@ -301,6 +313,9 @@ def extract_with_retries(
             _attempt_shape_log_line(shapes),
         )
     assert last_error is not None
+    if isinstance(last_error, (ValueError, TypeError)):
+        # 阶段事实:这个异常来自供应商调用(上面的 try),不是宿主解析;保留原异常链供诊断。
+        raise CuratorModelCallError(str(last_error)) from last_error
     raise last_error
 
 
@@ -415,6 +430,7 @@ def _enum_values(values: Collection[str]) -> str:
 __all__ = [
     "CuratorExtractionAttempt",
     "CuratorModelAttempt",
+    "CuratorModelCallError",
     "CuratorModelTimeoutError",
     "adaptive_timeout_seconds",
     "attempt_shape_payload",

@@ -2570,6 +2570,12 @@ Audit/摄取不列入本轮新增验收；共享模块既有回归按改动影�
   优先、退出释放、pending/游标保留、pre_compact 屏障、request-local 预算、取消连接及旧请求未退出不重试。
   真机只开一路本地慢模型且不派子代理；官网正常模型可并行对照。缓存核对需同时查推理服务槽位日志，
   外部请求/代理别名和缓存容量不能从 TUI 百分比推断。
+- 后台策展会话头与失败分类：`test_memory_curator_v2.py` 用真实 OpenAI/Anthropic 兼容后端加本地 HTTP
+  回放，验证策展 run 自带非空会话头、值只由 owner_id + run_id 派生、同 run 重试同值、不同 run/owner
+  不同值、run 结束 ContextVar 复位；去掉 `_execute` 的会话绑定时这三条用例必须失败。
+  `test_curator_timeout_observability.py`、`test_curator_timeout_adaptive.py` 锁定供应商调用阶段的
+  ValueError 归 `CURATOR_MODEL_FAILED`（结果、state.json、失败诊断一致），解析失败仍是
+  `CURATOR_SCHEMA_INVALID`；失败诊断附脱敏后 ≤200 字正文，整条 warning ≤300 字符且可解析。
 
 - 状态读取：`test_agent_tree_model_view.py`、`test_agent_tree_three_layer_status.py`、`test_orchestration_tools.py`，
   覆盖规范原状态、scope 裁决、恢复路径不外泄、实际报告与缺失报告、八节点直接可读及大树省略计数；

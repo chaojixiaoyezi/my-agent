@@ -219,7 +219,7 @@ def test_failed_run_records_per_attempt_shape_in_warnings(tmp_path: Path) -> Non
     assert {row["outcome"] for row in shapes} == {"ProviderTimeoutError"}
     assert len(records[0].warnings) == len(shapes) + 1  # + 既有 failure_diagnostic=
     assert records[0].warnings[-1] == (
-        'failure_diagnostic={"error_type":"ProviderTimeoutError"}'
+        'failure_diagnostic={"error_type":"ProviderTimeoutError","message":"idle"}'
     )
     # prompt 逐次变小(缩批真的发生了),第一次未缩批、之后都标 shrunk=True。
     assert [row["prompt_chars"] for row in shapes] == sorted(
@@ -257,24 +257,31 @@ def test_successful_run_keeps_existing_warning_shape(tmp_path: Path) -> None:
     assert _parse_attempt_warnings(service.run_log.list()[0].warnings) == []
 
 
-# 函数用途: (3) 非超时失败(同输入重试)同样留下逐次形状,并且每次 prompt 一样大、shrunk 全 False。
+# 函数用途: (3) 非超时失败(同输入重试)同样留下逐次形状,并且每次 prompt 一样大、shrunk 全 False;
+# 供应商调用阶段抛出的 ValueError(真机 2026-09-13 起:请求头缺宿主会话)按阶段归 CURATOR_MODEL_FAILED,
+# 结果、state.json 与失败诊断三处一致,不再冒充 schema 错误;诊断附脱敏正文以便归因。
 def test_non_timeout_failure_records_identical_prompt_shapes(tmp_path: Path) -> None:
     store, _thread, _messages = _conversation(tmp_path, 4)
-    backend = _ScriptedBackend([ValueError("CURATOR_SCHEMA_INVALID")])
+    backend = _ScriptedBackend([ValueError("此服务商需要会话编号，但当前请求没有绑定宿主会话。")])
     service = _service(tmp_path, backend, store)
 
     result = service.run(reason="admin")
 
     assert result.status == "failed"
-    assert result.failure_code == "CURATOR_SCHEMA_INVALID"
+    assert result.failure_code == "CURATOR_MODEL_FAILED"
+    assert service.state_store.load().last_failure_code == "CURATOR_MODEL_FAILED"
     assert len(backend.prompts) == 3  # max_retries + 1
     records = service.run_log.list()
     shapes = _parse_attempt_warnings(records[0].warnings)
 
+    assert records[0].failure_code == "CURATOR_MODEL_FAILED"
     assert [row["outcome"] for row in shapes] == ["ValueError"] * 3
     assert len({row["prompt_chars"] for row in shapes}) == 1
     assert {row["shrunk"] for row in shapes} == {False}
-    assert records[0].warnings[-1] == 'failure_diagnostic={"error_type":"ValueError"}'
+    assert records[0].warnings[-1] == (
+        'failure_diagnostic={"error_type":"CuratorModelCallError",'
+        '"message":"此服务商需要会话编号，但当前请求没有绑定宿主会话。"}'
+    )
 
 
 # 函数用途: (4) 形状必须带出 extract_with_retries 的成功调用(缩批后成功也能看出缩了几次)。
@@ -376,7 +383,7 @@ def test_attempt_shapes_track_actual_calls_only(tmp_path: Path) -> None:
     assert len(shapes) == len(backend.prompts)
     assert len(shapes) > 0
     assert records[0].warnings[-1] == (
-        'failure_diagnostic={"error_type":"ProviderTimeoutError"}'
+        'failure_diagnostic={"error_type":"ProviderTimeoutError","message":"idle"}'
     )
 
 

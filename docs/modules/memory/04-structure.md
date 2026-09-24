@@ -138,6 +138,16 @@ system/tools/messages 前缀，超窗时按原分段合同覆盖完整历史。�
 http 事件、takeover readiness、CLI resume、identity/daily memory。会按行重写文件的路径（审计清理、
 task workspace 摘要同步）同样改用它，避免"读时切开、写回落成 LF"的静默改写。
 
+## R265 策展会话头与失败阶段的边界
+
+- 后台提取的宿主会话在 `curator._execute` 用 `backends/provider_headers.provider_session_scope((owner_id,), run_id)`
+  包住整次 `extract_with_retries`：值只由 owner_id + run_id 派生，同 run 的同输入重试/缩批同值，退出即复位；
+  不借前台线程会话，也不在 `curator_backend` 里另造会话身份。`bounded_call` 的 `copy_context` 负责把它带进
+  供应商调用线程；改动任何一处都要跑 `test_memory_curator_v2.py` 的会话头用例。
+- 失败分类只读异常类型与阶段事实：`extract_with_retries` 把供应商调用阶段的 ValueError/TypeError 包成
+  `CuratorModelCallError`（`__cause__` 保留原异常）→ `CURATOR_MODEL_FAILED`；裸 ValueError 只剩宿主解析/校验
+  失败 → `CURATOR_SCHEMA_INVALID`。超时、still-running 与其它供应商异常类型原样抛出，既有分类不变。
+
 ## R264 策展尝试形状的边界
 
 - `curator_model_attempt={...}` 是**诊断投影**，只含计数/耗时/异常类名，权威仍是 `failure_code` 与事务状态；
@@ -161,7 +171,9 @@ task workspace 摘要同步）同样改用它，避免"读时切开、写回落�
 ## R257 策展失败账的字段边界
 - `CuratorRunRecord` 的字段集是**严格 v2 契约**：`from_record` 要求键集合与 dataclass 完全一致，
   因此**绝不允许**为了一时诊断新增字段（会让所有历史行 fail-closed；真机踩过 `CURATOR_RUN_AUDIT_FAILED`）。
-  失败诊断走既有 `warnings`，格式固定为 `failure_diagnostic=` + 紧凑 JSON（sort_keys）。
+  失败诊断走既有 `warnings`，格式固定为 `failure_diagnostic=` + 紧凑 JSON（sort_keys）；键只有
+  `error_type`、可选 `provider_http_status`、可选 `message`（`str(exc)` 经 `common/log_redaction`
+  脱敏后的前 200 字），超过单条 300 字符时只缩短 `message`，绝不裁 JSON 本体。请求体、响应体、记忆内容仍不入账。
 
 - `CuratorRunRecord.failure_diagnostic` 是**诊断投影**，不是失败权威：权威仍是 `failure_code` +
   attempt/lease 状态。字段只允许机器可判定形状（异常类名、可选 HTTP 状态码），

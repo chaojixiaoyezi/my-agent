@@ -82,6 +82,11 @@ lesson/HOT、截断、缺版本或 audit 正文覆盖未知时保留原批次并
 - 本地 Curator 的有界模型等待已迁入共用 `backends/bounded_call.py`，删除旧线程/队列副本；
   到期不再额外等待清理，准确 worker 或 cleanup 未退出时保持 still-running，禁止重叠重试。
   原缩批、游标与记忆提交规则不变；与取消/HTTP/准入联合 315 项通过，尚未实际 TUI 验收或部署。
+- 后台整理的模型调用现在自带宿主会话：`_execute` 按 owner_id + run_id 走与前台同一 `provider_session_scope`
+  包住整次提取，同 run 重试/缩批同值、run 结束复位，不冒用前台线程会话。此前要求会话头的服务商在发请求前
+  就抛 ValueError，主 owner 自 2026-09-13 起零提取，且被记成 `CURATOR_SCHEMA_INVALID`。供应商调用阶段的
+  ValueError/TypeError 现由 `CuratorModelCallError` 标记阶段并归 `CURATOR_MODEL_FAILED`，解析失败仍是
+  `CURATOR_SCHEMA_INVALID`；失败诊断附脱敏截断正文。本地三文件 76 项通过，真机 Gateway 尚未部署复验。
 - 存储组合后，Curator 通过 `threads.list_report` 和 `messages.after_report` 读取；
   Promotion 通过 `messages.by_id_report` 核验精确消息。原游标、坏账处理和证据匹配不变，不保留旧方法回退。
 - 普通后台策展让出正在工作的同模型端点，pending 和记忆游标保留；pre_compact 屏障不被延后。
