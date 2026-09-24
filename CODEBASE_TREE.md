@@ -593,6 +593,14 @@ scripts/
 `-- reproject_model_usage.py           # 历史用量账本的只读重算投影（exact/partial/incomplete，不覆盖原账本）
 plugins/
 |-- sdk/pyproject.toml                  # 独立 SDK 的唯一发行版本及标准构建声明
+|-- activity-line/                     # 自有纯展示插件：面板显示运行状态、活动与耗时，无工具、无依赖
+|   |-- README.md                      # 构建与面板用法
+|   |-- pyproject.toml                 # 插件发行身份，无运行依赖
+|   `-- src/activity_line/
+|       |-- declaration.json           # 展示动作与 text 面板（activity、run_state 主题）的唯一声明
+|       |-- __init__.py                #
+|       |-- __main__.py                # python -m activity_line 启动 stdio 服务
+|       `-- server.py                  # 握手声明展示能力，只实现只读 my-agent/display.render
 `-- workspace-peek/                    # 自有文件预览插件；不依赖完整宿主运行包
     |-- README.md                      # 离线构建、命令示例与当前验收边界
     |-- pyproject.toml                 # 插件发行身份及精确 SDK 依赖
