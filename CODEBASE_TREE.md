@@ -732,6 +732,7 @@ agent_py_agent/
 |   |-- test_plugin_removal.py        # 管理卸载、权限、旧请求重放、准备未退与持久成功后包回收
 |   |-- test_plugin_skills.py         # 随包 Skill：v3 描述往返与校验、只取已启用插件、最低优先级、停用即消失
 |   |-- test_plugin_host_api.py       # 宿主只读 API：令牌随激活失效、主题白名单、线程公开字段、v4 描述
+|   |-- test_harness_console_package.py # harness-console 实际包：v4 描述、假宿主 API、网页令牌/cookie、失效与不可用、桌面窗口回收
 |   |-- test_plugin_removal_store.py  # 安装删除 CAS、提交故障、符号链接与并发重新安装隔离
 |   |-- test_plugin_registry.py       # 共享视图、可信 owner 注入、关闭登记交错与未知保留
 |   |-- test_process_cleanup_evidence.py # 完整清理证明、自然终态保持、单调合并与 redo 恢复
@@ -897,6 +898,19 @@ plugins/
 |       |-- declarations.py            # 读取同源声明并验证平面参数和设置
 |       |-- operations.py              # 保存、列出、恢复流程；恢复先核对 --expect 再经写入上下文写回
 |       `-- snapshots.py               # 工作区 no-follow 读取与哈希，插件数据目录内的快照存取
+|-- harness-console/                   # 自有界面型插件：agent 工作台网页/桌面窗口，经宿主只读 API（v4 host_api=read）展示运行状态
+|   |-- README.md                      # 构建、open/desktop/stop 中文用法与安全边界（宿主令牌只在服务端、回环、会话令牌）
+|   |-- pyproject.toml                 # 插件发行身份，无 SDK 与第三方依赖
+|   `-- src/harness_console/
+|       |-- declaration.json           # 动作、工具（三个写类）、设置与 host_api 名单的唯一声明
+|       |-- __init__.py                # 独立插件包入口
+|       |-- __main__.py                # python -m harness_console 启动 stdio 服务
+|       |-- server.py                  # MCP 握手与分派，服务复用、桌面窗口启动/回退、进程退出时关闭服务与窗口
+|       |-- declarations.py            # 读取同源声明、验证平面参数和设置、业务错误
+|       |-- host.py                    # 宿主只读 API 客户端（令牌头、1 秒缓存、403 失效记忆）与 /api/state 白名单整理
+|       |-- console.py                 # ThreadingHTTPServer 服务：会话令牌/cookie、只 GET、首页与状态 API、空闲自停
+|       |-- page.py                    # 工作台单页：内联 CSS/JS、textContent 渲染、轮询与失效停止
+|       `-- window.py                  # Chrome/Chromium 探测、--app 独立窗口子进程、默认浏览器打开与窗口回收
 |-- web-board/                         # 自有网页界面型插件：插件进程内起只绑 127.0.0.1 的只读网页浏览指定目录
 |   |-- README.md                      # 构建、serve/status/stop 用法与安全边界（回环、令牌、只读、限定目录）
 |   |-- pyproject.toml                 # 插件发行身份及精确 SDK 依赖
@@ -981,6 +995,7 @@ docs/
 - `plugins/design-lite/`：首个带随包 Skill（包描述 v3）的自有插件，生成与修改 HTML 设计文件都走写入上下文；`agent_py_agent/tests/test_design_lite_package.py` 为其实际包、Skill 打包与 MCP 进程组件验收。
 - `plugins/browser-lite/`：首个驱动外部进程的自有插件，浏览器不随包分发，专属 profile 在插件数据目录，地址经读取上下文与 allowed_hosts 双重裁决；`agent_py_agent/tests/test_browser_lite_package.py` 为其实际包、帧编解码与真实浏览器组件验收。
 - `plugins/savepoint-lite/`：首个写工作区的自有插件，快照只存宿主插件数据目录，恢复走写入上下文；`agent_py_agent/tests/test_savepoint_lite_package.py` 为其实际包与 MCP 进程组件验收。
+- `plugins/harness-console/`：首个界面型插件（宿主只读 API 样本），网页与桌面窗口共用一个只绑回环的服务，宿主令牌只留在插件服务端；`agent_py_agent/tests/test_harness_console_package.py` 为其实际包、假宿主 API 与 MCP 进程、真实 HTTP 访问的组件验收。
 - `plugins/web-board/`：网页界面型插件，插件进程内只绑回环的只读网页，按 serve 时冻结的读取上下文和 no-follow 读取限定目录；`agent_py_agent/tests/test_web_board_package.py` 为其实际包与 MCP 进程、真实 HTTP 访问的组件验收。
 - `agent_py_agent/tests/test_plugin_api_build.py`、`agent_py_agent/tests/test_workspace_peek_package.py`：实际标准包、独立环境和原 MCP/宿主管理链的开发验证，不代替真实 TUI。
 

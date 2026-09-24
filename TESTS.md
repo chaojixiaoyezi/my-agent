@@ -537,6 +537,7 @@ OAuth 传输、采样和模型菜单回归。覆盖保存无网络、公开字�
 ## 第 10 步第三批插件（本地，待发布）
 
 - `test_plugin_host_api.py`：宿主 API 令牌只在 Gateway 服务时发放，换代/停用/Gateway 停止即失效且不复活；主题白名单外拒绝；线程只给公开字段；v4 描述往返与校验。
+- `test_harness_console_package.py`（5 项）：从源码构建 harness-console 包，确认包描述 v4、`host_api == ["read"]`、三个工具均为 mutating；测试内假宿主 API（校验 `X-Plugin-Host-Token`，返回固定 threads/activity/plugins/gateway）经环境变量注入真实 MCP 进程：open（不开浏览器）→ 读 0600 的 last-link.txt → 无/错令牌 403 → 带令牌首页 200 并下发 HttpOnly+SameSite=Strict cookie、页面无外部资源、CSP 只放行 self 与内联 → `/api/state` 只认 cookie，返回白名单整理数据（默认选最近线程、切换线程、未声明字段不透传）且不含宿主令牌、1 秒缓存不重复打宿主 → POST/HEAD 405、再次 open 复用 → 假宿主改 403 后报"插件已停用或令牌失效" → stop 后端口连不上；缺宿主 API 环境变量时报"宿主 API 不可用"；desktop 用记录 argv 的假浏览器断言 `--app=<带令牌链接>` 与数据目录下独立 `app-profile`、再次 desktop 复用窗口、stop 与插件进程退出后假窗口进程都被结束；坏设置启动失败。
 
 - `test_plugin_skills.py::test_plugin_tools_carry_plugin_identity_and_hidden_plugins_are_named`：插件工具说明含插件 ID 与简介、关键词含 ID 拆分词；折叠提示在短名单为空时仍按插件列出被折叠插件，非插件工具不列。
 
