@@ -8,6 +8,7 @@
 |-- STATUS.md                            # 当前能力、开放问题与证据边界
 |-- DESIGN_LEDGER.md                     # 当前架构决策及模块设计导航
 |-- TESTS.md                             # 开发测试、真实 TUI 与发布 gate
+|-- docs/tasks/DECISION_MODEL_TAKEOVER_HANDOFF.md # 决策模型完整Goal、暂停状态、实际证据和接手范围
 |-- docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md # 决策容量、完整请求投影与 Compact 的源码证据和分片交接
 |-- docs/tasks/DECISION_MODEL_CHILD_COMPACT_HANDOFF.md # child完整恢复共享实现、验收与后台后续边界交接
 |-- docs/tasks/DECISION_MODEL_BACKGROUND_PREPARATION_HANDOFF.md # 后台一次准备、范围冻结与原Compact材料丢失复现交接
@@ -1104,6 +1105,7 @@ docs/
 - `agent_py_agent/agent/capability/decision_candidates.py`、`decision_recommendation.py`：原授权能力候选与单工作片推荐消费者；一次调用、旧建议复核、按需展示，原Registry/Skill快照及搜索执行仍唯一。
 - `docs/tasks/DECISION_MODEL_P2_SUBAGENT_HANDOFF.md`：子代理选择生产接线、联合验证和完整窗口待验边界。
 - `docs/tasks/DECISION_MODEL_P3_RECALL_HANDOFF.md`：记忆排序、来源撤销、原本轮复用及本地验证交接。
+- `docs/tasks/DECISION_MODEL_TAKEOVER_HANDOFF.md`：暂停后交由新agent的完整P1—P5目标、进度快照、最新证据、共享所有权及下一步。
 - `docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md`：完整请求、创建前容量与 Compact 展示面的实际诊断和分工边界。
 - `docs/tasks/DECISION_MODEL_REAL_VALIDATION.md`：隔离 Jev、官方 MiniMax 与 TUI 的真实调用、失败和验收证据。
 
