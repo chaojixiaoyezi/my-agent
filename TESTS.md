@@ -555,6 +555,18 @@ OAuth 传输、采样和模型菜单回归。覆盖保存无网络、公开字�
 - 已知缺口：纯模型思考阶段面板显示空闲，见 [插件展示](docs/design/PLUGIN_DISPLAY.md#已知缺口)。
 - 断连重连：本轮样本中模型改用后台终端并误用参数，回合在断连前已按"结果无法确认"结束，未构成有效断连样本；断连/重连/停止仍以 TUI232 为准。
 
+## 第 10 步第二、三批真实 TUI（本机 6767bb4ed→4b8cdebbd，.10 同版；模型 MiniMax-M2.7）
+
+- worktable-lite（本机）：面板列出最近会话，编号、顺序、相对时间和"当前"标记与会话记录逐项一致（246 个会话、1 个损坏记录被跳过）。
+- status-pet（本机）：中文任务期间 空闲 → 正在工作（显示当前工具/思考中）→ 空闲；停用 → `/plugins configure --file`（style=whale、name=蓝蓝）→ 启用后面板变为鲸鱼"蓝蓝"。
+- genui-lite（本机）：中文请求依次调用 table 与 export，生成的 sales.html 标题正确、无脚本、无外部资源、权限 644，表内 10 行与输入逐项一致、极值（10月最高、2月最低）正确。随包 Skill：启用时 `skill_search` 找到 `plugin:genui-lite:genui-table` 并读取；停用后只读探针与模型的 `skill_search` 都找不到（matches 为空）。
+- design-lite（本机）：安装后中文请求调用 create 生成带 data-dl 标记与 #2f6feb 的海报；再次中文请求调用 edit，只改动两处标题行，其余字节不变。首轮失败原因为该包未安装成功（安装命令被模型选择弹窗吞掉），不是产品缺陷；补做的通用改进见下。
+- image-text（本机）：显式命令 OCR 读出 "HELLO FROM / IMAGE TEXT / PLUGIN READ"，Gateway 环境找到 tesseract；（.10）无 tesseract 时明确返回 OCR_UNAVAILABLE 并附图片元数据。
+- browser-lite（本机）：显式命令逐条调用时第二步起 NO_PAGE——显式命令每次是一次性插件连接，命令结束浏览器随之回收，有状态插件不能跨显式命令串联（记录为显式命令语义边界）；改用一次中文请求由模型在同一连接内完成 open→fill→click→read，页面显示"已提交：李雷/B"。（.10）无浏览器时审批后明确返回 BROWSER_UNAVAILABLE。
+- web-board（本机）：中文请求开服务，无令牌 403、越界 403；发现宿主会从工具结果中脱敏 token 参数，模型只能给出"<令牌>"的链接，改为插件把完整链接写入 0600 私有文件并用默认浏览器打开（0.1.1）。
+- desktop-lite：组件测试中真实 macOS 调用 osascript/pbcopy/open 退出码 0；（.10）无桌面时审批后明确返回 DESKTOP_UNAVAILABLE。
+- 通用改进（4b8cdebbd）：插件工具说明写成"插件 <ID>（<简介>）"、ID 进入检索关键词、`hints.provider_id=plugin:<ID>`；折叠提示按插件列出被折叠插件。
+
 ## 第 10 步第三批插件（本地，待发布）
 
 - `test_plugin_host_api.py`：宿主 API 令牌只在 Gateway 服务时发放，换代/停用/Gateway 停止即失效且不复活；主题白名单外拒绝；线程只给公开字段；v4 描述往返与校验。
