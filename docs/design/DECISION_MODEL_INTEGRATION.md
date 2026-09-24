@@ -1,6 +1,6 @@
 # 可选决策模型接入与并行实施计划
 
-状态：用户已授权 P1—P5 完整实施；P1—P4 有多项本地接线，P5-A/B/C/D 有首片，E1 只有默认关闭的授权与预算原语。日期：2026-09-22。最初核对基线：9141dad9c。
+状态：用户已授权 P1—P5 完整实施；P1—P4 有多项本地接线，P5-A/B/C/D 有首片，E1 有默认关闭的授权与预算原语，并在本地分支实现了 `/experiment` 授权入口、经验输入上界与发送硬门（2026-09-24，待审）。日期：2026-09-22。最初核对基线：9141dad9c。
 完整 P1—P5 完成条件与逐项进度见[执行 Goal](../tasks/DECISION_MODEL_GOAL.md)，不得在完成 P1 后关闭整个 Goal。
 本地配置、协议和假服务链已接通；隔离环境已做少量真实 Jev 与 Gateway TUI 验收，尚未发布或改日常 Gateway。
 计划在独立 worktree 保存；另一任务正在使用的工作区及其未提交修改不纳入本轮修改。
@@ -415,6 +415,19 @@ P5-C 规划首片只在当前主代理读取已有多项 Todo 时追加一个 ex
 自动试验将来若需恢复原设置，`patch` 后另发一次 `reset` 会暴露中间值，也可能在两次写入之间覆盖用户的新修改。原设置服务增加仅供宿主使用的 `restore` 操作：一份完整 owner/thread `expected_revision`、一组 `set` 原覆盖及一组 `unset` 原本未覆盖的字段，在原 owner→thread 锁序内一次校验、一次提交、一次正式读回；成功版本只前进一次。`set` 仍按原字段范围和模型引用校验，`unset` 只清已登记字段，交集或空操作拒绝。任何用户或其他任务先行写入都使旧版本冲突，本次恢复不写文件；已删或撤销的模型引用不被旧快照复活。
 
 这只是可供未来实验使用的恢复原语，不等于已有自主试验、实验授权、请求前预算、收益判断或自动回滚策略。未来实验必须保存原操作回执与精确前值，且不能回滚已经执行的业务副作用。用户授予一次范围和预算后，范围内的试验、应用与失败回退由宿主自动执行，不逐步询问用户。
+
+### P5-E1 有界自测：授权入口、经验输入上界与发送硬门（2026-09-24，本地实施待审）
+
+用户于 2026-09-24 批准接受**经验（非供应商保证）**的输入上界，要求明确标注。实现分支 `claude/decision-experiment-send-gate`；`experiment_enabled` 默认仍关闭，首次真实授权发送尚未进行。
+
+- **授权入口**：`/experiment observe skill_tool <时长> <HTTP次数> <输入token上限> <任务>` 与 `/audit 名称 prepare` 共用任务命令机制；HTTP `/ask` 丢弃客户端 `system_task`，只从已鉴权正文重推并冻结进排队请求，模型只见任务正文。只开放 `observe` 与已标定的 `skill_tool`。主轮在 `_bind_main_agent_turn_params` 发布 run/attempt 后、首个模型调用前，由 Gateway 写入器在同一 `GatewayActiveTurnTransition` 内写 `experiment_grant=granting`，以 `HostCommandIdentity`（owner、请求 user_id、channel、thread、request_id）调用 `authorize_decision_experiment`，写回 `granted(authorization_id)` 或 `rejected(code)`；失败只提示用户，不阻断业务。回执存在即不再授权；Compact 再入换 attempt 得 `experiment_identity_changed`，重启换账本代次得 `experiment_ledger_changed`。模型只有 `user_config` 读/撤销，不能授权。
+- **信封 v2**：必带 `input_bound_policy="empirical:jev_wire_bytes.v1"`，这是用户接受经验上界的结构化记录；v1 与未知口径可读可撤销，但准入分别返回 `input_bound_policy_missing` / `input_bound_policy_unsupported`，永不发送。
+- **经验上界 C**：`jev_empirical_input_bound()`（Jev wire 适配器）以最终 wire 字节 B、题数 Q、state wire 字节 S 计算 `C = ceil(B/2) + 256×Q + 1024`；只在 skill_tool、Q≤64、S≤4096、C≤57,600（0.9×64k）内使用，越界 `input_bound_out_of_calibration`，不预留不发送。标定：4 次真实 64,921–65,063 字节/27 题请求计费 17,352–17,383（约 2.3 倍余量），官方示例 173 字节/1 题计费 296（C=1,367）。常量是版本化代码方法，不是配置。普通请求与上界共用唯一编码器 `gateway_request_body()`，普通字节不变。
+- **原账**：`reserve_input_budget` 只接受 `InputTokenBound(kind="empirical", …)` 并同时签发发送绑定；调用记录存 `input_bound`，预算快照存 `input_bound_kind`，调用的 `input_tokens` 仍是估算。
+- **发送硬门**：`GatewayRequest.send_permit` 存在时强制零重试、禁重定向、有期限；`_gateway_request_attempt` 在最终 `req.data` 生成与期限复核之后、`started` 遥测与任何 DNS/连接之前调用 `admit`，不包 try/except。许可按“静态绑定→中断/设置撤销/期限→复读设置重跑准入并比对策略与当前连接代次（不复用把 off 当关闭的 `_stale`）→原账锁内单次消费”复核；拒绝抛 `ProviderSendRefused`，决策服务映射为 `send_refused:<code>`，不触发连接退避。
+- **结算**：终态写入后结算。成功按 provider 实际输入扣减并记比例（>0.8 仅警告，>C 关闭为 `input_bound_violated`）；许可未消费且零 HTTP 记 `refused_before_send` 并以 `send_refused` 关闭，不退款；有 HTTP 却无已消费许可记 `gate_bypassed` 并关闭；其余保留一次 HTTP 与整个 C，关闭为 `usage_unknown`。迟到 HTTP 只追加。实验结果恒为 observe（`may_apply=False`），只在该点普通模式为 off 时运行，只写 finding 与能力推荐观测（mode=observe、adopted=false），不改变模型可见输入。
+
+边界：经验上界不是供应商保证，只覆盖已标定的 skill_tool 形态；本地 TUI 直连模式和后台执行没有授权钩子，不会发送实验；本机文件队列属于同一 owner 的可信通道（与 `/audit` 准备轮相同）。细节与验证见 [E1 交接](../tasks/DECISION_MODEL_EXPERIMENT_E1_HANDOFF.md#第二片experiment-授权入口经验输入上界与发送硬门2026-09-24)。
 
 ## 8. 模型窗口、缓存与输入用量
 

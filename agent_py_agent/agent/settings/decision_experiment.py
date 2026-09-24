@@ -11,10 +11,12 @@ from ..contracts.model_call_budget import ModelCallBudgetError, ModelCallInputBu
 from ..runtime_context import current_subagent_attempt_id
 from ..runtime_db.host_commands import HostCommandIdentity
 from .decision_experiment_schema import (
+    EMPIRICAL_INPUT_BOUND_POLICY,
     EXPERIMENT_SCHEMA,
     experiment_identifier,
     experiment_points,
     experiment_positive_count,
+    experiment_task_id,
     validate_experiment_authorization,
 )
 from .decision_settings_schema import (
@@ -26,13 +28,16 @@ from .model_provider_schema import ModelProfileError
 
 
 # LLM: 宿主须先完成明确用户授权和原 operation 幂等；HostCommandIdentity 仅证明字段形状/归属，不证明用户确认或持久提交。
-# 函数用途: 为未来宿主控制入口保存一次有限许可原语；当前没有产品授权入口，普通模型不注册它，保存也不授予联网资格。
+# input_bound_policy 是宿主转交的用户接受口径，只支持 empirical:jev_wire_bytes.v1；v2 信封据此才可能通过发送门。
+# 函数用途: 供 Gateway /experiment 等宿主入口保存一次有限许可；普通模型不注册它，保存本身不发网络。
 def authorize_decision_experiment(context: object, params: object, *, source: HostCommandIdentity,
                                   expected_revision: dict, points: list[str], duration_seconds: float,
-                                  max_http_requests: int, max_input_tokens: int) -> dict:
+                                  max_http_requests: int, max_input_tokens: int, input_bound_policy: str) -> dict:
     from .decision_settings import _check_revision, execute_decision_settings_operation
 
     started, issued = time.monotonic(), time.time()
+    if input_bound_policy != EMPIRICAL_INPUT_BOUND_POLICY:
+        raise ModelProfileError("实验只支持已接受的经验输入上界口径。")
     binding = _host_experiment_binding(context, params, source)
     duration = positive_seconds(duration_seconds)
     allowed_points = experiment_points(points)
@@ -52,7 +57,7 @@ def authorize_decision_experiment(context: object, params: object, *, source: Ho
         "binding": binding, "source": {**asdict(source), "operation_id": source.operation_id},
         "points": allowed_points, "operations": ["observe"], "duration_seconds": duration,
         "issued_at": issued, "expires_at": issued + duration, "max_http_requests": maximum_http,
-        "max_input_tokens": maximum_input,
+        "max_input_tokens": maximum_input, "input_bound_policy": EMPIRICAL_INPUT_BOUND_POLICY,
         "settings_revision": {"owner": expected_revision["owner"], "thread": expected_revision["thread"] + 1},
     })
     limits = ModelCallInputBudget(authorization["authorization_id"], deadline=started + duration,
@@ -70,6 +75,7 @@ def authorize_decision_experiment(context: object, params: object, *, source: Ho
 
 
 # LLM: 只校验宿主传入的原身份，不推断授权；runner 与 params 有冲突就拒绝，不能借普通自然语言或被测材料选目标。
+# 未晋升会话任务的主轮按 RuntimeDB 同一规则以 run 作为 task 身份，准入与预留使用同一投影。
 # 函数用途: 取得明确用户控制来源与当前原任务的绑定，拒绝跨 owner/thread 或缺失 attempt/request。
 def _host_experiment_binding(context: object, params: object, source: HostCommandIdentity) -> dict:
     from ..conversation.decision_service import _identity
@@ -83,7 +89,7 @@ def _host_experiment_binding(context: object, params: object, source: HostComman
     supplied = getattr(params, "attempt_id", "")
     if current and supplied and current != supplied:
         raise DecisionSettingsAccessError("实验授权的运行尝试冲突。")
-    binding = dict(zip(("owner_ref", "thread_id", "run_id", "task_id"), (owner, thread, run, task)))
+    binding = dict(zip(("owner_ref", "thread_id", "run_id", "task_id"), (owner, thread, run, experiment_task_id(task, run))))
     binding.update(attempt_id=current or supplied, request_id=getattr(params, "request_id", ""))
     return {key: experiment_identifier(value) for key, value in binding.items()}
 

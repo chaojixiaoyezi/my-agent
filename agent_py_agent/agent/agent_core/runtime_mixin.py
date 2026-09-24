@@ -623,6 +623,7 @@ def _bind_main_agent_turn_params(
 
 
 # LLM: 顶层运行和所有自动 Compact 续接共用这一返回缝隙；只有最终不再续接时才能投影 standalone 终态。
+# 宿主实验授权钩子只在首个执行片绑定 run/attempt 之后、首次模型调用之前触发一次；Compact 续接不再授权。
 # 函数用途: 执行一次完整请求，必要时续接 Compact，并在真正结束时收尾任务工作区。
 def _run_with_params(agent, user_prompt: str, params: RunParams):
     current_params = run_params_with_request_id(params)
@@ -632,6 +633,7 @@ def _run_with_params(agent, user_prompt: str, params: RunParams):
     # ConversationStore before remember or Curator can claim message evidence.
     current_params = bind_cli_run_conversation(agent, current_params, user_prompt)
     current_params = _bind_main_agent_turn_params(agent, user_prompt, current_params)
+    _grant_host_decision_experiment(agent, current_params)
     result = _run_once_with_params(agent, user_prompt, current_params)
     while True:
         decision = compact_auto_continuation_decision(
@@ -667,6 +669,19 @@ def _run_with_params(agent, user_prompt: str, params: RunParams):
         _settle_main_agent_run(agent, current_params, result)
         persist_cli_run_assistant(agent, current_params, result)
         return result
+
+
+# LLM: 只调用宿主绑定回调自带的 grant_decision_experiment（当前仅 Gateway 请求写入器提供）；参数必须已是精确 run/attempt。
+# 授权失败或回调异常都不能阻断业务回合；中断等 BaseException 照常传播。
+# 函数用途: 在首次模型调用前让宿主按用户显式命令建立有界决策实验授权。
+def _grant_host_decision_experiment(agent, params: RunParams) -> None:
+    grant = getattr(params.conversation_task_binding_callback, "grant_decision_experiment", None)
+    if not callable(grant):
+        return
+    try:
+        grant(agent, params)
+    except Exception:  # noqa: BLE001 实验授权只提示用户，不影响主任务执行
+        logging.getLogger(__name__).warning("决策实验授权回调失败；本轮业务继续，不会发送实验请求。")
 
 
 # LLM: 阶段诊断日志只在 MY_AGENT_STAGE_DEBUG=1 时输出，用于定位 run 内部耗时构成；

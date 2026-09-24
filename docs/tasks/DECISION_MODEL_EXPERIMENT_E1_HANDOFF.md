@@ -2,7 +2,7 @@
 
 - 日期：2026-09-22；分支：`codex/decision-model-integration`。
 - 范围：主线授权的共享 worktree 内，原 decision settings、ModelCallLedger、决策服务、user_config、TUI 能力字段及定向测试。
-- 状态：**本地授权保存/撤销与预留原语已实现；完整 E1 和联网实验未实现、未验收。**
+- 状态：**本地授权保存/撤销与预留原语已实现；完整 E1 和联网实验未实现、未验收。** 2026-09-24 第二片（见文末）已在本地实现 `/experiment` 授权入口、经验输入上界与发送硬门，待审；真实授权发送仍未验收。
 - 没有启动或修改 Gateway，没有请求真实 Jev/MiniMax，没有提交、推送、部署或操作日常用户数据。
 
 ## 解决问题与真实边界
@@ -100,3 +100,80 @@ E2 同样本基线/候选对照、F 可信效果指标与自动应用、G 自动
 
 **建议下一步**：先由一个 owner 设计并证明宿主授权来源和实际发送硬门，再选择有可靠输入上界的后端；期间保留实验联网关闭。
 其他 agent 可并行只读审查 tokenizer/服务端硬额度与原 operation 证据，但不要同时修改 settings、ModelCallLedger 或传输入口。
+
+## 第二片：`/experiment` 授权入口、经验输入上界与发送硬门（2026-09-24）
+
+- 分支：`claude/decision-experiment-send-gate`，基于 origin/main `55f72b40c`，单个本地提交，未推送、未部署。
+- 状态：**已实施，本地定向与严格 gate 通过，待审**。`experiment_enabled` 默认仍关闭；首次真实授权发送尚未进行。
+- 用户于 2026-09-24 批准接受**经验（非供应商保证）**的输入上界，要求处处标注 `empirical`。上一片“拿不到可靠 C 就保持关闭”的前提由这一批准替换为“只在已标定范围内使用经验 C，越界拒绝”。
+- 没有启动 Gateway、没有请求真实 Jev/MiniMax、没有 ssh；测试只连本机临时 HTTP 服务。
+
+### 授权入口
+
+- `/experiment observe skill_tool <时长> <HTTP次数> <输入token上限> <任务>` 与 `/audit 名称 prepare` 共用 `ConversationTaskCommand`：入口生成 `system_task={"kind":"decision_experiment","attributes":{mode,point,duration_seconds,max_http_requests,max_input_tokens}}` 冻结进排队请求，模型只收到任务正文。HTTP `/ask` 原本就丢弃客户端 `system_task`，现只从已鉴权正文重推；非法格式在入口返回用法、不入队。只开放 `observe` 和已标定的 `skill_tool`，时长单位 `s/m/h/d`。
+- 授权时点：`_run_with_params` 在 `_bind_main_agent_turn_params` 发布 run/attempt 后、首个 `_run_once_with_params` 前调用绑定回调的 `grant_decision_experiment`；目前只有 Gateway 的 `GatewayTaskBindingWriter` 提供（新方法，委托新模块 `gateway_parts/request_experiment.py`，`request_binding.py` 未改已有行）。
+- 同一 `GatewayActiveTurnTransition`（phase `experiment_grant`，要求回合 open、未取消、执行代次一致）内：先以原 JSON 原子写 `experiment_grant.status=granting`（已有任何回执即放弃），再以 `HostCommandIdentity(owner, 请求 user_id, metadata.channel, thread, request_id)` 调用 `authorize_decision_experiment`，写回 `granted(authorization_id)` 或 `rejected(code)`，随后经本轮 `on_chunk` 发一行提示。拒绝码只按异常类型给出：`experiment_disabled`、`source_identity_invalid`、`settings_conflict`、`access_denied`、`invalid_identity`、`invalid_request` 或预算原因。失败不阻断业务回合。
+- 重放不再授权（回执已存在，含崩溃遗留的 granting）；Compact 再入换 attempt，旧授权得 `experiment_identity_changed`；重启换账本代次得 `experiment_ledger_changed`。模型仍只有 `user_config` 的读/撤销。
+- 信封升级 `decision_experiment_authorization.v2`，必带 `input_bound_policy="empirical:jev_wire_bytes.v1"`；原语新增必填参数且只接受该值。v1 与未知口径可读、可撤销，准入分别返回 `input_bound_policy_missing` / `input_bound_policy_unsupported`，永不发送。
+- 未晋升会话任务的主轮：授权、准入与预留的 task 身份都按 RuntimeDB 同一规则投影为 run（`experiment_task_id`）。
+
+### 经验输入上界 C 与原账
+
+- `backends/typesafe_decision_wire.py::jev_empirical_input_bound(body, payload, point=)`，方法 `jev_wire_bytes.v1`：B=最终 wire 正文字节，Q=题数，S=state 用同一编码器的字节；`C = ceil(B/2) + 256×Q + 1024`。只在 `skill_tool`、Q≤64、S≤4096、C≤57,600 内有效，否则 `input_bound_out_of_calibration`，不预留、不发送。常量是版本化代码方法，不是配置。
+- 标定事实：4 次真实 64,921–65,063 字节/27 题请求计费 17,352–17,383 输入（C=40,397–40,468，约 2.3 倍余量）；官方示例 173 字节/1 题计费 296（C=1,367）。测试夹具的 60 个中文 Skill 完整请求约 119,585 字节/62 题，C≈76.7k 超出标定，被作为真实越界样本拒绝（中文经 `\uXXXX` 转义约 6 字节/字）。
+- 唯一编码器 `gateway_helpers.gateway_request_body()` 取代 `_urllib_request` 内联的 `json.dumps(payload).encode("utf-8")`，普通请求字节逐字节不变。Jev 后端拆为无网络 `prepare()`（期限、载荷、窗口门、最终字节）与必须携带许可的 `send()`；普通 `decide()` = prepare + 原发送。
+- `InputTokenBound(tokens, kind="empirical", method, body_bytes, questions, state_bytes)`；`reserve_input_budget(params, budget_id=, input_bound=, send_binding=)` 只接受该对象（裸整数 `input_bound_unlabeled`），同时签发 `send_permit=issued` 绑定（方法、端点摘要、正文 sha256、模型、连接版本）。调用 metadata 记 `input_bound`，快照记 `input_bound_kind`；调用的 `input_tokens` 仍是原估算。
+
+### 发送硬门
+
+- `GatewayRequest.send_permit`（默认 None，不进 repr/比较）；有许可时 `validate_request_limits` 要求 `max_retries==0`、`allow_redirects=False`、有 deadline 且许可可调用 `admit`。
+- `_gateway_request_attempt` 在 `req=_urllib_request(request)` 与期限复核之后、`started` 遥测与 `_gateway_urlopen`（任何 DNS/连接）之前调用 `permit.admit(ProviderSendAttempt(method, req.full_url, sha256(req.data), model, attempt))`，不包 try/except。拒绝抛 `backends/provider_send_gate.py::ProviderSendRefused(RuntimeError)`，不属于 `post_json` 会重新包装的异常族。
+- `conversation/decision_send_permit.py::DecisionSendPermit.admit` 顺序：静态绑定（POST、端点、正文摘要、模型、attempt==0）→ 运行态（用户中断仍抛 `InterruptedError`；设置撤销句柄 `settings_changed`；期限 `deadline_exhausted`）→ 在发送线程恢复调用线程的 runner 身份后非阻塞复读设置，经 `experiment_current` 重跑 `experiment_admission`（状态、期限、身份、revision、账本代次、v2 口径）、要求点普通模式仍为 off、比较策略版本与当前 profile 的 `connection_revision`（不复用把 off 当关闭的 `_stale`）→ 原账锁内 `consume_send_permit`（预留仍属本调用且未终结、预算开放未到期、零 HTTP、绑定逐项相等，issued→consumed 单次）。
+- `decision_service` 以 `_route` 区分普通/实验路由，`_invoke` 的失败分类拆到 `_failure_outcome`：`ProviderSendRefused` → `send_refused:<code>`，预算/上界错误 → 原 reason，均不调用 `record_failure`。实验结果 mode 固定 `observe`、`may_apply=False`。
+
+### 结算
+
+- `invoke_decision_model_call` 在终态写入后的 finally 调 `settle_input_budget`：成功（finished、许可已消费、恰好一次 HTTP、provider 报告 input）按实际扣减、释放 C−actual 并记 `input_bound_ratio`，>0.8 只记 `input_bound_ratio_high` 警告，actual>C 沿 E1 关闭为 `input_bound_violated`；许可仍 issued 且零 HTTP 记 `refused_before_send` 并以 `send_refused` 关闭，不退款；有 HTTP 却无已消费许可记 `gate_bypassed` 并关闭；其余（消费后超时/取消/失败、缺 usage、HTTP≠1）保留一次 HTTP 与整个 C、`unknown_usage_calls+1`，以 `usage_unknown` 关闭。迟到 HTTP 只追加，不重开。预留失败或上界越界不产生调用记录。
+- 结算关闭原因覆盖 `active` 与 `revoked`：撤销后被拒的那次显示 `send_refused`，授权信封本身仍是 `revoked`。成功路径不改状态，撤销仍可见。
+
+### 消费者与观测
+
+- `recommend_capabilities` 只在普通阶段无错、`skill_tool` 普通模式为 off、`experiment_available`（普通阶段同次读取得到的零 I/O 提示：能力开或本线程有信封）且无携带展示时进入 `_experiment_observe`；默认关闭不增加读取。`begin_decision_stage(experiment=True)` 只发布普通模式为 off 的授权点。
+- 实验只写 `skill_tool_decision:experiment:<reason|status>` finding，原快照原样返回；rebase 后与主线新增的能力推荐观测合同对齐：真正发起过实验决策时同样附 `observation`（mode=observe、adopted=false、retain_reason=结果码），由宿主写入请求记录。
+
+### 文件归属
+
+| 文件 | 本片内容 |
+| --- | --- |
+| `agent/conversation/control_commands.py`、`agent/command_catalog.py` | `/experiment` 解析、冻结参数严格校验、公共目录条目 |
+| `agent/gateway_parts/request_experiment.py`（新）、`request_binding.py`（仅新方法） | 单次授权、回执与提示 |
+| `agent/agent_core/runtime_mixin.py` | 绑定后、首个模型调用前的授权钩子 |
+| `agent/settings/decision_experiment_schema.py`、`decision_experiment.py` | v2 信封、口径参数、task 投影 |
+| `agent/conversation/decision_experiment.py` | 口径准入、实验点发布、实验路由与在途复核 |
+| `agent/conversation/decision_send_permit.py`（新）、`agent/backends/provider_send_gate.py`（新） | 发送许可与传输层拒绝异常 |
+| `agent/conversation/decision_model_call.py`、`decision_service.py`、`agent/capability/decision_recommendation.py` | 实验调用、映射与只观察消费者 |
+| `agent/backends/gateway_helpers.py`、`gateway_request_limits.py`、`typesafe_decision.py`、`typesafe_decision_wire.py` | 唯一编码器、硬门位置、许可信封约束、prepare/send、经验上界 |
+| `agent/contracts/model_call_budget.py` | 带标签上界、发送绑定、单次消费与结算 |
+| `tests/test_decision_experiment_send_gate.py`（新）、`test_decision_experiment_command.py`（新）及四个扩展测试文件 | 见下 |
+
+以上路径均相对 `agent_py_agent/`。
+
+### 本地验证
+
+- 新增/扩展五文件从干净字节码（`PYTHONDONTWRITEBYTECODE=1`、删除全部 `__pycache__`）200 passed：`test_decision_experiment_send_gate.py` 39（统计 TCP accept：9 类缺授权/缺预算零连接、5 类预留后绕过零连接且预算 `send_refused`、抛错遥测不改变门、默认关闭不建实验阶段零连接、授权单次发送结算与只观察的推荐观测、X=C+1 关闭、挂起超时保留整个 C 且迟到不重开、路由变化零连接、许可静态绑定与运行态顺序、C 的样本余量/单调/越界/边界）、`test_decision_experiment_command.py` 34、`test_model_call_input_budget.py` 38、`test_decision_experiment_authorization.py` 35、`test_gateway_strict_request.py` 54。
+- 定向相关集（grep 触及传输、GatewayRequest 限制、决策服务/调用/实验、预算/账本、handle_ask 命令解析、Audit 准备、命令目录、request_binding、runtime_mixin 的测试文件）118 文件从干净字节码 3421 passed、2 skipped、4 xfailed、1 xpassed（基于 `55f72b40c`）。
+- 变异 36 项全部被杀（首轮 33/34，存活的“许可忽略设置撤销句柄”因设置复读同样拒绝而无可观察差异，已补运行态顺序单测后被杀；rebase 接入能力推荐观测后补 2 项消费者变异，并为“忽略零 I/O 提示”补默认关闭单测）；每项在子进程 `PYTHONDONTWRITEBYTECODE=1` 下运行并按 sha256 原样恢复，结束后删除字节码重跑。清单：去掉硬门、吞掉拒绝、硬门移到遥测之后、去掉许可信封约束、改编码器、去掉正文/端点/重试静态检查、去掉设置复读、忽略撤销句柄、去掉连接版本比较、去掉单次消费、去掉消费时预算状态检查、去掉绑定比较、拒绝后退款、去掉绕过检测、未知结果退款、超上界不关闭、接受裸整数、C 的题系数/取整/题数/state/总量/点位放宽、去掉 v2 口径检查、阶段/路由不要求普通模式 off、拒绝触发退避、实验结果可采用、去掉拒绝错误码、重放再授权、授权移到模型调用之后、入口保留客户端 system_task、实验资格忽略零 I/O 提示、实验结果丢失推荐观测。
+- 严格 gate 见提交说明；线上 CI 不作为验收来源。
+
+### 偏差与边界
+
+- 许可 `admit` 接收单个 `ProviderSendAttempt`（method、url、body_sha256、model、attempt），不是 5 个位置参数：避免新增参数计数发现；事实与顺序同设计。
+- `/experiment` 在入口只接受 `observe` 与 `skill_tool`：其它点没有标定上界和实验消费者，授权也无法发送，提前拒绝更清楚。
+- 结算关闭原因覆盖 `revoked`（设计要求撤销后被拒记 `send_refused`）；成功路径不覆盖。
+- “伪造阶段”在测试中实现为预留后改变阶段身份（attempt），发送门以 `experiment_identity_changed` 拒绝；stage 级伪造在准入/decide 已有 E1 覆盖。
+- 本地直连 TUI 与后台执行没有授权钩子，不会发送实验；本机文件队列与 `/audit` 准备轮同为同一 owner 的可信通道，能直接写 Gateway inbox 的进程可伪造 system_task（与现有任务命令同一信任边界）。
+- 经验上界不是供应商保证，只覆盖已标定的 skill_tool 形态；中文较多或候选较多的请求会因 C 超 57,600 被拒。
+
+### 建议下一步
+
+先由决策线 owner 审阅本分支；合入后在隔离 owner 做首次真实授权发送：开启 `enabled` 与 `experiment_enabled`、`skill_tool` 普通模式 off、`/experiment observe skill_tool 10m 1 50000 <短任务>`，核对请求记录的 `experiment_grant` 与能力推荐观测、原账快照 `charged=provider=X`、`input_bound_ratio`，并保存脱敏样本扩展标定。其他 agent 可并行只读核对更多真实 skill_tool 请求字节与计费以扩展标定范围，但不要同时修改 ModelCallLedger、传输入口或设置信封；E2 同样本对照与 F/G/H 仍未开始。

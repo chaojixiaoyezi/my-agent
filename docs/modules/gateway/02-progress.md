@@ -1,5 +1,7 @@
 # Gateway 维护状态
 
+决策实验授权入口（本地分支 `claude/decision-experiment-send-gate`，待审）：HTTP `/ask` 与文件队列沿 `/audit … prepare` 同一任务命令机制接收 `/experiment observe skill_tool <时长> <HTTP次数> <输入token上限> <任务>`，参数冻结进排队请求的 `system_task`、模型只见任务正文；新增 `request_experiment.py` 在主轮绑定后、首个模型调用前于精确回合锁内写 `experiment_grant` 回执并调用 E1 授权原语，重放/重启不再授权，失败只提示用户、不阻断业务。发送硬门、经验输入上界与结算归决策服务和传输层，详见[E1 交接](../../tasks/DECISION_MODEL_EXPERIMENT_E1_HANDOFF.md#第二片experiment-授权入口经验输入上界与发送硬门2026-09-24)。
+
 能力推荐观测写进请求记录（本地分支 `claude/decision-capability-observation`，待审）：真的发起过能力推荐决策时，结构化观测（码、版本、名称与计数，无正文）经独立 observer 追加到 `capability_presentation_observation.entries`，最多 8 条；与模型观察同一 active-turn 事务，回合终结时照原语义抛中断，其它写盘失败只放弃这一条，内存请求同步更新。原展示回调、已有键不变。
 
 Gateway 消息文件流式读取（本地分支 `claude/decision-gateway-message-reads`，待审）：建索引、近期产物、追加与补写去重不再按行数整块物化尾部，改为与原实现逐项等价的字节有界流式读取；4.2M 字符夹具上准备期峰值 21.33→0.82MB、全程 22.65→10.03MB，每次请求三次读取约 122→19ms。详见[容量审计](../../tasks/DECISION_MODEL_CONTEXT_AUDIT.md#gateway-213mb-峰值来自整块读取消息文件2026-09-24已实施待审)。
