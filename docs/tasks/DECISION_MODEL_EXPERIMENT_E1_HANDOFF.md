@@ -220,7 +220,8 @@ E2 同样本基线/候选对照、F 可信效果指标与自动应用、G 自动
 - 语法：`/experiment apply skill_tool <时长> <HTTP次数> <输入token上限> <任务>`；信封 `operations=["observe","apply"]`（仍是 v2，`experiment_operations` 只接受这两种精确列表）。实验调用本身仍只观察（`may_apply=False`），apply 只授权宿主在规则满足时晋升。
 - `request_experiment_promotion.py::promote_skill_tool_if_ready` 只在本请求 granted 回执含 apply 时由收尾调用：锁外只读评估；锁内（phase `experiment_promotion`，回合须 open 且未请求停止）复读设置并依次核对：仍是本请求那份授权（`authorization_replaced`）、身份（`identity_changed`）、active（`authorization_revoked`）、含 apply、未到期（`authorization_expired`）、设置 revision 与授权时一致（`settings_changed`）、能力仍开、点有效模式仍为 off（`point_not_off`，覆盖默认配置变化）；再经原设置服务 `patch`（thread 范围，`expected_revision` 取锁内读数，完整 CAS）写 apply。冲突记 `settings_conflict`，写入前校验失败记 `promotion_rejected`，写入结果不明记 `uncertain/settings_write_uncertain`；都不重试、不覆盖用户值。
 - **回执权威：本请求记录 `experiment_records.promotion`**。理由：它与触发晋升的证据同处原请求记录；授权信封是纯授权，会被下一次授权整份替换，把回执写进去还要改信封 schema 及发送门的所有读取者。顺序是先写 `promoting` 再改设置、最后写终态回执；已有任何回执即不再尝试（内存快判加锁内复核），重放与重启幂等；崩溃遗留的 `promoting` 表示结果不确定，保持原样。回执含状态/原因码、目标字段、证据摘要（状态、原因、样本数、记录编号）与前后值（线程覆盖是否存在及值、有效模式、两层 revision）。
-- 撤销或到期只停止未来实验与晋升，不回滚已晋升的设置；需要恢复继承时对 `points.skill_tool.mode` 执行 reset。Jev 回答只经宿主投影成候选名单；模型没有授权或晋升的工具路径（`user_config` 仍只读/撤销实验授权）。
+- 撤销或到期只停止未来实验与晋升，不回滚已晋升的设置；需要恢复继承时对 `points.skill_tool.mode` 执行 reset
+- 运行时回滚注意（主线 owner 合入时补记）：带 `apply` 操作的授权信封只有本片起的构建能读，回滚到更早的运行时前，先用 `/experiment observe …` 覆盖一次该线程的授权，或从部署备份恢复线程决策设置；否则旧构建会拒绝该线程的决策设置。Jev 回答只经宿主投影成候选名单；模型没有授权或晋升的工具路径（`user_config` 仍只读/撤销实验授权）。
 
 ### 文件归属
 
