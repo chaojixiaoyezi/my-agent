@@ -167,8 +167,14 @@ def _gateway_submit_workspace(
     return {"cwd": str(effective_root or ""), "roots": roots}
 
 
+# 活动租约的最小采样间隔；截止判定至少基于这么长的观察窗。
+_BASE_POLL_INTERVAL_SECONDS = 0.1
+
+
 # LLM: 终态仍只认 canonical envelope；入口绝对 deadline 仅转换一次为单调时钟，
 # 后续活动续租不受校时影响。截止时先检查终态；显式 TUI 续等不重新提交请求或重置游标。
+# 两次活动采样至少间隔 _BASE_POLL_INTERVAL_SECONDS：不能为贴合 deadline 缩短采样，
+# 否则租约心跳还没来得及落盘就被判成死请求；退避只放大空闲间隔，不缩短最小采样窗。
 # 函数用途: 读取事件和唯一终态；无活动时退避，TUI 等待超时仅提示继续观察，退出只停止本地观察。
 def poll_gateway_chunks(request: GatewayChunkPollRequest) -> dict:
     chunks_printed = request.chunks_printed_ref[0]
@@ -180,7 +186,7 @@ def poll_gateway_chunks(request: GatewayChunkPollRequest) -> dict:
     activity_fingerprints = {
         path: _path_activity_fingerprint(path) for path in request.activity_paths
     }
-    poll_interval = 0.1
+    poll_interval = _BASE_POLL_INTERVAL_SECONDS
     while True:
         if request.is_wait_cancelled is not None and request.is_wait_cancelled():
             raise InterruptedError("Gateway 请求观察已退出")
@@ -225,8 +231,8 @@ def poll_gateway_chunks(request: GatewayChunkPollRequest) -> dict:
                 break
             request.on_wait_timeout()
             deadline = now + max(1.0, request.inactivity_timeout_seconds)
-        poll_interval = 0.1 if active else min(1.0, poll_interval * 2)
-        time.sleep(min(poll_interval, max(0.01, deadline - now)))
+        poll_interval = _BASE_POLL_INTERVAL_SECONDS if active else min(1.0, poll_interval * 2)
+        time.sleep(min(poll_interval, max(_BASE_POLL_INTERVAL_SECONDS, deadline - now)))
     request.chunks_printed_ref[0] = chunks_printed
     if request.visible_chunks_ref is not None:
         request.visible_chunks_ref[0] = visible_chunks
