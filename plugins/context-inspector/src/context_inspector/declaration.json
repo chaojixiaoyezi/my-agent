@@ -1,0 +1,21 @@
+{
+  "plugin_id": "context-inspector",
+  "summary": "在面板查看当前会话的上下文组成与压缩次数",
+  "entry_module": "context_inspector",
+  "default_action": "show",
+  "actions": [
+    {
+      "name": "show",
+      "summary": "打开或关闭上下文面板",
+      "arguments": [],
+      "kind": "display",
+      "target": "context",
+      "available": true
+    }
+  ],
+  "tools": [],
+  "panels": [
+    {"id": "context", "title": "上下文", "kind": "status", "topics": ["context"]}
+  ],
+  "settings_schema": {"type": "object", "properties": {}}
+}
