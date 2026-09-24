@@ -508,6 +508,10 @@ OAuth 传输、采样和模型菜单回归。覆盖保存无网络、公开字�
 - 已知缺口：纯模型思考阶段面板显示空闲，见 [插件展示](docs/design/PLUGIN_DISPLAY.md#已知缺口)。
 - 断连重连：本轮样本中模型改用后台终端并误用参数，回合在断连前已按"结果无法确认"结束，未构成有效断连样本；断连/重连/停止仍以 TUI232 为准。
 
+## 第 10 步第三批插件（本地，待发布）
+
+- `test_image_text_package.py`（10 项）：从源码构建 image-text 包并起真实 MCP 进程；本机有 tesseract 时用测试内极简 PNG 编码器画的点阵英文图实识别（无 tesseract 时 skip），另覆盖 tesseract 缺失返回 OCR_UNAVAILABLE 且仍带元数据（PNG/伪装扩展名/GIF/JPEG/WebP 宽高）、非图片与损坏头部、超上限、链接/上溯/越界、非法语言名、语言包缺失列出已装语言、假 tesseract 超时被杀且临时文件删除、坏设置启动失败。
+
 ## 第 10 步第二批宿主补充（本地，待发布）
 
 - `test_plugin_skills.py`：包描述 v3 往返与名单校验（空、非法名、重复均拒绝，v1 不带 skills）；只取已启用且声明 Skill 的插件目录；插件 Skill 来源为 `plugin:<ID>`、不覆盖同名用户 Skill；提供方不再返回后下一次快照即消失；总闸关闭时不出现。
