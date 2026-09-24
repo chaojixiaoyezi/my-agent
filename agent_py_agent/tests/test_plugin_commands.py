@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from unittest.mock import Mock
 
 import pytest
@@ -235,3 +236,11 @@ def test_real_tui_completion_only_fills_declared_path_and_never_submits(tmp_path
     assert list(completer.get_completions(Document("/plugins@unknown @file"), CompleteEvent())) == []
     assert list(completer.get_completions(Document("/plugins help install", cursor_position=17), CompleteEvent())) == []
     paths.assert_not_called()
+
+
+def test_use_card_gives_no_spoken_example_for_display_only_actions(plugin):
+    # 真实 TUI：卡片曾建议"请用插件打开面板"，模型无从调用，只能回答没有这个能力
+    display = replace(plugin.actions[0], kind="display", target="line", summary="打开或关闭活动面板")
+    card = render_plugin_use_card(replace(plugin, actions=(display,)), {})
+    assert "普通中文示例：" not in card and "请用 Demo 插件" not in card
+    assert "普通中文请求不会打开面板" in card and "/plugins@Demo run" in card

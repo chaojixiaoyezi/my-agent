@@ -96,16 +96,22 @@ def submit_plugin_command(
     return True
 
 
-# LLM: 只用客户端已缓存的目录在本地解析；命中已启用插件的 display 动作才切换面板，不发宿主请求、不执行插件。
-#   目录未缓存、插件未启用或不是展示动作时返回 False，交回原命令链（宿主会给出明确拒绝）。
+# LLM: 用客户端目录在本地解析；命中已启用插件的 display 动作才切换面板，不执行插件。
+#   目录未缓存（新开或 resume 后尚未补全）时，只对 /plugins@ 命令做一次显式 refresh 读目录，不重试；
+#   仍取不到、插件未启用或不是展示动作时返回 False，交回原命令链（宿主会给出明确拒绝）。
 # 函数用途: 处理 /plugins@插件 <面板动作>，在本地打开或关闭对应面板并给出提示。
 def toggle_plugin_panel(params, text: str, binding: PluginInputBinding) -> bool:
     from ...agent.command_arguments import CommandArgumentError
     from ...agent.plugin_commands import parse_plugin_command
     from .tui_actions import _required_tui_runtime
 
+    if binding.panels is None:
+        return False
     catalog = binding.client.snapshot()
-    if binding.panels is None or catalog is None:
+    if catalog is None:
+        binding.client.refresh()
+        catalog = binding.client.snapshot()
+    if catalog is None:
         return False
     try:
         parsed = parse_plugin_command(text, plugins=catalog.plugins, management_actions=catalog.management_actions)

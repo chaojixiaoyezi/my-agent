@@ -479,6 +479,13 @@ OAuth 传输、采样和模型菜单回归。覆盖保存无网络、公开字�
 再覆盖 `test_model_oauth.py`、`test_model_oauth_transport.py`、`test_tui_model_menu.py`、`test_provider_sampling.py`；
 最终联合命令使用 `python3 -m pytest <以上十个文件> -o addopts='' -q --tb=short`，213 passed in 4.29s。
 
+## 第 9 步插件面板真实 TUI（本机，fae9d5855 / wheel 86339f65，模型 MiniMax-M2.7）
+
+- 通过：TUI 内安装、启用、`/plugins@activity-line show` 打开；两个中文任务期间面板显示"工作中 · 正在使用 run_command"，结束回到空闲，两份产物数字经独立脚本核对正确；面板打开时停用 → 面板立即消失、插件进程回收；再启用后可再打开；面板打开时卸载 → 面板与进程都消失，列表只剩其他插件；面板打开时 Esc 中断 → TUI 显示已中断，面板同时回到空闲。
+- 发现并修复：① `resume` 后未经补全直接输入面板命令，本地目录为空而落到宿主被拒；改为先显式读一次目录（`test_tui_plugin_panels.py` 新增回归）。② 只有展示动作的插件使用卡给出"请用插件打开面板"的中文示例，实测模型只能回答没有该能力；改为不给落空示例（`test_plugin_commands.py` 新增回归）。
+- 已知缺口：纯模型思考阶段面板显示空闲，见 [插件展示](docs/design/PLUGIN_DISPLAY.md#已知缺口)。
+- 断连重连：本轮样本中模型改用后台终端并误用参数，回合在断连前已按"结果无法确认"结束，未构成有效断连样本；断连/重连/停止仍以 TUI232 为准。
+
 ## 第 10 步插件写入上下文（本地，待发布）
 
 - `test_workspace_write_context.py`（10 项）：2000 组随机写入边界 × 4 个目标路径，逐项断言「插件允许 ⇔ 宿主 `validate_write_boundary` 允许且目标在写入根之内」，并验证序列化往返后裁决不变；另覆盖无范围时只允许 cwd、owner 墙、畸形载荷拒绝、锚点取最具体根，以及只对协商且声明写效果的工具下发、缺上下文时发送前 `not_started`。

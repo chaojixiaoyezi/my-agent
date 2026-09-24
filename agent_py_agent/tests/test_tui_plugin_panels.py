@@ -140,7 +140,20 @@ class _Runtime:
 _CATALOG = SimpleNamespace(plugins=(), management_actions=())
 
 
-def _intercept(monkeypatch, *, kind="display", enabled=True, catalog=_CATALOG):
+class _Client:
+    def __init__(self, catalog, refreshed=None):
+        self.catalog, self.refreshed, self.refreshes = catalog, refreshed, 0
+
+    def snapshot(self):
+        return self.catalog
+
+    def refresh(self):
+        self.refreshes += 1
+        self.catalog = self.refreshed
+        return {"ok": self.refreshed is not None}
+
+
+def _intercept(monkeypatch, *, kind="display", enabled=True, catalog=_CATALOG, refreshed=None):
     runtime = _Runtime()
     monkeypatch.setattr("agent_py_agent.cli.chat_parts.tui_actions._required_tui_runtime", lambda _p: runtime)
     parsed = SimpleNamespace(
@@ -150,25 +163,33 @@ def _intercept(monkeypatch, *, kind="display", enabled=True, catalog=_CATALOG):
     )
     monkeypatch.setattr(plugin_commands, "parse_plugin_command", lambda *_a, **_k: parsed)
     board, fetch, _ = _board()
-    client = SimpleNamespace(snapshot=lambda: catalog)
+    client = _Client(catalog, refreshed)
     binding = PluginInputBinding(client, panels=board)
     handled = toggle_plugin_panel(object(), "/plugins@activity-line show", binding)
-    return handled, board, fetch, runtime
+    return handled, board, fetch, runtime, client
 
 
 def test_display_action_toggles_locally_without_host_request(monkeypatch):
-    handled, board, fetch, runtime = _intercept(monkeypatch)
-    assert handled and board.has_visible() and fetch.calls == []
+    handled, board, fetch, runtime, client = _intercept(monkeypatch)
+    assert handled and board.has_visible() and fetch.calls == [] and client.refreshes == 0
     assert runtime.notices == ["已打开插件面板 activity-line/line。"]
 
 
 def test_tool_action_and_missing_catalog_fall_back_to_host(monkeypatch):
     assert _intercept(monkeypatch, kind="tool")[0] is False
-    assert _intercept(monkeypatch, catalog=None)[0] is False
+    handled, *_rest, client = _intercept(monkeypatch, catalog=None)
+    assert handled is False and client.refreshes == 1
+
+
+def test_uncached_catalog_after_resume_is_read_once_then_toggles_locally(monkeypatch):
+    # 真实 TUI：resume 后未经补全直接输入面板命令，曾落到宿主并被拒绝
+    handled, board, fetch, runtime, client = _intercept(monkeypatch, catalog=None, refreshed=_CATALOG)
+    assert handled and board.has_visible() and fetch.calls == [] and client.refreshes == 1
+    assert runtime.notices == ["已打开插件面板 activity-line/line。"]
 
 
 def test_disabled_plugin_panel_gets_clear_notice(monkeypatch):
-    handled, board, _fetch, runtime = _intercept(monkeypatch, enabled=False)
+    handled, board, _fetch, runtime, _client = _intercept(monkeypatch, enabled=False)
     assert handled and not board.has_visible()
     assert "未启用" in runtime.notices[0]
 

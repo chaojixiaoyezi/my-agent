@@ -29,7 +29,7 @@
 | --- | --- | --- | --- |
 | [MAINTAINABILITY_AND_JEV_REVIEW.md](MAINTAINABILITY_AND_JEV_REVIEW.md) | 模块可维护性 / Computer Use / Jev | 评估完成，方案待实施 | 热点源码及参考证据、渐进重构顺序、桌面能力现状；Jev 新接入方向见决策模型计划 |
 | [DECISION_MODEL_INTEGRATION.md](DECISION_MODEL_INTEGRATION.md) | 可选决策模型 / Jev | P1—P5 实施中，P1-A 已本地验收 | 原模型配置复用、短期限与失败隔离、逐点开关、记忆/派工/能力推荐、缓存和并行开发验收 |
-| [PLUGIN_DISPLAY.md](PLUGIN_DISPLAY.md) | 插件面板 / 只读订阅 | 第 9 步实施中 | 声明式面板、公开主题投影、单在途与撤销、TUI 只渲染核心校验结果 |
+| [PLUGIN_DISPLAY.md](PLUGIN_DISPLAY.md) | 插件面板 / 只读订阅 | 第 9 步已发布，真实 TUI 已验 | 声明式面板、公开主题投影、单在途与撤销、TUI 只渲染核心校验结果 |
 | [PLUGIN_WORKSPACE_WRITE.md](PLUGIN_WORKSPACE_WRITE.md) | 插件写入 / 工作区写入上下文 | 第 10 步本地已实施 | 协商扩展且声明写效果才下发、与内置写工具同一裁决且只可能更严 |
 | [PLUGIN_LIFECYCLE.md](PLUGIN_LIFECYCLE.md) | 可选插件 / 动态命令 / 热装卸 | 设计草案，待实施 | 核心与插件边界、停用无运行影响、Python 进程隔离、版本快照与卡死卸载；参考范围和 TUI 验收矩阵 |
 | [PLUGIN_SAMPLE_ACCEPTANCE.md](PLUGIN_SAMPLE_ACCEPTANCE.md) | 插件样本 / 功能组合 / TUI 验收 | 计划已记录，待实施 | 社区热度与随机抽样、10 个自有简易插件、分批功能验证和故障卸载；Audit 不在本轮重构范围 |

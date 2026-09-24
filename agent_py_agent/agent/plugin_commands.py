@@ -162,6 +162,7 @@ def render_plugin_help(namespace: PluginNamespace, actions: tuple[CommandActionS
 
 
 # LLM: 仅从包的公开动作和设置 schema 生成展示文本；示例不是授权、参数值或模型指令，不能写回安装状态。
+#   普通中文示例只取非 display 动作（按结构化 kind 判断）；只有展示动作时改为说明面板只能用命令打开。
 # 函数用途: 给插件详情和成功启用回执生成同一张简短使用卡，不读取私有设置或启动插件。
 def render_plugin_use_card(plugin: PluginCommandSpec, settings_schema: dict) -> str:
     namespace = f"/plugins@{plugin.plugin_id}"
@@ -178,13 +179,18 @@ def render_plugin_use_card(plugin: PluginCommandSpec, settings_schema: dict) -> 
         lines.append(f"当前未启用；先执行 /plugins enable {plugin.plugin_id}。")
     for action in actions[:2]:
         lines.append("  " + render_action_usage(namespace, action))
-    lines.append("普通中文示例：")
-    for action in actions[:2]:
-        lines.append(f"  请用 {plugin.plugin_id} 插件{' '.join(action.summary.split())}。")
-    if not actions:
-        lines.append(f"  请用 {plugin.plugin_id} 插件处理我指定的内容。")
-    if len(actions) < 2:
-        lines.append(f"  请用 {plugin.plugin_id} 插件帮我完成：{' '.join(plugin.summary.split())}。")
+    # 展示动作只能由支持面板的 TUI 本地打开，模型无从调用，不能给出会落空的普通中文示例
+    spoken = tuple(action for action in actions if action.kind != "display")
+    if actions and not spoken:
+        lines.append("面板只能用上面的命令在 TUI 中打开或关闭；普通中文请求不会打开面板。")
+    else:
+        lines.append("普通中文示例：")
+        for action in spoken[:2]:
+            lines.append(f"  请用 {plugin.plugin_id} 插件{' '.join(action.summary.split())}。")
+        if not actions:
+            lines.append(f"  请用 {plugin.plugin_id} 插件处理我指定的内容。")
+        if len(spoken) < 2:
+            lines.append(f"  请用 {plugin.plugin_id} 插件帮我完成：{' '.join(plugin.summary.split())}。")
     properties = settings_schema.get("properties", {})
     required = settings_schema.get("required", ())
     names = tuple(str(name) for name in required) if isinstance(required, (tuple, list)) else ()
