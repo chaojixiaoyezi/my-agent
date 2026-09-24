@@ -85,13 +85,15 @@ class GatewayExperimentGrant:
             duration_seconds=command["duration_seconds"], max_http_requests=command["max_http_requests"],
             max_input_tokens=command["max_input_tokens"], input_bound_policy=EMPIRICAL_INPUT_BOUND_POLICY)
 
-    # LLM: 回执只含身份、状态与固定代码/授权编号，不含任务正文、密钥或设置内容。
+    # LLM: 回执只含身份、状态与固定代码/授权编号，不含任务正文、密钥或设置内容。可选字段用显式关键字参数
+    #   （架构守卫禁止 **kwargs 服务接口），非空才写入，granting/granted/rejected 三种回执形状与原先一致。
     # 函数用途: 生成本请求的实验授权回执。
-    def _receipt(self, status: str, **fields: str) -> dict:
+    def _receipt(self, status: str, *, authorization_id: str = "", code: str = "") -> dict:
+        extra = {key: value for key, value in (("authorization_id", authorization_id), ("code", code)) if value}
         return {"schema": _GRANT_SCHEMA, "request_id": self.writer.request_id,
                 "execution_attempt_id": self.writer.execution_attempt_id,
                 "run_id": str(getattr(self.params, "run_id", "") or ""),
-                "attempt_id": str(getattr(self.params, "attempt_id", "") or ""), "status": status, **fields}
+                "attempt_id": str(getattr(self.params, "attempt_id", "") or ""), "status": status, **extra}
 
     # LLM: create=True 只在没有回执时写入；否则只替换同一次 granting 回执。内存请求与文件保持相同。
     # 函数用途: 用原子 JSON 更新写回执，返回本次是否真正写入。

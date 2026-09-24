@@ -2,6 +2,15 @@
 
 child不展示历史正文时的读取回归先复现1 failed/1 passed，修复后test_compact_retained_history、test_subagent_compact_recovery、test_gateway_child_compact_scope_application三文件31 passed（8.48秒）。三宿主seed仓外基线仅验证测量和完整性，不算内存目标通过；细节见容量审计的宿主生命周期基线。
 
+## 决策线收尾的全仓回归（2026-09-25，main `5fca6a194`）
+
+- **结果**：`python -m pytest agent_py_agent/tests -p no:cacheprovider` 共 24 分 19 秒，21,406 passed、4 failed、21 skipped、32 xfailed、5 xpassed。
+- **4 个失败逐一单独复跑归因**：
+  - `test_architecture_guardrails.py::test_product_code_has_no_var_keyword_service_interfaces`：第 17 项实验授权回执 `_receipt(**fields)` 违反"产品代码不用 `**kwargs` 服务接口"。已在本分支改为显式关键字参数，守卫与实验 3 文件合计 118 passed。
+  - `test_plugin_workspace_context.py` 中两项：单独运行稳定失败，报 `'MCPStdioClient' object has no attribute 'activation_ref'`。来源是插件调用前的激活复核（`58bb0441a`）；测试替身没有该属性。属插件线，已告知主线 owner，本分支不改。
+  - `test_subagent_capability_compact.py::test_child_same_turn_reuses_selection_and_exact_provider_surface[None]`：单独运行 3/3 通过，判为全仓负载下的时序偶发。
+- 按 AGENTS.md 的频率约定，全仓回归只在决策线收尾时跑这一次；各分支远端提交前的严格门仍以 focused tests 为准。
+
 ## 验证分类：返回码 126/127、pytest 范围与 && 串联（2026-09-25，本地分支 `claude/verification-exit-scope-chains`）
 
 - **新测试** `test_verification_project_facts.py`：
