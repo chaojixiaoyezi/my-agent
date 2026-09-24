@@ -160,3 +160,17 @@ def test_decision_tool_owner_check_and_unavailable_service_can_be_disabled(tmp_p
         assert not result.ok and result.error_code == "TOOL_PERMISSION_DENIED"
     finally:
         restore_current_subagent_context(host, previous)
+
+
+def test_self_service_percent_is_accepted_exactly_when_it_takes_effect():
+    """自助修改接受的百分比必须原样生效：与配置解析、运行时夹取三处一致，接受即生效、生效即可接受。"""
+    from agent_py_agent.agent.agent_core.runtime import context_compactor
+    from agent_py_agent.agent.settings.memory import normalize_memory_settings
+
+    pairs = {"memory_compact_auto_trigger_percent": context_compactor.compact_trigger_percent,
+             "memory_compact_recovery_target_percent": context_compactor.compact_recovery_target_percent}
+    for key, runtime_clamp in pairs.items():
+        for value in range(-5, 131):
+            accepted = TUNABLE_KEYS[key].validate(str(value))[0]
+            parsed = getattr(normalize_memory_settings({key: value})[0], key)
+            assert accepted == (runtime_clamp(value) == value) == (parsed == value), (key, value)

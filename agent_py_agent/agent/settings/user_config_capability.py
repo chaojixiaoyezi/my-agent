@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ._memory_coercion import COMPACT_RECOVERY_PERCENT_RANGE, COMPACT_TRIGGER_PERCENT_RANGE
 from .config_io import load_simple_yaml, set_simple_yaml_value
 
 # 生效时机（如实报告，不夸大）
@@ -34,14 +35,24 @@ class TunableSpec:
     effect: str = EFFECT_NEXT_SESSION
 
 
-def _percent(value: object) -> tuple[bool, str, object]:
-    try:
-        number = int(str(value).strip())
-    except (TypeError, ValueError):
-        return False, "必须是 25~95 之间的整数百分比", 0
-    if not 25 <= number <= 95:
-        return False, "必须是 25~95 之间的整数百分比", 0
-    return True, "", number
+# LLM: 每个百分比项按自己的有效范围校验，范围取自配置解析的同一常量；接受的值必须原样生效，不能再被运行时夹取成别的值。
+# 函数用途: 生成一个只接受 [low, high] 内整数百分比的校验函数，供自助修改白名单使用。
+def _percent_within(bounds: tuple[int, int]) -> Callable[[object], tuple[bool, str, object]]:
+    low, high = bounds
+    message = f"必须是 {low}~{high} 之间的整数百分比"
+
+    # LLM: 纯函数，只做整数与区间判断，不解析自然语言。
+    # 函数用途: 校验一次自助修改提交的百分比取值。
+    def validate(value: object) -> tuple[bool, str, object]:
+        try:
+            number = int(str(value).strip())
+        except (TypeError, ValueError):
+            return False, message, 0
+        if not low <= number <= high:
+            return False, message, 0
+        return True, "", number
+
+    return validate
 
 
 def _positive_int(value: object) -> tuple[bool, str, object]:
@@ -66,13 +77,13 @@ def _non_empty_text(value: object) -> tuple[bool, str, object]:
 TUNABLE_KEYS: dict[str, TunableSpec] = {
     "memory_compact_auto_trigger_percent": TunableSpec(
         key="memory_compact_auto_trigger_percent",
-        describe="上下文用到百分之多少时自动 compact（默认 90）",
-        validate=_percent,
+        describe="上下文用到百分之多少时自动 compact（50~100，默认 90）",
+        validate=_percent_within(COMPACT_TRIGGER_PERCENT_RANGE),
     ),
     "memory_compact_recovery_target_percent": TunableSpec(
         key="memory_compact_recovery_target_percent",
-        describe="compact 之后的健康目标百分比（默认 60）",
-        validate=_percent,
+        describe="compact 之后的健康目标百分比（25~80，默认 60）",
+        validate=_percent_within(COMPACT_RECOVERY_PERCENT_RANGE),
     ),
     "tool_read_max_chars": TunableSpec(
         key="tool_read_max_chars",
