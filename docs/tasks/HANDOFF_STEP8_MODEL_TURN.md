@@ -50,3 +50,13 @@ Astra max四文件diff未发现阻断，三种独立导入成功。此次仅本�
 - 14文件组合333 passed／20既有xfail；测试文件完整列表见TESTS，不追加全仓。本地Ruff、doc sync、strict code-size hard=0、diff、clean-package全通过，未改尺寸基线。未发布部署、未启动真实模型或TUI，旧scope过滤风险和业务失败保留。
 
 建议下一步：主线只集成本片已验证diff，继续剩余工具轮／结束决策与scope读回缺口；独立审阅可并行，Jev链不整枝导入。真实TUI必须在组合发布后另验。
+
+
+## 工具事实投影片交接
+
+- 基线b4ffb3475；主代理写runtime_facts／reducer、archive有界投影、loop_support的重建函数及reducer/MCP测试。独立空转发清理线只改同文件执行入口，函数归属已对齐。
+- 原process缺失10项红转绿；审阅发现巨整数／非有限浮点可破坏投影，三项红转绿，未改变verification原编码。
+- 8文件241 passed；Ruff、doc sync、strict code-size hard=0通过。当前、外置和carried恢复读取同一有界process事实；不改变原status/error/effect_outcome/call ID，无新持久schema。来源边界与字段见设计文档。
+- 测试层曾错误假定unknown effect等于unknown status、MCP默认无需批准，均按现有真实合同修正夹具，不改生产语义去迎合断言。
+
+建议下一步：与独立空转发清理片组合，继续第8步整体开发及原生多TUI；源码未部署，不能以本片通过关闭真实验收。

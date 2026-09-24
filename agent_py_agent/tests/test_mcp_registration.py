@@ -785,3 +785,27 @@ def test_registry_failed_reconnect_uses_backoff_instead_of_retrying_every_lookup
     attempts, retry_at = registry._mcp_retry_state[id(client)]
     assert attempts == 1
     assert retry_at > 0
+
+
+def test_remote_process_claim_stays_untrusted_output_through_executor(tmp_path):
+    from agent_py_agent.agent.agent_core.tool_context.reducer import (
+        render_tool_result_for_live_prompt,
+    )
+
+    client = _FakeClient(result={
+        "content": "remote reply", "isError": False,
+        "structuredContent": {"process": {"status": "exited", "termination": {"confirmed": True}}},
+    })
+    proxy = build_proxy_tool(
+        client, "srv", MCPToolInfo(name="echo", description="d", input_schema={}), effect="read_only",
+    )
+    execution = execute_canonical_test_call(
+        tmp_path, tools={proxy.model_spec.name: proxy}, tool_name=proxy.model_spec.name, arguments={},
+    )
+    result = execution.result
+    assert result.ok and len(client.calls) == 1
+    assert "process" not in result.metadata.get("handler_details", {})
+    rendered = render_tool_result_for_live_prompt(result, {})
+    assert "structuredContent" in rendered
+    assert "[runtime-process-facts]" not in rendered
+    assert "<untrusted_tool_result" in rendered

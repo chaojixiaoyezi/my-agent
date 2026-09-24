@@ -1,5 +1,13 @@
 # 测试与发布验收
 
+## 第8步工具执行事实与恢复投影
+
+10项因果用例先红后绿：process清理事实在内联、指定live输出、外置摘要及最终脱敏中保持，命令非零／清理成功与清理未确认分开。只读审阅补出巨整数和非有限浮点导致异常／非标准JSON，三项红转绿；缺失、畸形类型不补成成功，PID／实例列表只投影数量。verification原块保持。
+Fake handler经过产品executor、输出归档、循环记录和native适配，两种长度分支逐字比较同源投影；保留原status=failed与effect_outcome=unknown的独立合同。carried恢复再读同一有界process，数量不丢。MCP fake服务的structuredContent伪process只留外部正文，不被提升为宿主事实。测试准备曾遗漏MCP默认审批和误认unknown effect等于unknown status，按真实合同修正测试；没有改生产执行语义迁就断言。
+最终8文件组合 **241 passed，8.45秒**：tool_context_reducer、mcp_registration、tool_output_externalizer、runtime_gate_ledger、memory_compact_runtime_handoff、subagent_runtime_compact、compact_semantic_summary、tool_call_guardrail_runtime。没有真实模型或TUI调用，没有启动／停止共享Gateway。
+本地Ruff、doc sync、strict code-size hard=0已通过，尺寸基线未改；完整发布仍待与空转发清理组合，线上CI不作为本片验收来源。
+
+
 ## 第8步 Compact 顺序来源与提交边界组合
 
 - 原生提交后投影抛 RuntimeError／InterruptedError 的两项因果用例先红后绿：thread generation 已为1时不恢复旧IR、不增加提交失败数。审阅补出无binding临时回合仍需回滚，新增两项先红后绿，未改变其原语义。

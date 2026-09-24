@@ -141,6 +141,7 @@ agent_py_agent/
 |   |   |-- tool_loop/model_turn.py     # 绑定模型请求／超限恢复、用量与输入确认，保持原顺序
 |   |   |-- tool_loop/display_archive.py # 执行当时的公开工具原文归档与轻量预览引用
 |   |   |-- tool_context/               # 工具结果上下文：reducer、窗口、microcompact、PTL 单轮重试
+|   |   |-- tool_context/runtime_facts.py # 核验与进程清理的有界事实投影，当前工具回复和恢复共用
 |   |   |-- orchestration/              # 创建、只读状态、消息、取消、授权五个递归直属工具与内部自动启动/恢复引擎；无兄弟 goal 广播，进展事件由宿主写入
 |   |   |   |-- create_context.py     # 显式资料与合同装配；已移除 work_scope.py 的自动 IO 身份，引用不合并派工
 |   |   |   |-- capacity.py           # 根/子/孙代理共用的会话树与 owner 容量事实；超限整批拒绝
@@ -872,3 +873,5 @@ docs/
 - `agent_py_agent/agent/tooling/mcp_transport.py`、`mcp_protocol.py`：请求和线程永远绑定原连接；临时清理与永久关闭分开，不持有插件激活权威。
 - `agent_py_agent/agent/tooling/mcp_managed_process.py`：插件连接只走原托管启动，输出交给唯一文本读取端，原资源锁内复查原激活，清理保留完整 Store 回执与异常。
 - `docs/design/MCP_TRANSPORT_LIFECYCLE.md`：MCP 的关闭、重连、发布顺序与未知清理边界；对应开发用例为 `agent_py_agent/tests/test_mcp_lifecycle.py`。
+
+- `agent/agent_core/tool_context/runtime_facts.py`：只读canonical执行事实，保留未知与独立清理确认；不复制PID、诊断正文或授予执行权。

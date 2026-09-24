@@ -1,5 +1,5 @@
 # LLM: 本模块装配运行恢复状态与上下文，工具发现复用 tooling 投影，拒绝列表沿宿主参数传递；禁止反向依赖 Gateway。
-# 模块用途: 为主链准备记忆、工具及续跑输入，异常退出前交回原生历史；缓存面与权限仍由各自权威模块维护。
+# 模块用途: 为主链准备记忆、工具及续跑输入，恢复同源核验与清理投影；异常退出交回原生历史，权限不扩展。
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ from ...memory_store import (
     routed_lesson_records,
 )
 from ...runtime_errors import runtime_error_report
-from ...tooling.output_projection import project_tool_output_body
+from ...tooling.output_projection import project_tool_output_body, redact_tool_output_text
 from ...tooling.tool_search_state import pending_carried_loaded_tool_names
 from ...user_space.context_bundle import MainContextBundleRequest, build_main_context_bundle
 from ...user_space.home_layout import runtime_route_root_and_index
@@ -37,6 +37,7 @@ from .._runtime_params import ToolLoopExecuteParams
 from .._tool_loop_service import ToolLoopService
 from ..parameters import _one_shot_tool_call_keys
 from ..tool_context.call_reducer import render_tool_payload_for_live_prompt
+from ..tool_context.runtime_facts import render_tool_runtime_facts
 from .live_archive import write_runtime_fact_start_if_enabled
 from .loop_models import (
     FinalizeParams,
@@ -1191,8 +1192,9 @@ def _carried_one_shot_keys(record: dict[str, object]) -> set[str]:
 
 # LLM: Compact continuation may rebuild only typed archive fields. Reuse the live prompt payload
 # reducer after redaction so large write bodies stay behind hashes/previews instead of being copied
-# verbatim into every background slice; effect state still comes only from typed archive fields.
-# 函数用途: 把一条归档工具记录脱敏、限长后恢复为模型/守卫可读文本，并保留路径、失败、未知与重放事实。
+# verbatim into every background slice; shared verification/process projection must read the typed
+# envelope and pass final redaction. Effect state still comes only from typed archive fields.
+# 函数用途: 将原归档恢复为模型可读文本，保留核验、清理、失败和未知事实，不从输出猜测状态。
 def _reconstructed_tool_context_entry(record: dict[str, object]) -> str:
     payload = model_visible_tool_parameters(record)
     payload = payload or {"tool": str(record.get("tool") or "")}
@@ -1233,6 +1235,11 @@ def _reconstructed_tool_context_entry(record: dict[str, object]) -> str:
         value = str(record.get(key) or "").strip()
         if value:
             result_lines.append(f"- {key}: {value}")
+    details = record.get("tool_result_envelope")
+    if isinstance(details, dict) and (facts := render_tool_runtime_facts(details)):
+        result_lines.append(redact_tool_output_text(
+            facts, redaction=str(record.get("tool_output_redaction") or "default"),
+        ))
     result_lines.append(f"- handler_executed: {record.get('handler_executed') is True}")
     result_lines.append(f"- duration_ms: {_nonnegative_tool_duration(record.get('duration_ms'))}")
     if "tool_operation_replayed" in record:

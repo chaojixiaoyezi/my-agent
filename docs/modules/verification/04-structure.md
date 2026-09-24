@@ -1,5 +1,7 @@
 # Verification：结构
 
+`tool_context/runtime_facts.py`接canonical handler_details，输出原verification块和有界process字段；`reducer.py`统一脱敏，`tool_call_archive_record.py`保留同一有界process，`runtime/loop_support.py`恢复后同口径展示。它们不改变执行状态或持久schema。
+
 ## 零工具续跑原生历史
 
 `backends.response_completion.has_reasoning_content` 区分有效 typed 思考与空包；适配器返回原内容和用量。

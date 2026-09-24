@@ -1,4 +1,7 @@
 import json
+from copy import deepcopy
+
+import pytest
 
 from agent_py_agent.agent.agent_core.orchestration.shared_context import (
     parent_shared_context_packs,
@@ -434,3 +437,182 @@ def test_read_artifact_summary_hides_nested_wrapper_artifact_path():
     assert "source_artifact_ref: /tmp/tool_outputs/read_file-1.json" in rendered
     assert "read_artifact-2.json" not in rendered
     assert "read_artifact_hint" not in rendered
+
+
+@pytest.mark.parametrize("surface", ["inline", "live_output", "externalized"])
+@pytest.mark.parametrize("confirmed,return_code", [(True, 0), (True, 7), (False, None)])
+def test_process_cleanup_facts_survive_all_model_output_surfaces(surface, confirmed, return_code):
+    process = {
+        "status": "exited" if return_code is not None else "timed_out",
+        "return_code": return_code,
+        "command_succeeded": return_code == 0,
+        "pipes_drained": confirmed,
+        "termination": {
+            "method": "foreground_tree" if confirmed else "unknown",
+            "confirmed": confirmed,
+            "return_code": return_code,
+            "observed_processes": 3,
+            "unresolved_pids": [] if confirmed else [4001, 4002],
+        },
+        "stderr_head": "private diagnostic text",
+        "command": "private command text",
+        "output_file": "private output path",
+    }
+    envelope = {"process": process}
+    if surface == "live_output":
+        envelope["tool_output_policy"] = {"live_prompt_output": "bounded live text"}
+    before = deepcopy(envelope)
+    result = _result(
+        "run_command", confirmed and return_code == 0, "ordinary output",
+        result_envelope=envelope,
+        error_code="TOOL_OPERATION_OUTCOME_UNKNOWN" if not confirmed else "COMMAND_FAILED",
+    )
+    rendered = render_tool_result_for_live_prompt(result, {
+        "output_externalized": surface == "externalized", "output_preview": "preview",
+        "artifact_ref": "private-archive", "scoped_call_id": "run:call",
+    })
+    assert "[runtime-process-facts]" in rendered
+    facts = json.loads(rendered.split("[runtime-process-facts]", 1)[1].strip().splitlines()[-1])["process"]
+    assert facts["status"] == process["status"]
+    assert facts["return_code"] == return_code
+    assert facts["command_succeeded"] is (return_code == 0)
+    assert facts["pipes_drained"] is confirmed
+    assert facts["termination"] == {
+        "method": process["termination"]["method"], "confirmed": confirmed,
+        "return_code": return_code, "observed_processes": 3,
+        "unresolved_count": 0 if confirmed else 2,
+    }
+    assert "private diagnostic text" not in rendered
+    assert "private command text" not in rendered
+    assert "private output path" not in rendered
+    assert "4001" not in rendered and "4002" not in rendered
+    assert result.metadata["handler_details"] == before
+    assert result.output == "ordinary output"
+    assert result.with_live_prompt_projection(rendered).render_for_model_prompt() == rendered
+
+
+@pytest.mark.parametrize("process", [None, "confirmed", {}, {"termination": {"confirmed": "false"}}, {"command_succeeded": "true"}])
+def test_invalid_or_missing_process_facts_do_not_invent_cleanup_success(process):
+    result = _result("run_command", True, "output", result_envelope={"process": process})
+    rendered = render_tool_result_for_live_prompt(result, {})
+    assert "[runtime-process-facts]" not in rendered
+
+
+def test_stdout_process_json_never_becomes_host_cleanup_facts():
+    output = json.dumps({"process": {"termination": {"confirmed": True}}})
+    result = _result("mcp__sample__tool", True, output, result_envelope={
+        "tool_output_policy": {"trust": "external_data"},
+    })
+    rendered = render_tool_result_for_live_prompt(result, {})
+    assert "[runtime-process-facts]" not in rendered
+    assert "<untrusted_tool_result" in rendered
+
+
+def test_process_facts_use_the_existing_final_redaction_boundary():
+    result = _result("run_command", False, "output", result_envelope={
+        "process": {"status": "unknown", "reason": "api_key=synthetic-sensitive-value"},
+    })
+    rendered = render_tool_result_for_live_prompt(result, {})
+    assert "[runtime-process-facts]" in rendered
+    assert "synthetic-sensitive-value" not in rendered
+    assert "<redacted>" in rendered
+
+
+@pytest.mark.parametrize("value", [10**5000, float("inf"), float("nan")], ids=["large-int", "infinite", "nan"])
+def test_unbounded_process_number_cannot_break_tool_result_projection(value):
+    result = _result("run_command", True, "output", result_envelope={
+        "process": {"status": "exited", "return_code": value, "timeout_seconds": value},
+    })
+    rendered = render_tool_result_for_live_prompt(result, {})
+    facts = json.loads(rendered.split("[runtime-process-facts]", 1)[1].strip().splitlines()[-1])
+    assert facts == {"process": {"status": "exited"}}
+
+
+def test_session_cleanup_and_child_termination_stay_independent_and_bounded():
+    result = _result("process_session", True, "output", result_envelope={
+        "process": {"status": "exited", "termination": {
+            "confirmed": True,
+            "instances": [{"pid": 4001}] * 10000,
+            "cleanup": {"confirmed": False, "instances": [{"pid": 4002}] * 20000},
+        }},
+    })
+    rendered = render_tool_result_for_live_prompt(result, {})
+    facts = json.loads(rendered.split("[runtime-process-facts]", 1)[1].strip().splitlines()[-1])
+    assert facts["process"]["termination"] == {
+        "confirmed": True, "instances_count": 10000,
+        "cleanup": {"confirmed": False, "instances_count": 20000},
+    }
+    assert len(rendered) < 1500
+    assert "4001" not in rendered and "4002" not in rendered
+
+
+@pytest.mark.parametrize("archive_threshold", [32, 100000])
+def test_process_facts_follow_real_executor_archive_and_native_pair(tmp_path, monkeypatch, archive_threshold):
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core._tool_loop_service import _record_tool_call
+    from agent_py_agent.agent.agent_core.tool_call_archive_record import (
+        archive_tool_output_projection,
+    )
+    from agent_py_agent.agent.agent_core.tool_loop.round_execution import ToolCallRecordParams
+    from agent_py_agent.agent.backends.message_adapter import AnthropicMessageAdapter
+    from agent_py_agent.agent.settings.config import AgentConfig
+    from agent_py_agent.agent.tooling.models import BaseTool, ToolHandlerOutcome
+    from agent_py_agent.tests._tool_runtime_harness import (
+        execute_canonical_test_call,
+        make_test_model_spec,
+        make_test_runtime_policy,
+        runtime_snapshot_for_tools,
+    )
+    from agent_py_agent.tests.test_tool_output_externalizer import _tool_loop_params
+
+    process = {"status": "exited", "return_code": 0, "command_succeeded": True,
+               "termination": {"confirmed": False, "unresolved_pids": [4001]}}
+    tool = BaseTool()
+    tool.model_spec = make_test_model_spec("receipt_probe", input_schema={"type": "object", "properties": {}})
+    tool.runtime_policy = make_test_runtime_policy()
+    # 只有handler为确定性替身；调用验证、归档、canonical结果、循环记账和provider映射走产品代码。
+    monkeypatch.setattr(tool, "execute", lambda _params: ToolHandlerOutcome(
+        "receipt_probe", False, "raw-output\n" * 100,
+        result_envelope={"process": process}, error_code="TOOL_OPERATION_OUTCOME_UNKNOWN",
+        effect_outcome="unknown", handler_executed=True,
+    ), raising=False)
+    params = _tool_loop_params(request_id="receipt-request", run_id="receipt-run", task_id="receipt-task")
+    params = replace(params, tool_runtime_snapshot=runtime_snapshot_for_tools(
+        {"receipt_probe": tool}, run_id="receipt-run",
+    ))
+    agent = SimpleNamespace(root=tmp_path, config=AgentConfig(tool_output_externalize_min_chars=archive_threshold))
+    execution = execute_canonical_test_call(
+        tmp_path, tools={"receipt_probe": tool}, tool_name="receipt_probe", arguments={}, run_id="receipt-run",
+        output_archiver=lambda call, result: archive_tool_output_projection(agent, params, call, result),
+    )
+    result = execution.result
+    original = result.to_dict()
+    archive = result.metadata["archive_output_record"]
+    assert archive["output_externalized"] is (archive_threshold == 32)
+    rendered = render_tool_result_for_live_prompt(result, archive)
+    _record_tool_call(agent, ToolCallRecordParams(params, 1, 1, execution.call, result))
+    messages = AnthropicMessageAdapter().to_provider_messages(params.tool_ir_history)
+    block = messages[-1]["content"][0]
+    assert block["type"] == "tool_result"
+    assert block["tool_use_id"] == execution.call.call_id
+    assert block["content"] == rendered
+    assert rendered in params.tool_context[-1]
+    assert '"confirmed": false' in rendered
+    assert '"command_succeeded": true' in rendered
+    assert 'effect_outcome=unknown' in rendered
+    assert result.to_dict() == original
+    assert result.status == "failed" and result.error_code == "TOOL_OPERATION_OUTCOME_UNKNOWN"
+    assert result.effect_outcome == "unknown"
+    from agent_py_agent.agent.agent_core.runtime.loop_support import (
+        _reconstructed_tool_context_entry,
+    )
+
+    archived_process = params.archive_tool_calls[0]["tool_result_envelope"]["process"]
+    assert archived_process == {**process, "termination": {"confirmed": False, "unresolved_count": 1}}
+    carried = _reconstructed_tool_context_entry(params.archive_tool_calls[0])
+    assert "[runtime-process-facts]" in carried
+    assert '"confirmed": false' in carried and '"unresolved_count": 1' in carried
+    assert "4001" not in carried
+    assert 'effect_outcome: unknown' in carried

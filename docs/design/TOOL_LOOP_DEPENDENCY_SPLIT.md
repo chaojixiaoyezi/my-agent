@@ -77,3 +77,18 @@ Compact／媒体开发线与主线存在大量decision/Jev前置改动。以f2bc
 - 现有旧链将不同 request/attempt 的裸 tool_call_id 合并过滤的风险仍待独立修复；本片不声称完成 scope 隔离，也不把删掉的 strict 能力计入验收。
 
 建议下一步：完成有界估算组合回归与剩余工具轮拆分，再统一发布并开展第8步真实矩阵；独立审阅可并行，同一生产模块只保留一个写入者。
+
+
+## 第8步工具执行事实投影
+
+解决问题：TUI213的进程清理回执留在canonical ToolResult的handler_details中，但正文归约和跨工作片恢复都丢掉process，模型只能看到退出码而无法区分命令结束与资源清理。
+
+`tool_context/runtime_facts.py`只接结构化Mapping，统一原verification块及必要process投影；reducer的内联、指定live正文和外置摘要在最终脱敏前共用它。原工具正文不参与事实提取，ToolResult状态、错误、effect_outcome、调用身份和执行器不变。归档既有tool_result_envelope只补同一有界process投影，恢复入口再次读取同一结构和数量，原schema与持久权威不新增。
+
+- 字段按存在性保留False、0、None；退出码两个原键不互补，child termination与session cleanup独立。
+- 只投影短字符串、64bit以内整数和有限浮点；畸形或超大值略去，不变成零／成功。PID及实例列表只带数量，命令、路径、输出和诊断正文不复制。
+- 当前与恢复投影均经过原脱敏；verification原块的顺序、标签及内容保持。此为已有执行事实缺失的修复，无新增开关、请求或写账动作。
+- MCP及安装插件的远端structuredContent保持外部正文，不提升为handler envelope。管理员显式加载的进程内Python扩展本来就是受信代码，本片不新增来源证明或宣称可防御其伪造。
+- 局部核对Codex `tools/mod.rs::format_exec_output_for_model`的正文／执行事实分离和Hermes `agent/tool_executor.py`归档后统一模型投影，不移植其执行链。
+
+本片先以fake handler经过真实executor、archiver、循环记录和native adapter验证；不把组件测试称为原生TUI验收。建议下一步与空转发层清理组合后，继续完整第8步发布矩阵；两个生产范围分开写入。
