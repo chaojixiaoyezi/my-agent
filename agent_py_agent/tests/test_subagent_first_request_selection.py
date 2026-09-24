@@ -455,7 +455,7 @@ def test_adopted_none_choice_capacity_matches_actual_thinking_options(tmp_path, 
     assert validation["input_tokens_estimate"] == estimate_tokens(payload)
 
 
-@pytest.mark.parametrize("change", ["catalog", "disabled", "explicit_same", "unsupported_tools", "small_window", "old_generation"])
+@pytest.mark.parametrize("change", ["catalog", "disabled", "thread_settings", "explicit_same", "unsupported_tools", "small_window", "old_generation"])
 def test_automatic_validation_failure_retains_inherited_without_user_steps(tmp_path, monkeypatch, change):
     from agent_py_agent.agent.settings.model_profiles import (
         execute_model_profile_operation,
@@ -474,17 +474,24 @@ def test_automatic_validation_failure_retains_inherited_without_user_steps(tmp_p
         }))
 
     mutations = []
+    source_id = agent.conversation_store.threads.require(task.agent_thread_id).metadata[SUBAGENT_MODEL_ADVICE_KEY]["source_thread_id"]
+
+    def change_catalog():
+        data = read_model_profiles(model_profiles_path(agent.home_paths))
+        provider_id = next(iter(data["providers"]))
+        execute_model_profile_operation(agent, "save_provider", {"provider_id": provider_id, "editing": True,
+            "provider": {**data["providers"][provider_id], "api_key": "changed-private-test-key"}})
+
+    # 探针前按档位改一处结构化事实；其余档位不改，只记录已调用。
+    changes = {
+        "catalog": change_catalog,
+        "disabled": lambda: patch(agent, {"enabled": False}),
+        "thread_settings": lambda: patch(agent, {"timeout_seconds": 9}, thread_id=source_id, scope="thread"),
+        "explicit_same": lambda: thread_model_profile_id(agent, task.agent_thread_id, select="default"),
+    }
 
     def mutate():
-        if change == "catalog":
-            data = read_model_profiles(model_profiles_path(agent.home_paths))
-            provider_id = next(iter(data["providers"]))
-            execute_model_profile_operation(agent, "save_provider", {"provider_id": provider_id, "editing": True,
-                "provider": {**data["providers"][provider_id], "api_key": "changed-private-test-key"}})
-        elif change == "disabled":
-            patch(agent, {"enabled": False})
-        elif change == "explicit_same":
-            thread_model_profile_id(agent, task.agent_thread_id, select="default")
+        changes.get(change, lambda: None)()
         mutations.append(change)
 
     calls, _ = _install_automatic_provider(monkeypatch, agent, task, material, before_candidate_probe=mutate,
@@ -498,14 +505,79 @@ def test_automatic_validation_failure_retains_inherited_without_user_steps(tmp_p
     assert thread.model_selection_source == ("explicit" if change == "explicit_same" else "inherited")
     assert thread.model_selection_revision == (2 if change == "explicit_same" else 1)
     reason = thread.metadata[SUBAGENT_MODEL_ADVICE_KEY]["reason"]
-    if change == "unsupported_tools":
-        assert reason == "provider_tool_support_unknown"
-    elif change == "old_generation":
-        assert reason == "model_catalog_generation_unknown"
-    elif change == "small_window":
+    # 提交阶段的复核各有自己的原因码；owner 级设置写在模型目录里，改它会先改变目录代次。
+    expected = {"catalog": "model_catalog_changed", "disabled": "model_catalog_changed", "thread_settings": "settings_changed",
+                "explicit_same": "explicit_model_selection", "unsupported_tools": "provider_tool_support_unknown",
+                "old_generation": "model_catalog_generation_unknown"}
+    if change == "small_window":
         assert reason in {"request_capacity_exceeded", "original_context_preflight_rejected"}
-    if change in {"catalog", "disabled", "explicit_same"}:
+    else:
+        assert reason == expected[change]
+    if change in {"catalog", "disabled", "thread_settings", "explicit_same"}:
         assert mutations == [change]
+
+
+@pytest.mark.parametrize("busy", ["model_catalog", "source_thread"])
+def test_busy_commit_lock_retains_inherited_with_its_own_reason(tmp_path, monkeypatch, busy):
+    from contextlib import contextmanager
+    from pathlib import Path
+
+    from agent_py_agent.agent.common import json_io
+    from agent_py_agent.agent.settings import model_profiles
+
+    agent, task, _ = _automatic_child(tmp_path)
+    material = tmp_path / "material.txt"
+    material.write_text("材料", encoding="utf-8")
+    threads = agent.conversation_store.threads
+    source_path = Path(threads.storage.thread_path(threads.require(task.agent_thread_id).metadata[SUBAGENT_MODEL_ADVICE_KEY]["source_thread_id"]))
+    real_lock = json_io.locked_json_path
+
+    @contextmanager
+    def held_catalog(*_args, **_kwargs):
+        raise BlockingIOError("catalog lock held elsewhere")
+        yield
+
+    def held_source(path, *args, **kwargs):
+        if Path(path) == source_path and kwargs.get("blocking") is False:
+            raise BlockingIOError("source thread lock held elsewhere")
+        return real_lock(path, *args, **kwargs)
+
+    # 探针前才换上替身：准备阶段的复核照常，只有提交阶段的非阻塞加锁遇到占用。
+    def hold():
+        if busy == "model_catalog":
+            monkeypatch.setattr(model_profiles, "model_profile_generation_guard", held_catalog)
+        else:
+            monkeypatch.setattr(json_io, "locked_json_path", held_source)
+
+    calls, _ = _install_automatic_provider(monkeypatch, agent, task, material, before_candidate_probe=hold)
+    result = agent.run_subagent(task.id, dry_run=False, probe=False)
+    assert len(calls) == 2, result
+    assert {wire["model"] for wire, _ in calls} == {"inherited"}
+    advice = threads.require(task.agent_thread_id).metadata[SUBAGENT_MODEL_ADVICE_KEY]
+    assert (advice["status"], advice["reason"]) == ("retained", f"{busy}_busy")
+
+
+def test_adoption_conflict_reports_one_ordered_reason():
+    import time
+
+    from agent_py_agent.agent.agent_core.subagent.model_selection import _adoption_conflict
+
+    advice = {"status": "pending", "operation_id": "op"}
+    marker = {"status": "preparing", "attempt_id": "attempt", "operation_id": "op"}
+    candidate = SimpleNamespace(deadline=time.monotonic() + 60, advice=advice,
+                                thread=SimpleNamespace(model_profile_id="default", model_selection_revision=1))
+
+    def latest(marker, advice, revision=1):
+        return SimpleNamespace(model_profile_id="default", model_selection_revision=revision,
+                               metadata={SUBAGENT_FIRST_REQUEST_KEY: marker, SUBAGENT_MODEL_ADVICE_KEY: advice})
+
+    assert _adoption_conflict(latest(marker, advice), candidate, "attempt") == ""
+    late = SimpleNamespace(**{**vars(candidate), "deadline": time.monotonic() - 1})
+    assert _adoption_conflict(latest(None, None), late, "attempt") == "commit_deadline", "期限最先判定"
+    assert _adoption_conflict(latest(marker, {"status": "pending", "operation_id": "other"}), candidate, "attempt") == "advice_changed"
+    for consumed in (None, {**marker, "status": "reserved"}, {**marker, "attempt_id": "old"}, {**marker, "operation_id": "old"}):
+        assert _adoption_conflict(latest(consumed, advice), candidate, "attempt") == "first_request_consumed"
+    assert _adoption_conflict(latest(marker, advice, revision=2), candidate, "attempt") == "selection_revision_changed"
 
 
 def test_claimed_first_preparation_is_not_replayed_after_restart(child):

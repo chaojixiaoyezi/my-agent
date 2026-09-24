@@ -287,11 +287,11 @@ def select_first_request_model(agent: object, params: object, prompt: str) -> tu
         preparation.selection_reason = "candidate_validation_unavailable"
         return params, prompt
     try:
-        committed = _commit_candidate(agent, params, candidate)
+        conflict = _commit_candidate(agent, params, candidate)
     except BlockingIOError:
-        committed = False
-    if not committed:
-        preparation.selection_reason = "selection_changed"
+        conflict = "commit_lock_busy"
+    if conflict:
+        preparation.selection_reason = conflict
         return params, prompt
     # 已提交后绑定错误必须沿原失败路径传播，不能发一枪与 canonical profile 不同的继承模型。
     activate_model_dependencies(agent, candidate.dependencies, thread_id=candidate.thread.thread_id)
@@ -457,14 +457,39 @@ def _advice_settings_current(agent: object, thread: object, advice: dict, settin
 
 
 # LLM: 配置→父线程→creation→child 锁序；锁内只读原配置并 CAS，无网络；模型、版本、建议终态和发送预留同次写入唯一 thread。
-# 函数用途: 最后复核权限、设置、原 attempt 与 pending，再原子采用；返回 False 时原模型和其它线程字段均保留。
-def _commit_candidate(agent: object, params: object, candidate: _CandidateRequest) -> bool:
-    import time
+# 只把两把非阻塞锁的获取包进 BlockingIOError 分支，锁内逻辑的异常照原样传播；每个复核失败点返回自己的原因码，
+# 让 retained 建议记录准确的提交阶段原因（此前全部记成 selection_changed，真实样本无法归因）。
+# 函数用途: 最后复核权限、设置、原 attempt 与 pending，再原子采用；返回空串表示已采用，否则返回保留原因码，原模型和其它线程字段均保留。
+def _commit_candidate(agent: object, params: object, candidate: _CandidateRequest) -> str:
+    from contextlib import ExitStack
 
     from ...common.json_io import locked_json_path
+    from ...settings.model_profiles import model_profile_generation_guard
+
+    source_id = candidate.advice["source_thread_id"]
+    if source_id == candidate.thread.thread_id:
+        return "advice_source_is_child"
+    with ExitStack() as stack:
+        try:
+            current = stack.enter_context(model_profile_generation_guard(agent, candidate.generation, blocking=False))
+        except BlockingIOError:
+            return "model_catalog_busy"
+        if not current:
+            return "model_catalog_changed"
+        try:
+            stack.enter_context(locked_json_path(agent.conversation_store.threads.storage.thread_path(source_id), blocking=False))
+        except BlockingIOError:
+            return "source_thread_busy"
+        return _commit_locked_candidate(agent, params, candidate)
+
+
+# LLM: 调用方已持有目录代次与父线程锁；这里仍按原顺序复核父线程归属、设置、task 指纹、权限视图和期限，再进 creation 锁 CAS。
+# 函数用途: 在两把锁内完成其余复核与原子采用，返回空串或保留原因码。
+def _commit_locked_candidate(agent: object, params: object, candidate: _CandidateRequest) -> str:
+    import time
+
     from ...settings.decision_settings_projection import decision_settings_projection
     from ...settings.model_profiles import (
-        model_profile_generation_guard,
         model_profiles_path,
         read_model_profiles,
         selected_model_config,
@@ -474,55 +499,42 @@ def _commit_candidate(agent: object, params: object, candidate: _CandidateReques
     from ...user_space.approval_mode import permission_config
     from ..orchestration.decision_subagent import SubagentModelInput, _child_fingerprint
 
-    manager, threads = agent.subagents, agent.conversation_store.threads
-    source_id = candidate.advice["source_thread_id"]
-    if source_id == candidate.thread.thread_id:
-        return False
-    with model_profile_generation_guard(agent, candidate.generation, blocking=False) as current:
-        if not current:
-            return False
-        with locked_json_path(threads.storage.thread_path(source_id), blocking=False):
-            source = threads.load(source_id)
-            if source is None:
-                return False
-            _require_owner(agent, source)
-            settings = decision_settings_projection(agent, read_model_profiles(model_profiles_path(agent.home_paths)), source)
-            if not _advice_settings_current(agent, candidate.thread, candidate.advice, settings):
-                return False
-            with manager.creation_guard():
-                _require_current_attempt(manager, params, params.run_id)
-                task = manager.load(params.run_id)
-                if _child_fingerprint(SubagentModelInput({}, task)) != candidate.task_fingerprint:
-                    return False
-                config = project_task_runtime_config_overlay(selected_model_config(agent, profile_id=candidate.generation.profile_id),
-                                                             task, workspace_root=manager.workspace_root)
-                if permission_config(config, agent.home_paths, inherited=True) != candidate.dependencies.config:
-                    return False
-                if time.monotonic() >= candidate.deadline:
-                    return False
-                return _adopt_thread(agent, candidate, params)
+    manager = agent.subagents
+    source = agent.conversation_store.threads.load(candidate.advice["source_thread_id"])
+    if source is None:
+        return "source_thread_missing"
+    _require_owner(agent, source)
+    settings = decision_settings_projection(agent, read_model_profiles(model_profiles_path(agent.home_paths)), source)
+    if not _advice_settings_current(agent, candidate.thread, candidate.advice, settings):
+        return "settings_changed"
+    with manager.creation_guard():
+        _require_current_attempt(manager, params, params.run_id)
+        task = manager.load(params.run_id)
+        if _child_fingerprint(SubagentModelInput({}, task)) != candidate.task_fingerprint:
+            return "task_changed"
+        config = project_task_runtime_config_overlay(selected_model_config(agent, profile_id=candidate.generation.profile_id),
+                                                     task, workspace_root=manager.workspace_root)
+        if permission_config(config, agent.home_paths, inherited=True) != candidate.dependencies.config:
+            return "permission_changed"
+        if time.monotonic() >= candidate.deadline:
+            return "commit_deadline"
+        return _adopt_thread(agent, candidate, params)
 
 
 # LLM: 原 child update_atomic 同时提交选择与一次发送意图；显式同值选择也会让 revision/pending 比较失败，不擦除其它状态或修改已落盘 task。
-# 函数用途: 保存已验证候选；reserved 不代表网络已成功，真正 provider 边界另记 submitted 与调用编号。
-def _adopt_thread(agent: object, candidate: _CandidateRequest, params: object) -> bool:
-    import time
+# 函数用途: 保存已验证候选；返回空串表示已采用，否则返回锁内最新线程上的冲突原因码。reserved 不代表网络已成功，真正 provider 边界另记 submitted 与调用编号。
+def _adopt_thread(agent: object, candidate: _CandidateRequest, params: object) -> str:
+    conflict = "thread_update_skipped"
 
-    adopted = False
-
-    # LLM: updater 必须使用锁内最新值；旧建议、旧 revision 或首资格已消费都不覆盖当前会话。
+    # LLM: updater 必须使用锁内最新值；旧建议、旧 revision 或首资格已消费都不覆盖当前会话；重试时以最后一次判定为准。
     # 函数用途: 以原单调选择版本保存一次自动采用，保持显式事件版本和其余元数据。
     def update(latest):
-        nonlocal adopted
+        nonlocal conflict
         _require_current_attempt(agent.subagents, params, params.run_id)
-        marker, advice = _first_request_records(latest)
-        if (time.monotonic() >= candidate.deadline or advice != candidate.advice or marker is None
-                or marker.get("status") != "preparing" or marker.get("attempt_id") != params.attempt_id
-                or marker.get("operation_id") != advice.get("operation_id")
-                or (latest.model_profile_id, latest.model_selection_revision) !=
-                   (candidate.thread.model_profile_id, candidate.thread.model_selection_revision)):
+        conflict = _adoption_conflict(latest, candidate, params.attempt_id)
+        if conflict:
             return latest
-        adopted = True
+        marker, advice = _first_request_records(latest)
         return replace(latest, model_profile_id=candidate.generation.profile_id,
                        model_selection_revision=latest.model_selection_revision + 1, model_selection_source="automatic",
                        provider_context_observation={}, model_context_usage={}, metadata={
@@ -533,7 +545,26 @@ def _adopt_thread(agent: object, candidate: _CandidateRequest, params: object) -
                        })
 
     agent.conversation_store.threads.update_atomic(candidate.thread.thread_id, update)
-    return adopted
+    return conflict
+
+
+# LLM: 只比较锁内最新 child 线程的结构化字段；判定顺序固定（期限→建议→首请求资格→选择版本），同一线程状态总得同一个原因码。
+# 函数用途: 判断候选还能否写入这个 child 线程，能写返回空串。
+def _adoption_conflict(latest: object, candidate: _CandidateRequest, attempt_id: str) -> str:
+    import time
+
+    marker, advice = _first_request_records(latest)
+    if time.monotonic() >= candidate.deadline:
+        return "commit_deadline"
+    if advice != candidate.advice:
+        return "advice_changed"
+    if (marker is None or marker.get("status") != "preparing" or marker.get("attempt_id") != attempt_id
+            or marker.get("operation_id") != advice.get("operation_id")):
+        return "first_request_consumed"
+    if (latest.model_profile_id, latest.model_selection_revision) != (
+            candidate.thread.model_profile_id, candidate.thread.model_selection_revision):
+        return "selection_revision_changed"
+    return ""
 
 
 # LLM: 新工作片/Compact 只解析 canonical child 已生效选择，不读取旧建议或重跑决策；原继承模型保持原作用域，失败沿配置错误传播。
