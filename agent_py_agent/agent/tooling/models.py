@@ -75,6 +75,8 @@ class ToolModelHints:
     avoid_when: tuple[str, ...] = ()
     keywords: tuple[str, ...] = ()
     examples: tuple[str, ...] = ()
+    # 结构化归属：插件代理工具为 "plugin:<插件ID>"，其余为空；供能力推荐按插件分组，不是授权依据
+    provider_id: str = ""
 
 
 @dataclass(frozen=True)

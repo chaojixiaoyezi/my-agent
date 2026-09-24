@@ -31,6 +31,8 @@ def fields(value: object, schema: dict) -> dict:
         item = result[name]
         if spec["type"] == "integer":
             valid = type(item) is int and spec["minimum"] <= item <= spec["maximum"]
+        elif spec["type"] == "boolean":
+            valid = type(item) is bool
         elif spec["type"] == "string":
             valid = isinstance(item, str) and spec.get("minLength", 0) <= len(item) <= spec.get("maxLength", 8192)
         else:

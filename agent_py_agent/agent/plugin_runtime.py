@@ -172,7 +172,7 @@ class PluginMCPClient(MCPStdioClient):
         keywords = tuple(dict.fromkeys((*spec.hints.keywords, plugin_id, plugin_id.replace("-", "_"),
                                         *plugin_id.replace("_", "-").split("-"), info.name)))
         return replace(spec, name=name, description=sanitize_credentials(description),
-                       hints=replace(spec.hints, keywords=keywords))
+                       hints=replace(spec.hints, keywords=keywords, provider_id="plugin:" + plugin_id))
 
     # LLM: 缓存只在原连接/激活再次核验后整体替换；当前安装版本不能改变同连接代理的实现身份。
     # 函数用途: 为下一轮缓存完整工具贡献，调用方仍须在自己的权限视图中投影。

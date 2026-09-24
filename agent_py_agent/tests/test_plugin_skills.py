@@ -121,6 +121,7 @@ def test_plugin_tools_carry_plugin_identity_and_hidden_plugins_are_named():
     assert spec.description.startswith("插件 design-lite（按模板生成 HTML 设计文件）的 create 工具。")
     assert {"design-lite", "design_lite", "design", "lite", "create", "mcp"} <= set(spec.hints.keywords)
     assert spec.name == "plugin__design_lite__create" and spec.hints.category == "plugins"
+    assert spec.hints.provider_id == "plugin:design-lite" and base.hints.provider_id == ""
 
     other = ToolModelSpec(name="web_fetch", description="抓取网页", input_schema={}, hints=ToolModelHints(category="web"))
     notice = _render_deferred_notice([spec, other], presentation_shortlist_names=frozenset())

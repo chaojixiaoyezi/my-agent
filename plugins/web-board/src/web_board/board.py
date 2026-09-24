@@ -60,7 +60,8 @@ class BoardService:
     def snapshot(self) -> dict:
         with self.lock:
             running = self.stop_reason is None
-            return {"serving": running, "url": self.url if running else None, "root": self.display,
+            # 结果会进入模型上下文与历史，只给不含令牌的地址；完整链接由 server 写入私有文件并直接在浏览器打开
+            return {"serving": running, "address": f"http://{HOST}:{self.port}/" if running else None, "root": self.display,
                     "port": self.port if running else None, "requests": self.requests,
                     "idle_stop_seconds": self.idle_stop_seconds, "stop_reason": self.stop_reason}
 

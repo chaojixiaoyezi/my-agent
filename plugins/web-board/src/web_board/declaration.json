@@ -97,6 +97,11 @@
         "maximum": 16777216,
         "default": 262144
       },
+      "open_browser": {
+        "type": "boolean",
+        "description": "serve 后是否用系统默认浏览器直接打开带令牌的链接",
+        "default": true
+      },
       "idle_stop_seconds": {
         "type": "integer",
         "description": "无请求多少秒后自动停止服务",

@@ -24,8 +24,8 @@ python scripts/build_plugin_package.py \
 完成宿主安装和启用后：
 
 ```text
-/plugins@web-board serve --path docs      # 启动，返回 http://127.0.0.1:<端口>/?token=<令牌>
-/plugins@web-board status                 # 是否在服务、地址（含令牌）、目录、已处理请求数
+/plugins@web-board serve --path docs      # 启动；返回不含令牌的地址，完整链接写入私有文件并用默认浏览器打开
+/plugins@web-board status                 # 是否在服务、地址（不含令牌）、目录、已处理请求数
 /plugins@web-board stop                   # 停止并释放端口
 ```
 
@@ -44,7 +44,9 @@ python scripts/build_plugin_package.py \
 - **只绑回环**：只监听 `127.0.0.1`，端口由系统随机分配；不监听局域网或公网地址，不访问外网。
 - **令牌**：每次 `serve` 生成新的随机令牌；每个请求都要带正确令牌（查询参数 `token`，或首次带令牌访问后下发的
   `HttpOnly; SameSite=Strict` cookie），否则 403。响应带 `Referrer-Policy: no-referrer`、`Cache-Control: no-store`，
-  且不写访问日志，避免带令牌的地址外泄。令牌会出现在工具返回里（即进入模型上下文和会话记录），不要把地址转发给他人。
+  且不写访问日志，避免带令牌的地址外泄。令牌不进入工具返回（宿主也会脱敏 token 参数）：完整链接只写入插件数据目录下的 `last-link.txt`（0600），
+  并在设置 `open_browser`（默认 true）时用系统默认浏览器直接打开；无桌面环境时请从该文件取链接。
+  注意：显式 `/plugins@web-board serve` 每次命令是一次性连接，命令结束服务随之停止；要持续浏览请用普通中文让模型调用。
 - **只读**：只接受 GET/HEAD，写方法返回 405；插件从不写工作区。页面 CSP 禁止脚本和外部资源，
   `/raw` 附加 `CSP sandbox` 与 `nosniff`，直接打开 HTML/SVG 原文件也不会执行脚本。
 - **只限指定目录**：`serve` 时冻结本次调用的宿主读取上下文；之后每个请求的路径必须是该目录下的相对路径（拒绝 `..`、

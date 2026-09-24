@@ -11,9 +11,11 @@ import os
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 from urllib.parse import quote, urlsplit
 from zipfile import ZipFile
 
@@ -71,10 +73,21 @@ def workspace(tmp_path):
 # 函数用途: 启动一个安装后的 web-board MCP 进程。
 def start(installed, settings=None):
     python, _ = installed
-    env = {"MY_AGENT_PLUGIN_SETTINGS": json.dumps(settings)} if settings is not None else {}
+    # 测试中绝不真的打开浏览器；数据目录放临时位置，完整链接从那里读
+    data_dir = tempfile.mkdtemp(prefix="web-board-data-")
+    env = {"MY_AGENT_PLUGIN_SETTINGS": json.dumps({"open_browser": False, **(settings or {})}),
+           "MY_AGENT_PLUGIN_DATA_DIR": data_dir}
     client = MCPStdioClient(_config("", name="web-board", command=str(python), args=["-I", "-m", "web_board"], env=env))
     client.start()
     return client
+
+
+# 函数用途: 从 serve 结果指向的私有文件读取带令牌的完整链接，并确认令牌没有出现在工具结果里。
+def link(served):
+    url = Path(served["link_file"]).read_text(encoding="utf-8").strip()
+    assert "token" not in json.dumps(served) and served["browser_opened"] is False
+    assert oct(Path(served["link_file"]).stat().st_mode & 0o777) == "0o600"
+    return url
 
 
 # 函数用途: 带逐次读取上下文调用工具并解析 JSON 正文。
@@ -121,7 +134,7 @@ def test_serve_browse_and_stop(installed_board, workspace):
     try:
         error, served = invoke(client, workspace, "serve", path="site")
         assert not error, served
-        url, port = served["url"], served["port"]
+        url, port = link(served), served["port"]
         parts = urlsplit(url)
         assert parts.hostname == "127.0.0.1" and parts.port == port and "token=" in parts.query
         token = parts.query.split("token=", 1)[1]
@@ -172,17 +185,17 @@ def test_serve_browse_and_stop(installed_board, workspace):
         assert status == 200 and body == ""
 
         error, status_value = invoke(client, workspace, "status")
-        assert not error and status_value["serving"] and status_value["url"] == url
+        assert not error and status_value["serving"] and status_value["address"] == served["address"]
         assert status_value["root"] == "site" and status_value["requests"] >= 20
 
         # 再次 serve 先停旧服务
         error, second = invoke(client, workspace, "serve", path=".")
         assert not error and second["replaced_previous"] and second["root"] == "."
         assert not port_open(port) and port_open(second["port"])
-        assert "top.txt" in fetch(second["url"])[1]
+        assert "top.txt" in fetch(link(second))[1]
 
         error, stopped = invoke(client, workspace, "stop")
-        assert not error and stopped["serving"] is False and stopped["url"] is None
+        assert not error and stopped["serving"] is False and stopped["address"] is None
         assert stopped["stop_reason"] == "stopped" and not port_open(second["port"])
         assert invoke(client, workspace, "stop")[1]["serving"] is False
     finally:
@@ -197,7 +210,7 @@ def test_serve_rejects_bad_roots_and_keeps_old_service(installed_board, workspac
                            ("site/escape_dir", "PATH_READ_SCOPE_BLOCKED"), ("site/alias", "UNSAFE_PATH"), ("top.txt", "UNSAFE_PATH"), ("nope", "NOT_FOUND")]:
             error, result = invoke(client, workspace, "serve", path=path)
             assert error and result["code"] == code, (path, result)
-        assert invoke(client, workspace, "status")[1]["url"] == served["url"] and port_open(served["port"])
+        assert invoke(client, workspace, "status")[1]["address"] == served["address"] and port_open(served["port"])
         error, result = invoke(client, workspace, "serve", path="site", extra=1)
         assert error and result["code"] == "INVALID_ARGUMENTS"
     finally:

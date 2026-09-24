@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
+import subprocess
 import sys
 from importlib.metadata import version
 
@@ -21,6 +23,34 @@ from my_agent_plugin_api.workspace_read_context import (
 from .board import BoardService
 from .declarations import declaration, fields
 from .reading import BoardError, authorized_root
+
+
+# LLM: 完整链接含访问令牌，宿主会从工具结果里脱敏，所以只写到插件数据目录下 0600 文件；没有数据目录时不写。副作用：写文件。
+# 函数用途: 保存最近一次服务的完整链接，返回文件路径或 None。
+def write_link_file(url: str) -> str | None:
+    base = os.environ.get("MY_AGENT_PLUGIN_DATA_DIR", "")
+    if not base or not os.path.isdir(base):
+        return None
+    path = os.path.join(base, "last-link.txt")
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(url + "\n")
+    return path
+
+
+# LLM: 只调用系统默认打开程序（macOS open / Linux xdg-open），链接作为单个参数传入；失败或无桌面时返回 False，不影响服务。
+#   子进程不另开会话，超时 10 秒。副作用：在用户桌面打开浏览器。
+# 函数用途: 把完整链接交给默认浏览器，用户不需要看到令牌。
+def open_in_browser(url: str) -> bool:
+    opener = "open" if sys.platform == "darwin" else "xdg-open" if sys.platform.startswith("linux") else ""
+    program = shutil.which(opener) if opener else None
+    if program is None or (sys.platform.startswith("linux") and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))):
+        return False
+    try:
+        return subprocess.run([program, url], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, timeout=10, check=False).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 # LLM: 对象持有静态声明、已验证设置和当前（或最近一次）网页服务；不缓存除 serve 冻结上下文之外的权限。
@@ -101,7 +131,10 @@ class WebBoardServer:
         self.stop("replaced")
         self.board = BoardService(context, root, max_preview_bytes=self.settings["max_preview_bytes"],
                                   idle_stop_seconds=self.settings["idle_stop_seconds"])
-        return {**self.board.snapshot(), "replaced_previous": replaced}
+        link_file = write_link_file(self.board.url)
+        opened = open_in_browser(self.board.url) if self.settings.get("open_browser", True) else False
+        return {**self.board.snapshot(), "replaced_previous": replaced, "link_file": link_file, "browser_opened": opened,
+                "hint": "带令牌的完整链接已写入 link_file（仅本人可读）" + ("，并已在默认浏览器打开。" if opened else "。")}
 
     # 函数用途: 返回当前服务状态；从未启动时返回未运行。
     def status(self) -> dict:
