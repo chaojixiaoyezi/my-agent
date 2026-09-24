@@ -63,6 +63,10 @@ def test_coordinator_policy_does_not_silently_take_over_delegated_work():
     assert "用户明确分给你的工作不要一并转交" in policy
     assert "接手下级范围前确认其已结束或已停止冲突操作" in policy
     assert "不为保持忙碌编造文档" in policy
+    # 参照 Codex spawn_agent 合同的软引导：默认自己做、派工写清产出、交回先抽查再汇总。
+    assert "没有要求委派时，优先自己完成" in policy
+    assert "写清要交回的具体产出" in policy
+    assert "不要直接转述下级的“通过”" in policy
     assert "execution_context.output_json" not in policy
     assert "角色就变为协调者" not in policy
     assert "诚实列出未完成项不能代替继续工作" in policy

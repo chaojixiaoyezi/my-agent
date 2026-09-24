@@ -28,6 +28,9 @@ def test_runner_prompt_reports_checks_naturally_without_machine_acceptance():
     assert "不要输出 SUBAGENT_RESULT" in prompt
     assert "validation_method" not in prompt
     assert "command/working_dir" not in prompt
+    # 数字与核对结论必须来自实际工具输出；未执行的检查如实标为未核对（TUI229/233 心算合计样本）。
+    assert "必须来自本轮实际执行的工具输出" in prompt
+    assert "明确标为未核对" in prompt
 
 
 def test_runner_prompt_tells_leaf_to_chunk_long_file_writes():

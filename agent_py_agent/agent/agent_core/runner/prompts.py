@@ -122,7 +122,9 @@ def render_subagent_runner_prompt(prepared: SubagentRunnerPromptInput) -> str:
         "```\n\n"
         "## Required Output\n\n"
         "像普通协作者一样给出简洁最终回复：说明完成了什么、重要文件或结果在哪里、"
-        "实际运行了哪些检查，以及是否存在真实阻塞。不要输出 SUBAGENT_RESULT、"
+        "实际运行了哪些检查，以及是否存在真实阻塞。回复中的数字、统计和核对结论必须来自本轮实际执行的"
+        "工具输出，并说明由哪一步得到；没有用工具计算或核对过的内容明确标为未核对，不要心算后报告通过。"
+        "不要输出 SUBAGENT_RESULT、"
         "状态 JSON、验收模板或为了填格式而重复上下文；本轮是否结束由宿主根据工具循环决定。\n"
     )
 
