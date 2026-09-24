@@ -30,6 +30,7 @@ from ...memory_store import (
 )
 from ...runtime_errors import runtime_error_report
 from ...tooling.output_projection import project_tool_output_body, redact_tool_output_text
+from ...tooling.runtime_facts import render_tool_runtime_facts
 from ...tooling.tool_search_state import pending_carried_loaded_tool_names
 from ...user_space.context_bundle import MainContextBundleRequest, build_main_context_bundle
 from ...user_space.home_layout import runtime_route_root_and_index
@@ -37,7 +38,6 @@ from .._runtime_params import ToolLoopExecuteParams
 from .._tool_loop_service import execute_tool_loop
 from ..parameters import _one_shot_tool_call_keys
 from ..tool_context.call_reducer import render_tool_payload_for_live_prompt
-from ..tool_context.runtime_facts import render_tool_runtime_facts
 from .live_archive import write_runtime_fact_start_if_enabled
 from .loop_models import (
     FinalizeParams,

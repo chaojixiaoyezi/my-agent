@@ -1,5 +1,15 @@
 # 测试与发布验收
 
+
+## 第8步精确来源与耐久清理事实组合（本地，未发布）
+
+- 合入逐调用来源：来源为 canonical run/attempt/call，旧无来源记录保留 uncertain；来源/尾部和同号跨请求不能混淆，旧无 refs 的编号算法不变。
+- 耐久恢复缺口：原测试仅从内存 archive 恢复。新测试使用真实 executor → externalizer → 磁盘索引 → carried reader → 模型上下文；短／外置输出原有 2 项实际失败，修复后相关四文件106项通过。索引只保留共享有界 process，不含 PID；调用身份保持。
+- 发布组合首轮：48个直接相关文件1212 passed、24项既有xfail（49.55秒）。不同轮次的数字不累计作验收总数。
+- 独立末审发现新 ID 未包含未知尾部的逐位裸 ID，合法候选可碰撞；真实 Store 提交赢家后写入 CAS 败者，读取的尾部实际被改为另一值。新增用例红转绿，新 ID 纳入 retained IDs；旧 ID 不改。最终受影响四文件159 passed（5.24秒），覆盖来源、原生 Compact、Gateway Compact、清理事实恢复。
+- 旧无身份大历史仍可能无法安全 Compact；不制造身份或误删，不声称 provider overflow 已兼容。旧 reader 不能直接读取新混源账本，回滚须保持新增数据与可读运行时。
+- 本地严格 gate 已通过：全目录 Ruff、doc sync、strict code-size（hard=0、blocked=False，基线未变）、diff、clean-package。未运行真实模型或新版 TUI；本轮不是双机部署，线上 CI 未作为验收来源。
+
 ## 第8步并发段与收口组合
 
 并发段片0c19b2e3c精选为8468998b6，两个直接测试文件65 passed，包含21项新增因果／交错用例；原取消、审批、线程执行和provider顺序记账未移动。当前组合另把no-action两项常量移到唯一执行模块，原数值和测试断言不变。

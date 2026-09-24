@@ -76,7 +76,7 @@ def compact_checkpoint_id(
     return f"compact-{thread.compact_generation + 1}-{digest}"
 
 
-# LLM: 无 refs 的旧调用保持原 ID；新候选显式把规范来源和尾部 refs 加入内容地址，避免同裸编号的
+# LLM: 无 refs 的旧调用保持原 ID；新候选把来源、尾部 refs 及逐位尾部 ID 加入内容地址，避免未知 ref 的
 # 迟到候选在 CAS 失败后仍以同 ID 遮蔽已提交行。旧持久 ID 不重算。
 # 函数用途: 为一次工具历史压缩生成稳定编号，并隔离不同原始来源的竞争候选。
 def live_tool_compact_checkpoint_id(
@@ -87,6 +87,7 @@ def live_tool_compact_checkpoint_id(
     attempt_id: str,
     source_tool_call_refs: tuple[ToolCallRef, ...] | None = None,
     retained_tool_call_refs: tuple[ToolCallRef | None, ...] = (),
+    retained_tool_call_ids: tuple[str, ...] = (),
 ) -> str:
     payload = "\0".join(
         [
@@ -101,6 +102,7 @@ def live_tool_compact_checkpoint_id(
     if source_tool_call_refs is not None:
         payload += "\0" + json.dumps(
             {
+                "retained_tool_call_ids": list(retained_tool_call_ids),
                 "source_tool_call_refs": [ref.to_dict() for ref in source_tool_call_refs],
                 "retained_tool_call_refs": [
                     ref.to_dict() if ref is not None else None for ref in retained_tool_call_refs
@@ -215,6 +217,7 @@ def write_live_tool_compact_checkpoint(
         attempt_id=request.attempt_id,
         source_tool_call_refs=request.source_tool_call_refs,
         retained_tool_call_refs=request.retained_tool_call_refs,
+        retained_tool_call_ids=retained_ids,
     )
     backend = getattr(agent, "backend", None)
     append_jsonl(

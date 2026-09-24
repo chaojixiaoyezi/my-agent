@@ -223,6 +223,24 @@ def test_orphan_with_same_legacy_hash_inputs_cannot_replace_committed_refs(tmp_p
     assert model_visible_active_turn_tool_calls(agent, attrs, [old, current]) == [current]
 
 
+def test_orphan_cannot_replace_committed_unknown_tail_ids(tmp_path):
+    from agent_py_agent.agent.conversation.compact_checkpoint import (
+        committed_compact_checkpoint_chain,
+    )
+    from agent_py_agent.agent.conversation.live_tool_compact import commit_live_tool_compact
+
+    agent, binding = _commit_environment(tmp_path)
+    first = replace(_commit_request([_record()]), retained_tool_call_ids=("legacy-a",),
+                    retained_tool_call_refs=(None,))
+    thread = commit_live_tool_compact(agent, binding, first)
+    second = replace(first, retained_tool_call_ids=("legacy-b",))
+    with pytest.raises(RuntimeError, match="generation changed"):
+        commit_live_tool_compact(agent, binding, second)
+    row, = committed_compact_checkpoint_chain(agent, thread)
+    assert row["retained_tool_call_ids"] == ["legacy-a"]
+    assert row["retained_tool_call_refs"] == [None]
+
+
 def test_commit_keeps_duplicate_bare_ids_counts_and_submitter_semantics(tmp_path):
     from agent_py_agent.agent.conversation.compact_checkpoint import (
         committed_compact_checkpoint_chain,

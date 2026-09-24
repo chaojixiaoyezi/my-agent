@@ -616,3 +616,24 @@ def test_process_facts_follow_real_executor_archive_and_native_pair(tmp_path, mo
     assert '"confirmed": false' in carried and '"unresolved_count": 1' in carried
     assert "4001" not in carried
     assert 'effect_outcome: unknown' in carried
+
+    from agent_py_agent.agent.memory_archive.compact_tool_output_refs import (
+        carried_tool_call_records,
+    )
+
+    # 重新从磁盘索引读取，不能拿本轮内存归档代替跨工作片恢复。
+    recovered = carried_tool_call_records(tmp_path, {"conversation_request_id": "receipt-request"})
+    assert len(recovered) == 1
+    assert recovered[0]["tool_result_envelope"]["process"] == archived_process
+    for key in ("run_id", "attempt_id", "call_id"):
+        assert recovered[0][key] == getattr(execution.call, key)
+    from agent_py_agent.agent.common.tool_output_paths import tool_output_index_paths_for_lookup
+
+    index_rows = [json.loads(line) for path in tool_output_index_paths_for_lookup(tmp_path)
+                  for line in path.read_text().split("\n") if line]
+    assert all(row["tool_process"] == archived_process for row in index_rows)
+    assert "4001" not in json.dumps(index_rows)
+    resumed = _reconstructed_tool_context_entry(recovered[0])
+    assert "[runtime-process-facts]" in resumed
+    assert '"confirmed": false' in resumed and '"unresolved_count": 1' in resumed
+    assert "4001" not in resumed

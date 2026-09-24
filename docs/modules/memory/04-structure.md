@@ -1,5 +1,7 @@
 # Memory Structure
 
+第8步索引恢复补齐：externalizer 保存有界 `tool_process`，carried reader 恢复原 process 信封；投影唯一位于 `tooling/runtime_facts.py`，旧索引不推定清理成功。组件验证与真实 TUI 分开。
+
 ## Live-tool 逐调用来源
 
 `tooling/call_ref.py` 只校验 canonical 三元身份。`conversation/compact_checkpoint.py` 的 v2 行追加 `source_tool_call_refs`、`retained_tool_call_refs`；来源必须完整，未知保留项为 `null`。两组精确 refs 不可重复或重叠，裸 call id 可重复或交叉。带 refs 的新候选把规范 refs 加入内容地址；旧无 refs ID 输出和旧行不重算。顶层 request/attempt 仍是提交者，原写 checkpoint → 锁内 generation CAS 不变。

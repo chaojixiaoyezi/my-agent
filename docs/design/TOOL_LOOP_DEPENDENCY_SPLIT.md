@@ -83,7 +83,7 @@ Compact／媒体开发线与主线存在大量decision/Jev前置改动。以f2bc
 
 解决问题：TUI213的进程清理回执留在canonical ToolResult的handler_details中，但正文归约和跨工作片恢复都丢掉process，模型只能看到退出码而无法区分命令结束与资源清理。
 
-`tool_context/runtime_facts.py`只接结构化Mapping，统一原verification块及必要process投影；reducer的内联、指定live正文和外置摘要在最终脱敏前共用它。原工具正文不参与事实提取，ToolResult状态、错误、effect_outcome、调用身份和执行器不变。归档既有tool_result_envelope只补同一有界process投影，恢复入口再次读取同一结构和数量，原schema与持久权威不新增。
+`tooling/runtime_facts.py`只接结构化Mapping，统一原verification块及必要process投影；reducer的内联、指定live正文和外置摘要在最终脱敏前共用它。原工具正文不参与事实提取，ToolResult状态、错误、effect_outcome、调用身份和执行器不变。归档既有tool_result_envelope只补同一有界process投影，恢复入口再次读取同一结构和数量，原schema与持久权威不新增。
 
 - 字段按存在性保留False、0、None；退出码两个原键不互补，child termination与session cleanup独立。
 - 只投影短字符串、64bit以内整数和有限浮点；畸形或超大值略去，不变成零／成功。PID及实例列表只带数量，命令、路径、输出和诊断正文不复制。
@@ -139,3 +139,12 @@ Compact／媒体开发线与主线存在大量decision/Jev前置改动。以f2bc
 segment_planning只接受调用列表／起点、有效批上限和原位Compact／调度描述查询。每条候选仍先查Compact再读取该调用快照、工作根和写边界，命中屏障／冲突／批上限就停止扫描，异常原样传播。执行轮持有原线程身份、审批、取消、配对记录和完整provider调用序列；批大小只分批，不丢尾部调用。
 
 删除迁完的旧段扫描、批大小和整数转换helper；任务属性优先、缺省才读配置，0／负数原语义不变。不接整个Agent或request换名context。无动作闸的两项常量迁到唯一消费执行轮，移除反向导入主循环服务，值及判断不变。独立两文件65项通过（包含21项新增边界／真实轮交错测试）；与收口片组合另记TESTS。
+
+
+### 耐久索引恢复补齐（第8步本地候选）
+
+此前组件验证只从本轮内存归档恢复，未覆盖 Gateway 实际使用的磁盘索引。新增用例经过真实 executor、归档器、磁盘 index、carried reader 和上下文恢复；短输出及外置输出均复现缺失 process 信封。
+纯投影迁至 `tooling/runtime_facts.py`，删除旧位置，避免 memory_archive 反向依赖 agent_core。索引新增可选 `tool_process`，只保存同一有界字段；carried 恢复为既有 `tool_result_envelope.process`。原调用身份、未知副作用、独立 child/session 清理确认及最终脱敏保持，PID、原始诊断和工具正文不成为恢复事实。旧索引缺字段仍缺失，不推定成功、不改旧行。
+本片不增加执行器或持久权威；需随精确来源片组合检查和实际 TUI 验收。
+
+新候选编号同时包含逐位 retained IDs：未知来源的 refs 可以均为 null，若只哈希 refs，合法旧尾部差异仍会生成同 ID，使迟到 CAS 败者覆盖赢家审计边界。末审已用真实 Store 复现并补齐，旧无 refs 编号保持不变。

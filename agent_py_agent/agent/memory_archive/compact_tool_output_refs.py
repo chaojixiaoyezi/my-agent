@@ -10,6 +10,7 @@ from typing import Any
 from ..common.json_io import jsonl_lines
 from ..common.tool_output_paths import tool_output_index_paths_for_lookup
 from ..tooling.call_ref import ToolCallRef, tool_call_ref_from_record
+from ..tooling.runtime_facts import project_process_runtime_facts
 from .tool_output_externalizer import model_visible_tool_parameters
 
 _INTERNAL_LEDGER_TOOLS = {"task_progress"}
@@ -156,7 +157,7 @@ def _is_tool_call_row(row: dict[str, Any]) -> bool:
 
 
 # LLM: A small output is indexed as tool_call and an externalized output as tool_output;
-# both are one exact invocation, distinguished by scoped_call_id rather than filename.
+# both are indexed calls; exact identity validation and deduplication happen in carried_tool_call_records.
 # 函数用途: 判断索引行能否作为一次历史工具调用恢复。
 def _is_indexed_call_fact(row: dict[str, Any]) -> bool:
     return (
@@ -169,7 +170,7 @@ def _is_indexed_call_fact(row: dict[str, Any]) -> bool:
 # LLM: Convert index metadata into the existing carried archive contract. Successful indexed
 # calls prove the handler ran; failed legacy rows remain fail-closed because the index does not
 # claim a handler boundary. Copy attempt/turn from the original row, never the recovery request.
-# 函数用途: 恢复索引行的原始调用身份、执行参数和结果引用；缺字段仍为空，不猜来源。
+# 函数用途: 恢复原始调用身份、执行参数、结果引用与有界进程事实；缺字段仍为空，不猜来源或清理成功。
 def _carried_tool_call_record(row: dict[str, Any]) -> dict[str, Any]:
     path = str(row.get("path") or "").strip()
     digest = str(row.get("sha256") or "").strip()
@@ -216,6 +217,8 @@ def _carried_tool_call_record(row: dict[str, Any]) -> dict[str, Any]:
         value = row.get(key)
         if isinstance(value, dict):
             record[key] = dict(value)
+    if process := project_process_runtime_facts(row.get("tool_process")):
+        record["tool_result_envelope"] = {"process": process}
     _attach_carried_operation_facts(record, row.get("tool_operation"))
     return record
 

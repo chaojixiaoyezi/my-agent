@@ -34,6 +34,7 @@ from ..tooling.output_projection import (
     redact_tool_output_text,
     tool_output_projection_policy,
 )
+from ..tooling.runtime_facts import project_process_runtime_facts
 from .schema import (
     RuntimeMemorySchemaOptions,
     runtime_memory_schema_payload,
@@ -553,9 +554,9 @@ def _top_level_parameter_name(value: Any) -> str:
     return name if name and name.replace("_", "").isalnum() else ""
 
 
-# LLM: 持久索引只保存执行/操作生命周期、字段路径、来源类别和结构化引用，
+# LLM: 持久索引只保存执行/操作生命周期、有界进程事实、字段路径、来源类别和结构化引用，
 # 不得复制参数值、工具正文或任意 envelope 私有字段。
-# 函数用途: 把工具入口生成的权威终态、value-free 参数来源与读取窗口统一投影到耐久工具索引。
+# 函数用途: 把工具入口的终态、进程清理事实、value-free 参数来源与读取窗口投影到耐久工具索引。
 def _result_envelope_index_metadata(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
@@ -564,6 +565,8 @@ def _result_envelope_index_metadata(value: Any) -> dict[str, Any]:
         metadata["tool_execution"] = tool_execution
     if tool_operation := _safe_tool_operation(value.get("tool_operation")):
         metadata["tool_operation"] = tool_operation
+    if process := project_process_runtime_facts(value.get("process")):
+        metadata["tool_process"] = process
     if read_window := _read_window_from_envelope(value):
         metadata["read_window"] = read_window
     if page_window := _page_window_from_envelope(value):
@@ -579,7 +582,7 @@ def _result_envelope_index_metadata(value: Any) -> dict[str, Any]:
 
 
 # LLM: Artifact and short-call index rows must carry the same bounded lifecycle metadata;
-# never copy arbitrary artifact payload fields into the lookup index.
+# process uses the shared bounded projection; never copy arbitrary payload fields into the index.
 # 函数用途: 从工具归档记录中挑出后台续接需要的安全元数据，保证大小输出采用同一恢复语义。
 def _index_metadata_from_record(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
@@ -598,6 +601,8 @@ def _index_metadata_from_record(value: Any) -> dict[str, Any]:
             metadata[key] = dict(item)
         elif key.startswith("tool_output_") and isinstance(item, str):
             metadata[key] = item
+    if process := project_process_runtime_facts(value.get("tool_process")):
+        metadata["tool_process"] = process
     if input_sources := _safe_input_sources(value.get("input_sources")):
         metadata["input_sources"] = input_sources
     return metadata

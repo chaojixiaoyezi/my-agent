@@ -1,6 +1,6 @@
 
 # LLM: 工具回执、文件引用及删除记录进入同一 exact run 账本；不从正文提取路径或完成状态。
-# 模块用途: 归档输出、原始调用身份和文件交接，保留有界清理事实供续跑投影；不改变执行结果。
+# 模块用途: 归档输出、原始调用身份和文件交接；复用 tooling 的有界清理投影，与耐久索引恢复保持一致。
 from __future__ import annotations
 
 from pathlib import Path
@@ -19,12 +19,12 @@ from ..tooling.executor import ToolOutputProjection
 from ..tooling.models import ToolHandlerOutcome, output_policy_for_outcome
 from ..tooling.output_projection import project_tool_output_body
 from ..tooling.runtime_contracts import ToolCall, ToolContentBlock, ToolResultRef
+from ..tooling.runtime_facts import project_process_runtime_facts
 from .run_task_workspace_writer import (
     current_run_task_workspace_root,
     current_run_tool_output_archive_root,
 )
 from .runtime.owner_roots import runtime_owner_root
-from .tool_context.runtime_facts import project_process_runtime_facts
 from .tool_loop.recovery import runtime_run_scope
 from .tool_loop.round_execution import ToolCallRecordParams
 from .tool_output_failsafe import write_tool_output_fail_safe_checkpoint

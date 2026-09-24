@@ -1,5 +1,5 @@
 # LLM: 正文按原工具信任策略处理，执行事实只读canonical metadata并在统一脱敏前追加；文本与native共用此入口。
-# 模块用途: 将工具结果压成可读、可恢复的模型上下文，保留核验和进程清理事实，不改状态或原归档。
+# 模块用途: 将工具结果压成模型上下文；核验与进程事实复用 tooling 投影，和索引恢复同口径，不改原结果。
 
 from __future__ import annotations
 
@@ -18,9 +18,9 @@ from ...tooling.output_projection import (
     redact_tool_output_text,
 )
 from ...tooling.runtime_contracts import ToolContentBlock, ToolResult
+from ...tooling.runtime_facts import render_tool_runtime_facts
 from ..orchestration.context.live_summary import orchestration_live_summary
 from .action_summary import actionable_tool_result_summary
-from .runtime_facts import render_tool_runtime_facts
 
 
 # LLM: 所有长度分支共用事实投影和最终脱敏；不得将外部正文解析为宿主事实，调用方将同一字符串绑定native结果。

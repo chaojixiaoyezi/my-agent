@@ -1,6 +1,8 @@
 # 设计台账
 
-- **第8步Compact逐调用来源修复中**：已确认裸call_id跨请求过滤会误隐藏新工具结果；沿现有live-tool账增加精确来源引用，保留既有ID／无refs旧编号结果／提交者语义／CAS，新候选将精确来源纳入内容地址，存量不确定来源保留并显式标记。工具并发段窄依赖独立并行，详见[职责拆分](docs/design/TOOL_LOOP_DEPENDENCY_SPLIT.md#发布前缺口compact逐调用来源已确认修复中)。尚未发布验收。
+- **第8步耐久进程事实恢复本地修复**：投影下移 tooling，大小输出索引保存同一有界 process；旧行不制造确认。真实索引恢复已复现缺口并修复；末审补齐未知尾部 ID 的候选内容地址，组合检查已过，待发布／原生 TUI；见[依赖拆分](docs/design/TOOL_LOOP_DEPENDENCY_SPLIT.md#耐久索引恢复补齐第8步本地候选)。
+
+- **第8步Compact逐调用来源已本地集成、待组合验收**：已确认裸call_id跨请求过滤会误隐藏新工具结果；沿现有live-tool账增加精确来源引用，保留既有ID／无refs旧编号结果／提交者语义／CAS，新候选将精确来源纳入内容地址，存量不确定来源保留并显式标记。工具并发段窄依赖独立并行，详见[职责拆分](docs/design/TOOL_LOOP_DEPENDENCY_SPLIT.md#发布前缺口compact逐调用来源已确认修复中)。尚未发布验收。
 
 第8步 Compact 边界在本地开发：候选只借原三个列表和估算回调；checkpoint/CAS 成功后投影失败不得回滚内存历史。C 顺序来源保持原持久格式与降级语义，不隐式引入 v3/scope 迁移；旧跨 request 调用编号过滤风险仍待处理。详见[模型与工具循环](docs/design/TOOL_LOOP_DEPENDENCY_SPLIT.md#第8步-compact-候选与提交边界)。
 
