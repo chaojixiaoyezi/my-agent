@@ -51,3 +51,30 @@
 - 候选材料只有模型名、后端和声明窗口，指令又要求"候选声明不是实际能力证明"，Jev 缺少语义依据。要让自然的跨模型采用有机会出现，需要给候选补上由用户授权的结构化用途说明。这是设计方向，未实施，已记入 [DESIGN_LEDGER](../../DESIGN_LEDGER.md)。
 
 **清理**：TUI `/exit`，Gateway 经原 CLI 停止，PID 不存活，8431 无监听，pending/processing 为 0；原 CAS 恢复隔离 owner 设置（owner revision 25，enabled=false）。清理记录 `artifacts/cleanup-current.json`（SHA256 `57c36820d4424616d6146abfdcf55d90ef7b96568b32410513e43223f6704a40`），本机副本在 `~/.my-agent/decision-evidence/p5d-3d2424786-20260924/`（仓库外）。本轮 Jev 1 次，累计 66 次。
+
+## 第五、六个样本：候选带用途标签（2026-09-24，main `4ec0e11f3` 与分支 `claude/decision-selection-question` `10050d927`）
+
+**共同环境**：
+- 测试机新隔离目录，唯一 Gateway 8431，原生 TUI，决策只开 `points.model_selection.mode=apply`（期限 8 秒单次、10 秒阶段），压缩点 50%。
+- 需求、8 份材料（合计 325,451 字）与第四个样本逐字相同。
+- 唯一不同：经原 `save_model` 操作（与 `/model` 表单同一路径）给三个对话模型写了用途标签：M2.7 为 `general`，M3 与 DeepSeek（都声明 1M 窗口）为 `long_document, large_context`。
+
+**第五个样本（main `4ec0e11f3`，wheel SHA256 `9c878e90aa781ee60b6d6a1074e41add7a32f0f9fde475175e9dabac53e42ae4`）**：
+- Jev 1 次（HTTP 200，0.73 秒，1 题），仍选当前 M2.7：`choice` 等于冻结的 M2.7，`adopted=false`，`not_evaluated`。
+- 主代理这次把 8 份资料分给 8 个子代理（子代理选模关闭，都用继承的 M2.7），请求 51 秒 done，后台接续给出交叉结论。
+- 结论与事实不符：各份差异件数合计多数算错，"差异件数最多"与"最多的原因"都答错（事实：每份 670 段、各有 61 个零件仓位，合计 3,345–3,354 件，ledger-08 最多；四类原因各 1,340 次，完全打平）。
+- 原因：采用模式会整段替换问题说明，替换后的说明丢了用途标签的解释，只强调"候选声明不是能力证明"，也没说宿主会核对容量，Jev 没理由离开当前模型。
+
+**修复**（分支 `claude/decision-selection-question`，`10050d927`）：采用模式的问题说明改为照实描述宿主行为——完整首请求准备后独立核对容量、工具与版本，通过才采用、未通过就保持原模型——所以请按任务的语义需要挑最合适的候选；两种模式共用同一句用途标签说明；当前模型同样合适时选 retain_original。宿主的采用门不变。
+
+**第六个样本（`10050d927`，wheel SHA256 `998188b7d465e5cfb97204b801de16a152a6a4bc5ca5366cbdb7daaa88168d43`）**：
+- Jev 1 次（HTTP 200，0.8 秒，1 题）选 MiniMax-M3。宿主按完整请求估算核对（`validated_estimate`，保守输入上界 127,428，M3 声明窗口 1,000,000）并探测 M3 工具支持（HTTP 200）后，经线程 CAS 自动采用：观察记录 `adopted=true`，状态为设计上的 `send_intent_uncertain`（只记录发送意图，不冒充 HTTP 已接收）；线程模型改为 M3，来源 `automatic`，选择版本 1→2。
+- 之后 8 次业务请求全部发往 M3（29 个工具，HTTP 200），请求 done，没有压缩（Context 约 32k/1.0m）。
+- 回答与事实完全一致：8 份合计逐份正确，ledger-08 最多（3,354），合计 26,797；四类原因各 1,340 次、并列，模型也如实说明"无单一最高项"。
+- 出站 12 次全部 HTTP 200：Jev 1、M3 9（探针 1、业务 8）、M2.7 2（探针与一次后台请求）。
+- 清理：TUI `/exit`，Gateway 经原 CLI 停止，8431 无监听，pending/processing 为 0；原 CAS 恢复隔离 owner 设置（enabled=false）。证据：测试机隔离目录 `artifacts/cleanup-current.json`（第五样本 SHA256 `3a8683d9d67b4de1834f178ba4c47ea5188dcdfa89fd118d3801b992dbafe146`，第六样本 `fb7906a1d43a3d331e0e5fb6afd08cda3650fe6612fdfa6b52cfc02885f20088`）；本机副本在 `~/.my-agent/decision-evidence/tags-4ec0e11f3-20260924/` 与 `tags2-10050d927-20260924/`（仓库外）。
+
+**结论**：
+- 主会话第一次真实跨模型自动采用成功：建议来自 Jev，容量与工具由宿主客观核对后才采用，采用后的模型完成任务且答案正确；同一任务在 M2.7 上两次都答错。
+- 问题说明是决定性因素：同样的候选和标签，采用模式的说明照实描述宿主核对流程后，Jev 才会建议更合适的候选。
+- 本两轮 Jev 共 2 次，累计 77 次。

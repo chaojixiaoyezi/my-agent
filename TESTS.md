@@ -2,6 +2,13 @@
 
 child不展示历史正文时的读取回归先复现1 failed/1 passed，修复后test_compact_retained_history、test_subagent_compact_recovery、test_gateway_child_compact_scope_application三文件31 passed（8.48秒）。三宿主seed仓外基线仅验证测量和完整性，不算内存目标通过；细节见容量审计的宿主生命周期基线。
 
+## 主会话选模采用模式的问题说明（2026-09-24，本地分支 `claude/decision-selection-question`）
+
+- **新测试** `test_gateway_model_observation.py::test_question_explains_usage_tags_and_apply_asks_for_the_best_semantic_match`（observe/apply 两档）：从冻结的决策请求体读回问题说明，两种模式都含用途标签说明；采用模式要求按任务语义挑最合适的候选且不再写"本次只观察"，观察模式保留"本次只观察"。
+- **变异验证**：采用模式说明改回旧文、观察模式丢掉用途标签说明，各使一档失败。改回后通过（变异子进程带 `PYTHONDONTWRITEBYTECODE=1`）。
+- **相关回归**：Gateway 选模观察、Gateway 采用、模型用途标签 3 个文件 81 passed。
+- **真实验收**：同一 325k 字任务，修正前 Jev 仍选当前 M2.7（答案错误），修正后 Jev 选 M3、宿主核对后自动采用、答案正确；见[主会话真实交接](docs/tasks/DECISION_MODEL_MAIN_MODEL_LIVE_HANDOFF.md)。
+
 ## 模型用途标签（2026-09-24，本地分支 `claude/decision-usage-tags`）
 
 - **新测试** `test_model_usage_tags.py` 12 项：
