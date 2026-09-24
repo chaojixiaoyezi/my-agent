@@ -180,6 +180,9 @@ class PluginDisplayService:
                 _stop(connection.client)
                 return
             except Exception as exc:  # noqa: BLE001 插件故障只标记该面板错误，不能影响核心或其他插件
+                # 只记激活编号、异常类型和错误码，便于事后区分连接/握手失败与描述不合规；不记插件输出正文
+                logger.warning("插件展示渲染失败 activation=%s type=%s code=%s", conn_key[1], type(exc).__name__,
+                               getattr(exc, "code", ""))
                 outcome = _PanelResult(conn_key[1], digest, "error", error=_error_text(exc),
                                        rendered_at=time.time(), retry_after=self._clock() + ERROR_BACKOFF_SECONDS)
             with self._lock:
