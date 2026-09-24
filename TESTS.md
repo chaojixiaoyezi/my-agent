@@ -49,6 +49,13 @@ child不展示历史正文时的读取回归先复现1 failed/1 passed，修复�
 - **变异验证**：去掉 preflight 的媒体门槛，3 项失败（2 项矩阵、Gateway 越压缩点档）；恢复旧码，7 项失败（越窗档、2 项供应商溢出、4 项大历史）；去掉 `COMPACT_REQUEST_NON_TEXT` 的专门文案，越窗档失败。改回后全部通过。
 - **结果**：72 个相关测试文件 6460 passed、2 skipped、2 xfailed、5 xpassed。5 个 xpassed 在同一 main 上完全一样，与本片无关。
 
+## 压缩点与恢复目标的自助修改范围与运行时一致（2026-09-24，本地分支 `claude/compact-percent-config-sync`）
+
+- **问题**：运行时把压缩点夹在 50–100%、恢复目标夹在 25–80%（配置解析同样如此），但 `user_config` 自助修改对两者都接受 25–95。于是压缩点 25–49、恢复目标 81–95 会被"成功"保存，却在运行时变成 50、80。这是在第 12 项请求准备阶段压缩真实样本中发现的。
+- **修复**：两个范围改为 `_memory_coercion` 里的共享常量，配置解析与 `user_config` 校验同用；运行时夹取不变。
+- **新测试** `test_user_config_capability.py` 1 项：对 −5 到 130 的每个取值，自助修改接受、运行时夹取后不变、配置解析后不变，三者必须同真同假。
+- **变异验证**：4 种各自使该测试失败——压缩点校验改回 25–95、恢复目标校验改回 25–95、共享常量任一改成与运行时不一致。改回后全部通过。
+
 ## 子代理自动选模提交阶段的结构化原因码（2026-09-24，本地分支 `claude/decision-child-commit-reasons`）
 
 - **扩展** `test_subagent_first_request_selection.py` 的自动验证失败矩阵：新增"父线程级设置变化"档，得 `settings_changed`；原有各档改为逐一断言原因码——改目录、关闭决策都得 `model_catalog_changed`（owner 级设置写在目录里），显式同值选择得 `explicit_model_selection`，此前前两档只会记成 `selection_changed`。

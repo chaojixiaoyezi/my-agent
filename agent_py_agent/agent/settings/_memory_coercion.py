@@ -14,6 +14,10 @@ from ._memory_types import MemoryConfigWarning, MemorySettings
 
 _MISSING = object()
 _INT_PATTERN = re.compile(r"-?[0-9]+")
+# 压缩点与压缩后恢复目标的有效范围：配置解析与 user_config 自助校验共用，并与运行时夹取一致（测试钉住），
+# 保证自助修改接受的值一定原样生效，不会再被运行时夹到别的值。
+COMPACT_TRIGGER_PERCENT_RANGE = (50, 100)
+COMPACT_RECOVERY_PERCENT_RANGE = (25, 80)
 
 
 # LLM: Field specs are the sole coercion rules; max_chars bounds provider/model identifiers without parsing semantics.
@@ -179,6 +183,9 @@ def _coerce_string(
     return default
 
 
+# LLM: 与运行时 compact_trigger_percent 同一边界（0 表示 100、低于下限夹到下限、高于上限夹到上限），范围取自
+# COMPACT_TRIGGER_PERCENT_RANGE；夹取都留结构化警告。改边界须同步运行时与 user_config 的一致性测试。
+# 函数用途: 校验自动压缩触发百分比，越界时限制到有效范围并留下配置警告。
 def _coerce_compact_trigger_percent(
     field_name: str,
     raw_value: Any,
@@ -193,20 +200,22 @@ def _coerce_compact_trigger_percent(
         reason = "expected an integer, not a boolean" if isinstance(raw_value, bool) else "expected an integer"
         _warn(warnings, _WarningDraft(field_name, raw_value, default, reason))
         return default
+    low, high = COMPACT_TRIGGER_PERCENT_RANGE
     if number <= 0:
-        return 100
-    if number < 50:
-        _warn(warnings, _WarningDraft(field_name, raw_value, 50, "expected 0 or value between 50 and 100"))
-        return 50
-    if number > 100:
-        _warn(warnings, _WarningDraft(field_name, raw_value, 100, "expected value <= 100"))
-        return 100
+        return high
+    if number < low:
+        _warn(warnings, _WarningDraft(field_name, raw_value, low, f"expected 0 or value between {low} and {high}"))
+        return low
+    if number > high:
+        _warn(warnings, _WarningDraft(field_name, raw_value, high, f"expected value <= {high}"))
+        return high
     return number
 
 
 # LLM: This config parser mirrors runtime compact bounds so YAML cannot produce a different target
 # from direct AgentConfig construction; clamped values remain explicit structured warnings.
-# 函数用途: 校验压缩恢复目标百分比，越界时限制到 25%--80% 并留下配置警告。
+# 范围取自 COMPACT_RECOVERY_PERCENT_RANGE，user_config 自助校验用同一常量。
+# 函数用途: 校验压缩恢复目标百分比，越界时限制到有效范围（25%--80%）并留下配置警告。
 def _coerce_compact_recovery_percent(
     field_name: str,
     raw_value: Any,
@@ -221,12 +230,13 @@ def _coerce_compact_recovery_percent(
         reason = "expected an integer, not a boolean" if isinstance(raw_value, bool) else "expected an integer"
         _warn(warnings, _WarningDraft(field_name, raw_value, default, reason))
         return default
-    if number < 25:
-        _warn(warnings, _WarningDraft(field_name, raw_value, 25, "expected value between 25 and 80"))
-        return 25
-    if number > 80:
-        _warn(warnings, _WarningDraft(field_name, raw_value, 80, "expected value between 25 and 80"))
-        return 80
+    low, high = COMPACT_RECOVERY_PERCENT_RANGE
+    if number < low:
+        _warn(warnings, _WarningDraft(field_name, raw_value, low, f"expected value between {low} and {high}"))
+        return low
+    if number > high:
+        _warn(warnings, _WarningDraft(field_name, raw_value, high, f"expected value between {low} and {high}"))
+        return high
     return number
 
 
