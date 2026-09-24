@@ -797,6 +797,7 @@ docs/
 |-- tasks/HANDOFF_STEP7_SUBAGENT_LIFECYCLE.md # 第 7 步子代理结果链的代码、验证和集成交接
 |-- tasks/HANDOFF_STEP7_WAKE_PUBLICATION.md # 第 7 步唤醒配对发布半写修复与恢复边界交接
 |-- tasks/HANDOFF_STEP8_MODEL_TURN.md # 第8.2模型采纳边界、验证和集成交接
+|-- tasks/HANDOFF_18A_DECISION_MERGE_MAIN.md # 决策线吸收 main 的来源身份统一、原场景对照与受影响测试清单
 |-- tasks/HANDOFF_STEP7_CLOSEOUT_RECOVERY.md # 第 7 步恢复扫描显式依赖、回归与装配交接
 |-- design/FEATURE-20260804-tool-runtime-unification.md # 工具唯一主链的用户行为、需求与验收规格
 |-- design/tool-runtime-unification.md  # 工具参考证据、架构、迁移删除表与并行边界
