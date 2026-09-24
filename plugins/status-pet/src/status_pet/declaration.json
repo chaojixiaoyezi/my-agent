@@ -1,0 +1,40 @@
+{
+  "plugin_id": "status-pet",
+  "summary": "用文字小宠物显示工作、等待、空闲状态",
+  "entry_module": "status_pet",
+  "default_action": "show",
+  "actions": [
+    {
+      "name": "show",
+      "summary": "打开或关闭宠物面板",
+      "arguments": [],
+      "kind": "display",
+      "target": "pet",
+      "available": true
+    }
+  ],
+  "tools": [],
+  "panels": [
+    {"id": "pet", "title": "小宠物", "kind": "text", "topics": ["run_state", "activity"]}
+  ],
+  "settings_schema": {
+    "type": "object",
+    "properties": {
+      "style": {
+        "type": "string",
+        "description": "外观：cat（猫）、whale（鲸）、robot（机器人）",
+        "enum": ["cat", "whale", "robot"],
+        "default": "cat"
+      },
+      "name": {
+        "type": "string",
+        "description": "宠物名字，1–12 个字符",
+        "minLength": 1,
+        "maxLength": 12,
+        "default": "小咪"
+      }
+    },
+    "required": [],
+    "additionalProperties": false
+  }
+}
