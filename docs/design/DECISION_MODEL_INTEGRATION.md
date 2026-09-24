@@ -552,3 +552,19 @@ Skill选中/明确required名卡进入原动态推荐段，稳定区只保留固
 真实接口同时暴露逐项概率的百分位舍入：总和可为0.99/1.01。wire按每项半百分位累计误差校验总量和评分，
 高精度分布仍走严格误差；零总量、缺键、越界、非有限数、明显不一致仍拒绝，不归一化或改写供应商概率。
 原始脱敏失败样本进入协议replay，业务权限仍不来自分数。来源、实际请求和未验范围见[真实验收记录](../tasks/DECISION_MODEL_REAL_VALIDATION.md)。
+
+
+## TODO12.4 宿主历史来源与请求生命周期（2026-09-23，实施中）
+
+解决跨窗口Compact时完整历史被宿主seed、原生请求、冻结请求及恢复闭包同时保留的问题。来源到摘要的地址重放已在464df65c1本地验收；三宿主seed仍重新物化，同一4.2M字符来源的准备峰值约8.6–9.0MB，完整调用链峰值另测，不能用source单片代替。
+
+第二片按两个可验证边界实施，最终均归12.4，不缩减整项目标：
+
+1. **显式来源种子**：`ConversationHistorySeed` 的具体messages/canonical_messages与只读source严格二选一。source只携带同次canonical地址及已冻结的范围/投影规则，不建第二历史库；不将磁盘对象伪装成原tuple或运行时provider list。三宿主复用原行选择、工具折叠和native投影规则，范围事实只裁决一次，媒体/匿名信封及原生工具往返完整保留。
+2. **旧请求释放**：初始完整计量后，处理params、冻结输入、宿主外层帧、partial与闭包的实际持有关系。初始计量必须继续代表完整原请求，不能把“空历史”当成释放后的代用品。获选候选仍携带自己的完整请求材料；未提交失败不得继续发送旧请求。该部分接口与实现尚待独立审查，不能以第一步验收宣称摘要期驻留已解除。
+
+显式来源只在原native/text准备边界解析，之后仍为具体list/tuple；`capture_tool_loop_request`、`ToolLoopRequestInput`、纯projector及运行时provider list原位更新保持原合同。原生来源投影沿native_history做必要隔离，已有具体seed继续原复制语义；未知、明确空来源和读取失败不可混为一类。source不能与具体内容同时成为权威，也不能在重放时重新读取当前权限/配置扩大范围。
+
+模块重构owner已转交本分支两个精确函数的机械接线：`runtime/loop_support.py::_native_provider_history_messages`、`_tool_loop_service.py::_text_conversation_history_section`。其它native plan/commit/live-tool函数仍由原owner负责；不修改对方工作区或部署。
+
+验收分别记录source/seed、首次完整预检、摘要驻留和首实际provider payload峰值。必要发送本身仍有完整材料成本，不能把未发送旧超大预检峰值归入必要出站成本；三宿主的scope、失败不提交、媒体和候选/实际payload逐值一致需相邻验证。详细证据与剩余边界见[容量审计](../tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。

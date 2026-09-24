@@ -1465,6 +1465,16 @@ Sol high独立只读复核未发现必须修复的scope/base/legacy回归，确�
 | child | 270351 | 8513368 | 8584530 |
 | background | 270319 | 8513864 | 8968172 |
 
+后续在固定53d45f6c1上，用原三宿主业务执行链观测从prepare前到首实际provider payload的分配。真实loader、Compact分段/预算、writer/CAS及provider builder执行，只有辅助摘要响应和最终HTTP响应使用fake，无真实网络；显式临时MY_AGENT_HOME隔离，观察器不保存请求正文。脚本 `/tmp/decision_host_history_baseline.py`，日志 `/tmp/decision_host_history_baseline_53d45f6c1.log`，3项通过（7.20秒）。追加128×32768字符（4,194,304字符，不含标记及fixture旧行）；child/background原fixture另有2条旧行，完整checkpoint ID分别130/128/130，均与各自原文件顺序精确相等。prepare及首业务发送各一次，原任务标记保持。
+
+| 宿主 | 首payload前峰值bytes | 摘要期间最高驻留bytes | 摘要调用数 |
+| --- | ---: | ---: | ---: |
+| child | 10932180 | 10272498 | 96 |
+| Gateway | 29807947 | 9558548 | 47 |
+| background | 11393412 | 10730361 | 96 |
+
+Gateway最大峰值发生在摘要入口之前；各宿主fixture和请求预算面不同，不把跨宿主数字直接当优劣比较。数据仅为Python tracemalloc分配，不是RSS或真实供应商质量/用量。后续必须同脚本、同宿主比较；2a即使降低seed准备峰值，也不能据此宣称约9–10MB的摘要期驻留已解决。完整覆盖ID不等同摘要质量，完整字符hash仍由上一片独立用例证明。
+
 证据确认上一片地址视图未被宿主保持：history_projection、child/background seed及Gateway seed重新物化完整历史。下一片须同时核对这些准备、runtime原生历史、capture与恢复闭包；不能仅删除select局部变量就声称宿主释放。纯ToolLoopRequestInput继续只接已准备内存材料；范围/摘要/媒体与完整实际请求必须保持。
 
 本轮已先修一个独立确定的提前读取：child `_render_agent_thread_context(include_transcript=False)` 原来仍读取完整来源并算展示窗口。现只在确实展示正文时读取；原线程说明及程序核验保持，native正文仍交原seed。新增读计数回归先得到1 failed/1 passed，修复后相关三文件31 passed（8.48秒）；日志 `/tmp/decision_child_render_red_20260923.log` 与 `/tmp/decision_child_render_green_20260923.log`。这只消除未使用的展示读取，不计为seed或全宿主峰值收口。
