@@ -544,6 +544,8 @@ def test_gateway_chat_client_posts_correlated_active_turn_input(monkeypatch, tmp
             },
             "inject": ["遵守项目规范"],
             "prompt_files": ["spec.md"],
+            # 执行选项显式输出默认值，请求指纹覆盖附件；无附件时也是空数组。
+            "input_media": [],
             "save": False,
             "include_prompt": False,
             "resume_context": True,
