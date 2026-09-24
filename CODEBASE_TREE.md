@@ -38,6 +38,7 @@
     |-- MAINTAINABILITY_AND_JEV_REVIEW.md # 可维护性评估、渐进重构建议及 Computer Use/Jev 能力边界
     |-- DECISION_MODEL_INTEGRATION.md    # 可选决策模型的短期限、失败隔离、接入点、缓存与并行实施计划
     |-- TUI_INPUT_MEDIA.md               # TUI 图片视频输入、owner 原件与发送预算合同
+    |-- COMPACT_MEDIA_POLICY.md          # 媒体会话压缩策略：归档引用主链、视觉摘要按结构化能力事实开启
     |-- TOOL_LOOP_DEPENDENCY_SPLIT.md   # 第8步模型响应、工具轮与Compact职责边界及参考核对
     |-- PLUGIN_LIFECYCLE.md              # 可装卸插件、动态命令、版本切换与故障回收的待实施方案
     |-- PLUGIN_PACKAGES.md               # 本地包静态校验与待接线的安装事实、隔离和撤销边界
