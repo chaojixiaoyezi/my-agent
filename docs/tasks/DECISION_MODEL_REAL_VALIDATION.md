@@ -354,3 +354,50 @@ P4-B 普通 user owner 的两轮隔离真实中文配置各有 **1 次 Jev HTTP*
 ## P5-D 主会话自动选模第四个样本（2026-09-24，main `3d2424786`）
 
 新会话只给一次普通中文长资料需求（8 份资料合计 325,451 字，明显超出默认 M2.7 的 200k 声明窗口；候选 M3 与 DeepSeek 声明 1M）。Jev 真实调用 1 次，结构化观察为"选当前 M2.7、未采用、不需评估"；任务在 M2.7 上经两次压缩完成（done/completed，8 个工具轮）。主会话共 4 个真实样本（超时、need_data、两次选当前模型），真实跨模型自动采用仍未出现。最终回答有归纳错误，不因 done 自动算通过。详见[主会话真实交接](DECISION_MODEL_MAIN_MODEL_LIVE_HANDOFF.md)。本轮 Jev 1 次，累计 66 次。
+
+## 13 多 owner 与断网真实样本（2026-09-24，main `4163e66c0`）
+
+**安装**：
+- main `4163e66c0`（tree `1f53fb91ad16face449a0c80a2cb812080ba45fd`，git archive SHA256 `3c416128df3793c71355cb1cbd7ac813cbee88fa816934477d0054609780530c`）。wheel SHA256 `383b000fa974c01e1bac48b64970b6b5f0aacb09d67bae44b5f2ca466e538dbe`，5,593,582 字节；测试机上的 wheel 与本机构建一致。
+- 装在测试机新建的隔离目录和 venv。唯一 Gateway `127.0.0.1:8431`，两个原生 TUI 各连一个 owner。
+
+**配置**：
+- 一个 Gateway 进程服务两个 owner。A（`decision-live-validation`）沿用原私有模型目录。B（`decision-live-validation-b`）用同一目录的副本，只把决策模型 Jev 连接的 api_base 改成测试机上刚释放的本地端口，模拟断网（连接被拒）。改动记在 `staging.json`，A 的目录未改。
+- 两份目录按各自 owner 身份的摘要分开存放（`config/model-profiles/<sha256>.json`）。
+- 两个 owner 都经原设置 CAS 只开 `points.skill_tool=apply`（期限 8 秒，阶段期限 10 秒），其余决策点关闭；owner revision 24。
+- 主模型为官方 MiniMax-M2.7。每个 owner 的工作区只放一份各自的 `readme.md`。
+
+**过程**（两个 TUI 每轮同时提交同一句话，每轮只给一次 prompt）：
+
+| 轮 | 距首轮 | 需求 | A 的 Jev | B 的 Jev | 业务结果 |
+| --- | --- | --- | --- | --- | --- |
+| R1 | 0 秒 | 读当前目录的 readme.md，一句话说写了什么 | HTTP 200，1.95 秒 | URLError，0.077 秒 | 两边都 done：各调用一次 Read，只读到自己工作区的说明，一句话作答 |
+| R2 | 约 311 秒 | 只回复一个字 | HTTP 200，3.10 秒 | URLError，0.002 秒（冷却已过，重试一次） | 两边都 done |
+| R3 | 约 322 秒 | 只回复两个字 | HTTP 200，1.17 秒 | 未发出（距上次失败约 9 秒，仍在 30 秒冷却内） | 两边都 done |
+
+**证据**：
+- 出站共 19 次，全部有终态：
+  - M2.7 14 次，全部 HTTP 200：业务 8 次（R1 每个 owner 两次，读取加作答；R2、R3 每个 owner 各一次），工具能力探针 4 次（R1、R2 每个 owner 各一次），另有 R1 与 R2 之间 2 次约 23KB 的非决策后台请求。
+  - Jev 官方端点 3 次，全部 HTTP 200，都来自 A，每轮一次，每次 27 题。
+  - B 的断网端点 2 次 URLError（R1、R2），分别 0.077 秒、0.002 秒返回，没有等满 8 秒期限。
+  - 没有发往其它主机的请求。
+- 故障隔离：B 的 Jev 失败不影响 A，A 每轮 Jev 都是 200、业务照常。B 自己的业务请求照常发出并完成，决策失败只让工具展示保持原样。
+- 冷却按连接隔离：B 在 R1 失败后记 30 秒冷却。R2 距失败约 310 秒，冷却已过，重试一次仍失败；R3 距 R2 的失败约 9 秒，仍在冷却内，没有发出请求。冷却表只在进程内存里，证据来自出站记录。
+- 工作区隔离：两个 owner 各自只读到自己的 readme（内容分别含 `decision-live-validation` 与 `decision-live-validation-b`）。
+- TUI 用量行：A 显示 `决策入 17.4k`；B 显示 `决策入 未知 · 缺报 1`，失败的决策调用没有被记成 0。
+- R1 的四次业务请求都带 29 个工具、同一个工具 schema 摘要。这组配置下，工具面在 A、B 之间没有差别。
+
+**观察**：
+- 能力推荐的结论没有落盘。`recommend_capabilities` 算出的 `finding`（如 `skill_tool_decision:apply:cooldown`）和展示短名单、延迟名单只存在于本次运行的内存里；请求记录、线程指标和归档上下文快照里都没有。真实样本因此只能从出站记录看到 Jev 有没有被调用，看不到结论是否被采用、为什么保留原样。已记为设计台账提议。
+- 空闲 owner 的 Agent 在 `owner_agent_idle_seconds`（默认 60 秒）后被释放，所以 R2 每个 owner 都重新做了一次工具能力探针（约 0.6 秒）。R3 距 R2 只有约 11 秒，没有重探。可见按后端实例缓存的能力事实，实际寿命是 owner 的连续活跃期，而不是进程寿命。已告知媒体压缩策略的实施者，因为其视觉探针设计按实例缓存。
+- 本样本的断网是连接被拒（端口未监听），失败在毫秒级返回。DNS、TLS、5xx、慢响应、额度与计费由离线故障矩阵覆盖（`test_decision_fault_matrix.py`，已合入 main `5cb75eaf8`）；真实供应商侧的慢响应和额度样本仍未做。
+
+**清理**：
+- 两个 TUI 用 `/exit` 退出。Gateway 经原 CLI `gateway stop` 停止，PID 不存活，8431 无监听，pending/processing 都是 0，done 6 条。
+- 原 CAS 恢复两个 owner 的设置：enabled=false，skill_tool 关闭，owner revision 25。
+- 证据（测试机隔离目录）：`artifacts/staging.json`（SHA256 `c446f7ee0aab628b69660e97ad730c3cd92f2a8ef89fc7cafd996f0639217c96`）、`artifacts/cleanup-current.json`（SHA256 `a41f4c2b292b25dae46e9859ed62b87cb11fab90ffba25c762bfa4ff191e3f5d`）。本机副本和准备脚本在 `~/.my-agent/decision-evidence/owners-4163e66c0-20260924/`（仓库外）。
+
+**结论**：
+- 同一 Gateway 里两个 owner 的决策故障互相隔离。B 断网时快速失败，按连接冷却，冷却期内不发请求，过期后重试；A 的决策和业务不受影响；B 的业务在决策失败时以原工具展示照常完成。
+- 第 13 项的多 owner 和断网各有了一个真实样本。仍未关闭：主会话真实跨模型采用、真实供应商侧慢响应与额度样本、第四轮 selection_changed 的原因。能力推荐结论不落盘，采用效果还无法从真实样本核对。
+- 本轮 Jev 调用 3 次（都来自 A），累计 69 次。
