@@ -142,7 +142,7 @@ def test_background_run_params_carry_structured_conversation_task_identity() -> 
     }
 
 
-def test_background_context_overflow_resumes_after_committed_recovery_same_slice(monkeypatch) -> None:
+def test_background_context_overflow_resumes_after_committed_recovery_same_slice(monkeypatch, tmp_path) -> None:
     """后台主代理只在恢复宿主宣告提交后同片续跑，并携带已完成工具。"""
     from dataclasses import replace
 
@@ -182,13 +182,16 @@ def test_background_context_overflow_resumes_after_committed_recovery_same_slice
     class Store:
         def __init__(self, *args, **kwargs):
             self.threads = _StoreDomain(load_report=self._fake_load_thread_report)
-            self.messages = _StoreDomain(recent_report=self._fake_messages_recent_report)
+            # 使用临时canonical空账本，让scope来源走真实尾界/hash接口；保留原recent_limit断言。
+            self.messages = ConversationStore(tmp_path / "empty-history").messages
+            self.messages.recent_report = self._fake_messages_recent_report
 
         def _fake_load_thread_report(self, thread_id):
             assert thread_id == original.thread_id
             return original, None
 
-        def context_bundle_report(self, thread_id, *, recent_limit=0):
+        def context_bundle_report(self, thread_id, *, recent_limit=0, include_messages=True):
+            assert type(include_messages) is bool
             del recent_limit
             return {"thread": {"thread_id": thread_id}}, []
 
@@ -251,7 +254,7 @@ def test_background_context_overflow_resumes_after_committed_recovery_same_slice
 
 
 @pytest.mark.parametrize("initial_commit", [False, True])
-def test_background_compact_slice_yields_after_eight_progressful_generations(monkeypatch, initial_commit) -> None:
+def test_background_compact_slice_yields_after_eight_progressful_generations(monkeypatch, tmp_path, initial_commit) -> None:
     """首次自动压缩无论是否提交，真实提交满八代便让出调度片。"""
     from dataclasses import replace
 
@@ -288,13 +291,16 @@ def test_background_compact_slice_yields_after_eight_progressful_generations(mon
             )
 
     class Store:
-        def context_bundle_report(self, thread_id, *, recent_limit=0):
+        def context_bundle_report(self, thread_id, *, recent_limit=0, include_messages=True):
+            assert type(include_messages) is bool
             del recent_limit
             return {"thread": {"thread_id": thread_id}}, []
 
         def __init__(self, *args, **kwargs):
             self.threads = _StoreDomain(load_report=lambda _thread_id: (latest[0], None))
-            self.messages = _StoreDomain(recent_report=self._fake_messages_recent_report)
+            # 使用临时canonical空账本，让scope来源走真实尾界/hash接口；保留原recent_limit断言。
+            self.messages = ConversationStore(tmp_path / "empty-history").messages
+            self.messages.recent_report = self._fake_messages_recent_report
 
         def _fake_messages_recent_report(self, _thread_id, *, limit=0):
             assert limit == 0
@@ -365,7 +371,8 @@ def test_background_scheduler_treats_compact_slice_yield_as_clean_continuation(
     class Store:
         claims = Claims()
 
-        def context_bundle_report(self, thread_id, *, recent_limit=0):
+        def context_bundle_report(self, thread_id, *, recent_limit=0, include_messages=True):
+            assert type(include_messages) is bool
             del recent_limit
             return {"thread": {"thread_id": thread_id}}, []
 
@@ -408,7 +415,7 @@ def test_background_scheduler_treats_compact_slice_yield_as_clean_continuation(
 
 
 def test_background_empty_transcript_carries_active_turn_into_committed_recovery(
-    monkeypatch,
+    monkeypatch, tmp_path,
 ) -> None:
     """transcript 为空时活动工具必须进入恢复宿主，提交后才允许继续。"""
 
@@ -453,13 +460,16 @@ def test_background_empty_transcript_carries_active_turn_into_committed_recovery
     class Store:
         def __init__(self, *args, **kwargs):
             self.threads = _StoreDomain(load_report=self._fake_load_thread_report)
-            self.messages = _StoreDomain(recent_report=self._fake_messages_recent_report)
+            # 使用临时canonical空账本，让scope来源走真实尾界/hash接口；保留原recent_limit断言。
+            self.messages = ConversationStore(tmp_path / "empty-history").messages
+            self.messages.recent_report = self._fake_messages_recent_report
 
         def _fake_load_thread_report(self, thread_id):
             assert thread_id == original.thread_id
             return original, None
 
-        def context_bundle_report(self, thread_id, *, recent_limit=0):
+        def context_bundle_report(self, thread_id, *, recent_limit=0, include_messages=True):
+            assert type(include_messages) is bool
             del recent_limit
             return {"thread": {"thread_id": thread_id}}, []
 

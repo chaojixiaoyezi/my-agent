@@ -1453,3 +1453,16 @@ Sol high独立只读复核未发现必须修复的scope/base/legacy回归，确�
 
 
 主线owner随后明确授权本线仅在该SimpleNamespace补 `task_attributes={}` 与 `carried_active_turn_user_inputs=[]`，生产IR及业务断言保持。适配后整个IR测试文件 **29 passed（0.38秒）**，日志 `/tmp/decision_native_ir_fixture_20260923.log`；该数与原350有重叠，不累加为379。独立Sol high复核native两函数未发现必须修复的别名或调用者回归。全目录Ruff、doc sync、strict code-size（hard=0，基线不改）及diff通过；clean-package在登记新测试后通过。原四项后台fixture缺口及旧全仓失败仍开放，尚不称整枝严格gate通过，线上CI未作为证据。
+
+
+### 旧后台测试接口缺口收口与真实环境准备（2026-09-23）
+
+主线owner明确转交本分支 `test_background_main_agent_runtime.py` 的四处fake `Store.context_bundle_report` 接口和必要scope夹具适配；生产 `_tool_loop_service.py`、`runtime/loop_support.py`、IR及主线其它测试仍不触碰。
+
+先在bb60be21c基线重跑该文件，复现 **4 failed / 158 passed（14.58秒）**：overflow恢复、八代公平让出False/True、空transcript活动归档恢复均在历史准备前失败，日志 `/tmp/decision_background_fixture_red_20260923.log`。四处fake方法接受 `include_messages=True` 并检查布尔类型；三个涉及范围读取的测试使用pytest `tmp_path`下真实 `ConversationStore.messages`，执行实际固定尾界/hash/选择器读取，同时保留原recent_limit断言。原摘要视图/恢复宿主替身继续仅验证控制流，不假装测试真实CAS。
+
+修复后整个文件 **162 passed（14.96秒）**，日志 `/tmp/decision_background_fixture_green_20260923.log`。原业务断言、八代公平让出、原参数接续及活动归档事实均保留；无新增生产fallback或权限默认值。此前文中“四项接口失败仍开放”为当时状态，此处将这四项明确收口；旧全仓八项历史失败及web_fetch5秒根因不由本片消除，也不据此声称全仓已通过。只改测试与验收文档，没有新配置、结构或运行语义，因而无需更新YAML/dataclass/设计合同。
+
+独立测试机已只读复核SSH别名可用，原319004926隔离venv/HOME/证据目录仍在，8420与8431无监听。按IP默认本机用户名首次认证失败，使用现有SSH配置别名后成功；未改账号/密钥、进程、设置或部署。该观察只证明机器及旧环境可达，不能作为最新wheel、凭据有效性或模型请求验收。已同步主线，下一次启动前还需再次复核占用并明确版本及窗口。
+
+建议下一步：继续12.4选中正文生命周期的最小复用方案，并准备12.7真实Compact后/跨模型缓存对照；Astra max可只读审查来源，测试夹具已单owner完成。新部署与Gateway由本线协调同机唯一实例，保持另一任务工作不受影响。
