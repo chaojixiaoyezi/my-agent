@@ -203,6 +203,11 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
 
             handle_client_plugins(self, _server_instance)
             return
+        if self.path == "/client/plugin-panels":
+            from .plugin_panels_http import handle_client_plugin_panels
+
+            handle_client_plugin_panels(self, _server_instance)
+            return
         if self.path == "/client/permissions":
             from .approval_mode_service import handle_client_approval_mode
 
@@ -368,6 +373,8 @@ class GatewayHTTPServer:
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self.last_error_report: dict[str, Any] | None = None
+        # 插件展示服务由首个面板请求惰性创建（见 plugin_panels_http），停止时一并关闭
+        self.plugin_display = None
 
     def _guard_network_exposure(self) -> None:
         """fail-closed:绑非 loopback(暴露到网络)却没接鉴权中间件时拒绝启动,杜绝未认证远程入口。"""
@@ -435,6 +442,9 @@ class GatewayHTTPServer:
         if self._thread:
             self._thread.join(timeout=timeout)
             self._thread = None
+        if self.plugin_display is not None:
+            self.plugin_display.close()
+            self.plugin_display = None
         _server_instance = None
 
 

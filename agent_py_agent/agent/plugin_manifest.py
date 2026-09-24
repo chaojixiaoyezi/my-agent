@@ -11,9 +11,12 @@ from dataclasses import asdict, dataclass
 from .command_arguments import CommandActionSpec
 from .command_declarations import command_action_from_payload, declaration_list
 from .plugin_commands import PluginCommandSpec
+from .plugin_display.protocol import PanelDeclaration, validate_panels
 from .tooling.input_schema import canonicalize_tool_input_schema, validate_tool_input
 
 PLUGIN_PACKAGE_SCHEMA = "plugin_package.v1"
+# v2 只比 v1 多一个 panels 字段；无面板的包仍按 v1 序列化，保证已安装包的描述字节不变
+PLUGIN_PACKAGE_SCHEMA_V2 = "plugin_package.v2"
 PLUGIN_SETTINGS_BYTES = 64 * 1024
 _MODULE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*\Z")
 _WHEEL_PATH = re.compile(r"wheels/[A-Za-z0-9_][A-Za-z0-9_.+-]*\.whl\Z")
@@ -88,9 +91,11 @@ class PluginManifest:
     default_action: str
     tools: tuple[PluginToolDeclaration, ...]
     settings_schema_json: str
+    panels: tuple[PanelDeclaration, ...] = ()
 
-    # LLM: 直接构造与 JSON 读取共用约束；首期只开放声明为工具调用的动作，不接受包指定管理操作。
-    # 函数用途: 在包进入候选安装前拒绝重复身份、缺失入口及动作指向未声明工具。
+    # LLM: 直接构造与 JSON 读取共用约束；只开放工具动作和指向本包面板的展示动作，不接受包指定管理操作。
+    #   有面板的纯展示包可以没有工具；两者都没有则拒绝。
+    # 函数用途: 在包进入候选安装前拒绝重复身份、缺失入口及动作指向未声明的工具或面板。
     def __post_init__(self) -> None:
         _text(self.version)
         _text(self.summary)
@@ -110,14 +115,15 @@ class PluginManifest:
             wheel.path for wheel in self.wheels
         }:
             raise ValueError("wheel 重名或入口 wheel 缺失")
+        validate_panels(self.panels)
         tool_names = {tool.name for tool in self.tools}
-        if not tool_names or len(tool_names) != len(self.tools):
-            raise ValueError("工具缺失或重名")
-        if any(
-            action.kind != "tool" or action.target not in tool_names or action.available is not True
-            for action in self.actions
-        ):
-            raise ValueError("动作必须引用本包已声明的工具")
+        panel_ids = {panel.id for panel in self.panels}
+        if len(tool_names) != len(self.tools) or not (tool_names or panel_ids):
+            raise ValueError("工具重名，或既没有工具也没有面板")
+        for action in self.actions:
+            targets = tool_names if action.kind == "tool" else panel_ids if action.kind == "display" else set()
+            if action.target not in targets or action.available is not True:
+                raise ValueError("动作必须引用本包已声明的工具或面板")
         _ = self.command_spec
         canonical = canonicalize_tool_input_schema(json.loads(self.settings_schema_json))
         object.__setattr__(self, "settings_schema_json", _json(canonical))
@@ -165,6 +171,8 @@ class PluginManifest:
                         for tool in self.tools
                     ],
                     "settings_schema": self.settings_schema,
+                    **({"panels": [panel.to_payload() for panel in self.panels],
+                        "schema_version": PLUGIN_PACKAGE_SCHEMA_V2} if self.panels else {}),
                 }
             )
         )
@@ -175,12 +183,16 @@ class PluginManifest:
     def from_payload(cls, payload: object) -> PluginManifest:
         try:
             _json(payload)
-            row = _fields(
-                payload,
-                "schema_version plugin_id version summary entry_module entry_wheel wheels actions default_action tools settings_schema",
-            )
-            if row["schema_version"] != PLUGIN_PACKAGE_SCHEMA:
+            names = "schema_version plugin_id version summary entry_module entry_wheel wheels actions default_action tools settings_schema"
+            version = payload.get("schema_version") if isinstance(payload, dict) else None
+            if version == PLUGIN_PACKAGE_SCHEMA_V2:
+                names += " panels"
+            elif version != PLUGIN_PACKAGE_SCHEMA:
                 raise ValueError("包协议版本无效")
+            row = _fields(payload, names)
+            panels = tuple(PanelDeclaration.from_payload(item) for item in declaration_list(row.get("panels", [])))
+            if version == PLUGIN_PACKAGE_SCHEMA_V2 and not panels:
+                raise ValueError("v2 包必须声明面板")
             wheels = tuple(
                 PluginWheel(**_fields(item, "path sha256"))
                 for item in declaration_list(row["wheels"])
@@ -209,6 +221,7 @@ class PluginManifest:
                 default_action=row["default_action"],
                 tools=tuple(tools),
                 settings_schema_json=_json(row["settings_schema"]),
+                panels=panels,
             )
         except (ValueError, TypeError, KeyError, AttributeError, RecursionError) as exc:
             raise PluginPackageError("invalid_manifest", "插件包描述无效。") from exc

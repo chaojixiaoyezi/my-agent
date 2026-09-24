@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from agent_py_agent.agent.plugin_manifest import PLUGIN_PACKAGE_SCHEMA, PLUGIN_PACKAGE_SCHEMA_V2
 from agent_py_agent.agent.plugin_package import inspect_plugin_package
 from agent_py_agent.agent.plugin_wheels import inspect_plugin_wheels
 from scripts.plugin_build import build_wheel, publish_artifact, wheel_metadata
@@ -44,7 +45,9 @@ def build_plugin_package(project: Path, declaration_path: str, dependencies: tup
         wheel_bytes = {"wheels/" + item.name: item.read_bytes() for item in (wheel, *dependencies)}
         if len(wheel_bytes) != len(dependencies) + 1:
             raise ValueError("依赖 wheel 文件重名")
-        manifest.update(schema_version="plugin_package.v1", version=wheel_metadata(wheel)["Version"],
+        # 声明了面板的包才用 v2；其余保持 v1，已发布包重建后的描述不变
+        schema = PLUGIN_PACKAGE_SCHEMA_V2 if manifest.get("panels") else PLUGIN_PACKAGE_SCHEMA
+        manifest.update(schema_version=schema, version=wheel_metadata(wheel)["Version"],
                         entry_wheel="wheels/" + wheel.name,
                         wheels=[{"path": name, "sha256": hashlib.sha256(content).hexdigest()} for name, content in wheel_bytes.items()])
         buffer = io.BytesIO()

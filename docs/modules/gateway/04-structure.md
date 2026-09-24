@@ -21,6 +21,7 @@
 命令审批与聊天审批共用原 TUI FIFO，但不创建聊天回合或借主/子任务身份。该接线尚待产品实际 TUI 验收。
 
 `agent/command_catalog.py` 提供核心名称、别名、会话尾部语法及保留命名空间的唯一声明。
+插件面板经 `plugin_panels_http.py` 进入 `plugin_display/service.py`，只读活动投影、不写状态；
 HTTP ask/control 在原鉴权之后先经 `plugin_command_service.py` 读取可信 owner 目录并核对输入版本，其余控制继续经原会话解析器；
 `request_client.py` 在分配请求编号前拒绝普通队列中的系统命令，
 `request_execution.py` 在追加用户历史和调用模型前再次校验旧队列。三处沿原入口顺序，不增加队列或控制类型。

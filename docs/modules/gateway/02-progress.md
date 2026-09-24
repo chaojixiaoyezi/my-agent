@@ -5,6 +5,8 @@ TUI 观察超时不再标记业务失败：canonical terminal 优先检查，同
 TUI 媒体请求已接通：input_media refs 与 ask 执行选项及幂等指纹同行，worker 在 owner 解析后验证路径/大小，再进入原 native user history。官网 M3 图片、视频与重连续问通过；官网 M2.7 100 请求/50 槽全部完成。详细资源口径见 TESTS。
 
 独立资源线新增连接寿命和空闲 owner 回收：16 个 HTTP worker / 128 在途不变，socket 空闲 5 秒、排队 2 秒后明确拒绝；状态计数改为目录类型复用。请求持有 owner 精确实例租用，维护不续空闲期，60 秒空闲且无持久硬事实才退池；不改执行状态和原队列。100 身份/50 执行槽已在受限测试机用假模型验证，官方真实 TUI 单列；尚未合并默认环境，见 [资源合同](../../design/TUI_RESOURCE_LIFETIME.md)。
+- 插件面板入口 `/client/plugin-panels`（第 9 步，本地开发）：可信来源检查先于读正文，owner 只由 Gateway 作用域解析，冷 owner 不加载实例；
+  活动投影复用 `conversation_agent_activity` 只读结果，交给进程内唯一展示服务；服务随 HTTP server 停止关闭。合同测试见 test_gateway_plugin_panels。
 
 插件命令流的取消原语现直接引用 `common/cancellation.py`，不再越层依赖 tooling。保持逐请求取消和原审批运输，发布前回归进行中。
 
