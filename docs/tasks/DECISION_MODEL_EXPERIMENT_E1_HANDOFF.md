@@ -177,3 +177,12 @@ E2 同样本基线/候选对照、F 可信效果指标与自动应用、G 自动
 ### 建议下一步
 
 先由决策线 owner 审阅本分支；合入后在隔离 owner 做首次真实授权发送：开启 `enabled` 与 `experiment_enabled`、`skill_tool` 普通模式 off、`/experiment observe skill_tool 10m 1 50000 <短任务>`，核对请求记录的 `experiment_grant` 与能力推荐观测、原账快照 `charged=provider=X`、`input_bound_ratio`，并保存脱敏样本扩展标定。其他 agent 可并行只读核对更多真实 skill_tool 请求字节与计费以扩展标定范围，但不要同时修改 ModelCallLedger、传输入口或设置信封；E2 同样本对照与 F/G/H 仍未开始。
+
+### 第二片的首次真实授权发送（2026-09-25）
+
+在测试机隔离目录里，用户命令 `/experiment observe skill_tool 10m 1 50000 <任务>` 两次都完成了授权、单次发送与按实际结算：
+- 请求为 65,070 字节、27 题，C = 40,471。
+- 供应商计费 17,375 / 17,376，结算快照中的 charged 与 provider 相等，比例 0.43；预留 1/1 次 HTTP，未知用量为 0。
+- 能力推荐只观察、未采用。
+
+已知缺口：结算快照没有持久化（只在进程内账本），对照记录与基于证据的提议留给下一片（E2/F1）。详见[真实验收](DECISION_MODEL_REAL_VALIDATION.md)第 17 节。

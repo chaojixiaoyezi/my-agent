@@ -100,7 +100,7 @@
 `verification/runtime.py::record_tool_verification/_record_command/_mark_writes` 被动读取 canonical ToolCall/ToolResult。
 只有规范命令的真实进程退出事实才落证据；成功文件写入使旧证据 stale，任意 stdout 或模型“测过了”不生效。
 
-`verification/project_facts.py::project_facts_for/classify_verification_command/_verify_commands` 从项目文件识别规范命令，
+`verification/project_facts.py::project_facts_for/classify_verification_commands/_verify_commands` 从项目文件识别规范命令，
 并区分 full/targeted。`verification/repository.py::VerificationEvidenceRepository.record/status/mark_edited` 在原 owner
 SQLite 中保存 command、退出码、范围、root、owner/thread/task、事件 ID 和 stale 状态。
 
