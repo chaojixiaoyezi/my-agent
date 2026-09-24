@@ -2,6 +2,13 @@
 
 child不展示历史正文时的读取回归先复现1 failed/1 passed，修复后test_compact_retained_history、test_subagent_compact_recovery、test_gateway_child_compact_scope_application三文件31 passed（8.48秒）。三宿主seed仓外基线仅验证测量和完整性，不算内存目标通过；细节见容量审计的宿主生命周期基线。
 
+## 召回与记忆决策点的真实验收方法（2026-09-25，本地分支 `claude/decision-p5a-real`，只改文档）
+
+- **已知漏召回样本先离线标定**：测试者用产品原函数（BM25 顺序、均值中心化余弦 ≥0.30、RRF、原片段生成函数）和同一嵌入类复算限定范围的混合检索，只挑"整句召回不到、某个片段能召回、基线留有空槽"的问题做 off/apply 对照，避免拿不可能有收益的样本下结论。标定只输出编号、条数和相似度，密钥在进程内读取、不打印。
+- **旁观器只记结构化选择**：召回前决策点只记录所选片段 ID，关系点只记录每对的 ID 与关系标签，嵌入调用只记条数、耗时与成败；不保存问题、片段、记忆正文、密钥或请求头。
+- **同一快照在原路径上重放**：Curator 对照必须从同一快照在原 home 路径上依次跑 off 与 apply。会话工作区按绝对路径建键，把 home 复制到别的目录会读不到原对话（本次作废的一次运行已留证）。
+- 结果与证据见[真实验收](docs/tasks/DECISION_MODEL_REAL_VALIDATION.md#14-p5-a-召回前补充查询语义召回下的真实收益2026-09-25main-ab23a2666)。本分支没有代码改动，所以不跑 pytest；doc sync 与 diff 检查照常执行。
+
 ## 自学习 S1：子代理经验生成待确认的 Skill 提案（2026-09-24，本地分支 `claude/self-learning-skill-proposals`，待审）
 
 - **改动**：新增 `capability/skill_proposals.py`（提案 schema `my-agent.skill-proposal.v1` 与 `SkillProposalService`）和 CLI `my-agent skills proposals list|show|confirm|reject`；配置 `enable_self_learning`（默认 false，YAML、AgentConfig 与布尔规范化同步）；owner 布局登记 `owner_skill_proposals_dir = <owner_home>/data/skill_proposals`（不进初始化目录清单，首次生成提案才创建）；组合根只在开关开启时给子代理 manager 注入服务，`runner_result_service` 在记录候选之后调用，异常只写工作日志。

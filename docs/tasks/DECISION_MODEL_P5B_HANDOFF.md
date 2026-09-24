@@ -104,6 +104,18 @@ apply/off/期限三组都继续通过原 `extract_with_retries`、原输出 sche
 `request-2.json`；没有 response-2，因为期限内未取得响应。独立入口为同目录 `p5b/validate_relations.py`。
 本轮未发现需修改源码的产品缺陷；不代表后台持久用量结算、实际 TUI、本地 I/O 阻塞或所有关系质量已验。
 
+## 真实 Curator 下游对照（2026-09-25，main `ab23a2666`）
+
+补上了此前缺的"真实提取"一环：
+- 隔离目录用原管理入口 `memory curator run --force`，从同一对话快照在原路径上跑两对 off/apply，提取为真实 MiniMax-M2.7。
+- Jev 每次比较 26 对，用户那句话里的重复（F03）与冲突（F02）两次都判对，更新（F05）一次判更新、一次判冲突。
+- apply 两次都把换车归为 `long_term_fact replace` 并指向原条目；off 两次都归为 `user_profile replace`。
+- 老家更正四次结果相同；芒果重复在两档都没有新增写入。
+- 所有 replace 都停在原晋升链的 `blocked_conflict`，正式事实未变。
+- 代价：多 1 次 Jev（约 3 秒、51 KB），提取请求 +56%。
+- 同时发现：关系对按顺序截取前 32 对、不按相关度；新 owner 首次迁移会把模板标题生成两条待审候选（与本点无关）。
+- 详见[真实验收](DECISION_MODEL_REAL_VALIDATION.md#14-p5-b-关系提示的真实-curator-对照2026-09-25main-ab23a2666)。
+
 ## 主线重点复查与剩余风险
 
 - 这是提取前的关系提示，不是直接对已保存候选做语义分类/合并；没有用 Jev 置信度修改任何 promotion 权限。
