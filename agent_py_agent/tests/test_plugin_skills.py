@@ -104,3 +104,27 @@ def test_manifest_v3_round_trip_and_validation():
     legacy = _manifest_payload(schema_version="plugin_package.v1")
     del legacy["panels"], legacy["skills"]
     assert "skills" not in PluginManifest.from_payload(legacy).to_payload()
+
+
+def test_plugin_tools_carry_plugin_identity_and_hidden_plugins_are_named():
+    # 真实 TUI：启用 11 个插件时决策筛选折叠了用户点名的 design-lite，提示里只有数字，模型以为插件不存在
+    from agent_py_agent.agent.plugin_runtime import PluginMCPClient
+    from agent_py_agent.agent.tooling.models import ToolModelHints, ToolModelSpec
+    from agent_py_agent.agent.tooling.registry import _render_deferred_notice
+
+    manifest = SimpleNamespace(plugin_id="design-lite", summary="按模板生成 HTML 设计文件")
+    client = SimpleNamespace(installation=SimpleNamespace(manifest=manifest))
+    base = ToolModelSpec(name="x", description="旧", input_schema={"type": "object", "properties": {}},
+                         hints=ToolModelHints(category="plugins", keywords=("mcp",)))
+    spec = PluginMCPClient._plugin_model_spec(client, base, "plugin__design_lite__create", SimpleNamespace(
+        name="create", description="生成设计"))
+    assert spec.description.startswith("插件 design-lite（按模板生成 HTML 设计文件）的 create 工具。")
+    assert {"design-lite", "design_lite", "design", "lite", "create", "mcp"} <= set(spec.hints.keywords)
+    assert spec.name == "plugin__design_lite__create" and spec.hints.category == "plugins"
+
+    other = ToolModelSpec(name="web_fetch", description="抓取网页", input_schema={}, hints=ToolModelHints(category="web"))
+    notice = _render_deferred_notice([spec, other], presentation_shortlist_names=frozenset())
+    assert "本轮未列短名单" in notice and "插件 design-lite（按模板生成 HTML 设计文件）" in notice
+    assert "web_fetch" not in notice
+    full = _render_deferred_notice([spec], presentation_shortlist_names=None)
+    assert "已启用但本轮未展开的插件" not in full

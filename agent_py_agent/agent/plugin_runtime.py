@@ -13,7 +13,7 @@ from .plugin_activation_ref import PluginActivationRef
 from .plugin_installation import PluginInstallation
 from .plugin_manifest import canonical_plugin_settings
 from .tooling.input_schema import canonicalize_tool_input_schema
-from .tooling.mcp_client import MCPError, MCPServerConfig, MCPStdioClient
+from .tooling.mcp_client import MCPError, MCPServerConfig, MCPStdioClient, sanitize_credentials
 from .tooling.mcp_registration import MCPProxyTool, build_proxy_tool, sanitize_name_component
 from .tooling.models import ResourceScopePolicy, ToolAvailability, ToolInvocationContext
 from .tooling.process_session_store import ProcessSessionStore, process_session_store_root
@@ -156,10 +156,23 @@ class PluginMCPClient(MCPStdioClient):
             policy = replace(proxy.runtime_policy, resource_scopes=ResourceScopePolicy(
                 "declared", static_scopes=(f"logical:plugin:{self.activation_ref.scope.activation_id}:{info.name}",),
             ))
-            proxies.append(PluginProxyTool(self, info.name, replace(proxy.model_spec, name=name), policy, transport=transport))
+            proxies.append(PluginProxyTool(self, info.name, self._plugin_model_spec(proxy.model_spec, name, info),
+                                           policy, transport=transport))
         if len({tool.model_spec.name for tool in proxies}) != len(proxies):
             raise MCPError("插件工具名称冲突", code="MCP_PROTOCOL_ERROR")
         return tuple(proxies)
+
+    # LLM: 只改模型可见的说明与检索提示（软信息），不改权限、效果或实现身份；插件 ID 与简介来自已安装包描述。
+    #   让模型、tool_search 与能力推荐都能按"插件 <ID>"找到它，而不是只看到通用 MCP 文案和哈希后的工具名。
+    # 函数用途: 生成带插件身份的工具说明和关键词。
+    def _plugin_model_spec(self, spec, name: str, info):
+        manifest = self.installation.manifest
+        plugin_id = manifest.plugin_id
+        description = f"插件 {plugin_id}（{' '.join(manifest.summary.split())}）的 {info.name} 工具。{info.description}"
+        keywords = tuple(dict.fromkeys((*spec.hints.keywords, plugin_id, plugin_id.replace("-", "_"),
+                                        *plugin_id.replace("_", "-").split("-"), info.name)))
+        return replace(spec, name=name, description=sanitize_credentials(description),
+                       hints=replace(spec.hints, keywords=keywords))
 
     # LLM: 缓存只在原连接/激活再次核验后整体替换；当前安装版本不能改变同连接代理的实现身份。
     # 函数用途: 为下一轮缓存完整工具贡献，调用方仍须在自己的权限视图中投影。

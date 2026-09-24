@@ -1091,7 +1091,7 @@ def _split_deferred_specs(
 
 
 # LLM: 短名单只缩名字，完整数目和原tool_search/list_tools入口保留；省略名称不能成为权限或loaded事实。
-# 函数用途: 显示有界的本轮折叠名称提示，默认None逐字保留原完整折叠清单。
+# 函数用途: 显示有界的本轮折叠名称提示，默认None逐字保留原完整折叠清单；被折叠的插件按插件 ID 与简介列出（仅展示）。
 def _render_deferred_notice(specs: list[ToolModelSpec], *, presentation_shortlist_names: frozenset[str] | None = None) -> str:
     """折叠清单:只列被 defer 工具的名字，按 会话运行时 方式用 tool_search 再加载。"""
     if not specs:
@@ -1104,7 +1104,13 @@ def _render_deferred_notice(specs: list[ToolModelSpec], *, presentation_shortlis
     )
     if presentation_shortlist_names is None:
         return notice + f"：{names}"
-    return notice + (f"。本轮提示 {len(shown)} 个：{names}" if shown else "。本轮未列短名单，仍可按能力搜索。")
+    notice += f"。本轮提示 {len(shown)} 个：{names}" if shown else "。本轮未列短名单，仍可按能力搜索。"
+    # 被折叠的插件按插件列出（数量受已启用插件数约束），否则模型不知道用户点名的插件其实已安装
+    plugins = sorted({spec.description.split("的 ", 1)[0] for spec in specs
+                      if spec.category == "plugins" and spec.name not in shown and spec.description.startswith("插件 ")})
+    if plugins:
+        notice += "\n  已启用但本轮未展开的插件（可用 tool_search 按插件 ID 加载）：" + "；".join(plugins)
+    return notice
 
 
 def _filter_catalog_specs(specs: list[ToolModelSpec], categories: list[str]) -> list[ToolModelSpec]:
