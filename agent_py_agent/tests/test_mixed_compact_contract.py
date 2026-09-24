@@ -114,10 +114,12 @@ def test_mechanical_mixed_summary_keeps_every_tool_source_and_rejects_oversized_
     assert middle > 12_000 and len(source_text) - middle > 12_000
     ceiling = compact._compact_request_input_ceiling(case.agent, case.source.policy)
     assert estimate_tokens(source_text) >= ceiling
-    sent, views = [], []
+    sent, sources, views = [], [], []
 
-    def summary(request, **_kwargs):
+    # 摘要来源经显式流式 message_source 传入（request.messages 为 None）；替身物化同一份来源以检查覆盖。
+    def summary(request, *, message_source=None, **_kwargs):
         sent.append(request)
+        sources.append(list(message_source) if message_source is not None else request.messages)
         calls = [] if response_kind == "empty" else [{
             "id": "must-not-execute", "name": "write_file",
             "input": {"path": "must-not-run.txt", "content": "不应执行"},
@@ -135,7 +137,7 @@ def test_mechanical_mixed_summary_keeps_every_tool_source_and_rejects_oversized_
 
     assert error.value.code == "COMPACT_CANDIDATE_TOO_LARGE"
     assert len(sent) == 1 and len(views) == 2
-    supplied = sent[0].prompt + json.dumps(sent[0].messages, ensure_ascii=False)
+    supplied = sent[0].prompt + json.dumps(sources[0], ensure_ascii=False)
     candidate = views[1]
     fallback_messages = json.loads(candidate.summary.rsplit("\n\n", 1)[1])
     assert fallback_messages == [{"role": "user", "content": [{"type": "text", "text": source_text}]}]

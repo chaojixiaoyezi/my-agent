@@ -196,6 +196,8 @@ def test_compact_failure_keeps_its_typed_code_and_does_not_claim_data_corruption
         raise ProviderContextWindowError("source exceeds provider window")
 
     monkeypatch.setattr(request_context, "prepare_conversation_context", fail)
+    # 来源先于准备加载；替身只提供一个占位来源，失败仍由原压缩准备抛出。
+    monkeypatch.setattr(request_context, "load_conversation_compact_source", lambda *_args, **_kwargs: object())
     inputs = SimpleNamespace(agent=object(), prompt="继续", request_id="r", on_chunk=None,
                              request={}, loaded_tool_names=(), model_surface=None, defer_compact=False)
     with pytest.raises(ConversationCompactError) as caught:

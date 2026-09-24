@@ -1806,9 +1806,10 @@ def test_compact_continuation_carries_active_turn_user_input_as_real_native_turn
 
     assert continued.carried_active_turn_user_inputs == [packet]
     assert loop_params.active_turn_user_inputs == [packet]
+    # 接续的插话保留原结构化 input_ids，供内部追踪与回收；供应商仍只看到正文。
     assert loop_params.tool_ir_history == [
         UserTurn("# User Task\n继续做当前任务"),
-        UserTurn(packet["text"]),
+        UserTurn(packet["text"], input_ids=("guidance-1",)),
     ]
     assert loop_params.tool_context == [f"[ACTIVE_TURN_USER_INPUT]\n{packet['text']}"]
 
