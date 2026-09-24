@@ -47,6 +47,7 @@ system/tools/messages 前缀，超窗时按原分段合同覆盖完整历史。�
 当前选中集合完整保留，HOT/lesson 只绑定不参与排序。P3 排序的来源刷新只查原正式仓库并投影原 ID，不新增检索或访问计数；P5-A 补充查询至多一次，候选未确认前不记访问。
 候选、请求属性、主模型或设置变更时拒绝旧建议；最后采用沿 `decision_outcome_is_current`。
 结果驻留原 PreparedRuntimeContext.memories，工具循环/Compact 复用该轮材料。同步本地文件 I/O 不承诺强制中断，迟到建议不会采用。
+召回前补充真正追加的记录编号写到 `RoutedMemoryContext.supplement_entry_ids`；上下文包 `memory_refs` 另写 `recalled_refs`（编号、版本、种类、`via` 为 baseline 或 supplement）与 `recall_findings`（`memory_*` 发现码），只写文件、不进提示段，供真实验收核对补充召回有没有带来新事实。
 第8步索引恢复补齐：externalizer 保存有界 `tool_process`，carried reader 恢复原 process 信封；投影唯一位于 `tooling/runtime_facts.py`，旧索引不推定清理成功。组件验证与真实 TUI 分开。
 
 ## Live-tool 逐调用来源

@@ -2,6 +2,11 @@
 
 child不展示历史正文时的读取回归先复现1 failed/1 passed，修复后test_compact_retained_history、test_subagent_compact_recovery、test_gateway_child_compact_scope_application三文件31 passed（8.48秒）。三宿主seed仓外基线仅验证测量和完整性，不算内存目标通过；细节见容量审计的宿主生命周期基线。
 
+## 召回证据写进上下文包（2026-09-24，本地分支 `claude/decision-recall-evidence`）
+
+- **新测试** `test_decision_pre_recall.py` 2 项：正式召回只把补充查询真正追加的记录编号记进 `supplement_entry_ids`，来源清单区分 baseline/supplement 且不含正文；上下文包写出 `recalled_refs`、`recall_findings`，提示段字节与不带证据时逐字相同。
+- **变异验证**：4 种各自使测试失败——不记补充编号、来源恒为 baseline、丢发现码、提示段泄露来源清单。改回后通过（变异子进程带 `PYTHONDONTWRITEBYTECODE=1`）。
+- **相关回归**：上下文包、召回决策、记忆路由、运行上下文相关 15 个文件 314 passed。
 ## 主会话选模采用模式的问题说明（2026-09-24，本地分支 `claude/decision-selection-question`）
 
 - **新测试** `test_gateway_model_observation.py::test_question_explains_usage_tags_and_apply_asks_for_the_best_semantic_match`（observe/apply 两档）：从冻结的决策请求体读回问题说明，两种模式都含用途标签说明；采用模式要求按任务语义挑最合适的候选且不再写"本次只观察"，观察模式保留"本次只观察"。

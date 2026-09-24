@@ -33,6 +33,9 @@ from .validator import validate_routes
 VALID_CONTEXT_MODES = {"soft", "strict"}
 
 
+# LLM: 本轮记忆路由与正式召回的过程事实；findings 只放结构化码，supplement_entry_ids 只记召回前补充查询真正追加的
+#   正式记录编号，供上下文包落观察证据，不参与召回、权限或预算判定。
+# 类用途: 汇总一轮的记忆路由命中、注入段落、回执、发现码与补充召回追加的记录编号。
 @dataclass
 class RoutedMemoryContext:
 
@@ -45,6 +48,7 @@ class RoutedMemoryContext:
     injected_sections: list[str] = field(default_factory=list)
     receipts: list[dict[str, Any]] = field(default_factory=list)
     findings: list[str] = field(default_factory=list)
+    supplement_entry_ids: list[str] = field(default_factory=list)
 
 
 @dataclass

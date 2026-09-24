@@ -31,6 +31,9 @@ class MainContextBundleRequest:
     runtime_injection_count: int = 0
     routed_required_read_paths: tuple[str, ...] = ()
     routed_candidate_paths: tuple[str, ...] = ()
+    # 本轮实际注入记忆的来源清单（编号/版本/种类/baseline 或 supplement）与记忆决策发现码；只写文件，不进提示。
+    recalled_refs: tuple[dict[str, object], ...] = ()
+    recall_findings: tuple[str, ...] = ()
     resume_context_injected: bool = False
     task_attributes: dict | None = None
     workspace_roots: tuple[str, ...] = ()
@@ -148,11 +151,16 @@ def _task_payload(request: MainContextBundleRequest) -> dict[str, object]:
     }
 
 
+# LLM: 只放记忆相关的引用、计数与来源清单，不含记忆正文；recalled_refs/recall_findings 只写上下文包文件，
+#   提示段只渲染 related_memory_count，新增字段不改变模型可见字节。
+# 函数用途: 生成上下文包的 memory_refs 段，供恢复与真实验收核对本轮注入了哪些记忆、来自哪条召回路径。
 def _memory_refs(request: MainContextBundleRequest, home_paths: Any | None) -> dict[str, object]:
     payload: dict[str, object] = {
         "related_memory_count": int(request.memory_count),
         "routed_required_read_paths": list(request.routed_required_read_paths),
         "routed_candidate_paths": list(request.routed_candidate_paths),
+        "recalled_refs": [dict(item) for item in request.recalled_refs],
+        "recall_findings": list(request.recall_findings),
     }
     if home_paths is not None:
         payload.update(

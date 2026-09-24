@@ -228,3 +228,48 @@ def test_formal_recall_shares_one_stage_for_before_and_after_points(prepared, mo
 
     assert records == [original, extra]
     assert observed == ["begin", stage, stage]
+
+
+def test_formal_recall_records_only_the_entries_the_supplement_added(prepared, monkeypatch):
+    agent, request, stage, scope, original, extra = prepared
+    agent.config.memory_top_k = 3
+    agent.config.home_lesson_stale_caveat_days = 7
+    agent.memory_hot = None
+    agent.memory_lessons = None
+    routed = SimpleNamespace(receipts=[], findings=[], injected_sections=[], supplement_entry_ids=[])
+    monkeypatch.setattr(loop_support, "hot_memory_records", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(loop_support, "routed_lesson_records", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(decision_service, "begin_decision_stage", lambda *_args, **_kwargs: stage)
+    monkeypatch.setattr(decision_recall, "rerank_recalled_memories", lambda *_args, **_kwargs: ([original], ""))
+    monkeypatch.setattr(decision_recall, "supplement_recalled_memories",
+                        lambda *_args, **_kwargs: ([original, extra], "memory_pre_recall_decision:apply:success"))
+    records = loop_support._formal_memories_for_request(
+        agent, request, routed, recall_scope=scope, long_term_memories=[original], skip_formal_recall=False,
+    )
+    assert records == [original, extra]
+    assert routed.supplement_entry_ids == ["extra"], "只记补充查询真正追加的记录"
+    refs = loop_support._recalled_refs(records, routed.supplement_entry_ids)
+    assert [(ref["entry_id"], ref["via"]) for ref in refs] == [("original", "baseline"), ("extra", "supplement")]
+    assert all(set(ref) == {"entry_id", "version", "kind", "via"} for ref in refs), "来源清单不含正文"
+
+
+def test_context_bundle_writes_recall_evidence_without_changing_the_prompt_section(tmp_path):
+    from agent_py_agent.agent.user_space.context_bundle import (
+        MainContextBundleRequest,
+        build_main_context_bundle,
+    )
+
+    base = MainContextBundleRequest(root=tmp_path, home_paths=None, user_prompt="核对", save=False, memory_count=2,
+                                    created_at="2026-09-24T00:00:00Z")
+    plain = build_main_context_bundle(base)
+    from dataclasses import replace
+
+    evidence = build_main_context_bundle(replace(base, recalled_refs=(
+        {"entry_id": "original", "version": 1, "kind": "fact", "via": "baseline"},
+        {"entry_id": "extra", "version": 1, "kind": "fact", "via": "supplement"},
+    ), recall_findings=("memory_pre_recall_decision:apply:success",)))
+    refs = evidence.bundle["memory_refs"]
+    assert [ref["via"] for ref in refs["recalled_refs"]] == ["baseline", "supplement"]
+    assert refs["recall_findings"] == ["memory_pre_recall_decision:apply:success"]
+    assert plain.bundle["memory_refs"]["recalled_refs"] == [] and plain.bundle["memory_refs"]["recall_findings"] == []
+    assert evidence.prompt_section == plain.prompt_section, "来源清单只写文件，模型可见的提示段字节不变"

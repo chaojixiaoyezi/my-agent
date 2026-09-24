@@ -328,6 +328,8 @@ def _tool_snapshots_for_run(
     return runtime_snapshot, protocol_snapshot
 
 
+# LLM: 把本轮已定的运行事实投影成上下文包请求；记忆只传编号/版本/来源与发现码，不传正文；task_local 不建包。
+# 函数用途: 组装并保存主代理上下文包，供提示段引用和事后核对。
 def build_runtime_main_context_bundle(
     agent,
     request: RuntimeContextRequest,
@@ -371,6 +373,9 @@ def build_runtime_main_context_bundle(
                 getattr(routed_context, "required_read_paths", ()) or ()
             ),
             routed_candidate_paths=tuple(getattr(routed_context, "candidate_paths", ()) or ()),
+            recalled_refs=_recalled_refs(memories, getattr(routed_context, "supplement_entry_ids", ()) or ()),
+            recall_findings=tuple(str(item) for item in getattr(routed_context, "findings", ()) or ()
+                                  if str(item).startswith("memory_")),
             resume_context_injected=resume_context_injected,
             task_attributes=request.task_attributes,
             workspace_roots=tuple(str(item) for item in workspace_roots or ()),
@@ -379,6 +384,16 @@ def build_runtime_main_context_bundle(
             tool_runtime_errors=tuple(tool_runtime_errors),
         )
     )
+
+
+# LLM: 只投影正式记录的编号、版本、种类与来源（原完整召回 baseline 或召回前补充 supplement），不含正文；只写上下文包文件。
+# 函数用途: 为上下文包生成本轮实际注入记忆的结构化来源清单，供真实验收核对补充召回是否带来新事实。
+def _recalled_refs(memories: list, supplement_ids) -> tuple[dict[str, object], ...]:
+    supplemented = set(supplement_ids)
+    return tuple({"entry_id": str(getattr(row, "entry_id", "") or ""), "version": getattr(row, "version", None),
+                  "kind": str(getattr(row, "kind", "") or ""),
+                  "via": "supplement" if getattr(row, "entry_id", "") in supplemented else "baseline"}
+                 for row in memories)
 
 
 def _tool_runtime_for_context_bundle(
@@ -446,6 +461,7 @@ def _routed_memory_context_for_request(agent, request: RuntimeContextRequest, *,
 
 
 # LLM: 原授权与预算先固定记忆集合；隔离/总闸关闭不读正式库；召回前后两点共用一次原阶段期限。
+#   召回前补充真正追加的记录编号写到 routed_context.supplement_entry_ids，只供上下文包观察。
 # 函数用途: 合并 HOT、已路由 lesson 和长期记忆；可选排序与补充只在原权限/预算内生效。
 def _formal_memories_for_request(
     agent,
@@ -512,6 +528,7 @@ def _formal_memories_for_request(
         routed_context.findings.append(finding)
     if pre_eligible and stage is not None:
         remaining = _FORMAL_MEMORY_BUDGET_CHARS - sum(len(str(getattr(row, "content", "") or "")) for row in memories)
+        before = {getattr(row, "entry_id", "") for row in memories}
         memories, finding = supplement_recalled_memories(
             agent, request, memories, recall_scope=recall_scope, stage=stage, queries=queries,
             slots=slots, search_top_k=top_k, remaining_chars=remaining,
@@ -519,6 +536,9 @@ def _formal_memories_for_request(
         )
         if finding:
             routed_context.findings.append(finding)
+        if isinstance(getattr(routed_context, "supplement_entry_ids", None), list):
+            routed_context.supplement_entry_ids = [str(getattr(row, "entry_id", "")) for row in memories
+                                                   if getattr(row, "entry_id", "") not in before]
     return memories
 
 
