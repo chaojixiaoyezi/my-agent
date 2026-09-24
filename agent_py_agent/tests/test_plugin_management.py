@@ -162,3 +162,18 @@ def test_owner_quota_is_checked_before_package_and_installation_publication(tmp_
     assert result["details"]["reason"] == "quota_unavailable"
     assert service.installations.snapshot() == ()
     assert not (service.installations.root / "packages").exists()
+
+
+def test_explicit_command_output_is_shown_as_readable_text():
+    # 真实 TUI：/plugins@savepoint-lite list 曾直接显示双重转义的 MCP JSON
+    import json as _json
+
+    from agent_py_agent.agent.plugin_management import readable_plugin_output
+
+    inner = _json.dumps({"path": "sample.txt", "snapshots": [{"id": "s1", "current": True}]}, ensure_ascii=False)
+    raw = _json.dumps({"result": inner, "content": [{"type": "text", "text": inner}]})
+    text = readable_plugin_output(raw)
+    assert '"path": "sample.txt"' in text and "\\\"" not in text and text.count("sample.txt") == 1
+    assert readable_plugin_output("纯文本结果") == "纯文本结果"
+    plain = _json.dumps({"content": [{"type": "text", "text": "第一行"}]})
+    assert readable_plugin_output(plain) == "第一行"

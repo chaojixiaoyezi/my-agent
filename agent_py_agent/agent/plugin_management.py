@@ -437,7 +437,7 @@ class PluginManagement:
                        "approval_required": "插件调用需要审批，尚未执行。",
                        "outcome_unknown": "插件调用结果尚未确认，请查询原请求。"}.get(state, message)
             if payload.get("output"):
-                message += "\n" + payload["output"]
+                message += "\n" + readable_plugin_output(str(payload["output"]))
         if state in {"succeeded", "failed", "cancelled"} and payload.get("finalization_pending"):
             message = "插件调用已有结果，连接收尾尚未确认。" if business else "插件管理操作已有结果，运行收尾尚未确认。"
         if payload.get("connection_cleanup", {}).get("confirmed") is False:
@@ -467,3 +467,24 @@ class PluginManagement:
 def _validate_request_id(value: str) -> None:
     if not isinstance(value, str) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", value) is None:
         raise ValueError("插件请求编号无效")
+
+
+# LLM: 仅用于显式插件命令回执的展示，不改原结果、不参与状态判断；解析失败原样返回。
+#   MCP 代理输出形如 {"result": ..., "content": [{"type": "text", "text": ...}]}，取 text 部分，JSON 文本缩进展示。
+# 函数用途: 把插件工具的原始输出整理成人能读的文字，避免双重转义的 JSON 直接出现在 TUI。
+def readable_plugin_output(output: str) -> str:
+    try:
+        value = json.loads(output)
+    except ValueError:
+        return output
+    content = value.get("content") if isinstance(value, dict) else None
+    texts = [item.get("text") for item in content or () if isinstance(item, dict) and isinstance(item.get("text"), str)]
+    if not texts:
+        return output
+    parts = []
+    for text in texts:
+        try:
+            parts.append(json.dumps(json.loads(text), ensure_ascii=False, indent=2))
+        except ValueError:
+            parts.append(text)
+    return "\n".join(parts)
