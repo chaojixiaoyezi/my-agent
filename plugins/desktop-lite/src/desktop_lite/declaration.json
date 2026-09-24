@@ -1,0 +1,197 @@
+{
+  "plugin_id": "desktop-lite",
+  "summary": "在本机桌面发系统通知、用默认程序打开工作区文档、把文本放进剪贴板",
+  "entry_module": "desktop_lite",
+  "default_action": "notify",
+  "actions": [
+    {
+      "name": "notify",
+      "summary": "发送一条系统桌面通知",
+      "arguments": [
+        {
+          "name": "title",
+          "summary": "通知标题（不超过 80 字）",
+          "options": [
+            "--title",
+            "-t"
+          ],
+          "value_type": "string",
+          "required": true,
+          "multiple": false,
+          "default": null,
+          "choices": [],
+          "path": false
+        },
+        {
+          "name": "message",
+          "summary": "通知内容（不超过 300 字）",
+          "options": [
+            "--message",
+            "-m"
+          ],
+          "value_type": "string",
+          "required": true,
+          "multiple": false,
+          "default": null,
+          "choices": [],
+          "path": false
+        }
+      ],
+      "kind": "tool",
+      "target": "notify",
+      "available": true
+    },
+    {
+      "name": "open",
+      "summary": "用系统默认程序打开工作区里的文档",
+      "arguments": [
+        {
+          "name": "path",
+          "summary": "工作区文件路径",
+          "options": [
+            "--path",
+            "-p"
+          ],
+          "value_type": "string",
+          "required": true,
+          "multiple": false,
+          "default": null,
+          "choices": [],
+          "path": true
+        }
+      ],
+      "kind": "tool",
+      "target": "open",
+      "available": true
+    },
+    {
+      "name": "clipboard",
+      "summary": "把文本放进系统剪贴板",
+      "arguments": [
+        {
+          "name": "text",
+          "summary": "要复制的文本",
+          "options": [
+            "--text"
+          ],
+          "value_type": "string",
+          "required": true,
+          "multiple": false,
+          "default": null,
+          "choices": [],
+          "path": false
+        }
+      ],
+      "kind": "tool",
+      "target": "clipboard",
+      "available": true
+    }
+  ],
+  "tools": [
+    {
+      "name": "notify",
+      "description": "在用户本机桌面弹出一条系统通知（macOS 用 osascript，Linux 用 notify-send）。会打扰用户，只在需要提醒用户时使用；标题和内容按纯文本原样显示。返回实际调用的程序和退出码；本机不支持时返回 DESKTOP_UNAVAILABLE。",
+      "requested_effect": "mutating",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80,
+            "description": "通知标题，纯文本，1–80 字"
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300,
+            "description": "通知内容，纯文本，1–300 字"
+          }
+        },
+        "required": [
+          "title",
+          "message"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "open",
+      "description": "用系统默认程序（macOS open，Linux xdg-open）在用户桌面打开当前工作区里一个已存在的文档类普通文件，如 PDF、图片、HTML、表格。拒绝符号链接、越出读取范围、带可执行权限的文件，以及 .app/.command/.sh/.bat 等可执行或脚本类扩展名。返回实际调用的程序和退出码。",
+      "requested_effect": "mutating",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": "工作区文件路径（相对当前工作区或允许读取范围内的绝对路径）"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "clipboard",
+      "description": "把一段文本放进用户本机系统剪贴板（macOS pbcopy，Linux wl-copy 或 xclip），会覆盖用户原剪贴板内容。返回实际调用的程序和退出码；本机不支持时返回 DESKTOP_UNAVAILABLE。",
+      "requested_effect": "mutating",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 20000,
+            "description": "要放进剪贴板的文本，1–20000 字"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "settings_schema": {
+    "type": "object",
+    "properties": {
+      "osascript_path": {
+        "type": "string",
+        "maxLength": 4096,
+        "default": "",
+        "description": "macOS 通知用的 osascript 可执行文件路径；留空时按当前平台自动在 PATH 中探测"
+      },
+      "notify_send_path": {
+        "type": "string",
+        "maxLength": 4096,
+        "default": "",
+        "description": "Linux 通知用的 notify-send 可执行文件路径；留空时按当前平台自动在 PATH 中探测"
+      },
+      "open_path": {
+        "type": "string",
+        "maxLength": 4096,
+        "default": "",
+        "description": "打开文件用的 open（macOS）或 xdg-open（Linux）可执行文件路径；留空时按当前平台自动在 PATH 中探测"
+      },
+      "clipboard_path": {
+        "type": "string",
+        "maxLength": 4096,
+        "default": "",
+        "description": "剪贴板用的 pbcopy（macOS）或 wl-copy / xclip（Linux）可执行文件路径；留空时按当前平台自动在 PATH 中探测"
+      },
+      "command_timeout_seconds": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 60,
+        "default": 10,
+        "description": "单次调用系统程序的超时秒数，超时终止该进程"
+      }
+    },
+    "required": [],
+    "additionalProperties": false
+  }
+}

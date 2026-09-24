@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "my-agent-desktop-lite"
+version = "0.1.0"
+description = "本机桌面小工具：系统通知、用默认程序打开工作区文档、写剪贴板"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+dependencies = ["my-agent-plugin-api==0.2.0"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+license-files = ["LICENSE", "NOTICE"]
+
+[tool.setuptools.package-data]
+desktop_lite = ["declaration.json"]

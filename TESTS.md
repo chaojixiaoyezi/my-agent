@@ -536,6 +536,7 @@ OAuth 传输、采样和模型菜单回归。覆盖保存无网络、公开字�
 
 ## 第 10 步第三批插件（本地，待发布）
 
+- `test_desktop_lite_package.py`（7 项）：从源码构建 desktop-lite 包并起真实 MCP 进程，系统程序全部用记录 argv/stdin 的假脚本经设置注入（不真弹通知、不开程序）；覆盖三个工具均为 mutating 且缺上下文拒绝、通知文本含引号/反斜杠/`& do shell script` 原样作为 argv 且 AppleScript 固定走 stdin、标题/内容超长与 NUL 拒绝、open 拒绝符号链接/目录/缺失/上溯/越界/.command/.APP/可执行位并把绝对路径传给打开程序、剪贴板文本经 stdin、程序缺失返回“不可用”、非零退出码、超时杀进程、坏设置启动失败。
 - `test_image_text_package.py`（10 项）：从源码构建 image-text 包并起真实 MCP 进程；本机有 tesseract 时用测试内极简 PNG 编码器画的点阵英文图实识别（无 tesseract 时 skip），另覆盖 tesseract 缺失返回 OCR_UNAVAILABLE 且仍带元数据（PNG/伪装扩展名/GIF/JPEG/WebP 宽高）、非图片与损坏头部、超上限、链接/上溯/越界、非法语言名、语言包缺失列出已装语言、假 tesseract 超时被杀且临时文件删除、坏设置启动失败。
 
 ## 第 10 步第二批宿主补充（本地，待发布）
