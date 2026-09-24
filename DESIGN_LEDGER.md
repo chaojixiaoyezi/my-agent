@@ -11,6 +11,17 @@
 
 决策设置的宿主非阻塞读取改为无锁读取已提交版本（已合入 main `d69f30cf3` 并部署双机）：原先读取也拿排它锁，同一 owner 的并发决策互相挤成 `settings_busy` 静默回退；两份设置文件都是原子替换写、单次写事务只改一个文件，旧建议仍由调用前后版本复核与在途取消挡住。同一分支用本机 HTTP 故障矩阵钉住断网/DNS/TLS/额度/计费/5xx/慢响应的冷却与恢复。详见[接入设计](docs/design/DECISION_MODEL_INTEGRATION.md#42-已实现的可选服务边界)。
 
+- **自学习的 lesson 来源在当前产品里是死路**（2026-09-25，真实验收发现；修复进行中：分支 `claude/subagent-lesson-ledger`）：
+  - 子代理提示要求"像普通协作者一样回复、不输出状态 JSON"，`output.json` 由宿主生成，没有结构化通道填 `lessons`。所以真实子代理即使在回复里写了经验，也不会产生 `subagent_lesson` 候选，S1 提案与 S2 排序都无法触发。
+  - 宿主不能从自然语言回复抽取经验。修复为仿照 `record_finding` 的独立结构化工具 `record_lesson`，见[真实验收](docs/tasks/DECISION_MODEL_REAL_VALIDATION.md)第 15 节。
+- **设计（未实施）：动作候选接入需先有插件层通用的"观察候选"结构**（2026-09-25，第 15 项剩余点，依据[动作候选审计](docs/tasks/DECISION_MODEL_ACTION_CANDIDATE_AUDIT.md)）：
+  - **现状**：插件线已合入 browser-lite 与 desktop-lite。browser-lite 的 `read` 会返回有限元素清单（标签、文字、name/id、是否可见），`click`/`fill` 按唯一匹配的选择器执行；但宿主没有经过验证的 `observation_id`/`candidate_id`，也没有观察内容哈希与代次。
+  - **原则**：不能为 browser-lite 写专项解析，这会违反禁止专项合同的铁律；也不能用截图坐标、自由文本或工具名推荐冒充动作候选。
+  - **方向**：
+    - 在插件 SDK 的工具结果合同里增加可选的通用观察候选字段（插件声明哪个只读工具会产出候选），宿主校验形状后生成本地 `observation_id`（绑定 run/task/调用、结果哈希与代次）和有限的 `candidate_id`。
+    - 决策点只从这些 ID 里选一个、给软提示；真正执行仍由原工具按原审批执行。
+    - 执行前按页面或窗口代次复核候选是否仍然有效，失效即丢弃。
+    - 这需要主线 owner（插件线）先确认 SDK 字段，再由决策线接入点。
 - **自学习 S2：待确认 Skill 提案的审核顺序 `skill_proposal_review`（第 15 项 P5-C）**（2026-09-24，已实施：本地分支 `claude/self-learning-proposal-review-order`，待审；未做真实 Jev 验收）：
   - **接线与开关**：新增独立 `owner_background` 接入点，默认 off，只在 `my-agent skills proposals list` 运行。AgentConfig/YAML 三字段 `decision_skill_proposal_review_mode/_timeout_seconds/_profile_id` 与原设置服务、TUI 菜单共用，只允许用户长期（owner）设置。配置归 AgentConfig：此点只排展示、不授予 Skill/工具权限，和 `enable_self_learning` 同属主配置，CLI 也只加载主配置。审计里暂称 `self_learning`，改名以表明只管审核顺序。
   - **触发与材料**：待确认提案 2—30 条且本点 observe/apply、总开关开启时才请求；0—1 条或关闭时零请求、输出逐字节不变。不要求 `enable_self_learning`（它只管生成）。外发只有 `proposal_i` 别名、创建顺序、来源计数，以及经 `external_data/default` 投影的 description、when_to_use 和 240 字经验摘录；提案/候选/任务/运行编号、路径与目标 Skill 名只进本地版本摘要，草稿 hash 不符则不发。

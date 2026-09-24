@@ -658,3 +658,49 @@ P4-B 普通 user owner 的两轮隔离真实中文配置各有 **1 次 Jev HTTP*
 - 候选与用途标签同第六个样本。两条普通中文短需求（解释二分查找、写回文判断函数）各开新会话。
 - Jev 各 1 次（0.90 / 0.78 秒），都选 `retain_original`，没有误采用；M2.7 正常答对。累计 Jev 91 次。
 - 详见[主会话真实交接](DECISION_MODEL_MAIN_MODEL_LIVE_HANDOFF.md)第七、八个样本。
+
+## 17 E2 对照记录与 F1 授权内晋升的真实验收（2026-09-25，分支 `claude/decision-experiment-records` `5306c9483`，现已合入 main `84d873c9b`）
+
+**环境**：
+- 测试机隔离目录，唯一 Gateway 8431，原生 TUI，wheel SHA256 前缀 `ca4748ff`。
+- 决策总开关与实验能力开关打开，所有接入点的普通模式关闭。
+- 测试者在同一个 TUI 会话（同一线程）里依次输入三条 `/experiment apply skill_tool 10m 1 50000 <任务>`。三个任务都真实需要工具：读 notes.txt 行数、列目录数 txt 文件、读 notes.txt 第一行；两份文件是测试者预先放进工作区的数据。
+
+**结果**：
+- **授权**：三份授权回执都是 v2 且已授予，`previous_request_id` 串起前一轮请求。
+- **E2 记录**：每轮都在请求记录的 `experiment_records` 里写入一条 `decision_experiment_record.v1`。
+  - 结算 charged 等于 provider：17,354 / 17,356 / 17,346，比例 0.4295。
+  - 候选短名单 32 个，收起 0 个。
+  - 实际用量已知，工具为 read_file / list_files / read_file。
+- **F1 评估**：
+  - 第一、二轮为"继续观察"（样本不足、无节省）。
+  - 第三轮可比较样本达到 3 个，但仍因 `no_savings` 继续观察。三份晋升回执都是 `skipped/evaluation_keep_observing`，设置没有改动。
+- **无节省的原因**：默认 `decision_skill_tool_context_policy=progressive`，且可额外收起的类别只有 `plugins`；这个隔离 owner 没有安装插件，推荐结果没有可收起的工具，规则因此拒绝晋升。这正是"没有收益就不开启"的设计。
+- 本批官方 Jev 尝试 3 次，累计 94 次。结束后经原 CAS 恢复决策设置，8431 已释放。
+
+**结论与边界**：
+- 对照记录、授权链、按实际结算和"无收益不晋升"都在真实链路中成立。
+- **显式缺口**：正向晋升路径（applied）没有真实样本。要补，需要一个装有插件、且插件工具确实可以收起的**隔离** owner；用户真实 owner 上装的插件不用于决策实验，除非用户另行批准。目前该路径只有组合测试证据（真实 Gateway 回合加本地 HTTP Jev）。
+
+## 15 自学习 S1/S2 的真实验收尝试：子代理 lesson 没有结构化来源（2026-09-25，main `1132fd9d0`）
+
+**环境**：测试机隔离目录，wheel 前缀 `4b5d2aef`，`enable_self_learning: true`，决策只配 `skill_proposal_review`（先关闭）。
+
+**做法**：测试者只给一条中文需求——并行创建 3 个子代理写三个小函数（其中两个都是 CSV 分组求和，刻意相似），"每个子代理完成后都要在结果里总结一条以后可复用的经验教训"。
+
+**结果**：
+- 主请求 24.8 秒完成，3 个子代理都是 DONE。
+- 父代理把"总结经验"写进了每个子代理的 goal，子代理也在自由文本回复里写了经验。
+- 但 3 份 `output.json` 的 `lessons` 都是空数组，没有产生 `subagent_lesson` 候选，也没有生成任何 Skill 提案，因此 S2 没有可排序的真实提案。
+- 记忆里的 3 条 lesson 是 Curator 从对话里提取的 `model_inferred`，S1 按设计不收。
+
+**根因**：
+- 子代理 runner 提示的 Required Output 明确要求"像普通协作者一样回复，不输出状态 JSON"，`output.json` 由宿主生成。
+- 没有任何结构化通道填 `lessons`，所以 S1/S2 在当前产品里无法由真实子代理触发。
+- 宿主也不能从自然语言回复里抽取经验，这会违反铁律。
+
+**修复方向**（主线 owner 已确认）：
+- 仿照 `record_finding` 的通用底座，新增独立的结构化工具 `record_lesson`。参数为 title/when_to_use/procedure/适用范围；身份来自 runner 上下文；每个 run 有条数与字节上限；同参数重复调用幂等。
+- 首片只对子代理开放，子代理提示只加一句可选引导。
+- 实现后再做一次端到端真实验收。
+- 私有证据：该隔离目录的 `artifacts/s1-real-evidence.json`。本次没有 Jev 调用。
