@@ -11,7 +11,7 @@ from agent.conversation.background_routing import (
     owner_from_paths,
     resolve_background_route,
 )
-from agent.conversation.models import ChannelBinding, ConversationThread
+from agent.conversation.models import ChannelBinding, ConversationThread, WakeSignal
 from agent.conversation.runtime import BackgroundMainAgentScheduler
 
 
@@ -160,6 +160,9 @@ def test_run_wake_signal_passes_owner_route(monkeypatch):
     """实际 wake 入口必须把同一路由器的结果传到既有 claimed 执行链。"""
 
     captured = {}
+    signal = WakeSignal(
+        wake_signal_id="ws-1", thread_id="bg-main-thread-x", urgency="urgent", reason="", root_task_id="task-1",
+    )
 
     s = BackgroundMainAgentScheduler({
         "runtime": SimpleNamespace(
@@ -168,7 +171,11 @@ def test_run_wake_signal_passes_owner_route(monkeypatch):
         ),
         "store": SimpleNamespace(
             claims=SimpleNamespace(),
-            wakes=SimpleNamespace(mark_handled=lambda *a, **k: None),
+            # 7.10 起执行前按 id 重读原待处理信封；此处信封仍 pending，原样返回。
+            wakes=SimpleNamespace(
+                mark_handled=lambda *a, **k: None,
+                pending_one=lambda wake_id: signal if wake_id == signal.wake_signal_id else None,
+            ),
             threads=SimpleNamespace(load=lambda _tid: None),
         ),
     })
@@ -185,9 +192,6 @@ def test_run_wake_signal_passes_owner_route(monkeypatch):
 
     monkeypatch.setattr(claim_module, "run_claimed", lambda _dependencies, params: _fake_run_claimed(params))
 
-    signal = SimpleNamespace(
-        reason="", urgency="urgent", thread_id="bg-main-thread-x", root_task_id="task-1", wake_signal_id="ws-1",
-    )
     s._run_wake_signal(signal, now=123.0)
     assert captured.get("route_channel") == "feishu"
     assert captured.get("route_target") == "ou_owner"

@@ -1,5 +1,14 @@
 # 测试与发布验收
 
+## 第8步发布后全仓回归修复（本地，未发布）
+
+- 起因：66a598cf3 发布前只跑了相关文件，没有跑全仓。之后全仓复验共 19,034 项，其中 15 项是真实失败（另有 1 项因复验用的快照不是 git 仓库而失败，属于环境原因，在真实 checkout 中通过）。
+- 11 项 `test_manager_runner_capability_requests`：第 7 步把准入和收口依赖收窄为 `manager.runtime_db` 和 `manager.conversation_store` 以后，轻量 manager 替身没有跟着补上这两个属性。现在按生产 `_attach_runtime_db` 和构造默认值显式设为 None，走原来的非托管路径。
+- 1 项 `test_silent_swallow_stage2`：911a53245 以后，发布账本改为经锁内 `mutate` 写入，但替身仍然让 `save` 失败，因此断言的错误日志从未触发。改为让 `mutate` 失败，断言意图不变。
+- 1 项 `test_observation_route`：7.10 在执行前按 id 重读待处理信封，2707fbbe3 当时漏补了这一个替身。改为使用真实 `WakeSignal`，并由 `pending_one` 返回仍处于 pending 的原信封。
+- 1 项架构守卫：`compact_text_source.py` 的 `__exit__` 改为显式三参数签名，行为不变（不吞异常）。
+- 验证：上述文件、`test_cli_update` 以及所有引用 `compact_text_source` 的测试，共 68 项通过；另外 Ruff、doc sync、diff 检查通过。除一处签名外，生产行为没有改动。教训：远端发布前至少要把直接受影响模块的全部测试文件纳入，只跑定向文件会漏掉夹具。
+
 
 ## 第8步精确来源与耐久清理事实组合（本地，未发布）
 
