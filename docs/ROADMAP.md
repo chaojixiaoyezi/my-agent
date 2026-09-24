@@ -1,6 +1,6 @@
 # 后续开发与验证
 
-决策模型P1—P5当前paused，用户指定另一agent接替；11/18本地切片完成口径保持，12.4第二片尚未实施。见[完整交接](tasks/DECISION_MODEL_TAKEOVER_HANDOFF.md)，后续须由接手者重新核对工作区和共享归属。
+决策模型P1—P5已于2026-09-23由接手代理恢复推进；11/18本地切片完成口径保持。当前先完成18的“本分支吸收main并调和两套Compact来源设计”，再做12.4第二片，见[执行Goal接手记录](tasks/DECISION_MODEL_GOAL.md#2026-09-23-接手记录与当前-goal)与[原交接](tasks/DECISION_MODEL_TAKEOVER_HANDOFF.md)。
 
 child历史说明在不展示正文时不再提前读取完整来源或计算展示窗口，保留原线程说明及核验；三文件31项通过。三宿主seed物化峰值已定位，后续延后/释放尚未实施，12.4未完成。
 

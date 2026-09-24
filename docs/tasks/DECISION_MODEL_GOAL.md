@@ -1,6 +1,6 @@
 # 决策模型完整执行 Goal：P1—P5
 
-状态：paused（2026-09-23，用户明确要求停止并交由另一agent接替，应用Goal已返回paused）。完整P1—P5目标保留，不按暂停视为完成。接手入口见[完整交接报告](DECISION_MODEL_TAKEOVER_HANDOFF.md)。
+状态：active（2026-09-23 起由用户指定的接手代理继续；原代理按用户要求暂停并留下[完整交接报告](DECISION_MODEL_TAKEOVER_HANDOFF.md)）。完整 P1—P5 目标不缩减；接手后的 Goal、并行边界与顺序调整见文末“2026-09-23 接手记录与当前 Goal”。
 设计合同：[决策模型接入计划](../design/DECISION_MODEL_INTEGRATION.md)。本文件记录阶段完成条件与证据，不是运行时事实源。
 当前阶段：01—11 已完成各自本地切片；12窗口/缓存、13真实接口、14召回前与记忆写入建议、15其它决策点、16主会话模型选择、17自主对照和18最终集成进行中。隔离 Gateway TUI 的 Jev/官方 MiniMax、子代理自动采用官方 M3 与 OpenCode DeepSeek 已各有真实链；主会话 apply 又验了超时、need_data 与选择原模型的安全保留，真实异模仍待验；14/15/16/17 各有首片，但整体均未验收。早期全仓回归已修本线回归、旧测试调用和决策错误码漏登记；13 处导入层级问题现已移位消除，完整严格 gate 仍未过。
 
@@ -222,3 +222,31 @@ P1-F 只读调查已用无网络小复现确认：原账本 failed/timed_out 可
 
 建议下一步：先完成12的完整child输入、窗口/输出预留、缓存/Compact及并发验收；max独立查复用接缝，主代理整合，精确缺口可交high并行。
 插件线独立继续；共享入口先明确归属，本线不修改日常设置、不重启 Gateway，不用本地假服务结果代替真实供应商验收。
+
+## 2026-09-23 接手记录与当前 Goal
+
+状态：active。原代理已按用户要求暂停，交接提交为 `46ac29601`；用户指定新的接手代理按[交接报告](DECISION_MODEL_TAKEOVER_HANDOFF.md)继续推进，并让接手者自行设定 Goal。
+
+**当前 Goal（接手者设定，范围不缩减）**：按[设计合同](../design/DECISION_MODEL_INTEGRATION.md)和本文件，完成 P1—P5 全部 18 项，每项按“合同单测 → fake → replay → 少量真实 TUI”验收。同时遵守交接报告 §1.2 列出的 12 条用户后续要求，主要包括：
+- 决策默认关闭，失败时立即沿用原方案。
+- 不做价格计算，只显示决策输入 token。
+- 子代理模型由宿主自动选定，用户不需要逐个操作。
+- 普通真实模型用官方 M2.7，M3 走官方原生入口，OpenCode 只用 deepseek-v4-flash。
+- P5 不能缩成“以后再说”。
+
+源码、离线、真实接口、安装版 TUI 和模型质量这几类结果分开报告，局部通过不能写成整项完成。
+
+**并行边界（已与“模块重构”接手者逐条确认）**：
+- 本线只在本 worktree（分支 `codex/decision-model-integration`）写代码。主 checkout、远端 main、本机 Gateway 和主线测试机都归主线 owner。
+- 本线的真实验收只用决策线独立测试机，沿用原来的隔离目录和端口。第三台测试机磁盘已满，上面还有其他工作线的资源，双方都先不碰。
+- 共享函数沿用原约定：本线只改 `runtime/loop_support.py::_native_provider_history_messages` 和 `_tool_loop_service.py::_text_conversation_history_section`，动手前再向主线确认。native Compact 的 plan/commit、live-tool 来源/CAS、active_turn_compact 和 process-index 投影仍归主线。
+- 集成方式：本线先在本分支吸收 main，解决冲突并完成验证，再把分支名和 SHA 交给主线 owner 合入。本线不直接推 main，也不部署主线环境。
+
+**顺序调整及原因**：交接建议下一步做 12.4 第二片 2a。接手核对时发现几个问题：
+- 主线已发布 `66a598cf3`。与本分支试合并有 33 个冲突文件，其中 13 个是核心生产文件，集中在 Compact 来源追踪和工具循环。
+- 两线的 Compact 来源设计不同：主线是 v2 checkpoint 加逐调用 ToolCallRef，本线是 v3 scope checkpoint，需要调和。
+- 2a/2b 要动的请求周期，主线第 8 步已经重构过。
+
+因此调整顺序：先完成 18 中“吸收 main”这一步（记为 18-A），再在合并后的基线上做 12.4 的 2a/2b，然后推进 13—17，最后完成 18 的整体集成与交接。这只是顺序调整，任何一项都不缩减。
+
+**当前进行**：18-A，吸收 main `66a598cf3`。合并前已对两侧快照分别跑全量基线，合并后逐项对照，作为冲突归因依据。
