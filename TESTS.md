@@ -508,6 +508,10 @@ OAuth 传输、采样和模型菜单回归。覆盖保存无网络、公开字�
 - 已知缺口：纯模型思考阶段面板显示空闲，见 [插件展示](docs/design/PLUGIN_DISPLAY.md#已知缺口)。
 - 断连重连：本轮样本中模型改用后台终端并误用参数，回合在断连前已按"结果无法确认"结束，未构成有效断连样本；断连/重连/停止仍以 TUI232 为准。
 
+## 第 10 步第三批插件（本地，待发布）
+
+- `test_browser_lite_package.py`（20 项）：WebSocket 帧纯单测（客户端掩码、7/16/64 位长度分支、截断前缀视为数据不足、服务端掩码/保留位/未知操作码/控制帧分片与超长/超限拒绝、分片重组与非法序列、socketpair 上跨读拼帧、自动 pong 与 close）；从源码构建 browser-lite 包并起真实 MCP 进程 + 本机 Chrome（无浏览器时 skip）：工作区测试表单 open → read → fill（输入框、按文字选下拉）→ click → read 出现"已提交：张三/B"，同进程复用同一浏览器，close 后 pid 消失、profile 清空；选择器 0 个/多个/语法错、不可填元素、无此选项、未开页面、缺上下文；https://example.com、工作区外 file://、`../` 上溯、ftp/javascript 被拒，本机 302 到外部与点击外链被拦截并停到空白页，页面内外部 fetch 被拦、允许主机放行；allowed_hosts 设置生效；chrome_path 不存在时五个工具都报"浏览器不可用"；宿主 stop、stdin EOF、仅对插件 pid 发 SIGTERM 与空闲超时后浏览器 pid 均不存在（`os.kill(pid, 0)` 失败）；缺数据目录与坏设置。
+
 ## 第 10 步第二批宿主补充（本地，待发布）
 
 - `test_plugin_skills.py`：包描述 v3 往返与名单校验（空、非法名、重复均拒绝，v1 不带 skills）；只取已启用且声明 Skill 的插件目录；插件 Skill 来源为 `plugin:<ID>`、不覆盖同名用户 Skill；提供方不再返回后下一次快照即消失；总闸关闭时不出现。
