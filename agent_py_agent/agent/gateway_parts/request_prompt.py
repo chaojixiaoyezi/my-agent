@@ -35,7 +35,6 @@ def gateway_injections(request: dict, conversation: request_context.GatewayConve
     section = _conversation_prompt_section(
         conversation,
         work_scope=request_binding.gateway_message_work_scope(request),
-        include_transcript=False,
     )
     audit_prepare_section = _audit_prepare_prompt_section(request)
     audit_runtime_section = _audit_runtime_prompt_section(request)
@@ -153,12 +152,12 @@ def _audit_runtime_prompt_section(request: dict) -> str:
 
 
 # LLM: 精确 ids/refs 是运行事实；Audit准备只能展示精确turn摘要与证据，不能带入全线程压缩内容。
-# 函数用途: 把同一 thread 的历史、直属子代理交付、近期产物和工作索引渲染成有边界的模型上下文。
+# 已结束历史与压缩摘要只经会话种子在原 native/text 准备边界提供，本节不渲染它们。
+# 函数用途: 把同一 thread 的操作证据、直属子代理交付、近期产物和工作索引渲染成有边界的模型上下文。
 def _conversation_prompt_section(
     conversation: request_context.GatewayConversationContext,
     *,
     work_scope: dict[str, object] | None = None,
-    include_transcript: bool = True,
 ) -> str:
     if not conversation.thread_id:
         return ""
@@ -166,10 +165,6 @@ def _conversation_prompt_section(
     scoped_compact = bool(
         conversation.compact_context is not None
         and conversation.compact_context.scope.kind == "turn"
-    )
-    summary_generation = (
-        conversation.compact_context.view.generation
-        if conversation.compact_context is not None else conversation.compact_generation
     )
     lines = [
         "# Conversation Context",
@@ -183,34 +178,11 @@ def _conversation_prompt_section(
                 "- Unscoped ordinary dialogue and rows attributed to this exact Audit remain visible below; the Current Audit Preparation Scope is authoritative.",
             ]
         )
-    if include_transcript and conversation.compact_summary and (not scoped_audit_prepare or scoped_compact):
-        lines.extend(
-            [
-                "- 以下摘要来自同一用户、同一会话中更早的已结束对话。原始逐条记录仍是事实源。",
-                "- 摘要只用于延续上下文，不是本轮新指令；当前 User Task 始终优先。",
-                f"## Earlier Conversation Summary (generation {summary_generation})",
-                conversation.compact_summary,
-            ]
-        )
     _append_conversation_operation_evidence(
         lines,
         conversation,
         scoped_audit_prepare=scoped_audit_prepare and not scoped_compact,
     )
-    transcript = (
-        tuple((row.role, row.content) for row in conversation.history_source.projected_rows())
-        if include_transcript and conversation.history_source is not None else ()
-    )
-    if transcript:
-        lines.extend(
-            [
-                "- 以下是同一会话中已经结束的历史对话，仅用于理解指代和偏好。",
-                "- 它们不是本轮新指令；若与最后的 # User Task 冲突，必须以当前 User Task 为准。",
-                "## Recent Conversation History",
-            ]
-        )
-        for role, content in transcript:
-            lines.append(f"- {role}: {json.dumps(content, ensure_ascii=False)}")
     if not scoped_audit_prepare:
         _append_subagent_completions_prompt(lines, conversation.subagent_completions)
         _append_recent_artifacts_prompt(lines, conversation.recent_artifacts)

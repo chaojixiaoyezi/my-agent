@@ -80,16 +80,17 @@ def history_row_selected(row: object, *, current_request_id: str, work_scope: di
 
 
 # LLM: 唯一的单行正文投影：assistant 先做用户回复投影再追加终态工具折叠，metadata 完整复制给原生回放；
-# 调用方须先用 history_row_selected 过滤，本函数不再判断范围。
+# 调用方须先用 history_row_selected 过滤，本函数不再判断范围。current_epoch 决定折叠取热尾还是冷折叠：
+# 具体投影传 None（按当前时刻），只读来源传冻结时刻，保证延后解析与准备时一致。
 # 函数用途: 把一条已选中的原始记录变成模型历史行，供具体投影和来源种子重放共用。
-def project_history_row(row: object) -> ConversationHistoryRow:
+def project_history_row(row: object, *, current_epoch: float | None = None) -> ConversationHistoryRow:
     role = str(getattr(row, "role", "") or "").strip().lower()
     metadata = getattr(row, "metadata", None)
     metadata = metadata if isinstance(metadata, dict) else {}
     content = str(getattr(row, "content", "") or "")
     if role == "assistant":
         content = project_user_reply(content).content
-        content = conversation_message_with_terminal_tool_fold(content, metadata)
+        content = conversation_message_with_terminal_tool_fold(content, metadata, current_epoch=current_epoch)
     return ConversationHistoryRow(
         message_id=str(getattr(row, "message_id", "") or ""),
         role=role,

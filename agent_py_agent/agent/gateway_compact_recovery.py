@@ -66,7 +66,7 @@ def _project_recovery_candidate(context, conversation, params, frozen, view):
     seed = request_prompt.gateway_conversation_history_seed(candidate, work_scope=work_scope)
     candidate_params, prepared = replace_recovery_history(
         params, frozen, history_seed=seed, injection_index=len(context.request.get("inject", [])),
-        injection=request_prompt._conversation_prompt_section(candidate, work_scope=work_scope, include_transcript=False),
+        injection=request_prompt._conversation_prompt_section(candidate, work_scope=work_scope),
         compact_context=candidate_context,
     )
     return CompactRecoveryMaterial(candidate, candidate_params, prepared, project_tool_loop_request(prepared))
@@ -88,7 +88,7 @@ def _project_gateway_active_candidate(binding, params, frozen, summary, retained
     seed = request_prompt.gateway_conversation_history_seed(candidate, work_scope=work_scope)
     candidate_params, prepared = replace_recovery_history(
         params, frozen, history_seed=seed, compact_context=candidate_context,
-        injection=request_prompt._conversation_prompt_section(candidate, work_scope=work_scope, include_transcript=False),
+        injection=request_prompt._conversation_prompt_section(candidate, work_scope=work_scope),
         injection_index=len(context.request.get("inject", [])),
     )
     return CompactRecoveryMaterial(candidate, candidate_params, prepared, project_tool_loop_request(prepared))

@@ -22,7 +22,6 @@ from agent_py_agent.agent.agent_core.tool_model_generation import (
     _publish_provider_thinking,
 )
 from agent_py_agent.agent.conversation.control_commands import parse_conversation_control
-from agent_py_agent.agent.conversation.history_seed import history_source_text_messages
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.gateway_parts import request_execution, stream_approval
 from agent_py_agent.agent.gateway_parts.control_service import (
@@ -38,13 +37,8 @@ from agent_py_agent.agent.gateway_parts.request_context import (
 from agent_py_agent.agent.gateway_parts.request_execution import _handle_gateway_request
 from agent_py_agent.agent.gateway_parts.stream_writer import BufferedChunkStreamWriter
 from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.tests._gateway_history_helpers import context_history
 
-
-# LLM: 测试只经生产文本规则从上下文只读来源解析历史，替代已移除的具体副本字段。
-# 函数用途: 取得 Gateway 上下文的 (role, content) 历史供断言。
-def _context_history(conversation):
-    source = conversation.history_source
-    return () if source is None else history_source_text_messages(source)
 
 def _conversation(user: str = "ou_alice", chat: str = "oc_one") -> dict[str, str]:
     return {
@@ -104,7 +98,7 @@ def test_verbose_command_is_persisted_per_conversation_without_calling_model(tmp
     assert first.ok is True
     assert "工具步骤摘要" in first.message
     assert current.verbose_level == "on"
-    assert _context_history(current) == ()
+    assert context_history(current) == ()
     assert other.verbose_level == "off"
     status = _run_command(agent, "/v", _conversation())
     assert status.message == "当前详细过程模式：开启。"

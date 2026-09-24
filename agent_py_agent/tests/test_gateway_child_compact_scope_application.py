@@ -15,7 +15,7 @@ from agent_py_agent.agent.conversation.compact_checkpoint import (
 )
 from agent_py_agent.agent.conversation.compact_scope import THREAD_COMPACT_SCOPE, CompactScope
 from agent_py_agent.agent.conversation.history_seed import (
-    history_source_text_messages,
+    seed_provider_history_messages,
     seed_text_messages,
 )
 from agent_py_agent.agent.conversation.models import ConversationCompactCommit
@@ -25,17 +25,12 @@ from agent_py_agent.agent.gateway_parts.request_context import (
     gateway_conversation_context,
 )
 from agent_py_agent.agent.gateway_parts.request_prompt import gateway_conversation_history_seed
+from agent_py_agent.tests._gateway_history_helpers import context_history
 from agent_py_agent.tests.test_gateway_conversation_compact import _agent, _request
 from agent_py_agent.tests.test_subagent_compact_recovery import _child
 
 # LLM: 测试账本经真实 writer 与线程 CAS 提交，允许交错 scope，但不替换 resolver 或宿主读取。
 # 函数用途: 写入一条指定摘要范围的检查点，验证准备边界不会误用提交链最新局部摘要。
-
-# LLM: 测试只经生产文本规则从上下文只读来源解析历史，替代已移除的具体副本字段。
-# 函数用途: 取得 Gateway 上下文的 (role, content) 历史供断言。
-def _context_history(conversation):
-    source = conversation.history_source
-    return () if source is None else history_source_text_messages(source)
 
 def _commit_row(agent, thread_id, *, row, summary, scope, publish):
     store = agent.conversation_store
@@ -84,7 +79,13 @@ def test_gateway_thread_seed_keeps_interleaved_local_row_after_global_cursor(tmp
         agent, request, "normal-between", "继续",
     ))
     normal_seed = gateway_conversation_history_seed(normal)
-    assert normal_seed is not None and normal_seed == gateway_conversation_history_seed(before_next_global)
+    # 两次准备各自冻结投影时刻，按摘要、代次和两个边界的解析结果逐项比较。
+    assert normal_seed is not None
+    assert (normal_seed.compact_summary, normal_seed.compact_generation) == (
+        between_seed.compact_summary, between_seed.compact_generation,
+    )
+    assert seed_text_messages(normal_seed) == seed_text_messages(between_seed)
+    assert seed_provider_history_messages(normal_seed) == seed_provider_history_messages(between_seed)
     assert normal.compact_context == before_next_global.compact_context
     last = store.messages.append({"thread_id": initial.thread_id, "role": "user", "content": "全线程第二段"})
     _commit_row(agent, initial.thread_id, row=last, summary="全线程摘要二", scope=THREAD_COMPACT_SCOPE, publish=True)
@@ -98,7 +99,7 @@ def test_gateway_thread_seed_keeps_interleaved_local_row_after_global_cursor(tmp
     assert loaded.compact_source is not None
     assert loaded.compact_source.compact_context == loaded.compact_context
     assert [row.message_id for row in loaded.compact_source.messages] == [local.message_id]
-    assert [text for _role, text in _context_history(loaded)] == ["局部任务原文"]
+    assert [text for _role, text in context_history(loaded)] == ["局部任务原文"]
     seed = gateway_conversation_history_seed(loaded)
     assert seed is not None and seed.compact_summary == "全线程摘要二"
     assert seed_text_messages(seed) == (("assistant", "局部任务原文"),)

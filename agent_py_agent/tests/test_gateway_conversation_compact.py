@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent_py_agent.agent.agent_core._tool_loop_service import _text_conversation_history_section
 from agent_py_agent.agent.backends.anthropic_prompt_cache import (
     anthropic_messages_with_optional_cache,
     anthropic_prompt_cache_projection,
@@ -28,10 +29,7 @@ from agent_py_agent.agent.conversation.compact_guard import (
     compact_exception_code,
     split_recent_complete_turns,
 )
-from agent_py_agent.agent.conversation.history_seed import (
-    history_source_text_messages,
-    seed_text_messages,
-)
+from agent_py_agent.agent.conversation.history_seed import seed_text_messages
 from agent_py_agent.agent.conversation.models import MessageLogEntry
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.gateway_parts.request_context import (
@@ -48,22 +46,18 @@ from agent_py_agent.agent.gateway_parts.request_history import append_gateway_co
 from agent_py_agent.agent.gateway_parts.request_prompt import (
     _conversation_prompt_section,
     _prompt_operation_evidence,
+    gateway_conversation_history_seed,
 )
 from agent_py_agent.agent.memory_store import MemoryRecord
 from agent_py_agent.agent.prompting_parts.cache_layout import prompt_cache_layout
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.tooling.runtime_contracts import ProviderToolCapability
+from agent_py_agent.tests._gateway_history_helpers import context_history
 
 # LLM: These tests intentionally use tiny policy thresholds to exercise checkpoint/tail/CAS
 # behavior, while the fake provider has no wire limit. Physical request budgeting is tested with
 # explicit small windows and complete source coverage in test_compact_request_budget.
 # 函数用途: 隔离旧会话状态测试的人工触发线和 fake 后端容量，避免完整工具表大于玩具窗口。
-
-# LLM: 测试只经生产文本规则从上下文只读来源解析历史，替代已移除的具体副本字段。
-# 函数用途: 取得 Gateway 上下文的 (role, content) 历史供断言。
-def _context_history(conversation):
-    source = conversation.history_source
-    return () if source is None else history_source_text_messages(source)
 
 @pytest.fixture(autouse=True)
 def _fake_summary_provider_capacity(monkeypatch):
@@ -365,11 +359,11 @@ def test_terminal_tool_fold_reaches_next_turn_without_incrementing_compact(tmp_p
     rendered = render_conversation_context_usage(usage, model_name="MiniMax-M2.7")
 
     assert followup.compact_generation == 0
-    assert _context_history(followup)[-1][0] == "assistant"
-    assert _context_history(followup)[-1][1].startswith("文件已经修改。")
-    assert "conversation-terminal-tool-fold" in _context_history(followup)[-1][1]
-    assert "call-write" in _context_history(followup)[-1][1]
-    assert _context_history(replayed_followup) == _context_history(followup)
+    assert context_history(followup)[-1][0] == "assistant"
+    assert context_history(followup)[-1][1].startswith("文件已经修改。")
+    assert "conversation-terminal-tool-fold" in context_history(followup)[-1][1]
+    assert "call-write" in context_history(followup)[-1][1]
+    assert context_history(replayed_followup) == context_history(followup)
     assert usage.compact_generation == 0
     assert usage.terminal_tool_fold_turns == 1
     assert usage.terminal_tool_fold_calls == 2
@@ -399,8 +393,8 @@ def test_terminal_tool_fold_reaches_next_turn_without_incrementing_compact(tmp_p
     later = _context(agent, request, "gw-later", "继续下一项")
 
     assert later.compact_generation == 0
-    assert _context_history(later)[: len(_context_history(followup))] == _context_history(followup)
-    assert "call-read-again" in _context_history(later)[-1][1]
+    assert context_history(later)[: len(context_history(followup))] == context_history(followup)
+    assert "call-read-again" in context_history(later)[-1][1]
 
 
 def test_forced_compact_passes_optional_instructions_as_soft_summary_context(tmp_path) -> None:
@@ -797,8 +791,8 @@ def test_same_thread_accumulates_beyond_recent_turn_setting_until_compact(tmp_pa
     followup = _context(agent, request, "gw-follow", "继续")
 
     assert followup.compact_generation == 0
-    assert len(_context_history(followup)) == 60
-    assert _context_history(followup)[0][1] == "第 0 轮 user 内容"
+    assert len(context_history(followup)) == 60
+    assert context_history(followup)[0][1] == "第 0 轮 user 内容"
 
 
 def test_compact_keeps_raw_transcript_and_indexes_old_messages_per_owner(tmp_path) -> None:
@@ -841,9 +835,11 @@ def test_compact_keeps_raw_transcript_and_indexes_old_messages_per_owner(tmp_pat
     assert hits
     assert hits[0].metadata["thread_id"] == first.thread_id
     assert str(agent.home_paths.owner_home_dir) == followup.scope.owner_home
-    section = _conversation_prompt_section(followup)
-    assert "Earlier Conversation Summary" in section
-    assert "原始逐条记录仍是事实源" in section
+    # 摘要只经会话种子在准备边界提供；Gateway 上下文段不渲染摘要或历史正文。
+    transcript = _text_conversation_history_section(gateway_conversation_history_seed(followup))
+    assert f"## Earlier Conversation Summary (generation {followup.compact_generation})" in transcript
+    assert followup.compact_summary in transcript
+    assert "Earlier Conversation Summary" not in _conversation_prompt_section(followup)
     tail, tail_errors = agent.conversation_store.messages.after_compact_report(stored)
     assert tail_errors == []
     assert tail == [], "当前请求之前的完整历史应一次替换为摘要，原始 transcript 仍保留"
@@ -1432,10 +1428,13 @@ def test_compact_keeps_operation_evidence_outside_conflicting_model_summary(tmp_
             "replayed": False,
         }
     ]
+    # 冲突的模型摘要只进会话种子的历史段，程序核验的操作证据只在 Gateway 上下文段，两者互不混入。
     section = _conversation_prompt_section(followup)
-    assert section.index("助手已经成功删除") < section.index(
-        "Program-Verified Operations From Compacted History"
-    )
+    transcript = _text_conversation_history_section(gateway_conversation_history_seed(followup))
+    assert "Program-Verified Operations From Compacted History" in section
+    assert "助手已经成功删除" not in section
+    assert "助手已经成功删除" in transcript
+    assert "Program-Verified Operations From Compacted History" not in transcript
     assert "remember/list" in section
     assert "remember/remove" not in section
     assert "must-not-survive" not in section
@@ -1591,7 +1590,7 @@ def test_forced_compact_keeps_current_gateway_turn_out_of_summary(tmp_path) -> N
         row.metadata.get("gateway_request_id") == "gw-current" and row.content == current_marker
         for row in tail
     )
-    assert all(current_marker not in content for _role, content in _context_history(refreshed))
+    assert all(current_marker not in content for _role, content in context_history(refreshed))
     event_path = agent.home_paths.owner_compact_dir / "conversations" / f"{first.thread_id}.jsonl"
     assert '"forced": true' in event_path.read_text(encoding="utf-8")
 

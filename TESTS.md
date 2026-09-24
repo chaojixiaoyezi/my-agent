@@ -5,16 +5,21 @@ child不展示历史正文时的读取回归先复现1 failed/1 passed，修复�
 ## 第12.4项第二片 2a：宿主历史种子只读来源（2026-09-23，本地分支）
 
 - **新测试**：
-  - `test_conversation_history_seed.py` 7 项：具体种子与只读来源在 `_native_provider_history_messages`、`_text_conversation_history_section` 两个边界逐项相等，并覆盖：
+  - `test_conversation_history_seed.py` 16 项：具体种子与只读来源在 `_native_provider_history_messages`、`_text_conversation_history_section` 两个边界逐项相等，并覆盖：
     - 下游 `project_native_provider_messages` 孤儿清扫的补位结果、PNG 媒体、匿名信封、终态工具折叠；
     - 当前请求行、Audit 投递、display 行的排除；
-    - 磁盘地址视图与内存行、两种单行规则、三宿主真实入口；
-    - 互斥校验，以及源文件改写后抛 `DataCorruptionError` 而不是变成空历史。
+    - 磁盘地址视图与内存行，Gateway、后台（保留空正文行）、child 三种规则，三宿主真实入口逐项核对 messages；
+    - 冻结时刻：终态折叠热尾窗口（300 秒）过后再解析，仍与准备时的具体种子相同，多次解析结果不变；
+    - 冻结后合法追加不改变已选历史；
+    - 互斥校验；源文件改写、截短、原子替换（内容相同也算）后抛 `DataCorruptionError`，删除后抛 `FileNotFoundError`，都不会变成空历史。
   - `test_host_history_seed_lifetime.py` 3 项：4.2M 字符种子准备驻留 32–54KB、峰值 270–294KB（修改前约 8.5MB/8.6–9.0MB），解析后完整 JSON hash 与行数不变。
-- **适配**：21 个相邻测试文件的种子/上下文断言改为经解析入口核对完整内容，没有删除内容断言。其中 deferred source 用例原先把被缩窄的展示投影当成 Gateway 历史来源；改动后历史与 Compact 来源是同一批完整行（24 行）。
+- **变异验证**：解析时不传冻结时刻（改按解析时刻投影），时钟用例 3 项失败；后台改回过滤空正文，三宿主用例失败。改回后全部通过。
+- **适配**：11 个相邻测试文件的种子/上下文断言改为经解析入口核对完整内容，没有删除内容断言。Gateway 的 5 个文件共用 `_gateway_history_helpers.py`，按生产单行规则从只读来源取历史。其中 deferred source 用例原先把被缩窄的展示投影当成 Gateway 历史来源；改动后历史与 Compact 来源是同一批完整行（24 行），并断言缩窄的展示投影从未被调用。
+- **改写断言**：`test_gateway_conversation_compact.py` 两个用例原先断言 `_conversation_prompt_section` 默认分支（摘要在 Gateway 段内、位于操作证据之前），该分支生产不可达（所有调用方都传 `include_transcript=False`），已随评审删除。现改为断言生产路径：摘要只在会话种子的文本历史段，操作证据只在 Gateway 上下文段，两者互不混入。原排序断言只针对不可达分支；生产文本协议里 Gateway 段排在历史段之前，2a 没有改变。`test_gateway_child_compact_scope_application.py` 原先比较两个种子对象是否相等，现在两次准备各自冻结投影时刻，改为逐项比较摘要、代次和两个边界的解析结果。
 - **结果**：
   - 相关 114 个测试文件 2,932 passed、24 xfailed、1 xpassed。
   - 接到 main `fae9d5855` 后，加上第 10 步改动过的测试文件共 118 个：2,976 passed、24 xfailed、1 xpassed。
+  - 独立评审修复后，同一 118 个文件：2,985 passed、24 xfailed、1 xpassed（新增 9 项种子用例）。最后删掉 `freeze_history_source` 未使用的 `current_epoch` 参数（避免新增参数过多的 code-size 高风险项）后，13 个改动测试文件再跑 358 passed。
   - 完整链前后对照见容量审计同名一节。
 - **未覆盖**：没有跑真实模型或 TUI，线上 CI 未作为验收来源。2b 未开始。
 

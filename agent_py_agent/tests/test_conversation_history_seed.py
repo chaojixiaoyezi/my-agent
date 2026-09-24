@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 from functools import partial
 from types import SimpleNamespace
 
@@ -47,6 +49,7 @@ from agent_py_agent.agent.runtime_errors import DataCorruptionError
 
 PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII="
 CURRENT_REQUEST = "gw-current"
+FOLD_BUILT_AT = 1_000_000.0
 
 
 # LLM: 只写 tmp_path 的真实 canonical 文件；覆盖媒体、工具配对、匿名信封、孤儿调用、终态折叠及三类应被选择排除的行。
@@ -73,6 +76,7 @@ def _history(tmp_path):
     fold = build_conversation_terminal_tool_fold(
         SimpleNamespace(config=SimpleNamespace()),
         [{"tool": "write_file", "ok": True, "call_id": "call-write", "parameters": {"path": "out.txt"}}],
+        built_at_epoch=FOLD_BUILT_AT,
     )
     for role, content, metadata in (
         ("user", "第一轮：请读取资料", {"conversation_request_id": "turn-1"}),
@@ -84,6 +88,7 @@ def _history(tmp_path):
         ("assistant", "孤儿调用轮", {"conversation_request_id": "turn-orphan",
                                     CANONICAL_NATIVE_MESSAGES_METADATA_KEY: canonical_native_messages_envelope(orphan)}),
         ("assistant", "文件已修改", {"conversation_request_id": "turn-fold", TERMINAL_TOOL_FOLD_METADATA_KEY: fold}),
+        ("assistant", "", {"conversation_request_id": "turn-empty"}),
         ("assistant", "当前请求自己的回复", {"gateway_request_id": CURRENT_REQUEST}),
         ("assistant", "Audit 后台投递", {"task_id": "audit-1", "reason": "audit_finding",
                                         "background_delivery_reason": "finding"}),
@@ -95,16 +100,20 @@ def _history(tmp_path):
     assert isinstance(snapshot, MessageSnapshotRows), "必须覆盖磁盘地址重放路径"
     # 内存行由同一地址视图物化，两种来源覆盖完全相同的行（loader 自身已按原规则排除 display 检查点）。
     memory = tuple(snapshot)
-    assert len(memory) == len(snapshot) >= 8
+    assert len(memory) == len(snapshot) >= 9
     return agent, thread, snapshot, memory
 
 
 # LLM: 具体种子逐字沿原算法构造（conversation_history_rows / _bounded_agent_history + 原 messages 规则），作为等价基准。
 # 函数用途: 按宿主规则构造旧式具体种子。
 def _concrete_seed(agent, thread, rows, rule, current_request_id):
-    if rule == "conversation":
+    if rule in {"conversation", "background"}:
         selected = conversation_history_rows(agent, thread.thread_id, current_request_id, [], rows=rows, preserve_complete=True)
-        messages = tuple((row.role, row.content) for row in selected if row.role in {"user", "assistant"} and row.content)
+        # Gateway 原规则过滤空正文；后台原规则保留全部已选行。
+        messages = tuple(
+            (row.role, row.content) for row in selected
+            if row.role in {"user", "assistant"} and (row.content or rule == "background")
+        )
         return ConversationHistorySeed(messages=messages, canonical_messages=provider_history_messages_from_rows(selected))
     bounded = _bounded_agent_history(agent, list(rows), 0, preserve_complete=True)
     messages = tuple(
@@ -117,10 +126,11 @@ def _concrete_seed(agent, thread, rows, rule, current_request_id):
 # LLM: 来源只冻结原选择与原单行投影，不另写规则。
 # 函数用途: 按宿主规则构造只读来源种子。
 def _source_seed(rows, rule, current_request_id):
-    if rule == "conversation":
+    if rule in {"conversation", "background"}:
         source = freeze_history_source(
             rows, project_row=project_history_row,
             select=partial(history_row_selected, current_request_id=current_request_id, work_scope=None),
+            keep_empty_text=rule == "background",
         )
     else:
         source = freeze_history_source(rows, project_row=project_agent_history_row)
@@ -132,7 +142,7 @@ def _native(seed):
     return _native_provider_history_messages(SimpleNamespace(conversation_history_seed=seed, compact_context=None))
 
 
-@pytest.mark.parametrize("rule", ["conversation", "agent_thread"])
+@pytest.mark.parametrize("rule", ["conversation", "background", "agent_thread"])
 @pytest.mark.parametrize("kind", ["disk", "memory"])
 def test_source_seed_resolves_identically_at_native_and_text_boundaries(tmp_path, rule, kind):
     agent, thread, snapshot, memory = _history(tmp_path)
@@ -156,7 +166,7 @@ def test_source_seed_resolves_identically_at_native_and_text_boundaries(tmp_path
     assert seed_text_messages(source) == concrete.messages
     text = json.dumps(seed_text_messages(source), ensure_ascii=False)
     assert "conversation-terminal-tool-fold" in text or "call-write" in text, "终态工具折叠必须进入文本历史"
-    if rule == "conversation":
+    if rule != "agent_thread":
         for excluded in ("当前请求自己的回复", "Audit 后台投递", "显示检查点"):
             assert excluded not in text and excluded not in encoded
 
@@ -172,12 +182,14 @@ def test_three_host_builders_emit_source_seeds_equivalent_to_original_projection
     )
     child = _agent_thread_history_seed(agent, ConversationCompactView(thread.thread_id, 0, "", snapshot, {}, {}, 1, False))
     for seed, rule, request_id in (
-        (gateway, "conversation", CURRENT_REQUEST), (background, "conversation", ""), (child, "agent_thread", ""),
+        (gateway, "conversation", CURRENT_REQUEST), (background, "background", ""), (child, "agent_thread", ""),
     ):
         assert seed.source is not None and not seed.messages and not seed.canonical_messages
         concrete = _concrete_seed(agent, thread, memory, rule, request_id)
         assert _native(seed) == _native(concrete)
         assert _text_conversation_history_section(seed) == _text_conversation_history_section(concrete)
+        # 渲染段会跳过空正文，逐项核对原 messages 规则（后台保留空正文行，Gateway/child 过滤）。
+        assert seed_text_messages(seed) == concrete.messages
 
 
 def test_source_and_concrete_history_are_exclusive(tmp_path):
@@ -199,4 +211,57 @@ def test_rewritten_canonical_file_fails_instead_of_becoming_empty_history(tmp_pa
     with pytest.raises(DataCorruptionError):
         _native(seed)
     with pytest.raises(DataCorruptionError):
+        _text_conversation_history_section(seed)
+
+
+@pytest.mark.parametrize("rule", ["conversation", "background", "agent_thread"])
+def test_frozen_projection_time_keeps_terminal_fold_stable_after_hot_window(tmp_path, monkeypatch, rule):
+    clock = [FOLD_BUILT_AT + 10]
+    monkeypatch.setattr(time, "time", lambda: clock[0])
+    agent, thread, snapshot, memory = _history(tmp_path)
+    concrete = _concrete_seed(agent, thread, memory, rule, CURRENT_REQUEST)
+    source = _source_seed(snapshot, rule, CURRENT_REQUEST)
+    hot_text = _text_conversation_history_section(concrete)
+    # 热尾窗口（300 秒）过后再解析：仍按冻结时刻取热尾，与准备时的具体种子逐项相同，多次解析结果不变。
+    for later in (FOLD_BUILT_AT + 400, FOLD_BUILT_AT + 4000):
+        clock[0] = later
+        assert _text_conversation_history_section(source) == hot_text
+        assert _native(source) == _native(concrete)
+    clock[0] = FOLD_BUILT_AT + 400
+    assert _text_conversation_history_section(_concrete_seed(agent, thread, memory, rule, CURRENT_REQUEST)) != hot_text, (
+        "对照：同一时刻重新准备的具体种子会取冷折叠，证明冻结时刻确实生效"
+    )
+
+
+def test_legal_append_after_freeze_keeps_frozen_selection(tmp_path):
+    agent, thread, snapshot, memory = _history(tmp_path)
+    source = _source_seed(snapshot, "conversation", CURRENT_REQUEST)
+    before_native, before_text = _native(source), _text_conversation_history_section(source)
+    agent.conversation_store.messages.append({
+        "thread_id": thread.thread_id, "role": "user", "content": "冻结之后才追加", "metadata": {},
+    })
+    assert _native(source) == before_native
+    assert _text_conversation_history_section(source) == before_text
+    assert "冻结之后才追加" not in json.dumps(_native(source), ensure_ascii=False)
+
+
+@pytest.mark.parametrize("damage", ["truncate", "replace", "delete"])
+def test_truncated_replaced_or_deleted_canonical_file_fails_instead_of_empty_history(tmp_path, damage):
+    agent, thread, snapshot, _memory = _history(tmp_path)
+    seed = _source_seed(snapshot, "conversation", CURRENT_REQUEST)
+    path = agent.conversation_store.storage.message_path(thread.thread_id)
+    expected = DataCorruptionError
+    if damage == "truncate":
+        path.write_bytes(path.read_bytes()[: path.stat().st_size // 2])
+    elif damage == "replace":
+        # 原子替换成逐字节相同的新文件：文件身份已变，仍不能成为新的冻结来源。
+        replacement = path.with_name(path.name + ".replacement")
+        replacement.write_bytes(path.read_bytes())
+        os.replace(replacement, path)
+    else:
+        path.unlink()
+        expected = FileNotFoundError
+    with pytest.raises(expected):
+        _native(seed)
+    with pytest.raises(expected):
         _text_conversation_history_section(seed)

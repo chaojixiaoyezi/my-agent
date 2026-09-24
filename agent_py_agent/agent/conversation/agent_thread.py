@@ -481,11 +481,11 @@ def _bounded_agent_history(
 
 
 # LLM: 子代理历史唯一的单行投影：assistant 追加终态工具折叠，metadata 去掉折叠键，其余字段原样；
-# 具体投影与只读来源种子重放共用它，不读 Store、不按正文判断范围。
+# 具体投影与只读来源种子重放共用它，不读 Store、不按正文判断范围。current_epoch 同 project_history_row。
 # 函数用途: 把一条子代理线程原始记录变成模型历史行。
-def project_agent_history_row(row: MessageLogEntry) -> MessageLogEntry:
+def project_agent_history_row(row: MessageLogEntry, *, current_epoch: float | None = None) -> MessageLogEntry:
     content = (
-        conversation_message_with_terminal_tool_fold(row.content, row.metadata)
+        conversation_message_with_terminal_tool_fold(row.content, row.metadata, current_epoch=current_epoch)
         if row.role == "assistant"
         else str(row.content or "")
     )
@@ -503,6 +503,8 @@ def project_agent_history_row(row: MessageLogEntry) -> MessageLogEntry:
             if key != TERMINAL_TOOL_FOLD_METADATA_KEY
         },
     )
+
+
 __all__ = [
     "AgentThreadTurnContext",
     "append_subagent_thread_result",

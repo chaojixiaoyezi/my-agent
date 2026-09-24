@@ -53,13 +53,10 @@ from agent_py_agent.agent.conversation.channels import project_user_reply
 from agent_py_agent.agent.conversation.control_commands import (
     parse_conversation_control,
 )
-from agent_py_agent.agent.conversation.history_projection import project_history_row
 from agent_py_agent.agent.conversation.history_seed import (
-    freeze_history_source,
     seed_provider_history_messages,
     seed_text_messages,
 )
-from agent_py_agent.agent.conversation.models import MessageLogEntry
 from agent_py_agent.agent.conversation.task_promotion import (
     complete_current_conversation_task,
     complete_named_audit_task_if_settled,
@@ -122,6 +119,7 @@ from agent_py_agent.agent.task_progress import (
     write_task_progress,
 )
 from agent_py_agent.agent.user_space.home_indexes import latest_task_refs
+from agent_py_agent.tests._gateway_history_helpers import context_history, history_source_of
 from agent_py_agent.tests._tool_runtime_harness import canonical_test_call
 
 
@@ -144,22 +142,6 @@ def _promote_work_tool(
     )
 
 
-
-# LLM: 测试只按生产原规则从只读来源解析本轮历史，替代已移除的具体副本字段，不另写选择逻辑。
-# 函数用途: 取得 Gateway 上下文的 (role, content) 历史供断言。
-def _context_history(conversation):
-    source = conversation.history_source
-    return () if source is None else tuple((row.role, row.content) for row in source.projected_rows())
-
-
-# LLM: 只构造已裁决的内存会话行，投影规则沿生产 project_history_row。
-# 函数用途: 用给定 (role, content) 构造 Gateway 上下文的只读历史来源。
-def _history_source_of(*turns):
-    rows = tuple(
-        MessageLogEntry(message_id=f"history-{index}", thread_id="thread", role=role, content=content)
-        for index, (role, content) in enumerate(turns)
-    )
-    return freeze_history_source(rows, project_row=project_history_row)
 
 
 def test_gateway_chat_request_payload_carries_session_conversation(tmp_path):
@@ -661,7 +643,7 @@ def test_interleaved_named_audit_prepare_history_keeps_exact_scope(tmp_path):
     current_a = gateway_conversation_context(
         GatewayConversationLoadRequest(agent, request_a2, "prepare-a-2", "继续完善 A")
     )
-    history_a = "\n".join(content for _role, content in _context_history(current_a))
+    history_a = "\n".join(content for _role, content in context_history(current_a))
     assert "A 的确认条件是 alpha" in history_a
     assert "A 已记录 alpha" in history_a
     assert "普通聊天仍应对两个准备轮可见" in history_a
@@ -684,7 +666,7 @@ def test_interleaved_named_audit_prepare_history_keeps_exact_scope(tmp_path):
             "我们聊聊刚才的准备",
         )
     )
-    ordinary_history = "\n".join(content for _role, content in _context_history(ordinary))
+    ordinary_history = "\n".join(content for _role, content in context_history(ordinary))
     assert "A 的确认条件是 alpha" in ordinary_history
     assert "B 的确认条件是 beta" in ordinary_history
 
@@ -695,7 +677,7 @@ def test_audit_prepare_projection_does_not_use_global_compact_or_sibling_artifac
         compact_summary="旧 Audit 的 captured 规则",
         compact_operation_evidence={"events": [{"tool": "publish_audit_update"}]},
         recent_operation_evidence={"events": [{"tool": "publish_audit_update"}]},
-        history_source=_history_source_of(("user", "当前 Audit 自己的普通上下文")),
+        history_source=history_source_of(("user", "当前 Audit 自己的普通上下文")),
         recent_artifacts=({"path": "/tmp/old-audit-profile.md"},),
         workspace_task=GatewayWorkspaceSelection(
             task_id="ordinary-task",
@@ -965,8 +947,8 @@ def test_gateway_run_persists_user_and_assistant_for_next_turn(tmp_path):
         "gw-2",
         "你还记得我的偏好吗？",
     )
-    assert any(role == "user" and "简短回答" in content for role, content in _context_history(second))
-    assert any(role == "assistant" for role, _content in _context_history(second))
+    assert any(role == "user" and "简短回答" in content for role, content in context_history(second))
+    assert any(role == "assistant" for role, _content in context_history(second))
     rows = agent.conversation_store.messages.recent(second.thread_id, limit=10)
     assert [(row.role, row.metadata["gateway_request_id"]) for row in rows] == [
         ("user", "gw-1"),
@@ -1797,7 +1779,7 @@ def test_gateway_model_history_keeps_complete_long_message_until_compact(tmp_pat
     )
 
     followup = _conversation_context(agent, request, "gw-long-2", "产物在哪？")
-    history_text = "\n".join(content for _role, content in _context_history(followup))
+    history_text = "\n".join(content for _role, content in context_history(followup))
     assert "中间内容已折叠" not in history_text
     assert "中间" * 2000 in history_text
     assert "/output/final-report.md" in history_text
@@ -1839,7 +1821,7 @@ def test_gateway_history_keeps_typed_commentary_and_final_from_same_request(tmp_
     )
 
     followup = _conversation_context(agent, request, "gw-parts-2", "继续")
-    assistant_rows = [content for role, content in _context_history(followup) if role == "assistant"]
+    assistant_rows = [content for role, content in context_history(followup) if role == "assistant"]
     assert assistant_rows == ["我先检查已有实现。", "检查完成，结果如下。"]
 
 
@@ -1882,7 +1864,7 @@ def test_gateway_ordinary_history_excludes_detached_audit_deliveries(tmp_path):
     )
 
     followup = _conversation_context(agent, request, "gw-follow", "继续聊天")
-    history_text = "\n".join(content for _role, content in _context_history(followup))
+    history_text = "\n".join(content for _role, content in context_history(followup))
     stored_text = "\n".join(
         row.content for row in agent.conversation_store.messages.recent(context.thread_id, limit=0)
     )
@@ -1934,7 +1916,7 @@ def test_natural_reply_and_structured_artifact_are_reused_without_rerunning(tmp_
     followup = _conversation_context(agent, request, "gw-delivery-2", "发我")
     section = gateway_injections({"inject": []}, followup)[0]
 
-    assert _context_history(followup)[-1] == ("assistant", projection.content)
+    assert context_history(followup)[-1] == ("assistant", projection.content)
     assert followup.recent_artifacts[0]["artifact_id"] == "weekly_report"
     assert followup.recent_artifacts[0]["path"] == artifact
     assert "直接调用 send_message" in section
@@ -2127,7 +2109,7 @@ def test_gateway_chat_history_isolated_by_real_conversation_id(tmp_path):
     other = {"conversation": {**request["conversation"], "channel_conversation_id": "session-2"}}
     second = _conversation_context(agent, other, "gw-second", "这是会话二")
     assert second.thread_id != first.thread_id
-    assert _context_history(second) == ()
+    assert context_history(second) == ()
     assert second.workspace_task is None
 
 
@@ -2173,7 +2155,7 @@ def test_gateway_conversation_turns_do_not_leak_into_owner_global_memory(tmp_pat
         "gw-b",
         "另一个聊天",
     )
-    assert _context_history(second) == ()
+    assert context_history(second) == ()
     assert all("项目代号海棠" not in row.content for row in agent.memory.all())
 
 

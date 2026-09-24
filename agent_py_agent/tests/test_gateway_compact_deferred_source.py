@@ -5,12 +5,12 @@ import pytest
 from agent_py_agent.agent.conversation import history_projection
 from agent_py_agent.agent.conversation.compact import load_conversation_compact_source
 from agent_py_agent.agent.conversation.compact_guard import ConversationCompactError
-from agent_py_agent.agent.conversation.history_seed import history_source_text_messages
 from agent_py_agent.agent.gateway_parts.request_context import (
     GatewayConversationLoadRequest,
     gateway_conversation_context,
 )
 from agent_py_agent.agent.gateway_parts.request_history import append_gateway_conversation_message
+from agent_py_agent.tests._gateway_history_helpers import context_history
 from agent_py_agent.tests.test_gateway_conversation_compact import (
     _agent,
     _context,
@@ -21,12 +21,6 @@ from agent_py_agent.tests.test_gateway_conversation_compact import (
 # LLM: The fake provider declares native tools but has no physical wire limit; this test keeps
 # the production pressure policy small while isolating the summary backend's test capacity.
 # 函数用途: 固定 fake 摘要后端容量，使本文件只测试会话来源与加载副作用。
-
-# LLM: 测试只经生产文本规则从上下文只读来源解析历史，替代已移除的具体副本字段。
-# 函数用途: 取得 Gateway 上下文的 (role, content) 历史供断言。
-def _context_history(conversation):
-    source = conversation.history_source
-    return () if source is None else history_source_text_messages(source)
 
 @pytest.fixture(autouse=True)
 def _fake_summary_capacity(monkeypatch):
@@ -67,12 +61,14 @@ def test_deferred_load_keeps_full_source_without_summary_or_checkpoint(tmp_path,
     store = agent.conversation_store
     before = store.threads.load(initial.thread_id)
     checkpoint = agent.home_paths.owner_compact_dir / "conversations" / f"{initial.thread_id}.jsonl"
-    # The display projection is deliberately narrowed to prove it cannot supply Compact's source.
-    monkeypatch.setattr(
-        history_projection,
-        "conversation_history_rows",
-        lambda *_args, rows, **_kwargs: tuple(rows[:2]),
-    )
+    # 展示投影被替换成缩窄版并记录调用：Compact 来源与 Gateway 模型历史都不能经它取得。
+    display_calls = []
+
+    def narrowed_display(*_args, rows, **_kwargs):
+        display_calls.append(len(rows))
+        return tuple(rows[:2])
+
+    monkeypatch.setattr(history_projection, "conversation_history_rows", narrowed_display)
 
     deferred = gateway_conversation_context(
         GatewayConversationLoadRequest(agent, request, "gw-follow", "继续", defer_compact=True)
@@ -90,8 +86,9 @@ def test_deferred_load_keeps_full_source_without_summary_or_checkpoint(tmp_path,
     assert source.thread.thread_id == initial.thread_id
     assert source.thread.compact_generation == 0
     assert len(source.messages) == 24
-    # 被缩窄的展示投影既不能提供 Compact 来源，也不再参与 Gateway 模型历史：历史只读来源按原单行规则冻结同一批完整行。
-    assert len(_context_history(deferred)) == len(source.messages) == 24
+    # 历史只读来源按原单行规则冻结同一批完整行，缩窄的展示投影从未被调用。
+    assert display_calls == []
+    assert len(context_history(deferred)) == len(source.messages) == 24
     assert source.messages[0].content.startswith("紫藤暗号")
     assert source.policy.trigger_tokens > 0
     assert source.recent_operation_evidence == {}

@@ -143,6 +143,8 @@ def project_background_history_seed(agent, prepared: BackgroundHistoryProjection
             source=freeze_history_source(
                 rows, project_row=project_history_row,
                 select=partial(history_row_selected, current_request_id="", work_scope=None),
+                # 后台原 messages 规则保留空正文行，文本解析与原具体种子逐项一致。
+                keep_empty_text=True,
             ),
         )
     canonical = list(rows)
