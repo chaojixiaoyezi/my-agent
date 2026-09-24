@@ -21,20 +21,21 @@ from agent_py_agent.tests.test_decision_settings import host_at, patch
 # 函数用途: 用真实 HTTP 字节验证整条调用链，允许测试控制服务错误及在途延迟。
 @pytest.fixture
 def server():
-    state = SimpleNamespace(status=200, requests=[], entered=threading.Event(), release=threading.Event(), block=False)
+    state = SimpleNamespace(status=200, body=None, requests=[], entered=threading.Event(), release=threading.Event(),
+                            block=False)
 
     # LLM: 测试服务器只接收有限自有请求并返回固定协议，无命令执行或持久业务副作用。
     # 类用途: 让正式传输栈实际进行连接、发送、读取与取消。
     class Handler(BaseHTTPRequestHandler):
-        # LLM: 正文只留内存断言，认证头不打印；网络阻塞通过有界 Event 等待控制。
-        # 函数用途: 返回成功或指定 HTTP 错误，以验证服务故障不会进入主模型失败路径。
+        # LLM: 正文只留内存断言，认证头不打印；网络阻塞通过有界 Event 等待控制；错误体只在非 200 时使用。
+        # 函数用途: 返回成功或指定 HTTP 错误（可带服务商错误体），以验证服务故障不会进入主模型失败路径。
         def do_POST(self):
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             state.requests.append((self.path, body))
             state.entered.set()
             if state.block:
                 state.release.wait(3)
-            encoded = json.dumps(response()).encode()
+            encoded = json.dumps(state.body if state.body is not None and state.status != 200 else response()).encode()
             try:
                 self.send_response(state.status)
                 self.send_header("Content-Type", "application/json")
@@ -165,7 +166,8 @@ def test_usage_refresh_does_not_wait_for_thread_write_lock(tmp_path, server):
         assert server.entered.wait(1)
         with locked_file_transition(host.conversation_store.threads.storage.thread_path(thread.thread_id)):
             server.release.set()
+            # 线程写锁被占用时不等待：设置按已提交版本无锁读取，建议照常形成，采用前仍复核版本。
             result = future.result(timeout=0.8)
-            assert result.reason == "settings_busy" and not result.may_apply
+            assert result.status == "success" and result.may_apply
             metrics = params.tui_runtime.store.snapshot().status.model_metrics
             assert metrics["decision_input_tokens"] == 120
