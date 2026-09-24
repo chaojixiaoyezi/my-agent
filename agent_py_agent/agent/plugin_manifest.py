@@ -206,26 +206,11 @@ class PluginManifest:
     def from_payload(cls, payload: object) -> PluginManifest:
         try:
             _json(payload)
-            names = "schema_version plugin_id version summary entry_module entry_wheel wheels actions default_action tools settings_schema"
             version = payload.get("schema_version") if isinstance(payload, dict) else None
-            if version == PLUGIN_PACKAGE_SCHEMA_V2:
-                names += " panels"
-            elif version == PLUGIN_PACKAGE_SCHEMA_V3:
-                names += " panels skills"
-            elif version == PLUGIN_PACKAGE_SCHEMA_V4:
-                names += " panels skills host_api"
-            elif version != PLUGIN_PACKAGE_SCHEMA:
+            if version not in _SCHEMA_FIELDS:
                 raise ValueError("包协议版本无效")
-            row = _fields(payload, names)
-            panels = tuple(PanelDeclaration.from_payload(item) for item in declaration_list(row.get("panels", [])))
-            if version == PLUGIN_PACKAGE_SCHEMA_V2 and not panels:
-                raise ValueError("v2 包必须声明面板")
-            skills = tuple(declaration_list(row.get("skills", [])))
-            if version == PLUGIN_PACKAGE_SCHEMA_V3 and not skills:
-                raise ValueError("v3 包必须声明随包 Skill")
-            host_api = tuple(declaration_list(row.get("host_api", [])))
-            if version == PLUGIN_PACKAGE_SCHEMA_V4 and not host_api:
-                raise ValueError("v4 包必须声明宿主 API 权限")
+            row = _fields(payload, _BASE_FIELDS + _SCHEMA_FIELDS[version])
+            panels, skills, host_api = _extension_fields(version, row)
             wheels = tuple(
                 PluginWheel(**_fields(item, "path sha256"))
                 for item in declaration_list(row["wheels"])
@@ -260,6 +245,28 @@ class PluginManifest:
             )
         except (ValueError, TypeError, KeyError, AttributeError, RecursionError) as exc:
             raise PluginPackageError("invalid_manifest", "插件包描述无效。") from exc
+
+
+_BASE_FIELDS = "schema_version plugin_id version summary entry_module entry_wheel wheels actions default_action tools settings_schema"
+# 各协议版本在基础字段之外必须出现的字段；每个新版本声明的新能力不能为空（否则应使用更低版本）
+_SCHEMA_FIELDS = {
+    PLUGIN_PACKAGE_SCHEMA: "",
+    PLUGIN_PACKAGE_SCHEMA_V2: " panels",
+    PLUGIN_PACKAGE_SCHEMA_V3: " panels skills",
+    PLUGIN_PACKAGE_SCHEMA_V4: " panels skills host_api",
+}
+
+
+# LLM: 只做版本相关的非空约束与集合读取，具体取值校验在 PluginManifest.__post_init__ 统一进行。
+# 函数用途: 读取面板、随包 Skill、宿主 API 权限三项扩展声明，并检查所声明版本对应的新能力不为空。
+def _extension_fields(version: str, row: dict) -> tuple[tuple, tuple, tuple]:
+    panels = tuple(PanelDeclaration.from_payload(item) for item in declaration_list(row.get("panels", [])))
+    skills = tuple(declaration_list(row.get("skills", [])))
+    host_api = tuple(declaration_list(row.get("host_api", [])))
+    required = {PLUGIN_PACKAGE_SCHEMA_V2: panels, PLUGIN_PACKAGE_SCHEMA_V3: skills, PLUGIN_PACKAGE_SCHEMA_V4: host_api}
+    if version in required and not required[version]:
+        raise ValueError("包协议版本声明的新能力为空")
+    return panels, skills, host_api
 
 
 # LLM: 接受当前完整协议，未知键不能静默丢弃；不从文字或默认值推断机器字段。
