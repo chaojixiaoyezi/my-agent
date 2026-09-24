@@ -12,7 +12,10 @@ child不展示历史正文时的读取回归先复现1 failed/1 passed，修复�
     - 互斥校验，以及源文件改写后抛 `DataCorruptionError` 而不是变成空历史。
   - `test_host_history_seed_lifetime.py` 3 项：4.2M 字符种子准备驻留 32–54KB、峰值 270–294KB（修改前约 8.5MB/8.6–9.0MB），解析后完整 JSON hash 与行数不变。
 - **适配**：21 个相邻测试文件的种子/上下文断言改为经解析入口核对完整内容，没有删除内容断言。其中 deferred source 用例原先把被缩窄的展示投影当成 Gateway 历史来源；改动后历史与 Compact 来源是同一批完整行（24 行）。
-- **结果**：相关 114 个测试文件 2,932 passed、24 xfailed、1 xpassed。完整链前后对照见容量审计同名一节。
+- **结果**：
+  - 相关 114 个测试文件 2,932 passed、24 xfailed、1 xpassed。
+  - 接到 main `fae9d5855` 后，加上第 10 步改动过的测试文件共 118 个：2,976 passed、24 xfailed、1 xpassed。
+  - 完整链前后对照见容量审计同名一节。
 - **未覆盖**：没有跑真实模型或 TUI，线上 CI 未作为验收来源。2b 未开始。
 
 ## 18-A 吸收 main `66a598cf3` 合并回归（2026-09-23，本地）
