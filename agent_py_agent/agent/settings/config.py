@@ -334,6 +334,10 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     decision_delivery_quality_mode: str = "off"
     decision_delivery_quality_timeout_seconds: float | None = None
     decision_delivery_quality_profile_id: str | None = None
+    # Skill 提案审核顺序只排 CLI 展示、不授予 Skill/工具权限，且与 enable_self_learning 同属主配置，故不放 CapabilityConfig。
+    decision_skill_proposal_review_mode: str = "off"
+    decision_skill_proposal_review_timeout_seconds: float | None = None
+    decision_skill_proposal_review_profile_id: str | None = None
     agent_name: str = "myagent"
     # 默认沿 终端交互 主链由 TUI 接管滚轮、点击与应用内选区；F6 仍可临时退回宿主终端原生复制。
     # 关闭后备用屏幕收不到物理滚轮，历史只能用 PgUp/Ctrl+Home，因此不再作为开箱默认。

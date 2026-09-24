@@ -2,6 +2,40 @@
 
 child不展示历史正文时的读取回归先复现1 failed/1 passed，修复后test_compact_retained_history、test_subagent_compact_recovery、test_gateway_child_compact_scope_application三文件31 passed（8.48秒）。三宿主seed仓外基线仅验证测量和完整性，不算内存目标通过；细节见容量审计的宿主生命周期基线。
 
+## 自学习 S2：待确认 Skill 提案审核顺序 `skill_proposal_review`（2026-09-24，本地分支 `claude/self-learning-proposal-review-order`，待审）
+
+- **改动**：新增 `capability/decision_skill_proposal_review.py`；`POINT_RUNTIME_SCOPES` 登记 `skill_proposal_review: owner_background`；AgentConfig/YAML 三字段默认 off/null/null；TUI 决策菜单加“Skill 提案审核顺序（用户长期）”；`skills proposals list` 在点返回采用结果时才重排展示、加标签和 `review_order` 块。设计见[接入设计 P5-C 自学习 S2](docs/design/DECISION_MODEL_INTEGRATION.md#p5-c-自学习-s2待确认-skill-提案的审核顺序-skill_proposal_review)。
+- **新测试** `test_decision_skill_proposal_review.py` 42 项。用真实 S1 提案，只替换决策服务三个边界；替身签名与原服务的显式关键字参数一致。
+  - 资格：0/1 条待确认、31 条、点未登记都不建阶段；2 条和 30 条各一次请求；已确认/已拒绝的提案不计数，位置也不动。
+  - 关闭：阶段错误、点关闭、只开了别的点时不准备材料。
+  - 绑定：阶段为 owner_background、操作编号绑定待确认集合、每次新 run 编号且无 thread，source_refs 精确。
+  - 采用：observe 保留原序；apply 按 优先→普通→稍后/可能重复 分组，组内保持原序，标签和 `review_order` 块正确；全 normal 顺序不变、无标签。
+  - 回答：6 种坏回答（缺题、多答、错题号、逐题错误、错类型、越界值）与 3 种非选择都保留原序；候选版本不符、配置复核失败、超期也保留原序。
+  - 等待期间变化：6 种（被拒绝、版本号变、记录 hash 变、正文变而 hash 未变、新增待确认、文件损坏）都保留原序；正文被改而 hash 未更新的草稿不发请求。
+  - 隐私：外发不含提案/候选/任务/运行编号、目标 Skill 名、路径或密钥，含 3 段不可信数据边界和 `<redacted>`；题目只有 7 个固定候选且说明“不决定确认或拒绝”；经验摘录与 S1 模板一致、不含来源段、按 240 字截断。
+  - 零写入与取消：确认/拒绝/写入入口被替换成失败也不触发，提案、skills、候选账本逐字节不变；apply 与 observe 下等待期间的取消、配置复核中的取消都上抛；决策边界的 InterruptedError/ToolCancelled 上抛；普通错误回原序，但不掩盖同时发生的取消。
+- **新测试** `test_decision_skill_proposal_review_integration.py` 19 项。真实 CLI、owner 解析、设置与模型目录、决策服务、worker、响应解析、冷却表和调用账，只替换 `post_json`（窗口门与请求头照常执行）。
+  - 字节：点关闭、总开关关闭、1 条、0 条时零请求，`list` 与 `--json` 输出和按 S1 格式重建的期望逐字节相同。
+  - observe：两次调用各一次请求，各有一条 purpose=decision、finished 的调用账，输出不变。
+  - apply：`--json` 重排和 `review_order` 块、中文说明行与四种标签正确。
+  - 真实请求：只含 state/questions/model，别名化、已脱敏、无编号和路径。
+  - 失败路径：请求期间提案被拒绝、4 种真实非选择或越界回答、供应商错误后同进程冷却（第二次零请求）、0.2 秒超时都输出原列表。
+  - 中断：命令以 `SKILL_PROPOSAL_CLI_INTERRUPTEDERROR` 失败，不打印列表。
+  - 容量：30 条最长草稿通过真实窗口门并完成重排。
+  - 设置与菜单：YAML/dataclass 默认 off；字段只允许 owner，线程写入报“作用范围”；超时继承后台期限；TUI 用户长期菜单可设 apply，线程菜单不显示本点。
+- **一次性对照（未提交）**：在同一临时 home 上分别运行 origin/main（`d9a34fc76` 与变基后的 `4b9d684ea` 各一次）与本分支的 CLI 子进程，执行 `list`、`list --json`、`list --status pending_confirmation`。默认配置、点关闭、总开关关闭、1 条、0 条五种情形的输出逐字节相同。
+- **变异验证**：38 种变异全部被杀死。涉及：
+  - 资格：点登记、上下界 2/30、只计待确认。
+  - 阶段：错误与关闭、observe 被采用、scope 改 thread、run 编号为空。
+  - 采用前复核：候选版本、配置复核、重读提案、期限、重算草稿 hash、篡改拒发。
+  - 材料与隐私：不可信边界、脱敏、摘录带来源段、摘录上限、别名换成真实编号。
+  - 回答与排序：回答数量/逐题错误/类型、可能重复分组、标签、排序、已处理条目位置。
+  - 取消：入口吞中断、可选错误掩盖取消、决策后不查取消。
+  - CLI 与配置：不调用点、丢 `review_order`、丢标签、不重排；schema 改线程范围、dataclass/YAML 默认 apply、TUI 缺显示名。
+  每次在 `PYTHONDONTWRITEBYTECODE=1` 子进程运行，逐字节还原并用 sha256 核对；全部完成后删除被变异模块的 `__pycache__`，从干净字节码复跑 85 passed（含 S1 的 24 项）。
+- **结果**（变基到 main `4b9d684ea` 后）：与改动直接相关的 56 个测试文件加 `test_architecture_guardrails.py` 共 1428 passed（决策全部测试、S1、TUI 菜单、外部材料组合、CLI 解析/参考/配置、配置校验、user_config、Gateway 选模观察/采用、打包、架构守卫）。本分支产品代码和新测试都没有 `*args/**kwargs` 形参。Ruff、doc sync、import boundaries、strict code-size（blocked=False；与 origin/main 按 identity+severity 逐项比对无新增）、`git diff --check`、clean-package 通过；线上 CI 未作为验收来源。
+- **未验**：没有真实 Jev 或真实 CLI 验收，不证明审核顺序对用户有用；CLI 的决策调用账只在进程内，不进入会话展示或持久账本。
+
 ## 决策线收尾的全仓回归（2026-09-25，main `5fca6a194`）
 
 - **结果**：`python -m pytest agent_py_agent/tests -p no:cacheprovider` 共 24 分 19 秒，21,406 passed、4 failed、21 skipped、32 xfailed、5 xpassed。

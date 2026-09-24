@@ -360,13 +360,13 @@ need_data 的 A/B/C 缺项由候选化声明表达，也能说明“A 或 B 任�
 | 规划与派工建议 | 当前原 Todo read 的精确 open ID 与本轮问题 | 原工具回执中的软提示 | 主模型按原规则规划，不自动制造子代理或 Goal | 后续，现有 Todo 优先级首片已本地接入 |
 | 页面/工具动作候选 | 当前 DOM/OCR/工具结构化候选 | 原工具参数准备环节 | 原主模型判断，原审批与后置核验保持 | 后续 |
 | 交付质量提示 | 当前产物引用与原工具证据 | 主模型复核上下文 | 原收尾；不增加强制续跑或完成评分门 | 后续，交付复核焦点首片已合入并做过真实样本（无收益证据） |
-| 自学习候选筛选 | 原 runner lesson Candidate 与可信来源；正式 Skill 另需用户授权 | 唯一 Skill 提案/确认入口（S1 已合入 main `e9ead5ae3`）上待确认提案的审核顺序 | 原候选与提案不变；Jev 不能生成正文、确认、拒绝或写正式 Skill | 后续，S1 入口已合入，S2 排序未做 |
+| 自学习候选筛选 | 原 runner lesson Candidate 与可信来源；正式 Skill 另需用户授权 | 唯一 Skill 提案/确认入口（S1 已合入 main `e9ead5ae3`）上待确认提案的审核顺序 | 原候选与提案不变；Jev 不能生成正文、确认、拒绝或写正式 Skill | 后续，S1 入口已合入，S2 审核顺序点 `skill_proposal_review` 已本地实施待审（默认关闭） |
 | 主会话自动换模型 | 用户授权的候选范围和新工作片 | 原会话模型选择服务 | 保持当前选择，不切正在请求的模型 | 最后评估 |
 
 “记忆整理前标注”首版只加标签和优先级，不丢弃原始材料；召回前跳过与长期写入判断后置，避免早期错误造成静默遗漏。
 P5-A 的首片只允许默认关闭的 `pre_recall` 建议一次有界补充查询：原完整问题先检索，追加项仅用原 scope 与未用的 `memory_top_k`/字符空间；P3 排序和该点共用阶段期限。普通聊天没有可信的显式查历史结构化意图，因此 Jev 不能决定跳过原记忆。真实 Jev 的漏召回、时延和输入用量尚待隔离对照，见[审计与实施记录](../tasks/DECISION_MODEL_PRE_RECALL_AUDIT.md)。
 P5-C 规划首片只在当前主代理读取已有多项 Todo 时追加一个 exact ID 的软优先提示；原计划/Goal/派工权威不变，真实 Jev 质量尚待验，见[交接](../tasks/DECISION_MODEL_PLANNING_HANDOFF.md)。
-自学习点的前置合同见[只读审计](../tasks/DECISION_MODEL_SELF_LEARNING_AUDIT.md)。S1 提案/确认链已本地实施（分支 `claude/self-learning-skill-proposals`，待审）：`enable_self_learning` 默认关闭；开启后 runner 结果先记录 lesson Candidate，再由 `capability/skill_proposals.py` 为 `subagent_lesson`、带精确 task/run 来源的候选按固定模板生成提案，O_EXCL 幂等写入 `<owner_home>/data/skill_proposals/`（不用会被 Curator 迁移清理的 `learning_drafts`），生成失败只记工作日志。只有用户 `my-agent skills proposals confirm <id> --expected-revision N` 能在 owner 锁内复核版本、草稿 hash、来源 Candidate（未脱敏、hash 未变、状态有效）与目标不存在，并通过 `parse_skill_file(require_frontmatter=True)`、`scan_skill(agent_generated)` 与不 force 的 `install_decision` 后，把 Skill 原子装到 `<owner_home>/skills/lesson-*`；失败不写目标、提案保持待确认。S2 尚未做：Jev 只能对已存在的待确认提案给审核顺序或缺证据提示，不能生成正文、确认、拒绝或写 Skill，开关须另设独立 `self_learning` 决策点并默认关闭。
+自学习点的前置合同见[只读审计](../tasks/DECISION_MODEL_SELF_LEARNING_AUDIT.md)。S1 提案/确认链已本地实施（分支 `claude/self-learning-skill-proposals`，待审）：`enable_self_learning` 默认关闭；开启后 runner 结果先记录 lesson Candidate，再由 `capability/skill_proposals.py` 为 `subagent_lesson`、带精确 task/run 来源的候选按固定模板生成提案，O_EXCL 幂等写入 `<owner_home>/data/skill_proposals/`（不用会被 Curator 迁移清理的 `learning_drafts`），生成失败只记工作日志。只有用户 `my-agent skills proposals confirm <id> --expected-revision N` 能在 owner 锁内复核版本、草稿 hash、来源 Candidate（未脱敏、hash 未变、状态有效）与目标不存在，并通过 `parse_skill_file(require_frontmatter=True)`、`scan_skill(agent_generated)` 与不 force 的 `install_decision` 后，把 Skill 原子装到 `<owner_home>/skills/lesson-*`；失败不写目标、提案保持待确认。S2 已本地实施（见下文“P5-C 自学习 S2”）：独立决策点定名 `skill_proposal_review`（审计里暂称 `self_learning`，改名以表明它只管待确认提案的审核顺序），默认关闭，Jev 只能给已存在的待确认提案排审核先后，不能生成正文、确认、拒绝或写 Skill。
 如果用户显式要求一次 Jev 分析而服务不可用，应明确报告该分析未完成；不能拿普通模型结果冒充 Jev。
 
 ### P5-B 第一片：提取前的来源—正式条目关系建议
@@ -409,6 +409,18 @@ P5-C 规划首片只在当前主代理读取已有多项 Todo 时追加一个 ex
 - **触发（全部结构化）**：当前工具是 `run_command`、`handler_executed`，结果带验证事件且与归档信封中的同一事件一致；归档与调用在 tool/id/run/task/scoped_call_id 上一致且以同一对象位于本 run 的 `archive_tool_calls`；主代理（无当前子代理 run）；无重复失败或未知副作用收口标记；`user_prompt` 非空且不超过 1,024 字符。焦点取同 run/task 的 `run_command` 归档（`&&` 串联整体通过时读信封里完整有序的 `verification_evidence_chain`，其末项必须等于 `verification_evidence`，不一致即放弃），每个 (root, kind, scope) 只留最新一条，同一事件编号重复出现即放弃；其后同 root 出现 `verification_state.status=stale` 记为 `edited_after`。只有 2—12 个焦点且至少一个 failed 或 edited_after 才准备材料；非 run_command 与身份不符的记录在扫描归档前即返回。
 - **材料上限**：外发 state 只有经外部材料首片同一 `external_data/default` 脱敏、含 URL 查询串即放弃的当前请求，以及 `focuses: [{candidate: focus_i, project: project_j, kind, scope, status, exit_code, edited_after, order}]`；项目根只以 `project_j` 别名出现，本地路径、原命令、工具输出、改动路径和时间只进本地版本摘要。唯一单选题 `review_focus` 的候选是 `focus_i` 与 `not_needed/no_match/abstain/need_data`，`need_data` 明确“不补读、不跑测试”。
 - **采用与回退**：只接受一个无逐题错误的 choice 回答且值为本次宿主生成的 `focus_i`；渲染只含宿主事实，例如“交付前可先复核本轮验证事件 #11（test/targeted，failed，其后有修改）；范围与结果以原事实为准，targeted 不代表全量”，上限 512 字符。选中本次调用自己的事件不追加。`off` 不准备材料、不发请求；`observe` 照常请求并记原账但不追加；非选择、坏答案、超时、错误、冷却、配置或来源变化（采用前在 `decision_outcome_is_current` 之后重比参数与材料版本及同一绝对期限）都只返回空串。ToolResult、归档、验证账、Goal、Todo 与收口从不修改；用户取消与中断照常上抛。
+
+### P5-C 自学习 S2：待确认 Skill 提案的审核顺序 `skill_proposal_review`
+
+当前状态：本地实施（分支 `claude/self-learning-proposal-review-order`，待审），默认关闭；离线合同、真实 CLI 组合（只替换 HTTP 发送）与变异验证通过，未做真实 Jev 验收。
+
+要解决的问题：S1 之后，子代理经验会陆续积累待确认的 Skill 提案，用户逐条审核时不知道先看哪条，也不容易发现可能重复的提案。此点只在用户执行 `my-agent skills proposals list` 时，可选地请 Jev 给每条待确认提案一个审核先后建议，宿主据此重排列表并附固定标签。它不是审核门，不决定确认或拒绝。
+
+- **接线**：独立 `owner_background` 接入点，AgentConfig/YAML 三字段 `decision_skill_proposal_review_mode/_timeout_seconds/_profile_id` 默认 off/null/null，超时留空继承 `background_timeout_seconds`；只有用户长期（owner）设置可写，线程覆盖被原设置服务拒绝，线程菜单不显示。配置放 AgentConfig 而不放 CapabilityConfig：此点只排展示、不授予 Skill 或工具权限，和 `enable_self_learning` 同属主配置；CLI 也只加载主配置，放在这里用户改 YAML 才真正生效。TUI 菜单名“Skill 提案审核顺序（用户长期）”。
+- **触发**：`skills proposals list` 列出的提案中，待确认的有 2—30 条，且本点为 observe/apply、决策总开关开启。0—1 条、本点关闭或总开关关闭时零请求，输出逐字节不变（已与 origin/main 的 CLI 子进程逐字节对照）。不要求 `enable_self_learning` 开启：该开关只管自动生成，已有提案在关闭后仍可审核。CLI 没有会话或 runner，宿主以 owner 路径和配置作决策宿主，每次生成一次性 run 编号，以 owner_background 身份建阶段；同一阶段期限覆盖准备、发送和采用。
+- **外发材料**：每条待确认提案只给 `proposal_i` 别名、创建顺序、来源任务数和运行数，以及 description、when_to_use 与经验段前 240 字摘录。三者整体经 `external_data/default` 投影（脱敏加不可信数据边界）。经验摘录按 S1 固定模板的“经验”段截取，不含来源段。提案编号、路径、owner/候选/任务/运行编号和目标 Skill 名只进本地版本摘要。按原渲染函数重算的草稿 hash 与记录不符时整点放弃、零请求。30 条最长草稿仍在 Jev 单题窗口门内（估算约 25.7k/28.8k token）。
+- **题目与采用**：每条提案一道 choice，候选为 `review_first/normal/review_later/possible_duplicate`，非选择为 `not_needed/need_data/abstain`；说明写明只是审核顺序，不决定确认或拒绝。只接受恰好每题一个合法候选；缺题、多答、错题号、逐题错误或任一非选择都整体保留原序。采用前依次核对：候选版本、`decision_outcome_is_current`、重读待确认提案（编号、版本、状态、创建时间、记录和重算的草稿 hash 全等）、同一绝对期限。然后稳定排序：review_first → normal → review_later/possible_duplicate。可能重复与稍后同组，便于先看原提案再对照；组内保持原创建顺序。只替换原列表里待确认提案所在的位置，已确认/已拒绝的条目位置不动。每条附宿主固定标签“建议优先审核/建议稍后/可能与其他提案重复”，不复制模型文字，列表首行下加一行说明。`--json` 增加 `review_order` 块：point、mode、status=applied，以及别名→proposal_id/suggestion/label 的映射。全部为 normal 时顺序不变、没有标签，但仍标明已按建议排列。
+- **边界**：observe 照常请求并记原调用账（CLI 进程内），输出不变；错误、超时、冷却、配置或来源变化都保留原输出。用户取消与中断照常上抛，CLI 以 `SKILL_PROPOSAL_CLI_INTERRUPTEDERROR` 结束，不打印列表。本点只调用 `SkillProposalService.list`，从不确认、拒绝、改写提案或 Skill，也没有模型可调用入口；测试证明提案目录、skills 目录与候选账本逐字节不变。
 
 ### P5-G 基础原语：同次事务恢复设置覆盖
 

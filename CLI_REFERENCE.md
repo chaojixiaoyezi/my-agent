@@ -432,6 +432,14 @@ my-agent skills proposals reject <proposal_id> --expected-revision 1 --json
 任何确认失败都不会写入目标 Skill，提案保持待确认；确认成功后，下一轮 Skill 快照即可看到 `owner:lesson-*`，
 已开始的回合沿用自己的旧快照。
 
+可选审核顺序（默认关闭）：在用户长期决策设置里把 `skill_proposal_review` 设为 `apply`（YAML
+`decision_skill_proposal_review_mode`，或 TUI `/model` → 决策模型设置 → 用户长期设置 → 逐接入点设置 → “Skill 提案审核顺序（用户长期）”）并开启决策总开关后，
+`list` 遇到 2—30 条待确认提案时会请决策模型给出审核先后：待确认提案按“建议优先审核 → 普通 → 建议稍后/可能与其他提案重复”
+重排（同组保持创建顺序，已确认/已拒绝的条目位置不动），列表首行下多一行说明，条目后附 `〔建议优先审核〕` 这类标签；
+`--json` 多一个 `review_order` 块（别名、proposal_id、suggestion、label 与 `status: applied`）。这只是展示顺序，
+不会替你确认或拒绝任何提案。`observe` 只发请求不改输出；关闭、提案少于 2 条、请求失败、超时、冷却或列表在等待期间变化时，
+输出与未开启时完全相同。发给决策模型的只有提案别名、来源计数和脱敏后的描述、适用场景与经验摘录，不含提案编号或路径。
+
 ## `memory-list`
 
 ```powershell

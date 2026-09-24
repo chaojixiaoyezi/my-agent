@@ -562,6 +562,7 @@ agent_py_agent/
 |   |   |-- skill_service.py           # bounded builtin/shared/owner/workspace discovery、policy 与缓存
 |   |   |-- skill_snapshot.py          # 不可变稳定引用、正文 hash/guard 校验与子代理收窄
 |   |   |-- skill_proposals.py         # 自学习 S1：子代理 lesson 候选→待确认 Skill 提案→用户确认后经 guard 原子安装
+|   |   |-- decision_skill_proposal_review.py # 自学习 S2：`skills proposals list` 的可选审核顺序点，只重排展示并加宿主标签，从不确认/拒绝/写入
 |   |   |-- persona_repository.py      # owner SOUL/USER/AGENTS 受控加载、版本/CAS/回滚唯一入口
 |   |   `-- channel_message_tool.py    # 当前 owner 的统一 send_message；登记产物经原生通道发送
 |   |-- prompting_parts/               # prompt 构造
@@ -597,6 +598,8 @@ agent_py_agent/
 |-- tests/                             # 单元、集成、真实链路回归
 |   |-- fixtures/decision/jev_capability_rounding.json # 合成材料真实Jev响应的脱敏概率舍入replay，不含凭据
 |   |-- test_skill_proposals.py         # 自学习 S1：默认关闭、幂等提案、迁移不碰、确认拒绝矩阵、快照可见、runner 隔离与 CLI 往返
+|   |-- test_decision_skill_proposal_review.py # 自学习 S2 审核顺序点：资格边界、别名与脱敏、逐题校验、采用前复核、取消传播、零写入
+|   |-- test_decision_skill_proposal_review_integration.py # 自学习 S2 经真实 CLI/设置/决策服务（只替换 HTTP）：输出字节、observe 记账、冷却超时、菜单与默认值
 |   |-- test_decision_model_profiles.py # 决策用途隔离、旧目录迁移、共享撤销与生成选择不退化
 |   |-- test_model_usage_tags.py       # 模型用途标签：规范化与拒绝、决策模型不收、不进运行时配置、两处决策候选与 /model 表单
 |   |-- test_decision_model_operations.py # 原模型操作中的决策设置、原生HTTP测试和用量结算
@@ -1016,6 +1019,8 @@ docs/
 - `agent_py_agent/agent/capability/skill_proposals.py`：自学习 Skill 提案唯一权威；只收 `subagent_lesson` 且带 task/run 来源的 Candidate，固定模板渲染、O_EXCL 幂等写 `<owner_home>/data/skill_proposals/`；confirm 在 owner 锁内复核版本、草稿 hash、来源 Candidate 与目标不存在，经 frontmatter 解析和 `agent_generated` guard（不 force）后 `os.replace` 安装，失败不写目标。
 - `agent_py_agent/cli/skill_proposal_commands.py`：`my-agent skills proposals list/show/confirm/reject` 的注册与输出，只委托上面的服务；确认必须带 `--expected-revision`，不提供模型工具。
 - `agent_py_agent/tests/test_skill_proposals.py`：自学习 S1 的默认关闭、幂等、忽略非法来源、Curator 迁移不碰提案目录、确认拒绝矩阵、安装/回执失败回滚、快照可见性、runner 结果隔离与真实 CLI 入口往返验证。
+- `agent_py_agent/agent/capability/decision_skill_proposal_review.py`：自学习 S2 的唯一审核顺序点 `skill_proposal_review`（owner_background，默认 off）；只读 `SkillProposalService.list`，外发别名、来源计数与经 `external_data/default` 投影的草稿摘要，采用前重读待确认提案核对版本与草稿 hash，只重排 CLI 展示并附宿主标签；关闭、observe 或任何失败都返回 None 保持原输出，取消上抛。
+- `agent_py_agent/tests/test_decision_skill_proposal_review.py`、`test_decision_skill_proposal_review_integration.py`：前者只替换决策服务边界，覆盖资格、隐私、逐题校验、并发变化与取消；后者经真实 CLI、设置、模型目录、决策服务与调用账，只替换 HTTP 发送，覆盖输出逐字节不变、observe 记账、错误/冷却/超时、中断、30 条窗口门、默认值与 TUI 菜单。
 - `agent_py_agent/agent/agent_core/tool_loop/segment_planning.py`：只接canonical调用、有效批上限、Compact及并发描述查询；审批、线程和provider顺序记账仍归原执行轮。
 - `agent_py_agent/agent/agent_core/tool_loop/closeout.py`：统一请求、收口响应处理和延后结束原因读取，不持有Agent或完整回合参数，不执行工具或增加模型重试。
 
