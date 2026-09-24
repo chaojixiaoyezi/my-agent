@@ -301,6 +301,7 @@ def _run_gateway_ask(context: request_context.GatewayAskRunContext):
 
 
 # LLM: 原模型快照覆盖排队；首次只加载Compact来源，完整准备后先压缩再选模，发送拒绝沿新上下文回退；重复执行不重新决策。
+# 没有会话来源（未绑定 thread 的请求）时不安装恢复宿主，与 overflow 入口的同一判定保持一致。
 # 函数用途: 取得准确执行权后冻结来源与可选建议，在原生成安全点完成自动压缩和选模。
 def _run_gateway_ask_with_model(context: request_context.GatewayAskRunContext, *, captured=None):
     from ..gateway_model_observation import GatewayModelObservation
@@ -334,7 +335,10 @@ def _run_gateway_ask_with_model(context: request_context.GatewayAskRunContext, *
                 _require_gateway_conversation_ready(request, conversation)
                 from ..gateway_compact_recovery import prepare_gateway_compact_recovery
 
-                observer.compact_recovery = prepare_gateway_compact_recovery(context, conversation, force=False)
+                observer.compact_recovery = (
+                    prepare_gateway_compact_recovery(context, conversation, force=False)
+                    if conversation.compact_source is not None else None
+                )
                 _configure_gateway_main_activity(context, conversation)
                 if conversation.compact_generation > preflight.compact_generation:
                     _publish_gateway_compact_boundary(context.on_chunk, conversation.compact_generation)

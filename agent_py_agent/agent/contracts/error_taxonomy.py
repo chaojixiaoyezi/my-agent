@@ -7,6 +7,7 @@
 #   资源停止未确认必须核对原回执，未知控制必须修正调用；两者均不得原样重放或扩大停止范围。
 #   插件管理超时须查询原请求；管理权限、配置禁用和执行准备失败分别呈现，不能因错误而再次安装。
 #   决策模型是可选增强；连接探测或响应失败保留普通模型主链，设置版本冲突则读取新版本后再修改。
+#   入站附件无效是确定的用户输入失败：不能去掉附件改发纯文字，也不能原样重放，只能请用户重新添加。
 # 模块用途: 给工具结果、恢复状态机和用户汇报提供一致的错误类别、重试性与处理建议。
 
 from __future__ import annotations
@@ -70,6 +71,16 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         retryable=False,
         recommended_action=RecoveryAction.FIX_PATH_WITHIN_ALLOWED_ROOTS.value,
         recovery_hint="客户端工作目录不存在、格式错误或越过 owner 边界；改用当前 owner 工作区后重试。",
+    ),
+    "INPUT_MEDIA_INVALID": ErrorContract(
+        code="INPUT_MEDIA_INVALID",
+        category="validation",
+        retryable=False,
+        recommended_action=RecoveryAction.REQUEST_USER_INPUT.value,
+        recovery_hint=(
+            "附件引用无效、原件已改变、不属于当前用户或超过数量/字节上限；本次请求没有发给模型。"
+            "不要去掉附件改发纯文字，也不要原样重放；请用户重新添加图片/视频或调整附件限制。"
+        ),
     ),
     "PATH_INVALID": ErrorContract(
         code="PATH_INVALID",

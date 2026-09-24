@@ -22,6 +22,15 @@ child不展示历史正文时的读取回归先复现1 failed/1 passed，修复�
   - `test_owned_recovery_fits_over_budget_native_history_before_business_request`：构造 4 对真实 read_file 原生往返，冻结的原始完整请求超过共享预算。在自动和强制两种恢复模式下，都断言发送前共享预算回收没有介入、宿主已提交候选、候选的完整计量低于输入上界、业务线上没有原文。变异：去掉领取门，2 项失败；自动宿主不压缩，自动模式失败。
   - `test_post_commit_context_refresh_failure_keeps_committed_history`：CAS 之后同范围视图刷新失败时，异常原样上抛，不回滚已提交的 IR 与上下文，不记压缩失败，也不发布结果。变异：把刷新挪回回滚 try 内，2 项失败。
   - b4ffb3475 的三个用例（候选回收两项、提交后投影失败不回滚一项）正文和断言与 main 逐字一致，均通过。它们共用的 `_SummaryBackend` 只多接收两个关键字参数（`tool_choice`、`request_options`，本线摘要请求会传入），返回值不变。
+- **决策线接手前已有的 9 项失败已清零**（在 `46ac29601` 快照上就已失败，main 上没有；不处理的话合入后会变成 main 的新失败）：
+  - 产品缺陷（修复前 3 项失败，修复后通过）：首次恢复宿主在请求没有会话来源时仍读 `compact_source.thread`，导致未绑定 thread 的 ask 全部 AttributeError。受影响的是孤儿响应投影用例和两条 Gateway 场景（多 worker、延迟响应）。现与 overflow 入口共用同一判定：没有来源就不安装宿主。
+  - 合同缺口（1 项）：`INPUT_MEDIA_INVALID` 已登记到唯一错误合同，分类为确定的用户输入失败：不可重试，请用户重新添加附件。
+  - 过时测试替身（5 项）：本线改动后测试没有同步，断言意图不变。
+    - Gateway 改为先加载来源再准备，替身补上来源桩；
+    - 执行选项显式带出 `input_media: []`；
+    - 接续插话保留 `input_ids`；
+    - 摘要来源改走流式 `message_source`，替身物化同一来源后再检查覆盖。
+  - 验证：上述 6 个文件及相邻 Gateway/媒体/恢复共 12 个文件，350 passed、1 skipped、3 xfailed。
 
 ## 第12.4项选中来源到摘要生命周期（2026-09-23，本地）
 

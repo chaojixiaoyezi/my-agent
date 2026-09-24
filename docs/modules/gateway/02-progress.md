@@ -170,6 +170,8 @@ Gateway恢复协调已抽到 `agent_core/compact_request_recovery.py` 与child�
 
 首次自动Compact已本地接公共完整请求准备：原会话加载暂缓提交，PromptBuilder冻结后先压缩再自动选模。手动Compact在车道内按全线程来源判空，回执只报告历史估算。组合验收见TESTS，真实供应商与完整IR边界仍待验。
 
+首次恢复宿主只在请求带有会话来源时安装（2026-09-23 修复）：未绑定 thread 的 ask 此前会在 `compact_source` 为空时抛 AttributeError，导致无会话请求全部失败，Gateway 场景测试因此失败。现在与 overflow 入口共用同一判定，没有来源就不安装宿主；入站附件无效的 `INPUT_MEDIA_INVALID` 也已登记到唯一错误合同。
+
 外层typed overflow已接同宿主原生IR carry；真实循环释放未提交插话，Gateway按ID过滤后交下一次完整准备，原ToolCall身份和完整正文保留。恢复权限和模型前缀重新准备；无可压来源显式拒绝。此片隔离联验中，实际安装版与供应商证据仍待补。
 
 <!-- 媒体来源片 3adb61904 的既有记录；不代表当前 Compact 集成已验。 -->
