@@ -668,12 +668,12 @@ def test_block_cache_reuses_stable_history_when_active_stream_changes() -> None:
     store.publish(seq.emit("assistant_started", "started", "assistant"))
     cache = TuiBlockRenderCache(max_entries=10)
     context = TuiRenderContext(width=80)
-    render_tui_snapshot(store.snapshot(), context, cache=cache)
+    first = render_tui_snapshot(store.snapshot(), context, cache=cache)
     assert cache.stats().misses == 2
     store.publish(seq.emit("assistant_delta", "delta", "assistant", {"text": "x"}))
-    render_tui_snapshot(store.snapshot(), context, cache=cache)
+    second = render_tui_snapshot(store.snapshot(), context, cache=cache)
     stats = cache.stats()
-    assert stats.hits == 1
+    assert second.transcript_lines[0] is first.transcript_lines[0]
     assert stats.misses == 3
     assert stats.entries == 3
 

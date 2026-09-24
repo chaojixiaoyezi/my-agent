@@ -20,6 +20,7 @@ from ...agent.conversation.compact_progress import normalize_conversation_compac
 from ...agent.conversation.model_metrics import newer_model_metrics, public_model_metrics
 from ...agent.conversation.tool_input_progress import ToolInputProgressEventProjector
 from .tui_events import JournalAppendResult, TuiEvent, TuiEventSequencer
+from .tui_identity_window import TuiIdentityWindow
 from .tui_permission_queue import (
     ExternalTuiPermissionOwner,
     TuiPermissionCoordinator,
@@ -1324,7 +1325,7 @@ class TuiRuntime(
     _TuiBackgroundActivityRuntimeMixin,
     TuiPermissionRuntimeMixin,
 ):
-    # LLM: session_id 固定一个 UI 生命周期；store 可注入用于 replay/tests，但不能在运行中替换。
+    # LLM: session_id 固定一个 UI 生命周期；去重编号仅短期有界保留，持久游标负责历史推进，不能影响任务执行。
     # 函数用途: 创建单调事件流、历史游标及本页已提交请求关联；这些显示集合没有执行或审批权。
     def __init__(self, session_id: str, *, store: TuiStateStore | None = None) -> None:
         normalized = str(session_id or "default").strip() or "default"
@@ -1335,15 +1336,15 @@ class TuiRuntime(
             session_id=normalized,
         )
         self._turns: dict[str, TuiTurnEventAdapter] = {}
-        self._owned_gateway_requests: set[str] = set()
+        self._owned_gateway_requests = TuiIdentityWindow()
         self._pending_steers: dict[str, str] = {}
         self._queued_prompts: dict[str, str] = {}
-        self._published_control_commands: set[str] = set()
+        self._published_control_commands = TuiIdentityWindow()
         self._console_index = 0
         self.background_message_cursor = 0
         self.history_before_cursor = 0
         self.background_event_stream_id = ""
-        self._recovered_background_turns: set[str] = set()
+        self._recovered_background_turns = TuiIdentityWindow()
         self._notice_text = ""
         self._notice_kind = ""
         self._notice_until = 0.0

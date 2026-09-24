@@ -14,6 +14,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -701,6 +702,8 @@ def _process_gateway_request_path(
         gateway_worker_busy(-1)
 
 
+# LLM: 请求从 owner 解析到结果落账一直租用同一实例；退出只释放缓存租用，不改变持久任务恢复合同。
+# 函数用途: 处理一个已认领请求，在所有结束路径保留 owner 隔离并释放运行资源。
 def _process_claimed_gateway_request_path(
     agent: SimpleAgent,
     paths: GatewayPaths,
@@ -786,7 +789,9 @@ def _process_claimed_gateway_request_path(
             expected_lease_epoch=expected_lease_epoch,
         )
         return True
-    with register_interruptible(conversation_request_interrupt_name(request_id)):
+    pool = getattr(agent, "_owner_pool", None)
+    lease = pool.pin(request_agent) if pool is not None and request_agent is not agent else nullcontext()
+    with lease, register_interruptible(conversation_request_interrupt_name(request_id)):
         response = _process_claimed_gateway_request(
             _ClaimedGatewayRequestContext(
                 request_agent,  # 多用户飞书:只在请求 owner 作用域的 agent 上跑；失败已在上方终态拒绝
@@ -800,15 +805,15 @@ def _process_claimed_gateway_request_path(
                 ),
             )
         )
-    _finish_claimed_gateway_request(
-        paths,
-        processing_path,
-        request_id,
-        response,
-        conversation_store=request_agent.conversation_store,
-        expected_execution_attempt_id=expected_attempt_id,
-        expected_lease_epoch=expected_lease_epoch,
-    )
+        _finish_claimed_gateway_request(
+            paths,
+            processing_path,
+            request_id,
+            response,
+            conversation_store=request_agent.conversation_store,
+            expected_execution_attempt_id=expected_attempt_id,
+            expected_lease_epoch=expected_lease_epoch,
+        )
     return True
 
 

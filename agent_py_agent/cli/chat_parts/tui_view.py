@@ -1,5 +1,5 @@
 # LLM: 本模块把 typed snapshot renderer 接入 prompt_toolkit；缓存、全选与复制随当前 store/viewport 路由，只管显示；空选区右键不得触发业务动作。
-# 模块用途: 提供可滚动正文、固定提示与缓存；展开冻结正文不能遮住当前客户端的刷新故障提示。
+# 模块用途: 提供正文、提示和当前版本缓存，稳定历史不重复生成版本键；展开正文仍显示实时连接故障。
 
 from __future__ import annotations
 
@@ -91,11 +91,11 @@ def _right_copy_mouse_transition(
     return False, True, True
 
 
-# LLM: TuiFrameProvider 是 snapshot/context 到 frame 的单帧 memoization 层；block LRU 仍负责跨帧稳定历史复用。
-# 类用途: 让 transcript、overlay 和 footer 在一次 prompt_toolkit render 中共享同一画面。
+# LLM: TuiFrameProvider 只缓存当前 snapshot/context 的显示帧及块版本键；不可变容器身份变化才重建对应键，block LRU 仍负责正文。
+# 类用途: 让正文和底栏共享画面；活动增量不让每个控件重复遍历全部稳定历史。
 class TuiFrameProvider:
     # LLM: context_factory 必须由调用方显式提供 width→context，provider 不读取全局配置或 wall clock。
-    # 函数用途: 创建 frame provider 并订阅 typed state store 更新。
+    # 函数用途: 创建仅保留当前两组块键的 provider，并订阅 typed state store 更新。
     def __init__(
         self,
         state_store: TuiStateStore,
@@ -111,6 +111,8 @@ class TuiFrameProvider:
         self.last_width = DEFAULT_TRANSCRIPT_WIDTH
         self._cached_key: tuple[Any, ...] | None = None
         self._cached_frame: TuiRenderFrame | None = None
+        self._block_key_sources: tuple[object, ...] = ()
+        self._block_keys: tuple[tuple[Any, ...], ...] = ()
         self._invalidate_callback: Callable[[], None] | None = None
         self.return_to_input: Callable[[], None] | None = None
         self._lock = threading.Lock()
@@ -139,8 +141,8 @@ class TuiFrameProvider:
             state_store.subscribe(self.invalidate)
         self.invalidate()
 
-    # LLM: frame key覆盖 block版本、queue、permission、status 与 context；diagnostics 不可见所以不触发重绘。
-    # 函数用途: 返回共享渲染帧；展开模式仍保留实时刷新健康提示，不用旧冻结正文决定连接状态。
+    # LLM: frame key 覆盖块版本、queue、permission、status/context；块键沿不可变容器身份复用，不能用长度或正文猜版本。
+    # 函数用途: 返回共享渲染帧，避免每个控件重建稳定历史的版本键；展开模式仍保留实时刷新健康提示。
     def frame(self, width: int) -> TuiRenderFrame:
         normalized_width = max(1, int(width or 1))
         live_snapshot = self.state_store.snapshot()
@@ -155,7 +157,7 @@ class TuiFrameProvider:
             if self.transcript_state is not None
             else None
         )
-        key = _frame_key(snapshot, context, transcript_key)
+        key = _frame_key(snapshot, context, transcript_key, self._frame_blocks_key(snapshot))
         with self._lock:
             self.last_width = normalized_width
             if key == self._cached_key and self._cached_frame is not None:
@@ -181,6 +183,20 @@ class TuiFrameProvider:
             self._cached_key = key
             self._cached_frame = rendered
         return rendered
+
+    # LLM: 强引用当前 immutable tuple，避免裸 id 重用；只保留 stable/active 各一组，历史重排与同块替换必须产生新容器。
+    # 函数用途: 分别复用稳定和活动块版本键，活动增量不会重新扫描完整历史。
+    def _frame_blocks_key(self, snapshot: TuiViewSnapshot) -> tuple[tuple[Any, ...], ...]:
+        sources = (snapshot.stable_blocks, snapshot.active_blocks)
+        with self._lock:
+            keys = tuple(
+                self._block_keys[index]
+                if index < len(self._block_key_sources) and blocks is self._block_key_sources[index]
+                else _block_versions(blocks)
+                for index, blocks in enumerate(sources)
+            )
+            self._block_key_sources, self._block_keys = sources, keys
+        return keys
 
     # LLM: invalidate 只丢单帧 memo 并请求 app redraw；不能在 worker callback 中直接创建 UIContent。
     # 函数用途: 响应 typed event 发布或动画 tick。
@@ -298,13 +314,12 @@ class TuiTranscriptControl(UIControl):
     def is_focusable(self) -> bool:
         return True
 
-    # LLM: create_content 每次只取共享 frame 引用，不拼整份字符串；空 transcript 仍返回一行合法 UIContent。
+    # LLM: create_content 复用共享 frame，仅在布局需要补行时分配；空 transcript 仍返回合法 UIContent。
     # 函数用途: 生成行访问器；窗口中任何归档未就绪时保留来源锚点，前文加载也不能推走正在看的消息。
     def create_content(self, width: int, height: int) -> UIContent:
         frame = self.provider.frame(width)
-        lines = frame.transcript_lines or ((),)
         line_count = scrollable_line_count(frame, max(1, height), self.provider.transcript_state)
-        lines = (*lines, *((),) * (line_count - len(lines)))
+        lines = _pad_transcript_lines(frame.transcript_lines, line_count)
         visible_block_ids = _counted_message_block_ids(
             self.provider.state_store.snapshot()
         )
@@ -997,16 +1012,22 @@ def _counted_message_block_ids(snapshot: TuiViewSnapshot) -> frozenset[str]:
     )
 
 
-# LLM: frame key 使用显示版本字段而非 dataclass payload repr，避免 secret/未知 metadata 进入缓存身份。
-# 函数用途: 生成共享 frame 的可哈希版本键。
+# LLM: 只读取块显示身份与版本，不序列化正文或 metadata；调用方须按不可变容器身份失效缓存。
+# 函数用途: 为一组发生变化的显示块建立版本键。
+def _block_versions(blocks) -> tuple[tuple[str, int, str], ...]:
+    return tuple((block.block_id, block.updated_seq, block.phase) for block in blocks)
+
+
+# LLM: frame key 使用显示版本字段而非 payload repr；可复用 provider 已核对容器身份的块键，仍独立核对其它可见状态。
+# 函数用途: 生成共享 frame 的可哈希版本键，不让底栏变化重新遍历稳定正文。
 def _frame_key(
     snapshot: TuiViewSnapshot,
     context: TuiRenderContext,
     transcript_key: tuple[Any, ...] | None = None,
+    block_key: tuple[tuple[Any, ...], ...] | None = None,
 ) -> tuple[Any, ...]:
-    blocks = tuple(
-        (block.block_id, block.updated_seq, block.phase)
-        for block in (*snapshot.stable_blocks, *snapshot.active_blocks)
+    blocks = block_key if block_key is not None else (
+        _block_versions(snapshot.stable_blocks), _block_versions(snapshot.active_blocks),
     )
     queue = tuple((item.queue_id, item.seq, item.priority, item.text) for item in snapshot.queued_inputs)
     permission = _permission_key(snapshot)
@@ -1133,6 +1154,15 @@ def _decorate_selection(
                 decorated.append((selected_style, char))
             source_index += 1
     return tuple(decorated)
+
+
+# LLM: 布局补空行是纯显示变换，已有足够行时必须返回原 tuple，不能每帧复制稳定历史。
+# 函数用途: 按视口需要补空白行；空正文也保留一行，不触碰内容或阅读锚点。
+def _pad_transcript_lines(lines: tuple[FormattedLine, ...], line_count: int) -> tuple[FormattedLine, ...]:
+    lines = lines or ((),)
+    if line_count > len(lines):
+        return (*lines, *((),) * (line_count - len(lines)))
+    return lines
 
 
 # LLM: 多行 control 的 newline 在此统一插入，末行不额外添加换行避免 overlay 高度漂移。

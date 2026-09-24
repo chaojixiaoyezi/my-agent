@@ -605,6 +605,7 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
         self._registry = shared_active_owner_registry(context.agent)
         self._owner_pool: object | None = None
         self._owner_schedulers: dict[int, BackgroundMainAgentScheduler] = {}
+        self._next_owner_retire_at = 0.0
         # 后台整合按 owner + thread 分车道。持久 run claim 保证同会话单飞，
         # 进程内 in-flight 去重防止同一 thread 重复提交；不同 thread 可在有界池中并发。
         self._executor: object | None = None
@@ -681,13 +682,18 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
         except OSError:
             pass
 
-    # LLM: One supervisor pass collects finished thread lanes, performs model-free
-    # owner maintenance, then fairly submits ready conversation lanes.
-    # 函数用途: 推进单 Gateway 的后台会话调度并录制已完成报告。
+    # LLM: 先回收完成车道，再限频释放无持久工作的空闲 owner；实例回收不能改变任务/唤醒状态。
+    # 函数用途: 推进后台调度、按需释放空闲用户缓存，并记录完成报告。
     def tick(self) -> bool:
+        from ..agent.gateway_parts.owner_retention import release_idle_owner_agents
+
         self._maybe_write_heartbeat()
         self._maybe_seed_wake_pending_owners()
         reports = self._collect_finished_ticks()
+        now = time.monotonic()
+        if now >= self._next_owner_retire_at:
+            release_idle_owner_agents(self)
+            self._next_owner_retire_at = now + 5.0
         self._sync_owner_schedulers()
         self._recover_active_watch_harvesters()
         self._run_due_curators()
@@ -759,7 +765,7 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
         # 它们只在 _run_due_curators 真正拿到有限 worker 时临时进入池。
         for owner in self._registry.hard_snapshot():
             try:
-                pool.get(owner, hard=True)
+                pool.get(owner, hard=True, touch=False)
             except Exception as exc:
                 _print_gateway_loop_error("gateway_background_main.owner_build", str(getattr(owner, "owner_id", "")), exc)
         active = {id(agent): agent for agent in pool.hard_agents()}
@@ -820,9 +826,8 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
                 )
         return ensured
 
-    # LLM: Curator candidates are admitted lazily into a dedicated bounded lane;
-    # a rotating cursor and post-run soft eviction bound memory without losing owners.
-    # 函数用途: 公平轮转各用户的记忆整理，最多只加载实际可运行的 worker 数量。
+    # LLM: 完成回收不受新任务节流影响；全局关闭策展时不得创建软 owner，运行中的 future 仍按原合同结束。
+    # 函数用途: 及时释放已完成的记忆整理实例，再按开关、有限 worker 和轮转游标调度到期工作。
     def _run_due_curators(self) -> None:
         """后台记忆策展唤醒:按有限 worker 轮转 base、硬 owner 与纯策展软 owner。
 
@@ -836,16 +841,17 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
         不受配额约束;常规车道(interval/daily/turn 轮询,归档类晚一天无害)占用配额,
         当日满了就顺延明天——配额账本落盘,重启不丢。
         """
-        now = time.monotonic()
-        if now < self._next_curator_run_at:
-            return
-        self._next_curator_run_at = now + _positive_int_config(
-            self._base_agent, "owner_maintenance_scan_interval_seconds", default=60
-        )
         soft_agent_ids = getattr(self, "_curator_soft_agent_ids", set())
         self._curator_soft_agent_ids = soft_agent_ids
         pool = getattr(self, "_owner_pool", None)
         _retire_finished_curators(self, soft_agent_ids, pool)
+        now = time.monotonic()
+        if (not getattr(getattr(self._base_agent, "config", None), "memory_curator_enabled", True)
+                or now < self._next_curator_run_at):
+            return
+        self._next_curator_run_at = now + _positive_int_config(
+            self._base_agent, "owner_maintenance_scan_interval_seconds", default=60
+        )
         available = max(
             0,
             _memory_curator_workers(self._base_agent) - len(self._curator_inflight),
@@ -943,7 +949,7 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
         try:
             from ..agent.gateway_parts.request_worker import _owner_pool
 
-            self._owner_pool = _owner_pool(self._base_agent)  # 后台线程私有池,复用请求路同款构建(config 去固化路径)
+            self._owner_pool = _owner_pool(self._base_agent)  # 与请求路共用 owner 池，配置沿原路径去固化。
         except Exception as exc:
             _print_gateway_loop_error("gateway_background_main.owner_pool", "background-main", exc)
             self._owner_pool = None
@@ -1405,6 +1411,8 @@ class _GatewayOrphanReconciler:
             if available_slots <= 0:
                 break
 
+    # LLM: 维护扫描租用准确实例但不续空闲期；退出租用不得取消持久工具或修改任务终态。
+    # 函数用途: 安全检查一个用户的遗留工作，避免巡检本身让空闲实例永久常驻。
     def _sweep_owner(
         self,
         owner: OwnerIdentity,
@@ -1413,7 +1421,9 @@ class _GatewayOrphanReconciler:
         pool = self._ensure_owner_pool()
         if pool is None:
             return {"owner": label, "state": "owner_pool_unavailable"}
-        return self._sweep(pool.get(owner), label)
+        scoped = pool.get(owner, touch=False)
+        with pool.pin(scoped, touch=False):
+            return self._sweep(scoped, label)
 
     @staticmethod
     def _owner_key(owner: OwnerIdentity) -> tuple[str, str, str]:
@@ -1430,6 +1440,8 @@ class _GatewayOrphanReconciler:
             if executor is not None:
                 executor.shutdown(wait=False, cancel_futures=True)
 
+    # LLM: 同步入口复用后台扫描的租用规则；身份发现和回收各自沿原有结构化账本。
+    # 函数用途: 执行一轮同步遗留工作检查，供命令和测试调用。
     def tick(self) -> list[dict[str, object]]:
         self._seed_owner_registry()
         reports = [self._sweep(self._base_agent, "base")]
@@ -1447,7 +1459,9 @@ class _GatewayOrphanReconciler:
                 )
             )
             try:
-                reports.append(self._sweep(pool.get(owner), label))
+                scoped = pool.get(owner, touch=False)
+                with pool.pin(scoped, touch=False):
+                    reports.append(self._sweep(scoped, label))
             except Exception as exc:
                 _print_gateway_loop_error("gateway_orphan_reconcile.owner", label, exc)
         return reports

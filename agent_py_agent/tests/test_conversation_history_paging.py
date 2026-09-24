@@ -87,3 +87,18 @@ def test_zero_cursor_means_beginning_not_latest(tmp_path):
     store, thread, _ = _conversation(tmp_path)
     page = store.messages.history_page_report(thread, before=0)
     assert not page.rows and not page.errors and page.before == page.after == 0
+
+
+def test_one_very_long_turn_still_pages_without_losing_rows(tmp_path):
+    store, thread, rows = _conversation(tmp_path, turns=1, rows_per_turn=1701)
+    before, found, sizes = None, [], []
+    while True:
+        page = store.messages.history_page_report(thread, before=before, limit=4)
+        assert not page.errors
+        sizes.append(len(page.rows))
+        found[:0] = [row.message_id for row in page.rows]
+        if not page.before:
+            break
+        before = page.before
+    assert sizes == [800, 800, 101]
+    assert found == [row.message_id for row in rows]

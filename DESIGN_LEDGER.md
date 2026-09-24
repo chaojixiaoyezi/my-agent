@@ -80,6 +80,16 @@ TUI 原生媒体输入已实现、专用测试机官网 M3 验收通过：内容
 第 7 步依赖收窄（本地候选）：runner 结果准入只接收 canonical task、结果参数和原 RuntimeDB，
 不接收完整 manager；文件模式仍显式传 None，诊断仍写原账。已部署结果链与此候选分开验收，
 边界见[子代理迁移设计](docs/design/SUBAGENT_PARALLEL_EXECUTION.md#第-7-步结果链迁移边界进行中)。
+TUI 绘制合并已改为 20 Hz、周期动画 4 Hz，事件与模型执行不变。同一 fd 真任务的并行原生 TUI 对照 CPU 16.02%→10.23%，候选翻页中位 38 ms；长任务仍在验收，见 TESTS。
+稳定历史缓存补充已实现并经等历史真 TUI 验证：发布快照共享、稳定/活动版本键分开、静态前缀按预算复用，安全行组仍在构造时净化。fd 自然开发约 110 分钟/Compact 3 已终态，首次详细展开约 1.2 秒仍是边界；见 [资源寿命](docs/design/TUI_RESOURCE_LIFETIME.md) 与 TESTS，不外推任意历史/时长。
+
+TUI 绘制合并保持 20 Hz、周期动画 4 Hz，事件与模型执行不变。此前同一 fd 真任务的并行原生 TUI 对照 CPU 16.02%→10.23%，最终缓存片另做等历史对照，见 TESTS。
+
+TUI 观察超时与业务终态分离已实现：截止点先查 canonical terminal，原页存活时按同一请求/游标退避续等，退出仅释放观察；plain 有限等待保留。官网 M2.7 原生 TUI 已通过真实短等待窗口和暂停客户端后接收终态，见 [资源寿命](docs/design/TUI_RESOURCE_LIFETIME.md)。
+
+长对话验收方法已按用户要求调整：用 my-agent 自主完成真实 GitHub 项目跨语言实现产生自然历史；合成大文件仅保留存储边界定位用途。官网 M2.7 的 fd→Python 已自然结束，框架与项目内容分开记录，见 [TESTS](TESTS.md#真实开发长任务验收方法)。
+
+TUI 原生媒体输入已实现、专用测试机官网 M3 验收通过：内容寻址原件、owner 校验、草稿 refs、发送边界编码与历史媒体预算复用原主链。旧纯文本记录无需迁移。详细合同见 [TUI 图片视频](docs/design/TUI_INPUT_MEDIA.md)；候选未默认部署。
 
 第 5 步当前状态：使用卡按现有插件包声明与设置 schema 即时投影，详情和成功启用共用格式；列表、动作帮助及补全仍读同一目录，不新增卡片缓存、权限或执行链。本地实现与 300 项相关回归已完成，发布及原生 TUI 仍待验；详见 [插件生命周期](docs/design/PLUGIN_LIFECYCLE.md#从安装完成到真正可用) 和 [唯一 TODO](docs/tasks/REFACTOR_PLUGIN_GOAL.md#当前-todo唯一执行清单)。
 
@@ -616,3 +626,9 @@ Goal scope 同时公开宿主续跑机制事实，不把 active 或单轮 final 
 决策模型12.4外层overflow原生IR接续进行中：同一宿主回合只在context_overflow返回临时冻结的typed IR/工具上下文/已转发指引，沿原RunParams回入；新请求、跨任务、跨scope/view不得沿用。主代理attempt由原DB轮换，旧ToolCall的原四元身份保持，carrier不授予执行权；权限/工具快照/provider历史前缀仍重新准备。插话UserTurn增加仅内部input_ids，与原mailbox packet同源，释放只按ID剔除，禁止正文匹配。保留原用户IR和媒体引用，不重复初始化用户轮。仍只有原archive恢复执行预算、原Compact writer/CAS提交。
 
 外层原生IR接续补充（已本地实现，验收中）：宿主冻结的typed AppliedCompactContext是摘要线程来源；taskless后台缺task属性时不补写以免误升任务，已有当前线程声明仍按child优先核对。request_id同逻辑回合稳定；强制恢复必须有消息或完整工具来源，carry本身不证明可压。详细边界见容量审计末节。
+
+# 客户端资源寿命与低配置并发（2026-09-23，候选本片验收通过）
+
+解决长历史逐帧处理、旧测试客户端驻留和状态入口拥塞；区分 IM 身份、持久排队、
+执行槽与 HTTP 连接，保持既有任务权威。资源合同与验收边界见
+[资源寿命](docs/design/TUI_RESOURCE_LIFETIME.md)。已在独立测试机分层验收，最终统计见 TESTS；未发布默认环境，不将有限采样外推为无限耐久承诺。

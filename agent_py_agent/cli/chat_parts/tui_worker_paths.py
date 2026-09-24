@@ -11,8 +11,8 @@ from .tui_runtime import TuiTurnSummary
 
 
 # LLM: 已有 gateway_request_id 表示持久提交成功，必须沿原终态信封等待，不能因重启瞬间 PID 不可见丢弃回执或重新提交。
-# 未提交请求仍检查服务；超时/取消沿现有协议，不由进程活性猜模型任务的成败。
-# 函数用途: 等待原 Gateway 请求的回复，让重启间隙已入队的消息继续接收结果，不误报停止后诱导用户重发。
+# 未提交请求仍检查服务；观察超时不是任务终态，页面存活时保留同一请求与流游标，不重提业务。
+# 函数用途: 持续等原请求的真实终态；长时间无活动只提示，退出页面及时停止观察，不取消服务端任务。
 def _worker_gateway_path(ctx: Any) -> tuple[str, bool, TuiTurnSummary]:
     from ...agent.gateway_parts.permission_bridge import write_gateway_permission_decision
     from .gateway_client import (
@@ -46,10 +46,18 @@ def _worker_gateway_path(ctx: Any) -> tuple[str, bool, TuiTurnSummary]:
                 ),
                 inactivity_timeout_seconds=max(0.0, timeout),
                 on_event=ctx.turn_adapter.on_gateway_event,
+                on_wait_timeout=partial(
+                    ctx.cfg.tui_runtime.set_notice,
+                    "暂未收到最终结果，继续等待原请求；无需重新发送。",
+                    duration_seconds=3.0,
+                    notice_kind="gateway_wait_timeout",
+                ),
+                is_wait_cancelled=ctx.cfg.stop_event.is_set,
             )
         )
     finally:
         ctx.turn_adapter.clear_gateway_permission_sink()
+        ctx.cfg.tui_runtime.clear_notice(expected_kind="gateway_wait_timeout")
     if not response:
         raise TimeoutError(
             f"gateway 请求等待超时: request_id={request_id} terminal={terminal_path}"

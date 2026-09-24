@@ -508,6 +508,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # per-owner 作用域 agent 实例池上限(原 owner_scoped_pool.py 硬编码 64):有界 LRU,
     # 超出逐出最久未用;千并发多用户时的驻留 agent 数调参入口。
     owner_agent_pool_max_agents: int = 64
+    # 空闲实例寿命；只回收无执行租用、无持久工作者，0 关闭，身份和会话不删除。
+    owner_agent_idle_seconds: float = 60.0
     input_media_max_bytes: int = 16 * 1024 * 1024
     input_media_max_files: int = 8
     # 磁盘级 owner 唤醒发现间隔(秒,0=关):后台循环周期性扫 owners/ 把「有 enabled 进度

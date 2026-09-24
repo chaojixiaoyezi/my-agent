@@ -41,7 +41,7 @@ def add_chat_subcommands(
 
 # LLM: Shared options are defined once so chat and resume cannot silently diverge. The
 # explicit session positional remains owned by add_chat_subcommands because its semantics differ.
-# 函数用途: 添加两种交互入口共用的注入、保存、Gateway 和恢复上下文参数。
+# 函数用途: 添加共用参数；Gateway 超时只限制观察窗口，TUI 页面存活时继续接收原请求结果。
 def _add_shared_chat_arguments(parser: argparse.ArgumentParser) -> None:
     # LLM: 工作目录只接受用户显式声明——不把进程 cwd 自动当权限来源（那会重开"从 /root 启动
     # 就把 /root 当任务目录"的洞）。多个目录用逗号分隔，仍逐个过硬门校验。
@@ -80,7 +80,7 @@ def _add_shared_chat_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--gateway-timeout",
         type=float,
-        help="gateway 模式连续无请求活动后停止等待的秒数，默认使用配置 gateway_request_timeout",
+        help="Gateway 连续无活动的等待窗口（秒）；TUI 超时后继续观察原请求，plain 停止等待",
     )
     add_resume_context_switches(parser)
 

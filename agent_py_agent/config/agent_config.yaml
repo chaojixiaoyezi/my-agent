@@ -392,7 +392,8 @@ gateway_stop_timeout: 20
 # - responses：模型响应，`gateway result <request_id>` 读取这里。
 # - gateway_requests.jsonl：一行一条审计日志。
 # gateway_request_timeout 是 CLI 等待结果的默认时长，单位秒；交互 chat
-# 把它作为连续无请求租约/流式活动的超时，不用总墙钟误杀仍在工作的长任务。
+# 把它作为连续无请求租约/流式活动的等待窗；TUI 超窗仅提示并继续观察同一请求，
+# 页面退出只停止本地观察，不取消服务端任务。plain/一次性等待仍在超窗时返回。
 # gateway_request_poll_interval 是后台 worker 空闲时多久检查一次 pending，单位秒，可填小数。
 gateway_request_timeout: 300
 gateway_request_poll_interval: 0.2
@@ -420,8 +421,11 @@ background_threads_per_owner: 4
 # per-owner 作用域 agent 实例池上限（有界 LRU，超出逐出最久未用）。多用户高并发时按
 # 常驻活跃用户数调；每个实例含独立 home/记忆/local_store 句柄。
 owner_agent_pool_max_agents: 64
+# 用户实例连续空闲多久后释放（秒，0=关闭）；在途执行或持久任务/唤醒仍保留。
+# 身份、会话、记忆保存在磁盘；新消息按需重建。被动状态轮询不延长空闲时间。
+owner_agent_idle_seconds: 60.0
 # 用户显式添加的图片/视频：单条消息原始附件总字节上限与数量上限。
-# 历史只保存引用；同一字节上限也约束每次模型请求，较旧附件超预算时只发归档引用。
+# 历史仅保存引用；同一字节上限也约束每次模型请求，较旧附件超预算时只发归档引用。
 # 模型和接口仍须支持对应模态，不自动换模型。
 input_media_max_bytes: 16777216
 input_media_max_files: 8

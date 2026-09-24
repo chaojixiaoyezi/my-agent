@@ -479,10 +479,18 @@ OAuth 传输、采样和模型菜单回归。覆盖保存无网络、公开字�
 再覆盖 `test_model_oauth.py`、`test_model_oauth_transport.py`、`test_tui_model_menu.py`、`test_provider_sampling.py`；
 最终联合命令使用 `python3 -m pytest <以上十个文件> -o addopts='' -q --tb=short`，213 passed in 4.29s。
 
+## TUI 可扩展性集成分支修复（claude/integrate-tui-scalability，本地）
+
+- 背景：origin/main（含第 7/8 步）叠加 codex/tui-scalability 的 6 个提交后，出现 9 个稳定失败；另有 SSE 超时与 TUI fixture server 共 8 个用例在此前报告中失败，但在本分支原始 HEAD 与修复后均无法复现（单独、分组、4 路并发各跑通过），判为负载相关抖动，未改代码。
+- 真实回归（改产品代码）：`poll_gateway_chunks` 新增退避后把睡眠贴合到 deadline，最小采样窗被缩短，租约心跳尚未落盘就判请求死亡；恢复 0.1s 最小采样间隔，退避只放大空闲间隔。`SafeFormattedLines.join` 改为显式序列参数，满足无 `*args` 服务接口守卫。`INPUT_MEDIA_INVALID` 按决策线同文登记为不可重试的用户输入校验错误。
+- 替身过时（只改测试）：后台 supervisor 替身补 `_owner_pool/_next_owner_retire_at`；遗留巡检替身池接受 `touch` 并提供 `pin`；原生 IR 参数替身补 `task_attributes`；chat client 断言补 `input_media: []`（与决策线同文）。
+- 验证：tui_*/gateway_*/timeout*/stream*/slow_model*/background_main*/native_tool*/input_media*/chat_client* 共 91 个文件加架构守卫与错误码策略：2,059 passed、2 skipped、1 xpassed；ruff、strict code-size、diff check 通过。
+
 ## 委派与交付核对软引导（本地，待发布）
 
 - 改动：`coordinator_tool_boundary_text` 增加三条引导：没有要求委派时优先自己做；派工时写清要交回的产出和核对方式；收到结果后先用工具抽查，不直接转述"通过"。子代理 runner 的 Required Output 要求数字和核对结论必须来自本轮工具输出，未核对的如实标出。只改文字，能力、权限和完成判定不变；设计记录见 DESIGN_LEDGER。
 - 复测（7c467a4d3，本机）：TUI238 与 233 同题，24 个孩子都执行了计算命令，核对文件、totals.csv 和 summary 全部正确（上一轮 10/24 出错）；TUI239 与 229 同题，孩子数字和父级回核都正确，但父级自己新算的状态小计仍靠心算出错，并编造理由解释矛盾。因此在共用的 prompts/default.md 证据段增加数字来源和矛盾重算规则（+2 条断言，相关 15 个文件 515 passed、3 项既有 xfail）。自发委派没有被折中引导阻止，只记录为观察。
+- 再测（3b72c4d7b，TUI240 本机 / 241 测试机，与 229 同题）：240 所有数字正确（621 行明细），但缺少合计行；241 父级用工具回核，发现并如实披露了一组孩子的错误数字，combined.csv 已改正；它自己写的按状态分项仍有 3 个金额错误（和等于正确总额），但没有编造解释。结论：孩子错数未被发现、父级编造理由这两类问题已不再出现；父级在单张汇总表里偶发心算，接近模型能力边界，不再叠加提示词。
 - 验证：新增 5 条断言。所有引用协调策略、runner 提示、create_subagents、稳定前缀或系统提示的 79 个测试文件：1,941 passed、28 项既有 xfail。真实效果需在新包上用 TUI229/233 同题复测。
 
 ## 第8步新版原生 TUI 矩阵（TUI228—237，已部署版本 66a598cf3）
@@ -758,6 +766,154 @@ pending／handled 两种重试均保留一条 wake 和完整原观察。新顺�
 具体命令、严格 gate 与未覆盖项见[配对发布交接](docs/tasks/HANDOFF_STEP7_WAKE_PUBLICATION.md)。
 本片不做宿主自动恢复扫描；prepared 成功后仍需调用方重试，runner 复用原 WAL；无 key 不承诺重试幂等。
 离线故障回归不等于真实 TUI、硬断电或所有通知入口自动恢复，线上 CI 未作为验收来源。
+## 自然长任务结束与稳定历史缓存补充
+
+官网 M2.7 的 fd→Python 真实任务已自然结束：canonical TaskRun/主代理/三个子代理均 done，
+持续 6572.58 秒（约 109.5 分钟），自然 Compact 三次，末段 TUI 显示 348 个逻辑模型轮。
+任务结束前 1180 次采样未见未同步或观察错误，状态 P95/最大 43.47/1770.05 ms；
+1 CPU/2 GiB cgroup 峰值约 1425.78 MiB（包含文件缓存和多端对照），memory failcnt=0。
+这一长任务跨越几个候选客户端版本，不能写成最后缓存补充片已单独运行满 110 分钟。
+
+- 模型独立生成 Python 项目；原工具账保留完整 pytest 输出，24/24 passed、return_code=0。
+  上游固定版本、源码和双许可证实际存在。这里只确认真实开发/测试/修复过程和自测结果，
+  未宣称全部上游行为等价；当前自测没有覆盖所有 ignore/exec 等需求，已有工具失败记录也不改写。
+- 长历史中发现额外显示成本：相同版本、同任务的累计/新恢复 TUI 同窗 CPU 26.49%/17.36%，
+  采样定位到重复快照、全历史版本键和稳定行重组。本补充片复用发布快照、稳定/活动版本键、
+  有界静态前缀及已净化行组；活动块与插话仍按同一事件顺序合流，不删历史、不再降低帧率。
+- 最终对照先在任务结束后的同一历史恢复两个新 TUI，确认画面逐行相同，再经原端提交一次普通中文续聊需求。
+  官网 M2.7 实际执行 `sleep 30` 并回答十七加二十五等于四十二；三个端都收到唯一完整回复。
+  两个观察端同时采样 40.19 秒：基线/候选 CPU 4.68%/2.21%（约降 52.7%），RSS 101.19/100.87 MiB；
+  Gateway 同窗约 5.77%，状态查询无失败。这是等待与回复窗口的对照，不外推到所有活跃输出或内存降幅。
+- 在最终原生 TUI 中从阅读处 Ctrl+O/Ctrl+E 进入第 2384/2386 段附近；上下键、上下滚轮、跨段翻页、
+  100↔120 列 resize 与回到最新都通过。首次详细展开约 1205 ms，原文展开约 72 ms，后续六次滚动约 28—32 ms；
+  包含 tmux 注入/捕获开销，首次展开仍有明显重排成本，不宣称所有操作都在几十毫秒内完成。
+- 289 项显示/状态/输入/历史回归通过；覆盖缓存失效、插话顺序、同块替换、宽度变化、字符预算和终端过滤。
+  最后四个生产文件 SHA256 与测试机一致。本次全部测试 TUI 已 `/exit` 且准确 PID 消失，Gateway 未重启、running attempts=0。
+  清理后 20 秒采样：Gateway CPU 2.43%、RSS 297.08 MiB，状态 P95 5.46 ms；cgroup 1117.76 MiB 包含文件缓存。
+
+原始证据在私有 `fd-port/`：business-terminal/messages/thread、project-test-tool-evidence、port-artifact、
+frame-cache-equal-history、business-observation-summary、cleanup-result 与 final-idle-summary。
+其它阶段的对照记录保留，不能把历史不同或任务结束过渡窗口的数字替换成最终等历史对照。
+
+## 真实开发中的 TUI 重绘对照
+
+在同一官网 M2.7 的 fd→Python 真实任务上，只读恢复两个原生 TUI，未重复发送业务需求。
+相同 120×36 终端、同一 1 CPU/2 GiB cgroup，两个客户端同时观察同一会话。
+基线为 60 Hz 帧合并/8 Hz 周期动画，候选为 20 Hz/4 Hz；原始 TUI 和 Gateway 也仍在同一限制中。
+
+- 30.78 秒同时采样：基线 TUI 单核 CPU 16.02%，候选 10.23%，下降约 36.1%；RSS 为 101.43/98.61 MiB。
+  Gateway 同窗 CPU 12.93%、RSS 188.15 MiB，cgroup 峰值 1321.41 MiB，状态查询无失败。
+  该结果来自真实压缩/开发阶段，不把降低帧率称为长期内存容量通过。
+- Ctrl+O/Ctrl+E 在当时正在阅读的真实工具记录附近进入完整原文，第 125/128 段；两个视图内容一致。
+  每端各 12 次上下翻页，均有可见移动；基线中位/最大 34.33/43.27 ms，候选 38.09/68.18 ms。
+  测量包含 tmux 按键注入和画面捕获开销，不是人类屏幕刷新率测量。
+- 候选原文上/下键和上下滚轮都实际移动，四次可见延迟 28—71 ms；100 列 resize 后可继续读取。
+- 157 项 UI/输入/线程/reducer 定向测试通过。原始证据在私有 `fd-perf/` 的 samples、summary、
+  key-latency、raw-events 和逐次终端帧。frames 合并只限制绘制，不丢消息、工具结果或思考记录。
+
+## TUI 等待超时与迟到终态
+
+并行真实测试发现原请求已经 done，而原 TUI 停在等待超时、只有重连才读到最终回复。
+当前客户端补充片让 canonical terminal 优先于观察截止点，并保留同一请求和 chunk cursor 继续观察；
+超时不创建新任务、也不把展示去重归属留给一个已放弃接收的 worker。无活动时轮询退避至 1 Hz，页面退出收口。
+plain 等有限等待语义保持。Gateway client、TUI worker/threading、CLI parser 定向测试 **109 passed**。
+
+官网 M2.7、专用测试机同一 Gateway 的真实对照：观察窗口设为 0.2 秒，普通中文要求实际等待三秒后回答。
+基线服务端 11 秒后 done，原 TUI 始终停在等待超时，没有“十七”；候选同场景在原页显示工具过程和“十七”。
+再只对测试客户端 SIGSTOP 9.28 秒，原任务在暂停期间完成，SIGCONT 后原页显示“四十二”，无重复提问或回复。
+Gateway 全程同 PID，fd 开发任务与子代理没有停止；两条候选请求各只有一个 canonical request id。
+原生 `/exit` 后测试客户端退出。私有证据在 `late-wait/` 的 baseline/fixed/paused terminal、TUI 与 timing 文件。
+
+## 真实开发长任务验收方法
+
+用户明确要求长对话验收使用真实项目开发过程，禁止把重复生成的大行数当作真实任务通过依据。
+当前选择让官网 MiniMax-M2.7 的 my-agent 在原生 TUI 中把 GitHub `sharkdp/fd` 从 Rust 复刻为 Python，
+自行读源码、实现、运行测试、修复并提交项目产物。测试者只提交一次普通中文需求并观察，不能代写或补交产物。
+记录自然产生的模型/工具回合、Compact、TUI 状态、CPU/RSS、退出/恢复与任务结果；未实际发生的长历史边界不计为通过。
+下文合成一万/千万行记录只作为存储边界和缺陷复现，不代表此类真实开发工作负载。
+真实任务已自行获取源码、派出并收回三个子代理，自然触发 Compact generation=1 后继续开发；
+当时仍在兼容性测试和修复；最终自然结束及验收边界见本页顶部。HTTP 请求交接为 done 不代表后台业务任务结束，
+监控须继续看原 run 的 canonical attempts 和任务事实，不能据此停止 Gateway。
+截至本次阶段记录，真实需求已运行约 57 分钟、168 个模型轮；累计 552 次只读采样未见未同步或采样错误，
+状态查询中位/P95/最大约 4.23/28.49/1770.05 ms，cgroup 峰值约 1326 MiB（含文件缓存与对照客户端）。
+原始 TUI 与 A 对照端经 `/exit` 正常退出，准确进程消失；B 端继续观察同一后台任务，Gateway 未重启。
+保留原工具和项目失败记录，模型仍自行修复兼容性，不能把此阶段记录称为 fd 项目通过或任意时长保证。
+后续已沿同一任务完成采样并核对原账与产物；原始证据在私有 `fd-port/`，不再补合成长行数充当真实任务。
+
+## 官网真模型与TUI媒体验收
+
+2026-09-23，独立候选线，专用测试机限制为 1 CPU / 2 GiB；官网直连，不通过中转，不使用假模型作为本轮验收。
+
+- 官网 MiniMax-M2.7：100 独立用户身份各发送一次中文普通请求，100/100 terminal=done；处理槽峰值 50。
+  同时一个原生 TUI 发问并正确回答 `5+6=11`。204.3 秒完成队列，44 个实拍终端帧未见“未同步/刷新失败”。
+  cgroup 峰值 1047.1 MiB（含文件缓存），末次采样 Gateway RSS 313.8 MiB、TUI RSS 62.6 MiB。
+  真实 `/status` 全部成功，但高峰 P95 3268 ms、最大 4897 ms；单核批量冷启动仍有排队和刷新延迟。
+- 官网 MiniMax-M3：实际端点 `https://api.minimax.cn/anthropic/v1/messages`，现有私有 key 短请求确认返回 M3。
+  原生 TUI `/attach` 添加 PNG，正确识别红圆、蓝方、绿三角及 `Q7N4`；终端 bracketed paste 拖入 MP4，
+  正确识别红→蓝→绿和 1→2→3。测试提问未提供答案；未代模型执行视觉工具。
+- 私有只读请求观察器确认真正外发 image/png 6484 字节与 video/mp4 5774 字节，SHA256 与素材一致；
+  观察器调用原 HTTP 函数，不替换供应商、不改变请求/响应。模型工具轮为零。
+- 真正 `/exit` 后重新启动同一会话，问图片和视频背景，M3 正确回答白色；请求再次带相同原件字节。
+- macOS 隔离 Gateway + 原生 TUI，系统图片剪贴板经 Ctrl+V 成为附件，官网 M3 正确识别同图；原剪贴板完整恢复，
+  本机隔离测试 TUI/Gateway 已退出。无改动用户日常模型/默认 Gateway。
+- `input_media_max_bytes=16 MiB` 同时限制新输入和一次供应商请求的媒体展开；新近附件完整、超预算旧附件明确
+  投影为归档引用，canonical refs 和原件不删除。owner 越界、符号链接、同长度内容变更、总量/数量超限均有合同验证。
+- 相关组件矩阵当前为 1008 passed、1 skipped；跳过项仍为原 HTTP stop fixture 的 409，自行 skip 不计入通过。
+  单测只验证协议/资源/输入边界，真实可用结论来自上述官网模型与原生 TUI。
+- 无 checkpoint 的一万行历史：真实 TUI 续聊完成，自动压缩 generation=1 后正确回答 `4+4=8`。
+  终态用时 410.81 秒；账本记录官网 M2.7 的 4 次供应商调用均 finished、0 retry，输入 294653 / 输出 1621 token。
+  该用时不能算低延迟通过，也不能仅凭单次采样栈归因给 Compact 二分预算估算。
+
+**未通过边界**：千万行浏览成功不等于千万行任意状态续聊成功。对 10,000,000 行、约 2.43 GB、
+无 Compact byte checkpoint 的历史，隔离只读子进程在 384 MiB 地址空间上限下调用 `after_compact_report`
+立即产生 `MemoryError`，还没有发起模型请求。`append_once` 的全量去重读取也需后续治理。
+相关有界读取、分批 Compact 必须与另一开发线正在修改的 scope/checkpoint/CAS 合同合并验收。
+本轮不声称无限时长、任意历史规模、100 个重工具或真实 IM 平台账号已通过。
+
+证据保存在仓库外 `tui-real-media-20260923/`：`real-model/` 的 submissions/terminals/samples，
+`media-*-tui.txt`、`media-provider-requests.jsonl`、`real-10k-history-*`、`uncompacted-10m-read.json`、本机截图粘贴验收。
+旧假模型记录仍保留用于定位，不作为本轮通过依据。未推送、未替换用户默认环境。
+
+## TUI 资源与空闲用户验收
+
+独立资源线，未替换用户默认 Gateway。专用测试机始终只有一个真实 Gateway，TUI 为真实 tmux
+终端；cgroup v1 对 Gateway 与所有测试 TUI 合计限制 1 CPU、2 GiB、无交换。模型与合成规模证据分开。
+
+- 同一份 3035 条保存历史、2097 块、11824 展示行的只读 A/B 回放：基线稳定重绘中位数约 38 ms，
+  候选约 4 ms，终端控制字符过滤保留。这不是按键端到端延迟或跨机 CPU 对比。
+- 真实生成并读取 1 万条和 1000 万条 canonical JSONL；后一文件 2.43 GB。最近页和连续旧页各 80 条。
+  一千万行原文通过产品 writer 生成 39063 页，首尾索引为 0 / 9999999，读取单页约 0.5—1.0 ms（热缓存）。
+- 原生 TUI 实际恢复千万条会话，Ctrl+O/Ctrl+E 保留当前消息位置；下键进入原文、滚轮继续向下、
+  上键跨回消息、120→100 列 resize 均有终端文本证据；`/exit` 后准确 PID 消失。
+- 该长历史 TUI 与 Gateway 的 20 秒采样：cgroup 峰值约 164 MiB，Gateway/TUI 分别约 1.14% / 1.00%
+  单核 CPU；40 次 `/status` 无失败，中位 2.62 ms、P95 3.61 ms。
+- 官方 MiniMax-M2.7、`anthropic_compatible`、官方 MiniMax Messages 端点的真实 TUI 已完成普通中文问答；
+  私有密钥与完整配置不入仓。最终 20 个变更生产文件 SHA256 与测试机一致：真实执行 `sleep 15` 完成后恢复对话；
+  另一 TUI 在真实 `sleep 60` 执行中 `/exit`，终端进程消失而 Gateway 仍 processing=1；
+  新 TUI 恢复同一会话后收到“后台继续执行验证完成”，未重新发送需求。
+- 100 个独立 local owner，经真实 HTTP 鉴权、原 durable queue、真实 agent 初始化，使用仓库外假
+  Anthropic 服务分别发送一次普通中文消息：两轮有效压测各 100 个终态均为 done，处理峰值 50。
+  后一轮另有一个原生 TUI 真实排队并收到假模型答复，60 秒/30 帧未见未同步；总模型任务 101。
+  假模型故意等待首批 50 个并发再释放，因此总耗时不能当真实模型延迟。不是 100 个真实 IM 平台账号验收。
+- 后一轮 cgroup 峰值约 673 MiB（包含前轮累计文件缓存），任务结束后抽样匿名驻留约 238 MiB、
+  文件缓存约 442 MiB；不得将 cgroup 总数等同独占堆。第一有效轮后 Gateway RSS 约 194 MiB、
+  空闲 CPU 约 2.04%，状态 P95 4.20 ms。CPU 满载时会饱和，执行槽上限不等于立即响应承诺。
+- 压测发现策展关闭仍构造两个软实例、完成回收受 60 秒派发节流影响；已经修复全局关闭与及时回收，
+  针对性测试通过；最终同机实例池从 0 按原 owner 重建、请求 done，再在空闲期归零。
+  轻量身份登记可保留 64 条软事实，不等于存在 64 个执行槽或 TUI。
+- 初次假模型没有实现原生工具能力探针，100 条均被框架拒绝，记录保留但不算有效聊天验收。
+  合成夹具两次构造失误（时间字段/显示身份）也未计入通过，未为了夹具改变产品协议。
+
+最终定向矩阵 818 passed、1 skipped；跳过项是原 HTTP stop 测试夹具返回 409，未计入通过。
+Ruff、doc sync、strict code-size、diff check、clean-package 均通过；未推送远端，线上 CI 未作为验收来源。
+真实 HTTP 另有 8 个半请求在约 5.13 秒全部关闭，期间 35 次健康查询无失败。
+现有强制网络故障仍必须显示未同步；没有以隐藏错误、扩大超时、删历史或取消用户任务来制造成功。
+未验证 100 小时持续运行、任意单条超大 JSON、100 个真实 IM 同时操作及 50 个重浏览器/扫描进程。
+
+原始日志、配置、终端快照和测试驱动位于仓库外 `tui-scalability-20260923` 私有证据目录；
+设计和参考源码边界见 [资源寿命](docs/design/TUI_RESOURCE_LIFETIME.md)。
+
+## 第 7 步子代理结果链已发布 main（未切换运行环境）
 
 独立工作树已拆出 runner 状态展示、完成交接信封、exact attempt 准入与
 “结果先落盘、再 WAL、再运行账、最后父通知”的初次提交编排；旧函数和导出已删除。

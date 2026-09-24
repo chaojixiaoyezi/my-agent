@@ -164,8 +164,8 @@ class ModelFieldsService:
         return out, warnings
 
 
-# LLM: 数值校验沿原Gateway配置入口，媒体数量/字节预算必须为正，不扩展执行权限。
-# 类用途: 统一队列、连接和媒体输入资源预算的配置范围。
+# LLM: Gateway 限额和空闲寿命都在本入口归一，0 秒明确关闭回收；不得让非法数字进入维护循环。
+# 类用途: 统一队列、连接、实例寿命和媒体数量/字节预算的数值校验。
 class GatewayFieldsService:
     _INT_FIELD_SPECS = (
         ("gateway_heartbeat_interval", 5, None),
@@ -181,7 +181,8 @@ class GatewayFieldsService:
         ("input_media_max_bytes", 1, None),
         ("input_media_max_files", 1, None),
     )
-    _FLOAT_FIELD_SPECS = (("gateway_request_poll_interval", 0.05, None),)
+    _FLOAT_FIELD_SPECS = (("gateway_request_poll_interval", 0.05, None),
+                         ("owner_agent_idle_seconds", 0.0, None))
 
     @staticmethod
     def normalize(data: dict[str, object], defaults: object) -> tuple[dict[str, object], list[str]]:

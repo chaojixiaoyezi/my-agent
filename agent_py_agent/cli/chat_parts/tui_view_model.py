@@ -1,5 +1,5 @@
 # LLM: 本模块是 typed TUI event 到可渲染快照的唯一 reducer；不得读取模型正文猜状态，也不得执行工具、权限或会话动作。
-# 模块用途: 管理历史、候选与界面状态；明确的历史缺口可被同块完整结果替换，已知终态不被重放改写。
+# 模块用途: 管理历史、候选与界面状态；同一状态复用不可变快照，真实变更后重新投影，终态不被重放改写。
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from typing import Any
 
 from ...agent.conversation.model_metrics import newer_model_metrics
 from .tui_events import JournalAppendResult, TuiEvent, TuiEventJournal
+from .tui_identity_window import TuiIdentityWindow
 
 TERMINAL_BLOCK_PHASES = frozenset({"completed", "failed", "interrupted"})
 _LOGGER = logging.getLogger(__name__)
@@ -265,7 +266,7 @@ class _TuiPermissionReducerMixin:
 # LLM: TuiViewModelReducer 是事件到显示状态的唯一转换表；权限方法按领域拆入内部 mixin，新增 kind 仍须注册 handler 并补状态转换测试。
 # 类用途: 顺序应用已通过 journal 的事件，并维持 active→stable 一次冻结。
 class TuiViewModelReducer(_TuiPermissionReducerMixin):
-    # LLM: handler registry 明确列出已理解 kind，未知 kind 只记诊断，不把 payload 当文本透传。
+    # LLM: handler registry 明确列出显示事件；稳定块和近期去重身份分别有界，持久历史不在 reducer 保存。
     # 函数用途: 初始化空 view model、确认后的模型显示名、独立的刷新健康标记和事件处理表。
     def __init__(
         self,
@@ -287,7 +288,7 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
         self.diagnostics: list[TuiDiagnostic] = []
         self.max_diagnostics = max(1, int(max_diagnostics or 1))
         self.max_stable_blocks = max(1, int(max_stable_blocks or 1))
-        self._stable_ids: set[str] = set()
+        self._stable_ids = TuiIdentityWindow(maximum=self.max_stable_blocks * 2)
         self._task_progress_generation_id = ""
         # 本轮聊天请求的身份（只用于展示去重/诊断），与计划代次严格分开。
         self._task_progress_turn_id = ""
@@ -1230,9 +1231,11 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
 _MAX_CONFIRMED_STEER_IDS = 1024
 
 
+# LLM: store 是 reducer 变更的唯一发布入口；缓存只复用不可变显示投影，不改变事件接收或业务状态。
+# 类用途: 原子接收显示事件并按需生成快照，避免每个控件重复复制历史。
 class TuiStateStore:
-    # LLM: store 只拥有显示账和 reducer，不持有业务 agent/tool executor。
-    # 函数用途: 创建可选自定义 journal/reducer 的状态容器。
+    # LLM: store 只拥有显示账和 reducer；快照及稳定块缓存各只持有当前一个版本，不持有业务 executor。
+    # 函数用途: 创建状态容器与有界快照缓存，所有显示变更须经 publish 发布。
     def __init__(
         self,
         journal: TuiEventJournal | None = None,
@@ -1242,14 +1245,19 @@ class TuiStateStore:
         self.reducer = reducer or TuiViewModelReducer()
         self._lock = threading.Lock()
         self._subscribers: list[Callable[[], None]] = []
+        self._snapshot: TuiViewSnapshot | None = None
+        self._stable_snapshot: tuple[TuiBlock, ...] = ()
 
     # LLM: Journal/reducer mutation is canonical, while redraw subscribers are best-effort UI
-    # notifications. A closed or broken renderer must never turn an already-applied business event
+    # notifications. Every reducer mutation invalidates the snapshot, including rejection diagnostics.
+    # A closed or broken renderer must never turn an already-applied business event
     # into a failed delivery receipt or make a durable control outbox replay forever.
     # 函数用途: 原子发布状态事件，再尽力通知界面刷新；单个重绘失败不会反咬业务状态。
     def publish(self, event: TuiEvent) -> JournalAppendResult:
         with self._lock:
             result = self.journal.append(event)
+            if result.accepted or result.status == "rejected":
+                self._snapshot = None
             if result.accepted:
                 self.reducer.apply(event)
             elif result.status == "rejected":
@@ -1262,11 +1270,18 @@ class TuiStateStore:
                 _LOGGER.debug("TUI redraw subscriber failed", exc_info=True)
         return result
 
-    # LLM: snapshot 在 reducer 锁域内复制，避免 UI 看见一半应用的事件。
-    # 函数用途: 读取当前不可变 view snapshot。
+    # LLM: snapshot 在 reducer 锁域内按发布版本缓存；稳定块按完整 tuple 等值复用，不能只比长度或尾部而漏掉历史替换/重排。
+    # 函数用途: 同一显示状态只复制一次历史；流式活动变化保留未变的稳定块身份，供渲染缓存复用。
     def snapshot(self) -> TuiViewSnapshot:
         with self._lock:
-            return self.reducer.snapshot()
+            if self._snapshot is None:
+                current = self.reducer.snapshot()
+                if current.stable_blocks == self._stable_snapshot:
+                    current = replace(current, stable_blocks=self._stable_snapshot)
+                else:
+                    self._stable_snapshot = current.stable_blocks
+                self._snapshot = current
+            return self._snapshot
 
     # LLM: subscriber 只能请求 redraw，不得在 callback 中重入 publish 或执行业务动作。
     # 函数用途: 注册状态更新后的轻量通知函数。

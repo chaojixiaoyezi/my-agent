@@ -142,3 +142,41 @@ def test_gateway_http_pool_closes_cancelled_queued_request_on_shutdown() -> None
             except OSError:
                 pass
             client.close()
+
+
+def test_incomplete_client_request_releases_worker_for_status():
+    server = _SingleWorkerServer(("127.0.0.1", 0), _BlockingHandler)
+    server.request_socket_timeout = 0.1
+    server.test_lock = threading.Lock()
+    server.test_active = 0
+    server.test_worker_ids = set()
+    server.test_workers_started = threading.Event()
+    server.test_release = threading.Event()
+    server.test_release.set()
+    serving = threading.Thread(target=server.serve_forever, daemon=True)
+    serving.start()
+    client = socket.create_connection(server.server_address, timeout=2)
+    try:
+        client.sendall(b"GET / HTTP/1.1\r\nHost: unfinished")
+        with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/", timeout=2) as response:
+            assert response.status == 200
+        assert client.recv(4096) == b""
+    finally:
+        client.close()
+        server.shutdown()
+        server.server_close()
+        serving.join(2)
+
+
+def test_expired_queue_never_enters_product_handler():
+    server = _SingleWorkerServer(("127.0.0.1", 0), _BlockingHandler)
+    server.request_queue_timeout = 0.05
+    client, accepted = socket.socketpair()
+    try:
+        server._process_request_worker(accepted, ("127.0.0.1", 1), time.monotonic() - 1)
+        assert b"GATEWAY_HTTP_BUSY" in client.recv(4096)
+        assert client.recv(1) == b""
+    finally:
+        client.close()
+        accepted.close()
+        server.server_close()

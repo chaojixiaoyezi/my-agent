@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import socket
 import threading
+import time
 from concurrent.futures import Future
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -33,6 +34,8 @@ class GatewayBoundedHTTPServer(HTTPServer):
     request_queue_size = 128
     max_request_workers = 16
     max_outstanding_requests = 128
+    request_socket_timeout = 5.0
+    request_queue_timeout = 2.0
 
     # LLM: Construction must establish admission before serve_forever can
     # accept work. The daemon executor preserves the previous restart behavior:
@@ -58,10 +61,8 @@ class GatewayBoundedHTTPServer(HTTPServer):
             bind_and_activate=bind_and_activate,
         )
 
-    # LLM: Admission counts both running and queued requests. Never block the
-    # accept loop waiting for a slot: overload must be explicit so TUI transport
-    # backoff can engage instead of opening more sockets.
-    # 函数用途: 将请求放入固定工作池；容量已满时立即返回 503，防止内存和线程无界增长。
+    # LLM: 在途数包含运行和排队；从接收时计排队时限，socket 超时只约束传输，不中止已接收的持久任务。
+    # 函数用途: 给连接设置读写时限并入有界队列；过载立即返回 503，不堵塞 accept。
     def process_request(
         self,
         request: socket.socket,
@@ -71,12 +72,14 @@ class GatewayBoundedHTTPServer(HTTPServer):
             self._reject_overloaded_request(request)
             return
         try:
+            request.settimeout(self.request_socket_timeout)
             future = self._request_executor.submit(
                 self._process_request_worker,
                 request,
                 client_address,
+                time.monotonic(),
             )
-        except RuntimeError:
+        except (RuntimeError, OSError):
             self._request_slots.release()
             self._reject_overloaded_request(request)
             return
@@ -87,16 +90,21 @@ class GatewayBoundedHTTPServer(HTTPServer):
             )
         )
 
-    # LLM: This mirrors socketserver.ThreadingMixIn.process_request_thread:
-    # handler exceptions are isolated and every accepted socket is closed once.
-    # 函数用途: 在复用的 worker 中执行一个 HTTP handler，并在结束后关闭连接。
+    # LLM: 排队过期的请求未进入 handler，返回显式忙状态；传输超时是客户端边界，不记录为内部 traceback。
+    # 函数用途: 在时限内处理连接，释放半开/慢读连接占用的工位；所有分支都关闭 socket。
     def _process_request_worker(
         self,
         request: socket.socket,
         client_address: tuple[str, int],
+        accepted_at: float,
     ) -> None:
+        if time.monotonic() - accepted_at > self.request_queue_timeout:
+            self._reject_overloaded_request(request)
+            return
         try:
             self.finish_request(request, client_address)
+        except (TimeoutError, ConnectionError):
+            pass
         except Exception:
             self.handle_error(request, client_address)
         finally:

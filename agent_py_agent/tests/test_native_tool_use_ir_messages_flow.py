@@ -559,7 +559,8 @@ def test_native_completed_conversation_precedes_current_user_without_rewriting()
     params = SimpleNamespace(
         conversation_history_seed=seed,
         user_prompt="第二轮问题",
-        task_attributes={},
+        # RuntimeLoopParams.task_attributes 默认 None；本轮无附件。
+        task_attributes=None,
         carried_active_turn_user_inputs=[],
     )
 

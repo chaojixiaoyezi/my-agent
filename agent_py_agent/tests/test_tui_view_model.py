@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 from agent_py_agent.cli.chat_parts.tui_events import TuiEventSequencer
 from agent_py_agent.cli.chat_parts.tui_view_model import (
     TuiStateStore,
@@ -14,6 +16,42 @@ def _sequencer() -> TuiEventSequencer:
         request_id="request-1",
         clock=lambda: 10.0,
     )
+
+
+def test_snapshot_reuses_stable_history_but_refreshes_stream_and_terminal() -> None:
+    store, seq = TuiStateStore(), _sequencer()
+    old = seq.emit("assistant_completed", "completed", "old", {"text": "旧正文"})
+    store.publish(old)
+    initial = store.snapshot()
+    assert store.snapshot() is initial
+    assert store.publish(old).status == "duplicate"
+    assert store.snapshot() is initial
+
+    store.publish(seq.emit("assistant_started", "started", "live"))
+    store.publish(seq.emit("assistant_delta", "delta", "live", {"text": "新正文"}))
+    streaming = store.snapshot()
+    assert streaming is not initial
+    assert streaming.stable_blocks is initial.stable_blocks
+    assert streaming.active_blocks[0].text == "新正文"
+    assert initial.active_blocks == ()
+
+    store.publish(seq.emit("assistant_completed", "completed", "live", {"text": "完整新正文"}))
+    completed = store.snapshot()
+    assert [block.text for block in completed.stable_blocks] == ["旧正文", "完整新正文"]
+    assert completed.active_blocks == ()
+    assert streaming.active_blocks[0].text == "新正文"
+
+
+def test_rejected_conflict_invalidates_diagnostic_snapshot_without_changing_history() -> None:
+    store, seq = TuiStateStore(), _sequencer()
+    event = seq.emit("assistant_completed", "completed", "old", {"text": "原记录"})
+    store.publish(event)
+    before = store.snapshot()
+    assert store.publish(replace(event, payload={"text": "冲突记录"})).status == "rejected"
+    after = store.snapshot()
+    assert after.diagnostics[-1].code == "EVENT_ID_CONFLICT"
+    assert before.diagnostics == ()
+    assert after.stable_blocks is before.stable_blocks
 
 
 def test_assistant_stream_freezes_once_without_duplicate_final() -> None:

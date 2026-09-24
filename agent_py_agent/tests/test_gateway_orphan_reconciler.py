@@ -4,6 +4,7 @@ import json
 import os
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -183,6 +184,16 @@ def test_reconciler_reclaims_after_heartbeat_stales_without_another_model_tick(
     assert any(int(report.get("running_reclaimed") or 0) == 1 for report in second)
 
 
+# 替身 owner 池：按 owner 身份原样返回实例；巡检以 touch=False 租用并 pin，不刷新空闲时间。
+class _PassThroughOwnerPool:
+    def get(self, owner, *, touch: bool = True):
+        return owner
+
+    @contextmanager
+    def pin(self, agent, *, touch: bool = True):
+        yield agent
+
+
 def test_reconciler_stuck_owner_does_not_delay_base_or_other_owner(
     tmp_path: Path,
     monkeypatch,
@@ -206,7 +217,7 @@ def test_reconciler_stuck_owner_does_not_delay_base_or_other_owner(
     monkeypatch.setattr(
         reconciler,
         "_ensure_owner_pool",
-        lambda: SimpleNamespace(get=lambda owner: owner),
+        lambda: _PassThroughOwnerPool(),
     )
     slow_entered = threading.Event()
     release_slow = threading.Event()
@@ -300,7 +311,7 @@ def test_reconciler_does_not_sweep_memory_curator_only_owner(
     monkeypatch.setattr(
         reconciler,
         "_ensure_owner_pool",
-        lambda: SimpleNamespace(get=lambda owner: owner),
+        lambda: _PassThroughOwnerPool(),
     )
     labels: list[str] = []
 

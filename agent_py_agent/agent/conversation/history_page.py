@@ -1,5 +1,6 @@
-# LLM: 历史页仅倒读同一canonical JSONL，共用store_io完整LF尾界；临时游标不进入模型或Compact，不改正文。
-# 模块用途: 为历史显示和精确请求原文查找提供分页读取，保持同一工作片一起返回，调用方自行按结构化身份筛选。
+# LLM: 历史页仅倒读同一canonical JSONL，共用store_io完整LF尾界；游标不进入模型、执行状态或Compact，不改正文。
+#   普通工作片合页，超长工作片按记录边界分段。
+# 模块用途: 按页读取会话（限制每次记录数与累计字节），为历史显示和精确请求原文查找提供分页；调用方自行按结构化身份筛选。
 
 from __future__ import annotations
 
@@ -41,8 +42,8 @@ class ConversationHistoryPage:
     errors: tuple[dict[str, str], ...] = ()
 
 
-# LLM: 分页行数是目标窗口，最早的连续工作片不能截成两半；只倒读所选窗口及一个边界行，不全扫会话。
-# 函数用途: 读取一页完整工作片；忽略尚未追加完整的尾行，损坏或错误游标则明确返回失败。
+# LLM: 目标窗口保留普通工作片；800 条/8MiB 到达后必须按 canonical 行边界续页，不改变消息身份或状态。
+# 函数用途: 倒读有界历史页；忽略未完成尾行，单条记录完整读取，超长工作片下次上翻继续。
 def read_conversation_history_page(
     path: Path, thread_id: str, *, before: int | None = None, limit: int = 80,
 ) -> ConversationHistoryPage:
@@ -61,6 +62,8 @@ def read_conversation_history_page(
             selected: list[MessageLogEntry] = []
             start, oldest_group = end, ""
             for offset, line in _rows_backward(handle, end):
+                if selected and (len(selected) >= 800 or end - offset > 8 * 1024 * 1024):
+                    break
                 raw = json.loads(line.decode("utf-8"))
                 if not isinstance(raw, dict):
                     raise ValueError("invalid history row")

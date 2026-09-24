@@ -415,6 +415,9 @@ def test_blocked_base_tick_does_not_starve_scoped_owner_tick() -> None:
     supervisor._curator_inflight = {}
     supervisor._heartbeat_path = None
     supervisor._next_heartbeat_at = 0.0
+    # 空闲 owner 回收合同：无 owner 池时回收为 no-op，这里只测 tick 编排。
+    supervisor._owner_pool = None
+    supervisor._next_owner_retire_at = 0.0
     supervisor._maybe_seed_wake_pending_owners = lambda: None
     supervisor._sync_owner_schedulers = lambda: None
     supervisor._recover_active_watch_harvesters = lambda: None
@@ -474,6 +477,9 @@ def test_blocked_thread_does_not_starve_sibling_thread_for_same_owner() -> None:
     supervisor._curator_inflight = {}
     supervisor._heartbeat_path = None
     supervisor._next_heartbeat_at = 0.0
+    # 空闲 owner 回收合同：无 owner 池时回收为 no-op，这里只测 tick 编排。
+    supervisor._owner_pool = None
+    supervisor._next_owner_retire_at = 0.0
     supervisor._maybe_seed_wake_pending_owners = lambda: None
     supervisor._sync_owner_schedulers = lambda: None
     supervisor._recover_active_watch_harvesters = lambda: None
