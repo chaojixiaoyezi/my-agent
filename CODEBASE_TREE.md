@@ -832,6 +832,18 @@ plugins/
 |       |-- html_page.py               # 独立 HTML 渲染：内联 CSS、内联 SVG 条形图、全部文本转义、无脚本
 |       |-- operations.py              # table 渲染与 export 导出流程；导出经写入上下文 check/anchor 后原子写出
 |       `-- skills/genui-table/SKILL.md # 随包 Skill：何时用两个工具、数据格式、导出路径与不越界约束
+|-- image-text/                        # 自有图片本地 OCR 插件：系统 tesseract 提取文字 + 标准库图片元数据，不做视觉理解
+|   |-- README.md                      # 构建、依赖准备（tesseract）、用法与"视觉理解走 /attach"边界
+|   |-- pyproject.toml                 # 插件发行身份及精确 SDK 依赖
+|   `-- src/image_text/
+|       |-- declaration.json           # read 动作/只读工具与设置（tesseract_path、default_lang 等）的唯一声明
+|       |-- __init__.py                # 独立插件包入口
+|       |-- __main__.py                # python -m image_text 启动 stdio 服务
+|       |-- server.py                  # MCP 握手、逐次读取上下文接入与 read 流程，错误附带图片元数据
+|       |-- declarations.py            # 读取同源声明并验证平面参数、pattern 和设置
+|       |-- reading.py                 # 业务错误类型与授权后的 no-follow 有界图片读取
+|       |-- image_info.py              # 按魔数识别 PNG/JPEG/GIF/WebP 并解析宽高
+|       `-- ocr.py                     # 定位并以超时运行 tesseract、临时文件清理、TSV 解析与语言包检查
 |-- savepoint-lite/                    # 自有文件快照插件：保存/列出/恢复，快照只存插件数据目录
 |   |-- README.md                      # 构建、三个动作用法与中文示例
 |   |-- pyproject.toml                 # 插件发行身份及精确 SDK 依赖
@@ -910,6 +922,7 @@ docs/
 - `plugins/sdk/pyproject.toml` 与 `scripts/build_plugin_api.py`：SDK 唯一发行声明和原源码字节投影；不另存共用权限实现。
 - `plugins/workspace-peek/` 与 `scripts/build_plugin_package.py`：首个自有只读插件及标准安装包构建，独立 MCP 入口只消费宿主逐次上下文。
 - `plugins/genui-lite/`：首个随包带 Skill（包描述 v3）的自有插件，table 只读渲染、export 经写入上下文导出独立 HTML；`agent_py_agent/tests/test_genui_lite_package.py` 为其实际包与 MCP 进程组件验收。
+- `plugins/image-text/`：本地 OCR 工具插件，只调用系统 tesseract、不调用模型；`agent_py_agent/tests/test_image_text_package.py` 为其实际包与 MCP 进程组件验收。
 - `plugins/savepoint-lite/`：首个写工作区的自有插件，快照只存宿主插件数据目录，恢复走写入上下文；`agent_py_agent/tests/test_savepoint_lite_package.py` 为其实际包与 MCP 进程组件验收。
 - `agent_py_agent/tests/test_plugin_api_build.py`、`agent_py_agent/tests/test_workspace_peek_package.py`：实际标准包、独立环境和原 MCP/宿主管理链的开发验证，不代替真实 TUI。
 

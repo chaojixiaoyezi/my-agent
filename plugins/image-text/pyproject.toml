@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "my-agent-image-text"
+version = "0.1.0"
+description = "对工作区图片做本地 OCR，返回文字与图片元数据"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+dependencies = ["my-agent-plugin-api==0.2.0"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+license-files = ["LICENSE", "NOTICE"]
+
+[tool.setuptools.package-data]
+image_text = ["declaration.json"]
