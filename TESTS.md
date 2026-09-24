@@ -536,6 +536,7 @@ OAuth 传输、采样和模型菜单回归。覆盖保存无网络、公开字�
 
 ## 第 10 步第三批插件（本地，待发布）
 
+- `test_desktop_lite_package.py`（7 项）：从源码构建 desktop-lite 包并起真实 MCP 进程，系统程序全部用记录 argv/stdin 的假脚本经设置注入（不真弹通知、不开程序）；覆盖三个工具均为 mutating 且缺上下文拒绝、通知文本含引号/反斜杠/`& do shell script` 原样作为 argv 且 AppleScript 固定走 stdin、标题/内容超长与 NUL 拒绝、open 拒绝符号链接/目录/缺失/上溯/越界/.command/.APP/可执行位并把绝对路径传给打开程序、剪贴板文本经 stdin、程序缺失返回“不可用”、非零退出码、超时杀进程、坏设置启动失败。
 - `test_image_text_package.py`（10 项）：从源码构建 image-text 包并起真实 MCP 进程；本机有 tesseract 时用测试内极简 PNG 编码器画的点阵英文图实识别（无 tesseract 时 skip），另覆盖 tesseract 缺失返回 OCR_UNAVAILABLE 且仍带元数据（PNG/伪装扩展名/GIF/JPEG/WebP 宽高）、非图片与损坏头部、超上限、链接/上溯/越界、非法语言名、语言包缺失列出已装语言、假 tesseract 超时被杀且临时文件删除、坏设置启动失败。
 - `test_design_lite_package.py`（15 项）：从源码构建 design-lite 包，确认包描述 v3、`skills == ["design-card"]`、wheel 内 SKILL.md 可按 frontmatter 解析；起真实 MCP 进程：三种模板 create（无外部资源、无 script、标题副标题转义、权限 0644）、默认色与非法颜色/未知模板/非 .html 拒绝、已存在拒绝与 `--overwrite`、edit 只改目标字段（其余字节不变、保持原权限位、返回新旧值）、非本插件/非 UTF-8/标记被改的文件拒绝、字段缺失与未给字段、越界/上溯/链接/写入范围拒绝、缺写入上下文失败。
 - `test_browser_lite_package.py`（20 项）：WebSocket 帧纯单测（客户端掩码、7/16/64 位长度分支、截断前缀视为数据不足、服务端掩码/保留位/未知操作码/控制帧分片与超长/超限拒绝、分片重组与非法序列、socketpair 上跨读拼帧、自动 pong 与 close）；从源码构建 browser-lite 包并起真实 MCP 进程 + 本机 Chrome（无浏览器时 skip）：工作区测试表单 open → read → fill（输入框、按文字选下拉）→ click → read 出现"已提交：张三/B"，同进程复用同一浏览器，close 后 pid 消失、profile 清空；选择器 0 个/多个/语法错、不可填元素、无此选项、未开页面、缺上下文；https://example.com、工作区外 file://、`../` 上溯、ftp/javascript 被拒，本机 302 到外部与点击外链被拦截并停到空白页，页面内外部 fetch 被拦、允许主机放行；allowed_hosts 设置生效；chrome_path 不存在时五个工具都报"浏览器不可用"；宿主 stop、stdin EOF、仅对插件 pid 发 SIGTERM 与空闲超时后浏览器 pid 均不存在（`os.kill(pid, 0)` 失败）；缺数据目录与坏设置。
