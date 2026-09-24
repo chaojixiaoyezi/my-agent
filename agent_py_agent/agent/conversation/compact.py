@@ -679,7 +679,7 @@ def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
             )
             raise
     for partition_index, (compact_rows, ordinary_tail) in enumerate(partitions):
-        retained_tail = concatenate_message_rows(ordinary_tail, protected_suffix)
+        retained_tail = concatenate_message_rows((ordinary_tail, protected_suffix))
         raise_if_compact_interrupted(request.interrupt_check)
         summarize_percent = 15 + int(partition_index * 50 / partition_count)
         measure_percent = 15 + int((partition_index + 0.75) * 50 / partition_count)

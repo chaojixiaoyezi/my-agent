@@ -112,8 +112,9 @@ def filtered_message_rows(rows, predicate):
 
 
 # LLM: 同一冻结文件的多个子范围合并地址，不重新筛选或复制正文；内存输入继续保留原引用。
+# parts 是显式有序元组，不用可变位置参数，符合架构守卫的服务接口约束。
 # 函数用途: 合并近期尾部和媒体保护后缀，不改变原消息顺序。
-def concatenate_message_rows(*parts):
+def concatenate_message_rows(parts):
     nonempty = [part for part in parts if part]
     if not nonempty:
         return ()

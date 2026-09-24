@@ -16,6 +16,7 @@ child不展示历史正文时的读取回归先复现1 failed/1 passed，修复�
   - 修复后的 nontext 与原生 IR 两个文件：全部通过。
 - **Gate**：全目录 Ruff、doc sync、strict code-size（hard=0、blocked=False，基线不改）、diff 与 clean-package 全部通过。
 - **未覆盖**：未运行真实模型或 TUI，线上 CI 未作为验收来源。原场景到新测试的对照清单随交接提交给主线 owner。
+- **随后吸收 `0d02bb272`**：主线 15 项夹具修复已随之进入。决策线原有的架构守卫失败源于 `concatenate_message_rows(*parts)` 的可变位置参数，已改为显式元组；守卫及 7 个 Compact 分区/来源测试文件共 141 项通过。
 
 ## 第12.4项选中来源到摘要生命周期（2026-09-23，本地）
 
