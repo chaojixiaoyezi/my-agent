@@ -125,6 +125,14 @@ class GatewayTaskBindingWriter:
             self.request_path, self.request_id, self.execution_attempt_id,
         )("bind_runtime_authority", persist)
 
+    # LLM: core 在主轮发布 run/attempt 后、首次模型调用前调用；只消费入口冻结的 /experiment 参数，回执存在即不再授权。
+    # 实现归 request_experiment.py，失败只提示用户，不阻断业务回合，也不改变本类其它绑定。
+    # 函数用途: 为本请求执行至多一次的决策实验授权。
+    def grant_decision_experiment(self, agent: object, params: object) -> dict | None:
+        from .request_experiment import grant_request_decision_experiment
+
+        return grant_request_decision_experiment(self, agent, params)
+
     # LLM: 任务晋升只能回写同一请求；原子持久写成功后再更新共享内存对象，失败不伪造绑定。
     # 函数用途: 接收运行时确认的任务链接，让本轮 Compact 重试和重启恢复使用相同归属。
     def __call__(self, link: object) -> bool:

@@ -1,4 +1,5 @@
 # LLM: 会话控制保留原类型、参数语义和回执格式；词法声明读取公共目录，插件不可进入旧控制执行器。
+# /experiment 与 /audit 准备轮同为任务命令：参数冻结进 system_task，只有任务正文进入模型。
 # 模块用途: 将明确命令解释为会话控制或任务，供终端与 IM 共用，普通语言不获得控制权。
 
 from __future__ import annotations
@@ -35,11 +36,18 @@ ControlKind = Literal[
     "verbose",
     "unsupported",
 ]
-TaskCommandKind = Literal["audit_prepare"]
+TaskCommandKind = Literal["audit_prepare", "decision_experiment"]
 
 _AUDIT_UNIT_SECONDS = {"d": 86400, "h": 3600, "m": 60}
 _AUDIT_WINDOW_MAX_SECONDS = 400 * 86400
 _WORK_NAME_MAX_CHARS = 64
+DECISION_EXPERIMENT_TASK_KIND = "decision_experiment"
+# 只开放有经验输入上界标定和只观察消费者的接入点；其它点即使授权也无法发送，因此在入口直接拒绝。
+_EXPERIMENT_POINTS = frozenset({"skill_tool"})
+_EXPERIMENT_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+_EXPERIMENT_FIELDS = frozenset({"mode", "point", "duration_seconds", "max_http_requests", "max_input_tokens"})
+_EXPERIMENT_USAGE = ("用法：/experiment observe skill_tool 时长 HTTP次数 输入token上限 任务内容，"
+                     "例如 /experiment observe skill_tool 10m 1 50000 整理本周资料。输入上界是经验值，不是供应商保证。")
 
 
 @dataclass(frozen=True)
@@ -206,6 +214,8 @@ def parse_conversation_command(
         return _goal_command(trailing)
     if name == "audit":
         return _audit_command(raw)
+    if name == "experiment":
+        return _experiment_command(trailing)
     if name == "verbose":
         value = str(trailing or "").strip().lower()
         return ConversationControlCommand(
@@ -264,6 +274,38 @@ def conversation_task_attributes(system_task: object) -> dict[str, object]:
         CONVERSATION_WORK_NAME_ATTR: name,
         CONVERSATION_CANCELLATION_SCOPE_ATTR: "foreground",
     }
+
+
+# LLM: 只认显式 /experiment 语法；参数冻结进 system_task，模型只看到任务正文，不能从正文或模型参数取得授权。
+# 函数用途: 把实验命令拆成任务正文和结构化实验参数，格式或数值不合法时返回用法。
+def _experiment_command(trailing: object) -> ConversationTaskCommand:
+    match = re.match(r"^(\S+)\s+(\S+)\s+(\d{1,9})([smhd])\s+(\d{1,9})\s+(\d{1,12})\s+(.+)$",
+                     str(trailing or "").strip(), re.IGNORECASE | re.DOTALL)
+    if match is None:
+        return ConversationTaskCommand(DECISION_EXPERIMENT_TASK_KIND, valid=False, usage=_EXPERIMENT_USAGE)
+    mode, point, amount, unit, http_requests, input_tokens, prompt = match.groups()
+    attributes = {"mode": mode.lower(), "point": point,
+                  "duration_seconds": int(amount) * _EXPERIMENT_UNIT_SECONDS[unit.lower()],
+                  "max_http_requests": int(http_requests), "max_input_tokens": int(input_tokens)}
+    valid = decision_experiment_task({"kind": DECISION_EXPERIMENT_TASK_KIND, "attributes": attributes}) is not None
+    return ConversationTaskCommand(DECISION_EXPERIMENT_TASK_KIND, prompt=prompt.strip(), attributes=attributes,
+                                   valid=valid and bool(prompt.strip()), usage=_EXPERIMENT_USAGE)
+
+
+# LLM: 宿主授权只消费这里严格校验后的冻结参数；缺字段、多字段、非 observe、未标定点或非正整数一律视为无实验。
+# 函数用途: 从排队请求的 system_task 读取实验参数，供 Gateway 在模型前授权使用。
+def decision_experiment_task(system_task: object) -> dict[str, object] | None:
+    if not isinstance(system_task, dict) or system_task.get("kind") != DECISION_EXPERIMENT_TASK_KIND:
+        return None
+    attributes = system_task.get("attributes")
+    if not isinstance(attributes, dict) or set(attributes) != _EXPERIMENT_FIELDS:
+        return None
+    if attributes["mode"] != "observe" or type(attributes["point"]) is not str or attributes["point"] not in _EXPERIMENT_POINTS:
+        return None
+    counts = (attributes["duration_seconds"], attributes["max_http_requests"], attributes["max_input_tokens"])
+    if any(type(value) is not int or value <= 0 for value in counts):
+        return None
+    return dict(attributes)
 
 
 # LLM: Parse only the explicit goal lifecycle grammar; the objective body remains opaque model/user text.
@@ -533,12 +575,14 @@ def _short_text(value: object, limit: int) -> str:
 
 
 __all__ = [
+    "DECISION_EXPERIMENT_TASK_KIND",
     "ConversationControlCommand",
     "ConversationControlResult",
     "ConversationTaskCommand",
     "ConversationTaskStatus",
     "NamedConversationWorkStatus",
     "conversation_task_attributes",
+    "decision_experiment_task",
     "conversation_compact_interrupt_name",
     "conversation_request_interrupt_name",
     "parse_conversation_control",

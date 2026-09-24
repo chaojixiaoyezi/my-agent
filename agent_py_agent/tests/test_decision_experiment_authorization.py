@@ -15,6 +15,12 @@ from agent_py_agent.agent.runtime_context import (
 from agent_py_agent.agent.runtime_db.host_commands import HostCommandIdentity
 from agent_py_agent.agent.settings.config import AgentConfig, load_config
 from agent_py_agent.agent.settings.decision_experiment import authorize_decision_experiment
+from agent_py_agent.agent.settings.decision_experiment_schema import (
+    EMPIRICAL_INPUT_BOUND_POLICY,
+    EXPERIMENT_SCHEMA,
+    EXPERIMENT_SCHEMA_V1,
+    validate_experiment_authorization,
+)
 from agent_py_agent.agent.settings.decision_settings import (
     execute_decision_settings_operation as execute,
 )
@@ -47,7 +53,8 @@ def _grant(running, **changes):
     host, thread, params = running
     kwargs = {"source": HostCommandIdentity("alice", "alice", "host_control", thread.thread_id, "authorize-1"),
               "expected_revision": execute(host, "read", {}, thread_id=thread.thread_id)["revision"],
-              "points": ["planning"], "duration_seconds": 30, "max_http_requests": 2, "max_input_tokens": 100}
+              "points": ["planning"], "duration_seconds": 30, "max_http_requests": 2, "max_input_tokens": 100,
+              "input_bound_policy": EMPIRICAL_INPUT_BOUND_POLICY}
     kwargs.update(changes)
     return authorize_decision_experiment(host, params, **kwargs)
 
@@ -98,14 +105,15 @@ def test_explicit_v1_migration_preserves_revision_and_overrides_without_authorit
         validate_decision_settings({**old, "schema": "decision_settings.v2"})
 
 
-def test_host_grant_is_single_thread_authority_and_still_no_network(running, monkeypatch):
+def test_host_grant_is_single_thread_authority_and_ordinary_mode_point_never_sends(running, monkeypatch):
     host, thread, params = running
     _enabled(running)
     owner_bytes = model_profiles_path(host.home_paths).read_bytes()
-    # 夹具只构造宿主 API 的来源；没有原用户确认或持久 operation，不能据此宣称产品授权入口已验。
+    # 夹具只构造宿主 API 的来源；产品入口是 Gateway /experiment，另见 test_decision_experiment_send_gate。
     report = _grant(running)
     authorization = report["experiment_authorization"]
     assert authorization["operations"] == ["observe"] and authorization["status"] == "active"
+    assert authorization["schema"] == EXPERIMENT_SCHEMA and authorization["input_bound_policy"] == EMPIRICAL_INPUT_BOUND_POLICY
     assert authorization["binding"]["task_id"] == params.task_id
     assert authorization["binding"]["attempt_id"] == params.attempt_id
     assert authorization["binding"]["ledger_id"] == host._model_call_ledger.ledger_id
@@ -114,16 +122,55 @@ def test_host_grant_is_single_thread_authority_and_still_no_network(running, mon
     assert model_profiles_path(host.home_paths).read_bytes() == owner_bytes
     assert execute(host, "read", {})["experiment_authorization"] is None
     assert not host._model_call_ledger.records()
-    monkeypatch.setattr(decision_service, "decision_backend_from_profile", lambda *_: pytest.fail("缺证明不能构造后端"))
+    monkeypatch.setattr(decision_service, "decision_backend_from_profile", lambda *_: pytest.fail("普通模式未关不能构造后端"))
     stage = _stage(running)
-    assert stage.error_code == "input_bound_unavailable" and stage.enabled_points == ()
-    # 即使可信调用方错误地清了 stage.error_code，真正服务边界仍复核，不能用伪造 stage 发送。
-    outcome = decision_service.decide(host, params, replace(stage, error_code=""), point="planning",
+    # 准入通过，但 planning 普通模式为 observe：实验与普通建议互斥，不发布可准备点。
+    assert stage.error_code == "" and stage.enabled_points == ()
+    # 即使调用方伪造已发布的点，服务边界仍复读设置，普通模式未关就不能进入发送链。
+    outcome = decision_service.decide(host, params, replace(stage, enabled_points=("planning",)), point="planning",
         state=object(), questions=object(), candidates_revision="v1")
-    assert outcome.status == "experiment_unavailable" and outcome.reason == "input_bound_unavailable"
+    assert outcome.status == "experiment_unavailable" and outcome.reason == "experiment_point_mode_not_off"
     assert not host._model_call_ledger.records()
     budget = host._model_call_ledger.input_budget_snapshot(authorization["authorization_id"])
     assert budget["reserved_http_requests"] == budget["charged_input_tokens"] == 0
+
+
+def test_stage_publishes_only_authorized_points_whose_ordinary_mode_is_off(running):
+    host, thread, _params = running
+    patch(host, {"enabled": True, "experiment_enabled": True, "points.planning.mode": "off"}, thread_id=thread.thread_id)
+    _grant(running)
+    stage = _stage(running)
+    assert stage.error_code == "" and stage.enabled_points == ("planning",) and stage.experiment
+    ordinary = decision_service.begin_decision_stage(host, running[2], operation_id="sample-2")
+    assert "planning" not in ordinary.enabled_points and ordinary.experiment_available
+
+
+@pytest.mark.parametrize("policy", ["", "provider:exact.v1", None])
+def test_grant_requires_the_accepted_empirical_policy_before_budget(running, policy):
+    host, _thread, _params = running
+    _enabled(running)
+    with pytest.raises(ModelProfileError):
+        _grant(running, input_bound_policy=policy)
+    assert not hasattr(host, "_model_call_ledger")
+
+
+def test_v1_or_unknown_policy_envelope_stays_readable_but_can_never_be_admitted(running):
+    host, thread, _params = running
+    patch(host, {"enabled": True, "experiment_enabled": True, "points.planning.mode": "off"}, thread_id=thread.thread_id)
+    current = _grant(running)["experiment_authorization"]
+    v1 = {key: value for key, value in current.items() if key != "input_bound_policy"} | {"schema": EXPERIMENT_SCHEMA_V1}
+    assert validate_experiment_authorization(v1) == v1
+    with pytest.raises(ModelProfileError):
+        validate_experiment_authorization({**v1, "input_bound_policy": EMPIRICAL_INPUT_BOUND_POLICY})
+    with pytest.raises(ModelProfileError):
+        validate_experiment_authorization({**current, "schema": ["v2"]})
+    for envelope, reason in ((v1, "input_bound_policy_missing"),
+                             ({**current, "input_bound_policy": "empirical:other.v9"}, "input_bound_policy_unsupported")):
+        host.conversation_store.threads.update_atomic(thread.thread_id, lambda latest, value=envelope: replace(
+            latest, decision_settings={**latest.decision_settings, "experiment_authorization": value}))
+        stage = _stage(running)
+        assert stage.error_code == reason and stage.enabled_points == ()
+    assert not host._model_call_ledger.records()
 
 
 def test_same_revision_concurrent_host_primitives_have_one_settings_winner(running):
@@ -268,11 +315,16 @@ def test_expiry_and_point_scope_are_checked_before_preparation(running, monkeypa
     assert _stage(running).error_code == "experiment_expired"
 
 
-def test_direct_call_boundary_refuses_experiment_before_input_estimate_or_ledger(running, monkeypatch):
+def test_direct_call_boundary_refuses_untyped_experiment_before_input_estimate_or_ledger(running, monkeypatch):
     host, _thread, params = running
-    monkeypatch.setattr(decision_model_call, "estimate_tokens", lambda *_: pytest.fail("没有证明不能估算后放行"))
+    monkeypatch.setattr(decision_model_call, "estimate_tokens", lambda *_: pytest.fail("未知实验标签不能估算后放行"))
     from agent_py_agent.agent.contracts.model_call_budget import ModelCallBudgetError
+    from agent_py_agent.tests.test_decision_protocol import binding, questions
 
-    with pytest.raises(ModelCallBudgetError, match="input_bound_unavailable"):
-        decision_model_call.invoke_decision_model_call(host, params, object(), object(), deadline=10, resource_key="test", experiment_id="fake")
+    request = decision_model_call.DecisionRequest(binding(), {"fact": 1}, questions())
+    backend = SimpleNamespace(decide=lambda *_a, **_k: pytest.fail("未知实验标签不能发送"))
+    for experiment in ("fake", {"authorization_id": "fake"}):
+        with pytest.raises(ModelCallBudgetError, match="experiment_call_invalid"):
+            decision_model_call.invoke_decision_model_call(host, params, request, backend, deadline=10, resource_key="test",
+                                                           experiment=experiment)
     assert not hasattr(host, "_model_call_ledger")

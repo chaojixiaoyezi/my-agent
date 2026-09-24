@@ -1,4 +1,4 @@
-"""原 ModelCallLedger 的 E1 预留原语；测试给定上界只是合同夹具，不证明 Jev/tokenizer 的输入上界。"""
+"""原 ModelCallLedger 的 E1 预留、单次发送许可与结算原语；测试给定上界只是合同夹具，不证明 Jev/tokenizer 的输入上界。"""
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -6,8 +6,10 @@ from dataclasses import replace
 import pytest
 
 from agent_py_agent.agent.contracts.model_call_budget import (
+    InputTokenBound,
     ModelCallBudgetError,
     ModelCallInputBudget,
+    SendPermitBinding,
 )
 from agent_py_agent.agent.contracts.model_call_ledger import (
     ModelCallFailureParams,
@@ -19,6 +21,9 @@ from agent_py_agent.agent.contracts.model_call_ledger import (
     ModelCallStartedParams,
     ModelCallTimeoutParams,
 )
+
+_BINDING = SendPermitBinding(endpoint="https://decision.test/v1/systemone", body_sha256="a" * 64,
+                             model="decision-model", connection_revision="connection-1")
 
 
 def _ledger(*, max_http=2, max_input=100, max_records=128):
@@ -35,11 +40,22 @@ def _params(call_id="call"):
         metadata={"purpose": "decision", "owner_ref": "owner", "thread_id": "thread", "task_id": "task", "attempt_id": "attempt"})
 
 
+def _bound(tokens=60):
+    return InputTokenBound(tokens=tokens, method="fixture.v1", body_bytes=100, questions=1, state_bytes=10)
+
+
 def _reserve(ledger, call_id="call", bound=60):
-    return ledger.reserve_input_budget(_params(call_id), budget_id="authorization", input_token_upper_bound=bound)
+    return ledger.reserve_input_budget(_params(call_id), budget_id="authorization", input_bound=_bound(bound),
+                                       send_binding=_BINDING)
 
 
-def _finish(ledger, call_id="call", actual=30, fields=("input_tokens",), http_count=1):
+def _consume(ledger, call_id="call", binding=_BINDING):
+    ledger.consume_send_permit(call_id, budget_id="authorization", binding=binding)
+
+
+def _finish(ledger, call_id="call", actual=30, fields=("input_tokens",), http_count=1, consume=True):
+    if consume:
+        _consume(ledger, call_id)
     for index in range(http_count):
         ledger.provider_attempt(ModelCallProviderAttemptParams(call_id, f"http-{index}", "started"))
         ledger.provider_attempt(ModelCallProviderAttemptParams(call_id, f"http-{index}", "response_opened"))
@@ -53,13 +69,18 @@ def test_success_settles_provider_full_input_without_cache_or_output_discount():
     with token:
         before = ledger.input_budget_snapshot(limits.budget_id)
         assert before["charged_input_tokens"] == 60 and before["provider_input_tokens"] == 0
+        assert before["input_bound_kind"] == "empirical"
         _finish(ledger)
         result = ledger.settle_input_budget("call")
         assert result["charged_input_tokens"] == result["provider_input_tokens"] == 30
         assert result["reserved_http_requests"] == 1 and result["unknown_usage_calls"] == 0
+        assert result["input_bound_ratio"] == 0.5 and result["input_bound_warning"] == ""
         assert ledger.settle_input_budget("call") == result
-        assert ledger.records()[0].accounted_input_tokens == 30
-        assert ledger.records()[0].metadata["input_budget_id"] == limits.budget_id
+        record = ledger.records()[0]
+        assert record.accounted_input_tokens == 30 and record.input_tokens == 999
+        assert record.metadata["input_budget_id"] == limits.budget_id
+        assert record.metadata["input_bound"]["tokens"] == 60 and record.metadata["input_bound"]["kind"] == "empirical"
+        assert record.metadata["input_budget_outcome"] == "charged" and record.metadata["send_permit"]["state"] == "consumed"
     result["status"] = "changed-view"
     assert ledger.input_budget_snapshot(limits.budget_id)["status"] == "active"
 
@@ -89,19 +110,20 @@ def test_unknown_or_unreserved_transmission_never_refunds_to_zero_or_reopens(sta
     ledger, _limits, _now = _ledger()
     _record, token = _reserve(ledger)
     with token:
+        _consume(ledger)
         if status == "failed":
             ledger.failed(ModelCallFailureParams("call", "OSError"))
         elif status == "timed_out":
             ledger.timeout(ModelCallTimeoutParams("call", 1, "wall_clock"))
         else:
             _finish(ledger, actual=0, fields=() if status == "usage_missing" else ("input_tokens",),
-                    http_count=0 if status == "no_http" else 2 if status == "extra_http" else 1)
+                    http_count=0 if status == "no_http" else 2 if status == "extra_http" else 1, consume=False)
         result = ledger.settle_input_budget("call")
         assert result["status"] == "usage_unknown" and result["charged_input_tokens"] == 60
         assert result["reserved_http_requests"] == 1 and result["unknown_usage_calls"] == 1
         with pytest.raises(ModelCallBudgetError, match="budget_usage_unknown"):
             _reserve(ledger, "later")
-        _finish(ledger, actual=0)
+        _finish(ledger, actual=0, consume=False)
         assert ledger.settle_input_budget("call") == result
 
 
@@ -128,19 +150,93 @@ def test_input_exact_boundary_and_reported_zero_are_distinct_from_missing():
     token.release()
 
 
-@pytest.mark.parametrize("bound", [0, -1, True, None, 1.2, "20", 10**1000])
-def test_no_bound_or_invalid_bound_has_no_reservation(bound):
+@pytest.mark.parametrize("bound", [60, 0, True, None, 1.2, "20", 10**1000])
+def test_bare_or_unlabeled_bound_has_no_reservation(bound):
     ledger, _limits, _now = _ledger()
-    with pytest.raises(ModelCallBudgetError, match="input_bound_unavailable"):
-        _reserve(ledger, bound=bound)
+    with pytest.raises(ModelCallBudgetError, match="input_bound_unlabeled"):
+        ledger.reserve_input_budget(_params(), budget_id="authorization", input_bound=bound, send_binding=_BINDING)
+    with pytest.raises(ModelCallBudgetError, match="send_binding_invalid"):
+        ledger.reserve_input_budget(_params(), budget_id="authorization", input_bound=_bound(), send_binding=None)
     assert not ledger.records()
     assert ledger.input_budget_snapshot("authorization")["reserved_http_requests"] == 0
+
+
+@pytest.mark.parametrize("changes,reason", [({"tokens": 0}, "input_bound_invalid"), ({"tokens": True}, "input_bound_invalid"),
+    ({"questions": -1}, "input_bound_invalid"), ({"kind": "provider"}, "input_bound_unlabeled"),
+    ({"kind": None}, "input_bound_unlabeled"), ({"method": ""}, "input_bound_unlabeled")])
+def test_input_bound_object_requires_label_and_finite_counts(changes, reason):
+    values = {"tokens": 60, "method": "fixture.v1", "body_bytes": 1, "questions": 1, "state_bytes": 1, **changes}
+    with pytest.raises(ModelCallBudgetError, match=reason):
+        InputTokenBound(**values)
+
+
+@pytest.mark.parametrize("field,value", [("body_sha256", "b" * 64), ("endpoint", "https://other.test/v1/systemone"),
+                                         ("model", "other-model"), ("connection_revision", "connection-2")])
+def test_send_permit_binding_must_match_exactly(field, value):
+    ledger, _limits, _now = _ledger()
+    _record, token = _reserve(ledger)
+    with token, pytest.raises(ModelCallBudgetError, match="send_binding_mismatch"):
+        _consume(ledger, binding=replace(_BINDING, **{field: value}))
+    assert ledger.records()[0].metadata["send_permit"]["state"] == "issued"
+
+
+def test_send_permit_is_single_use():
+    ledger, _limits, _now = _ledger()
+    _record, token = _reserve(ledger)
+    with token:
+        _consume(ledger)
+        with pytest.raises(ModelCallBudgetError, match="send_permit_consumed"):
+            _consume(ledger)
+        with pytest.raises(ModelCallBudgetError, match="send_binding_invalid"):
+            ledger.consume_send_permit("call", budget_id="authorization", binding={"body_sha256": "a" * 64})
+    assert ledger.records()[0].metadata["send_permit"]["state"] == "consumed"
+
+
+def test_refused_before_send_keeps_reservation_and_closes_budget():
+    ledger, _limits, _now = _ledger()
+    _record, token = _reserve(ledger)
+    with token:
+        ledger.failed(ModelCallFailureParams("call", "ProviderSendRefused", "DECISION_SEND_REFUSED"))
+        result = ledger.settle_input_budget("call")
+    assert result["status"] == "send_refused" and result["charged_input_tokens"] == 60
+    assert result["reserved_http_requests"] == 1 and result["unknown_usage_calls"] == 0
+    assert ledger.records()[0].metadata["input_budget_outcome"] == "refused_before_send"
+    with pytest.raises(ModelCallBudgetError, match="reservation_not_active"):
+        _consume(ledger)
+    with pytest.raises(ModelCallBudgetError, match="budget_send_refused"):
+        _reserve(ledger, "next")
+
+
+def test_http_attempt_without_consumed_permit_is_marked_gate_bypassed():
+    ledger, _limits, _now = _ledger()
+    _record, token = _reserve(ledger)
+    with token:
+        _finish(ledger, actual=10, consume=False)
+        result = ledger.settle_input_budget("call")
+    assert result["status"] == "gate_bypassed" and result["unknown_usage_calls"] == 1
+    assert result["charged_input_tokens"] == 60 and result["provider_input_tokens"] == 0
+    assert ledger.records()[0].metadata["input_budget_outcome"] == "gate_bypassed"
+
+
+def test_revoked_or_settled_reservation_can_never_consume_permit():
+    ledger, _limits, _now = _ledger()
+    _record, token = _reserve(ledger)
+    with token:
+        ledger.revoke_input_budget("authorization")
+        with pytest.raises(ModelCallBudgetError, match="budget_revoked"):
+            _consume(ledger)
+        ledger.timeout(ModelCallTimeoutParams("call", 1, "wall_clock"))
+        with pytest.raises(ModelCallBudgetError, match="reservation_not_active"):
+            _consume(ledger)
+        result = ledger.settle_input_budget("call")
+    assert result["status"] == "send_refused" and result["charged_input_tokens"] == 60
 
 
 def test_expired_budget_and_wrong_execution_identity_cannot_create_record():
     ledger, _limits, now = _ledger()
     with pytest.raises(ModelCallBudgetError, match="budget_identity_mismatch"):
-        ledger.reserve_input_budget(replace(_params(), run_id="other"), budget_id="authorization", input_token_upper_bound=1)
+        ledger.reserve_input_budget(replace(_params(), run_id="other"), budget_id="authorization", input_bound=_bound(1),
+                                    send_binding=_BINDING)
     now[0] = 20
     with pytest.raises(ModelCallBudgetError, match="budget_expired"):
         _reserve(ledger)
@@ -205,13 +301,17 @@ def test_explicit_budget_does_not_evict_existing_ordinary_usage_scope_capacity()
     assert ledger.cumulative_summary(run_id="run") == original_run
 
 
-def test_provider_exceeding_asserted_bound_is_visible_and_closes_budget():
+@pytest.mark.parametrize("actual,status,warning", [(16, "active", ""), (17, "active", "input_bound_ratio_high"),
+                                                   (21, "input_bound_violated", "input_bound_ratio_high")])
+def test_provider_ratio_warning_and_bound_violation(actual, status, warning):
     ledger, _limits, _now = _ledger()
     _record, token = _reserve(ledger, bound=20)
     with token:
-        _finish(ledger, actual=30)
+        _finish(ledger, actual=actual)
         result = ledger.settle_input_budget("call")
-    assert result["charged_input_tokens"] == result["provider_input_tokens"] == 30
-    assert result["status"] == "input_bound_violated"
-    with pytest.raises(ModelCallBudgetError, match="budget_input_bound_violated"):
-        _reserve(ledger, "next")
+    assert result["charged_input_tokens"] == result["provider_input_tokens"] == actual
+    assert result["status"] == status and result["input_bound_warning"] == warning
+    assert ledger.records()[0].metadata["input_bound_ratio"] == round(actual / 20, 6)
+    if status == "input_bound_violated":
+        with pytest.raises(ModelCallBudgetError, match="budget_input_bound_violated"):
+            _reserve(ledger, "next")

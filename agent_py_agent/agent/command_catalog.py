@@ -118,6 +118,13 @@ COMMAND_CATALOG = (
         ),
         conversation_suffix=r"(?:\s|$)",
     ),
+    CommandSpec(
+        "experiment",
+        "/experiment observe skill_tool <时长> <HTTP次数> <输入token上限> <任务>",
+        "为本轮授权一次有预算、只观察的决策实验（输入上界为经验值）",
+        conversation_suffix=r"(?:\s+(.*))?$",
+        multiline=True,
+    ),
     CommandSpec("expand", "/expand [last|编号]", "展开一条已折叠的助手回复", submit_on_enter=True),
     CommandSpec("exit", "/exit", "退出聊天界面", aliases=("logout", "quit"), submit_on_enter=True),
     CommandSpec("memory", "/memory [查询内容]", "搜索记忆", submit_on_enter=True),

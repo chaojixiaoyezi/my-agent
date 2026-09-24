@@ -1,4 +1,5 @@
 # LLM: 可选推荐和已采用展示的携带都只投影原快照；纯值不持有handler，权限/搜索/加载仍归原合同，失效保留基础输入。
+# 宿主授权的只观察实验与普通 observe/apply 互斥（仅普通模式 off 时运行），结果只写 finding 与不采用的 observation。
 # 模块用途: 在原模型循环前请求或复用本片短名单；复用不再次联网，不从历史或结果序列化恢复选择。
 from __future__ import annotations
 
@@ -73,6 +74,7 @@ class CapabilityPresentation:
 
 # LLM: 新建议仍受原总期限和采用门约束；已采用纯值只读复核，宿主标记本片已评估后不重发决策，取消继续抛出。
 #   真的发起过决策的每个返回点都附结构化 observation（采用或保留原因），供宿主落盘观察；未发起决策时为 None。
+# 普通模式为 off 且普通阶段提示可能有实验时才进入只观察实验，实验结果永不改变本片展示。
 # 函数用途: 为原工作片取得或复用展示建议；关闭、失效携带和普通失败都保持当前原始输入。
 def recommend_capabilities(agent, params, snapshot, contract) -> CapabilityPresentation:
     original = CapabilityPresentation(snapshot)
@@ -90,7 +92,7 @@ def recommend_capabilities(agent, params, snapshot, contract) -> CapabilityPrese
             return original
         stage = begin_decision_stage(agent, params, operation_id="skill_tool:" + candidate_digest(operation))
         if stage.error_code or "skill_tool" not in stage.enabled_points:
-            return original
+            return _experiment_observe(agent, params, snapshot) if _experiment_eligible(stage, carried) else original
         if carried is not None:
             return _restore_presentation(agent, params, snapshot, contract, stage, carried)
         policy = _policy(agent, stage.thread_id)
@@ -160,6 +162,35 @@ def _observed(presentation: CapabilityPresentation, base: dict, retain_reason: s
             required_skill_count=len(presentation.required_skill_ids),
         )
     return replace(presentation, observation=observation)
+
+
+# LLM: 普通阶段无错、该点普通模式为 off（不在 enabled_points）、同次读取提示可能有实验且本片没有携带展示时才进入实验；
+#   experiment_available 只是零 I/O 提示，真正准入仍由实验阶段复读设置决定。
+# 函数用途: 判断本工作片是否值得再建一次只观察的实验阶段，默认关闭时不增加任何读取。
+def _experiment_eligible(stage, carried) -> bool:
+    return not stage.error_code and stage.experiment_available and carried is None
+
+
+# LLM: 只在普通模式 off 时由宿主已授权的实验阶段调用；材料与普通路径同源，结果固定 observe，原快照原样返回。
+#   真正发起过实验决策时与普通路径一样附结构化 observation（不采用，保留原因即结果码），供宿主落盘核对。
+# 函数用途: 执行一次有预算的只观察实验，把结构化结果写入 finding，不改变模型可见的 prompt 或工具 schema。
+def _experiment_observe(agent, params, snapshot) -> CapabilityPresentation:
+    original = CapabilityPresentation(snapshot)
+    operation = getattr(params, "request_id", "") or getattr(params, "run_id", "")
+    stage = begin_decision_stage(agent, params, operation_id="skill_tool:" + candidate_digest(operation), experiment=True)
+    if stage.error_code or "skill_tool" not in stage.enabled_points:
+        return replace(original, finding="skill_tool_decision:experiment:" + (stage.error_code or "experiment_point_forbidden"))
+    policy = _policy(agent, stage.thread_id)
+    discoverable = _skill_discoverable(agent, params, snapshot)
+    state, questions, revision = _material(agent, params, snapshot, agent.current_skill_snapshot(), policy, discoverable)
+    if not questions:
+        return original
+    wire_state = {key: value for key, value in state.items() if key != "candidates"}
+    outcome = decide(agent, params, stage, point="skill_tool", state=wire_state, questions=questions,
+                     candidates_revision=revision)
+    code = outcome.reason or outcome.status
+    return _observed(replace(original, finding="skill_tool_decision:experiment:" + code),
+                     _observation_base(stage, outcome, revision, len(questions)), code)
 
 
 # LLM: 版本比较结构化能力/必要引用、输入与生成连接摘要；不保存凭据、活快照或将Compact代际当作新权限。

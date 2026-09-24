@@ -341,6 +341,7 @@ agent_py_agent/
 |   |   |-- request_execution.py        # 单个已领取请求的租约、模型执行、超窗恢复与收尾编排
 |   |   |-- request_context.py          # 原车道内的会话快照、Compact 与工作目录准备
 |   |   |-- request_binding.py          # 精确请求与运行身份绑定、执行车道和原子更新
+|   |   |-- request_experiment.py       # /experiment 冻结参数在主轮绑定后、首个模型调用前的单次实验授权与回执
 |   |   |-- request_history.py          # 公开正文、canonical 历史提交、去重与延迟补交
 |   |   |-- request_prompt.py           # 已准备会话投影的模型输入渲染与历史种子
 |   |   |-- stream_writer.py            # 请求级文本缓冲、typed 流事件和显示投影的有序出口
@@ -404,8 +405,9 @@ agent_py_agent/
 |   |   |-- auxiliary_model_call.py   # 会话辅助模型调用的统一账、退避、并发闸；独立压缩用量持久结算
 |   |   |-- decision_service.py       # 可选决策阶段预算、设置/身份复核和建议返回，不执行业务动作
 |   |   |-- decision_policy.py        # 有界连接冷却与同进程设置取消通知，不拥有 worker 或持久状态
-|   |   |-- decision_model_call.py    # 实际决策 worker 复用原准入、身份头、HTTP 观察和唯一调用账
-|   |   |-- decision_experiment.py    # 可选实验预备入口只读原授权及账本，缺输入证明时失败关闭
+|   |   |-- decision_model_call.py    # 实际决策 worker 复用原准入、身份头、HTTP 观察和唯一调用账；实验先算经验上界再预留
+|   |   |-- decision_experiment.py    # 实验准入/路由/在途复核：只读原授权、账本代次与 v2 上界口径
+|   |   |-- decision_send_permit.py   # 实验单次发送许可：连接前复核绑定、撤销/期限、设置与连接后在原账锁内消费
 |   |   |-- tool_context_window.py    # text/native 共用的有界工具历史窗口与稳定前缀投影
 |   |   |-- tool_input_progress.py     # provider 大工具参数生成期的脱敏临时展示合同
 |   |   |-- agent_thread.py            # child/grandchild 独立 thread、逐 attempt transcript 与统一 Compact 适配
@@ -573,11 +575,12 @@ agent_py_agent/
 |       |-- provider_headers.py        # 自定义头保护、owner/thread 稳定会话头及 endpoint 拼接
 |       |-- request_content.py         # 摘要分段前的文字完整性判断，非文本引用不冒充正文
 |       |-- request_scope.py           # 前台模型端点占用与后台单次预算；不保存正文和持久状态
-|       |-- gateway_request_limits.py  # 原 HTTP 请求的绝对期限、有限读取与严格 JSON 校验
+|       |-- gateway_request_limits.py  # 原 HTTP 请求的绝对期限、有限读取与严格 JSON 校验；许可请求须零重试/禁重定向/有期限
+|       |-- provider_send_gate.py      # 传输层发送许可接口：最终请求事实与 ProviderSendRefused，不读设置或账本
 |       |-- bounded_call.py            # 从 Curator 迁出的唯一有界调用，保留未退出 worker/清理资源
 |       |-- decision_protocol.py       # 决策输入快照、宿主来源/版本绑定及逐题响应，不拥有业务执行权
-|       |-- typesafe_decision.py       # Jev 原生 decide 适配，复用原 HTTP，不接聊天生成接口
-|       |-- typesafe_decision_wire.py  # TypeSafe 三类问题与逐题结果校验，未知用量保留缺失
+|       |-- typesafe_decision.py       # Jev 原生 decide 适配（无网络 prepare + 必须持许可的 send），不接聊天生成接口
+|       |-- typesafe_decision_wire.py  # TypeSafe 题目/结果校验，未知用量保留缺失；jev_wire_bytes.v1 经验输入上界
 |       |-- cache_diagnostics.py       # 出站请求摘要及前缀变化诊断，不存正文或改变缓存布局
 |       |-- sampling.py                # top_p 校验与精确端点 V4 Flash 采样默认，不改变身份或重试
 |       |-- responses.py               # Responses 协议生成入口，复用正式 HTTP/取消/超时主链
@@ -682,8 +685,10 @@ agent_py_agent/
 |   |-- test_decision_curator.py        # 原Curator临时建议、完整材料、非选择结果和lease头寸对照
 |   |-- test_decision_curator_relation.py # 正式版本/完整性、独立后台设置、关系注释与原提取提交边界
 |   |-- test_decision_model_call.py     # 实际 worker 账本保留、HTTP 尝试、身份、准入与取消
-|   |-- test_decision_experiment_authorization.py # 设置授权来源、CAS/撤销与实际实验路径失败关闭
-|   |-- test_model_call_input_budget.py # 原账有限 HTTP/input 预留、并发/未知结算与代次/LRU 隔离
+|   |-- test_decision_experiment_authorization.py # 设置授权来源、CAS/撤销、v2 上界口径与普通模式互斥
+|   |-- test_decision_experiment_send_gate.py # 本地 HTTP 统计 TCP accept：拒绝/绕过零连接、单次发送结算、超上界与挂起
+|   |-- test_decision_experiment_command.py # /experiment 解析、HTTP 入口重推 system_task、单次授权与重放/重启/Compact
+|   |-- test_model_call_input_budget.py # 原账带标签上界预留、单次发送许可、拒绝/绕过结算与代次/LRU 隔离
 |   |-- test_model_call_ledger_partitions.py # 原账本用途、字段真值、单调终态及 worker 精确保留
 |   |-- test_decision_usage_metrics.py  # 决策用途增量、迟到补账、未知输入与原 TUI 一行展示
 |   |-- test_decision_protocol.py       # 决策快照、复杂度上限、逐题失败与用量未知合同
@@ -1105,7 +1110,7 @@ docs/
 - `agent_py_agent/agent/settings/decision_settings_schema.py`、`decision_settings_defaults.py`、`decision_settings_projection.py`：分别负责严格结构、原模块默认值映射及脱敏有效值投影，不增加配置权威位置。
 - `agent_py_agent/tests/test_decision_usage_metrics.py`：验证用途分区复用原增量规则，决策输入与 LLM 总量不双计、缺报保留未知、历史基数随原文件更新。
 - `agent_py_agent/agent/backends/decision_protocol.py`：冻结宿主决策材料、来源和候选版本；结果只有建议权，消费者仍要复查。
-- `agent_py_agent/agent/backends/typesafe_decision.py`：独立 decide 操作，复用原连接选项、请求头、HTTP 与错误协议；不实现 generate。
+- `agent_py_agent/agent/backends/typesafe_decision.py`：独立 decide 操作，复用原连接选项、请求头、HTTP 与错误协议；实验另拆无网络 `prepare` 与必须携带发送许可的 `send`，普通请求字节不变；不实现 generate。
 - `agent_py_agent/agent/backends/typesafe_decision_wire.py`：TypeSafe 问题和答案解析，单题错误与顶层协议损坏分开，完整用量交给原账本。
 - `agent_py_agent/agent/backends/gateway_request_limits.py`：原 HTTP 传输的有限读取、剩余期限和严格 JSON 原语，不另建执行器。
 - `agent_py_agent/agent/backends/bounded_call.py`：Curator 与后续决策共用的有界 callable；及时放弃等待与真实资源退出分别记录。
@@ -1345,8 +1350,10 @@ docs/
 - `agent_py_agent/agent/gateway_compact_recovery.py`：Gateway 已绑定请求溢出后，冻结原恢复准备，只替换候选历史与证据；原 CAS 后用同一请求继续生成。
 - `agent_py_agent/agent/conversation/compact_projection.py`：只读来源与完整候选投影的临时值合同；获选材料只随原 CAS 成功返回，不形成第二持久状态。
 - `agent_py_agent/agent/runtime_context.py`：当前 runner 的线程本地属性权威供 Tooling、Conversation 与 core 共用，作用域退出清理；不保存持久任务身份。
-- `agent_py_agent/agent/settings/decision_experiment_schema.py`、`decision_experiment.py`、`agent_py_agent/agent/conversation/decision_experiment.py`、`agent_py_agent/agent/contracts/model_call_budget.py`：宿主专用有限许可、原账预留和失败关闭实验入口；没有用户授权 UI 或可靠联网输入硬门。
-- `agent_py_agent/tests/test_decision_experiment_authorization.py`、`test_model_call_input_budget.py`：原设置/模型账中的许可、并发预算、撤销、未知输入及跨代保守拒绝回归。
+- `agent_py_agent/agent/settings/decision_experiment_schema.py`、`decision_experiment.py`、`agent_py_agent/agent/conversation/decision_experiment.py`、`agent_py_agent/agent/contracts/model_call_budget.py`：宿主专用有限许可（v2 信封记录用户接受的经验上界口径）、原账带标签上界预留、单次发送许可消费与保守结算。
+- `agent_py_agent/agent/gateway_parts/request_experiment.py`：`/experiment` 的唯一产品授权入口；只读入口冻结的 system_task，在主轮绑定 run/attempt 后、首个模型调用前于原回合锁内写 granting→granted/rejected 回执，失败只提示用户。
+- `agent_py_agent/agent/conversation/decision_send_permit.py`、`agent_py_agent/agent/backends/provider_send_gate.py`：实验发送硬门；传输层在最终字节生成后、任何 DNS/连接/遥测前调用许可，拒绝抛不被重包装的 `ProviderSendRefused`。
+- `agent_py_agent/tests/test_decision_experiment_authorization.py`、`test_model_call_input_budget.py`、`test_decision_experiment_send_gate.py`、`test_decision_experiment_command.py`：许可/预算/发送门/授权入口的合同与本地 HTTP 组合回归，统计 TCP accept，不调用真实供应商。
 - `agent_py_agent/tests/test_user_config_owner_scope.py`：普通 user 主回合 read/patch 的可信线程及 CAS 预览、跨 owner/子代理拒绝和 main_agent 原能力回归。
 - `agent_py_agent/tests/test_gateway_model_adoption.py`：Gateway 到原生成投影、最终发送和线程 CAS 的本地 HTTP 替身矩阵，不当作供应商真实验收。
 - `agent_py_agent/tests/test_gateway_compact_recovery.py`：原Gateway overflow到同次恢复发送的完整材料对照；失败边界由原CAS、停止及模型生成链验证。

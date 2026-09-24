@@ -1,9 +1,11 @@
 # LLM: TypeSafe只接受本次题目及候选；真实API两位小数分布按量化误差核对，不能归一化改写原概率或据此授予权限。
-# 模块用途: 校验三类问题和逐题响应，保留实际模型、原用量及供应商舍入值，不依赖外部SDK。
+# 经验输入上界只在标定范围内由最终 wire 字节计算并标注 empirical，不能当作 tokenizer 或服务端硬额度。
+# 模块用途: 校验三类问题和逐题响应，保留实际模型、原用量及供应商舍入值，并提供实验用的经验输入上界，不依赖外部SDK。
 from __future__ import annotations
 
 import math
 
+from ..contracts.model_call_budget import InputTokenBound, ModelCallBudgetError
 from ..memory_archive.tokens import estimate_tokens
 from .decision_protocol import (
     MAX_DECISION_RESPONSE_BYTES,
@@ -14,9 +16,38 @@ from .decision_protocol import (
     decision_json,
 )
 from .errors import ProviderResponseError
+from .gateway_helpers import gateway_request_body
 
 JEV_REQUEST_CONTEXT_TOKENS = 64_000
 JEV_STATE_QUESTION_TOKENS = 32_000
+# jev_wire_bytes.v1 是版本化的代码方法，不是用户配置：C = ceil(B/2) + 256*Q + 1024。
+# 标定依据：4 次真实 64,921–65,063 字节、27 题请求计费 17,352–17,383 输入（C≈40.5k，约 2.3 倍余量）；
+# 官方示例 173 字节、1 题计费 296（C=1367）。只在标定范围内使用，超出即拒绝而不外推。
+JEV_EMPIRICAL_BOUND_METHOD = "jev_wire_bytes.v1"
+_JEV_BOUND_BYTES_PER_TOKEN = 2
+_JEV_BOUND_TOKENS_PER_QUESTION = 256
+_JEV_BOUND_FIXED_TOKENS = 1024
+_JEV_BOUND_MAX_QUESTIONS = 64
+_JEV_BOUND_MAX_STATE_BYTES = 4096
+_JEV_BOUND_MAX_TOKENS = 57_600  # 0.9 × 64k 整请求窗口
+_JEV_BOUND_POINTS = frozenset({"skill_tool"})
+
+
+# LLM: 输入必须是最终 wire 正文字节及其原载荷；结果只是用户接受的经验上界（kind=empirical），不是供应商保证。
+# 超出标定点位/题量/state 字节/总量时抛 input_bound_out_of_calibration，调用方不得预留或发送。
+# 函数用途: 按 jev_wire_bytes.v1 计算一次 Jev 决策请求的完整输入 token 经验上界。
+def jev_empirical_input_bound(body: bytes, payload: dict, *, point: str) -> InputTokenBound:
+    questions = payload.get("questions") if isinstance(payload, dict) else None
+    if type(body) is not bytes or type(questions) is not dict or not questions:
+        raise ModelCallBudgetError("input_bound_out_of_calibration")
+    state_bytes = len(gateway_request_body(payload.get("state")))
+    tokens = (-(-len(body) // _JEV_BOUND_BYTES_PER_TOKEN) + _JEV_BOUND_TOKENS_PER_QUESTION * len(questions)
+              + _JEV_BOUND_FIXED_TOKENS)
+    if (type(point) is not str or point not in _JEV_BOUND_POINTS or len(questions) > _JEV_BOUND_MAX_QUESTIONS
+            or state_bytes > _JEV_BOUND_MAX_STATE_BYTES or tokens > _JEV_BOUND_MAX_TOKENS):
+        raise ModelCallBudgetError("input_bound_out_of_calibration")
+    return InputTokenBound(tokens=tokens, kind="empirical", method=JEV_EMPIRICAL_BOUND_METHOD, body_bytes=len(body),
+                           questions=len(questions), state_bytes=state_bytes)
 
 
 # LLM: 固定长度是本适配器资源限制，Choice/Score 数量遵循 TypeSafe API；不按名称解释结果含义。

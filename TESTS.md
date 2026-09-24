@@ -15,6 +15,13 @@ child不展示历史正文时的读取回归先复现1 failed/1 passed，修复�
 - **变异验证**：9 种变异各自使测试失败——126/127 记 failed、pytest 回退旧范围规则、不识别 `-kEXPR` 连写、不识别筛选开关、串联非零仍记、放行 `;`、不附串联字段、交付复核忽略串联、交付复核不核对末项一致。"交付复核忽略串联"最初只被不一致用例杀死；把正例的前段改为只在串联里出现的 `build` 后，正例也能杀死。还原后逐字节一致（`PYTHONDONTWRITEBYTECODE=1`）。
 - **回归**：引用验证账、分类器、运行事实或归档投影的 17 个测试文件 345 passed、4 xpassed。4 个 xpass 都在 `test_tool_unresolved_runtime_issue_guard.py`，main 上同样出现。
 
+## 决策实验授权入口、经验输入上界与发送硬门（2026-09-24，本地分支 `claude/decision-experiment-send-gate`，待审）
+
+- **改动**：`/experiment observe skill_tool <时长> <HTTP次数> <输入token上限> <任务>` 冻结参数、Gateway 主轮绑定后首个模型调用前单次授权；信封 v2 必带 `input_bound_policy="empirical:jev_wire_bytes.v1"`；经验上界 `C = ceil(B/2) + 256×Q + 1024`（只在 skill_tool、Q≤64、state≤4096 字节、C≤57,600 内）；原账只收带 `kind=empirical` 的上界对象并签发单次发送许可；传输层在最终字节生成后、DNS/连接/遥测前复核许可；终态后保守结算。
+- **新测试** `test_decision_experiment_send_gate.py` 39 项，复用 `test_decision_capability_http.py` 的 `capability_http`/`surface` 夹具，在本地服务 `verify_request` 处统计 TCP accept、在服务端记录原始字节：9 类缺授权/缺预算（无授权、能力关、撤销、到期、账本代次变化、HTTP 用尽、C 超剩余、越标定两种、v1 信封）零连接且无调用记录；5 类预留后绕过（撤销、换密钥、篡改正文、篡改端点、阶段身份改变）加抛错遥测均 `ProviderSendRefused`、零连接、预算 `send_refused`、不进连接退避；默认关闭只建一次普通阶段、不建实验阶段、零连接无调用记录；授权发送单连接单 POST、服务端正文 sha256 等于预留摘要、`reserved_http=1`、`charged=provider=X`、上界 kind empirical、结果不采用且 prompt/schema 不变、能力推荐观测为 observe/未采用、第二次 `http_budget_exhausted` 不再连接；X=C+1 关闭为 `input_bound_violated`；挂起到期 `timed_out` 保留整个 C、迟到响应不重开；另有许可静态绑定/运行态顺序和 C 的样本余量、单调、越界与边界单测。`test_decision_experiment_command.py` 34 项：命令解析与冻结、HTTP 入口丢弃客户端 system_task、单次授权与提示、重放/重启/Compact 再入不再授权、拒绝与关闭回合、核心钩子时序。
+- **扩展**：`test_model_call_input_budget.py`（带标签上界、单次许可、拒绝与绕过结算）38 项、`test_decision_experiment_authorization.py`（v2 口径、只发布普通模式 off 的点、改写旧“实验直连总拒绝”用例）35 项、`test_gateway_strict_request.py`（许可信封约束、拒绝在遥测与连接之前、普通请求字节不变）54 项。
+- **结果**：五文件从干净字节码 200 passed；定向相关集 118 文件 3421 passed、2 skipped、4 xfailed、1 xpassed（基于 `55f72b40c`）；变异 36 项全部被杀（清单见 [E1 交接](docs/tasks/DECISION_MODEL_EXPERIMENT_E1_HANDOFF.md#第二片experiment-授权入口经验输入上界与发送硬门2026-09-24)）。未启动 Gateway、未调用真实供应商；首次真实授权发送仍待做。
+
 ## 验证命令分类：cd 前缀与管道（2026-09-25，本地分支 `claude/verification-command-shapes`）
 
 - **新测试** `test_verification_project_facts.py`：

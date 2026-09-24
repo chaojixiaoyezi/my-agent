@@ -1,5 +1,5 @@
-# LLM: HTTP 唯一传输入口维护请求局部期限、重试、有限正文和中断合同；严格 JSON 不改变默认 SSE，联合 gateway_helpers/strict_request 测试。
-# 模块用途: 统一模型 HTTP 请求和错误分类；严格调用按绝对期限收口，普通生成保留原重试和流式空闲语义。
+# LLM: HTTP 唯一传输入口维护请求局部期限、重试、有限正文、中断及可选发送许可硬门；严格 JSON 不改变默认 SSE，联合 gateway_helpers/strict_request/send_gate 测试。
+# 模块用途: 统一模型 HTTP 请求和错误分类；严格调用按绝对期限收口，普通生成保留原重试和流式空闲语义及原请求字节。
 from __future__ import annotations
 
 import errno
@@ -16,7 +16,7 @@ import urllib.parse
 import urllib.request
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from .errors import (
@@ -36,6 +36,7 @@ from .gateway_request_limits import (
     stdlib_response_socket,
     validate_request_limits,
 )
+from .provider_send_gate import provider_send_attempt
 
 _RETRYABLE_HTTP_STATUS_CODES = frozenset({408, 409, 425, 429, 502, 503, 504, 529})
 _RETRYABLE_HTTP_DELAYS_SECONDS = (2.0, 5.0, 15.0)
@@ -116,9 +117,12 @@ class GatewayRequest:
     deadline: float | None = None
     max_retries: int | None = None
     max_response_bytes: int | None = None
+    # 实验发送许可：存在时每次物理发送前由 _gateway_request_attempt 硬门复核；None 保持原请求合同与字节。
+    send_permit: Any | None = field(default=None, repr=False, compare=False)
 
     # LLM: 新限制在信封创建时校验，不修改共享 backend 或普通请求默认值；校验失败不产生网络副作用。
-    # 函数用途: 拒绝非法绝对期限、重试计数或响应上限。
+    # 许可请求另须零重试、禁止重定向且有绝对期限，由同一校验入口拒绝。
+    # 函数用途: 拒绝非法绝对期限、重试计数、响应上限或不完整的发送许可请求。
     def __post_init__(self) -> None:
         validate_request_limits(self)
 
@@ -557,6 +561,13 @@ def _provider_is_interrupted() -> bool:
     return is_interrupted()
 
 
+# LLM: 这是 POST JSON 线上正文的唯一编码器；普通请求字节必须与迁出前的 json.dumps(...).encode("utf-8") 完全相同，
+# 决策实验的输入上界与发送许可摘要也只能复用它，不能另写紧凑编码冒充实际 wire 字节。
+# 函数用途: 把请求载荷（或其中一段）编码成与实际发送一致的 UTF-8 JSON 字节，无网络副作用。
+def gateway_request_body(payload: object) -> bytes:
+    return json.dumps(payload).encode("utf-8")
+
+
 def _urllib_request(request: GatewayRequest) -> urllib.request.Request:
     """Build the urllib request without exposing shell/string transport paths."""
     headers = dict(request.headers or {})
@@ -566,7 +577,7 @@ def _urllib_request(request: GatewayRequest) -> urllib.request.Request:
     headers.setdefault("User-Agent", "my-agent/1.0 (anthropic-compatible client)")
     return urllib.request.Request(
         request.url,
-        data=json.dumps(request.payload).encode("utf-8"),
+        data=gateway_request_body(request.payload),
         method="POST",
         headers=headers,
     )
@@ -585,10 +596,14 @@ def _open_gateway_request(request: GatewayRequest):
 
 
 # LLM: 每次物理 open 都发布观察事实；显式重试合并无定位 400 与网络重试，严格错误正文也不能绕过 deadline/大小上限。
+# 带发送许可时，硬门位于最终字节与期限复核之后、started 遥测与任何 DNS/连接之前，不包 try/except。
 # 函数用途: 发送一次连接及响应头请求，按当前信封限制登记失败或有限退避，不重放半截正文。
 def _gateway_request_attempt(request: GatewayRequest, attempt: int, last_attempt: int):
     req = _urllib_request(request)
     remaining_deadline_seconds(request.deadline)
+    if request.send_permit is not None:
+        # 许可拒绝抛 ProviderSendRefused（不属于下面的网络异常族）；观察者抛错也无法越过这一步。
+        request.send_permit.admit(provider_send_attempt(req, request.payload, attempt))
     attempt_id = f"provider-http:{time.time_ns()}:{attempt + 1}"
     base_event = {
         "attempt_id": attempt_id,

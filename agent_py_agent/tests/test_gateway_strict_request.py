@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+import hashlib
 import http.client
 import json
 import socket
@@ -24,6 +25,10 @@ from agent_py_agent.agent.backends.errors import (
     ProviderTimeoutError,
     ProviderTransientError,
     ProviderUsageLimitError,
+)
+from agent_py_agent.agent.backends.provider_send_gate import (
+    ProviderSendAttempt,
+    ProviderSendRefused,
 )
 
 
@@ -340,3 +345,55 @@ def test_error_response_guard_shuts_down_its_actual_socket():
             gateway._GatewayResponseGuard(error).abort()
             assert peer.recv(1) == b""
             assert response.isclosed()
+
+
+# LLM: 许可替身只记录传输层交来的最终发送事实并按配置拒绝；不读账本或设置，验证的是传输层硬门位置与信封约束。
+# 类用途: 为发送许可合同提供可观察的 admit 实现。
+class _Permit:
+    def __init__(self, refuse=""):
+        self.calls, self.refuse = [], refuse
+
+    def admit(self, attempt):
+        self.calls.append(attempt)
+        if self.refuse:
+            raise ProviderSendRefused(self.refuse)
+
+
+@pytest.mark.parametrize("overrides", [{"max_retries": None}, {"max_retries": 1}, {"allow_redirects": True},
+                                       {"deadline": None}, {"send_permit": object()}])
+def test_send_permit_envelope_requires_zero_retry_no_redirect_deadline_and_admit(overrides):
+    with pytest.raises(ValueError):
+        _request(**{"send_permit": _Permit(), **overrides})
+
+
+def test_refused_permit_stops_before_telemetry_and_any_connection(monkeypatch):
+    opener, events, permit = Mock(), [], _Permit("experiment_revoked")
+    monkeypatch.setattr(gateway, "_gateway_urlopen", opener)
+    with gateway.provider_attempt_observer(events.append), pytest.raises(ProviderSendRefused) as caught:
+        gateway.post_json(_request(payload={"model": "jev", "state": "材料"}, send_permit=permit))
+    assert type(caught.value) is ProviderSendRefused and caught.value.code == "experiment_revoked"
+    opener.assert_not_called()
+    assert events == [] and len(permit.calls) == 1
+
+
+def test_admitted_permit_sees_final_wire_facts_before_the_single_open(monkeypatch):
+    payload = {"model": "jev", "state": {"文本": "材料"}, "questions": {"a": {"type": "noul"}}}
+    permit, opened = _Permit(), []
+
+    def open_once(req, _request):
+        opened.append(req.data)
+        return BytesIO(b'{"ok":true}')
+
+    monkeypatch.setattr(gateway, "_gateway_urlopen", open_once)
+    assert gateway.post_json(_request(payload=payload, send_permit=permit)) == {"ok": True}
+    body = json.dumps(payload).encode("utf-8")
+    assert opened == [body]
+    assert permit.calls == [ProviderSendAttempt("POST", "http://127.0.0.1:1/decide", hashlib.sha256(body).hexdigest(), "jev", 0)]
+
+
+def test_ordinary_request_bytes_are_unchanged_by_the_single_encoder():
+    payload = {"model": "m", "messages": [{"role": "user", "content": "中文 😀"}], "n": 1.5, "flag": None}
+    expected = json.dumps(payload).encode("utf-8")
+    request = replace(_request(payload=payload), deadline=None, max_retries=None, max_response_bytes=None, allow_redirects=True)
+    assert gateway._urllib_request(request).data == expected == gateway.gateway_request_body(payload)
+    assert request.send_permit is None and "send_permit" not in repr(request)

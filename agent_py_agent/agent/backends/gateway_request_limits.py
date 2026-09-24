@@ -20,7 +20,8 @@ _STRICT_JSON_MAX_DEPTH = 64
 
 
 # LLM: 仅校验新增显式限制，不重解释既有普通模型配置；发网前统一拒绝布尔、非有限数、溢出数和非法计数。
-# 函数用途: 检查严格 HTTP 信封，避免无效 deadline 或重试值导致无限等待或意外请求。
+# 带 send_permit 的请求必须零重试、禁止重定向并有绝对期限，许可须可调用 admit；无许可请求不受影响。
+# 函数用途: 检查严格 HTTP 信封，避免无效 deadline、重试值或放宽的许可请求导致意外发送。
 def validate_request_limits(request: GatewayRequest) -> None:
     deadline = request.deadline
     if deadline is not None:
@@ -34,6 +35,10 @@ def validate_request_limits(request: GatewayRequest) -> None:
         value = getattr(request, name)
         if value is not None and (type(value) is not int or value < minimum):
             raise ValueError(f"{name} 必须是大于等于 {minimum} 的整数")
+    permit = getattr(request, "send_permit", None)
+    if permit is not None and (not callable(getattr(permit, "admit", None)) or request.max_retries != 0
+                               or request.allow_redirects is not False or deadline is None):
+        raise ValueError("带发送许可的请求必须零重试、禁止重定向并有绝对期限")
 
 
 # LLM: 用户取消优先于局部到期；返回剩余绝对期限，绝不重新授予等待时长，也不声称能强停 DNS/CPU。

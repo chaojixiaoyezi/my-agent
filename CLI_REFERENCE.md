@@ -78,6 +78,14 @@ python -m agent_py_agent --help
 | `/goal ...` | 查看或修改当前 thread 的持久目标。 | 系统控制；命令词不进入模型。 |
 | `/verbose [off|on|full]` | 查看或修改当前 thread 的过程显示档位。 | 系统设置；不创建模型请求、不写 transcript。 |
 | `/audit [时长] <任务>` | 以结构化保证档启动一个新任务。 | `/audit` 前缀不进入模型，只有任务正文进入正常 turn。 |
+| `/experiment observe skill_tool <时长> <HTTP次数> <输入token上限> <任务>` | 只为本轮授权一次有预算、只观察的决策实验，然后照常执行任务。 | 参数冻结进本次请求，只有任务正文进入模型；授权绑定本轮 thread/run/attempt/request 与当前模型账，重放不再授权。 |
+
+`/experiment` 说明（Gateway 模式）：时长支持 `s/m/h/d`（例如 `10m`），HTTP 次数和输入 token 上限须为正整数，
+目前只开放 `observe` 与 `skill_tool`。前提是决策总开关与 `experiment_enabled` 均已开启、该接入点普通模式为 `off`；
+否则本轮只提示“未建立授权（原因码）”并照常执行任务，不发送实验请求。每次实验请求前按最终请求字节计算
+**经验输入上界**（`empirical:jev_wire_bytes.v1`，不是供应商保证），超出标定范围或剩余预算就不发送；实验结果只记录、
+永不采用，也不改变模型看到的工具和 Skill 展示。撤销沿 `user_config` 的 `decision_experiment_revoke`。
+本地直连 TUI 与后台执行不建立实验授权。
 
 `/btw` 不再用于查看或永久追加 prompt，`/btw-clear` 已移除。`/stop` 会作废当前 turn 尚未消费的
 引导，但保留已经写入的聊天和工作现场；停止后可以直接用普通自然语言补充，再说“继续”。
