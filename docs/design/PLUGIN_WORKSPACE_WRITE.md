@@ -1,6 +1,6 @@
 # 插件工作区写入上下文
 
-状态：第 10 步协议与宿主运输已在本地实施（SDK 0.2.0），插件侧写入原语与真实 TUI 未验。与 [读取上下文](PLUGIN_WORKSPACE_CONTEXT.md) 对称；上位合同见 [可装卸插件方案](PLUGIN_LIFECYCLE.md)。
+状态：第 10 步协议与宿主运输已在本地实施（SDK 0.2.0）；首个消费者 `plugins/savepoint-lite` 已在真实 MCP 进程组件测试中验证插件侧 check/anchor/`write_bytes_atomic_beneath` 写回（`test_savepoint_lite_package.py`），宿主审批链与真实 TUI 未验。与 [读取上下文](PLUGIN_WORKSPACE_CONTEXT.md) 对称；上位合同见 [可装卸插件方案](PLUGIN_LIFECYCLE.md)。
 
 ## 解决问题
 

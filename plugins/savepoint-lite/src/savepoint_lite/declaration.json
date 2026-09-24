@@ -1,0 +1,200 @@
+{
+  "plugin_id": "savepoint-lite",
+  "summary": "为指定工作区文件保存、列出和恢复快照",
+  "entry_module": "savepoint_lite",
+  "default_action": "list",
+  "actions": [
+    {
+      "name": "save",
+      "summary": "保存文件快照",
+      "arguments": [
+        {
+          "name": "path",
+          "summary": "工作区文件路径",
+          "options": [
+            "--path",
+            "-p"
+          ],
+          "value_type": "string",
+          "required": true,
+          "multiple": false,
+          "default": null,
+          "choices": [],
+          "path": true
+        }
+      ],
+      "kind": "tool",
+      "target": "save",
+      "available": true
+    },
+    {
+      "name": "list",
+      "summary": "列出文件快照",
+      "arguments": [
+        {
+          "name": "path",
+          "summary": "工作区文件路径",
+          "options": [
+            "--path",
+            "-p"
+          ],
+          "value_type": "string",
+          "required": true,
+          "multiple": false,
+          "default": null,
+          "choices": [],
+          "path": true
+        }
+      ],
+      "kind": "tool",
+      "target": "list",
+      "available": true
+    },
+    {
+      "name": "restore",
+      "summary": "恢复文件快照",
+      "arguments": [
+        {
+          "name": "path",
+          "summary": "工作区文件路径",
+          "options": [
+            "--path",
+            "-p"
+          ],
+          "value_type": "string",
+          "required": true,
+          "multiple": false,
+          "default": null,
+          "choices": [],
+          "path": true
+        },
+        {
+          "name": "id",
+          "summary": "快照编号",
+          "options": [
+            "--id"
+          ],
+          "value_type": "string",
+          "required": true,
+          "multiple": false,
+          "default": null,
+          "choices": [],
+          "path": false
+        },
+        {
+          "name": "expect",
+          "summary": "当前文件 sha256 前缀（至少 8 位）",
+          "options": [
+            "--expect"
+          ],
+          "value_type": "string",
+          "required": true,
+          "multiple": false,
+          "default": null,
+          "choices": [],
+          "path": false
+        }
+      ],
+      "kind": "tool",
+      "target": "restore",
+      "available": true
+    }
+  ],
+  "tools": [
+    {
+      "name": "save",
+      "description": "为当前工作区的一个文件保存快照；快照只写入插件自有数据目录，不修改工作区。",
+      "requested_effect": "read_only",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": "工作区文件路径"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "list",
+      "description": "列出一个工作区文件的全部快照，并标出与当前内容相同的快照。",
+      "requested_effect": "read_only",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": "工作区文件路径"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "restore",
+      "description": "核对当前文件 sha256 前缀后，用指定快照覆盖该工作区文件；不匹配则拒绝并返回当前 sha256。",
+      "requested_effect": "mutating",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": "工作区文件路径"
+          },
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "description": "list 返回的快照编号"
+          },
+          "expect": {
+            "type": "string",
+            "minLength": 8,
+            "maxLength": 64,
+            "description": "当前文件 sha256 的十六进制前缀，至少 8 位"
+          }
+        },
+        "required": [
+          "path",
+          "id",
+          "expect"
+        ],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "settings_schema": {
+    "type": "object",
+    "properties": {
+      "max_file_bytes": {
+        "type": "integer",
+        "description": "单个文件快照的字节上限",
+        "minimum": 1,
+        "maximum": 67108864,
+        "default": 1048576
+      },
+      "max_snapshots_per_file": {
+        "type": "integer",
+        "description": "每个文件最多保留的快照数，超出拒绝新保存",
+        "minimum": 1,
+        "maximum": 1000,
+        "default": 20
+      }
+    },
+    "required": [],
+    "additionalProperties": false
+  }
+}

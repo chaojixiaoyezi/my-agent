@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "my-agent-savepoint-lite"
+version = "0.1.0"
+description = "为指定工作区文件创建、列出和恢复快照"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+dependencies = ["my-agent-plugin-api==0.2.0"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+license-files = ["LICENSE", "NOTICE"]
+
+[tool.setuptools.package-data]
+savepoint_lite = ["declaration.json"]

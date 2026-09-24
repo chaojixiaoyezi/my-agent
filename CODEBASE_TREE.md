@@ -805,6 +805,17 @@ plugins/
 |       |-- __init__.py                #
 |       |-- __main__.py                # python -m context_inspector 启动 stdio 服务
 |       `-- server.py                  # 握手声明展示能力，把 context 主题数字渲染成状态字段
+|-- savepoint-lite/                    # 自有文件快照插件：保存/列出/恢复，快照只存插件数据目录
+|   |-- README.md                      # 构建、三个动作用法与中文示例
+|   |-- pyproject.toml                 # 插件发行身份及精确 SDK 依赖
+|   `-- src/savepoint_lite/
+|       |-- declaration.json           # 动作、工具（save/list 只读、restore 写）与设置的唯一声明
+|       |-- __init__.py                # 独立插件包入口
+|       |-- __main__.py                # python -m savepoint_lite 启动 stdio 服务
+|       |-- server.py                  # MCP 握手声明读/写上下文扩展，逐次调用分派与中文错误
+|       |-- declarations.py            # 读取同源声明并验证平面参数和设置
+|       |-- operations.py              # 保存、列出、恢复流程；恢复先核对 --expect 再经写入上下文写回
+|       `-- snapshots.py               # 工作区 no-follow 读取与哈希，插件数据目录内的快照存取
 `-- workspace-peek/                    # 自有文件预览插件；不依赖完整宿主运行包
     |-- README.md                      # 离线构建、命令示例与当前验收边界
     |-- pyproject.toml                 # 插件发行身份及精确 SDK 依赖
@@ -863,6 +874,7 @@ docs/
 
 - `plugins/sdk/pyproject.toml` 与 `scripts/build_plugin_api.py`：SDK 唯一发行声明和原源码字节投影；不另存共用权限实现。
 - `plugins/workspace-peek/` 与 `scripts/build_plugin_package.py`：首个自有只读插件及标准安装包构建，独立 MCP 入口只消费宿主逐次上下文。
+- `plugins/savepoint-lite/`：首个写工作区的自有插件，快照只存宿主插件数据目录，恢复走写入上下文；`agent_py_agent/tests/test_savepoint_lite_package.py` 为其实际包与 MCP 进程组件验收。
 - `agent_py_agent/tests/test_plugin_api_build.py`、`agent_py_agent/tests/test_workspace_peek_package.py`：实际标准包、独立环境和原 MCP/宿主管理链的开发验证，不代替真实 TUI。
 
 - `agent_py_agent/agent/runtime_db/run_cancellation.py`：在原 RuntimeDB 上核对 task/run/agent run/attempt 四个身份并关闭执行权；原 UNKNOWN 不恢复、不释放锁，旧控制不能追随新的执行轮。

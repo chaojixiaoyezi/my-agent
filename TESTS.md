@@ -491,6 +491,7 @@ OAuth 传输、采样和模型菜单回归。覆盖保存无网络、公开字�
 - `test_plugin_display_service.py::test_context_topic_forwards_only_public_numbers`：`context` 主题只转发上下文公开数字白名单和压缩次数，缺快照标记未知。
 - `test_plugin_enable.py`：真实启用的插件进程环境带 `MY_AGENT_PLUGIN_DATA_DIR`，目录已按 owner + 插件 ID 创建。
 - 真实插件组件：`test_context_inspector_package.py` 从源码构建 v2 纯展示包 context-inspector，由真实 MCP 进程经展示服务渲染 `context` 主题：无快照只显示提示不编数字，有快照显示千分位用量 / 窗口百分比、触发线、三部分组成、压缩次数与"估算"标注，输出经核心校验不截断。
+- `test_savepoint_lite_package.py`（13 项）：从源码构建 savepoint-lite 包并起真实 MCP 进程；覆盖 save→list→restore 往返（保持权限位、工作区无新文件、快照只在数据目录）、`--expect` 不符拒绝并返回当前 sha256、写入上下文 check 拒绝、符号链接/父目录链接/上溯/越界拒绝、保存后换成链接不被跟随、缺写入上下文时 restore 失败、大小与数量上限设置生效、损坏快照不恢复、缺数据目录与坏设置。
 
 ## 第 10 步插件写入上下文（本地，待发布）
 
