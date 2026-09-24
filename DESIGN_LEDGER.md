@@ -11,6 +11,11 @@
 
 决策设置的宿主非阻塞读取改为无锁读取已提交版本（已合入 main `d69f30cf3` 并部署双机）：原先读取也拿排它锁，同一 owner 的并发决策互相挤成 `settings_busy` 静默回退；两份设置文件都是原子替换写、单次写事务只改一个文件，旧建议仍由调用前后版本复核与在途取消挡住。同一分支用本机 HTTP 故障矩阵钉住断网/DNS/TLS/额度/计费/5xx/慢响应的冷却与恢复。详见[接入设计](docs/design/DECISION_MODEL_INTEGRATION.md#42-已实现的可选服务边界)。
 
+- **交付复核焦点真实样本暴露的四个缺口**（2026-09-25，均**未实施**，只记方向；样本见[真实验收](docs/tasks/DECISION_MODEL_REAL_VALIDATION.md)第 15 节）：
+  1. **触发时机**：本点只在新的验证事件上触发，而"最后一次验证之后又改文件、未复核就交付"才是最该提示的场景。方向：在写入工具使已有验证变为 stale、或回合即将收尾时，按结构化的验证状态提示一次；仍只作软提示，不增加强制续跑或完成门。
+  2. **`&&` 串联的验证命令**：返回码 0 其实证明每条都通过，可以逐条记为 passed；非 0 无法归属，仍不记。
+  3. **返回码 126/127**：命令没有执行（找不到命令或不可执行），应记为"未运行"而不是测试失败。
+  4. **范围判断**：`pytest tests/` 这类参数等于项目配置的测试根目录时应算 full，需读取 testpaths 等结构化配置，不能按字符串猜。
 - **验证账只认一次返回码能证明的单条命令，并放行开头的 cd 前缀**（2026-09-25，已实施：分支 `claude/verification-command-shapes`，待审）：真实 TUI 里模型最常写 `cd <项目> && python3 -m pytest …`，原分类把它当链式命令整体拒绝，验证账漏记真实测试，交付复核焦点与交付前核对都看不到；单个管道又没被拆段，`pytest | head` 会按 `head` 的返回码记成 passed。现改为：未加引号的 `|`、`|&`、`&` 一律不算证据；只放行开头一个 `cd <可进入的现有目录> &&` 并以其为 cwd；其余链式写法仍拒绝。详见 [verification 进度](docs/modules/verification/02-progress.md)。
 - **TUI 决策菜单的接入点清单改为取 schema 登记**（2026-09-25，已实施：分支 `claude/decision-tui-points`，待审）：菜单原先自带一份接入点清单，漏了 `pre_recall`，界面无法设召回前补充查询，且已有该点覆盖时"恢复继承"列表会抛 KeyError。现在清单直接取 `decision_settings_schema.POINTS`（唯一权威），本地只保留中文显示名，缺显示名时显示原键。今后新增接入点只需在 schema 登记，菜单自动出现；各分支若新增接入点，只需补显示名。
 - **交付复核焦点 `delivery_quality`（第 15 项 P5-C 质量提示首片）**（2026-09-24，已实施：本地分支 `claude/decision-delivery-quality`，待审）：`run_command` 刚产生新验证事件、本轮同 run/task 有 2—12 个验证焦点（每个 project/kind/scope 只留最新一条）且至少一个 failed 或其后有修改时，可选地请 Jev 选一个交付前最值得先复核的焦点，宿主只把该焦点的编号/kind/scope/status/其后修改渲染成一句追加提示（≤512 字符），text/native 共用。外发材料只有脱敏当前请求和焦点别名事实，不含路径、命令或输出；默认 off，observe 只记账不追加，任何非成功、选中本次事件或来源/配置变化都保留原展示；ToolResult、归档、验证账、Goal、Todo 与收口不变，取消照常上抛。接线沿外部材料首片：`_record_tool_call` 的原展示接缝改为 `_optional_result_hints` 依次调用两个按工具名互斥的点。未做真实 Jev/TUI 验收。详见[接入设计](docs/design/DECISION_MODEL_INTEGRATION.md#p5-c-质量提示首片交付复核焦点-delivery_quality)。
