@@ -1,6 +1,6 @@
 # 工具调用审批前的有效性复核
 
-状态：设计草案，待用户确认后实现；改动统一权限门，两条开发线共用，实现前须经决策线评审。上位合同见 [可装卸插件方案](PLUGIN_LIFECYCLE.md) 与工具运行时合同（`agent/tooling/models.py`）。
+状态：设计草案，已经决策线评审（2026-09-24，方向同意，三处缺口与两处文档错误已并入本稿），待用户确认后实现；改动统一权限门，两条开发线共用。上位合同见 [可装卸插件方案](PLUGIN_LIFECYCLE.md) 与工具运行时合同（`agent/tooling/models.py`）。
 
 ## 解决问题
 
@@ -21,8 +21,10 @@
 调用链（现状）：模型发出 tool_use → `execute_traced_tool_call` → `ToolExecutor.execute`（`tooling/executor.py`）：快照查找 → 规范化 →
 `ActionPolicy.decide`（读取快照冻结的 `runtime.availability`、效果解析、审批判定）→ 状态为 `ask` 时返回 approval_required →
 `_resolve_tool_approval` → `StreamApproval.request` 写 `permission_requested` → 等待决定 → 再次 `execute_one` → `_execute_authorized`
-→ 校验 → `pre_handler_gate` → 权威 → 工具账 claim → `invoke_registry_tool`。今天没有任何一步在冻结快照之后重新读取可用性；
-插件代理的 `availability()`（`plugin_runtime.py`）已经能把激活失效报成 `TOOL_UNAVAILABLE`，但只在建快照时被调用一次。
+→ 校验 → `pre_handler_gate` → 权威 → 工具账 claim → `invoke_registry_tool`。执行链上没有任何一步在冻结快照之后重新读取可用性
+（唯一的例外是决策线的 `decision_recommendation._tools_current`：它在采用/续用推荐前逐个重读 `availability()`，任一失效就整体丢弃推荐、回到原展示，只影响展示不影响执行）。
+插件代理的 `availability()`（`plugin_runtime.py`）已经能把激活失效报成 `TOOL_UNAVAILABLE`，但执行链只在建快照时读它一次。
+显式插件命令（`host_command_approval`）两遍都走完整的 `ToolExecutor.execute`：审批前已复核激活，审批后没有复核；挂接点 2 自然覆盖它，不单独挂钩。
 
 挂接点（两处共用同一个辅助函数，不新增第二套判定）：
 
@@ -33,14 +35,25 @@
    不写 `permission_requested`，不进入执行器，工具账没有该调用的执行记录。
 2. `_execute_authorized`：审批通过后再次进入、工具账 claim 之前，只对"经过审批"的调用再跑同一函数。
    这一处覆盖"审批等待期间被停用"的时序；不对免审批调用逐次复核（`test_tool_runtime_scope.py:251` 钉住了这条现行合同，且避免给内置工具加成本）。
+   "经过审批"必须是结构化事实：现在 `ActionPolicy.decide` 返回的 allow 不带审批标记（绑定匹配在 `_approval_decision` 内部完成），
+   所以先让 ActionPolicy 在 decision 的 evidence 里输出 `approval_applied=true`，执行器只看这个标记，不重复匹配绑定。
+3. 渲染：挂接点 2 拦下的结果会经 `_with_applied_approval_fact` 带上"已获批准、不要等待"的说明，与 `TOOL_UNAVAILABLE` 并列会让模型困惑；
+   "批准后复核失败"要单独渲染成"已批准但工具在执行前失效，请换工具"，不复用已批准提示。
+4. 具体原因要到模型：`_decision_result` 目前不写 `reported_error_code`，模型只看到通用 `TOOL_UNAVAILABLE`；复核结果的具体原因（激活失效、连接关闭）
+   放进 `reported_error_code` 并保证它在错误分类表里；不把 `availability.error_code` 直接塞进 reason codes（未知码会塌成 UNKNOWN_ERROR / REPORT_BLOCKER）。
 
 接口：`_pre_execution_precheck(runtime: ToolRuntime) -> ToolAvailability | None`，只读，不构造连接、不启动进程、不写状态。
 可用的结构化输入：`request`（快照、写边界、审批模式、run 上下文、取消令牌）、`runtime`（spec、策略、冻结的处理器及其 activation_ref）、
 `call`（run/turn/attempt/operation 编号、参数哈希）、`decision`。
 
-错误码：沿用 `TOOL_UNAVAILABLE`（不可重试、建议申请能力），具体原因放在 reason / `reported_error_code`（例如 PLUGIN_ACTIVATION_UNAVAILABLE、MCP_CONNECTION_CLOSED）。
+错误码：沿用 `TOOL_UNAVAILABLE`（不可重试、建议申请能力），具体原因放在 `reported_error_code`（`PLUGIN_ACTIVATION_UNAVAILABLE` → `TOOL_UNAVAILABLE` 的映射已经存在于 `mcp_registration.py`，沿用）。
+连续两次审批前被拦会触发既有的 tool-failure-channel-hint（`loop_hints.py` 只计 `TOOL_UNAVAILABLE` 与可重试网络错，默认阈值 2）：插件已停用就该换渠道，这是期望行为，写明不改。
 不用 `PLUGIN_NOT_ENABLED`（不在错误分类表里，恢复逻辑会当未知码阻塞）和 `PLUGIN_DISABLED`（语义是插件管理总开关关闭）。
 顺带修正：现行失败路径报 `TOOL_EXECUTION_FAILED`，分类表标为可重试、建议 RETRY，对已停用插件是错误建议；复核提前拦下后模型收到的是正确的"换工具/申请能力"。
+
+顺带修正（同一片）：今天 TUI 看到的 `TOOL_EXECUTION_FAILED` 链路是"停用写入 stop_requested → 执行时检查到它 → 抛 MCP_CONNECTION_CLOSED → 映射成 TOOL_EXECUTION_FAILED（可重试）"。
+把"因停用而关闭"按结构化的 stop 原因报成 `PLUGIN_ACTIVATION_UNAVAILABLE`（不解析文字），这样复核之后、执行之前那个极短竞态窗口也不会再给出错误的重试建议。
+插件工具默认 effect=dangerous 不走只读自动重试，所以现在只是提示错、不会真重试。
 
 不做：等待审批期间逐次轮询复核（`permission_bridge` 每次 poll 再查）——目前"不可用"在 `round_execution` 里会回退成 approval_required，要先改那条回退才有意义，另开一片。
 非插件 MCP 服务在回合中途死亡的情况，同一复核（连接存活事实）自然覆盖，不单独写分支。
