@@ -200,6 +200,8 @@ agent_py_agent/
 |   |-- plugin_removal.py              # 固定安装删除 CAS 与卸载回执，不新增墓碑或持久历史
 |   |-- plugin_install_store.py        # owner 唯一安装表、包内容保存及锁内 CAS/提交裁决
 |   |-- plugin_install_tool.py         # 经原执行器读取授权包快照并保存默认停用记录
+|   |-- plugin_update.py               # 版本更新纯计划：同 ID 新包替换已停用安装，install+可选 configure 两步回执保留配置
+|   |-- plugin_update_tool.py          # 模型不可见的更新管理工具：读新包、按当前版本 CAS 提交替换，回执带配置是否保留
 |   |-- plugin_configure_tool.py       # 经原执行器读取和验证私有配置，结果不含配置值
 |   |-- plugin_enable_tool.py          # 原操作内准备环境、核对目录并确认候选退出后发布
 |   |-- plugin_disable_tool.py         # 原宿主链中的隐藏停用工具，区分撤销与资源清理结果
@@ -752,6 +754,7 @@ agent_py_agent/
 |   |-- test_plugin_proxy_revoked_call.py # 插件代理发送前复核激活：撤销固定 TOOL_UNAVAILABLE/not_started 且不发送，激活有效沿原 MCP 链
 |   |-- test_plugin_release.py        # 原 handler 退出、环境删除、结果落账与重送消费边界
 |   |-- test_plugin_removal.py        # 管理卸载、权限、旧请求重放、准备未退与持久成功后包回收
+|   |-- test_plugin_update.py         # /plugins update：替换包并保留兼容配置、不兼容清空并报告、已启用/ID 不一致/同包拒绝或不变、计划纯函数
 |   |-- test_plugin_skills.py         # 随包 Skill：v3 描述往返与校验、只取已启用插件、最低优先级、停用即消失
 |   |-- test_plugin_host_api.py       # 宿主只读 API：令牌随激活失效、主题白名单、线程公开字段、v4 描述
 |   |-- test_harness_console_package.py # harness-console 实际包：v4 描述、假宿主 API、网页令牌/cookie、失效与不可用、桌面窗口回收
@@ -1066,6 +1069,7 @@ docs/
 - `agent_py_agent/agent/plugin_invocation.py`：显式业务调用固定原选择，工具输入不混入管理字段；原审批/执行链之外只管理本次 MCP 连接的建立与准确关闭。
 - `agent_py_agent/agent/plugin_deactivation.py` 与 `plugin_disable_tool.py`：先关闭原激活与准备任务权限，再冻结两类准确资源并锁外清理；保留原退出记录，不能将撤销等同清理成功。
 - `agent_py_agent/agent/plugin_release.py` 与 `plugin_cleanup.py`：前者从原 enable 执行器和资源账核验退出，后者只在 disable/remove 原结果严格成功读回后消费固定引用，并回收无人引用的旧包；不改写 UNKNOWN，不重新选择当前代。
+- `agent_py_agent/agent/plugin_update.py` 与 `plugin_update_tool.py`：同一插件 ID 的新版本包替换已停用安装；同一锁内 install 回执后按新声明规范化旧配置成功再追加 configure 回执，只用既有持久动作；已启用、ID 不一致、版本变化在计划阶段拒绝。
 - `agent_py_agent/agent/plugin_removal.py` 与 `plugin_remove_tool.py`：原停用释放返回完整记录后，沿原锁 CAS 删除安装；删除回执只存原操作，不建墓碑，不删除用户产物。
 - `agent_py_agent/agent/tooling/process_cleanup_evidence.py`：原资源记录的最小身份摘要及完整退出证明，旧引用不能删除同 ID 新实例；不另建持久状态。
 - `agent_py_agent/agent/common/nofollow_tree.py`：使用已验证父目录描述符递归删除固定目录，不沿链接越界；调用方负责先确认原进程和执行器已退出。

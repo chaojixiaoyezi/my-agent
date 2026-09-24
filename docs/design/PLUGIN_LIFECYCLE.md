@@ -210,7 +210,7 @@ my-agent 自身保留完整的会话、任务、内置工具和恢复能力；�
 /plugins enable <插件>            启用
 /plugins disable <插件>           停用，保留安装包及设置
 /plugins remove <插件>            停用并卸载
-/plugins update <插件> <版本>       准备并切换版本
+/plugins update <插件> <新包路径>    用同一插件的新版本包替换已停用安装，配置结构不变时保留私有配置（已实施，见下）
 /plugins rollback <插件>           切回仍保留且兼容的版本
 
 /plugins@logs                    查看日志插件的帮助和可用动作
@@ -376,6 +376,13 @@ Hermes `0a62610` 的 `hermes_cli/plugins.py`、relay command manifest/transport 
 修复不在名单里补插件名，而是让决策带 `extension_tools=inherit`，由后台运行构造方按注册表的代理类型事实并入当前已启用插件/MCP
 工具名（见 [后台工具策略边界](../modules/gateway/04-structure.md#后台工具策略边界)）。停用撤销、禁用表和连接断开仍按第 5、6 条
 在注册表与快照层 fail-closed，后台唤醒不能因此重新激活插件。
+
+版本更新首片（2026-09-24）：`/plugins update <插件ID> <新包路径>` 由 `plugin_update.py` 的纯计划 + `PluginInstallStore.update_package`
+实现：同一锁内先提交 install 回执（版本 +1，配置清空），旧配置能按新版本 `settings_schema` 规范化时紧接 configure 回执（版本 +2）恢复，
+结果带 `settings_restored/settings_reason`；只复用既有持久动作，安装表不加字段，旧运行时仍能读。边界：目标必须已停用且激活已结清
+（否则 `activation_unsettled`，先 `/plugins disable`），新包插件 ID 必须一致（`plugin_conflict`），同包 `unchanged`；不做"旧版继续运行、
+新版准备好再切换"的双版本切换，也不做 rollback——那需要安装记录持有候选版本字段，另开一片。旧包 blob 保留给历史引用。
+回归见 `test_plugin_update.py`。
 
 停用清理结清（2026-09-24）：测试机 `/plugins disable` 两次返回 `PLUGIN_CLEANUP_UNCONFIRMED`，随后 `enable` 因 `activation_unsettled`
 拒绝，根因是一条实例早已消失的旧 `unknown` 进程记录永远无法确认。现在重试停止时，若记录已是 unknown 且带上一次的 cleanup 结果，

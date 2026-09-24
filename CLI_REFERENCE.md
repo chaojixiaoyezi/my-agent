@@ -89,6 +89,7 @@ Gateway 管理员的 `my-agent gateway stop` / HTTP `POST /stop` 是服务生命
 公共目录使用 `/plugins [管理动作]` 与 `/plugins@<插件ID> [动作] [参数]`。安装、列表、信息、请求查询、配置、启停、调用和卸载已有本地源码，尚未发布部署；已安装版本能力以 STATUS 为准。
 `/plugins configure <插件ID> --file ./settings.json` 从授权路径读取完整 JSON，严格按插件设置声明验证，保存在用户私有目录，保持插件停用。
 配置不是增量补丁；值不进入公共目录或工具回执。`/plugins status <原请求编号>` 可在来源删除后查询原结果，超时不自动重送。
+`/plugins update <插件ID> <新包路径>` 用同一插件 ID 的新版本本地包替换已停用插件：配置结构不变时保留私有配置（结果 `settings_restored=true`），变化则清空并提示先 configure 再 enable；已启用插件要先 disable，新包 ID 不一致或同包分别报错或不变。不做双版本切换与 rollback。
 `/help` 与补全读取同一声明；补全只填入，`/plugins@` 后直接填写 ID，不插入空格。新目录 v3 要求客户端与 Gateway 同版，过期输入须重新查看再确认。
 未知或异常后缀不会转为普通聊天、运行中插话、Shell 或停止操作。完整实际 TUI 装卸验收仍待完成，见 [插件设计](docs/design/PLUGIN_LIFECYCLE.md)。
 

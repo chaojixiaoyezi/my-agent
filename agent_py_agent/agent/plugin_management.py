@@ -33,6 +33,8 @@ from .plugin_invocation import (
 from .plugin_removal import PLUGIN_REMOVE_TOOL
 from .plugin_remove_tool import PluginRemoveTool
 from .plugin_runtime import plugin_tool_name
+from .plugin_update import PLUGIN_UPDATE_TOOL
+from .plugin_update_tool import PluginUpdateTool
 from .runtime_db.host_command_execution import execute_host_command, query_host_command
 from .runtime_db.host_commands import HostCommandIdentity, HostCommandRequest
 from .runtime_db.managed_operation_store import ManagedOperationStore
@@ -45,7 +47,8 @@ from .tooling.runtime_contracts import ToolCall, tool_arguments_hash
 from .user_space.owner_resolver import OwnerHomeResult
 
 _MANAGEMENT_TOOLS = {"install": PLUGIN_INSTALL_TOOL, "configure": PLUGIN_CONFIGURE_TOOL,
-                     "enable": PLUGIN_ENABLE_TOOL, "disable": PLUGIN_DISABLE_TOOL, "remove": PLUGIN_REMOVE_TOOL}
+                     "enable": PLUGIN_ENABLE_TOOL, "disable": PLUGIN_DISABLE_TOOL, "remove": PLUGIN_REMOVE_TOOL,
+                     "update": PLUGIN_UPDATE_TOOL}
 
 
 # LLM: 所有字段来自宿主，布尔授权不是客户端参数；ThreadStore 是原会话权威，目录投影不能提供执行身份。
@@ -350,6 +353,9 @@ class PluginManagement:
         tool_name = binding.request.command_name
         if tool_name == PLUGIN_INSTALL_TOOL:
             return PluginInstallTool(self.installations, context.path_policy, context.workspace, binding.request.operation_id)
+        if tool_name == PLUGIN_UPDATE_TOOL:
+            # 更新与安装共用来源读取权限与静态包保存链，不构造激活或环境。
+            return PluginUpdateTool(self.installations, context.path_policy, context.workspace, binding.request.operation_id)
         if tool_name not in {PLUGIN_CONFIGURE_TOOL, PLUGIN_DISABLE_TOOL, PLUGIN_ENABLE_TOOL, PLUGIN_REMOVE_TOOL}:
             raise RuntimeConflictError("未知插件管理工具")
         entries = self.installations.snapshot()
@@ -391,6 +397,8 @@ class PluginManagement:
     # 函数用途: 让每种管理动作分别遵守当前禁用策略。
     def _allowed(self, tool_name: str) -> bool:
         return {PLUGIN_INSTALL_TOOL: self.context.tool_allowed,
+                # 更新是"再装一个版本"，沿安装权限；不需要另立一个 owner 策略字段。
+                PLUGIN_UPDATE_TOOL: self.context.tool_allowed,
                 PLUGIN_CONFIGURE_TOOL: self.context.configure_allowed,
                 PLUGIN_DISABLE_TOOL: self.context.disable_allowed,
                 PLUGIN_ENABLE_TOOL: self.context.enable_allowed,

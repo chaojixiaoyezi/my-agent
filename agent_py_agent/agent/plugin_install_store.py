@@ -33,6 +33,7 @@ from .plugin_installation_state import (
 from .plugin_package import PackageReadLimits, PluginPackageSnapshot, inspect_plugin_package
 from .plugin_release import plugin_release_evidence
 from .plugin_removal import PluginRemovalResult, prepare_removal
+from .plugin_update import PluginUpdateRequest, PluginUpdateResult, plan_package_update
 from .user_space.owner_quota import (
     OwnerQuotaChange,
     OwnerQuotaExceeded,
@@ -103,6 +104,30 @@ class PluginInstallStore:
         if verified.manifest != request.package.manifest:
             raise PluginInstallationError("package_integrity", "候选包与声明不一致。")
         return self._write(lambda quota: self._install_locked(request, quota))
+
+    # LLM: 更新沿 install 的包复验与 quota→目录锁顺序；计划由 plugin_update 纯函数给出，install+可选 configure 两步回执
+    #   只写一次安装表；新包 blob 先保存，旧 blob 保留。已启用/未结清激活、ID 不一致、版本变化都在计划阶段拒绝。
+    # 函数用途: 用同一插件的新版本包替换已停用安装并尽量保留配置，重送复读原回执。
+    def update_package(self, request: PluginUpdateRequest) -> PluginUpdateResult:
+        verified = inspect_plugin_package(request.package.archive_bytes, limits=self._limits)
+        if verified.manifest != request.package.manifest:
+            raise PluginInstallationError("package_integrity", "候选包与声明不一致。")
+
+        def mutation(quota):
+            state = self._read_state()
+            plan = plan_package_update(request, state.entries)
+            if plan.commit is None:
+                return plan.result
+            text = encode_installation_state(plan.entries, self._owner, state.migration_json)
+            quota.check((
+                OwnerQuotaChange(self._anchor.joinpath(*self._blob_parts(request.package.sha256)), len(request.package.archive_bytes)),
+                OwnerQuotaChange(self.root / "installations.json", len(text.encode("utf-8"))),
+            ))
+            self._save_blob(request.package)
+            self._commit(state.entries, plan.entries, text, plan.commit)
+            return plan.result
+
+        return self._write(mutation)
 
     # LLM: 配置仍属于同一安装表；值验证、版本 CAS 和提交均在原锁内，包不在此更新或执行。
     # 函数用途: 完整替换停用插件的私有配置，重送复读原回执。

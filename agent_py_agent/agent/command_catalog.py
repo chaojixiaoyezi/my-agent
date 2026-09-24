@@ -157,6 +157,10 @@ COMMAND_CATALOG = (
             CommandActionSpec("remove", "停用并卸载插件，保留用户产物", (
                 ArgumentSpec("plugin", "插件 ID", required=True),
             ), available=False),
+            CommandActionSpec("update", "用同一插件的新版本包替换已停用插件，配置结构不变时保留私有配置", (
+                ArgumentSpec("plugin", "插件 ID", required=True),
+                ArgumentSpec("source", "新版本本地包路径", required=True, path=True),
+            ), available=False),
         ),
     ),
 )
