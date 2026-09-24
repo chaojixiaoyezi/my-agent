@@ -41,7 +41,8 @@ def test_command_freezes_parameters_and_leaves_only_task_text():
 
 
 @pytest.mark.parametrize("text", [
-    "/experiment", "/experiment observe skill_tool 10m 1 50000", "/experiment apply skill_tool 10m 1 50000 任务",
+    "/experiment", "/experiment observe skill_tool 10m 1 50000", "/experiment promote skill_tool 10m 1 50000 任务",
+    "/experiment apply planning 10m 1 50000 任务",
     "/experiment observe planning 10m 1 50000 任务", "/experiment observe skill_tool 10m 0 50000 任务",
     "/experiment observe skill_tool 10m 1 0 任务", "/experiment observe skill_tool 0m 1 50000 任务",
     "/experiment observe skill_tool 10x 1 50000 任务", "/experiment observe skill_tool 10m 1.5 50000 任务",
@@ -52,7 +53,8 @@ def test_invalid_experiment_commands_return_usage_without_task(text):
     assert command.valid is False and "用法" in command.usage and "经验值" in command.usage
 
 
-@pytest.mark.parametrize("attributes", [{**_FROZEN, "extra": 1}, {**_FROZEN, "mode": "apply"}, {**_FROZEN, "max_http_requests": True},
+@pytest.mark.parametrize("attributes", [{**_FROZEN, "extra": 1}, {**_FROZEN, "mode": "Apply"}, {**_FROZEN, "mode": ["apply"]},
+                                        {**_FROZEN, "max_http_requests": True},
                                         {**_FROZEN, "max_input_tokens": 0}, {**_FROZEN, "point": ["skill_tool"]},
                                         {key: value for key, value in _FROZEN.items() if key != "point"}])
 def test_frozen_task_payload_is_validated_strictly(attributes):
@@ -190,7 +192,7 @@ def test_closed_or_foreign_turn_cannot_grant_or_write_receipt(turn, change):
     assert _stored(turn) is None and _authorization(turn) is None and not turn.notices
 
 
-@pytest.mark.parametrize("system_task", [None, {"kind": "decision_experiment", "attributes": {**_FROZEN, "mode": "apply"}},
+@pytest.mark.parametrize("system_task", [None, {"kind": "decision_experiment", "attributes": {**_FROZEN, "mode": "promote"}},
                                          {"kind": "audit_prepare", "attributes": _FROZEN}])
 def test_requests_without_valid_frozen_experiment_are_ignored(turn, system_task):
     turn.writer.request["system_task"] = system_task

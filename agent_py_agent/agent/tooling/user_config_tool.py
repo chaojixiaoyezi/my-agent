@@ -95,6 +95,26 @@ def _decision_thread_scope(agent: object) -> tuple[str, str]:
     return "", "current_runner_context"
 
 
+# LLM: 只在本会话已有实验授权信封、且当前运行由 Gateway 宿主写入器承载时附只读 experiment_evaluation；
+#   读取器来自宿主运行参数（不是模型参数），失败只给结构化 unavailable，不影响设置读取，也绝不触发晋升或写入。
+#   评估块插在授权信封之后，避免被大段字段目录挤出有界预览；没有信封时原输出逐字节不变。
+# 函数用途: 让模型在读取决策设置时能看到实验证据是否已满足晋升建议。
+def _with_experiment_evaluation(agent: object, report: dict, thread_id: str) -> dict:
+    authorization = report.get("experiment_authorization")
+    writer = getattr(getattr(agent, "_current_run_params", None), "conversation_task_binding_callback", None)
+    reader = getattr(writer, "decision_experiment_evaluation", None)
+    if authorization is None or not thread_id or not callable(reader):
+        return report
+    try:
+        evaluation = reader(agent, thread_id, authorization)
+    except Exception:  # noqa: BLE001 只读证据读取失败不能影响设置读取
+        evaluation = {"status": "unavailable", "reasons": ["evidence_unreadable"]}
+    keys = list(report)
+    position = keys.index("experiment_authorization") + 1
+    return {**{key: report[key] for key in keys[:position]}, "experiment_evaluation": evaluation,
+            **{key: report[key] for key in keys[position:]}}
+
+
 # LLM: main_agent 保留完整配置能力，普通 owner 仅得 decision-only 视图；目录只读，探测只接受已存引用和显式预算。
 # 类用途: 按可信 owner 身份展示配置工具，读取、保存与显式联网测试仍复用原服务。
 class UserConfigTool(BaseTool):
@@ -206,6 +226,7 @@ class UserConfigTool(BaseTool):
         )
 
     # LLM: 主会话可读取宿主线程本地 RunParams，子代理只读自身 runner 身份；撤销只能引用原许可并使用完整 CAS。
+    #   read 在本会话已有实验授权时附只读实验证据评估（_with_experiment_evaluation），模型无法据此授权或晋升。
     # 函数用途: 调用共同决策设置服务修改原覆盖或撤销许可，身份与过期版本不能由模型覆盖。
     def _decision(self, operation: str, params: dict) -> ToolHandlerOutcome:
         from ..settings.decision_settings import execute_decision_settings_operation
@@ -232,6 +253,8 @@ class UserConfigTool(BaseTool):
         except OSError:
             return ToolHandlerOutcome("user_config", False, "配置存储读写失败，请重新读取核对是否保存。", error_code="TOOL_PERSISTENCE_FAILED", effect_outcome="unknown")
         report["scope_resolution"] = {"source": source, "effective": {"thread_id": thread_id, "scope": report["scope"]}}
+        if operation == "read":
+            report = _with_experiment_evaluation(self._agent, report, thread_id)
         # 原投影先列 revision，再列大段字段目录；排序会把 CAS 版本挤出有界模型预览。
         return ToolHandlerOutcome("user_config", True, json.dumps(report, ensure_ascii=False))
 

@@ -13,6 +13,8 @@ EXPERIMENT_SCHEMA_V1 = "decision_experiment_authorization.v1"
 EXPERIMENT_SCHEMA = "decision_experiment_authorization.v2"
 # 用户于 2026-09-24 接受的经验输入上界口径；代码只实现这一种可发送口径，其它值保留可读但不能发送。
 EMPIRICAL_INPUT_BOUND_POLICY = "empirical:jev_wire_bytes.v1"
+# 实验调用本身永远只观察；apply 只额外授权宿主在证据规则满足时把本会话该点改为 apply，保存不是观察的隐式后果。
+EXPERIMENT_OPERATIONS = (("observe",), ("observe", "apply"))
 _BINDING_FIELDS = ("owner_ref", "thread_id", "task_id", "run_id", "attempt_id", "request_id", "ledger_id")
 _SOURCE_FIELDS = ("owner_id", "actor_id", "channel", "thread_id", "request_id", "operation_id")
 _V1_FIELDS = frozenset({"schema", "authorization_id", "status", "scope", "binding", "source", "points", "operations",
@@ -47,7 +49,15 @@ def experiment_positive_count(value: object) -> int:
     return value
 
 
-# LLM: 第一片仅观察同一 thread 的已登记点，不支持后台范围、配置应用或权限扩大；列表不作 owner/thread 合并。
+# LLM: 只接受 ["observe"] 或 ["observe","apply"] 两种精确列表；apply 不能单独出现，也不接受别名、大小写或其它动作。
+# 函数用途: 校验宿主显式授权的实验动作清单，返回副本。
+def experiment_operations(value: object) -> list[str]:
+    if type(value) is not list or tuple(value) not in EXPERIMENT_OPERATIONS:
+        raise ModelProfileError("实验授权动作只能是 observe，或 observe 加 apply。")
+    return list(value)
+
+
+# LLM: 第一片仅观察同一 thread 的已登记点，不支持后台范围或权限扩大；列表不作 owner/thread 合并。
 # 函数用途: 验证宿主显式授权的接入点清单，拒绝重复、空值及跨范围点。
 def experiment_points(value: object) -> list[str]:
     if (type(value) is not list or not value or len(value) > len(POINT_RUNTIME_SCOPES)
@@ -59,6 +69,8 @@ def experiment_points(value: object) -> list[str]:
 
 # LLM: None 是没有授权；版本/字段/来源/固定到期完整读取，不把损坏或旧状态别名当成可执行许可。
 # v1 按原字段集原样读回（无上界口径即不可发送）；v2 额外要求合法的 input_bound_policy 标识。
+# operations 只能是 ["observe"] 或 ["observe","apply"]；旧版程序读到含 apply 的信封会拒绝整份线程决策设置，
+# 撤销与 reset 都不删除信封，回退前须用一次 observe 授权替换它或使用升级前备份。
 # 函数用途: 复制合法信封，保留宿主来源与准确任务身份，不修改任何配置或用量。
 def validate_experiment_authorization(value: object) -> dict | None:
     if value is None:
@@ -69,8 +81,9 @@ def validate_experiment_authorization(value: object) -> dict | None:
         raise ModelProfileError("实验授权结构或版本无效。")
     if schema == EXPERIMENT_SCHEMA:
         experiment_identifier(value["input_bound_policy"])
-    if type(value["status"]) is not str or value["status"] not in {"active", "revoked"} or value["scope"] != "thread" or value["operations"] != ["observe"]:
+    if type(value["status"]) is not str or value["status"] not in {"active", "revoked"} or value["scope"] != "thread":
         raise ModelProfileError("实验授权状态、范围或操作无效。")
+    experiment_operations(value["operations"])
     experiment_identifier(value["authorization_id"])
     for key, required in (("binding", _BINDING_FIELDS), ("source", _SOURCE_FIELDS)):
         if type(value[key]) is not dict or set(value[key]) != set(required):

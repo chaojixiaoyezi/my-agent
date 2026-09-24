@@ -342,6 +342,8 @@ agent_py_agent/
 |   |   |-- request_context.py          # 原车道内的会话快照、Compact 与工作目录准备
 |   |   |-- request_binding.py          # 精确请求与运行身份绑定、执行车道和原子更新
 |   |   |-- request_experiment.py       # /experiment 冻结参数在主轮绑定后、首个模型调用前的单次实验授权与回执
+|   |   |-- request_experiment_records.py # 实验对照记录写入请求记录、回合收尾补写实际工具用量、授权指针证据链与只读评估
+|   |   |-- request_experiment_promotion.py # /experiment apply 授权内：证据满足规则时经原设置 CAS 晋升 skill_tool 并写回执
 |   |   |-- request_history.py          # 公开正文、canonical 历史提交、去重与延迟补交
 |   |   |-- request_prompt.py           # 已准备会话投影的模型输入渲染与历史种子
 |   |   |-- stream_writer.py            # 请求级文本缓冲、typed 流事件和显示投影的有序出口
@@ -407,6 +409,7 @@ agent_py_agent/
 |   |   |-- decision_policy.py        # 有界连接冷却与同进程设置取消通知，不拥有 worker 或持久状态
 |   |   |-- decision_model_call.py    # 实际决策 worker 复用原准入、身份头、HTTP 观察和唯一调用账；实验先算经验上界再预留
 |   |   |-- decision_experiment.py    # 实验准入/路由/在途复核：只读原授权、账本代次与 v2 上界口径
+|   |   |-- decision_experiment_evaluation.py # 只读证据评估：召回/节省/结算三项事实，决定 skill_tool off→apply 建议
 |   |   |-- decision_send_permit.py   # 实验单次发送许可：连接前复核绑定、撤销/期限、设置与连接后在原账锁内消费
 |   |   |-- tool_context_window.py    # text/native 共用的有界工具历史窗口与稳定前缀投影
 |   |   |-- tool_input_progress.py     # provider 大工具参数生成期的脱敏临时展示合同
@@ -559,6 +562,7 @@ agent_py_agent/
 |   |-- capability/                    # 单一 SkillsService、逐轮 snapshot、能力路由与 capability tools
 |   |   |-- decision_candidates.py     # 原能力快照候选、独立适用性题及必要引用，不读取Skill正文
 |   |   |-- decision_recommendation.py # 每工作片可选推荐及采用前复核，只改变展示不改授权
+|   |   |-- decision_experiment_sample.py # 只观察实验的对照条目：基线/候选名单、配置版本与原账结算视图
 |   |   |-- skill_service.py           # bounded builtin/shared/owner/workspace discovery、policy 与缓存
 |   |   |-- skill_snapshot.py          # 不可变稳定引用、正文 hash/guard 校验与子代理收窄
 |   |   |-- skill_proposals.py         # 自学习 S1：子代理 lesson 候选→待确认 Skill 提案→用户确认后经 guard 原子安装
@@ -691,6 +695,10 @@ agent_py_agent/
 |   |-- test_decision_experiment_authorization.py # 设置授权来源、CAS/撤销、v2 上界口径与普通模式互斥
 |   |-- test_decision_experiment_send_gate.py # 本地 HTTP 统计 TCP accept：拒绝/绕过零连接、单次发送结算、超上界与挂起
 |   |-- test_decision_experiment_command.py # /experiment 解析、HTTP 入口重推 system_task、单次授权与重放/重启/Compact
+|   |-- test_decision_experiment_records.py # E2 对照记录：结算等于原账、基线/候选、写入边界、回合收尾实际用量
+|   |-- test_decision_experiment_evaluation.py # F1a 规则矩阵、外来记录忽略、授权指针证据链与 decision_read 只读暴露
+|   |-- test_decision_experiment_promotion.py # F1b apply 授权内 CAS 晋升、回执幂等、用户后改/撤销/到期跳过
+|   |-- test_decision_experiment_gateway_turn.py # 真实 Gateway 回合：本地 HTTP 实验、真实工具账实际用量与链上晋升
 |   |-- test_model_call_input_budget.py # 原账带标签上界预留、单次发送许可、拒绝/绕过结算与代次/LRU 隔离
 |   |-- test_model_call_ledger_partitions.py # 原账本用途、字段真值、单调终态及 worker 精确保留
 |   |-- test_decision_usage_metrics.py  # 决策用途增量、迟到补账、未知输入与原 TUI 一行展示
@@ -1359,6 +1367,9 @@ docs/
 - `agent_py_agent/agent/gateway_parts/request_experiment.py`：`/experiment` 的唯一产品授权入口；只读入口冻结的 system_task，在主轮绑定 run/attempt 后、首个模型调用前于原回合锁内写 granting→granted/rejected 回执，失败只提示用户。
 - `agent_py_agent/agent/conversation/decision_send_permit.py`、`agent_py_agent/agent/backends/provider_send_gate.py`：实验发送硬门；传输层在最终字节生成后、任何 DNS/连接/遥测前调用许可，拒绝抛不被重包装的 `ProviderSendRefused`。
 - `agent_py_agent/tests/test_decision_experiment_authorization.py`、`test_model_call_input_budget.py`、`test_decision_experiment_send_gate.py`、`test_decision_experiment_command.py`：许可/预算/发送门/授权入口的合同与本地 HTTP 组合回归，统计 TCP accept，不调用真实供应商。
+- `agent_py_agent/agent/capability/decision_experiment_sample.py`、`agent_py_agent/agent/gateway_parts/request_experiment_records.py`：E2 对照记录（身份、配置版本、基线/候选名单、原账结算视图）只写 Gateway 请求记录的 `experiment_records`；回合正常收尾按结构化工具账补写实际用量，停止/关闭不补写，普通请求零 I/O。
+- `agent_py_agent/agent/conversation/decision_experiment_evaluation.py`、`agent_py_agent/agent/gateway_parts/request_experiment_promotion.py`：F1 只读证据评估（≥3 可比较、全部 charged、召回 1.0、有节省）与 `/experiment apply` 授权内经原设置 CAS 的一次性晋升；回执在请求记录 `experiment_records.promotion`，用户后改优先。
+- `agent_py_agent/tests/test_decision_experiment_records.py`、`test_decision_experiment_evaluation.py`、`test_decision_experiment_promotion.py`、`test_decision_experiment_gateway_turn.py`：E2/F1 合同、写入器、规则矩阵、证据链、CAS 晋升与真实 Gateway 回合组合回归，不调用真实供应商。
 - `agent_py_agent/tests/test_user_config_owner_scope.py`：普通 user 主回合 read/patch 的可信线程及 CAS 预览、跨 owner/子代理拒绝和 main_agent 原能力回归。
 - `agent_py_agent/tests/test_gateway_model_adoption.py`：Gateway 到原生成投影、最终发送和线程 CAS 的本地 HTTP 替身矩阵，不当作供应商真实验收。
 - `agent_py_agent/tests/test_gateway_compact_recovery.py`：原Gateway overflow到同次恢复发送的完整材料对照；失败边界由原CAS、停止及模型生成链验证。

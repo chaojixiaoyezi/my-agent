@@ -8,7 +8,7 @@ import json
 import math
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from ..backends.bounded_call import BoundedCallBusyError, BoundedCallTimeoutError
 from ..backends.decision_protocol import (
@@ -66,6 +66,8 @@ class DecisionStage:
 
 
 # LLM: may_apply仅表示返回时信封有效；消费前用同一helper核验内存连接摘要/绝对期限，逐题error仍由消费者处理，不授予写入权。
+#   experiment 只在实验调用真正进入原账预留（因而有结算）时才有值：授权编号、设置/策略/连接版本和原账结算视图；
+#   普通调用恒为 None，它只供宿主写实验记录，不参与采用、比较或授权判断。
 # 类用途: 明确区分关闭、观察、可用建议、到期、冷却和过期结果，失败时保留原业务方案。
 @dataclass(frozen=True)
 class DecisionOutcome:
@@ -78,6 +80,7 @@ class DecisionOutcome:
     retain_original: bool = True
     connection_revision: str = field(default="", repr=False)
     deadline: float = 0.0
+    experiment: dict | None = field(default=None, repr=False, compare=False)
 
 
 # LLM: 身份只取宿主 params/runner；owner_background必须有run且无thread，不能从历史材料取身份或把活跃会话改称后台。
@@ -284,22 +287,43 @@ def _route(agent: object, params: object, stage: DecisionStage, *, point: str) -
     return mode, None, (settings, row, revision, config)
 
 
-# LLM: 实验调用只从准入快照取授权编号，连同线程/点/策略/连接版本交给原调用边界；普通调用不增加任何参数。
-# 函数用途: 生成传给 invoke_decision_model_call 的实验参数（普通调用为空）。
-def _experiment_kwargs(request: DecisionRequest, active: ActiveDecision, *, stage: DecisionStage, key: tuple) -> dict:
+# LLM: 实验调用只从准入快照取授权编号，连同线程/点/策略/连接版本交给原调用边界；普通调用返回 None，不增加任何参数。
+# 函数用途: 生成传给 invoke_decision_model_call 的实验调用事实（普通调用为空）。
+def _experiment_call(request: DecisionRequest, active: ActiveDecision, *, stage: DecisionStage, key: tuple):
     if not stage.experiment:
-        return {}
+        return None
     from .decision_send_permit import DecisionExperimentCall
 
     authorization_id = active.settings["experiment_authorization"]["authorization_id"]
-    return {"experiment": DecisionExperimentCall(authorization_id, stage.thread_id, request.binding.point,
-                                                 request.binding.policy_revision, key[2])}
+    return DecisionExperimentCall(authorization_id, stage.thread_id, request.binding.point,
+                                  request.binding.policy_revision, key[2])
+
+
+# LLM: 只在调用边界确已结算（进入过原账预留）时附实验事实；版本取本次路由快照，结算取原账返回视图，均不重读或另记。
+# 函数用途: 把实验调用的授权、配置版本与结算结果挂到本次结果上，供宿主写实验记录。
+def _with_experiment_facts(outcome: DecisionOutcome, call, active: ActiveDecision) -> DecisionOutcome:
+    if call is None or not call.settlements:
+        return outcome
+    authorization = active.settings["experiment_authorization"]
+    return replace(outcome, experiment={
+        "authorization_id": call.authorization_id, "settings_revision": dict(active.settings["revision"]),
+        "policy_revision": call.policy_revision, "connection_revision": call.connection_revision,
+        "input_bound_policy": authorization.get("input_bound_policy", ""), "settlement": dict(call.settlements[-1])})
+
+
+# LLM: 普通调用与原先完全相同；实验调用在同一次调用后附上结算事实。用户中断照常传播，不产生结果或记录。
+# 函数用途: 执行一次决策调用并返回结果，实验路径额外带回原账结算视图。
+def _invoke(params, stage, request, backend, deadline, key, active) -> DecisionOutcome:
+    call = _experiment_call(request, active, stage=stage, key=key)
+    outcome = _invoke_call(params, stage=stage, request=request, backend=backend, deadline=deadline, key=key,
+                           active=active, experiment=call)
+    return _with_experiment_facts(outcome, call, active)
 
 
 # LLM: 注册取消后再次复查堵住关闭/启动竞态；用户中断必须传播，设置取消仅使建议失效，不能冒充用户停止。
 # 连接一返回响应就复位该连接的退避阶梯（进程内冷却表），之后的复核失败不算连接故障；实验结果固定 observe、不可采用。
 # 函数用途: 调用原模型边界并核验响应绑定、摘要、请求模型和最新配置；不执行任何业务变更。
-def _invoke(params, stage, request, backend, deadline, key, active) -> DecisionOutcome:
+def _invoke_call(params, *, stage, request, backend, deadline, key, active, experiment) -> DecisionOutcome:
     from .decision_model_call import invoke_decision_model_call
 
     agent, point, revision = active.context, request.binding.point, request.binding.policy_revision
@@ -313,7 +337,7 @@ def _invoke(params, stage, request, backend, deadline, key, active) -> DecisionO
             return DecisionOutcome(mode, "deadline", reason="budget_exhausted")
         response = invoke_decision_model_call(agent, params, request, backend, deadline=deadline,
             resource_key=("decision", stage.owner_ref, stage.thread_id, key[1], key[2]), interrupt_handle=active.handle,
-            **_experiment_kwargs(request, active, stage=stage, key=key))
+            experiment=experiment)
         record_success(key)
         _check_interrupted()
         if active.settings_cancelled:

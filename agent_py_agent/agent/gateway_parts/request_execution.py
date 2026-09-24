@@ -4,6 +4,7 @@
 # 同turn展示及已评估事实仅由本请求局部回调持有，失效清除后本turn不再推荐，不进恢复账或结果。
 # 延迟transcript Compact沿同次恢复准备提交；原CAS后的上下文必须回传至下一溢出或最终持久化。
 # typed overflow携带原生IR与精确插话ID，下一轮重建权限/前缀，不能用归档preview替代原完整工具回执。
+# 决策实验对照记录由能力观察出口拆出写入请求记录；回合正常收尾后才补写实际工具用量并在 apply 授权内检查晋升。
 # 模块用途: 协调 Gateway 一轮请求的租约、模型执行、超窗恢复和收尾，复用各组件的唯一事实源。
 from __future__ import annotations
 
@@ -40,7 +41,13 @@ from ..conversation.compact_carry import compact_overflow_carry
 from ..conversation.control_commands import conversation_task_attributes
 from ..gateway_compact_context import build_gateway_compact_load_request
 from ..tooling.operation_verification import public_operation_verification
-from . import request_binding, request_context, request_history, request_prompt
+from . import (
+    request_binding,
+    request_context,
+    request_experiment_records,
+    request_history,
+    request_prompt,
+)
 from .approval_session import (
     agent_tool_approval_session_cache,
     tool_approval_session_scope,
@@ -368,6 +375,7 @@ def _configure_gateway_main_activity(context: request_context.GatewayAskRunConte
 
 
 # LLM: 仅在车道内运行；observer只沿内部调用传入，恢复上下文须回到最终持久化；公共命令判据先于用户历史和模型。
+#   模型回合正常返回后先做决策实验收尾（补写实际工具用量、apply 授权内晋升检查），再持久化答复；收尾不改变结果。
 # 函数用途: 配置流和审批并执行会话；明确系统命令及历史写入失败均阻止模型副作用。
 def _execute_gateway_conversation_turn(
     context: request_context.GatewayAskRunContext,
@@ -400,6 +408,8 @@ def _execute_gateway_conversation_turn(
         conversation,
         observer=observer,
     )
+    # 实验收尾只在回合正常返回后执行；普通请求零 I/O，停止/失败不补写，任何异常都不改变本轮结果。
+    request_experiment_records.finish_decision_experiment_turn(context, result)
     return request_history.persist_gateway_assistant_result(context, conversation, result)
 
 
@@ -511,7 +521,7 @@ def _register_named_system_task(
 # the same active request retains exact host rejection memory without inheriting approval grants.
 # 与后台共用携带 reducer；真实工具循环已按原身份释放 mailbox，这里只按释放ID排除插话并携带原IR。
 # 展示callback同步更新本turn局部值及当前宿主参数；新请求重置，失效None与已评估事实阻止额外决策。
-# 能力推荐的结构化观测另走 observer，只追加到本请求记录，不改展示回调的语义。
+# 能力推荐的结构化观测另走 observer，只追加到本请求记录，不改展示回调的语义；实验对照记录由同一出口拆出另写。
 # 有宿主时transcript延迟到完整恢复输入就绪后提交；成功材料从同次run回传，后续overflow/最终持久化不复活旧上下文。
 # 函数用途: 在同一用户回合内处理上下文超限，正式压缩旧会话或本轮工具历史后继续执行。
 def _run_gateway_turn_with_conversation_compact(
@@ -558,7 +568,7 @@ def _run_gateway_turn_with_conversation_compact(
         run_params.capability_presentation_turn_id = str(request.get("execution_attempt_id") or context.request_id)
         run_params.capability_presentation_callback = retain_presentation
         run_params.capability_presentation_observer = partial(
-            request_binding.record_capability_presentation_observation, context)
+            request_experiment_records.observe_capability_presentation, context)
         _run_started = time.monotonic()
         result = context.agent.run(
             prompt,

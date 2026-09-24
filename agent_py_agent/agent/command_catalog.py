@@ -122,6 +122,9 @@ COMMAND_CATALOG = (
         "experiment",
         "/experiment observe skill_tool <时长> <HTTP次数> <输入token上限> <任务>",
         "为本轮授权一次有预算、只观察的决策实验（输入上界为经验值）",
+        # apply 仍只观察本轮；另授权宿主在最近证据满足规则时把本会话 skill_tool 改为 apply，用户后改优先。
+        help_variants=(("/experiment apply skill_tool <时长> <HTTP次数> <输入token上限> <任务>",
+                        "同上，并授权证据满足规则时自动把本会话 skill_tool 改为 apply"),),
         conversation_suffix=r"(?:\s+(.*))?$",
         multiline=True,
     ),

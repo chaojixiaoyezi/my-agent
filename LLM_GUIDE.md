@@ -230,7 +230,7 @@ Curator 已本地消费用户后台临时标注，完整材料/提取/验证/游
 P5-B 新增独立 `curator_relation` 首片：仅本批完整消息与有版本的短 long-term 正文可获临时关系提示；原候选/晋升不由 Jev 直接控制，见 [P5-B 交接](docs/tasks/DECISION_MODEL_P5B_HANDOFF.md)。task_local/control_plane 及 owner 关闭记忆时已不扫描正式库；普通会话召回前跳过尚未开放。[P5-A 审计](docs/tasks/DECISION_MODEL_PRE_RECALL_AUDIT.md)要求未来只做不删原结果的补充检索，先有可信查询候选和无副作用候选检索接缝。
 P5-C 的 `external_material_order` 首片已本地接通，默认关闭：原 web_fetch 多页归档后只追加页序建议，原结果、引用、归档和工具权限不变；隔离真实Jev已验非选择保留及一次自动追加2→3→1，页面源为本地受控材料，其它检索/规划点未验，见 [P5-C 交接](docs/tasks/DECISION_MODEL_EXTERNAL_MATERIAL_ORDER_HANDOFF.md)。
 P5-D 主会话自动选模已完成[只读合同审计](docs/tasks/DECISION_MODEL_MAIN_MODEL_AUDIT.md)及[原线程选择版本首片](docs/tasks/DECISION_MODEL_MAIN_MODEL_SELECTION_HANDOFF.md)：显式同值选择也递增版本，旧线程不伪造手动事件；Gateway 准确车道、首请求容量、跨模型历史兼容和实际自动采用仍待实现，不把版本合同当作切换通过。
-P5-E/F/G/H 的[只读审计](docs/tasks/DECISION_MODEL_SELF_EXPERIMENT_AUDIT.md)已明确原 Goal/调用账与验证证据的复用边界；原设置服务增加同次 `set/unset`、完整双层 CAS 的内部 `restore` 基础原语，默认行为不变。它尚无实验授权、请求前输入硬预算、可信收益指标或自动调参，不能把恢复能力当成整项完成。
+P5-E/F/G/H 的[只读审计](docs/tasks/DECISION_MODEL_SELF_EXPERIMENT_AUDIT.md)已明确原 Goal/调用账与验证证据的复用边界；原设置服务增加同次 `set/unset`、完整双层 CAS 的内部 `restore` 基础原语，默认行为不变。此后 `/experiment` 授权、经验输入上界与发送硬门已合入；E2 对照记录（只写 Gateway 请求记录）、F1 只读证据评估与 `/experiment apply` 授权内经原设置 CAS 的一次性晋升在本地分支待审，见 [E1 交接第三片](docs/tasks/DECISION_MODEL_EXPERIMENT_E1_HANDOFF.md#第三片e2-对照记录f1-证据评估与授权内自动晋升2026-09-25)。P5-G 自动收尾与 H 收益验收未做，不能把恢复原语或本地晋升当成整项完成。
 缺数据等非选择结果分别保留，额外等待被原 lease 头寸限制；子代理选择、召回及真实模型验收继续。
 消费者在刷新候选后统一复核 `decision_outcome_is_current`，不能把服务返回时的 may_apply 当作永久有效授权。
 默认关闭、短总期限、失败沿原流程、配置/账本复用，不加入当前插件重构 Goal，也不改变普通主模型慢流合同。

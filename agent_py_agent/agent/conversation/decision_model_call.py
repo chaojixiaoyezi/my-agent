@@ -128,14 +128,17 @@ def _experiment_identity(agent: object, params: object, request: DecisionRequest
 
 
 # LLM: 结算只在终态写入后调用，普通调用直接返回；结算自身失败时保留预留占用（后续实验因 budget_busy 失败关闭），不改原调用结果。
-# 函数用途: 按原记录事实结算实验预算，并隔离结算异常。
+#   原账返回的结算视图原样追加到实验调用的 settlements，供实验记录携带；结算失败只记 settlement_failed，不猜占用或用量。
+# 函数用途: 按原记录事实结算实验预算，隔离结算异常，并把结算结果交回决策服务。
 def _settle_experiment(ledger: ModelCallLedger, call_id: str, experiment: DecisionExperimentCall | None) -> None:
     if experiment is None:
         return
     try:
-        ledger.settle_input_budget(call_id)
+        settlement = ledger.settle_input_budget(call_id)
     except (ModelCallBudgetError, KeyError):
         logging.getLogger(__name__).warning("决策实验预算未能结算；原预留保持占用，后续实验不会继续发送。")
+        settlement = {"call_id": call_id, "outcome": "settlement_failed"}
+    experiment.settlements.append(settlement)
 
 
 # LLM: 身份只读宿主 params 和冻结绑定；逻辑 ID 来自 operation+digest，真实模型取已配置 decision backend，正文及凭据不进 metadata。

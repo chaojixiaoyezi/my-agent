@@ -20,7 +20,9 @@ from ..runtime_context import (
 
 
 # LLM: 由决策服务在同一准入快照上构造：授权编号、线程、接入点、策略版本和连接版本都不从请求正文或模型输出读取。
-# 类用途: 描述一次只观察的实验调用在原预算和发送许可中需要复核的固定事实。
+#   settlements 只接收原账 settle_input_budget 的返回视图（调用边界 finally 追加），供决策服务交给实验记录；
+#   它不参与比较/哈希，不是第二本账，也不反过来影响预留、许可或结算。
+# 类用途: 描述一次只观察的实验调用在原预算和发送许可中需要复核的固定事实，并带回本次结算视图。
 @dataclass(frozen=True)
 class DecisionExperimentCall:
     authorization_id: str
@@ -28,6 +30,7 @@ class DecisionExperimentCall:
     point: str
     policy_revision: str
     connection_revision: str
+    settlements: list = field(default_factory=list, repr=False, compare=False)
 
 
 # LLM: 只由 issue_send_permit 在调用线程构造；runner 上下文快照随许可带到发送线程，复核后恢复，不改变其它线程状态。

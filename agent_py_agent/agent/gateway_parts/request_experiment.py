@@ -1,6 +1,7 @@
 # LLM: 这是 /experiment 的唯一产品授权入口：只读取入口冻结在排队请求里的 system_task，在主轮已发布 run/attempt 后、
 # 首次模型调用前，于同一精确回合转换锁内写 granting→调用 E1 原语→写 granted/rejected；回执存在即不再授权。
 # 失败只通知用户、从不阻断业务回合；模型没有任何工具路径能进入这里（user_config 只读/撤销）。
+# 回执 v2 另记 thread、授权动作与上一份授权的来源请求（previous_request_id），实验证据链只沿这个指针回读原请求记录。
 # 模块用途: 把用户显式的实验命令转换成绑定本请求 owner/thread/task/run/attempt 与当前原账代次的有界授权。
 from __future__ import annotations
 
@@ -18,7 +19,7 @@ from ..settings.model_provider_schema import ModelProfileError
 from .io import update_json_file_atomic
 
 EXPERIMENT_GRANT_KEY = "experiment_grant"
-_GRANT_SCHEMA = "gateway_decision_experiment_grant.v1"
+_GRANT_SCHEMA = "gateway_decision_experiment_grant.v2"
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -54,15 +55,15 @@ class GatewayExperimentGrant:
         if not self._write(self._receipt("granting"), create=True):
             return None
         try:
-            report = self._authorize()
-            receipt = self._receipt("granted", authorization_id=report["experiment_authorization"]["authorization_id"])
+            receipt = self._receipt("granted", grant=self._authorize())
         except Exception as exc:  # noqa: BLE001 结构化拒绝码只按异常类型给出，不解析文案
             receipt = self._receipt("rejected", code=_rejection_code(exc))
         self._write(receipt, create=False)
         return receipt
 
-    # LLM: 来源身份全部来自入口已鉴权写入的 user_id/metadata.channel 与 Agent 的 owner；阈值参数只取冻结 system_task。
-    # 函数用途: 读取当前设置版本后调用 E1 授权原语，要求实验能力已开启。
+    # LLM: 来源身份全部来自入口已鉴权写入的 user_id/metadata.channel 与 Agent 的 owner；阈值和动作只取冻结 system_task。
+    #   previous_request_id 取同一次读取中被替换的上一份信封的来源请求，与本次 CAS 同版本；没有旧信封时为空串。
+    # 函数用途: 读取当前设置版本后调用 E1 授权原语，要求实验能力已开启，返回写进回执的授权事实。
     def _authorize(self) -> dict:
         from ..conversation.decision_service import _identity
         from ..settings.decision_experiment import authorize_decision_experiment
@@ -80,20 +81,30 @@ class GatewayExperimentGrant:
         except ValueError as exc:
             raise _GrantRejected("source_identity_invalid") from exc
         command = self.command
-        return authorize_decision_experiment(
+        operations = ("observe", "apply") if command["mode"] == "apply" else ("observe",)
+        report = authorize_decision_experiment(
             self.agent, self.params, source=source, expected_revision=view["revision"], points=[command["point"]],
             duration_seconds=command["duration_seconds"], max_http_requests=command["max_http_requests"],
-            max_input_tokens=command["max_input_tokens"], input_bound_policy=EMPIRICAL_INPUT_BOUND_POLICY)
+            max_input_tokens=command["max_input_tokens"], input_bound_policy=EMPIRICAL_INPUT_BOUND_POLICY,
+            operations=operations)
+        previous = view["experiment_authorization"]
+        return {"authorization_id": report["experiment_authorization"]["authorization_id"], "thread_id": thread_id,
+                "operations": list(operations),
+                "previous_request_id": previous["source"]["request_id"] if previous is not None else ""}
 
-    # LLM: 回执只含身份、状态与固定代码/授权编号，不含任务正文、密钥或设置内容。可选字段用显式关键字参数
-    #   （架构守卫禁止 **kwargs 服务接口），非空才写入，granting/granted/rejected 三种回执形状与原先一致。
+    # LLM: 回执只含身份、状态、授权动作与固定代码/授权编号/上一来源请求，不含任务正文、密钥或设置内容。
+    #   可选字段用显式关键字参数（架构守卫禁止 **kwargs 服务接口），非空才写入：rejected 才带 code，
+    #   granted 才带 _authorize 返回的授权事实（v2：授权编号、thread、动作与 previous_request_id）。
     # 函数用途: 生成本请求的实验授权回执。
-    def _receipt(self, status: str, *, authorization_id: str = "", code: str = "") -> dict:
-        extra = {key: value for key, value in (("authorization_id", authorization_id), ("code", code)) if value}
-        return {"schema": _GRANT_SCHEMA, "request_id": self.writer.request_id,
-                "execution_attempt_id": self.writer.execution_attempt_id,
-                "run_id": str(getattr(self.params, "run_id", "") or ""),
-                "attempt_id": str(getattr(self.params, "attempt_id", "") or ""), "status": status, **extra}
+    def _receipt(self, status: str, *, code: str = "", grant: dict | None = None) -> dict:
+        receipt = {"schema": _GRANT_SCHEMA, "request_id": self.writer.request_id,
+                   "execution_attempt_id": self.writer.execution_attempt_id,
+                   "run_id": str(getattr(self.params, "run_id", "") or ""),
+                   "attempt_id": str(getattr(self.params, "attempt_id", "") or ""), "status": status}
+        if code:
+            receipt["code"] = code
+        receipt.update(grant or {})
+        return receipt
 
     # LLM: create=True 只在没有回执时写入；否则只替换同一次 granting 回执。内存请求与文件保持相同。
     # 函数用途: 用原子 JSON 更新写回执，返回本次是否真正写入。
@@ -124,8 +135,10 @@ class GatewayExperimentGrant:
             return
         if receipt["status"] == "granted":
             command = self.command
+            promotion = ("另授权：最近证据满足规则时，宿主自动把本会话该点改为 apply（用户后改优先，reset 恢复继承）；"
+                         if command["mode"] == "apply" else "")
             text = (f"\n[决策实验] 已授权本轮只观察 {command['point']}：{command['duration_seconds']} 秒内最多 "
-                    f"{command['max_http_requests']} 次请求、{command['max_input_tokens']} 输入 token；"
+                    f"{command['max_http_requests']} 次请求、{command['max_input_tokens']} 输入 token；{promotion}"
                     "输入上界按经验估计（empirical:jev_wire_bytes.v1），不是供应商保证。\n")
         else:
             text = f"\n[决策实验] 未建立授权（{receipt.get('code', '')}）；本轮任务照常执行，不发送实验请求。\n"

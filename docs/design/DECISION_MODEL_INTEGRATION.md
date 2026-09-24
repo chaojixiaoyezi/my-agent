@@ -441,6 +441,17 @@ P5-C 规划首片只在当前主代理读取已有多项 Todo 时追加一个 ex
 
 边界：经验上界不是供应商保证，只覆盖已标定的 skill_tool 形态；本地 TUI 直连模式和后台执行没有授权钩子，不会发送实验；本机文件队列属于同一 owner 的可信通道（与 `/audit` 准备轮相同）。细节与验证见 [E1 交接](../tasks/DECISION_MODEL_EXPERIMENT_E1_HANDOFF.md#第二片experiment-授权入口经验输入上界与发送硬门2026-09-24)。
 
+### P5-E2/F1 对照记录、证据评估与授权内自动晋升（2026-09-25，本地实施待审）
+
+要解决的问题：真实运行里一次只观察实验的结算快照只在内存原账里，回合结束即丢，留不下“基线对候选、结果、来源、配置版本”的持久记录；也没有任何环节能把实验证据变成设置建议，或在用户授权内应用它。
+
+- **E2 对照记录，只写原权威**：没有 token 表、旁路恢复文件或第二本账。`settle_input_budget` 的返回值改为结算视图（预算快照加本调用的结算码、调用编号、原估算输入和声明上界），经 `DecisionExperimentCall.settlements` 带回决策服务，挂到 `DecisionOutcome.experiment`（普通调用恒为 None）。只观察路径据此生成 `decision_experiment_record.v1`：身份 refs（owner/thread/run/task/attempt/request/operation/call）、授权编号、设置两层 revision、策略与连接版本、候选版本、输入上界口径；**基线**=点关闭时原 Registry `model_visible_specs` 实际展示的工具（数量、名称集合 sha256、前 64 个名称）；**候选**=按 apply 同一规则（`selected_capabilities`+`_project`）投影 Jev 回答后的短名单/延迟名单（各至多 256 个，超出显式标记截断）与 Skill 计数；**结算**=原账返回视图的白名单字段。条目经能力观察出口拆出，在同一请求记录 `experiment_records.entries` 内写入：record_id=原调用编号去重、最多 8 条、盖 Gateway 执行代次；写入走精确回合转换锁（回合关闭/停止时抛中断、不写），其它写盘失败只放弃这一条。只有进入过原账预留的调用才有记录。
+- **实际用量**：`_execute_gateway_conversation_turn` 在模型回合正常返回后、持久化答复前调用收尾：只有宿主协议结束原因为 completed 且结构化工具账 `archive_tool_calls` 每条都有工具名时才记 `known=true` 与去重工具名（前 64 个）；其它记 `known=false` 与原因码，不从正文补猜。只补写本执行代次的条目；停止/关闭的回合不补写，异常只记日志、不改变本轮结果。普通请求在观察与收尾处都零 I/O、不写任何键。
+- **F1a 只读评估**：`conversation/decision_experiment_evaluation.py` 只读这些条目并逐条核对 owner/thread。样本=最近 8 条已完成条目；可比较=结算 charged、实际用量已知、候选已投影且召回可算。短名单召回=实际工具中在短名单的比例，分母只含本次快照内的工具（短名单或延迟名单中的），快照外工具不计；名单截断而无法归类、或没有可归类工具时召回未知（样本不可比较，但不阻断）。规则四条同时成立才提出 `points.skill_tool.mode off→apply`：可比较样本≥3、窗口内每个样本 charged、每个可比较样本召回=1.0、每个可比较样本延迟数>0；否则 `keep_observing` 与原因码。常量属于已审计规则，不设配置项。跨请求证据只沿授权回执 v2 的 `previous_request_id`（授权时被替换信封的来源请求）回读原请求记录，至多 16 条，每条须是本会话 granted 回执，编号按文件名规则校验。`user_config decision_read` 在会话已有授权信封时附只读 `experiment_evaluation`（插在信封之后），模型可见；没有信封时输出逐字节不变。
+- **F1b 授权内自动晋升**：`/experiment apply skill_tool …` 与 observe 同一语法，信封 operations 为 `["observe","apply"]`（仍是 v2；旧版程序无法读取含 apply 的信封，撤销与 reset 都不删除信封）。实验调用本身仍只观察；apply 只授权宿主在回合收尾时晋升：锁外只读评估，锁内复读设置，核对授权仍是本请求那份、身份一致、active、含 apply、未到期、设置 revision 与授权时一致、能力仍开、点有效模式仍为 off，再经原设置服务 `patch`（thread 范围、`expected_revision` 取锁内读数，完整 CAS）写 apply。冲突或任何用户后改（线程/用户层修改、默认配置改变有效模式、撤销、到期、被新授权替换）都跳过、绝不覆盖。
+- **回执权威选请求记录**：`experiment_records.promotion` 与触发它的证据同处一份原请求记录；授权信封是纯授权、会被下一次授权整份替换，把回执写进它还会改变信封 schema 与发送门的读取者。晋升先写 `promoting` 再改设置，已有任何回执即不再尝试（内存快判加锁内复核，重放与重启幂等）；崩溃遗留的 `promoting` 表示结果不确定，不重试、不反向恢复。回执含状态/原因码、目标字段、证据摘要（记录编号与计数）以及前后值（线程覆盖是否存在及值、有效模式、两层 revision）。到期或撤销不回滚已晋升设置，需要恢复继承时对 `points.skill_tool.mode` 执行 reset。
+- **不变的边界**：Jev 回答只经宿主投影成候选名单，不能直接改变评估或触发晋升；模型没有授权或晋升工具路径（`user_config` 仍只有读取/撤销实验授权）。节省只按延迟数计，工具 schema 字节随协议序列化而变，不作为结构化事实记录。
+
 ## 8. 模型窗口、缓存与输入用量
 
 ### 模型选择先满足客观条件

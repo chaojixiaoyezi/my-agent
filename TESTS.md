@@ -2,6 +2,16 @@
 
 child不展示历史正文时的读取回归先复现1 failed/1 passed，修复后test_compact_retained_history、test_subagent_compact_recovery、test_gateway_child_compact_scope_application三文件31 passed（8.48秒）。三宿主seed仓外基线仅验证测量和完整性，不算内存目标通过；细节见容量审计的宿主生命周期基线。
 
+## 决策实验对照记录、证据评估与授权内自动晋升（2026-09-25，本地分支 `claude/decision-experiment-records`，待审）
+
+- **改动**：只观察实验调用经原账结算后，结算视图随 `DecisionOutcome.experiment` 带回，生成 `decision_experiment_record.v1`（身份、配置版本、基线/候选名单、结算）写进 Gateway 请求记录 `experiment_records`；回合正常收尾按结构化工具账补写实际用量；只读评估（≥3 可比较、全部 charged、召回 1.0、有节省）沿授权回执指针回读原请求记录，经 `user_config decision_read` 暴露；`/experiment apply` 授权内经原设置 CAS 一次性晋升 `points.skill_tool.mode`，回执写在请求记录。
+- **新测试** `test_decision_experiment_records.py` 27 项：复用 `test_decision_experiment_send_gate.py` 的本地 HTTP `lab` 夹具，断言记录结算字段逐项等于原账快照、record_id 等于原调用编号、基线等于原 Registry 实际展示、候选短名单/延迟名单、无用户正文/候选说明/模型回答/端点；未进入原账预留不写记录、普通决策无条目；真实请求文件与回合转换锁下的观察拆分与去重、8 条上界、关闭/停止/换代次时抛中断且不写、写盘失败吞掉；收尾实际用量来自工具账、6 类未知（未完成、无账、空名、非字符串名、非字典、混入坏记录）、只补写本执行代次、普通收尾零 I/O、停止收尾不补写。
+- **新测试** `test_decision_experiment_evaluation.py` 33 项：规则矩阵（样本不足、召回<1 两种、零节省、四种非 charged）、六类不可比较样本不计不阻断、快照外工具不稀释召回、外来 owner/线程/点/schema/未完成/空编号忽略、去重与 8 条窗口、证据链跨四个目录按新到旧、越界/隐藏/缺失指针终止且加载器自身拒绝越界编号、跨会话/成环/16 条上限；`user_config decision_read` 暴露只读评估且紧跟授权信封、无授权时输出不变、读取失败给 `unavailable`。
+- **新测试** `test_decision_experiment_promotion.py` 18 项：真实设置服务与真实 E1 授权入口；apply 语法与回执 v2 指针、一次 CAS 晋升（revision 只前进一次、前后值与证据编号）、重放与重启不二次晋升、崩溃遗留 promoting 不重试（内存与锁内两种）、observe 授权永不晋升但读路径给出建议、锁内读后用户改另一字段则 `settings_conflict` 且保留用户值、线程/用户层/默认配置三种后改跳过、撤销/到期/被替换跳过、四种弱证据（单样本、召回<1、usage_unknown、外来 owner）即使 Jev 候选完美也不晋升、被拒授权与模型工具均无授权/晋升路径。
+- **新测试** `test_decision_experiment_gateway_turn.py` 4 项：真实 `_run_gateway_ask`（原 SimpleAgent.run/设置/Registry/RuntimeDB/请求文件），主模型为 typed 假答复并发起一次真实原生工具调用，Jev 连本地 HTTP：一次实验一条记录、结算 charged、实际工具名来自真实工具账；普通回合不写任何实验键；两条历史授权链上样本加本轮样本时 apply 晋升、observe 不晋升。
+- **改动的原有测试**：`test_decision_experiment_command.py` 把 apply 从无效用例移出（改用 `promote`/`Apply`/`["apply"]` 等无效形态）；`test_model_call_input_budget.py` 断言结算视图额外的结算码/调用编号/估算/上界字段，快照部分与原值相同。
+- **结果**：相关 10 文件从干净字节码 246 passed；全部 `test_decision_*.py` 与 `test_gateway_*.py` 90 文件（变基到 `1132fd9d0` 后，含主线新增的两个 S2 文件）2196 passed、2 skipped；相邻 20 文件 604 passed；`check_import_boundaries.py` 0 findings。变异 37 项 36 项被杀（清单与唯一等价变异说明见 [E1 交接第三片](docs/tasks/DECISION_MODEL_EXPERIMENT_E1_HANDOFF.md#第三片e2-对照记录f1-证据评估与授权内自动晋升2026-09-25)），每项 `PYTHONDONTWRITEBYTECODE=1` 子进程运行、sha256 原样恢复。未启动 Gateway、未调用真实供应商；真实 `/experiment apply` 验收待做。
+
 ## 自学习 S2：待确认 Skill 提案审核顺序 `skill_proposal_review`（2026-09-24，本地分支 `claude/self-learning-proposal-review-order`，待审）
 
 - **改动**：新增 `capability/decision_skill_proposal_review.py`；`POINT_RUNTIME_SCOPES` 登记 `skill_proposal_review: owner_background`；AgentConfig/YAML 三字段默认 off/null/null；TUI 决策菜单加“Skill 提案审核顺序（用户长期）”；`skills proposals list` 在点返回采用结果时才重排展示、加标签和 `review_order` 块。设计见[接入设计 P5-C 自学习 S2](docs/design/DECISION_MODEL_INTEGRATION.md#p5-c-自学习-s2待确认-skill-提案的审核顺序-skill_proposal_review)。

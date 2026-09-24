@@ -207,20 +207,33 @@ class ModelCallInputBudgetMethods:
             self._replace(replace(record, metadata={**record.metadata, "send_permit": permit}))
 
     # LLM: 只用原记录的 provider 完整输入结算；门拒绝不退款，失败/超时/缺报/多次 HTTP 保留占用并关闭后续准入，迟到结果不重开终态。
+    #   返回值是结算视图：预算快照加本调用的结算码、调用编号、原估算和上界；重复结算只读返回同一视图。
+    #   E2 实验记录直接携带这份返回值，不另建第二本账；同步检查 decision_model_call._settle_experiment 与预算测试。
     # 函数用途: 成功时释放上界与真实输入的差值；未知结果不变成零，不按缓存输入扣减。
     def settle_input_budget(self, call_id: str) -> dict:
         with self._lock:
             record = self._require_record(call_id)
             state = self._require_input_budget(record.metadata.get("input_budget_id", ""))
             if record.metadata.get("input_budget_state") != "reserved":
-                return state.snapshot(float(self.context.now()))
+                return _settlement_view(state, record, float(self.context.now()))
             if record.status not in _TERMINAL_STATUSES:
                 raise ModelCallBudgetError("call_not_terminal")
             if state.active_call_id != call_id:
                 raise ModelCallBudgetError("reservation_mismatch")
             outcome = _settle_reservation(state, record)
-            self._replace(replace(record, metadata={**record.metadata, "input_budget_state": "settled", **outcome}))
-            return state.snapshot(float(self.context.now()))
+            record = replace(record, metadata={**record.metadata, "input_budget_state": "settled", **outcome})
+            self._replace(record)
+            return _settlement_view(state, record, float(self.context.now()))
+
+
+# LLM: 调用者持原锁；只投影原预算快照与原记录的结构化字段（结算码、调用编号、原估算输入、声明上界），不含正文或端点原文。
+# 函数用途: 生成一次结算的完整只读视图，供宿主原样写入实验记录。
+def _settlement_view(state: ModelCallInputBudgetState, record, now: float) -> dict:
+    bound = record.metadata.get("input_bound")
+    return {**state.snapshot(now), "call_id": record.call_id,
+            "outcome": str(record.metadata.get("input_budget_outcome") or ""),
+            "estimated_input_tokens": record.input_tokens,
+            "input_bound_tokens": bound.get("tokens") if isinstance(bound, dict) else None}
 
 
 # LLM: 全部判断在调用者已持原锁的区间；宿主身份不从调用正文读取，任何失败均在原记录和余额变更之前返回。

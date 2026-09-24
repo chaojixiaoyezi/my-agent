@@ -274,6 +274,9 @@ def test_original_retention_preserves_budget_until_deadline_and_new_ledger_canno
     with token:
         _finish(ledger)
         result = ledger.settle_input_budget("call")
+    # 结算视图 = 预算快照 + 本调用的结算码/编号/原估算/声明上界（E2 实验记录原样携带，不另建账）。
+    call_facts = {key: result.pop(key) for key in ("call_id", "outcome", "estimated_input_tokens", "input_bound_tokens")}
+    assert call_facts == {"call_id": "call", "outcome": "charged", "estimated_input_tokens": 999, "input_bound_tokens": 60}
     for index in range(12):
         ledger.started(ModelCallStartedParams(f"ordinary-{index}", "base", "main", 1, run_id=f"other-{index}"))
     assert ledger.input_budget_snapshot("authorization") == result

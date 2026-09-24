@@ -1,5 +1,6 @@
 # LLM: 只由已鉴权且已获用户明确授权的宿主控制 API 调用 authorize；HostCommandIdentity 只是原来源，工具一般执行权不授予实验。
-# 模块用途: 将一次有限、只观察的用户许可保存到原会话设置及原模型账；没有调度器、网络、自动应用或恢复策略。
+#   信封可带 apply 动作，但本模块从不改点模式：晋升由 Gateway 宿主在回合结束按证据规则经原设置 CAS 另行执行。
+# 模块用途: 将一次有限、调用只观察的用户许可保存到原会话设置及原模型账；没有调度器、网络、自动应用或恢复策略。
 from __future__ import annotations
 
 import time
@@ -14,6 +15,7 @@ from .decision_experiment_schema import (
     EMPIRICAL_INPUT_BOUND_POLICY,
     EXPERIMENT_SCHEMA,
     experiment_identifier,
+    experiment_operations,
     experiment_points,
     experiment_positive_count,
     experiment_task_id,
@@ -29,10 +31,12 @@ from .model_provider_schema import ModelProfileError
 
 # LLM: 宿主须先完成明确用户授权和原 operation 幂等；HostCommandIdentity 仅证明字段形状/归属，不证明用户确认或持久提交。
 # input_bound_policy 是宿主转交的用户接受口径，只支持 empirical:jev_wire_bytes.v1；v2 信封据此才可能通过发送门。
+# operations 由宿主按用户命令给出：observe，或 observe 加 apply（apply 只许宿主在证据规则满足后晋升设置，调用仍只观察）。
 # 函数用途: 供 Gateway /experiment 等宿主入口保存一次有限许可；普通模型不注册它，保存本身不发网络。
 def authorize_decision_experiment(context: object, params: object, *, source: HostCommandIdentity,
                                   expected_revision: dict, points: list[str], duration_seconds: float,
-                                  max_http_requests: int, max_input_tokens: int, input_bound_policy: str) -> dict:
+                                  max_http_requests: int, max_input_tokens: int, input_bound_policy: str,
+                                  operations: tuple[str, ...] = ("observe",)) -> dict:
     from .decision_settings import _check_revision, execute_decision_settings_operation
 
     started, issued = time.monotonic(), time.time()
@@ -41,6 +45,7 @@ def authorize_decision_experiment(context: object, params: object, *, source: Ho
     binding = _host_experiment_binding(context, params, source)
     duration = positive_seconds(duration_seconds)
     allowed_points = experiment_points(points)
+    allowed_operations = experiment_operations(list(operations))
     maximum_http, maximum_input = experiment_positive_count(max_http_requests), experiment_positive_count(max_input_tokens)
     view = execute_decision_settings_operation(context, "read", {"scope": "thread"}, thread_id=binding["thread_id"])
     if not view["effective"]["enabled"] or not view["effective"]["experiment_enabled"]:
@@ -55,7 +60,7 @@ def authorize_decision_experiment(context: object, params: object, *, source: Ho
     authorization = validate_experiment_authorization({
         "schema": EXPERIMENT_SCHEMA, "authorization_id": uuid.uuid4().hex, "status": "active", "scope": "thread",
         "binding": binding, "source": {**asdict(source), "operation_id": source.operation_id},
-        "points": allowed_points, "operations": ["observe"], "duration_seconds": duration,
+        "points": allowed_points, "operations": allowed_operations, "duration_seconds": duration,
         "issued_at": issued, "expires_at": issued + duration, "max_http_requests": maximum_http,
         "max_input_tokens": maximum_input, "input_bound_policy": EMPIRICAL_INPUT_BOUND_POLICY,
         "settings_revision": {"owner": expected_revision["owner"], "thread": expected_revision["thread"] + 1},

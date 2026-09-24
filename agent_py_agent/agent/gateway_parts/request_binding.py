@@ -133,6 +133,14 @@ class GatewayTaskBindingWriter:
 
         return grant_request_decision_experiment(self, agent, params)
 
+    # LLM: 只读：user_config 的 decision_read 在已有授权信封时经当前运行参数找到本写入器调用；实现归 request_experiment_records。
+    #   请求记录路径来自本写入器（原 Gateway 队列），不接受模型参数；不写文件、不触发晋升。
+    # 函数用途: 为设置读取提供当前会话实验证据的只读评估。
+    def decision_experiment_evaluation(self, agent: object, thread_id: str, authorization: dict) -> dict:
+        from .request_experiment_records import thread_experiment_evaluation
+
+        return thread_experiment_evaluation(self, agent, thread_id=thread_id, authorization=authorization)
+
     # LLM: 任务晋升只能回写同一请求；原子持久写成功后再更新共享内存对象，失败不伪造绑定。
     # 函数用途: 接收运行时确认的任务链接，让本轮 Compact 重试和重启恢复使用相同归属。
     def __call__(self, link: object) -> bool:

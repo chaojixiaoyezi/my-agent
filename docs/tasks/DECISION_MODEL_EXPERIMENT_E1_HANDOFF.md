@@ -2,7 +2,7 @@
 
 - 日期：2026-09-22；分支：`codex/decision-model-integration`。
 - 范围：主线授权的共享 worktree 内，原 decision settings、ModelCallLedger、决策服务、user_config、TUI 能力字段及定向测试。
-- 状态：**本地授权保存/撤销与预留原语已实现；完整 E1 和联网实验未实现、未验收。** 2026-09-24 第二片（见文末）已在本地实现 `/experiment` 授权入口、经验输入上界与发送硬门，待审；真实授权发送仍未验收。
+- 状态：**本地授权保存/撤销与预留原语已实现；完整 E1 和联网实验未实现、未验收。** 2026-09-24 第二片（见文末）实现 `/experiment` 授权入口、经验输入上界与发送硬门，已合入 main `dfa8e498b`，2026-09-25 两次真实授权发送已完成（见第二片末节）。2026-09-25 第三片（见文末）在本地实现 E2 对照记录、F1 只读证据评估与 `/experiment apply` 授权内自动晋升，待审；真实 apply 验收未做。
 - 没有启动或修改 Gateway，没有请求真实 Jev/MiniMax，没有提交、推送、部署或操作日常用户数据。
 
 ## 解决问题与真实边界
@@ -186,3 +186,78 @@ E2 同样本基线/候选对照、F 可信效果指标与自动应用、G 自动
 - 能力推荐只观察、未采用。
 
 已知缺口：结算快照没有持久化（只在进程内账本），对照记录与基于证据的提议留给下一片（E2/F1）。详见[真实验收](DECISION_MODEL_REAL_VALIDATION.md)第 17 节。
+
+## 第三片：E2 对照记录、F1 证据评估与授权内自动晋升（2026-09-25）
+
+- 分支：`claude/decision-experiment-records`，基于 origin/main `1132fd9d0`（开发时基于 `dfa8e498b`，提交前变基吸收主线的回执显式参数修正与文档更新），单个本地提交，未推送、未部署。
+- 状态：**已实施，本地定向、组合与严格 gate 通过，待审**。`experiment_enabled` 默认仍关闭；真实 `/experiment apply` 验收尚未做。
+- 没有启动 Gateway、没有请求真实 Jev/MiniMax；测试只连本机临时 HTTP 服务。
+
+### 解决的问题
+
+第二片的真实运行（2026-09-25）证明授权→只观察实验→结算的链路成立，但留下两个缺口：
+1. 结算快照只在内存原账里，回合结束即丢；一次实验留不下“基线对候选、结果、来源、配置版本”的持久记录（P5-E 要求）。
+2. 没有任何环节把实验证据变成设置建议，也没有在用户授权内应用它的路径（P5-F）。
+
+### E2：对照记录只写原请求记录
+
+- **结算视图**：`contracts/model_call_budget.py::settle_input_budget` 返回预算快照加本调用的 `call_id`、`outcome`（charged/usage_unknown/refused_before_send/gate_bypassed/input_bound_violated）、原估算 `estimated_input_tokens` 与声明上界 `input_bound_tokens`；重复结算只读返回同一视图。`decision_model_call._settle_experiment` 把它追加到 `DecisionExperimentCall.settlements`（不参与比较/哈希；结算失败记 `settlement_failed`）。
+- **结果携带**：`decision_service._invoke` 拆成 `_invoke`（外壳）与 `_invoke_call`（原逻辑）；只有调用确已进入原账预留时，`_with_experiment_facts` 才在 `DecisionOutcome.experiment` 挂上授权编号、设置两层 revision、策略/连接版本、上界口径与结算视图。普通调用恒为 None。
+- **条目构造**：`capability/decision_experiment_sample.py::experiment_sample_record` 生成 `decision_experiment_record.v1`：refs（owner/thread/run/task/attempt/request/operation/call）、config、decision（状态/原因/题数）、**baseline**（点关闭时原 Registry `model_visible_specs` 实际展示的工具：数量、名称集合 sha256、前 64 个名称）、**candidate**（`decision_recommendation._experiment_candidate` 用 apply 同一规则 `selected_capabilities`+`_project` 投影 Jev 回答：短名单/延迟名单各至多 256 个、截断标记、Skill 计数；非成功/非选择/投影失败只给原因码）、**settlement**（结算视图白名单）、`realized=None`。不含用户正文、题目、候选说明、模型回答、凭据或端点。
+- **写入**：条目随能力观测一起交给观察出口；`gateway_parts/request_experiment_records.py::observe_capability_presentation` 把 `experiment_record` 拆出，原观测照旧写 `capability_presentation_observation`，条目经 `record_decision_experiment_sample` 在精确回合转换锁内追加进 `experiment_records.entries`：record_id=原调用编号去重、最多 8 条、盖 Gateway 执行代次；回合关闭/停止抛中断且不写（不留半截记录），其它写盘失败只放弃这一条，内存 request 同步。
+- **实际用量**：`request_execution._execute_gateway_conversation_turn` 在模型回合正常返回后、持久化答复前调用 `finish_decision_experiment_turn`：只有 `result_turn_end_reason==completed` 且 `archive_tool_calls` 每条都是带非空 `tool` 的字典时记 `known=true`、去重工具名（前 64 个）与调用次数；其它记 `known=false` 与 `turn_not_completed`/`archive_unavailable`，不从正文补猜。只补写本执行代次的条目（崩溃恢复的新代次不接管旧候选）；停止/关闭的回合不补写，异常只记日志、不改变本轮结果。普通请求（无条目、无 apply 授权）零 I/O。
+
+### F1a：只读证据评估
+
+- `conversation/decision_experiment_evaluation.py` 只读这些条目，按 schema/point/record_id 与 refs 的 owner/thread 逐条核对，其它一律忽略；样本=最近 8 条已完成条目（按 record_id 去重）。
+- 可比较样本=结算 `charged`、实际用量已知、候选已投影且召回可算。召回=实际工具中在短名单的比例，分母只含快照内工具（短名单或延迟名单里的）；快照外工具（如模型编造的名称）不计。名单截断而无法归类、实际名单截断或没有可归类工具时召回未知：样本不可比较，但不阻断。
+- 规则四条同时成立才给 `proposal`（`points.skill_tool.mode` off→apply，thread 范围）：可比较样本≥3（`insufficient_samples`）、窗口内每个样本 charged（`settlement_not_charged`）、每个可比较样本召回=1.0（`recall_below_one`）、每个可比较样本延迟数>0（`no_savings`）；否则 `keep_observing` 与原因码。常量（3、1.0、8、charged）是审计过的规则，写在代码并有中文说明，不设配置项：可调阈值等于让人绕过证据门，行为本身已由 `experiment_enabled` 与逐次显式 `/experiment apply` 授权把关。
+- **证据链**：授权回执升 `gateway_decision_experiment_grant.v2`，另记 `thread_id`、`operations` 与 `previous_request_id`（授权时被替换信封的来源请求，与本次 CAS 同一次读取）。评估从链头沿该指针回读原请求记录（终态→处理中→done→failed），至多 16 条；每条须是本会话 granted v2 回执，编号按文件名规则（无 `/`、`:`、前导 `.`）校验，否则终止。没有目录扫描、索引文件或第二本账。
+- **读路径**：`GatewayTaskBindingWriter.decision_experiment_evaluation` → `thread_experiment_evaluation`；`user_config decision_read` 在会话已有授权信封、当前运行由 Gateway 写入器承载时，在 `experiment_authorization` 之后附只读 `experiment_evaluation`（含 `authorized_operations` 与链头请求的 `latest_promotion`）；读取失败只给 `unavailable/evidence_unreadable`；没有信封时输出逐字节不变。工具描述未改，普通请求的工具 schema 字节不变。
+
+### F1b：授权内自动晋升
+
+- 语法：`/experiment apply skill_tool <时长> <HTTP次数> <输入token上限> <任务>`；信封 `operations=["observe","apply"]`（仍是 v2，`experiment_operations` 只接受这两种精确列表）。实验调用本身仍只观察（`may_apply=False`），apply 只授权宿主在规则满足时晋升。
+- `request_experiment_promotion.py::promote_skill_tool_if_ready` 只在本请求 granted 回执含 apply 时由收尾调用：锁外只读评估；锁内（phase `experiment_promotion`，回合须 open 且未请求停止）复读设置并依次核对：仍是本请求那份授权（`authorization_replaced`）、身份（`identity_changed`）、active（`authorization_revoked`）、含 apply、未到期（`authorization_expired`）、设置 revision 与授权时一致（`settings_changed`）、能力仍开、点有效模式仍为 off（`point_not_off`，覆盖默认配置变化）；再经原设置服务 `patch`（thread 范围，`expected_revision` 取锁内读数，完整 CAS）写 apply。冲突记 `settings_conflict`，写入前校验失败记 `promotion_rejected`，写入结果不明记 `uncertain/settings_write_uncertain`；都不重试、不覆盖用户值。
+- **回执权威：本请求记录 `experiment_records.promotion`**。理由：它与触发晋升的证据同处原请求记录；授权信封是纯授权，会被下一次授权整份替换，把回执写进去还要改信封 schema 及发送门的所有读取者。顺序是先写 `promoting` 再改设置、最后写终态回执；已有任何回执即不再尝试（内存快判加锁内复核），重放与重启幂等；崩溃遗留的 `promoting` 表示结果不确定，保持原样。回执含状态/原因码、目标字段、证据摘要（状态、原因、样本数、记录编号）与前后值（线程覆盖是否存在及值、有效模式、两层 revision）。
+- 撤销或到期只停止未来实验与晋升，不回滚已晋升的设置；需要恢复继承时对 `points.skill_tool.mode` 执行 reset。Jev 回答只经宿主投影成候选名单；模型没有授权或晋升的工具路径（`user_config` 仍只读/撤销实验授权）。
+
+### 文件归属
+
+| 文件 | 本片内容 |
+| --- | --- |
+| `agent/contracts/model_call_budget.py` | 结算视图（快照＋结算码/调用编号/估算/上界） |
+| `agent/conversation/decision_send_permit.py`、`decision_model_call.py`、`decision_service.py` | 结算视图带回、`DecisionOutcome.experiment`、`_invoke` 拆分 |
+| `agent/capability/decision_experiment_sample.py`（新）、`decision_recommendation.py` | 条目构造（基线/候选/结算）与只观察路径接线 |
+| `agent/conversation/decision_experiment_evaluation.py`（新） | 只读规则评估 |
+| `agent/gateway_parts/request_experiment_records.py`（新）、`request_experiment_promotion.py`（新） | 写入、收尾实际用量、证据链、读路径、授权内晋升与回执 |
+| `agent/gateway_parts/request_experiment.py`、`request_binding.py`、`request_execution.py` | 回执 v2（显式参数，无 `**kwargs`）、只读评估入口、观察出口与收尾接线 |
+| `agent/settings/decision_experiment_schema.py`、`decision_experiment.py`、`agent/conversation/control_commands.py`、`agent/command_catalog.py` | observe/apply 动作校验、授权原语动作参数、`/experiment apply` 语法与帮助 |
+| `agent/tooling/user_config_tool.py` | `decision_read` 附只读 `experiment_evaluation` |
+| `tests/test_decision_experiment_records.py`、`test_decision_experiment_evaluation.py`、`test_decision_experiment_promotion.py`、`test_decision_experiment_gateway_turn.py`（新）；`test_decision_experiment_command.py`、`test_model_call_input_budget.py`（改） | 见下 |
+
+以上路径均相对 `agent_py_agent/`。
+
+### 本地验证
+
+- 新增四文件 82 项：`test_decision_experiment_records.py` 27（结算字段等于原账快照、基线/候选名单、无正文泄露、未预留不写、普通决策无条目、观察拆分与去重、8 条上界、关闭/停止/换代次不写、写盘失败吞掉、实际用量来自工具账、6 类未知、只补写本代次、普通收尾零 I/O、停止收尾不补写）、`test_decision_experiment_evaluation.py` 33（规则矩阵、不可比较样本不计不阻断、快照外工具不稀释召回、外来/未完成/畸形条目忽略、去重与窗口、证据链跨目录/越界编号/缺失/跨会话/成环/上限、`decision_read` 暴露/不变/读取失败）、`test_decision_experiment_promotion.py` 18（apply 语法与授权、一次 CAS 晋升及回执、重放与重启幂等、崩溃标记不重试（内存与锁内两种）、observe 永不晋升但可读建议、读写之间用户后改、三种后改、撤销/到期/被替换、四种弱证据、被拒授权与模型无路径）、`test_decision_experiment_gateway_turn.py` 4（真实 Gateway 回合：本地 HTTP 实验、真实工具调用入账、普通回合零键、链上 apply 晋升与 observe 不晋升）。
+- 相关改动文件共 10 个从干净字节码（删除全部 `__pycache__`、`PYTHONDONTWRITEBYTECODE=1`）246 passed；全部 `test_decision_*.py` 与 `test_gateway_*.py`（变基到 `1132fd9d0` 后 90 文件）2196 passed、2 skipped；相邻 20 文件（守卫、命令、插件目录、user_config、原账、TUI 菜单、工具展示等）604 passed；`scripts/check_import_boundaries.py` 0 findings。
+- 变异 37 项，36 项被杀，每项在子进程 `PYTHONDONTWRITEBYTECODE=1` 下运行、按 sha256 原样恢复，结束后删除字节码重跑：结算视图丢结算码、结算不带回、事实丢结算、无预留也挂事实、基线改读原始快照、候选名单对调、写入去重去掉、样本写入放行关闭回合、未完成回合算已知、畸形工具账部分接受、收尾不看执行代次、只在 apply 时补写、链不核对会话、加载器不校验编号、观测保留实验条目、两样本即可、结算规则只看可比较样本、去掉召回规则、去掉节省规则、接受外来 owner、未完成条目计入、快照外工具算漏掉、窗口放宽、去掉 revision 核对、去掉到期核对、去掉撤销核对、覆盖 promoting 标记、CAS 改用新读版本、去掉点模式核对、observe 授权可晋升、语法接受未知动作、回执丢上一请求指针、apply 命令只授 observe、读路径无授权也读取、去掉收尾接线、信封动作不校验。存活的 1 项是“去掉收尾函数开头的早返回”：内层两个条件已保证普通请求零 I/O，为等价变异，保留早返回只为可读性。首轮另有 3 项存活（加载器编号校验、锁内已有回执即放弃、CAS 必须用锁内读数），都是纵深防御守卫：已补直接调用加载器、在内存快判之后注入并发标记、在锁内首次读之后注入用户修改三个用例，复跑后全部被杀。
+- 严格 gate（变基后的提交上）：`ruff check agent_py_agent scripts`、`check_doc_sync.py --base HEAD~1`、`check_code_size.py --mode strict`（与 origin/main `1132fd9d0` 临时 worktree 的发现集合逐项比对，新增 0）、`git diff --check`、`check_clean_package.py .`、`check_import_boundaries.py` 均通过；线上 CI 不作为验收来源。
+
+### 偏差与边界
+
+- **召回口径**：分母只含本次快照内（短名单或延迟名单里）的工具，快照外工具不计，没有可归类工具时召回未知。字面口径会把模型编造的工具名算成“漏掉”，与候选无关却永远阻断晋升；这里的口径仍比“只看被移出初始展示的工具”更保守（同一工具若基线也按目录类别收起，仍按漏掉计）。
+- **可比较样本要求实际用量已知且有可归类工具**：实际用量未知或没调用任何工具的样本没有召回证据，不计入 3 个，但结算为 charged 时也不阻断。
+- **“每个样本都 charged”作用于窗口内全部已完成样本**：旧的 usage_unknown 样本会阻断建议，直到它移出最近 8 条窗口；这是按规则字面取的保守口径。
+- **节省只按延迟数**：工具 schema 字节随协议序列化而变，不是快照的结构化事实，未记录。
+- **读路径只在 Gateway 运行内可用**：owner 作用域 Agent 的 `gateway_workspace` 按 owner 重新解析，不指向原队列目录；因此读取器由当前请求的写入器（持有原请求路径）提供。TUI 菜单与本地直连没有这个入口，只有 `user_config decision_read` 暴露。
+- **旧版回退**：含 apply 的信封旧版程序无法读取（会拒绝该线程整份决策设置），撤销与 reset 都不删除信封；回退前须用一次 `/experiment observe` 授权替换，或使用升级前备份。v1 回执（第二片写的）没有指针与 thread，不进入证据链。
+- **晋升后不自动撤销授权**：晋升写入推进了 revision，旧授权随之失效；点模式变为 apply 后实验只在普通模式 off 时运行，因此不会再对该点实验。
+- 与主线并行修正的合并：`request_experiment._receipt` 原用 `**fields`，违反“产品代码不用 var-keyword 服务接口”守卫；主线 `0bb6f3a88` 已改为显式 `authorization_id`/`code`。本片变基后保留显式关键字参数，改为 `code`/`grant`（`grant` 是 `_authorize` 返回的 v2 授权事实：授权编号、thread、动作、上一来源请求），非空才写入。
+
+### 建议下一步
+
+1. **先审阅本分支再做一次真实 apply 验收**（测试机、隔离 owner，不动日常用户数据）：开启 `enabled` 与 `experiment_enabled`、`skill_tool` 普通模式 off、决策连接指向官方 Jev；同一会话连续发 3 次 `/experiment apply skill_tool 10m 1 50000 <会实际调用工具的短任务>`（任务需真的调用 1—2 个工具，否则样本没有召回证据）。每次核对请求记录的 `experiment_grant`（v2、`previous_request_id` 指向上一次）、`experiment_records.entries[0]`（结算 `charged` 且等于原账、候选名单、`realized.known=true`）；前两次收尾回执应为 `skipped/evaluation_keep_observing`（`insufficient_samples`），第三次在规则满足时为 `applied`，设置读回 `points.skill_tool.mode` 为 thread 覆盖 `apply`、revision 正好前进一次；再用 `user_config decision_read` 看 `experiment_evaluation` 与 `latest_promotion`，最后 reset 该字段恢复继承。若召回不满足，记录 `recall_below_one` 与涉及的工具名作为真实证据，不改规则。
+2. 可并行：其他 agent 只读整理更多真实 skill_tool 请求的 wire 字节与计费扩展经验标定；另一线可做 P5-G 的临时试验自动收尾（沿本片回执与原 `restore` 原语）。都不要同时改 `experiment_records` 写入器、授权信封或 ModelCallLedger 结算视图。
+3. 风险边界：不要把阈值做成可调配置，不要把 Jev 置信度或模型自述接进评估；跨进程恢复仍不支持（崩溃遗留 `promoting` 只保留不确定事实）。
