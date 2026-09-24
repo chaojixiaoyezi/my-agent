@@ -156,3 +156,36 @@ P4-B 普通 user owner 的两轮隔离真实中文配置各有 **1 次 Jev HTTP*
 ## 后续缓存验收的环境复核（2026-09-23，只读）
 
 使用既有SSH配置成功连接用户授权独立测试机；前次319004926隔离安装目录、venv、回退/清理记录仍存在，8420/8431当前无监听。未启动、停止、安装或改模型设置，也未发供应商请求；全线Jev HTTP累计仍57次。此证据不表示最新分支已部署。下一轮需冻结源码版本及wheel hash、再次复核占用，沿原隔离owner验证真实缓存回执，未报告字段继续保留未知。
+
+## 12.7同会话Compact与跨模型缓存验收（2026-09-23，固定安装版）
+
+固定源码`5e5122b04ea52a06d834c1b50a4e12a69afda900`、tree `fbead33fc3627f395cba580a00a4bf071b335303`经git archive构建wheel，SHA256 `1c50c588e8687a9cbb6847f12a4a38bdd9d6d41841dba816a35fe10dc1b5f1b7`。相对前安装版变化的19个测试文件 **613 passed、1既有xpassed**，全目录Ruff、doc sync、strict code-size（hard=0，基线不变）、diff、源码与wheel清洁检查全部通过；日志`/tmp/decision_candidate_gate_5e5122b04_pytest.log`及同前缀0—4守卫日志。此focused严格gate不重新裁定旧全仓历史失败，线上CI没有作为验收来源。
+
+与另一开发任务确认测试机空闲后，在用户授权独立机器的新目录建立venv/HOME，只复制原测试四模型配置及自编队列材料；旧安装和旧证据不变。安装后用`python -I`确认实际导入新venv。唯一候选Gateway监听8431；首次start就绪观察超时，但同PID随后running，未因此重复启动。补齐旁观器后通过原CLI正常stop/start，最终业务进程PID3163135。私有凭据不打印、不入仓，另一个任务的运行环境不动。
+
+原生TUI会话`sess_1790209198_9e446294`、thread `thread-8e1ce61b514842bf`，每轮仅给一次普通中文需求，不代替被测对象写文件/补产物。业务先保持官方M2.7和决策关闭，完成队列审查与普通跟进；空闲后原`/compact`提交`compact-v3-1-3dad852327c8cff3d5b6`、generation 0→1、source_messages=4，原会话模型用量新增独立`conversation_compact`事件。随后同会话续聊，再用原设置CAS开启on4（owner revision19→20）。Jev选模实际返回当前M2.7，未发生自动异模采用。之后通过原`/model`菜单的“当前会话模型”先选官方M3、再选OpenCode deepseek-v4-flash；不改变新会话默认模型。
+
+下表输入、缓存均取原用量事件及原ModelCallLedger逐字段来源；“已报”指该字段有供应商回执的调用数。Compact单列，不把摘要缓存当作恢复后主调用缓存。
+
+| 场景 / 原request ID | 主调用数 | 主输入 | 缓存读（已报） | 缓存写（已报） | 决策输入 |
+| --- | ---: | ---: | --- | --- | ---: |
+| M2.7初次审查 `gwreq-1790209415-100565b079be47539a54356263dd1403` | 2 | 44,534 | 21,558（2/2） | 22,971（2/2） | 无调用 |
+| M2.7同会话跟进 `gwreq-1790209489-431d6c4338d244cf92dcfe590b810b2a` | 1 | 24,827 | 22,194（1/1） | 2,633（1/1） | 无调用 |
+| Compact摘要 `conversation-compact:transcript:953c6b63fb7a40d2a912bb906515bbc6` | 辅助1 | 26,371 | 25,198（1/1） | 1,173（1/1） | 无调用 |
+| Compact后M2.7续聊 `gwreq-1790209646-1c05dd771b4040199b99efc249bd9258` | 1 | 23,298 | 20,222（1/1） | 3,071（1/1） | 无调用 |
+| on4仍选M2.7 `gwreq-1790209783-6882ee1d3ca947898019575447b367a5` | 2 | 48,763 | 22,978（1/2，其余未知） | 未报告 | 20,466 |
+| 显式M3首轮 `gwreq-1790209944-65847621a235492e8ebd179fd9e90e3a` | 1 | 28,412 | 128（1/1） | 未报告 | 20,398 |
+| M3实际读取工具轮 `gwreq-1790210045-70bb11673f8b4989a2cb98657391267e` | 2 | 62,932 | 59,276（2/2） | 未报告 | 20,395 |
+| 显式DeepSeek实际读取工具轮 `gwreq-1790210151-ed5ee5fa9d46497caf4b1553f8478b79` | 2 | 74,088 | 36,352（1/2，其余未知） | 未报告 | 20,430 |
+
+七条业务均原`done/ok/completed`；M3首轮没有工具调用，不作为工具轮证据，后续独立读取需求实际完成read_file；DeepSeek同样完成原工具往返。业务文件hash保持，未运行/修改文件。真实端点分别为官方`https://api.minimaxi.com/anthropic/v1/messages`（M2.7和M3）及`https://opencode.ai/zen/go/v1/chat/completions`（deepseek-v4-flash）；Jev为原`https://api.typesafe.ai/v1/systemone`。本轮Jev **8次HTTP200，累计65次**。保留原usage，不展示决策价格；界面只追加决策输入。
+
+窄旁观器在原HTTP组包之后仅记system/tools/messages的cache_control数量及已有hash，不改请求/响应；在原ledger.finished返回后读取原record的provider_usage_fields，缺失写null。M2.7稳定材料阶段实际有三个ephemeral断点，on4的system hash变化单列；工具schema hash保持。M3首请求缓存读128，后续两次分别28,412和30,864；这证明该模型自己的真实缓存回执，不证明沿用了M2.7的缓存。DeepSeek首主调用未报告缓存、第二次明确读36,352，不能把首调用补零。所有wire请求都有HTTP终态，另有探针等不在业务ledger范围；wire到Gateway request没有精确关联键，因此不凭数组位置将每条wire分配给某一业务请求。
+
+不同业务输入、工具轮数和Compact成本不同，本轮**不作净token节省或速度提升结论**。回答质量也未因done自动通过：例如M2.7并发时序说明存在把空队列pop描述成仍可返回任务的不严谨处，属于后续质量评估；本片不加针对该样例的产品分支。显式选模验证历史/工具兼容，不能计作第13/16项Jev跨模型自动采用完成。真实近窗口、媒体与超大来源仍按12.4验收。
+
+采集修正：旧脚本强取done.conversation_runtime，第二轮缺此投影而报KeyError；原conversation_claim.thread_id存在且业务完成，改为读原claim即可，不改产品。旧脚本还把采集时thread的模型和代次套到所有旧轮，窄报告现明确命名`thread_*_at_collection`；前后代次依据gen0快照、原控制展示与canonical checkpoint，实际模型依据每调用ledger/wire。最终仓外报告`/tmp/decision-cache-acceptance-5e5122b04/completed-seven-rounds-cache-usage-report.json`，SHA256 `6093ab669ec5b405fbdf5e8391adc78ae4c05f59ffbaa30f2d6e846ecb038415`。
+
+清理：原CAS将隔离owner overrides逐值恢复baseline，revision20→21且enabled=false；TUI正常退出code0，候选Gateway通过原CLI停止，PID不存活、8420/8431无监听、inbox/processing均0、26条HTTP观察均有终态。历史测试thread保留显式DeepSeek选择供证据复查；它是新建隔离会话，不影响默认模型。清理机器记录在新隔离目录`artifacts/cleanup-current.json`。
+
+12.7按上述明确组合收口；12的7个子项已完成6个，剩12.4。总清单仍11/18、P1—P5 Goal active。建议下一步：完成并复核12.4选中正文生命周期及其宿主伴随片；另一agent可并行查协议/取消，生产修改和Gateway控制各守单owner，源代码新实现不得借本固定旧包冒充已部署验收。

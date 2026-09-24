@@ -1,5 +1,7 @@
 # LLM_GUIDE
 
+12.7固定5e5122b04安装候选的19个变更测试文件613 passed、1既有xpassed，非pytest严格守卫通过。同一原生TUI已验M2.7两轮→原/compact提交→续聊、on4建议保留及显式切换官方M3/OpenCode DeepSeek的真实工具轮和缓存回执；七条业务全部完成，Jev累计65次，隔离设置已恢复且Gateway已停。12.7按已验组合收口，12剩12.4，总清单11/18不变；真实自动异模仍未完成。见[真实验收](docs/tasks/DECISION_MODEL_REAL_VALIDATION.md)。
+
 此前4项后台Compact测试接口缺口已按owner授权收口：先复现4 failed/158 passed，再补fake Store的include_messages及临时canonical消息域，整文件162 passed。原业务断言及生产路径不改；旧全仓八项历史问题另列，第12.4及11/18仍未完成。见[验收记录](docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。
 
 12.4原生历史投影保留一次canonical隔离复制，已隔离副本直接用于模型/摘要，匿名重复输出仍独立；嵌套容器测试峰值约4.89MB降至3.03MB。复用主线b4ffb3475的小JSON有界直接编码修复，估算口径不变；三文件72项通过。来源正文/覆盖ID仍驻留，12.4及11/18不变。详见[容量审计](docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。

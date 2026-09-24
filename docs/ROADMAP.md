@@ -1,5 +1,7 @@
 # 后续开发与验证
 
+12.7固定5e5122b04安装版缓存对照已收口：M2.7压缩后续聊、on4保留、官方M3/OpenCode DeepSeek显式跨模型工具轮有真实回执。第12项6/7已验，剩12.4来源正文及宿主生命周期；其第一片并行实现中。总清单11/18不变，自动异模仍归13/16，详见[真实验收](tasks/DECISION_MODEL_REAL_VALIDATION.md)。
+
 此前4项后台Compact测试接口缺口已按owner授权收口：先复现4 failed/158 passed，再补fake Store的include_messages及临时canonical消息域，整文件162 passed。原业务断言及生产路径不改；旧全仓八项历史问题另列，第12.4及11/18仍未完成。见[验收记录](tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。
 
 12.4原生历史投影保留一次canonical隔离复制，已隔离副本直接用于模型/摘要，匿名重复输出仍独立；嵌套容器测试峰值约4.89MB降至3.03MB。复用主线b4ffb3475的小JSON有界直接编码修复，估算口径不变；三文件72项通过。来源正文/覆盖ID仍驻留，12.4及11/18不变。详见[容量审计](tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。
