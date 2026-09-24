@@ -645,6 +645,9 @@ auth 表单取消和参数拒绝已验，官方设备码在两处环境被 HTTP 
   TUI 通过方向键和 Enter 打开目标草稿，明确保存才生效，退出丢弃；保存使用内容版本比较，计费刷新不制造编辑冲突。
   修改内容不隐式恢复暂停目标，不改变 run/task、历史和权限。主子目标保存、放弃、停止以及父子消息隔离已实测；孙级、IM 和旧数据迁移仍待专项验证。详见 [目标控制](docs/design/THREAD_GOAL_LIFECYCLE.md)。
 
+- 已实现、真实验收待做（2026-09-24，分支 `claude/compact-media-b`）：媒体压缩策略片 B。auto 下由结构化事实选随图摘要：档案 `input_modalities` 声明，
+  或宿主一次 8×8 纯色图探针（进程级缓存、只认结构化工具回答）；强制恢复、同代次 B 曾失败、视频、字节/摘要预算不满足都落归档引用并在 checkpoint
+  记 reason。B 单请求失败统一 typed `COMPACT_VISION_SUMMARY_FAILED`，只写线程代次标记不进熔断。见 [媒体压缩策略](docs/design/COMPACT_MEDIA_POLICY.md#片-b-实现记录与偏差2026-09-24按代码事实调整不改原则)。
 - 已修并真实复验通过（2026-09-24，main `4ec0e11f3`，双机 runtime-step10o；本机两段式派工/唤醒任务与测试机停用重启用均通过，见 TESTS）：后台唤醒续跑的工具目录不再是封闭名单。默认 profile 决策带 `extension_tools=inherit`，
   运行构造方按注册表代理类型事实并入当前已启用插件/MCP 工具；显式配置或任务白名单标 `none`。停用撤销与禁用表仍在注册表/快照
   fail-closed。同批：停止重试可按 PID 出生标识结清实例已消失的旧 unknown 进程记录，插件停用不再卡在 `activation_unsettled`。

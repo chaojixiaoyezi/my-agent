@@ -1,6 +1,6 @@
 # 媒体会话的压缩策略：归档引用为主链，视觉摘要按结构化能力事实开启
 
-状态：用户已定方向（2026-09-24）——A（旧媒体降级为可重新附上的归档引用）是主链和默认；B（含图轮次随文字进摘要）只在模型的视觉能力事实为 `supported` 时启用，事实只能来自档案声明或结构化探针，不能来自模型自述。决策线评审意见已并入本稿（见"评审并入的决定"）。片 A 已合入 main `6bb0467b1` 并双机部署，真实 TUI 验收通过（TESTS.md）；片 B/C 待实施。上位合同见 [TUI 图片视频](TUI_INPUT_MEDIA.md)、[容量审计](../tasks/DECISION_MODEL_CONTEXT_AUDIT.md#媒体会话越过压缩点2026-09-24本地修复)。
+状态：用户已定方向（2026-09-24）——A（旧媒体降级为可重新附上的归档引用）是主链和默认；B（含图轮次随文字进摘要）只在模型的视觉能力事实为 `supported` 时启用，事实只能来自档案声明或结构化探针，不能来自模型自述。决策线评审意见已并入本稿（见"评审并入的决定"）。片 A 已合入 main `6bb0467b1` 并双机部署，真实 TUI 验收通过（TESTS.md）；片 B 已本地实现（分支 `claude/compact-media-b`，实现记录与偏差见文末），真实 TUI 验收见 TESTS；片 C 待实施。上位合同见 [TUI 图片视频](TUI_INPUT_MEDIA.md)、[容量审计](../tasks/DECISION_MODEL_CONTEXT_AUDIT.md#媒体会话越过压缩点2026-09-24本地修复)。
 
 ## 解决问题
 
@@ -71,6 +71,27 @@
 - B：声明 `image` 的假后端记录到摘要请求含 base64 图块；超预算时选 A 且无媒体块外发；B typed 失败后写码、下一次同代次选 A 并留结构化原因。
 - 探针：正确颜色 → supported 缓存；typed 媒体拒绝 → unsupported 缓存；网络错不缓存；三种都用计数替身钉住只发一次。
 - 真实 TUI：M3 会话先贴图再读长文越过压缩点 → 自动压缩成功，checkpoint 有 `media_policy`；压缩后问图：A 下模型如实说明附件已归档并请求重新添加，B 下按摘要作答；M2.7 会话在 `auto` 下探针为 `unsupported`、走 A。
+
+## 片 B 实现记录与偏差（2026-09-24，按代码事实调整，不改原则）
+
+- **落点**：`backends/vision_capability.py`（探针 + 进程级缓存，键 = 工具端点 + 模型 + api_base，同键单飞；只缓存 supported/unsupported）；
+  `conversation/compact_media_policy.py`（`resolve_compact_media_policy(agent, forced=, thread=)`、`vision_capability_fact`、
+  `vision_summary_admission`、`MediaArchiveFacts.bytes/videos`、`COMPACT_VISION_SUMMARY_FAILED`）；`compact.py::_effective_media_decision`
+  在摘要请求构造处做准入；`compact_request_budget.generate_bounded_compact_response(vision_summary=, media_reserve_tokens=)`
+  单请求发送并把窗口错误/媒体拒绝/截断/超预算统一抛 typed 码；线程新增 `compact_vision_failed_generation`（默认 -1，压缩成功重置）；
+  checkpoint 新增 `media_blocks_summarized`、`media_policy_reason`。
+- **档案字段**：`input_modalities` 登记在 `validate_model`、快捷新增白名单与 `resolved_model`（→ `AgentConfig.model_input_modalities`），
+  `/model` 表单多一个"输入模态"输入；决策模型不接受。开放小写标识符，只处理 `image`/`video`/`text`。
+- **探针时机**：`resolve_compact_media_policy` 只给骨架决定（auto 下为 archived_refs + `vision_candidate`，fact_source `vision_fact_pending`），候选构造在确认压缩范围内确有媒体块后才调用 `resolve_vision_candidate` 读声明或发探针；纯文字压缩零额外请求（首版把探针放在解析处，两个 Gateway 压缩回归多出 2 次模型调用，据此改正）。
+- **探针细节**：答错或不调用工具最多重试 2 次后记 `probe_inconclusive`（不缓存）；`probe_tool_capability().native_supported`
+  为假记 `probe_unavailable`（不缓存）；网络/额度/认证错误在策略解析处捕获为 `probe_unavailable`、本次按 A、只记异常类型，
+  不让一次探针网络错拖垮压缩主链（原稿写"原样上抛"，此处改为在策略层吸收，探针缓存仍不写阴性）。
+- **准入顺序**：视频块 → 字节预算（`input_media_max_bytes`）→ 摘要预算（文字估算 + 图块数 × `input_media_token_reserve`）；
+  legacy prompt（无 provider 缓存面）不能承载图块，一律 A，reason `legacy_prompt`。
+- **计量缺口保留**：preflight、`_automatic_noop` 与请求投影器的候选接受估算仍未加图块预留（原稿"三处门"只在 B 准入与
+  `generate_bounded_compact_response` 落地）；低估仍由供应商窗口错误的恢复路径兜底，作为片 C 前的已知偏差。
+- **失败切换**：`_compact_pending` 对 `COMPACT_VISION_SUMMARY_FAILED` 只写 `compact_vision_failed_generation`，不增加
+  `compact_consecutive_failures`；同代次下一次压缩在解析策略时读到它即选 A，checkpoint 记 `media_policy_reason` 为该码。
 
 ## 边界与风险
 

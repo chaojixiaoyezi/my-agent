@@ -142,7 +142,7 @@ def validate_provider(value: object) -> dict:
 
 
 # LLM: 模型引用不持有第二份 secret；decision 只走独立决策协议，不能进入生成适配器；同步用途隔离测试。
-#   目录读取也经本函数重校验，未登记的字段会被丢弃；可选用途标签在此登记，决策模型不接受。
+#   目录读取也经本函数重校验，未登记的字段会被丢弃；可选用途标签和可选输入模态在此登记，决策模型都不接受。
 # 函数用途: 检查模型协议、用途、容量、适用采样和可选用途标签；型号允许透传，决策模型不接受无效的生成参数。
 def validate_model(value: object) -> dict:
     if not isinstance(value, dict) or not isinstance(value.get("model_backend"), str) or value["model_backend"] not in BACKENDS:
@@ -163,7 +163,8 @@ def validate_model(value: object) -> dict:
     # 可选扁平列表字段紧挨用途放：用途标签在此；将来的 input_modalities 按同一格式并列放这里。
     result = {"provider_id": validate_provider_id(value.get("provider_id")), "model_name": name.strip(),
             "model_backend": value["model_backend"], "model_context_window_tokens": int(window),
-            "capability": capability, "enabled": value.get("enabled", True), **_usage_tags_field(value, capability)}
+            "capability": capability, "enabled": value.get("enabled", True), **_usage_tags_field(value, capability),
+            **_input_modalities_field(value, capability)}
     temperature = value.get("temperature")
     if temperature not in (None, ""):
         try:
@@ -219,7 +220,41 @@ def validate_usage_tags(value: object) -> list[str]:
     return tags
 
 
+# 输入模态是开放的小写标识符列表（text/image/video 是压缩策略认识的值，其它照存不判定）；缺省表示未知。
+_INPUT_MODALITY = re.compile(r"[a-z][a-z0-9_]{0,39}")
+_MAX_INPUT_MODALITIES = 8
+
+
+# LLM: 只在填写时返回字段，缺省不写键（未知，由结构化视觉探针判定）；决策模型不接受，与采样字段和用途标签同一口径。
+# 函数用途: 为模型记录生成可选的输入模态字段，供 validate_model 合并。
+def _input_modalities_field(value: dict, capability: str) -> dict:
+    modalities = validate_input_modalities(value.get("input_modalities"))
+    if modalities and capability == "decision":
+        raise ModelProfileError("输入模态只用于对话/工具或向量模型，决策模型不填写。")
+    return {"input_modalities": modalities} if modalities else {}
+
+
+# LLM: 用户显式声明的模型输入模态是"能否随图摘要"的结构化事实来源之一，不由模型名或模型自述推断；开放世界：
+#   只校验格式，解析方只处理认识的值（image/video/text），不认识的保留。缺省或空返回空列表，调用方不写键。
+#   经 resolved_model 以 model_input_modalities 进入 AgentConfig，压缩策略在运行时读取。
+# 函数用途: 把列表或逗号分隔文本规范成去重排序的小写标识符列表，格式不对明确拒绝。
+def validate_input_modalities(value: object) -> list[str]:
+    if value in (None, "", []):
+        return []
+    if isinstance(value, str):
+        items = [item for item in re.split(r"[,，\s]+", value) if item]
+    elif isinstance(value, list) and all(isinstance(item, str) for item in value):
+        items = [item.strip() for item in value if item.strip()]
+    else:
+        raise ModelProfileError("输入模态请填写逗号分隔的小写英文标识，例如 text, image。")
+    modalities = sorted(set(items))
+    if len(modalities) > _MAX_INPUT_MODALITIES or any(not _INPUT_MODALITY.fullmatch(item) for item in modalities):
+        raise ModelProfileError(f"输入模态最多 {_MAX_INPUT_MODALITIES} 个，每个以小写英文字母开头，只含小写字母、数字或下划线，长度不超过 40。")
+    return modalities
+
+
 # LLM: 扁平输入立即变成 provider 引用；用途必须保留，不能在快捷新增中把 decision 降为 agentic。
+#   快捷新增白名单含可选 usage_tags 与 input_modalities，两者都只登记不改变生成参数。
 # 函数用途: 校验快捷新增的完整连接信息及用途；秘密仍只保存到服务商，非生成字段不传入 AgentConfig。
 def validate_model_profile(value: object) -> dict:
     if not isinstance(value, dict):
@@ -229,7 +264,7 @@ def validate_model_profile(value: object) -> dict:
         "custom_headers": value.get("model_custom_headers", {}), "session_header": value.get("model_session_header", "")})
     if not provider["api_key"]:
         raise ModelProfileError("模型名称、地址和密钥不能为空。")
-    row = {key: model[key] for key in ("model_name", "model_backend", "model_context_window_tokens", "temperature", "top_p", "model_queue_wait_seconds", "capability", "enabled", "usage_tags") if key in model}
+    row = {key: model[key] for key in ("model_name", "model_backend", "model_context_window_tokens", "temperature", "top_p", "model_queue_wait_seconds", "capability", "enabled", "usage_tags", "input_modalities") if key in model}
     row.update(api_base=provider["api_base"], api_key=provider["api_key"])
     if provider["custom_headers"]:
         row["model_custom_headers"] = provider["custom_headers"]
@@ -284,6 +319,7 @@ def migrate_v4(data: dict) -> dict:
 
 
 # LLM: 唯一解析点校验调用方所需用途，即使跳过启用检查也不能混用；OAuth 只返回绑定引用。
+#   声明了 input_modalities 时以 model_input_modalities 进入 AgentConfig（压缩策略消费）；用途标签仍不进运行时。
 # 函数用途: 获得指定用途的连接字段，默认只供聊天生成；决策消费者须显式请求 decision，不发网络请求。
 def resolved_model(data: dict, profile_id: str, *, require_enabled: bool = True, capability: str = "agentic") -> dict:
     from .model_oauth_schema import has_credential, oauth_binding
@@ -297,6 +333,9 @@ def resolved_model(data: dict, profile_id: str, *, require_enabled: bool = True,
     result = {**{key: model[key] for key in ("model_name", "model_backend", "model_context_window_tokens", "temperature", "top_p", "model_queue_wait_seconds") if key in model},
             "api_base": provider["api_base"], "api_key": provider["api_key"],
             "model_custom_headers": dict(provider["custom_headers"]), "model_session_header": provider["session_header"]}
+    if model.get("input_modalities"):
+        # 声明的输入模态进入运行时配置，供含图历史压缩判断能否随图摘要；它不是生成参数，也不证明容量。
+        result["model_input_modalities"] = list(model["input_modalities"])
     auth = provider.get("auth")
     if auth:
         if auth["mode"] == "chatgpt" and model["model_backend"] != "openai_responses":

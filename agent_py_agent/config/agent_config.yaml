@@ -203,7 +203,12 @@ memory_compact_semantic_summary_max_input_chars: 12000
 # - archived_refs：固定走归档引用，不探针、不随图摘要。
 # - off：保持旧行为——从首个媒体回合起保护全部后缀不摘要，会话容量等于窗口减去图片之后的全部内容。
 # 附件原件与 canonical 历史在任何策略下都不删；需要重看旧图时重新添加同一附件即可。
+# 视觉能力事实只来自两处：模型档案的输入模态声明（/model 表单"输入模态"，运行时为 model_input_modalities），
+# 或未声明时宿主发起的一次结构化探针（8×8 纯色图 + 结构化工具回答，进程内缓存）；模型口头说"能看图"无效。
 compact_media_policy: "auto"
+# 随图摘要时每个图块在摘要预算里预留的 token 数（仅 auto 且视觉能力事实为支持时使用）；
+# 文字估算加图块数乘以该值超过摘要预算时，本次改走归档引用并在 checkpoint 记原因。
+input_media_token_reserve: 1600
 
 # Memory / compact / artifact 默认预算：
 # - 这些值只控制“默认读取多少、预览多少、扫描多少”，不是数据保留上限。
@@ -665,6 +670,9 @@ max_tokens: 16314
 # 当前模型真实上下文窗口 token 数。compact/preflight 用它计算何时折叠；
 # 不要和 chat_context_window_chars 混用，后者只是聊天界面的字符预算。
 model_context_window_tokens: 128000
+# 当前模型声明的输入模态（例如 [text, image]）。通常由 /model 档案的"输入模态"字段带入；留空表示未知，
+# 含图历史压缩时会用一次结构化视觉探针判断能否随图摘要，不按模型名猜。
+model_input_modalities: []
 # 是否把上述窗口视为显式总容量，不再由 provider metadata 覆盖。
 # /model 保存的各模型窗口自动采用此语义；部署默认 false 保持既有探测优先行为。
 model_context_window_explicit: false

@@ -1715,6 +1715,13 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.RETRY_AFTER_BACKOFF.value,
         recovery_hint="compact 未能提交；原历史、游标和代次保持不变，短暂退避后重试。",
     ),
+    "COMPACT_VISION_SUMMARY_FAILED": ErrorContract(
+        code="COMPACT_VISION_SUMMARY_FAILED",
+        category="compact",
+        retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="随图摘要请求失败（预算、供应商窗口、媒体拒绝或截断）；原历史与附件保留，同一代次的下一次压缩自动改走归档引用，不要原样重试。",
+    ),
     "COMPACT_STOP_TARGET_INVALID": ErrorContract(
         code="COMPACT_STOP_TARGET_INVALID",
         category="compact",

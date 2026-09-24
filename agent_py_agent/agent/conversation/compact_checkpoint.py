@@ -43,9 +43,12 @@ class CompactCheckpointRequest:
     source_tool_refs: tuple[dict[str, str], ...] = ()
     retained_tool_refs: tuple[dict[str, str], ...] = ()
     # LLM: 媒体策略事实只在本次覆盖范围含媒体块时写入 checkpoint；refs 为完整 sha256，供审计与用户按内容地址重新附上。
+    #   archived 与 summarized 互斥：A 路径计 archived，B 路径计 summarized；reason 记录 auto 下没走 B 的结构化原因。
     media_policy: str = ""
     media_fact_source: str = ""
     media_blocks_archived: int = 0
+    media_blocks_summarized: int = 0
+    media_policy_reason: str = ""
     media_refs: tuple[str, ...] = ()
 
 
@@ -171,10 +174,12 @@ def write_compact_checkpoint(agent: SimpleAgent, request: CompactCheckpointReque
         "retained_tail_messages": len(request.retained_tail),
         "operation_evidence": json.loads(json.dumps(request.operation_evidence, ensure_ascii=False)),
     })
-    if request.media_policy and request.media_blocks_archived > 0:
+    if request.media_policy and (request.media_blocks_archived > 0 or request.media_blocks_summarized > 0):
         row.update({
             "media_policy": request.media_policy, "media_fact_source": request.media_fact_source,
-            "media_blocks_archived": int(request.media_blocks_archived), "media_refs": list(request.media_refs),
+            "media_blocks_archived": int(request.media_blocks_archived),
+            "media_blocks_summarized": int(request.media_blocks_summarized), "media_refs": list(request.media_refs),
+            **({"media_policy_reason": request.media_policy_reason} if request.media_policy_reason else {}),
         })
     return _append_checkpoint(agent, row)
 

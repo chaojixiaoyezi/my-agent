@@ -301,6 +301,7 @@ class ThreadStore:
                 compact_consecutive_failures=0,
                 compact_failure_updated_at=0.0,
                 compact_failure_code="",
+                compact_vision_failed_generation=-1,
                 provider_context_observation={},
                 model_context_usage={},
                 updated_at=current,
@@ -521,3 +522,23 @@ class ThreadStore:
             report["thread_id"] = actual_thread_id
             report["path"] = str(path)
             return None, report
+
+
+# LLM: 只在代次未推进时写 compact_vision_failed_generation=当前代次；不碰 consecutive_failures/failure_code，因此不进熔断。
+#   放在类外是为了不再撑大 ThreadStore；仍走同一 update_atomic 原子更新。
+# 函数用途: 记录本代次随图摘要失败过，让下一次压缩改走归档引用。
+def record_thread_compact_vision_failure(
+    threads: ThreadStore,
+    thread_id: str,
+    *,
+    expected_generation: int,
+    now: float | None = None,
+) -> ConversationThread:
+    current = now if now is not None else time.time()
+
+    def apply(thread: ConversationThread) -> ConversationThread:
+        if thread.compact_generation != expected_generation:
+            return thread
+        return replace(thread, compact_vision_failed_generation=thread.compact_generation, updated_at=current)
+
+    return threads.update_atomic(thread_id, apply)

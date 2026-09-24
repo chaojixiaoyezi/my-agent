@@ -46,6 +46,7 @@ class SystemCommandRoutingError(RuntimeError):
 # LLM: 客户端错误仅按结构化 error_code 映射；未配置模型引导 /model，不虚构默认模型或泄露异常原文。
 # COMPACT_REQUEST_NON_TEXT 先于通用 COMPACT_ 前缀匹配：它现在表示"无法摘要的非文本内容"（unknown 块，或 compact_media_policy=off 时的图片），
 # 文案要点明这一点并给出可行动的出路；已知图片在 auto/archived_refs 下会走归档引用，不再报这个码。
+# COMPACT_VISION_SUMMARY_FAILED 同样先于前缀匹配：随图摘要本次失败，同代次下一次压缩自动改走归档引用，文案说明不必换模型。
 # 函数用途: 区分尚未配置、压缩、截断、持久化与请求拒绝，不把未知 400 归咎密钥或建议不安全重放。
 def gateway_client_error_message(error_code: object) -> str:
     code = str(error_code or "").strip().upper()
@@ -53,6 +54,11 @@ def gateway_client_error_message(error_code: object) -> str:
         return (
             "会话里有无法摘要的非文本内容（compact_media_policy 为 off 时图片也算），上下文无法压缩，已超出模型可用窗口，本轮没有继续执行；"
             "原始历史和任务文件仍保留。可切换更大上下文的模型后继续原会话，或新开会话继续。"
+        )
+    if code == "COMPACT_VISION_SUMMARY_FAILED":
+        return (
+            "本次随图摘要未完成（预算、供应商窗口、媒体拒绝或截断），原始历史和附件仍保留，本轮没有继续执行；"
+            "下一次压缩会自动把旧图降级为归档引用后重试，不需要换模型。"
         )
     if code.startswith("COMPACT_"):
         return (

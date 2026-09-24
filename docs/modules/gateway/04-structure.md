@@ -91,6 +91,9 @@ TUI 的控制载荷复用普通消息 workspace 投影；HTTP、持久回执、G
 `control_operation_service.py` 的 v3 摘要签入目录，旧 v1/v2 禁止带此字段；无目录输入仍用 v2，
 保证已有回执重试一致。回执不是新 workspace 权威，运行时仍读 canonical thread。
 
+`request_errors.py::gateway_client_error_message` 对 `COMPACT_REQUEST_NON_TEXT` 与 `COMPACT_VISION_SUMMARY_FAILED` 各给专用文案，再落通用 `COMPACT_` 前缀；
+后者说明随图摘要失败后同代次下一次压缩会自动改走归档引用，原历史与附件保留，不建议换模型或原样重试。
+
 ## 后台工具策略边界
 
 `conversation/background_tool_policy.py` 独占工具目录计算、策略标签与用途展示；显式 request 携带

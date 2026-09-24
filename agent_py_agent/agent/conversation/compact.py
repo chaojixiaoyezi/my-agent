@@ -26,14 +26,22 @@ from .compact_guard import (
     compact_partitions,
     raise_if_compact_interrupted,
     record_compact_failure,
+    record_compact_vision_failure,
 )
 from .compact_media_policy import (
+    COMPACT_VISION_SUMMARY_FAILED,
+    MEDIA_POLICY_ARCHIVED_REFS,
     MEDIA_POLICY_OFF,
+    MEDIA_POLICY_VISION_SUMMARY,
     CompactMediaDecision,
     MediaArchiveFacts,
+    archived_refs_fallback,
     media_archive_facts,
+    media_token_reserve,
     project_archived_media_message,
     resolve_compact_media_policy,
+    resolve_vision_candidate,
+    vision_summary_admission,
 )
 from .compact_message_source import CompactMessageSource, estimate_compact_payload
 from .compact_progress import (
@@ -229,8 +237,12 @@ class _CompactSummaryCall:
     tool_source_ir_history: tuple[object, ...] = ()
     preserve_complete_fallback: bool = False
     # LLM: media_policy 决定摘要来源重放时是否把媒体块投影为归档引用；media_archived 只影响摘要软指令，不参与判定。
+    #   media_decision/media_facts 供 B 候选在请求前做字节/预算准入；实际采用的决定追加到 media_outcome（调用方提供的列表）。
     media_policy: str = MEDIA_POLICY_OFF
     media_archived: bool = False
+    media_decision: CompactMediaDecision | None = None
+    media_facts: MediaArchiveFacts = field(default_factory=MediaArchiveFacts)
+    media_outcome: list[CompactMediaDecision] | None = None
 
 
 # LLM: Never derive owner or thread authority from prompt text in this projection.
@@ -665,7 +677,7 @@ def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
     # protecting and then re-compacting the same tail creates checkpoint churn without helping
     # the active turn fit. Normal threshold compaction still protects bounded complete turns.
     # 逻辑说明: 平时到 90% 时保留近期完整问答；供应商已报压力时一次压完旧段，避免同一尾部连压多代。
-    media_decision = resolve_compact_media_policy(request.agent)
+    media_decision = resolve_compact_media_policy(request.agent, forced=request.forced, thread=request.thread)
     safe_prefix, protected_suffix = _split_nontext_transcript_suffix(request.pending, media_policy=media_decision.policy)
     if not safe_prefix:
         raise ConversationCompactError("没有可完整文字摘要的历史前缀，保留原始媒体", code="COMPACT_SOURCE_EMPTY")
@@ -710,12 +722,17 @@ def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
                     request,
                     trigger_fallback,
                 )
-            record_compact_failure(
-                request.store,
-                request.thread,
-                code=compact_exception_code(exc),
-                now=request.attempted_at,
-            )
+            code = compact_exception_code(exc)
+            if code == COMPACT_VISION_SUMMARY_FAILED:
+                # 随图摘要的 typed 失败只写线程代次标记，不进熔断；同代次下一次压缩自动改走归档引用。
+                record_compact_vision_failure(request.store, request.thread, now=request.attempted_at)
+            else:
+                record_compact_failure(
+                    request.store,
+                    request.thread,
+                    code=code,
+                    now=request.attempted_at,
+                )
             raise
         _emit_compact_progress(
             request,
@@ -809,11 +826,15 @@ def _build_compact_candidate(
     # 媒体事实只从 canonical 信封统计；策略为 off 或没有决定时不统计、也不写 checkpoint 字段。
     media_facts = (media_archive_facts(compact_rows)
                    if media_decision is not None and media_decision.policy != MEDIA_POLICY_OFF else MediaArchiveFacts())
+    if media_decision is not None and media_facts.blocks > 0:
+        # 只有范围内确有媒体块才解析视觉能力事实（声明或缓存探针）；纯文字候选零额外请求。
+        media_decision = resolve_vision_candidate(request.agent, media_decision)
     base_summary = (request.compact_context.view.summary if request.compact_context is not None
                     else request.thread.summary)
     base_evidence = (request.compact_context.view.operation_evidence if request.compact_context is not None
                      else request.thread.compact_operation_evidence)
     evidence = _merge_compact_operation_evidence(base_evidence, compact_rows)
+    media_outcome: list[CompactMediaDecision] = []
     summary = _summarize(
         request.agent,
         base_summary,
@@ -833,6 +854,9 @@ def _build_compact_candidate(
             preserve_complete_fallback=request.request_projector is not None,
             media_policy=media_decision.policy if media_decision is not None else MEDIA_POLICY_OFF,
             media_archived=media_facts.blocks > 0,
+            media_decision=media_decision,
+            media_facts=media_facts,
+            media_outcome=media_outcome,
             source_progress=lambda covered, total: _emit_compact_progress(
                 request, phase="progress", stage="summarizing",
                 percent=progress_range[0] + int((progress_range[1] - progress_range[0]) * covered / max(1, total)),
@@ -862,7 +886,8 @@ def _build_compact_candidate(
         projected_tokens_after=projected_after,
         request_projection=projection,
         tool_source=request.tool_source,
-        media_decision=media_decision,
+        # 摘要阶段的准入可能把 B 候选落成归档引用；checkpoint 记的是实际采用的决定。
+        media_decision=media_outcome[-1] if media_outcome else media_decision,
         media_facts=media_facts,
     )
 
@@ -906,7 +931,11 @@ def _commit_compact_candidate(
             retained_tool_refs=candidate.tool_source.retained_tool_refs if candidate.tool_source is not None else (),
             media_policy=candidate.media_decision.policy if candidate.media_decision is not None else "",
             media_fact_source=candidate.media_decision.fact_source if candidate.media_decision is not None else "",
-            media_blocks_archived=candidate.media_facts.blocks,
+            media_policy_reason=candidate.media_decision.reason if candidate.media_decision is not None else "",
+            media_blocks_archived=(candidate.media_facts.blocks if candidate.media_decision is not None
+                                   and candidate.media_decision.policy == MEDIA_POLICY_ARCHIVED_REFS else 0),
+            media_blocks_summarized=(candidate.media_facts.blocks if candidate.media_decision is not None
+                                     and candidate.media_decision.policy == MEDIA_POLICY_VISION_SUMMARY else 0),
             media_refs=candidate.media_facts.refs,
             **({
                 "scope": request.compact_context.scope,
@@ -1127,11 +1156,14 @@ def _summarize(
     tool_source_text = compact_tool_summary_text(tool_history) if tool_history else ""
     provider_surface = selected_call.provider_surface
     foreground_rows = filtered_message_rows(rows, lambda row: not is_audit_background_transcript_entry(row))
+    media_decision = _effective_media_decision(agent, selected_call, previous_summary, foreground_rows, operation_evidence)
+    vision = media_decision.policy == MEDIA_POLICY_VISION_SUMMARY
     instruction = _conversation_summary_instruction(
         operation_evidence,
         custom_instructions=selected_call.custom_instructions,
         cache_safe=provider_surface is not None,
-        media_archived=selected_call.media_archived,
+        media_archived=selected_call.media_archived and not vision,
+        media_summarized=selected_call.media_archived and vision,
     )
     if provider_surface is None:
         prompt = _legacy_conversation_summary_prompt(
@@ -1149,8 +1181,9 @@ def _summarize(
             selected_call.compact_generation,
             foreground_rows,
             volatile_sections=provider_surface.volatile_sections,
+            # B 路径保留 local_file 图块，由供应商适配层在网络边界展开为 base64；A 路径投影为归档引用。
             project_message=(project_archived_media_message
-                             if selected_call.media_policy != MEDIA_POLICY_OFF else None),
+                             if selected_call.media_policy != MEDIA_POLICY_OFF and not vision else None),
         )
         provider_tools = (
             list(provider_surface.tools)
@@ -1183,6 +1216,8 @@ def _summarize(
         source_progress=selected_call.source_progress,
         preserve_complete_fallback=selected_call.preserve_complete_fallback or bool(tool_history),
         message_source=message_source,
+        vision_summary=vision,
+        media_reserve_tokens=selected_call.media_facts.blocks * media_token_reserve(agent) if vision else 0,
     )
     summary = (
         ""
@@ -1206,8 +1241,53 @@ def _summarize(
     return f"{summary}\n\n{tool_source_text}" if mechanical and tool_source_text else summary
 
 
+# LLM: 请求前的 B 准入：只有 provider 原生消息重放能承载图块，legacy prompt 一律落 A（reason legacy_prompt）；文字估算用
+#   不投影的来源加同一套摘要 prompt/工具/系统指令口径，再经 vision_summary_admission 过视频/字节/预算门。结果追加到
+#   call.media_outcome 供候选与 checkpoint 读取；不发请求、不改 rows。
+# 函数用途: 把 B 候选按结构化门落成本次实际使用的媒体策略。
+def _effective_media_decision(
+    agent: SimpleAgent,
+    call: _CompactSummaryCall,
+    previous_summary: str,
+    rows: Sequence[MessageLogEntry],
+    operation_evidence: dict[str, object],
+) -> CompactMediaDecision:
+    decision = call.media_decision or CompactMediaDecision(call.media_policy, "")
+    surface = call.provider_surface
+    if decision.policy == MEDIA_POLICY_VISION_SUMMARY:
+        if surface is None:
+            decision = archived_refs_fallback(decision, "legacy_prompt")
+        else:
+            from .auxiliary_model_call import AuxiliaryModelCallRequest
+            from .compact_request_budget import compact_request_tokens, compact_summary_budget
+
+            instruction = _conversation_summary_instruction(
+                operation_evidence, custom_instructions=call.custom_instructions, cache_safe=True,
+                media_summarized=call.media_archived,
+            )
+            raw_source = conversation_compact_provider_source(
+                previous_summary, call.compact_generation, rows, volatile_sections=surface.volatile_sections,
+            )
+            probe = AuxiliaryModelCallRequest(
+                agent=agent, prompt=conversation_compact_provider_prompt(surface, instruction), messages=None,
+                tools=list(surface.tools) if surface.tools is not None else None,
+                system_instruction=surface.system_instruction, purpose="conversation_compact_summary",
+            )
+            decision = vision_summary_admission(
+                decision, call.media_facts,
+                media_max_bytes=int(getattr(getattr(agent, "config", None), "input_media_max_bytes", 16 * 1024 * 1024) or 0),
+                reserve_tokens=media_token_reserve(agent),
+                text_tokens=compact_request_tokens(probe, raw_source),
+                budget=compact_summary_budget(agent),
+            )
+    if call.media_outcome is not None:
+        call.media_outcome.append(decision)
+    return decision
+
+
 # LLM: These shared rules are content guidance only. The cache-safe flag describes where the rows
 # live on the wire; it cannot authorize evidence, select a partition, or change commit semantics.
+# media_archived / media_summarized 只是软引导：前者说明图已换成引用，后者说明图随请求发送、要求摘要图中要点。
 # 函数用途: 生成 transcript Compact 的统一摘要要求，并说明历史是原生消息还是兼容 prompt 正文。
 def _conversation_summary_instruction(
     operation_evidence: dict[str, object],
@@ -1215,6 +1295,7 @@ def _conversation_summary_instruction(
     custom_instructions: str,
     cache_safe: bool,
     media_archived: bool = False,
+    media_summarized: bool = False,
 ) -> str:
     row_location = (
         "The chronological provider messages immediately before this request are the new "
@@ -1235,6 +1316,10 @@ def _conversation_summary_instruction(
             *(["Image or video attachments in the rows were replaced by [附件引用 ...] reference blocks; keep those",
                "references and the conclusions drawn from them at the time. Do not claim the media itself is present."]
               if media_archived else []),
+            *(["Image attachments from the rows are included in this request. Summarize what each image shows that",
+               "matters for the conversation (values, labels, structure, conclusions) and keep the attachment name",
+               "or hash so the summary can refer to it later; the images themselves will not be resent."]
+              if media_summarized else []),
             "Use separate sections for the user's primary goal, current work, exact project/file paths,",
             "verified results, unfinished tasks, and the next step. A progress-check request does not",
             "replace the larger task it refers to. Retain the original requirements unless the user changed them.",
