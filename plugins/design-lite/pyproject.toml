@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "my-agent-design-lite"
+version = "0.1.0"
+description = "按模板生成 HTML 设计文件，并修改标题、副标题、颜色"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+dependencies = ["my-agent-plugin-api==0.2.0"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+license-files = ["LICENSE", "NOTICE"]
+
+[tool.setuptools.package-data]
+design_lite = ["declaration.json", "skills/*/SKILL.md"]

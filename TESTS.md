@@ -537,6 +537,7 @@ OAuth 传输、采样和模型菜单回归。覆盖保存无网络、公开字�
 ## 第 10 步第三批插件（本地，待发布）
 
 - `test_image_text_package.py`（10 项）：从源码构建 image-text 包并起真实 MCP 进程；本机有 tesseract 时用测试内极简 PNG 编码器画的点阵英文图实识别（无 tesseract 时 skip），另覆盖 tesseract 缺失返回 OCR_UNAVAILABLE 且仍带元数据（PNG/伪装扩展名/GIF/JPEG/WebP 宽高）、非图片与损坏头部、超上限、链接/上溯/越界、非法语言名、语言包缺失列出已装语言、假 tesseract 超时被杀且临时文件删除、坏设置启动失败。
+- `test_design_lite_package.py`（15 项）：从源码构建 design-lite 包，确认包描述 v3、`skills == ["design-card"]`、wheel 内 SKILL.md 可按 frontmatter 解析；起真实 MCP 进程：三种模板 create（无外部资源、无 script、标题副标题转义、权限 0644）、默认色与非法颜色/未知模板/非 .html 拒绝、已存在拒绝与 `--overwrite`、edit 只改目标字段（其余字节不变、保持原权限位、返回新旧值）、非本插件/非 UTF-8/标记被改的文件拒绝、字段缺失与未给字段、越界/上溯/链接/写入范围拒绝、缺写入上下文失败。
 
 ## 第 10 步第二批宿主补充（本地，待发布）
 

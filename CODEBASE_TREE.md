@@ -844,6 +844,18 @@ plugins/
 |       |-- reading.py                 # 业务错误类型与授权后的 no-follow 有界图片读取
 |       |-- image_info.py              # 按魔数识别 PNG/JPEG/GIF/WebP 并解析宽高
 |       `-- ocr.py                     # 定位并以超时运行 tesseract、临时文件清理、TSV 解析与语言包检查
+|-- design-lite/                       # 自有 HTML 设计文件插件：按模板生成、只改标题/副标题/颜色，随包带 Skill
+|   |-- README.md                      # 构建、两个动作用法、模板说明与中文示例
+|   |-- pyproject.toml                 # 插件发行身份、精确 SDK 依赖及 Skill 打包
+|   `-- src/design_lite/
+|       |-- declaration.json           # 动作、工具（create/edit 都是写）与随包 Skill 名单的唯一声明
+|       |-- __init__.py                # 独立插件包入口
+|       |-- __main__.py                # python -m design_lite 启动 stdio 服务
+|       |-- server.py                  # MCP 握手声明读/写上下文扩展，逐次调用分派与中文错误
+|       |-- declarations.py            # 读取同源声明并验证平面参数
+|       |-- operations.py              # 生成与修改流程：no-follow 读回，经写入上下文 check/anchor 原子写回
+|       |-- templates.py               # 三个内联 CSS 模板、转义渲染与 data-dl-field 字段定位替换
+|       `-- skills/design-card/SKILL.md # 随包 Skill：何时用、模板差别、先 create 再 edit
 |-- savepoint-lite/                    # 自有文件快照插件：保存/列出/恢复，快照只存插件数据目录
 |   |-- README.md                      # 构建、三个动作用法与中文示例
 |   |-- pyproject.toml                 # 插件发行身份及精确 SDK 依赖
@@ -923,6 +935,7 @@ docs/
 - `plugins/workspace-peek/` 与 `scripts/build_plugin_package.py`：首个自有只读插件及标准安装包构建，独立 MCP 入口只消费宿主逐次上下文。
 - `plugins/genui-lite/`：首个随包带 Skill（包描述 v3）的自有插件，table 只读渲染、export 经写入上下文导出独立 HTML；`agent_py_agent/tests/test_genui_lite_package.py` 为其实际包与 MCP 进程组件验收。
 - `plugins/image-text/`：本地 OCR 工具插件，只调用系统 tesseract、不调用模型；`agent_py_agent/tests/test_image_text_package.py` 为其实际包与 MCP 进程组件验收。
+- `plugins/design-lite/`：首个带随包 Skill（包描述 v3）的自有插件，生成与修改 HTML 设计文件都走写入上下文；`agent_py_agent/tests/test_design_lite_package.py` 为其实际包、Skill 打包与 MCP 进程组件验收。
 - `plugins/savepoint-lite/`：首个写工作区的自有插件，快照只存宿主插件数据目录，恢复走写入上下文；`agent_py_agent/tests/test_savepoint_lite_package.py` 为其实际包与 MCP 进程组件验收。
 - `agent_py_agent/tests/test_plugin_api_build.py`、`agent_py_agent/tests/test_workspace_peek_package.py`：实际标准包、独立环境和原 MCP/宿主管理链的开发验证，不代替真实 TUI。
 

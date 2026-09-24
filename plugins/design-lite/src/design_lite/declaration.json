@@ -1,0 +1,262 @@
+{
+  "plugin_id": "design-lite",
+  "summary": "按模板生成 HTML 设计文件，并修改标题、副标题、颜色",
+  "entry_module": "design_lite",
+  "default_action": "",
+  "actions": [
+    {
+      "name": "create",
+      "summary": "按模板生成设计文件",
+      "arguments": [
+        {
+          "name": "template",
+          "summary": "模板：card 卡片 / poster 海报 / landing 落地页",
+          "options": [
+            "--template",
+            "-t"
+          ],
+          "value_type": "string",
+          "required": true,
+          "multiple": false,
+          "default": null,
+          "choices": [
+            "card",
+            "poster",
+            "landing"
+          ],
+          "path": false
+        },
+        {
+          "name": "output",
+          "summary": "输出的 .html 文件路径",
+          "options": [
+            "--output",
+            "-o"
+          ],
+          "value_type": "string",
+          "required": true,
+          "multiple": false,
+          "default": null,
+          "choices": [],
+          "path": true
+        },
+        {
+          "name": "title",
+          "summary": "标题文字",
+          "options": [
+            "--title"
+          ],
+          "value_type": "string",
+          "required": true,
+          "multiple": false,
+          "default": null,
+          "choices": [],
+          "path": false
+        },
+        {
+          "name": "subtitle",
+          "summary": "副标题文字",
+          "options": [
+            "--subtitle"
+          ],
+          "value_type": "string",
+          "required": false,
+          "multiple": false,
+          "default": null,
+          "choices": [],
+          "path": false
+        },
+        {
+          "name": "color",
+          "summary": "主色，#RRGGBB",
+          "options": [
+            "--color"
+          ],
+          "value_type": "string",
+          "required": false,
+          "multiple": false,
+          "default": null,
+          "choices": [],
+          "path": false
+        },
+        {
+          "name": "overwrite",
+          "summary": "输出已存在时覆盖",
+          "options": [
+            "--overwrite"
+          ],
+          "value_type": "boolean",
+          "required": false,
+          "multiple": false,
+          "default": null,
+          "choices": [],
+          "path": false
+        }
+      ],
+      "kind": "tool",
+      "target": "create",
+      "available": true
+    },
+    {
+      "name": "edit",
+      "summary": "修改设计文件的标题、副标题或颜色",
+      "arguments": [
+        {
+          "name": "path",
+          "summary": "design-lite 生成的 .html 文件路径",
+          "options": [
+            "--path",
+            "-p"
+          ],
+          "value_type": "string",
+          "required": true,
+          "multiple": false,
+          "default": null,
+          "choices": [],
+          "path": true
+        },
+        {
+          "name": "title",
+          "summary": "标题文字",
+          "options": [
+            "--title"
+          ],
+          "value_type": "string",
+          "required": false,
+          "multiple": false,
+          "default": null,
+          "choices": [],
+          "path": false
+        },
+        {
+          "name": "subtitle",
+          "summary": "副标题文字",
+          "options": [
+            "--subtitle"
+          ],
+          "value_type": "string",
+          "required": false,
+          "multiple": false,
+          "default": null,
+          "choices": [],
+          "path": false
+        },
+        {
+          "name": "color",
+          "summary": "主色，#RRGGBB",
+          "options": [
+            "--color"
+          ],
+          "value_type": "string",
+          "required": false,
+          "multiple": false,
+          "default": null,
+          "choices": [],
+          "path": false
+        }
+      ],
+      "kind": "tool",
+      "target": "edit",
+      "available": true
+    }
+  ],
+  "tools": [
+    {
+      "name": "create",
+      "description": "按 card（卡片）、poster（海报）、landing（落地页）模板在工作区生成一个独立 HTML 设计文件（内联样式、无脚本、无外部资源）；输出已存在时默认拒绝。",
+      "requested_effect": "mutating",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "template": {
+            "type": "string",
+            "enum": [
+              "card",
+              "poster",
+              "landing"
+            ],
+            "description": "模板名：card、poster 或 landing"
+          },
+          "output": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": "输出文件路径，必须以 .html 结尾"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "description": "标题文字"
+          },
+          "subtitle": {
+            "type": "string",
+            "maxLength": 500,
+            "description": "副标题文字，可省略"
+          },
+          "color": {
+            "type": "string",
+            "maxLength": 32,
+            "description": "主色，#RRGGBB 形式，省略时用模板默认色"
+          },
+          "overwrite": {
+            "type": "boolean",
+            "default": false,
+            "description": "输出文件已存在时是否覆盖"
+          }
+        },
+        "required": [
+          "template",
+          "output",
+          "title"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "edit",
+      "description": "修改 design-lite 生成的 HTML 文件里的标题、副标题或颜色，只替换这些字段，其余内容原样保留；返回各字段新旧值。",
+      "requested_effect": "mutating",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": "design-lite 生成的 .html 文件路径"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "description": "新标题"
+          },
+          "subtitle": {
+            "type": "string",
+            "maxLength": 500,
+            "description": "新副标题，空字符串表示清空"
+          },
+          "color": {
+            "type": "string",
+            "maxLength": 32,
+            "description": "新主色，#RRGGBB 形式"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "settings_schema": {
+    "type": "object",
+    "properties": {},
+    "required": [],
+    "additionalProperties": false
+  },
+  "skills": [
+    "design-card"
+  ]
+}
