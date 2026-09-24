@@ -420,6 +420,7 @@ agent_py_agent/
 |   |   |-- live_tool_compact.py        # 运行中原生工具历史到同一 thread checkpoint/CAS 的适配层
 |   |   |-- native_history.py           # 完成回合的 provider 原生消息信封、校验与按请求替换式恢复
 |   |   |-- history_projection.py       # 前后台共用完整历史行选择、范围过滤和原生 metadata 保留
+|   |   |-- history_seed.py             # 会话种子只读来源：冻结行加原单行投影，只在 native/text 准备边界解析
 |   |   |-- history_display.py          # 从 canonical 消息投影只读恢复事件，不把问答预览代替正文
 |   |   |-- input_media.py              # owner 内容寻址原件、验证、发送编码和媒体预算
 |   |   |-- history_order.py            # 按源记录恢复跨工作片顺序并去重插话显示副本
@@ -636,6 +637,8 @@ agent_py_agent/
 |   |-- test_model_selection_isolation.py # 双会话选模故障隔离、近窗口完整材料和连接校准失效组合
 |   |-- test_compact_output_reserve.py # 三宿主完整输入和原输出cap、容量拒绝无提交及Responses字段对照
 |   |-- test_compact_retained_history.py # 三宿主完整保留行、媒体/工具回放和超容量不丢来源
+|   |-- test_conversation_history_seed.py # 具体种子与只读来源在两个准备边界逐项等价、互斥与改写失败
+|   |-- test_host_history_seed_lifetime.py # 三宿主4.2M字符种子准备只驻留地址、解析后完整hash不变
 |   |-- test_compact_media_recovery.py  # 两协议媒体工具轮及溢出后原文保留、无摘要和无CAS
 |   |-- test_compact_transcript_media_partition.py # 文字前缀覆盖与媒体完整后缀、分段拒绝
 |   |-- test_request_content_capacity.py # 当前思考与跨模型内容边界、child保留原模型
@@ -1029,6 +1032,7 @@ docs/
 - `agent_py_agent/agent/gateway_parts/request_history.py`：正常、停止和异常共用 canonical 历史提交及原样 repair；按 request/part 去重，索引仅作投影。
 - `agent_py_agent/agent/gateway_parts/request_prompt.py`：纯渲染已有上下文和历史种子，不重新读盘或通过文字裁决权限。
 - `agent_py_agent/agent/conversation/history_projection.py`：正文与原生回放共用行选择；Compact已选来源完整投影，普通展示沿原窗口，后台无需导入Gateway执行器。
+- `agent_py_agent/agent/conversation/history_seed.py`：会话历史种子的只读来源与两个边界唯一解析入口（`seed_provider_history_messages`/`seed_text_messages`）；与具体历史互斥，不新增持久状态。
 - `agent_py_agent/agent/gateway_parts/stream_writer.py`：维护请求级缓冲与事件顺序，组合 `stream_events.py` 的公开投影及 `stream_approval.py` 的审批交互；不拥有 canonical 历史或执行权。
 - `agent_py_agent/agent/conversation/compact_carry.py`：三宿主共享完整工具归档替换和插话合并；真实循环溢出边界沿原mailbox释放，并携带完整原生IR及准确释放ID，不恢复权限或新建持久状态。
 - `agent_py_agent/agent/conversation/store_usage.py`：显式接收原用量目录和线程读取/原子更新能力，持有用量事件、累计增量及数字显示，不继承消息、任务或 Goal 存储。

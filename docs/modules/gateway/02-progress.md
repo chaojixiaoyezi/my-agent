@@ -2,6 +2,8 @@
 
 12.4来源生命周期首片仅机械兼容显式只读Sequence：`_gateway_conversation_refs`按是否给出来源启用完整投影，防止换容器后误走普通展示窗口；history_projection接受非字符串Sequence。宿主的完整请求冻结/释放尚未重构，相邻回归另行记录，不把本片当全链内存收口。12.7固定旧包的同会话压缩/显式跨模型真实缓存另有证据，详见[真实验收](../../tasks/DECISION_MODEL_REAL_VALIDATION.md)。
 
+12.4 第二片 2a（本地分支 `claude/decision-12.4-2a`，未合入）：Gateway 上下文与恢复候选只保存只读历史来源，移除 `_gateway_conversation_refs` 和具体副本；4.2M 字符下种子准备驻留约 54KB，首次发送前峰值从 29.8MB 降到 21.3MB，摘要期峰值留给 2b。详见[容量审计](../../tasks/DECISION_MODEL_CONTEXT_AUDIT.md#宿主历史种子只读来源2a2026-09-23本地)。
+
 12.4保留历史完整投影已本地实现：Gateway、后台和child的Compact来源/候选不再套普通字符窗，完整材料统一进入原容量门；普通展示保持原规则。73项联合及416项相邻回归通过（含重叠，不累加），整项12.4及11/18不变。见[容量审计](../../tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。
 
 Gateway Compact的原visible范围规则现编译成逐行selector，公共message_selection沿固定完整尾界两遍验证/筛选；后台通过原Store延后正文，共用同次任务范围。writer/CAS与执行身份不变。12文件326项通过，4项主线独占后台fake Store签名待集成，整体gate未通过；12.4仍开放，详见[容量审计](../../tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。

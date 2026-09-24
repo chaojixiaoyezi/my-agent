@@ -1,6 +1,6 @@
 # Gateway Structure
 
-`request_context._gateway_conversation_refs`接收已有裁决来源时保持preserve_complete；`conversation_history_rows`接受只读Sequence并保留原顺序，不能依据仅list/tuple类型重新读取recent。Gateway宿主仍在原边界物化历史，纯`ToolLoopRequestInput`投影不允许隐式磁盘读取；延后/释放旧完整请求属于待实现的伴随片。
+`request_context._gateway_history_source` 把已裁决的来源行冻结为只读 `ConversationHistorySource`（地址视图加 `history_projection` 原单行选择与投影），`GatewayConversationContext.history_source` 是唯一历史载体，不再同时持有具体 history/canonical 副本。`request_prompt.gateway_conversation_history_seed` 把来源交给种子，恢复候选沿同一规则；只在原 native/text 准备边界解析，纯 `ToolLoopRequestInput` 投影不读盘。摘要期旧完整请求的释放属于 2b。
 
 12.4保留历史完整投影已本地实现：Gateway、后台和child的Compact来源/候选不再套普通字符窗，完整材料统一进入原容量门；普通展示保持原规则。73项联合及416项相邻回归通过（含重叠，不累加），整项12.4及11/18不变。见[容量审计](../../tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。
 

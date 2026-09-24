@@ -1455,6 +1455,57 @@ Sol high独立只读复核未发现必须修复的scope/base/legacy回归，确�
 主线owner随后明确授权本线仅在该SimpleNamespace补 `task_attributes={}` 与 `carried_active_turn_user_inputs=[]`，生产IR及业务断言保持。适配后整个IR测试文件 **29 passed（0.38秒）**，日志 `/tmp/decision_native_ir_fixture_20260923.log`；该数与原350有重叠，不累加为379。独立Sol high复核native两函数未发现必须修复的别名或调用者回归。全目录Ruff、doc sync、strict code-size（hard=0，基线不改）及diff通过；clean-package在登记新测试后通过。原四项后台fixture缺口及旧全仓失败仍开放，尚不称整枝严格gate通过，线上CI未作为证据。
 
 
+### 宿主历史种子只读来源（2a，2026-09-23，本地）
+
+分支 `claude/decision-12.4-2a`，基于 `94fbeb7a6`，未合入、未部署。
+
+**实现**：
+- 种子的具体 messages/canonical_messages 与只读来源 `source` 严格二选一，构造时校验。
+- 来源只保存同次冻结的行（canonical 地址视图，或调用方已有的内存行）和宿主原单行投影规则，只在 `_native_provider_history_messages`、`_text_conversation_history_section` 入口经 `seed_provider_history_messages`/`seed_text_messages` 解析。
+- capture、`ToolLoopRequestInput` 和纯投影仍只接具体列表。
+- 三宿主都复用原单行选择与投影：Gateway/后台为 `history_row_selected`+`project_history_row`，child 为 `project_agent_history_row`。
+- 后台非预选入口保留原范围算法和具体种子。
+- 源文件被改写时解析抛 `DataCorruptionError`，不会变成空历史。
+
+**种子准备**（同一 `_case` fixture：128 行、4,195,620 字符，tracemalloc）。前后两列在同一时段测量：前者用原脚本跑 `94fbeb7a6`，后者用新测试跑 2a 分支。
+
+| 宿主 | 修改前 驻留/峰值 | 2a 驻留/峰值 | 2a 发送边界解析 驻留/峰值 |
+| --- | ---: | ---: | ---: |
+| Gateway | 8,561,838 / 8,979,675 | 53,615 / 294,206 | 8,508,446 / 8,975,411 |
+| child | 8,513,368 / 8,584,530 | 32,088 / 270,335 | 8,492,624 / 8,600,913 |
+| background | 8,513,864 / 8,968,172 | 41,512 / 282,999 | 8,492,792 / 8,959,709 |
+
+发送边界解析仍需一份完整 provider 列表，约 8.5MB。这是必要出站成本，原种子与 provider 列表共享同一批字符串。所以 2a 的作用是把物化推迟到真正发送前，而不是取消这份成本。
+
+**完整链**（同一 `decision_host_history_baseline.py`：真实 prepare、Compact 分段/预算、writer/CAS、provider builder 到首个 HTTP 边界；只有摘要回复和最终 HTTP 是 fake）。单位 bytes，修改前 → 2a：
+
+| 宿主 | 运行后驻留 | 首次发送前峰值 | 摘要期峰值 | 摘要调用 |
+| --- | ---: | ---: | ---: | ---: |
+| child | 9,745,503 → 1,297,806 | 10,933,217 → 10,857,612 | 10,933,217 → 10,857,612 | 96 / 96 |
+| Gateway | 8,820,652 → 333,426 | 29,805,492 → 21,285,963 | 10,041,910 → 9,935,932 | 47 / 47 |
+| background | 8,900,407 → 419,921 | 11,394,007 → 11,314,510 | 11,394,007 → 11,314,510 | 96 / 96 |
+
+结论：
+- 运行结束后三宿主不再保留完整历史（减少 8.4–9.4MB）；Gateway 首次发送前少一份完整副本（约 8.5MB）。
+- child/后台的首次发送峰值与三宿主摘要期峰值基本不变。它们来自摘要期间旧 params/frozen/闭包仍持有完整请求，属于 2b，不能用 2a 宣称已解决。
+- 两轮测量结果一致。原始记录在 `~/.my-agent/decision-evidence/2a-20260923/`（仓库外，不含请求正文）。
+
+**验证**：
+- `test_conversation_history_seed.py` 7 项：
+  - 两个边界上具体种子与来源逐项相等，下游孤儿清扫结果、媒体、匿名信封一致，磁盘/内存两种行、两种规则、三宿主入口都覆盖；
+  - 互斥校验；
+  - 改写文件后失败。
+- `test_host_history_seed_lifetime.py` 3 项：准备驻留有界，解析后完整 JSON hash 与行数不变。
+- 相邻 21 个测试文件的断言改为经解析入口核对完整内容，没有删除内容断言。
+- 相关 114 个测试文件：2,932 passed、24 xfailed、1 xpassed。
+
+**剩余**：
+- 2b（摘要期旧请求释放）；
+- 后台 `load_context_bundle → prepare_context_payload` 的 messages 驻留（单列）；
+- 无 scope/`/context` 旧入口。
+
+12.4 仍开放。
+
 ### 宿主历史种子生命周期基线（2026-09-23，第二片进行中）
 
 在464df65c1固定生产基线上，对真实临时JSONL→scoped loader→三宿主原seed准备做仓外测量；输入128行、4,195,620字符，三种seed的完整canonical JSON SHA256及行数均与来源一致。未运行SimpleAgent或真实HTTP；只是宿主seed准备边界，不是capture/select/完整发送峰值。脚本 `/tmp/decision_host_seed_baseline.py`，日志 `/tmp/decision_host_seed_baseline_20260923.log`，3项通过只表示测量及完整性成功，不表示内存目标通过。

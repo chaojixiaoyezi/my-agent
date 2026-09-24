@@ -2,6 +2,19 @@
 
 child不展示历史正文时的读取回归先复现1 failed/1 passed，修复后test_compact_retained_history、test_subagent_compact_recovery、test_gateway_child_compact_scope_application三文件31 passed（8.48秒）。三宿主seed仓外基线仅验证测量和完整性，不算内存目标通过；细节见容量审计的宿主生命周期基线。
 
+## 第12.4项第二片 2a：宿主历史种子只读来源（2026-09-23，本地分支）
+
+- **新测试**：
+  - `test_conversation_history_seed.py` 7 项：具体种子与只读来源在 `_native_provider_history_messages`、`_text_conversation_history_section` 两个边界逐项相等，并覆盖：
+    - 下游 `project_native_provider_messages` 孤儿清扫的补位结果、PNG 媒体、匿名信封、终态工具折叠；
+    - 当前请求行、Audit 投递、display 行的排除；
+    - 磁盘地址视图与内存行、两种单行规则、三宿主真实入口；
+    - 互斥校验，以及源文件改写后抛 `DataCorruptionError` 而不是变成空历史。
+  - `test_host_history_seed_lifetime.py` 3 项：4.2M 字符种子准备驻留 32–54KB、峰值 270–294KB（修改前约 8.5MB/8.6–9.0MB），解析后完整 JSON hash 与行数不变。
+- **适配**：21 个相邻测试文件的种子/上下文断言改为经解析入口核对完整内容，没有删除内容断言。其中 deferred source 用例原先把被缩窄的展示投影当成 Gateway 历史来源；改动后历史与 Compact 来源是同一批完整行（24 行）。
+- **结果**：相关 114 个测试文件 2,932 passed、24 xfailed、1 xpassed。完整链前后对照见容量审计同名一节。
+- **未覆盖**：没有跑真实模型或 TUI，线上 CI 未作为验收来源。2b 未开始。
+
 ## 18-A 吸收 main `66a598cf3` 合并回归（2026-09-23，本地）
 
 - **基线**：合并前对两侧 git-archive 快照各跑一次 8 分片全量。决策 `46ac29601` 有 12 项失败，其中 10 项稳定；另 2 项分别依赖 git 仓库环境、对时序敏感。main `66a598cf3` 有 16 项失败，其中 15 项是旧夹具问题，已由主线 `d54fc0c98` 修复。

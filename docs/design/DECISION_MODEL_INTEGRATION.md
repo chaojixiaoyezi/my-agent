@@ -567,4 +567,11 @@ Skill选中/明确required名卡进入原动态推荐段，稳定区只保留固
 
 模块重构owner已转交本分支两个精确函数的机械接线：`runtime/loop_support.py::_native_provider_history_messages`、`_tool_loop_service.py::_text_conversation_history_section`。其它native plan/commit/live-tool函数仍由原owner负责；不修改对方工作区或部署。
 
+**2a 实施状态（2026-09-23，本地分支 `claude/decision-12.4-2a`）**：
+- 新增 `conversation/history_seed.py`：`ConversationHistorySource`（冻结行加原单行投影函数）与 `ProjectedHistoryRows`（按需投影的只读序列）；`seed_provider_history_messages`/`seed_text_messages` 是两个边界唯一的解析入口，具体种子沿原深拷贝规则。
+- `history_projection.history_row_selected`/`project_history_row` 与 `agent_thread.project_agent_history_row` 是从原循环中抽出的单行规则，具体投影与来源重放共用。
+- Gateway 上下文只保留 `history_source`，移除具体 history/canonical 副本和只剩完整路径使用的 `_gateway_conversation_refs`；恢复候选沿同一规则。child 冻结 view 行。后台 scope_applied 入口冻结已裁决行，非预选入口保留原范围算法。
+- 地址视图冻结时去掉准备期取消回调；源文件被改写时解析抛 `DataCorruptionError`，不会变成空历史。
+- 与主线 owner 约定：两个共享函数只在入口解析来源。等价测试覆盖两个边界、下游孤儿清扫、媒体和匿名信封；4.2M 字符的峰值对比写进容量审计。
+
 验收分别记录source/seed、首次完整预检、摘要驻留和首实际provider payload峰值。必要发送本身仍有完整材料成本，不能把未发送旧超大预检峰值归入必要出站成本；三宿主的scope、失败不提交、媒体和候选/实际payload逐值一致需相邻验证。详细证据与剩余边界见[容量审计](../tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。

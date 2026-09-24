@@ -9,7 +9,12 @@
 
 回滚边界：旧版运行时读不了 v3，回滚必须把运行时和数据成对核对并保留新账。详见[依赖拆分](docs/design/TOOL_LOOP_DEPENDENCY_SPLIT.md#两线合并后的来源身份与模型轮结果决策分支吸收-main2026-09-23)。
 
-宿主seed第二片已确定显式source与具体历史二选一，保留canonical唯一权威；只在原native/text准备边界解析，capture/纯投影和运行时list合同不改。两个共享解析函数已获owner转交，实施中；旧请求释放另验，详见[接入设计](docs/design/DECISION_MODEL_INTEGRATION.md#todo124-宿主历史来源与请求生命周期2026-09-23实施中)。
+12.4 第二片 2a 已在本地分支 `claude/decision-12.4-2a` 实现，未合入、未部署：
+- `ConversationHistorySeed` 的具体历史与只读来源严格二选一。来源只冻结同次地址视图和宿主原单行规则，在原 native/text 准备边界一次解析，capture 和纯投影合同不变。
+- 4.2M 字符来源下，种子准备后驻留从约 8.5MB 降到 32–54KB；运行结束后的驻留减少 8.4–9.4MB；Gateway 首次发送前峰值从 29.8MB 降到 21.3MB。
+- 摘要期峰值约 10–11MB 不变，属于 2b（旧请求释放）。
+
+详见[接入设计](docs/design/DECISION_MODEL_INTEGRATION.md#todo124-宿主历史来源与请求生命周期2026-09-23实施中)和[容量审计](docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md#宿主历史种子只读来源2a2026-09-23本地)。
 
 三宿主来源视图仍在seed准备时重新物化：相同约4.2M字符输入的准备峰值约8.6–9.0MB，第二片需延后物化并处理旧请求持有者。child无正文展示已移除提前全读；范围、纯投影和完整发送边界保持，详见[宿主基线](docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md#宿主历史种子生命周期基线2026-09-23第二片进行中)。
 

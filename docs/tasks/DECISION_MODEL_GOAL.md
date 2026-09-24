@@ -261,6 +261,9 @@ P1-F 只读调查已用无网络小复现确认：原账本 failed/timed_out 可
   4. review 发现 1 单独提交：来源身份无法证明时报 `COMPACT_TOOL_COVERAGE_UNKNOWN`。
   5. "原场景 → 新测试"对照表和受影响测试文件清单写入[交接](HANDOFF_18A_DECISION_MERGE_MAIN.md)。
 - 待办：
-  - 主线 owner 审阅后合入 main，并在合并版上跑真实 TUI 矩阵；
-  - tui-scalability 进入 main 后再吸收一次；
-  - 之后在合并基线上继续 12.4 第二片。
+  - 合并分支已再吸收 main 的 tui-scalability 整合与第 9 步，等主线 owner 审阅合入，并在合并版上跑真实 TUI 矩阵；
+  - 合入后把 12.4 第二片分支接到合并基线上。
+
+**12.4 第二片 2a**（本地分支 `claude/decision-12.4-2a`，基于 `94fbeb7a6`，未合入）：
+- 种子的具体历史与只读来源二选一，已实现，并通过等价测试和 4.2M 字符前后对照，详见[容量审计](DECISION_MODEL_CONTEXT_AUDIT.md#宿主历史种子只读来源2a2026-09-23本地)。
+- 2b（摘要期旧请求释放）尚未开始；12.4 仍开放。
