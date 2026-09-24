@@ -92,6 +92,11 @@
   `generate_bounded_compact_response` 落地）；低估仍由供应商窗口错误的恢复路径兜底，作为片 C 前的已知偏差。
 - **失败切换**：`_compact_pending` 对 `COMPACT_VISION_SUMMARY_FAILED` 只写 `compact_vision_failed_generation`，不增加
   `compact_consecutive_failures`；同代次下一次压缩在解析策略时读到它即选 A，checkpoint 记 `media_policy_reason` 为该码。
+- **"强制"的两层含义（2026-09-24 真实验收发现）**：Gateway 恢复宿主对每次决定摘要的压缩都传 `ConversationCompactOptions.force=True`，
+  它的语义是"整段已完成前缀一次压完、不留近期尾部"，阈值自动压缩、窗口上限/供应商施压恢复和手动 `/compact` 都这样用；首版把它当成
+  "供应商施压"，结果两模型四条真实会话的 checkpoint 全是 `policy_forced/forced_recovery`，B 在 Gateway 里不可达。现新增
+  `ConversationCompactOptions.pressure_forced`（恢复宿主传 `self.force`，只在窗口上限/供应商施压时为真），媒体策略只按它关闭 B；
+  阈值自动压缩与手动 `/compact` 都可走 B，与"强制恢复一律 A"的原意一致。
 
 ## 边界与风险
 

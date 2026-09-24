@@ -149,7 +149,7 @@ def _rows(case, block):
     ]
 
 
-def _compact(case, rows, *, force):
+def _compact(case, rows, *, force, pressure_forced=False):
     thread = case.store.threads.require(case.thread.thread_id)
     view = resolve_compact_summary_view(case.agent, thread, THREAD_COMPACT_SCOPE)
     source = ConversationCompactSource(thread, tuple(rows), case.policy, {},
@@ -157,7 +157,7 @@ def _compact(case, rows, *, force):
     return prepare_conversation_context(
         case.agent, case.store, source.thread,
         options=ConversationCompactOptions(
-            source=source, force=force, exclude_request_id="active-turn",
+            source=source, force=force, pressure_forced=pressure_forced, exclude_request_id="active-turn",
             request_projector=lambda view: ConversationCompactProjection(
                 projected_tokens=300 if view.is_candidate else 950,
                 material={"candidate": view.is_candidate, "messages": view.messages}),
@@ -198,11 +198,22 @@ def test_archived_refs_compaction_covers_media_turn_and_records_facts(media_case
     assert summarized == tuple(row.message_id for row in rows)
     assert call.media_policy == "archived_refs" and call.media_archived is True
     checkpoint = committed_compact_checkpoint_chain(case.agent, result.thread)[-1]
-    # 强制恢复一律归档引用：fact_source 记 policy_forced，reason 记 forced_recovery（片 B 起）。
-    assert checkpoint["media_policy"] == "archived_refs" and checkpoint["media_fact_source"] == "policy_forced"
-    assert checkpoint["media_policy_reason"] == "forced_recovery"
+    # force=True 只是整段压完；替身后端没有工具探针 → 视觉事实 probe_unavailable → 归档引用，不带 reason。
+    assert checkpoint["media_policy"] == "archived_refs" and checkpoint["media_fact_source"] == "probe_unavailable"
+    assert "media_policy_reason" not in checkpoint
     assert checkpoint["media_blocks_archived"] == 1 and checkpoint["media_blocks_summarized"] == 0
     assert checkpoint["media_refs"] == [SHA]
+
+
+def test_pressure_forced_recovery_always_archives_media(media_case):
+    case = media_case
+    rows = _rows(case, LOCAL_IMAGE)
+    result = _compact(case, rows, force=True, pressure_forced=True)
+    assert result.compacted
+    checkpoint = committed_compact_checkpoint_chain(case.agent, result.thread)[-1]
+    # 只有窗口上限/供应商施压的恢复才关闭随图摘要：fact_source 记 policy_forced，reason 记 forced_recovery。
+    assert checkpoint["media_policy"] == "archived_refs" and checkpoint["media_fact_source"] == "policy_forced"
+    assert checkpoint["media_policy_reason"] == "forced_recovery" and checkpoint["media_blocks_archived"] == 1
     assert provider_history_messages_from_rows(result.messages) == ()
     assert case.store.messages.recent_report(case.thread.thread_id, limit=0)[0] == rows, "canonical 行不删不改"
 

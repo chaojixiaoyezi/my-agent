@@ -180,6 +180,8 @@ class PreparedCompactRecovery:
                     agent, agent.conversation_store, source.thread,
                     options=ConversationCompactOptions(
                         current_prompt=params.user_prompt, exclude_request_id=self.exclude_request_id, force=True,
+                        # self.force 才是窗口上限/供应商施压；阈值自动压缩仍整段压完（force=True）但允许随图摘要。
+                        pressure_forced=self.force,
                         source=source, request_projector=project, provider_surface=_summary_surface(frozen),
                         tool_source=tool_source,
                         progress_callback=self.progress_callback,

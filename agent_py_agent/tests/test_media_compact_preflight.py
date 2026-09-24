@@ -113,6 +113,8 @@ def test_gateway_media_history_between_trigger_and_window(tmp_path, monkeypatch,
     fixture = actual_request(tmp_path, mode="disabled", original_window=WINDOW)
     agent = fixture.agent
     agent.config.compact_media_policy = policy
+    # 声明纯文字模态：本测试的假 HTTP 后端不看图，避免片 B 的视觉探针多出请求，业务调用计数保持 1。
+    agent.config.model_input_modalities = ["text"]
     agent.config.model_context_window_tokens = WINDOW
     agent.backend.context_window_tokens = WINDOW
     agent.config.memory_compact_auto_trigger_percent = 50

@@ -174,6 +174,9 @@ class ConversationCompactOptions:
     request_projector: CompactRequestProjector | None = field(default=None, repr=False)
     provider_surface: ConversationCompactProviderSurface | None = field(default=None, repr=False)
     tool_source: CarriedToolCompactSource | None = field(default=None, repr=False)
+    # LLM: force 表示"整段已完成前缀一次压完"（恢复宿主与手动 /compact 都这样用）；pressure_forced 才表示窗口上限/供应商施压的
+    #   恢复——媒体策略只按它决定是否禁用随图摘要，阈值自动压缩与手动 /compact 都可走 B。
+    pressure_forced: bool = False
 
 
 # LLM: 不可变请求绑定原CAS状态、显式摘要作用域和已准备投影；局部候选不能回读全线程摘要。
@@ -202,6 +205,8 @@ class _CompactRunRequest:
     provider_surface: ConversationCompactProviderSurface | None = field(default=None, repr=False)
     tool_source: CarriedToolCompactSource | None = field(default=None, repr=False)
     compact_context: AppliedCompactContext | None = field(default=None, repr=False)
+    # LLM: 只有窗口上限/供应商施压的恢复为真；options.force（整段压完）不等于施压，媒体策略据此决定是否关闭随图摘要。
+    pressure_forced: bool = field(default=False, kw_only=True)
 
 
 # LLM: 摘要、双来源分区及request_projection属于同一候选；保留候选回退时必须同时采用，不能取循环最后一次分区。
@@ -408,6 +413,7 @@ def _prepare_compact_request(
         policy=policy,
         projected_tokens=projected,
         forced=bool(options.force),
+        pressure_forced=bool(options.pressure_forced),
         attempted_at=attempted_at,
         operation_id=operation_id,
         standalone_usage=not str(options.exclude_request_id or "").strip(),
@@ -677,7 +683,8 @@ def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
     # protecting and then re-compacting the same tail creates checkpoint churn without helping
     # the active turn fit. Normal threshold compaction still protects bounded complete turns.
     # 逻辑说明: 平时到 90% 时保留近期完整问答；供应商已报压力时一次压完旧段，避免同一尾部连压多代。
-    media_decision = resolve_compact_media_policy(request.agent, forced=request.forced, thread=request.thread)
+    # 随图摘要只对"窗口上限/供应商施压"的恢复关闭；options.force 本身（一次压完前缀）不构成禁用理由。
+    media_decision = resolve_compact_media_policy(request.agent, forced=request.pressure_forced, thread=request.thread)
     safe_prefix, protected_suffix = _split_nontext_transcript_suffix(request.pending, media_policy=media_decision.policy)
     if not safe_prefix:
         raise ConversationCompactError("没有可完整文字摘要的历史前缀，保留原始媒体", code="COMPACT_SOURCE_EMPTY")
