@@ -579,7 +579,8 @@ TUI：多任务流式输出期间反复切会话、滚动/复制、输入中文/
 
 状态：十个包均已实现并发布，逐包真实 TUI 已验（见 TESTS.md 第 10 步各节）；另按用户要求增加 web-board（网页界面）、desktop-lite（桌面动作）
 与 harness-console（工作台网页 + 桌面窗口，依赖新的插件宿主只读 API）。宿主新增：写入上下文、插件数据目录、context/sessions 面板主题、
-随包 Skill（v3）、宿主只读 API（v4）、插件身份进入工具说明与折叠提示。待做：M3 视觉（/attach + 切 M3）、混装组合长任务与全部卸载基线。
+随包 Skill（v3）、宿主只读 API（v4）、插件身份进入工具说明与折叠提示；决策线按插件分组出题（a2e26178b）。
+M3 视觉、harness-console、三路 TUI 组合、全部卸载后基线均已真实验收（TESTS.md）。未满足：组合长任务约 9.5 分钟（未达 15—30 分钟），组合中未含图像理解。
 按样本计划完成 workspace-peek、context-inspector、savepoint-lite；worktable-lite、activity-line、status-pet、genui-lite；design-lite、image-text、browser-lite 三批。
 每个包都实际安装、配置、使用、停用、再启用及卸载；提供工具的包增加普通中文调用，展示包直接用 TUI 操作验证。
 组合长任务覆盖文件分析、页面/图表生成、图像理解、浏览器表单、多子代理汇总；同时另开内置任务和管理 TUI，逐个及批次卸载。
