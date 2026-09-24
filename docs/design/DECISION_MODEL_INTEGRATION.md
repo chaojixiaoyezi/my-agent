@@ -559,6 +559,7 @@ Skill选中/明确required名卡进入原动态推荐段，稳定区只保留固
 不能静默抹除覆盖。有效值变更纳入原在途取消签名和采用前版本复核；不建立第二份设置或目录。
 原`_execute_runtime_loop`在工具循环种子前调用一次；选择沿RuntimeToolLoopSeed→ToolLoopExecuteParams→ToolSections传递。
 每轮渲染及Compact的原目录构造不请求决策模型；不同工作片可重做建议，不建立长期结果缓存。
+真的发起过决策时，结果附一条结构化观测（`capability_presentation_observation.v1`：mode/status/reason 码、阶段操作编号、候选版本摘要、题数、是否采用、保留原因码，采用时加短名单与延迟名单的工具名各至多 64 个和 Skill 计数；不含题目、回答或用户正文）。它经循环参数上独立的 `capability_presentation_observer` 交给宿主，原展示回调的语义不变；Gateway 把它追加进请求记录的 `capability_presentation_observation.entries`（最多保留 8 条，与模型观察同一 active-turn 事务，内存与文件同步），只供观察，不参与判定。子代理和后台暂不写，后续按同一形状写 thread metadata。
 工具候选只取原授权运行快照并交集显式allowed，Skill只取当前scoped快照；不发送task_attributes原文，只用摘要绑定。
 真实Jev验收否定了多个选择槽跨题去重的设计：Jev各题独立并行，8槽实际全部答成无需，漏掉相关能力。
 现改为每候选独立choice（include/not_needed/缺数据等），候选说明只在对应instructions里发送一次，宿主保留原引用映射。

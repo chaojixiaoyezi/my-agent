@@ -66,6 +66,10 @@ class RunParams:
     capability_presentation_callback: Callable[[CapabilityPresentationSelection | None], object] | None = field(
         default=None, repr=False, compare=False,
     )
+    # 宿主可选的观察出口：收到一次能力推荐决策的结构化观测（码、版本、名称与计数），只写观察记录，不改展示或判定。
+    capability_presentation_observer: Callable[[dict], object] | None = field(
+        default=None, repr=False, compare=False,
+    )
     # CLI 自动续跑契约(2026-08-14 根因3 设计 v2): 首轮创建后贯穿所有续跑轮,
     # 保证同一 task/run/thread 链路(不每轮隐式生成新根)。
     # - continuation_seq: 0=首轮, 1..N=续跑轮(事件账本/终态分层用)
@@ -140,6 +144,10 @@ class RuntimeLoopParams:
     capability_presentation_evaluated: bool = False
     capability_presentation_turn_id: str = ""
     capability_presentation_callback: Callable[[CapabilityPresentationSelection | None], object] | None = field(
+        default=None, repr=False, compare=False,
+    )
+    # 宿主可选的观察出口：收到一次能力推荐决策的结构化观测（码、版本、名称与计数），只写观察记录，不改展示或判定。
+    capability_presentation_observer: Callable[[dict], object] | None = field(
         default=None, repr=False, compare=False,
     )
 

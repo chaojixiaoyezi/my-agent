@@ -598,6 +598,7 @@ agent_py_agent/
 |   |-- test_decision_service.py        # 决策阶段预算、冷却、设置复核、关闭与旧请求隔离
 |   |-- test_decision_service_http.py   # 原配置到真实本地 HTTP、账本与活动用量行的组合
 |   |-- test_decision_fault_matrix.py   # 决策故障矩阵：断网/DNS/TLS/额度/计费/5xx/慢响应的冷却与恢复、同 owner 多会话并发
+|   |-- test_capability_presentation_observation.py # 能力推荐观测进 Gateway 请求记录：一回合一条、采用/保留原因、失败码、写入上限与失败语义
 |   |-- test_decision_cooldown_backoff.py # 决策连接连续失败的冷却翻倍、并发同次故障不加级、成功/显式重试复位
 |   |-- test_decision_owner_scope.py    # 用户后台run/空thread、原身份冲突、后台期限与配置隔离
 |   |-- test_decision_subagent.py      # 原根/递归创建、有工具真实快照、逐项模型选择及幂等

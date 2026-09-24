@@ -19,6 +19,14 @@ child不展示历史正文时的读取回归先复现1 failed/1 passed，修复�
   - `/model` 编辑表单预填并原样回存标签，编辑其它字段不会丢。
 - **变异验证**：7 种各自使测试失败——校验结果丢标签、快捷新增白名单漏标签、决策模型可带标签、允许大写、主会话候选不带、子代理候选不带、表单不发送。改回后全部通过（变异子进程带 `PYTHONDONTWRITEBYTECODE=1`）。
 - **相关回归**：模型目录、服务商与采样、共享目录、决策全部、Gateway 选模观察与采用、子代理首请求选模、TUI 模型与决策菜单共 63 个文件 1399 passed。
+## 能力推荐观测写进 Gateway 请求记录（2026-09-24，本地分支 `claude/decision-capability-observation`）
+
+- **新测试** `test_capability_presentation_observation.py` 6 项，走真实 Gateway 回合（只替换模型生成与决策后端）：
+  - 采用与保留（abstain）两档：同一回合经过溢出重试仍只有一次决策、一条观测；字段只在白名单内，不含用户正文；采用时有短名单/延迟名单与 Skill 计数，保留时写 `retain_reason`；文件与内存请求一致，携带的展示值不落盘。
+  - 决策失败记 `status=error, reason=provider_failed`；接入点关闭时没有观测、没有决策请求。
+  - 写入器：保留其它键、最多 8 条、内存同步；回合已换代时抛 InterruptedError；写盘失败只放弃这一条。
+- **改写断言**：`test_gateway_capability_compact.py` 原先用子串断言请求记录里没有 `capability_presentation`，新观测键包含该子串；改为按精确键断言"携带的展示值不落盘"，意图不变。
+- **变异验证**：8 种各自使测试失败——不调用 observer、采用标记恒为假、丢保留原因、丢 outcome 原因码、不同步内存、不截上限、吞掉回合终结、写盘异常外抛。改回后全部通过（变异子进程带 `PYTHONDONTWRITEBYTECODE=1`）。
 
 ## 工具调用审批前/批准后复核（2026-09-24，本地分支 `claude/tool-precheck`）
 

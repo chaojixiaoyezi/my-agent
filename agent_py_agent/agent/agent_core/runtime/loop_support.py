@@ -141,6 +141,7 @@ def _runtime_loop_params(
         capability_presentation_evaluated=params.capability_presentation_evaluated,
         capability_presentation_turn_id=params.capability_presentation_turn_id,
         capability_presentation_callback=params.capability_presentation_callback,
+        capability_presentation_observer=params.capability_presentation_observer,
     )
 
 
@@ -610,6 +611,7 @@ def _runtime_injections_with_bundle(
 
 # LLM: 原推荐接缝只采用合法展示；工具快照与循环参数逐 run 固定，直接调用唯一循环函数。首请求选模采用的完整参数
 # 由循环结果显式交回；异常先保存当前 IR 再原样抛错（候选只换协议快照、共享同一 IR），需核对原生历史与中断回归。
+# 能力推荐真的发起过决策时，把结构化观测交给宿主可选的观察出口；原展示回调的语义不变。
 # 函数用途: 驱动工具循环，正常返回完整结果；溢出时释放未提交插话并冻结IR，异常也经宿主回调保存已发生的会话事实。
 def _execute_runtime_loop(agent, params: RuntimeLoopParams):
     write_runtime_fact_start_if_enabled(agent, params)
@@ -633,6 +635,8 @@ def _execute_runtime_loop(agent, params: RuntimeLoopParams):
     presentation = recommend_capabilities(agent, params, tool_runtime_snapshot, effective_contract_snapshot)
     if callable(params.capability_presentation_callback):
         params.capability_presentation_callback(presentation.selection)
+    if presentation.observation is not None and callable(params.capability_presentation_observer):
+        params.capability_presentation_observer(dict(presentation.observation))
     tool_runtime_snapshot = presentation.tool_snapshot
     tool_catalog_section, tool_recommendations_section = _resolve_tool_sections(
         ToolSectionsRequest(

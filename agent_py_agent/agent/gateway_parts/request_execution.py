@@ -511,6 +511,7 @@ def _register_named_system_task(
 # the same active request retains exact host rejection memory without inheriting approval grants.
 # 与后台共用携带 reducer；真实工具循环已按原身份释放 mailbox，这里只按释放ID排除插话并携带原IR。
 # 展示callback同步更新本turn局部值及当前宿主参数；新请求重置，失效None与已评估事实阻止额外决策。
+# 能力推荐的结构化观测另走 observer，只追加到本请求记录，不改展示回调的语义。
 # 有宿主时transcript延迟到完整恢复输入就绪后提交；成功材料从同次run回传，后续overflow/最终持久化不复活旧上下文。
 # 函数用途: 在同一用户回合内处理上下文超限，正式压缩旧会话或本轮工具历史后继续执行。
 def _run_gateway_turn_with_conversation_compact(
@@ -556,6 +557,8 @@ def _run_gateway_turn_with_conversation_compact(
         run_params.capability_presentation_evaluated = presentation_evaluated
         run_params.capability_presentation_turn_id = str(request.get("execution_attempt_id") or context.request_id)
         run_params.capability_presentation_callback = retain_presentation
+        run_params.capability_presentation_observer = partial(
+            request_binding.record_capability_presentation_observation, context)
         _run_started = time.monotonic()
         result = context.agent.run(
             prompt,

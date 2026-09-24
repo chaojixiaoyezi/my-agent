@@ -39,6 +39,8 @@ if TYPE_CHECKING:
 
 _GATEWAY_FOREGROUND_CLAIM_REASON = "gateway_foreground_turn"
 MODEL_OBSERVATION_KEY = "model_selection_observation"
+CAPABILITY_OBSERVATION_KEY = "capability_presentation_observation"
+_CAPABILITY_OBSERVATION_LIMIT = 8
 
 
 # LLM: This writer is the only bridge from a promoted conversation task back to the exact
@@ -267,6 +269,36 @@ class GatewayModelObservationWriter:
         transition = GatewayActiveTurnTransition(context.request_path, context.request_id,
                                                 context.request["execution_attempt_id"])
         return transition(phase, lambda: update_json_file_atomic(context.request_path, update, require_existing=True))
+
+
+# LLM: 只在本请求记录里追加能力推荐的结构化观测（码、版本、名称与计数，无模型正文），最多保留最近 8 条，不改任何已有键；
+#   与模型观察同一 active-turn 事务和原子写，回合已终结时按原语义抛 InterruptedError；其它写盘异常只放弃这一条，不影响业务。
+#   内存中的 request 同步更新，避免之后整体回写请求记录时丢掉这个键。
+# 函数用途: 把一次能力推荐（是否采用、为何保留、短名单与延迟名单）写进 Gateway 请求记录，供真实样本核对。
+def record_capability_presentation_observation(context: object, observation: dict) -> None:
+    from ..common.cancellation import ToolCancelled
+
+    entry = dict(observation)
+
+    # LLM: 只读写本键；非字典的旧值当作空列表重建，不影响其它字段。
+    # 函数用途: 在原 JSON 更新锁内追加一条观测并截到上限。
+    def update(current: dict) -> dict:
+        block = current.get(CAPABILITY_OBSERVATION_KEY)
+        entries = list(block.get("entries") or ()) if isinstance(block, dict) else []
+        return {**current, CAPABILITY_OBSERVATION_KEY: {
+            "schema": "gateway_capability_presentation_observation.v1",
+            "entries": [*entries, entry][-_CAPABILITY_OBSERVATION_LIMIT:],
+        }}
+
+    transition = GatewayActiveTurnTransition(context.request_path, context.request_id,
+                                            context.request["execution_attempt_id"])
+    try:
+        saved = transition("acknowledge", lambda: update_json_file_atomic(context.request_path, update, require_existing=True))
+    except (InterruptedError, ToolCancelled):
+        raise
+    except Exception:
+        return
+    context.request[CAPABILITY_OBSERVATION_KEY] = saved[CAPABILITY_OBSERVATION_KEY]
 
 
 # LLM: Transport owns this persisted projection, RuntimeDB owns the identity. Validate request

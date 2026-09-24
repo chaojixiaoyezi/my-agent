@@ -59,7 +59,8 @@ class CapabilityPresentationSelection:
 
 
 # LLM: 原活快照仅在本次RuntimeToolLoopSeed使用；跨接缝只能回传selection纯值，不将本对象写入AgentRunResult。
-# 类用途: 把当前合法短名单交给循环，另提供宿主可在本片内存中携带的展示值。
+#   observation 只在本片真的发起过决策时才有值：结构化码、版本、名称与计数，不含模型正文，只供宿主观察，不参与判定。
+# 类用途: 把当前合法短名单交给循环，另提供宿主可在本片内存中携带的展示值和一次决策的观测。
 @dataclass(frozen=True)
 class CapabilityPresentation:
     tool_snapshot: object
@@ -67,12 +68,15 @@ class CapabilityPresentation:
     required_skill_ids: tuple[str, ...] = ()
     finding: str = ""
     selection: CapabilityPresentationSelection | None = None
+    observation: dict | None = None
 
 
 # LLM: 新建议仍受原总期限和采用门约束；已采用纯值只读复核，宿主标记本片已评估后不重发决策，取消继续抛出。
+#   真的发起过决策的每个返回点都附结构化 observation（采用或保留原因），供宿主落盘观察；未发起决策时为 None。
 # 函数用途: 为原工作片取得或复用展示建议；关闭、失效携带和普通失败都保持当前原始输入。
 def recommend_capabilities(agent, params, snapshot, contract) -> CapabilityPresentation:
     original = CapabilityPresentation(snapshot)
+    base = None
     try:
         carried = getattr(params, "capability_presentation", None)
         if carried is None and getattr(params, "capability_presentation_evaluated", False):
@@ -101,19 +105,20 @@ def recommend_capabilities(agent, params, snapshot, contract) -> CapabilityPrese
         wire_state = {key: value for key, value in state.items() if key != "candidates"}
         outcome = decide(agent, params, stage, point="skill_tool", state=wire_state, questions=questions,
                          candidates_revision=revision)
+        base = _observation_base(stage, outcome, revision, len(questions))
         fallback = replace(original, finding=f"skill_tool_decision:{outcome.mode}:{outcome.status}")
         if not outcome.may_apply or outcome.response is None:
-            return fallback
+            return _observed(fallback, base)
         selected, reason = selected_capabilities(outcome.response, questions, state["candidates"])
         if reason:
-            return replace(fallback, finding="skill_tool_decision:retain_original:" + reason)
+            return _observed(replace(fallback, finding="skill_tool_decision:retain_original:" + reason), base, reason)
         fresh = agent.skill_snapshot_for_run_scope(skills.workspace_root)
         if (_material(agent, params, snapshot, fresh, policy, discoverable)[2] != revision
                 or _presentation_revision(agent, params, snapshot, contract, fresh, policy) != presentation_revision
                 or not _tools_current(snapshot) or agent.backend is not backend
                 or _policy(agent, stage.thread_id) != policy
                 or outcome.response.binding.candidates_revision != revision):
-            return replace(fallback, finding="skill_tool_decision:stale")
+            return _observed(replace(fallback, finding="skill_tool_decision:stale"), base, "stale")
         projected = _project(params, snapshot, contract, fresh, selected, policy, discoverable)
         selection = CapabilityPresentationSelection(
             outcome.response.binding, outcome.connection_revision,
@@ -123,12 +128,38 @@ def recommend_capabilities(agent, params, snapshot, contract) -> CapabilityPrese
         )
         _check_cancelled()
         if not decision_outcome_is_current(agent, params, stage, outcome) or time.monotonic() >= stage.deadline:
-            return replace(fallback, finding="skill_tool_decision:stale")
-        return replace(projected, selection=selection)
+            return _observed(replace(fallback, finding="skill_tool_decision:stale"), base, "stale")
+        return _observed(replace(projected, selection=selection), base)
     except (InterruptedError, ToolCancelled):
         raise
     except Exception:
-        return replace(original, finding="skill_tool_decision:enhancement_failed")
+        failed = replace(original, finding="skill_tool_decision:enhancement_failed")
+        return _observed(failed, base, "enhancement_failed") if base is not None else failed
+
+
+# LLM: 观测只取宿主结构化事实：决策 outcome 的 mode/status/reason 码、阶段操作编号、候选版本摘要与题数；不含题目或回答正文。
+# 函数用途: 在一次决策返回后生成观测的公共部分，供本片各个返回点复用。
+def _observation_base(stage, outcome, revision: str, question_count: int) -> dict:
+    return {"schema": "capability_presentation_observation.v1", "point": "skill_tool", "operation_id": stage.operation_id,
+            "mode": outcome.mode, "status": outcome.status, "reason": outcome.reason,
+            "candidates_revision": revision, "question_count": question_count}
+
+
+# LLM: 只在真的发起过决策时调用；采用时再加短名单/延迟名单的工具名（各最多 64 个）和 Skill 计数，保留时写结构化原因码。
+#   宿主据此写观察记录，不参与任何判定。
+# 函数用途: 给本次展示结果附上一条可落盘的决策观测，采用与否及原因都用结构化码表达。
+def _observed(presentation: CapabilityPresentation, base: dict, retain_reason: str = "") -> CapabilityPresentation:
+    adopted = presentation.selection is not None
+    snapshot = presentation.tool_snapshot
+    observation = {**base, "adopted": adopted, "retain_reason": "" if adopted else retain_reason}
+    if adopted:
+        observation.update(
+            shortlist_tool_names=sorted(snapshot.presentation_shortlist_names or ())[:64],
+            deferred_tool_names=sorted(snapshot.presentation_deferred_names or ())[:64],
+            selected_skill_count=len(presentation.selected_skill_ids or ()),
+            required_skill_count=len(presentation.required_skill_ids),
+        )
+    return replace(presentation, observation=observation)
 
 
 # LLM: 版本比较结构化能力/必要引用、输入与生成连接摘要；不保存凭据、活快照或将Compact代际当作新权限。

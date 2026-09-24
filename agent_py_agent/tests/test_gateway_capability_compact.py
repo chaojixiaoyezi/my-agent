@@ -212,7 +212,8 @@ def test_real_gateway_retry_rotates_db_attempt_but_keeps_one_decision_and_compac
     cards = dict(first_layout.volatile_sections)["prompt.tool_recommendations"]
     assert cards == dict(second_layout.volatile_sections)["prompt.tool_recommendations"]
     assert cards in [block["text"] for message in fixture.backend.kwargs[0]["messages"] for block in message["content"] if block["type"] == "text"]
-    assert "capability_presentation" not in fixture.context.request_path.read_text(encoding="utf-8")
+    # 携带的展示值（selection）不能落进请求记录；观测键 capability_presentation_observation 是另一回事，只有码与计数。
+    assert "capability_presentation" not in json.loads(fixture.context.request_path.read_text(encoding="utf-8"))
     assert "capability_presentation" not in str(asdict(result))
     assert fixture.first.calls == fixture.second.calls == 0
     assert starting[0] == (None, False, "gateway-turn-1")
