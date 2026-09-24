@@ -149,3 +149,18 @@ def test_runtime_records_a_cd_prefixed_test_run_at_the_cd_target(tmp_path: Path)
 
     fact = result.metadata["handler_details"]["verification_evidence"]
     assert (fact["status"], fact["root"]) == ("failed", str(project.resolve()))
+
+
+def test_runtime_records_every_segment_of_a_passing_and_chain(tmp_path: Path):
+    agent, project, owner_home = _agent(tmp_path)
+    (project / "Makefile").write_text("test:\n\tpytest -q\n\nlint:\n\tpyflakes .\n", encoding="utf-8")
+    call = _call("run_command", {"command": "make test && make lint", "working_dir": str(project)})
+    result = _success(call, "ok", {"process": {"status": "exited", "return_code": 0, "command_succeeded": True}})
+
+    result = record_tool_verification(agent, call, result)
+
+    details = result.metadata["handler_details"]
+    chain = details["verification_evidence_chain"]
+    assert [row["canonical_command"] for row in chain] == ["make test", "make lint"]
+    assert details["verification_evidence"] == chain[-1], "单条字段保持为最后一条，形状不变"
+    assert len({row["id"] for row in chain}) == 2 and all(row["status"] == "passed" for row in chain)

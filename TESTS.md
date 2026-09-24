@@ -2,6 +2,19 @@
 
 child不展示历史正文时的读取回归先复现1 failed/1 passed，修复后test_compact_retained_history、test_subagent_compact_recovery、test_gateway_child_compact_scope_application三文件31 passed（8.48秒）。三宿主seed仓外基线仅验证测量和完整性，不算内存目标通过；细节见容量审计的宿主生命周期基线。
 
+## 验证分类：返回码 126/127、pytest 范围与 && 串联（2026-09-25，本地分支 `claude/verification-exit-scope-chains`）
+
+- **新测试** `test_verification_project_facts.py`：
+  - 返回码 126/127 记 `environment_unavailable`，普通非零仍是 failed。
+  - pytest 10 种参数形状：无参数、目录、子目录为 full；文件、`::node`、`-k`、`-kEXPR`、`-m`、`--lf`、`--deselect=` 为 targeted。
+  - `make test && make lint` 返回 0 时两段都记 passed；带 cd 前缀时两段的 cwd 都是 cd 目标；`make test && echo done` 只记测试。
+  - 返回 2、使用 `;` 或 `||`、串联后接管道时都不记。
+- **新测试** `test_verification_runtime.py`：真实 `record_tool_verification` 为通过的串联落两条证据，信封 `verification_evidence` 为末条、`verification_evidence_chain` 为完整有序列表。
+- **新测试** `test_decision_delivery_quality.py`：串联前面几段的事件同样成为焦点；串联与末项不一致时整点放弃、零请求。
+- **原有测试**：分类测试改走新的列表接口；原"cd 后接 `&& echo done`"的拒绝用例按新规则移到串联测试里（返回 0 时证明测试通过）。
+- **变异验证**：9 种变异各自使测试失败——126/127 记 failed、pytest 回退旧范围规则、不识别 `-kEXPR` 连写、不识别筛选开关、串联非零仍记、放行 `;`、不附串联字段、交付复核忽略串联、交付复核不核对末项一致。"交付复核忽略串联"最初只被不一致用例杀死；把正例的前段改为只在串联里出现的 `build` 后，正例也能杀死。还原后逐字节一致（`PYTHONDONTWRITEBYTECODE=1`）。
+- **回归**：引用验证账、分类器、运行事实或归档投影的 17 个测试文件 345 passed、4 xpassed。4 个 xpass 都在 `test_tool_unresolved_runtime_issue_guard.py`，main 上同样出现。
+
 ## 验证命令分类：cd 前缀与管道（2026-09-25，本地分支 `claude/verification-command-shapes`）
 
 - **新测试** `test_verification_project_facts.py`：

@@ -143,8 +143,9 @@ def _focuses(record: object, archive: dict) -> list[dict]:
                                           for position, root in edits)} for event in ordered]
 
 
-# LLM: 只读 params.archive_tool_calls 中同 run/task 的归档信封；run_command 的 verification_evidence 是焦点，
-# 任意工具的 verification_state stale 行是修改事实；不访问文件、验证账或工具输出。
+# LLM: 只读 params.archive_tool_calls 中同 run/task 的归档信封；run_command 的 verification_evidence（&& 串联整体通过时
+# 为 verification_evidence_chain 的全部事件，同一位置按原顺序）是焦点，任意工具的 verification_state stale 行是修改事实；
+# 不访问文件、验证账或工具输出。
 # 函数用途: 顺序扫描本轮归档，交回带位置的验证事件和 (位置, 项目根) 修改记录。
 def _scan(record: object, archive: dict) -> tuple[list[dict], list[tuple[int, str]]]:
     call, params = record.call, record.params
@@ -155,9 +156,21 @@ def _scan(record: object, archive: dict) -> tuple[list[dict], list[tuple[int, st
             continue
         edits.extend((position, root) for root in _stale_roots(envelope.get("verification_state")))
         if item.get("tool") == _TOOL and "verification_evidence" in envelope:
-            events.append({**_evidence_fact(envelope["verification_evidence"]), "position": position,
-                           "current": item is archive, "scoped_call_id": item.get("scoped_call_id")})
+            events.extend({**fact, "position": position, "current": item is archive,
+                           "scoped_call_id": item.get("scoped_call_id")} for fact in _envelope_evidence(envelope))
     return events, edits
+
+
+# LLM: 串联整体通过时信封另带完整有序的 verification_evidence_chain，末项必须等于 verification_evidence；
+# 形状不符时整点放弃，不猜哪一段可信。
+# 函数用途: 取出一条归档信封里的全部验证事件（单条或串联）。
+def _envelope_evidence(envelope: dict) -> list[dict]:
+    chain = envelope.get("verification_evidence_chain")
+    if chain is None:
+        return [_evidence_fact(envelope["verification_evidence"])]
+    if type(chain) is not list or not chain or chain[-1] != envelope["verification_evidence"]:
+        raise DecisionInputError("串联验证事件与末项证据不一致。")
+    return [_evidence_fact(row) for row in chain]
 
 
 # LLM: 事件须带正整数 id、整数退出码、短标识 kind/scope/status 及非空本地 root/命令/时间；缺项整点放弃，不补默认值。

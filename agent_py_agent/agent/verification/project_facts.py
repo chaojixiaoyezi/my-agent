@@ -33,12 +33,18 @@ _JS_LOCKFILES = (
     ("package-lock.json", "npm"),
 )
 _VERIFY_TARGETS = ("test", "tests", "lint", "typecheck", "check", "build", "fmt", "format")
-_SHELL_SPLIT_RE = re.compile(r"\s*(?:&&|\|\||;)\s*")
+# 捕获分隔符本身，才能区分 && 与 ;、||：后两者会让前一段的失败被掩盖。
+_CHAIN_SPLIT_RE = re.compile(r"\s*(&&|\|\||;)\s*")
 # 铁律：一次返回码只能证明一条命令。管道取末段返回码、后台立即返回 0，返回码都不再属于测试命令本身，一律不算证据。
 _EXIT_CODE_HIDING_TOKENS = frozenset({"|", "|&", "&"})
 # 同一铁律决定放行边界：只放行开头一个 `cd <目录> &&`。&& 在 cd 失败时短路，而目录存在且可进入由文件系统事实判定
 # （不解析输出），这时返回码只可能来自后一条命令；其余链式写法仍拒绝。
 _CD_PREFIX_RE = re.compile(r"^\s*cd\s+(?P<target>\"[^\"]*\"|'[^']*'|[^\s;&|]+)\s*&&\s*(?P<rest>.+)$", re.S)
+# 返回码 126/127 是 shell 约定的"不可执行/找不到命令"：验证命令根本没有运行，只按返回码判定，不解析输出。
+_NOT_RUN_EXIT_CODES = frozenset({126, 127})
+ENVIRONMENT_UNAVAILABLE = "environment_unavailable"
+# pytest 按参数形状判范围：文件、::node 或这些筛选开关只跑部分用例（targeted）；目录或不带路径按 full。
+_PYTEST_SELECTION_FLAGS = frozenset({"-k", "-m", "--lf", "--last-failed", "--deselect"})
 _MAX_FACT_FILE_BYTES = 256 * 1024
 _MAX_VERIFY_COMMANDS = 8
 _MAX_OUTPUT_SUMMARY_CHARS = 2000
@@ -89,38 +95,81 @@ def project_facts_for(cwd: str | Path | None) -> ProjectFacts | None:
     return ProjectFacts(root=root, verify_commands=tuple(_verify_commands(root)))
 
 
-# LLM: only exact commands discovered from the current project can become
-# evidence; a successful arbitrary shell command is not verification.  A single leading
-# `cd <existing dir> &&` moves the project lookup and recorded cwd to that directory.
-# 函数用途: 把一次真实命令结果归类成 targeted/full 验证证据；开头带 cd 前缀时按 cd 目标目录归类。
-def classify_verification_command(
+# LLM: only exact commands discovered from the current project can become evidence; a successful
+# arbitrary shell command is not verification.  One shell exit code proves one command, so a single
+# command is classified by its code, while an `&&` chain proves every segment only when the whole
+# chain returns 0 (a non-zero code cannot be attributed to one segment and yields nothing).  A single
+# leading `cd <existing dir> &&` moves the project lookup and recorded cwd to that directory.
+# 函数用途: 把一次真实命令结果归类成验证证据列表；单条命令按返回码，&& 串联整体为 0 时每段记通过，其余情况为空。
+def classify_verification_commands(
     command: str,
     *,
     cwd: str | Path | None,
     exit_code: int,
     output: str,
-) -> ClassifiedVerification | None:
+) -> list[ClassifiedVerification]:
     if not isinstance(command, str) or not command.strip():
-        return None
+        return []
     effective_cwd, body = _cd_prefix(command, cwd)
     facts = project_facts_for(effective_cwd)
     if facts is None or not facts.verify_commands or body is None:
-        return None
-    match = _find_canonical_match(body, facts.verify_commands)
-    if match is None:
-        return None
-    canonical, trailing_args = match
-    return ClassifiedVerification(
-        command=command,
-        canonical_command=canonical,
-        kind=_kind_for_command(canonical),
-        scope="targeted" if any(_looks_like_target(arg) for arg in trailing_args) else "full",
-        status="passed" if int(exit_code) == 0 else "failed",
-        exit_code=int(exit_code),
-        cwd=str(Path(effective_cwd or ".").expanduser().resolve(strict=False)),
-        root=str(facts.root),
-        output_summary=_summarize_output(output),
-    )
+        return []
+    segments = _command_segments(body)
+    if len(segments) > 1 and int(exit_code) != 0:
+        return []
+    matches = [match for match in (_canonical_match(tokens, facts.verify_commands) for tokens in segments) if match]
+    return [
+        ClassifiedVerification(
+            command=command,
+            canonical_command=canonical,
+            kind=_kind_for_command(canonical),
+            scope=_scope_for(canonical, trailing_args),
+            status=_status_for(int(exit_code)),
+            exit_code=int(exit_code),
+            cwd=str(Path(effective_cwd or ".").expanduser().resolve(strict=False)),
+            root=str(facts.root),
+            output_summary=_summarize_output(output),
+        )
+        for canonical, trailing_args in matches
+    ]
+
+
+# LLM: 只比对一段已拆好的记号；返回首个匹配的规范命令及其后的参数，供范围判断。不看输出、不猜用户意图。
+# 函数用途: 判断一段命令是否是项目声明的某条规范验证命令。
+def _canonical_match(
+    tokens: list[str],
+    canonical_commands: tuple[str, ...],
+) -> tuple[str, list[str]] | None:
+    candidate = _strip_prefixes(tokens)
+    spellings = ((canonical, spelling) for canonical in canonical_commands
+                 for spelling in _equivalent_spellings(_tokens(canonical)))
+    return next(((canonical, candidate[len(spelling) :]) for canonical, spelling in spellings
+                 if candidate[: len(spelling)] == spelling), None)
+
+
+# LLM: 状态只由返回码决定：0 通过，126/127 表示命令没运行（环境不可用，不算测试失败），其余非零为失败。
+# 函数用途: 把返回码映射为验证状态。
+def _status_for(exit_code: int) -> str:
+    if exit_code == 0:
+        return "passed"
+    return ENVIRONMENT_UNAVAILABLE if exit_code in _NOT_RUN_EXIT_CODES else "failed"
+
+
+# LLM: pytest 按参数形状判定：含 ::、以 .py 结尾，或带 -k/-m/--lf/--deselect 等筛选开关为 targeted；只给目录
+#   或不给路径为 full（目录参数按约定算 full，不再逐一核对它是否覆盖全部测试）。其它生态沿用原 _looks_like_target 规则。
+# 函数用途: 根据规范命令和其后的参数判断这次验证是局部还是全量。
+def _scope_for(canonical: str, trailing_args: list[str]) -> str:
+    if canonical == "pytest":
+        return "targeted" if any(_pytest_selects_subset(arg) for arg in trailing_args) else "full"
+    return "targeted" if any(_looks_like_target(arg) for arg in trailing_args) else "full"
+
+
+# LLM: 只看参数本身的形状，不读取文件系统或配置；-kEXPR/-mEXPR 这类连写与 --deselect=… 一并识别。
+# 函数用途: 判断一个 pytest 参数是否只选中部分用例。
+def _pytest_selects_subset(arg: str) -> bool:
+    if "::" in arg or arg.endswith(".py") or arg in _PYTEST_SELECTION_FLAGS:
+        return True
+    return arg.startswith("--deselect=") or (arg[:2] in {"-k", "-m"} and not arg.startswith("--"))
 
 
 # LLM: known manifest defaults are structured fast paths, while package/Makefile declarations remain open extension points;
@@ -167,24 +216,9 @@ def _read_small(path: Path) -> str:
         return ""
 
 
-def _find_canonical_match(
-    command: str,
-    canonical_commands: tuple[str, ...],
-) -> tuple[str, list[str]] | None:
-    segments = _command_segments(command)
-    for canonical in canonical_commands:
-        needle = _tokens(canonical)
-        for segment in segments:
-            candidate = _strip_prefixes(segment)
-            for spelling in _equivalent_spellings(needle):
-                if candidate[: len(spelling)] == spelling:
-                    return canonical, candidate[len(spelling) :]
-    return None
-
-
 # LLM: 依"一次返回码只能证明一条命令"，只接受开头一个 `cd <目标> && <其余>`；目标按原 cwd 解析，是否为可进入的
 #   现有目录只看文件系统事实，不解析命令输出；否则返回 (cwd, None) 表示不可作为证据。没有 cd 前缀时原样返回，
-#   其余链式写法仍由 _command_segments 整体拒绝。
+#   其余段由 _command_segments 按 && 规则拆分。
 # 函数用途: 拆出命令开头的 cd 前缀，返回实际工作目录和剩余命令文本。
 def _cd_prefix(command: str, cwd: str | Path | None) -> tuple[str | Path | None, str | None]:
     match = _CD_PREFIX_RE.match(command)
@@ -208,24 +242,23 @@ def _hides_exit_code(raw: str) -> bool:
     return any(token in _EXIT_CODE_HIDING_TOKENS for token in lexer)
 
 
-# LLM: 一次 shell 返回码只能证明一条命令：多段链式、管道或后台写法都返回空列表，调用方不得据此生成验证证据；
-#   开头的 cd 前缀已由 _cd_prefix 先行剥离，不经过这里。
-# 函数用途: 把命令拆成可比对的记号段，只有恰好一段且返回码属于该段时才返回它。
+# LLM: 一次 shell 返回码只能证明一条命令。只接受用 && 串起的段：出现 ;、||、管道、后台、空段或引号不成对时整条返回空列表，
+#   调用方不得据此生成证据；多段时是否可信还要由调用方核对返回码是否为 0。开头的 cd 前缀已由 _cd_prefix 先行剥离。
+# 函数用途: 把命令拆成按 && 串联的记号段，不满足条件时返回空列表。
 def _command_segments(command: str) -> list[list[str]]:
+    parts = _CHAIN_SPLIT_RE.split(command.strip())
+    if any(operator != "&&" for operator in parts[1::2]):
+        return []
     segments: list[list[str]] = []
-    for raw in _SHELL_SPLIT_RE.split(command.strip()):
+    for raw in parts[0::2]:
         try:
             tokens = _tokens(raw)
         except ValueError:
-            continue
-        if tokens and _hides_exit_code(raw):
             return []
-        if tokens:
-            segments.append(tokens)
-    # One shell return code can only prove one command.  Chained commands can
-    # hide an earlier failure (for example ``pytest; echo done``), so they are
-    # intentionally not promoted to evidence.
-    return segments if len(segments) == 1 else []
+        if not tokens or _hides_exit_code(raw):
+            return []
+        segments.append(tokens)
+    return segments
 
 
 def _tokens(value: str) -> list[str]:
@@ -295,8 +328,9 @@ def _summarize_output(output: str) -> str:
 
 
 __all__ = [
+    "ENVIRONMENT_UNAVAILABLE",
     "ClassifiedVerification",
     "ProjectFacts",
-    "classify_verification_command",
+    "classify_verification_commands",
     "project_facts_for",
 ]

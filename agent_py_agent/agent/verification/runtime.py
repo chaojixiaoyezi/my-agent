@@ -18,12 +18,14 @@ from ..agent_core.runtime.task_identity import durable_task_id
 from ..runtime_context import current_subagent_run_id, current_task_attributes
 from ..tooling.runtime_contracts import ToolCall, ToolResult
 from ..tooling.write_boundary import WRITE_TOOL_NAMES, declared_write_paths
-from .project_facts import classify_verification_command, project_facts_for
+from .project_facts import classify_verification_commands, project_facts_for
 from .repository import VerificationContext, VerificationEvidence, VerificationEvidenceRepository
 
 
 # LLM: this is the only runtime integration point for the evidence ledger.  Do
 # not add per-IM or per-tool prompt patches elsewhere.
+# run_command may prove several verifications at once (an `&&` chain that returns 0): the envelope keeps
+# the last event as `verification_evidence` and adds the ordered `verification_evidence_chain`.
 # 函数用途: 根据一次真实工具结果，记录测试证据或让旧证据过期。
 def record_tool_verification(
     agent: object,
@@ -42,8 +44,11 @@ def record_tool_verification(
                 call=call,
                 result=result,
             )
-            if evidence is not None:
-                additions["verification_evidence"] = evidence
+            if evidence:
+                # 单条证据的形状保持不变；&& 串联整体通过时另附完整有序列表，读归档的消费者不能漏看前面几段。
+                additions["verification_evidence"] = evidence[-1]
+            if len(evidence) > 1:
+                additions["verification_evidence_chain"] = evidence
         if result.ok and call.tool_name in WRITE_TOOL_NAMES:
             states = _mark_writes(
                 repository,
@@ -76,6 +81,9 @@ def _with_verification_metadata(
     return replace(result, metadata=metadata)
 
 
+# LLM: 一次命令可能证明多条验证（&& 串联整体返回 0）；逐条落账并按原顺序返回公开事实。进程未正常退出、
+#   没有命令或返回码不可读时不记任何证据。副作用：写 owner 验证账。
+# 函数用途: 把一次 run_command 的真实结果登记为零到多条验证证据。
 def _record_command(
     repository: VerificationEvidenceRepository,
     context: VerificationContext,
@@ -83,31 +91,28 @@ def _record_command(
     agent: object,
     call: ToolCall,
     result: ToolResult,
-) -> dict[str, Any] | None:
+) -> list[dict[str, Any]]:
     process = _handler_metadata(result).get("process")
     if not isinstance(process, dict) or process.get("status") != "exited":
-        return None
+        return []
     command = str(call.arguments.get("command") or "").strip()
     if not command:
-        return None
+        return []
     try:
         exit_code = int(process.get("return_code"))
     except (TypeError, ValueError):
-        return None
+        return []
     cwd = _command_cwd(agent, call.arguments)
-    classified = classify_verification_command(
+    classified = classify_verification_commands(
         command,
         cwd=cwd,
         exit_code=exit_code,
         output=result.output,
     )
-    if classified is None:
-        return None
-    row = repository.record(
-        context,
-        VerificationEvidence(**asdict(classified)),
-    )
-    return _public_evidence(row)
+    return [
+        _public_evidence(repository.record(context, VerificationEvidence(**asdict(item))))
+        for item in classified
+    ]
 
 
 def _mark_writes(

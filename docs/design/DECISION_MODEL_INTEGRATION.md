@@ -359,7 +359,7 @@ need_data 的 A/B/C 缺项由候选化声明表达，也能说明“A 或 B 任�
 | 检索与外部材料排序 | 原工具返回的有来源候选 | 主模型或检索模块 | 原结果分页与读取方式 | 后续 |
 | 规划与派工建议 | 当前原 Todo read 的精确 open ID 与本轮问题 | 原工具回执中的软提示 | 主模型按原规则规划，不自动制造子代理或 Goal | 后续，现有 Todo 优先级首片已本地接入 |
 | 页面/工具动作候选 | 当前 DOM/OCR/工具结构化候选 | 原工具参数准备环节 | 原主模型判断，原审批与后置核验保持 | 后续 |
-| 交付质量提示 | 当前产物引用与原工具证据 | 主模型复核上下文 | 原收尾；不增加强制续跑或完成评分门 | 后续，交付复核焦点首片已本地实现（待审） |
+| 交付质量提示 | 当前产物引用与原工具证据 | 主模型复核上下文 | 原收尾；不增加强制续跑或完成评分门 | 后续，交付复核焦点首片已合入并做过真实样本（无收益证据） |
 | 自学习候选筛选 | 原 runner lesson Candidate 与可信来源；正式 Skill 另需用户授权 | 唯一 Skill 提案/确认入口（S1 已合入 main `e9ead5ae3`）上待确认提案的审核顺序 | 原候选与提案不变；Jev 不能生成正文、确认、拒绝或写正式 Skill | 后续，S1 入口已合入，S2 排序未做 |
 | 主会话自动换模型 | 用户授权的候选范围和新工作片 | 原会话模型选择服务 | 保持当前选择，不切正在请求的模型 | 最后评估 |
 
@@ -401,12 +401,12 @@ P5-C 规划首片只在当前主代理读取已有多项 Todo 时追加一个 ex
 
 ### P5-C 质量提示首片：交付复核焦点 `delivery_quality`
 
-当前状态：已在本地分支 `claude/decision-delivery-quality` 实现并通过离线合同、fake 后端组合与变异验证，待审；没有真实 Jev 或 TUI 验收，不证明交付质量提升。依据是[只读审计](../tasks/DECISION_MODEL_DELIVERY_QUALITY_AUDIT.md)的最小安全接缝：首片只用验证事件做候选，不用 artifact ref。
+当前状态：已合入 main（`8c6d29c5f`），默认关闭；离线合同、fake 后端组合与变异验证通过，2026-09-25 两个真实 TUI 任务各跑 off/apply，链路成立但没有实际追加提示，不证明交付质量提升（见[真实验收](../tasks/DECISION_MODEL_REAL_VALIDATION.md)第 15 节）。依据是[只读审计](../tasks/DECISION_MODEL_DELIVERY_QUALITY_AUDIT.md)的最小安全接缝：首片只用验证事件做候选，不用 artifact ref。
 
 要解决的问题：一轮里跑过局部测试、改过文件、又跑全量测试后，主模型可能只盯最新一次结果，漏掉更早的失败或“其后有修改”的旧验证。此点在一次 `run_command` 刚产生新验证事件后，可选地请 Jev 从本轮已有验证焦点里挑一个“交付前最值得先复核”的，宿主把它渲染成一句可忽略的提示。它不是完成评分、验收门或测试命令生成器。
 
 - **接线**：独立 thread 接入点，AgentConfig/YAML 三字段 `decision_delivery_quality_mode/_timeout_seconds/_profile_id` 默认 off/null/null，原 owner/thread 设置服务、`user_config` 工具和 TUI 菜单（“交付复核焦点”）共用。`_tool_loop_service._record_tool_call` 在原归档、账本写入之后调用 `_optional_result_hints`，依次调用 `external_material_order_hint` 与 `delivery_quality_hint`；两点按工具名互斥，每条记录至多一次决策请求，提示追加到 text/native 共用的同一 `result_rendered`。
-- **触发（全部结构化）**：当前工具是 `run_command`、`handler_executed`，结果带验证事件且与归档信封中的同一事件一致；归档与调用在 tool/id/run/task/scoped_call_id 上一致且以同一对象位于本 run 的 `archive_tool_calls`；主代理（无当前子代理 run）；无重复失败或未知副作用收口标记；`user_prompt` 非空且不超过 1,024 字符。焦点取同 run/task 的 `run_command` 归档，每个 (root, kind, scope) 只留最新一条，同一事件编号重复出现即放弃；其后同 root 出现 `verification_state.status=stale` 记为 `edited_after`。只有 2—12 个焦点且至少一个 failed 或 edited_after 才准备材料；非 run_command 与身份不符的记录在扫描归档前即返回。
+- **触发（全部结构化）**：当前工具是 `run_command`、`handler_executed`，结果带验证事件且与归档信封中的同一事件一致；归档与调用在 tool/id/run/task/scoped_call_id 上一致且以同一对象位于本 run 的 `archive_tool_calls`；主代理（无当前子代理 run）；无重复失败或未知副作用收口标记；`user_prompt` 非空且不超过 1,024 字符。焦点取同 run/task 的 `run_command` 归档（`&&` 串联整体通过时读信封里完整有序的 `verification_evidence_chain`，其末项必须等于 `verification_evidence`，不一致即放弃），每个 (root, kind, scope) 只留最新一条，同一事件编号重复出现即放弃；其后同 root 出现 `verification_state.status=stale` 记为 `edited_after`。只有 2—12 个焦点且至少一个 failed 或 edited_after 才准备材料；非 run_command 与身份不符的记录在扫描归档前即返回。
 - **材料上限**：外发 state 只有经外部材料首片同一 `external_data/default` 脱敏、含 URL 查询串即放弃的当前请求，以及 `focuses: [{candidate: focus_i, project: project_j, kind, scope, status, exit_code, edited_after, order}]`；项目根只以 `project_j` 别名出现，本地路径、原命令、工具输出、改动路径和时间只进本地版本摘要。唯一单选题 `review_focus` 的候选是 `focus_i` 与 `not_needed/no_match/abstain/need_data`，`need_data` 明确“不补读、不跑测试”。
 - **采用与回退**：只接受一个无逐题错误的 choice 回答且值为本次宿主生成的 `focus_i`；渲染只含宿主事实，例如“交付前可先复核本轮验证事件 #11（test/targeted，failed，其后有修改）；范围与结果以原事实为准，targeted 不代表全量”，上限 512 字符。选中本次调用自己的事件不追加。`off` 不准备材料、不发请求；`observe` 照常请求并记原账但不追加；非选择、坏答案、超时、错误、冷却、配置或来源变化（采用前在 `decision_outcome_is_current` 之后重比参数与材料版本及同一绝对期限）都只返回空串。ToolResult、归档、验证账、Goal、Todo 与收口从不修改；用户取消与中断照常上抛。
 

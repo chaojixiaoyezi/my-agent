@@ -513,3 +513,25 @@ def test_run_command_record_reaches_at_most_one_decision_point(prepared, monkeyp
     calls = install(monkeypatch)
     assert loop._optional_result_hints(*prepared) == "\n" + _HINT_11
     assert len(calls) == 1 and not reading_calls
+
+
+def test_a_passing_and_chain_contributes_every_event_as_a_focus(prepared, monkeypatch):
+    host, record, archive = prepared
+    chain = [evidence(7, kind="build", status="passed"), evidence(8, kind="typecheck", status="passed")]
+    record.params.archive_tool_calls.insert(0, archive_row("cmd-0", "run_command", {
+        "verification_evidence": chain[-1], "verification_evidence_chain": chain}))
+    calls = install(monkeypatch, choice="not_needed")
+    module.delivery_quality_hint(host, record, archive)
+    focuses = calls[0][2]["state"]["focuses"]
+    kinds = [(row["kind"], row["scope"], row["status"]) for row in focuses]
+    assert ("build", "full", "passed") in kinds and ("typecheck", "full", "passed") in kinds, \
+        "串联里前面几段的事件同样是焦点，不能只看末项"
+
+
+def test_an_inconsistent_chain_gives_up_without_a_request(prepared, monkeypatch):
+    host, record, archive = prepared
+    record.params.archive_tool_calls.insert(0, archive_row("cmd-0", "run_command", {
+        "verification_evidence": evidence(8, kind="typecheck", status="passed"),
+        "verification_evidence_chain": [evidence(7, status="passed")]}))
+    calls = install(monkeypatch)
+    assert module.delivery_quality_hint(host, record, archive) == "" and calls == []

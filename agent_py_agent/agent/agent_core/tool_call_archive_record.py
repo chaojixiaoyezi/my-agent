@@ -554,7 +554,8 @@ def _tool_result_refs_from_result(result: object) -> list[dict[str, object]]:
     return refs
 
 
-# LLM: 只保留恢复所需结构字段；process复用模型有界投影，禁止复制原PID/实例明细、参数值或任意私有envelope。
+# LLM: 只保留恢复所需结构字段（含 && 串联通过时的 verification_evidence_chain）；process复用模型有界投影，
+#   禁止复制原PID/实例明细、参数值或任意私有envelope。
 # 函数用途: 保留核验、清理及恢复必要事实，让下一工作片按同一口径读取，不修改执行状态。
 def _compact_result_envelope(result: object) -> dict[str, object]:
     envelope = _result_details(result)
@@ -573,6 +574,7 @@ def _compact_result_envelope(result: object) -> dict[str, object]:
         "page_window",
         "schedule_lifecycle",
         "verification_evidence",
+        "verification_evidence_chain",
         "verification_state",
         "tool_search",
         "input_sources",

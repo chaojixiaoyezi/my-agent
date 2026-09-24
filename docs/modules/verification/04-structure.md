@@ -76,7 +76,7 @@ run/task、原权限和配置变化均使建议失效。它只返回覆盖所有
 
 ```text
 agent/verification/
-|-- project_facts.py   # 从真实项目文件发现规范验证命令，并按精确 token 分类；只放行开头一个 cd 前缀，管道/后台不算证据
+|-- project_facts.py   # 从真实项目文件发现规范验证命令并按精确 token 分类：cd 前缀、&& 串联整体为 0 时逐段通过、126/127 记环境不可用、pytest 按参数形状判范围
 |-- repository.py      # owner data/verification/evidence.sqlite3 事件与状态投影
 `-- runtime.py         # 共用工具执行出口的唯一接线
 ```
@@ -139,7 +139,7 @@ Compact 不建立第二套验证链。live tool-context 与 archive 共用一个
 宿主只把 operation ledger 写入 response/transcript 元数据供审计，不再用 stale、failed、Todo open 等事实
 覆盖 plain final、注入隐藏返工或创建额外 model call。`project_facts.py` 仍从 manifest 发现规范验证命令；
 它提供模型上下文，不拥有普通任务完成权。
-分类只认一次返回码能证明的单条命令：开头的 `cd <现有目录> &&` 会被剥离并把 cd 目标当作 cwd，未加引号的管道 `|`、`|&` 与后台 `&` 让返回码不再属于测试命令，因此不记证据。
+分类只认一次返回码能证明的事实：开头的 `cd <现有目录> &&` 会被剥离并把 cd 目标当作 cwd；`&&` 串联只在整条返回 0 时逐段记为 passed（信封另附 `verification_evidence_chain`）；返回码 126/127 记为 `environment_unavailable`；未加引号的管道 `|`、`|&` 与后台 `&`，以及 `;`、`||`，让返回码无法归属，不记证据。
 
 UNKNOWN 副作用、取消、越权和危险路径仍在工具执行期 fail-closed，不能因删除机器完成判官而自动重放；
 显式 required action 继续由自身结构化协议裁决。区别在于：已知失败（包括用户故意要求的非零退出码）已经
