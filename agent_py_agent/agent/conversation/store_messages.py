@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
-from dataclasses import replace
+import os
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass, field, replace
+from itertools import takewhile
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from ..gateway_parts.io import (
     locked_file_transition,
@@ -25,12 +27,133 @@ from .models import (
     new_id,
 )
 from .store_io import (
+    iter_jsonl_tail_lines,
     json_row,
     jsonl_error,
     now,
     read_jsonl_tail_report,
 )
 from .store_layout import ConversationStorage
+
+_Projected = TypeVar("_Projected")
+_READ_CONTEXT = "conversation.messages.read"
+_PARSE_CONTEXT = "conversation.messages.parse"
+
+
+# LLM: 一个尾部窗口的扫描状态：只含投影值、错误和两个计数，不含正文；计数与 recent_report 的停止条件逐项对应。
+# 类用途: 在逐行投影和翻倍重读之间传递窗口事实。
+@dataclass
+class _TailWindow:
+    path: Path
+    limit: int
+    project: Callable[[MessageLogEntry], Any]
+    projected: list[Any] = field(default_factory=list)
+    json_errors: list[dict[str, Any]] = field(default_factory=list)
+    parse_errors: list[tuple[int, dict[str, Any]]] = field(default_factory=list)
+    rows: int = 0
+    selected: int = 0
+
+    # LLM: 与原实现错误同序：先 JSONL 坏行（文件顺序），后解析失败（row_index 为窗口内正向序号）。
+    # 函数用途: 把倒序收集的错误换成原 recent_report 的顺序与行号。
+    def errors(self) -> list[dict[str, Any]]:
+        for reverse_index, report in self.parse_errors:
+            report["row_index"] = self.rows - reverse_index + 1
+        return [*reversed(self.json_errors), *(report for _index, report in reversed(self.parse_errors))]
+
+
+# LLM: 与 recent_report 的单窗逐行处理相同：坏行记错不计行；解析失败记错计行；display 不计选中；只投影最新 limit 条。
+# 函数用途: 处理倒读到的一行并更新窗口状态。
+def _project_tail_line(window: _TailWindow, line: str) -> None:
+    row, error = json_row(line, context=_READ_CONTEXT, path=window.path, line_number=0)
+    if error is not None:
+        window.json_errors.append(error)
+        return
+    window.rows += 1
+    try:
+        entry = MessageLogEntry.from_dict(row)
+    except Exception as exc:
+        window.parse_errors.append((window.rows, runtime_error_report(exc, context=_PARSE_CONTEXT)))
+        return
+    if is_display_checkpoint(entry):
+        return
+    window.selected += 1
+    if window.selected <= window.limit:
+        window.projected.append(window.project(entry))
+
+
+# LLM: 与 recent_report 的单个窗口等价；读取错误时丢弃已投影结果，与原实现"读失败即空行加一条错误"一致；project 必须是纯投影。
+# 函数用途: 倒序扫描一个尾部窗口，返回投影值（新到旧）、错误与两个计数，不驻留正文。
+def _project_tail_window(path: Path, *, read_limit: int, limit: int, project: Callable[[MessageLogEntry], Any]) -> tuple[list[Any], list[dict[str, Any]], int, int]:
+    window = _TailWindow(path, limit, project)
+    try:
+        for line in iter_jsonl_tail_lines(path, limit=read_limit):
+            _project_tail_line(window, line)
+    except OSError as exc:
+        return [], [jsonl_error(exc, _READ_CONTEXT, path=path)], 0, 0
+    return window.projected, window.errors(), window.rows, window.selected
+
+
+# LLM: 与 read_jsonl_report 同源：文本模式通用换行、严格 UTF-8（解码错误照原样抛出）、跳过空白行、行号含空白行。
+# 函数用途: 正向逐行产出（行号, 去掉换行的文本），供全量扫描两遍共用，不物化文件。
+def _forward_lines(handle) -> Iterator[tuple[int, str]]:
+    for line_number, line in enumerate(handle, start=1):
+        text = line[:-1] if line.endswith("\n") else line
+        text = text[:-1] if text.endswith("\r") else text
+        if text.strip():
+            yield line_number, text
+
+
+# LLM: 全量校验的逐行状态；错误顺序与 recent_report(limit=0) 相同：先 JSONL 坏行（行序），后解析失败（row_index 正向）。
+# 类用途: 第一遍只累积错误、行数和末行行号，不保留条目。
+@dataclass
+class _Validation:
+    path: Path
+    json_errors: list[dict[str, Any]] = field(default_factory=list)
+    parse_errors: list[dict[str, Any]] = field(default_factory=list)
+    rows: int = 0
+    last_line: int = 0
+
+    # 函数用途: 校验一行并更新状态。
+    def check(self, line_number: int, text: str) -> None:
+        self.last_line = line_number
+        row, error = json_row(text, context=_READ_CONTEXT, path=self.path, line_number=line_number)
+        if error is not None:
+            self.json_errors.append(error)
+            return
+        self.rows += 1
+        try:
+            MessageLogEntry.from_dict(row)
+        except Exception as exc:
+            report = runtime_error_report(exc, context=_PARSE_CONTEXT)
+            report["row_index"] = self.rows
+            self.parse_errors.append(report)
+
+
+# LLM: 第一遍全量校验，只保留错误与末行行号；文件身份供第二遍核对仍是同一个 canonical 文件。
+# 函数用途: 返回（错误, 末行行号, 文件身份）。
+def _validate_all(path: Path) -> tuple[list[dict[str, Any]], int, tuple[int, int]]:
+    validation = _Validation(path)
+    with path.open("r", encoding="utf-8") as handle:
+        identity = _file_identity(handle)
+        for line_number, text in _forward_lines(handle):
+            validation.check(line_number, text)
+    return [*validation.json_errors, *validation.parse_errors], validation.last_line, identity
+
+
+# LLM: 第二遍只在同一文件上读到第一遍的末行，之后追加的行留给下次；已校验过的行不应失败，改写则按异常上抛。
+# 函数用途: 正向产出已校验范围内的条目（含 display，由调用方过滤）。
+def _validated_entries(path: Path, identity: tuple[int, int], last_line: int) -> Iterator[MessageLogEntry]:
+    with path.open("r", encoding="utf-8") as handle:
+        if _file_identity(handle) != identity:
+            raise OSError("canonical transcript was replaced between validation and visit")
+        for _line_number, text in takewhile(lambda item: item[0] <= last_line, _forward_lines(handle)):
+            yield MessageLogEntry.from_dict(json.loads(text))
+
+
+# 函数用途: 读取打开文件的设备号与 inode，用于确认两遍扫描读的是同一个 canonical 文件。
+def _file_identity(handle) -> tuple[int, int]:
+    info = os.fstat(handle.fileno())
+    return info.st_dev, info.st_ino
 
 
 # LLM: store_messages 的持久化合同：把 JSONL 对象逐条解析为消息，同时保留行号对应的解析错误；修改须同步本领域调用方与存储回归。
@@ -215,6 +338,48 @@ class MessageStore:
             if errors or limit <= 0 or len(selected) >= limit or len(report.rows) < read_limit:
                 return (selected if limit <= 0 else selected[-limit:]), errors
             read_limit *= 2
+
+    # LLM: 与 recent_report(limit) 同窗同错：同样的起始窗口与翻倍、同样的坏行与 row_index、同样只选最新 limit 条非 display；
+    # 只把选中条目交给纯投影 project，返回投影值（新到旧）与错误，不驻留正文。修改须同步 recent_report 等价测试。
+    # 函数用途: 给只要元数据的调用方（近期产物、追加与补写去重）读取最近消息，避免整块物化尾部正文。
+    def recent_projection_report(
+        self,
+        thread_id: str,
+        *,
+        limit: int,
+        project: Callable[[MessageLogEntry], _Projected],
+    ) -> tuple[list[_Projected], list[dict[str, Any]]]:
+        if limit <= 0:
+            raise ValueError("recent projection needs a positive limit")
+        path = self.storage.message_path(thread_id)
+        if not path.exists():
+            return [], []
+        read_limit = max(limit * 2, limit + 8)
+        while True:
+            projected, errors, rows, selected = _project_tail_window(
+                path, read_limit=read_limit, limit=limit, project=project,
+            )
+            if errors or selected >= limit or rows < read_limit:
+                return projected, errors
+            read_limit *= 2
+
+    # LLM: 与 recent_report(limit=0) 同源同错；先完整校验一遍，有任何错误就一条都不交给 visitor（原实现先读全量再判断）。
+    # 第二遍核对仍是同一文件，只读到第一遍的最后一行，之后追加的行留给下次；visitor 按正向顺序只收非 display 条目。
+    # 函数用途: 顺序访问全部消息而不驻留全量正文，供搜索索引逐条投影；返回错误列表，非空时未访问任何条目。
+    def visit_all_report(self, thread_id: str, visitor: Callable[[MessageLogEntry], object]) -> list[dict[str, Any]]:
+        path = self.storage.message_path(thread_id)
+        if not path.exists():
+            return []
+        try:
+            errors, last_line, identity = _validate_all(path)
+        except OSError as exc:
+            return [jsonl_error(exc, _READ_CONTEXT, path=path)]
+        if errors:
+            return errors
+        for entry in _validated_entries(path, identity, last_line):
+            if not is_display_checkpoint(entry):
+                visitor(entry)
+        return []
 
     # LLM: 固定完整LF尾界供多页共享；只读、不产生Compact覆盖证明，半行和后续追加留待下次快照。
     # 函数用途: 获取原消息文件的完整行结束位置，失败时返回结构化错误，不把坏读当成空历史。

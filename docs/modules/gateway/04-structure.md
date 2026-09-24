@@ -60,6 +60,7 @@ Gateway overflow 通过内部 `GatewayConversationLoadRequest.defer_compact` 只
 `request_context.py` 在原车道内按补交、索引、Compact、历史、任务顺序准备快照；
 `request_binding.py` 保留精确 request/thread/task/run/attempt 绑定、T 锁与原子写前登记；
 `request_history.py` 负责正文投影、canonical 追加、request/part 去重和原样延迟 repair；
+近期产物、追加去重与补写去重经 `MessageStore.recent_projection_report` 逐条倒读，与原 `recent_report` 同窗同错，只保留产物引用或 `_DedupeFacts`，不驻留正文；搜索索引经 `visit_all_report` 两遍正向流式扫描，有坏行时一条都不索引。
 `request_prompt.py` 只渲染已取得的事实，历史种子不重读磁盘；已结束历史与压缩摘要只经会话种子在 native/text 准备边界提供，`_conversation_prompt_section` 只渲染操作证据、子代理交付、近期产物和工作索引。
 共同的完整行窗口归 `conversation/history_projection.py`，后台历史种子也从会话领域直接调用。
 组件没有第二份状态，原持久字段、路径、锁、CAS 与提交顺序保持，调用方不再从旧执行文件取私有入口。

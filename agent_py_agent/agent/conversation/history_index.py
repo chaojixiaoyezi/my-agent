@@ -23,11 +23,10 @@ def ensure_thread_history_indexed(
         agent._conversation_indexed_threads = indexed
     if thread_id in indexed:
         return
-    rows, errors = store.messages.recent_report(thread_id, limit=0)
+    # 逐条流式建索引，不一次物化全量行；有任何坏行时与原实现一样一条都不索引。
+    errors = store.messages.visit_all_report(thread_id, lambda row: index_conversation_message(agent, store, row))
     if errors:
         raise OSError("conversation transcript could not be indexed reliably")
-    for row in rows:
-        index_conversation_message(agent, store, row)
     indexed.add(thread_id)
 
 

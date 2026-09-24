@@ -1,5 +1,7 @@
 # Gateway 维护状态
 
+Gateway 消息文件流式读取（本地分支 `claude/decision-gateway-message-reads`，待审）：建索引、近期产物、追加与补写去重不再按行数整块物化尾部，改为与原实现逐项等价的字节有界流式读取；4.2M 字符夹具上准备期峰值 21.33→0.82MB、全程 22.65→10.03MB，每次请求三次读取约 122→19ms。详见[容量审计](../../tasks/DECISION_MODEL_CONTEXT_AUDIT.md#gateway-213mb-峰值来自整块读取消息文件2026-09-24已实施待审)。
+
 媒体会话越过压缩点（本地分支 `claude/decision-media-preflight`，.9 真实验收已通过，待审）：未压历史带图时，preflight 只守窗口硬上限，越过压缩点也不再整轮失败；越过窗口时强制恢复报 `COMPACT_REQUEST_NON_TEXT`，客户端文案说明是图片等非文本内容使压缩不可用。详见[容量审计](../../tasks/DECISION_MODEL_CONTEXT_AUDIT.md#媒体会话越过压缩点2026-09-24本地修复)。
 
 12.4来源生命周期首片仅机械兼容显式只读Sequence：`_gateway_conversation_refs`按是否给出来源启用完整投影，防止换容器后误走普通展示窗口；history_projection接受非字符串Sequence。宿主的完整请求冻结/释放尚未重构，相邻回归另行记录，不把本片当全链内存收口。12.7固定旧包的同会话压缩/显式跨模型真实缓存另有证据，详见[真实验收](../../tasks/DECISION_MODEL_REAL_VALIDATION.md)。

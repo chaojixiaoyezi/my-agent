@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import json
 import time
+from collections import deque
+from collections.abc import Iterator
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path
 from typing import Any, BinaryIO
 
@@ -43,6 +46,9 @@ def read_jsonl_report(path: Path, *, context: str) -> JsonlReadReport:
     return JsonlReadReport(rows, errors)
 
 
+_TAIL_BLOCK_BYTES = 64 * 1024
+
+
 # LLM: 尾读只按字节定位边界；上层负责舍弃不完整首行并解释 JSON，不改变文件。
 # 函数用途: 分块从文件末尾读取足够行，避免分页时加载整个账本。
 def _read_tail_bytes(path: Path, limit: int) -> tuple[bytes, int]:
@@ -50,7 +56,7 @@ def _read_tail_bytes(path: Path, limit: int) -> tuple[bytes, int]:
     with path.open("rb") as handle:
         handle.seek(0, 2)
         pos = handle.tell()
-        block = 64 * 1024
+        block = _TAIL_BLOCK_BYTES
         data = b""
         while pos > 0 and data.count(b"\n") <= limit:
             step = min(block, pos)
@@ -58,6 +64,55 @@ def _read_tail_bytes(path: Path, limit: int) -> tuple[bytes, int]:
             handle.seek(pos)
             data = handle.read(step) + data
     return data, pos
+
+
+# LLM: 与 read_jsonl_tail_report 同窗：同样按 64KiB 块从文件尾对齐倒读，同样在"已读换行数超过 limit 或到文件头"时停，
+# 窗口首个可能不完整的行同样丢弃（到文件头时保留）；只按 LF 字节切行，逐行 UTF-8 replace 解码并去掉一个行尾 CR，空白行不计。
+# 修改须与 read_jsonl_tail_report 的等价测试同步；read_jsonl_tail_report 本身不经此实现，child/后台路径不受影响。
+# 函数用途: 从新到旧逐行产出尾部最多 limit 条非空记录，内存只占一个块加一行，不物化整个尾部；凑够即停止读块。
+def iter_jsonl_tail_lines(path: Path, *, limit: int) -> Iterator[str]:
+    if limit <= 0:
+        raise ValueError("tail line iteration needs a positive limit")
+    texts = (_tail_line_text(raw) for raw in _tail_raw_lines(path, limit))
+    return islice((text for text in texts if text.strip()), limit)
+
+
+# LLM: 窗口规则的唯一实现：读块条件与原 _read_tail_bytes 相同；关窗时首段只在到达文件头时才是完整行。
+# 函数用途: 从新到旧产出窗口内的完整原始行（含空行），由上层过滤与截断。
+def _tail_raw_lines(path: Path, limit: int) -> Iterator[bytes]:
+    with path.open("rb") as handle:
+        position = handle.seek(0, 2)
+        newlines = 0
+        carry: deque[bytes] = deque()
+        while position > 0 and newlines <= limit:
+            step = min(_TAIL_BLOCK_BYTES, position)
+            position -= step
+            handle.seek(position)
+            block = handle.read(step)
+            newlines += block.count(b"\n")
+            yield from _split_tail_block(block, carry)
+        if position == 0 and carry:
+            yield b"".join(carry)
+
+
+# LLM: carry 按文件顺序保存较新块里尚未遇到行首的片段；块内第一条（最新）完整行接上它，之后清空，块首残段成为新的 carry。
+# 函数用途: 从新到旧切出一个块里的完整行，跨块的行在找到其行首时一次拼接。
+def _split_tail_block(block: bytes, carry: deque[bytes]) -> Iterator[bytes]:
+    end = len(block)
+    index = block.rfind(b"\n", 0, end)
+    while index >= 0:
+        yield block[index + 1:end] + b"".join(carry)
+        carry.clear()
+        end = index
+        index = block.rfind(b"\n", 0, end)
+    carry.appendleft(block[:end])
+
+
+# LLM: 与整块解码后按 LF 切分等价：LF 不会出现在 UTF-8 多字节序列中，坏字节同样以 replace 处理；只去一个行尾 CR。
+# 函数用途: 把倒读得到的一行原始字节变成记录文本。
+def _tail_line_text(raw: bytes) -> str:
+    text = raw.decode("utf-8", errors="replace")
+    return text[:-1] if text.endswith("\r") else text
 
 
 # LLM: 在调用方已打开的canonical描述符上以固定物理大小倒扫LF；64KiB空间、短读拒绝，不识别业务行或覆盖。

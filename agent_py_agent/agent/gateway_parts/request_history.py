@@ -378,18 +378,17 @@ def gateway_recent_artifacts(
 ) -> tuple[dict[str, object], ...]:
     store = getattr(agent, "conversation_store", None)
     try:
-        rows, errors = store.messages.recent_report(thread_id, limit=80)
+        # 与原 recent_report(limit=80) 同窗同错，只保留每行的产物引用（新到旧），不驻留正文。
+        refs_by_row, errors = store.messages.recent_projection_report(
+            thread_id, limit=80, project=lambda row: _conversation_row_artifacts(row, current_request_id),
+        )
     except Exception as exc:
         load_errors.append(runtime_error_report(exc, context="gateway.conversation.recent_artifacts"))
         return ()
     load_errors.extend(error for error in errors if isinstance(error, dict))
     selected: list[dict[str, object]] = []
     seen: set[tuple[str, str]] = set()
-    candidates = [
-        ref
-        for row in reversed(rows)
-        for ref in reversed(_conversation_row_artifacts(row, current_request_id))
-    ]
+    candidates = [ref for refs in refs_by_row for ref in reversed(refs)]
     for ref in candidates:
         key = (str(ref.get("artifact_id") or ""), str(ref.get("path") or ""))
         if key in seen:
@@ -473,7 +472,8 @@ def append_gateway_conversation_message(
     metadata = metadata if isinstance(metadata, dict) else {}
     channel_message_id = str(metadata.get("message_id") or "") if role == "user" else ""
     try:
-        rows, errors = store.messages.recent_report(conversation.thread_id, limit=100)
+        # 与原 recent_report(limit=100) 同窗同错，只保留去重所需字段，不驻留正文；判定顺序与原实现相同。
+        facts, errors = store.messages.recent_projection_report(conversation.thread_id, limit=100, project=_dedupe_facts)
         if errors:
             raise OSError("conversation message ledger could not be read reliably")
         normalized_part_id = (
@@ -481,13 +481,13 @@ def append_gateway_conversation_message(
         )
         if any(
             _gateway_message_matches_part(
-                row,
+                fact,
                 role=role,
                 request_id=request_id,
                 channel_message_id=channel_message_id,
                 assistant_part_id=normalized_part_id,
             )
-            for row in rows
+            for fact in facts
         ):
             return True
         entry_metadata: dict[str, object] = {
@@ -633,7 +633,8 @@ def repair_gateway_conversation_messages(
         if str(payload.get("thread_id") or "") != thread_id:
             continue
         try:
-            rows, errors = store.messages.recent_report(thread_id, limit=200)
+            # 与原 recent_report(limit=200) 同窗同错，只保留去重所需字段，不驻留正文；判定顺序与原实现相同。
+            facts, errors = store.messages.recent_projection_report(thread_id, limit=200, project=_dedupe_facts)
             if errors:
                 load_errors.extend(errors)
                 continue
@@ -643,13 +644,13 @@ def repair_gateway_conversation_messages(
             part_id = str(metadata.get("assistant_part_id") or "final").strip() or "final"
             already_written = any(
                 _gateway_message_matches_part(
-                    row,
+                    fact,
                     role=role,
                     request_id=request_id,
                     channel_message_id=str(payload.get("channel_message_id") or ""),
                     assistant_part_id=part_id,
                 )
-                for row in rows
+                for fact in facts
             )
             if not already_written:
                 store.messages.append(payload)
@@ -661,6 +662,26 @@ def repair_gateway_conversation_messages(
 # LLM: Dedupe uses request plus a host-authored assistant part id. Legacy assistant rows without
 # the additive field are treated as the final part; ordinary user message identity is unchanged.
 # 函数用途: 判断一条已有消息是否与准备追加的用户消息或助手分段是同一条。
+# LLM: 只取 _gateway_message_matches_part 会读的字段（role、channel_message_id、metadata 的请求号与部分编号），不带正文；
+# 判定仍由原函数完成，新增判定字段时须同步这里。
+# 类用途: 倒序流式扫描时每行保留的去重事实。
+@dataclass(frozen=True)
+class _DedupeFacts:
+    role: object
+    channel_message_id: object
+    metadata: dict
+
+
+# 函数用途: 把一行消息投影成去重事实，供倒序流式扫描逐条保留。
+def _dedupe_facts(row: object) -> _DedupeFacts:
+    metadata = getattr(row, "metadata", None)
+    metadata = metadata if isinstance(metadata, dict) else {}
+    return _DedupeFacts(
+        getattr(row, "role", ""), getattr(row, "channel_message_id", ""),
+        {key: metadata[key] for key in ("gateway_request_id", "assistant_part_id") if key in metadata},
+    )
+
+
 def _gateway_message_matches_part(
     row: object,
     *,

@@ -2,6 +2,16 @@
 
 child不展示历史正文时的读取回归先复现1 failed/1 passed，修复后test_compact_retained_history、test_subagent_compact_recovery、test_gateway_child_compact_scope_application三文件31 passed（8.48秒）。三宿主seed仓外基线仅验证测量和完整性，不算内存目标通过；细节见容量审计的宿主生命周期基线。
 
+## Gateway 消息文件流式读取（2026-09-24，本地分支 `claude/decision-gateway-message-reads`）
+
+- **新测试** `test_message_tail_streaming.py` 124 项，以不改的 `read_jsonl_tail_report`、`recent_report` 作参照逐项比对：
+  - 24 个种子，轮换三种模式（混合故障、完全干净、大量 display 行）：尾部行、窗口投影、全量访问、近期产物、去重判定五类等价。覆盖多块大文件、翻倍重读、坏行、解析失败、CRLF、NEL/U+2028、无换行或被截断的末行、非法 UTF-8（全量路径两边都抛 UnicodeDecodeError）。
+  - 3 种块边界：多字节字符、LF、CRLF 恰好跨越 64KiB 边界。
+  - 原实现的一个边角：窗口内有空行时返回的行数少于 limit，新实现一致。
+- **变异验证**：去掉跨块拼接、去掉迭代器条数上限、投影超出上限、窗口不按换行数关闭、保留窗口首个不完整行、有坏行仍访问，6 种各自使 76、37、29、18、19、8 项失败。
+- **峰值与耗时**（仓外探针，同一 4.2M 字符夹具，同一基点 main `3d2424786`）：Gateway 准备期峰值 21.33→0.82MB，全程峰值 22.65→10.03MB；三宿主阶段探针中 child、后台不变；每次请求三次尾读约 40ms→约 6ms；建索引峰值 16.96→0.72MB，耗时基本不变。
+- **回归**（基点 main `3d2424786`）：171 个相关测试文件 4078 passed、1 skipped、25 xfailed。
+
 ## 决策线两片合入与 step10h 双机部署（2026-09-24，main `d69f30cf3`，wheel c52da295）
 
 - **合入**：`claude/step10-batch1` 从 `41c66872e` 快进到 `ec821c90c`（媒体 preflight：代码 `e90d2ec60`，其余为文档），再合并 `5cb75eaf8`（决策设置无锁读取），得 `d69f30cf3` 推送 main。TESTS.md 唯一冲突为两节都在顶部新增，按两节都保留、共用标题取"已合入 main"版本解决。

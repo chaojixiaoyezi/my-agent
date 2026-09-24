@@ -639,6 +639,7 @@ agent_py_agent/
 |   |-- test_compact_native_ir_recovery.py # 真实读文件原生回执、恢复安全点、原CAS及候选HTTP对等
 |   |-- test_compact_text_source.py   # 顺序完整覆盖、源改写/取消、纠正预算与序列化峰值回归
 |   |-- test_compact_message_source.py # 可重放摘要消息的编码/估算等价及迭代关闭验证
+|   |-- test_message_tail_streaming.py # 消息尾部流式读取与原整块读取逐项等价（跨块、CRLF、NEL/U+2028、坏行、停止边界）
 |   |-- test_compact_source_lifetime.py # 全选真实JSONL到摘要提交的正文驻留、完整覆盖及峰值验证
 |   |-- test_model_selection_isolation.py # 双会话选模故障隔离、近窗口完整材料和连接校准失效组合
 |   |-- test_compact_output_reserve.py # 三宿主完整输入和原输出cap、容量拒绝无提交及Responses字段对照
