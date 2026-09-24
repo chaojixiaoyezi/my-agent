@@ -1,5 +1,5 @@
-# LLM: 本模块装配运行恢复状态与上下文，工具发现复用 tooling 投影，拒绝列表沿宿主参数传递；禁止反向依赖 Gateway。
-# 模块用途: 为主链准备记忆、工具及续跑输入，恢复同源核验与清理投影；异常退出交回原生历史，权限不扩展。
+# LLM: 本模块逐run装配参数并调用execute_tool_loop，工具发现复用tooling投影；拒绝列表、异常原生历史与权限沿原权威，禁止反向依赖Gateway。
+# 模块用途: 为主链准备记忆、工具及续跑输入，恢复同源核验与清理事实，直接驱动唯一循环；异常退出前交回原生历史。
 
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ from ...tooling.tool_search_state import pending_carried_loaded_tool_names
 from ...user_space.context_bundle import MainContextBundleRequest, build_main_context_bundle
 from ...user_space.home_layout import runtime_route_root_and_index
 from .._runtime_params import ToolLoopExecuteParams
-from .._tool_loop_service import ToolLoopService
+from .._tool_loop_service import execute_tool_loop
 from ..parameters import _one_shot_tool_call_keys
 from ..tool_context.call_reducer import render_tool_payload_for_live_prompt
 from ..tool_context.runtime_facts import render_tool_runtime_facts
@@ -542,8 +542,8 @@ def _runtime_injections_with_bundle(
     return injections
 
 
-# LLM: 工具快照逐 run 固定；异常退出先经宿主回调保存当前 IR，再原样抛错，不把中断当成功或重新执行工具。
-# 函数用途: 驱动模型工具循环，正常返回完整结果，异常也保留已经发生的会话事实。
+# LLM: 工具快照和循环参数逐 run 固定；直接调用唯一循环函数，异常先保存当前 IR 再原样抛错，需核对原生历史与中断回归。
+# 函数用途: 装配并驱动模型工具循环，正常返回完整结果，异常也经宿主回调保存已经发生的会话事实。
 def _execute_runtime_loop(agent, params: RuntimeLoopParams):
     write_runtime_fact_start_if_enabled(agent, params)
     audit_source_provision = _provision_audit_sources_before_model(agent, params)
@@ -583,10 +583,9 @@ def _execute_runtime_loop(agent, params: RuntimeLoopParams):
         ),
     )
     _queue_audit_source_provision_reply(loop_params, audit_source_provision)
-    # 每个 run 都有自己的工具循环状态；同一 owner 的并发聊天/后台轮
-    # 不能共享一个 ToolLoopService 实例。
+    # 每个 run 独占本次参数与循环局部计数，同一 owner 的并发聊天或后台轮也不能共享。
     try:
-        final_prompt, final_response, tool_rounds = ToolLoopService(agent).execute(loop_params)
+        final_prompt, final_response, tool_rounds = execute_tool_loop(agent, loop_params)
     except (Exception, KeyboardInterrupt) as exc:
         _persist_partial_native_turn(params.partial_turn_callback, loop_params, exc)
         raise

@@ -11,11 +11,9 @@ import time
 from dataclasses import replace
 from types import SimpleNamespace
 
+from agent_py_agent.agent.agent_core import _tool_loop_service as tool_loop_module
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
-from agent_py_agent.agent.agent_core._tool_loop_service import (
-    ToolLoopService,
-    _execute_tool_loop_service,
-)
+from agent_py_agent.agent.agent_core._tool_loop_service import execute_tool_loop
 from agent_py_agent.agent.agent_core.tool_loop.round_execution import (
     ToolRoundExecutionRequest,
     execute_tool_round,
@@ -347,7 +345,6 @@ def test_foreground_shell_stops_when_conversation_is_interrupted(tmp_path):
 
 def test_interrupt_arriving_during_model_generation_discards_final_response(monkeypatch):
     agent = SimpleNamespace(backend=SimpleNamespace(name="test"))
-    service = ToolLoopService(agent)
     params = ToolLoopExecuteParams(
         user_prompt="long task",
         memories=[],
@@ -368,15 +365,19 @@ def test_interrupt_arriving_during_model_generation_discards_final_response(monk
         archive_tool_calls=[],
     )
 
-    def model_turn(*_args):
+    # LLM: 在主循环请求模型期间设置真实线程中断旗，返回旧响应以验证采样后的安全检查。
+    # 函数用途: 模拟生成中途收到停止，让真实循环负责丢弃旧回复并给出取消状态。
+    def model_turn(loop_agent, loop_params, _tool_rounds, _provider_response_repairs):
+        assert loop_agent is agent and loop_params is params
         set_interrupt(True)
         return "prompt", ModelResponse(text="stale final", backend="test"), False, False, 0
 
-    monkeypatch.setattr(service, "_model_turn_or_retry", model_turn)
-    try:
-        _, response, _ = _execute_tool_loop_service(service, params)
-    finally:
-        set_interrupt(False)
+    with monkeypatch.context() as loop_patch:
+        loop_patch.setattr(tool_loop_module, "_model_turn_or_retry", model_turn)
+        try:
+            _, response, _ = execute_tool_loop(agent, params)
+        finally:
+            set_interrupt(False)
 
     assert response.text == ""
     assert response.runtime_status == "cancelled"

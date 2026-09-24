@@ -417,10 +417,6 @@ class _RecordingPrompts:
 def test_loop_resumes_and_sends_host_instruction(monkeypatch) -> None:
     """端到端：真实循环在超时重试后零工具调用的承诺上续跑，并真的再发一次请求。"""
     from agent_py_agent.agent.agent_core import _tool_loop_service
-    from agent_py_agent.agent.agent_core._tool_loop_service import (
-        ToolLoopService,
-        _execute_tool_loop_service,
-    )
 
     backend = _TimeoutThenPromiseBackend("在的，刚才超时了，我重新来。")
     prompts = _RecordingPrompts()
@@ -430,21 +426,20 @@ def test_loop_resumes_and_sends_host_instruction(monkeypatch) -> None:
     # 该 run 的账本已预置「本轮执行过工具」（收窄后的第二个续跑事实）；循环里不再有新工具
     # 执行，工具轮执行入口一旦被调用即说明续跑重放了工具。
     executed: list[object] = []
-    service = ToolLoopService(agent)
-    monkeypatch.setattr(
-        service,
-        "_run_tool_round",
-        lambda request: (executed.append(request), (request.tool_rounds, None))[1],
-    )
-    monkeypatch.setattr(
-        _tool_loop_service,
-        "build_tool_loop_prompt",
-        lambda _agent, loop_params: _tool_loop_service._render_tool_loop_prompt(
-            agent, loop_params
-        ),
-    )
-
-    _prompt, response, _rounds = _execute_tool_loop_service(service, params)
+    with monkeypatch.context() as loop_patch:
+        loop_patch.setattr(
+            _tool_loop_service,
+            "_run_tool_round",
+            lambda _agent, request: (executed.append(request), (request.tool_rounds, None))[1],
+        )
+        loop_patch.setattr(
+            _tool_loop_service,
+            "build_tool_loop_prompt",
+            lambda _agent, loop_params: _tool_loop_service._render_tool_loop_prompt(
+                agent, loop_params
+            ),
+        )
+        _prompt, response, _rounds = _tool_loop_service.execute_tool_loop(agent, params)
 
     assert backend.calls == 3, (
         "超时 1 次 + 门槛5 重试 1 次 + 续跑 1 次；续跑那一枪是新的 model turn，"

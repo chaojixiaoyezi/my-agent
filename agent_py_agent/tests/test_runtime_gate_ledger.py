@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 from agent_py_agent.agent.action_protocol import RunScope
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
-from agent_py_agent.agent.agent_core._tool_loop_service import ToolLoopService
+from agent_py_agent.agent.agent_core._tool_loop_service import _record_tool_call
 from agent_py_agent.agent.agent_core.tool_call_runtime import (
     ToolCallRuntimeRequest,
     execute_traced_tool_call,
@@ -121,7 +121,8 @@ def test_tool_loop_record_persists_runtime_gate_ledger(tmp_path):
     params = _loop_params(write_boundary={})
 
     call = _runtime_gate_call()
-    ToolLoopService(agent)._record_tool_call(
+    _record_tool_call(
+        agent,
         ToolCallRecordParams(
             params=params,
             tool_rounds=1,

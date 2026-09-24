@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
-from agent_py_agent.agent.agent_core._tool_loop_service import ToolLoopService
+from agent_py_agent.agent.agent_core._tool_loop_service import execute_tool_loop
 from agent_py_agent.agent.agent_core.subagent.attempt_guard import (
     stale_subagent_attempt_message,
     stale_subagent_attempt_result,
@@ -161,7 +161,7 @@ def test_stale_attempt_guard_stops_tool_loop_before_next_model_call(tmp_path):
     )
 
     message = stale_subagent_attempt_message(agent)
-    final_prompt, response, tool_rounds = ToolLoopService(agent).execute(_tool_loop_params("继续写文件"))
+    final_prompt, response, tool_rounds = execute_tool_loop(agent, _tool_loop_params("继续写文件"))
 
     assert message is not None
     assert final_prompt == ""

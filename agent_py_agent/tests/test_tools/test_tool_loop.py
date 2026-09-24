@@ -13,10 +13,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from agent_py_agent.agent.agent_core import _tool_loop_service as tool_loop_module
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
 from agent_py_agent.agent.agent_core._tool_loop_service import (
-    ToolLoopService,
     _runtime_workspace_context,
+    execute_one_tool_call,
+    execute_tool_loop,
 )
 from agent_py_agent.agent.agent_core.tool_loop.round_execution import (
     ToolCallExecuteParams,
@@ -1337,7 +1339,6 @@ def test_non_mutating_schedule_result_does_not_consume_one_shot_key():
         archive_tool_calls=[],
     )
     agent = _OneShotHarnessAgent(_BlockedScheduleTools())
-    service = ToolLoopService(agent)
     arguments = {"dry_run": False, "children": [{"goal": "cart"}]}
     first_call = _canonical_test_call(
         "schedule_child_subagents",
@@ -1352,8 +1353,8 @@ def test_non_mutating_schedule_result_does_not_consume_one_shot_key():
         run_id="run-one-shot-blocked",
     )
 
-    first = service._execute_one_tool_call(ToolCallExecuteParams(params, 1, 1, first_call))
-    second = service._execute_one_tool_call(ToolCallExecuteParams(params, 2, 1, second_call))
+    first = execute_one_tool_call(agent, ToolCallExecuteParams(params, 1, 1, first_call))
+    second = execute_one_tool_call(agent, ToolCallExecuteParams(params, 2, 1, second_call))
 
     assert first.result.ok is True
     assert second.result.ok is True
@@ -1383,14 +1384,14 @@ def test_batch_create_blocks_overlapping_single_child_calls_in_same_turn():
     )
     tools = _SuccessfulCreateTools()
     agent = _OneShotHarnessAgent(tools)
-    service = ToolLoopService(agent)
     goals = ["研究营养均衡", "研究采购预算", "研究食材复用"]
     batch = {
         "goal": "并行研究营养计划",
         "items": [{"goal": goal, "role": "worker"} for goal in goals],
     }
 
-    first = service._execute_one_tool_call(
+    first = execute_one_tool_call(
+        agent,
         ToolCallExecuteParams(
             params,
             1,
@@ -1404,7 +1405,8 @@ def test_batch_create_blocks_overlapping_single_child_calls_in_same_turn():
         )
     )
     repeated = [
-        service._execute_one_tool_call(
+        execute_one_tool_call(
+            agent,
             ToolCallExecuteParams(
                 params,
                 1,
@@ -1427,7 +1429,7 @@ def test_batch_create_blocks_overlapping_single_child_calls_in_same_turn():
     )
 
 
-def test_tool_loop_drains_pending_deferred_tool_calls_before_model_turn(tmp_path):
+def test_tool_loop_drains_pending_deferred_tool_calls_before_model_turn(monkeypatch, tmp_path):
     run_id = "run-deferred-drain"
     agent = SimpleAgent(
         _text_agent_config(enable_tools=True, memory_path="memory.jsonl"),
@@ -1459,23 +1461,28 @@ def test_tool_loop_drains_pending_deferred_tool_calls_before_model_turn(tmp_path
             ]
         },
     )
-    service = ToolLoopService(agent)
     drained: list[list[ToolCall]] = []
     model_calls: list[int] = []
 
-    def fake_run_tool_round(request):
+    # LLM: 只观察排队工具被转交的时点，宿主身份和模型请求前的轮号仍由真实主循环决定。
+    # 函数用途: 收集待执行调用并让循环继续，以核对先排空队列再采样的顺序。
+    def fake_run_tool_round(loop_agent, request):
+        assert loop_agent is agent and request.agent is agent
         drained.append(list(request.calls))
         return request.tool_rounds, None
 
-    def fake_model_turn_or_retry(params_arg, tool_rounds, empty_repairs):
-        del params_arg, empty_repairs
+    # LLM: 接收真实循环递交的参数与轮数，不能自行推进轮号掩盖延迟工具未排空。
+    # 函数用途: 记录首次模型轮所见轮号，再返回固定终答结束本次测试。
+    def fake_model_turn_or_retry(loop_agent, params_arg, tool_rounds, empty_repairs):
+        assert loop_agent is agent and params_arg is params
+        del empty_repairs
         model_calls.append(tool_rounds)
         return "prompt", ModelResponse(text="done", backend="test"), True, False, 0
 
-    service._run_tool_round = fake_run_tool_round
-    service._model_turn_or_retry = fake_model_turn_or_retry
-
-    final_prompt, response, tool_rounds = service.execute(params)
+    with monkeypatch.context() as loop_patch:
+        loop_patch.setattr(tool_loop_module, "_run_tool_round", fake_run_tool_round)
+        loop_patch.setattr(tool_loop_module, "_model_turn_or_retry", fake_model_turn_or_retry)
+        final_prompt, response, tool_rounds = execute_tool_loop(agent, params)
 
     assert [[call.tool_name for call in calls] for calls in drained] == [["read_file"]]
     assert drained[0][0].arguments == {

@@ -1,7 +1,7 @@
 
 
-# LLM: 工具循环用同一 native IR 和 owner/thread Compact 权威；原生执行事实只补当前批次，不从次数推断任务完成。
-# 模块用途: 装配工具循环与原Compact；候选只借原列表，持久提交与投影分开，守住输入账本和取消边界。
+# LLM: execute_tool_loop 是主子共用的唯一循环入口；逐 run 参数和局部计数不共享，native IR 与 owner/thread Compact 权威不变。
+# 模块用途: 直接装配模型采样、工具执行和原Compact；保持输入账本、取消顺序以及持久提交与投影的边界。
 from __future__ import annotations
 
 import json
@@ -1321,10 +1321,6 @@ def _restore_tool_loop_params(agent, previous: object, sentinel: object) -> None
     agent._current_tool_loop_params = previous
 
 
-def execute_tool_loop(agent, params: ToolLoopExecuteParams):
-    return _execute_tool_loop_service(ToolLoopService(agent), params)
-
-
 def _renew_exec_lock_if_held(agent, params: ToolLoopExecuteParams) -> None:
     """R1-03 工具循环每轮续租执行权锁（lease 60s，fail-silent）。
 
@@ -1372,21 +1368,21 @@ def _pending_turn_input_invalidates_response(agent, params: ToolLoopExecuteParam
     return True
 
 
-# LLM: 工作片只按结构化响应/中断/预算推进，不能从有无正文猜停工或改写用户请求；重复观察走工具结果账。
-# 函数用途: 执行主子共用的模型工具循环，保留连续工具工作；等待直属孩子时安全让出而不假报完成。
-def _execute_tool_loop_service(service: ToolLoopService, params: ToolLoopExecuteParams):
+# LLM: 本入口直接调用既有采样、工具和记账函数；每次调用独占计数与 params，裁决顺序须同步核对中断、续跑和工具循环测试。
+# 函数用途: 执行主子共用的模型工具循环，会请求模型、运行工具及更新原账；只按结构化响应、中断和预算推进。
+def execute_tool_loop(agent, params: ToolLoopExecuteParams):
     final_prompt, final_response = "", None
     tool_rounds = params.tool_rounds
     repair_counters, provider_response_repairs = ToolLoopRepairCounters(), 0
 
     while True:
         if is_interrupted():
-            final_response = _interrupted_conversation_response(service._agent)
+            final_response = _interrupted_conversation_response(agent)
             break
         # R1-03：每轮续租执行权锁（fail-silent），活 worker 持续占有防误接管。
-        _renew_exec_lock_if_held(service._agent, params)
+        _renew_exec_lock_if_held(agent, params)
         tool_rounds, pending_final, drained, pending_prompt = _pending_drain_outcome(
-            service, params, tool_rounds
+            agent, params, tool_rounds
         )
         if drained and pending_final is None:
             continue
@@ -1402,28 +1398,28 @@ def _execute_tool_loop_service(service: ToolLoopService, params: ToolLoopExecute
             should_stop,
             retry_after_provider_response,
             provider_response_repairs,
-        ) = service._model_turn_or_retry(params, tool_rounds, provider_response_repairs)
+        ) = _model_turn_or_retry(agent, params, tool_rounds, provider_response_repairs)
         if retry_after_provider_response:
             continue
         if is_interrupted():
-            final_response = _interrupted_conversation_response(service._agent)
+            final_response = _interrupted_conversation_response(agent)
             break
         if should_stop:
             break
         # /btw 可能在 provider 正在生成时到达；旧响应此时已过期，不能据此开工具或结束任务。
-        if _pending_turn_input_invalidates_response(service._agent, params):
+        if _pending_turn_input_invalidates_response(agent, params):
             continue
         natural_reply_verdict, final_response = _natural_user_reply_step(params, final_response)
         if natural_reply_verdict == "retry":
             continue
         if natural_reply_verdict == "finish":
             break
-        repair_counters, action = _response_action(service._agent, params, final_response, repair_counters)
+        repair_counters, action = _response_action(agent, params, final_response, repair_counters)
         # 会话运行时 root/child lifecycle boundary: only a plain final response is
         # deferred.  Real tool calls remain executable while children run.
         if action.action == "break":
             if wait_response := task_local_wait_response_for_open_subagents(
-                service._agent,
+                agent,
                 params,
                 response=final_response,
             ):
@@ -1433,13 +1429,13 @@ def _execute_tool_loop_service(service: ToolLoopService, params: ToolLoopExecute
             # 也不改写 turn-end。task_local 的等待由 completion.py 的 direct_child_wait marker
             # + 子代理生命周期事件负责；主/子递归同规则。
             if queue_interim_reply_for_active_named_work(
-                service._agent,
+                agent,
                 params,
                 tool_rounds=tool_rounds,
             ):
                 continue
             if queue_reply_for_audit_prepare(
-                service._agent,
+                agent,
                 params,
                 response=final_response,
                 tool_rounds=tool_rounds,
@@ -1455,7 +1451,7 @@ def _execute_tool_loop_service(service: ToolLoopService, params: ToolLoopExecute
             final_response = routed_response if routed_response is not None else final_response
             break
         final_prompt, final_response, tool_rounds = _tool_step_or_limit(
-            service,
+            agent,
             _ToolStepRequest(
                 params=params,
                 tool_rounds=tool_rounds,
@@ -1498,90 +1494,48 @@ def _routed_action_step(action):
 
 
 
-# 函数用途: 把 pending 延迟工具调用的双分支收成一次裁决,返回(轮数, 最终回复, 是否命中, 产出回复的 prompt)。
-def _pending_drain_outcome(service, params, tool_rounds):
-    pending = _drain_pending_deferred_tool_calls(service, params, tool_rounds)
+# LLM: 消费延迟工具时沿用本 run 的宿主与参数，保持回复及其来源 prompt 成对返回；需核对延迟收口归属测试。
+# 函数用途: 驱动待处理工具并归一化有无结果的分支，返回轮数、回复、是否命中及来源 prompt。
+def _pending_drain_outcome(agent, params, tool_rounds):
+    pending = _drain_pending_deferred_tool_calls(agent, params, tool_rounds)
     if pending is None:
         return tool_rounds, None, False, ""
     return pending.tool_rounds, pending.final_response, True, pending.final_prompt
 
 
-class ToolLoopService:
-    def __init__(self, agent):
-        self._agent = agent
-
-    def execute(self, params: ToolLoopExecuteParams):
-        return _execute_tool_loop_service(self, params)
-
-    def _model_turn_or_retry(
-        self,
-        params: ToolLoopExecuteParams,
-        tool_rounds: int,
-        provider_response_repairs: int,
-    ):
-        return _model_turn_or_retry(self._agent, params, tool_rounds, provider_response_repairs)
-
-    def _run_tool_round(self, request: ToolRoundExecutionRequest):
-        return _run_tool_round(self._agent, request)
-
-    def _tool_round_limit_reached(self, params: ToolLoopExecuteParams, tool_rounds: int) -> bool:
-        return _tool_round_limit_reached(self._agent, params, tool_rounds)
-
-    def _final_response_after_tool_limit(self, params: ToolLoopExecuteParams, tool_rounds: int):
-        return _final_response_after_tool_limit(self._agent, params, tool_rounds)
-
-    def _final_response_after_repeated_failure(
-        self, params: ToolLoopExecuteParams, tool_rounds: int
-    ):
-        return _final_response_after_repeated_failure(self._agent, params, tool_rounds)
-
-    def _final_response_after_unknown_outcome_halt(
-        self, params: ToolLoopExecuteParams, tool_rounds: int
-    ):
-        return _final_response_after_unknown_outcome_halt(self._agent, params, tool_rounds)
-
-    def _final_response_after_no_action_gate(
-        self, params: ToolLoopExecuteParams, tool_rounds: int
-    ):
-        return _final_response_after_no_action_gate(self._agent, params, tool_rounds)
-
-    def _execute_one_tool_call(self, request: ToolCallExecuteParams):
-        return execute_one_tool_call(self._agent, request)
-
-    def _record_tool_call(self, record: ToolCallRecordParams) -> None:
-        _record_tool_call(self._agent, record)
-
-
+# LLM: 延迟队列只消费一次，执行和记账回调仍绑定同一 agent；上限收口保持原请求、回复和用量归属。
+# 函数用途: 先取出本 run 排队的工具，再执行一轮或请求模型收口，会更新工具账和延迟队列。
 def _drain_pending_deferred_tool_calls(
-    service: ToolLoopService,
+    agent,
     params: ToolLoopExecuteParams,
     tool_rounds: int,
 ) -> _PendingDeferredToolDrainResult | None:
     pending_calls = _pop_pending_deferred_tool_calls(params)
     if not pending_calls:
         return None
-    if service._tool_round_limit_reached(params, tool_rounds):
+    if _tool_round_limit_reached(agent, params, tool_rounds):
         if queue_interim_reply_for_tool_round_limit(
-            service._agent,
+            agent,
             params,
             tool_rounds=tool_rounds,
         ):
             return _PendingDeferredToolDrainResult(tool_rounds)
-        final_prompt, final_response = service._final_response_after_tool_limit(params, tool_rounds)
+        final_prompt, final_response = _final_response_after_tool_limit(agent, params, tool_rounds)
         # 这一枪是真的模型生成：它的 prompt 必须跟着回复一起回到主循环，否则返回给调用方的
         # prompt 会是上一轮的（跨请求配对）。这里只传递归属，不改任何裁决。
         return _PendingDeferredToolDrainResult(tool_rounds, final_response, final_prompt)
     next_round = tool_rounds + 1
-    next_round, final_response = service._run_tool_round(
+    next_round, final_response = _run_tool_round(
+        agent,
         ToolRoundExecutionRequest(
-            service._agent,
+            agent,
             params,
             next_round,
             ModelResponse(text="[PENDING_DEFERRED_TOOL_CALLS]", backend="tool_loop"),
             pending_calls,
-            service._execute_one_tool_call,
-            service._record_tool_call,
-            _deferred_drain_prompt(service._agent, params),
+            partial(execute_one_tool_call, agent),
+            partial(_record_tool_call, agent),
+            _deferred_drain_prompt(agent, params),
         ),
     )
     return _PendingDeferredToolDrainResult(next_round, final_response)
@@ -1665,47 +1619,49 @@ def _response_action(agent, loop_params: ToolLoopExecuteParams, response, repair
     return decision.counters, decision
 
 
-# LLM: 执行一批工具后只尊重 typed interrupt、预算和显式安全/硬门；普通可恢复
-# 工具失败必须留在当前模型循环内返工，不能由宿主按次数替模型结束 turn。
-# 函数用途: 推进一个工具轮，并在明确的中断或硬边界命中时返回收口响应。
-def _tool_step_or_limit(service: ToolLoopService, request: _ToolStepRequest):
+# LLM: 工具请求的执行、记账回调绑定同一 agent；只按 typed interrupt、预算和显式硬门收口，需同步核对工具及中断测试。
+# 函数用途: 运行一批工具并更新原账，硬边界命中时请求模型收口；普通可恢复失败留在当前循环内返工。
+def _tool_step_or_limit(agent, request: _ToolStepRequest):
     if is_interrupted():
         return (
             request.current_prompt,
-            _interrupted_conversation_response(service._agent),
+            _interrupted_conversation_response(agent),
             request.tool_rounds,
         )
-    if has_pending_turn_input(service._agent, request.params):
+    if has_pending_turn_input(agent, request.params):
         return request.current_prompt, None, request.tool_rounds
-    if service._tool_round_limit_reached(request.params, request.tool_rounds):
+    if _tool_round_limit_reached(agent, request.params, request.tool_rounds):
         if queue_interim_reply_for_tool_round_limit(
-            service._agent,
+            agent,
             request.params,
             tool_rounds=request.tool_rounds,
         ):
             return request.current_prompt, None, request.tool_rounds
-        final_prompt, final_response = service._final_response_after_tool_limit(
+        final_prompt, final_response = _final_response_after_tool_limit(
+            agent,
             request.params,
             request.tool_rounds,
         )
         return final_prompt, final_response, request.tool_rounds
     next_round = request.tool_rounds + 1
-    next_round, final_response = service._run_tool_round(
+    next_round, final_response = _run_tool_round(
+        agent,
         ToolRoundExecutionRequest(
-            service._agent,
+            agent,
             request.params,
             next_round,
             request.action.response,
             request.action.calls,
-            service._execute_one_tool_call,
-            service._record_tool_call,
+            partial(execute_one_tool_call, agent),
+            partial(_record_tool_call, agent),
             request.current_prompt,
         ),
     )
     # 这里只处理部署者显式开启的 hard_failure_halt。默认同类失败只会把
     # 结构化错误和换路提示交还模型，不会设置 repeated_failure_halt。
     if request.params.repeated_failure_halt is not None:
-        final_prompt, final_response = service._final_response_after_repeated_failure(
+        final_prompt, final_response = _final_response_after_repeated_failure(
+            agent,
             request.params,
             next_round,
         )
@@ -1714,7 +1670,8 @@ def _tool_step_or_limit(service: ToolLoopService, request: _ToolStepRequest):
     # retryable=False)后不再给模型工具权,按未完成收口并如实汇报
     # (与 repeated_failure_halt 正交,不自动续跑)。
     if getattr(request.params, "unknown_outcome_halt", None) is not None:
-        final_prompt, final_response = service._final_response_after_unknown_outcome_halt(
+        final_prompt, final_response = _final_response_after_unknown_outcome_halt(
+            agent,
             request.params,
             next_round,
         )
@@ -1722,7 +1679,8 @@ def _tool_step_or_limit(service: ToolLoopService, request: _ToolStepRequest):
     # no-action 闸收口(复核 seq 339):informational 轮模型反复抗拦截仍提调用,
     # 连续达限后不再给工具权,收口轮等用户明确指示(与 unknown 收口正交)。
     if getattr(request.params, "no_action_gate_halt", False):
-        final_prompt, final_response = service._final_response_after_no_action_gate(
+        final_prompt, final_response = _final_response_after_no_action_gate(
+            agent,
             request.params,
             next_round,
         )

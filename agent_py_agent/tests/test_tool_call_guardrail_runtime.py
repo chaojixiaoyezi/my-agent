@@ -158,7 +158,7 @@ def test_runtime_unrelated_failure_does_not_forget_read_result() -> None:
 def test_guardrail_recovery_survives_canonical_record_and_native_projection(tmp_path) -> None:
     from agent_py_agent.agent.agent_core._tool_loop_service import (
         ToolCallRecordParams,
-        ToolLoopService,
+        _record_tool_call,
     )
     from agent_py_agent.agent.backends.message_adapter import AnthropicMessageAdapter
     from agent_py_agent.agent.backends.tool_ir import AssistantTurn
@@ -178,7 +178,7 @@ def test_guardrail_recovery_survives_canonical_record_and_native_projection(tmp_
     )
     loop_params = _tool_loop_params(request_id=params.request_id, run_id=call.run_id, task_id=params.task_id)
     loop_params.tool_ir_history.append(AssistantTurn(text="", tool_calls=[call]))
-    ToolLoopService(SimpleNamespace(root=tmp_path))._record_tool_call(ToolCallRecordParams(
+    _record_tool_call(SimpleNamespace(root=tmp_path), ToolCallRecordParams(
         params=loop_params, tool_rounds=1, idx=1, call=call, result=result,
     ))
     native = AnthropicMessageAdapter().to_provider_messages(loop_params.tool_ir_history)
