@@ -13,6 +13,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent_py_agent.agent.agent_core.tool_loop import round_execution as round_module
+from agent_py_agent.agent.agent_core.tool_loop import segment_planning
 from agent_py_agent.agent.agent_core.tool_loop.round_execution import (
     ToolProgressEvent,
     ToolRoundExecutionRequest,
@@ -1030,6 +1032,113 @@ def test_tool_round_does_not_limit_model_tool_calls_by_default():
         "/tmp/source-3.md",
     ]
     assert not any("剩余" in str(item) and "没有执行" in str(item) for item in params.tool_context)
+
+
+# LLM: 只构造真实执行轮所需的 canonical 只读快照，调用仍经原段判定、线程和记录路径。
+# 函数用途: 为调度边界交错用例准备三个可并发 reader，不预置段尾或执行结果。
+def _planning_reader_request(execute_one, record_one) -> ToolRoundExecutionRequest:
+    spec = make_test_model_spec(
+        "read_probe",
+        input_schema={
+            "type": "object", "properties": {"slot": {"type": "integer"}},
+            "required": ["slot"], "additionalProperties": False,
+        },
+    )
+    snapshot = runtime_snapshot_for_model_specs(
+        (spec,), run_id=_ROUND_RUN_ID,
+        policies={spec.name: make_test_runtime_policy("read_only", concurrency_mode="parallel_safe")},
+    )
+    return _round_request(
+        agent=SimpleNamespace(),
+        params=SimpleNamespace(
+            tool_context=[], tool_runtime_snapshot=snapshot, cancellation_token=CancellationToken(),
+        ),
+        tool_rounds=1, response=ModelResponse(text="", backend="test"),
+        calls=[{"tool": "read_probe", "slot": slot} for slot in range(3)],
+        execute_one=execute_one, record_one=record_one,
+    )
+
+
+def test_dynamic_compact_boundary_is_rechecked_before_admitting_the_next_reader(monkeypatch):
+    compact_due = False
+    trace = []
+    executed = []
+    records = []
+
+    def execute_one(call_request):
+        executed.append(call_request.idx)
+        return _success(call_request, "read once")
+
+    request = _planning_reader_request(
+        execute_one, lambda record: records.append((record.idx, record.result.error_code)),
+    )
+    real_describe = round_module.describe_tool_concurrency
+
+    def defer(round_request, tool_name):
+        assert round_request is request
+        trace.append(("compact", tool_name, compact_due))
+        return compact_due
+
+    def describe(snapshot, call, **kwargs):
+        nonlocal compact_due
+        trace.append(("describe", call.arguments["slot"]))
+        descriptor = real_describe(snapshot, call, **kwargs)
+        compact_due = True
+        return descriptor
+
+    monkeypatch.setattr(round_module, "_should_defer_for_compact", defer)
+    monkeypatch.setattr(round_module, "describe_tool_concurrency", describe)
+    execute_tool_round(request)
+
+    assert executed == [1]
+    assert records == [(1, ""), (2, "CONTEXT_COMPACT_DEFERRED"), (3, "CONTEXT_COMPACT_DEFERRED")]
+    assert trace == [
+        ("compact", "read_probe", False),  # 原执行轮的启动前检查。
+        ("compact", "read_probe", False), ("describe", 0),
+        ("compact", "read_probe", True),  # 第一条描述之后实时边界改变。
+        ("compact", "read_probe", True),  # 下一轮统一登记未启动调用。
+    ]
+
+
+def test_segment_compact_query_error_propagates_before_any_handler_or_record(monkeypatch):
+    failure = RuntimeError("compact query failed")
+    queried = []
+    executed = []
+    records = []
+    request = _planning_reader_request(executed.append, records.append)
+
+    def defer(round_request, tool_name):
+        assert round_request is request
+        queried.append(tool_name)
+        if len(queried) == 2:
+            raise failure
+        return False
+
+    monkeypatch.setattr(round_module, "_should_defer_for_compact", defer)
+    with pytest.raises(RuntimeError) as caught:
+        execute_tool_round(request)
+
+    assert caught.value is failure
+    assert queried == ["read_probe", "read_probe"]
+    assert executed == []
+    assert records == []
+
+
+def test_conflicting_segment_keeps_calls_on_the_serial_path_without_losing_results(monkeypatch):
+    caller_thread = threading.get_ident()
+    executed = []
+    records = []
+
+    def execute_one(call_request):
+        executed.append((call_request.idx, threading.get_ident()))
+        return _success(call_request, "read serially")
+
+    # 现行 read/read 允许重叠；这里由冲突事实生产者注入冲突，核对真实循环的串行与记账因果。
+    monkeypatch.setattr(segment_planning, "concurrency_conflicts", lambda _left, _right: True)
+    execute_tool_round(_planning_reader_request(execute_one, lambda record: records.append(record.idx)))
+
+    assert executed == [(1, caller_thread), (2, caller_thread), (3, caller_thread)]
+    assert records == [1, 2, 3]
 
 
 def test_parallel_safe_readers_overlap_but_records_keep_provider_order():

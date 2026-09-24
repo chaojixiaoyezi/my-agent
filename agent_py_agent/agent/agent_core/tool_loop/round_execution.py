@@ -1,5 +1,5 @@
-# LLM: 本模块执行一轮 canonical ToolCall，并保持审批、并发、取消、记录和 provider 调用顺序的结构化一致性。
-# 模块用途: 编排单轮工具调用，隔离线程依赖并输出配对结果；用户拒绝后阻止相同调用重复弹框。
+# LLM: 本模块执行一轮 canonical ToolCall；仅将连续段判定交给窄查询，审批、并发、取消与 provider 顺序记账仍由原链负责。
+# 模块用途: 装配实时调度事实并执行工具轮，隔离线程依赖、输出配对结果，用户拒绝后阻止相同调用重复弹框。
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
 from dataclasses import dataclass, replace
+from functools import partial
 from typing import ClassVar, Literal
 
 from ...backends import ModelResponse
@@ -21,7 +22,7 @@ from ...contracts.tool_approval import (
 from ...conversation.authority import conversation_transcript_is_authoritative
 from ...memory_archive import estimate_tokens
 from ...tooling.action_policy import ActionDecision
-from ...tooling.concurrency import concurrency_conflicts, describe_tool_concurrency
+from ...tooling.concurrency import ToolConcurrencyDescriptor, describe_tool_concurrency
 from ...tooling.executor import ToolExecution
 from ...tooling.runtime_contracts import (
     AppliedToolApproval,
@@ -36,6 +37,11 @@ from ..runtime.live_archive import archive_assistant_tool_round_if_enabled
 from ..tool_context.call_reducer import (
     AssistantToolRoundContextRequest,
     render_assistant_tool_round_context,
+)
+from .segment_planning import (
+    parallel_segment_end,
+    parse_optional_batch_limit,
+    resolve_parallel_batch_limit,
 )
 
 _STATEFUL_ORCHESTRATION_TOOLS = {
@@ -142,8 +148,8 @@ class _ToolRoundProgress:
     deferred_reason: str = ""
 
 
-# LLM: 本入口按 ToolRuntimePolicy 划分只读并发段和顺序屏障；无论实际完成顺序如何，记录顺序始终与 provider 调用顺序一致。
-# 函数用途: 执行一轮 canonical 工具调用，并为执行、拒绝、延后与取消都写入配对 ToolResult。
+# LLM: 每段原位绑定实时 Compact/描述查询，不能把整轮调度事实提前冻结；实际完成顺序不影响 provider 顺序记账，联测取消与审批。
+# 函数用途: 执行一轮 canonical 工具调用，保留只读并发段和顺序屏障，为执行、拒绝、延后与取消写入配对 ToolResult。
 def execute_tool_round(request: ToolRoundExecutionRequest) -> bool:
     before_context_count = len(getattr(request.params, "tool_context", []) or [])
     _append_assistant_tool_round_context(request)
@@ -158,7 +164,13 @@ def execute_tool_round(request: ToolRoundExecutionRequest) -> bool:
     while position < len(calls):
         if _defer_unstarted_calls_if_needed(request, calls, position, progress):
             break
-        parallel_end = _parallel_segment_end(request, calls, position)
+        parallel_end = parallel_segment_end(
+            calls,
+            position,
+            batch_limit=_effective_parallel_batch_limit(request),
+            defer_for_compact=partial(_should_defer_for_compact, request),
+            describe_call=partial(_describe_round_call_concurrency, request),
+        )
         if parallel_end - position >= 2:
             position = _execute_parallel_step(
                 request,
@@ -637,52 +649,32 @@ class _ParallelThreadContext:
     task_attributes: dict[str, object] | None
 
 
-# LLM: Provider 已提交的全部调用都必须获得真实终态；两个配置只限制一次并发批次大小，不能截掉同一 assistant turn 的尾部调用。
-# 函数用途: 计算下一段可并发执行的调用范围；超出批大小的调用留在当前工具轮中，下一批紧接着继续执行。
-def _parallel_segment_end(
+# LLM: 本装配点在该调用的 Compact 查询之后才读原快照、工作根和写边界；这些只是调度事实，不替代 ActionPolicy 授权。
+# 函数用途: 为正在扫描的一个工具生成原并发描述，避免提前取快照改变动态边界或查询异常的时序。
+def _describe_round_call_concurrency(
     request: ToolRoundExecutionRequest,
-    calls: list[ToolCall],
-    start: int,
-) -> int:
-    descriptors = []
-    position = start
-    parallel_limit = _effective_parallel_batch_limit(request)
-    # 0=不限制(与 max_tool_rounds 显式 0 同约定);正数=该上限(EXEC-01)。
-    while position < len(calls) and (
-        parallel_limit <= 0 or position - start < parallel_limit
-    ):
-        call = calls[position]
-        if _should_defer_for_compact(request, call.tool_name):
-            break
-        descriptor = describe_tool_concurrency(
-            getattr(request.params, "tool_runtime_snapshot", None),
-            call,
-            workspace_root=getattr(
-                request.agent, "effective_workspace_root", getattr(request.agent, "root", None)
-            ),
-            write_boundary=getattr(request.params, "write_boundary", None),
-        )
-        if not descriptor.parallel_eligible:
-            break
-        if any(concurrency_conflicts(descriptor, prior) for prior in descriptors):
-            break
-        descriptors.append(descriptor)
-        position += 1
-    return position
+    call: ToolCall,
+) -> ToolConcurrencyDescriptor:
+    return describe_tool_concurrency(
+        getattr(request.params, "tool_runtime_snapshot", None),
+        call,
+        workspace_root=getattr(
+            request.agent, "effective_workspace_root", getattr(request.agent, "root", None)
+        ),
+        write_boundary=getattr(request.params, "write_boundary", None),
+    )
 
 
-# LLM: ``max_tool_calls_per_round`` 是历史公开字段；当前只把它解释为执行批大小，与 会话运行时 的 admission/parallel gate 一样不得制造未执行 ToolResult。
-# 函数用途: 合并普通并发上限和后台切片批大小，取最小正数；0 表示对应配置不限制。
+# LLM: 保持任务属性优先、缺省才读取对应配置的顺序；max_tool_calls_per_round 仅限制执行批，不能制造未执行 ToolResult。
+# 函数用途: 原位读取两项有效数值，再交给窄策略合并批上限，避免未使用的配置提前触发读取或异常。
 def _effective_parallel_batch_limit(request: ToolRoundExecutionRequest) -> int:
-    limits = [
-        value
-        for value in (
-            _max_parallel_tool_calls(request),
-            _tool_execution_batch_size(request),
-        )
-        if value > 0
-    ]
-    return min(limits) if limits else 0
+    parallel_limit = _task_attribute_int(request, "max_parallel_tool_calls")
+    if parallel_limit is None:
+        parallel_limit = _agent_config_int(request.agent, "max_parallel_tool_calls")
+    tool_batch_limit = _task_attribute_int(request, "max_tool_calls_per_round")
+    if tool_batch_limit is None:
+        tool_batch_limit = _agent_config_int(request.agent, "max_tool_calls_per_round")
+    return resolve_parallel_batch_limit(parallel_limit, tool_batch_limit)
 
 
 # LLM: 每个并行工具都携带独立 Context 副本，继承本工作片模型/权限；线程本地 runner 身份仍走原桥，不共享可进入的 Context。
@@ -974,21 +966,6 @@ def _interrupted_result(call: ToolCall) -> ToolResult:
 #   截口落在换行处,并注明恢复路径(重新调用工具/读档案)。纯框架层,模型无感。
 _TURN_TOOL_CONTEXT_BUDGET_CHARS = 200_000
 _TURN_BUDGET_KEEP_CHARS = 20_000
-# EXEC-01: 单轮并行工具段默认上限(8)。可用配置 max_parallel_tool_calls
-# 覆盖(空=本默认;正数=上限;0=不限制),任务属性可单任务覆盖。
-_MAX_PARALLEL_TOOL_CALLS = 8
-
-
-# 函数用途: 读取单轮并行工具段上限——任务属性 > agent 配置 > 代码默认 8。
-def _max_parallel_tool_calls(request: ToolRoundExecutionRequest) -> int:
-    value = _task_attribute_int(request, "max_parallel_tool_calls")
-    if value is None:
-        value = _agent_config_int(request.agent, "max_parallel_tool_calls")
-    if value is None:
-        return _MAX_PARALLEL_TOOL_CALLS
-    if value < 0:
-        return _MAX_PARALLEL_TOOL_CALLS
-    return value
 
 
 # 函数用途: 本轮工具输出总量超预算时,把最大的几段裁到安全大小(裁口带提示)。
@@ -1143,38 +1120,22 @@ def _runtime_transition_deferred_result(call: ToolCall) -> ToolResult:
     )
 
 
-# LLM: 该历史字段现在只限制一次宿主并发批次；调用总数由 provider turn 决定，所有 admitted calls 都必须在再次采样模型前执行或得到客观取消/compact 结果。
-# 函数用途: 读取每批工具执行数量，后台可用较小值削峰，但不能借此丢弃同轮后续调用。
-def _tool_execution_batch_size(request: ToolRoundExecutionRequest) -> int:
-    value = _task_attribute_int(request, "max_tool_calls_per_round")
-    if value is None:
-        value = _agent_config_int(request.agent, "max_tool_calls_per_round")
-    if value is None or value <= 0:
-        return 0
-    return value
-
-
+# LLM: 只读取任务属性中被请求的批大小字段，转换合同由 segment_planning 统一维护。
+# 函数用途: 读取任务对某一批上限的覆盖值，无有效覆盖时让装配点继续读取配置。
 def _task_attribute_int(request: ToolRoundExecutionRequest, key: str) -> int | None:
     attrs = getattr(request.params, "task_attributes", None)
     if not isinstance(attrs, dict) or key not in attrs:
         return None
-    return _positiveish_int(attrs.get(key))
+    return parse_optional_batch_limit(attrs.get(key))
 
 
+# LLM: 配置查询仍按原 hasattr/getattr 顺序发生，不能将配置对象传进段判定模块。
+# 函数用途: 读取缺少任务覆盖的批大小配置，并保留原转换异常行为。
 def _agent_config_int(agent: object, key: str) -> int | None:
     config = getattr(agent, "config", None)
     if config is None or not hasattr(config, key):
         return None
-    return _positiveish_int(getattr(config, key))
-
-
-def _positiveish_int(value: object) -> int | None:
-    if isinstance(value, bool):
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
+    return parse_optional_batch_limit(getattr(config, key))
 
 
 def _append_deferred_tool_call_notice(
