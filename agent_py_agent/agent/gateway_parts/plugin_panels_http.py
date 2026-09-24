@@ -33,11 +33,12 @@ def handle_client_plugin_panels(handler, server) -> None:
     scope = _gateway_control_scope(handler, body, user_id=user_id, channel=channel)
     try:
         owner, thread_key, activity = _owner_and_activity(base, scope)
+        sessions = _owner_sessions(base, scope)
     except Exception:  # noqa: BLE001 作用域解析失败不能泄露路径，也不能影响核心接口
         handler._send_json(200, {"ok": False, "panels": [], "error": "owner scope unavailable"})
         return
     service = plugin_display_service(server)
-    panels = service.panels(PanelQuery(owner, str(owner.home_dir), thread_key, activity, requested))
+    panels = service.panels(PanelQuery(owner, str(owner.home_dir), thread_key, activity, requested, sessions))
     handler._send_json(200, {"ok": True, "panels": panels})
 
 
@@ -95,3 +96,24 @@ def _owner_and_activity(base, scope) -> tuple[object, str, dict]:
         return owner, thread_key, {}
     thread_id = str(getattr(thread, "thread_id", "") or "")
     return owner, "thread:" + thread_id, conversation_agent_activity(owner_agent, store, thread_id).to_dict()
+
+
+# LLM: 只为已加载的 owner 返回惰性提供方，冷 owner 不为展示加载实例；只读该 owner 自己的会话记录，
+#   输出白名单字段（编号、时间、渠道、是否当前），不含 metadata、标题、路径或读取错误详情。
+# 函数用途: 生成插件面板 sessions 主题用的会话列表读取函数，由展示服务按需调用。
+def _owner_sessions(base, scope):
+    from ..session.manager import SessionManager
+    from .control_service import resolve_loaded_gateway_scope_agent
+
+    owner_agent = resolve_loaded_gateway_scope_agent(base, scope)
+    config = getattr(owner_agent, "config", None)
+    if config is None or not getattr(config, "session_workspace", ""):
+        return None
+    current = str(getattr(scope, "conversation_id", "") or "")
+
+    def read() -> list[dict]:
+        sessions, _errors = SessionManager(config).list_sessions_report()
+        return [{"session_id": item.session_id, "updated_at": item.updated_at, "created_at": item.created_at,
+                 "channel": item.last_active_channel, "current": item.session_id == current} for item in sessions]
+
+    return read

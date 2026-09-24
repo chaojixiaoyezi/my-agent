@@ -324,3 +324,25 @@ def test_context_topic_forwards_only_public_numbers():
                        "runtime_guidance_tokens": 1200, "tool_schema_tokens": 25000, "estimated": True}
     empty = project_topics({}, ("context",))["context"]
     assert empty["known"] is False and empty["current_tokens"] == 0
+
+
+def test_sessions_topic_is_lazy_and_whitelisted():
+    from agent_py_agent.agent.plugin_display.service import _session_rows, project_topics
+
+    calls = []
+
+    def provider():
+        calls.append(1)
+        return [{"session_id": "sess_1", "updated_at": 2.0, "created_at": 1.0, "channel": "chat", "current": True,
+                 "metadata": {"title": "私有"}}, "坏行", {"session_id": 3}]
+
+    rows = _session_rows(provider)
+    assert rows == [{"session_id": "sess_1", "updated_at": 2.0, "created_at": 1.0, "channel": "chat", "current": True}]
+    assert project_topics({}, ("sessions",), rows)["sessions"] == {"items": rows}
+    assert "sessions" not in project_topics({}, ("activity",), rows)
+    assert _session_rows(None) == [] and len(calls) == 1
+
+    def broken():
+        raise OSError("disk")
+
+    assert _session_rows(broken) == []

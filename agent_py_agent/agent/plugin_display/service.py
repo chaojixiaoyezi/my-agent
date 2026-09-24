@@ -28,6 +28,7 @@ RENDER_TIMEOUT_SECONDS = 3.0
 IDLE_CLOSE_SECONDS = 120.0
 ERROR_BACKOFF_SECONDS = 5.0
 MAX_REQUESTED_PANELS = 8
+MAX_SESSION_ROWS = 20
 
 
 # LLM: 请求方只能按 (插件, 面板) 选择要看的面板；owner、线程与活动投影由 Gateway 解析后传入，不信任客户端字段。
@@ -39,6 +40,8 @@ class PanelQuery:
     thread_key: str
     activity: dict
     requested: tuple[tuple[str, str], ...]
+    # 会话列表按需读取（扫描会话文件较重），只有被订阅 sessions 主题的面板请求时才调用一次
+    sessions: Callable[[], list[dict]] | None = None
 
 
 # LLM: 结果与激活代次、面板和输入摘要绑定；换代或输入变化都视为过期，不跨代复用。
@@ -95,6 +98,11 @@ class PluginDisplayService:
                   if getattr(row.manifest, "panels", ())}
         to_stop = self._retire(query.owner_key, active, now)
         output: list[dict] = []
+        wanted = {topic for plugin_id, panel_id in query.requested[:MAX_REQUESTED_PANELS]
+                  for panel in getattr(getattr(active.get(plugin_id), "manifest", None), "panels", ())
+                  if panel.id == panel_id for topic in panel.topics}
+        # 在锁外读取会话列表，避免文件扫描阻塞其他面板查询
+        sessions = _session_rows(query.sessions) if "sessions" in wanted else []
         with self._lock:
             for plugin_id, panel_id in query.requested[:MAX_REQUESTED_PANELS]:
                 row = active.get(plugin_id)
@@ -109,7 +117,7 @@ class PluginDisplayService:
                 if connection is None:
                     connection = self._connections[conn_key] = _Connection(installation=row)
                 connection.last_used = now
-                topics = project_topics(query.activity, panel.topics)
+                topics = project_topics(query.activity, panel.topics, sessions)
                 digest = _digest(topics)
                 result_key = (query.owner_key, activation_id, query.thread_key, panel_id)
                 result = self._results.get(result_key)
@@ -248,8 +256,9 @@ def _require_current(activation_ref, installation) -> None:
 # LLM: 只读 ConversationAgentActivity.to_dict() 的公开有界字段，不含路径、正文、配置或身份编号；
 #   run_state 只按宿主写入的确切阶段值（agent_activity 的活动阶段白名单）和计数推出，不解析模型文字。
 #   context 只转发 context_usage 公开白名单中的数字和压缩次数，不含正文、路径或工具参数。
+#   sessions 只含会话编号、时间、渠道和是否当前会话，由 Gateway 从本 owner 会话记录读出，不含标题或正文。
 # 函数用途: 按面板订阅的主题裁剪公开活动投影，作为 display.render 的唯一输入。
-def project_topics(activity: dict, topics: tuple[str, ...]) -> dict:
+def project_topics(activity: dict, topics: tuple[str, ...], sessions: list[dict] | None = None) -> dict:
     main = activity.get("main_activity") if isinstance(activity.get("main_activity"), dict) else {}
     subagents = activity.get("subagents") if isinstance(activity.get("subagents"), list) else []
     active_tasks = _int(activity.get("active_task_count"))
@@ -283,7 +292,28 @@ def project_topics(activity: dict, topics: tuple[str, ...]) -> dict:
             **{key: _int(usage.get(key)) for key in _CONTEXT_FIELDS},
             "estimated": usage.get("estimated") is True,
         }
+    if "sessions" in topics:
+        result["sessions"] = {"items": [dict(row) for row in (sessions or ())[:MAX_SESSION_ROWS]]}
     return result
+
+
+# LLM: 提供方来自 Gateway 的只读会话列表；异常或坏行一律丢弃，只保留白名单字段，不让面板影响核心。
+# 函数用途: 调用会话列表提供方并清洗成公开行。
+def _session_rows(provider: Callable[[], list[dict]] | None) -> list[dict]:
+    if provider is None:
+        return []
+    try:
+        rows = provider()
+    except Exception:  # noqa: BLE001 会话列表只用于展示，读取失败按空列表处理
+        logger.warning("插件展示会话列表读取失败")
+        return []
+    clean = []
+    for row in rows if isinstance(rows, list) else ():
+        if isinstance(row, dict) and isinstance(row.get("session_id"), str):
+            clean.append({"session_id": row["session_id"][:80], "updated_at": _number(row.get("updated_at")),
+                          "created_at": _number(row.get("created_at")), "channel": str(row.get("channel") or "")[:40],
+                          "current": row.get("current") is True})
+    return clean[:MAX_SESSION_ROWS]
 
 
 _CONTEXT_FIELDS = ("context_window_tokens", "compact_trigger_tokens", "current_tokens", "messages_tokens",

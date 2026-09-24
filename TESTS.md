@@ -508,6 +508,10 @@ OAuth 传输、采样和模型菜单回归。覆盖保存无网络、公开字�
 - 已知缺口：纯模型思考阶段面板显示空闲，见 [插件展示](docs/design/PLUGIN_DISPLAY.md#已知缺口)。
 - 断连重连：本轮样本中模型改用后台终端并误用参数，回合在断连前已按"结果无法确认"结束，未构成有效断连样本；断连/重连/停止仍以 TUI232 为准。
 
+## 第 10 步第二批宿主补充（本地，待发布）
+
+- `test_plugin_display_service.py::test_sessions_topic_is_lazy_and_whitelisted`：会话列表提供方只在订阅时调用，坏行丢弃、metadata 不转发、读取失败按空列表。
+
 ## 第 10 步第一批真实 TUI（1be5753ff / wheel 2d049be8，模型 MiniMax-M2.7）
 
 - 本机：新开 TUI 未经补全直接 `/plugins@activity-line show` 可打开面板（resume/新开修复生效）；纯展示插件使用卡改为"面板只能用命令打开"。
