@@ -39,21 +39,31 @@ def plugin_tool_name(plugin_id: str, tool_name: str) -> str:
 # LLM: 代理继承原执行/结果链，补固定激活可用性和能力协商的逐次元数据；不追随新连接或更改共享 cwd。
 # 类用途: 将插件接入原权限与撤销链，并把已冻结读取范围交给明确支持的插件。
 class PluginProxyTool(MCPProxyTool):
+    # LLM: 激活合同只存在于 PluginMCPClient（activation_ref）；用普通 MCPStdioClient 组装的代理（工作区上下文等测试夹具）
+    #   没有该合同，不做激活复核、只走原 MCP 连接检查——不是放宽撤销门，因为产品里插件代理一律由 PluginMCPClient 发现并持有
+    #   activation_ref。有合同时任何 OSError/ValueError（表坏、撤销、换代）都按已撤销处理，不追随最新安装。
+    # 函数用途: 统一目录可用性、审批前后复核、发送前三处的激活复核判定。
+    def _activation_revoked(self) -> bool:
+        ref = getattr(self.client, "activation_ref", None)
+        if ref is None:
+            return False
+        try:
+            ref.require()
+        except (OSError, ValueError):
+            return True
+        return False
+
     # LLM: 配置和代次只取固定 client；原表坏、撤销或换代都按不可用处理，不追随最新安装。
     # 函数用途: 只读检查原插件和已握手连接能否进入本轮目录。
     def availability(self) -> ToolAvailability:
-        try:
-            self.client.activation_ref.require()
-        except (OSError, ValueError):
+        if self._activation_revoked():
             return ToolAvailability.unavailable("原插件已停用或激活不可用")
         return super().availability()
 
     # LLM: 先复核原激活（一次有界安装表读取），失效报 PLUGIN_ACTIVATION_UNAVAILABLE；再复核连接内存状态。不启动进程、不追随新代次。
     # 函数用途: 审批前/批准后执行前复核原插件是否仍启用且连接仍在。
     def precheck_availability(self) -> ToolAvailability:
-        try:
-            self.client.activation_ref.require()
-        except (OSError, ValueError):
+        if self._activation_revoked():
             return ToolAvailability.unavailable("原插件已停用或激活不可用", error_code="PLUGIN_ACTIVATION_UNAVAILABLE")
         return super().precheck_availability()
 
@@ -63,9 +73,7 @@ class PluginProxyTool(MCPProxyTool):
     #   这是生命周期第 6 条"旧快照在执行门检查撤销"的落点。不启动进程、不追随新代次。
     # 函数用途: 停用后的插件调用固定报不可用且未执行，其余沿原 MCP 代理执行链。
     def _execute(self, params: dict[str, object], context: ToolInvocationContext | None) -> ToolHandlerOutcome:
-        try:
-            self.client.activation_ref.require()
-        except (OSError, ValueError):
+        if self._activation_revoked():
             return ToolHandlerOutcome(
                 self.model_spec.name, False, '{"error": "原插件已停用或激活不可用"}',
                 error_code="TOOL_UNAVAILABLE", reported_error_code="PLUGIN_ACTIVATION_UNAVAILABLE",
