@@ -139,6 +139,7 @@ P1-B 本地实现使用 `decision_protocol.py` 固定输入快照与宿主绑定
 `expected_revision={owner,thread}`。读回字段是 `revision`（单数）、`effective`、`sources`、两层 `overrides`；
 修改另返回 `before`。锁序固定 owner→thread；版本冲突要求重读，不自动重放旧写入。
 原 `user_config` 增加 `decision_read/decision_patch/decision_reset`，线程只取原可信 runner，模型不能传任意身份。
+TUI 决策菜单（`cli/chat_parts/tui_decision_menu.py`）的接入点清单直接取 schema 的 `POINTS`，本地只配中文显示名，缺显示名时显示原键。此前菜单自带一份清单，漏了 `pre_recall`：界面设不了召回前补充查询，已有该点覆盖时打开"恢复继承"会因取不到显示名而抛 KeyError（2026-09-25 修复，分支 `claude/decision-tui-points`）。
 
 原模型目录最初以 v4 和 conversation_thread.v10 显式迁移旧数据；当前私有目录 v5、共享发布 v2 增加随机持久代次，原 `decision_settings.v1` 覆盖仍在同一目录/线程权威内。普通读取不迁移落盘，已启用的子代理建议准备才可在原锁内初始化旧目录代次；详情见[目录代次交接](../tasks/DECISION_MODEL_CATALOG_GENERATION_HANDOFF.md)。
 默认值归原 AgentConfig、CapabilityConfig 与 MemorySettings；覆盖内不存默认值、阶段余额或运行状态。

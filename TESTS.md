@@ -2,6 +2,13 @@
 
 child不展示历史正文时的读取回归先复现1 failed/1 passed，修复后test_compact_retained_history、test_subagent_compact_recovery、test_gateway_child_compact_scope_application三文件31 passed（8.48秒）。三宿主seed仓外基线仅验证测量和完整性，不算内存目标通过；细节见容量审计的宿主生命周期基线。
 
+## TUI 决策菜单接入点跟随 schema（2026-09-25，本地分支 `claude/decision-tui-points`）
+
+- **新测试** `test_tui_decision_menu.py::test_menu_points_follow_the_schema_registry_and_reset_can_list_pre_recall`：菜单接入点与 schema `POINTS` 逐项一致；owner 覆盖 `points.pre_recall.mode` 后，该字段可编辑，恢复继承标签不崩溃并显示中文名。
+- 两个旧真实按键测试原先写死"召回后重排在第 4 项"，现改为按菜单顺序算位置。
+- **变异验证**：菜单漏掉 `pre_recall`、缺中文显示名两种变异都使新测试失败；还原后逐字节一致（变异子进程带 `PYTHONDONTWRITEBYTECODE=1`）。
+- **回归**：`test_tui_decision_menu.py` 与 `test_external_material_order_integration.py` 26 passed。
+
 ## 自学习 S1：子代理经验生成待确认的 Skill 提案（2026-09-24，本地分支 `claude/self-learning-skill-proposals`，待审）
 
 - **改动**：新增 `capability/skill_proposals.py`（提案 schema `my-agent.skill-proposal.v1` 与 `SkillProposalService`）和 CLI `my-agent skills proposals list|show|confirm|reject`；配置 `enable_self_learning`（默认 false，YAML、AgentConfig 与布尔规范化同步）；owner 布局登记 `owner_skill_proposals_dir = <owner_home>/data/skill_proposals`（不进初始化目录清单，首次生成提案才创建）；组合根只在开关开启时给子代理 manager 注入服务，`runner_result_service` 在记录候选之后调用，异常只写工作日志。
