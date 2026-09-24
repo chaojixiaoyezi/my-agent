@@ -4,6 +4,13 @@
 
 Compact来源覆盖现沿实际执行的run/attempt/模型turn/call四元身份；归档不再用当前runner覆盖原ToolCall。原摘要检查点v3封印scope/base/精确覆盖，旧未知身份保留。只验证来源和检查点合同，完整后台摘要应用与HTTP恢复仍待接。
 
+## 2026-09-24 可选交付复核焦点（本地分支 `claude/decision-delivery-quality`，待审）
+
+`delivery_quality` 只读同 run/task 归档信封中的验证事件与 stale 状态，默认关闭；原 owner/thread 设置、配置工具与 TUI 共用
+独立模式、超时和模型绑定。开启后 `run_command` 新事件使本轮有 2—12 个焦点且含 failed 或其后修改时，才请 Jev 选一个复核焦点，
+text/native 共用一句宿主事实提示；原结果、归档、验证账和收口不变。离线合同、真实验证账到 `_record_tool_call` 的 fake 后端组合
+与 59 项变异验证见 TESTS；没有真实 Jev/TUI 验收，不证明交付质量提升。
+
 ## 2026-09-22 可选外部材料阅读优先级
 
 `external_material_order` 仅消费原 `web_fetch mode=extract` 已归档页，默认关闭；原 owner/thread 设置、

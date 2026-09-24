@@ -331,6 +331,9 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     decision_planning_mode: str = "off"
     decision_planning_timeout_seconds: float | None = None
     decision_planning_profile_id: str | None = None
+    decision_delivery_quality_mode: str = "off"
+    decision_delivery_quality_timeout_seconds: float | None = None
+    decision_delivery_quality_profile_id: str | None = None
     agent_name: str = "myagent"
     # 默认沿 终端交互 主链由 TUI 接管滚轮、点击与应用内选区；F6 仍可临时退回宿主终端原生复制。
     # 关闭后备用屏幕收不到物理滚轮，历史只能用 PgUp/Ctrl+Home，因此不再作为开箱默认。

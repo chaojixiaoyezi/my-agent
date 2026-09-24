@@ -2162,12 +2162,11 @@ def _final_response_after_halt(
 
 
 # LLM: Archive once, then feed the same bounded projection to text and native histories before any
-# later compact/window logic; do not let raw result refs bypass this choke point. The optional
-# reading hint only appends to that shared display and never changes results, ledgers or refs.
-# 函数用途: 记录一次工具调用、更新运行事实，并把安全结果及可忽略的阅读建议续入下一轮模型上下文。
+# later compact/window logic; do not let raw result refs bypass this choke point. Optional decision
+# hints only append to that shared display and never change results, ledgers or refs.
+# 函数用途: 记录一次工具调用、更新运行事实，并把安全结果及可忽略的可选建议续入下一轮模型上下文。
 def _record_tool_call(agent, record: ToolCallRecordParams) -> None:
     from ..contracts.required_actions import settle_required_action
-    from .tool_context.external_material_order import external_material_order_hint
 
     payload = record.payload
     settle_required_action(
@@ -2198,9 +2197,7 @@ def _record_tool_call(agent, record: ToolCallRecordParams) -> None:
     record.params.archive_tool_calls.append(archive_record)
     update_runtime_fact_progress_if_enabled(agent, record.params, tool_round=record.tool_rounds)
     result_rendered = render_tool_result_for_live_prompt(record.result, archive_record)
-    reading_hint = external_material_order_hint(agent, record, archive_record)
-    if reading_hint:
-        result_rendered += "\n" + reading_hint
+    result_rendered += _optional_result_hints(agent, record, archive_record)
     record.params.tool_context.append(
         f"[tool-record round={record.tool_rounds} index={record.idx}]\n"
         f"{render_tool_payload_for_live_prompt(record.model_payload)}\n"
@@ -2216,6 +2213,20 @@ def _record_tool_call(agent, record: ToolCallRecordParams) -> None:
     progress = record_runtime_subagent_tool_progress(agent, record)
     if progress:
         record.params.tool_context.append(_task_local_progress_context(progress))
+
+
+# LLM: 两个可选决策点按工具名互斥（web_fetch / run_command），每条记录至多一次决策请求；
+# 空串即保留原展示。只追加 text/native 共用的展示后缀，不改结果、归档、账本或 refs；用户取消照常上抛。
+# 函数用途: 返回追加在工具结果展示之后的可选建议（带前导换行），没有建议时返回空串。
+def _optional_result_hints(agent, record: ToolCallRecordParams, archive_record: dict[str, object]) -> str:
+    from .tool_context.decision_delivery_quality import delivery_quality_hint
+    from .tool_context.external_material_order import external_material_order_hint
+
+    hints = (
+        external_material_order_hint(agent, record, archive_record),
+        delivery_quality_hint(agent, record, archive_record),
+    )
+    return "".join("\n" + hint for hint in hints if hint)
 
 
 def _load_discovered_tools(params: ToolLoopExecuteParams, archive_record: dict[str, object]) -> None:

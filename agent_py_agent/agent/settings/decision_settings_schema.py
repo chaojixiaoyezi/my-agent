@@ -13,7 +13,7 @@ DECISION_SETTINGS_SCHEMA = "decision_settings.v2"
 POINT_RUNTIME_SCOPES = MappingProxyType({
     "model_selection": "thread", "subagent_model": "thread", "skill_tool": "thread",
     "pre_recall": "thread", "recall": "thread", "curator": "owner_background", "curator_relation": "owner_background",
-    "external_material_order": "thread", "planning": "thread",
+    "external_material_order": "thread", "planning": "thread", "delivery_quality": "thread",
 })
 POINTS = tuple(POINT_RUNTIME_SCOPES)
 GENERAL_FIELDS = ("enabled", "experiment_enabled", "timeout_seconds", "stage_timeout_seconds", "background_timeout_seconds", "profile_id")
