@@ -32,6 +32,7 @@
 | [PLUGIN_DISPLAY.md](PLUGIN_DISPLAY.md) | 插件面板 / 只读订阅 | 第 9 步已发布，真实 TUI 已验 | 声明式面板、公开主题投影、单在途与撤销、TUI 只渲染核心校验结果 |
 | [PLUGIN_WORKSPACE_WRITE.md](PLUGIN_WORKSPACE_WRITE.md) | 插件写入 / 工作区写入上下文 | 第 10 步本地已实施 | 协商扩展且声明写效果才下发、与内置写工具同一裁决且只可能更严 |
 | [PLUGIN_HOST_API.md](PLUGIN_HOST_API.md) | 插件宿主只读 API | 第 10 步本地已实施 | 界面型插件读取活动、线程、插件列表；按激活发令牌，只读、回环 |
+| [TOOL_CALL_PRECHECK.md](TOOL_CALL_PRECHECK.md) | 统一权限门 / 工具调用 | 设计草案，待确认 | 审批前与执行前复核工具可用性（激活、连接），失效按 TOOL_UNAVAILABLE 提前拦下，不写审批事件 |
 | [PLUGIN_LIFECYCLE.md](PLUGIN_LIFECYCLE.md) | 可选插件 / 动态命令 / 热装卸 | 设计草案，待实施 | 核心与插件边界、停用无运行影响、Python 进程隔离、版本快照与卡死卸载；参考范围和 TUI 验收矩阵 |
 | [PLUGIN_SAMPLE_ACCEPTANCE.md](PLUGIN_SAMPLE_ACCEPTANCE.md) | 插件样本 / 功能组合 / TUI 验收 | 计划已记录，待实施 | 社区热度与随机抽样、10 个自有简易插件、分批功能验证和故障卸载；Audit 不在本轮重构范围 |
 | [computer-use.md](computer-use.md) | Computer Use / MCP | 真 TUI 通过 | 开源执行器选型、官方可选依赖、管理员 Full Access 硬门、effect 与 OCR 验收边界 |
