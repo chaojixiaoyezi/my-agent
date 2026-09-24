@@ -30,6 +30,7 @@ from .tui_keybindings import (
 )
 from .tui_params import MakeTuiAppParams
 from .tui_plugin_commands import bind_plugin_input
+from .tui_plugin_panels import PluginPanelBoard, make_plugin_panel_window
 from .tui_runtime import TuiRuntime
 from .tui_terminal import TuiTerminalTitleController
 from .tui_transcript import TuiTranscriptModeState
@@ -54,6 +55,7 @@ def _make_input_area(
     runtime: TuiRuntime,
     workspace: Path,
     *, plugin_client: PluginCommandClient | None = None,
+    plugin_panels: PluginPanelBoard | None = None,
 ) -> Any:
     from prompt_toolkit.history import FileHistory
     from prompt_toolkit.layout.dimension import Dimension
@@ -72,7 +74,7 @@ def _make_input_area(
         input_processors=[TuiQueuedPlaceholderProcessor(runtime)],
     )
     if plugin_client is not None:
-        bind_plugin_input(input_area.buffer, plugin_client)
+        bind_plugin_input(input_area.buffer, plugin_client, plugin_panels)
     return input_area
 
 
@@ -488,6 +490,7 @@ class _TuiAppParts:
     permission_active: Any
     permission_feedback_active: Any
     transcript_search_active: Any
+    plugin_panels: PluginPanelBoard | None = None
 
 
 # LLM: 控件准备只创建原 runtime 视图和易失插件客户端；目录不在此读取，history 目录仍是唯一文件系统副作用。
@@ -509,7 +512,10 @@ def _prepare_tui_app_parts(params: MakeTuiAppParams) -> _TuiAppParts:
     history_file = _tui_input_history_path(params)
     history_file.parent.mkdir(parents=True, exist_ok=True)
     plugin_client = PluginCommandClient(params.agent, str(params.current_session_id or "default"), use_gateway=params.use_gateway)
-    input_area = _make_input_area(str(history_file), runtime, Path(params.agent.root), plugin_client=plugin_client)
+    # 面板只在用户打开时才启动后台刷新；TUI 退出事件会让刷新线程结束
+    plugin_panels = PluginPanelBoard(plugin_client.panels, runtime.store.invalidate, stop_event=params.stop_event)
+    input_area = _make_input_area(str(history_file), runtime, Path(params.agent.root), plugin_client=plugin_client,
+                                  plugin_panels=plugin_panels)
     _wire_help_dismiss_on_input(input_area, interaction, params.agent_navigation)
     history_search_area = _make_history_search_area(interaction)
     _wire_history_search_area(history_search_area, input_area, interaction)
@@ -588,13 +594,14 @@ def _prepare_tui_app_parts(params: MakeTuiAppParams) -> _TuiAppParts:
         permission_active=permission_active,
         permission_feedback_active=permission_feedback_active,
         transcript_search_active=transcript_search_active,
+        plugin_panels=plugin_panels,
     )
 
 
-# LLM: normal body 的条件只引用 parts 中共享 filters；permission 覆盖层出现时必须隐藏输入、补全、历史与 footer。
-# 函数用途: 组装普通聊天和权限确认共用的主布局。
+# LLM: normal body 的条件只引用 parts 中共享 filters；permission 覆盖层出现时必须隐藏输入、补全、历史、插件面板与 footer。
+# 函数用途: 组装普通聊天和权限确认共用的主布局；插件面板区域位于输入状态栏上方。
 def _make_normal_tui_body(parts: _TuiAppParts) -> Any:
-    from prompt_toolkit.filters import has_completions
+    from prompt_toolkit.filters import Condition, has_completions
     from prompt_toolkit.layout import ConditionalContainer, HSplit, VSplit, Window
     from prompt_toolkit.layout.dimension import Dimension
 
@@ -602,6 +609,7 @@ def _make_normal_tui_body(parts: _TuiAppParts) -> Any:
     transcript_view = parts.transcript_view
     permission_active = parts.permission_active
     input_row = VSplit([_make_input_prompt_window(), input_area])
+    panels = parts.plugin_panels
     return HSplit(
         [
             transcript_view.window,
@@ -609,6 +617,11 @@ def _make_normal_tui_body(parts: _TuiAppParts) -> Any:
             ConditionalContainer(
                 content=parts.permission_feedback_area,
                 filter=parts.permission_feedback_active,
+            ),
+            # 插件面板只在有面板打开且没有审批时显示，高度有上限，不挤占输入区
+            ConditionalContainer(
+                content=make_plugin_panel_window(panels) if panels is not None else Window(height=0),
+                filter=Condition(lambda: panels is not None and panels.has_visible()) & ~permission_active,
             ),
             ConditionalContainer(
                 content=_make_input_status_window(transcript_view),

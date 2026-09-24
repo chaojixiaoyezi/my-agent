@@ -63,7 +63,8 @@ agent_py_agent/
 |   |   |-- plugin_command_client.py   # 显式宿主模式、会话目录缓存与原版本提交
 |   |   |-- command_interaction.py     # 单次命令的编号、审批消费者及独立取消引用
 |   |   |-- plugin_command_stream.py   # 持续读原命令流并异步回写完整审批绑定
-|   |   |-- tui_plugin_commands.py     # 输入候选版本绑定与不阻塞输入的插件命令分派
+|   |   |-- tui_plugin_commands.py     # 输入候选版本绑定与不阻塞输入的插件命令分派；面板动作本地切换
+|   |   |-- tui_plugin_panels.py       # 插件面板本地显示偏好、有界后台刷新与纯排版，不运行插件代码
 |   |   |-- slash_command_types.py     # CLI 命令处理器的可信上下文，不另设命令目录
 |   |   |-- tui_input.py                # 真实 slash/path 补全、菜单、history suggest 与排队占位投影
 |   |   |-- tui_model_menu.py           # /model 新增/选择/退出浮层，私密密钥与显式上下文窗口

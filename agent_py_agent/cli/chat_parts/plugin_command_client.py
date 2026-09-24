@@ -129,6 +129,20 @@ class PluginCommandClient:
     def refresh(self) -> dict:
         return self._request("catalog")
 
+    # LLM: 面板只经 Gateway 的展示服务取得，身份沿同一客户端绑定；direct 模式不在本进程启动插件，明确返回不可用。
+    #   传输失败返回空结果由调用方退避，不重试、不改写面板可见性。
+    # 函数用途: 查询当前会话打开的插件面板内容。
+    def panels(self, requested: tuple[tuple[str, str], ...]) -> dict:
+        owner, conversation_id, use_gateway, port = self._binding()
+        if not use_gateway:
+            return {"ok": True, "panels": [
+                {"plugin_id": plugin_id, "panel_id": panel_id, "state": "unavailable",
+                 "error": "插件面板需要连接 Gateway"} for plugin_id, panel_id in requested]}
+        payload = {"conversation_id": conversation_id,
+                   "panels": [{"plugin_id": plugin_id, "panel_id": panel_id} for plugin_id, panel_id in requested]}
+        status, body = post_gateway_json(port, owner, "/client/plugin-panels", payload, timeout=2.0)
+        return body if status == 200 and isinstance(body.get("panels"), list) else {}
+
     # LLM: 原 revision 与交互编号保持不变；刷新只读目录，失败不重放、不静默替换旧版本或审批消费者。
     # 函数用途: 提交一次插件命令并可选等待用户审批；原请求查询无需目录可用。
     def command(self, text: str, *, revision: str = "", interaction: CommandInteraction | None = None) -> dict:

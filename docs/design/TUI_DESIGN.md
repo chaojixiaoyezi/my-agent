@@ -12,6 +12,8 @@
 - Context 下一行固定模型统计：本次工作片的逻辑模型轮、当轮已解析工具数、最近结算缓存比例、当前代理会话累计 token；宽屏补充最近输出速度与输入/输出分项。空值显示 `—`，窄屏按宽度简写，不挤出多行。
 - Todo 默认最多四条，保留最近完成、正在执行和下一条；Ctrl+T 展开全部。动画只对应运行中项。
 - 输入框下为直属子代理列表：短职责、状态、耗时、当前上下文 token、压缩次数；按行宽截断。
+- 插件面板（第 9 步）位于输入状态栏上方，最多同时两个，每个一行标题加至多 6 行正文；审批框出现时隐藏。
+  `/plugins@插件 <面板动作>` 只在本地切换显示，内容由 Gateway 展示服务校验后返回，TUI 不运行插件代码，见 [插件展示](PLUGIN_DISPLAY.md)。
 
 ## 消息与样式
 
@@ -51,6 +53,7 @@ Gateway chat 等待使用单调时钟。入口绝对 deadline 只在进入轮询
 - `tui_view.py`、`tui_block_renderer.py`、`tui_markdown.py`：布局、缓存、样式和宽字符渲染。
 - `tui_input.py`、`tui_interaction.py`、`tui_keybindings.py`：输入、快捷键、滚动和控制。
 - `tui_input_delivery.py`、`tui_clipboard.py`、`tui_history.py`：投递、剪贴板与异步历史读取。
+- `tui_plugin_panels.py`：插件面板的本地显示偏好、有界后台刷新与纯排版；宿主报告不可用即移除面板。
 
 细节见 [完整详情](TUI_COMPLETE_DETAIL.md)、[展示归档](DISPLAY_ARCHIVE_PAGING.md)、[会话模型](SESSION_MODEL_SELECTION.md)。
 
