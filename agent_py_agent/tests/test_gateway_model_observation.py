@@ -460,3 +460,17 @@ def test_selected_read_capture_is_local_and_cleared_on_exit(tmp_path):
         assert outer[0].profile_id == "default" and inner[0].profile_id == fixture.candidate
     model_profiles.selected_model_config(fixture.agent, profile_id=fixture.candidate)
     assert len(outer) == 1 and outer[0].profile_id == "default"
+
+
+@pytest.mark.parametrize("mode", ["observe", "apply"])
+def test_question_explains_usage_tags_and_apply_asks_for_the_best_semantic_match(tmp_path, monkeypatch, mode):
+    fixture = prepared(tmp_path, mode=mode)
+    backend = install_backend(monkeypatch, fixture)
+    capture_main(monkeypatch)
+    request_execution._run_gateway_ask(fixture.context)
+    instructions = json.loads(backend.calls[0][0]._body)["questions"]["model"]["instructions"]
+    assert model_observation._USAGE_TAGS_NOTE in instructions, "两种模式都要解释用途标签"
+    if mode == "apply":
+        assert "按任务的语义需要挑选最合适的候选" in instructions and "本次只观察" not in instructions
+    else:
+        assert "本次只观察" in instructions

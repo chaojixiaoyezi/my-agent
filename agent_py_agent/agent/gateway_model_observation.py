@@ -27,6 +27,15 @@ _RETAIN_CHOICES = {
     "retain_original": "沿用当前冻结模型。", "need_data": "缺少作出建议的资料。",
     "not_needed": "不需要额外选择模型。", "no_match": "目录没有适合项。", "abstain": "无法可靠判断。",
 }
+# 观察与采用两种模式的问题说明共用这句：用途标签只作语义匹配参考。
+_USAGE_TAGS_NOTE = "部分候选带用户填写的用途标签 usage_tags，可用来判断候选与本任务的语义匹配，但不是能力或容量证明。"
+# 采用模式的问题说明：容量、工具与版本由宿主客观核对，未通过就保持原模型，所以请按任务的语义需要挑最合适的候选。
+_APPLY_INSTRUCTIONS = (
+    "根据当前任务对已授权目录提出一项模型建议。宿主会在完整首请求准备后独立核对容量、工具和版本，"
+    "只有客观验证通过才自动采用，未通过就保持原模型；因此请按任务的语义需要挑选最合适的候选，"
+    "不必因为容量或工具尚未验证而回避更合适的候选。候选的模型名和声明窗口同样只是声明，不是能力证明。"
+    + _USAGE_TAGS_NOTE + "当前模型同样合适时选 retain_original，资料不足选 need_data。"
+)
 
 
 # LLM: 只引用原目录的当前可访问生成模型，字段白名单不含端点、凭据或价格；不探针、不迁移、不保存选择。
@@ -66,7 +75,7 @@ def _observation_input(context: object, thread: object, captured: SelectedModelR
     questions = {"model": {"type": "choice", "instructions": (
         "根据当前任务对已授权目录提出一项模型建议。本次只观察，宿主保持原模型。"
         "候选只含配置声明，不能把模型名或窗口当成能力、完整容量或授权证明；资料不足可选择 need_data。"
-        "部分候选带用户填写的用途标签 usage_tags，可用来判断候选与本任务的语义匹配，但同样不是能力或容量证明。"
+        + _USAGE_TAGS_NOTE
     ), "criteria": {**candidates, **_RETAIN_CHOICES}}}
     return state, questions
 
@@ -233,6 +242,7 @@ class GatewayModelObservation:
                 logging.getLogger(__name__).warning("模型观察回执未落盘，保留原一次性标记", exc_info=False)
 
     # LLM: 原 service 复核设置/身份/连接；observe 仅记录，apply 也只创建临时候选，不能跳过首请求/发送检查。
+    #   apply 的问题说明告诉决策模型容量与工具由宿主核对、应按语义挑最合适候选，并同样解释用途标签；采用仍走原验证门。
     # 函数用途: 建立一次原阶段并准备只读候选，超时或无候选时保留原模型。
     def _decide(self, thread: object, op: str, mode: str) -> dict:
         agent = self.context.agent
@@ -249,10 +259,7 @@ class GatewayModelObservation:
             return {"status": "skipped", "reason": "no_candidates"}
         state, questions = _observation_input(self.context, thread, self.captured, candidates)
         if mode == "apply":
-            questions["model"]["instructions"] = (
-                "根据当前任务对已授权目录提出一项模型建议。宿主将在完整首请求准备后独立核对容量、工具和版本，"
-                "只有客观验证通过才自动采用。候选声明不是实际能力证明；资料不足可选择 need_data。"
-            )
+            questions["model"]["instructions"] = _APPLY_INSTRUCTIONS
         revision = hashlib.sha256(decision_json(candidates)).hexdigest()
         GatewayActiveTurnTransition(self.context.request_path, self.context.request_id,
                                     self.context.request["execution_attempt_id"])("submit", lambda: None)
