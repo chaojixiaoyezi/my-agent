@@ -65,6 +65,7 @@
 - **挂点 2 的位置**：`_execute_authorized` 已到 8 个参数的硬上限，复核放在该函数入口、按 allow 裁决证据里的 `approval_applied=true` 判断，不加参数；`approval_applied` 只在 `_approval_decision` 的精确 binding 匹配分支为真（沙箱内自动执行、策略不要求、auto 模式都为假）。
 - **渲染**：批准后被拦下的结果在 `_with_applied_approval_fact` 里跳过"已批准且已应用"事实，避免模型误以为执行过；拒绝文案由 `_decision_message` 按 `precheck=pre_approval|post_approval` 点明"审批前"或"批准后、执行前"。
 - **停用链**：`mcp_managed_process.require` 改为先核对激活再看进程记录，因停用而关闭的调用报 `PLUGIN_ACTIVATION_UNAVAILABLE`（→`TOOL_UNAVAILABLE`），不再是可重试的 `TOOL_EXECUTION_FAILED`；进程消失后的 EOF 路径仍报 `MCP_CONNECTION_CLOSED`。
+- **免审批路径的时序补口（2026-09-24）**：免审批调用不经过上面两处复核，而 `MCPProxyTool._execute` 先取连接再做发送准入——停用清理一旦先把连接关掉，旧快照调用就先撞上 `MCP_CONNECTION_CLOSED`（→`TOOL_EXECUTION_FAILED`），只有清理慢时才轮到准入里的激活检查，`test_plugin_enable` 的旧快照断言因此随机器快慢摆动。现在 `PluginProxyTool._execute` 在发送前先 `activation_ref.require()`，撤销固定报 `TOOL_UNAVAILABLE`、`effect_outcome=not_started`、不发送；仍不启动进程、不追随新代次。回归见 `test_plugin_proxy_revoked_call.py`。
 
 ## 验收
 

@@ -16,7 +16,12 @@ from .plugin_manifest import canonical_plugin_settings
 from .tooling.input_schema import canonicalize_tool_input_schema
 from .tooling.mcp_client import MCPError, MCPServerConfig, MCPStdioClient, sanitize_credentials
 from .tooling.mcp_registration import MCPProxyTool, build_proxy_tool, sanitize_name_component
-from .tooling.models import ResourceScopePolicy, ToolAvailability, ToolInvocationContext
+from .tooling.models import (
+    ResourceScopePolicy,
+    ToolAvailability,
+    ToolHandlerOutcome,
+    ToolInvocationContext,
+)
 from .tooling.process_session_store import ProcessSessionStore, process_session_store_root
 from .workspace_read_context import WORKSPACE_READ_EXTENSION, WORKSPACE_READ_VERSION
 from .workspace_write_context import WORKSPACE_WRITE_EXTENSION, WORKSPACE_WRITE_VERSION
@@ -51,6 +56,22 @@ class PluginProxyTool(MCPProxyTool):
         except (OSError, ValueError):
             return ToolAvailability.unavailable("原插件已停用或激活不可用", error_code="PLUGIN_ACTIVATION_UNAVAILABLE")
         return super().precheck_availability()
+
+    # LLM: 免审批调用不经过执行器复核，而 MCPProxyTool 先看连接再做发送准入：停用把连接关掉后，旧快照调用会先撞上
+    #   MCP_CONNECTION_CLOSED（映射为可重试的 TOOL_EXECUTION_FAILED），结果码随清理快慢摆动。这里在发送前先鲜活复核原激活，
+    #   撤销一律报 TOOL_UNAVAILABLE、effect_outcome=not_started，与审批前/批准后复核同一事实源；
+    #   这是生命周期第 6 条"旧快照在执行门检查撤销"的落点。不启动进程、不追随新代次。
+    # 函数用途: 停用后的插件调用固定报不可用且未执行，其余沿原 MCP 代理执行链。
+    def _execute(self, params: dict[str, object], context: ToolInvocationContext | None) -> ToolHandlerOutcome:
+        try:
+            self.client.activation_ref.require()
+        except (OSError, ValueError):
+            return ToolHandlerOutcome(
+                self.model_spec.name, False, '{"error": "原插件已停用或激活不可用"}',
+                error_code="TOOL_UNAVAILABLE", reported_error_code="PLUGIN_ACTIVATION_UNAVAILABLE",
+                effect_outcome="not_started",
+            )
+        return super()._execute(params, context)
 
     # LLM: 只看代理固定 transport 的声明；普通 arguments 不能伪造元数据，缺可信上下文须在发送前失败。
     #   写入上下文只给协商了写入扩展、且本工具声明 mutating/dangerous 的调用；只读工具永远拿不到写权限。

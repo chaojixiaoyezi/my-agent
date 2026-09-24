@@ -536,6 +536,20 @@ class ToolRegistry:
     def prepare_for_run(self) -> None:
         _prepare_registry_clients_for_run(self)
 
+    # LLM: 扩展目录只按注册对象的结构化类型判定（MCP/插件代理 MCPProxyTool），不看名称前缀；先做与新运行相同的
+    #   连接准备，再剔除 owner 禁用表；激活失效/连接断开由 runtime_snapshot 的可用性复核 fail-closed，本方法不重复判定。
+    #   调用方（后台续跑白名单）必须在同一 run 冻结快照之前调用；同步失败按原 prepare 规则记录，不在这里吞掉。
+    # 函数用途: 列出当前 owner 已启用插件和普通 MCP 服务贡献的工具名，供只列核心工具的白名单并入。
+    def extension_tool_names(self) -> list[str]:
+        from .mcp_registration import MCPProxyTool
+
+        self.prepare_for_run()
+        return [
+            name
+            for name, tool in self.tools.items()
+            if isinstance(tool, MCPProxyTool) and name not in self.disabled_tool_names
+        ]
+
     # LLM: specs 只是 runtime_snapshot 的投影；它不再维护独立的授权或可用性判断。
     # 函数用途: 返回当前快照中的工具说明，并按调用者需要隐藏编排类工具。
     def specs(

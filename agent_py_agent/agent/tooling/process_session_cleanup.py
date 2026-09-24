@@ -72,7 +72,8 @@ class ProcessSessionCleanupError(RuntimeError):
 
 
 # LLM: 固定 v2/v3/v4 同一句柄，先落停止意图再发信号；完整 session 清理写 termination.cleanup，原命令终态及 child 回执不重写。
-# 函数用途: 停止准确资源并持久保存完整退出确认，自然结束的命令也能留下清理证据。
+# 记录已是 unknown（上一次停止未按期确认）时，重试若按出生身份证明两级实例都不存在，即确认清理并转 killed；首次停止仍要求终态或本次回执。
+# 函数用途: 停止准确资源并持久保存完整退出确认，自然结束的命令也能留下清理证据；重试能结清实例已消失的旧未知记录。
 def stop_process_session(
     store: ProcessSessionStore,
     selected: dict[str, object],
@@ -111,12 +112,17 @@ def stop_process_session(
                 and current["status"] == "not_started"
                 and (current.get("termination") or {}).get("confirmed") is True
             )
+            # 上一次停止已把记录写成 unknown（当时实例未按期退出）；重试时若两级实例都按出生身份证明不存在，
+            # 这就是结清旧未知记录的结构化事实——否则没有可终止的实例、拿不到回执，记录会永远停在 unknown。
+            retried_after_unknown = current["status"] == "unknown" and isinstance(
+                (current.get("termination") or {}).get("cleanup"), dict,
+            )
             confirmed = (
                 no_host_confirmed
                 or bool(current["pid"])
                 and child_known
                 and instances_gone
-                and (known_terminal or bool(receipts))
+                and (known_terminal or bool(receipts) or retried_after_unknown)
                 and all(receipt.confirmed for receipt in receipts)
             )
             if not known_terminal:

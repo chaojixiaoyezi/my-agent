@@ -98,6 +98,15 @@ TUI 的控制载荷复用普通消息 workspace 投影；HTTP、持久回执、G
 `runtime.py` 只消费结果并继续原执行、取消和投递主链。执行器仍是最终权限边界，展示文案不授予权限。
 模块可独立加载而不导入 runtime/HTTP；旧实现和无引用的生命周期包装函数已删除，持久旧事件恢复规则保留。
 
+默认 profile 只能枚举核心控制/工作工具，而插件与普通 MCP 代理是随安装变化的开放目录，禁止写进封闭名单。
+决策因此多出 `extension_tools` 字段（`background-tool-policy.v2`）：默认 profile 为 `inherit`，
+`runtime._background_run_allowed_tools` 构造后台 RunParams 时调用 `ToolRegistry.extension_tool_names()`，
+按注册对象类型（`MCPProxyTool` 代理，经与新运行相同的 `prepare_for_run` 同步）把当前已启用插件/MCP 工具名并入白名单；
+显式 `background_main_agent_allowed_tools` 或任务 `allowed_tools` 是精确名单，标 `none` 不并入。
+owner 禁用表、激活撤销和连接断开仍由注册表与 `runtime_snapshot` fail-closed；定时任务续跑继续返回完整目录。
+真实断链（2026-09-24）：子代理生命周期唤醒后的 attempt 只有 17 个核心工具，模型继续调用前台刚用过的插件导出工具，
+三次 `TOOL_UNAVAILABLE` 协议违规后整轮中断；修复后由 `test_background_extension_tools.py` 守住。
+
 ## 本地来源与 owner 身份
 
 TUI worker 收到已经持久入队的 `gateway_request_id` 时，直接接原 terminal，不再以前台 PID

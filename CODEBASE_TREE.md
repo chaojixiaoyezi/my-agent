@@ -740,6 +740,9 @@ agent_py_agent/
 |   |-- plugin_activation_fixtures.py # 实际临时 wheel/MCP、原管理链和业务工具执行夹具
 |   |-- test_plugin_enable.py         # 实际启用、坏目录、原执行器调用与旧快照停用验证
 |   |-- test_tool_call_precheck.py    # 审批前/批准后执行前复核：代理 opt-in、TOOL_UNAVAILABLE 提前拦下、内置工具不复核
+|   |-- test_background_extension_tools.py # 后台续跑白名单按注册表代理类型并入插件/MCP 工具；显式配置/任务名单不并入；真实插件启停跟随
+|   |-- test_process_session_retry_settles_unknown.py # 重试停止按 PID 出生标识结清实例已消失的旧 unknown 记录；首次停止不凭空确认
+|   |-- test_plugin_proxy_revoked_call.py # 插件代理发送前复核激活：撤销固定 TOOL_UNAVAILABLE/not_started 且不发送，激活有效沿原 MCP 链
 |   |-- test_plugin_release.py        # 原 handler 退出、环境删除、结果落账与重送消费边界
 |   |-- test_plugin_removal.py        # 管理卸载、权限、旧请求重放、准备未退与持久成功后包回收
 |   |-- test_plugin_skills.py         # 随包 Skill：v3 描述往返与校验、只取已启用插件、最低优先级、停用即消失

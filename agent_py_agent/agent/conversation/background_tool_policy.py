@@ -50,6 +50,12 @@ SUBAGENT_INTEGRATION_ALLOWED_TOOLS = DEFAULT_BACKGROUND_ALLOWED_TOOLS
 GOAL_SUBAGENTS_ACTIVE_ALLOWED_TOOLS = GOAL_BACKGROUND_ALLOWED_TOOLS
 GOAL_SUBAGENTS_TERMINAL_ALLOWED_TOOLS = GOAL_BACKGROUND_ALLOWED_TOOLS
 
+# 扩展目录处理方式。默认 profile 只能枚举核心工具，而插件/普通 MCP 代理是开放目录（名字随安装变化），
+# 所以由后台运行构造方按注册表的结构化类型事实并入（inherit）；显式配置或任务 allowed_tools 是精确名单，
+# 不并入（none）。这里只产出决策字段，不读注册表。
+EXTENSION_TOOLS_INHERIT = "inherit"
+EXTENSION_TOOLS_NONE = "none"
+
 CONTROL_ACTION_DESCRIPTIONS = {
     "skill_search": "检索或读取当前轮已经授权的 Skill 正文。",
     "remember": "把当前 owner 的长期事实写入其隔离记忆。",
@@ -95,8 +101,9 @@ class BackgroundToolPolicyRequest:
     proactive_delivery_available: bool | None = None
 
 
-# LLM: 决策只描述本次目录及限制来源；工具执行器仍核对权限，结果不能充当额外授权或任务状态。
-# 类用途: 保存可见工具、策略标签和剔除原因，供运行时与展示读取。
+# LLM: 决策只描述本次核心目录、限制来源和扩展目录处理方式（extension_tools）；allowed_tools 不含插件/MCP 名，
+#   并入由 runtime 的后台 RunParams 构造方按注册表事实完成。工具执行器仍核对权限，结果不能充当额外授权或任务状态。
+# 类用途: 保存可见工具、策略标签、剔除原因和是否并入扩展目录，供运行时与展示读取。
 @dataclass(frozen=True)
 class BackgroundToolPolicyDecision:
     """Final background tool list plus where each restriction came from."""
@@ -105,16 +112,18 @@ class BackgroundToolPolicyDecision:
     profile: str
     sources: tuple[str, ...]
     removed_tools: tuple[str, ...] = ()
+    extension_tools: str = EXTENSION_TOOLS_INHERIT
 
-    # LLM: 展示投影保留版本和限制来源，必须与模型实际目录同源，不产生新的权威状态。
+    # LLM: 展示投影保留版本、限制来源和扩展目录方式，必须与模型实际目录同源，不产生新的权威状态；v2 新增 extension_tools。
     # 函数用途: 把决策转换为可序列化数据，不写文件或修改原决策。
     def to_dict(self) -> dict[str, object]:
         return {
-            "schema_version": "background-tool-policy.v1",
+            "schema_version": "background-tool-policy.v2",
             "profile": self.profile,
             "allowed_tools": list(self.allowed_tools),
             "sources": list(self.sources),
             "removed_tools": list(self.removed_tools),
+            "extension_tools": self.extension_tools,
         }
 
 
@@ -128,8 +137,9 @@ def background_allowed_tools(
 
 
 # LLM: 后台轮工具表必须先淘汰旧子代理控制面，再套 owner/task/delivery 减法；
-# 存量配置不能把已注销工具重新带回模型 prompt。
-# 函数用途: 根据唤醒类型和结构化策略计算后台主代理本轮可见工具。
+# 存量配置不能把已注销工具重新带回模型 prompt。默认 profile 才并入扩展目录（extension_tools=inherit）；
+# 显式配置或任务 allowed_tools 是精确名单，标 none。改动时同步 runtime._background_run_allowed_tools 与扩展目录回归。
+# 函数用途: 根据唤醒类型和结构化策略计算后台主代理本轮可见的核心工具，并给出是否并入插件/MCP 工具。
 def background_tool_policy_decision(
     config: object | None = None,
     request: BackgroundToolPolicyRequest | None = None,
@@ -154,11 +164,13 @@ def background_tool_policy_decision(
         tools = [tool for tool in tools if tool != "send_message"]
         removed = [*removed, "send_message"]
         sources.append("delivery_route_capability")
+    explicit_catalog = bool(configured) or bool(_task_allowed_tools(request))
     return BackgroundToolPolicyDecision(
         allowed_tools=tuple(tools),
         profile=profile,
         sources=tuple(sources),
         removed_tools=tuple(removed),
+        extension_tools=EXTENSION_TOOLS_NONE if explicit_catalog else EXTENSION_TOOLS_INHERIT,
     )
 
 
@@ -223,7 +235,7 @@ def _apply_policy_limits(
 ) -> tuple[list[str], list[str]]:
     allowed = list(dict.fromkeys(tools))
     task_policy = request.policy_snapshot if isinstance(request.policy_snapshot, dict) else {}
-    task_allowed = tool_names(task_policy.get("allowed_tools"))
+    task_allowed = _task_allowed_tools(request)
     if task_allowed:
         allowed = [tool for tool in allowed if tool in set(task_allowed)]
     disabled = set(_disabled_tools_from_owner(request.owner_policy))
@@ -231,6 +243,13 @@ def _apply_policy_limits(
     filtered = [tool for tool in allowed if tool not in disabled]
     removed = [tool for tool in allowed if tool not in filtered]
     return filtered, removed
+
+
+# LLM: 任务白名单只来自持久 task policy_snapshot 的结构化字段；非空即视为精确名单，决策据此关闭扩展目录并入。
+# 函数用途: 读出任务级显式允许工具列表，供目录收紧与扩展目录判定共用同一来源。
+def _task_allowed_tools(request: BackgroundToolPolicyRequest) -> list[str]:
+    task_policy = request.policy_snapshot if isinstance(request.policy_snapshot, dict) else {}
+    return tool_names(task_policy.get("allowed_tools"))
 
 
 # LLM: owner policy 由调用方提前读取；缺省表示没有额外禁用项，不表示 Full Access 或越权许可。

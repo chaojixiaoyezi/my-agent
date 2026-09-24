@@ -81,9 +81,10 @@ from .background_routing import (
 )
 from .background_supply_backoff import ProviderSupplyBackoff, consume_with_supply_guard
 from .background_tool_policy import (
+    EXTENSION_TOOLS_INHERIT,
     SCHEDULED_WAKE_REASONS,
     BackgroundToolPolicyRequest,
-    background_allowed_tools,
+    background_tool_policy_decision,
 )
 from .models import (
     SUBAGENT_LIFECYCLE_WAKE_REASONS,
@@ -1692,6 +1693,7 @@ def _run_params(
         # 普通无任务后台消息不会被误升格成任务。
         task_attributes=task_attributes,
         allowed_tools=_background_run_allowed_tools(
+            agent,
             config,
             BackgroundToolPolicyRequest(
                 reason=request.reason,
@@ -1871,7 +1873,13 @@ def _scheduler_run_id(request: BackgroundRunRequest) -> str:
     return str(metadata.get("scheduler_run_id") or "").strip()
 
 
+# LLM: 后台续跑白名单 = 策略决策的核心目录 + （decision.extension_tools=inherit 时）注册表当前的插件/普通 MCP
+#   代理工具名。扩展名来自 ToolRegistry.extension_tool_names 的结构化类型事实，不按名称前缀猜；显式配置或任务
+#   白名单（extension_tools=none）不并入。真实断链：子代理生命周期唤醒后的 attempt 只拿到 17 个核心工具，模型继续
+#   调用前台刚用过的插件工具被判 TOOL_UNAVAILABLE 三次后整轮中断（2026-09-24 combo4 run3）。
+# 函数用途: 算出这次后台模型轮能看见、能调用的工具名单；定时任务返回 None 表示完整目录。
 def _background_run_allowed_tools(
+    agent: object | None,
     config: object | None,
     request: BackgroundToolPolicyRequest,
 ) -> list[str] | None:
@@ -1880,7 +1888,31 @@ def _background_run_allowed_tools(
     # model; registry owner policy still removes disabled tools fail-closed.
     if str(request.reason or "").strip().lower() == "scheduled_job_due":
         return None
-    return background_allowed_tools(config, request=request)
+    decision = background_tool_policy_decision(config, request=request)
+    tools = list(decision.allowed_tools)
+    if decision.extension_tools == EXTENSION_TOOLS_INHERIT:
+        tools.extend(name for name in _registry_extension_tool_names(agent) if name not in tools)
+    return tools
+
+
+# LLM: 只在工具总开关开启且注册表提供 extension_tool_names 时读取；读取会触发一次与新运行相同的连接准备，
+#   必须在本次 run 冻结快照之前调用。异常按"暂无扩展目录"退回核心目录并记录异常类型，不抛给后台调度；
+#   运行自身的 prepare 会再试并在快照里留下不可用事实。
+# 函数用途: 从当前 owner 的工具注册表取插件/MCP 工具名，供后台白名单并入。
+def _registry_extension_tool_names(agent: object | None) -> list[str]:
+    config = getattr(agent, "config", None)
+    if config is not None and not getattr(config, "enable_tools", True):
+        return []
+    names = getattr(getattr(agent, "tools", None), "extension_tool_names", None)
+    if not callable(names):
+        return []
+    try:
+        return [str(name) for name in names()]
+    except Exception as exc:  # noqa: BLE001 扩展目录同步失败不能拖垮后台续跑；运行自身 prepare 会再试
+        logging.getLogger("agent.conversation.runtime").warning(
+            "后台续跑扩展工具目录暂不可读：%s", type(exc).__name__
+        )
+        return []
 
 
 # LLM: Every durable wake keeps the original task identity and typed mode facts;

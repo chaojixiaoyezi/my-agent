@@ -198,6 +198,17 @@ direct/local 控制在精确回合中断成功后，按 `operation=interrupt` �
 - Store 只记录停止意图，不发信号、不重新扫恢复轮、不另建任务取消状态。控制端仍须先关闭原执行轮的真实权限，
   不能把 request closing 或任务投影终态视作 RuntimeDB 权限已经关闭。既有 UNKNOWN 及锁的保留语义不能改写。
 
+### 重试结清旧未知记录
+
+2026-09-24 测试机复验插件停用时，`stop_process_session` 对一条 09-22 遗留的 `status=unknown, stop_requested=true`
+记录反复返回未确认：两级实例早已不存在，没有可终止对象、拿不到终止回执，`known_terminal or receipts` 永远为假，
+插件因此停在 revoked 且 `activation_unsettled` 拒绝重新启用。
+
+结清规则只加一个结构化事实：记录当前已是 `unknown` 且带上一次停止写入的 `termination.cleanup`（说明确有一次停止尝试），
+本次重试中 host/child 两级实例都按 PID 出生标识证明不存在（`instances_gone`），即视为已确认，状态写 `killed`。
+首次停止遇到已消失实例仍保持 `unknown`，不凭空确认；不解析 command/输出，不按 owner 或会话批量结清；
+回归见 `test_process_session_retry_settles_unknown.py`。
+
 ### 整任务控制接线
 
 - 停止先锁定原 task/run/attempt，沿 RuntimeDB 的现有终态事务关闭执行权，再冻结后台 session 清单；
