@@ -1,0 +1,219 @@
+{
+  "plugin_id": "genui-lite",
+  "summary": "把结构化数据渲染成表格和条形图，可导出独立 HTML",
+  "entry_module": "genui_lite",
+  "default_action": "table",
+  "skills": [
+    "genui-table"
+  ],
+  "actions": [
+    {
+      "name": "table",
+      "summary": "渲染 Markdown 表格与文字条形图",
+      "arguments": [
+        {
+          "name": "path",
+          "summary": "工作区 JSON 数据文件",
+          "options": [
+            "--path",
+            "-p"
+          ],
+          "value_type": "string",
+          "required": true,
+          "multiple": false,
+          "default": null,
+          "choices": [],
+          "path": true
+        },
+        {
+          "name": "chart",
+          "summary": "画条形图的数值列名",
+          "options": [
+            "--chart",
+            "-c"
+          ],
+          "value_type": "string",
+          "required": false,
+          "multiple": false,
+          "default": null,
+          "choices": [],
+          "path": false
+        }
+      ],
+      "kind": "tool",
+      "target": "table",
+      "available": true
+    },
+    {
+      "name": "export",
+      "summary": "导出独立 HTML 文件",
+      "arguments": [
+        {
+          "name": "path",
+          "summary": "工作区 JSON 数据文件",
+          "options": [
+            "--path",
+            "-p"
+          ],
+          "value_type": "string",
+          "required": true,
+          "multiple": false,
+          "default": null,
+          "choices": [],
+          "path": true
+        },
+        {
+          "name": "output",
+          "summary": "输出 .html 文件路径",
+          "options": [
+            "--output",
+            "-o"
+          ],
+          "value_type": "string",
+          "required": true,
+          "multiple": false,
+          "default": null,
+          "choices": [],
+          "path": true
+        },
+        {
+          "name": "chart",
+          "summary": "画条形图的数值列名",
+          "options": [
+            "--chart",
+            "-c"
+          ],
+          "value_type": "string",
+          "required": false,
+          "multiple": false,
+          "default": null,
+          "choices": [],
+          "path": false
+        },
+        {
+          "name": "title",
+          "summary": "HTML 标题",
+          "options": [
+            "--title",
+            "-t"
+          ],
+          "value_type": "string",
+          "required": false,
+          "multiple": false,
+          "default": null,
+          "choices": [],
+          "path": false
+        },
+        {
+          "name": "overwrite",
+          "summary": "允许覆盖已存在的输出文件",
+          "options": [
+            "--overwrite"
+          ],
+          "value_type": "boolean",
+          "required": false,
+          "multiple": false,
+          "default": null,
+          "choices": [],
+          "path": false
+        }
+      ],
+      "kind": "tool",
+      "target": "export",
+      "available": true
+    }
+  ],
+  "tools": [
+    {
+      "name": "table",
+      "description": "读取工作区 JSON 数据（对象数组，或 {columns, rows}），返回 Markdown 表格、可选的文字条形图和行列计数；只读。",
+      "requested_effect": "read_only",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": "工作区 JSON 数据文件路径"
+          },
+          "chart": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "description": "可选：按这个数值列画条形图"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "export",
+      "description": "把工作区 JSON 数据导出为独立 HTML 文件（内联样式、表格和可选 SVG 条形图，不引用外部资源）；输出须以 .html 结尾，已存在时需 overwrite。",
+      "requested_effect": "mutating",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": "工作区 JSON 数据文件路径"
+          },
+          "output": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": "输出 HTML 文件路径，须以 .html 结尾且在工作区写入范围内"
+          },
+          "chart": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "description": "可选：按这个数值列画条形图"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "description": "可选：HTML 页面标题"
+          },
+          "overwrite": {
+            "type": "boolean",
+            "default": false,
+            "description": "输出已存在时是否覆盖"
+          }
+        },
+        "required": [
+          "path",
+          "output"
+        ],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "settings_schema": {
+    "type": "object",
+    "properties": {
+      "max_input_bytes": {
+        "type": "integer",
+        "description": "输入 JSON 文件的字节上限",
+        "minimum": 1,
+        "maximum": 16777216,
+        "default": 524288
+      },
+      "max_rows": {
+        "type": "integer",
+        "description": "渲染的最多行数，超出截断并注明",
+        "minimum": 1,
+        "maximum": 10000,
+        "default": 200
+      }
+    },
+    "required": [],
+    "additionalProperties": false
+  }
+}

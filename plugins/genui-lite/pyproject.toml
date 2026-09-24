@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "my-agent-genui-lite"
+version = "0.1.0"
+description = "把工作区结构化数据渲染成表格、文字条形图，并可导出独立 HTML"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+dependencies = ["my-agent-plugin-api==0.2.0"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+license-files = ["LICENSE", "NOTICE"]
+
+[tool.setuptools.package-data]
+genui_lite = ["declaration.json", "skills/*/SKILL.md"]
