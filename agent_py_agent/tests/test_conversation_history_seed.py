@@ -265,3 +265,15 @@ def test_truncated_replaced_or_deleted_canonical_file_fails_instead_of_empty_his
         _native(seed)
     with pytest.raises(expected):
         _text_conversation_history_section(seed)
+
+
+def test_empty_source_seed_is_read_once_at_native_boundary(monkeypatch):
+    from agent_py_agent.agent.conversation import history_seed
+
+    def second_read(_seed):
+        raise AssertionError("只读来源在原生边界不能再为旧文本回退二次读行")
+
+    source = ConversationHistorySeed(source=freeze_history_source((), project_row=project_history_row))
+    expected = _native(ConversationHistorySeed())
+    monkeypatch.setattr(history_seed, "seed_text_messages", second_read)
+    assert _native(source) == expected == []

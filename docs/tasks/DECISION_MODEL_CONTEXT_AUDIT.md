@@ -1532,6 +1532,57 @@ Sol high独立只读复核未发现必须修复的scope/base/legacy回归，确�
 
 12.4 仍开放。
 
+### 摘要期释放旧请求历史（2b，2026-09-24，本地）
+
+分支 `claude/decision-12.4-2b`，基于 main `c18519d90`，方案经主线 owner 同意（选"解绑"而非原地清空），未合入、未部署。
+
+**持有者分析**：同一 4.2M 三宿主全链夹具，在第一次进入摘要时用 tracemalloc 取 25 层栈快照。
+- 三宿主摘要入口驻留 8.87–10.22MB，其中 8.40–8.43MB 是同一个持有者：`params.provider_history_messages`，也就是 `loop_support.py:1157` 建循环时从只读来源解析出的完整原生历史。
+- frozen capture 只是持有同一批 dict 的 tuple，不复制字符串；prompt、注入和 Skill 名卡只有几十 KB。
+- 后台另有 1.32MB，是 `load_context_bundle` 的 messages 驻留，单列处理。
+
+**实现**：
+- `PreparedCompactRecovery.select` 中，自动 noop 先原样返回原请求。决定摘要后：
+  - 用 `object.__setattr__` 把原参数的 `provider_history_messages` 解绑为空列表；
+  - 把 frozen 替换成空历史。
+  - 只解绑这一个对象，不原地清空，经 `dataclasses.replace` 共享同一列表的其它参数对象不受影响。
+- 旧请求此后不会再发送：consumed 后 render 返回 None，或抛 `COMPACT_RECOVERY_NOT_COMMITTED`。候选由 `replace_recovery_history` 用新种子重建历史。
+- 顺带收两项：
+  - `_native_provider_history_messages` 对只读来源不再走旧文本回退，同源行只读一次；
+  - `replace_recovery_history` 写明候选与原参数共享 `tool_context` 的合同，并加断言测试，行为不变。
+
+**全链对照**（同一分析脚本，单位 bytes，解绑前 → 解绑后；摘要调用次数与覆盖均不变）：
+
+| 宿主 | 摘要入口驻留 | 摘要期峰值 | 摘要前峰值（即首发前峰值） | 运行后驻留 |
+| --- | ---: | ---: | ---: | ---: |
+| child | 10,650,036 → 2,318,871 | 11,662,983 → 3,334,259 | 10,746,597 → 10,856,059 | 1,399,079 → 1,572,067 |
+| Gateway | 9,205,688 → 670,805 | 10,248,648 → 1,701,003 | 21,287,673 → 21,291,288 | 387,809 → 359,792 |
+| background | 10,513,853 → 1,957,308 | 11,613,345 → 3,056,891 | 10,537,460 → 10,471,045 | 456,425 → 452,887 |
+
+结论：
+- 摘要期间不再驻留旧请求的完整历史：摘要入口驻留降了约 8.3–8.5MB，摘要期峰值降了约 8.5MB。
+- 快照中解绑后的摘要入口驻留，Gateway 为 0.36MB，child 为 1.53MB，后台为 1.69MB（后台含单列的 1.32MB）。
+- 摘要前峰值不变：建循环时仍会物化一次完整原生历史，Gateway 在准备阶段还有约 21MB 峰值。降低这部分需要把 `provider_history_messages` 改成按需物化，改动面大，不在 2b。
+- 原始记录在 `~/.my-agent/decision-evidence/2b-20260924/`（仓库外，不含请求正文）。
+
+**验证**：
+- `test_host_summary_phase_lifetime.py` 3 项（slow，约 12 秒）：三宿主进入摘要时，原参数的旧历史已解绑，驻留低于历史正文的 3/4；摘要仍逐条覆盖全部历史；首业务请求带当前任务。去掉解绑的变异下 3 项全部失败。
+- `test_compact_recovery_release.py` 11 项：
+  - Gateway 七种失败（代次冲突、取消、令牌取消、未知投影、摘要瞬断、摘要超时、候选超限）和后台两种失败（取消、候选超限）。在解绑后换上"读取即报错"的替身，收尾全程不读旧历史。
+  - 自动 noop 原样发送、旧历史不解绑。
+  - 候选与原参数共享 `tool_context` 的合同。
+  - 变异验证：去掉解绑，Gateway 7 项失败；后台夹具没有旧历史，不能区分，由 Gateway 与全链用例覆盖。在收尾路径加一次读取，9 项失败。把解绑挪到 noop 之前，noop 用例失败。
+- 空来源只读一次的单测：改回旧文本回退后失败。
+- 147 个相关测试文件：3,724 passed、1 skipped、24 xfailed、1 xpassed；strict code-size 与 main 逐项对照，没有新增发现。
+
+**剩余**：
+- 建循环时的首次物化（摘要前峰值）；
+- 后台 `load_context_bundle → prepare_context_payload` 的 messages 驻留（1.32MB，单列）；
+- 媒体集成；
+- 无 scope/`/context` 旧入口。
+
+12.4 仍开放。
+
 ### 宿主历史种子生命周期基线（2026-09-23，第二片进行中）
 
 在464df65c1固定生产基线上，对真实临时JSONL→scoped loader→三宿主原seed准备做仓外测量；输入128行、4,195,620字符，三种seed的完整canonical JSON SHA256及行数均与来源一致。未运行SimpleAgent或真实HTTP；只是宿主seed准备边界，不是capture/select/完整发送峰值。脚本 `/tmp/decision_host_seed_baseline.py`，日志 `/tmp/decision_host_seed_baseline_20260923.log`，3项通过只表示测量及完整性成功，不表示内存目标通过。

@@ -2,6 +2,27 @@
 
 child不展示历史正文时的读取回归先复现1 failed/1 passed，修复后test_compact_retained_history、test_subagent_compact_recovery、test_gateway_child_compact_scope_application三文件31 passed（8.48秒）。三宿主seed仓外基线仅验证测量和完整性，不算内存目标通过；细节见容量审计的宿主生命周期基线。
 
+## 第12.4项第二片 2b：摘要期释放旧请求历史（2026-09-24，本地分支 `claude/decision-12.4-2b`）
+
+- **新测试**：
+  - `test_host_summary_phase_lifetime.py` 3 项（`slow`，约 12 秒）：Gateway、child、后台三宿主各写入 128 行、约 4.2M 字符的历史，跑完整链。第一次进入摘要时，原参数的旧历史已解绑，驻留低于历史正文的 3/4；摘要逐条覆盖全部历史；首业务请求带当前任务。
+  - `test_compact_recovery_release.py` 11 项：
+    - Gateway 七种失败（代次冲突、取消、令牌取消、未知投影、摘要瞬断、摘要超时、候选超限）与后台两种失败（取消、候选超限）。解绑后换上"读取即报错"的替身，收尾全程不读旧历史，也不发业务请求。
+    - 自动 noop 原样发送原请求，旧历史不解绑。
+    - 候选与原参数共享 `tool_context` 的合同。
+  - `test_conversation_history_seed.py` 新增 1 项：空的只读来源在原生边界只读一次，不走旧文本回退。
+- **变异验证**：
+  - 去掉解绑：全链 3 项与 Gateway 7 项失败（后台夹具没有旧历史，不能区分）。
+  - 在收尾路径加一次读取：9 项失败。
+  - 把解绑挪到 noop 之前：noop 用例失败。
+  - 只读来源改回旧文本回退：单测失败。
+  - 改回后全部通过。
+- **结果**：
+  - 2a、retry 两片的相关文件加本片新测试，共 147 个文件：3,724 passed、1 skipped、24 xfailed、1 xpassed。
+  - Ruff、doc sync、diff 检查通过。
+  - strict code-size：hard=0；与 main `c18519d90` 逐项对照，本片没有新增发现。main 上 high-risk 已是 1468，仓库里的报告文件是旧的。
+- **未覆盖**：没有跑真实模型；建循环时的首次物化峰值不在本片。
+
 ## 恢复候选提交后的同请求重试（2026-09-24，本地分支 `claude/decision-retry-committed`）
 
 - **新测试**：

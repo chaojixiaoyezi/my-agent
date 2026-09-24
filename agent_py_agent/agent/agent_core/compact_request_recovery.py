@@ -108,6 +108,7 @@ class PreparedCompactRecovery:
         return prepared_params, prepared_prompt
 
     # LLM: 进入时领取防摘要重入；强制恢复没有消息或完整工具来源时显式拒绝，准备/投影失败不发送业务，CAS后沿同次材料发送。
+    # 自动 noop 先原样返回原请求；决定摘要后解绑原参数与冻结输入的完整原生历史，失败/取消/超限收尾都不得再读它。
     # 函数用途: 用完整当前输入选择摘要候选，提交后返回同次恢复轮的新参数与已检查提示。
     def select(self, agent: object, params: object, prompt: str) -> tuple[object, str]:
         if self.consumed or not (agent is self.agent and self.matches_request(params)):
@@ -139,6 +140,10 @@ class PreparedCompactRecovery:
                                          or bool(self.interrupt_check and self.interrupt_check()))
             self.resolved_input = frozen
             return params, prompt
+        # 已决定摘要：旧请求不会再发送，候选按新种子重建历史。解绑原参数和冻结输入持有的完整原生历史，
+        # 摘要期间不再驻留旧请求；只解绑这一对象，经 replace 共享同一列表的其它参数对象不受影响。
+        frozen = replace(frozen, provider_history_messages=())
+        object.__setattr__(params, "provider_history_messages", [])
         backend = agent.backend
         config = agent.config
         from ..memory_archive.compact_semantic_summary import semantic_summary_config
@@ -285,6 +290,8 @@ def _summary_surface(prepared: ToolLoopRequestInput) -> ConversationCompactProvi
 
 
 # LLM: 注入索引由宿主提供；历史种子接管摘要时移除旧applied_compact IR，参数与冻结输入同时更新，不依赖工具分区。
+# 合同：候选参数与原参数共享同一个 tool_context 列表（dataclasses.replace 只替换下列字段），提交后写入任一份的
+# 插话或修复提示对另一份可见；改为复制前须先迁移 test_compact_recovery_release 里的合同测试。
 # 函数用途: 将一个摘要候选投影成同次请求的参数和冻结输入，供各宿主统一计量后发送。
 def replace_recovery_history(params, frozen, *, history_seed, injection: str, injection_index: int, compact_context):
     from ..backends.tool_ir import CompactionSummary

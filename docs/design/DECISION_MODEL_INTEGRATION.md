@@ -576,4 +576,10 @@ Skill选中/明确required名卡进入原动态推荐段，稳定区只保留固
 - Gateway `_conversation_prompt_section` 删掉生产不可达的 `include_transcript` 正文/摘要分支，已结束历史只经种子边界提供。
 - 与主线 owner 约定：两个共享函数只在入口解析来源。等价测试覆盖两个边界、下游孤儿清扫、媒体和匿名信封；4.2M 字符的峰值对比写进容量审计。
 
+**2b 实施状态（2026-09-24，本地分支 `claude/decision-12.4-2b`）**：
+- `PreparedCompactRecovery.select` 在自动 noop 返回之后、调用摘要之前，解绑原参数的 `provider_history_messages`，并把 frozen 换成空历史（经主线 owner 同意用解绑而非原地清空）。
+- 4.2M 字符下，三宿主摘要入口驻留降约 8.3–8.5MB，摘要期峰值从 10.2–11.7MB 降到 1.7–3.3MB；建循环时的首次物化峰值不变。
+- 失败、取消、超限收尾不读已解绑的历史（用读取即报错的替身钉住），自动 noop 原样发送原请求。
+- 详见[容量审计](../tasks/DECISION_MODEL_CONTEXT_AUDIT.md#摘要期释放旧请求历史2b2026-09-24本地)。
+
 验收分别记录source/seed、首次完整预检、摘要驻留和首实际provider payload峰值。必要发送本身仍有完整材料成本，不能把未发送旧超大预检峰值归入必要出站成本；三宿主的scope、失败不提交、媒体和候选/实际payload逐值一致需相邻验证。详细证据与剩余边界见[容量审计](../tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。
