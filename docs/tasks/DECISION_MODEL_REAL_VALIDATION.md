@@ -189,3 +189,67 @@ P4-B 普通 user owner 的两轮隔离真实中文配置各有 **1 次 Jev HTTP*
 清理：原CAS将隔离owner overrides逐值恢复baseline，revision20→21且enabled=false；TUI正常退出code0，候选Gateway通过原CLI停止，PID不存活、8420/8431无监听、inbox/processing均0、26条HTTP观察均有终态。历史测试thread保留显式DeepSeek选择供证据复查；它是新建隔离会话，不影响默认模型。清理机器记录在新隔离目录`artifacts/cleanup-current.json`。
 
 12.7按上述明确组合收口；12的7个子项已完成6个，剩12.4。总清单仍11/18、P1—P5 Goal active。建议下一步：完成并复核12.4选中正文生命周期及其宿主伴随片；另一agent可并行查协议/取消，生产修改和Gateway控制各守单owner，源代码新实现不得借本固定旧包冒充已部署验收。
+
+## 12.4 活动工具精确来源压缩真实验收（2026-09-24，main `c9794b9ca`）
+
+**安装**：
+- 源码 main `c9794b9ca`（tree `a8b337664328d17ed8456d8684d85c9c2f43e2d0`），git archive SHA256 `395475504d5676e0b5c725c536cce3c9d081bac60fd671516c01e12a0de5d148`。
+- 由它构建 wheel，SHA256 `186f8a90b99736604fbdbaa92ce2f304ff07652c8c7eb3b2409be9736c2a517e`（5,576,226 字节）。wheel 和源码的 clean-package 检查都通过。
+- 这个 head 已通过的 focused gate：2a 为 124 个相关文件 3,087 passed；retry 修复为 79 个相关文件 2,363 passed。另有主线 owner 独立复跑。
+- 在授权独立测试机上新建隔离目录和 venv，用 `python -I` 确认导入的是新 venv。只复制 12.7 的四模型私有配置（不打印），旧安装与旧证据不变，其它任务的运行环境不动。
+
+**配置**：
+- 唯一 Gateway 监听 `127.0.0.1:8431`；使用原生 TUI `chat --gateway`。
+- 模型为官方 MiniMax-M2.7（anthropic_compatible，窗口 200k），决策模型关闭。
+- `memory_compact_auto_trigger_percent` 设为最低值 50，对应 trigger_tokens=100,000。
+- 材料：12 个自编中文文件，每个 15,260–15,264 字，首行是 `EXACTREF-MARK-NN`。
+- 旁观器沿用 12.7 的窄版，只多记一项：每次出站是否含这 12 个标记。仍不保存正文。
+
+**第 1 轮（测试设计失误）**：
+- prompt 要求"每读完一个回复'已读 N'"。模型没读 big-01 就回复了"已读 1"，读完 big-02 后以"已读 2"结束回合：tool_rounds=1，没有压缩。
+- 这是 prompt 让模型把逐条回复当成回合结束，不是产品缺陷；按一轮一 prompt 的规则换新会话重测。
+
+**第 2 轮（新会话，只给一次 prompt：全部读完前不输出文字，读完后列出 12 个标记并总结）**：
+- 结果：请求 `gwreq-1790239779-b3d5efc4ef2f48919579335ba066954b` 为 done/ok/completed，tool_rounds=12，89.1 秒。
+- 进度事件：同一 operation_id `live-tool:a2beecd246204bd48b1410def5783aeb` 共 6 条，阶段依次为 preparing → summarizing → measuring → checkpointing → committing → completed。每条都是：
+  - `source_kind=active_turn_tool_archive`、`commit_authority=conversation_thread`，generation 1；
+  - before 108,569、after 34,985、trigger 100,000；
+  - source_messages 16（8 对 × 2），没有错误码。
+- checkpoint `compact-v3-1-0987081f5110f714dd28`：
+  - v3、`validated_candidate`、`source_kind=live_tool_ir`，generation 0→1，`commit_authority=conversation_thread.compact_checkpoint_id`；
+  - 8 条 `source_tool_refs` 的 run/attempt/turn/call 四个字段都非空，call id 与 refs 一一对应；保留 refs 为 0，没有重叠；
+  - request_id 是本轮的，attempt_id 为 `attempt-1790239779-9de4b3ef`；projected tokens 108,569→34,985。
+- 线程 JSON：`compact_checkpoint_id` 指向这一行，generation 1，`compact_source_tool_pairs=8`。
+- 兜底检查：摘要（1,556 字）和回答（603 字）都不以任一机械兜底前缀开头。
+- 出站对照：
+  - 压缩前最后一次业务请求：754,087 字节，7 个 tool_use、7 个 tool_result。
+  - 摘要调用：账本用途为 `compact_live_tool_summary`，输入 89,883、输出 1,229。这是唯一同时带着 01–08 原文的请求。
+  - 提交后的第一次业务请求：164,682 字节，0 个 tool_use、0 个 tool_result。同会话不带工具结果的首请求是 147,975 字节，而一份原文约 86KB，所以被压缩的 8 次调用原文没有再发出去。之后按正常流程读 09–12。
+- 取证注意：提交后的请求里仍能看到 01–08（以及 09、12）的标记字符串。这是模型摘要把 01–08 当事实保留、并把 09–12 写成预期范围所致；摘要里没有文件正文。因此"原文不再出现"要以 tool_result 块数和字节数为据，不能用标记字符串。最终回答列出的 12 个标记全部正确：01–08 来自摘要，09–12 来自原文。
+- 证据文件（测试机私有目录）：`artifacts/round1-evidence.json`（SHA256 `68ff58ca31e703ddc1a829e3bd7ad35571446294acd1994c078359edaa303128`）、`artifacts/round2-evidence.json`（SHA256 `944b827362df2f3af74c3c7dd86d6d49c22f04497a838efe21c8d1875c955b88`）。
+
+**第 3 轮（同一线程，只给一次 prompt：再完整读一遍 12 个文件，找出每个文件最大的仓位编号）**：
+- 结果：请求 `gwreq-1790240104-04a5e563ac7149c5b627f9343c24575b` 为 done/ok/completed，tool_rounds=17，89.4 秒。
+- 本轮开始时，上下文里带着第 2 轮保留的 4 次原文读取。读到第 3 个文件时估算达到 147,510，超过 100,000，触发会话级压缩：
+  - operation_id `transcript:73f464c294734c2282adf0d17c334b38`，`source_kind=conversation_transcript`，`commit_authority=conversation_thread`，generation 2，147,510→37,765。
+  - 写入 v3 行 `compact-v3-2-53c1d8d9d632a6d9f486`：`source_kind=transcript_and_tool_archive`，generation 1→2，覆盖 3 条早先消息和 3 次归档工具调用，refs 四个字段都非空，与保留无重叠。
+  - 摘要（2,048 字）没有兜底前缀。
+- 出站对照：压缩前最后一次业务请求 768,581 字节、7 个 tool_result；提交后下一次降到 176,940 字节、0 个 tool_result。长历史里的旧工具原文没有再发出去。
+- 回答质量（不因 done 自动算通过）：压缩后，模型对 big-10～12 只按行段读取了一部分（每次读取只增加约 3.7KB，而不是整份约 86KB）。因此这 3 个文件的最大编号（10199、11199、12199）没有答对，其余 9 个正确。这是模型没有按要求完整读取，本片不加针对样例的产品分支。
+
+**未覆盖**：
+- 请求准备阶段对超长历史的 Compact 没有在真实运行里触发：每轮结束时上下文都已被运行中压缩压到 100k 以下（第 3 轮结束约 57.5k）。这条路径仍由 fake HTTP 全链测试覆盖（见容量审计 2a 节）。
+- 媒体与超大来源仍按 12.4 开放。
+- 手动 `/compact` 回读、跨请求同一调用号、中断恢复由主线 owner 另行验收。
+
+**清理**：
+- TUI 用 `/exit` 正常退出；Gateway 经原 CLI `gateway stop` 停止，PID 不存活，8420/8431 无监听，processing 与 inbox 均为 0。
+- 原 CAS 恢复隔离 owner 设置：enabled=false，owner revision 23。
+- 42 条出站观察中 41 条有 HTTP 200 终态。剩下 1 条是第 3 轮结束后的后台结构化输出调用（`my_agent_structured_output`，输入 57,576 字节）：停机时它已在途约 113 秒，没有终态；同类前三次各用时 24–35 秒，Gateway 日志没有错误，原因未知。
+- 顺带清掉本线 9-23 遗留的空闲 tmux shell（`decision-p12-off`，无子进程）。其它 agent 的运行环境没动。
+- 清理记录：`artifacts/cleanup-current.json`。第 3 轮证据：`artifacts/round3-evidence.json`（SHA256 `4c05fe2342a7768f4a989071fc584c5b8f86cfe2f35a4323ac27262a1779b1a4`）。
+
+**结论**：
+- 活动工具精确来源压缩（exact-refs）已在真实 M2.7 TUI 中走通：进度事件、v3 四元 refs、线程 JSON、下一请求原生历史、无兜底前缀五项证据齐全。
+- 同一线程的会话级长历史压缩（`transcript_and_tool_archive`）也在真实运行中写出四元 refs，并在下一请求中移除了旧原文。
+- 12.4 仍开放：2b、媒体、准备阶段超长历史的真实触发。本轮 Jev 调用 0 次，累计仍为 65 次。

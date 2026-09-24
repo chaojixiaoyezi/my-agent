@@ -205,3 +205,5 @@ segment_planning只接受调用列表／起点、有效批上限和原位Compact
 - 空响应修复在原参数上调用 `build_tool_loop_prompt`，共享预算回收在原参数上触发运行中压缩，抛上面的 `ValueError`。
 - 插话取代把插话注入原参数；下一次迭代又拿原参数命中已提交记录，重发不带插话的候选。这次响应随后因插话未处理而作废，第三次请求才送出插话，白白多一次请求。
 - 修复：`except` 开头只做一件事——有已提交记录就把 `loop_params` 换成候选参数，其它判断照旧。修复提示和插话都落在候选参数上；下一次迭代传入的是候选参数，记录按原规则清除，然后正常重建。
+
+**隐式别名（已知，未改）**：`replace_recovery_history` 用 `dataclasses.replace` 生成候选参数，只替换了历史种子、Compact 上下文、`runtime_injections`、`live_archive_state`（深拷贝）和 `tool_ir_history`，`tool_context` 仍与原参数共享同一个列表。所以恢复提交后，写进任一份参数 `tool_context` 的内容（插话、空响应修复提示）在另一份里也看得到。目前这恰好保证插话只出现一次，但它是隐式别名，不是合同。2b 评估是否显式化：要么候选参数复制 `tool_context` 并按结构化记录转移尚未发送的条目，要么明确写成共享合同并加断言。
