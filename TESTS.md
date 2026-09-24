@@ -17,6 +17,13 @@ child不展示历史正文时的读取回归先复现1 failed/1 passed，修复�
 - **变异验证**：59 种各自使新测试失败，改回后按 sha256 核对原文件：接线丢点/丢换行、未登记不空操作、非 run_command 扫描归档、接受重放/子代理/两种收口/超长请求/无请求、去掉归档事件/id/run/task/scoped 一致、焦点下限 2→1、上限 12→13 与 12→11、不要求当前事件、去掉或只看 failed/只看修改、接受重复事件号、保留最早而非最新、修改方向反转、修改不比项目根、非 stale 算修改、去掉短标识与 id 校验、扫描不按 run/task 过滤、外发项目根、请求不脱敏、不拒 URL 查询串、忽略阶段错误/关闭/他 run、observe 被采用、不查候选版本/当前配置/最终来源/参数版本/绝对期限、接受多答/错题号/错类型/逐题错误、渲染当前事件、提示丢修改事实/targeted 说明、去掉 512 字符预算、决策后与配置复核后不查取消、中断被吞、可选错误掩盖取消、点未登记、TUI 缺菜单、dataclass/YAML 默认非 off。每次均以 `PYTHONDONTWRITEBYTECODE=1` 运行；全部完成后删除被变异模块的 `__pycache__` 并从干净字节码重跑 107 passed。
 - **结果**（基于 main `ab23a2666`）：与改动直接相关的 56 个测试文件 1443 passed、1 xpassed（`test_timeout_budget_locked.py::test_native_protocol_unified_counts_ir` 为既有非严格 xfail，main 上同样 xpass）。同组合共跑 8 次，第 1 次出现 1 failed，因输出被截断未记下用例名，其后 7 次全量均通过，新文件单独 25 次、时序敏感的 10 个既有文件 5 次也均通过，未能复现，暂按机器负载下的偶发记录；Ruff、doc sync、strict code-size（blocked=False；与 main 的 findings 按 identity+severity 逐项对比无新增，`_record_tool_call` 的临界长度项因接缝抽出而消失）、`git diff --check`、clean-package 通过。没有真实 Jev、真实主模型或 TUI 验收，不证明交付质量提升；线上 CI 未作为验收来源。
 
+## 召回与记忆决策点的真实验收方法（2026-09-25，本地分支 `claude/decision-p5a-real`，只改文档）
+
+- **已知漏召回样本先离线标定**：测试者用产品原函数（BM25 顺序、均值中心化余弦 ≥0.30、RRF、原片段生成函数）和同一嵌入类复算限定范围的混合检索，只挑"整句召回不到、某个片段能召回、基线留有空槽"的问题做 off/apply 对照，避免拿不可能有收益的样本下结论。标定只输出编号、条数和相似度，密钥在进程内读取、不打印。
+- **旁观器只记结构化选择**：召回前决策点只记录所选片段 ID，关系点只记录每对的 ID 与关系标签，嵌入调用只记条数、耗时与成败；不保存问题、片段、记忆正文、密钥或请求头。
+- **同一快照在原路径上重放**：Curator 对照必须从同一快照在原 home 路径上依次跑 off 与 apply。会话工作区按绝对路径建键，把 home 复制到别的目录会读不到原对话（本次作废的一次运行已留证）。
+- 结果与证据见[真实验收](docs/tasks/DECISION_MODEL_REAL_VALIDATION.md#14-p5-a-召回前补充查询语义召回下的真实收益2026-09-25main-ab23a2666)。本分支没有代码改动，所以不跑 pytest；doc sync 与 diff 检查照常执行。
+
 ## 自学习 S1：子代理经验生成待确认的 Skill 提案（2026-09-24，本地分支 `claude/self-learning-skill-proposals`，待审）
 
 - **改动**：新增 `capability/skill_proposals.py`（提案 schema `my-agent.skill-proposal.v1` 与 `SkillProposalService`）和 CLI `my-agent skills proposals list|show|confirm|reject`；配置 `enable_self_learning`（默认 false，YAML、AgentConfig 与布尔规范化同步）；owner 布局登记 `owner_skill_proposals_dir = <owner_home>/data/skill_proposals`（不进初始化目录清单，首次生成提案才创建）；组合根只在开关开启时给子代理 manager 注入服务，`runner_result_service` 在记录候选之后调用，异常只写工作日志。
