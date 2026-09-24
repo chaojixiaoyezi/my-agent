@@ -490,6 +490,7 @@ OAuth 传输、采样和模型菜单回归。覆盖保存无网络、公开字�
 
 - `test_plugin_display_service.py::test_context_topic_forwards_only_public_numbers`：`context` 主题只转发上下文公开数字白名单和压缩次数，缺快照标记未知。
 - `test_plugin_enable.py`：真实启用的插件进程环境带 `MY_AGENT_PLUGIN_DATA_DIR`，目录已按 owner + 插件 ID 创建。
+- 真实插件组件：`test_context_inspector_package.py` 从源码构建 v2 纯展示包 context-inspector，由真实 MCP 进程经展示服务渲染 `context` 主题：无快照只显示提示不编数字，有快照显示千分位用量 / 窗口百分比、触发线、三部分组成、压缩次数与"估算"标注，输出经核心校验不截断。
 
 ## 第 10 步插件写入上下文（本地，待发布）
 

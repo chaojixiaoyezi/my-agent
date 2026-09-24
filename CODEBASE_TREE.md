@@ -797,6 +797,14 @@ plugins/
 |       |-- __init__.py                #
 |       |-- __main__.py                # python -m activity_line 启动 stdio 服务
 |       `-- server.py                  # 握手声明展示能力，只实现只读 my-agent/display.render
+|-- context-inspector/                # 自有纯展示插件：面板查看上下文用量、组成与压缩次数，无工具、无设置、无依赖
+|   |-- README.md                      # 构建与面板用法
+|   |-- pyproject.toml                 # 插件发行身份，无运行依赖
+|   `-- src/context_inspector/
+|       |-- declaration.json           # 展示动作与 status 面板（context 主题）的唯一声明
+|       |-- __init__.py                #
+|       |-- __main__.py                # python -m context_inspector 启动 stdio 服务
+|       `-- server.py                  # 握手声明展示能力，把 context 主题数字渲染成状态字段
 `-- workspace-peek/                    # 自有文件预览插件；不依赖完整宿主运行包
     |-- README.md                      # 离线构建、命令示例与当前验收边界
     |-- pyproject.toml                 # 插件发行身份及精确 SDK 依赖
