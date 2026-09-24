@@ -937,6 +937,8 @@ def _native_ir_with_applied_summary(
 # the new current-turn IR summary owns that view, so callers may omit only this synthetic prefix.
 # A read-only seed source is replayed here once (the native preparation boundary); the result is a
 # concrete list exactly like the concrete seed path, so capture/projector contracts stay unchanged.
+# The legacy text fallback serves only concrete seeds without canonical messages; a source seed is
+# read once, because its native and text views come from the same rows.
 # 函数用途: 生成原生历史，按本次视图选择或省略前置摘要，同时保留原消息与媒体块；只读来源在此解析。
 def _native_provider_history_messages(
     params: RuntimeLoopParams | ToolLoopExecuteParams,
@@ -965,7 +967,8 @@ def _native_provider_history_messages(
 
     # 只读来源只在这里按原 native 规则一次性重放；具体种子沿原深拷贝隔离。
     canonical = seed_provider_history_messages(seed)
-    if canonical:
+    # 只读来源的 native 与 text 同源：native 为空时 text 也为空，不再为旧文本回退二次读行。
+    if canonical or getattr(seed, "source", None) is not None:
         return [*prefix, *canonical]
     legacy: list[object] = []
     for item in seed_text_messages(seed):
