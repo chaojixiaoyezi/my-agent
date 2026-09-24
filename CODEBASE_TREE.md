@@ -587,6 +587,7 @@ agent_py_agent/
 |-- tests/                             # 单元、集成、真实链路回归
 |   |-- fixtures/decision/jev_capability_rounding.json # 合成材料真实Jev响应的脱敏概率舍入replay，不含凭据
 |   |-- test_decision_model_profiles.py # 决策用途隔离、旧目录迁移、共享撤销与生成选择不退化
+|   |-- test_model_usage_tags.py       # 模型用途标签：规范化与拒绝、决策模型不收、不进运行时配置、两处决策候选与 /model 表单
 |   |-- test_decision_model_operations.py # 原模型操作中的决策设置、原生HTTP测试和用量结算
 |   |-- test_decision_gateway_transport.py # 原菜单运输到本地Gateway服务和原生HTTP的组合
 |   |-- test_decision_settings_scope.py  # owner后台范围、前台覆盖隔离和历史覆盖清理
