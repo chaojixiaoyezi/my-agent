@@ -17,6 +17,10 @@ from .tooling.input_schema import canonicalize_tool_input_schema, validate_tool_
 PLUGIN_PACKAGE_SCHEMA = "plugin_package.v1"
 # v2 只比 v1 多一个 panels 字段；无面板的包仍按 v1 序列化，保证已安装包的描述字节不变
 PLUGIN_PACKAGE_SCHEMA_V2 = "plugin_package.v2"
+# v3 在 v2 基础上增加随包 Skill 名单（面板可为空）；v1/v2 包的读写字节保持不变
+PLUGIN_PACKAGE_SCHEMA_V3 = "plugin_package.v3"
+_SKILL_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
+MAX_PLUGIN_SKILLS = 8
 PLUGIN_SETTINGS_BYTES = 64 * 1024
 _MODULE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*\Z")
 _WHEEL_PATH = re.compile(r"wheels/[A-Za-z0-9_][A-Za-z0-9_.+-]*\.whl\Z")
@@ -92,6 +96,8 @@ class PluginManifest:
     tools: tuple[PluginToolDeclaration, ...]
     settings_schema_json: str
     panels: tuple[PanelDeclaration, ...] = ()
+    # 随包 Skill 名单：文件在入口包的 skills/<名称>/SKILL.md，启用期间由宿主作为最低优先级 Skill 根暴露
+    skills: tuple[str, ...] = ()
 
     # LLM: 直接构造与 JSON 读取共用约束；只开放工具动作和指向本包面板的展示动作，不接受包指定管理操作。
     #   有面板的纯展示包可以没有工具；两者都没有则拒绝。
@@ -116,6 +122,10 @@ class PluginManifest:
         }:
             raise ValueError("wheel 重名或入口 wheel 缺失")
         validate_panels(self.panels)
+        if (not isinstance(self.skills, tuple) or len(self.skills) > MAX_PLUGIN_SKILLS
+                or len(set(self.skills)) != len(self.skills)
+                or any(not isinstance(name, str) or not _SKILL_NAME.fullmatch(name) for name in self.skills)):
+            raise ValueError("随包 Skill 名单无效")
         tool_names = {tool.name for tool in self.tools}
         panel_ids = {panel.id for panel in self.panels}
         if len(tool_names) != len(self.tools) or not (tool_names or panel_ids):
@@ -173,6 +183,8 @@ class PluginManifest:
                     "settings_schema": self.settings_schema,
                     **({"panels": [panel.to_payload() for panel in self.panels],
                         "schema_version": PLUGIN_PACKAGE_SCHEMA_V2} if self.panels else {}),
+                    **({"panels": [panel.to_payload() for panel in self.panels], "skills": list(self.skills),
+                        "schema_version": PLUGIN_PACKAGE_SCHEMA_V3} if self.skills else {}),
                 }
             )
         )
@@ -187,12 +199,17 @@ class PluginManifest:
             version = payload.get("schema_version") if isinstance(payload, dict) else None
             if version == PLUGIN_PACKAGE_SCHEMA_V2:
                 names += " panels"
+            elif version == PLUGIN_PACKAGE_SCHEMA_V3:
+                names += " panels skills"
             elif version != PLUGIN_PACKAGE_SCHEMA:
                 raise ValueError("包协议版本无效")
             row = _fields(payload, names)
             panels = tuple(PanelDeclaration.from_payload(item) for item in declaration_list(row.get("panels", [])))
             if version == PLUGIN_PACKAGE_SCHEMA_V2 and not panels:
                 raise ValueError("v2 包必须声明面板")
+            skills = tuple(declaration_list(row.get("skills", [])))
+            if version == PLUGIN_PACKAGE_SCHEMA_V3 and not skills:
+                raise ValueError("v3 包必须声明随包 Skill")
             wheels = tuple(
                 PluginWheel(**_fields(item, "path sha256"))
                 for item in declaration_list(row["wheels"])
@@ -222,6 +239,7 @@ class PluginManifest:
                 tools=tuple(tools),
                 settings_schema_json=_json(row["settings_schema"]),
                 panels=panels,
+                skills=skills,
             )
         except (ValueError, TypeError, KeyError, AttributeError, RecursionError) as exc:
             raise PluginPackageError("invalid_manifest", "插件包描述无效。") from exc

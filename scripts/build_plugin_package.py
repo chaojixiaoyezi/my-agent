@@ -17,7 +17,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from agent_py_agent.agent.plugin_manifest import PLUGIN_PACKAGE_SCHEMA, PLUGIN_PACKAGE_SCHEMA_V2
+from agent_py_agent.agent.plugin_manifest import (
+    PLUGIN_PACKAGE_SCHEMA,
+    PLUGIN_PACKAGE_SCHEMA_V2,
+    PLUGIN_PACKAGE_SCHEMA_V3,
+)
 from agent_py_agent.agent.plugin_package import inspect_plugin_package
 from agent_py_agent.agent.plugin_wheels import inspect_plugin_wheels
 from scripts.plugin_build import build_wheel, publish_artifact, wheel_metadata
@@ -39,14 +43,20 @@ def build_plugin_package(project: Path, declaration_path: str, dependencies: tup
         wheel = build_wheel(staging, Path(temporary) / "wheels")
         with ZipFile(wheel) as archive:
             manifest = json.loads(archive.read(declaration_path))
+            wheel_names = archive.namelist()
         generated = {"schema_version", "version", "entry_wheel", "wheels"}
         if not isinstance(manifest, dict) or generated & set(manifest):
             raise ValueError("声明不能覆盖构建元数据")
         wheel_bytes = {"wheels/" + item.name: item.read_bytes() for item in (wheel, *dependencies)}
         if len(wheel_bytes) != len(dependencies) + 1:
             raise ValueError("依赖 wheel 文件重名")
-        # 声明了面板的包才用 v2；其余保持 v1，已发布包重建后的描述不变
-        schema = PLUGIN_PACKAGE_SCHEMA_V2 if manifest.get("panels") else PLUGIN_PACKAGE_SCHEMA
+        # 声明了随包 Skill 的包用 v3，声明了面板的包用 v2；其余保持 v1，已发布包重建后的描述不变
+        if manifest.get("skills"):
+            _check_declared_skills(manifest, wheel_names)
+            manifest.setdefault("panels", [])
+            schema = PLUGIN_PACKAGE_SCHEMA_V3
+        else:
+            schema = PLUGIN_PACKAGE_SCHEMA_V2 if manifest.get("panels") else PLUGIN_PACKAGE_SCHEMA
         manifest.update(schema_version=schema, version=wheel_metadata(wheel)["Version"],
                         entry_wheel="wheels/" + wheel.name,
                         wheels=[{"path": name, "sha256": hashlib.sha256(content).hexdigest()} for name, content in wheel_bytes.items()])
@@ -59,6 +69,19 @@ def build_plugin_package(project: Path, declaration_path: str, dependencies: tup
         package = inspect_plugin_package(payload)
         inspect_plugin_wheels(package)
         return publish_artifact(output.resolve(), payload)
+
+
+# LLM: 宿主只按入口包 skills/<名称>/SKILL.md 定位随包 Skill；构建期要求 wheel 里的 Skill 目录与声明名单完全一致，
+#   避免声明了却没打进包（启用后找不到），或打进了未声明的 Skill（用户看不到却被暴露）。
+# 函数用途: 校验声明的随包 Skill 名单与 wheel 实际内容一致。
+def _check_declared_skills(manifest: dict, wheel_names: list[str]) -> None:
+    top = str(manifest.get("entry_module", "")).split(".")[0]
+    prefix = f"{top}/skills/"
+    present = {name[len(prefix):].split("/")[0] for name in wheel_names
+               if name.startswith(prefix) and name.endswith("/SKILL.md") and name.count("/") == 3}
+    declared = set(manifest["skills"]) if isinstance(manifest["skills"], list) else set()
+    if present != declared:
+        raise ValueError(f"随包 Skill 与声明不一致：wheel 中 {sorted(present)}，声明 {sorted(declared)}")
 
 
 # LLM: 开发者显式指定全部本地 wheel 与输出；不自动联网补依赖，也不改变宿主插件安装表。

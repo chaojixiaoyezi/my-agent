@@ -402,6 +402,7 @@ class SimpleAgent(
             home_paths=self.home_paths,
             workspace_root=self.effective_workspace_root,
             policy_provider=lambda: resolve_effective_owner_policy(self.home_paths),
+            plugin_roots=self._plugin_skill_roots,
         )
         self.capability_router = CapabilityRouter(
             config=config,
@@ -452,6 +453,16 @@ class SimpleAgent(
         _register_orchestration_tools(self)
         for spec in self.tools.specs():
             self.capability_router.register(from_tool_model_spec(spec))
+
+    # LLM: 与插件工具注册同一 owner 解析与同一开关（enable_plugins 且 enable_tools）；只读安装表，不启动插件进程。
+    # 函数用途: 给 Skill 目录提供本 owner 已启用插件自带的 Skill 目录，插件关闭时返回空。
+    def _plugin_skill_roots(self):
+        config = self.config
+        if not (getattr(config, "enable_plugins", False) and getattr(config, "enable_tools", False)):
+            return ()
+        from .plugin_skills import enabled_plugin_skill_roots
+
+        return enabled_plugin_skill_roots(resolve_owner_home(self.home_paths.root, owner_identity_from_config(config)))
 
     def current_skill_snapshot(self):
         """Return the immutable Skill catalog bound to this worker turn."""

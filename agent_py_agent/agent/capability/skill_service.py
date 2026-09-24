@@ -47,8 +47,11 @@ class SkillsService:
         home_paths: object,
         workspace_root: str | Path,
         policy_provider: Callable[[], EffectiveOwnerPolicy],
+        plugin_roots: Callable[[], Iterable[tuple[Path, str]]] | None = None,
     ) -> None:
         self.home_paths = home_paths
+        # 已启用插件自带的 Skill 目录（来源 plugin:<ID>）；每次快照都重新读取，停用后下一轮自然消失
+        self.plugin_roots = plugin_roots
         self.workspace_root = Path(workspace_root).expanduser().resolve(strict=False)
         self.policy_provider = policy_provider
         self._extra_roots: tuple[Path, ...] = ()
@@ -110,6 +113,10 @@ class SkillsService:
             roots.append(SkillRoot(Path(self.home_paths.shared_skills_dir), "shared"))
         if not enabled or "builtin" in enabled:
             roots.append(SkillRoot(Path(self.home_paths.shared_builtin_dir), "builtin"))
+        # 插件 Skill 由插件启用这一显式操作授权，不受旧的来源名单限制（已有 owner 的名单不含 plugin），
+        # 但排在最后、优先级最低，不能覆盖同名的工作区/用户/内置 Skill；总闸关闭时上面已返回空快照
+        if self.plugin_roots is not None:
+            roots.extend(SkillRoot(Path(path), source) for path, source in self.plugin_roots())
         return _dedupe_roots(roots)
 
 

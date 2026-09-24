@@ -1,0 +1,40 @@
+# LLM: 随包 Skill 的唯一定位规则：只看安装表里 phase=active 的激活，路径只由 owner、激活环境编号与包声明的入口模块推出，
+#   不接受包提供的路径；目录内容随插件 wheel 一起经哈希校验安装。停用、卸载或换代后下一次 Skill 快照自然不再包含它。
+#   修改时同步 capability/skill_service.py 的插件根顺序与 test_plugin_skills。
+# 模块用途: 给 Skill 目录提供"已启用插件自带的 Skill 目录"清单，让 Skill 随插件装卸。
+
+from __future__ import annotations
+
+import logging
+import sysconfig
+from pathlib import Path
+
+from .plugin_install_store import PluginInstallStore
+
+logger = logging.getLogger(__name__)
+PLUGIN_SKILL_SOURCE_PREFIX = "plugin:"
+
+
+# LLM: 插件环境与宿主同一 Python 版本（环境准备时已校验），因此可用宿主 sysconfig 规则推出其 purelib，跨平台一致。
+# 函数用途: 计算某个插件激活环境里入口包的 skills 目录。
+def plugin_skill_dir(owner, installation) -> Path:
+    environment = owner.plugins_dir / "environments" / installation.activation.plan.environment_ref / "python"
+    purelib = sysconfig.get_path("purelib", vars={"base": str(environment), "platbase": str(environment)})
+    return Path(purelib) / installation.manifest.entry_module.split(".")[0] / "skills"
+
+
+# LLM: 只读安装表快照，不启动插件进程；表不可读时记录类型并返回空（Skill 缺席不影响核心）。
+# 函数用途: 列出当前 owner 所有已启用且声明了 Skill 的插件的 (目录, 来源标签)。
+def enabled_plugin_skill_roots(owner) -> tuple[tuple[Path, str], ...]:
+    if owner is None:
+        return ()
+    try:
+        entries = PluginInstallStore(owner).snapshot()
+    except (OSError, ValueError) as exc:
+        logger.warning("插件安装目录不可读，本轮不提供插件 Skill：%s", type(exc).__name__)
+        return ()
+    roots = []
+    for entry in entries:
+        if entry.enabled and getattr(entry.manifest, "skills", ()):
+            roots.append((plugin_skill_dir(owner, entry), PLUGIN_SKILL_SOURCE_PREFIX + entry.manifest.plugin_id))
+    return tuple(roots)
