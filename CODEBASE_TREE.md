@@ -883,6 +883,18 @@ plugins/
 |       |-- declarations.py            # 读取同源声明并验证平面参数和设置
 |       |-- operations.py              # 保存、列出、恢复流程；恢复先核对 --expect 再经写入上下文写回
 |       `-- snapshots.py               # 工作区 no-follow 读取与哈希，插件数据目录内的快照存取
+|-- web-board/                         # 自有网页界面型插件：插件进程内起只绑 127.0.0.1 的只读网页浏览指定目录
+|   |-- README.md                      # 构建、serve/status/stop 用法与安全边界（回环、令牌、只读、限定目录）
+|   |-- pyproject.toml                 # 插件发行身份及精确 SDK 依赖
+|   `-- src/web_board/
+|       |-- declaration.json           # 动作、工具（serve/stop 写类、status 只读）与设置的唯一声明
+|       |-- __init__.py                # 独立插件包入口
+|       |-- __main__.py                # python -m web_board 启动 stdio 服务
+|       |-- server.py                  # MCP 握手与分派，单实例服务生命周期，进程退出时关闭服务
+|       |-- declarations.py            # 读取同源声明并验证平面参数和设置
+|       |-- board.py                   # ThreadingHTTPServer 服务：令牌/cookie、GET/HEAD 路由、计数、空闲自停、关闭释放端口
+|       |-- reading.py                 # 业务错误、根目录与请求路径授权、no-follow 目录枚举与有界读取
+|       `-- pages.py                   # 目录列表/预览/错误页 HTML 渲染，全部转义、内联 CSS、HTML 走 sandbox iframe
 |-- workspace-peek/                    # 自有文件预览插件；不依赖完整宿主运行包
 |   |-- README.md                      # 离线构建、命令示例与当前验收边界
 |   |-- pyproject.toml                 # 插件发行身份及精确 SDK 依赖
@@ -954,6 +966,7 @@ docs/
 - `plugins/design-lite/`：首个带随包 Skill（包描述 v3）的自有插件，生成与修改 HTML 设计文件都走写入上下文；`agent_py_agent/tests/test_design_lite_package.py` 为其实际包、Skill 打包与 MCP 进程组件验收。
 - `plugins/browser-lite/`：首个驱动外部进程的自有插件，浏览器不随包分发，专属 profile 在插件数据目录，地址经读取上下文与 allowed_hosts 双重裁决；`agent_py_agent/tests/test_browser_lite_package.py` 为其实际包、帧编解码与真实浏览器组件验收。
 - `plugins/savepoint-lite/`：首个写工作区的自有插件，快照只存宿主插件数据目录，恢复走写入上下文；`agent_py_agent/tests/test_savepoint_lite_package.py` 为其实际包与 MCP 进程组件验收。
+- `plugins/web-board/`：网页界面型插件，插件进程内只绑回环的只读网页，按 serve 时冻结的读取上下文和 no-follow 读取限定目录；`agent_py_agent/tests/test_web_board_package.py` 为其实际包与 MCP 进程、真实 HTTP 访问的组件验收。
 - `agent_py_agent/tests/test_plugin_api_build.py`、`agent_py_agent/tests/test_workspace_peek_package.py`：实际标准包、独立环境和原 MCP/宿主管理链的开发验证，不代替真实 TUI。
 
 - `agent_py_agent/agent/runtime_db/run_cancellation.py`：在原 RuntimeDB 上核对 task/run/agent run/attempt 四个身份并关闭执行权；原 UNKNOWN 不恢复、不释放锁，旧控制不能追随新的执行轮。
