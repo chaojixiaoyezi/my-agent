@@ -262,9 +262,9 @@ P1-F 只读调查已用无网络小复现确认：原账本 failed/timed_out 可
   5. "原场景 → 新测试"对照表和受影响测试文件清单写入[交接](HANDOFF_18A_DECISION_MERGE_MAIN.md)。
 - 结果：合并分支又吸收了 main 的 tui-scalability 整合和第 9 步，由主线 owner 审阅后合入 main（合并头 `67d10d626`，main `fae9d5855`）。18-A 完成；主线 owner 在新包上跑真实 TUI 矩阵。
 
-**12.4 第二片 2a**（主线 owner 审阅通过，main 快进到 `931f83739`，尚未部署）：
+**12.4 第二片 2a**（主线 owner 审阅通过，main 快进到 `931f83739`，已随 `d69f30cf3` 部署双机）：
 - 种子的具体历史与只读来源二选一，已实现，并通过等价测试和 4.2M 字符前后对照，详见[容量审计](DECISION_MODEL_CONTEXT_AUDIT.md#宿主历史种子只读来源2a2026-09-23本地)。
-- 2b（摘要期旧请求释放）已由主线 owner 审阅合入 main `911d0d14d`（尚未部署）：摘要期峰值从 10.2–11.7MB 降到 1.7–3.3MB，详见[容量审计](DECISION_MODEL_CONTEXT_AUDIT.md#摘要期释放旧请求历史2b2026-09-24本地)。建循环首次物化峰值：实测按需物化只会挪动峰值、不降峰，不做（方案 B 结论见[容量审计](DECISION_MODEL_CONTEXT_AUDIT.md#按需物化原生历史方案-b的测量结论不做2026-09-24)）；Gateway 21.3MB 峰值已定位为三处按行数（不按字节）整块读取消息文件，方案待主线 owner 同意（见[容量审计](DECISION_MODEL_CONTEXT_AUDIT.md#gateway-213mb-峰值来自整块读取消息文件2026-09-24只读分析)）。后台 messages 驻留与预算挤占的修复已合入 main `5dcdfd463`。
+- 2b（摘要期旧请求释放）已由主线 owner 审阅合入 main `911d0d14d`（已随 `d69f30cf3` 部署双机）：摘要期峰值从 10.2–11.7MB 降到 1.7–3.3MB，详见[容量审计](DECISION_MODEL_CONTEXT_AUDIT.md#摘要期释放旧请求历史2b2026-09-24本地)。建循环首次物化峰值：实测按需物化只会挪动峰值、不降峰，不做（方案 B 结论见[容量审计](DECISION_MODEL_CONTEXT_AUDIT.md#按需物化原生历史方案-b的测量结论不做2026-09-24)）；Gateway 21.3MB 峰值已定位为三处按行数（不按字节）整块读取消息文件，方案待主线 owner 同意（见[容量审计](DECISION_MODEL_CONTEXT_AUDIT.md#gateway-213mb-峰值来自整块读取消息文件2026-09-24只读分析)）。后台 messages 驻留与预算挤占的修复已合入 main `5dcdfd463`。
 
 **.9 媒体真实验收（main `5dcdfd463`，2026-09-24）**：集成版的图片输入与手动压缩组合在真实 M3 TUI 中走通：图片原样进请求，压缩只摘要图片前的文字前缀，压缩后仍能依据原图作答。验收后本地复现一个缺陷：未压历史带图时，一越过压缩点，请求就整轮失败。修复在本地分支 `claude/decision-media-preflight`（主线 owner 已同意方案，.9 真实验收已通过，待审）。媒体屏障写进 DESIGN_LEDGER 待用户决策。详见[真实验收](DECISION_MODEL_REAL_VALIDATION.md#124-媒体与-compact-集成版真实验收2026-09-24main-5dcdfd463)和[容量审计](DECISION_MODEL_CONTEXT_AUDIT.md#媒体会话越过压缩点2026-09-24本地修复)。12.4 仍开放：媒体屏障决策、Gateway 消息文件整块读取（方案待同意）。
 

@@ -2,6 +2,15 @@
 
 child不展示历史正文时的读取回归先复现1 failed/1 passed，修复后test_compact_retained_history、test_subagent_compact_recovery、test_gateway_child_compact_scope_application三文件31 passed（8.48秒）。三宿主seed仓外基线仅验证测量和完整性，不算内存目标通过；细节见容量审计的宿主生命周期基线。
 
+## 决策线两片合入与 step10h 双机部署（2026-09-24，main `d69f30cf3`，wheel c52da295）
+
+- **合入**：`claude/step10-batch1` 从 `41c66872e` 快进到 `ec821c90c`（媒体 preflight：代码 `e90d2ec60`，其余为文档），再合并 `5cb75eaf8`（决策设置无锁读取），得 `d69f30cf3` 推送 main。TESTS.md 唯一冲突为两节都在顶部新增，按两节都保留、共用标题取"已合入 main"版本解决。
+- **独立复跑**（各在 detached worktree 上，不用对方的工作树）：媒体链 18 个相关测试文件 395 项通过；决策链 31 个文件 779 项通过；合并树上取并集 47 个文件 1120 项通过。ruff（agent_py_agent/scripts/plugins）、doc sync、strict code-size（hard=0）、`git diff --check`、clean-package 均通过。线上 CI 停用，未作为验收来源。
+- **审阅要点**：无锁读取只走 `operation == "read" and not blocking` 分支；`_owner_operation` 的 read 路径只做投影不写文件，`read_model_profiles` 在文件不存在时返回默认值不落盘；两份设置文件都是原子替换写，读者最多读到已提交版本，调用方仍在调用前后复核 revision。媒体 preflight 把自动 noop、轮内跳过、强制拒绝三处口径统一为"压缩链不可用时只守窗口硬上限"，`COMPACT_REQUEST_NON_TEXT` 单列并配专门文案。
+- **部署**：同一 wheel（SHA256 前缀 c52da295）在本机与测试机各自复制上一运行时后强制重装、逐文件核对；测试机先切换（本机当时 processing=1、有活动 attempt，被空闲检查拒绝），本机随后空闲时切换，两机各一个 Gateway、默认入口同版，回滚运行时 step10g 保留。测试机新旧 Gateway 日志各有 4 条 `model_not_configured` 后台迭代记录，属既有现象，非本版回归。
+- **发布脚本教训**：一条龙脚本里本机切换的失败被管道掩盖而继续切测试机，造成短时双机不同版；脚本已加 `pipefail`，并要求推送 main 成功后才允许部署（`&&` 串接，不用 `;`）。
+- **"模型绕过插件工具"定性**（combo2 A 任务 `gwreq-1790249102-…`，M2.7，主运行两个 attempt 共 77 轮）：全部依据结构化事实，未读任何会话或记忆正文。归档 context bundle 的 `tool_manifest`（tool_runtime_manifest v2）显示该 run `allowed_tools=None`、visible=executable=51，其中 18 个 `plugin__*` 工具 category 为 `plugins`，不在默认折叠类别（collaboration/web/vision/meta/mcp）内，即原生 schema 直出；model_usage 两条记录的 `purpose_breakdown.decision` 均为 0（决策关闭，无 shortlist/deferred 可查）；主运行 tool_operations 为 create_subagents 1、write_file 5、run_command 48（33 成功/15 失败）、edit_file 1，插件工具 0 次；同日 05:11 的最小复现在同样可见性下正常调用了 `plugin__genui_lite…export`。结论：模型行为（长上下文下自选 run_command 直连插件环境，并给出与事实不符的"不在快照"说法），不是可见性或决策线缺陷，记为模型能力边界。`tool_search`/`list_tools` 不进 tool_operations，不能由其缺席推断未搜索。
+
 ## 媒体会话越过压缩点：preflight 只守窗口、越窗结构化拒绝（2026-09-24，本地分支 `claude/decision-media-preflight`）
 
 - **新测试** `test_media_compact_preflight.py` 13 项：
