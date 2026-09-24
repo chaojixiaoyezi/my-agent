@@ -165,6 +165,28 @@ def record_compact_failure(
         return
 
 
+# LLM: B 路径（随图摘要）的 typed 失败只写线程 compact_vision_failed_generation，不增加 compact_consecutive_failures、
+#   不触发熔断冷却；同代次下一次压缩读到它就选归档引用。存储异常吞掉，与 record_compact_failure 同一口径。
+# 函数用途: 记录一次随图摘要失败，让同代次的下一次压缩改走归档引用。
+def record_compact_vision_failure(
+    store: ConversationStore,
+    thread: ConversationThread,
+    *,
+    now: float,
+) -> None:
+    from .store_threads import record_thread_compact_vision_failure
+
+    try:
+        record_thread_compact_vision_failure(
+            store.threads,
+            thread.thread_id,
+            expected_generation=thread.compact_generation,
+            now=now,
+        )
+    except Exception:
+        return
+
+
 # LLM: Failure classification prefers a typed provider/runtime error_code, then falls back to
 # exception identity. It never parses message text and only emits bounded alphanumeric codes.
 # 函数用途: 把真实异常的结构化错误码转成稳定 Compact 错误码，供熔断状态和界面诊断展示。
@@ -193,5 +215,6 @@ __all__ = [
     "compact_partitions",
     "raise_if_compact_interrupted",
     "record_compact_failure",
+    "record_compact_vision_failure",
     "split_recent_complete_turns",
 ]

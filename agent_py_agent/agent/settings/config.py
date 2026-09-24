@@ -378,6 +378,10 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     memory_compact_auto_trigger_percent: int = 90
     # 含图历史的压缩策略：auto 默认走归档引用（视觉能力事实接入后按事实选择随图摘要）；archived_refs 固定归档引用；off 保持从首个媒体回合起保护全部后缀。
     compact_media_policy: str = "auto"
+    # 当前模型声明的输入模态（如 text、image、video），来自模型档案的 input_modalities；空表示未知，压缩策略会用一次结构化视觉探针判断，不按模型名猜。
+    model_input_modalities: list[str] = field(default_factory=list)
+    # 随图摘要（vision_summary）时每个图块在摘要预算里的预留 token 数；只在 compact_media_policy=auto 且模型视觉能力事实为支持时使用。
+    input_media_token_reserve: int = 1600
     # 到达触发线后优先把完整输入收敛到该占比；低于真实触发线的有效候选不会因未达目标而被丢弃。
     memory_compact_recovery_target_percent: int = 60
     # 后台 Memory Curator 只读有界经历并输出严格 daily/candidate JSON；它没有工具循环和写人格权限。

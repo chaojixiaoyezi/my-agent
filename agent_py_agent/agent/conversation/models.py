@@ -386,6 +386,9 @@ class ConversationThread:
     compact_consecutive_failures: int = 0
     compact_failure_updated_at: float = 0.0
     compact_failure_code: str = ""
+    # LLM: 随图摘要（vision_summary）typed 失败时写成当前 compact_generation；压缩成功推进代次即失效并重置为 -1。
+    # 字段用途: 让同一代次的下一次压缩改走归档引用，不用会被无关失败覆盖的 compact_failure_code。
+    compact_vision_failed_generation: int = -1
     # LLM: This numeric-only observation calibrates the next reconstructed provider slice. It is
     # valid only for the recorded compact generation and stable request-surface fingerprint;
     # every committed history rewrite clears it atomically with the compact cursor.
@@ -480,6 +483,10 @@ class ConversationThread:
                 data.get("compact_failure_updated_at") or 0.0
             ),
             compact_failure_code=str(data.get("compact_failure_code") or ""),
+            compact_vision_failed_generation=(
+                int(data["compact_vision_failed_generation"])
+                if isinstance(data.get("compact_vision_failed_generation"), int) else -1
+            ),
             provider_context_observation=(
                 data.get("provider_context_observation")
                 if isinstance(data.get("provider_context_observation"), dict)

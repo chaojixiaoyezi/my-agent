@@ -78,8 +78,8 @@ def test_compact_source_supported_matrix(policy, blocks, expected):
 @pytest.mark.parametrize("configured, expected", [
     ("off", CompactMediaDecision("off", "policy_forced")),
     ("archived_refs", CompactMediaDecision("archived_refs", "policy_forced")),
-    ("auto", CompactMediaDecision("archived_refs", "vision_fact_unavailable")),
-    (None, CompactMediaDecision("archived_refs", "vision_fact_unavailable")),
+    ("auto", CompactMediaDecision("archived_refs", "vision_fact_pending", vision_candidate=True)),
+    (None, CompactMediaDecision("archived_refs", "vision_fact_pending", vision_candidate=True)),
 ])
 def test_resolve_compact_media_policy(configured, expected):
     agent = SimpleNamespace(config=SimpleNamespace(compact_media_policy=configured) if configured is not None else SimpleNamespace())
@@ -186,7 +186,7 @@ def test_provider_source_projects_media_on_every_replay(media_case):
         assert "local_file" not in text and "附件引用" in text and "/owner/attachments" not in text
     plain = json.dumps(list(conversation_compact_provider_source("", 0, tuple(rows))), ensure_ascii=False)
     assert "local_file" in plain and "附件引用" not in plain, "没有投影时来源逐字保留"
-    assert media_archive_facts(rows) == MediaArchiveFacts(blocks=1, refs=(SHA,))
+    assert media_archive_facts(rows) == MediaArchiveFacts(blocks=1, refs=(SHA,), bytes=321, videos=0)
 
 
 def test_archived_refs_compaction_covers_media_turn_and_records_facts(media_case):
@@ -198,8 +198,11 @@ def test_archived_refs_compaction_covers_media_turn_and_records_facts(media_case
     assert summarized == tuple(row.message_id for row in rows)
     assert call.media_policy == "archived_refs" and call.media_archived is True
     checkpoint = committed_compact_checkpoint_chain(case.agent, result.thread)[-1]
-    assert checkpoint["media_policy"] == "archived_refs" and checkpoint["media_fact_source"] == "vision_fact_unavailable"
-    assert checkpoint["media_blocks_archived"] == 1 and checkpoint["media_refs"] == [SHA]
+    # 强制恢复一律归档引用：fact_source 记 policy_forced，reason 记 forced_recovery（片 B 起）。
+    assert checkpoint["media_policy"] == "archived_refs" and checkpoint["media_fact_source"] == "policy_forced"
+    assert checkpoint["media_policy_reason"] == "forced_recovery"
+    assert checkpoint["media_blocks_archived"] == 1 and checkpoint["media_blocks_summarized"] == 0
+    assert checkpoint["media_refs"] == [SHA]
     assert provider_history_messages_from_rows(result.messages) == ()
     assert case.store.messages.recent_report(case.thread.thread_id, limit=0)[0] == rows, "canonical 行不删不改"
 

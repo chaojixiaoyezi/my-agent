@@ -27,8 +27,10 @@ from .compact_guard import (
     ConversationCompactError,
     raise_if_compact_interrupted,
 )
+from .compact_media_policy import COMPACT_VISION_SUMMARY_FAILED
 from .compact_message_source import CompactMessageSource, estimate_compact_payload
 from .compact_text_source import CompactTextSource
+from .input_media import InputMediaError
 
 # LLM: Bounded repair budget for one source segment, driven by the typed response reason only.
 # 常量用途: 同一片段最多再纠正几次；1 + 该值就是单个片段允许的最大模型调用次数。
@@ -53,10 +55,25 @@ _SUMMARY_SYSTEM_INSTRUCTION = (
 )
 
 
+# LLM: 摘要预算 = 窗口 80% 减输出预留，与 generate_bounded_compact_response 内部同一公式；供请求前的媒体准入判定复用。
+# 函数用途: 算出当前模型一次摘要请求允许的输入 token 上限。
+def compact_summary_budget(agent: object) -> int:
+    window = resolve_model_context_window_tokens(agent)
+    return max(1, int(window * 0.8) - max_output_tokens(agent))
+
+
+# LLM: 与内部 _request_tokens 同一口径（prompt、messages/来源、tools、system）；供媒体准入在构造来源后估算文字部分。
+# 函数用途: 估算一次摘要请求的完整输入大小，不含图块视觉 token。
+def compact_request_tokens(request: AuxiliaryModelCallRequest, source: CompactMessageSource | None = None) -> int:
+    return _request_tokens(request, source)
+
+
 # LLM: Fitting requests remain byte-for-byte cache compatible. Only an oversized request or a
 # typed provider overflow enters the bounded summary chain; check cancellation again before I/O and after reply.
 # Strict replacement sources reject degraded excerpts; 显式message_source只在准备层读取，不能与request.messages竞争权威。
-# 函数用途: 窗口够用时沿用单次摘要；不够时逐段覆盖全部历史，避免反复重发超大请求。
+# vision_summary=True 时来源保留图块、估算加 media_reserve_tokens：超预算、供应商窗口错误、媒体拒绝、截断都抛 typed
+# COMPACT_VISION_SUMMARY_FAILED，绝不转分段（分段不能承载图片，转分段等于同一请求内静默退回 A）。
+# 函数用途: 窗口够用时沿用单次摘要；不够时逐段覆盖全部历史，避免反复重发超大请求；随图摘要只允许单次请求。
 def generate_bounded_compact_response(
     request: AuxiliaryModelCallRequest,
     *,
@@ -64,12 +81,15 @@ def generate_bounded_compact_response(
     source_progress: Callable[[int, int], object] | None = None,
     preserve_complete_fallback: bool = False,
     message_source: CompactMessageSource | None = None,
+    vision_summary: bool = False,
+    media_reserve_tokens: int = 0,
 ) -> object:
     if message_source is not None and request.messages is not None:
         raise ValueError('compact summary requires one message source')
-    window = resolve_model_context_window_tokens(request.agent)
-    budget = max(1, int(window * 0.8) - max_output_tokens(request.agent))
+    budget = compact_summary_budget(request.agent)
     raise_if_compact_interrupted(interrupt_check)
+    if vision_summary:
+        return _generate_vision_summary_response(request, message_source, budget, interrupt_check, media_reserve_tokens)
     if _request_tokens(request, message_source) <= budget:
         try:
             raise_if_compact_interrupted(interrupt_check)
@@ -82,6 +102,23 @@ def generate_bounded_compact_response(
             # 只响应明确的窗口错误；网络、额度、认证等错误不能变成隐式分段重试。
             budget = max(1, budget // 2)
     return _summarize_segments(request, budget, interrupt_check, source_progress, preserve_complete_fallback, message_source)
+
+
+# LLM: B 路径只有一次请求：预算不够、ProviderContextWindowError、InputMediaError、截断都变成 typed
+#   COMPACT_VISION_SUMMARY_FAILED，由上层写线程 compact_vision_failed_generation，同代次下一次压缩选 A；不减半预算、不分段。
+# 函数用途: 发出保留图块的单次摘要请求，把所有随图失败归到同一个结构化码。
+def _generate_vision_summary_response(request, source, budget, interrupt_check, media_reserve_tokens):
+    if _request_tokens(request, source) + max(0, int(media_reserve_tokens)) > budget:
+        raise ConversationCompactError("随图摘要超出摘要预算", code=COMPACT_VISION_SUMMARY_FAILED)
+    try:
+        raise_if_compact_interrupted(interrupt_check)
+        response = _generate_materialized_response(request, source)
+    except (ProviderContextWindowError, InputMediaError) as exc:
+        raise ConversationCompactError(f"随图摘要请求失败：{type(exc).__name__}", code=COMPACT_VISION_SUMMARY_FAILED) from exc
+    raise_if_compact_interrupted(interrupt_check)
+    if getattr(response, "truncated", False):
+        raise ConversationCompactError("随图摘要回复被截断", code=COMPACT_VISION_SUMMARY_FAILED)
+    return response
 
 
 # LLM: 只在完整来源已容纳时物化原运输列表；请求失败退出本帧后释放临时数组，外层仍持可重放来源。

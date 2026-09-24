@@ -190,3 +190,4 @@ TUI 观察超时不再标记业务失败：canonical terminal 优先检查，同
 
 <!-- 媒体来源片 3adb61904 的既有记录；不代表当前 Compact 集成已验。 -->
 TUI 媒体请求已接通：input_media refs 与 ask 执行选项及幂等指纹同行，worker 在 owner 解析后验证路径/大小，再进入原 native user history。官网 M3 图片、视频与重连续问通过；官网 M2.7 100 请求/50 槽全部完成。详细资源口径见 TESTS。
+- 客户端错误文案新增 `COMPACT_VISION_SUMMARY_FAILED`（随图摘要本次失败，下一次压缩自动改走归档引用，不必换模型），先于通用 `COMPACT_` 前缀匹配；见 [媒体压缩策略](../../design/COMPACT_MEDIA_POLICY.md)。

@@ -409,7 +409,7 @@ agent_py_agent/
 |   |   |-- compact.py                  # 唯一 thread compact：候选验证、一次 CAS 提交与近期 raw tail
 |   |   |-- compact_projection.py       # 原 Compact 的只读来源、完整请求投影和提交后临时材料合同
 |   |   |-- compact_provider_surface.py # transcript Compact 复用普通轮 stable prompt/system/tools/messages 的缓存面
-|   |   |-- compact_media_policy.py     # 媒体压缩策略：归档引用投影、策略解析与 checkpoint 媒体事实（B 路径待接）
+|   |   |-- compact_media_policy.py     # 媒体压缩策略：归档引用/随图摘要决策、视觉能力事实、字节与预算准入、checkpoint 媒体事实
 |   |   |-- compact_text_source.py      # 只读两遍编码校验与当前字符窗口，消费后释放，不拥有覆盖
 |   |   |-- compact_message_source.py   # 可重放原生摘要消息与完整JSON数组编码，复用唯一token估算
 |   |   |-- compact_request_budget.py   # 按当前模型窗口顺序分段摘要，完整覆盖历史且失败不推进游标
@@ -581,6 +581,7 @@ agent_py_agent/
 |       |-- http.py                    # HTTP 传输、请求局部控制、工具探针与模型目录读取
 |       |-- openai_chat.py             # Chat Completions 请求、原生历史、思考和流式结果转换
 |       |-- request_content.py         # 原始内容的文字计量适用性，未知模态保留原请求
+|       |-- vision_capability.py       # 视觉能力事实：8×8 纯色图结构化探针、进程级缓存（端点+模型+api_base，同键单飞）
 |       |-- anthropic.py               # Messages 请求对象、缓存布局、思考及工具结果转换
 |       |-- factory.py                 # 显式配置构造唯一后端，缺配置判据与调度共享
 |       `-- tool_protocol_adapter.py   # native 事件或显式完整 text 帧到 canonical ToolCall 的唯一适配口
@@ -656,6 +657,7 @@ agent_py_agent/
 |   |-- test_compact_transcript_media_partition.py # 文字前缀覆盖与媒体完整后缀、分段拒绝
 |   |-- test_media_compact_preflight.py # 媒体会话越过压缩点：off 只守窗口/越窗 NON_TEXT，auto 归档引用后按压缩点压缩
 |   |-- test_compact_media_policy.py    # 媒体压缩策略片 A：分类、投影、后缀保护按策略与 checkpoint 媒体事实
+|   |-- test_compact_media_vision.py    # 媒体压缩策略片 B：输入模态声明、视觉探针缓存、B/A 决策与准入、随图摘要请求、typed 失败回落
 |   |-- test_request_content_capacity.py # 当前思考与跨模型内容边界、child保留原模型
 |   |-- test_input_media.py             # 媒体归属、字节、预算和原生后端投影
 |   |-- test_native_compact_carry.py   # 同回合携带身份、深复制、精确释放和工具轮标记隔离
