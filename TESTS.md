@@ -1,5 +1,13 @@
 # 测试与发布验收
 
+## 第8步收口依赖
+
+相同三文件基线81 passed／20既有xfail；新增窄收口及绑定用例后四文件95 passed／20既有xfail。最终九文件组合218 passed／20既有xfail（11.43秒）：tool_loop_closeout、cli_resume_contract、unknown_outcome_tool_halt、test_tools/test_tool_loop、no_action_gate_round、tool_call_guardrail_runtime、timeout_recovery_delivery、runtime_gate_ledger、conversation_goal_tools。
+
+新增14项覆盖请求／响应与用量归属、build→generate→strip→原因读取顺序，四阶段普通异常与中断均不重试、不调用后续操作；四种宿主绑定保持同一Agent/params和轮号。unknown用例在strip时改变halt，证明读取发生在生成和剥离之后；合同读取失败不能产生可续跑结论。原taxonomy与should_continue_task断言仅迁调用入口，未放宽。
+
+Ruff、doc sync、strict code-size hard=0通过，尺寸基线未改；完整发布验收仍待来源修复和并发段组合。本片未启动真实模型、TUI或Gateway，不代替第8步真实矩阵。
+
 ## 第8步工具事实与唯一循环入口组合
 
 工具事实7482a40d6与去空转发c6f45425b合并后，16个相关文件运行退出码0，**349 passed、20项既有xfail**。仓库默认-q叠加命令-q不显示尾部汇总，此处按完整进度符号计数；没有重跑相同测试以补数字。

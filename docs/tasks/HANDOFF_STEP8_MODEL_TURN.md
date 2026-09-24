@@ -69,3 +69,13 @@ Astra max四文件diff未发现阻断，三种独立导入成功。此次仅本�
 - 独立入口片218 passed／20既有xfail，相邻104 passed／4既有xfail。工具事实片241 passed；这些分组有重叠，不相加为总数，16文件组合349 passed／20既有xfail，退出码0（双-q的完整进度字符计数）。
 
 建议下一步：组合严格验收后集成本地主线；Compact跨请求过滤风险独立只读复核，确认后再定修复。尚未部署或开展新版真实TUI，不能提前关闭第8步。
+
+
+## 结束收口依赖片
+
+- 主代理在bf2919fb8上独写_tool_loop_service的结束段与3处硬门调用、closeout新模块、cli_resume_contract原入口迁移及14项窄合同测试；没有改Compact plan/commit和round_execution，和两条并行线按函数分工。
+- 四份生成逻辑共用三项绑定操作＋延后原因读取，删除三旧入口、阈值纯转发和软提示未用Agent参数；原Goal查询与提示仍在原位。
+- 三文件基线81 passed／20既有xfail；最终九文件218 passed／20既有xfail。用量／prompt配对、异常原样传播、strip后读取unknown、四种实际绑定均覆盖；没有新模型重试或执行器。
+- Ruff、doc sync、strict-size hard=0通过，未改尺寸基线；发布及真实TUI尚待整体组合。
+
+建议下一步：集成本片后与来源引用／并发段片组合，原生验收必须使用新版安装包；可并行只读审阅，不互改已认领函数。

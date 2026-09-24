@@ -1,7 +1,7 @@
 
 
 # LLM: execute_tool_loop 是主子共用的唯一循环入口；逐 run 参数和局部计数不共享，native IR 与 owner/thread Compact 权威不变。
-# 模块用途: 直接装配模型采样、工具执行和原Compact；保持输入账本、取消顺序以及持久提交与投影的边界。
+# 模块用途: 装配模型采样、工具执行、原Compact和窄收口操作；保持输入账本、取消顺序、原请求归属及持久提交边界。
 from __future__ import annotations
 
 import json
@@ -93,6 +93,7 @@ from .tool_ir_compact import (
     reduce_native_compact_candidate,
 )
 from .tool_ir_history import record_tool_call_ir
+from .tool_loop.closeout import generate_tool_loop_closeout, unknown_outcome_runtime_reason
 from .tool_loop.completion import (
     ToolRoundCompletionRequest,
     completion_response_after_tool_round,
@@ -1660,29 +1661,34 @@ def _tool_step_or_limit(agent, request: _ToolStepRequest):
     # 这里只处理部署者显式开启的 hard_failure_halt。默认同类失败只会把
     # 结构化错误和换路提示交还模型，不会设置 repeated_failure_halt。
     if request.params.repeated_failure_halt is not None:
-        final_prompt, final_response = _final_response_after_repeated_failure(
+        final_prompt, final_response = _final_response_after_halt(
             agent,
             request.params,
             next_round,
+            reason="repeated_failure_exhausted",
+            runtime_reason="REPEATED_TOOL_FAILURE_EXHAUSTED",
         )
         return final_prompt, final_response, next_round
     # unknown 副作用收口(T-USER-001):副作用结果不确定(单次即收口,对齐错误合同
     # retryable=False)后不再给模型工具权,按未完成收口并如实汇报
     # (与 repeated_failure_halt 正交,不自动续跑)。
     if getattr(request.params, "unknown_outcome_halt", None) is not None:
-        final_prompt, final_response = _final_response_after_unknown_outcome_halt(
+        final_prompt, final_response = _final_response_after_halt(
             agent,
             request.params,
             next_round,
+            reason="unknown_outcome",
         )
         return final_prompt, final_response, next_round
     # no-action 闸收口(复核 seq 339):informational 轮模型反复抗拦截仍提调用,
     # 连续达限后不再给工具权,收口轮等用户明确指示(与 unknown 收口正交)。
     if getattr(request.params, "no_action_gate_halt", False):
-        final_prompt, final_response = _final_response_after_no_action_gate(
+        final_prompt, final_response = _final_response_after_halt(
             agent,
             request.params,
             next_round,
+            reason="no_action_gate",
+            runtime_reason="TOOL_ACTION_NOT_REQUIRED",
         )
         return final_prompt, final_response, next_round
     return request.current_prompt, final_response, next_round
@@ -1710,9 +1716,7 @@ def _tool_round_limit_reached(agent, params: ToolLoopExecuteParams, tool_rounds:
     return limit > 0 and tool_rounds >= limit
 
 
-# LLM: 工具轮数耗尽后只允许模型基于真实已执行结果收口；若本轮创建了 child，
-# wait for the exact lifecycle wake. Only an explicit active Goal promises a
-# future host-driven turn; ordinary chat must honestly stop for user input.
+# LLM: 轮限先按直属孩子和当前持久Goal选择交接提示，再调用唯一收口流程；孩子等待优先，不得凭缓存Goal承诺续跑。
 # 函数用途: 工具轮数到顶后生成诚实阶段回复，并区分等待子代理、Goal 续跑和普通暂停。
 def _final_response_after_tool_limit(agent, params: ToolLoopExecuteParams, tool_rounds: int):
     waiting_for_children = _executed_subagent_orchestration(params)
@@ -1740,29 +1744,7 @@ def _final_response_after_tool_limit(agent, params: ToolLoopExecuteParams, tool_
             "本次交接后暂停自动推进；"
             "请如实告诉用户：回复『继续』可让我接着做。"
         )
-    final_prompt = build_tool_loop_prompt(agent, params)
-    final_response = generate_model_response(
-        ModelGenerateParams(
-            agent=agent,
-            params=params,
-            prompt=final_prompt,
-            tool_rounds=tool_rounds,
-        )
-    )
-    final_response = without_tool_call_after_limit(params, final_response)
-    final_response = replace(
-        final_response,
-        runtime_status="unfinished",
-        runtime_reason="TOOL_ROUND_LIMIT_REACHED",
-        runtime_source="tool_loop",
-    )
-    return final_prompt, final_response
-
-
-def _repeated_failure_halt_threshold(params: ToolLoopExecuteParams) -> int:
-    # L2 阶梯:同工具同类失败连续达阈值即诚实收口(不再跟随 guardrail
-    # 3N DENY;默认 8,可经 task_attributes/runtime_guard_policy 覆盖)。
-    return configured_repeated_failure_halt_threshold(params)
+    return _final_response_after_halt(agent, params, tool_rounds)
 
 
 # LLM: 轮限承诺必须重读 exact thread/task/goal 的 active 状态；缓存编号仅用于定位，不能证明仍有续跑权。
@@ -1816,8 +1798,8 @@ def _mark_repeated_failure_halt(agent, record: ToolCallRecordParams) -> None:
         record.call.tool_name,
         failure_class,
     )
-    _soft_hint_after_failures(agent, record, count, failure_class)
-    if count < _repeated_failure_halt_threshold(record.params):
+    _soft_hint_after_failures(record, count, failure_class)
+    if count < configured_repeated_failure_halt_threshold(record.params):
         return
     if _hard_halt_hit(record, count):
         object.__setattr__(
@@ -1931,8 +1913,9 @@ _RECOVERY_HINT_BY_CODE_PREFIX: tuple[tuple[tuple[str, ...], str], ...] = (
 )
 
 
+# LLM: 只消费当前记录和已有失败分类／次数；提示不改变权限、状态或重试规则。
+# 函数用途: 连续两次失败时把原错误合同的换路提示放入当前模型上下文，不再依赖整个Agent。
 def _soft_hint_after_failures(
-    agent,
     record: ToolCallRecordParams,
     count: int,
     failure_class: str,
@@ -1957,116 +1940,27 @@ def _recovery_hint_for_failure_class(failure_class: str) -> str:
     )
 
 
-# LLM: 只有部署者显式开启的 repeated failure 硬门会进入这里；普通可恢复
-# 失败已在当前工具循环内返给模型修正，不能再借此入口替模型结束 turn。
-# 函数用途: 显式硬门命中后让模型基于真实工具记录给出未完成交接。
-def _final_response_after_repeated_failure(
-    agent, params: ToolLoopExecuteParams, tool_rounds: int
+# LLM: 在唯一装配点绑定原模型运输和收口响应处理；unknown原因延后读当前halt，保留原顺序与prompt/response归属。
+# 函数用途: 为轮限、显式硬门、未知副作用和无动作闸共用收口过程，不新增模型重试或执行工具。
+def _final_response_after_halt(
+    agent,
+    params: ToolLoopExecuteParams,
+    tool_rounds: int,
+    *,
+    reason: str = "",
+    runtime_reason: str = "TOOL_ROUND_LIMIT_REACHED",
 ):
-    final_prompt = build_tool_loop_prompt(agent, params)
-    final_response = generate_model_response(
-        ModelGenerateParams(
-            agent=agent,
-            params=params,
-            prompt=final_prompt,
-            tool_rounds=tool_rounds,
-        )
+    return generate_tool_loop_closeout(
+        build_prompt=partial(build_tool_loop_prompt, agent, params),
+        generate_response=lambda prompt: generate_model_response(
+            ModelGenerateParams(agent=agent, params=params, prompt=prompt, tool_rounds=tool_rounds)
+        ),
+        prepare_handoff_response=partial(without_tool_call_after_limit, params, reason=reason),
+        read_runtime_reason=lambda: (
+            unknown_outcome_runtime_reason(getattr(params, "unknown_outcome_halt", None))
+            if reason == "unknown_outcome" else runtime_reason
+        ),
     )
-    final_response = without_tool_call_after_limit(
-        params,
-        final_response,
-        reason="repeated_failure_exhausted",
-    )
-    final_response = replace(
-        final_response,
-        runtime_status="unfinished",
-        runtime_reason="REPEATED_TOOL_FAILURE_EXHAUSTED",
-        runtime_source="tool_loop",
-    )
-    return final_prompt, final_response
-
-
-# T-USER-001 收口:unknown 副作用出现(单次即收口,对齐错误合同)后模型不再有
-# 工具权,基于真实工具记录给诚实总结;不自动续跑(用户未必要求继续,续跑会再造
-# 一轮不确定副作用)。
-def _final_response_after_unknown_outcome_halt(
-    agent, params: ToolLoopExecuteParams, tool_rounds: int
-):
-    final_prompt = build_tool_loop_prompt(agent, params)
-    final_response = generate_model_response(
-        ModelGenerateParams(
-            agent=agent,
-            params=params,
-            prompt=final_prompt,
-            tool_rounds=tool_rounds,
-        )
-    )
-    final_response = without_tool_call_after_limit(
-        params, final_response, reason="unknown_outcome"
-    )
-    # 2026-08-15 3×3 cell1 真机: 错误合同对齐——UNKNOWN 的触发报码若属
-    # taxonomy retryable=True 的「结果已知失败」(COMMAND_FAILED 命令失败读
-    # 输出修正等), 收口按 REPEATED_TOOL_FAILURE(可续跑族, 模型开新轮读
-    # reported_output_preview 修复); 「真未知」(retryable=False: 超时/
-    # 执行者死/无码) 保持 TOOL_OPERATION_OUTCOME_UNKNOWN 单次收口不续跑。
-    # 双席 seq1992 收紧: 仅凭报码不足——「进程非零」不自动等于「无部分
-    # 副作用」。转 REPEATED_TOOL_FAILURE 必须叠加 handler_executed=False
-    # 或 effect_outcome 非 unknown(执行器已声明副作用边界): handler 真实
-    # 执行过的写命令失败(effect_outcome=unknown) 保持 UNKNOWN 人工核对闸。
-    halt = getattr(params, "unknown_outcome_halt", None) or ()
-    reported_code = str(halt[1] if len(halt) > 1 else "").strip().upper()
-    effect = str(halt[2] if len(halt) > 2 else "").strip().lower()
-    handler_executed = bool(halt[3] if len(halt) > 3 else True)
-    try:
-        from ..contracts.error_taxonomy import error_contract
-
-        contract = error_contract(reported_code) if reported_code else None
-        known_retryable_failure = bool(
-            contract is not None
-            and contract.retryable
-            and reported_code
-            and (not handler_executed or effect != "unknown")
-        )
-    except Exception:  # noqa: BLE001 判据失败保守走 unknown 不续跑
-        known_retryable_failure = False
-    runtime_reason = (
-        "REPEATED_TOOL_FAILURE"
-        if known_retryable_failure
-        else "TOOL_OPERATION_OUTCOME_UNKNOWN"
-    )
-    final_response = replace(
-        final_response,
-        runtime_status="unfinished",
-        runtime_reason=runtime_reason,
-        runtime_source="tool_loop",
-    )
-    return final_prompt, final_response
-
-
-# no-action 闸收口:informational 轮模型连续抗拦截提调用达限后不再给工具权,
-# 收口轮剥掉工具调用并按未完成交接(等用户明确指示,而非自动执行或自动完成)。
-def _final_response_after_no_action_gate(
-    agent, params: ToolLoopExecuteParams, tool_rounds: int
-):
-    final_prompt = build_tool_loop_prompt(agent, params)
-    final_response = generate_model_response(
-        ModelGenerateParams(
-            agent=agent,
-            params=params,
-            prompt=final_prompt,
-            tool_rounds=tool_rounds,
-        )
-    )
-    final_response = without_tool_call_after_limit(
-        params, final_response, reason="no_action_gate"
-    )
-    final_response = replace(
-        final_response,
-        runtime_status="unfinished",
-        runtime_reason="TOOL_ACTION_NOT_REQUIRED",
-        runtime_source="tool_loop",
-    )
-    return final_prompt, final_response
 
 
 # LLM: Archive once, then feed the same bounded projection to text and native histories before any
