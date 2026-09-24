@@ -1,5 +1,12 @@
 # 测试与发布验收
 
+## TUI 可扩展性集成分支修复（claude/integrate-tui-scalability，本地）
+
+- 背景：origin/main（含第 7/8 步）叠加 codex/tui-scalability 的 6 个提交后，出现 9 个稳定失败；另有 SSE 超时与 TUI fixture server 共 8 个用例在此前报告中失败，但在本分支原始 HEAD 与修复后均无法复现（单独、分组、4 路并发各跑通过），判为负载相关抖动，未改代码。
+- 真实回归（改产品代码）：`poll_gateway_chunks` 新增退避后把睡眠贴合到 deadline，最小采样窗被缩短，租约心跳尚未落盘就判请求死亡；恢复 0.1s 最小采样间隔，退避只放大空闲间隔。`SafeFormattedLines.join` 改为显式序列参数，满足无 `*args` 服务接口守卫。`INPUT_MEDIA_INVALID` 按决策线同文登记为不可重试的用户输入校验错误。
+- 替身过时（只改测试）：后台 supervisor 替身补 `_owner_pool/_next_owner_retire_at`；遗留巡检替身池接受 `touch` 并提供 `pin`；原生 IR 参数替身补 `task_attributes`；chat client 断言补 `input_media: []`（与决策线同文）。
+- 验证：tui_*/gateway_*/timeout*/stream*/slow_model*/background_main*/native_tool*/input_media*/chat_client* 共 91 个文件加架构守卫与错误码策略：2,059 passed、2 skipped、1 xpassed；ruff、strict code-size、diff check 通过。
+
 ## 委派与交付核对软引导（本地，待发布）
 
 - 改动：`coordinator_tool_boundary_text` 增加三条引导：没有要求委派时优先自己做；派工时写清要交回的产出和核对方式；收到结果后先用工具抽查，不直接转述"通过"。子代理 runner 的 Required Output 要求数字和核对结论必须来自本轮工具输出，未核对的如实标出。只改文字，能力、权限和完成判定不变；设计记录见 DESIGN_LEDGER。
