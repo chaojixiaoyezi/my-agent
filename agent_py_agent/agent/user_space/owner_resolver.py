@@ -44,7 +44,7 @@ class OwnerIdentity:
         return cls(provider=safe_path_segment(provider), owner_kind="group", owner_id=safe_path_segment(owner_id))
 
 
-# LLM: 每个 owner 权威位置显式保存；插件目录归 data，不能由工作目录、权限模式或包字段改变。
+# LLM: 每个 owner 权威位置显式保存；插件目录与自学习 Skill 提案目录归 data，不能由工作目录、权限模式或包字段改变。
 # 类用途: 给宿主提供同一用户的规范路径，纯解析结果本身不授予操作权限。
 @dataclass(frozen=True)
 class OwnerHomeResult:
@@ -84,6 +84,7 @@ class OwnerHomeResult:
     data_dir: Path
     plugins_dir: Path
     artifact_backups_dir: Path
+    skill_proposals_dir: Path
     scheduler_dir: Path
     scheduler_store_json: Path
     scheduler_history_jsonl: Path
@@ -126,7 +127,7 @@ def owner_identity_from_config(config: Any) -> OwnerIdentity:
     return OwnerIdentity.provider_user(provider, owner_id)
 
 
-# LLM: 替换所有 owner 作用域路径，不能沿用本地主用户的插件或会话目录；不写入状态。
+# LLM: 替换所有 owner 作用域路径，不能沿用本地主用户的插件、会话或 Skill 提案目录；不写入状态。
 # 函数用途: 将基础宿主路径投影到指定可信 owner，供冷用户管理入口直接使用。
 def home_paths_with_owner(paths: MyAgentHomePaths, owner: OwnerHomeResult) -> MyAgentHomePaths:
     return replace(
@@ -170,6 +171,7 @@ def home_paths_with_owner(paths: MyAgentHomePaths, owner: OwnerHomeResult) -> My
         owner_data_dir=owner.data_dir,
         owner_plugins_dir=owner.plugins_dir,
         owner_artifact_backups_dir=owner.artifact_backups_dir,
+        owner_skill_proposals_dir=owner.skill_proposals_dir,
         owner_scheduler_dir=owner.scheduler_dir,
         owner_scheduler_store_json=owner.scheduler_store_json,
         owner_scheduler_history_jsonl=owner.scheduler_history_jsonl,
@@ -190,7 +192,8 @@ def _owner_home_dir(root: Path, identity: OwnerIdentity) -> Path:
     return root / "owners" / "providers" / identity.provider / bucket / identity.owner_id
 
 
-# LLM: 与 home_layout_v2 的本地主用户路径保持一致，新增权威字段须同步两侧及 owner 隔离测试。
+# LLM: 与 home_layout_v2 的本地主用户路径保持一致，新增权威字段须同步两侧及 owner 隔离测试；
+#   skill_proposals_dir 只声明位置，不进入初始化目录清单，由首次生成提案时创建。
 # 函数用途: 从可信身份的 home 生成完整规范位置，不创建目录或加载用户状态。
 def _owner_home_result(root: Path, identity: OwnerIdentity, home_dir: Path) -> OwnerHomeResult:
     memory = home_dir / "memory"
@@ -233,6 +236,7 @@ def _owner_home_result(root: Path, identity: OwnerIdentity, home_dir: Path) -> O
         data_dir=data,
         plugins_dir=data / "plugins",
         artifact_backups_dir=data / "artifact_backups",
+        skill_proposals_dir=data / "skill_proposals",
         scheduler_dir=scheduler,
         scheduler_store_json=scheduler / "store.json",
         scheduler_history_jsonl=scheduler / "history.jsonl",

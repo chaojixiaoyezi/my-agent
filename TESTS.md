@@ -2,6 +2,22 @@
 
 child不展示历史正文时的读取回归先复现1 failed/1 passed，修复后test_compact_retained_history、test_subagent_compact_recovery、test_gateway_child_compact_scope_application三文件31 passed（8.48秒）。三宿主seed仓外基线仅验证测量和完整性，不算内存目标通过；细节见容量审计的宿主生命周期基线。
 
+## 自学习 S1：子代理经验生成待确认的 Skill 提案（2026-09-24，本地分支 `claude/self-learning-skill-proposals`，待审）
+
+- **改动**：新增 `capability/skill_proposals.py`（提案 schema `my-agent.skill-proposal.v1` 与 `SkillProposalService`）和 CLI `my-agent skills proposals list|show|confirm|reject`；配置 `enable_self_learning`（默认 false，YAML、AgentConfig 与布尔规范化同步）；owner 布局登记 `owner_skill_proposals_dir = <owner_home>/data/skill_proposals`（不进初始化目录清单，首次生成提案才创建）；组合根只在开关开启时给子代理 manager 注入服务，`runner_result_service` 在记录候选之后调用，异常只写工作日志。
+- **新测试** `test_skill_proposals.py` 24 项：
+  - 开关：随包 YAML 与 dataclass 默认 false，带引号的 "false" 规范化为布尔；默认关闭的 SimpleAgent 不注入服务、不建目录；开启后服务路径落在飞书用户 owner 自己的 `data/skill_proposals` 与 `skills`。
+  - 生成：一条 lesson 恰好一个提案，同 run 重放和第二个 run 合并都不重复；提案含来源任务/运行、触发原因、拟保存内容和适用场景，ID 等于 sha256(candidate_id + content_hash) 前 24 位；finding、`model_inferred` 自省 lesson、无 task/run 来源、类型不是 lesson 的候选以及非 Candidate 对象都被忽略，且不建目录。
+  - 迁移：真实 `MemoryMigrationService.apply()` 迁走并删除同级 `data/learning_drafts`，提案目录逐字节不变、提案仍可列出。
+  - 确认拒绝矩阵 7 种：旧版本号、目标已存在、候选正文被改写、候选脱敏、候选被拒绝、候选已删除、草稿被篡改，各返回对应错误码，提案文件与目标逐字节不变、暂存目录清空；guard `caution`（chmod 777）被拒；`os.replace` 失败与写回执失败都不留下目标 Skill。
+  - 成功路径：确认后 revision 2、`committed`、回执 guard `safe`；确认前取得的快照看不到新 Skill，下一次快照出现 `owner:lesson-*`，其 content_sha256 等于草稿 sha256 且正文可读；已提交后再确认返回 `NOT_PENDING`。
+  - frontmatter：含 `#`、引号和 CRLF 的经验文本经 `parse_skill_file` 解析后 name/description/when_to_use 与草稿一致；非法 ID、不存在、损坏文件分别返回 `INVALID_ID`/`NOT_FOUND`/`CORRUPT`，list 遇损坏文件关闭式失败。
+  - runner：提案服务抛异常时结果仍 DONE、候选照记、工作日志记 `skill_proposals_error=RuntimeError`；接上服务时生成一条待确认提案；未接时只记候选、不建目录。
+  - CLI：经真实 `cli.parser.main` 与临时配置完成 list→show→confirm→reject→按状态 list→重复 confirm（退出码 1、`NOT_PENDING`）；中文输出含来源、触发原因、正文、场景和带版本号的确认命令。
+- **变异验证**：26 种变异全部被杀死——资格三项（来源、task/run、类型）、O_EXCL 改 O_TRUNC、跳过版本/待确认/目标存在/来源 hash/脱敏/状态/缺失检查、guard 改 force、跳过草稿 hash、不回滚已装目标、不清暂存目录、不替换 `#`、不规范换行、runner 放任异常/不调用、组合根忽略开关、owner 投影沿用本地主用户目录、目录改名 `learning_drafts`（迁移测试失败）、开关不做布尔规范化、CLI confirm 调成 reject、CLI 退出码恒 0、YAML 默认改 true。每次在 `PYTHONDONTWRITEBYTECODE=1` 子进程运行并逐字节还原；之后删除被变异模块的 `__pycache__`，从干净字节码复跑 24 passed。
+- **回归**（基点 main `d3d66e56c`）：runner 结果、候选、Skill/guard、Memory 迁移、CLI 解析、owner 布局、配置与组合根相关 136 个测试文件 2299 passed、3 skipped、6 xfailed。ruff、doc sync、strict code-size（blocked=False；与 origin/main 逐项比对 finding 身份和级别无新增）、`git diff --check`、clean-package 通过；线上 CI 未作为验收来源。
+- **未验**：没有真实 TUI 验收（真实子代理产出 lesson→用户确认→新回合读到 Skill）；S2（Jev 对待确认提案的审核排序）未做；并发确认只由 owner 文件锁保证，未做多进程压测。
+
 ## 召回证据写进上下文包（2026-09-24，本地分支 `claude/decision-recall-evidence`）
 
 - **新测试** `test_decision_pre_recall.py` 2 项：正式召回只把补充查询真正追加的记录编号记进 `supplement_entry_ids`，来源清单区分 baseline/supplement 且不含正文；上下文包写出 `recalled_refs`、`recall_findings`，提示段字节与不带证据时逐字相同。

@@ -1,5 +1,7 @@
 # 子代理维护状态
 
+自学习 S1（2026-09-24，本地分支 `claude/self-learning-skill-proposals`，待审）：`enable_self_learning` 开启时，runner 结果记录 lesson Candidate 之后，会把本批候选交给 owner Skill 提案服务生成待用户确认的提案；提案失败只写工作日志（`skill_proposals_error=<类型>`），不影响结果交付。默认关闭时不注入服务、不建目录。确认只走 `my-agent skills proposals confirm`，子代理链不安装 Skill。证据见 TESTS 顶部自学习 S1 节。
+
 child overflow完整恢复已本地接入：原来源延迟至真实请求render/select，候选只改独立线程历史和第0注入，原CAS成功后同次生成。共享恢复器沿run token停止与摘要错误边界；首请求选模、权限和attempt不变。初次/手动与后台入口尚待接入；证据见TESTS及决策容量审计。
 
 ## 可选决策选模型（本地已验，未部署）

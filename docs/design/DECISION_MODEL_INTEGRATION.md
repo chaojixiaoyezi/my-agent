@@ -359,13 +359,13 @@ need_data 的 A/B/C 缺项由候选化声明表达，也能说明“A 或 B 任�
 | 规划与派工建议 | 当前原 Todo read 的精确 open ID 与本轮问题 | 原工具回执中的软提示 | 主模型按原规则规划，不自动制造子代理或 Goal | 后续，现有 Todo 优先级首片已本地接入 |
 | 页面/工具动作候选 | 当前 DOM/OCR/工具结构化候选 | 原工具参数准备环节 | 原主模型判断，原审批与后置核验保持 | 后续 |
 | 交付质量提示 | 当前产物引用与原工具证据 | 主模型复核上下文 | 原收尾；不增加强制续跑或完成评分门 | 后续 |
-| 自学习候选筛选 | 原 runner lesson Candidate 与可信来源；正式 Skill 另需用户授权 | 待建立的唯一 Skill 提案/确认入口 | 原候选不变；当前没有生产 Skill 草稿链，Jev 不能写正式 Skill | 后续，先补原入口 |
+| 自学习候选筛选 | 原 runner lesson Candidate 与可信来源；正式 Skill 另需用户授权 | 唯一 Skill 提案/确认入口（S1 已本地实施）上待确认提案的审核顺序 | 原候选与提案不变；Jev 不能生成正文、确认、拒绝或写正式 Skill | 后续，S1 入口待审，S2 排序未做 |
 | 主会话自动换模型 | 用户授权的候选范围和新工作片 | 原会话模型选择服务 | 保持当前选择，不切正在请求的模型 | 最后评估 |
 
 “记忆整理前标注”首版只加标签和优先级，不丢弃原始材料；召回前跳过与长期写入判断后置，避免早期错误造成静默遗漏。
 P5-A 的首片只允许默认关闭的 `pre_recall` 建议一次有界补充查询：原完整问题先检索，追加项仅用原 scope 与未用的 `memory_top_k`/字符空间；P3 排序和该点共用阶段期限。普通聊天没有可信的显式查历史结构化意图，因此 Jev 不能决定跳过原记忆。真实 Jev 的漏召回、时延和输入用量尚待隔离对照，见[审计与实施记录](../tasks/DECISION_MODEL_PRE_RECALL_AUDIT.md)。
 P5-C 规划首片只在当前主代理读取已有多项 Todo 时追加一个 exact ID 的软优先提示；原计划/Goal/派工权威不变，真实 Jev 质量尚待验，见[交接](../tasks/DECISION_MODEL_PLANNING_HANDOFF.md)。
-自学习点的现状和前置合同见[只读审计](../tasks/DECISION_MODEL_SELF_LEARNING_AUDIT.md)：生产只有带来源的记忆 Candidate，旧 `learning_drafts` 仅用于迁移；正式 Skill 提案与用户确认服务尚未实现。
+自学习点的前置合同见[只读审计](../tasks/DECISION_MODEL_SELF_LEARNING_AUDIT.md)。S1 提案/确认链已本地实施（分支 `claude/self-learning-skill-proposals`，待审）：`enable_self_learning` 默认关闭；开启后 runner 结果先记录 lesson Candidate，再由 `capability/skill_proposals.py` 为 `subagent_lesson`、带精确 task/run 来源的候选按固定模板生成提案，O_EXCL 幂等写入 `<owner_home>/data/skill_proposals/`（不用会被 Curator 迁移清理的 `learning_drafts`），生成失败只记工作日志。只有用户 `my-agent skills proposals confirm <id> --expected-revision N` 能在 owner 锁内复核版本、草稿 hash、来源 Candidate（未脱敏、hash 未变、状态有效）与目标不存在，并通过 `parse_skill_file(require_frontmatter=True)`、`scan_skill(agent_generated)` 与不 force 的 `install_decision` 后，把 Skill 原子装到 `<owner_home>/skills/lesson-*`；失败不写目标、提案保持待确认。S2 尚未做：Jev 只能对已存在的待确认提案给审核顺序或缺证据提示，不能生成正文、确认、拒绝或写 Skill，开关须另设独立 `self_learning` 决策点并默认关闭。
 如果用户显式要求一次 Jev 分析而服务不可用，应明确报告该分析未完成；不能拿普通模型结果冒充 Jev。
 
 ### P5-B 第一片：提取前的来源—正式条目关系建议

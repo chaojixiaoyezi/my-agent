@@ -38,6 +38,7 @@ owners/<provider>/<owner>/
 |-- capability_requests/             # owner 级能力/工具/权限申请
 |-- temporary_grants/                # 临时授权账本
 |-- data/artifact_backups/v1/        # 前台 shell 真正改动 ready 产物时保留的 owner 私有恢复 blob
+|-- data/skill_proposals/<id>.json   # 自学习 Skill 提案；开关开启且首次生成时才创建，用户 confirm 后才安装到 skills/
 |-- workspace/runtime/workspaces/    # LocalStore/gateway/conversation/collaboration
 |-- permissions.json                 # owner 权限
 |-- quota.json                       # owner 额度

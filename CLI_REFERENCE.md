@@ -196,6 +196,7 @@ Ctrl+C
 | `run` | 运行一次智能体对话 | 默认写运行归档与恢复事实；不自动写正式长期记忆，可用 `--no-save` 关闭本次运行归档 | 是，除非配置 echo 后端 |
 | `remember` | 通过统一 Candidate/Promotion 主链保存用户明确确认的具体事实、事件或项目知识 | 是 | 否 |
 | `memory` | 统一管理 Candidate、后台 Curator、Retention、Doctor 与 Migration | 取决于子命令；list/status/plan 默认只读 | Curator run 可能调用后台模型 |
+| `skills` | 查看、确认或拒绝自学习生成的 Skill 提案；确认后才安装正式 owner Skill | list/show 只读；confirm 写 `skills/lesson-*` 与提案文件；reject 只写提案文件 | 否 |
 | `memory-list` | 列出最近记忆 | 否 | 否 |
 | `memory-search` | 搜索记忆 | 否 | 否 |
 | `home-status` | 查看 `~/.my-agent` 入口文件、关键目录和轻量计数 | 否 | 否 |
@@ -393,6 +394,34 @@ my-agent memory migrate --apply --json
 - `doctor`：只读汇总 Candidate、Curator、routing、migration 和 retention 健康；`--index` 可指定 routing index。
 - `migrate`：默认 dry-run；`--apply` 才会先生成完整备份/manifest，再迁移并写 schema marker；失败会回滚。
 - 所有子命令可加 `--json` 输出稳定机器字段；普通输出提供中文标题，字段完整解释见 `docs/modules/memory/05-memory-v2-layout.md`。
+
+## `skills`
+
+```powershell
+my-agent skills proposals list
+my-agent skills proposals list --status pending_confirmation --json
+my-agent skills proposals show <proposal_id>
+my-agent skills proposals confirm <proposal_id> --expected-revision 1
+my-agent skills proposals reject <proposal_id> --expected-revision 1 --json
+```
+
+自学习 Skill 提案的唯一用户确认入口。配置 `enable_self_learning: true` 后，带精确任务/运行来源的子代理 lesson
+会在当前 owner 的 `data/skill_proposals/<proposal_id>.json` 生成待确认提案；提案写明来源任务与运行、触发原因
+（`subagent_lesson_candidate`）、拟保存内容（完整 SKILL.md 草稿）和适用场景，但不会自动安装。开关只控制自动生成，
+已生成的提案在开关关闭后仍可查看、确认或拒绝。没有任何模型可调用的确认工具。
+
+| 子命令或参数 | 中文说明 |
+| --- | --- |
+| `list` | 按创建时间列出当前 owner 的提案；目录不存在时返回空列表且不创建目录。 |
+| `--status <status>` | 按状态过滤：`pending_confirmation`=待确认，`committed`=已确认并安装，`rejected`=已拒绝。 |
+| `show <proposal_id>` | 查看一条提案的全部待核对事实和草稿正文，并给出带当前版本号的确认命令。 |
+| `confirm <proposal_id>` | 确认并安装：在 owner 锁内复核提案仍待确认、版本号、草稿 hash、来源候选仍存在且未脱敏/未改写/未被拒绝、目标 `skills/lesson-*` 不存在，再经 frontmatter 解析与 `agent_generated` 安全扫描（caution/dangerous 一律拒绝，不能强制）后原子安装，提案版本加一并记为 `committed`。 |
+| `reject <proposal_id>` | 拒绝提案：只把提案版本加一并记为 `rejected`，不写任何 Skill；同一候选内容之后不会再生成新提案。 |
+| `--expected-revision <N>` | confirm/reject 必填，填你查看时的提案版本号；与当前版本不一致或提案已处理时拒绝操作。 |
+| `--json` | 输出稳定机器字段：成功含 `code`，失败含 `error_code`（如 `SKILL_PROPOSAL_REVISION_MISMATCH`、`SKILL_PROPOSAL_TARGET_EXISTS`、`SKILL_PROPOSAL_SOURCE_CHANGED`、`SKILL_PROPOSAL_GUARD_BLOCKED`）；退出码成功为 0、失败为 1。 |
+
+任何确认失败都不会写入目标 Skill，提案保持待确认；确认成功后，下一轮 Skill 快照即可看到 `owner:lesson-*`，
+已开始的回合沿用自己的旧快照。
 
 ## `memory-list`
 

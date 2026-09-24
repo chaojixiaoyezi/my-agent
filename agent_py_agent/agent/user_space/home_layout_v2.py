@@ -237,6 +237,7 @@ def _owner_memory_path_fields(owner_memory_dir: Path) -> dict[str, Path]:
 
 
 # LLM: 与 owner_resolver 的可信 owner 投影保持同一布局；这里只声明路径，不创建插件目录或安装状态。
+#   自学习 Skill 提案目录只在首次生成提案时创建，且名字不能是 Curator 迁移会清理的 learning_drafts。
 # 函数用途: 生成 owner 工作与控制数据的规范位置，插件不会随业务工作区变化迁移。
 def _owner_workspace_path_fields(owner_home_dir: Path) -> dict[str, Path]:
     owner_data_dir = owner_home_dir / "data"
@@ -252,6 +253,7 @@ def _owner_workspace_path_fields(owner_home_dir: Path) -> dict[str, Path]:
         "owner_data_dir": owner_data_dir,
         "owner_plugins_dir": owner_data_dir / "plugins",
         "owner_artifact_backups_dir": owner_data_dir / "artifact_backups",
+        "owner_skill_proposals_dir": owner_data_dir / "skill_proposals",
         "owner_scheduler_dir": scheduler_dir,
         "owner_scheduler_store_json": scheduler_dir / "store.json",
         "owner_scheduler_history_jsonl": scheduler_dir / "history.jsonl",

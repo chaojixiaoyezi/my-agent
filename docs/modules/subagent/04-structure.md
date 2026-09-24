@@ -736,6 +736,10 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
   `scope_key=f"project:{safe_id}"`）；新持久化一律 project 单一权威，`task:<id>` 仅旧账本召回
   read alias，由 curator 侧 `canonical_scope_key` 归一，不允许以 `task:<id>` 新持久化；goal 只作
   `applies_when` 人类说明。
+- 自学习 S1：组合根仅在 `enable_self_learning` 开启时给 manager 注入 `skill_proposals`
+  （`capability/skill_proposals.py`，否则为 None）。`runner_result_service._post_result_side_effects`
+  在记录候选之后调用 `_skill_proposal_note`，把本批 Candidate 交给提案服务；异常只写成工作日志的
+  `skill_proposals_error=<类型>`，不改结果保存、提交或父级通知。`subagents/` 不导入提案服务，也不确认或安装 Skill。
 
 ## 2026-07-30 启动上下文必需字段
 
