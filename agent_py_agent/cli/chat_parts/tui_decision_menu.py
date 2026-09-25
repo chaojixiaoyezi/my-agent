@@ -15,7 +15,7 @@ from .tui_model_menu import _dialog, _request
 _POINT_NAMES = {"model_selection": "模型选择", "subagent_model": "子代理模型", "skill_tool": "Skill / 工具推荐",
                 "pre_recall": "记忆召回前补充查询", "recall": "记忆召回后重排", "curator": "后台记忆整理（用户长期）",
                 "curator_relation": "正式记忆关系建议（用户后台）", "external_material_order": "外部材料阅读优先级",
-                "planning": "现有待办优先级", "delivery_quality": "交付复核焦点",
+                "planning": "现有待办优先级", "delivery_quality": "交付复核焦点", "action_candidate": "动作候选",
                 "skill_proposal_review": "Skill 提案审核顺序（用户长期）"}
 _POINTS = {point: _POINT_NAMES.get(point, point) for point in POINTS}
 _GENERAL = {"enabled": "总开关", "profile_id": "默认决策模型", "timeout_seconds": "前台单次上限（秒）",

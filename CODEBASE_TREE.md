@@ -244,6 +244,7 @@ agent_py_agent/
 |   |   |-- tool_loop/display_archive.py # 执行当时的公开工具原文归档与轻量预览引用
 |   |   |-- tool_context/               # 工具结果上下文：reducer、窗口、microcompact、PTL 单轮重试
 |   |   |   |-- decision_delivery_quality.py # run_command 新验证事件后的可选交付复核焦点提示，只追加宿主事实
+|   |   |   |-- decision_action_candidate.py # 插件观察归档后的可选动作候选提示，只选宿主铸的候选、不执行动作
 |   |   |   `-- external_material_order.py # 原已归档页的可选阅读顺序提示，保留正式结果与 refs
 |   |   |-- orchestration/              # 创建、只读状态、消息、取消、授权五个递归直属工具与内部自动启动/恢复引擎；无兄弟 goal 广播，进展事件由宿主写入
 |   |   |   |-- decision_subagent.py # 原批次创建前模型建议，锁外请求、锁内复核，不另建任务账
@@ -649,6 +650,7 @@ agent_py_agent/
 |   |-- test_decision_curator_plugin_concurrency.py # 后台 curator 与前台 skill_tool 同连接并发：互不拖住、撤销命中对应点、共享冷却、关闭一起取消
 |   |-- test_gateway_decision_shutdown_cancel.py # Gateway 停止时主动取消在途决策：回原方案、不进冷却、关闭后不再联网、收尾顺序与失败隔离
 |   |-- test_gateway_model_call_shutdown_settlement.py # Gateway 停止排空后把仍在途的模型调用记为被停机中断、未结算，并写结构化停机事件
+|   |-- test_decision_action_candidate.py # 动作候选资格、隐私、非选择、新鲜度与来源复核、取消、text/native 同段与设置入口
 |   |-- test_decision_capability_consumer.py # 原设置/worker/循环接线到实际prompt/schema减量及失效原输入
 |   |-- test_decision_capability_provider_grouping.py # 能力推荐按结构化provider_id按插件出题、选中展开与整体延迟
 |   |-- test_decision_capability_http.py # 能力消费者经本地原生HTTP的成功/期限/在途设置变化
@@ -1401,6 +1403,8 @@ docs/
 - `agent_py_agent/tests/test_decision_external_material_order.py`、`test_external_material_order_integration.py`：安全输入、失效、取消、原页面归档链和设置消费的离线证据。
 - `agent_py_agent/agent/agent_core/tool_context/decision_delivery_quality.py`：run_command 新验证事件后按同 run/task 结构化验证焦点可选追加复核提示；外发不含路径/命令/输出，不改结果、归档或验证账。
 - `agent_py_agent/tests/test_decision_delivery_quality.py`、`test_decision_delivery_quality_integration.py`：资格、隐私、非选择、来源复核、取消，以及真实验证账到 text/native 展示接缝的离线证据。
+- `agent_py_agent/agent/agent_core/tool_context/decision_action_candidate.py`：插件只读观察工具的归档带宿主铸造的观察候选时，可选请决策模型选一个下一步先核对的候选并追加软提示；新鲜度只问插件线的 `plugin_observation` 权威，不执行动作、不生成参数（分支 `claude/decision-action-candidate`，待合入）。
+- `agent_py_agent/tests/test_decision_action_candidate.py`：资格、隐私、非选择、新鲜度与来源复核、取消、text/native 同段提示和设置入口。
 - `agent_py_agent/agent/capability/decision_candidates.py`、`decision_recommendation.py`：原授权能力候选与单工作片推荐消费者；一次调用、旧建议复核、按需展示，原Registry/Skill快照及搜索执行仍唯一。
 - `docs/tasks/DECISION_MODEL_P2_SUBAGENT_HANDOFF.md`：子代理选择生产接线、联合验证和完整窗口待验边界。
 - `docs/tasks/DECISION_MODEL_P3_RECALL_HANDOFF.md`：记忆排序、来源撤销、原本轮复用及本地验证交接。

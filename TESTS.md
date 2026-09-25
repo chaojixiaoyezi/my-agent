@@ -2,6 +2,23 @@
 
 child不展示历史正文时的读取回归先复现1 failed/1 passed，修复后test_compact_retained_history、test_subagent_compact_recovery、test_gateway_child_compact_scope_application三文件31 passed（8.48秒）。三宿主seed仓外基线仅验证测量和完整性，不算内存目标通过；细节见容量审计的宿主生命周期基线。
 
+## 动作候选 `action_candidate`（2026-09-25，分支 `claude/decision-action-candidate`，待插件线观察结构落地后合入）
+
+- **改动**：
+  - 新增 `tool_context/decision_action_candidate.py`；`_optional_result_hints` 追加第三个点。
+  - `POINT_RUNTIME_SCOPES` 登记 `action_candidate: thread`；AgentConfig/YAML 三字段默认 off/null/null；TUI 决策菜单加"动作候选"。
+- **新测试** `test_decision_action_candidate.py` 79 项。只替换两个边界：决策服务，以及插件线的新鲜度权威 `plugin_observation`（按承诺签名注入替身）。覆盖：
+  - 未登记时严格空操作；off、阶段错误、他 run 阶段都不准备材料。
+  - apply 只追加所选候选的 candidate_id 与 role。外发不含 key、目标引用、代次、激活、候选编号、动作名、请求密钥或工具输出；label 只出现在同一个外部数据块。
+  - observe 以及 deadline/cooldown/error/stale 都保留原结果；四种非选择和坏答案同样保留。
+  - 所选候选的动作工具不可用时不追加。
+  - 31 种不合格来源零请求：数量越界、编号/类型/角色/label/key/动作不合规、归档不一致、失败或重放调用、两种收口、请求超长或为空、请求或 label 含 URL 查询串、没有可用动作。
+  - 新鲜度：不新鲜时零请求并以 owner 库、run、task、observation_id 询问权威；等待期间变旧不追加；没有权威库或权威模块缺失都安全关闭。
+  - 子代理零请求；等待期间来源或工具快照变化、两种期限、响应绑定其他材料、策略变化都不采用；可选错误保留原结果，取消与中断上抛。
+  - 经原 `_record_tool_call` 在 off/observe/apply 下 text/native/IR 为同一段；三点互斥；默认配置为 off 且 thread 可设；原 TUI 菜单可改线程模式。
+- **变异验证**：18 种各自使新测试失败（新鲜度恒真、去掉采用前来源复核、渲染或资格忽略可用性、候选下限 2→1、去掉重复编号检查、外发 key、去掉 ok/子代理/URL/题号/策略/期限/label 上限/候选上限/归档 task/响应绑定/权威库检查）。子进程带 `PYTHONDONTWRITEBYTECODE=1`，结束后还原原文件。
+- **回归**（基于 main `6c3ffc2ad`）：全部 `test_decision_*`，以及引用 `_record_tool_call`/`_optional_result_hints`/设置 schema/TUI 决策菜单的 52 个文件，1462 passed、1 xpassed（既有）；另跑配置与架构守卫在内的 19 个文件，570 passed。
+
 ## 自愈两片：无身份悬挂运行轮可见可结清、导航种子不再误迁移（用户决定第 5 项，2026-09-24 晚）
 
 - **无身份悬挂运行轮**：本机 owner 库有 9 条 8 月的 running/created attempt，metadata 为空、没有 `runner_pid`，原 RUN-01 进程死亡证明永远碰不到它们。不自动判死（同一 owner 库会被别的运行版本写入，原合同"无 pid 记录保持原态"不动）；改为 Gateway 启动列出并写进状态/事件（`unidentified_stale_attempts`、`gateway_stale_attempts_reconciled.unidentified`），新增显式命令 `my-agent runtime-stale-attempts [--settle] [--older-than-days 1] [--json]`，`--settle` 经 `RuntimeRepository.settle_unidentified_attempts` 的 current_attempt CAS 记为 unknown（metadata `recovery_reason=no_runner_identity`、`settled_by=explicit_control`）。

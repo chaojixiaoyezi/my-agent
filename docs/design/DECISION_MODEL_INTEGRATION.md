@@ -419,6 +419,29 @@ P5-C 规划首片只在当前主代理读取已有多项 Todo 时追加一个 ex
 - **材料上限**：外发 state 只有经外部材料首片同一 `external_data/default` 脱敏、含 URL 查询串即放弃的当前请求，以及 `focuses: [{candidate: focus_i, project: project_j, kind, scope, status, exit_code, edited_after, order}]`；项目根只以 `project_j` 别名出现，本地路径、原命令、工具输出、改动路径和时间只进本地版本摘要。唯一单选题 `review_focus` 的候选是 `focus_i` 与 `not_needed/no_match/abstain/need_data`，`need_data` 明确“不补读、不跑测试”。
 - **采用与回退**：只接受一个无逐题错误的 choice 回答且值为本次宿主生成的 `focus_i`；渲染只含宿主事实，例如“交付前可先复核本轮验证事件 #11（test/targeted，failed，其后有修改）；范围与结果以原事实为准，targeted 不代表全量”，上限 512 字符。选中本次调用自己的事件不追加。`off` 不准备材料、不发请求；`observe` 照常请求并记原账但不追加；非选择、坏答案、超时、错误、冷却、配置或来源变化（采用前在 `decision_outcome_is_current` 之后重比参数与材料版本及同一绝对期限）都只返回空串。ToolResult、归档、验证账、Goal、Todo 与收口从不修改；用户取消与中断照常上抛。
 
+### P5-C 动作候选 `action_candidate`
+
+当前状态：决策侧本地实施（分支 `claude/decision-action-candidate`，待插件线的观察结构落地后合入），默认关闭；离线合同与变异验证通过，新鲜度权威暂用替身，未做真实验收。前置结构见[插件观察候选结构](PLUGIN_OBSERVATION_CANDIDATES.md)。
+
+要解决的问题：插件的只读观察工具（如 browser-lite `read`）一次返回多个可操作对象时，主模型可能先去操作不相关的那个。此点在观察结果归档之后，可选地请 Jev 从宿主铸造的候选里挑一个"下一步最值得先核对的"，宿主把它渲染成一句可忽略的提示。它不执行动作，也不生成参数、选择器或坐标。
+
+- **接线**：独立 thread 接入点。AgentConfig/YAML 三字段 `decision_action_candidate_mode/_timeout_seconds/_profile_id` 默认 off/null/null，与原设置服务、`user_config` 工具和 TUI 菜单（"动作候选"）共用。`_optional_result_hints` 依次调用三个点，按结构化触发事实互斥（web_fetch 归档 / run_command 验证事件 / 插件观察信封），每条记录至多一次决策请求。
+- **触发（全部结构化）**：
+  - 当前调用成功执行（`handler_executed` 且 `ok`），归档与调用在 tool/id/run/task/scoped_call_id 上一致，信封带 `observation`；
+  - 主代理、无收口标记，`user_prompt` 非空且不超过 1,024 字符；
+  - 观察形状合规：宿主铸的 `obs-`/`cand-` 编号，短标识 `target_kind`/`role`，本地目标事实齐全，1—64 个候选且编号不重复，label 不超过 120 字，每个候选 1—8 个动作工具名（宿主注册名）；
+  - 候选至少 2 个，至少一个候选的动作工具在本轮快照中可用；
+  - 新鲜度权威 `plugin_observation.observation_is_current`（owner 权威库 `agent.subagents.runtime_db`，按 run/task 归属）确认仍为当前。
+
+  任一不满足就零请求。
+- **材料上限**：外发只有脱敏后的当前请求、`target_kind`，以及放在同一个 `external_data` 块里的候选别名 `c_i`、role 与 label。候选编号、插件 key、目标引用、代次和动作工具名只进本地版本摘要。唯一单选题 `next_candidate` 的选项是 `c_i` 与 `not_needed/no_match/abstain/need_data`。label 或请求里含 URL 查询串时整点放弃。
+- **采用与回退**：
+  - 只接受一个无逐题错误的 choice 回答，且值是本次生成的别名；所选候选的动作工具须在本轮可用。
+  - 采用前依次复核 `decision_outcome_is_current`、参数与材料版本（这一步会再问一次新鲜度权威）以及同一绝对期限。
+  - 提示只含宿主铸的 candidate_id 与 role，例如"下一步可先核对候选 cand-…（button）；是否操作、如何操作仍由你按原工具与审批决定"，上限 512 字符。
+  - `off` 不准备材料；`observe` 照常请求但不追加；其余失败只返回空串；用户取消与中断照常上抛。
+- **待插件线**：`plugin_observation.py` 落地后改用真模块回归，再在隔离 owner 上用 browser-lite 做 off/observe/apply 真实验收。
+
 ### P5-C 自学习 S2：待确认 Skill 提案的审核顺序 `skill_proposal_review`
 
 当前状态：本地实施（分支 `claude/self-learning-proposal-review-order`，待审），默认关闭；离线合同、真实 CLI 组合（只替换 HTTP 发送）与变异验证通过，未做真实 Jev 验收。

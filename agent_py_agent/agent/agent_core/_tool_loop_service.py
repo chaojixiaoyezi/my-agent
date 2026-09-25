@@ -2215,16 +2215,18 @@ def _record_tool_call(agent, record: ToolCallRecordParams) -> None:
         record.params.tool_context.append(_task_local_progress_context(progress))
 
 
-# LLM: 两个可选决策点按工具名互斥（web_fetch / run_command），每条记录至多一次决策请求；
-# 空串即保留原展示。只追加 text/native 共用的展示后缀，不改结果、归档、账本或 refs；用户取消照常上抛。
+# LLM: 三个可选决策点按结构化触发事实互斥（web_fetch 归档 / run_command 验证事件 / 插件观察信封），每条记录至多一次
+# 决策请求；空串即保留原展示。只追加 text/native 共用的展示后缀，不改结果、归档、账本或 refs；用户取消照常上抛。
 # 函数用途: 返回追加在工具结果展示之后的可选建议（带前导换行），没有建议时返回空串。
 def _optional_result_hints(agent, record: ToolCallRecordParams, archive_record: dict[str, object]) -> str:
+    from .tool_context.decision_action_candidate import action_candidate_hint
     from .tool_context.decision_delivery_quality import delivery_quality_hint
     from .tool_context.external_material_order import external_material_order_hint
 
     hints = (
         external_material_order_hint(agent, record, archive_record),
         delivery_quality_hint(agent, record, archive_record),
+        action_candidate_hint(agent, record, archive_record),
     )
     return "".join("\n" + hint for hint in hints if hint)
 

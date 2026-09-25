@@ -68,7 +68,7 @@
   - `candidate_id = "cand-" + sha256(observation_id, key)` 取前 16 位
 - **唯一权威**：观察记录写进该次调用原归档的 `tool_result_envelope.observation`。字段为：
   - `observation_id`、`plugin_id`、`activation_id`、`target_kind`、`target_ref_hash`、`generation`、`content_hash`
-  - `candidates[{candidate_id, key, role, label, actions}]`
+  - `candidates[{candidate_id, key, role, label, actions}]`，其中 `actions` 记宿主注册的工具名（由 manifest 工具名映射），决策点据此核对本轮可用性
 
   不另建观察账本；索引与投影只读这份归档。
 - **模型可见投影**：主模型必须看到宿主铸的 `candidate_id` 才能填动作参数，所以宿主在模型可见的结果投影里，把 `my_agent_observation` 重写为有界投影 `{observation_id, candidates[{candidate_id, role, label, actions}]}`，隐去插件的 key、target.ref 与代次。归档仍是唯一权威，投影只做展示；形状被拒时投影里不出现任何候选。
@@ -84,6 +84,9 @@
 不填该参数的动作调用保持现状（例如 browser-lite 继续按选择器执行），与候选语义无关。首片不要求动作工具必须走候选。
 
 ### 2.5 决策接入点 `action_candidate`（决策线，第 15 项剩余）
+
+决策侧已在分支 `claude/decision-action-candidate`离线实施，见[接入设计](DECISION_MODEL_INTEGRATION.md#p5-c-动作候选-action_candidate)。
+
 
 - **开关与设置**：独立点，默认 off。沿用原决策设置来源（YAML、AgentConfig、设置服务、TUI 菜单）与逐点的 profile/timeout，不借 `skill_tool` 的开关。
 - **触发**：挂在 `_optional_result_hints` 链上，与 `external_material_order`、`delivery_quality` 并列。只在本次归档带 `tool_result_envelope.observation` 且候选 ≥ 2 时触发。

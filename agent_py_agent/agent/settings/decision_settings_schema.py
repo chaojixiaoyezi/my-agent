@@ -14,6 +14,7 @@ POINT_RUNTIME_SCOPES = MappingProxyType({
     "model_selection": "thread", "subagent_model": "thread", "skill_tool": "thread",
     "pre_recall": "thread", "recall": "thread", "curator": "owner_background", "curator_relation": "owner_background",
     "external_material_order": "thread", "planning": "thread", "delivery_quality": "thread",
+    "action_candidate": "thread",
     "skill_proposal_review": "owner_background",
 })
 POINTS = tuple(POINT_RUNTIME_SCOPES)
