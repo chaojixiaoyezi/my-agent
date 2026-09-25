@@ -3085,6 +3085,7 @@ Audit/摄取不列入本轮新增验收；共享模块既有回归按改动影�
   Full Tests 另暴露 `test_shell_orphan_kill.py::test_foreground_timeout_cleans_group_after_leader_exits[False]`：宽限期内已证明消失的后代 PID 在最终核对前被复用，
   `os.kill` 探测重新成功而出生标识读不到，被记回 unresolved。终止回执改为记住已证明消失的进程实例（同号 PID 换出生标识才重新纳入），
   回归 `test_termination_receipt_keeps_proven_dead_pid_resolved_after_pid_reuse`。
+  沙箱真跑之后 fast suite 单 job 实测 40–45 分钟，45 分钟预算在 8cd7d01d0 的运行里被顶满整体取消；test.yml 预算放到 60 分钟。
 
 ```bash
 python3 -m pytest <直接相关测试文件> -q --tb=short

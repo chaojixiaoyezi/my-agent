@@ -14,7 +14,8 @@ jobs:
     # 完整 fast suite 会真实覆盖 secrets/scale extras；较慢 runner 的 3.10/3.12
     # 在 10 分钟总预算下已连续通过到 97% 后被平台取消。单测仍保留 60 秒超时。
     # fast suite 在 GitHub 托管 runner 上约需 30 分钟（2026-09-25 实测 15 分钟只跑到 52%），预算按此放宽。
-    timeout-minutes: 45
+    # 放开 userns 后 run_command 用例真的在 bwrap 里跑，单个 job 实测 40–45 分钟，45 分钟预算被顶满而整体取消（2026-09-25 13:24Z），再放到 60。
+    timeout-minutes: 60
 
     strategy:
       matrix:
