@@ -171,13 +171,17 @@ def _sessions(host, count: int) -> list[tuple[SimpleNamespace, object]]:
 
 def test_concurrent_sessions_of_one_owner_each_get_their_own_decision(tmp_path, server):  # noqa: F811
     server.block = True
-    host, params, _thread, stage = configured(tmp_path, server, timeout=1.0)
+    # 本用例验证并发与同会话准入，不验证期限：服务端要等 13 个请求都到齐才放行，慢 CI 上到齐本身就可能超过 1 秒
+    # （2026-09-25 3.10 job 12 个会话全部 deadline）。期限给足，并在改完阶段预算后重新开始本会话的阶段。
+    host, params, _thread, _stage = configured(tmp_path, server, timeout=8.0)
+    patch(host, {"stage_timeout_seconds": 15.0})
+    stage = decision_service.begin_decision_stage(host, params, operation_id="batch-main")
     sessions = _sessions(host, 12)
     assert len({session_stage.thread_id for _params, session_stage in sessions}) == 12
     with ThreadPoolExecutor(max_workers=14) as pool:
         futures = [pool.submit(decide, host, session_params, session_stage) for session_params, session_stage in sessions]
         same = [pool.submit(decide, host, params, stage) for _ in range(2)]
-        deadline = time.monotonic() + 2
+        deadline = time.monotonic() + 6
         while len(server.requests) < 13 and time.monotonic() < deadline:
             time.sleep(0.01)
         server.release.set()
@@ -190,7 +194,8 @@ def test_concurrent_sessions_of_one_owner_each_get_their_own_decision(tmp_path, 
 
 
 def test_catalog_write_lock_does_not_turn_decisions_into_settings_busy(tmp_path, server):  # noqa: F811
-    host, params, _thread, stage = configured(tmp_path, server)
+    # 验证的是锁语义不是期限，给足期限，免得慢 CI 上整次调用挤不进默认 1 秒而误判为 deadline
+    host, params, _thread, stage = configured(tmp_path, server, timeout=8.0)
     with locked_json_path(model_profiles_path(host.home_paths)):
         result = decide(host, params, stage)
     assert result.status == "success" and result.may_apply and len(server.requests) == 1
