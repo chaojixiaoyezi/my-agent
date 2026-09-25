@@ -23,7 +23,8 @@
   - **下游**：`enable_self_learning` 开启时，S1 照原链为每条经验生成一个待确认提案。重放不重复：候选靠 observation_id，提案靠 O_EXCL。候选记录失败只写工作日志，不阻断结果交付。
   - **提示**：Runner Contract 只在授权含 `record_lesson` 时多一条可选软引导，不恢复任何状态 JSON 要求；宿主从不解析回复正文。
   - **留给后续**：主线程的经验记录；被取消 run 账本的收取（账本保留，但取消路径不经结果收口）；S1 草稿 `when_to_use` 仍写"来源任务目标："，而账本候选的场景其实是 `when_to_use`。证据见 [TESTS](TESTS.md) 顶部本节。
-- **设计（未实施）：动作候选接入需先有插件层通用的"观察候选"结构**（2026-09-25，第 15 项剩余点，依据[动作候选审计](docs/tasks/DECISION_MODEL_ACTION_CANDIDATE_AUDIT.md)）：
+- **设计（未实施）：动作候选接入需先有插件层通用的"观察候选"结构**（2026-09-25，第 15 项剩余点，依据[动作候选审计](docs/tasks/DECISION_MODEL_ACTION_CANDIDATE_AUDIT.md)；完整设计稿见[插件观察候选结构](docs/design/PLUGIN_OBSERVATION_CANDIDATES.md)，待插件线评审）：
+  - **设计稿要点**：manifest v5 在只读工具上声明 `observation`、在动作工具上声明 `observation_ref`；插件在 `structuredContent.my_agent_observation` 给出目标、代次与有限候选；宿主整份校验后铸 `observation_id`/`candidate_id`，写进该次调用原归档的 `tool_result_envelope.observation`（唯一权威）；动作执行前宿主按调用序查新鲜度、经 `_meta` 附代次与 key，插件再按页面代次复核；决策点 `action_candidate` 只选一个别名并追加软提示。
   - **现状**：插件线已合入 browser-lite 与 desktop-lite。browser-lite 的 `read` 会返回有限元素清单（标签、文字、name/id、是否可见），`click`/`fill` 按唯一匹配的选择器执行；但宿主没有经过验证的 `observation_id`/`candidate_id`，也没有观察内容哈希与代次。
   - **原则**：不能为 browser-lite 写专项解析，这会违反禁止专项合同的铁律；也不能用截图坐标、自由文本或工具名推荐冒充动作候选。
   - **方向**：
