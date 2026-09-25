@@ -549,10 +549,7 @@ def terminate_process_tree(
             # 根进程已回收时 PID 可能复用；只能对仍是原实例的根补充后代，不能杀到另一棵新树。
             if snapshot.get(pid) and _same_process(pid, snapshot[pid]):
                 current, current_complete = _process_tree_snapshot(pid)
-                for member, token in current.items():
-                    if snapshot.get(member) != token:
-                        terminated.discard(member)
-                    snapshot[member] = token
+                _merge_tree_snapshot(snapshot, current, terminated)
                 complete = complete and current_complete
             _signal_process_snapshot(snapshot, getattr(signal, "SIGKILL", signal.SIGTERM))
             method = "SIGTERM->SIGKILL"
@@ -835,6 +832,15 @@ def _signal_process_snapshot(snapshot: dict[int, str], signum: int) -> bool:
 
 # LLM: 此等待仅核对已观察进程，权限或身份读取失败须视为未确认；调用方仍要检查快照完整性。
 # 函数用途: 在有界时间内收割直接子进程并等待观察到的后代退出，不把信号已发送当成终止。
+# LLM: 补充后代快照时，同号 PID 换了出生标识说明是根的新后代（旧实例已死、PID 被复用），必须重新纳入核对。
+# 函数用途: 把补充快照合并进原快照，并把身份变了的 PID 从“已证明消失”集合里移出。
+def _merge_tree_snapshot(snapshot: dict[int, str], current: dict[int, str], terminated: set[int]) -> None:
+    for member, token in current.items():
+        if snapshot.get(member) != token:
+            terminated.discard(member)
+        snapshot[member] = token
+
+
 # LLM: terminated 集合跨多次等待累积“已证明消失”的 PID，避免宽限后 PID 复用把死进程记回未解决；
 #   调用方在快照里同 PID 换出生标识时负责把它移出集合。
 # 函数用途: 在宽限期内轮询快照成员是否都已消失，并把证明过的 PID 记进 terminated。
