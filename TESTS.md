@@ -3108,6 +3108,12 @@ Audit/摄取不列入本轮新增验收；共享模块既有回归按改动影�
 - 真实验收方法：隔离 home 与 127.0.0.1:8431 的 Gateway 上，一次 prompt 让代理在对话里执行该 Gateway 的 `gateway restart`，
   核对工具结果为拒绝、回合正常结束、Gateway 进程号不变；再以 IM 身份经 Gateway `/ask` 发 `/model`、`/model 1` 和一条普通消息，
   核对列表、会话选择和普通消息使用所选共享模型完成。
+- 真实验收（2026-09-25，`b3c86a697`，`runtime-step12a-13e1fc9e`，隔离 home、127.0.0.1:8431，管理员 full-access）：
+  一次 prompt 让代理用 `run_command` 执行这台隔离 Gateway 的 `gateway restart`。工具记为 FAILED、退出码 2，拒绝文案原样回到回复里，
+  回合 done/completed；Gateway 进程 12:23:16 启动后一直未变，日志没有任何停止事件。从普通终端执行同一 Gateway 的 `gateway stop` 照常成功。
+  以飞书身份经 `/ask`（与适配器同一载荷与身份头）：共享前普通消息报 `MODEL_NOT_CONFIGURED`、文案引导发 `/model`，`/model` 提示请管理员共享；
+  管理员经 `/client/models` 共享默认模型后，`/model` 列出 1 个带“管理员共享”的模型且不含接口地址，`/model 1` 选中，
+  普通消息用该模型完成，再发 `/model` 显示当前会话模型。复制的模型目录随隔离 home 删除，证据在仓库外。
 
 ## 提交前严格 gate
 
