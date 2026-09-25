@@ -3,7 +3,8 @@
 #   会话正在跑的工具(gateway 场景的关键);②中断状态仍在安全点轮询，
 #   但阻塞传输可以注册幂等关闭回调，不强杀线程;③register_
 #   interruptible 的 finally 必清标志+注销名字——线程池 ident 会复用,脏标志
-#   会让下一个任务莫名"被中断";④这里只覆盖进程内线程，独立 runner 的原
+#   会让下一个任务莫名"被中断";标志同时记住立旗时的线程对象,线程已退出或 ident
+#   换了主人即视为过期,给已退出线程立旗直接落空(关闭竞态里晚到的立旗不再残留);④这里只覆盖进程内线程，独立 runner 的原
 #   session 心跳读取持久取消事实，再在其宿主内转交精确 attempt 的中断。
 #   改动时同步检查 round_execution 轮询点、background/dispatch worker 注册、
 #   subagents/cancellation.py 接线与 tests/test_thread_interrupt.py。
@@ -11,13 +12,15 @@
 from __future__ import annotations
 
 import threading
+import weakref
 from collections import deque
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 
 _lock = threading.Lock()
-_interrupted_threads: set[int] = set()
+# ident → 立旗时仍存活的那个线程对象（弱引用）；只按 ident 记会把旧停止误投给复用该 ident 的新线程。
+_interrupted_threads: dict[int, weakref.ReferenceType[threading.Thread]] = {}
 _named_threads: dict[str, set[int]] = {}
 _interrupt_callbacks: dict[int, list[_InterruptCallback]] = {}
 _thread_handles: dict[int, InterruptHandle] = {}
@@ -74,7 +77,7 @@ class InterruptHandle:
             for wake in self._waiters:
                 wake.set()
             if self._tid is not None and _thread_handles.get(self._tid) is self:
-                _interrupted_threads.add(self._tid)
+                _flag_locked(self._tid)
                 for wake in _thread_wakeups.get(self._tid, ()):
                     wake.set()
                 for item in _interrupt_callbacks.get(self._tid, ()):
@@ -146,6 +149,7 @@ class InterruptHandle:
 
 
 # LLM: 原线程控制保持，绑定精确句柄时取消沿句柄转交；所有关闭动作都在 registry 锁外执行。
+#   目标线程已退出时立旗直接落空，不留下会被 ident 复用继承的脏标志。
 # 函数用途: 给某线程立/撤中断旗，立旗时关闭当前阻塞连接。
 def set_interrupt(active: bool, thread_id: int | None = None) -> None:
     tid = thread_id if thread_id is not None else threading.current_thread().ident
@@ -155,13 +159,14 @@ def set_interrupt(active: bool, thread_id: int | None = None) -> None:
     handle = None
     with _lock:
         if active:
-            _interrupted_threads.add(tid)
+            if not _flag_locked(tid):
+                return
             for wake in _thread_wakeups.get(tid, ()):
                 wake.set()
             handle = _thread_handles.get(tid)
             callbacks = tuple(item.callback for item in _interrupt_callbacks.get(tid, ())) if handle is None else ()
         else:
-            _interrupted_threads.discard(tid)
+            _interrupted_threads.pop(tid, None)
     if handle is not None:
         handle.cancel()
     _run_interrupt_callbacks_bounded(callbacks)
@@ -173,7 +178,7 @@ def is_interrupted() -> bool:
     tid = threading.current_thread().ident
     with _lock:
         handle = _thread_handles.get(tid)
-        return tid in _interrupted_threads or (handle is not None and handle.cancelled)
+        return _is_flagged_locked(tid) or (handle is not None and handle.cancelled)
 
 
 # LLM: Retry/backoff waits share the same cancellation token semantics as
@@ -204,7 +209,8 @@ def interrupt_by_name(name: str) -> bool:
         tids = tuple(_named_threads.get(name) or ())
         if not tids:
             return False
-        _interrupted_threads.update(tids)
+        for tid in tids:
+            _flag_locked(tid)
         for tid in tids:
             for wake in _thread_wakeups.get(tid, ()):
                 wake.set()
@@ -248,7 +254,7 @@ def register_interrupt_wakeup(wake: threading.Event, *, handle: InterruptHandle 
         waiters = handle._waiters if handle is not None else _thread_wakeups.setdefault(tid, set())
         waiters.add(wake)
         current = handle if handle is not None else _thread_handles.get(tid)
-        cancelled = (handle is None and tid in _interrupted_threads) or (current is not None and current.cancelled)
+        cancelled = (handle is None and _is_flagged_locked(tid)) or (current is not None and current.cancelled)
         if cancelled:
             wake.set()
     try:
@@ -273,7 +279,7 @@ def register_interrupt_callback(callback: Callable[[], object]) -> Iterator[None
     with _lock:
         _interrupt_callbacks.setdefault(tid, []).append(item)
         handle = _thread_handles.get(tid)
-        call_now = tid in _interrupted_threads or (handle is not None and handle.cancelled)
+        call_now = _is_flagged_locked(tid) or (handle is not None and handle.cancelled)
         if call_now and handle is not None:
             handle._enqueue_locked(item)
     if call_now:
@@ -335,7 +341,7 @@ def _register_named(name: str, tid: int | None, handle: InterruptHandle | None =
             handle._tid = tid
             _thread_handles[tid] = handle
             if handle.cancelled:
-                _interrupted_threads.add(tid)
+                _flag_locked(tid)
         _named_threads.setdefault(name, set()).add(tid)
 
 
@@ -356,9 +362,42 @@ def _unregister_named(name: str, tid: int | None, handle: InterruptHandle | None
             if not tids:
                 _named_threads.pop(name, None)
         if not any(tid in registered for registered in _named_threads.values()):
-            _interrupted_threads.discard(tid)
+            _interrupted_threads.pop(tid, None)
             _interrupt_callbacks.pop(tid, None)
             _thread_wakeups.pop(tid, None)
+
+
+# LLM: 只给仍存活且 ident 对应的线程立旗并记住线程对象；目标已退出时清掉旧记录且不立旗。调用方持 _lock。
+# 函数用途: 把一个线程标记为已中断，返回是否真的立了旗。
+def _flag_locked(tid: int) -> bool:
+    thread = _live_thread(tid)
+    if thread is None:
+        _interrupted_threads.pop(tid, None)
+        return False
+    _interrupted_threads[tid] = weakref.ref(thread)
+    return True
+
+
+# LLM: 只认立旗时的那个线程对象：线程已死或 ident 已换主人都视为过期并清除，复用 ident 的新线程不继承旧停止。调用方持 _lock。
+# 函数用途: 判断某个线程 ident 当前是否处于中断状态。
+def _is_flagged_locked(tid: int | None) -> bool:
+    ref = _interrupted_threads.get(tid) if tid is not None else None
+    if ref is None:
+        return False
+    thread = ref()
+    if thread is not None and thread.is_alive() and _live_thread(tid) is thread:
+        return True
+    _interrupted_threads.pop(tid, None)
+    return False
+
+
+# LLM: 当前线程直接取 current_thread，其余 ident 在存活线程表里找；找不到即视为已退出，不读私有字段。
+# 函数用途: 返回 ident 对应的存活线程对象，没有则返回 None。
+def _live_thread(tid: int) -> threading.Thread | None:
+    current = threading.current_thread()
+    if current.ident == tid:
+        return current
+    return next((thread for thread in threading.enumerate() if thread.ident == tid), None)
 
 
 __all__ = [
