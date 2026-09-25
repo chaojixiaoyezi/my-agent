@@ -1,13 +1,11 @@
-# LLM: 只替换决策服务边界与插件线的新鲜度权威 plugin_observation（该模块由插件线实施，落地后改为真模块回归）；
-#   观察信封沿设计稿 2.3 的归档字段，_record_tool_call 为原实现，核对原结果/归档不变及 text/native 同段提示。
+# LLM: 单元测试只替换决策服务边界与新鲜度权威 observation_is_current；观察信封沿 plugin_observation 真实归档形状，
+#   另有一组集成测试用真实 plugin_observation 与插件线的事件夹具；_record_tool_call 为原实现，核对原结果/归档不变及 text/native 同段提示。
 # 模块用途: 离线验证动作候选点的资格、脱敏输入、非选择回退、新鲜度与来源复核、取消传播、宿主展示接缝和设置入口。
 from __future__ import annotations
 
 import asyncio
 import json
-import sys
 import time
-import types
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
@@ -28,6 +26,7 @@ from agent_py_agent.agent.backends.decision_protocol import (
 )
 from agent_py_agent.agent.backends.message_adapter import AnthropicMessageAdapter
 from agent_py_agent.agent.common.cancellation import ToolCancelled
+from agent_py_agent.agent.plugin_observation import OBSERVATION_SCHEMA
 from agent_py_agent.agent.runtime_context import (
     restore_current_subagent_context,
     set_current_subagent_context,
@@ -66,27 +65,27 @@ _OBS = "obs-" + "a" * 24
 _C1, _C2, _C3 = ("cand-" + digit * 16 for digit in "123")
 _HINT_C1 = (f"[action-candidate]\n可选操作建议：下一步可先核对候选 {_C1}（button）；"
             "是否操作、如何操作仍由你按原工具与审批决定。")
-_OBSERVATION_MODULE = "agent_py_agent.agent.plugin_observation"
 
 
-# LLM: 字段与设计稿 2.3 的归档 `tool_result_envelope.observation` 一致；key/目标引用/代次/动作名是本地事实，不应外发。
+# LLM: 字段与 plugin_observation 写进归档的 `tool_result_envelope.observation` 一致；key/目标引用/代次/动作名是本地事实，不应外发。
 # 函数用途: 构造一份含三个候选的宿主观察记录，可覆盖任意顶层字段。
 def observation(**changes):
-    value = {"observation_id": _OBS, "plugin_id": "browser-lite", "activation_id": "activation-secret-7",
-             "target_kind": "page", "target_ref_hash": "target-ref-secret", "generation": "gen-8842",
-             "content_hash": "c" * 64, "operation_id": "host-command:op-1",
+    value = {"schema": OBSERVATION_SCHEMA, "observation_id": _OBS, "plugin_id": "browser-lite",
+             "activation_id": "activation-secret-7", "tool": _READ, "target_kind": "page",
+             "target_ref": "tab-plain-secret", "target_ref_hash": "target-ref-secret", "generation": "gen-8842",
+             "content_hash": "c" * 24,
              "candidates": [
                  {"candidate_id": _C1, "key": "key-e5", "role": "button", "label": "提交订单", "actions": [_CLICK]},
-                 {"candidate_id": _C2, "key": "key-e9", "role": "textbox", "label": "收货人", "actions": [_FILL]},
+                 {"candidate_id": _C2, "key": "key-e9", "role": "input:text", "label": "收货人", "actions": [_FILL]},
                  {"candidate_id": _C3, "key": "key-e12", "role": "link", "label": "帮助中心", "actions": [_CLICK]},
              ]}
     value.update(changes)
     return value
 
 
-# LLM: 替身沿插件线承诺的签名 observation_is_current(repo, *, run_id, task_id, observation_id) -> bool；
+# LLM: 替身沿 plugin_observation.observation_is_current 的真实签名 (repo, *, run_id, task_id, observation_id) -> bool；
 #   answers 依次返回，用尽后沿用最后一个，calls 记录每次询问。
-# 函数用途: 注入可控的新鲜度权威，返回调用记录。
+# 函数用途: 替换本模块使用的新鲜度权威，返回调用记录。
 def install_currency(monkeypatch, *answers):
     calls = []
     values = list(answers or (True,))
@@ -95,9 +94,7 @@ def install_currency(monkeypatch, *answers):
         calls.append((repo, run_id, task_id, observation_id))
         return values.pop(0) if len(values) > 1 else values[0]
 
-    fake = types.ModuleType(_OBSERVATION_MODULE)
-    fake.observation_is_current = observation_is_current
-    monkeypatch.setitem(sys.modules, _OBSERVATION_MODULE, fake)
+    monkeypatch.setattr(module, "observation_is_current", observation_is_current)
     return calls
 
 
@@ -215,6 +212,7 @@ _INELIGIBLE = {
     "no_candidates": candidate_count(0),
     "candidates_not_list": set_observation("candidates", {"c1": {}}),
     "bad_observation_id": set_observation("observation_id", "obs-short"),
+    "wrong_schema": set_observation("schema", "plugin_observation.v0"),
     "bad_target_kind": set_observation("target_kind", "Page Kind"),
     "missing_target_ref": set_observation("target_ref_hash", ""),
     "missing_generation": set_observation("generation", None),
@@ -270,7 +268,7 @@ def test_payload_sends_only_request_kind_roles_and_labels(prepared, monkeypatch)
     module.action_candidate_hint(*prepared)
     kwargs = calls[0][2]
     payload = json.dumps({"state": kwargs["state"], "questions": kwargs["questions"]}, ensure_ascii=False)
-    for private in ("key-e5", "target-ref-secret", "gen-8842", "activation-secret-7", "cand-", "plugin__", "obs-",
+    for private in ("key-e5", "target-ref-secret", "tab-plain-secret", "gen-8842", "activation-secret-7", "cand-", "plugin__", "obs-",
                     "prompt-secret-value", "page-output-secret", "host-command:"):
         assert private not in payload
     for label in ("提交订单", "收货人", "帮助中心"):
@@ -279,7 +277,7 @@ def test_payload_sends_only_request_kind_roles_and_labels(prepared, monkeypatch)
     assert kwargs["state"]["candidates"].startswith("<untrusted_tool_result")
     criteria = kwargs["questions"][_Q]["criteria"]
     assert {key: value for key, value in criteria.items() if key.startswith("c")} == {
-        "c1": {"role": "button"}, "c2": {"role": "textbox"}, "c3": {"role": "link"}}
+        "c1": {"role": "button"}, "c2": {"role": "input:text"}, "c3": {"role": "link"}}
     assert set(criteria) - {"c1", "c2", "c3"} == set(module._NON_SELECTIONS)
     assert kwargs["source_refs"] == ("run-1:read-1",)
 
@@ -346,8 +344,11 @@ def test_missing_owner_runtime_db_is_not_current(prepared, monkeypatch):
     assert module.action_candidate_hint(host, prepared[1], prepared[2]) == "" and calls == [] and currency == []
 
 
-def test_missing_freshness_authority_fails_closed(prepared, monkeypatch):
-    monkeypatch.setitem(sys.modules, _OBSERVATION_MODULE, None)
+def test_failing_freshness_authority_fails_closed(prepared, monkeypatch):
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("runtime db unavailable")
+
+    monkeypatch.setattr(module, "observation_is_current", broken)
     calls = install(monkeypatch)
     assert module.action_candidate_hint(*prepared) == "" and calls == []
 
@@ -490,3 +491,54 @@ def test_original_tui_can_edit_action_candidate_thread_mode(tmp_path):
             assert result["overrides"]["thread"][f"points.{module._POINT}.mode"] == "apply"
             assert not any(name in {"decision_probe", "select", "set_default"} for name, _payload in gateway.calls)
     asyncio.run(scenario())
+
+
+# LLM: 集成夹具：观察经插件线的 parse_observation 铸造，并经产品的 tool_completed 事件写法记进假权威库；
+#   不替换 observation_is_current，只替换决策服务边界，用来钉住与真实新鲜度合同（run_id 映射、按事件序判当前）的接缝。
+# 函数用途: 构造一次真实铸造的 browser-lite 读观察调用，返回宿主、调用记录、归档、假库与首个观察记录。
+def real_observation_turn(tmp_path):
+    from agent_py_agent.tests.test_plugin_observation import (
+        ACTIONS,
+        _payload,
+        _record_observation,
+        _Repo,
+    )
+
+    repo = _Repo()
+    record = _record_observation(repo, _payload(), operation_id="op-1")
+    tools = (record.tool_name, *ACTIONS.values())
+    params = ToolLoopExecuteParams(
+        user_prompt="帮我在测试页下单。", memories=[], runtime_injections=[], prompt_files=[],
+        tool_catalog_section="", tool_recommendations_section="", tool_context=[], effective_on_chunk=None,
+        allowed_tools=list(tools), write_boundary=None, task_attributes={"agent_thread_id": "thread-1"},
+        request_id="request-1", run_id="run-1", task_id="task-1", save=False,
+        one_shot_tool_calls=set(), executed_tools=[], archive_tool_calls=[],
+        tool_protocol_snapshot=make_test_protocol_snapshot(run_id="run-1"),
+        tool_runtime_snapshot=runtime_snapshot_for_model_specs(tuple(make_test_model_spec(name) for name in tools), run_id="run-1"),
+    )
+    call = canonical_history_call(record.tool_name, {}, call_id="read-1", run_id="run-1", turn_id="turn-2", attempt_id="attempt-1")
+    result = canonical_history_result(call, '{"items": ["page-output"]}', ok=True)
+    archive = {"tool": record.tool_name, "id": "read-1", "run_id": "run-1", "task_id": "task-1", "scoped_call_id": "run-1:read-1",
+               "output_hash": "a" * 64, "tool_result_envelope": {"observation": record.to_envelope()}}
+    params.archive_tool_calls.append(archive)
+    host = SimpleNamespace(root=tmp_path, tools=SimpleNamespace(), config=SimpleNamespace(auto_save_memory=False),
+                           subagents=SimpleNamespace(runtime_db=repo))
+    return host, ToolCallRecordParams(params=params, tool_rounds=2, idx=1, call=call, result=result), archive, repo, record
+
+
+def test_real_freshness_authority_accepts_the_current_observation(tmp_path, monkeypatch):
+    host, record, archive, _repo, observed = real_observation_turn(tmp_path)
+    calls = install(monkeypatch, choice="c1")
+    hint = module.action_candidate_hint(host, record, archive)
+    first = observed.candidates[0]
+    assert hint == (f"[action-candidate]\n可选操作建议：下一步可先核对候选 {first.candidate_id}（{first.role}）；"
+                    "是否操作、如何操作仍由你按原工具与审批决定。") and len(calls) == 1
+
+
+def test_real_freshness_authority_rejects_an_observation_replaced_for_the_same_target(tmp_path, monkeypatch):
+    from agent_py_agent.tests.test_plugin_observation import _payload, _record_observation
+
+    host, record, archive, repo, _observed = real_observation_turn(tmp_path)
+    _record_observation(repo, _payload(target={"ref": "tab-3", "generation": "18"}), operation_id="op-2", attempt_id="attempt-2")
+    calls = install(monkeypatch)
+    assert module.action_candidate_hint(host, record, archive) == "" and calls == [], "同一目标有了更新观察，旧候选不再提示"

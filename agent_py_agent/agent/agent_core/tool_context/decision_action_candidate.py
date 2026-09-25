@@ -1,12 +1,11 @@
 # LLM: 只读当前插件观察调用原归档信封里宿主铸造的 observation；新鲜度唯一权威是插件线的 plugin_observation（按
-#   tool_operations 调用序），本模块不扫归档自判。可选决策只能选一个已有候选，不执行工具、不生成参数/选择器/坐标，
+#   runtime_events 的 tool_completed 序），本模块不扫归档自判；形状规则也只认 plugin_observation / plugin_manifest 一处。可选决策只能选一个已有候选，不执行工具、不生成参数/选择器/坐标，
 #   不改 ToolResult、归档、审批或观察记录。插件 key、目标引用、代次与动作工具名只进本地版本摘要，不发送给决策模型；
 #   label 属外部数据，整体按 external_data 投影后才可外发。改动须同步 test_decision_action_candidate.py。
 # 模块用途: 插件只读观察工具返回宿主校验过的候选后，可选地提示主模型下一步先核对哪个候选；关闭、失败或无法安全投影时保留原展示。
 from __future__ import annotations
 
 import hashlib
-import re
 import time
 
 from ...backends.decision_protocol import DecisionInputError, decision_json
@@ -16,6 +15,19 @@ from ...conversation.decision_service import (
     begin_decision_stage,
     decide,
     decision_outcome_is_current,
+)
+from ...plugin_manifest import _TARGET_KIND
+
+# 形状上限、ID 与 key/role 规则都直接复用宿主铸造观察时的同一份定义，不在本点另立第二份。
+from ...plugin_observation import (
+    _CANDIDATE_ID,
+    _OBSERVATION_ID,
+    _TOKEN,
+    MAX_ACTIONS,
+    MAX_CANDIDATES,
+    MAX_LABEL_CHARS,
+    OBSERVATION_SCHEMA,
+    observation_is_current,
 )
 from ...runtime_context import current_subagent_run_id
 from ...settings.decision_settings_schema import POINT_RUNTIME_SCOPES
@@ -28,16 +40,9 @@ from .external_material_order import _URL_WITH_QUERY
 _POINT = "action_candidate"
 _QUESTION = "next_candidate"
 _MIN_CANDIDATES = 2
-_MAX_CANDIDATES = 64
-_MAX_ACTIONS = 8
 _MAX_REQUEST_CHARS = 1024
-_MAX_LABEL_CHARS = 120
 _MAX_HINT_CHARS = 512
 _HINT_TAG = "[action-candidate]"
-_OBSERVATION_ID = re.compile(r"obs-[0-9a-f]{24}")
-_CANDIDATE_ID = re.compile(r"cand-[0-9a-f]{16}")
-# role/target_kind 只按短标识形状校验，不是封闭枚举；形态异常时放弃增强，不猜含义。
-_TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,31}")
 _LOCAL_KEYS = ("activation_id", "target_ref_hash", "generation", "content_hash")
 _NON_SELECTIONS = {
     "not_needed": "无需额外操作建议，保留原结果",
@@ -127,16 +132,17 @@ def _current_record_matches(agent: object, record: object, archive: dict) -> boo
             and type(archive.get("scoped_call_id")) is str and bool(archive["scoped_call_id"]))
 
 
-# LLM: 形状按设计稿 2.3 的归档字段逐项校验：宿主铸的观察/候选编号、短标识目标类型、本地目标事实与 1—64 个候选；
+# LLM: 形状按设计稿第 6 节的归档字段逐项校验（schema 版本、宿主铸的观察/候选编号、manifest 规则的目标类型、本地目标事实与 1—64 个候选）；
 # 任一缺项或候选编号重复就整份放弃，不部分采纳、不补默认值。
 # 函数用途: 校验并复制当前归档里的观察记录，供资格判断、材料与渲染共用。
 def _observation(archive: dict) -> dict:
     value = archive["tool_result_envelope"]["observation"]
     candidates = value.get("candidates")
-    if (type(value.get("observation_id")) is not str or not _OBSERVATION_ID.fullmatch(value["observation_id"])
-            or type(value.get("target_kind")) is not str or not _TOKEN.fullmatch(value["target_kind"])
+    if (value.get("schema") != OBSERVATION_SCHEMA
+            or type(value.get("observation_id")) is not str or not _OBSERVATION_ID.fullmatch(value["observation_id"])
+            or type(value.get("target_kind")) is not str or not _TARGET_KIND.fullmatch(value["target_kind"])
             or any(type(value.get(key)) is not str or not value[key] for key in _LOCAL_KEYS)
-            or type(candidates) is not list or not 0 < len(candidates) <= _MAX_CANDIDATES):
+            or type(candidates) is not list or not 0 < len(candidates) <= MAX_CANDIDATES):
         raise DecisionInputError("观察记录缺少宿主结构化事实。")
     rows = [_candidate(item) for item in candidates]
     if len({row["candidate_id"] for row in rows}) != len(rows):
@@ -145,7 +151,7 @@ def _observation(archive: dict) -> dict:
             **{key: value[key] for key in _LOCAL_KEYS}, "candidates": rows}
 
 
-# LLM: 候选须有宿主铸的 candidate_id、短标识 role、≤120 字 label、非空插件 key 与 1—8 个动作工具名（宿主注册名）；
+# LLM: 候选须有宿主铸的 candidate_id、宿主 key/role 规则的 role、≤120 字 label、非空插件 key 与 1—8 个动作工具名（宿主注册名）；
 # key 只进本地版本摘要，动作名只用于核对本轮可用性。
 # 函数用途: 校验并复制一条候选。
 def _candidate(value: object) -> dict:
@@ -153,9 +159,9 @@ def _candidate(value: object) -> dict:
     if (type(value) is not dict or type(value.get("candidate_id")) is not str
             or not _CANDIDATE_ID.fullmatch(value["candidate_id"])
             or type(value.get("role")) is not str or not _TOKEN.fullmatch(value["role"])
-            or type(value.get("label")) is not str or len(value["label"]) > _MAX_LABEL_CHARS
+            or type(value.get("label")) is not str or len(value["label"]) > MAX_LABEL_CHARS
             or type(value.get("key")) is not str or not value["key"]
-            or type(actions) is not list or not 0 < len(actions) <= _MAX_ACTIONS
+            or type(actions) is not list or not 0 < len(actions) <= MAX_ACTIONS
             or any(type(name) is not str or not name for name in actions)):
         raise DecisionInputError("观察候选缺少宿主结构化事实。")
     return {"candidate_id": value["candidate_id"], "key": value["key"], "role": value["role"],
@@ -163,14 +169,12 @@ def _candidate(value: object) -> dict:
 
 
 # LLM: 新鲜度只问插件线的唯一权威 plugin_observation.observation_is_current（owner 权威库 agent.subagents.runtime_db，
-#   按 run/task 归属，后台续跑 attempt 共享）；没有权威库或返回非 True 都按不新鲜处理。延迟导入：该模块由插件线实施。
+#   按 run/task 归属，后台续跑 attempt 共享，run_id 由它在内部映射到 AgentRun）；没有权威库或返回非 True 都按不新鲜处理。
 # 函数用途: 判断当前归档里的观察是否仍是同一目标的最新成功观察。
 def _is_current(agent: object, record: object, observation: dict) -> bool:
     repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
     if repo is None:
         return False
-    from ...plugin_observation import observation_is_current
-
     return observation_is_current(repo, run_id=record.call.run_id, task_id=getattr(record.params, "task_id", ""),
                                   observation_id=observation["observation_id"]) is True
 
