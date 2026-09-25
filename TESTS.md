@@ -2,6 +2,18 @@
 
 child不展示历史正文时的读取回归先复现1 failed/1 passed，修复后test_compact_retained_history、test_subagent_compact_recovery、test_gateway_child_compact_scope_application三文件31 passed（8.48秒）。三宿主seed仓外基线仅验证测量和完整性，不算内存目标通过；细节见容量审计的宿主生命周期基线。
 
+## 第 10 步组合验收 combo6 与全部卸载后核心基线（本机 `runtime-step11l-2d00c734`→`step11m-f1cc8217`，2026-09-25 凌晨）
+
+- **组合任务（真实 owner，一条 prompt，M3）**：5 个插件（genui-lite、image-text、savepoint-lite、browser-lite、design-lite）经真实 TUI 安装→配置→启用后，
+  发一条 36 个月订单 CSV 的三年汇总长任务：3 个子代理按年统计→主代理独立重算核对→genui-lite 出三张柱状图→browser-lite 逐页核标题→savepoint-lite 快照→design-lite 出卡片→写报告。
+  PROMPT_SENT 01:33:54，产物最后写入 01:39（约 5 分钟），无审批弹窗，3 个子代理终态均已完成，Compact 0（上下文约 105k/1.0m）。
+- **产物核对（只读结构化事实，不读回复正文）**：`out/` 13 个文件；与测试者预先生成的真值文件逐项比对 18/18 一致——三年各年完成金额、各区域金额、
+  36 个月度金额、三类非完成状态订单数、各年最高区域、2024/2025 同比、三年总额。子代理中途把输出路径解析成 `combo6/combo6/out/`，主代理用 `send_guidance` 澄清后两处一致；
+  这是模型行为，不是框架缺陷，产物最终位置正确。
+- **脚手架教训**：观察脚本用屏幕关键词判"安静"，报告正文含"子代理"等词导致 WAIT_END 迟到 40 分钟；属测试脚手架问题，与产品无关，下次改读结构化会话状态。
+- **升级回归（本轮前置发现并修复）**：见上文"激活目录摘要随声明字段漂移"；修复部署（step11l）后本次安装、启用、调用全部正常。
+- **全部卸载后核心基线（step11n 二进制，同一真实 owner）**：第一轮误用 `/plugins uninstall`（无此命令，安装表 last_commit 仍为 release，5 插件只是停用），基线 summary.txt=400.00 在 25 秒内写出、无审批，但不算“空表”。第二轮用 `/plugins remove` 移除全部 6 个插件（含 workspace-peek），空表下发一条核心任务（读 CSV 合计写文件）：REMOVE_DONE 02:37:19 → 文件写出 02:37:42（16 秒），值 1234.56 正确，无审批弹窗、无插件工具。随后从仓库重建的 workspace-peek 包 `/plugins install` + `/plugins enable`，安装表只剩 workspace-peek 0.1.1 active（revision 从 17 重置为 3，证明确经移除再装）；packages 目录保留 1 个旧包文件（内容寻址，不影响运行）。测试目录已归档到仓库外并从 owner home 删除。
+
 ## 内置方法论技能正文重写（开源准备，2026-09-25，分支 `claude/opensource-prep-decision`）
 
 - **改动**：`agent_py_agent/skills/builtin/` 下 quality、planning、orchestration、review、meta 五类共 12 个 `SKILL.md` 的正文，按原意图用自己的话重写。这 12 个技能是 test-driven-development、systematic-debugging、verification-before-completion、brainstorming、writing-plans、executing-plans、define-goal、dispatching-parallel-agents、subagent-driven-development、requesting-code-review、receiving-code-review、writing-skills。
