@@ -59,7 +59,7 @@ risk_level: low
 - 数过页数、肉眼看过版式样张。
 - 中文字数非零、和原文大致成比例(防漏翻/串版)。
 - 图表在位,或显式列出"哪些图省略了"。
-- 附一张截图/contact-sheet 当版式自检证据(对照 [[verification-before-completion]] 的"证据先于断言")。
+- 附一张截图/contact-sheet 当版式自检证据(对照 [[verification-before-completion]]:先拿到证据,再下结论)。
 
 ## 环境前提
 

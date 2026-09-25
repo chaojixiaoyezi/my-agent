@@ -2,6 +2,19 @@
 
 child不展示历史正文时的读取回归先复现1 failed/1 passed，修复后test_compact_retained_history、test_subagent_compact_recovery、test_gateway_child_compact_scope_application三文件31 passed（8.48秒）。三宿主seed仓外基线仅验证测量和完整性，不算内存目标通过；细节见容量审计的宿主生命周期基线。
 
+## 内置方法论技能正文重写（开源准备，2026-09-25，分支 `claude/opensource-prep-decision`）
+
+- **改动**：`agent_py_agent/skills/builtin/` 下 quality、planning、orchestration、review、meta 五类共 12 个 `SKILL.md` 的正文，按原意图用自己的话重写。这 12 个技能是 test-driven-development、systematic-debugging、verification-before-completion、brainstorming、writing-plans、executing-plans、define-goal、dispatching-parallel-agents、subagent-driven-development、requesting-code-review、receiving-code-review、writing-skills。
+  - 结构、标题层级与示例都另写，不逐句转写旧文。
+  - frontmatter 的 name、tags、scope、risk_level 逐字节不变。与上游同名的 11 个技能另改写了 description 与 when_to_use：意思不变，保留用户常用的检索词（路由按 tags 4 分、描述 1.5 分给词打分）。define-goal 的 frontmatter 未改。`documents/academic-word-pdf-layout` 原先引用旧口号，已改为直接写规则。
+  - 正文里的工具名、技能引用、命令与路径约定保留。上游示例用的占位路径和示例函数名换成本项目自己的示例。
+- **核对方法**：逐文件对比 main `97fe9d72a` 的旧正文。
+  - frontmatter 逐字节相同。
+  - 旧正文中的工具、命令、路径类标识符都还在；只少了上游示例名与占位路径，属有意替换。
+  - 新旧正文去空白后的 8 字符片段重合率为 0.9%—4.1%。最长公共片段不超过 62 字符，全部是标识符列表、命令或路径。
+- **测试**：读取内置技能、`SKILL.md` 或技能目录的 20 个测试文件 212 passed。覆盖技能加载与优先级、代表性任务路由、技能守卫扫描、打包、声明式索引、已退役工具名检查与架构守卫。
+- **路由对照**：12 条贴近日常的中文请求（每个技能一条）用新旧 frontmatter 各检索一次，12 个技能新旧都排第一。这是临时的一次性对照，用例未入库。
+
 ## 动作候选 `action_candidate`（2026-09-25，分支 `claude/decision-action-candidate`，基于 main `6a50d84aa`）
 
 - **改动**：
