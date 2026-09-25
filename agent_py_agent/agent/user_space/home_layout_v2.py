@@ -119,6 +119,18 @@ def _seed_from_template(template_path: Path, default: str) -> str:
     return text if text.strip() else default
 
 
+# LLM: memory.md / memory-hot.md 的种子只有这一处权威：根级模板非空就复制，否则用 home_memory_seeds 的正式默认导航文本
+#   （与 Memory 迁移判定"当前/旧导航"用的默认文本相同，避免新 owner 的种子被迁移误当旧正文）。修改时同步 memory_store/migration.py。
+# 函数用途: 返回新 owner 的 memory.md 与 memory-hot.md 初始内容。
+def owner_navigation_seeds(paths: Any) -> tuple[str, str]:
+    from .home_memory_seeds import default_memory_hot_md, default_memory_md
+
+    return (
+        _seed_from_template(paths.memory_md, default_memory_md()),
+        _seed_from_template(paths.memory_hot_md, default_memory_hot_md()),
+    )
+
+
 def _owner_persona_seed(template_path: Path, default: str, owner_kind: object, index: int) -> str:
     """Keep administrator templates, but adapt the untouched built-in seed for groups."""
 
@@ -146,8 +158,8 @@ def v2_seed_files(paths: Any) -> tuple[tuple[Path, str], ...]:
             paths.owner_agents_md,
             _owner_persona_seed(paths.agents_md, AGENTS_TEMPLATE, paths.owner_kind, 2),
         ),
-        (paths.owner_memory_md, _seed_from_template(paths.memory_md, "# Memory\n\n")),
-        (paths.owner_memory_hot_md, _seed_from_template(paths.memory_hot_md, "# Memory HOT\n\nOwner-specific HOT memory can override or refine root HOT memory.\n")),
+        (paths.owner_memory_md, owner_navigation_seeds(paths)[0]),
+        (paths.owner_memory_hot_md, owner_navigation_seeds(paths)[1]),
         (paths.owner_memory_routing_index_md, "# Owner Memory Routing Index\n\n"),
         (paths.owner_memory_candidates_jsonl, ""),
         (paths.owner_memory_ops_jsonl, ""),
@@ -312,4 +324,4 @@ def _schema_version_payload() -> dict[str, object]:
     }
 
 
-__all__ = ["v2_home_directories", "v2_home_path_fields", "v2_seed_files", "v2_seed_jsons"]
+__all__ = ["owner_navigation_seeds", "v2_home_directories", "v2_home_path_fields", "v2_seed_files", "v2_seed_jsons"]

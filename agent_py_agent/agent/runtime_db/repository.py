@@ -106,6 +106,24 @@ def _main_agent_recovery_reason(run_status: str, attempt_status: str) -> str:
     return ""
 
 
+# 函数用途: 判断 attempt metadata 里是否记了正整数 runner_pid（有身份才能走进程死亡证明）。
+def _runner_pid_recorded(metadata_json: object) -> bool:
+    meta = _json_object(metadata_json)
+    try:
+        return int(meta.get("runner_pid") or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+# 函数用途: 把 metadata_json 解析成字典；坏 JSON 或非对象按空字典。
+def _json_object(value: object) -> dict[str, Any]:
+    try:
+        parsed = json.loads(str(value or "{}"))
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 # LLM: 崩溃调和（RUN-01）依赖 attempt 记录的 runner 身份；start_time 仅 Linux /proc 可读，
 # 其他平台为 None（判死时仅做 pid 探活，fail-closed 不猜）。
 # 函数用途: 构造当前进程身份元数据（pid + 启动时刻），随 attempt 落账供崩溃恢复使用。
@@ -672,6 +690,65 @@ class RuntimeRepository(
                     recovered.append(str(row["agent_run_id"] or ""))
             conn.commit()
         return recovered
+
+    # LLM: 只读：列出仍非终态但 metadata 里没有 runner 身份（runner_pid）的 current attempt。它们不能被进程死亡证明覆盖，
+    #   也不能被任何人自动判死（同一 owner 库可能被别的运行版本写入）；这里只暴露事实，供启动事件、状态展示与显式结清命令使用。
+    # 函数用途: 找出"永远无法证实死活"的悬挂运行轮。
+    def unidentified_stale_attempts(self) -> list[dict[str, Any]]:
+        with self._runtime_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT ar.agent_run_id, ar.run_id, ar.role, ar.status AS run_status, ar.current_attempt_id,
+                       at.status AS attempt_status, at.started_at, at.metadata_json
+                FROM agent_runs ar
+                JOIN agent_attempts at ON at.attempt_id = ar.current_attempt_id
+                WHERE at.status IN ('running', 'created')
+                ORDER BY at.started_at ASC
+                """,
+            ).fetchall()
+        result = []
+        for row in rows:
+            if _runner_pid_recorded(row["metadata_json"]):
+                continue
+            result.append({
+                "agent_run_id": str(row["agent_run_id"] or ""), "run_id": str(row["run_id"] or ""),
+                "attempt_id": str(row["current_attempt_id"] or ""), "role": str(row["role"] or ""),
+                "run_status": str(row["run_status"] or ""), "attempt_status": str(row["attempt_status"] or ""),
+                "started_at": float(row["started_at"] or 0.0),
+            })
+        return result
+
+    # LLM: 显式结构化控制（CLI 命令）才能调用：把无 runner 身份、且开始时间早于 now-older_than 的 current attempt 记为
+    #   unknown 终态（unknown = 不确定是否有副作用，不是成功或失败），metadata 记 recovery_reason=no_runner_identity 与结清来源；
+    #   同事务用 current_attempt CAS，别的执行者已换代的行不动。返回被结清的 agent_run_id。
+    # 函数用途: 用户显式认可后，结清永远无法证实死活的悬挂运行轮。
+    def settle_unidentified_attempts(self, *, older_than_seconds: float, now: float | None = None,
+                                     settled_by: str = "explicit_control") -> list[str]:
+        current = time.time() if now is None else float(now)
+        cutoff = current - max(0.0, float(older_than_seconds))
+        settled: list[str] = []
+        with self._runtime_connection() as conn:
+            for item in self.unidentified_stale_attempts():
+                if item["started_at"] > cutoff:
+                    continue
+                row = conn.execute("SELECT metadata_json FROM agent_attempts WHERE attempt_id = ?", (item["attempt_id"],)).fetchone()
+                if row is None or _runner_pid_recorded(row["metadata_json"]):
+                    continue
+                meta = _json_object(row["metadata_json"])
+                meta.update({"recovery_reason": "no_runner_identity", "settled_by": settled_by, "settled_at": current})
+                changed = conn.execute(
+                    "UPDATE agent_attempts SET status='unknown', ended_at=?, metadata_json=? WHERE attempt_id=? "
+                    "AND status IN ('running','created') AND EXISTS "
+                    "(SELECT 1 FROM agent_runs WHERE agent_run_id=? AND current_attempt_id=?)",
+                    (current, json.dumps(meta, ensure_ascii=False), item["attempt_id"], item["agent_run_id"], item["attempt_id"]),
+                ).rowcount
+                if changed != 1:
+                    continue
+                conn.execute("UPDATE agent_runs SET status='unknown', updated_at=? WHERE agent_run_id=? AND current_attempt_id=?",
+                             (current, item["agent_run_id"], item["attempt_id"]))
+                settled.append(item["agent_run_id"])
+            conn.commit()
+        return settled
 
     # LLM: This is the only automatic exception to the generic UNKNOWN hard stop.  It accepts
     # two exact durable identities plus a complete operation-record projection, then proves in

@@ -302,7 +302,7 @@ def _recover_gateway_stale_attempts(agent: object) -> dict[str, object]:
     repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
     recover = getattr(repo, "recover_stale_attempts", None)
     if not callable(recover):
-        return {"run_ids": [], "count": 0, "error": None}
+        return {"run_ids": [], "count": 0, "error": None, "unidentified": []}
     try:
         run_ids = [str(item) for item in (recover() or []) if str(item)]
     except Exception as exc:  # noqa: BLE001 Gateway 仍需启动并暴露结构化恢复错误
@@ -310,8 +310,22 @@ def _recover_gateway_stale_attempts(agent: object) -> dict[str, object]:
             "run_ids": [],
             "count": 0,
             "error": runtime_error_report(exc, context="gateway.startup.stale_attempts"),
+            "unidentified": [],
         }
-    return {"run_ids": run_ids, "count": len(run_ids), "error": None}
+    return {"run_ids": run_ids, "count": len(run_ids), "error": None, "unidentified": _unidentified_stale_attempts(repo)}
+
+
+# LLM: 只读事实：没有 runner 身份的悬挂运行轮无法被自动判死，也不能静默留着；启动时把它们的 run_id 列出来写进状态与事件，
+#   由 `my-agent runtime settle-unidentified` 这类显式结构化命令结清。读取失败按空列表，不影响启动。
+# 函数用途: 列出启动时仍无法证实死活的悬挂运行轮编号。
+def _unidentified_stale_attempts(repo: object) -> list[str]:
+    lister = getattr(repo, "unidentified_stale_attempts", None)
+    if not callable(lister):
+        return []
+    try:
+        return [str(item.get("run_id") or item.get("agent_run_id") or "") for item in (lister() or []) if isinstance(item, dict)]
+    except Exception:  # noqa: BLE001 启动路径只暴露事实，不因只读查询失败而中断
+        return []
 
 
 # LLM: Gateway setup is the single startup mutation boundary. It rejects an overlapping live
@@ -345,10 +359,11 @@ def _cmd_gateway_run_setup(agent, paths):
             "failed_processing_requests": recovery["failed"],
             "recovered_stale_attempts": attempt_recovery["count"],
             "stale_attempt_recovery_error": attempt_recovery["error"],
+            "unidentified_stale_attempts": len(attempt_recovery["unidentified"]),
             "started_at": time.time(),
         },
     )
-    if attempt_recovery["count"] or attempt_recovery["error"]:
+    if attempt_recovery["count"] or attempt_recovery["error"] or attempt_recovery["unidentified"]:
         log_gateway_event(
             agent,
             "gateway_stale_attempts_reconciled",
@@ -367,6 +382,7 @@ def _cmd_gateway_run_setup(agent, paths):
             "failed_processing_requests": recovery["failed"],
             "recovered_stale_attempts": attempt_recovery["count"],
             "stale_attempt_recovery_error": attempt_recovery["error"],
+            "unidentified_stale_attempts": len(attempt_recovery["unidentified"]),
         },
     )
     return requeued, pid

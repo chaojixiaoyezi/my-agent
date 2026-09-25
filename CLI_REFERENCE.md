@@ -212,6 +212,7 @@ Ctrl+C
 | `home-status` | 查看 `~/.my-agent` 入口文件、关键目录和轻量计数 | 否 | 否 |
 | `home-migrate` | 预览或复制旧 home 数据到当前 owner home | `--apply` 时写 | 否 |
 | `home-retention` | 预览或执行当前 owner home 的过期文件清理 | `--apply` 时删除过期文件并写审计 | 否 |
+| `runtime-stale-attempts` | 列出没有进程身份、无法自动判死的悬挂运行轮；`--settle` 按阈值显式结清为 unknown | `--settle` 时写运行库 | 否 |
 | `home-index-rebuild` | 预览或重建 owner/task/run/agent 全局轻量索引 | `--apply` 时追加索引行 | 否 |
 | `memory-daily-list` | 直接查看 home daily memory 按天流水 | 否 | 否 |
 | `memory-route` | 按长期规则索引预览 memory 路由命中 | 否 | 否 |
@@ -516,6 +517,21 @@ my-agent home-index-rebuild --apply --json
 | --- | --- | --- |
 | `--apply` | `false` | 实际追加重建索引行；不传时只 dry-run 预览。 |
 | `--json` | `false` | 输出机器可读 JSON。 |
+
+## `runtime-stale-attempts`
+
+```powershell
+my-agent runtime-stale-attempts
+my-agent runtime-stale-attempts --settle --older-than-days 7 --json
+```
+
+列出 owner 权威运行库里仍为 running/created、但 metadata 没有记录 `runner_pid` 的运行轮：这类行来自旧版本，进程死亡证明永远碰不到它们，Gateway 启动时会把数量写进状态与 `gateway_stale_attempts_reconciled` 事件，但不会自动判死（同一 owner 库可能被别的运行版本写入）。确认没有别的运行版本还在用它们后，加 `--settle` 把开始于阈值之前的行记为 unknown 终态（不是成功或失败），metadata 记 `recovery_reason=no_runner_identity`、`settled_by=explicit_control`。有进程身份的行不受影响，仍走原进程死亡证明。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--settle` | `false` | 实际结清；不传时只列出。 |
+| `--older-than-days` | `1` | 只结清开始时间早于这么多天前的运行轮；最小 0。 |
+| `--json` | `false` | 输出机器可读 JSON（含 `settled_agent_run_ids` 与 `remaining`）。 |
 
 ## `memory-daily-list`
 

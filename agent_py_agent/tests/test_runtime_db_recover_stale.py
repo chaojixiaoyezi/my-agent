@@ -156,6 +156,31 @@ def test_no_pid_metadata_kept(tmp_path):
 
 # LLM: 已终态 attempt 不在调和范围（JOIN 只取 running/created）。
 # 函数用途: 验证 done attempt 不动。
+# LLM: 无 runner 身份的行不能被自动判死（同一 owner 库可能被别的运行版本写入），但必须能被列出并由显式命令按阈值结清为 unknown。
+# 函数用途: 验证无身份悬挂运行轮的只读列出、阈值内保留、显式结清与幂等。
+def test_unidentified_attempts_are_listed_and_only_settled_explicitly(tmp_path):
+    repo = _make_repo(tmp_path)
+    unidentified = _seed_run(repo, status="created", metadata={})
+    identified = _seed_run(repo, status="created", metadata={"runner_pid": os.getpid(), "runner_start_time": None})
+    listed = repo.unidentified_stale_attempts()
+    assert [row["agent_run_id"] for row in listed] == [unidentified]
+    assert set(listed[0]) == {"agent_run_id", "run_id", "attempt_id", "role", "run_status", "attempt_status", "started_at"}
+    assert repo.recover_stale_attempts() == [], "没有身份的行不被自动判死"
+    started = listed[0]["started_at"]
+    assert repo.settle_unidentified_attempts(older_than_seconds=86400.0, now=started + 3600.0) == [], "未到阈值不结清"
+    settled = repo.settle_unidentified_attempts(older_than_seconds=86400.0, now=started + 2 * 86400.0)
+    assert settled == [unidentified]
+    with repo._runtime_connection() as conn:
+        attempt = conn.execute("SELECT status, ended_at, metadata_json FROM agent_attempts WHERE agent_run_id=?", (unidentified,)).fetchone()
+        run = conn.execute("SELECT status FROM agent_runs WHERE agent_run_id=?", (unidentified,)).fetchone()
+        other = conn.execute("SELECT status FROM agent_attempts WHERE agent_run_id=?", (identified,)).fetchone()
+    meta = json.loads(attempt["metadata_json"])
+    assert (attempt["status"], run["status"]) == ("unknown", "unknown") and attempt["ended_at"] == started + 2 * 86400.0
+    assert (meta["recovery_reason"], meta["settled_by"]) == ("no_runner_identity", "explicit_control")
+    assert other["status"] == "running", "有身份的行不受显式结清影响"
+    assert repo.unidentified_stale_attempts() == [] and repo.settle_unidentified_attempts(older_than_seconds=0.0) == []
+
+
 def test_terminal_attempt_untouched(tmp_path):
     repo = _make_repo(tmp_path)
     agent_run_id = _seed_run(

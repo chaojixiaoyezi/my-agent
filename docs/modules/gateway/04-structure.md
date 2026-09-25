@@ -1766,7 +1766,7 @@ per-owner Agent，也必须跟随基础 Gateway 的权威队列记录，不能�
 - `cli/bootstrap.py::default_config_path` 是 CLI 与 service 共用的进程级配置默认入口：优先
   `MY_AGENT_CONFIG`，否则回到随包 YAML；显式 `--config` 做本次命令覆盖。
 - `agent/startup_recovery.py` 虽保留历史文件名，但职责已冻结为 `status` 的只读投影；它不能改任务、attempt
-  或队列。普通 attempt 启动恢复位于 `cli/gateway_process.py::_cmd_gateway_run_setup`，subagent 失联恢复位于
+  或队列。普通 attempt 启动恢复位于 `cli/gateway_process.py::_cmd_gateway_run_setup`（另把没有 runner 身份、无法证实死活的 current attempt 只读列进 `state.json` 与启动事件的 `unidentified_stale_attempts`，结清只能经显式命令 `runtime-stale-attempts --settle`），subagent 失联恢复位于
   `cli/gateway_loops.py::_GatewayOrphanReconciler`，两者都由同一 Gateway 持有。
 - `agent_core/orchestration/dispatch/lock.py` 的权威是打开文件描述符上的 OS advisory lock。持有者 JSON
   只用于观测，不能授权抢占、拒绝恢复或判断进程生死；释放时禁止 unlink 共享 inode。

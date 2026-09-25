@@ -2,6 +2,13 @@
 
 child不展示历史正文时的读取回归先复现1 failed/1 passed，修复后test_compact_retained_history、test_subagent_compact_recovery、test_gateway_child_compact_scope_application三文件31 passed（8.48秒）。三宿主seed仓外基线仅验证测量和完整性，不算内存目标通过；细节见容量审计的宿主生命周期基线。
 
+## 自愈两片：无身份悬挂运行轮可见可结清、导航种子不再误迁移（用户决定第 5 项，2026-09-24 晚）
+
+- **无身份悬挂运行轮**：本机 owner 库有 9 条 8 月的 running/created attempt，metadata 为空、没有 `runner_pid`，原 RUN-01 进程死亡证明永远碰不到它们。不自动判死（同一 owner 库会被别的运行版本写入，原合同"无 pid 记录保持原态"不动）；改为 Gateway 启动列出并写进状态/事件（`unidentified_stale_attempts`、`gateway_stale_attempts_reconciled.unidentified`），新增显式命令 `my-agent runtime-stale-attempts [--settle] [--older-than-days 1] [--json]`，`--settle` 经 `RuntimeRepository.settle_unidentified_attempts` 的 current_attempt CAS 记为 unknown（metadata `recovery_reason=no_runner_identity`、`settled_by=explicit_control`）。
+- **导航种子**：`owner_navigation_seeds()` 统一 memory.md/HOT 的种子文本（根模板或正式默认导航），`_scan_legacy_navigation` 把正式默认与本 home 种子都判 current；新 owner 初始化后不再产生模板标题候选。
+- **测试**：`test_runtime_db_recover_stale.py` +1（列出、阈值内保留、显式结清与幂等、有身份行不受影响），`test_startup_commands.py` 两项断言含 `unidentified`，`test_memory_migration_v2.py` +1（种子/根模板副本/正式默认均 current，自定义正文才 legacy）。
+- **真实验收**：部署后本机跑 `my-agent runtime-stale-attempts` 看到 9 条并用 `--settle --older-than-days 7` 结清，Gateway 事件与 status 载荷计数归零。
+
 ## 插件观察候选结构（第 15 项 P5-C 前置，2026-09-24 晚）
 
 - **改动**：manifest v5（`observation` / `observation_ref`，安装校验与双向配对，构建脚本自动选 v5）；新模块 `agent/plugin_observation.py`（整份接受/拒绝、宿主铸 ID、模型投影、按 runtime_events 序判定新鲜度、动作候选复核）；`PluginProxyTool` 结果路径改写与发送前复核（宿主参数 `__operation_id`/`__run_scope`，`_meta["my-agent/observation"]`）；`MCPProxyTool._execute_with_meta` 让子类按本次参数附 _meta 而不缓存到共享实例；`tool_completed` 事件载荷附观察投影；`runtime_db.events_for_agent_run`；归档白名单加 `observation`/`observation_rejected`；`ToolRegistry` 构造参数 `plugin_runtime_repo`；browser-lite 输出观察候选并按候选执行。设计与偏差见 `docs/design/PLUGIN_OBSERVATION_CANDIDATES.md` 第 6 节。

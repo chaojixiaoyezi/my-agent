@@ -865,21 +865,26 @@ def _scan_legacy_lessons(service: object, state: _MigrationScanState) -> None:
 
 
 # LLM: memory.md and memory-hot.md are selected only by formal/default markers, never by similarity to their prose.
+#   "当前"文本有两个精确来源：home_memory_seeds 的正式默认，以及本 home 新 owner 实际会拿到的种子（根级模板副本，
+#   来自 home_layout_v2.owner_navigation_seeds）；新 owner 刚初始化的文件因此不会被当成旧正文变成待审候选。
 # 函数用途: 检测旧导航或重复 HOT 正文并保护正式 HOT marker。
 def _scan_legacy_navigation(service: object, state: _MigrationScanState) -> None:
+    from ..user_space.home_layout_v2 import owner_navigation_seeds
+
+    seeded_memory, seeded_hot = _seeded_navigation_texts(service, owner_navigation_seeds)
     sources = (
-        (Path(service.home.owner_memory_md), "legacy_memory_md", default_memory_md(), False),
+        (Path(service.home.owner_memory_md), "legacy_memory_md", (default_memory_md(), seeded_memory), False),
         (
             Path(service.home.owner_memory_hot_md),
             "legacy_memory_hot",
-            default_memory_hot_md(),
+            (default_memory_hot_md(), seeded_hot),
             True,
         ),
     )
-    for path, category, default, allow_formal_hot in sources:
+    for path, category, defaults, allow_formal_hot in sources:
         text_state, text_error = _navigation_file_state(
             path,
-            default=default,
+            defaults=defaults,
             allow_formal_hot=allow_formal_hot,
         )
         if text_error is not None:
@@ -890,6 +895,18 @@ def _scan_legacy_navigation(service: object, state: _MigrationScanState) -> None
             state.findings.append(
                 _finding(category, path, 1, "candidate_then_reset_navigation")
             )
+
+
+# LLM: 只读根级模板路径；home 缺这两个字段（旧测试替身）或模板不可读时退回正式默认，不猜别的路径。
+# 函数用途: 取本 home 新 owner 实际会拿到的 memory.md / memory-hot.md 种子文本。
+def _seeded_navigation_texts(service: object, seeds) -> tuple[str, str]:
+    home = service.home
+    if getattr(home, "memory_md", None) is None or getattr(home, "memory_hot_md", None) is None:
+        return default_memory_md(), default_memory_hot_md()
+    try:
+        return seeds(home)
+    except (OSError, TypeError, ValueError):
+        return default_memory_md(), default_memory_hot_md()
 
 
 # LLM: Runtime reads only retention v2, so a valid v1 policy becomes an explicit one-time migration finding.
@@ -1464,7 +1481,7 @@ def _lesson_file_state(
 def _navigation_file_state(
     path: Path,
     *,
-    default: str,
+    defaults: tuple[str, ...],
     allow_formal_hot: bool,
 ) -> tuple[str, MemoryMigrationError | None]:
     if not path.exists():
@@ -1477,7 +1494,7 @@ def _navigation_file_state(
             str(path),
             f"{type(exc).__name__}: unreadable navigation file",
         )
-    if text.strip() == default.strip():
+    if any(text.strip() == default.strip() for default in defaults):
         return "current", None
     if not allow_formal_hot:
         return "legacy", None

@@ -192,6 +192,9 @@ task workspace 摘要同步）同样改用它，避免"读时切开、写回落�
   `MEMORY_MIGRATION_SCHEMA_VERSION`、`status == "complete"`、marker 读无错，且
   `_legacy_sources_at_contract_paths` 在契约位置未发现遗留目录。任一条件不满足即回落完整扫描，
   因此"迁移该不该做"的裁决权仍在完整扫描与已冻结快照，短路只回答"无事可做"。
+- `_scan_legacy_navigation` 判定 memory.md / memory-hot.md 是否为旧正文只认两种精确来源：`home_memory_seeds` 的正式默认导航，
+  以及 `home_layout_v2.owner_navigation_seeds()` 给本 home 新 owner 的种子（根级模板副本或同一默认）；两者都不同才是 legacy。
+  种子文本因此只有一处权威，新 owner 初始化的文件不会变成 `migrated_legacy` 候选。
 - `_legacy_sources_at_contract_paths` / `_recorded_paths` / `_path_present` 是**只读派生探针**，
   不是第二套权威状态：它只按已知写入形状点名 stat（owner home 根、`owner_data_dir`、
   `owner_tasks_dir/<date>/<task>/work/<legacy-name>`、显式工作区根、marker 记录过的位置），

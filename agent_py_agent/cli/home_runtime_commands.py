@@ -66,6 +66,12 @@ def add_home_runtime_subcommands(sub: argparse._SubParsersAction) -> None:
     task_workspace_list.add_argument("--json", action="store_true", help="输出机器可读 JSON")
     task_workspace_list.set_defaults(func=cmd_task_workspace_list)
 
+    stale_attempts = sub.add_parser("runtime-stale-attempts", help="列出（可选结清）没有进程身份、无法自动判死的悬挂运行轮")
+    stale_attempts.add_argument("--settle", action="store_true", help="把开始时间早于阈值的悬挂运行轮记为 unknown 终态（显式结清，不是自动判死）")
+    stale_attempts.add_argument("--older-than-days", type=float, default=1.0, help="只结清开始于多少天前的运行轮；默认 1 天，最小 0")
+    stale_attempts.add_argument("--json", action="store_true", help="输出机器可读 JSON")
+    stale_attempts.set_defaults(func=cmd_runtime_stale_attempts)
+
 
 # LLM: Daily CLI 是只读经历检查器，不得把旧 role/kind 镜像解释成正式记忆或召回来源。
 # 函数用途: 查询当前 owner 的 Daily v2 账本并呈现摘要、顺序和引用字段。
@@ -139,6 +145,33 @@ def cmd_home_index_rebuild(args) -> int:
         print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
     else:
         _print_home_index_rebuild(payload)
+    return 0
+
+
+# LLM: 只读列出 owner 权威库里没有 runner 身份的悬挂运行轮；--settle 才写库，且只经 RuntimeRepository.settle_unidentified_attempts
+#   的 CAS 结清为 unknown（不是成功/失败），并把结清来源记进 metadata。没有权威库（无 home 上下文）时明确报错，不猜。
+# 函数用途: 让用户看到并显式结清 Gateway 启动事件里报出的"无法证实死活"的运行轮。
+def cmd_runtime_stale_attempts(args) -> int:
+    agent = make_agent(args)
+    repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
+    if repo is None or not hasattr(repo, "unidentified_stale_attempts"):
+        print(json.dumps({"ok": False, "error": "当前 home 没有权威运行库，无法列出悬挂运行轮。"}, ensure_ascii=False))
+        return 1
+    settled: list[str] = []
+    if bool(getattr(args, "settle", False)):
+        days = max(0.0, float(getattr(args, "older_than_days", 1.0) or 0.0))
+        settled = repo.settle_unidentified_attempts(older_than_seconds=days * 86400.0)
+    remaining = repo.unidentified_stale_attempts()
+    payload = {"ok": True, "settled_agent_run_ids": settled, "remaining": remaining}
+    if getattr(args, "json", False):
+        print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    print("MY-AGENT RUNTIME STALE ATTEMPTS")
+    print(f"settled={len(settled)} remaining={len(remaining)}")
+    for item in remaining:
+        print(f"- {item['run_id']} role={item['role']} attempt_status={item['attempt_status']} started_at={item['started_at']:.0f}")
+    if remaining and not settled:
+        print("这些运行轮没有记录进程身份，无法自动判死；确认没有别的运行版本在用它们后，可加 --settle 结清为 unknown。")
     return 0
 
 

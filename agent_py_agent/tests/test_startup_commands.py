@@ -159,10 +159,11 @@ def test_gateway_startup_owns_stale_attempt_recovery() -> None:
     recover = MagicMock(return_value=["run-1", "run-2"])
     agent = MagicMock()
     agent.subagents.runtime_db.recover_stale_attempts = recover
+    agent.subagents.runtime_db.unidentified_stale_attempts = MagicMock(return_value=[{"run_id": "run-legacy", "agent_run_id": "agentrun-x"}])
 
     result = _recover_gateway_stale_attempts(agent)
 
-    assert result == {"run_ids": ["run-1", "run-2"], "count": 2, "error": None}
+    assert result == {"run_ids": ["run-1", "run-2"], "count": 2, "error": None, "unidentified": ["run-legacy"]}
     recover.assert_called_once_with()
 
 
@@ -174,7 +175,7 @@ def test_gateway_stale_attempt_recovery_error_is_structured() -> None:
 
     result = _recover_gateway_stale_attempts(agent)
 
-    assert result["count"] == 0
+    assert result["count"] == 0 and result["unidentified"] == []
     assert result["error"]["context"] == "gateway.startup.stale_attempts"
 
 

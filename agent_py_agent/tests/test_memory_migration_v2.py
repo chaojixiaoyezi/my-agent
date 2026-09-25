@@ -197,6 +197,34 @@ def test_migration_dry_run_detects_all_legacy_sources_without_writes(tmp_path: P
     assert not any((home.system_backups_dir / "memory-migration").glob("*/manifest.json"))
 
 
+# LLM: 新 owner 刚初始化的 memory.md / memory-hot.md（根级模板副本或正式默认导航）不是旧正文，不能变成待审候选；
+#   只有与两种精确来源都不同的内容才是 legacy。
+# 函数用途: 验证种子文件按精确来源判定为 current，改成自定义内容后才成为 legacy。
+def test_freshly_seeded_navigation_files_are_not_legacy(tmp_path: Path):
+    from agent_py_agent.agent.user_space.home_layout_v2 import owner_navigation_seeds
+    from agent_py_agent.agent.user_space.home_memory_seeds import (
+        default_memory_hot_md,
+        default_memory_md,
+    )
+
+    home, *_rest, migration = _runtime(tmp_path)
+    seeded_memory, seeded_hot = owner_navigation_seeds(home)
+    assert seeded_memory.strip() and seeded_hot.strip()
+    home.owner_memory_md.write_text(seeded_memory, encoding="utf-8")
+    home.owner_memory_hot_md.write_text(seeded_hot, encoding="utf-8")
+    assert not {"legacy_memory_md", "legacy_memory_hot"} & {f.category for f in migration.plan().findings}, "种子内容是 current"
+
+    home.memory_md.write_text("# 管理员导航模板\n\n- 团队约定入口\n", encoding="utf-8")
+    home.owner_memory_md.write_text(home.memory_md.read_text(encoding="utf-8"), encoding="utf-8")
+    assert "legacy_memory_md" not in {f.category for f in migration.plan().findings}, "根级模板副本也是 current"
+    home.owner_memory_md.write_text(default_memory_md(), encoding="utf-8")
+    home.owner_memory_hot_md.write_text(default_memory_hot_md(), encoding="utf-8")
+    assert not {"legacy_memory_md", "legacy_memory_hot"} & {f.category for f in migration.plan().findings}, "正式默认导航是 current"
+
+    home.owner_memory_md.write_text("# 旧 Memory\n\n真正的旧正文。\n", encoding="utf-8")
+    assert "legacy_memory_md" in {f.category for f in migration.plan().findings}, "与两种精确来源都不同才是 legacy"
+
+
 def test_migration_apply_backs_up_preserves_mixed_daily_chunks_and_is_idempotent(
     tmp_path: Path,
 ):
