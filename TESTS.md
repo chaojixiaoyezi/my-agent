@@ -244,6 +244,13 @@ child不展示历史正文时的读取回归先复现1 failed/1 passed，修复�
 - **边界**：不停进程、不切激活，目标必须先 `/plugins disable`；不做双版本准备切换和 rollback；旧包 blob 保留。
 - **真实验收（本机，runtime-step10q，2026-09-24 13:26）**：仓内源码临时把 workspace-peek 版本号改成 0.1.2 构建新包（不提交），放在 owner home 下。`/plugins disable workspace-peek` → 已停用并释放；`/plugins update workspace-peek <新包>` → 完成，installations.json 版本 0.1.1→0.1.2、revision 6、last_commit=install（该插件原本无私有配置，`settings_reason=none`）；`/plugins enable workspace-peek` → 完成，phase=active、revision 8；`/plugins@workspace-peek tree mediab --depth 1` 返回结构化目录结果。证据在仓库外 `releases/step10-combo4/plugin-update-acceptance.json`。
 
+## 媒体压缩策略片 C：先看图后总结，让随图摘要在自动压缩里生效（2026-09-24，用户决定第 2 项）
+
+- **根因**：两轮真实阈值压缩（M3、M2.7）的 checkpoint 都是 `probe_supported` + `summary_budget_exceeded`：阈值在窗口 90% 触发并整段压完，而片 B 的单次随图请求必须装进 80% 窗口减输出预留，结构上永远装不下；只有范围很小的手动 `/compact` 才走到过 B。
+- **改动**：新增 `conversation/compact_media_digest.py`（含图回合分组、按摘要预算与 `compact_vision_digest_max_requests` 打包看图小请求、逐个发送并按 sha 前缀打标签、结果合成决定）；`compact.py::_summarize` 先看图再文字总结，图块统一投影为归档引用，要点进文字摘要指令；`_effective_media_decision` 预算门改为“最大的一次看图小请求”；`CompactMediaDecision.summarized_blocks` 与 checkpoint 双计数（`_media_blocks_archived/_media_blocks_summarized`）；一次都没成功才写 `compact_vision_failed_generation`，且不再让整次压缩失败。配置新增 `compact_vision_digest_max_requests`（YAML + dataclass，默认 4）。
+- **测试**：`test_compact_media_vision.py` 三项改为两步语义（准入按最大请求；看图小请求只带含图回合并保留图块、文字请求带引用与要点、checkpoint 计数；typed 失败同次回落、写同代次标记、不进熔断）；新增 `test_compact_media_digest.py` 6 项（分组顺序、按预算/次数打包与两种跳过原因、标签与首个 typed 失败停止并合成 partial 决定、非 typed 上抛与空回复算失败、部分成功写双计数与 `vision_digest_partial`、无图或非 B 决定零请求）。
+- **真实验收**：待部署后复跑“贴图 + 长文越过压缩点”的阈值自动压缩（M3、M2.7），看 checkpoint `media_policy=vision_summary`、`media_blocks_summarized≥1`、`media_policy_reason` 为空或 `vision_digest_partial`。
+
 ## 媒体压缩策略片 B：视觉摘要（2026-09-24，本地分支 `claude/compact-media-b`）
 
 - **改动**：档案字段 `input_modalities`（开放小写标识符，`validate_model`/快捷新增白名单/`resolved_model`→`AgentConfig.model_input_modalities`，`/model` 表单新增"输入模态"，决策模型不接受）；`backends/vision_capability.py` 结构化探针（8×8 纯色 PNG + `my_agent_vision_probe(color)` 工具，只认颜色一致的 tool_use；typed 媒体拒绝→unsupported 缓存；答错/不调用→inconclusive 不缓存、最多 2 次；原生工具未证明→unavailable；网络/额度错不缓存；进程级缓存键 端点+模型+api_base、同键单飞）；`compact_media_policy` 骨架决定（auto 下 archived_refs + `vision_candidate`）→ 候选构造在范围内确有媒体块时才 `resolve_vision_candidate`（声明或探针）→ 摘要请求构造处 `vision_summary_admission`（视频/`input_media_max_bytes`/文字估算+图块×`input_media_token_reserve`≤摘要预算）；B 单请求经 `generate_bounded_compact_response(vision_summary=True)`，窗口错误/媒体拒绝/截断/超预算统一 typed `COMPACT_VISION_SUMMARY_FAILED`，只写线程 `compact_vision_failed_generation`（不进熔断），同代次下一次压缩选 A 并记 `media_policy_reason`；checkpoint 新增 `media_blocks_summarized`、`media_policy_reason`；强制恢复一律 A（`policy_forced`/`forced_recovery`）。错误码登记分类表与 Gateway 文案。

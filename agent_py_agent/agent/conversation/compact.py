@@ -28,6 +28,11 @@ from .compact_guard import (
     record_compact_failure,
     record_compact_vision_failure,
 )
+from .compact_media_digest import (
+    MediaDigestContext,
+    largest_digest_request_tokens,
+    summarize_media_turns,
+)
 from .compact_media_policy import (
     COMPACT_VISION_SUMMARY_FAILED,
     MEDIA_POLICY_ARCHIVED_REFS,
@@ -37,10 +42,10 @@ from .compact_media_policy import (
     MediaArchiveFacts,
     archived_refs_fallback,
     media_archive_facts,
-    media_token_reserve,
     project_archived_media_message,
     resolve_compact_media_policy,
     resolve_vision_candidate,
+    vision_digest_max_requests,
     vision_summary_admission,
 )
 from .compact_message_source import CompactMessageSource, estimate_compact_payload
@@ -870,6 +875,11 @@ def _build_compact_candidate(
             ),
         ),
     )
+    final_media = media_outcome[-1] if media_outcome else media_decision
+    if (final_media is not None and final_media.policy == MEDIA_POLICY_ARCHIVED_REFS
+            and final_media.reason == COMPACT_VISION_SUMMARY_FAILED):
+        # 看图小请求一次都没成功：写同代次标记；若本次提交失败，同代次重试直接选归档引用，不再发看图请求。
+        record_compact_vision_failure(request.store, request.thread, now=request.attempted_at)
     raise_if_compact_interrupted(request.interrupt_check)
     projection = project_compact_request(request.request_projector, ConversationCompactView(
         request.thread.thread_id, request.thread.compact_generation + 1, summary, retained_tail,
@@ -893,8 +903,8 @@ def _build_compact_candidate(
         projected_tokens_after=projected_after,
         request_projection=projection,
         tool_source=request.tool_source,
-        # 摘要阶段的准入可能把 B 候选落成归档引用；checkpoint 记的是实际采用的决定。
-        media_decision=media_outcome[-1] if media_outcome else media_decision,
+        # 摘要阶段的准入或看图小请求结果可能改写 B 候选；checkpoint 记的是实际采用的决定（含 summarized_blocks）。
+        media_decision=final_media,
         media_facts=media_facts,
     )
 
@@ -939,10 +949,8 @@ def _commit_compact_candidate(
             media_policy=candidate.media_decision.policy if candidate.media_decision is not None else "",
             media_fact_source=candidate.media_decision.fact_source if candidate.media_decision is not None else "",
             media_policy_reason=candidate.media_decision.reason if candidate.media_decision is not None else "",
-            media_blocks_archived=(candidate.media_facts.blocks if candidate.media_decision is not None
-                                   and candidate.media_decision.policy == MEDIA_POLICY_ARCHIVED_REFS else 0),
-            media_blocks_summarized=(candidate.media_facts.blocks if candidate.media_decision is not None
-                                     and candidate.media_decision.policy == MEDIA_POLICY_VISION_SUMMARY else 0),
+            media_blocks_archived=_media_blocks_archived(candidate),
+            media_blocks_summarized=_media_blocks_summarized(candidate),
             media_refs=candidate.media_facts.refs,
             **({
                 "scope": request.compact_context.scope,
@@ -1163,14 +1171,14 @@ def _summarize(
     tool_source_text = compact_tool_summary_text(tool_history) if tool_history else ""
     provider_surface = selected_call.provider_surface
     foreground_rows = filtered_message_rows(rows, lambda row: not is_audit_background_transcript_entry(row))
-    media_decision = _effective_media_decision(agent, selected_call, previous_summary, foreground_rows, operation_evidence)
-    vision = media_decision.policy == MEDIA_POLICY_VISION_SUMMARY
+    media_decision = _effective_media_decision(agent, selected_call, foreground_rows)
+    media_decision, media_digest = _media_digest_for_summary(agent, selected_call, media_decision, foreground_rows)
     instruction = _conversation_summary_instruction(
         operation_evidence,
         custom_instructions=selected_call.custom_instructions,
         cache_safe=provider_surface is not None,
-        media_archived=selected_call.media_archived and not vision,
-        media_summarized=selected_call.media_archived and vision,
+        media_archived=selected_call.media_archived,
+        media_digest=media_digest,
     )
     if provider_surface is None:
         prompt = _legacy_conversation_summary_prompt(
@@ -1188,9 +1196,9 @@ def _summarize(
             selected_call.compact_generation,
             foreground_rows,
             volatile_sections=provider_surface.volatile_sections,
-            # B 路径保留 local_file 图块，由供应商适配层在网络边界展开为 base64；A 路径投影为归档引用。
+            # 图块永远不进这次大范围文字摘要请求：策略不为 off 时统一投影为归档引用，图中要点已由看图小请求写进指令。
             project_message=(project_archived_media_message
-                             if selected_call.media_policy != MEDIA_POLICY_OFF and not vision else None),
+                             if selected_call.media_policy != MEDIA_POLICY_OFF else None),
         )
         provider_tools = (
             list(provider_surface.tools)
@@ -1223,8 +1231,6 @@ def _summarize(
         source_progress=selected_call.source_progress,
         preserve_complete_fallback=selected_call.preserve_complete_fallback or bool(tool_history),
         message_source=message_source,
-        vision_summary=vision,
-        media_reserve_tokens=selected_call.media_facts.blocks * media_token_reserve(agent) if vision else 0,
     )
     summary = (
         ""
@@ -1238,6 +1244,9 @@ def _summarize(
             operation_evidence,
             foreground_rows,
         )
+        if media_digest:
+            # 机械回退也不能丢掉已经花请求换来的图中要点。
+            summary = f"{summary}\n\n附件内容要点：\n{media_digest}"
     summary = _summary_with_conversation_landmarks(
         summary, previous_summary, foreground_rows, max_chars=_compact_landmark_max_chars(agent),
     )
@@ -1248,43 +1257,26 @@ def _summarize(
     return f"{summary}\n\n{tool_source_text}" if mechanical and tool_source_text else summary
 
 
-# LLM: 请求前的 B 准入：只有 provider 原生消息重放能承载图块，legacy prompt 一律落 A（reason legacy_prompt）；文字估算用
-#   不投影的来源加同一套摘要 prompt/工具/系统指令口径，再经 vision_summary_admission 过视频/字节/预算门。结果追加到
-#   call.media_outcome 供候选与 checkpoint 读取；不发请求、不改 rows。
+# LLM: 请求前的 B 准入：只有 provider 原生消息重放能承载图块，legacy prompt 一律落 A（reason legacy_prompt）；预算门按
+#   "最大的一次看图小请求"估算（该回合文字 + 它的图块数 × 预留），不再按整段范围估算，所以阈值自动压缩的大范围不会天然
+#   超预算。结果追加到 call.media_outcome 供候选与 checkpoint 读取；不发请求、不改 rows。
 # 函数用途: 把 B 候选按结构化门落成本次实际使用的媒体策略。
 def _effective_media_decision(
     agent: SimpleAgent,
     call: _CompactSummaryCall,
-    previous_summary: str,
     rows: Sequence[MessageLogEntry],
-    operation_evidence: dict[str, object],
 ) -> CompactMediaDecision:
     decision = call.media_decision or CompactMediaDecision(call.media_policy, "")
-    surface = call.provider_surface
     if decision.policy == MEDIA_POLICY_VISION_SUMMARY:
-        if surface is None:
+        if call.provider_surface is None:
             decision = archived_refs_fallback(decision, "legacy_prompt")
         else:
-            from .auxiliary_model_call import AuxiliaryModelCallRequest
-            from .compact_request_budget import compact_request_tokens, compact_summary_budget
+            from .compact_request_budget import compact_summary_budget
 
-            instruction = _conversation_summary_instruction(
-                operation_evidence, custom_instructions=call.custom_instructions, cache_safe=True,
-                media_summarized=call.media_archived,
-            )
-            raw_source = conversation_compact_provider_source(
-                previous_summary, call.compact_generation, rows, volatile_sections=surface.volatile_sections,
-            )
-            probe = AuxiliaryModelCallRequest(
-                agent=agent, prompt=conversation_compact_provider_prompt(surface, instruction), messages=None,
-                tools=list(surface.tools) if surface.tools is not None else None,
-                system_instruction=surface.system_instruction, purpose="conversation_compact_summary",
-            )
             decision = vision_summary_admission(
                 decision, call.media_facts,
                 media_max_bytes=int(getattr(getattr(agent, "config", None), "input_media_max_bytes", 16 * 1024 * 1024) or 0),
-                reserve_tokens=media_token_reserve(agent),
-                text_tokens=compact_request_tokens(probe, raw_source),
+                request_tokens=largest_digest_request_tokens(agent, _media_digest_context(call), rows),
                 budget=compact_summary_budget(agent),
             )
     if call.media_outcome is not None:
@@ -1292,9 +1284,54 @@ def _effective_media_decision(
     return decision
 
 
+# LLM: 只在准入后仍为 vision_summary 且有 provider 缓存面时发看图小请求；最终决定（含 summarized_blocks 与 partial/失败原因）
+#   追加到 call.media_outcome，供候选与 checkpoint 读取。A/off 返回原决定与空串，零请求。
+# 函数用途: 文字摘要之前先把范围里的图看一遍，把图中要点文字带给文字摘要请求。
+def _media_digest_for_summary(
+    agent: SimpleAgent,
+    call: _CompactSummaryCall,
+    decision: CompactMediaDecision,
+    rows: Sequence[MessageLogEntry],
+) -> tuple[CompactMediaDecision, str]:
+    if decision.policy != MEDIA_POLICY_VISION_SUMMARY or call.provider_surface is None:
+        return decision, ""
+    final, digest = summarize_media_turns(
+        agent, _media_digest_context(call), rows, decision, max_requests=vision_digest_max_requests(agent),
+    )
+    if call.media_outcome is not None:
+        call.media_outcome.append(final)
+    return final, digest
+
+
+# 函数用途: 从摘要调用的身份与缓存面派生看图小请求上下文，不复制历史；调用方保证 provider_surface 非空。
+def _media_digest_context(call: _CompactSummaryCall) -> MediaDigestContext:
+    return MediaDigestContext(
+        surface=call.provider_surface, compact_generation=call.compact_generation, request_id=call.request_id,
+        run_id=call.run_id, task_id=call.task_id, thread_id=call.thread_id, interrupt_check=call.interrupt_check,
+    )
+
+
+# LLM: B 部分成功时 archived 与 summarized 可同时非零：summarized 取决定的 summarized_blocks（不超过范围内图块数），
+#   archived 为范围内其余图块；off/无媒体两者为 0。checkpoint 只读这两个函数，不再自行按 policy 推断。
+# 函数用途: 算 checkpoint 里"本次由看图小请求总结了几个图块"。
+def _media_blocks_summarized(candidate: _CompactCandidate) -> int:
+    decision = candidate.media_decision
+    if decision is None or decision.policy != MEDIA_POLICY_VISION_SUMMARY:
+        return 0
+    return max(0, min(int(decision.summarized_blocks), candidate.media_facts.blocks))
+
+
+# 函数用途: 算 checkpoint 里"本次按归档引用处理了几个图块"（范围内图块减去已总结的）。
+def _media_blocks_archived(candidate: _CompactCandidate) -> int:
+    decision = candidate.media_decision
+    if decision is None or decision.policy == MEDIA_POLICY_OFF:
+        return 0
+    return max(0, candidate.media_facts.blocks - _media_blocks_summarized(candidate))
+
+
 # LLM: These shared rules are content guidance only. The cache-safe flag describes where the rows
 # live on the wire; it cannot authorize evidence, select a partition, or change commit semantics.
-# media_archived / media_summarized 只是软引导：前者说明图已换成引用，后者说明图随请求发送、要求摘要图中要点。
+# media_archived / media_digest 只是软引导：前者说明图已换成引用，后者是看图小请求产出的图中要点文字，要求摘要把要点并到对应引用旁。
 # 函数用途: 生成 transcript Compact 的统一摘要要求，并说明历史是原生消息还是兼容 prompt 正文。
 def _conversation_summary_instruction(
     operation_evidence: dict[str, object],
@@ -1302,7 +1339,7 @@ def _conversation_summary_instruction(
     custom_instructions: str,
     cache_safe: bool,
     media_archived: bool = False,
-    media_summarized: bool = False,
+    media_digest: str = "",
 ) -> str:
     row_location = (
         "The chronological provider messages immediately before this request are the new "
@@ -1323,10 +1360,10 @@ def _conversation_summary_instruction(
             *(["Image or video attachments in the rows were replaced by [附件引用 ...] reference blocks; keep those",
                "references and the conclusions drawn from them at the time. Do not claim the media itself is present."]
               if media_archived else []),
-            *(["Image attachments from the rows are included in this request. Summarize what each image shows that",
-               "matters for the conversation (values, labels, structure, conclusions) and keep the attachment name",
-               "or hash so the summary can refer to it later; the images themselves will not be resent."]
-              if media_summarized else []),
+            *(["Attachment content notes from a separate vision pass over the same rows are appended after the optional",
+               "user instructions. Treat them as what those attachments showed, fold the relevant points into the summary",
+               "next to the matching [附件引用 ...] reference, and keep the attachment hash so the summary can refer to it."]
+              if media_digest else []),
             "Use separate sections for the user's primary goal, current work, exact project/file paths,",
             "verified results, unfinished tasks, and the next step. A progress-check request does not",
             "replace the larger task it refers to. Retain the original requirements unless the user changed them.",
@@ -1343,6 +1380,8 @@ def _conversation_summary_instruction(
             "",
             "Optional user summarization instructions:",
             str(custom_instructions or "").strip() or "(none)",
+            *(["", "Attachment content notes (vision pass over the compacted rows; authoritative for what the images showed):",
+               media_digest] if media_digest else []),
         ]
     )
 

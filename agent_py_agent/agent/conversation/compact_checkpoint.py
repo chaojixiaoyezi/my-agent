@@ -43,7 +43,8 @@ class CompactCheckpointRequest:
     source_tool_refs: tuple[dict[str, str], ...] = ()
     retained_tool_refs: tuple[dict[str, str], ...] = ()
     # LLM: 媒体策略事实只在本次覆盖范围含媒体块时写入 checkpoint；refs 为完整 sha256，供审计与用户按内容地址重新附上。
-    #   archived 与 summarized 互斥：A 路径计 archived，B 路径计 summarized；reason 记录 auto 下没走 B 的结构化原因。
+    #   archived 计按归档引用处理的图块，summarized 计看图小请求总结过的图块；B 部分成功时两者同时非零（reason=vision_digest_partial）；
+#   reason 另记 auto 下没走 B 的结构化原因。
     media_policy: str = ""
     media_fact_source: str = ""
     media_blocks_archived: int = 0

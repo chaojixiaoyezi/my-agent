@@ -389,6 +389,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     model_input_modalities: list[str] = field(default_factory=list)
     # 随图摘要（vision_summary）时每个图块在摘要预算里的预留 token 数；只在 compact_media_policy=auto 且模型视觉能力事实为支持时使用。
     input_media_token_reserve: int = 1600
+    # 随图摘要一次压缩最多发几次"看图"小请求；含图回合按摘要预算打包，超过次数的图块本次按归档引用（checkpoint 记 vision_digest_partial）。最小 1。
+    compact_vision_digest_max_requests: int = 4
     # 到达触发线后优先把完整输入收敛到该占比；低于真实触发线的有效候选不会因未达目标而被丢弃。
     memory_compact_recovery_target_percent: int = 60
     # 后台 Memory Curator 只读有界经历并输出严格 daily/candidate JSON；它没有工具循环和写人格权限。

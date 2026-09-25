@@ -1,4 +1,4 @@
-"""媒体压缩策略片 B：输入模态声明、结构化视觉探针、B/A 决策与准入、随图摘要请求路径、typed 失败后同代次回落。"""
+"""媒体压缩策略片 B/C：输入模态声明、结构化视觉探针、B/A 决策与准入、看图小请求 + 文字摘要两步路径、typed 失败同次压缩回落。"""
 from __future__ import annotations
 
 import base64
@@ -25,6 +25,7 @@ from agent_py_agent.agent.backends.vision_capability import (
     resolve_vision_capability,
 )
 from agent_py_agent.agent.conversation import ConversationStore
+from agent_py_agent.agent.conversation import compact as compact_module
 from agent_py_agent.agent.conversation import compact_request_budget as budget_module
 from agent_py_agent.agent.conversation.compact import (
     ConversationCompactOptions,
@@ -209,14 +210,15 @@ def test_forced_recovery_and_failed_generation_fall_back_before_any_probe():
     assert backend.calls == 0
 
 
-def test_vision_summary_admission_gates_video_bytes_and_budget():
+def test_vision_summary_admission_gates_video_bytes_and_largest_request_budget():
     candidate = CompactMediaDecision("vision_summary", "declared")
-    common = dict(media_max_bytes=1000, reserve_tokens=100, text_tokens=500, budget=800)
+    common = dict(media_max_bytes=1000, request_tokens=600, budget=800)
     assert vision_summary_admission(candidate, MediaArchiveFacts(1, (SHA,), 321, 0), **common) == candidate
     assert vision_summary_admission(candidate, MediaArchiveFacts(1, (SHA,), 321, 1), **common).reason == "video_present"
     assert vision_summary_admission(candidate, MediaArchiveFacts(1, (SHA,), 1001, 0), **common).reason == "media_bytes_exceeded"
-    assert vision_summary_admission(candidate, MediaArchiveFacts(4, (SHA,), 321, 0), **common).reason == "summary_budget_exceeded"
-    fallback = vision_summary_admission(candidate, MediaArchiveFacts(4, (SHA,), 321, 0), **common)
+    too_big = dict(media_max_bytes=1000, request_tokens=900, budget=800)
+    fallback = vision_summary_admission(candidate, MediaArchiveFacts(4, (SHA,), 321, 0), **too_big)
+    assert fallback.reason == "summary_budget_exceeded", "预算门按最大的一次看图小请求判断，不看整段范围"
     assert fallback.policy == "archived_refs" and fallback.fact_source == "declared", "回落保留事实来源"
     plain = CompactMediaDecision("archived_refs", "declared")
     assert vision_summary_admission(plain, MediaArchiveFacts(1, (SHA,), 321, 1), **common) is plain
@@ -263,12 +265,14 @@ def vision_case(tmp_path, monkeypatch):
     calls = []
     behaviour = {"raise": None}
 
+    # 函数用途: 假的有界摘要发送：记录每次请求（看图小请求 vision_summary=True，文字摘要 False）；behaviour["raise"] 只让看图请求失败。
     def bounded(request, *, message_source=None, vision_summary=False, media_reserve_tokens=0, **_kwargs):
         calls.append({"vision_summary": vision_summary, "media_reserve_tokens": media_reserve_tokens,
-                      "messages": list(message_source) if message_source is not None else None})
-        if behaviour["raise"] is not None:
+                      "messages": list(message_source) if message_source is not None else None,
+                      "prompt": str(request.prompt), "purpose": request.purpose})
+        if behaviour["raise"] is not None and vision_summary:
             raise behaviour["raise"]
-        return SimpleNamespace(text="摘要正文", tool_use_blocks=[], truncated=False)
+        return SimpleNamespace(text="图中要点：红色柱状图" if vision_summary else "摘要正文", tool_use_blocks=[], truncated=False)
 
     monkeypatch.setattr(budget_module, "generate_bounded_compact_response", bounded)
     monkeypatch.setattr(budget_module, "compact_summary_budget", lambda _agent: 10_000)
@@ -311,14 +315,19 @@ def _compact(case, rows):
     )
 
 
-def test_vision_summary_keeps_image_blocks_in_the_single_summary_request(vision_case):
+def test_vision_digest_sends_images_in_a_small_request_then_text_summary_gets_refs_and_notes(vision_case):
     case = vision_case
     result = _compact(case, _rows(case))
     assert result.compacted
-    (call,) = case.calls
-    assert call["vision_summary"] is True and call["media_reserve_tokens"] == 50
-    text = json.dumps(call["messages"], ensure_ascii=False)
-    assert "local_file" in text and SHA in text and "附件引用" not in text, "B 路径保留图块给供应商适配层展开"
+    digest, summary = case.calls
+    assert digest["vision_summary"] is True and digest["media_reserve_tokens"] == 50
+    assert digest["purpose"] == "conversation_compact_media_digest" and "vision pass only" in digest["prompt"]
+    digest_text = json.dumps(digest["messages"], ensure_ascii=False)
+    assert "local_file" in digest_text and SHA in digest_text and "附件引用" not in digest_text, "看图小请求保留图块给供应商适配层展开"
+    assert "旧问题" not in digest_text and "下一个问题" not in digest_text, "看图小请求只带含图回合"
+    summary_text = json.dumps(summary["messages"], ensure_ascii=False)
+    assert summary["vision_summary"] is False and "附件引用" in summary_text and "local_file" not in summary_text
+    assert "图中要点：红色柱状图" in summary["prompt"] and f"sha256:{SHA[:12]}" in summary["prompt"], "图中要点连附件 sha 前缀一起进文字摘要指令"
     checkpoint = committed_compact_checkpoint_chain(case.agent, result.thread)[-1]
     assert checkpoint["media_policy"] == "vision_summary" and checkpoint["media_fact_source"] == "declared"
     assert checkpoint["media_blocks_summarized"] == 1 and checkpoint["media_blocks_archived"] == 0
@@ -326,25 +335,24 @@ def test_vision_summary_keeps_image_blocks_in_the_single_summary_request(vision_
     assert case.agent.backend.calls == 0, "已声明模态，不发探针"
 
 
-def test_vision_summary_typed_failure_marks_generation_and_next_compaction_uses_archived_refs(vision_case):
+def test_vision_digest_typed_failure_falls_back_to_archived_refs_within_the_same_compaction(vision_case, monkeypatch):
     case = vision_case
     rows = _rows(case)
+    marks = []
+    monkeypatch.setattr(compact_module, "record_compact_vision_failure",
+                        lambda store, thread, *, now: marks.append((thread.thread_id, thread.compact_generation)))
     case.behaviour["raise"] = ConversationCompactError("随图摘要请求失败：ProviderContextWindowError", code=COMPACT_VISION_SUMMARY_FAILED)
-    with pytest.raises(ConversationCompactError) as failure:
-        _compact(case, rows)
-    assert failure.value.code == COMPACT_VISION_SUMMARY_FAILED
-    thread = case.store.threads.require(case.thread.thread_id)
-    assert thread.compact_vision_failed_generation == thread.compact_generation == 0
-    assert thread.compact_consecutive_failures == 0 and thread.compact_failure_code == "", "typed 随图失败不进熔断"
-    case.behaviour["raise"] = None
     result = _compact(case, rows)
-    assert result.compacted
-    second = case.calls[-1]
-    assert second["vision_summary"] is False and "附件引用" in json.dumps(second["messages"], ensure_ascii=False)
+    assert result.compacted, "看图小请求失败不再让整次压缩失败，同次压缩改走归档引用"
+    attempt, summary = case.calls
+    assert attempt["vision_summary"] is True and summary["vision_summary"] is False
+    assert "附件引用" in json.dumps(summary["messages"], ensure_ascii=False) and "图中要点" not in summary["prompt"]
+    assert marks == [(case.thread.thread_id, 0)], "一次都没成功时写同代次标记，供提交失败后的同代次重试选 A"
     checkpoint = committed_compact_checkpoint_chain(case.agent, result.thread)[-1]
     assert checkpoint["media_policy"] == "archived_refs" and checkpoint["media_policy_reason"] == COMPACT_VISION_SUMMARY_FAILED
     assert checkpoint["media_blocks_archived"] == 1 and checkpoint["media_blocks_summarized"] == 0
-    assert result.thread.compact_vision_failed_generation == -1, "压缩成功后重置"
+    assert result.thread.compact_consecutive_failures == 0 and result.thread.compact_failure_code == "", "typed 随图失败不进熔断"
+    assert result.thread.compact_vision_failed_generation == -1, "提交成功后标记为空"
 
 
 def test_budget_or_bytes_gate_falls_back_to_archived_refs_with_reason(vision_case, monkeypatch):

@@ -40,7 +40,7 @@
 
 ## B 路径：视觉摘要
 
-- 只在单请求模式生效：`generate_bounded_compact_response` 判定整份来源能容纳（文字估算加每图预留）时，摘要请求保留媒体块，经原 `project_input_media`/`provider_media_messages` 在网络边界展开为 base64，与业务请求同一条路。
+- （片 C 起改为看图小请求，见下文“片 C”；以下为片 B 原口径）只在单请求模式生效：`generate_bounded_compact_response` 判定整份来源能容纳（文字估算加每图预留）时，摘要请求保留媒体块，经原 `project_input_media`/`provider_media_messages` 在网络边界展开为 base64，与业务请求同一条路。
 - 分段模式（`_summarize_segments`）读的是 JSON 字符流，不能承载图片：进入分段前若来源含媒体块，本次直接以 A 重建来源，不进入 B；这一步同样是请求前决定。
 - `_summarize_segments` 的 `COMPACT_SOURCE_NON_TEXT` 检查改为 `compact_source_supported`，unknown 块仍拒绝。
 - checkpoint 字段：`media_policy=vision_summary`、`media_fact_source`、`media_blocks_summarized`、`media_refs`。
@@ -97,6 +97,32 @@
   "供应商施压"，结果两模型四条真实会话的 checkpoint 全是 `policy_forced/forced_recovery`，B 在 Gateway 里不可达。现新增
   `ConversationCompactOptions.pressure_forced`（恢复宿主传 `self.force`，只在窗口上限/供应商施压时为真），媒体策略只按它关闭 B；
   阈值自动压缩与手动 `/compact` 都可走 B，与"强制恢复一律 A"的原意一致。
+
+## 片 C：先看图、后总结（2026-09-24，用户决定第 2 项——随图摘要必须在自动压缩里生效）
+
+- **为什么片 B 在自动压缩里到不了**：阈值压缩在上下文到 `memory_compact_auto_trigger_percent`（默认 90%）时触发并整段压完前缀，
+  而片 B 的单次随图请求要装进 `compact_summary_budget` = 窗口 80% 减输出预留。范围 ≈ 0.9W 永远大于 0.8W − 输出，所以
+  两条真实阈值会话的 checkpoint 全是 `summary_budget_exceeded`，只有范围很小的手动 `/compact` 能走 B。这是结构问题，不是估算误差。
+- **新做法**：把“看图”和“总结”拆成两步，`conversation/compact_media_digest.py` 负责第一步：
+  1. `media_turn_groups` 按结构化回合身份把范围里含媒体块的回合挑出来（只读 canonical 信封，不读正文）；
+  2. `plan_media_digest` 贪心打包成若干“看图小请求”：每请求 `该请求文字估算 + 图块数 × input_media_token_reserve ≤ 摘要预算`，
+     请求数 ≤ `compact_vision_digest_max_requests`（默认 4，最小 1）；单回合装不下按 `summary_budget_exceeded` 跳过，超次数按上限跳过；
+  3. `generate_media_digest` 逐个发送（`purpose=conversation_compact_media_digest`，同一缓存面前缀/工具/系统指令，指令只要求写图中要点），
+     每段要点前加宿主按 sha 前缀生成的 `[附件组 n｜k 个图块｜sha256:…]` 标签；typed `COMPACT_VISION_SUMMARY_FAILED`、空回复或工具调用即停止；
+  4. 文字摘要请求照旧走 `generate_bounded_compact_response` 的文字路径（可分段），图块统一投影为 `[附件引用 …]`，要点文字作为指令末尾的
+     “Attachment content notes” 段随请求发送；机械回退也把要点附在摘要后。
+- **准入口径改动**：`vision_summary_admission` 的预算门改为 `request_tokens`（最大的一次看图小请求的完整估算）≤ 预算，不再按整段范围；
+  视频/字节两门不变。`compact.py::_effective_media_decision` 相应只算最大回合。
+- **结果合成**（`digest_media_decision`）：一次都没成功 → `archived_refs`，reason 取失败码或跳过原因，并写同代次 `compact_vision_failed_generation`
+  （只在本次提交失败后的同代次重试生效，提交成功即重置）；有成功 → `vision_summary`，`CompactMediaDecision.summarized_blocks` 记实际总结的
+  图块数，只要有图块没被覆盖 reason 记 `vision_digest_partial`。checkpoint 的 `media_blocks_summarized` 取该值，`media_blocks_archived`
+  为范围内其余图块，两者可同时非零。
+- **失败语义变化**：看图小请求失败不再让整次压缩失败（片 B 会抛 typed 错误让这次压缩中止），同次压缩改走归档引用并把码记进 checkpoint。
+- **不变的边界**：强制恢复（窗口上限/供应商施压，`pressure_forced`）仍一律 A；legacy prompt 仍 A；视觉能力事实仍只来自声明或探针；
+  preflight/`_automatic_noop`/请求投影器的候选接受估算仍未加图块预留（留作后续切片）。
+- **验收**：`test_compact_media_vision.py` 改为两步断言（看图小请求带图块且只带含图回合、文字请求带引用与要点、typed 失败同次回落且写标记）；
+  新增 `test_compact_media_digest.py`（分组、按预算与次数打包、标签与首个 typed 失败停止、非 typed 上抛、部分成功双计数、无图零请求）。
+  真实验收待部署后用阈值自动压缩（贴图 + 长文越过压缩点）看 checkpoint `media_policy=vision_summary`、`media_blocks_summarized≥1`。
 
 ## 边界与风险
 

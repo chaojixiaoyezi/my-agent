@@ -1,7 +1,8 @@
 # LLM: 媒体压缩策略的唯一判定与投影模块：只读 agent.config、结构化块字段、线程结构化字段和视觉能力事实模块，不读正文、
 #   不改 canonical 行。策略值 off / archived_refs / vision_summary；auto 配置下由事实选择：强制恢复、同代次 B 曾失败、
 #   视频块、字节预算、摘要预算任一不满足都落归档引用并写 reason。视觉能力事实只来自档案声明（model_input_modalities）
-#   或 backends.vision_capability 的结构化探针，不读模型自述。调用方不得自行判定。
+#   或 backends.vision_capability 的结构化探针，不读模型自述。调用方不得自行判定。随图摘要的实际发送（按预算打包的看图小请求）
+#   在 compact_media_digest.py；本模块只做决定、准入与投影。
 # 模块用途: 决定含图历史压缩时走归档引用还是随图摘要，并把媒体块投影成可重新附上的引用文字块。
 from __future__ import annotations
 
@@ -23,6 +24,8 @@ MEDIA_POLICY_VISION_SUMMARY = "vision_summary"
 MEDIA_POLICIES = frozenset({MEDIA_POLICY_OFF, MEDIA_POLICY_ARCHIVED_REFS, MEDIA_POLICY_AUTO})
 # B 路径的 typed 失败码：写进线程 compact_vision_failed_generation，同代次下一次压缩据此选 A；不计入熔断。
 COMPACT_VISION_SUMMARY_FAILED = "COMPACT_VISION_SUMMARY_FAILED"
+# B 部分成功的结构化原因：范围内只有一部分图块被看图小请求总结（预算或次数上限所限），其余按归档引用；不是失败。
+MEDIA_REASON_DIGEST_PARTIAL = "vision_digest_partial"
 
 
 # LLM: 配置值只认三个枚举，非法值按配置错误 fail closed，不静默回退默认；缺字段（旧测试替身）按默认 auto。
@@ -39,6 +42,8 @@ def configured_media_policy(agent: object) -> str:
 #   vision_fact_pending / vision_fact_unavailable）；reason 记录 auto 下没走 B 的结构化原因（forced_recovery、
 #   COMPACT_VISION_SUMMARY_FAILED、video_present、media_bytes_exceeded、summary_budget_exceeded、legacy_prompt）。
 #   vision_candidate=True 表示"范围内若确有媒体块，再解析视觉事实（声明或探针）"；纯文字压缩因此永远不发探针。
+#   summarized_blocks 记录本次实际由看图小请求总结的图块数：B 全部成功时等于范围内图块数，部分成功时小于它（reason 为
+#   vision_digest_partial），A 路径为 0。
 # 类用途: 一次压缩对媒体块采取的策略及其结构化依据。
 @dataclass(frozen=True)
 class CompactMediaDecision:
@@ -46,6 +51,7 @@ class CompactMediaDecision:
     fact_source: str
     reason: str = ""
     vision_candidate: bool = False
+    summarized_blocks: int = 0
 
 
 # LLM: supported 只可能来自声明含 image 或探针 probe_supported；fact_source 沿用决策枚举。
@@ -182,15 +188,15 @@ def media_archive_facts(rows: Iterable[object]) -> MediaArchiveFacts:
 
 
 # LLM: 请求前的结构化准入：视频只走 A；Σ size_bytes 超过运输层 input_media_max_bytes 走 A（避免 project_input_media 的
-#   带路径归档文字进入摘要）；文字估算 + 图块数 × reserve 超过摘要预算走 A。都过才保持 vision_summary。不发请求。
-# 函数用途: 决定一个 B 候选本次到底随图摘要还是回落归档引用。
+#   带路径归档文字进入摘要）；request_tokens 是"最大的一次看图小请求"的完整估算（该请求的文字 + 它的图块数 × 预留），超过
+#   摘要预算走 A——不再按整段压缩范围估算，所以阈值自动压缩的大范围不会天然超预算。都过才保持 vision_summary。不发请求。
+# 函数用途: 决定一个 B 候选本次能不能发看图小请求，还是整体回落归档引用。
 def vision_summary_admission(
     decision: CompactMediaDecision,
     facts: MediaArchiveFacts,
     *,
     media_max_bytes: int,
-    reserve_tokens: int,
-    text_tokens: int,
+    request_tokens: int,
     budget: int,
 ) -> CompactMediaDecision:
     if decision.policy != MEDIA_POLICY_VISION_SUMMARY:
@@ -199,7 +205,7 @@ def vision_summary_admission(
         return archived_refs_fallback(decision, "video_present")
     if facts.bytes > max(0, int(media_max_bytes)):
         return archived_refs_fallback(decision, "media_bytes_exceeded")
-    if int(text_tokens) + facts.blocks * max(0, int(reserve_tokens)) > int(budget):
+    if int(request_tokens) > int(budget):
         return archived_refs_fallback(decision, "summary_budget_exceeded")
     return decision
 
@@ -207,3 +213,8 @@ def vision_summary_admission(
 # 函数用途: 按配置取每个图块的摘要预算预留 token 数；缺字段（测试替身）按默认 1600。
 def media_token_reserve(agent: object) -> int:
     return max(0, int(getattr(getattr(agent, "config", None), "input_media_token_reserve", 1600) or 0))
+
+
+# 函数用途: 按配置取一次压缩最多发几次看图小请求；缺字段（测试替身）按默认 4，最小 1。
+def vision_digest_max_requests(agent: object) -> int:
+    return max(1, int(getattr(getattr(agent, "config", None), "compact_vision_digest_max_requests", 4) or 4))
