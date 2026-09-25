@@ -46,6 +46,8 @@ class HandoffState:
     original_tty: list | None = None
     quiet: tuple | None = None
     terminal_released: bool = False
+    # exec 之后自己的安装仍等于切换前的安装（入口指向了别的解释器）：本进程不再原地切换，避免每隔几秒循环 exec。
+    follow_disabled: bool = False
 
 
 _STATE = HandoffState()
@@ -120,6 +122,9 @@ def adopt_handoff() -> HandoffState:
     _STATE.child = True
     _STATE.session_id = payload["session_id"]
     _STATE.original_tty = decode_tty(payload.get("tty"))
+    from_prefix = payload.get("from_prefix")
+    if isinstance(from_prefix, str) and from_prefix and os.path.realpath(from_prefix) == os.path.realpath(sys.prefix):
+        _STATE.follow_disabled = True
     buffer = io.StringIO()
     _STATE.quiet = (sys.stdout, sys.stderr, buffer)
     sys.stdout = sys.stderr = buffer
@@ -188,7 +193,8 @@ def _restore_terminal_at_exit() -> None:
 # LLM: 只在 UI 事件循环线程、两次复核空闲之后调用；成功时不返回。失败返回异常类型名，调用方保留旧界面并提示。
 # 函数用途: 把会话编号和原始终端设置交给新进程，并在同一终端里 exec 成 Gateway 同版的 my-agent。
 def exec_handoff(target: str, argv_tail: list[str], session_id: str) -> str:
-    payload = {"schema": _HANDOFF_SCHEMA, "session_id": session_id, "tty": encode_tty(_STATE.original_tty)}
+    payload = {"schema": _HANDOFF_SCHEMA, "session_id": session_id, "tty": encode_tty(_STATE.original_tty),
+               "from_prefix": sys.prefix}
     os.environ[HANDOFF_ENV] = json.dumps(payload, separators=(",", ":"))
     try:
         for stream in (sys.stdout, sys.__stdout__):
@@ -277,7 +283,8 @@ def check_upgrade_once(ctx: UpgradeFollowContext, *, last_notice_at: float) -> t
         return "handoff", last_notice_at
     now = time.monotonic()
     if now - last_notice_at >= _NOTICE_REPEAT_SECONDS:
-        ctx.set_notice(BUSY_NOTICE_TEXT if handoff_supported() else REOPEN_NOTICE_TEXT, _NOTICE_SECONDS, NOTICE_KIND)
+        can_switch = handoff_supported() and ctx.request_handoff is not None
+        ctx.set_notice(BUSY_NOTICE_TEXT if can_switch else REOPEN_NOTICE_TEXT, _NOTICE_SECONDS, NOTICE_KIND)
         last_notice_at = now
     return "notice", last_notice_at
 
@@ -356,9 +363,10 @@ def _invalidate(app: object) -> None:
 def start_tui_upgrade_follow(*, state_path: Path, own_prefix: str, enabled: bool, hooks: HandoffHooks) -> threading.Thread:
     ctx = UpgradeFollowContext(
         state_path=state_path, own_prefix=own_prefix, enabled=enabled, stop_event=hooks.stop_event,
-        is_idle=hooks.is_idle, set_notice=hooks.set_notice,
+        is_idle=hooks.is_idle, set_notice=hooks.set_notice, poll_seconds=POLL_SECONDS,
     )
-    ctx.request_handoff = HandoffScheduler(hooks, ctx).request
+    if not _STATE.follow_disabled:
+        ctx.request_handoff = HandoffScheduler(hooks, ctx).request
     return start_upgrade_follow_watcher(ctx)
 
 
