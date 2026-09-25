@@ -33,7 +33,7 @@ from .plugin_invocation import (
 from .plugin_removal import PLUGIN_REMOVE_TOOL
 from .plugin_remove_tool import PluginRemoveTool
 from .plugin_runtime import plugin_tool_name
-from .plugin_runtime_facts import confirmation_message
+from .plugin_runtime_facts import confirmation_message, runtime_problem, runtime_reason_message
 from .plugin_update import PLUGIN_UPDATE_TOOL
 from .plugin_update_tool import PluginUpdateTool
 from .runtime_db.host_command_execution import execute_host_command, query_host_command
@@ -248,6 +248,10 @@ class PluginManagement:
         if not self.context.business_allowed or name in self.context.disabled_tools:
             return {"ok": False, "state": "rejected", "error_code": "TOOL_DISABLED"}
         entry = next(row for row in entries if row.manifest.plugin_id == parsed.plugin.plugin_id)
+        problem = runtime_problem(self.context.owner, entry)
+        if problem:
+            # 非 Python 插件的解释器/平台已不是用户确认时的样子：不建运行、不启动进程，结构化说明原因
+            return {"ok": False, "state": "rejected", "error_code": "PLUGIN_RUNTIME_UNAVAILABLE", "details": {"reason": problem}}
         arguments = json.loads(json.dumps(dict(parsed.arguments.values), ensure_ascii=False, allow_nan=False))
         return PluginInvocation(entry, name, arguments)
 
@@ -436,6 +440,9 @@ class PluginManagement:
         if details.get("reason") == "confirmation_required" and isinstance(details.get("confirmation"), dict):
             # 非 Python 插件启用前的用户确认：展示将要运行的程序与确认码，不套用通用的参数错误说明
             result["message"] = confirmation_message(details["confirmation"])
+        elif runtime_reason_message(details.get("reason")):
+            # 平台不符、解释器缺失或被替换：按结构化原因码给出具体说明与下一步
+            result["message"] = runtime_reason_message(details.get("reason"))
         if state == "succeeded" and details.get("removed") is True:
             message = "插件已卸载，用户产物与操作历史保留。"
         elif state == "succeeded" and details.get("release_pending"):

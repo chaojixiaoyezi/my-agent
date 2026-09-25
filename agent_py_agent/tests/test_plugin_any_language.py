@@ -301,20 +301,25 @@ def test_executable_plugin_needs_user_confirmation_then_runs_and_releases(tmp_pa
         registry.close_mcp_clients()
 
 
-def test_interpreter_plugin_pins_interpreter_and_refuses_after_it_changes(tmp_path, monkeypatch):
+# 函数用途: 用临时 PATH 上的解释器安装并带码启用 interpreter 类型插件，返回 (服务, 解释器文件, 第一次回执)。
+def _enabled_interpreter_plugin(tmp_path, monkeypatch):
     interpreter = _fake_interpreter(tmp_path, monkeypatch)
     service = _installed(tmp_path, _declaration("interpreter", interpreter="fixture-python"), {"server.py": _SERVER})
-    owner = service.context.owner
     first = _enable(service, "enable")
+    enabled = _enable(service, "confirmed", first["details"]["confirmation"]["confirm_code"])
+    assert enabled["state"] == "succeeded", enabled
+    return service, interpreter, first
+
+
+def test_interpreter_plugin_pins_interpreter_and_runs_script(tmp_path, monkeypatch):
+    service, interpreter, first = _enabled_interpreter_plugin(tmp_path, monkeypatch)
     confirmation = first["details"]["confirmation"]
     assert confirmation["interpreter"] == {"name": "fixture-python", "path": os.path.realpath(interpreter),
                                            "sha256": hashlib.sha256(interpreter.read_bytes()).hexdigest()}
     assert confirmation["files"][0]["executable"] is False
     assert "用系统解释器 fixture-python" in first["message"]
-    enabled = _enable(service, "confirmed", confirmation["confirm_code"])
-    assert enabled["state"] == "succeeded", enabled
     entry = service.installations.snapshot()[0]
-    environment = owner.plugins_dir / "environments" / entry.activation.plan.environment_ref
+    environment = service.context.owner.plugins_dir / "environments" / entry.activation.plan.environment_ref
     assert stat.S_IMODE((environment / "files" / "server.py").stat().st_mode) == 0o400
     assert stat.S_IMODE((environment / RUNTIME_PIN_FILE).stat().st_mode) == 0o600
     registry = plugin_registry(service)
@@ -327,10 +332,23 @@ def test_interpreter_plugin_pins_interpreter_and_refuses_after_it_changes(tmp_pa
         assert "解释器插件读取|entry=server.py;args=--stdio;cwd=files" in json.dumps(result, ensure_ascii=False), result
     finally:
         registry.close_mcp_clients()
+
+
+def test_changed_interpreter_refuses_launch_until_confirmed_again(tmp_path, monkeypatch):
+    service, interpreter, first = _enabled_interpreter_plugin(tmp_path, monkeypatch)
+    old_code = first["details"]["confirmation"]["confirm_code"]
+    entry = service.installations.snapshot()[0]
     interpreter.write_text(interpreter.read_text() + "# replaced\n")
     with pytest.raises(PluginRuntimeError) as changed:
-        PluginMCPClient(owner, entry)
+        PluginMCPClient(service.context.owner, entry)
     assert changed.value.reason == "interpreter_changed"
+    source = tmp_path / "input.txt"
+    source.write_text("x")
+    explicit = service.command(f'/plugins@{PLUGIN_ID} read "{source}"', revision=service.catalog().revision,
+                               request_id="explicit-after-change")
+    assert explicit["state"] == "rejected" and explicit["error_code"] == "PLUGIN_RUNTIME_UNAVAILABLE", explicit
+    assert explicit["details"] == {"reason": "interpreter_changed"} and "重新确认" in explicit["message"]
+    assert service.command("/plugins status explicit-after-change", revision="", request_id="query")["state"] == "not_found"
     fresh = plugin_registry(service)
     try:
         fresh.prepare_for_run()
@@ -341,8 +359,8 @@ def test_interpreter_plugin_pins_interpreter_and_refuses_after_it_changes(tmp_pa
     assert disabled["state"] == "succeeded", disabled
     again = _enable(service, "again")
     assert again["details"]["reason"] == "confirmation_required"
-    assert again["details"]["confirmation"]["confirm_code"] != confirmation["confirm_code"]
-    stale = _enable(service, "stale", confirmation["confirm_code"])
+    assert again["details"]["confirmation"]["confirm_code"] != old_code
+    stale = _enable(service, "stale", old_code)
     assert stale["details"]["reason"] == "confirmation_required", stale
 
 
@@ -395,12 +413,14 @@ def test_unsupported_platform_or_missing_interpreter_fails_before_confirmation(t
     service = _installed(tmp_path, _declaration(platforms=["plan9-mips"]), {"bin/server.py": _SERVER})
     result = _enable(service, "enable")
     assert result["state"] == "failed" and result["details"]["reason"] == "platform_unsupported", result
+    assert "没有为本机平台构建" in result["message"]
     other = tmp_path / "other"
     other.mkdir()
     monkeypatch.setenv("PATH", str(tmp_path / "empty"))
     service = _installed(other, _declaration("interpreter", interpreter="fixture-python"), {"server.py": _SERVER})
     result = _enable(service, "enable")
     assert result["state"] == "failed" and result["details"]["reason"] == "interpreter_not_found", result
+    assert "PATH 里找到插件需要的解释器" in result["message"]
     assert service.installations.snapshot()[0].activation is None
 
 

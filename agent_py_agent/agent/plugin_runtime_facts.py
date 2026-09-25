@@ -133,6 +133,43 @@ def verified_runtime_command(owner_root: Path, environment: Path, kind: str, fin
     return facts.interpreter_path
 
 
+# 结构化失败原因 → 给用户看的中文说明；启用失败与显式调用拒绝共用，原因码本身才是机器判断依据
+_REASON_MESSAGES = {
+    "platform_unsupported": "这个插件包没有为本机平台构建（包声明的平台不含本机），不能启用；请安装为本机平台构建的包。",
+    "environment_platform_unsupported": "这个插件包没有为本机平台构建（包声明的平台不含本机），不能启用；请安装为本机平台构建的包。",
+    "interpreter_not_found": "没有在 Gateway 的 PATH 里找到插件需要的解释器；请先安装它（或让 Gateway 的 PATH 能找到它）再启用。",
+    "environment_interpreter_not_found": "没有在 Gateway 的 PATH 里找到插件需要的解释器；请先安装它（或让 Gateway 的 PATH 能找到它）再启用。",
+    "interpreter_unreadable": "插件需要的解释器文件不可读取，无法核对其内容，不能启用。",
+    "environment_interpreter_unreadable": "插件需要的解释器文件不可读取，无法核对其内容，不能启用。",
+    "environment_interpreter_changed": "确认之后解释器发生了变化，本次没有启用；请重新执行 /plugins enable 查看新的确认回执。",
+    "interpreter_changed": "插件使用的解释器已被替换或删除，为安全起见没有启动；请先停用该插件（/plugins disable <插件ID>），"
+                           "再 /plugins enable 查看新的确认回执并重新确认。",
+    "interpreter_pin_invalid": "插件解释器的定位记录与启用时不符，为安全起见没有启动；请先停用该插件，再重新启用并确认。",
+    "platform_changed": "插件环境不是为本机平台准备的，没有启动；请先停用该插件，再重新启用并确认。",
+}
+
+
+# LLM: 只把已知的结构化原因码翻成中文说明，未知原因返回空串（调用方沿用原通用文案），不从说明文字反推任何状态。
+# 函数用途: 给启用失败或调用被拒的回执取一句具体的中文说明。
+def runtime_reason_message(reason: object) -> str:
+    return _REASON_MESSAGES.get(reason, "") if isinstance(reason, str) else ""
+
+
+# LLM: 只读复核已发布激活的运行事实（与启动前同一函数），不启动进程；Python 包与未激活安装返回空串。
+# 函数用途: 显式调用插件前检查解释器/平台是否仍是用户确认时的样子，返回失败原因码。
+def runtime_problem(owner, installation) -> str:
+    activation = installation.activation
+    if installation.manifest.entry is None or activation is None:
+        return ""
+    environment = owner.plugins_dir / "environments" / activation.plan.environment_ref
+    try:
+        verified_runtime_command(owner.root, environment, installation.manifest.entry.kind,
+                                 activation.plan.interpreter_fingerprint)
+    except PluginRuntimeError as exc:
+        return exc.reason
+    return ""
+
+
 # LLM: 回执只列宿主解析出的结构化事实与随包文件元数据；确认码由这些事实生成，任一变化（包、平台、解释器）都会作废旧码。
 # 函数用途: 生成"需要用户确认"回执的详细内容。
 def confirmation_details(manifest, package_sha256: str, facts: PluginRuntimeFacts, files) -> dict:
