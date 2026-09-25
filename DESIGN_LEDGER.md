@@ -15,7 +15,7 @@
   - **关闭取消**：`decision_policy.cancel_active_decisions_for_shutdown()` 复用设置撤销那张进程内在途索引。等待中的调用立即回原方案（`stale/host_shutdown`），不冒充用户停止、不进冷却，调用账记 `DECISION_CANCELLED`；关闭后不再登记新决策。Gateway 收尾在置位停止事件后调用它，出错只记异常类型。
   - **并发组合**：后台 `curator` 慢响应不拖住前台 `skill_tool`；线程变更只撤销前台，owner 级改 `curator` 只提前撤销后台。
   - **两处已知取舍**（不改，登记在此）：采用前复核按整份策略版本判断，所以 owner 级任何设置改动会让同 owner 其他点的在途建议返回后作废为 `policy_changed`；冷却按连接共享，后台超时会让同连接的前台点在冷却期直接保留原方案。两者都只会少一条建议，不会采用过期建议或卡住。
-  - 停止时被切断的后台模型请求的结构化"被中断"记录由主线 owner 实施，顺序排在本取消之后。详见[接入设计](docs/design/DECISION_MODEL_INTEGRATION.md)第 4.2 节。
+  - 停止时仍未结束的模型调用已由主线 owner 结清为结构化"被中断"（`db4d46398`，已部署）：排空窗口之后，Gateway 进程账本里的在途调用记为 failed / `MODEL_CALL_INTERRUPTED_HOST_SHUTDOWN`，用量保持未报告、不补零；runner worker 的账本另行跟进。详见[接入设计](docs/design/DECISION_MODEL_INTEGRATION.md)第 4.2 节。
 - **决策实验自动晋升后没有主动提示**（2026-09-25，F1 正向晋升真实样本发现；未实施）：授权内晋升把线程的 `points.skill_tool.mode` 由 off 改为 apply，但 TUI 当轮没有任何提示，用户只能在决策设置里看到线程覆盖。方向：晋升回执已是结构化的 `gateway_decision_experiment_promotion.v1`（带前后版本），由 Gateway 终态响应带出、TUI 按结构化字段展示一行提示，不从文字判断。
 - **自学习的 lesson 来源在当前产品里是死路**（2026-09-25，真实验收发现；已由 `record_lesson` 修复并做端到端真实验收，已合入 main `52e0190e1`）：
   - 子代理提示要求"像普通协作者一样回复、不输出状态 JSON"，`output.json` 由宿主生成，没有结构化通道填 `lessons`。所以真实子代理即使在回复里写了经验，也不会产生 `subagent_lesson` 候选，S1 提案与 S2 排序都无法触发。

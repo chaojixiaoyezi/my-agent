@@ -3,7 +3,7 @@
 ## 基本信息
 
 - workstream：接入决策模型（P1—P5，GOAL 18 项）。唯一持续更新的 TODO 是 [DECISION_MODEL_GOAL.md](DECISION_MODEL_GOAL.md)，[09-23 暂停快照](DECISION_MODEL_TAKEOVER_HANDOFF.md)只作历史参考。
-- branch：决策线只提交短分支 `claude/decision-*`，由主线 owner（模块重构线）合入并部署。写作时 main 为 `25650830d`，双机运行时为 `runtime-step11a-4c08c171`，之后以 Git 为准。
+- branch：决策线只提交短分支 `claude/decision-*`，由主线 owner（模块重构线）合入并部署。写作时 main 为 `761ef2ab2`，双机运行时为 `runtime-step11b-240d0f70`，之后以 Git 为准。
 - worktree：临时 worktree，合入后清理。真实验收只在测试机 .9 的隔离目录 `/root/decision-acceptance-*` 和唯一测试端口 8431 上做。
 - owner：决策线（Claude 会话）；合并与部署：主线 owner。
 - date：2026-09-25。
@@ -73,6 +73,8 @@
 | `84d873c9b`、`fb5be8262` | E2 对照记录、F1 评估与授权内晋升；正向晋升真实样本 | 拒绝与正向晋升都成立 |
 | `1b334200e`、`6c3ffc2ad` | 插件观察候选结构设计稿及评审结论 | — |
 | `25650830d` | Gateway 关闭时主动取消在途决策；Curator 与插件点并发组合 | 本地真实传输栈 |
+| `b0e79ec57` | GOAL 细分清单对账；整理标签 `curator` 真实 Curator 样本；本交接按模板重写 | 真实 Curator 五次运行 |
+| `761ef2ab2` | 线程中断标志绑定立旗时的线程对象，ident 复用不再误取消新线程 | 原先稳定复现失败的 63 文件组合转为全通过 |
 
 ## 改动文件
 
@@ -110,8 +112,8 @@ python3 scripts/check_clean_package.py .
 结果：
 
 - 收尾全仓回归（main `5fca6a194`）：21,406 passed、4 failed，全部归因（1 个由决策线修复，2 个由插件线修复，1 个为负载下时序偶发）。
-- 最近一片（Gateway 关闭取消与并发组合）：63 个决策/Gateway 相关文件 1428 passed、1 failed；14 种变异全杀；代码体量与 main 相比无新增项。
-- 那个失败是 `test_subagent_first_request_selection.py::test_real_child_first_request_capture_matches_actual_provider_payload` 第一组参数。它在同样组合下的 main 上同样失败，单独或整文件运行 40/40 通过，属于既有的测试顺序问题，由决策线继续排查。
+- Gateway 关闭取消与并发组合：63 个决策/Gateway 相关文件 1428 passed、1 failed；14 种变异全杀；代码体量与 main 相比无新增项。
+- 那个失败是 `test_subagent_first_request_selection.py` 真实 child 用例的第一组参数，根因是线程中断标志按 ident 记、线程退出后被复用的 ident 继承了旧旗。已由 `761ef2ab2` 修复：同一组合 1429 passed、0 failed，中断与有界调用测试族 760 passed。
 - 真实验收全部记录在[真实验收](DECISION_MODEL_REAL_VALIDATION.md)；测试机证据在 `/root/decision-acceptance-20260923/*`、`20260924/*`、`20260925/*` 的 `artifacts/` 与 `wire*/`。已完成目录的 venv 已删除，复现时用目录内的 wheel 重建。
 
 ## 影响范围
@@ -131,7 +133,7 @@ python3 scripts/check_clean_package.py .
 
 - 插件线：
   - 观察候选结构（manifest v5、代理结果路径、`plugin_observation`、browser-lite 观察）落地后，决策线接 `action_candidate` 并做真实验收；
-  - 停止时后台模型请求的结构化"被中断/未结算"记录，由插件线紧接在决策取消之后实施。
+  - 停止时未结束模型调用的结构化"被中断/未结算"结清已落地（`db4d46398`）；runner worker 账本的同类结清由主线跟进。
 - 主线：Memory v2 迁移把新 owner 的模板标题生成待审候选（主线已记待办）。
 
 ## 剩余风险
@@ -142,11 +144,11 @@ python3 scripts/check_clean_package.py .
 - 模态只按保守规则处理：带图片的子任务不会换到能看图的候选。
 - 自学习：被取消的 run 不收取 lesson 账本；S1 草稿的场景标签措辞不准；S2 的 CLI 进程各自持有冷却表，含查询串的 URL 仍会外发。
 - 决策实验自动晋升后，TUI 没有主动提示。
-- 既有的测试顺序问题见上文，可能让大组合回归偶发失败。
+- Gateway 停止时，runner worker 账本里的在途调用还没有同类结清（主线跟进）。
 
 ## 后续建议
 
 1. **动作候选**：插件线落地观察结构并通知 SHA 后，决策线把 `claude/decision-action-candidate` rebase 到新 main、换成真实新鲜度函数、跑严格门，再用 browser-lite 在 .9 做 off/observe/apply 真实验收。这是第 15 项和整个 Goal 的最后一块，可与插件线其他工作并行。
-2. **排查测试顺序问题**：定位前序测试留下的共享资源，让大组合回归稳定。它属于决策线，适合在等插件线期间做。
+2. **（已完成）测试顺序问题**：根因是线程中断标志随 ident 复用，已由 `761ef2ab2` 修复并部署。
 3. **按收益处理已知缺口**：先做 P5-A 补充片段材料和记忆关系对按相关度挑选（两点都有真实收益证据），再做自动晋升提示和 `record_lesson` 的小缺口。
 4. **风险边界**：所有决策点保持默认关闭；不从自然语言做机器判断；不加专项分支；远端提交前跑本地严格门并带上架构守卫测试。

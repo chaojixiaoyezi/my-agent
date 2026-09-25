@@ -8,7 +8,7 @@ child不展示历史正文时的读取回归先复现1 failed/1 passed，修复�
 - **新测试** `test_gateway_model_call_shutdown_settlement.py` 5 项：批量终态只动活动记录且幂等；facade 不新建账本、投影只含固定结构化字段、结清后不再算运行中；收尾在停 HTTP 与收循环之后、写心跳之前结清并写事件；没有在途调用（含没有账本的 agent）不写额外事件；账本模块抛错只记异常类型且收尾照常完成。
 - **真实验收**：待下次部署后用一次真实 Curator 在途停机复验，看 Gateway 事件里的 `gateway_model_calls_interrupted` 与收尾载荷的 `interrupted_model_calls`。
 
-## 线程中断标志与 ident 复用（2026-09-25，分支 `claude/interrupt-ident-reuse`）
+## 线程中断标志与 ident 复用（2026-09-25，分支 `claude/interrupt-ident-reuse`，已合入 main `761ef2ab2` 并部署）
 
 - **问题**：`test_subagent_first_request_selection.py` 的真实 child 用例只在跟一大批决策测试一起跑时失败。
   - 直接原因：`_wait_for_generation_result` 被停止时会给 worker 立中断旗；测试里的假 worker 退出时没有撤旗，之后复用同一 ident 的生成线程 `my-agent-model-generate-timeout-guard` 一开始检查就被判为已中断，整次 child 运行记为 cancelled。
@@ -26,7 +26,7 @@ child不展示历史正文时的读取回归先复现1 failed/1 passed，修复�
   - 原先稳定复现失败的 63 文件组合：1429 passed、2 skipped、3 xfailed、0 failed；
   - Ruff、doc sync、代码体量（与 main 相比无新增项）、diff、clean-package 全部通过。
 
-## 宿主关闭取消在途决策与 Curator/插件点并发组合（P4-F，2026-09-25，分支 `claude/decision-shutdown-cancel`）
+## 宿主关闭取消在途决策与 Curator/插件点并发组合（P4-F，2026-09-25，分支 `claude/decision-shutdown-cancel`，已合入 main `25650830d`）
 
 - **改动**：
   - `decision_policy.py`：新增关闭标记、`cancel_active_decisions_for_shutdown()` 与 `host_shutdown_started()`；`register_active` 在关闭后拒绝登记。
@@ -43,7 +43,7 @@ child不展示历史正文时的读取回归先复现1 failed/1 passed，修复�
 - 两个文件连跑 6 次 12/12 通过。
 - **变异验证**：14 种各自使新测试失败（不置关闭标记、登记不看标记、不标记或不取消句柄、计数错、`_revoked` 忽略关闭、关闭优先于设置撤销、登记失败不区分关闭与容量两个方向、登记被拒后照常发送、收尾不调用/不包 try/记异常正文/在停 HTTP 之后才调用）。子进程带 `PYTHONDONTWRITEBYTECODE=1`，结束后还原原文件。
 - **回归**（基于 main `6c3ffc2ad`）：全部 `test_decision_*`、引用 `gateway_process`/`decision_policy` 的测试与架构守卫共 63 个文件，1428 passed、2 skipped、3 xfailed、1 failed。
-  失败的是 `test_subagent_first_request_selection.py::test_real_child_first_request_capture_matches_actual_provider_payload` 的第一组参数。它在不含本改动的 main 上同一组合里同样失败，单独或整文件运行 40/40 通过。二分表明不是单个前置文件触发，要前面约 29 个决策测试文件叠加才出现，像是前序测试的 worker 暂占资源，属于既有的测试顺序问题，已告知主线 owner。
+  失败的是 `test_subagent_first_request_selection.py::test_real_child_first_request_capture_matches_actual_provider_payload` 的第一组参数。它在不含本改动的 main 上同一组合里同样失败，单独或整文件运行 40/40 通过。二分表明不是单个前置文件触发，要前面约 29 个决策测试文件叠加才出现。根因后来查明是线程中断标志按 ident 复用，已由上一节的修复（main `761ef2ab2`）解决。
 
 ## 子代理 lesson 结构化来源 `record_lesson`（2026-09-25，已合入 main `52e0190e1`；已端到端真实验收）
 
