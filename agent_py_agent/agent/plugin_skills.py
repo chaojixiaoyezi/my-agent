@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sysconfig
 from pathlib import Path
 
@@ -16,11 +17,23 @@ PLUGIN_SKILL_SOURCE_PREFIX = "plugin:"
 
 
 # LLM: 插件环境与宿主同一 Python 版本（环境准备时已校验），因此可用宿主 sysconfig 规则推出其 purelib，跨平台一致。
-# 函数用途: 计算某个插件激活环境里入口包的 skills 目录。
+#   必须显式指定 venv 布局的 scheme：宿主默认 scheme 在 Homebrew/framework Python（osx_framework_library）或 user 安装下
+#   会忽略传入的 base，把目录算到宿主 site-packages，插件随包 Skill 就此全部失踪（2026-09-25 对照线在 Homebrew 3.14 上发现）。
+# 函数用途: 计算某个插件激活环境里入口包的 skills 目录；路径永远落在该插件的激活环境内。
 def plugin_skill_dir(owner, installation) -> Path:
     environment = owner.plugins_dir / "environments" / installation.activation.plan.environment_ref / "python"
-    purelib = sysconfig.get_path("purelib", vars={"base": str(environment), "platbase": str(environment)})
+    purelib = sysconfig.get_path(
+        "purelib", scheme=_environment_scheme(), vars={"base": str(environment), "platbase": str(environment)},
+    )
     return Path(purelib) / installation.manifest.entry_module.split(".")[0] / "skills"
+
+
+# LLM: 3.11+ 的 venv scheme 就是激活环境的真实布局；3.10 没有它，用 posix_prefix / nt 等价表达，不读宿主默认 scheme。
+# 函数用途: 返回插件激活环境（一个 venv）的 sysconfig 布局名。
+def _environment_scheme() -> str:
+    if "venv" in sysconfig.get_scheme_names():
+        return "venv"
+    return "nt" if os.name == "nt" else "posix_prefix"
 
 
 # LLM: 只读安装表快照，不启动插件进程；表不可读时记录类型并返回空（Skill 缺席不影响核心）。

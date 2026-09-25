@@ -657,6 +657,10 @@ auth 表单取消和参数拒绝已验，官方设备码在两处环境被 HTTP 
 
 ## 当前待落地或待复验
 
+- 教训并已修（2026-09-25，对照线在 Homebrew Python 3.14 上发现）：随包 Skill 目录 `plugin_skill_dir` 曾用宿主默认 sysconfig scheme 推算激活环境的
+  purelib；framework/user 类 scheme 会忽略传入的 base，把目录算到宿主 site-packages，Python 插件的随包 Skill 在非 venv 的 Homebrew 宿主上整体失踪。
+  现在显式用 venv 布局 scheme（3.10 用 posix_prefix/nt 等价），回归 `test_plugin_skills.py::test_plugin_skill_dir_ignores_host_default_scheme`。
+
 - 已决定并实现（2026-09-25，用户：“/model 我的 agent 不能直接改……需要给他自己有这个权限”）：新增 `manage_models` 工具，主会话代理可直接
   list/add/save_provider/save_model/select/set_default/delete_model/delete_provider/probe/discover，复用 `execute_model_profile_operation`
   唯一写入口与文件锁；effect 按 action 结构化解析（删服务商 dangerous 走审批门，其余 mutating 按 owner 审批模式），子代理不可用，

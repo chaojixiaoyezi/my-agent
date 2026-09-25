@@ -56,6 +56,20 @@ def test_plugin_skill_follows_enablement_and_never_shadows_owner(tmp_path):
     assert service.snapshot_for(tmp_path / "ws").resolve("table-render") is None
 
 
+def test_plugin_skill_dir_ignores_host_default_scheme(tmp_path, monkeypatch):
+    # user/framework 类 scheme 会忽略传入 base，把 purelib 算到宿主 site-packages；随包 Skill 必须始终落在激活环境内。
+    import os
+    import sysconfig
+
+    monkeypatch.setattr(sysconfig, "get_default_scheme", lambda: "nt_user" if os.name == "nt" else "posix_user")
+    manifest = SimpleNamespace(plugin_id="genui-lite", skills=("table-render",), entry_module="genui_lite.plugin")
+    installation = SimpleNamespace(manifest=manifest, activation=SimpleNamespace(plan=SimpleNamespace(environment_ref="env-1")))
+    owner = SimpleNamespace(plugins_dir=tmp_path / "plugins")
+    path = plugin_skills.plugin_skill_dir(owner, installation)
+    assert path.is_relative_to(tmp_path / "plugins" / "environments" / "env-1" / "python")
+    assert path.parts[-2:] == ("genui_lite", "skills")
+
+
 def test_enabled_plugin_skill_roots_only_active_declared(tmp_path, monkeypatch):
     def entry(plugin_id, enabled, skills):
         manifest = SimpleNamespace(plugin_id=plugin_id, skills=skills, entry_module=plugin_id.replace("-", "_"))
