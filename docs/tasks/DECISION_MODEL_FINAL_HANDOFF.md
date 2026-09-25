@@ -4,7 +4,7 @@
 
 - workstream：接入决策模型（P1—P5，GOAL 18 项）。唯一持续更新的 TODO 是 [DECISION_MODEL_GOAL.md](DECISION_MODEL_GOAL.md)，[09-23 暂停快照](DECISION_MODEL_TAKEOVER_HANDOFF.md)只作历史参考。
 - branch：决策线只提交短分支 `claude/decision-*`，由主线 owner（模块重构线）合入并部署。本次更新时 main 为 `6a50d84aa`，双机运行时为 `runtime-step11f-c6ab15e7`；本交接随分支 `claude/decision-action-candidate` 合入，之后以 Git 为准。
-- worktree：临时 worktree，合入后清理。真实验收只在测试机 .9 的隔离目录 `/root/decision-acceptance-*` 和唯一测试端口 8431 上做。唯一例外是动作候选：它需要浏览器而 .9 没有 Chrome/Chromium，改在本机隔离临时目录跑（独立 `MY_AGENT_HOME`，隔离 Gateway 仍用 8431），本机 8420 与日常数据未动。
+- worktree：临时 worktree，合入后清理。真实验收只在决策线测试机的隔离目录 `decision-acceptance-*` 和唯一测试端口 8431 上做。唯一例外是动作候选：它需要浏览器而该测试机没有 Chrome/Chromium，改在本机隔离临时目录跑（独立 `MY_AGENT_HOME`，隔离 Gateway 仍用 8431），本机 8420 与日常数据未动。
 - owner：决策线（Claude 会话）；合并与部署：主线 owner。
 - date：2026-09-25。
 
@@ -117,7 +117,7 @@ python3 scripts/check_clean_package.py .
 - Gateway 关闭取消与并发组合：63 个决策/Gateway 相关文件 1428 passed、1 failed；14 种变异全杀；代码体量与 main 相比无新增项。
 - 那个失败是 `test_subagent_first_request_selection.py` 真实 child 用例的第一组参数，根因是线程中断标志按 ident 记、线程退出后被复用的 ident 继承了旧旗。已由 `761ef2ab2` 修复：同一组合 1429 passed、0 failed，中断与有界调用测试族 760 passed。
 - 动作候选（rebase 到 main `6a50d84aa` 后）：57 个文件 1530 passed、1 xpassed（既有）；19 种变异全杀；代码体量与 main 相比无新增项。
-- 真实验收全部记录在[真实验收](DECISION_MODEL_REAL_VALIDATION.md)；测试机证据在 `/root/decision-acceptance-20260923/*`、`20260924/*`、`20260925/*` 的 `artifacts/` 与 `wire*/`。已完成目录的 venv 已删除，复现时用目录内的 wheel 重建。动作候选的本机结构化证据在仓外证据目录，隔离 home 与私有模型目录副本已删除。
+- 真实验收全部记录在[真实验收](DECISION_MODEL_REAL_VALIDATION.md)；测试机证据在隔离目录 `decision-acceptance-20260923/*`、`20260924/*`、`20260925/*` 的 `artifacts/` 与 `wire*/`。已完成目录的 venv 已删除，复现时用目录内的 wheel 重建。动作候选的本机结构化证据在仓外证据目录，隔离 home 与私有模型目录副本已删除。
 
 ## 影响范围
 

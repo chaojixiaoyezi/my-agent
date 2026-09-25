@@ -36,6 +36,6 @@
 
 已读本仓库入口：`AGENTS.md`、`LLM_GUIDE.md`、`docs/ROADMAP.md`、`docs/WORKSTREAMS.md`、`docs/design/DECISION_MODEL_INTEGRATION.md`、`docs/tasks/DECISION_MODEL_GOAL.md`，以及上文列出的 runtime、Goal、task_progress、父级 planner、创建/绑定/幂等、decision 设置与服务源码；对照 `docs/modules/subagent/04-structure.md` 的子代理创建结构。定向运行：`python3 -m pytest -o addopts='' agent_py_agent/tests/test_conversation_goal_tools.py agent_py_agent/tests/test_planner.py agent_py_agent/tests/test_task_progress_tool_dispatch_reconcile.py agent_py_agent/tests/test_orchestration_create_subagents_idempotency.py -q --tb=short`，**79 passed**。这些测试只验证原合同，未验证尚不存在的 planning 接入。
 
-本机成熟参考限于 `/Users/xiaoyezi/study-agent/all-agent/openclaw-main/src/agents/subagent-spawn-child-plan.ts`、`subagent-spawn-launch-request.ts`、`subagent-launch-authorization.ts`：其 plan 解析、launch request 的 `idempotencyKey`、精确 model override 授权分层可作为“建议不越过启动授权”的对照；未审计 OpenClaw 全部 sessions_spawn/生命周期，也不据此宣称行为等价。未核对 Codex/Hermes/Free-Code 全链或真实 Jev；当前阶段没有必要扩大参考检索。
+本机成熟参考限于另一开源 agent 项目参考副本中的 `src/agents/subagent-spawn-child-plan.ts`、`subagent-spawn-launch-request.ts`、`subagent-launch-authorization.ts`：其 plan 解析、launch request 的 `idempotencyKey`、精确 model override 授权分层可作为“建议不越过启动授权”的对照；未审计该项目全部 sessions_spawn/生命周期，也不据此宣称行为等价。未核对 Codex/Hermes/Free-Code 全链或真实 Jev；当前阶段没有必要扩大参考检索。
 
 建议下一步：由独立实现者先补仅“已有 open Todo 的优先 ID 建议”切片，增加 off/observe/apply、超时、`need_data`、revision 变更、工具不可用、取消、普通任务无账本、Goal 不新建、child 不暗建的 fake 决策与 replay 定向测试；通过后用少量真实 Jev 验证是否优于原规划。可与子代理模型选择、召回切片并行，但不得编辑彼此的运行入口或改写原权限/幂等合同。

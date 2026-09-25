@@ -1219,7 +1219,7 @@ Gateway/child无transcript的活动归档已删除先粗估提交后重新prepar
 
 严格恢复的直接空回复/工具调用回退，在有界概览之后完整保留旧摘要、所选 transcript 原文及工具投影，再由完整容量门决定能否提交；分段修复仍失败则抛 typed 错误，不能靠截断摘录取得覆盖。默认手动旧回退不扩大范围。
 
-证据边界：纯冻结 IR 的下层安全点验收与外层溢出自动接续分开。当前外层重跑 agent.run 会从归档重建交接，未保留前轮原生 ToolCall/ToolResult；本切片不能宣称外层原生 IR 接续完成。媒体线、真实供应商缓存、超大历史有界读取及旧全仓八项失败仍开放，12.4不勾选。测试机192.168.1.9可用于后续已协调的隔离验收，本片尚未部署或重启。
+证据边界：纯冻结 IR 的下层安全点验收与外层溢出自动接续分开。当前外层重跑 agent.run 会从归档重建交接，未保留前轮原生 ToolCall/ToolResult；本切片不能宣称外层原生 IR 接续完成。媒体线、真实供应商缓存、超大历史有界读取及旧全仓八项失败仍开放，12.4不勾选。决策线测试机可用于后续已协调的隔离验收，本片尚未部署或重启。
 
 建议下一步：先完成本切片隔离联验，再接外层原生 IR 传递与媒体整合；共享执行参数和恢复桥接由一个 owner 修改，独立测试和只读审查可并行。
 
@@ -1246,7 +1246,7 @@ transcript Compact只摘要首个非文本原生信封所在完整回合之前�
 
 媒体线此前官方M3图片/视频/重连证据属于原提交，不能当作本次集成版真实验收。本次pytest采用隔离HOME、真实本地媒体读取和业务工具，仅末端HTTP替身；尚未部署测试机或重启共享Gateway。12.4、真实缓存、超大历史及旧全仓八项失败仍开放，11/18清单数不变。
 
-建议下一步：联合定向与严格gate后保留可审查本地提交，再协调192.168.1.9验收窗口。测试和只读审查可并行，共享Gateway及恢复writer保持单一owner。
+建议下一步：联合定向与严格gate后保留可审查本地提交，再协调决策线测试机验收窗口。测试和只读审查可并行，共享Gateway及恢复writer保持单一owner。
 
 本片55文件联合 **1419 passed、4项既有xfail**，退出码0；清单 `/tmp/compact_media_joint_20260923.files`，日志同名 `.log`。pytest配置和命令各带一次-q，原日志只有逐项结果和进度；统计为1419个通过标记及4个预期失败标记，不补猜运行秒数。初次媒体兼容检查144 passed、2 failed来自UserTurn新增字段的旧位置参数，已改显式media关键字并纳入上述联验；容量/选模91项、媒体工具轮4项、transcript26项均被最终联合覆盖，不累加计数。首次guard的导入排序和深层嵌套已修，新增文件暂未登记的打包提示在纳入本片后消除。
 
@@ -1590,7 +1590,7 @@ Sol high独立只读复核未发现必须修复的scope/base/legacy回归，确�
 
 ### 后台上下文预算只估算渲染节，有种子时不保留最近消息（2026-09-24，本地）
 
-分支 `claude/decision-background-context-budget`，基于 main `a2e26178b`，方案经主线 owner 同意，已合入 main `5dcdfd463`，并随 .9 媒体验收的安装版安装（见[真实验收](DECISION_MODEL_REAL_VALIDATION.md)）。纯 bug 修复，不加开关。
+分支 `claude/decision-background-context-budget`，基于 main `a2e26178b`，方案经主线 owner 同意，已合入 main `5dcdfd463`，并随测试机媒体验收的安装版安装（见[真实验收](DECISION_MODEL_REAL_VALIDATION.md)）。纯 bug 修复，不加开关。
 
 **问题**：
 - 后台就绪路径一定带历史种子，此时 `include_recent_messages=False`，"Recent Messages"不渲染。可 `background_history_seed` 仍把含最近 `conversation_context_recent_limit` 条完整消息的 `context_bundle` 保留给整个后台回合；4.2M 夹具下约 1.32MB。
@@ -1673,7 +1673,7 @@ Sol high独立只读复核未发现必须修复的scope/base/legacy回归，确�
 | `append_gateway_conversation_message`（每次请求，用户行与助手行各一次） | 100 | 100 行、约 3.25M 字符 | 49.2 / 63.1 ms | 发送后 21.48 → 22.90MB，全程最高 |
 
 **原因**：
-- 这三处只需要元数据：索引逐行投影，近期产物只看助手行 metadata 里的产物引用，追加只为幂等去重。但 `recent_report` 按行数限量、不按字节限量，行很大时（夹具每行 32KB；.9 真实会话里一条带原生信封的助手行就有 75,652 字符），"最近 80/100 行"就等于整份文件。
+- 这三处只需要元数据：索引逐行投影，近期产物只看助手行 metadata 里的产物引用，追加只为幂等去重。但 `recent_report` 按行数限量、不按字节限量，行很大时（夹具每行 32KB；测试机真实会话里一条带原生信封的助手行就有 75,652 字符），"最近 80/100 行"就等于整份文件。
 - 尾读把整块尾部依次物化为 bytes、解码后的 str（含中文时每字符 2 字节）、按行切分的列表、解析后的 dict 和 `MessageLogEntry`，四五份拷贝同时驻留，峰值约为文件大小的 4–5 倍。
 
 **实施**（分支 `claude/decision-gateway-message-reads`，主线 owner 有条件同意：公共接口不变、按 LF 字节切行、停止边界与原实现逐项等价、不加开关、不动 child/后台路径）：
@@ -1706,7 +1706,7 @@ Sol high独立只读复核未发现必须修复的scope/base/legacy回归，确�
 
 ### 媒体会话越过压缩点（2026-09-24，本地修复）
 
-来源：.9 的 M3 媒体验收（main `5dcdfd463`，见[真实验收](DECISION_MODEL_REAL_VALIDATION.md)）之后，本地复现"图片之后还能走多远"。
+来源：测试机的 M3 媒体验收（main `5dcdfd463`，见[真实验收](DECISION_MODEL_REAL_VALIDATION.md)）之后，本地复现"图片之后还能走多远"。
 
 **问题**：
 - 会话的未压历史里只要有图片，估算一越过自动压缩点，Gateway 请求就整轮失败：报 `COMPACT_REQUEST_PROJECTION_UNKNOWN`，业务 HTTP 0 次。即使离窗口还很远也一样。
@@ -1728,11 +1728,11 @@ Sol high独立只读复核未发现必须修复的scope/base/legacy回归，确�
 | 带图 + 12 行 | 33,111 | 整轮失败，业务 HTTP 0 次 | 先压缩再发送 |
 | 带图 + 20 行 | 49,305（超窗口） | 整轮失败，业务 HTTP 0 次 | 先压缩再发送 |
 
-**修复**：分支 `claude/decision-media-preflight`，主线 owner 已同意，.9 真实验收已通过（见[真实验收](DECISION_MODEL_REAL_VALIDATION.md#124-媒体会话越过压缩点修复的真实验收2026-09-24分支-claudedecision-media-preflight)）。纯 bug 修复，不加开关，纯文字会话行为不变。
+**修复**：分支 `claude/decision-media-preflight`，主线 owner 已同意，测试机真实验收已通过（见[真实验收](DECISION_MODEL_REAL_VALIDATION.md#124-媒体会话越过压缩点修复的真实验收2026-09-24分支-claudedecision-media-preflight)）。纯 bug 修复，不加开关，纯文字会话行为不变。
 - preflight：请求的文字容量不可知时（`text_request_capacity_known(params)` 为 False，即含媒体等非文本块），门槛从压缩点改为窗口，只守 `request_input_ceiling` 这个硬上限；诊断串加 `compact_capacity=non_text`。
 - `save=false`（`allow_persistent_apply=False`）原本就按窗口，不变，另有回归钉住。
 - 强制恢复遇非文本内容，改报结构化码 `COMPACT_REQUEST_NON_TEXT`。原先它与 20 多处内部投影失配共用 `COMPACT_REQUEST_PROJECTION_UNKNOWN`，宿主和 TUI 分不出"会话含图片、无法压缩"。三宿主共用 `select`，一处生效。
-- 客户端文案：`gateway_client_error_message` 对 `COMPACT_REQUEST_NON_TEXT` 单独说明原因（会话含图片等非文本内容，无法压缩且超出可用窗口；可换更大上下文的模型或新开会话），先于通用 `COMPACT_` 前缀匹配。.9 第一次验收时结构化码已进失败记录，但 TUI 仍显示通用的压缩失败文案，由此补上。
+- 客户端文案：`gateway_client_error_message` 对 `COMPACT_REQUEST_NON_TEXT` 单独说明原因（会话含图片等非文本内容，无法压缩且超出可用窗口；可换更大上下文的模型或新开会话），先于通用 `COMPACT_` 前缀匹配。测试机第一次验收时结构化码已进失败记录，但 TUI 仍显示通用的压缩失败文案，由此补上。
 
 **验证**：
 - 新文件 `test_media_compact_preflight.py` 13 项：
@@ -1744,8 +1744,8 @@ Sol high独立只读复核未发现必须修复的scope/base/legacy回归，确�
 **仍未解决**（媒体屏障已写进 [DESIGN_LEDGER](../../DESIGN_LEDGER.md) 待决策）：
 1. 媒体屏障：transcript checkpoint 只覆盖连续前缀，从首个媒体回合起的全部后缀都保留，首张图之后的文字轮永远进不了摘要。会话余量等于窗口减去图片之后的全部内容；越过窗口只能 typed 拒绝，需要新开会话。方向待用户定：把旧媒体降级为可重新附上的引用，还是用能看图的摘要模型摘要媒体回合。
 2. 强制恢复遇媒体时整体拒绝。能否只压媒体之前的文字前缀（媒体后缀原样保留，压缩前后差值可知），尚待设计。
-3. 越过压缩点后仍按压缩点收缩的软行为：大工具结果按"距压缩点余量"缩成引用视图（`safe_inline_tool_result_tokens`）；非会话运行的内容工具会延后（`_should_defer_for_compact`，Gateway 会话不走这条）。在媒体会话里，它们等不到压缩。.9 真实验收没能观察到前者（越点后的读取所在回合随即越过上限被拒），仍待观察。
-4. 失败回合之后，TUI 的 Context 读数偏低：没有计入失败回合留下、会被下一请求重放的工具往返（.9 上读数 67.1k，下一请求已超过约 103.7k 的上限）。属于 TUI 显示问题，已告知主线 owner。
+3. 越过压缩点后仍按压缩点收缩的软行为：大工具结果按"距压缩点余量"缩成引用视图（`safe_inline_tool_result_tokens`）；非会话运行的内容工具会延后（`_should_defer_for_compact`，Gateway 会话不走这条）。在媒体会话里，它们等不到压缩。测试机真实验收没能观察到前者（越点后的读取所在回合随即越过上限被拒），仍待观察。
+4. 失败回合之后，TUI 的 Context 读数偏低：没有计入失败回合留下、会被下一请求重放的工具往返（测试机上读数 67.1k，下一请求已超过约 103.7k 的上限）。属于 TUI 显示问题，已告知主线 owner。
 
 ### 宿主历史种子生命周期基线（2026-09-23，第二片进行中）
 

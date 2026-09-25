@@ -21,8 +21,8 @@
 
 ## 对照项目与核对范围
 
-- 已查本机 `/Users/xiaoyezi/study-agent/all-agent/hermes-agent-main/agent/verification_evidence.py` 的被动证据语义、`agent/verification_stop.py` 的 edit→verify-on-stop 有界续跑、`agent/turn_finalizer.py` 的已有答复保存。前者与本仓库可复用；后两者提供“额外续跑可能挤掉答复”的反例，本点不复制 verify-on-stop 门。
-- 已查本仓库 `docs/modules/verification/04-structure.md`、`docs/modules/delivery/01-closeout.md`、`docs/modules/subagent/04-structure.md` 的相关段、上述源码和测试。没有逐行审查整个 Hermes/OpenClaw/Codex，也没有核对它们所有版本或外部最新实现；对照只支撑上述边界，不代表全面优劣判断。
+- 已查本机参考副本 hermes-agent 的 `agent/verification_evidence.py` 的被动证据语义、`agent/verification_stop.py` 的 edit→verify-on-stop 有界续跑、`agent/turn_finalizer.py` 的已有答复保存。前者与本仓库可复用；后两者提供“额外续跑可能挤掉答复”的反例，本点不复制 verify-on-stop 门。
+- 已查本仓库 `docs/modules/verification/04-structure.md`、`docs/modules/delivery/01-closeout.md`、`docs/modules/subagent/04-structure.md` 的相关段、上述源码和测试。没有逐行审查整个 Hermes、Codex 或其他参考项目，也没有核对它们所有版本或外部最新实现；对照只支撑上述边界，不代表全面优劣判断。
 
 ## 定向证据、仍缺条件与所有权
 

@@ -27,7 +27,7 @@ Jev 只从当前观察的 exact ID 集合选一个候选，或返回 `not_needed
 
 ## 本机参考与证据边界
 
-已核对本机 `/Users/xiaoyezi/study-agent/all-agent/hermes-agent-main/tools/browser_tool.py` 的 accessibility snapshot、ref 和会话隔离方向，以及 `/Users/xiaoyezi/study-agent/all-agent/openclaw-main/extensions/browser/src/browser-tool.schema.ts` 的平面动作 schema/参数仍由执行器校验；它们说明“观察到 ref → 模型选动作 → 原执行器校验”的分层。未审查这些仓库的完整运行链，也未验证其当前网络最新版；不能据此推定本仓库已具有相同 Browser 能力。本仓库还核对 `docs/design/computer-use.md`、`docs/design/MAINTAINABILITY_AND_JEV_REVIEW.md`、`LLM_GUIDE.md`、`docs/ROADMAP.md`、`docs/design/DECISION_MODEL_INTEGRATION.md` 和上述源码；参考合同索引与实际生产引用已分开确认。
+已核对本机参考副本 hermes-agent 的 `tools/browser_tool.py` 的 accessibility snapshot、ref 和会话隔离方向，以及另一开源 agent 项目参考副本中浏览器扩展 `extensions/browser/src/browser-tool.schema.ts` 的平面动作 schema/参数仍由执行器校验；它们说明“观察到 ref → 模型选动作 → 原执行器校验”的分层。未审查这些仓库的完整运行链，也未验证其当前网络最新版；不能据此推定本仓库已具有相同 Browser 能力。本仓库还核对 `docs/design/computer-use.md`、`docs/design/MAINTAINABILITY_AND_JEV_REVIEW.md`、`LLM_GUIDE.md`、`docs/ROADMAP.md`、`docs/design/DECISION_MODEL_INTEGRATION.md` 和上述源码；参考合同索引与实际生产引用已分开确认。
 
 只读 focused 命令：`python3 -m pytest -o addopts='' agent_py_agent/tests/test_computer_use_profile.py agent_py_agent/tests/test_computer_text_input.py agent_py_agent/tests/test_mcp_registration.py agent_py_agent/tests/test_tool_input_completion_provenance.py agent_py_agent/tests/test_tool_gateway_contract.py agent_py_agent/tests/test_tool_operation_idempotency.py agent_py_agent/tests/test_offline_channel_browser_contract.py -q --tb=short`，结果 `128 passed`。它们证明现有配置、文本输入、MCP/参数/工具协议和离线浏览器合同回归，不证明 Jev 选目标准确或真实 GUI 安全。文档审计不修改生产代码，Ruff 不适用。
 

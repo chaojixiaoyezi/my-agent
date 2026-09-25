@@ -12,7 +12,7 @@
 
 ## 可复核的原始证据
 
-- 私有基线：`/Users/xiaoyezi/.codex/private-tests/decision-model-live/p4b-natural/20260923T062632Z/baseline.json`。只记录脱敏设置版本、来源、官方模型 profile ID/API base、Gateway 与 TUI 身份；不含密钥。
+- 私有基线：仓外私有测试目录的 `p4b-natural/20260923T062632Z/baseline.json`。只记录脱敏设置版本、来源、官方模型 profile ID/API base、Gateway 与 TUI 身份；不含密钥。
 - 唯一请求 ID：`gwreq-1790144867-4726bcb1185343b8872d5976ef52dbe1`；会话 `sess_1790144740_88a1ebd9`；线程 `thread-2a4cdc132b414c43`。原 request 在 `.../owners/local/main/workspace/runtime/services/gateway/requests/done/<request-id>.json`，原 response 在同级服务目录的 `responses/<request-id>.json`，工具流在 `requests/done/<request-id>.chunks.jsonl`。
 - 权威工具快照在 `.../owners/providers/local/users/decision-live-validation/memory_archive/snapshots/context_bundles/2026-09-22/<request-id>.json` 的 `tool_manifest`。`owner_type=user`，`permission_mode=owner_scoped`，`snapshot_hash=sha256:5f837d5b952a5b29096e55f5df8a3cc1052ed7d338828ee31defb716967780fa`；31 个 `visible_tools` 与 31 个 `executable_tools` 均不含 `user_config`，`tool_load_errors=[]`。工具并非被 Jev/skill_tool 推荐后临时收起：注册后的原 manifest 已无此工具。
 - `chunks.jsonl` 中 18 轮工具调用的 started 记录：`list_files` 7 次、`search_text` 6 次、`read_file` 14 次、`run_command` 5 次、`find_files` 2 次；`tool_search` 0 次，`user_config` 0 次。原 response 是“未能找到决策模型配置相关的文件”，并请求用户指出位置。Gateway 请求 `status=done, ok=true` 只表示模型正常结束，不表示配置任务成功。
