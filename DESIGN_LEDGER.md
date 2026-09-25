@@ -711,7 +711,7 @@ auth 表单取消和参数拒绝已验，官方设备码在两处环境被 HTTP 
   修改内容不隐式恢复暂停目标，不改变 run/task、历史和权限。主子目标保存、放弃、停止以及父子消息隔离已实测；孙级、IM 和旧数据迁移仍待专项验证。详见 [目标控制](docs/design/THREAD_GOAL_LIFECYCLE.md)。
 
 - 已实现并真实验收通过（2026-09-24，main `a1fea9e54`，本机 workspace-peek 0.1.1→0.1.2→enable 成功）：`/plugins update <插件> <新包路径>` 首片——同 ID 新包替换已停用安装，install+可选 configure 两步回执保留兼容配置，不新增持久动作；不做双版本准备切换与 rollback（需安装记录持有候选版本字段，另开一片）。见 [插件方案](docs/design/PLUGIN_LIFECYCLE.md#管理与使用分开的命令语法待实施)。
-- 已实现、待真实阈值复验（2026-09-24 晚，片 C）：随图摘要改为“先看图后总结”两步——含图回合按摘要预算打包成若干看图小请求（`compact_vision_digest_max_requests`），
+- 已实现并真实验收通过（2026-09-24 晚，片 C，main `94a2d0b4d`，双机 runtime-step11c；M2.7 阈值自动压缩 checkpoint `vision_summary/declared/summarized=1`）：随图摘要改为“先看图后总结”两步——含图回合按摘要预算打包成若干看图小请求（`compact_vision_digest_max_requests`），
   要点文字进普通文字摘要请求，图块统一投影为归档引用；准入按最大的一次小请求判断，因此阈值自动压缩与手动 /compact 走同一条路；
   部分成功记 `vision_digest_partial` 与双计数，一次都没成功同次回落 A。见 [媒体压缩策略](docs/design/COMPACT_MEDIA_POLICY.md#片-c先看图后总结2026-09-24用户决定第-2-项随图摘要必须在自动压缩里生效)。
 - 已实现并真实验收通过（2026-09-24，main `8c6d29c5f`，双机 runtime-step10r；M3 手动 /compact 走随图摘要，阈值压缩按预算门回落并记原因——片 C 已解决这一回落）：媒体压缩策略片 B。auto 下由结构化事实选随图摘要：档案 `input_modalities` 声明，

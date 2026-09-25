@@ -122,7 +122,8 @@
   preflight/`_automatic_noop`/请求投影器的候选接受估算仍未加图块预留（留作后续切片）。
 - **验收**：`test_compact_media_vision.py` 改为两步断言（看图小请求带图块且只带含图回合、文字请求带引用与要点、typed 失败同次回落且写标记）；
   新增 `test_compact_media_digest.py`（分组、按预算与次数打包、标签与首个 typed 失败停止、非 typed 上抛、部分成功双计数、无图零请求）。
-  真实验收待部署后用阈值自动压缩（贴图 + 长文越过压缩点）看 checkpoint `media_policy=vision_summary`、`media_blocks_summarized≥1`。
+  真实验收已过（2026-09-24，runtime-step11c，M2.7 官方档案声明 `input_modalities=[image,text]` 后）：阈值自动压缩 checkpoint `vision_summary/declared/summarized=1/archived=0`。
+  同批发现：M2.7 的视觉探针会偶发 `probe_inconclusive`（答错颜色或不调工具），未声明模态的档案在那一次压缩会回落 A；档案声明是避免这一波动的正道。
 
 ## 边界与风险
 
