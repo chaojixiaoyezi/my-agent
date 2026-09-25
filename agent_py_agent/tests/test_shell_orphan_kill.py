@@ -246,3 +246,25 @@ def test_group_expansion_requires_same_present_independent_leader(
     )
 
     assert module._exclusive_group_members(12345) == ([], complete)
+
+
+def test_termination_receipt_keeps_proven_dead_pid_resolved_after_pid_reuse(monkeypatch):
+    """宽限期内已证明消失的后代 PID，若在最终核对前被新进程复用，不能记回 unresolved（2026-09-25 CI 复现）。"""
+    from agent_py_agent.agent.tooling import process_registry as registry
+
+    root, child = 41000, 41001
+    checks: dict[int, int] = {root: 0, child: 0}
+
+    def fake_terminated(pid: int, _token: str) -> bool:
+        checks[pid] = checks.get(pid, 0) + 1
+        if pid == root:
+            return True
+        # 第一次核对：sleep 已被 TERM 杀掉；之后同号 PID 被别的进程复用且出生标识读不到。
+        return checks[pid] == 1
+
+    monkeypatch.setattr(registry, "_process_tree_snapshot", lambda _pid: ({root: "root-token", child: "child-token"}, True))
+    monkeypatch.setattr(registry, "_signal_process_snapshot", lambda _snapshot, _signum: True)
+    monkeypatch.setattr(registry, "_process_instance_terminated", fake_terminated)
+    receipt = registry.terminate_process_tree(root, None, grace_seconds=0.2)
+    assert receipt.method == "SIGTERM" and receipt.observed_processes == 2
+    assert receipt.unresolved_pids == () and receipt.confirmed is True

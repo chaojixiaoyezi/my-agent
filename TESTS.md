@@ -3082,6 +3082,9 @@ Audit/摄取不列入本轮新增验收；共享模块既有回归按改动影�
   `test_host_command_execution.py::test_unstarted_receipt_is_written_before_executor_exit_fact`（去掉修复即失败）。
   第二轮 CI 发现回执不能早于连接清理：`test_plugin_invocation.py::test_connection_cleanup_finishes_before_host_attempt_closes[denied]` 要求资源释放期间 attempt 仍 running；
   现按“ExitStack 资源清理 → 未启动回执 → attempt_executor 退出事实”的顺序写入，两条合同同时成立。
+  Full Tests 另暴露 `test_shell_orphan_kill.py::test_foreground_timeout_cleans_group_after_leader_exits[False]`：宽限期内已证明消失的后代 PID 在最终核对前被复用，
+  `os.kill` 探测重新成功而出生标识读不到，被记回 unresolved。终止回执改为记住已证明消失的进程实例（同号 PID 换出生标识才重新纳入），
+  回归 `test_termination_receipt_keeps_proven_dead_pid_resolved_after_pid_reuse`。
 
 ```bash
 python3 -m pytest <直接相关测试文件> -q --tb=short

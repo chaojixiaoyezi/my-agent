@@ -522,6 +522,8 @@ def terminate_process_tree(
       仍为同一进程实例的存活者发 SIGKILL。不能只 killpg(root):bwrap
       ``--new-session`` 会在里面再建 session/process-group,否则 npm/test 等后代
       能逃逸并继续持有 stdout/stderr pipe。
+    核对回执只认“进程实例”:某个 PID 一旦被证明消失(不存在/僵尸/出生标识已变),
+      后续同号 PID 被别的进程复用也不能把它记回 unresolved(2026-09-25 CI 复现)。
     Windows:taskkill /T /F 杀整棵进程树(/T 含子进程,/F 强制)。
     """
     if pid <= 0:
@@ -536,15 +538,21 @@ def terminate_process_tree(
     if expected_birth_token is not None and snapshot.get(pid) != expected_birth_token:
         return ProcessTerminationReceipt("identity_changed", False, None, len(snapshot), (pid,))
     method = "already_gone"
+    # 已证明消失的进程实例不再重查：PID 在宽限期后被新进程复用时，os.kill 探测会重新成功，
+    # 但那已经是另一个实例；只有快照里同 PID 换了出生标识（根的新后代）才重新纳入核对。
+    terminated: set[int] = set()
     signalled = _signal_process_snapshot(snapshot, signal.SIGTERM)
     grace = _KILL_GRACE_SECONDS if grace_seconds is None else max(0.0, grace_seconds)
     if signalled:
         method = "SIGTERM"
-        if not _wait_process_snapshot_gone(snapshot, proc, grace):
+        if not _wait_process_snapshot_gone(snapshot, proc, grace, terminated):
             # 根进程已回收时 PID 可能复用；只能对仍是原实例的根补充后代，不能杀到另一棵新树。
             if snapshot.get(pid) and _same_process(pid, snapshot[pid]):
                 current, current_complete = _process_tree_snapshot(pid)
-                snapshot.update(current)
+                for member, token in current.items():
+                    if snapshot.get(member) != token:
+                        terminated.discard(member)
+                    snapshot[member] = token
                 complete = complete and current_complete
             _signal_process_snapshot(snapshot, getattr(signal, "SIGKILL", signal.SIGTERM))
             method = "SIGTERM->SIGKILL"
@@ -553,8 +561,9 @@ def terminate_process_tree(
             proc.wait(timeout=2)
         except (subprocess.TimeoutExpired, OSError, ValueError):
             pass
-    _wait_process_snapshot_gone(snapshot, proc, 0.5)
-    unresolved = tuple(pid for pid, token in snapshot.items() if not _process_instance_terminated(pid, token))
+    _wait_process_snapshot_gone(snapshot, proc, 0.5, terminated)
+    unresolved = tuple(member for member, token in snapshot.items()
+                       if member not in terminated and not _process_instance_terminated(member, token))
     return_code = proc.poll() if proc is not None else None
     confirmed = complete and not unresolved and (proc is None or return_code is not None)
     return ProcessTerminationReceipt(method, confirmed, return_code, len(snapshot), unresolved)
@@ -826,19 +835,28 @@ def _signal_process_snapshot(snapshot: dict[int, str], signum: int) -> bool:
 
 # LLM: 此等待仅核对已观察进程，权限或身份读取失败须视为未确认；调用方仍要检查快照完整性。
 # 函数用途: 在有界时间内收割直接子进程并等待观察到的后代退出，不把信号已发送当成终止。
+# LLM: terminated 集合跨多次等待累积“已证明消失”的 PID，避免宽限后 PID 复用把死进程记回未解决；
+#   调用方在快照里同 PID 换出生标识时负责把它移出集合。
+# 函数用途: 在宽限期内轮询快照成员是否都已消失，并把证明过的 PID 记进 terminated。
 def _wait_process_snapshot_gone(
     snapshot: dict[int, str],
     proc: subprocess.Popen | None,
     grace_seconds: float,
+    terminated: set[int] | None = None,
 ) -> bool:
+    proven = set() if terminated is None else terminated
     deadline = time.monotonic() + grace_seconds
-    while time.monotonic() < deadline:
+    while True:
         if proc is not None:
             proc.poll()
-        if all(_process_instance_terminated(pid, token) for pid, token in snapshot.items()):
+        for member, token in snapshot.items():
+            if member not in proven and _process_instance_terminated(member, token):
+                proven.add(member)
+        if len(proven) >= len(snapshot):
             return True
+        if time.monotonic() >= deadline:
+            return False
         time.sleep(0.05)
-    return all(_process_instance_terminated(pid, token) for pid, token in snapshot.items())
 
 
 # 当前进程的共享缓存；跨主/子代理的权威事实由 ProcessSessionStore 提供。
