@@ -48,6 +48,7 @@ class StatusPayloadContext:
     archive_request_counts: dict | None = None
     gateway_state_load_error: dict | None = None
     gateway_heartbeat_load_error: dict | None = None
+    unidentified_stale_attempts: int = 0
 
 
 def build_status_payload(ctx: StatusPayloadContext) -> dict:
@@ -71,6 +72,7 @@ def _gateway_payload(ctx: StatusPayloadContext) -> dict:
         "request_counts": ctx.request_counts,
         "archive_request_counts": ctx.archive_request_counts or {},
         "workspace": str(ctx.paths.root),
+        "unidentified_stale_attempts": int(ctx.unidentified_stale_attempts or 0),
     }
     if ctx.gateway_state_load_error:
         payload["state_load_error"] = ctx.gateway_state_load_error

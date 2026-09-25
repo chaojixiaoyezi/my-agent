@@ -206,6 +206,9 @@ TUI 的背景 task ID 仅作 expected-target 提示。`runtime_db/repository.py`
 不回退到其他服务。`request_errors.py` 将其投影为明确的 `/model` 配置提示。
 `status_rendering.py` 仅生成 Gateway 健康事实；`tooling/gateway_status.py` 绑定当前执行配置生成
 `caller_model`，不再返回易与当前会话混淆的启动默认模型。用户显式保存的模型选择保持不变。
+`status_rendering.render_gateway_status` 另在 state.json 的 `unidentified_stale_attempts` 大于 0 时输出
+`gateway unidentified_stale_attempts=N`（`_append_unidentified_stale_attempts`），只投影 Gateway 启动写下的计数，
+不查 runtime.db、不结清；CLI `my-agent status` 的 Gateway 段与 `--json` 载荷同源同规则。
 
 ## 2026-09-14 R291 收口待重试事实必须进入硬事实发现层（否则恢复链跑不到）
 

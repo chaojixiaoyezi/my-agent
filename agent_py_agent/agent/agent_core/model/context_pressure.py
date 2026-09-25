@@ -8,8 +8,9 @@ import time
 from dataclasses import dataclass
 
 from ...backends import ModelResponse, is_provider_context_window_error
+from ...backends.request_content import classify_nontext_content
 from ...backends.tool_protocol_adapter import tools_for_choice
-from ...conversation.compact_media_policy import configured_media_policy
+from ...conversation.compact_media_policy import configured_media_policy, media_token_reserve
 from ...memory_archive import estimate_tokens
 from ...model_guidance import provider_system_instruction
 from ...prompting_parts.cache_layout import prompt_cache_layout
@@ -537,7 +538,7 @@ def _model_visible_context_components(
         messages=messages, tools=tools or None, tool_choice=choice,
     )
     current, components = projected_model_context_components(
-        projection, pending_runtime_guidance=guidance,
+        projection, pending_runtime_guidance=guidance, media_token_reserve=media_token_reserve(agent),
     )
     return (
         "native",
@@ -554,9 +555,12 @@ def _model_visible_context_components(
 
 
 # LLM: 只消费已准备投影与分类引导，未知拒绝计数；不读宿主/校准、不改状态或发请求，provider组包和输出预留仍由调用方核验。
-# 函数用途: 以原 estimate_tokens 估算 system、prompt、原生消息和schema占比；这不是供应商精确token或完整容量准入证明。
+#   media_token_reserve 由调用方从配置 input_media_token_reserve 传入：运输层会展开的已知图块按每块该值折进
+#   messages_tokens 与总量（预检、_automatic_noop 与恢复候选计量同口径），0 表示不折。
+# 函数用途: 以原 estimate_tokens 估算 system、prompt、原生消息和schema占比，并把已知图块按固定预留计入；
+#   这不是供应商精确token或完整容量准入证明。
 def projected_model_context_components(
-    projection: ToolLoopRequestProjection, *, pending_runtime_guidance: object = (),
+    projection: ToolLoopRequestProjection, *, pending_runtime_guidance: object = (), media_token_reserve: int = 0,
 ) -> tuple[int, dict[str, int]]:
     if (projection.status != "ready" or projection.provider_prompt is None
             or projection.system_instruction is None):
@@ -575,6 +579,7 @@ def projected_model_context_components(
         "runtime_guidance_tokens": 0,
         "tool_schema_tokens": 0,
     }
+    media_weight = 0
     if native:
         tools = projection.tools or []
         payload.update(messages=projection.messages, tools=tools)
@@ -582,13 +587,24 @@ def projected_model_context_components(
         guidance_weight = (
             min(message_weight, estimate_tokens(pending_runtime_guidance)) if pending_runtime_guidance else 0
         )
+        media_weight = _media_reserve_tokens(projection.messages, media_token_reserve)
         weights.update(
-            messages_tokens=message_weight - guidance_weight,
+            messages_tokens=message_weight - guidance_weight + media_weight,
             runtime_guidance_tokens=guidance_weight,
             tool_schema_tokens=estimate_tokens(tools) if tools else 0,
         )
-    total = estimate_tokens(payload)
+    total = estimate_tokens(payload) + media_weight
     return total, _rescale_context_components(total, weights)
+
+
+# LLM: 只数 classify_nontext_content 认定的已知媒体块（顶层 user 行 local_file image/video，与运输层展开集合相同），
+#   乘每块固定预留；不读图、不探视觉能力、不看压缩策略——图块不论策略如何都会进请求体。
+# 函数用途: 把消息里的已知图块按每块预留 token 折进估算，避免多图上下文在预检和自动压缩判定里被低估。
+def _media_reserve_tokens(messages: object, reserve: int) -> int:
+    per_block = max(0, int(reserve or 0))
+    if per_block <= 0 or not messages:
+        return 0
+    return classify_nontext_content(messages).media * per_block
 
 
 # LLM: Connection fields from third-party or test backends may be opaque objects; never serialize

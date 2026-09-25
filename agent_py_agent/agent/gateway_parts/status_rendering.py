@@ -667,6 +667,7 @@ def render_gateway_status(agent: SimpleAgent, paths: GatewayPaths) -> list[str]:
         )
     )
     _append_status_load_errors(lines, running_report, state_report.load_error, heartbeat_report.load_error)
+    _append_unidentified_stale_attempts(lines, state_report.payload)
     return lines
 
 
@@ -774,6 +775,15 @@ def _append_status_load_errors(
         lines.append("gateway heartbeat_load_error=" + _json(heartbeat_load_error))
     if running_report.load_error:
         lines.append("gateway pid_load_error=" + _json(running_report.load_error))
+
+
+# LLM: 只投影 Gateway 启动时写进 state.json 的 unidentified_stale_attempts 计数；0、缺失或非法不出行，
+#   不查 runtime.db、不自动结清（显式结清走 my-agent runtime-stale-attempts --settle）。
+# 函数用途: 在 gateway status 里提醒还有多少条没有进程身份的悬挂运行轮等用户处理。
+def _append_unidentified_stale_attempts(lines: list[str], state: object) -> None:
+    count = _int_value(state.get("unidentified_stale_attempts")) if isinstance(state, dict) else 0
+    if count > 0:
+        lines.append(f"gateway unidentified_stale_attempts={count}")
 
 
 def _json(payload: dict) -> str:

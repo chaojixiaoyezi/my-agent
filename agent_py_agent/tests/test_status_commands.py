@@ -626,3 +626,55 @@ class TestCmdRun:
             result = cmd_run(args)
 
         assert result == 2
+
+
+class TestStatusUnidentifiedStaleAttempts:
+    """Gateway 启动写进 state.json 的无身份悬挂运行轮计数要在 status 两种输出里可见。"""
+
+    def _run(self, tmp_path: Path, *, json_mode: bool) -> str:
+        from agent_py_agent.cli.local_commands import cmd_status
+
+        state_path = tmp_path / "state.json"
+        heartbeat_path = tmp_path / "heartbeat.json"
+        state_path.write_text(json.dumps({"status": "stopped", "unidentified_stale_attempts": 9}), encoding="utf-8")
+        heartbeat_path.write_text("{}", encoding="utf-8")
+        stdout = StringIO()
+        with patch("agent_py_agent.cli.local_commands.make_agent", return_value=_status_mock_agent(tmp_path)), \
+             patch(
+                 "agent_py_agent.cli.local_commands.gateway_paths",
+                 return_value=MagicMock(root=tmp_path, state=state_path, heartbeat=heartbeat_path),
+             ), \
+             patch("agent_py_agent.cli.local_commands.gateway_running", return_value=(None, False)), \
+             patch("agent_py_agent.cli.local_commands.gateway_request_counts", return_value={}), \
+             patch("agent_py_agent.cli.local_commands.build_status_suggestions", return_value=[]), \
+             redirect_stdout(stdout):
+            assert cmd_status(_status_args(tmp_path, json_mode=json_mode)) == 0
+        return stdout.getvalue()
+
+    def test_json_payload_carries_the_count(self, tmp_path: Path):
+        payload = json.loads(self._run(tmp_path, json_mode=True))
+        assert payload["gateway"]["unidentified_stale_attempts"] == 9
+
+    def test_human_output_points_to_the_explicit_settle_command(self, tmp_path: Path):
+        text = self._run(tmp_path, json_mode=False)
+        assert "- unidentified_stale_attempts=9" in text
+        assert "runtime-stale-attempts" in text
+
+    def test_zero_or_missing_count_prints_no_line(self, tmp_path: Path):
+        from agent_py_agent.cli.local_commands import cmd_status
+
+        state_path = tmp_path / "state.json"
+        state_path.write_text(json.dumps({"status": "stopped"}), encoding="utf-8")
+        (tmp_path / "heartbeat.json").write_text("{}", encoding="utf-8")
+        stdout = StringIO()
+        with patch("agent_py_agent.cli.local_commands.make_agent", return_value=_status_mock_agent(tmp_path)), \
+             patch(
+                 "agent_py_agent.cli.local_commands.gateway_paths",
+                 return_value=MagicMock(root=tmp_path, state=state_path, heartbeat=tmp_path / "heartbeat.json"),
+             ), \
+             patch("agent_py_agent.cli.local_commands.gateway_running", return_value=(None, False)), \
+             patch("agent_py_agent.cli.local_commands.gateway_request_counts", return_value={}), \
+             patch("agent_py_agent.cli.local_commands.build_status_suggestions", return_value=[]), \
+             redirect_stdout(stdout):
+            assert cmd_status(_status_args(tmp_path, json_mode=False)) == 0
+        assert "unidentified_stale_attempts" not in stdout.getvalue()

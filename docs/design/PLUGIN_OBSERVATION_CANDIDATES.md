@@ -161,9 +161,13 @@
   （stale / not_found）时，`PluginProxyTool._lift_observation_error` 把它提升为宿主 `reported_error_code` OBSERVATION_STALE /
   OBSERVATION_CANDIDATE_UNKNOWN、`error_code=TOOL_INVALID_ARGUMENTS`、`effect_outcome=not_started`（插件合同：这两种拒绝零副作用），
   信封记 `observation_rejected`；其它插件错误与没走候选路径的调用沿原 MCP 映射（TOOL_EXECUTION_FAILED）。
-- **同批记录、待插件线后续处理的 browser-lite 发现**：Gateway 模式下 `open url=相对路径` 按 `request.workspace_root` 解析而不是模型
-  以为的 TUI 当前目录；`file://` 被宿主的 URL 参数门先拦（`NETWORK_FILE_URL_BLOCKED`），`http://localhost` 被宿主私网门拦
-  （`NETWORK_PRIVATE_HOST_BLOCKED`），README 里"file:// 与 allowed_hosts 默认放行 localhost"的说法只对插件层成立，需要与宿主门对齐。
+- **browser-lite 与宿主门对齐（2026-09-24 深夜，已按事实改声明与 README）**：三处发现的宿主行为都是既有设计而非缺陷——
+  相对路径按 Gateway 校验的会话工作区根解析（与插件安装来源同一规则，不是客户端 shell 目录）；`file://` 由宿主 URL 参数门先拦
+  （`NETWORK_FILE_URL_BLOCKED`），只有工具输入策略声明了 `local_file_url_parameters` 的参数才走路径策略裁决，插件工具目前没有
+  这个声明入口；`localhost/127.0.0.1` 属私网地址，`allowed_private_hosts` 来自请求写边界的授权，插件设置不能替代。
+  因此本轮只改 browser-lite 的工具描述与 README：写路径不写 `file://` 前缀、相对路径基准写清、http(s) 需两道门都放行。
+  若将来需要显式 `file://`，正确做法是 manifest 增加通用的每工具 `local_file_url_parameters` 声明并接到
+  `PluginProxyTool` 输入策略（宿主仍按 owner 路径策略裁决），不为某个插件放松 URL 门。
 - **未做**：computer_use 观察适配。决策线 `action_candidate` 点与真实 TUI 端到端验收已于 2026-09-25 完成（见决策线[真实验收](../tasks/DECISION_MODEL_REAL_VALIDATION.md#15-动作候选-action_candidate-的-browser-lite-真实验收2026-09-25)）。
 
 ## 5. 评审结论（插件线，2026-09-25）

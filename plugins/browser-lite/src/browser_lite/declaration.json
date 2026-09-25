@@ -10,7 +10,7 @@
       "arguments": [
         {
           "name": "url",
-          "summary": "页面地址（工作区文件路径、file:// 或允许主机的 http(s)）",
+          "summary": "页面地址（工作区文件路径，或 allowed_hosts 里且宿主出站门放行的 http(s)；不要写 file:// 前缀）",
           "options": [
             "--url",
             "-u"
@@ -122,7 +122,7 @@
   "tools": [
     {
       "name": "open",
-      "description": "在插件专属的无头浏览器里打开地址并等待加载，返回最终 URL、标题和可见文字前 2000 字。只允许当前工作区内的文件页面（可写相对路径或 file://）和设置 allowed_hosts 里的 http(s) 主机；会启动浏览器进程。",
+      "description": "在插件专属的无头浏览器里打开地址并等待加载，返回最终 URL、标题和可见文字前 2000 字。只允许当前工作区内的文件页面（写相对或绝对路径，不带 file:// 前缀；相对路径按会话工作区根解析）和设置 allowed_hosts 里、且宿主出站门放行的 http(s) 主机（localhost/127.0.0.1 等私网地址默认被宿主拦下）；会启动浏览器进程。",
       "requested_effect": "mutating",
       "input_schema": {
         "type": "object",
@@ -131,7 +131,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 4096,
-            "description": "工作区文件路径、file:// 地址或允许主机的 http(s) 地址"
+            "description": "工作区文件路径（相对路径按会话工作区根解析，不带 file:// 前缀）或允许主机的 http(s) 地址"
           }
         },
         "required": [

@@ -206,8 +206,10 @@ memory_compact_semantic_summary_max_input_chars: 12000
 # 视觉能力事实只来自两处：模型档案的输入模态声明（/model 表单"输入模态"，运行时为 model_input_modalities），
 # 或未声明时宿主发起的一次结构化探针（8×8 纯色图 + 结构化工具回答，进程内缓存）；模型口头说"能看图"无效。
 compact_media_policy: "auto"
-# 随图摘要时每个图块在摘要预算里预留的 token 数（仅 auto 且视觉能力事实为支持时使用）；
-# 文字估算加图块数乘以该值超过摘要预算时，本次改走归档引用并在 checkpoint 记原因。
+# 每个已知图块（owner 附件目录里的 image/video 引用）按多少 token 计入上下文估算。两处使用：
+# 1) 每次模型请求前的上下文预检与自动压缩判定，把图块数乘以该值折进估算，避免多图上下文被低估而不触发压缩；
+# 2) 随图摘要时每个图块在摘要预算里的预留（仅 auto 且视觉能力事实为支持时使用），
+#    文字估算加图块数乘以该值超过摘要预算时，本次改走归档引用并在 checkpoint 记原因。
 input_media_token_reserve: 1600
 # 随图摘要一次压缩最多发几次"看图"小请求：含图回合按摘要预算打包（每次请求：该回合文字 + 图块数 × 上面的预留 ≤ 预算），
 # 一次装不完就分多次；超过次数的图块本次按归档引用，checkpoint 记 media_policy_reason=vision_digest_partial。

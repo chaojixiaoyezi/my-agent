@@ -59,7 +59,10 @@ python scripts/build_plugin_package.py \
 调用顺序复核该候选仍是当前观察后，把插件自己的键与页面代次放进 `_meta` 交回插件。页面代次随 `open` 与点击后导航推进：代次不符返回
 `OBSERVATION_STALE`，键解析不到返回 `OBSERVATION_NOT_FOUND`（两者都带 `my_agent_observation_error`，不产生副作用）。
 
-`--url` 不带协议时按当前工作区相对路径处理（如 `form.html`），也可写完整 `file://` 或 `http(s)://` 地址。
+`--url` 不带协议时按**会话工作区根**解析相对路径（如 `form.html`；Gateway 模式下是请求登记的工作区，不是 TUI shell 的当前目录），
+也可写绝对路径；插件内部把它转成 `file://` 再经 SDK `check` 裁决。不要直接写 `file://`：宿主的 URL 参数门会在请求到达插件之前拦下
+（`NETWORK_FILE_URL_BLOCKED`）。`http(s)://` 地址除了要在插件设置 `allowed_hosts` 里，还要过宿主出站门：`localhost`、`127.0.0.1`
+等私网地址默认被 `NETWORK_PRIVATE_HOST_BLOCKED` 拦下，需要宿主侧的私网授权（见该错误码的恢复提示），插件设置不能替代它。
 错误都是中文结构化结果（`code` + `message`）：`URL_NOT_ALLOWED`、`BROWSER_UNAVAILABLE`、`BROWSER_START_FAILED`、
 `NO_PAGE`、`SELECTOR_NOT_FOUND`、`SELECTOR_AMBIGUOUS`、`INVALID_SELECTOR`、`NOT_FILLABLE`、`OPTION_NOT_FOUND`、
 `TIMEOUT`、`PAGE_CRASHED`、`BROWSER_DISCONNECTED`、`NAVIGATION_FAILED` 等，不输出堆栈。
@@ -68,6 +71,7 @@ python scripts/build_plugin_package.py \
 
 - `chrome_path`：浏览器可执行文件，默认空（自动探测）。
 - `allowed_hosts`：允许访问的 http(s) 主机名，默认 `["127.0.0.1", "localhost"]`，按主机名精确匹配、不含端口。
+  这是插件层的第二道门；宿主出站门默认仍拦私网地址，两道门都放行才能打开。
 - `idle_close_seconds`：空闲多少秒后自动关闭浏览器，默认 120。
 - `command_timeout_seconds`：每个 CDP 命令（含启动、页面加载）的超时，默认 15。
 
@@ -79,8 +83,9 @@ python scripts/build_plugin_package.py \
   以 `--headless=new --remote-debugging-port=0 --no-first-run --no-default-browser-check` 等参数启动，
   绝不使用用户日常 Chrome 配置和登录态；`profile/` 是符号链接时拒绝启动。浏览器每次关闭（close、空闲、插件退出）
   都清空 profile 内容，所以 cookie 等状态不跨会话保留。
-- **可访问地址**：只允许 (1) 本次宿主读取上下文允许读取的工作区内 `file://` 页面（经 SDK `check` 裁决，
-  符号链接按真实目标判断）；(2) `allowed_hosts` 里的 http(s) 主机。其它协议一律拒绝。
+- **可访问地址**：只允许 (1) 本次宿主读取上下文允许读取的工作区内文件页面（插件把路径转成 `file://` 后经 SDK `check` 裁决，
+  符号链接按真实目标判断；模型直接写的 `file://` 到不了插件，先被宿主拦）；(2) `allowed_hosts` 里且宿主出站门放行的 http(s) 主机。
+  其它协议一律拒绝。
 - **请求拦截**：页面启用 CDP `Fetch` 拦截，页面自身、重定向、子资源和脚本发起的 http(s)/file 请求都按同一规则裁决，
   不允许的请求以 `BlockedByClient` 失败；导航或点击后跳到不允许地址时立即停到空白页并报 `URL_NOT_ALLOWED`。
   `data:`/`blob:` 等不出网的内嵌资源不拦；WebSocket 等不经 `Fetch` 的通道不在拦截范围内。

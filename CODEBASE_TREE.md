@@ -690,6 +690,7 @@ agent_py_agent/
 |   |-- test_media_compact_preflight.py # 媒体会话越过压缩点：off 只守窗口/越窗 NON_TEXT，auto 归档引用后按压缩点压缩
 |   |-- test_compact_media_policy.py    # 媒体压缩策略片 A：分类、投影、后缀保护按策略与 checkpoint 媒体事实
 |   |-- test_compact_media_digest.py    # 媒体压缩策略片 C：含图回合分组、按预算/次数打包看图小请求、部分成功双计数、typed 失败同次回落
+|   |-- test_context_pressure_media_reserve.py  # 已知图块按 input_media_token_reserve 折进预检/自动压缩估算，分类加总不变
 |   |-- test_compact_media_vision.py    # 媒体压缩策略片 B/C：输入模态声明、视觉探针缓存、B/A 决策与准入、看图小请求 + 文字摘要两步、typed 失败回落
 |   |-- test_request_content_capacity.py # 当前思考与跨模型内容边界、child保留原模型
 |   |-- test_input_media.py             # 媒体归属、字节、预算和原生后端投影

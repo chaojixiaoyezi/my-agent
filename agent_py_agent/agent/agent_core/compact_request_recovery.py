@@ -13,7 +13,7 @@ from ..conversation.compact_guard import (
     compact_exception_code,
     raise_if_compact_interrupted,
 )
-from ..conversation.compact_media_policy import configured_media_policy
+from ..conversation.compact_media_policy import configured_media_policy, media_token_reserve
 from ..conversation.compact_projection import (
     ConversationCompactProjection,
     ConversationCompactSource,
@@ -171,7 +171,9 @@ class PreparedCompactRecovery:
                     raise ConversationCompactError("恢复候选摘要视图不一致", code="COMPACT_REQUEST_PROJECTION_CHANGED")
             if material.projection.status != "ready":
                 raise ConversationCompactError("完整恢复投影未知", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
-            tokens, _ = projected_model_context_components(material.projection)
+            tokens, _ = projected_model_context_components(
+                material.projection, media_token_reserve=media_token_reserve(self.agent),
+            )
             return ConversationCompactProjection(tokens, material)
 
         try:
@@ -225,6 +227,7 @@ class PreparedCompactRecovery:
         return self.committed_request
 
     # LLM: 冻结投影须完整；未知模态只跳过可选自动压缩，不赋予容量证明，强制恢复在select提前拒绝。
+    #   已知图块按配置 input_media_token_reserve 折进计量，与预检同口径，多图上下文不会因估算偏低而被判“容量充足”。
     # 函数用途: 容量充足、没有来源或模态计量未知时保留原请求，普通媒体仍交给原选定模型。
     def _automatic_noop(self, frozen: ToolLoopRequestInput, tool_source) -> bool:
         from ..conversation.compact import _compact_request_input_ceiling
@@ -234,7 +237,7 @@ class PreparedCompactRecovery:
             raise ConversationCompactError("完整请求投影未知", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
         if not compact_request_source_supported(frozen, media_policy=configured_media_policy(self.agent)):
             return True
-        tokens, _ = projected_model_context_components(projection)
+        tokens, _ = projected_model_context_components(projection, media_token_reserve=media_token_reserve(self.agent))
         if tokens < _compact_request_input_ceiling(self.agent, self.source.policy):
             return True
         return not self.source.messages and tool_source is None
@@ -254,7 +257,9 @@ class PreparedCompactRecovery:
         )).projection
         if before_projection.status != "ready":
             raise ConversationCompactError("恢复输入未知", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
-        before, _ = projected_model_context_components(before_projection)
+        before, _ = projected_model_context_components(
+            before_projection, media_token_reserve=media_token_reserve(self.agent),
+        )
 
         # LLM: 本回调只在原摘要后、写checkpoint前执行；预计代次来自真实binding，不使用原旧thread猜新代次。
         # 函数用途: 把活动摘要和保留区交给宿主纯投影，交回真实完整计量及同次材料。
@@ -271,7 +276,9 @@ class PreparedCompactRecovery:
             ))
             if material.projection.status != "ready" or material.params.compact_context != expected:
                 raise ConversationCompactError("活动恢复候选未知", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
-            tokens, _ = projected_model_context_components(material.projection)
+            tokens, _ = projected_model_context_components(
+                material.projection, media_token_reserve=media_token_reserve(self.agent),
+            )
             return ConversationCompactProjection(tokens, material)
 
         return compact_carried_active_turn_archive(

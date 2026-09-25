@@ -298,6 +298,8 @@ my-agent status --json
 
 `status` 是用户显式执行的只读诊断，始终显示这份摘要，不修改任务、attempt 或队列状态。崩溃调和由单 Gateway 的启动恢复和后台 runner supervision 负责。
 
+Gateway 段在计数大于 0 时多一行 `unidentified_stale_attempts=N`（`--json` 为 `gateway.unidentified_stale_attempts`）：没有进程身份、启动恢复不能自动判死的悬挂运行轮数量，只投影 Gateway 启动写进 state 的计数，用 `my-agent runtime-stale-attempts [--settle]` 查看或显式结清。
+
 ## `timeline`
 
 ```powershell

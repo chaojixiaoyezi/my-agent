@@ -41,6 +41,7 @@ class StatusPrintContext:
     suggested_actions: list
     gateway_state_load_error: dict | None = None
     gateway_heartbeat_load_error: dict | None = None
+    unidentified_stale_attempts: int = 0
 
 
 @dataclass
@@ -52,6 +53,7 @@ class _GatewaySectionRequest:
     paths: Any
     state_load_error: dict | None = None
     heartbeat_load_error: dict | None = None
+    unidentified_stale_attempts: int = 0
 
 
 def print_status_human(ctx: StatusPrintContext):
@@ -69,6 +71,7 @@ def print_status_human(ctx: StatusPrintContext):
             ctx.paths,
             ctx.gateway_state_load_error,
             ctx.gateway_heartbeat_load_error,
+            ctx.unidentified_stale_attempts,
         ),
         ctx.request_counts,
         ctx.archive_request_counts,
@@ -100,6 +103,12 @@ def _format_gateway_section(request: _GatewaySectionRequest, request_counts: dic
         print("- state_load_error=" + json.dumps(request.state_load_error, ensure_ascii=False, sort_keys=True))
     if request.heartbeat_load_error:
         print("- heartbeat_load_error=" + json.dumps(request.heartbeat_load_error, ensure_ascii=False, sort_keys=True))
+    if request.unidentified_stale_attempts:
+        # 无身份悬挂运行轮不自动结清（多运行版本共用 owner 库），这里只提醒并指出显式命令。
+        print(
+            f"- unidentified_stale_attempts={request.unidentified_stale_attempts}"
+            "（无进程身份的悬挂运行轮，不自动结清；查看/结清: my-agent runtime-stale-attempts [--settle]）"
+        )
     print("- requests=" + json.dumps(request_counts, ensure_ascii=False, sort_keys=True))
     if archive_request_counts:
         print("- archive_requests=" + json.dumps(archive_request_counts, ensure_ascii=False, sort_keys=True))

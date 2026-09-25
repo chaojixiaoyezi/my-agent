@@ -139,3 +139,19 @@ def test_wait_for_gateway_running_honors_monotonic_deadline(monkeypatch, tmp_pat
     assert status_rendering.wait_for_gateway_running(_gateway_paths(tmp_path), 0.45) == (0, False)
     assert sum(sleeps) == pytest.approx(0.45)
     assert max(sleeps) <= 0.2
+
+
+def test_render_gateway_status_reports_unidentified_stale_attempts_only_when_present(tmp_path: Path):
+    """gateway status 只在 state.json 计数大于 0 时提醒无身份悬挂运行轮，不查库、不结清。"""
+    from agent_py_agent.agent.gateway_parts.queue_service import render_gateway_status
+
+    paths = _gateway_paths(tmp_path)
+    paths.root.mkdir(parents=True)
+    agent = MagicMock()
+    agent.config.gateway_stale_seconds = 60
+
+    paths.state.write_text(json.dumps({"status": "stopped", "unidentified_stale_attempts": 9}), encoding="utf-8")
+    assert "gateway unidentified_stale_attempts=9" in render_gateway_status(agent, paths)
+
+    paths.state.write_text(json.dumps({"status": "stopped", "unidentified_stale_attempts": 0}), encoding="utf-8")
+    assert not any("unidentified_stale_attempts" in line for line in render_gateway_status(agent, paths))

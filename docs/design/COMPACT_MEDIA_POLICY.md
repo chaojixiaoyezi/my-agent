@@ -119,7 +119,13 @@
   为范围内其余图块，两者可同时非零。
 - **失败语义变化**：看图小请求失败不再让整次压缩失败（片 B 会抛 typed 错误让这次压缩中止），同次压缩改走归档引用并把码记进 checkpoint。
 - **不变的边界**：强制恢复（窗口上限/供应商施压，`pressure_forced`）仍一律 A；legacy prompt 仍 A；视觉能力事实仍只来自声明或探针；
-  preflight/`_automatic_noop`/请求投影器的候选接受估算仍未加图块预留（留作后续切片）。
+  preflight/`_automatic_noop`/请求投影器的候选接受估算原先未加图块预留；2026-09-24 深夜补齐（见下一条）。
+- **图块预留进估算（2026-09-24 深夜）**：`projected_model_context_components(..., media_token_reserve=)` 把
+  `classify_nontext_content` 认定的已知图块（顶层 user 行 local_file image/video，与运输层展开集合相同）按每块
+  `input_media_token_reserve` 折进 `messages_tokens` 与总量；调用方（preflight 的 `_model_visible_context_components`、
+  `_automatic_noop`、恢复候选与活动回合候选计量）统一传配置值。不看压缩策略、不探视觉能力——图块不论策略如何都会进请求体。
+  状态条四个分类键不变、加总仍等于总量；供应商真实图片 token 仍由成功调用的校准对照修正。
+  测试 `test_context_pressure_media_reserve.py`（纯函数加预留与分类加总、tool_result/assistant/base64 图块不计、预检真实入口读配置）。
 - **验收**：`test_compact_media_vision.py` 改为两步断言（看图小请求带图块且只带含图回合、文字请求带引用与要点、typed 失败同次回落且写标记）；
   新增 `test_compact_media_digest.py`（分组、按预算与次数打包、标签与首个 typed 失败停止、非 typed 上抛、部分成功双计数、无图零请求）。
   真实验收已过（2026-09-24，runtime-step11c，M2.7 官方档案声明 `input_modalities=[image,text]` 后）：阈值自动压缩 checkpoint `vision_summary/declared/summarized=1/archived=0`。

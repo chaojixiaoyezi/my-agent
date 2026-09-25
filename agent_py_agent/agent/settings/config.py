@@ -390,7 +390,7 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     compact_media_policy: str = "auto"
     # 当前模型声明的输入模态（如 text、image、video），来自模型档案的 input_modalities；空表示未知，压缩策略会用一次结构化视觉探针判断，不按模型名猜。
     model_input_modalities: list[str] = field(default_factory=list)
-    # 随图摘要（vision_summary）时每个图块在摘要预算里的预留 token 数；只在 compact_media_policy=auto 且模型视觉能力事实为支持时使用。
+    # 每个已知图块折进上下文估算的 token 数：预检/自动压缩判定按图块数乘以该值计入；随图摘要时也是每块在摘要预算里的预留。
     input_media_token_reserve: int = 1600
     # 随图摘要一次压缩最多发几次"看图"小请求；含图回合按摘要预算打包，超过次数的图块本次按归档引用（checkpoint 记 vision_digest_partial）。最小 1。
     compact_vision_digest_max_requests: int = 4
