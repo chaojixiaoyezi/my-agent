@@ -159,6 +159,7 @@ def handle_status(handler, server) -> None:
         "pid": state.get("pid"),
         "uptime": time.time() - state.get("started_at", time.time()),
         "requests": counts,
+        "runtime_prefix": str(state.get("runtime_prefix") or ""),
     }
     if state_load_error:
         response["state_load_error"] = state_load_error

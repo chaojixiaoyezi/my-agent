@@ -994,6 +994,8 @@ my-agent chat --gateway
 | `--resume-context` | 配置值 | 本次 chat 会话临时启用恢复上下文注入。 |
 | `--no-resume-context` | 配置值 | 本次 chat 会话临时关闭恢复上下文注入。 |
 
+**随 Gateway 升级自动重启**：部署新版 Gateway 后，正在运行的 TUI 每隔几秒比对 Gateway 状态文件里的 `runtime_prefix` 与自己的安装；不是同一安装且当前空闲（没有进行中的回合、排队、待审批，输入框为空，停在主视图）时，界面自动退出并用 Gateway 同版的 `my-agent`按原参数重启，会话历史在服务端不丢；正在忙时只在底部提示。开关 `tui_follow_gateway_upgrade`（默认开），从源码 venv 起 TUI 调试时可关。
+
 chat 内部命令仍在本地处理，例如 `/memory`、`/remember`、`/subagents`。普通自然语言消息才会进入模型；在 `--gateway` 模式下，这些普通消息会走 gateway request/response。
 
 chat 和 gateway 都复用 `SimpleAgent.run()` 的恢复上下文能力。也就是说，只有当主配置显式打开 `memory_resume_auto_context_enabled` 时，普通消息才会在恢复触发词场景里自动注入 `Recovery Brief`；默认不查、不注入。

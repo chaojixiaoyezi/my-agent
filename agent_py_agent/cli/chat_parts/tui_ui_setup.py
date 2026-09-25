@@ -788,6 +788,8 @@ def _assemble_tui_application(
             duration_seconds=6.0,
         )
     app._my_agent_title_controller = parts.title_controller
+    # 升级守护线程用它判断输入框是否为空；只读，不改输入。
+    app._my_agent_input_area = parts.input_area
     def write_active_console(text: str) -> None:
         runtime_reader = getattr(params.agent_navigation, "active_runtime", None)
         selected_runtime = runtime_reader() if callable(runtime_reader) else parts.runtime

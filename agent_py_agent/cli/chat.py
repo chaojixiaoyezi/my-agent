@@ -332,6 +332,7 @@ def cmd_chat(args) -> int:
     runtime_inject: list[str] = args.inject or []
     prompt_files: list[str] = args.prompt_file or []
 
+    restart_target_ref: list = [""]
     if use_tui:
         from .chat_parts.tui_params import TuiRunParams
 
@@ -355,6 +356,7 @@ def cmd_chat(args) -> int:
             recovered_message_cursor=recovered_message_cursor,
             recovered_before_message_cursor=recovered_before_message_cursor,
             restore_session_history=deferred_history,
+            restart_target_ref=restart_target_ref,
         ))
     else:
         from .chat_parts.plain_state import RunPlainConfig
@@ -370,6 +372,12 @@ def cmd_chat(args) -> int:
             current_session_id=current_session_id,
         ))
     _request_chat_session_close(agent, current_session_id)
+    restart_target = str(restart_target_ref[0] or "")
+    if restart_target:
+        # 界面已收尾、会话关闭已登记；换成 Gateway 同版客户端继续，原命令行参数不变。
+        from .chat_parts.tui_upgrade_follow import reexec_into_target
+
+        return reexec_into_target(restart_target, sys.argv[1:])
     return result
 
 

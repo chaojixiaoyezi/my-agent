@@ -10,6 +10,7 @@ if TYPE_CHECKING:
 
 import threading
 from dataclasses import dataclass
+from pathlib import Path
 
 from .rendering import _cprint
 from .tui_params import (
@@ -189,6 +190,51 @@ def _run_tui_loop(ctx: TuiLoopContext) -> int:
     return result
 
 
+# LLM: 只在 Gateway 模式启动；空闲判定与退出请求都复用 TUI 既有的结构化引用（运行/排队计数、审批协调器、输入框、导航深度、
+#   stop_event + app.exit），不新造第二套状态。真正 exec 在 cmd_chat 收尾之后。
+# 函数用途: 启动“Gateway 换版后空闲自动重启”的守护线程。
+def _start_upgrade_follow(params: TuiRunParams, refs: TuiInputRefs, app) -> None:
+    import sys
+
+    from .tui_runtime import runtime_has_active_permission
+    from .tui_upgrade_follow import (
+        UpgradeFollowContext,
+        start_upgrade_follow_watcher,
+        tui_idle_for_restart,
+    )
+
+    def is_idle() -> bool:
+        with params.state_lock:
+            running, pending = bool(params.is_running_ref[0]), int(params.pending_jobs_ref[0] or 0)
+        input_area = getattr(app, "_my_agent_input_area", None)
+        navigation = refs.agent_navigation
+        depth = navigation.snapshot().depth if navigation is not None else 0
+        return tui_idle_for_restart(
+            is_running=running, pending_jobs=pending,
+            input_text=str(getattr(input_area, "text", "") or ""),
+            permission_active=runtime_has_active_permission(refs.tui_runtime),
+            navigation_depth=depth,
+        )
+
+    def request_exit() -> None:
+        _tui_request_exit(TuiExitRefs(
+            shutting_down_ref=params.shutting_down_ref, state_lock=params.state_lock,
+            is_running_ref=params.is_running_ref, pending_jobs_ref=params.pending_jobs_ref,
+            stop_event=refs.stop_event,
+        ))
+        loop = getattr(app, "loop", None)
+        if loop is not None and getattr(app, "is_running", False):
+            loop.call_soon_threadsafe(app.exit)
+
+    start_upgrade_follow_watcher(UpgradeFollowContext(
+        state_path=Path(params.paths.state), own_prefix=sys.prefix,
+        enabled=bool(getattr(params.agent.config, "tui_follow_gateway_upgrade", True)),
+        stop_event=refs.stop_event, restart_target_ref=params.restart_target_ref, is_idle=is_idle,
+        request_exit=request_exit,
+        set_notice=lambda text, seconds, kind: refs.tui_runtime.set_notice(text, duration_seconds=seconds, notice_kind=kind),
+    ))
+
+
 # LLM: app 参数携带与 worker 相同的 runtime/local_run_ref，禁止 UI setup 创建第二份状态。
 # 函数用途: 从顶层运行配置组装 TUI 界面参数。
 def _make_tui_app_params(
@@ -342,6 +388,8 @@ def run_tui(*, params: TuiRunParams) -> int:
             return
         worker_started.set()
         _start_worker_threads(params=_make_start_worker_params(params, refs))
+        if params.use_gateway:
+            _start_upgrade_follow(params, refs, app)
 
     if params.use_gateway:
         from .tui_preflight import TuiGatewayPreflight, start_tui_gateway_preflight

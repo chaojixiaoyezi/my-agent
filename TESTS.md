@@ -3070,6 +3070,11 @@ Audit/摄取不列入本轮新增验收；共享模块既有回归按改动影�
 覆盖，仅升级 wheel 不会替换这些值。测试可在备份后移除测试配置中已确认是旧默认副本的字段，
 不能直接覆盖用户定制提示。模型声明、界面 Goal、目标账本、任务绑定和最终工具结果分别取证。
 
+## TUI 随 Gateway 升级自动重启与部署工具适配器重启（2026-09-25）
+
+- `test_tui_upgrade_follow.py`：目标判定（同安装/未运行/开关关/入口缺失都不重启）、空闲五条件、空闲时写目标并请求退出一次、忙时 30 秒限频 footer 提示、守护线程请求重启后自行结束、exec 失败只打印提示、Gateway 状态文件带 `runtime_prefix`。
+- 真实验收方法：在 tmux 里用旧 runtime 的 `my-agent chat --gateway` 起一个空闲 TUI，部署新版（切 Gateway），观察该 TUI 进程的可执行文件路径在数秒内变成新 runtime；结束后关闭 tmux 会话。适配器重启步骤在本机/测试机都没有适配器时只记录 `adapter.running=false`，真实重启路径待下次接入 IM 时验证。
+
 ## 提交前严格 gate
 
 - **线上 CI runner 与 bwrap（2026-09-25）**：Actions 重新启用后 Test 工作流自 7 月以来一直失败，根因是 ubuntu-24.04 runner 预装 bwrap 但 AppArmor 禁止非特权用户命名空间，sandbox 自检 `BWRAP_ISOLATION_FAILED`（setting up uid map: permission denied）→ 全部 `run_command` 用例按设计 fail-closed。两个工作流增加

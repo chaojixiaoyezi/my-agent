@@ -479,6 +479,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     enable_self_learning: bool = False
     # 主会话代理可用 manage_models 工具直接增删改切 owner 模型目录；关闭后只能用 TUI /model 手动配置。
     enable_model_profile_tool: bool = True
+    # TUI 发现 Gateway 换了安装（runtime_prefix 不同）且自身空闲时自动重启到同版客户端；关闭后只在 footer 提示。
+    tui_follow_gateway_upgrade: bool = True
     result_check_execute_tests: bool = False
     result_check_timeout_seconds: int = 120
     dynamic_timeout_safety_margin: float = 2.0

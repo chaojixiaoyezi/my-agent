@@ -155,3 +155,5 @@ class TuiRunParams:
     recovered_before_message_cursor: int = 0
     restore_session_history: bool = False
     local_run_ref: list = dataclasses.field(default_factory=lambda: [None])
+    # 随 Gateway 升级自动重启：watcher 写入要 exec 的同版 my-agent 路径，cmd_chat 收尾后执行。
+    restart_target_ref: list = dataclasses.field(default_factory=lambda: [""])

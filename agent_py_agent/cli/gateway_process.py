@@ -158,6 +158,8 @@ def _build_run_state(request: GatewayThreadsRequest, pid: int, status: str = "ru
         "log_start_offset_bytes": max(0, int(context.log_start_offset_bytes or 0)),
         "process_identity": dict(context.process_identity or {}),
         "started_at": float(context.process_started_at or time.time()),
+        # 客户端用它判断自己是否与 Gateway 同一安装；只写 sys.prefix 这一结构化事实，不写版本文案。
+        "runtime_prefix": sys.prefix,
     }
 
 

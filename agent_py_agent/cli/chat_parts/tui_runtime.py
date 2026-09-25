@@ -2853,3 +2853,9 @@ def _cancellation_requested(token: object | None) -> bool:
 
 
 __all__ = ["TuiRuntime", "TuiTurnEventAdapter", "TuiTurnSummary"]
+
+
+# LLM: 只读投影当前是否有审批面板在显示；升级守护线程据此判断“空闲”，不授予或改变审批。放在模块级是为了不再撑大 TuiRuntime 类。
+# 函数用途: 告诉调用方这个 TUI runtime 现在有没有待用户决定的审批。
+def runtime_has_active_permission(runtime: TuiRuntime) -> bool:
+    return runtime._permission_coordinator.active_controller() is not None

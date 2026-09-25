@@ -322,6 +322,13 @@ enable_self_learning: false
 # - false：不注册该工具，模型目录只能通过 TUI /model 手动维护。
 enable_model_profile_tool: true
 
+# TUI 随 Gateway 升级自动重启（默认开启）：
+# - true：部署新版 Gateway 后，正在运行的 TUI 每隔几秒读一次 Gateway 状态文件里的 runtime_prefix；发现与自己不是同一安装，
+#   且当前没有进行中的回合、没有排队、没有待审批、输入框为空、停留在主视图时，退出界面并用 Gateway 同版的 my-agent 原参数重启；
+#   会话历史都在服务端，不会丢。正在忙时只在底部提示“Gateway 已升级，空闲时自动重启”。
+# - false：只提示，不自动重启（开发时从源码 venv 起 TUI 对着已部署 Gateway 调试可关掉）。
+tui_follow_gateway_upgrade: true
+
 # 用户身份配置
 # - user_id: 当前本地用户标识，默认为 admin
 user_id: "admin"

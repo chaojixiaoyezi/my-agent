@@ -1904,3 +1904,4 @@ GatewayModelObservation现承接render/prepare_request/select三个顺序点：�
   `permission_resolved(owner_granted=true)`；用户选 `approved_owner` 后经 `request_execution` 注入的 `grant_recorder` 落盘。子代理/后台的
   `AgentToolApprovalSinkMixin.request_permission` 做同样的预检与落盘。
 - 边界：会话级缓存（`approval_session.py`）仍然只是本 Gateway 进程内的一次授权复用，不会被扩成 owner 级；owner 级授权只来自用户在面板上的显式选择。
+- `cli/gateway_process._build_run_state` 写入 `runtime_prefix=sys.prefix`，`gateway_parts/http_handlers.handle_status` 原样投影；这是客户端比对安装的唯一结构化事实，不写版本文案（2026-09-25）。
