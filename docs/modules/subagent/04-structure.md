@@ -615,7 +615,7 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
   block 的 run 调用 durable auto-start。unknown run/attempt 返回 `authority_recovery_blocked`，不会创建
   runner、占用并发或把未启动的进程计作 `orphans_revived`。
 - 该预检不从 `CHANNEL_ERROR`、重试次数、模型正文或错误文案猜恢复安全性，也不自动把 unknown 改成
-  failed/abandoned。唯一放行仍是操作者核对副作用后调用 `recover_attempt_unknown`。
+  failed/abandoned。唯一放行仍是操作者核对副作用后调用 `recover_attempt_unknown`（会话里经 `/recover <处置>` 调用）。
 - 对照 会话运行时 的 `AgentStatus`：`Errored/NotFound` 在 multi-agent wait/tool 状态中直接投影失败，恢复是
   显式 `resume_agent` 行为；本项目保留持久 orphan 巡查，但不再周期性盲拉已知 unknown 执行。
 

@@ -376,6 +376,7 @@ agent_py_agent/
 |   |   |-- request_client.py          # 薄客户端 ask 载荷和不可变执行选项合同
 |   |   |-- channel_health.py          # adapter PID/heartbeat/逐通道状态的 fail-closed 健康投影
 |   |   |-- permission_bridge.py       # TUI/Gateway 工具审批 request binding 的原子决定文件桥
+|   |   |-- turn_recovery_control.py   # /recover：查看并按用户处置解除当前会话的未知执行轮阻塞
 |   |   `-- goal_control_service.py    # 同 thread 持续目标的创建/修改/暂停/恢复/清除
 |   |-- conversation/                  # 通道会话账本、权威 transcript、结构化任务关联/续接
 |   |   |-- store.py                    # 同源领域组件组装、跨领域上下文与账本维护
@@ -828,6 +829,7 @@ agent_py_agent/
 |   |-- test_tui_paste.py               # 大小 paste 的折叠/展开和占位符安全回归
 |   |-- test_tui_preflight.py           # Gateway readiness 瞬态成功、typed 失败与 worker 只启动一次回归
 |   |-- test_tui_upgrade_follow.py      # TUI 随 Gateway 升级原地切换：目标判定、空闲事实、UI 线程两段式、交接载荷、终端兜底
+|   |-- test_turn_recovery_control.py   # /recover 解析、只读查看、显式恢复后可再挂载、拒绝情形、Gateway 分派与 TUI 序列化
 |   |-- test_tui_terminal.py            # OSC 标题、活动动画、去重与清理回归
 |   |-- test_tui_transcript.py          # 详细 transcript、全文搜索、命中导航和 resize 回归
 |   |-- test_tui_reading_position.py    # 原地展开、立即滚动、双向跨页和插话身份回归
@@ -1326,6 +1328,7 @@ docs/
 - `agent/gateway_parts/foreground_transcript.py`：同会话公开过程、候选增量与 final 快照，不拥有运行或审批权限。
 - `agent_py_agent/tests/test_gateway_foreground_transcript.py`：前台 writer、消息顺序、缺帧恢复、候选接替与隔离验证。
 - `agent/gateway_parts/model_profile_service.py`：authenticated owner 的模型菜单接口，不经聊天队列或模型。
+- `agent/gateway_parts/turn_recovery_control.py`：`/recover` 只看当前 thread 工作任务的根主代理执行轮；查看只读，处置经唯一出口 `recover_attempt_unknown`，不重放旧操作。
 - `agent/gateway_parts/owner_conversation_store.py`：沿原配置与 owner 路径组装模型菜单和插件管理共用的轻量会话 Store，不初始化完整 Agent。
 - `agent/gateway_parts/approval_mode_service.py`：认证 owner 的权限菜单服务，不允许正文伪造管理员。
 - `agent/user_space/approval_mode.py`：既有 owner 工具策略里的唯一用户审批模式读写与运行快照映射。

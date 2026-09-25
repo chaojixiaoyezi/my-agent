@@ -60,6 +60,7 @@ from .audit_control_service import AuditControlRequest, execute_audit_control_op
 from .goal_control_service import GoalControlRequest, execute_goal_control_operation
 from .io import gateway_turn_transition, read_json_file_report, update_json_file_atomic
 from .paths import GatewayPaths, gateway_chunk_path, gateway_paths_from_root
+from .turn_recovery_control import execute_turn_recovery_control
 from .workspace_scope import GatewayWorkspaceScopeError, gateway_request_workspace_scope
 
 _ACTIVE_SUBAGENT_STATUSES = {
@@ -323,6 +324,7 @@ def reconcile_gateway_steer_delivery(
 
 
 # LLM: 三类控制分别调度 Goal、中断回合或停止任务资源；只有明确 stop 才组合，未知控制不能回退到停止。
+# /recover 只交给 turn_recovery_control 按当前会话的工作任务处理，不经过 live request 或停止分支。
 # 函数用途: 分派结构化控制，避免已暂停 Goal 或普通任务的 interrupt 落入资源停止。
 def execute_gateway_conversation_control(
     agent: object,
@@ -344,6 +346,8 @@ def execute_gateway_conversation_control(
         return _execute_compact_control(agent, paths, command, scope)
     if command.kind == "effort":
         return _execute_effort_control(agent, command, scope)
+    if command.kind == "recover":
+        return _execute_recover_control(agent, command, scope)
     steer_receipt: _SteerReceiptState | None = None
     if command.kind == "steer":
         try:
@@ -714,6 +718,25 @@ def _execute_verbose_control(
             "verbose",
             False,
             "当前会话的详细过程设置暂时不可用，请稍后重试。",
+        )
+
+
+# LLM: /recover 只在已认证 scope 解析出的 owner/thread 上执行，不创建线程；读写细节归 turn_recovery_control。
+# 函数用途: 为 /recover 解析当前会话的 owner 与线程，再交给恢复控制模块查看或解除阻塞。
+def _execute_recover_control(
+    base_agent: object,
+    command: ConversationControlCommand,
+    scope: GatewayControlScope,
+) -> ConversationControlResult:
+    try:
+        owner_agent = _request_agent_for_scope(base_agent, scope)
+        thread = _conversation_thread_for_scope(owner_agent.conversation_store, scope)
+        return execute_turn_recovery_control(owner_agent, thread, command)
+    except Exception:
+        return ConversationControlResult(
+            "recover",
+            False,
+            "当前会话的执行恢复状态暂时不可用，请稍后重试。",
         )
 
 

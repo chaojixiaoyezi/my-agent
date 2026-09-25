@@ -389,6 +389,20 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.MANUAL_REVIEW.value,
         recovery_hint="原工作片已有操作但终态未确认；先核对原操作回执与外部事实，不得重复执行整个任务。",
     ),
+    "RUN_RECOVERY_REQUIRED": ErrorContract(
+        code="RUN_RECOVERY_REQUIRED",
+        category="state",
+        retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="执行链结果未确认，自动挂载被拒；只能由用户用 /recover 查看并显式确认处置，不自动重试或重做整个任务。",
+    ),
+    "RUN_RECOVERY_REJECTED": ErrorContract(
+        code="RUN_RECOVERY_REJECTED",
+        category="state",
+        retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="/recover 没有改变执行状态（状态已变化或不是可人工恢复的未知执行轮）；重新查看或查看运行诊断。",
+    ),
     "CONVERSATION_CONTEXT_REQUIRED": ErrorContract(
         code="CONVERSATION_CONTEXT_REQUIRED",
         category="orchestration",

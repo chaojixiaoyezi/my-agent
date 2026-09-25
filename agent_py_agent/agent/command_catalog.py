@@ -87,6 +87,18 @@ COMMAND_CATALOG = (
         conversation_suffix=r"(?:\s+(.*))?$",
     ),
     CommandSpec(
+        "recover",
+        "/recover",
+        "查看结果未确认、正在阻塞本会话的上一轮操作",
+        help_variants=(
+            ("/recover recorded", "已核实操作生效并记下，解除阻塞后接着原任务继续"),
+            ("/recover confirmed_noop", "已核实操作没有生效，解除阻塞后接着原任务继续"),
+            ("/recover abandoned", "不再核对、接受未知后果，解除阻塞后接着原任务继续"),
+        ),
+        submit_on_enter=True,
+        conversation_suffix=r"(?:\s+(.*))?$",
+    ),
+    CommandSpec(
         "goal",
         "/goal <时长> <名称> <任务>",
         "启动一个有名称的持续目标",

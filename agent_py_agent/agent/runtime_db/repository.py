@@ -57,6 +57,7 @@ from .host_commands import (
 from .operations import (
     _ATTEMPT_TERMINAL_STATUSES,
     AGENT_RUN_TERMINAL_STATUSES,
+    ATTEMPT_EFFECT_DISPOSITIONS,
     ATTEMPT_STATUS_PENDING,
     ATTEMPT_STATUS_RECOVERED,
     ATTEMPT_STATUS_UNKNOWN,
@@ -73,6 +74,7 @@ from .operations import (
     RuntimeConflictError,
     RuntimeExecutionBusyError,
     RuntimeOperationsMixin,
+    RuntimeRecoveryRequiredError,
     exec_lock_scope,
     holder_is_alive,
 )
@@ -1549,9 +1551,11 @@ class RuntimeRepository(
                 # 诊断事件先落库再拒绝：raise 会让 with 事务回滚，事件必须
                 # 先行 commit（拒绝路径本身不产生其他写，回滚空事务无害）。
                 conn.commit()
-                raise RuntimeConflictError(
+                raise RuntimeRecoveryRequiredError(
                     f"run 状态未知({status!r})，fail-closed 拒绝挂载: {agent_run_id}"
                 )
+            # 两处 unknown 闸都抛 RuntimeRecoveryRequiredError（RUN_RECOVERY_REQUIRED），
+            # Gateway 据 error_code 提示用户 /recover；重试不会自行解除。
             # attempt 层 unknown 闸（2026-08-15 双席核对点3）：最新 attempt
             # 标 unknown（执行者死亡+结果未知）→ 自动挂载被拒——不能触发
             # 自动续跑；recover_attempt_unknown 人工核对后（→ recovered）
@@ -1571,7 +1575,7 @@ class RuntimeRepository(
                                      "人工核对后 recover_attempt_unknown 显式恢复"},
                 )
                 conn.commit()
-                raise RuntimeConflictError(
+                raise RuntimeRecoveryRequiredError(
                     f"attempt 未知终态(unknown)，fail-closed 拒绝挂载: {agent_run_id}"
                 )
             lock = conn.execute(
@@ -2708,7 +2712,7 @@ class RuntimeRepository(
             return {"reclaimed": False, "reason": result.get("reason", "settle_failed")}
         return {"reclaimed": True, "status": closeout, "attempt_id": attempt_id}
 
-    # LLM: 这是 unknown 执行权的唯一人工出口；恢复 current attempt 时必须同时
+    # LLM: 这是 unknown 执行权的唯一人工出口（会话里由 /recover 调用，处置值取 ATTEMPT_EFFECT_DISPOSITIONS）；恢复 current attempt 时必须同时
     # 恢复 startup recovery 写入的 unknown run，并只释放该 attempt 自己的锁。
     # 函数用途: 人工核对副作用处置后恢复同一主链，使保留的事件可以重新调度。
     def recover_attempt_unknown(
@@ -2729,7 +2733,7 @@ class RuntimeRepository(
         effect_disposition 结构化值：confirmed_noop(已核实无副作用) /
         recorded(副作用已人工入账) / abandoned(副作用丢弃接受)。禁 NL 判定。
         """
-        if str(effect_disposition or "") not in {"confirmed_noop", "recorded", "abandoned"}:
+        if str(effect_disposition or "") not in ATTEMPT_EFFECT_DISPOSITIONS:
             return {"recovered": False, "reason": "invalid_effect_disposition"}
         with self.transaction() as conn:
             return _recover_unknown_attempt_conn(
@@ -2740,6 +2744,27 @@ class RuntimeRepository(
                 effect_disposition=effect_disposition,
                 reason=reason,
             )
+
+    # LLM: /recover 的只读投影；只列结构化状态可能已生效的操作（EXECUTING/UNKNOWN，或已启动的
+    # CLAIMED），不读 outcome 正文、不改任何行。结果顺序按创建时间，供用户核对后再显式恢复。
+    # 函数用途: 列出某个执行轮里结果尚未确认的工具操作（工具名、状态、开始时间）。
+    def unsettled_attempt_operations(self, attempt_id: str) -> list[dict[str, Any]]:
+        with self._runtime_connection() as conn:
+            rows = conn.execute(
+                "SELECT operation_id, operation_type, status, handler_started_at, created_at "
+                "FROM tool_operations WHERE attempt_id = ? AND (status IN (?, ?) "
+                "OR (status = ? AND handler_started_at > 0)) ORDER BY created_at",
+                (str(attempt_id or ""), OP_EXECUTING, OP_UNKNOWN, OP_CLAIMED),
+            ).fetchall()
+        return [
+            {
+                "operation_id": str(row["operation_id"] or ""),
+                "operation_type": str(row["operation_type"] or ""),
+                "status": str(row["status"] or ""),
+                "handler_started_at": float(row["handler_started_at"] or 0),
+            }
+            for row in rows
+        ]
 
     # -------------------------------------------------------- wake_queue
     # LLM: 调度唤醒字条(2026-08-17 扫描治理 owner 拍板)——"任务自己留的闹钟"。

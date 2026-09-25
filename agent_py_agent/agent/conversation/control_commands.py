@@ -16,6 +16,7 @@ from ..command_catalog import (
     unavailable_command_message,
 )
 from ..plugin_commands import plugin_command_response
+from ..runtime_db.operations import ATTEMPT_EFFECT_DISPOSITIONS
 from .authority import (
     CONVERSATION_AUDIT_PREPARE_ATTR,
     CONVERSATION_CANCELLATION_SCOPE_ATTR,
@@ -34,6 +35,7 @@ ControlKind = Literal[
     "goal",
     "audit",
     "verbose",
+    "recover",
     "unsupported",
 ]
 TaskCommandKind = Literal["audit_prepare", "decision_experiment"]
@@ -168,7 +170,7 @@ def parse_conversation_control(
 
 
 # LLM: 名称和正文读取公共声明；插件实际入口另行消费其只读回执，此控制解析器仍拒绝插件，不能执行旧 stop 分支。
-# 函数用途: 区分即时控制与模型任务，保留暂停目标、中断本轮和停止资源三种语义。
+# 函数用途: 区分即时控制与模型任务，保留暂停目标、中断本轮和停止资源三种语义；/recover 只解析结构化处置值。
 def parse_conversation_command(
     text: object,
     *,
@@ -216,6 +218,8 @@ def parse_conversation_command(
         )
     if name == "goal":
         return _goal_command(trailing)
+    if name == "recover":
+        return _recover_command(trailing)
     if name == "audit":
         return _audit_command(raw)
     if name == "experiment":
@@ -366,6 +370,19 @@ def _goal_command(trailing: object) -> ConversationControlCommand:
             usage="用法：/goal edit 新目标",
         )
     return ConversationControlCommand("goal", value=value, operation="create")
+
+
+# LLM: 处置值只认 runtime_db 的结构化取值表，不接受同义词或正文；无参数只读查看，带参数才会改运行库。
+# 函数用途: 把 `/recover` 解析为查看，或把 `/recover <处置>` 解析为显式恢复请求。
+def _recover_command(trailing: object) -> ConversationControlCommand:
+    value = str(trailing or "").strip().lower()
+    return ConversationControlCommand(
+        "recover",
+        value=value,
+        operation="apply" if value else "view",
+        valid=not value or value in ATTEMPT_EFFECT_DISPOSITIONS,
+        usage="用法：/recover 查看未确认的操作；核对后用 /recover " + "|".join(ATTEMPT_EFFECT_DISPOSITIONS) + " 解除阻塞。",
+    )
 
 
 def _audit_command(raw: str) -> ConversationCommand:

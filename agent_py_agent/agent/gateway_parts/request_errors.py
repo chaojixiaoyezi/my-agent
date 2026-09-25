@@ -47,6 +47,7 @@ class SystemCommandRoutingError(RuntimeError):
 # COMPACT_REQUEST_NON_TEXT 先于通用 COMPACT_ 前缀匹配：它现在表示"无法摘要的非文本内容"（unknown 块，或 compact_media_policy=off 时的图片），
 # 文案要点明这一点并给出可行动的出路；已知图片在 auto/archived_refs 下会走归档引用，不再报这个码。
 # COMPACT_VISION_SUMMARY_FAILED 同样先于前缀匹配：随图摘要本次失败，同代次下一次压缩自动改走归档引用，文案说明不必换模型。
+# ACTIVE_TURN_OUTCOME_UNCERTAIN 与 RUN_RECOVERY_REQUIRED 都是执行结果未确认的人工恢复点：文案只指向 /recover，重试不会自行解除。
 # 函数用途: 区分尚未配置、压缩、截断、持久化与请求拒绝，不把未知 400 归咎密钥或建议不安全重放。
 def gateway_client_error_message(error_code: object) -> str:
     code = str(error_code or "").strip().upper()
@@ -94,7 +95,11 @@ def gateway_client_error_message(error_code: object) -> str:
         ),
         "ACTIVE_TURN_OUTCOME_UNCERTAIN": (
             "上一轮有操作已发起，但执行结果尚不能确认。为避免重复写入或重复启动，"
-            "已停止自动恢复；请先核对执行结果，不要直接重做整个任务。"
+            "已停止自动恢复；请输入 /recover 查看未确认的操作，核对后选择处置，不要直接重做整个任务。"
+        ),
+        "RUN_RECOVERY_REQUIRED": (
+            "上一轮执行结果尚未确认，本会话已暂停自动执行，重试不会自行解除。"
+            "请输入 /recover 查看未确认的操作，核对后选择处置。"
         ),
         "CONVERSATION_PERSISTENCE_UNAVAILABLE": (
             "当前会话记录无法可靠读取或保存，本轮已停止，避免在缺少上下文时继续执行。"

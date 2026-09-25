@@ -3079,6 +3079,18 @@ Audit/摄取不列入本轮新增验收；共享模块既有回归按改动影�
 - 第二版真机（隔离 Gateway 127.0.0.1:8431、临时 home、两份同提交 runtime）首轮发现两处：新进程先把 stdout 换成缓冲再判断终端，误入 plain 模式卡在 `input()`，切换中键入的字符被它吞掉；启动器的启动页会清屏。已修并补回归（`test_in_place_handoff_detects_the_terminal_before_holding_output`、`test_boot_frame_is_skipped_during_an_in_place_handoff`）；同轮已确认：783 次采样全屏从未退出、无退出横幅、同一进程换到新 runtime。
 - 部署工具（仓库外）：同机有 IM 适配器在跑时，先比对它实际加载的 agent_py_agent 模块在新旧安装间是否有变化，没变就不重启（IM 完全无感），变了才重启并核对同版。
 
+## 未知执行轮的会话内恢复 `/recover`（2026-09-25）
+
+- 真实触发：用户会话里模型在回合中执行 `my-agent gateway restart`，Gateway 自杀；启动恢复把该回合 run/attempt 记为 unknown，
+  自动续跑报 `ACTIVE_TURN_OUTCOME_UNCERTAIN`，此后每条新消息续同一 active 工作任务都在 `create_attempt` 被拒，没有任何用户出口。
+- `test_turn_recovery_control.py`：处置值只认结构化取值；`/recover` 只读列出未确认操作（已成功的不列）且不改库；
+  unknown 挂载抛 `RuntimeRecoveryRequiredError`（`RUN_RECOVERY_REQUIRED`，仍是 `RuntimeConflictError`）且客户端文案指向 `/recover`；
+  `/recover recorded` 后 attempt=recovered、run=created、事件带 operator 与处置、下一次 `create_attempt` 成功、再执行显示无需恢复；
+  无 thread/无阻塞/非 unknown attempt 的阻塞分别返回无需恢复或 `RUN_RECOVERY_REJECTED`；Gateway 按已认证 scope 解析 thread 后分派；
+  TUI 序列化与本地模式拒绝。
+- 真实验收方法：部署后对卡住的会话先发 `/recover` 核对列出的工具与开始时间，再发一个处置值；随后发一条普通消息，
+  核对该请求 done、运行库新 attempt 的 metadata 带 `recovered_from_attempt_id`，旧 attempt 的未确认操作没有被重做。
+
 ## 提交前严格 gate
 
 - **线上 CI runner 与 bwrap（2026-09-25）**：Actions 重新启用后 Test 工作流自 7 月以来一直失败，根因是 ubuntu-24.04 runner 预装 bwrap 但 AppArmor 禁止非特权用户命名空间，sandbox 自检 `BWRAP_ISOLATION_FAILED`（setting up uid map: permission denied）→ 全部 `run_command` 用例按设计 fail-closed。两个工作流增加

@@ -62,6 +62,10 @@ RUN_STATUS_LEGACY_CREATED = frozenset({"", "created"})
 ATTEMPT_STATUS_PENDING = "pending"
 ATTEMPT_STATUS_UNKNOWN = "unknown"
 ATTEMPT_STATUS_RECOVERED = "recovered"
+#: unknown → recovered 的人工处置结构化取值：confirmed_noop(已核实无副作用) /
+#: recorded(副作用已核实并入账) / abandoned(不再核对，接受未知后果)。
+#: recover_attempt_unknown 与 /recover 命令共用这一份，禁止从自然语言推断。
+ATTEMPT_EFFECT_DISPOSITIONS = ("recorded", "confirmed_noop", "abandoned")
 _ATTEMPT_TERMINAL_STATUSES = frozenset(
     {"done", "failed", "cancelled", ATTEMPT_STATUS_UNKNOWN, ATTEMPT_STATUS_RECOVERED}
 )
@@ -148,6 +152,15 @@ class RuntimeConflictError(RuntimeError):
 # 类用途: 表示同一 run 已有真实存活执行者，供 Gateway 进入可恢复等待而不是报程序异常。
 class RuntimeExecutionBusyError(RuntimeConflictError):
     """活执行者占用同一执行权锁；状态未损坏，可在持有者让位后重试。"""
+
+
+# LLM: 只由 create_attempt 的 unknown 闸抛出；error_code 是 Gateway 给客户端选文案的唯一依据，
+# 调用方不得解析异常文本。仍是 RuntimeConflictError 子类，既有 except/pytest.raises 语义不变。
+# 类用途: 表示这条执行链的结果未确认、必须先经 /recover 人工处置，重试不会自行解除。
+class RuntimeRecoveryRequiredError(RuntimeConflictError):
+    """run 或当前执行轮处于 unknown，自动挂载被拒，需人工显式恢复。"""
+
+    error_code = "RUN_RECOVERY_REQUIRED"
 
 
 def sha256_of(path: Path) -> str:

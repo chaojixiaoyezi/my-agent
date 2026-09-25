@@ -75,6 +75,7 @@ python -m agent_py_agent --help
 | `/btw <补充要求>` | 给当前正在运行的任务补充一次要求；若模型正在生成，旧动作会先作废。 | 仅当前 request，投递一次后结束；不会进入下一任务。 |
 | `/stop` | 停止当前轮、暂停当前持续目标并回收活跃子代理；需要继续目标时显式恢复。 | 保留 transcript、工作区、compact 和 memory，不停止 Gateway 服务。 |
 | `/interrupt` | 主代理中断当前轮；已有 active Goal 时沿原调度安全续接，不等同暂停目标。 | 保留目标、任务身份和会话；无 active Goal 时不创建续跑。 |
+| `/recover [recorded\|confirmed_noop\|abandoned]` | 上一轮执行中断、结果未确认（报 `ACTIVE_TURN_OUTCOME_UNCERTAIN` 或 `RUN_RECOVERY_REQUIRED`）时使用：不带参数只列出未确认的工具操作；核对外部事实后带处置值显式解除阻塞，下一条消息接着原任务继续。 | 只作用于当前会话的工作任务；处置写进运行库 `attempt_recovered` 事件；不重放旧操作，不改聊天记录。仅 Gateway 模式。 |
 | `/goal ...` | 查看或修改当前 thread 的持久目标。 | 系统控制；命令词不进入模型。 |
 | `/verbose [off|on|full]` | 查看或修改当前 thread 的过程显示档位。 | 系统设置；不创建模型请求、不写 transcript。 |
 | `/audit [时长] <任务>` | 以结构化保证档启动一个新任务。 | `/audit` 前缀不进入模型，只有任务正文进入正常 turn。 |
@@ -86,6 +87,11 @@ python -m agent_py_agent --help
 **经验输入上界**（`empirical:jev_wire_bytes.v1`，不是供应商保证），超出标定范围或剩余预算就不发送；实验结果只记录、
 永不采用，也不改变模型看到的工具和 Skill 展示。撤销沿 `user_config` 的 `decision_experiment_revoke`。
 本地直连 TUI 与后台执行不建立实验授权。
+
+`/recover` 的三个处置值：`recorded` 表示已核实操作生效并记下，`confirmed_noop` 表示已核实操作没有生效，
+`abandoned` 表示不再核对、接受未知后果。三者都只经 `RuntimeRepository.recover_attempt_unknown` 把 unknown
+执行轮改为 recovered、run 复原为 created 并释放该轮执行锁；区别只记录在事件里。系统不会自动重做那条操作，
+模型在下一轮看到的仍是原会话历史。执行链状态不是“执行中断造成的 unknown”时，`/recover` 拒绝处理并提示查看运行诊断。
 
 `/btw` 不再用于查看或永久追加 prompt，`/btw-clear` 已移除。`/stop` 会作废当前 turn 尚未消费的
 引导，但保留已经写入的聊天和工作现场；停止后可以直接用普通自然语言补充，再说“继续”。

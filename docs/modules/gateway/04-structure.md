@@ -1833,6 +1833,8 @@ exact task id、同值 run/request id，以及 carried archive 中的 operation 
 确定终态及匹配记录、资源稳定时，才执行 unknown→recovered、run unknown→created、exact exec lock release。
 generic `create_attempt` 和 `recover_attempt_unknown` 不感知 transport marker，继续保持普通 unknown 人工恢复。
 
+普通 unknown 的人工恢复入口是会话控制 `/recover`（`gateway_parts/turn_recovery_control.py`，由 `control_service` 按 kind 分派）。它只看已认证 scope 对应 thread 的 `workspace_task_id`，经 `main_agent_recovery_block_for_task` 找到阻塞的根主代理执行轮：无参数时只读列出 `unsettled_attempt_operations`；带处置值时以 `conversation-control:/recover` 为 operator 调用 `recover_attempt_unknown`，处置值必须属于 `ATTEMPT_EFFECT_DISPOSITIONS`。`create_attempt` 在两处 unknown 闸抛 `RuntimeRecoveryRequiredError`（`RUN_RECOVERY_REQUIRED`），Gateway 按 error_code 给出指向 `/recover` 的客户端文案。
+
 模型输出、异常字符串、PID 年龄、目录内容和“看起来已完成”都不是恢复证据。恢复后新 generation 仍走普通
 `_bind_main_agent_authority`；旧操作不会被 RuntimeDB 重开，模型只从 carried records 获得已做事实。任何
 EXECUTING/UNKNOWN、已启动但未 settle、缺 archive、operation 字段冲突或 DIRTY/MUTATING 资源都返回结构化
