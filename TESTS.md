@@ -3086,6 +3086,9 @@ Audit/摄取不列入本轮新增验收；共享模块既有回归按改动影�
   `os.kill` 探测重新成功而出生标识读不到，被记回 unresolved。终止回执改为记住已证明消失的进程实例（同号 PID 换出生标识才重新纳入），
   回归 `test_termination_receipt_keeps_proven_dead_pid_resolved_after_pid_reuse`。
   沙箱真跑之后 fast suite 单 job 实测 40–45 分钟，45 分钟预算在 8cd7d01d0 的运行里被顶满整体取消；test.yml 预算放到 60 分钟。
+  结果（2026-09-25 13:3xZ，main `88631648e`，run 36137357520）：test (3.11) 41 分钟 success、test (3.12) 44 分钟 success——7 月以来首次全绿的 fast suite，
+  且 run_command 用例真在 bwrap 里执行；test (3.10) 在 45 分钟预算处被取消（非用例失败，60 分钟预算已在 6db8ef403）。随后 Actions 被账单/额度挡住，
+  新 run 3 秒内以 billing 注解失败；线上 CI 复验待用户处理 Billing 后进行，本地严格 gate 仍是唯一验收来源。
 
 ```bash
 python3 -m pytest <直接相关测试文件> -q --tb=short
