@@ -657,6 +657,11 @@ auth 表单取消和参数拒绝已验，官方设备码在两处环境被 HTTP 
 
 ## 当前待落地或待复验
 
+- 想法、未落地（2026-09-25，用户提问“更新 Gateway 时我在用的 TUI 和飞书要不要管”引出）：客户端随 Gateway 升级。现状：TUI 是独立进程，Gateway 重启后会自动重连并补回历史，
+  但客户端代码停在启动时的版本（旧 `/help`、旧插件命令目录），没有版本不一致检测；IM 适配器也是独立守护进程，部署工具只切 Gateway 不重启它。
+  方案：(1) 部署工具切完 Gateway 后检测并重启同机适配器守护进程，纳入同版核对；(2) TUI 在重连时比对 Gateway 上报的版本事实（wheel 哈希/source_sha），
+  不一致且当前无进行中的回合、输入框为空时 `os.execv` 重启自身（同参数、同会话，历史在服务端），否则只在状态行提示“Gateway 已升级，空闲时将自动重启”；
+  版本事实来自结构化状态接口，不解析文案。待用户确认优先级后实现。
 - 教训并已修（2026-09-25，对照线在 Homebrew Python 3.14 上发现）：随包 Skill 目录 `plugin_skill_dir` 曾用宿主默认 sysconfig scheme 推算激活环境的
   purelib；framework/user 类 scheme 会忽略传入的 base，把目录算到宿主 site-packages，Python 插件的随包 Skill 在非 venv 的 Homebrew 宿主上整体失踪。
   现在显式用 venv 布局 scheme（3.10 用 posix_prefix/nt 等价），回归 `test_plugin_skills.py::test_plugin_skill_dir_ignores_host_default_scheme`。
