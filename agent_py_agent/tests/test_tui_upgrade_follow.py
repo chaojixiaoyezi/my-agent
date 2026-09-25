@@ -200,6 +200,8 @@ def test_adopt_handoff_takes_session_quiets_output_and_restores_terminal_on_earl
     monkeypatch.setattr(sys, "stderr", real_err)
     state = follow.adopt_handoff()
     assert state.child and state.session_id == "sess-7" and follow.HANDOFF_ENV not in os.environ
+    assert sys.stdout is real_out, "adopt 不能换掉 stdout：cmd_chat 还要用它判断是不是终端"
+    follow.hold_setup_output()
     assert registered == [follow._restore_terminal_at_exit]
     print("会话打不开", file=sys.stderr)
     assert real_err.getvalue() == "", "旧画面还在屏幕上，启动期间的输出先暂存"
@@ -215,6 +217,7 @@ def test_released_streams_and_normal_exit_do_not_reset_again(monkeypatch):
     monkeypatch.setattr(sys, "stdout", real_out)
     monkeypatch.setattr(sys, "stderr", io.StringIO())
     follow.adopt_handoff()
+    follow.hold_setup_output()
     print("已恢复会话: sess-8")
     follow.release_quiet_streams()
     assert sys.stdout is real_out and real_out.getvalue() == ""
@@ -277,3 +280,15 @@ def test_exec_payload_records_the_install_it_came_from(monkeypatch):
     monkeypatch.setattr(follow.os, "execv", fake_execv)
     follow.exec_handoff("/rt-b/bin/my-agent", [], "sess-1")
     assert seen["payload"]["from_prefix"] == sys.prefix
+
+
+def test_child_that_cannot_use_the_tui_hands_the_terminal_back_immediately(monkeypatch):
+    payload = {"schema": "my_agent.tui_handoff.v1", "session_id": "sess-p", "tty": None}
+    monkeypatch.setenv(follow.HANDOFF_ENV, json.dumps(payload))
+    out = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", out)
+    follow.adopt_handoff()
+    follow.drop_handoff_screen()
+    follow.drop_handoff_screen()
+    follow._restore_terminal_at_exit()
+    assert out.getvalue().count(follow._TERMINAL_RESET) == 1

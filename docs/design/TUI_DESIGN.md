@@ -95,7 +95,7 @@ Esc 中断当前代理，不承担关闭或保存职责；主代理 active Goal 
 - Gateway 状态文件与 `/status` 带结构化 `runtime_prefix`（Gateway 进程的 `sys.prefix`）。TUI 的 `tui_upgrade_follow` 守护线程每 5 秒读一次状态文件，与自身 `sys.prefix` 比对；不解析任何版本文案。
 - 空闲判定只看结构化事实：无运行中回合、无排队、无待审批（`runtime_has_active_permission`）、输入框为空且有焦点、导航深度为 0、转写视图跟随底部（没在翻历史）。
 - 切换两段式都在 prompt_toolkit 事件循环线程上：先复核空闲并显示“正在切换到新版本…”，留一帧渲染时间，再复核一次后 `os.execv` 到 Gateway 同版的 `bin/my-agent`，保留原命令行参数。不走退出流程：全屏、raw 模式、鼠标与括号粘贴都原样留给新进程，屏幕保持原画面；期间按键留在终端输入队列。
-- 跨 exec 只经环境变量 `MY_AGENT_TUI_HANDOFF` 传两样结构化事实：会话编号与第一代进程保存的原始终端设置（termios）。新进程在 `cmd_chat` 开头弹出它，沿用同一会话；启动期间的输出先暂存（旧画面还在屏幕上）；先同步确认 Gateway 就绪、同步读历史与模型名，再首帧渲染，跳过可见的连接动画。新进程退出界面后把终端还原成第一代的设置；没能接管终端就退出时，atexit 兜底撤掉全屏/鼠标/括号粘贴并补打暂存的错误。
+- 跨 exec 只经环境变量 `MY_AGENT_TUI_HANDOFF` 传两样结构化事实：会话编号与第一代进程保存的原始终端设置（termios）。新进程在 `cmd_chat` 开头弹出它，沿用同一会话；用真实 stdout 判断完“是不是终端”之后才暂存启动输出（旧画面还在屏幕上；先暂存会误入 plain 模式卡在 `input()`），启动器的启动页（清屏）在交接时跳过；先同步确认 Gateway 就绪、同步读历史与模型名，再首帧渲染，跳过可见的连接动画。新进程退出界面后把终端还原成第一代的设置；没能接管终端就退出时，atexit 兜底撤掉全屏/鼠标/括号粘贴并补打暂存的错误。
 - 载荷还带切换前的 `from_prefix`：新进程若发现自己的安装仍等于它（入口指向了别的解释器），本进程不再原地切换、只提示重开，避免每隔几秒循环 exec。
 - 任一次复核不空闲就撤回并清除提示，守护线程稍后再试；exec 失败保留旧界面并提示，本进程不再重试。Windows 的 `execv` 会另起进程，不做原地切换，只提示重开。
 - 回归：`test_tui_upgrade_follow.py`、`test_cli_chat.py::...test_in_place_handoff_keeps_session_and_loads_history_before_first_frame`。

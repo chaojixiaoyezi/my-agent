@@ -3076,6 +3076,7 @@ Audit/摄取不列入本轮新增验收；共享模块既有回归按改动影�
 - `test_tui_upgrade_follow.py`：目标判定、七项空闲事实、只排到 UI 线程且两次复核、忙时撤回、exec 失败保留旧界面、会话与 termios 经环境变量传递、新进程暂存启动输出、未接管终端退出时补发复位序列、畸形或外来载荷忽略、Windows 只提示、Gateway 状态带 `runtime_prefix`。
 - `test_cli_chat.py::TestChatCommandRuntime::test_in_place_handoff_keeps_session_and_loads_history_before_first_frame`：新进程沿用会话、就绪后同步读历史、跳过可见连接流程。
 - 真实验收方法：在 tmux 里的 shell 中用新版 runtime 起一个空闲 TUI，再部署同一提交的下一版切 Gateway；每 0.1 秒记录进程路径变化与“正在切换”提示消失的时间，核对画面没出现退出横幅/shell 提示符、会话记录数不变、切换期间 send-keys 的字符出现在新界面输入框；最后退出 TUI，用 `stty -a` 核对 icanon/echo 已还原。
+- 第二版真机（隔离 Gateway 127.0.0.1:8431、临时 home、两份同提交 runtime）首轮发现两处：新进程先把 stdout 换成缓冲再判断终端，误入 plain 模式卡在 `input()`，切换中键入的字符被它吞掉；启动器的启动页会清屏。已修并补回归（`test_in_place_handoff_detects_the_terminal_before_holding_output`、`test_boot_frame_is_skipped_during_an_in_place_handoff`）；同轮已确认：783 次采样全屏从未退出、无退出横幅、同一进程换到新 runtime。
 - 部署工具（仓库外）：同机有 IM 适配器在跑时，先比对它实际加载的 agent_py_agent 模块在新旧安装间是否有变化，没变就不重启（IM 完全无感），变了才重启并核对同版。
 
 ## 提交前严格 gate

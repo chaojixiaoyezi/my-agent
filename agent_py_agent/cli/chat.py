@@ -289,7 +289,12 @@ def cmd_resume(args) -> int:
 # LLM: 显式恢复只读 canonical history；Gateway TUI 将读取交给既有 preflight，不能在 readiness 前 HTTP 请求或以空历史启动 worker。
 # 函数用途: 启动或恢复聊天，本地直接读历史，薄客户端先显示连接界面；正常关闭后登记统一会话提炼请求。
 def cmd_chat(args) -> int:
-    from .chat_parts.tui_upgrade_follow import adopt_handoff, release_quiet_streams
+    from .chat_parts.tui_upgrade_follow import (
+        adopt_handoff,
+        drop_handoff_screen,
+        hold_setup_output,
+        release_quiet_streams,
+    )
 
     # 原地切换来的新进程接着用上一代的会话；普通启动只记下终端设置，供以后切换时带过去。
     handoff = adopt_handoff()
@@ -297,6 +302,12 @@ def cmd_chat(args) -> int:
         args.session_id = handoff.session_id
     use_gateway = bool(args.gateway)
     use_tui = _has_prompt_toolkit() and not bool(getattr(args, "plain", False))
+    if handoff.child:
+        # 先用真实 stdout 判断完是不是终端，再暂存启动输出（旧画面还在屏幕上）；不能用 TUI 就立刻把终端还给 shell。
+        if use_tui:
+            hold_setup_output()
+        else:
+            drop_handoff_screen()
     args._gateway_client_mode = bool(use_gateway and use_tui)
     agent = make_agent(args)
     _ensure_chat_memory_limit(args, agent)

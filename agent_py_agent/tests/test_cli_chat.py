@@ -533,6 +533,62 @@ class TestChatCommandRuntime:
         assert params.current_session_id == "sess-live" and params.conversation_history == [("问", "答")]
         assert follow.HANDOFF_ENV not in __import__("os").environ
 
+    def test_in_place_handoff_detects_the_terminal_before_holding_output(self, monkeypatch):
+        """真机回归：新进程若先把 stdout 换成缓冲再判断终端，会误入 plain 模式卡在 input()。"""
+        import io as _io
+        import json as _json
+        import sys as _sys
+
+        from agent_py_agent.cli import chat as chat_mod
+        from agent_py_agent.cli.chat_parts import tui_upgrade_follow as follow
+        from agent_py_agent.cli.chat_parts.history import GatewayChatHistorySnapshot
+
+        class _Tty(_io.StringIO):
+            def isatty(self):
+                return True
+
+        monkeypatch.setattr(follow, "_STATE", follow.HandoffState())
+        monkeypatch.setattr(follow.atexit, "register", lambda *_a: None)
+        monkeypatch.setattr(_sys, "stdin", _Tty())
+        monkeypatch.setattr(_sys, "stdout", _Tty())
+        monkeypatch.setenv(follow.HANDOFF_ENV, _json.dumps(
+            {"schema": "my_agent.tui_handoff.v1", "session_id": "sess-tty", "tty": None}))
+        args = SimpleNamespace(gateway=True, inject=[], prompt_file=[], session_id="", memory_limit=5, plain=False)
+        agent = MagicMock()
+        agent.gateway_client_only = True
+        agent.config.chat_history_max_turns = 20
+        with patch.object(chat_mod, "make_agent", return_value=agent), \
+             patch.object(chat_mod, "SessionManager"), \
+             patch.object(chat_mod, "_setup_session", return_value="sess-tty"), \
+             patch.object(chat_mod, "gateway_paths", return_value=object()), \
+             patch.object(chat_mod, "_handoff_gateway_ready", return_value=True), \
+             patch.object(chat_mod, "load_gateway_chat_history", return_value=GatewayChatHistorySnapshot()), \
+             patch.object(chat_mod, "run_plain", side_effect=AssertionError("不能落到 plain 模式")), \
+             patch.object(chat_mod, "run_tui", return_value=0) as tui:
+            assert chat_mod.cmd_chat(args) == 0
+        assert tui.call_args.kwargs["params"].handoff is True
+
+    def test_boot_frame_is_skipped_during_an_in_place_handoff(self, monkeypatch):
+        import io as _io
+        import sys as _sys
+
+        from agent_py_agent.cli import chat_command_parser as parser_mod
+        from agent_py_agent.cli.chat_parts import tui_upgrade_follow as follow
+
+        class _Tty(_io.StringIO):
+            def isatty(self):
+                return True
+
+        out = _Tty()
+        monkeypatch.setattr(_sys, "stdin", _Tty())
+        monkeypatch.setattr(_sys, "stdout", out)
+        monkeypatch.setenv(follow.HANDOFF_ENV, "{}")
+        parser_mod._show_boot_frame(SimpleNamespace(plain=False))
+        assert out.getvalue() == "", "旧画面要留到新界面首帧，不能清屏画启动页"
+        monkeypatch.delenv(follow.HANDOFF_ENV)
+        parser_mod._show_boot_frame(SimpleNamespace(plain=False))
+        assert "my-agent" in out.getvalue()
+
     def test_cmd_chat_fails_closed_when_recovered_history_is_corrupt(self, capsys):
         """显式恢复读到损坏账本时不能悄悄显示空历史。"""
         from agent_py_agent.cli import chat as chat_mod

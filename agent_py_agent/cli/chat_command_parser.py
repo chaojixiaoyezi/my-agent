@@ -6,6 +6,7 @@ from __future__ import annotations
 # 模块用途: 集中注册 chat 和 resume 的全部命令行参数；启动时只解析轻量参数，真正执行后
 # 才加载聊天运行时，避免为了进入 TUI 预先加载所有其他命令。
 import argparse
+import os
 import sys
 
 from .bootstrap import add_resume_context_switches
@@ -111,6 +112,9 @@ def _show_boot_frame(args) -> None:
     if bool(getattr(args, "plain", False)):
         return
     if not sys.stdin.isatty() or not sys.stdout.isatty():
+        return
+    # 原地切换来的新进程：旧画面要一直留到新界面首帧，不能清屏画启动页（环境变量名与 tui_upgrade_follow.HANDOFF_ENV 一致）。
+    if os.environ.get("MY_AGENT_TUI_HANDOFF"):
         return
     sys.stdout.write(
         "\x1b[2J\x1b[H"

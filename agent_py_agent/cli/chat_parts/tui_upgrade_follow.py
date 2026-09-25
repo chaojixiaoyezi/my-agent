@@ -110,8 +110,9 @@ def _parse_payload(raw: str) -> dict | None:
     return payload
 
 
-# LLM: cmd_chat 开头调用一次。原地切换来的新进程：弹出环境变量（不传给后代进程）、记下会话与原始终端设置、把启动期间的输出暂存起来
-#   （旧画面仍在屏幕上，任何打印都会画花它），并注册退出兜底。普通启动：只记下当前终端设置，供以后切换时带过去。
+# LLM: cmd_chat 开头调用一次。原地切换来的新进程：弹出环境变量（不传给后代进程）、记下会话与原始终端设置，并注册退出兜底；
+#   不在这里换掉标准输出——cmd_chat 还要用真实 stdout 判断是不是终端（2026-09-25 真机发现：先换成缓冲会让新进程误入 plain 模式卡在 input()）。
+#   普通启动：只记下当前终端设置，供以后切换时带过去。
 # 函数用途: 识别本进程是不是原地切换来的，并准备好会话编号与终端恢复信息。
 def adopt_handoff() -> HandoffState:
     payload = _parse_payload(os.environ.pop(HANDOFF_ENV, ""))
@@ -125,11 +126,32 @@ def adopt_handoff() -> HandoffState:
     from_prefix = payload.get("from_prefix")
     if isinstance(from_prefix, str) and from_prefix and os.path.realpath(from_prefix) == os.path.realpath(sys.prefix):
         _STATE.follow_disabled = True
+    atexit.register(_restore_terminal_at_exit)
+    return _STATE
+
+
+# LLM: 必须在 cmd_chat 判断完“是否终端/是否用 TUI”之后调用。旧画面仍在屏幕上，启动期间的任何打印都会画花它，所以先暂存。
+# 函数用途: 原地切换来的新进程在界面接管前暂存所有输出。
+def hold_setup_output() -> None:
+    if not _STATE.child or _STATE.quiet is not None or _STATE.terminal_released:
+        return
     buffer = io.StringIO()
     _STATE.quiet = (sys.stdout, sys.stderr, buffer)
     sys.stdout = sys.stderr = buffer
-    atexit.register(_restore_terminal_at_exit)
-    return _STATE
+
+
+# LLM: 原地切换来的进程却不能用 TUI（理论上不该发生）时立刻撤掉旧界面的终端模式，再按普通命令行继续。
+# 函数用途: 把终端从上一代的全屏 raw 状态还原成 shell 能用的样子。
+def drop_handoff_screen() -> None:
+    if not _STATE.child or _STATE.terminal_released:
+        return
+    try:
+        sys.stdout.write(_TERMINAL_RESET)
+        sys.stdout.flush()
+    except (OSError, ValueError, AttributeError):
+        pass
+    _restore_original_tty()
+    _STATE.terminal_released = True
 
 
 # LLM: 必须在创建 prompt_toolkit Application 之前调用（它要真实 stdout）；暂存的是“已恢复会话”之类的启动提示，旧画面还在，直接丢弃。
@@ -384,7 +406,9 @@ __all__ = [
     "encode_tty",
     "exec_handoff",
     "gateway_runtime_prefix",
+    "drop_handoff_screen",
     "handoff_supported",
+    "hold_setup_output",
     "release_quiet_streams",
     "start_tui_upgrade_follow",
     "start_upgrade_follow_watcher",
