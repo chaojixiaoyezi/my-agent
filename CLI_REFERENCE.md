@@ -300,6 +300,8 @@ my-agent status --json
 
 Gateway 段在计数大于 0 时多一行 `unidentified_stale_attempts=N`（`--json` 为 `gateway.unidentified_stale_attempts`）：没有进程身份、启动恢复不能自动判死的悬挂运行轮数量，只投影 Gateway 启动写进 state 的计数，用 `my-agent runtime-stale-attempts [--settle]` 查看或显式结清。
 
+Gateway 未运行且停机时还有受管后台进程在跑时，多一行 `background_sessions_after_stop=N`（`--json` 为 `gateway.surviving_background_sessions`）：这些进程按设计跨 Gateway 存活，明细在 Gateway 事件 `gateway_background_sessions_surviving`，停止用 TUI `/stop` 或 `background_process list/stop`。
+
 ## `timeline`
 
 ```powershell

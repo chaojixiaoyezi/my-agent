@@ -112,3 +112,5 @@ lesson/HOT、截断、缺版本或 audit 正文覆盖未知时保留原批次并
 恢复摘要来源扩展至同一次冻结的真实原生工具往返，与归档同ref去重后沿原adapter和有界分段器处理。严格恢复空回复/工具调用的机械回退完整保留旧摘要与原模型可见材料；分段修复失败拒绝提交，避免截断摘录获得完整coverage。不新增记忆库或持久状态，不读取外置全文。此片本地联验中，外层重跑传递原生IR仍待实现；见决策模型容量审计末节与TESTS。
 
 后续外层overflow接续已本地实现：三宿主保留完整原生工具IR，释放失败经原partial出口保存完成事实；prefix接管摘要时移除旧applied_compact，避免transcript-only重复。无任务后台以宿主冻结视图校验线程，不补task属性误建任务。联合验收及剩余边界见TESTS；媒体、超大历史和真实缓存仍未收口。
+
+2026-09-24 深夜：`ExternalizeToolOutputRequest.force_externalize` 接通上下文余量不足的外置指令——余量由 agent_core 归档入口按 preflight 同口径计算，外置层只执行：`read_file` 分页不再豁免、通用输出直接落 artifact，记录写 `output_externalized_reason=tool_result_headroom`；`read_artifact` 分页保持内联。见[验证模块进展](../verification/02-progress.md)。

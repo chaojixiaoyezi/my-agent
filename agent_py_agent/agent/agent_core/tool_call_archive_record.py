@@ -13,7 +13,11 @@ from ..artifacts.registry import (
     ArtifactRegistration,
     register_artifact,
 )
-from ..memory_archive import ExternalizeToolOutputRequest, externalize_tool_output_record
+from ..memory_archive import (
+    ExternalizeToolOutputRequest,
+    estimate_tokens,
+    externalize_tool_output_record,
+)
 from ..settings.defaults import default_config_int
 from ..tooling.executor import ToolOutputProjection
 from ..tooling.models import ToolHandlerOutcome, output_policy_for_outcome
@@ -77,6 +81,7 @@ def archive_tool_output_projection(
         turn_id=call.turn_id,
         task_id=str(getattr(params, "task_id", "") or ""),
         min_chars=_config_int(agent, "tool_output_externalize_min_chars"),
+        force_externalize=_headroom_forces_externalize(agent, params, outcome.output),
         preview_chars=_config_int(agent, "tool_output_preview_chars"),
         parameters=dict(call.arguments),
         model_parameters=dict((model_call or call).arguments),
@@ -180,6 +185,7 @@ def archive_tool_call_record(agent: object, record: ToolCallRecordParams) -> dic
             turn_id=record.call.turn_id,
             task_id=record.params.task_id,
             min_chars=_config_int(agent, "tool_output_externalize_min_chars"),
+            force_externalize=_headroom_forces_externalize(agent, record.params, record.result.output),
             preview_chars=_config_int(agent, "tool_output_preview_chars"),
             parameters=dict(record.call.arguments),
             model_parameters=dict(record.model_visible_call.arguments),
@@ -258,6 +264,65 @@ def _config_int(agent: object, key: str) -> int:
         return int(getattr(agent.config, key))
     except (AttributeError, TypeError, ValueError):
         return default_config_int(key)
+
+
+# LLM: 布尔配置读取；agent/config 缺字段时用调用方给的默认值，不抛错（归档层不能因配置形状中断工具结果）。
+# 函数用途: 读一个开关类配置，缺失时用默认值。
+def _config_bool(agent: object, key: str, default: bool) -> bool:
+    value = getattr(getattr(agent, "config", None), key, None)
+    return default if value is None else bool(value)
+
+
+_HEADROOM_OVERFLOW_REASON = "tool_result_headroom"
+
+
+# LLM: 低余量外置（用户第 5 项"单回合超窗"的通用修法）：本条输出的估算 token 不小于距自动压缩点的剩余余量时，给归档请求
+#   打 force_externalize（read_file 分页也外置，正文照常落 artifact，模型只看预览+恢复锚点），并在 live_archive_state 登记
+#   tool_context_window_overflow(reason=tool_result_headroom)，让下一次预检必走统一 Compact 链；这样同一轮多条大结果不会把
+#   上下文冲过窗口再撞 COMPACT_CANDIDATE_TOO_LARGE。余量与 preflight 同一口径（model_visible_context_budget）。
+#   不介入的情况：开关 tool_output_externalize_on_low_headroom 关、配置阈值为 0（本来全外置）、已达配置阈值、输出不长于预览、
+#   窗口未知，或预算计算本身出错（软策略，失败即回到配置阈值，不能挡工具结果）。
+# 函数用途: 判断这条工具输出是否因为上下文余量不足而必须立刻外置。
+def _headroom_forces_externalize(agent: object, params: object, output: object) -> bool:
+    configured = _config_int(agent, "tool_output_externalize_min_chars")
+    text = str(output or "")
+    if not text or configured == 0 or not _config_bool(agent, "tool_output_externalize_on_low_headroom", True):
+        return False
+    size = max(len(text), len(text.encode("utf-8")))
+    if (configured > 0 and size >= configured) or len(text) <= max(0, _config_int(agent, "tool_output_preview_chars")):
+        return False
+    try:
+        from .model.context_pressure import model_visible_context_budget
+
+        budget = model_visible_context_budget(agent, params)
+    except Exception:  # noqa: BLE001 - 余量未知时回到配置阈值，归档不能因预算计算失败而中断
+        return False
+    if budget.context_window_tokens <= 0:
+        return False
+    tokens = estimate_tokens(text)
+    if tokens < budget.remaining_to_compact_tokens:
+        return False
+    _record_headroom_overflow(params, chars=len(text), tokens=tokens, remaining=budget.remaining_to_compact_tokens)
+    return True
+
+
+# LLM: 与 tool_context_window 的溢出登记同键同形（omitted_count/original_chars/preserved_count），preflight 按
+#   allow_persistent_apply 单次消费；同一轮多条累加，reason 固定 tool_result_headroom，不写任何正文。
+# 函数用途: 记下"这条结果因余量不足被外置"，让下一次模型请求前先压缩。
+def _record_headroom_overflow(params: object, *, chars: int, tokens: int, remaining: int) -> None:
+    state = getattr(params, "live_archive_state", None)
+    if not isinstance(state, dict):
+        return
+    prior = state.get("tool_context_window_overflow")
+    prior = prior if isinstance(prior, dict) else {}
+    state["tool_context_window_overflow"] = {
+        "omitted_count": int(prior.get("omitted_count") or 0) + 1,
+        "original_chars": int(prior.get("original_chars") or 0) + int(chars),
+        "preserved_count": int(prior.get("preserved_count") or 0),
+        "reason": _HEADROOM_OVERFLOW_REASON,
+        "estimated_tokens": int(tokens),
+        "remaining_to_compact_tokens": int(remaining),
+    }
 
 
 # LLM: Delegate to the per-run cached root; recomputing from a newly promoted task would orphan

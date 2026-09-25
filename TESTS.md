@@ -31,6 +31,7 @@ child不展示历史正文时的读取回归先复现1 failed/1 passed，修复�
 - **status 可见（2026-09-24 深夜）**：`my-agent status` 的 Gateway 段与 `--json` 的 `gateway.unidentified_stale_attempts`、`gateway status` 的
   `gateway unidentified_stale_attempts=N` 都只投影 Gateway 启动写进 state.json 的计数，大于 0 才出行并指向 `runtime-stale-attempts`；不查库、不结清。
   测试：`test_status_commands.py::TestStatusUnidentifiedStaleAttempts`、`test_gateway_status_runtime_errors.py` +1。
+- **停机后存活的后台会话（2026-09-24 深夜）**：Gateway 停机收尾只读列出仍未终态的受管后台进程，写事件 `gateway_background_sessions_surviving`、state 计数 `surviving_background_sessions`，`my-agent status` 在 Gateway 未运行时显示 `background_sessions_after_stop=N`；不停进程。测试 `test_gateway_background_sessions_shutdown.py`（真实 store + 活进程只列非终态并带监听事实、无注册表/无目录返回空且不建目录、收尾事件与失败扫描不阻塞、state 合并），`test_status_commands.py::TestStatusSurvivingBackgroundSessions`。
 
 ## 插件观察候选结构（第 15 项 P5-C 前置，2026-09-24 晚）
 
@@ -286,6 +287,7 @@ child不展示历史正文时的读取回归先复现1 failed/1 passed，修复�
 
 - **根因**：两轮真实阈值压缩（M3、M2.7）的 checkpoint 都是 `probe_supported` + `summary_budget_exceeded`：阈值在窗口 90% 触发并整段压完，而片 B 的单次随图请求必须装进 80% 窗口减输出预留，结构上永远装不下；只有范围很小的手动 `/compact` 才走到过 B。
 - **改动**：新增 `conversation/compact_media_digest.py`（含图回合分组、按摘要预算与 `compact_vision_digest_max_requests` 打包看图小请求、逐个发送并按 sha 前缀打标签、结果合成决定）；`compact.py::_summarize` 先看图再文字总结，图块统一投影为归档引用，要点进文字摘要指令；`_effective_media_decision` 预算门改为“最大的一次看图小请求”；`CompactMediaDecision.summarized_blocks` 与 checkpoint 双计数（`_media_blocks_archived/_media_blocks_summarized`）；一次都没成功才写 `compact_vision_failed_generation`，且不再让整次压缩失败。配置新增 `compact_vision_digest_max_requests`（YAML + dataclass，默认 4）。
+- **余量不足立刻外置工具输出（2026-09-24 深夜，用户第 5 项"单回合超窗"）**：`tool_call_archive_record._headroom_forces_externalize` 用 preflight 同口径余量判断，本条输出估算 token 不小于剩余余量就给 `force_externalize`（read_file 分页也外置）并登记 `tool_context_window_overflow(reason=tool_result_headroom)`；开关 `tool_output_externalize_on_low_headroom`。`test_tool_output_headroom_externalize.py` 5 项（外置+登记+预检消费、同轮累加、余量够内联、开关关、预算未知回退）；`test_compact_native_ir_recovery.py` 超预算夹具显式关开关。
 - **图块预留进估算（2026-09-24 深夜）**：`projected_model_context_components` 新增 `media_token_reserve`，预检、`_automatic_noop` 与恢复候选计量按已知图块数 × `input_media_token_reserve` 加进估算；`test_context_pressure_media_reserve.py`（3 项：加预留且分类加总不变、非展开集合与 0 预留不计、预检真实入口读配置）。
 - **测试**：`test_compact_media_vision.py` 三项改为两步语义（准入按最大请求；看图小请求只带含图回合并保留图块、文字请求带引用与要点、checkpoint 计数；typed 失败同次回落、写同代次标记、不进熔断）；新增 `test_compact_media_digest.py` 6 项（分组顺序、按预算/次数打包与两种跳过原因、标签与首个 typed 失败停止并合成 partial 决定、非 typed 上抛与空回复算失败、部分成功写双计数与 `vision_digest_partial`、无图或非 B 决定零请求）。
 - **真实验收（本机，runtime-step11c，main `94a2d0b4d`，2026-09-24 19:59—20:08，MiniMax-M2.7 官方，窗口 262,144）**：贴图问图后连续粘贴报告分片，上下文 65% → 部分四贴到压缩点，回合前自动压缩（checkpoint `forced=true` 是“整段压完”语义，非施压）。第一条会话 checkpoint 为 `archived_refs / probe_inconclusive`：M2.7 的结构化视觉探针两次都没给出正确颜色的工具回答（探针本身的既有波动，不缓存），策略在预算门之前就回落。随后经产品 `save_model` 给两条官方 M2.7 与 M3 档案声明 `input_modalities=[image,text]`（依据是片 B 第二轮两模型都拿到过 `probe_supported`），第二条会话 checkpoint 为 `media_policy=vision_summary`、`media_fact_source=declared`、`media_blocks_summarized=1`、`media_blocks_archived=0`、无 `media_policy_reason`，摘要正文含“附件内容要点”段——用户第 2 项“随图摘要在自动压缩里生效”成立。证据 `~/.my-agent/releases/step10-combo4/media-c-evidence.json`。

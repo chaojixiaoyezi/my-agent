@@ -513,6 +513,7 @@ def _cmd_gateway_run_cleanup(request: GatewayRunCleanupRequest) -> dict[str, obj
     alive_threads = _join_gateway_loops(request)
     drain_complete = not alive_threads
     interrupted_model_calls = _settle_interrupted_model_calls(request, drain_complete=drain_complete)
+    surviving_background_sessions = _record_surviving_background_sessions(request)
     paths = request.context.paths
     try:
         remove_pid_file_if_owned(paths.pid)
@@ -537,6 +538,7 @@ def _cmd_gateway_run_cleanup(request: GatewayRunCleanupRequest) -> dict[str, obj
         "drain_complete": drain_complete,
         "alive_threads": alive_threads,
         "interrupted_model_calls": interrupted_model_calls,
+        "surviving_background_sessions": surviving_background_sessions,
         "updated_at": time.time(),
     }
     log_gateway_event(
@@ -548,10 +550,51 @@ def _cmd_gateway_run_cleanup(request: GatewayRunCleanupRequest) -> dict[str, obj
         "[gateway-run] "
         f"status={request.termination_status} pid={request.pid} "
         f"reason={request.termination_reason or 'unspecified'} drain_complete={str(drain_complete).lower()} "
-        f"interrupted_model_calls={interrupted_model_calls}",
+        f"interrupted_model_calls={interrupted_model_calls} surviving_background_sessions={surviving_background_sessions}",
         flush=True,
     )
     return cleanup_payload
+
+
+# LLM: 停机时受管后台进程按设计继续存活；这里只在排空后列一次仍未终态的会话并写事件 gateway_background_sessions_surviving
+#   （count + 每条投影，含监听范围事实），扫描出错只记 gateway_background_sessions_scan_failed 的异常类型；不停止任何进程。
+#   改事件名或字段要同步 test_gateway_background_sessions_shutdown.py。
+# 函数用途: Gateway 停止时告诉用户还有哪些后台进程会继续跑，返回条数。
+def _record_surviving_background_sessions(request: GatewayRunCleanupRequest) -> int:
+    agent = request.context.agent
+    try:
+        from ..agent.gateway_parts.background_sessions import surviving_background_sessions
+
+        rows = surviving_background_sessions(agent)
+    except Exception as exc:  # noqa: BLE001 - 停止收尾不能因后台会话目录出错而中断
+        log_gateway_event(agent, "gateway_background_sessions_scan_failed", {"error_type": type(exc).__name__})
+        return 0
+    if rows:
+        log_gateway_event(
+            agent,
+            "gateway_background_sessions_surviving",
+            {
+                "status": "cleanup",
+                "pid": request.pid,
+                "termination_status": request.termination_status,
+                "count": len(rows),
+                "sessions": list(rows),
+            },
+        )
+    return len(rows)
+
+
+# LLM: 停机 state 已由 termination 记录写好；这里只把停机后仍存活的后台会话数并进 state.json 供 my-agent status 投影，
+#   不改 status/termination 字段，不写会话明细（明细在 gateway_background_sessions_surviving 事件里）。
+# 函数用途: 把"停机后还有 N 条后台进程在跑"写进 Gateway 状态文件。
+def _record_surviving_background_sessions_state(paths: GatewayPaths, cleanup: dict[str, object]) -> None:
+    prior = read_json_file(paths.state)
+    payload = {
+        **prior,
+        "surviving_background_sessions": int(cleanup.get("surviving_background_sessions") or 0),
+        "updated_at": time.time(),
+    }
+    write_json_file(paths.state, payload)
 
 
 # LLM: The context identity is captured before startup mutations. Tests/legacy embedders that did
@@ -873,6 +916,8 @@ def cmd_gateway_run(args) -> int:
     if not bool(cleanup_report.get("drain_complete")):
         _record_gateway_drain_failure(paths, agent, pid, cleanup_report)
         exit_code = 2
+    if cleanup_report.get("surviving_background_sessions"):
+        _record_surviving_background_sessions_state(paths, cleanup_report)
     return exit_code
 
 

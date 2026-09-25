@@ -42,6 +42,7 @@ class StatusPrintContext:
     gateway_state_load_error: dict | None = None
     gateway_heartbeat_load_error: dict | None = None
     unidentified_stale_attempts: int = 0
+    surviving_background_sessions: int = 0
 
 
 @dataclass
@@ -54,6 +55,7 @@ class _GatewaySectionRequest:
     state_load_error: dict | None = None
     heartbeat_load_error: dict | None = None
     unidentified_stale_attempts: int = 0
+    surviving_background_sessions: int = 0
 
 
 def print_status_human(ctx: StatusPrintContext):
@@ -72,6 +74,7 @@ def print_status_human(ctx: StatusPrintContext):
             ctx.gateway_state_load_error,
             ctx.gateway_heartbeat_load_error,
             ctx.unidentified_stale_attempts,
+            ctx.surviving_background_sessions,
         ),
         ctx.request_counts,
         ctx.archive_request_counts,
@@ -108,6 +111,12 @@ def _format_gateway_section(request: _GatewaySectionRequest, request_counts: dic
         print(
             f"- unidentified_stale_attempts={request.unidentified_stale_attempts}"
             "（无进程身份的悬挂运行轮，不自动结清；查看/结清: my-agent runtime-stale-attempts [--settle]）"
+        )
+    if request.surviving_background_sessions and not request.alive:
+        # 受管后台进程按设计跨 Gateway 存活；停机时记下的数量提醒用户它们还在跑，停止要走显式控制。
+        print(
+            f"- background_sessions_after_stop={request.surviving_background_sessions}"
+            "（Gateway 停机时仍在运行的后台进程会话；用 TUI /stop 或 background_process list/stop 查看与停止）"
         )
     print("- requests=" + json.dumps(request_counts, ensure_ascii=False, sort_keys=True))
     if archive_request_counts:

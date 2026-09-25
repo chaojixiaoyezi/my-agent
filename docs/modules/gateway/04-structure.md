@@ -1561,6 +1561,7 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   Scheduler due-owner 有界唤醒；各 controller 只负责编排，不保存业务事实源。
 - `cli/gateway_process.py`、`cli/gateway_client.py`：
   启动、停止、状态和客户端命令；`gateway_process.py` 直接承载公开 gateway 命令实现，不再转发到 `_gateway_commands.py`。
+  停机后存活的后台会话（2026-09-24 深夜）：`_cmd_gateway_run_cleanup` 在模型调用结清之后调用 `_record_surviving_background_sessions`，经 `gateway_parts/background_sessions.surviving_background_sessions` 只读列出 owner 后台会话权威目录（`process_session_store_root(registry.workspace_root, registry.owner_scope_root)`，与 ProcessSessionTool 同源）里仍未终态的受管进程，每条带 session_id/status/started_at/uptime_seconds/command(≤200)/lan_reachability/listener_observation；有则写事件 `gateway_background_sessions_surviving`，收尾后 `_record_surviving_background_sessions_state` 把条数并进 state.json 的 `surviving_background_sessions`，`my-agent status` 在 Gateway 未运行时投影为 `background_sessions_after_stop`；扫描出错只记 `gateway_background_sessions_scan_failed` 的异常类型。受管后台进程按设计跨 Gateway 存活，停止仍走显式 `/stop` 或 `background_process stop`，停机不杀进程。
   停止收尾 `_cmd_gateway_run_cleanup` 的顺序：置位停止事件 → 取消本进程在途决策（决策线，出错只记异常类型）→ 停 HTTP → 收三条循环 → 结清仍在途的模型调用（唯一账本记 failed/`MODEL_CALL_INTERRUPTED_HOST_SHUTDOWN`，用量按缺报；有在途才写 `gateway_model_calls_interrupted` 事件，账本出错只记 `gateway_model_call_settlement_failed{error_type}`）→ 清 pid/停止请求 → 写心跳与收尾事件（载荷含 `interrupted_model_calls` 条数）。只覆盖 Gateway 进程 agent 自己的账本；子代理 runner worker 各自的账本不在此结清。
   watch 返回必须分类为计划 stop、signal shutdown、有限轮完成或意外返回；SIGTERM/SIGINT 先落 typed
   stop request/forensics 再走同一 drain，意外返回非零退出，cleanup 另记 drain 结果。

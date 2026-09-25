@@ -309,6 +309,16 @@ submitted/consumed/rejected/reserved 不触发网络重试预留，响应使用�
 - agent runner/Gateway 退出：不自动杀已批准的受管会话；另一个同 scope 进程可重新水合。
 - 主机崩溃或重启：不自动重放命令。旧记录只用于还原真实终态，避免重复副作用。
 
+### Gateway 停机后的存活事实（2026-09-24 深夜）
+
+受管后台进程跨 Gateway 存活是设计行为，但用户"关掉程序"后需要看得见还有哪些在跑。停机收尾在模型调用结清之后，
+经 `gateway_parts/background_sessions.surviving_background_sessions` 只读列出权威目录里仍未终态的会话
+（目录与 `ProcessSessionTool` 同源），每条带 `session_id/status/started_at/uptime_seconds/command/lan_reachability/listener_observation`，
+写事件 `gateway_background_sessions_surviving`，条数并进 Gateway state.json 的 `surviving_background_sessions`，
+`my-agent status` 在 Gateway 未运行时显示 `background_sessions_after_stop=N`。不停止、不改记录、不猜归属；
+监听事实沿 `process_network_status`（非 Linux 为 `unsupported_on_host`）。启动时观测监听不可靠（服务可能尚未绑定端口）
+故未加入启动回执；是否按 socket 事实限制监听范围（loopback_only）待用户拍板，见 DESIGN_LEDGER。
+
 ## 非目标
 
 - 不把普通前台命令变成长驻会话。

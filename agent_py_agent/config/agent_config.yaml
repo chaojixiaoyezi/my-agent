@@ -774,9 +774,13 @@ tool_artifact_read_budget_max_chars: 240000
 # - tool_output_externalize_min_chars: 工具输出达到多少字符或 UTF-8 bytes 后外置为 artifact；0 表示所有工具输出都外置。
 #   几 KB 的定位/抽取结果会直接进入下一轮上下文，避免模型只看到“命令完成”却看不到证据。
 # - tool_output_preview_chars: archive 记录里保留多少字符预览；完整内容走 artifact 引用读取。
+# - tool_output_externalize_on_low_headroom: 一条工具输出的估算 token 已不小于距自动压缩点的剩余余量时，即使没到
+#   上面的字符阈值也立刻外置（模型只看预览和恢复锚点），并让下一次模型请求前先走统一压缩；用来避免同一轮多条大结果
+#   把上下文冲过窗口后压缩再也放不下（COMPACT_CANDIDATE_TOO_LARGE）。关掉则只按字符阈值外置。
 # - tool_payload_*: 只限制模型发来的单次工具调用 JSON 形状，防止坏 payload 撑爆上下文；不是业务字段枚举。
 tool_output_externalize_min_chars: 200000
 tool_output_preview_chars: 4000
+tool_output_externalize_on_low_headroom: true
 
 # 工具上下文回溯回收（microcompact）：
 # - 渲染 prompt 时，把窗口外的旧工具结果正文换成 artifact 锚点占位（read_artifact 可取回完整），

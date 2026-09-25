@@ -678,3 +678,37 @@ class TestStatusUnidentifiedStaleAttempts:
              redirect_stdout(stdout):
             assert cmd_status(_status_args(tmp_path, json_mode=False)) == 0
         assert "unidentified_stale_attempts" not in stdout.getvalue()
+
+
+class TestStatusSurvivingBackgroundSessions:
+    """Gateway 停机写进 state.json 的存活后台会话数要在 status 两种输出里可见。"""
+
+    def _run(self, tmp_path: Path, *, json_mode: bool, state: dict) -> str:
+        from agent_py_agent.cli.local_commands import cmd_status
+
+        state_path = tmp_path / "state.json"
+        heartbeat_path = tmp_path / "heartbeat.json"
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        heartbeat_path.write_text("{}", encoding="utf-8")
+        stdout = StringIO()
+        with patch("agent_py_agent.cli.local_commands.make_agent", return_value=_status_mock_agent(tmp_path)), \
+             patch(
+                 "agent_py_agent.cli.local_commands.gateway_paths",
+                 return_value=MagicMock(root=tmp_path, state=state_path, heartbeat=heartbeat_path),
+             ), \
+             patch("agent_py_agent.cli.local_commands.gateway_running", return_value=(None, False)), \
+             patch("agent_py_agent.cli.local_commands.gateway_request_counts", return_value={}), \
+             patch("agent_py_agent.cli.local_commands.build_status_suggestions", return_value=[]), \
+             redirect_stdout(stdout):
+            assert cmd_status(_status_args(tmp_path, json_mode=json_mode)) == 0
+        return stdout.getvalue()
+
+    def test_json_payload_and_human_line(self, tmp_path: Path):
+        state = {"status": "stopped", "surviving_background_sessions": 2}
+        assert json.loads(self._run(tmp_path, json_mode=True, state=state))["gateway"]["surviving_background_sessions"] == 2
+        text = self._run(tmp_path, json_mode=False, state=state)
+        assert "- background_sessions_after_stop=2" in text and "background_process" in text
+
+    def test_zero_prints_no_line(self, tmp_path: Path):
+        text = self._run(tmp_path, json_mode=False, state={"status": "stopped"})
+        assert "background_sessions_after_stop" not in text

@@ -54,6 +54,9 @@ def _native_ir_attempt(
     agent.config.enable_tools = True
     agent.config.tool_output_preview_chars = 64
     agent.config.tool_output_externalize_min_chars = 10_000_000
+    # 本夹具要故意造出"已经超预算的原生历史"来验证恢复宿主先压缩再发业务请求；默认开的余量外置会在归档时
+    # 把第二页起的 read_file 结果外置并直接触发预检压缩，所以这里显式关掉它（余量外置有自己的回归）。
+    agent.config.tool_output_externalize_on_low_headroom = False
     source_paths = [
         agent.home_paths.owner_workspace_dir / ("source.txt" if index == 0 else f"source-{index}.txt")
         for index in range(pairs)

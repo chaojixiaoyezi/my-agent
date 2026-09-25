@@ -72,6 +72,8 @@ class ExternalizeToolOutputRequest:
     conversation_request_id: str = ""
     min_chars: int = -1
     preview_chars: int = -1
+    # 归档层之外的结构化外置指令（上下文余量不足）：read_file 分页也外置，模型只看预览与恢复锚点；read_artifact 分页仍内联。
+    force_externalize: bool = False
     parameters: dict[str, Any] | None = None
     model_parameters: dict[str, Any] | None = None
     result_envelope: dict[str, Any] | None = None
@@ -85,13 +87,15 @@ def externalize_tool_output_record(request: ExternalizeToolOutputRequest) -> dic
     if _is_bounded_read_artifact_output(request, output):
         record.update(_read_artifact_record_fields(output))
         return record
-    if _is_bounded_read_file_output(request):
+    if _is_bounded_read_file_output(request) and not request.force_externalize:
         record.update(_archive_bounded_read_file_output(request, output, resolved))
         if not record.get("output_externalized") and not record.get("source_output_archived"):
             _append_tool_call_index(request, record, digest)
         return record
-    if _output_requires_recovery_artifact(output, resolved, request.result_envelope):
+    if request.force_externalize or _output_requires_recovery_artifact(output, resolved, request.result_envelope):
         path = _write_output_artifact(request, output, digest)
+        if request.force_externalize:
+            record["output_externalized_reason"] = "tool_result_headroom"
         # _write_output_artifact 内部已 _append_index 写 kind=tool_output 行
         # (带 path)——这里不需要再补 tool_call 行, 否则同 path 双行会破坏
         # read_artifact 的唯一 basename 修复匹配。

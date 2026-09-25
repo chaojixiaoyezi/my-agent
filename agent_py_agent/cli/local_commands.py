@@ -63,7 +63,7 @@ def cmd_status(args) -> int:
     )
     timeline = agent.local_store.timeline(limit=limit)
     pid, alive = gateway_running(paths)
-    gateway_status, heartbeat_age, state_load_error, heartbeat_load_error, unidentified_stale = _gateway_status_from_files(
+    gateway_status, heartbeat_age, state_load_error, heartbeat_load_error, state_counts = _gateway_status_from_files(
         agent, paths, alive,
     )
 
@@ -85,7 +85,8 @@ def cmd_status(args) -> int:
         archive_request_counts,
         state_load_error,
         heartbeat_load_error,
-        unidentified_stale_attempts=unidentified_stale,
+        unidentified_stale_attempts=state_counts["unidentified_stale_attempts"],
+        surviving_background_sessions=state_counts["surviving_background_sessions"],
     )
     payload = build_status_payload(payload_ctx)
     payload["suggestions"] = build_status_suggestions(agent, payload)
@@ -96,16 +97,18 @@ def cmd_status(args) -> int:
     print_ctx = StatusPrintContext(
         agent, paths, local_stats, board, timeline, gateway_status, pid, alive, heartbeat_age, active_work_summary,
         request_counts, archive_request_counts, payload["suggestions"], state_load_error, heartbeat_load_error,
-        unidentified_stale_attempts=unidentified_stale,
+        unidentified_stale_attempts=state_counts["unidentified_stale_attempts"],
+        surviving_background_sessions=state_counts["surviving_background_sessions"],
     )
     print_status_human(print_ctx)
     return 0
 
 
-# LLM: status 的 Gateway 事实只来自 state.json/heartbeat.json 与进程存活；第五项是 Gateway 启动时写进 state 的
-#   unidentified_stale_attempts 计数（无 runner 身份、不自动结清的悬挂运行轮），这里只投影不查 runtime.db、不结清。
-# 函数用途: 读取 Gateway 状态文件，给 status 提供状态、心跳年龄、两份读取错误和无身份悬挂运行轮计数。
-def _gateway_status_from_files(agent, paths, alive: bool) -> tuple[str, float, dict | None, dict | None, int]:
+# LLM: status 的 Gateway 事实只来自 state.json/heartbeat.json 与进程存活；第五项是 state 里两个计数的投影：
+#   unidentified_stale_attempts（Gateway 启动写入，无 runner 身份、不自动结清的悬挂运行轮）和
+#   surviving_background_sessions（Gateway 停机写入，停机后仍在运行的后台进程会话）。只投影，不查 runtime.db、不结清、不停进程。
+# 函数用途: 读取 Gateway 状态文件，给 status 提供状态、心跳年龄、两份读取错误和两个提醒计数。
+def _gateway_status_from_files(agent, paths, alive: bool) -> tuple[str, float, dict | None, dict | None, dict[str, int]]:
     gateway_state_report = read_json_file_report(paths.state, context="cli.status.gateway_state.read")
     heartbeat_report = read_json_file_report(paths.heartbeat, context="cli.status.gateway_heartbeat.read")
     gateway_status, heartbeat_age = resolve_gateway_status(
@@ -117,10 +120,11 @@ def _gateway_status_from_files(agent, paths, alive: bool) -> tuple[str, float, d
             now=time.time(),
         )
     )
-    return (
-        gateway_status, heartbeat_age, gateway_state_report.load_error, heartbeat_report.load_error,
-        _state_count(gateway_state_report.payload, "unidentified_stale_attempts"),
-    )
+    counts = {
+        key: _state_count(gateway_state_report.payload, key)
+        for key in ("unidentified_stale_attempts", "surviving_background_sessions")
+    }
+    return gateway_status, heartbeat_age, gateway_state_report.load_error, heartbeat_report.load_error, counts
 
 
 # LLM: 计数字段缺失、非法或状态文件读坏（payload 为空）都按 0，不抛错；status 是只读诊断，不能因一个计数字段失败。

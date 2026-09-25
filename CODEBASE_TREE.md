@@ -650,6 +650,7 @@ agent_py_agent/
 |   |-- test_decision_curator_plugin_concurrency.py # 后台 curator 与前台 skill_tool 同连接并发：互不拖住、撤销命中对应点、共享冷却、关闭一起取消
 |   |-- test_gateway_decision_shutdown_cancel.py # Gateway 停止时主动取消在途决策：回原方案、不进冷却、关闭后不再联网、收尾顺序与失败隔离
 |   |-- test_gateway_model_call_shutdown_settlement.py # Gateway 停止排空后把仍在途的模型调用记为被停机中断、未结算，并写结构化停机事件
+|   |-- test_gateway_background_sessions_shutdown.py # Gateway 停机时只读列出仍存活的受管后台会话并写事件/state 计数，不停进程
 |   |-- test_decision_action_candidate.py # 动作候选资格、隐私、非选择、新鲜度与来源复核、取消、text/native 同段与设置入口
 |   |-- test_decision_capability_consumer.py # 原设置/worker/循环接线到实际prompt/schema减量及失效原输入
 |   |-- test_decision_capability_provider_grouping.py # 能力推荐按结构化provider_id按插件出题、选中展开与整体延迟
@@ -691,6 +692,7 @@ agent_py_agent/
 |   |-- test_compact_media_policy.py    # 媒体压缩策略片 A：分类、投影、后缀保护按策略与 checkpoint 媒体事实
 |   |-- test_compact_media_digest.py    # 媒体压缩策略片 C：含图回合分组、按预算/次数打包看图小请求、部分成功双计数、typed 失败同次回落
 |   |-- test_context_pressure_media_reserve.py  # 已知图块按 input_media_token_reserve 折进预检/自动压缩估算，分类加总不变
+|   |-- test_tool_output_headroom_externalize.py # 余量不足的工具输出立刻外置并登记溢出，下一次预检走统一压缩
 |   |-- test_compact_media_vision.py    # 媒体压缩策略片 B/C：输入模态声明、视觉探针缓存、B/A 决策与准入、看图小请求 + 文字摘要两步、typed 失败回落
 |   |-- test_request_content_capacity.py # 当前思考与跨模型内容边界、child保留原模型
 |   |-- test_input_media.py             # 媒体归属、字节、预算和原生后端投影
@@ -1054,6 +1056,7 @@ docs/
 
 - `agent_py_agent/agent/agent_core/tool_loop/model_turn.py`：协调请求周期与响应采纳；实际prompt构造、Compact和执行权仍由原入口绑定。
 - `agent_py_agent/cli/chat_parts/tui_safe_lines.py`、`tui_identity_window.py`：只管理显示缓存和近期身份，完整记录留在 canonical 历史。
+- `agent_py_agent/agent/gateway_parts/background_sessions.py`：Gateway 停机收尾只读列出 owner 后台会话权威目录里仍未终态的受管进程（含监听范围事实），供停机事件与 status 投影；不停止、不改记录。
 - `agent_py_agent/agent/gateway_parts/owner_retention.py`：复核既有硬事实后回收空闲实例和轮询登记，不关闭持久任务或共享插件。
 - `docs/design/TUI_RESOURCE_LIFETIME.md`：身份、执行槽、连接和历史规模的边界与参考源码。
 

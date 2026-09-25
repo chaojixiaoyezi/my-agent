@@ -213,6 +213,8 @@ class _ToolConfigFields:
     tool_artifact_read_budget_max_chars: int = 240_000
     tool_output_externalize_min_chars: int = 200_000
     tool_output_preview_chars: int = 4_000
+    # 上下文余量不足时立刻外置本条工具输出并要求下一次请求前压缩；关掉则只按 tool_output_externalize_min_chars 外置。
+    tool_output_externalize_on_low_headroom: bool = True
     tool_context_microcompact_keep_recent: int = 8
     tool_context_microcompact_min_chars: int = 1500
     tool_context_ptl_retry_max: int = 3

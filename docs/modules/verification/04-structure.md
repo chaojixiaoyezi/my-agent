@@ -24,6 +24,9 @@
 
 `tool_call_archive_record.archive_tool_output_projection` 先归档原始结果，再按明确的
 `output_externalized` 与 `preserve_prompt_output` 选择模型正文；仅外置结果使用归档预览。
+两个外置入口还经 `_headroom_forces_externalize` 判断余量：本条输出估算 token 不小于距自动压缩点的剩余余量时置
+`force_externalize`（`read_file` 分页也外置）并登记 `tool_context_window_overflow(reason=tool_result_headroom)`，
+由预检消费触发统一 Compact；开关 `tool_output_externalize_on_low_headroom`。
 内联和已分页读取保留整页及继续参数，之后共用脱敏/信任投影、canonical ToolResult 与 native IR。
 `output_preview` 仍为有界日志字段，`projection_truncated` 描述模型正文是否缩成预览，不能用归档存在与否代替。
 
