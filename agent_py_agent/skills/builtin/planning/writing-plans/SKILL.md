@@ -1,7 +1,7 @@
 ---
 name: writing-plans
-description: 把一份需求/规格写成可逐步执行的实现计划——精确到改哪些文件、写什么代码、怎么测、按测试驱动拆成小步。
-when_to_use: 拿到一个多步骤任务的规格或需求、动手写代码之前,需要先产出一份能照着做的实现计划时。
+description: 根据需求或规格写出一份能照做的实现计划：列清要动的文件、要写的代码和测试方法，并按先测试后实现拆成小步骤。
+when_to_use: 面对一个需要多步完成的任务，已经有规格或需求、还没开始写代码，需要先交出一份可以逐步执行的计划的时候。
 tags: 计划, 制定计划, 任务拆解, 从哪开始, 分步骤, 多步骤, 实现规格, 自校验, write a plan, implementation plan, break into steps, multi-step
 scope: builtin
 risk_level: low

@@ -1,7 +1,7 @@
 ---
 name: dispatching-parallel-agents
-description: 把 2 个以上彼此独立、无共享状态的任务拆给多个子代理并行处理,再统一收口验收的方法。
-when_to_use: 同时面对多个互不相关的问题(不同测试文件、不同子系统、不同 bug),它们之间没有先后依赖、不共用状态,适合并行推进时。
+description: 手上有两件以上彼此独立、互不共享状态的事情时，分别派给多个子代理并行处理，结果回来后集中核对与验收。
+when_to_use: 同一时间冒出几个互不相干的问题（例如分属不同测试文件、不同子系统或不同 bug），彼此没有先后依赖、也不共用状态，可以齐头并进的时候。
 tags: 子代理派工, 并行编排, 任务拆解, 收口验收, 上下文隔离, parallel agents, dispatch parallel, concurrent tasks, fan out
 scope: builtin
 risk_level: low

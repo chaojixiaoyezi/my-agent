@@ -1,7 +1,7 @@
 ---
 name: brainstorming
-description: 在动手实现前,用自然对话把模糊想法逐步打磨成清晰的设计与规格,并拿到用户确认。
-when_to_use: 任何创造性工作开始前——新建功能、搭建组件、加能力、改行为时,先用它探清意图、需求与设计,再写代码。
+description: 写代码之前，通过一来一回的对话把还不成形的想法梳理成明确的设计和规格，并请用户确认。
+when_to_use: 准备做新东西的时候：新增功能、搭一个组件、加一项能力或改变现有行为，在写代码前先把意图、需求和设计谈清楚。
 tags: 头脑风暴, 需求澄清, 方案设计, 还没想清楚, 先发散, 规格评审, 实现前置, 任务分解, brainstorm, explore requirements, design discussion, flesh out idea, brainstorming, explore the design, requirements gathering
 scope: builtin
 risk_level: low

@@ -1,7 +1,7 @@
 ---
 name: verification-before-completion
-description: 在声称"完成/修好了/通过了"之前,强制先跑验证命令、读完输出、确认结果,再下结论——证据先于断言。
-when_to_use: 准备说/汇报任务做完了、搞定了、bug 修好、测试通过,或准备最终回复、标记任务完成、收尾子代理结果之前——任何声称完成之前。
+description: 说出“做完了”“修好了”“测试通过”之类的结论前，必须先运行验证命令、看完整个输出、核对结果，拿到证据再开口。
+when_to_use: 准备汇报任务已经完成、问题已修复或测试已通过，或者要给出最终回复、标记任务完成、合并子代理结果之前。
 tags: 验证, 完成前, 声称做完, 做完了, 搞定了, 弄好了, 收工了, 自查, 任务收尾, 诚实, 交付验收, 测试gate, 防自欺, verify before done, claiming complete, task finished, task complete, all done, finished the work
 scope: builtin
 risk_level: low

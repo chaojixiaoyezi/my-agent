@@ -1,7 +1,7 @@
 ---
 name: executing-plans
-description: 拿到一份写好的实施计划后,怎么逐条执行到交付——先批判性通读,再照计划一步步做、每步带验证,卡住就停不硬猜。
-when_to_use: 已经有一份分解好的实施计划/任务清单要落地执行时;尤其是计划由别的会话或上游写好、你只负责执行的场景。
+description: 按一份现成的实施计划把工作做到交付：动手前先挑一遍计划的毛病，然后逐项执行、每项都验证，遇到计划没覆盖的情况就停下来确认。
+when_to_use: 手上有一份已经拆好步骤的实施计划或任务清单需要落地，特别是计划由其他会话或上游写好、自己只负责执行的时候。
 tags: 计划执行, 任务落地, 验证, 交付收尾, 卡点处理, execute the plan, follow the plan, step by step, work through tasks, carry out
 scope: builtin
 risk_level: low

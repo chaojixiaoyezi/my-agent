@@ -1,7 +1,7 @@
 ---
 name: subagent-driven-development
-description: 在当前会话内逐个任务派全新子代理执行计划,每个任务做"先合规、后质量"的两段式评审,保证高质量与快迭代。
-when_to_use: 已经有一份可执行的实现计划,任务之间基本独立,且要在当前会话里一口气把它跑完(不换会话、不逐任务回头问人)时。
+description: 在本会话里按计划逐项推进：每项交给一个新的子代理实现，交回后先核对是否符合需求、再看代码质量，两道评审都通过才进入下一项。
+when_to_use: 手里已有一份可执行的实现计划，各项任务大体互不依赖，并且打算在当前会话里连续做完（中途不换会话，也不逐项回头请示）的时候。
 tags: 子代理编排, 拆给子代理, 一口气做完, 计划执行, 两段式评审, 派工, 质量门, 并发控制, subagent driven, dispatch subagents, orchestrate agents
 scope: builtin
 risk_level: low

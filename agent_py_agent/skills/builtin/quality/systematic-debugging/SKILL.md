@@ -1,7 +1,7 @@
 ---
 name: systematic-debugging
-description: 遇到 bug/测试失败/异常行为时,先定位根因再动手修——不靠瞎猜、不补症状、不堆叠补丁的系统化排障方法。
-when_to_use: 任何技术问题排查时:测试挂了、线上 bug、行为不符预期、性能/构建/集成故障;尤其是赶时间、已经试过几次都没修好、或自己都没真搞懂问题的时候。
+description: 排查 bug、测试失败或异常行为的系统方法：先复现并定位根因，确认之后再修复，不凭猜测改代码，也不只压住表面症状。
+when_to_use: 各类技术问题的排查：测试失败、线上缺陷、行为与预期不符、性能或构建集成出错；时间紧、已经修过几轮仍没好、或者对问题还没真正弄懂时尤其需要。
 tags: 调试, 排障, 根因分析, 测试失败, 一直报错, 找不到原因, 修不好, 跑不通, 故障定位, debug, debugging, test failing, root cause, keeps failing, not working, stack trace
 scope: builtin
 risk_level: low

@@ -1,7 +1,7 @@
 ---
 name: receiving-code-review
-description: 收到代码评审意见后,先核实再动手——不表演式附和、不盲目照做,用技术依据决定改还是不改。
-when_to_use: 收到针对自己改动的评审反馈、准备落实评审建议时;尤其当反馈含糊、看着技术上站不住脚、或可能与既定决策冲突时。
+description: 对待收到的代码评审意见：逐条核实后再决定改不改，判断只看技术依据，既不为了表态而附和，也不未经验证就照改。
+when_to_use: 自己的改动收到评审反馈、准备着手落实时；意见说得含糊、技术上似乎不成立，或者可能和先前定下的决策冲突时尤其适用。
 tags: 代码评审, 反馈处理, 技术核实, 交付收尾, 诚实, review feedback, address review comments
 scope: builtin
 risk_level: low
