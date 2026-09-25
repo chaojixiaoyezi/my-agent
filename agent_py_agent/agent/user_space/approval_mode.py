@@ -13,6 +13,7 @@ from ..common.json_io import (
     write_json_file_atomic_unlocked,
 )
 from ..contracts.tool_approval import ToolApprovalDecision, ToolApprovalRequest
+from .operation_grants import owner_operation_granted
 from .owner_policy_seed_payloads import default_tool_policy_payload
 
 APPROVAL_MODES = {
@@ -81,12 +82,19 @@ def permission_config(config: object, home: object, *, inherited: bool = False):
 
 
 # LLM: 等待中的请求已通过硬门，模式改变只为原 request 产生精确批准；执行器会重新校验边界，always 仍须本人确认。
-# 函数用途: 用户在 F4 菜单开启自主后，主/子代理当前审批可原地续跑，不必逐个点允许。
+#   带 binding.grant_key 的请求（工具声明的可长期授权操作，如后台服务开放局域网）不走自主模式放行：只有 owner 策略里
+#   已记录该键才批准，否则返回 None 等用户本人在面板上决定；这样自主模式也不会悄悄放开这类边界。
+# 函数用途: 用户在 F4 菜单开启自主后，主/子代理当前审批可原地续跑，不必逐个点允许；长期授权过的操作类别也直接放行。
 def autonomous_tool_decision(agent: object, request: ToolApprovalRequest) -> ToolApprovalDecision | None:
     try:
         tools = getattr(getattr(agent, "tools", None), "tools", {})
         tool = tools.get(request.tool_name)
         if tool is None or tool.runtime_policy.approval_policy.mode == "always":
+            return None
+        grant_key = str(request.binding.get("grant_key") or "").strip()
+        if grant_key:
+            if owner_operation_granted(agent.home_paths, grant_key):
+                return ToolApprovalDecision(request.permission_id, "approved")
             return None
         if read_approval_mode(agent.home_paths) == "auto":
             return ToolApprovalDecision(request.permission_id, "approved")

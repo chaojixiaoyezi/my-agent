@@ -109,6 +109,7 @@ def _register_network_tools(registry: Any, params: Any) -> None:
             access_mode=params.access_mode,
             default_timeout=params.shell_tool_timeout,
             max_output_chars=params.shell_tool_output_max_chars,
+            listen_scope_enforce=params.background_process_listen_scope_enforce,
         ),
     )
     registry.register(shell_tool)

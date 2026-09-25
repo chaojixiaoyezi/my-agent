@@ -104,6 +104,7 @@ class ToolRegistryParams:
     access_mode: str = "workspace-write"
     shell_tool_timeout: int = 30
     shell_tool_output_max_chars: int = 12_000
+    background_process_listen_scope_enforce: bool = True
     catalog_mode: str = "compact"
     catalog_offset: int = 0
     catalog_categories: list[str] | None = None

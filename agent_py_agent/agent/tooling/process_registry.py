@@ -108,6 +108,10 @@ class BackgroundProcess:
                            handoff_confirmed=self.persisted_snapshot["handoff_confirmed"])
         if self.exit_code is not None:
             summary["exit_code"] = self.exit_code
+        # 监听范围声明、host 停止原因与越界证据都是记录里的结构化事实，原样投影给 status/list。
+        for key in ("reason", "listen_scope", "listener_violation", "listener_warning"):
+            if self.persisted_snapshot.get(key):
+                summary[key] = self.persisted_snapshot[key]
         if include_output:
             summary["output_tail"] = _read_log_tail(self.output_file, output_tail_chars)
             try:

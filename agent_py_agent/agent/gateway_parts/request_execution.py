@@ -454,9 +454,16 @@ def _configure_gateway_approval_session(
             path_access_mode=getattr(config, "path_access_mode", ""),
         )
 
+    from ..user_space.operation_grants import record_owner_operation_grant
+
+    # 函数用途: 用户在面板选"长期允许"后，把这类操作记进本用户策略文件（唯一权威），下次同类调用不再询问。
+    def remember_grant(grant_key: str) -> None:
+        record_owner_operation_grant(context.agent.home_paths, grant_key, source="gateway_stream_approval")
+
     configure(
         agent_tool_approval_session_cache(context.agent),
         current_scope,
+        remember_grant,
     )
 
 

@@ -143,13 +143,16 @@ class BufferedChunkStreamWriter:
 
     # LLM: Binding happens only after canonical owner/thread/cwd resolution and before the model
     # can call tools. Request payload prose or tool arguments must never choose this scope.
-    # 函数用途: 把当前请求接到真实会话级审批缓存，供后续完全相同的调用复用一次授权。
+    #   grant_recorder 由宿主（request_execution）注入：用户选 approved_owner 时把 binding.grant_key 写进 owner 策略文件；
+    #   None 表示本请求不支持长期授权，面板照常只提供一次/本会话/拒绝。
+    # 函数用途: 把当前请求接到真实会话级审批缓存和长期授权记录器，供后续同类调用复用授权。
     def configure_approval_session(
         self,
         cache: ToolApprovalSessionCache,
         scope_provider: Callable[[], str],
+        grant_recorder: Callable[[str], None] | None = None,
     ) -> None:
-        self._approval.configure(cache, scope_provider)
+        self._approval.configure(cache, scope_provider, grant_recorder)
 
 
     # LLM: steering 只清空未确认段并重开普通客户端首段额度；同会话公开投影在同一 typed 边界丢弃候选。

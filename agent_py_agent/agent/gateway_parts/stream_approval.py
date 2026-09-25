@@ -23,6 +23,8 @@ class StreamApproval:
     before_wait: Callable[[], None]
     cache: ToolApprovalSessionCache | None = field(default=None, repr=False)
     scope_provider: Callable[[], str] | None = field(default=None, repr=False)
+    # LLM: 用户选 approved_owner 时把 binding.grant_key 交给宿主持久化（owner 策略文件）；None 表示本流不支持长期授权。
+    grant_recorder: Callable[[str], None] | None = field(default=None, repr=False)
 
     # LLM: Binding happens only after canonical owner/thread/cwd resolution and before the model
     # can call tools. Request payload prose or tool arguments must never choose this scope.
@@ -31,9 +33,11 @@ class StreamApproval:
         self,
         cache: ToolApprovalSessionCache,
         scope_provider: Callable[[], str],
+        grant_recorder: Callable[[str], None] | None = None,
     ) -> None:
         self.cache = cache
         self.scope_provider = scope_provider
+        self.grant_recorder = grant_recorder
 
     # LLM: The canonical task workspace may be promoted after the first model sample. Resolve
     # it at the approval boundary so first-turn and later-turn keys describe the same real cwd.
@@ -79,6 +83,13 @@ class StreamApproval:
                 },
             )
             return decision.to_dict()
+        grant_key = str(request.binding.get("grant_key") or "").strip()
+        if grant_key and mode_decision_provider is not None:
+            # 长期授权过的操作类别由宿主提供者直接给出批准，不发布审批面板；未授权时提供者返回 None，照常询问。
+            granted = mode_decision_provider(request)
+            if granted is not None and granted.approved:
+                self.publish({"kind": "permission_resolved", **granted.to_dict(), "owner_granted": True})
+                return granted.to_dict()
         self.before_wait()
         self.publish(
             {
@@ -95,6 +106,8 @@ class StreamApproval:
         if session_key and str(decision.decision or "").strip().lower() == "approved_session":
             if approval_cache is not None:
                 approval_cache.approve(approval_scope, session_key)
+        if grant_key and str(decision.decision or "").strip().lower() == "approved_owner" and self.grant_recorder is not None:
+            self.grant_recorder(grant_key)
         self.publish(
             {
                 "kind": "permission_resolved",

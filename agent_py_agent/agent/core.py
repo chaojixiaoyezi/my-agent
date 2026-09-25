@@ -841,6 +841,7 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
             vector_search_enabled=config.tool_vector_search_enabled,
             shell_tool_timeout=config.tool_shell_timeout,
             shell_tool_output_max_chars=config.tool_shell_output_max_chars,
+            background_process_listen_scope_enforce=config.background_process_listen_scope_enforce,
             path_access_mode=effective_path_access_mode,
             path_dangerous_roots=config.path_dangerous_roots,
             access_mode=access_mode,

@@ -651,6 +651,7 @@ agent_py_agent/
 |   |-- test_gateway_decision_shutdown_cancel.py # Gateway 停止时主动取消在途决策：回原方案、不进冷却、关闭后不再联网、收尾顺序与失败隔离
 |   |-- test_gateway_model_call_shutdown_settlement.py # Gateway 停止排空后把仍在途的模型调用记为被停机中断、未结算，并写结构化停机事件
 |   |-- test_gateway_background_sessions_shutdown.py # Gateway 停机时只读列出仍存活的受管后台会话并写事件/state 计数，不停进程
+|   |-- test_background_listen_scope.py        # 后台服务默认只监听回环：授权键、approved_owner 面板与 owner 授权存储、host 按 socket 表回收越界服务
 |   |-- test_decision_action_candidate.py # 动作候选资格、隐私、非选择、新鲜度与来源复核、取消、text/native 同段与设置入口
 |   |-- test_decision_capability_consumer.py # 原设置/worker/循环接线到实际prompt/schema减量及失效原输入
 |   |-- test_decision_capability_provider_grouping.py # 能力推荐按结构化provider_id按插件出题、选中展开与整体延迟
@@ -1056,6 +1057,8 @@ docs/
 
 - `agent_py_agent/agent/agent_core/tool_loop/model_turn.py`：协调请求周期与响应采纳；实际prompt构造、Compact和执行权仍由原入口绑定。
 - `agent_py_agent/cli/chat_parts/tui_safe_lines.py`、`tui_identity_window.py`：只管理显示缓存和近期身份，完整记录留在 canonical 历史。
+- `agent_py_agent/agent/tooling/listen_scope.py`：后台服务监听范围（loopback/lan）的规范化、child 进程树真实监听观测（Linux /proc、其它 POSIX lsof）与越界判定；host 用它回收越界服务。
+- `agent_py_agent/agent/user_space/operation_grants.py`：owner 级"长期允许某类操作"的唯一权威（tool_policy.json 的 operation_grants），审批面板选 approved_owner 后写入，自主模式据此放行。
 - `agent_py_agent/agent/gateway_parts/background_sessions.py`：Gateway 停机收尾只读列出 owner 后台会话权威目录里仍未终态的受管进程（含监听范围事实），供停机事件与 status 投影；不停止、不改记录。
 - `agent_py_agent/agent/gateway_parts/owner_retention.py`：复核既有硬事实后回收空闲实例和轮询登记，不关闭持久任务或共享插件。
 - `docs/design/TUI_RESOURCE_LIFETIME.md`：身份、执行槽、连接和历史规模的边界与参考源码。

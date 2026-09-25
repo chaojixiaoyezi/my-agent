@@ -1160,6 +1160,17 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
             "把同一前台命令以 run_in_background=true 重新调用。"
         ),
     ),
+    "BACKGROUND_LISTEN_SCOPE_VIOLATION": ErrorContract(
+        code="BACKGROUND_LISTEN_SCOPE_VIOLATION",
+        category="tool",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint=(
+            "后台服务声明只监听本机（background_listen_scope=loopback，默认）却绑定了局域网地址，已被宿主回收。"
+            "让服务只监听 127.0.0.1 后重新启动；只有用户明确要求局域网访问时才用 background_listen_scope=lan，"
+            "首次会请用户确认，用户可选择长期允许。"
+        ),
+    ),
     "COMMAND_EMPTY": ErrorContract(
         code="COMMAND_EMPTY",
         category="tool",

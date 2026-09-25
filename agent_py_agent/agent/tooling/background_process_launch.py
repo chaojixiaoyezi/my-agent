@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 from ..common.cancellation import raise_if_cancelled
 from ..common.json_io import write_json_file_atomic
+from .listen_scope import DEFAULT_LISTEN_SCOPE, normalize_listen_scope
 from .process_registry import (
     _process_instance_terminated,
     capture_process_birth_token,
@@ -29,7 +30,7 @@ if TYPE_CHECKING:
     from ..plugin_activation_ref import PluginActivationRef
 
 BACKGROUND_START_SETTLE_SECONDS = 0.5
-LAUNCH_SPEC_SCHEMA = "background_process_launch.v5"
+LAUNCH_SPEC_SCHEMA = "background_process_launch.v6"
 
 
 # LLM: 参数来自已授权宿主，env 不写磁盘；stdio 绑定 launcher，显式保留只控制记录裁剪，不改变执行归属或进程寿命。
@@ -52,10 +53,17 @@ class BackgroundLaunchRequest:
     io_mode: str = "log"
     activation: PluginActivationRef | None = None
     retain_until_consumed: bool = False
+    # LLM: 监听范围是结构化声明：loopback（默认）只允许本机回环监听，lan 由用户经审批/长期授权放开；enforce=False 时 host 只记
+    #   listener_warning 不回收。值在 __post_init__ 规范化，进入 launch spec 与会话记录，host 按真实 socket 表核对。
+    listen_scope: str = DEFAULT_LISTEN_SCOPE
+    listen_scope_enforce: bool = True
 
-    # LLM: 零期限不限制寿命；保留策略须为宿主布尔值，共享资源附原激活引用，不能以展示字段跳过复查。
-    # 函数用途: 在创建记录前验证寿命、管道、保留策略与可信激活引用；任务启动不加载插件存储。
+    # LLM: 零期限不限制寿命；保留策略须为宿主布尔值，共享资源附原激活引用，不能以展示字段跳过复查；监听范围只认 loopback/lan。
+    # 函数用途: 在创建记录前验证寿命、管道、保留策略、监听范围与可信激活引用；任务启动不加载插件存储。
     def __post_init__(self) -> None:
+        object.__setattr__(self, "listen_scope", normalize_listen_scope(self.listen_scope))
+        if type(self.listen_scope_enforce) is not bool:
+            raise ValueError("managed background listen scope enforcement flag invalid")
         if (type(self.deadline_monotonic) not in {int, float}
                 or not math.isfinite(self.deadline_monotonic) or self.deadline_monotonic < 0
                 or type(self.stop_on_launcher_exit) is not bool
@@ -137,6 +145,8 @@ def start_background_process(
                     "deadline_monotonic": request.deadline_monotonic,
                     "stop_on_launcher_exit": request.stop_on_launcher_exit,
                     "io_mode": request.io_mode,
+                    "listen_scope": request.listen_scope,
+                    "listen_scope_enforce": request.listen_scope_enforce,
                     "activation": request.activation.to_payload() if request.activation is not None else None,
                 },
             )
@@ -178,7 +188,7 @@ def start_background_process(
             if (
                 current is None
                 or current["stop_requested"]
-                or current["status"] not in {"running", "exited"}
+                or (current["status"] not in {"running", "exited"} and not _host_settled_terminal(current))
             ):
                 raise RuntimeError("managed background handoff unavailable")
             if current["pid"] != process.pid or current["pid_birth_token"] != birth:
@@ -250,6 +260,7 @@ def _reservation(request: BackgroundLaunchRequest, session_id: str) -> dict[str,
         "child_launch_started": False,
         "command": request.command,
         "cwd": str(request.cwd),
+        "listen_scope": request.listen_scope,
         "output_file": str(request.log_path) if request.log_path is not None else "",
         "host_state_file": "",
         "completion_target": dict(request.completion_target),
@@ -270,7 +281,20 @@ def _require_admission(request: BackgroundLaunchRequest) -> None:
     raise_if_cancelled()
 
 
+# LLM: host 在启动窗口内按自己的结构化原因（listen_scope_violation、deadline_exceeded、log_limit_exceeded）回收 child 并确认
+#   终态时，记录带 reason 与 finished_at；这不是"启动被撤销"，而是要交给调用方如实投影的终态。stop_requested 的 killed 仍按撤销处理。
+# 函数用途: 判断一条 killed 记录是不是 host 自己结清的终态。
+def _host_settled_terminal(record: dict[str, object]) -> bool:
+    return (
+        record.get("status") == "killed"
+        and not record.get("stop_requested")
+        and bool(record.get("reason"))
+        and record.get("finished_at") is not None
+    )
+
+
 # LLM: host 退出后须复读原 Store，缺失/未终态/撤销仍失败；取消由未交接清理处理，退出码留给调用方裁决。
+#   host 自己结清的 killed 终态（_host_settled_terminal）视同 exited 交接。
 # 函数用途: 等待 host 绑定并观察真实业务状态，消除读旧状态后进程退出的窗口，不重启命令或延长等待。
 def _observe_startup(
     store: ProcessSessionStore, session_id: str, host_pid: int, birth: str, timeout: float
@@ -284,6 +308,9 @@ def _observe_startup(
         if report.load_error or not report.record:
             raise OSError("managed background authority unreadable")
         record = report.record
+        if _host_settled_terminal(record):
+            # host 已按结构化原因（如监听范围越界）回收并写下终态：交接给调用方投影，不当成启动被撤销。
+            return
         if record["stop_requested"] or record["status"] in {"unknown", "not_started", "killed"}:
             raise RuntimeError("managed background startup revoked or unresolved")
         if record["status"] == "exited":

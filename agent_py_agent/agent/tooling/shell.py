@@ -51,7 +51,9 @@ from .background_process_launch import (
     BackgroundLaunchRequest,
     start_background_process,
 )
+from .listen_scope import DEFAULT_LISTEN_SCOPE, LISTEN_SCOPES, normalize_listen_scope
 from .models import (
+    ApprovalPolicy,
     BaseTool,
     EffectResolverPolicy,
     IdempotencyPolicy,
@@ -116,6 +118,8 @@ class ShellToolOptions:
     access_mode: str = _DEFAULT_ACCESS_MODE
     default_timeout: int = 30
     max_output_chars: int = _DEFAULT_MAX_OUTPUT_CHARS
+    # 后台服务声明 loopback 却绑到局域网地址时是否由 host 回收；False 只记 listener_warning。来自配置 background_process_listen_scope_enforce。
+    listen_scope_enforce: bool = True
 
 
 # LLM: This immutable request carries the exact ActionPolicy operation decision into shell recovery;
@@ -523,6 +527,12 @@ def _wants_background(params: dict[str, Any]) -> bool:
     return str(value or "").strip().lower() in {"true", "1", "yes"}
 
 
+# LLM: schema 已把取值限定在 LISTEN_SCOPES；这里只做缺省与规范化，未知值仍由 normalize 拒绝而不是静默放宽。
+# 函数用途: 读出这次后台启动声明的监听范围，缺省 loopback。
+def _background_listen_scope(params: dict[str, Any]) -> str:
+    return normalize_listen_scope(params.get("background_listen_scope") or DEFAULT_LISTEN_SCOPE)
+
+
 # LLM: 错误正文只解释如何改成唯一受管形态，控制流仍由已注册 error_code 和
 #   effect_outcome=not_started 决定；不要在 ShellTool.execute 内复制这份合同。
 # 函数用途: 返回“未启动且应改用结构化后台参数”的标准工具结果。
@@ -753,6 +763,15 @@ def _build_shell_tool_model_spec(
                         "if it exits immediately, return status=exited plus exit_code/output_tail."
                     ),
                 },
+                "background_listen_scope": {
+                    "type": "string",
+                    "enum": list(LISTEN_SCOPES),
+                    "description": (
+                        "Only with run_in_background=true. loopback (default): the service may listen on 127.0.0.1/::1 "
+                        "only; the host recycles it if it binds a LAN address. lan: the user asked to expose the service to "
+                        "the local network; the first such call asks the user once and can be remembered for this owner."
+                    ),
+                },
             },
             "required": ["command"],
             "additionalProperties": False,
@@ -799,6 +818,8 @@ def _build_shell_runtime_policy(default_timeout: int) -> ToolRuntimePolicy:
             command_parameter="command",
             by_parameter=(("run_in_background", (("true", "dangerous"),)),),
         ),
+        # 开放局域网是可被用户长期允许的一类操作：审批面板多出"长期允许"，自主模式不擅自放行未授权的 lan。
+        approval_policy=ApprovalPolicy(owner_grant_parameters=(("background_listen_scope", ("lan",)),)),
         sandbox_policy=SandboxPolicy("required"),
         idempotency_policy=IdempotencyPolicy("operation"),
         timeout_policy=TimeoutPolicy(default_timeout),
@@ -867,6 +888,7 @@ class ShellTool(BaseTool):
         )
         self.default_timeout = options.default_timeout
         self.max_output_chars = max(0, int(options.max_output_chars))
+        self.listen_scope_enforce = bool(options.listen_scope_enforce)
         self.model_spec = _build_shell_tool_model_spec(
             self.access_mode, self.default_timeout, self.max_output_chars
         )
@@ -985,6 +1007,7 @@ class ShellTool(BaseTool):
                 completion_target=params.get("__process_completion_target"),
                 execution_scope=ProcessExecutionScope.from_run_scope(params.get("__run_scope"), self.path_access_policy.owner_scope_root),
                 context=context,
+                listen_scope=_background_listen_scope(params),
             )
         return _execute_with_artifact_protection(
             _ShellArtifactExecutionRequest(
@@ -1127,6 +1150,7 @@ class ShellTool(BaseTool):
         self, command: str, target: Path, sandbox_roots: _ShellSandboxRoots,
         access_scope: ProcessAccessScope, completion_target: dict[str, str] | None = None,
         *, execution_scope: ProcessExecutionScope | None = None, context: ToolInvocationContext | None = None,
+        listen_scope: str = DEFAULT_LISTEN_SCOPE,
     ) -> ToolHandlerOutcome:
         try:
             argv = _background_command_argv(command, target, self.path_access_policy.owner_scope_root,
@@ -1141,6 +1165,7 @@ class ShellTool(BaseTool):
                 store_root=process_session_store_root(self.workspace_root, access_scope.owner_home),
                 access_scope=access_scope, execution_scope=execution_scope or ProcessExecutionScope(owner_home=access_scope.owner_home),
                 completion_target=dict(completion_target or {}), authority_check=context.execution_authority_check if context else None,
+                listen_scope=listen_scope, listen_scope_enforce=self.listen_scope_enforce,
             )
             hosted = start_background_process(request)
         except BackgroundLaunchError as exc:
@@ -1152,7 +1177,8 @@ class ShellTool(BaseTool):
         try:
             record = process_registry.attach(hosted.record, hosted.process, hosted.store_root)
             _record_background_job(jobs_dir, record.pid, command, log_path, session_id=record.session_id, process_pid=record.child_pid)
-            return _background_start_outcome(tool_name=self.model_spec.name, record=record, log_path=log_path)
+            return _background_start_outcome(tool_name=self.model_spec.name, record=record, log_path=log_path,
+                                             listen_scope=listen_scope)
         except (OSError, RuntimeError, ValueError) as exc:
             # 已交接资源仍归持久 session，查询故障不能把它当未启动或回滚。
             return ToolHandlerOutcome(self.model_spec.name, False,
@@ -1678,6 +1704,7 @@ def _background_start_outcome(
     tool_name: str,
     record: BackgroundProcess,
     log_path: Path,
+    listen_scope: str = DEFAULT_LISTEN_SCOPE,
 ) -> ToolHandlerOutcome:
     settled = process_registry.status(record.session_id, record.access_scope, record.store_root)
     state = dict(settled or {})
@@ -1687,6 +1714,7 @@ def _background_start_outcome(
             "status": "started",
             "session_id": record.session_id,
             "output_file": str(log_path),
+            "listen_scope": listen_scope,
             "startup_observation_seconds": BACKGROUND_START_SETTLE_SECONDS,
             "hint": _background_session_hint(running=True),
         }
@@ -1706,13 +1734,18 @@ def _background_start_outcome(
         "startup_observation_seconds": BACKGROUND_START_SETTLE_SECONDS,
         "hint": _background_session_hint(running=False),
     }
+    # host 自己结清的终态带结构化原因；监听范围越界另给稳定错误码，让模型知道该改绑定地址还是走 lan 授权。
+    for key in ("reason", "listen_scope", "listener_violation"):
+        if state.get(key):
+            payload[key] = state[key]
     if status == "exited" and exit_code == 0:
         return ToolHandlerOutcome(tool_name, True, json.dumps(payload, ensure_ascii=False))
+    violated = status == "killed" and state.get("reason") == "listen_scope_violation"
     return ToolHandlerOutcome(
         tool_name,
         False,
         json.dumps(payload, ensure_ascii=False),
-        error_code="COMMAND_FAILED",
+        error_code="BACKGROUND_LISTEN_SCOPE_VIOLATION" if violated else "COMMAND_FAILED",
         effect_outcome="failed",
     )
 

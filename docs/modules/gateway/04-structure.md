@@ -1891,3 +1891,16 @@ GatewayModelObservation现承接render/prepare_request/select三个顺序点：�
 
 <!-- 媒体来源片 3adb61904 的既有记录；不代表当前 Compact 集成已验。 -->
 媒体原件权威位于 owner_home/media/input/<sha256>，通用实现为 agent/conversation/input_media.py。GatewayAskExecutionOptions / GatewayAskParams 携带小 refs，request_execution 在认证 owner 下验证后写入 task_attributes.input_media，UserTurn.media 保留原生历史；后端网络边界才编码，不新增队列或 provider 状态库。
+
+## 2026-09-25 审批链的 owner 长期授权（operation grants）
+
+- 声明：工具 runtime policy 的 `ApprovalPolicy.owner_grant_parameters=(("参数", ("值", …)),)` 说明哪些结构化参数值代表"可被用户长期允许的一类操作"；
+  `_validate_runtime_policy` 要求参数是 schema 里的公开参数。首个使用方：`run_command` 的 `background_listen_scope=lan`。
+- 请求：`tool_loop/round_execution._owner_grant_key` 从本次 `tool_runtime_snapshot` 的该工具策略算出 `grant_key`
+  （`contracts.tool_approval.operation_grant_key`，形如 `run_command:background_listen_scope=lan`），`build_tool_approval_request` 把它写进 binding
+  并追加选项 `allow_owner`（decision `approved_owner`）。host command 审批不提供该选项。
+- 决定：`user_space/operation_grants.py` 是唯一权威（owner `tool_policy.json` 的 `operation_grants`）。`autonomous_tool_decision` 对带 grant_key 的请求
+  只在已授权时返回批准，未授权返回 None——自主模式不会替用户放开这类边界。`StreamApproval.request` 在发布面板前先问宿主提供者，已授权则直接
+  `permission_resolved(owner_granted=true)`；用户选 `approved_owner` 后经 `request_execution` 注入的 `grant_recorder` 落盘。子代理/后台的
+  `AgentToolApprovalSinkMixin.request_permission` 做同样的预检与落盘。
+- 边界：会话级缓存（`approval_session.py`）仍然只是本 Gateway 进程内的一次授权复用，不会被扩成 owner 级；owner 级授权只来自用户在面板上的显式选择。

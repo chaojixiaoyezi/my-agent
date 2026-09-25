@@ -3,34 +3,6 @@ my-agent
 本项目按 LICENSE 中的 Apache License 2.0 发布。以下第三方材料保留其原许可与版权；
 这些声明不表示第三方认可或维护本项目。后续修改应保留适用的许可说明。
 
-方法论技能
-----------
-builtin 下 quality、planning、orchestration、review、meta 中的部分方法论文本
-包含 Superpowers 技能的中文翻译和适配，触发元数据及工具名称已作本项目适配。
-来源：https://github.com/obra/superpowers
-
-MIT License
-
-Copyright (c) 2025 Jesse Vincent
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
 沙箱依赖
 --------
 随包提供的 bubblewrap 保留在 agent_py_agent/vendor/bubblewrap 下的 COPYING、

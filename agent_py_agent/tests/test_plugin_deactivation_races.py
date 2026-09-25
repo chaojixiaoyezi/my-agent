@@ -122,7 +122,8 @@ def test_independent_host_admission_and_management_revoke_share_resource_boundar
         spec.write_text(json.dumps({"schema": launch.LAUNCH_SPEC_SCHEMA, "session_id": session,
             "command_argv": request.argv, "max_log_bytes": request.max_log_bytes,
             "deadline_monotonic": time.monotonic() + 20, "stop_on_launcher_exit": True,
-            "io_mode": "log", "activation": request.activation.to_payload()}))
+            "io_mode": "log", "listen_scope": "loopback", "listen_scope_enforce": True,
+            "activation": request.activation.to_payload()}))
         gate, go = tmp_path / "host-admission", tmp_path / "allow-host"
         host = subprocess.Popen([sys.executable, "-c", _PAUSED_HOST, str(store.root), session, str(spec),
                                  str(gate), str(go), order], start_new_session=True)

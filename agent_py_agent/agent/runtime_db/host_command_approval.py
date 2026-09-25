@@ -21,7 +21,7 @@ def resolve_host_command_approval(prepared: ToolExecutorRequest, execution: Tool
     request = build_tool_approval_request(execution.call, request_id=request_id, round_number=0,
                                          call_index=1, description=execution.call.tool_name)
     request = replace(request, options=tuple(option for option in request.options
-                                             if option["decision"] != "approved_session"))
+                                             if option["decision"] not in {"approved_session", "approved_owner"}))
     try:
         raw = consumer(request.to_dict(), cancellation_token=prepared.cancellation_token)
         decision = (raw if isinstance(raw, ToolApprovalDecision) else ToolApprovalDecision.from_mapping(raw)

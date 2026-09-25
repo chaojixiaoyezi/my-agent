@@ -44,6 +44,7 @@ child不展示历史正文时的读取回归先复现1 failed/1 passed，修复�
 - **status 可见（2026-09-24 深夜）**：`my-agent status` 的 Gateway 段与 `--json` 的 `gateway.unidentified_stale_attempts`、`gateway status` 的
   `gateway unidentified_stale_attempts=N` 都只投影 Gateway 启动写进 state.json 的计数，大于 0 才出行并指向 `runtime-stale-attempts`；不查库、不结清。
   测试：`test_status_commands.py::TestStatusUnidentifiedStaleAttempts`、`test_gateway_status_runtime_errors.py` +1。
+- **后台服务监听范围与 owner 长期授权（2026-09-25，用户决定）**：`run_command` 新参数 `background_listen_scope`（默认 loopback）；`ApprovalPolicy.owner_grant_parameters` 声明 `lan` 为可长期允许的操作，审批面板多出 `approved_owner`，写进 owner `tool_policy.json.operation_grants`；自主模式不放行未授权的 lan。host 每 2 秒按 socket 表核对，越界即 `killed/listen_scope_violation` 并留 `listener_violation` 证据，`run_command` 返回 `BACKGROUND_LISTEN_SCOPE_VIOLATION`。测试 `test_background_listen_scope.py` 11 项（含真实进程：绑 0.0.0.0 被回收、绑 127.0.0.1 与 lan 放行、关闭 enforce 只告警）；launch spec 升 v6，既有夹具补两个字段。
 - **停机后存活的后台会话（2026-09-24 深夜）**：Gateway 停机收尾只读列出仍未终态的受管后台进程，写事件 `gateway_background_sessions_surviving`、state 计数 `surviving_background_sessions`，`my-agent status` 在 Gateway 未运行时显示 `background_sessions_after_stop=N`；不停进程。测试 `test_gateway_background_sessions_shutdown.py`（真实 store + 活进程只列非终态并带监听事实、无注册表/无目录返回空且不建目录、收尾事件与失败扫描不阻塞、state 合并），`test_status_commands.py::TestStatusSurvivingBackgroundSessions`。
 
 ## 插件观察候选结构（第 15 项 P5-C 前置，2026-09-24 晚）

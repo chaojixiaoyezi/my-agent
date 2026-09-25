@@ -306,12 +306,23 @@ class EffectResolverPolicy:
 @dataclass(frozen=True)
 class ApprovalPolicy:
     mode: str = "dangerous"
+    # LLM: 声明哪些公开参数的哪些值代表"可被用户长期允许的一类操作"（如 background_listen_scope=lan）。命中时审批请求
+    #   带 grant_key 并多出 approved_owner 选项；自主模式不放行未授权的这类调用。只能声明 schema 里的公开参数。
+    owner_grant_parameters: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
     def __post_init__(self) -> None:
         mode = str(self.mode or "").strip().lower()
         if mode not in {"never", "dangerous", "mutating", "always"}:
             raise ValueError(f"invalid tool approval mode: {mode}")
         object.__setattr__(self, "mode", mode)
+        declared = []
+        for item in self.owner_grant_parameters:
+            name, values = item
+            allowed = tuple(str(value) for value in values)
+            if not str(name).strip() or not allowed or any(not value.strip() for value in allowed):
+                raise ValueError("owner grant parameter requires a name and non-empty values")
+            declared.append((str(name), allowed))
+        object.__setattr__(self, "owner_grant_parameters", tuple(declared))
 
 
 # LLM: sandbox policy 必须显式声明哪些结构化动作会越过当前隔离边界，授权层不得按工具名猜。
@@ -892,6 +903,20 @@ class ToolRuntime:
             )
 
 
+# LLM: 本地文件 URL 参数与 owner 长期授权参数都必须指向 schema 里的公开参数；从 _validate_runtime_policy 拆出以守住函数长度，
+#   新增"按参数名声明"的策略字段放这里校验。
+# 函数用途: 核对策略里按参数名引用的字段确实存在于模型可见 schema。
+def _validate_parameter_scoped_policies(
+    model_spec: ToolModelSpec,
+    public_names: set[str],
+    runtime_policy: ToolRuntimePolicy,
+) -> None:
+    for name in runtime_policy.input_policy.local_file_url_parameters:
+        _require_public_input_parameter(model_spec, public_names, name, "local file URL parameter")
+    for name, _values in runtime_policy.approval_policy.owner_grant_parameters:
+        _require_public_input_parameter(model_spec, public_names, name, "owner grant parameter")
+
+
 # LLM: snapshot 构造是 policy 引用字段的唯一 fail-closed 入口；新增策略必须在此校验它们来自同一 schema。
 # 函数用途: 核对一个工具的输入 schema 与副作用、sandbox、补参、资源等运行策略是否自洽。
 def _validate_runtime_policy(
@@ -946,13 +971,7 @@ def _validate_runtime_policy(
                 condition_name,
                 f"trusted binding condition for {name}",
             )
-    for name in policy.local_file_url_parameters:
-        _require_public_input_parameter(
-            model_spec,
-            public_names,
-            name,
-            "local file URL parameter",
-        )
+    _validate_parameter_scoped_policies(model_spec, public_names, runtime_policy)
     resolver = runtime_policy.effect_resolver
     for field_name, _variants in resolver.by_parameter:
         _require_public_input_parameter(

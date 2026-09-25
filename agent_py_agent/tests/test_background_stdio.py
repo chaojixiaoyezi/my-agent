@@ -78,7 +78,7 @@ def test_host_refuses_old_or_inconsistent_stdio_spec(tmp_path, change):
     spec_path.parent.mkdir()
     spec = {"schema": launch.LAUNCH_SPEC_SCHEMA, "session_id": "bg-test", "command_argv": ["unused"],
             "max_log_bytes": 0, "deadline_monotonic": 0, "stop_on_launcher_exit": True,
-            "io_mode": "stdio", "activation": None, **change}
+            "io_mode": "stdio", "activation": None, "listen_scope": "loopback", "listen_scope_enforce": True, **change}
     spec_path.write_text(json.dumps(spec))
     with pytest.raises(ValueError):
         _read_launch_spec(store, "bg-test", spec_path)
@@ -161,7 +161,8 @@ def test_child_is_owned_before_log_close_failure(tmp_path, monkeypatch):
     spec_path.parent.mkdir()
     spec_path.write_text(json.dumps({"schema": launch.LAUNCH_SPEC_SCHEMA, "session_id": "bg-close-failure",
         "command_argv": request.argv, "max_log_bytes": request.max_log_bytes, "deadline_monotonic": 0,
-        "stop_on_launcher_exit": False, "io_mode": "log", "activation": None}))
+        "stop_on_launcher_exit": False, "io_mode": "log", "activation": None,
+        "listen_scope": "loopback", "listen_scope_enforce": True}))
     original_open, original_popen = Path.open, subprocess.Popen
     spawned = []
 

@@ -133,7 +133,7 @@ def test_host_fresh_check_rejects_revocation_after_launcher_precheck(tmp_path, m
     spec_path.parent.mkdir()
     spec_path.write_text(json.dumps({"schema": launch.LAUNCH_SPEC_SCHEMA, "session_id": session,
         "command_argv": request.argv, "max_log_bytes": 0, "deadline_monotonic": 0,
-        "stop_on_launcher_exit": False, "io_mode": "log", "activation": ref.to_payload()}))
+        "stop_on_launcher_exit": False, "io_mode": "log", "listen_scope": "loopback", "listen_scope_enforce": True, "activation": ref.to_payload()}))
     installations.change_activation(revocation(entry))
     original_popen = host.subprocess.Popen
     def guarded_popen(argv, *args, **kwargs):

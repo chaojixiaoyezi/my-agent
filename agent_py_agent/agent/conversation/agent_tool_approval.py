@@ -71,6 +71,15 @@ class AgentToolApprovalSinkMixin:
                     request.permission_id,
                     "approved",
                 ).to_dict()
+            from ..user_space.operation_grants import (
+                owner_operation_granted,
+                record_owner_operation_grant,
+            )
+
+            grant_key = str(request.binding.get("grant_key") or "").strip()
+            if grant_key and owner_operation_granted(getattr(self.agent, "home_paths", None), grant_key):
+                # 用户已对这类操作长期允许：不再发布审批，直接以 approved 放行本次精确调用。
+                return ToolApprovalDecision(request.permission_id, "approved").to_dict()
             handle = publish_agent_tool_approval(
                 self.agent,
                 run_id=self.task_id,
@@ -86,6 +95,8 @@ class AgentToolApprovalSinkMixin:
                 approved_keys = set(approved_keys)
                 approved_keys.add(session_key)
                 self._approved_session_keys = approved_keys
+            if decision.decision == "approved_owner" and grant_key:
+                record_owner_operation_grant(self.agent.home_paths, grant_key, source="agent_tool_approval")
         except (FileNotFoundError, OSError, RuntimeError, TypeError, ValueError):
             permission_id = str(request_value.get("permission_id") or "").strip()
             if not permission_id:

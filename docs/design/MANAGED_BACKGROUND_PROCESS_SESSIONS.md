@@ -319,6 +319,25 @@ submitted/consumed/rejected/reserved 不触发网络重试预留，响应使用�
 监听事实沿 `process_network_status`（非 Linux 为 `unsupported_on_host`）。启动时观测监听不可靠（服务可能尚未绑定端口）
 故未加入启动回执；是否按 socket 事实限制监听范围（loopback_only）待用户拍板，见 DESIGN_LEDGER。
 
+### 监听范围：默认只允许本机回环（2026-09-25，用户决定）
+
+用户决定：后台服务默认只能监听 127.0.0.1/::1；要开放局域网必须由模型在调用里结构化声明，并由用户确认一次后可长期记住，
+不让用户自己改配置。
+
+- 声明：`run_command` 新增 `background_listen_scope`（`loopback` 默认 / `lan`），进入 `BackgroundLaunchRequest.listen_scope`、
+  启动交接文件（`background_process_launch.v6`，必带 `listen_scope`/`listen_scope_enforce`）与会话记录 `listen_scope`。
+- 授权：`ApprovalPolicy.owner_grant_parameters` 让 shell 工具声明 `background_listen_scope=lan` 是"可被用户长期允许的一类操作"。
+  审批请求的 binding 带 `grant_key`（`run_command:background_listen_scope=lan`），面板多出"本用户长期允许这类操作"
+  （decision `approved_owner`）；选择后写进 owner `tool_policy.json` 的 `operation_grants`（`user_space/operation_grants.py` 是唯一权威），
+  以后同类调用由 `autonomous_tool_decision` 直接放行、不再发面板。未授权的 `lan` 在自主审批模式下也不会被放行，必须等用户本人决定。
+- 执行：后台 host 每 2 秒用真实 socket 表核对 child 进程树（Linux 走 /proc，macOS 等 POSIX 走 lsof；`tooling/listen_scope.py`）。
+  声明 loopback 却出现非回环监听：`listen_scope_enforce=true`（配置 `background_process_listen_scope_enforce`，默认开）时回收进程，
+  记录 `status=killed, reason=listen_scope_violation, listener_violation={bindings, observation, …}`；关掉时只记一次 `listener_warning`。
+  启动窗口内就被回收的服务由 launcher 按 host 结清的终态交接，`run_command` 直接返回 `BACKGROUND_LISTEN_SCOPE_VIOLATION`；
+  `process_session status/list` 的摘要带 `listen_scope`、`reason` 与越界证据。
+- 不做：不按命令正文猜监听地址；观测不到（Windows、无 lsof）不算越界；`lan` 不做任何限制。
+- 测试：`test_background_listen_scope.py`（授权键、面板选项、owner 授权存储与自主模式、shell 声明、spec 校验、真实进程回收/放行/只告警）。
+
 ## 非目标
 
 - 不把普通前台命令变成长驻会话。

@@ -8,11 +8,17 @@ import os
 import subprocess
 import time
 from contextlib import contextmanager, nullcontext
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from ..common.json_io import read_json_object_report
 from .background_process_launch import LAUNCH_SPEC_SCHEMA
+from .listen_scope import (
+    LISTEN_SCOPE_VIOLATION,
+    normalize_listen_scope,
+    observe_tree_listeners,
+    scope_violations,
+)
 from .process_registry import (
     _process_instance_terminated,
     capture_process_birth_token,
@@ -26,10 +32,23 @@ from .process_session_records import (
 from .process_session_store import ProcessSessionStore
 
 _HOST_POLL_SECONDS = 0.05
+# 监听范围核对的间隔：读 socket 表有成本，不必跟 50ms 的存活轮询同频。
+_LISTEN_CHECK_SECONDS = 2.0
 
 
-# LLM: 只接收当前 v5 完整字段；激活引用必须明确有值或 null，环境只继承父进程，旧信封不补默认值。
-# 函数用途: 验证一次性交接文件和通道寿命，畸形或缺少激活字段时不启动命令。
+# LLM: 监控期只读的结构化策略，全部来自已校验的启动交接文件；不从记录正文或命令推断。
+# 类用途: 把 child 的寿命上限、launcher 绑定和监听范围声明打成一个不可变参数，供监控循环使用。
+@dataclass(frozen=True)
+class _MonitorPolicy:
+    deadline_monotonic: float = 0.0
+    stop_on_launcher_exit: bool = False
+    listen_scope: str = "loopback"
+    listen_scope_enforce: bool = True
+
+
+# LLM: 只接收当前 v6 完整字段（含 listen_scope/listen_scope_enforce）；激活引用必须明确有值或 null，环境只继承父进程，
+#   旧信封不补默认值。
+# 函数用途: 验证一次性交接文件、通道寿命与监听范围声明，畸形或缺少字段时不启动命令。
 def _read_launch_spec(
     store: ProcessSessionStore, session_id: str, spec_path: Path
 ) -> dict[str, object]:
@@ -62,6 +81,9 @@ def _read_launch_spec(
         raise ValueError("managed background I/O mode invalid")
     if mode == "stdio" and (not spec["stop_on_launcher_exit"] or spec["max_log_bytes"] != 0):
         raise ValueError("managed stdio requires attached lifetime without log output")
+    if "listen_scope" not in spec or type(spec.get("listen_scope_enforce")) is not bool:
+        raise ValueError("managed background listen scope declaration missing")
+    spec["listen_scope"] = normalize_listen_scope(spec["listen_scope"])
     return spec
 
 
@@ -133,9 +155,10 @@ def run_background_process_host(
                     "status": "running",
                 }
             )
-        return _monitor_child(store, session_id, child, birth, spec["max_log_bytes"],
-                              deadline_monotonic=spec["deadline_monotonic"],
-                              stop_on_launcher_exit=spec["stop_on_launcher_exit"])
+        return _monitor_child(store, session_id, child, birth, spec["max_log_bytes"], _MonitorPolicy(
+            deadline_monotonic=spec["deadline_monotonic"], stop_on_launcher_exit=spec["stop_on_launcher_exit"],
+            listen_scope=spec["listen_scope"], listen_scope_enforce=spec["listen_scope_enforce"],
+        ))
     except Exception as exc:
         receipt = (
             terminate_process_tree(
@@ -197,17 +220,20 @@ def _monitor_child(
     child: subprocess.Popen,
     birth: str,
     max_log_bytes: int,
-    *,
-    deadline_monotonic: float = 0.0,
-    stop_on_launcher_exit: bool = False,
+    policy: _MonitorPolicy | None = None,
 ) -> int:
+    policy = policy or _MonitorPolicy()
+    next_listen_check = time.monotonic()
     while True:
         report = store.load(session_id)
         if report.load_error or not report.record:
             raise OSError("managed background authority unreadable")
         record = report.record
-        reason = _stop_reason(record, max_log_bytes, deadline_monotonic=deadline_monotonic,
-                              stop_on_launcher_exit=stop_on_launcher_exit)
+        reason = _stop_reason(record, max_log_bytes, deadline_monotonic=policy.deadline_monotonic,
+                              stop_on_launcher_exit=policy.stop_on_launcher_exit)
+        if not reason and policy.listen_scope != "lan" and time.monotonic() >= next_listen_check:
+            next_listen_check = time.monotonic() + _LISTEN_CHECK_SECONDS
+            reason = _listen_scope_check(store, session_id, child.pid, policy.listen_scope, policy.listen_scope_enforce)
         ended = _process_instance_terminated(child.pid, birth)
         if reason or ended:
             receipt = terminate_process_tree(
@@ -231,6 +257,29 @@ def _monitor_child(
                 )
             return receipt.return_code if receipt.return_code is not None else 1
         time.sleep(_HOST_POLL_SECONDS)
+
+
+# LLM: 用真实 socket 表核对 child 进程树（listen_scope 模块：Linux /proc、其它 POSIX lsof），越出 loopback 的监听按 enforce 决定
+#   是回收（返回 reason=listen_scope_violation）还是只记一次 listener_warning；证据（地址、端口、PID、观测码）写进会话记录，
+#   不解析命令正文。观测不到（unsupported/lsof 缺失）不算越界。
+# 函数用途: 声明只允许本机回环时，发现服务绑到了局域网地址就回收它，并把证据留在记录里供 status 查看。
+def _listen_scope_check(
+    store: ProcessSessionStore, session_id: str, child_pid: int, listen_scope: str, enforce: bool,
+) -> str:
+    bindings, observation = observe_tree_listeners(child_pid)
+    violations = scope_violations(listen_scope, bindings)
+    if not violations:
+        return ""
+    field = "listener_violation" if enforce else "listener_warning"
+    evidence = {
+        "observed_at": time.time(), "observation": observation, "listen_scope": listen_scope,
+        "bindings": violations, "enforced": enforce,
+    }
+    with store.transaction() as transaction:
+        current = transaction.load(session_id)
+        if current is not None and not current.get(field):
+            transaction.write({**current, field: evidence})
+    return LISTEN_SCOPE_VIOLATION if enforce else ""
 
 
 # LLM: 控制只读结构化事实及同一 monotonic 期限，不解析正文；既有长期后台仍允许 launcher 交接后退出。

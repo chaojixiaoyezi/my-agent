@@ -12,12 +12,14 @@ from typing import Any, Literal, Protocol
 
 ToolApprovalDecisionValue = Literal[
     "approved",
+    "approved_session",
+    "approved_owner",
     "denied",
     "cancelled",
     "unavailable",
 ]
 _DECISION_VALUES = frozenset(
-    {"approved", "approved_session", "denied", "cancelled", "unavailable"}
+    {"approved", "approved_session", "approved_owner", "denied", "cancelled", "unavailable"}
 )
 
 
@@ -172,11 +174,12 @@ class ToolApprovalDecision:
 
     # LLM: approved 只认显式 approved 枚举；label、option id 和反馈文本不得产生授权。
     # approved_session 是会话级批准（#5 引入），同样放行——否则选"会话级批准"会走
-    # 拒绝分支并抛 ValueError 导致整个请求失败（R2-7 实测）。
+    # 拒绝分支并抛 ValueError 导致整个请求失败（R2-7 实测）。approved_owner 是用户对某一类
+    # 操作（binding.grant_key）的长期允许，本次同样放行，持久化由消费方经 owner 策略文件完成。
     # 函数用途: 判断该决定是否允许当前调用继续执行。
     @property
     def approved(self) -> bool:
-        return self.decision in {"approved", "approved_session"}
+        return self.decision in {"approved", "approved_session", "approved_owner"}
 
     # LLM: 输出包含精确 binding id，但不复制工具参数或凭据。
     # 函数用途: 生成跨进程审批答复 payload。
@@ -203,6 +206,8 @@ class ToolApprovalDecision:
 
 # LLM: permission_id 只从 canonical ToolCall 身份哈希产生；description 是已脱敏展示摘要，不参与 id 或授权绑定。
 # 函数用途: 为工具轮中的一条待审批调用生成通用 Yes/No 请求。
+# LLM: grant_key（可选）来自工具 runtime policy 的 owner_grant_parameters 声明：写进 binding 并追加 approved_owner 选项，
+#   让用户可以对这一类操作长期允许；空串保持原三个选项。
 def build_tool_approval_request(
     call: ToolApprovalCallIdentity,
     *,
@@ -210,6 +215,7 @@ def build_tool_approval_request(
     round_number: int,
     call_index: int,
     description: str,
+    grant_key: str = "",
 ) -> ToolApprovalRequest:
     binding = {
         "tool_name": call.tool_name,
@@ -218,6 +224,9 @@ def build_tool_approval_request(
         "idempotency_key": call.idempotency_key,
         "args_hash": call.args_hash,
     }
+    if str(grant_key or "").strip():
+        # 操作授权键来自工具 runtime policy 的结构化声明，进入 binding 后与决定一起被消费方核对。
+        binding["grant_key"] = str(grant_key).strip()
     identity = json.dumps(
         {"call_id": call.call_id, **binding},
         ensure_ascii=False,
@@ -225,6 +234,41 @@ def build_tool_approval_request(
         separators=(",", ":"),
     )
     permission_id = f"approval:{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:24]}"
+    options = [
+        {
+            "id": "allow_once",
+            "label": "允许一次",
+            "decision": "approved",
+            "feedback_type": "accept",
+            "feedback_placeholder": "可选：告诉 my-agent 接下来怎么做",
+        },
+        {
+            "id": "allow_session",
+            "label": "本会话允许同一操作",
+            "decision": "approved_session",
+            "feedback_type": "accept",
+            "feedback_placeholder": "可选：告诉 my-agent 接下来怎么做",
+        },
+    ]
+    if binding.get("grant_key"):
+        options.append(
+            {
+                "id": "allow_owner",
+                "label": "本用户长期允许这类操作",
+                "decision": "approved_owner",
+                "feedback_type": "accept",
+                "feedback_placeholder": "可选：告诉 my-agent 接下来怎么做",
+            }
+        )
+    options.append(
+        {
+            "id": "deny",
+            "label": "拒绝",
+            "decision": "denied",
+            "feedback_type": "reject",
+            "feedback_placeholder": "可选：告诉 my-agent 改用什么方式",
+        }
+    )
     return ToolApprovalRequest(
         permission_id=permission_id,
         request_id=str(request_id or call.turn_id),
@@ -234,30 +278,31 @@ def build_tool_approval_request(
         title="工具授权",
         description=str(description or call.tool_name),
         binding=binding,
-        options=(
-            {
-                "id": "allow_once",
-                "label": "允许一次",
-                "decision": "approved",
-                "feedback_type": "accept",
-                "feedback_placeholder": "可选：告诉 my-agent 接下来怎么做",
-            },
-            {
-                "id": "allow_session",
-                "label": "本会话允许同一操作",
-                "decision": "approved_session",
-                "feedback_type": "accept",
-                "feedback_placeholder": "可选：告诉 my-agent 接下来怎么做",
-            },
-            {
-                "id": "deny",
-                "label": "拒绝",
-                "decision": "denied",
-                "feedback_type": "reject",
-                "feedback_placeholder": "可选：告诉 my-agent 改用什么方式",
-            },
-        ),
+        options=tuple(options),
     )
+
+
+# LLM: 操作授权键的唯一算法：工具名 + 第一个命中的声明参数及其值，形如 `run_command:background_listen_scope=lan`；
+#   参数缺失、值不在声明列表或工具没声明都返回空串。声明来自 ApprovalPolicy.owner_grant_parameters，不从描述文本猜。
+# 函数用途: 判断这次调用属于哪一类可被用户长期允许的操作。
+def operation_grant_key(
+    tool_name: str,
+    arguments: Mapping[str, object] | None,
+    owner_grant_parameters: object,
+) -> str:
+    values = arguments if isinstance(arguments, Mapping) else {}
+    for item in owner_grant_parameters or ():
+        try:
+            name, allowed = item
+        except (TypeError, ValueError):
+            continue
+        raw = values.get(str(name))
+        if raw is None:
+            continue
+        text = str(raw).strip().lower() if isinstance(raw, bool) is False else str(raw).lower()
+        if text in {str(value).strip().lower() for value in allowed}:
+            return f"{tool_name}:{name}={text}"
+    return ""
 
 
 # LLM: option 校验保持 id/label 开放而 decision 封闭，便于未来增加持久规则文案而不扩大授权枚举。

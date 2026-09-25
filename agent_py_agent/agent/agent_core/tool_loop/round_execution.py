@@ -18,6 +18,7 @@ from ...contracts.required_actions import required_action_assessment_failed
 from ...contracts.tool_approval import (
     ToolApprovalDecision,
     build_tool_approval_request,
+    operation_grant_key,
 )
 from ...conversation.authority import conversation_transcript_is_authoritative
 from ...memory_archive import estimate_tokens
@@ -433,6 +434,19 @@ def _execute_serial_step(
         progress.deferred_reason = "上下文需要先 compact/resume"
 
 
+# LLM: 操作授权键只来自本次 tool_runtime_snapshot 里该工具 runtime policy 的 owner_grant_parameters 声明与结构化参数；
+#   快照缺失、工具未声明或参数值不在声明列表都返回空串，审批面板就保持原三个选项。
+# 函数用途: 算出这次调用属于哪一类可长期授权的操作，供审批请求追加"长期允许"选项和自主模式判定。
+def _owner_grant_key(request: ToolRoundExecutionRequest, call: ToolCall) -> str:
+    snapshot = getattr(request.params, "tool_runtime_snapshot", None)
+    try:
+        runtime = snapshot.runtime(call.tool_name) if snapshot is not None else None
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return ""
+    policy = getattr(getattr(runtime, "runtime_policy", None), "approval_policy", None)
+    return operation_grant_key(call.tool_name, call.arguments, getattr(policy, "owner_grant_parameters", ()))
+
+
 # LLM: 审批 consumer 是 effective_on_chunk 上的宿主能力；无 consumer/unavailable 保留旧 approval_required 终态，绝不擅自批准。
 # 函数用途: 等待一条审批决定，并在批准时用原 call identity 重新执行同一工具调用。
 def _resolve_tool_approval(
@@ -453,6 +467,7 @@ def _resolve_tool_approval(
         round_number=request.tool_rounds,
         call_index=idx,
         description=_approval_description(request, idx, execution.call),
+        grant_key=_owner_grant_key(request, execution.call),
     )
     prior_rejection = _matching_runtime_rejection(request.params, approval_request.binding)
     if prior_rejection is not None:
