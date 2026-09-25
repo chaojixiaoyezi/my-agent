@@ -3090,6 +3090,10 @@ Audit/摄取不列入本轮新增验收；共享模块既有回归按改动影�
   TUI 序列化与本地模式拒绝。
 - 真实验收方法：部署后对卡住的会话先发 `/recover` 核对列出的工具与开始时间，再发一个处置值；随后发一条普通消息，
   核对该请求 done、运行库新 attempt 的 metadata 带 `recovered_from_attempt_id`，旧 attempt 的未确认操作没有被重做。
+- 真实验收（2026-09-25，`62b3329cf`，双机 `runtime-step11z-cb3cb7a7`，用户批准对其卡住的会话执行）：经 Gateway `/control`
+  以该会话身份发 `/recover`，只列出 1 条 `run_command`（执行中断，开始时间与卡住那一轮一致），运行库未变；外部事实核实为那次
+  Gateway 确实已重启后发 `/recover recorded`，attempt=recovered、run=created、`attempt_recovered` 事件的 operator 与处置正确。
+  用户下一条消息接着原任务新开一轮的核对，等用户实际发消息后补记。
 
 ## 提交前严格 gate
 
