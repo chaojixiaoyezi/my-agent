@@ -1,7 +1,7 @@
 # 任意语言插件（plugin_package.v6）
 
 状态：第一阶段本地实现、组件验证与真实 TUI 验收完成（2026-09-25，分支 `claude/plugin-any-language`，本机 macOS 与测试机
-Linux 各一轮，记录见“真实 TUI 验收”一节）；尚未合并部署。第二阶段的 OS 沙箱试点见最后一节，未开始实现。
+Linux 各一轮，记录见“真实 TUI 验收”一节）；已由插件线合并部署（main `6c2baad4e`，runtime-step11n）。第二阶段的 OS 沙箱试点见最后一节。
 
 ## 用户决定（2026-09-25）
 
@@ -155,8 +155,7 @@ pytest 同时断言参考实现与期望逐条一致、Node 移植与期望逐�
 - 布局说明：验收把工作区放在隔离 home 的 owner 目录下，产品把这类会话的工作目录归到 owner 家目录，所以相对路径要写成
   `ws-ac/notes.txt`；工作区之外的绝对路径在宿主参数层就被 `PATH_OWNER_SCOPE_BLOCKED` 拦截，没有到达插件。
 
-## 第二阶段：OS 沙箱试点（计划，未实现）
+## 第二阶段：OS 沙箱试点（2026-09-25，本地实现）
 
-- 仓库已随包带 bubblewrap（Linux）并有 `tooling/sandbox.py`；macOS 用 sandbox-exec。试点只包插件进程（Python 与 v6 同一入口），
-  默认关闭，开关按配置规范同步 YAML 与 dataclass。
-- 插件启动链路经过后台进程启动与监听范围检查（对端维护），接入前与对端对齐包装方式与进程身份记录。
+用户第 4 项。开关 `plugin_process_sandbox`（默认关）打开后，所有插件进程经平台沙箱启动：读范围不变，只能写自己的数据目录，
+网络不变；沙箱不可用时拒绝启动。设计、限制与验证见[插件进程 OS 沙箱](PLUGIN_PROCESS_SANDBOX.md)。

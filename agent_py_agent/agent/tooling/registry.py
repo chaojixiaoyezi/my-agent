@@ -134,6 +134,8 @@ class ToolRegistryParams:
     plugin_owner: OwnerHomeResult | None = None
     # owner 权威运行库（agent.subagents.runtime_db）的只读引用：插件动作按候选 ID 发送前复核观察新鲜度用；None 时复核一律不通过
     plugin_runtime_repo: object | None = None
+    # 配置 plugin_process_sandbox：插件业务进程是否套平台沙箱（只写插件数据目录）；默认关，沙箱不可用时插件不接入
+    plugin_process_sandbox: bool = False
     # 视觉理解(短板6)：辅助视觉模型配置(VisionModelConfig)。默认 None = 未配视觉模型,
     # analyze_image 注册但调用时返回 TOOL_UNAVAILABLE(可选加法,零默认影响)。
     # 真实语义工具检索的 embedding provider；未配置时 vector 通道明确显示 unconfigured。

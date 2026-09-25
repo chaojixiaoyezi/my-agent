@@ -185,6 +185,8 @@ class _ToolConfigFields:
     enable_tools: bool = True
     # 仅允许用户显式管理插件；未安装/启用时不加载插件或启动额外进程。
     enable_plugins: bool = True
+    # 插件进程 OS 沙箱试点：开启后插件进程只可写自己的数据目录（读范围与网络不变）；沙箱不可用则不启动插件。
+    plugin_process_sandbox: bool = False
     max_tool_rounds: int | None = None
     # 历史字段名保留配置兼容；语义是一次并发执行批次大小，不是丢弃同轮尾部调用。
     max_tool_calls_per_round: int | None = None

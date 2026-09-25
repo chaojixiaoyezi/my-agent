@@ -722,6 +722,12 @@ anthropic_prompt_cache_enabled: true
 enable_tools: true
 # 允许显式插件管理；未安装并启用时不加载插件、不启动额外进程。关闭后仍可查询原结果。
 enable_plugins: true
+# 插件进程 OS 沙箱（试点，默认关闭）：
+# - false：插件进程以你本人的权限运行（现状）。
+# - true：每个插件进程都放进系统沙箱（Linux 用 bubblewrap，macOS 用 sandbox-exec），能读的范围不变，
+#   但只能写它自己的插件数据目录；网络不受影响。本机沙箱不可用时插件不会启动（不会悄悄退回无沙箱）。
+#   注意：需要写工作区文件的插件（例如导出、恢复快照）在沙箱里写入会失败；它也不是网络边界。修改后重启 Gateway 生效。
+plugin_process_sandbox: false
 
 # 是否启用流式模型响应；关闭后走一次性响应路径，便于排查模型接口问题。
 stream_enabled: true

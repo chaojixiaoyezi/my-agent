@@ -146,6 +146,8 @@ _REASON_MESSAGES = {
                            "再 /plugins enable 查看新的确认回执并重新确认。",
     "interpreter_pin_invalid": "插件解释器的定位记录与启用时不符，为安全起见没有启动；请先停用该插件，再重新启用并确认。",
     "platform_changed": "插件环境不是为本机平台准备的，没有启动；请先停用该插件，再重新启用并确认。",
+    "sandbox_unavailable": "已开启插件进程沙箱（plugin_process_sandbox），但本机沙箱不可用（Linux 需要可用的 bubblewrap，"
+                           "macOS 需要 sandbox-exec），为安全起见没有启动插件。",
 }
 
 

@@ -73,6 +73,8 @@ class AttemptSandboxSpec:
     # Standalone attempt views are writable by definition. Production shell sets False whenever
     # an explicit write-boundary list exists, so a read-only cwd never becomes an implicit RW root.
     implicit_attempt_write_roots: bool = True
+    # 整根只读形态（插件进程试点）：Linux 读范围与宿主相同、只写显式写根；macOS 非 full 形态本来就是读放行、写只落写根。
+    read_only_root: bool = False
 
 
 class AttemptExecutionSandbox:
@@ -236,6 +238,7 @@ class AttemptExecutionSandbox:
             read_only_paths=self.spec.protected_write_paths,
             full_access=self.spec.full_access,
             network_access=self.spec.network_access,
+            read_only_root=self.spec.read_only_root,
         )
         return [*build_bwrap_argv(spec), "--", *command_argv]
 

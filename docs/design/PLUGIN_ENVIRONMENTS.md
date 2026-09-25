@@ -97,3 +97,9 @@ v6 包不建 venv、不跑 pip：`prepare_plugin_environment` 转交 `plugin_fil
 期限与原操作授权下，把随包文件按摘要排他解包到 `<环境>/files/`（可执行 0500、数据 0400，读回复核）。计划里的
 `interpreter_fingerprint` 字段改由本机运行事实（入口类型、平台、系统解释器真实路径与摘要）生成，准备时重新解析必须一致；
 解释器类型另写 `runtime.json` 固定解释器，每次启动复核。详见[任意语言插件](PLUGIN_ANY_LANGUAGE.md)。
+
+## 插件进程 OS 沙箱试点（2026-09-25，本地实现）
+
+上文“Python 进程与 venv 不构成 OS 沙箱”仍是默认事实。新增开关 `plugin_process_sandbox`（默认关）：打开后插件进程
+（Python 与 v6 包同一入口）经平台沙箱启动，只能写自己的数据目录，读范围与网络不变，沙箱不可用则拒绝启动。
+详见[插件进程 OS 沙箱](PLUGIN_PROCESS_SANDBOX.md)。

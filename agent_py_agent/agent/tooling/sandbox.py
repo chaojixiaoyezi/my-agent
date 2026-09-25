@@ -137,6 +137,9 @@ class SandboxSpec:
     # into a network namespace with no host interface instead of growing a
     # second sandbox implementation.
     network_access: bool = True
+    # 整根只读形态：读范围与宿主相同，只有 write_roots 可写（插件进程沙箱试点用）；
+    # 默认 False 时两种既有形态的 argv 逐字节不变。
+    read_only_root: bool = False
 
 
 # LLM: 这是 bwrap 文件系统/进程隔离策略的唯一 argv 构造点。owner_home 和已授权
@@ -147,6 +150,8 @@ def build_bwrap_argv(spec: SandboxSpec) -> list[str]:
     bwrap = spec.bwrap_path or find_bwrap()
     if not bwrap:
         raise SandboxUnavailable("bwrap 不可用(仓库内置缺失且系统未装)")
+    if spec.read_only_root:
+        return _read_only_root_argv(bwrap, spec)
     if spec.full_access:
         argv = [
             bwrap,
@@ -251,6 +256,24 @@ def build_bwrap_argv(spec: SandboxSpec) -> list[str]:
         argv,
         spec.protected_persona_root or spec.owner_home,
     )
+    argv += ["--chdir", str(spec.workspace)]
+    return argv
+
+
+# LLM: 整根只读后再挂新的 /dev、/proc，最后逐个可写绑定 write_roots；受保护只读路径最后覆盖。不挂私有 /tmp：
+#   owner home 或工作区可能就在 /tmp 下（测试与部分部署），tmpfs 会把它们整个盖住；需要临时文件的进程应由调用方把
+#   TMPDIR 指到某个写根里。不收窄读范围、不隔离网络，只防改写——这是插件进程试点的边界，不能替代 owner 墙形态。
+# 函数用途: 构造"整个文件系统只读、个别目录可写"的 bwrap 参数。
+def _read_only_root_argv(bwrap: str, spec: SandboxSpec) -> list[str]:
+    argv = [
+        bwrap, "--die-with-parent", "--unshare-pid", "--unshare-uts", "--unshare-ipc",
+        "--share-net" if spec.network_access else "--unshare-net", "--new-session",
+        "--ro-bind", "/", "/", "--dev", "/dev", *_proc_mount_args(),
+    ]
+    for root in _normalized_write_roots(spec.write_roots):
+        if root.exists():
+            argv += ["--bind", str(root), str(root)]
+    _append_readonly_mounts(argv, spec.read_only_paths)
     argv += ["--chdir", str(spec.workspace)]
     return argv
 

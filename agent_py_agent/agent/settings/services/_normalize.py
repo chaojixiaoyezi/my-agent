@@ -385,6 +385,7 @@ def _normalize_tool_bool_fields(out: dict[str, object], defaults: object) -> lis
         out, defaults,
         (
             "enable_plugins",
+            "plugin_process_sandbox",
             "stream_enabled",
             "tool_catalog_include_examples",
             "tool_catalog_show_truncated_notice",

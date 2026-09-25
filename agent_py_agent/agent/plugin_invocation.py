@@ -63,7 +63,7 @@ def execute_plugin_invocation(
                     or tool_arguments_hash(selected.arguments) != "sha256:" + request.input_digest):
                 raise ValueError("原插件调用选择已变化")
             token.raise_if_cancelled()
-            client = PluginMCPClient(context.owner, selected.installation)
+            client = PluginMCPClient(context.owner, selected.installation, process_sandbox=context.process_sandbox)
             client.require_settled_previous_resources()
             callbacks.enter_context(token.register_callback(client.stop))
             with bind_cancellation_token(token):

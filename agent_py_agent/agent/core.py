@@ -858,6 +858,7 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
             plugin_owner=(resolve_owner_home(agent.home_paths.root, owner_identity_from_config(config))
                           if config.enable_plugins and config.enable_tools else None),
             plugin_runtime_repo=getattr(getattr(agent, "subagents", None), "runtime_db", None),
+            plugin_process_sandbox=bool(getattr(config, "plugin_process_sandbox", False)),
             tool_embedder=_build_tool_embedder(config),
             operation_store=select_operation_store(agent),
             operation_store_required=True,

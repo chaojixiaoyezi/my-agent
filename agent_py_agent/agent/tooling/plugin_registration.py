@@ -40,7 +40,8 @@ def synchronize_plugin_clients(registry) -> None:
         client = None
         try:
             client = PluginMCPClient(owner, installation,
-                                     runtime_repo=getattr(registry._construction_params, "plugin_runtime_repo", None))
+                                     runtime_repo=getattr(registry._construction_params, "plugin_runtime_repo", None),
+                                     process_sandbox=bool(getattr(registry._construction_params, "plugin_process_sandbox", False)))
             client.require_settled_previous_resources()
             registry._mcp_clients.append(client)
             if registry._mcp_closed.is_set():

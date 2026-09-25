@@ -22,6 +22,7 @@ from .plugin_runtime_facts import (
     confirmation_details,
     resolve_plugin_runtime,
 )
+from .plugin_sandbox import plugin_sandbox_problem
 from .tooling.background_process_launch import BackgroundLaunchError
 from .tooling.mcp_client import MCPError
 from .tooling.models import (
@@ -40,10 +41,12 @@ from .tooling.models import (
 # 类用途: 接入明确管理员启用，对已启用版本保持不变，对准备失败继续拒绝使用。
 class PluginEnableTool(BaseTool):
     # LLM: never 仅免管理动作重复询问；只有未激活版本生成计划及资源声明，无计划分支只核对原激活或返回拒绝。
+    #   process_sandbox 来自管理上下文的配置 plugin_process_sandbox，决定候选进程是否套平台沙箱。
     # 函数用途: 在领取前声明新环境身份，已启用或缺失插件不构造非法空资源域。
-    def __init__(self, owner, repository, binding, installation, catalog_revision):
+    def __init__(self, owner, repository, binding, installation, catalog_revision, *, process_sandbox: bool = False):
         self.owner, self.repository, self.binding = owner, repository, binding
         self.installation, self.catalog_revision = installation, catalog_revision
+        self.process_sandbox = process_sandbox
         pending = installation is not None and installation.activation is None
         self.runtime, self.runtime_error = _runtime_facts(installation) if pending else (None, "")
         self.plan = (plan_plugin_environment(installation, binding.request.operation_id,
@@ -70,6 +73,9 @@ class PluginEnableTool(BaseTool):
             return self._failure("plugin_missing", "TOOL_INVALID_ARGUMENTS", "not_started")
         if self.runtime_error:
             return self._failure(self.runtime_error, "TOOL_EXECUTION_FAILED", "not_started")
+        if self.plan is not None and plugin_sandbox_problem(self.process_sandbox, self.owner.home_dir):
+            # 沙箱开关已开但本机沙箱不可用：在准备环境、启动候选之前拒绝，不退回无沙箱
+            return self._failure("sandbox_unavailable", "TOOL_EXECUTION_FAILED", "not_started")
         if self.runtime is not None:
             confirmation = self._confirmation()
             if params.get("confirm") != confirmation["confirm_code"]:
@@ -111,7 +117,7 @@ class PluginEnableTool(BaseTool):
         ))
         prepare_plugin_environment(self.owner, package, operation)
         operation.authorize()
-        client = PluginMCPClient(self.owner, prepared.installation)
+        client = PluginMCPClient(self.owner, prepared.installation, process_sandbox=self.process_sandbox)
         try:
             transport = client.start()
             tools = client.discover_tools(transport)

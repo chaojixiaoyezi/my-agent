@@ -31,6 +31,7 @@ from .plugin_observation import (
 # 插件层候选复核失败码 → 宿主结构化 reported_error_code；插件合同保证这两种拒绝不产生副作用
 _PLUGIN_OBSERVATION_ERROR_CODES = {"stale": OBSERVATION_STALE, "not_found": OBSERVATION_CANDIDATE_UNKNOWN}
 from .plugin_runtime_facts import verified_runtime_command
+from .plugin_sandbox import SANDBOX_TMP_DIRECTORY, sandboxed_plugin_argv
 from .tooling.input_schema import canonicalize_tool_input_schema
 from .tooling.mcp_client import MCPError, MCPServerConfig, MCPStdioClient, sanitize_credentials
 from .tooling.mcp_registration import MCPProxyTool, build_proxy_tool, sanitize_name_component
@@ -264,8 +265,11 @@ class PluginMCPClient(MCPStdioClient):
     # LLM: 构造只读规范环境和设置；私有值只放子进程环境，包声明的 effect 不降低原危险工具门。
 #   同时 no-follow 创建插件数据目录（有副作用：可能新建目录），经 MY_AGENT_PLUGIN_DATA_DIR 传给子进程；
 #   声明了 host_api=["read"] 的包另获宿主只读 API 地址与令牌（有副作用：登记令牌）。
+#   process_sandbox=True（配置 plugin_process_sandbox）时启动命令套进平台沙箱，只可写数据目录，TMPDIR 指向其中的 .tmp；
+#   沙箱不可用时这里抛 SandboxUnavailable，调用方应先用 plugin_sandbox_problem 结构化拒绝。
     # 函数用途: 将已准备的插件环境（Python 或 v6 随包文件）接到原 MCP 客户端，不在构造时启动进程；runtime_repo 是 owner 权威库，供观察新鲜度复核只读。
-    def __init__(self, owner, installation: PluginInstallation, *, runtime_repo: object | None = None):
+    def __init__(self, owner, installation: PluginInstallation, *, runtime_repo: object | None = None,
+                 process_sandbox: bool = False):
         self.runtime_repo = runtime_repo
         activation = installation.activation
         if activation is None or activation.phase not in {"preparing", "active"}:
@@ -280,6 +284,12 @@ class PluginMCPClient(MCPStdioClient):
         data_dir = plugin_data_dir(owner, installation.manifest.plugin_id)
         descriptor = open_directory_beneath(owner.root, data_dir.relative_to(owner.root).parts, create=True)
         os.close(descriptor)
+        sandbox_env = {}
+        if process_sandbox:
+            os.close(open_directory_beneath(owner.root, (*data_dir.relative_to(owner.root).parts, SANDBOX_TMP_DIRECTORY),
+                                            create=True))
+            command, *args = sandboxed_plugin_argv([command, *args], cwd=cwd, data_dir=data_dir, owner_home=owner.home_dir)
+            sandbox_env = {"TMPDIR": str(data_dir / SANDBOX_TMP_DIRECTORY)}
         settings = canonical_plugin_settings(load_strict_json(installation.settings_json or "{}"),
                                              installation.manifest.settings_schema)
         self.installation = installation
@@ -290,7 +300,7 @@ class PluginMCPClient(MCPStdioClient):
         super().__init__(MCPServerConfig(
             name="plugin_" + installation.manifest.plugin_id,
             command=command, args=args, cwd=str(cwd),
-            env={"MY_AGENT_PLUGIN_SETTINGS": settings, PLUGIN_DATA_DIR_ENV: str(data_dir), **host_api_env},
+            env={"MY_AGENT_PLUGIN_SETTINGS": settings, PLUGIN_DATA_DIR_ENV: str(data_dir), **host_api_env, **sandbox_env},
             catalog_category="plugins",
         ), activation=self.activation_ref)
 

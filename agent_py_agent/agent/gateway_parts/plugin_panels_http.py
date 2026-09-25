@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import threading
+from functools import partial
 
 _SERVICE_LOCK = threading.Lock()
 
@@ -45,12 +46,14 @@ def handle_client_plugin_panels(handler, server) -> None:
 # LLM: 服务挂在唯一 HTTP server 上，首次请求时创建；Gateway 停止时由 server.stop 关闭。
 # 函数用途: 取得（必要时创建）本 Gateway 进程的插件展示服务。
 def plugin_display_service(server):
-    from ..plugin_display.service import PluginDisplayService
+    from ..plugin_display.service import PluginDisplayService, plugin_display_client
 
     with _SERVICE_LOCK:
         service = getattr(server, "plugin_display", None)
         if service is None:
-            service = PluginDisplayService()
+            # 面板连接与业务连接同一沙箱开关（配置 plugin_process_sandbox）
+            sandbox = bool(getattr(getattr(server.agent, "config", None), "plugin_process_sandbox", False))
+            service = PluginDisplayService(client_factory=partial(plugin_display_client, process_sandbox=sandbox))
             server.plugin_display = service
         return service
 

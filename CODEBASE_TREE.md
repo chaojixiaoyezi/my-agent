@@ -49,6 +49,7 @@
     |-- PLUGIN_HOST_API.md               # 界面型插件的宿主只读 API：v4 声明、按激活发令牌、主题白名单
     |-- PLUGIN_OBSERVATION_CANDIDATES.md # 插件观察候选结构设计稿：manifest 声明、宿主铸 ID、两层执行前复核与动作候选决策点
     |-- PLUGIN_ANY_LANGUAGE.md           # 任意语言插件（v6）：随包可执行文件/系统解释器、启用前用户确认、解释器固定与跨语言读取检查用例
+    |-- PLUGIN_PROCESS_SANDBOX.md        # 插件进程 OS 沙箱试点：开关语义、失败拒绝、已知限制与验证
     |-- WORKSPACE_PEEK.md                # 首个自有只读插件的预览、分页、安全打开与构建边界
     |-- PLUGIN_ACTIVATION.md             # 唯一安装表的激活 CAS、撤销、显式迁移及待接线资源边界
     |-- MANAGED_PROCESS_STDIO.md         # 原 host 字节管道、激活资源归属及旧版本恢复边界
@@ -197,6 +198,7 @@ agent_py_agent/
 |   |-- plugin_activation.py           # 原安装版本上的激活迁移、阶段重放与旧代拒绝
 |   |-- plugin_runtime.py              # 固定代次的 MCP 服务、完整目录校验与原工具代理；观察结果改写与动作候选发送前复核
 |   |-- plugin_runtime_facts.py        # 非 Python 插件的本机运行事实：解释器解析与固定、启动前复核、用户确认回执与确认码
+|   |-- plugin_sandbox.py              # 插件进程 OS 沙箱试点：经平台沙箱网关启动，只写插件数据目录，不可用则拒绝
 |   |-- plugin_skills.py               # 已启用插件自带 Skill 目录的唯一定位规则（来源 plugin:<ID>，最低优先级）
 |   |-- plugin_host_api.py             # 插件宿主只读 API：令牌发放与复核、/plugin-host/query 主题投影
 |   |-- workspace_read_context.py      # 宿主与插件共用的冻结读取协议及逐项路径检查
@@ -569,7 +571,7 @@ agent_py_agent/
 |   |   |-- shell.py                  # 非交互 run_command、独立 stdin、超时/中断与有界 pipe drain
 |   |   |-- shell_syntax.py           # 外层及字面 Shell -c 的后台语法检查，不解释普通字符串或 heredoc 正文
 |   |   |-- tool_input_completion.py # 明示安全默认值、可信上下文补参与脱敏 source/source_ref
-|   |   `-- sandbox.py                # bwrap 唯一策略、自检、worker/K8s readiness 硬门
+|   |   `-- sandbox.py                # bwrap 唯一策略、自检、worker/K8s readiness 硬门；含插件进程用的整根只读形态
 |   |-- capability/                    # 单一 SkillsService、逐轮 snapshot、能力路由与 capability tools
 |   |   |-- decision_candidates.py     # 原能力快照候选、独立适用性题及必要引用，不读取Skill正文
 |   |   |-- decision_recommendation.py # 每工作片可选推荐及采用前复核，只改变展示不改授权
@@ -776,6 +778,7 @@ agent_py_agent/
 |   |-- test_plugin_package.py         # 静态包篡改、归档预算、危险成员及不执行代码的合同检查；v5 观察声明往返与非法声明
 |   |-- test_plugin_any_language.py    # v6 非 Python 插件：包描述、可复现打包、确认回执、解包准备、解释器固定与真实 MCP 启停
 |   |-- test_plugin_any_language_samples.py # 跨语言读取检查一致性用例（Python 参考 + Node 移植）与 hello-node/hello-go 宿主链路
+|   |-- test_plugin_sandbox.py         # 插件进程沙箱：开关默认值、bwrap 整根只读布局、包装与 TMPDIR、不可用拒绝、真实平台写边界
 |   |-- plugin_wheel_fixtures.py       # 合成标准 wheel 与导入陷阱，仅用于开发组件检查
 |   |-- test_plugin_wheels.py          # 固定依赖、extras、平台、摘要与归档预算检查
 |   |-- test_plugin_wheel_layout.py    # 跨 wheel 与引导文件冲突、安装布局和入口脚本检查
@@ -1182,6 +1185,7 @@ docs/
 - `docs/design/PLUGIN_LIFECYCLE.md`：可选 Python 插件的核心边界、命令目录、隔离依赖、版本绑定和卡死卸载；提案与现有实现明确区分。
 - `docs/design/PLUGIN_PACKAGES.md`：本地包格式、读取预算、静态校验及待实现的安装提交和隔离撤销合同。
 - `docs/design/PLUGIN_ANY_LANGUAGE.md`：任意语言插件的用户决定、v6 包描述、启用确认、解释器固定、给插件作者的协议要点、读取检查移植实测与 OS 沙箱试点计划。
+- `docs/design/PLUGIN_PROCESS_SANDBOX.md` 与 `agent_py_agent/agent/plugin_sandbox.py`：插件进程 OS 沙箱试点（配置 `plugin_process_sandbox`，默认关）的语义、失败拒绝与限制；沙箱参数仍只由 `tooling/sandbox.py` / `attempt/sandbox.py` 构造。
 - `docs/design/PLUGIN_SAMPLE_ACCEPTANCE.md`：社区候选抽样与热度快照、10 个简易插件的最小功能、分批实现顺序和组合卸载验收；不代表已实现。
 - `docs/tasks/REFACTOR_PLUGIN_GOAL.md`：发布部署前置条件、十步执行状态、每步真实多 TUI 矩阵、证据与推进条件。
 - `docs/tasks/DECISION_MODEL_GOAL.md`：决策模型 P1—P5 完整范围、逐项完成条件、并行认领及分层验收状态。

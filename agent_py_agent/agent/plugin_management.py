@@ -34,6 +34,7 @@ from .plugin_removal import PLUGIN_REMOVE_TOOL
 from .plugin_remove_tool import PluginRemoveTool
 from .plugin_runtime import plugin_tool_name
 from .plugin_runtime_facts import confirmation_message, runtime_problem, runtime_reason_message
+from .plugin_sandbox import plugin_sandbox_problem
 from .plugin_update import PLUGIN_UPDATE_TOOL
 from .plugin_update_tool import PluginUpdateTool
 from .runtime_db.host_command_execution import execute_host_command, query_host_command
@@ -73,6 +74,8 @@ class PluginManagementContext:
     business_allowed: bool = True
     disabled_tools: frozenset[str] = frozenset()
     approval_mode: str = "ask"
+    # 配置 plugin_process_sandbox：插件进程是否套平台沙箱（启用验收与显式调用都按它启动）
+    process_sandbox: bool = False
 
 
 # LLM: 冷入口与完整代理共用 owner 权限和审批配置；管理/业务分别受工具禁用约束，查询仍绑定原身份。
@@ -112,7 +115,8 @@ def plugin_management_context(
                                    allowed and PLUGIN_ENABLE_TOOL not in policy.disabled_tools,
                                    allowed and PLUGIN_REMOVE_TOOL not in policy.disabled_tools,
                                    business_allowed=allowed, disabled_tools=frozenset(policy.disabled_tools),
-                                   approval_mode=approval_mode)
+                                   approval_mode=approval_mode,
+                                   process_sandbox=bool(getattr(config, "plugin_process_sandbox", False)))
 
 
 # LLM: owner 只有原安装 Store/runtime.db；实例不建后台任务或业务历史，结果投影须保留 finalization_pending。
@@ -248,7 +252,8 @@ class PluginManagement:
         if not self.context.business_allowed or name in self.context.disabled_tools:
             return {"ok": False, "state": "rejected", "error_code": "TOOL_DISABLED"}
         entry = next(row for row in entries if row.manifest.plugin_id == parsed.plugin.plugin_id)
-        problem = runtime_problem(self.context.owner, entry)
+        problem = (runtime_problem(self.context.owner, entry)
+                   or plugin_sandbox_problem(self.context.process_sandbox, self.context.owner.home_dir))
         if problem:
             # 非 Python 插件的解释器/平台已不是用户确认时的样子：不建运行、不启动进程，结构化说明原因
             return {"ok": False, "state": "rejected", "error_code": "PLUGIN_RUNTIME_UNAVAILABLE", "details": {"reason": problem}}
@@ -370,7 +375,8 @@ class PluginManagement:
             return PluginConfigureTool(self.installations, context.path_policy, context.workspace,
                                        binding.request.operation_id, existing, catalog_revision)
         if tool_name == PLUGIN_ENABLE_TOOL:
-            return PluginEnableTool(context.owner, repo, binding, existing, catalog_revision)
+            return PluginEnableTool(context.owner, repo, binding, existing, catalog_revision,
+                                    process_sandbox=context.process_sandbox)
         if tool_name == PLUGIN_REMOVE_TOOL:
             return PluginRemoveTool(context.owner, repo, binding.request.operation_id, existing, catalog_revision)
         return PluginDisableTool(context.owner, repo, binding.request.operation_id, existing, catalog_revision)

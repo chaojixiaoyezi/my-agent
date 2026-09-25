@@ -83,7 +83,7 @@ class PluginDisplayService:
         executor: ThreadPoolExecutor | None = None,
     ) -> None:
         self._installations = installations or _enabled_installations
-        self._client_factory = client_factory or _plugin_client
+        self._client_factory = client_factory or plugin_display_client
         self._clock = clock
         self._executor = executor or ThreadPoolExecutor(max_workers=4, thread_name_prefix="plugin-display")
         self._lock = threading.Lock()
@@ -374,12 +374,12 @@ def _enabled_installations(owner) -> tuple:
         return ()
 
 
-# LLM: 复用插件业务连接的同一客户端类型与进程资源账，不另建通道。
+# LLM: 复用插件业务连接的同一客户端类型与进程资源账，不另建通道；process_sandbox 沿配置 plugin_process_sandbox。
 # 函数用途: 为一个固定激活创建插件客户端（不启动进程）。
-def _plugin_client(owner, installation):
+def plugin_display_client(owner, installation, *, process_sandbox: bool = False):
     from ..plugin_runtime import PluginMCPClient
 
-    return PluginMCPClient(owner, installation)
+    return PluginMCPClient(owner, installation, process_sandbox=process_sandbox)
 
 
 # LLM: 非整数或布尔一律视为 0，不从字符串猜数。
