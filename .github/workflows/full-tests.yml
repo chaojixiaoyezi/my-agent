@@ -8,7 +8,8 @@ on:
 jobs:
   full:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 全量 + slow + security 三段在托管 runner 上超过 30 分钟（2026-09-25 实测被取消），预算按此放宽。
+    timeout-minutes: 120
 
     strategy:
       matrix:

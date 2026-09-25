@@ -168,6 +168,7 @@
   因此本轮只改 browser-lite 的工具描述与 README：写路径不写 `file://` 前缀、相对路径基准写清、http(s) 需两道门都放行。
   若将来需要显式 `file://`，正确做法是 manifest 增加通用的每工具 `local_file_url_parameters` 声明并接到
   `PluginProxyTool` 输入策略（宿主仍按 owner 路径策略裁决），不为某个插件放松 URL 门。
+- **升级回归（2026-09-25 凌晨修复）**：v5 新增的 `observation/observation_ref` 进入了 `plugin_catalog_digest` 的 `asdict(tool)`，既有激活记录的 `catalog_sha256` 全部失配，安装表整体不可读。摘要改为只哈希有值字段（`plugin_activation_record.plugin_catalog_digest`），见 TESTS.md 与 `test_plugin_catalog_digest_stability.py`。
 - **未做**：computer_use 观察适配。决策线 `action_candidate` 点与真实 TUI 端到端验收已于 2026-09-25 完成（见决策线[真实验收](../tasks/DECISION_MODEL_REAL_VALIDATION.md#15-动作候选-action_candidate-的-browser-lite-真实验收2026-09-25)）。
 
 ## 5. 评审结论（插件线，2026-09-25）

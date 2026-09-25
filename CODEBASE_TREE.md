@@ -651,6 +651,7 @@ agent_py_agent/
 |   |-- test_gateway_decision_shutdown_cancel.py # Gateway 停止时主动取消在途决策：回原方案、不进冷却、关闭后不再联网、收尾顺序与失败隔离
 |   |-- test_gateway_model_call_shutdown_settlement.py # Gateway 停止排空后把仍在途的模型调用记为被停机中断、未结算，并写结构化停机事件
 |   |-- test_gateway_background_sessions_shutdown.py # Gateway 停机时只读列出仍存活的受管后台会话并写事件/state 计数，不停进程
+|   |-- test_plugin_catalog_digest_stability.py # 激活目录摘要跨声明版本稳定：可选字段为空不改变旧安装的 catalog_sha256
 |   |-- test_background_listen_scope.py        # 后台服务默认只监听回环：授权键、approved_owner 面板与 owner 授权存储、host 按 socket 表回收越界服务
 |   |-- test_decision_action_candidate.py # 动作候选资格、隐私、非选择、新鲜度与来源复核、取消、text/native 同段与设置入口
 |   |-- test_decision_capability_consumer.py # 原设置/worker/循环接线到实际prompt/schema减量及失效原输入

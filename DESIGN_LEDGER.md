@@ -663,6 +663,7 @@ auth 表单取消和参数拒绝已验，官方设备码在两处环境被 HTTP 
   与本项一起构成"停机结清 + 启动对账"两段自愈，见 [Gateway 结构](docs/modules/gateway/04-structure.md)。
 
 - 已决定并实现（2026-09-24 晚，用户第 5 项"小问题 my-agent 自己搞定"）：无进程身份的悬挂运行轮**不自动判死**——同一 owner 权威库会被多个运行版本写入，"没有身份"不是死亡证明；产品改为在 Gateway 启动时把它们列进状态与事件，并提供显式结构化命令 `runtime-stale-attempts --settle` 按阈值结清为 unknown（记结清来源）。自愈的边界是"看得见 + 一条命令"，不是猜。启动对账仍只对能证实进程死亡的行自动生效。
+- 教训并已修（2026-09-25 凌晨，真实 owner 组合验收发现）：持久摘要必须对声明类的字段演进稳定。manifest v5 加可选字段后 `plugin_catalog_digest` 哈希 `asdict(tool)` 导致所有既有激活记录校验失败、安装表整体不可读（真实 owner 上插件能力从 step11d 起静默消失）。现在摘要只哈希有值字段；规则写进函数注释与 `test_plugin_catalog_digest_stability.py`：给 `PluginToolDeclaration` 等被持久摘要引用的声明加字段时默认 None/空，先跑稳定性测试。`activation_sha256`、`installation_ref` 由结构化回执字段派生，不含声明 dataclass 全量。
 - 已决定并实现（2026-09-24 深夜，用户第 5 项"单回合超窗渐进压缩"）：单个活动回合多条工具结果在下一次预检前全部内联，会把上下文冲过窗口再撞 `COMPACT_CANDIDATE_TOO_LARGE`（真实样本 129%）。修法不按工具名、不改压缩器：归档入口用 preflight 同口径余量判断，本条输出估算 token 不小于距压缩点的剩余余量就立刻外置（`read_file` 分页也外置，模型只看预览+恢复锚点）并登记 `tool_context_window_overflow(reason=tool_result_headroom)`，下一次预检必走统一 Compact；开关 `tool_output_externalize_on_low_headroom` 默认开。见[验证模块进展](docs/modules/verification/02-progress.md)。
 - 想法、未落地：模型档案窗口目前靠人工实测（2026-09-24 用产品后端探到 MiniMax-M2.7=262,144、M3=1,048,576，
   官方文档分别写 204,800/1,000,000，口径都是输入+输出合计）。后续可把供应商 400 "context window exceeds limit"

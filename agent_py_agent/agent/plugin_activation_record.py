@@ -60,7 +60,14 @@ class PluginActivation:
 
 
 # LLM: 摘要只描述静态完整工具清单，不能证明服务实际返回了这些工具；发布方仍必须比对同一候选 MCP 目录。
-# 函数用途: 为激活回执绑定原 manifest 的工具名称、说明、输入和效果声明。
+#   这个摘要被持久写进每条激活记录并在每次读安装表时复核，所以它必须跨运行时版本稳定：只哈希有值的字段，
+#   声明类新增的可选字段（如 v5 的 observation/observation_ref）为 None 时不进入摘要。2026-09-25 真实 owner 上的教训：
+#   直接哈希 asdict(tool) 让升级后所有既有激活的摘要变化，整张安装表被判"不可读"，插件工具/Skill/管理全部消失。
+#   以后给 PluginToolDeclaration 加字段必须默认 None/空，并跑 test_plugin_catalog_digest_stability.py。
+# 函数用途: 为激活回执绑定原 manifest 的工具名称、说明、输入和效果声明；旧安装升级后仍能对上原摘要。
 def plugin_catalog_digest(manifest) -> str:
-    rows = sorted((asdict(tool) for tool in manifest.tools), key=lambda row: row["name"])
+    rows = sorted(
+        ({key: value for key, value in asdict(tool).items() if value is not None} for tool in manifest.tools),
+        key=lambda row: row["name"],
+    )
     return hashlib.sha256(json.dumps(rows, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
