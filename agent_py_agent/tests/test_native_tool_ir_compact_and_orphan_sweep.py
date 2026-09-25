@@ -91,6 +91,7 @@ def _native_agent(root: Path, *, protocol: str = "native", backend: str = "anthr
             enable_tools=True,
             auto_save_memory=False,
             tool_output_externalize_min_chars=10_000_000,  # keep results inline
+            tool_output_externalize_on_low_headroom=False,  # 余量外置会先把超窗输出外置；本文件专测 IR 窗口裁剪
             tool_output_preview_chars=160,
         ),
         root=root,

@@ -65,6 +65,23 @@ def test_filesystem_root_directories_are_never_inherited(root):
     assert _second_layer_work_roots(agent) == []
 
 
+def test_merged_usr_symlinked_root_directories_are_never_inherited(monkeypatch):
+    """merged-/usr 系统上 /bin 解析成 /usr/bin；字面与解析形态都不得成为可继承工作根。"""
+    from pathlib import Path as _Path
+
+    from agent_py_agent.agent.path_access_policy import inheritable_declared_work_roots
+
+    original = _Path.resolve
+
+    def merged_usr_resolve(self, strict=False):
+        mapping = {"/bin": "/usr/bin", "/sbin": "/usr/sbin"}
+        return _Path(mapping[str(self)]) if str(self) in mapping else original(self, strict=strict)
+
+    monkeypatch.setattr(_Path, "resolve", merged_usr_resolve)
+    assert inheritable_declared_work_roots(["/bin", "/sbin", "/usr/bin", "/usr/sbin"]) == []
+    assert inheritable_declared_work_roots(["/usr/bin/project"]) == ["/usr/bin/project"]
+
+
 def test_work_root_under_root_directory_is_plain_subdirectory_and_inherited(tmp_path):
     """具体子目录照常继承；只有目录本身恰好等于根级常量时才拒。"""
     nested = tmp_path / "etc"

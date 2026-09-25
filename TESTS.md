@@ -3073,6 +3073,9 @@ Audit/摄取不列入本轮新增验收；共享模块既有回归按改动影�
 
 - **线上 CI runner 与 bwrap（2026-09-25）**：Actions 重新启用后 Test 工作流自 7 月以来一直失败，根因是 ubuntu-24.04 runner 预装 bwrap 但 AppArmor 禁止非特权用户命名空间，sandbox 自检 `BWRAP_ISOLATION_FAILED`（setting up uid map: permission denied）→ 全部 `run_command` 用例按设计 fail-closed。两个工作流增加
   “Prepare bubblewrap sandbox on the runner”步骤：`sysctl kernel.apparmor_restrict_unprivileged_userns=0` 并复核自检；产品代码与测试都不绕过沙箱。线上 CI 仍不作为验收来源。
+  放开后首轮 3.12 暴露 7 项失败并分类：goal 续跑 prompt 英文断言过时（改结构标记）、随包 bwrap 二进制名 `bwrap.linux-x86_64`（断言前缀）、
+  原生 IR 窗口测试前提被余量外置抵消（该测试显式关掉 `tool_output_externalize_on_low_headroom`）、merged-/usr 下 `/bin`→`/usr/bin` 绕过根级目录排除（产品修，`_uninheritable_root_forms`），
+  以及两项只在 runner 上出现、本机通过的用例（`test_decision_fault_matrix[dns]`、`test_host_command_stream` 断连取消）待各线复查。
 
 ```bash
 python3 -m pytest <直接相关测试文件> -q --tb=short

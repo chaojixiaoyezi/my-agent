@@ -269,7 +269,7 @@ def test_sandbox_exec_owner_scoped_returns_platform_sandbox_argv(tmp_path, monke
         assert Path(argv[0]).name == "sandbox-exec"
         assert "-p" in argv
     else:
-        assert Path(argv[0]).name == "bwrap"
+        assert Path(argv[0]).name.startswith("bwrap")  # 系统 bwrap 或随包 bwrap.linux-x86_64
     assert argv[-1] == "echo hi"
 
 

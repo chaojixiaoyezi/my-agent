@@ -300,6 +300,8 @@ def agent_home_root_for_owner(owner_home: object) -> Path | None:
 #   可以下发成子代理工作根与工具执行根；但文件系统根级目录、以及 my-agent 自己的运行记录区
 #   （runs/agents/data/logs/其它 owner 的家）永远不是工作目录。
 #   判据只用归一化路径，不读 goal 文字、不读模型自报的产物路径；无法解析的输入按"没有事实"丢弃。
+#   根级目录按字面和解析后两种形态一起排除：merged-/usr 系统上 /bin、/sbin 是指向 /usr/bin、/usr/sbin 的符号链接，
+#   归一化后不再等于常量本身（2026-09-25 ubuntu-24.04 CI 发现）。
 # 函数用途: 把"声明过或已授权的目录"过滤成可以继承给子代理和工具执行层的可信工作根。
 def inheritable_declared_work_roots(
     raw_roots: object,
@@ -314,7 +316,7 @@ def inheritable_declared_work_roots(
         if path is None:
             continue
         text = str(path)
-        if text in UNINHERITABLE_ROOT_DIRS:
+        if text in _uninheritable_root_forms():
             continue
         if agent_home is not None and _is_relative_to(path, agent_home):
             if home is None or not _is_relative_to(path, home):
@@ -323,6 +325,18 @@ def inheritable_declared_work_roots(
         if text not in roots:
             roots.append(text)
     return roots
+
+
+# LLM: 唯一权威常量仍是 UNINHERITABLE_ROOT_DIRS；这里只补每个常量当前宿主上的解析形态，供归一化后的路径比对。
+# 函数用途: 返回根级目录的字面与解析后两套字符串，避免符号链接（/bin→/usr/bin）绕过排除。
+def _uninheritable_root_forms() -> frozenset[str]:
+    forms = set(UNINHERITABLE_ROOT_DIRS)
+    for item in UNINHERITABLE_ROOT_DIRS:
+        try:
+            forms.add(str(Path(item).resolve(strict=False)))
+        except (OSError, RuntimeError):
+            continue
+    return frozenset(forms)
 
 
 def _is_relative_to(path: Path, root: Path) -> bool:

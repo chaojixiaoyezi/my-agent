@@ -174,7 +174,7 @@ def test_child_wake_keeps_exact_goal_scope_and_shared_original_history(tmp_path)
     prompt = background_prompt(request.reason, goal=context.goal, other_goals=context.other_goals)
     assert first.goal_id in prompt and second.goal_id in prompt
     assert '"current_goal"' in prompt and '"other_goals"' in prompt
-    assert "Each agent has at most one unfinished goal" in prompt
+    assert "[goal-continuation]" in prompt and "每个代理同时只有一个未结束目标" in prompt
     assert store.messages.recent(thread.thread_id)[0].content == original
 
 
