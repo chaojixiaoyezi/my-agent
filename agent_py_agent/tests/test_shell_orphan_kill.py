@@ -268,3 +268,23 @@ def test_termination_receipt_keeps_proven_dead_pid_resolved_after_pid_reuse(monk
     receipt = registry.terminate_process_tree(root, None, grace_seconds=0.2)
     assert receipt.method == "SIGTERM" and receipt.observed_processes == 2
     assert receipt.unresolved_pids == () and receipt.confirmed is True
+
+
+def test_termination_without_handle_waits_long_enough_for_slow_exit(monkeypatch):
+    """停止方没有 Popen 句柄时（停别的进程起的插件宿主），SIGKILL 后核对窗口要够慢主机把实例收走（2026-09-25 CI 3.10 复现）。"""
+    from agent_py_agent.agent.tooling import process_registry as registry
+
+    root, child = 42000, 42001
+    started = time.monotonic()
+
+    def slow_exit(pid: int, _token: str) -> bool:
+        # 根立即消失；子进程在 SIGKILL 后 1.2 秒才消失，超过旧的 0.5 秒窗口、在 2 秒窗口内。
+        return pid == root or time.monotonic() - started > 1.2
+
+    monkeypatch.setattr(registry, "_process_tree_snapshot", lambda _pid: ({root: "r", child: "c"}, True))
+    monkeypatch.setattr(registry, "_signal_process_snapshot", lambda _snapshot, _signum: True)
+    monkeypatch.setattr(registry, "_same_process", lambda *_args: False)
+    monkeypatch.setattr(registry, "_process_instance_terminated", slow_exit)
+    receipt = registry.terminate_process_tree(root, None, grace_seconds=0)
+    assert receipt.method == "SIGTERM->SIGKILL"
+    assert receipt.confirmed is True and receipt.unresolved_pids == ()

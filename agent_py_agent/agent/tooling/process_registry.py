@@ -33,6 +33,10 @@ _IS_WINDOWS = os.name == "nt"
 # 杀进程时 SIGTERM 到 SIGKILL 的宽限秒数。先礼(SIGTERM 让进程自己清理)后兵
 # (还活着就 SIGKILL 硬杀整组),避免留下孤儿子进程。
 _KILL_GRACE_SECONDS = 3.0
+# 没有 Popen 句柄的停止方（如从别的进程停插件宿主）拿不到 wait()；SIGKILL 后只留 0.5 秒核对在慢主机上会漏掉刚死的实例，
+# 把它记成未确认（2026-09-25 CI 3.10 复现）。有句柄时 proc.wait(2) 已经等过，这里只需短核对。
+_FINAL_CONFIRM_SECONDS_WITH_HANDLE = 0.5
+_FINAL_CONFIRM_SECONDS_WITHOUT_HANDLE = 2.0
 
 
 # LLM: 该回执只证明本次观察到的进程树是否已终止，不证明命令成功或外部系统已回滚。
@@ -558,7 +562,11 @@ def terminate_process_tree(
             proc.wait(timeout=2)
         except (subprocess.TimeoutExpired, OSError, ValueError):
             pass
-    _wait_process_snapshot_gone(snapshot, proc, 0.5, terminated)
+    _wait_process_snapshot_gone(
+        snapshot, proc,
+        _FINAL_CONFIRM_SECONDS_WITH_HANDLE if proc is not None else _FINAL_CONFIRM_SECONDS_WITHOUT_HANDLE,
+        terminated,
+    )
     unresolved = tuple(member for member, token in snapshot.items()
                        if member not in terminated and not _process_instance_terminated(member, token))
     return_code = proc.poll() if proc is not None else None
