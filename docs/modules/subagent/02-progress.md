@@ -20,7 +20,7 @@ child overflow完整恢复已本地接入：原来源延迟至真实请求render
 隔离 Gateway TUI 又完成六轮普通中文派工，10 个 child 均 DONE：三候选自然建议官方 MiniMax-M3 与
 仅限 OpenCode DeepSeek 候选时的合法建议，各被宿主自动采用并完成实际工具后续轮；Jev 超时/冷却时
 自动保留官方 M2.7。两条异模成功只是各自条件的小样本，DeepSeek 不代表三候选默认偏好。
-P2-B 尚不整项勾选：图片/其它模态的候选能力与 token 计数未证明，窗口/Compact/故障组合仍需验，
+P2-B 已于 2026-09-25 复核勾选：窗口/Compact/故障组合已由第 12、13 项验收；模态按保守规则，子任务带图片等非文本内容时不换模型（`history_modality_unknown`，媒体集成 `319004926` 带真实 child 路径反例测试）。仍未做：按 `input_modalities` 换到能看图的候选。以下为当时记录：
 其中一次 `selection_changed` 的精确提交分支没有当时观测，不能补推原因；提交阶段现已按失败点记录结构化原因码
 （目录/父线程锁占用、目录代次或设置变化、task/权限变化、期限、child 线程冲突，本地分支 `claude/decision-child-commit-reasons`，待审），
 同类情况再现即可直接归因。详见

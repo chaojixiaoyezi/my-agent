@@ -1,31 +1,62 @@
-# 决策模型 P1—P5：最终交接（2026-09-25）
+# 决策模型 P1—P5：最终交接（2026-09-25，按 HANDOFF_TEMPLATE 格式）
 
-## 0. 先读此处
+## 基本信息
 
-- 本文件是决策线接手后的最新状态。[09-23 暂停快照](DECISION_MODEL_TAKEOVER_HANDOFF.md)只作历史参考；唯一持续更新的 TODO 仍是 [DECISION_MODEL_GOAL.md](DECISION_MODEL_GOAL.md)。
-- 写作时 main 为 `84d873c9b`，双机部署为 `runtime-step10x-2e4ca0e7`。之后的合入以 Git 为准。
-- 合并与部署由主线 owner（模块重构线）负责，决策线只提交分支与 SHA，并在测试机隔离目录做真实验收。
-- 18 项中 17 项完成，第 15 项只剩动作候选未接入：它依赖插件 SDK 先提供观察候选结构；自学习的 lesson 结构化来源已补上并真实验收。各项的完成边界见第 1 节；凡写"完成"的，都有真实验收或明确写出的离线边界。
-- 官方 Jev 按尝试累计 **103 次**，全部在隔离目录与唯一测试 Gateway 8431 上完成。日常 8420 与用户日常模型从未改动，每次测试后都经原 CAS 恢复决策设置。
-- 凭据方面：
-  - Jev 凭据只在隔离私有模型目录。
-  - 语义召回的嵌入密钥只由启动器注入测试 Gateway 进程环境，YAML 只写环境变量名。
-  - 仓库、日志与本文件都不含密钥。
+- workstream：接入决策模型（P1—P5，GOAL 18 项）。唯一持续更新的 TODO 是 [DECISION_MODEL_GOAL.md](DECISION_MODEL_GOAL.md)，[09-23 暂停快照](DECISION_MODEL_TAKEOVER_HANDOFF.md)只作历史参考。
+- branch：决策线只提交短分支 `claude/decision-*`，由主线 owner（模块重构线）合入并部署。写作时 main 为 `25650830d`，双机运行时为 `runtime-step11a-4c08c171`，之后以 Git 为准。
+- worktree：临时 worktree，合入后清理。真实验收只在测试机 .9 的隔离目录 `/root/decision-acceptance-*` 和唯一测试端口 8431 上做。
+- owner：决策线（Claude 会话）；合并与部署：主线 owner。
+- date：2026-09-25。
 
-## 1. 18 项最终状态
+## 本线目标
+
+给 my-agent 加一个可选的"决策模型"（Jev）：在选模型、召回记忆、推荐工具、子代理派工、整理记忆等节点上给出很短的建议。用户可以逐点打开、只观察或关闭，也能调整等待时间。超时、没额度、出错时一律自动回到原来的做法，不拖垮主流程、工具或记忆链路。整条线复用原有的配置、授权、取消、调用账本、子代理、记忆和上下文机制，不迁入外部 agent 框架。
+
+## 实际完成
+
+- 18 项总表中 17 项完成；细分清单除 P5-C 和收尾最后一项外全部勾选。2026-09-25 做过一次对账，第 07、08、12 行标完成时漏勾的 P2-B/D/F、P3-E、P4-F 都已对照证据补齐，说明见 GOAL。
+- 第 15 项只剩动作候选。[设计稿](../design/PLUGIN_OBSERVATION_CANDIDATES.md)已评审通过。决策侧 `action_candidate` 在分支 `claude/decision-action-candidate`（`3c54f38ff`）离线实现并测过，要等插件线落地观察结构后才能合入和做真实验收。
+- 官方 Jev 按尝试累计 **107 次**，全部在隔离目录与唯一测试 Gateway 8431 上完成。日常 8420、用户真实 owner 和日常模型从未改动，每次测试后都经原 CAS 恢复决策设置。
+- 凭据：Jev 凭据只在隔离私有模型目录；语义召回的嵌入密钥只由启动器注入测试 Gateway 进程环境，YAML 只写环境变量名；仓库、日志与本文件都不含密钥。
+
+### 18 项状态
 
 | 项 | 状态 | 结论与边界 |
 | --- | --- | --- |
-| 01—11 | ✅ | 配置、原生协议、有界等待、设置服务、账本、首条决策链、子代理选模、Curator 标注、召回重排、能力推荐与设置入口；证据见 GOAL 第 01—11 行 |
-| 12 / P3-E、P4-D/F | ✅ | 窗口、缓存与并发故障；12.1—12.7 全部完成，请求准备阶段压缩已在真实 TUI 触发 |
-| 13 / P4-E/G | ✅ | 真实 Jev + MiniMax TUI 验收与 [P4-G 汇总报告](DECISION_MODEL_P4G_REPORT.md)；真实额度耗尽样本只由离线矩阵覆盖 |
+| 01—06 / P1 | ✅ | 配置、原生协议、有界等待、设置服务、账本、首条决策链 |
+| 07 / P2-A/B | ✅ | 子代理创建前选模：自动核验并采用；模态按保守规则，带图片不换模型 |
+| 08 / P2-C/D/E/F | ✅ | Curator 前置标注：本地组合加 2026-09-25 真实 Curator 样本 |
+| 09—11 / P3-A/B/C/D、P4-A/B/C | ✅ | 召回重排与复用、能力推荐与插件减量、设置入口与代操作 |
+| 12 / P3-E、P4-D/F | ✅ | 窗口、缓存与并发故障；12.1—12.7；Gateway 关闭取消与 Curator/插件点并发组合（`25650830d`） |
+| 13 / P4-E/G | ✅ | 真实 Jev + MiniMax TUI 验收与 [P4-G 汇总报告](DECISION_MODEL_P4G_REPORT.md)；真实额度耗尽只由离线矩阵覆盖 |
 | 14 / P5-A/B | ✅ | 语义召回下补充查询有真实收益（3 条已知漏召回中 2 条稳定补回）；关系提示让真实提取把更新类事实归入原条目 |
-| 15 / P5-C | 🔄（仅剩动作候选） | 外部材料顺序、Todo 规划、交付复核焦点、自学习 S1/S2 已接并真实验收；`record_lesson` 补上子代理的结构化 lesson 通道后，端到端链路（真实子代理 lesson→提案→S2 排序→用户确认安装→新会话可见）成立。动作候选待插件 SDK 的观察候选结构 |
-| 16 / P5-D | ✅ | 主会话真实跨模型采用（长资料任务采用 M3 并答对），普通短任务两次保留当前模型、无误采用 |
-| 17 / P5-E/F/G/H | ✅ | 授权入口、经验输入上界、发送硬门、按实际结算、E2 对照记录、F1 评估与授权内晋升都已合入并做真实验收。拒绝路径（无插件、无节省）与正向晋升（装插件的隔离 owner，本线程 skill_tool off→apply，下一轮少给 3 个插件工具）都有真实样本 |
-| 18 / 最终集成 | ✅ | 全仓回归 21,406 passed；4 个失败全部归因，其中两个已修复、一个为负载偶发，详见 GOAL 第 18 行；本交接 |
+| 15 / P5-C | 🔄（仅剩动作候选） | 外部材料顺序、Todo 规划、交付复核焦点、自学习 S1/S2 已接并真实验收；动作候选决策侧已写好，待插件线 |
+| 16 / P5-D | ✅ | 主会话真实跨模型采用（长资料任务采用 M3 并答对），普通短任务两次保留当前模型 |
+| 17 / P5-E/F/G/H | ✅ | 授权、经验输入上界、发送硬门、按实际结算、E2 记录、F1 评估与授权内晋升；拒绝与正向晋升都有真实样本 |
+| 18 / 最终集成 | ✅ | 全仓回归 21,406 passed，4 个失败全部归因；本交接 |
 
-## 2. 本接手期间合入 main 的决策线工作（按合入顺序，节选）
+### 证据类型汇总
+
+按 GOAL 要求把几类证据分开写，不混成"整体通过"。"—"表示该类证据不适用或没有。
+
+| 范围 | 源码与合同 | 离线（fake / 本地 HTTP） | 真实接口（官方 Jev） | 实际 TUI | 模型判断质量 |
+| --- | --- | --- | --- | --- | --- |
+| P1 配置、协议、期限与故障隔离 | decision 用途 schema、Jev 协议严格校验、设置 CAS、原账本接线 | 本地 HTTP 组合；故障矩阵八类（连接被拒/DNS/TLS/5xx/慢响应/429 额度/429 限流/402 计费） | 首批真实记录；多 owner 断网、挂起、瞬时故障与退避复测 | 用量行显示决策输入 | — |
+| P2 子代理选模 | 候选冻结、幂等、提交原因码、模态保守闸 | 容量门与跨窗口组合；带图片 child 的反例测试 | 六轮派工 20 次 | 六父任务十 child 全部完成 | 自然选中 M3、受限候选选中 DeepSeek 各 1 次；样本小，不代表选中率 |
+| P2 Curator 前置标注 | 临时注释不落盘，逐题独立 | 父侧组合与 lease 头寸 | 真实 Curator 五次运行（Jev 4 次） | 素材经 TUI 生成，点本身在后台 | 16 题全部是合法回答；没有提取质量收益证据 |
+| P3 召回重排与复用 | 原权限/来源内排序，失败回原序 | 父侧组合 | 无单独真实样本 | — | 无 |
+| P3 能力推荐与插件减量 | 快照内短名单，不扩权 | 10.1—10.4 组合 | 首批 8 次与 Gateway 回合 | 集成安装版 off/2 秒/4 秒对照 | 改成每候选一题后 4 个 include、4 个 not_needed 全对；该样本总输入没有节省 |
+| P4 设置入口与代操作 | 设置服务、原菜单、user_config | 243 项组合 | 普通中文 read→thread patch 一条 | 原 TUI 菜单 | — |
+| P3-E/P4-D/F 窗口、缓存与并发 | 两层容量门、稳定前缀、关闭取消原语 | 12.1—12.6；Gateway 关闭取消与并发组合 | 12.7 缓存读回；准备阶段压缩真实触发 | 12.4 真实 TUI 压缩 | 缓存回执存在，不证明净收益 |
+| P5-A 召回前补充 | 只追加、不跳过原召回 | 136 项 | 语义召回 6 轮 apply | 真实 TUI 对照 | 3 条漏召回中 2 条稳定补回，1 条稳定选错片段 |
+| P5-B 记忆关系 | 提示只进临时 prompt | 组合测试 | 12 对短样本与真实 Curator 2 对 | 素材经 TUI 生成 | 预设三类关系标对 5/6；更新类归入原条目 2/2 |
+| P5-C 外部材料、Todo、交付复核 | 只追加软提示 | 各自组合与变异 | 外部材料 2 组、Todo 3 次、交付复核 1 次 | 交付复核 2 个任务 off/apply | 链路成立；都没有业务收益结论，交付复核 4 轮均未实际提示 |
+| P5-C 自学习 S1/S2 | 提案只经用户 CLI 确认；`record_lesson` 结构化来源 | 组合与变异 | S2 真实 4 次 | 端到端：真实子代理 lesson→提案→确认→新会话可见 | S2 只给出 normal，排序是否有帮助没有证据 |
+| P5-C 动作候选 | 设计稿已评审 | 决策侧 79 项、18 种变异全杀（分支未合入） | — | — | — |
+| P5-D 主会话选模 | 新工作片边界、发送前 CAS | 本地组合 302 项 | 8 个真实样本 | 真实 TUI 会话 | 修正后跨模型采用 1/1 答对；短任务 2 次正确保留 |
+| P5-E/F/G/H 有预算自测 | 授权信封、发送硬门、按实际结算、CAS 晋升 | 组合与变异 | 授权发送 2 次；E2/F1 实验回合 7 轮，另有晋升后普通回合 1 轮 | 真实 TUI `/experiment` | 结算额等于计费；晋升只看召回与节省，不评模型质量 |
+
+### 本接手期间合入 main 的决策线工作（节选，按合入顺序）
 
 | 合入 | 内容 | 真实验收 |
 | --- | --- | --- |
@@ -34,54 +65,88 @@
 | `42f7e57e1`、`6b48b5270` | 子代理提交原因码；压缩百分比只接受真实生效值；准备阶段压缩真实样本 | 第 12 项收口 |
 | `4ec0e11f3`、`92ce09fb5` | 模型用途标签；采用模式问题说明 | 真实跨模型采用成功 |
 | `bd4bca4d8`、`ab23a2666` | 能力推荐观测写进请求记录；召回来源写进上下文包 | 支撑后续实验 |
-| `e9ead5ae3` | 自学习 S1 | 首次真实验收发现 lesson 来源是死路；补上 `record_lesson` 后端到端通过 |
+| `e9ead5ae3`、`1132fd9d0`、`52e0190e1` | 自学习 S1、S2 审核顺序、子代理结构化 lesson 通道 `record_lesson` | 端到端真实验收通过 |
 | `8c6d29c5f` | P5-A/B 真实收益记录、P4-G 报告、TUI 菜单跟随 schema、交付复核焦点 | 真实实验 |
 | `e489ffff0`、`3da83ca72` | 验证分类：cd 前缀、管道与后台、126/127、pytest 范围、`&&` 串联 | 真实样本暴露后修复 |
-| `dfa8e498b`、`5fca6a194` | `/experiment` 授权入口、经验输入上界、发送硬门；首次真实授权发送 | 结算额等于计费 |
-| `d9a34fc76` | 主会话短任务保留样本，第 16 项收口 | — |
-| `0bb6f3a88` | 实验回执改用显式关键字参数（全仓回归发现） | — |
-| `1132fd9d0` | 自学习 S2 审核顺序 | 随 `record_lesson` 真实验收：observe 不改输出，apply 给出审核顺序 |
-| `84d873c9b` | E2 对照记录、F1 评估与授权内晋升 | 真实三轮：记录与拒绝路径成立 |
-| `52e0190e1` | 子代理结构化 lesson 通道 `record_lesson` | 端到端真实验收通过 |
+| `dfa8e498b`、`5fca6a194`、`0bb6f3a88` | `/experiment` 授权入口、经验输入上界、发送硬门；回执显式参数 | 结算额等于计费 |
+| `d9a34fc76` | 主会话短任务保留样本 | — |
+| `84d873c9b`、`fb5be8262` | E2 对照记录、F1 评估与授权内晋升；正向晋升真实样本 | 拒绝与正向晋升都成立 |
+| `1b334200e`、`6c3ffc2ad` | 插件观察候选结构设计稿及评审结论 | — |
+| `25650830d` | Gateway 关闭时主动取消在途决策；Curator 与插件点并发组合 | 本地真实传输栈 |
 
-## 3. 证据位置
+## 改动文件
 
-- **文档**：
-  - [真实验收](DECISION_MODEL_REAL_VALIDATION.md)
-  - [主会话真实交接](DECISION_MODEL_MAIN_MODEL_LIVE_HANDOFF.md)
-  - [子代理真实交接](DECISION_MODEL_CHILD_LIVE_HANDOFF.md)
-  - [P4-G 汇总](DECISION_MODEL_P4G_REPORT.md)
-  - [召回前审计](DECISION_MODEL_PRE_RECALL_AUDIT.md)
-  - [P5-B 交接](DECISION_MODEL_P5B_HANDOFF.md)
-  - [实验 E1 交接](DECISION_MODEL_EXPERIMENT_E1_HANDOFF.md)
-- **测试机私有证据**：`/root/decision-acceptance-20260923/*` 与 `/root/decision-acceptance-20260924/*`。
-  - 每个目录都有 `artifacts/`（wheel、标定、逐轮记录）和 `wire*/`（HTTP 结构、所选 ID、结算快照）。
-  - 已完成目录的 venv 已删除以释放空间，复现时可用目录内的 wheel 重建。
-- **本机私有证据**：`~/.my-agent/decision-evidence/*` 与 `~/.codex/private-tests/decision-model-live/*`。
+按领域列关键入口，逐片细节见 [TESTS](../../TESTS.md) 与 [CODEBASE_TREE](../../CODEBASE_TREE.md)。
 
-## 4. 已知缺口与方向（均已登记 DESIGN_LEDGER）
+- 协议与传输：`agent/backends/decision_protocol.py`、`typesafe_decision.py`、`typesafe_decision_wire.py`、`provider_send_gate.py`。
+- 决策服务：`agent/conversation/decision_service.py`、`decision_policy.py`、`decision_model_call.py`、`decision_send_permit.py`、`decision_experiment.py`、`decision_experiment_evaluation.py`。
+- 设置：`agent/settings/decision_settings.py`、`decision_settings_schema.py`、`decision_settings_defaults.py`、`decision_experiment_schema.py`、`config.py`，以及 `config/agent_config.yaml`。
+- 接入点：
+  - 子代理选模：`agent_core/orchestration/decision_subagent.py`、`agent_core/subagent/model_selection.py`；
+  - Curator 标注与记忆关系：`memory_store/decision_curator.py`、`decision_curator_relation.py`；
+  - 召回：`memory_store/decision_recall.py`；
+  - 规划：`agent_core/decision_planning.py`；
+  - 能力推荐：`capability/decision_recommendation.py`；
+  - 外部材料与交付复核：`agent_core/tool_context/external_material_order.py`、`decision_delivery_quality.py`；
+  - 自学习：`capability/skill_proposals.py`、`decision_skill_proposal_review.py`、`subagents/lesson_ledger.py`、`agent_core/runtime/record_lesson_tool.py`；
+  - 主会话选模：`gateway_model_adoption.py`、`gateway_model_observation.py`；
+  - 自测与调参：`gateway_parts/request_experiment.py`、`request_experiment_records.py`、`request_experiment_promotion.py`。
+- 界面与收尾：`cli/chat_parts/tui_decision_menu.py`；`cli/gateway_process.py` 只加了一行关闭取消（主线 owner 同意）。
+- 验证账（交付复核样本暴露后修）：`verification/project_facts.py` 等。
 
-1. **自学习**：`record_lesson` 已补上结构化来源并做端到端真实验收。剩余：被取消的 run 不收取其 lesson 账本（账本保留，但取消路径不经结果收口）；S1 草稿的 `when_to_use` 仍写"来源任务目标："，而账本候选的场景其实是经验自带的 `when_to_use`；主线程的经验记录另开片。
-2. **F1 自动晋升**：晋升时 TUI 没有主动提示，用户只能在决策设置里看到线程覆盖；插件工具与任务相关时规则是否仍然稳妥，还没有真实样本。
-3. **动作候选**：[设计稿](../design/PLUGIN_OBSERVATION_CANDIDATES.md)已评审通过。插件线先做声明、校验、投影与复核，决策线再接 `action_candidate` 点。
-4. **交付复核焦点**：在"改后未复核"时触发（设计已写）。
-5. **召回与记忆关系**：
-   - P5-A 补充片段缺"能否新增记录"的客观材料；
-   - 主模型没有长期事实检索工具；
-   - 语义检索重复嵌入；
-   - 记忆关系按顺序截取前 32 对。
-6. **P4-F**：Gateway 关闭时在途决策的主动取消与 Curator/插件点并发组合已补（分支 `claude/decision-shutdown-cancel`）；停止时被切断的后台请求的结构化"被中断"记录由主线 owner 实施中。
-7. **S2 的 CLI 进程**：各自的冷却表和内存账本；含查询串的 URL 仍会外发，下一片应去掉 query 部分。
-8. **选模**：视觉、推理密集等任务类型需要候选带对应的用途或模态事实。
-9. **Memory**：v2 迁移把新 owner 的模板标题生成待审候选（主线 owner 已记待办）。
+## 测试命令和结果
 
-## 5. 建议下一步
+远端提交前的严格门（每片都跑，并带上架构守卫测试）：
 
-1. **动作候选**：[设计稿](../design/PLUGIN_OBSERVATION_CANDIDATES.md)已评审通过，按第 4 节分工实施：插件线先落 manifest v5、代理结果路径与 browser-lite 观察，决策线再接 `action_candidate` 并做 browser-lite 真实验收。这是第 15 项最后的剩余。
-2. **插件线评估两处旁路发现**：在 owner 工作区内用相对路径安装插件包失败、改用绝对路径成功（原因未定位）；安装失败文案不区分找不到与未授权。可与第 1 项并行。
-3. **之后按收益排序处理第 4 节缺口**：先做 P5-A 片段材料与关系对按相关度挑选，两点都已证实有收益；主模型长期事实检索工具与动作候选需先做设计评审。
-4. **风险边界**：
-   - 所有决策点保持默认关闭；
-   - 不从自然语言做机器判断；
-   - 不加专项分支；
-   - 远端提交前跑本地严格门，并带上架构守卫测试。
+```bash
+python3 -m pytest <与改动直接相关的 test_*.py> agent_py_agent/tests/test_architecture_guardrails.py -q --tb=short
+ruff check agent_py_agent scripts
+python3 scripts/check_doc_sync.py
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+git diff --check
+python3 scripts/check_clean_package.py .
+```
+
+结果：
+
+- 收尾全仓回归（main `5fca6a194`）：21,406 passed、4 failed，全部归因（1 个由决策线修复，2 个由插件线修复，1 个为负载下时序偶发）。
+- 最近一片（Gateway 关闭取消与并发组合）：63 个决策/Gateway 相关文件 1428 passed、1 failed；14 种变异全杀；代码体量与 main 相比无新增项。
+- 那个失败是 `test_subagent_first_request_selection.py::test_real_child_first_request_capture_matches_actual_provider_payload` 第一组参数。它在同样组合下的 main 上同样失败，单独或整文件运行 40/40 通过，属于既有的测试顺序问题，由决策线继续排查。
+- 真实验收全部记录在[真实验收](DECISION_MODEL_REAL_VALIDATION.md)；测试机证据在 `/root/decision-acceptance-20260923/*`、`20260924/*`、`20260925/*` 的 `artifacts/` 与 `wire*/`。已完成目录的 venv 已删除，复现时用目录内的 wheel 重建。
+
+## 影响范围
+
+- 所有决策点默认关闭。关闭时零请求、零准备，行为与未接入前等价。
+- 用户可见的新入口：TUI 决策设置菜单、`/experiment` 授权命令、`my-agent skills proposals` 审核命令；子代理多了一个专属工具 `record_lesson`。
+- 每个接入点都有 AgentConfig/YAML 三个字段（mode、timeout_seconds、profile_id），与设置服务共用一份来源。
+- Gateway 停止时会主动取消本进程在途决策，等待中的调用立即回到原方案。
+
+## 需要主线重点复查
+
+- `cli/gateway_process.py::_cmd_gateway_run_cleanup` 中决策取消那一段：必须保持在置位停止事件之后、停 HTTP 之前，并继续被 try/except 包住。
+- `tooling/registry.py` 的 `_DEFAULT_HIDDEN_TOOL_NAMES` 里的 `record_lesson`：它保证主线程看不到这个子代理专属工具。
+- 动作候选合入时的三条接口约定：新鲜度函数签名、`actions` 用宿主注册名、ID 形状。插件线已书面确认，落地时按 SHA 通知逐条对照。
+
+## 需要其他线协调
+
+- 插件线：
+  - 观察候选结构（manifest v5、代理结果路径、`plugin_observation`、browser-lite 观察）落地后，决策线接 `action_candidate` 并做真实验收；
+  - 停止时后台模型请求的结构化"被中断/未结算"记录，由插件线紧接在决策取消之后实施。
+- 主线：Memory v2 迁移把新 owner 的模板标题生成待审候选（主线已记待办）。
+
+## 剩余风险
+
+- 判断质量的证据都是小样本、自建中文任务，不能外推为线上整体质量。多数点只证明链路成立，没有业务收益结论。
+- 真实额度耗尽没有样本，只由离线矩阵覆盖。
+- 两处保守取舍：采用前复核按整份策略版本判断，owner 级任何设置改动都会让同 owner 其他点的在途建议作废；冷却按连接共享，后台超时会让同连接的前台点在冷却期直接保留原方案。两者都只会少一条建议。
+- 模态只按保守规则处理：带图片的子任务不会换到能看图的候选。
+- 自学习：被取消的 run 不收取 lesson 账本；S1 草稿的场景标签措辞不准；S2 的 CLI 进程各自持有冷却表，含查询串的 URL 仍会外发。
+- 决策实验自动晋升后，TUI 没有主动提示。
+- 既有的测试顺序问题见上文，可能让大组合回归偶发失败。
+
+## 后续建议
+
+1. **动作候选**：插件线落地观察结构并通知 SHA 后，决策线把 `claude/decision-action-candidate` rebase 到新 main、换成真实新鲜度函数、跑严格门，再用 browser-lite 在 .9 做 off/observe/apply 真实验收。这是第 15 项和整个 Goal 的最后一块，可与插件线其他工作并行。
+2. **排查测试顺序问题**：定位前序测试留下的共享资源，让大组合回归稳定。它属于决策线，适合在等插件线期间做。
+3. **按收益处理已知缺口**：先做 P5-A 补充片段材料和记忆关系对按相关度挑选（两点都有真实收益证据），再做自动晋升提示和 `record_lesson` 的小缺口。
+4. **风险边界**：所有决策点保持默认关闭；不从自然语言做机器判断；不加专项分支；远端提交前跑本地严格门并带上架构守卫测试。

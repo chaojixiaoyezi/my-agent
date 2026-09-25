@@ -138,6 +138,8 @@ Gateway 配置是 private local-main，TUI 是 `providers/local/users/decision-l
 | 12 | 两个已支持适配器的完整请求组包与真实输出 cap、未知保留及 fake 容量边界；真实工具历史没有丢失 | 仍包括 token 计数差异、图片/推理预留、Compact inspect/完整投影和稳定缓存整体。真实样本远未逼近 250K/1M，缓存 usage 不等于受控收益对照 |
 | 13 | 普通中文 TUI 自动 M3、受限 DeepSeek 首轮/工具轮/DONE；Jev 超时冷却后继承 M2.7 完成 | P4-B 中文配置、跨模型多 owner、慢网/额度/取消/恢复/插件并行真实故障组合、质量和延迟分布仍待验 |
 
+2026-09-25 更新：P2-B、第 12、13 项均已勾选。模态缺口由媒体集成 `319004926` 以保守规则补上（带图片等非文本内容时不换模型，并有反例测试），见 GOAL 复核说明。
+
 模态边界的准确只读位置是 `subagent/model_selection.py::_candidate_request_input` 与
 `tool_request_projection.py::project_tool_loop_request`：后者保留原 IR 图片/推理，但 ready 只证明材料完整和组包成功；
 前者目前使用原 payload 估算与 native 探针，没有另一个明确候选模态证明。此处仅登记覆盖缺口，未扩改生产代码。
