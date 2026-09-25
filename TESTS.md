@@ -2,7 +2,7 @@
 
 child不展示历史正文时的读取回归先复现1 failed/1 passed，修复后test_compact_retained_history、test_subagent_compact_recovery、test_gateway_child_compact_scope_application三文件31 passed（8.48秒）。三宿主seed仓外基线仅验证测量和完整性，不算内存目标通过；细节见容量审计的宿主生命周期基线。
 
-## 子代理 lesson 结构化来源 `record_lesson`（2026-09-25，分支 `claude/subagent-lesson-ledger`，待合入；已端到端真实验收）
+## 子代理 lesson 结构化来源 `record_lesson`（2026-09-25，已合入 main `52e0190e1`；已端到端真实验收）
 
 - **改动**：
   - 新增账本合同 `subagents/lesson_ledger.py` 与子代理专属工具 `agent_core/runtime/record_lesson_tool.py`。

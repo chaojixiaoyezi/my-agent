@@ -705,7 +705,7 @@ P4-B 普通 user owner 的两轮隔离真实中文配置各有 **1 次 Jev HTTP*
 - 实现后再做一次端到端真实验收。
 - 私有证据：该隔离目录的 `artifacts/s1-real-evidence.json`。本次没有 Jev 调用。
 
-## 15 自学习 S1/S2 端到端真实验收（2026-09-25，分支 `claude/subagent-lesson-ledger` `f585487e0`）
+## 15 自学习 S1/S2 端到端真实验收（2026-09-25，分支 `claude/subagent-lesson-ledger` `f585487e0`，现已合入 main `52e0190e1`）
 
 **环境**：
 - 测试机新隔离目录，wheel SHA256 前缀 `ad35b1b7`，`enable_self_learning: true`，唯一 Gateway 8431。
@@ -728,3 +728,34 @@ P4-B 普通 user owner 的两轮隔离真实中文配置各有 **1 次 Jev HTTP*
 - 真实子代理 lesson → 提案 → S2 排序 → 用户确认安装 → 新会话可见，整条链路成立，写入只发生在用户确认这一步。
 - 本批 Jev 4 次（observe 1、apply 2、隐私检查 1），累计 98 次。结束后经原 CAS 恢复决策设置，8431 已释放。
 - 限制：只有一个样本；S2 这次没有给出非 `normal` 的顺序，排序能否帮上用户还没有证据。
+
+## 17 F1 正向晋升的真实样本（2026-09-25，main `019dd0dcd`；F1 代码与现 main `52e0190e1` 相同）
+
+**环境**：
+- 测试机新隔离目录，wheel SHA256 前缀 `06529cfa`，唯一 Gateway 8431。
+- 插件管理只允许本机管理员身份，普通 user owner 会被拒（`PLUGIN_PERMISSION_DENIED`，符合设计）。所以本次改用**隔离 home 自己的 local/main owner**：整个 home 都在隔离目录里，不是用户的真实 owner。
+- 测试者只用产品自己的入口：
+  - 先用 TUI `/plugins install <包>` 与 `/plugins enable desktop-lite`，装上仓库自带的 desktop-lite 插件（本地构建包 SHA256 前缀 `d31d02c0`，3 个工具）。
+  - 再在同一线程里输入与上一次相同的三条任务：`/experiment apply skill_tool 10m 1 50000 <任务>`。
+- 决策总开关与实验能力开关打开，所有接入点的普通模式关闭。
+
+**结果**：
+- **收起**：每轮候选短名单都收起了 desktop-lite 的 3 个工具（`deferred_count=3`）。基线同轮给主模型 33 个工具，其中 3 个是插件工具。
+- **样本**：
+  - A1 读 notes.txt 行数：调用 read_file，charged 18,700。
+  - A2 列目录数 txt 文件：调用 list_files，charged 18,699。
+  - A3 读 notes.txt 第一行：模型直接用上文答复，没有调工具，按 `no_realized_tools` 不计入可比较样本（charged 18,694）。
+  - A4 读 todo.txt：测试者用 `resume --gateway` 续同一会话后输入，调用 read_file，charged 18,692。
+  - 所有样本都是 charged，结算额等于供应商计费。
+- **晋升**：A4 结束时 4 个样本中有 3 个可比较，没有任何拒绝原因，评估为 `proposal`。晋升回执为 `applied`：`points.skill_tool.mode` 在本线程由 off 改为 apply，线程版本 4→5，owner 版本不变。
+- **生效**：之后同一线程的一轮普通对话（不带 `/experiment`）先有 1 次 Jev `skill_tool` 决策。主模型请求里的工具由 33 个降到 30 个，插件工具由 3 个降到 0 个。
+- 本批官方 Jev 5 次（实验 4 次、晋升后的正常决策 1 次），累计 103 次。结束后两个 owner 都经原 CAS 恢复到基线（决策总开关关闭），8431 已释放，没有残留进程。
+
+**结论与边界**：
+- F1 的正向路径在真实链路中成立：收起 → 召回 → 结算 → 评估 → 授权内 CAS 晋升 → 下一轮实际少给工具。第 17 项的显式缺口已补。
+- 限制：
+  - 只有一个线程、4 个读文件类小任务。插件工具与任务无关，召回 1.0 容易达成；插件工具与任务相关时规则是否仍然稳妥，还没有真实样本。
+  - 晋升时 TUI 没有主动提示，用户只能在决策设置里看到线程覆盖（已登记台账）。
+- **旁路发现（插件线）**：
+  - 插件包必须放在 owner home 内：非 full-access 时 owner 墙对管理员同样生效。包放在 owner home 外时，安装结果只有笼统的"来源不可读、未获授权或格式无效"。
+  - 在 owner home 内的 TUI 工作目录里用相对路径安装仍然失败，改用绝对路径才成功，原因未定位。已转告插件线。

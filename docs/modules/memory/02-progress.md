@@ -1,6 +1,6 @@
 # 记忆与上下文维护状态
 
-子代理 run 工作区登记 `lessons.jsonl`（2026-09-25，分支 `claude/subagent-lesson-ledger`，待合入；已端到端真实验收）：`AgentRunWorkspacePaths` 新增 `lessons_jsonl`，与 `findings.jsonl` 同目录，由子代理 `record_lesson` 工具独占追加；工作区同步不创建也不覆盖它。账本经验经子代理结果收口进入 owner `candidates.jsonl`，成为 `subagent_lesson` 候选：适用场景取 `when_to_use`，证据引用账本条目。晋升规则不变，正式 lesson 仍要 approved、重复独立证据（occurrence≥2）并通过威胁扫描。
+子代理 run 工作区登记 `lessons.jsonl`（2026-09-25，已合入 main `52e0190e1`；已端到端真实验收）：`AgentRunWorkspacePaths` 新增 `lessons_jsonl`，与 `findings.jsonl` 同目录，由子代理 `record_lesson` 工具独占追加；工作区同步不创建也不覆盖它。账本经验经子代理结果收口进入 owner `candidates.jsonl`，成为 `subagent_lesson` 候选：适用场景取 `when_to_use`，证据引用账本条目。晋升规则不变，正式 lesson 仍要 approved、重复独立证据（occurrence≥2）并通过威胁扫描。
 
 召回证据落上下文包（本地分支 `claude/decision-recall-evidence`，待审）：上下文包 `memory_refs` 新增本轮实际注入记忆的来源清单与记忆决策发现码，区分原完整召回与召回前补充；提示段字节不变。为第 14 项 P5-A 的真实收益实验提供结构化证据。
 
