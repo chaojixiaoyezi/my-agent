@@ -3077,6 +3077,9 @@ Audit/摄取不列入本轮新增验收；共享模块既有回归按改动影�
   放开后首轮 3.12 暴露 7 项失败并分类：goal 续跑 prompt 英文断言过时（改结构标记）、随包 bwrap 二进制名 `bwrap.linux-x86_64`（断言前缀）、
   原生 IR 窗口测试前提被余量外置抵消（该测试显式关掉 `tool_output_externalize_on_low_headroom`）、merged-/usr 下 `/bin`→`/usr/bin` 绕过根级目录排除（产品修，`_uninheritable_root_forms`），
   以及两项只在 runner 上出现、本机通过的用例（`test_decision_fault_matrix[dns]`、`test_host_command_stream` 断连取消）待各线复查。
+  后续：dns 项由决策线修正（其 Mac 的 HTTP_PROXY 掩盖了解析路径，runner 才是对的）；断连取消项根因是 `execute_host_command` 在 attempt_executor 退出事实之后才写
+  未启动回执，并发 `query_host_command` 在窗口里投影成 outcome_unknown。回执改到执行器登记仍为 running 时写入，回归
+  `test_host_command_execution.py::test_unstarted_receipt_is_written_before_executor_exit_fact`（去掉修复即失败）。
 
 ```bash
 python3 -m pytest <直接相关测试文件> -q --tb=short

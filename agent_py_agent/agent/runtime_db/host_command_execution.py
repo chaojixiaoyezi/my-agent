@@ -26,6 +26,8 @@ _LOGGER = logging.getLogger(__name__)
 
 
 # LLM: 只有原 pending 领取者拥有执行及释放回调；审批与资源收尾都在同一执行区间，重送只读原结果。
+#   执行器内产生的未启动拒绝（审批取消/拒绝、前置门失配）必须在 attempt_executor 退出事实落库之前写回执：
+#   否则并发的 query_host_command 会在“执行器已退出、回执未到”的窗口里把它投影成 outcome_unknown（2026-09-25 CI 复现）。
 # 函数用途: 经原审批/工具链执行一次，先释放调用方本次资源再关闭原运行，不换代或重跑 handler。
 def execute_host_command(
     repo: RuntimeRepository, request: HostCommandRequest,
@@ -71,8 +73,9 @@ def execute_host_command(
             execution = resolve_host_command_approval(prepared, execution, request_id=request.request_id,
                                                        consumer=request_permission)
             if _operation(repo, binding) is None and not execution.result.handler_executed:
-                unstarted = (execution.result.reported_error_code,
-                             "approval_required" if execution.decision.status == "ask" else "rejected")
+                # 执行器登记仍是 running 时就写未启动回执，不给并发查询留下 outcome_unknown 窗口。
+                _settle_unstarted(repo, binding, execution.result.reported_error_code,
+                                  state="approval_required" if execution.decision.status == "ask" else "rejected")
     except Exception as exc:  # noqa: BLE001 不输出参数或私有路径，进入执行链之后只能核对原账
         _LOGGER.warning("宿主命令执行中断: operation=%s error=%s", request.operation_id, type(exc).__name__)
         if not entered_executor:

@@ -159,6 +159,32 @@ def test_parameter_completion_cannot_change_frozen_command_input(tmp_path):
     assert tool.calls == 0
 
 
+def test_unstarted_receipt_is_written_before_executor_exit_fact(tmp_path, monkeypatch):
+    """执行器内的未启动拒绝必须在 attempt_executor 退出事实之前落库：否则并发查询会在窗口里看到 outcome_unknown
+    （2026-09-25 ubuntu runner 上 test_host_command_stream 断连取消复现）。"""
+    from agent_py_agent.agent.runtime_db.executor_liveness import exited_attempt_facts
+
+    repo, request, tool, prepare = case(tmp_path)
+    tool.model_spec = make_test_model_spec(tool.model_spec.name, input_schema={
+        "type": "object", "properties": {"value": {"type": "integer"}}, "additionalProperties": False,
+    })
+    tool.runtime_policy = replace(tool.runtime_policy, input_policy=ToolInputPolicy(safe_parameter_defaults=(("value", 1),)))
+    observed = {}
+    original = execution._settle_unstarted
+
+    def settle_and_observe(repo_, binding, error_code, *, state="rejected"):
+        observed["exit_facts_before_receipt"] = exited_attempt_facts(repo_, binding.run_id, binding.attempt_id)
+        observed["state_seen_by_concurrent_query"] = execution.query_host_command(repo_, request)["state"]
+        return original(repo_, binding, error_code, state=state)
+
+    monkeypatch.setattr(execution, "_settle_unstarted", settle_and_observe)
+    result = execution.execute_host_command(repo, request, prepare)
+    assert result["state"] == "rejected" and result["error_code"] == "TOOL_INVALID_ARGUMENTS"
+    assert observed["exit_facts_before_receipt"] is None, "回执写入时执行器登记仍应是 running"
+    assert observed["state_seen_by_concurrent_query"] == "running", "回执落库前的并发查询只能看到 running，不能是 outcome_unknown"
+    assert tool.calls == 0
+
+
 def test_normal_cancel_event_is_not_forged_into_unstarted_receipt(tmp_path):
     repo, request, _tool, _prepare = case(tmp_path)
     binding = repo.register_host_command(request)
