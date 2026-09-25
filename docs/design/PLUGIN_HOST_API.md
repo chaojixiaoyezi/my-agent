@@ -10,6 +10,7 @@
 
 ## 协议
 
+- 包描述 v5 在 v4 基础上允许工具项声明 `observation` / `observation_ref`（观察候选，见[插件观察候选结构](PLUGIN_OBSERVATION_CANDIDATES.md)）；宿主 API 名单不变。
 - 包描述 v4 在 v3 基础上增加 `host_api` 名单，目前只允许 `"read"`。只有声明了它的插件，启动时环境里才有
   `MY_AGENT_HOST_API_URL`（`http://127.0.0.1:<Gateway端口>/plugin-host/query`）与 `MY_AGENT_HOST_API_TOKEN`。
 - 令牌在插件客户端构造时发放，绑定该插件激活；每个请求都复核激活仍是同一代，停用、卸载、换代或 Gateway 停止即失效，失效后不复活。

@@ -167,6 +167,13 @@ class MCPProxyTool(BaseTool):
     # LLM: 两入口共用执行链；完整 CallToolResult 的 isError 按失败结算，不声称未执行；传输与清理异常仍保留未知。
     # 函数用途: 向固定连接发送本次参数和权限，保留可读失败回执，使原操作可查询且不阻塞后续独立调用。
     def _execute(self, params: dict[str, Any], context: ToolInvocationContext | None) -> ToolHandlerOutcome:
+        return self._execute_with_meta(params, context, None)
+
+    # LLM: 唯一的发送主体：过滤 "__" 宿主参数、合并子类逐次 _meta（extra_meta 只能来自宿主复核过的结构化事实，不能来自 arguments），
+    #   再走原客户端调用；错误映射与结果脱敏保持不变。子类需要按本次参数附 _meta 时调用它，而不是缓存到实例上（代理跨请求共享）。
+    # 函数用途: 发出一次 MCP 工具调用并把结果转成结构化工具输出。
+    def _execute_with_meta(self, params: dict[str, Any], context: ToolInvocationContext | None,
+                           extra_meta: dict[str, object] | None) -> ToolHandlerOutcome:
         arguments = {
             key: value
             for key, value in (params or {}).items()
@@ -179,6 +186,8 @@ class MCPProxyTool(BaseTool):
             if context is not None and context.execution_authority_check is not None:
                 options["authority_check"] = context.execution_authority_check
             request_meta = self._request_meta(context)
+            if extra_meta:
+                request_meta = {**(request_meta or {}), **extra_meta}
             if request_meta is not None:
                 options["request_meta"] = request_meta
             result = self.client.call_tool(self.remote_tool, arguments, **options)

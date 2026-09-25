@@ -120,6 +120,8 @@ Compact 不建立第二套验证链。live tool-context 与 archive 共用一个
    宿主 approval gate 写入并绑定 exact permission/call/operation 的 `applied_tool_approval`；handler 私有
    metadata、模型正文和 UI 文案无权生成批准事实。该投影只供同一轮 current-turn、archive 与 Compact/恢复
    重建“本调用为何被允许”，不能反向批准另一调用。
+   插件观察候选 `observation`（`plugin_observation.parse_observation` 夹界后的完整记录，含插件 key、目标引用与代次）与整份拒绝码
+   `observation_rejected` 也经此白名单进入归档，是候选内容的唯一权威；模型可见投影由插件代理另行改写，事件流只带查找投影。
    `message_tool_delivery.v1` 的成功状态、当前 owner 标记、receipt、用户投影、附件引用和有界
    `evidence_refs`，以及
    `tool_search` 的已加载工具名列表。参数审计只接受 `input_sources`、`input_coercions` 和不可逆

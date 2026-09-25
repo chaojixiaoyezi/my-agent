@@ -1,5 +1,7 @@
 # Verification：开发推进
 
+归档信封白名单（2026-09-24 晚）新增 `observation` 与 `observation_rejected`：只读插件工具的观察候选记录由 `plugin_observation.parse_observation` 按形状与数量夹界后写进 `tool_result_envelope`，是候选内容的唯一权威；`tool_completed` 事件只带查找投影。验证账、副作用证据与其它白名单字段不变。
+
 后台Compact已本地接同一scope/view的摘要注入和精确覆盖，局部来源/提交不改全线程摘要和游标；18文件联合420项通过，最终验证见TESTS。此片不证明完整恢复payload，Gateway/child准备同view、初次/手动和真实缓存仍待验；唯一TODO的12.4保持未完成。
 
 Compact来源覆盖现沿实际执行的run/attempt/模型turn/call四元身份；归档不再用当前runner覆盖原ToolCall。原摘要检查点v3封印scope/base/精确覆盖，旧未知身份保留。只验证来源和检查点合同，完整后台摘要应用与HTTP恢复仍待接。

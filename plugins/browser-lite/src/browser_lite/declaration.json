@@ -156,11 +156,15 @@
         },
         "required": [],
         "additionalProperties": false
+      },
+      "observation": {
+        "target_kind": "page",
+        "max_candidates": 50
       }
     },
     {
       "name": "click",
-      "description": "点击当前页面里唯一匹配 CSS 选择器的元素（0 个或多个都报错），等待导航或 500ms 稳定后返回新 URL 与标题。",
+      "description": "点击当前页面里唯一匹配 CSS 选择器的元素（0 个或多个都报错），等待导航或 500ms 稳定后返回新 URL 与标题；也可以只填 candidate_id，按上一次 read 的观察候选操作。",
       "requested_effect": "mutating",
       "input_schema": {
         "type": "object",
@@ -170,17 +174,25 @@
             "minLength": 1,
             "maxLength": 1024,
             "description": "只匹配一个元素的 CSS 选择器"
+          },
+          "candidate_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "description": "宿主在 read 结果里给出的候选 ID（cand-…）；填了它就按观察候选执行，可不填 selector"
           }
         },
-        "required": [
-          "selector"
-        ],
+        "required": [],
         "additionalProperties": false
+      },
+      "observation_ref": {
+        "target_kind": "page",
+        "param": "candidate_id"
       }
     },
     {
       "name": "fill",
-      "description": "填写当前页面里唯一匹配的 input/textarea/select（下拉可按选项 value 或文字），并触发 input/change 事件。",
+      "description": "填写当前页面里唯一匹配的 input/textarea/select（下拉可按选项 value 或文字），并触发 input/change 事件；也可以只填 candidate_id，按上一次 read 的观察候选操作。",
       "requested_effect": "mutating",
       "input_schema": {
         "type": "object",
@@ -196,13 +208,22 @@
             "minLength": 0,
             "maxLength": 10000,
             "description": "要填写的文本或下拉选项"
+          },
+          "candidate_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "description": "宿主在 read 结果里给出的候选 ID（cand-…）；填了它就按观察候选执行，可不填 selector"
           }
         },
         "required": [
-          "selector",
           "value"
         ],
         "additionalProperties": false
+      },
+      "observation_ref": {
+        "target_kind": "page",
+        "param": "candidate_id"
       }
     },
     {

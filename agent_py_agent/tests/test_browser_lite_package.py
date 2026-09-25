@@ -247,6 +247,62 @@ def test_tools_match_manifest(browser, installed_browser):
     assert {tool.name: tool.requested_effect for tool in manifest.tools} == {
         "open": "mutating", "read": "read_only", "click": "mutating", "fill": "mutating", "close": "mutating"}
     assert browser.server_info == {"name": "browser-lite", "version": manifest.version}
+    declared = {tool.name: tool for tool in manifest.tools}
+    assert manifest.observes and manifest.to_payload()["schema_version"] == "plugin_package.v5"
+    assert (declared["read"].observation.target_kind, declared["read"].observation.max_candidates) == ("page", 50)
+    for name in ("click", "fill"):
+        assert (declared[name].observation_ref.target_kind, declared[name].observation_ref.param) == ("page", "candidate_id")
+        assert "selector" not in declared[name].input_schema["required"], "填候选 ID 时可以不给 selector"
+
+
+# LLM: 与 invoke 同源，但返回完整 MCP 结果（含 structuredContent）并可附宿主观察 _meta；只拼装真实协议值。
+# 函数用途: 发起一次带可选观察上下文的工具调用，返回原始结果。
+def invoke_full(client, workspace, tool, *, observation=None, **arguments):
+    meta = {WORKSPACE_READ_EXTENSION: read_context(workspace).to_payload()}
+    if observation is not None:
+        meta["my-agent/observation"] = observation
+    return client.call_tool(tool, arguments, request_meta=meta)
+
+
+# 函数用途: 宿主复核通过后会附给插件的候选上下文形状。
+def _observation_meta(key: str, generation: str) -> dict:
+    return {"version": "1", "observation_id": "obs-" + "0" * 24, "key": key, "target": {"ref": "page", "generation": generation}}
+
+
+@needs_browser
+def test_candidates_resolve_by_key_and_generation_and_go_stale_after_navigation(browser, dirs):
+    workspace, _ = dirs
+    assert not invoke(browser, workspace, "open", url="form.html")[0]
+    listed = invoke_full(browser, workspace, "read")
+    assert not listed["isError"] and "my_agent_observation" not in listed["content"], "观察只进 structuredContent，正文不重复"
+    observation = listed["structuredContent"]["my_agent_observation"]
+    assert observation["schema"] == "plugin_observation.v1" and observation["target"] == {"ref": "page", "generation": "1"}
+    candidates = observation["candidates"]
+    assert [c["role"] for c in candidates] == ["textbox", "select", "button"]
+    assert [c["actions"] for c in candidates] == [["fill", "click"], ["fill", "click"], ["click"]]
+    assert candidates[2]["label"] == "提交" and all(c["key"].split(".")[1] == str(i) for i, c in enumerate(candidates))
+    name_key, submit_key = candidates[0]["key"], candidates[2]["key"]
+
+    filled = invoke_full(browser, workspace, "fill", candidate_id="cand-0123456789abcdef", value="张三",
+                         observation=_observation_meta(name_key, "1"))
+    assert not filled["isError"] and json.loads(filled["content"]) == {"filled": "input", "value": "张三"}, "按候选填写，不需要 selector"
+    clicked = invoke_full(browser, workspace, "click", candidate_id="cand-0123456789abcdef", observation=_observation_meta(submit_key, "1"))
+    assert not clicked["isError"] and json.loads(clicked["content"])["clicked"] == "button"
+    assert invoke(browser, workspace, "read", selector="#result")[1]["items"][0]["text"] == "已提交：张三/"
+
+    missing = invoke_full(browser, workspace, "click", candidate_id="cand-0123456789abcdef", observation=_observation_meta("deadbeef.0", "1"))
+    assert missing["isError"] and missing["structuredContent"] == {"my_agent_observation_error": {"code": "not_found"}}
+    assert json.loads(missing["content"])["code"] == "OBSERVATION_NOT_FOUND"
+    no_meta = invoke_full(browser, workspace, "click", candidate_id="cand-0123456789abcdef")
+    assert no_meta["isError"] and json.loads(no_meta["content"])["code"] == "MISSING_CONTEXT"
+    neither = invoke_full(browser, workspace, "click")
+    assert neither["isError"] and json.loads(neither["content"])["code"] == "INVALID_ARGUMENTS"
+
+    assert not invoke(browser, workspace, "open", url="form.html")[0], "重新打开页面换代次"
+    stale = invoke_full(browser, workspace, "click", candidate_id="cand-0123456789abcdef", observation=_observation_meta(submit_key, "1"))
+    assert stale["isError"] and stale["structuredContent"] == {"my_agent_observation_error": {"code": "stale"}}
+    fresh = invoke_full(browser, workspace, "read")["structuredContent"]["my_agent_observation"]
+    assert fresh["target"]["generation"] == "2" and fresh["candidates"][2]["key"] == submit_key, "同一选择器在新代次里键形状不变、代次不同"
 
 
 @needs_browser

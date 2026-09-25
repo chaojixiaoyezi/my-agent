@@ -45,12 +45,19 @@ _CLICK_JS = """(selector) => {
   return {count: 1, tag: el.tagName.toLowerCase()};
 }"""
 
-_FILL_JS = """(selector, value) => {
-  let list;
+# 观察候选的第 n 个元素：按观察时的同一选择器重新查询，总数与序号都要对得上，否则返回 mismatch 让调用方报 not_found
+_NTH_PREFIX = """  let list;
   try { list = document.querySelectorAll(selector); } catch (error) { return {invalid: true}; }
-  if (list.length !== 1) return {count: list.length};
-  const el = list[0];
-  const tag = el.tagName.toLowerCase();
+  if (list.length !== expected || index < 0 || index >= list.length) return {count: list.length, mismatch: true};
+  const el = list[index];
+"""
+
+_CLICK_NTH_JS = "(selector, index, expected) => {\n" + _NTH_PREFIX + """  el.scrollIntoView({block: "center"});
+  el.click();
+  return {count: 1, tag: el.tagName.toLowerCase()};
+}"""
+
+_FILL_BODY = """  const tag = el.tagName.toLowerCase();
   const kind = (el.type || "").toLowerCase();
   const fixed = ["checkbox", "radio", "file", "submit", "button", "reset", "image", "hidden"];
   if (!["input", "textarea", "select"].includes(tag) || (tag === "input" && fixed.includes(kind)))
@@ -68,6 +75,18 @@ _FILL_JS = """(selector, value) => {
   el.dispatchEvent(new Event("change", {bubbles: true}));
   return {count: 1, tag, value: String(el.value)};
 }"""
+
+_FILL_JS = """(selector, value) => {
+  let list;
+  try { list = document.querySelectorAll(selector); } catch (error) { return {invalid: true}; }
+  if (list.length !== 1) return {count: list.length};
+  const el = list[0];
+""" + _FILL_BODY
+
+_FILL_NTH_JS = "(selector, index, expected, value) => {\n" + _NTH_PREFIX + _FILL_BODY
+
+# read 不给 selector 时的默认查询，必须与 _READ_JS 里的回退串逐字相同，观察候选才能按同一选择器解析回元素
+DEFAULT_READ_SELECTOR = "input, textarea, select, button"
 
 
 # LLM: 用 JSON 字面量传参（ensure_ascii 转义 U+2028 等字符），脚本异常转成 SCRIPT_FAILED，不回传页面堆栈。
@@ -130,7 +149,45 @@ def click_element(page: PageConnection, guard: UrlGuard, selector: str) -> dict:
     require_current(page, guard)
     page.events.clear()
     page.blocked.clear()
-    found = _unique(evaluate(page, _CLICK_JS, selector))
+    return _after_click(page, guard, _unique(evaluate(page, _CLICK_JS, selector)))
+
+
+# LLM: 只填唯一匹配的 input/textarea/select，并触发 input/change 事件；select 可按选项 value 或文字匹配。
+# 函数用途: 填写一个表单控件并返回填后的值。
+def fill_element(page: PageConnection, guard: UrlGuard, selector: str, value: str) -> dict:
+    require_current(page, guard)
+    return _fill_result(_unique(evaluate(page, _FILL_JS, selector, value)))
+
+
+# LLM: 候选路径：按观察时的选择器与序号重新定位，总数变化或序号越界报 OBSERVATION_NOT_FOUND（结构化 my_agent_observation_error=not_found），
+#   不产生副作用；导航处理与 click_element 相同。
+# 函数用途: 点击观察候选对应的第 index 个元素。
+def click_candidate(page: PageConnection, guard: UrlGuard, selector: str, index: int, expected: int) -> dict:
+    require_current(page, guard)
+    page.events.clear()
+    page.blocked.clear()
+    found = _resolved(evaluate(page, _CLICK_NTH_JS, selector, index, expected))
+    return _after_click(page, guard, found)
+
+
+# 函数用途: 填写观察候选对应的第 index 个表单控件。
+def fill_candidate(page: PageConnection, guard: UrlGuard, selector: str, index: int, expected: int, value: str) -> dict:
+    require_current(page, guard)
+    return _fill_result(_resolved(evaluate(page, _FILL_NTH_JS, selector, index, expected, value)))
+
+
+# 函数用途: 把填写脚本的返回值转成结果或结构化错误。
+def _fill_result(found: dict) -> dict:
+    if "unfillable" in found:
+        raise BrowserError("NOT_FILLABLE", f"匹配元素是 {found['unfillable']}，只能填写 input/textarea/select。")
+    if "options" in found:
+        raise BrowserError("OPTION_NOT_FOUND", "下拉框里没有这个选项。", options=found["options"])
+    return {"filled": found["tag"], "value": found["value"]}
+
+
+# LLM: 点击后 500ms 内出现主 frame 导航就等 load（受命令超时约束），否则视为已稳定；结束后核对最终地址。
+# 函数用途: 点击脚本执行后的统一收尾，返回点击结果。
+def _after_click(page: PageConnection, guard: UrlGuard, found: dict) -> dict:
     started = page.wait_event(lambda event: event["method"] in ("Page.frameStartedLoading", "Page.frameRequestedNavigation")
                               and (event.get("params") or {}).get("frameId") == page.main_frame, SETTLE_SECONDS)
     navigated = started is not None
@@ -140,16 +197,39 @@ def click_element(page: PageConnection, guard: UrlGuard, selector: str) -> dict:
     return {"clicked": found["tag"], "navigated": navigated, "url": state["url"], "title": state["title"]}
 
 
-# LLM: 只填唯一匹配的 input/textarea/select，并触发 input/change 事件；select 可按选项 value 或文字匹配。
-# 函数用途: 填写一个表单控件并返回填后的值。
-def fill_element(page: PageConnection, guard: UrlGuard, selector: str, value: str) -> dict:
-    require_current(page, guard)
-    found = _unique(evaluate(page, _FILL_JS, selector, value))
-    if "unfillable" in found:
-        raise BrowserError("NOT_FILLABLE", f"匹配元素是 {found['unfillable']}，只能填写 input/textarea/select。")
-    if "options" in found:
-        raise BrowserError("OPTION_NOT_FOUND", "下拉框里没有这个选项。", options=found["options"])
-    return {"filled": found["tag"], "value": found["value"]}
+# 函数用途: 候选脚本结果校验：选择器语法错照常报，总数/序号不符报结构化 not_found。
+def _resolved(found: object) -> dict:
+    found = _checked(found)
+    if found.get("mismatch"):
+        raise BrowserError("OBSERVATION_NOT_FOUND", "观察过的元素已变化或不存在，请重新 read 后再操作。",
+                           my_agent_observation_error={"code": "not_found"})
+    return found
+
+
+# LLM: 候选只由结构化 item 字段生成：key = 选择器哈希前 8 位 + "." + 序号（本插件在同一代次下能解析回元素，不是选择器）；
+#   role 取标签/类型短标识；label 取可见文字，其次 name/id，再次“标签-序号”，去控制字符、≤120 字；actions 按控件类型给 click/fill。
+# 函数用途: 把 read 的元素列表投影成宿主合同要求的观察候选。
+def observation_candidates(items: list, selector_hash: str) -> list[dict]:
+    candidates = []
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            continue
+        tag, kind = str(item.get("tag") or ""), str(item.get("type") or "").lower()
+        if tag == "input" and kind in ("checkbox", "radio"):
+            role = kind
+        elif tag == "input" and kind in ("submit", "button", "reset", "image"):
+            role = "button"
+        elif tag in ("input", "textarea"):
+            role = "textbox"
+        elif tag == "a":
+            role = "link"
+        else:
+            role = tag or "element"
+        actions = ["fill", "click"] if role in ("textbox", "select") else ["click"]
+        raw = str(item.get("text") or item.get("name") or item.get("id") or f"{tag or 'element'}-{index}")
+        label = "".join(ch for ch in raw if ord(ch) >= 32)[:120].strip() or f"{tag or 'element'}-{index}"
+        candidates.append({"key": f"{selector_hash}.{index}", "role": role, "label": label, "actions": actions})
+    return candidates
 
 
 # LLM: 选择器语法错误和脚本返回非对象分别报错，其余原样返回。

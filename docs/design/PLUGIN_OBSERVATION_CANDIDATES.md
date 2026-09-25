@@ -1,6 +1,6 @@
 # 插件观察候选结构（设计稿）
 
-状态：纯文档设计，**未实施**；2026-09-25 插件线评审通过，结论见第 5 节（已并入正文）。插件线先实施第 4 节第 1 步，决策线随后接点。它是第 15 项 P5-C"动作候选"的前置条件：没有这层结构，决策模型就无法在不读自由文本的前提下参与"下一步先看哪个元素"。
+状态：插件线部分**已实施**（2026-09-24 晚，见第 6 节实施记录）；决策线 `action_candidate` 点待接。2026-09-25 插件线评审通过，结论见第 5 节（已并入正文）。它是第 15 项 P5-C"动作候选"的前置条件：没有这层结构，决策模型就无法在不读自由文本的前提下参与"下一步先看哪个元素"。
 归属：manifest、代理结果校验、执行前复核与示例插件归插件线；决策接入点归决策线。前期审计见[动作候选审计](../tasks/DECISION_MODEL_ACTION_CANDIDATE_AUDIT.md)，台账摘要见 [DESIGN_LEDGER](../../DESIGN_LEDGER.md)。
 
 ## 1. 现状与缺口
@@ -118,6 +118,37 @@
    - 环境：隔离 owner，装 browser-lite，打开含两个相似按钮的本地测试页；
    - 对照 off/observe/apply；
    - 记录 Jev 用量、选中的 ID、提示是否出现、主模型是否采纳，以及页面变化后旧建议是否被拦下。
+
+## 6. 实施记录（插件线，2026-09-24 晚）
+
+- **manifest v5**（`plugin_manifest.py`）：`PLUGIN_PACKAGE_SCHEMA_V5`；工具项可选 `observation{target_kind,max_candidates}`（只允许 read_only）与
+  `observation_ref{target_kind,param}`（param 须是输入 schema 里可选的 string，形状 `[A-Za-z][A-Za-z0-9_]{0,63}`，天然排除 `__` 与 `_meta`）；
+  一个工具不能两者兼有；同包内按 target_kind 双向配对（引用无观察、观察无引用都拒绝）；v5 至少一个工具带观察字段；v1–v4 字节不变。
+  `scripts/build_plugin_package.py` 见到观察字段自动选 v5。
+- **宿主实现**（新模块 `agent/plugin_observation.py`）：`parse_observation` 整份接受/拒绝（原因码 schema / unknown_field / target / target_ref /
+  target_generation / candidate_count / duplicate_key / candidate_shape / candidate_key / candidate_role / candidate_label / candidate_actions /
+  action_not_declared），铸 `obs-`+sha256(run_id, task_id, operation_id, activation_id, 注册工具名, target.ref, generation, 规范候选)[:24] 与
+  `cand-`+sha256(observation_id, key)[:16]；候选 `actions` 换成宿主注册名。
+- **代理结果路径**（`plugin_runtime.PluginProxyTool`）：插件代理声明宿主参数 `__operation_id`、`__run_scope`（run/task 身份，发送前过滤不转发）；
+  只读观察工具成功后把 `structuredContent.my_agent_observation` 校验、铸 ID，模型可见结果改写为 `{observation_id, candidates[{candidate_id,
+  role, label, actions}]}`，归档 `tool_result_envelope.observation` 保留完整记录（含插件 `target_ref` 与代次——动作时要原样交还插件复核，
+  这是相对原稿"只存 hash"的一处补充）；形状不合规删掉候选、信封记 `observation_rejected:<code>`。归档白名单新增 `observation` / `observation_rejected`。
+  合同：观察只进 `structuredContent`，文本正文不重复（否则模型仍会看到插件 key）。
+- **新鲜度权威**：`tool_runtime_ledger._append_runtime_event` 在同一条 `tool_completed` 事件载荷里附观察的查找投影（ID、activation、target_ref/hash、
+  代次、task/operation、候选 `{candidate_id,key,actions}`）；`runtime_db.repository.events_for_agent_run` 按 seq 读同 agent_run 全部事件（跨 attempt
+  共享）。`plugin_observation.current_observation / observation_is_current / resolve_action_candidate` 只读这条事件流；库不可用、没有权威 AgentRun 行、
+  失败调用都按"不新鲜"。原稿写的 `tool_operations` 调用序在实现里落为权威事件流的 seq 序，语义相同。
+- **发送前复核**：动作工具填了 `observation_ref.param` 时，代理按 `resolve_action_candidate` 复核，未知/过期直接返回 `TOOL_INVALID_ARGUMENTS`
+  （reported_error_code `OBSERVATION_CANDIDATE_UNKNOWN` / `OBSERVATION_STALE`，`effect_outcome=not_started`，不发送）；通过后把
+  `{version, observation_id, key, target{ref,generation}}` 放进 `_meta["my-agent/observation"]`。库引用经 `ToolRegistry` 构造参数 `plugin_runtime_repo`
+  （= `agent.subagents.runtime_db`）传给 `PluginMCPClient(runtime_repo=)`，不另开连接。
+- **browser-lite**：`read` 声明 `observation(page, 50)`，`click`/`fill` 声明 `observation_ref(page, candidate_id)` 且 `selector` 改为可选；
+  页面代次随 `open` 与点击后导航推进；候选 key = 该次 read 选择器哈希前 8 位 + "." + 序号，插件按同一选择器重新查询并要求总数不变；
+  代次不符返 `my_agent_observation_error.code=stale`，key 解析不到返 `not_found`，都不产生副作用；观察与错误只进 `structuredContent`。
+- **测试**：`test_plugin_package.py`（v5 往返与 13 种非法声明）、`test_plugin_observation.py`（形状码、ID 稳定、投影、事件序新鲜度、候选复核）、
+  `test_plugin_proxy_observation.py`（代理改写与信封、整份拒绝、动作 _meta、未知/过期不发送、不填参数沿旧路径）、
+  `test_browser_lite_package.py`（v5 描述；真实浏览器下按候选填写/点击、not_found/stale/缺上下文）。
+- **未做**：决策线 `action_candidate` 点（`claude/decision-action-candidate` 待 rebase）；computer_use 观察适配；真实 TUI 端到端验收待决策点接入后一起做。
 
 ## 5. 评审结论（插件线，2026-09-25）
 

@@ -19,6 +19,9 @@ from my_agent_plugin_api.workspace_read_context import (
 
 from .access import UrlGuard
 from .declarations import declaration, fields
+
+# 宿主在动作调用 _meta 里附观察候选事实用的扩展键（与宿主 plugin_observation.OBSERVATION_META_EXTENSION 一致）
+OBSERVATION_META_EXTENSION = "my-agent/observation"
 from .errors import BrowserError
 from .launcher import find_browser
 from .session import BrowserSession
@@ -90,7 +93,7 @@ class BrowserServer:
                 raise BrowserError("MISSING_CONTEXT", "缺少宿主逐次工作区读取上下文。")
             context = WorkspaceReadContext.from_payload(metadata[WORKSPACE_READ_EXTENSION])
             guard = UrlGuard(context, self.settings["allowed_hosts"])
-            return self.result(self.session.run(name, arguments, guard), False)
+            return self.result(self.session.run(name, arguments, guard, observation=self._observation(name, arguments, metadata)), False)
         except BrowserError as exc:
             return self.result({"code": exc.code, "message": str(exc), **exc.extra}, True)
         except OSError:
@@ -98,11 +101,29 @@ class BrowserServer:
         except (ValueError, TypeError, KeyError):
             return self.result({"code": "INVALID_CONTEXT", "message": "宿主工作区上下文或浏览器响应无效。"}, True)
 
-    # LLM: 结果使用原 MCP 文本结构，正文为结构化 JSON（保留中文便于阅读）；不伪装自定义 TUI 面板。
+    # LLM: 只有声明了 observation_ref 的工具、且模型填了该参数时才要求 _meta 带宿主观察上下文；候选事实只从 _meta 取，
+    #   arguments 里的 candidate_id 本身不解析（宿主已复核并换成了 key 与代次）。没填参数返回 None，沿 selector 路径。
+    # 函数用途: 取本次动作调用的观察候选上下文。
+    def _observation(self, name: str, arguments: dict, metadata: dict) -> dict | None:
+        ref = self.tools[name].get("observation_ref")
+        if not isinstance(ref, dict) or not arguments.get(ref.get("param")):
+            return None
+        observation = metadata.get(OBSERVATION_META_EXTENSION)
+        if not isinstance(observation, dict):
+            raise BrowserError("MISSING_CONTEXT", "候选调用缺少宿主观察上下文，请直接用 selector 或重新 read。")
+        return observation
+
+    # LLM: 结果使用原 MCP 文本结构，正文为结构化 JSON（保留中文便于阅读）；观察候选与候选错误只进 structuredContent、不进正文，
+    #   宿主会把它改写成模型可见的有界投影；不伪装自定义 TUI 面板。
     # 函数用途: 编码正常或错误的工具返回值。
     @staticmethod
     def result(value: dict, error: bool) -> dict:
-        return {"content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False)}], "isError": error}
+        structured = {key: value[key] for key in ("my_agent_observation", "my_agent_observation_error") if key in value}
+        body = {key: item for key, item in value.items() if key not in structured}
+        encoded = {"content": [{"type": "text", "text": json.dumps(body, ensure_ascii=False)}], "isError": error}
+        if structured:
+            encoded["structuredContent"] = structured
+        return encoded
 
     # LLM: 这里只生成协议响应，不输出调试堆栈或输入正文。
     # 函数用途: 创建标准 JSON-RPC 错误。

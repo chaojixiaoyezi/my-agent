@@ -129,6 +129,64 @@ def test_manifest_roundtrip_and_schema_projection_do_not_alias():
     assert not manifest.settings_schema["properties"]
 
 
+# LLM: v5 观察声明夹具：只读 read 带 observation，动作 click 带 observation_ref（param 是可选 string）；修改协议时同步往返测试。
+# 函数用途: 在最小包描述上加一对配好的观察/动作工具，得到合法的 v5 描述。
+def _v5_manifest(wheel: bytes) -> dict:
+    manifest = _manifest(wheel)
+    manifest["schema_version"] = "plugin_package.v5"
+    manifest["panels"], manifest["skills"], manifest["host_api"] = [], [], []
+    manifest["tools"][0]["observation"] = {"target_kind": "page", "max_candidates": 50}
+    manifest["tools"].append({
+        "name": "click", "description": "点击候选", "requested_effect": "mutating",
+        "observation_ref": {"target_kind": "page", "param": "candidate_id"},
+        "input_schema": {"type": "object", "properties": {"selector": {"type": "string"}, "candidate_id": {"type": "string"}},
+                         "required": ["selector"]},
+    })
+    return manifest
+
+
+def test_v5_observation_declarations_roundtrip_and_pair_by_target_kind():
+    manifest = PluginManifest.from_payload(json.loads(json.dumps(_v5_manifest(_wheel()))))
+    assert manifest.observes and manifest.tools[0].observation.target_kind == "page"
+    assert manifest.tools[0].observation.max_candidates == 50 and manifest.tools[1].observation_ref.param == "candidate_id"
+    projection = manifest.to_payload()
+    assert projection["schema_version"] == "plugin_package.v5"
+    assert projection["tools"][0]["observation"] == {"target_kind": "page", "max_candidates": 50}
+    assert projection["tools"][1]["observation_ref"] == {"target_kind": "page", "param": "candidate_id"}
+    assert PluginManifest.from_payload(projection) == manifest
+    plain = PluginManifest.from_payload(json.loads(json.dumps(_manifest(_wheel()))))
+    assert not plain.observes and "observation" not in plain.to_payload()["tools"][0], "v1 包描述字节不变"
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda row: row["tools"][0].update(requested_effect="mutating"),                       # 观察只能挂只读工具
+        lambda row: row["tools"][1].update(observation={"target_kind": "page"}),               # 观察与动作互斥
+        lambda row: row["tools"][1]["observation_ref"].update(param="missing"),               # 参数不在 schema 里
+        lambda row: row["tools"][1]["input_schema"]["required"].append("candidate_id"),       # 参数不能是必填
+        lambda row: row["tools"][1]["input_schema"]["properties"].update(candidate_id={"type": "integer"}),
+        lambda row: row["tools"][1]["observation_ref"].update(target_kind="tab"),             # 引用没有配对的观察
+        lambda row: row["tools"][0]["observation"].update(target_kind="Page"),                # 目标类型形状
+        lambda row: row["tools"][0]["observation"].update(max_candidates=65),                 # 超宿主上限
+        lambda row: row["tools"][0]["observation"].update(extra=1),                           # 未知键
+        lambda row: row["tools"][1]["observation_ref"].update(param="__operation_id"),       # 不能冒充宿主注入参数
+        lambda row: row["tools"][1].pop("observation_ref"),                                   # 观察没有任何动作引用
+        lambda row: (row["tools"][0].pop("observation"), row["tools"][1].pop("observation_ref")),  # v5 新能力为空
+        lambda row: row.update(schema_version="plugin_package.v4", host_api=["read"]),        # v4 不认识观察字段
+    ],
+)
+def test_invalid_v5_observation_declarations_are_rejected(tmp_path, change):
+    source = tmp_path / "invalid-v5.zip"
+    wheel = _wheel()
+    manifest = json.loads(json.dumps(_v5_manifest(wheel)))
+    change(manifest)
+    source.write_bytes(_bundle(raw_manifest=json.dumps(manifest)))
+    with pytest.raises(PluginPackageError) as caught:
+        read_plugin_package(source)
+    assert caught.value.reason == "invalid_manifest"
+
+
 @pytest.mark.parametrize(
     "change",
     [

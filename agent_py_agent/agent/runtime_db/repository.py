@@ -2871,6 +2871,22 @@ class RuntimeRepository(
                 "SELECT * FROM runtime_events WHERE event_id = ?", (event_id,)
             ).fetchone()
 
+    # LLM: 只读同一 agent_run 下的事件（跨 attempt 共享），按 seq 升序；event_type 为空时不过滤。供插件观察新鲜度等按运行序判定的读者使用。
+    # 函数用途: 列出一个权威 AgentRun 的事件流。
+    def events_for_agent_run(self, agent_run_id: str, *, event_type: str = "", limit: int = 2000) -> list[dict[str, Any]]:
+        with self._runtime_connection() as conn:
+            if event_type:
+                rows = conn.execute(
+                    "SELECT * FROM runtime_events WHERE agent_run_id = ? AND event_type = ? ORDER BY seq ASC LIMIT ?",
+                    (agent_run_id, event_type, int(limit)),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM runtime_events WHERE agent_run_id = ? ORDER BY seq ASC LIMIT ?",
+                    (agent_run_id, int(limit)),
+                ).fetchall()
+        return [conn_row_to_event(row) for row in rows]
+
     def events_for_attempt(self, attempt_id: str, *, limit: int = 500) -> list[dict[str, Any]]:
         with self._runtime_connection() as conn:
             rows = conn.execute(

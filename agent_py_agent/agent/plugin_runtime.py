@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from dataclasses import asdict, replace
 
@@ -12,7 +13,16 @@ from .common.strict_json import load_strict_json
 from .plugin_activation_ref import PluginActivationRef
 from .plugin_host_api import HOST_API_READ, issue_host_api_env
 from .plugin_installation import PluginInstallation
-from .plugin_manifest import canonical_plugin_settings
+from .plugin_manifest import PluginToolDeclaration, canonical_plugin_settings
+from .plugin_observation import (
+    OBSERVATION_KEY,
+    OBSERVATION_META_EXTENSION,
+    ObservationHostContext,
+    ObservationRejected,
+    observation_meta,
+    parse_observation,
+    resolve_action_candidate,
+)
 from .tooling.input_schema import canonicalize_tool_input_schema
 from .tooling.mcp_client import MCPError, MCPServerConfig, MCPStdioClient, sanitize_credentials
 from .tooling.mcp_registration import MCPProxyTool, build_proxy_tool, sanitize_name_component
@@ -71,7 +81,7 @@ class PluginProxyTool(MCPProxyTool):
     #   MCP_CONNECTION_CLOSED（映射为可重试的 TOOL_EXECUTION_FAILED），结果码随清理快慢摆动。这里在发送前先鲜活复核原激活，
     #   撤销一律报 TOOL_UNAVAILABLE、effect_outcome=not_started，与审批前/批准后复核同一事实源；
     #   这是生命周期第 6 条"旧快照在执行门检查撤销"的落点。不启动进程、不追随新代次。
-    # 函数用途: 停用后的插件调用固定报不可用且未执行，其余沿原 MCP 代理执行链。
+    # 函数用途: 停用后的插件调用固定报不可用且未执行；动作工具填了候选 ID 先复核新鲜度再发送；观察工具成功后校验并铸 ID。
     def _execute(self, params: dict[str, object], context: ToolInvocationContext | None) -> ToolHandlerOutcome:
         if self._activation_revoked():
             return ToolHandlerOutcome(
@@ -79,7 +89,83 @@ class PluginProxyTool(MCPProxyTool):
                 error_code="TOOL_UNAVAILABLE", reported_error_code="PLUGIN_ACTIVATION_UNAVAILABLE",
                 effect_outcome="not_started",
             )
-        return super()._execute(params, context)
+        declared = self._declared_tool()
+        extra_meta = None
+        if declared is not None and declared.observation_ref is not None:
+            try:
+                extra_meta = self._observation_action_meta(params, declared)
+            except ObservationRejected as exc:
+                return ToolHandlerOutcome(
+                    self.model_spec.name, False,
+                    json.dumps({"error": "候选已过期或不存在，请先重新观察再操作", "code": exc.code}, ensure_ascii=False),
+                    error_code="TOOL_INVALID_ARGUMENTS", reported_error_code=exc.code, effect_outcome="not_started",
+                    result_envelope={"observation_rejected": exc.code},
+                )
+        outcome = self._execute_with_meta(params, context, extra_meta)
+        if declared is not None and declared.observation is not None and outcome.ok:
+            outcome = self._attach_observation(outcome, params, context, declared)
+        return outcome
+
+    # LLM: 只在模型填了 observation_ref.param 时复核：候选按当前 run/task 的权威事件流解析，过期/未知抛 ObservationRejected
+    #   （调用方转成 TOOL_INVALID_ARGUMENTS、not_started，不发送）；没填参数保持现状（如按选择器执行）。复核通过才把插件自己的
+    #   key 与目标代次放进 _meta，arguments 不能冒充。
+    # 函数用途: 生成动作调用要附给插件的观察 _meta，或判定候选不可用。
+    def _observation_action_meta(self, params: dict[str, object], declared: PluginToolDeclaration) -> dict[str, object] | None:
+        candidate_id = params.get(declared.observation_ref.param)
+        if not isinstance(candidate_id, str) or not candidate_id.strip():
+            return None
+        scope = params.get("__run_scope") if isinstance(params.get("__run_scope"), dict) else {}
+        observation, candidate = resolve_action_candidate(
+            getattr(self.client, "runtime_repo", None), run_id=str(scope.get("run_id") or ""),
+            task_id=str(scope.get("task_id") or ""), candidate_id=candidate_id.strip(), action_tool=self.model_spec.name,
+        )
+        return {OBSERVATION_META_EXTENSION: observation_meta(observation, candidate)}
+
+    # LLM: 只处理成功结果里 structuredContent.my_agent_observation；形状合规则铸 ID、把归档权威写进 result_envelope.observation，
+    #   模型可见投影只留 candidate_id/role/label/actions；不合规整份丢弃、模型看不到候选，信封记 observation_rejected 原因码。
+    #   身份全部取宿主：run/task 来自 __run_scope、operation 来自 __operation_id、激活来自固定 client，不取插件自报。
+    # 函数用途: 把插件的观察载荷变成宿主的结构化观察事实。
+    def _attach_observation(self, outcome: ToolHandlerOutcome, params: dict[str, object],
+                            context: ToolInvocationContext | None, declared: PluginToolDeclaration) -> ToolHandlerOutcome:
+        try:
+            payload = json.loads(outcome.output)
+        except (TypeError, ValueError):
+            return outcome
+        structured = payload.get("structuredContent") if isinstance(payload, dict) else None
+        if not isinstance(structured, dict) or OBSERVATION_KEY not in structured:
+            return outcome
+        envelope = dict(outcome.result_envelope)
+        try:
+            record = parse_observation(structured[OBSERVATION_KEY], self._observation_context(params, context, declared))
+        except ObservationRejected as exc:
+            structured.pop(OBSERVATION_KEY, None)
+            envelope["observation_rejected"] = exc.code
+        else:
+            structured[OBSERVATION_KEY] = record.model_projection()
+            envelope["observation"] = record.to_envelope()
+        return replace(outcome, output=json.dumps(payload, ensure_ascii=False), result_envelope=envelope)
+
+    # 函数用途: 汇集铸 ID 所需的宿主身份与本包同类动作工具的注册名映射。
+    def _observation_context(self, params: dict[str, object], context: ToolInvocationContext | None,
+                             declared: PluginToolDeclaration) -> ObservationHostContext:
+        scope = params.get("__run_scope") if isinstance(params.get("__run_scope"), dict) else {}
+        snapshot = getattr(context, "runtime_snapshot", None)
+        manifest = self.client.installation.manifest
+        kind = declared.observation.target_kind
+        return ObservationHostContext(
+            run_id=str(scope.get("run_id") or getattr(snapshot, "run_id", "") or ""),
+            task_id=str(scope.get("task_id") or ""), operation_id=str(params.get("__operation_id") or ""),
+            activation_id=self.client.activation_ref.scope.activation_id, plugin_id=manifest.plugin_id,
+            tool_name=self.model_spec.name, target_kind=kind, max_candidates=declared.observation.max_candidates,
+            action_tools={tool.name: plugin_tool_name(manifest.plugin_id, tool.name) for tool in manifest.tools
+                          if tool.observation_ref is not None and tool.observation_ref.target_kind == kind},
+        )
+
+    # LLM: 声明来自固定 client 的已安装包描述；找不到（测试夹具的普通客户端）返回 None，此时不做任何观察处理。
+    # 函数用途: 取本代理对应的工具声明。
+    def _declared_tool(self) -> PluginToolDeclaration | None:
+        manifest = getattr(getattr(self.client, "installation", None), "manifest", None)
+        return next((tool for tool in getattr(manifest, "tools", ()) if tool.name == self.remote_tool), None)
 
     # LLM: 只看代理固定 transport 的声明；普通 arguments 不能伪造元数据，缺可信上下文须在发送前失败。
     #   写入上下文只给协商了写入扩展、且本工具声明 mutating/dangerous 的调用；只读工具永远拿不到写权限。
@@ -131,8 +217,9 @@ class PluginMCPClient(MCPStdioClient):
     # LLM: 构造只读规范环境和设置；私有值只放子进程环境，包声明的 effect 不降低原危险工具门。
 #   同时 no-follow 创建插件数据目录（有副作用：可能新建目录），经 MY_AGENT_PLUGIN_DATA_DIR 传给子进程；
 #   声明了 host_api=["read"] 的包另获宿主只读 API 地址与令牌（有副作用：登记令牌）。
-    # 函数用途: 将已准备 Python 环境接到原 MCP 客户端，不在构造时启动进程。
-    def __init__(self, owner, installation: PluginInstallation):
+    # 函数用途: 将已准备 Python 环境接到原 MCP 客户端，不在构造时启动进程；runtime_repo 是 owner 权威库，供观察新鲜度复核只读。
+    def __init__(self, owner, installation: PluginInstallation, *, runtime_repo: object | None = None):
+        self.runtime_repo = runtime_repo
         activation = installation.activation
         if activation is None or activation.phase not in {"preparing", "active"}:
             raise ValueError("插件没有可启动的固定激活")
@@ -197,9 +284,11 @@ class PluginMCPClient(MCPStdioClient):
                 raise MCPError("插件工具说明或输入结构与安装声明不一致", code="MCP_PROTOCOL_ERROR")
             proxy = build_proxy_tool(self, self.config.name, info, transport=transport, catalog_category="plugins")
             name = plugin_tool_name(self.installation.manifest.plugin_id, info.name)
+            # 观察 ID 与新鲜度复核需要宿主的 run/task/operation 身份：只经声明的宿主参数注入，模型参数不能冒充，发送前会被过滤
             policy = replace(proxy.runtime_policy, resource_scopes=ResourceScopePolicy(
                 "declared", static_scopes=(f"logical:plugin:{self.activation_ref.scope.activation_id}:{info.name}",),
-            ))
+            ), input_policy=replace(proxy.runtime_policy.input_policy, internal_parameters=tuple(dict.fromkeys(
+                (*proxy.runtime_policy.input_policy.internal_parameters, "__operation_id", "__run_scope")))))
             proxies.append(PluginProxyTool(self, info.name, self._plugin_model_spec(proxy.model_spec, name, info),
                                            policy, transport=transport))
         if len({tool.model_spec.name for tool in proxies}) != len(proxies):

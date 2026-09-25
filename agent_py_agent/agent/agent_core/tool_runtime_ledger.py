@@ -17,6 +17,7 @@ from ..conversation.authority import (
 )
 from ..local_storage import RuntimeGateLedgerRecord
 from ..path_access_policy import inheritable_declared_work_roots
+from ..plugin_observation import observation_event_payload_from_envelope
 from ..tooling.runtime_contracts import tool_arguments_hash
 from .run_task_workspace_writer import current_run_tool_output_archive_root
 from .tool_guard.call_guardrail import tool_guardrail_policy, tool_guardrail_records
@@ -63,6 +64,13 @@ def _append_runtime_event(agent: object, archive_record: dict[str, object]) -> N
         "status": _ledger_status(archive_record, runtime_gate),
         "idempotency_key": _text(archive_record.get("idempotency_key")),
     }
+    # 插件观察候选的查找投影随同一事件落库：新鲜度按事件 seq 判定，归档信封仍是候选内容的唯一权威
+    observation = observation_event_payload_from_envelope(
+        _dict_value(archive_record.get("tool_result_envelope")).get("observation"),
+        task_id=_text(archive_record.get("task_id")), operation_id=operation_id,
+    )
+    if observation is not None:
+        payload["observation"] = observation
     _best_effort_control_plane_write(
         lambda: repo.append_event(
             event_type="tool_completed",

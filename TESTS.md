@@ -2,6 +2,12 @@
 
 child不展示历史正文时的读取回归先复现1 failed/1 passed，修复后test_compact_retained_history、test_subagent_compact_recovery、test_gateway_child_compact_scope_application三文件31 passed（8.48秒）。三宿主seed仓外基线仅验证测量和完整性，不算内存目标通过；细节见容量审计的宿主生命周期基线。
 
+## 插件观察候选结构（第 15 项 P5-C 前置，2026-09-24 晚）
+
+- **改动**：manifest v5（`observation` / `observation_ref`，安装校验与双向配对，构建脚本自动选 v5）；新模块 `agent/plugin_observation.py`（整份接受/拒绝、宿主铸 ID、模型投影、按 runtime_events 序判定新鲜度、动作候选复核）；`PluginProxyTool` 结果路径改写与发送前复核（宿主参数 `__operation_id`/`__run_scope`，`_meta["my-agent/observation"]`）；`MCPProxyTool._execute_with_meta` 让子类按本次参数附 _meta 而不缓存到共享实例；`tool_completed` 事件载荷附观察投影；`runtime_db.events_for_agent_run`；归档白名单加 `observation`/`observation_rejected`；`ToolRegistry` 构造参数 `plugin_runtime_repo`；browser-lite 输出观察候选并按候选执行。设计与偏差见 `docs/design/PLUGIN_OBSERVATION_CANDIDATES.md` 第 6 节。
+- **新测试**：`test_plugin_observation.py` 19 项、`test_plugin_proxy_observation.py` 5 项；`test_plugin_package.py` +14 项（v5 往返、13 种非法声明）；`test_browser_lite_package.py` 描述断言 + 1 项真实浏览器候选流（本机无 Chrome 时跳过）。
+- **真实验收**：待决策线接 `action_candidate` 后在隔离 owner 用 browser-lite 做 off/observe/apply 对照；宿主侧先以合同测试为准。
+
 ## Gateway 停止时结清在途模型调用（用户决定第 4 项，2026-09-24）
 - **背景**：同伴观察到 Gateway 停止时一条后台非流式 M2.7 请求（约 26.6KB，Memory Curator）被切断，收尾 `drain_complete=true` 却没有任何结算事实。
 - **改动**：`contracts/model_call_ledger.py` 新增 `ModelCallLedger.fail_open_calls()`（用途分区函数改为公开的 `model_call_purpose`）；`agent_core/model/call_runtime.py` 新增 `settle_open_model_calls_for_shutdown()`（只读已有账本，不新建）；`cli/gateway_process.py` 收尾拆出 `_join_gateway_loops()`，排空后由 `_settle_interrupted_model_calls()` 写 `gateway_model_calls_interrupted` 事件并在收尾载荷加 `interrupted_model_calls`。

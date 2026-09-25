@@ -21,7 +21,14 @@ PLUGIN_PACKAGE_SCHEMA_V2 = "plugin_package.v2"
 PLUGIN_PACKAGE_SCHEMA_V3 = "plugin_package.v3"
 # v4 在 v3 基础上增加宿主 API 权限名单（目前只有 "read"：只读查询宿主运行状态）；v1–v3 包的读写字节保持不变
 PLUGIN_PACKAGE_SCHEMA_V4 = "plugin_package.v4"
+# v5 在 v4 基础上允许工具项多两个可选字段：只读工具的 observation（结果带候选观察）与动作工具的 observation_ref
+# （接受同类观察的候选 ID）；面板/Skill/宿主 API 可为空。v1–v4 包的读写字节保持不变
+PLUGIN_PACKAGE_SCHEMA_V5 = "plugin_package.v5"
 PLUGIN_HOST_API_PERMISSIONS = ("read",)
+# 观察候选数量的宿主硬上限；manifest 声明的 max_candidates 不能超过它
+MAX_OBSERVATION_CANDIDATES = 64
+_TARGET_KIND = re.compile(r"[a-z][a-z0-9_-]{0,31}\Z")
+_OBSERVATION_PARAM = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,63}\Z")
 _SKILL_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
 MAX_PLUGIN_SKILLS = 8
 PLUGIN_SETTINGS_BYTES = 64 * 1024
@@ -57,7 +64,41 @@ class PluginWheel:
             raise ValueError("wheel 摘要无效")
 
 
+# LLM: 观察声明只允许出现在 read_only 工具上（观察本身不能有副作用）；target_kind 是开放字符串，只校验形状，用于把观察和
+#   动作配对；max_candidates 由宿主再夹一次上限。声明不授予任何权限，也不改变结果的信任级别。
+# 类用途: 声明某只读工具的成功结果会带 my_agent_observation 候选载荷。
+@dataclass(frozen=True)
+class PluginToolObservation:
+    target_kind: str
+    max_candidates: int = MAX_OBSERVATION_CANDIDATES
+
+    # 函数用途: 拒绝形状不合规的目标类型与越界的候选上限。
+    def __post_init__(self) -> None:
+        if not isinstance(self.target_kind, str) or not _TARGET_KIND.fullmatch(self.target_kind):
+            raise ValueError("观察目标类型无效")
+        if type(self.max_candidates) is not int or not 1 <= self.max_candidates <= MAX_OBSERVATION_CANDIDATES:
+            raise ValueError("观察候选上限无效")
+
+
+# LLM: param 指向动作工具输入 schema 里一个可选的 string 参数，名字由插件自定，宿主只读这条映射；不能与 _meta 或宿主注入的
+#   "__" 参数同名（形状正则已排除）。同一 manifest 里必须有同 target_kind 的观察工具与之配对。
+# 类用途: 声明某动作工具可以接受同类观察的候选 ID。
+@dataclass(frozen=True)
+class PluginToolObservationRef:
+    target_kind: str
+    param: str
+
+    # 函数用途: 拒绝形状不合规的目标类型与参数名。
+    def __post_init__(self) -> None:
+        if not isinstance(self.target_kind, str) or not _TARGET_KIND.fullmatch(self.target_kind):
+            raise ValueError("观察目标类型无效")
+        if not isinstance(self.param, str) or not _OBSERVATION_PARAM.fullmatch(self.param):
+            raise ValueError("候选参数名无效")
+
+
 # LLM: schema 用规范 JSON 冻结，读取时返回独立副本；requested_effect 不是宿主授予的权限或沙箱保证。
+#   observation / observation_ref 是 v5 的可选声明：前者只能挂在 read_only 工具上，后者要求 param 是输入 schema 里可选的
+#   string 参数；一个工具不能同时观察与动作。
 # 类用途: 保存一个工具的公开描述，避免安装后被可变字典悄悄改写。
 @dataclass(frozen=True)
 class PluginToolDeclaration:
@@ -65,9 +106,11 @@ class PluginToolDeclaration:
     description: str
     input_schema_json: str
     requested_effect: str
+    observation: PluginToolObservation | None = None
+    observation_ref: PluginToolObservationRef | None = None
 
     # LLM: 所有 schema 通过原工具合同，不建立包专属类型系统；效果只接受现行执行协议值。
-    # 函数用途: 验证工具身份、用途及输入描述，并固定规范形式。
+    # 函数用途: 验证工具身份、用途、输入描述与观察声明，并固定规范形式。
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not _TOOL_NAME.fullmatch(self.name):
             raise ValueError("工具名称无效")
@@ -76,12 +119,33 @@ class PluginToolDeclaration:
             raise ValueError("工具效果分类无效")
         canonical = canonicalize_tool_input_schema(json.loads(self.input_schema_json))
         object.__setattr__(self, "input_schema_json", _json(canonical))
+        _validate_observation_declaration(self, canonical)
 
     # LLM: 修改返回值不能改变包快照，后续 ModelSpec 仍应使用原 schema 校验器。
     # 函数用途: 为目录或工具适配器提供独立的输入 schema。
     @property
     def input_schema(self) -> dict:
         return json.loads(self.input_schema_json)
+
+
+# LLM: 观察只能挂只读工具；观察引用要求 param 在 schema.properties 里、type 为 string、不在 required 里；两者互斥。
+# 函数用途: 校验一个工具声明里的观察/观察引用与其输入 schema 是否一致。
+def _validate_observation_declaration(tool: PluginToolDeclaration, canonical: object) -> None:
+    if tool.observation is not None and tool.observation_ref is not None:
+        raise ValueError("观察工具不能同时是动作工具")
+    if tool.observation is not None and (not isinstance(tool.observation, PluginToolObservation)
+                                         or tool.requested_effect != "read_only"):
+        raise ValueError("只有只读工具可以声明观察")
+    if tool.observation_ref is None:
+        return
+    if not isinstance(tool.observation_ref, PluginToolObservationRef):
+        raise ValueError("观察引用无效")
+    properties = canonical.get("properties") if isinstance(canonical, dict) else None
+    required = canonical.get("required") if isinstance(canonical, dict) else None
+    spec = properties.get(tool.observation_ref.param) if isinstance(properties, dict) else None
+    if (not isinstance(spec, dict) or spec.get("type") != "string"
+            or (isinstance(required, list) and tool.observation_ref.param in required)):
+        raise ValueError("候选参数必须是输入 schema 里可选的 string 参数")
 
 
 # LLM: 这是包的不可变内容，不保存安装状态、owner 或激活代次；先校验声明再允许安装服务持久保存。
@@ -138,6 +202,7 @@ class PluginManifest:
         panel_ids = {panel.id for panel in self.panels}
         if len(tool_names) != len(self.tools) or not (tool_names or panel_ids):
             raise ValueError("工具重名，或既没有工具也没有面板")
+        _validate_observation_pairs(self.tools)
         for action in self.actions:
             targets = tool_names if action.kind == "tool" else panel_ids if action.kind == "display" else set()
             if action.target not in targets or action.available is not True:
@@ -164,6 +229,12 @@ class PluginManifest:
     def settings_schema(self) -> dict:
         return json.loads(self.settings_schema_json)
 
+    # LLM: 只读 tools 的结构化声明，不看名字猜；供代理结果路径与安装校验共用。
+    # 函数用途: 判断本包是否声明了任何观察或观察引用（决定协议版本 v5）。
+    @property
+    def observes(self) -> bool:
+        return any(tool.observation is not None or tool.observation_ref is not None for tool in self.tools)
+
     # LLM: 输出只包含协议声明，不含私有运行字段；JSON 形态由命令 dataclass 和原 schema 投影产生。
     # 函数用途: 生成可复读的静态包描述。
     def to_payload(self) -> dict:
@@ -185,6 +256,8 @@ class PluginManifest:
                             "description": tool.description,
                             "input_schema": tool.input_schema,
                             "requested_effect": tool.requested_effect,
+                            **({"observation": asdict(tool.observation)} if tool.observation is not None else {}),
+                            **({"observation_ref": asdict(tool.observation_ref)} if tool.observation_ref is not None else {}),
                         }
                         for tool in self.tools
                     ],
@@ -196,6 +269,9 @@ class PluginManifest:
                     **({"panels": [panel.to_payload() for panel in self.panels], "skills": list(self.skills),
                         "host_api": list(self.host_api), "schema_version": PLUGIN_PACKAGE_SCHEMA_V4}
                        if self.host_api else {}),
+                    **({"panels": [panel.to_payload() for panel in self.panels], "skills": list(self.skills),
+                        "host_api": list(self.host_api), "schema_version": PLUGIN_PACKAGE_SCHEMA_V5}
+                       if self.observes else {}),
                 }
             )
         )
@@ -217,15 +293,21 @@ class PluginManifest:
             )
             tools = []
             for item in declaration_list(row["tools"]):
-                tool = _fields(item, "name description input_schema requested_effect")
+                tool = _tool_fields(item, version)
                 tools.append(
                     PluginToolDeclaration(
                         tool["name"],
                         tool["description"],
                         _json(tool["input_schema"]),
                         tool["requested_effect"],
+                        observation=_observation_from_payload(tool.get("observation")),
+                        observation_ref=_observation_ref_from_payload(tool.get("observation_ref")),
                     )
                 )
+            if version == PLUGIN_PACKAGE_SCHEMA_V5 and not any(
+                tool.observation is not None or tool.observation_ref is not None for tool in tools
+            ):
+                raise ValueError("包协议版本声明的新能力为空")
             return cls(
                 plugin_id=row["plugin_id"],
                 version=row["version"],
@@ -254,7 +336,48 @@ _SCHEMA_FIELDS = {
     PLUGIN_PACKAGE_SCHEMA_V2: " panels",
     PLUGIN_PACKAGE_SCHEMA_V3: " panels skills",
     PLUGIN_PACKAGE_SCHEMA_V4: " panels skills host_api",
+    PLUGIN_PACKAGE_SCHEMA_V5: " panels skills host_api",
 }
+_TOOL_REQUIRED_FIELDS = frozenset({"name", "description", "input_schema", "requested_effect"})
+_TOOL_V5_OPTIONAL_FIELDS = frozenset({"observation", "observation_ref"})
+
+
+# LLM: 工具项字段严格：v1–v4 只允许四个基础字段；v5 另允许两个可选观察字段。未知键不能静默丢弃。
+# 函数用途: 按协议版本检查一个工具声明项的字段集合。
+def _tool_fields(value: object, version: str) -> dict:
+    optional = _TOOL_V5_OPTIONAL_FIELDS if version == PLUGIN_PACKAGE_SCHEMA_V5 else frozenset()
+    if (not isinstance(value, dict) or not set(value) >= _TOOL_REQUIRED_FIELDS
+            or set(value) - _TOOL_REQUIRED_FIELDS - optional):
+        raise ValueError("包描述字段不完整或存在未知字段")
+    return value
+
+
+# 函数用途: 从 JSON 对象恢复观察声明；缺 max_candidates 按宿主上限，未知键拒绝。
+def _observation_from_payload(value: object) -> PluginToolObservation | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict) or not {"target_kind"} <= set(value) or set(value) - {"target_kind", "max_candidates"}:
+        raise ValueError("观察声明字段无效")
+    return PluginToolObservation(value["target_kind"], value.get("max_candidates", MAX_OBSERVATION_CANDIDATES))
+
+
+# 函数用途: 从 JSON 对象恢复观察引用声明；两个字段都必须出现。
+def _observation_ref_from_payload(value: object) -> PluginToolObservationRef | None:
+    if value is None:
+        return None
+    return PluginToolObservationRef(**_fields(value, "target_kind param"))
+
+
+# LLM: 配对是双向的：每个 observation_ref 的目标类型都要有同类观察工具，每个观察目标类型也要至少有一个动作工具引用，
+#   否则候选的 actions 永远无法合规。只读结构化声明，不看名字猜。
+# 函数用途: 校验同一包内观察工具与动作工具按 target_kind 成对出现。
+def _validate_observation_pairs(tools: tuple[PluginToolDeclaration, ...]) -> None:
+    observed = {tool.observation.target_kind for tool in tools if tool.observation is not None}
+    referenced = {tool.observation_ref.target_kind for tool in tools if tool.observation_ref is not None}
+    if referenced - observed:
+        raise ValueError("动作工具引用的观察目标类型没有对应的观察工具")
+    if observed - referenced:
+        raise ValueError("观察目标类型没有任何动作工具引用")
 
 
 # LLM: 只做版本相关的非空约束与集合读取，具体取值校验在 PluginManifest.__post_init__ 统一进行。

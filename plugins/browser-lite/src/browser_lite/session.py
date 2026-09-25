@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import threading
 import time
 from pathlib import Path
@@ -12,7 +13,16 @@ from .access import UrlGuard
 from .cdp import PageConnection
 from .errors import BrowserError
 from .launcher import BrowserProcess, clear_profile, find_browser
-from .page import click_element, fill_element, open_page, read_elements
+from .page import (
+    DEFAULT_READ_SELECTOR,
+    click_candidate,
+    click_element,
+    fill_candidate,
+    fill_element,
+    observation_candidates,
+    open_page,
+    read_elements,
+)
 
 _FATAL = {"PAGE_CRASHED", "BROWSER_DISCONNECTED"}
 
@@ -30,24 +40,44 @@ class BrowserSession:
         self.browser: BrowserProcess | None = None
         self.page: PageConnection | None = None
         self.last_used = time.monotonic()
+        # 页面代次：open 与点击后导航都换新代次；观察候选只在铸出它的代次内有效。observed 记该代次里每次 read 用的选择器与总数
+        self.generation = 0
+        self.observed: dict[str, dict] = {}
         self._stopped = threading.Event()
         threading.Thread(target=self._idle_loop, name="browser-lite-idle", daemon=True).start()
 
     # LLM: open 会按需启动浏览器；其它动作要求已有页面。致命错误（崩溃、断连）后关闭浏览器再抛出。
+    #   observation 是宿主复核过后附在 _meta 里的候选事实（key + 目标代次）；给了它就按候选执行，否则按 selector；两者都没有报参数错误。
+    #   read 的结果附本代次的观察候选；open 与点击后导航都推进代次，旧候选随之失效。
     # 函数用途: 在锁内执行一个页面动作。
-    def run(self, name: str, arguments: dict, guard: UrlGuard) -> dict:
+    def run(self, name: str, arguments: dict, guard: UrlGuard, observation: dict | None = None) -> dict:
         with self.lock:
             self.last_used = time.monotonic()
             try:
                 page = self._ensure_page() if name == "open" else self._require_page()
                 page.guard = guard.reason
                 if name == "open":
-                    return {**open_page(page, guard, arguments["url"]), "browser_pid": self.browser.pid}
+                    result = open_page(page, guard, arguments["url"])
+                    self._advance_generation()
+                    return {**result, "browser_pid": self.browser.pid}
                 if name == "read":
-                    return read_elements(page, guard, arguments.get("selector"))
-                if name == "click":
-                    return click_element(page, guard, arguments["selector"])
-                return fill_element(page, guard, arguments["selector"], arguments["value"])
+                    return self._read_with_observation(page, guard, arguments.get("selector"))
+                if observation is not None:
+                    selector, index, expected = self._resolve_candidate(observation)
+                    if name == "click":
+                        result = click_candidate(page, guard, selector, index, expected)
+                    else:
+                        result = fill_candidate(page, guard, selector, index, expected, arguments["value"])
+                else:
+                    if not arguments.get("selector"):
+                        raise BrowserError("INVALID_ARGUMENTS", "请提供 selector，或填 read 结果里的 candidate_id。")
+                    if name == "click":
+                        result = click_element(page, guard, arguments["selector"])
+                    else:
+                        result = fill_element(page, guard, arguments["selector"], arguments["value"])
+                if result.get("navigated"):
+                    self._advance_generation()
+                return result
             except BrowserError as exc:
                 if exc.code in _FATAL:
                     self._shutdown()
@@ -56,6 +86,43 @@ class BrowserSession:
                 if self.page is not None:
                     self.page.guard = None
                 self.last_used = time.monotonic()
+
+    # LLM: 只读；观察载荷只由结构化元素字段生成，目标引用固定为 "page"（本插件只有一个页面），代次是本会话的页面代次。
+    #   没有元素时不附观察（宿主要求 1 个以上候选）。同代次内每次 read 的选择器与总数记在 observed，供候选解析。
+    # 函数用途: 读取元素并附上本代次的观察候选。
+    def _read_with_observation(self, page, guard: UrlGuard, selector: str | None) -> dict:
+        result = read_elements(page, guard, selector)
+        selector_text = selector or DEFAULT_READ_SELECTOR
+        selector_hash = hashlib.sha256(selector_text.encode("utf-8")).hexdigest()[:8]
+        self.observed[selector_hash] = {"selector": selector_text, "count": int(result.get("count") or 0)}
+        candidates = observation_candidates(result.get("items") or [], selector_hash)
+        if candidates:
+            result["my_agent_observation"] = {"schema": "plugin_observation.v1",
+                                              "target": {"ref": "page", "generation": str(self.generation)},
+                                              "candidates": candidates}
+        return result
+
+    # LLM: 只认宿主 _meta 里的结构化字段：目标必须是本页当前代次（否则 stale），key 必须是本代次某次 read 铸出的“选择器哈希.序号”
+    #   （否则 not_found）；两种拒绝都带 my_agent_observation_error 供宿主与模型区分，且不产生副作用。
+    # 函数用途: 把候选 key 解析回“同一选择器 + 序号 + 观察时总数”。
+    def _resolve_candidate(self, observation: dict) -> tuple[str, int, int]:
+        target = observation.get("target") if isinstance(observation, dict) else None
+        if (not isinstance(target, dict) or target.get("ref") != "page"
+                or str(target.get("generation")) != str(self.generation)):
+            raise BrowserError("OBSERVATION_STALE", "页面已经变化，观察候选已过期，请重新 read 后再操作。",
+                               my_agent_observation_error={"code": "stale"})
+        key = str(observation.get("key") or "")
+        selector_hash, _, index = key.partition(".")
+        entry = self.observed.get(selector_hash)
+        if entry is None or not index.isdigit():
+            raise BrowserError("OBSERVATION_NOT_FOUND", "候选不属于本页当前代次的任何一次 read，请重新 read。",
+                               my_agent_observation_error={"code": "not_found"})
+        return entry["selector"], int(index), int(entry["count"])
+
+    # 函数用途: 页面换代：清空本代次的观察记录。
+    def _advance_generation(self) -> None:
+        self.generation += 1
+        self.observed = {}
 
     # LLM: 有副作用：结束浏览器并清空 profile 缓存（即使浏览器没在运行也清理）。
     # 函数用途: 响应 close 工具。

@@ -50,9 +50,14 @@ python scripts/build_plugin_package.py \
 | --- | --- | --- |
 | `open` | `mutating` | 启动/复用浏览器，导航并等待 load；返回最终 URL、标题、可见文字前 2000 字和浏览器 pid |
 | `read` | `read_only` | 返回匹配元素（最多 50 个）的标签、文字、value、name/id、是否可见；下拉框带选项；不给 selector 时列出 input/textarea/select/button |
-| `click` | `mutating` | 只点击唯一匹配元素（0 个或多个都报错），500ms 内出现导航就等 load，返回新 URL/标题 |
-| `fill` | `mutating` | 只填唯一匹配的 input/textarea/select，触发 input/change 事件；下拉可按选项 value 或文字 |
+| `click` | `mutating` | 只点击唯一匹配元素（0 个或多个都报错），500ms 内出现导航就等 load，返回新 URL/标题；也可只填 `candidate_id` 按上一次 read 的观察候选点击 |
+| `fill` | `mutating` | 只填唯一匹配的 input/textarea/select，触发 input/change 事件；下拉可按选项 value 或文字；也可只填 `candidate_id` |
 | `close` | `mutating` | 关闭浏览器并删除本次 profile 下的缓存（保留 profile 目录本身） |
+
+`read` 的成功结果另带观察候选（`structuredContent.my_agent_observation`，协议 `plugin_observation.v1`）：宿主校验后给每个元素铸一个
+`candidate_id`（`cand-…`）并只把 ID/角色/文字/可用动作展示给模型；模型在 `click`/`fill` 里填 `candidate_id`（可不填 `selector`），宿主按
+调用顺序复核该候选仍是当前观察后，把插件自己的键与页面代次放进 `_meta` 交回插件。页面代次随 `open` 与点击后导航推进：代次不符返回
+`OBSERVATION_STALE`，键解析不到返回 `OBSERVATION_NOT_FOUND`（两者都带 `my_agent_observation_error`，不产生副作用）。
 
 `--url` 不带协议时按当前工作区相对路径处理（如 `form.html`），也可写完整 `file://` 或 `http(s)://` 地址。
 错误都是中文结构化结果（`code` + `message`）：`URL_NOT_ALLOWED`、`BROWSER_UNAVAILABLE`、`BROWSER_START_FAILED`、

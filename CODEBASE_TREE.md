@@ -175,7 +175,8 @@ agent_py_agent/
 |   |-- plugin_command_catalog.py      # 可验证的不可变目录快照、JSON 合同及内容版本
 |   |-- plugin_command_service.py      # 宿主作用域目录与旧版本拒绝，不拥有安装和执行权
 |   |-- plugin_completion.py           # 用公共词法和绑定事实生成只编辑输入的候选
-|   |-- plugin_manifest.py             # 静态包描述、不可变 schema 与默认停用的命令投影；v2 可选声明展示面板
+|   |-- plugin_manifest.py             # 静态包描述、不可变 schema 与默认停用的命令投影；v2 面板、v3 Skill、v4 宿主 API、v5 观察/观察引用声明
+|   |-- plugin_observation.py          # 插件观察候选：载荷整份校验、宿主铸 ID、模型投影、按 runtime_events 序判定新鲜度与候选复核
 |   |-- plugin_display/                # 插件声明式面板与只读订阅（第 9 步）
 |   |   |-- protocol.py                # 面板声明、公开主题与展示描述校验/截断，纯协议无 IO
 |   |   `-- service.py                 # Gateway 进程内展示服务：固定代次连接、单在途、撤销与空闲回收
@@ -191,7 +192,7 @@ agent_py_agent/
 |   |-- plugin_activation_record.py    # 固定环境计划、同代准备/发布/撤销身份及严格读回
 |   |-- plugin_activation_ref.py       # 可信 owner 与原代次引用，跨进程复查唯一安装表
 |   |-- plugin_activation.py           # 原安装版本上的激活迁移、阶段重放与旧代拒绝
-|   |-- plugin_runtime.py              # 固定代次的 MCP 服务、完整目录校验与原工具代理
+|   |-- plugin_runtime.py              # 固定代次的 MCP 服务、完整目录校验与原工具代理；观察结果改写与动作候选发送前复核
 |   |-- plugin_skills.py               # 已启用插件自带 Skill 目录的唯一定位规则（来源 plugin:<ID>，最低优先级）
 |   |-- plugin_host_api.py             # 插件宿主只读 API：令牌发放与复核、/plugin-host/query 主题投影
 |   |-- workspace_read_context.py      # 宿主与插件共用的冻结读取协议及逐项路径检查
@@ -759,7 +760,8 @@ agent_py_agent/
 |   |-- test_conversation_history_paging.py # 中文长行字节边界、完整工作片、坏游标与追加竞态
 |   |-- test_tui_input.py               # slash/path 补全、菜单选择、queue 回取与 bracketed paste 输入回归
 |   |-- test_plugin_command_catalog.py # 声明跨进程往返、版本变化及损坏载荷拒绝
-|   |-- test_plugin_package.py         # 静态包篡改、归档预算、危险成员及不执行代码的合同检查
+|   |-- test_plugin_observation.py     # 插件观察候选宿主合同：形状码、ID 稳定、投影、事件序新鲜度、动作候选复核
+|   |-- test_plugin_package.py         # 静态包篡改、归档预算、危险成员及不执行代码的合同检查；v5 观察声明往返与非法声明
 |   |-- plugin_wheel_fixtures.py       # 合成标准 wheel 与导入陷阱，仅用于开发组件检查
 |   |-- test_plugin_wheels.py          # 固定依赖、extras、平台、摘要与归档预算检查
 |   |-- test_plugin_wheel_layout.py    # 跨 wheel 与引导文件冲突、安装布局和入口脚本检查
@@ -781,6 +783,7 @@ agent_py_agent/
 |   |-- test_tool_call_precheck.py    # 审批前/批准后执行前复核：代理 opt-in、TOOL_UNAVAILABLE 提前拦下、内置工具不复核
 |   |-- test_background_extension_tools.py # 后台续跑白名单按注册表代理类型并入插件/MCP 工具；显式配置/任务名单不并入；真实插件启停跟随
 |   |-- test_process_session_retry_settles_unknown.py # 重试停止按 PID 出生标识结清实例已消失的旧 unknown 记录；首次停止不凭空确认
+|   |-- test_plugin_proxy_observation.py # 插件代理观察路径：结果改写与归档信封、整份拒绝、动作候选 _meta、未知/过期不发送
 |   |-- test_plugin_proxy_revoked_call.py # 插件代理发送前复核激活：撤销固定 TOOL_UNAVAILABLE/not_started 且不发送，激活有效沿原 MCP 链
 |   |-- test_plugin_release.py        # 原 handler 退出、环境删除、结果落账与重送消费边界
 |   |-- test_plugin_removal.py        # 管理卸载、权限、旧请求重放、准备未退与持久成功后包回收

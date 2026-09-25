@@ -580,6 +580,9 @@ def _compact_result_envelope(result: object) -> dict[str, object]:
         "input_sources",
         "input_coercions",
         "input_facts",
+        # 插件观察候选：plugin_observation.parse_observation 已按形状与数量夹过界，归档是它的唯一权威位置
+        "observation",
+        "observation_rejected",
     )
     compact = {key: envelope[key] for key in keys if key in envelope}
     if process := project_process_runtime_facts(envelope.get("process")):
