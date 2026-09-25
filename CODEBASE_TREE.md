@@ -148,7 +148,7 @@ agent_py_agent/
 |   |   |-- tui_markdown.py             # CommonMark/table token 到 Unicode 宽度换行、语法色和 prompt_toolkit fragments
 |   |   |-- tui_paste.py                # 大文本粘贴显示引用与提交时精确展开合同
 |   |   |-- tui_preflight.py            # alternate screen 内真实 Gateway readiness 等待、typed 连接事件与 worker 启动门
-|   |   |-- tui_upgrade_follow.py       # Gateway 换安装后空闲自动重启到同版客户端：结构化 runtime_prefix 比对、空闲判定、exec 收尾
+|   |   |-- tui_upgrade_follow.py       # Gateway 换安装后空闲原地切换到同版客户端：runtime_prefix 比对、空闲判定、UI 线程 execv、会话与 termios 交接
 |   |   |-- tui_permission_queue.py     # 主代理与多个 child 的工具审批统一 FIFO、原 request 回写和展示去重
 |   |   |-- tui_runtime.py              # session/queue/turn/model/tool/Gateway typed rows 到稳定 TuiEvent 的唯一 adapter
 |   |   |-- tui_terminal.py             # OSC 终端标题、活动帧与退出清理
@@ -827,7 +827,7 @@ agent_py_agent/
 |   |-- test_tui_interaction.py         # stash、Ctrl-R、help 与 paste refs 状态机回归
 |   |-- test_tui_paste.py               # 大小 paste 的折叠/展开和占位符安全回归
 |   |-- test_tui_preflight.py           # Gateway readiness 瞬态成功、typed 失败与 worker 只启动一次回归
-|   |-- test_tui_upgrade_follow.py      # TUI 随 Gateway 升级自动重启：目标判定、空闲条件、限频提示、exec 失败回退
+|   |-- test_tui_upgrade_follow.py      # TUI 随 Gateway 升级原地切换：目标判定、空闲事实、UI 线程两段式、交接载荷、终端兜底
 |   |-- test_tui_terminal.py            # OSC 标题、活动动画、去重与清理回归
 |   |-- test_tui_transcript.py          # 详细 transcript、全文搜索、命中导航和 resize 回归
 |   |-- test_tui_reading_position.py    # 原地展开、立即滚动、双向跨页和插话身份回归

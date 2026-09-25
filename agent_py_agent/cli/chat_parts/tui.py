@@ -179,6 +179,10 @@ def _run_tui_loop(ctx: TuiLoopContext) -> int:
         ctx.stop_event.set()
         ctx.refresh_stop.set()
         set_tui_output_sink(None)
+        # 原地切换来的进程要在这里把终端还原成第一代保存的设置（prompt_toolkit 只会还原成它启动时看到的 raw 模式）。
+        from .tui_upgrade_follow import terminal_released
+
+        terminal_released()
         title_controller = getattr(ctx.app, "_my_agent_title_controller", None)
         if title_controller is not None:
             title_controller.clear(ctx.app.output)
@@ -190,48 +194,45 @@ def _run_tui_loop(ctx: TuiLoopContext) -> int:
     return result
 
 
-# LLM: 只在 Gateway 模式启动；空闲判定与退出请求都复用 TUI 既有的结构化引用（运行/排队计数、审批协调器、输入框、导航深度、
-#   stop_event + app.exit），不新造第二套状态。真正 exec 在 cmd_chat 收尾之后。
-# 函数用途: 启动“Gateway 换版后空闲自动重启”的守护线程。
+# LLM: 只在 Gateway 模式启动；空闲判定复用 TUI 既有的结构化引用（运行/排队计数、审批协调器、输入框与焦点、导航深度、
+#   阅读位置），切换本身在 tui_upgrade_follow 里于 UI 事件循环线程原地 exec，不走退出流程，不新造第二套状态。
+# 函数用途: 启动“Gateway 换版后空闲原地切换”的守护线程。
 def _start_upgrade_follow(params: TuiRunParams, refs: TuiInputRefs, app) -> None:
     import sys
 
-    from .tui_runtime import runtime_has_active_permission
-    from .tui_upgrade_follow import (
-        UpgradeFollowContext,
-        start_upgrade_follow_watcher,
-        tui_idle_for_restart,
-    )
+    from .tui_upgrade_follow import HandoffHooks, start_tui_upgrade_follow
 
-    def is_idle() -> bool:
-        with params.state_lock:
-            running, pending = bool(params.is_running_ref[0]), int(params.pending_jobs_ref[0] or 0)
-        input_area = getattr(app, "_my_agent_input_area", None)
-        navigation = refs.agent_navigation
-        depth = navigation.snapshot().depth if navigation is not None else 0
-        return tui_idle_for_restart(
-            is_running=running, pending_jobs=pending,
-            input_text=str(getattr(input_area, "text", "") or ""),
-            permission_active=runtime_has_active_permission(refs.tui_runtime),
-            navigation_depth=depth,
-        )
-
-    def request_exit() -> None:
-        _tui_request_exit(TuiExitRefs(
-            shutting_down_ref=params.shutting_down_ref, state_lock=params.state_lock,
-            is_running_ref=params.is_running_ref, pending_jobs_ref=params.pending_jobs_ref,
-            stop_event=refs.stop_event,
-        ))
-        loop = getattr(app, "loop", None)
-        if loop is not None and getattr(app, "is_running", False):
-            loop.call_soon_threadsafe(app.exit)
-
-    start_upgrade_follow_watcher(UpgradeFollowContext(
+    runtime = refs.tui_runtime
+    start_tui_upgrade_follow(
         state_path=Path(params.paths.state), own_prefix=sys.prefix,
         enabled=bool(getattr(params.agent.config, "tui_follow_gateway_upgrade", True)),
-        stop_event=refs.stop_event, restart_target_ref=params.restart_target_ref, is_idle=is_idle,
-        request_exit=request_exit,
-        set_notice=lambda text, seconds, kind: refs.tui_runtime.set_notice(text, duration_seconds=seconds, notice_kind=kind),
+        hooks=HandoffHooks(
+            app=app, is_idle=lambda: _tui_idle(params, refs, app), stop_event=refs.stop_event,
+            set_notice=lambda text, seconds, kind: runtime.set_notice(text, duration_seconds=seconds, notice_kind=kind),
+            clear_notice=lambda kind: runtime.clear_notice(expected_kind=kind),
+            session_id=params.current_session_id, argv_tail=list(sys.argv[1:]),
+        ),
+    )
+
+
+# LLM: 只读结构化界面事实；任何一项不满足都算“忙”，切换推迟到下一次检查。
+# 函数用途: 判断此刻原地切换会不会打断用户（在打字、看菜单、翻历史、看子代理或有工作在跑）。
+def _tui_idle(params: TuiRunParams, refs: TuiInputRefs, app) -> bool:
+    from .tui_runtime import runtime_has_active_permission
+    from .tui_upgrade_follow import TuiIdleFacts, tui_idle_for_restart
+
+    with params.state_lock:
+        running, pending = bool(params.is_running_ref[0]), int(params.pending_jobs_ref[0] or 0)
+    input_area = getattr(app, "_my_agent_input_area", None)
+    view = getattr(app, "_my_agent_transcript_view", None)
+    layout = getattr(app, "layout", None)
+    navigation = refs.agent_navigation
+    return tui_idle_for_restart(TuiIdleFacts(
+        is_running=running, pending_jobs=pending, input_text=str(getattr(input_area, "text", "") or ""),
+        permission_active=runtime_has_active_permission(refs.tui_runtime),
+        navigation_depth=navigation.snapshot().depth if navigation is not None else 0,
+        following=bool(getattr(view, "follow", True)),
+        input_focused=input_area is None or layout is None or bool(layout.has_focus(input_area)),
     ))
 
 
@@ -351,7 +352,8 @@ def run_tui(*, params: TuiRunParams) -> int:
         model=str(getattr(params.agent.config, "model_name", "") or ""),
         workspace=str(getattr(params.agent, "root", "") or ""),
     )
-    if not params.use_gateway:
+    if not params.use_gateway or params.handoff:
+        # 原地切换来的新进程在首帧之前同步好模型名，画面不闪回“未同步”。
         from .tui_model_menu import refresh_model_selection
 
         refresh_model_selection(params.agent, params.current_session_id, tui_runtime)
@@ -391,7 +393,7 @@ def run_tui(*, params: TuiRunParams) -> int:
         if params.use_gateway:
             _start_upgrade_follow(params, refs, app)
 
-    if params.use_gateway:
+    if params.use_gateway and not params.handoff:
         from .tui_preflight import TuiGatewayPreflight, start_tui_gateway_preflight
 
         # LLM: pre-run 在 loop 建立后才探活；显式 resume 的历史读取复用同一后台阶段，成功之前不得启动 worker。

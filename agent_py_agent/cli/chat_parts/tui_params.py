@@ -155,5 +155,5 @@ class TuiRunParams:
     recovered_before_message_cursor: int = 0
     restore_session_history: bool = False
     local_run_ref: list = dataclasses.field(default_factory=lambda: [None])
-    # 随 Gateway 升级自动重启：watcher 写入要 exec 的同版 my-agent 路径，cmd_chat 收尾后执行。
-    restart_target_ref: list = dataclasses.field(default_factory=lambda: [""])
+    # 原地切换来的新进程：Gateway 已就绪、历史已同步读好，跳过可见的连接动画直接启动 worker。
+    handoff: bool = False

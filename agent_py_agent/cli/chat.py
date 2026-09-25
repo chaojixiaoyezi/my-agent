@@ -289,6 +289,12 @@ def cmd_resume(args) -> int:
 # LLM: 显式恢复只读 canonical history；Gateway TUI 将读取交给既有 preflight，不能在 readiness 前 HTTP 请求或以空历史启动 worker。
 # 函数用途: 启动或恢复聊天，本地直接读历史，薄客户端先显示连接界面；正常关闭后登记统一会话提炼请求。
 def cmd_chat(args) -> int:
+    from .chat_parts.tui_upgrade_follow import adopt_handoff, release_quiet_streams
+
+    # 原地切换来的新进程接着用上一代的会话；普通启动只记下终端设置，供以后切换时带过去。
+    handoff = adopt_handoff()
+    if handoff.child and not str(getattr(args, "session_id", "") or "").strip():
+        args.session_id = handoff.session_id
     use_gateway = bool(args.gateway)
     use_tui = _has_prompt_toolkit() and not bool(getattr(args, "plain", False))
     args._gateway_client_mode = bool(use_gateway and use_tui)
@@ -315,7 +321,9 @@ def cmd_chat(args) -> int:
     recovered_message_cursor = 0
     recovered_before_message_cursor = 0
     resume_session = bool(str(getattr(args, "session_id", "") or "").strip())
-    deferred_history = bool(resume_session and use_gateway and use_tui)
+    # 原地切换时旧画面还留在屏幕上：先同步确认 Gateway 就绪并读好历史，新界面首帧就是同一段对话；没就绪才退回可见的连接流程。
+    handoff_ready = bool(handoff.child and use_gateway and use_tui and _handoff_gateway_ready(agent, paths))
+    deferred_history = bool(resume_session and use_gateway and use_tui and not handoff_ready)
     if resume_session and not deferred_history:
         restored = load_gateway_chat_history(
             agent,
@@ -332,10 +340,10 @@ def cmd_chat(args) -> int:
     runtime_inject: list[str] = args.inject or []
     prompt_files: list[str] = args.prompt_file or []
 
-    restart_target_ref: list = [""]
     if use_tui:
         from .chat_parts.tui_params import TuiRunParams
 
+        release_quiet_streams()
         result = run_tui(params=TuiRunParams(
             agent=agent, args=args, use_gateway=use_gateway, paths=paths,
             runtime_inject=runtime_inject, prompt_files=prompt_files,
@@ -356,7 +364,7 @@ def cmd_chat(args) -> int:
             recovered_message_cursor=recovered_message_cursor,
             recovered_before_message_cursor=recovered_before_message_cursor,
             restore_session_history=deferred_history,
-            restart_target_ref=restart_target_ref,
+            handoff=handoff_ready,
         ))
     else:
         from .chat_parts.plain_state import RunPlainConfig
@@ -372,13 +380,21 @@ def cmd_chat(args) -> int:
             current_session_id=current_session_id,
         ))
     _request_chat_session_close(agent, current_session_id)
-    restart_target = str(restart_target_ref[0] or "")
-    if restart_target:
-        # 界面已收尾、会话关闭已登记；换成 Gateway 同版客户端继续，原命令行参数不变。
-        from .chat_parts.tui_upgrade_follow import reexec_into_target
-
-        return reexec_into_target(restart_target, sys.argv[1:])
     return result
+
+
+# LLM: 只给原地切换用：旧画面还在屏幕上，可以同步等；读 Gateway 自己的就绪事实，不看文案。没就绪返回 False，调用方退回可见连接流程。
+# 函数用途: 原地切换的新进程在首帧之前确认 Gateway 已可用。
+def _handoff_gateway_ready(agent, paths) -> bool:
+    from .chat_parts.tui_preflight import wait_for_gateway_readiness
+
+    try:
+        outcome = wait_for_gateway_readiness(
+            paths, timeout=float(getattr(agent.config, "gateway_ready_timeout_seconds", 3) or 3),
+        )
+    except (OSError, ValueError, TypeError):
+        return False
+    return bool(getattr(outcome, "ready", False))
 
 
 # LLM: Lightweight clients must signal the already-running Gateway rather than promoting to a full

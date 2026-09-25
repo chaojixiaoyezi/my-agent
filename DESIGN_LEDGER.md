@@ -657,7 +657,7 @@ auth 表单取消和参数拒绝已验，官方设备码在两处环境被 HTTP 
 
 ## 当前待落地或待复验
 
-- 已实现（2026-09-25，用户确认后落地；原为想法）：客户端随 Gateway 升级。实现：`cli/chat_parts/tui_upgrade_follow.py` + Gateway `runtime_prefix`，开关 `tui_follow_gateway_upgrade`；发布工具增加同机适配器重启（仓库外）。原设计：现状：TUI 是独立进程，Gateway 重启后会自动重连并补回历史，
+- 已实现（2026-09-25，用户确认后落地；第二版按用户“不要关了再开”改为原地切换）：客户端随 Gateway 升级。TUI 空闲时在 UI 事件循环线程原地 `execv`，不退出全屏、同一会话、首帧即原对话，跨 exec 只传会话编号与原始 termios（`MY_AGENT_TUI_HANDOFF`）；实现 `cli/chat_parts/tui_upgrade_follow.py` + Gateway `runtime_prefix`，开关 `tui_follow_gateway_upgrade`。发布工具（仓库外）只在适配器实际加载的模块有变化时才重启它。最初设计：现状：TUI 是独立进程，Gateway 重启后会自动重连并补回历史，
   但客户端代码停在启动时的版本（旧 `/help`、旧插件命令目录），没有版本不一致检测；IM 适配器也是独立守护进程，部署工具只切 Gateway 不重启它。
   方案：(1) 部署工具切完 Gateway 后检测并重启同机适配器守护进程，纳入同版核对；(2) TUI 在重连时比对 Gateway 上报的版本事实（wheel 哈希/source_sha），
   不一致且当前无进行中的回合、输入框为空时 `os.execv` 重启自身（同参数、同会话，历史在服务端），否则只在状态行提示“Gateway 已升级，空闲时将自动重启”；

@@ -994,7 +994,7 @@ my-agent chat --gateway
 | `--resume-context` | 配置值 | 本次 chat 会话临时启用恢复上下文注入。 |
 | `--no-resume-context` | 配置值 | 本次 chat 会话临时关闭恢复上下文注入。 |
 
-**随 Gateway 升级自动重启**：部署新版 Gateway 后，正在运行的 TUI 每隔几秒比对 Gateway 状态文件里的 `runtime_prefix` 与自己的安装；不是同一安装且当前空闲（没有进行中的回合、排队、待审批，输入框为空，停在主视图）时，界面自动退出并用 Gateway 同版的 `my-agent`按原参数重启，会话历史在服务端不丢；正在忙时只在底部提示。开关 `tui_follow_gateway_upgrade`（默认开），从源码 venv 起 TUI 调试时可关。
+**随 Gateway 升级原地切换**：部署新版 Gateway 后，正在运行的 TUI 每隔几秒比对 Gateway 状态文件里的 `runtime_prefix` 与自己的安装；不是同一安装且当前空闲（没有进行中的回合、排队、待审批，输入框为空，没在看菜单、翻历史或看子代理）时，在同一个终端里原地换成 Gateway 同版的 `my-agent`：不退出全屏、不闪回 shell，底部显示“正在切换到新版本…”约一两秒后以同一段对话继续，期间按下的键保留。正在忙时只在底部提示。开关 `tui_follow_gateway_upgrade`（默认开），从源码 venv 起 TUI 调试时可关；Windows 只提示重开。2026-09-25 之前启动的 TUI 没有这个能力，需要手动重开一次。
 
 chat 内部命令仍在本地处理，例如 `/memory`、`/remember`、`/subagents`。普通自然语言消息才会进入模型；在 `--gateway` 模式下，这些普通消息会走 gateway request/response。
 

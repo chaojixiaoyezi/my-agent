@@ -3070,10 +3070,13 @@ Audit/摄取不列入本轮新增验收；共享模块既有回归按改动影�
 覆盖，仅升级 wheel 不会替换这些值。测试可在备份后移除测试配置中已确认是旧默认副本的字段，
 不能直接覆盖用户定制提示。模型声明、界面 Goal、目标账本、任务绑定和最终工具结果分别取证。
 
-## TUI 随 Gateway 升级自动重启与部署工具适配器重启（2026-09-25）
+## TUI 随 Gateway 升级原地切换与部署工具适配器重启（2026-09-25）
 
-- `test_tui_upgrade_follow.py`：目标判定（同安装/未运行/开关关/入口缺失都不重启）、空闲五条件、空闲时写目标并请求退出一次、忙时 30 秒限频 footer 提示、守护线程请求重启后自行结束、exec 失败只打印提示、Gateway 状态文件带 `runtime_prefix`。
-- 真实验收方法：在 tmux 里用旧 runtime 的 `my-agent chat --gateway` 起一个空闲 TUI，部署新版（切 Gateway），观察该 TUI 进程的可执行文件路径在数秒内变成新 runtime；结束后关闭 tmux 会话。适配器重启步骤在本机/测试机都没有适配器时只记录 `adapter.running=false`，真实重启路径待下次接入 IM 时验证。
+- 第一版（退出界面再 exec）真机验证时只核对了进程路径，漏掉两处：退出会闪回 shell；原命令行不带会话编号，`_setup_session` 会建新会话，界面回来是空对话。改为原地切换并用 `MY_AGENT_TUI_HANDOFF` 传会话与原始终端设置。
+- `test_tui_upgrade_follow.py`：目标判定、七项空闲事实、只排到 UI 线程且两次复核、忙时撤回、exec 失败保留旧界面、会话与 termios 经环境变量传递、新进程暂存启动输出、未接管终端退出时补发复位序列、畸形或外来载荷忽略、Windows 只提示、Gateway 状态带 `runtime_prefix`。
+- `test_cli_chat.py::TestChatCommandRuntime::test_in_place_handoff_keeps_session_and_loads_history_before_first_frame`：新进程沿用会话、就绪后同步读历史、跳过可见连接流程。
+- 真实验收方法：在 tmux 里的 shell 中用新版 runtime 起一个空闲 TUI，再部署同一提交的下一版切 Gateway；每 0.1 秒记录进程路径变化与“正在切换”提示消失的时间，核对画面没出现退出横幅/shell 提示符、会话记录数不变、切换期间 send-keys 的字符出现在新界面输入框；最后退出 TUI，用 `stty -a` 核对 icanon/echo 已还原。
+- 部署工具（仓库外）：同机有 IM 适配器在跑时，先比对它实际加载的 agent_py_agent 模块在新旧安装间是否有变化，没变就不重启（IM 完全无感），变了才重启并核对同版。
 
 ## 提交前严格 gate
 

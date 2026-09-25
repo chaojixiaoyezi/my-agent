@@ -500,6 +500,39 @@ class TestChatCommandRuntime:
         assert params.current_session_id == "sess-resume"
         assert params.conversation_history == []
 
+    def test_in_place_handoff_keeps_session_and_loads_history_before_first_frame(self, monkeypatch):
+        """原地切换来的新进程：沿用上一代会话、Gateway 就绪后同步读好历史，首帧就是同一段对话，不走可见连接流程。"""
+        import json as _json
+
+        from agent_py_agent.cli import chat as chat_mod
+        from agent_py_agent.cli.chat_parts import tui_upgrade_follow as follow
+        from agent_py_agent.cli.chat_parts.history import GatewayChatHistorySnapshot
+
+        monkeypatch.setattr(follow, "_STATE", follow.HandoffState())
+        monkeypatch.setattr(follow.atexit, "register", lambda *_a: None)
+        monkeypatch.setenv(follow.HANDOFF_ENV, _json.dumps(
+            {"schema": "my_agent.tui_handoff.v1", "session_id": "sess-live", "tty": None}))
+        args = SimpleNamespace(gateway=True, inject=[], prompt_file=[], session_id="", memory_limit=5, plain=False)
+        agent = MagicMock()
+        agent.gateway_client_only = True
+        agent.config.chat_history_max_turns = 20
+        snapshot = GatewayChatHistorySnapshot(turns=[("问", "答")])
+        with patch.object(chat_mod, "make_agent", return_value=agent), \
+             patch.object(chat_mod, "SessionManager"), \
+             patch.object(chat_mod, "_setup_session", side_effect=lambda a, _m: a.session_id) as setup, \
+             patch.object(chat_mod, "gateway_paths", return_value=object()), \
+             patch.object(chat_mod, "_has_prompt_toolkit", return_value=True), \
+             patch.object(chat_mod, "_handoff_gateway_ready", return_value=True), \
+             patch.object(chat_mod, "load_gateway_chat_history", return_value=snapshot) as history, \
+             patch.object(chat_mod, "run_tui", return_value=0) as tui:
+            result = chat_mod.cmd_chat(args)
+        assert result == 0 and setup.call_args.args[0].session_id == "sess-live"
+        history.assert_called_once()
+        params = tui.call_args.kwargs["params"]
+        assert params.handoff is True and params.restore_session_history is False
+        assert params.current_session_id == "sess-live" and params.conversation_history == [("问", "答")]
+        assert follow.HANDOFF_ENV not in __import__("os").environ
+
     def test_cmd_chat_fails_closed_when_recovered_history_is_corrupt(self, capsys):
         """显式恢复读到损坏账本时不能悄悄显示空历史。"""
         from agent_py_agent.cli import chat as chat_mod
