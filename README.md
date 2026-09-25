@@ -1,342 +1,225 @@
 # my-agent
 
-一个用 Python 标准库搭起来的个人通用智能体底座。
+一个可以长期值守的本地个人智能体：一台机器一个常驻 Gateway，终端 TUI 和飞书等通道都接到它上面；
+主代理能拆出多层子代理协作，工具在系统沙箱里执行，插件可以用任何语言写，每一步都有可核对的结构化账。
 
-后续版本统一以 **my-agent** 发布，正式仓库为 [官方仓库](https://github.com/chaojixiaoyezi/my-agent)。
-安装命令、产品说明和发布名称统一为 `my-agent`，已有 `~/.my-agent` 用户数据不因改名迁移。
-历史说明使用中性路径与会话占位，不假装旧目录已更名；原始定位仍可按提交和运行编号追溯。
+[![Test](https://github.com/chaojixiaoyezi/my-agent/actions/workflows/test.yml/badge.svg)](https://github.com/chaojixiaoyezi/my-agent/actions/workflows/test.yml)
+[![Lint](https://github.com/chaojixiaoyezi/my-agent/actions/workflows/lint.yml/badge.svg)](https://github.com/chaojixiaoyezi/my-agent/actions/workflows/lint.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-它现在不是单纯聊天脚本，而是在逐步变成一个可常驻、可审计、可恢复、能跑多层子代理任务的本地工作台。
+- 主链路只用 Python 标准库，Python 3.10+，macOS / Linux / Windows 都能装。
+- 模型、密钥、权限都在 TUI 里配置，或者直接对代理说一句让它自己配；软件不预选任何模型。
+- 面向“把任务交给它、过一会儿回来看结果”的使用方式，而不是一问一答的聊天窗口。
 
-当前哪些能力稳定、部分可用、实验性或仅设计，以
-[当前产品事实](docs/PRODUCT_FACTS.md) 为唯一权威；路线图和历史完成记录不代表已发布能力。
+当前哪些能力稳定、哪些仍有边界，以 [产品能力与边界](docs/PRODUCT_FACTS.md) 为唯一权威；发布风险见 [STATUS](STATUS.md)。
 
-### 在 TUI 中配置模型
+## 它解决什么问题
 
-输入 `/model`，选择“新增模型”或“选择已有模型”。新增时选择 OpenAI 风格或 Anthropic 风格接口，
-填写模型名称、接口基础地址、密钥和总上下文窗口（tokens）；按 Tab 切换，选择“保存”，或返回/退出不保存。
-Auth 认证暂时只有预留入口。软件不预填模型、接口类型或地址；未配置时可以打开设置，但不会调用任何模型。
-保存后在“选择已有模型”中启用。若管理员显式提供了部署连接，它才会出现在可选列表中。
+普通聊天助手每次对话都从零开始，任务一长就丢上下文，跑命令没有隔离，做了什么也无法回溯。
+my-agent 把这些当成底座问题来解：
 
-“选择已有模型”只影响当前会话的下一工作片，同一用户另外打开的 TUI/IM 会话各用各的模型。
-“新会话默认模型”用于以后新开的会话，不改已有会话；正在执行的工作片和已有子代理不被中断。
-管理员还可在菜单中逐个显式共享模型，普通用户只能选择已开放项，密钥仍留在服务端。
-密钥掩码输入、私有保存，不进入聊天记录。保存成功不代表接口已经验证可用；窗口请按供应商实际容量填写。
-
-### 在 TUI 中选择权限与审批模式
-
-输入 `/permissions`，或按 **F4** 打开菜单；审批框出现时也能按 F4，不必逐个确认子代理。
-
-| 模式 | 含义 |
+| 你遇到的情况 | my-agent 的做法 |
 | --- | --- |
-| 默认确认 | 自己家目录内工作，敏感工具操作询问用户。 |
-| 自主工作 | 自己家目录内自动执行，主代理和所属子代理不逐次询问普通工具操作。 |
-| Full Access | 仅本机管理员可选，主代理可访问家目录外，不逐次询问普通工具操作。 |
+| 任务要跑几十分钟，中途还要插话、改方向、停下来 | 常驻 Gateway 持有会话；TUI 可随时插话、停止、恢复，工作片冻结配置，后台续跑有唤醒链 |
+| 一个人干不完，想拆给几个“同事”并行 | 主代理创建子代理、子代理再拆孙代理；每个运行都有身份、状态、终态和通知，父级按结构化事实调度 |
+| 让模型跑命令、装依赖、开服务，怕它碰到不该碰的 | 命令走 bwrap（Linux）或 Seatbelt（macOS）沙箱，沙箱不可用就拒绝执行；后台服务默认只监听回环；owner 家目录墙 |
+| 上下文越聊越大，图片、长文件、大输出把窗口撞爆 | 自动 Compact、含图历史的视觉摘要、大工具输出外置、按余量提前外置；主子孙代理各有自己的压缩协议 |
+| 想扩展能力，又不想被 Python 绑死 | 插件是独立进程：Python、Go、Node 或任意可执行文件都行；装、配、启、停、卸、更新全在 TUI 里完成 |
+| 事后想知道“它到底做了什么、为什么失败” | SQLite/FTS5 本地事实源、运行时账本、工具操作幂等与未知副作用对账、事件时间线、`my-agent status` / `timeline` / `local-doctor` |
 
-↑↓ 选择、Enter 保存、Esc 取消。Full Access 有二次确认；本机 TUI 默认是管理员身份，但不默认开启全盘权限。
-也可明确输入 `/permissions ask`、`/permissions auto` 或 `/permissions full-access`。
-选择保存到当前用户的工具策略，适用于该用户的会话与子代理，不改变其他用户。
-审批选择保存后生效，已挂起的主/子代理普通工具审批可原地继续；路径权限在下一工作片生效，当前片不热改。
-子代理仍限定该用户家目录；禁用工具、灾难命令保护和 SOUL 等本人确认不会因为自主模式被取消。
+## 能力一览
 
-## 从零开始
+### 常驻 Gateway 与多客户端
 
-下面命令按“刚拿到项目，想跑起来”的顺序写。每条命令后面都写了它是干什么的。
+- 每台机器一个 Gateway，服务多个用户和多个客户端；TUI、IM 通道、HTTP 入口都是它的客户端。
+- 每个用户有自己的 canonical home（`~/.my-agent/owners/<provider>/<user>`），会话、记忆、模型目录、插件互相隔离。
+- 停机时在途模型调用会被结清并留下结构化事实；启动时对遗留运行做对账，不把坏账当成“没有任务”。
 
-### 推荐：一键容器安装
+### 终端 TUI
 
-Linux，或已经装好 Docker/Podman 的 macOS/WSL：
+- 流式回答、工具记录、思考折叠、历史分页、拖选复制、粘贴多行。
+- 插话、停止、恢复、目标模式与任务清单；子代理有独立子页面，可以进去看、插话、停止。
+- `/model` 配模型、`/permissions`（或 F4）选权限模式、`/plugins` 管插件；插件面板显示在输入区上方。
+
+### 模型接入
+
+- 三种生成协议：OpenAI Chat Completions、OpenAI Responses、Anthropic Messages；MiniMax、Qwen 以及任何兼容这三种协议的服务都能接。
+- 账号登录：ChatGPT 订阅设备码授权与通用 OAuth 设备码流程，见 [模型账号登录](docs/design/MODEL_OAUTH.md)。
+- 模型目录按用户私有保存；“选择已有模型”只改当前会话，“新会话默认模型”只改以后新开的会话；管理员可逐个共享模型，密钥留在服务端。
+- 代理可以自己管目录：对它说“帮我加个模型”“这个会话换成 X”“测一下这个模型通不通”，它通过 `manage_models` 工具完成；删服务商需要你确认一次，密钥只在你那句话里出现一次，回执和归档都不回显。
+- 可选的决策模型（TypeSafe 决策接口）：在有来源的候选之间做选择、分类、评分；它不是权限门、不是记忆事实源，也不裁判任务完成。
+
+### 多层子代理
+
+- 主代理按需创建子代理，子代理可递归协作；创建、进入、插话、停止、结果通知全部按结构化父子身份执行。
+- 每次运行有 run / task / attempt 身份和账本；终态、通知、恢复都可去重、可重放。
+- 子代理继承或显式指定本用户可用的模型，工具与文件范围只能收窄、不能越出父级。
+
+### 工具与安全
+
+- 文件读写、搜索、结构化补丁、大输出引用；批处理命令、交互 PTY、受管后台进程三类句柄分开管理。
+- 命令沙箱：Linux 用系统或随包的 bubblewrap，macOS 用 Seatbelt；自检失败返回 `SANDBOX_UNAVAILABLE`，不会悄悄退回无隔离执行。
+- 后台服务默认只监听 127.0.0.1；要对局域网开放，由用户长期授权一次，宿主每两秒复核监听范围，越界即结束。
+- 三档权限模式：默认确认 / 自主工作 / Full Access（仅本机管理员）；审批可原地续跑，禁用工具、灾难命令保护和人格文件确认不受自主模式影响。
+- 网络请求带私网、`file://` 等 URL 门；MCP 服务器和技能按当前工具快照加载。
+
+### 插件系统
+
+- 插件是独立 MCP 进程，通过本地包安装：Python 包用隔离 venv 运行；任意语言（Go、Node、脚本、可执行文件）用 v6 包格式，启用前给出确认码，解释器路径与哈希被钉住，被替换即拒绝启动。
+- 逐次下发工作区读写范围，插件拿不到宿主其他目录；可选的进程级 OS 沙箱试点（`plugin_process_sandbox`，默认关）。
+- 插件可以带 Skill、显示面板、调用宿主只读 API；停用、卸载、换代后下一次快照自然生效。
+- 自带 13 个插件：`workspace-peek`（工作区预览）、`genui-lite`（表格与图表）、`browser-lite`（受控无头浏览器）、`image-text`（本地 OCR）、
+  `savepoint-lite`（文件快照）、`design-lite`（HTML 设计稿）、`desktop-lite`（系统通知/剪贴板）、`harness-console`（工作台网页）、
+  `context-inspector`、`activity-line`、`status-pet`、`worktable-lite`、`web-board`；另有 `hello-go`、`hello-node` 两个跨语言示例。
+- 插件 SDK 与一致性测试套件见 [plugins/sdk](plugins/sdk/)，打包与生命周期见 [插件包](docs/design/PLUGIN_PACKAGES.md)、[任意语言插件](docs/design/PLUGIN_ANY_LANGUAGE.md)。
+
+### 记忆、人格与技能
+
+- 长期记忆走“候选 → 晋升”链，代理用 `remember` 保存“需要时才想起”的具体事实。
+- 人格三件套 SOUL / USER / AGENTS 每轮注入：用户画像和长期工作约定由代理自主维护，改 SOUL 必须用户确认。
+- Skill 三级加载：索引 → 正文 → 引用资源，优先级 workspace > user > builtin。
+- 自学习默认关闭；开启后子代理经验只生成待确认的 Skill 提案，用户确认后才落正式目录。
+
+### 上下文与压缩
+
+- 同一用户同一会话只有一份 canonical transcript；展示分页、子代理通知、后台恢复都不另造模型历史。
+- 达到阈值自动 Compact；含图片的历史用独立的视觉摘要请求处理；单条工具输出超过距压缩点的余量时立刻外置，模型只看预览和恢复锚点。
+- Context、累计 token、缓存读写、输出速率是分开的指标，TUI 状态行逐项显示。
+
+## 架构一览
+
+```text
+  终端 TUI        飞书等 IM 通道        HTTP / ASGI 入口        CLI (my-agent run/gateway ask)
+      \                 |                     |                        /
+       +----------------+----------+----------+-----------------------+
+                                   |
+                        Gateway（每台机器一个，常驻）
+            会话与回合 · 审批 · 控制事件 · Compact · 唤醒/续跑 · 停机结清与启动对账
+                                   |
+        +--------------------------+---------------------------+
+        |                          |                           |
+   工具执行层                   子代理 runner                 插件 MCP 进程
+   文件 / 命令 / PTY /          run·task·attempt 账本          Python venv 或
+   后台进程宿主 / 网络 / MCP     递归协作 · 结构化通知          任意语言可执行文件
+   bwrap / Seatbelt 沙箱                                       逐次工作区权限
+                                   |
+                     模型后端（OpenAI Chat / Responses / Anthropic / 决策模型）
+                                   |
+              ~/.my-agent：每个用户的 canonical home · runtime_db(SQLite/FTS5)
+                         · 记忆 · 模型目录 · 插件环境 · 发布与回滚副本
+```
+
+## 快速开始
+
+### 安装
+
+推荐一键容器安装（Linux，或已装 Docker/Podman 的 macOS/WSL）：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/chaojixiaoyezi/my-agent/main/install.sh | bash
 ```
 
-安装器默认构建受限容器，在容器内完成 bwrap namespace/mount 真自检，然后安装一个透明
-`my-agent` 包装器。普通用户直接运行 `my-agent`；脚本仍可运行 `my-agent run ...`，都不需要手动 `docker exec`。
+安装器构建受限容器，在容器内完成 bwrap 自检，再装一个透明的 `my-agent` 包装器：`~/.my-agent` 持久挂载，
+当前目录作为唯一工作区挂入，不挂 Docker socket；自检失败就不会装出一个降级运行的版本。
 
-- `~/.my-agent` 持久挂到容器的 `/my-agent-home`。
-- 当前工作目录是唯一挂入的项目工作区 `/workspace`。
-- owner-scoped 前后台命令必须经过 bwrap；自检失败则安装/worker 启动失败，不会降级宿主执行。
-- 干净 Linux 没有 Docker/Podman 时，安装器会尝试安装 rootless Podman。
-
-本地源码验证容器安装：
-
-```bash
-MYAGENT_SRC="$PWD" bash install.sh --container
-```
-
-### macOS / Linux 宿主开发安装
-
-宿主 venv 只推荐开发使用；没有 Linux bwrap 时，owner-scoped `run_command` 会安全拒绝。
+宿主开发安装（macOS / Linux）：
 
 ```bash
 cd /path/to/my-agent
-# 进入项目根目录；后面的命令都默认在这里执行。
-
-python3 --version
-# 确认 Python 已安装；项目要求 Python 3.10 或更高。
-
-python3 -m venv .venv
-# 创建一个本项目专用虚拟环境，避免污染系统 Python。
-
-source .venv/bin/activate
-# 启用虚拟环境；看到命令行前面有 (.venv) 就对了。
-
+python3 -m venv .venv && source .venv/bin/activate
 python -m pip install -U pip
-# 升级 pip，减少安装包版本问题。
-
-python -m pip install -e .
-# 以可编辑模式安装本项目；改代码后不用重复安装。
-
+python -m pip install -e .        # 开发者用 -e ".[dev]"
 my-agent --help
-# 验证安装成功，并查看所有可用命令。
 ```
 
-也可以复用安装器显式选择宿主开发模式：
-
-```bash
-bash install.sh --host
-```
-
-### Windows PowerShell 安装
+Windows PowerShell：
 
 ```powershell
 cd C:\你的路径\my-agent
-# 进入项目根目录；把路径换成你本机实际位置。
-
-py -3 --version
-# 确认 Python 已安装；项目要求 Python 3.10 或更高。
-
 py -3 -m venv .venv
-# 创建一个本项目专用虚拟环境。
-
-.\.venv\Scripts\Activate.ps1
-# 启用虚拟环境；看到命令行前面有 (.venv) 就对了。
-
+.\.venv\Scripts\Activate.ps1      # 提示不允许执行脚本时先运行 Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 python -m pip install -U pip
-# 升级 pip。
-
 python -m pip install -e .
-# 以可编辑模式安装本项目。
-
 my-agent --help
-# 验证安装成功，并查看所有可用命令。
 ```
 
-如果 PowerShell 提示不允许执行脚本，先运行：
+宿主 venv 只推荐开发使用：没有 bwrap 的 Linux 上，owner-scoped 命令会安全拒绝而不是无隔离执行。
 
-```powershell
-Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
-# 允许当前 Windows 用户执行本机脚本；这是为了能激活 .venv。
+### 第一次运行
+
+```bash
+my-agent
+# 默认入口：确保后台 Gateway 存活，然后进入 TUI。
 ```
 
-## API Key
+1. 在 TUI 输入 `/model`，新增一个服务商和模型：选择协议（Chat / Responses / Messages），填模型名、接口地址、密钥和上下文窗口，保存后选中。
+   也可以直接对代理说“帮我加一个模型，地址是……，密钥是……”，它会自己写进目录并切换。
+2. 输入 `/permissions` 或按 F4 选权限模式；默认是“默认确认”，敏感操作会问你。
+3. 说一句任务试试，例如“看看当前目录有什么，写个 README 草稿”。
 
-当前默认配置使用 MiniMax 的 Anthropic 兼容接口：
+软件不预填任何模型或地址；未配置时可以打开 TUI 和设置，但不会调用任何模型，也不会退回到别的模型。
+
+### 部署式配置（可选）
+
+无人值守部署可以在 `agent_py_agent/config/agent_config.yaml` 里给出显式连接，密钥只放环境变量：
 
 ```yaml
-model_backend: "anthropic_compatible"
-api_base: "https://api.minimaxi.com/anthropic"
-model_name: "MiniMax-M2.7"
-api_key_env: "AGENT_API_KEY"
-```
-
-### 去哪里拿 Key
-
-截至 2026-04-29，MiniMax 官方文档写法是：
-
-- 打开 [MiniMax API Platform](https://platform.minimax.io/docs/guides/quickstart)，注册或登录账号。
-- 进入 [API Overview](https://platform.minimax.io/docs/api-reference/api-overview) 里说的 `API Keys`。
-- 普通按量付费 key：选择 `Create new secret key`。
-- Token Plan key：选择 `Create Token Plan Key`。
-
-### Key 存在哪里
-
-不要把真实 key 写进 Git 仓库，也不要提交到 README、配置文件或聊天记录里。
-
-本项目推荐只把 key 放到环境变量 `AGENT_API_KEY`，配置文件里只保留“去哪个环境变量读”：
-
-```yaml
+model_backend: "anthropic_compatible"      # 或 openai_compatible / openai_responses
+api_base: "https://api.example.com/anthropic"
+model_name: "your-model"
+model_context_window_tokens: 200000
 api_key: ""
-api_key_env: "AGENT_API_KEY"
+api_key_env: "AGENT_API_KEY"               # 只写“去哪个环境变量读”
 ```
-
-### macOS / Linux 临时设置 Key
 
 ```bash
-read -rsp "AGENT_API_KEY: " AGENT_API_KEY; echo
-# 安全输入 key；不会把 key 明文显示在终端。
-
-export AGENT_API_KEY
-# 把刚输入的 key 放进当前终端环境变量。
-
-echo ${AGENT_API_KEY:+AGENT_API_KEY_OK}
-# 只验证 key 是否存在，不打印 key 内容。
+read -rsp "AGENT_API_KEY: " AGENT_API_KEY; echo; export AGENT_API_KEY   # macOS / Linux，当前终端有效
 ```
-
-这个方式只对当前终端有效。关掉终端后需要重新设置。
-
-### macOS / Linux 长期设置 Key
-
-```bash
-nano ~/.zshrc
-# 打开 zsh 配置文件；如果你用 bash，就改成 nano ~/.bashrc。
-```
-
-在文件末尾手动加一行：
-
-```bash
-export AGENT_API_KEY="你的真实 key"
-# 每次打开新终端时自动设置 AGENT_API_KEY。
-```
-
-保存后运行：
-
-```bash
-source ~/.zshrc
-# 让刚改的配置立刻在当前终端生效。
-
-echo ${AGENT_API_KEY:+AGENT_API_KEY_OK}
-# 验证 key 已经读到，但不打印 key。
-```
-
-### Windows PowerShell 临时设置 Key
 
 ```powershell
-$env:AGENT_API_KEY="你的真实 key"
-# 只给当前 PowerShell 窗口设置 key。
-
-if ($env:AGENT_API_KEY) { "AGENT_API_KEY_OK" }
-# 只验证 key 是否存在，不打印 key 内容。
+[Environment]::SetEnvironmentVariable("AGENT_API_KEY", "你的 key", "User")  # Windows，新窗口生效
 ```
 
-这个方式只对当前 PowerShell 窗口有效。
+显式部署连接会出现在 `/model` 的可选列表里，但用户自己保存的模型不受它影响。`.env` 不会被自动读取。
 
-### Windows PowerShell 长期设置 Key
+## 权限模式
 
-```powershell
-[Environment]::SetEnvironmentVariable("AGENT_API_KEY", "你的真实 key", "User")
-# 把 key 存到当前 Windows 用户的环境变量里。
+输入 `/permissions`，或按 **F4** 打开菜单；审批框出现时也能按 F4。
 
-# 关掉当前 PowerShell，再重新打开一个新的 PowerShell。
-# Windows 用户环境变量通常要新窗口才会生效。
+| 模式 | 含义 |
+| --- | --- |
+| 默认确认 | 在自己家目录内工作，敏感工具操作询问用户 |
+| 自主工作 | 在自己家目录内自动执行，主代理和子代理不逐次询问普通工具操作 |
+| Full Access | 仅本机管理员可选，可访问家目录外，不逐次询问普通工具操作 |
 
-if ($env:AGENT_API_KEY) { "AGENT_API_KEY_OK" }
-# 验证新窗口已经读到 key，但不打印 key。
-```
-
-### 关于 `.env`
-
-`.env` 文件已经被 `.gitignore` 忽略，但当前代码不会自动读取 `.env`。
-
-也就是说，写 `.env` 只是“本地备忘”，程序不会自己加载。最稳的方式仍然是使用系统环境变量 `AGENT_API_KEY`。
-
-## 第一次验证
-
-先跑不会调用真实模型的检查：
-
-```bash
-python3 scripts/live_agent_lab.py --suite smoke
-# 跑 Live Lab 冒烟测试；默认临时改成 echo 后端，不消耗真实 API。
-```
-
-确认 key 和真实模型可用：
-
-```bash
-my-agent run "你好，用一句话介绍你自己" --no-save
-# 直接调用一次真实模型；--no-save 表示不要把这轮写入长期记忆。
-
-my-agent run "继续刚才的 README 任务" --resume-context --show-prompt
-# 临时打开恢复上下文注入，并打印最终 prompt，方便检查它到底注入了哪些恢复线索。
-```
-
-如果你想看后台 gateway 路径：
-
-```bash
-my-agent gateway start
-# 启动后台 gateway，相当于让主代理在后台值班。
-
-my-agent gateway ask "你好，检查一下 gateway 是否能工作" --no-save
-# 给后台 gateway 发一条任务；这会调用真实模型。
-
-my-agent gateway status
-# 查看 gateway 是否还活着、队列里有没有请求。
-
-my-agent gateway stop --kill
-# 停掉后台 gateway；--kill 表示正常停止失败时强制结束。
-```
+选择保存到当前用户的工具策略，适用于该用户的会话与子代理；已挂起的审批可原地继续，路径权限在下一工作片生效。
+`/permissions ask`、`/permissions auto`、`/permissions full-access` 可直接切换。
 
 ## 常用命令速查
 
-### 基础命令
+完整参数见 [CLI_REFERENCE.md](CLI_REFERENCE.md)。下面每条后面标了是否会调用模型。
 
 ```bash
-my-agent --help
-# 查看所有命令和参数；不调用模型。
-
-my-agent status
-# 查看当前总览：gateway、LocalStore、subagent、最近事件；不调用模型。
-
-my-agent status --json
-# 输出机器可读 JSON，方便脚本或后续 TUI 使用；不调用模型。
-
-my-agent timeline --limit 20
-# 查看最近 20 条本地审计事件；不调用模型。
-
-my-agent timeline --source-type gateway_request
-# 只看 gateway 请求相关事件；不调用模型。
+my-agent                                  # 默认入口：确保 Gateway 存活并进入 TUI
+my-agent status                           # 全局总览：gateway、本地事实源、子代理、最近事件；不调用模型
+my-agent status --json                    # 机器可读输出；不调用模型
+my-agent timeline --limit 20              # 最近 20 条本地审计事件；不调用模型
+my-agent run "总结当前项目状态" --no-save   # 脚本入口，前台跑一次请求；调用模型
+my-agent gateway start|status|stop        # 后台 Gateway 启停与状态
+my-agent gateway ask "继续推进当前任务"     # 给后台 Gateway 发同步请求；调用模型
+my-agent gateway ask "跑个长任务" --no-wait # 异步投递，返回 request_id
+my-agent gateway result <request_id>      # 读异步结果；不调用模型
+my-agent gateway logs --lines 80          # 最近日志；不调用模型
+my-agent feishu connect --scan            # 扫码接入飞书，自动建应用
+my-agent memory-list --limit 20           # 最近长期记忆；不调用模型
+my-agent memory-search "关键词"            # 搜索长期记忆；不调用模型
+my-agent local-doctor                     # 诊断记忆、gateway、子代理、本地事实源是否一致；不调用模型
+my-agent subagents                        # 子代理红绿灯看板；不调用模型
+my-agent runtime-stale-attempts           # 列出无身份的悬挂运行轮，--settle 显式结清；不调用模型
+my-agent skills proposals list            # 查看待确认的自学习 Skill 提案；不调用模型
 ```
 
-### 普通对话
-
-```bash
-my-agent run "帮我总结当前项目状态" --no-save
-# 脚本/调试入口：运行一次前台请求；会调用真实模型；--no-save 表示不写长期记忆。
-
-my-agent chat
-# 进入 gateway 客户端聊天；真正调用模型的是后台 gateway。
-
-my-agent chat --direct
-# 开发调试：显式绕过 gateway，在当前前台进程调用模型；不是正式默认 runtime。
-
-my-agent
-# 默认入口：自动确保 gateway 存活，然后进入 chat --gateway。
-```
-
-### Gateway 后台值班
-
-```bash
-my-agent gateway start
-# 启动后台 gateway；启动本身不调用模型。
-
-my-agent chat --gateway
-# 与默认 `my-agent chat` 相同；保留显式写法便于脚本表达意图。
-
-my-agent gateway ask "继续推进当前任务"
-# 给后台 gateway 发一条同步请求；会调用真实模型，并等待结果。
-
-my-agent gateway ask "继续推进当前任务" --resume-context --show-prompt
-# 临时打开恢复上下文注入，并在响应里打印最终 prompt。
-
-my-agent gateway ask "跑一个长任务" --no-wait
-# 异步投递请求，不等模型完成；会返回 request_id。
-
-my-agent gateway result <request_id>
-# 读取异步请求结果；不会发起新的模型调用。
-
-my-agent gateway logs --lines 80
-# 查看 gateway 最近 80 行日志；不调用模型。
-
-my-agent gateway restart --force
-# 重启 gateway；旧进程停不掉时允许强制终止。
-
-my-agent gateway stop --kill
-# 停止 gateway；超时后强制结束。
-```
-
-### 本地记忆和事实源
-
-fresh install 下，长期记忆和本地事实源默认属于当前 owner：
+默认的长期数据都在当前用户的 owner home 下：
 
 ```text
 ~/.my-agent/owners/local/main/memory/long_term/memory.jsonl
@@ -344,367 +227,70 @@ fresh install 下，长期记忆和本地事实源默认属于当前 owner：
 ~/.my-agent/owners/local/main/tasks/<yyyy-mm-dd>/<task-slug>/{output,work}/
 ```
 
-repo 内 `data/*` 只保留测试 fixture 或显式指定路径用途，不再是普通运行事实源。
-如果配置里显式把 `local_store_path`、`subagent_workspace`、`gateway_workspace`
-等改成非默认路径，这些显式路径仍会生效；默认新任务、记忆、gateway 和子代理状态都归当前 owner home。
-
-本地 TUI 的结构化身份默认为 `local/main`，但默认权限仍是 WorkspaceOnly：无论从哪个 shell 目录启动，
-相对路径都从自己的 owner home（或任务建立后的项目目录）解析，不会把 `/root`、源码树等启动目录自动变成
-工作区。普通/远程用户只能使用自己的 owner home；文件权限不限制正常外网访问。只有本机 `local/main`
-显式配置 `access_mode: full-access` 后才可访问外部目录，且子代理仍保持 owner/task 范围。Full Access 下，
-模型只有在用户明确指定外部路径或要求系统排障时才离开自己的 home；涉及其他 owner 目录还需用户明确点名，
-默认先只读并尽量少改。这里的自然语言规则只是行为约束，真正权限只认结构化身份和配置。
-
-```bash
-my-agent memory-list --limit 20
-# 查看最近 20 条长期记忆；不调用模型。
-
-my-agent memory-search "关键词" --limit 5
-# 搜索长期记忆 JSONL；不调用模型。
-
-my-agent local-store-status
-# 查看 SQLite/FTS5/文件事实源状态；不调用模型。
-
-my-agent local-index-memory
-# 把旧 memory.jsonl 补建到 LocalStore 索引；不调用模型。
-
-my-agent local-doctor
-# 诊断 memory、gateway、subagent、LocalStore 是否一致；不调用模型。
-
-my-agent local-rebuild --source fts
-# 重建全文检索索引；不调用模型。
-
-my-agent local-search "gateway" --source-type gateway_request
-# 在 LocalStore 里搜索 gateway 请求记录；不调用模型。
-```
-
-### Subagent 多代理工作流
-
-```bash
-my-agent spawn-subagents "开发一个可验收的功能" --count 2
-# 手动创建 2 个子代理工单；不直接执行真实 runner。
-
-my-agent subagents
-# 查看子代理红绿灯看板；不调用模型。
-
-my-agent subagents-due-check
-# 巡检卡住、超时、需要验收的子代理；不调用模型。
-
-my-agent subagents-route-capabilities --dry-run
-# 预览能力请求如何路由成 skill/tool grant；不写回。
-
-my-agent subagents-route-capabilities --apply
-# 真正写入 capability grant/gap；不一定调用模型。
-
-my-agent subagent-context <run_id>
-# 生成某个子代理的执行上下文包；不调用模型。
-
-my-agent subagent-run <run_id>
-# dry-run 一个子代理 runner，只生成 prompt 和报告；不调用模型。
-
-my-agent subagent-run <run_id> --execute
-# 真正调用模型执行这个子代理；会消耗 API。
-
-my-agent subagents-dispatch --dry-run
-# 预览一轮父代理调度；不写回，不执行 runner。
-
-my-agent subagents-dispatch --apply --start-runners --max-runners 1
-# 真正调度并执行最多 1 个 runner；会调用真实模型。
-```
-
-### 场景测试
-
-```bash
-my-agent scenario-test
-# 隔离跑一轮真实全流程：gateway ask -> 派工 -> runner -> 验收；会调用真实模型。
-
-my-agent scenario-test --case verification
-# 验证伪造 artifact 不会通过验收；通常不调用真实模型。
-
-my-agent scenario-test --case gateway-restart
-# 验证 gateway 崩溃遗留 processing 请求能恢复；不调用真实模型。
-
-my-agent scenario-test --case gateway-cross-day-resume
-# 验证真实后台 gateway 请求跨天恢复到 request/response JSON；echo 后端不调用真实模型。
-
-my-agent scenario-test --case gateway-delayed-response
-# 验证响应已落盘但 pending 请求副本迟到时不会重复调用模型；不调用真实模型。
-
-my-agent scenario-test --case gateway-multi-worker
-# 验证两个 request worker 并发抢占多条 pending 请求；不调用真实模型。
-
-my-agent scenario-test --case gateway-stale-lease
-# 验证 worker 中断留下的旧 processing lease 会重排并完成；不调用真实模型。
-
-my-agent scenario-test --case parent-subagent-cross-day-resume
-# 验证真实 subagent runner 写回后跨天恢复到任务事实源；使用测试后端，不调用真实模型。
-
-my-agent scenario-test --case runner-retry
-# 验证 runner 临时失败会有限重试；使用测试后端，不调用真实模型。
-
-my-agent scenario-test --case all --count 1
-# 连续跑所有场景；最后的 happy path 会调用真实模型。
-```
-
-### Live Lab 可见测试台
-
-```bash
-python3 scripts/live_agent_lab.py --suite smoke
-# 当前终端跑冒烟测试；默认不调用真实模型。
-
-python3 scripts/live_agent_lab.py --suite compact-stress --real-llm --timeout 2400
-# 当前终端跑真实 compact 长输出压测；默认生成约 10MB 现场记录，至少要求 20 次 compact。
-
-python3 scripts/live_agent_lab.py --suite real --real-llm --timeout 300 --count 1 --max-cycles 2
-# 当前终端跑真实 LLM + gateway + 长链路测试；会调用真实模型。
-
-scripts/open_live_lab.sh --suite real --real-llm --timeout 300 --count 1 --max-cycles 2
-# macOS 新开一个可见 Terminal 跑真实测试；你能看到 prompt、命令、响应和证据路径。
-```
-
-### 并行开发 Workstream
-
-```bash
-scripts/workstream_create.sh memory
-# 创建 memory 开发线的 git worktree 和 workstream/memory 分支。
-
-scripts/workstream_create.sh memory --dry-run
-# 只预览会创建什么，不真的创建目录或分支。
-
-scripts/workstream_status.sh
-# 查看主仓库和所有 worktree 的分支、HEAD、未提交文件。
-
-scripts/open_workstream.sh memory
-# macOS 新开一个可见 Terminal，进入 memory 开发线。
-```
-
-每条线的职责边界和交接格式见 [WORKSTREAMS.md](docs/WORKSTREAMS.md) 和 [HANDOFF_TEMPLATE.md](docs/tasks/HANDOFF_TEMPLATE.md)。
+无论从哪个 shell 目录启动，相对路径都从自己的 owner home 或任务目录解析，不会把源码树或 `/root` 自动变成工作区；
+只有本机 `local/main` 显式选择 Full Access 才能访问外部目录，且子代理仍保持 owner/task 范围。
 
 ## 配置文件
 
-主配置文件：
-
-```text
-agent_py_agent/config/agent_config.yaml
-```
-
-它负责：
-
-- 模型后端、API 地址、模型名、key 环境变量名。
-- owner home、记忆路径和本地事实源路径。
-- memory raw/hook 归档、长期规则路由和可选恢复上下文注入开关。
-- gateway 工作区和请求超时。
-- daemon / runner / 调度策略。
-- 工具开关和工具返回长度。
-- 决策模型总开关与逐点模式；自学习开关 `enable_self_learning` 默认关闭，开启后子代理 lesson 只生成待 `my-agent skills proposals confirm` 确认的 Skill 提案。
-
-能力路由配置：
-
-```text
-agent_py_agent/config/capability_config.yaml
-```
-
-它负责：
-
-- capability request 最大描述长度。
-- 上抛最大层数。
-- 候选 skill/tool 数量。
-- grant 最大 skill/tool 数量。
-- subagent heartbeat / timeout / due-check 参数。
-- evidence 最小要求。
-
-约定：能力路由配置里的数字限制项，`0` 表示不限制。
-
-## 当前能力
-
-已能运行的主链路：
-
-1. 普通请求进入 `SimpleAgent.run()`。
-2. 根据任务注入工具目录和推荐工具。
-3. 模型输出 `[TOOL_CALL]` 或 Qwen/通道运行时 常见 XML-ish 工具调用时，工具系统会解析、执行并回填结果。
-4. 工具调用半截损坏时，会变成可恢复的 `__parse_error__`，避免整轮崩掉。
-5. 子代理可以创建工单，记录父子关系、能力边界、交付要求和证据。
-6. 父代理可用 Capability Router 把 request 路由成 grant 或 gap。
-7. `subagent-run` 默认 dry-run，显式 `--execute` 才调用真实模型。
-8. runner 输出 `[SUBAGENT_RESULT]` JSON 后，系统会把 evidence、artifacts、tests、patches、lessons、next_actions 写回工单。
-9. workflow plan 已能进入真实任务创建：父任务保存 `workflow_plan`，`auto` apply 可物化 worker 子工单。
-10. 成功 runner 的结构化 lessons/findings 可进入 owner 的记忆 CandidateService；Skill 提案、确认与正式写入链尚未接通。
-11. CLI 构造 agent 时支持 `MY_AGENT_RUNTIME_CONFIG` / `MY_AGENT_RUNTIME_CONFIG_LAYERS` 注入 owner/task/run/runtime scoped 配置 overlay，并保留 `config_sources` / `config_layers` 来源链。
-12. 后台 dispatch 启动标记和启动恢复摘要会暴露结构化读取/保存错误，避免把坏账本误判成“没有任务”。
-
-还没做完的主链路：
-
-- 真正的进程级 worker pool / session pool 和长期心跳治理。
-- 多层父子代理自动上抛和下发，以及 capability grant 后的自动唤醒闭环。
-- patch 自动集成后的更强 owner / 权限策略、批量验证和失败恢复编排。
-- 运行时错误报告已经覆盖更多恢复入口，但仍需继续清理 gateway/http/lease/audit 等剩余 `except Exception` best-effort 路径。
-- 配置层已支持 CLI runtime overlay，后续还要把 agent-local/task-local overlay ref 接到子代理创建、接管和远端 session 入口。
-- 记忆候选之外的 Skill 提案、用户确认与正式写入流程。
-- 完整 ACP / 外部 agent session / 远端执行器接入。
+- `agent_py_agent/config/agent_config.yaml`：主配置。模型连接、owner home 与记忆路径、Gateway 与 runner 参数、工具开关、
+  Compact 与外置阈值、后台进程监听范围、决策模型开关、`enable_self_learning`（默认关）、`enable_model_profile_tool`（默认开）等，每项都有中文注释。
+- `agent_py_agent/config/capability_config.yaml`：子代理能力路由、上抛层数、grant 上限、心跳与超时；数字限制项 `0` 表示不限制。
+- 用户级配置：`~/.my-agent/config/`，模型目录在 `config/model-profiles/`（0700 目录、0600 文件），权限模式在各用户的 `tool_policy.json`。
 
 ## 安全边界
 
-- 不要把真实 API Key 写进仓库。
-- `subagent-run` 默认 dry-run，不调用模型。
-- `--execute` 才会调用模型 API。
-- runner 执行前默认做 channel probe，BROKEN 时不会继续模型调用。
-- 子代理只能看到 `execution_context.json` 里的 allowed tools / skills。
-- 模型尝试调用未授权工具时，工具层会拒绝。
-- 多用户/owner-scoped 的前台与后台 shell 必须通过 bwrap 隔离；缺失、动态依赖错误、namespace 或 mount 自检失败统一返回 `SANDBOX_UNAVAILABLE`，不允许未隔离回退。
-- 默认容器安装只挂当前工作目录和 `~/.my-agent`，不挂 Docker socket，也不暴露宿主其他目录。
-- runner 写出结构化结果后直接进入 `DONE/VERIFIED` 或明确失败态；父级只读取代理树和产物 refs 继续调度或汇总，不再有单独最终收口阶段。
-- `patches` 当前只记录补丁意图和状态，不会自动 apply。
-- `lessons` 会写入 `output.json` / `DEBRIEF.md`；成功 runner 可形成带来源的 owner 记忆 Candidate，不会自动写正式 Skill。
+- 密钥不进仓库：模型密钥只在用户私有目录或环境变量里；工具回执、归档和日志按字段名脱敏。
+- 命令必须隔离：多用户或 owner-scoped 的前后台命令必须经过 bwrap / Seatbelt；自检失败统一 `SANDBOX_UNAVAILABLE`，不允许无隔离回退。
+- 后台服务默认回环：`background_listen_scope` 默认 loopback，开放局域网需用户一次性长期授权，宿主持续复核。
+- 默认容器安装只挂当前工作目录和 `~/.my-agent`，不挂 Docker socket。
+- 子代理只看得到执行上下文里授权的工具与技能；未授权工具在工具层被拒绝；子代理不能越出父级范围。
+- 自学习不自动改正式 Skill：提案必须由用户确认；人格文件 SOUL 的修改也必须用户确认。
+- 未知副作用不冒充成功：工具操作、进程终止、插件停用都要有可核对的回执，拿不到就记为未知并保留对账入口。
+- 更多边界见 [产品能力与边界](docs/PRODUCT_FACTS.md)。
 
-## 关键文档
+## 项目状态
 
-- [LLM_GUIDE.md](LLM_GUIDE.md)：**LLM/AI 开发者总入口**，含开工前/收工后清单、编码规范和设计原则。
-- [docs/ROADMAP.md](docs/ROADMAP.md)：待做/进行中功能清单，开工前必读。
-- [docs/COMPLETED.md](docs/COMPLETED.md)：已落地功能清单，收工后必改。
-- [CLI_REFERENCE.md](CLI_REFERENCE.md)：完整命令和参数手册。
-- [SUBAGENT_RUNBOOK.md](docs/modules/subagent/SUBAGENT_RUNBOOK.md)：subagent、capability 和 runner 详细手册。
-- [WORKSTREAMS.md](docs/WORKSTREAMS.md)：并行开发线和 worktree 规则。
-- [AGENTS.md](AGENTS.md)：后续 AI 开发者必须遵守的开发规范。
-- [CODEBASE_TREE.md](CODEBASE_TREE.md)：目录树和关键文件职责。
-- [DESIGN_LEDGER.md](DESIGN_LEDGER.md)：设计想法、落地状态和后续方向的主导航。
-- [docs/design/](docs/design/)：模块级长篇设计文档。
-- [TESTS.md](TESTS.md)：测试说明和覆盖率报告。
+- 十步重构 / 插件 Goal 的第 1—7、10 步已按真实 TUI 验收收口，第 8、9 步（模型与工具循环拆分、TUI 拆分）仍在进行，见 [执行 Goal](docs/tasks/REFACTOR_PLUGIN_GOAL.md)。
+- 每次发布都要先过本地严格 gate（focused pytest、Ruff、文档同步、代码尺寸、diff、打包洁净度），再推送并双机同版部署；线上 CI 只作参考，不是验收来源。
+- 真实验收方法、历史证据和已知问题见 [TESTS.md](TESTS.md) 与 [STATUS.md](STATUS.md)。
 
 ## 测试
 
-### 运行测试
-
 ```bash
-# 跑全部测试（约 5000+ 个，耗时 ~40 秒）
-python3 -m pytest -q
-
-# 跑某个模块的测试
-python3 -m pytest agent_py_agent/tests/test_subagent_*.py -q
-
-# 跑压力测试（标记为 slow 的测试）
-python3 -m pytest -m slow -q
-
-# 查看覆盖率（需要先安装 pytest-cov）
-pip install pytest-cov
-python3 -m pytest --cov=agent_py_agent/agent --cov-report=term-missing -q
+python3 -m pytest -q -m "not slow and not e2e" --tb=short --timeout=60   # fast suite，CI 同款，托管 runner 上约 40 分钟
+python3 -m pytest agent_py_agent/tests/test_plugin_*.py -q                 # 某个模块
+python3 -m pytest -m slow -q                                              # 压力测试
+python3 -m pytest agent_py_agent/tests/test_architecture_guardrails.py -q # 架构护栏，每次提交前都跑
 ```
 
-### 测试结构
+- 1,100 多个测试文件、两万余项用例，覆盖合同单测、fake tool / fake LLM、回放和少量真实环境验收；真实 TUI 验收单独记录在 [TESTS.md](TESTS.md)。
+- CI 在 Python 3.10 / 3.11 / 3.12 上运行 fast suite，`run_command` 用例在 runner 上真实使用 bubblewrap 沙箱；Full Tests 工作流每日定时运行，也可手动触发。
+- 测试分层与规范见 [TESTING_POLICY.md](TESTING_POLICY.md)，提交前的严格 gate 见 [开发规则](docs/development/DEVELOPMENT_RULES.md)。
 
-```text
-agent_py_agent/tests/
-├── conftest.py                  # 共享 fixture（mock 对象、临时文件等）
-├── test_subagent_*.py           # 子代理模块测试
-├── test_manager_*.py            # 子代理管理器测试
-├── test_gateway_*.py            # gateway 模块测试
-├── test_session_*.py            # session 模块测试
-├── test_memory_*.py             # 记忆模块测试
-├── test_archive_*.py            # 记忆归档测试
-├── test_capability_*.py         # 能力路由测试
-├── test_auth_*.py               # 认证模块测试
-├── test_notification_*.py       # 通知模块测试
-├── test_adapter_*.py            # 通道适配器测试
-├── test_cli_*.py / test_subcommands_*.py  # CLI 命令测试
-├── test_e2e_*.py                # 端到端流程测试
-├── test_scenario_*.py           # 场景测试
-├── test_stress_*.py             # 压力测试
-└── test_regression_fixes.py     # 已知 bug 回归测试
-```
+## 参与开发
 
-### 更新测试文档
-
-当以下情况发生时，必须同步更新 [TESTS.md](TESTS.md)：
-
-1. **新增测试文件** — 在 TESTS.md 的"测试文件清单"中添加条目
-2. **删除或重命名测试文件** — 更新对应条目
-3. **新增压力测试或回归测试** — 在对应章节添加说明
-4. **覆盖率发生变化** — 更新覆盖率数据
-5. **测试策略变更** — 更新"测试策略"章节
-
-更新命令：
-
-```bash
-# 查看当前测试统计
-python3 -m pytest -q --co | tail -1
-
-# 查看测试文件列表
-ls agent_py_agent/tests/test_*.py | wc -l
-```
-
-CI/CD 会在每次 push 时自动运行测试并检查 TESTS.md 是否与实际测试文件同步。
-
-### CI/CD 状态
-
-**查看 CI 运行状态**：
-- 打开 GitHub 仓库页面 → Actions 选项卡
-- 或直接访问：`https://github.com/chaojixiaoyezi/my-agent/actions`
-
-**Badge 状态徽章**（添加到仓库 README 顶部）：
-
-```markdown
-[![Test](https://github.com/chaojixiaoyezi/my-agent/actions/workflows/test.yml/badge.svg)](https://github.com/chaojixiaoyezi/my-agent/actions/workflows/test.yml)
-[![Lint](https://github.com/chaojixiaoyezi/my-agent/actions/workflows/lint.yml/badge.svg)](https://github.com/chaojixiaoyezi/my-agent/actions/workflows/lint.yml)
-```
-
-将 `<owner>` 和 `<repo>` 替换为实际的用户名和仓库名。
-
-**PR 合并要求**：Push 到 main 或打开 PR 时，两个 workflow（Test 和 Lint）必须全部通过才能合并。
-
-### 本地复现 CI 失败
-
-如果 CI 失败，先在本地复现：
-
-```bash
-# 1. 拉取最新代码
-git pull
-
-# 2. 安装依赖
-python3 -m pip install -e .
-
-# 3. 运行完整测试（与 CI 同款）
-python3 -m pytest -q --tb=short
-
-# 4. 运行 lint 检查（与 CI 同款）
-python3 scripts/check_doc_sync.py
-python3 -m py_compile agent_py_agent/**/*.py
-python3 -m py_compile scripts/*.py
-```
-
-如果本地测试通过但 CI 失败，常见原因：
-- **Python 版本差异**：CI 使用 3.10/3.11/3.12，本地确认版本 `python3 --version`
-- **依赖版本差异**：删除 `.venv` 重建，或 `pip install -e .` 重新安装
-- **并行状态污染**：某些测试依赖串行执行，用 `python3 -m pytest -q --tb=short -p no:randomly` 禁用随机顺序
-
-### 本地验证
-
-```bash
-python3 -m py_compile agent_py_agent/agent/*.py agent_py_agent/__main__.py
-# 编译核心 Python 文件，检查语法错误。
-
-python3 -m agent_py_agent --help
-# 直接用模块入口查看帮助，验证源码入口可用。
-
-python3 scripts/live_agent_lab.py --suite smoke
-# 跑不消耗真实 API 的冒烟测试。
-
-python3 agent_py_agent/tests/run_tests.py
-# 跑完整测试；当前测试策略可能调用真实 API，跑前确认 key 和成本。
-```
-
----
+- 新开发者（人或 AI）从 [ONBOARDING.md](ONBOARDING.md) 开始，规范在 [AGENTS.md](AGENTS.md) 和 [LLM_GUIDE.md](LLM_GUIDE.md)。
+- 提交前必须通过本地严格 gate；PR 合并到 `main` 需要维护者审阅，首次贡献者的工作流需要维护者批准后才会运行。
+- 并行开发线用独立 worktree，见 [WORKSTREAMS.md](docs/WORKSTREAMS.md) 和 [交接模板](docs/tasks/HANDOFF_TEMPLATE.md)。
+- 发现安全问题请使用仓库的私密漏洞报告入口，不要开公开 issue。
 
 ## 文档导航
 
 | 文档 | 说明 |
-|------|------|
-| [ONBOARDING.md](ONBOARDING.md) | **新 LLM / 新开发者开工指南** — 先读这个 |
-| [AGENTS.md](AGENTS.md) | LLM 开发者行为规范 |
+| --- | --- |
+| [docs/PRODUCT_FACTS.md](docs/PRODUCT_FACTS.md) | 当前产品能力与边界（唯一权威） |
+| [CLI_REFERENCE.md](CLI_REFERENCE.md) | 全部命令、TUI 斜杠命令与参数 |
+| [docs/design/TUI_DESIGN.md](docs/design/TUI_DESIGN.md) | TUI 交互规范 |
+| [docs/design/TUI_MODEL_PROFILES.md](docs/design/TUI_MODEL_PROFILES.md) | 模型目录、会话选择与代理自助管理 |
+| [docs/design/GATEWAY_DESIGN.md](docs/design/GATEWAY_DESIGN.md) | Gateway 设计 |
+| [docs/modules/subagent/SUBAGENT_RUNBOOK.md](docs/modules/subagent/SUBAGENT_RUNBOOK.md) | 子代理、能力路由与 runner 手册 |
+| [docs/design/PLUGIN_PACKAGES.md](docs/design/PLUGIN_PACKAGES.md) · [PLUGIN_ANY_LANGUAGE.md](docs/design/PLUGIN_ANY_LANGUAGE.md) | 插件包、任意语言插件与沙箱 |
+| [docs/architecture/MY_AGENT_HOME_LAYOUT.md](docs/architecture/MY_AGENT_HOME_LAYOUT.md) | `~/.my-agent` 家目录布局 |
+| [DESIGN_LEDGER.md](DESIGN_LEDGER.md) | 设计想法、落地状态与后续方向 |
 | [CODEBASE_TREE.md](CODEBASE_TREE.md) | 目录树逐文件说明 |
-| [CLI_REFERENCE.md](CLI_REFERENCE.md) | CLI 命令和参数手册 |
-| [docs/architecture/BOUNDARY_RULES.md](docs/architecture/BOUNDARY_RULES.md) | 分层导入矩阵 |
-| [docs/architecture/MODULE_OWNERSHIP.md](docs/architecture/MODULE_OWNERSHIP.md) | 模块职责归属表 |
-| [docs/development/DEVELOPMENT_RULES.md](docs/development/DEVELOPMENT_RULES.md) | 编码规则 |
-| [TESTING_POLICY.md](TESTING_POLICY.md) | 测试分层和规范 |
-| [CODE_SIZE_POLICY.md](CODE_SIZE_POLICY.md) | 代码尺寸限制 |
-| [CLEAN_PACKAGE_POLICY.md](CLEAN_PACKAGE_POLICY.md) | 打包洁净度规范 |
-| [docs/decisions/](docs/decisions/) | 架构决策记录 (ADR) |
+| [docs/ROADMAP.md](docs/ROADMAP.md) · [docs/COMPLETED.md](docs/COMPLETED.md) | 待做与已完成清单 |
+| [docs/decisions/](docs/decisions/) | 架构决策记录 |
+
+## 许可
+
+Copyright 2026 超级小叶子 (chaojixiaoyezi)。代码按 [Apache License 2.0](LICENSE) 发布。随包提供的 bubblewrap 沙箱二进制保留其自身许可、源码归档与来源说明，见 [NOTICE](NOTICE) 与 `agent_py_agent/vendor/bubblewrap/`。
