@@ -493,19 +493,35 @@ def test_original_tui_can_edit_action_candidate_thread_mode(tmp_path):
     asyncio.run(scenario())
 
 
-# LLM: 集成夹具：观察经插件线的 parse_observation 铸造，并经产品的 tool_completed 事件写法记进假权威库；
+# LLM: 与真实工具循环同一写入口 persist_tool_runtime_ledger；归档形状照产品归档且没有 runtime_gate（只读观察工具不经审批），
+#   宿主带真实 LocalStore，用来钉住“门台账不写、权威事件仍写”的真实链路；有副作用：写 tmp_path 下的本地库与假权威库。
+# 函数用途: 把一次宿主铸造的观察按产品写法归档进权威事件流，返回归档与观察记录。
+def persist_observation(host, payload, *, operation_id, call_id):
+    from agent_py_agent.agent.agent_core.tool_runtime_ledger import persist_tool_runtime_ledger
+    from agent_py_agent.agent.plugin_observation import parse_observation
+    from agent_py_agent.tests.test_plugin_observation import _context
+
+    record = parse_observation(payload, _context(operation_id=operation_id))
+    archive = {"tool": record.tool_name, "id": call_id, "run_id": "run-1", "task_id": "task-1", "operation_id": operation_id,
+               "attempt_id": "attempt-1", "ok": True, "error_code": "", "idempotency_key": "",
+               "scoped_call_id": f"run-1:{call_id}", "output_hash": "a" * 64,
+               "tool_result_envelope": {"observation": record.to_envelope()}}
+    persist_tool_runtime_ledger(host, archive)
+    return archive, record
+
+
+# LLM: 集成夹具：观察经插件线的 parse_observation 铸造，并经产品写入口 persist_tool_runtime_ledger 记进假权威库；
 #   不替换 observation_is_current，只替换决策服务边界，用来钉住与真实新鲜度合同（run_id 映射、按事件序判当前）的接缝。
 # 函数用途: 构造一次真实铸造的 browser-lite 读观察调用，返回宿主、调用记录、归档、假库与首个观察记录。
 def real_observation_turn(tmp_path):
-    from agent_py_agent.tests.test_plugin_observation import (
-        ACTIONS,
-        _payload,
-        _record_observation,
-        _Repo,
-    )
+    from agent_py_agent.agent.local_storage import LocalStore
+    from agent_py_agent.tests.test_plugin_observation import ACTIONS, _payload, _Repo
 
     repo = _Repo()
-    record = _record_observation(repo, _payload(), operation_id="op-1")
+    host = SimpleNamespace(root=tmp_path, tools=SimpleNamespace(), config=SimpleNamespace(auto_save_memory=False),
+                           local_store=LocalStore(tmp_path / "local.db", enable_fts=False),
+                           subagents=SimpleNamespace(runtime_db=repo))
+    archive, record = persist_observation(host, _payload(), operation_id="op-1", call_id="read-1")
     tools = (record.tool_name, *ACTIONS.values())
     params = ToolLoopExecuteParams(
         user_prompt="帮我在测试页下单。", memories=[], runtime_injections=[], prompt_files=[],
@@ -518,16 +534,14 @@ def real_observation_turn(tmp_path):
     )
     call = canonical_history_call(record.tool_name, {}, call_id="read-1", run_id="run-1", turn_id="turn-2", attempt_id="attempt-1")
     result = canonical_history_result(call, '{"items": ["page-output"]}', ok=True)
-    archive = {"tool": record.tool_name, "id": "read-1", "run_id": "run-1", "task_id": "task-1", "scoped_call_id": "run-1:read-1",
-               "output_hash": "a" * 64, "tool_result_envelope": {"observation": record.to_envelope()}}
     params.archive_tool_calls.append(archive)
-    host = SimpleNamespace(root=tmp_path, tools=SimpleNamespace(), config=SimpleNamespace(auto_save_memory=False),
-                           subagents=SimpleNamespace(runtime_db=repo))
     return host, ToolCallRecordParams(params=params, tool_rounds=2, idx=1, call=call, result=result), archive, repo, record
 
 
 def test_real_freshness_authority_accepts_the_current_observation(tmp_path, monkeypatch):
-    host, record, archive, _repo, observed = real_observation_turn(tmp_path)
+    host, record, archive, repo, observed = real_observation_turn(tmp_path)
+    assert host.local_store.list_runtime_gate_ledger(run_id="run-1") == [], "没有 runtime_gate：门台账不写"
+    assert [row["event_type"] for row in repo.events] == ["tool_completed"], "权威完成事件照写，观察才有新鲜度事实源"
     calls = install(monkeypatch, choice="c1")
     hint = module.action_candidate_hint(host, record, archive)
     first = observed.candidates[0]
@@ -536,9 +550,9 @@ def test_real_freshness_authority_accepts_the_current_observation(tmp_path, monk
 
 
 def test_real_freshness_authority_rejects_an_observation_replaced_for_the_same_target(tmp_path, monkeypatch):
-    from agent_py_agent.tests.test_plugin_observation import _payload, _record_observation
+    from agent_py_agent.tests.test_plugin_observation import _payload
 
-    host, record, archive, repo, _observed = real_observation_turn(tmp_path)
-    _record_observation(repo, _payload(target={"ref": "tab-3", "generation": "18"}), operation_id="op-2", attempt_id="attempt-2")
+    host, record, archive, _repo, _observed = real_observation_turn(tmp_path)
+    persist_observation(host, _payload(target={"ref": "tab-3", "generation": "18"}), operation_id="op-2", call_id="read-2")
     calls = install(monkeypatch)
     assert module.action_candidate_hint(host, record, archive) == "" and calls == [], "同一目标有了更新观察，旧候选不再提示"
