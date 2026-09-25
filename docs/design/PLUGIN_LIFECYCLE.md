@@ -377,6 +377,8 @@ Hermes `0a62610` 的 `hermes_cli/plugins.py`、relay command manifest/transport 
 工具名（见 [后台工具策略边界](../modules/gateway/04-structure.md#后台工具策略边界)）。停用撤销、禁用表和连接断开仍按第 5、6 条
 在注册表与快照层 fail-closed，后台唤醒不能因此重新激活插件。
 
+来源解析与报错（2026-09-24，同伴 .9 现场发现后修）：相对包路径只按 Gateway 已校验的会话工作区根解析（客户端随命令附带的 `workspace.cwd`，缺省为线程 cwd 或 owner 目录），不是终端当前目录；`plugin_sources.PluginSourceError` 带结构化 `reason ∈ {not_found, unauthorized, symlink}` 与解析基准，安装/更新工具据此分别回执（`source_not_found` 含解析目录、`source_unauthorized`、`package_<原因>`），不再三合一。
+
 版本更新首片（2026-09-24）：`/plugins update <插件ID> <新包路径>` 由 `plugin_update.py` 的纯计划 + `PluginInstallStore.update_package`
 实现：同一锁内先提交 install 回执（版本 +1，配置清空），旧配置能按新版本 `settings_schema` 规范化时紧接 configure 回执（版本 +2）恢复，
 结果带 `settings_restored/settings_reason`；只复用既有持久动作，安装表不加字段，旧运行时仍能读。边界：目标必须已停用且激活已结清

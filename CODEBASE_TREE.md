@@ -779,6 +779,7 @@ agent_py_agent/
 |   |-- test_plugin_proxy_revoked_call.py # 插件代理发送前复核激活：撤销固定 TOOL_UNAVAILABLE/not_started 且不发送，激活有效沿原 MCP 链
 |   |-- test_plugin_release.py        # 原 handler 退出、环境删除、结果落账与重送消费边界
 |   |-- test_plugin_removal.py        # 管理卸载、权限、旧请求重放、准备未退与持久成功后包回收
+|   |-- test_plugin_source_errors.py  # 插件来源结构化原因：相对路径按会话工作区解析、不存在/越权/格式无效分别回执
 |   |-- test_plugin_update.py         # /plugins update：替换包并保留兼容配置、不兼容清空并报告、已启用/ID 不一致/同包拒绝或不变、计划纯函数
 |   |-- test_plugin_skills.py         # 随包 Skill：v3 描述往返与校验、只取已启用插件、最低优先级、停用即消失
 |   |-- test_plugin_host_api.py       # 宿主只读 API：令牌随激活失效、主题白名单、线程公开字段、v4 描述

@@ -188,6 +188,12 @@ child不展示历史正文时的读取回归先复现1 failed/1 passed，修复�
 - **真实 TUI 复验（测试机，默认确认模式，MiniMax-M2.7，2026-09-24）**：workspace-peek 的 tree 是只读工具不弹审批，改用临时安装的 savepoint-lite（save 为写操作）。场景一：模型调用 save 弹出"工具授权"框，另一 TUI 在等待期间 `/plugins disable savepoint-lite`（SUCCEEDED），随后点"允许一次"→ 结果为 `TOOL_UNAVAILABLE`，文案"工具在批准后、执行前复核时已不可用：原插件已停用或激活不可用"，该请求 `tool_operations` 为空、`agent_run.completed` ok、模型如实报告不可用并给出替代建议。场景二：发出请求 1 秒后停用插件，模型的调用到执行器时已被审批前复核拦下，没有弹出审批框，文案为"审批前复核时已不可用"，账上同样零操作。收尾已卸载 savepoint-lite、删除包文件、关闭 TUI。证据在仓库外 `releases/step10-combo3/precheck-acceptance-evidence.json`。
 - **待办（测试机，插件生命周期）**：复验前用 `/plugins disable workspace-peek` 制造停用时，两次停用都返回 UNKNOWN（`effect_outcome_unknown:PLUGIN_CLEANUP_UNCONFIRMED`），随后 `/plugins enable` 以 `commit_state=not_committed, reason=activation_unsettled` 失败，插件停在 revoked。测试机上没有残留插件进程，进程会话表里该插件有一条 09-22 的 `status=unknown, stop_requested=true, exit_code=None` 旧记录，疑为清理无法确认的来源。按合同这是"未知不改成成功"，但缺少一条由结构化事实（进程确已不存在）结清旧未知记录的路径，需要另开一片处理；处理前测试机基线只剩 revoked 的 workspace-peek。 **已修（2026-09-24）**：重试停止时若记录已是 unknown、带上一次 cleanup 结果且两级实例按 PID 出生标识均不存在，则结清为 killed；见下文"后台续跑扩展目录与停用结清"，测试机真实复验待部署后进行。
 
+## 插件来源结构化原因（2026-09-24，本地分支 `claude/plugin-source-errors`）
+
+- **现场**：同伴在 .9 用 TUI 装 desktop-lite，相对路径失败、绝对路径成功，且报错和"包在 owner 墙外"是同一句"来源不可读、未获授权或格式无效"。核对合同：相对路径按 Gateway 校验过的会话工作区根（客户端随命令附带的 `workspace.cwd`，即 TUI 标题栏显示的目录）解析，不是终端所在目录——这一点本身正确，问题是三种失败混成一句、用户无从判断。
+- **改动**：`plugin_sources.PluginSourceError(reason ∈ {not_found, unauthorized, symlink}, source, base)`；`read_plugin_source` 找不到时带出解析基准；安装与更新工具分别回执 `source_not_found`（文案含解析目录与"可改用绝对路径"）、`source_unauthorized`（不回显路径）、`package_<原因>`（格式无效），其余异常保留泛化文案。CLI_REFERENCE 与插件方案写明解析规则。
+- **回归**：新增 `test_plugin_source_errors.py` 2 项（原因码、解析基准、链接、越权不回显路径；真实管理链上相对路径安装成功、缺失/坏包分别回执）；与 `test_plugin_management`、`test_plugin_update`、`test_plugin_install_store` 联合 61 passed。
+
 ## /plugins update 首片（2026-09-24，本地分支 `claude/plugin-update`）
 
 - **改动**：目录新增 `update <插件> <新包路径>` 管理动作，映射管理工具 `plugin_update`（沿安装权限，模型不可见）。`plugin_update.plan_package_update` 纯计划：同操作重放 → 插件存在 → 新包 ID 一致 → 版本 CAS → 激活已结清 → 包确实不同；`PluginInstallStore.update_package` 在同一 quota→目录锁内保存新包 blob、一次写入安装表：install 回执（版本 +1，配置清空）后，旧配置能按新 `settings_schema` 规范化时紧接 configure 回执（版本 +2）恢复，结果带 `settings_restored/settings_reason`；只复用既有持久动作，安装表无新字段。

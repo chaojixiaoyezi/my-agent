@@ -10,8 +10,9 @@ from pathlib import Path
 from .path_access_policy import PathAccessPolicy
 from .plugin_install_store import PluginInstallStore
 from .plugin_installation import PluginInstallationError
+from .plugin_manifest import PluginPackageError
 from .plugin_package import PackageReadLimits, inspect_plugin_package
-from .plugin_sources import read_plugin_source
+from .plugin_sources import PluginSourceError, read_plugin_source
 from .plugin_update import PLUGIN_UPDATE_TOOL, PluginUpdateRequest
 from .tooling.models import (
     ApprovalPolicy,
@@ -51,8 +52,17 @@ class PluginUpdateTool(BaseTool):
             package = inspect_plugin_package(read_plugin_source(
                 params["source"], self.workspace, self.policy, max_bytes=limits.archive_bytes,
             ), limits=limits)
+        except PluginSourceError as exc:
+            # 来源问题按结构化原因分开告知：不存在（含解析基准）、越权、链接；不把三者混成一句。
+            return ToolHandlerOutcome(PLUGIN_UPDATE_TOOL, False, str(exc), error_code="TOOL_INVALID_ARGUMENTS",
+                                      effect_outcome="not_started",
+                                      result_envelope={PLUGIN_UPDATE_TOOL: {"reason": f"source_{exc.reason}", "source_base": str(exc.base)}})
+        except PluginPackageError as exc:
+            return ToolHandlerOutcome(PLUGIN_UPDATE_TOOL, False, f"插件包格式无效：{exc}", error_code="TOOL_INVALID_ARGUMENTS",
+                                      effect_outcome="not_started",
+                                      result_envelope={PLUGIN_UPDATE_TOOL: {"reason": f"package_{exc.reason}"}})
         except (OSError, ValueError, RuntimeError):
-            return ToolHandlerOutcome(PLUGIN_UPDATE_TOOL, False, "插件包来源不可读、未获授权或格式无效。",
+            return ToolHandlerOutcome(PLUGIN_UPDATE_TOOL, False, "插件包来源不可读或格式无效。",
                                       error_code="TOOL_INVALID_ARGUMENTS", effect_outcome="not_started")
         previous = next((entry for entry in self.store.snapshot() if entry.manifest.plugin_id == plugin_id), None)
         report = {"plugin_id": plugin_id, "enabled": False,
