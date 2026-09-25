@@ -1,6 +1,6 @@
 # 插件观察候选结构（设计稿）
 
-状态：纯文档设计，**未实施**，待插件线评审（2026-09-25）。它是第 15 项 P5-C"动作候选"的前置条件：没有这层结构，决策模型就无法在不读自由文本的前提下参与"下一步先看哪个元素"。
+状态：纯文档设计，**未实施**；2026-09-25 插件线评审通过，结论见第 5 节（已并入正文）。插件线先实施第 4 节第 1 步，决策线随后接点。它是第 15 项 P5-C"动作候选"的前置条件：没有这层结构，决策模型就无法在不读自由文本的前提下参与"下一步先看哪个元素"。
 归属：manifest、代理结果校验、执行前复核与示例插件归插件线；决策接入点归决策线。前期审计见[动作候选审计](../tasks/DECISION_MODEL_ACTION_CANDIDATE_AUDIT.md)，台账摘要见 [DESIGN_LEDGER](../../DESIGN_LEDGER.md)。
 
 ## 1. 现状与缺口
@@ -36,7 +36,7 @@
 - `observation` 只允许出现在 `requested_effect == "read_only"` 的工具上，否则安装拒绝：观察本身不能有副作用。
 - `target_kind` 是开放字符串，只校验形状（如 `^[a-z][a-z0-9_-]{0,31}$`），不设封闭枚举。它只用于把观察和动作配对。
 - `max_candidates` 由宿主再夹一次上限（建议 ≤ 64）。
-- `observation_ref.param` 指向动作工具输入 schema 里的一个**可选**字符串参数。安装时校验该参数存在、类型为 string、不在 `required` 里。
+- `observation_ref.param` 指向动作工具输入 schema 里的一个**可选**字符串参数，名字由插件自定，宿主只读 manifest 映射。安装时校验：该参数存在、类型为 string、不在 `required` 里，且不与 `_meta` 保留键或宿主注入参数同名。
 - **声明只放 manifest，不另加握手扩展**：已安装的包快照本来就是工具元数据的唯一权威，安装、帮助与审阅时都能看到；若再用握手动态声明，就会出现两个可能冲突的来源。
 
 ### 2.2 结果载荷（插件输出）
@@ -71,13 +71,14 @@
   - `candidates[{candidate_id, key, role, label, actions}]`
 
   不另建观察账本；索引与投影只读这份归档。
-- **"当前观察"判定**：同一 run/task、同一 `activation_id` 与 `target_ref_hash` 下，调用序最新的一次成功观察为 current，更早的都算 stale。这是宿主凭调用顺序就能验证的事实。
+- **模型可见投影**：主模型必须看到宿主铸的 `candidate_id` 才能填动作参数，所以宿主在模型可见的结果投影里，把 `my_agent_observation` 重写为有界投影 `{observation_id, candidates[{candidate_id, role, label, actions}]}`，隐去插件的 key、target.ref 与代次。归档仍是唯一权威，投影只做展示；形状被拒时投影里不出现任何候选。
+- **"当前观察"判定**：同一 run/task、同一 `activation_id` 与 `target_ref_hash` 下，最新的一次成功观察为 current，更早的都算 stale。调用序取 runtime 工具账（`tool_operations`），不按模型历史。同一 run/task 的后台续跑 attempt 共享这些观察：归属按 run/task，不按 attempt。
 
 ### 2.4 执行前复核（两层，插件线）
 
 主模型调用声明了 `observation_ref` 的动作工具，并填了 `param` 指定的参数（值为某个 `candidate_id`）时：
 
-1. **宿主层**（发送前）：在当前 run/task 的归档里查这个 `candidate_id`。查不到、所属观察已 stale、或该候选的 `actions` 不含本工具时，直接拒绝：`OBSERVATION_STALE` / `OBSERVATION_CANDIDATE_UNKNOWN`，`effect_outcome=not_started`，不发送。通过时，只在 `tools/call` 的 `_meta["my-agent/observation-ref"]` 附上 `{"version": "1", "target_ref": ..., "generation": ..., "key": ...}`；模型给的 `arguments` 原样不动，原审批绑定的 `args_hash` 也不受影响。这与 workspace-read-context 放 `_meta` 的方式相同。
+1. **宿主层**（发送前）：在当前 run/task 的归档里查这个 `candidate_id`，新鲜度按 `tool_operations` 调用序判定。查不到、所属观察已 stale、或该候选的 `actions` 不含本工具时，直接拒绝：`OBSERVATION_STALE` / `OBSERVATION_CANDIDATE_UNKNOWN`，`effect_outcome=not_started`，不发送。通过时，只在 `tools/call` 的 `_meta["my-agent/observation-ref"]` 附上 `{"version": "1", "target_ref": ..., "generation": ..., "key": ...}`；模型给的 `arguments` 原样不动，原审批绑定的 `args_hash` 也不受影响。这与 workspace-read-context 放 `_meta` 的方式相同。
 2. **插件层**（执行前）：插件核对自己的当前代次等于 `_meta` 里的代次、`key` 能唯一解析，才执行。否则返回 `isError`，并在 `structuredContent` 里带 `{"my_agent_observation_error": {"code": "stale" | "not_found"}}`，不产生副作用。
 
 不填该参数的动作调用保持现状（例如 browser-lite 继续按选择器执行），与候选语义无关。首片不要求动作工具必须走候选。
@@ -118,10 +119,12 @@
    - 对照 off/observe/apply；
    - 记录 Jev 用量、选中的 ID、提示是否出现、主模型是否采纳，以及页面变化后旧建议是否被拦下。
 
-## 5. 请插件线确认
+## 5. 评审结论（插件线，2026-09-25）
 
-1. 声明放 manifest（推荐）还是握手扩展？
-2. 动作工具的候选参数名：按 `observation_ref.param` 由插件自定（推荐，宿主只读 manifest 映射），还是统一保留名？
-3. 保留键 `my_agent_observation` / `my_agent_observation_error` 是否与现有 `structuredContent` 用法冲突？
-4. 归档里观察记录的大小上限：64 个候选、label 120 字，约 10 KB，是否可接受？
-5. browser-lite 的 key 选型：插件内序号加代次（推荐），还是唯一 CSS 选择器？
+1. **声明位置**：放 manifest，不用握手扩展。握手扩展只承载逐次可信上下文，静态声明只能有一个权威。
+2. **动作参数名**：按 `observation_ref.param` 由插件自定，宿主只读 manifest 映射。另加安装校验：参数名不能与 `_meta` 保留键或宿主注入参数同名。
+3. **保留键**：`my_agent_observation` / `my_agent_observation_error` 与现有插件不冲突。评审补了一个缺口：候选 ID 必须出现在模型可见的结果投影里，已并入 2.3。
+4. **大小**：64 个候选、label 120 字（约 10 KB）可以接受。观察按次调用归档，随原工具结果受 `max_chars` 约束，不另建账本，不会累积。
+5. **browser-lite 的 key**：用插件内序号加代次。CSS 选择器不稳定，也会诱使模型或宿主把它当选择器用。
+
+另加两条边界（已并入 2.3/2.4）：发送前新鲜度按 `tool_operations` 调用序判定；同一 run/task 的后台续跑 attempt 共享观察。

@@ -1088,7 +1088,7 @@ docs/
 - `agent_py_agent/agent/plugin_activation.py` 与 `plugin_activation_record.py`：同一原计划的准备/发布/撤销 CAS，旧快照只读原代；撤销状态不证明资源退出。
 - `agent_py_agent/agent/plugin_activation_ref.py`：只定位原安装表的可信引用；严格核对原 owner/root/scope，启动和发送不缓存授权。
 - `docs/design/PLUGIN_ACTIVATION.md`：激活身份、持久撤销、释放/证据消费及重新启用；卸载、显式业务命令及实际多 TUI 仍待完成。
-- `docs/design/PLUGIN_OBSERVATION_CANDIDATES.md`：插件观察候选结构设计稿（未实施，待插件线评审）：只读工具在 manifest 声明观察、结果给出目标代次与有限候选，宿主铸 ID 写进原归档，动作前两层复核；是第 15 项动作候选决策点的前置条件。
+- `docs/design/PLUGIN_OBSERVATION_CANDIDATES.md`：插件观察候选结构设计稿（未实施，已评审通过）：只读工具在 manifest 声明观察、结果给出目标代次与有限候选，宿主铸 ID 写进原归档，动作前两层复核；是第 15 项动作候选决策点的前置条件。
 - `docs/design/MANAGED_PROCESS_STDIO.md`：原托管器的字节通道、v4 显式保留和激活归属，旧 v2/v3 原版本恢复边界。
 - `agent_py_agent/agent/plugin_configure_tool.py` 与 `plugin_sources.py`：隐藏管理工具通过原执行链读取授权来源，配置值只进 owner 私有安装表；包与配置共用有界安全读取。
 - `agent_py_agent/agent/plugin_install_tool.py` 与 `plugin_management.py`：管理服务核对原授权并走唯一执行器；安装默认停用，配置与启停同源，列表／详情投影当前安装快照，查询只读原请求。
