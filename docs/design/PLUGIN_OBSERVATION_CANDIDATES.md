@@ -1,6 +1,6 @@
 # 插件观察候选结构（设计稿）
 
-状态：插件线部分**已实施**（2026-09-24 晚，见第 6 节实施记录）；决策线 `action_candidate` 点待接。2026-09-25 插件线评审通过，结论见第 5 节（已并入正文）。它是第 15 项 P5-C"动作候选"的前置条件：没有这层结构，决策模型就无法在不读自由文本的前提下参与"下一步先看哪个元素"。
+状态：插件线部分**已实施**（2026-09-24 晚，见第 6 节实施记录）；决策线 `action_candidate` 点已接入并完成 browser-lite 真实验收（2026-09-25）。2026-09-25 插件线评审通过，结论见第 5 节（已并入正文）。它是第 15 项 P5-C"动作候选"的前置条件：没有这层结构，决策模型就无法在不读自由文本的前提下参与"下一步先看哪个元素"。
 归属：manifest、代理结果校验、执行前复核与示例插件归插件线；决策接入点归决策线。前期审计见[动作候选审计](../tasks/DECISION_MODEL_ACTION_CANDIDATE_AUDIT.md)，台账摘要见 [DESIGN_LEDGER](../../DESIGN_LEDGER.md)。
 
 ## 1. 现状与缺口
@@ -85,7 +85,7 @@
 
 ### 2.5 决策接入点 `action_candidate`（决策线，第 15 项剩余）
 
-决策侧已在分支 `claude/decision-action-candidate`离线实施，见[接入设计](DECISION_MODEL_INTEGRATION.md#p5-c-动作候选-action_candidate)。
+决策侧已接入（随分支 `claude/decision-action-candidate` 合入），2026-09-25 在隔离 owner 上用 browser-lite 完成 off/observe/apply/过期四档真实验收，见[接入设计](DECISION_MODEL_INTEGRATION.md#p5-c-动作候选-action_candidate)与[真实验收](../tasks/DECISION_MODEL_REAL_VALIDATION.md#15-动作候选-action_candidate-的-browser-lite-真实验收2026-09-25)。
 
 
 - **开关与设置**：独立点，默认 off。沿用原决策设置来源（YAML、AgentConfig、设置服务、TUI 菜单）与逐点的 profile/timeout，不借 `skill_tool` 的开关。
@@ -160,7 +160,7 @@
 - **同批记录、待插件线后续处理的 browser-lite 发现**：Gateway 模式下 `open url=相对路径` 按 `request.workspace_root` 解析而不是模型
   以为的 TUI 当前目录；`file://` 被宿主的 URL 参数门先拦（`NETWORK_FILE_URL_BLOCKED`），`http://localhost` 被宿主私网门拦
   （`NETWORK_PRIVATE_HOST_BLOCKED`），README 里"file:// 与 allowed_hosts 默认放行 localhost"的说法只对插件层成立，需要与宿主门对齐。
-- **未做**：决策线 `action_candidate` 点（`claude/decision-action-candidate` 待 rebase）；computer_use 观察适配；真实 TUI 端到端验收待决策点接入后一起做。
+- **未做**：computer_use 观察适配。决策线 `action_candidate` 点与真实 TUI 端到端验收已于 2026-09-25 完成（见决策线[真实验收](../tasks/DECISION_MODEL_REAL_VALIDATION.md#15-动作候选-action_candidate-的-browser-lite-真实验收2026-09-25)）。
 
 ## 5. 评审结论（插件线，2026-09-25）
 

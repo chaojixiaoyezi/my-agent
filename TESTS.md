@@ -2,22 +2,25 @@
 
 child不展示历史正文时的读取回归先复现1 failed/1 passed，修复后test_compact_retained_history、test_subagent_compact_recovery、test_gateway_child_compact_scope_application三文件31 passed（8.48秒）。三宿主seed仓外基线仅验证测量和完整性，不算内存目标通过；细节见容量审计的宿主生命周期基线。
 
-## 动作候选 `action_candidate`（2026-09-25，分支 `claude/decision-action-candidate`，待插件线观察结构落地后合入）
+## 动作候选 `action_candidate`（2026-09-25，分支 `claude/decision-action-candidate`，基于 main `6a50d84aa`）
 
 - **改动**：
   - 新增 `tool_context/decision_action_candidate.py`；`_optional_result_hints` 追加第三个点。
   - `POINT_RUNTIME_SCOPES` 登记 `action_candidate: thread`；AgentConfig/YAML 三字段默认 off/null/null；TUI 决策菜单加"动作候选"。
-- **新测试** `test_decision_action_candidate.py` 79 项。只替换两个边界：决策服务，以及插件线的新鲜度权威 `plugin_observation`（按承诺签名注入替身）。覆盖：
+  - 新鲜度只问插件线的 `plugin_observation.observation_is_current`；数量上限、`obs-`/`cand-` 编号、key/role 规则与 `OBSERVATION_SCHEMA` 直接复用 `plugin_observation`，`target_kind` 复用 manifest 规则，不另立第二份。
+- **新测试** `test_decision_action_candidate.py` 82 项。单元用例只替换决策服务和模块内的新鲜度函数；另有两项集成用例用插件线真实的 `parse_observation` 铸观察，经产品写入口 `persist_tool_runtime_ledger`（带真实 LocalStore，归档没有 `runtime_gate`，与真实链路一致）记进权威事件流，再由真实 `observation_is_current` 判定。覆盖：
   - 未登记时严格空操作；off、阶段错误、他 run 阶段都不准备材料。
   - apply 只追加所选候选的 candidate_id 与 role。外发不含 key、目标引用、代次、激活、候选编号、动作名、请求密钥或工具输出；label 只出现在同一个外部数据块。
   - observe 以及 deadline/cooldown/error/stale 都保留原结果；四种非选择和坏答案同样保留。
   - 所选候选的动作工具不可用时不追加。
-  - 31 种不合格来源零请求：数量越界、编号/类型/角色/label/key/动作不合规、归档不一致、失败或重放调用、两种收口、请求超长或为空、请求或 label 含 URL 查询串、没有可用动作。
-  - 新鲜度：不新鲜时零请求并以 owner 库、run、task、observation_id 询问权威；等待期间变旧不追加；没有权威库或权威模块缺失都安全关闭。
+  - 32 种不合格来源零请求：schema 版本不符、数量越界、编号/类型/角色/label/key/动作不合规、归档不一致、失败或重放调用、两种收口、请求超长或为空、请求或 label 含 URL 查询串、没有可用动作。
+  - 新鲜度：不新鲜时零请求并以 owner 库、run、task、observation_id 询问权威；等待期间变旧不追加；没有权威库、权威返回非 True 或抛错都安全关闭。
+  - 集成：当前观察给出提示，同时门台账不写、完成事件照写；同一目标有了更新观察后旧候选不再提示。修复前的 `persist_tool_runtime_ledger`（无门即提前返回）会让第一项失败。
   - 子代理零请求；等待期间来源或工具快照变化、两种期限、响应绑定其他材料、策略变化都不采用；可选错误保留原结果，取消与中断上抛。
   - 经原 `_record_tool_call` 在 off/observe/apply 下 text/native/IR 为同一段；三点互斥；默认配置为 off 且 thread 可设；原 TUI 菜单可改线程模式。
-- **变异验证**：18 种各自使新测试失败（新鲜度恒真、去掉采用前来源复核、渲染或资格忽略可用性、候选下限 2→1、去掉重复编号检查、外发 key、去掉 ok/子代理/URL/题号/策略/期限/label 上限/候选上限/归档 task/响应绑定/权威库检查）。子进程带 `PYTHONDONTWRITEBYTECODE=1`，结束后还原原文件。
-- **回归**（基于 main `6c3ffc2ad`）：全部 `test_decision_*`，以及引用 `_record_tool_call`/`_optional_result_hints`/设置 schema/TUI 决策菜单的 52 个文件，1462 passed、1 xpassed（既有）；另跑配置与架构守卫在内的 19 个文件，570 passed。
+- **变异验证**：19 种各自使新测试失败（新鲜度恒真、去掉采用前来源复核、渲染或资格忽略可用性、候选下限 2→1、去掉重复编号检查、外发 key、去掉 ok/子代理/URL/题号/策略/期限/label 上限/候选上限/归档 task/响应绑定/权威库/schema 检查）。子进程带 `PYTHONDONTWRITEBYTECODE=1`，结束后原文件逐字节还原。
+- **回归**（rebase 到 main `6a50d84aa` 后）：全部 `test_decision_*`、引用 `_record_tool_call`/`_optional_result_hints`/设置 schema/TUI 决策菜单的文件，加插件观察、代理观察、运行门账本、browser-lite 包与架构守卫，共 57 个文件 1530 passed、1 xpassed（既有）。
+- **真实验收**：本机隔离 owner 上用 browser-lite 做 off/observe/apply/过期四档，见[真实验收](docs/tasks/DECISION_MODEL_REAL_VALIDATION.md#15-动作候选-action_candidate-的-browser-lite-真实验收2026-09-25)。首次运行暴露宿主完成事件在无 `runtime_gate` 时不写的缺口（插件线已在 main `6a50d84aa` 修复）。
 
 ## 自愈两片：无身份悬挂运行轮可见可结清、导航种子不再误迁移（用户决定第 5 项，2026-09-24 晚）
 

@@ -28,7 +28,7 @@
   - **下游**：`enable_self_learning` 开启时，S1 照原链为每条经验生成一个待确认提案。重放不重复：候选靠 observation_id，提案靠 O_EXCL。候选记录失败只写工作日志，不阻断结果交付。
   - **提示**：Runner Contract 只在授权含 `record_lesson` 时多一条可选软引导，不恢复任何状态 JSON 要求；宿主从不解析回复正文。
   - **留给后续**：主线程的经验记录；被取消 run 账本的收取（账本保留，但取消路径不经结果收口）；S1 草稿 `when_to_use` 仍写"来源任务目标："，而账本候选的场景其实是 `when_to_use`。证据见 [TESTS](TESTS.md) 顶部本节。
-- **插件层"观察候选"结构已实施（main `c577ed185`，已部署 `runtime-step11d-16b108bd`；manifest v5、代理结果路径、runtime_events 新鲜度、browser-lite）；决策线 `action_candidate` 点已接入（分支 `claude/decision-action-candidate`，真实验收后合入）**（原稿 2026-09-25，第 15 项剩余点，依据[动作候选审计](docs/tasks/DECISION_MODEL_ACTION_CANDIDATE_AUDIT.md)；完整设计稿见[插件观察候选结构](docs/design/PLUGIN_OBSERVATION_CANDIDATES.md)；决策侧见[接入设计](docs/design/DECISION_MODEL_INTEGRATION.md#p5-c-动作候选-action_candidate)）：
+- **插件层"观察候选"结构已实施（main `c577ed185`，已部署 `runtime-step11d-16b108bd`；manifest v5、代理结果路径、runtime_events 新鲜度、browser-lite）；决策线 `action_candidate` 点已接入并真实验收（2026-09-25，本机隔离 owner 上用 browser-lite 做 off/observe/apply/过期四档，随分支 `claude/decision-action-candidate` 合入，基于 main `6a50d84aa`）**（原稿 2026-09-25，第 15 项剩余点，依据[动作候选审计](docs/tasks/DECISION_MODEL_ACTION_CANDIDATE_AUDIT.md)；完整设计稿见[插件观察候选结构](docs/design/PLUGIN_OBSERVATION_CANDIDATES.md)；决策侧见[接入设计](docs/design/DECISION_MODEL_INTEGRATION.md#p5-c-动作候选-action_candidate)）：
   - **设计稿要点**：manifest v5 在只读工具上声明 `observation`、在动作工具上声明 `observation_ref`；插件在 `structuredContent.my_agent_observation` 给出目标、代次与有限候选；宿主整份校验后铸 `observation_id`/`candidate_id`，写进该次调用原归档的 `tool_result_envelope.observation`（唯一权威），并在模型可见投影里改写为带 candidate_id、隐去插件 key 的有界候选；新鲜度按 `tool_operations` 调用序，run/task 内的后台续跑共享观察；动作执行前宿主按调用序查新鲜度、经 `_meta` 附代次与 key，插件再按页面代次复核；决策点 `action_candidate` 只选一个别名并追加软提示。
   - **现状**：插件线已合入 browser-lite 与 desktop-lite。browser-lite 的 `read` 会返回有限元素清单（标签、文字、name/id、是否可见），`click`/`fill` 按唯一匹配的选择器执行；但宿主没有经过验证的 `observation_id`/`candidate_id`，也没有观察内容哈希与代次。
   - **原则**：不能为 browser-lite 写专项解析，这会违反禁止专项合同的铁律；也不能用截图坐标、自由文本或工具名推荐冒充动作候选。
@@ -37,6 +37,10 @@
     - 决策点只从这些 ID 里选一个、给软提示；真正执行仍由原工具按原审批执行。
     - 执行前按页面或窗口代次复核候选是否仍然有效，失效即丢弃。
     - 这需要主线 owner（插件线）先确认 SDK 字段，再由决策线接入点。
+  - **真实验收的发现**（2026-09-25）：
+    - 已修复：只读工具的归档没有 `runtime_gate`，`persist_tool_runtime_ledger` 原先因此提前返回，`tool_completed` 事件一条不写，观察新鲜度恒为 False。插件线已在 main `6a50d84aa` 改为完成事件总写，决策侧集成测试也改走这个真实写入口。
+    - 插件线后续（已记入[插件观察候选结构](docs/design/PLUGIN_OBSERVATION_CANDIDATES.md)第 6 节，未实施）：相对路径按宿主 `workspace_root` 解析；`file://` 与本机 http 被宿主 URL 参数门先拦。工具描述仍写可用 `file://`，真实样本里模型因此两次先写 `file://` 被拦。
+    - 待主线评估（未实施）：模型经后台进程起的 `python3 -m http.server` 默认监听所有网卡，Gateway 停止后仍在运行（父进程变为 1）。自主审批模式下这会把 owner 工作区目录暴露给局域网；需要结构化的后台进程回收与监听地址边界，而不是按命令文本拦截。
 - **自学习 S2：待确认 Skill 提案的审核顺序 `skill_proposal_review`（第 15 项 P5-C）**（2026-09-24，已合入 main `1132fd9d0`；2026-09-25 随 `record_lesson` 做了真实 Jev 验收，端到端真实验收见[真实验收](docs/tasks/DECISION_MODEL_REAL_VALIDATION.md)「15 自学习 S1/S2 端到端真实验收」一节）：
   - **接线与开关**：新增独立 `owner_background` 接入点，默认 off，只在 `my-agent skills proposals list` 运行。AgentConfig/YAML 三字段 `decision_skill_proposal_review_mode/_timeout_seconds/_profile_id` 与原设置服务、TUI 菜单共用，只允许用户长期（owner）设置。配置归 AgentConfig：此点只排展示、不授予 Skill/工具权限，和 `enable_self_learning` 同属主配置，CLI 也只加载主配置。审计里暂称 `self_learning`，改名以表明只管审核顺序。
   - **触发与材料**：待确认提案 2—30 条且本点 observe/apply、总开关开启时才请求；0—1 条或关闭时零请求、输出逐字节不变。不要求 `enable_self_learning`（它只管生成）。外发只有 `proposal_i` 别名、创建顺序、来源计数，以及经 `external_data/default` 投影的 description、when_to_use 和 240 字经验摘录；提案/候选/任务/运行编号、路径与目标 Skill 名只进本地版本摘要，草稿 hash 不符则不发。

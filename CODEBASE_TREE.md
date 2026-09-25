@@ -1099,7 +1099,7 @@ docs/
 - `agent_py_agent/agent/plugin_activation.py` 与 `plugin_activation_record.py`：同一原计划的准备/发布/撤销 CAS，旧快照只读原代；撤销状态不证明资源退出。
 - `agent_py_agent/agent/plugin_activation_ref.py`：只定位原安装表的可信引用；严格核对原 owner/root/scope，启动和发送不缓存授权。
 - `docs/design/PLUGIN_ACTIVATION.md`：激活身份、持久撤销、释放/证据消费及重新启用；卸载、显式业务命令及实际多 TUI 仍待完成。
-- `docs/design/PLUGIN_OBSERVATION_CANDIDATES.md`：插件观察候选结构设计稿（未实施，已评审通过）：只读工具在 manifest 声明观察、结果给出目标代次与有限候选，宿主铸 ID 写进原归档，动作前两层复核；是第 15 项动作候选决策点的前置条件。
+- `docs/design/PLUGIN_OBSERVATION_CANDIDATES.md`：插件观察候选结构设计稿（插件线已实施，决策点 `action_candidate` 已接入并真实验收）：只读工具在 manifest 声明观察、结果给出目标代次与有限候选，宿主铸 ID 写进原归档，动作前两层复核；是第 15 项动作候选决策点的前置条件。
 - `docs/design/MANAGED_PROCESS_STDIO.md`：原托管器的字节通道、v4 显式保留和激活归属，旧 v2/v3 原版本恢复边界。
 - `agent_py_agent/agent/plugin_configure_tool.py` 与 `plugin_sources.py`：隐藏管理工具通过原执行链读取授权来源，配置值只进 owner 私有安装表；包与配置共用有界安全读取。
 - `agent_py_agent/agent/plugin_install_tool.py` 与 `plugin_management.py`：管理服务核对原授权并走唯一执行器；安装默认停用，配置与启停同源，列表／详情投影当前安装快照，查询只读原请求。
@@ -1403,8 +1403,8 @@ docs/
 - `agent_py_agent/tests/test_decision_external_material_order.py`、`test_external_material_order_integration.py`：安全输入、失效、取消、原页面归档链和设置消费的离线证据。
 - `agent_py_agent/agent/agent_core/tool_context/decision_delivery_quality.py`：run_command 新验证事件后按同 run/task 结构化验证焦点可选追加复核提示；外发不含路径/命令/输出，不改结果、归档或验证账。
 - `agent_py_agent/tests/test_decision_delivery_quality.py`、`test_decision_delivery_quality_integration.py`：资格、隐私、非选择、来源复核、取消，以及真实验证账到 text/native 展示接缝的离线证据。
-- `agent_py_agent/agent/agent_core/tool_context/decision_action_candidate.py`：插件只读观察工具的归档带宿主铸造的观察候选时，可选请决策模型选一个下一步先核对的候选并追加软提示；新鲜度只问插件线的 `plugin_observation` 权威，不执行动作、不生成参数（分支 `claude/decision-action-candidate`，待合入）。
-- `agent_py_agent/tests/test_decision_action_candidate.py`：资格、隐私、非选择、新鲜度与来源复核、取消、text/native 同段提示和设置入口。
+- `agent_py_agent/agent/agent_core/tool_context/decision_action_candidate.py`：插件只读观察工具的归档带宿主铸造的观察候选时，可选请决策模型选一个下一步先核对的候选并追加软提示；新鲜度只问插件线的 `plugin_observation` 权威，不执行动作、不生成参数。
+- `agent_py_agent/tests/test_decision_action_candidate.py`：资格、隐私、非选择、新鲜度与来源复核、取消、text/native 同段提示和设置入口；两项集成用例经真实写入口 `persist_tool_runtime_ledger`（无 `runtime_gate` 的归档）接插件线真实新鲜度权威。
 - `agent_py_agent/agent/capability/decision_candidates.py`、`decision_recommendation.py`：原授权能力候选与单工作片推荐消费者；一次调用、旧建议复核、按需展示，原Registry/Skill快照及搜索执行仍唯一。
 - `docs/tasks/DECISION_MODEL_P2_SUBAGENT_HANDOFF.md`：子代理选择生产接线、联合验证和完整窗口待验边界。
 - `docs/tasks/DECISION_MODEL_P3_RECALL_HANDOFF.md`：记忆排序、来源撤销、原本轮复用及本地验证交接。
