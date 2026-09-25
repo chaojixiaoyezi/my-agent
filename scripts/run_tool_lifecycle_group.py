@@ -37,7 +37,7 @@ import threading
 import time
 import uuid
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -1205,7 +1205,7 @@ def main() -> int:
     if not args.skip_real and not ensure_model_key():
         print("AGENT_API_KEY is required; no fake fallback is allowed.", file=sys.stderr)
         return 2
-    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     run_root = args.output_root.expanduser().resolve() / f"tool-g4-{timestamp}"
     run_root.mkdir(parents=True, exist_ok=False)
     exact_command = " ".join(shlex.quote(item) for item in [sys.executable, *sys.argv])
@@ -1243,7 +1243,7 @@ def main() -> int:
     env_head = os.environ.get("MY_AGENT_GIT_HEAD", "").strip()
     report = {
         "schema_version": "tool-lifecycle-group.v1",
-        "created_at": datetime.now(UTC).isoformat(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
         "provenance": {
             # 复核 seq 345: 实际 checkout HEAD 与 harness revision 分开记录,
             # env override 只作为显式覆盖字段单独列出, 不充当独立 provenance。

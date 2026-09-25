@@ -20,7 +20,7 @@ import sys
 import termios
 import time
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -166,7 +166,7 @@ def record_pty_session(config: RecorderConfig) -> RecorderResult:
     manifest_path = config.output_dir / f"{config.name}.manifest.json"
     master_fd, slave_fd = os.openpty()
     _set_winsize(master_fd, config.rows, config.cols)
-    started_at = datetime.now(UTC).isoformat()
+    started_at = datetime.now(timezone.utc).isoformat()
     process = _spawn_process(config, slave_fd)
     os.close(slave_fd)
     state = _CaptureState(started_monotonic=time.monotonic())

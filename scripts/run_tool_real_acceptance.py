@@ -23,7 +23,7 @@ import subprocess
 import sys
 import uuid
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -322,7 +322,7 @@ def main() -> int:
     if not ensure_model_key():
         print("AGENT_API_KEY is required; no fake fallback is allowed.", file=sys.stderr)
         return 2
-    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     run_root = args.output_root.expanduser().resolve() / f"tool-runtime-{timestamp}"
     run_root.mkdir(parents=True, exist_ok=False)
     workspace = _create_fixture(run_root)
@@ -355,7 +355,7 @@ def main() -> int:
         )
     report = {
         "schema_version": "tool-real-acceptance.v1",
-        "created_at": datetime.now(UTC).isoformat(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
         "git_head": _git_head(),
         "environment": {
             "python": platform.python_version(),

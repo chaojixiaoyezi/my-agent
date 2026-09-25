@@ -32,7 +32,7 @@ import threading
 import time
 import uuid
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -814,7 +814,7 @@ def main() -> int:
     if not args.skip_real and not ensure_model_key():
         print("AGENT_API_KEY is required; no fake fallback is allowed.", file=sys.stderr)
         return 2
-    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     run_root = args.output_root.expanduser().resolve() / f"tool-g3-{timestamp}"
     run_root.mkdir(parents=True, exist_ok=False)
     exact_command = " ".join(shlex.quote(item) for item in [sys.executable, *sys.argv])
@@ -849,7 +849,7 @@ def main() -> int:
 
     report = {
         "schema_version": "tool-side-effect-group.v1",
-        "created_at": datetime.now(UTC).isoformat(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
         "git_head": _git_head(),
         "environment": {
             "python": platform.python_version(),
