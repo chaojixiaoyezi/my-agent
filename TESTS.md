@@ -34,7 +34,8 @@ child不展示历史正文时的读取回归先复现1 failed/1 passed，修复�
 - **改动**：manifest v5（`observation` / `observation_ref`，安装校验与双向配对，构建脚本自动选 v5）；新模块 `agent/plugin_observation.py`（整份接受/拒绝、宿主铸 ID、模型投影、按 runtime_events 序判定新鲜度、动作候选复核）；`PluginProxyTool` 结果路径改写与发送前复核（宿主参数 `__operation_id`/`__run_scope`，`_meta["my-agent/observation"]`）；`MCPProxyTool._execute_with_meta` 让子类按本次参数附 _meta 而不缓存到共享实例；`tool_completed` 事件载荷附观察投影；`runtime_db.events_for_agent_run`；归档白名单加 `observation`/`observation_rejected`；`ToolRegistry` 构造参数 `plugin_runtime_repo`；browser-lite 输出观察候选并按候选执行。设计与偏差见 `docs/design/PLUGIN_OBSERVATION_CANDIDATES.md` 第 6 节。
 - **新测试**：`test_plugin_observation.py` 19 项、`test_plugin_proxy_observation.py` 5 项；`test_plugin_package.py` +14 项（v5 往返、13 种非法声明）；`test_browser_lite_package.py` 描述断言 + 1 项真实浏览器候选流（本机无 Chrome 时跳过）。
 - **真实链路缺口修复（2026-09-24 深夜，决策线在隔离 Gateway 上发现）**：只读工具的归档没有 `runtime_gate`，`persist_tool_runtime_ledger` 提前 return 导致零 `tool_completed` 事件、新鲜度恒 False。改为每次工具完成都进权威事件流（无门时 status 按 ok），legacy 门账本仍只在有门时写；`events_for_agent_run`/`events_for_attempt` 取最新窗口再升序。`test_plugin_observation.py` +2（走 `persist_tool_runtime_ledger` 的无门归档、真实 SQLite 库 2100 条填充后最新观察仍在窗口内且按 attempt 读也取最新），原观察测试全部改走真实持久化入口；`test_runtime_gate_ledger.py` 原 8 项不变（有门事件、无权威库跳过、写失败不崩）。
-- **真实验收**：待决策线接 `action_candidate` 后在隔离 owner 用 browser-lite 做 off/observe/apply 对照；宿主侧先以合同测试为准。
+- **插件层拒绝提升为结构化码（2026-09-24 深夜）**：`PluginProxyTool._lift_observation_error` 把 isError 结果里的 `my_agent_observation_error.code`（stale/not_found）提升为 `reported_error_code` OBSERVATION_STALE/OBSERVATION_CANDIDATE_UNKNOWN、TOOL_INVALID_ARGUMENTS、not_started；`test_plugin_proxy_observation.py` +1（两种提升、其它插件错误沿原映射、非候选路径不提升）。
+- **真实验收**：决策线已于 2026-09-25 在隔离 owner 用 browser-lite 完成 off/observe/apply/过期四档（见 `docs/tasks/DECISION_MODEL_REAL_VALIDATION.md`）；宿主侧以合同测试为准。
 
 ## Gateway 停止时结清在途模型调用（用户决定第 4 项，2026-09-24）
 - **背景**：同伴观察到 Gateway 停止时一条后台非流式 M2.7 请求（约 26.6KB，Memory Curator）被切断，收尾 `drain_complete=true` 却没有任何结算事实。

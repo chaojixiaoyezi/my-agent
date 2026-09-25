@@ -157,6 +157,10 @@
   status 按 ok 记 done/failed，不记 blocked），legacy 门账本仍只在有门时写；`events_for_agent_run` / `events_for_attempt` 改为取最新
   limit 条再升序返回，长运行不会把最新观察或收尾事件挤出窗口。测试改走 `persist_tool_runtime_ledger`，并加真实 SQLite 库的
   2100 条填充事件用例。
+- **插件层拒绝的结构化提升（2026-09-24 深夜）**：动作调用带候选且插件以 isError 返回 `structuredContent.my_agent_observation_error.code`
+  （stale / not_found）时，`PluginProxyTool._lift_observation_error` 把它提升为宿主 `reported_error_code` OBSERVATION_STALE /
+  OBSERVATION_CANDIDATE_UNKNOWN、`error_code=TOOL_INVALID_ARGUMENTS`、`effect_outcome=not_started`（插件合同：这两种拒绝零副作用），
+  信封记 `observation_rejected`；其它插件错误与没走候选路径的调用沿原 MCP 映射（TOOL_EXECUTION_FAILED）。
 - **同批记录、待插件线后续处理的 browser-lite 发现**：Gateway 模式下 `open url=相对路径` 按 `request.workspace_root` 解析而不是模型
   以为的 TUI 当前目录；`file://` 被宿主的 URL 参数门先拦（`NETWORK_FILE_URL_BLOCKED`），`http://localhost` 被宿主私网门拦
   （`NETWORK_PRIVATE_HOST_BLOCKED`），README 里"file:// 与 allowed_hosts 默认放行 localhost"的说法只对插件层成立，需要与宿主门对齐。

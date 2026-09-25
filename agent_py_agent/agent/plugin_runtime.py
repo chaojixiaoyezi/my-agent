@@ -15,14 +15,20 @@ from .plugin_host_api import HOST_API_READ, issue_host_api_env
 from .plugin_installation import PluginInstallation
 from .plugin_manifest import PluginToolDeclaration, canonical_plugin_settings
 from .plugin_observation import (
+    OBSERVATION_CANDIDATE_UNKNOWN,
+    OBSERVATION_ERROR_KEY,
     OBSERVATION_KEY,
     OBSERVATION_META_EXTENSION,
+    OBSERVATION_STALE,
     ObservationHostContext,
     ObservationRejected,
     observation_meta,
     parse_observation,
     resolve_action_candidate,
 )
+
+# 插件层候选复核失败码 → 宿主结构化 reported_error_code；插件合同保证这两种拒绝不产生副作用
+_PLUGIN_OBSERVATION_ERROR_CODES = {"stale": OBSERVATION_STALE, "not_found": OBSERVATION_CANDIDATE_UNKNOWN}
 from .tooling.input_schema import canonicalize_tool_input_schema
 from .tooling.mcp_client import MCPError, MCPServerConfig, MCPStdioClient, sanitize_credentials
 from .tooling.mcp_registration import MCPProxyTool, build_proxy_tool, sanitize_name_component
@@ -104,7 +110,29 @@ class PluginProxyTool(MCPProxyTool):
         outcome = self._execute_with_meta(params, context, extra_meta)
         if declared is not None and declared.observation is not None and outcome.ok:
             outcome = self._attach_observation(outcome, params, context, declared)
+        if extra_meta is not None and not outcome.ok:
+            outcome = self._lift_observation_error(outcome)
         return outcome
+
+    # LLM: 插件按代次复核候选后拒绝执行时，在 isError 结果的 structuredContent.my_agent_observation_error.code 里给结构化原因
+    #   （stale / not_found）。这里把它提升成宿主的 reported_error_code（OBSERVATION_STALE / OBSERVATION_CANDIDATE_UNKNOWN）、
+    #   error_code TOOL_INVALID_ARGUMENTS、effect_outcome not_started（插件合同：这两种拒绝零副作用），信封记 observation_rejected；
+    #   其它错误原样保留，不解析正文。
+    # 函数用途: 让候选过期/不存在成为可结构化分支的失败，而不是笼统的 TOOL_EXECUTION_FAILED。
+    def _lift_observation_error(self, outcome: ToolHandlerOutcome) -> ToolHandlerOutcome:
+        try:
+            payload = json.loads(outcome.output)
+        except (TypeError, ValueError):
+            return outcome
+        structured = payload.get("structuredContent") if isinstance(payload, dict) else None
+        error = structured.get(OBSERVATION_ERROR_KEY) if isinstance(structured, dict) else None
+        code = _PLUGIN_OBSERVATION_ERROR_CODES.get(str(error.get("code") or "")) if isinstance(error, dict) else None
+        if code is None:
+            return outcome
+        return replace(
+            outcome, error_code="TOOL_INVALID_ARGUMENTS", reported_error_code=code, effect_outcome="not_started",
+            result_envelope={**outcome.result_envelope, "observation_rejected": code},
+        )
 
     # LLM: 只在模型填了 observation_ref.param 时复核：候选按当前 run/task 的权威事件流解析，过期/未知抛 ObservationRejected
     #   （调用方转成 TOOL_INVALID_ARGUMENTS、not_started，不发送）；没填参数保持现状（如按选择器执行）。复核通过才把插件自己的

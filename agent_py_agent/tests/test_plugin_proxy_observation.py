@@ -123,3 +123,23 @@ def test_action_with_unknown_or_stale_candidate_is_rejected_before_sending():
     assert outcome.reported_error_code == OBSERVATION_STALE and outcome.effect_outcome == "not_started"
     plain = _proxy(client, "click").execute({"selector": "#go", "__run_scope": RUN_SCOPE})
     assert plain.ok is True and client.sent[-1]["meta"] is None, "不填候选参数保持原选择器路径，不附观察 _meta"
+
+
+def test_plugin_side_stale_or_not_found_rejection_is_lifted_to_structured_codes():
+    repo = _Repo()
+    client = _Client(_read_result(_observation()), repo)
+    candidates = _recorded(repo, client)
+    for plugin_code, host_code in (("stale", OBSERVATION_STALE), ("not_found", OBSERVATION_CANDIDATE_UNKNOWN)):
+        client.result = {"content": json.dumps({"code": "OBSERVATION_" + plugin_code.upper(), "message": "页面已变化"}),
+                         "structuredContent": {"my_agent_observation_error": {"code": plugin_code}}, "isError": True}
+        outcome = _proxy(client, "click").execute({"candidate_id": candidates[0]["candidate_id"], "__run_scope": RUN_SCOPE})
+        assert client.sent[-1]["meta"][OBSERVATION_META_EXTENSION]["key"] == "e1", "宿主复核通过、请求已发出"
+        assert (outcome.ok, outcome.error_code, outcome.reported_error_code, outcome.effect_outcome) == (False, "TOOL_INVALID_ARGUMENTS", host_code, "not_started")
+        assert outcome.result_envelope["observation_rejected"] == host_code
+    client.result = {"content": json.dumps({"code": "TIMEOUT", "message": "超时"}), "isError": True}
+    other = _proxy(client, "click").execute({"candidate_id": candidates[0]["candidate_id"], "__run_scope": RUN_SCOPE})
+    assert (other.error_code, other.reported_error_code) == ("TOOL_EXECUTION_FAILED", "TOOL_EXECUTION_FAILED"), "其它插件错误沿原 MCP 映射"
+    assert "observation_rejected" not in other.result_envelope and other.effect_outcome == "failed"
+    client.result = {"content": json.dumps({"code": "OBSERVATION_STALE"}), "structuredContent": {"my_agent_observation_error": {"code": "stale"}}, "isError": True}
+    plain = _proxy(client, "click").execute({"selector": "#go", "__run_scope": RUN_SCOPE})
+    assert plain.reported_error_code == "TOOL_EXECUTION_FAILED" and "observation_rejected" not in plain.result_envelope, "没走候选路径的错误不提升"
