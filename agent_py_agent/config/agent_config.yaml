@@ -315,6 +315,13 @@ subagent_destroy_summary_required: true
 # - 开关只控制自动生成提案；已生成的提案仍可用 `my-agent skills proposals list/show/confirm/reject` 管理。
 enable_self_learning: false
 
+# 代理自助管理模型目录（默认开启）：
+# - true：主会话代理可用 manage_models 工具代替用户列出、新增、编辑、删除服务商和模型，切换当前会话或新会话默认模型，
+#   并做连通性测试；密钥只作为工具参数传一次，回执、归档和日志都不回显。删除服务商会经统一危险动作审批门，
+#   其余动作按当前 owner 的审批模式裁决；子代理运行里该工具不可用。
+# - false：不注册该工具，模型目录只能通过 TUI /model 手动维护。
+enable_model_profile_tool: true
+
 # 用户身份配置
 # - user_id: 当前本地用户标识，默认为 admin
 user_id: "admin"

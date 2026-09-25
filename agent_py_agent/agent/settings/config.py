@@ -475,6 +475,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     subagent_destroy_summary_required: bool = True
     # 自学习默认关闭；开启后子代理 lesson 只生成待用户 CLI 确认的 Skill 提案，确认前不写正式 Skill。
     enable_self_learning: bool = False
+    # 主会话代理可用 manage_models 工具直接增删改切 owner 模型目录；关闭后只能用 TUI /model 手动配置。
+    enable_model_profile_tool: bool = True
     result_check_execute_tests: bool = False
     result_check_timeout_seconds: int = 120
     dynamic_timeout_safety_margin: float = 2.0

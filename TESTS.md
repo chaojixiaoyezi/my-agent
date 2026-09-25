@@ -3023,7 +3023,7 @@ Audit/摄取不列入本轮新增验收；共享模块既有回归按改动影�
   当前真实 TUI 已覆盖主子保存、放弃、编辑中停止，以及旧版本冲突保留草稿；详情与未测组合见持续目标设计。
   `test_saved_goal_guidance_reaches_its_agent_and_can_cross_provider_boundary` 复现运行中改主目标被子代理误领，
   覆盖主/子消息隔离与提交模型、确认消费完整链路；共享 root task 不能授予父级邮箱。
-- 模型：`test_model_provider_management.py`、`test_provider_sampling.py`、`test_model_unconfigured.py`；
+- 模型：`test_model_profile_tool.py`（manage_models 工具）、`test_model_provider_management.py`、`test_provider_sampling.py`、`test_model_unconfigured.py`；
   未配置可进设置但不发请求，发布默认值为空，用户显式选择仍保留。
 - TUI：`test_tui_interaction.py`、`test_tui_markdown.py`、`test_tui_pty.py`。
 - 模型统计：`test_tui_model_metrics.py`，覆盖协议缓存分母、缺报、重放去重、明细裁剪、重试、主子隔离、重连和宽字符窄屏；独立压缩成功/失败均落账，绑定工作片的不重复结算；统计字段不得影响模型上下文。

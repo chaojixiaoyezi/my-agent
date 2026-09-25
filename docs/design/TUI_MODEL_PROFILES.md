@@ -40,6 +40,22 @@
 - 模型名、后端、地址、密钥、窗口与输出上限采用同一显式选择优先级；旧 task/run 配置不能拆开覆盖。
   无关运行配置叠加必须保留宿主 profile ID，孙代理创建/重启继续引用同一配置，不能默默恢复部署默认。
 
+## 代理自助管理（`manage_models` 工具）
+
+- 用户不必自己进 `/model` 填表：主会话代理可用 `manage_models` 工具执行同一套结构化操作——`list`、`add`（服务商+模型一步保存）、
+  `save_provider`/`save_model`（新建或 `editing=true` 编辑）、`select`（只改当前 canonical 会话）、`set_default`（只改新会话默认）、
+  `delete_model`/`delete_provider`、`probe`、`discover`。唯一写入口仍是 `execute_model_profile_operation`，菜单与工具共用同一份
+  owner 目录、同一把文件锁和同一套校验；新建时 profile_id 由工具生成 UUID，模型不自造编号。
+- 权限按结构化 effect 裁决：`list/probe/discover` 只读；`delete_provider` 为 dangerous，经统一危险动作审批门（密钥不可恢复）；
+  其余为 mutating，由当前 owner 的审批模式决定是否逐次确认。不解析用户自然语言判定授权。
+- 会话身份只读当前回合的结构化 `conversation_thread_id`；没有会话的上下文调用 `select` 返回 `MODEL_PROFILE_NO_THREAD`，
+  要求改用 `set_default`。子代理运行里该工具不可用，子代理仍只能继承或按 `create_subagents.model` 指定模型。
+- 密钥边界：用户把密钥告诉代理时，它会经过一次模型上下文和工具参数；工具回执只含 `has_key`，工具账本归档按字段名脱敏 `api_key`，
+  错误文案不回显参数值。校验失败（`MODEL_PROFILE_INVALID`）都发生在落盘前，标记 `not_started`；探针失败是服务商侧事实，
+  以 `MODEL_PROBE_FAILED`/`MODEL_DISCOVER_FAILED` 返回，不冒充配置错误。
+- 开关：主配置 `enable_model_profile_tool`（默认开启）；关闭后不注册该工具，仍可用 `/model` 手动维护。
+  回归：`test_model_profile_tool.py`。
+
 ## 子代理单独指定模型
 
 - `create_subagents.model` 或单项 `items[].model` 可填写本 owner 已新增模型的精确名称或配置编号；

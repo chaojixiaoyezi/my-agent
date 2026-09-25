@@ -1287,6 +1287,40 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.REPORT_BLOCKER.value,
         recovery_hint="尚未配置模型；通过 /model 新增并选择，不发送探针、不自动切换其它模型。",
     ),
+    "MODEL_PROFILE_INVALID": ErrorContract(
+        code="MODEL_PROFILE_INVALID",
+        category="model",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint=(
+            "模型目录校验拒绝，尚未落盘；按错误文案修正 manage_models 参数"
+            "（编辑已有记录需 editing=true，先 list 取精确 id）后重试。"
+        ),
+    ),
+    "MODEL_PROFILE_NO_THREAD": ErrorContract(
+        code="MODEL_PROFILE_NO_THREAD",
+        category="state",
+        retryable=False,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="当前上下文没有会话，select 不可用；改用 manage_models action=set_default 设置新会话默认模型。",
+    ),
+    "MODEL_PROBE_FAILED": ErrorContract(
+        code="MODEL_PROBE_FAILED",
+        category="network",
+        retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint=(
+            "服务商未返回正常回复；把 provider_message 转告用户，核对地址、协议、模型名和密钥后"
+            "用 editing=true 修正再探测一次，不要反复重试。"
+        ),
+    ),
+    "MODEL_DISCOVER_FAILED": ErrorContract(
+        code="MODEL_DISCOVER_FAILED",
+        category="network",
+        retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="服务商模型列表接口不可用；请用户直接给出模型名和上下文窗口，改用 save_model 手动保存。",
+    ),
     "PROVIDER_CONFIGURATION_INVALID": ErrorContract(
         code="PROVIDER_CONFIGURATION_INVALID",
         category="model",

@@ -1800,6 +1800,8 @@ my-agent subagent-run <run_id> --execute
 Tab/Shift+Tab 切换表单字段，保存后回到菜单，再选择该模型启用；返回/退出/Esc 不保存尚未提交的草稿。
 菜单中的 Esc 不停止代理。保存只验证格式，不代表接口连通；密钥以掩码显示，不进入聊天/输入历史。
 配置按用户保存，后续主工作片采用选择，运行中的工作片和已有 child 保持原模型。
+也可以直接对代理说“帮我加一个模型 / 把默认模型换成 X / 测一下这个模型能不能用”：主会话代理通过 `manage_models` 工具执行同一套操作，
+密钥只作为参数传一次、回执不回显；删除服务商会弹统一审批确认。开关 `enable_model_profile_tool`，详见 [/model 设计](docs/design/TUI_MODEL_PROFILES.md)。
 
 ## `bench-model`
 

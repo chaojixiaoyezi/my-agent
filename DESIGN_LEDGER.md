@@ -657,6 +657,12 @@ auth 表单取消和参数拒绝已验，官方设备码在两处环境被 HTTP 
 
 ## 当前待落地或待复验
 
+- 已决定并实现（2026-09-25，用户：“/model 我的 agent 不能直接改……需要给他自己有这个权限”）：新增 `manage_models` 工具，主会话代理可直接
+  list/add/save_provider/save_model/select/set_default/delete_model/delete_provider/probe/discover，复用 `execute_model_profile_operation`
+  唯一写入口与文件锁；effect 按 action 结构化解析（删服务商 dangerous 走审批门，其余 mutating 按 owner 审批模式），子代理不可用，
+  `select` 只读结构化 `conversation_thread_id`。密钥经一次模型上下文与工具参数，回执只含 `has_key`、归档按字段名脱敏。
+  开关 `enable_model_profile_tool` 默认开。详见 [/model 设计](docs/design/TUI_MODEL_PROFILES.md)。待真实 TUI 复验：口头加模型→select→真实回复。
+
 - 已实现、待真实停机复验：Gateway 停止排空窗口后，仍在途的模型调用由唯一账本批量记为 failed/`MODEL_CALL_INTERRUPTED_HOST_SHUTDOWN`
   （用量按缺报，不补零），并写 `gateway_model_calls_interrupted` 结构化事件；只覆盖 Gateway 进程 agent 自己的账本，
   子代理 runner worker 各自持有的账本尚未纳入。下一片是启动时对遗留 `running` attempt 的结构化对账（非正常退出的补救路径），
