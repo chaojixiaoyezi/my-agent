@@ -589,6 +589,18 @@ class TestChatCommandRuntime:
         parser_mod._show_boot_frame(SimpleNamespace(plain=False))
         assert "my-agent" in out.getvalue()
 
+    def test_resume_handoff_skips_duplicate_full_agent_build(self, monkeypatch):
+        """resume 起的 TUI 原地切换时，新进程直接交给 cmd_chat（它仍做会话存在与归属校验），不再先构建完整 agent。"""
+        from agent_py_agent.cli import chat as chat_mod
+        from agent_py_agent.cli.chat_parts import tui_upgrade_follow as follow
+
+        monkeypatch.setenv(follow.HANDOFF_ENV, "{}")
+        args = SimpleNamespace(session_id="sess-r", gateway=True)
+        with patch.object(chat_mod, "make_agent", side_effect=AssertionError("不应重复构建完整 agent")), \
+             patch.object(chat_mod, "cmd_chat", return_value=0) as chat:
+            assert chat_mod.cmd_resume(args) == 0
+        chat.assert_called_once_with(args)
+
     def test_cmd_chat_fails_closed_when_recovered_history_is_corrupt(self, capsys):
         """显式恢复读到损坏账本时不能悄悄显示空历史。"""
         from agent_py_agent.cli import chat as chat_mod

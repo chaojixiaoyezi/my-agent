@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import queue
 import sys
 import threading
@@ -249,8 +250,13 @@ def _ensure_chat_memory_limit(args, agent) -> None:
 # 本命令只决定"接哪条会话", 会话下的任务续跑仍由共享权威(runtime.db)驱动。
 def cmd_resume(args) -> int:
     from ..agent.session.manager import SessionManager
+    from .chat_parts.tui_upgrade_follow import HANDOFF_ENV
 
     session_id = str(getattr(args, "session_id", "") or "").strip()
+    if session_id and os.environ.get(HANDOFF_ENV):
+        # 原地切换来的新进程：上一代刚在用这个会话，cmd_chat 的 _setup_session 仍会做存在性与归属校验（fail-closed）；
+        # 这里跳过重复的完整 agent 构建，旧画面停留时间更短，也不会有初始化输出画到旧画面上。
+        return cmd_chat(args)
     if not session_id:
         print(
             "用法: my-agent resume <session_id>  (会话不存在时不创建新会话)",
