@@ -414,7 +414,7 @@ def _partitioned_usage(record: ModelCallRecord) -> dict[str, int]:
 
 # LLM: 用途来自宿主结构化 metadata；未声明 decision 的辅助调用仍归辅助，普通调用默认归主桶。
 # 函数用途: 为累计账选一个互斥用途分区，不读取提示词、后端名或响应正文猜测用途。
-def _model_call_purpose(record: ModelCallRecord) -> str:
+def model_call_purpose(record: ModelCallRecord) -> str:
     if record.metadata.get("purpose") == "decision":
         return "decision"
     return "auxiliary" if record.metadata.get("auxiliary") is True else "main"
@@ -432,13 +432,13 @@ class _ModelCallAggregate(_ModelCallTotals):
     # 函数用途: 登记一次新调用，并保留其用途分区计数。
     def observe_new(self, record: ModelCallRecord) -> None:
         super().observe_new(record)
-        self.purpose_totals[_model_call_purpose(record)].observe_new(record)
+        self.purpose_totals[model_call_purpose(record)].observe_new(record)
 
     # LLM: started 后身份及用途不再改变；后续终态和迟到 HTTP 事实按同一新旧记录同步更新原分区。
     # 函数用途: 更新调用的总计和用途计数，不新建调用或改变统计代次。
     def observe_update(self, previous: ModelCallRecord, current: ModelCallRecord) -> None:
         super().observe_update(previous, current)
-        self.purpose_totals[_model_call_purpose(current)].observe_update(previous, current)
+        self.purpose_totals[model_call_purpose(current)].observe_update(previous, current)
 
     # LLM: 分区只有统计字段，不含独立代次或嵌套分区；旧持久事件未声明分区时不能事后猜测用途。
     # 函数用途: 在原累计摘要中附加三类调用的用量和尝试统计。
@@ -716,6 +716,17 @@ class ModelCallLedger(ModelCallInputBudgetMethods):
             self._replace(updated)
             return updated
 
+    # LLM: 宿主停机时的批量终态：只把仍活动（started/first_token）的调用一次性记为 failed 并带同一结构化原因码；
+    #   已终态记录不动，首个终态规则不变，重复调用返回空元组。返回被改写的记录供宿主写停机事件，不在此写盘。
+    # 函数用途: Gateway 停止排空窗口过后，把还没结清的模型调用统一标成"被宿主停机中断"，交给收尾写事件。
+    def fail_open_calls(self, *, error_type: str, error_code: str) -> tuple[ModelCallRecord, ...]:
+        with self._lock:
+            open_ids = [record.call_id for record in self._records if record.status not in _TERMINAL_STATUSES]
+            return tuple(
+                self.failed(ModelCallFailureParams(call_id=call_id, error_type=error_type, error_code=error_code))
+                for call_id in open_ids
+            )
+
     # LLM: 物理观察允许晚于逻辑终态，但只修改 HTTP 事实及诊断；终态时钟、状态和用量不变，请求面仅按同线程或 run 比较。
     # 函数用途: 记录真实 HTTP 尝试与缓存前缀变化，保留取消后仍在退出的 worker 观察结果。
     def provider_attempt(
@@ -900,7 +911,7 @@ def _selected_scope_key(
 # LLM: logical_call_id 只在同一用途桶中去重；不同用途不能因宿主误用同名 ID 而少计，也不能从自然语言推断身份。
 # 函数用途: 取得带用途命名空间的逻辑回合键，使总计与各分区可以准确相加。
 def _logical_call_id(record: ModelCallRecord) -> tuple[str, str]:
-    return _model_call_purpose(record), str(record.metadata.get("logical_call_id") or record.call_id)
+    return model_call_purpose(record), str(record.metadata.get("logical_call_id") or record.call_id)
 
 
 # LLM: 引用计数归零时删除键，防逻辑回合或状态集合残留幽灵项。

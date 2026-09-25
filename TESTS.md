@@ -2,6 +2,12 @@
 
 child不展示历史正文时的读取回归先复现1 failed/1 passed，修复后test_compact_retained_history、test_subagent_compact_recovery、test_gateway_child_compact_scope_application三文件31 passed（8.48秒）。三宿主seed仓外基线仅验证测量和完整性，不算内存目标通过；细节见容量审计的宿主生命周期基线。
 
+## Gateway 停止时结清在途模型调用（用户决定第 4 项，2026-09-24）
+- **背景**：同伴观察到 Gateway 停止时一条后台非流式 M2.7 请求（约 26.6KB，Memory Curator）被切断，收尾 `drain_complete=true` 却没有任何结算事实。
+- **改动**：`contracts/model_call_ledger.py` 新增 `ModelCallLedger.fail_open_calls()`（用途分区函数改为公开的 `model_call_purpose`）；`agent_core/model/call_runtime.py` 新增 `settle_open_model_calls_for_shutdown()`（只读已有账本，不新建）；`cli/gateway_process.py` 收尾拆出 `_join_gateway_loops()`，排空后由 `_settle_interrupted_model_calls()` 写 `gateway_model_calls_interrupted` 事件并在收尾载荷加 `interrupted_model_calls`。
+- **新测试** `test_gateway_model_call_shutdown_settlement.py` 5 项：批量终态只动活动记录且幂等；facade 不新建账本、投影只含固定结构化字段、结清后不再算运行中；收尾在停 HTTP 与收循环之后、写心跳之前结清并写事件；没有在途调用（含没有账本的 agent）不写额外事件；账本模块抛错只记异常类型且收尾照常完成。
+- **真实验收**：待下次部署后用一次真实 Curator 在途停机复验，看 Gateway 事件里的 `gateway_model_calls_interrupted` 与收尾载荷的 `interrupted_model_calls`。
+
 ## 宿主关闭取消在途决策与 Curator/插件点并发组合（P4-F，2026-09-25，分支 `claude/decision-shutdown-cancel`）
 
 - **改动**：

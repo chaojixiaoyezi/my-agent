@@ -15,6 +15,7 @@ from ...contracts.model_call_ledger import (
     ModelCallProviderAttemptParams,
     ModelCallStartedParams,
     ModelCallTimeoutParams,
+    model_call_purpose,
     summarize_model_call_records,
 )
 from ...conversation.context_usage import record_model_context_usage
@@ -41,6 +42,9 @@ from .usage import (
 # 模块用途: 连接实际调用与账本、超时及统计，让生成和决策响应共用用量读取并保留缺报事实。
 
 _LEDGER_CREATION_LOCK = threading.Lock()
+# LLM: 停机中断的唯一结构化原因码/类型；消费端按 error_code 识别"未结算"，不解析文案。
+MODEL_CALL_INTERRUPTED_ERROR_CODE = "MODEL_CALL_INTERRUPTED_HOST_SHUTDOWN"
+MODEL_CALL_INTERRUPTED_ERROR_TYPE = "HostShutdownInterrupted"
 
 
 # LLM: The caller may pass the exact precomputed context snapshot so timeout, ledger, TUI and
@@ -293,6 +297,41 @@ def model_call_ledger(agent: object) -> ModelCallLedger:
         except Exception:
             return ledger
         return ledger
+
+
+# LLM: 只读取 agent 上已存在的账本，停机时不新建账本；每条未结清调用按同一原因码记 failed，用量仍按缺报处理（不补零）。
+#   返回的投影只含结构化身份与时长字段，不含提示词、响应正文或密钥；写事件由调用方（Gateway 收尾）负责。
+# 函数用途: Gateway 停机排空后，把仍在途的模型调用统一记成"被停机中断、未结算"，并给出可写进停机事件的事实列表。
+def settle_open_model_calls_for_shutdown(agent: object) -> tuple[dict[str, object], ...]:
+    ledger = getattr(agent, "_model_call_ledger", None)
+    if not isinstance(ledger, ModelCallLedger):
+        return ()
+    interrupted = ledger.fail_open_calls(
+        error_type=MODEL_CALL_INTERRUPTED_ERROR_TYPE,
+        error_code=MODEL_CALL_INTERRUPTED_ERROR_CODE,
+    )
+    return tuple(_interrupted_call_projection(record) for record in interrupted)
+
+
+# LLM: 投影字段固定：调用/请求/run 身份、后端与模型名、账本用途桶、是否已见首 token、耗时、估算输入、HTTP 尝试数、
+#   是否探针、原因码与 settlement=unsettled；新增字段要同步 test_gateway_model_call_shutdown_settlement.py。
+# 函数用途: 把一条被中断的调用记录压成可写进 Gateway 停机事件的小字典。
+def _interrupted_call_projection(record: Any) -> dict[str, object]:
+    return {
+        "call_id": record.call_id,
+        "request_id": record.request_id,
+        "run_id": record.run_id,
+        "backend": record.backend,
+        "model": record.model,
+        "purpose": model_call_purpose(record),
+        "first_token_seen": record.first_token_at is not None,
+        "elapsed_seconds": round(float(record.total_latency_seconds or 0.0), 3),
+        "estimated_input_tokens": int(record.input_tokens),
+        "provider_attempt_count": int(record.provider_attempt_count),
+        "is_probe": bool(record.is_probe),
+        "error_code": record.error_code,
+        "settlement": "unsettled",
+    }
 
 
 # LLM: 优先读取不受明细裁剪影响的累计 scope；仅为旧账本或测试私有注入保留 retained-record 回退。

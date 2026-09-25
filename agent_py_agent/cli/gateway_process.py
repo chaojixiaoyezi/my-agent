@@ -432,9 +432,56 @@ def _cmd_gateway_run_threads(request: GatewayThreadsRequest):
     return stop_event, heartbeat_thread, request_thread, background_thread, http_server
 
 
-# LLM: 停止收尾顺序固定：先置停止事件，再取消本进程在途决策，再停 HTTP 与收三条循环；决策取消出错只记异常类型事件，
-#   不能中断后续清理。改动须同步 test_gateway_decision_shutdown_cancel.py 与 Gateway 停止相关回归。
-# 函数用途: Gateway 停止时收尾三条循环、清理 pid/停止请求并写出是否完整排空的状态。
+# LLM: 只负责收三条循环并报告仍存活的线程名；未启动线程（ident 为 None）跳过 join，每条最多等 2 秒。
+# 函数用途: Gateway 收尾时等 heartbeat/request/background 三条循环退出，返回还活着的线程名列表。
+def _join_gateway_loops(request: GatewayRunCleanupRequest) -> list[str]:
+    threads = {
+        "heartbeat": request.heartbeat_thread,
+        "request": request.request_thread,
+        "background": request.background_thread,
+    }
+    for thread in threads.values():
+        if thread.ident is None:
+            # 未启动的线程（HTTP bind 失败时 heartbeat 线程还没 start）不能 join
+            continue
+        thread.join(timeout=2)
+    return [name for name, thread in threads.items() if thread.is_alive()]
+
+
+# LLM: 排空窗口之后才结清：这时仍在途的模型调用会随进程退出被切断，由唯一账本按同一原因码记 failed（用量按缺报），
+#   有在途调用才写结构化事件 gateway_model_calls_interrupted（只含身份/用途/时长字段，不含正文）；账本模块出错只记
+#   异常类型事件 gateway_model_call_settlement_failed，不能中断收尾。只覆盖 Gateway 进程 agent 自己的账本。
+# 函数用途: Gateway 停止时给还没结清的前台/后台模型调用留下"被中断、未结算"的事实，返回条数。
+def _settle_interrupted_model_calls(request: GatewayRunCleanupRequest, *, drain_complete: bool) -> int:
+    agent = request.context.agent
+    try:
+        from ..agent.agent_core.model.call_runtime import settle_open_model_calls_for_shutdown
+
+        interrupted = settle_open_model_calls_for_shutdown(agent)
+    except Exception as exc:  # noqa: BLE001 - 停止收尾不能因账本模块出错而中断
+        log_gateway_event(agent, "gateway_model_call_settlement_failed", {"error_type": type(exc).__name__})
+        return 0
+    if interrupted:
+        log_gateway_event(
+            agent,
+            "gateway_model_calls_interrupted",
+            {
+                "status": "cleanup",
+                "pid": request.pid,
+                "termination_status": request.termination_status,
+                "drain_complete": drain_complete,
+                "count": len(interrupted),
+                "calls": list(interrupted),
+            },
+        )
+    return len(interrupted)
+
+
+# LLM: 停止收尾顺序固定：先置停止事件，再取消本进程在途决策，再停 HTTP 与收三条循环，排空窗口后把仍在途的模型调用
+#   记成被停机中断（只记结构化事实，不猜用量），最后清 pid/停止请求并写心跳与收尾事件；决策取消或账本结清出错只记
+#   异常类型事件，不能中断后续清理。改动须同步 test_gateway_decision_shutdown_cancel.py、
+#   test_gateway_model_call_shutdown_settlement.py 与 Gateway 停止相关回归。
+# 函数用途: Gateway 停止时收尾三条循环、结清在途模型调用、清理 pid/停止请求并写出是否完整排空的状态。
 def _cmd_gateway_run_cleanup(request: GatewayRunCleanupRequest) -> dict[str, object]:
     """Drain the three gateway loops and persist whether shutdown was complete."""
     request.stop_event.set()
@@ -447,18 +494,9 @@ def _cmd_gateway_run_cleanup(request: GatewayRunCleanupRequest) -> dict[str, obj
         log_gateway_event(request.context.agent, "gateway_decision_cancel_failed", {"error_type": type(exc).__name__})
     if request.http_server:
         request.http_server.stop()
-    threads = {
-        "heartbeat": request.heartbeat_thread,
-        "request": request.request_thread,
-        "background": request.background_thread,
-    }
-    for thread in threads.values():
-        if thread.ident is None:
-            # 未启动的线程（HTTP bind 失败时 heartbeat 线程还没 start）不能 join
-            continue
-        thread.join(timeout=2)
-    alive_threads = [name for name, thread in threads.items() if thread.is_alive()]
+    alive_threads = _join_gateway_loops(request)
     drain_complete = not alive_threads
+    interrupted_model_calls = _settle_interrupted_model_calls(request, drain_complete=drain_complete)
     paths = request.context.paths
     try:
         remove_pid_file_if_owned(paths.pid)
@@ -482,6 +520,7 @@ def _cmd_gateway_run_cleanup(request: GatewayRunCleanupRequest) -> dict[str, obj
         "termination_reason": request.termination_reason,
         "drain_complete": drain_complete,
         "alive_threads": alive_threads,
+        "interrupted_model_calls": interrupted_model_calls,
         "updated_at": time.time(),
     }
     log_gateway_event(
@@ -492,7 +531,8 @@ def _cmd_gateway_run_cleanup(request: GatewayRunCleanupRequest) -> dict[str, obj
     print(
         "[gateway-run] "
         f"status={request.termination_status} pid={request.pid} "
-        f"reason={request.termination_reason or 'unspecified'} drain_complete={str(drain_complete).lower()}",
+        f"reason={request.termination_reason or 'unspecified'} drain_complete={str(drain_complete).lower()} "
+        f"interrupted_model_calls={interrupted_model_calls}",
         flush=True,
     )
     return cleanup_payload
