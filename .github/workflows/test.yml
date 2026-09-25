@@ -41,5 +41,13 @@ jobs:
           # 安装这些 feature extras，不能依赖 runner 预装，也不能在测试里临时跳过。
           python3 -m pip install -e ".[dev,secrets,scale]"
 
+      - name: Prepare bubblewrap sandbox on the runner
+        # ubuntu-24.04 runner 预装 bwrap，但 AppArmor 默认禁止非特权用户命名空间，sandbox 自检会以
+        # BWRAP_ISOLATION_FAILED 失败，run_command 用例随之全部 fail-closed（2026-09-25 线上实测）。
+        # 这里只放开 runner 自己的内核开关并复核自检；产品代码不做任何绕过。
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          python3 -c 'from agent_py_agent.agent.tooling.sandbox import main; raise SystemExit(main([]))'
+
       - name: Run fast tests
         run: python3 -m pytest -q -m "not slow and not e2e" --tb=short --timeout=60
