@@ -64,6 +64,7 @@ from ..agent.gateway_parts.status_rendering import (
 )
 from ..agent.runtime_errors import runtime_error_report
 from .common import ROOT, make_agent
+from .gateway_host_guard import mark_hosting_gateway_process, refuse_stopping_hosting_gateway
 from .gateway_loops import (
     _gateway_background_main_loop,
     _gateway_heartbeat_loop,
@@ -816,6 +817,8 @@ def cmd_gateway_uninstall(args) -> int:
     return 0 if success else 1
 
 
+# LLM: 已在运行且带 --force 时，先经托管自停闸再写停止请求；托管自己的工具进程不能借 --force 自停。
+# 函数用途: 启动后台 Gateway；--force 时先停掉正在运行的实例再启动新进程，并等待就绪。
 def cmd_gateway_start(args) -> int:
     agent = make_agent(args)
     paths = gateway_paths(agent)
@@ -829,6 +832,8 @@ def cmd_gateway_start(args) -> int:
             print(f"start_time: {record.get('start_time')}")
         return 0
     if pid and is_pid_alive(pid) and args.force:
+        if refuse_stopping_hosting_gateway(pid):
+            return 2
         _write_gateway_stop_request(
             paths,
             reason="force restart before start",
@@ -862,7 +867,10 @@ def cmd_gateway_start(args) -> int:
     return 0
 
 
+# LLM: 服务进程入口先写托管标记，再创建 Agent/线程/工具；所有子进程继承它，生命周期命令据此拒绝自停。
+# 函数用途: 前台运行 Gateway 服务循环，负责启动、分类退出原因和收尾清理。
 def cmd_gateway_run(args) -> int:
+    mark_hosting_gateway_process()
     agent = make_agent(args)
     paths = gateway_paths(agent)
     paths.root.mkdir(parents=True, exist_ok=True)
@@ -976,6 +984,8 @@ def _gateway_state_detail_for_display(running: bool, state: dict) -> dict:
     return detail
 
 
+# LLM: 写停止请求前先经托管自停闸；目标只来自 pid 文件的运行中记录，--kill 与 restart 都不能绕过。
+# 函数用途: 请求正在运行的 Gateway 排水退出，超时后按 --kill 强制结束。
 def cmd_gateway_stop(args) -> int:
     agent = make_agent(args)
     paths = gateway_paths(agent)
@@ -984,6 +994,8 @@ def cmd_gateway_stop(args) -> int:
         remove_pid_file_if_owned(paths.pid)
         print("gateway 未在运行")
         return 0
+    if refuse_stopping_hosting_gateway(pid):
+        return 2
 
     stop_payload = write_targeted_gateway_stop_request(
         paths.pid,

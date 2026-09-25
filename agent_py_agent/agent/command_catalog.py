@@ -47,7 +47,17 @@ COMMAND_CATALOG = (
         conversation_suffix=r"(?:\s+(.*))?$",
     ),
     CommandSpec("attach", '/attach "<图片或视频路径>"', "添加图片或视频附件（TUI）"),
-    CommandSpec("model", "/model", "新增或选择模型、接口和上下文窗口", submit_on_enter=True),
+    CommandSpec(
+        "model",
+        "/model",
+        "新增或选择模型、接口和上下文窗口",
+        help_variants=(
+            ("/model <编号>", "为当前会话选择一个自己的或管理员共享的模型（IM 可用）"),
+            ("/model default <编号>", "把一个模型设为新会话默认（IM 可用）"),
+        ),
+        submit_on_enter=True,
+        conversation_suffix=r"(?:\s+(.*))?$",
+    ),
     CommandSpec(
         "permissions",
         "/permissions",

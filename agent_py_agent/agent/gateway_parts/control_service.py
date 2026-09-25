@@ -324,7 +324,8 @@ def reconcile_gateway_steer_delivery(
 
 
 # LLM: 三类控制分别调度 Goal、中断回合或停止任务资源；只有明确 stop 才组合，未知控制不能回退到停止。
-# /recover 只交给 turn_recovery_control 按当前会话的工作任务处理，不经过 live request 或停止分支。
+# /recover 只交给 turn_recovery_control 按当前会话的工作任务处理，不经过 live request 或停止分支；
+# /model 文字形式交给 model_profile_service，与 TUI 菜单共用 owner/线程解析和写入口。
 # 函数用途: 分派结构化控制，避免已暂停 Goal 或普通任务的 interrupt 落入资源停止。
 def execute_gateway_conversation_control(
     agent: object,
@@ -348,6 +349,11 @@ def execute_gateway_conversation_control(
         return _execute_effort_control(agent, command, scope)
     if command.kind == "recover":
         return _execute_recover_control(agent, command, scope)
+    if command.kind == "model":
+        # model_profile_service 在导入期依赖本模块的 owner 解析，这里延迟导入以免循环引用。
+        from .model_profile_service import execute_model_text_control
+
+        return execute_model_text_control(agent, command, scope)
     steer_receipt: _SteerReceiptState | None = None
     if command.kind == "steer":
         try:

@@ -36,6 +36,7 @@ ControlKind = Literal[
     "audit",
     "verbose",
     "recover",
+    "model",
     "unsupported",
 ]
 TaskCommandKind = Literal["audit_prepare", "decision_experiment"]
@@ -170,7 +171,7 @@ def parse_conversation_control(
 
 
 # LLM: 名称和正文读取公共声明；插件实际入口另行消费其只读回执，此控制解析器仍拒绝插件，不能执行旧 stop 分支。
-# 函数用途: 区分即时控制与模型任务，保留暂停目标、中断本轮和停止资源三种语义；/recover 只解析结构化处置值。
+# 函数用途: 区分即时控制与模型任务，保留暂停目标、中断本轮和停止资源三种语义；/recover 只解析结构化处置值，/model 只解析编号。
 def parse_conversation_command(
     text: object,
     *,
@@ -220,6 +221,8 @@ def parse_conversation_command(
         return _goal_command(trailing)
     if name == "recover":
         return _recover_command(trailing)
+    if name == "model":
+        return _model_command(trailing)
     if name == "audit":
         return _audit_command(raw)
     if name == "experiment":
@@ -370,6 +373,27 @@ def _goal_command(trailing: object) -> ConversationControlCommand:
             usage="用法：/goal edit 新目标",
         )
     return ConversationControlCommand("goal", value=value, operation="create")
+
+
+_MODEL_USAGE = "用法：/model 查看可选模型；/model <编号> 选为本会话模型；/model default <编号> 设为新会话默认。"
+
+
+# LLM: 文字形式只做查看、会话选择和默认值三件事，目标是列表编号或精确配置编号；新增/密钥永远不走聊天。
+# 函数用途: 把 `/model`、`/model <编号>`、`/model default <编号>` 解析成结构化模型控制。
+def _model_command(trailing: object) -> ConversationControlCommand:
+    value = str(trailing or "").strip()
+    if not value:
+        return ConversationControlCommand("model", operation="view", usage=_MODEL_USAGE)
+    head, _, rest = value.partition(" ")
+    if head.lower() == "default":
+        target = rest.strip()
+        return ConversationControlCommand(
+            "model", value=target, operation="set_default",
+            valid=bool(target) and len(target.split()) == 1, usage=_MODEL_USAGE,
+        )
+    return ConversationControlCommand(
+        "model", value=value, operation="select", valid=len(value.split()) == 1, usage=_MODEL_USAGE,
+    )
 
 
 # LLM: 处置值只认 runtime_db 的结构化取值表，不接受同义词或正文；无参数只读查看，带参数才会改运行库。

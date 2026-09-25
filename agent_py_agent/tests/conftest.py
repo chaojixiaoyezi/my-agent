@@ -36,6 +36,8 @@ def _isolate_my_agent_home(tmp_path_factory, monkeypatch):
         "no_proxy",
         _loopback_no_proxy(os.environ.get("no_proxy", "")),
     )
+    # 在 Gateway 托管的工具进程里跑测试时会继承托管标记；清掉它，生命周期命令测试才不受宿主影响。
+    monkeypatch.delenv("MY_AGENT_HOSTING_GATEWAY_PID", raising=False)
 
 
 def _loopback_no_proxy(current: str) -> str:

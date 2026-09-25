@@ -76,6 +76,7 @@ python -m agent_py_agent --help
 | `/stop` | 停止当前轮、暂停当前持续目标并回收活跃子代理；需要继续目标时显式恢复。 | 保留 transcript、工作区、compact 和 memory，不停止 Gateway 服务。 |
 | `/interrupt` | 主代理中断当前轮；已有 active Goal 时沿原调度安全续接，不等同暂停目标。 | 保留目标、任务身份和会话；无 active Goal 时不创建续跑。 |
 | `/recover [recorded\|confirmed_noop\|abandoned]` | 上一轮执行中断、结果未确认（报 `ACTIVE_TURN_OUTCOME_UNCERTAIN` 或 `RUN_RECOVERY_REQUIRED`）时使用：不带参数只列出未确认的工具操作；核对外部事实后带处置值显式解除阻塞，下一条消息接着原任务继续。 | 只作用于当前会话的工作任务；处置写进运行库 `attempt_recovered` 事件；不重放旧操作，不改聊天记录。仅 Gateway 模式。 |
+| `/model [<编号>\|default <编号>]` | 不带参数列出本会话模型、新会话默认和可选模型；`/model <编号>` 为当前会话选择，`/model default <编号>` 设为新会话默认。 | 只选择已保存或管理员共享的模型，不在聊天里新增模型或收发密钥；TUI 里单独输入 `/model` 仍打开菜单。仅 Gateway 模式。 |
 | `/goal ...` | 查看或修改当前 thread 的持久目标。 | 系统控制；命令词不进入模型。 |
 | `/verbose [off|on|full]` | 查看或修改当前 thread 的过程显示档位。 | 系统设置；不创建模型请求、不写 transcript。 |
 | `/audit [时长] <任务>` | 以结构化保证档启动一个新任务。 | `/audit` 前缀不进入模型，只有任务正文进入正常 turn。 |
@@ -1572,6 +1573,12 @@ my-agent gateway ask "帮我检查当前任务状态"
 my-agent gateway result <request_id>
 ```
 
+由 Gateway 托管的工具进程（例如代理在对话里通过 `run_command` 执行命令）运行 `gateway stop`、`gateway restart`
+或 `gateway start --force` 时，如果要停的正是托管它的那台 Gateway，命令直接拒绝并以 2 退出，不写停止请求：
+停掉它会切断正在执行这条命令的对话回合，回合结果将无法确认。判断依据是 Gateway 服务进程启动时写进自身环境、
+由所有子进程继承的 `MY_AGENT_HOSTING_GATEWAY_PID`；其他 home 或端口的 Gateway 进程号不同，照常可停。
+直接 kill 进程号或调用 HTTP `POST /stop` 不经过这道检查。确实需要重启时，在对话结束后由用户在终端执行。
+
 `gateway` 第一版是本地后台控制面。它会启动一个后台 Python 进程，在内部按配置运行现有 daemon/watch 调度，并把 pid、state、heartbeat、stop request、请求队列、响应和日志写到 `gateway_workspace`。当前 request worker pool 已有保守第一版，默认 1 个 worker；runner 并发也只在显式配置 `runner_concurrency` 为数字时启用。它还不是多机器组织 gateway。
 
 先把它理解成三层：
@@ -1810,6 +1817,11 @@ Tab/Shift+Tab 切换表单字段，保存后回到菜单，再选择该模型启
 配置按用户保存，后续主工作片采用选择，运行中的工作片和已有 child 保持原模型。
 也可以直接对代理说“帮我加一个模型 / 把默认模型换成 X / 测一下这个模型能不能用”：主会话代理通过 `manage_models` 工具执行同一套操作，
 密钥只作为参数传一次、回执不回显；删除服务商会弹统一审批确认。开关 `enable_model_profile_tool`，详见 [/model 设计](docs/design/TUI_MODEL_PROFILES.md)。
+
+IM（如飞书）和 TUI 都可以用文字形式选模型：发送 `/model` 列出当前会话模型、新会话默认和带编号的可选模型，
+`/model <编号>` 为当前会话选择，`/model default <编号>` 设为新会话默认。可选模型只有自己保存的模型、
+显式部署配置和管理员在“管理员共享模型”里开放的模型；聊天里不能新增模型、不收发密钥，也不显示接口地址。
+会话一旦用过某个模型就固定下来，改新会话默认不会改变已打开的会话，所以 IM 用户第一次使用时要对当前会话发 `/model <编号>`。
 
 ## `bench-model`
 

@@ -345,14 +345,14 @@ def _http_error_body(exc: urllib.error.HTTPError) -> dict[str, object]:
 
 # LLM: 窗口只选择精确 request；停止委托原 worker 句柄和正式运行绑定，不能读另一线程的当前参数猜身份。
 # 函数用途: 在直接本地聊天里查询或控制当前回合，让单纯中断与任务资源停止保持不同边界。
-# context/compact/recover 依赖 Gateway 的 canonical 会话与运行库，本地模式直接拒绝并提示改用 Gateway。
+# context/compact/recover 与 /model 文字形式依赖 Gateway 的 canonical 会话、运行库和 owner 解析，本地模式直接拒绝并提示改用 Gateway。
 def _execute_local_control(
     execution: ChatControlExecution,
     command: ConversationControlCommand,
 ) -> ConversationControlResult:
     state = execution.state
     request_id = str(state.request_id or "").strip()
-    if command.kind in {"context", "compact", "recover"}:
+    if command.kind in {"context", "compact", "recover", "model"}:
         return ConversationControlResult(
             command.kind,
             False,
@@ -543,7 +543,7 @@ def _cleanup_local_resources(request_id: str, resources: object | None) -> None:
     ).start()
 
 
-# LLM: 序列化显式控制操作，尤其不能将 interrupt 降级为暂停目标的 /stop；/recover 原样带结构化处置值。
+# LLM: 序列化显式控制操作，尤其不能将 interrupt 降级为暂停目标的 /stop；/recover 原样带结构化处置值，/model 保留 default 前缀。
 # 函数用途: 将界面的结构化控制还原为服务端共用的命令协议，不发送给模型。
 def _command_text(command: ConversationControlCommand) -> str:
     if command.kind == "stop" and command.operation == "interrupt":
@@ -587,6 +587,9 @@ def _command_text(command: ConversationControlCommand) -> str:
         return f"/verbose {command.value}".rstrip()
     if command.kind == "recover":
         return f"/recover {command.value}".rstrip()
+    if command.kind == "model":
+        prefix = "/model default" if command.operation == "set_default" else "/model"
+        return f"{prefix} {command.value}".rstrip()
     if command.kind == "unsupported":
         return f"/{command.operation or 'unsupported'}"
     return f"/{command.kind}"

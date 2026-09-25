@@ -1835,6 +1835,11 @@ generic `create_attempt` 和 `recover_attempt_unknown` 不感知 transport marke
 
 普通 unknown 的人工恢复入口是会话控制 `/recover`（`gateway_parts/turn_recovery_control.py`，由 `control_service` 按 kind 分派）。它只看已认证 scope 对应 thread 的 `workspace_task_id`，经 `main_agent_recovery_block_for_task` 找到阻塞的根主代理执行轮：无参数时只读列出 `unsettled_attempt_operations`；带处置值时以 `conversation-control:/recover` 为 operator 调用 `recover_attempt_unknown`，处置值必须属于 `ATTEMPT_EFFECT_DISPOSITIONS`。`create_attempt` 在两处 unknown 闸抛 `RuntimeRecoveryRequiredError`（`RUN_RECOVERY_REQUIRED`），Gateway 按 error_code 给出指向 `/recover` 的客户端文案。
 
+生命周期命令的托管自停闸在 CLI 侧（`cli/gateway_host_guard.py`）：`cmd_gateway_run` 第一步写 `MY_AGENT_HOSTING_GATEWAY_PID`，
+`cmd_gateway_stop` 与 `cmd_gateway_start --force` 在写停止请求前调用 `refuse_stopping_hosting_gateway(pid)`；`restart` 经 stop 继承同一拒绝。
+聊天 `/model` 文字控制由 `control_service` 按 kind 分派到 `model_profile_service.execute_model_text_control`，
+与 `/client/models` 共用 `_scoped_model_host`；为避免循环导入，分派处延迟导入该模块。
+
 模型输出、异常字符串、PID 年龄、目录内容和“看起来已完成”都不是恢复证据。恢复后新 generation 仍走普通
 `_bind_main_agent_authority`；旧操作不会被 RuntimeDB 重开，模型只从 carried records 获得已做事实。任何
 EXECUTING/UNKNOWN、已启动但未 settle、缺 archive、operation 字段冲突或 DIRTY/MUTATING 资源都返回结构化

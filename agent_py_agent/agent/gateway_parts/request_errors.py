@@ -43,7 +43,7 @@ class SystemCommandRoutingError(RuntimeError):
     error_code = "SYSTEM_COMMAND_ROUTING_ERROR"
 
 
-# LLM: 客户端错误仅按结构化 error_code 映射；未配置模型引导 /model，不虚构默认模型或泄露异常原文。
+# LLM: 客户端错误仅按结构化 error_code 映射；未配置模型引导 /model（IM 里可用编号选择共享模型），不虚构默认模型或泄露异常原文。
 # COMPACT_REQUEST_NON_TEXT 先于通用 COMPACT_ 前缀匹配：它现在表示"无法摘要的非文本内容"（unknown 块，或 compact_media_policy=off 时的图片），
 # 文案要点明这一点并给出可行动的出路；已知图片在 auto/archived_refs 下会走归档引用，不再报这个码。
 # COMPACT_VISION_SUMMARY_FAILED 同样先于前缀匹配：随图摘要本次失败，同代次下一次压缩自动改走归档引用，文案说明不必换模型。
@@ -67,7 +67,10 @@ def gateway_client_error_message(error_code: object) -> str:
             "请查看压缩诊断；切换更大上下文的模型后可继续原会话。"
         )
     messages = {
-        "MODEL_NOT_CONFIGURED": "尚未配置模型，请先通过 /model 新增并选择模型；系统不会自动使用其它模型。",
+        "MODEL_NOT_CONFIGURED": (
+            "尚未配置模型。请发送 /model 查看并选择可用模型；新增模型需在终端 TUI 的 /model 里操作。"
+            "系统不会自动使用其它模型。"
+        ),
         "MODEL_RESPONSE_TRUNCATED": (
             "本次模型输出达到上限，尚未形成完整正文；已有工具操作和历史保留。"
         ),

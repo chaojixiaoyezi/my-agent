@@ -29,6 +29,9 @@
 - “选择已有模型”只改变当前 canonical 会话；同一用户其他 TUI/IM 会话不受影响。
   “新会话默认模型”只初始化未来新会话，正在执行的工作片冻结原配置；当前 child 不被菜单中断。
   会话固定编号及恢复语义见 [会话模型选择](SESSION_MODEL_SELECTION.md)。
+- 聊天文字形式 `/model`、`/model <编号>`、`/model default <编号>` 供 IM 与 TUI 使用（TUI 单独 `/model` 仍开菜单）：
+  经 Gateway 控制面按已认证 scope 解析 owner/会话，与菜单共用同一轻量宿主和 `execute_model_profile_operation` 写入口；
+  只做查看、会话选择和新会话默认，编号取同一次列表的可选行，不按模型名模糊匹配；不新增、不收发密钥、不显示接口地址。
 - 管理员可逐个显式发布或撤销共享模型；私有配置不会自动共享。共享目录只保存引用，
   普通用户调用由 Gateway 解析管理员原私有配置，不复制或返回密钥。见 [共享模型目录](SHARED_MODEL_CATALOG.md)。
 - 上下文窗口是用户显式配置的总容量（tokens），不是输出长度；用于真实压力/Compact 计算。

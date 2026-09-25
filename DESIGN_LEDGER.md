@@ -662,12 +662,16 @@ auth 表单取消和参数拒绝已验，官方设备码在两处环境被 HTTP 
   现在 `/recover` 只读列出当前 thread 工作任务根执行轮里未确认的工具操作；用户核对外部事实后用 `recorded|confirmed_noop|abandoned`
   之一显式解除阻塞，下一条消息接着原任务新开一轮，旧操作不重放。unknown 闸改抛 `RUN_RECOVERY_REQUIRED`，客户端文案指向 `/recover`。
   范围只覆盖 thread 的工作任务；持续目标（Goal）任务的 unknown 执行轮仍无入口，待有真实样本再扩展。细节见 `docs/modules/gateway/04-structure.md`。
-- 已查明原因、待用户确认方案（2026-09-25，未实施）：模型在回合里执行 `my-agent gateway restart`，重启的正是承载自己这一轮的 Gateway，
+- 已实现（2026-09-25，用户确认两项都做）：模型在回合里执行 `my-agent gateway restart`，重启的正是承载自己这一轮的 Gateway，
   命令被自己的重启切断，回合停在 unknown。触发背景：用户让它排查飞书“模型调用失败”，它此前用 `manage_models` 的 `set_default`
   只改了本机主 owner 的默认模型，飞书用户是另一个 owner，仍是 `MODEL_NOT_CONFIGURED`；它随后推测是 Gateway 缓存了旧配置，于是重启。
-  候选方向：(1) 从 Gateway 托管的工具进程里发起的 stop/restart 以结构化事实（工具子进程环境里的运行身份标记）识别，拒绝并提示改用
-  “本轮结束后重启”的结构化控制，不从命令文本猜；(2) 给管理员一条把模型共享给其他 owner 的显式入口，或让 `manage_models` 回执写明作用的 owner，
-  避免模型误以为已替飞书用户配好模型。两项都等用户拍板。
+  - 托管自停闸：Gateway 服务进程启动时把自己的进程号写进环境变量 `MY_AGENT_HOSTING_GATEWAY_PID`，工具、后台命令和 runner 子进程继承；
+    `gateway stop`/`restart`/`start --force` 发现要停的正是这个进程号就拒绝并以 2 退出，不写停止请求。不解析命令文本。
+    已知边界：直接 kill 进程号或调用 HTTP `POST /stop` 不经过它；从托管进程里启动的终端继承标记，人工在里面重启时需先清掉该变量。
+    没有实现“本轮结束后自动重启”：拒绝文案让用户在对话结束后自己重启，模型配置修改本就不需要重启。
+  - IM 选模型：`/model` 成为聊天文字控制（IM 与 TUI 带编号形式；TUI 单独 `/model` 仍开菜单），`/model <编号>` 选当前会话，
+    `/model default <编号>` 设新会话默认，只列自己的、部署的和管理员共享的模型，不在聊天里新增或收发密钥。
+    `MODEL_NOT_CONFIGURED` 文案改为引导发送 `/model`。仍未做：管理员替其他用户预设模型；`manage_models` 回执不写作用 owner。
 - 已实现（2026-09-25，用户确认后落地；第二版按用户“不要关了再开”改为原地切换）：客户端随 Gateway 升级。TUI 空闲时在 UI 事件循环线程原地 `execv`，不退出全屏、同一会话、首帧即原对话，跨 exec 只传会话编号与原始 termios（`MY_AGENT_TUI_HANDOFF`）；实现 `cli/chat_parts/tui_upgrade_follow.py` + Gateway `runtime_prefix`，开关 `tui_follow_gateway_upgrade`。发布工具（仓库外）只在适配器实际加载的模块有变化时才重启它。最初设计：现状：TUI 是独立进程，Gateway 重启后会自动重连并补回历史，
   但客户端代码停在启动时的版本（旧 `/help`、旧插件命令目录），没有版本不一致检测；IM 适配器也是独立守护进程，部署工具只切 Gateway 不重启它。
   方案：(1) 部署工具切完 Gateway 后检测并重启同机适配器守护进程，纳入同版核对；(2) TUI 在重连时比对 Gateway 上报的版本事实（wheel 哈希/source_sha），

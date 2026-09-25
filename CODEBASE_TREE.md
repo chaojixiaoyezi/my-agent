@@ -166,6 +166,7 @@ agent_py_agent/
 |   |   `-- control_runtime.py          # CLI 对共享会话控制协议及窗口级精确中断的运行适配
 |   |-- home_runtime_commands.py        # owner home 状态、daily/task workspace/index 维护命令
 |   |-- gateway_process.py              # gateway 进程入口
+|   |-- gateway_host_guard.py           # 托管标记：Gateway 托管的工具进程不能停止或重启托管自己的 Gateway
 |   |-- gateway_lane_retry.py           # 后台 owner/thread 配置等待与普通冷却；有界、线程安全、不另存任务状态
 |   `-- _*.py                           # CLI 子命令实现
 |-- skills/builtin/<category>/<name>/   # 内置知识型 skill 树：目录即分类（research/documents/…），递归扫描，类目索引常驻 prompt，skill_search 工具按需检索（千级地基）
@@ -830,6 +831,8 @@ agent_py_agent/
 |   |-- test_tui_preflight.py           # Gateway readiness 瞬态成功、typed 失败与 worker 只启动一次回归
 |   |-- test_tui_upgrade_follow.py      # TUI 随 Gateway 升级原地切换：目标判定、空闲事实、UI 线程两段式、交接载荷、终端兜底
 |   |-- test_turn_recovery_control.py   # /recover 解析、只读查看、显式恢复后可再挂载、拒绝情形、Gateway 分派与 TUI 序列化
+|   |-- test_gateway_host_guard.py      # 托管标记继承与擦洗保留、只拦托管自己的 Gateway、stop/restart/start --force 拒绝
+|   |-- test_model_text_control.py      # 聊天 /model：解析、无模型引导、选择共享模型不泄密钥、按 owner 隔离、TUI 菜单保留
 |   |-- test_tui_terminal.py            # OSC 标题、活动动画、去重与清理回归
 |   |-- test_tui_transcript.py          # 详细 transcript、全文搜索、命中导航和 resize 回归
 |   |-- test_tui_reading_position.py    # 原地展开、立即滚动、双向跨页和插话身份回归
@@ -1328,6 +1331,7 @@ docs/
 - `agent/gateway_parts/foreground_transcript.py`：同会话公开过程、候选增量与 final 快照，不拥有运行或审批权限。
 - `agent_py_agent/tests/test_gateway_foreground_transcript.py`：前台 writer、消息顺序、缺帧恢复、候选接替与隔离验证。
 - `agent/gateway_parts/model_profile_service.py`：authenticated owner 的模型菜单接口，不经聊天队列或模型。
+- `cli/gateway_host_guard.py`：Gateway 服务进程启动时写入托管进程号，工具子进程继承；stop/restart/start --force 据此拒绝停掉托管自己的 Gateway。
 - `agent/gateway_parts/turn_recovery_control.py`：`/recover` 只看当前 thread 工作任务的根主代理执行轮；查看只读，处置经唯一出口 `recover_attempt_unknown`，不重放旧操作。
 - `agent/gateway_parts/owner_conversation_store.py`：沿原配置与 owner 路径组装模型菜单和插件管理共用的轻量会话 Store，不初始化完整 Agent。
 - `agent/gateway_parts/approval_mode_service.py`：认证 owner 的权限菜单服务，不允许正文伪造管理员。

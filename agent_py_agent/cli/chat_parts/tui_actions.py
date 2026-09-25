@@ -203,7 +203,7 @@ def _tui_attach_gateway_job(
 # through to a foreground/background task. 会话运行时 does not expose manual Compact during an active
 # task, so the client must reject that state before persisting an outbox row or starting animation;
 # automatic in-turn Compact is a separate runtime path. Ambiguous task sets still fail closed.
-# 函数用途: 展示同源上下文，或持久提交带精确回合/Compact 目标的 TUI 控制命令；任务运行中不显示假的手动压缩动画。
+# 函数用途: 展示同源上下文，或持久提交带精确回合/Compact 目标的 TUI 控制命令；任务运行中不显示假的手动压缩动画；单独 /model 留给本地菜单。
 def _tui_submit_control_operation(
     params: TuiCreateKeybindingsParams,
     text: str,
@@ -215,6 +215,8 @@ def _tui_submit_control_operation(
     command = parse_conversation_control(text, reject_unknown_slash=True)
     if command is None or not command.valid:
         return False
+    if command.kind == "model" and command.operation == "view":
+        return False  # 单独 /model 仍由 TUI 本地菜单处理；只有带编号的文字形式发给 Gateway。
     if command.kind == "context":
         from .tui_block_renderer import render_tui_context_usage_report
 

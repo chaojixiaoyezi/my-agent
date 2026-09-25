@@ -3093,7 +3093,21 @@ Audit/摄取不列入本轮新增验收；共享模块既有回归按改动影�
 - 真实验收（2026-09-25，`62b3329cf`，双机 `runtime-step11z-cb3cb7a7`，用户批准对其卡住的会话执行）：经 Gateway `/control`
   以该会话身份发 `/recover`，只列出 1 条 `run_command`（执行中断，开始时间与卡住那一轮一致），运行库未变；外部事实核实为那次
   Gateway 确实已重启后发 `/recover recorded`，attempt=recovered、run=created、`attempt_recovered` 事件的 operator 与处置正确。
-  用户下一条消息接着原任务新开一轮的核对，等用户实际发消息后补记。
+  用户 12:06 发下一条消息后：同一 agent run 开出 generation 2，metadata 带 `recovered_from_attempt_id`，旧 attempt 那条
+  EXECUTING 操作在换代时转为 UNKNOWN、没有被重放；新一轮 12 条工具操作后 12:12 done，请求进入 done，期间 Gateway 进程号未变。
+
+## 托管自停闸与聊天 `/model`（2026-09-25）
+
+- 背景同上一节：模型在回合里重启了托管自己的 Gateway；飞书用户是另一个 owner，没有模型，飞书里发 `/model` 只得到“不支持的系统命令”。
+- `test_gateway_host_guard.py`：Gateway 进程写入的托管进程号经 `_subprocess_text_env` 传给子进程，降权擦洗后仍保留；
+  只有目标进程号与托管进程号完全相同才拒绝，缺失、坏值、别的 Gateway 都放行；`gateway stop`/`restart`/`start --force`
+  拒绝时返回 2，且没有写停止请求、没有 kill、没有启动新进程；工具里停别的 Gateway 照常成功。conftest 清掉该变量，避免在托管工具里跑测试时串宿主。
+- `test_model_text_control.py`：`/model`、`/model <编号>`、`/model default <编号>` 解析为结构化操作，多余正文无效；
+  没有模型时返回“请管理员共享”的引导而不是不支持；管理员共享一个模型后 IM 用户看到它（不含管理员私有模型、密钥和接口地址），
+  选中后本会话生效、新会话默认不变，再设默认后才变；越界编号拒绝；两个 IM 用户的会话选择互不影响；TUI 单独 `/model` 仍留给本地菜单。
+- 真实验收方法：隔离 home 与 127.0.0.1:8431 的 Gateway 上，一次 prompt 让代理在对话里执行该 Gateway 的 `gateway restart`，
+  核对工具结果为拒绝、回合正常结束、Gateway 进程号不变；再以 IM 身份经 Gateway `/ask` 发 `/model`、`/model 1` 和一条普通消息，
+  核对列表、会话选择和普通消息使用所选共享模型完成。
 
 ## 提交前严格 gate
 
