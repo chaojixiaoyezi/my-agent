@@ -3080,6 +3080,8 @@ Audit/摄取不列入本轮新增验收；共享模块既有回归按改动影�
   后续：dns 项由决策线修正（其 Mac 的 HTTP_PROXY 掩盖了解析路径，runner 才是对的）；断连取消项根因是 `execute_host_command` 在 attempt_executor 退出事实之后才写
   未启动回执，并发 `query_host_command` 在窗口里投影成 outcome_unknown。回执改到执行器登记仍为 running 时写入，回归
   `test_host_command_execution.py::test_unstarted_receipt_is_written_before_executor_exit_fact`（去掉修复即失败）。
+  第二轮 CI 发现回执不能早于连接清理：`test_plugin_invocation.py::test_connection_cleanup_finishes_before_host_attempt_closes[denied]` 要求资源释放期间 attempt 仍 running；
+  现按“ExitStack 资源清理 → 未启动回执 → attempt_executor 退出事实”的顺序写入，两条合同同时成立。
 
 ```bash
 python3 -m pytest <直接相关测试文件> -q --tb=short

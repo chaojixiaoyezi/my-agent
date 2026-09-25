@@ -49,33 +49,38 @@ def execute_host_command(
     entered_executor = False
     unstarted = None
     try:
-        with attempt_executor(repo, binding.run_id, binding.attempt_id), ExitStack() as resources:
-            if release_execution is not None:
-                resources.callback(release_execution)
-            prepared = prepare(binding)
-            _validate_execution(binding, prepared)
-            original_gate = prepared.pre_handler_gate
+        with attempt_executor(repo, binding.run_id, binding.attempt_id):
+            with ExitStack() as resources:
+                if release_execution is not None:
+                    resources.callback(release_execution)
+                prepared = prepare(binding)
+                _validate_execution(binding, prepared)
+                original_gate = prepared.pre_handler_gate
 
-            # LLM: gate 接收原执行器补全后的规范输入；失配在操作领取前拒绝，不改原请求摘要。
-            # 函数用途: 检查实际即将执行的参数，随后保留调用方原先的前置校验。
-            def gate(call):
-                if tool_arguments_hash(call.arguments) != "sha256:" + request.input_digest:
-                    return ToolHandlerOutcome(call.tool_name, False, "宿主命令参数补全改变了原输入。",
-                                              error_code="TOOL_INVALID_ARGUMENTS", effect_outcome="not_started")
-                return original_gate(call) if original_gate else None
+                # LLM: gate 接收原执行器补全后的规范输入；失配在操作领取前拒绝，不改原请求摘要。
+                # 函数用途: 检查实际即将执行的参数，随后保留调用方原先的前置校验。
+                def gate(call):
+                    if tool_arguments_hash(call.arguments) != "sha256:" + request.input_digest:
+                        return ToolHandlerOutcome(call.tool_name, False, "宿主命令参数补全改变了原输入。",
+                                                  error_code="TOOL_INVALID_ARGUMENTS", effect_outcome="not_started")
+                    return original_gate(call) if original_gate else None
 
-            trusted = dict(prepared.trusted_run_context or {})
-            trusted["run_scope"] = {**trusted.get("run_scope", {}), "task_id": binding.task_id}
-            prepared = replace(prepared, operation_store=ManagedOperationStore(repo), operation_store_required=True,
-                               trusted_run_context=trusted, pre_handler_gate=gate, require_model_visibility=False)
-            entered_executor = True
-            execution = ToolExecutor().execute(prepared)
-            execution = resolve_host_command_approval(prepared, execution, request_id=request.request_id,
-                                                       consumer=request_permission)
-            if _operation(repo, binding) is None and not execution.result.handler_executed:
-                # 执行器登记仍是 running 时就写未启动回执，不给并发查询留下 outcome_unknown 窗口。
-                _settle_unstarted(repo, binding, execution.result.reported_error_code,
-                                  state="approval_required" if execution.decision.status == "ask" else "rejected")
+                trusted = dict(prepared.trusted_run_context or {})
+                trusted["run_scope"] = {**trusted.get("run_scope", {}), "task_id": binding.task_id}
+                prepared = replace(prepared, operation_store=ManagedOperationStore(repo), operation_store_required=True,
+                                   trusted_run_context=trusted, pre_handler_gate=gate, require_model_visibility=False)
+                entered_executor = True
+                execution = ToolExecutor().execute(prepared)
+                execution = resolve_host_command_approval(prepared, execution, request_id=request.request_id,
+                                                           consumer=request_permission)
+                if _operation(repo, binding) is None and not execution.result.handler_executed:
+                    unstarted = (execution.result.reported_error_code,
+                                 "approval_required" if execution.decision.status == "ask" else "rejected")
+            # 资源清理（连接释放）已先于 attempt 关闭完成；执行器登记仍是 running，此时写未启动回执，
+            # 不给并发查询留下 outcome_unknown 窗口。
+            if unstarted is not None:
+                _settle_unstarted(repo, binding, unstarted[0], state=unstarted[1])
+                unstarted = None
     except Exception as exc:  # noqa: BLE001 不输出参数或私有路径，进入执行链之后只能核对原账
         _LOGGER.warning("宿主命令执行中断: operation=%s error=%s", request.operation_id, type(exc).__name__)
         if not entered_executor:
