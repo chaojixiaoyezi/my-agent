@@ -1,0 +1,64 @@
+{
+  "plugin_id": "hello-node",
+  "version": "1.0.0",
+  "summary": "Node.js 示例插件：打招呼，并按宿主本次下发的权限读取工作区文本",
+  "entry": {"kind": "interpreter", "interpreter": "node", "command": "src/server.js", "args": []},
+  "files": [
+    {"path": "declaration.json", "executable": false},
+    {"path": "src/server.js", "executable": false},
+    {"path": "src/workspace_read.js", "executable": false}
+  ],
+  "platforms": ["any"],
+  "default_action": "hello",
+  "actions": [
+    {
+      "name": "hello",
+      "summary": "打个招呼，看看插件由哪个 Node.js 运行",
+      "arguments": [
+        {"name": "name", "summary": "称呼", "options": [], "value_type": "string", "required": false, "multiple": false, "default": null, "choices": [], "path": false}
+      ],
+      "kind": "tool",
+      "target": "hello",
+      "available": true
+    },
+    {
+      "name": "read",
+      "summary": "读取工作区里的 UTF-8 文本",
+      "arguments": [
+        {"name": "path", "summary": "文件路径", "options": [], "value_type": "string", "required": true, "multiple": false, "default": null, "choices": [], "path": true},
+        {"name": "max_bytes", "summary": "最多读取的字节数", "options": ["--max-bytes"], "value_type": "integer", "required": false, "multiple": false, "default": null, "choices": [], "path": false}
+      ],
+      "kind": "tool",
+      "target": "read_text",
+      "available": true
+    }
+  ],
+  "tools": [
+    {
+      "name": "hello",
+      "description": "返回一句来自 Node.js 插件的问候，附带运行它的 Node 版本与平台。",
+      "requested_effect": "read_only",
+      "input_schema": {
+        "type": "object",
+        "properties": {"name": {"type": "string", "maxLength": 64, "description": "称呼"}},
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "read_text",
+      "description": "按宿主本次下发的工作区读取权限，读取一个 UTF-8 文本文件的开头部分。",
+      "requested_effect": "read_only",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {"type": "string", "minLength": 1, "description": "文件路径（相对当前工作目录或绝对路径）"},
+          "max_bytes": {"type": "integer", "minimum": 1, "maximum": 65536, "description": "最多读取的字节数，默认 4096"}
+        },
+        "required": ["path"],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "settings_schema": {"type": "object", "properties": {}, "additionalProperties": false}
+}

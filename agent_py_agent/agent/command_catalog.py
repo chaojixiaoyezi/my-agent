@@ -160,6 +160,8 @@ COMMAND_CATALOG = (
             ), available=False),
             CommandActionSpec("enable", "启用已安装插件", (
                 ArgumentSpec("plugin", "插件 ID", required=True),
+                ArgumentSpec("confirm", "确认码：启用含可执行文件或外部解释器的插件时，先看回执再原样填入",
+                             options=("--confirm",)),
             ), available=False),
             CommandActionSpec("disable", "停用插件并保留安装包", (
                 ArgumentSpec("plugin", "插件 ID", required=True),

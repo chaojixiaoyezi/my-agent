@@ -1,5 +1,5 @@
 # LLM: 准备只消费原 operation 已领取的固定计划，所有进程沿原托管链；不发布激活或通过目录扫描判断成功。
-# 模块用途: 从固定本地 wheel 创建独立 Python 环境，准备权限与资源绑定可反复核对，启用发布仍由上层负责。
+# 模块用途: 从固定本地 wheel 创建独立 Python 环境（v6 非 Python 包转交 plugin_files_environment 解包），准备权限与资源绑定可反复核对，启用发布仍由上层负责。
 
 from __future__ import annotations
 
@@ -73,11 +73,16 @@ _DEFAULT_LIMITS = EnvironmentBuildLimits()
 
 
 # LLM: 原 claim 和资源声明先于候选写入；原 quota 非阻塞，失败不修改安装/激活，解释器变化不得重新生成计划。
-# 函数用途: 按原操作冻结的地址准备离线环境，三个宿主命令沿已有进程 Store，结果不代表插件启用。
+# 函数用途: 按原操作冻结的地址准备离线环境，三个宿主命令沿已有进程 Store，结果不代表插件启用；v6 包改走解包准备。
 def prepare_plugin_environment(
     owner: OwnerHomeResult, package: PluginPackageSnapshot, operation: PluginEnvironmentOperation,
     *, limits: EnvironmentBuildLimits = _DEFAULT_LIMITS,
 ) -> PreparedPluginEnvironment:
+    if package.manifest.entry is not None:
+        # v6 非 Python 包：解包随包文件，不建 venv、不跑 pip
+        from .plugin_files_environment import prepare_files_environment
+
+        return prepare_files_environment(owner, package, operation, limits=limits)
     deadline = time.monotonic() + limits.timeout_seconds
     check_preparation_deadline(deadline)
     if os.name != "posix":
@@ -99,7 +104,7 @@ def prepare_plugin_environment(
         quota.check((OwnerQuotaChange(candidate, reserve),))
         check_preparation_deadline(deadline)
         operation.authorize()
-        descriptor = _create_candidate(owner, reference)
+        descriptor = create_environment_candidate(owner, reference)
         try:
             _prepare_candidate(candidate, descriptor, wheels, deadline, reserve, operation)
         finally:
@@ -122,7 +127,7 @@ def _preparation_capacity(wheels) -> int:
 
 # LLM: 原 owner 根下逐段 no-follow，最终目录必须不存在；已有候选即使不完整也不能被重试覆盖或当作成功。
 # 函数用途: 为本次操作在最终地址排他创建私有候选，保留目录描述符供后续身份核对。
-def _create_candidate(owner, reference: str) -> int:
+def create_environment_candidate(owner, reference: str) -> int:
     parts = (*owner.plugins_dir.relative_to(owner.root).parts, "environments")
     parent = open_directory_beneath(owner.root, parts, create=True)
     try:
@@ -142,7 +147,7 @@ def _prepare_candidate(candidate, descriptor, wheels, deadline, reserve, operati
     temporary.mkdir(mode=0o700)
     environment = preparation_environment(temporary)
     root = candidate / "python"
-    _check_candidate(candidate, descriptor, reserve, deadline)
+    check_environment_candidate(candidate, descriptor, reserve, deadline)
     run_environment_process(
         (sys.executable, "-I", "-m", "venv", "--symlinks", str(root)),
         cwd=candidate, environment=environment, deadline=deadline, operation=operation, stage="venv",
@@ -153,13 +158,13 @@ def _prepare_candidate(candidate, descriptor, wheels, deadline, reserve, operati
     plan = plan_wheel_installation(wheels, layout)
     check_preparation_deadline(deadline)
     requirements = _write_wheels(candidate, wheels, deadline)
-    _check_candidate(candidate, descriptor, reserve, deadline)
+    check_environment_candidate(candidate, descriptor, reserve, deadline)
     run_environment_process(
         (str(python), "-I", "-m", "pip", "--isolated", "--disable-pip-version-check", "--no-input", "--no-cache-dir",
          "install", "--no-index", "--no-deps", "--only-binary=:all:", "--no-compile", "--require-hashes", "-r", str(requirements)),
         cwd=candidate, environment=environment, deadline=deadline, operation=operation, stage="install",
     )
-    _check_candidate(candidate, descriptor, reserve, deadline)
+    check_environment_candidate(candidate, descriptor, reserve, deadline)
     if any(_file_fingerprint(root / relative, deadline) != original for relative, original in bootstrap.items()):
         raise EnvironmentPreparationError("bootstrap_modified")
     verify_wheel_installation(plan, layout, python, checkpoint=lambda: check_preparation_deadline(deadline))
@@ -226,7 +231,7 @@ def _file_fingerprint(path: Path, deadline) -> str:
 
 # LLM: 候选身份与空间在每次外部命令前后核对；这不是 OS 沙箱，目录存在或进程退出都不能替代最终安装事实提交。
 # 函数用途: 防止准备器继续使用已被替换的目录，并在返回结果前检查实际空间仍在原预留内。
-def _check_candidate(candidate, descriptor, reserve, deadline) -> None:
+def check_environment_candidate(candidate, descriptor, reserve, deadline) -> None:
     check_preparation_deadline(deadline)
     expected = os.fstat(descriptor)
     actual = candidate.lstat()

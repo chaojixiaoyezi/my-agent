@@ -120,3 +120,10 @@ HTTP/direct 命令绑定真实 run/attempt 与原 OperationStore；网络回包�
 先用临时真实 ZIP/wheel 字节验证损坏、篡改、路径、大小、重复字段、声明冲突和不导入代码，
 本地合同已覆盖同 owner 独立进程竞争、重复操作、提交前后失败、双故障、损坏包重放、锁链接及目录替换；之后才接环境、MCP 假端点和撤销交错。
 实际安装、启停、调用及卸载仍须通过多路真实 TUI，并与另一核心任务并行；开发验证不计作该验收完成。
+
+## 非 Python 包：plugin_package.v6（2026-09-25，本地实现）
+
+用户决定插件可以用任意语言写（系统解释器或随包可执行文件）。v6 用结构化 `entry`（`executable` / `interpreter`）、
+`files`（逐文件摘要与执行位）和 `platforms` 取代 Python 模块入口与 wheel 清单；读包器对 v6 核对 `plugin.json` + `files`
+的成员集合与逐文件摘要，其余外层规则与预算不变。v1–v5 的读写字节不变。启用前要用户看确认回执并输入确认码。
+完整设计、字段规则与验证见[任意语言插件](PLUGIN_ANY_LANGUAGE.md)。

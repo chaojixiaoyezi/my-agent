@@ -1,5 +1,5 @@
 # LLM: 包描述是未授权的静态声明；不接受宿主身份、配置值或启用事实，命令和工具 schema 必须沿现有合同。
-# 模块用途: 校验本地 Python 插件的内容声明，提供无需导入插件的帮助信息及不可变包元数据。
+# 模块用途: 校验本地插件的内容声明（Python 包或 v6 非 Python 包），提供无需导入插件的帮助信息及不可变包元数据。
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from .command_arguments import CommandActionSpec
 from .command_declarations import command_action_from_payload, declaration_list
 from .plugin_commands import PluginCommandSpec
 from .plugin_display.protocol import PanelDeclaration, validate_panels
+from .plugin_entry import PluginEntry, PluginFile, validate_entry_files
 from .tooling.input_schema import canonicalize_tool_input_schema, validate_tool_input
 
 PLUGIN_PACKAGE_SCHEMA = "plugin_package.v1"
@@ -24,6 +25,9 @@ PLUGIN_PACKAGE_SCHEMA_V4 = "plugin_package.v4"
 # v5 在 v4 基础上允许工具项多两个可选字段：只读工具的 observation（结果带候选观察）与动作工具的 observation_ref
 # （接受同类观察的候选 ID）；面板/Skill/宿主 API 可为空。v1–v4 包的读写字节保持不变
 PLUGIN_PACKAGE_SCHEMA_V5 = "plugin_package.v5"
+# v6 是非 Python 插件：用结构化 entry（随包可执行文件 / 系统解释器加随包脚本）与 files、platforms 取代 Python 模块和 wheel；
+# 面板/Skill/宿主 API/观察字段照旧可选。Python 包继续用 v1–v5，读写字节不变
+PLUGIN_PACKAGE_SCHEMA_V6 = "plugin_package.v6"
 PLUGIN_HOST_API_PERMISSIONS = ("read",)
 # 观察候选数量的宿主硬上限；manifest 声明的 max_candidates 不能超过它
 MAX_OBSERVATION_CANDIDATES = 64
@@ -167,6 +171,10 @@ class PluginManifest:
     skills: tuple[str, ...] = ()
     # 宿主 API 权限：声明 "read" 的插件启动时获得只读宿主 API 地址与令牌（见 plugin_host_api）
     host_api: tuple[str, ...] = ()
+    # v6 非 Python 入口；为 None 时是 Python 包（entry_module/entry_wheel/wheels 生效）
+    entry: PluginEntry | None = None
+    files: tuple[PluginFile, ...] = ()
+    platforms: tuple[str, ...] = ()
 
     # LLM: 直接构造与 JSON 读取共用约束；只开放工具动作和指向本包面板的展示动作，不接受包指定管理操作。
     #   有面板的纯展示包可以没有工具；两者都没有则拒绝。
@@ -174,10 +182,6 @@ class PluginManifest:
     def __post_init__(self) -> None:
         _text(self.version)
         _text(self.summary)
-        if not isinstance(self.entry_module, str) or not _MODULE.fullmatch(self.entry_module):
-            raise ValueError("Python 模块入口无效")
-        if any(keyword.iskeyword(part) for part in self.entry_module.split(".")):
-            raise ValueError("Python 模块入口含保留字")
         for items, kind in (
             (self.wheels, PluginWheel),
             (self.actions, CommandActionSpec),
@@ -185,16 +189,16 @@ class PluginManifest:
         ):
             if not isinstance(items, tuple) or any(not isinstance(item, kind) for item in items):
                 raise ValueError("包声明必须是不可变集合")
-        wheel_names = {wheel.path.casefold() for wheel in self.wheels}
-        if len(wheel_names) != len(self.wheels) or self.entry_wheel not in {
-            wheel.path for wheel in self.wheels
-        }:
-            raise ValueError("wheel 重名或入口 wheel 缺失")
         validate_panels(self.panels)
         if (not isinstance(self.skills, tuple) or len(self.skills) > MAX_PLUGIN_SKILLS
                 or len(set(self.skills)) != len(self.skills)
                 or any(not isinstance(name, str) or not _SKILL_NAME.fullmatch(name) for name in self.skills)):
             raise ValueError("随包 Skill 名单无效")
+        # 入口校验排在 Skill 名单之后：v6 要拿已校验的 Skill 名单核对随包 SKILL.md
+        if self.entry is None:
+            self._validate_python_entry()
+        else:
+            self._validate_file_entry()
         if (not isinstance(self.host_api, tuple) or len(set(self.host_api)) != len(self.host_api)
                 or any(item not in PLUGIN_HOST_API_PERMISSIONS for item in self.host_api)):
             raise ValueError("宿主 API 权限名单无效")
@@ -210,6 +214,28 @@ class PluginManifest:
         _ = self.command_spec
         canonical = canonicalize_tool_input_schema(json.loads(self.settings_schema_json))
         object.__setattr__(self, "settings_schema_json", _json(canonical))
+
+    # LLM: Python 包（v1–v5）必须有合法模块入口和包含入口 wheel 的 wheel 集合，且不能夹带 v6 字段。
+    # 函数用途: 校验 Python 入口与 wheel 声明一致。
+    def _validate_python_entry(self) -> None:
+        if not isinstance(self.entry_module, str) or not _MODULE.fullmatch(self.entry_module):
+            raise ValueError("Python 模块入口无效")
+        if any(keyword.iskeyword(part) for part in self.entry_module.split(".")):
+            raise ValueError("Python 模块入口含保留字")
+        wheel_names = {wheel.path.casefold() for wheel in self.wheels}
+        if len(wheel_names) != len(self.wheels) or self.entry_wheel not in {
+            wheel.path for wheel in self.wheels
+        }:
+            raise ValueError("wheel 重名或入口 wheel 缺失")
+        if self.files or self.platforms:
+            raise ValueError("Python 包不能声明随包文件或平台")
+
+    # LLM: v6 包不带 Python 入口与 wheel；入口、文件清单、平台与 Skill 文件的一致性统一由 plugin_entry 裁决。
+    # 函数用途: 校验非 Python 入口声明。
+    def _validate_file_entry(self) -> None:
+        if not isinstance(self.entry, PluginEntry) or self.entry_module or self.entry_wheel or self.wheels:
+            raise ValueError("非 Python 包不能声明 Python 入口或 wheel")
+        validate_entry_files(self.entry, self.files, self.platforms, self.skills)
 
     # LLM: 包始终投影为停用且无激活代次，宿主必须从自己的权威记录另行发布实际状态。
     # 函数用途: 复用原命令声明生成帮助，不能借此将包加入模型工具目录。
@@ -235,9 +261,39 @@ class PluginManifest:
     def observes(self) -> bool:
         return any(tool.observation is not None or tool.observation_ref is not None for tool in self.tools)
 
+    # LLM: 工具项投影在各协议版本间共用；观察字段只在声明时出现，保证旧版本包的字节不变。
+    # 函数用途: 生成包描述里的 tools 列表。
+    def _tool_payloads(self) -> list[dict]:
+        return [
+            {
+                "name": tool.name,
+                "description": tool.description,
+                "input_schema": tool.input_schema,
+                "requested_effect": tool.requested_effect,
+                **({"observation": asdict(tool.observation)} if tool.observation is not None else {}),
+                **({"observation_ref": asdict(tool.observation_ref)} if tool.observation_ref is not None else {}),
+            }
+            for tool in self.tools
+        ]
+
+    # LLM: v6 字段全部显式输出（面板、Skill、宿主 API 可为空列表），不与 v1–v5 的逐级升版规则混用。
+    # 函数用途: 生成非 Python 包的静态包描述。
+    def _v6_payload(self) -> dict:
+        return json.loads(_json({
+            "schema_version": PLUGIN_PACKAGE_SCHEMA_V6, "plugin_id": self.plugin_id, "version": self.version,
+            "summary": self.summary, "entry": self.entry.to_payload(),
+            "files": [asdict(item) for item in self.files], "platforms": list(self.platforms),
+            "actions": [asdict(action) for action in self.actions], "default_action": self.default_action,
+            "tools": self._tool_payloads(), "settings_schema": self.settings_schema,
+            "panels": [panel.to_payload() for panel in self.panels], "skills": list(self.skills),
+            "host_api": list(self.host_api),
+        }))
+
     # LLM: 输出只包含协议声明，不含私有运行字段；JSON 形态由命令 dataclass 和原 schema 投影产生。
     # 函数用途: 生成可复读的静态包描述。
     def to_payload(self) -> dict:
+        if self.entry is not None:
+            return self._v6_payload()
         return json.loads(
             _json(
                 {
@@ -250,17 +306,7 @@ class PluginManifest:
                     "wheels": [asdict(wheel) for wheel in self.wheels],
                     "actions": [asdict(action) for action in self.actions],
                     "default_action": self.default_action,
-                    "tools": [
-                        {
-                            "name": tool.name,
-                            "description": tool.description,
-                            "input_schema": tool.input_schema,
-                            "requested_effect": tool.requested_effect,
-                            **({"observation": asdict(tool.observation)} if tool.observation is not None else {}),
-                            **({"observation_ref": asdict(tool.observation_ref)} if tool.observation_ref is not None else {}),
-                        }
-                        for tool in self.tools
-                    ],
+                    "tools": self._tool_payloads(),
                     "settings_schema": self.settings_schema,
                     **({"panels": [panel.to_payload() for panel in self.panels],
                         "schema_version": PLUGIN_PACKAGE_SCHEMA_V2} if self.panels else {}),
@@ -283,6 +329,8 @@ class PluginManifest:
         try:
             _json(payload)
             version = payload.get("schema_version") if isinstance(payload, dict) else None
+            if version == PLUGIN_PACKAGE_SCHEMA_V6:
+                return cls._from_v6(payload)
             if version not in _SCHEMA_FIELDS:
                 raise ValueError("包协议版本无效")
             row = _fields(payload, _BASE_FIELDS + _SCHEMA_FIELDS[version])
@@ -291,19 +339,7 @@ class PluginManifest:
                 PluginWheel(**_fields(item, "path sha256"))
                 for item in declaration_list(row["wheels"])
             )
-            tools = []
-            for item in declaration_list(row["tools"]):
-                tool = _tool_fields(item, version)
-                tools.append(
-                    PluginToolDeclaration(
-                        tool["name"],
-                        tool["description"],
-                        _json(tool["input_schema"]),
-                        tool["requested_effect"],
-                        observation=_observation_from_payload(tool.get("observation")),
-                        observation_ref=_observation_ref_from_payload(tool.get("observation_ref")),
-                    )
-                )
+            tools = _tools_from_payload(row["tools"], version)
             if version == PLUGIN_PACKAGE_SCHEMA_V5 and not any(
                 tool.observation is not None or tool.observation_ref is not None for tool in tools
             ):
@@ -328,7 +364,26 @@ class PluginManifest:
         except (ValueError, TypeError, KeyError, AttributeError, RecursionError) as exc:
             raise PluginPackageError("invalid_manifest", "插件包描述无效。") from exc
 
+    # LLM: v6 字段集合固定（面板、Skill、宿主 API 可为空列表）；Python 入口字段在 v6 里不存在，构造时置空。
+    # 函数用途: 从 v6 JSON 恢复非 Python 包描述，错误由 from_payload 统一转为包描述无效。
+    @classmethod
+    def _from_v6(cls, payload: dict) -> PluginManifest:
+        row = _fields(payload, _V6_FIELDS)
+        panels, skills, host_api = _extension_fields(PLUGIN_PACKAGE_SCHEMA_V6, row)
+        files = tuple(PluginFile(**_fields(item, "path sha256 executable")) for item in declaration_list(row["files"]))
+        return cls(
+            plugin_id=row["plugin_id"], version=row["version"], summary=row["summary"],
+            entry_module="", entry_wheel="", wheels=(),
+            actions=tuple(command_action_from_payload(item) for item in declaration_list(row["actions"])),
+            default_action=row["default_action"], tools=_tools_from_payload(row["tools"], PLUGIN_PACKAGE_SCHEMA_V6),
+            settings_schema_json=_json(row["settings_schema"]), panels=panels, skills=skills, host_api=host_api,
+            entry=PluginEntry.from_payload(row["entry"]), files=files,
+            platforms=tuple(declaration_list(row["platforms"])),
+        )
 
+
+_V6_FIELDS = ("schema_version plugin_id version summary entry files platforms actions default_action tools "
+              "settings_schema panels skills host_api")
 _BASE_FIELDS = "schema_version plugin_id version summary entry_module entry_wheel wheels actions default_action tools settings_schema"
 # 各协议版本在基础字段之外必须出现的字段；每个新版本声明的新能力不能为空（否则应使用更低版本）
 _SCHEMA_FIELDS = {
@@ -345,11 +400,26 @@ _TOOL_V5_OPTIONAL_FIELDS = frozenset({"observation", "observation_ref"})
 # LLM: 工具项字段严格：v1–v4 只允许四个基础字段；v5 另允许两个可选观察字段。未知键不能静默丢弃。
 # 函数用途: 按协议版本检查一个工具声明项的字段集合。
 def _tool_fields(value: object, version: str) -> dict:
-    optional = _TOOL_V5_OPTIONAL_FIELDS if version == PLUGIN_PACKAGE_SCHEMA_V5 else frozenset()
+    optional = (_TOOL_V5_OPTIONAL_FIELDS if version in {PLUGIN_PACKAGE_SCHEMA_V5, PLUGIN_PACKAGE_SCHEMA_V6}
+                else frozenset())
     if (not isinstance(value, dict) or not set(value) >= _TOOL_REQUIRED_FIELDS
             or set(value) - _TOOL_REQUIRED_FIELDS - optional):
         raise ValueError("包描述字段不完整或存在未知字段")
     return value
+
+
+# LLM: 工具项在各版本共用同一构造；观察字段是否允许由 _tool_fields 按版本裁决。
+# 函数用途: 从包描述 JSON 恢复工具声明元组。
+def _tools_from_payload(value: object, version: str) -> tuple[PluginToolDeclaration, ...]:
+    tools = []
+    for item in declaration_list(value):
+        tool = _tool_fields(item, version)
+        tools.append(PluginToolDeclaration(
+            tool["name"], tool["description"], _json(tool["input_schema"]), tool["requested_effect"],
+            observation=_observation_from_payload(tool.get("observation")),
+            observation_ref=_observation_ref_from_payload(tool.get("observation_ref")),
+        ))
+    return tuple(tools)
 
 
 # 函数用途: 从 JSON 对象恢复观察声明；缺 max_candidates 按宿主上限，未知键拒绝。

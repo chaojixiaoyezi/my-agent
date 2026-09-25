@@ -49,3 +49,10 @@ Python 绕过协议直接访问系统；不把声明 `read_only` 或一份元数
 按服务能力选择逐次请求元数据，不复制其配置或沙箱实现。MCP 字段位置依据官方
 [生命周期](https://modelcontextprotocol.io/specification/2024-11-05/basic/lifecycle)与
 [消息基础](https://modelcontextprotocol.io/specification/2024-11-05/basic)。未完整审阅参考仓库。
+
+## 跨语言一致性用例（2026-09-25）
+
+非 Python 插件不能直接用 Python SDK，需要各自移植读取检查。`plugins/sdk/conformance/workspace_read_check.json` 给出目录树、
+上下文、逐条期望裁决和必须拒绝的畸形上下文，期望值由本文件描述的宿主实现裁决（pytest 同时校验参考实现）。
+Node 样例移植全部通过，典型错误写法（先按字面折叠 `..`、直接用语言自带 realpath、按字符串前缀判断包含等）均能被用例抓出。
+写入上下文暂无跨语言用例。详见[任意语言插件](PLUGIN_ANY_LANGUAGE.md#第-2-项实测非-python-插件怎么检查工作区路径)。

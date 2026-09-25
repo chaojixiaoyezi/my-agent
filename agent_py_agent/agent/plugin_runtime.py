@@ -11,6 +11,7 @@ from dataclasses import asdict, replace
 from .common.nofollow_fs import open_directory_beneath
 from .common.strict_json import load_strict_json
 from .plugin_activation_ref import PluginActivationRef
+from .plugin_entry import FILES_DIRECTORY
 from .plugin_host_api import HOST_API_READ, issue_host_api_env
 from .plugin_installation import PluginInstallation
 from .plugin_manifest import PluginToolDeclaration, canonical_plugin_settings
@@ -29,6 +30,7 @@ from .plugin_observation import (
 
 # 插件层候选复核失败码 → 宿主结构化 reported_error_code；插件合同保证这两种拒绝不产生副作用
 _PLUGIN_OBSERVATION_ERROR_CODES = {"stale": OBSERVATION_STALE, "not_found": OBSERVATION_CANDIDATE_UNKNOWN}
+from .plugin_runtime_facts import verified_runtime_command
 from .tooling.input_schema import canonicalize_tool_input_schema
 from .tooling.mcp_client import MCPError, MCPServerConfig, MCPStdioClient, sanitize_credentials
 from .tooling.mcp_registration import MCPProxyTool, build_proxy_tool, sanitize_name_component
@@ -233,6 +235,23 @@ class PluginProxyTool(MCPProxyTool):
 PLUGIN_DATA_DIR_ENV = "MY_AGENT_PLUGIN_DATA_DIR"
 
 
+# LLM: 启动命令只由宿主从安装快照与准备结果推出：Python 包沿 venv 解释器 -I -m 入口模块；可执行入口直接运行随包文件；
+#   解释器入口先按计划指纹复核定位文件（解释器被替换即拒绝），再以其绝对路径运行随包脚本。包不能提供宿主路径或额外 argv。
+# 函数用途: 返回插件进程的命令、参数与工作目录，并确认所需目录仍在原环境里。
+def _launch_argv(owner, manifest, environment, fingerprint: str) -> tuple[str, list[str], object]:
+    entry = manifest.entry
+    if entry is None:
+        os.close(open_directory_beneath(owner.root, (*environment.relative_to(owner.root).parts, "python", "bin")))
+        return str(environment / "python" / "bin" / "python"), ["-I", "-m", manifest.entry_module], environment
+    files = environment / FILES_DIRECTORY
+    os.close(open_directory_beneath(owner.root, files.relative_to(owner.root).parts))
+    target = str(files / entry.command)
+    interpreter = verified_runtime_command(owner.root, environment, entry.kind, fingerprint)
+    if entry.kind == "executable":
+        return target, list(entry.args), files
+    return interpreter, [target, *entry.args], files
+
+
 # LLM: 唯一插件数据位置；只由 owner 与已校验的插件 ID 推出，不接受包声明的路径。调用方负责 no-follow 创建。
 # 函数用途: 返回某 owner 下某插件的私有数据目录，供启动插件进程和管理命令共用。
 def plugin_data_dir(owner, plugin_id: str):
@@ -245,7 +264,7 @@ class PluginMCPClient(MCPStdioClient):
     # LLM: 构造只读规范环境和设置；私有值只放子进程环境，包声明的 effect 不降低原危险工具门。
 #   同时 no-follow 创建插件数据目录（有副作用：可能新建目录），经 MY_AGENT_PLUGIN_DATA_DIR 传给子进程；
 #   声明了 host_api=["read"] 的包另获宿主只读 API 地址与令牌（有副作用：登记令牌）。
-    # 函数用途: 将已准备 Python 环境接到原 MCP 客户端，不在构造时启动进程；runtime_repo 是 owner 权威库，供观察新鲜度复核只读。
+    # 函数用途: 将已准备的插件环境（Python 或 v6 随包文件）接到原 MCP 客户端，不在构造时启动进程；runtime_repo 是 owner 权威库，供观察新鲜度复核只读。
     def __init__(self, owner, installation: PluginInstallation, *, runtime_repo: object | None = None):
         self.runtime_repo = runtime_repo
         activation = installation.activation
@@ -256,8 +275,7 @@ class PluginMCPClient(MCPStdioClient):
         if current != installation:
             raise ValueError("插件安装已变化")
         environment = owner.plugins_dir / "environments" / activation.plan.environment_ref
-        descriptor = open_directory_beneath(owner.root, (*environment.relative_to(owner.root).parts, "python", "bin"))
-        os.close(descriptor)
+        command, args, cwd = _launch_argv(owner, installation.manifest, environment, activation.plan.interpreter_fingerprint)
         # 插件自有数据按 owner + 插件 ID 固定一处，跨版本、停用和重新启用保留；卸载默认也不清（见 PLUGIN_LIFECYCLE）
         data_dir = plugin_data_dir(owner, installation.manifest.plugin_id)
         descriptor = open_directory_beneath(owner.root, data_dir.relative_to(owner.root).parts, create=True)
@@ -271,8 +289,7 @@ class PluginMCPClient(MCPStdioClient):
                         if HOST_API_READ in getattr(installation.manifest, "host_api", ()) else {})
         super().__init__(MCPServerConfig(
             name="plugin_" + installation.manifest.plugin_id,
-            command=str(environment / "python" / "bin" / "python"),
-            args=["-I", "-m", installation.manifest.entry_module], cwd=str(environment),
+            command=command, args=args, cwd=str(cwd),
             env={"MY_AGENT_PLUGIN_SETTINGS": settings, PLUGIN_DATA_DIR_ENV: str(data_dir), **host_api_env},
             catalog_category="plugins",
         ), activation=self.activation_ref)

@@ -48,6 +48,7 @@
     |-- PLUGIN_WORKSPACE_WRITE.md        # 逐次写入工作区协议，与内置写工具同一裁决且只可能更严
     |-- PLUGIN_HOST_API.md               # 界面型插件的宿主只读 API：v4 声明、按激活发令牌、主题白名单
     |-- PLUGIN_OBSERVATION_CANDIDATES.md # 插件观察候选结构设计稿：manifest 声明、宿主铸 ID、两层执行前复核与动作候选决策点
+    |-- PLUGIN_ANY_LANGUAGE.md           # 任意语言插件（v6）：随包可执行文件/系统解释器、启用前用户确认、解释器固定与跨语言读取检查用例
     |-- WORKSPACE_PEEK.md                # 首个自有只读插件的预览、分页、安全打开与构建边界
     |-- PLUGIN_ACTIVATION.md             # 唯一安装表的激活 CAS、撤销、显式迁移及待接线资源边界
     |-- MANAGED_PROCESS_STDIO.md         # 原 host 字节管道、激活资源归属及旧版本恢复边界
@@ -181,9 +182,11 @@ agent_py_agent/
 |   |   |-- protocol.py                # 面板声明、公开主题与展示描述校验/截断，纯协议无 IO
 |   |   `-- service.py                 # Gateway 进程内展示服务：固定代次连接、单在途、撤销与空闲回收
 |   |-- plugin_package.py              # 有界 ZIP 读取、成员与摘要核对，不安装或导入插件
+|   |-- plugin_entry.py                # v6 非 Python 入口、随包文件与平台声明的形状校验及本机平台标记
 |   |-- plugin_wheels.py               # wheel 标准元数据、RECORD、平台与本地依赖闭包预检
 |   |-- plugin_wheel_layout.py         # 环境内文件计划、引导文件保护与宿主只读核对
 |   |-- plugin_environment.py          # 固定地址的 owner 独立 venv 准备，尚不发布激活
+|   |-- plugin_files_environment.py    # v6 包的环境准备：按摘要排他解包随包文件并设权限，不执行任何文件
 |   |-- plugin_environment_plan.py     # 原 operation 领取前冻结包、配置版本、解释器与候选身份
 |   |-- plugin_environment_process.py  # 原 claim 精确复查、托管准备命令与有界取消清理
 |   |-- plugin_installation.py         # 安装请求、私有配置事实、通用提交回执与安装准入
@@ -193,6 +196,7 @@ agent_py_agent/
 |   |-- plugin_activation_ref.py       # 可信 owner 与原代次引用，跨进程复查唯一安装表
 |   |-- plugin_activation.py           # 原安装版本上的激活迁移、阶段重放与旧代拒绝
 |   |-- plugin_runtime.py              # 固定代次的 MCP 服务、完整目录校验与原工具代理；观察结果改写与动作候选发送前复核
+|   |-- plugin_runtime_facts.py        # 非 Python 插件的本机运行事实：解释器解析与固定、启动前复核、用户确认回执与确认码
 |   |-- plugin_skills.py               # 已启用插件自带 Skill 目录的唯一定位规则（来源 plugin:<ID>，最低优先级）
 |   |-- plugin_host_api.py             # 插件宿主只读 API：令牌发放与复核、/plugin-host/query 主题投影
 |   |-- workspace_read_context.py      # 宿主与插件共用的冻结读取协议及逐项路径检查
@@ -770,6 +774,8 @@ agent_py_agent/
 |   |-- test_plugin_command_catalog.py # 声明跨进程往返、版本变化及损坏载荷拒绝
 |   |-- test_plugin_observation.py     # 插件观察候选宿主合同：形状码、ID 稳定、投影、事件序新鲜度、动作候选复核
 |   |-- test_plugin_package.py         # 静态包篡改、归档预算、危险成员及不执行代码的合同检查；v5 观察声明往返与非法声明
+|   |-- test_plugin_any_language.py    # v6 非 Python 插件：包描述、可复现打包、确认回执、解包准备、解释器固定与真实 MCP 启停
+|   |-- test_plugin_any_language_samples.py # 跨语言读取检查一致性用例（Python 参考 + Node 移植）与 hello-node/hello-go 宿主链路
 |   |-- plugin_wheel_fixtures.py       # 合成标准 wheel 与导入陷阱，仅用于开发组件检查
 |   |-- test_plugin_wheels.py          # 固定依赖、extras、平台、摘要与归档预算检查
 |   |-- test_plugin_wheel_layout.py    # 跨 wheel 与引导文件冲突、安装布局和入口脚本检查
@@ -855,6 +861,7 @@ agent_py_agent/
 scripts/
 |-- build_plugin_api.py                # 固定共用源码原字节投影，标准构建零运行依赖 SDK wheel
 |-- build_plugin_package.py            # 构建自有插件并沿原包/依赖校验生成安装 ZIP
+|-- build_plugin_files_package.py      # 构建非 Python（任意语言）插件的 v6 安装包：生成摘要、固定时间戳、宿主读包器复核
 |-- plugin_build.py                    # 开发构建后端调用、wheel 元数据读取与独占产物写入
 |-- bench/                             # GW-03/慢模型配对基准：锁内解析成本、owner 事实缓存各路径（配对交替，比值只在组内）
 |-- live_lab/                          # 真实链路 harness；真实 preflight、main-artifact、tool-recovery
@@ -865,6 +872,7 @@ scripts/
 `-- reproject_model_usage.py           # 历史用量账本的只读重算投影（exact/partial/incomplete，不覆盖原账本）
 plugins/
 |-- sdk/pyproject.toml                  # 独立 SDK 的唯一发行版本及标准构建声明
+|-- sdk/conformance/workspace_read_check.json # 工作区读取检查的跨语言一致性用例（期望值由宿主参考实现裁决）
 |-- activity-line/                     # 自有纯展示插件：面板显示运行状态、活动与耗时，无工具、无依赖
 |   |-- README.md                      # 构建与面板用法
 |   |-- pyproject.toml                 # 插件发行身份，无运行依赖
@@ -990,6 +998,18 @@ plugins/
 |       |-- board.py                   # ThreadingHTTPServer 服务：令牌/cookie、GET/HEAD 路由、计数、空闲自停、关闭释放端口
 |       |-- reading.py                 # 业务错误、根目录与请求路径授权、no-follow 目录枚举与有界读取
 |       `-- pages.py                   # 目录列表/预览/错误页 HTML 渲染，全部转义、内联 CSS、HTML 走 sandbox iframe
+|-- hello-go/                          # Go 示例插件（v6 随包可执行文件）：交叉编译成单文件，提供问候工具
+|   |-- README.md                      # 构建、打包、安装与确认步骤
+|   |-- go.mod                         # Go 模块声明，只用标准库
+|   |-- declaration.json               # 包声明（打包时生成摘要），同时编译嵌入作工具目录
+|   `-- main.go                        # stdio MCP 服务：握手、工具目录与 hello
+|-- hello-node/                        # Node.js 示例插件（v6 系统解释器）：问候与按宿主读取上下文读文本
+|   |-- README.md                      # 构建、安装、确认与读取检查说明
+|   |-- declaration.json               # 包声明，同时随包供服务读取工具目录
+|   |-- conformance.js                 # 开发用：跑工作区读取一致性用例（不打进包）
+|   `-- src/
+|       |-- server.js                  # stdio MCP 服务：握手声明读取扩展、工具分派、打开后复核的有界读取
+|       `-- workspace_read.js          # 工作区读取上下文的 Node 移植：逐段解析链接、owner/凭据/危险目录裁决
 |-- workspace-peek/                    # 自有文件预览插件；不依赖完整宿主运行包
 |   |-- README.md                      # 离线构建、命令示例与当前验收边界
 |   |-- pyproject.toml                 # 插件发行身份及精确 SDK 依赖
@@ -1076,6 +1096,7 @@ docs/
 - `plugins/savepoint-lite/`：首个写工作区的自有插件，快照只存宿主插件数据目录，恢复走写入上下文；`agent_py_agent/tests/test_savepoint_lite_package.py` 为其实际包与 MCP 进程组件验收。
 - `plugins/harness-console/`：首个界面型插件（宿主只读 API 样本），网页与桌面窗口共用一个只绑回环的服务，宿主令牌只留在插件服务端；`agent_py_agent/tests/test_harness_console_package.py` 为其实际包、假宿主 API 与 MCP 进程、真实 HTTP 访问的组件验收。
 - `plugins/web-board/`：网页界面型插件，插件进程内只绑回环的只读网页，按 serve 时冻结的读取上下文和 no-follow 读取限定目录；`agent_py_agent/tests/test_web_board_package.py` 为其实际包与 MCP 进程、真实 HTTP 访问的组件验收。
+- `plugins/hello-node/`、`plugins/hello-go/` 与 `scripts/build_plugin_files_package.py`：任意语言插件（包描述 v6）的两种启动机制样例及打包脚本；`plugins/sdk/conformance/workspace_read_check.json` 是非 Python 插件移植读取检查时必须跑通的一致性用例，`agent_py_agent/tests/test_plugin_any_language_samples.py` 为其组件验收。
 - `agent_py_agent/tests/test_plugin_api_build.py`、`agent_py_agent/tests/test_workspace_peek_package.py`：实际标准包、独立环境和原 MCP/宿主管理链的开发验证，不代替真实 TUI。
 
 - `agent_py_agent/agent/runtime_db/run_cancellation.py`：在原 RuntimeDB 上核对 task/run/agent run/attempt 四个身份并关闭执行权；原 UNKNOWN 不恢复、不释放锁，旧控制不能追随新的执行轮。
@@ -1103,6 +1124,7 @@ docs/
 - `agent_py_agent/agent/plugin_manifest.py` 与 `plugin_package.py`：只读校验包并保留同一字节快照；不接受宿主身份，不代表已安装、已授权或已隔离。
 - `agent_py_agent/agent/plugin_wheels.py` 与 `plugin_wheel_layout.py`：标准元数据和固定依赖集合预检、环境内目标保护及安装后宿主读回；不运行插件或替代 pip 安装器。
 - `agent_py_agent/agent/plugin_environment.py`、`plugin_environment_plan.py` 与 `plugin_environment_process.py`：计划先进入原 operation，准备沿原 owner 配额与 ProcessSessionStore；只返回准备事实，不发布激活或重建进程账。
+- `agent_py_agent/agent/plugin_entry.py`、`plugin_runtime_facts.py` 与 `plugin_files_environment.py`：v6 非 Python 插件的声明、本机运行事实与解包准备；启用前生成用户确认回执，解释器按真实路径与摘要固定、每次启动复核，全程不执行随包文件或解释器（启动插件进程除外）。
 - `agent_py_agent/agent/runtime_db/operation_resources.py`：精确资源准入的同事务只读检查，不能领取新代次、续租或恢复 UNKNOWN。
 - `agent_py_agent/agent/plugin_installation.py` 与 `plugin_install_store.py`：原 owner 插件目录中的唯一安装表和最后回执；先存包再提交，默认停用，异常读回区分提交结果，不拥有管理权限或执行历史。
 - `agent_py_agent/agent/plugin_installation_state.py` 与 `plugin_configuration.py`：原表 v3 编解码、v1/v2 明确迁移来源和完整配置替换裁决；未清理激活阻止改配置，没有第二套权威。
@@ -1159,6 +1181,7 @@ docs/
 - `agent_py_agent/agent/backends/bounded_call.py`：Curator 与后续决策共用的有界 callable；及时放弃等待与真实资源退出分别记录。
 - `docs/design/PLUGIN_LIFECYCLE.md`：可选 Python 插件的核心边界、命令目录、隔离依赖、版本绑定和卡死卸载；提案与现有实现明确区分。
 - `docs/design/PLUGIN_PACKAGES.md`：本地包格式、读取预算、静态校验及待实现的安装提交和隔离撤销合同。
+- `docs/design/PLUGIN_ANY_LANGUAGE.md`：任意语言插件的用户决定、v6 包描述、启用确认、解释器固定、给插件作者的协议要点、读取检查移植实测与 OS 沙箱试点计划。
 - `docs/design/PLUGIN_SAMPLE_ACCEPTANCE.md`：社区候选抽样与热度快照、10 个简易插件的最小功能、分批实现顺序和组合卸载验收；不代表已实现。
 - `docs/tasks/REFACTOR_PLUGIN_GOAL.md`：发布部署前置条件、十步执行状态、每步真实多 TUI 矩阵、证据与推进条件。
 - `docs/tasks/DECISION_MODEL_GOAL.md`：决策模型 P1—P5 完整范围、逐项完成条件、并行认领及分层验收状态。

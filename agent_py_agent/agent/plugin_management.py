@@ -33,6 +33,7 @@ from .plugin_invocation import (
 from .plugin_removal import PLUGIN_REMOVE_TOOL
 from .plugin_remove_tool import PluginRemoveTool
 from .plugin_runtime import plugin_tool_name
+from .plugin_runtime_facts import confirmation_message
 from .plugin_update import PLUGIN_UPDATE_TOOL
 from .plugin_update_tool import PluginUpdateTool
 from .runtime_db.host_command_execution import execute_host_command, query_host_command
@@ -432,6 +433,9 @@ class PluginManagement:
         }
         message = messages.get(state, "插件命令已处理。")
         details = payload.get("details", {})
+        if details.get("reason") == "confirmation_required" and isinstance(details.get("confirmation"), dict):
+            # 非 Python 插件启用前的用户确认：展示将要运行的程序与确认码，不套用通用的参数错误说明
+            result["message"] = confirmation_message(details["confirmation"])
         if state == "succeeded" and details.get("removed") is True:
             message = "插件已卸载，用户产物与操作历史保留。"
         elif state == "succeeded" and details.get("release_pending"):

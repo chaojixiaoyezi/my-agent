@@ -1,5 +1,5 @@
 # LLM: 读取器只处理已授权来源，严格 JSON 与安装表共用；不安装、不导入、不启动插件，保留完整字节快照。
-# 模块用途: 有界读取 ZIP、拒绝危险成员并核对 wheel 摘要，让包验证和保存不受来源文件变化影响。
+# 模块用途: 有界读取 ZIP、拒绝危险成员并核对 wheel 或随包文件摘要，让包验证和保存不受来源文件变化影响。
 
 from __future__ import annotations
 
@@ -117,20 +117,21 @@ def inspect_plugin_package(
         raise PluginPackageError("invalid_archive", "插件包归档损坏或使用了不支持的格式。") from exc
 
 
-# LLM: 声明、归档成员和摘要必须三方精确匹配；失败时不返回部分工具目录或可安装候选。
-# 函数用途: 从已预检的归档读取描述并验证全部 wheel 字节，不展开到磁盘。
+# LLM: 声明、归档成员和摘要必须三方精确匹配；失败时不返回部分工具目录或可安装候选。Python 包核对 wheel，
+#   v6 非 Python 包核对随包文件；两种包都不能夹带未声明成员。
+# 函数用途: 从已预检的归档读取描述并验证全部 wheel 或随包文件字节，不展开到磁盘。
 def _verified_manifest(archive: zipfile.ZipFile, limits: PackageReadLimits) -> PluginManifest:
     members = validate_zip_members(archive.infolist(), limits)
     if "plugin.json" not in members:
         raise PluginPackageError("invalid_archive", "插件包缺少描述文件。")
     manifest = _read_manifest(read_zip_member(archive, members["plugin.json"], limits.manifest_bytes))
-    expected = {"plugin.json", *(wheel.path for wheel in manifest.wheels)}
-    if set(members) != expected:
+    declared = manifest.wheels if manifest.entry is None else manifest.files
+    if set(members) != {"plugin.json", *(item.path for item in declared)}:
         raise PluginPackageError("invalid_archive", "插件包成员与描述不一致。")
-    for wheel in manifest.wheels:
-        data = read_zip_member(archive, members[wheel.path], limits.member_bytes)
-        if hashlib.sha256(data).hexdigest() != wheel.sha256:
-            raise PluginPackageError("digest_mismatch", "插件 wheel 内容摘要不匹配。")
+    for item in declared:
+        data = read_zip_member(archive, members[item.path], limits.member_bytes)
+        if hashlib.sha256(data).hexdigest() != item.sha256:
+            raise PluginPackageError("digest_mismatch", "插件包成员内容摘要不匹配。")
     return manifest
 
 

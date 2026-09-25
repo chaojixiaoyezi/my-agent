@@ -1,0 +1,36 @@
+{
+  "plugin_id": "hello-go",
+  "version": "1.0.0",
+  "summary": "Go 示例插件：编译成单个可执行文件，提供一个问候工具",
+  "entry": {"kind": "executable", "command": "bin/hello-go", "args": []},
+  "files": [
+    {"path": "bin/hello-go", "executable": true}
+  ],
+  "default_action": "hello",
+  "actions": [
+    {
+      "name": "hello",
+      "summary": "打个招呼，看看插件编译成了哪个平台",
+      "arguments": [
+        {"name": "name", "summary": "称呼", "options": [], "value_type": "string", "required": false, "multiple": false, "default": null, "choices": [], "path": false}
+      ],
+      "kind": "tool",
+      "target": "hello",
+      "available": true
+    }
+  ],
+  "tools": [
+    {
+      "name": "hello",
+      "description": "返回一句来自 Go 插件的问候，附带编译目标平台与 Go 版本。",
+      "requested_effect": "read_only",
+      "input_schema": {
+        "type": "object",
+        "properties": {"name": {"type": "string", "maxLength": 64, "description": "称呼"}},
+        "required": [],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "settings_schema": {"type": "object", "properties": {}, "additionalProperties": false}
+}

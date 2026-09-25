@@ -54,12 +54,21 @@ class PluginEnvironmentPlan:
         }, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
 
 
-# LLM: 只读宿主 Python，不能在生成计划时创建候选或启动进程；调用方须把返回值写原 operation 后再准备。
+# LLM: 只读宿主 Python（Python 包）或宿主解析的运行时事实（v6 非 Python 包），不能在生成计划时创建候选或启动进程；
+#   调用方已解析运行时事实时传入其指纹，保证确认回执、计划与准备用的是同一份事实。调用方须把返回值写原 operation 后再准备。
 # 函数用途: 根据同次安装快照和原管理操作生成固定的环境身份。
-def plan_plugin_environment(installation, operation_id: str, *, deadline: float | None = None) -> PluginEnvironmentPlan:
+def plan_plugin_environment(installation, operation_id: str, *, deadline: float | None = None,
+                            runtime_fingerprint: str | None = None) -> PluginEnvironmentPlan:
+    if runtime_fingerprint is None:
+        if installation.manifest.entry is None:
+            runtime_fingerprint = interpreter_fingerprint(deadline)
+        else:
+            from .plugin_runtime_facts import resolve_plugin_runtime
+
+            runtime_fingerprint = resolve_plugin_runtime(installation.manifest, deadline=deadline).fingerprint
     return PluginEnvironmentPlan(
         operation_id, installation.manifest.plugin_id, installation.package_sha256,
-        installation.revision, installation.settings_revision, interpreter_fingerprint(deadline),
+        installation.revision, installation.settings_revision, runtime_fingerprint,
     )
 
 
