@@ -272,7 +272,7 @@ child不展示历史正文时的读取回归先复现1 failed/1 passed，修复�
 
 ## 插件来源结构化原因（2026-09-24，本地分支 `claude/plugin-source-errors`）
 
-- **现场**：同伴在 .9 用 TUI 装 desktop-lite，相对路径失败、绝对路径成功，且报错和"包在 owner 墙外"是同一句"来源不可读、未获授权或格式无效"。核对合同：相对路径按 Gateway 校验过的会话工作区根（客户端随命令附带的 `workspace.cwd`，即 TUI 标题栏显示的目录）解析，不是终端所在目录——这一点本身正确，问题是三种失败混成一句、用户无从判断。
+- **现场**：同伴在决策线测试机用 TUI 装 desktop-lite，相对路径失败、绝对路径成功，且报错和"包在 owner 墙外"是同一句"来源不可读、未获授权或格式无效"。核对合同：相对路径按 Gateway 校验过的会话工作区根（客户端随命令附带的 `workspace.cwd`，即 TUI 标题栏显示的目录）解析，不是终端所在目录——这一点本身正确，问题是三种失败混成一句、用户无从判断。
 - **改动**：`plugin_sources.PluginSourceError(reason ∈ {not_found, unauthorized, symlink}, source, base)`；`read_plugin_source` 找不到时带出解析基准；安装与更新工具分别回执 `source_not_found`（文案含解析目录与"可改用绝对路径"）、`source_unauthorized`（不回显路径）、`package_<原因>`（格式无效），其余异常保留泛化文案。CLI_REFERENCE 与插件方案写明解析规则。
 - **回归**：新增 `test_plugin_source_errors.py` 2 项（原因码、解析基准、链接、越权不回显路径；真实管理链上相对路径安装成功、缺失/坏包分别回执）；与 `test_plugin_management`、`test_plugin_update`、`test_plugin_install_store` 联合 61 passed。
 
@@ -644,7 +644,7 @@ Gateway/child无transcript活动归档已接完整恢复准备、候选计量、
 
 最终32文件联合 **738 passed，75.48秒**，日志 `/tmp/compact_mixed_final_20260923.log`，文件清单为同名 `.files`。Ruff、doc sync、导入边界0发现、strict code-size hard=0（基线未改）、diff和clean-package通过。本地严格gate只覆盖本片，不关闭历史全仓八项失败，也不宣称第12项全部完成。
 
-本片无供应商请求、安装版TUI、部署、重启或线上CI；初次/手动、真正native工具IR组合、媒体及真实缓存仍待验。前轮全仓八项失败独立保留。测试机1.9可用于后续实际验收，目前没有安装本片。
+本片无供应商请求、安装版TUI、部署、重启或线上CI；初次/手动、真正native工具IR组合、媒体及真实缓存仍待验。前轮全仓八项失败独立保留。测试机可用于后续实际验收，目前没有安装本片。
 
 ## 第 12.4 项后台完整恢复与三宿主同视图（本地）
 
@@ -656,7 +656,7 @@ Gateway/child无transcript活动归档已接完整恢复准备、候选计量、
 
 旧fake agent.run测试绕开renderer/select，现按明确defer/宿主已提交语义验证控制流；不把fake声明提交算真实CAS证据，后者由上述及Gateway/child实际HTTP材料测试覆盖。初次14文件联合有2项child旧params对象identity断言失败，CAS回填正式view后参数确有新对象；已改为检验候选材料相等、获胜checkpoint、恢复及后续工具轮共用新params，原失败日志保留 `/tmp/compact_complete_recovery_joint_20260923.log`。
 
-本片没有供应商真实请求、安装版TUI、部署、重启或线上CI证据。初次/手动、其它宿主活动归档完整计量和混合transcript+active联合候选仍待实现；超大历史无界读取及前轮全仓八项失败也未关闭。12.4保持未完成。测试机1.9已授权且只读核对可达，尚未用其部署本片。
+本片没有供应商真实请求、安装版TUI、部署、重启或线上CI证据。初次/手动、其它宿主活动归档完整计量和混合transcript+active联合候选仍待实现；超大历史无界读取及前轮全仓八项失败也未关闭。12.4保持未完成。测试机已授权且只读核对可达，尚未用其部署本片。
 
 ## 第 12.4 项后台实际摘要视图接线（本地）
 
@@ -975,16 +975,16 @@ OAuth 传输、采样和模型菜单回归。覆盖保存无网络、公开字�
   - 逐个卸载全部 11 个插件：浏览器进程与插件环境目录清空、列表为空；新会话内置工具任务正确（orders-01.csv 400 行、金额 1,015,997）；历史会话中的插件调用记录保留。
   - 未满足：组合长任务实际约 9.5 分钟，未达 15—30 分钟；组合中未包含 M3 图像理解（单独验证）。
 
-## 第 10 步第二、三批真实 TUI（本机 6767bb4ed→4b8cdebbd，.10 同版；模型 MiniMax-M2.7）
+## 第 10 步第二、三批真实 TUI（本机 6767bb4ed→4b8cdebbd，测试机同版；模型 MiniMax-M2.7）
 
 - worktable-lite（本机）：面板列出最近会话，编号、顺序、相对时间和"当前"标记与会话记录逐项一致（246 个会话、1 个损坏记录被跳过）。
 - status-pet（本机）：中文任务期间 空闲 → 正在工作（显示当前工具/思考中）→ 空闲；停用 → `/plugins configure --file`（style=whale、name=蓝蓝）→ 启用后面板变为鲸鱼"蓝蓝"。
 - genui-lite（本机）：中文请求依次调用 table 与 export，生成的 sales.html 标题正确、无脚本、无外部资源、权限 644，表内 10 行与输入逐项一致、极值（10月最高、2月最低）正确。随包 Skill：启用时 `skill_search` 找到 `plugin:genui-lite:genui-table` 并读取；停用后只读探针与模型的 `skill_search` 都找不到（matches 为空）。
 - design-lite（本机）：安装后中文请求调用 create 生成带 data-dl 标记与 #2f6feb 的海报；再次中文请求调用 edit，只改动两处标题行，其余字节不变。首轮失败原因为该包未安装成功（安装命令被模型选择弹窗吞掉），不是产品缺陷；补做的通用改进见下。
-- image-text（本机）：显式命令 OCR 读出 "HELLO FROM / IMAGE TEXT / PLUGIN READ"，Gateway 环境找到 tesseract；（.10）无 tesseract 时明确返回 OCR_UNAVAILABLE 并附图片元数据。
-- browser-lite（本机）：显式命令逐条调用时第二步起 NO_PAGE——显式命令每次是一次性插件连接，命令结束浏览器随之回收，有状态插件不能跨显式命令串联（记录为显式命令语义边界）；改用一次中文请求由模型在同一连接内完成 open→fill→click→read，页面显示"已提交：李雷/B"。（.10）无浏览器时审批后明确返回 BROWSER_UNAVAILABLE。
+- image-text（本机）：显式命令 OCR 读出 "HELLO FROM / IMAGE TEXT / PLUGIN READ"，Gateway 环境找到 tesseract；（测试机）无 tesseract 时明确返回 OCR_UNAVAILABLE 并附图片元数据。
+- browser-lite（本机）：显式命令逐条调用时第二步起 NO_PAGE——显式命令每次是一次性插件连接，命令结束浏览器随之回收，有状态插件不能跨显式命令串联（记录为显式命令语义边界）；改用一次中文请求由模型在同一连接内完成 open→fill→click→read，页面显示"已提交：李雷/B"。（测试机）无浏览器时审批后明确返回 BROWSER_UNAVAILABLE。
 - web-board（本机）：中文请求开服务，无令牌 403、越界 403；发现宿主会从工具结果中脱敏 token 参数，模型只能给出"<令牌>"的链接，改为插件把完整链接写入 0600 私有文件并用默认浏览器打开（0.1.1）。
-- desktop-lite：组件测试中真实 macOS 调用 osascript/pbcopy/open 退出码 0；（.10）无桌面时审批后明确返回 DESKTOP_UNAVAILABLE。
+- desktop-lite：组件测试中真实 macOS 调用 osascript/pbcopy/open 退出码 0；（测试机）无桌面时审批后明确返回 DESKTOP_UNAVAILABLE。
 - 通用改进（4b8cdebbd）：插件工具说明写成"插件 <ID>（<简介>）"、ID 进入检索关键词、`hints.provider_id=plugin:<ID>`；折叠提示按插件列出被折叠插件。
 
 ## 第 10 步第三批插件（本地，待发布）
@@ -1013,7 +1013,7 @@ OAuth 传输、采样和模型菜单回归。覆盖保存无网络、公开字�
 - 本机：新开 TUI 未经补全直接 `/plugins@activity-line show` 可打开面板（resume/新开修复生效）；纯展示插件使用卡改为"面板只能用命令打开"。
 - context-inspector（本机）：发消息前面板显示"还没有快照"；一次中文请求后显示 23,981 / 200,000（12.0%）、触发线 180,000、消息 2,779、运行引导 0、工具目录 15,316、压缩 0，与 TUI 状态行一致；面板打开时停用 → 面板与进程消失；再启用重开有数字；卸载后面板与进程消失，数据目录保留。
 - workspace-peek 0.1.1（本机，SDK 0.2.0）：卸载 0.1.0 后安装新包并启用；中文"请用 workspace-peek 插件预览 peek-note.txt，第二行的数字"经插件工具读出 4217，正确。`/plugins update` 尚未实现，升级按卸载后重装。
-- savepoint-lite（.10，默认确认权限）：包在 owner 家目录外时安装被读取授权拒绝（按设计），放入家目录后安装启用；中文请求保存快照 → 审批"允许一次" → 快照只写插件数据目录，内容与原文件逐字节一致；改坏文件后中文请求恢复 → 首次恢复 `--expect` 不符被拒（未写）→ 模型用返回的当前哈希重试 → 审批 → 恢复后 sha256 与快照一致、权限位 644 保持。另一个 TUI 在调用等审批时停用插件 → 批准后该调用记 TOOL_EXECUTION_FAILED，无新快照、无残留进程；再启用后显式 `list` 显示原快照仍在；卸载后进程消失、快照数据保留、用户文件不变。
+- savepoint-lite（测试机，默认确认权限）：包在 owner 家目录外时安装被读取授权拒绝（按设计），放入家目录后安装启用；中文请求保存快照 → 审批"允许一次" → 快照只写插件数据目录，内容与原文件逐字节一致；改坏文件后中文请求恢复 → 首次恢复 `--expect` 不符被拒（未写）→ 模型用返回的当前哈希重试 → 审批 → 恢复后 sha256 与快照一致、权限位 644 保持。另一个 TUI 在调用等审批时停用插件 → 批准后该调用记 TOOL_EXECUTION_FAILED，无新快照、无残留进程；再启用后显式 `list` 显示原快照仍在；卸载后进程消失、快照数据保留、用户文件不变。
 - 发现：① 同回合内已停用插件的工具仍先弹审批（冻结目录 + 审批先于执行可用性检查），批准后才失败，零副作用但体验差，记入台账待设计；② 显式插件命令回执直接显示双重转义 JSON，已改为展示 content 文本并缩进 JSON（`test_plugin_management.py` 新增回归）；③ 首次渲染偶发"展示内容无效"一次后自愈、未能复现，已加失败类型日志。
 
 ## 第 10 步第一批宿主补充（本地，待发布）
