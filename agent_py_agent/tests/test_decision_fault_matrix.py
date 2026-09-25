@@ -22,7 +22,7 @@ _DNS_HOST = "decision-fault.invalid"
 # (故障, 首次结果, 冷却秒数；None 表示须改设置才重试, 冷却后或改设置后结果)
 FAULTS = {
     "refused": ("error", 30, "error"),
-    "dns": ("deadline", 30, "deadline"),
+    "dns": ("error", 30, "error"),
     "503": ("error", 30, "success"),
     "slow": ("deadline", 30, "success"),
     "429_quota": ("error", 300, "success"),
@@ -32,17 +32,33 @@ FAULTS = {
 }
 
 
-# LLM: 只让一个保留域名解析失败，其余解析照旧；不向真实 resolver 发送该域名。
+# LLM: 本机若配了 HTTP 代理（环境变量 HTTP_PROXY 等），非回环地址的请求会先连代理，注入的 DNS 故障根本走不到，
+#   结果随机器而变（2026-09-25：开发机经 127.0.0.1:7890 代理拖到超时得到 deadline，CI 直连得到 error）。
+#   清掉代理环境并让所有主机绕过代理，保证每台机器都经同一条直连传输栈。
+# 函数用途: 让本文件的每个用例都不经本机代理。
+@pytest.fixture(autouse=True)
+def _direct_transport(monkeypatch) -> None:
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("NO_PROXY", "*")
+    monkeypatch.setenv("no_proxy", "*")
+
+
+# LLM: 只让一个保留域名解析失败，其余解析照旧；不向真实 resolver 发送该域名。返回的列表记录被拦截的解析次数，
+#   用例据此证明注入的故障确实被走到，而不是被代理等其它路径绕过。
 # 函数用途: 在测试进程内模拟 DNS 故障。
-def _block_dns(monkeypatch) -> None:
+def _block_dns(monkeypatch) -> list[str]:
     original = socket.getaddrinfo
+    hits: list[str] = []
 
     def resolve(host, *args, **kwargs):
         if host == _DNS_HOST:
+            hits.append(host)
             raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")
         return original(host, *args, **kwargs)
 
     monkeypatch.setattr(socket, "getaddrinfo", resolve)
+    return hits
 
 
 # 函数用途: 让服务指向一个刚释放、无人监听的本机端口。
@@ -53,10 +69,10 @@ def _refused(state, _monkeypatch) -> None:
     probe.close()
 
 
-# 函数用途: 让服务指向只在本进程内解析失败的保留域名。
+# 函数用途: 让服务指向只在本进程内解析失败的保留域名，并把拦截记录挂到服务状态上供用例核对。
 def _dns(state, monkeypatch) -> None:
     state.url = f"http://{_DNS_HOST}"
-    _block_dns(monkeypatch)
+    state.dns_hits = _block_dns(monkeypatch)
 
 
 # 函数用途: 在明文 HTTP 端口上发起 https，制造 TLS 握手失败。
@@ -105,6 +121,8 @@ def test_transport_faults_fall_back_then_recover_on_the_declared_boundary(tmp_pa
     existing = set(threading.enumerate())
     first = decide(host, params, stage)
     assert first.status == first_status and not first.may_apply
+    if fault == "dns":
+        assert server.dns_hits, "注入的 DNS 解析失败必须真的被走到（决策请求零重试，解析失败即结束）"
     assert host.config.model_name == "deployment-model", "决策故障不改变主模型"
     blocked = "cooldown" if cooldown else "configuration_required"
     attempts = _attempts(host, params)
