@@ -117,7 +117,9 @@ def test_transport_faults_fall_back_then_recover_on_the_declared_boundary(tmp_pa
     real = time.monotonic
     monkeypatch.setattr(decision_policy, "time", SimpleNamespace(monotonic=lambda: real() + offset[0]))
     _inject(fault, server, monkeypatch)
-    host, params, thread, stage = configured(tmp_path, server, timeout=0.3)
+    # 只有"慢响应"需要短期限来制造超时；其余故障立即失败，给足期限——整次决策调用（路由、记账、工作线程）都算在期限里，
+    # 慢 CI 机器上 0.3 秒挤不下，会把本应立即失败的故障误判成 deadline（2026-09-25 runner 上 dns 恢复步骤实测）。
+    host, params, thread, stage = configured(tmp_path, server, timeout=0.3 if fault == "slow" else 5.0)
     existing = set(threading.enumerate())
     first = decide(host, params, stage)
     assert first.status == first_status and not first.may_apply
@@ -135,12 +137,12 @@ def test_transport_faults_fall_back_then_recover_on_the_declared_boundary(tmp_pa
     # 超时后原 worker 仍占着本会话的资源键，放行后等它真实退出，再验证冷却到期的新尝试。
     for worker in set(threading.enumerate()) - existing:
         worker.join(3)
+    # 恢复这一步模拟冷却到期后的下一轮需求：新决策阶段、宽裕期限。改设置会换修订：配置类故障正靠它才重新尝试，
+    # 按时间冷却的故障不受修订影响，仍须等到期（offset 推过冷却）。
+    patch(host, {"timeout_seconds": 6.0}, thread_id=thread.thread_id)
+    stage = decision_service.begin_decision_stage(host, params, operation_id="batch-2")
     if cooldown:
         offset[0] = cooldown + 1
-    else:
-        # 配置类故障不随时间解除，设置修订变化后才重新尝试。
-        patch(host, {"timeout_seconds": 0.4}, thread_id=thread.thread_id)
-        stage = decision_service.begin_decision_stage(host, params, operation_id="batch-2")
     last = decide(host, params, stage)
     assert last.status == recovered and _attempts(host, params) == attempts + 1
     assert last.may_apply is (recovered == "success")
