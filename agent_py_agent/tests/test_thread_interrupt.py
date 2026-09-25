@@ -442,3 +442,124 @@ def test_interrupt_arriving_during_model_generation_discards_final_response(monk
 
     assert response.text == ""
     assert response.runtime_status == "cancelled"
+
+
+# LLM: 以下钉住 ident 复用安全：标志绑定立旗时的线程对象；旧线程退出后留下的标志不能被复用该 ident 的新线程继承。
+# 函数用途: 在指定线程里执行 body 并返回其结果，用于跨线程观察中断状态。
+def _run_in_thread(body, *, before_release=None):
+    ready, release, result = threading.Event(), threading.Event(), {}
+
+    def worker():
+        ready.set()
+        release.wait(timeout=5)
+        result["value"] = body()
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    assert ready.wait(timeout=5)
+    if before_release is not None:
+        before_release(thread)
+    release.set()
+    thread.join(timeout=5)
+    return result.get("value")
+
+
+def test_flag_on_an_exited_thread_is_a_noop():
+    from agent_py_agent.agent.concurrency import interrupt as interrupt_module
+
+    finished = threading.Thread(target=lambda: None)
+    finished.start()
+    finished.join(timeout=5)
+    set_interrupt(True, thread_id=finished.ident)
+    with interrupt_module._lock:
+        assert finished.ident not in interrupt_module._interrupted_threads, "目标线程已退出时不能留下标志"
+
+
+def test_stale_flag_is_not_inherited_by_a_thread_reusing_the_ident():
+    import weakref
+
+    from agent_py_agent.agent.concurrency import interrupt as interrupt_module
+
+    exited = threading.Thread(target=lambda: None)
+    exited.start()
+    exited.join(timeout=5)
+
+    def plant_stale_flag(thread):
+        # 模拟 ident 复用：新线程的 ident 下挂着一面属于已退出线程对象的旧旗。
+        with interrupt_module._lock:
+            interrupt_module._interrupted_threads[thread.ident] = weakref.ref(exited)
+
+    callback = Mock()
+
+    def body():
+        with register_interrupt_callback(callback):
+            pass
+        return is_interrupted()
+
+    assert _run_in_thread(body, before_release=plant_stale_flag) is False, "复用 ident 的新线程不能继承旧停止"
+    callback.assert_not_called()
+
+
+def test_flag_set_after_the_worker_cleared_itself_does_not_outlive_it():
+    from agent_py_agent.agent.concurrency import interrupt as interrupt_module
+
+    cleared, flagged = threading.Event(), threading.Event()
+
+    def worker():
+        try:
+            pass
+        finally:
+            set_interrupt(False)  # 与生产生成线程相同：退出前自行撤旗
+            cleared.set()
+            flagged.wait(timeout=5)  # 撤旗之后、线程真正退出之前的竞态窗口
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    assert cleared.wait(timeout=5)
+    set_interrupt(True, thread_id=thread.ident)  # 晚到的立旗落在仍存活的线程上
+    flagged.set()
+    thread.join(timeout=5)
+    with interrupt_module._lock:
+        assert interrupt_module._is_flagged_locked(thread.ident) is False, "线程退出后这面旗必须失效"
+        assert thread.ident not in interrupt_module._interrupted_threads, "失效的旗在查询时被清除"
+
+
+def test_cross_thread_flag_on_a_live_thread_still_interrupts_it():
+    seen = _run_in_thread(is_interrupted, before_release=lambda thread: set_interrupt(True, thread_id=thread.ident))
+    assert seen is True, "给仍存活的线程立旗照常生效"
+
+
+def test_flag_after_clear_race_does_not_leak_into_a_new_thread_with_the_same_ident():
+    import pytest
+
+    cleared, flagged = threading.Event(), threading.Event()
+
+    def worker():
+        try:
+            pass
+        finally:
+            set_interrupt(False)
+            cleared.set()
+            flagged.wait(timeout=5)
+
+    first = threading.Thread(target=worker)
+    first.start()
+    assert cleared.wait(timeout=5)
+    set_interrupt(True, thread_id=first.ident)
+    flagged.set()
+    first.join(timeout=5)
+    target = first.ident
+    for _ in range(200):  # 先 join 再新建，系统通常会马上复用同一 ident；一直撞不上就跳过
+        seen = {}
+
+        def probe():
+            seen["ident"] = threading.get_ident()
+            seen["interrupted"] = is_interrupted()
+
+        probe_thread = threading.Thread(target=probe)
+        probe_thread.start()
+        probe_thread.join(timeout=5)
+        if seen["ident"] == target:
+            assert seen["interrupted"] is False, "复用 ident 的新线程不能继承竞态里晚到的旧旗"
+            return
+    pytest.skip("200 次内系统没有复用同一线程 ident")

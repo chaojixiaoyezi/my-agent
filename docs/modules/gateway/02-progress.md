@@ -1,5 +1,7 @@
 # Gateway 维护状态
 
+线程中断标志不再随 ident 复用串到新线程（分支 `claude/interrupt-ident-reuse`，待合入）：`concurrency/interrupt.py` 的中断标志改为记住立旗时的线程对象（弱引用）。线程已退出或 ident 换了主人即视为过期并清除；给已退出线程立旗直接落空，关闭竞态里晚到的立旗不再残留。此前长期运行的 Gateway 里，新线程可能复用带脏标志的 ident，被静默、随机地取消。公共接口不变。
+
 Gateway 停止时主动取消在途决策（分支 `claude/decision-shutdown-cancel`，待合入；主线 owner 已同意这一行）：`_cmd_gateway_run_cleanup` 置位停止事件后，立即调用 `decision_policy.cancel_active_decisions_for_shutdown()`，让正在等待决策模型的前台/后台调用回到原方案，关闭后不再发新决策。它只取消本进程内登记的决策句柄，不读写持久状态；用 try/except 包住，出错只记异常类型事件 `gateway_decision_cancel_failed`，不中断后续清理。停止时后台模型请求的结构化"被中断"记录由主线 owner 紧接着另加。详见[接入设计](../../design/DECISION_MODEL_INTEGRATION.md)第 4.2 节。
 
 决策实验对照记录与授权内自动晋升（本地分支 `claude/decision-experiment-records`，待审）：只观察实验调用经原账结算后，结构化对照条目（身份、配置版本、基线/候选名单、结算视图）经能力观察出口拆出写进同一请求记录的 `experiment_records`；回合正常收尾时按结构化工具账补写实际调用工具名，停止/关闭的回合不补写。`/experiment apply skill_tool …` 另授权宿主在证据规则（≥3 可比较样本、全部 charged、短名单召回 1.0、有节省）满足时，于回合收尾在精确回合锁内经原设置 CAS 把本会话 skill_tool 改为 apply，用户后改、撤销、到期、被替换都跳过不覆盖；回执写在 `experiment_records.promotion`，已有即不重试。普通请求零 I/O、请求字节不变。详见[E1 交接第三片](../../tasks/DECISION_MODEL_EXPERIMENT_E1_HANDOFF.md#第三片e2-对照记录f1-证据评估与授权内自动晋升2026-09-25)。

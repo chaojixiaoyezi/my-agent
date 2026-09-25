@@ -61,8 +61,11 @@ def _results_after(delay: float, result: _BackendGenerateResult) -> tuple[queue.
     results: queue.Queue = queue.Queue()
 
     def worker() -> None:
-        time.sleep(delay)
-        results.put(result)
+        try:
+            time.sleep(delay)
+            results.put(result)
+        finally:
+            set_interrupt(False)  # 与生产生成线程相同：退出前撤掉可能被立的中断旗，不把脏标志留给复用 ident 的线程
 
     thread = threading.Thread(target=worker, daemon=True)
     thread.start()

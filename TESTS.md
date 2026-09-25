@@ -2,6 +2,24 @@
 
 child不展示历史正文时的读取回归先复现1 failed/1 passed，修复后test_compact_retained_history、test_subagent_compact_recovery、test_gateway_child_compact_scope_application三文件31 passed（8.48秒）。三宿主seed仓外基线仅验证测量和完整性，不算内存目标通过；细节见容量审计的宿主生命周期基线。
 
+## 线程中断标志与 ident 复用（2026-09-25，分支 `claude/interrupt-ident-reuse`）
+
+- **问题**：`test_subagent_first_request_selection.py` 的真实 child 用例只在跟一大批决策测试一起跑时失败。
+  - 直接原因：`_wait_for_generation_result` 被停止时会给 worker 立中断旗；测试里的假 worker 退出时没有撤旗，之后复用同一 ident 的生成线程 `my-agent-model-generate-timeout-guard` 一开始检查就被判为已中断，整次 child 运行记为 cancelled。
+  - 生产也有同样的竞态：worker 自行撤旗之后、真正退出之前被立的旗无人再撤。
+- **修复**：`concurrency/interrupt.py` 的标志从 ident 集合改为"ident → 立旗时线程对象的弱引用"。检查时线程已退出或 ident 换了主人即视为过期并清除；给已退出线程立旗落空；句柄与命名登记语义不变，公共接口不变。测试里的假 worker 改为与生产一致，退出前撤旗。
+- **新测试**（`test_thread_interrupt.py` 5 项）：
+  - 给已退出线程立旗落空；
+  - 模拟 ident 复用：新线程不继承旧旗，回调也不被触发；
+  - 撤旗后晚到的立旗随线程退出失效；
+  - 先 join 再新建线程、强制复用同一 ident，新线程不被中断（200 次内撞不上即跳过，本机未跳过）；
+  - 跨线程给存活线程立旗照常生效。
+- 反向验证：换回旧实现时前 4 项失败，第 5 项照常通过。
+- **回归**：
+  - 引用中断/有界调用的测试族加架构守卫共 29 个文件：760 passed、1 skipped（既有的 Linux /proc 限制）；
+  - 原先稳定复现失败的 63 文件组合：1429 passed、2 skipped、3 xfailed、0 failed；
+  - Ruff、doc sync、代码体量（与 main 相比无新增项）、diff、clean-package 全部通过。
+
 ## 宿主关闭取消在途决策与 Curator/插件点并发组合（P4-F，2026-09-25，分支 `claude/decision-shutdown-cancel`）
 
 - **改动**：
