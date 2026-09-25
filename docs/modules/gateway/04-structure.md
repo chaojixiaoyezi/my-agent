@@ -1558,6 +1558,7 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   Scheduler due-owner 有界唤醒；各 controller 只负责编排，不保存业务事实源。
 - `cli/gateway_process.py`、`cli/gateway_client.py`：
   启动、停止、状态和客户端命令；`gateway_process.py` 直接承载公开 gateway 命令实现，不再转发到 `_gateway_commands.py`。
+  停止收尾 `_cmd_gateway_run_cleanup` 的顺序：置位停止事件 → 取消本进程在途决策（决策线，出错只记异常类型）→ 停 HTTP → 收三条循环 → 清 pid/停止请求 → 写心跳与收尾事件。
   watch 返回必须分类为计划 stop、signal shutdown、有限轮完成或意外返回；SIGTERM/SIGINT 先落 typed
   stop request/forensics 再走同一 drain，意外返回非零退出，cleanup 另记 drain 结果。
 - `cli/chat_parts/control_runtime.py`：终端 Gateway 模式调用同一 `/control`；本地直跑模式使用同一 typed

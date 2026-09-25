@@ -2,6 +2,25 @@
 
 child不展示历史正文时的读取回归先复现1 failed/1 passed，修复后test_compact_retained_history、test_subagent_compact_recovery、test_gateway_child_compact_scope_application三文件31 passed（8.48秒）。三宿主seed仓外基线仅验证测量和完整性，不算内存目标通过；细节见容量审计的宿主生命周期基线。
 
+## 宿主关闭取消在途决策与 Curator/插件点并发组合（P4-F，2026-09-25，分支 `claude/decision-shutdown-cancel`）
+
+- **改动**：
+  - `decision_policy.py`：新增关闭标记、`cancel_active_decisions_for_shutdown()` 与 `host_shutdown_started()`；`register_active` 在关闭后拒绝登记。
+  - `decision_service.py`：登记被拒且宿主关闭中时返回 `stale/host_shutdown`；设置撤销与关闭撤销合并为 `_revoked`，设置撤销优先。
+  - `cli/gateway_process.py::_cmd_gateway_run_cleanup`：置位停止事件后调用取消原语，用 try/except 包住，出错只记异常类型。
+- **新测试** `test_gateway_decision_shutdown_cancel.py` 7 项（真实本地 HTTP 与原账本）：
+  - 在途决策被取消后 0.8 秒内返回 `stale/host_shutdown`，调用账 failed 1、无 running；
+  - 不新增冷却，复位后同一连接照常成功；关闭后新决策不联网；设置撤销与关闭同时发生时报设置撤销；索引满仍报 `notification_capacity`；
+  - Gateway 收尾顺序为停止事件、取消决策、停 HTTP；取消模块抛错时收尾照常完成，只记 `{"error_type": "RuntimeError"}`。
+- **新测试** `test_decision_curator_plugin_concurrency.py` 5 项（后台 `curator` 与前台 `skill_tool` 共用同一连接，本地服务按 lane 选择性阻塞）：
+  - 后台慢时前台照常完成，两边各记一条原账；
+  - 线程变更只撤销前台；owner 级改 `curator` 只提前撤销后台，前台返回后按整份策略版本作废为 `policy_changed`；
+  - 后台超时后同连接前台返回 `cooldown/connection_backoff` 且不发请求；关闭时两者一起取消。
+- 两个文件连跑 6 次 12/12 通过。
+- **变异验证**：14 种各自使新测试失败（不置关闭标记、登记不看标记、不标记或不取消句柄、计数错、`_revoked` 忽略关闭、关闭优先于设置撤销、登记失败不区分关闭与容量两个方向、登记被拒后照常发送、收尾不调用/不包 try/记异常正文/在停 HTTP 之后才调用）。子进程带 `PYTHONDONTWRITEBYTECODE=1`，结束后还原原文件。
+- **回归**（基于 main `6c3ffc2ad`）：全部 `test_decision_*`、引用 `gateway_process`/`decision_policy` 的测试与架构守卫共 63 个文件，1428 passed、2 skipped、3 xfailed、1 failed。
+  失败的是 `test_subagent_first_request_selection.py::test_real_child_first_request_capture_matches_actual_provider_payload` 的第一组参数。它在不含本改动的 main 上同一组合里同样失败，单独或整文件运行 40/40 通过。二分表明不是单个前置文件触发，要前面约 29 个决策测试文件叠加才出现，像是前序测试的 worker 暂占资源，属于既有的测试顺序问题，已告知主线 owner。
+
 ## 子代理 lesson 结构化来源 `record_lesson`（2026-09-25，已合入 main `52e0190e1`；已端到端真实验收）
 
 - **改动**：
