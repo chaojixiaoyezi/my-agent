@@ -39,6 +39,7 @@ from .decision_policy import (
     connection_revision,
     cooldown_state,
     decision_owner_ref,
+    host_shutdown_started,
     record_failure,
     record_success,
     register_active,
@@ -253,7 +254,7 @@ def decide(agent: object, params: object, stage: DecisionStage, *, point: str, s
         active = ActiveDecision(stage.owner_ref, stage.thread_id, point, InterruptHandle(), agent, settings)
         token = uuid.uuid4().hex
         if not register_active(token, active):
-            return DecisionOutcome(mode, "error", reason="notification_capacity")
+            return _registration_refused(mode)
         try:
             return _invoke(params, stage, request, backend, deadline, key, active)
         finally:
@@ -320,7 +321,7 @@ def _invoke(params, stage, request, backend, deadline, key, active) -> DecisionO
     return _with_experiment_facts(outcome, call, active)
 
 
-# LLM: 注册取消后再次复查堵住关闭/启动竞态；用户中断必须传播，设置取消仅使建议失效，不能冒充用户停止。
+# LLM: 注册取消后再次复查堵住关闭/启动竞态；用户中断必须传播，设置取消与宿主关闭仅使建议失效，不能冒充用户停止。
 # 连接一返回响应就复位该连接的退避阶梯（进程内冷却表），之后的复核失败不算连接故障；实验结果固定 observe、不可采用。
 # 函数用途: 调用原模型边界并核验响应绑定、摘要、请求模型和最新配置；不执行任何业务变更。
 def _invoke_call(params, *, stage, request, backend, deadline, key, active, experiment) -> DecisionOutcome:
@@ -340,8 +341,8 @@ def _invoke_call(params, *, stage, request, backend, deadline, key, active, expe
             experiment=experiment)
         record_success(key)
         _check_interrupted()
-        if active.settings_cancelled:
-            return DecisionOutcome(mode, "stale", reason="settings_changed")
+        if (revoked := _revoked(active, mode)) is not None:
+            return revoked
         if time.monotonic() >= deadline:
             return DecisionOutcome(mode, "deadline", reason="late_response")
         if not isinstance(response, DecisionResponse) or response.binding != request.binding or response.input_digest != request.input_digest or response.requested_model != backend.model_name:
@@ -350,15 +351,15 @@ def _invoke_call(params, *, stage, request, backend, deadline, key, active, expe
         if stale:
             return DecisionOutcome(mode, "stale", reason=stale)
         _check_interrupted()
-        if active.settings_cancelled:
-            return DecisionOutcome(mode, "stale", reason="settings_changed")
+        if (revoked := _revoked(active, mode)) is not None:
+            return revoked
         if time.monotonic() >= deadline:
             return DecisionOutcome(mode, "deadline", reason="late_validation")
         return DecisionOutcome(mode, "success", response, mode == "apply", connection_revision=key[2], deadline=deadline)
     except InterruptedError:
         _check_interrupted()
-        if active.settings_cancelled:
-            return DecisionOutcome(mode, "stale", reason="settings_changed")
+        if (revoked := _revoked(active, mode)) is not None:
+            return revoked
         raise
     except ToolCancelled:
         raise
@@ -366,6 +367,24 @@ def _invoke_call(params, *, stage, request, backend, deadline, key, active, expe
         return DecisionOutcome(mode, "error", reason="admission_busy")
     except Exception as exc:
         return _failure_outcome(request, exc, active, mode=mode, key=key)
+
+
+# LLM: 登记被拒只有两种固定原因：宿主已开始关闭（建议失效，不算错误）或在途索引已满（可选增强忙）；都不联网、不进冷却。
+# 函数用途: 把在途索引拒绝登记换成保留原方案的结果。
+def _registration_refused(mode: str) -> DecisionOutcome:
+    if host_shutdown_started():
+        return DecisionOutcome(mode, "stale", reason="host_shutdown")
+    return DecisionOutcome(mode, "error", reason="notification_capacity")
+
+
+# LLM: 设置撤销与宿主关闭都只使本次建议失效、不冒充用户停止；两者都发生时按设置撤销报告。均不进入连接退避。
+# 函数用途: 返回在途调用被撤销时保留原方案的结果，没有被撤销时返回 None。
+def _revoked(active: ActiveDecision, mode: str) -> DecisionOutcome | None:
+    if active.settings_cancelled:
+        return DecisionOutcome(mode, "stale", reason="settings_changed")
+    if active.shutdown_cancelled:
+        return DecisionOutcome(mode, "stale", reason="host_shutdown")
+    return None
 
 
 # LLM: 用户中断仍传播；发送许可拒绝与预算/上界拒绝按固定代码显式返回，绝不调用 record_failure 触发连接退避。

@@ -1,5 +1,6 @@
-# LLM: 这里只保存有界的冷却摘要（含连续失败次数）和在途取消索引，不是 worker/资源池；实际退出仍由 bounded_call 跟踪。
-# 模块用途: 隔离决策连接故障并按连续失败逐步加长冷却，同时将同进程设置撤销转交给原精确中断句柄。
+# LLM: 这里只保存有界的冷却摘要（含连续失败次数）、在途取消索引和宿主关闭标记，不是 worker/资源池；实际退出仍由
+#   bounded_call 跟踪。
+# 模块用途: 隔离决策连接故障并按连续失败逐步加长冷却，同时将同进程设置撤销与宿主关闭转交给原精确中断句柄。
 from __future__ import annotations
 
 import hashlib
@@ -30,6 +31,8 @@ _MAX_COOLDOWN_SECONDS = 300.0
 # 值为 (状态, 设置修订, 冷却截止或 None, 连续失败次数)；冷却过期后保留次数，成功或显式重试才清除。
 _FAILURES: OrderedDict[tuple[str, str, str], tuple[str, str, float | None, int]] = OrderedDict()
 _ACTIVE: dict[str, ActiveDecision] = {}
+# 宿主进程开始收尾后置位且不复位：此后不再登记新的在途决策，进程随后退出。
+_HOST_SHUTDOWN = False
 
 
 # LLM: 只读可信 owner 的原路径并哈希，不接受请求指定 owner，不公开路径或凭据。
@@ -56,16 +59,41 @@ class ActiveDecision:
     context: object = field(repr=False)
     settings: dict = field(repr=False)
     settings_cancelled: bool = False
+    shutdown_cancelled: bool = False
 
 
-# LLM: 索引满只拒绝本次可选增强，不等待或建立另一池；caller 退出必须注销，不替 bounded_call 回收资源。
+# LLM: 索引满或宿主已开始关闭都只拒绝本次可选增强，不等待或建立另一池；关闭标记与登记同锁判断，不留竞态窗口。
+#   caller 退出必须注销，不替 bounded_call 回收资源。
 # 函数用途: 发布一个准备发送的取消目标，覆盖关闭发生在 worker 注册前的窗口。
 def register_active(key: str, active: ActiveDecision) -> bool:
     with _LOCK:
-        if key in _ACTIVE or len(_ACTIVE) >= _MAX_ACTIVE:
+        if _HOST_SHUTDOWN or key in _ACTIVE or len(_ACTIVE) >= _MAX_ACTIVE:
             return False
         _ACTIVE[key] = active
         return True
+
+
+# LLM: 宿主进程收尾（Gateway 停止）时调用：先在索引锁内置位关闭标记并标记全部在途决策，再在锁外取消各自句柄。
+#   被取消的调用只使建议失效（stale/host_shutdown），不冒充用户停止、不进入连接冷却；worker 仍沿 bounded_call 自行退出，
+#   调用账按原取消路径记 DECISION_CANCELLED。调用方：cli/gateway_process 的停止收尾。
+# 函数用途: 让正在等待决策模型的前台/后台调用立即回到原方案，并拒绝之后的新决策；返回本次取消的在途数量。
+def cancel_active_decisions_for_shutdown() -> int:
+    global _HOST_SHUTDOWN
+    with _LOCK:
+        _HOST_SHUTDOWN = True
+        targets = tuple(_ACTIVE.values())
+        for active in targets:
+            active.shutdown_cancelled = True
+    for active in targets:
+        active.handle.cancel()
+    return len(targets)
+
+
+# LLM: 只读进程关闭标记；决策服务据此把登记失败区分为"宿主关闭中"与"索引已满"两种固定原因。
+# 函数用途: 判断宿主是否已开始关闭、不再接受新的决策请求。
+def host_shutdown_started() -> bool:
+    with _LOCK:
+        return _HOST_SHUTDOWN
 
 
 # LLM: 只移除同一个在途通知对象；实际 worker 可能仍存活，不触碰其原保留表。

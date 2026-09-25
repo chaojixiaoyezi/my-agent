@@ -432,9 +432,19 @@ def _cmd_gateway_run_threads(request: GatewayThreadsRequest):
     return stop_event, heartbeat_thread, request_thread, background_thread, http_server
 
 
+# LLM: 停止收尾顺序固定：先置停止事件，再取消本进程在途决策，再停 HTTP 与收三条循环；决策取消出错只记异常类型事件，
+#   不能中断后续清理。改动须同步 test_gateway_decision_shutdown_cancel.py 与 Gateway 停止相关回归。
+# 函数用途: Gateway 停止时收尾三条循环、清理 pid/停止请求并写出是否完整排空的状态。
 def _cmd_gateway_run_cleanup(request: GatewayRunCleanupRequest) -> dict[str, object]:
     """Drain the three gateway loops and persist whether shutdown was complete."""
     request.stop_event.set()
+    # 决策线：只取消本进程内登记的在途决策句柄，让等待中的可选增强立即回到原方案；不读写任何持久状态。
+    try:
+        from ..agent.conversation.decision_policy import cancel_active_decisions_for_shutdown
+
+        cancel_active_decisions_for_shutdown()
+    except Exception as exc:  # noqa: BLE001 - 停止收尾不能因可选决策模块出错而中断
+        log_gateway_event(request.context.agent, "gateway_decision_cancel_failed", {"error_type": type(exc).__name__})
     if request.http_server:
         request.http_server.stop()
     threads = {

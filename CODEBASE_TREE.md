@@ -644,6 +644,8 @@ agent_py_agent/
 |   |-- test_external_material_order_integration.py # 原页面生产归档、决策 worker、设置工具与 TUI 接线
 |   |-- test_decision_delivery_quality.py # 交付复核焦点资格、脱敏输入、非选择、来源复核、取消与 text/native 同段提示
 |   |-- test_decision_delivery_quality_integration.py # 真实验证账到 _record_tool_call、原设置默认与 TUI 入口的组合
+|   |-- test_decision_curator_plugin_concurrency.py # 后台 curator 与前台 skill_tool 同连接并发：互不拖住、撤销命中对应点、共享冷却、关闭一起取消
+|   |-- test_gateway_decision_shutdown_cancel.py # Gateway 停止时主动取消在途决策：回原方案、不进冷却、关闭后不再联网、收尾顺序与失败隔离
 |   |-- test_decision_capability_consumer.py # 原设置/worker/循环接线到实际prompt/schema减量及失效原输入
 |   |-- test_decision_capability_provider_grouping.py # 能力推荐按结构化provider_id按插件出题、选中展开与整体延迟
 |   |-- test_decision_capability_http.py # 能力消费者经本地原生HTTP的成功/期限/在途设置变化

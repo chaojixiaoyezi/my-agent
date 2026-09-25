@@ -11,6 +11,11 @@
 
 决策设置的宿主非阻塞读取改为无锁读取已提交版本（已合入 main `d69f30cf3` 并部署双机）：原先读取也拿排它锁，同一 owner 的并发决策互相挤成 `settings_busy` 静默回退；两份设置文件都是原子替换写、单次写事务只改一个文件，旧建议仍由调用前后版本复核与在途取消挡住。同一分支用本机 HTTP 故障矩阵钉住断网/DNS/TLS/额度/计费/5xx/慢响应的冷却与恢复。详见[接入设计](docs/design/DECISION_MODEL_INTEGRATION.md#42-已实现的可选服务边界)。
 
+- **宿主关闭时主动取消在途决策，及 Curator 与插件点并发组合（P4-F）**（2026-09-25，已实施：分支 `claude/decision-shutdown-cancel`，待合入；主线 owner 已同意在 `cli/gateway_process.py` 加一行）：
+  - **关闭取消**：`decision_policy.cancel_active_decisions_for_shutdown()` 复用设置撤销那张进程内在途索引。等待中的调用立即回原方案（`stale/host_shutdown`），不冒充用户停止、不进冷却，调用账记 `DECISION_CANCELLED`；关闭后不再登记新决策。Gateway 收尾在置位停止事件后调用它，出错只记异常类型。
+  - **并发组合**：后台 `curator` 慢响应不拖住前台 `skill_tool`；线程变更只撤销前台，owner 级改 `curator` 只提前撤销后台。
+  - **两处已知取舍**（不改，登记在此）：采用前复核按整份策略版本判断，所以 owner 级任何设置改动会让同 owner 其他点的在途建议返回后作废为 `policy_changed`；冷却按连接共享，后台超时会让同连接的前台点在冷却期直接保留原方案。两者都只会少一条建议，不会采用过期建议或卡住。
+  - 停止时被切断的后台模型请求的结构化"被中断"记录由主线 owner 实施，顺序排在本取消之后。详见[接入设计](docs/design/DECISION_MODEL_INTEGRATION.md)第 4.2 节。
 - **决策实验自动晋升后没有主动提示**（2026-09-25，F1 正向晋升真实样本发现；未实施）：授权内晋升把线程的 `points.skill_tool.mode` 由 off 改为 apply，但 TUI 当轮没有任何提示，用户只能在决策设置里看到线程覆盖。方向：晋升回执已是结构化的 `gateway_decision_experiment_promotion.v1`（带前后版本），由 Gateway 终态响应带出、TUI 按结构化字段展示一行提示，不从文字判断。
 - **自学习的 lesson 来源在当前产品里是死路**（2026-09-25，真实验收发现；已由 `record_lesson` 修复并做端到端真实验收，已合入 main `52e0190e1`）：
   - 子代理提示要求"像普通协作者一样回复、不输出状态 JSON"，`output.json` 由宿主生成，没有结构化通道填 `lessons`。所以真实子代理即使在回复里写了经验，也不会产生 `subagent_lesson` 候选，S1 提案与 S2 排序都无法触发。
