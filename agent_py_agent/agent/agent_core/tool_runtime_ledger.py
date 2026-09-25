@@ -23,14 +23,15 @@ from .run_task_workspace_writer import current_run_tool_output_archive_root
 from .tool_guard.call_guardrail import tool_guardrail_policy, tool_guardrail_records
 
 
+# LLM: 每一次工具调用完成都要进权威 runtime_events（有无 runtime_gate 都记）：插件观察新鲜度等只按这条事件流判序，
+#   只读工具（没有审批门）以前在这里被提前 return 掉，导致事件流缺整类调用。legacy 门账本仍只在有 runtime_gate 时写。
+#   两处写入都 best-effort，不能让工具循环崩溃。
+# 函数用途: 把一次已归档的工具调用记进 legacy 门账本（有门时）与权威事件流（总是）。
 def persist_tool_runtime_ledger(agent: object, archive_record: dict[str, object]) -> None:
     store = getattr(agent, "local_store", None)
-    if not hasattr(store, "record_runtime_gate_ledger"):
-        return
     record = runtime_gate_ledger_record_from_archive(archive_record)
-    if record is None:
-        return
-    _best_effort_control_plane_write(lambda: store.record_runtime_gate_ledger(record))
+    if record is not None and hasattr(store, "record_runtime_gate_ledger"):
+        _best_effort_control_plane_write(lambda: store.record_runtime_gate_ledger(record))
     # A.3：工具完成事件写入权威 runtime_events（agent_events 可从中重建），
     # 与 legacy 台账并行 —— 权威事件流是审计/重建的单一事实源。
     _append_runtime_event(agent, archive_record)
@@ -61,7 +62,7 @@ def _append_runtime_event(agent: object, archive_record: dict[str, object]) -> N
         "tool": _text(archive_record.get("tool")),
         "ok": bool(archive_record.get("ok")),
         "error_code": _text(archive_record.get("error_code")),
-        "status": _ledger_status(archive_record, runtime_gate),
+        "status": _completion_status(archive_record, runtime_gate),
         "idempotency_key": _text(archive_record.get("idempotency_key")),
     }
     # 插件观察候选的查找投影随同一事件落库：新鲜度按事件 seq 判定，归档信封仍是候选内容的唯一权威
@@ -703,6 +704,15 @@ def _result_ref(record: Mapping[str, object]) -> str:
 def _ledger_status(record: Mapping[str, object], runtime_gate: Mapping[str, object]) -> str:
     if runtime_gate.get("allowed") is not True:
         return "blocked"
+    return "done" if record.get("ok") is True else "failed"
+
+
+# LLM: 事件流里的完成状态：有审批门按门账口径（未放行即 blocked）；没有门的调用（只读工具、免审批）只按 ok 记 done/failed，
+#   不能把"没有门"误记成 blocked。
+# 函数用途: 算 tool_completed 事件载荷里的 status。
+def _completion_status(record: Mapping[str, object], runtime_gate: Mapping[str, object]) -> str:
+    if runtime_gate:
+        return _ledger_status(record, runtime_gate)
     return "done" if record.get("ok") is True else "failed"
 
 

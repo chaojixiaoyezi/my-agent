@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from agent_py_agent.agent.agent_core import tool_runtime_ledger
+from agent_py_agent.agent.agent_core.tool_runtime_ledger import persist_tool_runtime_ledger
 from agent_py_agent.agent.plugin_observation import (
     OBSERVATION_CANDIDATE_UNKNOWN,
     OBSERVATION_SCHEMA,
@@ -107,14 +108,59 @@ class _Repo:
         return self.events[-1]
 
 
-# 函数用途: 经产品的 tool_completed 事件写法把一次观察归档记进假库，返回记录。
-def _record_observation(repo, payload, *, operation_id, attempt_id="attempt-1", ok=True):
+# 函数用途: 走产品的完整持久化入口（persist_tool_runtime_ledger）把一次只读观察调用的归档记进假库；只读工具没有 runtime_gate。
+def _record_observation(repo, payload, *, operation_id, attempt_id="attempt-1", ok=True, gate_ledger=None):
     record = parse_observation(payload, _context(operation_id=operation_id))
     archive = {"run_id": "run-1", "task_id": "task-1", "operation_id": operation_id, "attempt_id": attempt_id, "tool": record.tool_name,
-               "ok": ok, "error_code": "", "idempotency_key": "", "runtime_gate": {"allowed": True},
+               "ok": ok, "error_code": "", "idempotency_key": "",
                "tool_result_envelope": {"observation": record.to_envelope()}}
-    tool_runtime_ledger._append_runtime_event(SimpleNamespace(subagents=SimpleNamespace(runtime_db=repo)), archive)
+    store = SimpleNamespace(record_runtime_gate_ledger=lambda row: (gate_ledger if gate_ledger is not None else []).append(row))
+    persist_tool_runtime_ledger(SimpleNamespace(subagents=SimpleNamespace(runtime_db=repo), local_store=store), archive)
     return record
+
+
+def test_gate_less_read_only_calls_still_reach_the_authority_event_stream():
+    repo, gate_ledger = _Repo(), []
+    record = _record_observation(repo, _payload(), operation_id="op-1", gate_ledger=gate_ledger)
+    assert gate_ledger == [], "没有 runtime_gate 就不写 legacy 门账本"
+    assert [e["event_type"] for e in repo.events] == ["tool_completed"], "但完成事件必须落进权威事件流"
+    payload = repo.events[0]["payload"]
+    assert (payload["status"], payload["ok"], payload["operation_id"]) == ("done", True, "op-1"), "没有门的调用按 ok 记 done，不是 blocked"
+    assert observation_is_current(repo, run_id="run-1", task_id="task-1", observation_id=record.observation_id) is True
+    _record_observation(repo, _payload(), operation_id="op-2", ok=False)
+    assert repo.events[-1]["payload"]["status"] == "failed"
+
+
+def test_real_repository_keeps_the_newest_events_inside_the_window(tmp_path):
+    import time
+
+    from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
+
+    repo = RuntimeRepository(str(tmp_path / "runtime.db"))
+    now = time.time()
+    agent_run_id, task_run_id, attempt_id = "agentrun-real", "taskrun-real", "attempt-real"
+    with repo._runtime_connection() as conn:
+        conn.execute("INSERT INTO task_runs(task_run_id, task_id, status, created_at, updated_at) VALUES(?,?,?,?,?)",
+                     (task_run_id, "task-1", "created", now, now))
+        conn.execute("INSERT INTO agent_runs(agent_run_id, task_run_id, run_id, role, status, current_attempt_id, current_attempt_generation, "
+                     "workspace_epoch, created_at, updated_at) VALUES(?,?,?,?,?,?,1,1,?,?)",
+                     (agent_run_id, task_run_id, "run-1", "main", "running", attempt_id, now, now))
+        conn.execute("INSERT INTO agent_attempts(attempt_id, agent_run_id, attempt_generation, status, started_at, metadata_json) VALUES(?,?,1,?,?,?)",
+                     (attempt_id, agent_run_id, "running", now, "{}"))
+        conn.commit()
+    first = _record_observation(repo, _payload(), operation_id="op-1", attempt_id=attempt_id)
+    assert observation_is_current(repo, run_id="run-1", task_id="task-1", observation_id=first.observation_id) is True
+    for index in range(2100):  # 长运行：每次工具完成都追加事件，把首次观察挤出 2000 条窗口
+        repo.append_event(event_type="tool_completed", attempt_id=attempt_id, agent_run_id=agent_run_id,
+                          payload={"operation_id": f"filler-{index}", "ok": True, "status": "done"})
+    second = _record_observation(repo, _payload(target={"ref": "tab-3", "generation": "18"}), operation_id="op-2", attempt_id=attempt_id)
+    assert observation_is_current(repo, run_id="run-1", task_id="task-1", observation_id=second.observation_id) is True, "最新事件永远在窗口内"
+    assert observation_is_current(repo, run_id="run-1", task_id="task-1", observation_id=first.observation_id) is False, "挤出窗口的旧观察按不新鲜（fail-closed）"
+    recent = repo.events_for_agent_run(agent_run_id, event_type="tool_completed", limit=5)
+    assert [e["seq"] for e in recent] == sorted(e["seq"] for e in recent) and recent[-1]["payload"]["operation_id"] == "op-2"
+    by_attempt = repo.events_for_attempt(attempt_id, limit=3)
+    assert len(by_attempt) == 3 and by_attempt[-1]["payload"]["operation_id"] == "op-2", "按 attempt 读也取最新窗口再升序"
+    assert [e["seq"] for e in by_attempt] == sorted(e["seq"] for e in by_attempt)
 
 
 def test_latest_successful_observation_per_target_is_current_and_older_ones_are_stale():

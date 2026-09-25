@@ -148,6 +148,15 @@
 - **测试**：`test_plugin_package.py`（v5 往返与 13 种非法声明）、`test_plugin_observation.py`（形状码、ID 稳定、投影、事件序新鲜度、候选复核）、
   `test_plugin_proxy_observation.py`（代理改写与信封、整份拒绝、动作 _meta、未知/过期不发送、不填参数沿旧路径）、
   `test_browser_lite_package.py`（v5 描述；真实浏览器下按候选填写/点击、not_found/stale/缺上下文）。
+- **真实链路发现并修复（决策线在隔离 Gateway 上跑 browser-lite，2026-09-24 深夜）**：`tool_runtime_ledger.persist_tool_runtime_ledger`
+  原本在归档没有 `runtime_gate` 时提前 return，只读工具（观察工具正是只读）永远不进 `tool_completed` 事件流，`observation_is_current`
+  恒为 False；我的合同测试直接调 `_append_runtime_event` 并手造了 gate，没走到这个入口。现改为每次工具完成都追加事件（无门时
+  status 按 ok 记 done/failed，不记 blocked），legacy 门账本仍只在有门时写；`events_for_agent_run` / `events_for_attempt` 改为取最新
+  limit 条再升序返回，长运行不会把最新观察或收尾事件挤出窗口。测试改走 `persist_tool_runtime_ledger`，并加真实 SQLite 库的
+  2100 条填充事件用例。
+- **同批记录、待插件线后续处理的 browser-lite 发现**：Gateway 模式下 `open url=相对路径` 按 `request.workspace_root` 解析而不是模型
+  以为的 TUI 当前目录；`file://` 被宿主的 URL 参数门先拦（`NETWORK_FILE_URL_BLOCKED`），`http://localhost` 被宿主私网门拦
+  （`NETWORK_PRIVATE_HOST_BLOCKED`），README 里"file:// 与 allowed_hosts 默认放行 localhost"的说法只对插件层成立，需要与宿主门对齐。
 - **未做**：决策线 `action_candidate` 点（`claude/decision-action-candidate` 待 rebase）；computer_use 观察适配；真实 TUI 端到端验收待决策点接入后一起做。
 
 ## 5. 评审结论（插件线，2026-09-25）

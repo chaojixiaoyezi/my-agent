@@ -2948,28 +2948,33 @@ class RuntimeRepository(
                 "SELECT * FROM runtime_events WHERE event_id = ?", (event_id,)
             ).fetchone()
 
-    # LLM: 只读同一 agent_run 下的事件（跨 attempt 共享），按 seq 升序；event_type 为空时不过滤。供插件观察新鲜度等按运行序判定的读者使用。
-    # 函数用途: 列出一个权威 AgentRun 的事件流。
+    # LLM: 只读同一 agent_run 下的事件（跨 attempt 共享），event_type 为空时不过滤。窗口取**最新的** limit 条再按 seq 升序返回：
+    #   每次工具完成都会追加事件，长运行超过窗口时丢掉最旧的，最新事实（新鲜度、收尾事件）永远在窗口内。
+    # 函数用途: 列出一个权威 AgentRun 的最近事件流（升序）。
     def events_for_agent_run(self, agent_run_id: str, *, event_type: str = "", limit: int = 2000) -> list[dict[str, Any]]:
         with self._runtime_connection() as conn:
             if event_type:
                 rows = conn.execute(
-                    "SELECT * FROM runtime_events WHERE agent_run_id = ? AND event_type = ? ORDER BY seq ASC LIMIT ?",
+                    "SELECT * FROM (SELECT * FROM runtime_events WHERE agent_run_id = ? AND event_type = ? "
+                    "ORDER BY seq DESC LIMIT ?) ORDER BY seq ASC",
                     (agent_run_id, event_type, int(limit)),
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT * FROM runtime_events WHERE agent_run_id = ? ORDER BY seq ASC LIMIT ?",
+                    "SELECT * FROM (SELECT * FROM runtime_events WHERE agent_run_id = ? ORDER BY seq DESC LIMIT ?) ORDER BY seq ASC",
                     (agent_run_id, int(limit)),
                 ).fetchall()
         return [conn_row_to_event(row) for row in rows]
 
+    # LLM: 同上，窗口取最新的 limit 条再升序：读者按 reversed() 找最后的收尾事件（如 agent_run.completed）时，不会因为工具事件
+    #   变多而把它挤出窗口。
+    # 函数用途: 列出一个 attempt 的最近事件流（升序）。
     def events_for_attempt(self, attempt_id: str, *, limit: int = 500) -> list[dict[str, Any]]:
         with self._runtime_connection() as conn:
             rows = conn.execute(
                 """
-                SELECT * FROM runtime_events WHERE attempt_id = ?
-                ORDER BY seq ASC LIMIT ?
+                SELECT * FROM (SELECT * FROM runtime_events WHERE attempt_id = ?
+                ORDER BY seq DESC LIMIT ?) ORDER BY seq ASC
                 """,
                 (attempt_id, int(limit)),
             ).fetchall()

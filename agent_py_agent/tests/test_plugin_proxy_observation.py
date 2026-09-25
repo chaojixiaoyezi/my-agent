@@ -86,10 +86,11 @@ def test_result_without_observation_key_and_non_observation_tools_are_untouched(
 
 def _recorded(repo, client):
     outcome = _proxy(client, "read").execute({"path": "x", "__run_scope": RUN_SCOPE, "__operation_id": "op-1"})
-    from agent_py_agent.agent.agent_core import tool_runtime_ledger
+    from agent_py_agent.agent.agent_core.tool_runtime_ledger import persist_tool_runtime_ledger
+    # 只读插件工具的归档没有 runtime_gate，必须照样进权威事件流（同伴真实链路发现的缺口）
     archive = {"run_id": "run-1", "task_id": "task-1", "operation_id": "op-1", "attempt_id": "attempt-1", "tool": outcome.tool, "ok": True,
-               "error_code": "", "idempotency_key": "", "runtime_gate": {"allowed": True}, "tool_result_envelope": outcome.result_envelope}
-    tool_runtime_ledger._append_runtime_event(SimpleNamespace(subagents=SimpleNamespace(runtime_db=repo)), archive)
+               "error_code": "", "idempotency_key": "", "tool_result_envelope": outcome.result_envelope}
+    persist_tool_runtime_ledger(SimpleNamespace(subagents=SimpleNamespace(runtime_db=repo), local_store=SimpleNamespace()), archive)
     return json.loads(outcome.output)["structuredContent"][OBSERVATION_KEY]["candidates"]
 
 
