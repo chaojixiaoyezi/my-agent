@@ -167,7 +167,7 @@ python3 scripts/check_clean_package.py --mode worktree . # tracked/untracked + r
 ```
 
 Local ruff note: on the desktop machine, ruff is also available at
-`/Users/example/ai_claw/bin/ruff`. If `python3 -m ruff` is missing in the
+`/Users/example/tools/bin/ruff`. If `python3 -m ruff` is missing in the
 current interpreter, use `ruff check ...` from PATH or that explicit binary.
 
 If any strict-gate command fails, do not push or merge by default. Only bypass

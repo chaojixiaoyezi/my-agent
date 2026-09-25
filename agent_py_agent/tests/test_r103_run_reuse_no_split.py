@@ -1,6 +1,6 @@
 """R1-03 补漏红测：主代理续跑禁止分裂 run 树。
 
-真机根因（2026-08-12 testbox）：同一任务 req_1786515758774 出现两个
+真机根因（2026-08-12 测试机）：同一任务 req_1786515758774 出现两个
 task_run + 两个 main agent_run——gateway 请求执行用 run_id=req_{id}
 登记第一棵 run 树；任务 runtime 未闭合（unfinished）后发现层继续驱动，
 主代理后台续跑用 run_id=bg-main-thread-{thread} 登记第二棵 run 树

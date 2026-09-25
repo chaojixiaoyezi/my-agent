@@ -1,6 +1,6 @@
 """Embedding 抽象 + 本地确定性 embedder + 可选语义端点(Phase 2)。
 
-综合三家:学 claw memory/embedding.py(LocalHashingEmbedder 纯 Python 特征哈希 + cosine)
+综合三家:学 参考实现 memory/embedding.py(LocalHashingEmbedder 纯 Python 特征哈希 + cosine)
 + 通道运行时 可插拔/可降级(配了 provider 才启用语义,否则降级词面)。
 
 自建优先:

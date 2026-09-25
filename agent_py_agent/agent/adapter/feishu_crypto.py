@@ -1,7 +1,7 @@
-"""飞书 webhook 加解密(Tier 1 飞书接入,移植 claw im/feishu_crypto.py)。
+"""飞书 webhook 加解密(Tier 1 飞书接入,移植 参考实现 im/feishu_crypto.py)。
 
 my-agent 现有 feishu.py 只验签、**缺加密事件解密**(配了 Encrypt Key 时飞书发的是 AES 加密体);
-本模块补上。研究确认 claw 是三家里唯一真实现飞书 AES 解密 + fail-closed 的。
+本模块补上。研究确认 参考实现 是三家里唯一真实现飞书 AES 解密 + fail-closed 的。
 
 - 签名:``sha256(timestamp + nonce + encrypt_key + raw_body)``,常数时间比较;**encrypt_key 空则
   fail-closed**(签名不含任何秘密,攻击者可自算匹配 → 验签沦为空操作)。

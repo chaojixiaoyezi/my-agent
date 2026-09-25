@@ -1627,7 +1627,7 @@ diff、clean-package 和候选 wheel 的发布边界检查通过。全仓 pytest
 
 当前运行包仍为第 5 步已发布的同一 wheel，尚无第 6 步产品代码改动。故障插件是仓库外构造的标准本地包，原包、合成输入和原始运行账均保存在私有测试目录，不随仓库发布。该包独立验证了 `probe`、完整 `isError`、受控阻塞和非零退出；停用与恢复没有按插件 ID 加核心特判。受影响的停用竞态、发布、调用及宿主命令 focused tests 已通过；本段真实 TUI 结论单列，不以组件测试代替。
 
-本机 TUI179—185、187—194 共用原 Gateway，均在各自会话选择并核对官方 `MiniMax-M2.7`，请求端点为 `api.minimax.cn/anthropic/v1`。测试机 TUI174—178、186 也共用该机原 Gateway，官方端点为 `api.minimaxi.com/anthropic`。查看本机管理、插件长任务、核心长任务、故障、逐页长任务、源码审阅、审批及卸载后基线，分别用 `tmux attach -t release-0920-step6-local-manage`、`release-0920-step6-local-plugin-long`、`release-0920-step6-local-core-long`、`release-0920-step6-local-fault`、`release-0920-step6-local-ledger-long`、`release-0920-step6-local-core-review-long`、`release-0920-step6-local-approval`、`release-0920-step6-local-post-clean`。188—194 的新会话后缀依次为 `local-triple-plugin`、`local-triple-core`、`local-final-plugin`、`local-final-core`、`local-random600-plugin`、`local-random600-core`、`local-random600-core-retry`，均加在 `release-0920-step6-` 后；测试机用 `ssh testbox 'tmux attach -t release-0920-step6-remote-manage'` 查看管理 TUI，原故障 TUI 已正常退出，重连 TUI 用 `release-0920-step6-remote-resume`，其它后缀为 `remote-core`、`remote-plugin-long`、`remote-core-long`。原生 TUI 发起业务或管理；测试者只准备合成输入、控制明确审批／中断并只读核对原账和产物。
+本机 TUI179—185、187—194 共用原 Gateway，均在各自会话选择并核对官方 `MiniMax-M2.7`，请求端点为 `api.minimax.cn/anthropic/v1`。测试机 TUI174—178、186 也共用该机原 Gateway，官方端点为 `api.minimaxi.com/anthropic`。查看本机管理、插件长任务、核心长任务、故障、逐页长任务、源码审阅、审批及卸载后基线，分别用 `tmux attach -t release-0920-step6-local-manage`、`release-0920-step6-local-plugin-long`、`release-0920-step6-local-core-long`、`release-0920-step6-local-fault`、`release-0920-step6-local-ledger-long`、`release-0920-step6-local-core-review-long`、`release-0920-step6-local-approval`、`release-0920-step6-local-post-clean`。188—194 的新会话后缀依次为 `local-triple-plugin`、`local-triple-core`、`local-final-plugin`、`local-final-core`、`local-random600-plugin`、`local-random600-core`、`local-random600-core-retry`，均加在 `release-0920-step6-` 后；测试机用 `ssh <测试机> 'tmux attach -t release-0920-step6-remote-manage'` 查看管理 TUI，原故障 TUI 已正常退出，重连 TUI 用 `release-0920-step6-remote-resume`，其它后缀为 `remote-core`、`remote-plugin-long`、`remote-core-long`。原生 TUI 发起业务或管理；测试者只准备合成输入、控制明确审批／中断并只读核对原账和产物。
 
 | TUI | 已核对的原生事实 | 结论与边界 |
 | --- | --- | --- |
@@ -1672,7 +1672,7 @@ diff、clean-package 和候选 wheel 的发布边界检查通过。全仓 pytest
 | 172／`release-0920-step5-local-resume` | 171 退出客户端后按同一会话恢复，原两次任务历史、模型选择和输入框可见；缩小窗口后 PageUp／PageDown 改变并恢复可见历史。 | 重连与滚动通过，Gateway 未重启。 |
 | 173／`release-0920-step5-remote-resume` | 169 退出客户端后按同一会话恢复，`/plugins list` 仍显示启用插件；再次显式读取中文空格路径，经原生审批，新增的原 HostCommand／工具操作均成功，首段字节与源文件一致。 | 插件目录和实际调用跨 TUI 客户端重连通过，Gateway 未重启。 |
 
-第 5 步的框架必测项已收口，未发现本片新增的框架失败。旧 TUI164 的模型文本失真继续归第 8 步通用交付核验，不由本片短任务覆盖；连续长任务、多子代理和受控故障属于第 6—10 步。测试机 TUI169、本机 TUI171 已正常退出并分别恢复为 173、172；查看仍运行的测试机 TUI 用 `ssh testbox 'tmux attach -t <上表会话名>'`，本机用 `tmux attach -t release-0920-step5-local-resume`。测试机磁盘边界仍未消除，后续重负载优先本机。
+第 5 步的框架必测项已收口，未发现本片新增的框架失败。旧 TUI164 的模型文本失真继续归第 8 步通用交付核验，不由本片短任务覆盖；连续长任务、多子代理和受控故障属于第 6—10 步。测试机 TUI169、本机 TUI171 已正常退出并分别恢复为 173、172；查看仍运行的测试机 TUI 用 `ssh <测试机> 'tmux attach -t <上表会话名>'`，本机用 `tmux attach -t release-0920-step5-local-resume`。测试机磁盘边界仍未消除，后续重负载优先本机。
 
 ## 第 5 步使用卡与目录同源的本地验证
 

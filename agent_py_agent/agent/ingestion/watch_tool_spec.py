@@ -784,7 +784,7 @@ def _watch_stream_examples() -> list[str]:
         '{"tool":"watch_stream","action":"open","url":"https://source.example/query","http_request":{"method":"POST","json_body":{"page":{}},"cursor_binding":{"location":"json_body","path":["page","cursor"],"initial":0},"page_size_binding":{"location":"json_body","path":["page","size"]}},"record_list_field":"records","cursor_field":"next","cursor_semantics":"next_position"}',
         '{"tool":"watch_stream","action":"open","url":"file:///var/log/app/events.log","watch_window_seconds":3600}',
         '{"tool":"watch_stream","action":"open","url":"file:///var/log/app/multiline.log","record_boundary":{"mode":"delimiter","delimiter":"\\n---END---\\n"}}',
-        '{"tool":"watch_stream","action":"open","url":"http://192.168.1.50:9100/health","mode":"poll","poll_query_seconds":60}',
+        '{"tool":"watch_stream","action":"open","url":"http://192.0.2.10:9100/health","mode":"poll","poll_query_seconds":60}',
         '{"tool":"watch_stream","action":"sample","watch_id":"ws-ab12cd34ef","sample_count":300}',
         '{"tool":"watch_stream","action":"configure","watch_id":"ws-ab12cd34ef","spec":{"result_field":"state","normal_values":["ready"],"ignore_fields":["trace_id"]}}',
         '{"tool":"watch_stream","action":"pull","watch_id":"ws-ab12cd34ef","max_wait_seconds":45}',

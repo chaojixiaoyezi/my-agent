@@ -36,7 +36,7 @@ def _audit_enabled(config: AgentConfig) -> bool:
 
 
 # 审计 details 里键名命中这些词的值一律脱敏(防 secret/口令/凭据落审计文件造成二次泄漏,审计 #13)。
-# 学 claw AuditLedger 禁用键 + 通道运行时 redactSensitiveText 默认开。command/output/path 属审计价值,不脱敏。
+# 学 参考实现 AuditLedger 禁用键 + 通道运行时 redactSensitiveText 默认开。command/output/path 属审计价值,不脱敏。
 _FORBIDDEN_AUDIT_KEY_PARTS = (
     "secret", "token", "password", "passwd", "api_key", "apikey", "access_key", "secret_key",
     "private_key", "credential", "authorization", "ciphertext", "session_key",

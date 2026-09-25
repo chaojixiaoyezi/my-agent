@@ -121,7 +121,7 @@ def test_truncated_stream_is_flagged_not_silently_empty():
 
 
 def test_eof_before_message_stop_is_truncated():
-    # 流在 message_stop / stop_reason 之前就 EOF(代理截断)→ 截断(对照 claw 的 not(saw_stop or stop_reason))。
+    # 流在 message_stop / stop_reason 之前就 EOF(代理截断)→ 截断(对照 参考实现 的 not(saw_stop or stop_reason))。
     lines = [
         json.dumps({"type": "message_start", "message": {"usage": {"input_tokens": 3}}}),
         json.dumps(

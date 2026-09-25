@@ -3,7 +3,7 @@
 重点:① **放行外网**(--share-net 在、--unshare-net 不在)——硬约束,沙箱只隔离文件/进程不断网;
 ② owner home/已授权 workspace 读写 bind、系统库只读、进程隔离;③ bwrap 不可用时
 抛 SandboxUnavailable，owner-scoped 调用方必须 fail-closed。
-实际隔离效果(rm -rf 只删沙箱/跨 owner 拦/外网可达)在 testbox 真机极限测,mac 只测命令构造。
+实际隔离效果(rm -rf 只删沙箱/跨 owner 拦/外网可达)在 测试机 真机极限测,mac 只测命令构造。
 """
 
 from __future__ import annotations
@@ -516,7 +516,7 @@ def test_sandbox_unavailable_has_fail_closed_error_contract() -> None:
 
 def test_proc_mount_uses_real_procfs_when_probe_succeeds(tmp_path, monkeypatch) -> None:
     """真机可挂真实 procfs 时用 --proc:go 等 trimmed 发行版二进制靠 /proc/self/exe
-    推导自身根目录(实测 testbox 空 /proc 里 go 报 "binary is trimmed and GOROOT is not set")。"""
+    推导自身根目录(实测 测试机 空 /proc 里 go 报 "binary is trimmed and GOROOT is not set")。"""
     monkeypatch.setattr("agent_py_agent.agent.tooling.sandbox._PROC_MOUNT_KIND", None)
     monkeypatch.setattr("agent_py_agent.agent.tooling.sandbox.find_bwrap", lambda: "/fake/bwrap")
     monkeypatch.setattr(

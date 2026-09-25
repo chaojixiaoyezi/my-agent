@@ -13,7 +13,7 @@ set -euo pipefail
 
 REPO="${MYAGENT_REPO:-https://github.com/chaojixiaoyezi/my-agent.git}"
 BRANCH="${MYAGENT_BRANCH:-main}"
-HOME_DIR="${MYAGENT_HOME_DIR:-$HOME/.my-agent}"        # 纯数据目录(不含源码/venv,学 my-agent-claw)
+HOME_DIR="${MYAGENT_HOME_DIR:-$HOME/.my-agent}"        # 纯数据目录(不含源码/venv,学 参考实现)
 SRC_DIR="${MYAGENT_SRC_DIR:-$HOME/my-agent-src}"        # 安装目录:源码 + venv,与数据目录分离
 VENV_DIR=""                                             # 在 obtain_source 定下 SRC_DIR 后设为 $SRC_DIR/.venv
 EXTRAS="${MYAGENT_EXTRAS:-scale,secrets}"

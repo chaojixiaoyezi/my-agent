@@ -1,6 +1,6 @@
 """PostgreSQL 行级安全 RLS 多租户硬隔离(Tier 2 加固):在 DB 层强制 tenant 过滤。
 
-研究核验三家都没做 RLS:claw 用 owner 列(无 RLS)、长期助手 靠外部 user_id、通道运行时 用目录/独立文件。
+研究核验三家都没做 RLS:参考实现 用 owner 列(无 RLS)、长期助手 靠外部 user_id、通道运行时 用目录/独立文件。
 RLS 是企业级数据隔离的硬通货——即便应用层漏写 ``WHERE tenant``,DB 也按策略
 ``tenant = current_setting('app.tenant_id')`` 挡掉越权行,把"租户隔离"从"靠每个查询自觉"升级成
 "DB 强制保证"。``FORCE ROW LEVEL SECURITY`` 让表属主也受约束(仅超级用户/BYPASSRLS 角色绕过)。

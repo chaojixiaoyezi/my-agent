@@ -1,6 +1,6 @@
 """真机回归:升级后 legacy 记忆再也不能瘫痪 curator 提炼。
 
-真机根因(testbox, 2026-08-05):升级到 v2 后,旧版纯 Markdown lesson 没有 v1 元数据 marker,
+真机根因(测试机, 2026-08-05):升级到 v2 后,旧版纯 Markdown lesson 没有 v1 元数据 marker,
 lessons.list() 抛 ValueError → FormalMemorySource.read 崩 → 每次 curator run 都是
 CURATOR_FORMAL_MEMORY_READ_FAILED → 记忆自主提炼完全瘫痪。
 

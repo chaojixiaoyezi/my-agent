@@ -284,7 +284,7 @@ def _reply_after_card_action(adapter: Any, norm: dict[str, Any]) -> dict[str, An
     """飞书卡片回调。两类分流:
     - 会话锁密码卡:密码走 form_value(绝不进聊天/日志),处理完【返回】就地整卡替换响应
       ({toast, card:{type:raw,data:已决卡}})→ 飞书把原密码卡(含输入框+已输的密码)当场替换消失,
-      密码不残留、不另发新消息。这是从 claw 抄全的关键:回调同步返回卡片,而非 send 一条新卡。
+      密码不残留、不另发新消息。这是从 参考实现 抄全的关键:回调同步返回卡片,而非 send 一条新卡。
     - persona 人设确认卡:落写/取消后另发一条确认消息给发起人,返回 None(不走就地替换)。
     fail-open,绝不抛回长连。"""
     value = norm.get("value") or {}

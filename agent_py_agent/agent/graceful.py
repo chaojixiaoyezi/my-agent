@@ -4,7 +4,7 @@ K8s 滚动升级零停机的应用侧基础:收到 SIGTERM 先把 draining 翻�
 摘除该 pod 的 endpoint、LB 停止往这送新流量),再配合清单里的 preStop sleep + terminationGracePeriodSeconds
 让在途 HTTP / in-flight job 跑完才真退。
 
-研究核验:claw 把 drain 埋在 cli 的 finally(uvicorn/gunicorn 收 SIGTERM 时不一定可靠触发),
+研究核验:参考实现 把 drain 埋在 cli 的 finally(uvicorn/gunicorn 收 SIGTERM 时不一定可靠触发),
 且 readyz 就绪门 / preStop / terminationGracePeriodSeconds 这套 K8s 层零停机配置三家都没有——本模块补应用侧。
 signal 只能在主线程注册;worker 池把 on_drain=pool.stop 传进来即可在退出信号时优雅停消费。
 """

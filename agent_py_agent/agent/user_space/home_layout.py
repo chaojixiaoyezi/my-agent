@@ -159,7 +159,7 @@ def _root_home_path_fields(home: Path) -> dict[str, Path]:
     workspace_dir = home / "workspace"
     templates_dir = home / "templates"
     return {
-        # 种子模板收进 templates/,不散落在 home 根目录(对齐 my-agent-claw 的干净根)
+        # 种子模板收进 templates/,不散落在 home 根目录(对齐 参考实现 的干净根)
         "templates_dir": templates_dir,
         "soul_md": templates_dir / "SOUL.md",
         "user_md": templates_dir / "USER.md",

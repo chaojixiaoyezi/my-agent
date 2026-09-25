@@ -1,6 +1,6 @@
 """Web 仪表盘(Phase 3,自建 stdlib http.server,零外部依赖)。
 
-学 claw web/dashboard.py 的"瘦客户端只渲染状态、权威在别处"概念,但实现取舍按用户原则
+学 参考实现 web/dashboard.py 的"瘦客户端只渲染状态、权威在别处"概念,但实现取舍按用户原则
 "能自建就自建":my-agent 本就有自建的 stdlib `ThreadingHTTPServer`(gateway_parts/http_service.py),
 故**不引 FastAPI**,这里同样用 stdlib http.server 自建一个**独立只读仪表盘**(新端口,不碰 gateway
 热路径)。安全默认:默认仅回环;非回环绑定必须配 admin token,

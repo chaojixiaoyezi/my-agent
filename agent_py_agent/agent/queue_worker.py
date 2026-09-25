@@ -1,8 +1,8 @@
 """队列 worker(Tier 1.1 企业规模化):消费入站队列、跑 handler,闭合两层架构。
 
-研究确认 worker 池是简单循环、**自建**可控无额外依赖(claw 已自建)。无状态:状态全在队列/DB,
+研究确认 worker 池是简单循环、**自建**可控无额外依赖(参考实现 已自建)。无状态:状态全在队列/DB,
 worker 可横向加副本,跨实例靠多副本 + 队列 SKIP-LOCKED 分发。每消息一个**心跳线程**按 lease/2
-续租——防多步 LLM turn(可能数十秒)超 lease 被 recover_stale 误回收重复处理(claw 标注"验收 CRITICAL")。
+续租——防多步 LLM turn(可能数十秒)超 lease 被 recover_stale 误回收重复处理(参考实现 标注"验收 CRITICAL")。
 handler 抛异常 → fail(不卡队列);CPU 密集 handler 应放独立进程(Python GIL,研究提醒)。
 """
 

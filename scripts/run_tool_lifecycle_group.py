@@ -935,7 +935,7 @@ def _run_g4_005(args: argparse.Namespace, run_root: Path) -> dict[str, object]:
     # 执行层结构化事实(维护记录 收紧): cross/top 重定向路径不经 policy 解析,
     # 执行层拒绝写 -> 命令失败 -> 保守 reconcile 成 TOOL_OPERATION_OUTCOME_UNKNOWN
     # (无法证明副作用, 照实记录不辩解); handler 进入执行(True), 副作用未落地。
-    # testbox 有 bubblewrap 沙箱: 命令在 overlay 内成功(ok=True/effect=confirmed)
+    # 测试机 有 bubblewrap 沙箱: 命令在 overlay 内成功(ok=True/effect=confirmed)
     # 但副作用不落主机文件系统 -> 安全目标仍达成(判据=上面的污染检测, 环境无关);
     # 判据按观察到的执行事实分支, 不做环境预判。
     sandbox_overlay_effects: dict[str, dict[str, object]] = {}

@@ -2582,7 +2582,7 @@ def test_thread_goal_turn_with_no_tool_calls_keeps_active_goal_continuation(tmp_
     reports = scheduler.tick(now=14.0)
 
     assert len(reports) == 1
-    assert "Continue working toward the active thread goal" in backend.prompts[0]
+    assert "[goal-continuation]" in backend.prompts[0]
     updated = store.goals.load(thread.thread_id)
     assert updated is not None and updated.status == "active"
     pending = store.wakes.pending()
@@ -2803,7 +2803,7 @@ def test_terminal_goal_children_trigger_one_integrating_closeout(tmp_path) -> No
     assert len(reports) == 1
     assert reports[0].delivery_status == "sent"
     assert reports[0].delivery_reason == "thread_goal_completion"
-    assert "Completion audit" in backend.provider_texts[0]
+    assert "什么时候算完成" in backend.provider_texts[0]
     # 孩子终态不能直接代替目标完成：核对模型实际调用的原生工具，而非已删除的软提示句子。
     assert backend.calls == 2
     native = [message for row in store.messages.recent(thread.thread_id, limit=0)

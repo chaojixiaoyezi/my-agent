@@ -77,7 +77,7 @@ def create_home_backup_snapshot(home: MyAgentHomePaths, *, reason: str = "") -> 
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
         copied.append(str(rel))
-    # Phase 4B(学 claw):存每文件 sha256+字节数清单,供恢复前完整性校验(防备份损坏/被篡改)。
+    # Phase 4B(学 参考实现):存每文件 sha256+字节数清单,供恢复前完整性校验(防备份损坏/被篡改)。
     _update_manifest(
         manifest.manifest_path,
         {"mode": "snapshot", "copied_roots": copied, "checksums": _compute_checksums(files_root)},
@@ -110,7 +110,7 @@ class HomeBackupVerifyResult:
 
 
 def verify_home_backup_snapshot(backup_dir: str | Path) -> HomeBackupVerifyResult:
-    """恢复前完整性校验:重算备份区每文件 sha256/size 与 manifest 比对(学 claw 恢复前校验)。"""
+    """恢复前完整性校验:重算备份区每文件 sha256/size 与 manifest 比对(学 参考实现 恢复前校验)。"""
     root = Path(backup_dir)
     files_root = root / "files"
     manifest = read_json_object(root / "manifest.json")

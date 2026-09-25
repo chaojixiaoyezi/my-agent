@@ -49,7 +49,7 @@ def test_string_config_value_coerces_number_not_drop() -> None:
 
 
 def test_load_config_quoted_numeric_id_survives() -> None:
-    """全链路:引号数字 ID 经 load_config 后仍是字符串、值不丢(真机 testbox 配置形态)。"""
+    """全链路:引号数字 ID 经 load_config 后仍是字符串、值不丢(真机 测试机 配置形态)。"""
     # 虚构样例值:本用例只需"纯数字 ID + 含字母的 secret"这两种形态,不得写入任何真实凭据。
     y = 'qq_app_id: "1900000000"\nqq_app_secret: "fake-secret-abcdefghijklmnopqrstuv"\n'
     with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False, encoding="utf-8") as f:

@@ -2,7 +2,7 @@
 默认)或 PostgreSQL(10k–100k 并发规模),零代码改。
 
 借库取舍(用户原则"能自建就自建、不能的才借库" + "稳定性第一"):多 dialect 差异(自增/参数
-风格/UPSERT/事务行为)难以自建得稳,SQLAlchemy Core 自动处理、且 claw 已生产验证 → 正当借库,
+风格/UPSERT/事务行为)难以自建得稳,SQLAlchemy Core 自动处理、且 参考实现 已生产验证 → 正当借库,
 设为可选 `scale` extra(不装则用现有 raw-sqlite3 local_storage,本模块不影响现状)。
 
 存储层并发和连接生命周期约束：
@@ -70,7 +70,7 @@ class StorageBackend:
 
                 kwargs["poolclass"] = StaticPool
         else:
-            # PG 连接池调优(研究发现 claw `db.py` 零调优、默认仅 5+10,撑不住 10k-100k):每实例池 +
+            # PG 连接池调优(研究发现 参考实现 `db.py` 零调优、默认仅 5+10,撑不住 10k-100k):每实例池 +
             # 溢出 + pre_ping 预检活连接(防 PgBouncer/PG 掐死的陈连接复用直接报错)。前面再放 PgBouncer。
             kwargs.update(pool_size=pool_size, max_overflow=max_overflow, pool_pre_ping=True)
         self.engine: Engine = create_engine(url, **kwargs)

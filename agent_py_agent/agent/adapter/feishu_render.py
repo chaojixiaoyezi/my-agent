@@ -1,6 +1,6 @@
 """飞书出站渲染 — markdown 选型、post 富文本构建、长消息分片(纯函数)。
 
-移植自 my-agent-claw(长期助手 实战参数),解决"回复发纯 text、markdown 符号(**粗体**/列表/代码块)
+移植自 参考实现(长期助手 实战参数),解决"回复发纯 text、markdown 符号(**粗体**/列表/代码块)
 原样显示难看"——把 markdown 转成飞书 post 富文本正确渲染。要点:
 - 飞书 post 的 md 标签**不渲染 markdown 表格**(显示空白)→含表格降级纯文本发送。
 - code fence 必须独立成 post 行,否则大段元素会吞掉 fence 后内容。
@@ -94,7 +94,7 @@ def _wrap_line(line: str, limit: int) -> list[str]:
 
 def split_message(text: str, *, limit: int = MAX_MESSAGE_CHARS) -> list[str]:
     """长文按行边界贪心合并成 ≤limit 的片;单行超长按字符硬切。返回至少一个元素。
-    (从简:不做 claw 那种 fence 跨片闭合重开——回复>8000字符且代码块正好跨界是极边缘场景。)"""
+    (从简:不做 参考实现 那种 fence 跨片闭合重开——回复>8000字符且代码块正好跨界是极边缘场景。)"""
     if len(text) <= limit:
         return [text]
     chunks = [c for line in text.split("\n") for c in _wrap_line(line, limit)]

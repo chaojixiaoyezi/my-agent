@@ -1,6 +1,6 @@
 """测试脚本统一 key 加载:model.env 为部署权威(systemd 服务同源),环境变量只兜底。
 
-testbox 上交互 shell 的 .bashrc 会把 AGENT_API_KEY 覆盖成旧 MiniMax key
+测试机 上交互 shell 的 .bashrc 会把 AGENT_API_KEY 覆盖成旧 MiniMax key
 (真机实测 401 根因),后台/setsid 任务则完全没有 key;正式 key 在
 /etc/my-agent/model.env。所有跑真模型(禁模拟判读)的测试脚本在检查/使用
 key 之前调用 ensure_model_key()。环境变量优先曾让 .bashrc 的旧 key 在交互

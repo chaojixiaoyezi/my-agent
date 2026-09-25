@@ -23,9 +23,9 @@
 
 ## 为什么 my-agent 能做到三家都没做的
 
-研究核验 claw / 长期助手 / 通道运行时 后,以下都落在我们 Tier 0/1 地基(PG、Redis、分布式锁、持久化队列、ASGI、worker 池)的延长线上:
+研究核验 参考实现 / 长期助手 / 通道运行时 后,以下都落在我们 Tier 0/1 地基(PG、Redis、分布式锁、持久化队列、ASGI、worker 池)的延长线上:
 
-| 能力 | claw | 长期助手 | 通道运行时 | my-agent |
+| 能力 | 参考实现 | 长期助手 | 通道运行时 | my-agent |
 |---|---|---|---|---|
 | 真 RollingUpdate 多副本零停机 | 无 K8s | 无 K8s | Recreate+单副本 | ✅ worker 无状态(状态在 PG)→ 可放心多副本滚动 |
 | `maxUnavailable:0` + readyz 就绪门 + preStop | — | — | 无 readyz 门/preStop | ✅ 新就绪前不减旧、退出先摘流量 |

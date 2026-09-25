@@ -1,6 +1,6 @@
 """检索子系统(Phase 2 向量记忆):纯 Python 词面 BM25 + 可选语义向量 + RRF 混合。
 
-治 my-agent 检索召回头号短板。综合 claw(BM25/LocalHashingEmbedder)+ 通道运行时(RRF 混合/
+治 my-agent 检索召回头号短板。综合 参考实现(BM25/LocalHashingEmbedder)+ 通道运行时(RRF 混合/
 可降级)+ 长期助手(长程回想痛点动机)。自建优先:核心全 stdlib,语义 embedding 端点也是
 stdlib urllib 自建客户端、不引库;真要换 ANN 后端时接口不变。
 """

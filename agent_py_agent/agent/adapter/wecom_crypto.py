@@ -1,4 +1,4 @@
-"""企业微信回调加解密(Phase 4,移植 claw im/wecom_crypto.py 的官方加解密方案)。
+"""企业微信回调加解密(Phase 4,移植 参考实现 im/wecom_crypto.py 的官方加解密方案)。
 
 - 签名:``sha1("".join(sorted([token, timestamp, nonce, encrypt])))``,常数时间比较(stdlib 自建)。
 - AES-256-CBC:key = Base64Decode(EncodingAESKey + "="),iv = key[:16];明文结构 =

@@ -1,6 +1,6 @@
 """Prometheus 指标暴露(Tier 4.1 企业规模化,**全自建零依赖**)。
 
-研究确认:claw 手写 Prometheus 文本(无 prometheus_client 依赖)是三家里的"自建典范",
+研究确认:参考实现 手写 Prometheus 文本(无 prometheus_client 依赖)是三家里的"自建典范",
 企业告警最先消费 /metrics。my-agent 现状 = 无 metrics 暴露(真空白),本模块补上。
 
 自建取舍:Prometheus 文本暴露格式简单(# HELP / # TYPE / name{labels} value),纯 stdlib 手写

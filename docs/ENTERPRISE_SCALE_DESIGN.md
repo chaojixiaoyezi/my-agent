@@ -19,18 +19,18 @@ my-agent 架构的**形是企业级**(Gateway 中心 / 多租户 / 队列 / 审�
 
 | 维度 | 决策 | 理由(稳定性第一) |
 |---|---|---|
-| 存储 SQLite↔PostgreSQL 抽象 | **借 SQLAlchemy Core** | 多 dialect 差异(自增/参数风格/UPSERT/事务)难自建得稳;SQLAlchemy 自动处理、claw 已验证。这是"难自建得稳→借库"的正当 case |
+| 存储 SQLite↔PostgreSQL 抽象 | **借 SQLAlchemy Core** | 多 dialect 差异(自增/参数风格/UPSERT/事务)难自建得稳;SQLAlchemy 自动处理、参考实现 已验证。这是"难自建得稳→借库"的正当 case |
 | Postgres 驱动 | **借 psycopg(v3)** | 驱动不能自建 |
 | 连接池 | **借 pgbouncer**(进程外)或 SQLAlchemy pool | 10 万用户≠10 万连接,池化必需 |
 | 异步 HTTP serving | **asyncio(stdlib 自建事件循环)+ 借 uvicorn**(生产 ASGI) | asyncio 是 stdlib;HTTP/1.1 解析/keepalive 的生产级服务器借 uvicorn 更稳 |
 | 分布式锁 | **自建**(PG advisory lock 薄封装)/ 备选 Redis | PG advisory lock 是 SQL,薄封装可自建;已上 PG 就不引 Redis |
 | 缓存 | **借 Redis**(client 库)| 分布式缓存/计数/去重不能自建;但 client 是薄层 |
-| 分布式队列 | **自建**(PG `FOR UPDATE SKIP LOCKED`,学 claw)| 入站队列用 PG 行锁自建,claw 实测 4204/秒;量级真撑不住再上 Redis Streams/MQ |
+| 分布式队列 | **自建**(PG `FOR UPDATE SKIP LOCKED`,学 参考实现)| 入站队列用 PG 行锁自建,参考实现 实测 4204/秒;量级真撑不住再上 Redis Streams/MQ |
 | 向量 ANN | **借 pgvector**(PG 扩展)| 百万级向量 ANN 索引不能自建得好;pgvector 复用 PG,不引 Milvus 服务 |
 | 限流/熔断/背压 | **自建**(my-agent 已有 28 文件基础)| 算法经典,已有基础,自建 |
 | 可观测 指标/追踪 | **借 prometheus_client + OpenTelemetry SDK** | 标准协议,SDK 是薄层 |
 | 容器/编排 | **借 Docker + K8s** | 不是代码,是部署基础设施 |
-| 密钥 | Phase1 文件级 → **借 KMS/Vault 接口**(规模隔离) | 真多租户密钥隔离需 KMS(claw 自己也这么说) |
+| 密钥 | Phase1 文件级 → **借 KMS/Vault 接口**(规模隔离) | 真多租户密钥隔离需 KMS(参考实现 自己也这么说) |
 | Owner 对象事实源 | **借 S3 API/boto3 + PG/RLS manifest** | 10 万 owner 不能让 RWX 小文件树成为共享事实源；签名、重试、multipart 与对象版本协议不能自建 |
 
 **新增必需依赖估计**:SQLAlchemy、psycopg、redis、uvicorn、prometheus_client、opentelemetry、boto3(+ 可选 pgvector/KMS)。**这是规模化的必要代价**(全是"难自建得稳"的标准件,符合原则)。
@@ -40,7 +40,7 @@ my-agent 架构的**形是企业级**(Gateway 中心 / 多租户 / 队列 / 审�
 ## 2. 分层路线(按"不做就到不了"排序)
 
 ### Tier 0 · 硬阻塞(物理墙)
-- **0.1 存储抽象 + PostgreSQL**:引入 `StorageBackend` 抽象(SQLAlchemy Core),SQLite=本地/开发默认、PostgreSQL=规模。**稳定性第一→增量可回退:先建抽象seam不动现有逻辑,逐仓储迁移,SQLite 路径永不破。** 编码 claw 的并发血泪教训(`BEGIN IMMEDIATE`/busy_timeout/WAL 重试)。
+- **0.1 存储抽象 + PostgreSQL**:引入 `StorageBackend` 抽象(SQLAlchemy Core),SQLite=本地/开发默认、PostgreSQL=规模。**稳定性第一→增量可回退:先建抽象seam不动现有逻辑,逐仓储迁移,SQLite 路径永不破。** 编码 参考实现 的并发血泪教训(`BEGIN IMMEDIATE`/busy_timeout/WAL 重试)。
 - **0.2 异步 HTTP/ASGI**:gateway HTTP 层 ThreadingHTTPServer → asyncio+uvicorn;请求路径异步化。**可回退:保留同步 gateway,新增 ASGI 入口并行灰度。**
 - **0.3 分布式锁**:文件锁 → PG advisory lock 薄封装;锁接口抽象,单机回退文件锁。
 
@@ -85,7 +85,7 @@ my-agent 架构的**形是企业级**(Gateway 中心 / 多租户 / 队列 / 审�
 | 4.2 | 分布式追踪 W3C traceparent | ✅ | `338b9794` | 7,真队列传播 |
 | 5.1 | K8s 零停机 + KEDA 队列扩缩 + 优雅退出 | ✅ | `4ccc9095` | 14 |
 
-**做了三家(claw/长期助手/通道运行时)集体没做的差异化点**(研究子代理逐行核验):pgvector HNSW ANN、PostgreSQL RLS、队列版 traceparent 传播(否则 worker span 是孤儿)、KEDA 队列深度扩缩、真 RollingUpdate 多副本零停机(worker 无状态解掉 通道运行时 单副本约束)、PodDisruptionBudget。
+**做了三家(参考实现/长期助手/通道运行时)集体没做的差异化点**(研究子代理逐行核验):pgvector HNSW ANN、PostgreSQL RLS、队列版 traceparent 传播(否则 worker span 是孤儿)、KEDA 队列深度扩缩、真 RollingUpdate 多副本零停机(worker 无状态解掉 通道运行时 单副本约束)、PodDisruptionBudget。
 
 **P2 更新**：Redis、expand migration、OTLP、release-channel canary、PG/RLS owner manifest +
 versioned S3 objects 和灾备 Job 已接正式 scale 主链；真 Redis/PG/OTLP/MinIO S3 API smoke 已通过。
@@ -110,26 +110,26 @@ versioned S3 objects 和灾备 Job 已接正式 scale 主链；真 Redis/PG/OTLP
 
 ---
 
-## 4. 三家参考(claw / 长期助手 / 通道运行时)· 研究子代理实读源码结论(均附文件:行号)
+## 4. 三家参考(参考实现 / 长期助手 / 通道运行时)· 研究子代理实读源码结论(均附文件:行号)
 
-**定位**:**claw = 规模化的 my-agent 蓝本**(它已 FastAPI/uvicorn+SQLAlchemy+PG SKIP-LOCKED,`db.py:66,89` 注释自承"学 长期助手 ★4 / 通道运行时 教训")→ 地基 = 移植 claw + 补缺口。长期助手=单机 SQLite 并发调参/优雅停机最佳范本;通道运行时=飞书 CardKit 流式 + readiness/云原生最佳范本。
+**定位**:**参考实现 = 规模化的 my-agent 蓝本**(它已 FastAPI/uvicorn+SQLAlchemy+PG SKIP-LOCKED,`db.py:66,89` 注释自承"学 长期助手 ★4 / 通道运行时 教训")→ 地基 = 移植 参考实现 + 补缺口。长期助手=单机 SQLite 并发调参/优雅停机最佳范本;通道运行时=飞书 CardKit 流式 + readiness/云原生最佳范本。
 
 | 维度 | 最优来源 | my-agent 决策 |
 |---|---|---|
-| 1 存储 | claw(唯一真双后端) | 借 SQLAlchemy Core;**补 claw 缺的 PG 池调优(pool_size/max_overflow/pre_ping)+ PgBouncer** |
-| 2 锁 | claw(PG SKIP-LOCKED+advisory) | 自建 DB 原语;**移植 长期助手 jitter 重试到 SQLite 默认抗 convoy** |
-| 3 HTTP | claw(异步接入+DB队列+无状态worker两层) | 借 uvicorn+自建 worker;CPU 密集步骤挪进程(GIL) |
-| 4 入站队列 | claw `IngressQueue`(持久+多实例+lease/墓碑/lane) | 自建;移植 通道运行时 timeout 驱逐 |
-| 5 飞书 | 通道运行时(CardKit sequence 流式+持久 dedup)+ claw(双传输+AES 解密) | 借 lark_oapi WS+自建逻辑;移植 通道运行时 流式卡片+长期助手 自适应退避 |
-| 6 限流/熔断 | claw(熔断+两级背压)**但缺 RPS 限流** | 熔断自建;**借 Redis 共享态令牌桶补 RPS 限流**(进程内限流跨副本失效) |
-| 7 可观测 | claw(`/metrics` 手写)+ 通道运行时(W3C trace) | 指标自建;借 OTel SDK 追踪;补 RED 指标+per-session 日志 |
+| 1 存储 | 参考实现(唯一真双后端) | 借 SQLAlchemy Core;**补 参考实现 缺的 PG 池调优(pool_size/max_overflow/pre_ping)+ PgBouncer** |
+| 2 锁 | 参考实现(PG SKIP-LOCKED+advisory) | 自建 DB 原语;**移植 长期助手 jitter 重试到 SQLite 默认抗 convoy** |
+| 3 HTTP | 参考实现(异步接入+DB队列+无状态worker两层) | 借 uvicorn+自建 worker;CPU 密集步骤挪进程(GIL) |
+| 4 入站队列 | 参考实现 `IngressQueue`(持久+多实例+lease/墓碑/lane) | 自建;移植 通道运行时 timeout 驱逐 |
+| 5 飞书 | 通道运行时(CardKit sequence 流式+持久 dedup)+ 参考实现(双传输+AES 解密) | 借 lark_oapi WS+自建逻辑;移植 通道运行时 流式卡片+长期助手 自适应退避 |
+| 6 限流/熔断 | 参考实现(熔断+两级背压)**但缺 RPS 限流** | 熔断自建;**借 Redis 共享态令牌桶补 RPS 限流**(进程内限流跨副本失效) |
+| 7 可观测 | 参考实现(`/metrics` 手写)+ 通道运行时(W3C trace) | 指标自建;借 OTel SDK 追踪;补 RED 指标+per-session 日志 |
 | 8 部署 | 通道运行时(readiness 503+云原生)+长期助手(60s drain) | 自建+借 tini/K8s;补 readiness 探针+用户感知 drain |
 
 **4 件"三家都没有、必须从零建"**代码进度：① Redis 共享态准入 ✅；② PG RLS 数据面隔离
 ✅；③ K8s readiness-gated 部署 ✅；④ expand-contract migration Job ✅。这只表示正式代码与配置
 存在；四项的目标集群 HA、容量、滚动与灾备验收仍未完成。
 
-**纠正**:claw 宣称的 "4204/秒 exactly-once" 是**单机 SQLite 基准**,非 PG 吞吐。
+**纠正**:参考实现 宣称的 "4204/秒 exactly-once" 是**单机 SQLite 基准**,非 PG 吞吐。
 
 ---
 
@@ -138,4 +138,4 @@ versioned S3 objects 和灾备 Job 已接正式 scale 主链；真 Redis/PG/OTLP
 每步:稳定性第一(可回退、SQLite 路径不破)、真实测试(含真 PostgreSQL)、不破现有全量。
 
 ---
-*调查来源:claw 源码、SQLAlchemy/Uvicorn 官方与社区最佳实践(见对话 web 调查)、研究子代理三家深析。*
+*调查来源:参考实现 源码、SQLAlchemy/Uvicorn 官方与社区最佳实践(见对话 web 调查)、研究子代理三家深析。*

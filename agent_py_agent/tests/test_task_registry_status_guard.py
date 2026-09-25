@@ -1,7 +1,7 @@
 """审计 #6 修复真测:TaskRegistry 状态写入终态保护 + CAS(防丢更新/迟到写把终态复活)。
 
 真起 LocalStore(真 SQLite):终态(done/cancelled…)改不回非终态;failed 可重试;CAS 防并发/迟到写覆盖。
-学 长期助手 VALID_TRANSITIONS 状态机 + claw owner-lease 任务层的"原子改、拒非法转移"思路。
+学 长期助手 VALID_TRANSITIONS 状态机 + 参考实现 owner-lease 任务层的"原子改、拒非法转移"思路。
 """
 
 from __future__ import annotations

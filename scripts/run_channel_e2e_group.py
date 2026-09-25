@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """第⑤组: CLI+飞书真实入口 × 工具边界/审计矩阵 harness(通道 E2E)。
 
-通过 testbox 常驻 gateway 的真实 HTTP 入口驱动(POST /ask = CLI/通道消息的
+通过 测试机 常驻 gateway 的真实 HTTP 入口驱动(POST /ask = CLI/通道消息的
 canonical ingress,见 http_handlers.py:6;X-User-Id/X-Channel 头 = 通道用户身份,
 见 auth/middleware.py extract_identity)。oracle = owner runtime.db 机器账本
 (tool_operations/runtime_events/agent_runs/delegations),只信账本状态机字段,
@@ -68,7 +68,7 @@ _INJECT_PROBE = Path("/tmp/e2e-inject-target")
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-root", required=True, help="report 输出目录")
-    parser.add_argument("--gateway-url", default="http://127.0.0.1:8420", help="testbox 常驻 gateway")
+    parser.add_argument("--gateway-url", default="http://127.0.0.1:8420", help="测试机 常驻 gateway")
     parser.add_argument("--owners-root", default="/root/.my-agent/owners", help="owner homes 根(含 local/ 与 providers/ 子树)")
     parser.add_argument("--skip-real", action="store_true", help="跳过真实 gateway 请求(仅结构自检)")
     parser.add_argument("--case", default="", help="只跑指定 case(逗号分隔, 如 C1,C3)")

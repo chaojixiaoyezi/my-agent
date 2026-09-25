@@ -1,6 +1,6 @@
 # F11 权限分级 + 产物落位 · 实现设计(断点续传)
 
-> 目标(用户 goal):逐条整改实现 + 多普通用户/admin 完整测试。代码在 mac,gate 绿后部署 testbox 验证。
+> 目标(用户 goal):逐条整改实现 + 多普通用户/admin 完整测试。代码在 mac,gate 绿后部署 测试机 验证。
 > 原则:很多机制已有,**surgical 改动、复用现成、每条改完测试 gate 绿再下一条**。
 
 ## 现状(Explore 实测确认,已有的别重造)
@@ -23,7 +23,7 @@
 ## 验收(全绿)
 - **mac 单元测试**:F11 核心 34/34 + **全量 gate 7261 passed / 0 failed / 0 error**,0 既有测试破坏。
 - **code-size**:`strict_scope_total=0 hard=0 high-risk=0 soft=0 blocked=False`。
-- **testbox 真机端到端**(`f11_testbox_e2e.py`,28/28 PASS 0 FAIL):多普通用户 alice/bob 0 层隔离 + admin 降权/提权/过期/自授权防护 + ①归一 + ⑤pip 真落家 + **bwrap 真沙箱**(写 /root 外部挡、读别人 home 挡、cat /etc/passwd 挡、rm -rf /etc 挡)。覆盖用户原话全部越权场景。
+- **测试机 真机端到端**(`f11_testbox_e2e.py`,28/28 PASS 0 FAIL):多普通用户 alice/bob 0 层隔离 + admin 降权/提权/过期/自授权防护 + ①归一 + ⑤pip 真落家 + **bwrap 真沙箱**(写 /root 外部挡、读别人 home 挡、cat /etc/passwd 挡、rm -rf /etc 挡)。覆盖用户原话全部越权场景。
 - 合并方式:worktree `599f683a` → 主树 `cherry-pick -n`(工作区改动,未 commit)。
 
 ## 5 条缺口与改法
@@ -54,5 +54,5 @@
 - **测试**:普通用户 `pip install --user` 装 home、装完能 import。
 
 ## 实现顺序
-①路径语义 → ②bwrap全开 → ④角色降权/提权 → ③owner墙确认 → ⑤pip。每条:改 + 单测 + `pytest gate 绿`。最后 testbox 多用户/admin 集成测。
+①路径语义 → ②bwrap全开 → ④角色降权/提权 → ③owner墙确认 → ⑤pip。每条:改 + 单测 + `pytest gate 绿`。最后 测试机 多用户/admin 集成测。
 gate 命令:`python3 -m pytest agent_py_agent/tests -q -p no:cacheprovider -m "not slow and not e2e"`(按需 --ignore 坏 import 文件)。

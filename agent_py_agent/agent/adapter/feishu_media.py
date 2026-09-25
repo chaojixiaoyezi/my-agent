@@ -1,6 +1,6 @@
 """飞书富媒体 — 入站消息解析(text/post/image/file/audio/...)、文件类型路由、multipart 构造(纯函数)。
 
-移植自 my-agent-claw:按 msg_type 抽取文本+媒体引用(未知类型给占位、绝不丢消息);上传按扩展名
+移植自 参考实现:按 msg_type 抽取文本+媒体引用(未知类型给占位、绝不丢消息);上传按扩展名
 路由 file_type;下载/发送的 HTTP 在 feishu.py。入站图片/文件下载后 agent 可按类型看图(analyze_image)/读文件。
 """
 

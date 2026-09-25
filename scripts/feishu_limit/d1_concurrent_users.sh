@@ -1,7 +1,7 @@
 #!/bin/bash
 # D1 双用户并发极限测试：gateway 灌消息法（X-User-Id）验证 per-user 隔离。
 # 场景：两个用户并发提交任务 + 交叉记忆隔离验证。
-# 用法：ssh testbox 上跑（gateway 在 testbox 8420）。本机运行：bash scripts/feishu_limit/d1_concurrent_users.sh
+# 用法：ssh 测试机 上跑（gateway 在 测试机 8420）。本机运行：bash scripts/feishu_limit/d1_concurrent_users.sh
 set -u
 GW="http://127.0.0.1:8420"
 USER_A="limittest-a-$(date +%s)"
@@ -82,7 +82,7 @@ CONT_Q2=$(echo "$RES_Q2" | python3 -c "import json,sys; d=json.load(sys.stdin); 
 say "a 问暗号回复=$CONT_Q2"
 check "a 记得自己的暗号" "$(echo "$CONT_Q2" | grep -q '苹果' && echo true || echo false)"
 
-# owner home 隔离（文件侧验证；真实路径由 testbox 实测得出：
+# owner home 隔离（文件侧验证；真实路径由 测试机 实测得出：
 # /root/.my-agent/owners/providers/feishu/users/<user-id>）
 HOME_A="/root/.my-agent/owners/providers/feishu/users/$USER_A"
 HOME_B="/root/.my-agent/owners/providers/feishu/users/$USER_B"

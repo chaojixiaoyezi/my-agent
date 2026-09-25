@@ -1,6 +1,6 @@
 """词面相关性:中文 bigram 分词 + BM25 + RRF 融合(纯 Python,零外部依赖)。
 
-Phase 2 综合三家:学 claw memory/retrieval.py 的 BM25(把"最相关"顶到第一,治 my-agent
+Phase 2 综合三家:学 参考实现 memory/retrieval.py 的 BM25(把"最相关"顶到第一,治 my-agent
 裸 n-gram 召回把真相关淹没的短板)+ 通道运行时 的 RRF 混合检索(融合 BM25 与向量两路排序)。
 my-agent 原则"能自建就自建"——BM25/分词/RRF 全是经典 IR,纯 Python 自建,不引向量库。
 """

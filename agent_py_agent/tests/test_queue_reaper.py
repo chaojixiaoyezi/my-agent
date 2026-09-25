@@ -2,7 +2,7 @@
 
 真起队列/reaper 线程:worker 领了消息却不再心跳(模拟崩在多步 turn 中途)→ reaper 周期 recover_stale
 把它退回 pending、整条 lane 解封(不再永久卡死);心跳调用每次抛错也不杀心跳线程(防 lease 过期→在途
-消息被误回收重复处理)。学 claw/通道运行时 在 worker 循环里实际消费 reclaim_stale。
+消息被误回收重复处理)。学 参考实现/通道运行时 在 worker 循环里实际消费 reclaim_stale。
 """
 
 from __future__ import annotations

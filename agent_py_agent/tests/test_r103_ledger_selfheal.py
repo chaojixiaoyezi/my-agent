@@ -1,6 +1,6 @@
 """R1-03 补漏 2 红测：run 权威终态后任务级账本自愈闭环。
 
-真机根因（2026-08-12 testbox）：孤儿回收 tick（wake-tick-orphan-reclaim）把
+真机根因（2026-08-12 测试机）：孤儿回收 tick（wake-tick-orphan-reclaim）把
 「挂载后无续租」的 attempt 经 settle_agent_run 落成 run 终态（cancelled）——
 但 state.json 残留 RUNNING、link 残留 active、task_run 未 closeout（三层任务级
 账本都没闭环）→ 发现层 _filter_by_runtime_authority 每 tick 对每个 stale task
@@ -314,7 +314,7 @@ def test_projection_failure_keeps_diagnostic_event(stale_owner):
 
 def test_done_run_no_conflict_flood_across_ticks(tmp_path):
     """【红测】done 终态 + link active（持续任务轮间正常形态）重复 maintenance tick
-    不产生 status_conflict 洪泛——隔离复现 testbox 42041 条根因。
+    不产生 status_conflict 洪泛——隔离复现 测试机 42041 条根因。
     当前实现每 tick 对 done/failed 无条件写诊断（projected 恒 False）→ 本测试红。"""
     home = tmp_path / "home"
     repo = RuntimeRepository(home / "runtime.db")
@@ -348,7 +348,7 @@ def test_done_run_no_conflict_flood_across_ticks(tmp_path):
         __import__("json").dumps(link), encoding="utf-8"
     )
 
-    for _ in range(5):  # 5 个 maintenance tick（testbox 60s 间隔 × 5 分钟）
+    for _ in range(5):  # 5 个 maintenance tick（测试机 60s 间隔 × 5 分钟）
         unfinished_task_ids(home)
 
     # 正常轮间形态不是冲突：不写诊断（当前实现红：每 tick 一条）

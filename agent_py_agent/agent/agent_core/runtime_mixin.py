@@ -428,7 +428,7 @@ def _settle_main_agent_run_status(
     CLI 一次性 run 例外（问题C同族, 2026-08-14 真机）：source=cli_run 的
     one-shot run 结束后**没有** gateway 发现层/wake 循环再驱动它。此前
     blocked/unfinished 等非终态不 settle → attempt 永卡 running/ended_at=0
-    （testbox local/main 遗留 20+ 条 created/running，aiohttp 首轮 break 后
+    （测试机 local/main 遗留 20+ 条 created/running，aiohttp 首轮 break 后
     无 ended_at）。CLI 一次性 run 真实结束即兜底落 failed 终态，原始
     runtime_status/runtime_reason 保留在 payload 证据，绝不写 DONE 撒谎；
     gateway 等可续跑路径行为完全不变。

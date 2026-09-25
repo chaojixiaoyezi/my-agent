@@ -3,14 +3,6 @@ my-agent
 本项目按 LICENSE 中的 Apache License 2.0 发布。以下第三方材料保留其原许可与版权；
 这些声明不表示第三方认可或维护本项目。后续修改应保留适用的许可说明。
 
-持续目标提示模板
-----------------
-agent_py_agent/agent/conversation/goal_prompting.py 的提示文本改编自 OpenAI Codex。
-Copyright 2025 OpenAI
-来源：https://github.com/openai/codex
-许可：Apache License 2.0（见本仓库 LICENSE）。
-本项目已将模板接入自身的目标状态、预算字段及用户文本转义逻辑。
-
 方法论技能
 ----------
 builtin 下 quality、planning、orchestration、review、meta 中的部分方法论文本

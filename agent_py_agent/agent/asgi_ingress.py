@@ -1,6 +1,6 @@
 """ASGI 入站层(Tier 0.2 企业规模化):异步 FastAPI/uvicorn 两层架构的接入层。
 
-研究确认 claw 两层架构(异步 ASGI 接入 + DB 队列 + 横向无状态 worker)是三家唯一能扩到单机外的形态。
+研究确认 参考实现 两层架构(异步 ASGI 接入 + DB 队列 + 横向无状态 worker)是三家唯一能扩到单机外的形态。
 本模块=**接入层**:飞书 webhook verify→decrypt→dedup→enqueue→**立即 ack**,**不内联跑 LLM**
 (LLM 在独立 worker 消费队列跑,HTTP 永不被慢 LLM 阻塞)。整合已建地基:feishu_crypto + ingress_queue + metrics。
 

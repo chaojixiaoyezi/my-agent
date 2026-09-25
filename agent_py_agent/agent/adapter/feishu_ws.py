@@ -31,7 +31,7 @@ _ws_connect_patched = False
 
 
 def _fixed_ws_kwargs(orig_kw: dict[str, Any], has_open_timeout: bool, proxy: str) -> dict[str, Any]:
-    """补 open_timeout + 纠正 proxy(移植自 claw 真机踩坑;详见 _patch_ws_connect)。
+    """补 open_timeout + 纠正 proxy(移植自 参考实现 真机踩坑;详见 _patch_ws_connect)。
     (1) 慢链路握手 >10s(websockets 默认)会 timed out → 调大到 45s;(2) SDK 硬塞 proxy=None 在
     代理/TUN 环境直连飞书 WS 网关是黑洞 → 去掉它让 websockets 读 HTTPS_PROXY 环境变量(无代理=直连)。"""
     kw = dict(orig_kw)

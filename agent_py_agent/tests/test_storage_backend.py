@@ -79,7 +79,7 @@ def test_portability_same_code_both_backends() -> None:
 
 
 def test_postgres_pool_is_tuned_real() -> None:
-    """PG 连接池按参数调优(研究发现 claw 零调优默认仅 5;10 万并发必须可调)。"""
+    """PG 连接池按参数调优(研究发现 参考实现 零调优默认仅 5;10 万并发必须可调)。"""
     url = os.environ.get("TEST_POSTGRES_URL", "postgresql+psycopg://localhost:5432/postgres")
     try:
         db = StorageBackend(url, pool_size=7, max_overflow=12)

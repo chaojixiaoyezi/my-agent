@@ -40,7 +40,7 @@ def _proc_mount_args() -> list[str]:
 
     真机(或有 mount 权限的容器)挂真实 procfs:`/proc/self/exe` 等自省路径对
     go/python 等发行版(trimmed)二进制成立——它们靠 /proc/self/exe 推导自身根目录
-    (实测 testbox: bwrap 空 /proc 里 `go version` 报 "binary is trimmed and GOROOT
+    (实测 测试机: bwrap 空 /proc 里 `go version` 报 "binary is trimmed and GOROOT
     is not set", --proc 挂真实 procfs 后正常)。挂载后立即 --remount-ro 锁只读
     (Docker 同款):/proc 只供读取,防改 /proc/sys 内核全局参数;进程隔离不变
     (bwrap 挂的是新 pid namespace 里的 procfs, 宿主进程列表照样不可见)。
@@ -54,7 +54,7 @@ def _proc_mount_args() -> list[str]:
         if bwrap:
             # 探测挂载与真实沙箱一致(_SYSTEM_RO_ROOTS):动态链接二进制(env/sh)的
             # interpreter /lib64/ld-linux-x86-64.so.2 独立于 /usr,不挂就 execvp 失败,
-            # 会误判成"内核拒 mount(proc)"(实测 RHEL 系 testbox)。
+            # 会误判成"内核拒 mount(proc)"(实测 RHEL 系 测试机)。
             probe_args = [bwrap, "--unshare-pid", "--proc", "/proc"]
             for ro in _SYSTEM_RO_ROOTS:
                 if Path(ro).exists():

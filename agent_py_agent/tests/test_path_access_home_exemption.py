@@ -2,7 +2,7 @@ from __future__ import annotations
 
 """path_access_policy: my-agent 自己 home 豁免 dangerous_roots —— 修 root 用户场景误伤产物目录。
 
-真机 dogfooding(testbox root 用户):dangerous_roots 含 /root(本意保护 /root/.ssh 等),但 my-agent
+真机 dogfooding(测试机 root 用户):dangerous_roots 含 /root(本意保护 /root/.ssh 等),但 my-agent
 数据目录在 /root/.my-agent,整个 /root 被列危险目录,导致 agent 写自己的 output 产物失败(UNKNOWN_ERROR),
 只能自适应改写 /tmp。修复:agent 写自己 home 子树(MY_AGENT_HOME,默认 ~/.my-agent)豁免;/root 下其他
 敏感目录(.ssh 等)仍拦——口子精确不扩大,resolve 已展开 .. 防逃逸。
