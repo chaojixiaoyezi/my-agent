@@ -34,7 +34,7 @@
 8. 真实测试已获Jev凭据与充分授权，用户说“测试到完全没问题为止”，不再等待请求次数审批。但要按证据有目的地测，不能无限重跑。密钥已在隔离私有配置，不放报告、仓库或日志输出。
 9. 普通真实模型用官方MiniMax-M2.7；可让Jev对子代理选择官方MiniMax-M3及OpenCode deepseek-v4-flash。**OpenCode只用deepseek-v4-flash，MiniMax两者均走官方原生入口。** 不静默改用户日常模型。
 10. 普通子任务用Astra high或GPT-6 Sol high/xhigh；复杂并发/取消/状态审查可Astra max，最高指max，**不是ultra**。
-11. 用户允许并行开发和测试机192.168.1.9；修改共享入口、部署和重启仍须与另一工作线精确协调，不把旧协调当无限授权。
+11. 用户允许并行开发和使用决策线测试机；修改共享入口、部署和重启仍须与另一工作线精确协调，不把旧协调当无限授权。
 12. 保持代码轻量、优雅、可读、可扩展；从已有通用实现提取复用，不为单任务增加专项合同、重复注册表或第二状态权威。
 
 ### 1.3 最终完成判定
@@ -178,14 +178,14 @@ seed-only：真实JSONL→scoped loader→三宿主原seed，4195620字符；sou
 
 其它native plan/commit、live-tool checkpoint来源/CAS、active_turn_compact、process-index输出投影等仍归对方。尤其不要改 `LiveToolCompactCheckpointRequest`、`LiveToolCompactCommitRequest`、`write_live_tool_compact_checkpoint`、`committed_live_tool_compact_source_ids`、`model_visible_active_turn_tool_calls`。
 
-**最新交接通知：对方也按用户要求暂停了Goal。** 对方自报已发布main `66a598cf3`；.10测试机切 `39a2c2de`，本机仅安装未切；TUI230任务完成待核账，228只打开没提交业务。这是对方通知，不是本线部署验收。对方交接在 `~/.my-agent/releases/step8-39a2c2de/HANDOFF_TO_NEXT_AGENT.md` 与 `GOAL_HANDOFF.md`。新接手者应重新核对最新HEAD、dirty、负责人及精确函数范围，旧协调不自动扩大到新任务。
+**最新交接通知：对方也按用户要求暂停了Goal。** 对方自报已发布main `66a598cf3`；主线测试机切 `39a2c2de`，本机仅安装未切；TUI230任务完成待核账，228只打开没提交业务。这是对方通知，不是本线部署验收。对方交接在 `~/.my-agent/releases/step8-39a2c2de/HANDOFF_TO_NEXT_AGENT.md` 与 `GOAL_HANDOFF.md`。新接手者应重新核对最新HEAD、dirty、负责人及精确函数范围，旧协调不自动扩大到新任务。
 
 本分支不要直接整体移植对方新候选，也不要在原主工作区继续开发。当前无部署窗口、无待批准操作。
 
 ## 8. 真实测试与远端收尾
 
-- 用户授权独立测试机192.168.1.9；SSH已有别名 `openeuler`（root与既有identity），直接IP默认本机用户会认证失败，不需要改账户或密钥。
-- 最近安装验收目录：`/root/decision-acceptance-20260923/5e5122b04`，独立venv/HOME，端口8431。旧319004926目录保留。
+- 用户授权独立的决策线测试机；SSH 已配置专用别名（root 与既有 identity），直接IP默认本机用户会认证失败，不需要改账户或密钥。
+- 最近安装验收目录：测试机隔离目录 `decision-acceptance-20260923/5e5122b04`，独立venv/HOME，端口8431。旧319004926目录保留。
 - 真实安装生产版本仅5e5122b04，**未包含464df65c1或53d45f6c1**。
 - 最近七条业务全部done/completed；M2.7两轮→原/compact generation0→1→续聊，on4保留当前模型，原菜单显式切官方M3/OpenCode DeepSeek且完成工具轮。
 - 本线累计真实Jev HTTP **65次**；本轮停止前没有新增真实调用。
@@ -303,7 +303,7 @@ P1—P5 全部逐项实现并验收，文档与真实限制同步，才可以关
 
 ## 11. 可直接交给下一位agent的接手指令
 
-> 接手my-agent可选决策模型完整P1—P5目标。先读本报告及DECISION_MODEL_GOAL.md，进入codex/decision-model-integration独立工作区，核对HEAD和dirty；不要写原主工作区。用户已让旧代理停止，其Goal为paused，你仅在用户本次明确委派后继续。当前01—11本地切片完成、12—18未整项完成；优先12.4第二片2a（显式source seed，严格互斥，原native/text边界解析），其生产尚未开始。已有完整基线和两个共享函数的旧范围确认，先与“模块重构”的接手者复核最新归属。之后完成2b旧请求释放及后续13—18，不能缩减P5。决策默认关闭、失败不影响原执行；不计价格，只显示输入token；普通真实模型官方M2.7，M3官方，OpenCode仅deepseek-v4-flash。保护纯投影、scope、完整历史、原CAS、媒体、权限和两候选回用。常规用高档子代理，复杂边界Astra max，不用ultra。每片定向验证、同步文档，真实验收用隔离.9并先协调；不把局部通过冒充全Goal完成。
+> 接手my-agent可选决策模型完整P1—P5目标。先读本报告及DECISION_MODEL_GOAL.md，进入codex/decision-model-integration独立工作区，核对HEAD和dirty；不要写原主工作区。用户已让旧代理停止，其Goal为paused，你仅在用户本次明确委派后继续。当前01—11本地切片完成、12—18未整项完成；优先12.4第二片2a（显式source seed，严格互斥，原native/text边界解析），其生产尚未开始。已有完整基线和两个共享函数的旧范围确认，先与“模块重构”的接手者复核最新归属。之后完成2b旧请求释放及后续13—18，不能缩减P5。决策默认关闭、失败不影响原执行；不计价格，只显示输入token；普通真实模型官方M2.7，M3官方，OpenCode仅deepseek-v4-flash。保护纯投影、scope、完整历史、原CAS、媒体、权限和两候选回用。常规用高档子代理，复杂边界Astra max，不用ultra。每片定向验证、同步文档，真实验收用隔离的决策线测试机并先协调；不把局部通过冒充全Goal完成。
 
 ## 建议下一步
 

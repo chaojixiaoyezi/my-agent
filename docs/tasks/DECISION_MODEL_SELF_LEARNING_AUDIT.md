@@ -33,7 +33,7 @@ TypeSafe/Jev wire 只支持 `choice`、`score`、`noul`，无自由正文生成�
 
 本机项目索引核对：`CONTRACTS_MAP.md` 的 Memory/Task workspace 权威入口，`CODEBASE_TREE.md` 的 Candidate、SkillService/SkillSnapshot、`docs/design/README.md` 和 `docs/design/DECISION_MODEL_INTEGRATION.md` 的 P5-C 项；源码核对范围限上文列出的 runner 结果、候选/晋升、Skill 发现/guard、决策服务与设置 schema，没有全仓逐行审计。
 
-外部本机参考只读检查了 `study-agent/all-agent/openclaw-main/docs/tools/skill-workshop.md`：提案与活动 `SKILL.md` 分开，目标 hash、扫描与回滚在 apply 前复查；这只是可借鉴的边界，本项目用户确认要求更严格，不能照搬其默认 agent apply 行为。另看 `study-agent/all-agent/hermes-agent-main/tools/skill_manager_tool.py` 的 staged write gate；其配置默认可直接写，导入 gate 失败还有 fail-open，**不借用该默认与降级**。未审 OpenClaw/Hermes 的全部测试、安装包或运行表现，不把参考文档当作 my-agent 的实现证据。
+外部本机参考只读检查了另一开源 agent 项目参考副本的 `docs/tools/skill-workshop.md`：提案与活动 `SKILL.md` 分开，目标 hash、扫描与回滚在 apply 前复查；这只是可借鉴的边界，本项目用户确认要求更严格，不能照搬其默认 agent apply 行为。另看 hermes-agent 参考副本的 `tools/skill_manager_tool.py` 的 staged write gate；其配置默认可直接写，导入 gate 失败还有 fail-open，**不借用该默认与降级**。未审这两个参考项目的全部测试、安装包或运行表现，不把参考文档当作 my-agent 的实现证据。
 
 ## 验证、缺口和建议下一步
 

@@ -793,7 +793,7 @@ P4-B 普通 user owner 的两轮隔离真实中文配置各有 **1 次 Jev HTTP*
 代码：分支 `claude/decision-action-candidate` `f229a32c7`（基于 main `6a50d84aa`），wheel SHA256 前缀 `95574cdc`，browser-lite 包 `42631ee4`（同一提交构建）。
 
 **环境**：
-- 测试机 .9 没有 Chrome/Chromium（dnf 也没有），本次改在本机隔离临时目录跑：独立 `MY_AGENT_HOME`，唯一隔离 Gateway 127.0.0.1:8431；本机 8420、日常数据目录与用户真实 owner 都没动。
+- 决策线测试机没有 Chrome/Chromium（dnf 也没有），本次改在本机隔离临时目录跑：独立 `MY_AGENT_HOME`，唯一隔离 Gateway 127.0.0.1:8431；本机 8420、日常数据目录与用户真实 owner 都没动。
 - 用隔离 home 自己的 local/main owner（插件管理只对管理员开放）。审批模式经与 F4 相同的原操作设为自主，决策只开 `points.action_candidate`（单次 8 秒），其余点全关。主模型 MiniMax-M2.7。
 - browser-lite 经 TUI `/plugins install|configure|enable` 安装；`chrome_path` 指向 Playwright 自带的 Chrome for Testing，不用日常 Chrome。
 - 测试页在 owner 工作区：一个收货人输入框和"保存订单草稿""提交订单"两个相似按钮，提交后跳到只有一个"返回订单页"按钮的确认页。

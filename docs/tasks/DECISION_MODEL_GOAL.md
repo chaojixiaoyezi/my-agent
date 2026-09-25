@@ -268,14 +268,14 @@ P1-F 只读调查已用无网络小复现确认：原账本 failed/timed_out 可
 - 种子的具体历史与只读来源二选一，已实现，并通过等价测试和 4.2M 字符前后对照，详见[容量审计](DECISION_MODEL_CONTEXT_AUDIT.md#宿主历史种子只读来源2a2026-09-23本地)。
 - 2b（摘要期旧请求释放）已由主线 owner 审阅合入 main `911d0d14d`（已随 `d69f30cf3` 部署双机）：摘要期峰值从 10.2–11.7MB 降到 1.7–3.3MB，详见[容量审计](DECISION_MODEL_CONTEXT_AUDIT.md#摘要期释放旧请求历史2b2026-09-24本地)。建循环首次物化峰值：实测按需物化只会挪动峰值、不降峰，不做（方案 B 结论见[容量审计](DECISION_MODEL_CONTEXT_AUDIT.md#按需物化原生历史方案-b的测量结论不做2026-09-24)）；Gateway 21.3MB 峰值已定位为三处按行数（不按字节）整块读取消息文件，已改为字节有界的流式读取，准备期峰值 21.3→0.8MB，本地分支 `claude/decision-gateway-message-reads` 待审（见[容量审计](DECISION_MODEL_CONTEXT_AUDIT.md#gateway-213mb-峰值来自整块读取消息文件2026-09-24已实施待审)）。后台 messages 驻留与预算挤占的修复已合入 main `5dcdfd463`。
 
-**.9 媒体真实验收（main `5dcdfd463`，2026-09-24）**：集成版的图片输入与手动压缩组合在真实 M3 TUI 中走通：图片原样进请求，压缩只摘要图片前的文字前缀，压缩后仍能依据原图作答。验收后本地复现一个缺陷：未压历史带图时，一越过压缩点，请求就整轮失败。修复在本地分支 `claude/decision-media-preflight`（主线 owner 已同意方案，.9 真实验收已通过，待审）。媒体屏障写进 DESIGN_LEDGER 待用户决策。详见[真实验收](DECISION_MODEL_REAL_VALIDATION.md#124-媒体与-compact-集成版真实验收2026-09-24main-5dcdfd463)和[容量审计](DECISION_MODEL_CONTEXT_AUDIT.md#媒体会话越过压缩点2026-09-24本地修复)。12.4 仍开放：媒体屏障决策、Gateway 消息文件整块读取（已改为流式读取，本地分支 `claude/decision-gateway-message-reads` 待审）。
+**测试机媒体真实验收（main `5dcdfd463`，2026-09-24）**：集成版的图片输入与手动压缩组合在真实 M3 TUI 中走通：图片原样进请求，压缩只摘要图片前的文字前缀，压缩后仍能依据原图作答。验收后本地复现一个缺陷：未压历史带图时，一越过压缩点，请求就整轮失败。修复在本地分支 `claude/decision-media-preflight`（主线 owner 已同意方案，测试机真实验收已通过，待审）。媒体屏障写进 DESIGN_LEDGER 待用户决策。详见[真实验收](DECISION_MODEL_REAL_VALIDATION.md#124-媒体与-compact-集成版真实验收2026-09-24main-5dcdfd463)和[容量审计](DECISION_MODEL_CONTEXT_AUDIT.md#媒体会话越过压缩点2026-09-24本地修复)。12.4 仍开放：媒体屏障决策、Gateway 消息文件整块读取（已改为流式读取，本地分支 `claude/decision-gateway-message-reads` 待审）。
 
 **恢复候选提交后的同请求重试**（主线 owner 审阅通过，main 快进到 `c9794b9ca`）：18-A 合并后用探针发现，候选发送瞬断后重试会发回压缩前的旧请求；现改为复用已提交候选；经主线 owner 同意，空响应修复和插话取代两个重跑分支的同类问题一并修复（先换成候选参数）。补了 Gateway、后台和单元回归，每条都做了变异验证。详见[依赖拆分](../design/TOOL_LOOP_DEPENDENCY_SPLIT.md#恢复候选提交后的同请求重试决策分支2026-09-24本地)。
 
-**.9 真实验收（main `c9794b9ca`，2026-09-24）**：活动工具精确来源压缩在真实 M2.7 TUI 中走通，五项证据齐全；同一线程的会话级长历史压缩也写出四元 refs，并在下一请求中移除旧原文。请求准备阶段对超长历史的压缩没有在真实运行中触发，仍由 fake 全链测试覆盖。详见[真实验收](DECISION_MODEL_REAL_VALIDATION.md#124-活动工具精确来源压缩真实验收2026-09-24main-c9794b9ca)。
+**测试机真实验收（main `c9794b9ca`，2026-09-24）**：活动工具精确来源压缩在真实 M2.7 TUI 中走通，五项证据齐全；同一线程的会话级长历史压缩也写出四元 refs，并在下一请求中移除旧原文。请求准备阶段对超长历史的压缩没有在真实运行中触发，仍由 fake 全链测试覆盖。详见[真实验收](DECISION_MODEL_REAL_VALIDATION.md#124-活动工具精确来源压缩真实验收2026-09-24main-c9794b9ca)。
 
 **P5-C 动作候选接入与真实验收（2026-09-25，分支 `claude/decision-action-candidate`，基于 main `6a50d84aa`，由主线 owner 合入）**：
 - 插件线的观察候选结构落地（main `c577ed185`）后，决策侧 rebase 并改用真实合同：新鲜度只问 `plugin_observation.observation_is_current`，形状规则直接复用插件线与 manifest 的定义；82 项测试、19 种变异全杀。
 - 第一次真实运行发现新鲜度恒为 False：只读工具的归档没有 `runtime_gate`，宿主因此从不写 `tool_completed` 事件。插件线按通用方式修复（main `6a50d84aa`），决策侧集成测试改走真实写入口。
-- 合并后代码的 off/observe/apply/过期四档在隔离 owner 上全部成立，Jev 共 6 次（含修复前临时构建 3 次），累计 113 次。.9 没有浏览器，本次在本机隔离目录与 8431 上跑，未碰 8420 与日常数据。
+- 合并后代码的 off/observe/apply/过期四档在隔离 owner 上全部成立，Jev 共 6 次（含修复前临时构建 3 次），累计 113 次。决策线测试机没有浏览器，本次在本机隔离目录与 8431 上跑，未碰 8420 与日常数据。
 - 同批发现：browser-lite 的相对路径、`file://` 与本机 http 地址和宿主门不一致（插件线后续项）；模型起的后台 http.server 监听所有网卡且 Gateway 停止后仍在（待主线评估）。两者都已登记台账。

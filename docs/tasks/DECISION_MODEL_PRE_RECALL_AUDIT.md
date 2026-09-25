@@ -44,7 +44,7 @@
 
 ## 参考与验证
 
-本地参考核对了 `docs/design/README.md`、`CONTRACTS_MAP.md`、`CODEBASE_TREE.md` 与 `docs/modules/memory/{02-progress,04-structure}.md` 的入口/权威索引；源码边界以上表为准。协议还核对了 `backends/typesafe_decision_wire.py::_validate_question`，确认没有自由文本回答。外部只读参考为本机 `study-agent/all-agent/openclaw-main/docs/concepts/{memory,memory-search}.md`：它把显式 `memory_search` 与自动注入分开，自动注入限定可信晋升来源，混合检索保留原召回途径；只借鉴“明确来源边界和失败语义”，不照搬其索引/插件实现。该参考文档还将 session 搜索另列，支持本审计的来源分离判断。
+本地参考核对了 `docs/design/README.md`、`CONTRACTS_MAP.md`、`CODEBASE_TREE.md` 与 `docs/modules/memory/{02-progress,04-structure}.md` 的入口/权威索引；源码边界以上表为准。协议还核对了 `backends/typesafe_decision_wire.py::_validate_question`，确认没有自由文本回答。外部只读参考为本机另一开源 agent 项目参考副本的 `docs/concepts/{memory,memory-search}.md`：它把显式 `memory_search` 与自动注入分开，自动注入限定可信晋升来源，混合检索保留原召回途径；只借鉴“明确来源边界和失败语义”，不照搬其索引/插件实现。该参考文档还将 session 搜索另列，支持本审计的来源分离判断。
 
 本次执行：
 
