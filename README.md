@@ -637,13 +637,13 @@ CI/CD 会在每次 push 时自动运行测试并检查 TESTS.md 是否与实际�
 
 **查看 CI 运行状态**：
 - 打开 GitHub 仓库页面 → Actions 选项卡
-- 或直接访问：`https://github.com/<owner>/<repo>/actions`
+- 或直接访问：`https://github.com/chaojixiaoyezi/my-agent/actions`
 
 **Badge 状态徽章**（添加到仓库 README 顶部）：
 
 ```markdown
-[![Test](https://github.com/<owner>/<repo>/actions/workflows/test.yml/badge.svg)](https://github.com/<owner>/<repo>/actions/workflows/test.yml)
-[![Lint](https://github.com/<owner>/<repo>/actions/workflows/lint.yml/badge.svg)](https://github.com/<owner>/<repo>/actions/workflows/lint.yml)
+[![Test](https://github.com/chaojixiaoyezi/my-agent/actions/workflows/test.yml/badge.svg)](https://github.com/chaojixiaoyezi/my-agent/actions/workflows/test.yml)
+[![Lint](https://github.com/chaojixiaoyezi/my-agent/actions/workflows/lint.yml/badge.svg)](https://github.com/chaojixiaoyezi/my-agent/actions/workflows/lint.yml)
 ```
 
 将 `<owner>` 和 `<repo>` 替换为实际的用户名和仓库名。
