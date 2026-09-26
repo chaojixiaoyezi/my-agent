@@ -210,11 +210,11 @@ class _Rebuild:
 
     def render(self, budget: int) -> str:
         self.budgets.append(budget)
-        return f"smaller-{budget}"
+        return f"smaller-{max(0, budget)}"
 
 
-def test_fit_only_remeasures_when_shrinking_can_change_the_decision():
-    request = _CandidateLimits(target=1_000, ceiling=1_500)
+def test_fit_shrinks_landmarks_whenever_the_candidate_is_over_target():
+    limits = _CandidateLimits(target=1_000, ceiling=1_500)
     remeasured: list[str] = []
 
     # 函数用途: 重新计量替身：按收缩后的备份预算线性给出新大小。
@@ -223,21 +223,25 @@ def test_fit_only_remeasures_when_shrinking_can_change_the_decision():
         return _MeasuredSummary(summary, None, 900 + int(summary.rsplit("-", 1)[1]) // 10)
 
     under = _MeasuredSummary("s", None, 950)
-    assert _fit_landmarks_to_target(request, under, [_Rebuild(300)], remeasure) is under
-    # 超目标但去掉备份能达标：按超出量缩小备份后重算一次并采用更小的。
+    assert _fit_landmarks_to_target(limits, under, [_Rebuild(300)], remeasure) is under and not remeasured
+    # 超目标：按超出量缩小备份后重算一次并采用更小的；能达标的缩到刚好达标。
     rebuild = _Rebuild(300)
-    fitted = _fit_landmarks_to_target(request, _MeasuredSummary("s", None, 1_200), [rebuild], remeasure)
+    fitted = _fit_landmarks_to_target(limits, _MeasuredSummary("s", None, 1_200), [rebuild], remeasure)
     assert rebuild.budgets == [100] and fitted.summary == "smaller-100"
-    # 会被拒但去掉备份能回到上限以下：同样收缩重算。
+    # 会被拒、缩小后能回到上限以下的同样收缩。
     rejected = _Rebuild(900)
-    assert _fit_landmarks_to_target(request, _MeasuredSummary("s", None, 1_600), [rejected], remeasure).summary == "smaller-300"
-    # 去掉整段备份也救不回来（超限来自别的内容）、超目标但缩到最小也达不到目标（最小段含标题与编号）、或没有备份段：都不重算。
-    for tokens, used, minimum in ((2_000, 100, 0), (1_400, 100, 0), (1_200, 300, 150), (1_200, 0, 0)):
+    assert _fit_landmarks_to_target(limits, _MeasuredSummary("s", None, 1_600), [rejected], remeasure).summary == "smaller-300"
+    # 缩到最小也达不到目标的仍收缩到最小段：备份不能把候选顶在上限边缘（CI 上 1.6 万窗口的候选曾只离上限 100 token）。
+    small = _Rebuild(300, minimum=150)
+    fitted = _fit_landmarks_to_target(limits, _MeasuredSummary("s", None, 1_400), [small], remeasure)
+    assert small.budgets == [-100] and fitted.summary == "smaller-0" and fitted.tokens < 1_400
+    # 缩到最小仍不低于上限（超限来自别的内容）、备份已是最小段、或没有备份段：都不重算。
+    for tokens, used, minimum in ((2_000, 100, 0), (1_600, 200, 150), (1_200, 150, 150), (1_200, 0, 0)):
         count = len(remeasured)
         rebuild = _Rebuild(used, minimum)
-        assert _fit_landmarks_to_target(request, _MeasuredSummary("s", None, tokens), [rebuild], remeasure).tokens == tokens
+        assert _fit_landmarks_to_target(limits, _MeasuredSummary("s", None, tokens), [rebuild], remeasure).tokens == tokens
         assert len(remeasured) == count
-    assert _fit_landmarks_to_target(request, _MeasuredSummary("s", None, 1_200), [], remeasure).tokens == 1_200
+    assert _fit_landmarks_to_target(limits, _MeasuredSummary("s", None, 1_200), [], remeasure).tokens == 1_200
 
 
 def test_real_compaction_shrinks_landmarks_to_the_target_with_one_extra_measurement(tmp_path, monkeypatch):

@@ -990,10 +990,11 @@ def _measure_candidate(request: _CompactRunRequest, tail: _CandidateTail, summar
     return _MeasuredSummary(summary, projection, tokens)
 
 
-# LLM: 原话备份是非权威补充，不能让它改变压缩结果：只在收缩可能改变判定时才重建并重新计量一次——候选会被拒而去掉
-#   备份后能回到上限以下，或候选介于目标与上限之间而去掉备份后能达到目标（免去再换切分、多一次摘要请求）。
-#   按超出目标的量缩小备份（最小只剩编号与回查说明），变小才采用；语义摘要与机械回退正文不动，不发模型请求。
-# 函数用途: 候选超出恢复目标时按需收缩原话备份，避免备份把压缩结果挤出目标或容量线。
+# LLM: 原话备份是非权威补充，只能占用恢复目标以内的空间：候选超出目标时按超出量缩小备份（最小只剩标题、编号与
+#   回查说明）并重新计量一次，变小才采用。备份已是最小段，或缩到最小仍不低于上限（超限来自别的内容、候选照样被拒）时不重算。
+#   小窗口里整段备份可能把候选顶在上限边缘，压缩刚提交下一轮又要压缩；收缩换回余量，也免去候选被拒后再换切分、
+#   多一次摘要请求。语义摘要与机械回退正文不动，不发模型请求。
+# 函数用途: 候选超出恢复目标时收缩原话备份，避免备份把压缩结果挤出目标或容量线。
 def _fit_landmarks_to_target(
     limits: _CandidateLimits,
     measured: _MeasuredSummary,
@@ -1001,15 +1002,12 @@ def _fit_landmarks_to_target(
     remeasure: Callable[[str], _MeasuredSummary],
 ) -> _MeasuredSummary:
     rebuild = rebuilds[-1] if rebuilds else None
-    if rebuild is None or rebuild.used_tokens <= 0:
+    if rebuild is None or measured.tokens <= limits.target:
         return measured
-    target, ceiling = limits.target, limits.ceiling
-    floor = measured.tokens - rebuild.used_tokens + rebuild.minimum_tokens()
-    rejected_but_fixable = measured.tokens >= ceiling and floor < ceiling
-    over_target_but_fixable = target < measured.tokens < ceiling and floor <= target
-    if not (rejected_but_fixable or over_target_but_fixable):
+    minimum = rebuild.minimum_tokens()
+    if rebuild.used_tokens <= minimum or measured.tokens - rebuild.used_tokens + minimum >= limits.ceiling:
         return measured
-    smaller = remeasure(rebuild.render(rebuild.used_tokens - (measured.tokens - target)))
+    smaller = remeasure(rebuild.render(rebuild.used_tokens - (measured.tokens - limits.target)))
     return smaller if smaller.tokens < measured.tokens else measured
 
 

@@ -1,5 +1,20 @@
 # 测试与发布验收
 
+## 原话备份改为“候选超目标就收缩”（2026-09-26，分支 `claude/curator-budget`，基于 main `fcd23952f`）
+
+- **来源**：dsh-9b 报告 main CI 每次都红（`527bcdd99` 的运行 36267438519、`fcd23952f` 的运行 36267615914，都是 3.11 失败，其余版本被 fail-fast 取消）。`test_mixed_compact_recovery.py::test_mixed_replacement_fits_when_transcript_only_exceeds_real_input_ceiling` 断言计量两次，实际只有一次。它按 basetemp 路径长度确定性失败：25、45 个字符失败，65 个字符以上通过；CI 是 30 个字符，本机 macOS 默认临时路径 100 多个字符，所以本机严格门能过。
+- **原因**：原规则只在收缩能改变判定时才缩小原话备份。这个用例的 1.6 万窗口里，第一次联合候选约 1.43 万 token，离输入上限 1.44 万只差约 100 token，临时路径的长短决定它越没越过上限：越过就收缩再计量，没越过就带着整段备份提交。后者还有产品问题：候选贴着上限提交，下一轮又要压缩。
+- **改动**：`_fit_landmarks_to_target` 改为候选超出恢复目标就按超出量缩小备份并重算一次；备份已是最小段、或缩到最小仍不低于上限时不重算。同一场景候选降到约 1.24 万；`test_background_first_request_compacts_after_complete_prepare`（1.95 万窗口）从 1.45 万降到 1.22 万。
+- **测试同步**：
+  - `test_compact_landmarks.py` 的收缩规则用例按新规则重写：新增“缩到最小也达不到目标仍收缩”；不重算的情况包括缩到最小仍超上限、已是最小段、没有备份段。
+  - `test_mixed_compact_recovery.py` 加前提断言：第一次候选远高于目标，所以两次计量是确定的。
+  - `test_background_compact_recovery.py` 的首请求用例改为两次候选计量，提交并发送更小的那份。
+  - `test_compact_source_lifetime.py` 的两候选用例原先按调用次序给大小，改为按候选身份给（第一候选保留两条近期问答），摘要失败改为在第一候选计量之后触发，计量次数改为 5/3。
+- **验证**：
+  - 改动涉及的 4 个文件在 basetemp 25、52、156 个字符和默认路径下都通过。
+  - 含 compact 字样的全部测试文件加原聚焦集，共 246 个文件，在 25 个字符的 basetemp 下 4762 passed、1 xfailed、4 xpassed。
+  - 变异：退回旧规则时，新规则用例和混合恢复用例（短路径）都失败；去掉“缩到最小仍超上限”判断、去掉“已是最小段”判断时，新规则用例都失败。
+
 ## Gateway 恢复收割线程改用 registry 里的状态对象（2026-09-26，分支 `claude/watch-recovery-registry-state`，基于 `5bd163135`）
 
 - **来源**：只读调查 `test_watch_audit_guarantee` 偶发时发现，Gateway 恢复循环每 15 秒（`gateway_loops.py:829`）调用一次 `recover_active_audit_harvesters`，它用 `load_state()` 直接读盘，绕开 registry，拿这个对象起收割线程。之后 source worker 的 pull 从 registry 取另一个对象，而 `ensure_harvester` 只按 watch_id 复用活线程，于是同一进程里同一 watch 有两份状态对象、各自落盘。registry 本身不会淘汰状态，这是唯一的生产入口。
@@ -35,7 +50,7 @@
   - `test_session_history_read.py`（9 项）：长消息分段读回后逐字拼回；offset 与 max_chars 的边界；助手消息取给用户的回复正文；会话身份只认宿主（没有可信会话时拒绝，显式 thread_id 如实标注来源，current_thread 不接受模型自报的会话）；没有派生索引也能读原文；当前会话浏览只列可见消息、翻页不重不漏、无效游标拒绝；当前会话检索不混入其它会话、能命中长消息中段；会话过滤先于条数上限生效、LIKE 兜底同样生效；翻看模式每条限 2000 字并指向 message_id，且带 current_thread 时显式锚点仍优先；schema 上下限与模块常量一致。
 - **提交前复审补的四处边界**：跨代省略总数会缩水（超出 30 个的计数没继承）；机械回退附在备份段后的旧摘要与原文会被当成备份再继承；换行多的长消息刚好超预算时按原文折算、被整条丢掉；机械续接包带入整段旧摘要，备份标题落在包中间，收尾剥离时把原文摘录切掉。另把 `around_id` 调到 `current_thread` 之前（与代码注释一致）。
 - **变异验证**：13 种变异全部被抓住——会话过滤去掉、遇长消息立即截头尾、第二遍渲染全部行、总是重算、最小段按 0 估算、current_thread 接受模型会话、翻看不设上限、摘要指令去掉需求清单，以及上面四处边界各退回原实现、current_thread 压过锚点。均在 `PYTHONDONTWRITEBYTECODE=1` 下运行，结束后逐字节还原。
-  - `test_compact_landmarks.py`（12 项）：预算随窗口与配置上限变化；每条带编号，回查说明可选；短要求先整条放入、最新长消息保留头尾；省略编号按时间只列最近 30 个；新旧两种格式跨代继承、预算为 0 时编号全部转入省略行；没列出的省略数量逐代累加、只继承备份段本身（段后附带的原文与列表不继承）；换行多、刚好超预算的长消息保留头尾而不是整条丢掉；机械回退带上一代备份时续接包原文不被切掉；第二遍只按下标重读被选中的行；摘要指令单列全部需求与未完成请求；收缩只在能改变判定时重算；真实压缩链路收缩到目标、只多计量一次。
+  - `test_compact_landmarks.py`（12 项）：预算随窗口与配置上限变化；每条带编号，回查说明可选；短要求先整条放入、最新长消息保留头尾；省略编号按时间只列最近 30 个；新旧两种格式跨代继承、预算为 0 时编号全部转入省略行；没列出的省略数量逐代累加、只继承备份段本身（段后附带的原文与列表不继承）；换行多、刚好超预算的长消息保留头尾而不是整条丢掉；机械回退带上一代备份时续接包原文不被切掉；第二遍只按下标重读被选中的行；摘要指令单列全部需求与未完成请求；候选超目标就收缩（备份已最小或缩到最小仍超上限时不重算）；真实压缩链路收缩到目标、只多计量一次。
 - **测试同步**：原话备份改为带编号的格式（`test_gateway_conversation_compact.py` 四项、`test_goal_lifecycle_recovery.py` 一项改用新接口）；`test_compact_source_lifetime.py` 中超上限的候选先收缩备份再放弃（计量次数 3→4）；`test_mixed_compact_recovery.py` 的前提改看收缩前的首次计量。
 - **回归**：压缩、摘要、活动工具、上下文压力、辅助调用、恢复、会话检索、本地存储、配置相关测试文件，加 `test_agent_goals.py`、`test_goal_lifecycle_recovery.py`、`test_architecture_guardrails.py`，以及正文引用会话检索或原话备份的测试，共 139 个文件：1885 passed（复审修补后重跑）。另把两次真机验收提交的摘要原样再走一遍新的继承逻辑（不加新行、同样预算），备份段逐字不变（19,731、3,690 token）。严格门全部通过；code-size 总发现数 2196→2195，`_summarize` 97→84 行、`_build_compact_candidate` 78→67 行，没有新增发现。
 - **真机验收**（隔离 8432，本分支代码，DeepSeek 官方 deepseek-v4-flash，1M 窗口）：

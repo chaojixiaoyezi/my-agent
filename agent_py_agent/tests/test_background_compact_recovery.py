@@ -310,14 +310,18 @@ def test_background_first_request_compacts_after_complete_prepare(tmp_path, monk
     )
     assert result.runtime_status != "context_overflow"
     assert len(runs) == len(prepares) == 1
-    assert len(candidates) == 1 and len(summaries) == 1 and len(business) == 1
+    # 首个候选（约 1.45 万）超出恢复目标（11,700），先缩小原话备份再计量一次，提交更小的那份；摘要与业务请求各只一次。
+    assert len(candidates) == 2 and len(summaries) == 1 and len(business) == 1
     assert len(all_wires) == 2
     assert business[0][1] == store.threads.require(thread.thread_id).compact_generation == 1
-    projected = candidates[0].projection
+    first_tokens, _ = projected_model_context_components(candidates[0].projection)
+    projected = candidates[-1].projection
     candidate_tokens, _ = projected_model_context_components(projected)
+    target = agent.config.model_context_window_tokens * agent.config.memory_compact_recovery_target_percent / 100
+    assert candidate_tokens < first_tokens and first_tokens > target
     assert candidate_tokens < agent.config.model_context_window_tokens * agent.config.memory_compact_auto_trigger_percent / 100
     assert candidate_tokens + agent.backend.max_tokens < agent.config.model_context_window_tokens
-    frozen = candidates[0].request_input
+    frozen = candidates[-1].request_input
     expected = agent.backend.project_generate_payload(
         projected.provider_prompt, tools=list(frozen.native_tools) or None,
         tool_choice=projected.tool_choice if frozen.native_tools else None,
