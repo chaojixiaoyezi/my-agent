@@ -41,14 +41,15 @@ from agent_py_agent.tests.test_capability_package import content_bundle
 
 
 # LLM: 测试只在 conftest 隔离 home 创建真实安装事实；不用假摘要充当原安装校验，也不启动模型。
-# 函数用途: 装配支持两份同名内部资源的 Agent 和可停用的安装引用。
-def _agent(tmp_path):
+# 函数用途: 装配支持两份同名内部资源的 Agent 和可停用安装；可指定大资源以覆盖原生输出归档。
+def _agent(tmp_path, *, method_body=None):
     agent = SimpleAgent(AgentConfig(enable_plugins=True, enable_subagents=True, prompt_files=[]), tmp_path / "repo")
     store = PluginInstallStore(resolve_owner_home(agent.home_paths.root))
     entries = []
     for index, package_id in enumerate(("story-a", "story-b")):
         package = inspect_plugin_package(content_bundle(
-            files={"CAPABILITY.md": f"# {package_id}".encode(), "methods/SKILL.md": package_id.encode()},
+            files={"CAPABILITY.md": f"# {package_id}".encode(),
+                   "methods/SKILL.md": package_id.encode() if method_body is None else method_body},
             change=lambda row, name=package_id: row.update(plugin_id=name),
         ))
         row = store.install(PluginInstallRequest(package, f"install-{index}", 0)).installation

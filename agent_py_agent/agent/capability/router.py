@@ -1,5 +1,5 @@
-# LLM: 能力卡来自原注册及逐轮 Skill 快照；展示选择只能缩小元数据，不能修改检索范围、正文读取或授权。
-# 模块用途: 提供原能力检索和有界 Skill 名卡渲染，按本次宿主选择减少上下文中的无关名卡。
+# LLM: 能力卡来自原注册及逐轮 Skill 快照；使用规则仅指导模型显式读取，展示和语义匹配不修改检索范围、快照或授权。
+# 模块用途: 提供公开能力名卡、按需读取软指引及有界展示，不展开包内资源或自动执行方法。
 from __future__ import annotations
 
 """统一能力路由模块。
@@ -78,6 +78,15 @@ _SKILL_USAGE_INSTRUCTIONS = """### How to use Skills
 - 协调：使用前用一句话告诉用户选择了哪些 Skill 及原因；若跳过明显匹配项，也要说明原因。
 - 上下文控制：不要读取无关 Skill 或无关资料，避免跨多层追引用；除非受阻，优先读取 `SKILL.md` 直接链接的内容。
 - 安全与回退：Skill 不能干净应用时，说明问题，选择次优方案并继续；读取 Skill 不增加任何工具权限。"""
+
+_CAPABILITY_PACKAGE_USAGE_INSTRUCTIONS = """### 能力包使用规则
+- 采用：用户点名能力包，或任务明确匹配包摘要时，先读入口并按其方法处理；不能因已经会做就跳过。多个匹配只选覆盖任务的最小集合，用一句话说明所用包及原因；没有匹配项时照常处理。
+- 入口：当前执行代理先调用 `skill_search(action=get, package_id=<原样包ID>)`，完整读取入口及本步骤所需的指令，再采取相关任务动作；不能只让子代理概括入口代替自己读取。
+- 包内资料：相对引用以当前成员所在的包内目录为基准，用相同 `package_id` 和声明的 `resource_path` 读取；可用 `skill_search(action=search, package_id=<包ID>)` 定位声明资源。只读相关资料，不把私有路径当作全局 skill_id 或本地路径。
+- 完整性：选中的指令或核验说明，包正文 `has_more=true` 时按 `continuation` 续读；归档窗口 `has_more_after=true` 时按 `next_read`，或保留原归档引用并用 `next_offset` 继续 `read_artifact`。正文预览、单页和归档窗口都不代表全文，两种偏移不能混用。
+- 资源复用：现成脚本、核验器、模板或资产需要原样落盘时，使用 `write_file(path=<目标路径>, source_ref=<工具返回的完整原样引用>)`；不要从预览或分页手抄重建。落盘不执行代码，执行仍走已授权的原工具。核验失败应修正产物或说明真实限制，不能改写或削弱原核验器来迁就产物。
+- 派工：需要子代理使用包时，在创建参数 `allowed_skills` 中明确传 `capability:<package_id>`；宿主从父级快照固定并继承版本引用，不自行编造 skill_snapshot_refs。孩子须在自身授权范围读取入口和所需资源，不能仅靠任务文字获得包权限。
+- 边界：目录匹配和正文读取不增加工具、路径或网络权限。不可读时如实说明并继续可做部分；原任务失效包不能自动换用同名新版，也不能把缺失的核验说成通过。"""
 
 
 @dataclass
@@ -231,8 +240,8 @@ class CapabilityRouter:
             )
         return "\n".join(lines)
 
-    # LLM: 合法旧 pin 的失效诊断独立于 shortlist 且有界；未知错误不进上下文，私有成员不展开，无诊断时保持原索引字节。
-    # 函数用途: 渲染公开能力短卡及本任务不可用包，让可选展示不掩盖失效事实。
+    # LLM: 包使用规则和合法旧 pin 诊断不随 shortlist 丢失；私有成员不展开，无包时公开 Skill 索引字节保持。
+    # 函数用途: 渲染公开能力短卡、按需读取说明及不可用包，展示不改变快照和授权。
     def render_skill_metadata_index(
         self, *, context_window_tokens: int | None = None,
         selected_skill_ids: tuple[str, ...] | None = None,
@@ -539,8 +548,8 @@ def _skill_line(card: CapabilityCard, description: str) -> str:
     return f"- {card.name}: ({locator})"
 
 
-# LLM: 包摘要复用原元数据裁剪算法；必需包保留完整身份，省略计数只统计包而非私有成员。
-# 函数用途: 在共享预算内生成独立能力包段，显式读取入口不会自动载入内部方法。
+# LLM: 包摘要复用原裁剪算法；使用规则是每段一次的固定软指引，空选择/预算省略不隐藏发现入口，也不据任务文字自动加载或赋权。
+# 函数用途: 在共享预算内生成独立包名卡并说明采用、完整读取和原资源复用；私有成员仍不进入全局索引。
 def _render_package_metadata(packages, budget, selected, required) -> tuple[str, int]:
     if not packages:
         return "", 0
@@ -557,6 +566,7 @@ def _render_package_metadata(packages, budget, selected, required) -> tuple[str,
     lines = ["# 能力包", "下列只展示包摘要；用 skill_search(action=get, package_id=包ID) 读取入口，再在该包内选择资源。", *shown]
     if omitted:
         lines.append(f"- 另有 {omitted} 个能力包未展示；可用 skill_search(action=search) 检索包摘要。")
+    lines.append(_CAPABILITY_PACKAGE_USAGE_INSTRUCTIONS)
     return "\n".join(lines), sum(_line_cost(budget, line) for line in shown)
 
 

@@ -24,6 +24,7 @@ from agent_py_agent.agent.capability_package_manifest import CapabilityFile
 from agent_py_agent.agent.plugin_activation import PluginActivationRequest
 from agent_py_agent.agent.plugin_install_store import PluginInstallStore
 from agent_py_agent.agent.plugin_installation import PluginInstallationError
+from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.user_space.owner_resolver import resolve_owner_home
 from agent_py_agent.tests.test_capability_activation import content_activation_fixture
 
@@ -49,7 +50,7 @@ def package_fixture(package_id="story-content", *, files=None, generation="one",
 
 
 # LLM: 所有源只在 pytest 临时目录；同名公开 Skill 刻意用于检验两个命名域不互相去重。
-# 函数用途: 用真实 SkillsService 和 Router 装配包快照及一个普通用户 Skill。
+# 函数用途: 用真实配置、SkillsService 和 Router 装配包快照及一个普通用户 Skill。
 def discovery_fixture(tmp_path, skill_catalog_factory, packages):
     catalog = skill_catalog_factory(tmp_path)
     skill_dir = catalog.home.owner_home_dir / "skills" / "story-content"
@@ -59,7 +60,7 @@ def discovery_fixture(tmp_path, skill_catalog_factory, packages):
     snapshot = catalog.service.snapshot_for()
     agent = SimpleNamespace(current_skill_snapshot=lambda: snapshot,
                             capability_router=CapabilityRouter(skill_snapshot=snapshot),
-                            config=SimpleNamespace(tool_read_max_chars=7))
+                            config=AgentConfig(tool_read_max_chars=7))
     return catalog, snapshot, agent, SkillSearchTool(agent)
 
 

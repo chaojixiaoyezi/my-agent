@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
+
+import pytest
 
 from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.core import SimpleAgent
@@ -75,3 +78,36 @@ def test_native_model_pipeline_binds_then_materializes_original_resource(tmp_pat
     operations = result.operation_verification["operations"]
     assert any(row["tool"] == "write_file" and row["verification_status"] == "succeeded" for row in operations)
     assert not agent.current_skill_snapshot().resolve("methods/SKILL.md")
+
+
+@pytest.mark.parametrize("preview_chars", [0, 200, 1800])
+def test_externalized_package_page_exposes_exact_copy_reference_without_rewriting_body(tmp_path, preview_chars):
+    raw = b"# resource\r\n" + b"do_not_rewrite = True\r\n" * 800 + b"# final invariant\r\n"
+    agent, _store, _entries = _agent(tmp_path, method_body=raw)
+    workspace = resolve_owner_home(agent.home_paths.root).workspace_dir / "large-resource"
+    workspace.mkdir(parents=True)
+    agent = SimpleAgent(replace(agent.config, tool_output_externalize_min_chars=100,
+                                tool_output_preview_chars=preview_chars, tool_read_max_chars=5000), workspace)
+    target = agent.root / "original-resource.py"
+    backend = _PackagePipelineBackend(target)
+    agent.backend = backend
+    thread = agent.conversation_store.threads.get_or_create({
+        "canonical_user_id": "local/main", "channel": "cli", "channel_conversation_id": "large-resource",
+    })
+    result = agent.run("将已有资源原样整理到当前工作区。", save=False,
+                       allowed_tools=["skill_search", "write_file"],
+                       task_attributes={"conversation_thread_id": thread.thread_id},
+                       context_scope="conversation")
+
+    assert result.response == "已按原资源生成文件。"
+    assert target.read_bytes() == raw
+    model_results = [block for row in backend.requests[1]["messages"] for block in row["content"]
+                     if block["type"] == "tool_result" and block["tool_use_id"] == "read-package"]
+    rendered = model_results[0]["content"]
+    payload, _ = json.JSONDecoder().raw_decode(rendered[rendered.index("{"):])
+    assert payload["source_ref"] == backend.source_ref
+    assert payload["body_preview_complete"] is False
+    assert len(payload["body_preview"]) <= preview_chars
+    assert payload["has_more"] is True and payload["continuation"]["offset"] == 5000
+    assert "output_scoped_call_id" in rendered
+    assert "# final invariant" not in rendered

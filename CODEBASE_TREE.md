@@ -20,6 +20,7 @@
 |-- docs/design/CAPABILITY_PACKS.md       # 能力包协议、生命周期、隔离召回和任务版本合同
 |-- docs/design/CAPABILITY_MIGRATION.md   # 从固定来源到候选、安装、验收、迭代和回退的操作流程
 |-- agent_py_agent/tests/test_capability_package_native_pipeline.py # 模型替身沿原生循环读取和精确落盘
+|-- agent_py_agent/tests/test_capability_package_prompt_guidance.py # 包采用与资源复用软规则、空选择和旧提示不变
 |-- agent_py_agent/tests/test_capability_package_compact.py # 原快照与安装事实的 Compact 续读及换代拒绝
 |-- agent_py_agent/tests/test_capability_package_catalog_scale.py # 包目录预算与大量私有成员不展开
 |-- agent_py_agent/tests/test_capability_package_main_scope.py # 失效包隔离、保留原版本与主任务正常收口

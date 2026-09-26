@@ -1,6 +1,6 @@
 # LLM_GUIDE
 
-能力包内化已与协作方确认边界并开始实施，详见[唯一 TODO](docs/tasks/CAPABILITY_INTERNALIZATION_GOAL.md)和[合同](docs/design/CAPABILITY_PACKS.md)。包内资源独立作用域，旧全局 Skill 保持；尚未真实 TUI 验收或发布。
+能力包内化已进入六席官方 M2.7 原生 TUI 验收，详见[唯一 TODO](docs/tasks/CAPABILITY_INTERNALIZATION_GOAL.md)和[合同](docs/design/CAPABILITY_PACKS.md)。三包无进程安装启用及基础读写已通过；首轮业务没有读取能力包，自然召回尚未通过，正在定位。包内资源独立作用域、旧全局 Skill 保持，尚未发布。
 
 决策模型P1—P5已由用户指定的接手代理于2026-09-23恢复推进；原代理的停止基线与已验/未验范围见[完整交接报告](docs/tasks/DECISION_MODEL_TAKEOVER_HANDOFF.md)，接手后的Goal、并行边界和当前一步（先吸收main再做12.4第二片）见[执行Goal接手记录](docs/tasks/DECISION_MODEL_GOAL.md#2026-09-23-接手记录与当前-goal)。
 

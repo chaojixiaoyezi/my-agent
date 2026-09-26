@@ -3,7 +3,8 @@
 #   层(几十 K token)移到工具调用(单次 ~5ms,score_card 含中文 n-gram)。契约:
 #   ①公开检索不写状态；②search 返回卡片和稳定 id，get 经同一 turn snapshot 读取正文;
 #   ③category 过滤可选;④包内成员只在显式 package_id 下检索/读取，不进入全局 Skill。
-#   包正文读取会由原 task pin 入口保存精确引用；不执行脚本。改动时同步检查 skill_tree 和包发现测试。
+#   包正文读取由原 task pin 保存精确引用；大结果沿原归档保留可见来源和预览，不执行脚本。
+#   修改时同步检查 skill_tree、包发现和原生归档后精确复制测试。
 # 模块用途: 模型的"技能书架检索台":说一句需求,给出最相关的几个技能和它们的
 #   稳定引用和按需正文,书架上千本也不用把目录全背进对话里。
 from __future__ import annotations
@@ -31,17 +32,18 @@ if TYPE_CHECKING:
     from ..core import SimpleAgent
 
 
-# LLM: 包范围是结构化参数；不据 query 文字推断包身份，正文分页继续携带同包摘要和激活 ID。
+# LLM: 包范围是结构化参数；匹配建议只给模型，不据 query 推权限；分页继续携带同包摘要和激活 ID。
 # 函数用途: 声明统一方法检索入口，同时区分公开 Skill 和能力包内按需资源。
 def build_skill_search_model_spec() -> ToolModelSpec:
     return ToolModelSpec(
         name="skill_search",
         description=(
-            "检索或读取当前轮可用技能。action=search 按需求返回摘要和稳定 skill_id；"
+            "检索或读取当前轮可用 Skill 和能力包；任务明确匹配已列出的专业方法时，先读方法再开展工作。"
+            "action=search 按需求返回摘要和稳定 skill_id；"
             "action=get 用 skill_id 读取同一不可变快照里的完整 SKILL.md。"
             "能力包先返回包摘要；指定 package_id 后可检索内部资源，get 省略 resource_path 时读取包入口。"
             "包资源分页读取，has_more=true 时继续 continuation；读取不会执行脚本或授予工具权限。"
-            "需要原样落盘时将资源 source_ref 传给 write_file.source_ref；落盘不会执行资源。"
+            "原样落盘现有脚本或模板时，将完整 source_ref 直接传给 write_file.source_ref，不用手抄正文；落盘不会执行资源。"
         ),
         input_schema={
             "type": "object",
@@ -66,7 +68,7 @@ def build_skill_search_model_spec() -> ToolModelSpec:
                 "任务需要特定领域的方法论时先检索",
                 "不确定系统有没有现成做法时，用一句话描述需求来检索",
             ),
-            avoid_when=("普通问答或已明确知道怎么做时不必检索",),
+            avoid_when=("普通问答且没有匹配的 Skill 或能力包时不必检索",),
             keywords=("技能", "skill", "方法", "工具链", "怎么做", "检索技能"),
             examples=(
                 '{"tool":"skill_search","action":"search","query":"把一份英文资料翻译成中文文档"}',
@@ -154,8 +156,8 @@ class SkillSearchTool(BaseTool):
         }
         return ToolHandlerOutcome("skill_search", True, json.dumps(payload, ensure_ascii=False, indent=2))
 
-    # LLM: scoped 成员只来自本轮包声明，安装与内容错误 fail closed；取消不转成可恢复搜索结果。
-    # 函数用途: 执行明确包范围的搜索或分页读取，并返回可直接复用的同代 continuation。
+    # LLM: scoped 成员只来自本轮包声明，错误 fail closed；资源引用沿原回执和归档展示，取消不降级。
+    # 函数用途: 执行包范围检索或读取，保留同代 continuation，并让大正文归档后仍能按原引用复制。
     def _package_action(self, params: dict[str, object], action: str) -> ToolHandlerOutcome:
         if action not in {"search", "get"} or params.get("skill_id"):
             return _invalid("包范围只接受 search/get，不能同时传 skill_id")
@@ -173,14 +175,16 @@ class SkillSearchTool(BaseTool):
                 payload = _package_matches(package, params, offset)
             else:
                 payload = self._package_body(snapshot, package, params, offset)
+                config = getattr(self.agent, "config", None) or default_agent_config()
+                return _package_read_outcome(payload, max(0, int(config.tool_output_preview_chars)))
             return ToolHandlerOutcome("skill_search", True, json.dumps(payload, ensure_ascii=False, indent=2))
         except SkillSnapshotError as exc:
             return _snapshot_unavailable(exc)
         except (OSError, ValueError) as exc:
             return _invalid(str(exc))
 
-    # LLM: bytes 校验成功后必须先 pin 原任务引用再交付，pin 错误不能降级为无 task；仅 UTF-8 文本进入模型上下文。
-    # 函数用途: 返回受原配置限制的一页包正文，以及完整性、偏移和同代续读参数。
+    # LLM: bytes 校验后先 pin 原任务引用；仅 UTF-8 正文按原配置分页，来源元数据排在正文前，pin 错误不能降级。
+    # 函数用途: 返回一页包正文与原样复制引用、完整性和续读参数，避免引用落在长正文尾部。
     def _package_body(self, snapshot, package, params, offset) -> dict[str, object]:
         from .task_references import pin_package_reference
 
@@ -202,10 +206,10 @@ class SkillSearchTool(BaseTool):
         window = body[offset:offset + limit]
         next_offset = offset + len(window)
         pin_package_reference(self.agent, package.to_ref())
-        payload = {"kind": "capability_package", **package.to_ref(), "resource_path": member.path,
+        payload = {"source_ref": package_resource_reference(package, member.path),
+                   "kind": "capability_package", **package.to_ref(), "resource_path": member.path,
                    "resource_sha256": member.sha256, "body": window, "offset": offset,
-                   "total_chars": len(body), "has_more": next_offset < len(body),
-                   "source_ref": package_resource_reference(package, member.path)}
+                   "total_chars": len(body), "has_more": next_offset < len(body)}
         if payload["has_more"]:
             payload["continuation"] = {**_package_continuation(package, "get", next_offset),
                                        "resource_path": member.path, "max_chars": limit}
@@ -257,6 +261,27 @@ def _snapshot_for(agent):
     if callable(provider):
         return provider()
     return getattr(agent, "_current_skill_snapshot", None)
+
+
+# LLM: 只投影当前已校验页；原正文、包 continuation 和归档游标各守原合同，不把预览标成已读全文。
+# 函数用途: 复用原 live_prompt_output 保留精确复制引用和有界预览，完整内容继续由原归档保存/读取。
+def _package_read_outcome(payload: dict[str, object], preview_chars: int) -> ToolHandlerOutcome:
+    output = json.dumps(payload, ensure_ascii=False, indent=2)
+    envelope = {"source_ref": dict(payload["source_ref"])}
+    if len(output) > preview_chars:
+        body = str(payload["body"])
+        summary = {key: value for key, value in payload.items() if key != "body"}
+        summary.update({
+            "body_preview": body[:preview_chars],
+            "body_preview_complete": len(body) <= preview_chars,
+            "resource_copy_hint": "原样复制本资源时，将完整 source_ref 传给 write_file.source_ref；不要手抄或改写脚本。",
+            "body_read_hint": "body_preview_complete=false 时预览不是当前页全文；需要完整正文时用原归档锚点 read_artifact，并按归档窗口继续读。包的 continuation 只用于下一包正文页，两种游标不可混用。",
+        })
+        envelope["tool_output_policy"] = {
+            "live_prompt_output": json.dumps(summary, ensure_ascii=False, separators=(",", ":")),
+            "requires_recovery_artifact": True,
+        }
+    return ToolHandlerOutcome("skill_search", True, output, result_envelope=envelope)
 
 
 # LLM: continuation 绑定完整包字节和原激活，页码不能在换代后静默套到新资源。

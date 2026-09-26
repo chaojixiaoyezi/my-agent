@@ -1,4 +1,4 @@
-# LLM: 本模块是 write_file 的 canonical 原子写入实现；宿主来源只提供 bytes，不改变执行器、路径、配额、persona 或 artifact 合同。
+# LLM: 本模块是 write_file 的 canonical 原子写入；有精确来源时优先传原引用，宿主仅提供 bytes，不改变执行器、路径、配额或 artifact 合同。
 # 模块用途: 校验文本、二进制或精确来源内容并安全写入文件，同时返回可追踪的写入结果；来源读取不执行脚本。
 
 from __future__ import annotations
@@ -123,8 +123,8 @@ class WriteFileTool(FileSystemTool):
         mutates_workspace=True,
     )
 
-    # LLM: 未注入 resolver 时保持原模型合同；插件关闭不能向模型公开不可用来源参数，联查 registry 装配与写工具测试。
-    # 函数用途: 初始化访问策略并声明实际可用的内容输入。
+    # LLM: 未注入 resolver 时保持原模型合同；已启用时明确原样复制入口，不把可用性或示例当授权，联查 registry 和写工具测试。
+    # 函数用途: 初始化访问策略，区分生成新正文和按原引用复制，避免模型手抄现有脚本时丢失内容。
     def __init__(
         self,
         workspace_root: Path,
@@ -145,11 +145,11 @@ class WriteFileTool(FileSystemTool):
         self.model_spec = ToolModelSpec(
             name="write_file",
             description=("原子写入或覆盖完整文件；支持文本 content 或二进制 data_base64，缺失父目录会自动创建。"
-                         + ("也可原样传入 skill_search 返回的 source_ref 复制资源；三种内容输入互斥，复制不执行。" if self.source_resolver else "")),
+                         + ("复制已有脚本、模板或资源时优先原样传入 skill_search 返回的完整 source_ref，不经 content 手抄；三种内容输入互斥，复制不执行。" if self.source_resolver else "")),
             input_schema={
                 "type": "object",
                 "properties": {
-                    **({"source_ref": {"type": "object", "description": "原样使用 skill_search 返回的完整 source_ref，精确复制原始资源字节；只支持 overwrite，不授予脚本执行权。"}} if self.source_resolver else {}),
+                    **({"source_ref": {"type": "object", "description": "原样使用 skill_search 返回的完整 source_ref 对象，精确复制完整资源（不是正文预览）；不要自行拼字段或把归档地址当来源。只支持 overwrite，不授予脚本执行权。"}} if self.source_resolver else {}),
                     "expected_version": {"type": "string", "description": "基于 read_file 内容修改时，填它返回的 file_version；过期会拒绝覆盖，需重新读取合并。"},
                     "path": {
                         "type": "string",
@@ -176,7 +176,7 @@ class WriteFileTool(FileSystemTool):
             },
             hints=ToolModelHints(
                 category="filesystem",
-                use_cases=tuple(_WRITE_FILE_USE_CASES),
+                use_cases=tuple(_WRITE_FILE_USE_CASES) + (("按工具返回的 source_ref 原样复制已有脚本、模板或资源",) if self.source_resolver else ()),
                 avoid_when=(
                     "只想局部改已有文件时优先用 apply_patch",
                     long_content_avoidance_rule(),
