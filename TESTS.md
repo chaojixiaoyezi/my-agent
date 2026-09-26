@@ -1,5 +1,26 @@
 # 测试与发布验收
 
+## 决策开关、超时自调、统一审计与管理员管控（2026-09-25，分支 `claude/decision-audit-controls`，基于 main `07fa00fb3`）
+
+- **新增** `test_decision_audit_controls.py` 20 项：注册范围（main 两个工具、user 只有审计、group 都没有，管理员工具审批为 always）；
+  管理员控制默认值、坏块/坏文件失败关闭、写入保留其它策略字段与 0600；只允许管理员写（not_admin/admin_self_only/invalid_changes）；
+  跨用户许可只在管理员名下生效；owner 编号解析拒绝非规范或不存在；管理员工具 list/set 与用户侧即时生效；
+  审计的时间窗、本人范围、观察白名单（提示词与工具名清单不外泄）、跨用户许可、无 Gateway 上下文时观察不可用。
+- **补充**：`test_decision_service_http.py`（管理员关闭后本机 HTTP 零请求、零调用记录、`admin_disabled`，重新允许立即恢复；坏策略失败关闭）；
+  `test_user_config_owner_scope.py`（自调等待时间越界拒绝且不保存、范围回显、能力配置 0=不限）；
+  `test_gateway_model_observation.py`（选模型输入去锚点段、按上限截断并标注、候选公共声明只写一次）；
+  `test_decision_usage_metrics.py`（成功/失败计数、约数外推、全部缺报 `≈?`、旧账不计入）；
+  `test_tui_decision_menu.py` 与四个接入点集成测试（两个勾选到三种模式的换算与真实按键保存）。
+- **结果**（变基到 main `1ea760c0f` 后）：全部 `test_decision_*.py`、`test_tui_decision_menu.py`、`test_tui_model_metrics.py`、
+  `test_user_config_*.py`、`test_gateway_model_*.py`、`test_gateway_compact*.py`、`test_capability_*.py`、配置/审批/owner 策略、
+  `test_admin_identity_*.py`、工具面快照相关文件、恢复码/合同与 `test_architecture_guardrails.py` 共 3394 passed（24 xfailed、5 xpassed 为既有标记）；
+  ruff、`check_doc_sync --base origin/main`、strict code-size（与 main 完全相同：2200/1496/704，新增 0）、`git diff --check`、clean-package 均通过。
+  变异 24 个（管理员硬门、阶段提前返回、失败映射、审计本人/跨用户权限、观察归属与白名单、时间窗、自调上下限、成败计数、约数、
+  锚点段、截断标注、审批 always、注册条件、执行复核、勾选换算、候选去重、连接测试说明）全部被抓出，
+  每个都在 `PYTHONDONTWRITEBYTECODE=1` 子进程里跑并逐字节恢复。
+- **真实 TUI 验收**：本机隔离 home、127.0.0.1:8431、真实 Jev，管理员与普通用户两个 TUI 各走一遍，
+  见[决策开关、超时自调与审计](docs/design/DECISION_AUDIT_AND_ADMIN_CONTROLS.md#真实-tui-验收2026-09-25本机隔离-homegateway-只绑-12700018431)。
+
 child不展示历史正文时的读取回归先复现1 failed/1 passed，修复后test_compact_retained_history、test_subagent_compact_recovery、test_gateway_child_compact_scope_application三文件31 passed（8.48秒）。三宿主seed仓外基线仅验证测量和完整性，不算内存目标通过；细节见容量审计的宿主生命周期基线。
 
 ## 第 10 步组合验收 combo6 与全部卸载后核心基线（本机 `runtime-step11l-2d00c734`→`step11m-f1cc8217`，2026-09-25 凌晨）

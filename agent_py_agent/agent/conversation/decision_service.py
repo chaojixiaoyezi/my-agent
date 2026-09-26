@@ -34,6 +34,7 @@ from ..settings.decision_settings_projection import decision_profile
 from ..settings.decision_settings_schema import POINT_RUNTIME_SCOPES
 from ..settings.model_profiles import model_profiles_path, read_model_profiles
 from ..settings.model_provider_schema import ModelProfileError
+from ..user_space.owner_admin_controls import owner_decision_model_allowed
 from .decision_policy import (
     ActiveDecision,
     connection_revision,
@@ -140,6 +141,7 @@ def _check_interrupted() -> None:
 
 # LLM: 开始时刻在读配置前取得；实验资格先于材料准备且不能重置总期限，准入失败时不发布可准备点。
 # 普通阶段顺带给出零 I/O 的 experiment_available 提示（能力开或本线程存在授权信封），默认关闭时不增加任何读取。
+# 管理员禁用本 owner 的 Jev 时直接返回 admin_disabled 阶段（不读设置、不准备材料）；真正的硬门在 invoke_decision_model_call。
 # 函数用途: 建立原决策阶段；实验关闭、撤销或口径缺失均返回结构化原因，不调用后端或建立预算。
 def begin_decision_stage(agent: object, params: object, *, operation_id: str, caller_deadline: float | None = None,
                          scope: str = "thread", experiment: bool = False) -> DecisionStage:
@@ -151,6 +153,8 @@ def begin_decision_stage(agent: object, params: object, *, operation_id: str, ca
             raise DecisionInputError("决策阶段需要宿主操作编号。")
         identity = _identity(agent, params, scope=scope)
         caller = _deadline(caller_deadline)
+        if not owner_decision_model_allowed(getattr(agent, "home_paths", None)):
+            return DecisionStage(operation_id, *identity, started, started, "admin_disabled", scope=scope, experiment=experiment)
         settings = execute_decision_settings_operation(agent, "read", {}, thread_id=identity[1], blocking=False)
         budget = "background_timeout_seconds" if scope == "owner_background" else "stage_timeout_seconds"
         deadline = started + settings["effective"][budget]
@@ -229,6 +233,8 @@ def decide(agent: object, params: object, stage: DecisionStage, *, point: str, s
             raise DecisionInputError("决策接入点或重试标志无效。")
         if not isinstance(stage, DecisionStage) or _identity(agent, params, scope=stage.scope) != (stage.owner_ref, stage.thread_id, stage.run_id, stage.task_id):
             return DecisionOutcome(mode, "stale", reason="identity_changed")
+        if stage.error_code == "admin_disabled" and not stage.experiment:
+            return DecisionOutcome(mode, "off", reason="admin_disabled")
         if stage.error_code and not stage.experiment:
             return DecisionOutcome(mode, "error" if stage.error_code == "settings_busy" else "configuration_required", reason=stage.error_code)
         if POINT_RUNTIME_SCOPES[point] != stage.scope:
@@ -387,12 +393,16 @@ def _revoked(active: ActiveDecision, mode: str) -> DecisionOutcome | None:
     return None
 
 
-# LLM: 用户中断仍传播；发送许可拒绝与预算/上界拒绝按固定代码显式返回，绝不调用 record_failure 触发连接退避。
+# LLM: 用户中断仍传播；管理员禁用、发送许可拒绝与预算/上界拒绝按固定代码显式返回，绝不调用 record_failure 触发连接退避。
 # 只有 typed provider/超时错误进入原冷却表，其余错误保持原分类。
 # 函数用途: 把一次调用异常转换成保留原方案的决策结果。
 def _failure_outcome(request: DecisionRequest, exc: Exception, active: ActiveDecision, *, mode: str,
                      key: tuple) -> DecisionOutcome:
+    from .decision_model_call import DecisionModelDisallowed
+
     _check_interrupted()
+    if isinstance(exc, DecisionModelDisallowed):
+        return DecisionOutcome(mode, "off", reason=exc.reason)
     if isinstance(exc, ProviderSendRefused):
         return DecisionOutcome(mode, "experiment_unavailable", reason="send_refused:" + exc.code)
     if isinstance(exc, ModelCallBudgetError):

@@ -198,12 +198,12 @@ def test_config_defaults_and_original_agent_setting_tool_share_thread_override(t
         current = settings(host, "read", {"scope": "thread"}, thread_id=thread.thread_id)
         outcome = UserConfigTool(host).execute({"action": "decision_patch", "scope": "thread",
             "expected_revision": current["revision"], "changes": {
-                f"points.{module._POINT}.mode": "apply", f"points.{module._POINT}.timeout_seconds": 0.75,
+                f"points.{module._POINT}.mode": "apply", f"points.{module._POINT}.timeout_seconds": 1.5,
                 f"points.{module._POINT}.profile_id": key}})
         assert outcome.ok, outcome.output
         view = settings(host, "read", {"scope": "thread"}, thread_id=thread.thread_id)
         point = view["effective"]["points"][module._POINT]
-        assert point["mode"] == "apply" and point["timeout_seconds"] == 0.75 and point["profile_id"] == key
+        assert point["mode"] == "apply" and point["timeout_seconds"] == 1.5 and point["profile_id"] == key
         assert settings(host, "read", {})["effective"]["points"][module._POINT]["mode"] == "observe"
         assert not hasattr(host, "_model_call_ledger")
     finally:
@@ -222,7 +222,9 @@ def test_original_tui_can_edit_external_material_thread_mode(tmp_path):
             assert "外部材料阅读优先级" in visible(ui.app)
             await choose(ui, points.index(module._POINT))
             await choose(ui, 0)
-            await press(ui, b"\x1b[B\x1b[B\r")
+            # 模式改为"开启 + 观察模式"两个勾选：勾上开启、去掉观察即正式使用（apply），再 Tab 到保存
+            await press(ui, b" \x1b[B ")
+            await press(ui, b"\t\r")
             result = settings(gateway.host, "read", {"scope": "thread"}, thread_id=gateway.thread.thread_id)
             assert result["overrides"]["thread"][f"points.{module._POINT}.mode"] == "apply"
             assert not any(name in {"decision_probe", "select", "set_default"} for name, _payload in gateway.calls)

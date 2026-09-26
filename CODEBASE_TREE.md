@@ -40,6 +40,7 @@
     |-- ADMIN_CHANNEL_IDENTITY.md       # IM 管理员身份：管理员密码、私聊精确绑定为 local/main、聊天内 /approve /deny 审批
     |-- MAINTAINABILITY_AND_JEV_REVIEW.md # 可维护性评估、渐进重构建议及 Computer Use/Jev 能力边界
     |-- DECISION_MODEL_INTEGRATION.md    # 可选决策模型的短期限、失败隔离、接入点、缓存与并行实施计划
+    |-- DECISION_AUDIT_AND_ADMIN_CONTROLS.md # 决策点开关、超时自调上下限、选模型输入精简、统计行、统一审计与管理员管控
     |-- TUI_INPUT_MEDIA.md               # TUI 图片视频输入、owner 原件与发送预算合同
     |-- COMPACT_MEDIA_POLICY.md          # 媒体会话压缩策略：归档引用主链、视觉摘要按结构化能力事实开启
     |-- TOOL_LOOP_DEPENDENCY_SPLIT.md   # 第8步模型响应、工具轮与Compact职责边界及参考核对
@@ -315,6 +316,7 @@ agent_py_agent/
 |   |   |-- approval_mode.py           # owner 显式审批模式与权限快照映射，子代理同源读取
 |   |   |-- admin_password.py          # 管理员密码 scrypt 记录与按渠道身份的失败节流（config/，0600）
 |   |   |-- admin_channel_identity.py  # 已绑定为管理员的 IM 私聊 (channel, user_id) 精确绑定表
+|   |   |-- owner_admin_controls.py    # 管理员对每个 owner 的 Jev/审计开关与本人跨用户审计许可（tool_policy.json 的 admin_controls，失败关闭）
 |   |   |-- owner_quota.py             # 显式非零磁盘上限的跨进程配额锁；0 时退出热路径
 |   |   |-- home_retention.py          # 结构化终态/时间清理、二次校验、trash tombstone 与 legal hold
 |   |   `-- owner_maintenance.py       # owner 维护间隔、状态记录与自动执行控制
@@ -362,6 +364,7 @@ agent_py_agent/
 |   |   |-- request_binding.py          # 精确请求与运行身份绑定、执行车道和原子更新
 |   |   |-- request_experiment.py       # /experiment 冻结参数在主轮绑定后、首个模型调用前的单次实验授权与回执
 |   |   |-- request_experiment_records.py # 实验对照记录写入请求记录、回合收尾补写实际工具用量、授权指针证据链与只读评估
+|   |   |-- request_audit_records.py   # 审计只读：按会话→owner 映射扫描窗口内请求记录的决策观察键，白名单投影、有界、不写文件
 |   |   |-- request_experiment_promotion.py # /experiment apply 授权内：证据满足规则时经原设置 CAS 晋升 skill_tool 并写回执
 |   |   |-- request_history.py          # 公开正文、canonical 历史提交、去重与延迟补交
 |   |   |-- request_prompt.py           # 已准备会话投影的模型输入渲染与历史种子
@@ -433,6 +436,7 @@ agent_py_agent/
 |   |   |-- decision_model_call.py    # 实际决策 worker 复用原准入、身份头、HTTP 观察和唯一调用账；实验先算经验上界再预留
 |   |   |-- decision_experiment.py    # 实验准入/路由/在途复核：只读原授权、账本代次与 v2 上界口径
 |   |   |-- decision_experiment_evaluation.py # 只读证据评估：召回/节省/结算三项事实，决定 skill_tool off→apply 建议
+|   |   |-- decision_audit.py         # 决策审计汇总：设置摘要与 model_usage 决策分区计数（时间窗、按会话明细），只读
 |   |   |-- decision_send_permit.py   # 实验单次发送许可：连接前复核绑定、撤销/期限、设置与连接后在原账锁内消费
 |   |   |-- tool_context_window.py    # text/native 共用的有界工具历史窗口与稳定前缀投影
 |   |   |-- tool_input_progress.py     # provider 大工具参数生成期的脱敏临时展示合同
@@ -581,6 +585,8 @@ agent_py_agent/
 |   |   |-- gateway_status.py         # 本机管理员读取唯一 Gateway 身份、端点、队列和本生命周期日志摘要
 |   |   |-- gateway_restart_tool.py   # restart_gateway：管理员主代理安排 Gateway 安全重启，只写请求立即返回
 |   |   |-- user_config_tool.py        # main_agent 专用：读生效值/来源，写白名单项并报告生效时机
+|   |   |-- audit_records_tool.py      # 统一只读审计工具：topic 枚举（首个 decision）、本人范围，管理员明确许可才跨用户
+|   |   |-- admin_controls_tool.py     # 管理员专用：list/set 各用户 Jev/审计开关与跨用户审计许可，每次都要本人确认
 |   |   |-- shell.py                  # 非交互 run_command、独立 stdin、超时/中断与有界 pipe drain
 |   |   |-- shell_syntax.py           # 外层及字面 Shell -c 的后台语法检查，不解释普通字符串或 heredoc 正文
 |   |   |-- tool_input_completion.py # 明示安全默认值、可信上下文补参与脱敏 source/source_ref
@@ -643,6 +649,7 @@ agent_py_agent/
 |   |-- test_decision_settings_notifications.py # 设置逆序通知、覆盖恢复继承及精准取消
 |   |-- test_decision_service.py        # 决策阶段预算、冷却、设置复核、关闭与旧请求隔离
 |   |-- test_decision_service_http.py   # 原配置到真实本地 HTTP、账本与活动用量行的组合
+|   |-- test_decision_audit_controls.py # 管理员控制存取/失败关闭/只许管理员写、审计工具范围与时间窗、观察白名单与跨用户许可
 |   |-- test_decision_fault_matrix.py   # 决策故障矩阵：断网/DNS/TLS/额度/计费/5xx/慢响应的冷却与恢复、同 owner 多会话并发
 |   |-- test_capability_presentation_observation.py # 能力推荐观测进 Gateway 请求记录：一回合一条、采用/保留原因、失败码、写入上限与失败语义
 |   |-- test_decision_cooldown_backoff.py # 决策连接连续失败的冷却翻倍、并发同次故障不加级、成功/显式重试复位
@@ -1192,6 +1199,9 @@ docs/
 
 - `docs/design/MAINTAINABILITY_AND_JEV_REVIEW.md`：热点源码与参考阅读证据、未实施的重构顺序、Computer Use 当前条件及 Jev 可选接入方案。
 - `docs/design/DECISION_MODEL_INTEGRATION.md`：原生决策模型的实施合同，覆盖配置复用、2/4 秒预算、缺数据、记忆/派工/能力接入、缓存窗口、并行认领与验收。
+- `docs/design/DECISION_AUDIT_AND_ADMIN_CONTROLS.md`：2026-09-25 六项决策/审计要求的合同——接入点开启/观察模式、my-agent 自调等待时间上下限、选模型输入精简与评估、统计行约数、统一审计 `audit_records`、管理员 `admin_controls`。
+- `agent_py_agent/agent/tooling/audit_records_tool.py`、`agent_py_agent/agent/conversation/decision_audit.py`、`agent_py_agent/agent/gateway_parts/request_audit_records.py`：唯一审计入口及其决策主题的三类权威来源读取（设置、用量账本、请求记录观察），不 grep 日志、不读正文；新审计主题只加 topic，不另建工具。
+- `agent_py_agent/agent/tooling/admin_controls_tool.py`、`agent_py_agent/agent/user_space/owner_admin_controls.py`：管理员管控的唯一写入口与存取；Jev 禁用在 `conversation/decision_model_call.invoke_decision_model_call` 硬拦。
 - `agent_py_agent/tests/test_decision_model_profiles.py`：验证当前模型目录 v4 的用途隔离、显式迁移、凭据复用、共享撤销及主子代理选择不误用决策模型。
 - `agent_py_agent/agent/settings/decision_settings.py`：原设置界面和工具共用服务；原 owner 模型目录及线程字段保存覆盖，锁序 owner→thread，版本冲突拒绝覆写。
 - `agent_py_agent/agent/conversation/decision_service.py`、`decision_policy.py`、`decision_model_call.py`：分别负责建议策略、连接隔离和实际模型调用；复用原存储/准入/取消/账本，不建立第二份任务权威。

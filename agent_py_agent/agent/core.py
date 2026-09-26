@@ -98,11 +98,14 @@ from .settings import AgentConfig
 from .settings.model_scope import ModelScopedAttribute
 from .settings.runtime_guard_config import runtime_guard_policy
 from .subagents.manager import SubAgentManager
+from .tooling.admin_controls_tool import AdminControlsTool
+from .tooling.audit_records_tool import AuditRecordsTool
 from .tooling.computer_use_profile import computer_use_mcp_servers
 from .tooling.gateway_restart_tool import RestartGatewayTool
 from .tooling.gateway_status import GatewayStatusTool
 from .tooling.registry import ToolRegistry, ToolRegistryParams
 from .tooling.user_config_tool import UserConfigTool
+from .user_space.approval_mode import is_permission_admin
 from .user_space.home_indexes import register_owner_ref
 from .user_space.home_layout import ensure_my_agent_home
 from .user_space.home_root import configured_home_root
@@ -965,8 +968,9 @@ def _add_skill_snapshot_hashes(target: dict[str, str], value: object) -> None:
 
 
 # LLM: Gateway 状态与安全重启仍限本机管理员；user_config 按可信 owner 身份自行缩窄模型 schema 与执行动作，不能把 legacy 配置能力给普通用户。
+#   audit_records 与 user_config 同范围注册（执行时再按 owner 控制与管理员许可裁决）；admin_controls 只按 is_permission_admin 注册。
 #   record_lesson 只在启用子代理时注册，并由注册表默认隐藏，主线程工具面、tool_search 与 list_tools 都看不到它。
-# 函数用途: 把配置、编排、检索、记忆、消息和协作工具装入当前 owner 的 registry。
+# 函数用途: 把配置、审计、编排、检索、记忆、消息和协作工具装入当前 owner 的 registry。
 def _register_orchestration_tools(agent: SimpleAgent) -> None:
     # Gateway 状态包含宿主 PID、配置和日志路径，只向本机管理员主代理提供；普通 owner
     # 不注册这项能力，从工具快照源头避免跨用户泄露。
@@ -976,8 +980,13 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
         if agent.config.enable_gateway_restart_tool:
             agent.tools.register(RestartGatewayTool(agent))
     # 普通 user 也能经原 owner/thread 设置服务操作自己的决策覆盖；group/未知 owner 不扩权。
+    # 统一审计工具同一范围注册：只读本人结构化记录，跨用户审计另需管理员明确许可（工具内复核）。
     if str(getattr(agent.tools, "owner_type", "") or "") in {"main_agent", "user"}:
         agent.tools.register(UserConfigTool(agent))
+        agent.tools.register(AuditRecordsTool(agent))
+    # 管理员专用管控（各用户 Jev/审计开关、跨用户审计许可）只按唯一管理员判断 is_permission_admin 注册。
+    if is_permission_admin(agent.home_paths):
+        agent.tools.register(AdminControlsTool(agent))
     agent.tools.register(CapabilityRequestTool(agent))
     agent.tools.register(TaskProgressTool(agent))
     agent.tools.register(GetGoalTool(agent))

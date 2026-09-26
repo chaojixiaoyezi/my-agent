@@ -2800,3 +2800,39 @@ __all__ = [
     "error_contract",
     "tool_failure_taxonomy",
 ]
+
+
+# ---- 决策与审计控制（2026-09-25 决策线追加）：独立块，合并冲突时整块保留，不与上方表格交错 ----
+# LLM: 这三个码只由 user_config（自调等待时间越界）、audit_records（审计无权）、admin_controls（非管理员或越权写）产生；
+#   都是确定的权限/范围事实，不能靠换参数或重放绕过。改文案须同步对应工具与 test_decision_audit_controls。
+ERROR_CONTRACTS.update({
+    "DECISION_TIMEOUT_OUT_OF_BOUNDS": ErrorContract(
+        code="DECISION_TIMEOUT_OUT_OF_BOUNDS",
+        category="validation",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint=(
+            "决策等待时间超出 my-agent 可自调的范围，设置未修改；按结果里的 agent_timeout_bounds 选范围内的秒数，"
+            "重新 decision_read 取 revision 后提交。确需范围外的值，请用户在 /model 决策设置里修改或由管理员调整上下限。"
+        ),
+    ),
+    "AUDIT_ACCESS_DENIED": ErrorContract(
+        code="AUDIT_ACCESS_DENIED",
+        category="permission",
+        retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint=(
+            "当前用户的审计权限被管理员关闭，或跨用户审计没有管理员许可；不要换范围或参数绕过，"
+            "如实告诉用户需要管理员在 admin_controls 里开启。"
+        ),
+    ),
+    "ADMIN_CONTROL_DENIED": ErrorContract(
+        code="ADMIN_CONTROL_DENIED",
+        category="permission",
+        retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint=(
+            "只有本机管理员能修改用户的 Jev 与审计开关，跨用户审计许可只能写在管理员自己名下；设置未修改，不要重放。"
+        ),
+    ),
+})

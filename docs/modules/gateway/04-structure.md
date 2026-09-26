@@ -60,6 +60,7 @@ Gateway overflow 通过内部 `GatewayConversationLoadRequest.defer_compact` 只
 `request_context.py` 在原车道内按补交、索引、Compact、历史、任务顺序准备快照；
 `request_binding.py` 保留精确 request/thread/task/run/attempt 绑定、T 锁与原子写前登记，并负责模型观察与能力推荐观测两个观察键的写入；
 `request_experiment.py` 只在 `/experiment` 冻结的 `system_task` 存在时，由 `GatewayTaskBindingWriter.grant_decision_experiment` 在主轮绑定 run/attempt 后、首个模型调用前于同一 T 锁内写 `experiment_grant`（granting→granted/rejected）并调用 E1 授权原语；回执存在即不再授权，失败只经本轮 `on_chunk` 提示；回执可选字段用显式关键字参数，不用 `**kwargs`；回执 v2 另记 thread、授权动作（observe 或 observe+apply）与被替换信封的来源请求 `previous_request_id`；
+`request_audit_records.py` 只供统一审计工具读取：按会话→owner 映射只读扫描窗口内请求记录的两个决策观察键，白名单投影、一次最多 300 份、不写文件；由 `request_binding.GatewayTaskBindingWriter.decision_audit_observations` 以写入器的请求路径定位队列；
 `request_experiment_records.py` 是实验对照记录在请求记录里的唯一写入/读取点：能力观察出口拆出 `experiment_record` 追加进 `experiment_records.entries`（record_id 去重、最多 8 条、盖执行代次，回合关闭/停止时抛中断不写），`_execute_gateway_conversation_turn` 在模型回合正常返回后调用 `finish_decision_experiment_turn` 按结构化工具账补写实际用量；跨请求证据只沿授权回执指针回读原请求记录（最多 16 条、编号按文件名规则校验）。普通请求在观察与收尾处都零 I/O；
 `request_experiment_promotion.py` 只在本请求 apply 授权回执存在时由收尾调用：锁外只读评估，锁内复读设置核对授权/期限/revision/点模式后经原设置 patch 的完整 CAS 写 thread 覆盖，回执写在 `experiment_records.promotion`（先 promoting，已有即不再试）；
 `request_history.py` 负责正文投影、canonical 追加、request/part 去重和原样延迟 repair；

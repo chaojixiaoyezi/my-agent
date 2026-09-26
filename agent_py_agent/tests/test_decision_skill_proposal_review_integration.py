@@ -295,7 +295,9 @@ def test_tui_owner_menu_lists_point_and_saves_mode(tmp_path):
             assert "Skill 提案审核顺序（用户长期）" in visible(ui.app)
             await choose(ui, point_index(gateway, POINT))
             await choose(ui, 0)
-            await press(ui, b"\x1b[B\x1b[B\r")
+            # 模式为"开启 + 观察模式"两个勾选：勾上开启、去掉观察即正式使用（apply），再 Tab 到保存
+            await press(ui, b" \x1b[B ")
+            await press(ui, b"\t\r")
             assert settings(gateway.host, "read", {})["overrides"]["owner"][f"points.{POINT}.mode"] == "apply"
     asyncio.run(scenario())
 

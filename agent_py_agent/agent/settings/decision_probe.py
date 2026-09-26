@@ -10,7 +10,7 @@ from ..backends.decision_protocol import DecisionBinding, DecisionRequest
 from ..backends.typesafe_decision import decision_backend_from_profile
 from ..common.cancellation import ToolCancelled
 from ..conversation.auxiliary_model_call import settle_standalone_model_usage
-from ..conversation.decision_model_call import invoke_decision_model_call
+from ..conversation.decision_model_call import DecisionModelDisallowed, invoke_decision_model_call
 from ..conversation.decision_policy import connection_revision, cooldown_state, decision_owner_ref
 from .decision_settings import execute_decision_settings_operation
 from .decision_settings_projection import decision_profile
@@ -19,6 +19,7 @@ from .model_profiles import model_profiles_path, read_model_profiles
 
 
 # LLM: 秒数为显式用户输入，整次网络共用准备前 deadline；当前线程由认证宿主传入，payload 不可指定 owner/run/thread。
+#   管理员禁用本 owner 的 Jev 时由调用边界硬门拒绝（不联网），这里给出明确说明而不是通用失败。
 # 函数用途: 发一次无聊天材料的原生选择题；成功清除此连接冷却，返回诊断/用量并沿原独立调用入口结算。
 def probe_decision_model(agent: object, payload: dict, *, thread_id: str = "") -> dict:
     started = time.monotonic()
@@ -53,6 +54,8 @@ def probe_decision_model(agent: object, payload: dict, *, thread_id: str = "") -
             message="原生接口测试通过；仅验证本次连接与协议，不代表任务判断质量。" if ok else "请求已返回，但测试题未得到有效答案。")
     except (InterruptedError, ToolCancelled):
         raise
+    except DecisionModelDisallowed as exc:
+        result.update(error_type=type(exc).__name__, message="管理员已关闭当前用户的决策模型使用权，未发起连接。原设置未修改。")
     except Exception as exc:
         result.update(error_type=type(exc).__name__, message="决策连接测试失败；请检查可用配置、服务状态和等待时间。原设置未修改。")
     finally:

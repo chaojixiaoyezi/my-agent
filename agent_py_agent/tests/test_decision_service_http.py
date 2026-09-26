@@ -104,7 +104,8 @@ def test_configured_http_decision_reaches_original_usage_and_display(tmp_path, s
         "request_id": params.request_id, "run_id": params.run_id, "task_id": params.task_id,
         "source": "test", "model_calls": summary})
     metrics = params.tui_runtime.store.snapshot().status.model_metrics
-    assert metrics["decision_input_tokens"] == 120 and metrics["decision_input_complete"]
+    assert metrics["decision_input_tokens"] == 120 and metrics["decision_input_reported_calls"] == 1
+    assert metrics["decision_success_count"] == 1 and metrics["decision_failure_count"] == 0
     assert metrics["input_tokens"] == 120 and metrics["output_tokens"] == 30
     assert metrics["model_rounds"] == 0
 
@@ -131,6 +132,7 @@ def test_http_error_returns_original_plan_marker_and_cools_connection(tmp_path, 
     assert model_call_summary(host, request_id=params.request_id)["status_counts"]["failed"] == 1
     metrics = params.tui_runtime.store.snapshot().status.model_metrics
     assert metrics["decision_call_count"] == 1 and metrics["decision_input_tokens"] is None
+    assert metrics["decision_failure_count"] == 1
 
 
 def test_slow_http_is_bounded_and_late_result_cannot_be_applied(tmp_path, server):
@@ -171,3 +173,40 @@ def test_usage_refresh_does_not_wait_for_thread_write_lock(tmp_path, server):
             assert result.status == "success" and result.may_apply
             metrics = params.tui_runtime.store.snapshot().status.model_metrics
             assert metrics["decision_input_tokens"] == 120
+
+
+def test_admin_disabled_owner_never_reaches_the_network_and_reports_admin_disabled(tmp_path, server):
+    from agent_py_agent.agent.settings.decision_probe import probe_decision_model
+    from agent_py_agent.agent.settings.decision_settings import execute_decision_settings_operation
+
+    host, params, thread, stage = configured(tmp_path, server)
+    profile_id = execute_decision_settings_operation(host, "read", {}, thread_id=thread.thread_id)["effective"]["profile_id"]
+    policy = tmp_path / "tool_policy.json"
+    policy.write_text(json.dumps({"schema_version": "tool-policy.v1", "admin_controls": {
+        "schema": "owner_admin_controls.v1", "decision_model_allowed": False}}))
+    host.home_paths.owner_tool_policy_json = policy
+    # 关闭前建好的阶段也拦在调用边界：不建调用记录、不联网、不进连接退避
+    stale_stage = decide(host, params, stage)
+    assert (stale_stage.status, stale_stage.reason, stale_stage.may_apply) == ("off", "admin_disabled", False)
+    assert not hasattr(host, "_model_call_ledger")
+    fresh = decision_service.begin_decision_stage(host, params, operation_id="batch-2")
+    assert fresh.error_code == "admin_disabled" and not fresh.enabled_points
+    assert decide(host, params, fresh).reason == "admin_disabled"
+    probe = probe_decision_model(host, {"profile_id": profile_id, "timeout_seconds": 1.0}, thread_id=thread.thread_id)
+    assert not probe["ok"] and probe["error_type"] == "DecisionModelDisallowed" and "管理员" in probe["message"]
+    assert not server.requests
+    assert model_call_summary(host, request_id=params.request_id)["physical_model_attempt_count"] == 0
+    # 管理员重新允许后，下一次调用即恢复，不需要重启或清冷却
+    policy.write_text(json.dumps({"schema_version": "tool-policy.v1"}))
+    again = decide(host, params, decision_service.begin_decision_stage(host, params, operation_id="batch-3"))
+    assert again.status == "success" and len(server.requests) == 1
+
+
+def test_unreadable_owner_policy_fails_closed_for_the_decision_model(tmp_path, server):
+    host, params, _thread, _stage = configured(tmp_path, server)
+    policy = tmp_path / "tool_policy.json"
+    policy.write_text("{not json")
+    host.home_paths.owner_tool_policy_json = policy
+    stage = decision_service.begin_decision_stage(host, params, operation_id="batch-bad")
+    assert stage.error_code == "admin_disabled"
+    assert decide(host, params, stage).reason == "admin_disabled" and not server.requests

@@ -201,7 +201,9 @@ def test_original_tui_can_edit_delivery_quality_thread_mode(tmp_path):
             assert "交付复核焦点" in visible(ui.app)
             await choose(ui, points.index(module._POINT))
             await choose(ui, 0)
-            await press(ui, b"\x1b[B\x1b[B\r")
+            # 模式为"开启 + 观察模式"两个勾选：勾上开启、去掉观察即正式使用（apply），再 Tab 到保存
+            await press(ui, b" \x1b[B ")
+            await press(ui, b"\t\r")
             result = settings(gateway.host, "read", {"scope": "thread"}, thread_id=gateway.thread.thread_id)
             assert result["overrides"]["thread"][f"points.{module._POINT}.mode"] == "apply"
             assert not any(name in {"decision_probe", "select", "set_default"} for name, _payload in gateway.calls)
