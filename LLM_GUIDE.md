@@ -1,5 +1,9 @@
 # LLM_GUIDE
 
+能力包新增X01/E01与F01第二轮共45次官方M2.7 HTTP，原生组合/明确选择/脚本执行已触发，来源语义与交接质量仍有失败。
+F01控制因测试观察器混淆activation身份、解析截短display而未触发；这不是产品撤销失败，不修改原trial或补做已结束任务。
+当前保留例各0/3、全卸载核心对照待做；详见[唯一Goal](docs/tasks/CAPABILITY_INTERNALIZATION_GOAL.md)。
+
 Compact生成事实已形成[设计交接](docs/design/COMPACT_GENERATION_FACTS.md)，产品及直接测试由Claude统一实施；能力包线继续独立框架验收与只读复核，不同时修改Compact/Jev。此交接未改变运行代码，也未完成新的真实验收。
 
 能力包时长补片只修改A/B包内检查与方法，不新增宿主硬门；四文件142项和同一Gateway原生热更新通过，新版六席已终态但质量仍未全过。
