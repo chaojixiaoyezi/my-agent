@@ -2,7 +2,7 @@
 
 本文是[能力包合同](CAPABILITY_PACKS.md)的操作手册：将固定版本的外部方法、流程、模板和脚本迁移为独立能力包，复用宿主原有任务、工具、子代理与权限。它不修改模型权重，也不把调用原 Agent 当成已掌握其全部能力。
 
-状态：构建及管理语法已按当前源码核对；本文没有执行安装、真实模型或 TUI 验收。真实结果按[验收矩阵](../tasks/CAPABILITY_PACK_ACCEPTANCE.md)分别记录，不能把可构建当作已迁移完成。
+状态：构建及管理语法已按当前源码核对；本文提供操作流程，不充当安装、真实模型或 TUI 通过证据。真实结果按[验收矩阵](../tasks/CAPABILITY_PACK_ACCEPTANCE.md)分别记录，不能把可构建当作已迁移完成。
 
 ## 1. 先固定来源，再讨论覆盖率
 
@@ -22,11 +22,13 @@ git -C "<来源副本目录>" ls-files
 
 本仓库现有切片可作为结构参考，来源版本和许可事实以各包的 `PROVENANCE.md` 为准：
 
-| 样包 | 可参考的迁移方式 | 仍须单列的缺项 |
-| --- | --- | --- |
-| [drama-text-a](../../examples/capability-packages/drama-text-a/PROVENANCE.md) | 原文依据、来源覆盖、场次和镜头的文本改编 | 真实媒体、完整导演规则和质量评估 |
-| [drama-workflow-b](../../examples/capability-packages/drama-workflow-b/PROVENANCE.md) | 多份制作资料的关联与交接，独立连续性检查 | 上游全部交互报告、美术与生成链路 |
-| [security-evidence](../../examples/capability-packages/security-evidence/PROVENANCE.md) | 已有证据的范围、来源、去重和报告 | 实际授权证明、扫描及漏洞验证；不属于本切片 |
+| 样包 | 当前源码版本 | 可参考的迁移方式 | 仍须单列的缺项 |
+| --- | --- | --- | --- |
+| [drama-text-a](../../examples/capability-packages/drama-text-a/PROVENANCE.md) | `0.1.1` | 原文依据、来源覆盖、场次和镜头的文本改编 | 真实媒体、完整导演规则和质量评估 |
+| [drama-workflow-b](../../examples/capability-packages/drama-workflow-b/PROVENANCE.md) | `0.1.0` | 多份制作资料的关联与交接，独立连续性检查 | 上游全部交互报告、美术与生成链路 |
+| [security-evidence](../../examples/capability-packages/security-evidence/PROVENANCE.md) | `0.1.0` | 已有证据的范围、来源、去重和报告 | 实际授权证明、扫描及漏洞验证；不属于本切片 |
+
+A 的 `0.1.1` 只修订包内说明与模板的一致性：镜头和场次均要求正数 `seconds`，来源摘要明确取原输入文件字节，模板补完整条目形状，并区分结构检查已执行、待执行和未通过。原校验脚本及两份合成示例字节不变；不修改宿主读写规则，也不改变 B/C 的迁移范围。原 `0.1.0` 的 ZIP、失败与成功证据继续保留，不能用新文档替换旧结果。
 
 ## 2. 建立完整来源覆盖表
 
@@ -42,6 +44,8 @@ git -C "<来源副本目录>" ls-files
 | 证据报告 | 明确范围与已有材料 → 待复核报告 | 包内整理方法及确定性检查器 | 合成 fixture、许可说明 | 已有证据整理 | 引用与摘要、未验证标记；待执行 | 不提供扫描或漏洞验证 |
 
 每个完整工作流再拆成输入校验、方法选择、执行、交付、复核与异常恢复，避免“一条流程已迁移”掩盖缺失步骤。给覆盖项保留稳定的文档编号，验收结果逐项引用；模型评分和报告正文不成为运行时状态来源。
+
+迁移时同时对照方法中的字段清单、模板、有效示例和校验器。内容摘要要写清计算对象：对原输入文件的字节计算，不能用宿主 `file_version` 这类状态版本替代，也不能先解析再重新序列化后当作原文件摘要。通过既有获准工具取值，不给宿主增加某个包专用的文件规则；权限或工具不可用时如实保留待核验项。
 
 覆盖报告同时给出两个分母：固定来源版本的完整清单，以及本轮明确承诺的首期清单。列出已实现、已做组件验证、已做真实 TUI 验收的范围和所有未通过项。未知项不从分母中悄悄删除；资料齐全、安装成功或一次任务完成都不能推出“100% 能力”。
 
@@ -143,7 +147,7 @@ python3 scripts/build_capability_package.py \
 python3 scripts/build_capability_package.py \
   --declaration examples/capability-packages/drama-text-a/declaration.json \
   --files-root examples/capability-packages/drama-text-a \
-  --output "$CAP_WORK/dist/drama-text-a-0.1.0.zip"
+  --output "$CAP_WORK/dist/drama-text-a-0.1.1.zip"
 ```
 
 构建会核对源文件、生成可重复的 ZIP 并用正式读取器复验，不安装、不执行资源。记录整个 ZIP 的 SHA256，并保留当时声明及源码版本；普通文件修改不会改变已安装包。
@@ -151,8 +155,10 @@ python3 scripts/build_capability_package.py \
 开发反馈遵循合同单测 → fake tool → fake LLM → replay → 真实 TUI。现有样包的组件检查入口：
 
 ```bash
-python3 -m pytest agent_py_agent/tests/test_capability_package_examples.py -q --tb=short
+python3 -m pytest agent_py_agent/tests/test_capability_package_examples.py agent_py_agent/tests/test_capability_package.py -q --tb=short
 ```
+
+2026-09-26 的 A `0.1.1` 修订已通过该组合 75 项（样包 47、内容包协议 28）：模板实际填充、缺失/无效镜头时长、误用文件版本摘要、原始字节与 JSON 重排差异均有定向检查。原校验脚本没有放宽；这是组件验证，不是新版本的真实 TUI 通过记录。
 
 新包补适合其行为的检查：输入输出格式、引用与范围、脚本副作用、坏输入、依赖失败和旧版兼容等。开发时单独运行检查器只能算组件验证；真实验收时必须由被测 my-agent 自主读取包资源、物化及执行，测试者不能代跑或补产物。
 

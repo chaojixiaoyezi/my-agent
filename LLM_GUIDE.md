@@ -1,6 +1,6 @@
 # LLM_GUIDE
 
-能力包内化已完成两轮六席官方 M2.7 原生 TUI，详见[唯一 TODO](docs/tasks/CAPABILITY_INTERNALIZATION_GOAL.md)和[合同](docs/design/CAPABILITY_PACKS.md)。无进程装卸、升级回退和基础读写通过；自然召回及规范资源复制仍失败，第三候选补准确读取参数和相关包推荐。长任务三份JSON不可解析单列交付失败；包内资源独立作用域、旧全局Skill保持，尚未发布。
+能力包内化第三候选已完成五个官方 M2.7 原生 TUI 业务用例，详见[唯一 TODO](docs/tasks/CAPABILITY_INTERNALIZATION_GOAL.md)和[合同](docs/design/CAPABILITY_PACKS.md)。自然读取包入口已改善，无进程装卸和升级回退通过；规范资源复制、子代理方法采用与长任务交付仍未通过。第四候选修正包内资源地址表达与 A 样包字段一致性，同任务停用／换代恢复另行验收；尚未发布。
 
 决策模型P1—P5已由用户指定的接手代理于2026-09-23恢复推进；原代理的停止基线与已验/未验范围见[完整交接报告](docs/tasks/DECISION_MODEL_TAKEOVER_HANDOFF.md)，接手后的Goal、并行边界和当前一步（先吸收main再做12.4第二片）见[执行Goal接手记录](docs/tasks/DECISION_MODEL_GOAL.md#2026-09-23-接手记录与当前-goal)。
 

@@ -4,7 +4,8 @@
 #   ①公开检索不写状态；②search 返回卡片和稳定 id，get 经同一 turn snapshot 读取正文;
 #   ③category 过滤可选;④包内成员只在显式 package_id 下检索/读取，不进入全局 Skill。
 #   包正文读取由原 task pin 保存精确引用；大结果沿原归档保留可见来源和预览，不执行脚本。
-#   next_read 只投影显式调用参数；错选择器仍失败，只在当前可见包精确命中时建议重试，不自动读取或晋升。
+#   next_read/next_search 只投影同代显式调用参数；包命名空间仅指已声明成员，不从正文推断业务路径归属。
+#   错选择器仍失败，只在当前可见包精确命中时建议重试，不自动读取或晋升。
 #   修改时同步检查 skill_tree、包发现、选择器恢复和原生归档后精确复制测试。
 # 模块用途: 模型的"技能书架检索台":说一句需求,给出最相关的几个技能和它们的
 #   稳定引用和按需正文,书架上千本也不用把目录全背进对话里。
@@ -34,7 +35,7 @@ if TYPE_CHECKING:
     from ..core import SimpleAgent
 
 
-# LLM: 包范围是结构化参数；next_read 建议只给模型，不据 query 或错选择器扩权；action 默认须与 execute 一致。
+# LLM: 包范围是结构化参数；导航建议只给模型，不据正文路径、query 或错选择器扩权；action 默认须与 execute 一致。
 # 函数用途: 声明统一方法检索入口，同时区分公开 Skill 和能力包内按需资源。
 def build_skill_search_model_spec() -> ToolModelSpec:
     return ToolModelSpec(
@@ -45,6 +46,8 @@ def build_skill_search_model_spec() -> ToolModelSpec:
             "action=get 时，普通 Skill 使用 skill_id 读取 SKILL.md，能力包使用 package_id；两种选择器互斥。"
             "包的 stable_id 用于授权和任务引用，不能填入 skill_id。指定 package_id 后可检索内部资源，"
             "get 省略 resource_path 时读取包入口。错选择器仍失败；若返回 next_read，可发起新的显式调用。"
+            "已声明的包成员属于包命名空间，不是工作区文件；用 next_search 检索声明，再用匹配项 next_read 读取。"
+            "正文中的业务输入/交付路径不因此变成包成员；不要用 read_file 或 find_files 猜包安装位置。"
             "包资源分页读取，has_more=true 时继续 continuation；读取不会执行脚本或授予工具权限。"
             "原样落盘现有脚本或模板时，将完整 source_ref 直接传给 write_file.source_ref，不用手抄正文；落盘不会执行资源。"
         ),
@@ -57,11 +60,11 @@ def build_skill_search_model_spec() -> ToolModelSpec:
                 "category": {"type": "string", "description": "可选，限定 Skill Categories 类目。"},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 20, "description": "最多返回几条，默认 5。"},
                 "package_id": {"type": "string", "description": "逐字复制能力包摘要的 package_id；与 skill_id 互斥。action=get 读取包入口或资源，action=search 检索包内资源；省略本字段时只检索公开摘要。"},
-                "resource_path": {"type": "string", "description": "包内 get 使用声明的相对成员路径，省略读取入口文档。"},
+                "resource_path": {"type": "string", "description": "包内 get 使用已声明的包根相对成员路径，不是宿主文件地址；从包内检索结果定位，省略读取入口文档。"},
                 "offset": {"type": "integer", "minimum": 0, "description": "包内检索的结果偏移，或正文读取的字符偏移。"},
                 "max_chars": {"type": "integer", "minimum": 1, "description": "包正文单页字符数，不超过原 tool_read_max_chars 配置。"},
-                "expected_package_sha256": {"type": "string", "description": "原样携带 next_read 或分页 continuation 中的包摘要，防止读到同名新版本。"},
-                "expected_activation_id": {"type": "string", "description": "原样携带 next_read 或分页 continuation 中的激活代次，停用重启后的旧建议不能继续使用。"},
+                "expected_package_sha256": {"type": "string", "description": "原样携带 next_read、next_search 或分页 continuation 中的包摘要，防止读到同名新版本。"},
+                "expected_activation_id": {"type": "string", "description": "原样携带 next_read、next_search 或分页 continuation 中的激活代次，停用重启后的旧建议不能继续使用。"},
             },
             "additionalProperties": False,
         },
@@ -165,8 +168,8 @@ class SkillSearchTool(BaseTool):
         }
         return ToolHandlerOutcome("skill_search", True, json.dumps(payload, ensure_ascii=False, indent=2))
 
-    # LLM: scoped 成员只来自本轮包声明，错误 fail closed；资源引用沿原回执和归档展示，取消不降级。
-    # 函数用途: 执行包范围检索或读取，保留同代 continuation，并让大正文归档后仍能按原引用复制。
+    # LLM: scoped 成员只来自本轮包声明，错误 fail closed；成功结果共用有界地址说明和同代导航，不读取其它成员。
+    # 函数用途: 执行包范围检索或读取，让小结果和归档大结果都能定位原包；取消、权限及 pin 仍沿原合同。
     def _package_action(self, params: dict[str, object], action: str) -> ToolHandlerOutcome:
         if action not in {"search", "get"} or params.get("skill_id"):
             return _invalid("包范围只接受 search/get，不能同时传 skill_id")
@@ -184,9 +187,9 @@ class SkillSearchTool(BaseTool):
                 payload = _package_matches(package, params, offset)
             else:
                 payload = self._package_body(snapshot, package, params, offset)
-                config = getattr(self.agent, "config", None) or default_agent_config()
-                return _package_read_outcome(payload, max(0, int(config.tool_output_preview_chars)))
-            return ToolHandlerOutcome("skill_search", True, json.dumps(payload, ensure_ascii=False, indent=2))
+            payload = {**_package_navigation(package), **payload}
+            config = getattr(self.agent, "config", None) or default_agent_config()
+            return _package_read_outcome(payload, max(0, int(config.tool_output_preview_chars)))
         except SkillSnapshotError as exc:
             return _snapshot_unavailable(exc)
         except (OSError, ValueError) as exc:
@@ -281,25 +284,60 @@ def _snapshot_for(agent):
     return getattr(agent, "_current_skill_snapshot", None)
 
 
-# LLM: 只投影当前已校验页；原正文、包 continuation 和归档游标各守原合同，不把预览标成已读全文。
-# 函数用途: 复用原 live_prompt_output 保留精确复制引用和有界预览，完整内容继续由原归档保存/读取。
+# LLM: 此说明仅来自已授权包的结构化身份，不解析正文、不枚举成员、不 pin；导航复用原分页参数，source_ref 字段集不变。
+# 函数用途: 明确已声明成员属于包命名空间，给出可原样使用的限页搜索；业务文件仍按任务工作区处理。
+def _package_navigation(package) -> dict[str, object]:
+    return {
+        "resource_namespace": {
+            "kind": "capability_package", "path_base": "package_root", "declared_members_only": True,
+            "filesystem_path": False, "reader_tool": "skill_search", "path_parameter": "resource_path",
+        },
+        "next_search": {**_package_continuation(package, "search", 0), "limit": 5},
+        "resource_access_hint": "只有清单中已声明的包内资源使用 package_id + resource_path；它们不是工作区文件。"
+            "正文中的业务输入和交付路径不因此变成包成员。先用 next_search 检索声明，再原样使用匹配项 next_read；不要猜安装位置。",
+        "resource_copy_hint": "需要原样复制已定位资源时，将该资源完整 source_ref 传给 write_file.source_ref，"
+            "另选工作区目标 path；不要手抄或改写脚本。复制不执行资源。",
+    }
+
+
+# LLM: 只投影当前已校验页；正文/匹配预览、包 continuation 与归档窗口分开，导航和完整引用始终保留。
+# 函数用途: 复用 live_prompt_output 展示有界内容，完整页仍沿原归档恢复；零预览也不能丢包地址和复制指引。
 def _package_read_outcome(payload: dict[str, object], preview_chars: int) -> ToolHandlerOutcome:
     output = json.dumps(payload, ensure_ascii=False, indent=2)
-    envelope = {"source_ref": dict(payload["source_ref"])}
+    envelope = {"source_ref": dict(payload["source_ref"])} if "source_ref" in payload else {}
     if len(output) > preview_chars:
-        body = str(payload["body"])
-        summary = {key: value for key, value in payload.items() if key != "body"}
-        summary.update({
-            "body_preview": body[:preview_chars],
-            "body_preview_complete": len(body) <= preview_chars,
-            "resource_copy_hint": "原样复制本资源时，将完整 source_ref 传给 write_file.source_ref；不要手抄或改写脚本。",
-            "body_read_hint": "body_preview_complete=false 时预览不是当前页全文；需要完整正文时用原归档锚点 read_artifact，并按归档窗口继续读。包的 continuation 只用于下一包正文页，两种游标不可混用。",
-        })
+        summary = {key: value for key, value in payload.items() if key not in {"body", "matches"}}
+        if "body" in payload:
+            body = str(payload["body"])
+            summary.update(body_preview=body[:preview_chars], body_preview_complete=len(body) <= preview_chars)
+        else:
+            matches = payload["matches"]
+            preview = _package_match_preview(matches, preview_chars)
+            summary.update(matches_preview=preview, matches_preview_complete=len(preview) == len(matches))
+        summary["body_read_hint"] = (
+            "body_preview_complete 或 matches_preview_complete 为 false 时，预览不是当前页全文；"
+            "用原归档锚点 read_artifact 取回当前页，并按归档窗口继续读。"
+            "has_more/continuation 只表示包的下一正文页或结果页，不代表当前预览完整；两种游标不可混用。"
+        )
         envelope["tool_output_policy"] = {
             "live_prompt_output": json.dumps(summary, ensure_ascii=False, separators=(",", ":")),
             "requires_recovery_artifact": True,
         }
     return ToolHandlerOutcome("skill_search", True, output, result_envelope=envelope)
+
+
+# LLM: 预览只取原页完整卡片前缀，不能截断 source_ref/next_read，也不能改变原页的 offset/continuation。
+# 函数用途: 在原字符预算内展示搜索结果，放不下的完整页仍由归档读取，不枚举额外资源。
+def _package_match_preview(matches: list[dict[str, object]], limit: int) -> list[dict[str, object]]:
+    preview = []
+    used = 2
+    for item in matches:
+        size = len(json.dumps(item, ensure_ascii=False)) + (2 if preview else 0)
+        if used + size > limit:
+            break
+        preview.append(item)
+        used += size
+    return preview
 
 
 # LLM: continuation 绑定完整包字节和原激活，页码不能在换代后静默套到新资源。

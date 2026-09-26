@@ -1,4 +1,5 @@
-"""三个真实内容样包的构建与私有脚本组件验证；不安装、不联网，不代表真实 TUI 验收。"""
+# LLM: 样包组件测试只消费公开合成材料；模板、原文字节摘要和严格脚本须保持同一合同，不修改安装或真实验收记录。
+# 模块用途: 检查独立内容包的可重现构建及私有校验资源，组件通过不代表模型采用或真实 TUI 通过。
 
 from __future__ import annotations
 
@@ -13,6 +14,7 @@ from zipfile import ZipFile
 
 import pytest
 
+from agent_py_agent.agent.common.file_version import file_version
 from agent_py_agent.agent.plugin_package import inspect_plugin_package
 from scripts.build_capability_package import build_capability_package
 
@@ -62,11 +64,17 @@ def _replace(payload: dict, path: tuple, value: object) -> dict:
     return result
 
 
-# LLM: 文本检查固定同一原文字节，来源变更测试显式重写，不借用旧摘要掩盖改动。
-# 函数用途: 将短剧 A 的原文和交付资料复制到临时目录并运行检查。
+# LLM: 常规夹具沿固定格式写入；原字节差异测试须直接传实际文件给 _check_a_source_path，不能被此处重新序列化。
+# 函数用途: 将短剧 A 的合成原文复制到临时目录，交给同一严格检查入口。
 def _check_a(tmp_path: Path, delivery: dict, source: dict | None = None) -> dict:
     source = source or _fixture("drama-text-a", "example-source.json")
     source_path = _write_json(tmp_path, "source.json", source)
+    return _check_a_source_path(tmp_path, delivery, source_path)
+
+
+# LLM: 输入路径的现有字节是摘要权威；本 helper 只写独立交付并调用原脚本，不能修正输入或校验结果。
+# 函数用途: 对指定合成输入文件运行 A 的真实组件检查，保留空白、换行和文件版本对照。
+def _check_a_source_path(tmp_path: Path, delivery: dict, source_path: Path) -> dict:
     delivery_path = _write_json(tmp_path, "delivery.json", delivery)
     result = _run("drama-text-a", "check_delivery.py", tmp_path,
                   ["--source", str(source_path), "--delivery", str(delivery_path)])
@@ -123,6 +131,62 @@ def test_text_sample_checks_complete_source_and_shot_coverage(tmp_path):
     assert {item["code"] for item in report["warnings"]} == {"creative_quality_and_media_not_checked"}
 
 
+def test_text_template_can_be_filled_into_valid_source_bound_delivery(tmp_path):
+    template = json.loads((EXAMPLES / "drama-text-a" / "templates" / "delivery.json").read_text(encoding="utf-8"))
+    example = _fixture("drama-text-a", "example-delivery.json")
+    for key in ("cast", "scenes", "shots"):
+        shape = template[key][0]
+        template[key] = [{field: copy.deepcopy(row[field]) for field in shape} for row in example[key]]
+    template["source_sha256"] = example["source_sha256"]
+    template["brief"] = {field: example["brief"][field] for field in template["brief"]}
+
+    report = _check_a(tmp_path, template)
+
+    assert report["structure_valid"], report["errors"]
+    assert report["metrics"]["shots"] == len(example["shots"])
+
+
+def test_text_sample_rejects_missing_shot_duration(tmp_path):
+    delivery = _fixture("drama-text-a", "example-delivery.json")
+    del delivery["shots"][0]["seconds"]
+
+    report = _check_a(tmp_path, delivery)
+
+    assert not report["structure_valid"]
+    assert {"code": "positive_seconds_required", "path": "SH01"} in report["errors"]
+
+
+def test_text_sample_rejects_file_version_as_source_digest(tmp_path):
+    source_path = _write_json(tmp_path, "source.json", _fixture("drama-text-a", "example-source.json"))
+    delivery = _fixture("drama-text-a", "example-delivery.json")
+    delivery["source_sha256"] = file_version(source_path).removeprefix("file-v1:")
+    assert delivery["source_sha256"] != hashlib.sha256(source_path.read_bytes()).hexdigest()
+
+    report = _check_a_source_path(tmp_path, delivery, source_path)
+
+    assert not report["structure_valid"]
+    assert {"code": "source_digest_mismatch", "path": "source_sha256"} in report["errors"]
+
+
+def test_text_sample_digest_uses_original_bytes_not_json_reserialization(tmp_path):
+    source = _fixture("drama-text-a", "example-source.json")
+    source_path = tmp_path / "source.json"
+    raw = json.dumps(source, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    source_path.write_bytes(raw)
+    delivery = _fixture("drama-text-a", "example-delivery.json")
+    assert json.loads(raw) == source
+    assert delivery["source_sha256"] != hashlib.sha256(raw).hexdigest()
+
+    rejected = _check_a_source_path(tmp_path, delivery, source_path)
+    assert not rejected["structure_valid"]
+    assert {"code": "source_digest_mismatch", "path": "source_sha256"} in rejected["errors"]
+    delivery["source_sha256"] = hashlib.sha256(raw).hexdigest()
+    accepted = _check_a_source_path(tmp_path, delivery, source_path)
+
+    assert accepted["structure_valid"], accepted["errors"]
+    assert source_path.read_bytes() == raw
+
+
 @pytest.mark.parametrize("path,value,code", [
     (("source_sha256",), "0" * 64, "source_digest_mismatch"),
     (("scenes", 0, "source_ids"), ["missing"], "unknown_reference"),
@@ -131,6 +195,10 @@ def test_text_sample_checks_complete_source_and_shot_coverage(tmp_path):
     (("shots", 0, "scene_id"), "missing", "unknown_scene"),
     (("shots", 0, "visible_character_ids"), ["C02"], "unknown_reference"),
     (("shots", 0, "end_state"), "", "shot_state_required"),
+    (("shots", 0, "seconds"), None, "positive_seconds_required"),
+    (("shots", 0, "seconds"), 0, "positive_seconds_required"),
+    (("shots", 0, "seconds"), -1, "positive_seconds_required"),
+    (("shots", 0, "seconds"), True, "positive_seconds_required"),
     (("scenes", 0, "seconds"), True, "positive_seconds_required"),
     (("omitted_passages",), [{"source_id": "P01", "reason": "重复声明省略"}], "invalid_omission"),
 ])

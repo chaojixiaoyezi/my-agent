@@ -5,9 +5,32 @@
     "premise": "",
     "adaptation_note": ""
   },
-  "cast": [],
-  "scenes": [],
-  "shots": [],
+  "cast": [
+    {
+      "id": "",
+      "name": ""
+    }
+  ],
+  "scenes": [
+    {
+      "id": "",
+      "source_ids": [],
+      "character_ids": [],
+      "seconds": null,
+      "summary": ""
+    }
+  ],
+  "shots": [
+    {
+      "id": "",
+      "scene_id": "",
+      "seconds": null,
+      "start_state": "",
+      "action": "",
+      "end_state": "",
+      "visible_character_ids": []
+    }
+  ],
   "omitted_passages": [],
   "unresolved": []
 }
