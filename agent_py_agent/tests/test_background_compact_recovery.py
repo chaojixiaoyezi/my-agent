@@ -247,7 +247,9 @@ def test_background_first_request_compacts_after_complete_prepare(tmp_path, monk
     agent, store, thread, request, execution, sink = _background(
         tmp_path, backend=backend, detached=False,
     )
-    agent.config.model_context_window_tokens = 15_500
+    # 窗口只校准测试输入：工具目录随 manage_models（f7029f54c）变长后，15500 装不下压缩后的候选。实测 16000–23000 都能
+    # 先触发压缩再装下候选，25000 起不再需要压缩；取中间值给工具目录增减留出余量，断言不放松。
+    agent.config.model_context_window_tokens = 19_500
     agent.config.max_tokens = agent.backend.max_tokens = 1_024
     for role in ("user", "assistant"):
         store.messages.append({

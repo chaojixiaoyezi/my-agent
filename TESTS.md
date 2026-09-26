@@ -1,5 +1,11 @@
 # 测试与发布验收
 
+## 后台首请求压缩用例窗口校准（2026-09-26）
+
+- **现象**：`test_background_compact_recovery.py::test_background_first_request_compacts_after_complete_prepare` 两个协议在 main 上失败，报“压缩候选装不进输入触发线和输出预留”。之前的 focused gate 没有覆盖它。
+- **定位**：git bisect 从 `81bdf9579`（通过）到 `c187f932f`（失败），第一个坏提交是 `f7029f54c`（新增 `manage_models` 工具）：工具目录变长后，用例固定的 15500 窗口装不下压缩后的候选。产品拒绝提交装不下的压缩是正确行为，所以只校准测试输入。
+- **校准**：实测 16000–23000 都能先触发压缩、再装下候选，25000 起不再需要压缩；取中间值 19500，给工具目录增减留出余量，断言一条不放松。该文件 22 passed。
+
 ## macOS 沙箱拒绝读取 my-agent 私有目录（2026-09-26，分支 `claude/curator-budget`，基于 main `0624ab355`）
 
 - **起因**：macOS Seatbelt 规则只有写拒绝，owner 隔离的 Shell 能读到其它 owner 的数据和 `~/.my-agent/config`（含密钥）；Linux bwrap 本来就不挂载这些路径。
