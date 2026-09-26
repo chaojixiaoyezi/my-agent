@@ -62,7 +62,7 @@ def _profile_backend(agent: object, config: object):
         "model_backend", "model_name", "api_base", "api_key", "model_context_window_tokens", "max_tokens",
         "model_custom_headers", "model_session_header", "model_auth_ref",
         "temperature", "top_p", "stream_enabled", "anthropic_prompt_cache_enabled", "anthropic_version", "request_timeout",
-        "model_temperature_explicit", "model_reasoning_control",
+        "model_temperature_explicit", "model_reasoning_control", "model_structured_output",
     )]
     key = hashlib.sha256(json.dumps(values).encode()).hexdigest()
     with _CACHE_LOCK:

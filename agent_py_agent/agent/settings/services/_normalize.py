@@ -14,6 +14,7 @@ import os
 
 from ...backends.reasoning_control import REASONING_CONTROLS, REASONING_LEVELS
 from ...backends.sampling import validate_top_p
+from ...backends.structured_output_mode import STRUCTURED_OUTPUT_MODES
 from ...path_access_policy import normalize_path_access_mode
 from ..defaults import default_agent_config
 from ._coercion import CoercionService
@@ -159,6 +160,8 @@ class ModelFieldsService:
         # 智能程度档位与控制方式取值与 backends/reasoning_control 一致；非法值告警并回默认。
         warnings.extend(_apply_choice_field(out, defaults, "model_reasoning_effort", REASONING_LEVELS))
         warnings.extend(_apply_choice_field(out, defaults, "model_reasoning_control", REASONING_CONTROLS))
+        # 结构化输出方式取值与 backends/structured_output_mode 一致；非法值告警并回默认。
+        warnings.extend(_apply_choice_field(out, defaults, "model_structured_output", STRUCTURED_OUTPUT_MODES))
         warnings.extend(_normalize_temperature(out, defaults))
         try:
             out["top_p"] = validate_top_p(out.get("top_p", defaults.top_p))

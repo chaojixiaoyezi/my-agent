@@ -1,6 +1,6 @@
 # 记忆与上下文维护状态
 
-记忆整理输入预算缩批（分支 `claude/curator-budget`，2026-09-26）：生产本机 owner 自 9/24 15:39Z 起每次都是 `CURATOR_INPUT_BUDGET_EXCEEDED`、游标不动。收集只按条目估算，消息收满后审计仍按保底至少收一条，身份清单里的编号也不在预算内，最终提示超预算；提取前检查不缩批，同一批永远失败。现在在标注前按最终提示实测长度截尾（先消息后审计，各留一条），尾部下一轮重放；同时修复预算早退复用上一调用者尝试形状的诊断残留。DeepSeek 官方接口拒绝 `json_schema` 仍未实施，见 DESIGN_LEDGER。
+记忆整理输入预算缩批（分支 `claude/curator-budget`，2026-09-26）：生产本机 owner 自 9/24 15:39Z 起每次都是 `CURATOR_INPUT_BUDGET_EXCEEDED`、游标不动。收集只按条目估算，消息收满后审计仍按保底至少收一条，身份清单里的编号也不在预算内，最终提示超预算；提取前检查不缩批，同一批永远失败。现在在标注前按最终提示实测长度截尾（先消息后审计，各留一条），尾部下一轮重放；同时修复预算早退复用上一调用者尝试形状的诊断残留。DeepSeek 官方接口拒绝 `json_schema` 的问题随后修复：模型档案新增可选 `structured_output`，该接口默认改用 JSON 对象模式并把 schema 写进提示，结果仍由 Curator 严格解析（见 TESTS.md 顶部）。
 
 新 owner 的导航种子不再被迁移误当旧正文（主线，2026-09-24 晚，同伴在 .9 观察到的模板标题候选）：`home_layout_v2.owner_navigation_seeds()` 成为 memory.md / memory-hot.md 种子的唯一权威（根级模板非空则复制，否则用 `home_memory_seeds` 的正式默认导航，不再是 `# Memory` 短占位）；`migration._scan_legacy_navigation` 把"正式默认"与"本 home 的种子内容"都判为 current，只有与两者都不同的内容才是 legacy 并变成 `migrated_legacy` 候选。测试 `test_memory_migration_v2.py::test_freshly_seeded_navigation_files_are_not_legacy`。
 

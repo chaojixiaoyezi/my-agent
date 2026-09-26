@@ -26,6 +26,7 @@ from .response_completion import (
     without_tool_blocks,
 )
 from .stream_parsers import StreamCompletion
+from .structured_output_mode import json_object_prompt
 from .tool_protocol_adapter import tools_for_choice
 from .usage_metadata import (
     collect_openai_stream_with_completion,
@@ -129,8 +130,10 @@ class OpenAICompatibleBackend(HttpBackend):
             )
         )
 
-    # LLM: Chat 结构化输出仍经过同一请求组装与响应解析；schema 只约束输出，不授予工具权限。
-    # 函数用途: 发起使用供应商 JSON Schema 格式的模型请求。
+    # LLM: Chat 结构化输出仍经过同一请求组装与响应解析；schema 只约束输出，不授予工具权限。方式随 profile 冻结
+    #   （self.structured_output，见 structured_output_mode.py）：native 发严格 json_schema；json_object 用供应商 JSON
+    #   对象模式，并把 schema 写进提示，是否合规由调用方的严格解析判断。同步 test_structured_output_mode.py。
+    # 函数用途: 发起结构化输出的模型请求，按模型声明选择 JSON Schema 或 JSON 对象格式。
     def generate_structured(
         self,
         prompt: str,
@@ -138,13 +141,15 @@ class OpenAICompatibleBackend(HttpBackend):
         response_schema: dict[str, Any],
         messages: list[dict[str, Any]] | None = None,
     ) -> ModelResponse:
-        """Use the provider-native strict JSON-schema response format."""
+        """Use strict JSON schema, or JSON-object mode with the schema in the prompt when declared."""
 
+        json_object = self.structured_output == "json_object"
         return self._generate(
             _OpenAIGenerateRequest(
-                prompt=prompt,
+                prompt=json_object_prompt(prompt, response_schema) if json_object else prompt,
                 messages=messages,
-                response_schema=response_schema,
+                response_schema=None if json_object else response_schema,
+                json_object=json_object,
             )
         )
 

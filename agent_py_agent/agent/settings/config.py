@@ -655,6 +655,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     model_reasoning_effort: str = "auto"
     # 当前模型的思考控制方式 auto/effort/budget/none，通常由 /model 档案带入；auto 只对已核对供应商给默认，其余不发参数。
     model_reasoning_control: str = "auto"
+    # 当前模型的结构化输出方式 auto/native/json_object，通常由 /model 档案带入；auto 只对已核对供应商改用 json_object。
+    model_structured_output: str = "auto"
     # 三种接口均只发送显式温度；未启用沿用提供方默认，/model 填温度自动启用。
     model_temperature_explicit: bool = False
     anthropic_version: str = "2023-06-01"

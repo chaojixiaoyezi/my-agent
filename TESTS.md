@@ -1,5 +1,16 @@
 # 测试与发布验收
 
+## 结构化输出方式：DeepSeek 官方改用 JSON 对象（2026-09-26，分支 `claude/curator-budget`，基于 main `337a689ad`）
+
+- **起因**：Curator 与自动总结 Skill 的结构化调用固定发 `json_schema`，DeepSeek 官方 OpenAI 兼容接口直接 400；默认模型设成它时，这两条后台链路会整体失效。
+- **新增** `test_structured_output_mode.py` 17 项（传输全为本地 fake）：
+  - 方式解析：显式声明优先；auto 只对 DeepSeek 官方 OpenAI 兼容接口给 json_object，OpenCode、未知域名、Anthropic 兼容、Responses 都是 native；非 OpenAI Chat 协议上声明 json_object 也不生效。
+  - 真实组包：DeepSeek 上 `response_format` 为 `{"type": "json_object"}`，完整 schema 出现在提示开头、原提示在后；OpenCode 仍是严格 `json_schema` 且提示不变；声明可覆盖已知表；Curator 的 `call_backend_with_timeout` 在 DeepSeek 上同样发 JSON 对象。
+  - 档案与配置：`structured_output` 保存、列出、解析进运行配置（未声明为 auto），auto 不写键；非法值、Anthropic 兼容上的 json_object、决策模型都被拒绝；改声明后缓存的后端会重建；`manage_models` 参数定义接受该字段；TUI 表单预选并保存；YAML 默认与规范化。
+- **变异验证**：13 种（去掉已知表、结构化请求忽略方式、json_object 不写 schema、工厂不传方式、解析不带档案字段、auto 也写键、非 OpenAI 也接受 json_object、决策模型也接受、配置不规范化、缓存键漏字段、TUI 不保存、工具 schema 漏字段、非 OpenAI 协议也用声明）全部使测试失败。
+- **回归**：原 `test_structured_output.py`（`common/structured_output` 的 6 项，本轮一度被误覆盖，已从 HEAD 恢复）通过；与结构化输出、后端组包、模型档案、TUI、配置、Curator、自动总结 Skill 相关的 65 个测试文件 1639 passed、4 xfailed（原有标记）。
+- **真实验证**（工作区新代码 + 生产模型目录，只在进程内读取，不打印密钥与模型输出）：DeepSeek 官方 OpenAI 兼容档案强制 native 立即 `ProviderRequestRejectedError`（HTTP 400）；auto 解析为 json_object，服务商接受，8.9 s 返回，结果通过 Curator 严格解析，身份清单 3/3 覆盖，生成 2 个候选、1 条日记事件。
+
 ## 记忆 Curator 输入预算缩批（2026-09-26，分支 `claude/curator-budget`，基于 main `37cad88f7`）
 
 - **真机现象**：生产本机 owner 自 2026-09-24T15:39Z 起每次都是 `CURATOR_INPUT_BUDGET_EXCEEDED`（9/25 共 180 次），`cursor_before` 始终同一个、每次处理 0 条、0 次模型调用；测试 owner `tui-matrix/p1-r141` 同样卡住。失败记录里还夹着别的 owner 留下的 `ModelNotConfiguredError` 尝试形状。

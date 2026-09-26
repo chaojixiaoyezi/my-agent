@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from ..backends.reasoning_control import REASONING_CONTROLS
+from ..backends.structured_output_mode import STRUCTURED_OUTPUT_MODES
 from ..conversation.authority import current_conversation_task_attributes
 from ..runtime_context import current_subagent_run_id
 from ..settings.model_profiles import ModelProfileError, execute_model_profile_operation
@@ -82,6 +83,8 @@ _PARAMETERS = {
         "add/save_model 必填。add 填 model_name/model_backend/api_base/api_key/model_context_window_tokens（可选 capability、temperature、top_p）；"
         "save_model 填 model_name/model_backend/model_context_window_tokens（provider_id 可放这里或顶层）。"
         "可选 reasoning_control 声明思考控制方式：auto/effort/budget/none，决定智能程度（/effort）怎样发送。"
+        "可选 structured_output 声明结构化输出方式：auto/native/json_object（json_object 只适用于 OpenAI 兼容接口），"
+        "决定记忆整理等后台结构化调用用哪种输出格式。"
     ),
     "editing": "save_provider/save_model 修改已存在记录时必须为 true；新建时省略。",
 }
@@ -116,6 +119,8 @@ _PROFILE_SCHEMA = {
         "input_modalities": {"type": "array", "items": {"type": "string"}},
         # 思考控制方式；取值与 backends/reasoning_control.REASONING_CONTROLS 一致，缺省 auto。
         "reasoning_control": {"type": "string", "enum": list(REASONING_CONTROLS)},
+        # 结构化输出方式；取值与 backends/structured_output_mode.STRUCTURED_OUTPUT_MODES 一致，缺省 auto。
+        "structured_output": {"type": "string", "enum": list(STRUCTURED_OUTPUT_MODES)},
     },
     "additionalProperties": False,
 }

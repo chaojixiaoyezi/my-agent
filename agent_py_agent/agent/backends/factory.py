@@ -8,6 +8,7 @@ from .anthropic import AnthropicCompatibleBackend
 from .base import BackendOptions, BaseBackend, EchoBackend, UnconfiguredBackend
 from .openai_chat import OpenAICompatibleBackend
 from .reasoning_control import resolved_reasoning_control
+from .structured_output_mode import resolved_structured_output
 
 
 # LLM: 后端构造与后台调度共用本地缺配置判据；不探测网络、密钥权益或模型能力，未知协议仍由工厂拒绝。
@@ -49,6 +50,9 @@ def get_backend(name: str, config: Any | None = None) -> BaseBackend:
         session_header=getattr(config, "model_session_header", ""),
         reasoning_control=resolved_reasoning_control(
             getattr(config, "model_reasoning_control", "auto"), config.api_base, name,
+        ),
+        structured_output=resolved_structured_output(
+            getattr(config, "model_structured_output", "auto"), config.api_base, name,
         ),
     )
 

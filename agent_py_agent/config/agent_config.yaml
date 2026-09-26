@@ -769,6 +769,11 @@ model_reasoning_effort: auto
 # - budget：按思考预算发送（Anthropic 兼容接口写 thinking.budget_tokens；部分服务商只按开/关生效）。
 # - none：不支持调节，不发任何推理参数。
 model_reasoning_control: auto
+# 当前模型的结构化输出方式（记忆整理、自动总结 Skill 等后台结构化调用使用），通常由 /model 档案的"结构化输出"字段带入：
+# - auto：只对实测确认过的服务商改用 json_object（DeepSeek 官方 OpenAI 兼容接口不接受 json_schema），其余用原生方式。
+# - native：用接口自带的严格方式（OpenAI 兼容接口发 json_schema，Anthropic 兼容接口用强制工具信封）。
+# - json_object：只适用于 OpenAI 兼容接口；发 JSON 对象模式，并把 schema 写进提示，结果仍由程序严格校验。
+model_structured_output: auto
 
 # Anthropic API 版本
 anthropic_version: "2023-06-01"

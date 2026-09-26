@@ -82,6 +82,7 @@
   该配置不能修复 schema 编译错误或输出长度耗尽；不得因此无界重试或替换模型。
 
 - 模型编辑的“思考控制”存为可选字段 `reasoning_control`（auto/effort/budget/none），决定 `/effort` 与子代理 `effort`的档位怎样发送；只有显式声明且不是 auto 才写键。auto 只对实测确认的 DeepSeek 官方接口给默认，其余不发参数，详见 [智能程度](REASONING_EFFORT.md)。
+- 模型编辑的“结构化输出”存为可选字段 `structured_output`（auto/native/json_object），决定记忆整理、自动总结 Skill 等后台结构化调用用哪种输出格式；只有显式声明且不是 auto 才写键。native 用接口自带的严格方式（OpenAI 兼容发 `json_schema`，Anthropic 兼容用强制工具信封）；json_object 只适用于 OpenAI 兼容接口，发 JSON 对象模式并把 schema 写进提示，结果由程序严格校验。auto 只对实测确认不接受 `json_schema` 的 DeepSeek 官方 OpenAI 兼容接口改用 json_object，其余用 native。
 
 - `top_p` 是可选核采样概率，YAML 默认 `null`；`/model` 每模型可填写 0 至 1 的有限数值。
   模型表单留空表示继承部署值；部署同样留空时由适配器决定是否发送。布尔/NaN/无穷大/越界值无效。

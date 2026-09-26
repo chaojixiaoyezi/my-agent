@@ -73,6 +73,8 @@ class BackendOptions:
     top_p: float | None = None
     # 已解析的思考控制方式（effort/budget/none，见 reasoning_control.py）；随 profile 冻结，档位按请求传入。
     reasoning_control: str = "none"
+    # 已解析的结构化输出方式（native/json_object，见 structured_output_mode.py）；随 profile 冻结。
+    structured_output: str = "native"
 
 
 # LLM: 供应商级请求控制集中在 typed options；首包预算必须保持 request-local，不能通过修改共享 backend 传递。

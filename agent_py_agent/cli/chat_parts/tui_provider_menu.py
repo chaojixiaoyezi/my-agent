@@ -90,11 +90,18 @@ _REASONING_CONTROL_CHOICES = [
     ("budget", "按思考预算发送（thinking.budget_tokens；部分服务商只按开/关生效）"),
     ("none", "不支持调节（不发任何推理参数）"),
 ]
+# 结构化输出方式的表单选项；取值与 backends/structured_output_mode.STRUCTURED_OUTPUT_MODES 一致，文案只供人读。
+_STRUCTURED_OUTPUT_CHOICES = [
+    ("auto", "自动（已核对不支持 json_schema 的服务商改用 JSON 对象，其余用原生方式）"),
+    ("native", "原生严格方式（OpenAI 兼容发 json_schema；Anthropic 兼容用强制工具信封）"),
+    ("json_object", "JSON 对象（只适用于 OpenAI 兼容接口；schema 写进提示，结果由程序校验）"),
+]
 
 # LLM: 编辑保留原用途/协议；decision 不发送生成采样字段和用途标签，保存无网络，同步用途表单回归。
 #   用途标签按原值预填，编辑其它字段时不会丢失；标签只作决策模型的参考材料，不影响路由。
 #   输入模态同样预填、逗号分隔；它是压缩策略"能否随图摘要"的声明事实，留空表示未知（由探针判断），不是能力证明。
 #   思考控制方式按原值预选（缺省 auto），只决定 /effort 与子代理 effort 的档位怎样发送，取值见 reasoning_control。
+#   结构化输出方式同样按原值预选，只决定记忆整理等后台结构化调用的输出格式，取值见 structured_output_mode。
 # 函数用途: 新增或编辑生成/决策模型；认证在 provider 管理，原 UUID 不变，决策设置另行绑定。
 async def _edit_model(app, agent, session: str, provider_id: str, row: dict | None = None) -> str:
     backend = await _choose_interface(app, default=(row or {}).get("model_backend"), allow_auth=False, allow_decision=True)
@@ -109,6 +116,7 @@ async def _edit_model(app, agent, session: str, provider_id: str, row: dict | No
     usage = _field(", ".join(data.get("usage_tags", ())))
     modalities = _field(", ".join(data.get("input_modalities", ())))
     reasoning = RadioList(_REASONING_CONTROL_CHOICES, default=data.get("reasoning_control", "auto"), select_on_focus=True)
+    structured = RadioList(_STRUCTURED_OUTPUT_CHOICES, default=data.get("structured_output", "auto"), select_on_focus=True)
     enabled = Checkbox("启用模型", checked=data.get("enabled", True))
     is_decision = backend == "typesafe_decision"
     capability = RadioList([("decision", "Decision 决策建议")] if is_decision else
@@ -122,7 +130,8 @@ async def _edit_model(app, agent, session: str, provider_id: str, row: dict | No
                    Label("额外排队预算秒数（0–86400，留空继承；慢模型可增大）"), queue,
                    Label("用途标签（可选，逗号分隔的小写英文标识，如 long_document, low_cost；只供决策模型比较候选时参考）"), usage,
                    Label("输入模态（可选，如 text, image；留空=未知，含图历史压缩时用结构化探针判断能否随图摘要）"), modalities,
-                   Label("思考控制（决定 /effort 智能程度怎样发送；不确定就选自动）"), reasoning]),
+                   Label("思考控制（决定 /effort 智能程度怎样发送；不确定就选自动）"), reasoning,
+                   Label("结构化输出（记忆整理等后台调用的输出格式；不确定就选自动）"), structured]),
                    enabled, capability, notice, Label("Tab 切换 · Esc 不保存返回")])
     identity = data.get("id") or str(uuid4())
     while await _dialog(app, "编辑模型" if data.get("id") else "新增模型", body,
@@ -133,7 +142,8 @@ async def _edit_model(app, agent, session: str, provider_id: str, row: dict | No
                         **({} if is_decision else {"temperature": temperature.text, "top_p": top_p.text,
                                                  "model_queue_wait_seconds": queue.text, "usage_tags": usage.text,
                                                  "input_modalities": modalities.text,
-                                                 "reasoning_control": reasoning.current_value}),
+                                                 "reasoning_control": reasoning.current_value,
+                                                 "structured_output": structured.current_value}),
                         "enabled": enabled.checked, "capability": capability.current_value}})
         if result.get("ok"):
             return "决策模型已保存；尚未启用或测试。" if is_decision else "模型已保存；选择后将在后续工作片生效。"

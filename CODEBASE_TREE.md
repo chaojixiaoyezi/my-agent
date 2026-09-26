@@ -632,6 +632,7 @@ agent_py_agent/
 |       |-- cache_diagnostics.py       # 出站请求摘要及前缀变化诊断，不存正文或改变缓存布局
 |       |-- sampling.py                # top_p 校验与精确端点 V4 Flash 采样默认，不改变身份或重试
 |       |-- reasoning_control.py       # 智能程度档位与模型思考控制方式（effort/budget/none）的唯一换算点，只对实测供应商给默认
+|       |-- structured_output_mode.py  # 结构化输出方式（native/json_object）的唯一换算点；只对实测不接受 json_schema 的供应商改用 json_object
 |       |-- responses.py               # Responses 协议生成入口，复用正式 HTTP/取消/超时主链
 |       |-- responses_wire.py          # typed SSE/items 与既有工具历史映射、加密 reasoning 回放
 |       |-- anthropic_prompt_cache.py  # Anthropic tools/system/最新 history 断点与追加式 user 投影
@@ -648,6 +649,7 @@ agent_py_agent/
 |   |-- test_skill_proposals.py         # 自学习 S1：默认关闭、幂等提案、迁移不碰、确认拒绝矩阵、快照可见、runner 自动确认与 CLI 往返
 |   |-- test_skill_learning.py          # 自学习 S3：触发判据、请求有界脱敏、create/update/skip、各闸门拒绝码、上限、重试、忙时顺延、回滚删除
 |   |-- test_reasoning_effort.py        # 智能程度：换算与优先级、两种协议真实组包、线程档位、投影一致、子代理继承、/effort、档案字段与配置
+|   |-- test_structured_output_mode.py  # 结构化输出方式：方式解析、DeepSeek 用 json_object 且 schema 进提示、其余仍 json_schema、档案字段、缓存键、TUI 与配置
 |   |-- test_skill_learning_integration.py # 自学习 S3 接线：组合根装配、收口入队、Gateway 策展车道准入、learned CLI、S1 自动确认与配置
 |   |-- test_subagent_lesson_ledger.py  # record_lesson：身份与 Schema、字段/条数/字节上限、幂等、账本复核、结果合并、候选与 S1 提案、暴露面与提示
 |   |-- test_decision_skill_proposal_review.py # 自学习 S2 审核顺序点：资格边界、别名与脱敏、逐题校验、采用前复核、取消传播、零写入
@@ -1402,6 +1404,7 @@ docs/
 - `agent/conversation/process_events.py`：原进程记录到原 wake 队列的耐久终态通知；不新增任务状态机。
 - `agent/backends/sampling.py`：YAML/profile/backend 共用 top_p 数值校验；已知 Flash 方言默认与任意端点显式覆盖分开。
 - `agent/backends/reasoning_control.py` 与 `agent/settings/reasoning_effort.py`：智能程度的换算与解析。档位是会话线程属性（`/effort`、子代理 `effort`、全局 `model_reasoning_effort`），模型档案 `reasoning_control` 决定怎样发送；真实请求与两处自动选模投影共用 `request_reasoning_options`。设计见 `docs/design/REASONING_EFFORT.md`，测试 `test_reasoning_effort.py`。
+- `agent/backends/structured_output_mode.py`：结构化输出方式的换算。模型档案 `structured_output`（auto/native/json_object）经 `model_structured_output` 进入后端，`openai_chat.generate_structured` 按它发 `json_schema` 或 JSON 对象模式（schema 写进提示）；记忆整理和自动总结 Skill 都走这里。测试 `test_structured_output_mode.py`。
 - `agent_py_agent/tests/test_gateway_main_activity.py`：前后台数值/阶段共享、任务晋升、跨会话拒绝、迟到关闭和显示故障验证。
 - `agent_py_agent/tests/test_shell_stdin.py`：使用独立宿主管道验证批处理 EOF、输入不串和显式管道，不读取真实用户输入。
 - `agent_py_agent/tests/test_shell_foreground_cleanup.py`：验证前台普通退出先清理后代再回收组长，身份缺失／复用拒绝发信号，原命令结果与清理 UNKNOWN 分开。
