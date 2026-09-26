@@ -1,5 +1,7 @@
 # Gateway 维护状态
 
+`/admin` 指引修正与审计软提示（主线，2026-09-26，真实验收发现）：执行飞书请求的是 owner 池里按用户隔离的 agent，其 owner 字段被改成该用户，原判定里的“基础 owner 是 local/main”永远不成立，指引没有出现；`admin_binding_hint_for_request` 改为只看开关、全局数据根的密码文件与绑定表。`audit_records` 的 requests 主题给管理员附软提示（查飞书用 all_owners、已设密码未绑定时发 /admin），`MODEL_NOT_CONFIGURED` 处理建议补上 `/admin`。真实验收里 my-agent 两轮工具即给出正确结论。
+
 审计工具新增 `requests` 主题（主线，2026-09-26，用户要求“这种东西以后 my-agent 能帮我解决”）：每个请求开始执行时响应带 `owner_id`（宿主解析的执行 owner 规范编号，`request_execution._executing_owner_id`），`request_audit_records.request_outcome_records` 按 `OutcomeQuery` 读窗口内请求结果（状态、错误码与错误分类表的处理建议、渠道、私聊/群聊、耗时），归属优先 `terminal_response.owner_id`、旧记录退回会话，都没有的列为 `unattributed`；经 `GatewayTaskBindingWriter.request_audit_outcomes` 供 `audit_records`（`tooling/audit_requests_topic.py`）使用，跨用户沿用管理员两道门。回归见 `test_audit_requests_topic.py`。
 
 未绑定管理员时的 `/admin` 指引（主线，2026-09-26，用户真实使用中发现）：管理员设好密码后在飞书私聊直接发消息，因为还没 `/admin` 绑定，按飞书普通用户运行得到 `MODEL_NOT_CONFIGURED`，提示只提 `/model`。现在 IM 私聊、开关生效、已设管理员密码且该私聊未绑定时，失败回复（`request_execution._gateway_user_error`）和 `/model` 没有可选模型的回复（`model_profile_service._admin_hint`）追加 `/admin <管理员密码>` 指引；判定唯一入口 `request_worker.admin_binding_hint_for_request`。回归见 `test_admin_identity_gateway.py` 末尾两例。

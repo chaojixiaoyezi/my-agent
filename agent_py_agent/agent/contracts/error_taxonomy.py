@@ -1328,7 +1328,10 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         category="model",
         retryable=False,
         recommended_action=RecoveryAction.REPORT_BLOCKER.value,
-        recovery_hint="尚未配置模型；通过 /model 新增并选择，不发送探针、不自动切换其它模型。",
+        recovery_hint=(
+            "尚未配置模型：普通用户用 /model 选择管理员共享的模型；如果是本机管理员本人在飞书等 IM 私聊里使用，"
+            "先在该私聊发 /admin <管理员密码> 绑定管理员身份，之后按管理员的模型运行。不发送探针、不自动切换其它模型。"
+        ),
     ),
     "MODEL_PROFILE_INVALID": ErrorContract(
         code="MODEL_PROFILE_INVALID",

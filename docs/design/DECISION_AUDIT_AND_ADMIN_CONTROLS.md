@@ -95,8 +95,16 @@
 - 管理员身份事实：调用方是本机管理员时附带 `admin_identity`（是否设了管理员密码、IM 管理员开关、哪些私聊已绑定），
   普通用户看不到。
 - 扫描与去重同决策观察：窗口内按修改时间新到旧最多读 300 份，同一请求在 done/failed 与 terminal 的两份按编号去重。
+- 软提示 `hints`（只给管理员）：只查本人范围时提示“飞书等 IM 私聊在绑定前属于另一个用户，用 scope=all_owners”；
+  已设管理员密码、开关打开但没有任何私聊绑定时提示“管理员本人在飞书私聊发 /admin <管理员密码>”。
+  `MODEL_NOT_CONFIGURED` 的处理建议同时写明普通用户走 `/model`、管理员本人在 IM 私聊走 `/admin`。
 - 实现：`tooling/audit_requests_topic.py`（收集器）、`gateway_parts/request_audit_records.py`（`OutcomeQuery`、
   `request_outcome_records`）、`GatewayTaskBindingWriter.request_audit_outcomes`；回归 `test_audit_requests_topic.py`。
+- 真实验收（2026-09-26，隔离 home、127.0.0.1:8432、真实模型，管理员 full-access、已设密码、已开跨用户审计）：
+  未绑定飞书私聊发“你好，在吗”→ `MODEL_NOT_CONFIGURED`。本机管理员一次 prompt“我刚才在飞书上给你发消息，一直报错，帮我查一下”：
+  第一版 my-agent 只查了本人范围，没看到飞书失败，转去翻 Gateway 文件，结论只提 `/model`；加上软提示与处理建议后，
+  它先查本人范围、按提示改查 `all_owners`，2 轮工具就给出“飞书私聊 2 条请求全部 MODEL_NOT_CONFIGURED；已设管理员密码但
+  没有私聊绑定；在飞书私聊发 /admin <密码>”，并说明不会替用户执行这一步。证据在 `~/.my-agent/releases/audit-requests-acceptance-20260926/`。
 
 ## 6. 管理员专用 `admin_controls`
 

@@ -81,7 +81,21 @@ def test_owner_scope_uses_stamped_owner_then_thread_and_never_bodies(tmp_path, m
     assert [row["request_id"] for row in entries] == ["req-alice-fail"], "按宿主写入的 owner_id 归属，且两份去重"
     assert entries[0]["error_code"] == "MODEL_NOT_CONFIGURED" and entries[0]["chat_type"] == "p2p"
     assert entries[0]["error"]["recovery_hint"] and entries[0]["error"]["recommended_action"]
-    assert "admin_identity" not in report, "只给管理员看管理员身份事实"
+    assert "admin_identity" not in report and "hints" not in report, "只给管理员看管理员身份事实与提示"
+
+
+def test_admin_owner_scope_hints_point_to_all_owners_and_admin_binding(tmp_path, monkeypatch):
+    _alice, main, _thread, queue = _seed(tmp_path, monkeypatch)
+    set_admin_password(main.home_paths.root, "Correct-Horse-42")
+    _in_gateway_turn(main, queue)
+    outcome, report = _call(main, {"topic": "requests"})
+    assert outcome.ok, outcome.output
+    hints = report["hints"]
+    assert any("scope=all_owners" in hint for hint in hints)
+    assert any("/admin <管理员密码>" in hint for hint in hints)
+    bind_admin_channel_identity(main.home_paths.root, "feishu", "ou-alice")
+    _outcome, report = _call(main, {"topic": "requests"})
+    assert not any("/admin" in hint for hint in report.get("hints", [])), "已有私聊绑定后不再提示绑定"
 
 
 def test_all_owners_needs_explicit_permission_and_reports_admin_identity(tmp_path, monkeypatch):
@@ -98,6 +112,7 @@ def test_all_owners_needs_explicit_permission_and_reports_admin_identity(tmp_pat
     assert set(by_id) == {"req-alice-fail", "req-main-legacy", "req-unattributed"}
     assert by_id["req-alice-fail"]["owner_id"] == ALICE and by_id["req-unattributed"]["owner_id"] == "unattributed"
     assert report["requests"]["counts"]["error_code"]["MODEL_NOT_CONFIGURED"] == 1
+    assert not any("scope=all_owners" in hint for hint in report.get("hints", [])), "已在跨用户范围时不再提示换范围"
     admin = report["admin_identity"]
     assert admin["password_configured"] is True
     assert [(row["channel"], row["user_id"]) for row in admin["bound_private_chats"]] == [("feishu", "ou-alice")]

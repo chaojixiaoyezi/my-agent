@@ -71,7 +71,22 @@ def requests_topic(agent: object, query: object, *, max_owners: int) -> dict:
     admin = _admin_identity_facts(agent)
     if admin is not None:
         result["admin_identity"] = admin
+        hints = _admin_hints(query.scope, admin)
+        if hints:
+            result["hints"] = hints
     return result
+
+
+# LLM: 软提示只依据结构化事实（范围、管理员身份事实），给模型看的下一步建议，不做任何判定或授权。
+# 函数用途: 告诉管理员的 my-agent：飞书私聊在绑定前属于另一个用户、以及还没有私聊绑定管理员时该怎么做。
+def _admin_hints(scope: str, admin: dict) -> list[str]:
+    hints = []
+    if scope != "all_owners":
+        hints.append("飞书等 IM 私聊在绑定管理员之前属于另一个用户，本人范围看不到；要查这些请求用 scope=all_owners。")
+    if admin.get("password_configured") and admin.get("channel_identity_enabled") and not admin.get("bound_private_chats"):
+        hints.append("已设管理员密码但还没有任何 IM 私聊绑定管理员：管理员本人在飞书私聊发 /admin <管理员密码> 后，"
+                     "那个私聊才按管理员运行（使用管理员的模型和设置）。")
+    return hints
 
 
 __all__ = ["REQUEST_SOURCES", "requests_topic"]

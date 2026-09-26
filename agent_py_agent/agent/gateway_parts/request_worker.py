@@ -709,19 +709,22 @@ _ADMIN_BINDING_HINT = (
 )
 
 
-# LLM: 判据全是结构化事实：IM 私聊身份、admin_channel_identity_enabled、本机管理员密码文件状态、绑定表；不看正文。
-#   /admin 本就在公开命令帮助里，这里只在"没有模型"等报错里指出正确出路；已绑定、群聊、未设密码或开关关闭都返回空串。
+# LLM: 判据全是结构化事实：IM 私聊身份、配置开关 admin_channel_identity_enabled、全局数据根里的管理员密码文件、绑定表；不看正文。
+#   调用方可能是按用户隔离的 agent（owner 池把它的 owner 字段改成了该用户），所以这里不做“基础 owner 是 local/main”的判断：
+#   密码只能由 local/main 的 CLI 设置，未设密码就不提示。/admin 本就在公开命令帮助里；已绑定、群聊、未设密码或开关关闭都返回空串。
 # 函数用途: 给还没绑定管理员的 IM 私聊报错补一句 /admin 指引，让管理员不用排查就知道下一步。
 def admin_binding_hint_for_request(agent, request_payload: dict) -> str:
-    if not isinstance(request_payload, dict) or private_channel_identity(request_payload) is None:
-        return ""
-    if not admin_channel_identity_enabled(agent) or admin_channel_identity_for_request(agent, request_payload) is not None:
+    identity = private_channel_identity(request_payload) if isinstance(request_payload, dict) else None
+    if identity is None or not bool(getattr(getattr(agent, "config", None), "admin_channel_identity_enabled", False)):
         return ""
     home_root = getattr(getattr(agent, "home_paths", None), "root", None)
     if not home_root:
         return ""
+    from ..user_space.admin_channel_identity import find_admin_channel_identity
     from ..user_space.admin_password import admin_password_status
 
+    if find_admin_channel_identity(home_root, *identity) is not None:
+        return ""
     return _ADMIN_BINDING_HINT if admin_password_status(home_root).get("configured") else ""
 
 

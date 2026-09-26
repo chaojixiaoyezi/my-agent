@@ -389,6 +389,9 @@ def test_model_not_configured_in_unbound_admin_p2p_points_to_admin(tmp_path):
     bind_admin_channel_identity(agent.home_paths.root, "feishu", "ou_admin")
     assert admin_binding_hint_for_request(agent, _request()) == "", "已绑定的私聊不再提示"
     assert admin_binding_hint_for_request(agent, _request(user="ou_other")) == hint, "只看本私聊自己的绑定"
+    scoped = _agent(tmp_path, provider="feishu", kind="user")
+    assert admin_binding_hint_for_request(scoped, _request(user="ou_other")) == hint, "按用户隔离的 agent 也要提示"
+    assert _gateway_user_error(scoped, _request(user="ou_other"), "MODEL_NOT_CONFIGURED").endswith(hint)
 
 
 def test_model_view_without_choices_adds_admin_hint_only_when_empty(tmp_path):

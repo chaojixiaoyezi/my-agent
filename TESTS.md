@@ -3126,6 +3126,11 @@ Audit/摄取不列入本轮新增验收；共享模块既有回归按改动影�
   响应 `owner_id` 就是执行 owner 的规范编号。
 - 真实验收方法：部署后在 TUI 里问 my-agent“我刚才在飞书发消息报错了，帮我查一下原因”，核对它调用 `audit_records`
   （topic=requests），在需要查飞书用户时先请你允许跨用户审计，再说出 `MODEL_NOT_CONFIGURED` 与“先在私聊发 /admin”的结论。
+- 真实验收（2026-09-26，隔离 8432、真实模型、管理员已开跨用户审计）：第一轮暴露两处问题——未绑定飞书私聊的失败回复没带 `/admin`
+  指引（执行 agent 是按用户隔离的，owner 字段被改写，原判定不成立），my-agent 只查本人范围后转去翻文件、结论只提 `/model`。
+  修正后：失败回复带上 `/admin` 指引；my-agent 先查本人范围、按软提示改查 `all_owners`，两轮工具给出“2 条 MODEL_NOT_CONFIGURED、
+  已设密码但未绑定、在飞书私聊发 /admin <密码>”。`test_admin_identity_gateway.py` 增加按用户隔离 agent 的指引用例，
+  `test_audit_requests_topic.py` 增加软提示用例。
 
 ## Gateway 安全重启第一期（2026-09-26）
 
