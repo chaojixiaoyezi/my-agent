@@ -77,6 +77,26 @@
      一次最多读 300 份窗口内记录，超出如实标 `truncated`；不在 Gateway 回合里时报告 `no_gateway_request_context`。
 - 参数：`topic`（必填）、`scope`、`since_hours`（默认 24，≤720）、`limit`（观察条数，默认 20，≤100）。
 - 实现：`tooling/audit_records_tool.py`、`conversation/decision_audit.py`、`gateway_parts/request_audit_records.py`。
+- 各主题收集器在返回值里自带 `sources`，工具不再写死来源。
+
+### 主题 `requests`：请求成败（2026-09-26，用户要求“这种东西以后 my-agent 能帮我解决”）
+
+起因：管理员设好密码后没先 `/admin` 就在飞书私聊发消息，请求按飞书普通用户运行，全部 `MODEL_NOT_CONFIGURED`，
+当时只能由开发者翻请求文件查。现在 my-agent 可以自己查：
+
+- 内容：Gateway 请求记录里的结构化结果——请求编号、记录时间、归属 owner、渠道、私聊/群聊、状态、错误码、耗时、工具轮数，
+  以及按错误码从唯一错误分类表取出的处理建议（类别、可否重试、建议动作、恢复提示）；另附按状态/错误码/渠道的计数。
+  不读 prompt、goal、回复正文、用户可见文案，也不读日志。
+- 归属：Gateway 在每个请求开始执行时把执行 owner 的规范编号写进响应（`request_execution._executing_owner_id`，
+  取宿主解析出的 `agent.home_paths.owner_id`），终态记录里的 `terminal_response.owner_id` 是权威；此前的旧记录没有这个字段，
+  退回按 `conversation_claim.thread_id` 归属；两者都没有的只在 `all_owners` 里列为 `unattributed`，不按 user_id 或渠道猜。
+- 范围：`owner` 只看本人；`current_thread` 再按会话过滤；`all_owners` 沿用同一套两道门（本机管理员 + 管理员明确开启跨用户审计）。
+  飞书用户在绑定管理员之前是另一个 owner，所以查它的失败要 `all_owners`，my-agent 不会自己开许可。
+- 管理员身份事实：调用方是本机管理员时附带 `admin_identity`（是否设了管理员密码、IM 管理员开关、哪些私聊已绑定），
+  普通用户看不到。
+- 扫描与去重同决策观察：窗口内按修改时间新到旧最多读 300 份，同一请求在 done/failed 与 terminal 的两份按编号去重。
+- 实现：`tooling/audit_requests_topic.py`（收集器）、`gateway_parts/request_audit_records.py`（`OutcomeQuery`、
+  `request_outcome_records`）、`GatewayTaskBindingWriter.request_audit_outcomes`；回归 `test_audit_requests_topic.py`。
 
 ## 6. 管理员专用 `admin_controls`
 

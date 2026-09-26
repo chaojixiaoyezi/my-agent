@@ -150,6 +150,14 @@ class GatewayTaskBindingWriter:
         paths = gateway_paths_from_root(self.request_path.parent.parent.parent)
         return decision_observation_records(paths, thread_owners=thread_owners, since=since, limit=limit)
 
+    # LLM: 只读：与 decision_audit_observations 同一队列来源；query.allowed_owners=None 只能由已通过跨用户许可的调用方传入。
+    # 函数用途: 为审计工具提供请求结果（状态、错误码、渠道、归属 owner）。
+    def request_audit_outcomes(self, query: object) -> dict:
+        from .request_audit_records import request_outcome_records
+
+        paths = gateway_paths_from_root(self.request_path.parent.parent.parent)
+        return request_outcome_records(paths, query)
+
     # LLM: 任务晋升只能回写同一请求；原子持久写成功后再更新共享内存对象，失败不伪造绑定。
     # 函数用途: 接收运行时确认的任务链接，让本轮 Compact 重试和重启恢复使用相同归属。
     def __call__(self, link: object) -> bool:

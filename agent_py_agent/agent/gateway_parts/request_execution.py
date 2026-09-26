@@ -1087,6 +1087,13 @@ def _complete_gateway_request_audit(
     )
 
 
+# LLM: 执行 owner 只取宿主为本请求解析出的 agent.home_paths.owner_id（规范编号，与 audit_records/admin_controls 同源），
+#   写进终态响应供审计按请求归属；不从 user_id、渠道或正文推断。
+# 函数用途: 返回执行本请求的用户（owner）规范编号。
+def _executing_owner_id(agent: object) -> str:
+    return str(getattr(getattr(agent, "home_paths", None), "owner_id", "") or "local/main")
+
+
 # LLM: 每个 claimed request 只创建一个 chunk writer；审批只读 client_capabilities 或服务端核实的管理员 IM 私聊，失败只投影 typed HTTP 事实，不把异常正文公开或用作重试依据。
 # 函数用途: 执行一条 Gateway 请求、维护 lease/chunk，并保存已有执行与本次失败的真实响应。
 def _handle_gateway_request(
@@ -1103,6 +1110,7 @@ def _handle_gateway_request(
     }
     context["stage_timings"] = stage_timings
     response = context["response"]
+    response["owner_id"] = _executing_owner_id(agent)
     if context.get("skip_execution"):
         _finalize_gateway_response(context, response)
         _complete_gateway_request_audit(agent, context, request_path, response)

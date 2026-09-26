@@ -131,6 +131,8 @@ HTTP/IM/未知来源不能凭 rich transcript 获得私有路径展示，后台�
 ## IM 管理员身份与聊天内审批
 
 - owner 解析：`request_worker._resolve_request_owner_identity` 在逐用户路由前调用 `admin_channel_identity_for_request`。
+- 请求结果审计：`request_execution._handle_gateway_request` 给响应写 `owner_id`；`request_audit_records.request_outcome_records`
+  只读、白名单、有界并按编号去重，经 `GatewayTaskBindingWriter.request_audit_outcomes` 给 `audit_records` 的 requests 主题。
 - 未绑定提示：`request_worker.admin_binding_hint_for_request` 是 `/admin` 指引的唯一判定，失败回复经 `request_execution._gateway_user_error`（仅 `MODEL_NOT_CONFIGURED`），`/model` 空列表经 `model_profile_service._admin_hint`。
   该函数的判据全部是结构化字段：`private_channel_identity` 只取认证后的 user_id、`metadata.channel` 与 adapter 给出的
   `channel_chat_type`（p2p/private），本机基础通道一律排除；`admin_channel_identity_enabled` 要求开关开启且 base owner

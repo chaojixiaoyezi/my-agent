@@ -364,7 +364,7 @@ agent_py_agent/
 |   |   |-- request_binding.py          # 精确请求与运行身份绑定、执行车道和原子更新
 |   |   |-- request_experiment.py       # /experiment 冻结参数在主轮绑定后、首个模型调用前的单次实验授权与回执
 |   |   |-- request_experiment_records.py # 实验对照记录写入请求记录、回合收尾补写实际工具用量、授权指针证据链与只读评估
-|   |   |-- request_audit_records.py   # 审计只读：按会话→owner 映射扫描窗口内请求记录的决策观察键，白名单投影、有界、不写文件
+|   |   |-- request_audit_records.py   # 审计只读：窗口内请求记录的决策观察与请求结果（owner_id 优先、会话归属兜底），白名单、有界、不写文件
 |   |   |-- request_experiment_promotion.py # /experiment apply 授权内：证据满足规则时经原设置 CAS 晋升 skill_tool 并写回执
 |   |   |-- request_history.py          # 公开正文、canonical 历史提交、去重与延迟补交
 |   |   |-- request_prompt.py           # 已准备会话投影的模型输入渲染与历史种子
@@ -585,7 +585,8 @@ agent_py_agent/
 |   |   |-- gateway_status.py         # 本机管理员读取唯一 Gateway 身份、端点、队列和本生命周期日志摘要
 |   |   |-- gateway_restart_tool.py   # restart_gateway：管理员主代理安排 Gateway 安全重启，只写请求立即返回
 |   |   |-- user_config_tool.py        # main_agent 专用：读生效值/来源，写白名单项并报告生效时机
-|   |   |-- audit_records_tool.py      # 统一只读审计工具：topic 枚举（首个 decision）、本人范围，管理员明确许可才跨用户
+|   |   |-- audit_records_tool.py      # 统一只读审计工具：topic 枚举（decision、requests）、本人范围，管理员明确许可才跨用户
+|   |   |-- audit_requests_topic.py    # audit_records 的 requests 主题：请求成败、错误码与处理建议、归属 owner，管理员附带身份事实
 |   |   |-- admin_controls_tool.py     # 管理员专用：list/set 各用户 Jev/审计开关与跨用户审计许可，每次都要本人确认
 |   |   |-- shell.py                  # 非交互 run_command、独立 stdin、超时/中断与有界 pipe drain
 |   |   |-- shell_syntax.py           # 外层及字面 Shell -c 的后台语法检查，不解释普通字符串或 heredoc 正文
@@ -855,6 +856,7 @@ agent_py_agent/
 |   |-- test_restart_gate.py            # 工具关口：关闭时停在领取前、重开放行、中断按未启动收口、执行中计数与等待
 |   |-- test_gateway_safe_restart.py    # 安全重启：合并/冷却/防循环、两段排空与超时取消、标记、续跑优先、接班与 /restart
 |   |-- test_gateway_restart_tool.py    # restart_gateway：只在 Gateway 内、立即返回、冷却拒绝、只注册给管理员主代理
+|   |-- test_audit_requests_topic.py    # 审计 requests 主题：owner_id/会话归属、去重、时间窗、不含正文、跨用户两道门、管理员身份事实
 |   |-- test_model_text_control.py      # 聊天 /model：解析、无模型引导、选择共享模型不泄密钥、按 owner 隔离、TUI 菜单保留
 |   |-- test_tui_terminal.py            # OSC 标题、活动动画、去重与清理回归
 |   |-- test_tui_transcript.py          # 详细 transcript、全文搜索、命中导航和 resize 回归

@@ -1,9 +1,10 @@
 # LLM: 统一审计工具：以后新的审计主题一律加进 topic 枚举与 _TOPIC_COLLECTORS，不再为每类审计新建工具。
 #   权限：当前 owner 的 audit_allowed（管理员可关，读失败按不允许）；scope=all_owners 另要求当前 owner 是本机管理员且
 #   管理员自己开启了 cross_owner_audit_allowed（owner_admin_controls）。owner 与会话身份只来自宿主解析的 home_paths 与
-#   运行上下文，不接受模型给的 owner/thread。只读权威结构化记录（设置读取、model_usage 账本、Gateway 请求记录观察块），
-#   不 grep 日志、不读正文。子代理不可用。改动须同步 decision_audit、request_audit_records、错误码块与 test_decision_audit_controls。
-# 模块用途: 让用户和 my-agent 查询自己的决策使用记录（管理员许可时可查全部用户），回答"到底调没调、成功几次、花了多少"。
+#   运行上下文，不接受模型给的 owner/thread。只读权威结构化记录（设置读取、model_usage 账本、Gateway 请求记录），
+#   不 grep 日志、不读正文。子代理不可用。各主题收集器自带 sources。改动须同步 decision_audit、request_audit_records、
+#   audit_requests_topic、错误码块与 test_decision_audit_controls、test_audit_requests_topic。
+# 模块用途: 让用户和 my-agent 查询自己的决策使用与请求成败（管理员许可时可查全部用户），回答"调没调、成没成、为什么失败"。
 from __future__ import annotations
 
 import json
@@ -27,7 +28,7 @@ from .models import (
 )
 
 TOOL_NAME = "audit_records"
-_TOPICS = ("decision",)
+_TOPICS = ("decision", "requests")
 _SCOPES = ("current_thread", "owner", "all_owners")
 _DEFAULT_HOURS, _MAX_HOURS = 24, 24 * 30
 _DEFAULT_LIMIT, _MAX_LIMIT = 20, 100
@@ -118,10 +119,19 @@ def _decision_topic(agent: object, query: AuditQuery) -> dict:
         thread_owners.update(dict.fromkeys(ids, owner_id))
         owners.append(_decision_owner_report(owner_id, host, ids, query))
     return {"owners": owners, "owners_truncated": truncated, "unreadable_thread_records": unreadable_threads,
-            "observations": _observations(agent, thread_owners, query)}
+            "observations": _observations(agent, thread_owners, query),
+            "sources": ["decision_settings", "model_usage_ledger", "gateway_request_records"]}
 
 
-_TOPIC_COLLECTORS = {"decision": _decision_topic}
+# LLM: requests 主题实现在 audit_requests_topic（延迟导入避免循环）；范围与许可已由 execute 裁决。
+# 函数用途: 收集 Gateway 请求结果（成败、错误码与处理建议、渠道、归属 owner）。
+def _requests_topic(agent: object, query: AuditQuery) -> dict:
+    from .audit_requests_topic import requests_topic
+
+    return requests_topic(agent, query, max_owners=_MAX_OWNERS)
+
+
+_TOPIC_COLLECTORS = {"decision": _decision_topic, "requests": _requests_topic}
 
 
 # LLM: 只做结构校验，越界不夹取；非法参数按 TOOL_INVALID_ARGUMENTS 返回，不读任何记录。
@@ -151,16 +161,19 @@ class AuditRecordsTool(BaseTool):
     model_spec = ToolModelSpec(
         name=TOOL_NAME,
         description=(
-            "统一审计入口：查询当前用户自己的结构化运行记录，回答'到底调没调用、成功失败几次、用了多少 token、设置是什么'。"
+            "统一审计入口：查询当前用户自己的结构化运行记录，回答'到底调没调用、成功失败几次、用了多少 token、设置是什么、为什么失败'。"
             "topic=decision 汇总决策模型（Jev）：有效设置与各接入点模式、会话用量账本里的调用次数/成功/失败/超时/已报输入 token、"
-            "Gateway 请求记录里的选模型与能力推荐观察。scope=current_thread 只看当前会话，owner（默认）看本人全部会话，"
+            "Gateway 请求记录里的选模型与能力推荐观察。topic=requests 列出 Gateway 请求结果：状态、错误码及处理建议、渠道、"
+            "私聊/群聊、耗时和归属用户；用户说'飞书/IM/TUI 发消息报错、没回复'时先用它查，管理员调用时还附带管理员密码是否已设、"
+            "哪些 IM 私聊已绑定管理员。scope=current_thread 只看当前会话，owner（默认）看本人全部会话，"
             "all_owners 仅管理员且已明确开启跨用户审计时可用。只读权威记录，不读日志和对话正文；"
             "回答决策是否被调用时必须以本工具结果为准，不要 grep 日志或凭文件名下结论。"
         ),
         input_schema={
             "type": "object",
             "properties": {
-                "topic": {"type": "string", "enum": list(_TOPICS), "description": "审计主题；目前只有 decision。"},
+                "topic": {"type": "string", "enum": list(_TOPICS),
+                          "description": "审计主题：decision（决策模型使用）或 requests（请求成败与错误码）。"},
                 "scope": {"type": "string", "enum": list(_SCOPES), "description": "默认 owner（本人全部会话）。"},
                 "since_hours": {"type": "number", "exclusiveMinimum": 0, "maximum": _MAX_HOURS,
                                 "description": f"只看最近多少小时，默认 {_DEFAULT_HOURS}。"},
@@ -174,6 +187,7 @@ class AuditRecordsTool(BaseTool):
             "用户问决策模型/Jev 今天有没有被调用、成功几次、失败原因",
             "用户问决策花了多少 token、哪些会话调用最多",
             "排查决策设置是否生效（总开关、各点模式、等待时间）",
+            "用户说在飞书/IM/TUI 发消息报错或没回复：topic=requests 查错误码与处理建议（别的用户的请求要 scope=all_owners）",
         ), avoid_when=("需要修改设置时（用 user_config）",)),
     )
     runtime_policy = ToolRuntimePolicy(
@@ -222,8 +236,7 @@ class AuditRecordsTool(BaseTool):
         query = AuditQuery(topic, scope, thread_id, time.time() - hours * 3600, limit)
         result = _TOPIC_COLLECTORS[topic](self._agent, query)
         report = {"topic": topic, "scope": scope, "window": {"since_hours": hours, "since": round(query.since, 3)},
-                  **result, "sources": ["decision_settings", "model_usage_ledger", "gateway_request_records"],
-                  "not_read": "日志与对话/记忆正文不在审计读取范围内"}
+                  **result, "not_read": "日志与对话/记忆正文不在审计读取范围内"}
         return ToolHandlerOutcome(TOOL_NAME, True, json.dumps(report, ensure_ascii=False))
 
 

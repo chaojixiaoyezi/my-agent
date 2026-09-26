@@ -3117,6 +3117,16 @@ Audit/摄取不列入本轮新增验收；共享模块既有回归按改动影�
   用户 12:06 发下一条消息后：同一 agent run 开出 generation 2，metadata 带 `recovered_from_attempt_id`，旧 attempt 那条
   EXECUTING 操作在换代时转为 UNKNOWN、没有被重放；新一轮 12 条工具操作后 12:12 done，请求进入 done，期间 Gateway 进程号未变。
 
+## 审计 `requests` 主题（2026-09-26）
+
+- 背景：用户说“这种东西我希望以后是我的 my-agent 能帮我解决”——飞书没绑定管理员就发消息，全部 `MODEL_NOT_CONFIGURED`，当时靠开发者翻请求文件定位。
+- `test_audit_requests_topic.py`：本人范围只看自己的请求，宿主写入的 `owner_id` 优先、旧记录按会话归属，同一请求两份去重，
+  30 小时前的记录不进 24 小时窗口，输出不含 prompt/回复/用户文案；`all_owners` 未开许可被拒，开许可后含未归属记录与错误码计数，
+  管理员附带密码已设与已绑定私聊（普通用户看不到）；`current_thread` 按会话过滤；不在 Gateway 回合里报告不可用；
+  响应 `owner_id` 就是执行 owner 的规范编号。
+- 真实验收方法：部署后在 TUI 里问 my-agent“我刚才在飞书发消息报错了，帮我查一下原因”，核对它调用 `audit_records`
+  （topic=requests），在需要查飞书用户时先请你允许跨用户审计，再说出 `MODEL_NOT_CONFIGURED` 与“先在私聊发 /admin”的结论。
+
 ## Gateway 安全重启第一期（2026-09-26）
 
 - 背景：用户要求代理能自己重启 Gateway 且 TUI/IM 不出事；此前代理在回合里执行 `gateway restart` 会切断自己，会话卡在 unknown。
