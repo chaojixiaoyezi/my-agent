@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent_py_agent.agent.backends.provider_headers import provider_session_scope, request_headers
 from agent_py_agent.agent.capability import skill_learning as skill_learning_module
 from agent_py_agent.agent.capability.skill_learning import (
     SkillLearningRuntime,
@@ -414,3 +415,33 @@ def test_publish_rejects_frontmatter_that_would_not_round_trip(tmp_path: Path, d
 
     assert denied.value.code == "SKILL_LEARNING_DRAFT_INVALID"
     assert not _learned_file(ctx).parent.exists() and ctx.store.load_registry().skills == {}
+
+
+class _SessionHeaderBackend(_FakeBackend):
+    """模拟要求会话头的服务商：没有宿主会话时 request_headers 直接抛 ValueError。"""
+
+    def __init__(self, *responses: object) -> None:
+        super().__init__(*responses)
+        self.sessions: list[str] = []
+
+    def generate_structured(self, prompt: str, *, response_schema: dict, messages=None):
+        self.sessions.append(request_headers({}, {}, "x-test-session")["x-test-session"])
+        return super().generate_structured(prompt, response_schema=response_schema)
+
+
+def test_background_call_binds_its_own_host_session_for_session_header_providers(tmp_path: Path) -> None:
+    ctx = _runtime(tmp_path, TimeoutError("slow"), _output())
+    backend = _SessionHeaderBackend(*ctx.backend.responses)
+    ctx.service.runtime = SkillLearningRuntime(backend=backend, snapshot_provider=ctx.service.runtime.snapshot_provider,
+                                               owner_id="owner-a")
+    ctx.service.enqueue_from_finalize(_ctx())
+    [path] = ctx.store.pending_requests()
+    key = ctx.store.read_request(path)["request_key"]
+
+    assert ctx.service.run_pending().status == "retry"
+    assert ctx.service.run_pending().status == "published"
+    with provider_session_scope(("owner-a",), "skill-learning:" + key):
+        expected = request_headers({}, {}, "x-test-session")["x-test-session"]
+    assert backend.sessions == [expected, expected]
+    with pytest.raises(ValueError):
+        request_headers({}, {}, "x-test-session")

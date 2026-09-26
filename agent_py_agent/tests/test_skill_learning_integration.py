@@ -41,13 +41,15 @@ def test_agent_wires_skill_learning_only_when_self_learning_is_on(tmp_path: Path
     off = SimpleAgent(AgentConfig(my_agent_home=str(tmp_path / "off"), prompt_files=[]), tmp_path / "ws-off")
     on = SimpleAgent(
         AgentConfig(my_agent_home=str(tmp_path / "on"), prompt_files=[], enable_self_learning=True,
-                     self_learning_min_tool_rounds=4, self_learning_daily_limit=7),
+                     self_learning_min_tool_rounds=4, self_learning_daily_limit=7, my_agent_owner_provider="feishu",
+                     my_agent_owner_kind="user", my_agent_owner_id="ou_1"),
         tmp_path / "ws-on",
     )
     service = on.skill_learning
 
     assert off.skill_learning is None
     assert isinstance(service, SkillLearningService)
+    assert service.runtime.owner_id == str(on.home_paths.owner_id) and "ou_1" in service.runtime.owner_id
     assert service.store.directory == on.home_paths.owner_home_dir / "data" / "skill_learning"
     assert service.store.learned_root == on.home_paths.owner_home_dir / "skills" / "learned"
     assert service.runtime.backend is on.memory_curator.backend

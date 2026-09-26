@@ -347,6 +347,7 @@ def _skill_learning_service(agent: object, config: AgentConfig) -> SkillLearning
             backend=agent.memory_curator.backend,
             snapshot_provider=lambda: agent.skills_service.snapshot_for(),
             guard_config=config,
+            owner_id=str(agent.home_paths.owner_id or "local/main"),
         ),
     )
 

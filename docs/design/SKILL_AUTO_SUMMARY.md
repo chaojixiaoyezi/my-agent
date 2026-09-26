@@ -79,6 +79,7 @@ Gateway 后台记忆整理车道（同一个有界线程池、同一套 owner �
 - 每日上限：`self_learning_daily_limit`（默认 20 次模型调用，0 为不限）。计数按 UTC 日期存在登记表里，发请求前加一。
 - 失败重试：模型调用失败或超时，请求上的 `attempts` 加一，保留等下次。达到 2 次后丢弃并记 `failed`。输出不合格属于确定性失败，直接记 `rejected`，不重试。
 - 超时：`self_learning_timeout_seconds`（默认 180 秒）。复用 `call_backend_with_timeout`，同一 backend 的旧请求没退出前不叠加新请求。
+- 宿主会话：后台线程没有前台的会话上下文，而部分服务商要求每个请求带会话编号头，没有就在发送前拒绝（真实验收里首次暴露为 `ValueError`）。所以调用外面按 owner_id + `skill-learning:<请求键>` 自绑 `provider_session_scope`，与记忆整理同一原语；同一请求的重试共用同一会话值，不冒用前台线程会话。
 
 ## 7. 模型输出合同
 

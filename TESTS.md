@@ -2,16 +2,17 @@
 
 ## 自学习 S3：完成任务后自动总结 Skill（2026-09-26，分支 `claude/skill-auto-summary`，基于 main `839250728`）
 
-- **新增** `test_skill_learning.py` 33 项（假 backend，不联网）：
+- **新增** `test_skill_learning.py` 34 项（假 backend，不联网）：
   - 触发与材料：不落盘、task_local、后台回合、工具轮数不足、缺运行身份都不入队；请求有界（输入/回复截 3000 字、轨迹 80 条）、密钥脱敏、只收成功的 `skill_search get` 读过的 skill_id。
   - 发布：create 后下一次快照出现 `owner:<名字>`（category `learned`、content_sha256 等于登记值），账本、版本全文、每日计数正确，请求删除、暂存目录清空；skip 只记账。
   - 拒绝：7 种输出不合规（非 JSON、多字段、坏名字、坏标签、正文过短、正文带 frontmatter、未授权的 update）都记 `OUTPUT_INVALID` 且不重试；与用户 Skill 重名、guard 命中 `curl | sh`、数量上限、删过的名字各返回对应码且不写文件；直接调用发布接口时 3 种不能往返的 frontmatter 被 `DRAFT_INVALID` 拦下。
   - 所有权：update 只针对本轮读过、登记在册、磁盘 hash 未变的自学 Skill，提示词里给出其完整字段；用户手改后同样的 update 被拒、文件不动；未在本轮读过的 update 被拒。
   - 运行：每日上限顺延；模型超时先重试（attempts=1）、再失败则丢弃记 failed；运行锁被占与前台同端点忙都返回 busy 且零调用；队列 20 条上限、重复入队忽略；损坏请求丢弃、损坏登记表失败关闭且保留请求。
   - 回滚删除：v2 回滚到 v1 文本逐字一致，v1 再回滚等同删除并进禁用名单；用户改过的拒绝回滚但允许删除。
+  - 宿主会话：模拟要求会话头的服务商（无会话即 `ValueError`），后台调用自绑 owner + 请求键的会话，重试共用同一会话值，调用结束后当前线程不再持有会话。这是真实验收首轮发现的缺陷（真实服务商要求会话头，两次尝试都失败后丢弃），修复前本用例失败。
 - **新增** `test_skill_learning_integration.py` 8 项：组合根只在开关开启时装配、与 Curator 共用 backend、不预建目录；finalize 只在任务完成时入队；收口 helper 吞异常；Gateway 策展车道对“记忆关闭但有学习请求”的 owner 只跑学习、正常 owner 先整理后学习、学习异常隔离、`memory_curator_enabled=false` 时不跑整理；车道开关按两项配置之一；`skills learned list/show/revert/remove` 真实 CLI 往返（含手改后状态 `user_modified`、回滚被拒、删除入账）；S1 lesson 提案经 runner 自动确认（`confirmed_by=auto`）；四个新配置键的 YAML 默认与越界规范化。
 - **改写** 2 项旧断言（行为按用户决定改变）：`test_skill_proposals.py::test_runner_result_auto_confirms_proposal_when_service_attached`、`test_subagent_lesson_ledger.py` 的自学习开启用例，从“提案保持待确认”改为“自动确认并安装”。
-- **变异验证**：38 种各自使测试失败——触发的 task_local/后台/门槛/do_save、材料脱敏、只收成功读取、名字/更新目标/`#`/frontmatter 正文检查、重名/禁用名/上限/所有权 hash、发布脱敏、guard force、frontmatter 往返、回滚所有权、删除入禁用名单、每日上限、队列上限、去重、前台让路、重试次数、本轮读过过滤、可更新 hash、运行锁、车道准入/重算/总开关/整理开关、组合根开关、finalize 调用、S1 自动确认与确认方、CLI 状态、登记表损坏、来源 run。每次在 `PYTHONDONTWRITEBYTECODE=1` 子进程运行并按 sha256 还原，之后删除 `__pycache__` 重跑。
+- **变异验证**：40 种各自使测试失败——宿主会话绑定、组合根传 owner_id、触发的 task_local/后台/门槛/do_save、材料脱敏、只收成功读取、名字/更新目标/`#`/frontmatter 正文检查、重名/禁用名/上限/所有权 hash、发布脱敏、guard force、frontmatter 往返、回滚所有权、删除入禁用名单、每日上限、队列上限、去重、前台让路、重试次数、本轮读过过滤、可更新 hash、运行锁、车道准入/重算/总开关/整理开关、组合根开关、finalize 调用、S1 自动确认与确认方、CLI 状态、登记表损坏、来源 run。每次在 `PYTHONDONTWRITEBYTECODE=1` 子进程运行并按 sha256 还原，之后删除 `__pycache__` 重跑。
 - **结果**：与改动直接相关的 52 个测试文件（含 `test_architecture_guardrails.py`）1015 passed；ruff、strict code-size（与 main 的 finding 身份逐项对比无新增）、doc sync、`git diff --check`、clean-package 见提交前 gate。真实环境验收见 `docs/design/SKILL_AUTO_SUMMARY.md` 第 14 节与合入后的交接说明。
 
 ## 决策开关、超时自调、统一审计与管理员管控（2026-09-25，分支 `claude/decision-audit-controls`，基于 main `07fa00fb3`）

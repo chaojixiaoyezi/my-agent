@@ -10,6 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from ..backends.provider_headers import provider_session_scope
 from ..backends.request_scope import foreground_model_active
 from ..memory_store.curator_backend import CuratorModelStillRunningError, call_backend_with_timeout
 from .skill_learning_prompt import (
@@ -72,12 +73,14 @@ class SkillLearningSettings:
 
 # LLM: backend 与记忆整理共用（owner 选定模型、非流式）；snapshot_provider 返回当前 owner 的 Skill 快照，
 #   只读取 entries 的 name/description/source/path/stable_id；guard_config 只用于 guard 的文件数与大小上限。
+#   owner_id 用于后台调用自绑宿主会话（要求会话头的服务商没有会话会直接拒绝请求），与 Curator 同一原语。
 # 类用途: 自动总结在运行期依赖的外部对象。
 @dataclass(frozen=True)
 class SkillLearningRuntime:
     backend: object
     snapshot_provider: Callable[[], object]
     guard_config: object | None = None
+    owner_id: str = "local/main"
 
 
 # LLM: status 取 idle/busy/daily_limit/retry 或账本事件名（published/updated/skipped/rejected/failed/dropped）；
@@ -148,18 +151,26 @@ class SkillLearningService:
             return SkillLearningRunResult(STATUS_DAILY_LIMIT, request_key=str(request.get("request_key") or ""))
         material = _material(self.store, request, _snapshot_entries(self.runtime.snapshot_provider))
         try:
-            response = call_backend_with_timeout(
-                self.runtime.backend,
-                prompt=skill_learning_prompt(material),
-                response_schema=skill_learning_response_schema(),
-                timeout_seconds=self.settings.timeout_seconds,
-            )
+            response = self._call_model(material)
         except CuratorModelStillRunningError:
             return SkillLearningRunResult(STATUS_BUSY, request_key=str(request.get("request_key") or ""))
         except Exception as exc:  # noqa: BLE001 - 供应商故障只影响这一条请求，按重试合同记账。
             return self._retry_or_drop(path, request, exc)
         event = self._decide(material, str(getattr(response, "text", "") or ""))
         return self._finish(path, request, event)
+
+    # LLM: 后台线程没有前台的会话 ContextVar：按 owner_id + 请求键自绑宿主会话（同一请求的重试共用同一会话值、
+    #   不冒用前台线程会话），bounded_call 的 copy_context 会把它带进供应商调用线程；退出即复位。
+    # 函数用途: 发起一次无工具结构化总结调用。
+    def _call_model(self, material: SkillLearningMaterial) -> object:
+        session = "skill-learning:" + str(material.request.get("request_key") or "")
+        with provider_session_scope((self.runtime.owner_id,), session):
+            return call_backend_with_timeout(
+                self.runtime.backend,
+                prompt=skill_learning_prompt(material),
+                response_schema=skill_learning_response_schema(),
+                timeout_seconds=self.settings.timeout_seconds,
+            )
 
     # LLM: skip 直接记账；create/update 走自动闸门；输出不合规与闸门拒绝都记 rejected（不重试）。
     # 函数用途: 把模型输出变成一条账本事件（可能伴随发布）。
