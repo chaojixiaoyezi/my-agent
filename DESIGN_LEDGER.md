@@ -16,6 +16,7 @@
   - **S1 调整**：自学习开启时，子代理 lesson 提案立即以 `confirmed_by=auto` 走原确认链安装，复核失败的保持待确认；S2 只对遗留待确认提案生效。
   - **参考**：Hermes 与 OpenClaw 上游的后台 review、所有权、使用回执与账本回滚做法；不照搬配额式“每次都要学”、不扫描直接写和默认关扫描。
   - **未做**：支持文件、后台/Goal 回合学习、使用统计、合并与退役。
+  - **已知限制：自然采用**（2026-09-26 真实验收观察，待跟进）：第 4 轮任务与已发布的 `owner:csv-merge-cli` 高度相关，模型却没调 `skill_search` 直接做完；第 5 轮用户提示“先找一下之前的做法”后才读取并触发更新。Codex 用 `/show-prompt` 取证：Skill/包摘要确实进了最终提示词，采用规则也在，属通用 Skill 采用问题，展示与采用规则归 Skill 路由线；自学习侧只观察，不为 learned Skill 加专项提示。先看线上账本里 `used_skill_ids` 命中率，再决定是否需要通用的采用回执或提示调整。
 
 - **决策开关、超时自调、统一审计与管理员管控（用户 6 项要求）**（2026-09-25，已实施：本地分支 `claude/decision-audit-controls`，基于 main `07fa00fb3`，待合并部署）：① `/model` 决策设置每个点改为“开启 + 观察模式”两个勾选，存储值仍是 off/observe/apply；② my-agent 经 `user_config decision_patch` 自调等待时间受 `capability_config` 的 `decision_agent_timeout_min/max_seconds`（默认 1—30 秒，0 不限）约束，越界拒绝不夹取；③ 评估“每条消息都问一次选模型”：observe 下同步等待且约六成超时、输入以摘要锚点段为主，按现状不划算；已只删材料精简（摘要去原文锚点段并限 1500 字、当前消息限 4000 字、截断如实标注、候选公共声明只写一次，合成输入约减 63%），“只在结构性变化时问”需用户拍板，未做；④ 统计行改为“决策 ≈N token · 成功 X · 失败 Y”；⑤ 新增统一只读审计工具 `audit_records`（topic 枚举，首个 decision；本人范围，跨用户需管理员明确许可；只读设置/用量账本/请求记录观察，不 grep 日志或正文）；⑥ 新增管理员专用 `admin_controls`（每次本人确认；各用户 Jev/审计开关与本人跨用户审计许可存目标 owner 的 `tool_policy.json.admin_controls`，失败关闭），Jev 禁用硬拦在唯一调用入口 `invoke_decision_model_call`。新错误码在 `error_taxonomy.py` 末尾独立块。详见[决策开关、超时自调与审计](docs/design/DECISION_AUDIT_AND_ADMIN_CONTROLS.md)。
 
