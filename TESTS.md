@@ -1,5 +1,15 @@
 # 测试与发布验收
 
+## Compact 分段请求改为片段在前、累计摘要与规则在后（2026-09-26，分支 `claude/curator-budget`，基于 main `54f24ab94`）
+
+- **新测试**：`test_compact_request_budget.py::test_segment_request_puts_source_first_and_carry_with_rules_last`，锁定分段请求是单条文本、`messages=None`，顺序为 源片段 → 结束标记 → 此前摘要 → 摘要规则 → 合并要求；首段写明“无此前摘要”。
+- **测试同步**：分段请求不再有 `messages`。新增共用解析 `segment_part`（放在 `test_compact_request_budget.py`）：按头部区间长度切出片段并核对紧随的结束标记。`test_compact_text_source.py`、`test_compact_source_lifetime.py`、`test_native_tool_ir_compact_and_orphan_sweep.py`、`test_subagent_runtime_compact.py` 改用它；原“prompt 等于压缩指令”的断言改为“摘要规则一节等于压缩指令，执行器稳定前缀不进入分段请求”。
+- **回归**：压缩、摘要、活动工具、上下文压力、辅助调用相关的 70 个测试文件，加 `test_agent_goals.py` 与 `test_architecture_guardrails.py`：923 passed。严格门全部通过；改动模块的 code-size 发现与 main 逐项相同。
+- **隔离真机对比**（8432，隔离 home，同一组合成资料：5 份各约 9 万字、各带一条处理规则；DeepSeek 官方 1M 累积到约 31.3 万 token 后 `/model` 切 MiniMax-M2.7 262K，再问 5 条规则）：
+  - 部署版 `step12w`：压缩自动完成，两段辅助请求共 300,046 输入、344 输出；模型摘要 267 字，一条规则都没有；回答说第 1 份“未显示具体规则”，其余 4 条来自原文地标；另白写 171,960 token 缓存。
+  - 本分支代码：两段共 300,475 输入、1,052 输出；模型摘要 602 字，5 条规则全在；回答逐条正确；无缓存写入。压缩后主请求分别为 28,607 与 28,812 token。
+  - 证据在 `~/.my-agent/releases/compact-window-switch-20260926/`（不进仓库）；隔离 home 与模型目录副本验收后删除。
+
 ## Jev 审计按会话过滤、Compact 兜底收窄与 CI 修复合入（2026-09-26，main `a2604cb7f`，基于 `a53ab52d7`）
 
 - **合入 CI 修复**：`claude/ci-fix` `251247edf`，由 my-agent-dsh-9b 完成，排查记录见下一节，集成方审阅后快进合入。

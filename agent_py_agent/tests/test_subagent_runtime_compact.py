@@ -34,6 +34,7 @@ from agent_py_agent.agent.subagents.services.control_plane_projection import (
     runtime_compact_count,
 )
 from agent_py_agent.tests._tool_runtime_harness import make_test_protocol_snapshot
+from agent_py_agent.tests.test_compact_request_budget import segment_part
 from agent_py_agent.tests.test_subagent_compact_recovery import _http
 from agent_py_agent.tests.test_subagent_compact_recovery_continuation import (
     _is_probe,
@@ -591,8 +592,8 @@ def test_subagent_preflight_compacts_large_completed_history_before_sampling(
     # 300K 字符源超过 64K 窗口，必须分段而不是单次超窗发送；每段禁用执行工具，全部覆盖后仅提交一代。
     assert len(backend.summary_prompts) > 1
     assert all(k["tools"] == [] and k["tool_choice"].mode == "none" for k in backend.summary_kwargs)
-    source = "".join(k["messages"][0]["content"][0]["text"].split("]：\n", 1)[1]
-                     for k in backend.summary_kwargs)
+    # 分段请求是单条文本 prompt：按头部区间切出源片段再拼回完整来源。
+    source = "".join(segment_part(prompt)[3] for prompt in backend.summary_prompts)
     assert "old requirement " + "x" * 150_000 in source
     assert "old completed work " + "y" * 150_000 in source
     assert len(backend.model_prompts) == 1
