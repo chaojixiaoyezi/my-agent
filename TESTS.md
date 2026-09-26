@@ -10,7 +10,7 @@
   - 诊断：同一线程先成功提取一次，再遇预算失败，`last_model_attempts()` 为空；缩批时写一行只含条数的 WARNING 日志（成功运行的 warning 不进运行账，靠它在网关日志里看到缩批），未缩批时不写。
 - **变异验证**：9 种（不调用缩批、缩批挪到标注之后、开头不清空形状、先截审计、允许截空、从头部截、不返回 warning、缩批不写日志、未超预算也换新对象）全部使测试失败。每次在 `PYTHONDONTWRITEBYTECODE=1` 子进程运行，并按 sha256 还原。
 - **回归**：与 Curator 相关的 22 个测试文件加 `test_architecture_guardrails.py`，共 477 passed。
-- **生产验证**（main `e47f60d0b`，双机 `step12l-5145e6cc`）：本机 owner 在 9/24 15:39Z 到 9/26 07:17Z 共 307 次 `CURATOR_INPUT_BUDGET_EXCEEDED`，全部是同一个 `cursor_before`。00:23 PDT 切换后第一次运行从同一游标开始，成功处理 44 条消息和 1 条审计，生成 2 个候选和 3 条日记事件，游标前进。缩批日志行随后续补丁上线，见下一次部署记录。
+- **生产验证**（main `e47f60d0b`，双机 `step12l-5145e6cc`）：本机 owner 在 9/24 15:39Z 到 9/26 07:17Z 共 307 次 `CURATOR_INPUT_BUDGET_EXCEEDED`，全部是同一个 `cursor_before`。00:23 PDT 切换后第一次运行从同一游标开始，成功处理 44 条消息和 1 条审计，生成 2 个候选和 3 条日记事件，游标前进。缩批日志行随 `22b052fdb` 上线（双机 `step12m-cdda962b`）；切换后第二次运行（00:30 PDT）处理 24 条消息和 1 条审计，未触发缩批。测试 owner `tui-matrix/p1-r141` 当天修复前 56 次超预算，修复后变为 `CURATOR_MODEL_FAILED`（该 owner 未配模型，属配置问题）。
 
 ## 智能程度（推理强度）：`/effort` 与子代理 `effort`（2026-09-26，已合入 main `7a15c9c91`，基于 `84d9e50ac`）
 
