@@ -35,6 +35,7 @@ from ..settings.decision_settings_schema import POINT_RUNTIME_SCOPES
 from ..settings.model_profiles import model_profiles_path, read_model_profiles
 from ..settings.model_provider_schema import ModelProfileError
 from ..user_space.owner_admin_controls import owner_decision_model_allowed
+from .decision_outcome_log import append_decision_outcome, decision_outcome_row
 from .decision_policy import (
     ActiveDecision,
     connection_revision,
@@ -221,15 +222,42 @@ def _stale(agent: object, params: object, stage: DecisionStage, point: str, revi
     return ""
 
 
+# LLM: decide 的原参数原样打包，只在 decide 与 _decide_outcome 之间传递，不做任何推断或默认值补全。
+# 类用途: 把一次建议请求的阶段、点位、状态、题目、期限与重试标志作为整体交给内部实现。
+@dataclass(frozen=True)
+class _DecideCall:
+    stage: DecisionStage
+    point: str
+    state: object
+    questions: dict
+    candidates_revision: str
+    source_refs: tuple[str, ...]
+    caller_deadline: float | None
+    explicit_retry: bool
+
+
 # LLM: 实验 stage 忽略自带 error_code，在构造请求/后端前复读准入并失败关闭，伪造 stage 不能放行；普通点仍沿原 schema/身份/期限及调用账。
+#   每次返回的结果（含冷却跳过、到期、配置不可用）都按点位写一行决策结果日志（decision_outcome_log，无正文）；
+#   用户中断照常上抛、不记录。审计据此区分"点位没触发"和"触发了但被冷却/期限挡住"。
 # 函数用途: 在合法范围请求建议；实验只在点普通模式为 off 时以 observe 运行并经原预算与发送许可联网，结果永不获得采用权。
 def decide(agent: object, params: object, stage: DecisionStage, *, point: str, state: object, questions: dict,
            candidates_revision: str, source_refs: tuple[str, ...] = (), caller_deadline: float | None = None,
            explicit_retry: bool = False) -> DecisionOutcome:
+    started = time.monotonic()
+    outcome = _decide_outcome(agent, params, _DecideCall(
+        stage, point, state, questions, candidates_revision, source_refs, caller_deadline, explicit_retry))
+    append_decision_outcome(agent, decision_outcome_row(stage, point, outcome, time.monotonic() - started))
+    return outcome
+
+
+# LLM: decide 的实现；返回语义与原 decide 完全一致。冷却先看整条连接，再看本点位（超时只冷却本点位，见 _failure_key）。
+# 函数用途: 校验身份与范围、解析路由和期限、检查冷却后调用决策模型，任何失败都保留原业务方案。
+def _decide_outcome(agent: object, params: object, call: _DecideCall) -> DecisionOutcome:
     _check_interrupted()
     mode = "off"
+    stage, point = call.stage, call.point
     try:
-        if type(point) is not str or point not in POINT_RUNTIME_SCOPES or type(explicit_retry) is not bool:
+        if type(point) is not str or point not in POINT_RUNTIME_SCOPES or type(call.explicit_retry) is not bool:
             raise DecisionInputError("决策接入点或重试标志无效。")
         if not isinstance(stage, DecisionStage) or _identity(agent, params, scope=stage.scope) != (stage.owner_ref, stage.thread_id, stage.run_id, stage.task_id):
             return DecisionOutcome(mode, "stale", reason="identity_changed")
@@ -240,7 +268,7 @@ def decide(agent: object, params: object, stage: DecisionStage, *, point: str, s
         if POINT_RUNTIME_SCOPES[point] != stage.scope:
             raise DecisionInputError("决策接入点与本次运行范围不匹配。")
         started = time.monotonic()
-        caller = _deadline(caller_deadline)
+        caller = _deadline(call.caller_deadline)
         mode, refused, route = _route(agent, params, stage, point=point)
         if refused is not None:
             return refused
@@ -250,12 +278,16 @@ def decide(agent: object, params: object, stage: DecisionStage, *, point: str, s
             return DecisionOutcome(mode, "deadline", reason="budget_exhausted")
         connection = connection_revision(config)
         key = stage.owner_ref, row["profile_id"], connection
-        blocked, remaining = cooldown_state(key, revision, retry=explicit_retry)
+        blocked, remaining = cooldown_state(key, revision, retry=call.explicit_retry)
+        reason = "connection_backoff"
+        if not blocked:
+            blocked, remaining = cooldown_state((*key, point), revision, retry=call.explicit_retry)
+            reason = "point_backoff"
         if blocked:
-            return DecisionOutcome(mode, blocked, reason="connection_backoff", retry_after_seconds=remaining)
-        binding = DecisionBinding(point, stage.owner_ref, stage.operation_id, revision, candidates_revision,
-            stage.thread_id, stage.run_id, stage.task_id, source_refs)
-        request = DecisionRequest(binding, state, questions)
+            return DecisionOutcome(mode, blocked, reason=reason, retry_after_seconds=remaining)
+        binding = DecisionBinding(point, stage.owner_ref, stage.operation_id, revision, call.candidates_revision,
+            stage.thread_id, stage.run_id, stage.task_id, call.source_refs)
+        request = DecisionRequest(binding, call.state, call.questions)
         backend = decision_backend_from_profile(config)
         active = ActiveDecision(stage.owner_ref, stage.thread_id, point, InterruptHandle(), agent, settings)
         token = uuid.uuid4().hex
@@ -346,6 +378,7 @@ def _invoke_call(params, *, stage, request, backend, deadline, key, active, expe
             resource_key=("decision", stage.owner_ref, stage.thread_id, key[1], key[2]), interrupt_handle=active.handle,
             experiment=experiment)
         record_success(key)
+        record_success((*key, point))
         _check_interrupted()
         if (revoked := _revoked(active, mode)) is not None:
             return revoked
@@ -419,12 +452,22 @@ def _failure_outcome(request: DecisionRequest, exc: Exception, active: ActiveDec
         return DecisionOutcome(mode, "error", reason="settings_busy")
     if not isinstance(exc, (ProviderConfigurationError, ProviderRecoverableError, BoundedCallTimeoutError, TimeoutError)):
         return DecisionOutcome(mode, "error", reason="enhancement_failed")
-    status = record_failure(key, request.binding.policy_revision, exc)
+    status = record_failure(_failure_key(key, request.binding.point, exc), request.binding.policy_revision, exc)
     if isinstance(exc, (BoundedCallTimeoutError, ProviderTimeoutError, TimeoutError)):
         status = "deadline"
     elif status == "cooldown":
         status = "error"
     return DecisionOutcome(mode, status, reason="provider_failed")
+
+
+# LLM: 超时只说明这条线路对本点位的时间预算不够（服务仍能响应），只冷却本点位；连接错误、5xx、额度与配置问题说明连接本身
+#   有问题，冷却整条连接（全部点位）。只按异常类型判断，不解析错误文案。2026-09-26 真机：选模型每次最先超时，
+#   整条连接冷却到 300 秒，其它点位长期拿不到调用机会。
+# 函数用途: 选出一次失败应计入的冷却键：点位键或连接键。
+def _failure_key(key: tuple[str, str, str], point: str, exc: Exception) -> tuple[str, ...]:
+    if isinstance(exc, (BoundedCallTimeoutError, ProviderTimeoutError, TimeoutError)):
+        return (*key, point)
+    return key
 
 
 # LLM: 消费者在刷新候选后共用此只读门；沿原非阻塞设置/身份复核，不联网、不重置期限，用户取消不能吞成可选失败。

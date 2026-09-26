@@ -86,6 +86,7 @@ class OwnerHomeResult:
     artifact_backups_dir: Path
     skill_proposals_dir: Path
     skill_learning_dir: Path
+    decision_outcomes_jsonl: Path
     scheduler_dir: Path
     scheduler_store_json: Path
     scheduler_history_jsonl: Path
@@ -174,6 +175,7 @@ def home_paths_with_owner(paths: MyAgentHomePaths, owner: OwnerHomeResult) -> My
         owner_artifact_backups_dir=owner.artifact_backups_dir,
         owner_skill_proposals_dir=owner.skill_proposals_dir,
         owner_skill_learning_dir=owner.skill_learning_dir,
+        owner_decision_outcomes_jsonl=owner.decision_outcomes_jsonl,
         owner_scheduler_dir=owner.scheduler_dir,
         owner_scheduler_store_json=owner.scheduler_store_json,
         owner_scheduler_history_jsonl=owner.scheduler_history_jsonl,
@@ -195,7 +197,8 @@ def _owner_home_dir(root: Path, identity: OwnerIdentity) -> Path:
 
 
 # LLM: 与 home_layout_v2 的本地主用户路径保持一致，新增权威字段须同步两侧及 owner 隔离测试；
-#   skill_proposals_dir / skill_learning_dir 只声明位置，不进入初始化目录清单，由首次生成提案或学习请求时创建。
+#   skill_proposals_dir / skill_learning_dir / decision_outcomes_jsonl 只声明位置，不进入初始化目录清单，
+#   由首次生成提案、学习请求或决策结果记录时创建。
 # 函数用途: 从可信身份的 home 生成完整规范位置，不创建目录或加载用户状态。
 def _owner_home_result(root: Path, identity: OwnerIdentity, home_dir: Path) -> OwnerHomeResult:
     memory = home_dir / "memory"
@@ -240,6 +243,7 @@ def _owner_home_result(root: Path, identity: OwnerIdentity, home_dir: Path) -> O
         artifact_backups_dir=data / "artifact_backups",
         skill_proposals_dir=data / "skill_proposals",
         skill_learning_dir=data / "skill_learning",
+        decision_outcomes_jsonl=data / "decision" / "outcomes.jsonl",
         scheduler_dir=scheduler,
         scheduler_store_json=scheduler / "store.json",
         scheduler_history_jsonl=scheduler / "history.jsonl",

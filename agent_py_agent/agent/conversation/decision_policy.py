@@ -29,7 +29,7 @@ _MAX_ACTIVE = 256
 _BASE_COOLDOWN_SECONDS = 30.0
 _MAX_COOLDOWN_SECONDS = 300.0
 # 值为 (状态, 设置修订, 冷却截止或 None, 连续失败次数)；冷却过期后保留次数，成功或显式重试才清除。
-_FAILURES: OrderedDict[tuple[str, str, str], tuple[str, str, float | None, int]] = OrderedDict()
+_FAILURES: OrderedDict[tuple[str, ...], tuple[str, str, float | None, int]] = OrderedDict()
 _ACTIVE: dict[str, ActiveDecision] = {}
 # 宿主进程开始收尾后置位且不复位：此后不再登记新的在途决策，进程随后退出。
 _HOST_SHUTDOWN = False
@@ -104,10 +104,11 @@ def unregister_active(key: str, active: ActiveDecision) -> None:
             del _ACTIVE[key]
 
 
-# LLM: 显式 retry 清除一个准确连接的冷却及连续失败次数；配置错误在配置修订改变前不热循环重发。
+# LLM: 键是连接键 (owner, profile, 连接摘要)，或在其后加点位名的点位键（超时只冷却本点位，见 decision_service._failure_key）。
+#   显式 retry 清除一个准确键的冷却及连续失败次数；配置错误在配置修订改变前不热循环重发。
 # 冷却过期只放行本次尝试，不删记录：下一次失败要据此加长冷却，成功才由 record_success 清除。
-# 函数用途: 返回当前连接的阻塞原因和剩余冷却秒数，未知连接不受其他 owner 故障影响。
-def cooldown_state(key: tuple[str, str, str], revision: str, *, retry: bool = False) -> tuple[str, float]:
+# 函数用途: 返回当前连接或点位的阻塞原因和剩余冷却秒数，未知键不受其他 owner 故障影响。
+def cooldown_state(key: tuple[str, ...], revision: str, *, retry: bool = False) -> tuple[str, float]:
     with _LOCK:
         item = _FAILURES.get(key)
         if item is None:
@@ -126,7 +127,7 @@ def cooldown_state(key: tuple[str, str, str], revision: str, *, retry: bool = Fa
 # LLM: 只按异常类型分类，不能解析中文/服务商正文；不改变主 LLM 配置或其重试策略。
 # 冷却期内返回的并发失败属于同一次故障，不加长阶梯；只有冷却过期后的重试再失败才翻倍。
 # 函数用途: 记录一个连接的配置等待或有界冷却：额度 300 秒，其他故障 30 秒起、连续失败翻倍、封顶 300 秒。
-def record_failure(key: tuple[str, str, str], revision: str, error: Exception) -> str:
+def record_failure(key: tuple[str, ...], revision: str, error: Exception) -> str:
     if isinstance(error, ProviderConfigurationError):
         with _LOCK:
             _store_failure(key, ("configuration_required", revision, None, 0))
@@ -151,7 +152,7 @@ def _next_cooldown(previous: tuple | None, now: float, quota: bool) -> tuple[int
 
 # LLM: 调用方持有 _LOCK；表有界，满时淘汰最久未用的连接记录，淘汰只会让该连接从 30 秒重新计起。
 # 函数用途: 写入一条连接失败记录并维持表的上限。
-def _store_failure(key: tuple[str, str, str], item: tuple[str, str, float | None, int]) -> None:
+def _store_failure(key: tuple[str, ...], item: tuple[str, str, float | None, int]) -> None:
     _FAILURES[key] = item
     _FAILURES.move_to_end(key)
     while len(_FAILURES) > _MAX_FAILURES:
@@ -160,7 +161,7 @@ def _store_failure(key: tuple[str, str, str], item: tuple[str, str, float | None
 
 # LLM: 连接真实返回过响应即清除该连接的冷却和连续失败次数；响应之后的绑定/期限复核失败不属于连接故障。
 # 函数用途: 在决策调用成功返回后复位这个连接的退避阶梯。
-def record_success(key: tuple[str, str, str]) -> None:
+def record_success(key: tuple[str, ...]) -> None:
     with _LOCK:
         _FAILURES.pop(key, None)
 

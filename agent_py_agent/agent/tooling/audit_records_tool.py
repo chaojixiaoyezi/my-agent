@@ -71,10 +71,12 @@ def _owner_host(agent: object, home: object) -> SimpleNamespace:
                            conversation_store=owner_conversation_store(agent, home, initialize=False))
 
 
-# LLM: 设置读取失败只记结构化原因（设置忙或配置不可读），不影响用量统计。
-# 函数用途: 汇总一个 owner 的决策设置、管理员控制和时间窗内的调用统计。
+# LLM: 设置读取失败只记结构化原因（设置忙或配置不可读），不影响用量统计。points 取 owner 决策结果日志的按点位汇总，
+#   是判断某接入点是否被调用、被冷却/期限挡住的唯一来源；用量账只按用途汇总，不能拿它推断单个点位。
+# 函数用途: 汇总一个 owner 的决策设置、管理员控制、时间窗内的调用统计和各接入点的决策结果。
 def _decision_owner_report(owner_id: str, host: object, thread_ids: list[str], query: AuditQuery) -> dict:
     from ..conversation.decision_audit import decision_settings_summary, decision_usage_summary
+    from ..conversation.decision_outcome_log import decision_outcome_summary
     from ..user_space.owner_admin_controls import read_owner_admin_controls
 
     try:
@@ -85,7 +87,8 @@ def _decision_owner_report(owner_id: str, host: object, thread_ids: list[str], q
         settings = {"unavailable": "settings_unreadable"}
     controls = read_owner_admin_controls(host.home_paths)
     return {"owner_id": owner_id, "admin_controls": {key: controls[key] for key in ("decision_model_allowed", "audit_allowed")},
-            "settings": settings, "usage": decision_usage_summary(host.conversation_store, thread_ids, since=query.since)}
+            "settings": settings, "usage": decision_usage_summary(host.conversation_store, thread_ids, since=query.since),
+            "points": decision_outcome_summary(host.home_paths, since=query.since)}
 
 
 # LLM: 请求记录只经宿主写入器读取（Gateway 运行时才有），读取器不存在即报告不可用，不改从日志或配置推导队列位置。
@@ -120,7 +123,7 @@ def _decision_topic(agent: object, query: AuditQuery) -> dict:
         owners.append(_decision_owner_report(owner_id, host, ids, query))
     return {"owners": owners, "owners_truncated": truncated, "unreadable_thread_records": unreadable_threads,
             "observations": _observations(agent, thread_owners, query),
-            "sources": ["decision_settings", "model_usage_ledger", "gateway_request_records"]}
+            "sources": ["decision_settings", "model_usage_ledger", "decision_outcome_log", "gateway_request_records"]}
 
 
 # LLM: requests 主题实现在 audit_requests_topic（延迟导入避免循环）；范围与许可已由 execute 裁决。
@@ -163,6 +166,7 @@ class AuditRecordsTool(BaseTool):
         description=(
             "统一审计入口：查询当前用户自己的结构化运行记录，回答'到底调没调用、成功失败几次、用了多少 token、设置是什么、为什么失败'。"
             "topic=decision 汇总决策模型（Jev）：有效设置与各接入点模式、会话用量账本里的调用次数/成功/失败/超时/已报输入 token、"
+            "各接入点的决策结果（成功/超时/冷却跳过等次数与最近几条；某点没出现只说明窗口内没触发），"
             "Gateway 请求记录里的选模型与能力推荐观察。topic=requests 列出 Gateway 请求结果：状态、错误码及处理建议、渠道、"
             "私聊/群聊、耗时和归属用户；用户说'飞书/IM/TUI 发消息报错、没回复'时先用它查，管理员调用时还附带管理员密码是否已设、"
             "哪些 IM 私聊已绑定管理员。scope=current_thread 只看当前会话，owner（默认）看本人全部会话，"

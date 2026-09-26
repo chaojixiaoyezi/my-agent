@@ -1,5 +1,28 @@
 # 测试与发布验收
 
+## Jev 决策结果日志与点位冷却（2026-09-26，分支 `claude/curator-budget`，基于 main `a3f5c17ec`）
+
+- **来源**：用户 TUI 里的模型据 `audit_records` 断言 Jev"只接了选模型"。查实原因有三：Jev 经代理访问慢，单次约 2.5–5 秒；任一点位超时就冷却整条连接，选模型每轮最先超时，把其它点位全挡住；审计只看得到选模型和能力展示的观察。
+- **新测试** `test_decision_outcome_log.py`，共 4 项：
+  - 日志行只含结构化字段。
+  - 只写 owner 规范路径，有条数上限；没有该路径的宿主不写文件。
+  - 汇总按时间窗口按点位计数，坏行单独计数。
+  - 经本地假决策服务走真实 `decide()`：超时、成功、点位冷却各落一行；请求材料不进日志；审计按点位给出次数。
+- **改写测试** `test_decision_curator_plugin_concurrency.py`：原"后台超时冷却共享连接"的契约改为三项：
+  - 后台超时只冷却本点位，前台照常请求并成功；同一点位换新阶段后 `point_backoff`，不发请求。
+  - 冷却到期后本点位成功一次就清掉失败阶梯，下次超时从 30 秒重新计起。
+  - 服务端 503 仍冷却整条连接，前台 `connection_backoff`、不发请求。
+- **调整** `test_decision_fault_matrix.py`：慢响应（超时）那一格的原因改为 `point_backoff`，其余故障仍为 `connection_backoff`。
+- **变异验证**：8 种变异各自使测试失败：
+  - 日志与审计：不记日志、审计不带点位、汇总不按窗口。
+  - 冷却分级：超时仍冷却整条连接、所有失败都只冷却点位、不查点位冷却、成功不清点位冷却、点位冷却原因写成连接。
+
+  "成功不清点位冷却"最初没被杀死，补了阶梯重置测试才杀死。还原后逐字节一致（`PYTHONDONTWRITEBYTECODE=1`）。
+- **回归**：
+  - 引用决策服务、冷却策略、审计工具或 owner 路径布局的 100 个测试文件（含 `test_architecture_guardrails.py`）：1686 passed。
+  - 构造 `SimpleAgent` 的 117 个测试文件：2278 passed、8 skipped、29 xfailed。
+  - 严格门全部通过；code-size 总数与 main 相同。原 `decide` 的长度发现随函数体移到 `_decide_outcome`（50→53 行，仍为 high-risk）；参数打包后没有新增参数发现。
+
 ## macOS 沙箱读边界第二步：拒读用户家目录（开关默认关闭，2026-09-26，分支 `claude/curator-budget`，基于 main `e24aae8ab`）
 
 - **改动**：
