@@ -6,7 +6,7 @@ import json
 import math
 
 from prompt_toolkit.layout import HSplit, ScrollablePane
-from prompt_toolkit.widgets import Label, RadioList, TextArea
+from prompt_toolkit.widgets import CheckboxList, Label, RadioList, TextArea
 
 from ...agent.settings.decision_settings_schema import POINTS, validate_decision_field
 from .tui_model_menu import _dialog, _request
@@ -24,7 +24,8 @@ _GENERAL = {"enabled": "总开关", "profile_id": "默认决策模型", "timeout
 _POINT_FIELDS = {"mode": "模式", "profile_id": "决策模型", "timeout_seconds": "单次上限（秒）",
                  "context_policy": "上下文减量策略", "optional_categories": "可选工具类别",
                  "candidate_profile_ids": "子代理执行模型候选"}
-_MODES = {"off": "关闭", "observe": "仅观察", "apply": "采用建议"}
+# 模式仍只有 off/observe/apply 三个存储值；界面按"开/关 + 观察模式"呈现（关=off，开+观察=observe，开+不观察=apply）
+_MODES = {"off": "关", "observe": "开 · 观察模式", "apply": "开 · 正式使用"}
 _CONTEXT_POLICIES = {"metadata": "仅精简名卡与推荐", "progressive": "名卡与可选工具渐进披露"}
 
 
@@ -189,24 +190,46 @@ def _field_text_value(field: str, text: str):
     return _seconds(text)
 
 
+# LLM: 开关与上下文策略用单选，其余（秒数、JSON 数组）用单行文本；取值仍由 _field_text_value 与设置服务校验。
+# 函数用途: 为非模式、非模型编号的字段生成编辑控件。
+def _plain_control(field: str, value):
+    if field in {"enabled", "experiment_enabled"} or field.endswith(".context_policy"):
+        rows = ([(False, "关闭"), (True, "开启")] if field in {"enabled", "experiment_enabled"} else
+                list(_CONTEXT_POLICIES.items()))
+        return RadioList(rows, default=value, select_on_focus=True)
+    return TextArea(text=json.dumps(value, ensure_ascii=False) if isinstance(value, list) else str(value), height=1, multiline=False)
+
+
+# LLM: 两个勾选项只是呈现，保存时换算回唯一的 mode 值：不勾"开启"=off，开启且勾"观察模式"=observe，开启不勾=apply。
+#   新开启的点默认勾观察（先观察再正式使用）；关闭时观察勾选不参与保存。
+# 函数用途: 生成点位"开启 / 观察模式"勾选框，并返回把当前勾选换算成模式值的函数。
+def _mode_control(value: str):
+    control = CheckboxList([("enabled", "开启"), ("observe", "观察模式（只记录建议，不采用）")])
+    # 构造后再设勾选：若用 default_values，光标会停在第一个已勾项，空格就会先切掉"观察模式"而不是"开启"
+    control.current_values = [key for key, on in (("enabled", value != "off"), ("observe", value != "apply")) if on]
+    return control, lambda: "off" if "enabled" not in control.current_values else "observe" if "observe" in control.current_values else "apply"
+
+
 # LLM: 每次只提交原字段/CAS；两个布尔开关都不构造授权信封，实验能力编辑必须说明当前联网不可用。
+#   点位模式用"开启 / 观察模式"两个勾选项编辑，存储仍是原 off/observe/apply。
 # 函数用途: 编辑普通开关、实验能力或点级配置，保存后读回，不触发实验或探测。
 async def _edit_field(app, agent, session: str, view: dict, field: str) -> str:
     value = _value(view, field)
+    mode_value = None
     if field.endswith("profile_id"):
         control = await _profile_choices(app, agent, session, value)
         if control is None:
             return "模型目录不可用；仍可返回修改开关或恢复继承。"
-    elif field in {"enabled", "experiment_enabled"} or field.endswith((".mode", ".context_policy")):
-        rows = ([(False, "关闭"), (True, "开启")] if field in {"enabled", "experiment_enabled"} else
-                list(_CONTEXT_POLICIES.items()) if field.endswith(".context_policy") else list(_MODES.items()))
-        control = RadioList(rows, default=value, select_on_focus=True)
+    elif field.endswith(".mode"):
+        control, mode_value = _mode_control(value)
     else:
-        control = TextArea(text=json.dumps(value, ensure_ascii=False) if isinstance(value, list) else str(value), height=1, multiline=False)
+        control = _plain_control(field, value)
     notice = Label("这里只开启能力，不建立实验许可；当前联网实验不可用。" if field == "experiment_enabled" else
                    "候选请填原模型目录 ID 的 JSON 字符串数组；[] 表示全部当前授权生成模型。" if field.endswith(".candidate_profile_ids") else
                    "类别请填 JSON 字符串数组，如 [\"plugins\", \"自定义类别\"]；[] 不额外收起。" if field.endswith(".optional_categories") else
                    "减量可改变缓存前缀/schema；原搜索和权限不变，仅在开启并采用建议时生效。" if field.endswith(".context_policy") else
+                   "空格或回车勾选；关=不调用，开+观察=只记录建议，开+不勾观察=正式使用（采用前仍会复核）。Tab 到保存。"
+                   if field.endswith(".mode") else
                    "恢复继承会删除本范围覆盖；清空模型只表示不绑定。")
     while True:
         action = await _dialog(app, "编辑决策设置", HSplit([Label(_field_label(view, field)), control, notice]),
@@ -216,7 +239,8 @@ async def _edit_field(app, agent, session: str, view: dict, field: str) -> str:
         if action == "reset":
             return await _save(app, agent, session, view, field, reset=True)
         try:
-            chosen = control.current_value if isinstance(control, RadioList) else _field_text_value(field, control.text)
+            chosen = (mode_value() if mode_value is not None else control.current_value if isinstance(control, RadioList)
+                      else _field_text_value(field, control.text))
         except ValueError:
             notice.text = "请输入合法的 JSON 模型编号数组，修改尚未保存。" if field.endswith(".candidate_profile_ids") else "请输入 JSON 字符串数组，修改尚未保存。" if field.endswith(".optional_categories") else "请输入有限且大于 0 的秒数，修改尚未保存。"
             continue

@@ -38,8 +38,13 @@ _APPLY_INSTRUCTIONS = (
 )
 
 
+# 每个候选都相同的两项声明只在请求里写一次（state.candidate_facts），不逐个候选重复
+_CANDIDATE_FACTS = {"capacity_status": "unknown_until_full_request_projection", "tool_support": "unknown_until_original_probe"}
+
+
 # LLM: 只引用原目录的当前可访问生成模型，字段白名单不含端点、凭据或价格；不探针、不迁移、不保存选择。
 #   用户填写了用途标签才带上 usage_tags，作为语义参考；它和窗口一样只是声明，不是能力或容量证明。
+#   容量与工具支持"尚未核对"对所有候选相同，统一放在 state.candidate_facts，不逐个候选重复。
 # 函数用途: 准备本次观察的公开模型候选，窗口是配置声明，不代表完整输入能容纳。
 def _candidates(agent: object, deadline: float) -> dict:
     public = execute_model_profile_operation(agent, "list", {})
@@ -52,24 +57,39 @@ def _candidates(agent: object, deadline: float) -> dict:
         result[row["id"]] = {
             "model_name": row["model_name"], "model_backend": row["model_backend"],
             "declared_context_window_tokens": row["model_context_window_tokens"],
-            "capacity_status": "unknown_until_full_request_projection",
-            "tool_support": "unknown_until_original_probe",
             **({"usage_tags": list(row["usage_tags"])} if row.get("usage_tags") else {}),
         }
     return result
 
 
+# LLM: 只截头部、不改写；截断与否写进 input_completeness，不能把截断后的材料冒充完整输入。limit<=0 表示不截断。
+# 函数用途: 按字符上限截取一段材料，并返回它的完整性标注。
+def _bounded_text(value: str, limit: int) -> tuple[str, dict]:
+    if limit <= 0 or len(value) <= limit:
+        return value, {"status": "complete", "chars": len(value)}
+    return value[:limit], {"status": "truncated", "chars": len(value), "kept_chars": limit}
+
+
 # LLM: 原提示和原摘要仅供语义判断；完整历史、system/native schemas、图像及真实输出预留尚未准备，必须明确未知。
+#   只删材料：摘要只带语义部分（去掉原文锚点段），摘要与当前消息按主配置字符上限截头，截断如实标注；候选公共声明只写一次。
 # 函数用途: 描述这一新主请求和当前冻结模型，不把不完整输入伪装成可自动切换的容量证明。
 def _observation_input(context: object, thread: object, captured: SelectedModelRead, candidates: dict) -> tuple[dict, dict]:
+    from .conversation.compact import semantic_summary_text
+
     config = context.agent.config
+    prompt, prompt_fact = _bounded_text(str(context.request.get("prompt") or context.request.get("goal") or "").strip(),
+                                        config.decision_model_selection_prompt_max_chars)
+    summary, summary_fact = _bounded_text(semantic_summary_text(thread.summary),
+                                          config.decision_model_selection_summary_max_chars)
     state = {
-        "prompt": str(context.request.get("prompt") or context.request.get("goal") or "").strip(),
-        "conversation_summary": thread.summary,
+        "prompt": prompt,
+        "conversation_summary": summary,
+        "candidate_facts": dict(_CANDIDATE_FACTS),
         "current_model": {"profile_id": captured.profile_id, "model_name": config.model_name,
                           "model_backend": config.model_backend, "context_window_tokens": config.model_context_window_tokens},
         "observed_thread_selection": {"profile_id": thread.model_profile_id, "revision": thread.model_selection_revision},
-        "input_completeness": {"full_history": "unknown", "system_and_native_schemas": "unknown",
+        "input_completeness": {"prompt": prompt_fact, "conversation_summary": {**summary_fact, "landmarks": "omitted"},
+                               "full_history": "unknown", "system_and_native_schemas": "unknown",
                                "multimodal_inputs": "unknown", "output_and_reasoning_reserve": "unknown"},
     }
     questions = {"model": {"type": "choice", "instructions": (

@@ -1494,6 +1494,12 @@ def _without_conversation_landmark_suffix(value: str) -> str:
     return text[:marker_at].rstrip()
 
 
+# LLM: 公开给只需要语义摘要的有界输入（如选模型决策）；只按固定锚点标题切掉原文锚点段，不改写语义部分。
+# 函数用途: 返回会话摘要里的语义部分（去掉 Exact Conversation Landmarks 原文锚点段）。
+def semantic_summary_text(value: str) -> str:
+    return _without_conversation_landmark_suffix(value)
+
+
 # LLM: Only canonical user/final-answer lines from a prior summary may be inherited. Arbitrary
 # bullets in provider prose are not promoted into the exact-landmark projection.
 # 函数用途: 从上一代摘要里取回既有用户请求和最终答复锚点，供下一代去重续接。
@@ -1767,4 +1773,5 @@ __all__ = [
     "inspect_conversation_context",
     "prepare_conversation_context",
     "render_conversation_context_usage",
+    "semantic_summary_text",
 ]

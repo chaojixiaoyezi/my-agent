@@ -474,3 +474,34 @@ def test_question_explains_usage_tags_and_apply_asks_for_the_best_semantic_match
         assert "按任务的语义需要挑选最合适的候选" in instructions and "本次只观察" not in instructions
     else:
         assert "本次只观察" in instructions
+
+
+@pytest.mark.parametrize("summary_limit,prompt_limit", [(40, 6), (0, 0)])
+def test_selection_input_drops_landmarks_bounds_text_and_states_candidate_facts_once(tmp_path, monkeypatch,
+                                                                                   summary_limit, prompt_limit):
+    fixture = prepared(tmp_path)
+    fixture.agent.config.decision_model_selection_summary_max_chars = summary_limit
+    fixture.agent.config.decision_model_selection_prompt_max_chars = prompt_limit
+    semantic = "语义摘要" * 20
+    fixture.agent.conversation_store.threads.update_summary(
+        fixture.thread_id, semantic + "\n\n## Exact Conversation Landmarks (non-authoritative)\n- user: LANDMARK-TEXT")
+    backend = install_backend(monkeypatch, fixture)
+    capture_main(monkeypatch)
+    request_execution._run_gateway_ask(fixture.context)
+    body = json.loads(backend.calls[0][0]._body)
+    state, prompt = body["state"], fixture.context.request["prompt"]
+    assert "LANDMARK-TEXT" not in json.dumps(body, ensure_ascii=False)
+    completeness = state["input_completeness"]
+    if summary_limit:
+        assert state["conversation_summary"] == semantic[:40] and state["prompt"] == prompt[:6]
+        assert completeness["conversation_summary"] == {"status": "truncated", "chars": 80, "kept_chars": 40,
+                                                        "landmarks": "omitted"}
+        assert completeness["prompt"] == {"status": "truncated", "chars": len(prompt), "kept_chars": 6}
+    else:
+        assert state["conversation_summary"] == semantic and state["prompt"] == prompt
+        assert completeness["conversation_summary"]["status"] == completeness["prompt"]["status"] == "complete"
+    # 容量/工具"尚未核对"对所有候选相同，只写一次；采用门与指令不变
+    assert state["candidate_facts"] == {"capacity_status": "unknown_until_full_request_projection",
+                                        "tool_support": "unknown_until_original_probe"}
+    assert "capacity_status" not in json.dumps(body["questions"], ensure_ascii=False)
+    assert completeness["full_history"] == "unknown"

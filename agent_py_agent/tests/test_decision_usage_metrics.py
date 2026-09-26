@@ -6,7 +6,9 @@ import pytest
 
 from agent_py_agent.agent.agent_core.model.call_runtime import (
     model_call_summary,
+    record_model_call_failed,
     record_model_call_finished,
+    record_model_call_timeout,
 )
 from agent_py_agent.agent.contracts.model_call_ledger import ModelCallStartedParams
 from agent_py_agent.agent.conversation.model_metrics import (
@@ -21,13 +23,20 @@ from agent_py_agent.tests.test_tui_model_metrics import fixture, settled
 
 # LLM: 在同一原账本写入宿主决策用途与真实字段；不构造生成正文或用估算冒充供应商用量。
 # 函数用途: 添加一条决策完成记录，供持久增量与显示验证。
-def decision(agent, params, *, call_id="decision-1", usage=None):
+def decision(agent, params, *, call_id="decision-1", usage=None, outcome="finished"):
     ledger = agent._model_call_ledger
     ledger.started(ModelCallStartedParams(call_id, "typesafe_decision", "systemone", 42,
         request_id=params.request_id, run_id=params.run_id,
         metadata={"purpose": "decision", "logical_call_id": call_id}))
     response = SimpleNamespace(usage={} if usage is None else usage)
-    record_model_call_finished(ledger, call_id, response)
+    settle = {
+        "timed_out": lambda: record_model_call_timeout(ledger=ledger, call_id=call_id, timeout_seconds=2.0,
+                                                       timeout_stage="wall_clock"),
+        "failed": lambda: record_model_call_failed(ledger, call_id, ConnectionError("refused")),
+        "finished": lambda: record_model_call_finished(ledger, call_id, response),
+    }.get(outcome)
+    if settle is not None:
+        settle()
     return response
 
 
@@ -60,13 +69,13 @@ def test_purpose_snapshot_delta_counts_input_once_and_keeps_real_output(tmp_path
     assert total["purpose_breakdown"]["decision"]["output_tokens"] == 3
 
 
-@pytest.mark.parametrize("usage,expected,complete,label", [
-    ({"input_tokens": 0}, 0, True, "决策入 0"),
-    ({"input_tokens": 12, "output_tokens": 3}, 12, True, "决策入 12"),
-    ({"output_tokens": 3}, None, False, "决策入 未知"),
-    ({}, None, False, "决策入 未知"),
+@pytest.mark.parametrize("usage,expected,reported,label", [
+    ({"input_tokens": 0}, 0, 1, "决策 ≈0 token · 成功 1 · 失败 0"),
+    ({"input_tokens": 12, "output_tokens": 3}, 12, 1, "决策 ≈12 token · 成功 1 · 失败 0"),
+    ({"output_tokens": 3}, None, 0, "决策 ≈? token · 成功 1 · 失败 0"),
+    ({}, None, 0, "决策 ≈? token · 成功 1 · 失败 0"),
 ])
-def test_decision_metrics_preserve_main_rounds_cache_tools_and_unknown(tmp_path, usage, expected, complete, label):
+def test_decision_metrics_preserve_main_rounds_cache_tools_and_unknown(tmp_path, usage, expected, reported, label):
     agent, params, clock, _, _ = fixture(tmp_path)
     response = settled(agent, params, clock)
     initial = publish_model_metrics(agent, params, pending=False, tool_count=4, response=response, call_id="call-1")
@@ -76,12 +85,12 @@ def test_decision_metrics_preserve_main_rounds_cache_tools_and_unknown(tmp_path,
         assert metrics.get(key) == initial.get(key)
     assert metrics["decision_call_count"] == 1
     assert metrics["decision_input_tokens"] == expected
-    assert metrics["decision_input_complete"] is complete
+    assert metrics["decision_input_reported_calls"] == reported
     # 正常生成边界也不把决策算成生成轮；错误传入决策响应不污染最近生成缓存。
     metrics = publish_model_metrics(agent, params, pending=True, response=response, call_id="decision-1")
     assert metrics["model_rounds"] == 1 and metrics["cache_percent"] == initial["cache_percent"]
     text = "".join(part[1] for line in render_model_metrics(metrics, 250) for part in line)
-    assert label in text and "决策出" not in text and "价格" not in text
+    assert label in text and "决策入" not in text and "决策出" not in text and "价格" not in text
     for width in (30, 80, 110, 180):
         rendered = "".join(part[1] for line in render_model_metrics(metrics, width) for part in line)
         assert display_width_text(rendered) <= width
@@ -94,9 +103,31 @@ def test_partial_decision_usage_is_not_hidden_by_complete_other_call(tmp_path):
     metrics = publish_model_metrics(agent, params, pending=False)
     assert metrics["model_rounds"] == 0
     assert metrics["input_tokens"] == 12 and metrics["estimated_tokens"] == 42
-    assert metrics["decision_input_tokens"] == 12 and not metrics["decision_input_complete"]
+    assert metrics["decision_input_tokens"] == 12 and metrics["decision_input_reported_calls"] == 1
     text = "".join(part[1] for line in render_model_metrics(metrics, 250) for part in line)
-    assert "决策入 12+?" in text
+    assert "决策 ≈24 token · 成功 2 · 失败 0" in text
+
+
+def test_timed_out_and_failed_calls_count_as_failures_and_widen_the_estimate(tmp_path):
+    agent, params, _, _, _ = fixture(tmp_path)
+    decision(agent, params, usage={"input_tokens": 5000})
+    decision(agent, params, call_id="decision-2", outcome="timed_out")
+    decision(agent, params, call_id="decision-3", outcome="failed")
+    decision(agent, params, call_id="decision-4", outcome="started")
+    metrics = publish_model_metrics(agent, params, pending=False)
+    assert (metrics["decision_call_count"], metrics["decision_success_count"], metrics["decision_failure_count"]) == (4, 1, 2)
+    text = "".join(part[1] for line in render_model_metrics(metrics, 250) for part in line)
+    # 进行中的调用不算成功也不算失败，但它的输入已经发出，约数按 4 次调用外推
+    assert "决策 ≈20.0k token · 成功 1 · 失败 2" in text
+
+
+def test_all_calls_unreported_shows_unknown_estimate_not_zero(tmp_path):
+    agent, params, _, _, _ = fixture(tmp_path)
+    decision(agent, params, outcome="timed_out")
+    metrics = publish_model_metrics(agent, params, pending=False)
+    text = "".join(part[1] for line in render_model_metrics(metrics, 250) for part in line)
+    assert metrics["decision_input_tokens"] is None
+    assert "决策 ≈? token · 成功 0 · 失败 1" in text
 
 
 def test_original_baseline_refreshes_when_background_usage_appends(tmp_path):
@@ -122,7 +153,8 @@ def test_legacy_history_retains_unknown_partition(tmp_path):
     assert not agent.conversation_store.model_usage.summary(thread.thread_id)["purpose_totals_known"]
     metrics = publish_model_metrics(agent, params, pending=False)
     assert metrics["input_tokens"] == 24 and metrics["decision_input_tokens"] == 12
-    assert not metrics["decision_input_complete"]
+    # 没有用途分区的旧账不计入决策约数与成败次数，也不当作零决策补进来
+    assert (metrics["decision_call_count"], metrics["decision_success_count"]) == (1, 1)
 
 
 @pytest.mark.parametrize("mutation", ["unknown_schema", "nested", "regression"])
@@ -145,4 +177,5 @@ def test_purpose_corruption_cannot_silently_drop_history(tmp_path, mutation):
 def test_optional_metrics_do_not_fabricate_zero_or_output():
     base = {"schema": "model_runtime_metrics.v1", "decision_call_count": 1}
     assert public_model_metrics(base)["decision_input_tokens"] is None
+    assert public_model_metrics({**base, "decision_success_count": True})["decision_success_count"] == 0
     assert "decision_call_count" not in public_model_metrics({"schema": base["schema"]})

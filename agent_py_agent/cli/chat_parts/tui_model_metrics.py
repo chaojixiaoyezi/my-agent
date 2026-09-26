@@ -1,5 +1,5 @@
 # LLM: 只渲染 model_runtime_metrics.v1，不读取日志、成本文件或模型正文；每帧工作量与固定字段数相关。
-# 模块用途: 在 Context 下沿原统计行显示 LLM 与决策输入，按宽度简写，缺报保留未知，不显示价格。
+# 模块用途: 在 Context 下沿原统计行显示 LLM 与决策约数（输入 token、成功/失败次数），按宽度简写，缺报保留未知，不显示价格。
 from __future__ import annotations
 
 from ...agent.conversation.model_metrics import public_model_metrics
@@ -15,8 +15,18 @@ def _tokens(value: int) -> str:
     return str(value)
 
 
-# LLM: 决策输入是会话累计子集，输出留白但原账保留；不能把部分缺报或历史未知显示成完整零值。
-# 函数用途: 在同一统计行增加决策输入；普通轮次/缓存/速度保留原口径，窄屏仍有界裁剪。
+# LLM: 仅供显示的约数：已报输入按已报调用的平均值外推到全部决策调用（超时/失败的调用没有回报用量），
+#   一次都没报时显示 ≈?，不能显示成 0；约数不写回账本，也不参与任何预算或调度判断。
+# 函数用途: 生成统计行里的"决策 ≈N token · 成功 X · 失败 Y"片段。
+def _decision_part(metrics: dict[str, object]) -> str:
+    calls, reported = int(metrics["decision_call_count"]), int(metrics["decision_input_reported_calls"])
+    value = metrics["decision_input_tokens"]
+    approx = "?" if value is None or not reported else _tokens(round(int(value) * max(calls, reported) / reported))
+    return f"决策 ≈{approx} token · 成功 {metrics['decision_success_count']} · 失败 {metrics['decision_failure_count']}"
+
+
+# LLM: 决策约数是会话累计子集，输出留白但原账保留；不能把全部缺报显示成完整零值。
+# 函数用途: 在同一统计行增加决策约数与成败次数；普通轮次/缓存/速度保留原口径，窄屏仍有界裁剪。
 def render_model_metrics(value: object, width: int) -> tuple[FormattedLine, ...]:
     metrics = public_model_metrics(value)
     if not metrics:
@@ -31,9 +41,7 @@ def render_model_metrics(value: object, width: int) -> tuple[FormattedLine, ...]
         total_text = "未知"
     parts = [f"本次轮 {rounds}" if narrow else f"本次模型轮 {rounds}", f"当轮工具 {tools}", f"最近缓存 {cache}", f"会话累计 {total_text}"]
     if metrics.get("decision_call_count"):
-        value = metrics.get("decision_input_tokens")
-        text = "未知" if value is None else _tokens(value) + ("+?" if not metrics.get("decision_input_complete") else "")
-        parts.append(f"决策入 {text}")
+        parts.append(_decision_part(metrics))
     if metrics["retry_count"]:
         parts.append(f"重试 {metrics['retry_count']}")
     if metrics["unreported_calls"]:

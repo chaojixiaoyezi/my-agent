@@ -22,6 +22,7 @@ from agent_py_agent.cli.chat_parts.tui_decision_menu import (
     _POINTS,
     _field_text_value,
     _fields,
+    _mode_control,
     _seconds,
 )
 from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
@@ -157,6 +158,19 @@ def point_index(gateway, point, *, thread=False):
     return [key for key in _POINTS if f"points.{key}.mode" in _fields(view)].index(point)
 
 
+@pytest.mark.parametrize("stored,toggles,expected", [
+    ("off", (), "off"), ("off", ("enabled",), "observe"), ("off", ("enabled", "observe"), "apply"),
+    ("observe", (), "observe"), ("observe", ("observe",), "apply"), ("observe", ("enabled",), "off"),
+    ("apply", (), "apply"), ("apply", ("observe",), "observe"), ("apply", ("enabled",), "off"),
+])
+def test_mode_checkboxes_map_on_off_and_observe_to_the_three_stored_modes(stored, toggles, expected):
+    control, mode_value = _mode_control(stored)
+    for key in toggles:
+        values = control.current_values
+        control.current_values = [item for item in values if item != key] if key in values else [*values, key]
+    assert mode_value() == expected
+
+
 def test_candidate_profile_ids_form_uses_structured_json(tmp_path):
     gateway = Gateway(tmp_path)
     field = "points.subagent_model.candidate_profile_ids"
@@ -187,8 +201,16 @@ def test_pipe_owner_fields_model_mode_seconds_reset_and_provider_reuse(tmp_path)
             assert [view["effective"][key] for key in ("timeout_seconds", "stage_timeout_seconds", "background_timeout_seconds")] == [2.5, 5.5, 6.5]
             await choose(ui, 6)  # 接入点；前面有独立实验能力开关
             await choose(ui, point_index(gateway, "recall"))
-            await choose(ui, 0)  # mode
-            await press(ui, b"\x1b[B\x1b[B\r")
+            await choose(ui, 0)  # mode：两个勾选项"开启 / 观察模式"
+            assert "观察模式" in visible(ui.app)
+            await press(ui, b" ")  # 勾选开启；新开启默认勾观察
+            await press(ui, b"\t\r")  # 保存 → 开 + 观察 = observe
+            assert settings(gateway.host, "read", {})["effective"]["points"]["recall"]["mode"] == "observe"
+            await choose(ui, 6)
+            await choose(ui, point_index(gateway, "recall"))
+            await choose(ui, 0)
+            await press(ui, b"\x1b[B ")  # 下移到观察模式并取消 → 正式使用
+            await press(ui, b"\t\r")
             assert settings(gateway.host, "read", {})["effective"]["points"]["recall"]["mode"] == "apply"
             await choose(ui, 7)  # reset 列表
             await choose(ui, 0)  # enabled

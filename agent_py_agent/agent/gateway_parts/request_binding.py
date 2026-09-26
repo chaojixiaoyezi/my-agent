@@ -141,6 +141,15 @@ class GatewayTaskBindingWriter:
 
         return thread_experiment_evaluation(self, agent, thread_id=thread_id, authorization=authorization)
 
+    # LLM: 只读：audit_records 工具经当前运行参数找到本写入器调用；队列目录来自本写入器的请求路径（原 Gateway 队列），
+    #   不接受模型参数，也不信任 agent 自身的 Gateway 配置；实现归 request_audit_records，不写任何文件。
+    # 函数用途: 为审计工具提供指定会话在请求记录里的决策观察。
+    def decision_audit_observations(self, *, thread_owners: dict[str, str], since: float, limit: int) -> dict:
+        from .request_audit_records import decision_observation_records
+
+        paths = gateway_paths_from_root(self.request_path.parent.parent.parent)
+        return decision_observation_records(paths, thread_owners=thread_owners, since=since, limit=limit)
+
     # LLM: 任务晋升只能回写同一请求；原子持久写成功后再更新共享内存对象，失败不伪造绑定。
     # 函数用途: 接收运行时确认的任务链接，让本轮 Compact 重试和重启恢复使用相同归属。
     def __call__(self, link: object) -> bool:

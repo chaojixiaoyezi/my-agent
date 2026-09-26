@@ -33,6 +33,9 @@ class CapabilityConfig:
     decision_skill_tool_profile_id: str | None = None
     decision_skill_tool_context_policy: str = "progressive"
     decision_skill_tool_optional_categories: list[str] = field(default_factory=lambda: ["plugins"])
+    # my-agent 经 user_config decision_patch 自调决策等待时间的上下限（整数秒）；0 表示该侧不限制，用户菜单修改不受限。
+    decision_agent_timeout_min_seconds: int = 1
+    decision_agent_timeout_max_seconds: int = 30
     enable_capability_routing: bool = False
     capability_request_max_tokens: int = 600
     capability_escalation_max_hops: int = 0

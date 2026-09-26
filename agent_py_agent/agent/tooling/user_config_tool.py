@@ -63,6 +63,7 @@ def _decision_only_spec(full_spec: ToolModelSpec) -> ToolModelSpec:
         name=full_spec.name,
         description=("读取或修改当前用户自己的决策设置。先 decision_read 获取 owner/thread revision，"
                      "再用 decision_patch 或 decision_reset 修改并读回生效值；scope=thread 只用于当前可信会话。"
+                     "等待时间只能在 decision_read 返回的 agent_timeout_bounds 范围内调整，越界会被拒绝。"
                      "decision_models 只读脱敏目录；decision_probe 仅在用户明确要求测试连接时使用，会联网并产生用量。"
                      "decision_experiment_revoke 只能撤销当前会话已有授权，不能建立授权。"
                      "本工具不开放本机全局配置、凭据或其他用户设置。"),
@@ -73,6 +74,53 @@ def _decision_only_spec(full_spec: ToolModelSpec) -> ToolModelSpec:
             "用户明确要求测试已保存决策模型连接",
         ), avoid_when=("需要本机全局配置、凭据或其他用户设置时",)),
     )
+
+
+# LLM: 上下限只来自能力配置 decision_agent_timeout_min/max_seconds（经 capability_config_for_agent 唯一入口，读不到用默认值），
+#   0 表示该侧不限制；只约束本工具（模型自调）的 decision_patch，用户在 /model 决策设置菜单里修改不受限。
+# 函数用途: 取得 my-agent 自调决策等待时间的允许范围（秒）。
+def _agent_timeout_bounds(agent: object) -> dict:
+    from ..capability.config import CapabilityConfig
+    from ..capability.runtime_config_reload import capability_config_for_agent
+
+    config = capability_config_for_agent(agent) or CapabilityConfig()
+    return {"min_seconds": max(0, int(config.decision_agent_timeout_min_seconds)),
+            "max_seconds": max(0, int(config.decision_agent_timeout_max_seconds))}
+
+
+# LLM: 只看 changes 里以 timeout_seconds 结尾的字段（通用前台/阶段/后台与各接入点）；非数值留给设置服务原校验。
+#   越界只报告，不夹取也不取整——模型必须按范围重新提交，避免悄悄保存成另一个值。
+# 函数用途: 找出本次 patch 中超出 my-agent 自调范围的等待时间字段。
+def _out_of_bounds_timeouts(changes: object, bounds: dict) -> list[dict]:
+    if not isinstance(changes, dict):
+        return []
+    low, high = bounds["min_seconds"], bounds["max_seconds"]
+    return [{"field": path, "value": value} for path, value in changes.items()
+            if str(path).endswith("timeout_seconds") and type(value) in (int, float)
+            and ((low and value < low) or (high and value > high))]
+
+
+# LLM: 只对 patch 检查；越界时在进设置服务之前拒绝（not_started），回执带允许范围与越界字段，错误码 DECISION_TIMEOUT_OUT_OF_BOUNDS。
+# 函数用途: 返回自调等待时间越界的拒绝回执，没有越界返回 None。
+def _timeout_refusal(agent: object, operation: str, changes: object) -> ToolHandlerOutcome | None:
+    bounds = _agent_timeout_bounds(agent)
+    violations = _out_of_bounds_timeouts(changes, bounds) if operation == "patch" else []
+    if not violations:
+        return None
+    refusal = {"reason": "timeout_out_of_bounds", "agent_timeout_bounds": bounds, "fields": violations}
+    return ToolHandlerOutcome("user_config", False, json.dumps(refusal, ensure_ascii=False),
+                              error_code="DECISION_TIMEOUT_OUT_OF_BOUNDS", effect_outcome="not_started",
+                              result_envelope={"decision_timeout_bounds": refusal})
+
+
+# LLM: 读回附加两项只读事实：模型可自调的等待时间范围，以及管理员是否允许本用户使用 Jev（关了则各点都不会调用）；
+#   放在回执最前，保证有界预览里先看到。模型改不了这两项。
+# 函数用途: 生成 decision_read 回执最前面的附加事实。
+def _read_facts(agent: object) -> dict:
+    from ..user_space.owner_admin_controls import owner_decision_model_allowed
+
+    return {"agent_timeout_bounds": _agent_timeout_bounds(agent),
+            "admin_decision_model_allowed": owner_decision_model_allowed(getattr(agent, "home_paths", None))}
 
 
 # LLM: 子代理自己的 thread 优先；仅非子代理主回合可从线程本地 RunParams 读取 Gateway 绑定，绝不接受模型参数或父线程回退。
@@ -130,7 +178,8 @@ class UserConfigTool(BaseTool):
             "decision_read/decision_patch/decision_reset 读取、字段修改或恢复决策设置继承；"
             "decision_experiment_revoke 可用当前授权编号撤销本会话实验；本工具不能建立实验授权，能力开关不代表用户授权。"
             "先读 revision 再作为 expected_revision 提交。scope=owner 为长期设置，thread 仅当前可信会话；"
-            "时间使用有限正秒数，reset 的 fields 删除覆盖。总开关关闭保留各点模式，observe 也会产生用量；"
+            "时间使用有限正秒数，且须在 decision_read 返回的 agent_timeout_bounds 范围内（越界拒绝、不自动夹取）；"
+            "reset 的 fields 删除覆盖。总开关关闭保留各点模式，observe 也会产生用量；"
             "保存不联网，时间只用于后续请求且不重置正在进行的阶段预算。"
             "decision_models 只读当前用户已保存或获共享授权的脱敏 Decision 目录，可用返回的编号绑定配置。"
             "decision_probe 仅在用户要求测试连接时使用，必须显式传 profile_id 和有限正 timeout_seconds；"
@@ -227,7 +276,9 @@ class UserConfigTool(BaseTool):
 
     # LLM: 主会话可读取宿主线程本地 RunParams，子代理只读自身 runner 身份；撤销只能引用原许可并使用完整 CAS。
     #   read 在本会话已有实验授权时附只读实验证据评估（_with_experiment_evaluation），模型无法据此授权或晋升。
-    # 函数用途: 调用共同决策设置服务修改原覆盖或撤销许可，身份与过期版本不能由模型覆盖。
+    #   patch 的等待时间先按能力配置上下限检查，越界直接拒绝（DECISION_TIMEOUT_OUT_OF_BOUNDS），不进设置服务；
+    #   read 回显该范围与管理员是否允许本用户使用 Jev（admin_decision_model_allowed，只读，模型改不了）。
+    # 函数用途: 调用共同决策设置服务修改原覆盖或撤销许可，身份与过期版本不能由模型覆盖，自调等待时间受上下限约束。
     def _decision(self, operation: str, params: dict) -> ToolHandlerOutcome:
         from ..settings.decision_settings import execute_decision_settings_operation
         from ..settings.decision_settings_schema import (
@@ -242,6 +293,9 @@ class UserConfigTool(BaseTool):
         payload = {key: value for key, value in params.items() if key != "action"}
         if payload.get("scope") == "thread" and not thread_id:
             return ToolHandlerOutcome("user_config", False, "当前运行没有可信会话，不能写入临时覆盖。", error_code="TOOL_PERMISSION_DENIED", effect_outcome="not_started")
+        refusal = _timeout_refusal(self._agent, operation, payload.get("changes"))
+        if refusal is not None:
+            return refusal
         try:
             report = execute_decision_settings_operation(self._agent, operation, payload, thread_id=thread_id)
         except DecisionSettingsConflict as exc:
@@ -254,7 +308,7 @@ class UserConfigTool(BaseTool):
             return ToolHandlerOutcome("user_config", False, "配置存储读写失败，请重新读取核对是否保存。", error_code="TOOL_PERSISTENCE_FAILED", effect_outcome="unknown")
         report["scope_resolution"] = {"source": source, "effective": {"thread_id": thread_id, "scope": report["scope"]}}
         if operation == "read":
-            report = _with_experiment_evaluation(self._agent, report, thread_id)
+            report = _with_experiment_evaluation(self._agent, {**_read_facts(self._agent), **report}, thread_id)
         # 原投影先列 revision，再列大段字段目录；排序会把 CAS 版本挤出有界模型预览。
         return ToolHandlerOutcome("user_config", True, json.dumps(report, ensure_ascii=False))
 

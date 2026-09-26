@@ -331,6 +331,9 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     decision_model_selection_mode: str = "off"
     decision_model_selection_timeout_seconds: float | None = None
     decision_model_selection_profile_id: str | None = None
+    # 选模型决策请求里对话摘要（只带语义部分，不带原文锚点段）与当前消息的字符上限；0 表示不截断，截断时如实标注
+    decision_model_selection_summary_max_chars: int = 1500
+    decision_model_selection_prompt_max_chars: int = 4000
     decision_external_material_order_mode: str = "off"
     decision_external_material_order_timeout_seconds: float | None = None
     decision_external_material_order_profile_id: str | None = None

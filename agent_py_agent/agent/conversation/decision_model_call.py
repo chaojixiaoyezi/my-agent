@@ -50,8 +50,16 @@ from .decision_send_permit import DecisionExperimentCall, issue_send_permit
 from .model_metrics import publish_model_metrics
 
 
+# LLM: 管理员关闭了本 owner 的 Jev 使用权（owner_admin_controls）；在建调用记录前抛出，不联网、不进连接退避。
+#   决策服务映射为 off/admin_disabled，连接测试映射为明确的拒绝说明。
+# 类用途: 表示当前 owner 已被管理员禁止使用决策模型。
+class DecisionModelDisallowed(RuntimeError):
+    reason = "admin_disabled"
+
+
 # LLM: experiment=None 保持原普通调用；实验只接受决策服务构造的 DecisionExperimentCall，上界越界或预留失败时不建调用记录。
 # 实验结果仍只是建议，调用方固定按 observe 处理；普通调用仍沿原绝对期限/准入/worker 且不重试。
+# 这是所有 Jev 联网（普通、实验、连接测试）的唯一入口，管理员禁用硬门放在最前：每次现读 owner 策略，拒绝时不建调用记录。
 # 函数用途: 执行一次可选决策并记原账；实验路径在联网前完成上界计算、预算预留和发送许可签发。
 def invoke_decision_model_call(
     agent: object,
@@ -64,9 +72,13 @@ def invoke_decision_model_call(
     interrupt_handle: InterruptHandle | None = None,
     experiment: DecisionExperimentCall | None = None,
 ) -> DecisionResponse:
+    from ..user_space.owner_admin_controls import owner_decision_model_allowed
+
     started_at = time.monotonic()
     if not isinstance(request, DecisionRequest) or not callable(getattr(backend, "decide", None)):
         raise DecisionInputError("决策调用需要原生请求与 decide 后端。")
+    if not owner_decision_model_allowed(getattr(agent, "home_paths", None)):
+        raise DecisionModelDisallowed("管理员已关闭当前用户的决策模型使用权。")
     if experiment is not None and type(experiment) is not DecisionExperimentCall:
         raise ModelCallBudgetError("experiment_call_invalid")
     ledger = model_call_ledger(agent)
@@ -260,4 +272,4 @@ def _error_code(exc: BaseException) -> str:
     return "DECISION_CALL_FAILED"
 
 
-__all__ = ["invoke_decision_model_call"]
+__all__ = ["DecisionModelDisallowed", "invoke_decision_model_call"]

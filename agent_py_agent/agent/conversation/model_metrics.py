@@ -1,5 +1,5 @@
 # LLM: 这是原 ModelCallLedger 的显示投影；用途分区不重复累计，不改变预算/输入/任务，主子按 exact thread 隔离。
-# 模块用途: 提供原模型统计行及决策输入，未知保留未知，后台新用量让旧显示基数失效。
+# 模块用途: 提供原模型统计行及决策输入与成败次数，未知保留未知，后台新用量让旧显示基数失效。
 from __future__ import annotations
 
 import logging
@@ -13,6 +13,8 @@ _COUNTS = (
     "model_rounds", "retry_count", "input_tokens", "output_tokens",
     "estimated_tokens", "unreported_calls", "sampled_at_ns",
 )
+# 决策分区的显示计数：已报输入的调用次数（供约数外推）、成功（finished）与失败（failed + timed_out）次数
+_DECISION_COUNTS = ("decision_input_reported_calls", "decision_success_count", "decision_failure_count")
 
 
 # LLM: 数值白名单不接受 bool、负数和无穷大，调用方不得借此传递提示词或工具参数。
@@ -27,8 +29,8 @@ def _number(value: object) -> float | None:
     return result if math.isfinite(result) and result >= 0 else None
 
 
-# LLM: 通道共用数值白名单；决策输入缺报保持 None，部分已报另带完整性，不从空值猜供应商零消耗。
-# 函数用途: 清洗统计条、决策输入及缓存诊断，拒绝未知 schema 和任意嵌套正文。
+# LLM: 通道共用数值白名单；决策输入缺报保持 None，另带已报调用数与成败次数，不从空值猜供应商零消耗。
+# 函数用途: 清洗统计条、决策输入与成败次数及缓存诊断，拒绝未知 schema 和任意嵌套正文。
 def public_model_metrics(value: object) -> dict[str, object]:
     from ..backends.cache_diagnostics import public_cache_diagnostic
 
@@ -48,7 +50,7 @@ def public_model_metrics(value: object) -> dict[str, object]:
         **({"cache_diagnostic": diagnostic} if diagnostic else {}),
         **({"decision_call_count": decision_calls,
             "decision_input_tokens": int(decision_input) if decision_input is not None else None,
-            "decision_input_complete": value.get("decision_input_complete") is True}
+            **{key: int(_number(value.get(key)) or 0) for key in _DECISION_COUNTS}}
            if decision_calls else {}),
     }
 
@@ -89,7 +91,7 @@ def _previous_totals(agent: object, params: object, thread_id: str, usage_scope_
     if isinstance(cached, tuple) and cached[0] == (key, revision):
         return dict(cached[1])
     totals = {"input_tokens": 0, "output_tokens": 0, "estimated_tokens": 0, "unreported_calls": 0, "totals_known": True,
-              "decision_call_count": 0, "decision_input_tokens": None, "decision_input_complete": True}
+              "decision_call_count": 0, "decision_input_tokens": None, **dict.fromkeys(_DECISION_COUNTS, 0)}
     reader = getattr(usage_store, "events_report", None)
     if thread_id and callable(reader):
         try:
@@ -107,7 +109,8 @@ def _previous_totals(agent: object, params: object, thread_id: str, usage_scope_
 
 
 # LLM: provider input 已含缓存读写，不再加缓存；决策只是原总量子集，逐字段缺报不能由信封计数猜测。
-# 函数用途: 汇总原 token 并附加决策输入显示，旧账没有用途时不推断历史决策为零。
+#   成功/失败取决策分区 status_counts（finished / failed + timed_out），进行中的调用两边都不计。
+# 函数用途: 汇总原 token 并附加决策输入与成败次数；旧账没有用途分区时不计入决策，也不推断为零。
 def _add_usage(totals: dict[str, object], summary: Mapping[str, object]) -> None:
     breakdown = summary.get("usage_breakdown")
     breakdown = breakdown if isinstance(breakdown, Mapping) else {}
@@ -119,17 +122,17 @@ def _add_usage(totals: dict[str, object], summary: Mapping[str, object]) -> None
     totals["unreported_calls"] += int(estimated.get("call_count") or 0) + sum(int(statuses.get(key) or 0) for key in ("failed", "timed_out"))
     purposes = summary.get("purpose_breakdown")
     if not isinstance(purposes, Mapping):
-        if summary.get("physical_model_attempt_count"):
-            totals["decision_input_complete"] = False
         return
     decision = purposes.get("decision", {})
-    calls = int(decision.get("physical_model_attempt_count") or 0)
     usage = decision.get("usage_breakdown", {}).get("provider", {})
     reported = int(usage.get("input_tokens_reported_call_count") or 0)
-    totals["decision_call_count"] += calls
+    outcomes = decision.get("status_counts") or {}
+    totals["decision_call_count"] += int(decision.get("physical_model_attempt_count") or 0)
+    totals["decision_input_reported_calls"] += reported
+    totals["decision_success_count"] += int(outcomes.get("finished") or 0)
+    totals["decision_failure_count"] += sum(int(outcomes.get(key) or 0) for key in ("failed", "timed_out"))
     if reported:
         totals["decision_input_tokens"] = int(totals["decision_input_tokens"] or 0) + int(usage.get("input_tokens") or 0)
-    totals["decision_input_complete"] = totals["decision_input_complete"] and calls == reported
 
 
 # LLM: 遥测只在调用边界发布；usage_only 保留生成状态且只刷新活动显示，不等待持久会话写锁；调用方必须传原活动范围。

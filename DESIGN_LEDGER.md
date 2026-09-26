@@ -9,6 +9,8 @@
 
 回滚边界：旧版运行时读不了 v3，回滚必须把运行时和数据成对核对并保留新账。详见[依赖拆分](docs/design/TOOL_LOOP_DEPENDENCY_SPLIT.md#两线合并后的来源身份与模型轮结果决策分支吸收-main2026-09-23)。
 
+- **决策开关、超时自调、统一审计与管理员管控（用户 6 项要求）**（2026-09-25，已实施：本地分支 `claude/decision-audit-controls`，基于 main `07fa00fb3`，待合并部署）：① `/model` 决策设置每个点改为“开启 + 观察模式”两个勾选，存储值仍是 off/observe/apply；② my-agent 经 `user_config decision_patch` 自调等待时间受 `capability_config` 的 `decision_agent_timeout_min/max_seconds`（默认 1—30 秒，0 不限）约束，越界拒绝不夹取；③ 评估“每条消息都问一次选模型”：observe 下同步等待且约六成超时、输入以摘要锚点段为主，按现状不划算；已只删材料精简（摘要去原文锚点段并限 1500 字、当前消息限 4000 字、截断如实标注、候选公共声明只写一次，合成输入约减 63%），“只在结构性变化时问”需用户拍板，未做；④ 统计行改为“决策 ≈N token · 成功 X · 失败 Y”；⑤ 新增统一只读审计工具 `audit_records`（topic 枚举，首个 decision；本人范围，跨用户需管理员明确许可；只读设置/用量账本/请求记录观察，不 grep 日志或正文）；⑥ 新增管理员专用 `admin_controls`（每次本人确认；各用户 Jev/审计开关与本人跨用户审计许可存目标 owner 的 `tool_policy.json.admin_controls`，失败关闭），Jev 禁用硬拦在唯一调用入口 `invoke_decision_model_call`。新错误码在 `error_taxonomy.py` 末尾独立块。详见[决策开关、超时自调与审计](docs/design/DECISION_AUDIT_AND_ADMIN_CONTROLS.md)。
+
 决策设置的宿主非阻塞读取改为无锁读取已提交版本（已合入 main `d69f30cf3` 并部署双机）：原先读取也拿排它锁，同一 owner 的并发决策互相挤成 `settings_busy` 静默回退；两份设置文件都是原子替换写、单次写事务只改一个文件，旧建议仍由调用前后版本复核与在途取消挡住。同一分支用本机 HTTP 故障矩阵钉住断网/DNS/TLS/额度/计费/5xx/慢响应的冷却与恢复。详见[接入设计](docs/design/DECISION_MODEL_INTEGRATION.md#42-已实现的可选服务边界)。
 
 - **宿主关闭时主动取消在途决策，及 Curator 与插件点并发组合（P4-F）**（2026-09-25，已实施：分支 `claude/decision-shutdown-cancel`，待合入；主线 owner 已同意在 `cli/gateway_process.py` 加一行）：

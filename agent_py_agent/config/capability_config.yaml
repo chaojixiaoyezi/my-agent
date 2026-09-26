@@ -62,3 +62,11 @@ decision_skill_tool_optional_categories: ["plugins"]
 decision_skill_tool_mode: off
 decision_skill_tool_timeout_seconds: null  # 有限正秒数；留空继承通用前台期限
 decision_skill_tool_profile_id: null  # 留空继承通用 Decision 模型引用
+
+# my-agent 自己调决策等待时间的上下限（秒，整数）。
+# - 只约束 my-agent 通过 user_config 的 decision_patch 调整各 timeout_seconds 字段（通用前台/阶段/后台与各接入点）；
+#   用户在 /model 决策设置菜单里修改不受此限。
+# - 越界时工具直接拒绝并返回允许范围，不会自动夹到边界。
+# - 0: 该侧不限制（统一约定）。
+decision_agent_timeout_min_seconds: 1
+decision_agent_timeout_max_seconds: 30

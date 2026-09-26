@@ -168,3 +168,42 @@ def test_decision_read_puts_cas_revision_in_bounded_tool_preview(tmp_path):
     assert len(output) > 4000  # 原投影包含所有接入点；检查真实有界预览，而非碰巧完整展示。
     assert '"revision"' in output[:4000]
     assert '"subagent_model"' in output[:4000]
+
+
+def test_agent_timeout_patch_is_bounded_and_read_reports_the_range(tmp_path):
+    host = host_at(tmp_path)
+    tool = UserConfigTool(host)
+    report = json.loads(tool.execute({"action": "decision_read"}).output)
+    assert report["agent_timeout_bounds"] == {"min_seconds": 1, "max_seconds": 30}
+    for changes in ({"timeout_seconds": 0.5}, {"points.model_selection.timeout_seconds": 45},
+                    {"enabled": True, "stage_timeout_seconds": 31}):
+        refused = tool.execute({"action": "decision_patch", "expected_revision": report["revision"], "changes": changes})
+        assert not refused.ok and refused.error_code == "DECISION_TIMEOUT_OUT_OF_BOUNDS"
+        assert refused.effect_outcome == "not_started"
+        assert refused.result_envelope["decision_timeout_bounds"]["fields"][0]["field"].endswith("timeout_seconds")
+    # 越界拒绝发生在设置服务之前：版本没动，也没有保存其中的合法字段
+    assert json.loads(tool.execute({"action": "decision_read"}).output)["revision"] == report["revision"]
+    saved = tool.execute({"action": "decision_patch", "expected_revision": report["revision"],
+                          "changes": {"timeout_seconds": 4, "points.model_selection.timeout_seconds": 30}})
+    assert saved.ok, saved.output
+    assert json.loads(saved.output)["effective"]["timeout_seconds"] == 4
+
+
+def test_agent_timeout_bounds_follow_capability_config_and_zero_means_unlimited(tmp_path):
+    from agent_py_agent.agent.capability.config import CapabilityConfig
+
+    host = host_at(tmp_path)
+    host._capability_config_runtime_snapshot = SimpleNamespace(config=CapabilityConfig(
+        decision_agent_timeout_min_seconds=0, decision_agent_timeout_max_seconds=0))
+    tool = UserConfigTool(host)
+    report = json.loads(tool.execute({"action": "decision_read"}).output)
+    assert report["agent_timeout_bounds"] == {"min_seconds": 0, "max_seconds": 0}
+    saved = tool.execute({"action": "decision_patch", "expected_revision": report["revision"],
+                          "changes": {"timeout_seconds": 0.5, "background_timeout_seconds": 120}})
+    assert saved.ok, saved.output
+    host._capability_config_runtime_snapshot = SimpleNamespace(config=CapabilityConfig(
+        decision_agent_timeout_min_seconds=3, decision_agent_timeout_max_seconds=8))
+    report = json.loads(tool.execute({"action": "decision_read"}).output)
+    refused = tool.execute({"action": "decision_patch", "expected_revision": report["revision"],
+                            "changes": {"timeout_seconds": 2}})
+    assert not refused.ok and json.loads(refused.output)["agent_timeout_bounds"] == {"min_seconds": 3, "max_seconds": 8}
