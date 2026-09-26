@@ -49,8 +49,24 @@ class ChatControlExecution:
     state: ChatControlState
 
 
+_IM_ONLY_CONTROL_KINDS = frozenset({"admin", "approve", "deny"})
+_IM_ONLY_CONTROL_MESSAGE = (
+    "本机终端已经是管理员；/admin、/approve、/deny 只用于飞书等 IM 私聊，终端里的工具确认请直接在审批面板中选择。"
+    "命令没有发送，也没有保存。"
+)
+
+
+# LLM: 管理员身份与 IM 审批命令只属于 IM 私聊；终端在任何传输或持久化之前本地拒绝，密码不离开输入框。
+# 函数用途: 终端遇到 /admin、/approve、/deny 时返回固定拒绝结果；其他命令返回 None 继续原流程。
+def im_only_control_result(command: ConversationControlCommand) -> ConversationControlResult | None:
+    if command.kind not in _IM_ONLY_CONTROL_KINDS:
+        return None
+    return ConversationControlResult(command.kind, False, _IM_ONLY_CONTROL_MESSAGE, error_code="ADMIN_IDENTITY_SCOPE_INVALID")
+
+
 # LLM: CLI dispatch preserves the shared command contract while swapping only its runtime backend;
 # an optional manual-Compact target is transport metadata and never parsed from command prose.
+# IM 专用的管理员命令在一切传输之前本地拒绝，Gateway 与本地两种后端都不会收到它们。
 # 函数用途:按本地或 Gateway 模式执行控制命令，并可携带精确 Compact 停止目标。
 def execute_chat_control(
     execution: ChatControlExecution,
@@ -59,6 +75,9 @@ def execute_chat_control(
     message_id: str = "",
     target_control_message_id: str = "",
 ) -> ConversationControlResult:
+    refused = im_only_control_result(command)
+    if refused is not None:
+        return refused
     if not command.valid:
         return ConversationControlResult(command.kind, False, command.usage)
     if execution.use_gateway:
@@ -628,4 +647,5 @@ __all__ = [
     "ChatControlExecution",
     "ChatControlState",
     "execute_chat_control",
+    "im_only_control_result",
 ]

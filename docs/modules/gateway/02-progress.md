@@ -1,5 +1,19 @@
 # Gateway 维护状态
 
+IM 管理员身份与聊天内审批（主线，2026-09-26 合入，用户决定“支持注册飞书账号为管理员、确认用管理员密码”）。
+以前管理员只有本机 local/main：飞书用户永远是自己的 owner，IM 请求也不带审批能力，需要确认的工具一律被拒。现在：
+- 本机 `my-agent admin-password set` 保存 scrypt 管理员密码（`config/admin-password.json`，0600）。
+- 飞书一对一私聊发 `/admin <密码>`，把 `(channel, user_id)` 精确绑定为管理员（`config/admin-channel-identities.json`）。
+  之后这个私聊的请求与控制作用域都经 `admin_channel_identity_for_request` 解析为 local/main。
+- 同一渠道身份 10 分钟内错 5 次锁 10 分钟，节流记录持久化，拒绝文案不区分原因。
+- Gateway 服务端为这些私聊开启原 `StreamApproval`。`/progress` 投影待确认工具，适配器提示 `/approve`、`/deny`。
+  `/approve <密码>` 只批准本会话唯一待决的一次，`/deny` 拒绝；决定都写原 permission bridge 的精确决定文件。
+- 密码不进回执（`/admin ******`）、会话记录、请求队列、日志、适配器持久入站或 TUI 输入历史；终端本地拒绝这三条命令。
+- 开关 `admin_channel_identity_enabled`；新增错误码 `ADMIN_PASSWORD_REJECTED` 等 6 个。
+- 已知边界：后台续跑与子代理的审批在 IM 里仍无人接收；飞书保留原消息，需要用户撤回。
+回归见 `test_admin_identity_store.py`、`test_admin_identity_gateway.py`、`test_admin_identity_clients.py`，
+设计见 `docs/design/ADMIN_CHANNEL_IDENTITY.md`。
+
 Gateway 安全重启第二批（主线，2026-09-26）：终端 `gateway restart` 默认经 `cli/gateway_restart_handover.safe_restart_from_cli` 写 kind=cli 请求并按状态文件等新进程号 running 或本请求 cancelled（托管自己的工具进程仍拒绝），`--force` 保留先停后起；排空期间 `_RequestDispatcher` 以 `hold_reason=gateway_restart_draining` 调 `dispatch_pending_requests`，只给待处理请求写 `admission_wait_*` 等待事实、不认领，客户端据此续期；TUI `tui_upgrade_follow` 读 `restart_drain.phase` 在页脚提示正在安全重启。回归见 `test_gateway_safe_restart.py`、`test_tui_upgrade_follow.py`、`test_gateway_commands.py`（旧先停后起用例改为显式 `--force`）。
 
 Gateway 安全重启第一期（主线，2026-09-26，用户批准“代理要能自己重启且不出事”、full access 下免确认）：重启请求、两段排空、换进程、续跑与通知落地。`gateway_parts/restart_service.py` 是唯一状态源：`gateway_restart.request`（目标进程号、发起方结构化身份、原因；同一目标的重复请求合并为 `additional_requesters`）、进程内排空阶段、`gateway_restart.completed` 标记与 `gateway_restart_state.json`（冷却起点、近期请求）。服务主循环（`cli/gateway_restart_handover.drain_for_requested_restart`）发现指向本进程的请求后：第一段置 `restart_draining`，请求派发器不再认领新请求（留在 pending）、后台 supervisor 只回收已完成车道，等本进程 admission 在飞数归零，上限 `gateway_restart_turn_wait_seconds`；第二段关闭 `concurrency/restart_gate`，`tool_operation_coordinator` 的新副作用工具停在领取之前（被中断则按 not_started 的 `CANCELLED` 收口），等执行中的工具归零，上限 `gateway_restart_drain_timeout_seconds`（0 不限），超时撤销请求、恢复服务并给发起会话写取消通知。排空成功后写完成标记，按 `planned_restart` 收尾，再由旧进程拉起带 `--after-pid` 的接班进程（systemd 单元 cgroup 或 launchd 标签托管时改为退出码 75 交给管理器）；接班进程等旧进程退出后先消费标记，启动恢复以 `gateway_safe_restart` 原因立即重排旧回合（不加 10 秒延迟，排在新请求之前），再给发起会话写“重启已完成、不要再次重启”的持久唤醒。入口：管理员主代理的 `restart_gateway` 工具（effect=dangerous，只写请求立刻返回）与管理员 `/restart` 控制命令；托管自停闸的拒绝文案改为指向它们。冷却 `gateway_restart_cooldown_seconds`（默认 30 秒），同一会话 10 分钟内最多安排 3 次。回归见 `test_restart_gate.py`、`test_gateway_safe_restart.py`、`test_gateway_restart_tool.py`。未做（后续分期）：终端 `gateway restart` 与部署工具改走安全重启、重启窗口内 `/stop` 找续跑回合、TUI/IM 的重启提示与确认框作废。

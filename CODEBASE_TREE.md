@@ -37,6 +37,7 @@
 |-- docs/tasks/DECISION_MODEL_CATALOG_GENERATION_HANDOFF.md # 原私有/共享模型目录持久代次及原锁 guard 交接
 |-- docs/tasks/TUI_RESOURCE_HANDOFF.md  # 资源性能线的归属、验收、限制和主线整合交接
 `-- docs/design/
+    |-- ADMIN_CHANNEL_IDENTITY.md       # IM 管理员身份：管理员密码、私聊精确绑定为 local/main、聊天内 /approve /deny 审批
     |-- MAINTAINABILITY_AND_JEV_REVIEW.md # 可维护性评估、渐进重构建议及 Computer Use/Jev 能力边界
     |-- DECISION_MODEL_INTEGRATION.md    # 可选决策模型的短期限、失败隔离、接入点、缓存与并行实施计划
     |-- TUI_INPUT_MEDIA.md               # TUI 图片视频输入、owner 原件与发送预算合同
@@ -165,6 +166,7 @@ agent_py_agent/
 |   |   |-- tui_clipboard.py            # 单应用有界复制顺序与分通道结果，及本机/tmux 复制子进程 helper
 |   |   `-- control_runtime.py          # CLI 对共享会话控制协议及窗口级精确中断的运行适配
 |   |-- home_runtime_commands.py        # owner home 状态、daily/task workspace/index 维护命令
+|   |-- admin_identity_commands.py      # 本机 admin-password set/status/clear 与 admin-identities list/remove（仅 local/main 配置）
 |   |-- gateway_process.py              # gateway 进程入口
 |   |-- gateway_host_guard.py           # 托管标记：Gateway 托管的工具进程不能停止或重启托管自己的 Gateway
 |   |-- gateway_restart_handover.py     # 安全重启进程接线：服务循环排空、接班进程或退出码 75、启动时续跑与通知
@@ -311,6 +313,8 @@ agent_py_agent/
 |   |-- user_space/                    # owner home、task workspace、policy、可选 quota、doctor、自动 retention
 |   |   |-- owner_access.py            # 完整代理与冷管理共用的 owner 目录墙及权限裁决
 |   |   |-- approval_mode.py           # owner 显式审批模式与权限快照映射，子代理同源读取
+|   |   |-- admin_password.py          # 管理员密码 scrypt 记录与按渠道身份的失败节流（config/，0600）
+|   |   |-- admin_channel_identity.py  # 已绑定为管理员的 IM 私聊 (channel, user_id) 精确绑定表
 |   |   |-- owner_quota.py             # 显式非零磁盘上限的跨进程配额锁；0 时退出热路径
 |   |   |-- home_retention.py          # 结构化终态/时间清理、二次校验、trash tombstone 与 legal hold
 |   |   `-- owner_maintenance.py       # owner 维护间隔、状态记录与自动执行控制
@@ -381,6 +385,7 @@ agent_py_agent/
 |   |   |-- turn_recovery_control.py   # /recover：查看并按用户处置解除当前会话的未知执行轮阻塞
 |   |   |-- restart_service.py         # 安全重启唯一状态源：请求/合并、两段排空、完成标记、冷却防循环与发起方通知
 |   |   |-- restart_control.py         # /restart：管理员在 TUI/IM 里安排 Gateway 安全重启
+|   |   |-- admin_control_service.py   # /admin 绑定 IM 管理员身份，/approve、/deny 决定本会话唯一待决审批
 |   |   `-- goal_control_service.py    # 同 thread 持续目标的创建/修改/暂停/恢复/清除
 |   |-- conversation/                  # 通道会话账本、权威 transcript、结构化任务关联/续接
 |   |   |-- store.py                    # 同源领域组件组装、跨领域上下文与账本维护
@@ -836,6 +841,9 @@ agent_py_agent/
 |   |-- test_tui_preflight.py           # Gateway readiness 瞬态成功、typed 失败与 worker 只启动一次回归
 |   |-- test_tui_upgrade_follow.py      # TUI 随 Gateway 升级原地切换：目标判定、空闲事实、UI 线程两段式、交接载荷、终端兜底
 |   |-- test_turn_recovery_control.py   # /recover 解析、只读查看、显式恢复后可再挂载、拒绝情形、Gateway 分派与 TUI 序列化
+|   |-- test_admin_identity_store.py    # 管理员密码私有存储、5 次失败锁定、绑定精确匹配与损坏 fail-closed、本机 CLI
+|   |-- test_admin_identity_gateway.py  # 绑定私聊解析为 local/main、/admin 回执脱敏、服务端审批开关、/approve 与 /deny 精确决定
+|   |-- test_admin_identity_clients.py  # 适配器敏感命令不进持久队列、Gateway 不可达回复、TUI 本地拒绝且不写输入历史
 |   |-- test_gateway_host_guard.py      # 托管标记继承与擦洗保留、只拦托管自己的 Gateway、stop/restart/start --force 拒绝
 |   |-- test_restart_gate.py            # 工具关口：关闭时停在领取前、重开放行、中断按未启动收口、执行中计数与等待
 |   |-- test_gateway_safe_restart.py    # 安全重启：合并/冷却/防循环、两段排空与超时取消、标记、续跑优先、接班与 /restart
@@ -1342,6 +1350,9 @@ docs/
 - `cli/gateway_host_guard.py`：Gateway 服务进程启动时写入托管进程号，工具子进程继承；stop/restart/start --force 据此拒绝停掉托管自己的 Gateway。
 - `agent/gateway_parts/restart_service.py`：Gateway 安全重启的唯一状态源；工具、`/restart` 只写请求，排空与换进程由服务循环经 `cli/gateway_restart_handover.py` 执行。
 - `agent/gateway_parts/turn_recovery_control.py`：`/recover` 只看当前 thread 工作任务的根主代理执行轮；查看只读，处置经唯一出口 `recover_attempt_unknown`，不重放旧操作。
+- `agent/gateway_parts/admin_control_service.py`：`/admin`、`/approve`、`/deny` 的唯一执行入口；只信任认证 scope 与结构化私聊类型，批准只写原 permission bridge 的精确决定文件。
+- `agent/user_space/admin_password.py` 与 `admin_channel_identity.py`：管理员密码（scrypt、节流）与 IM 身份绑定的唯一权威，位于 `config/`；owner 解析经 `request_worker.admin_channel_identity_for_request` 精确匹配。
+- `cli/admin_identity_commands.py`：本机管理员设置密码与管理绑定的唯一 CLI 入口；设计见 `docs/design/ADMIN_CHANNEL_IDENTITY.md`。
 - `agent/gateway_parts/owner_conversation_store.py`：沿原配置与 owner 路径组装模型菜单和插件管理共用的轻量会话 Store，不初始化完整 Agent。
 - `agent/gateway_parts/approval_mode_service.py`：认证 owner 的权限菜单服务，不允许正文伪造管理员。
 - `agent/user_space/approval_mode.py`：既有 owner 工具策略里的唯一用户审批模式读写与运行快照映射。

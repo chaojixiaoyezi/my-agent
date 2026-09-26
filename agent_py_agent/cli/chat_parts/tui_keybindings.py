@@ -587,8 +587,13 @@ def _replace_trailing_backslash_with_newline(input_area: Any) -> bool:
 
 
 # LLM: FileHistory 只登记最终提交的非空输入；展示/命令分流仍由后续 typed 路径决定。
+#   命令目录声明 sensitive_input 的命令（可能带管理员密码）一律不写历史文件。
 # 函数用途: 把一次提交保存到输入历史供 Up/Down 和自动建议使用。
 def _remember_input(input_area: Any, text: str) -> None:
+    from ...agent.command_catalog import sensitive_command_name
+
+    if sensitive_command_name(text):
+        return
     history = getattr(input_area.buffer, "history", None)
     append = getattr(history, "append_string", None)
     if callable(append):

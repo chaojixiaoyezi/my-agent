@@ -3143,6 +3143,46 @@ Audit/摄取不列入本轮新增验收；共享模块既有回归按改动影�
   管理员经 `/client/models` 共享默认模型后，`/model` 列出 1 个带“管理员共享”的模型且不含接口地址，`/model 1` 选中，
   普通消息用该模型完成，再发 `/model` 显示当前会话模型。复制的模型目录随隔离 home 删除，证据在仓库外。
 
+## IM 管理员身份与聊天内审批（2026-09-25，分支 `claude/admin-identity`）
+
+- 背景：管理员以前只有本机 local/main，飞书用户永远是自己的 owner，IM 客户端也无法确认工具。用户决定用管理员密码在飞书
+  私聊里绑定管理员身份，并用密码批准工具。设计见 [IM 管理员身份](docs/design/ADMIN_CHANNEL_IDENTITY.md)。
+- `test_admin_identity_store.py`：
+  - 密码文件只有 scrypt 参数、盐和派生值；文件 0600、目录 0700；任何文件里都没有明文；重新设置会换盐。
+  - 过短、首尾空白、含换行或制表符的密码被拒，不写文件。
+  - 同一身份 10 分钟内错 5 次锁 10 分钟：锁定期内正确密码也拒绝，别的身份不受影响，到期后恢复，成功后计数清零；
+    拒绝文案只有通用句子和剩余分钟数。窗口外的失败不累计。
+  - 未设置或损坏的密码文件一律验证不通过；失败记录损坏时拒绝，不放行。
+  - 绑定只按 `(channel, user_id)` 精确匹配，渠道名不分大小写、用户 ID 区分大小写；重复绑定不产生重复行；绑定文件损坏时
+    查询 fail-closed、写入不覆盖。
+  - CLI：两次输入不一致或密码过短时返回 2 且不写文件；status/list 输出不含散列、盐和明文；非 local/main 配置拒绝且不提示输入；
+    命令组缺子命令时打印帮助，不落到默认聊天入口。
+- `test_admin_identity_gateway.py`：
+  - 绑定后，请求和控制作用域都解析为 local/main；群聊、缺私聊类型、其他用户、开关关闭、base owner 不是 local/main 时不变；
+    解除绑定后恢复。
+  - 真实 `handle_ask` 处理 `/admin <密码>`：回执 `command_text` 为 `/admin ******`，整个临时目录没有明文，不写请求队列；
+    同一消息重投只重放原回执。
+  - 错误密码、群聊（提示撤回并更换密码）、本机终端、开关关闭都被拒；`/admin status` 与 `/admin logout` 正常。
+  - 服务端只对已绑定的管理员私聊、且执行 owner 为本机管理员时开启交互审批；显式声明能力的 TUI 不变。
+  - `/progress` 的审批事件只有 `kind/tool/summary`，外部渠道收敛宿主路径；IM 渲染出 `/approve` 与 `/deny` 提示。
+  - 真实 `BufferedChunkStreamWriter` 等待审批：错误密码不产生决定；正确的 `/approve` 经控制回执（正文为 `/approve ******`）
+    让等待方得到 `approved`，再批准返回 `APPROVAL_NOT_PENDING`。`/deny` 不要密码，得到 `denied`；未绑定时 `/approve`
+    返回 `ADMIN_IDENTITY_NOT_BOUND`，而且不校验密码。
+  - 以下情形都拒绝，且不写决定文件：没有待决、同一回合两条待决（`APPROVAL_AMBIGUOUS`）、其他会话或其他用户、
+    本次认领之前的旧执行事件。
+- `test_admin_identity_clients.py`：
+  - 适配器：`/admin`、`/approve`、`/deny` 不写持久入站记录，也不建回复 watcher，只直接 POST 一次并回复 Gateway 结果；
+    Gateway 不可达时只回“服务暂时不可用”，不重试；普通消息照常入持久队列。临时目录里没有明文。
+  - TUI 与终端：在写控制 outbox 与发 Gateway 之前本地拒绝；拒绝文案不含密码；这三条命令不写输入历史。
+- 回归：本地严格 gate 共 54 个测试文件（3 个新增，加所涉模块既有测试与架构守卫）1468 passed、1 skipped；
+  ruff、doc sync、strict code-size、diff check、clean package 均通过。尚未部署，未做真实飞书验收。
+- 真实验收方法（待做）：
+  1. 在隔离 home 与 127.0.0.1:8431 的 Gateway 上用 CLI 设置密码。
+  2. 以飞书私聊身份经 `/ask` 发送 `/admin <密码>`，核对绑定文件和回执脱敏。
+  3. 发一条会触发需确认工具的普通消息，核对 `/progress` 的提示。
+  4. 分别用 `/approve <密码>` 和 `/deny` 核对工具执行或拒绝。
+  5. 核对群聊被拒、错误 5 次锁定。
+
 ## 提交前严格 gate
 
 - **线上 CI runner 与 bwrap（2026-09-25）**：Actions 重新启用后 Test 工作流自 7 月以来一直失败，根因是 ubuntu-24.04 runner 预装 bwrap 但 AppArmor 禁止非特权用户命名空间，sandbox 自检 `BWRAP_ISOLATION_FAILED`（setting up uid map: permission denied）→ 全部 `run_command` 用例按设计 fail-closed。两个工作流增加

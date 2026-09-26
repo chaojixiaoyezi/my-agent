@@ -347,6 +347,9 @@ def handle_progress(handler, server) -> None:
     )
 
 
+# LLM: /progress 只公开白名单事件：模型过程说明、按档位的工具进度，以及等待确认的工具审批（只含工具名与已脱敏摘要，
+#   不含 binding、选项或参数原文）。审批事件只是提示，授权仍只能经 /approve、/deny 控制写入精确决定文件。
+# 函数用途: 按行游标读取一段 chunk 流，并投影成 IM 适配器可渲染的公开进度事件。
 def _read_public_progress_events(
     path, since: int, *, channel: str = ""
 ) -> tuple[list[dict[str, object]], int]:
@@ -374,6 +377,11 @@ def _read_public_progress_events(
             if text:
                 events.append({"kind": "assistant_commentary", "text": text})
             continue
+        if row.get("kind") == "permission_requested":
+            permission_event = _public_permission_request_event(row, channel)
+            if permission_event is not None:
+                events.append(permission_event)
+            continue
         if row.get("kind") != "tool_progress":
             continue
         level = str(row.get("verbose_level") or "off")
@@ -382,6 +390,23 @@ def _read_public_progress_events(
             continue
         events.append({"level": level, **progress})
     return events, min(len(lines), since + 200)
+
+
+# LLM: 只接受结构化 permission 对象里的工具名和展示摘要；摘要经与最终回复同一的公开投影和宿主路径收敛并限长。
+# 函数用途: 把一条等待确认的工具审批变成 IM 可渲染的公开进度事件。
+def _public_permission_request_event(row: dict, channel: str) -> dict[str, object] | None:
+    permission = row.get("permission")
+    if not isinstance(permission, dict):
+        return None
+    tool = str(permission.get("tool_name") or "").strip()
+    if not tool:
+        return None
+    summary = project_host_paths_for_channel(
+        project_user_reply(str(permission.get("description") or "")).content,
+        channel,
+    )
+    summary = " ".join(summary.split())[:200] or tool
+    return {"kind": "permission_requested", "tool": tool, "summary": summary}
 
 
 def _send_pending_state(handler, folder, status: str, access: _ResultAccessContext) -> bool:

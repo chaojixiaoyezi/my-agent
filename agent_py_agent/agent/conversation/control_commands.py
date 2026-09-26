@@ -1,5 +1,6 @@
 # LLM: 会话控制保留原类型、参数语义和回执格式；词法声明读取公共目录，插件不可进入旧控制执行器。
 # /experiment 与 /audit 准备轮同为任务命令：参数冻结进 system_task，只有任务正文进入模型。
+# /admin、/approve 的密码只在 command.value 中，任何持久化之前经 persisted_control_command_text 脱敏。
 # 模块用途: 将明确命令解释为会话控制或任务，供终端与 IM 共用，普通语言不获得控制权。
 
 from __future__ import annotations
@@ -38,6 +39,9 @@ ControlKind = Literal[
     "recover",
     "model",
     "restart",
+    "admin",
+    "approve",
+    "deny",
     "unsupported",
 ]
 TaskCommandKind = Literal["audit_prepare", "decision_experiment"]
@@ -172,6 +176,7 @@ def parse_conversation_control(
 
 
 # LLM: 名称和正文读取公共声明；插件实际入口另行消费其只读回执，此控制解析器仍拒绝插件，不能执行旧 stop 分支。
+#   /admin、/approve 的参数是密码，只进 command.value，调用方持久化前必须经 persisted_control_command_text 脱敏。
 # 函数用途: 区分即时控制与模型任务，保留暂停目标、中断本轮和停止资源三种语义；/recover 只解析结构化处置值，/model 只解析编号，
 # /restart 的尾随文字只作为展示用原因。
 def parse_conversation_command(
@@ -227,6 +232,17 @@ def parse_conversation_command(
         return ConversationControlCommand("restart", value=str(trailing or "").strip()[:200], operation="apply")
     if name == "model":
         return _model_command(trailing)
+    if name == "admin":
+        return _admin_command(trailing)
+    if name == "approve":
+        password = str(trailing or "").strip()
+        return ConversationControlCommand(
+            "approve", value=password, operation="approve", valid=bool(password), usage=_APPROVE_USAGE,
+        )
+    if name == "deny":
+        return ConversationControlCommand(
+            "deny", operation="deny", valid=not str(trailing or "").strip(), usage=_DENY_USAGE,
+        )
     if name == "audit":
         return _audit_command(raw)
     if name == "experiment":
@@ -398,6 +414,42 @@ def _model_command(trailing: object) -> ConversationControlCommand:
     return ConversationControlCommand(
         "model", value=value, operation="select", valid=len(value.split()) == 1, usage=_MODEL_USAGE,
     )
+
+
+_ADMIN_USAGE = "用法：/admin <管理员密码> 在 IM 私聊中验证管理员身份；/admin status 查看；/admin logout 解除。"
+_APPROVE_USAGE = "用法：/approve <管理员密码> 批准本会话当前唯一等待确认的操作（仅本次）；拒绝请发 /deny。"
+_DENY_USAGE = "用法：/deny（拒绝本会话当前唯一等待确认的操作，不需要密码）"
+_REDACTED_SECRET = "******"
+
+
+# LLM: status/logout 是精确子命令，其余整段正文都当作一次性密码放进 command.value，只在内存中供 Gateway 校验一次；
+#   密码最短 8 位，不会与两个子命令同名。解析器不校验密码对错，也不记录它。
+# 函数用途: 把 `/admin <密码>`、`/admin status`、`/admin logout` 解析成结构化管理员身份控制。
+def _admin_command(trailing: object) -> ConversationControlCommand:
+    value = str(trailing or "").strip()
+    operation = value.casefold() if value.casefold() in {"status", "logout"} else "login"
+    return ConversationControlCommand(
+        "admin",
+        value=value if operation == "login" else "",
+        operation=operation,
+        valid=bool(value),
+        usage=_ADMIN_USAGE,
+    )
+
+
+# LLM: 只看结构化 kind/operation：/approve 与 /admin 登录的 value 是密码；status/logout/deny 不带秘密。
+# 函数用途: 判断一条控制命令的参数是否是管理员密码。
+def control_command_carries_secret(command: ConversationControlCommand) -> bool:
+    return command.kind == "approve" or (command.kind == "admin" and command.operation == "login")
+
+
+# LLM: 管理员密码只在内存里的 command.value 中用于一次校验；控制回执、摘要和日志落盘前必须改用这里的脱敏正文。
+#   脱敏正文仍能被同一解析器还原成相同 kind（回执读回校验依赖这一点）；其余命令原样返回。
+# 函数用途: 生成可以安全持久化的控制命令正文，例如把 `/admin 密码` 变成 `/admin ******`。
+def persisted_control_command_text(command: ConversationControlCommand, text: object) -> str:
+    if control_command_carries_secret(command):
+        return f"/{command.kind} {_REDACTED_SECRET}"
+    return str(text or "")
 
 
 # LLM: 处置值只认 runtime_db 的结构化取值表，不接受同义词或正文；无参数只读查看，带参数才会改运行库。
@@ -631,6 +683,7 @@ __all__ = [
     "ConversationTaskCommand",
     "ConversationTaskStatus",
     "NamedConversationWorkStatus",
+    "control_command_carries_secret",
     "conversation_task_attributes",
     "decision_experiment_task",
     "conversation_compact_interrupt_name",
@@ -638,6 +691,7 @@ __all__ = [
     "parse_conversation_control",
     "parse_conversation_command",
     "parse_conversation_task_command",
+    "persisted_control_command_text",
     "render_conversation_task_status",
     "render_verbose_control",
 ]

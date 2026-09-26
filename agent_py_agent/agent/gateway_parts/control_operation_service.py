@@ -21,6 +21,7 @@ from typing import Any
 from ..conversation.control_commands import (
     ConversationControlCommand,
     parse_conversation_control,
+    persisted_control_command_text,
 )
 from ..runtime_errors import DataCorruptionError, runtime_error_report
 from ..user_space.owner_resolver import OwnerIdentity
@@ -259,6 +260,7 @@ def gateway_control_operation_identity(
 
 # LLM: The prepare row is committed before the executing marker and before any command-specific
 # mutation. Existing completed/unknown rows are replayed without touching the effect service.
+# /admin、/approve 的密码在写回执、算摘要之前就换成脱敏正文；明文只随内存中的 command 交给执行服务一次。
 # 函数用途: 幂等执行一条控制命令，并把崩溃边界保存为 completed 或 terminal_unknown。
 def execute_gateway_control_operation(
     agent: object,
@@ -269,6 +271,7 @@ def execute_gateway_control_operation(
     command_text: str,
 ) -> GatewayControlOperationReceipt:
     scope = bind_gateway_control_scope_owner(agent, scope)
+    command_text = persisted_control_command_text(command, command_text)
     operation_id, input_digest = gateway_control_operation_identity(scope, command_text)
     with try_gateway_control_operation_transition(paths, operation_id) as acquired:
         if acquired:

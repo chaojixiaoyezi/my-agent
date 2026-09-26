@@ -327,7 +327,8 @@ def reconcile_gateway_steer_delivery(
 # LLM: 三类控制分别调度 Goal、中断回合或停止任务资源；只有明确 stop 才组合，未知控制不能回退到停止。
 # /recover 只交给 turn_recovery_control 按当前会话的工作任务处理，不经过 live request 或停止分支；
 # /model 文字形式交给 model_profile_service，与 TUI 菜单共用 owner/线程解析和写入口；
-# /restart 只交给 restart_control 校验管理员后写安全重启请求。
+# /restart 只交给 restart_control 校验管理员后写安全重启请求；
+# /admin、/approve、/deny 交给 admin_control_service：只读 base agent 的 home/config 与 Gateway 队列，不构造 scoped Agent。
 # 函数用途: 分派结构化控制，避免已暂停 Goal 或普通任务的 interrupt 落入资源停止。
 def execute_gateway_conversation_control(
     agent: object,
@@ -358,6 +359,11 @@ def execute_gateway_conversation_control(
         from .model_profile_service import execute_model_text_control
 
         return execute_model_text_control(agent, command, scope)
+    if command.kind in {"admin", "approve", "deny"}:
+        # admin_control_service 在导入期依赖本模块的请求匹配，这里延迟导入以免循环引用。
+        from .admin_control_service import execute_admin_channel_control
+
+        return execute_admin_channel_control(agent, paths, command, scope)
     steer_receipt: _SteerReceiptState | None = None
     if command.kind == "steer":
         try:

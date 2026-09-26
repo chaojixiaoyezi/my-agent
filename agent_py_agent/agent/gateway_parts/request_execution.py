@@ -1087,7 +1087,7 @@ def _complete_gateway_request_audit(
     )
 
 
-# LLM: 每个 claimed request 只创建一个 chunk writer；审批只读 client_capabilities，失败只投影 typed HTTP 事实，不把异常正文公开或用作重试依据。
+# LLM: 每个 claimed request 只创建一个 chunk writer；审批只读 client_capabilities 或服务端核实的管理员 IM 私聊，失败只投影 typed HTTP 事实，不把异常正文公开或用作重试依据。
 # 函数用途: 执行一条 Gateway 请求、维护 lease/chunk，并保存已有执行与本次失败的真实响应。
 def _handle_gateway_request(
     agent: SimpleAgent,
@@ -1126,7 +1126,7 @@ def _handle_gateway_request(
     chunk_path_abs, _ = open_chunk_stream(chunk_path)
     chunk_writer = BufferedChunkStreamWriter(
         chunk_path_abs,
-        interactive_approvals=_gateway_client_supports_tool_approval(context["request"]),
+        interactive_approvals=_gateway_request_interactive_approvals(agent, context["request"]),
         rich_transcript=_gateway_client_supports_rich_transcript(context["request"]),
         delivery_channel=request_history.gateway_request_channel(context["request"]),
     )
@@ -1187,6 +1187,22 @@ def _gateway_client_supports_tool_approval(request: object) -> bool:
         return False
     capabilities = request.get("client_capabilities")
     return bool(isinstance(capabilities, dict) and capabilities.get("tool_approval") is True)
+
+
+# LLM: 交互审批只来自两种结构化事实：客户端显式声明 tool_approval（TUI），或服务端核实本请求来自已绑定管理员的 IM 私聊
+#   且执行 owner 正是本机管理员（local/main）。IM 客户端不能自己声明这项能力；绑定和 owner 都由 Gateway 读自己的配置与文件。
+# 函数用途: 决定本请求遇到需要确认的工具时是等用户决定（TUI 面板或 IM 的 /approve、/deny），还是立即按无法确认拒绝。
+def _gateway_request_interactive_approvals(agent: object, request: object) -> bool:
+    if _gateway_client_supports_tool_approval(request):
+        return True
+    if not isinstance(request, dict):
+        return False
+    from ..user_space.approval_mode import is_permission_admin
+    from .request_worker import admin_channel_identity_for_request
+
+    if not is_permission_admin(getattr(agent, "home_paths", None)):
+        return False
+    return admin_channel_identity_for_request(agent, request) is not None
 
 
 # LLM: 富 transcript 只接受 client_capabilities.rich_transcript 的精确布尔真值，不从 source/TTY 猜测。

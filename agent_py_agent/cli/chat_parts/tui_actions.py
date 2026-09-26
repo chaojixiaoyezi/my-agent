@@ -203,6 +203,7 @@ def _tui_attach_gateway_job(
 # through to a foreground/background task. 会话运行时 does not expose manual Compact during an active
 # task, so the client must reject that state before persisting an outbox row or starting animation;
 # automatic in-turn Compact is a separate runtime path. Ambiguous task sets still fail closed.
+# IM 专用的 /admin、/approve、/deny 在写 outbox 之前本地拒绝。
 # 函数用途: 展示同源上下文，或持久提交带精确回合/Compact 目标的 TUI 控制命令；任务运行中不显示假的手动压缩动画；单独 /model 留给本地菜单。
 def _tui_submit_control_operation(
     params: TuiCreateKeybindingsParams,
@@ -210,11 +211,9 @@ def _tui_submit_control_operation(
 ) -> bool:
     if not bool(getattr(params, "use_gateway", False)):
         return False
-    from ...agent.conversation.control_commands import parse_conversation_control
-
-    command = parse_conversation_control(text, reject_unknown_slash=True)
-    if command is None or not command.valid:
-        return False
+    command, handled = _tui_control_or_im_only_refusal(params, text)
+    if handled or command is None or not command.valid:
+        return handled
     if command.kind == "model" and command.operation == "view":
         return False  # 单独 /model 仍由 TUI 本地菜单处理；只有带编号的文字形式发给 Gateway。
     if command.kind == "context":
@@ -311,6 +310,21 @@ def _tui_submit_control_operation(
             duration_seconds=2.5 if command.kind == "steer" else 1.2,
         )
     return True
+
+
+# LLM: /admin、/approve、/deny 只属于 IM 私聊：在写控制 outbox、发 Gateway 之前本地拒绝并显示原因，密码不落盘也不离开输入框。
+#   返回 (解析结果, 是否已处理)；其余命令原样交回调用方继续走持久控制流程。
+# 函数用途: 解析一条 TUI 控制命令，并就地拒绝 IM 专用的管理员命令。
+def _tui_control_or_im_only_refusal(params: TuiCreateKeybindingsParams, text: str):
+    from ...agent.conversation.control_commands import parse_conversation_control
+    from .control_runtime import im_only_control_result
+
+    command = parse_conversation_control(text, reject_unknown_slash=True)
+    refused = im_only_control_result(command) if command is not None else None
+    if refused is None:
+        return command, False
+    _required_tui_runtime(params).write_console(refused.message)
+    return command, True
 
 
 # LLM: A single durable reconciler owns every TUI control retry. It reuses the saved message id,

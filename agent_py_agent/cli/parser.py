@@ -28,11 +28,13 @@ if TYPE_CHECKING:
 # LLM: Full parser compatibility remains the authority for every non-interactive command. Keep
 # registrations unchanged and pass an already loaded extension registry from main().
 # `skills` is the only user entry that may confirm self-learning Skill proposals.
+# `admin-password` / `admin-identities` are the only CLI entries for the IM admin password and bindings.
 # 函数用途: 构建包含全部内置命令和扩展命令的解析器，供管理命令、测试和帮助页使用。
 def build_parser(extension_registry: ExtensionRegistry | None = None) -> argparse.ArgumentParser:
     parser = _build_root_parser()
     subparsers = parser.add_subparsers(dest="command")
 
+    from .admin_identity_commands import add_admin_identity_subcommands
     from .background_main_agent import add_background_main_agent_subcommands
     from .commands import (
         add_bench_model_command,
@@ -81,6 +83,7 @@ def build_parser(extension_registry: ExtensionRegistry | None = None) -> argpars
     add_update_subcommand(subparsers)
     add_config_subcommands(subparsers)
     add_feishu_subcommands(subparsers)
+    add_admin_identity_subcommands(subparsers)
     if extension_registry is not None:
         extension_registry.register_cli_commands(subparsers)
 

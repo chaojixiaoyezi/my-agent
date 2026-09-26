@@ -127,6 +127,28 @@ HTTP/IM/未知来源不能凭 rich transcript 获得私有路径展示，后台�
 标识遮蔽也必须使用同一展示通道：本机私有正文中的独立内部编号照常遮蔽，路径里的 owner/request
 不能被替换为“当前空间/当前请求”而破坏地址。外部通道仍先去除宿主路径，再按原策略遮蔽标识。
 
+## IM 管理员身份与聊天内审批
+
+- owner 解析：`request_worker._resolve_request_owner_identity` 在逐用户路由前调用 `admin_channel_identity_for_request`。
+  该函数的判据全部是结构化字段：`private_channel_identity` 只取认证后的 user_id、`metadata.channel` 与 adapter 给出的
+  `channel_chat_type`（p2p/private），本机基础通道一律排除；`admin_channel_identity_enabled` 要求开关开启且 base owner
+  为 local/main；绑定表 `user_space/admin_channel_identity.py` 按 `(channel, user_id)` 精确匹配，读失败按未绑定处理。
+  命中时返回 base owner。控制作用域的两个 owner 解析入口经同一函数，所以请求与控制的结果一致。
+- 控制：`control_service` 把 `admin/approve/deny` 延迟分派给 `admin_control_service.py`，只用 base agent 的 home/config
+  和 Gateway 队列，不构造 scoped Agent。`control_operation_service.execute_gateway_control_operation` 在计算摘要、
+  写回执之前，用 `control_commands.persisted_control_command_text` 把密码换成 `******`；明文只随内存中的 command 交给执行服务。
+- 审批：`request_execution._gateway_request_interactive_approvals` 在客户端声明 `tool_approval`，或服务端核实为已绑定的
+  管理员私聊且执行 owner 为本机管理员时，开启原 `StreamApproval`。`http_handlers._read_public_progress_events` 把
+  `permission_requested` 投影成 `{kind, tool, summary}`。`/approve`、`/deny` 经 `pending_tool_approvals` 核对以下各项，
+  再用 `write_gateway_permission_decision` 写唯一决定文件，由原等待方核对 binding：
+  - 本会话开放回合；
+  - owner 一致；
+  - 请求号一致；
+  - 事件发布于本次认领之后；
+  - 该审批尚未有决定文件。
+- 适配器：`adapter/manager.route_message` 对命令目录声明 `sensitive_input` 的命令不建持久入站记录，在一次性线程里直接
+  POST `/ask` 并回复结果。其余消息仍按原持久状态机处理。设计见 `docs/design/ADMIN_CHANNEL_IDENTITY.md`。
+
 ## 异常回合历史
 
 `request_execution.py` 在同一 Gateway 用户回合内仅用内存回调携带已评估标记与能力展示选择；

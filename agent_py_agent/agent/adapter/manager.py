@@ -3,18 +3,22 @@
 from __future__ import annotations
 
 """LLM: ChannelManager persists authenticated adapter ingress before any Gateway or provider IO.
+The only exception is a catalog-declared sensitive_input command (may carry the admin password):
+it is never persisted and is submitted once directly.
 
-模块用途: 注册外部通道，并把入站消息交给可恢复的单线程投递状态机处理。
+模块用途: 注册外部通道，并把入站消息交给可恢复的单线程投递状态机处理；可能带管理员密码的命令不落盘、直接提交一次。
 """
 
 import json
 import logging
+import threading
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ..command_catalog import sensitive_command_name
 from ..delivery import ChannelAdapterRegistry, DeliveryContext, DeliveryService, ReplyEnvelope
 from .base import BaseChannelAdapter
 from .delivery import (
@@ -35,6 +39,7 @@ from .ingress import (
 from .protocol import IncomingMessage
 
 logger = logging.getLogger(__name__)
+_SENSITIVE_COMMAND_UNAVAILABLE = "服务暂时不可用，命令没有执行，请稍后重试。"
 
 
 # LLM: Submission preserves Gateway's typed input disposition separately from request execution
@@ -62,9 +67,16 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# LLM: 只渲染 Gateway /progress 的结构化事件；permission_requested 只提示可发送的控制命令，既不代表批准，
+#   也不是最终回复（最终正文仍由原请求结果 watcher 发送）；提示只含工具名与 Gateway 已脱敏的摘要。
+# 函数用途: 把一条过程事件渲染成 IM 可读文本；工具等待确认时告诉用户用 /approve 或 /deny。
 def _render_gateway_progress(event: dict[str, object]) -> str:
-    if str(event.get("kind") or "") == "assistant_commentary":
+    kind = str(event.get("kind") or "")
+    if kind == "assistant_commentary":
         return str(event.get("text") or "").strip()
+    if kind == "permission_requested":
+        summary = str(event.get("summary") or event.get("tool") or "一个工具操作").strip()
+        return f"代理请求：{summary}。回复 /approve <管理员密码> 允许本次，/deny 拒绝。"
     tool = str(event.get("tool") or "工具")
     status = str(event.get("status") or "").strip()
     elapsed = event.get("elapsed_seconds")
@@ -834,12 +846,16 @@ class ChannelManager:
 
     # LLM: Every authenticated message is durably recorded before media, Gateway POST, placeholder,
     # or reply IO. Same-id/same-body reuses the row; same-id/different-body is quarantined.
+    # 例外：命令目录声明 sensitive_input 的命令（/admin、/approve、/deny）可能带管理员密码，绝不进入持久入站队列，
+    # 改由 _route_sensitive_command 一次性直接提交。
     # 函数用途: 只登记外部消息并唤醒后台 worker，不在飞书/WS 回调线程访问 Gateway 或通道接口。
     def route_message(self, msg: IncomingMessage) -> bool:
         try:
             if self._adapters.get(msg.channel) is None:
                 logger.error(f"找不到 channel={msg.channel} 的适配器")
                 return False
+            if sensitive_command_name(msg.content):
+                return self._route_sensitive_command(msg)
             record = build_gateway_ingress_record(
                 channel=msg.channel,
                 user_id=msg.user_id,
@@ -865,6 +881,35 @@ class ChannelManager:
         except Exception as exc:
             logger.error(f"route_message 异常: {exc}")
             return False
+
+    # LLM: 敏感命令不写入口记录、回复 watcher 或占位句柄，也不重试；回调线程只启动一个短生命周期线程后立即返回，
+    #   这条线程不持有任何持久状态，不是第二条投递状态机。
+    # 函数用途: 把可能带管理员密码的命令交给一次性后台线程直接提交。
+    def _route_sensitive_command(self, msg: IncomingMessage) -> bool:
+        threading.Thread(
+            target=self._deliver_sensitive_command,
+            args=(msg,),
+            name="gateway-sensitive-command",
+            daemon=True,
+        ).start()
+        return True
+
+    # LLM: 只 POST 一次原 /ask 载荷（Gateway 在任何持久化之前脱敏并在模型之前拦截）；Gateway 不可达或返回错误时
+    #   只回复“服务暂时不可用”，不落盘、不重试。日志只记异常类型，不记正文。
+    # 函数用途: 直接提交一条敏感命令，并把 Gateway 返回的控制结果回复给原私聊。
+    def _deliver_sensitive_command(self, msg: IncomingMessage) -> None:
+        reply_id = f"control-{msg.message_id}"
+        try:
+            submission = self._submit_gateway_ask(msg)
+            text = submission.message or "系统命令没有返回结果。"
+            reply_id = submission.operation_id or reply_id
+        except Exception as exc:
+            logger.warning("敏感命令提交失败 channel=%s error_type=%s", msg.channel, type(exc).__name__)
+            text = _SENSITIVE_COMMAND_UNAVAILABLE
+        try:
+            self._send_gateway_reply(msg, reply_id, text)
+        except Exception as exc:
+            logger.warning("敏感命令回复发送失败 channel=%s error_type=%s", msg.channel, type(exc).__name__)
 
     # LLM: Match both request and trusted channel scope before suppressing a late reply.
     # 函数用途: `/stop` 成功后丢弃当前会话该请求的旧回复并撤掉占位提示。

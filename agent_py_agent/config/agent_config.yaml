@@ -513,6 +513,11 @@ gateway_port: 8420
 # home/记忆/数据/成本/审计）上跑。远程通道身份缺失或 owner agent 创建失败时拒绝请求，
 # 绝不回退到基础 agent 串户；本机 CLI 没有远程身份时仍走 local main owner。
 gateway_per_user_owner_scoping: true
+# IM 管理员身份：本机用 `my-agent admin-password set` 设置管理员密码后，管理员在飞书等 IM 与机器人的一对一私聊里
+# 发送 `/admin <密码>` 即把该私聊身份（渠道+用户ID 精确匹配）绑定为管理员：之后这个私聊按本机主用户 local/main 运行，
+# 需要确认的工具会在聊天里提示，回复 `/approve <密码>` 批准本次、`/deny` 拒绝。群聊永远不匹配。
+# 没设密码时不会有任何绑定；设为 false 时 /admin 拒绝，已有绑定不生效（文件保留）。只在 base owner 为 local/main 时可用。
+admin_channel_identity_enabled: true
 
 # 网关 HTTP 绑定地址。默认 127.0.0.1(仅本机可达)。
 # 改成 0.0.0.0 等非回环地址会把网关暴露到网络,此时必须 auth_enabled=true,否则 fail-closed 拒绝启动

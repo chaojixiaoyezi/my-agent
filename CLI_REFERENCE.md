@@ -78,6 +78,9 @@ python -m agent_py_agent --help
 | `/recover [recorded\|confirmed_noop\|abandoned]` | 上一轮执行中断、结果未确认（报 `ACTIVE_TURN_OUTCOME_UNCERTAIN` 或 `RUN_RECOVERY_REQUIRED`）时使用：不带参数只列出未确认的工具操作；核对外部事实后带处置值显式解除阻塞，下一条消息接着原任务继续。 | 只作用于当前会话的工作任务；处置写进运行库 `attempt_recovered` 事件；不重放旧操作，不改聊天记录。仅 Gateway 模式。 |
 | `/restart [<原因>]` | 管理员安全重启 Gateway：先停领新请求、等在跑的回合结束，再等执行中的工具跑完后换新进程；期间的消息排队，重启后自动处理。 | 只有本机管理员（及已绑定为管理员的 IM 身份）可用；冷却中或同一会话短时间内重复重启会被拒。仅 Gateway 模式。 |
 | `/model [<编号>\|default <编号>]` | 不带参数列出本会话模型、新会话默认和可选模型；`/model <编号>` 为当前会话选择，`/model default <编号>` 设为新会话默认。 | 只选择已保存或管理员共享的模型，不在聊天里新增模型或收发密钥；TUI 里单独输入 `/model` 仍打开菜单。仅 Gateway 模式。 |
+| `/admin <管理员密码>`、`/admin status`、`/admin logout` | 仅 IM 一对一私聊：用本机设置的管理员密码把本私聊绑定为管理员，之后按本机主用户 local/main 运行；`status` 查看、`logout` 解除。 | 绑定写 `config/admin-channel-identities.json`；密码不进回执、记录和日志；群聊与本机终端拒绝。仅 Gateway 模式。 |
+| `/approve <管理员密码>` | 仅已绑定管理员的 IM 私聊：批准本会话当前唯一等待确认的工具操作，只批准这一次。 | 写原 permission bridge 的精确决定文件；没有或多于一个待决时拒绝。 |
+| `/deny` | 仅 IM 私聊：拒绝本会话当前唯一等待确认的工具操作，不需要密码。 | 同上；终端里请直接在审批面板中选择。 |
 | `/goal ...` | 查看或修改当前 thread 的持久目标。 | 系统控制；命令词不进入模型。 |
 | `/verbose [off|on|full]` | 查看或修改当前 thread 的过程显示档位。 | 系统设置；不创建模型请求、不写 transcript。 |
 | `/audit [时长] <任务>` | 以结构化保证档启动一个新任务。 | `/audit` 前缀不进入模型，只有任务正文进入正常 turn。 |
@@ -94,6 +97,13 @@ python -m agent_py_agent --help
 `abandoned` 表示不再核对、接受未知后果。三者都只经 `RuntimeRepository.recover_attempt_unknown` 把 unknown
 执行轮改为 recovered、run 复原为 created 并释放该轮执行锁；区别只记录在事件里。系统不会自动重做那条操作，
 模型在下一轮看到的仍是原会话历史。执行链状态不是“执行中断造成的 unknown”时，`/recover` 拒绝处理并提示查看运行诊断。
+
+`/admin`、`/approve`、`/deny` 说明：先在本机运行 `my-agent admin-password set` 设置管理员密码，再在飞书里与机器人的
+一对一私聊中发送 `/admin <密码>`。绑定只按渠道和用户 ID 精确匹配，群聊永远不匹配；10 分钟内错 5 次会锁定该身份 10 分钟，
+拒绝文案不区分原因。绑定后，需要确认的工具会在聊天里提示“代理请求：…。回复 /approve <管理员密码> 允许本次，/deny 拒绝。”。
+适配器不把这三条命令写进持久入站队列，Gateway 回执只存 `/admin ******`、`/approve ******`。飞书会保留原消息，
+发送后请撤回。终端（TUI/plain）本来就是管理员，会本地拒绝这三条命令，不发送也不保存。
+开关 `admin_channel_identity_enabled`，设计见 [IM 管理员身份](docs/design/ADMIN_CHANNEL_IDENTITY.md)。
 
 `/btw` 不再用于查看或永久追加 prompt，`/btw-clear` 已移除。`/stop` 会作废当前 turn 尚未消费的
 引导，但保留已经写入的聊天和工作现场；停止后可以直接用普通自然语言补充，再说“继续”。
@@ -221,6 +231,8 @@ Ctrl+C
 | `home-migrate` | 预览或复制旧 home 数据到当前 owner home | `--apply` 时写 | 否 |
 | `home-retention` | 预览或执行当前 owner home 的过期文件清理 | `--apply` 时删除过期文件并写审计 | 否 |
 | `runtime-stale-attempts` | 列出没有进程身份、无法自动判死的悬挂运行轮；`--settle` 按阈值显式结清为 unknown | `--settle` 时写运行库 | 否 |
+| `admin-password` | 设置、查看或清除本机管理员密码（IM 私聊 `/admin` 绑定和 `/approve` 审批时校验） | `set`/`clear` 写 `config/admin-password.json` | 否 |
+| `admin-identities` | 列出或解除已绑定为管理员的 IM 私聊身份 | `remove` 写 `config/admin-channel-identities.json` | 否 |
 | `home-index-rebuild` | 预览或重建 owner/task/run/agent 全局轻量索引 | `--apply` 时追加索引行 | 否 |
 | `memory-daily-list` | 直接查看 home daily memory 按天流水 | 否 | 否 |
 | `memory-route` | 按长期规则索引预览 memory 路由命中 | 否 | 否 |
@@ -544,6 +556,37 @@ my-agent runtime-stale-attempts --settle --older-than-days 7 --json
 | `--settle` | `false` | 实际结清；不传时只列出。 |
 | `--older-than-days` | `1` | 只结清开始时间早于这么多天前的运行轮；最小 0。 |
 | `--json` | `false` | 输出机器可读 JSON（含 `settled_agent_run_ids` 与 `remaining`）。 |
+
+## `admin-password`
+
+```powershell
+my-agent admin-password set
+my-agent admin-password status --json
+my-agent admin-password clear
+```
+
+只在配置的 base owner 为本机主用户（local/main）时运行，否则以 2 退出。`set` 用无回显输入读两次密码，两次一致且满足
+至少 8 个字符、首尾无空白、不含控制字符时，保存到 `<my_agent_home>/config/admin-password.json`（文件 0600、目录 0700）。
+文件只存 scrypt 参数、盐和派生值，重新设置会换新盐。`status` 只显示是否已设置、更新时间和已绑定身份数，不输出散列。
+`clear` 只删除密码文件，已绑定的 IM 身份保持不变；之后 `/admin` 与 `/approve` 一律验证不通过。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--json` | `false` | `status` 输出机器可读 JSON（`configured`、`state`、`updated_at`、`bound_identities`）。 |
+
+## `admin-identities`
+
+```powershell
+my-agent admin-identities list
+my-agent admin-identities remove feishu:ou_xxx
+```
+
+列出或解除 `/admin` 绑定的 IM 私聊身份（`<my_agent_home>/config/admin-channel-identities.json`）。身份写成
+`渠道:用户ID`；`remove` 按精确匹配删除一条，不存在时返回 1。同样只在 local/main 配置下运行。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--json` | `false` | `list` 输出机器可读 JSON（`identities` 列表含 `identity` 与 `bound_at`）。 |
 
 ## `memory-daily-list`
 

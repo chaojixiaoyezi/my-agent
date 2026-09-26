@@ -27,6 +27,7 @@
 
 | 文档 | 模块 | 状态 | 说明 |
 | --- | --- | --- | --- |
+| [ADMIN_CHANNEL_IDENTITY.md](ADMIN_CHANNEL_IDENTITY.md) | Gateway / IM 管理员身份 / 工具审批 | 已实现，待真实飞书验收 | 管理员密码与节流、IM 私聊精确绑定为 local/main、服务端开启聊天内审批、`/approve` `/deny`、密码不落原文 |
 | [MAINTAINABILITY_AND_JEV_REVIEW.md](MAINTAINABILITY_AND_JEV_REVIEW.md) | 模块可维护性 / Computer Use / Jev | 评估完成，方案待实施 | 热点源码及参考证据、渐进重构顺序、桌面能力现状；Jev 新接入方向见决策模型计划 |
 | [DECISION_MODEL_INTEGRATION.md](DECISION_MODEL_INTEGRATION.md) | 可选决策模型 / Jev | P1—P5 实施中，P1-A 已本地验收 | 原模型配置复用、短期限与失败隔离、逐点开关、记忆/派工/能力推荐、缓存和并行开发验收 |
 | [PLUGIN_DISPLAY.md](PLUGIN_DISPLAY.md) | 插件面板 / 只读订阅 | 第 9 步已发布，真实 TUI 已验 | 声明式面板、公开主题投影、单在途与撤销、TUI 只渲染核心校验结果 |

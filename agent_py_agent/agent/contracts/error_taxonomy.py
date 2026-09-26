@@ -8,6 +8,7 @@
 #   插件管理超时须查询原请求；管理权限、配置禁用和执行准备失败分别呈现，不能因错误而再次安装。
 #   决策模型是可选增强；连接探测或响应失败保留普通模型主链，设置版本冲突则读取新版本后再修改。
 #   入站附件无效是确定的用户输入失败：不能去掉附件改发纯文字，也不能原样重放，只能请用户重新添加。
+#   IM 管理员密码错误与失败锁定共用一个码，不暴露差别；没有待决审批时不得重复批准或替用户重试密码。
 # 模块用途: 给工具结果、恢复状态机和用户汇报提供一致的错误类别、重试性与处理建议。
 
 from __future__ import annotations
@@ -2703,6 +2704,50 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         retryable=False,
         recommended_action=RecoveryAction.REPORT_BLOCKER.value,
         recovery_hint="未知失败；记录诊断信息，避免盲目复读工具调用。",
+    ),
+    # —— IM 管理员身份与聊天内审批（/admin、/approve、/deny；2026-09-25）——
+    # 这些是会话控制的结构化结果码，客户端按码区分，不解析文案；密码失败与锁定共用一个码，不暴露差别。
+    "ADMIN_PASSWORD_REJECTED": ErrorContract(
+        code="ADMIN_PASSWORD_REJECTED",
+        category="permission",
+        retryable=False,
+        recommended_action=RecoveryAction.REQUEST_USER_INPUT.value,
+        recovery_hint="管理员密码校验未通过（含多次失败后的临时锁定）；不要替用户猜测或重试密码，由用户稍后自己重新输入。",
+    ),
+    "ADMIN_IDENTITY_SCOPE_INVALID": ErrorContract(
+        code="ADMIN_IDENTITY_SCOPE_INVALID",
+        category="permission",
+        retryable=False,
+        recommended_action=RecoveryAction.REQUEST_USER_INPUT.value,
+        recovery_hint="/admin、/approve、/deny 只在已启用的 IM 一对一私聊里有效；本机终端、群聊或功能关闭时改用原入口或请本机管理员启用。",
+    ),
+    "ADMIN_IDENTITY_NOT_BOUND": ErrorContract(
+        code="ADMIN_IDENTITY_NOT_BOUND",
+        category="permission",
+        retryable=False,
+        recommended_action=RecoveryAction.REQUEST_USER_INPUT.value,
+        recovery_hint="当前 IM 私聊没有绑定管理员身份，不能批准工具；需要用户先发送 /admin <管理员密码> 完成验证。",
+    ),
+    "ADMIN_IDENTITY_STORE_UNAVAILABLE": ErrorContract(
+        code="ADMIN_IDENTITY_STORE_UNAVAILABLE",
+        category="state",
+        retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="管理员密码、失败计数或身份绑定记录无法读写，没有做任何更改；请本机管理员检查 my-agent 的 config 目录后再试。",
+    ),
+    "APPROVAL_NOT_PENDING": ErrorContract(
+        code="APPROVAL_NOT_PENDING",
+        category="state",
+        retryable=False,
+        recommended_action=RecoveryAction.REQUEST_USER_INPUT.value,
+        recovery_hint="本会话当前没有等待确认的工具操作（可能已被处理、已停止或已结束）；不要重复发送批准。",
+    ),
+    "APPROVAL_AMBIGUOUS": ErrorContract(
+        code="APPROVAL_AMBIGUOUS",
+        category="state",
+        retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="本会话同时有多个等待确认的操作，系统不猜测目标；先用 /stop 收口当前回合，再重新发起。",
     ),
 }
 

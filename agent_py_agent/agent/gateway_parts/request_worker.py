@@ -1,4 +1,5 @@
 # LLM: 本模块负责 Gateway 请求入队、claim 和 worker 调度；文件 payload 的会话身份与客户端能力必须保持结构化且可审计。
+#   owner 解析另认已用管理员密码绑定的 IM 私聊，判据只有结构化渠道身份与绑定表的精确匹配。
 # 模块用途: 接收 Gateway 请求、写入队列并驱动后台 worker 可靠处理。
 
 from __future__ import annotations
@@ -525,6 +526,8 @@ def _request_deferred_until_later(request: _PendingGatewayRequest) -> bool:
 _OWNER_POOL_LOCK = threading.Lock()
 _BASE_OWNER_CHANNELS = frozenset({"local", "cli", "chat", "gateway-cli", "http"})
 _LOCAL_MAIN_USER_IDS = frozenset({"local-agent"})
+# IM 管理员身份只接受 adapter 明确标成一对一私聊的结构化 chat_type；缺失或群聊一律不匹配。
+_ADMIN_CHANNEL_CHAT_TYPES = frozenset({"p2p", "private"})
 
 
 class OwnerScopeUnavailableError(RuntimeError):
@@ -549,12 +552,16 @@ def _resolve_request_agent(agent, request_payload: dict):
 
 # LLM: This resolver freezes the actual owner chosen at ingress. Durable receipts must persist
 # the returned identity and must not rerun channel routing after configuration changes.
+# 已绑定管理员的 IM 私聊（admin_channel_identity_for_request）先于逐用户路由解析为 base owner；控制作用域经同一函数，结果一致。
 # 函数用途: 按当前可信请求事实解析本次实际使用的唯一 owner 身份，但不创建作用域 Agent。
 def _resolve_request_owner_identity(agent, request_payload: dict):
     from ..user_space.owner_resolver import owner_identity_from_config
 
     base_owner = owner_identity_from_config(getattr(agent, "config", None))
     if not bool(getattr(getattr(agent, "config", None), "gateway_per_user_owner_scoping", False)):
+        return base_owner
+    if admin_channel_identity_for_request(agent, request_payload) is not None:
+        # 已用管理员密码绑定的 IM 私聊按本机主用户运行；精确匹配只在 base owner 为 local/main 时成立。
         return base_owner
     owner = _owner_from_request(agent, request_payload)
     if owner is None:
@@ -653,6 +660,47 @@ def _owner_from_request(agent, request_payload: dict):
     if chat_type not in {"", "p2p", "private"} and chat_id:
         return OwnerIdentity.provider_group(normalized_channel, chat_id)
     return OwnerIdentity.provider_user(normalized_channel, user_id)
+
+
+# LLM: 只读 adapter 经认证 /ask 带来的结构化 user_id、metadata.channel、metadata.channel_chat_type；本机基础通道、
+#   匿名、缺 chat_type 或群聊都返回 None。不看昵称、会话名或正文。
+# 函数用途: 取出一条请求的 IM 私聊身份 (channel, user_id)，供管理员绑定匹配与 /admin 作用域检查共用。
+def private_channel_identity(request_payload: dict) -> tuple[str, str] | None:
+    meta = request_payload.get("metadata") if isinstance(request_payload.get("metadata"), dict) else {}
+    user_id = str(request_payload.get("user_id") or meta.get("user_id") or "").strip()
+    channel = str(meta.get("channel") or "").strip().casefold()
+    chat_type = str(meta.get("channel_chat_type") or "").strip().lower()
+    if not user_id or user_id == "anonymous" or not channel or channel in _BASE_OWNER_CHANNELS:
+        return None
+    if chat_type not in _ADMIN_CHANNEL_CHAT_TYPES:
+        return None
+    return channel, user_id
+
+
+# LLM: 开关读显式配置，基础 owner 必须正是 local/main；否则“绑定到管理员”没有可信目标，整体停用。
+# 函数用途: 判断本 Gateway 是否允许 IM 私聊通过管理员密码成为本机管理员。
+def admin_channel_identity_enabled(agent) -> bool:
+    from ..user_space.owner_resolver import OwnerIdentity, owner_identity_from_config
+
+    config = getattr(agent, "config", None)
+    if not bool(getattr(config, "admin_channel_identity_enabled", False)):
+        return False
+    return owner_identity_from_config(config) == OwnerIdentity.local_main()
+
+
+# LLM: 授权入口：私聊身份与 home/config 绑定文件做 (channel, user_id) 精确匹配，绑定文件损坏按未绑定处理（fail-closed）。
+#   只读文件，不创建 Agent；owner 解析、控制作用域和 Gateway 审批开关都必须经这里，不能各自另判。
+# 函数用途: 返回本请求命中的管理员 IM 身份绑定；不是已绑定的管理员私聊时返回 None。
+def admin_channel_identity_for_request(agent, request_payload: dict):
+    identity = private_channel_identity(request_payload) if isinstance(request_payload, dict) else None
+    if identity is None or not admin_channel_identity_enabled(agent):
+        return None
+    home_root = getattr(getattr(agent, "home_paths", None), "root", None)
+    if not home_root:
+        return None
+    from ..user_space.admin_channel_identity import find_admin_channel_identity
+
+    return find_admin_channel_identity(home_root, *identity)
 
 
 def _config_without_runtime_paths(agent):

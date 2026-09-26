@@ -12,6 +12,8 @@ from .command_arguments import ArgumentSpec, CommandActionSpec
 
 
 # LLM: 尾部正则保留核心自由正文，actions 描述结构化参数；两者不能从 usage/summary 反推或互相替代。
+#   sensitive_input 是声明事实：命令正文可能带管理员密码，入口不得持久化原文（适配器不进持久入站队列、
+#   TUI 不写输入历史、Gateway 回执只存脱敏正文）；它不授予任何权限。
 # 类用途: 保存一种命令的名称、别名、帮助变体、输入行为及可选会话语法，不持有处理器或运行状态。
 @dataclass(frozen=True)
 class CommandSpec:
@@ -25,6 +27,7 @@ class CommandSpec:
     multiline: bool = False
     namespace_separator: str = ""
     actions: tuple[CommandActionSpec, ...] = ()
+    sensitive_input: bool = False
 
 
 COMMAND_CATALOG = (
@@ -57,6 +60,32 @@ COMMAND_CATALOG = (
         ),
         submit_on_enter=True,
         conversation_suffix=r"(?:\s+(.*))?$",
+    ),
+    CommandSpec(
+        "admin",
+        "/admin <管理员密码>",
+        "在 IM 私聊中验证管理员身份，之后本私聊按本机管理员运行",
+        help_variants=(
+            ("/admin status", "查看本私聊是否已绑定管理员身份（IM 私聊）"),
+            ("/admin logout", "解除本私聊的管理员身份（IM 私聊）"),
+        ),
+        conversation_suffix=r"(?:\s+(.*))?$",
+        sensitive_input=True,
+    ),
+    CommandSpec(
+        "approve",
+        "/approve <管理员密码>",
+        "在 IM 私聊中批准本会话当前唯一等待确认的工具操作（仅本次）",
+        conversation_suffix=r"(?:\s+(.*))?$",
+        sensitive_input=True,
+    ),
+    CommandSpec(
+        "deny",
+        "/deny",
+        "在 IM 私聊中拒绝本会话当前唯一等待确认的工具操作",
+        submit_on_enter=True,
+        conversation_suffix=r"(?:\s+(.*))?$",
+        sensitive_input=True,
     ),
     CommandSpec(
         "permissions",
@@ -260,6 +289,13 @@ def system_slash_command_name(text: object) -> str:
             return spec.name + head[len(spec.name) + 1 :]
     match = _SYSTEM_SLASH.match(raw)
     return str(match.group(1) or "").lower() if match is not None else ""
+
+
+# LLM: 只按消息开头的系统命令名查目录声明，不解析参数、不读正文语义；插件命名空间、未知命令和普通文本都返回空串。
+# 函数用途: 判断一条输入是否可能带管理员密码，供适配器、TUI 输入历史决定不落原文。
+def sensitive_command_name(text: object) -> str:
+    spec = COMMAND_INDEX.get(system_slash_command_name(text))
+    return spec.name if spec is not None and spec.sensitive_input else ""
 
 
 # LLM: 此错误只负责未知核心命令；插件参数结果归 plugin_commands，不能再增加第二套命名空间文案。

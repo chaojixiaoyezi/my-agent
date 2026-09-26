@@ -555,6 +555,9 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 多用户通道默认按 X-User-Id/channel 解析独立 owner；远程身份缺失或 owner 创建失败时
     # fail-closed，绝不回退共享 main。单机 CLI 无远程 provider 身份时仍使用 local main。
     gateway_per_user_owner_scoping: bool = True
+    # 用管理员密码（本机 CLI 设置）在 IM 一对一私聊里 /admin 绑定过的身份按本机主用户 local/main 运行，
+    # Gateway 为这些私聊开启聊天内工具审批（/approve、/deny）。关闭时 /admin 拒绝、已有绑定不生效（文件保留）。
+    admin_channel_identity_enabled: bool = True
     # 网关 HTTP 绑定地址:默认 loopback,仅本机可达。绑非 loopback(暴露到网络)时强制要求鉴权,
     # 否则 fail-closed 拒绝启动(防"绑 0.0.0.0 + 无鉴权 = 未认证远程命令执行")。默认仅监听回环地址。
     gateway_bind_host: str = "127.0.0.1"
