@@ -1,0 +1,35 @@
+{
+  "schema": "drama_workflow_handoff.v1",
+  "files": [
+    {"id": "", "path": "", "sha256": ""}
+  ],
+  "stages": [
+    {
+      "id": "",
+      "scope": "",
+      "input_file_ids": [""],
+      "output_file_ids": [""],
+      "review_notes": ""
+    }
+  ],
+  "object_mappings": [
+    {
+      "source_file_id": "",
+      "source_field": "",
+      "source_object_id": "",
+      "target_file_id": "",
+      "target_field": "",
+      "target_object_id": "",
+      "reason": ""
+    }
+  ],
+  "omissions": [
+    {"source_file_id": "", "source_field": "", "source_object_id": "", "reason": ""}
+  ],
+  "additions": [
+    {"target_file_id": "", "target_field": "", "target_object_id": "", "reason": ""}
+  ],
+  "unresolved_differences": [
+    {"file_ids": [""], "object_ids": [""], "difference": "", "next_step": ""}
+  ]
+}

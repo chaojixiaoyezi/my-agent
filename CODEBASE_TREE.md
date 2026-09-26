@@ -29,11 +29,15 @@
 |-- agent_py_agent/tests/test_capability_package_entry_context.py # 多入口总预算、分页和失败隔离
 |-- agent_py_agent/tests/test_capability_package_selection_runtime.py # 主请求一次准备及停止续跑组合
 |-- agent_py_agent/tests/test_capability_package_drama_text_duration.py # A包逐场镜头与来源目标时长对账
+|-- agent_py_agent/tests/test_capability_package_drama_text_basis.py # A包v2镜头来源、改编与未知声明及报告版本
 |-- agent_py_agent/tests/test_capability_package_drama_workflow_duration.py # B包分集镜头与明确目标对账
+|-- agent_py_agent/tests/test_capability_package_b_template.py # B完整模板、制作交接及原派工授权接口
 |-- scripts/build_capability_package.py   # 不执行代码的可重复内容包构建入口
 |-- examples/capability-packages/         # 来源独立的短剧与证据报告样包源码
+|   `-- drama-workflow-b/templates/handoff.json # 制作阶段输入与对象转换的待填写业务资料
 |-- docs/design/CAPABILITY_PACKS.md       # 能力包协议、生命周期、隔离召回和任务版本合同
 |-- docs/design/CAPABILITY_MIGRATION.md   # 从固定来源到候选、安装、验收、迭代和回退的操作流程
+|-- docs/design/CAPABILITY_SOURCE_COVERAGE.md # 固定上游入口、脚本、依赖与样包迁移缺口
 |-- agent_py_agent/tests/test_capability_package_native_pipeline.py # 模型替身沿原生循环读取和精确落盘
 |-- agent_py_agent/tests/test_capability_package_prompt_guidance.py # 包采用与资源复用软规则、空选择和旧提示不变
 |-- agent_py_agent/tests/test_capability_package_selector_recovery.py # 准确读取参数、错误恢复、受限隔离及换代拒绝
@@ -1178,9 +1182,13 @@ docs/
 - `scripts/build_capability_package.py`：把声明和私有资源构建为 v7 内容包，不导入或执行包内脚本。
 - `examples/capability-packages/`：三个独立迁移切片与来源许可，组件测试不代表真实 TUI 通过。
 - `agent_py_agent/tests/test_capability_package_drama_text_duration.py` 与 `test_capability_package_drama_workflow_duration.py`：合成输入下验证样包原脚本的时长聚合、目标缺失/非法、浮点和溢出边界，不执行真实任务产物。
+- `agent_py_agent/tests/test_capability_package_drama_text_basis.py`：验证 A 包 v2 镜头声明、本场来源、失败回执版本和结构不代表语义的边界。
+- `agent_py_agent/tests/test_capability_package_b_template.py`：用完整占位填写公开合成资料，核对 B 的原检查器、私有交接模板及真实隔离派工授权。
+- `examples/capability-packages/drama-workflow-b/templates/handoff.json`：制作阶段、输入字节摘要、对象转换、省略与新增的业务清单；不作为宿主状态或已验证证据。
 
 - `docs/design/CAPABILITY_PACKS.md`：包级发现、私有方法、原安装与任务授权的边界。
 - `docs/design/CAPABILITY_MIGRATION.md`：固定来源、完整覆盖表、候选构建和原命令发布／回退的可执行步骤。
+- `docs/design/CAPABILITY_SOURCE_COVERAGE.md`：两个固定短剧来源的全部入口、阅读深度、样包映射及未迁移项；索引覆盖不等于能力全部迁移。
 - `agent_py_agent/tests/test_capability_package_resource_scope.py`：验证包成员和业务路径的区分、同代搜索导航、受限隔离，以及归档后原生消息保留完整资源引用。
 - `agent_py_agent/tests/test_capability_resource_input_schema.py`：验证模型完整来源schema、原执行器在handler前拒绝缺字段/类型错误，以及原身份/代次/摘要边界不变。
 - `docs/tasks/CAPABILITY_INTERNALIZATION_GOAL.md`：能力内化执行 Goal 与当前唯一 TODO。

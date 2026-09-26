@@ -130,7 +130,12 @@ def test_text_sample_checks_complete_source_and_shot_coverage(tmp_path):
                                  "scenes": 3, "shots": 3, "scene_seconds": 60.0, "shot_seconds": 60.0,
                                  "scene_shot_seconds": {"S01": 20.0, "S02": 20.0, "S03": 20.0},
                                  "target_declared": True, "target_seconds": 60.0, "target_delta_seconds": 0.0}
-    assert {item["code"] for item in report["warnings"]} == {"creative_quality_and_media_not_checked"}
+    assert {item["code"] for item in report["warnings"]} == {
+        "creative_quality_and_media_not_checked", "shot_adaptations_need_review",
+    }
+    assert {item["path"] for item in report["warnings"] if item["code"] == "shot_adaptations_need_review"} == {
+        "SH01.adaptations", "SH02.adaptations",
+    }
 
 
 def test_text_template_can_be_filled_into_valid_source_bound_delivery(tmp_path):

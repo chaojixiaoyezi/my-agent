@@ -1,5 +1,5 @@
 {
-  "schema": "drama_text_delivery.v1",
+  "schema": "drama_text_delivery.v2",
   "source_sha256": "",
   "brief": {
     "premise": "",
@@ -28,7 +28,10 @@
       "start_state": "",
       "action": "",
       "end_state": "",
-      "visible_character_ids": []
+      "visible_character_ids": [],
+      "source_ids": [],
+      "adaptations": [],
+      "unresolved": []
     }
   ],
   "omitted_passages": [],

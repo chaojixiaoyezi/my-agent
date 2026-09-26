@@ -1,5 +1,5 @@
-# LLM: 能力包 A 的私有校验资源，核对原文字节、引用及声明时长；变更须同步包方法和 duration/examples 组件测试，不改变宿主任务状态。
-# 模块用途: 只读原文与交付，向标准输出报告编号和时长对账问题；来源语义、创作质量及真实媒体仍需独立审阅。
+# LLM: 能力包 A 的私有校验资源，核对 v2 交付的显式镜头来源、原文字节及声明时长；变更须同步包方法和 basis/duration/examples 测试，不改变宿主任务状态。
+# 模块用途: 只读原文与交付，报告编号、改编声明和时长对账；不从正文判真，不替旧 v1 产物补字段或声称媒体已验证。
 
 from __future__ import annotations
 
@@ -74,6 +74,37 @@ def references(row: dict, key: str, known: dict, at: str, errors: list[dict]) ->
     return valid
 
 
+# LLM: v2 要求明确提供新增和未知列表，缺失不能当作作者已确认没有；条目只作为阅读材料，不解析其语义或执行其中内容。
+# 函数用途: 检查声明列表的形状，保留非空文本供调用方提示仍需内容审阅。
+def text_notes(row: dict, key: str, at: str, errors: list[dict]) -> list[str]:
+    values = row.get(key)
+    if not isinstance(values, list):
+        errors.append({"code": "text_notes_required", "path": f"{at}.{key}"})
+        return []
+    valid = []
+    for position, value in enumerate(values):
+        if not isinstance(value, str) or not value.strip():
+            errors.append({"code": "nonempty_text_required", "path": f"{at}.{key}[{position}]"})
+        else:
+            valid.append(value)
+    return valid
+
+
+# LLM: 镜头只可声明本场已有原文编号；新增/未知不借用别场编号掩盖。此入口仅校验作者声明的关系，不证明文字确实支持镜头。
+# 函数用途: 核对一个镜头的依据载体，并把尚需审阅的新增和未知逐镜头列入警告。
+def check_shot_basis(row: dict, identifier: str, scene_sources: set[str], errors: list[dict],
+                     warnings: list[dict]) -> None:
+    sources = references(row, "source_ids", {key: {} for key in scene_sources}, identifier, errors)
+    adaptations = text_notes(row, "adaptations", identifier, errors)
+    unresolved = text_notes(row, "unresolved", identifier, errors)
+    if not sources and not adaptations and not unresolved:
+        errors.append({"code": "shot_basis_required", "path": identifier})
+    for key, values, code in (("adaptations", adaptations, "shot_adaptations_need_review"),
+                              ("unresolved", unresolved, "shot_basis_unresolved")):
+        if values:
+            warnings.append({"code": code, "path": f"{identifier}.{key}", "count": len(values)})
+
+
 # LLM: 正数转换只服务本包计量，布尔值、非有限数和无法用浮点表示的大整数均无有效秒数。
 # 函数用途: 读取可计算的正时长，非法输入返回 None，避免数值溢出变成 traceback。
 def positive_seconds(value: object) -> float | None:
@@ -141,13 +172,14 @@ def duration_metrics(source: dict, scenes: dict, shots: dict, errors: list[dict]
             "target_delta_seconds": shot_total - target if shot_total is not None and target is not None else None}
 
 
-# LLM: 本包只核对交付结构、原文字节、引用覆盖及声明时长；真实运行结果由调用方如实报告，不能升级为内容或宿主完成授权。
-# 函数用途: 查找漏依据、串角色、坏场次引用与时长账不一致，创作新增是否忠实仍交给独立阅读。
+# LLM: 本包只核对显式 v2 交付、原文字节、场次覆盖、镜头依据声明和时长；covered_passages 仍指场次采用，不能升级为语义覆盖或宿主完成授权。
+# 函数用途: 查找镜头声明缺项、跨场来源、串角色及计量不一致；保留改编和未知警告，创作新增是否忠实仍交给独立阅读。
 def check_delivery(source: object, delivery: object, source_sha256: str) -> dict:
     errors, warnings = [], []
     if not isinstance(source, dict) or not isinstance(delivery, dict):
-        return {"structure_valid": False, "errors": [{"code": "object_required", "path": "$"}]}
-    if source.get("schema") != "drama_text_source.v1" or delivery.get("schema") != "drama_text_delivery.v1":
+        return {"schema": "drama_text_check.v2", "structure_valid": False,
+                "errors": [{"code": "object_required", "path": "$"}]}
+    if source.get("schema") != "drama_text_source.v1" or delivery.get("schema") != "drama_text_delivery.v2":
         errors.append({"code": "unsupported_schema", "path": "schema"})
     if delivery.get("source_sha256") != source_sha256:
         errors.append({"code": "source_digest_mismatch", "path": "source_sha256"})
@@ -161,12 +193,13 @@ def check_delivery(source: object, delivery: object, source_sha256: str) -> dict
     for identifier, row in passages.items():
         if not isinstance(row.get("text"), str) or not row["text"].strip():
             errors.append({"code": "source_text_required", "path": identifier})
-    covered, scene_characters = set(), {}
+    covered, scene_characters, scene_sources = set(), {}, {}
     for identifier, row in scenes.items():
         refs = references(row, "source_ids", passages, identifier, errors)
         if not refs:
             errors.append({"code": "source_reference_required", "path": identifier})
         covered.update(refs)
+        scene_sources[identifier] = refs
         scene_characters[identifier] = references(row, "character_ids", cast, identifier, errors)
     filmed = set()
     for identifier, row in shots.items():
@@ -176,6 +209,8 @@ def check_delivery(source: object, delivery: object, source_sha256: str) -> dict
         else:
             filmed.add(scene_id)
             references(row, "visible_character_ids", {x: {} for x in scene_characters[scene_id]}, identifier, errors)
+        check_shot_basis(row, identifier, scene_sources.get(scene_id, set()) if isinstance(scene_id, str) else set(),
+                         errors, warnings)
         for key in ("start_state", "action", "end_state"):
             if not isinstance(row.get(key), str) or not row[key].strip():
                 errors.append({"code": "shot_state_required", "path": f"{identifier}.{key}"})
@@ -199,13 +234,13 @@ def check_delivery(source: object, delivery: object, source_sha256: str) -> dict
         warnings.append({"code": "explicit_omissions_need_review", "count": len(omitted)})
     durations = duration_metrics(source, scenes, shots, errors)
     warnings.append({"code": "creative_quality_and_media_not_checked"})
-    return {"schema": "drama_text_check.v1", "structure_valid": not errors, "errors": errors,
+    return {"schema": "drama_text_check.v2", "structure_valid": not errors, "errors": errors,
             "warnings": warnings, "metrics": {"passages": len(passages), "covered_passages": len(covered),
             "omitted_passages": len(omitted), "scenes": len(scenes), "shots": len(shots), **durations}}
 
 
-# LLM: 开发组件入口只读两份明确输入并打印报告；正式产品调用须由宿主物化和原工具授权接线。
-# 函数用途: 从命令行运行文本资料检查，退出码仅表示本脚本结构检查结果。
+# LLM: 开发组件入口只读两份明确输入并打印 v2 报告，输入解析失败也保留版本；正式调用须由宿主物化和原工具授权接线。
+# 函数用途: 从命令行检查文本资料并报告稳定错误格式，退出码仅表示本脚本结构检查结果。
 def main() -> int:
     parser = argparse.ArgumentParser(description="核对短剧文本依据与分镜引用，不评价成片质量")
     parser.add_argument("--source", type=Path, required=True)
@@ -216,7 +251,8 @@ def main() -> int:
         delivery, _ = read_document(arguments.delivery)
         result = check_delivery(source, delivery, hashlib.sha256(raw).hexdigest())
     except (OSError, ValueError) as exc:
-        result = {"structure_valid": False, "errors": [{"code": "invalid_input", "message": str(exc)}]}
+        result = {"schema": "drama_text_check.v2", "structure_valid": False,
+                  "errors": [{"code": "invalid_input", "message": str(exc)}]}
     print(json.dumps(result, ensure_ascii=False, allow_nan=False))
     return 0 if result["structure_valid"] else 1
 

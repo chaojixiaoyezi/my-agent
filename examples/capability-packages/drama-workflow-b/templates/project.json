@@ -1,11 +1,35 @@
 {
   "schema": "drama_workflow_project.v1",
   "title": "",
-  "episodes": [],
-  "characters": [],
-  "locations": [],
-  "props": [],
-  "scenes": [],
-  "shots": [],
-  "references": []
+  "episodes": [
+    {"id": "", "hook": "", "ending": "", "target_seconds": null}
+  ],
+  "characters": [
+    {"id": "", "name": "", "visual_anchor": ""}
+  ],
+  "locations": [
+    {"id": "", "name": "", "continuity_note": ""}
+  ],
+  "props": [
+    {"id": "", "name": "", "continuity_note": ""}
+  ],
+  "scenes": [
+    {
+      "id": "",
+      "episode_id": "",
+      "location_id": "",
+      "character_ids": [""],
+      "prop_ids": [""],
+      "beats": [
+        {"id": "", "kind": "action", "text": ""},
+        {"id": "", "kind": "dialogue", "character_id": "", "text": ""}
+      ]
+    }
+  ],
+  "shots": [
+    {"id": "", "scene_id": "", "beat_ids": [""], "seconds": null, "reference_ids": [""]}
+  ],
+  "references": [
+    {"id": "", "kind": "", "subject_id": "", "state": ""}
+  ]
 }

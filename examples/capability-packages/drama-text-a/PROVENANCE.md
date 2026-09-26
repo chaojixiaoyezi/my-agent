@@ -31,3 +31,11 @@
 入口和方法同时明确：只有真实运行的结果才能称为已验证；来源事实、改编新增、持物连续性和创作质量仍需独立阅读，不能从结构通过推断。并行阶段合并沿现有来源/场次/角色引用记录完整转换关系，不新增宿主状态或权限。
 
 0.1.2 修改校验脚本；上节“字节保持不变”只描述 0.1.1 当时的修订。公开合成原文、示例交付和模板本次均保持不变。旧版本包及真实验收结果不回写，新版组件验证不代表新版已通过真实 TUI。
+
+## 0.2.0 修订范围
+
+再次按上述固定 commit 读取[事实提取](https://github.com/zenstory-ai/drama-skills/blob/0e8929881bb59248618c4f402707c64723adc017/skills/short-drama-novel-analyze/references/chapter-extraction.md)及[分镜合同](https://github.com/zenstory-ai/drama-skills/blob/0e8929881bb59248618c4f402707c64723adc017/skills/short-drama-storyboard/references/stage-contract.md)，参考原文追溯、未决事实与结构/语义审阅分离的原则，为本包新编写镜头依据校验，没有复制原执行器或所有质量规则。
+
+资料显式升级 `drama_text_delivery.v2`、报告升级 `drama_text_check.v2`；每镜增加 `source_ids`、`adaptations`、`unresolved`，原输入仍为 v1。脚本核对本场来源引用及三个列表，提示新增/未知需要审阅，不解析正文判断真实支持关系。`covered_passages` 的场次覆盖含义保持；顶层与镜头未决事项不混为一份。
+
+本次模板与公开合成交付同步升级，示例把原文未明说的拾书/指认动作标为改编；原始合成 source 字节不改。没有自动转换或兼容旧 v1 交付的旁路，旧包 ZIP 和既有真实结果保留。字段检查不能保证模型不漏标，也不提供道具状态推理、真实视觉生成或全部上游能力。组件与新版本真实 TUI 结果分别记录，尚未真实验收。
