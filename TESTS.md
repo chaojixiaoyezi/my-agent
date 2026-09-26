@@ -1,5 +1,17 @@
 # 测试与发布验收
 
+## Jev 审计按会话过滤、Compact 兜底收窄与 CI 修复合入（2026-09-26，main `a2604cb7f`，基于 `a53ab52d7`）
+
+- **合入 CI 修复**：`claude/ci-fix` `251247edf`，由 my-agent-dsh-9b 完成，排查记录见下一节，集成方审阅后快进合入。
+  - 集成方逐项核对了产品改动：按目录描述符逐层删除，子目录不跟随链接地打开并复核身份；证据库每次操作后显式关闭连接。
+  - 测试改动没有放松断言，时限放宽后仍能抓住不守期限的实现。
+- **新测试**：
+  - `test_decision_outcome_log.py`：汇总可限定可信会话，后台点位没有会话编号，随之排除；审计 `scope=current_thread` 只剩当前会话的点位，`owner` 范围包含后台 curator。
+  - `test_compact_request_budget.py`：工具调用改走分段链后，若分段期间来源变化（`COMPACT_SOURCE_CHANGED`），错误照常上抛，不交回旧回复。
+- **补注释**：Codex 用旧 main 作 doc sync 基准时发现 `2b25e38b3` 一片的缺口：`curator.py` 的退避与失败分类补了真实职责注释，gateway 进度补了唤醒发现同源退避说明。`--base 2b25e38b3^` 与默认基准的 doc sync 都通过。
+- **变异验证**：5 种变异各自使测试失败：审计不按范围传会话、汇总忽略会话过滤、兜底吞所有错误、白名单漏严格来源、白名单漏非文本。
+- **回归**：170 个测试文件、3313 passed。范围覆盖 Jev、Compact、CI 修复改到的测试，以及引用 nofollow_tree、验证证据库的测试，含 `test_architecture_guardrails.py`。严格门全部通过，code-size 总数与 main 相同。
+
 ## GitHub CI 持续失败排查（2026-09-26，分支 `claude/ci-fix`，排查时基于 main `a3f5c17ec`，已变基到 `a53ab52d7`）
 
 - **范围**：main 上最近 40 次失败运行（39 次 Test、1 次 Full Tests，2026-09-25 15:47Z 到 09-26 14:27Z），逐个拉失败 job 的日志归类。同期 Lint 和 Cross-platform guard 全部通过。
