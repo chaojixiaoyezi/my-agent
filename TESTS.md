@@ -1,5 +1,20 @@
 # 测试与发布验收
 
+## 验证分类：换行与不执行检查的参数（2026-09-26，分支 `claude/curator-budget`，基于 main `7179f12e4`）
+
+- **来源**：Codex 在 main `7179f12e4` 上给出三个反例：`pytest\necho done`、`pytest --help`、`pytest --collect-only` 返回 0 时都被记为 passed/full。复核时又找到同类写法：`cd tests` 换行后接 `&& pytest`，`make test -i`（忽略失败），`go test -n` 和 `go build -n`（只打印命令）。
+- **新测试** `test_verification_project_facts.py`：
+  - 5 种换行写法 × 返回码 0/2，都不记证据。其中包括 cd 前缀部分出现换行，以及 `&&` 后换行的续行写法。
+  - pytest 的 12 种参数都不算证据，它们只打印帮助或版本、只收集或只装夹具；`pytest -v` 仍记 passed。
+  - cargo、go、make 的 14 种参数都不算证据，它们不执行检查或吞掉失败。`cargo test`、`go test ./...`、`go build ./...`、`make test`、`make test -k`、`cargo test -- --nocapture` 仍记 passed。
+- **变异验证**：9 种变异各自使测试失败：
+  - 去掉换行检查；把换行检查放回拆段处（由 `cd tests` 换行接 `&& pytest` 的用例杀死）。
+  - 不过滤参数；去掉通用帮助参数；make 表去掉 `-i`；go build 不设表。
+  - `--flag=值` 不拆等号；不按首词回退查表。
+  - 各命令共用一张表：`pytest -q` 会被 make 的 `-q` 误伤。
+  - 还原后逐字节一致（`PYTHONDONTWRITEBYTECODE=1`）。
+- **回归**：14 个测试文件 850 passed、24 xfailed，它们引用分类器、验证账或运行事实，并含 `test_architecture_guardrails.py`。严格门的 Ruff、doc sync、strict code-size、diff 和 clean-package 全部通过；改动文件的 code-size 发现与 main 相同。
+
 ## 后台首请求压缩用例窗口校准（2026-09-26）
 
 - **现象**：`test_background_compact_recovery.py::test_background_first_request_compacts_after_complete_prepare` 两个协议在 main 上失败，报“压缩候选装不进输入触发线和输出预留”。之前的 focused gate 没有覆盖它。

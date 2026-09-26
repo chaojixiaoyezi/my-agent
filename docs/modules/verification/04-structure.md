@@ -79,7 +79,7 @@ run/task、原权限和配置变化均使建议失效。它只返回覆盖所有
 
 ```text
 agent/verification/
-|-- project_facts.py   # 从真实项目文件发现规范验证命令并按精确 token 分类：cd 前缀、&& 串联整体为 0 时逐段通过、126/127 记环境不可用、pytest 按参数形状判范围
+|-- project_facts.py   # 从真实项目文件发现规范验证命令并按精确 token 分类：cd 前缀、&& 串联整体为 0 时逐段通过、126/127 记环境不可用、pytest 按参数形状判范围；含换行或带已知不执行检查的参数（帮助/版本、只收集、演练、make -i 等）不算证据
 |-- repository.py      # owner data/verification/evidence.sqlite3 事件与状态投影
 `-- runtime.py         # 共用工具执行出口的唯一接线
 ```

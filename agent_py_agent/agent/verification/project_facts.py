@@ -45,6 +45,19 @@ _NOT_RUN_EXIT_CODES = frozenset({126, 127})
 ENVIRONMENT_UNAVAILABLE = "environment_unavailable"
 # pytest 按参数形状判范围：文件、::node 或这些筛选开关只跑部分用例（targeted）；目录或不带路径按 full。
 _PYTEST_SELECTION_FLAGS = frozenset({"-k", "-m", "--lf", "--last-failed", "--deselect"})
+# 这些参数让验证器只打印帮助或版本、只收集、只编译或只演练，或让 make 忽略失败，检查没有真正执行或失败被吞：
+# 返回码 0 证明不了检查通过，一律不算证据。这是已知形状的保守优化，只会减少证据；不认识的参数仍按原前缀规则处理。
+# 只看命令行参数；PYTEST_ADDOPTS、MAKEFLAGS、ini 的 addopts 这类配置通道不在判断范围内。键是规范命令，查不到时再按首个词（如 make）。
+_NON_EXECUTING_FLAGS = frozenset({"-h", "-help", "--help", "--version"})
+_NON_EXECUTING_FLAGS_BY_COMMAND = {
+    "pytest": frozenset({"-V", "--co", "--collect-only", "--collectonly", "--fixtures", "--funcargs",
+                         "--fixtures-per-test", "--markers", "--setup-only", "--setup-plan", "--cache-show"}),
+    "cargo test": frozenset({"--no-run", "--list"}),
+    "go test": frozenset({"-list", "-c", "-n"}),
+    "go build": frozenset({"-n"}),
+    "make": frozenset({"-n", "--dry-run", "--just-print", "--recon", "-q", "--question", "-t", "--touch",
+                       "-i", "--ignore-errors", "-v"}),
+}
 _MAX_FACT_FILE_BYTES = 256 * 1024
 _MAX_VERIFY_COMMANDS = 8
 _MAX_OUTPUT_SUMMARY_CHARS = 2000
@@ -99,7 +112,9 @@ def project_facts_for(cwd: str | Path | None) -> ProjectFacts | None:
 # arbitrary shell command is not verification.  One shell exit code proves one command, so a single
 # command is classified by its code, while an `&&` chain proves every segment only when the whole
 # chain returns 0 (a non-zero code cannot be attributed to one segment and yields nothing).  A single
-# leading `cd <existing dir> &&` moves the project lookup and recorded cwd to that directory.
+# leading `cd <existing dir> &&` moves the project lookup and recorded cwd to that directory.  Any
+# newline rejects the whole command, and a matched verifier carrying a known non-executing flag
+# (help/version, collect-only, dry-run, make -i ...) is dropped; both rules only ever remove evidence.
 # 函数用途: 把一次真实命令结果归类成验证证据列表；单条命令按返回码，&& 串联整体为 0 时每段记通过，其余情况为空。
 def classify_verification_commands(
     command: str,
@@ -110,6 +125,10 @@ def classify_verification_commands(
 ) -> list[ClassifiedVerification]:
     if not isinstance(command, str) or not command.strip():
         return []
+    # 换行、回车在 shell 里就是命令分隔符，和 ; 一样会让前面命令的返回码被掩盖；shlex 和 cd 前缀的 \s 又会把它当空白吞掉，
+    # 所以整条命令（含 cd 前缀部分）出现换行就不算证据。续行写法因此也不算，只会少记证据。
+    if "\n" in command.strip() or "\r" in command.strip():
+        return []
     effective_cwd, body = _cd_prefix(command, cwd)
     facts = project_facts_for(effective_cwd)
     if facts is None or not facts.verify_commands or body is None:
@@ -117,7 +136,8 @@ def classify_verification_commands(
     segments = _command_segments(body)
     if len(segments) > 1 and int(exit_code) != 0:
         return []
-    matches = [match for match in (_canonical_match(tokens, facts.verify_commands) for tokens in segments) if match]
+    matches = [match for match in (_canonical_match(tokens, facts.verify_commands) for tokens in segments)
+               if match and _runs_the_check(*match)]
     return [
         ClassifiedVerification(
             command=command,
@@ -145,6 +165,14 @@ def _canonical_match(
                  for spelling in _equivalent_spellings(_tokens(canonical)))
     return next(((canonical, candidate[len(spelling) :]) for canonical, spelling in spellings
                  if candidate[: len(spelling)] == spelling), None)
+
+
+# LLM: 只看规范命令之后的参数记号（--flag=值 按 flag 比对），不看输出。命中已知“不真正执行检查”的参数就不算证据。
+# 函数用途: 判断一次匹配到的验证命令是否真的执行了检查。
+def _runs_the_check(canonical: str, trailing_args: list[str]) -> bool:
+    blocked = _NON_EXECUTING_FLAGS | _NON_EXECUTING_FLAGS_BY_COMMAND.get(
+        canonical, _NON_EXECUTING_FLAGS_BY_COMMAND.get(canonical.split()[0], frozenset()))
+    return not any(arg.split("=", 1)[0] in blocked for arg in trailing_args)
 
 
 # LLM: 状态只由返回码决定：0 通过，126/127 表示命令没运行（环境不可用，不算测试失败），其余非零为失败。

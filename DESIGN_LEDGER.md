@@ -9,6 +9,11 @@
 
 回滚边界：旧版运行时读不了 v3，回滚必须把运行时和数据成对核对并保留新账。详见[依赖拆分](docs/design/TOOL_LOOP_DEPENDENCY_SPLIT.md#两线合并后的来源身份与模型轮结果决策分支吸收-main2026-09-23)。
 
+- **验证账不收"检查没真正执行"的命令**（2026-09-26，已实施：分支 `claude/curator-budget`；Codex 反例驱动）：
+  - 命令里出现换行或回车就整条不算证据。shell 把换行当命令分隔符，返回码只属于最后一条命令。
+  - 规范验证命令带上已知的"不执行检查"参数也不算证据，例如帮助/版本、只收集、只编译、演练，以及让失败被吞掉的 `make -i`。参数表按规范命令分开。
+  - 这些规则只减少证据、不读输出；不认识的参数仍按原规则记。
+  - 未覆盖：配置通道（`PYTEST_ADDOPTS`、`MAKEFLAGS`、ini addopts），以及 cargo/go 的名称筛选仍记 full。详见 [verification 进度](docs/modules/verification/02-progress.md)。
 - **智能程度（推理强度）：主会话 `/effort` 与子代理 `effort`**（2026-09-26，已合入 main `7a15c9c91` 并双机部署 `step12k-e5b2f8bc`，隔离真实验收通过；详见[智能程度设计](docs/design/REASONING_EFFORT.md)）：
   - **用户要求**：能设置模型的智能程度，包括给子代理单独设置，并实测。原 `/effort` 只是空壳，请求体从不发推理参数。
   - **实测结论**：DeepSeek 官方 OpenAI 兼容接口的 `reasoning_effort` 与思考开关都生效（low 推理 token 约减半）；其 Anthropic 兼容接口只有开关生效；OpenCode 中转与 MiniMax M2.7 都不生效；MiniMax M3 默认不思考、显式开启才思考。“被接受”不等于“生效”。

@@ -610,6 +610,27 @@ FT-158/160 两份旧业务文件直接修改，未再出现路径回绑或改写
   - `;`、`||`、管道、后台仍整体拒绝。
   - 信封里 `verification_evidence` 保持单条形状（最后一条）；串联时另附完整有序的 `verification_evidence_chain`。归档投影、模型可见的运行事实和交付复核焦点都读取它。
 
+## 2026-09-26 验证分类：换行与不执行检查的参数
+
+- **反例**：Codex 在 main `7179f12e4` 上复现了三个反例，返回 0 时都被记为 passed/full。
+  - `pytest\necho done` 的返回码来自 `echo`。
+  - `pytest --help`、`pytest --collect-only` 根本没跑测试。
+- **修复**：只减少证据，不读输出。
+  - 整条命令出现换行或回车就不算证据，cd 前缀部分也一样。shell 把换行当命令分隔符，shlex 和 cd 前缀的正则却会把它当空白吞掉。`&&` 后换行这类合法续行也一并不算，只会少记。
+  - 匹配到规范验证命令后，其后的参数命中已知"不真正执行检查"的参数就丢弃，`--flag=值` 按 flag 比对。已知参数有：
+    - 通用：`-h`、`-help`、`--help`、`--version`。
+    - pytest：`-V`；只收集（`--co`、`--collect-only`、`--collectonly`）；只列夹具或标记；`--setup-only`、`--setup-plan`、`--cache-show`。
+    - cargo：`cargo test --no-run`、`--list`。
+    - go：`go test -list/-c/-n`、`go build -n`。
+    - make：演练（`-n` 等）、问询 `-q`、只 touch 的 `-t`、忽略失败的 `-i`、打印版本的 `-v`。
+  - 表按规范命令分开，因为同一个短参数在不同命令里含义不同：pytest 的 `-v` 是啰嗦输出，make 的 `-v` 是版本；pytest 的 `-q` 是安静，make 的 `-q` 是问询。查不到规范命令时按首个词查，例如 `make`。
+  - 这是已知形状的优化：不认识的参数仍按原规则记证据。
+- **已知限制，未改**：
+  - 只看命令行参数，不看 `PYTEST_ADDOPTS`、`MAKEFLAGS`、`-o addopts=…` 或 ini 里的 addopts 这类配置通道。项目测试配置里跳过全部用例同样看不出来。
+  - make 的合并短参数（如 `-nk`）和 go 的双横线写法（如 `--list`）不在表里。
+  - 其它生态的范围判断没动：`cargo test foo`、`go test -run X ./...` 只跑部分用例，仍按原规则记为 full。
+- 回归与变异见 [TESTS](../../../TESTS.md)。
+
 ## 2026-09-24 深夜：余量不足的工具输出立刻外置并要求先压缩
 
 - 真实验收样本：单个活动回合的工具循环把 69 万字节报告读完，上下文冲到窗口 129%，恢复压缩报 `COMPACT_CANDIDATE_TOO_LARGE`。根因不是单条输出过大（`read_file` 分页 16k 字符、通用输出超预览即外置），而是同一轮多条结果在下一次预检之前全部内联进入上下文，压缩候选保留区随之放不下。
