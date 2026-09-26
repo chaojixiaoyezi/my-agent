@@ -1,6 +1,6 @@
 # 测试与发布验收
 
-## 验证分类：换行与不执行检查的参数（2026-09-26，分支 `claude/curator-budget`，基于 main `7179f12e4`）
+## 验证分类：换行与不执行检查的参数（2026-09-26，已合入 main `76cb23c6c` 并双机部署 `step12r-d79ae184`，基于 `7179f12e4`）
 
 - **来源**：Codex 在 main `7179f12e4` 上给出三个反例：`pytest\necho done`、`pytest --help`、`pytest --collect-only` 返回 0 时都被记为 passed/full。复核时又找到同类写法：`cd tests` 换行后接 `&& pytest`，`make test -i`（忽略失败），`go test -n` 和 `go build -n`（只打印命令）。
 - **新测试** `test_verification_project_facts.py`：
@@ -13,6 +13,7 @@
   - `--flag=值` 不拆等号；不按首词回退查表。
   - 各命令共用一张表：`pytest -q` 会被 make 的 `-q` 误伤。
   - 还原后逐字节一致（`PYTHONDONTWRITEBYTECODE=1`）。
+- **部署核对**：两台机器的已装运行时对三个反例都不再记证据，普通 `pytest` 仍记 passed。
 - **回归**：14 个测试文件 850 passed、24 xfailed，它们引用分类器、验证账或运行事实，并含 `test_architecture_guardrails.py`。严格门的 Ruff、doc sync、strict code-size、diff 和 clean-package 全部通过；改动文件的 code-size 发现与 main 相同。
 
 ## 后台首请求压缩用例窗口校准（2026-09-26）
