@@ -1,5 +1,17 @@
 # 测试与发布验收
 
+## browser-lite 关闭时先等本 profile 的子进程退出再清 profile（2026-09-26，分支 `claude/browser-lite-helper-exit`，基于 main `b2ee13f1c`）
+
+- **来源**：main `54f24ab94` 的 CI 3.11 上，`test_plugin_exit_closes_browser[eof]` 列出的残留是 `profile/Default` 和 `profile/Default/Network Persistent State`。这个文件由 Chrome 的网络服务写入，网络服务在单独的 utility 进程里运行。`BrowserProcess.stop()` 只等主进程退出就清 profile，网络服务随后落盘，和 `rmtree(ignore_errors=True)` 撞上后留下非空的 `Default/`。同一用例此前在 Linux runner 上还挂过 3 次。
+- **改动**（只动 `launcher.py` 的 stop 路径，浏览器仍留在插件进程组）：主进程退出后，最多等 5 秒，让 argv 带本 profile `--user-data-dir` 的进程退出；等待只看 argv，误匹配只会多等。到期仍在的进程，只有 argv 仍匹配、且 `/proc/<pid>/stat` 里的 pgrp（从最后一个 `)` 之后切，因为 comm 可能含空格和括号）等于插件 `os.getpgrp()` 时才发 SIGKILL；这两项都在发信号前现读，防止 pid 被复用。stat 读不到或进程组不同就只等不杀，这是有意的保守取舍：`grep -- --user-data-dir=<profile>`，或者用户 Chrome 的 profile 路径恰好是“本 profile 加空格再加别的”，都可能碰巧匹配 argv。之后最多再等 1 秒，然后才 `clear_profile`。读 `/proc/*/cmdline` 读不到或没权限就跳过；`/proc` 不存在（macOS）时不等待。
+- **匹配规则**：参数必须是 argv 里完整的一个元素，或者在以空格拼接的单串标题里作为以空格为界的完整一段出现；`<profile>2`、`<profile>/x` 这类前缀和别的 profile 都不算。之所以要认单串标题：按 Chromium 的 `base::SetProcessTitleFromCommandLine`，Linux 上 Chrome 进程会把整条命令行改写成一个用空格拼接的字符串，只比较完整元素就一个都匹配不上。这一点来自对源码的理解，没有在 Linux 上实测（testbox 没装 Chrome，磁盘占用 97%），真实 Linux 验收只能靠 CI。
+- **本机佐证**：macOS 上 headless Chrome 的 8 个进程（主进程、gpu、网络服务、存储服务、通知服务、3 个 renderer）命令行都带 `--user-data-dir=<profile>`，也都和主进程同一进程组；主进程退出后 1 秒内全部退出。
+- **新测试** `test_browser_lite_launcher.py` 3 项，用假 `/proc` 的 cmdline 和 stat：
+  - 网络服务晚于主进程退出并重建 `Default/` 写文件，另一个 argv 匹配但不在插件进程组的进程更晚退出：stop 会把两者都等完再清理，而且不发信号。
+  - 超时后只有两个同进程组的本 profile 进程（原始 argv 形式和单串标题形式各一个）各收到一次 SIGKILL。其中一个的 comm 含空格和括号，还伪造了一段 `S 1 999`。以下进程都不会被杀：不同进程组的、读不到 stat 的、`grep -- <参数>`、profile 路径为“本 profile 加空格再加别的”的用户 Chrome，以及前缀相同的别的 profile、用户自己的 Chrome、读不到的进程。
+  - 没有 `/proc` 时立即清理。
+- **变异验证**：6 种变异都被测试抓住——去掉等待、匹配改成子串、只比较完整元素、不等超时就直接杀、去掉进程组检查、stat 从第一个 `)` 之后切。每次都在 `PYTHONDONTWRITEBYTECODE=1` 下运行，结束后逐字节还原，删掉 `__pycache__` 再从干净字节码复跑，3 passed。审阅后按集成方要求补了进程组保护（SIGKILL 前核对 pgrp），以及相应的测试和最后两种变异。首版测试里的晚写线程没有重建 `Default/`，导致“去掉等待”时它照样通过；已改为先重建目录，与 CI 上的残留一致。
+
 ## Compact 强制恢复的“压缩前”计量改到解绑历史之前（2026-09-26，分支 `claude/curator-budget`，基于 main `04c339eb9`）
 
 - **复现**：`test_gateway_compact_recovery` 的真实 Gateway 恢复链（只有 HTTP 是内存替身），历史放大到约 7 万 token。原请求带历史实测 69,961，旧代码写进 checkpoint 的 `projected_tokens_before` 却是 9,919（压后 13,290），与真机“35,915 < 压后 40,303”同一模式。

@@ -770,6 +770,7 @@ agent_py_agent/
 |   |-- test_typesafe_decision.py       # 原生请求、绝对期限及本地 HTTP 组合验收
 |   |-- test_gateway_strict_request.py  # 原 HTTP 严格请求的零重试、期限与正文上限回归
 |   |-- test_bounded_call.py            # 启动/取消/超时竞态、未退出资源与进程容量保护
+|   |-- test_browser_lite_launcher.py  # browser-lite 关闭时先等本 profile 子进程再清 profile：假 /proc 与 stat、晚退出网络服务、超时只 SIGKILL 同进程组的精确匹配
 |   |-- test_decision_call_resources.py # 有界调用与原模型准入的组合、普通模型保留名额
 |   |-- test_subagent_process_control.py # 公共进程树终止覆盖后代、升级、宿主保留及未确认回执
 |   |-- test_subagent_resource_stop.py  # 固定原子树、终态资源、恢复隔离及 Goal/creation 锁序
@@ -948,7 +949,7 @@ plugins/
 |       |-- declarations.py            # 读取同源声明并验证参数和设置（含字符串数组）
 |       |-- errors.py                  # 带稳定错误码的中文业务错误
 |       |-- access.py                  # 地址守卫：工作区 file:// 经读取上下文裁决，http(s) 只放行 allowed_hosts
-|       |-- launcher.py                # 浏览器探测、专属 profile 启动、调试端口读取与进程回收
+|       |-- launcher.py                # 浏览器探测、专属 profile 启动、调试端口读取与进程回收（Linux 先等本 profile 子进程退出再清 profile）
 |       |-- websocket.py               # 最小 WebSocket 客户端：握手、掩码帧编解码、分片、ping/pong、close
 |       |-- cdp.py                     # 页面级 CDP 命令/事件收发、请求拦截与崩溃检测
 |       |-- page.py                    # open/read/click/fill 页面脚本与结果结构
@@ -1152,7 +1153,7 @@ docs/
 - `plugins/desktop-lite/`：首个影响用户桌面的工具插件，文本只经 argv/stdin 交给系统程序，open 只开授权范围内的非可执行普通文件；`agent_py_agent/tests/test_desktop_lite_package.py` 为其实际包与 MCP 进程组件验收（假程序经设置注入）。
 - `plugins/image-text/`：本地 OCR 工具插件，只调用系统 tesseract、不调用模型；`agent_py_agent/tests/test_image_text_package.py` 为其实际包与 MCP 进程组件验收。
 - `plugins/design-lite/`：首个带随包 Skill（包描述 v3）的自有插件，生成与修改 HTML 设计文件都走写入上下文；`agent_py_agent/tests/test_design_lite_package.py` 为其实际包、Skill 打包与 MCP 进程组件验收。
-- `plugins/browser-lite/`：首个驱动外部进程的自有插件，浏览器不随包分发，专属 profile 在插件数据目录，地址经读取上下文与 allowed_hosts 双重裁决；`agent_py_agent/tests/test_browser_lite_package.py` 为其实际包、帧编解码与真实浏览器组件验收。
+- `plugins/browser-lite/`：首个驱动外部进程的自有插件，浏览器不随包分发，专属 profile 在插件数据目录，地址经读取上下文与 allowed_hosts 双重裁决；`agent_py_agent/tests/test_browser_lite_package.py` 为其实际包、帧编解码与真实浏览器组件验收；`agent_py_agent/tests/test_browser_lite_launcher.py` 用假 /proc 进程表覆盖关闭时等本 profile 子进程、超时只对同进程组的精确匹配 SIGKILL。
 - `plugins/savepoint-lite/`：首个写工作区的自有插件，快照只存宿主插件数据目录，恢复走写入上下文；`agent_py_agent/tests/test_savepoint_lite_package.py` 为其实际包与 MCP 进程组件验收。
 - `plugins/harness-console/`：首个界面型插件（宿主只读 API 样本），网页与桌面窗口共用一个只绑回环的服务，宿主令牌只留在插件服务端；`agent_py_agent/tests/test_harness_console_package.py` 为其实际包、假宿主 API 与 MCP 进程、真实 HTTP 访问的组件验收。
 - `plugins/web-board/`：网页界面型插件，插件进程内只绑回环的只读网页，按 serve 时冻结的读取上下文和 no-follow 读取限定目录；`agent_py_agent/tests/test_web_board_package.py` 为其实际包与 MCP 进程、真实 HTTP 访问的组件验收。

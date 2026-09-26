@@ -93,4 +93,7 @@ python scripts/build_plugin_package.py \
   请只打开测试页面，不要在其中输入真实凭据。
 - **进程回收**：浏览器是插件进程的普通子进程（不另开会话），宿主回收插件进程组时一并结束；插件在 stdin EOF
   或 SIGTERM 时主动关闭浏览器；空闲超过 `idle_close_seconds` 自动关闭；页面崩溃或连接断开后整体关闭，下次 `open` 重启。
+  Linux 上关闭时，主进程退出后还会最多等 5 秒，让命令行带本 profile `--user-data-dir` 的浏览器子进程（如网络服务）
+  先退出，然后才清空 profile，避免它们在清理之后又写回文件；到期仍在的，只有命令行仍匹配且与插件同一进程组的才会被
+  SIGKILL，不在插件进程组的只等不杀。macOS 上这些子进程随主进程退出，不等待。
 - 标准输出只承载 MCP 协议，浏览器的 stdout/stderr 全部丢弃。
