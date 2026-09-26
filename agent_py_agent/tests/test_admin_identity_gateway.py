@@ -367,3 +367,36 @@ def test_missing_ambiguous_foreign_and_stale_approvals_are_refused(tmp_path):
 def test_terminal_channel_is_told_to_use_the_approval_panel(tmp_path, text):
     result = _control(_agent(tmp_path), gateway_paths_from_root(tmp_path / "gateway"), text, _scope("local-agent", channel="chat"))
     assert result.ok is False and result.error_code == "ADMIN_IDENTITY_SCOPE_INVALID" and "审批面板" in result.message
+
+
+# ---- 没有模型时的 /admin 指引（管理员在飞书里不用排查就知道先绑定） ----
+
+
+def test_model_not_configured_in_unbound_admin_p2p_points_to_admin(tmp_path):
+    from agent_py_agent.agent.gateway_parts.request_execution import _gateway_user_error
+    from agent_py_agent.agent.gateway_parts.request_worker import admin_binding_hint_for_request
+
+    agent = _agent(tmp_path)
+    assert admin_binding_hint_for_request(agent, _request()) == "", "没设管理员密码时不提示"
+    set_admin_password(agent.home_paths.root, _SECRET)
+    hint = admin_binding_hint_for_request(agent, _request())
+    assert "/admin <管理员密码>" in hint and "撤回" in hint
+    message = _gateway_user_error(agent, _request(), "MODEL_NOT_CONFIGURED")
+    assert message.startswith("尚未配置模型") and message.endswith(hint)
+    assert _gateway_user_error(agent, _request(), "PROVIDER_CONNECTION_FAILED").find("/admin") == -1, "其它错误码不变"
+    assert admin_binding_hint_for_request(agent, _request(chat_type="group")) == "", "群聊不提示"
+    assert admin_binding_hint_for_request(_agent(tmp_path, enabled=False), _request()) == "", "开关关闭不提示"
+    bind_admin_channel_identity(agent.home_paths.root, "feishu", "ou_admin")
+    assert admin_binding_hint_for_request(agent, _request()) == "", "已绑定的私聊不再提示"
+    assert admin_binding_hint_for_request(agent, _request(user="ou_other")) == hint, "只看本私聊自己的绑定"
+
+
+def test_model_view_without_choices_adds_admin_hint_only_when_empty(tmp_path):
+    from agent_py_agent.agent.gateway_parts.model_profile_service import _admin_hint
+
+    agent = _agent(tmp_path)
+    set_admin_password(agent.home_paths.root, _SECRET)
+    empty = {"profiles": []}
+    assert "/admin <管理员密码>" in _admin_hint(agent, empty, _scope())
+    assert _admin_hint(agent, {"profiles": [{"id": "p1", "available": True}]}, _scope()) == "", "有可选模型时不提示"
+    assert _admin_hint(agent, empty, _scope(chat_type="group")) == ""

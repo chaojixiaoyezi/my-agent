@@ -1135,7 +1135,7 @@ def _handle_gateway_request(
     try:
         _execute_gateway_request_body({**context, "agent": agent}, chunk_writer)
     except Exception as exc:
-        from .request_errors import gateway_client_error_message, gateway_provider_error_projection
+        from .request_errors import gateway_provider_error_projection
 
         error_code = response.get("error_code") or str(
             getattr(exc, "error_code", "") or type(exc).__name__.upper()
@@ -1146,7 +1146,7 @@ def _handle_gateway_request(
                 "status": "failed",
                 "error_code": error_code,
                 "error": f"{type(exc).__name__}: {exc}",
-                "user_error": gateway_client_error_message(error_code),
+                "user_error": _gateway_user_error(agent, context["request"], error_code),
                 **gateway_provider_error_projection(exc),
             }
         )
@@ -1187,6 +1187,20 @@ def _gateway_client_supports_tool_approval(request: object) -> bool:
         return False
     capabilities = request.get("client_capabilities")
     return bool(isinstance(capabilities, dict) and capabilities.get("tool_approval") is True)
+
+
+# LLM: 文案仍只按结构化 error_code 映射；尚未配置模型时，未绑定管理员的 IM 私聊追加 /admin 指引（判据见
+#   request_worker.admin_binding_hint_for_request），其余错误码不变。
+# 函数用途: 生成返回给客户端的失败说明，让飞书里的管理员直接知道先绑定身份。
+def _gateway_user_error(agent: object, request: object, error_code: object) -> str:
+    from .request_errors import gateway_client_error_message
+
+    message = gateway_client_error_message(error_code)
+    if str(error_code or "").strip().upper() != "MODEL_NOT_CONFIGURED" or not isinstance(request, dict):
+        return message
+    from .request_worker import admin_binding_hint_for_request
+
+    return message + admin_binding_hint_for_request(agent, request)
 
 
 # LLM: 交互审批只来自两种结构化事实：客户端显式声明 tool_approval（TUI），或服务端核实本请求来自已绑定管理员的 IM 私聊

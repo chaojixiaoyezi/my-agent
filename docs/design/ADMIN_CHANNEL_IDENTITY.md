@@ -86,6 +86,15 @@
 4. `/approve` 通过节流校验后写 `approved`（仅本次）；`/deny` 不需要密码，写 `denied`。决定经
    `write_gateway_permission_decision` 写入，原等待方再逐字段核对 binding 后继续。
 
+### 未绑定时的指引（2026-09-26）
+
+真实使用中管理员设好密码后直接在飞书发普通消息，因私聊尚未绑定仍按飞书普通用户运行，得到 `MODEL_NOT_CONFIGURED`，
+提示只提 `/model`，没有指出应先 `/admin`。现在在同时满足以下结构化事实时，给这类报错和 `/model` 的“没有可选模型”回复
+追加一句 `/admin <管理员密码>` 指引（并提醒撤回含密码消息）：请求来自 IM 私聊（`private_channel_identity`）、
+`admin_channel_identity_enabled` 生效、本机已设管理员密码、这个私聊尚未绑定。判定在
+`request_worker.admin_binding_hint_for_request`，失败回复经 `request_execution._gateway_user_error`，`/model` 经
+`model_profile_service._admin_hint`。`/admin` 本就在公开命令帮助里，指引不增加暴露面；群聊、已绑定、未设密码时都不提示。
+
 ## 密码明文可能去向与处理
 
 | 位置 | 处理 |

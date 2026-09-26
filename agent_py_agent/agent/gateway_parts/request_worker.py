@@ -703,6 +703,28 @@ def admin_channel_identity_for_request(agent, request_payload: dict):
     return find_admin_channel_identity(home_root, *identity)
 
 
+_ADMIN_BINDING_HINT = (
+    "如果你是这台电脑的 my-agent 管理员：在与机器人的一对一私聊里发送 /admin <管理员密码>，"
+    "验证后本私聊会使用管理员的模型和设置；发完请撤回那条含密码的消息。"
+)
+
+
+# LLM: 判据全是结构化事实：IM 私聊身份、admin_channel_identity_enabled、本机管理员密码文件状态、绑定表；不看正文。
+#   /admin 本就在公开命令帮助里，这里只在"没有模型"等报错里指出正确出路；已绑定、群聊、未设密码或开关关闭都返回空串。
+# 函数用途: 给还没绑定管理员的 IM 私聊报错补一句 /admin 指引，让管理员不用排查就知道下一步。
+def admin_binding_hint_for_request(agent, request_payload: dict) -> str:
+    if not isinstance(request_payload, dict) or private_channel_identity(request_payload) is None:
+        return ""
+    if not admin_channel_identity_enabled(agent) or admin_channel_identity_for_request(agent, request_payload) is not None:
+        return ""
+    home_root = getattr(getattr(agent, "home_paths", None), "root", None)
+    if not home_root:
+        return ""
+    from ..user_space.admin_password import admin_password_status
+
+    return _ADMIN_BINDING_HINT if admin_password_status(home_root).get("configured") else ""
+
+
 def _config_without_runtime_paths(agent):
     """克隆基础 config 但把已解析的 owner 运行时路径字段(local_store_path/memory_path 等)清空。
 

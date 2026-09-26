@@ -3170,6 +3170,8 @@ Audit/摄取不列入本轮新增验收；共享模块既有回归按改动影�
     返回 `ADMIN_IDENTITY_NOT_BOUND`，而且不校验密码。
   - 以下情形都拒绝，且不写决定文件：没有待决、同一回合两条待决（`APPROVAL_AMBIGUOUS`）、其他会话或其他用户、
     本次认领之前的旧执行事件。
+- `test_admin_identity_gateway.py` 末尾两例（2026-09-26）：未绑定的管理员 IM 私聊遇到 `MODEL_NOT_CONFIGURED` 时回复追加
+  `/admin <管理员密码>` 指引，其它错误码、群聊、开关关闭、未设密码、已绑定都不追加，且只看本私聊自己的绑定；`/model` 只在没有可选模型时追加。
 - `test_admin_identity_clients.py`：
   - 适配器：`/admin`、`/approve`、`/deny` 不写持久入站记录，也不建回复 watcher，只直接 POST 一次并回复 Gateway 结果；
     Gateway 不可达时只回“服务暂时不可用”，不重试；普通消息照常入持久队列。临时目录里没有明文。

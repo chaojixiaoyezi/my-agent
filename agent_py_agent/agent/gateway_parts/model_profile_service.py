@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from ..conversation.control_commands import ConversationControlCommand, ConversationControlResult
 from ..settings.model_profiles import ModelProfileError, execute_model_profile_operation
 from ..user_space.owner_resolver import home_paths_with_owner, resolve_owner_home
-from .control_service import resolve_gateway_scope_owner
+from .control_service import _scope_request_payload, resolve_gateway_scope_owner
 from .owner_conversation_store import owner_conversation_store
 
 
@@ -78,7 +78,7 @@ def execute_model_text_control(base_agent, command: ConversationControlCommand, 
         host, thread = _scoped_model_host(base_agent, scope)
         listing = execute_model_profile_operation(host, "list", {}, thread_id=thread.thread_id)
         if command.operation == "view":
-            return ConversationControlResult("model", True, render_model_choices(listing))
+            return ConversationControlResult("model", True, render_model_choices(listing) + _admin_hint(base_agent, listing, scope))
         row = _choice_by_reference(listing, command.value)
         if row is None:
             return ConversationControlResult(
@@ -98,6 +98,17 @@ def execute_model_text_control(base_agent, command: ConversationControlCommand, 
         "model", True,
         f"本会话已选择 {row['model_name']}，上下文 {row.get('model_context_window_tokens', '?')} tokens，下一条消息生效。",
     )
+
+
+# LLM: 只在没有可选模型时追加；判据复用 request_worker.admin_binding_hint_for_request（IM 私聊、开关、密码已设、未绑定）。
+# 函数用途: 飞书里的管理员发 /model 看到“没有可选模型”时，同时告诉他可以先用 /admin 绑定身份。
+def _admin_hint(base_agent: object, listing: dict, scope: object) -> str:
+    if _selectable_choices(listing):
+        return ""
+    from .request_worker import admin_binding_hint_for_request
+
+    hint = admin_binding_hint_for_request(base_agent, _scope_request_payload(scope))
+    return f"\n{hint}" if hint else ""
 
 
 # LLM: 与 TUI 菜单同一过滤：部署默认行或 agentic 可用行；顺序取 list 投影原顺序，编号从 1 开始。

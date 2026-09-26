@@ -1,5 +1,7 @@
 # Gateway 维护状态
 
+未绑定管理员时的 `/admin` 指引（主线，2026-09-26，用户真实使用中发现）：管理员设好密码后在飞书私聊直接发消息，因为还没 `/admin` 绑定，按飞书普通用户运行得到 `MODEL_NOT_CONFIGURED`，提示只提 `/model`。现在 IM 私聊、开关生效、已设管理员密码且该私聊未绑定时，失败回复（`request_execution._gateway_user_error`）和 `/model` 没有可选模型的回复（`model_profile_service._admin_hint`）追加 `/admin <管理员密码>` 指引；判定唯一入口 `request_worker.admin_binding_hint_for_request`。回归见 `test_admin_identity_gateway.py` 末尾两例。
+
 IM 管理员身份与聊天内审批（主线，2026-09-26 合入，用户决定“支持注册飞书账号为管理员、确认用管理员密码”）。
 以前管理员只有本机 local/main：飞书用户永远是自己的 owner，IM 请求也不带审批能力，需要确认的工具一律被拒。现在：
 - 本机 `my-agent admin-password set` 保存 scrypt 管理员密码（`config/admin-password.json`，0600）。
