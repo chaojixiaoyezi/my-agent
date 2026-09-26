@@ -199,9 +199,10 @@ def shrink_batch_for_timeout(
 # 最终提示实测长度做确定性尾部截断，游标契约与超时缩批相同：被丢弃的尾部留在原游标之后、下一轮重放，
 # 零丢失。先截消息尾部，再截审计尾部，各至少留一条，两类输入每轮都能前进；保底后仍超出（预算小于模板
 # 本身）就交回原批，由 extract_with_retries 报 CURATOR_INPUT_BUDGET_EXCEEDED。必须在可选决策标注之前
-# 调用，标注不为超预算的尾部浪费调用。warning 只含条数，不含正文。同步检查 curator._execute 与
-# test_curator_input_budget.py。
-# 函数用途: 把一批 Curator 输入裁到最终提示不超过 max_chars，返回裁剪后的批次和运行账 warning。
+# 调用，标注不为超预算的尾部浪费调用。warning 只含条数，不含正文；成功运行的 warning 只随运行结果返回、
+# 不进运行账（与超时缩批相同），所以缩批时再按尝试形状的日志约定写一行无正文摘要，网关日志里可见。
+# 同步检查 curator._execute 与 test_curator_input_budget.py。
+# 函数用途: 把一批 Curator 输入裁到最终提示不超过 max_chars，返回裁剪后的批次和运行结果 warning，缩批时写一行日志。
 def fit_batch_to_input_budget(
     batch: CuratorInputBatch,
     *,
@@ -214,10 +215,12 @@ def fit_batch_to_input_budget(
         fitted = replace(batch, messages=tuple(messages), audit_events=tuple(audit_events))
     if fitted is batch:
         return batch, ()
-    return fitted, (
+    warning = (
         f"memory_curator_input_fitted:messages={len(batch.messages)}->{len(messages)},"
-        f"audit={len(batch.audit_events)}->{len(audit_events)}",
+        f"audit={len(batch.audit_events)}->{len(audit_events)}"
     )
+    _LOGGER.warning("memory curator input fitted to prompt budget: %s", warning)
+    return fitted, (warning,)
 
 
 # LLM: Timeout budget grows with the actual prompt so that long ingest (novel/長文 bulk load)

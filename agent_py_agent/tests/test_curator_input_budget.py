@@ -267,13 +267,27 @@ def test_fit_drops_message_tail_before_audit_and_keeps_prefixes() -> None:
     assert warnings == ("memory_curator_input_fitted:messages=6->1,audit=4->1",)
 
 
-def test_fit_leaves_a_batch_within_budget_untouched() -> None:
+def test_fit_leaves_a_batch_within_budget_untouched(caplog: pytest.LogCaptureFixture) -> None:
     batch = _batch(messages=3, audits=2)
 
-    fitted, warnings = fit_batch_to_input_budget(batch, max_chars=len(curator_prompt(batch)))
+    with caplog.at_level("WARNING"):
+        fitted, warnings = fit_batch_to_input_budget(batch, max_chars=len(curator_prompt(batch)))
 
     assert fitted is batch
     assert warnings == ()
+    assert "memory curator input fitted" not in caplog.text
+
+
+def test_fit_logs_a_content_free_summary_for_the_gateway_log(caplog: pytest.LogCaptureFixture) -> None:
+    batch = _batch(messages=6, audits=4)
+    two_messages = len(curator_prompt(replace(batch, messages=batch.messages[:2])))
+
+    with caplog.at_level("WARNING"):
+        fit_batch_to_input_budget(batch, max_chars=two_messages)
+
+    # 成功运行的 warning 不进运行账，缩批只能靠这一行日志在网关日志里看到；只含条数，不含正文。
+    assert "memory curator input fitted to prompt budget: memory_curator_input_fitted:messages=6->2,audit=4->4" in caplog.text
+    assert "macOS" not in caplog.text
 
 
 def test_budget_smaller_than_one_item_keeps_the_typed_budget_failure() -> None:
