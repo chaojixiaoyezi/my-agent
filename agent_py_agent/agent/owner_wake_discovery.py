@@ -688,7 +688,7 @@ def _has_pending_memory_curator_work(
         return False  # 总闸关闭:curator 软活不判活(不占登记表工位,对称 skill 空快照)
     state_path = owner_home / "memory" / "curator" / "state.json"
     try:
-        from .memory_store.curator_models import MemoryCuratorState
+        from .memory_store.curator_models import MemoryCuratorState, curator_failure_retry_seconds
 
         payload = json.loads(state_path.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
@@ -704,9 +704,11 @@ def _has_pending_memory_curator_work(
     # 失败退避:刚失败的 pending owner 不判活(curator 层 _run_pending_when_due 同窗口 300s)。
     # 否则失败后的 curator 软活每轮分页都被种回登记表占工位,硬事实 owner 反而被挤(真机实锤)。
     last_failure = _curator_success_timestamp(state.last_failure_at)
-    if last_failure > 0 and now - last_failure < _CURATOR_FAILURE_BACKOFF_SECONDS:
+    # 没配模型的失败用更长的同源退避(curator_failure_retry_seconds),不按维护周期反复重建 owner 实例。
+    backoff = curator_failure_retry_seconds(state.last_failure_code, _CURATOR_FAILURE_BACKOFF_SECONDS)
+    if last_failure > 0 and now - last_failure < backoff:
         # 退避到期这一刻结论可能翻转(还需新输入,新输入由消息/审计 mtime 签名覆盖)。
-        _add_deadline(deadline_out, last_failure + _CURATOR_FAILURE_BACKOFF_SECONDS)
+        _add_deadline(deadline_out, last_failure + backoff)
         return False
     if state.pending_reasons or state.active_lease:
         # 非空 lease/pending 是文件事实:lease 过期与否都仍判活(旧语义),无时间边界。

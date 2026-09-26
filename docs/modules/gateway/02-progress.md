@@ -1,5 +1,9 @@
 # Gateway 维护状态
 
+能力包组合分支吸收主线`2b25e38b3`的Curator退避修订：owner发现层与Curator执行层共用`curator_failure_retry_seconds`，
+未配置模型的结构化失败延长到一小时，普通失败保持原退避；到期仍按真实pending/input事实判活，不删除待办或伪造成功。
+该修订避免维护周期反复重建未配置owner；组合验证见`test_curator_model_not_configured.py`和本轮TESTS记录。
+
 能力包第七候选：新Goal绑定任务时可初始化原TaskLink的一次选包pending（默认关闭）；只读当前owner的元数据资格，旧任务不补字段，不新增模型调用或Goal状态。组件与主流程组合验收中，未发布。
 
 `/effort` 从空壳改为真实会话设置（分支 `claude/reasoning-effort`，2026-09-26）：`control_service._execute_effort_control`

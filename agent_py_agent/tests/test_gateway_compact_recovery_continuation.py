@@ -19,7 +19,7 @@ from agent_py_agent.agent.backends.errors import ProviderContextWindowError
 from agent_py_agent.agent.backends.tool_ir import AssistantTurn, ToolResult
 from agent_py_agent.agent.conversation import active_turn_compact
 from agent_py_agent.agent.conversation.compact_guard import ConversationCompactError
-from agent_py_agent.agent.gateway_model_adoption import _payload
+from agent_py_agent.agent.gateway_model_adoption import _payload, _PayloadSurface
 from agent_py_agent.agent.gateway_parts import request_execution
 from agent_py_agent.agent.model_request_selection import _HOST
 from agent_py_agent.agent.tooling import _filesystem_read
@@ -248,11 +248,11 @@ def test_empty_transcript_overflow_compacts_active_turn_before_reprepare(
         elif number == 4:
             events.append("restored-business")
             projection = candidates[-1].projection
-            expected = _payload(
-                agent.backend, projection.provider_prompt,
-                list(candidates[-1].request_input.native_tools) or None,
-                projection.tool_choice, projection.messages, projection.system_instruction,
-            )
+            # 7a15c9c91 起 _payload 收一个请求面对象，含本轮 agent/params 以同源计算思考开关与档位。
+            expected = _payload(agent.backend, projection.provider_prompt, _PayloadSurface(
+                list(candidates[-1].request_input.native_tools) or None, projection.tool_choice,
+                projection.messages, projection.system_instruction, agent, candidates[-1].params,
+            ))
             assert _wire == expected
         elif number == 5:
             events.append("following-tool-business")

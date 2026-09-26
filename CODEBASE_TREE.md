@@ -83,6 +83,7 @@
     |-- DECISION_MODEL_INTEGRATION.md    # 可选决策模型的短期限、失败隔离、接入点、缓存与并行实施计划
     |-- DECISION_AUDIT_AND_ADMIN_CONTROLS.md # 决策点开关、超时自调上下限、选模型输入精简、统计行、统一审计与管理员管控
     |-- TUI_INPUT_MEDIA.md               # TUI 图片视频输入、owner 原件与发送预算合同
+    |-- COMPACT_GENERATION_FACTS.md      # 摘要生成来源、请求关联及旧检查点未知诊断边界（待实施）
     |-- COMPACT_MEDIA_POLICY.md          # 媒体会话压缩策略：归档引用主链、视觉摘要按结构化能力事实开启
     |-- TOOL_LOOP_DEPENDENCY_SPLIT.md   # 第8步模型响应、工具轮与Compact职责边界及参考核对
     |-- COMPACT_GENERATION_FACTS.md    # 摘要生成来源、请求关联及旧检查点未知诊断边界
@@ -476,7 +477,8 @@ agent_py_agent/
 |   |   |-- display_archive.py        # 不可变显示原文、无路径引用与有界页文件，不进入模型上下文
 |   |   |-- auxiliary_model_call.py   # 会话辅助模型调用的统一账、退避、并发闸；独立压缩用量持久结算
 |   |   |-- decision_service.py       # 可选决策阶段预算、设置/身份复核和建议返回，不执行业务动作
-|   |   |-- decision_policy.py        # 有界连接冷却与同进程设置取消通知，不拥有 worker 或持久状态
+|   |   |-- decision_policy.py        # 有界连接/点位冷却与同进程设置取消通知，不拥有 worker 或持久状态
+|   |   |-- decision_outcome_log.py   # 决策结果日志：每次 decide 的点位/状态/原因/耗时（无正文），有界落 owner data/decision，审计按点位汇总
 |   |   |-- decision_model_call.py    # 实际决策 worker 复用原准入、身份头、HTTP 观察和唯一调用账；实验先算经验上界再预留
 |   |   |-- decision_experiment.py    # 实验准入/路由/在途复核：只读原授权、账本代次与 v2 上界口径
 |   |   |-- decision_experiment_evaluation.py # 只读证据评估：召回/节省/结算三项事实，决定 skill_tool off→apply 建议
@@ -714,6 +716,7 @@ agent_py_agent/
 |   |-- test_decision_service_http.py   # 原配置到真实本地 HTTP、账本与活动用量行的组合
 |   |-- test_decision_audit_controls.py # 管理员控制存取/失败关闭/只许管理员写、审计工具范围与时间窗、观察白名单与跨用户许可
 |   |-- test_decision_fault_matrix.py   # 决策故障矩阵：断网/DNS/TLS/额度/计费/5xx/慢响应的冷却与恢复、同 owner 多会话并发
+|   |-- test_decision_outcome_log.py    # 决策结果日志：只记结构化字段、有界、按窗口汇总，decide 的成功/超时/点位冷却落日志，审计按点位报告
 |   |-- test_capability_presentation_observation.py # 能力推荐观测进 Gateway 请求记录：一回合一条、采用/保留原因、失败码、写入上限与失败语义
 |   |-- test_decision_cooldown_backoff.py # 决策连接连续失败的冷却翻倍、并发同次故障不加级、成功/显式重试复位
 |   |-- test_decision_owner_scope.py    # 用户后台run/空thread、原身份冲突、后台期限与配置隔离
@@ -737,7 +740,7 @@ agent_py_agent/
 |   |-- test_external_material_order_integration.py # 原页面生产归档、决策 worker、设置工具与 TUI 接线
 |   |-- test_decision_delivery_quality.py # 交付复核焦点资格、脱敏输入、非选择、来源复核、取消与 text/native 同段提示
 |   |-- test_decision_delivery_quality_integration.py # 真实验证账到 _record_tool_call、原设置默认与 TUI 入口的组合
-|   |-- test_decision_curator_plugin_concurrency.py # 后台 curator 与前台 skill_tool 同连接并发：互不拖住、撤销命中对应点、共享冷却、关闭一起取消
+|   |-- test_decision_curator_plugin_concurrency.py # 后台 curator 与前台 skill_tool 同连接并发：互不拖住、撤销命中对应点、超时只冷却本点而连接故障冷却全部、关闭一起取消
 |   |-- test_gateway_decision_shutdown_cancel.py # Gateway 停止时主动取消在途决策：回原方案、不进冷却、关闭后不再联网、收尾顺序与失败隔离
 |   |-- test_gateway_model_call_shutdown_settlement.py # Gateway 停止排空后把仍在途的模型调用记为被停机中断、未结算，并写结构化停机事件
 |   |-- test_gateway_background_sessions_shutdown.py # Gateway 停机时只读列出仍存活的受管后台会话并写事件/state 计数，不停进程
@@ -939,6 +942,7 @@ agent_py_agent/
 |   |-- test_memory_candidate_daily_v2.py # Candidate/Daily v2 身份、状态、顺序、并发与大输出边界
 |   |-- test_memory_curator_v2.py      # Curator 触发、模型配置、权限、失败恢复与整批提交
 |   |-- test_curator_input_budget.py   # Curator 输入预算缩批：按最终提示实测长度截尾、尾部重放不丢、标注前缩批、预算失败不复用旧尝试形状
+|   |-- test_curator_model_not_configured.py # 没配模型的 owner：永久配置错误不原地重试、独立失败码、发现层与 Curator 同源一小时退避
 |   |-- test_provider_request_scope.py # 同端点前台优先、后台预算传递、取消和不重叠重试
 |   |-- test_memory_promotion_v2.py    # 证据/冲突/Persona/lesson/HOT 晋升边界
 |   |-- test_memory_recall_v2.py       # 正式来源、scope、陈旧索引、owner 隔离与信封安全
@@ -954,6 +958,7 @@ agent_py_agent/
 |   |-- test_cache_diagnostics.py       # 请求前缀诊断、无正文存储与线程隔离
 |   |-- test_gateway_status_tool.py    # Gateway 权威身份、端点与生命周期日志诊断回归
 |   |-- test_sandbox.py                # bwrap argv、自检协议、owner-scoped fail-closed
+|   |-- test_shell_hide_user_home.py   # macOS 非管理员 owner 拒读用户家目录开关、HOME 改指向与真实 Seatbelt 验证
 |   |-- test_container_install.py      # 假 runtime 验证一键 build/probe/透明包装器
 |   `-- test_check_clean_package.py    # untracked、运行目录和 tar/wheel 制品门
 scripts/
@@ -1284,9 +1289,10 @@ docs/
 - `scripts/check_offline_contract_matrix.py`：开发文件完整性检查，验证证据项指向实际运行模块与测试；已删除无生产调用的旧 verifier integrity 合同及其自造数据测试。
 
 - `docs/design/MAINTAINABILITY_AND_JEV_REVIEW.md`：热点源码与参考阅读证据、未实施的重构顺序、Computer Use 当前条件及 Jev 可选接入方案。
+- `docs/design/COMPACT_GENERATION_FACTS.md`：摘要来源与请求关联的设计（Codex 交接、集成方待实施），明确旧检查点未知和诊断不参与恢复权威。
 - `docs/design/DECISION_MODEL_INTEGRATION.md`：原生决策模型的实施合同，覆盖配置复用、2/4 秒预算、缺数据、记忆/派工/能力接入、缓存窗口、并行认领与验收。
 - `docs/design/DECISION_AUDIT_AND_ADMIN_CONTROLS.md`：2026-09-25 六项决策/审计要求的合同——接入点开启/观察模式、my-agent 自调等待时间上下限、选模型输入精简与评估、统计行约数、统一审计 `audit_records`、管理员 `admin_controls`。
-- `agent_py_agent/agent/tooling/audit_records_tool.py`、`agent_py_agent/agent/conversation/decision_audit.py`、`agent_py_agent/agent/gateway_parts/request_audit_records.py`：唯一审计入口及其决策主题的三类权威来源读取（设置、用量账本、请求记录观察），不 grep 日志、不读正文；新审计主题只加 topic，不另建工具。
+- `agent_py_agent/agent/tooling/audit_records_tool.py`、`agent_py_agent/agent/conversation/decision_audit.py`、`agent_py_agent/agent/gateway_parts/request_audit_records.py`：唯一审计入口及其决策主题的四类权威来源读取（设置、用量账本、决策结果日志 `conversation/decision_outcome_log.py`、请求记录观察），不 grep 日志、不读正文；新审计主题只加 topic，不另建工具。
 - `agent_py_agent/agent/tooling/admin_controls_tool.py`、`agent_py_agent/agent/user_space/owner_admin_controls.py`：管理员管控的唯一写入口与存取；Jev 禁用在 `conversation/decision_model_call.invoke_decision_model_call` 硬拦。
 - `agent_py_agent/tests/test_decision_model_profiles.py`：验证当前模型目录 v4 的用途隔离、显式迁移、凭据复用、共享撤销及主子代理选择不误用决策模型。
 - `agent_py_agent/agent/settings/decision_settings.py`：原设置界面和工具共用服务；原 owner 模型目录及线程字段保存覆盖，锁序 owner→thread，版本冲突拒绝覆写。

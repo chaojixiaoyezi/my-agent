@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from ..backends.errors import ModelNotConfiguredError
 from ..backends.provider_headers import provider_session_scope
 from ..common.json_io import read_json_object_report
 from ..common.log_redaction import redact_sensitive_text
@@ -43,10 +44,12 @@ from .curator_inputs import (
     collect_curator_inputs,
 )
 from .curator_models import (
+    CURATOR_MODEL_NOT_CONFIGURED,
     CuratorExtraction,
     CuratorRunResult,
     MemoryCuratorConfig,
     MemoryCuratorState,
+    curator_failure_retry_seconds,
     validate_curator_state,
 )
 from .curator_run_log import CuratorRunLog, CuratorRunRecord
@@ -227,7 +230,7 @@ class _CuratorLifecycleMixin:
         current: datetime,
     ) -> CuratorRunResult:
         last_failure = _parse_time(state.last_failure_at)
-        retry_after = max(30, min(300, self.config.interval_seconds))
+        retry_after = curator_failure_retry_seconds(state.last_failure_code, max(30, min(300, self.config.interval_seconds)))
         if (
             state.last_failure_code
             and last_failure is not None
@@ -1174,6 +1177,8 @@ def _failure_code(exc: BaseException) -> str:
         return "CURATOR_MODEL_TIMEOUT"
     if isinstance(exc, CuratorModelCallError):
         return "CURATOR_MODEL_FAILED"
+    if isinstance(exc, ModelNotConfiguredError):
+        return CURATOR_MODEL_NOT_CONFIGURED
     if isinstance(exc, CuratorCommitRecoveryError):
         return "CURATOR_COMMIT_RECOVERY_FAILED"
     if isinstance(exc, CuratorBatchCommitError):

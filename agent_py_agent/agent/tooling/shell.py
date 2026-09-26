@@ -39,6 +39,7 @@ from agent_py_agent.agent.contracts.gates.command_policy import (
 )
 from agent_py_agent.agent.path_access_policy import PathAccessPolicy
 
+from ..attempt.sandbox import sandbox_hides_host_paths
 from ..common.cancellation import (
     ToolCancelled,
     cancellation_requested,
@@ -120,6 +121,9 @@ class ShellToolOptions:
     max_output_chars: int = _DEFAULT_MAX_OUTPUT_CHARS
     # 后台服务声明 loopback 却绑到局域网地址时是否由 host 回收；False 只记 listener_warning。来自配置 background_process_listen_scope_enforce。
     listen_scope_enforce: bool = True
+    # owner 隔离时沙箱要拒读的宿主根（my-agent 家目录根，开关打开时对非本机管理员还有用户家目录），其中本 owner 的可见范围
+    # 仍放行；full access 不生效。空=不加读拒绝。HOME 落在这些根里时，子进程 HOME 改指到 owner home。
+    host_private_roots: tuple[str, ...] = ()
 
 
 # LLM: This immutable request carries the exact ActionPolicy operation decision into shell recovery;
@@ -419,8 +423,9 @@ def _command_display(result: subprocess.CompletedProcess[str]) -> dict[str, obje
 # LLM: owner-scoped 子进程的 home 是只读底图；标准临时目录和 XDG cache 必须显式指向
 # 沙箱内 /tmp。npm 是已验证会忽略 XDG 并写 ``$HOME/.npm`` 的标准工具例外，因此只覆盖其官方
 # cache 变量；未知工具仍使用开放世界的 TMPDIR/XDG 路径。凭据擦洗仍先执行，不能因此恢复 secret。
+# hidden_roots 是沙箱拒读的宿主根：宿主 HOME 落在其中时改指到 owner home（见 _redirected_home）。
 # 函数用途: 构造 shell 子进程环境，并把普通缓存及 npm 缓存安全地放进任务持久临时区。
-def _subprocess_text_env(owner_home: object = None) -> dict[str, str]:
+def _subprocess_text_env(owner_home: object = None, *, hidden_roots: tuple[str, ...] = ()) -> dict[str, str]:
     env = dict(os.environ)
     env.setdefault("PYTHONIOENCODING", "utf-8")
     _apply_owner_scoped_pip_env(env, owner_home)
@@ -434,7 +439,23 @@ def _subprocess_text_env(owner_home: object = None) -> dict[str, str]:
         env["TMPDIR"] = "/tmp"
         env["XDG_CACHE_HOME"] = "/tmp/.cache"
         env["NPM_CONFIG_CACHE"] = "/tmp/.cache/npm"
+        if home := _redirected_home(env.get("HOME"), owner_home, hidden_roots):
+            env["HOME"] = home
     return env
+
+
+# LLM: 只按路径事实判断：宿主 HOME 就是某个拒读根或落在其中时，git 等工具读 ~/.gitconfig 会拿到 EPERM 并直接退出
+#   （git 只容忍 ENOENT/EACCES），所以改指到本 owner 的家目录（沙箱放行）；否则保持宿主 HOME。不看命令文本。
+#   Shell 回执的 home 说明也用它判断，两处必须同源。
+# 函数用途: 算出 owner 隔离子进程应使用的 HOME；返回空串表示不改。
+def _redirected_home(home: object, owner_home: object, hidden_roots: tuple[str, ...]) -> str:
+    if not str(home or "").strip() or not str(owner_home or "").strip():
+        return ""
+    current = Path(str(home)).expanduser().resolve(strict=False)
+    hidden = (Path(str(root)).expanduser().resolve(strict=False) for root in hidden_roots)
+    if any(current == root or root in current.parents for root in hidden):
+        return str(Path(str(owner_home)).expanduser().resolve(strict=False))
+    return ""
 
 
 def _apply_owner_scoped_pip_env(env: dict[str, str], owner_home: object) -> None:
@@ -615,6 +636,8 @@ def _sandbox_exec(
     write_roots: tuple[Path, ...] | None = None,
     read_roots: tuple[Path, ...] | None = None,
     protected_write_paths: tuple[Path, ...] | None = None,
+    *,
+    private_roots: tuple[object, ...] = (),
 ) -> tuple[Any, bool]:
     """把命令包进 attempt 沙箱（G6 接线）。
 
@@ -664,6 +687,10 @@ def _sandbox_exec(
         ),
         implicit_attempt_write_roots=write_roots is None,
         full_access=full_access,
+        # 只在 owner 隔离时生效：Full Access 没有 owner 墙，也就没有私有目录读拒绝。
+        private_read_roots=tuple(
+            Path(str(root)).expanduser().resolve(strict=False) for root in private_roots if str(root or "").strip()
+        ) if owner_text else (),
     )
     sandbox = AttemptExecutionSandbox(spec)
     # Attempt 网关的 SandboxUnavailableError 继承 SandboxUnavailable，
@@ -677,11 +704,12 @@ def _sandbox_exec(
 def _background_command_argv(
     command: str, target: Path, owner_home: object, protected_persona_root: object,
     write_roots: tuple[Path, ...] | None, read_roots: tuple[Path, ...] | None,
-    protected_write_paths: tuple[Path, ...] | None,
+    protected_write_paths: tuple[Path, ...] | None, *, private_roots: tuple[object, ...] = (),
 ) -> list[str]:
     if owner_home or protected_persona_root or os.name == "posix":
         argv, use_shell = _sandbox_exec(command, target, owner_home, protected_persona_root,
-                                        write_roots, read_roots, protected_write_paths)
+                                        write_roots, read_roots, protected_write_paths,
+                                        private_roots=private_roots)
         if use_shell or not isinstance(argv, list):
             raise OSError("managed background sandbox must provide argv execution")
         return argv
@@ -881,6 +909,7 @@ class ShellTool(BaseTool):
         )
         self.access_mode = _normalize_access_mode(options.access_mode)
         self.protected_persona_root = str(options.protected_persona_root or "")
+        self.host_private_roots = tuple(str(root) for root in options.host_private_roots if str(root or "").strip())
         self.artifact_backup_root = (
             Path(options.artifact_backup_root).expanduser().resolve(strict=False)
             if options.artifact_backup_root is not None
@@ -1154,14 +1183,16 @@ class ShellTool(BaseTool):
     ) -> ToolHandlerOutcome:
         try:
             argv = _background_command_argv(command, target, self.path_access_policy.owner_scope_root,
-                                            self.protected_persona_root, *sandbox_roots)
+                                            self.protected_persona_root, *sandbox_roots,
+                                            private_roots=self.host_private_roots)
             jobs_dir = self.workspace_root / ".background_jobs"
             jobs_dir.mkdir(parents=True, exist_ok=True)
             log_path = jobs_dir / f"job-{time.time_ns()}.log"
             log_path.touch(exist_ok=False)
             request = BackgroundLaunchRequest(
                 argv=argv, command=command, cwd=target, log_path=log_path,
-                env=_subprocess_text_env(self.path_access_policy.owner_scope_root), max_log_bytes=_MAX_BG_LOG_BYTES,
+                env=_subprocess_text_env(self.path_access_policy.owner_scope_root, hidden_roots=self.host_private_roots),
+                max_log_bytes=_MAX_BG_LOG_BYTES,
                 store_root=process_session_store_root(self.workspace_root, access_scope.owner_home),
                 access_scope=access_scope, execution_scope=execution_scope or ProcessExecutionScope(owner_home=access_scope.owner_home),
                 completion_target=dict(completion_target or {}), authority_check=context.execution_authority_check if context else None,
@@ -1399,6 +1430,30 @@ def _postcheck_shell_artifacts(
     return output, summary, False
 
 
+# LLM: 回执文本与 result_envelope.sandbox 必须同源（hidden 来自 sandbox_hides_host_paths），不能一处说隐藏、另一处说可读。
+#   macOS 版如实说明宿主路径读得到，同时写明工作区外的路径不在本任务授权内，不给读取背书。
+# 函数用途: 生成 owner 隔离模式下 Shell 输出末尾的沙箱范围说明。
+def _sandbox_scope_notice(hidden: bool, *, private_hidden: bool = False, home_hidden: bool = False) -> str:
+    if hidden:
+        return (
+            "[sandbox_scope] file_scope=owner_workspace_only "
+            "external_host_paths_hidden=true host_path_absence_proven=false\n"
+            "当前命令只在本 owner 的隔离视图内运行；其中的 uid=0、/root 或其它绝对"
+            "路径都不代表宿主权限，只有结构化授权写根内的结果会持久化到宿主。未挂载"
+            "路径的不存在、拒绝或沙箱内成功都不能证明宿主路径状态。"
+        )
+    return (
+        "[sandbox_scope] file_scope=owner_workspace_only "
+        "external_host_paths_hidden=false host_path_absence_proven=false\n"
+        "当前平台的沙箱只限制写入，不隐藏宿主上的一般路径"
+        + ("；my-agent 数据目录中本 owner 以外的部分（其它 owner、配置、发布记录）读不到" if private_hidden else "")
+        + ("；用户家目录中本 owner 可见范围以外的内容（如 ~/.ssh、其它项目）也读不到，HOME 指向本 owner 的家目录"
+           if home_hidden else "")
+        + "。只有结构化授权写根内的写入会生效并持久化。"
+        "能读到工作区以外的路径不代表获得了授权，这些路径不在本任务范围内，不要读取或依赖它们。"
+    )
+
+
 # LLM: The result envelope exposes process and sandbox facts but never owner-private backup paths.
 # Artifact postcheck failure overrides provider success and stays UNKNOWN for durable reconciliation.
 # 函数用途: 把 shell 进程、沙箱和产物复核事实组装成统一工具结果。
@@ -1416,20 +1471,19 @@ def _build_protected_shell_outcome(
 ) -> ToolHandlerOutcome:
     tool = request.tool
     owner_scoped = tool.path_access_policy.owner_scope_root is not None
+    # 只读隔离按平台沙箱的结构化事实如实投影：Linux 隐藏未挂载路径，macOS 只限写。
+    hidden = owner_scoped and sandbox_hides_host_paths()
     if owner_scoped:
-        output = (
-            f"{output}\n[sandbox_scope] file_scope=owner_workspace_only "
-            "external_host_paths_hidden=true host_path_absence_proven=false\n"
-            "当前命令只在本 owner 的隔离视图内运行；其中的 uid=0、/root 或其它绝对"
-            "路径都不代表宿主权限，只有结构化授权写根内的结果会持久化到宿主。未挂载"
-            "路径的不存在、拒绝或沙箱内成功都不能证明宿主路径状态。"
-        )
+        home_hidden = bool(_redirected_home(os.environ.get("HOME"), tool.path_access_policy.owner_scope_root,
+                                            tool.host_private_roots))
+        notice = _sandbox_scope_notice(hidden, private_hidden=bool(tool.host_private_roots), home_hidden=home_hidden)
+        output = f"{output}\n{notice}"
     result_envelope: dict[str, object] = {
         "artifact_protection": artifact_summary,
         "process": process_facts,
         "sandbox": {
             "file_scope": "owner_workspace_only" if owner_scoped else "full_access",
-            "external_host_paths_hidden": owner_scoped,
+            "external_host_paths_hidden": hidden,
             "host_path_absence_proven": False,
         },
     }
@@ -1857,6 +1911,7 @@ def _run_attempt_sandboxed_shell_command(
         sandbox_write_roots,
         sandbox_read_roots,
         sandbox_protected_paths,
+        private_roots=tool.host_private_roots,
     )
     try:
         proc = subprocess.Popen(
@@ -1869,7 +1924,7 @@ def _run_attempt_sandboxed_shell_command(
             text=True,
             encoding="utf-8",
             errors="replace",
-            env=_subprocess_text_env(owner_home),
+            env=_subprocess_text_env(owner_home, hidden_roots=tool.host_private_roots),
             start_new_session=True,
         )
     except OSError as exc:

@@ -48,6 +48,157 @@ A02原脚本原字节物化与执行通过，但有未标创作事实；B01报�
 纯问答晋升另补on/off首请求回归：开启并有授权候选时空选保留普通任务、Goal不变；关闭不晋升且无aux。该测试不模拟终态，真实N03的completed另列。
 候选6 CAP06 的自然摘要独立复核通过；新checkpoint属于thread，已完成旧task没有后续业务请求，未验证该task消费新摘要或重用方法。
 
+## Compact 摘要请求禁止工具与违规兜底（2026-09-26，已合入 main `f230ab077` 并双机部署 `step12v-dff317e5`，基于 `756d4b9bb`）
+
+- **来源**：
+  - main 的摘要请求带工具、选择为 `auto`，模型调工具就退成机械摘要。
+  - Codex 私有验收里，MiniMax-M2.7 带工具加 `none` 仍回 tool_use。
+  - 集成方吸收 Codex `d4dd6c094` 的产品和测试部分，丢掉其中能力包相关文档，并在其上补违规兜底和日志关联键。
+- **吸收的测试**（10 个文件，来自 `d4dd6c094`）：
+  - 可容纳请求只多一个 `none` 选择。
+  - Anthropic 协议实际请求体带 `tool_choice: {"type":"none"}`，并保留工具 schema 与缓存标记。
+  - 三协议 `tools_for_choice` 在 `none` 时保留目录，响应里的调用仍被协议门拒绝。
+  - 摘要响应形状诊断不含正文、思考、签名。
+  - 另有若干夹具按新语义校准；`test_background_compact_recovery.py` 窗口保留集成方的 19500，并采纳 Codex 新增的"候选装得下"断言。
+- **新测试**（`test_compact_request_budget.py`，共 3 项）：
+  - 单次摘要回工具调用后改走分段链，由模型重写；分段请求空工具、`none`；诊断带请求/会话/用途编号和墙钟时间，不含原文。
+  - 带图来源不能分段：交回原回复。
+  - 严格来源下分段只能降级：交回原回复。
+- **按新契约改写**：
+  - `test_gateway_conversation_compact.py`：假后端始终调工具时，摘要为分段链的带标注摘录，工具始终未执行，首请求带工具、之后空工具。
+  - 形状日志测试把关联键分开断言。
+  - `test_compact_message_source.py`：实际请求只多 `none`。
+- **修复 main 既有失败**：`test_gateway_compact_recovery.py` 与 `_continuation.py` 的 12 个用例自 `7a15c9c91`（/effort 把 `_payload` 改为收 `_PayloadSurface`）起失败。在干净的 main `756d4b9bb` 上复现为 12 failed，测试已改用新签名并传入候选的真实 params，23 passed。
+- **变异验证**：6 种变异各自使测试失败：不设 `none`、`none` 清空工具、不走分段兜底、兜底失败不交回原回复、日志不带关联键、compact 不传请求。还原后逐字节一致。
+- **真实验收**（隔离 Gateway 8432，运行时 `runtime-step12v-dff317e5`，MiniMax-M2.7 官方接口，Jev 观察模式，经 Gateway `/ask` 与 `/control`，每轮一条普通需求）：
+  - 四轮对话：建文件并数行数；改第二条并读回；`/compact`；压缩后凭记忆回答。第四轮让模型用 `audit_records` 查决策点位。
+  - 决策结果日志：`model_selection` 4 次成功、`pre_recall` 4 次成功、后台 `curator` 1 次成功、1 次超时（5002 ms，恰为后台 5 秒预算）。超时只冷却 curator，其它点位照常。
+  - 模型据 `audit_records` 按点位如实报告，未触发的点位说成"窗口内未触发"，不再断言"没接线"。
+  - 压缩：带工具加 `none` 的单次摘要一次成功，只有 1 次辅助请求，摘要为模型正文（1034 字，非机械回退）；历史 19,075 → 9,947 tokens，压缩后准确答出文件名与改后的第二条。
+  - 本样本未出现违规 tool_use，分段兜底由单元测试覆盖。
+  - 证据留在 `~/.my-agent/releases/compact-jev-acceptance-20260926/`（不进仓库）；隔离 home 与模型目录副本已删除。
+- **回归**：涉及 Compact、摘要预算、辅助调用、工具选择的 66 个测试文件，含推理强度、结构化输出和 `test_architecture_guardrails.py` 组合回归：1601 passed。严格门全部通过；改动产品文件的 code-size 发现与 main 逐项相同。
+
+## Jev 决策结果日志与点位冷却（2026-09-26，已合入 main `756d4b9bb`，基于 `a3f5c17ec`；真实验收见上节 Compact 同一次隔离运行）
+
+- **来源**：用户 TUI 里的模型据 `audit_records` 断言 Jev"只接了选模型"。查实原因有三：Jev 经代理访问慢，单次约 2.5–5 秒；任一点位超时就冷却整条连接，选模型每轮最先超时，把其它点位全挡住；审计只看得到选模型和能力展示的观察。
+- **新测试** `test_decision_outcome_log.py`，共 4 项：
+  - 日志行只含结构化字段。
+  - 只写 owner 规范路径，有条数上限；没有该路径的宿主不写文件。
+  - 汇总按时间窗口按点位计数，坏行单独计数。
+  - 经本地假决策服务走真实 `decide()`：超时、成功、点位冷却各落一行；请求材料不进日志；审计按点位给出次数。
+- **改写测试** `test_decision_curator_plugin_concurrency.py`：原"后台超时冷却共享连接"的契约改为三项：
+  - 后台超时只冷却本点位，前台照常请求并成功；同一点位换新阶段后 `point_backoff`，不发请求。
+  - 冷却到期后本点位成功一次就清掉失败阶梯，下次超时从 30 秒重新计起。
+  - 服务端 503 仍冷却整条连接，前台 `connection_backoff`、不发请求。
+- **调整** `test_decision_fault_matrix.py`：慢响应（超时）那一格的原因改为 `point_backoff`，其余故障仍为 `connection_backoff`。
+- **变异验证**：8 种变异各自使测试失败：
+  - 日志与审计：不记日志、审计不带点位、汇总不按窗口。
+  - 冷却分级：超时仍冷却整条连接、所有失败都只冷却点位、不查点位冷却、成功不清点位冷却、点位冷却原因写成连接。
+
+  "成功不清点位冷却"最初没被杀死，补了阶梯重置测试才杀死。还原后逐字节一致（`PYTHONDONTWRITEBYTECODE=1`）。
+- **回归**：
+  - 引用决策服务、冷却策略、审计工具或 owner 路径布局的 100 个测试文件（含 `test_architecture_guardrails.py`）：1686 passed。
+  - 构造 `SimpleAgent` 的 117 个测试文件：2278 passed、8 skipped、29 xfailed。
+  - 严格门全部通过；code-size 总数与 main 相同。原 `decide` 的长度发现随函数体移到 `_decide_outcome`（50→53 行，仍为 high-risk）；参数打包后没有新增参数发现。
+
+## macOS 沙箱读边界第二步：拒读用户家目录（开关默认关闭，2026-09-26，分支 `claude/curator-budget`，基于 main `e24aae8ab`）
+
+- **改动**：
+  - 拒读根从单个值改为一组：`host_private_roots` → `private_roots` → `AttemptSandboxSpec.private_read_roots`。
+  - 开关 `shell_sandbox_hide_user_home` 打开时，非本机管理员的 owner 在 macOS 上多拒读用户家目录。
+  - HOME 落在拒读根里时，前台、后台、终端三条路径的子进程 HOME 改指到 owner home。
+  - 这个开关属于配置边界项，模型不能改。
+- **新测试** `test_shell_hide_user_home.py`，共 8 项：
+  - 开关在 YAML、dataclass 和规范化中默认都是 false，并已列入 `BOUNDARY_KEYS`。
+  - 裁决：开关打开、非管理员、macOS 三者同时满足才加家目录；开关关闭、本机管理员、Linux 时都只拒读 my-agent 根。
+  - 规则：全部拒读根在前，放行在后，上层目录元数据在最后；家目录这一级只放行元数据，`.ssh` 和其它项目不放行。
+  - HOME 改指向：家目录被拒读时指到 owner home，包括 HOME 在拒读根之下的情形；只拒读 my-agent 根，或本机管理员时，HOME 不变。
+  - 回执：家目录被拒读时说明读不到、HOME 已改指向，否则不这么说。
+  - 装配：飞书 owner 的 `SimpleAgent` 在开关打开时，把家目录接进 Shell 工具。
+  - 后台命令和终端会话的子进程同样拿到改指向后的 HOME。
+  - 真实 Seatbelt（仅 macOS）：注册表装配的 `run_command` 读不到 `~/.ssh` 和其它项目，本 owner 文件可读，`$HOME` 是 owner home，`git init`、`git status` 成功；只拒读 my-agent 根时，其它项目仍可读。
+- **既有测试**：5 个文件里的替身和参数改用新名字，断言不变。
+- **变异验证**：14 种变异各自使测试失败，还原后逐字节一致：
+  - 裁决：不看开关、不看管理员、不看平台。
+  - HOME：不改 HOME、只认 HOME 与拒读根相等。
+  - 装配：core 总说平台已隐藏、bootstrap 不传拒读根。
+  - 环境构造：前台、后台、终端各自不把拒读根交给环境构造。
+  - 回执、配置：回执不提家目录、开关不在边界项、不做布尔规范化、YAML 默认打开。
+- **本机探针**（真实 `sandbox-exec`，拒读家目录，HOME 指向家目录外的临时 owner 目录）：
+  - git init/status、python3、node、npm、uv 都正常；家目录列不出，`.zshrc` 读不到。
+  - curl 与 pip 下载 3 轮都成功。第一次 curl 超时是代理偶发，与拒读无关：同一轮不拒读时也慢，拒读时 CONNECT 隧道与 TLS 握手完整。
+  - 正是这次探针在 owner 目录位于家目录之内时暴露了 git 的 EPERM，才有了上面的热修复。
+- **回归**：
+  - 沙箱、Shell、终端会话、配置规范化、owner 权限与工具注册相关的 92 个测试文件（含 `test_architecture_guardrails.py`）：1840 passed、10 skipped、3 xfailed。
+  - 另外 117 个构造 `SimpleAgent` 的测试文件：2278 passed、8 skipped、29 xfailed。
+  - 严格门全部通过；改动文件的 code-size 发现与 main 相比没有新增或升级。
+
+## macOS 沙箱拒读根的上层目录放行元数据（热修复，2026-09-26，分支 `claude/curator-budget`，基于 main `227fcd5b1`）
+
+- **现象**：step12q 部署后，owner 工作区在拒读根 `~/.my-agent` 之下时，沙箱里的 `git init` 报 `fatal: Invalid path '<my-agent 根>': Operation not permitted`。`git add`、`python3 -m venv`、node 的 `fs.realpathSync` 同样失败。
+  - 受影响的是 `~/.my-agent/owners/...` 下的工作区，TUI 默认工作区就在这里。
+  - `--workspace` 指向 `~/.my-agent` 以外的项目目录不受影响。
+- **原因**：拒读规则用 subpath，连根目录本身一起拒绝；放行本 owner 目录后，根与 owner 目录之间的各级目录仍拿不到元数据。这些工具规范化路径时要逐级 lstat，遇到 EPERM 就退出。第一步的真实沙箱用例只测了读文件和写文件，没覆盖到这一点。
+- **修复**：对拒读根内、放行目录上层的各级目录，按 literal 放行 `file-read-metadata`。这些目录本身能 stat，但仍列不出内容；同级目录、其它 owner 和 config 仍 stat 不到。
+- **测试**（`test_attempt_sandbox.py`）：
+  - 规则单测：元数据放行规则排在最后，覆盖根、`owners`、`owners/local`、`shared` 这几级目录；不含 `providers` 和 `config`，也不用 subpath。
+  - 真实 `sandbox-exec`（仅 macOS）：根和 `owners` 能 stat，但根列不出内容；其它 owner 的上层目录和 config 仍 stat 不到；owner 工作区里 `git init`、`git add` 成功。
+- **变异验证**：3 种变异各自使测试失败：不放行上层元数据、literal 换成 subpath、漏掉根目录本身。还原后逐字节一致（`PYTHONDONTWRITEBYTECODE=1`）。
+- **回归**：引用 attempt 沙箱、Shell 工具或终端会话的 25 个测试文件（含 `test_architecture_guardrails.py`）722 passed、9 skipped；跳过的是 Linux bwrap 用例。
+
+## 验证分类：换行与不执行检查的参数（2026-09-26，已合入 main `76cb23c6c` 并双机部署 `step12r-d79ae184`，基于 `7179f12e4`）
+
+- **来源**：Codex 在 main `7179f12e4` 上给出三个反例：`pytest\necho done`、`pytest --help`、`pytest --collect-only` 返回 0 时都被记为 passed/full。复核时又找到同类写法：`cd tests` 换行后接 `&& pytest`，`make test -i`（忽略失败），`go test -n` 和 `go build -n`（只打印命令）。
+- **新测试** `test_verification_project_facts.py`：
+  - 5 种换行写法 × 返回码 0/2，都不记证据。其中包括 cd 前缀部分出现换行，以及 `&&` 后换行的续行写法。
+  - pytest 的 12 种参数都不算证据，它们只打印帮助或版本、只收集或只装夹具；`pytest -v` 仍记 passed。
+  - cargo、go、make 的 14 种参数都不算证据，它们不执行检查或吞掉失败。`cargo test`、`go test ./...`、`go build ./...`、`make test`、`make test -k`、`cargo test -- --nocapture` 仍记 passed。
+- **变异验证**：9 种变异各自使测试失败：
+  - 去掉换行检查；把换行检查放回拆段处（由 `cd tests` 换行接 `&& pytest` 的用例杀死）。
+  - 不过滤参数；去掉通用帮助参数；make 表去掉 `-i`；go build 不设表。
+  - `--flag=值` 不拆等号；不按首词回退查表。
+  - 各命令共用一张表：`pytest -q` 会被 make 的 `-q` 误伤。
+  - 还原后逐字节一致（`PYTHONDONTWRITEBYTECODE=1`）。
+- **部署核对**：两台机器的已装运行时对三个反例都不再记证据，普通 `pytest` 仍记 passed。
+- **回归**：14 个测试文件 850 passed、24 xfailed，它们引用分类器、验证账或运行事实，并含 `test_architecture_guardrails.py`。严格门的 Ruff、doc sync、strict code-size、diff 和 clean-package 全部通过；改动文件的 code-size 发现与 main 相同。
+
+## 后台首请求压缩用例窗口校准（2026-09-26）
+
+- **现象**：`test_background_compact_recovery.py::test_background_first_request_compacts_after_complete_prepare` 两个协议在 main 上失败，报“压缩候选装不进输入触发线和输出预留”。之前的 focused gate 没有覆盖它。
+- **定位**：git bisect 从 `81bdf9579`（通过）到 `c187f932f`（失败），第一个坏提交是 `f7029f54c`（新增 `manage_models` 工具）：工具目录变长后，用例固定的 15500 窗口装不下压缩后的候选。产品拒绝提交装不下的压缩是正确行为，所以只校准测试输入。
+- **校准**：实测 16000–23000 都能先触发压缩、再装下候选，25000 起不再需要压缩；取中间值 19500，给工具目录增减留出余量，断言一条不放松。该文件 22 passed。
+
+## macOS 沙箱拒绝读取 my-agent 私有目录（2026-09-26，分支 `claude/curator-budget`，基于 main `0624ab355`）
+
+- **起因**：macOS Seatbelt 规则只有写拒绝，owner 隔离的 Shell 能读到其它 owner 的数据和 `~/.my-agent/config`（含密钥）；Linux bwrap 本来就不挂载这些路径。
+- **规则语义实测**（本机 `sandbox-exec`）：后写覆盖先写。先拒绝根、再放行子目录时子目录可读；顺序颠倒时连本 owner 也读不到。
+- **新增/调整测试**（`test_attempt_sandbox.py` 7 项、`test_sandbox.py` 1 项、`test_pty_sessions.py` 1 项；另外给 4 个既有测试的替身补上新参数或属性，断言不变）：
+  - 规则顺序单元测试：先拒绝根，再放行本 owner、view、授权读根与写根，不放行其它 owner 与 config；Full Access 与未给根时不加读规则。
+  - 真实 `sandbox-exec`（仅 macOS）：本 owner 文件与授权读根可读；其它 owner 与 config 读不到；一般宿主路径仍可读；view 可写。
+  - 真实注册表装配（仅 macOS）：`ToolRegistryParams(host_private_root=…)` 构造出的 `run_command` 读不到 config 与其它 owner，本 owner 可读。
+  - 传递链：`_sandbox_exec` 只在 owner 隔离时带根；前台、后台、终端会话三条路径都把根交给沙箱（终端会话经 `_PtySandboxInputs` 打包后原样转交）；`SimpleAgent` 把自身 home 根接进 Shell 工具；macOS 回执在配置了根时说明其它 owner 与配置读不到，没配置时不这么说。
+- **变异验证**：11 种（不追加读规则、放行写在拒绝前、Full Access 也加规则、前台/后台/终端不传根、终端打包丢根、bootstrap 不传、core 不传、回执不看根、放行漏掉授权读根）全部使测试失败。
+- **代码尺寸**：按“标识 + 严重级别”与 main 比对。`_spawn` 加参后一度触发硬性超限，改为把沙箱输入收进 `_PtySandboxInputs`，参数反而从超软上限降到接近上限；沙箱类的读规则判断移到类外，类长度不变。
+- **回归**：工具注册、Shell、沙箱、终端会话相关 42 个测试文件 978 passed、9 skipped（按平台跳过）；构造 `SimpleAgent` 的 136 个测试文件 2670 passed、17 skipped、29 xfailed，另 2 个失败是 main 上既有问题：`test_background_first_request_compacts_after_complete_prepare` 两个协议，改动前同样失败，bisect 定位到 `f7029f54c`，下一个提交校准测试窗口。
+- **事故记录**：第一次跑这 136 个文件时，按关键字挑文件误把 `agent_py_agent/tests/run_tests.py` 交给了 pytest。它在导入时就对真实 `~/.my-agent` 执行了 `status`、一次真实模型调用的 `run --no-save`，以及一次因参数不合法失败的 `remember`，留下运行时工作区 `main-a4e68bb5ead1`、运行目录 `runs/2026-09-26/861790a7…` 和全局索引条目；长期记忆未写入。按既有规则不手删、已报告用户。测试文件列表必须经 `grep '/test_[^/]*\.py$'` 过滤。
+
+## Shell 沙箱回执按平台如实说明（2026-09-26，分支 `claude/curator-budget`，基于 main `2b25e38b3`）
+
+- **起因**：Codex 验收 TUI-CAP06 发现，macOS 上 owner 隔离的 Shell 回执写 `external_host_paths_hidden=true`，而 Seatbelt 规则只拒绝写入、读取不受限，命令实际读得到宿主路径。
+- **修改**：新增 `attempt/sandbox.sandbox_hides_host_paths()`，作为只读隔离的唯一事实来源（Linux bwrap 为 true，macOS Seatbelt 为 false）。回执文本与 `result_envelope.sandbox` 同源；macOS 版说明只限制写入，并写明工作区外的路径不在任务授权内。
+- **测试**：`test_sandbox.py` 新增 2 项（平台事实，以及 macOS 回执的文本与结构化字段）；原 3 项 Linux 回执用例显式固定平台事实，断言保持原样。
+- **变异验证**：4 种（不看平台、文本总说隐藏、平台判断总为真、结构化字段不跟平台）全部使测试失败。
+- **回归**：Shell、沙箱、进程会话相关 28 个测试文件 662 passed、9 skipped（按平台跳过）。
+- 读边界收紧（给 Seatbelt 加读拒绝）是安全缺口，另立项，见 DESIGN_LEDGER。
+
+## 没配模型的 owner 不再反复失败（2026-09-26，分支 `claude/curator-budget`，基于 main `d00fde8be`）
+
+- **真机现象**：飞书 owner 与测试 owner `tui-matrix/p1-r141` 未选模型，step12m 上 3 小时内各失败 28 次：每次重建 owner 实例、整批收集（p1-r141 每次都是同一批 47→46 条缩批），以 `ModelNotConfiguredError` 失败并原地重试一次，记成通用的 `CURATOR_MODEL_FAILED`。
+- **新增** `test_curator_model_not_configured.py` 4 项：未配模型和 4xx 拒绝都只调用一次、不原地重试；服务级运行记 `CURATOR_MODEL_NOT_CONFIGURED`，游标不动，10 分钟后（原 5 分钟退避已过）不再调用，一小时后才重试；发现层对同样 10 分钟前失败的两个 owner，只唤醒普通超时失败的那个。
+- **变异验证**：5 种（配置错误照旧重试、失败码不区分、待处理路径用原退避、发现层用原退避、退避函数不区分）全部使测试失败。
+- **回归**：Curator、发现层、网关循环相关 29 个测试文件 600 passed。
+
 ## 结构化输出方式：DeepSeek 官方改用 JSON 对象（2026-09-26，分支 `claude/curator-budget`，基于 main `337a689ad`）
 
 - **起因**：Curator 与自动总结 Skill 的结构化调用固定发 `json_schema`，DeepSeek 官方 OpenAI 兼容接口直接 400；默认模型设成它时，这两条后台链路会整体失效。

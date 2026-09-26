@@ -130,7 +130,9 @@ def test_transport_faults_fall_back_then_recover_on_the_declared_boundary(tmp_pa
     attempts = _attempts(host, params)
     offset[0] = (cooldown or 301) - 1
     again = decide(host, params, stage)
-    assert (again.status, again.reason) == (blocked, "connection_backoff") and _attempts(host, params) == attempts
+    # 超时只冷却本点位（服务仍能响应，只是超出本点预算）；连接错误、服务端错误、额度与配置问题冷却整条连接。
+    reason = "point_backoff" if fault == "slow" else "connection_backoff"
+    assert (again.status, again.reason) == (blocked, reason) and _attempts(host, params) == attempts
     if cooldown == 300:
         assert 0 < again.retry_after_seconds <= 1, "额度与限流冷却 300 秒，普通故障的 30 秒不能提前放行"
     _heal(server)

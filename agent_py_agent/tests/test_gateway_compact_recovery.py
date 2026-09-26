@@ -17,7 +17,7 @@ from agent_py_agent.agent.backends.errors import (
 )
 from agent_py_agent.agent.conversation import compact
 from agent_py_agent.agent.conversation.compact_guard import ConversationCompactError
-from agent_py_agent.agent.gateway_model_adoption import _payload
+from agent_py_agent.agent.gateway_model_adoption import _payload, _PayloadSurface
 from agent_py_agent.agent.gateway_parts import request_context, request_execution
 from agent_py_agent.agent.gateway_parts.request_history import append_gateway_conversation_message
 from agent_py_agent.agent.model_request_selection import _HOST
@@ -88,9 +88,10 @@ def test_full_gateway_recovery_reuses_preparation_and_sends_selected_payload(tmp
         seen.append("restored")
         material = projections[-1]
         projected = material.projection
-        expected = _payload(agent.backend, projected.provider_prompt,
-                            list(material.request_input.native_tools) or None, projected.tool_choice,
-                            projected.messages, projected.system_instruction)
+        # 与真实发送同源地投影（含本轮 agent/params 决定的思考开关与档位，7a15c9c91 起 _payload 收一个请求面对象）。
+        expected = _payload(agent.backend, projected.provider_prompt, _PayloadSurface(
+            list(material.request_input.native_tools) or None, projected.tool_choice,
+            projected.messages, projected.system_instruction, agent, material.params))
         assert wire == expected
 
     business, _ = fake_http(monkeypatch, fixture, on_business=on_business)
@@ -201,9 +202,9 @@ def test_initial_compact_precedes_model_adoption_and_rejection_baseline(tmp_path
             assert material.params.conversation_history_seed.compact_generation == 1
             if wire["model"] == "original-model":
                 projected = material.projection
-                assert wire == _payload(fixture.agent.backend, projected.provider_prompt,
-                                        list(material.request_input.native_tools) or None,
-                                        projected.tool_choice, projected.messages, projected.system_instruction)
+                assert wire == _payload(fixture.agent.backend, projected.provider_prompt, _PayloadSurface(
+                    list(material.request_input.native_tools) or None, projected.tool_choice, projected.messages,
+                    projected.system_instruction, fixture.agent, material.params))
 
     monkeypatch.setattr(runtime_mixin, "_prepare_runtime_context", prepare)
     if reject:
@@ -294,8 +295,9 @@ def test_transient_retry_after_commit_resends_committed_candidate(tmp_path, monk
             return
         material = projections[-1]
         projected = material.projection
-        expected = _payload(agent.backend, projected.provider_prompt, list(material.request_input.native_tools) or None,
-                            projected.tool_choice, projected.messages, projected.system_instruction)
+        expected = _payload(agent.backend, projected.provider_prompt, _PayloadSurface(
+            list(material.request_input.native_tools) or None, projected.tool_choice, projected.messages,
+            projected.system_instruction, agent, material.params))
         seen.append("candidate" if wire == expected else "rebuilt")
         marks.append((len(builds), len(fits)))
         wires.append(wire)

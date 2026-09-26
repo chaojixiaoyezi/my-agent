@@ -233,6 +233,8 @@ class _ToolConfigFields:
     tool_shell_output_max_chars: int = 12_000
     # 后台服务默认只允许监听本机回环；声明 loopback 却绑到局域网地址时由 host 回收（False 只记 listener_warning）。
     background_process_listen_scope_enforce: bool = True
+    # macOS 上对非本机管理员的 owner 拒读用户家目录（本 owner 可见范围除外），并把其 Shell 的 HOME 指到 owner home。默认关闭。
+    shell_sandbox_hide_user_home: bool = False
     stream_enabled: bool = True
     tool_catalog_limit: int = 80
     tool_catalog_mode: str = "compact"

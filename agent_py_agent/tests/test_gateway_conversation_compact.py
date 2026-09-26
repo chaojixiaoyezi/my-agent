@@ -13,6 +13,7 @@ from agent_py_agent.agent.backends.anthropic_prompt_cache import (
 )
 from agent_py_agent.agent.backends.base import ModelResponse
 from agent_py_agent.agent.backends.errors import ProviderResponseError
+from agent_py_agent.agent.conversation import compact_request_budget as budget_module
 from agent_py_agent.agent.conversation.compact import (
     ConversationCompactOptions,
     _merge_compact_operation_evidence,
@@ -495,15 +496,15 @@ def test_transcript_compact_tool_call_is_never_executed(tmp_path, caplog) -> Non
     )
 
     assert compacted.compact_generation == 1
-    assert compacted.compact_summary.startswith(
-        "[conversation-compact-mechanical-fallback]"
-    )
+    # 单次摘要回 tool_use 后改走分段链（空工具）重写；假后端始终调工具，分段按原纠正上限后留带标注的确定性摘录。
+    assert "- reason: TOOL_CALL" in compacted.compact_summary
     assert not (tmp_path / "compact-tool-must-not-run.txt").exists()
-    assert backend.calls == 1
+    assert backend.calls == 2 + budget_module._SEGMENT_REPAIR_LIMIT
+    assert backend.kwargs[0].get("tools") and all(not kwargs.get("tools") for kwargs in backend.kwargs[1:])
     diagnostic = [record.compact_response_shape for record in caplog.records
                   if hasattr(record, "compact_response_shape")]
-    assert len(diagnostic) == 1 and diagnostic[0]["reason"] == "TOOL_CALL"
-    assert diagnostic[0]["tool_use_count"] == 1
+    assert {item["reason"] for item in diagnostic} == {"TOOL_CALL"} and diagnostic[0]["tool_use_count"] == 1
+    assert diagnostic[0]["purpose"] == "conversation_compact_summary" and diagnostic[0]["thread_id"]
     assert "unsafe" not in caplog.text and "我将调用工具后再总结" not in caplog.text
 
 
@@ -525,6 +526,8 @@ def test_empty_transcript_summary_logs_typed_shape_without_content(caplog, think
     assert len(calls) == 1 and summary.startswith("[conversation-compact-mechanical-fallback]")
     records = [record.compact_response_shape for record in caplog.records if hasattr(record, "compact_response_shape")]
     assert len(records) == 1
+    identity = {key: records[0].pop(key) for key in ("request_id", "thread_id", "purpose", "logged_at")}
+    assert identity["purpose"] == "conversation_compact_summary" and identity["logged_at"] > 0
     assert records[0] == {
         "reason": "EMPTY", "text_chars": 0, "tool_use_count": 0, "thinking_only": thinking,
         "stop_reason": response.stop_reason, "runtime_status": response.runtime_status,

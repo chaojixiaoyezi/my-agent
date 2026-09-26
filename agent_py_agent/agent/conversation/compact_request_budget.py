@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from collections.abc import Callable
 from contextlib import closing
 from dataclasses import dataclass, replace
@@ -74,6 +75,9 @@ def compact_request_tokens(request: AuxiliaryModelCallRequest, source: CompactMe
 # Strict replacement sources reject degraded excerpts; 显式message_source只在准备层读取，不能与request.messages竞争权威。
 # vision_summary=True 时来源保留图块、估算加 media_reserve_tokens：超预算、供应商窗口错误、媒体拒绝、截断都抛 typed
 # COMPACT_VISION_SUMMARY_FAILED，绝不转分段（分段不能承载图片，转分段等于同一请求内静默退回 A）。
+# 单次摘要设了 none 仍返回工具调用（2026-09-26 真机：MiniMax-M2.7 经 Anthropic 兼容协议带工具+none 仍回 tool_use）时，
+#   改走同一分段链（文本化来源、空工具、none，带原有纠正与确定性摘录），让模型重写而不是直接退成机械摘要；
+#   分段链因非文本来源或严格来源等 typed 原因失败时，交回原回复，由上层照旧做机械回退，不比原行为更差。
 # 函数用途: 窗口够用时沿用单次摘要；不够时逐段覆盖全部历史，避免反复重发超大请求；随图摘要只允许单次请求。
 def generate_bounded_compact_response(
     request: AuxiliaryModelCallRequest,
@@ -93,19 +97,29 @@ def generate_bounded_compact_response(
     raise_if_compact_interrupted(interrupt_check)
     if vision_summary:
         return _generate_vision_summary_response(request, message_source, budget, interrupt_check, media_reserve_tokens)
+    tool_call_reply = None
     if _request_tokens(request, message_source) <= budget:
         try:
             raise_if_compact_interrupted(interrupt_check)
             response = _generate_materialized_response(request, message_source)
             raise_if_compact_interrupted(interrupt_check)
             if preserve_complete_fallback and getattr(response, "truncated", False):
-                compact_summary_response_outcome(response)
+                compact_summary_response_outcome(response, request=request)
                 raise ConversationCompactError("摘要回复被截断，保留原始来源", code="COMPACT_SUMMARY_TRUNCATED")
-            return response
+            if not getattr(response, "tool_use_blocks", None):
+                return response
+            compact_summary_response_outcome(response, request=request)
+            tool_call_reply = response
         except ProviderContextWindowError:
             # 只响应明确的窗口错误；网络、额度、认证等错误不能变成隐式分段重试。
             budget = max(1, budget // 2)
-    return _summarize_segments(request, budget, interrupt_check, source_progress, preserve_complete_fallback, message_source)
+    try:
+        return _summarize_segments(request, budget, interrupt_check, source_progress, preserve_complete_fallback,
+                                   message_source)
+    except ConversationCompactError:
+        if tool_call_reply is None:
+            raise
+        return tool_call_reply
 
 
 # LLM: B 路径只有一次请求：预算不够、ProviderContextWindowError、InputMediaError、截断都变成 typed
@@ -122,7 +136,7 @@ def _generate_vision_summary_response(request, source, budget, interrupt_check, 
         raise ConversationCompactError(f"随图摘要请求失败：{type(exc).__name__}", code=COMPACT_VISION_SUMMARY_FAILED) from exc
     raise_if_compact_interrupted(interrupt_check)
     if getattr(response, "truncated", False):
-        compact_summary_response_outcome(response)
+        compact_summary_response_outcome(response, request=request)
         raise ConversationCompactError("随图摘要回复被截断", code=COMPACT_VISION_SUMMARY_FAILED)
     return response
 
@@ -263,7 +277,7 @@ def _summarize_segment(
             reason = ""
             continue
         raise_if_compact_interrupted(interrupt_check)
-        text, reason = compact_summary_response_outcome(response)
+        text, reason = compact_summary_response_outcome(response, request=base)
         if not reason:
             return _SegmentOutcome(text, end, budget, response)
         if repairs >= _SEGMENT_REPAIR_LIMIT:
@@ -297,20 +311,30 @@ def _verified_segment_response(response: object, summary: str) -> object:
 
 # LLM: 复用原 TOOL_CALL/TRUNCATED/EMPTY 分类；transcript 显式关闭截断拒绝以保持既有普通单次摘要语义。
 # 结构化日志仅为观察投影，绝不解析文案驱动重试，也不含正文/思考/工具参数；分段调用须保留默认严格分类。
-# 函数用途: 返回可用摘要与原失败码，并在原失败位置记录有界响应形状，不新增请求或状态。
-def compact_summary_response_outcome(response: object, *, reject_truncated: bool = True) -> tuple[str, str]:
+# request 只取请求、会话、用途编号作关联键（缺失保留为空，不从正文或时间邻近猜），并记墙钟时间。
+# 函数用途: 返回可用摘要与原失败码，并在原失败位置记录带关联键的有界响应形状，不新增请求或状态。
+def compact_summary_response_outcome(response: object, *, reject_truncated: bool = True,
+                                     request: object = None) -> tuple[str, str]:
     text = str(getattr(response, "text", "") or "").strip()
     shape = auxiliary_response_shape(response)
     truncated = shape["truncated"] or shape["stop_reason"] in {"max_tokens", "length"}
     reason = "TOOL_CALL" if shape["tool_use_count"] else "TRUNCATED" if reject_truncated and truncated else "EMPTY" if not text else ""
     if not reason:
         return text, ""
-    diagnostic = {"reason": reason, **shape}
+    diagnostic = {"reason": reason, **shape, **_diagnostic_identity(request)}
     logging.getLogger(__name__).warning(
         "Compact 摘要响应不可用：%s", json.dumps(diagnostic, ensure_ascii=False, separators=(",", ":")),
         extra={"compact_response_shape": diagnostic},
     )
     return "", reason
+
+
+# LLM: 关联键只取宿主请求对象上的结构化编号，不读 prompt/messages；墙钟时间用于和其它日志对齐，不作为身份。
+# 函数用途: 生成摘要诊断日志的请求、会话、用途编号与记录时间。
+def _diagnostic_identity(request: object) -> dict[str, object]:
+    return {"request_id": str(getattr(request, "request_id", "") or ""),
+            "thread_id": str(getattr(request, "thread_id", "") or ""),
+            "purpose": str(getattr(request, "purpose", "") or ""), "logged_at": round(time.time(), 3)}
 
 
 # LLM: A degraded segment is explicit and byte-bounded: it names its failure reason and source range,

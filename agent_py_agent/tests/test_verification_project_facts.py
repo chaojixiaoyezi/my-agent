@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from agent_py_agent.agent.verification.project_facts import (
     ENVIRONMENT_UNAVAILABLE,
     classify_verification_commands,
@@ -234,3 +236,47 @@ def test_and_chain_proves_every_verification_only_when_it_returns_zero(tmp_path:
     for command, code in (("make test && make lint", 2), ("make test; make lint", 0), ("make test || make lint", 0),
                           ("make test && make lint | tee log", 0)):
         assert classify_verification_commands(command, cwd=root, exit_code=code, output="") == [], command
+
+
+@pytest.mark.parametrize("command", ["pytest\necho done", "pytest -q\r\necho done", "cd tests && pytest\necho done",
+                                     "cd tests\n&& pytest", "cd tests &&\npytest"])
+@pytest.mark.parametrize("exit_code", [0, 2])
+def test_newline_separated_commands_never_become_verification(tmp_path: Path, command: str, exit_code: int):
+    root = _python_project(tmp_path)
+
+    # 换行就是 shell 的命令分隔符：返回码来自最后一条命令（`cd tests` 换行后的 `&& pytest` 甚至是语法错误），
+    # 证明不了 pytest 通过或失败；cd 前缀部分出现换行同样整条不算。
+    assert _one(command, cwd=root, exit_code=exit_code, output="done") is None
+
+
+@pytest.mark.parametrize("command", [
+    "pytest --help", "pytest -h", "pytest --version", "pytest -V", "pytest --collect-only", "pytest --co -q",
+    "pytest --collectonly", "python -m pytest --collect-only tests/", "pytest --fixtures", "pytest --markers",
+    "pytest --setup-only", "pytest --setup-plan",
+])
+def test_pytest_arguments_that_do_not_run_tests_never_become_verification(tmp_path: Path, command: str):
+    root = _python_project(tmp_path)
+
+    assert _one(command, cwd=root, exit_code=0, output="collected 3 items") is None
+
+
+def test_other_ecosystems_drop_non_executing_flags_but_keep_real_runs(tmp_path: Path):
+    cargo = tmp_path / "cargo-project"
+    cargo.mkdir()
+    (cargo / "Cargo.toml").write_text("[package]\nname = 'demo'\n", encoding="utf-8")
+    go = tmp_path / "go-project"
+    go.mkdir()
+    (go / "go.mod").write_text("module example.test/demo\n\ngo 1.21\n", encoding="utf-8")
+    make = _make_project(tmp_path)
+
+    for command, root in (("cargo test --no-run", cargo), ("cargo test -- --list", cargo), ("go test -list . ./...", go),
+                          ("go test -list=Test ./...", go), ("go test -c", go), ("go test -n ./...", go),
+                          ("go build -n ./...", go), ("go build -help", go), ("make test -n", make),
+                          ("make test --dry-run", make), ("make test --help", make), ("make test -i", make),
+                          ("make test --touch", make), ("make test -v", make)):
+        assert _one(command, cwd=root, exit_code=0, output="ok") is None, command
+    # 同名短参数在别的命令里含义不同：pytest -v 只是啰嗦输出、make -k 只是继续执行，仍是真实运行。
+    for command, root in (("cargo test", cargo), ("go test ./...", go), ("go build ./...", go), ("make test", make),
+                          ("make test -k", make), ("cargo test -- --nocapture", cargo)):
+        assert _one(command, cwd=root, exit_code=0, output="ok").status == "passed", command
+    assert _one("pytest -v", cwd=_python_project(tmp_path), exit_code=0, output="ok").status == "passed"

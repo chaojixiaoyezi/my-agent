@@ -1218,25 +1218,26 @@ def _summarize(
         generate_bounded_compact_response,
     )
 
+    summary_request = AuxiliaryModelCallRequest(
+        agent=agent,
+        prompt=prompt,
+        messages=None,
+        tools=provider_tools,
+        system_instruction=system_instruction,
+        request_id=selected_call.request_id,
+        run_id=selected_call.run_id,
+        task_id=selected_call.task_id,
+        purpose="conversation_compact_summary",
+        thread_id=selected_call.thread_id,
+    )
     response = generate_bounded_compact_response(
-        AuxiliaryModelCallRequest(
-            agent=agent,
-            prompt=prompt,
-            messages=None,
-            tools=provider_tools,
-            system_instruction=system_instruction,
-            request_id=selected_call.request_id,
-            run_id=selected_call.run_id,
-            task_id=selected_call.task_id,
-            purpose="conversation_compact_summary",
-            thread_id=selected_call.thread_id,
-        ),
+        summary_request,
         interrupt_check=selected_call.interrupt_check,
         source_progress=selected_call.source_progress,
         preserve_complete_fallback=selected_call.preserve_complete_fallback or bool(tool_history),
         message_source=message_source,
     )
-    summary, _reason = compact_summary_response_outcome(response, reject_truncated=False)
+    summary, _reason = compact_summary_response_outcome(response, reject_truncated=False, request=summary_request)
     mechanical = not summary
     if mechanical:
         summary = _mechanical_conversation_summary(

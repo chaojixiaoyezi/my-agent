@@ -411,3 +411,52 @@ def test_tail_budget_counts_hidden_native_tool_history():
     prefix, tail = split_recent_complete_turns(rows, max_turns=1, max_tail_tokens=1000)
     assert prefix == rows
     assert tail == []
+
+
+# 函数用途: 按调用顺序返回预置回复的假辅助调用，并记录每次实际请求。
+def _scripted(monkeypatch, replies):
+    calls = []
+
+    def generate(request):
+        calls.append(request)
+        return replies[min(len(calls), len(replies)) - 1]
+
+    monkeypatch.setattr(budget_module, "generate_auxiliary_model_response", generate)
+    return calls
+
+
+def test_tool_call_reply_is_rewritten_through_the_text_segment_chain(monkeypatch, caplog):
+    # 2026-09-26 真机：带工具+none 的单次摘要仍回 tool_use。改走分段链（文本化来源、空工具）让模型重写，不直接退成机械摘要。
+    tool_call = ModelResponse(text="", backend="fake", tool_use_blocks=[{"name": "run_command"}], stop_reason="tool_use")
+    calls = _scripted(monkeypatch, [tool_call, ModelResponse(text="分段重写的摘要", backend="fake")])
+    request = replace(_request("记住蓝色项目，稍后继续"), request_id="req-1", thread_id="thread-1")
+
+    result = budget_module.generate_bounded_compact_response(request)
+
+    assert "分段重写的摘要" in result.text and "source_range" not in result.text
+    assert calls[0].tools == [{"name": "read_file"}] and calls[0].tool_choice.mode == "none"
+    assert len(calls) == 2 and calls[1].tools == [] and calls[1].tool_choice.mode == "none"
+    shape = next(record.compact_response_shape for record in caplog.records if hasattr(record, "compact_response_shape"))
+    assert (shape["reason"], shape["tool_use_count"], shape["stop_reason"]) == ("TOOL_CALL", 1, "tool_use")
+    assert (shape["request_id"], shape["thread_id"], shape["purpose"]) == ("req-1", "thread-1", "conversation_compact_summary")
+    assert shape["logged_at"] > 0 and "蓝色项目" not in caplog.text
+
+
+def test_tool_call_reply_is_returned_when_the_source_cannot_be_segmented(monkeypatch):
+    tool_call = ModelResponse(text="", backend="fake", tool_use_blocks=[{"name": "run_command"}])
+    calls = _scripted(monkeypatch, [tool_call])
+    request = replace(_request("看图"), messages=[{"role": "user", "content": [
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}]}])
+
+    # 带图来源不能文本化分段：交回原回复，由上层照旧机械回退，不比原行为更差。
+    assert budget_module.generate_bounded_compact_response(request) is tool_call
+    assert len(calls) == 1
+
+
+def test_tool_call_reply_is_returned_when_strict_segments_cannot_cover_the_source(monkeypatch):
+    tool_call = ModelResponse(text="", backend="fake", tool_use_blocks=[{"name": "run_command"}])
+    calls = _scripted(monkeypatch, [tool_call])
+
+    # 严格来源不接受降级摘录：分段链报 typed 错误时同样交回原回复，保留原机械回退与完整来源行为。
+    assert budget_module.generate_bounded_compact_response(_request("严格来源"), preserve_complete_fallback=True) is tool_call
+    assert len(calls) == 1 + 1 + budget_module._SEGMENT_REPAIR_LIMIT

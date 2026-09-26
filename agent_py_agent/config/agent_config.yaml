@@ -944,6 +944,12 @@ tool_shell_output_max_chars: 12000
 # 自主审批模式也不会替你放开。声明 loopback 却绑到局域网地址时，后台 host 按真实 socket 表回收该服务并在记录里留证据；
 # 设为 false 则只记 listener_warning 不回收。
 background_process_listen_scope_enforce: true
+# macOS 上 Shell 沙箱是否对"非本机管理员"的 owner（例如飞书等 IM 用户）拒读你的用户家目录（默认关闭）：
+# - false：这些 owner 的命令读不到 my-agent 数据目录里别人的部分，但仍能读你家目录里的其它内容（如 ~/.ssh、其它项目）。
+# - true：家目录里只有该 owner 自己的目录、工作区和授权目录能读；其 Shell 的 HOME 改指到 owner 自己的家目录，
+#   git 等工具照常可用，但用不了你本人的 git/SSH 配置和凭据。本机管理员（local/main）与 Full Access 不受影响；
+#   Linux 的 bubblewrap 本来就不挂载家目录，也不受影响。修改后重启 Gateway 生效。
+shell_sandbox_hide_user_home: false
 
 # 工具目录里最多展示多少个工具条目
 # 这个值偏大也没问题，因为目录只放中等详细度信息，不会像完整手册那么占 prompt

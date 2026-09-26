@@ -35,7 +35,9 @@ def test_fitting_source_materializes_only_at_original_transport(monkeypatch):
     seen = []
 
     def generate(actual):
-        assert isinstance(actual.messages, list) and actual == original
+        # 有工具面时摘要请求只多一个 none 选择（保留工具定义以复用缓存前缀），其余与原请求逐项相同。
+        assert isinstance(actual.messages, list) and actual.tool_choice.mode == 'none'
+        assert actual == replace(original, tool_choice=actual.tool_choice)
         seen.append(True)
         return ModelResponse(text='摘要', backend='fake')
 

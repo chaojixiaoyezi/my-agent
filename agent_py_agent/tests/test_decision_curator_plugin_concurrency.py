@@ -27,7 +27,7 @@ _LANES = ("curator", "foreground")
 # 函数用途: 让两个接入点经真实传输栈并发请求同一连接，并由测试控制各自何时返回。
 @pytest.fixture
 def lanes():
-    state = SimpleNamespace(blocked=set(), requests=[], entered={lane: threading.Event() for lane in _LANES},
+    state = SimpleNamespace(blocked=set(), failing=set(), requests=[], entered={lane: threading.Event() for lane in _LANES},
                             release={lane: threading.Event() for lane in _LANES})
 
     # LLM: 测试服务器只接收有限自有请求并返回固定协议，无命令执行或持久副作用。
@@ -44,6 +44,11 @@ def lanes():
                 state.release[lane].wait(3)
             encoded = json.dumps(response()).encode()
             try:
+                if lane in state.failing:
+                    self.send_response(503)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(encoded)))
@@ -161,14 +166,63 @@ def test_owner_curator_change_cancels_background_at_once_and_foreground_discards
     assert (late.status, late.reason) == ("stale", "policy_changed") and not late.may_apply
 
 
-def test_background_timeout_cools_the_shared_connection_and_foreground_keeps_its_plan(tmp_path, lanes):
+def test_background_timeout_cools_only_its_own_point_and_foreground_still_asks(tmp_path, lanes):
     env = configured(tmp_path, lanes, background_timeout=0.2)
     lanes.blocked = {"curator"}
     timed_out = decide_background(env)
     assert timed_out.status == "deadline" and not timed_out.may_apply
+    # 超时只说明这条线路对后台点的预算不够，服务仍可用：前台点照常请求（2026-09-26 真机，共享冷却让其它点长期拿不到调用）。
+    foreground = decide_foreground(env)
+    assert foreground.status == "success" and lanes.requests == ["curator", "foreground"]
+    # 超时的点自己进入冷却：新阶段再问 curator 直接保留原方案，不发请求。
+    env.bg_stage = decision_service.begin_decision_stage(env.host, env.background, operation_id="curator-lease-2",
+                                                         scope="owner_background")
+    again = decide_background(env)
+    assert (again.status, again.reason) == ("cooldown", "point_backoff") and again.retry_after_seconds > 0
+    assert lanes.requests == ["curator", "foreground"]
+
+
+def test_point_success_after_its_cooldown_resets_the_backoff_ladder(tmp_path, lanes, monkeypatch):
+    offset = [0.0]
+    real = time.monotonic
+    monkeypatch.setattr(decision_policy, "time", SimpleNamespace(monotonic=lambda: real() + offset[0]))
+    existing = set(threading.enumerate())
+    env = configured(tmp_path, lanes, background_timeout=0.2)
+    lanes.blocked = {"curator"}
+    assert decide_background(env).status == "deadline"
+    # 放行被挡住的请求并等原 worker 退出，它还占着本连接的资源键。
+    lanes.release["curator"].set()
+    for worker in set(threading.enumerate()) - existing:
+        worker.join(3)
+
+    # 冷却到期后这一点成功一次（给宽裕期限，避免慢机器把成功挤成超时），成功必须清掉本点的失败阶梯。
+    offset[0] = 31
+    lanes.blocked, lanes.release["curator"] = set(), threading.Event()
+    patch(env.host, {"background_timeout_seconds": 5.0})
+    env.bg_stage = decision_service.begin_decision_stage(env.host, env.background, operation_id="curator-lease-2",
+                                                         scope="owner_background")
+    assert decide_background(env).status == "success"
+
+    lanes.blocked = {"curator"}
+    patch(env.host, {"background_timeout_seconds": 0.2})
+    for lease in ("curator-lease-3", "curator-lease-4"):
+        env.bg_stage = decision_service.begin_decision_stage(env.host, env.background, operation_id=lease,
+                                                             scope="owner_background")
+        outcome = decide_background(env)
+    # 再次超时后从 30 秒重新计起；成功若没清阶梯，这里会翻倍成 60 秒。
+    assert (outcome.status, outcome.reason) == ("cooldown", "point_backoff") and 0 < outcome.retry_after_seconds <= 30
+    lanes.release["curator"].set()
+
+
+def test_connection_failure_still_cools_the_shared_connection_for_every_point(tmp_path, lanes):
+    env = configured(tmp_path, lanes)
+    lanes.failing = {"curator"}
+    failed = decide_background(env)
+    assert (failed.status, failed.reason) == ("error", "provider_failed") and not failed.may_apply
+    # 服务端错误说明连接本身有问题：冷却整条连接，前台不发请求，直接保留原方案。
     foreground = decide_foreground(env)
     assert (foreground.status, foreground.reason) == ("cooldown", "connection_backoff") and not foreground.may_apply
-    assert foreground.retry_after_seconds > 0 and lanes.requests == ["curator"], "冷却期内前台不发请求，直接保留原方案"
+    assert foreground.retry_after_seconds > 0 and lanes.requests == ["curator"]
 
 
 def test_host_shutdown_cancels_both_concurrent_decisions(tmp_path, lanes):

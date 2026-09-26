@@ -75,6 +75,10 @@ class AttemptSandboxSpec:
     implicit_attempt_write_roots: bool = True
     # 整根只读形态（插件进程试点）：Linux 读范围与宿主相同、只写显式写根；macOS 非 full 形态本来就是读放行、写只落写根。
     read_only_root: bool = False
+    # owner 隔离形态下要拒读的宿主根：总有 my-agent 家目录根（其它 owner、配置与密钥、发布记录），开关打开时对非本机管理员
+    # 再加用户家目录。拒读后仍放行本 owner home、attempt view、staging、授权读根和写根。Linux bwrap 本来就不挂载这些路径；
+    # macOS 由 Seatbelt 读拒绝实现。full_access 不生效。
+    private_read_roots: tuple[Path, ...] = ()
 
 
 class AttemptExecutionSandbox:
@@ -251,7 +255,7 @@ class AttemptExecutionSandbox:
             raise SandboxUnavailableError(
                 "SANDBOX_UNAVAILABLE: SEATBELT_NOT_FOUND: 缺少 sandbox-exec"
             )
-        profile = self._macos_profile(
+        profile = "\n".join([self._macos_profile(
             attempt_view=self.spec.attempt_view,
             staging=self.spec.staging_root,
             shared=self.spec.shared_workspace,
@@ -260,7 +264,7 @@ class AttemptExecutionSandbox:
             protected_write_paths=self.spec.protected_write_paths,
             implicit_attempt_write_roots=self.spec.implicit_attempt_write_roots,
             full_access=self.spec.full_access,
-        )
+        ), *_private_read_rules(self.spec)])
         return [sandbox_exec, "-p", profile, "--", *command_argv]
 
     # LLM: 同步批处理无 stdin 注入协议，必须返回 EOF；不改变 build_argv、显式 PTY 通道和超时回收契约。
@@ -366,8 +370,8 @@ class AttemptExecutionSandbox:
         lines.extend(_readonly_path_denies(protected_write_paths))
         persona_denies = _persona_file_literal_denies(protected_persona_root)
         if persona_denies:
-            # literal 比 subpath 精确，Seatbelt 同精确度取首条 → deny 优先于
-            # 更宽的写根 allow；persona 文件在可写区内也保持只读。
+            # Seatbelt 后写覆盖先写（本机实测 2026-09-26）：这些 deny 写在写根 allow 之后才生效，
+            # persona 文件在可写区内也保持只读。顺序不能调换。
             lines.extend(persona_denies)
         return "\n".join(lines)
 
@@ -375,6 +379,43 @@ class AttemptExecutionSandbox:
     def sandbox_readiness_dict() -> dict[str, Any]:
         """跨平台 readiness 汇总（诊断/CLI 用）。"""
         return {"platform": platform.system()}
+
+
+# LLM: 只读隔离事实由平台沙箱实现决定，是 Shell 回执 external_host_paths_hidden 的唯一来源：Linux bwrap 只挂载授权根，
+#   未挂载的宿主路径看不到；macOS Seatbelt 是 allow default 加写拒绝，读取不受限，宿主路径读得到。不能把 owner 隔离模式
+#   一律说成“宿主路径已隐藏”。平台读边界变化时（例如给 Seatbelt 加读拒绝）必须同步这里与 test_sandbox.py。
+# 函数用途: 判断当前平台的进程沙箱是否隐藏未授权的宿主路径。
+def sandbox_hides_host_paths(platform_name: str | None = None) -> bool:
+    return (platform_name or platform.system()) == "Linux"
+
+
+# LLM: Seatbelt 规则“后写覆盖先写”（本机实测 2026-09-26：先拒绝根再放行子目录，子目录可读；顺序颠倒则子目录也被拒）。
+#   所以先写全部拒读根（my-agent 根，开关打开时还有用户家目录），再逐个放行本 owner 的可见范围，最后放行上层目录的元数据；
+#   与 Linux 挂载视图对齐。只动 file-read*，写规则保持原样。改动须同步 test_attempt_sandbox.py 里的真实 sandbox-exec 用例。
+# 函数用途: 生成 owner 隔离形态下宿主私有目录的读拒绝与放行规则；Full Access 或没有拒读根时返回空列表。
+def _private_read_rules(spec: AttemptSandboxSpec) -> list[str]:
+    if spec.full_access or not spec.private_read_roots:
+        return []
+    hidden = tuple(sorted({Path(path).resolve(strict=False) for path in spec.private_read_roots}))
+    visible = {Path(path).resolve(strict=False) for path in (
+        spec.owner_home, spec.shared_workspace, spec.attempt_view, spec.staging_root,
+        *spec.public_read_roots, *spec.extra_write_roots)}
+    allowed = sorted(json.dumps(str(path)) for path in visible)
+    return [*(f"(deny file-read* (subpath {json.dumps(str(root))}))" for root in hidden),
+            *(f"(allow file-read* (subpath {path}))" for path in allowed),
+            *_ancestor_metadata_rules(hidden, visible)]
+
+
+# LLM: 拒读根按 subpath 连同根目录本身一起拒绝；放行子目录之后，根与放行目录之间的上层目录仍拿不到元数据。git、node 的
+#   realpath、python -m venv 规范化路径时要逐级 lstat，会报 Operation not permitted 退出（2026-09-26 本机复现，owner 工作区
+#   在 ~/.my-agent 之下）。所以只对这些上层目录按 literal 放行 file-read-metadata：能 stat 目录本身，仍不能列目录、不能读同级。
+# 函数用途: 生成拒读根内、放行目录上层各级目录的元数据放行规则；没有这类目录时返回空列表。
+def _ancestor_metadata_rules(hidden_roots: tuple[Path, ...], visible: set[Path]) -> list[str]:
+    ancestors = sorted({json.dumps(str(parent)) for path in visible for parent in path.parents
+                        if any(parent == root or root in parent.parents for root in hidden_roots)})
+    if not ancestors:
+        return []
+    return ["(allow file-read-metadata " + " ".join(f"(literal {path})" for path in ancestors) + ")"]
 
 
 def _persona_file_literal_denies(protected_persona_root: Path | None) -> list[str]:
@@ -422,4 +463,5 @@ __all__ = [
     "AttemptSandboxSpec",
     "AttemptExecutionSandbox",
     "SandboxUnavailableError",
+    "sandbox_hides_host_paths",
 ]
