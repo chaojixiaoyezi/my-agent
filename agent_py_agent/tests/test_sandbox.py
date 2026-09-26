@@ -490,7 +490,7 @@ def test_owner_scoped_shell_on_macos_names_the_private_dirs_when_denied(tmp_path
     monkeypatch.setattr("agent_py_agent.agent.tooling.shell.sandbox_hides_host_paths", lambda: False)
     owner = tmp_path / "owner"
     owner.mkdir()
-    tool = ShellTool(owner, options=ShellToolOptions(owner_scope_root=str(owner), host_private_root=str(tmp_path)))
+    tool = ShellTool(owner, options=ShellToolOptions(owner_scope_root=str(owner), host_private_roots=(str(tmp_path),)))
     monkeypatch.setattr(
         tool,
         "_run_command",

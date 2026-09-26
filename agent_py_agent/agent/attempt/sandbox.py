@@ -75,9 +75,10 @@ class AttemptSandboxSpec:
     implicit_attempt_write_roots: bool = True
     # 整根只读形态（插件进程试点）：Linux 读范围与宿主相同、只写显式写根；macOS 非 full 形态本来就是读放行、写只落写根。
     read_only_root: bool = False
-    # my-agent 家目录根：owner 隔离形态下拒绝读取其中除本 owner home、attempt view、staging、授权读根、写根以外的部分
-    # （其它 owner、配置与密钥、发布记录）。Linux bwrap 本来就不挂载这些路径；macOS 由 Seatbelt 读拒绝实现。full_access 不生效。
-    private_read_root: Path | None = None
+    # owner 隔离形态下要拒读的宿主根：总有 my-agent 家目录根（其它 owner、配置与密钥、发布记录），开关打开时对非本机管理员
+    # 再加用户家目录。拒读后仍放行本 owner home、attempt view、staging、授权读根和写根。Linux bwrap 本来就不挂载这些路径；
+    # macOS 由 Seatbelt 读拒绝实现。full_access 不生效。
+    private_read_roots: tuple[Path, ...] = ()
 
 
 class AttemptExecutionSandbox:
@@ -389,20 +390,20 @@ def sandbox_hides_host_paths(platform_name: str | None = None) -> bool:
 
 
 # LLM: Seatbelt 规则“后写覆盖先写”（本机实测 2026-09-26：先拒绝根再放行子目录，子目录可读；顺序颠倒则子目录也被拒）。
-#   所以先写对 my-agent 根的读拒绝，再逐个放行本 owner 的可见范围，最后放行上层目录的元数据；与 Linux 挂载视图对齐。
-#   只动 file-read*，写规则保持原样。改动须同步 test_attempt_sandbox.py 里的真实 sandbox-exec 用例。
-# 函数用途: 生成 owner 隔离形态下 my-agent 私有目录的读拒绝与放行规则；Full Access 或未给根时返回空列表。
+#   所以先写全部拒读根（my-agent 根，开关打开时还有用户家目录），再逐个放行本 owner 的可见范围，最后放行上层目录的元数据；
+#   与 Linux 挂载视图对齐。只动 file-read*，写规则保持原样。改动须同步 test_attempt_sandbox.py 里的真实 sandbox-exec 用例。
+# 函数用途: 生成 owner 隔离形态下宿主私有目录的读拒绝与放行规则；Full Access 或没有拒读根时返回空列表。
 def _private_read_rules(spec: AttemptSandboxSpec) -> list[str]:
-    if spec.full_access or spec.private_read_root is None:
+    if spec.full_access or not spec.private_read_roots:
         return []
-    root_path = Path(spec.private_read_root).resolve(strict=False)
+    hidden = tuple(sorted({Path(path).resolve(strict=False) for path in spec.private_read_roots}))
     visible = {Path(path).resolve(strict=False) for path in (
         spec.owner_home, spec.shared_workspace, spec.attempt_view, spec.staging_root,
         *spec.public_read_roots, *spec.extra_write_roots)}
     allowed = sorted(json.dumps(str(path)) for path in visible)
-    return [f"(deny file-read* (subpath {json.dumps(str(root_path))}))",
+    return [*(f"(deny file-read* (subpath {json.dumps(str(root))}))" for root in hidden),
             *(f"(allow file-read* (subpath {path}))" for path in allowed),
-            *_ancestor_metadata_rules((root_path,), visible)]
+            *_ancestor_metadata_rules(hidden, visible)]
 
 
 # LLM: 拒读根按 subpath 连同根目录本身一起拒绝；放行子目录之后，根与放行目录之间的上层目录仍拿不到元数据。git、node 的

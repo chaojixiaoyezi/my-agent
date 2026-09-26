@@ -99,7 +99,8 @@ class ToolRegistryParams:
     )
     owner_type: str = "main_agent"
     protected_persona_root: str = ""  # 三份 Persona 只走专用入口；admin bypass 也不清空
-    host_private_root: str = ""  # my-agent 家目录根；owner 隔离时 Shell 沙箱拒绝读取其中本 owner 以外的部分
+    # owner 隔离时 Shell 沙箱要拒读的宿主根（my-agent 家目录根，开关打开时对非本机管理员还有用户家目录）
+    host_private_roots: tuple[str, ...] = ()
     owner_quota_max_bytes: int = 0
     owner_quota_policy_available: bool = True
     access_mode: str = "workspace-write"

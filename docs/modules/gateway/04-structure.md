@@ -939,8 +939,10 @@ Gateway 解析并校验会话 cwd，但不再把 `workspace_task.task_path` 覆�
 - owner-scoped Shell 的结构化 cwd 先由 path policy 校验，命令正文仍交给 OS 沙箱，不解析重定向、管道或
   任意字符串中的路径。Linux bwrap 下另一 owner/未授权宿主路径不会被挂载，进程内 `ENOENT`/`EACCES` 只证明当前
   scope 不可访问；macOS Seatbelt 是 allow default 加写拒绝，宿主上的一般路径读得到，但 owner 隔离时先拒绝读取 my-agent
-  家目录、再放行本 owner 家目录与授权读写根（`attempt/sandbox._private_read_rules`，根来自 `ToolRegistryParams.host_private_root`），
-  其它 owner、配置与密钥读不到；根与放行目录之间的各级目录只放行元数据（git 等规范化路径要逐级 lstat），仍列不出内容。Shell 结果无论成功失败都向
+  家目录、再放行本 owner 家目录与授权读写根（`attempt/sandbox._private_read_rules`，拒读根来自 `ToolRegistryParams.host_private_roots`），
+  其它 owner、配置与密钥读不到；根与放行目录之间的各级目录只放行元数据（git 等规范化路径要逐级 lstat），仍列不出内容。
+  开关 `shell_sandbox_hide_user_home`（默认关）打开时，非本机管理员的 owner 在 macOS 上还拒读用户家目录
+  （`user_space/owner_access.owner_hidden_host_roots`），子进程 HOME 改指到 owner home（`tooling/shell._redirected_home`）。Shell 结果无论成功失败都向
   模型投影 `owner_workspace_only`、`host_path_absence_proven=false`，`external_host_paths_hidden` 按平台沙箱的结构化事实
   `attempt/sandbox.sandbox_hides_host_paths()` 取值（Linux 为 true，macOS 为 false），回执文本与之同源；macOS 版写明工作区外
   的路径不在任务授权内。该投影解释可见性，不参与授权、operation 终态或副作用裁决。

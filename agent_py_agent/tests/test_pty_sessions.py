@@ -225,7 +225,7 @@ def test_terminal_session_carries_structured_write_roots_to_sandbox(
         protected_write_paths=None,
         run_scope=None,
         *,
-        private_root=None,
+        private_roots=(),
     ):
         captured.update(
             command=command,
@@ -235,7 +235,7 @@ def test_terminal_session_carries_structured_write_roots_to_sandbox(
             read_roots=read_roots,
             protected_write_paths=protected_write_paths,
             run_scope=run_scope,
-            private_root=private_root,
+            private_roots=private_roots,
         )
         raise OSError("captured")
 
@@ -253,8 +253,8 @@ def test_terminal_session_carries_structured_write_roots_to_sandbox(
     assert result.error_code == "COMMAND_FAILED"
     assert captured["write_roots"] == (task_root.resolve(),)
     assert captured["read_roots"] == ((tmp_path / "shared").resolve(),)
-    # 终端会话与前台/后台命令一样，把 Shell 工具的 my-agent 根交给沙箱（未配置时为空）。
-    assert captured["private_root"] == ""
+    # 终端会话与前台/后台命令一样，把 Shell 工具的拒读根交给沙箱（未配置时为空）。
+    assert captured["private_roots"] == ()
 
 
 def test_terminal_session_scope_rejects_other_task(tmp_path: Path) -> None:
@@ -435,8 +435,8 @@ def test_pty_start_hands_the_private_root_to_the_sandbox(tmp_path: Path, monkeyp
 
     monkeypatch.setattr(pty_sessions, "_sandbox_exec", fake_sandbox_exec)
     with pytest.raises(OSError, match="captured"):
-        pty_session_registry.start("true", tmp_path, tmp_path, private_root=str(tmp_path / "home"))
+        pty_session_registry.start("true", tmp_path, tmp_path, private_roots=(str(tmp_path / "home"),))
 
-    # start 打包后交给 _spawn，再原样交给沙箱，不在途中丢掉私有根。
+    # start 打包后交给 _spawn，再原样交给沙箱，不在途中丢掉拒读根。
     assert captured["owner_home"] == tmp_path
-    assert captured["private_root"] == str(tmp_path / "home")
+    assert captured["private_roots"] == (str(tmp_path / "home"),)

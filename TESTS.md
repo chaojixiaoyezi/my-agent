@@ -1,5 +1,37 @@
 # 测试与发布验收
 
+## macOS 沙箱读边界第二步：拒读用户家目录（开关默认关闭，2026-09-26，分支 `claude/curator-budget`，基于 main `e24aae8ab`）
+
+- **改动**：
+  - 拒读根从单个值改为一组：`host_private_roots` → `private_roots` → `AttemptSandboxSpec.private_read_roots`。
+  - 开关 `shell_sandbox_hide_user_home` 打开时，非本机管理员的 owner 在 macOS 上多拒读用户家目录。
+  - HOME 落在拒读根里时，前台、后台、终端三条路径的子进程 HOME 改指到 owner home。
+  - 这个开关属于配置边界项，模型不能改。
+- **新测试** `test_shell_hide_user_home.py`，共 8 项：
+  - 开关在 YAML、dataclass 和规范化中默认都是 false，并已列入 `BOUNDARY_KEYS`。
+  - 裁决：开关打开、非管理员、macOS 三者同时满足才加家目录；开关关闭、本机管理员、Linux 时都只拒读 my-agent 根。
+  - 规则：全部拒读根在前，放行在后，上层目录元数据在最后；家目录这一级只放行元数据，`.ssh` 和其它项目不放行。
+  - HOME 改指向：家目录被拒读时指到 owner home，包括 HOME 在拒读根之下的情形；只拒读 my-agent 根，或本机管理员时，HOME 不变。
+  - 回执：家目录被拒读时说明读不到、HOME 已改指向，否则不这么说。
+  - 装配：飞书 owner 的 `SimpleAgent` 在开关打开时，把家目录接进 Shell 工具。
+  - 后台命令和终端会话的子进程同样拿到改指向后的 HOME。
+  - 真实 Seatbelt（仅 macOS）：注册表装配的 `run_command` 读不到 `~/.ssh` 和其它项目，本 owner 文件可读，`$HOME` 是 owner home，`git init`、`git status` 成功；只拒读 my-agent 根时，其它项目仍可读。
+- **既有测试**：5 个文件里的替身和参数改用新名字，断言不变。
+- **变异验证**：14 种变异各自使测试失败，还原后逐字节一致：
+  - 裁决：不看开关、不看管理员、不看平台。
+  - HOME：不改 HOME、只认 HOME 与拒读根相等。
+  - 装配：core 总说平台已隐藏、bootstrap 不传拒读根。
+  - 环境构造：前台、后台、终端各自不把拒读根交给环境构造。
+  - 回执、配置：回执不提家目录、开关不在边界项、不做布尔规范化、YAML 默认打开。
+- **本机探针**（真实 `sandbox-exec`，拒读家目录，HOME 指向家目录外的临时 owner 目录）：
+  - git init/status、python3、node、npm、uv 都正常；家目录列不出，`.zshrc` 读不到。
+  - curl 与 pip 下载 3 轮都成功。第一次 curl 超时是代理偶发，与拒读无关：同一轮不拒读时也慢，拒读时 CONNECT 隧道与 TLS 握手完整。
+  - 正是这次探针在 owner 目录位于家目录之内时暴露了 git 的 EPERM，才有了上面的热修复。
+- **回归**：
+  - 沙箱、Shell、终端会话、配置规范化、owner 权限与工具注册相关的 92 个测试文件（含 `test_architecture_guardrails.py`）：1840 passed、10 skipped、3 xfailed。
+  - 另外 117 个构造 `SimpleAgent` 的测试文件：2278 passed、8 skipped、29 xfailed。
+  - 严格门全部通过；改动文件的 code-size 发现与 main 相比没有新增或升级。
+
 ## macOS 沙箱拒读根的上层目录放行元数据（热修复，2026-09-26，分支 `claude/curator-budget`，基于 main `227fcd5b1`）
 
 - **现象**：step12q 部署后，owner 工作区在拒读根 `~/.my-agent` 之下时，沙箱里的 `git init` 报 `fatal: Invalid path '<my-agent 根>': Operation not permitted`。`git add`、`python3 -m venv`、node 的 `fs.realpathSync` 同样失败。

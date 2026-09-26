@@ -110,7 +110,7 @@ class PtyAccessScope:
 
 
 # LLM: 一次 PTY 启动的沙箱输入原样收拢，不做任何推断；字段与 tooling/shell._sandbox_exec 的同名参数一一对应，
-#   private_root 是 my-agent 家目录根（owner 隔离时由沙箱拒绝读取其中本 owner 以外的部分）。
+#   private_roots 是 owner 隔离时沙箱要拒读的宿主根（my-agent 家目录根，开关打开时可能还有用户家目录）。
 # 类用途: 把 owner、读写根、受保护路径和私有根作为一个整体交给 _spawn。
 @dataclass(frozen=True)
 class _PtySandboxInputs:
@@ -118,7 +118,7 @@ class _PtySandboxInputs:
     write_roots: tuple[Path, ...] | None = None
     read_roots: tuple[Path, ...] | None = None
     protected_write_paths: tuple[Path, ...] | None = None
-    private_root: object = None
+    private_roots: tuple[object, ...] = ()
 
 
 # LLM: 预留和取消标记共用 registry 锁；取消只命中当时的启动，不阻止用户后续显式恢复。
@@ -194,7 +194,7 @@ class PtySessionRegistry:
         protected_write_paths: tuple[Path, ...] | None = None,
         run_scope: object = None,
         *,
-        private_root: object = None,
+        private_roots: tuple[object, ...] = (),
     ) -> PtySession:
         if os.name == "nt":
             raise OSError("PTY_UNAVAILABLE: Windows requires a ConPTY backend")
@@ -209,7 +209,7 @@ class PtySessionRegistry:
             session_id = f"pty-{self._counter}-{int(time.time())}"
             self._pending_starts[session_id] = _PtyStart(execution_scope)
         try:
-            sandbox = _PtySandboxInputs(owner_home, write_roots, read_roots, protected_write_paths, private_root)
+            sandbox = _PtySandboxInputs(owner_home, write_roots, read_roots, protected_write_paths, private_roots)
             return self._spawn(session_id, command, target, sandbox, run_scope)
         finally:
             with self._lock:
@@ -235,7 +235,7 @@ class PtySessionRegistry:
             write_roots=sandbox.write_roots,
             read_roots=sandbox.read_roots,
             protected_write_paths=sandbox.protected_write_paths,
-            private_root=sandbox.private_root,
+            private_roots=sandbox.private_roots,
         )
         with self._lock:
             launch = self._pending_starts[session_id]
@@ -254,7 +254,7 @@ class PtySessionRegistry:
                 stderr=slave_fd,
                 start_new_session=True,
                 close_fds=True,
-                env=_subprocess_text_env(owner_home),
+                env=_subprocess_text_env(owner_home, hidden_roots=tuple(str(root) for root in sandbox.private_roots)),
             )
         except Exception:
             os.close(master_fd)
@@ -684,7 +684,7 @@ class TerminalSessionTool(BaseTool):
                 read_roots,
                 protected_write_paths,
                 params.get("__run_scope"),
-                private_root=self.shell_tool.host_private_root,
+                private_roots=self.shell_tool.host_private_roots,
             )
         except SandboxUnavailable as exc:
             return self._error("SANDBOX_UNAVAILABLE", str(exc))

@@ -110,7 +110,7 @@ def _register_network_tools(registry: Any, params: Any) -> None:
             default_timeout=params.shell_tool_timeout,
             max_output_chars=params.shell_tool_output_max_chars,
             listen_scope_enforce=params.background_process_listen_scope_enforce,
-            host_private_root=params.host_private_root,
+            host_private_roots=params.host_private_roots,
         ),
     )
     registry.register(shell_tool)

@@ -504,7 +504,7 @@ def _private_root_spec(tmp_path: Path, **changes) -> tuple[Path, AttemptSandboxS
     (package / "SKILL.md").write_text("pkg", encoding="utf-8")
     values = dict(attempt_view=view, staging_root=view, shared_workspace=owner, owner_home=owner,
                   extra_write_roots=(view,), public_read_roots=(package,), implicit_attempt_write_roots=False,
-                  private_read_root=root, macos_sandbox_exec="/usr/bin/sandbox-exec")
+                  private_read_roots=(root,), macos_sandbox_exec="/usr/bin/sandbox-exec")
     values.update(changes)
     return root, AttemptSandboxSpec(**values)
 
@@ -534,7 +534,7 @@ def test_macos_profile_adds_private_read_rules_only_for_owner_scope(tmp_path, mo
     _root, spec = _private_root_spec(tmp_path)
     scoped = AttemptExecutionSandbox(spec)._macos_argv(["/bin/true"])[2]
     full = AttemptExecutionSandbox(AttemptSandboxSpec(**{**spec.__dict__, "full_access": True}))._macos_argv(["/bin/true"])[2]
-    unset = AttemptExecutionSandbox(AttemptSandboxSpec(**{**spec.__dict__, "private_read_root": None}))._macos_argv(["/bin/true"])[2]
+    unset = AttemptExecutionSandbox(AttemptSandboxSpec(**{**spec.__dict__, "private_read_roots": ()}))._macos_argv(["/bin/true"])[2]
 
     assert "(deny file-read*" in scoped
     # Full Access 没有 owner 墙，也就没有私有目录读拒绝；未给根时保持原规则。
@@ -592,11 +592,11 @@ def test_shell_passes_the_private_root_only_for_owner_scope(tmp_path, monkeypatc
     root = (tmp_path / "home").resolve()
     owner = root / "owners" / "local" / "main"
     owner.mkdir(parents=True)
-    _sandbox_exec("true", owner, owner, private_root=root)
-    _sandbox_exec("true", owner, "", private_root=root)
+    _sandbox_exec("true", owner, owner, private_roots=(root,))
+    _sandbox_exec("true", owner, "", private_roots=(root,))
 
-    assert captured[0].private_read_root == root
-    assert captured[1].full_access is True and captured[1].private_read_root is None
+    assert captured[0].private_read_roots == (root,)
+    assert captured[1].full_access is True and captured[1].private_read_roots == ()
 
 
 @needs_macos
@@ -610,7 +610,7 @@ def test_registry_built_shell_cannot_read_other_owners_or_config_on_macos(tmp_pa
     registry = ToolRegistry(ToolRegistryParams(
         workspace_root=owner, max_chars=6000, max_entries=200, max_matches=50, web_max_chars=12000, http_timeout=30,
         catalog_limit=20, retrieval_limit=3, vector_search_enabled=False, shell_tool_timeout=30,
-        owner_scope_root=str(owner), host_private_root=str(root),
+        owner_scope_root=str(owner), host_private_roots=(str(root),),
     ))
     shell = registry.tools["run_command"]
 
@@ -636,11 +636,12 @@ def test_background_command_carries_the_private_root(tmp_path, monkeypatch):
         raise OSError("captured")
 
     monkeypatch.setattr(shell_module, "_background_command_argv", fake_argv)
-    tool = ShellTool(owner, options=ShellToolOptions(owner_scope_root=str(owner), host_private_root=str(tmp_path / "home")))
+    tool = ShellTool(owner, options=ShellToolOptions(owner_scope_root=str(owner),
+                                                     host_private_roots=(str(tmp_path / "home"),)))
     tool.execute({"command": "sleep 5", "run_in_background": True, "working_dir": str(owner)})
 
-    # 后台命令与前台、终端会话一样把 my-agent 根交给沙箱。
-    assert captured["private_root"] == str(tmp_path / "home")
+    # 后台命令与前台、终端会话一样把拒读根交给沙箱。
+    assert captured["private_roots"] == (str(tmp_path / "home"),)
 
 
 def test_agent_wires_its_home_root_into_the_shell_tool(tmp_path):
@@ -650,4 +651,5 @@ def test_agent_wires_its_home_root_into_the_shell_tool(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False), tmp_path)
     shell = agent.tools.tools["run_command"]
 
-    assert shell.host_private_root == str(agent.home_paths.root)
+    # 开关默认关闭：只拒读 my-agent 根，不含用户家目录。
+    assert shell.host_private_roots == (str(agent.home_paths.root),)

@@ -20,17 +20,22 @@
   - **做法**：档位 auto/off/low/medium/high/max 是会话线程属性（`/effort` 写主会话，`create_subagents.effort` 写子线程，省略继承父级实际档位，全局默认 `model_reasoning_effort`）；模型档案新增 `reasoning_control`（auto/effort/budget/none），auto 只对实测确认的 DeepSeek 官方接口给默认，其余 none，可在 `/model` 显式声明。真实请求与两处自动选模投影共用 `request_reasoning_options`，强制工具选择的关思考优先。
   - **边界**：不按模型名或正文判断能力；不支持的模型如实回执“不改变请求”；TUI 底栏暂不显示档位；Responses 协议暂不换算。
   - **真实验收**：DeepSeek 两种接口、声明为 `budget` 的 MiniMax M3、MiniMax M2.7，以及一次创建 low/max/继承三个子代理，全部符合预期（详见 TESTS.md 顶部）。生产默认模型是 OpenCode 中转，按实测不支持调节，`/effort` 会如实提示；要生效需切到 DeepSeek 官方接口，或给支持的模型显式声明控制方式。
-- **Shell 读边界与回执表述不一致（macOS）**（2026-09-26 登记；回执已修复，分支 `claude/curator-budget`；读边界收紧未实施，属安全缺口；Codex 能力内化验收 TUI-CAP06 中前台 `run_command` 发现，证据留在其私有线；归宿主执行/沙箱这条线）：
+- **Shell 读边界与回执表述不一致（macOS）**（2026-09-26 登记；回执已修复；读边界第一步已上线 step12q，上层目录热修复 step12s；第二步已实施，开关默认关闭；Codex 能力内化验收 TUI-CAP06 中前台 `run_command` 发现，证据留在其私有线；归宿主执行/沙箱这条线）：
   - **事实**：owner 隔离模式下，macOS Seatbelt 规则（`agent_py_agent/agent/attempt/sandbox.py` 的 `_macos_profile`）是 `allow default` 加 `deny file-write*` 再放开写根，只限制写、不限制读，命令能读到 owner 工作区外的宿主路径；`read_file` 的 owner 读墙更严。Shell 回执（`agent_py_agent/agent/tooling/shell.py` 的 `[sandbox_scope]` 文本与 `sandbox.external_host_paths_hidden`）在 owner 模式下一律写 `external_host_paths_hidden=true`，这只在 Linux 挂载隔离下成立，macOS 上与实际不符。
   - **影响**：模型会以为宿主路径“看不到”，实际能读到；两条读路径的边界也不一致。不涉及越权写入，但 macOS 规则里没有任何读拒绝：owner 隔离的 Shell 能读到网关账号可读的一切，包括其它 owner 的数据和含密钥的配置目录。这是安全缺口，不只是表述问题。
   - **回执（已修复）**：`attempt/sandbox.sandbox_hides_host_paths()` 按平台给出只读隔离事实（Linux 为 true，macOS 为 false），Shell 回执文本与 `result_envelope.sandbox.external_host_paths_hidden` 同源；macOS 版如实说明只限制写入，并写明工作区外的路径不在任务授权内、不要读取或依赖。
-  - **读边界第一步（已实施，分支 `claude/curator-budget`）**：owner 隔离形态下，Seatbelt 先拒绝读取 my-agent 家目录，再放行本 owner 家目录、attempt view、staging、授权读根和写根；其它 owner、config（含密钥）、发布记录读不到，与 Linux 挂载视图对齐。本机实测 Seatbelt 是“后写覆盖先写”，所以拒绝必须写在放行之前。my-agent 根由 `ToolRegistryParams.host_private_root` → `ShellToolOptions` → `_sandbox_exec(private_root=)` → `AttemptSandboxSpec.private_read_root` 显式传递，前台、后台、终端会话三条路径都覆盖；Full Access 不生效。影响：本机默认管理员也在 owner 隔离形态（访问模式 workspace-write），它的 Shell 以后同样读不到 `~/.my-agent` 里自己家目录以外的部分，要读需切 Full Access；项目目录不受影响。
+  - **读边界第一步（已上线 step12q）**：owner 隔离形态下，Seatbelt 先拒绝读取 my-agent 家目录，再放行本 owner 家目录、attempt view、staging、授权读根和写根；其它 owner、config（含密钥）、发布记录读不到，与 Linux 挂载视图对齐。本机实测 Seatbelt 是“后写覆盖先写”，所以拒绝必须写在放行之前。拒读根由 `ToolRegistryParams.host_private_roots` → `ShellToolOptions` → `_sandbox_exec(private_roots=)` → `AttemptSandboxSpec.private_read_roots` 显式传递，前台、后台、终端会话三条路径都覆盖；Full Access 不生效。影响：本机默认管理员也在 owner 隔离形态（访问模式 workspace-write），它的 Shell 以后同样读不到 `~/.my-agent` 里自己家目录以外的部分，要读需切 Full Access；项目目录不受影响。
   - **第一步的回归与热修复**（2026-09-26）：拒读根用 subpath，连根目录本身一起拒绝，根与本 owner 目录之间的各级目录因此拿不到元数据。owner 工作区在 `~/.my-agent` 之下时，git、node 的 realpath 和 `python3 -m venv` 逐级 lstat 会遇到 EPERM 并退出。现在对这些上层目录按 literal 放行 `file-read-metadata`：能 stat 目录本身，仍列不出内容，同级目录读不到。详见 [TESTS](TESTS.md)。
-  - **读边界第二步（未实施，待用户决定）**：用户家目录里的敏感目录（如 `~/.ssh`、钥匙串）在 macOS 上仍可读。已核实的约束：
-    - 本机常用工具链（python3、node、npm、uv 在 `/opt/homebrew`，git 在 `/usr/bin`）不在家目录，拒绝家目录不会弄坏它们。
-    - owner 隔离的 Shell 没有改 `HOME`（`tooling/shell._subprocess_text_env` 只改 TMPDIR、缓存目录和 PYTHONUSERBASE，并擦洗凭据）。Linux 上家目录没挂载，git 读 `~/.gitconfig` 得到 ENOENT 会跳过；macOS 若拒读家目录会得到 EPERM，git 的 `access_or_die` 只容忍 ENOENT/EACCES，会直接退出。所以只加读拒绝会弄坏这些 owner 的 git。
-    - 对本机管理员拒读家目录会弄坏它自己的 SSH/HTTPS 凭据（git 推送等），而真正的风险来自其它 IM 用户。
-    - 建议方案：只对非本机管理员的 owner（`user_space/owner_access.is_local_admin_owner` 为假）追加拒读用户家目录，同时把它们 Shell 的 `HOME` 指到 owner home；本机管理员保持现状；Linux 不变（bwrap 已隐藏）。需要把“是否拒读家目录”作为结构化值从装配处传到前台、后台、终端三条路径的沙箱与环境构造。目前生产上的飞书 owner 只有用户本人，实际风险低，先登记，等用户决定。
+  - **读边界第二步（已实施，开关 `shell_sandbox_hide_user_home` 默认关闭；生产未开启）**：用户家目录里的敏感目录（如 `~/.ssh`、其它项目）在 macOS 上原本仍可读。
+    - **做法**：开关打开时，`user_space/owner_access.owner_hidden_host_roots` 只对非本机管理员的 owner（`is_local_admin_owner` 为假），并且只在平台沙箱本身不隐藏宿主路径时（macOS），在拒读根里追加用户家目录。开关读全局配置，owner 无法自行覆盖；它也列入 `BOUNDARY_KEYS`，模型不能改。
+    - **HOME**：`tooling/shell._redirected_home` 判断宿主 HOME 是否落在拒读根里，是则把前台、后台、终端三条路径的子进程 HOME 改指到 owner home；Shell 回执据同一判断说明家目录读不到。上层目录的元数据放行（见热修复）同样覆盖家目录这一级，git 逐级 lstat 不受影响。
+    - **实测**（本机真实 Seatbelt，拒读家目录且 HOME 改指向）：git init/status/commit、python3、node、npm、uv、pip 下载都正常；`~/.ssh` 和其它项目读不到。
+    - **已核实的约束**（设计依据）：
+      - 本机常用工具链（python3、node、npm、uv 在 `/opt/homebrew`，git 在 `/usr/bin`）不在家目录，拒绝家目录不会弄坏它们。
+      - owner 隔离的 Shell 没有改 `HOME`（`tooling/shell._subprocess_text_env` 只改 TMPDIR、缓存目录和 PYTHONUSERBASE，并擦洗凭据）。Linux 上家目录没挂载，git 读 `~/.gitconfig` 得到 ENOENT 会跳过；macOS 若拒读家目录会得到 EPERM，git 的 `access_or_die` 只容忍 ENOENT/EACCES，会直接退出。所以只加读拒绝会弄坏这些 owner 的 git。
+      - 对本机管理员拒读家目录会弄坏它自己的 SSH/HTTPS 凭据（git 推送等），而真正的风险来自其它 IM 用户。
+    - **边界**：打开后，这些 owner 用不了你本人的 git/SSH 配置和凭据（OpenSSH 按账户数据库而不是 HOME 找 `~/.ssh`，所以读不到，这正是目的）；装在家目录下的工具（如 `~/.local/bin`）也跑不了；环境变量里指向家目录的路径（如自定义的 `XDG_CONFIG_HOME`）读不到。本机管理员与 Full Access 不受影响，Linux 不变。
+    - **为何生产未开启**：目前唯一的非管理员 owner 是用户本人的飞书身份，开启后其飞书里的 Shell 也会读不到家目录、用不了本人凭据。有其它 IM 用户接入时再开。
 - **记忆 Curator 生产持续失败：输入预算与结构化输出**（2026-09-26 登记；输入预算与失败诊断已修复，main `e47f60d0b`、`22b052fdb`，双机部署 `step12m-cdda962b`，生产已恢复；结构化输出方式已修复，见事实 2）：
   - **事实 1：输入预算（已修复）**。生产 owner 的 Curator 运行记录里，9/25 的 180 次和 9/26（UTC）至今的 51 次全部是 `CURATOR_INPUT_BUDGET_EXCEEDED`，触发原因都是 `session_close`，`cursor_before` 始终同一个、每次处理 0 条；最后一次成功在 2026-09-24T15:28Z，此前成功批次的提示已贴着 40000 上限（39399、39653）。测试 owner `tui-matrix/p1-r141` 同样卡住（9/25 失败 198 次）。根因已用测试复现：收集阶段按条目估算，只给模板留固定 7000 字符（模板实测约 4981）；消息收满预算后，审计仍按保底至少收一条（`curator_inputs.py` 的 `remaining_chars = max(1_000, …)`，且第一条不受上限约束，带 1000 字预览的一条约 1500 字），再加上身份清单里的消息和审计编号，最终提示就超过预算。提取前检查（`curator_backend.py`）直接报错、不缩批，游标不前进，下一轮重建同一批。只有消息时余量够装 80 个编号，所以要有审计事件才触发。
   - **修复**：`fit_batch_to_input_budget` 在可选决策标注之前按最终提示实测长度截尾（先消息后审计，各至少留一条），被截的尾部留在原游标之后、下一轮重放，零丢失，与超时缩批同一游标契约。缩批时运行结果带 `memory_curator_input_fitted:messages=a->b,audit=c->d`；成功运行的 warning 不进运行账（与原超时缩批相同），所以另按尝试形状的日志约定写一行无正文摘要到网关日志。保底后仍超出（预算小于模板）保持原失败码。

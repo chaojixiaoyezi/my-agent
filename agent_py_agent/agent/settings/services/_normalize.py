@@ -393,6 +393,7 @@ def _normalize_tool_bool_fields(out: dict[str, object], defaults: object) -> lis
         (
             "enable_plugins",
             "plugin_process_sandbox",
+            "shell_sandbox_hide_user_home",
             "stream_enabled",
             "tool_catalog_include_examples",
             "tool_catalog_show_truncated_notice",

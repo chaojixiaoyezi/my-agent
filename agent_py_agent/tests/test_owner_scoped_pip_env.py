@@ -73,7 +73,7 @@ def test_run_command_wires_owner_scope_to_env(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
         "agent_py_agent.agent.tooling.shell._sandbox_exec",
         lambda command, target, owner_home, protected_root=None, write_roots=None,
-        read_roots=None, protected_write_paths=None, *, private_root=None: (
+        read_roots=None, protected_write_paths=None, *, private_roots=(): (
             command,
             True,
         ),

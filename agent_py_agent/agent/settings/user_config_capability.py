@@ -129,6 +129,7 @@ BOUNDARY_KEYS: dict[str, str] = {
     "access_mode": "决定工具/命令的权限档位，属于安全边界",
     "path_access_mode": "决定路径访问模式（normal/full），属于安全边界",
     "path_dangerous_roots": "决定危险目录清单，属于安全边界",
+    "shell_sandbox_hide_user_home": "决定 Shell 沙箱能否读用户家目录，属于安全边界",
     "api_key": "供应商凭据，不能由模型改写",
     "api_key_env": "供应商凭据来源，不能由模型改写",
     "my_agent_home": "宿主数据根，属于宿主控制面",

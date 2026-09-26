@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 
 # LLM: 只有结构化 local/main 与显式 Full Access 能解除 owner 墙；主工具组装与冷管理入口必须共用此裁决。
 # 函数用途: 统一裁决 owner 硬边界和命令权限档位，供工作区、文件工具、Shell 与 Gateway 共用。
@@ -35,6 +37,19 @@ def is_local_admin_owner(home_paths: object) -> bool:
     provider = str(getattr(home_paths, "owner_provider", "") or "").strip().lower()
     owner_kind = str(getattr(home_paths, "owner_kind", "") or "").strip().lower()
     return provider in {"", "local"} and owner_kind in {"", "main"}
+
+
+# LLM: owner 隔离 Shell 要拒读的宿主根只按结构化身份、全局配置和平台事实裁决，不看命令或自然语言。my-agent 根总是给出
+#   （沙箱只在 owner 隔离时用它，Full Access 不生效）；开关 shell_sandbox_hide_user_home 打开、owner 不是本机管理员、且平台
+#   沙箱本身不隐藏宿主路径（macOS；Linux bwrap 已不挂载家目录）时，再加用户家目录。配置来自全局配置，owner 无法自行覆盖。
+# 函数用途: 算出 owner 隔离的 Shell 沙箱要拒读的宿主目录，供工具装配传给前台、后台和终端三条执行路径。
+def owner_hidden_host_roots(home_paths: object, config: object, *, platform_hides_host_paths: bool) -> tuple[str, ...]:
+    roots = [str(getattr(home_paths, "root", "") or "")]
+    hide_home = bool(getattr(config, "shell_sandbox_hide_user_home", False))
+    if hide_home and not platform_hides_host_paths and not is_local_admin_owner(home_paths):
+        home = Path.home()
+        roots.append(str(home) if home.is_absolute() else "")
+    return tuple(dict.fromkeys(root for root in roots if root))
 
 
 # LLM: owner 策略只缩小非 Full 权限；未知值不构成授权，显式 Full Access 在调用本函数前裁决。

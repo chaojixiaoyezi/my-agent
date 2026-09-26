@@ -34,6 +34,7 @@ from .agent_core.runtime.record_lesson_tool import RecordLessonTool
 from .agent_core.runtime_mixin import SimpleAgentRuntimeMixin
 from .agent_core.subagent_mixin import SimpleAgentSubagentMixin
 from .agent_core.task_progress_tool import TaskProgressTool
+from .attempt.sandbox import sandbox_hides_host_paths
 from .backends import get_backend
 from .capability import CapabilityRouter, from_tool_model_spec
 from .capability.channel_message_tool import SendMessageTool
@@ -115,7 +116,11 @@ from .user_space.approval_mode import is_permission_admin
 from .user_space.home_indexes import register_owner_ref
 from .user_space.home_layout import ensure_my_agent_home
 from .user_space.home_root import configured_home_root
-from .user_space.owner_access import is_local_admin_owner, resolve_owner_scope_and_access
+from .user_space.owner_access import (
+    is_local_admin_owner,
+    owner_hidden_host_roots,
+    resolve_owner_scope_and_access,
+)
 from .user_space.owner_policy import resolve_effective_owner_policy
 from .user_space.owner_quota import OwnerQuotaEnforcer
 from .user_space.owner_resolver import (
@@ -844,8 +849,10 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
             owner_scope_root=owner_scope_root,
             owner_type=_tool_registry_owner_type(agent),
             protected_persona_root=_protected_persona_root(agent),
-            # 沙箱只在 owner 隔离时用它拒绝读取其它 owner 与配置；full access 视图不生效，所以这里无条件给出。
-            host_private_root=str(getattr(agent.home_paths, "root", "") or ""),
+            # 沙箱只在 owner 隔离时用它拒绝读取其它 owner 与配置（开关打开时对非本机管理员还有用户家目录）；
+            # full access 视图不生效，所以这里无条件给出。
+            host_private_roots=owner_hidden_host_roots(
+                agent.home_paths, config, platform_hides_host_paths=sandbox_hides_host_paths()),
             owner_quota_max_bytes=(
                 max(0, int(getattr(agent.owner_policy, "max_disk_mb", 0))) * 1024 * 1024
                 if owner_scope_root
