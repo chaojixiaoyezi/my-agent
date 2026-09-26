@@ -9,7 +9,7 @@
 
 回滚边界：旧版运行时读不了 v3，回滚必须把运行时和数据成对核对并保留新账。详见[依赖拆分](docs/design/TOOL_LOOP_DEPENDENCY_SPLIT.md#两线合并后的来源身份与模型轮结果决策分支吸收-main2026-09-23)。
 
-- **自学习 S3：完成任务后自动总结 Skill，不要用户逐条审批**（2026-09-26，已实施：本地分支 `claude/skill-auto-summary`，待合入、部署与真实验收；详见[自动总结 Skill 设计](docs/design/SKILL_AUTO_SUMMARY.md)）：
+- **自学习 S3：完成任务后自动总结 Skill，不要用户逐条审批**（2026-09-26，已合入 main 并双机部署，隔离真实验收通过：真实模型新建并更新了一个 Skill，验收中修了宿主会话绑定和“不记绕过拦截做法”两处；详见[自动总结 Skill 设计](docs/design/SKILL_AUTO_SUMMARY.md)与 TESTS 顶部）：
   - **用户决定**：要有“完成任务后自动总结 Skill”的能力，且“别让用户审批，这个用户没时间审批”。所以用确定性的自动闸门代替人工确认，`AGENTS.md` 自学习约束同步改写；`enable_self_learning` 仍默认关闭。
   - **主链**：主代理任务按结构化判据完成（`conversation_task_completed`、非 task_local、非后台回合、`tool_rounds ≥ self_learning_min_tool_rounds`）时，收口写一条有界、脱敏请求到 `<owner_home>/data/skill_learning/requests/`。Gateway 后台记忆整理车道逐条处理：非阻塞运行锁、前台同端点让路、每日上限，复用 Curator 的 backend 做无工具结构化调用，输出 `create/update/skip`，经闸门后发布到 `<owner_home>/skills/learned/<name>/SKILL.md`，下一轮快照可见。
   - **闸门与所有权**：输出合同、与任何来源的 Skill 重名、删过的名字、数量上限、只更新本轮 `skill_search get` 读过且登记表 hash 与磁盘一致（用户没改过）的自学 Skill、发布前脱敏、frontmatter 往返、`agent_generated` guard。`registry.json` 是自学归属唯一权威，`ledger.jsonl` 只记结构化字段，版本全文可回滚；`my-agent skills learned list/show/revert/remove`，删过的名字不再自动新建。

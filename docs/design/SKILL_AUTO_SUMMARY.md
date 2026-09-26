@@ -1,6 +1,6 @@
 # 自学习 S3：自动总结 Skill
 
-状态：已实施，本地分支 `claude/skill-auto-summary`（2026-09-26），待合入与真实验收。本文是自动总结 Skill 的唯一模块设计；`DESIGN_LEDGER.md` 只保留摘要和链接。
+状态：已合入 main 并双机部署（2026-09-26），隔离真实验收通过（过程与发现见 TESTS.md 顶部“自学习 S3”节）；`enable_self_learning` 仓库默认仍为 false。本文是自动总结 Skill 的唯一模块设计；`DESIGN_LEDGER.md` 只保留摘要和链接。
 
 ## 1. 背景和用户决定
 

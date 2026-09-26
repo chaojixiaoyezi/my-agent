@@ -274,6 +274,7 @@ def test_update_only_for_used_owned_and_unmodified_skill(tmp_path: Path) -> None
     assert [item["name"] for item in prompt_payload["updatable_skills"]] == [NAME]
     assert prompt_payload["updatable_skills"][0]["body"] == BODY
     assert "日期列有空值" in _learned_file(ctx).read_text() and ctx.store.read_version(NAME, 2) is not None
+    assert sorted(path.name for path in (ctx.store.versions_dir / NAME).iterdir()) == ["v1.md", "v2.md"]
 
     _learned_file(ctx).write_text(_learned_file(ctx).read_text() + "\n用户手改。\n", encoding="utf-8")
     edited = _learned_file(ctx).read_bytes()

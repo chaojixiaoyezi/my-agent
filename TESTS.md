@@ -14,7 +14,12 @@
 - **真实验收发现并修复的两处**：① 服务商要求会话头，后台调用未绑宿主会话 → `ValueError`（已修，见上）；② 首个真实发布的 Skill 含“删除被拦截就改用 apply_patch 删”这种绕过安全拦截的做法 → 提示词“不要保存”清单加一条，更新时一并删除（软约束，用例断言提示词含该条）。
 - **改写** 2 项旧断言（行为按用户决定改变）：`test_skill_proposals.py::test_runner_result_auto_confirms_proposal_when_service_attached`、`test_subagent_lesson_ledger.py` 的自学习开启用例，从“提案保持待确认”改为“自动确认并安装”。
 - **变异验证**：40 种各自使测试失败——宿主会话绑定、组合根传 owner_id、触发的 task_local/后台/门槛/do_save、材料脱敏、只收成功读取、名字/更新目标/`#`/frontmatter 正文检查、重名/禁用名/上限/所有权 hash、发布脱敏、guard force、frontmatter 往返、回滚所有权、删除入禁用名单、每日上限、队列上限、去重、前台让路、重试次数、本轮读过过滤、可更新 hash、运行锁、车道准入/重算/总开关/整理开关、组合根开关、finalize 调用、S1 自动确认与确认方、CLI 状态、登记表损坏、来源 run。每次在 `PYTHONDONTWRITEBYTECODE=1` 子进程运行并按 sha256 还原，之后删除 `__pycache__` 重跑。
-- **结果**：与改动直接相关的 52 个测试文件（含 `test_architecture_guardrails.py`）1015 passed；ruff、strict code-size（与 main 的 finding 身份逐项对比无新增）、doc sync、`git diff --check`、clean-package 见提交前 gate。真实环境验收见 `docs/design/SKILL_AUTO_SUMMARY.md` 第 14 节与合入后的交接说明。
+- **结果**：与改动直接相关的 52 个测试文件（含 `test_architecture_guardrails.py`）1015 passed；每次提交前严格 gate 全过（ruff、doc sync、strict code-size 与 main 持平 2200/1496/704、`git diff --check`、clean-package）。
+- **真实验收**（2026-09-26，本机隔离 home + 回环 8432 单 Gateway，owner 真实选定模型，门槛配置为 4，测试者每轮只发一次 prompt）：
+  - 第 1 轮（CSV 合并，3 轮工具）不到门槛，不入队；第 2 轮（多编码，6 轮）入队，但服务商要求会话头而后台调用没绑宿主会话，两次都 `ValueError` 后丢弃并记 `failed`——据此修复并发 step12h。
+  - 第 3 轮（做成命令行工具，12 轮）入队后由策展车道处理，真实模型发布 `csv-merge-cli` 第 1 版，下一次快照出现 `owner:csv-merge-cli`（category `learned`，hash 与登记表一致）；正文含“删除被拦截就改用 apply_patch 删”，据此加提示词约束并发 step12i。
+  - 第 4 轮（同类任务，3 轮）模型没读 Skill、也不到门槛；第 5 轮（用户说按之前总结的做法来，25 轮）模型先 `skill_search get owner:csv-merge-cli`，后台据此选 update，发布第 2 版（补了 UTF-16、¥、千分位三个新坑），正文不再含绕过拦截的内容。
+  - `skills learned list/show/revert` 在真实数据上运行正常，回滚后文件与 `versions/v1.md` 逐字节一致；首日总结调用 4 次。验收中发现版本目录多出 `.lock` 文件，已改用不取锁的原子写。证据在仓库外 `~/.my-agent/releases/skill-learning-acceptance-20260926/`，隔离 home 与模型目录副本已删除。
 
 ## 决策开关、超时自调、统一审计与管理员管控（2026-09-25，分支 `claude/decision-audit-controls`，基于 main `07fa00fb3`）
 

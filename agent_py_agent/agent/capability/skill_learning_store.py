@@ -22,7 +22,7 @@ from ..common.json_io import (
     read_json_object_report,
     read_jsonl_objects_report,
     write_json_file_atomic_unlocked,
-    write_text_file_atomic,
+    write_text_file_atomic_unlocked,
 )
 
 REQUEST_SCHEMA_VERSION = "my-agent.skill-learning-request.v1"
@@ -275,11 +275,12 @@ class SkillLearningStore:
         selected = [item for item in records if not name or item.get("skill_name") == name]
         return selected[-limit:] if limit > 0 else selected
 
-    # LLM: 每个版本存全文供回滚；只保留最近 MAX_KEPT_VERSIONS 个版本文件。副作用：写 versions/<name>/。
+    # LLM: 每个版本存全文供回滚；只保留最近 MAX_KEPT_VERSIONS 个版本文件。调用方必须已持 state_lock，
+    #   所以用不再取 per-path 锁的原子写，版本目录里不会留下 .lock 文件。副作用：写 versions/<name>/。
     # 函数用途: 保存一个已发布版本的 SKILL.md 全文。
     def save_version(self, name: str, version: int, text: str) -> None:
         directory = self.versions_dir / name
-        write_text_file_atomic(directory / f"v{version}.md", text)
+        write_text_file_atomic_unlocked(directory / f"v{version}.md", text)
         for stale in sorted(directory.glob("v*.md"), key=_version_number)[:-MAX_KEPT_VERSIONS]:
             stale.unlink(missing_ok=True)
 
