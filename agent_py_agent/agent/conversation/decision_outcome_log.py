@@ -47,13 +47,17 @@ def append_decision_outcome(agent: object, row: dict[str, object]) -> None:
 
 
 # LLM: 只读；按时间窗口汇总每个接入点各状态的次数，并给出最近几行（无正文）。坏行只计数，不中断审计。
+#   thread_ids 给出时只统计这些会话的行（调用方按可信范围解析，如 current_thread）；后台点位没有会话编号，随之排除。
+#   None 表示 owner 全部（含后台点位）。
 # 函数用途: 为审计工具提供"每个决策点调用了几次、分别是什么结果"。
-def decision_outcome_summary(home_paths: object, *, since: float) -> dict[str, object]:
+def decision_outcome_summary(home_paths: object, *, since: float,
+                             thread_ids: list[str] | None = None) -> dict[str, object]:
     path = getattr(home_paths, "owner_decision_outcomes_jsonl", None)
     if not path:
         return {"available": False, "points": {}, "recent": [], "unreadable_rows": 0}
     report = read_jsonl_objects_report(Path(path), context="decision_outcome_log.read")
-    rows = [row for row in report.records if row.get("schema") == SCHEMA and _created_at(row) >= since]
+    rows = [row for row in report.records if row.get("schema") == SCHEMA and _created_at(row) >= since
+            and (thread_ids is None or str(row.get("thread_id") or "") in thread_ids)]
     points: dict[str, dict[str, int]] = {}
     for row in rows:
         counts = points.setdefault(str(row.get("point") or ""), {})

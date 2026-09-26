@@ -676,16 +676,20 @@ class TestChannelManagerDurableDelivery:
              patch.object(manager._reply_delivery, "_poll_progress", return_value=([], 0)), \
              patch.object(dummy, "finalize_response", side_effect=finalize) as finalizer:
             manager.start_all()
-            started = time.monotonic()
-            assert manager.route_message(self._message()) is True
-            assert time.monotonic() - started < 0.1
-            assert delivered.wait(2.0)
-            # 旧实现约 60 次轮询后发一条假超时并永远丢掉真结果；现在没有这个终止窗。
-            assert poll_count > 60
-            assert finalizer.call_count == 1
-            time.sleep(0.05)
-            assert finalizer.call_count == 1
-            manager.stop_all()
+            try:
+                started = time.monotonic()
+                assert manager.route_message(self._message()) is True
+                assert time.monotonic() - started < 0.1
+                # 每次轮询都要持久领取、释放（含 fsync），慢 runner 上 65 次轮询可超过 2 秒；送达即返回。
+                assert delivered.wait(30.0)
+                # 旧实现约 60 次轮询后发一条假超时并永远丢掉真结果；现在没有这个终止窗。
+                assert poll_count > 60
+                assert finalizer.call_count == 1
+                time.sleep(0.05)
+                assert finalizer.call_count == 1
+            finally:
+                # 失败时也要趁补丁还在就停线程；否则泄漏的投递线程会轮询真实 8420 端口并写盘，污染后续用例。
+                manager.stop_all()
 
     def test_reply_poll_uses_inbound_owner_identity_and_only_returns_public_error(self) -> None:
         manager = ChannelManager(gateway_port=8420)

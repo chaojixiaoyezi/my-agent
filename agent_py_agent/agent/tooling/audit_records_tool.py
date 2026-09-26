@@ -73,6 +73,7 @@ def _owner_host(agent: object, home: object) -> SimpleNamespace:
 
 # LLM: 设置读取失败只记结构化原因（设置忙或配置不可读），不影响用量统计。points 取 owner 决策结果日志的按点位汇总，
 #   是判断某接入点是否被调用、被冷却/期限挡住的唯一来源；用量账只按用途汇总，不能拿它推断单个点位。
+#   scope=current_thread 时 points 与用量、观察一样只统计可信的当前会话（不含其它会话与后台点位）。
 # 函数用途: 汇总一个 owner 的决策设置、管理员控制、时间窗内的调用统计和各接入点的决策结果。
 def _decision_owner_report(owner_id: str, host: object, thread_ids: list[str], query: AuditQuery) -> dict:
     from ..conversation.decision_audit import decision_settings_summary, decision_usage_summary
@@ -88,7 +89,8 @@ def _decision_owner_report(owner_id: str, host: object, thread_ids: list[str], q
     controls = read_owner_admin_controls(host.home_paths)
     return {"owner_id": owner_id, "admin_controls": {key: controls[key] for key in ("decision_model_allowed", "audit_allowed")},
             "settings": settings, "usage": decision_usage_summary(host.conversation_store, thread_ids, since=query.since),
-            "points": decision_outcome_summary(host.home_paths, since=query.since)}
+            "points": decision_outcome_summary(host.home_paths, since=query.since,
+                                               thread_ids=thread_ids if query.scope == "current_thread" else None)}
 
 
 # LLM: 请求记录只经宿主写入器读取（Gateway 运行时才有），读取器不存在即报告不可用，不改从日志或配置推导队列位置。

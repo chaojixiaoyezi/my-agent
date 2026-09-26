@@ -221,8 +221,10 @@ class _CuratorLifecycleMixin:
             return self._commit_failure(context, exc)
 
     # LLM: Cooldown applies only to a durable failed pending request; it bounds provider retries
-    # without deleting the reason or skipping input.
-    # 函数用途: 判断 pending reason 现在执行还是等待失败退避。
+    # without deleting the reason or skipping input. 退避时长与 owner_wake_discovery 共用
+    # curator_failure_retry_seconds：普通失败沿维护周期（30–300 秒），CURATOR_MODEL_NOT_CONFIGURED 等一小时，
+    # 两处必须同源，否则发现层会在 curator 仍退避时反复重建 owner 实例（2026-09-26 真机）。
+    # 函数用途: 判断 pending reason 现在执行还是等待失败退避；没配模型的 owner 每小时最多试一次。
     def _run_pending_when_due(
         self,
         state: MemoryCuratorState,
@@ -1171,6 +1173,8 @@ def _cursor_payload(cursors: dict[str, str], audit_event_id: str) -> dict[str, o
 # LLM: Failure taxonomy contains stable codes only; classification reads exception types, never text.
 # 供应商调用阶段的 ValueError/TypeError 已由 extract_with_retries 包成 CuratorModelCallError,
 # 归 CURATOR_MODEL_FAILED;裸 ValueError 只剩宿主解析/校验失败,仍归 CURATOR_SCHEMA_INVALID。
+# ModelNotConfiguredError(owner 没选模型)是永久配置错误,归 CURATOR_MODEL_NOT_CONFIGURED,由退避函数走一小时档,
+# 不原地重试;新增错误码须同步 curator_models.curator_failure_retry_seconds 与 owner_wake_discovery。
 # 函数用途: 将 Curator 异常分类为恢复和运维使用的错误码。
 def _failure_code(exc: BaseException) -> str:
     if isinstance(exc, CuratorModelTimeoutError):

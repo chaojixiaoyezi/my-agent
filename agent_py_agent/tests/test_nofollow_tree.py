@@ -14,6 +14,9 @@ def test_recursive_delete_preserves_link_targets_and_missing_is_idempotent(tmp_p
     target.mkdir(parents=True)
     (target / "linked-directory").symlink_to(outside, target_is_directory=True)
     (target / "linked-file").symlink_to(outside / "keep.txt")
+    (target / "nested" / "deeper").mkdir(parents=True)
+    (target / "nested" / "deeper" / "file.txt").write_text("gone")
+    (target / "nested" / "deeper" / "linked-back").symlink_to(outside, target_is_directory=True)
     remove_tree_beneath(tmp_path, ("managed", "old"))
     remove_tree_beneath(tmp_path, ("managed", "old"))
     assert not target.exists() and (outside / "keep.txt").read_text() == "keep"

@@ -394,7 +394,12 @@ def test_restart_resumes_harvest_from_disk_cursor(owner_home):
     opened = _open(tool)
     state = _state(owner_home, opened["watch_id"])
     assert _wait_until(lambda: state.cursor >= 100)
+    old = hv.harvesters.get_live(state.watch_id)
     hv.stop_harvester(state.watch_id)
+    # 真实重启时旧读者已随进程消失；这里等旧线程退出并清掉自己的租约，否则慢机器上新工具会看到
+    # 仍新鲜的旧租约而按设计 fail-closed 成 remote，不起本地收割者。
+    old.thread.join(timeout=10.0)
+    assert not old.thread.is_alive()
     # 模拟进程重启:注册表清空,新工具从盘上快照复活,收割续游标(不重读旧事件)。
     reborn = ws.WatchRegistry()
     ws.registry = reborn

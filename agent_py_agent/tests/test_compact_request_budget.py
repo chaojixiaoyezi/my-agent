@@ -460,3 +460,17 @@ def test_tool_call_reply_is_returned_when_strict_segments_cannot_cover_the_sourc
     # 严格来源不接受降级摘录：分段链报 typed 错误时同样交回原回复，保留原机械回退与完整来源行为。
     assert budget_module.generate_bounded_compact_response(_request("严格来源"), preserve_complete_fallback=True) is tool_call
     assert len(calls) == 1 + 1 + budget_module._SEGMENT_REPAIR_LIMIT
+
+
+def test_tool_call_fallback_does_not_hide_a_source_that_changed_during_segments(monkeypatch):
+    tool_call = ModelResponse(text="", backend="fake", tool_use_blocks=[{"name": "run_command"}])
+    _scripted(monkeypatch, [tool_call])
+
+    def changed(*_args, **_kwargs):
+        raise ConversationCompactError("来源在分段期间变化", code="COMPACT_SOURCE_CHANGED")
+
+    monkeypatch.setattr(budget_module, "_summarize_segments", changed)
+    # 只有"不能文本化"和"严格来源不接受降级"可以退回原回复；来源变化必须上抛，不能拿旧回复掩盖。
+    with pytest.raises(ConversationCompactError) as error:
+        budget_module.generate_bounded_compact_response(_request("来源会变"))
+    assert error.value.code == "COMPACT_SOURCE_CHANGED"

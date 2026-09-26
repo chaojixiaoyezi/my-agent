@@ -1,9 +1,5 @@
 # Gateway 维护状态
 
-能力包组合分支吸收主线`2b25e38b3`的Curator退避修订：owner发现层与Curator执行层共用`curator_failure_retry_seconds`，
-未配置模型的结构化失败延长到一小时，普通失败保持原退避；到期仍按真实pending/input事实判活，不删除待办或伪造成功。
-该修订避免维护周期反复重建未配置owner；组合验证见`test_curator_model_not_configured.py`和本轮TESTS记录。
-
 能力包第七候选：新Goal绑定任务时可初始化原TaskLink的一次选包pending（默认关闭）；只读当前owner的元数据资格，旧任务不补字段，不新增模型调用或Goal状态。组件与主流程组合验收中，未发布。
 
 `/effort` 从空壳改为真实会话设置（分支 `claude/reasoning-effort`，2026-09-26）：`control_service._execute_effort_control`
@@ -287,3 +283,5 @@ TUI 媒体请求已接通：input_media refs 与 ask 执行选项及幂等指纹
 新轮验证已用版本并保持发现其他包，升级或重装不会静默替换旧任务；普通临时轮继续使用逐轮快照。
 本地引用／调度／会话／能力授予七文件114项组合通过，真实原生 TUI 与发布尚未开始。
 详见[能力包 Goal](../../tasks/CAPABILITY_INTERNALIZATION_GOAL.md)。
+
+- 2026-09-26：owner 唤醒发现 `owner_wake_discovery._has_pending_memory_curator_work` 的失败退避改为与 Curator 自身同源的 `curator_failure_retry_seconds`。普通失败仍是 300 秒；`CURATOR_MODEL_NOT_CONFIGURED`（owner 没选模型）等一小时，发现层不再按维护周期反复种回登记表、重建 owner 实例（真机：两个未选模型的 owner 每约 7 分钟失败一次）。见 [memory 进度](../memory/02-progress.md)。

@@ -249,8 +249,9 @@ def test_exact_compact_stop_dispatches_while_compact_post_is_blocked(tmp_path) -
     assert stop_sent.wait(timeout=0.5)
     assert completed == ["stop"]
     compact_release.set()
-    deadline = time.monotonic() + 1
-    while "compact" not in completed and time.monotonic() < deadline:
+    # _finish 先回调界面、再删 outbox 行；只等回调会在慢 runner 上读到尚未删除的行。
+    deadline = time.monotonic() + 5
+    while ("compact" not in completed or reconciler._read_entries()) and time.monotonic() < deadline:
         time.sleep(0.01)
     stop_event.set()
     reconciler._wake.set()
