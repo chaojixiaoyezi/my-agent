@@ -1,12 +1,25 @@
-# LLM: 能力包快照只保存原安装代次的公开摘要和私有成员声明；成员不转换为全局 Skill，读取不授予执行权。
-# 模块用途: 为同一轮能力发现、授权引用和按需读取保留不可变的包身份，不另建安装或任务状态。
+# LLM: 能力包快照保存原安装代次的公开摘要和私有声明；读取建议携带同代身份，不转换全局 Skill 或授予执行权。
+# 模块用途: 为发现、授权和按需读取保留不可变包身份，共用准确读取参数，不另建安装或任务状态。
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 
 from ..capability_package_manifest import CapabilityFile
+
+
+# LLM: 读取建议只来自已校验的当前包引用，携带原内容与激活代次；调用方仍须经过原工具授权、晋升和鲜活复核。
+# 函数用途: 让发现卡、错误恢复和资源列表共用准确读取参数，防止旧建议跨轮读到同名新版本。
+def package_read_parameters(reference: Mapping[str, str], resource_path: str = "") -> dict[str, object]:
+    params: dict[str, object] = {
+        "action": "get", "package_id": reference["package_id"],
+        "expected_package_sha256": reference["content_sha256"],
+        "expected_activation_id": reference["activation_id"],
+    }
+    if resource_path:
+        params["resource_path"] = resource_path
+    return params
 
 
 # LLM: reader 由宿主绑定原 owner 与完整安装记录，并须在读取前后验证代次；不得由包或模型提供回调。

@@ -2,7 +2,7 @@
 # same tool snapshot and PromptBuilder contracts as an ordinary model turn. It must never execute
 # tools, infer cache boundaries from prose, or mutate ConversationThread state. Same-turn display
 # is revalidated from host inputs; failure clears the host carrier without another decision call.
-# 模块用途: 为会话压缩复用普通请求的system、工具和动态展示；历史在原读取边界隔离后直接使用，不执行工具。
+# 模块用途: 为会话压缩复用普通请求的system、工具和动态展示；推荐继承宿主范围和重验选择，历史沿原读取边界隔离，不执行工具。
 
 from __future__ import annotations
 
@@ -56,7 +56,8 @@ class ConversationCompactProviderSurface:
 # LLM: Tool registration, protocol selection, catalog rendering, and native schemas intentionally
 # reuse ordinary helpers; original preparation may synchronize tools/probe capability. Carried
 # display is optional and read-only; this entry is not a pure capacity renderer or inspect path.
-# 函数用途: 按原准备链冻结压缩缓存面，复核同片展示并回传采用结果；准备失败仍在摘要发送前抛出。
+# 包候选沿 model_surface 原范围和重验后的 selected 集合投影，不用默认范围或载体旧选择重新补回未选包。
+# 函数用途: 按原准备链冻结压缩缓存面，复核并传递同片展示与范围；准备失败仍在摘要发送前抛出。
 def prepare_conversation_compact_provider_surface(
     agent: object,
     model_surface: ConversationCompactModelSurface,
@@ -110,6 +111,8 @@ def prepare_conversation_compact_provider_surface(
             allowed_tools=allowed_tools,
             runtime_snapshot=runtime_snapshot,
             protocol_snapshot=protocol_snapshot,
+            context_scope=model_surface.context_scope,
+            selected_skill_ids=presentation.selected_skill_ids,
         )
     )
     parent_prompt = agent.prompts.build(

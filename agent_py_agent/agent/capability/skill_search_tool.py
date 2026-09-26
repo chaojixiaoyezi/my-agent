@@ -4,7 +4,8 @@
 #   ①公开检索不写状态；②search 返回卡片和稳定 id，get 经同一 turn snapshot 读取正文;
 #   ③category 过滤可选;④包内成员只在显式 package_id 下检索/读取，不进入全局 Skill。
 #   包正文读取由原 task pin 保存精确引用；大结果沿原归档保留可见来源和预览，不执行脚本。
-#   修改时同步检查 skill_tree、包发现和原生归档后精确复制测试。
+#   next_read 只投影显式调用参数；错选择器仍失败，只在当前可见包精确命中时建议重试，不自动读取或晋升。
+#   修改时同步检查 skill_tree、包发现、选择器恢复和原生归档后精确复制测试。
 # 模块用途: 模型的"技能书架检索台":说一句需求,给出最相关的几个技能和它们的
 #   稳定引用和按需正文,书架上千本也不用把目录全背进对话里。
 from __future__ import annotations
@@ -25,6 +26,7 @@ from ..tooling.models import (
     ToolRuntimePolicy,
 )
 from .package_resources import package_resource_reference
+from .package_snapshot import package_read_parameters
 from .router import CapabilityRouter, tokenize
 from .skill_snapshot import SkillSnapshotError
 
@@ -32,33 +34,34 @@ if TYPE_CHECKING:
     from ..core import SimpleAgent
 
 
-# LLM: 包范围是结构化参数；匹配建议只给模型，不据 query 推权限；分页继续携带同包摘要和激活 ID。
+# LLM: 包范围是结构化参数；next_read 建议只给模型，不据 query 或错选择器扩权；action 默认须与 execute 一致。
 # 函数用途: 声明统一方法检索入口，同时区分公开 Skill 和能力包内按需资源。
 def build_skill_search_model_spec() -> ToolModelSpec:
     return ToolModelSpec(
         name="skill_search",
         description=(
             "检索或读取当前轮可用 Skill 和能力包；任务明确匹配已列出的专业方法时，先读方法再开展工作。"
-            "action=search 按需求返回摘要和稳定 skill_id；"
-            "action=get 用 skill_id 读取同一不可变快照里的完整 SKILL.md。"
-            "能力包先返回包摘要；指定 package_id 后可检索内部资源，get 省略 resource_path 时读取包入口。"
+            "action=search 按需求返回公开 Skill 或能力包摘要；结果的 next_read 可原样作为本工具参数读取。"
+            "action=get 时，普通 Skill 使用 skill_id 读取 SKILL.md，能力包使用 package_id；两种选择器互斥。"
+            "包的 stable_id 用于授权和任务引用，不能填入 skill_id。指定 package_id 后可检索内部资源，"
+            "get 省略 resource_path 时读取包入口。错选择器仍失败；若返回 next_read，可发起新的显式调用。"
             "包资源分页读取，has_more=true 时继续 continuation；读取不会执行脚本或授予工具权限。"
             "原样落盘现有脚本或模板时，将完整 source_ref 直接传给 write_file.source_ref，不用手抄正文；落盘不会执行资源。"
         ),
         input_schema={
             "type": "object",
             "properties": {
-                "action": {"type": "string", "enum": ["search", "get"], "description": "search 或 get；省略时默认 search。"},
+                "action": {"type": "string", "enum": ["search", "get"], "description": "search 或 get；省略时，有 skill_id 则默认 get，否则 search。读取能力包必须显式指定 get。"},
                 "query": {"type": "string", "description": "search 时用一句话描述需要的方法。"},
-                "skill_id": {"type": "string", "description": "get 时逐字使用 search 返回的稳定 skill_id。"},
+                "skill_id": {"type": "string", "description": "仅普通 Skill 的 get 使用，逐字复制 search 返回的 skill_id；与 package_id 互斥，不能填包的 stable_id。"},
                 "category": {"type": "string", "description": "可选，限定 Skill Categories 类目。"},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 20, "description": "最多返回几条，默认 5。"},
-                "package_id": {"type": "string", "description": "显式选择能力包；省略时只检索公开 Skill 和包摘要。"},
+                "package_id": {"type": "string", "description": "逐字复制能力包摘要的 package_id；与 skill_id 互斥。action=get 读取包入口或资源，action=search 检索包内资源；省略本字段时只检索公开摘要。"},
                 "resource_path": {"type": "string", "description": "包内 get 使用声明的相对成员路径，省略读取入口文档。"},
                 "offset": {"type": "integer", "minimum": 0, "description": "包内检索的结果偏移，或正文读取的字符偏移。"},
                 "max_chars": {"type": "integer", "minimum": 1, "description": "包正文单页字符数，不超过原 tool_read_max_chars 配置。"},
-                "expected_package_sha256": {"type": "string", "description": "分页时原样携带 continuation 的包摘要。"},
-                "expected_activation_id": {"type": "string", "description": "分页时原样携带 continuation 的激活代次。"},
+                "expected_package_sha256": {"type": "string", "description": "原样携带 next_read 或分页 continuation 中的包摘要，防止读到同名新版本。"},
+                "expected_activation_id": {"type": "string", "description": "原样携带 next_read 或分页 continuation 中的激活代次，停用重启后的旧建议不能继续使用。"},
             },
             "additionalProperties": False,
         },
@@ -73,6 +76,9 @@ def build_skill_search_model_spec() -> ToolModelSpec:
             examples=(
                 '{"tool":"skill_search","action":"search","query":"把一份英文资料翻译成中文文档"}',
                 '{"tool":"skill_search","action":"get","skill_id":"builtin:pdf-translate-toolchain"}',
+                '{"tool":"skill_search","action":"get","package_id":"example-package"}',
+                '{"tool":"skill_search","action":"search","package_id":"example-package","query":"review"}',
+                '{"tool":"skill_search","action":"get","package_id":"example-package","resource_path":"methods/review.md"}',
             ),
         ),
     )
@@ -109,8 +115,8 @@ class SkillSearchTool(BaseTool):
             return _invalid("action 只接受 search 或 get")
         return self._search(params)
 
-    # LLM: 未限定 package_id 时只查公开 Skill 与包级摘要，绝不遍历私有成员来给包加召回分数。
-    # 函数用途: 返回公开方法卡或独立能力包摘要。
+    # LLM: 未限定 package_id 时只查公开 Skill 与包级摘要；next_read 只从公开身份生成，不含成员路径、不预读或 pin。
+    # 函数用途: 返回公开方法卡及可原样重用的读取参数，让模型无需从多种身份字段猜调用方式。
     def _search(self, params: dict[str, object]) -> ToolHandlerOutcome:
         query = str(params.get("query") or "").strip()
         if not query:
@@ -138,8 +144,10 @@ class SkillSearchTool(BaseTool):
         matches = [
             ({"kind": "capability_package", "package_id": hit.card.metadata["package_id"],
               "name": hit.card.name, "description": hit.card.description,
-              "stable_id": hit.card.metadata["stable_id"], "score": round(hit.score, 1)}
+              "stable_id": hit.card.metadata["stable_id"], "score": round(hit.score, 1),
+              "next_read": package_read_parameters(hit.card.metadata)}
              if hit.card.kind == "capability_package" else {
+                "kind": "skill",
                 "name": hit.card.name,
                 "skill_id": str(hit.card.metadata.get("stable_id") or ""),
                 "source": str(hit.card.metadata.get("scope") or ""),
@@ -147,12 +155,13 @@ class SkillSearchTool(BaseTool):
                 "description": hit.card.description,
                 "when_to_use": hit.card.when_to_use[:1],
                 "score": round(hit.score, 1),
+                "next_read": {"action": "get", "skill_id": str(hit.card.metadata.get("stable_id") or "")},
             })
             for hit in hits
         ]
         payload = {
             "matches": matches,
-            "hint": "选择后用 action=get 读取：Skill 携带原样 skill_id，能力包携带原样 package_id。",
+            "hint": "选择后原样使用对应 next_read 调用本工具；Skill 用 skill_id，能力包用 package_id，不能混用。",
         }
         return ToolHandlerOutcome("skill_search", True, json.dumps(payload, ensure_ascii=False, indent=2))
 
@@ -215,6 +224,8 @@ class SkillSearchTool(BaseTool):
                                        "resource_path": member.path, "max_chars": limit}
         return payload
 
+    # LLM: 保持普通 Skill resolve 的既有优先级；失败后仅精确匹配当前受限包身份来给建议，不读成员、不 pin、不转换执行。
+    # 函数用途: 读取普通 Skill，或为错填包身份的请求返回仍为失败的结构化纠错信息。
     def _get(self, params: dict[str, object]) -> ToolHandlerOutcome:
         skill_id = str(params.get("skill_id") or "").strip()
         if not skill_id:
@@ -227,7 +238,14 @@ class SkillSearchTool(BaseTool):
             return _unavailable()
         entry = snapshot.resolve(skill_id)
         if entry is None:
-            return _invalid("当前轮没有这个可用 skill_id", hint="重新 search 获取当前轮稳定 id")
+            package = next((item for item in snapshot.packages if skill_id in {item.package_id, item.stable_id}), None)
+            if package is not None:
+                return _invalid(
+                    "能力包不能通过 skill_id 读取", hint="使用 next_read 重新调用；本次没有读取包正文。",
+                    selector_mismatch={"received": "skill_id", "expected": "package_id", "kind": "capability_package"},
+                    next_read=package_read_parameters(package.to_ref()),
+                )
+            return _invalid("当前轮没有这个可用 skill_id", hint="重新 action=search 查找当前可用摘要，再使用结果的 next_read")
         try:
             body = snapshot.read_body(skill_id)
         except SkillSnapshotError as exc:
@@ -300,8 +318,8 @@ def _package_continuation(package, action: str, offset: int) -> dict[str, object
             "expected_package_sha256": package.package_sha256, "expected_activation_id": package.activation_id}
 
 
-# LLM: 只匹配声明路径，不扫描正文或创建内部 SkillCard；结果数量与外部 Skill 计数完全独立。
-# 函数用途: 在显式包范围内分页列出或按名称检索私有资源。
+# LLM: 只匹配声明路径，不扫描正文或创建内部 SkillCard；next_read 保留显式包范围，资源计数不进入全局 Skill。
+# 函数用途: 在已选包内分页检索私有资源，同时给出无需猜路径归属的读取参数。
 def _package_matches(package, params, offset: int) -> dict[str, object]:
     query = str(params.get("query") or "").strip()
     tokens = tokenize(query)
@@ -314,7 +332,8 @@ def _package_matches(package, params, offset: int) -> dict[str, object]:
     payload = {"package_id": package.package_id,
                "matches": [{"resource_path": item.path, "content_sha256": item.sha256,
                             "executable": item.executable,
-                            "source_ref": package_resource_reference(package, item.path)} for item in selected],
+                            "source_ref": package_resource_reference(package, item.path),
+                            "next_read": package_read_parameters(package.to_ref(), item.path)} for item in selected],
                "offset": offset, "total_matches": len(members), "has_more": next_offset < len(members)}
     if payload["has_more"]:
         payload["continuation"] = {**_package_continuation(package, "search", next_offset), "query": query, "limit": limit}
@@ -330,11 +349,21 @@ def _nonnegative_int(params, key: str, default: int) -> int:
     return value
 
 
-def _invalid(error: str, *, hint: str = "") -> ToolHandlerOutcome:
+# LLM: 结构化建议不把失败改为成功；只有调用方已在受限快照精确命中时才传入选择器信息，不执行建议。
+# 函数用途: 返回统一参数错误，可附不会泄漏未知能力的纠错字段。
+def _invalid(
+    error: str, *, hint: str = "", selector_mismatch: dict[str, str] | None = None,
+    next_read: dict[str, object] | None = None,
+) -> ToolHandlerOutcome:
+    payload: dict[str, object] = {"error": error, "hint": hint}
+    if selector_mismatch is not None:
+        payload["selector_mismatch"] = selector_mismatch
+    if next_read is not None:
+        payload["next_read"] = next_read
     return ToolHandlerOutcome(
         "skill_search",
         False,
-        json.dumps({"error": error, "hint": hint}, ensure_ascii=False),
+        json.dumps(payload, ensure_ascii=False),
         error_code="TOOL_INVALID_ARGUMENTS",
     )
 

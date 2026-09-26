@@ -1,4 +1,4 @@
-# LLM: 本模块逐run装配参数并调用execute_tool_loop，工具发现复用tooling投影；展示纯值只经推荐接缝/回调传递，
+# LLM: 本模块逐run装配参数并调用execute_tool_loop，工具发现复用tooling投影；包候选只消费 scoped 元数据与原能力配置，展示纯值经推荐接缝/回调传递，
 # 不能写入结果、Agent共享属性或扩大原快照权限；拒绝列表、异常原生历史与权限沿原权威，禁止反向依赖Gateway。
 # 模块用途: 为主链准备记忆、工具和续跑输入，恢复同源核验与清理事实，直接驱动唯一循环；回传本片展示与异常历史。
 
@@ -9,6 +9,8 @@ import logging
 from copy import deepcopy
 from dataclasses import dataclass, fields, replace
 
+from ...capability.config import CapabilityConfig
+from ...capability.runtime_config_reload import capability_config_for_agent
 from ...conversation.active_turn_input import (
     active_turn_user_input_texts,
     merge_active_turn_user_inputs,
@@ -29,6 +31,7 @@ from ...memory_store import (
     long_term_record_matches_scope,
     routed_lesson_records,
 )
+from ...runtime_context import current_subagent_run_id
 from ...runtime_errors import runtime_error_report
 from ...tooling.output_projection import project_tool_output_body, redact_tool_output_text
 from ...tooling.runtime_facts import render_tool_runtime_facts
@@ -53,6 +56,8 @@ from .loop_models import (
 _RUN_PARAM_FIELD_NAMES = tuple(field.name for field in fields(RunParams))
 
 
+# LLM: 范围与选中 ID 仅是当前片展示输入，权限仍从原工具快照和 scoped Skill 快照读取，不可变值不写共享 Agent。
+# 类用途: 固定本轮工具说明和包候选的渲染条件，不把自然语言建议当成授权。
 @dataclass(frozen=True)
 class ToolSectionsRequest:
     agent: object
@@ -60,6 +65,8 @@ class ToolSectionsRequest:
     allowed_tools: list[str] | None
     runtime_snapshot: object
     protocol_snapshot: object
+    context_scope: str = "default"
+    selected_skill_ids: tuple[str, ...] | None = None
 
 
 # LLM: 只保留有真实运行消费者的字段；工具能力由 allowed_tools 与 runtime snapshot 共同决定。
@@ -174,8 +181,8 @@ def _finalize_params(
     )
 
 
-# LLM: 文本目录和推荐区必须消费 run 开始时的同一工具快照，不能各自重新探测或扩大权限。
-# 函数用途: 用统一工具快照渲染本轮文本协议工具说明和相关工具建议。
+# LLM: 目录和推荐区消费同一工具快照；包建议只从当前授权目录软排序，沿能力配置开关，不重新探测、读正文或扩大权限。
+# 函数用途: 渲染本轮工具说明，按原工具权限追加有界包建议，空建议保持原字节。
 def _resolve_tool_sections(request: ToolSectionsRequest):
     if not request.agent.config.enable_tools:
         return "", ""
@@ -196,7 +203,31 @@ def _resolve_tool_sections(request: ToolSectionsRequest):
         tool_protocol=tool_protocol,
         runtime_snapshot=request.runtime_snapshot,
     )
+    if packages := _package_recommendations(request):
+        tool_recommendations = "\n\n".join(part for part in (tool_recommendations, packages) if part)
     return tool_catalog, tool_recommendations
+
+
+# LLM: 这是有配置读取的宿主准备层，不能在后台纯投影重跑；task_local 需原 runner 身份，只交集工具权限/范围/已选集合，不从关键词授权。
+# 函数用途: 在允许发现包的工作片读取原能力开关并生成建议；关闭、隔离或无 skill_search 权限时返回空字符串。
+def _package_recommendations(request: ToolSectionsRequest) -> str:
+    scope = str(request.context_scope or "").strip().lower()
+    if scope in {"isolated", "control_plane"} or (scope == "task_local" and not current_subagent_run_id(request.agent)):
+        return ""
+    if request.allowed_tools is not None and "skill_search" not in request.allowed_tools:
+        return ""
+    router = getattr(request.agent, "capability_router", None)
+    runtime = request.runtime_snapshot.runtime("skill_search")
+    if router is None or runtime is None or not runtime.availability.available or not runtime.exposure.model_visible:
+        return ""
+    config = capability_config_for_agent(request.agent) or CapabilityConfig()
+    if not config.enable_capability_package_recommendations:
+        return ""
+    return router.render_package_recommendations(
+        request.user_prompt, limit=config.capability_candidate_limit,
+        context_window_tokens=getattr(request.agent.config, "model_context_window_tokens", 0),
+        selected_skill_ids=request.selected_skill_ids,
+    )
 
 
 # LLM: Runtime recall uses only active long-term plus formal lesson/HOT under structured scope;
@@ -631,7 +662,7 @@ def _runtime_injections_with_bundle(
 
 # LLM: 原推荐接缝只采用合法展示；工具快照与循环参数逐 run 固定，直接调用唯一循环函数。首请求选模采用的完整参数
 # 由循环结果显式交回；异常先保存当前 IR 再原样抛错（候选只换协议快照、共享同一 IR），需核对原生历史与中断回归。
-# 能力推荐真的发起过决策时，把结构化观测交给宿主可选的观察出口；原展示回调的语义不变。
+# 能力推荐真的发起过决策时回传结构化观测；同一 selected 集合传给包动态建议，不绕过原展示选择或另发请求。
 # 函数用途: 驱动工具循环，正常返回完整结果；溢出时释放未提交插话并冻结IR，异常也经宿主回调保存已发生的会话事实。
 def _execute_runtime_loop(agent, params: RuntimeLoopParams):
     write_runtime_fact_start_if_enabled(agent, params)
@@ -665,6 +696,8 @@ def _execute_runtime_loop(agent, params: RuntimeLoopParams):
             allowed_tools=params.allowed_tools,
             runtime_snapshot=tool_runtime_snapshot,
             protocol_snapshot=tool_protocol_snapshot,
+            context_scope=params.context_scope,
+            selected_skill_ids=presentation.selected_skill_ids,
         )
     )
     loop_params = _tool_loop_execute_params(

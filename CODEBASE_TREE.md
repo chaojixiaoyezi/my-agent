@@ -11,7 +11,7 @@
 |-- agent_py_agent/agent/capability_package_manifest.py # 独立能力内容声明与资源路径校验
 |-- agent_py_agent/agent/plugin_content_activation.py # 内容包无进程激活身份
 |-- agent_py_agent/agent/plugin_content_lifecycle.py # 原安装库中的内容激活迁移
-|-- agent_py_agent/agent/capability/package_snapshot.py # 包级摘要与私有资源快照
+|-- agent_py_agent/agent/capability/package_snapshot.py # 包级快照及绑定内容与激活代次的读取参数
 |-- agent_py_agent/agent/capability/package_provider.py # 从原安装表发现并复核内容包
 |-- agent_py_agent/agent/capability/task_references.py # 主子任务与调度的准确包版本引用
 |-- agent_py_agent/agent/capability/package_resources.py # 原写文件工具的私有资源引用解析
@@ -21,6 +21,8 @@
 |-- docs/design/CAPABILITY_MIGRATION.md   # 从固定来源到候选、安装、验收、迭代和回退的操作流程
 |-- agent_py_agent/tests/test_capability_package_native_pipeline.py # 模型替身沿原生循环读取和精确落盘
 |-- agent_py_agent/tests/test_capability_package_prompt_guidance.py # 包采用与资源复用软规则、空选择和旧提示不变
+|-- agent_py_agent/tests/test_capability_package_selector_recovery.py # 准确读取参数、错误恢复、受限隔离及换代拒绝
+|-- agent_py_agent/tests/test_capability_package_recommendations.py # 当轮候选软展示、配置开关及原生请求边界
 |-- agent_py_agent/tests/test_capability_package_compact.py # 原快照与安装事实的 Compact 续读及换代拒绝
 |-- agent_py_agent/tests/test_capability_package_catalog_scale.py # 包目录预算与大量私有成员不展开
 |-- agent_py_agent/tests/test_capability_package_main_scope.py # 失效包隔离、保留原版本与主任务正常收口
