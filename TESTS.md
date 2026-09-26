@@ -1,5 +1,14 @@
 # 测试与发布验收
 
+## Gateway 恢复收割线程改用 registry 里的状态对象（2026-09-26，分支 `claude/watch-recovery-registry-state`，基于 `5bd163135`）
+
+- **来源**：只读调查 `test_watch_audit_guarantee` 偶发时发现，Gateway 恢复循环每 15 秒（`gateway_loops.py:829`）调用一次 `recover_active_audit_harvesters`，它用 `load_state()` 直接读盘，绕开 registry，拿这个对象起收割线程。之后 source worker 的 pull 从 registry 取另一个对象，而 `ensure_harvester` 只按 watch_id 复用活线程，于是同一进程里同一 watch 有两份状态对象、各自落盘。registry 本身不会淘汰状态，这是唯一的生产入口。
+- **改动（只改 `continuous_monitor.py`）**：改用 `watch_state.registry.get_or_load(owner_home, watch_id)`，恢复起的线程与工具共用同一个对象。取出后先在锁内 `refresh_scalars_from_disk`，保持原先 `load_state` 的盘上新鲜度，和工具路径 `get_or_load` 之后的做法一致。`ensure_harvester` 的对象告警按集成方决定不做。
+- **测试**：
+  - 新增 2 项：一是恢复循环交给 `ensure_harvester` 的就是 registry 里缓存的对象，并且游标已按盘上前进；二是真实 `ensure_harvester` 加上只记录状态对象的假收割循环，先由恢复循环起线程，再按 pull 入口的方式经 registry 取对象并 `ensure_harvester`，断言复用同一条线程，且线程持有的正是 pull 所用的对象。
+  - 原恢复用例改为替换 registry 供状态，断言不变。
+- **变异验证**：改回 `load_state` 时两条新测试都失败；去掉盘上刷新时第一条失败。每次都在 `PYTHONDONTWRITEBYTECODE=1` 下运行，结束后逐字节还原。
+
 ## watch 审计重载用例：模拟重启前先停旧收割线程（2026-09-26，分支 `claude/watch-audit-reload-race`，基于 main `e6a46bdcc`）
 
 - **来源**：main `e6a46bdcc` 是纯文档提交，代码与全绿的 `892a7874a` 相同。它的 CI 3.11 上，`test_watch_audit_guarantee.py::test_contract_and_worker_binding_survive_registry_reload` 在第 4420 行拿到空候选。
