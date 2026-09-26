@@ -15,10 +15,11 @@
   - **做法**：档位 auto/off/low/medium/high/max 是会话线程属性（`/effort` 写主会话，`create_subagents.effort` 写子线程，省略继承父级实际档位，全局默认 `model_reasoning_effort`）；模型档案新增 `reasoning_control`（auto/effort/budget/none），auto 只对实测确认的 DeepSeek 官方接口给默认，其余 none，可在 `/model` 显式声明。真实请求与两处自动选模投影共用 `request_reasoning_options`，强制工具选择的关思考优先。
   - **边界**：不按模型名或正文判断能力；不支持的模型如实回执“不改变请求”；TUI 底栏暂不显示档位；Responses 协议暂不换算。
   - **真实验收**：DeepSeek 两种接口、声明为 `budget` 的 MiniMax M3、MiniMax M2.7，以及一次创建 low/max/继承三个子代理，全部符合预期（详见 TESTS.md 顶部）。生产默认模型是 OpenCode 中转，按实测不支持调节，`/effort` 会如实提示；要生效需切到 DeepSeek 官方接口，或给支持的模型显式声明控制方式。
-- **Shell 读边界与回执表述不一致（macOS）**（2026-09-26 登记，未实施；Codex 能力内化验收 TUI-CAP06 中前台 `run_command` 发现，证据留在其私有线；归宿主执行/沙箱这条线）：
+- **Shell 读边界与回执表述不一致（macOS）**（2026-09-26 登记；回执已修复，分支 `claude/curator-budget`；读边界收紧未实施，属安全缺口；Codex 能力内化验收 TUI-CAP06 中前台 `run_command` 发现，证据留在其私有线；归宿主执行/沙箱这条线）：
   - **事实**：owner 隔离模式下，macOS Seatbelt 规则（`agent_py_agent/agent/attempt/sandbox.py` 的 `_macos_profile`）是 `allow default` 加 `deny file-write*` 再放开写根，只限制写、不限制读，命令能读到 owner 工作区外的宿主路径；`read_file` 的 owner 读墙更严。Shell 回执（`agent_py_agent/agent/tooling/shell.py` 的 `[sandbox_scope]` 文本与 `sandbox.external_host_paths_hidden`）在 owner 模式下一律写 `external_host_paths_hidden=true`，这只在 Linux 挂载隔离下成立，macOS 上与实际不符。
-  - **影响**：模型会以为宿主路径“看不到”，实际能读到；两条读路径的边界也不一致。不涉及越权写入。
-  - **待定方向**：先让回执按平台如实给出结构化事实（macOS 不再声称隐藏）；读边界是否收紧到与 `read_file` 一致要单独评估（会影响依赖读取宿主工具链的命令）。不为此改能力包的读写路径。
+  - **影响**：模型会以为宿主路径“看不到”，实际能读到；两条读路径的边界也不一致。不涉及越权写入，但 macOS 规则里没有任何读拒绝：owner 隔离的 Shell 能读到网关账号可读的一切，包括其它 owner 的数据和含密钥的配置目录。这是安全缺口，不只是表述问题。
+  - **回执（已修复）**：`attempt/sandbox.sandbox_hides_host_paths()` 按平台给出只读隔离事实（Linux 为 true，macOS 为 false），Shell 回执文本与 `result_envelope.sandbox.external_host_paths_hidden` 同源；macOS 版如实说明只限制写入，并写明工作区外的路径不在任务授权内、不要读取或依赖。
+  - **读边界（未实施，高优先级）**：给 Seatbelt 加读拒绝，与 Linux 挂载隔离对齐。至少要拒绝读取 my-agent 家目录里除本 owner 家目录、授权读根、写根以外的部分（其它 owner、config、密钥），以及用户家目录里的敏感目录；系统和工具链路径保持可读。会影响依赖读取宿主工具链的命令，需要在 macOS 上实测工具链与常用命令，并补 readiness 自检。不为此改能力包的读写路径。
 - **记忆 Curator 生产持续失败：输入预算与结构化输出**（2026-09-26 登记；输入预算与失败诊断已修复，main `e47f60d0b`、`22b052fdb`，双机部署 `step12m-cdda962b`，生产已恢复；结构化输出方式已修复，见事实 2）：
   - **事实 1：输入预算（已修复）**。生产 owner 的 Curator 运行记录里，9/25 的 180 次和 9/26（UTC）至今的 51 次全部是 `CURATOR_INPUT_BUDGET_EXCEEDED`，触发原因都是 `session_close`，`cursor_before` 始终同一个、每次处理 0 条；最后一次成功在 2026-09-24T15:28Z，此前成功批次的提示已贴着 40000 上限（39399、39653）。测试 owner `tui-matrix/p1-r141` 同样卡住（9/25 失败 198 次）。根因已用测试复现：收集阶段按条目估算，只给模板留固定 7000 字符（模板实测约 4981）；消息收满预算后，审计仍按保底至少收一条（`curator_inputs.py` 的 `remaining_chars = max(1_000, …)`，且第一条不受上限约束，带 1000 字预览的一条约 1500 字），再加上身份清单里的消息和审计编号，最终提示就超过预算。提取前检查（`curator_backend.py`）直接报错、不缩批，游标不前进，下一轮重建同一批。只有消息时余量够装 80 个编号，所以要有审计事件才触发。
   - **修复**：`fit_batch_to_input_budget` 在可选决策标注之前按最终提示实测长度截尾（先消息后审计，各至少留一条），被截的尾部留在原游标之后、下一轮重放，零丢失，与超时缩批同一游标契约。缩批时运行结果带 `memory_curator_input_fitted:messages=a->b,audit=c->d`；成功运行的 warning 不进运行账（与原超时缩批相同），所以另按尝试形状的日志约定写一行无正文摘要到网关日志。保底后仍超出（预算小于模板）保持原失败码。

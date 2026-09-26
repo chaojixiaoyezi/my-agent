@@ -937,10 +937,11 @@ Gateway 解析并校验会话 cwd，但不再把 `workspace_task.task_path` 覆�
 ## Owner WorkspaceOnly 与管理员 Full Access
 
 - owner-scoped Shell 的结构化 cwd 先由 path policy 校验，命令正文仍交给 OS 沙箱，不解析重定向、管道或
-  任意字符串中的路径。另一 owner/未授权宿主路径不会被挂载，因此进程内 `ENOENT`/`EACCES` 只证明当前
-  scope 不可访问。Shell 结果无论成功失败都向模型投影 `owner_workspace_only`、
-  `external_host_paths_hidden=true`、`host_path_absence_proven=false`；该投影解释可见性，不参与授权、
-  operation 终态或副作用裁决。
+  任意字符串中的路径。Linux bwrap 下另一 owner/未授权宿主路径不会被挂载，进程内 `ENOENT`/`EACCES` 只证明当前
+  scope 不可访问；macOS Seatbelt 是 allow default 加写拒绝，只限制写入，宿主路径读得到。Shell 结果无论成功失败都向
+  模型投影 `owner_workspace_only`、`host_path_absence_proven=false`，`external_host_paths_hidden` 按平台沙箱的结构化事实
+  `attempt/sandbox.sandbox_hides_host_paths()` 取值（Linux 为 true，macOS 为 false），回执文本与之同源；macOS 版写明工作区外
+  的路径不在任务授权内。该投影解释可见性，不参与授权、operation 终态或副作用裁决。
 - `run_command` 的唯一机器退出事实仍是 shell 最终 return code。供应商若在失败动作后追加恒成功命令，底座
   不从 stdout 或自然语言猜中间动作；model spec 明确要求直接使用工具自带退出码，避免 `; echo $?` 遮蔽。
 

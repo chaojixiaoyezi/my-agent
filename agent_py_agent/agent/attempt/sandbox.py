@@ -377,6 +377,14 @@ class AttemptExecutionSandbox:
         return {"platform": platform.system()}
 
 
+# LLM: 只读隔离事实由平台沙箱实现决定，是 Shell 回执 external_host_paths_hidden 的唯一来源：Linux bwrap 只挂载授权根，
+#   未挂载的宿主路径看不到；macOS Seatbelt 是 allow default 加写拒绝，读取不受限，宿主路径读得到。不能把 owner 隔离模式
+#   一律说成“宿主路径已隐藏”。平台读边界变化时（例如给 Seatbelt 加读拒绝）必须同步这里与 test_sandbox.py。
+# 函数用途: 判断当前平台的进程沙箱是否隐藏未授权的宿主路径。
+def sandbox_hides_host_paths(platform_name: str | None = None) -> bool:
+    return (platform_name or platform.system()) == "Linux"
+
+
 def _persona_file_literal_denies(protected_persona_root: Path | None) -> list[str]:
     """persona 文件（SOUL/USER/AGENTS.md）的 Seatbelt literal deny 规则。
 
@@ -422,4 +430,5 @@ __all__ = [
     "AttemptSandboxSpec",
     "AttemptExecutionSandbox",
     "SandboxUnavailableError",
+    "sandbox_hides_host_paths",
 ]

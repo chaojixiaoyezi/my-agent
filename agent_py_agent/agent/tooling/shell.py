@@ -39,6 +39,7 @@ from agent_py_agent.agent.contracts.gates.command_policy import (
 )
 from agent_py_agent.agent.path_access_policy import PathAccessPolicy
 
+from ..attempt.sandbox import sandbox_hides_host_paths
 from ..common.cancellation import (
     ToolCancelled,
     cancellation_requested,
@@ -1399,6 +1400,26 @@ def _postcheck_shell_artifacts(
     return output, summary, False
 
 
+# LLM: 回执文本与 result_envelope.sandbox 必须同源（hidden 来自 sandbox_hides_host_paths），不能一处说隐藏、另一处说可读。
+#   macOS 版如实说明宿主路径读得到，同时写明工作区外的路径不在本任务授权内，不给读取背书。
+# 函数用途: 生成 owner 隔离模式下 Shell 输出末尾的沙箱范围说明。
+def _sandbox_scope_notice(hidden: bool) -> str:
+    if hidden:
+        return (
+            "[sandbox_scope] file_scope=owner_workspace_only "
+            "external_host_paths_hidden=true host_path_absence_proven=false\n"
+            "当前命令只在本 owner 的隔离视图内运行；其中的 uid=0、/root 或其它绝对"
+            "路径都不代表宿主权限，只有结构化授权写根内的结果会持久化到宿主。未挂载"
+            "路径的不存在、拒绝或沙箱内成功都不能证明宿主路径状态。"
+        )
+    return (
+        "[sandbox_scope] file_scope=owner_workspace_only "
+        "external_host_paths_hidden=false host_path_absence_proven=false\n"
+        "当前平台的沙箱只限制写入，不隐藏宿主路径：只有结构化授权写根内的写入会生效并持久化。"
+        "能读到工作区以外的路径不代表获得了授权，这些路径不在本任务范围内，不要读取或依赖它们。"
+    )
+
+
 # LLM: The result envelope exposes process and sandbox facts but never owner-private backup paths.
 # Artifact postcheck failure overrides provider success and stays UNKNOWN for durable reconciliation.
 # 函数用途: 把 shell 进程、沙箱和产物复核事实组装成统一工具结果。
@@ -1416,20 +1437,16 @@ def _build_protected_shell_outcome(
 ) -> ToolHandlerOutcome:
     tool = request.tool
     owner_scoped = tool.path_access_policy.owner_scope_root is not None
+    # 只读隔离按平台沙箱的结构化事实如实投影：Linux 隐藏未挂载路径，macOS 只限写。
+    hidden = owner_scoped and sandbox_hides_host_paths()
     if owner_scoped:
-        output = (
-            f"{output}\n[sandbox_scope] file_scope=owner_workspace_only "
-            "external_host_paths_hidden=true host_path_absence_proven=false\n"
-            "当前命令只在本 owner 的隔离视图内运行；其中的 uid=0、/root 或其它绝对"
-            "路径都不代表宿主权限，只有结构化授权写根内的结果会持久化到宿主。未挂载"
-            "路径的不存在、拒绝或沙箱内成功都不能证明宿主路径状态。"
-        )
+        output = f"{output}\n{_sandbox_scope_notice(hidden)}"
     result_envelope: dict[str, object] = {
         "artifact_protection": artifact_summary,
         "process": process_facts,
         "sandbox": {
             "file_scope": "owner_workspace_only" if owner_scoped else "full_access",
-            "external_host_paths_hidden": owner_scoped,
+            "external_host_paths_hidden": hidden,
             "host_path_absence_proven": False,
         },
     }

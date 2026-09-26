@@ -1,5 +1,14 @@
 # 测试与发布验收
 
+## Shell 沙箱回执按平台如实说明（2026-09-26，分支 `claude/curator-budget`，基于 main `2b25e38b3`）
+
+- **起因**：Codex 验收 TUI-CAP06 发现，macOS 上 owner 隔离的 Shell 回执写 `external_host_paths_hidden=true`，而 Seatbelt 规则只拒绝写入、读取不受限，命令实际读得到宿主路径。
+- **修改**：新增 `attempt/sandbox.sandbox_hides_host_paths()`，作为只读隔离的唯一事实来源（Linux bwrap 为 true，macOS Seatbelt 为 false）。回执文本与 `result_envelope.sandbox` 同源；macOS 版说明只限制写入，并写明工作区外的路径不在任务授权内。
+- **测试**：`test_sandbox.py` 新增 2 项（平台事实，以及 macOS 回执的文本与结构化字段）；原 3 项 Linux 回执用例显式固定平台事实，断言保持原样。
+- **变异验证**：4 种（不看平台、文本总说隐藏、平台判断总为真、结构化字段不跟平台）全部使测试失败。
+- **回归**：Shell、沙箱、进程会话相关 28 个测试文件 662 passed、9 skipped（按平台跳过）。
+- 读边界收紧（给 Seatbelt 加读拒绝）是安全缺口，另立项，见 DESIGN_LEDGER。
+
 ## 没配模型的 owner 不再反复失败（2026-09-26，分支 `claude/curator-budget`，基于 main `d00fde8be`）
 
 - **真机现象**：飞书 owner 与测试 owner `tui-matrix/p1-r141` 未选模型，step12m 上 3 小时内各失败 28 次：每次重建 owner 实例、整批收集（p1-r141 每次都是同一批 47→46 条缩批），以 `ModelNotConfiguredError` 失败并原地重试一次，记成通用的 `CURATOR_MODEL_FAILED`。

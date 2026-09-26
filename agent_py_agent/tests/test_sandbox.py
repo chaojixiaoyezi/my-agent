@@ -348,6 +348,7 @@ def test_owner_scoped_shell_is_hidden_when_bwrap_is_unavailable(tmp_path, monkey
 
 
 def test_owner_scoped_shell_failure_explains_hidden_host_paths(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("agent_py_agent.agent.tooling.shell.sandbox_hides_host_paths", lambda: True)
     owner = tmp_path / "owner"
     owner.mkdir()
     tool = ShellTool(
@@ -381,6 +382,7 @@ def test_owner_scoped_shell_stderr_keeps_scope_fact_when_command_masks_failure(
     tmp_path,
     monkeypatch,
 ) -> None:
+    monkeypatch.setattr("agent_py_agent.agent.tooling.shell.sandbox_hides_host_paths", lambda: True)
     owner = tmp_path / "owner"
     owner.mkdir()
     tool = ShellTool(
@@ -414,6 +416,7 @@ def test_owner_scoped_shell_success_explains_isolated_absolute_paths(
     tmp_path,
     monkeypatch,
 ) -> None:
+    monkeypatch.setattr("agent_py_agent.agent.tooling.shell.sandbox_hides_host_paths", lambda: True)
     owner = tmp_path / "owner"
     owner.mkdir()
     tool = ShellTool(
@@ -444,6 +447,39 @@ def test_owner_scoped_shell_success_explains_isolated_absolute_paths(
     assert result.result_envelope["sandbox"] == {
         "file_scope": "owner_workspace_only",
         "external_host_paths_hidden": True,
+        "host_path_absence_proven": False,
+    }
+
+
+def test_sandbox_read_isolation_fact_follows_the_platform() -> None:
+    from agent_py_agent.agent.attempt.sandbox import sandbox_hides_host_paths
+
+    # Linux bwrap 只挂载授权根；macOS Seatbelt 只拦写、读取不受限。
+    assert sandbox_hides_host_paths("Linux") is True
+    assert sandbox_hides_host_paths("Darwin") is False
+
+
+def test_owner_scoped_shell_on_macos_says_host_paths_are_readable(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("agent_py_agent.agent.tooling.shell.sandbox_hides_host_paths", lambda: False)
+    owner = tmp_path / "owner"
+    owner.mkdir()
+    tool = ShellTool(owner, options=ShellToolOptions(owner_scope_root=str(owner)))
+    monkeypatch.setattr(
+        tool,
+        "_run_command",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(args=["bash"], returncode=0, stdout="ok\n", stderr=""),
+    )
+
+    result = tool.execute({"command": "cat /etc/hosts", "working_dir": str(owner)})
+
+    # 回执文本与结构化事实同源：macOS 不能再声称宿主路径已隐藏，也不给工作区外的读取背书。
+    assert "external_host_paths_hidden=false" in result.output
+    assert "当前平台的沙箱只限制写入，不隐藏宿主路径" in result.output
+    assert "不要读取或依赖它们" in result.output
+    assert "隔离视图" not in result.output
+    assert result.result_envelope["sandbox"] == {
+        "file_scope": "owner_workspace_only",
+        "external_host_paths_hidden": False,
         "host_path_absence_proven": False,
     }
 
