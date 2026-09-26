@@ -1,5 +1,29 @@
 # 测试与发布验收
 
+## Compact 摘要请求禁止工具与违规兜底（2026-09-26，分支 `claude/curator-budget`，基于 main `756d4b9bb`）
+
+- **来源**：
+  - main 的摘要请求带工具、选择为 `auto`，模型调工具就退成机械摘要。
+  - Codex 私有验收里，MiniMax-M2.7 带工具加 `none` 仍回 tool_use。
+  - 集成方吸收 Codex `d4dd6c094` 的产品和测试部分，丢掉其中能力包相关文档，并在其上补违规兜底和日志关联键。
+- **吸收的测试**（10 个文件，来自 `d4dd6c094`）：
+  - 可容纳请求只多一个 `none` 选择。
+  - Anthropic 协议实际请求体带 `tool_choice: {"type":"none"}`，并保留工具 schema 与缓存标记。
+  - 三协议 `tools_for_choice` 在 `none` 时保留目录，响应里的调用仍被协议门拒绝。
+  - 摘要响应形状诊断不含正文、思考、签名。
+  - 另有若干夹具按新语义校准；`test_background_compact_recovery.py` 窗口保留集成方的 19500，并采纳 Codex 新增的"候选装得下"断言。
+- **新测试**（`test_compact_request_budget.py`，共 3 项）：
+  - 单次摘要回工具调用后改走分段链，由模型重写；分段请求空工具、`none`；诊断带请求/会话/用途编号和墙钟时间，不含原文。
+  - 带图来源不能分段：交回原回复。
+  - 严格来源下分段只能降级：交回原回复。
+- **按新契约改写**：
+  - `test_gateway_conversation_compact.py`：假后端始终调工具时，摘要为分段链的带标注摘录，工具始终未执行，首请求带工具、之后空工具。
+  - 形状日志测试把关联键分开断言。
+  - `test_compact_message_source.py`：实际请求只多 `none`。
+- **修复 main 既有失败**：`test_gateway_compact_recovery.py` 与 `_continuation.py` 的 12 个用例自 `7a15c9c91`（/effort 把 `_payload` 改为收 `_PayloadSurface`）起失败。在干净的 main `756d4b9bb` 上复现为 12 failed，测试已改用新签名并传入候选的真实 params，23 passed。
+- **变异验证**：6 种变异各自使测试失败：不设 `none`、`none` 清空工具、不走分段兜底、兜底失败不交回原回复、日志不带关联键、compact 不传请求。还原后逐字节一致。
+- **回归**：涉及 Compact、摘要预算、辅助调用、工具选择的 66 个测试文件，含推理强度、结构化输出和 `test_architecture_guardrails.py` 组合回归：1601 passed。严格门全部通过；改动产品文件的 code-size 发现与 main 逐项相同。
+
 ## Jev 决策结果日志与点位冷却（2026-09-26，分支 `claude/curator-budget`，基于 main `a3f5c17ec`）
 
 - **来源**：用户 TUI 里的模型据 `audit_records` 断言 Jev"只接了选模型"。查实原因有三：Jev 经代理访问慢，单次约 2.5–5 秒；任一点位超时就冷却整条连接，选模型每轮最先超时，把其它点位全挡住；审计只看得到选模型和能力展示的观察。

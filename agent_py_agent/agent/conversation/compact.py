@@ -1,4 +1,4 @@
-# LLM: 单一会话压缩链保持原文、证据、尾部、检查点和游标分离；独立请求负责结算自己的模型用量，不改普通请求收口。
+# LLM: 单一会话压缩链保持原文、证据、尾部、检查点和游标分离；独立请求负责结算模型用量，失败形状不含正文且不改变收口。
 # 同片展示只经宿主冻结面进入摘要；完整恢复projector（若提供）是候选计量来源，其材料仅在原CAS成功后返回。
 # 联合候选绑定消息及工具分区，须同时满足输入触发线和已知输出预留；取消不提交、不计熔断。
 # 模块用途: 在隔离的会话历史上压缩并记录真实消耗；坏摘要不得推进游标，近期完整对话仍保留原文。
@@ -1152,8 +1152,9 @@ def _projected_context_tokens(
     return max(legacy_tokens, native_tokens)
 
 
-# LLM: 摘要为软上下文，操作证据另守权威；原缓存面追加完整工具模型投影，超量沿原分段器。
+# LLM: 摘要为软上下文，操作证据另守权威；原缓存面追加完整工具模型投影，摘要选择 none，超量沿原分段器。
 # 严格恢复空文本/工具调用回退保留旧摘要与全部消息/工具来源，最终容量门裁决；网络异常不提交、不执行工具。
+# 普通单次摘要不新增截断拒绝；失败形状沿共用分类记录，日志不是新的恢复或 checkpoint 事实。
 # 函数用途: 从可重放原生投影分段归纳完整来源，再附原文锚点；只在可容纳的实际请求边界物化正文。
 def _summarize(
     agent: SimpleAgent,
@@ -1212,31 +1213,31 @@ def _summarize(
         else:
             message_source = message_source.with_tail(AnthropicMessageAdapter().to_provider_messages(tool_history))
     from .auxiliary_model_call import AuxiliaryModelCallRequest
-    from .compact_request_budget import generate_bounded_compact_response
+    from .compact_request_budget import (
+        compact_summary_response_outcome,
+        generate_bounded_compact_response,
+    )
 
+    summary_request = AuxiliaryModelCallRequest(
+        agent=agent,
+        prompt=prompt,
+        messages=None,
+        tools=provider_tools,
+        system_instruction=system_instruction,
+        request_id=selected_call.request_id,
+        run_id=selected_call.run_id,
+        task_id=selected_call.task_id,
+        purpose="conversation_compact_summary",
+        thread_id=selected_call.thread_id,
+    )
     response = generate_bounded_compact_response(
-        AuxiliaryModelCallRequest(
-            agent=agent,
-            prompt=prompt,
-            messages=None,
-            tools=provider_tools,
-            system_instruction=system_instruction,
-            request_id=selected_call.request_id,
-            run_id=selected_call.run_id,
-            task_id=selected_call.task_id,
-            purpose="conversation_compact_summary",
-            thread_id=selected_call.thread_id,
-        ),
+        summary_request,
         interrupt_check=selected_call.interrupt_check,
         source_progress=selected_call.source_progress,
         preserve_complete_fallback=selected_call.preserve_complete_fallback or bool(tool_history),
         message_source=message_source,
     )
-    summary = (
-        ""
-        if list(getattr(response, "tool_use_blocks", None) or [])
-        else str(getattr(response, "text", "") or "").strip()
-    )
+    summary, _reason = compact_summary_response_outcome(response, reject_truncated=False, request=summary_request)
     mechanical = not summary
     if mechanical:
         summary = _mechanical_conversation_summary(

@@ -1,6 +1,7 @@
 import json
 import re
 from copy import deepcopy
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -58,16 +59,104 @@ def responses_cover_source(text: str, total: int) -> bool:
     return all(previous_end == start for (_, previous_end), (start, _) in zip(ranges, ranges[1:]))
 
 
-def test_fitting_request_preserves_exact_cache_surface(monkeypatch):
+@pytest.mark.parametrize("vision_summary", [False, True])
+def test_fitting_request_preserves_cache_surface_with_summary_only_choice(monkeypatch, vision_summary):
     request = _request("记住蓝色项目，稍后继续")
     calls = []
     monkeypatch.setattr(budget_module, "generate_auxiliary_model_response", lambda r: calls.append(r) or "result")
-    assert budget_module.generate_bounded_compact_response(request) == "result"
-    assert calls == [request]
-    assert calls[0] is request
+    assert budget_module.generate_bounded_compact_response(request, vision_summary=vision_summary) == "result"
+    assert len(calls) == 1
+    assert calls[0].tool_choice.mode == "none"
+    assert calls[0].tool_choice.reason == "compact_summary_only"
+    assert calls[0] == replace(request, tool_choice=calls[0].tool_choice)
+    assert all(getattr(calls[0], name) is value for name, value in vars(request).items() if name != "tool_choice")
+    assert request.tool_choice is None
 
 
-def test_strict_fitting_summary_rejects_truncated_provider_reply(monkeypatch):
+@pytest.mark.parametrize("stream", [False, True])
+def test_fitting_compact_keeps_schema_and_none_in_actual_provider_payload(monkeypatch, stream):
+    from agent_py_agent.agent.backends import AnthropicCompatibleBackend, BackendOptions
+    from agent_py_agent.agent.prompting_parts.cache_layout import CacheStructuredPrompt
+
+    captured = []
+
+    def capture_json(_backend, _path, payload, _headers):
+        captured.append(deepcopy(payload))
+        return {"content": [{"type": "text", "text": "摘要"}], "stop_reason": "end_turn"}
+
+    def capture_stream(_backend, _path, payload, _headers, **_kwargs):
+        captured.append(deepcopy(payload))
+        yield from [
+            json.dumps({"type": "content_block_delta", "delta": {"text": "摘要"}}),
+            json.dumps({"type": "message_delta", "delta": {"stop_reason": "end_turn"}}),
+            json.dumps({"type": "message_stop"}),
+        ]
+
+    monkeypatch.setattr(AnthropicCompatibleBackend, "request_json", capture_json)
+    monkeypatch.setattr(AnthropicCompatibleBackend, "request_stream_iter", capture_stream)
+    monkeypatch.setattr("socket.create_connection", lambda *_args, **_kwargs: pytest.fail("fixture must never open a socket"))
+    backend = AnthropicCompatibleBackend(BackendOptions(
+        api_base="https://example.invalid/anthropic", api_key="fake-key-must-not-log", model_name="fake-summary",
+        max_tokens=128, stream_enabled=stream,
+    ))
+    request = _request("已完成的历史，不能继续执行")
+    request.agent.backend = backend
+    schema = {"name": "write_file", "description": "只保留目录", "input_schema": {
+        "type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"],
+    }}
+    request = replace(request, tools=[schema], prompt=CacheStructuredPrompt("稳定前缀", "只总结历史"))
+    original = deepcopy((request.tools, request.messages))
+
+    response = budget_module.generate_bounded_compact_response(request)
+
+    assert response.text == "摘要" and len(captured) == 1
+    payload = captured[0]
+    assert payload["tool_choice"] == {"type": "none"}
+    assert payload["tools"] == [{**schema, "cache_control": {"type": "ephemeral"}}]
+    assert "只总结历史" in json.dumps(payload["messages"][-1], ensure_ascii=False)
+    assert "稳定前缀" in json.dumps(payload, ensure_ascii=False)
+    assert (request.tools, request.messages) == original
+    assert "thinking" not in payload
+
+
+def test_fitting_legacy_compact_does_not_require_tool_keywords():
+    calls = []
+
+    def generate(prompt):
+        calls.append(prompt)
+        return ModelResponse(text="旧接口摘要", backend="legacy")
+
+    agent = SimpleNamespace(backend=SimpleNamespace(generate=generate, max_tokens=128))
+    request = AuxiliaryModelCallRequest(agent=agent, prompt="旧接口原文")
+
+    response = budget_module.generate_bounded_compact_response(request)
+
+    assert response.text == "旧接口摘要" and calls == [request.prompt]
+    assert request.tool_choice is None and request.tools is None
+
+
+def test_fitting_backend_typeerror_after_submission_is_not_retried():
+    calls = []
+
+    def generate(prompt, **kwargs):
+        calls.append((prompt, kwargs))
+        raise TypeError("请求已进入后端，不能当签名不支持重发")
+
+    request = _request("短历史")
+    request.agent.backend.generate = generate
+    with pytest.raises(TypeError, match="不能当签名不支持重发"):
+        budget_module.generate_bounded_compact_response(request)
+    assert len(calls) == 1
+
+
+def test_non_strict_fitting_compact_keeps_partial_text_semantics():
+    response = ModelResponse(text="原合同允许的部分摘要", backend="fake", truncated=True, stop_reason="max_tokens")
+    request = _request("短历史")
+    request.agent.backend.generate = lambda *_args, **_kwargs: response
+    assert budget_module.generate_bounded_compact_response(request) is response
+
+
+def test_strict_fitting_summary_rejects_truncated_provider_reply(monkeypatch, caplog):
     calls = []
     monkeypatch.setattr(budget_module, "generate_auxiliary_model_response", lambda request: calls.append(request)
                         or ModelResponse(text="看似可用的前半段", backend="fake", truncated=True))
@@ -75,6 +164,9 @@ def test_strict_fitting_summary_rejects_truncated_provider_reply(monkeypatch):
         budget_module.generate_bounded_compact_response(_request("短历史"), preserve_complete_fallback=True)
     assert error.value.code == "COMPACT_SUMMARY_TRUNCATED"
     assert len(calls) == 1
+    diagnostics = [record.compact_response_shape for record in caplog.records if hasattr(record, "compact_response_shape")]
+    assert len(diagnostics) == 1 and diagnostics[0]["reason"] == "TRUNCATED"
+    assert diagnostics[0]["truncated"] is True and "看似可用的前半段" not in caplog.text
 
 
 def test_live_summary_bounds_complete_tool_arguments_results_and_reasoning(monkeypatch):
@@ -169,7 +261,9 @@ def test_typed_provider_overflow_reduces_request_without_losing_source(monkeypat
 
     monkeypatch.setattr(budget_module, "generate_auxiliary_model_response", generate)
     budget_module.generate_bounded_compact_response(request)
-    assert calls[0] is request
+    assert calls[0] == replace(request, tool_choice=calls[0].tool_choice)
+    assert all(getattr(calls[0], name) is value for name, value in vars(request).items() if name != "tool_choice")
+    assert calls[0].tool_choice.mode == "none"
     assert len(calls) > 1
     assert "".join(r.messages[0]["content"][0]["text"].split("]：\n", 1)[1] for r in calls[1:]) == json.dumps(request.messages, ensure_ascii=False)
 
@@ -317,3 +411,52 @@ def test_tail_budget_counts_hidden_native_tool_history():
     prefix, tail = split_recent_complete_turns(rows, max_turns=1, max_tail_tokens=1000)
     assert prefix == rows
     assert tail == []
+
+
+# 函数用途: 按调用顺序返回预置回复的假辅助调用，并记录每次实际请求。
+def _scripted(monkeypatch, replies):
+    calls = []
+
+    def generate(request):
+        calls.append(request)
+        return replies[min(len(calls), len(replies)) - 1]
+
+    monkeypatch.setattr(budget_module, "generate_auxiliary_model_response", generate)
+    return calls
+
+
+def test_tool_call_reply_is_rewritten_through_the_text_segment_chain(monkeypatch, caplog):
+    # 2026-09-26 真机：带工具+none 的单次摘要仍回 tool_use。改走分段链（文本化来源、空工具）让模型重写，不直接退成机械摘要。
+    tool_call = ModelResponse(text="", backend="fake", tool_use_blocks=[{"name": "run_command"}], stop_reason="tool_use")
+    calls = _scripted(monkeypatch, [tool_call, ModelResponse(text="分段重写的摘要", backend="fake")])
+    request = replace(_request("记住蓝色项目，稍后继续"), request_id="req-1", thread_id="thread-1")
+
+    result = budget_module.generate_bounded_compact_response(request)
+
+    assert "分段重写的摘要" in result.text and "source_range" not in result.text
+    assert calls[0].tools == [{"name": "read_file"}] and calls[0].tool_choice.mode == "none"
+    assert len(calls) == 2 and calls[1].tools == [] and calls[1].tool_choice.mode == "none"
+    shape = next(record.compact_response_shape for record in caplog.records if hasattr(record, "compact_response_shape"))
+    assert (shape["reason"], shape["tool_use_count"], shape["stop_reason"]) == ("TOOL_CALL", 1, "tool_use")
+    assert (shape["request_id"], shape["thread_id"], shape["purpose"]) == ("req-1", "thread-1", "conversation_compact_summary")
+    assert shape["logged_at"] > 0 and "蓝色项目" not in caplog.text
+
+
+def test_tool_call_reply_is_returned_when_the_source_cannot_be_segmented(monkeypatch):
+    tool_call = ModelResponse(text="", backend="fake", tool_use_blocks=[{"name": "run_command"}])
+    calls = _scripted(monkeypatch, [tool_call])
+    request = replace(_request("看图"), messages=[{"role": "user", "content": [
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}]}])
+
+    # 带图来源不能文本化分段：交回原回复，由上层照旧机械回退，不比原行为更差。
+    assert budget_module.generate_bounded_compact_response(request) is tool_call
+    assert len(calls) == 1
+
+
+def test_tool_call_reply_is_returned_when_strict_segments_cannot_cover_the_source(monkeypatch):
+    tool_call = ModelResponse(text="", backend="fake", tool_use_blocks=[{"name": "run_command"}])
+    calls = _scripted(monkeypatch, [tool_call])
+
+    # 严格来源不接受降级摘录：分段链报 typed 错误时同样交回原回复，保留原机械回退与完整来源行为。
+    assert budget_module.generate_bounded_compact_response(_request("严格来源"), preserve_complete_fallback=True) is tool_call
+    assert len(calls) == 1 + 1 + budget_module._SEGMENT_REPAIR_LIMIT

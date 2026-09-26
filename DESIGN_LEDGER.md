@@ -9,6 +9,16 @@
 
 回滚边界：旧版运行时读不了 v3，回滚必须把运行时和数据成对核对并保留新账。详见[依赖拆分](docs/design/TOOL_LOOP_DEPENDENCY_SPLIT.md#两线合并后的来源身份与模型轮结果决策分支吸收-main2026-09-23)。
 
+- **Compact 摘要请求改为禁止调用工具，模型违规时改走分段链重写**（2026-09-26，已实施：分支 `claude/curator-budget`；吸收 Codex `d4dd6c094` 的产品与测试部分，并补违规兜底）：
+  - **问题**：main 的摘要请求为复用缓存，带着主会话工具，却没设 `tool_choice`，宿主补成 `auto`，模型可以直接调工具。只要回复里有工具调用，摘要就被当作空，退成机械摘要：旧摘要、操作证据加原文片段，不是真正的总结。
+    - Codex 私有验收里的真机样本：MiniMax-M2.7 经 Anthropic 兼容协议，带工具加 `none` 仍返回 tool_use。
+  - **修复**：
+    - **不让模型选工具**：摘要请求保留工具定义以复用缓存前缀，选择设为 `none`；`tools_for_choice` 在 `none` 时不再清空工具，产品里只有 Compact 用到 `none`。
+    - **违规兜底**：单次摘要仍回工具调用时，改走原分段链重写（文本化来源、空工具、`none`，沿用原纠正与确定性摘录）。分段链因非文本或严格来源失败时，交回原回复，由上层照旧机械回退。
+    - **诊断**：无正文的响应形状日志加上 `request_id`、`thread_id`、`purpose` 和 `logged_at`。
+  - **未实施**：摘要生成来源写进 checkpoint，见 [Compact 摘要生成事实](docs/design/COMPACT_GENERATION_FACTS.md)；传输层记录实际发送的 `tool_choice` 与工具数，Codex 已指出接缝位置。
+  - **顺带修复**：`test_gateway_compact_recovery*.py` 的 12 个用例自 `7a15c9c91`（/effort）起在 main 上失败，因为 `_payload` 改收请求面对象；测试已同步。详见 [会话上下文设计](docs/design/CONVERSATION_CONTEXT_DESIGN.md)。
+
 - **Jev 其它接入点"开了没效果"：真实原因与修复**（2026-09-26，已实施：分支 `claude/curator-budget`）。用户在 TUI 里发现，TUI 里的模型凭 `audit_records` 断言"只接了选模型，其余点位没接线"。
   - **事实**：
     - **点位都已接好**：12 个点位都已接入代码。owner 设置是总开关开、11 个点位观察模式、超时 5 秒。观察模式按设计只记录、不生效，想生效要切到 apply。

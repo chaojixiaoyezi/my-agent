@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 from agent_py_agent.agent.backends.tool_protocol_adapter import (
@@ -7,6 +8,7 @@ from agent_py_agent.agent.backends.tool_protocol_adapter import (
     anthropic_tool_choice,
     canonical_tool_calls_from_response,
     openai_tool_choice,
+    tools_for_choice,
 )
 from agent_py_agent.agent.tooling.models import (
     EffectResolverPolicy,
@@ -188,3 +190,20 @@ def test_tool_choice_maps_without_prompt_strings() -> None:
         "type": "function",
         "function": {"name": "run_command"},
     }
+
+
+def test_none_keeps_catalog_but_rejects_decoded_calls_before_execution() -> None:
+    runtime = _runtime_snapshot()
+    tools = [{"name": item.model_spec.name, "description": item.model_spec.description,
+              "input_schema": item.model_spec.input_schema} for item in runtime.runtimes]
+    choice = ToolChoice.none("compact_summary_only")
+    assert tools_for_choice(tools, choice) == tools
+    assert tools_for_choice(tools, choice) is not tools
+    request = _request(SimpleNamespace(text="", tool_use_blocks=[{
+        "id": "forbidden-call", "name": "run_command", "input": {"command": "must-not-run"},
+    }]), "native")
+    result = canonical_tool_calls_from_response(replace(request, tool_choice=choice))
+    assert result.calls == ()
+    assert [violation.code for violation in result.violations] == ["TOOL_CHOICE_VIOLATION"]
+    assert tools_for_choice(None, choice) == []
+    assert tools_for_choice([], choice) == []

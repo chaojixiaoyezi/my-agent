@@ -13,6 +13,7 @@ from agent_py_agent.agent.backends.anthropic_prompt_cache import (
 )
 from agent_py_agent.agent.backends.base import ModelResponse
 from agent_py_agent.agent.backends.errors import ProviderResponseError
+from agent_py_agent.agent.conversation import compact_request_budget as budget_module
 from agent_py_agent.agent.conversation.compact import (
     ConversationCompactOptions,
     _merge_compact_operation_evidence,
@@ -470,7 +471,7 @@ def test_completed_empty_compact_response_commits_mechanical_fallback(tmp_path) 
     assert "8080" in result.thread.summary
 
 
-def test_transcript_compact_tool_call_is_never_executed(tmp_path) -> None:
+def test_transcript_compact_tool_call_is_never_executed(tmp_path, caplog) -> None:
     agent = _agent(tmp_path, context_tokens=1_000_000)
     backend = _ToolCallingSummaryBackend()
     agent.backend = backend
@@ -495,10 +496,56 @@ def test_transcript_compact_tool_call_is_never_executed(tmp_path) -> None:
     )
 
     assert compacted.compact_generation == 1
-    assert compacted.compact_summary.startswith(
-        "[conversation-compact-mechanical-fallback]"
-    )
+    # 单次摘要回 tool_use 后改走分段链（空工具）重写；假后端始终调工具，分段按原纠正上限后留带标注的确定性摘录。
+    assert "- reason: TOOL_CALL" in compacted.compact_summary
     assert not (tmp_path / "compact-tool-must-not-run.txt").exists()
+    assert backend.calls == 2 + budget_module._SEGMENT_REPAIR_LIMIT
+    assert backend.kwargs[0].get("tools") and all(not kwargs.get("tools") for kwargs in backend.kwargs[1:])
+    diagnostic = [record.compact_response_shape for record in caplog.records
+                  if hasattr(record, "compact_response_shape")]
+    assert {item["reason"] for item in diagnostic} == {"TOOL_CALL"} and diagnostic[0]["tool_use_count"] == 1
+    assert diagnostic[0]["purpose"] == "conversation_compact_summary" and diagnostic[0]["thread_id"]
+    assert "unsafe" not in caplog.text and "我将调用工具后再总结" not in caplog.text
+
+
+@pytest.mark.parametrize("thinking", [False, True])
+def test_empty_transcript_summary_logs_typed_shape_without_content(caplog, thinking):
+    response = ModelResponse(
+        text="", backend="fake", truncated=thinking, stop_reason="max_tokens" if thinking else "end_turn",
+        runtime_status="unfinished" if thinking else "ok", runtime_reason="MODEL_RESPONSE_TRUNCATED" if thinking else "",
+        runtime_source="model_provider" if thinking else "", turn_end_reason="max-tokens" if thinking else "",
+        assistant_content_blocks=[{"type": "thinking", "thinking": "PRIVATE-THINKING", "signature": "PRIVATE-KEY"}]
+        if thinking else [],
+    )
+    calls = []
+    agent = SimpleNamespace(backend=SimpleNamespace(generate=lambda prompt: calls.append(prompt) or response))
+    row = MessageLogEntry(message_id="m", thread_id="t", role="user", content="PRIVATE-SOURCE")
+
+    summary = _summarize(agent, "", {}, [row])
+
+    assert len(calls) == 1 and summary.startswith("[conversation-compact-mechanical-fallback]")
+    records = [record.compact_response_shape for record in caplog.records if hasattr(record, "compact_response_shape")]
+    assert len(records) == 1
+    identity = {key: records[0].pop(key) for key in ("request_id", "thread_id", "purpose", "logged_at")}
+    assert identity["purpose"] == "conversation_compact_summary" and identity["logged_at"] > 0
+    assert records[0] == {
+        "reason": "EMPTY", "text_chars": 0, "tool_use_count": 0, "thinking_only": thinking,
+        "stop_reason": response.stop_reason, "runtime_status": response.runtime_status,
+        "runtime_reason": response.runtime_reason, "runtime_source": response.runtime_source,
+        "turn_end_reason": response.turn_end_reason, "truncated": thinking,
+    }
+    assert all(value not in caplog.text for value in ("PRIVATE-THINKING", "PRIVATE-KEY", "PRIVATE-SOURCE"))
+
+
+def test_compact_response_diagnostic_bounds_untrusted_labels(caplog):
+    response = ModelResponse(text="", backend="fake", stop_reason="x" * 10000, runtime_reason="PRIVATE BODY\nPRIVATE KEY")
+    agent = SimpleNamespace(backend=SimpleNamespace(generate=lambda prompt: response))
+    _summarize(agent, "", {}, [])
+    records = [record.compact_response_shape for record in caplog.records if hasattr(record, "compact_response_shape")]
+    assert len(records) == 1
+    assert records[0]["stop_reason"] == "invalid_label"
+    assert records[0]["runtime_reason"] == "invalid_label"
+    assert len(caplog.text) < 2000 and "PRIVATE" not in caplog.text
 
 
 def test_compact_keeps_exact_user_and_final_answer_landmarks_when_model_omits_them() -> None:
@@ -1648,7 +1695,7 @@ def test_forced_compact_includes_completed_checkpoint_from_same_gateway_request(
     assert "You maintain a conversation summary" in layout.volatile_suffix
     tools = backend.kwargs[0].get("tools")
     assert isinstance(tools, list) and tools
-    assert getattr(backend.kwargs[0].get("tool_choice"), "mode", "") == "auto"
+    assert getattr(backend.kwargs[0].get("tool_choice"), "mode", "") == "none"
     projection = anthropic_prompt_cache_projection(
         system_instruction="",
         prompt=backend.prompts[0],

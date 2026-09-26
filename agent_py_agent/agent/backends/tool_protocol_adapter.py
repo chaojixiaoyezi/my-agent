@@ -1,4 +1,4 @@
-# LLM: 此模块独占规范工具调用的协议转换与显式目录选择；模型正文不取得执行权，需联合三种后端和工具合同测试。
+# LLM: 此模块独占规范工具调用的协议转换与显式目录选择；none 保留已有 schema 但拒绝响应调用，需联合三种后端和合同测试。
 # 模块用途: 将原生事件或完整文本协议帧转换为工具调用，并验证请求指定工具属于本次目录。
 from __future__ import annotations
 
@@ -350,17 +350,16 @@ __all__ = [
 ]
 
 
-# LLM: 工具协议只从已提供目录中应用显式 ToolChoice；越界特定工具必须报错，需联合三种后端回归。
-# 函数用途: 生成本次请求的工具目录，关闭模式清空，指定模式验证工具确实存在。
+# LLM: 目录可见性与选择权分离：none 保留调用方已授权的 schema，响应由 _enforce_tool_choice 拒绝执行。
+# 空目录不扩充，指定工具仍必须属于原目录；修改须同步三种后端组包及请求容量投影。
+# 函数用途: 保留当前工具定义以复用缓存前缀，验证显式选择不越界；本函数不授予工具执行权。
 def tools_for_choice(
     tools: list[dict[str, Any]] | None,
     choice: ToolChoice | None,
 ) -> list[dict[str, Any]]:
     selected = list(tools or ())
-    if choice is None or choice.mode == "auto":
+    if choice is None or choice.mode in {"auto", "none"}:
         return selected
-    if choice.mode == "none":
-        return []
     if not selected:
         raise ValueError(f"tool_choice={choice.mode} requires a non-empty tools surface")
     names = {str(tool.get("name") or "").strip() for tool in selected if isinstance(tool, dict)}

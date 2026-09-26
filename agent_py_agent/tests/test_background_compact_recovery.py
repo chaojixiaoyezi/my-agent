@@ -7,6 +7,9 @@ from functools import partial
 import pytest
 
 from agent_py_agent.agent.agent_core import compact_request_recovery, runtime_mixin
+from agent_py_agent.agent.agent_core.model.context_pressure import (
+    projected_model_context_components,
+)
 from agent_py_agent.agent.agent_core.tool_request_projection import project_tool_loop_request
 from agent_py_agent.agent.backends.base import ProviderRequestOptions
 from agent_py_agent.agent.backends.errors import ProviderContextWindowError, ProviderTransientError
@@ -248,7 +251,8 @@ def test_background_first_request_compacts_after_complete_prepare(tmp_path, monk
         tmp_path, backend=backend, detached=False,
     )
     # 窗口只校准测试输入：工具目录随 manage_models（f7029f54c）变长后，15500 装不下压缩后的候选。实测 16000–23000 都能
-    # 先触发压缩再装下候选，25000 起不再需要压缩；取中间值给工具目录增减留出余量，断言不放松。
+    # 先触发压缩再装下候选，25000 起不再需要压缩；取中间值给工具目录增减留出余量，断言不放松。完整准备仍须越过触发线，
+    # 摘要后的完整提示则须容纳（见下方候选断言）。
     agent.config.model_context_window_tokens = 19_500
     agent.config.max_tokens = agent.backend.max_tokens = 1_024
     for role in ("user", "assistant"):
@@ -310,6 +314,9 @@ def test_background_first_request_compacts_after_complete_prepare(tmp_path, monk
     assert len(all_wires) == 2
     assert business[0][1] == store.threads.require(thread.thread_id).compact_generation == 1
     projected = candidates[0].projection
+    candidate_tokens, _ = projected_model_context_components(projected)
+    assert candidate_tokens < agent.config.model_context_window_tokens * agent.config.memory_compact_auto_trigger_percent / 100
+    assert candidate_tokens + agent.backend.max_tokens < agent.config.model_context_window_tokens
     frozen = candidates[0].request_input
     expected = agent.backend.project_generate_payload(
         projected.provider_prompt, tools=list(frozen.native_tools) or None,

@@ -273,8 +273,8 @@ def _automatic_child(tmp_path, *, backend="anthropic_compatible", model="MiniMax
     return agent, task, key
 
 
-# LLM: 捕获原 post_json 最终 payload；探针响应使用原 nonce，业务工具经真实执行器读取文件；测试不替被测 child 执行工作。
-# 函数用途: 为两种适配器提供 fake provider，只在实际目录允许时调用读取工具，保留首轮及后续出站证据。
+# LLM: 捕获原 post_json 最终 payload；正常 fake 响应服从目录及 typed tool_choice，探针仍用原 nonce；不替 child 执行工作。
+# 函数用途: 为两种适配器提供 fake provider，原宿主执行真实读取并保留出站证据；none 拒绝违规响应另由协议测试覆盖。
 def _install_automatic_provider(monkeypatch, agent, task, material, *, before_candidate_probe=None, fail_probe=False):
     import json
     import re
@@ -323,7 +323,9 @@ def _install_automatic_provider(monkeypatch, agent, task, material, *, before_ca
                     ),
                 )
                 assert wire == expected
-                if "read_file" in names:
+                choice = wire.get("tool_choice")
+                choice_mode = choice.get("type") if isinstance(choice, dict) else choice
+                if "read_file" in names and choice_mode != "none":
                     tool = {"type": "tool_use", "id": "read-material", "name": "read_file", "input": {"path": str(material)}}
             calls.append((wire, thread))
         if native:
@@ -471,8 +473,9 @@ def test_adopted_none_choice_capacity_matches_actual_thinking_options(tmp_path, 
     assert len(calls) == 1
     payload, thread = calls[0]
     assert thread.model_profile_id == key
-    assert "tools" not in payload
-    assert payload.get("tool_choice") == ("none" if backend == "openai_compatible" and enable_tools else None)
+    assert bool(payload.get("tools")) == enable_tools
+    expected_choice = {"type": "none"} if backend == "anthropic_compatible" else "none"
+    assert payload.get("tool_choice") == (expected_choice if enable_tools else None)
     assert payload.get("thinking") == ({"type": "disabled"} if enable_tools else None)
     validation = thread.metadata[SUBAGENT_MODEL_ADVICE_KEY]["validation"]
     assert validation["input_tokens_estimate"] == estimate_tokens(payload)

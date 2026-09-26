@@ -44,6 +44,7 @@
     |-- DECISION_MODEL_INTEGRATION.md    # 可选决策模型的短期限、失败隔离、接入点、缓存与并行实施计划
     |-- DECISION_AUDIT_AND_ADMIN_CONTROLS.md # 决策点开关、超时自调上下限、选模型输入精简、统计行、统一审计与管理员管控
     |-- TUI_INPUT_MEDIA.md               # TUI 图片视频输入、owner 原件与发送预算合同
+    |-- COMPACT_GENERATION_FACTS.md      # 摘要生成来源、请求关联及旧检查点未知诊断边界（待实施）
     |-- COMPACT_MEDIA_POLICY.md          # 媒体会话压缩策略：归档引用主链、视觉摘要按结构化能力事实开启
     |-- TOOL_LOOP_DEPENDENCY_SPLIT.md   # 第8步模型响应、工具轮与Compact职责边界及参考核对
     |-- PLUGIN_LIFECYCLE.md              # 可装卸插件、动态命令、版本切换与故障回收的待实施方案
@@ -1224,6 +1225,7 @@ docs/
 - `scripts/check_offline_contract_matrix.py`：开发文件完整性检查，验证证据项指向实际运行模块与测试；已删除无生产调用的旧 verifier integrity 合同及其自造数据测试。
 
 - `docs/design/MAINTAINABILITY_AND_JEV_REVIEW.md`：热点源码与参考阅读证据、未实施的重构顺序、Computer Use 当前条件及 Jev 可选接入方案。
+- `docs/design/COMPACT_GENERATION_FACTS.md`：摘要来源与请求关联的设计（Codex 交接、集成方待实施），明确旧检查点未知和诊断不参与恢复权威。
 - `docs/design/DECISION_MODEL_INTEGRATION.md`：原生决策模型的实施合同，覆盖配置复用、2/4 秒预算、缺数据、记忆/派工/能力接入、缓存窗口、并行认领与验收。
 - `docs/design/DECISION_AUDIT_AND_ADMIN_CONTROLS.md`：2026-09-25 六项决策/审计要求的合同——接入点开启/观察模式、my-agent 自调等待时间上下限、选模型输入精简与评估、统计行约数、统一审计 `audit_records`、管理员 `admin_controls`。
 - `agent_py_agent/agent/tooling/audit_records_tool.py`、`agent_py_agent/agent/conversation/decision_audit.py`、`agent_py_agent/agent/gateway_parts/request_audit_records.py`：唯一审计入口及其决策主题的四类权威来源读取（设置、用量账本、决策结果日志 `conversation/decision_outcome_log.py`、请求记录观察），不 grep 日志、不读正文；新审计主题只加 topic，不另建工具。

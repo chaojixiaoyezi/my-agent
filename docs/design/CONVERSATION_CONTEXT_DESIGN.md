@@ -121,6 +121,32 @@ tool-result reducer、archive 和 refs 管理，不用裁剪对话正文代替�
 `agent_thread_id` 和相同的 summary/generation/checkpoint 状态机；它不生成根任务级 compact 包，也不注入
 另一份主 thread。孙代理递归遵守同一规则。
 
+## 摘要请求的工具控制与诊断（2026-09-26，集成方已吸收 Codex `d4dd6c094` 并补违规兜底，分支 `claude/curator-budget`）
+
+摘要只归纳已有材料，没有业务工具执行权。非分段请求仍保留原system/tools缓存前缀，
+但通过既有`ToolChoice.none("compact_summary_only")`表达禁止工具；分段请求原本工具目录为空，继续保持。
+`none`禁止选择而不隐式删除调用方已给的目录，三协议共用适配层；返回违规调用仍由原协议门拒绝，
+辅助摘要入口也没有工具执行循环。不增设auto重试、文本原因识别或另一份摘要账本。
+
+违规兜底（2026-09-26 集成方补）：真机样本里 MiniMax-M2.7 经 Anthropic 兼容协议，带工具加 `none` 仍返回 tool_use。
+- **做法**：单次摘要一旦返回工具调用，就改走原有分段链。分段链把来源文本化、工具为空、选择为 `none`，沿用原纠正提示与确定性摘录，让模型重写，不直接退成机械摘要。
+- **失败时**：分段链因非文本来源、严格来源不接受降级摘录等 typed 原因失败，就交回原回复，由上层照旧做机械回退，不比原行为更差。
+- **为什么不去掉工具重发整段**：历史里带原生工具块而不给工具定义，服务商是否接受未经验证；分段链本来就把历史当文本处理，没有这个问题。
+- **代价**：只在违规时多发分段请求；分段请求不共享主请求缓存前缀。
+
+诊断日志在原形状字段外，附宿主请求对象上的 `request_id`、`thread_id`、`purpose` 和墙钟时间 `logged_at`，缺失保留为空，不从正文或时间邻近猜。
+它仍只是观察投影；摘要来源写入 checkpoint 另见 [Compact 摘要生成事实](COMPACT_GENERATION_FACTS.md) 设计（未实施）。
+
+诊断复用原辅助响应与摘要分类，记录有界原因标签、工具块数量、正文字符数、thinking是否存在、
+stop/runtime/turn原因及truncated事实，不记录正文、思考内容、参数或凭据。非分段截断的旧接受语义本片不扩改，
+严格完整来源、媒体失败、分段恢复预算、checkpoint/CAS和取消边界仍按原合同。
+此前真实空摘要没有保存原响应形状，不能用新诊断倒填其原因；传输完成和输出token数不等于有摘要正文。
+
+协议参考：[MiniMax Anthropic兼容说明](https://platform.minimax.cn/docs/api-reference/text-anthropic-api)声明支持tool_choice，
+但具体模型端点仍须真实TUI验证。[Anthropic缓存说明](https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-use-with-prompt-caching)
+说明改变tool_choice会使消息层缓存失效，不等同于工具/system前缀失效；不能承诺实际缓存命中率不变。
+本片不改辅助调用的推理档位；集成方在含 effort 接口的 main 上补了组合回归，见 [TESTS](../../TESTS.md)。
+
 ## Cache economics
 
 系统通道的验证规则只限定证据表述，不要求每个动作前重新运行已有检查。相同版本、输入和观察点
