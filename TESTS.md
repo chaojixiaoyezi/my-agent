@@ -1,5 +1,13 @@
 # 测试与发布验收
 
+## watch 审计重载用例：模拟重启前先停旧收割线程（2026-09-26，分支 `claude/watch-audit-reload-race`，基于 main `e6a46bdcc`）
+
+- **来源**：main `e6a46bdcc` 是纯文档提交，代码与全绿的 `892a7874a` 相同。它的 CI 3.11 上，`test_watch_audit_guarantee.py::test_contract_and_worker_binding_survive_registry_reload` 在第 4420 行拿到空候选。
+- **原因（机制）**：测试只替换了 `ws.registry` / `wt.registry`，而收割线程登记在 `hv.harvesters`。模拟重启后，新工具的 pull 会复用重启前那条仍持有旧状态对象的线程。用只读诊断插件看到 `reuse=True`、`same_state=False`，两份状态对象并存、各自落盘。真实重启时旧线程已随进程消失。
+- **改动（只改测试）**：第一次 pull 之后先确认旧线程还活着，再 `hv.stop_harvester(watch_id)`，join 到它退出，然后再换 registry。第二次 pull 之后加一条机制断言：当前收割线程必须不是重启前那条。
+- **验证**：修复版连跑 3 次都通过；去掉 stop/join 的变异连跑 3 次都在这条机制断言（第 4425 行）处失败，不依赖线程交错。
+- **未证实**：CI 上“候选为空”的具体交错，本机正常跑 6 次、后台 QoS 下 10 次、加收割或租约延迟都没有复现。所以只有机制证据，因果链最后一步没有实测证实。
+
 ## browser-lite 关闭时先等本 profile 的子进程退出再清 profile（2026-09-26，分支 `claude/browser-lite-helper-exit`，基于 main `b2ee13f1c`）
 
 - **来源**：main `54f24ab94` 的 CI 3.11 上，`test_plugin_exit_closes_browser[eof]` 列出的残留是 `profile/Default` 和 `profile/Default/Network Persistent State`。这个文件由 Chrome 的网络服务写入，网络服务在单独的 utility 进程里运行。`BrowserProcess.stop()` 只等主进程退出就清 profile，网络服务随后落盘，和 `rmtree(ignore_errors=True)` 撞上后留下非空的 `Default/`。同一用例此前在 Linux runner 上还挂过 3 次。

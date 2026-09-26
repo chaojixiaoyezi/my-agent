@@ -4394,6 +4394,13 @@ def test_contract_and_worker_binding_survive_registry_reload(owner_home, monkeyp
         attempt_id="attempt-contract",
     ):
         _payload(tool.execute({"action": "pull", "watch_id": watch_id, "max_wait_seconds": 3}))
+    # 真实重启时旧收割线程随进程消失。收割线程登记在 hv.harvesters 而不是 ws.registry，只换 registry
+    # 会让新工具复用这条仍持有旧状态对象的线程，两份状态并存各自落盘（CI 上偶发拿不回候选）。
+    old = hv.harvesters.get_live(watch_id)
+    assert old is not None
+    hv.stop_harvester(watch_id)
+    old.thread.join(timeout=10.0)
+    assert not old.thread.is_alive()
     # 换一个"进程":新 registry 冷加载，同一持久 worker attempt 继续。
     monkeypatch.setattr(ws, "registry", ws.WatchRegistry())
     monkeypatch.setattr(wt, "registry", ws.registry)
@@ -4416,6 +4423,9 @@ def test_contract_and_worker_binding_survive_registry_reload(owner_home, monkeyp
         pulled = _payload(
             successor.execute({"action": "pull", "watch_id": watch_id, "max_wait_seconds": 3})
         )
+        # 机制断言：此时的收割线程必须是基于重载状态新起的，不能是重启前那条线程。
+        current = hv.harvesters.get_live(watch_id)
+        assert current is not None and current.thread is not old.thread
         assert "/audit" in pulled["guidance"]
         assert pulled["candidates"] and all(row.get("ack_id") for row in pulled["candidates"])
         # 不交结论就再 pull:游标推不动,同一 worker 拿回同一批+欠账。
