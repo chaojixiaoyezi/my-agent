@@ -756,6 +756,20 @@ top_p: null
 # /model 每模型填写温度自动显式启用；false 不会用软件默认 0.2 干预兼容模型。
 model_temperature_explicit: false
 
+# 智能程度（推理强度）全局默认档位，会话里可用 /effort 单独设置，派子代理时可用 effort 单独指定：
+# - auto：不发任何推理参数，由服务商按默认方式思考（默认）。
+# - off：请求时关闭思考。
+# - low / medium / high / max：由低到高的思考深度。
+# 实际怎么发送取决于当前模型的思考控制方式（下一项）；模型不支持时本设置不改变请求，/effort 会如实说明。
+model_reasoning_effort: auto
+# 当前模型的思考控制方式，通常由 /model 档案的"思考控制"字段带入：
+# - auto：只对实测确认过的服务商给默认值（DeepSeek 官方 OpenAI 兼容接口按档位发送 reasoning_effort；
+#   DeepSeek 官方 Anthropic 兼容接口按思考开关发送），其余一律视为不支持、不发参数。
+# - effort：按档位发送（OpenAI 兼容接口写 reasoning_effort，Anthropic 兼容接口写 output_config.effort）。
+# - budget：按思考预算发送（Anthropic 兼容接口写 thinking.budget_tokens；部分服务商只按开/关生效）。
+# - none：不支持调节，不发任何推理参数。
+model_reasoning_control: auto
+
 # Anthropic API 版本
 anthropic_version: "2023-06-01"
 

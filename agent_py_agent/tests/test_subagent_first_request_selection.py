@@ -238,7 +238,7 @@ def test_real_child_first_request_capture_matches_actual_provider_payload(tmp_pa
 
 # LLM: 候选目录、设置、父子 thread 与首轮资格走原存储；只假造服务商返回，不伪造 RUNNING/attempt/空历史或直接改有效 profile。
 # 函数用途: 构造宿主已经保存语义建议的真实 child，供自动验证/采用和失败矩阵使用。
-def _automatic_child(tmp_path, *, backend="anthropic_compatible", model="MiniMax-M3", window=1_000_000, persist_child=True, timeout_seconds=10, output_limit=4096):
+def _automatic_child(tmp_path, *, backend="anthropic_compatible", model="MiniMax-M3", window=1_000_000, persist_child=True, timeout_seconds=10, output_limit=4096, endpoint=""):
     from agent_py_agent.agent.conversation.decision_policy import decision_owner_ref
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings import AgentConfig
@@ -252,7 +252,7 @@ def _automatic_child(tmp_path, *, backend="anthropic_compatible", model="MiniMax
         api_key="fake-key", stream_enabled=False, enable_tools=True, enable_subagents=True, max_subagents=10, max_tool_rounds=3,
         max_tokens=output_limit, model_context_window_tokens=200_000, model_context_window_explicit=True,
     ), tmp_path)
-    endpoint = "https://api.minimaxi.com/anthropic" if backend == "anthropic_compatible" else "https://opencode.ai/zen/go/v1"
+    endpoint = endpoint or ("https://api.minimaxi.com/anthropic" if backend == "anthropic_compatible" else "https://opencode.ai/zen/go/v1")
     key, _ = add(agent, model_backend=backend, model_name=model, api_base=endpoint, model_context_window_tokens=window)
     jev, _ = decision(agent)
     source = agent.conversation_store.threads.get_or_create({"canonical_user_id": agent.home_paths.owner_id,
@@ -278,11 +278,13 @@ def _automatic_child(tmp_path, *, backend="anthropic_compatible", model="MiniMax
 def _install_automatic_provider(monkeypatch, agent, task, material, *, before_candidate_probe=None, fail_probe=False):
     import json
     import re
+    from types import SimpleNamespace
 
     from agent_py_agent.agent.agent_core.subagent import model_selection
     from agent_py_agent.agent.agent_core.tool_request_projection import project_tool_loop_request
     from agent_py_agent.agent.backends import http
     from agent_py_agent.agent.backends.base import ProviderRequestOptions
+    from agent_py_agent.agent.settings.reasoning_effort import request_reasoning_options
 
     calls, probes = [], []
 
@@ -308,12 +310,16 @@ def _install_automatic_provider(monkeypatch, agent, task, material, *, before_ca
             frozen = model_selection._PREPARATION.get().request_input
             if not calls:
                 projection = project_tool_loop_request(frozen)
+                forced = bool(frozen.native_tools) and projection.tool_choice.mode != "auto"
+                thinking_disabled, effort = request_reasoning_options(
+                    agent, SimpleNamespace(task_attributes={"agent_thread_id": task.agent_thread_id}), agent.backend, forced=forced,
+                )
                 expected = agent.backend.project_generate_payload(
                     projection.provider_prompt, tools=list(frozen.native_tools) or None,
                     tool_choice=projection.tool_choice if frozen.native_tools else None,
                     messages=projection.messages, request_options=ProviderRequestOptions(
                         system_instruction=projection.system_instruction,
-                        thinking_disabled=bool(frozen.native_tools) and projection.tool_choice.mode != "auto",
+                        thinking_disabled=thinking_disabled, reasoning_effort=effort,
                     ),
                 )
                 assert wire == expected
@@ -377,6 +383,23 @@ def test_automatic_adoption_binds_first_and_following_tool_payloads(tmp_path, mo
     assert result is not None
     assert evidence[-1]["protocol"]["model"] == model
     assert evidence[-1]["protocol"]["native_supported"]
+
+
+def test_automatic_adoption_keeps_the_child_reasoning_level_on_the_adopted_model(tmp_path, monkeypatch):
+    # 子代理线程档位 low，候选为 DeepSeek 官方 OpenAI 兼容接口（控制方式 effort）：投影与真实首轮必须同样带档位才会采用。
+    from agent_py_agent.agent.settings.reasoning_effort import set_thread_reasoning_level
+
+    agent, task, key = _automatic_child(tmp_path, backend="openai_compatible", model="deepseek-v4-flash",
+                                        window=1_000_000, output_limit=65_536, endpoint="https://api.deepseek.com")
+    set_thread_reasoning_level(agent.conversation_store, task.agent_thread_id, "low")
+    material = tmp_path / "material.txt"
+    material.write_text("材料内容用于验证真实工具读取。", encoding="utf-8")
+    calls, _probes = _install_automatic_provider(monkeypatch, agent, task, material)
+    agent.run_subagent(task.id, dry_run=False, probe=False)
+    first_wire, first_thread = calls[0]
+    assert first_wire["model"] == "deepseek-v4-flash" and first_thread.model_profile_id == key
+    assert first_wire["reasoning_effort"] == "low"
+    assert first_thread.metadata[SUBAGENT_MODEL_ADVICE_KEY]["status"] == "adopted"
 
 
 @pytest.mark.parametrize("backend, model", [

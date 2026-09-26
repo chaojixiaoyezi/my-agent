@@ -9,6 +9,12 @@
 
 回滚边界：旧版运行时读不了 v3，回滚必须把运行时和数据成对核对并保留新账。详见[依赖拆分](docs/design/TOOL_LOOP_DEPENDENCY_SPLIT.md#两线合并后的来源身份与模型轮结果决策分支吸收-main2026-09-23)。
 
+- **智能程度（推理强度）：主会话 `/effort` 与子代理 `effort`**（2026-09-26，已实施：本地分支 `claude/reasoning-effort`，待合入与真实验收；详见[智能程度设计](docs/design/REASONING_EFFORT.md)）：
+  - **用户要求**：能设置模型的智能程度，包括给子代理单独设置，并实测。原 `/effort` 只是空壳，请求体从不发推理参数。
+  - **实测结论**：DeepSeek 官方 OpenAI 兼容接口的 `reasoning_effort` 与思考开关都生效（low 推理 token 约减半）；其 Anthropic 兼容接口只有开关生效；OpenCode 中转与 MiniMax M2.7 都不生效；MiniMax M3 默认不思考、显式开启才思考。“被接受”不等于“生效”。
+  - **做法**：档位 auto/off/low/medium/high/max 是会话线程属性（`/effort` 写主会话，`create_subagents.effort` 写子线程，省略继承父级实际档位，全局默认 `model_reasoning_effort`）；模型档案新增 `reasoning_control`（auto/effort/budget/none），auto 只对实测确认的 DeepSeek 官方接口给默认，其余 none，可在 `/model` 显式声明。真实请求与两处自动选模投影共用 `request_reasoning_options`，强制工具选择的关思考优先。
+  - **边界**：不按模型名或正文判断能力；不支持的模型如实回执“不改变请求”；TUI 底栏暂不显示档位；Responses 协议暂不换算。
+
 - **自学习 S3：完成任务后自动总结 Skill，不要用户逐条审批**（2026-09-26，已合入 main 并双机部署，隔离真实验收通过：真实模型新建并更新了一个 Skill，验收中修了宿主会话绑定和“不记绕过拦截做法”两处；详见[自动总结 Skill 设计](docs/design/SKILL_AUTO_SUMMARY.md)与 TESTS 顶部）：
   - **用户决定**：要有“完成任务后自动总结 Skill”的能力，且“别让用户审批，这个用户没时间审批”。所以用确定性的自动闸门代替人工确认，`AGENTS.md` 自学习约束同步改写；`enable_self_learning` 仍默认关闭。
   - **主链**：主代理任务按结构化判据完成（`conversation_task_completed`、非 task_local、非后台回合、`tool_rounds ≥ self_learning_min_tool_rounds`）时，收口写一条有界、脱敏请求到 `<owner_home>/data/skill_learning/requests/`。Gateway 后台记忆整理车道逐条处理：非阻塞运行锁、前台同端点让路、每日上限，复用 Curator 的 backend 做无工具结构化调用，输出 `create/update/skip`，经闸门后发布到 `<owner_home>/skills/learned/<name>/SKILL.md`，下一轮快照可见。

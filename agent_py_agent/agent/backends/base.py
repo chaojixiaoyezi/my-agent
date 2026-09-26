@@ -71,15 +71,19 @@ class BackendOptions:
     session_header: str = ""
     input_media_max_bytes: int = 16 * 1024 * 1024
     top_p: float | None = None
+    # 已解析的思考控制方式（effort/budget/none，见 reasoning_control.py）；随 profile 冻结，档位按请求传入。
+    reasoning_control: str = "none"
 
 
 # LLM: 供应商级请求控制集中在 typed options；首包预算必须保持 request-local，不能通过修改共享 backend 传递。
-# 类用途: 携带一次模型请求的宿主 system 指令、思考开关和首个流式事件等待预算，不混入用户正文或工具历史。
+#   reasoning_effort 只会是 low/medium/high/max 或空串（off 已折成 thinking_disabled），由后端按控制方式换算字段。
+# 类用途: 携带一次模型请求的宿主 system 指令、思考开关、智能程度档位和首个流式事件等待预算，不混入用户正文或工具历史。
 @dataclass(frozen=True)
 class ProviderRequestOptions:
     system_instruction: str = ""
     thinking_disabled: bool = False
     first_event_timeout_seconds: float | None = None
+    reasoning_effort: str = ""
 
 
 # LLM: 后端 capability flag 决定上层能否传真实 system instruction；未声明支持的旧实现保持原关键字形态。

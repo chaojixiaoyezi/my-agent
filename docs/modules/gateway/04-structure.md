@@ -1580,8 +1580,10 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
 - `agent/conversation/compact.py`、`compact_guard.py`、`compact_checkpoint.py`、`history_index.py`、
   `control_commands.py`：分别承载 owner/thread 唯一自动 compact、结构化近期尾部与失败熔断、
   完整恢复点、owner-local 旧聊天检索投影，以及 CLI/IM 共用 typed slash/task command；
-  `/context` 只读自动压缩同一估算，`/compact` 复用同一 run lane/checkpoint/CAS，`/effort` 只投影真实后端
-  参数能力；`/verbose off|on|full` 的持久状态仍在唯一 thread schema 中，不从自然语言推断 owner 或 compact 成败。
+  `/context` 只读自动压缩同一估算，`/compact` 复用同一 run lane/checkpoint/CAS；`/effort` 与 `/verbose` 共用
+  `control_service._settings_thread` 取或建会话线程，档位写 thread 的 `reasoning_effort`（`default` 清除），回执按当前会话
+  模型的结构化 `reasoning_control` 说明实际效果（不支持时如实说明不改变请求，见 docs/design/REASONING_EFFORT.md）；
+  `/verbose off|on|full` 的持久状态仍在唯一 thread schema 中，不从自然语言推断 owner 或 compact 成败。
 - `agent/capability/channel_message_tool.py`：`send_message` 的模型可见性与执行前检共用 owner provider/target、
   owner root 和 registry proactive capability；无外部通道的本地 transcript 只隐藏当前快照，不删除唯一工具实现。
 - `agent/conversation/authority.py`、`task_promotion.py`：普通 transcript 唯一权威标记，以及任务候选的

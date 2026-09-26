@@ -696,6 +696,25 @@ def _execute_goal_control(
         return ConversationControlResult("goal", False, "持续目标状态暂时不可用，请稍后重试。")
 
 
+_EFFORT_USAGE = "用法：/effort [auto|off|low|medium|high|max|default]（default 清除本会话设置，回到全局默认）"
+
+# LLM: 会话设置类命令（/verbose、/effort）可在第一条消息之前执行，因此按已认证 scope 取或建精确 owner/thread。
+# 函数用途: 为会话设置命令取得当前会话线程，不存在时以“会话设置”标题创建。
+def _settings_thread(owner_agent: object, scope: GatewayControlScope) -> object:
+    home_paths = getattr(owner_agent, "home_paths", None)
+    return owner_agent.conversation_store.threads.get_or_create(
+        {
+            "canonical_user_id": scope.user_id,
+            "owner_id": str(getattr(home_paths, "owner_id", "") or ""),
+            "owner_home": str(getattr(home_paths, "owner_home_dir", "") or ""),
+            "channel": scope.channel,
+            "channel_conversation_id": scope.conversation_id,
+            "channel_user_id": scope.user_id,
+            "title": "会话设置",
+        }
+    )
+
+
 # LLM: Verbose is a per-thread control setting; the command text never enters a model turn.
 # 函数用途:在精确 owner/thread 上读取或修改过程显示档位，并返回确定性系统回执。
 def _execute_verbose_control(
@@ -706,21 +725,7 @@ def _execute_verbose_control(
     try:
         owner_agent = _request_agent_for_scope(base_agent, scope)
         store = owner_agent.conversation_store
-        thread = store.threads.get_or_create(
-            {
-                "canonical_user_id": scope.user_id,
-                "owner_id": str(
-                    getattr(getattr(owner_agent, "home_paths", None), "owner_id", "") or ""
-                ),
-                "owner_home": str(
-                    getattr(getattr(owner_agent, "home_paths", None), "owner_home_dir", "") or ""
-                ),
-                "channel": scope.channel,
-                "channel_conversation_id": scope.conversation_id,
-                "channel_user_id": scope.user_id,
-                "title": "会话设置",
-            }
-        )
+        thread = _settings_thread(owner_agent, scope)
         if command.value:
             thread = store.threads.update_verbose_level(thread.thread_id, command.value)
         level = str(getattr(thread, "verbose_level", "off") or "off")
@@ -1030,48 +1035,51 @@ def _stop_targeted_manual_compact(
     )
 
 
-# LLM: Effort is an inference parameter, not a prose style. Until a backend exposes a verified
-# structured setter, every requested level must fail explicitly without changing temperature/prompt.
-# 函数用途: 查看或设置 effort 时说明当前真实能力，防止显示已设置但实际没生效。
+# LLM: 智能程度是会话线程设置（reasoning_effort），命令文本不进入模型轮；set 只写本线程字段，default 清除回落全局默认。
+#   回执按当前会话模型的结构化控制方式说明实际效果，模型不支持时如实说明不改变请求，绝不假装已生效。
+# 函数用途: 查看或设置本会话的智能程度，并说明在当前模型上怎样生效。
 def _execute_effort_control(
     base_agent: object,
     command: ConversationControlCommand,
     scope: GatewayControlScope,
 ) -> ConversationControlResult:
+    from ..settings.reasoning_effort import set_thread_reasoning_level
+
     try:
         owner_agent = _request_agent_for_scope(base_agent, scope)
-        backend = getattr(owner_agent, "backend", None)
-        levels = tuple(getattr(backend, "supported_effort_levels", ()) or ())
+        thread = _settings_thread(owner_agent, scope)
+        if command.operation == "set":
+            level = "" if command.value == "default" else command.value
+            thread = set_thread_reasoning_level(owner_agent.conversation_store, thread.thread_id, level)
+        return ConversationControlResult("effort", True, _render_effort(owner_agent, thread, command))
     except Exception:
-        levels = ()
-    if not levels:
-        viewing = command.operation in {"view", "help"}
-        prefix = (
-            "用法：/effort [low|medium|high|max|auto]\n"
-            if command.operation == "help"
-            else ""
-        )
-        return ConversationControlResult(
-            "effort",
-            viewing,
-            prefix + "当前模型接口由供应商管理推理强度，未声明可调 effort 档位；未改变任何模型参数。",
-        )
-    if command.operation in {"view", "help"}:
-        prefix = (
-            "用法：/effort [low|medium|high|max|auto]\n"
-            if command.operation == "help"
-            else ""
-        )
-        return ConversationControlResult(
-            "effort",
-            True,
-            prefix + f"后端声明的 effort 档位：{', '.join(map(str, levels))}。",
-        )
-    return ConversationControlResult(
-        "effort",
-        False,
-        "后端声明了 effort 档位，但当前运行时尚无结构化设置入口；本次未应用。",
+        return ConversationControlResult("effort", False, "当前会话的智能程度设置暂时不可用，请稍后重试。")
+
+
+# LLM: 只由线程档位、全局默认与当前会话模型的控制方式生成文案；模型暂不可解析时仍显示档位并说明原因。
+# 函数用途: 渲染 /effort 的中文回执。
+def _render_effort(owner_agent: object, thread: object, command: ConversationControlCommand) -> str:
+    from ..backends.reasoning_control import (
+        LEVEL_LABELS,
+        describe_reasoning_effect,
+        resolved_reasoning_control,
     )
+    from ..settings.reasoning_effort import THREAD_FIELD, configured_reasoning_level
+    from ..settings.thread_model_selection import thread_model_config
+
+    own = str(getattr(thread, THREAD_FIELD, "") or "")
+    level = own or configured_reasoning_level(getattr(owner_agent, "config", None))
+    source = "本会话设置" if own else "全局默认"
+    lines = [_EFFORT_USAGE] if command.operation == "help" else []
+    lines.append(f"本会话智能程度：{LEVEL_LABELS[level]}（{source}）。")
+    try:
+        config = thread_model_config(owner_agent, thread.thread_id)
+    except Exception:  # noqa: BLE001 - 模型尚未配置时仍要能查看和设置档位。
+        lines.append("当前会话还没有可用的模型；设置会保存，选择模型后生效。")
+        return "\n".join(lines)
+    control = resolved_reasoning_control(config.model_reasoning_control, config.api_base, config.model_backend)
+    lines.append(f"当前模型 {config.model_name}：{describe_reasoning_effect(level, control)}")
+    return "\n".join(lines)
 
 
 # LLM: Context controls resolve only the exact authenticated channel binding; query/manual

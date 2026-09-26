@@ -8,6 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
+from ..settings.reasoning_effort import child_reasoning_level
 from ..settings.thread_model_selection import PendingSubagentModelAdvice
 from ..tooling.operation_verification import public_operation_verification
 from ..turn_end import result_turn_end_reason
@@ -56,7 +57,8 @@ class AgentThreadTurnContext:
 
 
 # LLM: 谱系只读 canonical task/父；建议仅接受宿主准备载体的显式参数，绝不从 task attrs 恢复，既有线程不重植 pending。
-# 函数用途: 物化或校验孩子独立会话，新线程可保存待验证模型建议，读取/恢复不改其有效模型。
+#   新线程同时写入创建时冻结的智能程度档位（host_reasoning_effort.v1），既有线程不改。
+# 函数用途: 物化或校验孩子独立会话，新线程可保存待验证模型建议与档位，读取/恢复不改其有效模型。
 def ensure_subagent_thread(manager: object, task: object, *, model_advice: PendingSubagentModelAdvice | None = None) -> ConversationThread | None:
     store = getattr(manager, "conversation_store", None)
     if store is None:
@@ -118,6 +120,7 @@ def ensure_subagent_thread(manager: object, task: object, *, model_advice: Pendi
             "owner_id": owner_id,
             "owner_home": str(getattr(manager, "owner_home_dir", "") or "").strip(),
             "model_profile_id": str((attrs.get("host_model_profile.v1") or {}).get("profile_id") or "default"),
+            "reasoning_effort": child_reasoning_level(attrs),
             "title": title,
             "cwd": cwd,
             "runtime_workspace_roots": roots,

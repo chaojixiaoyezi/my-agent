@@ -81,6 +81,8 @@
   只加到动态首事件预算，适合单槽推理服务器排队；不延长流静默或取消响应，不是承诺上游一定成功。
   该配置不能修复 schema 编译错误或输出长度耗尽；不得因此无界重试或替换模型。
 
+- 模型编辑的“思考控制”存为可选字段 `reasoning_control`（auto/effort/budget/none），决定 `/effort` 与子代理 `effort`的档位怎样发送；只有显式声明且不是 auto 才写键。auto 只对实测确认的 DeepSeek 官方接口给默认，其余不发参数，详见 [智能程度](REASONING_EFFORT.md)。
+
 - `top_p` 是可选核采样概率，YAML 默认 `null`；`/model` 每模型可填写 0 至 1 的有限数值。
   模型表单留空表示继承部署值；部署同样留空时由适配器决定是否发送。布尔/NaN/无穷大/越界值无效。
 - 普通 Chat、Responses、Anthropic 未配置时不新增 top_p；显式填写时透传，供应商支持性由其协议决定。

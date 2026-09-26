@@ -8,6 +8,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from ..backends.reasoning_control import normalize_reasoning_level
 from ..settings.decision_settings_schema import empty_decision_settings
 
 SCHEMA_VERSION = "conversation_thread.v10"
@@ -407,6 +408,10 @@ class ConversationThread:
     # 字段用途: 保存已压缩历史中的结构化操作核验证据；不从摘要或聊天正文反向推断。
     compact_operation_evidence: dict[str, Any] = field(default_factory=dict)
     verbose_level: str = "off"
+    # LLM: 智能程度档位（auto/off/low/medium/high/max）；空串表示本会话未设置、回落全局默认。
+    #   主会话由 /effort 写入，子代理线程在创建时写入；换算与控制方式见 backends/reasoning_control.py。
+    # 字段用途: 保存本会话的推理强度设置，多个窗口打开同一会话共享。
+    reasoning_effort: str = ""
     created_at: float = 0.0
     updated_at: float = 0.0
     channel_bindings: tuple[ChannelBinding, ...] = ()
@@ -504,6 +509,7 @@ class ConversationThread:
                 else {}
             ),
             verbose_level=_verbose_level(data.get("verbose_level")),
+            reasoning_effort=normalize_reasoning_level(data.get("reasoning_effort")),
             created_at=float(data.get("created_at") or 0.0),
             updated_at=float(data.get("updated_at") or 0.0),
             channel_bindings=tuple(

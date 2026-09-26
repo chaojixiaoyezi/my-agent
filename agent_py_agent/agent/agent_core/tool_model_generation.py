@@ -1252,36 +1252,52 @@ def _publish_tool_input_progress(
     sink(payload)
 
 
-# LLM: 仅把 backend 明确声明支持的 provider 增量/终态 callback 传给具备 typed sink
-# 的宿主；fake/旧后端保持原关键字形态，流内思考终态不能在 response 收尾处重放。
-# 函数用途: 按当前原生工具、思考和展示能力组装参数并调用一次模型后端。
-def _do_backend_generate(backend, prompt: str, state: _ModelGenerationState):
-    # text 协议(tools/messages 均为 None)保持原调用形态，不传新关键字，旁路/伪后端零改动。
-    thinking_observer = _thinking_stream_observer(backend, state)
-    tool_input_progress = _tool_input_progress_callback(backend, state)
+# LLM: 强制 tool_choice(specific/required/none)必须同时关思考——部分兼容端点(如 工具运行时 zen)在思考模式下拒绝
+#   强制工具选择；其余情况按本轮智能程度（request_reasoning_options，与自动选模投影同一函数）决定关思考或档位。
+#   后端未声明支持 typed options 或没有任何控制项时返回 None，保持旧调用形态。
+# 函数用途: 组装一次模型请求的 typed 选项（system 指令、思考开关、档位、首包预算）。
+def _provider_request_options(backend, state: _ModelGenerationState, *, forced: bool) -> ProviderRequestOptions | None:
+    if not bool(getattr(backend, "supports_provider_request_options", False)):
+        return None
+    from ..settings.reasoning_effort import request_reasoning_options
+
     system_instruction = str(getattr(state, "system_instruction", "") or "")
-    provider_options_supported = bool(
-        getattr(backend, "supports_provider_request_options", False)
-    )
     first_event_timeout = (
         max(0.0, float(state.first_token_timeout_seconds))
         if bool(getattr(backend, "stream_enabled", False))
         else None
     )
+    thinking_disabled, effort = request_reasoning_options(
+        getattr(state, "agent", None), getattr(state, "params", None), backend, forced=forced,
+    )
+    if not (system_instruction or thinking_disabled or effort or first_event_timeout is not None):
+        return None
+    return ProviderRequestOptions(
+        system_instruction=system_instruction,
+        thinking_disabled=thinking_disabled,
+        first_event_timeout_seconds=first_event_timeout,
+        reasoning_effort=effort,
+    )
+
+
+# LLM: 仅把 backend 明确声明支持的 provider 增量/终态 callback 传给具备 typed sink
+# 的宿主；fake/旧后端保持原关键字形态，流内思考终态不能在 response 收尾处重放。
+# 函数用途: 按当前原生工具、思考、智能程度和展示能力组装参数并调用一次模型后端。
+def _do_backend_generate(backend, prompt: str, state: _ModelGenerationState):
+    # text 协议(tools/messages 均为 None)保持原调用形态，不传新关键字，旁路/伪后端零改动。
+    thinking_observer = _thinking_stream_observer(backend, state)
+    tool_input_progress = _tool_input_progress_callback(backend, state)
     _generate_started = time.monotonic()
     if state.tools is None and state.messages is None:
         kwargs: dict[str, object] = {"on_chunk": state.on_chunk}
-        if provider_options_supported and (system_instruction or first_event_timeout is not None):
-            kwargs["request_options"] = ProviderRequestOptions(
-                system_instruction=system_instruction,
-                first_event_timeout_seconds=first_event_timeout,
-            )
+        if (options := _provider_request_options(backend, state, forced=False)) is not None:
+            kwargs["request_options"] = options
         if thinking_observer is not None:
             kwargs["on_thinking_delta"] = thinking_observer
         result = backend.generate(prompt, **kwargs)
     else:
         kwargs: dict[str, object] = {"on_chunk": state.on_chunk}
-        thinking_disabled = False
+        forced = False
         if thinking_observer is not None:
             kwargs["on_thinking_delta"] = thinking_observer
         if tool_input_progress is not None:
@@ -1290,17 +1306,9 @@ def _do_backend_generate(backend, prompt: str, state: _ModelGenerationState):
             kwargs["tools"] = state.tools
             tool_choice = state.tool_choice or ToolChoice.auto()
             kwargs["tool_choice"] = tool_choice
-            thinking_disabled = tool_choice.mode != "auto"
-        if provider_options_supported and (
-            system_instruction or thinking_disabled or first_event_timeout is not None
-        ):
-            # LLM: 强制 tool_choice(specific/required/none)必须同时关思考——部分兼容端点
-            # (如 工具运行时 zen)在思考模式下拒绝强制工具选择；typed options 避免继续扩张公开签名。
-            kwargs["request_options"] = ProviderRequestOptions(
-                system_instruction=system_instruction,
-                thinking_disabled=thinking_disabled,
-                first_event_timeout_seconds=first_event_timeout,
-            )
+            forced = tool_choice.mode != "auto"
+        if (options := _provider_request_options(backend, state, forced=forced)) is not None:
+            kwargs["request_options"] = options
         if state.messages is not None:
             kwargs["messages"] = state.messages
         result = backend.generate(prompt, **kwargs)

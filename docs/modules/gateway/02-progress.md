@@ -1,5 +1,11 @@
 # Gateway 维护状态
 
+`/effort` 从空壳改为真实会话设置（分支 `claude/reasoning-effort`，2026-09-26）：`control_service._execute_effort_control`
+读写当前 thread 的 `reasoning_effort`（auto/off/low/medium/high/max，`default` 清除回全局默认），回执说明当前会话模型的实际效果；
+与 `/verbose` 共用新抽出的 `_settings_thread`（行为不变）。每轮请求在 `tool_model_generation._provider_request_options` 现读线程
+档位，网关自动选模 `gateway_model_adoption._payload` 用同一函数投影（参数收进 `_PayloadSurface`），逐字核对保持一致。
+设计见 `docs/design/REASONING_EFFORT.md`，测试见 `test_reasoning_effort.py`。
+
 自学习 S3 接入后台策展车道（分支 `claude/skill-auto-summary`，2026-09-26）：`cli/gateway_loops.py` 的策展车道在记忆整理之后
 处理自动总结 Skill 请求。owner 有待处理学习请求时，即使记忆总闸关闭或当日记忆配额用完也会被准入，但那时只跑自动总结、
 不跑记忆整理（准入后按原条件重算）；`memory_curator_enabled=false` 而 `enable_self_learning=true` 时车道照常运转。

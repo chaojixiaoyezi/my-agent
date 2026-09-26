@@ -53,15 +53,33 @@ def freeze_selection_candidates(agent: object, candidates: dict, deadline: float
     return rows, generations
 
 
-# LLM: 原 schema 消费口径来自实际 backend builder，thinking_disabled 仅在实际 tools 参数存在时生效；不生成替代载荷。
+# LLM: 投影所需的请求面：工具、选择、历史、system 与本轮 agent/params（用于与真实发送同源地计算智能程度）。
+# 类用途: 打包一次载荷投影的输入，避免长参数列表。
+@dataclass(frozen=True)
+class _PayloadSurface:
+    tools: object
+    choice: object
+    messages: object
+    system: str
+    agent: object
+    params: object
+
+
+# LLM: 原 schema 消费口径来自实际 backend builder，强制工具选择仅在实际 tools 参数存在时关思考；思考开关与档位
+#   与真实发送共用 request_reasoning_options，不生成替代载荷。
 # 函数用途: 构造与真实 generate 相同的纯 payload，用于准备与最后发送边界逐字核对。
-def _payload(backend: object, prompt: str, tools: object, choice: object, messages: object, system: str) -> dict:
+def _payload(backend: object, prompt: str, surface: _PayloadSurface) -> dict:
+    from .settings.reasoning_effort import request_reasoning_options
+
     projector = getattr(backend, "project_generate_payload", None)
     if not callable(projector):
         raise ValueError("provider_request_surface_unknown")
-    value = projector(prompt, tools=tools, tool_choice=choice if tools is not None else None, messages=messages,
-                      request_options=ProviderRequestOptions(system_instruction=system,
-                                                             thinking_disabled=tools is not None and choice.mode != "auto"))
+    forced = surface.tools is not None and surface.choice.mode != "auto"
+    thinking_disabled, effort = request_reasoning_options(surface.agent, surface.params, backend, forced=forced)
+    value = projector(prompt, tools=surface.tools, tool_choice=surface.choice if surface.tools is not None else None,
+                      messages=surface.messages,
+                      request_options=ProviderRequestOptions(system_instruction=surface.system,
+                                                             thinking_disabled=thinking_disabled, reasoning_effort=effort))
     if not isinstance(value, dict):
         raise ValueError("provider_request_surface_unknown")
     return value
@@ -184,8 +202,9 @@ class GatewayModelAdoption:
             if projected.status != "ready" or any(not text_content_supported(row.get("content"), allow_reasoning=False) for row in projected.messages or ()):
                 raise ValueError("history_modality_or_projection_unknown")
             # 原始非空工具面即使被 choice.none 隐藏，也决定真实发送包装是否关闭 thinking。
-            payload = _payload(agent.backend, projected.provider_prompt, list(candidate_input.native_tools) or None, projected.tool_choice,
-                               projected.messages, projected.system_instruction)
+            payload = _payload(agent.backend, projected.provider_prompt, _PayloadSurface(
+                list(candidate_input.native_tools) or None, projected.tool_choice, projected.messages,
+                projected.system_instruction, agent, candidate_params))
             validation = _capacity(dependencies.config, payload)
             if preflight_context_pressure_response(ModelGenerateParams(agent, candidate_params, projected.prompt, params.tool_rounds)):
                 raise ValueError("original_context_preflight_rejected")
@@ -204,7 +223,8 @@ class GatewayModelAdoption:
         try:
             if state.params is not self.candidate_params or backend is not state.agent.backend:
                 raise ValueError("request_identity_changed")
-            payload = _payload(backend, prompt, state.tools, state.tool_choice, state.messages, state.system_instruction)
+            payload = _payload(backend, prompt, _PayloadSurface(state.tools, state.tool_choice, state.messages,
+                                                                state.system_instruction, state.agent, state.params))
             if payload != self.expected_payload:
                 raise ValueError("provider_payload_changed")
             _capacity(self.candidate.config, payload)

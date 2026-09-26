@@ -1,5 +1,18 @@
 # 测试与发布验收
 
+## 智能程度（推理强度）：`/effort` 与子代理 `effort`（2026-09-26，分支 `claude/reasoning-effort`，基于 main `84d9e50ac`）
+
+- **新增** `test_reasoning_effort.py` 30 项（传输全为本地 fake）：
+  - 换算：控制方式解析（显式声明优先；仅 DeepSeek 官方两种接口有默认；MiniMax、OpenCode、Responses、决策接口为 none）；档位与强制工具选择的优先级矩阵；两种协议的字段与思考预算夹紧。
+  - 真实组包：OpenAI 兼容带 `reasoning_effort` 或关思考且不混发；DeepSeek 工具历史缺 `reasoning_content` 被迫关思考时去掉档位；显式声明控制方式的未知域名 `off` 真正写出 `thinking: disabled`，未声明的不写；Anthropic 兼容 `budget` 与关闭。
+  - 档位解析：线程设置优先、清除后回全局默认、线程不可读时回默认；公用选项函数与网关自动选模投影载荷逐字一致，强制工具选择时不带档位。
+  - 子代理：显式档位（大小写不敏感）、伪造宿主属性被覆盖、非法档位整批报错、省略时继承父级线程档位、`effort` 计入去重身份、子线程只在物化时写入一次档位。
+  - `/effort`：真实 SimpleAgent + DeepSeek 档案下查看 / 设置 low / default 清除 / help，回执写明模型与“按推理强度档位发送：低”，不含密钥；echo 后端上如实回执“不支持调节、暂不改变请求”（改写原“永不假装已设置”用例）。
+  - 档案与配置：`reasoning_control` 保存、列出、解析进运行配置（未声明为 auto），auto 不写键，非法值与决策模型拒绝；TUI 表单预选并保存；YAML 默认与规范化。
+- **补充** `test_subagent_first_request_selection.py`：首轮自动换模的逐字比对改用同一 `request_reasoning_options` 计算期望载荷；新增用例在子线程档位 low、候选为 DeepSeek 官方接口时，断言确实采用候选模型且真实首轮请求带 `reasoning_effort: low`。
+- **变异验证**：22 种中 21 种使测试失败（强制工具优先、已知表、none 不发、预算夹紧、DeepSeek 被迫关思考时去档位、声明方式的 off、Anthropic 关思考优先、选项丢档位、网关投影丢档位、子代理继承、线程覆盖、去重身份、子线程初始化、/effort 写入、档案映射、auto 不写键、配置规范化、TUI 表单、非法子代理档位、工厂控制方式、决策模型拒绝）。存活的 1 种是子代理首轮选模投影不带档位：该投影只用于容量估算、不做逐字比对，属于行为等价，代码仍保持与真实请求一致。每次在 `PYTHONDONTWRITEBYTECODE=1` 子进程运行并按 sha256 还原。
+- **结果**：与改动直接相关的 39 个测试文件（含 `test_architecture_guardrails.py`）1074 passed；代码尺寸与 main 逐项对比无新增（`_do_backend_generate` 超软上限、`_payload` 参数两项消失）。
+
 ## 自学习 S3：完成任务后自动总结 Skill（2026-09-26，分支 `claude/skill-auto-summary`，基于 main `839250728`）
 
 - **新增** `test_skill_learning.py` 34 项（假 backend，不联网）：

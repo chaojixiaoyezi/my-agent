@@ -17,6 +17,7 @@ from .errors import (
 )
 from .http import HttpBackend, bounded_output_tokens, request_stream_lines
 from .provider_headers import endpoint_parts
+from .reasoning_control import reasoning_payload_fields
 from .response_completion import (
     has_reasoning_content,
     incomplete_response_fields,
@@ -50,6 +51,8 @@ class _OpenAIGenerateRequest:
     thinking_disabled: bool = False
     max_output_tokens: int | None = None
     first_event_timeout_seconds: float | None = None
+    # 智能程度档位（low/medium/high/max 或空串），按 self.reasoning_control 换算成 reasoning_effort/thinking。
+    reasoning_effort: str = ""
 
 
 # LLM: Chat 出站诊断只在显式环境开关下写入；payload 含任务正文，调用方必须使用仓库外私有路径。
@@ -65,6 +68,7 @@ def dump_provider_payload(payload: dict[str, Any], *, path: str) -> None:
             "path": path,
             "model": payload.get("model"),
             "thinking": payload.get("thinking"),
+            "reasoning_effort": payload.get("reasoning_effort"),
             "has_tools": "tools" in payload,
             "tool_choice": payload.get("tool_choice"),
             "message_count": len(payload.get("messages") or []),
@@ -121,6 +125,7 @@ class OpenAICompatibleBackend(HttpBackend):
                 messages=messages,
                 thinking_disabled=provider_options.thinking_disabled,
                 first_event_timeout_seconds=provider_options.first_event_timeout_seconds,
+                reasoning_effort=provider_options.reasoning_effort,
             )
         )
 
@@ -179,6 +184,7 @@ class OpenAICompatibleBackend(HttpBackend):
         payload = self._request_payload(_OpenAIGenerateRequest(
             prompt=prompt, tools=tools, tool_choice=tool_choice, messages=messages,
             system_instruction=options.system_instruction, thinking_disabled=options.thinking_disabled,
+            reasoning_effort=options.reasoning_effort,
         ))
         if self.stream_enabled:
             payload = openai_stream_payload(payload)
@@ -199,8 +205,10 @@ class OpenAICompatibleBackend(HttpBackend):
             thinking_disabled=request.thinking_disabled))
         if request.thinking_disabled:
             # 参考 轻量运行时 的 thinkingFormat 适配：官方与 Zen/Go 都默认开思考，强制工具探针须显式关闭；
-            # 不是通用 OpenAI 字段，因此只在已核对端点的分支里写入。
+            # 不是通用 OpenAI 字段，因此只在已核对端点或显式声明了思考控制方式的模型上写入。
             _disable_thinking_for(payload, api_base=self.api_base)
+            if self.reasoning_control in {"effort", "budget"}:
+                payload["thinking"] = {"type": "disabled"}
         from ..conversation.input_media import project_input_media
 
         if request.messages is not None:
@@ -227,6 +235,11 @@ class OpenAICompatibleBackend(HttpBackend):
                 _disable_thinking_for(payload, api_base=self.api_base)
         elif request.tool_choice is not None and request.tool_choice.mode == "none":
             payload["tool_choice"] = "none"
+        if request.reasoning_effort and payload.get("thinking") != {"type": "disabled"}:
+            # LLM: 档位放在工具历史检查之后：DeepSeek 缺 reasoning_content 被迫关思考时不能再带档位。
+            payload.update(reasoning_payload_fields(
+                self.reasoning_control, request.reasoning_effort, "openai", payload["max_tokens"],
+            ))
         if request.response_schema is not None:
             payload["response_format"] = {
                 "type": "json_schema",

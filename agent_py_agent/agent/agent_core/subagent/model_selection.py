@@ -389,6 +389,7 @@ def _candidate_request_input(agent: object, params: object, preparation: Subagen
     from ...memory_archive import estimate_tokens
     from ...model_guidance import provider_system_instruction
     from ...settings.model_scope import model_dependencies_scope
+    from ...settings.reasoning_effort import request_reasoning_options
     from ..model.context_pressure import preflight_context_pressure_response
     from ..native_tool_protocol import (
         model_turn_tool_choice,
@@ -415,12 +416,15 @@ def _candidate_request_input(agent: object, params: object, preparation: Subagen
             raise _CandidateUnavailable("provider_request_surface_unknown")
         if not text_messages_supported(projected.messages or (), allow_reasoning=False):
             raise _CandidateUnavailable("history_modality_unknown")
-        # 和真实生成包装一样，原工具参数决定 choice/thinking；筛选后空 schema 不代表原参数缺失。
+        # 和真实生成包装一样，原工具参数决定 choice/thinking，智能程度与真实发送同一函数计算；
+        # 筛选后空 schema 不代表原参数缺失。
+        forced = tools is not None and projected.tool_choice.mode != "auto"
+        thinking_disabled, effort = request_reasoning_options(agent, candidate_params, agent.backend, forced=forced)
         payload = projector(projected.provider_prompt, tools=tools,
                             tool_choice=projected.tool_choice if tools is not None else None,
                             messages=projected.messages, request_options=ProviderRequestOptions(
                                 system_instruction=projected.system_instruction,
-                                thinking_disabled=tools is not None and projected.tool_choice.mode != "auto",
+                                thinking_disabled=thinking_disabled, reasoning_effort=effort,
                             ))
         config = dependencies.config
         window = config.model_context_window_tokens

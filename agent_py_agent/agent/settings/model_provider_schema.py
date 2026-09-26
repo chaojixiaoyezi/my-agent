@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 from uuid import UUID
 
 from ..backends.provider_headers import validate_headers, validate_session_header
+from ..backends.reasoning_control import normalize_reasoning_control
 from ..backends.sampling import validate_top_p
 
 SCHEMA = "owner_model_profiles.v5"
@@ -142,7 +143,7 @@ def validate_provider(value: object) -> dict:
 
 
 # LLM: 模型引用不持有第二份 secret；decision 只走独立决策协议，不能进入生成适配器；同步用途隔离测试。
-#   目录读取也经本函数重校验，未登记的字段会被丢弃；可选用途标签和可选输入模态在此登记，决策模型都不接受。
+#   目录读取也经本函数重校验，未登记的字段会被丢弃；可选用途标签、输入模态和思考控制方式在此登记，决策模型都不接受。
 # 函数用途: 检查模型协议、用途、容量、适用采样和可选用途标签；型号允许透传，决策模型不接受无效的生成参数。
 def validate_model(value: object) -> dict:
     if not isinstance(value, dict) or not isinstance(value.get("model_backend"), str) or value["model_backend"] not in BACKENDS:
@@ -164,7 +165,7 @@ def validate_model(value: object) -> dict:
     result = {"provider_id": validate_provider_id(value.get("provider_id")), "model_name": name.strip(),
             "model_backend": value["model_backend"], "model_context_window_tokens": int(window),
             "capability": capability, "enabled": value.get("enabled", True), **_usage_tags_field(value, capability),
-            **_input_modalities_field(value, capability)}
+            **_input_modalities_field(value, capability), **_reasoning_control_field(value, capability)}
     temperature = value.get("temperature")
     if temperature not in (None, ""):
         try:
@@ -190,6 +191,21 @@ def validate_model(value: object) -> dict:
             raise ModelProfileError("排队预算须为 0 至 86400 秒。")
         result["model_queue_wait_seconds"] = seconds
     return result
+
+
+# LLM: 思考控制方式只在显式声明且不是 auto 时写键（缺省即 auto，旧记录逐字节不变）；取值与
+#   backends/reasoning_control.REASONING_CONTROLS 一致；决策模型不接受，与它不接受生成采样字段同一口径。
+# 函数用途: 为模型记录生成可选的思考控制方式字段，供 validate_model 合并。
+def _reasoning_control_field(value: dict, capability: str) -> dict:
+    raw = value.get("reasoning_control")
+    if raw in (None, ""):
+        return {}
+    control = normalize_reasoning_control(raw)
+    if not control:
+        raise ModelProfileError("思考控制只接受 auto、effort、budget 或 none。")
+    if control != "auto" and capability == "decision":
+        raise ModelProfileError("决策模型不使用思考控制，由决策设置管理。")
+    return {} if control == "auto" else {"reasoning_control": control}
 
 
 # LLM: 只在填写了标签时返回字段，缺省不写键；决策模型不接受标签，与它不接受生成采样字段同一口径。
@@ -254,7 +270,7 @@ def validate_input_modalities(value: object) -> list[str]:
 
 
 # LLM: 扁平输入立即变成 provider 引用；用途必须保留，不能在快捷新增中把 decision 降为 agentic。
-#   快捷新增白名单含可选 usage_tags 与 input_modalities，两者都只登记不改变生成参数。
+#   快捷新增白名单含可选 usage_tags、input_modalities 与 reasoning_control（后者只决定智能程度档位怎样发送）。
 # 函数用途: 校验快捷新增的完整连接信息及用途；秘密仍只保存到服务商，非生成字段不传入 AgentConfig。
 def validate_model_profile(value: object) -> dict:
     if not isinstance(value, dict):
@@ -264,7 +280,7 @@ def validate_model_profile(value: object) -> dict:
         "custom_headers": value.get("model_custom_headers", {}), "session_header": value.get("model_session_header", "")})
     if not provider["api_key"]:
         raise ModelProfileError("模型名称、地址和密钥不能为空。")
-    row = {key: model[key] for key in ("model_name", "model_backend", "model_context_window_tokens", "temperature", "top_p", "model_queue_wait_seconds", "capability", "enabled", "usage_tags", "input_modalities") if key in model}
+    row = {key: model[key] for key in ("model_name", "model_backend", "model_context_window_tokens", "temperature", "top_p", "model_queue_wait_seconds", "capability", "enabled", "usage_tags", "input_modalities", "reasoning_control") if key in model}
     row.update(api_base=provider["api_base"], api_key=provider["api_key"])
     if provider["custom_headers"]:
         row["model_custom_headers"] = provider["custom_headers"]
@@ -319,7 +335,8 @@ def migrate_v4(data: dict) -> dict:
 
 
 # LLM: 唯一解析点校验调用方所需用途，即使跳过启用检查也不能混用；OAuth 只返回绑定引用。
-#   声明了 input_modalities 时以 model_input_modalities 进入 AgentConfig（压缩策略消费）；用途标签仍不进运行时。
+#   声明了 input_modalities 时以 model_input_modalities 进入 AgentConfig（压缩策略消费）；思考控制方式总以
+#   model_reasoning_control 进入（未声明为 auto）；用途标签仍不进运行时。
 # 函数用途: 获得指定用途的连接字段，默认只供聊天生成；决策消费者须显式请求 decision，不发网络请求。
 def resolved_model(data: dict, profile_id: str, *, require_enabled: bool = True, capability: str = "agentic") -> dict:
     from .model_oauth_schema import has_credential, oauth_binding
@@ -332,7 +349,9 @@ def resolved_model(data: dict, profile_id: str, *, require_enabled: bool = True,
         raise ModelProfileError("这个模型或服务商未启用、缺少密钥或尚未登录。")
     result = {**{key: model[key] for key in ("model_name", "model_backend", "model_context_window_tokens", "temperature", "top_p", "model_queue_wait_seconds") if key in model},
             "api_base": provider["api_base"], "api_key": provider["api_key"],
-            "model_custom_headers": dict(provider["custom_headers"]), "model_session_header": provider["session_header"]}
+            "model_custom_headers": dict(provider["custom_headers"]), "model_session_header": provider["session_header"],
+            # 未声明即 auto，不继承部署配置里为其它模型写的控制方式。
+            "model_reasoning_control": model.get("reasoning_control") or "auto"}
     if model.get("input_modalities"):
         # 声明的输入模态进入运行时配置，供含图历史压缩判断能否随图摘要；它不是生成参数，也不证明容量。
         result["model_input_modalities"] = list(model["input_modalities"])

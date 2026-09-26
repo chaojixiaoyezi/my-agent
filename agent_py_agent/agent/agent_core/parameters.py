@@ -79,8 +79,8 @@ def _create_subagent_intent_keys(payload: dict[str, object]) -> set[str]:
     return keys
 
 
-# LLM: model 是显式配置选择，不得被 goal 去重吞掉；省略时不追加字段，保持既有请求键稳定。
-# 函数用途: 生成派工去重身份，让同目标的不同模型比较不会被当成同一个子代理。
+# LLM: model 与 effort 是显式配置选择，不得被 goal 去重吞掉；省略时不追加字段，保持既有请求键稳定。
+# 函数用途: 生成派工去重身份，让同目标的不同模型或不同智能程度对比不会被当成同一个子代理。
 def subagent_intent_identity(payload: dict[str, object], item: dict[str, object]) -> str:
     goal = " ".join(str(item.get("goal") or payload.get("goal") or "").split())
     if not goal:
@@ -99,6 +99,8 @@ def subagent_intent_identity(payload: dict[str, object], item: dict[str, object]
     }
     model = item.get("model", payload.get("model"))
     model_ref = {"model": model.strip()} if isinstance(model, str) and model.strip() else {}
+    effort = item.get("effort", payload.get("effort"))
+    effort_ref = {"effort": effort.strip().lower()} if isinstance(effort, str) and effort.strip() else {}
     return json.dumps(
         {
             "goal": goal,
@@ -106,6 +108,7 @@ def subagent_intent_identity(payload: dict[str, object], item: dict[str, object]
             "replacement_for_run_ids": sorted(replacement_ids),
             **work_refs,
             **model_ref,
+            **effort_ref,
         },
         ensure_ascii=False,
         sort_keys=True,

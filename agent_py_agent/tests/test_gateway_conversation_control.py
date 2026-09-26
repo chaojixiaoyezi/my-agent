@@ -3266,7 +3266,8 @@ def test_manual_compact_after_task_head_uses_thread_source_and_replays_receipt(t
     assert store.threads.require(thread.thread_id).compact_generation == 2
 
 
-def test_manual_compact_rejects_a_live_turn_and_effort_never_fakes_a_setting(tmp_path) -> None:
+def test_manual_compact_rejects_a_live_turn_and_effort_never_fakes_an_effect(tmp_path) -> None:
+    # /effort 现在是会话设置：档位会保存，但模型不支持调节时回执必须如实说明不改变请求。
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
         tmp_path,
@@ -3296,10 +3297,11 @@ def test_manual_compact_rejects_a_live_turn_and_effort_never_fakes_a_setting(tmp
 
     assert compact.ok is False
     assert "仍在运行" in compact.message
-    assert effort.ok is False
-    assert "未改变任何模型参数" in effort.message
+    assert effort.ok is True
+    assert "本会话智能程度：高（本会话设置）" in effort.message
+    assert "不支持调节智能程度" in effort.message and "暂不改变请求" in effort.message
     assert effort_status.ok is True
-    assert "供应商管理推理强度" in effort_status.message
+    assert "高（本会话设置）" in effort_status.message and "不支持调节智能程度" in effort_status.message
 
 
 def test_manual_compact_cas_race_does_not_replace_winning_head(tmp_path, monkeypatch) -> None:

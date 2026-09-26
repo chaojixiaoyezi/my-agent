@@ -39,6 +39,7 @@
 `-- docs/design/
     |-- ADMIN_CHANNEL_IDENTITY.md       # IM 管理员身份：管理员密码、私聊精确绑定为 local/main、聊天内 /approve /deny 审批
     |-- SKILL_AUTO_SUMMARY.md           # 自学习 S3：完成任务后自动总结 Skill，自动闸门代替人工确认、登记表所有权、账本与回滚
+    |-- REASONING_EFFORT.md             # 智能程度：各服务商实测、档位与控制方式、会话/子代理档位来源、/effort 与边界
     |-- MAINTAINABILITY_AND_JEV_REVIEW.md # 可维护性评估、渐进重构建议及 Computer Use/Jev 能力边界
     |-- DECISION_MODEL_INTEGRATION.md    # 可选决策模型的短期限、失败隔离、接入点、缓存与并行实施计划
     |-- DECISION_AUDIT_AND_ADMIN_CONTROLS.md # 决策点开关、超时自调上下限、选模型输入精简、统计行、统一审计与管理员管控
@@ -524,6 +525,7 @@ agent_py_agent/
 |   |   |-- model_oauth_schema.py       # 授权配置、凭据目的地、私有状态与绑定校验
 |   |   |-- model_oauth_wire.py         # 设备码、兑换和刷新协议的有界无重定向 HTTP
 |   |   |-- thread_model_selection.py   # canonical 会话模型编号、默认初始化与逐工作片解析
+|   |   |-- reasoning_effort.py         # 会话/子代理智能程度档位：线程现读、全局默认、/effort 写入、子代理继承与请求选项
 |   |   |-- shared_model_catalog.py     # 管理员显式共享引用目录，不复制私有连接凭证
 |   |   |-- model_provider_schema.py    # provider/model v2 校验、v1 显式迁移与单份连接快照解析
 |   |   |-- model_provider_operations.py # 锁内服务商/模型管理，密钥保留与显式清除
@@ -629,6 +631,7 @@ agent_py_agent/
 |       |-- typesafe_decision_wire.py  # TypeSafe 题目/结果校验，未知用量保留缺失；jev_wire_bytes.v1 经验输入上界
 |       |-- cache_diagnostics.py       # 出站请求摘要及前缀变化诊断，不存正文或改变缓存布局
 |       |-- sampling.py                # top_p 校验与精确端点 V4 Flash 采样默认，不改变身份或重试
+|       |-- reasoning_control.py       # 智能程度档位与模型思考控制方式（effort/budget/none）的唯一换算点，只对实测供应商给默认
 |       |-- responses.py               # Responses 协议生成入口，复用正式 HTTP/取消/超时主链
 |       |-- responses_wire.py          # typed SSE/items 与既有工具历史映射、加密 reasoning 回放
 |       |-- anthropic_prompt_cache.py  # Anthropic tools/system/最新 history 断点与追加式 user 投影
@@ -644,6 +647,7 @@ agent_py_agent/
 |   |-- fixtures/decision/jev_capability_rounding.json # 合成材料真实Jev响应的脱敏概率舍入replay，不含凭据
 |   |-- test_skill_proposals.py         # 自学习 S1：默认关闭、幂等提案、迁移不碰、确认拒绝矩阵、快照可见、runner 自动确认与 CLI 往返
 |   |-- test_skill_learning.py          # 自学习 S3：触发判据、请求有界脱敏、create/update/skip、各闸门拒绝码、上限、重试、忙时顺延、回滚删除
+|   |-- test_reasoning_effort.py        # 智能程度：换算与优先级、两种协议真实组包、线程档位、投影一致、子代理继承、/effort、档案字段与配置
 |   |-- test_skill_learning_integration.py # 自学习 S3 接线：组合根装配、收口入队、Gateway 策展车道准入、learned CLI、S1 自动确认与配置
 |   |-- test_subagent_lesson_ledger.py  # record_lesson：身份与 Schema、字段/条数/字节上限、幂等、账本复核、结果合并、候选与 S1 提案、暴露面与提示
 |   |-- test_decision_skill_proposal_review.py # 自学习 S2 审核顺序点：资格边界、别名与脱敏、逐题校验、采用前复核、取消传播、零写入
@@ -1396,6 +1400,7 @@ docs/
 - `agent/backends/cache_diagnostics.py`：真实 HTTP 请求的无正文摘要，不修改模型请求或记忆。
 - `agent/conversation/process_events.py`：原进程记录到原 wake 队列的耐久终态通知；不新增任务状态机。
 - `agent/backends/sampling.py`：YAML/profile/backend 共用 top_p 数值校验；已知 Flash 方言默认与任意端点显式覆盖分开。
+- `agent/backends/reasoning_control.py` 与 `agent/settings/reasoning_effort.py`：智能程度的换算与解析。档位是会话线程属性（`/effort`、子代理 `effort`、全局 `model_reasoning_effort`），模型档案 `reasoning_control` 决定怎样发送；真实请求与两处自动选模投影共用 `request_reasoning_options`。设计见 `docs/design/REASONING_EFFORT.md`，测试 `test_reasoning_effort.py`。
 - `agent_py_agent/tests/test_gateway_main_activity.py`：前后台数值/阶段共享、任务晋升、跨会话拒绝、迟到关闭和显示故障验证。
 - `agent_py_agent/tests/test_shell_stdin.py`：使用独立宿主管道验证批处理 EOF、输入不串和显式管道，不读取真实用户输入。
 - `agent_py_agent/tests/test_shell_foreground_cleanup.py`：验证前台普通退出先清理后代再回收组长，身份缺失／复用拒绝发信号，原命令结果与清理 UNKNOWN 分开。

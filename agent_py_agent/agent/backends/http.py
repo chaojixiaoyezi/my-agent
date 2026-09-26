@@ -85,6 +85,8 @@ class HttpBackend(BaseBackend):
         from .sampling import validate_top_p
 
         self.top_p = validate_top_p(options.top_p)
+        # 思考控制方式随 profile 冻结；档位由每次请求的 ProviderRequestOptions.reasoning_effort 传入。
+        self.reasoning_control = str(options.reasoning_control or "none")
         self.stream_enabled = bool(options.stream_enabled)
         self.prompt_cache_enabled = bool(options.prompt_cache_enabled)
         self.input_media_max_bytes = max(1, int(options.input_media_max_bytes))
