@@ -2,7 +2,8 @@
 
 能力包新增X01/E01与F01第二轮共45次官方M2.7 HTTP，原生组合/明确选择/脚本执行已触发，来源语义与交接质量仍有失败。
 F01控制因测试观察器混淆activation身份、解析截短display而未触发；这不是产品撤销失败，不修改原trial或补做已结束任务。
-当前保留例各0/3、全卸载核心对照待做；详见[唯一Goal](docs/tasks/CAPABILITY_INTERNALIZATION_GOAL.md)。
+ZERO01全卸载后的核心CSV与精确重装已由原生TUI通过；12次管理写、2次主业务HTTP，195旧文件/42pins/6配置保持。
+当前保留例各0/3；下一步吸收实施方固定main并复核Compact/Jev组合，详见[唯一Goal](docs/tasks/CAPABILITY_INTERNALIZATION_GOAL.md)。
 
 Compact生成事实已形成[设计交接](docs/design/COMPACT_GENERATION_FACTS.md)，产品及直接测试由Claude统一实施；能力包线继续独立框架验收与只读复核，不同时修改Compact/Jev。此交接未改变运行代码，也未完成新的真实验收。
 
