@@ -111,7 +111,8 @@ class PreparedCompactRecovery:
     # LLM: 进入时领取防摘要重入；强制恢复没有消息或完整工具来源时显式拒绝，准备/投影失败不发送业务，CAS后沿同次材料发送。
     # 强制恢复遇 unknown 非文本内容（或媒体策略 off 且含媒体）报 COMPACT_REQUEST_NON_TEXT（preflight 此时只在窗口上限触发）；自动遇同类内容走 noop。
     # 已知媒体在策略不为 off 时进入压缩链，由 compact 按策略投影为归档引用或随图摘要。
-    # 自动 noop 先原样返回原请求；决定摘要后解绑原参数与冻结输入的完整原生历史，失败/取消/超限收尾都不得再读它。
+    # 自动 noop 先原样返回原请求；决定摘要后先量一次完整旧请求（“压缩前”大小），再解绑原参数与冻结输入的完整原生历史，
+    # 失败/取消/超限收尾都不得再读它。
     # 函数用途: 用完整当前输入选择摘要候选，提交后返回同次恢复轮的新参数与已检查提示。
     def select(self, agent: object, params: object, prompt: str) -> tuple[object, str]:
         if self.consumed or not (agent is self.agent and self.matches_request(params)):
@@ -146,6 +147,9 @@ class PreparedCompactRecovery:
             return params, prompt
         # 已决定摘要：旧请求不会再发送，候选按新种子重建历史。解绑原参数和冻结输入持有的完整原生历史，
         # 摘要期间不再驻留旧请求；只解绑这一对象，经 replace 共享同一列表的其它参数对象不受影响。
+        # 解绑前先按自动判定同一口径量一次完整旧请求，作为 checkpoint 与进度里的“压缩前”大小：解绑后的冻结输入
+        # 已不含历史，再量只剩系统提示和工具（2026-09-26 真机记成 35,915，实际约 31.3 万）。
+        before_tokens = _full_request_tokens(agent, frozen)
         frozen = replace(frozen, provider_history_messages=())
         object.__setattr__(params, "provider_history_messages", [])
         backend = agent.backend
@@ -171,9 +175,10 @@ class PreparedCompactRecovery:
                     raise ConversationCompactError("恢复候选摘要视图不一致", code="COMPACT_REQUEST_PROJECTION_CHANGED")
             if material.projection.status != "ready":
                 raise ConversationCompactError("完整恢复投影未知", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
-            tokens, _ = projected_model_context_components(
+            # 原请求视图的材料来自已解绑历史的冻结输入，计量改用解绑前的完整大小；候选照常按自身投影计量。
+            tokens = projected_model_context_components(
                 material.projection, media_token_reserve=media_token_reserve(self.agent),
-            )
+            )[0] if view.is_candidate else before_tokens
             return ConversationCompactProjection(tokens, material)
 
         try:
@@ -191,7 +196,7 @@ class PreparedCompactRecovery:
                     ),
                 )
             else:
-                result = self._compact_active_source(params, frozen, interrupted, tool_source, handoff_max_chars)
+                result = self._compact_active_source(params, frozen, interrupted, tool_source, before_tokens)
         except (InterruptedError, ToolCancelled):
             raise
         except Exception as exc:
@@ -243,23 +248,16 @@ class PreparedCompactRecovery:
         return not self.source.messages and tool_source is None
 
     # LLM: 同次归档和原生IR来源复用原active-turn摘要与CAS；projector只替换已证明完整的冻结来源。
+    #   before_tokens 是 select 在解绑旧历史前量得的完整旧请求大小，这里不能再用已解绑的冻结输入重量。
     # 函数用途: 没有已结束历史时，以完整请求计量压缩工具往返和归档交接，未知/过大不提交。
-    def _compact_active_source(self, params, frozen, interrupted, tool_source, handoff_max_chars):
+    def _compact_active_source(self, params, frozen, interrupted, tool_source, before_tokens):
         from ..conversation.active_turn_compact import (
             ActiveTurnArchiveCompactRequest,
             compact_carried_active_turn_archive,
         )
+        from ..memory_archive.compact_semantic_summary import semantic_summary_config
 
-        before_projection = self.project_candidate(params, frozen, ConversationCompactView(
-            self.source.thread.thread_id, self.source.thread.compact_generation,
-            self.source.compact_context.view.summary, (), self.source.compact_context.view.operation_evidence,
-            {}, self.source.policy.trigger_tokens, False,
-        )).projection
-        if before_projection.status != "ready":
-            raise ConversationCompactError("恢复输入未知", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
-        before, _ = projected_model_context_components(
-            before_projection, media_token_reserve=media_token_reserve(self.agent),
-        )
+        handoff_max_chars = semantic_summary_config(self.agent).max_input_chars
 
         # LLM: 本回调只在原摘要后、写checkpoint前执行；预计代次来自真实binding，不使用原旧thread猜新代次。
         # 函数用途: 把活动摘要和保留区交给宿主纯投影，交回真实完整计量及同次材料。
@@ -287,9 +285,20 @@ class PreparedCompactRecovery:
                 task_attributes=params.task_attributes, request_id=params.request_id, attempt_id=params.attempt_id,
                 task_prompt=params.user_prompt, progress_callback=self.progress_callback, interrupt_check=interrupted,
                 compact_context=self.source.compact_context, request_projector=project,
-                projected_tokens_before=before, provider_surface=_summary_surface(frozen), tool_source=tool_source,
+                projected_tokens_before=before_tokens, provider_surface=_summary_surface(frozen), tool_source=tool_source,
             ),
         )
+
+
+# LLM: 与 _automatic_noop 同一口径（完整冻结投影 + 已知媒体预留）量完整旧请求；只在决定摘要后、解绑历史前调用一次，
+#   结果只写 checkpoint/进度的“压缩前”大小，不参与是否压缩的判定。投影未知时按原结构化错误拒绝。
+# 函数用途: 返回压缩前完整请求的估算 token 数，供强制与自动两条恢复路径共用。
+def _full_request_tokens(agent: object, frozen: ToolLoopRequestInput) -> int:
+    projection = project_tool_loop_request(frozen)
+    if projection.status != "ready":
+        raise ConversationCompactError("完整请求投影未知", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
+    tokens, _ = projected_model_context_components(projection, media_token_reserve=media_token_reserve(agent))
+    return tokens
 
 
 # LLM: 摘要继续沿原 provider surface，但只消费此次已准备的 system/schema/展示；不得重跑 Registry、推荐或 PromptBuilder。

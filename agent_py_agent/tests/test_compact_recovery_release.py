@@ -14,6 +14,7 @@ from agent_py_agent.agent.backends.errors import (
     ProviderTransientError,
 )
 from agent_py_agent.agent.conversation import active_turn_compact, background_execution, compact
+from agent_py_agent.agent.conversation.compact_checkpoint import committed_compact_checkpoint_chain
 from agent_py_agent.agent.conversation.compact_guard import ConversationCompactError
 from agent_py_agent.agent.gateway_parts import request_execution
 from agent_py_agent.agent.model_request_selection import _HOST
@@ -258,3 +259,27 @@ def test_committed_candidate_shares_tool_context_with_original_params(tmp_path, 
     fake_http(monkeypatch, fixture, on_business=on_business)
     request_execution._run_gateway_ask(fixture.context)
     assert shared == [True]
+
+
+def test_released_history_does_not_shrink_the_recorded_before_size(tmp_path, monkeypatch):
+    # 2026-09-26 真机：决定摘要后先解绑旧历史、再量“压缩前”大小，checkpoint 记成只剩系统提示和工具的 35,915
+    # （实际约 31.3 万），比压后还小。锁定：记录的是解绑前完整旧请求的计量，与自动判定同一口径。
+    fixture = _history_request(tmp_path, history_repeat=3000)
+    measured = []
+    original_measure = recovery_core._full_request_tokens
+    monkeypatch.setattr(recovery_core, "_full_request_tokens",
+                        lambda *args: measured.append(original_measure(*args)) or measured[-1])
+    seen = []
+
+    def on_business(wire):
+        if not seen:
+            seen.append("overflow")
+            raise ProviderContextWindowError("测试供应商上下文溢出")
+        seen.append("sent")
+
+    fake_http(monkeypatch, fixture, on_business=on_business)
+    request_execution._run_gateway_ask(fixture.context)
+    current = fixture.agent.conversation_store.threads.require(fixture.thread_id)
+    checkpoint = committed_compact_checkpoint_chain(fixture.agent, current)[-1]
+    assert len(measured) == 1 and checkpoint["projected_tokens_before"] == measured[0]
+    assert checkpoint["projected_tokens_before"] > checkpoint["projected_tokens_after"]

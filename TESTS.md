@@ -1,5 +1,14 @@
 # 测试与发布验收
 
+## Compact 强制恢复的“压缩前”计量改到解绑历史之前（2026-09-26，分支 `claude/curator-budget`，基于 main `04c339eb9`）
+
+- **复现**：`test_gateway_compact_recovery` 的真实 Gateway 恢复链（只有 HTTP 是内存替身），历史放大到约 7 万 token。原请求带历史实测 69,961，旧代码写进 checkpoint 的 `projected_tokens_before` 却是 9,919（压后 13,290），与真机“35,915 < 压后 40,303”同一模式。
+- **新测试**：
+  - `test_compact_recovery_release.py::test_released_history_does_not_shrink_the_recorded_before_size`：Gateway transcript 路径，checkpoint 的“压缩前”等于解绑前量得的完整请求，且大于压后。
+  - `test_compact_native_ir_recovery.py` 空 transcript 的活动回合成功用例：checkpoint 的“压缩前”等于同一次解绑前计量，只量一次。
+- **变异验证**：把计量挪到解绑之后，Gateway 用例失败（9,920 不大于 13,293）；活动回合路径改回用已解绑输入重量，三个参数组合失败。还原后通过。
+- **估算器核对**（原因排查）：`estimate_tokens` 对一份约 9 万字的合成资料估 63,562，DeepSeek 实测每份约 57,650，估算偏保守；之前记的 73,841 取自 `current_context_token_estimate`，它不含原生历史，不是估算器偏低。
+
 ## Compact 分段请求改为片段在前、累计摘要与规则在后（2026-09-26，分支 `claude/curator-budget`，基于 main `54f24ab94`）
 
 - **新测试**：`test_compact_request_budget.py::test_segment_request_puts_source_first_and_carry_with_rules_last`，锁定分段请求是单条文本、`messages=None`，顺序为 源片段 → 结束标记 → 此前摘要 → 摘要规则 → 合并要求；首段写明“无此前摘要”。

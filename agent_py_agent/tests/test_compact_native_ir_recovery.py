@@ -27,6 +27,7 @@ from agent_py_agent.agent.conversation.background_context import (
 from agent_py_agent.agent.conversation.background_history_seed import (
     prepare_background_history_or_raise,
 )
+from agent_py_agent.agent.conversation.compact_checkpoint import committed_compact_checkpoint_chain
 from agent_py_agent.agent.conversation.compact_guard import ConversationCompactError
 from agent_py_agent.agent.conversation.compact_summary_view import resolve_compact_summary_view
 from agent_py_agent.agent.conversation.runtime import _run_params
@@ -161,6 +162,10 @@ def test_empty_transcript_native_ir_recovery_summarizes_full_result_once_and_sen
     monkeypatch.setattr(recovery_core, "_project_mixed_recovery_material", project)
     monkeypatch.setattr(active_turn_compact, "_active_turn_replacement_summary", summary)
     monkeypatch.setattr(store.threads, "update_compact_state", commit)
+    measured = []
+    original_measure = recovery_core._full_request_tokens
+    monkeypatch.setattr(recovery_core, "_full_request_tokens",
+                        lambda *args: measured.append(original_measure(*args)) or measured[-1])
 
     def on_http(wire, _number):
         if in_summary:
@@ -194,6 +199,9 @@ def test_empty_transcript_native_ir_recovery_summarizes_full_result_once_and_sen
     assert not any(isinstance(item, (AssistantTurn, ToolResult)) for item in candidate.request_input.tool_ir_history)
     committed = store.threads.require(thread.thread_id)
     assert committed.compact_generation == 1 and committed.compact_checkpoint_id
+    # “压缩前”取 select 解绑旧历史前量得的完整旧请求，活动回合路径不再用已解绑的冻结输入重量。
+    assert len(measured) == 1
+    assert committed_compact_checkpoint_chain(agent, committed)[-1]["projected_tokens_before"] == measured[0]
     view = resolve_compact_summary_view(agent, committed, history.compact_context.scope)
     assert view.source_tool_refs == tuple(source_plans[0].source_tool_refs)
     assert (archived in candidate.params.archive_tool_calls) is archive_present
