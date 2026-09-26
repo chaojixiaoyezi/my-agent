@@ -231,7 +231,7 @@ Curator 与插件相关点的并发组合（P4-F，同一分支，`test_decision
 - 后台 `curator` 慢响应时，前台 `skill_tool`（插件工具短名单所用的点）照常在期限内完成；两者各记一条 purpose=decision 的原账。
 - 线程设置变更只提前取消该线程的前台决策；owner 级改 `curator` 只提前取消后台决策。
 - 已知取舍：采用前复核比较的是整份策略版本（两层 CAS 加全部有效值，自 `e131b1f6e` 起的保守设计），所以 owner 级任何设置改动也会让同 owner 其他点的在途建议在返回后作废为 `policy_changed`。两者都回原方案、都不挂起，只可能丢掉一条建议。
-- 冷却按连接（owner、profile、连接版本）共享：后台 Curator 超时后，同一连接上的前台点在冷却期内直接返回 `cooldown/connection_backoff` 保留原方案，不发请求。
+- 冷却分两种键（2026-09-26 修订）：后台 Curator 超时只让 `curator` 自己进入 `cooldown/point_backoff`，同一连接上的前台点照常请求；连接被拒、5xx、DNS、额度、配置等连接错误才冷却整条连接（owner、profile、连接版本），冷却期内前后台都直接返回 `cooldown/connection_backoff` 保留原方案，不发请求。见 `test_decision_curator_plugin_concurrency.py`。
 - 宿主关闭时两者一起被取消。
 
 `decision_model_call.py` 在实际 worker 安装原 HTTP observer 和身份头，并持有原可选准入与原账本 retain；
