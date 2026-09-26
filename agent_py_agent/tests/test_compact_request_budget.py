@@ -59,6 +59,21 @@ def responses_cover_source(text: str, total: int) -> bool:
     return all(previous_end == start for (_, previous_end), (start, _) in zip(ranges, ranges[1:]))
 
 
+_SEGMENT_HEADER = re.compile(r"历史 JSON 连续片段 \[(\d+):(\d+)/(\d+)\]：\n")
+
+
+# LLM: 只解析测试捕获的宿主分段信封：按头部区间长度切出源片段，并确认片段后紧跟同区间的结束标记；
+#   产品决策不读取这些自然语言标记。分段请求是单条文本 prompt，没有 messages。
+# 函数用途: 从一次分段摘要请求里取出 (起点, 终点, 总长, 源片段)，供各覆盖测试拼回完整来源。
+def segment_part(text: str) -> tuple[int, int, int, str]:
+    match = _SEGMENT_HEADER.search(text)
+    assert match is not None
+    start, end, total = map(int, match.groups())
+    part = text[match.end():match.end() + end - start]
+    assert text[match.end() + end - start:].startswith(f"\n历史 JSON 连续片段结束 [{start}:{end}/{total}]")
+    return start, end, total, part
+
+
 @pytest.mark.parametrize("vision_summary", [False, True])
 def test_fitting_request_preserves_cache_surface_with_summary_only_choice(monkeypatch, vision_summary):
     request = _request("记住蓝色项目，稍后继续")
@@ -201,11 +216,8 @@ def test_live_summary_bounds_complete_tool_arguments_results_and_reasoning(monke
         assert candidate.tools == [] and candidate.tool_choice.mode == "none"
         assert candidate.system_instruction != request.system_instruction
         assert budget_module._request_tokens(candidate) <= 6_272
-        material = candidate.messages[0]["content"][0]["text"]
-        match = re.search(r"历史 JSON 连续片段 \[(\d+):(\d+)/(\d+)\]：\n", material)
-        assert match is not None
-        start, end, total = map(int, match.groups())
-        part = material[match.end():]
+        assert candidate.messages is None
+        start, end, total, part = segment_part(candidate.prompt)
         assert start == sum(map(len, segments)) and len(part) == end - start and total == len(expected)
         segments.append(part)
         assert history == before
@@ -231,13 +243,13 @@ def test_large_native_history_is_fully_covered_with_bounded_calls(monkeypatch):
     progress = []
 
     def generate(candidate):
-        assert candidate.prompt == request.prompt
+        assert candidate.messages is None and candidate.prompt.rstrip().endswith(budget_module._SEGMENT_MERGE_INSTRUCTION)
+        assert f"摘要规则：\n{request.prompt}\n" in candidate.prompt
         assert candidate.tools == []
         assert candidate.tool_choice.mode == "none"
         assert candidate.system_instruction != request.system_instruction
         assert budget_module._request_tokens(candidate) <= 1472
-        text = candidate.messages[0]["content"][0]["text"]
-        segments.append(text.split("]：\n", 1)[1])
+        segments.append(segment_part(candidate.prompt)[3])
         return ModelResponse(text="保留先前事实与本段的新事实", backend="fake")
 
     monkeypatch.setattr(budget_module, "generate_auxiliary_model_response", generate)
@@ -265,7 +277,7 @@ def test_typed_provider_overflow_reduces_request_without_losing_source(monkeypat
     assert all(getattr(calls[0], name) is value for name, value in vars(request).items() if name != "tool_choice")
     assert calls[0].tool_choice.mode == "none"
     assert len(calls) > 1
-    assert "".join(r.messages[0]["content"][0]["text"].split("]：\n", 1)[1] for r in calls[1:]) == json.dumps(request.messages, ensure_ascii=False)
+    assert "".join(segment_part(r.prompt)[3] for r in calls[1:]) == json.dumps(request.messages, ensure_ascii=False)
 
 
 def test_degraded_segment_keeps_source_coverage_and_stops_on_interrupt(monkeypatch, caplog):
@@ -317,8 +329,28 @@ def test_segment_surface_retains_summary_rules_not_executor_prefix(monkeypatch):
                         lambda r: calls.append(r) or ModelResponse(text="摘要", backend="fake"))
     budget_module.generate_bounded_compact_response(request)
     assert len(calls) > 1
-    assert all(r.prompt == request.prompt.cache_layout.volatile_suffix for r in calls)
+    # 摘要规则只取动态后缀（压缩指令），执行器稳定前缀不进入分段请求。
+    assert all(f"摘要规则：\n{request.prompt.cache_layout.volatile_suffix}\n" in r.prompt for r in calls)
+    assert all("调用工具直到工作完成" not in r.prompt for r in calls)
     assert all(r.tools == [] and r.tool_choice.mode == "none" for r in calls)
+
+
+def test_segment_request_puts_source_first_and_carry_with_rules_last(monkeypatch):
+    # 2026-09-26 真机：规则排在十几万 token 数据之前时，MiniMax-M2.7 读完数据只复述片段目录（两段共 344 token），
+    # 上一段摘要整体丢失。锁定新顺序：源片段 → 结束标记 → 此前摘要 → 摘要规则 → 合并要求，全部在一条文本里。
+    request = _request("第一份资料规则：金额保留两位小数。" + "数据行" * 3000)
+    calls = []
+    monkeypatch.setattr(budget_module, "generate_auxiliary_model_response",
+                        lambda r: calls.append(r) or ModelResponse(text=f"累计摘要第{len(calls)}段", backend="fake"))
+    response = budget_module.generate_bounded_compact_response(request)
+
+    assert len(calls) > 1 and response.text == f"累计摘要第{len(calls)}段"
+    assert "此前摘要（本片段之前全部历史的累计摘要）：\n（无，这是第一个片段）" in calls[0].prompt
+    second = calls[1].prompt
+    order = [second.index("历史 JSON 连续片段结束"), second.index("累计摘要第1段"),
+             second.index("摘要规则：\n请总结历史"), second.index(budget_module._SEGMENT_MERGE_INSTRUCTION)]
+    assert order == sorted(order)
+    assert all(call.messages is None and call.tools == [] for call in calls)
 
 
 @pytest.mark.parametrize(("response", "code", "hint"), [
@@ -333,7 +365,7 @@ def test_invalid_segment_repairs_in_place_then_degrades(monkeypatch, caplog, res
     calls = []
     monkeypatch.setattr(budget_module, "generate_auxiliary_model_response", lambda r: calls.append(r) or response)
     result = budget_module.generate_bounded_compact_response(_request("很短的历史记录" * 500))
-    texts = [call.messages[0]["content"][0]["text"] for call in calls]
+    texts = [call.prompt for call in calls]
     first_segment = texts[: 1 + budget_module._SEGMENT_REPAIR_LIMIT]
     assert "纠正要求" not in first_segment[0]
     assert hint in first_segment[1] and hint in first_segment[2]

@@ -4,7 +4,6 @@ from __future__ import annotations
 import gc
 import hashlib
 import json
-import re
 import tracemalloc
 from types import SimpleNamespace
 
@@ -25,6 +24,7 @@ from agent_py_agent.agent.conversation.compact_provider_surface import (
 from agent_py_agent.agent.conversation.compact_scope import THREAD_COMPACT_SCOPE
 from agent_py_agent.agent.conversation.message_replay import MessageSnapshotRows
 from agent_py_agent.agent.runtime_errors import DataCorruptionError
+from agent_py_agent.tests.test_compact_request_budget import segment_part
 
 
 # LLM: 夹具逐行写真实canonical文件，只返回轻量hash/ID；测量前不保留正文或provider列表，不替换生产reader/摘要/提交。
@@ -67,12 +67,9 @@ def test_selected_history_to_summary_commit_releases_source_bodies(tmp_path, mon
 
     def generate(request):
         nonlocal covered, calls
-        text = request.messages[0]['content'][0]['text']
-        match = re.search(r'历史 JSON 连续片段 \[(\d+):(\d+)/(\d+)\]：\n', text)
-        assert match, '该来源必须完整走真实多段摘要'
-        start, end, _ = map(int, match.groups())
+        assert request.messages is None, '该来源必须完整走真实多段摘要'
+        start, end, _, part = segment_part(request.prompt)
         assert start == covered
-        part = text[match.end():]
         assert len(part) == end - start
         digest.update(part.encode())
         covered, calls = end, calls + 1

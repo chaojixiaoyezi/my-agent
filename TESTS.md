@@ -1,5 +1,12 @@
 # 测试与发布验收
 
+## 能力包固定分段摘要修复组合（2026-09-26，本地复验，真实待验）
+
+在样包提交`aaf055ee2`的69文件检查之上，合入固定main `04c339eb9`及Jev说明修正`6b331ee28`。
+生产差异仅原Compact分段请求；该文件及五个直接测试与固定main逐字节一致，其余已验源码/测试摘要保持。
+针对分段预算、完整来源、主/子/后台/live和包续读消费者补跑12文件289 passed；不与前轮1661重复相加，也不冒充同一次全量运行。
+原生TUI仍未切新runtime，集成方自身的大窗口换小窗口真实证据单列；本线的业务质量、F01撤销控制和保留集未因此通过。
+
 ## 能力包第八候选组合（2026-09-26，本地严格检查通过，尚未安装）
 
 首轮合并 `a3f058d35` 的 53 文件为 1340 passed、9 skipped；Ruff/strict-size/diff/clean-package通过，但doc-sync失败。
@@ -62,6 +69,16 @@ A02原脚本原字节物化与执行通过，但有未标创作事实；B01报�
 方法使用、结构脚本与业务质量分列[真实矩阵](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#第七候选真实开发集)；开发集未全过，保留集尚未开始。
 纯问答晋升另补on/off首请求回归：开启并有授权候选时空选保留普通任务、Goal不变；关闭不晋升且无aux。该测试不模拟终态，真实N03的completed另列。
 候选6 CAP06 的自然摘要独立复核通过；新checkpoint属于thread，已完成旧task没有后续业务请求，未验证该task消费新摘要或重用方法。
+
+## Compact 分段请求改为片段在前、累计摘要与规则在后（2026-09-26，分支 `claude/curator-budget`，基于 main `54f24ab94`）
+
+- **新测试**：`test_compact_request_budget.py::test_segment_request_puts_source_first_and_carry_with_rules_last`，锁定分段请求是单条文本、`messages=None`，顺序为 源片段 → 结束标记 → 此前摘要 → 摘要规则 → 合并要求；首段写明“无此前摘要”。
+- **测试同步**：分段请求不再有 `messages`。新增共用解析 `segment_part`（放在 `test_compact_request_budget.py`）：按头部区间长度切出片段并核对紧随的结束标记。`test_compact_text_source.py`、`test_compact_source_lifetime.py`、`test_native_tool_ir_compact_and_orphan_sweep.py`、`test_subagent_runtime_compact.py` 改用它；原“prompt 等于压缩指令”的断言改为“摘要规则一节等于压缩指令，执行器稳定前缀不进入分段请求”。
+- **回归**：压缩、摘要、活动工具、上下文压力、辅助调用相关的 70 个测试文件，加 `test_agent_goals.py` 与 `test_architecture_guardrails.py`：923 passed。严格门全部通过；改动模块的 code-size 发现与 main 逐项相同。
+- **隔离真机对比**（8432，隔离 home，同一组合成资料：5 份各约 9 万字、各带一条处理规则；DeepSeek 官方 1M 累积到约 31.3 万 token 后 `/model` 切 MiniMax-M2.7 262K，再问 5 条规则）：
+  - 部署版 `step12w`：压缩自动完成，两段辅助请求共 300,046 输入、344 输出；模型摘要 267 字，一条规则都没有；回答说第 1 份“未显示具体规则”，其余 4 条来自原文地标；另白写 171,960 token 缓存。
+  - 本分支代码：两段共 300,475 输入、1,052 输出；模型摘要 602 字，5 条规则全在；回答逐条正确；无缓存写入。压缩后主请求分别为 28,607 与 28,812 token。
+  - 证据在 `~/.my-agent/releases/compact-window-switch-20260926/`（不进仓库）；隔离 home 与模型目录副本验收后删除。
 
 ## Jev 审计按会话过滤、Compact 兜底收窄与 CI 修复合入（2026-09-26，main `a2604cb7f`，基于 `a53ab52d7`）
 

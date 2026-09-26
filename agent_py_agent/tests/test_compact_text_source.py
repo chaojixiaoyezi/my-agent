@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 import tracemalloc
 from dataclasses import replace
 
@@ -13,7 +12,7 @@ from agent_py_agent.agent.backends.base import ModelResponse
 from agent_py_agent.agent.conversation import compact_request_budget as budget
 from agent_py_agent.agent.conversation.compact_guard import ConversationCompactError
 from agent_py_agent.agent.conversation.compact_text_source import CompactTextSource
-from agent_py_agent.tests.test_compact_request_budget import _request
+from agent_py_agent.tests.test_compact_request_budget import _request, segment_part
 
 
 def test_unicode_slices_retry_and_release_preserve_json_characters():
@@ -80,13 +79,11 @@ def test_every_corrective_request_fits_same_budget(monkeypatch, reason):
 
     def generate(candidate):
         assert budget._request_tokens(candidate) <= 1472
-        text = candidate.messages[0]["content"][0]["text"]
-        match = re.search(r"历史 JSON 连续片段 \[(\d+):(\d+)/(\d+)\]：\n", text)
-        start, end, _ = map(int, match.groups())
+        start, end, _, part = segment_part(candidate.prompt)
         attempts[start] = attempts.get(start, 0) + 1
         if attempts[start] == 1:
             return invalid
-        covered.append((start, end, text[match.end():]))
+        covered.append((start, end, part))
         return ModelResponse(text="完整事实摘要", backend="fake")
 
     request = _request("全段Unicode🪴与路径/参数" * 1200)
@@ -107,11 +104,8 @@ def test_many_message_summary_avoids_whole_json_copy(monkeypatch):
 
     def generate(candidate):
         nonlocal chars, calls
-        material = candidate.messages[0]["content"][0]["text"]
-        match = re.search(r"历史 JSON 连续片段 \[(\d+):(\d+)/(\d+)\]：\n", material)
-        start, end, total = map(int, match.groups())
+        start, end, total, part = segment_part(candidate.prompt)
         assert start == chars and total == len(expected)
-        part = material[match.end():]
         assert end - start == len(part)
         digest.update(part.encode("utf-8"))
         chars, calls = end, calls + 1

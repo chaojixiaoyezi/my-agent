@@ -18,7 +18,6 @@ Step 4（出站孤儿净化 sweep，最后防线）：
 """
 
 import json
-import re
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -79,6 +78,7 @@ from agent_py_agent.tests._tool_runtime_harness import (
     canonical_history_result,
     make_test_protocol_snapshot,
 )
+from agent_py_agent.tests.test_compact_request_budget import segment_part
 
 # --- shared native fixtures (no archive/network side effects) -----------------
 
@@ -255,19 +255,16 @@ class _EmptySummaryBackend:
 # LLM: 只解析测试捕获的宿主分段信封，核对连续覆盖后重建原消息；产品决策不读取这些自然语言标记。
 # 函数用途: 让原单次摘要与多次分段测试共用完整历史断言，不把最后一段误当全部来源。
 def _summary_source_messages(calls):
-    first_messages = calls[0][1]
-    first_text = first_messages[0]["content"][0].get("text", "")
-    if "\n历史 JSON 连续片段 [" not in first_text:
+    first_prompt, first_messages = calls[0]
+    # 分段请求是单条文本 prompt、没有 messages；单次摘要仍是原生消息。
+    if first_messages or "\n历史 JSON 连续片段 [" not in first_prompt:
         assert len(calls) == 1
         return first_messages
     source = ""
     total = 0
-    for _prompt, messages in calls:
-        text = messages[0]["content"][0]["text"]
-        match = re.search(r"\n历史 JSON 连续片段 \[(\d+):(\d+)/(\d+)\]：\n", text)
-        assert match is not None
-        start, end, total = map(int, match.groups())
-        part = text[match.end():]
+    for prompt, messages in calls:
+        assert messages == []
+        start, end, total, part = segment_part(prompt)
         assert start == len(source) and len(part) == end - start
         source += part
     assert len(source) == total
@@ -1301,7 +1298,8 @@ def test_shared_native_window_commits_main_or_child_conversation_compact(
     assert sink.rows[-1]["generation"] == second.compact_generation == 2
     assert '"compact_generation":2' in conversation_runtime_state_section(params)
     assert second.compact_source_tool_pairs > first.compact_source_tool_pairs
-    assert agent.backend.calls[-1][0] == "x"
+    # 分段请求的摘要规则只取动态后缀 "x"，排在源片段与此前摘要之后、合并要求之前。
+    assert "\n摘要规则：\nx\n\n分段合并要求：" in agent.backend.calls[-1][0]
     source_messages = _summary_source_messages(agent.backend.calls[first_call_count:])
     final_blocks = source_messages[-1]["content"]
     final_text = "".join(str(block.get("text") or "") for block in final_blocks)
@@ -1496,7 +1494,7 @@ def test_live_segment_failure_or_run_cancel_never_retires_ir_or_commits(tmp_path
         assert params.tool_ir_history == before_ir and params.tool_context == before_context
         assert kwargs["tools"] == [] and kwargs["tool_choice"].mode == "none"
         assert _request_tokens(AuxiliaryModelCallRequest(
-            agent=agent, prompt=prompt, messages=kwargs["messages"], tools=kwargs["tools"],
+            agent=agent, prompt=prompt, messages=kwargs.get("messages"), tools=kwargs["tools"],
             system_instruction=kwargs["request_options"].system_instruction,
         )) <= 7_872
         captured.append(kwargs)
