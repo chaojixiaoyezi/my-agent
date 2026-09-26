@@ -29,6 +29,11 @@
   - 压缩：带工具加 `none` 的单次摘要一次成功，只有 1 次辅助请求，摘要为模型正文（1034 字，非机械回退）；历史 19,075 → 9,947 tokens，压缩后准确答出文件名与改后的第二条。
   - 本样本未出现违规 tool_use，分段兜底由单元测试覆盖。
   - 证据留在 `~/.my-agent/releases/compact-jev-acceptance-20260926/`（不进仓库）；隔离 home 与模型目录副本已删除。
+- **原生 TUI 复验**（用户要求真实验收经原生 TUI）：新的隔离 home，tmux 里运行 `chat --gateway`，像用户一样逐条输入同样四轮，压缩用 TUI 里的 `/compact`。
+  - 点位冷却：`pre_recall` 09:27:20 超时（5004 ms）。09:27:43 它以 `point_backoff` 跳过、不发请求，同一时刻 `model_selection` 照常成功（4842 ms）。30 秒后 `pre_recall` 恢复，两次成功。
+  - 模型据 `audit_records` 按点位报告了成功、超时、`point_backoff` 与未触发。
+  - 压缩：只有 1 次辅助请求，模型正文 1144 字，非机械回退；历史 17,920 → 10,076 tokens；压缩后答对文件名与第二条。
+  - 收尾：TUI `/exit`、Gateway 停止、tmux 会话关闭、8432 释放，隔离 home 已删除。
 - **回归**：涉及 Compact、摘要预算、辅助调用、工具选择的 66 个测试文件，含推理强度、结构化输出和 `test_architecture_guardrails.py` 组合回归：1601 passed。严格门全部通过；改动产品文件的 code-size 发现与 main 逐项相同。
 
 ## Jev 决策结果日志与点位冷却（2026-09-26，已合入 main `756d4b9bb`，基于 `a3f5c17ec`；真实验收见上节 Compact 同一次隔离运行）
