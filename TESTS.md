@@ -1,5 +1,16 @@
 # 测试与发布验收
 
+## 一次能力包选择（2026-09-26，第七候选本地通过，真实待验）
+
+分片已覆盖原TaskLink严格标记/CAS/旧缺键与损坏隔离、一次structured调用及三协议输出、真实共享reader原回执和取消、配置关闭与scope权限。
+上述是组件证据，合并统计以本候选冻结后的统一focused清单为准，不相加重叠测试次数。相关测试由CODEBASE_TREE中的capability selection/read入口导航。
+组合重点：普通任务及Goal初始化、只有主业务首轮准备、明确空选/失败继续、停止/换attempt迟到结果零pin与零注入、预算不足零pin、selector信封不进业务history，以及选模捕获与实际发送包含相同入口。
+冻结源码后的31文件统一focused为901 passed，无skip/xfail；Ruff、doc sync、strict code-size、diff及clean-package通过。
+clean-package首次因14个新增文件未登记Git而拒绝，登记后通过；不改检测规则。首次红结果保留，线上CI未作为验收来源。
+真实组件证明会话successor链接与RuntimeDB执行task分别核验；取消不降级、预算不足不pin，原首请求捕获和发送包含同一入口且不包含selector信封。
+本候选尚未打包或进行实际TUI，不以候选6的通过替代真实采用。
+候选6 CAP06 的自然摘要独立复核通过；新checkpoint属于thread，已完成旧task没有后续业务请求，未验证该task消费新摘要或重用方法。
+
 ## 结构化输出方式：DeepSeek 官方改用 JSON 对象（2026-09-26，分支 `claude/curator-budget`，基于 main `337a689ad`）
 
 - **起因**：Curator 与自动总结 Skill 的结构化调用固定发 `json_schema`，DeepSeek 官方 OpenAI 兼容接口直接 400；默认模型设成它时，这两条后台链路会整体失效。

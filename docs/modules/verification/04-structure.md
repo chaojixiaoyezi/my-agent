@@ -1,5 +1,7 @@
 # Verification：结构
 
+`tool_call_runtime`继续按原ToolRuntimePolicy判断是否晋升，然后调用`promote_conversation_task_for_run`；该原会话入口承担T锁和权威参数单向同步，宿主选包准备共用同一事务。执行与工具账仍归原ToolExecutor，选包本身不进入工具账。
+
 能力包沿 `tooling/models.py` 的 `ToolParameterCondition` 声明条件晋升，
 `agent_core/tool_call_runtime.py` 在原晋升入口读取 typed 参数，`contracts/tool_manifest_contract.py` 投影同一策略。
 资源复制仍是 `write_file`，宿主注入 resolver 只提供校验后的原字节和精确来源；

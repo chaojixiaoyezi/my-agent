@@ -7,6 +7,7 @@
 #   next_read/next_search 只投影同代显式调用参数；包命名空间仅指已声明成员，不从正文推断业务路径归属。
 #   search 显式携带 resource_path 时在快照读取前报参数错，不静默丢条件或改成 get。
 #   错选择器仍失败，只在当前可见包精确命中时建议重试，不自动读取或晋升。
+#   正文读取及 pin 共用 package_read；本工具仍沿原 ToolExecutor 准入，宿主加载不伪造工具回执。
 #   修改时同步检查 skill_tree、包发现、选择器恢复和原生归档后精确复制测试。
 # 模块用途: 模型的"技能书架检索台":说一句需求,给出最相关的几个技能和它们的
 #   稳定引用和按需正文,书架上千本也不用把目录全背进对话里。
@@ -26,6 +27,11 @@ from ..tooling.models import (
     ToolModelSpec,
     ToolParameterCondition,
     ToolRuntimePolicy,
+)
+from .package_read import (
+    package_continuation,
+    read_package_page,
+    validate_package_continuation,
 )
 from .package_resources import package_resource_reference
 from .package_snapshot import package_read_parameters
@@ -173,8 +179,8 @@ class SkillSearchTool(BaseTool):
         }
         return ToolHandlerOutcome("skill_search", True, json.dumps(payload, ensure_ascii=False, indent=2))
 
-    # LLM: scoped 成员只来自本轮包声明，错误 fail closed；成功结果共用有界地址说明和同代导航，不读取其它成员。
-    # 函数用途: 执行包范围检索或读取，让小结果和归档大结果都能定位原包；取消、权限及 pin 仍沿原合同。
+    # LLM: scoped 成员只来自本轮包声明，错误 fail closed；正文共用 package_read 的取消、字节校验和原 pin，不改工具准入或回执。
+    # 函数用途: 执行包范围检索或读取，让小结果和归档大结果都能定位原包；同代导航不读取其它成员。
     def _package_action(self, params: dict[str, object], action: str) -> ToolHandlerOutcome:
         if action not in {"search", "get"} or params.get("skill_id"):
             return _invalid("包范围只接受 search/get，不能同时传 skill_id")
@@ -186,51 +192,22 @@ class SkillSearchTool(BaseTool):
             package = snapshot.resolve_package(package_id)
             if package is None:
                 raise SkillSnapshotError("CAPABILITY_PACKAGE_NOT_AVAILABLE")
-            _validate_package_continuation(package, params)
+            validate_package_continuation(package, params)
             offset = _nonnegative_int(params, "offset", 0)
+            config = getattr(self.agent, "config", None) or default_agent_config()
             if action == "search":
                 payload = _package_matches(package, params, offset)
             else:
-                payload = self._package_body(snapshot, package, params, offset)
+                payload = read_package_page(
+                    self.agent, snapshot, package_id, resource_path=str(params.get("resource_path") or ""),
+                    offset=offset, max_chars=_nonnegative_int(params, "max_chars", max(1, int(config.tool_read_max_chars))),
+                )
             payload = {**_package_navigation(package), **payload}
-            config = getattr(self.agent, "config", None) or default_agent_config()
             return _package_read_outcome(payload, max(0, int(config.tool_output_preview_chars)))
         except SkillSnapshotError as exc:
             return _snapshot_unavailable(exc)
         except (OSError, ValueError) as exc:
             return _invalid(str(exc))
-
-    # LLM: bytes 校验后先 pin 原任务引用；仅 UTF-8 正文按原配置分页，来源元数据排在正文前，pin 错误不能降级。
-    # 函数用途: 返回一页包正文与原样复制引用、完整性和续读参数，避免引用落在长正文尾部。
-    def _package_body(self, snapshot, package, params, offset) -> dict[str, object]:
-        from .task_references import pin_package_reference
-
-        member_path = str(params.get("resource_path") or "")
-        member = package.resolve(member_path)
-        if member is None:
-            raise SkillSnapshotError("CAPABILITY_RESOURCE_NOT_AVAILABLE")
-        raw = snapshot.read_in_package(package.package_id, member.path)
-        try:
-            body = raw.decode("utf-8")
-        except UnicodeError as exc:
-            raise SkillSnapshotError("CAPABILITY_RESOURCE_NOT_TEXT") from exc
-        config = getattr(self.agent, "config", None) or default_agent_config()
-        default_limit = max(1, int(config.tool_read_max_chars))
-        requested = _nonnegative_int(params, "max_chars", default_limit)
-        if requested == 0 or offset > len(body):
-            raise ValueError("max_chars 必须大于零，offset 不能超过正文长度")
-        limit = min(requested, default_limit)
-        window = body[offset:offset + limit]
-        next_offset = offset + len(window)
-        pin_package_reference(self.agent, package.to_ref())
-        payload = {"source_ref": package_resource_reference(package, member.path),
-                   "kind": "capability_package", **package.to_ref(), "resource_path": member.path,
-                   "resource_sha256": member.sha256, "body": window, "offset": offset,
-                   "total_chars": len(body), "has_more": next_offset < len(body)}
-        if payload["has_more"]:
-            payload["continuation"] = {**_package_continuation(package, "get", next_offset),
-                                       "resource_path": member.path, "max_chars": limit}
-        return payload
 
     # LLM: 保持普通 Skill resolve 的既有优先级；失败后仅精确匹配当前受限包身份来给建议，不读成员、不 pin、不转换执行。
     # 函数用途: 读取普通 Skill，或为错填包身份的请求返回仍为失败的结构化纠错信息。
@@ -297,7 +274,7 @@ def _package_navigation(package) -> dict[str, object]:
             "kind": "capability_package", "path_base": "package_root", "declared_members_only": True,
             "filesystem_path": False, "reader_tool": "skill_search", "path_parameter": "resource_path",
         },
-        "next_search": {**_package_continuation(package, "search", 0), "limit": 5},
+        "next_search": {**package_continuation(package, "search", 0), "limit": 5},
         "resource_access_hint": "只有清单中已声明的包内资源使用 package_id + resource_path；它们不是工作区文件。"
             "正文中的业务输入和交付路径不因此变成包成员。先用 next_search 检索声明，再原样使用匹配项 next_read；不要猜安装位置。",
         "resource_copy_hint": "需要原样复制已定位资源时，将该资源完整 source_ref 传给 write_file.source_ref，"
@@ -345,22 +322,6 @@ def _package_match_preview(matches: list[dict[str, object]], limit: int) -> list
     return preview
 
 
-# LLM: continuation 绑定完整包字节和原激活，页码不能在换代后静默套到新资源。
-# 函数用途: 拒绝来自其它包版本或已重新安装代次的分页参数。
-def _validate_package_continuation(package, params) -> None:
-    for key, expected in (("expected_package_sha256", package.package_sha256),
-                          ("expected_activation_id", package.activation_id)):
-        if key in params and params[key] != expected:
-            raise SkillSnapshotError("SKILL_SNAPSHOT_STALE")
-
-
-# LLM: 分页参数只有宿主当前声明身份，没有路径猜测或隐式授权。
-# 函数用途: 生成继续读取同一能力包的结构化工具参数。
-def _package_continuation(package, action: str, offset: int) -> dict[str, object]:
-    return {"action": action, "package_id": package.package_id, "offset": offset,
-            "expected_package_sha256": package.package_sha256, "expected_activation_id": package.activation_id}
-
-
 # LLM: 只匹配声明路径，不扫描正文或创建内部 SkillCard；next_read 保留显式包范围，资源计数不进入全局 Skill。
 # 函数用途: 在已选包内分页检索私有资源，同时给出无需猜路径归属的读取参数。
 def _package_matches(package, params, offset: int) -> dict[str, object]:
@@ -379,7 +340,7 @@ def _package_matches(package, params, offset: int) -> dict[str, object]:
                             "next_read": package_read_parameters(package.to_ref(), item.path)} for item in selected],
                "offset": offset, "total_matches": len(members), "has_more": next_offset < len(members)}
     if payload["has_more"]:
-        payload["continuation"] = {**_package_continuation(package, "search", next_offset), "query": query, "limit": limit}
+        payload["continuation"] = {**package_continuation(package, "search", next_offset), "query": query, "limit": limit}
     return payload
 
 

@@ -152,13 +152,13 @@ search 不晋升。条件声明只读取明确参数，由通用工具运行缝�
 已有 Goal 或持久执行有准确任务链接但无目录时，Gateway 保留精确 conversation_task_id；
 普通 RuntimeDB 临时执行编号不能冒充已经存在的会话任务。
 
-## 一次能力选择（2026-09-26已对齐合同，待实现）
+## 一次能力选择（2026-09-26第七候选本地通过，真实待验）
 
 当前`CapabilityPresentationSelection`只选择展示名卡；`adopted`只证明展示被采用。
 成功正文读取、版本pin、原资源执行和业务验收是不同事实，不能互相代替。
 已有回归明确允许模型零包读取回答；继续堆软提示不能把它变成稳定的方法加载合同。
 
-与协作方确认增加原主请求之前的一次结构化选择；放弃仅增加一个可选工具的方案，接口尚未实现：
+与协作方确认增加原主请求之前的一次结构化选择；本地接口已接通，真实采用仍待验：
 
 - 新模式默认关闭，开关和预算归`capability_config.yaml`及对应dataclass；关闭或无授权包零额外调用。
 - 准备时绑定的主模型只见有界、当前授权的名卡；沿原`generate_structured`返回候选ID集合，只有空数组为明确空选。
@@ -177,10 +177,28 @@ search 不晋升。条件声明只读取明确参数，由通用工具运行缝�
 None不序列化键，旧记录及关闭路径字节保持。仅原新建任务可初始化pending；新Goal提前创建link也须走同一资格helper。
 原task transition及JSON锁内CAS执行pending→claimed→finished；I/O前先claim，结果分selected/empty/failed。
 claimed绑定实际请求/run/attempt与候选指纹；旧缺键、claimed、finished、损坏标记均不得重新领取，损坏只警告不阻普通业务。
+模型身份使用准备时实际后端公开生成字段的`model_binding_digest`，不把可能已被菜单改动的thread profile冒充当前后端。
+摘要不含密钥，不作为模型采用权限或凭据版本；实际调用仍看原辅助模型账。finished只保存结果数量、摘要与warning，准确refs仍归原pins。
 停止或换attempt后的迟到结果不得pin/注入。bind、状态更新和原pin必须保留该字段，不把整块marker放进模型可写attrs。
 不新建表/文件/采用账；原pins仍是唯一版本权威。旧程序回写丢键后，再升级按缺键跳过，不补填或重复选择。
 配置开启且有授权候选时可沿原晋升创建任务，这有持久写入成本，即使最后空选也不撤掉原任务。
 默认开启与否留待用户查看采用、额外token及首响应时延后决定；本节不表示稳定召回已通过。
+
+实现分工：`package_selection_scope`只核元数据资格；`package_selection`只准备材料和调用原结构化后端；
+`package_selection_runtime`只在真实主业务首轮、完整build/capture前协调一次；`package_selection_authority`复用原准入与执行权；
+`package_selection_context`控制入口总预算，正文读取和原`skill_search get`共用`package_read`。
+新开关`enable_capability_package_selection=false`；输入预算`capability_package_selection_max_input_tokens=3000`，
+候选数复用`capability_candidate_limit=5`；入口总预算首次真正消费`capability_bundle_max_tokens=3000`，不把此前未消费的字段描述成已生效。
+数字配额0只移除独立限制，仍预留原模型输出并受上下文窗口限制。输入不截掉用户需求，候选只整条省略；入口分页不改原资源摘要。
+
+宿主读取用原`ActionPolicy`做只读准入：原接口要求的`ToolCall`只作为栈内评估值，
+不dispatch、不进入业务history或工具操作账，也不声称模型调用过工具。ask/deny只给warning，不自动代批。
+共享reader仍检查当前scope、声明成员、哈希和activation；`pin_skill_reference`在原task transition/JSON锁内复核当前执行权。
+激活按原读取前后核验，已读内容可留历史，撤销后的后续读取拒绝；不声称上下文提交时仍与安装表全局原子一致。
+精确 completed/interrupted 工作区的接续沿原晋升产生新链接，可初始化一次选择；旧链接和暂停Goal不补写或复活。
+会话链接用于选择CAS和版本pin，实际执行准入复用原`runtime_run_scope.task_id`，两者不能混用，也不为选包重绑RuntimeDB或新增attempt。
+活动回合锁只包有限本地领取/读取/提交，模型I/O在锁外；原停止或失效attempt沿取消异常上抛，不当成普通选包失败。
+选择assistant/schema信封不入业务历史；有界入口作为原`RuntimeFactsTurn`进入原预算、历史、Compact、自动选模捕获及实际请求。
 
 ## 主任务、子代理和长任务
 

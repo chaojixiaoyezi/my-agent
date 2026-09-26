@@ -1,5 +1,7 @@
 # Gateway 维护状态
 
+能力包第七候选：新Goal绑定任务时可初始化原TaskLink的一次选包pending（默认关闭）；只读当前owner的元数据资格，旧任务不补字段，不新增模型调用或Goal状态。组件与主流程组合验收中，未发布。
+
 `/effort` 从空壳改为真实会话设置（分支 `claude/reasoning-effort`，2026-09-26）：`control_service._execute_effort_control`
 读写当前 thread 的 `reasoning_effort`（auto/off/low/medium/high/max，`default` 清除回全局默认），回执说明当前会话模型的实际效果；
 与 `/verbose` 共用新抽出的 `_settings_thread`（行为不变）。每轮请求在 `tool_model_generation._provider_request_options` 现读线程

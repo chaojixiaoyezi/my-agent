@@ -2,7 +2,7 @@
 # 模块用途: 让派工、定时执行与主会话长任务固定同一能力版本，包重新启用或替换后不会静默换代。
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 
 from ..runtime_context import current_subagent_run_id
 from .skill_snapshot import SkillSnapshot, SkillSnapshotError
@@ -115,9 +115,15 @@ def scope_main_task_references(agent: object, snapshot: SkillSnapshot, attrs: ob
     return snapshot.without_unavailable_packages(unavailable)
 
 
-# LLM: 包正文首次交付前写原任务 pins；child 只复核原授权不另写主任务。此为内部版本记账，不执行包或扩大工具权限。
-# 函数用途: 在内容通过完整性检查后固定准确包版本，阻止同任务读取同名替换包。
-def pin_package_reference(agent: object, value: object) -> None:
+# LLM: 包正文交付前写原任务 pins；可选执行权检查在原存储锁内复核，取消异常不能降级成普通读取失败。
+# 函数用途: 在内容通过完整性检查后固定准确版本；孩子只验证继承引用，不扩大授权或替主任务记账。
+def pin_package_reference(
+    agent: object, value: object, *, execution_authority_check: Callable[[], None] | None = None,
+) -> None:
+    from ..common.cancellation import ToolCancelled
+
+    if execution_authority_check is not None:
+        execution_authority_check()
     try:
         reference = normalize_skill_reference(value)
     except ValueError as exc:
@@ -140,6 +146,9 @@ def pin_package_reference(agent: object, value: object) -> None:
     if store is None:
         raise SkillSnapshotError("SKILL_TASK_STORE_UNAVAILABLE")
     try:
-        store.tasks.pin_skill_reference(task_id=task_id, thread_id=thread_id, reference=reference)
+        options = {"execution_authority_check": execution_authority_check} if execution_authority_check is not None else {}
+        store.tasks.pin_skill_reference(task_id=task_id, thread_id=thread_id, reference=reference, **options)
+    except (InterruptedError, ToolCancelled):
+        raise
     except (OSError, ValueError, RuntimeError) as exc:
         raise SkillSnapshotError("SKILL_TASK_REFERENCE_UNAVAILABLE") from exc

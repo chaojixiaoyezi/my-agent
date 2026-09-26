@@ -144,14 +144,16 @@ class SkillSnapshot:
         package = self.resolve_package(package_id)
         return package.resolve(member_path) if package is not None else None
 
-    # LLM: 读取始终经过包快照绑定的原 owner/代次校验；本入口不解包、不执行，也不返回其它包的内容。
-    # 函数用途: 读取受摘要保护的私有成员字节，并将路径、完整性和撤销失败转成原快照错误。
+    # LLM: 读取经过原 owner/代次校验；InterruptedError 是停止信号，不能因继承 OSError 被转换成可恢复读失败。
+    # 函数用途: 读取受摘要保护的私有成员；路径、完整性和撤销失败转成快照错误，中断继续传播。
     def read_in_package(self, package_id: str, member_path: str = "") -> bytes:
         package = self.resolve_package(package_id)
         if package is None:
             raise SkillSnapshotError(f"CAPABILITY_PACKAGE_NOT_AVAILABLE package={package_id}")
         try:
             return package.read(member_path)
+        except InterruptedError:
+            raise
         except (OSError, ValueError) as exc:
             code = str(getattr(exc, "code", "") or "CAPABILITY_RESOURCE_UNAVAILABLE")
             raise SkillSnapshotError(f"{code} package={package_id}") from exc

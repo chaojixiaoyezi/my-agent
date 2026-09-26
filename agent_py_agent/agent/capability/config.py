@@ -15,8 +15,8 @@ from ..settings.config import load_simple_yaml
 # LLM: 子代理权限、运行投影、包候选展示和阶段提醒的唯一默认配置；新增字段同步随包 YAML 与配置一致性测试。
 # 模块用途: 集中读取协作能力设置；包候选只影响上下文，阶段提醒不作为执行超时或权限授予。
 
-# LLM: 能力决策和包推荐字段只定义展示模式、候选范围和绑定，不授予工具/子代理权限；时间限制与活动提醒仍分开。
-# 类用途: 定义子代理能力、观测和可关闭的包候选展示；静态目录/手动读取不受推荐开关影响，数值为零的阶段提醒表示关闭该阶段。
+# LLM: 包选择默认关闭，开启后只在新主任务准备一次辅助调用和有界入口读取；候选、预算和绑定不授予工具权限。
+# 类用途: 定义子代理能力和包上下文设置；推荐只展示摘要，选包会消耗模型用量并记录原任务，数值配额为零仍受模型窗口限制。
 @dataclass
 class CapabilityConfig:
     """能力路由与子代理运行配置总表。
@@ -38,6 +38,8 @@ class CapabilityConfig:
     decision_agent_timeout_max_seconds: int = 30
     enable_capability_routing: bool = False
     enable_capability_package_recommendations: bool = True
+    enable_capability_package_selection: bool = False
+    capability_package_selection_max_input_tokens: int = 3000
     capability_request_max_tokens: int = 600
     capability_escalation_max_hops: int = 0
     capability_candidate_limit: int = 5

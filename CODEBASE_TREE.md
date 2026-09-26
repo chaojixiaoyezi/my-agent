@@ -15,6 +15,19 @@
 |-- agent_py_agent/agent/capability/package_provider.py # 从原安装表发现并复核内容包
 |-- agent_py_agent/agent/capability/task_references.py # 主子任务与调度的准确包版本引用
 |-- agent_py_agent/agent/capability/package_resources.py # 原写文件工具的私有资源引用解析
+|-- agent_py_agent/agent/capability/package_read.py # 原工具与宿主共用的准确正文分页和任务pin
+|-- agent_py_agent/agent/capability/package_selection.py # 有界包名卡及一次结构化选择
+|-- agent_py_agent/agent/capability/package_selection_scope.py # 新主任务的元数据资格与pending初始化
+|-- agent_py_agent/agent/capability/package_selection_authority.py # 原只读准入与精确执行权复核
+|-- agent_py_agent/agent/capability/package_selection_context.py # 已读入口的总预算和准确续页
+|-- agent_py_agent/agent/capability/package_selection_runtime.py # 首个主业务请求前的一次领取和装配
+|-- agent_py_agent/tests/test_capability_selection_state.py # 原TaskLink严格标记、损坏隔离和CAS
+|-- agent_py_agent/tests/test_capability_selection_scope.py # 默认关闭、主子权限和配置资格
+|-- agent_py_agent/tests/test_capability_package_selection.py # 结构化选择、原调用账与响应隔离
+|-- agent_py_agent/tests/test_capability_package_read.py # 原页回执保持及读取和pin取消边界
+|-- agent_py_agent/tests/test_capability_selection_authority.py # 原执行权和只读准入组合验证
+|-- agent_py_agent/tests/test_capability_package_entry_context.py # 多入口总预算、分页和失败隔离
+|-- agent_py_agent/tests/test_capability_package_selection_runtime.py # 主请求一次准备及停止续跑组合
 |-- scripts/build_capability_package.py   # 不执行代码的可重复内容包构建入口
 |-- examples/capability-packages/         # 来源独立的短剧与证据报告样包源码
 |-- docs/design/CAPABILITY_PACKS.md       # 能力包协议、生命周期、隔离召回和任务版本合同
@@ -428,6 +441,7 @@ agent_py_agent/
 |   |   |-- message_selection.py        # 固定EOF两遍来源校验与逐行范围/覆盖筛选，无第二消息存储
 |   |   |-- message_replay.py           # 固定原文件身份及行地址/hash的只读消息重放，切片不驻留正文
 |   |   |-- store_tasks.py              # 任务关联、活动索引、工作区状态投影及终态进度关闭
+|   |   |-- capability_selection_state.py # 原任务内的一次选包标记校验，不另建账
 |   |   |-- store_audits.py             # Audit 准备、发布修订、终态重开与运行代提交
 |   |   |-- store_guidance.py           # 插话入队、精确认领、权威回执查询与组件组装
 |   |   |-- store_guidance_records.py   # 插话回执格式、迁移构造与身份校验
@@ -621,6 +635,12 @@ agent_py_agent/
 |   |   |-- tool_input_completion.py # 明示安全默认值、可信上下文补参与脱敏 source/source_ref
 |   |   `-- sandbox.py                # bwrap 唯一策略、自检、worker/K8s readiness 硬门；含插件进程用的整根只读形态
 |   |-- capability/                    # 单一 SkillsService、逐轮 snapshot、能力路由与 capability tools
+|   |   |-- package_read.py            # 原工具与宿主共用正文分页、页验收和任务pin
+|   |   |-- package_selection.py       # 有界元数据与原后端的一次结构化选择
+|   |   |-- package_selection_scope.py # 新主任务选择资格和typed pending初值
+|   |   |-- package_selection_authority.py # 原策略门和精确执行轮复查
+|   |   |-- package_selection_context.py # 入口总预算、来源与续页装配
+|   |   |-- package_selection_runtime.py # 原主业务首轮的一次选择准备
 |   |   |-- decision_candidates.py     # 原能力快照候选、独立适用性题及必要引用，不读取Skill正文
 |   |   |-- decision_recommendation.py # 每工作片可选推荐及采用前复核，只改变展示不改授权
 |   |   |-- decision_experiment_sample.py # 只观察实验的对照条目：基线/候选名单、配置版本与原账结算视图
@@ -1142,6 +1162,9 @@ docs/
 ### 关键文件说明
 
 - `agent_py_agent/agent/capability/task_references.py`：连接原任务 pins、授权 grants 和调度引用，不另建状态库。
+- `agent_py_agent/agent/capability/package_read.py`：原工具与宿主共用准确原字节、分页、来源与任务pin。
+- `agent_py_agent/agent/capability/package_selection_runtime.py`：原主业务准备的唯一选包接缝；scope、authority、context和纯selector分别负责资格、原门复核、总预算与模型选择。
+- `agent_py_agent/agent/conversation/capability_selection_state.py`：原TaskLink的可选值类型和结果摘要，CAS与持久化仍归store.tasks。
 - `agent_py_agent/agent/capability/package_provider.py`：只从当前 owner 的原安装表取得已启用包，每次读取复查代次与摘要。
 - `scripts/build_capability_package.py`：把声明和私有资源构建为 v7 内容包，不导入或执行包内脚本。
 - `examples/capability-packages/`：三个独立迁移切片与来源许可，组件测试不代表真实 TUI 通过。

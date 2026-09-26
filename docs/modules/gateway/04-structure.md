@@ -1,5 +1,7 @@
 # Gateway Structure
 
+`goal_control_service._create_goal`复用`capability.package_selection_scope.new_task_capability_selection`为真正新建任务提供可选typed pending；原Goal存储、任务bind和wake顺序保持，入口选择在后续真实主业务请求前发生。
+
 `request_context._gateway_history_source` 把已裁决的来源行冻结为只读 `ConversationHistorySource`（地址视图加 `history_projection` 原单行选择与投影），`GatewayConversationContext.history_source` 是唯一历史载体，不再同时持有具体 history/canonical 副本。`request_prompt.gateway_conversation_history_seed` 把来源交给种子，恢复候选沿同一规则；只在原 native/text 准备边界解析，纯 `ToolLoopRequestInput` 投影不读盘。摘要期旧完整请求的释放属于 2b。
 
 12.4保留历史完整投影已本地实现：Gateway、后台和child的Compact来源/候选不再套普通字符窗，完整材料统一进入原容量门；普通展示保持原规则。73项联合及416项相邻回归通过（含重叠，不累加），整项12.4及11/18不变。见[容量审计](../../tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。
