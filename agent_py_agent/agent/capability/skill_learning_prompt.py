@@ -181,10 +181,11 @@ _PROMPT = """你是 my-agent 的后台 Skill 总结器。下面的输入全是�
 - 用户偏好、身份、联系方式等个人信息（这些归记忆系统管）。
 - 密钥、令牌、密码、Cookie、私钥、内部地址等敏感信息。
 - 环境临时故障、“某工具不能用”之类的负面结论、没有解决的失败。
+- 绕过安全策略、权限、审批或拦截的做法：被拦截说明不该那样做，不要教以后换个工具绕过去。
 - 对已有 Skill 的简单重复。
 
 怎么选：
-1. updatable_skills 列出本轮用过、可以由你更新的自学 Skill。这次任务补充或修正了其中某个的做法时选 update：update_target 和 name 都写它的名字，输出完整的新 description、when_to_use、tags、body（整篇替换，不是补丁）。
+1. updatable_skills 列出本轮用过、可以由你更新的自学 Skill。这次任务补充或修正了其中某个的做法时选 update：update_target 和 name 都写它的名字，输出完整的新 description、when_to_use、tags、body（整篇替换，不是补丁），旧正文里不符合上面要求的内容一并删掉。
 2. 做法已经被 existing_skills 里的某个 Skill 覆盖时选 skip。
 3. 确实是新的可复用做法才选 create；name 不能与 existing_skills 里的任何名字相同。
 

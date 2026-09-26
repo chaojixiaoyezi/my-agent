@@ -178,6 +178,7 @@ def test_create_publishes_skill_that_the_next_snapshot_loads(tmp_path: Path) -> 
     assert ctx.store.pending_requests() == [] and ctx.store.read_version(NAME, 1) == _learned_file(ctx).read_text()
     assert not list(ctx.store.directory.glob(".staging-*"))
     assert "existing_skills" in ctx.backend.prompts[0] and ctx.backend.schemas[0] == skill_learning_response_schema()
+    assert "绕过安全策略" in ctx.backend.prompts[0]
 
 
 def test_skip_is_recorded_and_writes_no_skill(tmp_path: Path) -> None:
