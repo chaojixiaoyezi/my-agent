@@ -1,0 +1,54 @@
+{
+  "plugin_id": "drama-text-a",
+  "version": "0.1.0",
+  "summary": "从原文依据形成短剧文本和分镜资料",
+  "capability": {
+    "description": "适用于故事改编、单集剧本、场次与镜头设计；保留原文依据和省略说明，不生成媒体。",
+    "keywords": [
+      "短剧",
+      "漫剧",
+      "故事改编",
+      "剧本",
+      "分镜",
+      "文本依据"
+    ],
+    "entry_document": "CAPABILITY.md"
+  },
+  "files": [
+    {
+      "path": "CAPABILITY.md"
+    },
+    {
+      "path": "LICENSE"
+    },
+    {
+      "path": "PROVENANCE.md"
+    },
+    {
+      "path": "licenses/drama-skills-LICENSE"
+    },
+    {
+      "path": "methods/review.md"
+    },
+    {
+      "path": "methods/workflow.md"
+    },
+    {
+      "path": "resources/example-delivery.json"
+    },
+    {
+      "path": "resources/example-source.json"
+    },
+    {
+      "path": "scripts/check_delivery.py"
+    },
+    {
+      "path": "templates/delivery.json"
+    }
+  ],
+  "settings_schema": {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": false
+  }
+}

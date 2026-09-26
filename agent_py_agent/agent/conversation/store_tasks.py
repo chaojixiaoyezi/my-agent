@@ -75,7 +75,7 @@ def _thread_without_task(
     )
 
 
-# LLM: store_tasks 的持久化合同：读取精确任务关联并核验身份，保留坏账错误而不推断其它任务；修改须同步本领域调用方与存储回归。
+# LLM: 请求 task_id 必须与原文件 payload.task_id 精确相同，即便 thread 相同也不能串账；失败沿原 load_report 坏账错误返回。
 # 函数用途: 读取精确任务关联并核验身份，保留坏账错误而不推断其它任务。
 def _read_task_link(
     path,
@@ -89,7 +89,10 @@ def _read_task_link(
         payload = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
             raise ValueError(f"conversation task link is {type(payload).__name__}, expected object")
-        return ThreadTaskLink.from_dict(payload), None
+        link = ThreadTaskLink.from_dict(payload)
+        if link.task_id != task_id:
+            raise ValueError("conversation task link identity does not match requested task")
+        return link, None
     except Exception as exc:
         report = runtime_error_report(exc, context=context)
         report["task_id"] = task_id
@@ -609,6 +612,35 @@ class TaskStore:
     def list(self, thread_id: str) -> list[ThreadTaskLink]:
         links, _load_errors = self.list_report(thread_id)
         return links
+
+    # LLM: 版本固定在原 task transition→JSON 锁内；读取/状态/归属一起复核，冲突不覆盖旧 pins，也不改变其它任务字段。
+    # 函数用途: 在首次读取能力包时写入准确摘要和激活代次，重读幂等，升级或重装必须新任务显式选择。
+    def pin_skill_reference(self, *, task_id: str, thread_id: str, reference: dict[str, str]) -> ThreadTaskLink:
+        from ..capability.task_references import normalize_skill_reference
+
+        selected = safe_file_stem(str(task_id or ""))
+        fixed = normalize_skill_reference(reference)
+        if not selected or not thread_id or fixed.get("kind") != "capability_package":
+            raise ValueError("SKILL_TASK_REFERENCE_INVALID")
+
+        # LLM: updater 只在原文件锁中执行，先严格恢复原记录，不在坏账或停止任务上追加引用。
+        # 函数用途: 合并同一包的一次固定引用，重复调用保持全部原始字段。
+        def updater(data: dict[str, Any]) -> dict[str, Any]:
+            latest = ThreadTaskLink.from_dict(data)
+            if latest.task_id != task_id or latest.thread_id != thread_id:
+                raise ValueError("SKILL_TASK_BINDING_INVALID")
+            if latest.status in THREAD_TASK_LINK_INACTIVE_STATUSES:
+                raise ValueError("SKILL_TASK_INACTIVE")
+            for previous in latest.skill_snapshot_refs:
+                if previous["stable_id"] == fixed["stable_id"]:
+                    if previous != fixed:
+                        raise ValueError("SKILL_PACKAGE_REFERENCE_CONFLICT")
+                    return data
+            return replace(latest, skill_snapshot_refs=(*latest.skill_snapshot_refs, fixed)).to_dict()
+
+        with self.transition_guard(task_id):
+            result = update_json_file_atomic(self.storage.task_path(selected), updater, require_existing=True)
+        return ThreadTaskLink.from_dict(result)
 
     # LLM: store_tasks 的持久化合同：读取精确任务关联，沿原合同把损坏记录抛为 DataCorruptionError；修改须同步本领域调用方与存储回归。
     # 函数用途: 读取精确任务关联，沿原合同把损坏记录抛为 DataCorruptionError。

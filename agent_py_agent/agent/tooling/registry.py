@@ -24,6 +24,7 @@ from ..settings.defaults import default_config_int
 from .artifact import ReadArtifactTool
 from .content_transport_policy import (
     MAX_INLINE_WRITE_CONTENT_CHARS,
+    FileSourceContent,
     tool_content_transport_protocol,
 )
 from .executor import ToolExecution, ToolExecutor, ToolExecutorRequest, ToolOutputProjection
@@ -78,8 +79,8 @@ class CatalogRenderConfig:
     deferred_categories: list[str] = field(default_factory=list)
 
 
-# LLM: ToolRegistry 的单一装配配置；审批读取器和可选插件 owner 由 core 绑定，不能从工作区或模型参数推导；联测 owner/worker。
-# 类用途: 汇总工作区、权限、工具上限和可信插件身份，未启用插件时不读安装表或启动服务。
+# LLM: ToolRegistry 的单一装配配置；审批、插件 owner 与资源 resolver 由 core 绑定，不能从模型参数推导；联测 owner/worker。
+# 类用途: 汇总工作区、权限、工具上限及可信内容来源，构造时不读取包或启动服务。
 @dataclass(frozen=True)
 class ToolRegistryParams:
     workspace_root: Path
@@ -114,6 +115,8 @@ class ToolRegistryParams:
     catalog_show_truncated_notice: bool = True
     tool_detail_max_chars: int = 0
     tool_write_inline_max_chars: int = MAX_INLINE_WRITE_CONTENT_CHARS
+    # 仅由宿主装配的当前权限快照解析器；文件工具不接受模型提供的读取回调或 owner 身份。
+    file_source_resolver: Callable[[object], FileSourceContent] | None = None
     artifact_read_budget_window_seconds: int = field(
         default_factory=lambda: _agent_config_int("tool_artifact_read_budget_window_seconds")
     )

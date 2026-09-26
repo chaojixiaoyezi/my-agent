@@ -1,5 +1,13 @@
 # Verification：开发推进
 
+## 2026-09-25 能力包的原工具链接线
+
+工具运行策略增加通用结构化参数条件；只有显式 `skill_search` 包 get 晋升任务，普通索引查询不建立任务。
+包引用随后在原 TaskStore 固定，`write_file.source_ref` 沿原 Executor、审批、版本、配额和原子写完成资源复制。
+两条路径复用现有操作回执；来源已撤销时写入前拒绝，写后异常和 UNKNOWN 不重放。
+条件晋升、真实 Registry、来源写入及相邻验证组件已定向通过；完整 native 替身链与真实 TUI 结果持续记录于
+[本轮验收](../../tasks/CAPABILITY_PACK_ACCEPTANCE.md)，当前不能称模型自然召回通过。
+
 归档信封白名单（2026-09-24 晚）新增 `observation` 与 `observation_rejected`：只读插件工具的观察候选记录由 `plugin_observation.parse_observation` 按形状与数量夹界后写进 `tool_result_envelope`，是候选内容的唯一权威；`tool_completed` 事件只带查找投影。验证账、副作用证据与其它白名单字段不变。
 
 后台Compact已本地接同一scope/view的摘要注入和精确覆盖，局部来源/提交不改全线程摘要和游标；18文件联合420项通过，最终验证见TESTS。此片不证明完整恢复payload，Gateway/child准备同view、初次/手动和真实缓存仍待验；唯一TODO的12.4保持未完成。

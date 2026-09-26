@@ -770,7 +770,7 @@ def _require_gateway_conversation_ready(
         raise ConversationPersistenceError("会话记录当前不可用，请稍后重试")
 
 
-# LLM: 模型前统一 canonical task、RuntimeDB 身份与已冻结Compact view；active Goal跨前后台保持同一任务。
+# LLM: 模型前统一 canonical task、RuntimeDB 身份与已冻结Compact view；active Goal无目录也要从原任务表验证thread后绑定。
 # 函数用途: 构造精确运行参数，已发布的恢复身份优先，未发布时沿已经校验的活动任务或 Goal 绑定。
 # LLM: 附件先按已解析 owner 校验，仅结构化 refs 进入 run；跨 owner 或损坏附件不可退化成纯文本请求。
 # 函数用途: 构造当前请求执行参数，并验证显式输入附件的归属与资源上限。
@@ -796,6 +796,14 @@ def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> RunParams:
 
         raise ConversationTaskBindingError("当前请求的执行身份与会话任务绑定不一致")
     task_id = task_id or selected_task_id
+    if task_id and conversation.thread_id and not (attrs or {}).get("conversation_task_id"):
+        from .request_errors import ConversationTaskBindingError
+
+        link, error = context.agent.conversation_store.tasks.load_report(task_id)
+        if error or (link is not None and link.thread_id != conversation.thread_id) or (selected_task_id and link is None):
+            raise ConversationTaskBindingError("当前请求的原会话任务不可读或不属于本线程")
+        if link is not None:
+            attrs = {**(attrs or {}), "conversation_task_id": task_id}
     return RunParams(
         inject=request_prompt.gateway_injections(request, conversation),
         prompt_files=[str(item) for item in request.get("prompt_files", [])],

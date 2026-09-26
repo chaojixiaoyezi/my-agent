@@ -3310,3 +3310,30 @@ python3 scripts/check_clean_package.py .
 证据保存在仓库外 `tui-real-media-20260923/`：`real-model/` 的 submissions/terminals/samples，
 `media-*-tui.txt`、`media-provider-requests.jsonl`、`real-10k-history-*`、`uncompacted-10m-read.json`、本机截图粘贴验收。
 旧假模型记录仍保留用于定位，不作为本轮通过依据。未推送、未替换用户默认环境。
+
+## 能力包内化首片（2026-09-25，本地实现中）
+
+完整计划与真实 TUI 空白证据表见 [能力包验收](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md)，
+当前执行见[唯一 Goal](docs/tasks/CAPABILITY_INTERNALIZATION_GOAL.md)。
+已运行主链组合：`test_capability_package_task_refs.py`、`test_subagent_skill_inheritance.py`、
+`test_scheduler_tool.py`、`test_scheduler_service.py`、`test_scheduler_repository.py`、
+`test_conversation_store.py`、`test_resolve_capability_requests_tool.py`，114项通过。
+覆盖原安装生成引用、主任务原锁 pin／重启读回／并发与换代、子代理隔离、层级继承、后授予接续、调度旧引用拒绝。
+包生命周期及发现线的定向结果另在完成时合并记录，不能把交叉重复测试累加成独立用例。
+这是组件测试，未启动真实模型／Gateway／原生 TUI，不能据此关闭真实验收。
+
+能力包分线结果（均为本地组件，不与前项去重后累计）：生命周期16文件339项通过，包含v1—v6相邻回归；
+独立发现、分页与旧Skill／decision组合111项通过；三样包构建与私有脚本39项通过；主链引用加固补充两文件11项通过。
+架构与合同层级两个守卫文件13项通过。Ruff、doc sync、strict code-size通过；
+clean-package 初跑因本轮新文件尚未纳入Git而拒绝，加入跟踪后复验通过。
+样包只验证声明范围：A文本改编／引用，B跨表连续性／静态报告，C已授权证据整理；未迁移整套媒体生成或攻击执行。
+
+后续联合 gate：44 个相关测试文件 858 项通过，无新增跳过；覆盖上述生命周期、旧插件、发现、主子任务、调度、精确写入、文件权限、配额、幂等、原生循环与相邻 Compact。
+`test_capability_package_compact.py`、`test_prompt_scope_failure.py` 与原 runtime_guidance/tool_runtime_scope/model_scope_dependencies
+五文件组合 97 passed、4 项既有 xfail；其替身仅代替模型传输，不代替原 Skill/安装/TaskStore 权威。
+`test_capability_package_catalog_scale.py` 四种规模均通过，合成最多 1000 包、201000 私有成员；公开 Skill 不增长，发现阶段不读取正文，实际元数据字节和目录耗时存为测试属性。
+完整原生替身 get→write_file.source_ref 验证了真实 provider 消息、任务晋升和原操作回执；与真实 TUI 证据分开。
+失效主任务包隔离补片的13文件组合180项通过：保留旧pin、剔除同ID新代、有界诊断、空展示选择、混合包可用、主任务正常收口；坏身份/引用、child与scheduler继续严格。
+真实Compact恢复前换代现在只拒绝这个包的后续读取，不阻止模型回复；本文先前“换代拒绝”指拒绝新内容，不再指主任务整轮失败。
+补片后主线20文件230项通过（24.69秒）；Ruff、doc sync、strict code-size（hard=0，blocked=False）、diff check、clean-package均通过。
+本地严格 gate 已通过；尚未推送、线上 CI 没有作为验收来源，真实 TUI 仍待执行。

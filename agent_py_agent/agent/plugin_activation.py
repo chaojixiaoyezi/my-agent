@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 
 from .common.strict_json import load_strict_json
 from .plugin_activation_record import PluginActivation, plugin_catalog_digest
+from .plugin_content_activation import PluginContentActivation
 from .plugin_installation import (
     PluginCommitReceipt,
     PluginInstallation,
@@ -20,21 +21,22 @@ from .plugin_manifest import canonical_plugin_settings
 PLUGIN_ENABLE_TOOL = "plugin_enable"
 
 
-# LLM: activation 是宿主从固定候选生成的目标状态，不能直接由管理正文或模型传入；operation_id 仍来自原操作。
-# 类用途: 将一次准备、发布或撤销绑定到明确安装版本与原激活计划。
+# LLM: activation 是宿主从安装快照生成的目标状态，不能由管理正文或模型传入；内容与进程变体都绑定原操作。
+# 类用途: 将准备、发布或撤销绑定到明确安装版本，内容激活无需环境计划。
 @dataclass(frozen=True)
 class PluginActivationRequest:
     operation_id: str
     expected_revision: int
-    activation: PluginActivation
+    activation: PluginActivation | PluginContentActivation
 
-    # LLM: 准备与发布必须来自该计划的原操作，撤销可由独立获准管理操作发起；这里不授予管理权限。
+    # LLM: 准备与发布必须来自固定激活身份的原操作，撤销可由独立获准管理操作发起；这里不授予管理权限。
     # 函数用途: 在写入前拒绝不完整请求和启用操作换绑。
     def __post_init__(self) -> None:
         validate_install_identity(self.operation_id, self.expected_revision)
-        if not isinstance(self.activation, PluginActivation):
+        if not isinstance(self.activation, (PluginActivation, PluginContentActivation)):
             raise ValueError("激活请求缺少固定计划")
-        if self.activation.phase != "revoked" and self.operation_id != self.activation.plan.operation_id:
+        binding = self.activation if isinstance(self.activation, PluginContentActivation) else self.activation.plan
+        if self.activation.phase != "revoked" and self.operation_id != binding.operation_id:
             raise ValueError("激活请求与原计划操作不符")
 
     # LLM: 动作是当前有限状态协议的显式映射，不解析正文或接受任意状态别名。
@@ -43,18 +45,22 @@ class PluginActivationRequest:
     def action(self) -> str:
         return {"preparing": "prepare", "active": "activate", "revoked": "revoke"}[self.activation.phase]
 
-    # LLM: 同一原请求可以有准备/发布两个提交，但各自摘要必须包含阶段、期望版与完整目标；不是新的宿主 operation。
+    # LLM: 进程准备/发布可共用原请求，内容直接发布；每次摘要仍含阶段、期望版与完整目标，不新建宿主 operation。
     # 函数用途: 让响应丢失后的同次提交可精确读回。
     @property
     def input_digest(self) -> str:
-        plan = self.activation.plan
+        plan = self.activation if isinstance(self.activation, PluginContentActivation) else self.activation.plan
         return plugin_input_digest(self.action, plan.plugin_id, plan.package_sha256,
                                    self.expected_revision, activation_sha256=self.activation.content_sha256)
 
 
-# LLM: 调用方持有原安装锁；阶段变化前核对原包、配置与版本，只允许同一计划前进或撤销，旧代不能修改新代。
+# LLM: 调用方持有原安装锁；内容变体独立验证直接发布，进程保持同计划准备/发布，旧代均不能修改新代。
 # 函数用途: 纯计算一个激活提交或已有提交的重放，不启动服务或修改文件。
 def prepare_activation(request: PluginActivationRequest, entries: tuple[PluginInstallation, ...]) -> PluginMutationResult:
+    if isinstance(request.activation, PluginContentActivation):
+        from .plugin_content_lifecycle import prepare_content_activation
+
+        return prepare_content_activation(request, entries)
     plan = request.activation.plan
     for entry in entries:
         if entry.last_commit.operation_id != request.operation_id:
@@ -62,7 +68,7 @@ def prepare_activation(request: PluginActivationRequest, entries: tuple[PluginIn
         if entry.last_commit.input_digest == request.input_digest:
             return PluginMutationResult(entry, "replayed", "committed", entry.last_commit)
         if not (entry.manifest.plugin_id == plan.plugin_id and request.operation_id == plan.operation_id
-                and entry.activation is not None and entry.activation.plan == plan
+                and isinstance(entry.activation, PluginActivation) and entry.activation.plan == plan
                 and entry.last_commit.action in {"prepare", "activate"}
                 and request.action in {"activate", "revoke"}
                 and entry.last_commit.action != request.action):
@@ -72,7 +78,8 @@ def prepare_activation(request: PluginActivationRequest, entries: tuple[PluginIn
         raise PluginInstallationError("plugin_missing", "插件尚未安装。")
     if existing.revision != request.expected_revision:
         raise PluginInstallationError("revision_conflict", "安装版本已变化，请先读取当前状态。")
-    if existing.package_sha256 != plan.package_sha256 or existing.settings_revision != plan.settings_revision:
+    if (existing.manifest.is_content_only or existing.package_sha256 != plan.package_sha256
+            or existing.settings_revision != plan.settings_revision):
         raise PluginInstallationError("activation_binding_conflict", "插件包或配置与激活计划不同。")
     _validate_transition(request, existing)
     if existing.activation == request.activation:

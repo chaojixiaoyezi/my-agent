@@ -8,6 +8,7 @@ from __future__ import annotations
 后续无论是父代理给子代理下发 skill，还是下发 tool，都可以走同一套路由协议。
 """
 
+import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -17,7 +18,8 @@ from ..common.value_parsing import dedupe_strings
 from ..tooling.models import ToolModelSpec
 from ..tooling.write_boundary import WRITE_TOOL_NAMES
 from .config import CapabilityConfig
-from .skill_snapshot import SkillSnapshot, SkillSnapshotEntry
+from .package_snapshot import CapabilityPackageSnapshot
+from .skill_snapshot import PACKAGE_PIN_ERROR_MESSAGES, SkillSnapshot, SkillSnapshotEntry
 from .skills import SkillCard
 
 _PLAYWRIGHT_CAPABILITIES = [
@@ -99,6 +101,8 @@ class CapabilityCard:
     path: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    # LLM: Skill 与能力包只渲染各自公开引用；包内文件不会通过能力卡自动进入上下文。
+    # 函数用途: 渲染可发现短卡和对应读取方式，不读取正文或增加权限。
     def render_compact(self, *, max_chars: int = 0) -> str:
         """渲染短卡片。
 
@@ -121,6 +125,8 @@ class CapabilityCard:
             lines.append(
                 f"  正文：调用 skill_search，action=get，skill_id={self.metadata['stable_id']}"
             )
+        elif self.kind == "capability_package":
+            lines.append(f"  正文：调用 skill_search，action=get，package_id={self.metadata['package_id']}")
         text = "\n".join(lines)
         if max_chars and len(text) > max_chars:
             return text[:max_chars] + "\n  ... 已截断"
@@ -177,14 +183,17 @@ class CapabilityRouter:
             return cards
         return [card for card in cards if card.kind in kinds]
 
+    # LLM: 原 Skill 与包摘要各自从同一 scoped snapshot 派生，私有成员既不注册也不参加全局计数/搜索。
+    # 函数用途: 汇集本轮公开可见的工具、Skill 与能力包卡片。
     def _current_cards(self) -> list[CapabilityCard]:
         snapshot = self._snapshot()
         static = list(self._cards.values())
         if snapshot is None:
             return static
-        non_skills = [card for card in static if card.kind != "skill"]
+        non_skills = [card for card in static if card.kind not in {"skill", "capability_package"}]
         skills = [from_skill_snapshot_entry(entry) for entry in snapshot.enabled_entries()]
-        return [*non_skills, *skills]
+        packages = [from_capability_package(package) for package in snapshot.packages]
+        return [*non_skills, *skills, *packages]
 
     def _snapshot(self) -> SkillSnapshot | None:
         if self._skill_snapshot_provider is not None:
@@ -222,8 +231,8 @@ class CapabilityRouter:
             )
         return "\n".join(lines)
 
-    # LLM: None 保持原有序索引字节；宿主 ID 只与当前授权卡相交，必需引用保留最低行，不读正文或改变 Router。
-    # 函数用途: 渲染完整预算索引或本次选中的短卡；省略项仍由原 skill_search 找回。
+    # LLM: 合法旧 pin 的失效诊断独立于 shortlist 且有界；未知错误不进上下文，私有成员不展开，无诊断时保持原索引字节。
+    # 函数用途: 渲染公开能力短卡及本任务不可用包，让可选展示不掩盖失效事实。
     def render_skill_metadata_index(
         self, *, context_window_tokens: int | None = None,
         selected_skill_ids: tuple[str, ...] | None = None,
@@ -244,11 +253,19 @@ class CapabilityRouter:
                 str(card.metadata.get("stable_id") or ""),
             ),
         )
-        if not skills:
-            return ""
         budget = _skill_metadata_budget(context_window_tokens)
+        unavailable_text = _render_unavailable_package_references(self._snapshot())
+        budget = _SkillMetadataBudget(max(0, budget.limit - budget.cost(unavailable_text)), budget.token_based)
+        packages = sorted(self.cards(kinds={"capability_package"}), key=lambda card: card.name)
+        package_budget = _SkillMetadataBudget(max(1, budget.limit // 2) if skills else budget.limit, budget.token_based)
+        package_text, package_cost = _render_package_metadata(packages, package_budget, selected_skill_ids, required_skill_ids)
+        package_text = "\n\n".join(text for text in (unavailable_text, package_text) if text)
+        if not skills:
+            return package_text
+        budget = _SkillMetadataBudget(max(0, budget.limit - package_cost), budget.token_based)
         if selected_skill_ids is not None:
-            return _render_selected_skill_metadata(skills, budget, selected_skill_ids, required_skill_ids)
+            skill_text = _render_selected_skill_metadata(skills, budget, selected_skill_ids, required_skill_ids)
+            return "\n\n".join(text for text in (package_text, skill_text) if text)
         rendered, omitted, descriptions_shortened = _render_skill_metadata_lines(skills, budget)
         lines = [
             "# Available Skills",
@@ -268,7 +285,7 @@ class CapabilityRouter:
                 "- 部分 description 已为适配 2% Skill metadata 预算而缩短；stable id 与 Skill 正文未改变。"
             )
         lines.append(_SKILL_USAGE_INSTRUCTIONS)
-        return "\n".join(lines)
+        return "\n\n".join(text for text in (package_text, "\n".join(lines)) if text)
 
     def search(
         self,
@@ -343,6 +360,17 @@ def from_skill_snapshot_entry(entry: SkillSnapshotEntry) -> CapabilityCard:
     card.metadata["stable_id"] = entry.stable_id
     card.metadata["content_sha256"] = entry.content_sha256
     return card
+
+
+# LLM: 卡片只能含包级公开声明；不得附带 members、内部文件名、正文或宿主路径。
+# 函数用途: 将能力包摘要加入统一软召回，同时保持独立于全局 Skill 的类别。
+def from_capability_package(package: CapabilityPackageSnapshot) -> CapabilityCard:
+    return CapabilityCard(
+        id=package.stable_id, kind="capability_package", name=package.package_id,
+        description=package.description, keywords=list(package.keywords),
+        when_to_use=[package.summary], source=package.source,
+        metadata={**package.to_ref(), "version": package.version},
+    )
 
 
 def from_tool_model_spec(spec: ToolModelSpec) -> CapabilityCard:
@@ -500,11 +528,60 @@ def _skill_metadata_budget(context_window_tokens: int | None) -> _SkillMetadataB
     return _SkillMetadataBudget(_DEFAULT_SKILL_METADATA_CHAR_BUDGET, False)
 
 
+# LLM: 包卡仅展示公开 package_id，私有成员路径不参与统一名卡格式。
+# 函数用途: 为公开方法或能力包生成一行完整稳定引用。
 def _skill_line(card: CapabilityCard, description: str) -> str:
     stable_id = str(card.metadata.get("stable_id") or "").strip()
+    locator = (f"package_id: {card.metadata['package_id']}" if card.kind == "capability_package"
+               else f"skill_id: {stable_id}")
     if description:
-        return f"- {card.name}: {description} (skill_id: {stable_id})"
-    return f"- {card.name}: (skill_id: {stable_id})"
+        return f"- {card.name}: {description} ({locator})"
+    return f"- {card.name}: ({locator})"
+
+
+# LLM: 包摘要复用原元数据裁剪算法；必需包保留完整身份，省略计数只统计包而非私有成员。
+# 函数用途: 在共享预算内生成独立能力包段，显式读取入口不会自动载入内部方法。
+def _render_package_metadata(packages, budget, selected, required) -> tuple[str, int]:
+    if not packages:
+        return "", 0
+    required_ids = set(required)
+    mandatory = [card for card in packages if card.metadata["stable_id"] in required_ids]
+    optional = [card for card in packages if card not in mandatory
+                and (selected is None or card.metadata["stable_id"] in selected)]
+    minimum = sum(_line_cost(budget, _skill_line(card, "")) for card in mandatory)
+    first, _, _ = _render_skill_metadata_lines(mandatory, _SkillMetadataBudget(max(budget.limit, minimum), budget.token_based))
+    used = sum(_line_cost(budget, line) for line in first)
+    remaining, _, _ = _render_skill_metadata_lines(optional, _SkillMetadataBudget(max(0, budget.limit - used), budget.token_based))
+    shown = [*first, *remaining]
+    omitted = len(packages) - len(shown)
+    lines = ["# 能力包", "下列只展示包摘要；用 skill_search(action=get, package_id=包ID) 读取入口，再在该包内选择资源。", *shown]
+    if omitted:
+        lines.append(f"- 另有 {omitted} 个能力包未展示；可用 skill_search(action=search) 检索包摘要。")
+    return "\n".join(lines), sum(_line_cost(budget, line) for line in shown)
+
+
+# LLM: 仅渲染主任务已规范的两种包 pin 诊断；不读取错误原文、宿主路径或正文，最多八条并限制总字符。
+# 函数用途: 告知模型哪些原任务能力不能继续读取，保留正常工具和任务收口，不暗示自动换版。
+def _render_unavailable_package_references(snapshot: SkillSnapshot | None) -> str:
+    if snapshot is None:
+        return ""
+    errors = sorted({(error.path, error.code) for error in snapshot.errors
+                     if error.source == "capability_package" and error.code in PACKAGE_PIN_ERROR_MESSAGES
+                     and error.path.startswith("capability:")})
+    if not errors:
+        return ""
+    lines = ["# 当前任务不可用的能力包", "原任务版本引用保留；下列包的正文和资源不可读取，也不能自动换用同名新版本。其它可用能力及正常回复不受影响。"]
+    shown = 0
+    for reference, code in errors[:8]:
+        line = "- " + json.dumps({"reference": reference, "code": code,
+                                 "message": PACKAGE_PIN_ERROR_MESSAGES[code]}, ensure_ascii=False)
+        if sum(len(item) + 1 for item in lines) + len(line) > 1800:
+            break
+        lines.append(line)
+        shown += 1
+    if shown < len(errors):
+        lines.append(f"- 另有 {len(errors) - shown} 个原任务包引用不可用；这些包同样不能读取。")
+    return "\n".join(lines)
 
 
 def _bounded_skill_description(card: CapabilityCard) -> str:

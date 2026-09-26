@@ -370,6 +370,8 @@ def _conversation_scope(agent: object) -> tuple[str, str]:
     ), task_id
 
 
+# LLM: 定时任务从当前权限快照固定引用；能力包保存完整激活身份，不能在后台启动时只按包名重新选择。
+# 函数用途: 把用户选择的公开 Skill 或能力包规范化为原调度记录里的版本引用。
 def _skill_refs(agent: object, raw: object) -> list[dict[str, str]] | ToolHandlerOutcome:
     if raw in (None, ""):
         return []
@@ -384,16 +386,11 @@ def _skill_refs(agent: object, raw: object) -> list[dict[str, str]] | ToolHandle
     missing: list[str] = []
     for value in raw:
         reference = str(value or "").strip()
-        entry = snapshot.resolve(reference) if reference else None
+        entry = snapshot.resolve_reference(reference) if reference else None
         if entry is None:
             missing.append(reference)
         elif entry.stable_id not in seen:
-            refs.append(
-                {
-                    "stable_id": entry.stable_id,
-                    "content_sha256": entry.content_sha256,
-                }
-            )
+            refs.append(entry.to_ref())
             seen.add(entry.stable_id)
     if missing:
         return _error(

@@ -14,6 +14,7 @@ from ..tooling.models import (
     ToolFailureStage,
     ToolHandlerOutcome,
     apply_tool_execution_facts,
+    tool_promotes_task,
 )
 from ..tooling.runtime_contracts import ToolCall, ToolResult
 from .audit_dispatch import audit_privileged_tool_call
@@ -237,9 +238,8 @@ def _record_passive_verification(
     return record_tool_verification(agent, call, result)
 
 
-# LLM: Promotion is one active-turn mutation. Gateway callers must hold their exact turn
-# transition around the whole bind; local callers without that host capability execute directly.
-# 函数用途: 首个工作工具把普通对话晋升为持久任务；若用户已经停止则不产生任何续接任务。
+# LLM: 晋升只读同一 ToolRuntimePolicy 的布尔或结构化参数条件；Gateway 原活动回合锁覆盖完整绑定，不能按工具名另开旁路。
+# 函数用途: 首个实际工作动作把普通对话晋升为持久任务；只检索的变体不晋升，停止后不产生续接任务。
 def _promote_conversation_task_for_work_tool(
     runtime_request: ToolCallRuntimeRequest,
 ) -> ToolHandlerOutcome | None:
@@ -247,7 +247,7 @@ def _promote_conversation_task_for_work_tool(
     tool_name = str(runtime_request.payload.get("tool") or "").strip()
     snapshot = runtime_request.request.params.tool_runtime_snapshot
     runtime = snapshot.runtime(tool_name) if snapshot is not None else None
-    if runtime is None or runtime.runtime_policy.promotes_task is not True:
+    if runtime is None or not tool_promotes_task(runtime.runtime_policy, runtime_request.call.arguments):
         return None
     from ..tooling._persona_write_guard import _persona_runtime_redirect_error
 

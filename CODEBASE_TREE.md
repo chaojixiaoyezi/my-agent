@@ -8,6 +8,25 @@
 |-- STATUS.md                            # 当前能力、开放问题与证据边界
 |-- DESIGN_LEDGER.md                     # 当前架构决策及模块设计导航
 |-- TESTS.md                             # 开发测试、真实 TUI 与发布 gate
+|-- agent_py_agent/agent/capability_package_manifest.py # 独立能力内容声明与资源路径校验
+|-- agent_py_agent/agent/plugin_content_activation.py # 内容包无进程激活身份
+|-- agent_py_agent/agent/plugin_content_lifecycle.py # 原安装库中的内容激活迁移
+|-- agent_py_agent/agent/capability/package_snapshot.py # 包级摘要与私有资源快照
+|-- agent_py_agent/agent/capability/package_provider.py # 从原安装表发现并复核内容包
+|-- agent_py_agent/agent/capability/task_references.py # 主子任务与调度的准确包版本引用
+|-- agent_py_agent/agent/capability/package_resources.py # 原写文件工具的私有资源引用解析
+|-- scripts/build_capability_package.py   # 不执行代码的可重复内容包构建入口
+|-- examples/capability-packages/         # 来源独立的短剧与证据报告样包源码
+|-- docs/design/CAPABILITY_PACKS.md       # 能力包协议、生命周期、隔离召回和任务版本合同
+|-- docs/design/CAPABILITY_MIGRATION.md   # 从固定来源到候选、安装、验收、迭代和回退的操作流程
+|-- agent_py_agent/tests/test_capability_package_native_pipeline.py # 模型替身沿原生循环读取和精确落盘
+|-- agent_py_agent/tests/test_capability_package_compact.py # 原快照与安装事实的 Compact 续读及换代拒绝
+|-- agent_py_agent/tests/test_capability_package_catalog_scale.py # 包目录预算与大量私有成员不展开
+|-- agent_py_agent/tests/test_capability_package_main_scope.py # 失效包隔离、保留原版本与主任务正常收口
+|-- agent_py_agent/tests/test_write_file_sources.py # 来源物化复用原权限、审批和操作回执
+|-- agent_py_agent/tests/test_prompt_scope_failure.py # 准入失败和嵌套并发的线程上下文恢复
+|-- docs/tasks/CAPABILITY_INTERNALIZATION_GOAL.md # 能力内化的唯一 TODO、并行归属和收口要求
+|-- docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md # 能力迁移的来源、许可、覆盖矩阵和真实验收计划
 |-- docs/tasks/DECISION_MODEL_TAKEOVER_HANDOFF.md # 决策模型完整Goal、暂停状态、实际证据和接手范围
 |-- docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md # 决策容量、完整请求投影与 Compact 的源码证据和分片交接
 |-- docs/tasks/DECISION_MODEL_CHILD_COMPACT_HANDOFF.md # child完整恢复共享实现、验收与后台后续边界交接
@@ -1100,6 +1119,16 @@ docs/
 ## Current Storage Roots
 
 ### 关键文件说明
+
+- `agent_py_agent/agent/capability/task_references.py`：连接原任务 pins、授权 grants 和调度引用，不另建状态库。
+- `agent_py_agent/agent/capability/package_provider.py`：只从当前 owner 的原安装表取得已启用包，每次读取复查代次与摘要。
+- `scripts/build_capability_package.py`：把声明和私有资源构建为 v7 内容包，不导入或执行包内脚本。
+- `examples/capability-packages/`：三个独立迁移切片与来源许可，组件测试不代表真实 TUI 通过。
+
+- `docs/design/CAPABILITY_PACKS.md`：包级发现、私有方法、原安装与任务授权的边界。
+- `docs/design/CAPABILITY_MIGRATION.md`：固定来源、完整覆盖表、候选构建和原命令发布／回退的可执行步骤。
+- `docs/tasks/CAPABILITY_INTERNALIZATION_GOAL.md`：能力内化执行 Goal 与当前唯一 TODO。
+- `docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md`：固定来源版本与迁移范围、许可和测试证据矩阵。
 
 - `agent_py_agent/agent/capability/skill_proposals.py`：自学习 Skill 提案唯一权威；只收 `subagent_lesson` 且带 task/run 来源的 Candidate，固定模板渲染、O_EXCL 幂等写 `<owner_home>/data/skill_proposals/`；confirm 在 owner 锁内复核版本、草稿 hash、来源 Candidate 与目标不存在，经 frontmatter 解析和 `agent_generated` guard（不 force）后 `os.replace` 安装，失败不写目标。
 - `agent_py_agent/cli/skill_proposal_commands.py`：`my-agent skills proposals list/show/confirm/reject` 的注册与输出，只委托上面的服务；确认必须带 `--expected-revision`，不提供模型工具。

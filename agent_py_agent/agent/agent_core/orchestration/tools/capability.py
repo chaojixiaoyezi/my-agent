@@ -314,6 +314,8 @@ class ResolveCapabilityRequestsTool(BaseTool):
         return allowed, rejected
 
 
+# LLM: 显式授予仍受直属父级快照限制；包只授予包级引用并携带完整激活身份，不能凭内部文件名扩权。
+# 函数用途: 为现有能力申请生成公开 Skill／能力包授权卡，供 canonical grant 持久化和续跑复核。
 def _resolved_skill_grant(
     agent: object,
     requested: list[str],
@@ -325,7 +327,7 @@ def _resolved_skill_grant(
     cards: list[dict[str, str]] = []
     missing: list[str] = []
     for reference in requested:
-        entry = snapshot.resolve(reference)
+        entry = snapshot.resolve_reference(reference)
         if entry is None:
             missing.append(reference)
             continue
@@ -336,11 +338,8 @@ def _resolved_skill_grant(
             {
                 "id": f"skill:{entry.stable_id}",
                 "kind": "skill",
-                "name": entry.name,
-                "stable_id": entry.stable_id,
-                "source": entry.source,
-                "content_sha256": entry.content_sha256,
                 "path": "",
+                **entry.to_ref(),
             }
         )
     if missing:

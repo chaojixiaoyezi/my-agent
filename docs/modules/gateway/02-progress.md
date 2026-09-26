@@ -261,3 +261,11 @@ TUI 媒体请求已接通：input_media refs 与 ask 执行选项及幂等指纹
 - 2026-09-25：实验授权回执 `request_experiment._receipt` 的可选字段改为显式关键字参数（`authorization_id`、`code`，非空才写入），回执形状不变。原先的 `**fields` 违反架构守卫 `test_product_code_has_no_var_keyword_service_interfaces`，是全仓回归发现的。
 - 2026-09-25：插件面板服务 `plugin_display_service` 按配置 `plugin_process_sandbox` 给面板连接的插件客户端带上同一沙箱开关（与业务连接、启用候选一致），默认关时行为不变；见[插件进程 OS 沙箱](../../design/PLUGIN_PROCESS_SANDBOX.md)。
 - 2026-09-25：Gateway 状态文件 `gateway_state.json` 与 `/status` 新增结构化 `runtime_prefix`（进程 `sys.prefix`），供 TUI 判断自己是否与 Gateway 同一安装并在空闲时自动重启到同版客户端；见 [TUI 交互规范](../../design/TUI_DESIGN.md)。发布工具切完 Gateway 后会检测并重启同机 IM 适配器守护进程（仓库外 claude-tools）。
+
+## 2026-09-25 能力包调度与长任务（本地组件阶段）
+
+定时任务的 skill_refs 现在保留包类型、包 ID、摘要与激活代次；后台启动前必须全部匹配。
+主会话首次读取能力包，在原 ThreadTaskLink.skill_snapshot_refs 固定版本；重读幂等，原锁内并发合并。
+新轮验证已用版本并保持发现其他包，升级或重装不会静默替换旧任务；普通临时轮继续使用逐轮快照。
+本地引用／调度／会话／能力授予七文件114项组合通过，真实原生 TUI 与发布尚未开始。
+详见[能力包 Goal](../../tasks/CAPABILITY_INTERNALIZATION_GOAL.md)。

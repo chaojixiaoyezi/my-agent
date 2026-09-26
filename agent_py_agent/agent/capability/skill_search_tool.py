@@ -1,9 +1,9 @@
 # LLM: skill_search 模型工具(skill 树第一期,千级 search-first 冷路):prompt
 #   常驻只有类目索引,具体技能由模型按需检索——千级 skill 的索引成本从 prompt
 #   层(几十 K token)移到工具调用(单次 ~5ms,score_card 含中文 n-gram)。契约:
-#   ①只读检索零副作用;②search 返回卡片和稳定 id，get 经同一 turn snapshot 读取正文;
-#   ③category 过滤可选;④空库/无命中返回结构化提示不报错。改动时同步检查
-#   tests/test_skill_search_tool.py 与 router 的类目索引。
+#   ①公开检索不写状态；②search 返回卡片和稳定 id，get 经同一 turn snapshot 读取正文;
+#   ③category 过滤可选;④包内成员只在显式 package_id 下检索/读取，不进入全局 Skill。
+#   包正文读取会由原 task pin 入口保存精确引用；不执行脚本。改动时同步检查 skill_tree 和包发现测试。
 # 模块用途: 模型的"技能书架检索台":说一句需求,给出最相关的几个技能和它们的
 #   稳定引用和按需正文,书架上千本也不用把目录全背进对话里。
 from __future__ import annotations
@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
+from ..settings.defaults import default_agent_config
 from ..tooling.models import (
     BaseTool,
     ConcurrencyPolicy,
@@ -19,22 +20,28 @@ from ..tooling.models import (
     ToolHandlerOutcome,
     ToolModelHints,
     ToolModelSpec,
+    ToolParameterCondition,
     ToolRuntimePolicy,
 )
-from .router import CapabilityRouter
+from .package_resources import package_resource_reference
+from .router import CapabilityRouter, tokenize
 from .skill_snapshot import SkillSnapshotError
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent
 
 
-# 函数用途: skill_search 的工具说明书(进工具目录,引导模型在需要领域方法时先搜)。
+# LLM: 包范围是结构化参数；不据 query 文字推断包身份，正文分页继续携带同包摘要和激活 ID。
+# 函数用途: 声明统一方法检索入口，同时区分公开 Skill 和能力包内按需资源。
 def build_skill_search_model_spec() -> ToolModelSpec:
     return ToolModelSpec(
         name="skill_search",
         description=(
             "检索或读取当前轮可用技能。action=search 按需求返回摘要和稳定 skill_id；"
             "action=get 用 skill_id 读取同一不可变快照里的完整 SKILL.md。"
+            "能力包先返回包摘要；指定 package_id 后可检索内部资源，get 省略 resource_path 时读取包入口。"
+            "包资源分页读取，has_more=true 时继续 continuation；读取不会执行脚本或授予工具权限。"
+            "需要原样落盘时将资源 source_ref 传给 write_file.source_ref；落盘不会执行资源。"
         ),
         input_schema={
             "type": "object",
@@ -44,6 +51,12 @@ def build_skill_search_model_spec() -> ToolModelSpec:
                 "skill_id": {"type": "string", "description": "get 时逐字使用 search 返回的稳定 skill_id。"},
                 "category": {"type": "string", "description": "可选，限定 Skill Categories 类目。"},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 20, "description": "最多返回几条，默认 5。"},
+                "package_id": {"type": "string", "description": "显式选择能力包；省略时只检索公开 Skill 和包摘要。"},
+                "resource_path": {"type": "string", "description": "包内 get 使用声明的相对成员路径，省略读取入口文档。"},
+                "offset": {"type": "integer", "minimum": 0, "description": "包内检索的结果偏移，或正文读取的字符偏移。"},
+                "max_chars": {"type": "integer", "minimum": 1, "description": "包正文单页字符数，不超过原 tool_read_max_chars 配置。"},
+                "expected_package_sha256": {"type": "string", "description": "分页时原样携带 continuation 的包摘要。"},
+                "expected_activation_id": {"type": "string", "description": "分页时原样携带 continuation 的激活代次。"},
             },
             "additionalProperties": False,
         },
@@ -63,28 +76,39 @@ def build_skill_search_model_spec() -> ToolModelSpec:
     )
 
 
+# LLM: 同一快照承接公开 Skill 与显式包范围；包成员读取前后复核原安装且成功后固定原任务引用。
+# 类用途: 为模型提供只读方法检索和分页正文读取，任务引用写入不代表执行或扩权。
 class SkillSearchTool(BaseTool):
     model_spec = build_skill_search_model_spec()
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy("read_only"),
         concurrency_policy=ConcurrencyPolicy("parallel_safe"),
-        resource_scopes=ResourceScopePolicy(parameter_names=("skill_id", "query"),
-            parameter_kinds={"skill_id": "logical", "query": "logical"}),
+        resource_scopes=ResourceScopePolicy(parameter_names=("skill_id", "query", "package_id", "resource_path"),
+            parameter_kinds={"skill_id": "logical", "query": "logical", "package_id": "logical", "resource_path": "logical"}),
+        promotes_task_when=(ToolParameterCondition("action", "equals", "get"),
+                            ToolParameterCondition("package_id", "nonempty_string")),
     )
 
     # 类用途: 把 CapabilityRouter 的 skill 检索暴露成模型可调用的只读工具。
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
 
-    # 函数用途: 执行一次检索;命中给卡片+稳定 id,未命中给类目索引当线索。
+    # LLM: 包参数只能进入明确包分支；不能把未声明资源路径交给全局 Skill 或文件工具兜底。
+    # 函数用途: 按结构化动作选择公开检索、原 Skill 读取或包内按需读取。
     def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         action = str(params.get("action") or ("get" if params.get("skill_id") else "search")).strip()
+        if params.get("package_id"):
+            return self._package_action(params, action)
+        if params.get("resource_path"):
+            return _invalid("resource_path 必须同时指定 package_id")
         if action == "get":
             return self._get(params)
         if action != "search":
             return _invalid("action 只接受 search 或 get")
         return self._search(params)
 
+    # LLM: 未限定 package_id 时只查公开 Skill 与包级摘要，绝不遍历私有成员来给包加召回分数。
+    # 函数用途: 返回公开方法卡或独立能力包摘要。
     def _search(self, params: dict[str, object]) -> ToolHandlerOutcome:
         query = str(params.get("query") or "").strip()
         if not query:
@@ -97,7 +121,7 @@ class SkillSearchTool(BaseTool):
         try:
             hits = [
                 hit
-                for hit in router.search(query, limit=0, kinds={"skill"})
+                for hit in router.search(query, limit=0, kinds={"skill", "capability_package"})
                 if not category or str(hit.card.metadata.get("category") or "") == category
             ][:limit]
         except SkillSnapshotError as exc:
@@ -110,7 +134,10 @@ class SkillSearchTool(BaseTool):
             }
             return ToolHandlerOutcome("skill_search", True, json.dumps(payload, ensure_ascii=False, indent=2))
         matches = [
-            {
+            ({"kind": "capability_package", "package_id": hit.card.metadata["package_id"],
+              "name": hit.card.name, "description": hit.card.description,
+              "stable_id": hit.card.metadata["stable_id"], "score": round(hit.score, 1)}
+             if hit.card.kind == "capability_package" else {
                 "name": hit.card.name,
                 "skill_id": str(hit.card.metadata.get("stable_id") or ""),
                 "source": str(hit.card.metadata.get("scope") or ""),
@@ -118,14 +145,71 @@ class SkillSearchTool(BaseTool):
                 "description": hit.card.description,
                 "when_to_use": hit.card.when_to_use[:1],
                 "score": round(hit.score, 1),
-            }
+            })
             for hit in hits
         ]
         payload = {
             "matches": matches,
-            "hint": "选择合适项后，用 skill_search action=get 和原样 skill_id 读取完整方法。",
+            "hint": "选择后用 action=get 读取：Skill 携带原样 skill_id，能力包携带原样 package_id。",
         }
         return ToolHandlerOutcome("skill_search", True, json.dumps(payload, ensure_ascii=False, indent=2))
+
+    # LLM: scoped 成员只来自本轮包声明，安装与内容错误 fail closed；取消不转成可恢复搜索结果。
+    # 函数用途: 执行明确包范围的搜索或分页读取，并返回可直接复用的同代 continuation。
+    def _package_action(self, params: dict[str, object], action: str) -> ToolHandlerOutcome:
+        if action not in {"search", "get"} or params.get("skill_id"):
+            return _invalid("包范围只接受 search/get，不能同时传 skill_id")
+        try:
+            snapshot = _snapshot_for(self.agent)
+            if snapshot is None:
+                return _unavailable()
+            package_id = str(params["package_id"]).strip()
+            package = snapshot.resolve_package(package_id)
+            if package is None:
+                raise SkillSnapshotError("CAPABILITY_PACKAGE_NOT_AVAILABLE")
+            _validate_package_continuation(package, params)
+            offset = _nonnegative_int(params, "offset", 0)
+            if action == "search":
+                payload = _package_matches(package, params, offset)
+            else:
+                payload = self._package_body(snapshot, package, params, offset)
+            return ToolHandlerOutcome("skill_search", True, json.dumps(payload, ensure_ascii=False, indent=2))
+        except SkillSnapshotError as exc:
+            return _snapshot_unavailable(exc)
+        except (OSError, ValueError) as exc:
+            return _invalid(str(exc))
+
+    # LLM: bytes 校验成功后必须先 pin 原任务引用再交付，pin 错误不能降级为无 task；仅 UTF-8 文本进入模型上下文。
+    # 函数用途: 返回受原配置限制的一页包正文，以及完整性、偏移和同代续读参数。
+    def _package_body(self, snapshot, package, params, offset) -> dict[str, object]:
+        from .task_references import pin_package_reference
+
+        member_path = str(params.get("resource_path") or "")
+        member = package.resolve(member_path)
+        if member is None:
+            raise SkillSnapshotError("CAPABILITY_RESOURCE_NOT_AVAILABLE")
+        raw = snapshot.read_in_package(package.package_id, member.path)
+        try:
+            body = raw.decode("utf-8")
+        except UnicodeError as exc:
+            raise SkillSnapshotError("CAPABILITY_RESOURCE_NOT_TEXT") from exc
+        config = getattr(self.agent, "config", None) or default_agent_config()
+        default_limit = max(1, int(config.tool_read_max_chars))
+        requested = _nonnegative_int(params, "max_chars", default_limit)
+        if requested == 0 or offset > len(body):
+            raise ValueError("max_chars 必须大于零，offset 不能超过正文长度")
+        limit = min(requested, default_limit)
+        window = body[offset:offset + limit]
+        next_offset = offset + len(window)
+        pin_package_reference(self.agent, package.to_ref())
+        payload = {"kind": "capability_package", **package.to_ref(), "resource_path": member.path,
+                   "resource_sha256": member.sha256, "body": window, "offset": offset,
+                   "total_chars": len(body), "has_more": next_offset < len(body),
+                   "source_ref": package_resource_reference(package, member.path)}
+        if payload["has_more"]:
+            payload["continuation"] = {**_package_continuation(package, "get", next_offset),
+                                       "resource_path": member.path, "max_chars": limit}
+        return payload
 
     def _get(self, params: dict[str, object]) -> ToolHandlerOutcome:
         skill_id = str(params.get("skill_id") or "").strip()
@@ -173,6 +257,52 @@ def _snapshot_for(agent):
     if callable(provider):
         return provider()
     return getattr(agent, "_current_skill_snapshot", None)
+
+
+# LLM: continuation 绑定完整包字节和原激活，页码不能在换代后静默套到新资源。
+# 函数用途: 拒绝来自其它包版本或已重新安装代次的分页参数。
+def _validate_package_continuation(package, params) -> None:
+    for key, expected in (("expected_package_sha256", package.package_sha256),
+                          ("expected_activation_id", package.activation_id)):
+        if key in params and params[key] != expected:
+            raise SkillSnapshotError("SKILL_SNAPSHOT_STALE")
+
+
+# LLM: 分页参数只有宿主当前声明身份，没有路径猜测或隐式授权。
+# 函数用途: 生成继续读取同一能力包的结构化工具参数。
+def _package_continuation(package, action: str, offset: int) -> dict[str, object]:
+    return {"action": action, "package_id": package.package_id, "offset": offset,
+            "expected_package_sha256": package.package_sha256, "expected_activation_id": package.activation_id}
+
+
+# LLM: 只匹配声明路径，不扫描正文或创建内部 SkillCard；结果数量与外部 Skill 计数完全独立。
+# 函数用途: 在显式包范围内分页列出或按名称检索私有资源。
+def _package_matches(package, params, offset: int) -> dict[str, object]:
+    query = str(params.get("query") or "").strip()
+    tokens = tokenize(query)
+    members = [member for member in package.members
+               if not query or any(token in member.path.lower() for token in tokens)]
+    members.sort(key=lambda member: member.path)
+    limit = _safe_limit(params.get("limit"))
+    selected = members[offset:offset + limit]
+    next_offset = offset + len(selected)
+    payload = {"package_id": package.package_id,
+               "matches": [{"resource_path": item.path, "content_sha256": item.sha256,
+                            "executable": item.executable,
+                            "source_ref": package_resource_reference(package, item.path)} for item in selected],
+               "offset": offset, "total_matches": len(members), "has_more": next_offset < len(members)}
+    if payload["has_more"]:
+        payload["continuation"] = {**_package_continuation(package, "search", next_offset), "query": query, "limit": limit}
+    return payload
+
+
+# LLM: 偏移和预算是结构化整数，不能用 bool、文本或负值触发隐式强转。
+# 函数用途: 检查分页参数并使用明确默认值。
+def _nonnegative_int(params, key: str, default: int) -> int:
+    value = params.get(key, default)
+    if type(value) is not int or value < 0:
+        raise ValueError(f"{key} 必须为非负整数")
+    return value
 
 
 def _invalid(error: str, *, hint: str = "") -> ToolHandlerOutcome:

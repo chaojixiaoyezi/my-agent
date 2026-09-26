@@ -7,6 +7,7 @@ from dataclasses import asdict, replace
 
 from .plugin_activation import PLUGIN_ENABLE_TOOL, PluginActivationRequest
 from .plugin_activation_record import PluginActivation, plugin_catalog_digest
+from .plugin_content_activation import PluginContentActivation
 from .plugin_environment import prepare_plugin_environment
 from .plugin_environment_plan import plan_plugin_environment
 from .plugin_environment_process import EnvironmentPreparationError, PluginEnvironmentOperation
@@ -42,18 +43,19 @@ from .tooling.models import (
 class PluginEnableTool(BaseTool):
     # LLM: never 仅免管理动作重复询问；只有未激活版本生成计划及资源声明，无计划分支只核对原激活或返回拒绝。
     #   process_sandbox 来自管理上下文的配置 plugin_process_sandbox，决定候选进程是否套平台沙箱。
-    # 函数用途: 在领取前声明新环境身份，已启用或缺失插件不构造非法空资源域。
+    # 函数用途: 可执行包在领取前声明环境；内容包、已启用或缺失插件均不构造虚假资源域。
     def __init__(self, owner, repository, binding, installation, catalog_revision, *, process_sandbox: bool = False):
         self.owner, self.repository, self.binding = owner, repository, binding
         self.installation, self.catalog_revision = installation, catalog_revision
         self.process_sandbox = process_sandbox
-        pending = installation is not None and installation.activation is None
+        pending = (installation is not None and installation.activation is None
+                   and not installation.manifest.is_content_only)
         self.runtime, self.runtime_error = _runtime_facts(installation) if pending else (None, "")
         self.plan = (plan_plugin_environment(installation, binding.request.operation_id,
                                              runtime_fingerprint=self.runtime.fingerprint if self.runtime else None)
                      if pending and not self.runtime_error else None)
         keys = ("plugin", "catalog_revision", "workspace", "permission_digest")
-        self.model_spec = ToolModelSpec(PLUGIN_ENABLE_TOOL, "准备插件隔离环境并验证完整工具目录后启用。", {
+        self.model_spec = ToolModelSpec(PLUGIN_ENABLE_TOOL, "启用已验证内容；可执行插件另行准备环境并核验工具目录。", {
             "type": "object", "properties": {**{key: {"type": "string"} for key in keys}, "confirm": {"type": "string"}},
             "required": list(keys), "additionalProperties": False,
         })
@@ -98,13 +100,15 @@ class PluginEnableTool(BaseTool):
                                  "failed" if exc.cleanup_confirmed else "unknown")
         except Exception:  # noqa: BLE001 原执行链保留未确认结果，不能按异常文本推断已清理或重新准备
             return self._failure("activation_unconfirmed", "TOOL_EXECUTION_FAILED", "unknown", "unknown")
-        return ToolHandlerOutcome(PLUGIN_ENABLE_TOOL, True, "插件版本已启用，新任务将读取该代工具。",
+        return ToolHandlerOutcome(PLUGIN_ENABLE_TOOL, True, "包版本已启用，新任务将读取该代贡献。",
                                   result_envelope={PLUGIN_ENABLE_TOOL: result})
 
     # LLM: 激活 CAS、环境副作用、握手目录和退出确认按序发生；候选只作验收，新运行通过原 Registry 按同代创建业务连接。
     # 函数用途: 在固定版本上完成启用；确认候选退出后才发布，不让冷管理入口留下临时服务。
     def _enable(self) -> dict:
         store, entry = PluginInstallStore(self.owner), self.installation
+        if entry.manifest.is_content_only:
+            return self._enable_content(store, entry)
         if self.plan is None:
             if entry.enabled and store.require_activation(entry.manifest.plugin_id, entry.activation_id) == entry:
                 return {"plugin_id": entry.manifest.plugin_id, "activation_id": entry.activation_id,
@@ -134,6 +138,23 @@ class PluginEnableTool(BaseTool):
                 "tools": [tool.model_spec.name for tool in tools], "commit_state": published.commit_state,
                 "candidate_cleanup": {"session_id": cleanup.record["session_id"], "confirmed": cleanup.confirmed,
                                       "terminations": [asdict(item) for item in cleanup.terminations]}}
+
+    # LLM: 内容启用沿原 operation 与安装 CAS，先复验固定 blob，再直接发布无进程代；不调用环境、沙箱或 MCP。
+    # 函数用途: 启用纯内容能力包，重复启用只核对同一代，撤销未释放时拒绝重开。
+    def _enable_content(self, store, entry) -> dict:
+        store.package_bytes(entry)
+        if entry.activation is not None:
+            if entry.enabled and store.require_activation(entry.manifest.plugin_id, entry.activation_id) == entry:
+                return {"plugin_id": entry.manifest.plugin_id, "activation_id": entry.activation_id,
+                        "revision": entry.revision, "enabled": True, "outcome": "unchanged", "runtime": "none"}
+            raise PluginInstallationError("activation_unsettled", "原内容激活尚未释放。")
+        operation_id = self.binding.request.operation_id
+        active = PluginContentActivation(operation_id, entry.manifest.plugin_id, entry.package_sha256,
+                                         entry.revision, entry.settings_revision)
+        published = store.change_activation(PluginActivationRequest(operation_id, entry.revision, active))
+        return {"plugin_id": entry.manifest.plugin_id, "enabled": True, "activation_id": active.activation_id,
+                "revision": published.installation.revision, "outcome": published.outcome,
+                "commit_state": published.commit_state, "runtime": "none"}
 
     # LLM: 只读安装快照与宿主已解析的运行时事实，不执行任何程序；确认码由这些事实生成，包或解释器变化即作废。
     # 函数用途: 生成非 Python 插件启用前给用户看的确认内容与确认码。

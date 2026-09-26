@@ -14,12 +14,13 @@ import zlib
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
+from .capability_package_manifest import MAX_CAPABILITY_FILES
 from .common.strict_json import load_strict_json
 from .plugin_manifest import PluginManifest, PluginPackageError
 
 
 # LLM: 预算只属于本地包读取，不扩展执行权限；调用方若开放配置须同步 YAML、dataclass 与安装入口。
-# 类用途: 限制归档、展开内容、单成员和描述文件占用，防止一次安装耗尽宿主内存。
+# 类用途: 限制归档、展开内容、单成员与描述文件；新内容库允许更多私有文件，旧协议仍有独立成员上限。
 @dataclass(frozen=True)
 class PackageReadLimits:
     archive_bytes: int = 64 * 1024 * 1024
@@ -27,7 +28,8 @@ class PackageReadLimits:
     member_bytes: int = 64 * 1024 * 1024
     manifest_bytes: int = 512 * 1024
     directory_bytes: int = 1024 * 1024
-    members: int = 128
+    members: int = MAX_CAPABILITY_FILES + 1
+    legacy_members: int = 128
 
     # LLM: 这里不是能力路由限制，零值不能代表无限读取；预算必须是显式正整数。
     # 函数用途: 拒绝无效预算，避免布尔值或负值绕开读取上限。
@@ -41,6 +43,7 @@ class PackageReadLimits:
                 self.manifest_bytes,
                 self.directory_bytes,
                 self.members,
+                self.legacy_members,
             )
         ):
             raise ValueError("插件包读取预算必须是正整数")
@@ -89,7 +92,7 @@ def _read_source(source: Path, limit: int) -> bytes:
         return stream.read(limit + 1)
 
 
-# LLM: 安装保存必须使用本次已检查的字节；不能用这个纯校验入口冒充来源路径授权或真正安装。
+# LLM: 安装保存必须使用本次已检查的字节；先执行宿主明确成员预算，读描述后旧 v1-v6 另施加原 128 成员上限。
 # 函数用途: 核对静态描述、归档结构和逐文件摘要，并保留完整包快照。
 def inspect_plugin_package(
     content: bytes,
@@ -117,15 +120,16 @@ def inspect_plugin_package(
         raise PluginPackageError("invalid_archive", "插件包归档损坏或使用了不支持的格式。") from exc
 
 
-# LLM: 声明、归档成员和摘要必须三方精确匹配；失败时不返回部分工具目录或可安装候选。Python 包核对 wheel，
-#   v6 非 Python 包核对随包文件；两种包都不能夹带未声明成员。
+# LLM: 声明、归档成员和摘要必须三方精确匹配；Python 核对 wheel，v6 和内容包核对文件，旧协议成员上限保持。
 # 函数用途: 从已预检的归档读取描述并验证全部 wheel 或随包文件字节，不展开到磁盘。
 def _verified_manifest(archive: zipfile.ZipFile, limits: PackageReadLimits) -> PluginManifest:
     members = validate_zip_members(archive.infolist(), limits)
     if "plugin.json" not in members:
         raise PluginPackageError("invalid_archive", "插件包缺少描述文件。")
     manifest = _read_manifest(read_zip_member(archive, members["plugin.json"], limits.manifest_bytes))
-    declared = manifest.wheels if manifest.entry is None else manifest.files
+    if not manifest.is_content_only:
+        _check_limit(len(members), min(limits.members, limits.legacy_members))
+    declared = manifest.files if manifest.is_content_only or manifest.entry is not None else manifest.wheels
     if set(members) != {"plugin.json", *(item.path for item in declared)}:
         raise PluginPackageError("invalid_archive", "插件包成员与描述不一致。")
     for item in declared:
@@ -133,6 +137,21 @@ def _verified_manifest(archive: zipfile.ZipFile, limits: PackageReadLimits) -> P
         if hashlib.sha256(data).hexdigest() != item.sha256:
             raise PluginPackageError("digest_mismatch", "插件包成员内容摘要不匹配。")
     return manifest
+
+
+# LLM: 调用方先复核原安装/激活，再传已验证快照；这里只读明确声明的私有成员，不代表权限或维持旧代有效。
+# 函数用途: 有界读取一个归档资源并核对摘要，不解压、不执行；调用方须在返回前再次核对激活。
+def read_plugin_member(package: PluginPackageSnapshot, member_path: str, *, max_bytes: int) -> bytes:
+    if type(max_bytes) is not int or max_bytes <= 0:
+        raise ValueError("资源读取预算无效")
+    declared = next((item for item in package.manifest.files if item.path == member_path), None)
+    if declared is None:
+        raise PluginPackageError("member_missing", "包中没有声明这个资源。")
+    with zipfile.ZipFile(io.BytesIO(package.archive_bytes)) as archive:
+        content = read_zip_member(archive, archive.getinfo(member_path), max_bytes)
+    if hashlib.sha256(content).hexdigest() != declared.sha256:
+        raise PluginPackageError("digest_mismatch", "包资源内容摘要不匹配。")
+    return content
 
 
 # LLM: 外包与 wheel 共用有界目录预检；ZipFile 构造前限制实际计数，正文仍由标准库校验，不信 EOCD 自报值。

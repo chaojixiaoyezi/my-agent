@@ -205,3 +205,10 @@ OS 强制终止仍可能缺已完成的 native 信封，取消回执不证明历
 - 首次请求合同续片：新增 thread 的宿主 pending 才初始化首次发送资格，原 runner 激活后捕获真实 child 请求输入；
   provider I/O 前同一 thread 原子写发送意图，旧 pending 不补资格，取消/写入失败不发请求。原模型依赖 scope 与
   Anthropic/Chat 同源组包已验证实际出站等价；目录/设置撤销、工具或容量未知自动保留。M2.7、M3、DeepSeek 的 fake provider 首轮与后续工具轮自动采用已验，隔离真实服务验收仍待主线执行。
+
+## 2026-09-25 能力包引用接线（本地组件阶段）
+
+子代理创建与能力授予复用 allowed_skills／skill_snapshot_refs，把 capability:<id> 固定到整包摘要和激活代次。
+层级继承只取父任务 canonical attrs 和 grants，忽略 spec 自报引用；后授予能力不再被旧运行参数中的初始列表再次裁掉。
+本地定向测试已覆盖包内读取隔离、父子权限、伪造孙任务 refs、后授予接续；真实多 TUI 尚未开始。
+详见[能力包 Goal](../../tasks/CAPABILITY_INTERNALIZATION_GOAL.md)。

@@ -1246,3 +1246,10 @@ ToolLoopService 接纳整份候选 params，后续模型、工具轮、异常历
 M3 与受限候选 OpenCode DeepSeek 各一条自动采用并完成实际工具轮的样本。图片/其它模态的候选能力与
 token 口径尚无完整证据，不能将文本/native 样本扩写为全部首请求资格已验；结构证据见
 `docs/tasks/DECISION_MODEL_CHILD_LIVE_HANDOFF.md`。
+
+## 能力包版本引用（2026-09-25，首片）
+
+`capability/task_references.py` 从原 task attrs／grants 收集版本，不建立第二份授权状态。
+`orchestration_tools._params_with_skill_snapshot_refs` 和 `orchestration/tools/capability._resolved_skill_grant`
+只从父级当前快照铸造引用；`hierarchy/context.inherited_hierarchy_attributes` 同时保留后授予引用并按子级权限裁剪。
+`core.skill_snapshot_for_run_scope` 对 child 只读 canonical task 和 grants，包摘要相同但激活已换代也拒绝。

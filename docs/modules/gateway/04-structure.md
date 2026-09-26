@@ -1951,3 +1951,10 @@ GatewayModelObservation现承接render/prepare_request/select三个顺序点：�
   `AgentToolApprovalSinkMixin.request_permission` 做同样的预检与落盘。
 - 边界：会话级缓存（`approval_session.py`）仍然只是本 Gateway 进程内的一次授权复用，不会被扩成 owner 级；owner 级授权只来自用户在面板上的显式选择。
 - `cli/gateway_process._build_run_state` 写入 `runtime_prefix=sys.prefix`，`gateway_parts/http_handlers.handle_status` 原样投影；这是客户端比对安装的唯一结构化事实，不写版本文案（2026-09-25）。
+
+## 能力包的原任务状态接线（2026-09-25，首片）
+
+`scheduler/tool` 从当前快照选中 capability:<id>；`scheduler/repository` 规范和持久保存完整引用，
+`scheduler/service` 对同内容重装后的不同 activation_id 也拒绝自动启动。
+`conversation/models.ThreadTaskLink` 和 `store_tasks.TaskStore.pin_skill_reference` 是主任务包版本的唯一持久位置，
+不复制插件安装状态。`capability/task_references` 组合可信运行身份与原任务库；普通后台沿原任务链接恢复。

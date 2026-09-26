@@ -1,5 +1,16 @@
 # 设计台账
 
+## 能力包内化（2026-09-25，方案确认／首片实现中）
+
+解决问题：外部 Agent 的整套能力可独立发现、迁移、升级和卸载，包内方法不膨胀为全局 Skill。
+复用原插件安装／授权／执行和逐轮快照；v7 纯内容包不创建 MCP 或 Python 环境。
+A/B/C 先独立有来源和验收，再按任务组合；不将复制资料或转发原 Agent 当成100%内化。
+详见[模块合同](docs/design/CAPABILITY_PACKS.md)、[执行 Goal](docs/tasks/CAPABILITY_INTERNALIZATION_GOAL.md)
+与[来源及验收矩阵](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md)。
+[迁移操作流程](docs/design/CAPABILITY_MIGRATION.md)使用普通候选源码和原管理命令，不增设自动学习或发布账。
+原生替身复制、Compact 同代续读／换代拒绝已有组件证据；真实 TUI 和发布尚未开始。
+
+
 决策分支已在本地吸收 main `66a598cf3`，尚未合入 main，也未部署：
 - Compact 工具来源统一为 v3 checkpoint 加 run/attempt/turn/call 四元身份，主线三元 `tooling/call_ref.py` 已删除。
 - 未知来源保持可见，并返回结构化的 uncertain 结果。

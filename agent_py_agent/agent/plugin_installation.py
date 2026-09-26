@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass, field
 
 from .common.strict_json import load_strict_json
 from .plugin_activation_record import PluginActivation, plugin_catalog_digest
+from .plugin_content_activation import PluginContentActivation
 from .plugin_manifest import PluginManifest, canonical_plugin_settings
 from .plugin_package import PluginPackageSnapshot
 
@@ -94,7 +95,7 @@ class PluginInstallation:
     last_commit: PluginCommitReceipt
     settings_json: str | None = field(default=None, repr=False)
     settings_revision: int = 0
-    activation: PluginActivation | None = None
+    activation: PluginActivation | PluginContentActivation | None = None
 
     # LLM: 最后回执与包、版本、配置及激活匹配；私有配置读回须通过原 schema，损坏不能降级为空值。
     # 函数用途: 校验完整安装事实，不从包自述生成宿主激活状态。
@@ -130,7 +131,7 @@ class PluginInstallation:
                 raise ValueError("配置与提交回执不一致")
         self._validate_activation()
 
-    # LLM: 激活绑定原包/配置/安装版本；release 只允许空激活并保留原代摘要，真实退出由 Store 在提交前核验。
+    # LLM: 激活绑定原包/配置/安装版本；内容变体无进程准备阶段，release 的资源要求由 Store 按显式类型裁决。
     # 函数用途: 拒绝拼接不同版本或缺少阶段回执的激活，允许已确认清理后的再次准备。
     def _validate_activation(self) -> None:
         activation = self.activation
@@ -139,6 +140,13 @@ class PluginInstallation:
             if action not in {"install", "configure", "release"}:
                 raise ValueError("激活提交缺少原代记录")
             return
+        if isinstance(activation, PluginContentActivation):
+            from .plugin_content_lifecycle import validate_content_installation
+
+            validate_content_installation(self)
+            return
+        if self.manifest.is_content_only:
+            raise ValueError("纯内容包不能绑定进程激活")
         if not isinstance(activation, PluginActivation):
             raise ValueError("安装激活记录无效")
         plan = activation.plan

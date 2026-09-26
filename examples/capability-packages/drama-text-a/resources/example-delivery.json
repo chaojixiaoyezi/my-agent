@@ -1,0 +1,96 @@
+{
+  "schema": "drama_text_delivery.v1",
+  "source_sha256": "81a084e5c7b335fb4fb610326d7a9c47e33c1e425b0d49f6a5542c53d670037a",
+  "brief": {
+    "premise": "赶车人在最后一分钟找回重要便条。",
+    "adaptation_note": "以旧书和车站钟声承接三段原文。"
+  },
+  "cast": [
+    {
+      "id": "C01",
+      "name": "店员"
+    },
+    {
+      "id": "C02",
+      "name": "赶车人"
+    }
+  ],
+  "scenes": [
+    {
+      "id": "S01",
+      "source_ids": [
+        "P01"
+      ],
+      "character_ids": [
+        "C01"
+      ],
+      "seconds": 20,
+      "summary": "店员在门口发现旧书。"
+    },
+    {
+      "id": "S02",
+      "source_ids": [
+        "P02"
+      ],
+      "character_ids": [
+        "C01",
+        "C02"
+      ],
+      "seconds": 20,
+      "summary": "赶车人折返，说明便条的意义。"
+    },
+    {
+      "id": "S03",
+      "source_ids": [
+        "P03"
+      ],
+      "character_ids": [
+        "C01",
+        "C02"
+      ],
+      "seconds": 20,
+      "summary": "书被装入防水袋并交还。"
+    }
+  ],
+  "shots": [
+    {
+      "id": "SH01",
+      "scene_id": "S01",
+      "seconds": 20,
+      "visible_character_ids": [
+        "C01"
+      ],
+      "start_state": "门口旧书无人触碰。",
+      "action": "店员拾起旧书。",
+      "end_state": "旧书被店员拿在手上。"
+    },
+    {
+      "id": "SH02",
+      "scene_id": "S02",
+      "seconds": 20,
+      "visible_character_ids": [
+        "C01",
+        "C02"
+      ],
+      "start_state": "店员持书，赶车人停在门口。",
+      "action": "赶车人指出夹在书页中的便条。",
+      "end_state": "便条的去向被说明。"
+    },
+    {
+      "id": "SH03",
+      "scene_id": "S03",
+      "seconds": 20,
+      "visible_character_ids": [
+        "C01",
+        "C02"
+      ],
+      "start_state": "旧书仍由店员持有。",
+      "action": "店员装袋并交给赶车人。",
+      "end_state": "赶车人拿到装袋旧书。"
+    }
+  ],
+  "omitted_passages": [],
+  "unresolved": [
+    "尚未生成任何媒体。"
+  ]
+}

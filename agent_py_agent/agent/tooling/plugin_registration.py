@@ -13,13 +13,14 @@ logger = logging.getLogger(__name__)
 
 
 # LLM: 只在新运行准备调用；先登记再复查共享关闭标记，未登记候选须关闭，旧代清理未知仍保留原句柄。
-# 函数用途: 将当前 owner 的已启用版本同步到原 MCP 集合，撤销只影响插件自己的连接。
+# 函数用途: 将当前 owner 的已启用程序插件同步到原 MCP 集合；纯内容能力包不创建连接，撤销只影响准确旧连接。
 def synchronize_plugin_clients(registry) -> None:
     owner = registry._construction_params.plugin_owner
     if owner is None:
         return
     try:
-        active = {row.activation_id: row for row in PluginInstallStore(owner).snapshot() if row.enabled}
+        active = {row.activation_id: row for row in PluginInstallStore(owner).snapshot()
+                  if row.enabled and not row.manifest.is_content_only}
     except (OSError, ValueError) as exc:
         logger.warning("插件安装目录不可读：%s", type(exc).__name__)
         active = {}

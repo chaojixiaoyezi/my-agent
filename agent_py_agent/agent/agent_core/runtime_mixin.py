@@ -1,5 +1,6 @@
 # LLM: 主代理真实 task/run/attempt 必须在模型前完成绑定并交给宿主持久保存；
 # 正常结束、异常和 Compact 续接沿用同一权威，不从会话展示编号反推执行身份。
+# 快照准入失败同样必须恢复线程临时字段，不能将失败任务的参数留给同线程下一次调用。
 # 模块用途: 执行主代理的模型工具循环、上下文续接与精确执行轮收尾，不替子代理调度另建身份。
 from __future__ import annotations
 
@@ -84,6 +85,8 @@ def release_active_turn_inputs_for_compact(
     return release_reserved_turn_input_after_attempt(agent, params)
 
 
+# LLM: 先固定旧临时状态，再在同一 try/finally 中安装参数与快照；包括 yield 前的过期引用错误也必须恢复。
+# 函数用途: 进入一轮线程隔离的 prompt/任务/能力快照范围，正常、失败和嵌套退出均恢复原状态。
 @contextmanager
 def current_prompt_scope(agent, user_prompt: str, params: RunParams | None = None):
     """Expose one thread-local run/tool scope without requiring a model turn."""
@@ -93,10 +96,6 @@ def current_prompt_scope(agent, user_prompt: str, params: RunParams | None = Non
     previous_current_run_params = getattr(agent, "_current_run_params", None)
     had_current_skills = hasattr(agent, "_current_skill_snapshot")
     previous_current_skills = getattr(agent, "_current_skill_snapshot", None)
-    agent._current_user_prompt = user_prompt
-    if params is not None:
-        agent._current_run_params = params
-    agent._current_skill_snapshot = _turn_skill_snapshot(agent)
     snapshot = _PromptScopeSnapshot(
         had_current_prompt,
         previous_current_prompt,
@@ -106,6 +105,10 @@ def current_prompt_scope(agent, user_prompt: str, params: RunParams | None = Non
         previous_current_skills,
     )
     try:
+        agent._current_user_prompt = user_prompt
+        if params is not None:
+            agent._current_run_params = params
+        agent._current_skill_snapshot = _turn_skill_snapshot(agent)
         yield
     finally:
         _restore_current_prompt(agent, snapshot)

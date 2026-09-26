@@ -859,6 +859,8 @@ def _items_with_audit_child_scopes(
     return scoped, ""
 
 
+# LLM: 派工只从父级当前快照铸造引用；模型 attributes 中的旧引用先删除，包固定整包摘要和激活代次，不展开私有成员。
+# 函数用途: 将显式 allowed_skills 规范化为可继承的公开 Skill／能力包引用，并在创建前拒绝整批缺失能力。
 def _params_with_skill_snapshot_refs(
     agent: SimpleAgent,
     params: dict[str, object],
@@ -877,7 +879,7 @@ def _params_with_skill_snapshot_refs(
         missing = []
         seen: set[str] = set()
         for reference in requested:
-            entry = snapshot.resolve(reference)
+            entry = snapshot.resolve_reference(reference)
             if entry is None:
                 missing.append(reference)
                 continue
@@ -887,17 +889,9 @@ def _params_with_skill_snapshot_refs(
     except SkillSnapshotError as exc:
         return normalized, f"无法读取当前 Skill 快照：{exc}"
     if missing:
-        return normalized, "allowed_skills 含当前 owner 不可用或已禁用的 Skill：" + ", ".join(missing)
+        return normalized, "allowed_skills 含当前 owner 不可用或已禁用的 Skill／能力包：" + ", ".join(missing)
     normalized["allowed_skills"] = [entry.stable_id for entry in entries]
-    attrs["skill_snapshot_refs"] = [
-        {
-            "stable_id": entry.stable_id,
-            "name": entry.name,
-            "source": entry.source,
-            "content_sha256": entry.content_sha256,
-        }
-        for entry in entries
-    ]
+    attrs["skill_snapshot_refs"] = [entry.to_ref() for entry in entries]
     normalized["attributes"] = attrs
     return normalized, ""
 

@@ -519,6 +519,35 @@ class ToolInputPolicy:
     local_file_url_parameters: tuple[str, ...] = ()
 
 
+# LLM: 条件只读模型 schema 已声明的字符串参数；比较器是宿主代码枚举，不执行表达式、不解释用户自然语言。
+# 类用途: 为某类结构化工具动作声明何时需要先绑定持久任务。
+@dataclass(frozen=True)
+class ToolParameterCondition:
+    field: str
+    operator: str
+    value: str = ""
+
+    # LLM: 禁止隐式强转或可执行谓词；注册时由同一 ToolRuntime 再核对字段与模型 schema。
+    # 函数用途: 拒绝空字段、未知比较和非字符串条件。
+    def __post_init__(self) -> None:
+        if not isinstance(self.field, str) or not self.field or self.field != self.field.strip():
+            raise ValueError("tool parameter condition requires exact field")
+        if self.operator not in {"equals", "nonempty_string"} or not isinstance(self.value, str):
+            raise ValueError("invalid tool parameter condition")
+        if self.operator == "nonempty_string" and self.value:
+            raise ValueError("nonempty condition cannot carry a comparison value")
+
+    # LLM: 只匹配实际字符串值；bool、对象及缺参均不满足，避免类型投影悄悄改变任务状态。
+    # 函数用途: 判断一组工具实参是否满足本条声明。
+    def matches(self, arguments: dict[str, object]) -> bool:
+        actual = arguments.get(self.field)
+        return isinstance(actual, str) and (
+            actual == self.value if self.operator == "equals" else bool(actual.strip())
+        )
+
+
+# LLM: 每次执行沿同一冻结策略；条件晋升只追加到原布尔语义，不能改变授权、效果分类或工作区写权限。
+# 类用途: 汇集工具的执行边界与可按结构化参数触发的持久任务绑定。
 @dataclass(frozen=True)
 class ToolRuntimePolicy:
     effect_resolver: EffectResolverPolicy
@@ -536,6 +565,25 @@ class ToolRuntimePolicy:
     # 正交——wait/派工/审计发布是 mutating(改内部状态)但不写 workspace 文件,
     # 声明 False 即豁免执行锁,不再维护手写工具名名单(新写工具在注册处声明)。
     mutates_workspace: bool = False
+    promotes_task_when: tuple[ToolParameterCondition, ...] = ()
+
+    # LLM: 条件必须不可变且均为宿主构造；空集合维持原 promotes_task 开关，不作为真命题自动晋升。
+    # 函数用途: 验证条件集合并拒绝同参数的矛盾重复定义。
+    def __post_init__(self) -> None:
+        conditions = self.promotes_task_when
+        if not isinstance(conditions, tuple) or any(not isinstance(item, ToolParameterCondition) for item in conditions):
+            raise ValueError("task promotion conditions must be an immutable tuple")
+        if len({item.field for item in conditions}) != len(conditions):
+            raise ValueError("task promotion condition fields must be unique")
+
+
+# LLM: 原无条件 True 优先；否则全部条件同时匹配才晋升，无条件集合返回 False，不按工具名或文本猜行为。
+# 函数用途: 在原工具执行缝隙决定本次结构化动作是否先绑定任务。
+def tool_promotes_task(policy: ToolRuntimePolicy, arguments: object) -> bool:
+    if policy.promotes_task is True:
+        return True
+    values = arguments if isinstance(arguments, dict) else {}
+    return bool(policy.promotes_task_when) and all(condition.matches(values) for condition in policy.promotes_task_when)
 
 
 # LLM: 所有 effect 消费者必须共用这个解析入口；command 分类与参数 mapping 取风险最高值。
@@ -903,7 +951,7 @@ class ToolRuntime:
             )
 
 
-# LLM: 本地文件 URL 参数与 owner 长期授权参数都必须指向 schema 里的公开参数；从 _validate_runtime_policy 拆出以守住函数长度，
+# LLM: 本地文件 URL、owner 授权与条件晋升都必须指向 schema 里的公开参数；从 _validate_runtime_policy 拆出以守住函数长度，
 #   新增"按参数名声明"的策略字段放这里校验。
 # 函数用途: 核对策略里按参数名引用的字段确实存在于模型可见 schema。
 def _validate_parameter_scoped_policies(
@@ -915,6 +963,12 @@ def _validate_parameter_scoped_policies(
         _require_public_input_parameter(model_spec, public_names, name, "local file URL parameter")
     for name, _values in runtime_policy.approval_policy.owner_grant_parameters:
         _require_public_input_parameter(model_spec, public_names, name, "owner grant parameter")
+    for condition in runtime_policy.promotes_task_when:
+        _require_public_input_parameter(model_spec, public_names, condition.field, "task promotion condition")
+        if condition.operator == "equals":
+            _validate_runtime_default(model_spec, condition.field, condition.value)
+        elif model_spec.input_schema["properties"][condition.field].get("type") != "string":
+            raise ValueError(f"task promotion requires a string parameter: {model_spec.name}.{condition.field}")
 
 
 # LLM: snapshot 构造是 policy 引用字段的唯一 fail-closed 入口；新增策略必须在此校验它们来自同一 schema。

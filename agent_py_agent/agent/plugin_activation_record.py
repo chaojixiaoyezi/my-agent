@@ -1,5 +1,5 @@
-# LLM: 激活是唯一安装表的子记录，不是执行器或操作账；字段只绑定原环境计划和发布事实，不保存配置正文或 OS 退出结论。
-# 模块用途: 为准备、已发布和已撤销的同一代提供严格身份，旧客户端不能换绑另一个环境。
+# LLM: 激活是唯一安装表的子记录，不是执行器或操作账；原进程格式绑定环境，显式新内容格式没有环境或 OS 退出结论。
+# 模块用途: 保留进程激活原格式并识别内容变体，让准备、发布、撤销不能换绑身份。
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import json
 import re
 from dataclasses import asdict, dataclass, fields
 
+from .plugin_content_activation import CONTENT_ACTIVATION_SCHEMA, PluginContentActivation
 from .plugin_environment_plan import PluginEnvironmentPlan
 
 
@@ -47,10 +48,12 @@ class PluginActivation:
     def to_payload(self) -> dict:
         return {"plan": asdict(self.plan), "phase": self.phase, "catalog_sha256": self.catalog_sha256}
 
-    # LLM: 严格字段集合与原计划校验共用；未知协议字段不能丢弃后重写成旧版本。
+    # LLM: 显式内容版本交内容合同；无版本记录只按原进程字段读取，未知协议不能丢字段改写成旧格式。
     # 函数用途: 从持久记录恢复一个不可变激活对象。
     @classmethod
-    def from_payload(cls, value: object) -> PluginActivation:
+    def from_payload(cls, value: object) -> PluginActivation | PluginContentActivation:
+        if isinstance(value, dict) and value.get("schema_version") == CONTENT_ACTIVATION_SCHEMA:
+            return PluginContentActivation.from_payload(value)
         if not isinstance(value, dict) or set(value) != {"plan", "phase", "catalog_sha256"}:
             raise ValueError("插件激活字段无效")
         plan = value["plan"]

@@ -1,0 +1,41 @@
+{
+  "schema": "security_evidence_input.v1",
+  "scope": {
+    "authorization_ref": "synthetic:lab-authorization",
+    "asset_ids": [
+      "lab-portal"
+    ],
+    "allowed_operations": [
+      "review_existing_evidence"
+    ]
+  },
+  "evidence": [
+    {
+      "id": "EV01",
+      "asset_id": "lab-portal",
+      "source_ref": "synthetic:observation-a",
+      "content": "合成测试记录：实验页面响应包含标记 demo-header=present；尚未验证安全影响。",
+      "sha256": "f2ba991940fc6652a14c364e7165c7240011217f77c782aacc94e079f5e68555"
+    },
+    {
+      "id": "EV02",
+      "asset_id": "lab-portal",
+      "source_ref": "synthetic:observation-b",
+      "content": "合成测试记录：实验页面响应包含标记 demo-header=present；尚未验证安全影响。",
+      "sha256": "f2ba991940fc6652a14c364e7165c7240011217f77c782aacc94e079f5e68555"
+    }
+  ],
+  "findings": [
+    {
+      "id": "F01",
+      "asset_id": "lab-portal",
+      "title": "测试标记的配置观察",
+      "claim": "两份合成记录包含同一测试标记，尚无漏洞结论。",
+      "evidence_ids": [
+        "EV01",
+        "EV02"
+      ],
+      "recommendation": "由授权负责人核对配置用途，再决定是否需要实操验证。"
+    }
+  ]
+}

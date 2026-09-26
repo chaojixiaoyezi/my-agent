@@ -177,6 +177,8 @@ def is_audit_background_transcript_entry(entry: MessageLogEntry) -> bool:
     )
 
 
+# LLM: 任务链接是同 owner/thread 下持久任务的唯一关联；新增 pins 只固定能力版本，不复制安装授权或执行状态。
+# 类用途: 保存当前任务的会话归属、生命周期与长期上下文绑定，恢复必须读取此记录。
 @dataclass(frozen=True)
 class ThreadTaskLink:
     thread_id: str
@@ -226,10 +228,16 @@ class ThreadTaskLink:
     # It is run-scoped execution context, not published source configuration:
     # on conflict the prepared ``goal`` remains authoritative.
     run_prompt: str = ""
+    # 能力包首次读取时固定的版本；只保存在当前任务链接，不能从会话摘要或名称推断。
+    skill_snapshot_refs: tuple[dict[str, str], ...] = ()
 
+    # LLM: 序列化保留完整任务字段和版本引用；调用方使用原锁提交，不能写成独立能力账。
+    # 函数用途: 生成任务链接的规范持久字段。
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
+    # LLM: 旧记录缺 pins 为显式空集合，新记录逐行校验；不可将损坏引用静默丢弃。
+    # 函数用途: 读回任务链接及其固定的能力版本。
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ThreadTaskLink:
         return cls(
@@ -278,7 +286,18 @@ class ThreadTaskLink:
             ),
             run_epoch=max(0, int(data.get("run_epoch") or 0)),
             run_prompt=str(data.get("run_prompt") or ""),
+            skill_snapshot_refs=tuple(_task_skill_refs(data.get("skill_snapshot_refs", []))),
         )
+
+
+# LLM: 旧任务无字段时是空集合；新字段损坏必须暴露，不可过滤坏行后继续换用当前包。
+# 函数用途: 严格读回原任务保存的能力引用，不创建安装或授权事实。
+def _task_skill_refs(value: object) -> list[dict[str, str]]:
+    from ..capability.task_references import normalize_skill_reference
+
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("SKILL_TASK_REFERENCES_INVALID")
+    return [normalize_skill_reference(row) for row in value]
 
 
 def thread_task_run_started_at(link: object, *, fallback: float = 0.0) -> float:
