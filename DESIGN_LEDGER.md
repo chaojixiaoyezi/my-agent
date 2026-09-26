@@ -665,7 +665,9 @@ auth 表单取消和参数拒绝已验，官方设备码在两处环境被 HTTP 
   重启窗口里 `/stop`、`/btw` 找不到续跑回合；授权确认框续跑后可能被吞。这些列为同一方案的必修项。
   2026-09-26 对照 Hermes 与 OpenClaw 上游：两家都先等回合结束再换新进程并自动续跑，续跑说明禁止再执行重启；Hermes 另有重启前后通知、
   连续重启挂起会话，OpenClaw 另有冷却与合并。据此把排空改成“先等回合结束、再只等执行中工具”两段。权限上 Hermes 要审批，
-  OpenClaw 7 月起已把代理的重启动作移除、改为必须人批准。详见 [Gateway 安全重启](docs/design/GATEWAY_SAFE_RESTART.md)。
+  OpenClaw 7 月起已把代理的重启动作移除、改为必须人批准。2026-09-26 澄清审批语义：对话里说“重启”只是请求，批准只来自
+  TUI 确认框、事先选定的自主/完全访问模式或管理员 `/restart` 命令；飞书里当管理员需先登记渠道身份并补卡片或确认码。
+  详见 [Gateway 安全重启](docs/design/GATEWAY_SAFE_RESTART.md)。
 - 已实现（2026-09-25，用户批准）：结果未确认的执行轮有了会话内显式出口 `/recover`。此前唯一人工出口 `recover_attempt_unknown`
   没有任何 CLI/TUI/IM 入口，执行者中途死亡后该会话的 active 工作任务每条新消息都在 `create_attempt` 的 unknown 闸被拒，会话永久卡死。
   现在 `/recover` 只读列出当前 thread 工作任务根执行轮里未确认的工具操作；用户核对外部事实后用 `recorded|confirmed_noop|abandoned`
