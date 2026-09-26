@@ -3143,7 +3143,7 @@ Audit/摄取不列入本轮新增验收；共享模块既有回归按改动影�
   管理员经 `/client/models` 共享默认模型后，`/model` 列出 1 个带“管理员共享”的模型且不含接口地址，`/model 1` 选中，
   普通消息用该模型完成，再发 `/model` 显示当前会话模型。复制的模型目录随隔离 home 删除，证据在仓库外。
 
-## IM 管理员身份与聊天内审批（2026-09-25，分支 `claude/admin-identity`）
+## IM 管理员身份与聊天内审批（2026-09-26 合入 main）
 
 - 背景：管理员以前只有本机 local/main，飞书用户永远是自己的 owner，IM 客户端也无法确认工具。用户决定用管理员密码在飞书
   私聊里绑定管理员身份，并用密码批准工具。设计见 [IM 管理员身份](docs/design/ADMIN_CHANNEL_IDENTITY.md)。
@@ -3175,13 +3175,15 @@ Audit/摄取不列入本轮新增验收；共享模块既有回归按改动影�
     Gateway 不可达时只回“服务暂时不可用”，不重试；普通消息照常入持久队列。临时目录里没有明文。
   - TUI 与终端：在写控制 outbox 与发 Gateway 之前本地拒绝；拒绝文案不含密码；这三条命令不写输入历史。
 - 回归：本地严格 gate 共 54 个测试文件（3 个新增，加所涉模块既有测试与架构守卫）1468 passed、1 skipped；
-  ruff、doc sync、strict code-size、diff check、clean package 均通过。尚未部署，未做真实飞书验收。
-- 真实验收方法（待做）：
-  1. 在隔离 home 与 127.0.0.1:8431 的 Gateway 上用 CLI 设置密码。
-  2. 以飞书私聊身份经 `/ask` 发送 `/admin <密码>`，核对绑定文件和回执脱敏。
-  3. 发一条会触发需确认工具的普通消息，核对 `/progress` 的提示。
-  4. 分别用 `/approve <密码>` 和 `/deny` 核对工具执行或拒绝。
-  5. 核对群聊被拒、错误 5 次锁定。
+  ruff、doc sync、strict code-size、diff check、clean package 均通过。
+- 真实流程验收（2026-09-26，`0bbe68d55`，隔离 home、127.0.0.1:8432、真实模型；飞书侧以与适配器相同的 `/ask` 载荷与身份头模拟私聊/群聊）：
+  私聊 `/admin status` 显示未绑定；群聊 `/admin <密码>` 返回 `ADMIN_IDENTITY_SCOPE_INVALID` 并提醒撤回；私聊绑定成功、status 显示绑定时间。
+  注意：工作目录内 `write_file` 属于 mutating，默认确认模式本就不弹审批，不能用来测审批。改用 `restart_gateway`（dangerous）：
+  `/progress` 出现 `permission_requested{tool: restart_gateway}`，`/approve <密码>` 后本轮 done、Gateway 换进程（85871 → 87163）；
+  同样请求再发 `/deny`，工具未运行（`APPROVAL_REJECTED`）、进程号不变，代理没有重试。另一身份连错 5 次后锁 10 分钟，锁定期内正确密码也拒且文案不区分原因。
+  绑定身份发 `/restart` 成功换进程（77505 → 85871），`/admin logout` 后 `/restart` 返回 `GATEWAY_RESTART_ADMIN_ONLY`。
+  扫描隔离 home 全部 431 个文件，测试密码明文零命中；控制回执为 `/admin ******`、`/approve ******`。
+  证据在 `~/.my-agent/releases/admin-identity-acceptance-20260926/`（隔离 home 与模型目录副本已删除）。真实飞书客户端上的验收待部署后由用户操作。
 
 ## 提交前严格 gate
 
