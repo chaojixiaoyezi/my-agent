@@ -389,17 +389,32 @@ def sandbox_hides_host_paths(platform_name: str | None = None) -> bool:
 
 
 # LLM: Seatbelt 规则“后写覆盖先写”（本机实测 2026-09-26：先拒绝根再放行子目录，子目录可读；顺序颠倒则子目录也被拒）。
-#   所以先写对 my-agent 根的读拒绝，再逐个放行本 owner 的可见范围；与 Linux 挂载视图对齐。只动 file-read*，
-#   写规则保持原样。改动须同步 test_attempt_sandbox.py 里的真实 sandbox-exec 用例。
+#   所以先写对 my-agent 根的读拒绝，再逐个放行本 owner 的可见范围，最后放行上层目录的元数据；与 Linux 挂载视图对齐。
+#   只动 file-read*，写规则保持原样。改动须同步 test_attempt_sandbox.py 里的真实 sandbox-exec 用例。
 # 函数用途: 生成 owner 隔离形态下 my-agent 私有目录的读拒绝与放行规则；Full Access 或未给根时返回空列表。
 def _private_read_rules(spec: AttemptSandboxSpec) -> list[str]:
     if spec.full_access or spec.private_read_root is None:
         return []
-    root = json.dumps(str(Path(spec.private_read_root).resolve(strict=False)))
-    visible = (spec.owner_home, spec.shared_workspace, spec.attempt_view, spec.staging_root,
-               *spec.public_read_roots, *spec.extra_write_roots)
-    allowed = sorted({json.dumps(str(Path(path).resolve(strict=False))) for path in visible})
-    return [f"(deny file-read* (subpath {root}))", *(f"(allow file-read* (subpath {path}))" for path in allowed)]
+    root_path = Path(spec.private_read_root).resolve(strict=False)
+    visible = {Path(path).resolve(strict=False) for path in (
+        spec.owner_home, spec.shared_workspace, spec.attempt_view, spec.staging_root,
+        *spec.public_read_roots, *spec.extra_write_roots)}
+    allowed = sorted(json.dumps(str(path)) for path in visible)
+    return [f"(deny file-read* (subpath {json.dumps(str(root_path))}))",
+            *(f"(allow file-read* (subpath {path}))" for path in allowed),
+            *_ancestor_metadata_rules((root_path,), visible)]
+
+
+# LLM: 拒读根按 subpath 连同根目录本身一起拒绝；放行子目录之后，根与放行目录之间的上层目录仍拿不到元数据。git、node 的
+#   realpath、python -m venv 规范化路径时要逐级 lstat，会报 Operation not permitted 退出（2026-09-26 本机复现，owner 工作区
+#   在 ~/.my-agent 之下）。所以只对这些上层目录按 literal 放行 file-read-metadata：能 stat 目录本身，仍不能列目录、不能读同级。
+# 函数用途: 生成拒读根内、放行目录上层各级目录的元数据放行规则；没有这类目录时返回空列表。
+def _ancestor_metadata_rules(hidden_roots: tuple[Path, ...], visible: set[Path]) -> list[str]:
+    ancestors = sorted({json.dumps(str(parent)) for path in visible for parent in path.parents
+                        if any(parent == root or root in parent.parents for root in hidden_roots)})
+    if not ancestors:
+        return []
+    return ["(allow file-read-metadata " + " ".join(f"(literal {path})" for path in ancestors) + ")"]
 
 
 def _persona_file_literal_denies(protected_persona_root: Path | None) -> list[str]:

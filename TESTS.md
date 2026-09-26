@@ -1,5 +1,18 @@
 # 测试与发布验收
 
+## macOS 沙箱拒读根的上层目录放行元数据（热修复，2026-09-26，分支 `claude/curator-budget`，基于 main `227fcd5b1`）
+
+- **现象**：step12q 部署后，owner 工作区在拒读根 `~/.my-agent` 之下时，沙箱里的 `git init` 报 `fatal: Invalid path '<my-agent 根>': Operation not permitted`。`git add`、`python3 -m venv`、node 的 `fs.realpathSync` 同样失败。
+  - 受影响的是 `~/.my-agent/owners/...` 下的工作区，TUI 默认工作区就在这里。
+  - `--workspace` 指向 `~/.my-agent` 以外的项目目录不受影响。
+- **原因**：拒读规则用 subpath，连根目录本身一起拒绝；放行本 owner 目录后，根与 owner 目录之间的各级目录仍拿不到元数据。这些工具规范化路径时要逐级 lstat，遇到 EPERM 就退出。第一步的真实沙箱用例只测了读文件和写文件，没覆盖到这一点。
+- **修复**：对拒读根内、放行目录上层的各级目录，按 literal 放行 `file-read-metadata`。这些目录本身能 stat，但仍列不出内容；同级目录、其它 owner 和 config 仍 stat 不到。
+- **测试**（`test_attempt_sandbox.py`）：
+  - 规则单测：元数据放行规则排在最后，覆盖根、`owners`、`owners/local`、`shared` 这几级目录；不含 `providers` 和 `config`，也不用 subpath。
+  - 真实 `sandbox-exec`（仅 macOS）：根和 `owners` 能 stat，但根列不出内容；其它 owner 的上层目录和 config 仍 stat 不到；owner 工作区里 `git init`、`git add` 成功。
+- **变异验证**：3 种变异各自使测试失败：不放行上层元数据、literal 换成 subpath、漏掉根目录本身。还原后逐字节一致（`PYTHONDONTWRITEBYTECODE=1`）。
+- **回归**：引用 attempt 沙箱、Shell 工具或终端会话的 25 个测试文件（含 `test_architecture_guardrails.py`）722 passed、9 skipped；跳过的是 Linux bwrap 用例。
+
 ## 验证分类：换行与不执行检查的参数（2026-09-26，已合入 main `76cb23c6c` 并双机部署 `step12r-d79ae184`，基于 `7179f12e4`）
 
 - **来源**：Codex 在 main `7179f12e4` 上给出三个反例：`pytest\necho done`、`pytest --help`、`pytest --collect-only` 返回 0 时都被记为 passed/full。复核时又找到同类写法：`cd tests` 换行后接 `&& pytest`，`make test -i`（忽略失败），`go test -n` 和 `go build -n`（只打印命令）。

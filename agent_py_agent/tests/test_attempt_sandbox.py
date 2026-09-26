@@ -515,13 +515,18 @@ def test_private_read_rules_deny_the_root_first_then_allow_the_owner_view(tmp_pa
     root, spec = _private_root_spec(tmp_path)
     rules = _private_read_rules(spec)
 
-    # Seatbelt 后写覆盖先写：拒绝根必须在最前，放行在后。
+    # Seatbelt 后写覆盖先写：拒绝根必须在最前，放行在后，上层目录的元数据放行在最后。
     assert rules[0] == f'(deny file-read* (subpath "{root}"))'
-    allowed = rules[1:]
+    allowed, metadata = rules[1:-1], rules[-1]
     assert all(rule.startswith("(allow file-read* (subpath ") for rule in allowed)
     for path in (spec.owner_home, spec.attempt_view, *spec.public_read_roots):
         assert f'(allow file-read* (subpath "{path}"))' in allowed
     assert not any("config" in rule or "u-other" in rule for rule in allowed)
+    # 根到放行目录之间的各级目录只放行元数据（literal），同级目录不放行。
+    assert metadata.startswith("(allow file-read-metadata ")
+    for path in (root, root / "owners", root / "owners" / "local", root / "shared"):
+        assert f'(literal "{path}")' in metadata
+    assert "providers" not in metadata and "config" not in metadata and "subpath" not in metadata
 
 
 def test_macos_profile_adds_private_read_rules_only_for_owner_scope(tmp_path, monkeypatch):
@@ -556,6 +561,18 @@ def test_macos_private_read_root_hides_other_owners_and_config(tmp_path):
     assert can_read(tmp_path / "outside.txt")
     write = sandbox.run(["/bin/sh", "-c", f"printf ok > {spec.attempt_view / 'out.txt'}"], timeout=30)
     assert write.returncode == 0 and (spec.attempt_view / "out.txt").read_text(encoding="utf-8") == "ok"
+
+    def can_stat(path: Path) -> bool:
+        return sandbox.run(["/usr/bin/stat", "-f", "%N", str(path)], timeout=30).returncode == 0
+
+    # 上层目录能 stat（git 等规范化路径要逐级 lstat），但列不出内容；不在放行路径上的同级目录仍 stat 不到。
+    assert can_stat(root) and can_stat(root / "owners")
+    assert sandbox.run(["/bin/ls", str(root)], timeout=30).returncode != 0
+    assert not can_stat(root / "owners" / "providers") and not can_stat(root / "config")
+    # 回归（2026-09-26 生产）：owner 工作区在拒读根之下时，git 曾报 Invalid path … Operation not permitted。
+    git = sandbox.run(["/bin/sh", "-c", f"cd {spec.attempt_view} && git init -q repo && touch repo/a "
+                       "&& git -C repo add -A && echo git-ok"], timeout=60)
+    assert git.returncode == 0 and "git-ok" in git.stdout, git.stderr
 
 
 def test_shell_passes_the_private_root_only_for_owner_scope(tmp_path, monkeypatch):

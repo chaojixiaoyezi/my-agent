@@ -25,6 +25,7 @@
   - **影响**：模型会以为宿主路径“看不到”，实际能读到；两条读路径的边界也不一致。不涉及越权写入，但 macOS 规则里没有任何读拒绝：owner 隔离的 Shell 能读到网关账号可读的一切，包括其它 owner 的数据和含密钥的配置目录。这是安全缺口，不只是表述问题。
   - **回执（已修复）**：`attempt/sandbox.sandbox_hides_host_paths()` 按平台给出只读隔离事实（Linux 为 true，macOS 为 false），Shell 回执文本与 `result_envelope.sandbox.external_host_paths_hidden` 同源；macOS 版如实说明只限制写入，并写明工作区外的路径不在任务授权内、不要读取或依赖。
   - **读边界第一步（已实施，分支 `claude/curator-budget`）**：owner 隔离形态下，Seatbelt 先拒绝读取 my-agent 家目录，再放行本 owner 家目录、attempt view、staging、授权读根和写根；其它 owner、config（含密钥）、发布记录读不到，与 Linux 挂载视图对齐。本机实测 Seatbelt 是“后写覆盖先写”，所以拒绝必须写在放行之前。my-agent 根由 `ToolRegistryParams.host_private_root` → `ShellToolOptions` → `_sandbox_exec(private_root=)` → `AttemptSandboxSpec.private_read_root` 显式传递，前台、后台、终端会话三条路径都覆盖；Full Access 不生效。影响：本机默认管理员也在 owner 隔离形态（访问模式 workspace-write），它的 Shell 以后同样读不到 `~/.my-agent` 里自己家目录以外的部分，要读需切 Full Access；项目目录不受影响。
+  - **第一步的回归与热修复**（2026-09-26）：拒读根用 subpath，连根目录本身一起拒绝，根与本 owner 目录之间的各级目录因此拿不到元数据。owner 工作区在 `~/.my-agent` 之下时，git、node 的 realpath 和 `python3 -m venv` 逐级 lstat 会遇到 EPERM 并退出。现在对这些上层目录按 literal 放行 `file-read-metadata`：能 stat 目录本身，仍列不出内容，同级目录读不到。详见 [TESTS](TESTS.md)。
   - **读边界第二步（未实施，待用户决定）**：用户家目录里的敏感目录（如 `~/.ssh`、钥匙串）在 macOS 上仍可读。已核实的约束：
     - 本机常用工具链（python3、node、npm、uv 在 `/opt/homebrew`，git 在 `/usr/bin`）不在家目录，拒绝家目录不会弄坏它们。
     - owner 隔离的 Shell 没有改 `HOME`（`tooling/shell._subprocess_text_env` 只改 TMPDIR、缓存目录和 PYTHONUSERBASE，并擦洗凭据）。Linux 上家目录没挂载，git 读 `~/.gitconfig` 得到 ENOENT 会跳过；macOS 若拒读家目录会得到 EPERM，git 的 `access_or_die` 只容忍 ENOENT/EACCES，会直接退出。所以只加读拒绝会弄坏这些 owner 的 git。
