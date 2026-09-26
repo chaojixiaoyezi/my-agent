@@ -38,6 +38,7 @@ from ..agent.gateway_parts.request_worker import (
     dispatch_pending_requests,
     terminalize_unhandled_claimed_gateway_request,
 )
+from ..agent.gateway_parts.restart_service import restart_draining
 from ..agent.ingestion.continuous_monitor import recover_active_audit_harvesters
 from ..agent.observability.concurrency_metrics import background_tick_inflight
 from ..agent.owner_scoped_pool import shared_active_owner_registry
@@ -110,17 +111,21 @@ class _RequestDispatcher:
         self._next_input_reconcile_at = 0.0
         self._next_terminal_projection_at = 0.0
 
+    # LLM: 安全重启排空期间（restart_service.restart_draining）不再认领新请求，它们留在 pending 由接班进程处理；
+    # 恢复、终态投影和输入回执调和照常运行。改动须同步 test_gateway_safe_restart.py。
+    # 函数用途: 派发一轮待处理请求并执行节流的恢复/投影/调和扫描，返回本轮派发数量。
     def tick(self) -> int:
         # New work gets the first bounded slice. Historical projection and
         # reconciliation scans must never sit in front of an interactive request.
         dispatched = 0
         try:
-            dispatched = dispatch_pending_requests(
-                self.paths,
-                self.limits,
-                self._submit,
-                scan_gate=self._scan_gate,
-            )
+            if not restart_draining():
+                dispatched = dispatch_pending_requests(
+                    self.paths,
+                    self.limits,
+                    self._submit,
+                    scan_gate=self._scan_gate,
+                )
         except Exception as exc:
             _print_gateway_loop_error("gateway_request_dispatch.iteration", "dispatcher", exc)
         # Recovery and projections are independent durability domains. One
@@ -683,21 +688,25 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
             pass
 
     # LLM: 先回收完成车道，再限频释放无持久工作的空闲 owner；实例回收不能改变任务/唤醒状态。
+    #   安全重启排空期间只回收已完成车道，不发现/提交新的会话或策展工作片，持久唤醒留给接班进程。
     # 函数用途: 推进后台调度、按需释放空闲用户缓存，并记录完成报告。
     def tick(self) -> bool:
         from ..agent.gateway_parts.owner_retention import release_idle_owner_agents
 
         self._maybe_write_heartbeat()
-        self._maybe_seed_wake_pending_owners()
+        draining = restart_draining()
+        if not draining:
+            self._maybe_seed_wake_pending_owners()
         reports = self._collect_finished_ticks()
-        now = time.monotonic()
-        if now >= self._next_owner_retire_at:
-            release_idle_owner_agents(self)
-            self._next_owner_retire_at = now + 5.0
-        self._sync_owner_schedulers()
-        self._recover_active_watch_harvesters()
-        self._run_due_curators()
-        self._submit_ready_thread_ticks()
+        if not draining:
+            now = time.monotonic()
+            if now >= self._next_owner_retire_at:
+                release_idle_owner_agents(self)
+                self._next_owner_retire_at = now + 5.0
+            self._sync_owner_schedulers()
+            self._recover_active_watch_harvesters()
+            self._run_due_curators()
+            self._submit_ready_thread_ticks()
         if not reports:
             return False
         _record_background_main_reports(self._base_agent, reports)

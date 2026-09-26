@@ -60,6 +60,7 @@ from .audit_control_service import AuditControlRequest, execute_audit_control_op
 from .goal_control_service import GoalControlRequest, execute_goal_control_operation
 from .io import gateway_turn_transition, read_json_file_report, update_json_file_atomic
 from .paths import GatewayPaths, gateway_chunk_path, gateway_paths_from_root
+from .restart_control import execute_restart_control
 from .turn_recovery_control import execute_turn_recovery_control
 from .workspace_scope import GatewayWorkspaceScopeError, gateway_request_workspace_scope
 
@@ -325,7 +326,8 @@ def reconcile_gateway_steer_delivery(
 
 # LLM: 三类控制分别调度 Goal、中断回合或停止任务资源；只有明确 stop 才组合，未知控制不能回退到停止。
 # /recover 只交给 turn_recovery_control 按当前会话的工作任务处理，不经过 live request 或停止分支；
-# /model 文字形式交给 model_profile_service，与 TUI 菜单共用 owner/线程解析和写入口。
+# /model 文字形式交给 model_profile_service，与 TUI 菜单共用 owner/线程解析和写入口；
+# /restart 只交给 restart_control 校验管理员后写安全重启请求。
 # 函数用途: 分派结构化控制，避免已暂停 Goal 或普通任务的 interrupt 落入资源停止。
 def execute_gateway_conversation_control(
     agent: object,
@@ -349,6 +351,8 @@ def execute_gateway_conversation_control(
         return _execute_effort_control(agent, command, scope)
     if command.kind == "recover":
         return _execute_recover_control(agent, command, scope)
+    if command.kind == "restart":
+        return _execute_restart_control(agent, paths, command, scope)
     if command.kind == "model":
         # model_profile_service 在导入期依赖本模块的 owner 解析，这里延迟导入以免循环引用。
         from .model_profile_service import execute_model_text_control
@@ -744,6 +748,22 @@ def _execute_recover_control(
             False,
             "当前会话的执行恢复状态暂时不可用，请稍后重试。",
         )
+
+
+# LLM: /restart 按已认证 scope 解析 owner（不创建线程），管理员判定与请求写入归 restart_control。
+# 函数用途: 为 /restart 解析当前会话的 owner 与线程，再交给重启控制模块校验管理员并安排安全重启。
+def _execute_restart_control(
+    base_agent: object,
+    paths: GatewayPaths,
+    command: ConversationControlCommand,
+    scope: GatewayControlScope,
+) -> ConversationControlResult:
+    try:
+        owner_agent = _request_agent_for_scope(base_agent, scope)
+        thread = _conversation_thread_for_scope(owner_agent.conversation_store, scope)
+        return execute_restart_control(owner_agent, thread, command, paths=paths)
+    except Exception:
+        return ConversationControlResult("restart", False, "暂时无法安排 Gateway 重启，请稍后重试。")
 
 
 # LLM: `/context` is a read-only projection of the same owner/thread, prompt estimator, and

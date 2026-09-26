@@ -45,7 +45,11 @@ from .queue_service import (
     claim_request,
     ensure_gateway_folders,
 )
-from .recovery import _gateway_request_attempts, gateway_terminal_projection_folder
+from .recovery import (
+    GATEWAY_SAFE_RESTART_CAUSE,
+    _gateway_request_attempts,
+    gateway_terminal_projection_folder,
+)
 from .request_client import GatewayAskParams, submit_gateway_ask
 from .request_errors import (
     gateway_owner_scope_error_response,
@@ -471,12 +475,18 @@ def _pending_request_sort_key(request_path: Path) -> tuple[int, float, str]:
     )
 
 
+# LLM: 排序只读结构化字段：安全重启接班的续跑回合最先（它们在重启前已在跑，且同会话后来的消息必须排在它后面），
+# 其次新请求，最后普通崩溃恢复（防止毒请求挡住新工作）。改动须同步 test_gateway_safe_restart.py。
+# 函数用途: 给待派发请求排序，决定下一轮先认领谁。
 def _pending_request_entry_sort_key(request: _PendingGatewayRequest) -> tuple[int, float, str]:
     payload = request.payload or {}
     priority = str(payload.get("priority") or "").strip().lower()
     is_recovery = priority == "recovery" or bool(payload.get("requeued_at"))
+    marker = payload.get("active_turn_recovery")
+    cause = str(marker.get("cause") or "") if isinstance(marker, dict) else ""
+    rank = 0 if is_recovery and cause == GATEWAY_SAFE_RESTART_CAUSE else (2 if is_recovery else 1)
     created_at = _request_created_at(payload, request.path)
-    return (1 if is_recovery else 0, created_at, request.path.name)
+    return (rank, created_at, request.path.name)
 
 
 def _request_created_at(payload: dict, request_path: Path) -> float:

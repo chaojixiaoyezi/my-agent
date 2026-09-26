@@ -21,6 +21,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+from ..concurrency.restart_gate import tool_execution_admission
 from ..local_storage import (
     TOOL_OPERATION_FAILED,
     TOOL_OPERATION_SUCCEEDED,
@@ -92,11 +93,38 @@ class _ToolOperationClaimAttempt:
     lease_expires_at: float
 
 
+# LLM: 领取、执行、结算全程处在重启关口之内；关口关闭时新的副作用工具在领取前等待，被中断则按未启动收口。
+# 函数用途: 领取、执行一次、持久化并可重放一次副作用工具调用；Gateway 安全重启排空时不让新工具开跑。
 def execute_tool_operation(
     request: ToolOperationExecutionRequest,
 ) -> ToolHandlerOutcome:
     """Claim, execute once, persist, and replay an exact side-effect result."""
 
+    with tool_execution_admission() as admitted:
+        if not admitted:
+            return _restart_gate_not_started(request)
+        return _execute_admitted_tool_operation(request)
+
+
+# LLM: 只在重启关口等待期间被协作中断时使用；工具从未领取执行权，副作用可证明未发生。
+# 函数用途: 生成“Gateway 重启排空中、工具未开跑”的结构化结果。
+def _restart_gate_not_started(request: ToolOperationExecutionRequest) -> ToolHandlerOutcome:
+    result = _operation_error(
+        request.tool_name,
+        "CANCELLED",
+        "Gateway 正在安全重启，工具在开跑前被停止，没有执行。",
+    )
+    _attach_operation_facts(result, request, status="not_started", action="gateway_restart_drain")
+    return apply_tool_execution_facts(
+        result,
+        failure_stage=ToolFailureStage.RUNTIME_GATE,
+        handler_executed=False,
+    )
+
+
+# LLM: 原 execute_tool_operation 主体，调用方已通过重启关口；领取与结算语义不变。
+# 函数用途: 在已准入的前提下领取、执行一次并持久化副作用工具调用。
+def _execute_admitted_tool_operation(request: ToolOperationExecutionRequest) -> ToolHandlerOutcome:
     if not _operation_store_available(request.store):
         if request.store_required:
             result = _operation_error(

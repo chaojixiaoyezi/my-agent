@@ -165,6 +165,9 @@ def handle_status(handler, server) -> None:
         response["state_load_error"] = state_load_error
     if isinstance(state.get("server_error"), dict):
         response["server_error"] = state["server_error"]
+    # 安全重启排空阶段（turn_wait/tool_drain/cancelled）只做展示投影，状态源在 restart_service。
+    if isinstance(state.get("restart_drain"), dict):
+        response["restart_drain"] = state["restart_drain"]
     handler._send_json(200, response)
 
 

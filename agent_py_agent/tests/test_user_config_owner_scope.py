@@ -37,6 +37,7 @@ def test_user_manifest_has_decision_only_user_config_and_no_gateway_status(tmp_p
     assert "user_config" in manifest["visible_tools"]
     assert "user_config" in manifest["executable_tools"]
     assert "gateway_status" not in manifest["visible_tools"]
+    assert "restart_gateway" not in manifest["visible_tools"]
     entry = next(item for item in manifest["tools"] if item["name"] == "user_config")
     schema = entry["input_schema"]
     assert schema["required"] == ["action"]
@@ -57,6 +58,7 @@ def test_remote_user_gets_decision_only_but_group_gets_no_config_tool(tmp_path, 
     assert "view" not in next(item for item in user_manifest["tools"] if item["name"] == "user_config")["input_schema"]["properties"]["action"]["enum"]
     assert "user_config" not in group_manifest["visible_tools"]
     assert "gateway_status" not in group_manifest["visible_tools"]
+    assert "restart_gateway" not in group_manifest["visible_tools"]
 
 
 def test_user_legacy_actions_rejected_even_when_called_directly(tmp_path, monkeypatch):
@@ -119,6 +121,7 @@ def test_main_agent_keeps_complete_config_tool_and_gateway_status(tmp_path, monk
 
     assert manifest["owner_type"] == "main_agent"
     assert "gateway_status" in manifest["visible_tools"]
+    assert "restart_gateway" in manifest["visible_tools"]
     entry = next(item for item in manifest["tools"] if item["name"] == "user_config")
     assert {"view", "set", "decision_read", "decision_patch"}.issubset(
         set(entry["input_schema"]["properties"]["action"]["enum"]))

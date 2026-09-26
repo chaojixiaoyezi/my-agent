@@ -71,6 +71,13 @@ from .gateway_loops import (
     _gateway_request_loop,
     _write_gateway_heartbeat,
 )
+from .gateway_restart_handover import (
+    announce_restart_completed,
+    drain_for_requested_restart,
+    hand_over_to_successor,
+    take_restart_marker,
+    wait_for_predecessor_exit,
+)
 from .gateway_service import (
     install_service,
     uninstall_service,
@@ -333,7 +340,9 @@ def _unidentified_stale_attempts(repo: object) -> list[str]:
 
 # LLM: Gateway setup is the single startup mutation boundary. It rejects an overlapping live
 # generation before touching state, then recovers durable queue claims and publishes startup facts.
-# 函数用途: 先阻止两个 Gateway 重叠运行，再创建目录、调和崩溃遗留并写入 starting 状态。
+# A fresh safe-restart marker (consumed before recovery) makes recovery resume turns without delay and
+# triggers the requester continuation after recovery.
+# 函数用途: 先阻止两个 Gateway 重叠运行，再创建目录、调和崩溃遗留（安全重启接班时立即续跑）并写入 starting 状态。
 def _cmd_gateway_run_setup(agent, paths):
     pid = os.getpid()
     existing_pid = get_running_pid(paths.pid)
@@ -341,12 +350,14 @@ def _cmd_gateway_run_setup(agent, paths):
         raise RuntimeError(f"gateway already running pid={existing_pid}")
     for path in (paths.inbox, paths.processing, paths.done, paths.failed, paths.responses):
         path.mkdir(parents=True, exist_ok=True)
+    restart_marker = take_restart_marker(paths)
     recovery = recover_gateway_processing_requests(
         paths,
         startup=True,
         max_attempts=agent.config.gateway_request_max_attempts,
         timeout_seconds=agent.config.gateway_processing_timeout_seconds,
         agent=agent,
+        planned_restart=restart_marker is not None,
     )
     requeued = recovery["requeued"]
     attempt_recovery = _recover_gateway_stale_attempts(agent)
@@ -372,6 +383,8 @@ def _cmd_gateway_run_setup(agent, paths):
             "gateway_stale_attempts_reconciled",
             attempt_recovery,
         )
+    if restart_marker is not None:
+        announce_restart_completed(agent, restart_marker, requeued=requeued)
     print(f"[gateway-run] status=starting pid={pid}", flush=True)
     log_gateway_event(
         agent,
@@ -611,7 +624,8 @@ def _gateway_context_process_identity(context: GatewayRunContext) -> dict[str, o
 
 # LLM: Service wait accepts only a stop marker matching this exact process generation. Stale or
 # malformed files remain observable on disk but cannot terminate a freshly started Gateway.
-# 函数用途: 等待真正发给当前 Gateway 的停止请求，忽略上一代遗留文件。
+# A safe-restart request targeting this pid is drained here (stop requests win over restarts).
+# 函数用途: 等待真正发给当前 Gateway 的停止请求，或执行指向本进程的安全重启排空；忽略上一代遗留文件。
 def _run_gateway_service_loop(context: GatewayRunContext) -> object:
     """Keep the Gateway alive without running a global model-driven planner.
 
@@ -630,6 +644,9 @@ def _run_gateway_service_loop(context: GatewayRunContext) -> object:
                 process_started_at=context.process_started_at,
             ):
                 return {"summary": "stop requested", "stop_request": payload}
+        restart_report = drain_for_requested_restart(context, process_identity)
+        if restart_report is not None:
+            return restart_report
         time.sleep(0.25)
 
 
@@ -713,6 +730,16 @@ def _classify_gateway_service_return(
         summary = str(report.get("summary") or "")
     else:
         summary = str(getattr(report, "summary", "") or "")
+    if isinstance(report, dict) and isinstance(report.get("restart"), dict):
+        marker = report["restart"]
+        return _GatewayServiceTermination(
+            "stopped",
+            "planned_restart",
+            str(marker.get("reason") or "safe restart"),
+            summary,
+            0,
+            {"restart_request_id": str(marker.get("request_id") or "")},
+        )
     stop_payload: dict[str, object] | None = None
     if isinstance(report, dict) and isinstance(report.get("stop_request"), dict):
         stop_payload = dict(report["stop_request"])
@@ -761,10 +788,11 @@ def _record_gateway_service_termination(
     }
     if termination.details:
         payload.update(termination.details)
-    if termination.exit_code:
+    failed = termination.status == "failed"
+    if failed:
         payload["error_code"] = "GATEWAY_SERVICE_LOOP_UNEXPECTED_RETURN"
     write_json_file(paths.state, payload)
-    event = "gateway_run_failed" if termination.exit_code else "gateway_run_stopped"
+    event = "gateway_run_failed" if failed else "gateway_run_stopped"
     log_gateway_event(agent, event, payload)
 
 
@@ -868,9 +896,11 @@ def cmd_gateway_start(args) -> int:
 
 
 # LLM: 服务进程入口先写托管标记，再创建 Agent/线程/工具；所有子进程继承它，生命周期命令据此拒绝自停。
-# 函数用途: 前台运行 Gateway 服务循环，负责启动、分类退出原因和收尾清理。
+#   --after-pid 由安全重启的旧进程传入：先等旧进程退出再启动恢复；planned_restart 收尾后交给接班进程或服务管理器。
+# 函数用途: 前台运行 Gateway 服务循环，负责启动、分类退出原因、收尾清理，以及安全重启时的换进程。
 def cmd_gateway_run(args) -> int:
     mark_hosting_gateway_process()
+    wait_for_predecessor_exit(int(getattr(args, "after_pid", 0) or 0))
     agent = make_agent(args)
     paths = gateway_paths(agent)
     paths.root.mkdir(parents=True, exist_ok=True)
@@ -885,10 +915,12 @@ def cmd_gateway_run(args) -> int:
     exit_code = 0
     termination_status = "failed"
     termination_reason = "gateway run ended before termination was classified"
+    termination_kind = ""
     cleanup_report: dict[str, object] = {}
     try:
         report = _run_gateway_service_loop(run_context)
         termination = _classify_gateway_service_return(run_context, report)
+        termination_kind = termination.kind
         termination_status = termination.status
         termination_reason = termination.reason
         exit_code = termination.exit_code
@@ -928,6 +960,15 @@ def cmd_gateway_run(args) -> int:
         exit_code = 2
     if cleanup_report.get("surviving_background_sessions"):
         _record_surviving_background_sessions_state(paths, cleanup_report)
+    if termination_kind == "planned_restart":
+        command = _gateway_start_command(_gateway_start_options_from_args(args, workspace_root=agent.root))
+        exit_code = hand_over_to_successor(
+            run_context,
+            pid=pid,
+            command=command,
+            spawn=lambda successor: _spawn_gateway_process(paths, successor, cwd=ROOT.parent),
+            write_start_files=lambda new_pid, successor: _write_gateway_start_files(paths, pid=new_pid, command=successor),
+        )
     return exit_code
 
 

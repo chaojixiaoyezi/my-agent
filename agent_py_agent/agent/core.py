@@ -99,6 +99,7 @@ from .settings.model_scope import ModelScopedAttribute
 from .settings.runtime_guard_config import runtime_guard_policy
 from .subagents.manager import SubAgentManager
 from .tooling.computer_use_profile import computer_use_mcp_servers
+from .tooling.gateway_restart_tool import RestartGatewayTool
 from .tooling.gateway_status import GatewayStatusTool
 from .tooling.registry import ToolRegistry, ToolRegistryParams
 from .tooling.user_config_tool import UserConfigTool
@@ -963,7 +964,7 @@ def _add_skill_snapshot_hashes(target: dict[str, str], value: object) -> None:
             target[stable_id] = content_sha256
 
 
-# LLM: Gateway 状态仍限本机管理员；user_config 按可信 owner 身份自行缩窄模型 schema 与执行动作，不能把 legacy 配置能力给普通用户。
+# LLM: Gateway 状态与安全重启仍限本机管理员；user_config 按可信 owner 身份自行缩窄模型 schema 与执行动作，不能把 legacy 配置能力给普通用户。
 #   record_lesson 只在启用子代理时注册，并由注册表默认隐藏，主线程工具面、tool_search 与 list_tools 都看不到它。
 # 函数用途: 把配置、编排、检索、记忆、消息和协作工具装入当前 owner 的 registry。
 def _register_orchestration_tools(agent: SimpleAgent) -> None:
@@ -971,6 +972,9 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
     # 不注册这项能力，从工具快照源头避免跨用户泄露。
     if str(getattr(agent.tools, "owner_type", "") or "") == "main_agent":
         agent.tools.register(GatewayStatusTool(agent))
+        # 安全重启同样只给本机管理员主代理；开关 enable_gateway_restart_tool 关闭时不注册。
+        if agent.config.enable_gateway_restart_tool:
+            agent.tools.register(RestartGatewayTool(agent))
     # 普通 user 也能经原 owner/thread 设置服务操作自己的决策覆盖；group/未知 owner 不扩权。
     if str(getattr(agent.tools, "owner_type", "") or "") in {"main_agent", "user"}:
         agent.tools.register(UserConfigTool(agent))

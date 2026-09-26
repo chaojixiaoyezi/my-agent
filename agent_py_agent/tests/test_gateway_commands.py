@@ -503,7 +503,7 @@ class TestGatewayRunStateHelpers:
         agent = MagicMock()
         context = GatewayRunContext(
             agent=agent,
-            paths=SimpleNamespace(stop_request=stop_path),
+            paths=SimpleNamespace(stop_request=stop_path, root=tmp_path),
             config_path=tmp_path / "config.yaml",
         )
         timer = threading.Timer(0.02, lambda: stop_path.write_text("{}", encoding="utf-8"))
@@ -538,7 +538,7 @@ class TestGatewayRunStateHelpers:
         )
         context = GatewayRunContext(
             agent=MagicMock(),
-            paths=SimpleNamespace(stop_request=stop_path),
+            paths=SimpleNamespace(stop_request=stop_path, root=tmp_path),
             config_path=tmp_path / "config.yaml",
             process_identity={"host_id": "host-a", "pid": 222, "start_time": 20},
             process_started_at=100.0,

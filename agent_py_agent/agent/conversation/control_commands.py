@@ -37,6 +37,7 @@ ControlKind = Literal[
     "verbose",
     "recover",
     "model",
+    "restart",
     "unsupported",
 ]
 TaskCommandKind = Literal["audit_prepare", "decision_experiment"]
@@ -171,7 +172,8 @@ def parse_conversation_control(
 
 
 # LLM: 名称和正文读取公共声明；插件实际入口另行消费其只读回执，此控制解析器仍拒绝插件，不能执行旧 stop 分支。
-# 函数用途: 区分即时控制与模型任务，保留暂停目标、中断本轮和停止资源三种语义；/recover 只解析结构化处置值，/model 只解析编号。
+# 函数用途: 区分即时控制与模型任务，保留暂停目标、中断本轮和停止资源三种语义；/recover 只解析结构化处置值，/model 只解析编号，
+# /restart 的尾随文字只作为展示用原因。
 def parse_conversation_command(
     text: object,
     *,
@@ -221,6 +223,8 @@ def parse_conversation_command(
         return _goal_command(trailing)
     if name == "recover":
         return _recover_command(trailing)
+    if name == "restart":
+        return ConversationControlCommand("restart", value=str(trailing or "").strip()[:200], operation="apply")
     if name == "model":
         return _model_command(trailing)
     if name == "audit":

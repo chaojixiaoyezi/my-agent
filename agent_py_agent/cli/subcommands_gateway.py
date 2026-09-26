@@ -145,6 +145,8 @@ def _add_gateway_start_stop_subcommands(gateway_sub):
 def _add_gateway_run_subcommand(gateway_sub):
     gateway_run = gateway_sub.add_parser("run", help="内部命令：前台运行 gateway 服务")
     gateway_run.add_argument("--workspace-root", default="", help=argparse.SUPPRESS)
+    # 安全重启的接班进程由旧进程带上这个参数：先等旧进程退出再启动恢复，不对用户公开。
+    gateway_run.add_argument("--after-pid", type=int, default=0, help=argparse.SUPPRESS)
     gateway_run.set_defaults(func=cmd_gateway_run)
 
     gateway_status = gateway_sub.add_parser("status", help="查看 gateway 状态")

@@ -1840,6 +1840,14 @@ generic `create_attempt` 和 `recover_attempt_unknown` 不感知 transport marke
 聊天 `/model` 文字控制由 `control_service` 按 kind 分派到 `model_profile_service.execute_model_text_control`，
 与 `/client/models` 共用 `_scoped_model_host`；为避免循环导入，分派处延迟导入该模块。
 
+安全重启分三层：状态在 `gateway_parts/restart_service.py`（请求文件、进程内排空阶段、完成标记、冷却与防循环、发起方通知），
+工具关口在 `concurrency/restart_gate.py`（`execute_tool_operation` 全程处在准入之内，只读工具不经过），进程动作在
+`cli/gateway_restart_handover.py`（服务循环排空、接班或退出码 75、`--after-pid` 等旧进程、启动时消费标记与续跑通知）。
+入口只有两个：`tooling/gateway_restart_tool.py`（仅 main_agent 注册，受 `enable_gateway_restart_tool` 控制）与
+`gateway_parts/restart_control.py`（`/restart`，只认 local/main owner，使用 control_service 传入的权威 Gateway 路径）。
+`recover_gateway_processing_requests(planned_restart=True)` 只在消费到新鲜完成标记的启动时使用；
+`_pending_request_entry_sort_key` 按 `active_turn_recovery.cause` 把安全重启续跑排在新请求之前。
+
 模型输出、异常字符串、PID 年龄、目录内容和“看起来已完成”都不是恢复证据。恢复后新 generation 仍走普通
 `_bind_main_agent_authority`；旧操作不会被 RuntimeDB 重开，模型只从 carried records 获得已做事实。任何
 EXECUTING/UNKNOWN、已启动但未 settle、缺 archive、operation 字段冲突或 DIRTY/MUTATING 资源都返回结构化

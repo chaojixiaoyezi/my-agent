@@ -167,6 +167,7 @@ agent_py_agent/
 |   |-- home_runtime_commands.py        # owner home 状态、daily/task workspace/index 维护命令
 |   |-- gateway_process.py              # gateway 进程入口
 |   |-- gateway_host_guard.py           # 托管标记：Gateway 托管的工具进程不能停止或重启托管自己的 Gateway
+|   |-- gateway_restart_handover.py     # 安全重启进程接线：服务循环排空、接班进程或退出码 75、启动时续跑与通知
 |   |-- gateway_lane_retry.py           # 后台 owner/thread 配置等待与普通冷却；有界、线程安全、不另存任务状态
 |   `-- _*.py                           # CLI 子命令实现
 |-- skills/builtin/<category>/<name>/   # 内置知识型 skill 树：目录即分类（research/documents/…），递归扫描，类目索引常驻 prompt，skill_search 工具按需检索（千级地基）
@@ -378,6 +379,8 @@ agent_py_agent/
 |   |   |-- channel_health.py          # adapter PID/heartbeat/逐通道状态的 fail-closed 健康投影
 |   |   |-- permission_bridge.py       # TUI/Gateway 工具审批 request binding 的原子决定文件桥
 |   |   |-- turn_recovery_control.py   # /recover：查看并按用户处置解除当前会话的未知执行轮阻塞
+|   |   |-- restart_service.py         # 安全重启唯一状态源：请求/合并、两段排空、完成标记、冷却防循环与发起方通知
+|   |   |-- restart_control.py         # /restart：管理员在 TUI/IM 里安排 Gateway 安全重启
 |   |   `-- goal_control_service.py    # 同 thread 持续目标的创建/修改/暂停/恢复/清除
 |   |-- conversation/                  # 通道会话账本、权威 transcript、结构化任务关联/续接
 |   |   |-- store.py                    # 同源领域组件组装、跨领域上下文与账本维护
@@ -526,6 +529,7 @@ agent_py_agent/
 |   |   |-- audit_activation.py        # 显式 `/audit` 前缀 -> guarantee/window 结构化激活
 |   |   `-- tool_output_paths.py       # Memory/工具共用的 owner/task 输出归档与索引路径权威
 |   |-- concurrency/                   # 重试/退避（jittered backoff）、锁、per-thread 协作中断
+|   |   `-- restart_gate.py            # 安全重启工具关口：排空时新副作用工具停在领取前，统计执行中工具数
 |   |-- owner_object_store.py          # scale owner PG/RLS manifest + versioned S3，Pod 盘只作缓存
 |   |-- scale_runtime.py               # scale role/release channel/S3 配置 fail-closed
 |   |-- continuous_monitor_entry.py    # 真实 wall-clock 异构来源 proof 长守入口
@@ -570,6 +574,7 @@ agent_py_agent/
 |   |   |-- process_network_status.py # exact 受管进程树监听、防火墙显式规则与外部探针边界的只读投影
 |   |   |-- process_sessions.py       # owner+TUI 会话隔离的后台命令查询、等待与停止工具
 |   |   |-- gateway_status.py         # 本机管理员读取唯一 Gateway 身份、端点、队列和本生命周期日志摘要
+|   |   |-- gateway_restart_tool.py   # restart_gateway：管理员主代理安排 Gateway 安全重启，只写请求立即返回
 |   |   |-- user_config_tool.py        # main_agent 专用：读生效值/来源，写白名单项并报告生效时机
 |   |   |-- shell.py                  # 非交互 run_command、独立 stdin、超时/中断与有界 pipe drain
 |   |   |-- shell_syntax.py           # 外层及字面 Shell -c 的后台语法检查，不解释普通字符串或 heredoc 正文
@@ -832,6 +837,9 @@ agent_py_agent/
 |   |-- test_tui_upgrade_follow.py      # TUI 随 Gateway 升级原地切换：目标判定、空闲事实、UI 线程两段式、交接载荷、终端兜底
 |   |-- test_turn_recovery_control.py   # /recover 解析、只读查看、显式恢复后可再挂载、拒绝情形、Gateway 分派与 TUI 序列化
 |   |-- test_gateway_host_guard.py      # 托管标记继承与擦洗保留、只拦托管自己的 Gateway、stop/restart/start --force 拒绝
+|   |-- test_restart_gate.py            # 工具关口：关闭时停在领取前、重开放行、中断按未启动收口、执行中计数与等待
+|   |-- test_gateway_safe_restart.py    # 安全重启：合并/冷却/防循环、两段排空与超时取消、标记、续跑优先、接班与 /restart
+|   |-- test_gateway_restart_tool.py    # restart_gateway：只在 Gateway 内、立即返回、冷却拒绝、只注册给管理员主代理
 |   |-- test_model_text_control.py      # 聊天 /model：解析、无模型引导、选择共享模型不泄密钥、按 owner 隔离、TUI 菜单保留
 |   |-- test_tui_terminal.py            # OSC 标题、活动动画、去重与清理回归
 |   |-- test_tui_transcript.py          # 详细 transcript、全文搜索、命中导航和 resize 回归
@@ -1332,6 +1340,7 @@ docs/
 - `agent_py_agent/tests/test_gateway_foreground_transcript.py`：前台 writer、消息顺序、缺帧恢复、候选接替与隔离验证。
 - `agent/gateway_parts/model_profile_service.py`：authenticated owner 的模型菜单接口，不经聊天队列或模型。
 - `cli/gateway_host_guard.py`：Gateway 服务进程启动时写入托管进程号，工具子进程继承；stop/restart/start --force 据此拒绝停掉托管自己的 Gateway。
+- `agent/gateway_parts/restart_service.py`：Gateway 安全重启的唯一状态源；工具、`/restart` 只写请求，排空与换进程由服务循环经 `cli/gateway_restart_handover.py` 执行。
 - `agent/gateway_parts/turn_recovery_control.py`：`/recover` 只看当前 thread 工作任务的根主代理执行轮；查看只读，处置经唯一出口 `recover_attempt_unknown`，不重放旧操作。
 - `agent/gateway_parts/owner_conversation_store.py`：沿原配置与 owner 路径组装模型菜单和插件管理共用的轻量会话 Store，不初始化完整 Agent。
 - `agent/gateway_parts/approval_mode_service.py`：认证 owner 的权限菜单服务，不允许正文伪造管理员。

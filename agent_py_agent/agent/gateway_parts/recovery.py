@@ -38,6 +38,7 @@ if TYPE_CHECKING:
 
 _TERMINAL_PROJECTION_MARKER_SCHEMA = "gateway_terminal_projection_complete.v1"
 _ACTIVE_TURN_RECOVERY_SCHEMA = "gateway_active_turn_recovery.v1"
+GATEWAY_SAFE_RESTART_CAUSE = "gateway_safe_restart"
 
 
 @dataclass(frozen=True)
@@ -48,6 +49,8 @@ class _RecoveryContext:
     startup: bool
     agent: SimpleAgent | None
     lease_stale_seconds: int | None
+    # 安全重启排空后的接班启动：旧进程已确认退出，续跑不需要防崩溃循环的等待延迟。
+    planned_restart: bool = False
 
 
 @dataclass(frozen=True)
@@ -132,6 +135,7 @@ def recover_gateway_processing_requests(
     startup: bool = False,
     agent: SimpleAgent | None = None,
     lease_stale_seconds: int | None = None,
+    planned_restart: bool = False,
 ) -> dict[str, int]:
     return recover_gateway_processing_requests_report(
         paths,
@@ -141,6 +145,7 @@ def recover_gateway_processing_requests(
         startup=startup,
         agent=agent,
         lease_stale_seconds=lease_stale_seconds,
+        planned_restart=planned_restart,
     ).summary
 
 
@@ -153,6 +158,7 @@ def recover_gateway_processing_requests_report(
     startup: bool = False,
     agent: SimpleAgent | None = None,
     lease_stale_seconds: int | None = None,
+    planned_restart: bool = False,
 ) -> GatewayProcessingRecoveryReport:
 
     _ensure_recovery_dirs(paths)
@@ -167,7 +173,10 @@ def recover_gateway_processing_requests_report(
     now = time.time()
     max_attempts = _non_negative_int(max_attempts, default=1)
     timeout_seconds = max(1, int(timeout_seconds or 1))
-    context = params or _RecoveryContext(now, max_attempts, timeout_seconds, startup, agent, lease_stale_seconds)
+    context = params or _RecoveryContext(
+        now, max_attempts, timeout_seconds, startup, agent, lease_stale_seconds,
+        planned_restart=bool(startup and planned_restart),
+    )
     for request_path in sorted(paths.processing.glob("*.json")):
         summary["checked"] += 1
         payload_report = read_json_file_report(request_path, context="gateway.recovery.processing.read")
@@ -737,6 +746,14 @@ def _fail_stale_processing(context: dict) -> str:
     return "failed"
 
 
+# LLM: cause 是续跑排序与诊断读取的结构化事实：安全重启接班、普通重启、服务内租约过期三者互斥。
+# 函数用途: 给重排的回合标注这次续跑的原因。
+def _requeue_cause(context: _RecoveryContext) -> str:
+    if context.planned_restart:
+        return GATEWAY_SAFE_RESTART_CAUSE
+    return "gateway_restart" if context.startup else "processing_lease_expired"
+
+
 # LLM: Preserve request/run identity and committed effects while replacing only the dead lease.
 # Record observed processing failures under the existing turn lock; startup resumes do not
 # consume that budget or reset earlier failures. This does not start/restart the Gateway itself.
@@ -760,7 +777,7 @@ def _requeue_stale_processing(
                 dead_attempt_id=dead_attempt_id,
             )
             requeued = dict(fresh)
-            if context.startup:
+            if context.startup and not context.planned_restart:
                 requeued["not_before_at"] = context.now + 10
             requeued.update(
                 {
@@ -776,7 +793,7 @@ def _requeue_stale_processing(
                         "request_id": request_id,
                         "dead_execution_attempt_id": dead_attempt_id,
                         "requeued_at": context.now,
-                        "cause": "gateway_restart" if context.startup else "processing_lease_expired",
+                        "cause": _requeue_cause(context),
                     },
                     "last_error": (
                         "gateway restarted before request completed"

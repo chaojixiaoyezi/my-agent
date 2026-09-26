@@ -109,6 +109,14 @@ COMMAND_CATALOG = (
         conversation_suffix=r"(?:\s+(.*))?$",
     ),
     CommandSpec(
+        "restart",
+        "/restart",
+        "安全重启 Gateway（仅管理员）：先排空在跑的回合和工具，再换新进程",
+        help_variants=(("/restart <原因>", "附带一句原因，写进 Gateway 日志"),),
+        submit_on_enter=True,
+        conversation_suffix=r"(?:\s+(.*))?$",
+    ),
+    CommandSpec(
         "goal",
         "/goal <时长> <名称> <任务>",
         "启动一个有名称的持续目标",

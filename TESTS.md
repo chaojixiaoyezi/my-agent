@@ -3096,6 +3096,22 @@ Audit/摄取不列入本轮新增验收；共享模块既有回归按改动影�
   用户 12:06 发下一条消息后：同一 agent run 开出 generation 2，metadata 带 `recovered_from_attempt_id`，旧 attempt 那条
   EXECUTING 操作在换代时转为 UNKNOWN、没有被重放；新一轮 12 条工具操作后 12:12 done，请求进入 done，期间 Gateway 进程号未变。
 
+## Gateway 安全重启第一期（2026-09-26）
+
+- 背景：用户要求代理能自己重启 Gateway 且 TUI/IM 不出事；此前代理在回合里执行 `gateway restart` 会切断自己，会话卡在 unknown。
+- `test_restart_gate.py`：关口打开时准入并计数；关闭时工具停在领取前、重开后才开跑；等待中被中断则不准入，协调器返回
+  not_started 的 `CANCELLED`（`action=gateway_restart_drain`）且不执行工具；执行中计数的等待可超时也可成功。
+- `test_gateway_safe_restart.py`：同一目标的重复请求合并；排空完成后冷却拒绝、冷却 0 不限；同一会话 10 分钟 3 次后防循环、换会话或过窗放行；
+  第一段等在飞回合、第二段等执行中工具，成功后关口保持关闭；第一段超时继续、第二段超时取消并重开关口；完成标记只在旧进程退出后消费一次，
+  过期标记丢弃；续跑通知只写到数据根内的发起会话、按请求编号去重；`planned_restart` 恢复不加延迟、原因为 `gateway_safe_restart`、排在新请求前；
+  服务循环排空返回重启报告、状态投影阶段；排空超时撤销请求并通知发起会话；`planned_restart` 分类为 stopped 不记失败；
+  接班命令带 `--after-pid`、托管时返回 75 不拉进程；`/restart` 非管理员拒绝、管理员写入指向本进程的请求并合并重复。
+- `test_gateway_restart_tool.py`：不在 Gateway 内拒绝且不写文件；Gateway 内立即返回 scheduled 并记录发起会话存储根；缺原因与冷却为 not_started；
+  只注册给管理员主代理且可关闭；`test_user_config_owner_scope.py` 另核对普通用户与群看不到它。
+- 真实验收方法：隔离 home 与 127.0.0.1:8432 的 Gateway 上，一次 prompt 让代理重启 Gateway，核对工具回执 scheduled、回合正常结束、
+  Gateway 换了新进程号、发起会话收到“重启已完成”后没有再次重启；另开一个会话跑长命令时发 `/restart`，核对等它跑完才换进程、
+  回合续跑完成、没有 unknown；重启期间发的消息在新进程里照常处理且只回复一次。
+
 ## 托管自停闸与聊天 `/model`（2026-09-25）
 
 - 背景同上一节：模型在回合里重启了托管自己的 Gateway；飞书用户是另一个 owner，没有模型，飞书里发 `/model` 只得到“不支持的系统命令”。

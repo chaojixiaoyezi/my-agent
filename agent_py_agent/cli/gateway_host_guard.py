@@ -1,19 +1,20 @@
 # LLM: 托管身份只来自 Gateway 服务进程启动时写进自身环境的进程号，工具、后台命令和 runner 子进程自然继承；
 # 不解析命令文本或模型正文。只拦“停止/重启托管自己的那台 Gateway”，别的 Gateway 进程号不同照常放行。
-# 已知边界：直接 kill 进程号或调用 HTTP /stop 不经过这里。改动时同步 test_gateway_host_guard.py。
+# 已知边界：直接 kill 进程号或调用 HTTP /stop 不经过这里。需要重启时走 restart_gateway 工具 / /restart 的安全重启。
+# 环境变量名的唯一定义在 agent/gateway_parts/restart_service。改动时同步 test_gateway_host_guard.py。
 # 模块用途: 防止 Gateway 托管的工具进程执行 gateway stop/restart/start --force，把正在执行它的对话回合切断。
 from __future__ import annotations
 
 import os
 import sys
 
-HOSTING_GATEWAY_PID_ENV = "MY_AGENT_HOSTING_GATEWAY_PID"
+from ..agent.gateway_parts.restart_service import HOSTING_GATEWAY_PID_ENV
 
 _REFUSAL = (
     "拒绝执行：这条命令运行在 Gateway（pid={pid}）托管的工具进程里。停止或重启这台 Gateway "
     "会切断正在执行这条命令的对话回合，回合结果将无法确认。用 /model 或 manage_models 修改的模型配置"
-    "在下一次请求时直接生效，不需要重启 Gateway。确实需要重启时，请在本轮结束后由用户在终端执行 "
-    "my-agent gateway restart。"
+    "在下一次请求时直接生效，不需要重启 Gateway。确实需要重启时，管理员会话请改用 restart_gateway 工具"
+    "安排安全重启（先排空在跑的回合和工具再换进程，完成后会通知你继续）；其他会话请告诉用户由管理员用 /restart 处理。"
 )
 
 

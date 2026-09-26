@@ -479,6 +479,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     enable_self_learning: bool = False
     # 主会话代理可用 manage_models 工具直接增删改切 owner 模型目录；关闭后只能用 TUI /model 手动配置。
     enable_model_profile_tool: bool = True
+    # 本机管理员主代理可用 restart_gateway 工具安排 Gateway 安全重启（先排空再换进程）；关闭后不注册该工具。
+    enable_gateway_restart_tool: bool = True
     # TUI 发现 Gateway 换了安装（runtime_prefix 不同）且自身空闲时在同一终端原地换成同版客户端（同会话、不退出全屏）；关闭后只在 footer 提示。
     tui_follow_gateway_upgrade: bool = True
     result_check_execute_tests: bool = False
@@ -563,6 +565,12 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     gateway_ready_timeout_seconds: int = 3
     gateway_service_command_timeout_seconds: int = 30
     gateway_service_stop_timeout_seconds: int = 90
+    # 安全重启第一段：停领新请求后，等本进程在跑回合结束的上限秒数；超时后关闭工具关口，停在工具前的回合由接班进程续跑。
+    gateway_restart_turn_wait_seconds: int = 300
+    # 安全重启第二段：等执行中的副作用工具归零的上限秒数，0=不限；超时取消本次重启并恢复服务，不强杀。
+    gateway_restart_drain_timeout_seconds: int = 600
+    # 两次安全重启之间的最短间隔秒数，0=不限；间隔内的请求直接返回冷却中。
+    gateway_restart_cooldown_seconds: int = 30
     adapter_workspace: str = ""
     # 飞书适配器配置
     feishu_app_id: str = ""

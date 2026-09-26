@@ -76,6 +76,7 @@ python -m agent_py_agent --help
 | `/stop` | 停止当前轮、暂停当前持续目标并回收活跃子代理；需要继续目标时显式恢复。 | 保留 transcript、工作区、compact 和 memory，不停止 Gateway 服务。 |
 | `/interrupt` | 主代理中断当前轮；已有 active Goal 时沿原调度安全续接，不等同暂停目标。 | 保留目标、任务身份和会话；无 active Goal 时不创建续跑。 |
 | `/recover [recorded\|confirmed_noop\|abandoned]` | 上一轮执行中断、结果未确认（报 `ACTIVE_TURN_OUTCOME_UNCERTAIN` 或 `RUN_RECOVERY_REQUIRED`）时使用：不带参数只列出未确认的工具操作；核对外部事实后带处置值显式解除阻塞，下一条消息接着原任务继续。 | 只作用于当前会话的工作任务；处置写进运行库 `attempt_recovered` 事件；不重放旧操作，不改聊天记录。仅 Gateway 模式。 |
+| `/restart [<原因>]` | 管理员安全重启 Gateway：先停领新请求、等在跑的回合结束，再等执行中的工具跑完后换新进程；期间的消息排队，重启后自动处理。 | 只有本机管理员（及已绑定为管理员的 IM 身份）可用；冷却中或同一会话短时间内重复重启会被拒。仅 Gateway 模式。 |
 | `/model [<编号>\|default <编号>]` | 不带参数列出本会话模型、新会话默认和可选模型；`/model <编号>` 为当前会话选择，`/model default <编号>` 设为新会话默认。 | 只选择已保存或管理员共享的模型，不在聊天里新增模型或收发密钥；TUI 里单独输入 `/model` 仍打开菜单。仅 Gateway 模式。 |
 | `/goal ...` | 查看或修改当前 thread 的持久目标。 | 系统控制；命令词不进入模型。 |
 | `/verbose [off|on|full]` | 查看或修改当前 thread 的过程显示档位。 | 系统设置；不创建模型请求、不写 transcript。 |
@@ -1577,7 +1578,17 @@ my-agent gateway result <request_id>
 或 `gateway start --force` 时，如果要停的正是托管它的那台 Gateway，命令直接拒绝并以 2 退出，不写停止请求：
 停掉它会切断正在执行这条命令的对话回合，回合结果将无法确认。判断依据是 Gateway 服务进程启动时写进自身环境、
 由所有子进程继承的 `MY_AGENT_HOSTING_GATEWAY_PID`；其他 home 或端口的 Gateway 进程号不同，照常可停。
-直接 kill 进程号或调用 HTTP `POST /stop` 不经过这道检查。确实需要重启时，在对话结束后由用户在终端执行。
+直接 kill 进程号或调用 HTTP `POST /stop` 不经过这道检查。确实需要重启时，管理员会话里的代理改用 `restart_gateway` 工具，
+用户可以直接发 `/restart`。
+
+安全重启（`restart_gateway` 工具与 `/restart` 共用）：只写一份重启请求就返回。Gateway 随后分两段排空：先停领新请求、等本进程在跑的回合结束
+（上限 `gateway_restart_turn_wait_seconds`，默认 300 秒）；再让新的有副作用工具停在开跑之前、等执行中的工具跑完
+（上限 `gateway_restart_drain_timeout_seconds`，默认 600 秒，0 不限；超时就取消这次重启、照常服务，并通知发起的会话）。
+排空完成后由新进程接班：停在半路的回合立即续跑、排在重启期间的新消息前面，发起的会话会收到“重启已完成”的通知。
+由 systemd/launchd 托管时改为以退出码 75 交给服务管理器拉起。两次重启至少间隔 `gateway_restart_cooldown_seconds`（默认 30 秒），
+同一会话 10 分钟内最多安排 3 次。`restart_gateway` 只注册给本机管理员的主会话代理（`enable_gateway_restart_tool` 可关闭），
+按危险动作审批：完全访问模式直接执行，其它模式弹确认。重启进度可在 HTTP `/status` 的 `restart_drain` 字段查看。
+终端的 `my-agent gateway restart` 目前仍是先停后起，不等回合。
 
 `gateway` 第一版是本地后台控制面。它会启动一个后台 Python 进程，在内部按配置运行现有 daemon/watch 调度，并把 pid、state、heartbeat、stop request、请求队列、响应和日志写到 `gateway_workspace`。当前 request worker pool 已有保守第一版，默认 1 个 worker；runner 并发也只在显式配置 `runner_concurrency` 为数字时启用。它还不是多机器组织 gateway。
 

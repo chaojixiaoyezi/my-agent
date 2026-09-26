@@ -322,6 +322,14 @@ enable_self_learning: false
 # - false：不注册该工具，模型目录只能通过 TUI /model 手动维护。
 enable_model_profile_tool: true
 
+# 代理自助安排 Gateway 安全重启（默认开启）：
+# - true：本机管理员的主会话代理可用 restart_gateway 工具安排重启。Gateway 先停领新请求、等在跑的回合结束，
+#   再让新的副作用工具停在开跑前、等执行中的工具跑完，然后换一个新进程接班；停在半路的回合由新进程自动续跑，
+#   重启完成后会给发起的会话发一条“重启已完成、不要再次重启”的通知。普通用户和群的代理没有这个工具。
+#   是否需要你确认由审批模式决定：完全放行（full access）时直接执行，其它模式按危险动作审批。
+# - false：不注册该工具；需要重启时由管理员在终端执行 my-agent gateway restart 或使用 /restart。
+enable_gateway_restart_tool: true
+
 # TUI 随 Gateway 升级原地切换（默认开启）：
 # - true：部署新版 Gateway 后，正在运行的 TUI 每隔几秒读一次 Gateway 状态文件里的 runtime_prefix；发现与自己不是同一安装，
 #   且当前没有进行中的回合、没有排队、没有待审批、输入框为空、没在看菜单/翻历史/看子代理时，在同一个终端里原地换成
@@ -486,6 +494,16 @@ gateway_worker_join_timeout_seconds: 2
 gateway_ready_timeout_seconds: 3
 gateway_service_command_timeout_seconds: 30
 gateway_service_stop_timeout_seconds: 90
+# Gateway 安全重启（restart_gateway 工具、/restart）：
+# - gateway_restart_turn_wait_seconds：第一段，停领新请求后等在跑回合结束的上限秒数；超时后进入第二段，
+#   回合停在下一个副作用工具之前，由接班进程续跑。0 表示不等回合、直接进入第二段。
+# - gateway_restart_drain_timeout_seconds：第二段，等执行中的副作用工具跑完的上限秒数，0 表示不限；
+#   超时就取消这次重启、恢复正常服务，不强杀任何工具。
+# - gateway_restart_cooldown_seconds：两次安全重启之间的最短间隔秒数，0 表示不限。
+#   另有固定防循环：同一会话 10 分钟内最多安排 3 次重启。
+gateway_restart_turn_wait_seconds: 300
+gateway_restart_drain_timeout_seconds: 600
+gateway_restart_cooldown_seconds: 30
 
 # HTTP 服务端口（gateway 守护进程用）
 # - 默认 8420
