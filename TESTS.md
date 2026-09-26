@@ -1,5 +1,16 @@
 # 测试与发布验收
 
+## 记忆 Curator 输入预算缩批（2026-09-26，分支 `claude/curator-budget`，基于 main `37cad88f7`）
+
+- **真机现象**：生产本机 owner 自 2026-09-24T15:39Z 起每次都是 `CURATOR_INPUT_BUDGET_EXCEEDED`（9/25 共 180 次），`cursor_before` 始终同一个、每次处理 0 条、0 次模型调用；测试 owner `tui-matrix/p1-r141` 同样卡住。失败记录里还夹着别的 owner 留下的 `ModelNotConfiguredError` 尝试形状。
+- **新增** `test_curator_input_budget.py` 6 项：
+  - 服务级复现：真实 ConversationStore 80 条消息加 3 条真机形态审计（36 位编号、带预览）。先断言前置条件：按生产收集口径收满后最终提示超预算。修复后第一轮截尾、成功提交前缀，游标只推进到前缀末尾，运行账记 `memory_curator_input_fitted`；第二轮重放剩余消息和审计，全部恰好处理一次。修复前同一场景连续三轮 `CURATOR_INPUT_BUDGET_EXCEEDED`、0 次模型调用、游标不动，失败诊断与真机记录逐字一致。
+  - 缩批发生在可选决策标注之前：标注钩子只看到已裁进预算的批次。
+  - 单元：先截消息后截审计、保留前缀、各留一条；未超预算原样返回（同一对象、无 warning）；预算小于模板时保底后仍超出，提取前检查保持原失败码。
+  - 诊断：同一线程先成功提取一次，再遇预算失败，`last_model_attempts()` 为空。
+- **变异验证**：8 种（不调用缩批、缩批挪到标注之后、开头不清空形状、先截审计、允许截空、从头部截、不记 warning、未超预算也换新对象）全部使测试失败。每次在 `PYTHONDONTWRITEBYTECODE=1` 子进程运行，并按 sha256 还原。
+- **回归**：与 Curator 相关的 22 个测试文件加 `test_architecture_guardrails.py`，共 476 passed。
+
 ## 智能程度（推理强度）：`/effort` 与子代理 `effort`（2026-09-26，已合入 main `7a15c9c91`，基于 `84d9e50ac`）
 
 - **新增** `test_reasoning_effort.py` 30 项（传输全为本地 fake）：

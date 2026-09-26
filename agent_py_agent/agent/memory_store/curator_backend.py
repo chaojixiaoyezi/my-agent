@@ -194,6 +194,32 @@ def shrink_batch_for_timeout(
     )
 
 
+# LLM: 收集阶段按条目估算、模板只留固定余量，身份清单与“至少一条审计”都不在预算内；积压一满，最终提示
+# 就会超预算，而提取前检查不缩批、游标不前进，下一轮重建同一批，永远失败（真机 2026-09-24 起）。这里按
+# 最终提示实测长度做确定性尾部截断，游标契约与超时缩批相同：被丢弃的尾部留在原游标之后、下一轮重放，
+# 零丢失。先截消息尾部，再截审计尾部，各至少留一条，两类输入每轮都能前进；保底后仍超出（预算小于模板
+# 本身）就交回原批，由 extract_with_retries 报 CURATOR_INPUT_BUDGET_EXCEEDED。必须在可选决策标注之前
+# 调用，标注不为超预算的尾部浪费调用。warning 只含条数，不含正文。同步检查 curator._execute 与
+# test_curator_input_budget.py。
+# 函数用途: 把一批 Curator 输入裁到最终提示不超过 max_chars，返回裁剪后的批次和运行账 warning。
+def fit_batch_to_input_budget(
+    batch: CuratorInputBatch,
+    *,
+    max_chars: int,
+) -> tuple[CuratorInputBatch, tuple[str, ...]]:
+    messages, audit_events = list(batch.messages), list(batch.audit_events)
+    fitted = batch
+    while len(curator_prompt(fitted)) > max_chars and (len(messages) > 1 or len(audit_events) > 1):
+        (messages if len(messages) > 1 else audit_events).pop()
+        fitted = replace(batch, messages=tuple(messages), audit_events=tuple(audit_events))
+    if fitted is batch:
+        return batch, ()
+    return fitted, (
+        f"memory_curator_input_fitted:messages={len(batch.messages)}->{len(messages)},"
+        f"audit={len(batch.audit_events)}->{len(audit_events)}",
+    )
+
+
 # LLM: Timeout budget grows with the actual prompt so that long ingest (novel/長文 bulk load)
 # gets enough wall-clock budget on slow providers, while short inputs keep the configured base.
 # 函数用途: 按输入规模自适应放大模型调用超时(每 chars_per_unit 字符追加一个基础预算,封顶 max_multiplier 倍)。
@@ -223,6 +249,9 @@ def extract_with_retries(
     config: MemoryCuratorConfig,
     batch: CuratorInputBatch,
 ) -> CuratorExtractionAttempt:
+    # 先清空本线程上一调用者(可能是另一个 owner 或另一次 run)留下的尝试形状:预算检查等早退路径
+    # 也不能让失败审计把别人的尝试当成本次证据。
+    _LAST_MODEL_ATTEMPTS.set(())
     prompt = curator_prompt(batch)
     if len(prompt) > config.max_input_chars:
         raise ValueError("CURATOR_INPUT_BUDGET_EXCEEDED")
@@ -236,77 +265,69 @@ def extract_with_retries(
     shrinks_left = _TIMEOUT_SHRINK_LIMIT
     last_error: BaseException | None = None
     shapes: list[CuratorModelAttempt] = []
-    token = _LAST_MODEL_ATTEMPTS.set(())
-    try:
-        while True:
-            timeout_seconds = adaptive_timeout_seconds(config.timeout_seconds, len(prompt))
-            if granted_seconds + timeout_seconds > budget_seconds:
-                break  # 预算耗尽: 有界收口,不再发新调用,按最后一次异常分类失败
-            granted_seconds += timeout_seconds
-            started = time.monotonic()
-            failure: BaseException | None = None
-            try:
-                response = call_backend_with_timeout(
-                    backend,
-                    prompt=prompt,
-                    response_schema=schema,
-                    timeout_seconds=timeout_seconds,
-                )
-            except Exception as exc:
-                failure = exc
-            # LLM: 只把**供应商调用**的失败当尝试失败。解析(parse_curator_extraction)失败属于宿主
-            # 契约错误:它不是"这次调用没跑出来",不能借它触发缩批或多打一次调用——语义必须与修复前
-            # 一致(解析异常直接冒出 extract_with_retries)。
-            shapes.append(
-                CuratorModelAttempt(
-                    attempt=len(shapes) + 1,
-                    prompt_chars=len(prompt),
-                    schema_chars=schema_chars,
-                    granted_seconds=timeout_seconds,
-                    elapsed_ms=int((time.monotonic() - started) * 1000),
-                    shrunk=effective is not batch,
-                    outcome=type(failure).__name__ if failure is not None else "ok",
-                )
+    while True:
+        timeout_seconds = adaptive_timeout_seconds(config.timeout_seconds, len(prompt))
+        if granted_seconds + timeout_seconds > budget_seconds:
+            break  # 预算耗尽: 有界收口,不再发新调用,按最后一次异常分类失败
+        granted_seconds += timeout_seconds
+        started = time.monotonic()
+        failure: BaseException | None = None
+        try:
+            response = call_backend_with_timeout(
+                backend,
+                prompt=prompt,
+                response_schema=schema,
+                timeout_seconds=timeout_seconds,
             )
-            _LAST_MODEL_ATTEMPTS.set(tuple(shapes))
-            if failure is None:
-                # 成功形状同样留痕(含 result 类名),失败审计与成功运行都能看出调用形状。
-                return CuratorExtractionAttempt(
-                    batch=effective,
-                    extraction=parse_curator_extraction(
-                        str(getattr(response, "text", "") or "")
-                    ),
-                    shrink_attempts=_TIMEOUT_SHRINK_LIMIT - shrinks_left,
-                )
-            last_error = failure
-            if isinstance(failure, (CuratorModelStillRunningError, InterruptedError)):
-                break
-            timed_out = is_curator_timeout_error(failure)
-            smaller = (
-                shrink_batch_for_timeout(effective)
-                if timed_out and shrinks_left > 0
-                else None
+        except Exception as exc:
+            failure = exc
+        # LLM: 只把**供应商调用**的失败当尝试失败。解析(parse_curator_extraction)失败属于宿主
+        # 契约错误:它不是"这次调用没跑出来",不能借它触发缩批或多打一次调用——语义必须与修复前
+        # 一致(解析异常直接冒出 extract_with_retries)。
+        shapes.append(
+            CuratorModelAttempt(
+                attempt=len(shapes) + 1,
+                prompt_chars=len(prompt),
+                schema_chars=schema_chars,
+                granted_seconds=timeout_seconds,
+                elapsed_ms=int((time.monotonic() - started) * 1000),
+                shrunk=effective is not batch,
+                outcome=type(failure).__name__ if failure is not None else "ok",
             )
-            if smaller is not None:
-                # 缩批只改本次模型输入:state、游标、run 账一概不动;成功提交仍走同一事务路径,
-                # 被丢弃的尾部不在 processed 前缀内,下一轮从同一游标重放(不丢数据)。
-                effective = smaller
-                shrinks_left -= 1
-                prompt = curator_prompt(effective)
-                continue
-            if not timed_out and retries_left > 0:
-                # 非超时错误(如供应商拒绝/schema 失败)保持原有语义:同输入重试,不缩批。
-                retries_left -= 1
-                continue
-            # 超时不消耗同输入重试额度:同一份已超时的输入再试一次没有新信息。缩到下限
-            # (shrink_batch_for_timeout 返回 None)或缩批/时长预算用尽,即按原语义 typed 失败。
+        )
+        _LAST_MODEL_ATTEMPTS.set(tuple(shapes))
+        if failure is None:
+            # 成功形状同样留痕(含 result 类名),失败审计与成功运行都能看出调用形状。
+            return CuratorExtractionAttempt(
+                batch=effective,
+                extraction=parse_curator_extraction(
+                    str(getattr(response, "text", "") or "")
+                ),
+                shrink_attempts=_TIMEOUT_SHRINK_LIMIT - shrinks_left,
+            )
+        last_error = failure
+        if isinstance(failure, (CuratorModelStillRunningError, InterruptedError)):
             break
-    finally:
-        # 只有"一次调用都没发生"时才回滚(比如预算在第 0 次就收口、或 prompt 组装前的早退):
-        # 那种情况必须清掉上一个调用者留下的形状,否则失败审计会把别人的尝试当成本次证据。
-        # 已经落了形状就保留到本次异常被分类落账之后再清(由下一次调用覆盖)。
-        if not shapes:
-            _LAST_MODEL_ATTEMPTS.reset(token)
+        timed_out = is_curator_timeout_error(failure)
+        smaller = (
+            shrink_batch_for_timeout(effective)
+            if timed_out and shrinks_left > 0
+            else None
+        )
+        if smaller is not None:
+            # 缩批只改本次模型输入:state、游标、run 账一概不动;成功提交仍走同一事务路径,
+            # 被丢弃的尾部不在 processed 前缀内,下一轮从同一游标重放(不丢数据)。
+            effective = smaller
+            shrinks_left -= 1
+            prompt = curator_prompt(effective)
+            continue
+        if not timed_out and retries_left > 0:
+            # 非超时错误(如供应商拒绝/schema 失败)保持原有语义:同输入重试,不缩批。
+            retries_left -= 1
+            continue
+        # 超时不消耗同输入重试额度:同一份已超时的输入再试一次没有新信息。缩到下限
+        # (shrink_batch_for_timeout 返回 None)或缩批/时长预算用尽,即按原语义 typed 失败。
+        break
     if last_error is not None:
         _LOGGER.warning(
             "memory curator model calls failed: %s",
@@ -438,6 +459,7 @@ __all__ = [
     "curator_prompt",
     "extract_with_retries",
     "extraction_budget_seconds",
+    "fit_batch_to_input_budget",
     "is_curator_timeout_error",
     "last_model_attempts",
     "shrink_batch_for_timeout",

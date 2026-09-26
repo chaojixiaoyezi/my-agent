@@ -141,6 +141,12 @@ system/tools/messages 前缀，超窗时按原分段合同覆盖完整历史。�
 http 事件、takeover readiness、CLI resume、identity/daily memory。会按行重写文件的路径（审计清理、
 task workspace 摘要同步）同样改用它，避免"读时切开、写回落成 LF"的静默改写。
 
+## 2026-09-26 策展输入预算缩批的边界（真机卡死修复）
+
+- `curator._execute` 在可选决策标注之前调用 `curator_backend.fit_batch_to_input_budget`：按最终提示（`curator_prompt`）实测长度截尾，先截消息、再截审计，各至少留一条。与 R262 超时缩批同一游标契约：只截尾部，尾部留在游标之后被下一轮重放，不写 state。截过就在运行账 `warnings` 记 `memory_curator_input_fitted:messages=a->b,audit=c->d`，只含条数。
+- 收集阶段的条目估算（固定 7000 字符模板余量、审计 1000 字保底且第一条不受上限约束）只是收集上界，不是提示长度的权威；提示是否超预算只以 `curator_prompt` 实测为准。保底后仍超出说明预算小于模板本身，仍报 `CURATOR_INPUT_BUDGET_EXCEEDED`。
+- R264 的“每轮先清空”现在覆盖预算早退：`extract_with_retries` 第一行就清空尝试形状，不再用 `reset(token)` 恢复上一调用者（可能是另一个 owner）的形状。改动任何一处都要跑 `test_curator_input_budget.py`。
+
 ## R265 策展会话头与失败阶段的边界
 
 - 后台提取的宿主会话在 `curator._execute` 用 `backends/provider_headers.provider_session_scope((owner_id,), run_id)`

@@ -19,11 +19,12 @@
   - **事实**：owner 隔离模式下，macOS Seatbelt 规则（`agent_py_agent/agent/attempt/sandbox.py` 的 `_macos_profile`）是 `allow default` 加 `deny file-write*` 再放开写根，只限制写、不限制读，命令能读到 owner 工作区外的宿主路径；`read_file` 的 owner 读墙更严。Shell 回执（`agent_py_agent/agent/tooling/shell.py` 的 `[sandbox_scope]` 文本与 `sandbox.external_host_paths_hidden`）在 owner 模式下一律写 `external_host_paths_hidden=true`，这只在 Linux 挂载隔离下成立，macOS 上与实际不符。
   - **影响**：模型会以为宿主路径“看不到”，实际能读到；两条读路径的边界也不一致。不涉及越权写入。
   - **待定方向**：先让回执按平台如实给出结构化事实（macOS 不再声称隐藏）；读边界是否收紧到与 `read_file` 一致要单独评估（会影响依赖读取宿主工具链的命令）。不为此改能力包的读写路径。
-- **记忆 Curator 生产持续失败：输入预算与结构化输出**（2026-09-26 登记，未实施；智能程度验收中发现）：
-  - **事实 1：输入预算**。生产 owner 的 Curator 运行记录里，9/25 的 180 次和 9/26（UTC）至今的 51 次全部是 `CURATOR_INPUT_BUDGET_EXCEEDED`，触发原因都是 `session_close`，`cursor_before` 始终同一个、每次处理 0 条；最后一次成功在 2026-09-24T15:28Z。原因是收集预算只给提示模板和正式记忆预留 7000 字符（`memory_store/curator.py` 的 `max_input_chars - 7_000 - formal_chars`），而空批次模板本身约 4981 字符；身份清单（最多 80 个消息编号加审计编号）和审计保底 1000 字符（`memory_store/curator_inputs.py` 的 `remaining_chars = max(1_000, …)`）都没算进去。积压一旦填满消息预算，组出的提示必然超过 40000，`memory_store/curator_backend.py` 直接报错，也不缩批，于是每次都卡在同一批上。
-  - **事实 2：结构化输出**。Curator 固定发 `response_format: json_schema`。DeepSeek 官方 OpenAI 兼容接口直接返回 400（“This response_format type is unavailable now”）；9/24 生产（运行记录只写了 openai_compatible 的 deepseek-v4-flash，当前默认是 OpenCode 中转）有 103 次 `CURATOR_SCHEMA_INVALID`，疑似中转不执行 schema，待探测确认。
-  - **影响**：自 9/24 起生产记忆提炼停摆。游标不前进，消息不会丢，但记忆不再更新。失败发生在调用模型之前，不耗 token。
-  - **待定方向**：输入侧按最终提示的实测长度缩批（与超时缩批同一机制），或把清单和审计保底算进收集预算；结构化输出按模型能力降级（例如 json_object 加提示内 schema，再做校验）。能力来自显式声明或结构化探测，不按模型名判断。
+- **记忆 Curator 生产持续失败：输入预算与结构化输出**（2026-09-26 登记；输入预算与失败诊断已修复，分支 `claude/curator-budget`；结构化输出未实施）：
+  - **事实 1：输入预算（已修复）**。生产 owner 的 Curator 运行记录里，9/25 的 180 次和 9/26（UTC）至今的 51 次全部是 `CURATOR_INPUT_BUDGET_EXCEEDED`，触发原因都是 `session_close`，`cursor_before` 始终同一个、每次处理 0 条；最后一次成功在 2026-09-24T15:28Z，此前成功批次的提示已贴着 40000 上限（39399、39653）。测试 owner `tui-matrix/p1-r141` 同样卡住（9/25 失败 198 次）。根因已用测试复现：收集阶段按条目估算，只给模板留固定 7000 字符（模板实测约 4981）；消息收满预算后，审计仍按保底至少收一条（`curator_inputs.py` 的 `remaining_chars = max(1_000, …)`，且第一条不受上限约束，带 1000 字预览的一条约 1500 字），再加上身份清单里的消息和审计编号，最终提示就超过预算。提取前检查（`curator_backend.py`）直接报错、不缩批，游标不前进，下一轮重建同一批。只有消息时余量够装 80 个编号，所以要有审计事件才触发。
+  - **修复**：`fit_batch_to_input_budget` 在可选决策标注之前按最终提示实测长度截尾（先消息后审计，各至少留一条），被截的尾部留在原游标之后、下一轮重放，零丢失，与超时缩批同一游标契约；运行账记 `memory_curator_input_fitted:messages=a->b,audit=c->d`。保底后仍超出（预算小于模板）保持原失败码。
+  - **失败诊断残留（已修复）**：提取在预算早退前没有清空本线程上一调用者的尝试形状，`finally` 里 `reset(token)` 恢复的也是上一调用者的形状；生产 9/25 有 41 条本机失败记录带着飞书 owner（该 owner 未配模型，当天 50 次 `CURATOR_MODEL_FAILED`）的 `ModelNotConfiguredError` 形状。现在提取开头先清空。
+  - **事实 2：结构化输出（未实施）**。Curator 固定发 `response_format: json_schema`。DeepSeek 官方 OpenAI 兼容接口直接返回 400（“This response_format type is unavailable now”）。Curator 只用 owner 默认模型（`selected_model_config`），不跟随会话 `/model`，所以只有把默认模型设成 DeepSeek 官方时才受影响。9/24 前半天的 103 次 `CURATOR_SCHEMA_INVALID` 经诊断是模型调用本身抛 `ValueError`（当时中转要求会话编号），已由 `f06d780de` 修复，不是 schema 问题。待定方向：结构化输出按模型能力降级（例如 json_object 加提示内 schema，再做校验），能力来自显式声明或结构化探测，不按模型名判断。
+  - **另见**：飞书 owner 未配模型时 Curator 仍按触发反复失败（不调模型、不耗 token），后续可改为未配置时跳过并给出结构化状态。
 
 - **自学习 S3：完成任务后自动总结 Skill，不要用户逐条审批**（2026-09-26，已合入 main 并双机部署，隔离真实验收通过：真实模型新建并更新了一个 Skill，验收中修了宿主会话绑定和“不记绕过拦截做法”两处；详见[自动总结 Skill 设计](docs/design/SKILL_AUTO_SUMMARY.md)与 TESTS 顶部）：
   - **用户决定**：要有“完成任务后自动总结 Skill”的能力，且“别让用户审批，这个用户没时间审批”。所以用确定性的自动闸门代替人工确认，`AGENTS.md` 自学习约束同步改写；`enable_self_learning` 仍默认关闭。
