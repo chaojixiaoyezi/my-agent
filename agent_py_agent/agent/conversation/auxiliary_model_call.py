@@ -1,11 +1,12 @@
-# LLM: 辅助生成与独立用量结算复用原模型账；显式决策探测只复用结算，不进入生成接口或另建持久账。
-# 模块用途: 记录 Compact 等辅助模型调用，并结算独立操作的用量；展示故障不改变调用结果。
+# LLM: 辅助生成与独立用量结算复用原模型账；响应形状仅提供有界诊断，不复制正文或另建持久账。
+# 模块用途: 记录 Compact 等辅助模型调用，投影无正文的失败形状并结算用量；诊断不裁定恢复行为。
 """统一记录 Compact 等非工具循环模型调用。"""
 
 from __future__ import annotations
 
 import inspect
 import logging
+import re
 import time
 import uuid
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ from ..agent_core.model.llm_metrics import record_llm_call
 from ..backends import ProviderRequestOptions
 from ..backends.gateway_helpers import provider_attempt_observer
 from ..backends.provider_headers import provider_runtime_scope
+from ..backends.response_completion import has_reasoning_content
 from ..contracts.model_call_ledger import (
     ModelCallActivityParams,
     ModelCallFirstTokenParams,
@@ -308,4 +310,28 @@ def _purpose(value: object) -> str:
     return str(value or "auxiliary").strip()[:80] or "auxiliary"
 
 
-__all__ = ["AuxiliaryModelCallRequest", "generate_auxiliary_model_response", "settle_standalone_model_usage"]
+# LLM: 只读 ModelResponse 的形状和 typed 终态；未知标签有界保留，正文、思考、参数、签名和凭据不得进入返回值。
+# 函数用途: 为摘要失败日志生成固定字段诊断；不推断 token 上限、不发请求、不改变原响应或恢复分类。
+def auxiliary_response_shape(response: object) -> dict[str, str | int | bool]:
+    text_chars = len(str(getattr(response, "text", "") or "").strip())
+    tool_use_count = len(getattr(response, "tool_use_blocks", None) or [])
+    blocks = getattr(response, "assistant_content_blocks", None) or []
+    return {
+        "text_chars": text_chars,
+        "tool_use_count": tool_use_count,
+        "thinking_only": not text_chars and not tool_use_count and has_reasoning_content(blocks),
+        **{name: _diagnostic_label(getattr(response, name, "")) for name in (
+            "stop_reason", "runtime_status", "runtime_reason", "runtime_source", "turn_end_reason",
+        )},
+        "truncated": bool(getattr(response, "truncated", False)),
+    }
+
+
+# LLM: 终态字段允许供应商扩展，但不得把多行内容或异常长值带入日志；不把未知值映射成已知状态。
+# 函数用途: 保留最多 80 字符的机器标签，非法形状只显示固定标记。
+def _diagnostic_label(value: object) -> str:
+    label = str(value or "")
+    return label if not label or re.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", label) else "invalid_label"
+
+
+__all__ = ["AuxiliaryModelCallRequest", "auxiliary_response_shape", "generate_auxiliary_model_response", "settle_standalone_model_usage"]

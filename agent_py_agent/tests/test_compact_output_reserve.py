@@ -25,10 +25,10 @@ WINDOW = 200_000
 OUTPUT = 50_000
 
 
-# LLM: 复用隔离pytest宿主fixture，不独立创建真实用户Agent；只用原模型设置和canonical历史建立容量输入。
-# 函数用途: 为三种宿主提供相同共享窗口和输出要求，返回原业务入口，不替换模型准备流程。
+# LLM: 复用隔离宿主和完整真实提示/schema；large 输入须落在触发线下、输出预留线上，不能通过删 schema 校准。
+# 函数用途: 为三种宿主构造输出预留才会拒绝的候选；下方双边容量断言验证输入校准，不替换模型准备流程。
 def _case(tmp_path, host, backend, large):
-    requirement = "CURRENT_REQUIREMENT_BEGIN " + "a" * (430_000 if large else 1000) + " CURRENT_REQUIREMENT_END"
+    requirement = "CURRENT_REQUIREMENT_BEGIN " + "a" * (425_000 if large else 1000) + " CURRENT_REQUIREMENT_END"
     if host == "gateway":
         fixture = _history_request(tmp_path, mode="disabled", tools=True, original_window=WINDOW)
         agent, tid = fixture.agent, fixture.thread_id

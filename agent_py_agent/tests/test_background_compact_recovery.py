@@ -7,6 +7,9 @@ from functools import partial
 import pytest
 
 from agent_py_agent.agent.agent_core import compact_request_recovery, runtime_mixin
+from agent_py_agent.agent.agent_core.model.context_pressure import (
+    projected_model_context_components,
+)
 from agent_py_agent.agent.agent_core.tool_request_projection import project_tool_loop_request
 from agent_py_agent.agent.backends.base import ProviderRequestOptions
 from agent_py_agent.agent.backends.errors import ProviderContextWindowError, ProviderTransientError
@@ -247,7 +250,8 @@ def test_background_first_request_compacts_after_complete_prepare(tmp_path, monk
     agent, store, thread, request, execution, sink = _background(
         tmp_path, backend=backend, detached=False,
     )
-    agent.config.model_context_window_tokens = 15_500
+    # 完整准备仍须越过触发线，摘要后的完整提示则须容纳；不能让固定前缀增长把该正例变成无法恢复的容量反例。
+    agent.config.model_context_window_tokens = 18_000
     agent.config.max_tokens = agent.backend.max_tokens = 1_024
     for role in ("user", "assistant"):
         store.messages.append({
@@ -308,6 +312,9 @@ def test_background_first_request_compacts_after_complete_prepare(tmp_path, monk
     assert len(all_wires) == 2
     assert business[0][1] == store.threads.require(thread.thread_id).compact_generation == 1
     projected = candidates[0].projection
+    candidate_tokens, _ = projected_model_context_components(projected)
+    assert candidate_tokens < agent.config.model_context_window_tokens * agent.config.memory_compact_auto_trigger_percent / 100
+    assert candidate_tokens + agent.backend.max_tokens < agent.config.model_context_window_tokens
     frozen = candidates[0].request_input
     expected = agent.backend.project_generate_payload(
         projected.provider_prompt, tools=list(frozen.native_tools) or None,

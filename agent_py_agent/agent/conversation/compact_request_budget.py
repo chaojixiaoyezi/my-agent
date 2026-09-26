@@ -1,9 +1,6 @@
-# LLM: Bound transcript-summary requests to the currently selected model before provider I/O.
-# This module owns no transcript/checkpoint state, executes no tools, and never drops source bytes.
-# An unusable summary reply (tool calls / truncation / no text) is never executed and never advances
-# source coverage silently: it gets bounded corrective calls, then a labelled deterministic digest of
-# the same byte range, so one unhelpful model reply cannot strand the whole conversation.
-# 模块用途: 大窗口切小窗口时顺序分段摘要，保留完整源历史，全部成功后才由原 Compact 入口提交。
+# LLM: 摘要请求复用原缓存前缀和工具目录，但显式 none 禁止选择工具；本模块不执行工具或拥有 checkpoint 状态。
+# 分段沿原有界纠正和机械摘录，非分段仍保持原严格/普通截断规则；诊断只投影响应形状，不成为新的状态事实源。
+# 模块用途: 在当前窗口内发送只读摘要，超量时顺序分段保留完整源历史；失败日志不泄露原文或增加恢复请求。
 
 from __future__ import annotations
 
@@ -21,7 +18,11 @@ from ..backends.request_content import text_messages_supported
 from ..memory_archive import estimate_tokens
 from ..prompting_parts.cache_layout import prompt_cache_layout
 from ..tooling.runtime_contracts import ToolChoice
-from .auxiliary_model_call import AuxiliaryModelCallRequest, generate_auxiliary_model_response
+from .auxiliary_model_call import (
+    AuxiliaryModelCallRequest,
+    auxiliary_response_shape,
+    generate_auxiliary_model_response,
+)
 from .compact_guard import (
     CompactInterruptCheck,
     ConversationCompactError,
@@ -68,8 +69,8 @@ def compact_request_tokens(request: AuxiliaryModelCallRequest, source: CompactMe
     return _request_tokens(request, source)
 
 
-# LLM: Fitting requests remain byte-for-byte cache compatible. Only an oversized request or a
-# typed provider overflow enters the bounded summary chain; check cancellation again before I/O and after reply.
+# LLM: 可容纳请求保持原 prompt/messages/system/tools，只将已有工具面的选择设为 none；工具/system 缓存前缀不改，
+# 不承诺 messages 缓存命中不变。仅超量或 typed 窗口错误进入原分段链；I/O 前后复查取消，legacy tools=None 不添接口要求。
 # Strict replacement sources reject degraded excerpts; 显式message_source只在准备层读取，不能与request.messages竞争权威。
 # vision_summary=True 时来源保留图块、估算加 media_reserve_tokens：超预算、供应商窗口错误、媒体拒绝、截断都抛 typed
 # COMPACT_VISION_SUMMARY_FAILED，绝不转分段（分段不能承载图片，转分段等于同一请求内静默退回 A）。
@@ -86,6 +87,8 @@ def generate_bounded_compact_response(
 ) -> object:
     if message_source is not None and request.messages is not None:
         raise ValueError('compact summary requires one message source')
+    if request.tools is not None:
+        request = replace(request, tool_choice=ToolChoice.none("compact_summary_only"))
     budget = compact_summary_budget(request.agent)
     raise_if_compact_interrupted(interrupt_check)
     if vision_summary:
@@ -96,6 +99,7 @@ def generate_bounded_compact_response(
             response = _generate_materialized_response(request, message_source)
             raise_if_compact_interrupted(interrupt_check)
             if preserve_complete_fallback and getattr(response, "truncated", False):
+                compact_summary_response_outcome(response)
                 raise ConversationCompactError("摘要回复被截断，保留原始来源", code="COMPACT_SUMMARY_TRUNCATED")
             return response
         except ProviderContextWindowError:
@@ -106,6 +110,7 @@ def generate_bounded_compact_response(
 
 # LLM: B 路径只有一次请求：预算不够、ProviderContextWindowError、InputMediaError、截断都变成 typed
 #   COMPACT_VISION_SUMMARY_FAILED，由上层写线程 compact_vision_failed_generation，同代次下一次压缩选 A；不减半预算、不分段。
+#   截断只补无正文的结构化形状日志，不改变原错误码或触发额外请求。
 # 函数用途: 发出保留图块的单次摘要请求，把所有随图失败归到同一个结构化码。
 def _generate_vision_summary_response(request, source, budget, interrupt_check, media_reserve_tokens):
     if _request_tokens(request, source) + max(0, int(media_reserve_tokens)) > budget:
@@ -117,6 +122,7 @@ def _generate_vision_summary_response(request, source, budget, interrupt_check, 
         raise ConversationCompactError(f"随图摘要请求失败：{type(exc).__name__}", code=COMPACT_VISION_SUMMARY_FAILED) from exc
     raise_if_compact_interrupted(interrupt_check)
     if getattr(response, "truncated", False):
+        compact_summary_response_outcome(response)
         raise ConversationCompactError("随图摘要回复被截断", code=COMPACT_VISION_SUMMARY_FAILED)
     return response
 
@@ -225,8 +231,8 @@ class _SegmentOutcome:
     degraded_text: str = ""
 
 
-# LLM: Only typed response facts select the branch: tool calls / truncation / empty text. Provider
-# window errors shrink the budget and retry the same bytes; other provider errors stay fatal.
+# LLM: 共用响应分类只读工具调用/截断/空文本事实；窗口错误仍缩预算重试同段，其它异常直接上抛。
+# 形状诊断不改变纠正次数或覆盖范围，禁止从日志文案取得重试权。
 # 函数用途: 摘要一个连续片段，必要时按类型纠正或缩段重试，最终保证该片段有可用文本。
 def _summarize_segment(
     base: AuxiliaryModelCallRequest,
@@ -257,7 +263,7 @@ def _summarize_segment(
             reason = ""
             continue
         raise_if_compact_interrupted(interrupt_check)
-        text, reason = _segment_summary_outcome(response)
+        text, reason = compact_summary_response_outcome(response)
         if not reason:
             return _SegmentOutcome(text, end, budget, response)
         if repairs >= _SEGMENT_REPAIR_LIMIT:
@@ -289,20 +295,20 @@ def _verified_segment_response(response: object, summary: str) -> object:
     return ModelResponse(backend=str(getattr(response, "backend", "") or "compact_segments"), **fields)
 
 
-# LLM: Only structured response facts classify summary failure. Diagnostics never contain source,
-# generated text, tool arguments or credentials; invalid output cannot advance source coverage.
-# 函数用途: 区分摘要工具调用、截断和空回复，返回（可用正文，失败原因）；只记录形状与计数。
-def _segment_summary_outcome(response: object) -> tuple[str, str]:
+# LLM: 复用原 TOOL_CALL/TRUNCATED/EMPTY 分类；transcript 显式关闭截断拒绝以保持既有普通单次摘要语义。
+# 结构化日志仅为观察投影，绝不解析文案驱动重试，也不含正文/思考/工具参数；分段调用须保留默认严格分类。
+# 函数用途: 返回可用摘要与原失败码，并在原失败位置记录有界响应形状，不新增请求或状态。
+def compact_summary_response_outcome(response: object, *, reject_truncated: bool = True) -> tuple[str, str]:
     text = str(getattr(response, "text", "") or "").strip()
-    calls = list(getattr(response, "tool_use_blocks", None) or [])
-    stop = str(getattr(response, "stop_reason", "") or "")
-    truncated = bool(getattr(response, "truncated", False)) or stop in {"max_tokens", "length"}
-    reason = "TOOL_CALL" if calls else "TRUNCATED" if truncated else "EMPTY" if not text else ""
+    shape = auxiliary_response_shape(response)
+    truncated = shape["truncated"] or shape["stop_reason"] in {"max_tokens", "length"}
+    reason = "TOOL_CALL" if shape["tool_use_count"] else "TRUNCATED" if reject_truncated and truncated else "EMPTY" if not text else ""
     if not reason:
         return text, ""
+    diagnostic = {"reason": reason, **shape}
     logging.getLogger(__name__).warning(
-        "Compact segment invalid: reason=%s text_chars=%d tool_calls=%d truncated=%s",
-        reason, len(text), len(calls), truncated,
+        "Compact 摘要响应不可用：%s", json.dumps(diagnostic, ensure_ascii=False, separators=(",", ":")),
+        extra={"compact_response_shape": diagnostic},
     )
     return "", reason
 

@@ -129,7 +129,8 @@ def test_none_choice_keeps_original_thinking_options_through_adoption(tmp_path, 
     request_execution._run_gateway_ask(fixture.context)
     assert [row[0]["model"] for row in business] == ["candidate-large"]
     payload = business[0][0]
-    assert "tools" not in payload and "tool_choice" not in payload
+    assert bool(payload.get("tools")) == tools
+    assert payload.get("tool_choice") == ({"type": "none"} if tools else None)
     assert payload.get("thinking") == ({"type": "disabled"} if tools else None)
 
 

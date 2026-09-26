@@ -210,3 +210,43 @@ def test_responses_backend_cannot_inherit_chat_payload_proof():
 
     backend = OpenAIResponsesBackend(_OPENAI_OPTIONS)
     assert backend.project_generate_payload("prompt") is None
+
+
+@pytest.mark.parametrize("protocol", ["anthropic", "chat", "responses"])
+@pytest.mark.parametrize("catalog", ["none", "empty", "provided"])
+def test_none_choice_preserves_catalog_in_actual_protocol_payload(monkeypatch, protocol, catalog):
+    from copy import deepcopy
+
+    from agent_py_agent.agent.backends.responses import OpenAIResponsesBackend
+    from agent_py_agent.agent.tooling.runtime_contracts import ToolChoice
+
+    backend_type = {"anthropic": AnthropicCompatibleBackend, "chat": OpenAICompatibleBackend,
+                    "responses": OpenAIResponsesBackend}[protocol]
+    backend = backend_type(replace(_ANTHROPIC_OPTIONS if protocol == "anthropic" else _OPENAI_OPTIONS,
+                                   stream_enabled=False))
+    captured = []
+    response = {"content": [{"type": "text", "text": "摘要"}], "stop_reason": "end_turn",
+                "choices": [{"message": {"content": "摘要"}, "finish_reason": "stop"}],
+                "status": "completed", "output": [{"type": "message", "content": [{"type": "output_text", "text": "摘要"}]}]}
+    monkeypatch.setattr(backend, "request_json", lambda _path, payload, _headers: captured.append(deepcopy(payload)) or response)
+    monkeypatch.setattr("socket.create_connection", lambda *_args, **_kwargs: pytest.fail("fixture must never open a socket"))
+    schema = {"name": "read", "description": "只保留目录", "input_schema": {
+        "type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"],
+    }}
+    tools = None if catalog == "none" else [] if catalog == "empty" else [deepcopy(schema)]
+
+    result = backend.generate("只总结", tools=tools, tool_choice=ToolChoice.none("summary_only"))
+
+    assert result.text == "摘要" and len(captured) == 1
+    payload = captured[0]
+    if catalog == "provided":
+        assert payload["tool_choice"] == ({"type": "none"} if protocol == "anthropic" else "none")
+        item = payload["tools"][0]
+        original = item["function"] if protocol == "chat" else item
+        assert original["name"] == schema["name"]
+        assert original["input_schema" if protocol == "anthropic" else "parameters"] == schema["input_schema"]
+        assert tools == [schema]
+    else:
+        assert "tools" not in payload
+        assert payload.get("tool_choice") == ("none" if protocol == "chat" else None)
+    assert "thinking" not in payload and "reasoning_effort" not in payload and "reasoning" not in payload

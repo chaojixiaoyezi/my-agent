@@ -121,6 +121,24 @@ tool-result reducer、archive 和 refs 管理，不用裁剪对话正文代替�
 `agent_thread_id` 和相同的 summary/generation/checkpoint 状态机；它不生成根任务级 compact 包，也不注入
 另一份主 thread。孙代理递归遵守同一规则。
 
+## 摘要请求的工具控制与诊断（2026-09-26，本地实现、安装版待验）
+
+摘要只归纳已有材料，没有业务工具执行权。非分段请求仍保留原system/tools缓存前缀，
+但通过既有`ToolChoice.none("compact_summary_only")`表达禁止工具；分段请求原本工具目录为空，继续保持。
+`none`禁止选择而不隐式删除调用方已给的目录，三协议共用适配层；返回违规调用仍由原协议门拒绝，
+辅助摘要入口也没有工具执行循环。不增设auto重试、文本原因识别或另一份摘要账本。
+
+诊断复用原辅助响应与摘要分类，记录有界原因标签、工具块数量、正文字符数、thinking是否存在、
+stop/runtime/turn原因及truncated事实，不记录正文、思考内容、参数或凭据。非分段截断的旧接受语义本片不扩改，
+严格完整来源、媒体失败、分段恢复预算、checkpoint/CAS和取消边界仍按原合同。
+此前真实空摘要没有保存原响应形状，不能用新诊断倒填其原因；传输完成和输出token数不等于有摘要正文。
+
+协议参考：[MiniMax Anthropic兼容说明](https://platform.minimax.cn/docs/api-reference/text-anthropic-api)声明支持tool_choice，
+但具体模型端点仍须真实TUI验证。[Anthropic缓存说明](https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-use-with-prompt-caching)
+说明改变tool_choice会使消息层缓存失效，不等同于工具/system前缀失效；不能承诺实际缓存命中率不变。
+本片不改辅助调用的推理档位；当前分支没有后续main的effort接口，集成方须在其基线上补对应组合回归。
+25个相关测试文件537项通过，生产与容量夹具的独立审阅通过；精确原基线的既有容量失败、测试校准和首轮失败均保留，见TESTS。
+
 ## Cache economics
 
 系统通道的验证规则只限定证据表述，不要求每个动作前重新运行已有检查。相同版本、输入和观察点

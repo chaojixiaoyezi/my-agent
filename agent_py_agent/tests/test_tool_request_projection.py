@@ -163,8 +163,8 @@ def test_pure_projection_matches_real_outbound_payload_and_preserves_sources(req
     assert captured[0] == captured[1]
     assert captured[0].get("thinking") == ({"type": "disabled"} if choice.mode != "auto" else None)
     if choice.mode == "none":
-        assert "tools" not in captured[0] and "tool_choice" not in captured[0]
-        assert snapshot.tool_schema_tokens == 0
+        assert captured[0]["tools"] and captured[0]["tool_choice"] == {"type": "none"}
+        assert snapshot.tool_schema_tokens > 0
     else:
         assert captured[0]["tools"]
         assert captured[0]["tool_choice"]["type"] == ("tool" if choice.mode == "specific" else "auto")

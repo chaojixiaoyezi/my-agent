@@ -500,7 +500,9 @@ def test_live_compact_cache_safe_fork_reuses_parent_request_prefix() -> None:
     assert compact_payload["model"] == parent_payload["model"]
     assert compact_payload["system"] == parent_payload["system"]
     assert compact_payload["tools"] == parent_payload["tools"]
-    assert compact_payload["tool_choice"] == parent_payload["tool_choice"] == {"type": "auto"}
+    # 摘要禁用选择但保留原工具/system/历史前缀；不据相同前缀承诺 messages 缓存命中。
+    assert parent_payload["tool_choice"] == {"type": "auto"}
+    assert compact_payload["tool_choice"] == {"type": "none"}
     assert "thinking" not in compact_payload
     parent_tail = parent_payload["messages"][-1]["content"]
     compact_tail = compact_payload["messages"][-1]["content"]
