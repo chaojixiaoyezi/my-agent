@@ -323,6 +323,70 @@ def test_actual_first_model_request_sees_entry_before_capture_without_selector_e
     assert all(isinstance(item, RuntimeFactsTurn) for item in fixture.params.tool_ir_history)
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+def test_tool_free_first_reply_keeps_empty_selection_task_without_creating_goal(tmp_path, monkeypatch, enabled):
+    from agent_py_agent.agent import model_request_selection
+
+    fixture = _runtime(tmp_path, monkeypatch, enabled=enabled, bind=False, selected=())
+    fixture.params = replace(fixture.params, user_prompt="二加三等于多少？", root_user_prompt="二加三等于多少？")
+    fixture.agent._current_run_params = fixture.params
+    store = fixture.agent.conversation_store
+    assert fixture.entries and store.tasks.list(fixture.thread.thread_id) == []
+    assert store.goals.list(fixture.thread.thread_id) == []
+    goal_path = store.storage.goal_path(fixture.thread.thread_id)
+    assert not goal_path.exists()
+    original_build = loop_service.build_tool_loop_prompt
+    original_capture = model_request_selection.prepare_request_context
+    original_generate = fixture.agent.backend.generate
+    observed = []
+
+    # LLM: 观察原请求组装前的真实任务列表，不替宿主绑定任务或创建 Goal。
+    # 函数用途: 证明空选标记在业务请求组装前持久化，关闭时仍没有会话任务。
+    def build(agent, params):
+        observed.append(("build", store.tasks.list(fixture.thread.thread_id)))
+        return original_build(agent, params)
+
+    # LLM: 保留真实选模捕获路径，仅记录该结构边界的任务状态。
+    # 函数用途: 核对捕获与发送沿同一首轮准备结果，不伪造选包载荷。
+    def capture(agent, params, prompt):
+        observed.append(("capture", store.tasks.list(fixture.thread.thread_id)))
+        return original_capture(agent, params, prompt)
+
+    # LLM: 只替模型传输的正文；原 fake 仍记录真实组装载荷，响应不携带工具调用。
+    # 函数用途: 模拟一个直接答复的普通问题，不执行终态收尾或修改任务状态。
+    def generate(prompt, **kwargs):
+        return replace(original_generate(prompt, **kwargs), text="五。")
+
+    monkeypatch.setattr(loop_service, "build_tool_loop_prompt", build)
+    monkeypatch.setattr(model_request_selection, "prepare_request_context", capture)
+    monkeypatch.setattr(fixture.agent.backend, "generate", generate)
+    turn = loop_service.next_tool_loop_model_response(fixture.agent, fixture.params, 0)
+
+    assert turn.response.text == "五。" and not turn.response.tool_use_blocks
+    assert [kind for kind, _links in observed] == ["build", "capture"]
+    assert [call[0] for call in fixture.agent.backend.calls] == (
+        ["selection", "primary"] if enabled else ["primary"]
+    )
+    links = store.tasks.list(fixture.thread.thread_id)
+    assert all(edge_links == links for _kind, edge_links in observed)
+    if enabled:
+        task, = links
+        assert task.task_id == fixture.params.task_attributes["conversation_task_id"]
+        assert task.work_kind != "goal" and task.status == "active"
+        assert task.capability_selection.status == "finished"
+        assert task.capability_selection.outcome == "empty"
+        assert task.capability_selection.selected_count == 0 and not task.skill_snapshot_refs
+        reopened = ConversationStore(store.storage.root)
+        assert reopened.tasks.list(fixture.thread.thread_id) == [task]
+    else:
+        assert links == [] and "conversation_task_id" not in fixture.params.task_attributes
+    assert store.goals.list(fixture.thread.thread_id) == [] and not goal_path.exists()
+    assert not fixture.reads and not _facts(fixture)
+    assert not fixture.params.executed_tools and not fixture.params.archive_tool_calls
+    with fixture.agent.subagents.runtime_db._runtime_connection() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM tool_operations").fetchone()[0] == 0
+
+
 @pytest.mark.parametrize("mode", ["later_round", "receipt", "committed"])
 def test_nonfirst_or_recovery_or_receipt_skips_prepare_but_uses_original_request(tmp_path, monkeypatch, mode):
     from contextlib import nullcontext

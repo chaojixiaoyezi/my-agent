@@ -2,7 +2,8 @@
 
 能力包第七候选的唯一准备接缝位于真实主业务首轮build/capture之前，默认开关关闭；回执、纯渲染和已提交恢复候选不进入。
 开发时分别检查TaskLink一次领取、辅助调用账、入口只读准入和原请求载荷；权限不得靠“已选择”扩大，取消不得降为普通warning。
-本候选31文件901项与本地严格gate通过，真实TUI待精确打包后执行；跟踪[唯一Goal](docs/tasks/CAPABILITY_INTERNALIZATION_GOAL.md)。
+本候选31文件901项与本地严格gate通过，精确安装后六席官方M2.7入口/方法及空选已验；短剧业务质量仍未全过，先修包层检查。
+开启时纯问答也可能保留普通任务，Goal不变；默认关闭仍沿原晋升。跟踪[唯一Goal](docs/tasks/CAPABILITY_INTERNALIZATION_GOAL.md)。
 
 能力包候选6的537项及严格gate通过并精确安装。官方M2.7原会话再次Compact生成自然摘要，原文件/pins保持；旧机械回退原因、方法续用仍未验证。此前原脚本引用、两级孙代理同代读取、新客户端续原Goal身份及缺运行依赖的如实交付有独立证据，临时夹具已原生卸载。12个保留例仅首轮完成，自然采用与交付质量未达标；已对齐一次结构化选择/宿主入口加载，正在组合固定main后分片实现。详见[唯一 TODO](docs/tasks/CAPABILITY_INTERNALIZATION_GOAL.md)和[合同](docs/design/CAPABILITY_PACKS.md)；尚未发布。
 

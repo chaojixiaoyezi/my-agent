@@ -1,6 +1,6 @@
 # 测试与发布验收
 
-## 一次能力包选择（2026-09-26，第七候选本地通过，真实待验）
+## 一次能力包选择（2026-09-26，第七候选六席采用已验，质量未全过）
 
 分片已覆盖原TaskLink严格标记/CAS/旧缺键与损坏隔离、一次structured调用及三协议输出、真实共享reader原回执和取消、配置关闭与scope权限。
 上述是组件证据，合并统计以本候选冻结后的统一focused清单为准，不相加重叠测试次数。相关测试由CODEBASE_TREE中的capability selection/read入口导航。
@@ -8,7 +8,10 @@
 冻结源码后的31文件统一focused为901 passed，无skip/xfail；Ruff、doc sync、strict code-size、diff及clean-package通过。
 clean-package首次因14个新增文件未登记Git而拒绝，登记后通过；不改检测规则。首次红结果保留，线上CI未作为验收来源。
 真实组件证明会话successor链接与RuntimeDB执行task分别核验；取消不降级、预算不足不pin，原首请求捕获和发送包含同一入口且不包含selector信封。
-本候选尚未打包或进行实际TUI，不以候选6的通过替代真实采用。
+固定`d843ebb17`已精确打包安装，1374个Python文件同源。六个官方M2.7原生TUI：四领域任务真实选包/入口/方法，两个普通任务明确空选；每前台新增aux1，四孩子无重复选择。
+A02原脚本原字节物化与执行通过，但有未标创作事实；B01报告一处不实且未用原checker；L01镜头合计573秒却报600并有无效来源引用。C02核心归并、N05/N03普通业务通过。
+方法使用、结构脚本与业务质量分列[真实矩阵](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#第七候选真实开发集)；开发集未全过，保留集尚未开始。
+纯问答晋升另补on/off首请求回归：开启并有授权候选时空选保留普通任务、Goal不变；关闭不晋升且无aux。该测试不模拟终态，真实N03的completed另列。
 候选6 CAP06 的自然摘要独立复核通过；新checkpoint属于thread，已完成旧task没有后续业务请求，未验证该task消费新摘要或重用方法。
 
 ## 结构化输出方式：DeepSeek 官方改用 JSON 对象（2026-09-26，分支 `claude/curator-budget`，基于 main `337a689ad`）
