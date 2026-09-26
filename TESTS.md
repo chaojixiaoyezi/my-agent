@@ -1,6 +1,6 @@
 # 测试与发布验收
 
-## Compact 摘要请求禁止工具与违规兜底（2026-09-26，分支 `claude/curator-budget`，基于 main `756d4b9bb`）
+## Compact 摘要请求禁止工具与违规兜底（2026-09-26，已合入 main `f230ab077` 并双机部署 `step12v-dff317e5`，基于 `756d4b9bb`）
 
 - **来源**：
   - main 的摘要请求带工具、选择为 `auto`，模型调工具就退成机械摘要。
@@ -22,9 +22,16 @@
   - `test_compact_message_source.py`：实际请求只多 `none`。
 - **修复 main 既有失败**：`test_gateway_compact_recovery.py` 与 `_continuation.py` 的 12 个用例自 `7a15c9c91`（/effort 把 `_payload` 改为收 `_PayloadSurface`）起失败。在干净的 main `756d4b9bb` 上复现为 12 failed，测试已改用新签名并传入候选的真实 params，23 passed。
 - **变异验证**：6 种变异各自使测试失败：不设 `none`、`none` 清空工具、不走分段兜底、兜底失败不交回原回复、日志不带关联键、compact 不传请求。还原后逐字节一致。
+- **真实验收**（隔离 Gateway 8432，运行时 `runtime-step12v-dff317e5`，MiniMax-M2.7 官方接口，Jev 观察模式，经 Gateway `/ask` 与 `/control`，每轮一条普通需求）：
+  - 四轮对话：建文件并数行数；改第二条并读回；`/compact`；压缩后凭记忆回答。第四轮让模型用 `audit_records` 查决策点位。
+  - 决策结果日志：`model_selection` 4 次成功、`pre_recall` 4 次成功、后台 `curator` 1 次成功、1 次超时（5002 ms，恰为后台 5 秒预算）。超时只冷却 curator，其它点位照常。
+  - 模型据 `audit_records` 按点位如实报告，未触发的点位说成"窗口内未触发"，不再断言"没接线"。
+  - 压缩：带工具加 `none` 的单次摘要一次成功，只有 1 次辅助请求，摘要为模型正文（1034 字，非机械回退）；历史 19,075 → 9,947 tokens，压缩后准确答出文件名与改后的第二条。
+  - 本样本未出现违规 tool_use，分段兜底由单元测试覆盖。
+  - 证据留在 `~/.my-agent/releases/compact-jev-acceptance-20260926/`（不进仓库）；隔离 home 与模型目录副本已删除。
 - **回归**：涉及 Compact、摘要预算、辅助调用、工具选择的 66 个测试文件，含推理强度、结构化输出和 `test_architecture_guardrails.py` 组合回归：1601 passed。严格门全部通过；改动产品文件的 code-size 发现与 main 逐项相同。
 
-## Jev 决策结果日志与点位冷却（2026-09-26，分支 `claude/curator-budget`，基于 main `a3f5c17ec`）
+## Jev 决策结果日志与点位冷却（2026-09-26，已合入 main `756d4b9bb`，基于 `a3f5c17ec`；真实验收见上节 Compact 同一次隔离运行）
 
 - **来源**：用户 TUI 里的模型据 `audit_records` 断言 Jev"只接了选模型"。查实原因有三：Jev 经代理访问慢，单次约 2.5–5 秒；任一点位超时就冷却整条连接，选模型每轮最先超时，把其它点位全挡住；审计只看得到选模型和能力展示的观察。
 - **新测试** `test_decision_outcome_log.py`，共 4 项：

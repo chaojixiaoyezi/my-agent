@@ -9,7 +9,7 @@
 
 回滚边界：旧版运行时读不了 v3，回滚必须把运行时和数据成对核对并保留新账。详见[依赖拆分](docs/design/TOOL_LOOP_DEPENDENCY_SPLIT.md#两线合并后的来源身份与模型轮结果决策分支吸收-main2026-09-23)。
 
-- **Compact 摘要请求改为禁止调用工具，模型违规时改走分段链重写**（2026-09-26，已实施：分支 `claude/curator-budget`；吸收 Codex `d4dd6c094` 的产品与测试部分，并补违规兜底）：
+- **Compact 摘要请求改为禁止调用工具，模型违规时改走分段链重写**（2026-09-26，已合入 main `f230ab077` 并双机部署 `step12v-dff317e5`，隔离真实验收通过，见 TESTS；吸收 Codex `d4dd6c094` 的产品与测试部分，并补违规兜底）：
   - **问题**：main 的摘要请求为复用缓存，带着主会话工具，却没设 `tool_choice`，宿主补成 `auto`，模型可以直接调工具。只要回复里有工具调用，摘要就被当作空，退成机械摘要：旧摘要、操作证据加原文片段，不是真正的总结。
     - Codex 私有验收里的真机样本：MiniMax-M2.7 经 Anthropic 兼容协议，带工具加 `none` 仍返回 tool_use。
   - **修复**：
@@ -19,7 +19,7 @@
   - **未实施**：摘要生成来源写进 checkpoint，见 [Compact 摘要生成事实](docs/design/COMPACT_GENERATION_FACTS.md)；传输层记录实际发送的 `tool_choice` 与工具数，Codex 已指出接缝位置。
   - **顺带修复**：`test_gateway_compact_recovery*.py` 的 12 个用例自 `7a15c9c91`（/effort）起在 main 上失败，因为 `_payload` 改收请求面对象；测试已同步。详见 [会话上下文设计](docs/design/CONVERSATION_CONTEXT_DESIGN.md)。
 
-- **Jev 其它接入点"开了没效果"：真实原因与修复**（2026-09-26，已实施：分支 `claude/curator-budget`）。用户在 TUI 里发现，TUI 里的模型凭 `audit_records` 断言"只接了选模型，其余点位没接线"。
+- **Jev 其它接入点"开了没效果"：真实原因与修复**（2026-09-26，已合入 main `756d4b9bb` 并双机部署，隔离真实验收通过，见 TESTS）。用户在 TUI 里发现，TUI 里的模型凭 `audit_records` 断言"只接了选模型，其余点位没接线"。
   - **事实**：
     - **点位都已接好**：12 个点位都已接入代码。owner 设置是总开关开、11 个点位观察模式、超时 5 秒。观察模式按设计只记录、不生效，想生效要切到 apply。
     - **Jev 慢**：本机经代理访问 `api.typesafe.ai`，TLS 握手 0.8–3.6 秒，单次决策约 2.5–5 秒；同样走代理的 `api.deepseek.com` 握手只要 0.02–0.03 秒。每次调用都新建连接。超时设 2 秒时几乎全部超时，设 5 秒后仍偶发超时。
