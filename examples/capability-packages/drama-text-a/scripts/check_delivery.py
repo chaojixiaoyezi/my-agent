@@ -1,5 +1,5 @@
-# LLM: 能力包 A 的私有校验资源，只检查文本依据和引用；不调用模型、不执行生成、不改变宿主任务状态。
-# 模块用途: 对照原文检查剧本与分镜资料，向标准输出返回结构问题；创作质量仍需独立审阅。
+# LLM: 能力包 A 的私有校验资源，核对原文字节、引用及声明时长；变更须同步包方法和 duration/examples 组件测试，不改变宿主任务状态。
+# 模块用途: 只读原文与交付，向标准输出报告编号和时长对账问题；来源语义、创作质量及真实媒体仍需独立审阅。
 
 from __future__ import annotations
 
@@ -7,9 +7,11 @@ import argparse
 import hashlib
 import json
 import math
+from collections.abc import Iterable
 from pathlib import Path
 
 MAX_INPUT_BYTES = 4 * 1024 * 1024
+DURATION_REL_TOL = 1e-12
 
 
 # LLM: 保留唯一 JSON 键，避免重复字段在模型输出与校验器之间产生不同含义。
@@ -72,18 +74,75 @@ def references(row: dict, key: str, known: dict, at: str, errors: list[dict]) ->
     return valid
 
 
-# LLM: 秒数仅作为声明计量，不代表真实语音或视频时长；缺失和非有限数不能混为零。
-# 函数用途: 校验一个正时长，失败时保留错误并返回零用于问题汇总。
+# LLM: 正数转换只服务本包计量，布尔值、非有限数和无法用浮点表示的大整数均无有效秒数。
+# 函数用途: 读取可计算的正时长，非法输入返回 None，避免数值溢出变成 traceback。
+def positive_seconds(value: object) -> float | None:
+    if type(value) not in (int, float):
+        return None
+    try:
+        result = float(value)
+    except OverflowError:
+        return None
+    return result if math.isfinite(result) and result > 0 else None
+
+
+# LLM: 保留原 positive_seconds_required 错误合同；非法项只在失败报告求和时贡献零，不能当作已验证零秒。
+# 函数用途: 校验场次或镜头的 seconds，向当前报告记录类型或数值错误。
 def seconds(row: dict, at: str, errors: list[dict]) -> float:
-    value = row.get("seconds")
-    if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+    value = positive_seconds(row.get("seconds"))
+    if value is None:
         errors.append({"code": "positive_seconds_required", "path": at})
         return 0.0
-    return float(value)
+    return value
 
 
-# LLM: 本包只核对交付结构、原文字节和引用覆盖；不会批准内容、生成媒体或宣告宿主任务完成。
-# 函数用途: 检查文本方案和分镜有没有漏依据、串角色或引用不存在的场次。
+# LLM: 各项已由 seconds 校验；汇总溢出保留原结构错误，不输出 JSON Infinity 或推断目标已达成。
+# 函数用途: 稳定求和并将无法表示的总时长标成未知。
+def duration_sum(values: Iterable[float], at: str, errors: list[dict]) -> float | None:
+    try:
+        return math.fsum(values)
+    except OverflowError:
+        errors.append({"code": "duration_sum_overflow", "path": at})
+        return None
+
+
+# LLM: 只比较唯一资料中的显式秒数；容差仅吸收数值舍入，不按故事题目放宽目标，也不验证对白或媒体时长。
+# 函数用途: 按场次汇总真实镜头条目，并对照场次声明及原文里实际提供的目标时长。
+def duration_metrics(source: dict, scenes: dict, shots: dict, errors: list[dict]) -> dict:
+    scene_values = {identifier: seconds(row, identifier, errors) for identifier, row in scenes.items()}
+    shot_values = {identifier: seconds(row, identifier, errors) for identifier, row in shots.items()}
+    grouped = {identifier: [] for identifier in scenes}
+    for identifier, shot in shots.items():
+        scene_id = shot.get("scene_id")
+        if isinstance(scene_id, str) and scene_id in grouped:
+            grouped[scene_id].append(shot_values[identifier])
+    per_scene = {identifier: duration_sum(values, f"{identifier}.shots", errors)
+                 for identifier, values in grouped.items()}
+    for identifier, actual in per_scene.items():
+        declared = scene_values[identifier]
+        if declared > 0 and actual is not None and not math.isclose(
+            actual, declared, rel_tol=DURATION_REL_TOL, abs_tol=0.0,
+        ):
+            errors.append({"code": "scene_duration_mismatch", "path": f"{identifier}.seconds",
+                           "declared_seconds": declared, "shot_seconds": actual})
+    scene_total = duration_sum(scene_values.values(), "scenes", errors)
+    shot_total = duration_sum(shot_values.values(), "shots", errors)
+    target_declared = "target_seconds" in source
+    target = positive_seconds(source.get("target_seconds")) if target_declared else None
+    if target_declared and target is None:
+        errors.append({"code": "positive_target_seconds_required", "path": "source.target_seconds"})
+    if target is not None and shot_total is not None and not math.isclose(
+        shot_total, target, rel_tol=DURATION_REL_TOL, abs_tol=0.0,
+    ):
+        errors.append({"code": "target_duration_mismatch", "path": "source.target_seconds",
+                       "target_seconds": target, "shot_seconds": shot_total})
+    return {"scene_seconds": scene_total, "shot_seconds": shot_total, "scene_shot_seconds": per_scene,
+            "target_declared": target_declared, "target_seconds": target,
+            "target_delta_seconds": shot_total - target if shot_total is not None and target is not None else None}
+
+
+# LLM: 本包只核对交付结构、原文字节、引用覆盖及声明时长；真实运行结果由调用方如实报告，不能升级为内容或宿主完成授权。
+# 函数用途: 查找漏依据、串角色、坏场次引用与时长账不一致，创作新增是否忠实仍交给独立阅读。
 def check_delivery(source: object, delivery: object, source_sha256: str) -> dict:
     errors, warnings = [], []
     if not isinstance(source, dict) or not isinstance(delivery, dict):
@@ -102,14 +161,13 @@ def check_delivery(source: object, delivery: object, source_sha256: str) -> dict
     for identifier, row in passages.items():
         if not isinstance(row.get("text"), str) or not row["text"].strip():
             errors.append({"code": "source_text_required", "path": identifier})
-    covered, scene_seconds, scene_characters = set(), 0.0, {}
+    covered, scene_characters = set(), {}
     for identifier, row in scenes.items():
         refs = references(row, "source_ids", passages, identifier, errors)
         if not refs:
             errors.append({"code": "source_reference_required", "path": identifier})
         covered.update(refs)
         scene_characters[identifier] = references(row, "character_ids", cast, identifier, errors)
-        scene_seconds += seconds(row, identifier, errors)
     filmed = set()
     for identifier, row in shots.items():
         scene_id = row.get("scene_id")
@@ -118,7 +176,6 @@ def check_delivery(source: object, delivery: object, source_sha256: str) -> dict
         else:
             filmed.add(scene_id)
             references(row, "visible_character_ids", {x: {} for x in scene_characters[scene_id]}, identifier, errors)
-        seconds(row, identifier, errors)
         for key in ("start_state", "action", "end_state"):
             if not isinstance(row.get(key), str) or not row[key].strip():
                 errors.append({"code": "shot_state_required", "path": f"{identifier}.{key}"})
@@ -140,13 +197,11 @@ def check_delivery(source: object, delivery: object, source_sha256: str) -> dict
         errors.append({"code": "unfilmed_scene", "path": identifier})
     if omitted:
         warnings.append({"code": "explicit_omissions_need_review", "count": len(omitted)})
-    if not math.isfinite(scene_seconds):
-        errors.append({"code": "duration_sum_overflow", "path": "scenes"})
-        scene_seconds = None
+    durations = duration_metrics(source, scenes, shots, errors)
     warnings.append({"code": "creative_quality_and_media_not_checked"})
     return {"schema": "drama_text_check.v1", "structure_valid": not errors, "errors": errors,
             "warnings": warnings, "metrics": {"passages": len(passages), "covered_passages": len(covered),
-            "omitted_passages": len(omitted), "scenes": len(scenes), "shots": len(shots), "scene_seconds": scene_seconds}}
+            "omitted_passages": len(omitted), "scenes": len(scenes), "shots": len(shots), **durations}}
 
 
 # LLM: 开发组件入口只读两份明确输入并打印报告；正式产品调用须由宿主物化和原工具授权接线。

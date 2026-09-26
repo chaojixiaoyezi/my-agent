@@ -24,11 +24,13 @@ git -C "<来源副本目录>" ls-files
 
 | 样包 | 当前源码版本 | 可参考的迁移方式 | 仍须单列的缺项 |
 | --- | --- | --- | --- |
-| [drama-text-a](../../examples/capability-packages/drama-text-a/PROVENANCE.md) | `0.1.1` | 原文依据、来源覆盖、场次和镜头的文本改编 | 真实媒体、完整导演规则和质量评估 |
-| [drama-workflow-b](../../examples/capability-packages/drama-workflow-b/PROVENANCE.md) | `0.1.0` | 多份制作资料的关联与交接，独立连续性检查 | 上游全部交互报告、美术与生成链路 |
+| [drama-text-a](../../examples/capability-packages/drama-text-a/PROVENANCE.md) | `0.1.2` | 原文依据、来源覆盖、场次/镜头及目标时长对账 | 真实媒体、完整导演规则和质量评估 |
+| [drama-workflow-b](../../examples/capability-packages/drama-workflow-b/PROVENANCE.md) | `0.1.1` | 制作资料关联与交接，逐集时长和连续性检查 | 上游全部交互报告、美术与生成链路 |
 | [security-evidence](../../examples/capability-packages/security-evidence/PROVENANCE.md) | `0.1.0` | 已有证据的范围、来源、去重和报告 | 实际授权证明、扫描及漏洞验证；不属于本切片 |
 
 A 的 `0.1.1` 只修订包内说明与模板的一致性：镜头和场次均要求正数 `seconds`，来源摘要明确取原输入文件字节，模板补完整条目形状，并区分结构检查已执行、待执行和未通过。原校验脚本及两份合成示例字节不变；不修改宿主读写规则，也不改变 B/C 的迁移范围。原 `0.1.0` 的 ZIP、失败与成功证据继续保留，不能用新文档替换旧结果。
+
+A `0.1.2` 与 B `0.1.1` 是之后的包层检查候选，针对公开字段补镜头按场/集求和和明确目标对账；缺目标、非法数字、溢出与差异分开。来源语义、创作新增和媒体仍需独立审阅。新源码、ZIP、安装代次及真实结果单列；不改变已安装旧包，不把脚本扩展变成宿主硬门。
 
 ## 2. 建立完整来源覆盖表
 
@@ -147,7 +149,7 @@ python3 scripts/build_capability_package.py \
 python3 scripts/build_capability_package.py \
   --declaration examples/capability-packages/drama-text-a/declaration.json \
   --files-root examples/capability-packages/drama-text-a \
-  --output "$CAP_WORK/dist/drama-text-a-0.1.1.zip"
+  --output "$CAP_WORK/dist/drama-text-a-0.1.2.zip"
 ```
 
 构建会核对源文件、生成可重复的 ZIP 并用正式读取器复验，不安装、不执行资源。记录整个 ZIP 的 SHA256，并保留当时声明及源码版本；普通文件修改不会改变已安装包。

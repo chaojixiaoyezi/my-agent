@@ -28,6 +28,8 @@
 |-- agent_py_agent/tests/test_capability_selection_authority.py # 原执行权和只读准入组合验证
 |-- agent_py_agent/tests/test_capability_package_entry_context.py # 多入口总预算、分页和失败隔离
 |-- agent_py_agent/tests/test_capability_package_selection_runtime.py # 主请求一次准备及停止续跑组合
+|-- agent_py_agent/tests/test_capability_package_drama_text_duration.py # A包逐场镜头与来源目标时长对账
+|-- agent_py_agent/tests/test_capability_package_drama_workflow_duration.py # B包分集镜头与明确目标对账
 |-- scripts/build_capability_package.py   # 不执行代码的可重复内容包构建入口
 |-- examples/capability-packages/         # 来源独立的短剧与证据报告样包源码
 |-- docs/design/CAPABILITY_PACKS.md       # 能力包协议、生命周期、隔离召回和任务版本合同
@@ -1168,6 +1170,7 @@ docs/
 - `agent_py_agent/agent/capability/package_provider.py`：只从当前 owner 的原安装表取得已启用包，每次读取复查代次与摘要。
 - `scripts/build_capability_package.py`：把声明和私有资源构建为 v7 内容包，不导入或执行包内脚本。
 - `examples/capability-packages/`：三个独立迁移切片与来源许可，组件测试不代表真实 TUI 通过。
+- `agent_py_agent/tests/test_capability_package_drama_text_duration.py` 与 `test_capability_package_drama_workflow_duration.py`：合成输入下验证样包原脚本的时长聚合、目标缺失/非法、浮点和溢出边界，不执行真实任务产物。
 
 - `docs/design/CAPABILITY_PACKS.md`：包级发现、私有方法、原安装与任务授权的边界。
 - `docs/design/CAPABILITY_MIGRATION.md`：固定来源、完整覆盖表、候选构建和原命令发布／回退的可执行步骤。

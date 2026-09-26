@@ -127,7 +127,9 @@ def test_text_sample_checks_complete_source_and_shot_coverage(tmp_path):
     report = _check_a(tmp_path, _fixture("drama-text-a", "example-delivery.json"))
     assert report["structure_valid"]
     assert report["metrics"] == {"passages": 3, "covered_passages": 3, "omitted_passages": 0,
-                                 "scenes": 3, "shots": 3, "scene_seconds": 60.0}
+                                 "scenes": 3, "shots": 3, "scene_seconds": 60.0, "shot_seconds": 60.0,
+                                 "scene_shot_seconds": {"S01": 20.0, "S02": 20.0, "S03": 20.0},
+                                 "target_declared": True, "target_seconds": 60.0, "target_delta_seconds": 0.0}
     assert {item["code"] for item in report["warnings"]} == {"creative_quality_and_media_not_checked"}
 
 
@@ -226,7 +228,8 @@ def test_workflow_sample_keeps_media_unverified(tmp_path):
     result = _run("drama-workflow-b", "check_continuity.py", tmp_path, ["--project", str(path)])
     report = json.loads(result.stdout)
     assert result.returncode == 0 and report["structure_valid"]
-    assert report["metrics"] == {"episodes": 1, "scenes": 1, "shots": 3, "shot_seconds": 60.0}
+    assert report["metrics"] == {"episodes": 1, "scenes": 1, "shots": 3, "shot_seconds": 60.0,
+                                 "episode_seconds": {"EP01": 60.0}}
     assert sum(item["code"] == "reference_media_not_verified" for item in report["warnings"]) == 2
 
 

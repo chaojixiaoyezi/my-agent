@@ -9,6 +9,8 @@
 输入包含故事、原文段落编号、制作时长和希望保留的事件。先读取 `methods/workflow.md`；资料形状见 `resources/example-source.json` 和 `templates/delivery.json`。
 输出交给用户的制作方案，以及 `drama_text_delivery.v1` JSON：明确原文字节摘要、角色、场次和镜头各自的正数 `seconds`、镜头起止状态、主动省略及原因。场次和镜头编号只在资料内使用，不是宿主任务编号。
 
+每场的 `seconds` 须等于引用该场次的镜头秒数之和；原输入明确提供 `target_seconds` 时，总镜头秒数还须与它一致。未提供该字段表示没有声明目标；已经提供的 `null`、布尔值、非数值、非正数或无法计算的数值属于非法目标，不能悄悄当作未设目标。脚本只允许浮点求和的数值舍入误差，不给特定故事另设时长容差。
+
 `templates/delivery.json` 展示待填写的条目结构。空字符串、空引用和 `seconds: null` 都是占位值，交付前须根据本次材料填写或扩展条目；不能把模板当成检查通过的样例。已填写的合成格式示例见 `resources/example-delivery.json`。
 
 每次以当前用户输入为来源。`resources/example-*.json` 是公开合成 fixture，仅用于理解格式，不是用户故事或验收产物。
@@ -29,10 +31,10 @@ python3 -c 'import hashlib, sys; from pathlib import Path; print(hashlib.sha256(
 
 1. 读取原文和明确约束，按上述方式计算原文字节摘要，给段落稳定编号；没有原文时先说明依据是用户梗概，不伪造原著引用。
 2. 写出核心冲突、保留事件和改编取舍；材料足够就推进，确实影响方案的未知选择再询问。
-3. 按 `methods/workflow.md` 建立场次，再写镜头的起点、动作、终点和可见角色；场次与镜头分别填写正数 `seconds`，并人工核对各场节奏与目标时长。
+3. 按 `methods/workflow.md` 建立场次，再写镜头的起点、动作、终点和可见角色；填写可计算的正数 `seconds`，逐场核对镜头分配和总目标，另行审阅这些秒数是否真的容得下动作与对白。
 4. 用 `methods/review.md` 独立核对；有疑点先修订文本，不把资料齐全等同于创作优秀。
 5. 交付前读取同一包版本的 `scripts/check_delivery.py`，将其读取结果的完整 `source_ref` 交给原 `write_file.source_ref`，物化到本任务获准写入的位置，再用原执行工具运行。包内路径不是工作区现有路径；读取和物化不授予执行权限。工具不可用或尚未执行时，把确定性结构检查标为待执行。
-6. 依据脚本实际返回的 `structure_valid`、`errors` 和 `warnings` 报告结构检查；有错误先修订本次交付并重查，未执行或未通过都不能写“结构检查通过”。文本审阅、已交付资料、依据覆盖、省略和未决项分别汇报；图片/声音/成片质量始终另列。
+6. 依据脚本实际返回的 `structure_valid`、`errors`、`warnings` 和 `metrics` 报告结构检查；有错误先修订本次交付并重查，未执行或未通过都不能写“结构检查通过”。区分场次声明合计 `scene_seconds`、镜头实际合计 `shot_seconds`、逐场镜头合计 `scene_shot_seconds` 和显式目标差值 `target_delta_seconds`。`target_declared=false` 只表示没有目标可比，不表示验证过一个推测的目标。文本审阅、已交付资料、依据覆盖、省略和未决项分别汇报；图片/声音/成片质量始终另列。
 
 ## 可并行的子任务
 
@@ -44,4 +46,4 @@ python3 -c 'import hashlib, sys; from pathlib import Path; print(hashlib.sha256(
 python3 scripts/check_delivery.py --source <本任务原文资料.json> --delivery <本任务交付.json>
 ```
 
-上面路径相对于经过授权物化的本包资源，不能据此猜测安装目录。脚本只核对来源摘要、覆盖、ID 引用、正时长与镜头状态字段；不会验证对白自然程度、审美、真实媒体或用户接受状态。
+上面路径相对于经过授权物化的本包资源，不能据此猜测安装目录。脚本只核对来源摘要、覆盖、ID 引用、正时长、场次/镜头/显式目标之间的数值一致性与镜头状态字段；不会证明原文引用支持某个新增情节，也不会验证对白自然程度、道具持物语义、审美、真实媒体或用户接受状态。

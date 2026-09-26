@@ -4,26 +4,34 @@
 
 | 包 | 当前源码版本 | 特点 | 交付与边界 |
 | --- | --- | --- | --- |
-| `drama-text-a` | `0.1.1` | 先核对原文依据，再改编场次和镜头 | 文本方案、来源覆盖与分镜状态；不生成媒体 |
-| `drama-workflow-b` | `0.1.0` | 五类制作资料的结构和交接 | 人物、美术、剧集、场次、镜头跨表关系及静态报告；不具备上游全部报告交互 |
+| `drama-text-a` | `0.1.2` | 先核对原文依据，再改编场次和镜头 | 文本方案、来源覆盖、逐场/总时长对账；不生成媒体 |
+| `drama-workflow-b` | `0.1.1` | 五类制作资料的结构和交接 | 跨表关系、分集时长与静态报告；不具备上游全部报告交互 |
 | `security-evidence` | `0.1.0` | 范围明确的既有证据整理 | 证据摘要、来源去重、发现引用和待复核报告；不扫描、不验证漏洞 |
 
 `CAPABILITY.md` 是包入口。`methods/`、`templates/`、`resources/`、`scripts/` 只属于本包；三个包都有 `methods/review.md`，内容各不相同，不能按裸文件名覆盖。
 来源版本、实际迁移与缺项见各包 `PROVENANCE.md`。许可随内容打包。全部故事和证据 fixture 都为本样例新编写的合成数据，与用户任务无关。
 
-## A 0.1.1 的修订边界
+## A 0.1.1 的历史修订边界
 
-本次只调整 A 的声明、入口、方法、模板和来源覆盖说明：场次与镜头都填写正数 `seconds`；`source_sha256` 明确是当前原输入文件字节的 SHA-256，通过既有获准执行工具计算，不能用文件状态版本 `file_version` 或重新序列化 JSON 的摘要代替。模板提供待填写的完整条目形状，未执行或未通过的检查不能写成通过。
+该版本只调整 A 的声明、入口、方法、模板和来源覆盖说明：场次与镜头都填写正数 `seconds`；`source_sha256` 明确是当前原输入文件字节的 SHA-256，通过既有获准执行工具计算，不能用文件状态版本 `file_version` 或重新序列化 JSON 的摘要代替。模板提供待填写的完整条目形状，未执行或未通过的检查不能写成通过。
 
-`scripts/check_delivery.py` 和两份 `resources/example-*.json` 保持原字节，校验器没有放宽；脚本 SHA-256 为 `7e898ebd50a7398099c7a9c96b793525d50c1d96eb6ca94318646277bcd45408`。本次没有修改宿主读写规则或 B/C 的源码。首批 `0.1.0` 包及其真实验收结果保留，新版本单独构建、安装与验收，不改写旧失败。
+该版本的 `scripts/check_delivery.py` 和两份 `resources/example-*.json` 保持原字节，校验器没有放宽；当时脚本 SHA-256 为 `7e898ebd50a7398099c7a9c96b793525d50c1d96eb6ca94318646277bcd45408`。当时没有修改宿主读写规则或 B/C 的源码。各旧包及其真实验收结果保留，新版本单独构建、安装与验收，不改写旧失败。
+
+## A 0.1.2 / B 0.1.1 的修订边界
+
+真实开发集暴露了两类不同缺口：原包检查器没有比对镜头合计与声明时长；部分任务没有运行原检查器，却给出了超出依据的报告。A 新增逐场镜头与场次声明、总时长与来源明确目标的核对；B 新增按分集归集镜头与明确目标的核对。非法数字、溢出、缺目标和数值差异分开报告，浮点容差仅消除计算舍入。
+
+这些只是包内只读检查器，仍由模型通过原资源引用物化，并按原工具授权实际执行。没有新运行时门、自动脚本执行或验证状态库；未执行就列未验证，结构通过也不能证明原文语义、创作新增、道具连续性或真实媒体正确。跨包字段转换及主子阶段材料仍须显式核对，来源 ID 不能代替制作参考条目 ID。
+
+当前为开发候选；新版本的组件、构建和真实 TUI 结果分别记账，旧候选结果不能直接继承。
 
 ## 构建
 
 在仓库根目录运行，输出目录由操作者指定，目标文件必须不存在：
 
 ```bash
-python3 scripts/build_capability_package.py --declaration examples/capability-packages/drama-text-a/declaration.json --files-root examples/capability-packages/drama-text-a --output /tmp/drama-text-a-0.1.1.zip
-python3 scripts/build_capability_package.py --declaration examples/capability-packages/drama-workflow-b/declaration.json --files-root examples/capability-packages/drama-workflow-b --output /tmp/drama-workflow-b.zip
+python3 scripts/build_capability_package.py --declaration examples/capability-packages/drama-text-a/declaration.json --files-root examples/capability-packages/drama-text-a --output /tmp/drama-text-a-0.1.2.zip
+python3 scripts/build_capability_package.py --declaration examples/capability-packages/drama-workflow-b/declaration.json --files-root examples/capability-packages/drama-workflow-b --output /tmp/drama-workflow-b-0.1.1.zip
 python3 scripts/build_capability_package.py --declaration examples/capability-packages/security-evidence/declaration.json --files-root examples/capability-packages/security-evidence --output /tmp/security-evidence.zip
 ```
 
@@ -42,4 +50,4 @@ python3 -m pytest agent_py_agent/tests/test_capability_package_examples.py agent
 正式使用脚本必须通过宿主对已选包资源的读取、物化与原工具授权；如果这条链尚未接通，应报告待校验，不能让模型猜源仓库路径或把示例输出当作已执行结果。
 首期没有新增第三方依赖；脚本只读取明确输入并写 stdout，无网络访问和文件写入。输入上限每文件 4 MiB；长任务按章节/剧集/资产拆分，包不负责宿主调度。
 
-建议下一步：按验收矩阵在独立测试 owner 的原生 TUI 验证 A 新版本，保留旧版本失败及 B/C 各自结果；自然采用、资源原样物化、脚本实际执行和业务质量分开报告。同包安装更新由一人负责，其它包的只读审阅可并行。
+建议下一步：组合验证 A/B 新检查器后固定源码与 ZIP，等现有控制任务结束再由管理席原生更新两包，复验开发集；保留旧失败，采用、原样物化、实际执行和质量继续分列。源码审阅可并行，同一 owner 的更新由一人操作。

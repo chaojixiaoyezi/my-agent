@@ -1,5 +1,5 @@
-# LLM: 能力包 B 的私有领域检查；只核对资料间的编号关系，不推断媒体存在、不启动模型或工具。
-# 模块用途: 检查大纲、人物、美术、场次和分镜的连续性，输出 JSON 或已转义的静态核对报告。
+# LLM: 能力包 B 的私有领域检查；只核对编号关系和声明时长，不推断媒体存在、不启动模型或工具；保持样包组件测试同步。
+# 模块用途: 只读大纲、人物、美术、场次和分镜资料，对账分集镜头时长，向 stdout 输出 JSON 或已转义的静态报告。
 
 from __future__ import annotations
 
@@ -70,8 +70,58 @@ def references(row: dict, key: str, known: dict, at: str, errors: list[dict]) ->
     return valid
 
 
-# LLM: 方法只验证跨表关系；参考图状态仍是声明，不是文件、画面或视频已经通过的证据。
-# 函数用途: 找出剧集、场次、人物、道具、节拍与镜头之间的断链。
+# LLM: 目标与镜头共用有限正数边界；布尔值、字符串及超出浮点计量范围的整数不能成为秒数事实。
+# 函数用途: 在不转换输入字段的情况下判断秒数是否可安全计量。
+def positive_seconds(value: object) -> bool:
+    if type(value) not in (int, float):
+        return False
+    try:
+        return math.isfinite(value) and value > 0
+    except OverflowError:
+        return False
+
+
+# LLM: 各项已验证为有限正数；稳定求和保留大量小项的贡献，溢出仍是结构错误，不能输出 Infinity。
+# 函数用途: 合计某集或全片的真实镜头秒数，不让逐项舍入吞掉合法时长。
+def duration_sum(values: list[float], at: str, errors: list[dict]) -> float | None:
+    try:
+        return math.fsum(values)
+    except OverflowError:
+        errors.append({"code": "duration_sum_overflow", "path": at})
+        return None
+
+
+# LLM: 仅按已校验的 scene.episode_id 归集，不猜别名或倒推；容差只吸收相对舍入，不能把合法极小目标的倍数差异视为一致。
+# 函数用途: 比较每集实际镜头合计与显式目标，保留缺失、非法和数值溢出的区别，返回可展示的分集秒数。
+def check_episode_seconds(catalog: dict, errors: list[dict], warnings: list[dict]) -> dict[str, float | None]:
+    grouped = {identifier: [] for identifier in catalog["episodes"]}
+    for shot in catalog["shots"].values():
+        scene_id = shot.get("scene_id")
+        scene = catalog["scenes"].get(scene_id) if isinstance(scene_id, str) else None
+        episode_id = scene.get("episode_id") if scene else None
+        if not isinstance(episode_id, str) or episode_id not in grouped:
+            continue
+        value = shot.get("seconds")
+        if not positive_seconds(value):
+            grouped[episode_id] = None
+        elif grouped[episode_id] is not None:
+            grouped[episode_id].append(value)
+    totals = {identifier: duration_sum(values, f"{identifier}.shots", errors) if values is not None else None
+              for identifier, values in grouped.items()}
+    for identifier, episode in catalog["episodes"].items():
+        actual = totals[identifier]
+        if "target_seconds" not in episode:
+            warnings.append({"code": "episode_target_missing", "path": f"{identifier}.target_seconds"})
+        elif not positive_seconds(episode["target_seconds"]):
+            errors.append({"code": "positive_target_seconds_required", "path": f"{identifier}.target_seconds"})
+        elif actual is not None and not math.isclose(actual, episode["target_seconds"], rel_tol=1e-12, abs_tol=0.0):
+            errors.append({"code": "episode_duration_mismatch", "path": identifier,
+                           "target_seconds": episode["target_seconds"], "shot_seconds": actual})
+    return totals
+
+
+# LLM: 只验证跨表关系及显式时长对账；不改输入或宿主状态，结构通过不代表内容、真实媒体或创作节奏通过。
+# 函数用途: 找出剧集、场次、人物、道具、节拍与镜头的断链，并逐集报告镜头合计与目标不一致。
 def check_project(project: object) -> dict:
     errors, warnings = [], []
     if not isinstance(project, dict):
@@ -102,7 +152,7 @@ def check_project(project: object) -> dict:
                     errors.append({"code": "speaker_outside_scene", "path": beat_id})
             elif beat.get("kind") != "action":
                 errors.append({"code": "unknown_beat_kind", "path": beat_id})
-    covered, total_seconds = {}, 0.0
+    covered, shot_seconds = {}, []
     for identifier, shot in catalog["shots"].items():
         scene_id = shot.get("scene_id")
         if not isinstance(scene_id, str) or scene_id not in beat_catalog:
@@ -114,10 +164,10 @@ def check_project(project: object) -> dict:
             covered.setdefault(scene_id, set()).update(refs)
         references(shot, "reference_ids", catalog["references"], identifier, errors)
         value = shot.get("seconds")
-        if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+        if not positive_seconds(value):
             errors.append({"code": "positive_seconds_required", "path": identifier})
         else:
-            total_seconds += value
+            shot_seconds.append(value)
     for scene_id, beats in beat_catalog.items():
         for beat_id in sorted(set(beats) - covered.get(scene_id, set())):
             errors.append({"code": "uncovered_beat", "path": f"{scene_id}.{beat_id}"})
@@ -130,12 +180,12 @@ def check_project(project: object) -> dict:
             errors.append({"code": "invalid_reference_state", "path": identifier})
         warnings.append({"code": "reference_media_not_verified", "path": identifier})
     warnings.append({"code": "creative_quality_and_media_not_checked"})
-    if not math.isfinite(total_seconds):
-        errors.append({"code": "duration_sum_overflow", "path": "shots"})
-        total_seconds = None
+    total_seconds = duration_sum(shot_seconds, "shots", errors)
+    episode_seconds = check_episode_seconds(catalog, errors, warnings)
     return {"schema": "drama_continuity_check.v1", "structure_valid": not errors, "errors": errors,
             "warnings": warnings, "metrics": {"episodes": len(catalog["episodes"]),
-            "scenes": len(catalog["scenes"]), "shots": len(catalog["shots"]), "shot_seconds": total_seconds}}
+            "scenes": len(catalog["scenes"]), "shots": len(catalog["shots"]), "shot_seconds": total_seconds,
+            "episode_seconds": episode_seconds}}
 
 
 # LLM: 报告只展示输入及确定性核对结果，所有文本转义；不是浏览器执行容器或生产媒体。
