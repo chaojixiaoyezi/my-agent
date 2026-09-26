@@ -46,6 +46,10 @@
 - **未解决**：`test_browser_lite_package::test_plugin_exit_closes_browser`，3 次，都在 Linux runner 上，插件退出后 profile 目录有残留。本机 macOS 跑 16 次没有复现：退出后没有带这个 profile 路径的 Chrome 进程，profile 3 秒后仍为空。疑似 Linux 上 Chrome 的子进程（例如 crashpad handler）在主进程退出后还在写 profile。本分支只让断言失败时列出残留条目，没有改产品；要在 Linux 上拿到残留文件名再定修法。
 - **基础设施**：2026-09-25 13:26Z 到 14:31Z 之间的运行在 3 到 8 秒内失败，注解是 "recent account payments have failed or your spending limit needs to be increased"，属于账单/额度问题。仓库公开后恢复，最近 24 小时没有再出现这类失败。
 - **验证**（变基后的最终树）：与改动直接相关的 40 个测试文件，含 `test_architecture_guardrails.py`、上面被连带的文件，以及 main 已修好的两个 compact 文件。用 3.10.20、3.11.15、3.12.13 各跑一遍，每个版本都是 712 passed；3.10 和 3.11 用 scratchpad 里的隔离 venv，依赖经本机代理安装。严格门的 6 条命令退出码全部为 0：pytest（3.12）、Ruff、doc sync、strict code-size（blocked=False，与 origin/main 按 identity 和 severity 逐项比对，3485 条一致、无新增）、`git diff --check`、clean-package。没有推送，线上 CI 未作为验收来源。
+- **合入后线上 CI 跟进**（分支 `claude/ci-fix-2`，基于 main `8419fb762`）：
+  - `a2604cb7f` 是第一个包含本修复的推送，它的 Test 3.10、3.11、3.12 全部通过。
+  - `54f24ab94` 的 3.11 只挂了 browser-lite 退出用例（3.10/3.12 被 fail-fast 取消）。断言列出的残留是 `profile/Default` 和 `profile/Default/Network Persistent State`，这个文件由 Chrome 的网络服务写入，网络服务在单独的 utility 进程里运行。`BrowserProcess.stop()` 只等主进程退出就清 profile，网络服务随后才落盘，和 `rmtree(ignore_errors=True)` 撞上后留下非空的 `Default/`。本机 macOS 上 Chrome 的 8 个进程（含网络服务）命令行都带 `--user-data-dir=<profile>`，也和主进程同一进程组，主进程退出后 1 秒内全部退出，所以本机复现不了。产品暂未改，修法待定。
+  - 修复前的 `a53ab52d7` 上，3.11 还出现过一次 `test_tui_prompt_toolkit_pipe` 鼠标协议用例偶发：固定 `sleep(0.08)` 之后读到的终端输出是空串。已改为有界轮询，直到预期序列出现（上限 5 秒）。临时插件让 pipe 输入晚 0.2 秒送达时，旧用例在 CI 同一行（267）失败，新用例通过。
 
 ## Compact 摘要请求禁止工具与违规兜底（2026-09-26，已合入 main `f230ab077` 并双机部署 `step12v-dff317e5`，基于 `756d4b9bb`）
 

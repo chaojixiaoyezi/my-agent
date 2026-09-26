@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import threading
+import time
 from pathlib import Path
 from queue import Queue
 from types import SimpleNamespace
@@ -22,6 +23,16 @@ from agent_py_agent.cli.chat_parts.tui_ui_setup import (
     _tui_input_history_path,
     make_tui_app,
 )
+
+
+# 函数用途: 有界轮询终端输出，直到 TUI 真实处理完输入并写出全部预期序列；固定短 sleep 在慢 runner 上读到空串。
+async def _terminal_output_after(terminal: io.StringIO, offset: int, expected: tuple[str, ...]) -> str:
+    deadline = time.monotonic() + 5
+    while True:
+        text = terminal.getvalue()[offset:]
+        if all(item in text for item in expected) or time.monotonic() >= deadline:
+            return text
+        await asyncio.sleep(0.01)
 
 
 def _app_params(
@@ -253,25 +264,22 @@ def test_real_vt100_output_enables_default_mouse_and_f6_emits_both_transitions(
             with create_app_session(input=pipe_input, output=output):
                 app = make_tui_app(_app_params(tmp_path, runtime))
                 run_task = asyncio.create_task(app.run_async())
-                await asyncio.sleep(0.08)
-
-                started = terminal.getvalue()
+                enabled = ("\x1b[?1000h", "\x1b[?1003h", "\x1b[?1006h")
+                started = await _terminal_output_after(terminal, 0, enabled)
                 assert "\x1b[?1000h" in started
                 assert "\x1b[?1003h" in started
                 assert "\x1b[?1006h" in started
 
                 offset = len(started)
                 pipe_input.send_bytes(b"\x1b[17~")
-                await asyncio.sleep(0.08)
-                disabled = terminal.getvalue()[offset:]
+                disabled = await _terminal_output_after(terminal, offset, ("\x1b[?1000l", "\x1b[?1003l", "\x1b[?1006l"))
                 assert "\x1b[?1000l" in disabled
                 assert "\x1b[?1003l" in disabled
                 assert "\x1b[?1006l" in disabled
 
                 offset = len(terminal.getvalue())
                 pipe_input.send_bytes(b"\x1b[17~")
-                await asyncio.sleep(0.08)
-                restored = terminal.getvalue()[offset:]
+                restored = await _terminal_output_after(terminal, offset, enabled)
                 assert "\x1b[?1000h" in restored
                 assert "\x1b[?1003h" in restored
                 assert "\x1b[?1006h" in restored
