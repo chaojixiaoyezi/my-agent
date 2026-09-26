@@ -81,7 +81,8 @@ def test_native_probe_timeout_is_bounded_and_does_not_retry(tmp_path, server, mo
     server.block = True
     started = time.monotonic()
     result = op(host, "decision_probe", {"profile_id": key, "timeout_seconds": 0.08}, thread_id=thread.thread_id)
-    assert time.monotonic() - started < 0.8
+    # 墙钟还含设置读取、账本结算，CI 实测 0.895 秒；服务端挂起 3 秒才回，不守期限仍会超过这里的 2 秒。
+    assert time.monotonic() - started < 2.0
     assert not result["ok"] and result["error_type"]
     assert host._model_call_ledger.records()[0].status == "timed_out"
     assert len(server.requests) == 1 and result["usage"]["input_tokens"] is None

@@ -1,5 +1,21 @@
 # 测试与发布验收
 
+## GitHub CI 持续失败排查（2026-09-26，分支 `claude/ci-fix`，排查时基于 main `a3f5c17ec`，已变基到 `a53ab52d7`）
+
+- **范围**：main 上最近 40 次失败运行（39 次 Test、1 次 Full Tests，2026-09-25 15:47Z 到 09-26 14:27Z），逐个拉失败 job 的日志归类。同期 Lint 和 Cross-platform guard 全部通过。
+- **每次必挂的失败**：
+  - 3.10：`common/nofollow_tree.py` 调用了 `shutil.rmtree(..., dir_fd=)`，而这个参数 3.11 才有，项目声明的是 `>=3.10`。插件停用、移除时删环境目录会抛 TypeError，宿主命令落成 `outcome_unknown`，每个 3.10 job 因此挂 29 项（`test_plugin_*`、`test_host_command_stream`、`test_workspace_peek_package` 等）。40 个失败 job 里 20 个是 3.10；3.11/3.12 先挂时 3.10 会被 fail-fast 取消，所以日志里不一定看得到。修法：改为按目录描述符逐层删除——子目录经 no-follow 打开并复核身份，再用 `os.scandir(fd)` 和 `unlink/rmdir(dir_fd=)`，不再依赖 `rmtree` 的 `dir_fd`，各 Python 版本走同一实现。`test_nofollow_tree` 补了嵌套的真实目录，覆盖递归路径。
+  - 3.11/3.12：`test_gateway_compact_recovery*.py` 共 12 项报 `_payload() takes 3 positional arguments but 6 were given`。原因是 `7a15c9c91`（/effort）改了签名，测试没跟着改。已由集成窗口在 main `f230ab077` 修好，本分支不改这两个文件。
+- **偶发失败**：除探针超时用例外，根因都在本地用临时 pytest 插件注入延迟或 GC 复现过，旧代码稳定失败、失败行与 CI 一致，修复后通过。
+  - `test_adapter_manager` 投递线程用例，5 次。每次轮询都要持久领取和释放（含 fsync），65 次轮询在慢 runner 上超过 2 秒。更要紧的是断言失败后没停 manager：泄漏的投递线程继续轮询 127.0.0.1:8420 并写盘，连带挂了 `test_gateway_model_observation`（3 次）、`test_scheduler_heartbeat_resilience`（2 次），以及 `test_conversation_message_selection`、`test_compact_source_lifetime`、`test_gateway_model_adoption`、`test_browser_lite_package` 候选用例各 1 次，这些失败日志里都有泄漏线程的 `req_late` 告警。修法：等待上限改为 30 秒（送达即返回），并用 `try/finally` 在补丁仍生效时停线程。复现方式：每次写投递记录多 15 ms。
+  - `test_ingestion_harvester::test_restart_resumes_harvest_from_disk_cursor`，3 次。测试停掉旧收割线程后没等它退出就模拟重启，新工具读到旧线程还没清掉的租约，按设计 fail-closed 成 remote，于是不起本地收割者。修法：先 join 旧线程再模拟重启。复现方式：旧线程清租约前睡 1 秒。
+  - `test_decision_delivery_quality_integration`，2 次，出现在 3.11 和 3.12。这是产品问题：验证证据库的连接不关闭，3.11 起要等循环 GC 才关，WAL checkpoint 时机不定，决策时刻的文件快照和结束时对不上。修法：每次操作显式关闭连接，详见 verification 模块进度；新增回归测试在关闭自动 GC 的情况下检查 WAL 侧文件。复现方式：决策时刻快照之后手动 GC 一次。
+  - `test_tui_control_delivery` 的 compact/stop 用例，1 次。`_finish` 先回调界面、再删 outbox 行，测试一见到回调就读 outbox。修法：等回调完成且 outbox 清空后再断言，上限 5 秒。复现方式：回调后晚 0.2 秒删行。
+  - `test_decision_model_operations` 的探针超时用例，1 次。墙钟 0.895 秒超过了 0.8 秒上限，这个上限还包含设置读取和账本结算。本机加慢 fsync、降为后台 QoS 各跑多次都没复现，不知道 runner 上具体慢在哪一步。修法：上限改为 2 秒，仍低于测试服务端 3 秒的挂起时长；变异验证中让产品忽略期限，这条断言照样失败。
+- **未解决**：`test_browser_lite_package::test_plugin_exit_closes_browser`，3 次，都在 Linux runner 上，插件退出后 profile 目录有残留。本机 macOS 跑 16 次没有复现：退出后没有带这个 profile 路径的 Chrome 进程，profile 3 秒后仍为空。疑似 Linux 上 Chrome 的子进程（例如 crashpad handler）在主进程退出后还在写 profile。本分支只让断言失败时列出残留条目，没有改产品；要在 Linux 上拿到残留文件名再定修法。
+- **基础设施**：2026-09-25 13:26Z 到 14:31Z 之间的运行在 3 到 8 秒内失败，注解是 "recent account payments have failed or your spending limit needs to be increased"，属于账单/额度问题。仓库公开后恢复，最近 24 小时没有再出现这类失败。
+- **验证**（变基后的最终树）：与改动直接相关的 40 个测试文件，含 `test_architecture_guardrails.py`、上面被连带的文件，以及 main 已修好的两个 compact 文件。用 3.10.20、3.11.15、3.12.13 各跑一遍，每个版本都是 712 passed；3.10 和 3.11 用 scratchpad 里的隔离 venv，依赖经本机代理安装。严格门的 6 条命令退出码全部为 0：pytest（3.12）、Ruff、doc sync、strict code-size（blocked=False，与 origin/main 按 identity 和 severity 逐项比对，3485 条一致、无新增）、`git diff --check`、clean-package。没有推送，线上 CI 未作为验收来源。
+
 ## Compact 摘要请求禁止工具与违规兜底（2026-09-26，已合入 main `f230ab077` 并双机部署 `step12v-dff317e5`，基于 `756d4b9bb`）
 
 - **来源**：
@@ -58,6 +74,7 @@
   - 引用决策服务、冷却策略、审计工具或 owner 路径布局的 100 个测试文件（含 `test_architecture_guardrails.py`）：1686 passed。
   - 构造 `SimpleAgent` 的 117 个测试文件：2278 passed、8 skipped、29 xfailed。
   - 严格门全部通过；code-size 总数与 main 相同。原 `decide` 的长度发现随函数体移到 `_decide_outcome`（50→53 行，仍为 high-risk）；参数打包后没有新增参数发现。
+
 
 ## macOS 沙箱读边界第二步：拒读用户家目录（开关默认关闭，2026-09-26，分支 `claude/curator-budget`，基于 main `e24aae8ab`）
 

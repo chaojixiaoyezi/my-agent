@@ -1,5 +1,13 @@
 # Verification：开发推进
 
+## 2026-09-26 证据库连接显式关闭（分支 `claude/ci-fix`）
+
+`VerificationEvidenceRepository` 原来用 `with self._connect() as conn`，只提交不关闭。Python 3.11 起 sqlite3 连接要等循环 GC
+才关，WAL checkpoint 和 `-wal`/`-shm` 删除会拖到任意时刻，操作返回后证据库文件仍在变。CI 上 3.11/3.12 两次偶发
+`test_real_verification_story_shares_one_hint_without_changing_facts` 就是这个原因：决策时刻的 owner 文件快照和结束时对不上。
+现在每次读写经 `_connection()` 打开，事务结束后立即关闭；事务语义、锁和表结构不变。回归测试关自动 GC 后检查每次操作
+返回时没有 WAL 侧文件，旧代码在 3.12 上稳定失败。
+
 归档信封白名单（2026-09-24 晚）新增 `observation` 与 `observation_rejected`：只读插件工具的观察候选记录由 `plugin_observation.parse_observation` 按形状与数量夹界后写进 `tool_result_envelope`，是候选内容的唯一权威；`tool_completed` 事件只带查找投影。验证账、副作用证据与其它白名单字段不变。
 
 后台Compact已本地接同一scope/view的摘要注入和精确覆盖，局部来源/提交不改全线程摘要和游标；18文件联合420项通过，最终验证见TESTS。此片不证明完整恢复payload，Gateway/child准备同view、初次/手动和真实缓存仍待验；唯一TODO的12.4保持未完成。

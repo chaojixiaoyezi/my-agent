@@ -494,7 +494,9 @@ def test_plugin_exit_closes_browser(installed_browser, dirs, how):
             os.kill(process.pid, signal.SIGTERM)
         assert process.wait(timeout=20) == 0
         assert gone(pid)
-        assert not any((data / "profile").iterdir())
+        # Linux runner 偶发残留（本机 macOS 复现不了）；失败时列出残留条目，定位是哪个浏览器子进程在主进程退出后仍写 profile。
+        left = sorted(str(path.relative_to(data)) for path in (data / "profile").rglob("*"))
+        assert not left, left
     finally:
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGKILL)

@@ -1,3 +1,4 @@
+import gc
 from pathlib import Path
 
 from agent_py_agent.agent.verification.repository import (
@@ -67,3 +68,23 @@ def test_owner_databases_and_task_streams_are_isolated(tmp_path: Path):
     assert repository_a.status(context_b, root=project)["status"] == "unverified"
     assert repository_b.status(context_b, root=project)["status"] == "unverified"
     assert repository_a.db_path != repository_b.db_path
+
+
+def test_each_operation_closes_its_connection_before_returning(tmp_path: Path):
+    # 3.11 起 sqlite3 连接要等循环 GC 才关；关自动 GC 后，操作返回时 WAL 侧文件仍在就说明连接泄漏，
+    # 之后任意时刻的 checkpoint 会改动证据库文件。
+    project = tmp_path / "project"
+    project.mkdir()
+    context = VerificationContext("owner-a", "thread-1", "task-1")
+    repository = VerificationEvidenceRepository(tmp_path / "owner-a")
+    sidecars = [repository.db_path.with_name(repository.db_path.name + suffix) for suffix in ("-wal", "-shm")]
+    gc.disable()
+    try:
+        repository.record(context, _evidence(project))
+        assert not any(path.exists() for path in sidecars)
+        repository.mark_edited(context, root=project, paths=[str(project / "app.py")])
+        assert not any(path.exists() for path in sidecars)
+        assert repository.status(context, root=project)["status"] == "stale"
+        assert not any(path.exists() for path in sidecars)
+    finally:
+        gc.enable()

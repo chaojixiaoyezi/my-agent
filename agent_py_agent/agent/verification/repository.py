@@ -10,6 +10,8 @@ final response, or upgrades targeted evidence to full.
 import json
 import sqlite3
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -58,7 +60,7 @@ class VerificationEvidenceRepository:
     # 函数用途: 记录一次测试命令结果，并把它设为当前最新证据。
     def record(self, context: VerificationContext, evidence: VerificationEvidence) -> dict[str, Any]:
         created_at = _utc_now()
-        with _DB_LOCK, self._connect() as conn:
+        with _DB_LOCK, self._connection() as conn:
             cursor = conn.execute(
                 """
                 INSERT INTO verification_events(
@@ -114,7 +116,7 @@ class VerificationEvidenceRepository:
         root_text = str(Path(root).expanduser().resolve(strict=False))
         edited_at = _utc_now()
         changed = sorted({str(path) for path in paths if str(path).strip()})
-        with _DB_LOCK, self._connect() as conn:
+        with _DB_LOCK, self._connection() as conn:
             row = conn.execute(
                 """
                 SELECT changed_paths_json FROM verification_state
@@ -150,7 +152,7 @@ class VerificationEvidenceRepository:
     # 函数用途: 读取某个任务在某个项目里的最新验证状态。
     def status(self, context: VerificationContext, *, root: str | Path) -> dict[str, Any]:
         root_text = str(Path(root).expanduser().resolve(strict=False))
-        with _DB_LOCK, self._connect() as conn:
+        with _DB_LOCK, self._connection() as conn:
             state = conn.execute(
                 """
                 SELECT last_event_id, last_edit_at, changed_paths_json
@@ -191,6 +193,18 @@ class VerificationEvidenceRepository:
         conn.execute("PRAGMA busy_timeout=5000")
         self._ensure_schema(conn)
         return conn
+
+    # LLM: 每次操作独占一条连接：提交或回滚后立刻关闭，不交给 GC。3.11 起 sqlite3 连接要等循环回收才关，
+    #   WAL checkpoint 和 -wal/-shm 删除会拖到任意时刻，操作返回后证据库文件仍在变。调用方仍须持 _DB_LOCK。
+    # 函数用途: 打开证据库连接，事务结束后关闭它，让每次读写返回时落盘状态已确定。
+    @contextmanager
+    def _connection(self) -> Iterator[sqlite3.Connection]:
+        conn = self._connect()
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     @staticmethod
     def _ensure_schema(conn: sqlite3.Connection) -> None:
