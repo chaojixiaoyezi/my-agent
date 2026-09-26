@@ -481,3 +481,56 @@ def test_cli_restart_reports_cancellation_and_cooldown(tmp_path, monkeypatch):
     request = read_json_file(service.restart_request_path(paths))
     service.mark_restart_drained(paths, request, old_pid=4242, old_process_started_at=0.0, active_turns_at_exit=0)
     assert handover.safe_restart_from_cli(_cli_agent(), paths) == 2, "冷却中直接拒绝"
+
+
+@pytest.mark.parametrize("case", ["resumed", "fresh", "cancelled"])
+def test_resumed_claim_writes_one_turn_resumed_boundary_before_new_output(tmp_path, monkeypatch, case):
+    from agent_py_agent.agent.gateway_parts import request_execution
+
+    agent = _agent(tmp_path, gateway_processing_timeout_seconds=1)
+    paths = gateway_paths(agent)
+    for folder in (paths.inbox, paths.processing, paths.done, paths.failed, paths.responses):
+        folder.mkdir(parents=True, exist_ok=True)
+    request_id = "gwreq-resume-boundary"
+    claimed = paths.processing / f"{request_id}.json"
+    write_json_file(claimed, {
+        "id": request_id, "kind": "ask", "prompt": "重启前在跑", "attempts": 1,
+        "status": "processing" if case != "fresh" else "pending", "turn_phase": "open",
+        "lease_started_at": time.time() - 10,
+    })
+    chunk_path = paths.processing / f"{request_id}.chunks.jsonl"
+    stale_row = {"t": 1.0, "kind": "tool_progress",
+                 "progress": {"round": 2, "call_index": 0, "tool": "run_command", "phase": "started"}}
+    chunk_path.write_text(json.dumps(stale_row) + "\n", encoding="utf-8")
+    if case != "fresh":
+        recovered = recover_gateway_processing_requests(
+            paths, startup=True, max_attempts=2, timeout_seconds=1, agent=agent, planned_restart=True,
+        )
+        assert recovered["requeued"] == 1
+        # 接班进程按原请求号重新认领；恢复写下的结构化续跑标记随请求文件保留，chunk 文件原地不动。
+        (paths.inbox / claimed.name).replace(claimed)
+        assert read_json_file(claimed)["active_turn_recovery"]["cause"] == "gateway_safe_restart"
+    if case == "cancelled":
+        write_json_file(claimed, {**read_json_file(claimed), "cancel_requested": True})
+    executed: list[str] = []
+
+    def run_new_generation(context, on_chunk):
+        executed.append(context["request_id"])
+        on_chunk.write_progress({"round": 2, "call_index": 0, "tool": "run_command", "phase": "started"}, "")
+
+    monkeypatch.setattr(request_execution, "_execute_gateway_request_body", run_new_generation)
+    request_execution._handle_gateway_request(agent, claimed)
+
+    rows = [json.loads(line) for line in chunk_path.read_text(encoding="utf-8").splitlines()]
+    kinds = [row["kind"] for row in rows]
+    if case == "resumed":
+        assert executed == [request_id]
+        assert kinds == ["tool_progress", "turn_resumed", "tool_progress"], "边界只写一次，且先于续跑代次的任何输出"
+        assert rows[1]["cause"] == "gateway_safe_restart"
+        assert set(rows[1]) == {"t", "kind", "cause"}
+    elif case == "fresh":
+        assert executed == [request_id]
+        assert kinds == ["tool_progress", "tool_progress"], "普通请求没有续跑标记，不写边界"
+    else:
+        assert executed == []
+        assert kinds == ["tool_progress"], "认领时已被停止的续跑请求不执行，也不写边界"

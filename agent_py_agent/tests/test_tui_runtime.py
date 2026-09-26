@@ -1384,3 +1384,174 @@ def test_gateway_tool_input_progress_is_transient_and_resettable() -> None:
         block.role == "tool_input"
         for block in runtime.store.snapshot().active_blocks
     )
+
+
+def test_gateway_turn_resumed_cancels_stale_approval_and_reopens_new_generation() -> None:
+    """Gateway 重启后续跑同一回合：旧确认框本地作废，新代次的同轮同序号调用照常开卡和弹确认。"""
+    runtime = TuiRuntime("session-turn-resumed")
+    request_id = "request-turn-resumed"
+    runtime.enqueue_prompt(request_id, "run it", queued=False)
+    turn = runtime.begin_turn(request_id)
+    written: list[tuple[str, str]] = []
+    turn.configure_gateway_permission_sink(
+        lambda approval, decision: written.append((approval.permission_id, decision.decision))
+    )
+    finished = {"round": 1, "call_index": 0, "tool": "read_file", "phase": "started"}
+    waiting = {"round": 1, "call_index": 1, "tool": "run_command", "phase": "started"}
+    assert turn.on_gateway_event({"kind": "tool_progress", "progress": finished})
+    assert turn.on_gateway_event(
+        {"kind": "tool_progress", "progress": {**finished, "phase": "finished", "ok": True, "output": "read ok"}}
+    )
+    assert turn.on_gateway_event({"kind": "tool_progress", "progress": waiting})
+    stale = _approval_request_for(request_id, "call-before-restart", "run-before-restart")
+    assert turn.on_gateway_event({"kind": "permission_requested", "permission": stale.to_dict()})
+    assert runtime.store.snapshot().permission.permission_id == stale.permission_id
+
+    assert turn.on_gateway_event({"kind": "turn_resumed", "cause": "gateway_safe_restart"})
+
+    snapshot = runtime.store.snapshot()
+    assert snapshot.permission is None
+    assert written == [], "上一代已经结束，作废只在本地收口，不写回 Gateway"
+    stable = {block.block_id: block for block in snapshot.stable_blocks}
+    stale_card = f"tool:{request_id}:1:1"
+    assert stable[stale_card].phase == "interrupted"
+    assert stable[stale_card].detail == "已中断"
+    assert stable[f"tool:{request_id}:1:0"].phase == "completed"
+    assert not [block for block in snapshot.active_blocks if block.role in {"tool", "thinking", "assistant"}]
+    assert not [item for item in snapshot.diagnostics if item.code in {"TERMINAL_BLOCK_REPLAY", "TERMINAL_WITHOUT_BLOCK"}]
+    notice = stable[f"turn-resumed:{request_id}:1"]
+    assert notice.role == "system"
+    assert notice.text == "Gateway 安全重启打断了这一轮，已自动续跑。"
+    assert snapshot.status.phase == "running"
+
+    # 续跑代次的模型重新生成同一调用：轮号与序号不变，permission_id 必然不同。
+    assert turn.on_gateway_event({"kind": "tool_progress", "progress": waiting})
+    fresh = _approval_request_for(request_id, "call-after-restart", "run-after-restart")
+    assert fresh.permission_id != stale.permission_id
+    assert turn.on_gateway_event({"kind": "permission_requested", "permission": fresh.to_dict()})
+    snapshot = runtime.store.snapshot()
+    fresh_card = f"{stale_card}:resume1"
+    assert snapshot.permission.permission_id == fresh.permission_id
+    assert snapshot.permission.block_id == fresh_card
+    assert {block.block_id: block.phase for block in snapshot.active_blocks}[fresh_card] == "waiting_permission"
+    assert runtime.resolve_permission(fresh.permission_id, "approved")
+    assert written == [(fresh.permission_id, "approved")]
+    assert turn.on_gateway_event(
+        {"kind": "tool_progress", "progress": {**waiting, "phase": "finished", "ok": True, "output": "ran"}}
+    )
+    runtime.complete_turn(request_id, TuiTurnSummary(response_text="完成", tool_rounds=1))
+
+    snapshot = runtime.store.snapshot()
+    stable = {block.block_id: block for block in snapshot.stable_blocks}
+    assert stable[stale_card].phase == "interrupted"
+    assert stable[fresh_card].phase == "completed"
+    assert snapshot.permission is None
+    assert not [block for block in snapshot.active_blocks if block.role == "tool"]
+
+
+def test_gateway_turn_resumed_freezes_live_blocks_and_keeps_new_reply_separate() -> None:
+    """旧回复、旧思考、参数进度和 Compact 进度按中断收口，续跑文本另起新块而不拼到旧块后面。"""
+    runtime = TuiRuntime("session-turn-resumed-stream")
+    request_id = "request-turn-resumed-stream"
+    runtime.enqueue_prompt(request_id, "写一段", queued=False)
+    turn = runtime.begin_turn(request_id)
+    compact = {
+        "schema": "conversation_compaction_progress.v1",
+        "generation": 3,
+        "operation_id": "transcript:compact-3",
+        "source_kind": "conversation_transcript",
+        "commit_authority": "conversation_thread",
+        "before_tokens": 118_400,
+        "after_tokens": 0,
+        "trigger_tokens": 115_200,
+        "source_messages": 80,
+        "phase": "started",
+        "stage": "preparing",
+        "percent": 5,
+    }
+    assert turn.on_gateway_event({"kind": "model_delta", "text": "旧的半段回复"})
+    assert turn.on_gateway_event({"kind": "thinking_delta", "text": "旧的思考"})
+    assert turn.on_gateway_event(
+        {
+            "kind": "tool_input_progress",
+            "progress": {
+                "schema": "provider_tool_input_progress.v1",
+                "phase": "started",
+                "stream_index": 0,
+                "tool": "write_file",
+                "received_chars": 0,
+            },
+        }
+    )
+    assert turn.on_gateway_event({"kind": "conversation_compaction_progress", "compact_progress": compact})
+    assert {block.role for block in runtime.store.snapshot().active_blocks} >= {
+        "assistant", "thinking", "tool_input", "compact",
+    }
+
+    assert turn.on_gateway_event({"kind": "turn_resumed", "cause": "gateway_restart"})
+
+    snapshot = runtime.store.snapshot()
+    assert not [
+        block for block in snapshot.active_blocks
+        if block.role in {"assistant", "thinking", "tool_input", "compact", "tool"}
+    ]
+    stable = {block.block_id: block for block in snapshot.stable_blocks}
+    assert (stable[f"assistant:{request_id}:1"].phase, stable[f"assistant:{request_id}:1"].text) == (
+        "interrupted", "旧的半段回复",
+    )
+    assert (stable[f"thinking:{request_id}:1"].phase, stable[f"thinking:{request_id}:1"].text) == (
+        "interrupted", "旧的思考",
+    )
+    assert stable[f"conversation-compact:{request_id}:transcript:compact-3"].phase == "interrupted"
+    assert stable[f"turn-resumed:{request_id}:1"].text == "Gateway 重启打断了这一轮，已自动续跑。"
+
+    assert turn.on_gateway_event({"kind": "thinking_delta", "text": "新的思考"})
+    assert turn.on_gateway_event({"kind": "model_delta", "text": "新的回复"})
+    assert turn.on_gateway_event(
+        {"kind": "conversation_compaction_progress", "compact_progress": {**compact, "operation_id": "transcript:compact-3-retry"}}
+    ), "续跑代次的新 Compact 操作要能照常显示"
+    runtime.complete_turn(request_id, TuiTurnSummary(response_text="新的回复"))
+
+    stable = {block.block_id: block for block in runtime.store.snapshot().stable_blocks}
+    assert (stable[f"assistant:{request_id}:2"].phase, stable[f"assistant:{request_id}:2"].text) == (
+        "completed", "新的回复",
+    )
+    assert stable[f"assistant:{request_id}:1"].text == "旧的半段回复"
+    assert stable[f"thinking:{request_id}:2"].text == "新的思考"
+    assert (
+        stable[f"assistant:{request_id}:1"].created_seq
+        < stable[f"turn-resumed:{request_id}:1"].created_seq
+        < stable[f"thinking:{request_id}:2"].created_seq
+        < stable[f"assistant:{request_id}:2"].created_seq
+    )
+
+
+@pytest.mark.parametrize(
+    ("cause", "notice"),
+    [
+        ("processing_lease_expired", "这一轮执行超时中断，Gateway 已自动续跑。"),
+        ("", "这一轮执行被打断，已自动续跑。"),
+        ("future_restart_cause", "这一轮执行被打断，已自动续跑。"),
+    ],
+)
+def test_gateway_turn_resumed_notice_reads_only_structured_cause(cause: str, notice: str) -> None:
+    runtime = TuiRuntime("session-turn-resumed-cause")
+    request_id = "request-turn-resumed-cause"
+    runtime.enqueue_prompt(request_id, "go", queued=False)
+    turn = runtime.begin_turn(request_id)
+
+    assert turn.on_gateway_event({"kind": "turn_resumed", "cause": cause})
+    assert turn.on_gateway_event({"kind": "turn_resumed", "cause": cause})
+
+    notices = [
+        block for block in runtime.store.snapshot().stable_blocks
+        if block.block_id.startswith(f"turn-resumed:{request_id}:")
+    ]
+    assert [(block.block_id, block.text) for block in notices] == [
+        (f"turn-resumed:{request_id}:1", notice),
+        (f"turn-resumed:{request_id}:2", notice),
+    ]
+    runtime.complete_turn(request_id, TuiTurnSummary(response_text="ok"))
+    finished = runtime.store.snapshot()
+    assert turn.on_gateway_event({"kind": "turn_resumed", "cause": cause}) is False
+    assert runtime.store.snapshot() == finished

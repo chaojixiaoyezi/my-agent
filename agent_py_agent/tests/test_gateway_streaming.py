@@ -225,6 +225,20 @@ def test_compact_boundary_is_typed_and_does_not_copy_summary(tmp_path):
     assert set(row) == {"t", "kind", "compact_generation"}
 
 
+def test_turn_resumed_boundary_is_typed_content_free_and_after_buffered_output(tmp_path):
+    paths = _make_paths(tmp_path)
+    chunk_path = gateway_chunk_path(paths, "turn-resumed")
+    writer = BufferedChunkStreamWriter(chunk_path, flush_interval_seconds=999, flush_chars=999)
+
+    writer.write("续跑前还没刷出的进度")
+    writer.write_turn_resumed(" gateway_safe_restart ")
+
+    rows = [json.loads(line) for line in chunk_path.read_text(encoding="utf-8").splitlines()]
+    assert [row["kind"] for row in rows] == ["runtime_progress", "turn_resumed"]
+    assert rows[1]["cause"] == "gateway_safe_restart"
+    assert set(rows[1]) == {"t", "kind", "cause"}
+
+
 def test_context_usage_is_rich_only_and_whitelists_numeric_projection(tmp_path):
     paths = _make_paths(tmp_path)
     disabled_path = gateway_chunk_path(paths, "context-disabled")

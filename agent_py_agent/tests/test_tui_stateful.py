@@ -15,6 +15,7 @@ from agent_py_agent.cli.chat_parts.tui_runtime import (
     TuiRuntime,
     TuiTurnEventAdapter,
     TuiTurnSummary,
+    _tool_block_id,
 )
 
 _TERMINAL_TEXT = st.text(
@@ -268,7 +269,9 @@ class TuiRuntimeStateMachine(RuleBasedStateMachine):
             "phase": "started",
             "detail": text,
         }
-        block_id = f"tool:{self.active_request_id}:{self.tool_index}:0"
+        block_id = _tool_block_id(
+            self.active_request_id, progress, self.active_adapter._resume_generation
+        )
         self.active_adapter.write_progress(progress)
         self.active_adapter.write_progress(
             {**progress, "phase": "updated", "output": f"partial {text}"}
@@ -291,6 +294,55 @@ class TuiRuntimeStateMachine(RuleBasedStateMachine):
         snapshot = self.runtime.store.snapshot()
         assert block_id not in {block.block_id for block in snapshot.active_blocks}
         assert sum(block.block_id == block_id for block in snapshot.stable_blocks) == 1
+
+    @precondition(lambda self: self.active_adapter is not None)
+    @rule(
+        cause=st.sampled_from(
+            ("gateway_safe_restart", "gateway_restart", "processing_lease_expired", "", "future_cause")
+        ),
+        text=_TERMINAL_TEXT,
+    )
+    def resume_same_turn_after_gateway_restart(self, cause: str, text: str) -> None:
+        assert self.active_adapter is not None
+        assert self.active_request_id is not None
+        adapter = self.active_adapter
+        self.tool_index += 1
+        progress = {
+            "tool": "run_command",
+            "round": self.tool_index,
+            "call_index": 0,
+            "phase": "started",
+            "detail": text,
+        }
+        adapter.write_progress(progress)
+        stale_id = _tool_block_id(self.active_request_id, progress, adapter._resume_generation)
+        adapter.write_model(text)
+
+        assert adapter.on_gateway_event({"kind": "turn_resumed", "cause": cause})
+        snapshot = self.runtime.store.snapshot()
+        assert not any(
+            block.role in {"assistant", "thinking", "tool", "tool_input", "compact"}
+            for block in snapshot.active_blocks
+        )
+        assert [block.phase for block in snapshot.stable_blocks if block.block_id == stale_id] == [
+            "interrupted"
+        ]
+        notice_id = f"turn-resumed:{self.active_request_id}:{adapter._resume_generation}"
+        assert sum(block.block_id == notice_id for block in snapshot.stable_blocks) == 1
+        assert snapshot.permission is None
+        assert snapshot.status.phase in {"running", "interrupting"}
+
+        # 续跑代次同轮同序号的调用必须开出新卡，而不是被旧卡的终态吞掉。
+        adapter.write_progress(progress)
+        fresh_id = _tool_block_id(self.active_request_id, progress, adapter._resume_generation)
+        assert fresh_id != stale_id
+        assert fresh_id in {block.block_id for block in self.runtime.store.snapshot().active_blocks}
+        adapter.write_progress({**progress, "phase": "completed", "ok": True, "output": text})
+        snapshot = self.runtime.store.snapshot()
+        assert [block.phase for block in snapshot.stable_blocks if block.block_id == fresh_id] == [
+            "completed"
+        ]
+        assert not [item for item in snapshot.diagnostics if item.block_id in {stale_id, fresh_id}]
 
     @precondition(lambda self: self.active_adapter is not None)
     @rule(

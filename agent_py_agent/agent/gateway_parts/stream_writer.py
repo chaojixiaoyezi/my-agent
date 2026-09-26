@@ -424,6 +424,13 @@ class BufferedChunkStreamWriter:
             },
         )
 
+    # LLM: 续跑边界只由宿主在同一请求重新执行、写任何本代事件之前调用一次；只带 recovery 标记里的结构化 cause，
+    #   不写正文，也不代表恢复核对已经通过。客户端据此收口上一执行代次的显示，未知 kind 的旧客户端会忽略它。
+    # 函数用途: 在原 chunk 流里标出“这一轮被打断后重新开始执行”，让 TUI 关掉旧确认框、旧动画和运行中的旧工具卡。
+    def write_turn_resumed(self, cause: str) -> None:
+        self.flush()
+        self._write_event({"kind": "turn_resumed", "cause": str(cause or "").strip()})
+
     # LLM: 工具轮数来自结构化 progress，不能从输出文本或动画推断。
     # 函数用途: 返回当前请求已经观察到的最大工具轮号。
     @property

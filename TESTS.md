@@ -3146,6 +3146,16 @@ Audit/摄取不列入本轮新增验收；共享模块既有回归按改动影�
   终端 `gateway restart` 在 Gateway 未运行时交回启动路径、在托管自己的工具进程里拒绝且不写请求、等到新进程号 running 返回 0、
   本请求被取消或冷却中返回 2；`test_gateway_commands.py` 的先停后起用例改为显式 `--force`；`test_tui_upgrade_follow.py` 核对
   排空阶段每次轮询都提示、cancelled/缺失不提示。
+- 第三批（TUI 续跑边界与确认框作废）：`test_gateway_safe_restart.py::test_resumed_claim_writes_one_turn_resumed_boundary_before_new_output`
+  从真实恢复标记出发（`planned_restart` 重排、接班认领同一请求号），核对 chunk 流只多出一条 `turn_resumed`、字段只有 t/kind/cause、
+  排在续跑代次任何输出之前；普通请求不写，认领时已被停止的请求不执行也不写。`test_gateway_streaming.py` 核对边界先刷出缓冲进度、cause 去空白。
+  `test_tui_runtime.py` 三组：旧确认框本地作废且不经 sink 写回；同轮同序号的新代工具卡用 `:resume1` 块号、新确认正常弹出并只写回一次；
+  已终态的卡不重发终态（没有 `TERMINAL_*` 诊断）；旧回复、旧思考和进行中的 Compact 按 interrupted 冻结，参数临时行收起，续跑文本另起新块；
+  提示文案只按 cause 选择，未知或空 cause 用通用提示，回合结束后再收到边界不发布。`test_tui_stateful.py` 状态机新增续跑规则，
+  随机交错下块号仍唯一、旧卡只中断一次、新卡正常完成。`test_gateway_client.py` 用返回 False 的旧版 typed 消费者核对该行不显示、不报错；
+  `test_gateway_verbose_progress.py` 核对 IM `/progress` 忽略它并照常前移游标。变异核对：新 TUI 用例在旧 adapter 上全部失败；
+  去掉块号代次后缀、终态不移出未终态登记、去掉 Gateway 写入调用，各有用例失败。真实 TUI 验收未做：需在隔离 Gateway 上让回合停在确认框
+  或长命令时安全重启，核对旧框关闭、提示出现、新确认能弹出、旧工具卡显示已中断。
 - `test_gateway_restart_tool.py`：不在 Gateway 内拒绝且不写文件；Gateway 内立即返回 scheduled 并记录发起会话存储根；缺原因与冷却为 not_started；
   只注册给管理员主代理且可关闭；`test_user_config_owner_scope.py` 另核对普通用户与群看不到它。
 - 真实验收方法：隔离 home 与 127.0.0.1:8432 的 Gateway 上，一次 prompt 让代理重启 Gateway，核对工具回执 scheduled、回合正常结束、

@@ -46,6 +46,13 @@ Gateway chat 等待使用单调时钟。入口绝对 deadline 只在进入轮询
 系统校时前跳不能让正在工作的请求提前超时，回拨也不能延长真正失联的等待。该修复不放宽提供方首事件、流静默或权限边界。
 客户端停止等待不是后台任务终态，不得据此宣称执行失败或自动重跑。
 
+Gateway 重启或执行超时后，接班进程按原请求号续跑同一回合，TUI 继续读同一个 chunk 文件。续跑代次开始执行前，Gateway 写一次
+结构化 `turn_resumed{cause}`（只有 kind 和 cause，没有正文）。TUI 据此只收口上一执行代次的显示：旧确认框按 cancelled 本地关闭、
+不写回 Gateway；活动思考与回复按 interrupted 冻结；adapter 登记的仍未终态工具卡按中断收口，已终态的卡不重发终态；再按 cause
+显示一条系统提示（如“Gateway 安全重启打断了这一轮，已自动续跑。”，未知原因用通用提示）。回合本身继续运行，不因此结束。
+续跑回合的工具轮号可能与被打断的那一轮同号，所以续跑代次的工具卡与审批块号追加 `:resume<代次>`；首代块号不变。
+旧版 TUI 不认识该 kind 时按未知事件忽略，不显示也不报错。细节见 [Gateway 安全重启](GATEWAY_SAFE_RESTART.md) 文末第三批。
+
 ## 实现入口
 
 - `agent_py_agent/cli/chat_parts/tui_events.py`、`tui_view_model.py`：事件信封和 reducer。

@@ -1141,3 +1141,36 @@ def test_plain_projection_fails_closed_for_model_delta_rows() -> None:
     )
     assert text == ""
     assert terminal is False
+
+
+def test_turn_resumed_row_is_silently_skipped_by_clients_that_do_not_know_it(tmp_path, capsys) -> None:
+    from agent_py_agent.agent.gateway_parts.response_renderer import (
+        project_gateway_stream_chunk,
+    )
+    from agent_py_agent.cli.chat_parts import gateway_client as chat_gateway_client
+    from agent_py_agent.cli.chat_parts.gateway_client import ChunkFilePollRequest
+
+    boundary = {"t": 1.0, "kind": "turn_resumed", "cause": "gateway_safe_restart"}
+    assert project_gateway_stream_chunk(boundary) == ("", False)
+    chunk_path = tmp_path / "req.chunks.jsonl"
+    chunk_path.write_text(
+        json.dumps(boundary) + "\n"
+        + json.dumps({"kind": "assistant_commentary", "text": "续跑后的说明"}) + "\n",
+        encoding="utf-8",
+    )
+    shown: list[str] = []
+    typed: list[str] = []
+
+    # 旧版 TUI 的 typed 消费者遇到不认识的 kind 按原合同返回 False，只能落到 legacy 文本投影。
+    def old_consumer(event: dict) -> bool:
+        typed.append(str(event.get("kind") or ""))
+        return False
+
+    chunks, visible, _offset = chat_gateway_client._poll_chunk_file(
+        ChunkFilePollRequest(chunk_path, lambda chunk: shown.append(chunk) or True, 0, 0, 0, old_consumer)
+    )
+
+    assert typed == ["turn_resumed", "assistant_commentary"]
+    assert (chunks, visible) == (2, 0)
+    assert shown == ["续跑后的说明"]
+    assert capsys.readouterr().err == ""

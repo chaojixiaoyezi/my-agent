@@ -147,6 +147,22 @@ def test_progress_chunk_respects_on_and_full_levels(tmp_path) -> None:
     assert "secret result" in _render_gateway_progress(events[1])
 
 
+def test_public_progress_skips_turn_resumed_boundary_and_advances_cursor(tmp_path) -> None:
+    path = tmp_path / "request.chunks.jsonl"
+    writer = BufferedChunkStreamWriter(path)
+    writer.set_verbose_level("on")
+    writer.write_progress({"tool": "read_file", "status": "完成"}, "legacy")
+    writer.write_turn_resumed("gateway_safe_restart")
+    writer.write_progress({"tool": "run_command", "status": "完成"}, "legacy")
+    writer.close()
+
+    events, cursor = _read_public_progress_events(path, 0)
+
+    assert cursor == 3
+    assert [item["tool"] for item in events] == ["read_file", "run_command"]
+    assert all("cause" not in item and item.get("kind") != "turn_resumed" for item in events)
+
+
 def test_rich_transcript_keeps_each_commentary_tool_display_and_thinking(tmp_path) -> None:
     path = tmp_path / "request.chunks.jsonl"
     writer = BufferedChunkStreamWriter(path, rich_transcript=True)

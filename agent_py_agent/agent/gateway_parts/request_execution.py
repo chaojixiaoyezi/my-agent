@@ -748,6 +748,16 @@ def _publish_gateway_compact_boundary(on_chunk: object, generation: int) -> None
         writer(generation)
 
 
+# LLM: 是否续跑只认 request_binding 对 recovery 结构化标记的判定（含上一版已排队的旧形式），cause 原样取标记字段；
+#   每个已认领请求只在创建 chunk writer 之后、执行本代之前调用一次，不读正文、不改变恢复核对和执行结果。
+# 函数用途: 被 Gateway 重启或执行超时打断的回合在新进程里重新执行时，先在流里写一条续跑边界，供 TUI 收口上一代显示。
+def _publish_gateway_turn_resumed(writer: BufferedChunkStreamWriter, request: dict, request_id: str) -> None:
+    if not request_binding.gateway_request_is_active_turn_recovery(request, request_id):
+        return
+    marker = request.get("active_turn_recovery")
+    writer.write_turn_resumed(str(marker.get("cause") or "") if isinstance(marker, dict) else "")
+
+
 # LLM: 声明 conversation 的请求必须拿到可读 canonical thread；加载失败不能降级成无历史的新对话。
 # 函数用途: 在选模型和执行前检查会话上下文是否可靠可用。
 def _require_gateway_conversation_ready(
@@ -1095,6 +1105,7 @@ def _executing_owner_id(agent: object) -> str:
 
 
 # LLM: 每个 claimed request 只创建一个 chunk writer；审批只读 client_capabilities 或服务端核实的管理员 IM 私聊，失败只投影 typed HTTP 事实，不把异常正文公开或用作重试依据。
+#   带续跑标记的请求在执行前经同一 writer 写一次 turn_resumed 边界；取消提前返回时不写。
 # 函数用途: 执行一条 Gateway 请求、维护 lease/chunk，并保存已有执行与本次失败的真实响应。
 def _handle_gateway_request(
     agent: SimpleAgent,
@@ -1141,6 +1152,7 @@ def _handle_gateway_request(
 
     execution_started_mono = time.monotonic()
     try:
+        _publish_gateway_turn_resumed(chunk_writer, context["request"], context["request_id"])
         _execute_gateway_request_body({**context, "agent": agent}, chunk_writer)
     except Exception as exc:
         from .request_errors import gateway_provider_error_projection

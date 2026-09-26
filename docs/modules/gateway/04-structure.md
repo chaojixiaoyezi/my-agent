@@ -1197,7 +1197,7 @@ audit Agent 为空而回退 daemon cwd。
   `.approvals/<sha256(request_id)[:24]>/<sha256(permission_id)[:24]>.json`；路径不接受外部 id 拼接，
   原子文件在 schema、request id、permission id、完整 binding 全部匹配后才消费。
 - `stream_writer.BufferedChunkStreamWriter` 是 Gateway typed 事件唯一出口：模型 delta、工具 progress、
-  `permission_requested/resolved`、`conversation_compacted` 共用同一 chunk cursor。writer 是否等待审批只读
+  `permission_requested/resolved`、`conversation_compacted`、`turn_resumed` 共用同一 chunk cursor。writer 是否等待审批只读
   请求的显式 `client_capabilities.tool_approval`；没有该能力时不得按 source、终端在线或文案猜测。
 - `cli/chat_parts/gateway_client.py` 把 chunk object 交给 TUI typed consumer；consumer 成功时不再走 legacy
   文本投影，最终 response file 仍是请求终态事实。坏行有界跳过，cursor 继续前进，不能重放已消费事件。
@@ -1873,6 +1873,9 @@ generic `create_attempt` 和 `recover_attempt_unknown` 不感知 transport marke
 `gateway_parts/restart_control.py`（`/restart`，只认 local/main owner，使用 control_service 传入的权威 Gateway 路径）。
 `recover_gateway_processing_requests(planned_restart=True)` 只在消费到新鲜完成标记的启动时使用；
 `_pending_request_entry_sort_key` 按 `active_turn_recovery.cause` 把安全重启续跑排在新请求之前。
+续跑边界：`request_execution._publish_gateway_turn_resumed` 在 `_handle_gateway_request` 创建 chunk writer 之后、执行本代之前，
+对带续跑标记的请求经 `write_turn_resumed` 写一次 `turn_resumed{cause}`；TUI `tui_runtime._close_resumed_turn_generation`
+据此收口上一执行代次的审批、思考、回复和未终态工具卡，续跑代次的工具卡与审批块号带 `:resume<代次>`。
 排空期间 `dispatch_pending_requests(hold_reason=...)` 只写等待事实不认领；终端 `gateway restart` 的默认入口是
 `gateway_restart_handover.safe_restart_from_cli`，`--force` 才走 `cmd_gateway_stop` + `cmd_gateway_start`。
 

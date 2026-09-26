@@ -1,5 +1,20 @@
 # Gateway 维护状态
 
+Gateway 安全重启第三批：TUI 续跑边界与确认框作废（分支 `claude/turn-resumed-boundary`，2026-09-26）。
+被重启或执行超时打断的回合由接班进程按原请求号续跑，TUI 读同一个 chunk 文件，以前没有任何“上一代已结束”的信号：
+上一代开着的确认框让新确认在 `_TuiPermissionController.open` 报“已有待确认”被吞，回合可能一直等；旧回复、旧思考和续跑文本拼在一起；
+死掉那一代的执行中工具卡一直显示运行中；续跑轮号按已落账调用数接着数，被打断那一轮没有落账时新卡与旧卡同号。现在：
+- `request_execution._handle_gateway_request` 对 `request_binding.gateway_request_is_active_turn_recovery` 成立的请求，
+  在创建 chunk writer 之后、执行本代之前经 `BufferedChunkStreamWriter.write_turn_resumed` 写一次 `{"kind": "turn_resumed", "cause": ...}`，
+  cause 原样取 `active_turn_recovery.cause`（旧形式为空）；认领时已被停止的请求不执行也不写。
+- TUI `tui_runtime._close_resumed_turn_generation`：旧审批按 cancelled 本地关闭、不写回；活动思考与回复按 interrupted 冻结；
+  参数临时行与进行中的 Compact 进度收口；adapter 登记的未终态工具卡按中断收口，已终态的不重发；按 cause 显示“已自动续跑”提示；
+  续跑代次的工具卡与审批块号追加 `:resume<代次>`。
+- 旧版 TUI、普通 CLI 与 `gateway ask` 对该行投影为空；IM `/progress` 白名单忽略它。
+- 未处理：同会话其它窗口经 `bg-main:` 后台显示流看到的旧代活动块；恢复放弃续跑时 TUI 终态仍不关闭运行中的工具卡。
+回归见 `test_tui_runtime.py`、`test_tui_stateful.py`、`test_gateway_safe_restart.py`、`test_gateway_streaming.py`、
+`test_gateway_client.py`、`test_gateway_verbose_progress.py`，设计见 `docs/design/GATEWAY_SAFE_RESTART.md` 文末第三批。
+
 `/admin` 指引修正与审计软提示（主线，2026-09-26，真实验收发现）：执行飞书请求的是 owner 池里按用户隔离的 agent，其 owner 字段被改成该用户，原判定里的“基础 owner 是 local/main”永远不成立，指引没有出现；`admin_binding_hint_for_request` 改为只看开关、全局数据根的密码文件与绑定表。`audit_records` 的 requests 主题给管理员附软提示（查飞书用 all_owners、已设密码未绑定时发 /admin），`MODEL_NOT_CONFIGURED` 处理建议补上 `/admin`。真实验收里 my-agent 两轮工具即给出正确结论。
 
 审计工具新增 `requests` 主题（主线，2026-09-26，用户要求“这种东西以后 my-agent 能帮我解决”）：每个请求开始执行时响应带 `owner_id`（宿主解析的执行 owner 规范编号，`request_execution._executing_owner_id`），`request_audit_records.request_outcome_records` 按 `OutcomeQuery` 读窗口内请求结果（状态、错误码与错误分类表的处理建议、渠道、私聊/群聊、耗时），归属优先 `terminal_response.owner_id`、旧记录退回会话，都没有的列为 `unattributed`；经 `GatewayTaskBindingWriter.request_audit_outcomes` 供 `audit_records`（`tooling/audit_requests_topic.py`）使用，跨用户沿用管理员两道门。回归见 `test_audit_requests_topic.py`。

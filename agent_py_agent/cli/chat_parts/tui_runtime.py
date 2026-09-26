@@ -1,6 +1,7 @@
 # LLM: 本模块是 chat worker/Gateway structured rows 到 TuiEvent 的唯一 adapter；它不渲染、不执行工具，也不把 legacy 文案当状态。
 # 后台流身份仅管理展示续接，换流不得清空本页面历史、待输入回执或已恢复工作片。
 # 历史工具卡不再驱动实时 Todo；当前计划只由实时工具/活动快照发布，恢复和向前翻页都遵守这一边界。
+# Gateway 续跑边界 turn_resumed 只收口同一回合上一执行代次的显示，不结束回合、不写回审批。
 # 模块用途: 发布会话、输入、回合和工具有序事件；保留公开原文及缺失字段，不重复标题或改变执行配置。
 
 from __future__ import annotations
@@ -64,6 +65,13 @@ _BACKGROUND_TRANSCRIPT_KINDS = frozenset(
 _BACKGROUND_TRANSCRIPT_PHASES = frozenset(
     {"started", "delta", "updated", "completed", "failed", "interrupted"}
 )
+# 续跑提示按 recovery 标记的结构化 cause 选文案；表里没有的新原因用通用提示，不拒绝也不显示原始取值。
+_TURN_RESUMED_NOTICES = {
+    "gateway_safe_restart": "Gateway 安全重启打断了这一轮，已自动续跑。",
+    "gateway_restart": "Gateway 重启打断了这一轮，已自动续跑。",
+    "processing_lease_expired": "这一轮执行超时中断，Gateway 已自动续跑。",
+}
+_TURN_RESUMED_FALLBACK_NOTICE = "这一轮执行被打断，已自动续跑。"
 
 
 # LLM: TuiTurnSummary 是 finalize 的结构化输入；error/status/token 不能从格式化 timing 文案反解析。
@@ -356,7 +364,8 @@ class _TuiPermissionController:
                 )
         self._owner.runtime._permission_coordinator.release(self)
 
-    # LLM: controller 只能经 owner runtime 发布同一 permission 的 typed event；block id 由 request round/index 事实生成。
+    # LLM: controller 只能经 owner runtime 发布同一 permission 的 typed event；block id 由 request round/index 事实
+    #   加 owner 当前续跑代次生成，与同代工具卡一致。外部审批宿主没有续跑代次，按 0 处理。
     # 函数用途: 统一发布审批覆盖层事件，避免各交互分支重复拼装身份字段。
     def _publish(
         self,
@@ -373,10 +382,11 @@ class _TuiPermissionController:
             permission_id and permission_id != effective_request.permission_id
         ):
             return
+        generation = getattr(self._owner, "_resume_generation", 0)
         self._owner.runtime._publish(
             kind,
             phase,
-            _tool_block_id(self._owner.request_id, effective_request.to_dict()),
+            _tool_block_id(self._owner.request_id, effective_request.to_dict(), generation),
             payload,
             request_id=self._owner.request_id,
         )
@@ -1735,7 +1745,7 @@ class TuiRuntime(
 # LLM: TuiTurnEventAdapter 实现 callable/write_model/write_progress/Gateway event 四个入口，共享同一 typed 生命周期和 block identity。
 # 类用途: 把一次本地或 Gateway 回合的流式输出、工具事件和终态写入 TuiRuntime。
 class TuiTurnEventAdapter:
-    # LLM: adapter 状态只记当前显示 block/id/text 和已见工具，不复制 agent/tool runtime 业务状态；
+    # LLM: adapter 状态只记当前显示 block/id/text、已见及未终态工具卡和续跑代次，不复制 agent/tool runtime 业务状态；
     # defer_assistant_display 只改变显式 show-prompt 的展示顺序，不改变终态 response 或会话保存。
     # 函数用途: 初始化一个尚未开始的回合 adapter，并设置回答是否等最终 prompt 后再显示。
     def __init__(
@@ -1772,15 +1782,14 @@ class TuiTurnEventAdapter:
         self._output_bytes = 0
         self._defer_assistant_display = bool(defer_assistant_display)
         self._tool_blocks: set[str] = set()
+        # 尚未收到终态的工具卡（按开始顺序）；续跑边界只收口这些卡，已终态的卡不会再收到第二个终态。
+        self._open_tool_blocks: dict[str, None] = {}
+        # 已消费的 turn_resumed 次数；大于 0 时工具卡与审批块号带代次，避免与上一代同轮同序号的卡撞号。
+        self._resume_generation = 0
         self._tool_input_projector = ToolInputProgressEventProjector(
             block_prefix=f"tool-input:{request_id}",
             event_writer=lambda kind, phase, block_id, payload: self.runtime._publish(
-                kind,
-                phase,
-                block_id,
-                dict(payload),
-                request_id=self.request_id,
-            ),
+                kind, phase, block_id, dict(payload), request_id=self.request_id),
         )
         self._runtime_progress_index = 0
         self._interrupt_requested = False
@@ -2218,8 +2227,9 @@ class TuiTurnEventAdapter:
 
     # LLM: thinking terminal 携带完整思考文本与真实耗时；返回值只表示本次确实关闭了活动块，
     # 供 assistant transition 标记旧 Gateway 可能迟到的全文终态；空 spinner 仍走 typed discard。
+    #   phase 由调用方按结构化事实显式给出（续跑边界用 interrupted），不从思考文本推断。
     # 函数用途: 关闭当前等待模型的 thinking block，并告知调用方是否发生了真实状态转换。
-    def _complete_thinking(self) -> bool:
+    def _complete_thinking(self, *, phase: str = "completed") -> bool:
         if not self._thinking_active:
             return False
         if not self._thinking_text:
@@ -2235,7 +2245,7 @@ class TuiTurnEventAdapter:
         elapsed = max(0.0, time.time() - self._thinking_started_at)
         self.runtime._publish(
             "thinking_completed",
-            "completed",
+            phase,
             self.thinking_block_id,
             {
                 "text": self._thinking_text,
@@ -2340,10 +2350,11 @@ class TuiTurnEventAdapter:
         self._assistant_block_id = ""
         self._assistant_text = ""
 
-    # LLM: tool block id 只使用结构化 round/call_index/request，unknown tool 仍有稳定开放名称。
+    # LLM: tool block id 只使用结构化 round/call_index/request 与本 adapter 的续跑代次，unknown tool 仍有稳定开放名称；
+    #   开始时登记为未终态，收到终态即移出，续跑边界只收口仍登记的卡。
     # 函数用途: 将一个 structured progress 映射为工具 block 事件。
     def _publish_tool_progress(self, progress: dict[str, Any]) -> None:
-        block_id = _tool_block_id(self.request_id, progress)
+        block_id = _tool_block_id(self.request_id, progress, self._resume_generation)
         phase = str(progress.get("phase") or "updated").strip().lower()
         if block_id not in self._tool_blocks:
             self.runtime._publish(
@@ -2354,6 +2365,7 @@ class TuiTurnEventAdapter:
                 request_id=self.request_id,
             )
             self._tool_blocks.add(block_id)
+            self._open_tool_blocks[block_id] = None
         terminal_kind, terminal_phase = _tool_terminal(phase, progress)
         if terminal_kind:
             self.runtime._publish(
@@ -2363,6 +2375,7 @@ class TuiTurnEventAdapter:
                 _tool_payload(progress),
                 request_id=self.request_id,
             )
+            self._open_tool_blocks.pop(block_id, None)
             return
         self.runtime._publish(
             "tool_progress",
@@ -2512,12 +2525,53 @@ def _consume_gateway_turn_event(
             request_id=adapter.request_id,
         )
         return True
+    if kind == "turn_resumed":
+        return _close_resumed_turn_generation(adapter, payload)
     if kind == "permission_requested" and isinstance(payload.get("permission"), dict):
         adapter._permissions.open(ToolApprovalRequest.from_mapping(payload["permission"]))
         return True
     if kind == "permission_resolved":
         return adapter._permissions.accept_gateway_resolution(payload)
     return False
+
+
+# LLM: turn_resumed 是 Gateway 在同一请求重新执行前写的结构化边界，只收口上一执行代次的显示：审批本地按 cancelled 关闭
+#   （不经 sink 写回，那一代已经结束；先于代次推进，permission 事件仍落在旧代块号上），思考与回复按 interrupted 冻结，
+#   仍登记为未终态的工具卡按中断收口、已终态的不再重发；随后代次加一，新代工具卡与审批用带代次的块号。
+#   cause 只用来选提示文案，未知或缺失时用通用提示，不读取任何正文。回合已结束时不再发布。
+# 函数用途: Gateway 重启或执行超时后同一回合自动续跑时，关掉旧确认框、旧动画和仍在“运行中”的旧工具卡，并提示已自动续跑。
+def _close_resumed_turn_generation(
+    adapter: TuiTurnEventAdapter,
+    payload: Mapping[str, object],
+) -> bool:
+    with adapter._lock:
+        if adapter._finished:
+            return False
+        adapter._permissions.cancel_pending()
+        adapter._tool_input_projector.clear()
+        adapter._close_compact_if_active(phase="interrupted")
+        adapter._complete_thinking(phase="interrupted")
+        adapter._late_thinking_completion_expected = False
+        adapter._complete_active_assistant(phase="interrupted")
+        for block_id in tuple(adapter._open_tool_blocks):
+            adapter.runtime._publish(
+                "tool_failed",
+                "interrupted",
+                block_id,
+                {"phase": "interrupted"},
+                request_id=adapter.request_id,
+            )
+        adapter._open_tool_blocks.clear()
+        adapter._resume_generation += 1
+        cause = str(payload.get("cause") or "").strip()
+        adapter.runtime._publish(
+            "system_message",
+            "completed",
+            f"turn-resumed:{adapter.request_id}:{adapter._resume_generation}",
+            {"text": _TURN_RESUMED_NOTICES.get(cause, _TURN_RESUMED_FALLBACK_NOTICE)},
+            request_id=adapter.request_id,
+        )
+    return True
 
 
 # LLM: request id 是所有回合 block/queue 的 canonical 显示关联，空值必须在入口失败。
@@ -2724,14 +2778,17 @@ def _active_input_message_ids(payload: Mapping) -> tuple[str, ...]:
     )
 
 
-# LLM: 工具 block identity 只取 typed round/call_index，不使用 detail/output 文本。
-# 函数用途: 生成工具显示块稳定 id。
-def _tool_block_id(request_id: str, progress: dict[str, Any]) -> str:
-    return (
+# LLM: 工具 block identity 只取 typed round/call_index 与 adapter 自己数的续跑代次，不使用 detail/output 文本；
+#   续跑回合的轮号按已落账调用数接着数，被打断那一轮没有记录时会与新一轮同号，所以代次大于 0 时追加后缀。
+#   首代保持原格式，`tool:<request_id>:` 前缀不变（插话排序按该前缀找本回合块）。
+# 函数用途: 生成工具显示块稳定 id，续跑后同轮同序号的新卡不会撞上上一代的旧卡。
+def _tool_block_id(request_id: str, progress: dict[str, Any], generation: int = 0) -> str:
+    block_id = (
         f"tool:{request_id}:"
         f"{_nonnegative_int(progress.get('round'))}:"
         f"{_nonnegative_int(progress.get('call_index'))}"
     )
+    return f"{block_id}:resume{generation}" if generation > 0 else block_id
 
 
 # LLM: tool payload只转发公开字段；原文ref与history_incomplete同源保留，不能把采集缺口当工具失败或正文状态。
