@@ -19,6 +19,7 @@ from ..backends.bounded_call import (
     BoundedCallTimeoutError,
     call_with_deadline,
 )
+from ..backends.errors import ProviderConfigurationError
 from ..backends.request_scope import provider_request_budget
 from .candidate_models import (
     CANDIDATE_TYPES,
@@ -309,7 +310,8 @@ def extract_with_retries(
                 shrink_attempts=_TIMEOUT_SHRINK_LIMIT - shrinks_left,
             )
         last_error = failure
-        if isinstance(failure, (CuratorModelStillRunningError, InterruptedError)):
+        # 仍在运行、被中断，或没有可用模型这类永久配置错误：同输入再试没有新信息，直接按原语义失败。
+        if isinstance(failure, (CuratorModelStillRunningError, InterruptedError, ProviderConfigurationError)):
             break
         timed_out = is_curator_timeout_error(failure)
         smaller = (

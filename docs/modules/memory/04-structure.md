@@ -147,6 +147,12 @@ task workspace 摘要同步）同样改用它，避免"读时切开、写回落�
 - 收集阶段的条目估算（固定 7000 字符模板余量、审计 1000 字保底且第一条不受上限约束）只是收集上界，不是提示长度的权威；提示是否超预算只以 `curator_prompt` 实测为准。保底后仍超出说明预算小于模板本身，仍报 `CURATOR_INPUT_BUDGET_EXCEEDED`。
 - R264 的“每轮先清空”现在覆盖预算早退：`extract_with_retries` 第一行就清空尝试形状，不再用 `reset(token)` 恢复上一调用者（可能是另一个 owner）的形状。改动任何一处都要跑 `test_curator_input_budget.py`。
 
+## 2026-09-26 没配模型的 owner：不原地重试、独立失败码、同源长退避
+
+- `ProviderConfigurationError` 一族（未配模型、4xx 拒绝、地址/代理配置错误）按基类合同不得重试：`extract_with_retries` 遇到即结束，不消耗同输入重试。
+- `ModelNotConfiguredError` 记 `CURATOR_MODEL_NOT_CONFIGURED`；其它配置错误仍归 `CURATOR_MODEL_FAILED`。
+- 失败退避只有一个口径 `curator_models.curator_failure_retry_seconds`：发现层 `owner_wake_discovery` 与 `curator._run_pending_when_due` 都调用它。未配模型退避一小时，其它失败保持原 5 分钟。改动要跑 `test_curator_model_not_configured.py`。
+
 ## R265 策展会话头与失败阶段的边界
 
 - 后台提取的宿主会话在 `curator._execute` 用 `backends/provider_headers.provider_session_scope((owner_id,), run_id)`

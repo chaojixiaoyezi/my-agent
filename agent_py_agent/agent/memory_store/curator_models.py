@@ -97,6 +97,19 @@ class MemoryCuratorConfig:
         return "curator-config-" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
 
 
+# owner 没有可用模型是需要人处理的永久配置问题，不是临时故障：退避拉长到一小时，避免每个维护周期都重建
+# owner 实例、整批收集后再失败；配好模型后（IM owner 空闲回收后重建会读到新配置）最迟一小时恢复。
+CURATOR_MODEL_NOT_CONFIGURED = "CURATOR_MODEL_NOT_CONFIGURED"
+CURATOR_NOT_CONFIGURED_RETRY_SECONDS = 3600
+
+
+# LLM: 唯一的失败退避口径，发现层 owner_wake_discovery 与 curator._run_pending_when_due 都必须调用它；只按
+#   结构化失败码判断，不读异常正文。同步 test_curator_model_not_configured.py。
+# 函数用途: 按上次失败码给出这次重试前要等待的秒数。
+def curator_failure_retry_seconds(failure_code: str, base_seconds: int) -> int:
+    return CURATOR_NOT_CONFIGURED_RETRY_SECONDS if failure_code == CURATOR_MODEL_NOT_CONFIGURED else base_seconds
+
+
 # LLM: state 是每 owner 唯一游标和 lease 权威；不能在 Gateway 内存另存一份成功游标。
 # 类用途: 持久化增量消息/audit 位置、运行健康、累计数量和待处理触发。
 @dataclass
@@ -424,6 +437,8 @@ def curator_response_schema() -> dict[str, Any]:
 
 
 __all__ = [
+    "CURATOR_MODEL_NOT_CONFIGURED",
+    "CURATOR_NOT_CONFIGURED_RETRY_SECONDS",
     "CURATOR_OUTPUT_SCHEMA_VERSION",
     "CURATOR_MODEL_ORIGINS",
     "CURATOR_RUN_SCHEMA_VERSION",
@@ -434,6 +449,7 @@ __all__ = [
     "CuratorRunResult",
     "MemoryCuratorConfig",
     "MemoryCuratorState",
+    "curator_failure_retry_seconds",
     "curator_response_schema",
     "parse_curator_extraction",
     "validate_curator_state",

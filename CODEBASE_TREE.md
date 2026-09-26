@@ -892,6 +892,7 @@ agent_py_agent/
 |   |-- test_memory_candidate_daily_v2.py # Candidate/Daily v2 身份、状态、顺序、并发与大输出边界
 |   |-- test_memory_curator_v2.py      # Curator 触发、模型配置、权限、失败恢复与整批提交
 |   |-- test_curator_input_budget.py   # Curator 输入预算缩批：按最终提示实测长度截尾、尾部重放不丢、标注前缩批、预算失败不复用旧尝试形状
+|   |-- test_curator_model_not_configured.py # 没配模型的 owner：永久配置错误不原地重试、独立失败码、发现层与 Curator 同源一小时退避
 |   |-- test_provider_request_scope.py # 同端点前台优先、后台预算传递、取消和不重叠重试
 |   |-- test_memory_promotion_v2.py    # 证据/冲突/Persona/lesson/HOT 晋升边界
 |   |-- test_memory_recall_v2.py       # 正式来源、scope、陈旧索引、owner 隔离与信封安全

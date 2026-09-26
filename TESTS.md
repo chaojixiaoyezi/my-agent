@@ -1,5 +1,12 @@
 # 测试与发布验收
 
+## 没配模型的 owner 不再反复失败（2026-09-26，分支 `claude/curator-budget`，基于 main `d00fde8be`）
+
+- **真机现象**：飞书 owner 与测试 owner `tui-matrix/p1-r141` 未选模型，step12m 上 3 小时内各失败 28 次：每次重建 owner 实例、整批收集（p1-r141 每次都是同一批 47→46 条缩批），以 `ModelNotConfiguredError` 失败并原地重试一次，记成通用的 `CURATOR_MODEL_FAILED`。
+- **新增** `test_curator_model_not_configured.py` 4 项：未配模型和 4xx 拒绝都只调用一次、不原地重试；服务级运行记 `CURATOR_MODEL_NOT_CONFIGURED`，游标不动，10 分钟后（原 5 分钟退避已过）不再调用，一小时后才重试；发现层对同样 10 分钟前失败的两个 owner，只唤醒普通超时失败的那个。
+- **变异验证**：5 种（配置错误照旧重试、失败码不区分、待处理路径用原退避、发现层用原退避、退避函数不区分）全部使测试失败。
+- **回归**：Curator、发现层、网关循环相关 29 个测试文件 600 passed。
+
 ## 结构化输出方式：DeepSeek 官方改用 JSON 对象（2026-09-26，分支 `claude/curator-budget`，基于 main `337a689ad`）
 
 - **起因**：Curator 与自动总结 Skill 的结构化调用固定发 `json_schema`，DeepSeek 官方 OpenAI 兼容接口直接 400；默认模型设成它时，这两条后台链路会整体失效。
