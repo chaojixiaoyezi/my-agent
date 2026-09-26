@@ -162,6 +162,37 @@ stop/runtime/turn原因及truncated事实，不记录正文、思考内容、参
   - `projected_tokens_before` 偏小：强制恢复在决定摘要后先解绑旧请求历史（12.4-2b，`911d0d14d`），再用解绑后的冻结输入量“压缩前”，只量到系统提示和工具。已改为解绑前量一次，见 [决策模型集成](DECISION_MODEL_INTEGRATION.md) 2b 一节。宿主估算器本身偏保守：同一份资料估 63,562 token，DeepSeek 实测约 57,650。
   - 最早的用户原话进不了地标：地标段上限是 min(6000, max(800, 窗口/12)) 字，窗口不小于 72K token 时一律 6000 字。扣掉标题和省略说明后剩 5,706 字；每条长用户消息截到 1,200 字，连前缀共 1,209 字，按“最新优先”选，4 条占 4,836 字后剩 870 字，第 5 条（最早的一条）放不下。这是有意的固定成本设计（与会话运行时保留最近用户消息一致），语义摘要才是主载体；修好分段顺序后，本场景 5 条规则都已由语义摘要保住，因此暂不改地标策略。
 
+## 压缩后查回原话与原话备份（2026-09-26，集成方，分支 `claude/curator-budget`）
+
+**问题**：多段长需求（例如 10 段各 1 万 token）压缩后细节会丢。模型摘要只能概括；旧原话备份固定 6000 字，每条只截开头 1200 字、按最新优先，只放得下约 4 段的开头；原始记录虽在磁盘，模型压缩后没有路径读回。
+
+**对照**（2026-09-26 各家当前 main 源码与官方文档）：
+- Codex CLI：最新优先保留用户原话 2 万 token（OpenAI 服务端压缩 6.4 万），放不下的那条保留头尾；默认不能查回，实验模式 `token_budget` 提供历史检索与按条读回。
+- Claude Code：摘要单列全部用户消息，末尾给出完整转录路径让模型自己读；CLAUDE.md、记忆与最近改过的文件压缩后重新载入。
+- Hermes：尾部保留 1–2.5 万 token 原文，另有 2.4 万字用户原话区；`session_search` 能搜到本会话已压缩的原文。
+- OpenClaw：保留最近 2 万 token；压缩前让模型把要点写进记忆文件；`sessions_search` 加按消息编号读回。
+- Gemini CLI、opencode：只保留最近原文，没有查回工具。
+
+**做法一：查回原话**（`capability/session_history_read.py`，复用既有 `session_search`，不另起工具）：
+- `message_id`：按字符游标分段读回一条消息原文（默认每次 6000 字、上限 2 万字，按 `next_offset` 续读）。只读 canonical 消息文件，不读派生索引。`thread_id` 只在读单条时可显式给出（落在同一 owner 会话库），默认取宿主可信会话，结果带 `scope_resolution`。
+- `current_thread=true`：不带 query 时按页浏览当前会话的用户消息与最终答复（`older_cursor` 翻页，预览 160 字）；带 query 时只在当前会话内全文检索，会话条件在 SQL 里先于 LIMIT 生效（`local_storage.search_records_in_thread`）。
+- 翻看（`around_id`）每条正文上限 2000 字，超长标 `content_truncated` 并提示按 `message_id` 读全文，避免一次灌满上下文。
+- 形态优先级：`message_id` > `around_id` > `current_thread` > `query` > 浏览。显式锚点压过 `current_thread`，因为翻看本就限在锚点所属会话。
+
+**做法二：原话备份**（`conversation/compact_landmarks.py`）：
+- 预算按 token：min(`compact_landmark_max_tokens`=20000, max(500, 窗口 10%))，窗口越大留得越多。
+- 每条带 `message_id`。先整条放入能放下的条目（用户原话优先、最新优先，短要求不会被更新的长消息挤掉），再用剩余预算把最新一条放不下的用户消息保留头尾，写明原长度与省略字数。
+- 放不下的用户消息编号列在 `omitted_user_messages` 行（最近 30 个加总数），跨代继承；超出 30 个的只计数（`earliest N not listed`），这个数逐代累加，总数不缩水。可选回查说明（`compact_recall_hint_enabled` 且本 agent 注册了 `session_search`）告诉模型按编号读回。
+- 头尾裁剪按整行 token（含 JSON 转义）折算保留字数：换行多的原文转义后更长，按原文折算会误以为整条放得下而把它整条丢掉。
+- 两遍处理：第一遍流式只记编号与整行 token，第二遍按下标只重读被选中的行，保持“压缩期间原文不整份驻留”的合同。旧格式备份行（无编号）照常继承。
+- 继承只读上一代备份段本身（标题之后到第一个空行）。严格恢复的机械回退会在备份段后附上一代摘要与本次原文，这些内容不会被当成备份再继承。机械续接包里的上一代摘要只取语义部分：以前整段带入时，备份标题落在续接包中间，收尾剥离旧备份时会把后面的操作证据和原文摘录一起切掉。
+
+**做法三：摘要指令**要求单列“User requirements”（用户说过的全部要求、规则、约束、偏好与决定，按时间、带确切值，后来改过的标出而不是删掉；随大段资料一起给的要求也单独列出）和“Pending user requests”。
+
+**容量保护**：原话备份是非权威补充，不能改变压缩结果。候选超出恢复目标时，只在收缩可能改变判定时才处理：会被拒、而去掉备份能回到上限以下；或介于目标与上限之间、而缩到最小能达到目标。这时按超出量缩小备份、重新计量一次，变小才采用；判断时计入最小备份段（标题、编号、回查说明）。多一次投影远比非强制压缩再换一种切分、多一次摘要模型调用便宜。
+
+**配置**：`compact_landmark_max_tokens`（默认 20000，0 表示只留编号与回查说明）、`compact_recall_hint_enabled`（默认 true）。
+
 ## Cache economics
 
 系统通道的验证规则只限定证据表述，不要求每个动作前重新运行已有检查。相同版本、输入和观察点
@@ -318,7 +349,7 @@ guidance id 幂等追加到同一 raw transcript；provider 失败、进程崩�
 
 thread transcript 负责“我们刚才说了什么”。长期 memory 负责跨很久的稳定偏好、事实或可检索经验。compact
 不会自动修改 USER/SOUL，也不会把每个 task 复制进长期 memory。旧 transcript 可以进入 owner-local
-LocalStore 派生索引，由 `session_search` 按需查回；索引不是第二事实源，也不能跨 owner。
+LocalStore 派生索引，由 `session_search` 按需查回；索引不是第二事实源，也不能跨 owner。压缩掉的原话按 `message_id` 直接从 canonical 消息文件分段读回（见上文“压缩后查回原话与原话备份”）。
 
 ## Multi-user boundary
 

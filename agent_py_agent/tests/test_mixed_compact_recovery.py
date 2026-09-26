@@ -259,10 +259,14 @@ def test_mixed_replacement_fits_when_transcript_only_exceeds_real_input_ceiling(
     selected = [(before, after, candidate) for before, after, candidate in measured
                 if _wire_from_material(agent, candidate) == sent_business[0]]
     assert len(selected) == 1
-    transcript_only, mixed, candidate = selected[0]
+    _transcript_only, mixed, candidate = selected[0]
+    # 前提看第一次计量（原话备份收缩之前）：只压对话仍超过真实输入上限，必须同时替换工具交接。
+    # 候选超出恢复目标后会按超出量缩小原话备份再计量一次，提交的是更小的那份。
+    first_transcript_only, first_mixed, _ = measured[0]
+    assert len(measured) == 2 and mixed < first_mixed
     assert len(candidate.params.compact_context.view.summary) < 2_000
-    assert mixed < ceiling <= transcript_only
-    assert mixed + agent.backend.max_tokens < policy.context_window_tokens <= transcript_only + agent.backend.max_tokens
+    assert mixed < ceiling <= first_transcript_only
+    assert mixed + agent.backend.max_tokens < policy.context_window_tokens <= first_transcript_only + agent.backend.max_tokens
     assert store.threads.require(thread.thread_id).compact_generation == 1
 
 

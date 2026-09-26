@@ -456,6 +456,7 @@ agent_py_agent/
 |   |   |-- compact_text_source.py      # 只读两遍编码校验与当前字符窗口，消费后释放，不拥有覆盖
 |   |   |-- compact_message_source.py   # 可重放原生摘要消息与完整JSON数组编码，复用唯一token估算
 |   |   |-- compact_request_budget.py   # 按当前模型窗口顺序分段摘要，完整覆盖历史且失败不推进游标
+|   |   |-- compact_landmarks.py        # 压缩摘要末尾原话备份：按 token 随窗口放大、带消息编号、放不下保留头尾、省略列编号与回查说明
 |   |   |-- compact_tool_refs.py        # 从匹配原生工具往返保留原样路径线索，不靠模型摘要记忆目录
 |   |   |-- compact_guard.py            # 结构化完整回合选择、连续失败冷却与 typed compact 错误
 |   |   |-- compact_checkpoint_scan.py  # 同次固定EOF临时行地址与hash读取，不新增持久索引
@@ -613,7 +614,9 @@ agent_py_agent/
 |   |   |-- decision_skill_proposal_review.py # 自学习 S2：`skills proposals list` 的可选审核顺序点，只重排展示并加宿主标签，从不确认/拒绝/写入
 |   |   |-- persona_repository.py      # owner SOUL/USER/AGENTS 受控加载、版本/CAS/回滚唯一入口
 |   |   |-- model_profile_tool.py      # manage_models：主会话代理自助增删改切 owner 模型目录，复用唯一配置服务，回执不含密钥
-|   |   `-- channel_message_tool.py    # 当前 owner 的统一 send_message；登记产物经原生通道发送
+|   |   |-- channel_message_tool.py    # 当前 owner 的统一 send_message；登记产物经原生通道发送
+|   |   |-- session_search_tool.py     # session_search：本地历史检索/翻看/浏览，外加按 message_id 读原文与当前会话检索
+|   |   `-- session_history_read.py    # session_search 的会话原文读取：按消息编号分段读回、当前会话按页浏览，只读 canonical 消息文件
 |   |-- prompting_parts/               # prompt 构造
 |   |   |-- builder.py                 # 完整 prompt 与 native 三段追加式缓存布局构造
 |   |   |-- cache_layout.py            # typed 稳定 system/user、动态尾部与完整字符串投影
@@ -733,7 +736,9 @@ agent_py_agent/
 |   |-- test_conversation_history_seed.py # 具体种子与只读来源两边界逐项等价、冻结时刻与追加、互斥及改写/截短/替换/删除失败
 |   |-- test_host_history_seed_lifetime.py # 三宿主4.2M字符种子准备只驻留地址、解析后完整hash不变
 |   |-- test_host_summary_phase_lifetime.py # 三宿主4.2M字符全链：摘要期不驻留旧请求历史、覆盖完整
-|   |-- test_compact_recovery_release.py # 恢复宿主解绑旧历史：失败/取消/超限收尾不读、noop保留、tool_context共享合同
+|   |-- test_compact_recovery_release.py # 恢复宿主解绑旧历史：失败/取消/超限收尾不读、noop保留、tool_context共享合同、解绑前量压缩前大小
+|   |-- test_compact_landmarks.py   # 原话备份：预算随窗口、编号、头尾裁剪、省略编号、跨代继承、只重读选中行、候选超目标时收缩
+|   |-- test_session_history_read.py # session_search 读原文：长消息分段拼回、可信会话身份、当前会话浏览/检索不混入其它会话
 |   |-- test_compact_media_recovery.py  # 两协议媒体工具轮及溢出后原文保留、无摘要和无CAS
 |   |-- test_compact_transcript_media_partition.py # 文字前缀覆盖与媒体完整后缀、分段拒绝
 |   |-- test_media_compact_preflight.py # 媒体会话越过压缩点：off 只守窗口/越窗 NON_TEXT，auto 归档引用后按压缩点压缩
@@ -1370,6 +1375,8 @@ docs/
 - `agent/conversation/compact_text_source.py`：两遍长度/hash 校验与可释放顺序窗口；取消或来源变化时拒绝候选，不推进 canonical 游标。
 - `agent/backends/request_content.py`：摘要分段的纯文字可表示性判断，不读取媒体或推断供应商能力。
 - `agent/conversation/compact_request_budget.py`：当前模型窗口内的摘要请求预算和连续分段；不持有历史游标或另建状态源。
+- `agent/conversation/compact_landmarks.py`：压缩摘要末尾“原话备份”的唯一实现。预算按 token 随模型窗口放大（窗口 10%，上限 `compact_landmark_max_tokens`），用户原话优先、最新优先，放不下的那条保留头尾；每条带 message_id，省略的用户消息列编号，可选回查说明。两遍处理：第一遍流式只记编号与 token，第二遍按下标只重读被选中的行。
+- `agent/capability/session_history_read.py`：`session_search` 的会话原文读取。message_id 分段读回只读 canonical 消息文件；当前会话浏览/检索只认宿主可信会话，结果带 scope_resolution。
 - `agent_py_agent/vendor/bubblewrap/`：离线 bwrap 的第三方许可与对应源码材料；升级二进制时同步更新并验包。
 - `agent/common/text_file_window.py`：64 KiB 流式索引、有限检查点与页面 cookie；编码和字符坐标只保留一个实现。
 - `agent/common/file_version.py`：read_file 返回观察版本，write/edit/patch 明确携带前置条件；外部写入者不被强制纳管。

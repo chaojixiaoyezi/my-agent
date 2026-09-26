@@ -344,7 +344,7 @@ class UserFieldsService:
 # 带引号的 "false" 必须转成真实布尔值，否则会被当成真值打开开关（含自学习 enable_self_learning）。
 _RUNTIME_BOOL_FIELDS = (
     "auto_save_memory", "local_store_fts_enabled",
-    "conversation_terminal_tool_fold_enabled",
+    "conversation_terminal_tool_fold_enabled", "compact_recall_hint_enabled",
     "enable_subagents", "enable_self_learning",
     "concurrency_lock_enabled", "audit_enabled", "watchdog_enabled",
 )

@@ -190,7 +190,8 @@ def test_two_candidates_commit_own_retained_snapshot_and_projection(tmp_path, mo
 
     monkeypatch.setattr(compact_request_budget, 'generate_auxiliary_model_response', generate)
     result = _prepare(agent, thread, source, force=False, request_projector=project)
-    assert len(views) == (3 if second == 'oversized' else 2)
+    # 超上限的第二候选会先缩小原话备份再计量一次（本替身按调用次序给大小，仍超限），然后才放弃。
+    assert len(views) == (4 if second == 'oversized' else 2)
     assert all(isinstance(view.messages, MessageSnapshotRows) for view in views[:2])
     assert result.messages == tuple(tail) and result.request_projection.material is materials[1]
     chain = committed_compact_checkpoint_chain(agent, result.thread)

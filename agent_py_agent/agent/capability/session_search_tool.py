@@ -8,6 +8,10 @@
 #     ③ BROWSE     —— 不传参:按时间倒序列出最近记录(标题/预览/时间)。
 #   与 长期助手 的差异:my-agent 的事实单元是 record(非逐条 message)。scroll 有
 #   结构化 thread_id 时限在同一会话；没有归属的旧记录明确标为时间邻居。
+#   另有两种会话原文形态（实现见 session_history_read.py，只读 canonical 消息文件）:
+#     ④ READ         —— 传 message_id:按字符游标分段读取一条会话消息的原文（压缩后回查原话）。
+#     ⑤ THREAD       —— current_thread=true:只在当前可信会话内检索(带 query)或按页浏览(不带 query)。
+#   scroll 每条正文有上限，超长时标 content_truncated 并提示用 message_id 分段读全文。
 #   返回字段 messages 是历史协议字段，不代表每项都是一条原始对话消息。Gateway 投影 host-authored
 #   task_ref，供“回到上次项目”拿到精确路径，不从自然语言猜 cwd。契约:只读零副作用;
 #   空库/无命中返回结构化提示不报错；给精确 input_schema（对齐原生 tool_use 改造规范）。
@@ -18,7 +22,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
-from ..local_storage.search import record_thread_id
+from ..local_storage.search import ThreadSearch, record_thread_id, search_records_in_thread
 from ..tooling.models import (
     BaseTool,
     ConcurrencyPolicy,
@@ -28,6 +32,16 @@ from ..tooling.models import (
     ToolModelHints,
     ToolModelSpec,
     ToolRuntimePolicy,
+)
+from .session_history_read import (
+    READ_DEFAULT_CHARS,
+    READ_MAX_CHARS,
+    READ_MIN_CHARS,
+    SessionHistoryRefusal,
+    browse_current_thread,
+    read_conversation_message,
+    require_current_thread,
+    trusted_thread,
 )
 
 if TYPE_CHECKING:
@@ -41,12 +55,16 @@ _DEFAULT_BROWSE_LIMIT = 10
 _DEFAULT_WINDOW = 5
 _MAX_LIMIT = 20
 _MAX_WINDOW = 20
+_SCROLL_CONTENT_CHARS = 2_000
+_THREAD_BROWSE_DEFAULT = 20
 _HISTORICAL_TASK_REF_STATUSES = frozenset({"done", "failed", "interrupted"})
 _SESSION_SEARCH_USE_CASES = (
     "用户问之前怎么解决或上次聊到哪时先检索历史",
     "用户要求回到刚才、先前或某个具名旧项目时，先按项目名检索 gateway_request 并读取 task_ref",
     "拿到一条命中后用 around_id 翻看前后上下文",
     "用户问最近在做什么时浏览最近记录",
+    "上下文被压缩后需要早先的原话细节时，用摘要或检索结果里的 message_id 分段读回原文",
+    "只想找本次会话里说过的内容时，加 current_thread=true 检索或按页浏览",
 )
 _SESSION_SEARCH_KEYWORDS = (
     "历史", "检索", "回顾", "之前", "上次", "刚才", "先前", "回到", "原项目", "旧项目",
@@ -57,6 +75,8 @@ _SESSION_SEARCH_EXAMPLES = (
     '{"tool":"session_search","query":"星河日志分析器","source_type":"gateway_request"}',
     '{"tool":"session_search","around_id":"rec-abc123","window":8}',
     '{"tool":"session_search"}',
+    '{"tool":"session_search","message_id":"msg-2a75a9b3a005400a","offset":0}',
+    '{"tool":"session_search","current_thread":true,"query":"金额保留两位小数"}',
 )
 
 
@@ -68,11 +88,14 @@ def build_session_search_model_spec() -> ToolModelSpec:
         name="session_search",
         description=(
             "检索/翻看当前用户自己的本地历史记录(普通聊天、记忆、任务产物、归档),零成本纯读。"
-            "三种形态由参数推断:"
+            "形态由参数推断:"
             "①传 query=全文检索(FTS5,支持中文子串);②传 around_id=以某条记录为锚翻看前后上下文;"
             "③都不传=按时间倒序列出最近记录。回答'我们之前对X怎么处理/在哪记过Y'优先用它,先于上网/翻文件。"
             "已结束的 Gateway 任务命中可能带 task_ref，并在默认检索结果里优先展示；"
             "其中 task_path 是该历史任务的精确目录，用户要求续作时优先使用。"
+            "④传 message_id=按字符游标分段读取一条会话消息的原文（上下文被压缩后回查原话细节），"
+            "按返回的 next_offset 续读；⑤传 current_thread=true=只在当前会话内检索（带 query）"
+            "或按页浏览全部用户与助手消息（不带 query，用 older_cursor 翻更早一页）。"
         ),
         input_schema={
             "type": "object",
@@ -82,6 +105,13 @@ def build_session_search_model_spec() -> ToolModelSpec:
                 "window": {"type": "integer", "minimum": 1, "maximum": _MAX_WINDOW, "description": "锚点两侧各取几条，默认 5。"},
                 "limit": {"type": "integer", "minimum": 1, "maximum": _MAX_LIMIT, "description": "检索或浏览返回条数。"},
                 "source_type": {"type": "string", "description": "限定来源类型，如 memory。"},
+                "message_id": {"type": "string", "description": "会话消息编号（压缩摘要或检索结果里给出）；读取这条消息原文，优先于其它形态。"},
+                "thread_id": {"type": "string", "description": "配合 message_id 读取本人其它会话的消息，取自检索结果 scope；不传则读当前会话。"},
+                "offset": {"type": "integer", "minimum": 0, "description": "读取原文的起始字符位置，默认 0；长消息按返回的 next_offset 续读。"},
+                "max_chars": {"type": "integer", "minimum": READ_MIN_CHARS, "maximum": READ_MAX_CHARS,
+                              "description": f"本次最多返回多少字符，默认 {READ_DEFAULT_CHARS}。"},
+                "current_thread": {"type": "boolean", "description": "只在当前会话内检索或浏览，包含已被上下文压缩掉的原始消息。"},
+                "cursor": {"type": "integer", "minimum": 0, "description": "浏览当前会话时翻到更早一页，取上一页返回的 older_cursor。"},
             },
             "additionalProperties": False,
         },
@@ -100,39 +130,75 @@ class SessionSearchTool(BaseTool):
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy("read_only"),
         concurrency_policy=ConcurrencyPolicy("parallel_safe"),
-        resource_scopes=ResourceScopePolicy(parameter_names=("around_id", "query"),
-            parameter_kinds={"around_id": "logical", "query": "logical"}),
+        resource_scopes=ResourceScopePolicy(parameter_names=("around_id", "query", "message_id"),
+            parameter_kinds={"around_id": "logical", "query": "logical", "message_id": "logical"}),
     )
 
     # 类用途: 把 LocalStore 的历史检索/翻看暴露成模型可调用的只读工具(三模式)。
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
 
-    # 函数用途: 校验 store 后把三模式分派交给 _dispatch;store 不可用/检索异常都给结构化码。
+    # LLM: 会话原文读取（message_id / current_thread 浏览）只依赖会话库，本地索引不可用时仍可读；
+    #   需要索引的形态在分派时单独拒绝。可预期失败给结构化码，其余异常统一为可重试的执行失败。
+    # 函数用途: 把各形态分派交给 _dispatch;存储不可用/检索异常都给结构化码。
     def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
-        store = _store_for(self.agent)
-        if store is None:
-            return _error("本地历史存储不可用", "当前运行环境未配置 local_store", "TOOL_UNAVAILABLE")
         try:
-            payload = _dispatch(store, params)
+            payload = _dispatch(self.agent, _store_for(self.agent), params)
+        except SessionHistoryRefusal as refusal:
+            return _error(refusal.message, refusal.hint, refusal.code)
         except Exception as exc:  # noqa: BLE001 — 检索失败要给明确可重试码,不逃逸成 UNKNOWN_ERROR
             return _error(f"历史检索失败: {exc}", "可原样重试一次", "TOOL_EXECUTION_FAILED")
         return ToolHandlerOutcome("session_search", True, json.dumps(payload, ensure_ascii=False))
 
 
-# 函数用途: 按参数推断并执行三模式(scroll 优先 > discovery > browse)。
-def _dispatch(store: LocalStore, params: dict[str, object]) -> dict[str, Any]:
+# LLM: 形态只由参数推断：message_id 读原文 > around_id 翻看 > current_thread 会话内检索/浏览 > query 检索 > 浏览。
+#   显式锚点压过 current_thread（翻看本就限在锚点所属会话）。current_thread 必须是布尔 true，会话编号只取宿主可信上下文。
+# 函数用途: 按参数推断并执行对应形态。
+def _dispatch(agent: object, store: LocalStore | None, params: dict[str, object]) -> dict[str, Any]:
     source_type = _clean_str(params.get("source_type")) or None
+    message_id = _clean_str(params.get("message_id"))
+    if message_id:
+        return read_conversation_message(agent, message_id, params)
     around_id = _clean_str(params.get("around_id"))
     query = _clean_str(params.get("query"))
+    limit_default = _DEFAULT_DISCOVER_LIMIT if query else _DEFAULT_BROWSE_LIMIT
+    if params.get("current_thread") is True and not around_id:
+        if not query:
+            return browse_current_thread(agent, params, _safe_int(params.get("limit"), _THREAD_BROWSE_DEFAULT, _MAX_LIMIT))
+        search = ThreadSearch("", source_type or "conversation_message", _safe_int(params.get("limit"), limit_default, _MAX_LIMIT))
+        return _discover_thread(agent, _required_store(store), query, search)
+    store = _required_store(store)
     # scroll 优先:显式锚点压过 query(模型明确要翻看某条的上下文)。
     if around_id:
         window = _safe_int(params.get("window"), _DEFAULT_WINDOW, _MAX_WINDOW)
         return _scroll(store, around_id, window, source_type)
     if query:
-        limit = _safe_int(params.get("limit"), _DEFAULT_DISCOVER_LIMIT, _MAX_LIMIT)
-        return _discover(store, query, limit, source_type)
-    return _browse(store, _safe_int(params.get("limit"), _DEFAULT_BROWSE_LIMIT, _MAX_LIMIT), source_type)
+        return _discover(store, query, _safe_int(params.get("limit"), limit_default, _MAX_LIMIT), source_type)
+    return _browse(store, _safe_int(params.get("limit"), limit_default, _MAX_LIMIT), source_type)
+
+
+# LLM: 只有检索/翻看/浏览需要派生索引；读原文（message_id、current_thread 浏览）不经过这里。
+# 函数用途: 需要本地索引的形态在索引不可用时明确拒绝。
+def _required_store(store: LocalStore | None) -> LocalStore:
+    if store is None:
+        raise SessionHistoryRefusal("TOOL_UNAVAILABLE", "本地历史存储不可用", "当前运行环境未配置 local_store；读原文可改用 message_id。")
+    return store
+
+
+# LLM: 会话条件只取宿主可信上下文（覆盖 search 里的空会话编号），与索引 metadata 的结构化会话编号比对；
+#   search 带来源类型（默认只查会话消息记录）与条数。
+# 函数用途: 只在当前会话内全文检索，结果带 message_id 供分段读回原文。
+def _discover_thread(agent: object, store: LocalStore, query: str, search: ThreadSearch) -> dict[str, Any]:
+    thread_id, source = trusted_thread(agent)
+    require_current_thread(thread_id, source)
+    hits = search_records_in_thread(store, query, ThreadSearch(thread_id, search.source_type, search.limit))
+    results = [_shape_hit(hit, snippet_for=query) for hit in hits]
+    return {
+        "mode": "thread_discover", "query": query, "thread_id": thread_id, "results": results, "count": len(results),
+        "scope_resolution": {"thread_source": source, "current_thread_id": thread_id},
+        "hint": ("用结果 scope 里的 message_id 调 session_search(message_id=...) 分段读取原文全文。"
+                 if results else "本会话没有命中；可换关键词，或 current_thread=true 不带 query 按页浏览。"),
+    }
 
 
 # 函数用途: 统一构造 session_search 的失败返回(带明确 error_code)。
@@ -210,6 +276,7 @@ def _scroll(store: LocalStore, around_id: str, window: int, source_type: str | N
             +
             "向后翻:用最后一条的 id 当 around_id 再调;向前翻:用第一条的 id。"
             " before/after 小于 window 说明已到历史的一端。"
+            " content_truncated 的条目可用 scope 里的 message_id 分段读取全文。"
         ),
     }
 
@@ -262,7 +329,11 @@ def _shape_record(rec: LocalSearchResult, *, anchor_id: str | None = None, previ
         "scope": _history_scope(rec.metadata),
     }
     body = rec.content or ""
-    entry["preview" if preview else "content"] = body[:_PREVIEW_CHARS] if preview else body
+    entry["preview" if preview else "content"] = body[:_PREVIEW_CHARS] if preview else body[:_SCROLL_CONTENT_CHARS]
+    if not preview and len(body) > _SCROLL_CONTENT_CHARS:
+        # 翻看窗口最多 41 条，每条不设上限会一次灌满上下文；全文改走 message_id 分段读取。
+        entry["content_truncated"] = True
+        entry["chars"] = len(body)
     task_ref = _history_task_ref(rec.metadata, source_type=rec.source_type)
     if task_ref:
         entry["task_ref"] = task_ref

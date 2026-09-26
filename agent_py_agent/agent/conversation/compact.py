@@ -10,6 +10,7 @@ import time
 import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
+from functools import partial
 from typing import TYPE_CHECKING
 
 from ..backends.request_content import compact_source_supported
@@ -27,6 +28,14 @@ from .compact_guard import (
     raise_if_compact_interrupted,
     record_compact_failure,
     record_compact_vision_failure,
+)
+from .compact_landmarks import (
+    LandmarkOptions,
+    LandmarkSource,
+    landmark_options,
+    landmark_source,
+    render_landmarked_summary,
+    semantic_summary_text,
 )
 from .compact_media_digest import (
     MediaDigestContext,
@@ -105,10 +114,6 @@ if TYPE_CHECKING:
 
 _MAX_COMPACT_OPERATION_EVENTS = 32
 _EMPTY_RESPONSE_FALLBACK_MAX_CHARS = 12_000
-_COMPACT_LANDMARK_MAX_CHARS = 6_000
-_COMPACT_LANDMARK_MIN_CHARS = 800
-_COMPACT_LANDMARK_ROW_MAX_CHARS = 1_200
-_COMPACT_LANDMARK_HEADING = "## Exact Conversation Landmarks (non-authoritative)"
 _VERIFICATION_COUNT_KEYS = (
     "succeeded",
     "failed",
@@ -253,6 +258,44 @@ class _CompactSummaryCall:
     media_decision: CompactMediaDecision | None = None
     media_facts: MediaArchiveFacts = field(default_factory=MediaArchiveFacts)
     media_outcome: list[CompactMediaDecision] | None = None
+    # LLM: 调用方提供的列表；_summarize 追加一个可按更小原话备份预算重建同一摘要文本的对象，只供本候选超出恢复目标时收缩备份。
+    landmark_outcome: list[_LandmarkRebuild] | None = None
+
+
+# LLM: 只重算原话备份段，语义摘要、机械回退正文与尾随来源原样保留；不发模型请求、不写任何状态。
+# 类用途: 记住一次摘要的语义部分与原话备份输入，候选超出恢复目标时按更小预算重建全文。
+@dataclass(frozen=True)
+class _LandmarkRebuild:
+    semantic: str
+    source: LandmarkSource
+    trailing: str
+    options: LandmarkOptions
+    used_tokens: int
+
+    # LLM: 只重算备份段；语义摘要与尾随原文逐字不变，负数预算按 0 处理。
+    # 函数用途: 用给定的原话备份 token 上限重建摘要全文（复用第一遍结果，只按下标重读被选中的行）。
+    def render(self, max_tokens: int) -> str:
+        options = replace(self.options, max_tokens=max(0, max_tokens))
+        return render_landmarked_summary(self.semantic, self.source, options).text + self.trailing
+
+    # LLM: 预算为 0 时备份段仍保留标题、省略编号与回查说明；收缩判断必须计入这部分，不能按整段可删到 0 估算。
+    # 函数用途: 返回备份段能缩到的最小 token 数（不读任何原文正文）。
+    def minimum_tokens(self) -> int:
+        return render_landmarked_summary(self.semantic, self.source, replace(self.options, max_tokens=0)).used_tokens
+
+
+# LLM: 摘要模型返回后的收尾输入；rows 是本次全部行（机械回退保留原文用），foreground_rows 是去掉后台审计投递的行。
+# 类用途: 收拢 _finish_summary 需要的上一代摘要、证据、行、工具来源文本、媒体要点与调用参数。
+@dataclass(frozen=True)
+class _SummaryFinish:
+    agent: SimpleAgent
+    previous_summary: str
+    operation_evidence: dict[str, object]
+    rows: Sequence[MessageLogEntry]
+    foreground_rows: Sequence[MessageLogEntry]
+    tool_source_text: str
+    media_digest: str
+    call: _CompactSummaryCall
 
 
 # LLM: Never derive owner or thread authority from prompt text in this projection.
@@ -847,6 +890,7 @@ def _build_compact_candidate(
                      else request.thread.compact_operation_evidence)
     evidence = _merge_compact_operation_evidence(base_evidence, compact_rows)
     media_outcome: list[CompactMediaDecision] = []
+    landmark_outcome: list[_LandmarkRebuild] = []
     summary = _summarize(
         request.agent,
         base_summary,
@@ -869,6 +913,7 @@ def _build_compact_candidate(
             media_decision=media_decision,
             media_facts=media_facts,
             media_outcome=media_outcome,
+            landmark_outcome=landmark_outcome,
             source_progress=lambda covered, total: _emit_compact_progress(
                 request, phase="progress", stage="summarizing",
                 percent=progress_range[0] + int((progress_range[1] - progress_range[0]) * covered / max(1, total)),
@@ -880,33 +925,92 @@ def _build_compact_candidate(
             and final_media.reason == COMPACT_VISION_SUMMARY_FAILED):
         # 看图小请求一次都没成功：写同代次标记；若本次提交失败，同代次重试直接选归档引用，不再发看图请求。
         record_compact_vision_failure(request.store, request.thread, now=request.attempted_at)
+    remeasure = partial(_measure_candidate, request, _CandidateTail(retained_tail, evidence))
+    measured = _fit_landmarks_to_target(_candidate_limits(request), remeasure(summary), landmark_outcome, remeasure)
+    return _CompactCandidate(
+        summary=measured.summary,
+        operation_evidence=evidence,
+        compact_rows=compact_rows,
+        retained_tail=retained_tail,
+        projected_tokens_after=measured.tokens,
+        request_projection=measured.projection,
+        tool_source=request.tool_source,
+        # 摘要阶段的准入或看图小请求结果可能改写 B 候选；checkpoint 记的是实际采用的决定（含 summarized_blocks）。
+        media_decision=final_media,
+        media_facts=media_facts,
+    )
+
+
+# LLM: projection 与 summary 必须来自同一次计量；提交时用这里的 projection 作为下一请求材料，不能换摘要不换材料。
+# 类用途: 一个摘要文本及其完整下一请求的计量（投影材料与 token 数）。
+@dataclass(frozen=True)
+class _MeasuredSummary:
+    summary: str
+    projection: ConversationCompactProjection | None
+    tokens: int
+
+
+# LLM: 同一候选的保留尾部与合并后的操作证据，计量时原样交给投影器，不在计量之间改动。
+# 类用途: 打包候选计量需要的保留尾部与操作证据。
+@dataclass(frozen=True)
+class _CandidateTail:
+    retained_tail: Sequence[MessageLogEntry]
+    evidence: dict[str, object]
+
+
+# LLM: target 是压缩后的健康目标，ceiling 是会被拒的输入上限（与候选循环同一 _compact_request_input_ceiling）。
+# 类用途: 一次候选判定用到的两条 token 线。
+@dataclass(frozen=True)
+class _CandidateLimits:
+    target: int
+    ceiling: int
+
+
+# LLM: 只读 policy 与 agent 配置，与候选循环共用 _compact_request_input_ceiling，不另设阈值。
+# 函数用途: 取本次压缩的健康目标与输入上限，供原话备份收缩判断使用。
+def _candidate_limits(request: _CompactRunRequest) -> _CandidateLimits:
+    return _CandidateLimits(request.policy.recovery_target_tokens, _compact_request_input_ceiling(request.agent, request.policy))
+
+
+# LLM: 与提交前的容量门同一口径：有宿主投影器时用完整下一请求计量，否则用本地会话估算；只读，不写状态。
+# 函数用途: 计量“某个摘要文本 + 保留尾部”组成的下一请求有多大。
+def _measure_candidate(request: _CompactRunRequest, tail: _CandidateTail, summary: str) -> _MeasuredSummary:
     raise_if_compact_interrupted(request.interrupt_check)
+    retained_tail, evidence = tail.retained_tail, tail.evidence
     projection = project_compact_request(request.request_projector, ConversationCompactView(
         request.thread.thread_id, request.thread.compact_generation + 1, summary, retained_tail,
         evidence, dict(_recent_operation_evidence(retained_tail) or {}), request.policy.trigger_tokens, True,
         retained_tool_records=request.tool_source.retained_records if request.tool_source is not None else None,
         retained_ir_history=request.tool_source.retained_ir_history if request.tool_source is not None else None,
     ))
-    projected_after = projection.projected_tokens if projection is not None else _projected_context_tokens(
-        request.agent,
-        summary,
-        retained_tail,
-        request.current_prompt,
-        operation_evidence=evidence,
+    tokens = projection.projected_tokens if projection is not None else _projected_context_tokens(
+        request.agent, summary, retained_tail, request.current_prompt, operation_evidence=evidence,
         recent_operation_evidence=_recent_operation_evidence(retained_tail),
     )
-    return _CompactCandidate(
-        summary=summary,
-        operation_evidence=evidence,
-        compact_rows=compact_rows,
-        retained_tail=retained_tail,
-        projected_tokens_after=projected_after,
-        request_projection=projection,
-        tool_source=request.tool_source,
-        # 摘要阶段的准入或看图小请求结果可能改写 B 候选；checkpoint 记的是实际采用的决定（含 summarized_blocks）。
-        media_decision=final_media,
-        media_facts=media_facts,
-    )
+    return _MeasuredSummary(summary, projection, tokens)
+
+
+# LLM: 原话备份是非权威补充，不能让它改变压缩结果：只在收缩可能改变判定时才重建并重新计量一次——候选会被拒而去掉
+#   备份后能回到上限以下，或候选介于目标与上限之间而去掉备份后能达到目标（免去再换切分、多一次摘要请求）。
+#   按超出目标的量缩小备份（最小只剩编号与回查说明），变小才采用；语义摘要与机械回退正文不动，不发模型请求。
+# 函数用途: 候选超出恢复目标时按需收缩原话备份，避免备份把压缩结果挤出目标或容量线。
+def _fit_landmarks_to_target(
+    limits: _CandidateLimits,
+    measured: _MeasuredSummary,
+    rebuilds: list[_LandmarkRebuild],
+    remeasure: Callable[[str], _MeasuredSummary],
+) -> _MeasuredSummary:
+    rebuild = rebuilds[-1] if rebuilds else None
+    if rebuild is None or rebuild.used_tokens <= 0:
+        return measured
+    target, ceiling = limits.target, limits.ceiling
+    floor = measured.tokens - rebuild.used_tokens + rebuild.minimum_tokens()
+    rejected_but_fixable = measured.tokens >= ceiling and floor < ceiling
+    over_target_but_fixable = target < measured.tokens < ceiling and floor <= target
+    if not (rejected_but_fixable or over_target_but_fixable):
+        return measured
+    smaller = remeasure(rebuild.render(rebuild.used_tokens - (measured.tokens - target)))
+    return smaller if smaller.tokens < measured.tokens else measured
 
 
 # LLM: 原checkpoint与generation CAS仍唯一；显式scope/base写入同一候选，局部提交只推进链head不发布全线程摘要/游标。
@@ -1238,24 +1342,38 @@ def _summarize(
         message_source=message_source,
     )
     summary, _reason = compact_summary_response_outcome(response, reject_truncated=False, request=summary_request)
+    return _finish_summary(_SummaryFinish(
+        agent, previous_summary, operation_evidence, rows, foreground_rows, tool_source_text, media_digest, selected_call,
+    ), summary)
+
+
+# LLM: 模型没给正文时生成机械续接包（保留媒体要点）；再追加原话备份段，并把可按更小预算重建的对象交给调用方。
+#   严格恢复的机械回退仍在备份段之后原样附上一代摘要与本次全部原文，由容量门决定能否提交。
+# 函数用途: 把摘要模型的回复收尾成最终摘要文本（机械回退、原话备份、尾随来源）。
+def _finish_summary(finish: _SummaryFinish, summary: str) -> str:
     mechanical = not summary
     if mechanical:
-        summary = _mechanical_conversation_summary(
-            previous_summary,
-            operation_evidence,
-            foreground_rows,
-        )
-        if media_digest:
+        summary = _mechanical_conversation_summary(finish.previous_summary, finish.operation_evidence, finish.foreground_rows)
+        if finish.media_digest:
             # 机械回退也不能丢掉已经花请求换来的图中要点。
-            summary = f"{summary}\n\n附件内容要点：\n{media_digest}"
-    summary = _summary_with_conversation_landmarks(
-        summary, previous_summary, foreground_rows, max_chars=_compact_landmark_max_chars(agent),
-    )
+            summary = f"{summary}\n\n附件内容要点：\n{finish.media_digest}"
+    trailing = _summary_trailing(finish, mechanical)
+    options, semantic = landmark_options(finish.agent), semantic_summary_text(summary)
+    source = landmark_source(finish.previous_summary, finish.foreground_rows)
+    rendered = render_landmarked_summary(semantic, source, options)
+    if finish.call.landmark_outcome is not None:
+        finish.call.landmark_outcome.append(_LandmarkRebuild(semantic, source, trailing, options, rendered.used_tokens))
+    return rendered.text + trailing
+
+
+# LLM: 与原 _summarize 尾部逐字相同的拼接；只在机械回退时非空，原话备份收缩不得改动这部分。
+# 函数用途: 机械回退时要附在摘要之后的原文：严格恢复附完整旧摘要与本次原文，否则只附工具来源文本；正常摘要为空。
+def _summary_trailing(finish: _SummaryFinish, mechanical: bool) -> str:
     # 完整请求恢复继承旧覆盖权，机械回退必须保留旧摘要及本次全部原文，再由容量门决定能否提交。
-    if mechanical and selected_call.preserve_complete_fallback:
-        original = "\n\n".join([previous_summary, *[f"{row.role}: {row.content}" for row in rows], tool_source_text])
-        return f"{summary}\n\n{original}"
-    return f"{summary}\n\n{tool_source_text}" if mechanical and tool_source_text else summary
+    if mechanical and finish.call.preserve_complete_fallback:
+        rows = [f"{row.role}: {row.content}" for row in finish.rows]
+        return "\n\n" + "\n\n".join([finish.previous_summary, *rows, finish.tool_source_text])
+    return f"\n\n{finish.tool_source_text}" if mechanical and finish.tool_source_text else ""
 
 
 # LLM: 请求前的 B 准入：只有 provider 原生消息重放能承载图块，legacy prompt 一律落 A（reason legacy_prompt）；预算门按
@@ -1368,6 +1486,11 @@ def _conversation_summary_instruction(
             "Use separate sections for the user's primary goal, current work, exact project/file paths,",
             "verified results, unfinished tasks, and the next step. A progress-check request does not",
             "replace the larger task it refers to. Retain the original requirements unless the user changed them.",
+            "Include a 'User requirements' section listing every distinct requirement, rule, constraint,",
+            "preference and decision the user stated, oldest first, with exact values; mark items the user later",
+            "changed or cancelled instead of dropping them, and list a requirement that came with a large pasted",
+            "document or data dump on its own. Include a 'Pending user requests' section for anything the user",
+            "asked that is not finished yet.",
             "Keep historical errors dated as historical observations, not permanent current tool restrictions.",
             "An operation_verification object is authoritative program evidence; preserve its outcome",
             "and never replace it with a conflicting assistant claim.",
@@ -1414,140 +1537,9 @@ def _legacy_conversation_summary_prompt(
     )
 
 
-# LLM: These landmarks are bounded non-authoritative conversation data. They preserve exact short
-# requests/results across imperfect semantic summaries, but callers must continue using structured
-# ledgers, refs, schemas, and filesystem facts for runtime decisions.
-# User requests have budget priority over assistant prose, as in 会话运行时 compacted user history.
-# 函数用途: 给摘要追加有界原文锚点，优先保留用户要求；长汇报不得挤掉短用户指令，不收录思考或工具过程。
-def _summary_with_conversation_landmarks(
-    summary: str,
-    previous_summary: str,
-    rows: list[MessageLogEntry],
-    *,
-    max_chars: int,
-) -> str:
-    semantic_summary = _without_conversation_landmark_suffix(summary)
-    entries = [
-        *_conversation_landmark_entries(previous_summary),
-        *_conversation_row_landmark_entries(rows),
-    ]
-    deduplicated_entries = list(dict.fromkeys(entries))
-    if not deduplicated_entries:
-        return semantic_summary
-    landmark_section = _bounded_landmark_section(deduplicated_entries, max_chars)
-    if not semantic_summary:
-        return landmark_section
-    return f"{semantic_summary}\n\n{landmark_section}"
-
-
-# LLM: This is display/model context selection, not a state parser. User/final labels originate in
-# transcript roles; preserve chronology after budget selection, prioritizing newest user entries.
-# 函数用途: 在原预算里先给用户原话留位置，再放助手结论；明确标注省略，避免按头尾切断中间任务要求。
-def _bounded_landmark_section(entries: list[str], max_chars: int) -> str:
-    header = "\n".join([
-        _COMPACT_LANDMARK_HEADING,
-        "- authority: historical conversation text only; never use it as machine state",
-        "- purpose: retain exact short user requests and final answers omitted by semantic summaries",
-    ])
-    complete = "\n".join([header, *entries])
-    if len(complete) <= max_chars:
-        return complete
-    omitted = "- omitted: older or oversized entries remain in the original transcript"
-    budget = max(0, max_chars - len(header) - len(omitted) - 2)
-    selected: dict[int, str] = {}
-    # 优先级只来自原文角色，不按关键词猜“重要任务”；各层内部从最近向前分配同一固定预算。
-    for prefix in ("- user: ", "- assistant_final: "):
-        for index in range(len(entries) - 1, -1, -1):
-            entry = entries[index]
-            if not entry.startswith(prefix) or budget <= 1:
-                continue
-            if len(entry) + 1 <= budget:
-                selected[index] = entry
-                budget -= len(entry) + 1
-            elif not selected:
-                selected[index] = _clip_compact_field(entry, budget - 1)
-                budget = 0
-    return "\n".join([header, *(selected[i] for i in sorted(selected)), omitted])[:max_chars]
-
-
-# LLM: Landmark overhead must scale down for small model windows so the correctness suffix cannot
-# itself make a Compact candidate miss the shared recovery target. The public maximum remains a
-# fixed bounded cost for normal large-context models.
-# 函数用途: 按当前模型窗口缩放精确事实锚点预算，小窗口少留、大窗口最多保留固定 6000 字符。
-def _compact_landmark_max_chars(agent: object) -> int:
-    from ..agent_core.model.context_window import resolve_model_context_window_tokens
-
-    context_window_tokens = resolve_model_context_window_tokens(agent)
-    return min(
-        _COMPACT_LANDMARK_MAX_CHARS,
-        max(_COMPACT_LANDMARK_MIN_CHARS, context_window_tokens // 12),
-    )
-
-
-# LLM: A provider may echo the prior canonical landmark suffix while rewriting the semantic
-# summary. Remove the first canonical suffix before appending the newly merged one exactly once.
-# 函数用途: 去掉摘要中已经存在的精确事实锚点，防止每次 Compact 重复嵌套同一段内容。
-def _without_conversation_landmark_suffix(value: str) -> str:
-    text = str(value or "").strip()
-    marker_at = text.find(_COMPACT_LANDMARK_HEADING)
-    if marker_at < 0:
-        return text
-    return text[:marker_at].rstrip()
-
-
-# LLM: 公开给只需要语义摘要的有界输入（如选模型决策）；只按固定锚点标题切掉原文锚点段，不改写语义部分。
-# 函数用途: 返回会话摘要里的语义部分（去掉 Exact Conversation Landmarks 原文锚点段）。
-def semantic_summary_text(value: str) -> str:
-    return _without_conversation_landmark_suffix(value)
-
-
-# LLM: Only canonical user/final-answer lines from a prior summary may be inherited. Arbitrary
-# bullets in provider prose are not promoted into the exact-landmark projection.
-# 函数用途: 从上一代摘要里取回既有用户请求和最终答复锚点，供下一代去重续接。
-def _conversation_landmark_entries(previous_summary: str) -> list[str]:
-    text = str(previous_summary or "")
-    marker_at = text.find(_COMPACT_LANDMARK_HEADING)
-    if marker_at < 0:
-        return []
-    entries: list[str] = []
-    for line in text[marker_at + len(_COMPACT_LANDMARK_HEADING) :].splitlines():
-        stripped = line.strip()
-        if stripped.startswith(("- user: ", "- assistant_final: ")):
-            entries.append(stripped)
-    return entries
-
-
-# LLM: Assistant commentary/tool narration has typed assistant_part_id metadata and must not be
-# mistaken for a final answer. Legacy assistant rows without that metadata remain final-compatible.
-# 函数用途: 从本次被压缩的原始消息中提取用户原话和助手最终答复，排除 commentary 等过程输出。
-def _conversation_row_landmark_entries(
-    rows: list[MessageLogEntry],
-) -> list[str]:
-    entries: list[str] = []
-    for row in rows:
-        if row.role not in {"user", "assistant"}:
-            continue
-        metadata = row.metadata if isinstance(row.metadata, dict) else {}
-        assistant_part_id = str(metadata.get("assistant_part_id") or "").strip()
-        if row.role == "assistant" and assistant_part_id not in {"", "final"}:
-            continue
-        content = (
-            project_user_reply(row.content).content
-            if row.role == "assistant"
-            else str(row.content or "").strip()
-        )
-        if not content:
-            continue
-        label = "assistant_final" if row.role == "assistant" else "user"
-        encoded = json.dumps(content, ensure_ascii=False)
-        entries.append(
-            f"- {label}: {_clip_compact_field(encoded, _COMPACT_LANDMARK_ROW_MAX_CHARS)}"
-        )
-    return entries
-
-
-# LLM: This empty-response fallback reads only the prior summary, sanitized transcript projection,
-# and structured operation evidence already selected for this Compact candidate. It cannot decide
+# LLM: This empty-response fallback reads only the prior summary's semantic part (its landmark section is
+# carried by _finish_summary), sanitized transcript projection, and structured operation evidence already
+# selected for this Compact candidate. It cannot decide
 # task completion or replace the separate authoritative operation-evidence field.
 # 函数用途: 摘要模型正常结束却没输出正文时，生成有界的会话续接包，避免空回复把长期会话打断。
 def _mechanical_conversation_summary(
@@ -1561,7 +1553,8 @@ def _mechanical_conversation_summary(
         "- reason: compact provider completed without summary text",
         "- authority: non-authoritative conversation continuation; structured operation evidence and raw transcript remain authoritative",
     ]
-    prior = " ".join(str(previous_summary or "").split())
+    # 上一代的原话备份段由收尾统一继承；这里只放语义部分，否则备份标题落进本段，收尾剥离旧备份时会把后面的原文一起切掉。
+    prior = " ".join(semantic_summary_text(previous_summary).split())
     if prior:
         lines.append(f"- previous_summary: {_clip_compact_field(prior, 3_000)}")
     evidence = json.dumps(
@@ -1774,5 +1767,4 @@ __all__ = [
     "inspect_conversation_context",
     "prepare_conversation_context",
     "render_conversation_context_usage",
-    "semantic_summary_text",
 ]

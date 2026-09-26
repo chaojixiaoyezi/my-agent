@@ -215,6 +215,17 @@ input_media_token_reserve: 1600
 # 一次装不完就分多次；超过次数的图块本次按归档引用，checkpoint 记 media_policy_reason=vision_digest_partial。
 # 最小 1；只在 compact_media_policy=auto 且视觉能力事实为支持时使用。自动阈值压缩与手动 /compact 走同一条路。
 compact_vision_digest_max_requests: 4
+# 压缩摘要末尾的“原话备份”（Exact Conversation Landmarks）最多占多少 token：
+# - 用户原话优先、最新优先，放不下的那条保留开头和结尾、截掉中间并写明原长度，每条都带消息编号；
+# - 实际上限取本值与模型窗口 10% 中较小者（最少 500），窗口越大能留的原话越多；
+# - 放不下的用户消息编号列在备份段末尾，模型可用 session_search 按编号读回全文；
+# - 候选超出压缩恢复目标时会自动缩小备份，不会因为备份让压缩失败；
+# - 0 表示不附原话，只保留被省略消息的编号与回查说明。
+compact_landmark_max_tokens: 20000
+# 压缩摘要末尾是否附“原文回查说明”：被压缩的原话仍完整保存在会话记录里，模型可用
+# session_search(message_id=..., offset=...) 分段读回，或 current_thread=true 在本会话内检索/浏览。
+# 只在本 agent 注册了 session_search 时附上；关闭后只是不提示，session_search 本身照常可用。
+compact_recall_hint_enabled: true
 
 # Memory / compact / artifact 默认预算：
 # - 这些值只控制“默认读取多少、预览多少、扫描多少”，不是数据保留上限。

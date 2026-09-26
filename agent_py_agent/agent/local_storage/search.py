@@ -1,6 +1,6 @@
 
-# LLM: 搜索只读 owner LocalStore 派生索引；有结构化会话归属的 around 查询不能混入其它会话。
-# 模块用途: 统一全文检索、最近列表和会话内时间邻居查询，不从记录正文推断身份。
+# LLM: 搜索只读 owner LocalStore 派生索引；有结构化会话归属的 around 查询与 search_records_in_thread 不能混入其它会话。
+# 模块用途: 统一全文检索、会话内全文检索、最近列表和会话内时间邻居查询，不从记录正文推断身份。
 from __future__ import annotations
 
 import re
@@ -206,7 +206,7 @@ def _records_around(
     thread_id = record_thread_id(anchor.metadata)
     if thread_id:
         prefix = f"{where} AND" if where else "WHERE"
-        where = f"{prefix} COALESCE(NULLIF(json_extract(metadata_json, '$.conversation_runtime.thread_id'), ''), json_extract(metadata_json, '$.thread_id')) = ?"
+        where = f"{prefix} {_thread_expression()} = ?"
         params = [*params, thread_id]
     side = _WindowSide(where=where, params=params, anchor=anchor, window=max(1, window))
     with store._connection() as conn:
@@ -241,6 +241,72 @@ def _fetch_window_side(conn: sqlite3.Connection, side: _WindowSide, *, after: bo
     return conn.execute(
         sql, [*side.params, anchor.updated_at, anchor.updated_at, anchor.id, side.window]
     ).fetchall()
+
+
+# LLM: 会话身份只认宿主写入的结构化字段：Gateway 请求记录在 conversation_runtime.thread_id，会话消息在 thread_id。
+# 函数用途: 生成按会话过滤的 SQL 表达式（可带表名前缀），供会话内检索与时间窗口共用同一口径。
+def _thread_expression(table: str = "") -> str:
+    column = f"{table}.metadata_json" if table else "metadata_json"
+    return (f"COALESCE(NULLIF(json_extract({column}, '$.conversation_runtime.thread_id'), ''), "
+            f"json_extract({column}, '$.thread_id'))")
+
+
+# LLM: 只携带结构化条件；thread_id 来自宿主可信上下文或记录 metadata，不接受正文推断的会话。
+# 类用途: 会话内检索的过滤条件（会话、可选来源类型、条数），把参数打包以免函数签名过长。
+@dataclass(frozen=True)
+class ThreadSearch:
+    thread_id: str
+    source_type: str | None = None
+    limit: int = 5
+
+
+# LLM: 会话条件取宿主写入的 metadata（与 records_around 同一表达式）并在 SQL 里先于 LIMIT 生效，
+#   其它会话的命中不能占掉配额；会话编号为空时返回空，不退化成全库检索。FTS 失败或无命中时按预览 LIKE 兜底。只读。
+# 函数用途: 只在一个结构化会话的记录里做全文检索，供 session_search 的 current_thread 检索使用。
+def search_records_in_thread(store: Any, query: str, scope: ThreadSearch) -> list[LocalSearchResult]:
+    clean_query, clean_scope = query.strip(), ThreadSearch(scope.thread_id.strip(), scope.source_type, scope.limit)
+    if clean_scope.limit <= 0 or not clean_query or not clean_scope.thread_id:
+        return []
+    fts_query = store._fts_query(clean_query) if store.fts_available else ""
+    if fts_query:
+        try:
+            hits = _search_thread_fts(store, fts_query, clean_scope)
+        except sqlite3.OperationalError:
+            hits = []
+        if hits:
+            return hits
+    return _search_thread_like(store, clean_query, clean_scope)
+
+
+# LLM: FTS 与会话条件同一条 SQL；排序沿用 search() 的 bm25 再按更新时间。只读。
+# 函数用途: 用全文索引在指定会话内检索记录。
+def _search_thread_fts(store: Any, fts_query: str, scope: ThreadSearch) -> list[LocalSearchResult]:
+    clauses, params = _record_fts_filters(fts_query, scope.source_type, None)
+    clauses.append(f"{_thread_expression('records')} = ?")
+    sql = f"""
+        SELECT records.*, bm25(records_fts) AS rank
+        FROM records_fts
+        JOIN records ON records_fts.id = records.id
+        WHERE {" AND ".join(clauses)}
+        ORDER BY rank, records.updated_at DESC
+        LIMIT ?
+    """
+    with store._connection() as conn:
+        rows = conn.execute(sql, [*params, scope.thread_id, scope.limit]).fetchall()
+    return [store._row_to_result(row, score=float(row["rank"])) for row in rows]
+
+
+# LLM: 兜底只匹配标题、预览和来源编号（与 _search_like 相同口径），会话条件同样在 LIMIT 之前。只读。
+# 函数用途: 全文索引不可用或无命中时，在指定会话内按子串检索记录。
+def _search_thread_like(store: Any, query: str, scope: ThreadSearch) -> list[LocalSearchResult]:
+    clauses, params = _record_like_filters(query, scope.source_type, None)
+    clauses.append(f"{_thread_expression()} = ?")
+    with store._connection() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM records WHERE {' AND '.join(clauses)} ORDER BY updated_at DESC LIMIT ?",
+            [*params, scope.thread_id, scope.limit],
+        ).fetchall()
+    return [store._row_to_result(row, score=0.0) for row in rows]
 
 
 _CJK_RE = re.compile(r"[一-鿿]")

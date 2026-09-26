@@ -405,6 +405,10 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     input_media_token_reserve: int = 1600
     # 随图摘要一次压缩最多发几次"看图"小请求；含图回合按摘要预算打包，超过次数的图块本次按归档引用（checkpoint 记 vision_digest_partial）。最小 1。
     compact_vision_digest_max_requests: int = 4
+    # 压缩摘要末尾“原话备份”（用户原话优先、最新优先，放不下的那条保留头尾）最多占多少 token；实际上限还不超过模型窗口的 10%。0 表示不附原话，只保留被省略消息的编号与回查说明。
+    compact_landmark_max_tokens: int = 20000
+    # 压缩摘要末尾是否告诉模型：被压缩的原话仍在会话记录里，可用 session_search 按 message_id 分段读回（本 agent 注册了 session_search 时才附）。
+    compact_recall_hint_enabled: bool = True
     # 到达触发线后优先把完整输入收敛到该占比；低于真实触发线的有效候选不会因未达目标而被丢弃。
     memory_compact_recovery_target_percent: int = 60
     # 后台 Memory Curator 只读有界经历并输出严格 daily/candidate JSON；它没有工具循环和写人格权限。
