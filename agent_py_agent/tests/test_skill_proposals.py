@@ -419,15 +419,17 @@ def test_proposal_failure_never_affects_runner_result(tmp_path: Path) -> None:
     assert not ctx.home.owner_skill_proposals_dir.exists()
 
 
-def test_runner_result_creates_pending_proposal_when_service_attached(tmp_path: Path) -> None:
+def test_runner_result_auto_confirms_proposal_when_service_attached(tmp_path: Path) -> None:
+    # 用户 2026-09-26 决定自学习不逐条审批：服务接上（自学习开启）时新提案立即以 actor=auto 走原确认链。
     ctx = _runtime(tmp_path)
 
     result, saved, work_log = _run_with(ctx, ctx.service)
     [proposal] = ctx.service.list()
 
-    assert result.ok is True and "skill_proposals=1" in work_log
-    assert (proposal.status, proposal.source.run_ids) == ("pending_confirmation", (saved.id,))
-    assert not (ctx.home.owner_home_dir / "skills" / proposal.target.skill_name).exists()
+    assert result.ok is True and "skill_proposals=1 skill_proposals_committed=1" in work_log
+    assert (proposal.status, proposal.source.run_ids) == ("committed", (saved.id,))
+    assert proposal.receipt["confirmed_by"] == "auto" and proposal.receipt["guard_verdict"] == "safe"
+    assert (ctx.home.owner_home_dir / "skills" / proposal.target.skill_name / "SKILL.md").is_file()
 
 
 def test_runner_result_without_service_records_candidate_only(tmp_path: Path) -> None:

@@ -90,6 +90,8 @@ def ensure_agent_thread_record(
             model_selection_revision=1,
             model_selection_source="inherited",
             model_selection_last_explicit_revision=0,
+            # 子代理档位只在物化新线程时写入一次；已有线程（恢复、重放）保持创建时的档位。
+            reasoning_effort=str(request.get("reasoning_effort") or ""),
             title=str(request.get("title") or agent_run_id).strip()[:240],
             created_at=current,
             updated_at=current,

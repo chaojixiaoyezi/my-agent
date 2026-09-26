@@ -121,7 +121,7 @@ tool-result reducer、archive 和 refs 管理，不用裁剪对话正文代替�
 `agent_thread_id` 和相同的 summary/generation/checkpoint 状态机；它不生成根任务级 compact 包，也不注入
 另一份主 thread。孙代理递归遵守同一规则。
 
-## 摘要请求的工具控制与诊断（2026-09-26，本地实现、安装版待验）
+## 摘要请求的工具控制与诊断（2026-09-26，本地实现、官方M2.7控制已验）
 
 摘要只归纳已有材料，没有业务工具执行权。非分段请求仍保留原system/tools缓存前缀，
 但通过既有`ToolChoice.none("compact_summary_only")`表达禁止工具；分段请求原本工具目录为空，继续保持。
@@ -136,8 +136,9 @@ stop/runtime/turn原因及truncated事实，不记录正文、思考内容、参
 协议参考：[MiniMax Anthropic兼容说明](https://platform.minimax.cn/docs/api-reference/text-anthropic-api)声明支持tool_choice，
 但具体模型端点仍须真实TUI验证。[Anthropic缓存说明](https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-use-with-prompt-caching)
 说明改变tool_choice会使消息层缓存失效，不等同于工具/system前缀失效；不能承诺实际缓存命中率不变。
-本片不改辅助调用的推理档位；当前分支没有后续main的effort接口，集成方须在其基线上补对应组合回归。
+本片不改辅助调用的推理档位；后续main的effort接口正吸收做组合回归，安装版原c6不作为该接口集成证据。
 25个相关测试文件537项通过，生产与容量夹具的独立审阅通过；精确原基线的既有容量失败、测试校准和首轮失败均保留，见TESTS。
+精确安装的c6在原生CAP06同会话再次compact实际生成自然摘要并提交新canonical head，七个业务文件和pins保持；未触发失败诊断分支。
 
 ## Cache economics
 

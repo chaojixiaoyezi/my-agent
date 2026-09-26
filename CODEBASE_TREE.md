@@ -62,6 +62,8 @@
 |-- docs/tasks/TUI_RESOURCE_HANDOFF.md  # 资源性能线的归属、验收、限制和主线整合交接
 `-- docs/design/
     |-- ADMIN_CHANNEL_IDENTITY.md       # IM 管理员身份：管理员密码、私聊精确绑定为 local/main、聊天内 /approve /deny 审批
+    |-- SKILL_AUTO_SUMMARY.md           # 自学习 S3：完成任务后自动总结 Skill，自动闸门代替人工确认、登记表所有权、账本与回滚
+    |-- REASONING_EFFORT.md             # 智能程度：各服务商实测、档位与控制方式、会话/子代理档位来源、/effort 与边界
     |-- MAINTAINABILITY_AND_JEV_REVIEW.md # 可维护性评估、渐进重构建议及 Computer Use/Jev 能力边界
     |-- DECISION_MODEL_INTEGRATION.md    # 可选决策模型的短期限、失败隔离、接入点、缓存与并行实施计划
     |-- DECISION_AUDIT_AND_ADMIN_CONTROLS.md # 决策点开关、超时自调上下限、选模型输入精简、统计行、统一审计与管理员管控
@@ -139,7 +141,8 @@ agent_py_agent/
 |   |   `-- runner_retry_backend.py     # 只供该场景注入的离线失败后端
 |   |-- memory_admin_parser.py          # Memory v2 唯一管理员命令树与中文参数帮助
 |   |-- memory_admin_commands.py        # Candidate/Curator/Retention/Doctor/Migration 共用正式 Service 的 CLI 适配
-|   |-- skill_proposal_commands.py      # `skills proposals list/show/confirm/reject`：自学习 Skill 提案唯一用户确认入口
+|   |-- skill_proposal_commands.py      # `skills proposals list/show/confirm/reject`：子代理经验提案的用户入口；也挂 learned 子树
+|   |-- skill_learning_commands.py      # `skills learned list/show/revert/remove`：自动总结 Skill 的查看、回滚与删除
 |   |-- chat_parts/                     # TUI、gateway client、stream/render worker
 |   |   |-- chat_prompt_queue.py        # 可按 request identity 原子回取且保持 FIFO/task_done 账的聊天任务队列
 |   |   |-- tui_agent_navigation.py     # TUI 精确子代理选择栈、详情游标与父子视图切换状态
@@ -546,6 +549,7 @@ agent_py_agent/
 |   |   |-- model_oauth_schema.py       # 授权配置、凭据目的地、私有状态与绑定校验
 |   |   |-- model_oauth_wire.py         # 设备码、兑换和刷新协议的有界无重定向 HTTP
 |   |   |-- thread_model_selection.py   # canonical 会话模型编号、默认初始化与逐工作片解析
+|   |   |-- reasoning_effort.py         # 会话/子代理智能程度档位：线程现读、全局默认、/effort 写入、子代理继承与请求选项
 |   |   |-- shared_model_catalog.py     # 管理员显式共享引用目录，不复制私有连接凭证
 |   |   |-- model_provider_schema.py    # provider/model v2 校验、v1 显式迁移与单份连接快照解析
 |   |   |-- model_provider_operations.py # 锁内服务商/模型管理，密钥保留与显式清除
@@ -622,7 +626,12 @@ agent_py_agent/
 |   |   |-- decision_experiment_sample.py # 只观察实验的对照条目：基线/候选名单、配置版本与原账结算视图
 |   |   |-- skill_service.py           # bounded builtin/shared/owner/workspace discovery、policy 与缓存
 |   |   |-- skill_snapshot.py          # 不可变稳定引用、正文 hash/guard 校验与子代理收窄
-|   |   |-- skill_proposals.py         # 自学习 S1：子代理 lesson 候选→待确认 Skill 提案→用户确认后经 guard 原子安装
+|   |   |-- skill_proposals.py         # 自学习 S1：子代理 lesson 候选→Skill 提案→确认链（用户 CLI 或自学习开启时自动）经 guard 原子安装
+|   |   |-- skill_learning.py          # 自学习 S3 服务：收口入队、后台运行锁/前台让路/每日上限、无工具结构化总结、重试与账本
+|   |   |-- skill_learning_request.py  # S3 触发判据（结构化）与有界脱敏请求材料、本轮用过的 skill_id
+|   |   |-- skill_learning_prompt.py   # S3 提示词、严格 JSON schema 与输出解析（frontmatter 无损规范化）
+|   |   |-- skill_learning_publish.py  # S3 自动闸门与发布：重名/删过的名字/上限/所有权 hash/脱敏/解析/guard，回滚与删除
+|   |   |-- skill_learning_store.py    # S3 唯一落盘权威：请求队列、registry.json、ledger.jsonl、版本全文、removed 归档与锁
 |   |   |-- decision_skill_proposal_review.py # 自学习 S2：`skills proposals list` 的可选审核顺序点，只重排展示并加宿主标签，从不确认/拒绝/写入
 |   |   |-- persona_repository.py      # owner SOUL/USER/AGENTS 受控加载、版本/CAS/回滚唯一入口
 |   |   |-- model_profile_tool.py      # manage_models：主会话代理自助增删改切 owner 模型目录，复用唯一配置服务，回执不含密钥
@@ -646,6 +655,8 @@ agent_py_agent/
 |       |-- typesafe_decision_wire.py  # TypeSafe 题目/结果校验，未知用量保留缺失；jev_wire_bytes.v1 经验输入上界
 |       |-- cache_diagnostics.py       # 出站请求摘要及前缀变化诊断，不存正文或改变缓存布局
 |       |-- sampling.py                # top_p 校验与精确端点 V4 Flash 采样默认，不改变身份或重试
+|       |-- reasoning_control.py       # 智能程度档位与模型思考控制方式（effort/budget/none）的唯一换算点，只对实测供应商给默认
+|       |-- structured_output_mode.py  # 结构化输出方式（native/json_object）的唯一换算点；只对实测不接受 json_schema 的供应商改用 json_object
 |       |-- responses.py               # Responses 协议生成入口，复用正式 HTTP/取消/超时主链
 |       |-- responses_wire.py          # typed SSE/items 与既有工具历史映射、加密 reasoning 回放
 |       |-- anthropic_prompt_cache.py  # Anthropic tools/system/最新 history 断点与追加式 user 投影
@@ -659,7 +670,11 @@ agent_py_agent/
 |       `-- tool_protocol_adapter.py   # native 事件或显式完整 text 帧到 canonical ToolCall 的唯一适配口
 |-- tests/                             # 单元、集成、真实链路回归
 |   |-- fixtures/decision/jev_capability_rounding.json # 合成材料真实Jev响应的脱敏概率舍入replay，不含凭据
-|   |-- test_skill_proposals.py         # 自学习 S1：默认关闭、幂等提案、迁移不碰、确认拒绝矩阵、快照可见、runner 隔离与 CLI 往返
+|   |-- test_skill_proposals.py         # 自学习 S1：默认关闭、幂等提案、迁移不碰、确认拒绝矩阵、快照可见、runner 自动确认与 CLI 往返
+|   |-- test_skill_learning.py          # 自学习 S3：触发判据、请求有界脱敏、create/update/skip、各闸门拒绝码、上限、重试、忙时顺延、回滚删除
+|   |-- test_reasoning_effort.py        # 智能程度：换算与优先级、两种协议真实组包、线程档位、投影一致、子代理继承、/effort、档案字段与配置
+|   |-- test_structured_output_mode.py  # 结构化输出方式：方式解析、DeepSeek 用 json_object 且 schema 进提示、其余仍 json_schema、档案字段、缓存键、TUI 与配置
+|   |-- test_skill_learning_integration.py # 自学习 S3 接线：组合根装配、收口入队、Gateway 策展车道准入、learned CLI、S1 自动确认与配置
 |   |-- test_subagent_lesson_ledger.py  # record_lesson：身份与 Schema、字段/条数/字节上限、幂等、账本复核、结果合并、候选与 S1 提案、暴露面与提示
 |   |-- test_decision_skill_proposal_review.py # 自学习 S2 审核顺序点：资格边界、别名与脱敏、逐题校验、采用前复核、取消传播、零写入
 |   |-- test_decision_skill_proposal_review_integration.py # 自学习 S2 经真实 CLI/设置/决策服务（只替换 HTTP）：输出字节、observe 记账、冷却超时、菜单与默认值
@@ -900,6 +915,7 @@ agent_py_agent/
 |   |-- test_memory_hardening.py       # 来源证据、候选、并发去重、hard delete 与信封安全回归
 |   |-- test_memory_candidate_daily_v2.py # Candidate/Daily v2 身份、状态、顺序、并发与大输出边界
 |   |-- test_memory_curator_v2.py      # Curator 触发、模型配置、权限、失败恢复与整批提交
+|   |-- test_curator_input_budget.py   # Curator 输入预算缩批：按最终提示实测长度截尾、尾部重放不丢、标注前缩批、预算失败不复用旧尝试形状
 |   |-- test_provider_request_scope.py # 同端点前台优先、后台预算传递、取消和不重叠重试
 |   |-- test_memory_promotion_v2.py    # 证据/冲突/Persona/lesson/HOT 晋升边界
 |   |-- test_memory_recall_v2.py       # 正式来源、scope、陈旧索引、owner 隔离与信封安全
@@ -1138,7 +1154,11 @@ docs/
 - `docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md`：固定来源版本与迁移范围、许可和测试证据矩阵。
 
 - `agent_py_agent/agent/capability/skill_proposals.py`：自学习 Skill 提案唯一权威；只收 `subagent_lesson` 且带 task/run 来源的 Candidate，固定模板渲染、O_EXCL 幂等写 `<owner_home>/data/skill_proposals/`；confirm 在 owner 锁内复核版本、草稿 hash、来源 Candidate 与目标不存在，经 frontmatter 解析和 `agent_generated` guard（不 force）后 `os.replace` 安装，失败不写目标。
-- `agent_py_agent/cli/skill_proposal_commands.py`：`my-agent skills proposals list/show/confirm/reject` 的注册与输出，只委托上面的服务；确认必须带 `--expected-revision`，不提供模型工具。
+- `agent_py_agent/cli/skill_proposal_commands.py`：`my-agent skills proposals list/show/confirm/reject` 的注册与输出，只委托上面的服务；确认必须带 `--expected-revision`，不提供模型工具。自学习开启时 runner 结果链以 `actor=auto` 调同一 confirm。
+- `agent_py_agent/agent/capability/skill_learning.py` 与 `skill_learning_{request,prompt,publish,store}.py`：自学习 S3 自动总结 Skill（设计见 `docs/design/SKILL_AUTO_SUMMARY.md`）。收口按结构化判据写有界请求；Gateway 记忆整理车道逐条处理：运行锁、前台让路、每日上限、复用 Curator backend 的无工具结构化调用；自动闸门代替人工确认后发布到 `<owner_home>/skills/learned/<name>/`，登记表 `registry.json` 是自学归属唯一权威，账本只记结构化字段。
+- `agent_py_agent/cli/skill_learning_commands.py`：`my-agent skills learned list/show/revert/remove`，只读写 `SkillLearningStore` 与 `skills/learned/`，不构造 Agent、不调模型。
+- `agent_py_agent/tests/test_skill_learning.py`、`test_skill_learning_integration.py`：S3 的离线合同（假 backend）与接线（组合根、收口 helper、Gateway 车道、CLI、S1 自动确认、配置）。
+- `docs/design/SKILL_AUTO_SUMMARY.md`：自学习 S3 的唯一模块设计：用户决定、上游参考取舍、触发、材料、后台执行、输出合同、自动闸门、存储所有权、用户入口与边界。
 - `agent_py_agent/agent/subagents/lesson_ledger.py`：子代理经验账本 `lessons.jsonl` 的唯一合同。字段规范成单行且有界，id 取内容 hash（同 run 相同参数只记一次），每 run 最多 5 条、16 KiB，超限返回结构化结论；读回逐行复核版本、字段、id 与 run 归属。工具写入与 runner 结果收口共用，宿主从不解析模型回复正文。
 - `agent_py_agent/agent/agent_core/runtime/record_lesson_tool.py`：子代理专属 `record_lesson` 工具。run/attempt 取 runner 上下文、task 取任务记录，Schema 只含四个经验字段；注册表默认隐藏，随子代理 allowed_tools 下发，主线程调用返回 `TOOL_UNAVAILABLE`；所有拒绝都声明 `effect_outcome=not_started`。
 - `agent_py_agent/tests/test_subagent_lesson_ledger.py`：record_lesson 链路的离线合同（只用假件）：身份与 Schema、字段/条数/字节上限、幂等、坏账本与符号链接、读回复核、合并进 output.json、`subagent_lesson` 候选与 S1 提案（含重放不重复）、候选失败不阻断交付、暴露面与 runner 提示。
@@ -1419,6 +1439,8 @@ docs/
 - `agent/backends/cache_diagnostics.py`：真实 HTTP 请求的无正文摘要，不修改模型请求或记忆。
 - `agent/conversation/process_events.py`：原进程记录到原 wake 队列的耐久终态通知；不新增任务状态机。
 - `agent/backends/sampling.py`：YAML/profile/backend 共用 top_p 数值校验；已知 Flash 方言默认与任意端点显式覆盖分开。
+- `agent/backends/reasoning_control.py` 与 `agent/settings/reasoning_effort.py`：智能程度的换算与解析。档位是会话线程属性（`/effort`、子代理 `effort`、全局 `model_reasoning_effort`），模型档案 `reasoning_control` 决定怎样发送；真实请求与两处自动选模投影共用 `request_reasoning_options`。设计见 `docs/design/REASONING_EFFORT.md`，测试 `test_reasoning_effort.py`。
+- `agent/backends/structured_output_mode.py`：结构化输出方式的换算。模型档案 `structured_output`（auto/native/json_object）经 `model_structured_output` 进入后端，`openai_chat.generate_structured` 按它发 `json_schema` 或 JSON 对象模式（schema 写进提示）；记忆整理和自动总结 Skill 都走这里。测试 `test_structured_output_mode.py`。
 - `agent_py_agent/tests/test_gateway_main_activity.py`：前后台数值/阶段共享、任务晋升、跨会话拒绝、迟到关闭和显示故障验证。
 - `agent_py_agent/tests/test_shell_stdin.py`：使用独立宿主管道验证批处理 EOF、输入不串和显式管道，不读取真实用户输入。
 - `agent_py_agent/tests/test_shell_foreground_cleanup.py`：验证前台普通退出先清理后代再回收组长，身份缺失／复用拒绝发信号，原命令结果与清理 UNKNOWN 分开。
@@ -1476,7 +1498,9 @@ docs/
 |   `-- work/                           # 状态、日志、代理交接与大输出归档
 |-- agents/<run_id>/                    # 子代理 refs-only projection
 |-- data/artifact_backups/v1/           # 前台 shell 改动 ready 产物时保留的 owner 私有哈希恢复 blob
-|-- data/skill_proposals/<id>.json      # 自学习 Skill 提案（开关开启后按需创建）；用户 confirm 后才装到 skills/lesson-*；不用 learning_drafts 目录名
+|-- data/skill_proposals/<id>.json      # 子代理经验 Skill 提案（开关开启后按需创建）；自学习开启时自动走确认链装到 skills/lesson-*；不用 learning_drafts 目录名
+|-- data/skill_learning/                # 自动总结 Skill：requests/、registry.json、ledger.jsonl、versions/、removed/（开关开启后按需创建）
+|-- skills/learned/<name>/SKILL.md      # 自动总结发布的 Skill；归属只由 data/skill_learning/registry.json 认定
 |-- workspace/runtime/workspaces/<scope>/# LocalStore、gateway、conversation 等 workspace 账本
 `-- global_index/                       # 可重建轻量索引
 

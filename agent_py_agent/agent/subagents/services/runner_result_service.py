@@ -49,17 +49,19 @@ def _runner_append_debrief(task, parsed):
 
 
 # LLM: 自学习提案是结果交付后的可选旁支：manager.skill_proposals 仅在 enable_self_learning 开启时由组合根注入；
-#   这里只把本批已落盘的 Candidate 交给它，任何异常只变成工作日志片段，绝不影响结果保存、提交或父级通知。
-# 函数用途: 尝试为本次 lesson 候选生成待确认 Skill 提案，返回追加到工作日志的简短结果。
+#   这里只把本批已落盘的 Candidate 交给它，新提案立即以 actor=auto 走原确认链（用户 2026-09-26 决定不逐条审批），
+#   确认被闸门拒绝的提案保持待确认；任何异常只变成工作日志片段，绝不影响结果保存、提交或父级通知。
+# 函数用途: 为本次 lesson 候选生成并自动确认 Skill 提案，返回追加到工作日志的简短结果。
 def _skill_proposal_note(manager, memory_candidates: list) -> str:
     service = getattr(manager, "skill_proposals", None)
     if service is None or not memory_candidates:
         return ""
     try:
         created = service.propose_from_candidates(memory_candidates)
+        committed = [service.confirm(item.proposal_id, item.revision, actor="auto") for item in created]
     except Exception as exc:  # noqa: BLE001 - 可选提案失败不得影响子代理结果交付。
         return f" skill_proposals_error={type(exc).__name__}"
-    return f" skill_proposals={len(created)}"
+    return f" skill_proposals={len(created)} skill_proposals_committed={sum(1 for item in committed if item.ok)}"
 
 
 # LLM: lessons 为合并后的最终列表；lesson_ledger 默认 absent，保持旧调用方按位置构造不变。

@@ -518,13 +518,14 @@ def test_self_learning_on_proposes_once_per_lesson_and_replay_adds_nothing(tmp_p
     candidates = ctx.candidates.list()
 
     assert first.ok and replay.ok
-    assert len(proposals) == 2 and {item.status for item in proposals} == {"pending_confirmation"}
+    assert len(proposals) == 2 and {item.status for item in proposals} == {"committed"}
     assert {item.source.run_ids for item in proposals} == {(ctx.task.id,)}
     assert any(LESSON_A["when_to_use"] in item.draft.when_to_use for item in proposals)
     assert sorted(ctx.home.owner_skill_proposals_dir.glob("*.json")) == files
     assert len(candidates) == 2 and {item.occurrence_count for item in candidates} == {1}
     log = _work_log(ctx)
-    assert "skill_proposals=2" in log and "skill_proposals=0" in log
+    assert "skill_proposals=2 skill_proposals_committed=2" in log
+    assert "skill_proposals=0 skill_proposals_committed=0" in log
 
 
 def test_self_learning_off_records_candidates_without_proposals(tmp_path: Path) -> None:

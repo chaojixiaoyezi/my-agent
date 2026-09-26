@@ -199,6 +199,7 @@ def parse_conversation_command(
             usage="用法：/compact [可选的摘要要求]",
         )
     if name == "effort":
+        # 档位取值与 backends/reasoning_control.REASONING_LEVELS 一致；default 清除本会话设置。
         value = str(trailing or "").strip().lower()
         if value in {"current", "status"}:
             value = ""
@@ -206,8 +207,8 @@ def parse_conversation_command(
             "effort",
             value=value,
             operation="set" if value and value != "help" else value or "view",
-            valid=not value or value in {"low", "medium", "high", "max", "auto", "help"},
-            usage="用法：/effort [low|medium|high|max|auto]",
+            valid=not value or value in {"auto", "off", "low", "medium", "high", "max", "default", "help"},
+            usage="用法：/effort [auto|off|low|medium|high|max|default]",
         )
     if name == "stop":
         return _argumentless_command("stop", trailing, "/stop")

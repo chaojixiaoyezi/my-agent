@@ -45,11 +45,11 @@ A 样包独立修订为0.1.1，补齐镜头时长及原始输入字节摘要要�
 两级孙代理同代读取和新客户端续原Goal身份有独立证据；质量缺项与未触发方法续用仍保留。
 12个保留例只有首轮：9领域例4例get，稳定自然采用未通过。实际包名卡展示和动态推荐属于软召回，
 现有决策include只选择展示，不自动读入口；零包读取答复在现合同中允许，不应误判成宿主丢pin。
-后续“结构化选定后有界读入口／主工具循环内选择”仍为待评审方向，必须先协调决策接口、预算和开关，
+后续“原首主请求前一次结构化选择→宿主有界读入口”已与协作方对齐，待实现；默认关闭，原TaskLink可选typed标记防止恢复重复，
 不能用任务关键词硬编码、全量私有Skill展开、重复必调或保留集调提示来替代设计。
 
 Compact补充片已获协作方归属确认，本地537项及独立审阅通过：原缓存前缀及工具schema保留，摘要请求沿既有ToolChoice.none禁止工具，
-失败记录仅用结构化响应形状和原因，不写正文或参数；安装版尚未实测该修复，旧REOPEN02机械回退原因保持未知。
+失败记录仅用结构化响应形状和原因，不写正文或参数；候选6实际同会话再次Compact已生成自然摘要，旧REOPEN02机械回退原因保持未知。
 通用文件格式检查若后续做，只考虑复用原解析器的可选warning；当前未实施，不增加某个索引文件的专项合同。
 
 
@@ -61,6 +61,33 @@ Compact补充片已获协作方归属确认，本地537项及独立审阅通过�
 兼容后果：`66a598cf3` 写出的 v2 行按 legacy 读取。合并版部署前做过运行中压缩的旧调用会重新进入模型上下文，只多占上下文，不丢失、不误隐藏。
 
 回滚边界：旧版运行时读不了 v3，回滚必须把运行时和数据成对核对并保留新账。详见[依赖拆分](docs/design/TOOL_LOOP_DEPENDENCY_SPLIT.md#两线合并后的来源身份与模型轮结果决策分支吸收-main2026-09-23)。
+
+- **智能程度（推理强度）：主会话 `/effort` 与子代理 `effort`**（2026-09-26，已合入 main `7a15c9c91` 并双机部署 `step12k-e5b2f8bc`，隔离真实验收通过；详见[智能程度设计](docs/design/REASONING_EFFORT.md)）：
+  - **用户要求**：能设置模型的智能程度，包括给子代理单独设置，并实测。原 `/effort` 只是空壳，请求体从不发推理参数。
+  - **实测结论**：DeepSeek 官方 OpenAI 兼容接口的 `reasoning_effort` 与思考开关都生效（low 推理 token 约减半）；其 Anthropic 兼容接口只有开关生效；OpenCode 中转与 MiniMax M2.7 都不生效；MiniMax M3 默认不思考、显式开启才思考。“被接受”不等于“生效”。
+  - **做法**：档位 auto/off/low/medium/high/max 是会话线程属性（`/effort` 写主会话，`create_subagents.effort` 写子线程，省略继承父级实际档位，全局默认 `model_reasoning_effort`）；模型档案新增 `reasoning_control`（auto/effort/budget/none），auto 只对实测确认的 DeepSeek 官方接口给默认，其余 none，可在 `/model` 显式声明。真实请求与两处自动选模投影共用 `request_reasoning_options`，强制工具选择的关思考优先。
+  - **边界**：不按模型名或正文判断能力；不支持的模型如实回执“不改变请求”；TUI 底栏暂不显示档位；Responses 协议暂不换算。
+  - **真实验收**：DeepSeek 两种接口、声明为 `budget` 的 MiniMax M3、MiniMax M2.7，以及一次创建 low/max/继承三个子代理，全部符合预期（详见 TESTS.md 顶部）。生产默认模型是 OpenCode 中转，按实测不支持调节，`/effort` 会如实提示；要生效需切到 DeepSeek 官方接口，或给支持的模型显式声明控制方式。
+- **Shell 读边界与回执表述不一致（macOS）**（2026-09-26 登记，未实施；Codex 能力内化验收 TUI-CAP06 中前台 `run_command` 发现，证据留在其私有线；归宿主执行/沙箱这条线）：
+  - **事实**：owner 隔离模式下，macOS Seatbelt 规则（`agent_py_agent/agent/attempt/sandbox.py` 的 `_macos_profile`）是 `allow default` 加 `deny file-write*` 再放开写根，只限制写、不限制读，命令能读到 owner 工作区外的宿主路径；`read_file` 的 owner 读墙更严。Shell 回执（`agent_py_agent/agent/tooling/shell.py` 的 `[sandbox_scope]` 文本与 `sandbox.external_host_paths_hidden`）在 owner 模式下一律写 `external_host_paths_hidden=true`，这只在 Linux 挂载隔离下成立，macOS 上与实际不符。
+  - **影响**：模型会以为宿主路径“看不到”，实际能读到；两条读路径的边界也不一致。不涉及越权写入。
+  - **待定方向**：先让回执按平台如实给出结构化事实（macOS 不再声称隐藏）；读边界是否收紧到与 `read_file` 一致要单独评估（会影响依赖读取宿主工具链的命令）。不为此改能力包的读写路径。
+- **记忆 Curator 生产持续失败：输入预算与结构化输出**（2026-09-26 登记；输入预算与失败诊断已修复，main `e47f60d0b`、`22b052fdb`，双机部署 `step12m-cdda962b`，生产已恢复；结构化输出方式已修复，见事实 2）：
+  - **事实 1：输入预算（已修复）**。生产 owner 的 Curator 运行记录里，9/25 的 180 次和 9/26（UTC）至今的 51 次全部是 `CURATOR_INPUT_BUDGET_EXCEEDED`，触发原因都是 `session_close`，`cursor_before` 始终同一个、每次处理 0 条；最后一次成功在 2026-09-24T15:28Z，此前成功批次的提示已贴着 40000 上限（39399、39653）。测试 owner `tui-matrix/p1-r141` 同样卡住（9/25 失败 198 次）。根因已用测试复现：收集阶段按条目估算，只给模板留固定 7000 字符（模板实测约 4981）；消息收满预算后，审计仍按保底至少收一条（`curator_inputs.py` 的 `remaining_chars = max(1_000, …)`，且第一条不受上限约束，带 1000 字预览的一条约 1500 字），再加上身份清单里的消息和审计编号，最终提示就超过预算。提取前检查（`curator_backend.py`）直接报错、不缩批，游标不前进，下一轮重建同一批。只有消息时余量够装 80 个编号，所以要有审计事件才触发。
+  - **修复**：`fit_batch_to_input_budget` 在可选决策标注之前按最终提示实测长度截尾（先消息后审计，各至少留一条），被截的尾部留在原游标之后、下一轮重放，零丢失，与超时缩批同一游标契约。缩批时运行结果带 `memory_curator_input_fitted:messages=a->b,audit=c->d`；成功运行的 warning 不进运行账（与原超时缩批相同），所以另按尝试形状的日志约定写一行无正文摘要到网关日志。保底后仍超出（预算小于模板）保持原失败码。
+  - **生产验证**：9/24 15:39Z 到 9/26 07:17Z 共 307 次 `CURATOR_INPUT_BUDGET_EXCEEDED`，全部是同一个 `cursor_before`；00:23 PDT 切到 `step12l-5145e6cc` 后第一次运行从同一游标开始，成功处理 44 条消息和 1 条审计，生成 2 个候选和 3 条日记事件，游标前进；00:30 第二次运行又处理 24 条。测试 owner `tui-matrix/p1-r141` 也不再卡在超预算，改为 `CURATOR_MODEL_FAILED`（未配模型）。
+  - **失败诊断残留（已修复）**：提取在预算早退前没有清空本线程上一调用者的尝试形状，`finally` 里 `reset(token)` 恢复的也是上一调用者的形状；生产 9/25 有 41 条本机失败记录带着飞书 owner（该 owner 未配模型，当天 50 次 `CURATOR_MODEL_FAILED`）的 `ModelNotConfiguredError` 形状。现在提取开头先清空。
+  - **事实 2：结构化输出（已修复，分支 `claude/curator-budget`）**。Curator 与自动总结 Skill 的结构化调用原来固定发 `response_format: json_schema`，DeepSeek 官方 OpenAI 兼容接口直接 400（“This response_format type is unavailable now”）。Curator 只用 owner 默认模型（`selected_model_config`），不跟随会话 `/model`，所以只有把默认模型设成 DeepSeek 官方时才受影响。9/24 前半天的 103 次 `CURATOR_SCHEMA_INVALID` 经诊断是模型调用本身抛 `ValueError`（当时中转要求会话编号），已由 `f06d780de` 修复，不是 schema 问题。修复：模型档案新增可选 `structured_output`（auto/native/json_object），与思考控制同一套做法——`backends/structured_output_mode.py` 只对实测确认的 DeepSeek 官方 OpenAI 兼容接口默认 json_object，其余 native（逐字节不变），可在 `/model` 编辑或 `manage_models` 显式声明；json_object 发 JSON 对象模式并把 schema 写进提示，结果仍由调用方严格解析。实测（2026-09-26）：同一档案强制 native 立即 400；auto 解析为 json_object，服务商接受，结果通过 Curator 严格解析，身份清单 3/3 覆盖。
+  - **另见**：飞书 owner 未配模型时 Curator 仍按触发反复失败（不调模型、不耗 token），后续可改为未配置时跳过并给出结构化状态。
+
+- **自学习 S3：完成任务后自动总结 Skill，不要用户逐条审批**（2026-09-26，已合入 main 并双机部署，隔离真实验收通过：真实模型新建并更新了一个 Skill，验收中修了宿主会话绑定和“不记绕过拦截做法”两处；详见[自动总结 Skill 设计](docs/design/SKILL_AUTO_SUMMARY.md)与 TESTS 顶部）：
+  - **用户决定**：要有“完成任务后自动总结 Skill”的能力，且“别让用户审批，这个用户没时间审批”。所以用确定性的自动闸门代替人工确认，`AGENTS.md` 自学习约束同步改写；`enable_self_learning` 仍默认关闭。
+  - **主链**：主代理任务按结构化判据完成（`conversation_task_completed`、非 task_local、非后台回合、`tool_rounds ≥ self_learning_min_tool_rounds`）时，收口写一条有界、脱敏请求到 `<owner_home>/data/skill_learning/requests/`。Gateway 后台记忆整理车道逐条处理：非阻塞运行锁、前台同端点让路、每日上限，复用 Curator 的 backend 做无工具结构化调用，输出 `create/update/skip`，经闸门后发布到 `<owner_home>/skills/learned/<name>/SKILL.md`，下一轮快照可见。
+  - **闸门与所有权**：输出合同、与任何来源的 Skill 重名、删过的名字、数量上限、只更新本轮 `skill_search get` 读过且登记表 hash 与磁盘一致（用户没改过）的自学 Skill、发布前脱敏、frontmatter 往返、`agent_generated` guard。`registry.json` 是自学归属唯一权威，`ledger.jsonl` 只记结构化字段，版本全文可回滚；`my-agent skills learned list/show/revert/remove`，删过的名字不再自动新建。
+  - **S1 调整**：自学习开启时，子代理 lesson 提案立即以 `confirmed_by=auto` 走原确认链安装，复核失败的保持待确认；S2 只对遗留待确认提案生效。
+  - **参考**：Hermes 与 OpenClaw 上游的后台 review、所有权、使用回执与账本回滚做法；不照搬配额式“每次都要学”、不扫描直接写和默认关扫描。
+  - **未做**：支持文件、后台/Goal 回合学习、使用统计、合并与退役。
+  - **已知限制：自然采用**（2026-09-26 真实验收观察，待跟进）：第 4 轮任务与已发布的 `owner:csv-merge-cli` 高度相关，模型却没调 `skill_search` 直接做完；第 5 轮用户提示“先找一下之前的做法”后才读取并触发更新。Codex 用 `/show-prompt` 取证：Skill/包摘要确实进了最终提示词，采用规则也在，属通用 Skill 采用问题，展示与采用规则归 Skill 路由线；自学习侧只观察，不为 learned Skill 加专项提示。先看线上账本里 `used_skill_ids` 命中率，再决定是否需要通用的采用回执或提示调整。
 
 - **决策开关、超时自调、统一审计与管理员管控（用户 6 项要求）**（2026-09-25，已实施：本地分支 `claude/decision-audit-controls`，基于 main `07fa00fb3`，待合并部署）：① `/model` 决策设置每个点改为“开启 + 观察模式”两个勾选，存储值仍是 off/observe/apply；② my-agent 经 `user_config decision_patch` 自调等待时间受 `capability_config` 的 `decision_agent_timeout_min/max_seconds`（默认 1—30 秒，0 不限）约束，越界拒绝不夹取；③ 评估“每条消息都问一次选模型”：observe 下同步等待且约六成超时、输入以摘要锚点段为主，按现状不划算；已只删材料精简（摘要去原文锚点段并限 1500 字、当前消息限 4000 字、截断如实标注、候选公共声明只写一次，合成输入约减 63%），“只在结构性变化时问”需用户拍板，未做；④ 统计行改为“决策 ≈N token · 成功 X · 失败 Y”；⑤ 新增统一只读审计工具 `audit_records`（topic 枚举，首个 decision；本人范围，跨用户需管理员明确许可；只读设置/用量账本/请求记录观察，不 grep 日志或正文）；⑥ 新增管理员专用 `admin_controls`（每次本人确认；各用户 Jev/审计开关与本人跨用户审计许可存目标 owner 的 `tool_policy.json.admin_controls`，失败关闭），Jev 禁用硬拦在唯一调用入口 `invoke_decision_model_call`。新错误码在 `error_taxonomy.py` 末尾独立块。详见[决策开关、超时自调与审计](docs/design/DECISION_AUDIT_AND_ADMIN_CONTROLS.md)。
 
@@ -116,7 +143,7 @@ Compact补充片已获协作方归属确认，本地537项及独立审阅通过�
 - **验证账只认一次返回码能证明的单条命令，并放行开头的 cd 前缀**（2026-09-25，已实施：分支 `claude/verification-command-shapes`，待审）：真实 TUI 里模型最常写 `cd <项目> && python3 -m pytest …`，原分类把它当链式命令整体拒绝，验证账漏记真实测试，交付复核焦点与交付前核对都看不到；单个管道又没被拆段，`pytest | head` 会按 `head` 的返回码记成 passed。现改为：未加引号的 `|`、`|&`、`&` 一律不算证据；只放行开头一个 `cd <可进入的现有目录> &&` 并以其为 cwd；其余链式写法仍拒绝。详见 [verification 进度](docs/modules/verification/02-progress.md)。
 - **TUI 决策菜单的接入点清单改为取 schema 登记**（2026-09-25，已实施：分支 `claude/decision-tui-points`，待审）：菜单原先自带一份接入点清单，漏了 `pre_recall`，界面无法设召回前补充查询，且已有该点覆盖时"恢复继承"列表会抛 KeyError。现在清单直接取 `decision_settings_schema.POINTS`（唯一权威），本地只保留中文显示名，缺显示名时显示原键。今后新增接入点只需在 schema 登记，菜单自动出现；各分支若新增接入点，只需补显示名。
 - **交付复核焦点 `delivery_quality`（第 15 项 P5-C 质量提示首片）**（2026-09-24，已实施：本地分支 `claude/decision-delivery-quality`，待审）：`run_command` 刚产生新验证事件、本轮同 run/task 有 2—12 个验证焦点（每个 project/kind/scope 只留最新一条）且至少一个 failed 或其后有修改时，可选地请 Jev 选一个交付前最值得先复核的焦点，宿主只把该焦点的编号/kind/scope/status/其后修改渲染成一句追加提示（≤512 字符），text/native 共用。外发材料只有脱敏当前请求和焦点别名事实，不含路径、命令或输出；默认 off，observe 只记账不追加，任何非成功、选中本次事件或来源/配置变化都保留原展示；ToolResult、归档、验证账、Goal、Todo 与收口不变，取消照常上抛。接线沿外部材料首片：`_record_tool_call` 的原展示接缝改为 `_optional_result_hints` 依次调用两个按工具名互斥的点。未做真实 Jev/TUI 验收。详见[接入设计](docs/design/DECISION_MODEL_INTEGRATION.md#p5-c-质量提示首片交付复核焦点-delivery_quality)。
-- **自学习 S1：子代理 lesson 生成待用户确认的 Skill 提案**（2026-09-24，已合入 main `e9ead5ae3`；2026-09-25 随 `record_lesson` 做了端到端真实验收）：`enable_self_learning`（默认 false，YAML、AgentConfig 与布尔规范化同步）开启时，组合根给子代理 manager 接上 `capability/skill_proposals.py`；runner 结果记录 lesson Candidate 之后，只把 `subagent_lesson`、同时带 task/run 来源、状态有效且未脱敏的候选按固定模板（不调模型）渲染成提案，O_EXCL 幂等写入 owner 路径解析器登记的 `<owner_home>/data/skill_proposals/<proposal_id>.json`（`proposal_id` 为 sha256(candidate_id + content_hash) 前 24 位；目标 `lesson-<正文 hash 前 12 位>`、`before=absent`；提案写明来源任务/运行、触发原因、拟保存内容和适用场景），生成失败只写工作日志、不影响结果交付。正式 Skill 只能由用户 `my-agent skills proposals confirm <id> --expected-revision N` 写入：owner 锁内复核版本与待确认状态、草稿 hash、来源 Candidate（存在、未脱敏、hash 未变、未被拒绝/替代/过期/阻塞）、目标不存在，再在临时目录经 `parse_skill_file(require_frontmatter=True)`、`scan_skill(source="agent_generated")` 与 `install_decision`（不 force，caution/dangerous 均拒）后 `os.replace` 到 `<owner_home>/skills/<name>/` 并标 committed（revision+1）；任何失败不写目标、提案保持待确认并返回结构化错误码，写回执失败会删掉刚装的目标。目录刻意不叫 `learning_drafts`：Curator 每次持 lease 前的 Memory 迁移会递归迁走并删除该名字的目录。没有任何模型可调用的确认工具；开关只控制自动生成，已有提案仍可在 CLI 查看/确认/拒绝。S2（Jev 对待确认提案的审核排序）见本台账顶部“自学习 S2”条目；两者的端到端真实验收见 `record_lesson` 条目。详见[接入设计](docs/design/DECISION_MODEL_INTEGRATION.md)自学习段与 [TESTS](TESTS.md)。
+- **自学习 S1：子代理 lesson 生成待用户确认的 Skill 提案**（2026-09-24，已合入 main `e9ead5ae3`；2026-09-25 随 `record_lesson` 做了端到端真实验收；2026-09-26 起自学习开启时新提案改为以 `confirmed_by=auto` 自动确认，见顶部“自学习 S3”条目，下文“只能由用户确认”描述的是当时语义）：`enable_self_learning`（默认 false，YAML、AgentConfig 与布尔规范化同步）开启时，组合根给子代理 manager 接上 `capability/skill_proposals.py`；runner 结果记录 lesson Candidate 之后，只把 `subagent_lesson`、同时带 task/run 来源、状态有效且未脱敏的候选按固定模板（不调模型）渲染成提案，O_EXCL 幂等写入 owner 路径解析器登记的 `<owner_home>/data/skill_proposals/<proposal_id>.json`（`proposal_id` 为 sha256(candidate_id + content_hash) 前 24 位；目标 `lesson-<正文 hash 前 12 位>`、`before=absent`；提案写明来源任务/运行、触发原因、拟保存内容和适用场景），生成失败只写工作日志、不影响结果交付。正式 Skill 只能由用户 `my-agent skills proposals confirm <id> --expected-revision N` 写入：owner 锁内复核版本与待确认状态、草稿 hash、来源 Candidate（存在、未脱敏、hash 未变、未被拒绝/替代/过期/阻塞）、目标不存在，再在临时目录经 `parse_skill_file(require_frontmatter=True)`、`scan_skill(source="agent_generated")` 与 `install_decision`（不 force，caution/dangerous 均拒）后 `os.replace` 到 `<owner_home>/skills/<name>/` 并标 committed（revision+1）；任何失败不写目标、提案保持待确认并返回结构化错误码，写回执失败会删掉刚装的目标。目录刻意不叫 `learning_drafts`：Curator 每次持 lease 前的 Memory 迁移会递归迁走并删除该名字的目录。没有任何模型可调用的确认工具；开关只控制自动生成，已有提案仍可在 CLI 查看/确认/拒绝。S2（Jev 对待确认提案的审核排序）见本台账顶部“自学习 S2”条目；两者的端到端真实验收见 `record_lesson` 条目。详见[接入设计](docs/design/DECISION_MODEL_INTEGRATION.md)自学习段与 [TESTS](TESTS.md)。
 - **召回前补充查询与关系提示的真实收益，以及随之发现的四个缺口**（2026-09-25，真实验收已完成：main `ab23a2666` 在测试机隔离目录，见[真实验收](docs/tasks/DECISION_MODEL_REAL_VALIDATION.md#14-p5-a-召回前补充查询语义召回下的真实收益2026-09-25main-ab23a2666)；四个缺口均**未实施**，只记录方向）：
   - P5-A：在语义召回下，3 条已知漏召回样本中 2 条稳定补回（4/4 次），答复从"查不到"变成准确事实。
   - P5-B：关系提示让真实 M2.7 提取把"换车"稳定归为 `long_term_fact replace` 并指向原条目（off 两次都是 `user_profile`）；其余两类无稳定差异。

@@ -478,8 +478,14 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     subagent_memory_retention_policy: str = "parent_review_or_cleanup"
     subagent_memory_delete_after_days: int = 0
     subagent_destroy_summary_required: bool = True
-    # 自学习默认关闭；开启后子代理 lesson 只生成待用户 CLI 确认的 Skill 提案，确认前不写正式 Skill。
+    # 自学习默认关闭；开启后主代理完成的多轮工具任务会在后台自动总结成 owner 的 skills/learned/ Skill（自动闸门代替人工确认），
+    # 子代理 lesson 提案也会立即走原确认链自动安装。
     enable_self_learning: bool = False
+    # 自动总结 Skill 的触发与预算：工具轮数门槛、每 owner 每日模型调用上限（0 不限）、自学 Skill 数量上限（0 不限，只限新建）、单次调用超时秒数。
+    self_learning_min_tool_rounds: int = 6
+    self_learning_daily_limit: int = 20
+    self_learning_max_skills: int = 50
+    self_learning_timeout_seconds: int = 180
     # 主会话代理可用 manage_models 工具直接增删改切 owner 模型目录；关闭后只能用 TUI /model 手动配置。
     enable_model_profile_tool: bool = True
     # 本机管理员主代理可用 restart_gateway 工具安排 Gateway 安全重启（先排空再换进程）；关闭后不注册该工具。
@@ -645,6 +651,12 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     temperature: str = "0.2"
     # top_p 留空不覆盖普通模型；已核对的 DeepSeek V4 Flash 使用供应商采样默认。
     top_p: float | None = None
+    # 智能程度（推理强度）全局默认档位 auto/off/low/medium/high/max；会话 /effort 与子代理 effort 可覆盖。
+    model_reasoning_effort: str = "auto"
+    # 当前模型的思考控制方式 auto/effort/budget/none，通常由 /model 档案带入；auto 只对已核对供应商给默认，其余不发参数。
+    model_reasoning_control: str = "auto"
+    # 当前模型的结构化输出方式 auto/native/json_object，通常由 /model 档案带入；auto 只对已核对供应商改用 json_object。
+    model_structured_output: str = "auto"
     # 三种接口均只发送显式温度；未启用沿用提供方默认，/model 填温度自动启用。
     model_temperature_explicit: bool = False
     anthropic_version: str = "2023-06-01"

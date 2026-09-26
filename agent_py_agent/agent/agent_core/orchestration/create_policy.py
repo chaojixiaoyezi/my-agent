@@ -474,8 +474,8 @@ def _config_bool(agent, key: str, default: bool) -> bool:
     return bool_value(value, default=default)
 
 
-# LLM: 根/递归共用属性装配，宿主工具上限和模型引用覆盖伪造值，决策与命名来源只能由宿主在准备后写入。
-# 函数用途: 保留显式属性并绑定父工具上限和原模型引用；移除伪造建议及线程 pending，无效显式模型在整批创建前报错。
+# LLM: 根/递归共用属性装配，宿主工具上限、模型引用和智能程度档位覆盖伪造值，决策与命名来源只能由宿主在准备后写入。
+# 函数用途: 保留显式属性并绑定父工具上限、原模型引用和档位；移除伪造建议及线程 pending，无效显式模型或档位在整批创建前报错。
 def create_task_attributes(raw_params: dict[str, object], agent=None) -> dict[str, object]:
     attrs = (
         dict(raw_params.get("attributes") or {})
@@ -517,8 +517,10 @@ def create_task_attributes(raw_params: dict[str, object], agent=None) -> dict[st
     _inherit_audit_guarantee(attrs, agent)
     _clamp_service_window_to_audit_deadline(attrs)
     from ...settings.model_profiles import inherit_model_profile
+    from ...settings.reasoning_effort import inherit_reasoning_effort
 
     inherit_model_profile(attrs, agent, model=raw_params.get("model"))
+    inherit_reasoning_effort(attrs, agent, raw_params.get("effort"))
     return attrs
 
 

@@ -1,5 +1,70 @@
 # 测试与发布验收
 
+## 结构化输出方式：DeepSeek 官方改用 JSON 对象（2026-09-26，分支 `claude/curator-budget`，基于 main `337a689ad`）
+
+- **起因**：Curator 与自动总结 Skill 的结构化调用固定发 `json_schema`，DeepSeek 官方 OpenAI 兼容接口直接 400；默认模型设成它时，这两条后台链路会整体失效。
+- **新增** `test_structured_output_mode.py` 17 项（传输全为本地 fake）：
+  - 方式解析：显式声明优先；auto 只对 DeepSeek 官方 OpenAI 兼容接口给 json_object，OpenCode、未知域名、Anthropic 兼容、Responses 都是 native；非 OpenAI Chat 协议上声明 json_object 也不生效。
+  - 真实组包：DeepSeek 上 `response_format` 为 `{"type": "json_object"}`，完整 schema 出现在提示开头、原提示在后；OpenCode 仍是严格 `json_schema` 且提示不变；声明可覆盖已知表；Curator 的 `call_backend_with_timeout` 在 DeepSeek 上同样发 JSON 对象。
+  - 档案与配置：`structured_output` 保存、列出、解析进运行配置（未声明为 auto），auto 不写键；非法值、Anthropic 兼容上的 json_object、决策模型都被拒绝；改声明后缓存的后端会重建；`manage_models` 参数定义接受该字段；TUI 表单预选并保存；YAML 默认与规范化。
+- **变异验证**：13 种（去掉已知表、结构化请求忽略方式、json_object 不写 schema、工厂不传方式、解析不带档案字段、auto 也写键、非 OpenAI 也接受 json_object、决策模型也接受、配置不规范化、缓存键漏字段、TUI 不保存、工具 schema 漏字段、非 OpenAI 协议也用声明）全部使测试失败。
+- **回归**：原 `test_structured_output.py`（`common/structured_output` 的 6 项，本轮一度被误覆盖，已从 HEAD 恢复）通过；与结构化输出、后端组包、模型档案、TUI、配置、Curator、自动总结 Skill 相关的 65 个测试文件 1639 passed、4 xfailed（原有标记）。
+- **真实验证**（工作区新代码 + 生产模型目录，只在进程内读取，不打印密钥与模型输出）：DeepSeek 官方 OpenAI 兼容档案强制 native 立即 `ProviderRequestRejectedError`（HTTP 400）；auto 解析为 json_object，服务商接受，8.9 s 返回，结果通过 Curator 严格解析，身份清单 3/3 覆盖，生成 2 个候选、1 条日记事件。
+
+## 记忆 Curator 输入预算缩批（2026-09-26，分支 `claude/curator-budget`，基于 main `37cad88f7`）
+
+- **真机现象**：生产本机 owner 自 2026-09-24T15:39Z 起每次都是 `CURATOR_INPUT_BUDGET_EXCEEDED`（9/25 共 180 次），`cursor_before` 始终同一个、每次处理 0 条、0 次模型调用；测试 owner `tui-matrix/p1-r141` 同样卡住。失败记录里还夹着别的 owner 留下的 `ModelNotConfiguredError` 尝试形状。
+- **新增** `test_curator_input_budget.py` 7 项：
+  - 服务级复现：真实 ConversationStore 80 条消息加 3 条真机形态审计（36 位编号、带预览）。先断言前置条件：按生产收集口径收满后最终提示超预算。修复后第一轮截尾、成功提交前缀，游标只推进到前缀末尾，运行结果带 `memory_curator_input_fitted`；第二轮重放剩余消息和审计，全部恰好处理一次。修复前同一场景连续三轮 `CURATOR_INPUT_BUDGET_EXCEEDED`、0 次模型调用、游标不动，失败诊断与真机记录逐字一致。
+  - 缩批发生在可选决策标注之前：标注钩子只看到已裁进预算的批次。
+  - 单元：先截消息后截审计、保留前缀、各留一条；未超预算原样返回（同一对象、无 warning）；预算小于模板时保底后仍超出，提取前检查保持原失败码。
+  - 诊断：同一线程先成功提取一次，再遇预算失败，`last_model_attempts()` 为空；缩批时写一行只含条数的 WARNING 日志（成功运行的 warning 不进运行账，靠它在网关日志里看到缩批），未缩批时不写。
+- **变异验证**：9 种（不调用缩批、缩批挪到标注之后、开头不清空形状、先截审计、允许截空、从头部截、不返回 warning、缩批不写日志、未超预算也换新对象）全部使测试失败。每次在 `PYTHONDONTWRITEBYTECODE=1` 子进程运行，并按 sha256 还原。
+- **回归**：与 Curator 相关的 22 个测试文件加 `test_architecture_guardrails.py`，共 477 passed。
+- **生产验证**（main `e47f60d0b`，双机 `step12l-5145e6cc`）：本机 owner 在 9/24 15:39Z 到 9/26 07:17Z 共 307 次 `CURATOR_INPUT_BUDGET_EXCEEDED`，全部是同一个 `cursor_before`。00:23 PDT 切换后第一次运行从同一游标开始，成功处理 44 条消息和 1 条审计，生成 2 个候选和 3 条日记事件，游标前进。缩批日志行随 `22b052fdb` 上线（双机 `step12m-cdda962b`）；切换后第二次运行（00:30 PDT）处理 24 条消息和 1 条审计，未触发缩批。测试 owner `tui-matrix/p1-r141` 当天修复前 56 次超预算，修复后变为 `CURATOR_MODEL_FAILED`（该 owner 未配模型，属配置问题）。
+
+## 智能程度（推理强度）：`/effort` 与子代理 `effort`（2026-09-26，已合入 main `7a15c9c91`，基于 `84d9e50ac`）
+
+- **新增** `test_reasoning_effort.py` 30 项（传输全为本地 fake）：
+  - 换算：控制方式解析（显式声明优先；仅 DeepSeek 官方两种接口有默认；MiniMax、OpenCode、Responses、决策接口为 none）；档位与强制工具选择的优先级矩阵；两种协议的字段与思考预算夹紧。
+  - 真实组包：OpenAI 兼容带 `reasoning_effort` 或关思考且不混发；DeepSeek 工具历史缺 `reasoning_content` 被迫关思考时去掉档位；显式声明控制方式的未知域名 `off` 真正写出 `thinking: disabled`，未声明的不写；Anthropic 兼容 `budget` 与关闭。
+  - 档位解析：线程设置优先、清除后回全局默认、线程不可读时回默认；公用选项函数与网关自动选模投影载荷逐字一致，强制工具选择时不带档位。
+  - 子代理：显式档位（大小写不敏感）、伪造宿主属性被覆盖、非法档位整批报错、省略时继承父级线程档位、`effort` 计入去重身份、子线程只在物化时写入一次档位。
+  - `/effort`：真实 SimpleAgent + DeepSeek 档案下查看 / 设置 low / default 清除 / help，回执写明模型与“按推理强度档位发送：低”，不含密钥；echo 后端上如实回执“不支持调节、暂不改变请求”（改写原“永不假装已设置”用例）。
+  - 档案与配置：`reasoning_control` 保存、列出、解析进运行配置（未声明为 auto），auto 不写键，非法值与决策模型拒绝；TUI 表单预选并保存；YAML 默认与规范化。
+- **补充** `test_subagent_first_request_selection.py`：首轮自动换模的逐字比对改用同一 `request_reasoning_options` 计算期望载荷；新增用例在子线程档位 low、候选为 DeepSeek 官方接口时，断言确实采用候选模型且真实首轮请求带 `reasoning_effort: low`。
+- **变异验证**：22 种中 21 种使测试失败（强制工具优先、已知表、none 不发、预算夹紧、DeepSeek 被迫关思考时去档位、声明方式的 off、Anthropic 关思考优先、选项丢档位、网关投影丢档位、子代理继承、线程覆盖、去重身份、子线程初始化、/effort 写入、档案映射、auto 不写键、配置规范化、TUI 表单、非法子代理档位、工厂控制方式、决策模型拒绝）。存活的 1 种是子代理首轮选模投影不带档位：该投影只用于容量估算、不做逐字比对，属于行为等价，代码仍保持与真实请求一致。每次在 `PYTHONDONTWRITEBYTECODE=1` 子进程运行并按 sha256 还原。
+- **结果**：与改动直接相关的 39 个测试文件（含 `test_architecture_guardrails.py`）1074 passed；代码尺寸与 main 逐项对比无新增（`_do_backend_generate` 超软上限、`_payload` 参数两项消失）。
+- **真实验收**（2026-09-26，main `7a15c9c91`，运行时 `step12k-e5b2f8bc`；本机隔离 home + 回环 8432 单 Gateway，默认模型为 DeepSeek 官方 OpenAI 兼容 flash；测试者只发 `/effort`、`/model` 控制命令和每个会话一条任务。题目是“1 到 2000 中既是 3 的倍数、各位数字之和又能被 7 整除的整数个数”，答案 64。token 取用量账本 `purpose_breakdown.main`，排除 Jev 决策调用）：
+  - **DeepSeek 官方 OpenAI 兼容**：`/effort` 回执写明档位、来源和当前模型上的效果。出站请求：low/max 分别带 `reasoning_effort: low|max`，off 带 `thinking: {type: disabled}`，auto 不带任何字段；`/effort default` 清除后回到全局默认。主模型输出 token：low 4 次 1059–2185（均值约 1536），max 4 次 1494–5392（均值约 2847），auto 3 次 1234–5192，off 2 次 272 和 566。同一道题在完整主代理上下文里波动很大，只能看出 max 平均约为 low 的 1.9 倍，off 最低；off 两次中有一次答错。
+  - **DeepSeek 官方 Anthropic 兼容**（auto 解析为 budget）：off 时助手原生消息只有正文、没有思考块，推导写进了正文，答案正确；high 和 auto 都有思考块，答 64。Anthropic 协议没有出站诊断摘要，这里以原生内容块作结构化证据。
+  - **MiniMax M3**（在隔离目录里经产品 `save_model` 声明 `reasoning_control: budget`）：auto 没有思考块，答错；`/effort high` 后出现思考块（26713 字符），答对。输出 token 从 5609 升到 11999，用时从 21 s 升到 99 s。
+  - **MiniMax M2.7**（none）：`/effort high` 回执如实说明“不支持调节……本设置暂不改变请求”，请求照常完成。
+  - **子代理**：主会话先 `/effort medium`，再用一条任务让主代理一次创建三个子代理（effort=low、effort=max、不设）。子线程记录与任务宿主属性分别是 low、max、medium，不设的继承了父级 medium。出站请求逐条对上：low 子代理 4 轮都带 low，max 子代理 7 轮都带 max，继承的子代理 4 轮都带 medium；主会话前台 3 轮加后台续跑 5 轮都带 medium；3 次宿主能力探测不带档位。三个子代理都答 64，输出 token 为 low 1641 < medium 2373 < max 7305。
+  - **附带发现**（与本改动无关，已登记 DESIGN_LEDGER“记忆 Curator 生产持续失败”）：隔离环境的记忆 Curator 给 DeepSeek 官方 OpenAI 兼容接口发 `response_format: json_schema`，被 400 拒绝（“This response_format type is unavailable now”），记为 `CURATOR_MODEL_FAILED`。
+  - 证据在 `~/.my-agent/releases/reasoning-effort-acceptance-20260926/`，只含结构化摘要；隔离 home 与模型目录副本已删除。
+
+## 自学习 S3：完成任务后自动总结 Skill（2026-09-26，分支 `claude/skill-auto-summary`，基于 main `839250728`）
+
+- **新增** `test_skill_learning.py` 34 项（假 backend，不联网）：
+  - 触发与材料：不落盘、task_local、后台回合、工具轮数不足、缺运行身份都不入队；请求有界（输入/回复截 3000 字、轨迹 80 条）、密钥脱敏、只收成功的 `skill_search get` 读过的 skill_id。
+  - 发布：create 后下一次快照出现 `owner:<名字>`（category `learned`、content_sha256 等于登记值），账本、版本全文、每日计数正确，请求删除、暂存目录清空；skip 只记账。
+  - 拒绝：7 种输出不合规（非 JSON、多字段、坏名字、坏标签、正文过短、正文带 frontmatter、未授权的 update）都记 `OUTPUT_INVALID` 且不重试；与用户 Skill 重名、guard 命中 `curl | sh`、数量上限、删过的名字各返回对应码且不写文件；直接调用发布接口时 3 种不能往返的 frontmatter 被 `DRAFT_INVALID` 拦下。
+  - 所有权：update 只针对本轮读过、登记在册、磁盘 hash 未变的自学 Skill，提示词里给出其完整字段；用户手改后同样的 update 被拒、文件不动；未在本轮读过的 update 被拒。
+  - 运行：每日上限顺延；模型超时先重试（attempts=1）、再失败则丢弃记 failed；运行锁被占与前台同端点忙都返回 busy 且零调用；队列 20 条上限、重复入队忽略；损坏请求丢弃、损坏登记表失败关闭且保留请求。
+  - 回滚删除：v2 回滚到 v1 文本逐字一致，v1 再回滚等同删除并进禁用名单；用户改过的拒绝回滚但允许删除。
+  - 宿主会话：模拟要求会话头的服务商（无会话即 `ValueError`），后台调用自绑 owner + 请求键的会话，重试共用同一会话值，调用结束后当前线程不再持有会话。这是真实验收首轮发现的缺陷（真实服务商要求会话头，两次尝试都失败后丢弃），修复前本用例失败。
+- **新增** `test_skill_learning_integration.py` 8 项：组合根只在开关开启时装配、与 Curator 共用 backend、不预建目录；finalize 只在任务完成时入队；收口 helper 吞异常；Gateway 策展车道对“记忆关闭但有学习请求”的 owner 只跑学习、正常 owner 先整理后学习、学习异常隔离、`memory_curator_enabled=false` 时不跑整理；车道开关按两项配置之一；`skills learned list/show/revert/remove` 真实 CLI 往返（含手改后状态 `user_modified`、回滚被拒、删除入账）；S1 lesson 提案经 runner 自动确认（`confirmed_by=auto`）；四个新配置键的 YAML 默认与越界规范化。
+- **真实验收发现并修复的两处**：① 服务商要求会话头，后台调用未绑宿主会话 → `ValueError`（已修，见上）；② 首个真实发布的 Skill 含“删除被拦截就改用 apply_patch 删”这种绕过安全拦截的做法 → 提示词“不要保存”清单加一条，更新时一并删除（软约束，用例断言提示词含该条）。
+- **改写** 2 项旧断言（行为按用户决定改变）：`test_skill_proposals.py::test_runner_result_auto_confirms_proposal_when_service_attached`、`test_subagent_lesson_ledger.py` 的自学习开启用例，从“提案保持待确认”改为“自动确认并安装”。
+- **变异验证**：40 种各自使测试失败——宿主会话绑定、组合根传 owner_id、触发的 task_local/后台/门槛/do_save、材料脱敏、只收成功读取、名字/更新目标/`#`/frontmatter 正文检查、重名/禁用名/上限/所有权 hash、发布脱敏、guard force、frontmatter 往返、回滚所有权、删除入禁用名单、每日上限、队列上限、去重、前台让路、重试次数、本轮读过过滤、可更新 hash、运行锁、车道准入/重算/总开关/整理开关、组合根开关、finalize 调用、S1 自动确认与确认方、CLI 状态、登记表损坏、来源 run。每次在 `PYTHONDONTWRITEBYTECODE=1` 子进程运行并按 sha256 还原，之后删除 `__pycache__` 重跑。
+- **结果**：与改动直接相关的 52 个测试文件（含 `test_architecture_guardrails.py`）1015 passed；每次提交前严格 gate 全过（ruff、doc sync、strict code-size 与 main 持平 2200/1496/704、`git diff --check`、clean-package）。
+- **真实验收**（2026-09-26，本机隔离 home + 回环 8432 单 Gateway，owner 真实选定模型，门槛配置为 4，测试者每轮只发一次 prompt）：
+  - 第 1 轮（CSV 合并，3 轮工具）不到门槛，不入队；第 2 轮（多编码，6 轮）入队，但服务商要求会话头而后台调用没绑宿主会话，两次都 `ValueError` 后丢弃并记 `failed`——据此修复并发 step12h。
+  - 第 3 轮（做成命令行工具，12 轮）入队后由策展车道处理，真实模型发布 `csv-merge-cli` 第 1 版，下一次快照出现 `owner:csv-merge-cli`（category `learned`，hash 与登记表一致）；正文含“删除被拦截就改用 apply_patch 删”，据此加提示词约束并发 step12i。
+  - 第 4 轮（同类任务，3 轮）模型没读 Skill、也不到门槛；第 5 轮（用户说按之前总结的做法来，25 轮）模型先 `skill_search get owner:csv-merge-cli`，后台据此选 update，发布第 2 版（补了 UTF-16、¥、千分位三个新坑），正文不再含绕过拦截的内容。
+  - `skills learned list/show/revert` 在真实数据上运行正常，回滚后文件与 `versions/v1.md` 逐字节一致；首日总结调用 4 次。验收中发现版本目录多出 `.lock` 文件，已改用不取锁的原子写。证据在仓库外 `~/.my-agent/releases/skill-learning-acceptance-20260926/`，隔离 home 与模型目录副本已删除。
+
 ## 决策开关、超时自调、统一审计与管理员管控（2026-09-25，分支 `claude/decision-audit-controls`，基于 main `07fa00fb3`）
 
 - **新增** `test_decision_audit_controls.py` 20 项：注册范围（main 两个工具、user 只有审计、group 都没有，管理员工具审批为 always）；
@@ -3501,4 +3566,13 @@ REOPEN01非法索引使控制未触发；独立REOPEN02实际stop/compact/正常
 零业务发送／零提交断言；后台窗口15500校准为18000，原完整准备一次／摘要一次／真实请求相等保持，
 新增候选低于触发线且加输出预留仍低于窗口的断言。生产容量限制未变，初次410000误校准也留证。
 Ruff、doc sync、strict code-size、diff与clean-package通过，尺寸基线未改，线上CI未作为验收来源。
-安装版真实TUI另记；其它协议fake结果不代替供应商实测，后续main effort接口组合尚未验证。
+其它协议fake结果不代替供应商实测，后续main effort接口组合另列。
+
+### 第六候选真实Compact控制
+
+精确源码`d4dd6c094`、wheel和安装的1,358个Python文件一致；六席正常退出后仅切私有Gateway，三包安装账和记忆关闭策略保持。
+CAP06用原session恢复已完成的REOPEN02，仅原生发送一次`/compact`，没有补业务提示或恢复已完成Goal。
+官方M2.7实际一次HTTP，输入72,821、输出1,123，38.170秒提交原checkpoint，canonical generation 1→2；
+历史估算77,141→14,061，生成连贯目标／文件／进度／约束摘要，原机械回退记录保留。
+原七文件、task完成状态和pins保持，业务工具操作12→12；旧原始消息和checkpoint前缀保留、无资源锁。
+没有额外供应商抓包，也未触发新版失败诊断分支；不据此宣称全部协议实测、缓存命中不变、方法续用或旧失败原因已知。

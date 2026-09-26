@@ -364,30 +364,18 @@ def _http_error_body(exc: urllib.error.HTTPError) -> dict[str, object]:
 
 # LLM: 窗口只选择精确 request；停止委托原 worker 句柄和正式运行绑定，不能读另一线程的当前参数猜身份。
 # 函数用途: 在直接本地聊天里查询或控制当前回合，让单纯中断与任务资源停止保持不同边界。
-# context/compact/recover 与 /model 文字形式依赖 Gateway 的 canonical 会话、运行库和 owner 解析，本地模式直接拒绝并提示改用 Gateway。
+# context/compact/recover/effort 与 /model 文字形式依赖 Gateway 的 canonical 会话、运行库和 owner 解析，本地模式直接拒绝并提示改用 Gateway。
 def _execute_local_control(
     execution: ChatControlExecution,
     command: ConversationControlCommand,
 ) -> ConversationControlResult:
     state = execution.state
     request_id = str(state.request_id or "").strip()
-    if command.kind in {"context", "compact", "recover", "model"}:
+    if command.kind in {"context", "compact", "recover", "model", "effort"}:
         return ConversationControlResult(
             command.kind,
             False,
             f"/{command.kind} 需要使用 canonical Gateway 会话；请用 chat --gateway。",
-        )
-    if command.kind == "effort":
-        viewing = command.operation in {"view", "help"}
-        prefix = (
-            "用法：/effort [low|medium|high|max|auto]\n"
-            if command.operation == "help"
-            else ""
-        )
-        return ConversationControlResult(
-            "effort",
-            viewing,
-            prefix + "当前模型接口由供应商管理推理强度，未声明可调 effort 档位；未改变任何模型参数。",
         )
     if command.kind == "status":
         status = _local_status(execution)

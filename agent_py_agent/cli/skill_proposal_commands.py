@@ -30,6 +30,7 @@ from ..agent.user_space.owner_resolver import (
     owner_identity_from_config,
     resolve_owner_home,
 )
+from .skill_learning_commands import add_learned_skill_subcommands
 
 _STATUS_HELP = "状态：pending_confirmation=待确认，committed=已确认并安装，rejected=已拒绝。"
 _STATUS_LABELS = {"pending_confirmation": "待确认", "committed": "已确认并安装", "rejected": "已拒绝"}
@@ -48,15 +49,17 @@ class _ProposalCommandContext:
     decision_host: object
 
 
-# LLM: 顶层 skills 只挂 proposals 子树；不提供任何绕过用户确认直接写正式 Skill 的命令。
+# LLM: 顶层 skills 挂 proposals（子代理经验提案）与 learned（自动总结的 Skill）两棵子树；
+#   两者都不提供直接编辑或写入正式 Skill 的命令，写入只经各自服务的闸门。
 # 函数用途: 注册 skills 命令树。
 def add_skill_subcommands(sub: argparse._SubParsersAction) -> None:
     parser = sub.add_parser(
         "skills",
-        help="管理自学习生成、等待用户确认的 Skill 提案",
-        description="Skill 的用户确认入口。提案只有经 confirm 复核通过后才会安装为正式 owner Skill。",
+        help="管理自学习 Skill：子代理经验提案与自动总结的 Skill",
+        description="自学习 Skill 的用户入口：proposals 管子代理经验提案，learned 管自动总结的 Skill。",
     )
     areas = parser.add_subparsers(dest="skills_area", required=True)
+    add_learned_skill_subcommands(areas)
     proposals = areas.add_parser(
         "proposals",
         help="查看、确认或拒绝自学习 Skill 提案",

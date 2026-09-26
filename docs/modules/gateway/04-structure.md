@@ -1216,6 +1216,12 @@ audit Agent 为空而回退 daemon cwd。
   `owner_wake_discovery.py` 负责重启后重新发现 durable pending work。二者都不直接生成 Daily/Candidate。
 - Curator 的 provider/model、strict schema、lease、cursor、批提交和运行审计由 Memory 模块拥有；Gateway
   只提供生命周期触发和现有 owner maintenance 执行位置，因此聊天、飞书、本地入口不会形成不同记忆语义。
+- 自学习 S3（自动总结 Skill）复用同一条策展车道：`_BackgroundMainSupervisor._safe_run_curator` 先按原条件
+  （`_curator_run_allowed`：全局 `memory_curator_enabled`、owner 记忆总闸、紧急原因或当日配额）跑记忆整理，
+  再调 `_run_skill_learning` 处理 `agent.skill_learning` 最早的一条请求，两者异常互相隔离。准入
+  `_curator_candidate_is_admitted` 在原条件之外多认一个结构化事实：`skill_learning.has_pending()`；车道开关
+  `_background_curation_enabled` 为记忆整理或 `enable_self_learning` 任一开启。Gateway 不解析学习内容，
+  运行锁、前台让路、每日上限、闸门与账本都归 `capability/skill_learning*.py`。
 
 Gateway 负责把外部请求落成可审计队列，并由 worker 调用 SimpleAgent。它不负责模型业务决策。
 
@@ -1574,8 +1580,10 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
 - `agent/conversation/compact.py`、`compact_guard.py`、`compact_checkpoint.py`、`history_index.py`、
   `control_commands.py`：分别承载 owner/thread 唯一自动 compact、结构化近期尾部与失败熔断、
   完整恢复点、owner-local 旧聊天检索投影，以及 CLI/IM 共用 typed slash/task command；
-  `/context` 只读自动压缩同一估算，`/compact` 复用同一 run lane/checkpoint/CAS，`/effort` 只投影真实后端
-  参数能力；`/verbose off|on|full` 的持久状态仍在唯一 thread schema 中，不从自然语言推断 owner 或 compact 成败。
+  `/context` 只读自动压缩同一估算，`/compact` 复用同一 run lane/checkpoint/CAS；`/effort` 与 `/verbose` 共用
+  `control_service._settings_thread` 取或建会话线程，档位写 thread 的 `reasoning_effort`（`default` 清除），回执按当前会话
+  模型的结构化 `reasoning_control` 说明实际效果（不支持时如实说明不改变请求，见 docs/design/REASONING_EFFORT.md）；
+  `/verbose off|on|full` 的持久状态仍在唯一 thread schema 中，不从自然语言推断 owner 或 compact 成败。
 - `agent/capability/channel_message_tool.py`：`send_message` 的模型可见性与执行前检共用 owner provider/target、
   owner root 和 registry proactive capability；无外部通道的本地 transcript 只隐藏当前快照，不删除唯一工具实现。
 - `agent/conversation/authority.py`、`task_promotion.py`：普通 transcript 唯一权威标记，以及任务候选的

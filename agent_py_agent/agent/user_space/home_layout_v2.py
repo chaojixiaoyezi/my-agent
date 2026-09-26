@@ -266,6 +266,7 @@ def _owner_workspace_path_fields(owner_home_dir: Path) -> dict[str, Path]:
         "owner_plugins_dir": owner_data_dir / "plugins",
         "owner_artifact_backups_dir": owner_data_dir / "artifact_backups",
         "owner_skill_proposals_dir": owner_data_dir / "skill_proposals",
+        "owner_skill_learning_dir": owner_data_dir / "skill_learning",
         "owner_scheduler_dir": scheduler_dir,
         "owner_scheduler_store_json": scheduler_dir / "store.json",
         "owner_scheduler_history_jsonl": scheduler_dir / "history.jsonl",

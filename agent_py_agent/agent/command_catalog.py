@@ -103,8 +103,8 @@ COMMAND_CATALOG = (
     ),
     CommandSpec(
         "effort",
-        "/effort [low|medium|high|max|auto]",
-        "查看或设置模型推理强度（接口支持时）",
+        "/effort [auto|off|low|medium|high|max|default]",
+        "查看或设置本会话的智能程度（推理强度）",
         submit_on_enter=True,
         conversation_suffix=r"(?:\s+(\S+))?\s*$",
     ),

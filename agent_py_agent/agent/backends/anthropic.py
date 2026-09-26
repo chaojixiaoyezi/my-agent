@@ -19,6 +19,7 @@ from .errors import (
 )
 from .http import HttpBackend, bounded_output_tokens, request_stream_lines
 from .provider_headers import endpoint_parts
+from .reasoning_control import reasoning_payload_fields
 from .response_completion import (
     has_reasoning_content,
     incomplete_response_fields,
@@ -51,6 +52,8 @@ class _AnthropicGenerateRequest:
     on_thinking_delta: Callable[[str], None] | None = None
     on_tool_input_progress: Callable[[dict[str, object]], None] | None = None
     first_event_timeout_seconds: float | None = None
+    # 智能程度档位（low/medium/high/max 或空串），按 self.reasoning_control 换算成 thinking/output_config。
+    reasoning_effort: str = ""
 
 
 # LLM: Messages 的缓存、原生块与流事件由此适配；能力端点使用 HTTP 同源规则，联合思考、工具和 OAuth 测试。
@@ -113,6 +116,7 @@ class AnthropicCompatibleBackend(HttpBackend):
                 on_thinking_delta=on_thinking_delta,
                 on_tool_input_progress=on_tool_input_progress,
                 first_event_timeout_seconds=provider_options.first_event_timeout_seconds,
+                reasoning_effort=provider_options.reasoning_effort,
             )
         )
 
@@ -211,10 +215,21 @@ class AnthropicCompatibleBackend(HttpBackend):
         payload = self._request_payload(_AnthropicGenerateRequest(
             prompt=prompt, tools=tools, tool_choice=tool_choice, messages=messages,
             system_instruction=options.system_instruction, thinking_disabled=options.thinking_disabled,
+            reasoning_effort=options.reasoning_effort,
         ))
         if self.stream_enabled:
             payload["stream"] = True
         return deepcopy(payload)
+
+    # LLM: 关闭思考优先（兼容 Anthropic 官方 thinking 参数，不识别的端点如 MiniMax 静默忽略）；否则按档位经
+    #   reasoning_control 统一换算，预算夹在 max_tokens 以内；都没有时不写任何思考字段。
+    # 函数用途: 返回本次 Messages 请求要合入的思考/智能程度字段。
+    def _thinking_fields(self, request: _AnthropicGenerateRequest, max_tokens: int) -> dict[str, Any]:
+        if request.thinking_disabled:
+            return {"thinking": {"type": "disabled"}}
+        if request.reasoning_effort:
+            return reasoning_payload_fields(self.reasoning_control, request.reasoning_effort, "anthropic", max_tokens)
+        return {}
 
     # LLM: 普通发送、短JSON和只读投影共用组包；媒体按同预算有界读盘及核对哈希，不执行传输或修改canonical引用。
     # 函数用途: 按原缓存、采样和工具合同构造内容，在此将已验证媒体引用展开为临时字节。
@@ -242,9 +257,7 @@ class AnthropicCompatibleBackend(HttpBackend):
         )
         if cache_projection.system:
             payload["system"] = cache_projection.system
-        if request.thinking_disabled:
-            # LLM: 兼容 Anthropic 官方 thinking 参数；不识别该字段的端点(如 MiniMax)静默忽略。
-            payload["thinking"] = {"type": "disabled"}
+        payload.update(self._thinking_fields(request, payload["max_tokens"]))
         selected_tools = tools_for_choice(request.tools, request.tool_choice)
         payload["messages"], selected_tools = anthropic_messages_with_optional_cache(
             prompt=cache_projection.prompt,

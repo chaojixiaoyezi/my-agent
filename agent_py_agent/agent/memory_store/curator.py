@@ -27,6 +27,7 @@ from .curator_backend import (
     attempt_shape_payload,
     extract_with_retries,
     extraction_budget_seconds,
+    fit_batch_to_input_budget,
     last_model_attempts,
 )
 from .curator_commit import (
@@ -438,6 +439,9 @@ class _CuratorExecutionMixin:
             return self._commit_batch(
                 context, batch, None, extra_warnings=migration_warnings
             )
+        # 先按最终提示实测长度裁进预算：超预算的积压只截尾部、留给下一轮重放，不能让同一批反复失败卡住游标。
+        batch, fit_warnings = fit_batch_to_input_budget(batch, max_chars=self.config.max_input_chars)
+        migration_warnings = (*migration_warnings, *fit_warnings)
         annotate = self.dependencies.annotate_batch
         if annotate is not None:
             batch, decision_warnings = annotate(batch, context.run_id, _annotation_deadline(context, self.config))

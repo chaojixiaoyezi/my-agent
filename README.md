@@ -78,7 +78,7 @@ my-agent 把这些当成底座问题来解：
 - 长期记忆走“候选 → 晋升”链，代理用 `remember` 保存“需要时才想起”的具体事实。
 - 人格三件套 SOUL / USER / AGENTS 每轮注入：用户画像和长期工作约定由代理自主维护，改 SOUL 必须用户确认。
 - Skill 三级加载：索引 → 正文 → 引用资源，优先级 workspace > user > builtin。
-- 自学习默认关闭；开启后子代理经验只生成待确认的 Skill 提案，用户确认后才落正式目录。
+- 自学习默认关闭；开启后主代理完成的多轮工具任务会在后台自动总结成 owner 的 `skills/learned/` Skill，子代理经验提案也自动安装；不需要逐条确认，发布前经自动闸门（重名、安全扫描、脱敏、只改自己生成且你没改过的 Skill），每次写入都留账，可用 `my-agent skills learned` 回滚或删除。
 
 ### 上下文与压缩
 
@@ -216,7 +216,8 @@ my-agent memory-search "关键词"            # 搜索长期记忆；不调用�
 my-agent local-doctor                     # 诊断记忆、gateway、子代理、本地事实源是否一致；不调用模型
 my-agent subagents                        # 子代理红绿灯看板；不调用模型
 my-agent runtime-stale-attempts           # 列出无身份的悬挂运行轮，--settle 显式结清；不调用模型
-my-agent skills proposals list            # 查看待确认的自学习 Skill 提案；不调用模型
+my-agent skills learned list              # 查看自动总结的 Skill、待处理请求和今日调用次数；不调用模型
+my-agent skills proposals list            # 查看子代理经验 Skill 提案；不调用模型
 ```
 
 默认的长期数据都在当前用户的 owner home 下：
@@ -244,7 +245,7 @@ my-agent skills proposals list            # 查看待确认的自学习 Skill �
 - 后台服务默认回环：`background_listen_scope` 默认 loopback，开放局域网需用户一次性长期授权，宿主持续复核。
 - 默认容器安装只挂当前工作目录和 `~/.my-agent`，不挂 Docker socket。
 - 子代理只看得到执行上下文里授权的工具与技能；未授权工具在工具层被拒绝；子代理不能越出父级范围。
-- 自学习不自动改正式 Skill：提案必须由用户确认；人格文件 SOUL 的修改也必须用户确认。
+- 自学习只写自学目录（`skills/learned/`、`skills/lesson-*`），不改内置、共享、插件或你手写的 Skill；每次写入都留账、可回滚；人格文件 SOUL 的修改仍必须用户确认。
 - 未知副作用不冒充成功：工具操作、进程终止、插件停用都要有可核对的回执，拿不到就记为未知并保留对账入口。
 - 更多边界见 [产品能力与边界](docs/PRODUCT_FACTS.md)。
 

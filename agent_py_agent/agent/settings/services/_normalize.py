@@ -12,7 +12,9 @@ from __future__ import annotations
 import math
 import os
 
+from ...backends.reasoning_control import REASONING_CONTROLS, REASONING_LEVELS
 from ...backends.sampling import validate_top_p
+from ...backends.structured_output_mode import STRUCTURED_OUTPUT_MODES
 from ...path_access_policy import normalize_path_access_mode
 from ..defaults import default_agent_config
 from ._coercion import CoercionService
@@ -137,7 +139,7 @@ def _temperature_value(raw_temp: object) -> float | None:
 # LLM: 规范化显式协议选择；空值保持未配置，非法协议也不能回退到可生成回复的模型。
 # 类用途: 检查模型连接、容量和请求选项的配置值。
 class ModelFieldsService:
-    # LLM: 不发模型请求或改持久配置；top_p 与模型表单共用范围校验，非法 YAML 按既有规则告警回默认。
+    # LLM: 不发模型请求或改持久配置；top_p 与模型表单共用范围校验，智能程度档位/控制方式按枚举校验，非法 YAML 告警回默认。
     # 函数用途: 统一模型字段的类型和范围，供 YAML/overlay 共用；None 保留为不覆盖供应商采样。
     @staticmethod
     def normalize(data: dict[str, object], defaults: object) -> tuple[dict[str, object], list[str]]:
@@ -155,6 +157,11 @@ class ModelFieldsService:
             ),
         ))
         warnings.extend(_apply_bool_fields(out, defaults, ("auto_bench_model_on_first_use",)))
+        # 智能程度档位与控制方式取值与 backends/reasoning_control 一致；非法值告警并回默认。
+        warnings.extend(_apply_choice_field(out, defaults, "model_reasoning_effort", REASONING_LEVELS))
+        warnings.extend(_apply_choice_field(out, defaults, "model_reasoning_control", REASONING_CONTROLS))
+        # 结构化输出方式取值与 backends/structured_output_mode 一致；非法值告警并回默认。
+        warnings.extend(_apply_choice_field(out, defaults, "model_structured_output", STRUCTURED_OUTPUT_MODES))
         warnings.extend(_normalize_temperature(out, defaults))
         try:
             out["top_p"] = validate_top_p(out.get("top_p", defaults.top_p))
@@ -613,6 +620,10 @@ _TIMEOUT_INT_FIELDS = (
     ("gateway_restart_turn_wait_seconds", 0, None),
     ("gateway_restart_drain_timeout_seconds", 0, None),
     ("gateway_restart_cooldown_seconds", 0, None),
+    ("self_learning_min_tool_rounds", 1, None),
+    ("self_learning_daily_limit", 0, None),
+    ("self_learning_max_skills", 0, None),
+    ("self_learning_timeout_seconds", 10, None),
     ("memory_artifact_default_read_chars", 0, None),
     ("memory_archive_preview_level_0_chars", 0, None),
     ("memory_archive_preview_level_1_chars", 0, None),
