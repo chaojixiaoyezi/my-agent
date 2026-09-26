@@ -4,7 +4,8 @@
 #   第一代进程保存的原始终端设置，先同步完成就绪检查与历史读取再首帧渲染，所以画面接续、会话不变，期间按键留在终端输入队列里不丢。
 #   exec 失败时旧界面继续可用并提示。Windows 的 execv 会另起进程，不做原地切换，只提示重开。开关 tui_follow_gateway_upgrade（默认开）。
 #   改动时同步 tests/test_tui_upgrade_follow.py、tests/test_cli_chat.py 的 handoff 用例、docs/design/TUI_DESIGN.md 与 CLI_REFERENCE.md。
-# 模块用途: 部署新版 Gateway 后，正在用的 TUI 自己在空闲时原地换成同版客户端，用户看不到关闭重开。
+#   同一轮询顺带读 restart_drain：Gateway 安全重启排空期间在页脚提示“正在安全重启、消息会排队”。
+# 模块用途: 部署新版 Gateway 后，正在用的 TUI 自己在空闲时原地换成同版客户端，用户看不到关闭重开；安全重启时给出提示。
 from __future__ import annotations
 
 import atexit
@@ -30,6 +31,9 @@ BUSY_NOTICE_TEXT = "Gateway 已升级到新版本，界面空闲时会原地切�
 REOPEN_NOTICE_TEXT = "Gateway 已升级到新版本，重开 my-agent 即可使用新界面。"
 SWITCHING_NOTICE_TEXT = "正在切换到新版本…"
 FAILED_NOTICE_TEXT = "切换到新版本失败，当前界面继续可用；方便时重开 my-agent 即可。"
+RESTART_NOTICE_KIND = "gateway_restart"
+RESTART_DRAIN_NOTICE_TEXT = "Gateway 正在安全重启：等在跑的回合和工具结束后换新进程；新消息会排队，重启后自动处理。"
+_RESTART_DRAIN_PHASES = frozenset({"turn_wait", "tool_drain"})
 _NOTICE_SECONDS = 6.0
 _NOTICE_REPEAT_SECONDS = 30.0
 _SWITCH_RENDER_DELAY_SECONDS = 0.25
@@ -290,12 +294,25 @@ class UpgradeFollowContext:
     failed: bool = False
 
 
-# LLM: 单次检查：先算目标，再按空闲与否二选一（排队原地切换 / 限频提示）；pending 或 failed 时什么都不做。
+# LLM: 排空阶段只读状态文件里 Gateway 写的 restart_drain.phase（restart_service 的投影），不看文案；cancelled/缺失都不提示。
+# 函数用途: Gateway 正在安全重启排空时返回页脚提示文字，否则返回空串。
+def restart_drain_notice(state: dict | None) -> str:
+    drain = state.get("restart_drain") if isinstance(state, dict) else None
+    if isinstance(drain, dict) and str(drain.get("phase") or "") in _RESTART_DRAIN_PHASES:
+        return RESTART_DRAIN_NOTICE_TEXT
+    return ""
+
+
+# LLM: 单次检查：Gateway 排空中先给重启提示（每次轮询续显，不影响升级判断）；再算目标，按空闲与否二选一
+#   （排队原地切换 / 限频提示）；pending 或 failed 时什么都不做。
 # 函数用途: 读一次 Gateway 状态并决定是切换、提示还是保持不动。
 def check_upgrade_once(ctx: UpgradeFollowContext, *, last_notice_at: float) -> tuple[str, float]:
     if ctx.pending or ctx.failed:
         return "", last_notice_at
     report = read_json_object_report(ctx.state_path, context="cli.tui_upgrade_follow.state.read")
+    drain_notice = restart_drain_notice(report.payload)
+    if drain_notice:
+        ctx.set_notice(drain_notice, ctx.poll_seconds + 2.0, RESTART_NOTICE_KIND)
     target = upgrade_restart_target(report.payload, ctx.own_prefix, enabled=ctx.enabled)
     if not target:
         return "", last_notice_at
@@ -398,6 +415,8 @@ __all__ = [
     "HandoffScheduler",
     "HandoffState",
     "NOTICE_KIND",
+    "RESTART_DRAIN_NOTICE_TEXT",
+    "RESTART_NOTICE_KIND",
     "TuiIdleFacts",
     "UpgradeFollowContext",
     "adopt_handoff",
@@ -410,6 +429,7 @@ __all__ = [
     "handoff_supported",
     "hold_setup_output",
     "release_quiet_streams",
+    "restart_drain_notice",
     "start_tui_upgrade_follow",
     "start_upgrade_follow_watcher",
     "terminal_released",

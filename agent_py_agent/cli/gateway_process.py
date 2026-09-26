@@ -75,6 +75,7 @@ from .gateway_restart_handover import (
     announce_restart_completed,
     drain_for_requested_restart,
     hand_over_to_successor,
+    safe_restart_from_cli,
     take_restart_marker,
     wait_for_predecessor_exit,
 )
@@ -1090,7 +1091,15 @@ def _force_kill_gateway(agent, paths: GatewayPaths, pid: int) -> bool:
 # 没给就用 --timeout（用户把 --timeout 理解成"整个重启最多等多久"），都没给才落配置默认值。
 # 禁止让 start 段永远只等内置 3 秒——那会把"仍在启动"误报成启动失败。
 # 函数用途: 重启 gateway，并把就绪等待预算透传给 start 段。
+# LLM: 默认走安全重启（gateway_restart_handover.safe_restart_from_cli），Gateway 未运行时才落到启动；
+#   --force 保持原来的先停后起（停止超时强制终止）。改动须同步 test_gateway_commands.py 与 test_gateway_safe_restart.py。
+# 函数用途: 终端重启 Gateway：默认先排空再换进程，--force 立即先停后起。
 def cmd_gateway_restart(args) -> int:
+    if not getattr(args, "force", False):
+        agent = make_agent(args)
+        safe_code = safe_restart_from_cli(agent, gateway_paths(agent))
+        if safe_code is not None:
+            return safe_code
     stop_args = argparse.Namespace(
         config=args.config,
         timeout=args.timeout,

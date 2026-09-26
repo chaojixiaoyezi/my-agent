@@ -400,3 +400,84 @@ def test_drain_timeout_cancels_restart_and_notifies_requester(tmp_path, monkeypa
     assert restart_gate.tool_gate_closed() is False
     reasons = [signal.reason for signal in store.wakes.pending()]
     assert reasons == [service.CANCELLED_EVENT_TYPE]
+
+
+def test_draining_dispatch_only_records_wait_facts_and_claims_nothing(tmp_path):
+    from agent_py_agent.agent.gateway_parts.request_worker import (
+        AdmissionLimits,
+        dispatch_pending_requests,
+    )
+
+    agent = _agent(tmp_path)
+    paths = gateway_paths(agent)
+    for folder in (paths.inbox, paths.processing, paths.done, paths.failed, paths.responses):
+        folder.mkdir(parents=True, exist_ok=True)
+    _rid, pending_path, _ = submit_gateway_ask(paths, params=GatewayAskParams(prompt="排空期间的新消息", save=False))
+    submitted: list[object] = []
+    claimed = dispatch_pending_requests(
+        paths, AdmissionLimits(user_inflight=8, global_inflight=8), lambda *args: submitted.append(args),
+        hold_reason=service.RESTART_DRAIN_HOLD_REASON,
+    )
+    assert claimed == 0 and submitted == []
+    payload = read_json_file(pending_path)
+    assert payload["admission_wait_reason"] == "gateway_restart_draining"
+    assert payload.get("status") != "processing" and not list(paths.processing.glob("*.json"))
+
+
+def _cli_agent(**overrides):
+    values = {"gateway_restart_cooldown_seconds": 30, "gateway_restart_turn_wait_seconds": 1,
+              "gateway_restart_drain_timeout_seconds": 1, **overrides}
+    return SimpleNamespace(config=SimpleNamespace(**values))
+
+
+def test_cli_restart_falls_back_when_gateway_not_running(tmp_path, monkeypatch):
+    paths = _paths(tmp_path)
+    monkeypatch.setattr(handover, "get_running_pid", lambda _path: None)
+    assert handover.safe_restart_from_cli(_cli_agent(), paths) is None
+    assert not service.restart_request_path(paths).exists()
+
+
+def test_cli_restart_is_refused_inside_its_own_gateway(tmp_path, monkeypatch):
+    paths = _paths(tmp_path)
+    monkeypatch.setattr(handover, "get_running_pid", lambda _path: 4242)
+    monkeypatch.setattr(handover, "is_pid_alive", lambda _pid: True)
+    monkeypatch.setenv(service.HOSTING_GATEWAY_PID_ENV, "4242")
+    assert handover.safe_restart_from_cli(_cli_agent(), paths) == 2
+    assert not service.restart_request_path(paths).exists()
+
+
+def test_cli_restart_waits_for_new_running_pid(tmp_path, monkeypatch, capsys):
+    paths = _paths(tmp_path)
+    monkeypatch.delenv(service.HOSTING_GATEWAY_PID_ENV, raising=False)
+    current = {"pid": 4242}
+    monkeypatch.setattr(handover, "get_running_pid", lambda _path: current["pid"])
+    monkeypatch.setattr(handover, "is_pid_alive", lambda _pid: True)
+
+    def successor():
+        time.sleep(0.4)
+        assert read_json_file(service.restart_request_path(paths))["requester"] == {"kind": "cli"}
+        current["pid"] = 5353
+        paths.state.write_text(json.dumps({"status": "running", "pid": 5353}), encoding="utf-8")
+
+    threading.Thread(target=successor).start()
+    assert handover.safe_restart_from_cli(_cli_agent(), paths) == 0
+    assert "4242 → 5353" in capsys.readouterr().out
+
+
+def test_cli_restart_reports_cancellation_and_cooldown(tmp_path, monkeypatch):
+    paths = _paths(tmp_path)
+    monkeypatch.delenv(service.HOSTING_GATEWAY_PID_ENV, raising=False)
+    monkeypatch.setattr(handover, "get_running_pid", lambda _path: 4242)
+    monkeypatch.setattr(handover, "is_pid_alive", lambda _pid: True)
+
+    def cancel():
+        time.sleep(0.4)
+        request_id = read_json_file(service.restart_request_path(paths))["request_id"]
+        paths.state.write_text(json.dumps({"status": "running", "pid": 4242, "restart_drain": {
+            "request_id": request_id, "phase": "cancelled", "reason": "drain_timeout"}}), encoding="utf-8")
+
+    threading.Thread(target=cancel).start()
+    assert handover.safe_restart_from_cli(_cli_agent(), paths) == 2
+    request = read_json_file(service.restart_request_path(paths))
+    service.mark_restart_drained(paths, request, old_pid=4242, old_process_started_at=0.0, active_turns_at_exit=0)
+    assert handover.safe_restart_from_cli(_cli_agent(), paths) == 2, "冷却中直接拒绝"

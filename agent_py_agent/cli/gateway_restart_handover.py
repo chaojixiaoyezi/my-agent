@@ -6,11 +6,14 @@
 from __future__ import annotations
 
 import os
+import sys
+import time
 from pathlib import Path
 
 from ..agent.gateway_parts import is_pid_alive, log_gateway_event, wait_for_pid_exit
 from ..agent.gateway_parts.daemon_control import (
     GATEWAY_SERVICE_RESTART_EXIT_CODE,
+    get_running_pid,
     stop_request_targets_process,
 )
 from ..agent.gateway_parts.io import read_json_file, update_json_file_atomic
@@ -23,7 +26,9 @@ from ..agent.gateway_parts.restart_service import (
     mark_restart_drained,
     pending_restart_request,
     run_restart_drain,
+    submit_restart_request,
 )
+from .gateway_host_guard import refuse_stopping_hosting_gateway
 from .gateway_service import _get_launchd_label, get_service_name
 from .models import GatewayRunContext
 
@@ -152,11 +157,56 @@ def announce_restart_completed(agent, marker: dict[str, object], *, requeued: in
     })
 
 
+# LLM: 终端 `my-agent gateway restart` 的默认路径：Gateway 在跑时写一份 kind=cli 的安全重启请求，按状态文件里的结构化事实
+# 等新进程号 running（或本请求被取消）；Gateway 没在跑返回 None，由调用方走原来的启动路径。托管自己的工具进程仍被拒绝，
+# 否则它自己就是“执行中的工具”，第二段会一直等到超时。改动须同步 test_gateway_safe_restart.py 与 CLI_REFERENCE.md。
+# 函数用途: 从终端安排安全重启并等待结果；返回退出码，Gateway 未运行时返回 None。
+def safe_restart_from_cli(agent, paths) -> int | None:
+    pid = get_running_pid(paths.pid)
+    if not pid or not is_pid_alive(pid):
+        return None
+    if refuse_stopping_hosting_gateway(pid):
+        return 2
+    config = agent.config
+    result = submit_restart_request(
+        paths, target_pid=pid, requester={"kind": "cli"}, reason="终端执行 my-agent gateway restart",
+        cooldown_seconds=float(getattr(config, "gateway_restart_cooldown_seconds", 30) or 0),
+    )
+    if result.get("status") in {"cooldown", "loop_guard"}:
+        retry = result.get("retry_after_seconds")
+        hint = f"刚完成过一次安全重启，请 {retry} 秒后再试" if retry is not None else "短时间内重启次数过多"
+        print(f"{hint}；确需立即重启可加 --force 先停后起。", file=sys.stderr)
+        return 2
+    request_id = str((result.get("request") or {}).get("request_id") or "")
+    print(f"已安排安全重启 request_id={request_id}：等在跑的回合和执行中的工具结束后换新进程……", flush=True)
+    drain = float(getattr(config, "gateway_restart_drain_timeout_seconds", 600) or 3600)
+    budget = float(getattr(config, "gateway_restart_turn_wait_seconds", 300) or 0) + drain + 120.0
+    return _wait_for_cli_restart(paths, pid, request_id, budget)
+
+
+def _wait_for_cli_restart(paths, old_pid: int, request_id: str, budget: float) -> int:
+    deadline = time.monotonic() + budget
+    while time.monotonic() < deadline:
+        state = read_json_file(paths.state)
+        drain = state.get("restart_drain") if isinstance(state.get("restart_drain"), dict) else {}
+        if drain.get("request_id") == request_id and drain.get("phase") == "cancelled":
+            print(f"安全重启已取消（{drain.get('reason')}），Gateway 照常运行；确需立即重启可加 --force。", file=sys.stderr)
+            return 2
+        new_pid = get_running_pid(paths.pid)
+        if new_pid and new_pid != old_pid and state.get("status") == "running" and int(state.get("pid") or 0) == new_pid:
+            print(f"gateway 已安全重启 pid {old_pid} → {new_pid}")
+            return 0
+        time.sleep(0.5)
+    print("等待安全重启超时：Gateway 可能仍在排空，可用 my-agent gateway status 查看。", file=sys.stderr)
+    return 2
+
+
 __all__ = [
     "PREDECESSOR_EXIT_WAIT_SECONDS",
     "announce_restart_completed",
     "drain_for_requested_restart",
     "hand_over_to_successor",
+    "safe_restart_from_cli",
     "service_manager_restarts_gateway",
     "take_restart_marker",
     "wait_for_predecessor_exit",

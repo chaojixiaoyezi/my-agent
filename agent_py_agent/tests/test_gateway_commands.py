@@ -296,13 +296,13 @@ class TestCmdGatewayRestart:
     """测试 cmd_gateway_restart 命令。"""
 
     def test_gateway_restart_starts_background_gateway(self):
-        """Restart should stop first, then return after starting the background gateway."""
+        """--force restart should stop first, then return after starting the background gateway."""
         from agent_py_agent.cli.gateway_process import cmd_gateway_restart
 
         args = MagicMock(
             config="agent_config.yaml",
             timeout=None,
-            force=False,
+            force=True,
         )
 
         with patch("agent_py_agent.cli.gateway_process.cmd_gateway_stop", return_value=0) as mock_stop, \
@@ -1106,13 +1106,13 @@ def test_cmd_gateway_start_failure_keeps_exit_code_two_with_typed_reason(tmp_pat
 def test_gateway_restart_forwards_ready_timeout_to_start():
     from agent_py_agent.cli.gateway_process import cmd_gateway_restart
 
-    explicit = MagicMock(config="cfg.yaml", timeout=10.0, ready_timeout=42.0, force=False)
+    explicit = MagicMock(config="cfg.yaml", timeout=10.0, ready_timeout=42.0, force=True)
     with patch("agent_py_agent.cli.gateway_process.cmd_gateway_stop", return_value=0), \
          patch("agent_py_agent.cli.gateway_process.cmd_gateway_start", return_value=0) as start:
         assert cmd_gateway_restart(explicit) == 0
     assert start.call_args.args[0].ready_timeout == 42.0
 
-    fallback = MagicMock(config="cfg.yaml", timeout=17.0, ready_timeout=None, force=False)
+    fallback = MagicMock(config="cfg.yaml", timeout=17.0, ready_timeout=None, force=True)
     with patch("agent_py_agent.cli.gateway_process.cmd_gateway_stop", return_value=0), \
          patch("agent_py_agent.cli.gateway_process.cmd_gateway_start", return_value=0) as start:
         assert cmd_gateway_restart(fallback) == 0

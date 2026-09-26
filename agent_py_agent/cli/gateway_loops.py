@@ -38,7 +38,7 @@ from ..agent.gateway_parts.request_worker import (
     dispatch_pending_requests,
     terminalize_unhandled_claimed_gateway_request,
 )
-from ..agent.gateway_parts.restart_service import restart_draining
+from ..agent.gateway_parts.restart_service import RESTART_DRAIN_HOLD_REASON, restart_draining
 from ..agent.ingestion.continuous_monitor import recover_active_audit_harvesters
 from ..agent.observability.concurrency_metrics import background_tick_inflight
 from ..agent.owner_scoped_pool import shared_active_owner_registry
@@ -111,7 +111,7 @@ class _RequestDispatcher:
         self._next_input_reconcile_at = 0.0
         self._next_terminal_projection_at = 0.0
 
-    # LLM: 安全重启排空期间（restart_service.restart_draining）不再认领新请求，它们留在 pending 由接班进程处理；
+    # LLM: 安全重启排空期间（restart_service.restart_draining）不再认领新请求，只给它们记结构化等待事实，留给接班进程处理；
     # 恢复、终态投影和输入回执调和照常运行。改动须同步 test_gateway_safe_restart.py。
     # 函数用途: 派发一轮待处理请求并执行节流的恢复/投影/调和扫描，返回本轮派发数量。
     def tick(self) -> int:
@@ -119,13 +119,13 @@ class _RequestDispatcher:
         # reconciliation scans must never sit in front of an interactive request.
         dispatched = 0
         try:
-            if not restart_draining():
-                dispatched = dispatch_pending_requests(
-                    self.paths,
-                    self.limits,
-                    self._submit,
-                    scan_gate=self._scan_gate,
-                )
+            dispatched = dispatch_pending_requests(
+                self.paths,
+                self.limits,
+                self._submit,
+                scan_gate=self._scan_gate,
+                hold_reason=RESTART_DRAIN_HOLD_REASON if restart_draining() else "",
+            )
         except Exception as exc:
             _print_gateway_loop_error("gateway_request_dispatch.iteration", "dispatcher", exc)
         # Recovery and projections are independent durability domains. One

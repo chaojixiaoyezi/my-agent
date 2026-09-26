@@ -97,6 +97,19 @@ def test_busy_client_gets_a_rate_limited_notice_and_no_handoff(tmp_path):
     assert len(calls["notices"]) == 1, "30 秒内不重复提示"
 
 
+def test_safe_restart_drain_shows_notice_on_every_poll_until_done(tmp_path):
+    own = _runtime_dir(tmp_path, "runtime-a")
+    for phase in ("turn_wait", "tool_drain"):
+        ctx, calls = _context(tmp_path, {**_state(own), "restart_drain": {"phase": phase, "request_id": "r"}}, own, idle=True)
+        follow.check_upgrade_once(ctx, last_notice_at=-1e9)
+        follow.check_upgrade_once(ctx, last_notice_at=-1e9)
+        assert calls["notices"] == [follow.RESTART_DRAIN_NOTICE_TEXT] * 2 and calls["handoff"] == []
+    for drain in ({"phase": "cancelled"}, None, "turn_wait"):
+        ctx, calls = _context(tmp_path, {**_state(own), "restart_drain": drain}, own, idle=True)
+        follow.check_upgrade_once(ctx, last_notice_at=-1e9)
+        assert calls["notices"] == []
+
+
 def test_platform_without_in_place_exec_only_asks_to_reopen(tmp_path, monkeypatch):
     monkeypatch.setattr(follow, "handoff_supported", lambda: False)
     own, other = _runtime_dir(tmp_path, "runtime-a"), _runtime_dir(tmp_path, "runtime-b")

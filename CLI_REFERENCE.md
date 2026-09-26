@@ -1588,7 +1588,9 @@ my-agent gateway result <request_id>
 由 systemd/launchd 托管时改为以退出码 75 交给服务管理器拉起。两次重启至少间隔 `gateway_restart_cooldown_seconds`（默认 30 秒），
 同一会话 10 分钟内最多安排 3 次。`restart_gateway` 只注册给本机管理员的主会话代理（`enable_gateway_restart_tool` 可关闭），
 按危险动作审批：完全访问模式直接执行，其它模式弹确认。重启进度可在 HTTP `/status` 的 `restart_drain` 字段查看。
-终端的 `my-agent gateway restart` 目前仍是先停后起，不等回合。
+终端的 `my-agent gateway restart` 默认也走安全重启：写一份请求后等新进程就绪并打印新旧进程号；冷却中、被取消或等待超时以 2 退出。
+加 `--force` 才是原来的先停后起（停止超时强制终止，在跑的回合会被切断）。Gateway 没在运行时两者都直接启动。
+排空期间 TUI 页脚会提示“Gateway 正在安全重启……新消息会排队”，排队中的消息会带上结构化等待事实，客户端不会把它当成超时。
 
 `gateway` 第一版是本地后台控制面。它会启动一个后台 Python 进程，在内部按配置运行现有 daemon/watch 调度，并把 pid、state、heartbeat、stop request、请求队列、响应和日志写到 `gateway_workspace`。当前 request worker pool 已有保守第一版，默认 1 个 worker；runner 并发也只在显式配置 `runner_concurrency` 为数字时启用。它还不是多机器组织 gateway。
 

@@ -123,18 +123,20 @@ def _add_gateway_start_stop_subcommands(gateway_sub):
     gateway_stop.add_argument("--reason", help="写入 stop request 的原因")
     gateway_stop.set_defaults(func=cmd_gateway_stop)
 
-    gateway_restart = gateway_sub.add_parser("restart", help="重启 gateway")
+    gateway_restart = gateway_sub.add_parser("restart", help="安全重启 gateway：先排空在跑的回合和工具再换新进程")
     gateway_restart.add_argument(
         "--timeout",
         type=float,
-        help="等待正常停止的秒数，默认使用配置；未显式给 --ready-timeout 时也作为就绪等待预算",
+        help="--force 时等待正常停止的秒数，默认使用配置；未显式给 --ready-timeout 时也作为就绪等待预算",
     )
     gateway_restart.add_argument(
         "--ready-timeout",
         type=float,
-        help="等待新进程就绪的秒数，优先级高于 --timeout 与配置；冷启动慢时用它避免假失败",
+        help="--force 或 Gateway 未运行时等待新进程就绪的秒数，优先级高于 --timeout 与配置；冷启动慢时用它避免假失败",
     )
-    gateway_restart.add_argument("--force", action="store_true", help="停止超时后强制终止旧进程")
+    gateway_restart.add_argument(
+        "--force", action="store_true", help="跳过安全重启，立即先停后起（停止超时强制终止旧进程；在跑的回合会被切断）",
+    )
     gateway_restart.set_defaults(func=cmd_gateway_restart)
 
     gateway_logs = gateway_sub.add_parser("logs", help="显示 gateway 日志尾部")

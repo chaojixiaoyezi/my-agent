@@ -268,11 +268,15 @@ def _positive_int(value: object, fallback: int) -> int:
     return parsed if parsed > 0 else fallback
 
 
+# LLM: hold_reason 非空时（Gateway 安全重启排空）整轮只给每个待处理请求记一次结构化等待事实、不认领，
+# 请求留给接班进程；等待事实让客户端按活动续期，不把长时间排空误判为超时。改动须同步 test_gateway_safe_restart.py。
+# 函数用途: 按两层限流认领待处理请求并提交执行；排空时只记录等待。
 def dispatch_pending_requests(
     paths: GatewayPaths,
     limits: AdmissionLimits,
     submit: Callable[[GatewayClaim, str, str], None],
     scan_gate: GatewayInboxScanGate | None = None,
+    hold_reason: str = "",
 ) -> int:
     """两层限流的派发扫描:按 (recovery, created_at) 顺序认领在限内的请求并交给 submit;
     超限的留在 pending(排队),被限流数入探针。返回本轮认领数。
@@ -280,6 +284,10 @@ def dispatch_pending_requests(
     公平性:单用户小坑满后扫描继续走到后面用户的请求——先到先服务但不许独吞;
     坑释放后下一轮扫描按同一顺序补位,任何用户至多再等一个空位周期,不会饿死。"""
     ensure_gateway_folders(paths)
+    if hold_reason:
+        for request in _iter_pending_requests(paths):
+            _record_admission_wait(request, reason=hold_reason)
+        return 0
     if scan_gate is not None and not scan_gate.should_scan(paths.inbox):
         return 0
     claimed = 0

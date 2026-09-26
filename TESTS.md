@@ -3106,6 +3106,10 @@ Audit/摄取不列入本轮新增验收；共享模块既有回归按改动影�
   过期标记丢弃；续跑通知只写到数据根内的发起会话、按请求编号去重；`planned_restart` 恢复不加延迟、原因为 `gateway_safe_restart`、排在新请求前；
   服务循环排空返回重启报告、状态投影阶段；排空超时撤销请求并通知发起会话；`planned_restart` 分类为 stopped 不记失败；
   接班命令带 `--after-pid`、托管时返回 75 不拉进程；`/restart` 非管理员拒绝、管理员写入指向本进程的请求并合并重复。
+- 第二批（同在 `test_gateway_safe_restart.py`）：排空时派发只给待处理请求写 `admission_wait_reason=gateway_restart_draining`、不认领；
+  终端 `gateway restart` 在 Gateway 未运行时交回启动路径、在托管自己的工具进程里拒绝且不写请求、等到新进程号 running 返回 0、
+  本请求被取消或冷却中返回 2；`test_gateway_commands.py` 的先停后起用例改为显式 `--force`；`test_tui_upgrade_follow.py` 核对
+  排空阶段每次轮询都提示、cancelled/缺失不提示。
 - `test_gateway_restart_tool.py`：不在 Gateway 内拒绝且不写文件；Gateway 内立即返回 scheduled 并记录发起会话存储根；缺原因与冷却为 not_started；
   只注册给管理员主代理且可关闭；`test_user_config_owner_scope.py` 另核对普通用户与群看不到它。
 - 真实验收方法：隔离 home 与 127.0.0.1:8432 的 Gateway 上，一次 prompt 让代理重启 Gateway，核对工具回执 scheduled、回合正常结束、

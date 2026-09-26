@@ -34,6 +34,8 @@ LOOP_GUARD_LIMIT = 3
 MARKER_MAX_AGE_SECONDS = 600.0
 CONTINUATION_EVENT_TYPE = "gateway_restart_completed"
 CANCELLED_EVENT_TYPE = "gateway_restart_cancelled"
+# 排空期间待处理请求上的结构化等待原因（admission_wait_reason），客户端据等待事实续期。
+RESTART_DRAIN_HOLD_REASON = "gateway_restart_draining"
 _POLL_SECONDS = 0.25
 
 _phase_lock = threading.Lock()
@@ -363,6 +365,7 @@ __all__ = [
     "CONTINUATION_EVENT_TYPE",
     "HOSTING_GATEWAY_PID_ENV",
     "REQUEST_SCHEMA",
+    "RESTART_DRAIN_HOLD_REASON",
     "append_restart_cancellation",
     "append_restart_continuations",
     "cancel_restart_request",

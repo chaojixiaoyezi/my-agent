@@ -1847,6 +1847,8 @@ generic `create_attempt` 和 `recover_attempt_unknown` 不感知 transport marke
 `gateway_parts/restart_control.py`（`/restart`，只认 local/main owner，使用 control_service 传入的权威 Gateway 路径）。
 `recover_gateway_processing_requests(planned_restart=True)` 只在消费到新鲜完成标记的启动时使用；
 `_pending_request_entry_sort_key` 按 `active_turn_recovery.cause` 把安全重启续跑排在新请求之前。
+排空期间 `dispatch_pending_requests(hold_reason=...)` 只写等待事实不认领；终端 `gateway restart` 的默认入口是
+`gateway_restart_handover.safe_restart_from_cli`，`--force` 才走 `cmd_gateway_stop` + `cmd_gateway_start`。
 
 模型输出、异常字符串、PID 年龄、目录内容和“看起来已完成”都不是恢复证据。恢复后新 generation 仍走普通
 `_bind_main_agent_authority`；旧操作不会被 RuntimeDB 重开，模型只从 carried records 获得已做事实。任何

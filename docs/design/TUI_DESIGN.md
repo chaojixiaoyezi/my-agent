@@ -98,6 +98,8 @@ Esc 中断当前代理，不承担关闭或保存职责；主代理 active Goal 
 - 跨 exec 只经环境变量 `MY_AGENT_TUI_HANDOFF` 传两样结构化事实：会话编号与第一代进程保存的原始终端设置（termios）。新进程在 `cmd_chat` 开头弹出它，沿用同一会话；用真实 stdout 判断完“是不是终端”之后才暂存启动输出（旧画面还在屏幕上；先暂存会误入 plain 模式卡在 `input()`），启动器的启动页（清屏）在交接时跳过；`my-agent resume <id>` 起的 TUI 交接时，新进程的 `cmd_resume` 直接交给 `cmd_chat`（它仍做会话存在与归属校验），不再先构建一次完整 agent；先同步确认 Gateway 就绪、同步读历史与模型名，再首帧渲染，跳过可见的连接动画。新进程退出界面后把终端还原成第一代的设置；没能接管终端就退出时，atexit 兜底撤掉全屏/鼠标/括号粘贴并补打暂存的错误。
 - 载荷还带切换前的 `from_prefix`：新进程若发现自己的安装仍等于它（入口指向了别的解释器），本进程不再原地切换、只提示重开，避免每隔几秒循环 exec。
 - 任一次复核不空闲就撤回并清除提示，守护线程稍后再试；exec 失败保留旧界面并提示，本进程不再重试。Windows 的 `execv` 会另起进程，不做原地切换，只提示重开。
+- 同一守护线程顺带读状态文件里的 `restart_drain.phase`：Gateway 安全重启排空（turn_wait/tool_drain）时每次轮询在页脚续显
+  “Gateway 正在安全重启……新消息会排队”（提示来源 `gateway_restart`），不影响升级判断；cancelled 或缺失时不提示。
 - 回归：`test_tui_upgrade_follow.py`、`test_cli_chat.py::...test_in_place_handoff_keeps_session_and_loads_history_before_first_frame`。
 
 ## 验收
