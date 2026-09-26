@@ -38,6 +38,7 @@
 |-- docs/tasks/TUI_RESOURCE_HANDOFF.md  # 资源性能线的归属、验收、限制和主线整合交接
 `-- docs/design/
     |-- ADMIN_CHANNEL_IDENTITY.md       # IM 管理员身份：管理员密码、私聊精确绑定为 local/main、聊天内 /approve /deny 审批
+    |-- SKILL_AUTO_SUMMARY.md           # 自学习 S3：完成任务后自动总结 Skill，自动闸门代替人工确认、登记表所有权、账本与回滚
     |-- MAINTAINABILITY_AND_JEV_REVIEW.md # 可维护性评估、渐进重构建议及 Computer Use/Jev 能力边界
     |-- DECISION_MODEL_INTEGRATION.md    # 可选决策模型的短期限、失败隔离、接入点、缓存与并行实施计划
     |-- DECISION_AUDIT_AND_ADMIN_CONTROLS.md # 决策点开关、超时自调上下限、选模型输入精简、统计行、统一审计与管理员管控
@@ -115,7 +116,8 @@ agent_py_agent/
 |   |   `-- runner_retry_backend.py     # 只供该场景注入的离线失败后端
 |   |-- memory_admin_parser.py          # Memory v2 唯一管理员命令树与中文参数帮助
 |   |-- memory_admin_commands.py        # Candidate/Curator/Retention/Doctor/Migration 共用正式 Service 的 CLI 适配
-|   |-- skill_proposal_commands.py      # `skills proposals list/show/confirm/reject`：自学习 Skill 提案唯一用户确认入口
+|   |-- skill_proposal_commands.py      # `skills proposals list/show/confirm/reject`：子代理经验提案的用户入口；也挂 learned 子树
+|   |-- skill_learning_commands.py      # `skills learned list/show/revert/remove`：自动总结 Skill 的查看、回滚与删除
 |   |-- chat_parts/                     # TUI、gateway client、stream/render worker
 |   |   |-- chat_prompt_queue.py        # 可按 request identity 原子回取且保持 FIFO/task_done 账的聊天任务队列
 |   |   |-- tui_agent_navigation.py     # TUI 精确子代理选择栈、详情游标与父子视图切换状态
@@ -598,7 +600,12 @@ agent_py_agent/
 |   |   |-- decision_experiment_sample.py # 只观察实验的对照条目：基线/候选名单、配置版本与原账结算视图
 |   |   |-- skill_service.py           # bounded builtin/shared/owner/workspace discovery、policy 与缓存
 |   |   |-- skill_snapshot.py          # 不可变稳定引用、正文 hash/guard 校验与子代理收窄
-|   |   |-- skill_proposals.py         # 自学习 S1：子代理 lesson 候选→待确认 Skill 提案→用户确认后经 guard 原子安装
+|   |   |-- skill_proposals.py         # 自学习 S1：子代理 lesson 候选→Skill 提案→确认链（用户 CLI 或自学习开启时自动）经 guard 原子安装
+|   |   |-- skill_learning.py          # 自学习 S3 服务：收口入队、后台运行锁/前台让路/每日上限、无工具结构化总结、重试与账本
+|   |   |-- skill_learning_request.py  # S3 触发判据（结构化）与有界脱敏请求材料、本轮用过的 skill_id
+|   |   |-- skill_learning_prompt.py   # S3 提示词、严格 JSON schema 与输出解析（frontmatter 无损规范化）
+|   |   |-- skill_learning_publish.py  # S3 自动闸门与发布：重名/删过的名字/上限/所有权 hash/脱敏/解析/guard，回滚与删除
+|   |   |-- skill_learning_store.py    # S3 唯一落盘权威：请求队列、registry.json、ledger.jsonl、版本全文、removed 归档与锁
 |   |   |-- decision_skill_proposal_review.py # 自学习 S2：`skills proposals list` 的可选审核顺序点，只重排展示并加宿主标签，从不确认/拒绝/写入
 |   |   |-- persona_repository.py      # owner SOUL/USER/AGENTS 受控加载、版本/CAS/回滚唯一入口
 |   |   |-- model_profile_tool.py      # manage_models：主会话代理自助增删改切 owner 模型目录，复用唯一配置服务，回执不含密钥
@@ -635,7 +642,9 @@ agent_py_agent/
 |       `-- tool_protocol_adapter.py   # native 事件或显式完整 text 帧到 canonical ToolCall 的唯一适配口
 |-- tests/                             # 单元、集成、真实链路回归
 |   |-- fixtures/decision/jev_capability_rounding.json # 合成材料真实Jev响应的脱敏概率舍入replay，不含凭据
-|   |-- test_skill_proposals.py         # 自学习 S1：默认关闭、幂等提案、迁移不碰、确认拒绝矩阵、快照可见、runner 隔离与 CLI 往返
+|   |-- test_skill_proposals.py         # 自学习 S1：默认关闭、幂等提案、迁移不碰、确认拒绝矩阵、快照可见、runner 自动确认与 CLI 往返
+|   |-- test_skill_learning.py          # 自学习 S3：触发判据、请求有界脱敏、create/update/skip、各闸门拒绝码、上限、重试、忙时顺延、回滚删除
+|   |-- test_skill_learning_integration.py # 自学习 S3 接线：组合根装配、收口入队、Gateway 策展车道准入、learned CLI、S1 自动确认与配置
 |   |-- test_subagent_lesson_ledger.py  # record_lesson：身份与 Schema、字段/条数/字节上限、幂等、账本复核、结果合并、候选与 S1 提案、暴露面与提示
 |   |-- test_decision_skill_proposal_review.py # 自学习 S2 审核顺序点：资格边界、别名与脱敏、逐题校验、采用前复核、取消传播、零写入
 |   |-- test_decision_skill_proposal_review_integration.py # 自学习 S2 经真实 CLI/设置/决策服务（只替换 HTTP）：输出字节、observe 记账、冷却超时、菜单与默认值
@@ -1102,7 +1111,11 @@ docs/
 ### 关键文件说明
 
 - `agent_py_agent/agent/capability/skill_proposals.py`：自学习 Skill 提案唯一权威；只收 `subagent_lesson` 且带 task/run 来源的 Candidate，固定模板渲染、O_EXCL 幂等写 `<owner_home>/data/skill_proposals/`；confirm 在 owner 锁内复核版本、草稿 hash、来源 Candidate 与目标不存在，经 frontmatter 解析和 `agent_generated` guard（不 force）后 `os.replace` 安装，失败不写目标。
-- `agent_py_agent/cli/skill_proposal_commands.py`：`my-agent skills proposals list/show/confirm/reject` 的注册与输出，只委托上面的服务；确认必须带 `--expected-revision`，不提供模型工具。
+- `agent_py_agent/cli/skill_proposal_commands.py`：`my-agent skills proposals list/show/confirm/reject` 的注册与输出，只委托上面的服务；确认必须带 `--expected-revision`，不提供模型工具。自学习开启时 runner 结果链以 `actor=auto` 调同一 confirm。
+- `agent_py_agent/agent/capability/skill_learning.py` 与 `skill_learning_{request,prompt,publish,store}.py`：自学习 S3 自动总结 Skill（设计见 `docs/design/SKILL_AUTO_SUMMARY.md`）。收口按结构化判据写有界请求；Gateway 记忆整理车道逐条处理：运行锁、前台让路、每日上限、复用 Curator backend 的无工具结构化调用；自动闸门代替人工确认后发布到 `<owner_home>/skills/learned/<name>/`，登记表 `registry.json` 是自学归属唯一权威，账本只记结构化字段。
+- `agent_py_agent/cli/skill_learning_commands.py`：`my-agent skills learned list/show/revert/remove`，只读写 `SkillLearningStore` 与 `skills/learned/`，不构造 Agent、不调模型。
+- `agent_py_agent/tests/test_skill_learning.py`、`test_skill_learning_integration.py`：S3 的离线合同（假 backend）与接线（组合根、收口 helper、Gateway 车道、CLI、S1 自动确认、配置）。
+- `docs/design/SKILL_AUTO_SUMMARY.md`：自学习 S3 的唯一模块设计：用户决定、上游参考取舍、触发、材料、后台执行、输出合同、自动闸门、存储所有权、用户入口与边界。
 - `agent_py_agent/agent/subagents/lesson_ledger.py`：子代理经验账本 `lessons.jsonl` 的唯一合同。字段规范成单行且有界，id 取内容 hash（同 run 相同参数只记一次），每 run 最多 5 条、16 KiB，超限返回结构化结论；读回逐行复核版本、字段、id 与 run 归属。工具写入与 runner 结果收口共用，宿主从不解析模型回复正文。
 - `agent_py_agent/agent/agent_core/runtime/record_lesson_tool.py`：子代理专属 `record_lesson` 工具。run/attempt 取 runner 上下文、task 取任务记录，Schema 只含四个经验字段；注册表默认隐藏，随子代理 allowed_tools 下发，主线程调用返回 `TOOL_UNAVAILABLE`；所有拒绝都声明 `effect_outcome=not_started`。
 - `agent_py_agent/tests/test_subagent_lesson_ledger.py`：record_lesson 链路的离线合同（只用假件）：身份与 Schema、字段/条数/字节上限、幂等、坏账本与符号链接、读回复核、合并进 output.json、`subagent_lesson` 候选与 S1 提案（含重放不重复）、候选失败不阻断交付、暴露面与 runner 提示。
@@ -1440,7 +1453,9 @@ docs/
 |   `-- work/                           # 状态、日志、代理交接与大输出归档
 |-- agents/<run_id>/                    # 子代理 refs-only projection
 |-- data/artifact_backups/v1/           # 前台 shell 改动 ready 产物时保留的 owner 私有哈希恢复 blob
-|-- data/skill_proposals/<id>.json      # 自学习 Skill 提案（开关开启后按需创建）；用户 confirm 后才装到 skills/lesson-*；不用 learning_drafts 目录名
+|-- data/skill_proposals/<id>.json      # 子代理经验 Skill 提案（开关开启后按需创建）；自学习开启时自动走确认链装到 skills/lesson-*；不用 learning_drafts 目录名
+|-- data/skill_learning/                # 自动总结 Skill：requests/、registry.json、ledger.jsonl、versions/、removed/（开关开启后按需创建）
+|-- skills/learned/<name>/SKILL.md      # 自动总结发布的 Skill；归属只由 data/skill_learning/registry.json 认定
 |-- workspace/runtime/workspaces/<scope>/# LocalStore、gateway、conversation 等 workspace 账本
 `-- global_index/                       # 可重建轻量索引
 

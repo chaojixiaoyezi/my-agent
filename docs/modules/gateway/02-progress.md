@@ -1,5 +1,11 @@
 # Gateway 维护状态
 
+自学习 S3 接入后台策展车道（分支 `claude/skill-auto-summary`，2026-09-26）：`cli/gateway_loops.py` 的策展车道在记忆整理之后
+处理自动总结 Skill 请求。owner 有待处理学习请求时，即使记忆总闸关闭或当日记忆配额用完也会被准入，但那时只跑自动总结、
+不跑记忆整理（准入后按原条件重算）；`memory_curator_enabled=false` 而 `enable_self_learning=true` 时车道照常运转。
+学习失败只写 `gateway_skill_learning.iteration` 诊断，不影响记忆整理与其它 owner。设计见 `docs/design/SKILL_AUTO_SUMMARY.md`，
+测试见 `test_skill_learning_integration.py`。
+
 Gateway 安全重启第三批：TUI 续跑边界与确认框作废（分支 `claude/turn-resumed-boundary`，2026-09-26）。
 被重启或执行超时打断的回合由接班进程按原请求号续跑，TUI 读同一个 chunk 文件，以前没有任何“上一代已结束”的信号：
 上一代开着的确认框让新确认在 `_TuiPermissionController.open` 报“已有待确认”被吞，回合可能一直等；旧回复、旧思考和续跑文本拼在一起；

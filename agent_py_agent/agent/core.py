@@ -43,6 +43,12 @@ from .capability.persona_repository import PersonaRepository
 from .capability.persona_tool import UpdatePersonaTool
 from .capability.runtime_config_reload import default_capability_config_path
 from .capability.session_search_tool import SessionSearchTool
+from .capability.skill_learning import (
+    SkillLearningRuntime,
+    SkillLearningService,
+    SkillLearningSettings,
+)
+from .capability.skill_learning_store import SkillLearningStore
 from .capability.skill_proposals import SkillProposalService
 from .capability.skill_search_tool import SkillSearchTool
 from .capability.skill_service import SkillsService
@@ -235,7 +241,8 @@ def _wire_memory_authorities(
 
 
 # LLM: 复用原 owner 仓库并注入仅返回临时建议的决策 callback；Curator 无模型工具权限，不创建第二 Agent 或配置库。
-# 函数用途: 为一个已建立 ConversationStore/Memory/Persona 的 agent 接通统一后台策展链。
+#   末尾按 enable_self_learning 挂上自动总结 Skill 服务（agent.skill_learning，关闭时为 None），与 Curator 共用 backend。
+# 函数用途: 为一个已建立 ConversationStore/Memory/Persona 的 agent 接通统一后台策展链与自动总结 Skill。
 def _wire_memory_curator(agent: object, config: AgentConfig) -> None:
     from .memory_store.decision_curator import annotate_curator_batch
 
@@ -322,6 +329,24 @@ def _wire_memory_curator(agent: object, config: AgentConfig) -> None:
                     if root
                 ),
             ),
+        ),
+    )
+    agent.skill_learning = _skill_learning_service(agent, config)
+
+
+# LLM: 自学习关闭时返回 None，收口与 Gateway 车道都按缺席处理；开启时与 Curator 共用同一 backend（owner 选定模型、
+#   非流式），快照只读 SkillsService 当前 owner 视图。服务没有模型可调用入口，发布只经自动闸门。
+# 函数用途: 按自学习开关为当前 owner 创建自动总结 Skill 服务。
+def _skill_learning_service(agent: object, config: AgentConfig) -> SkillLearningService | None:
+    if not config.enable_self_learning:
+        return None
+    return SkillLearningService(
+        SkillLearningStore.for_home(agent.home_paths),
+        SkillLearningSettings.from_config(config),
+        SkillLearningRuntime(
+            backend=agent.memory_curator.backend,
+            snapshot_provider=lambda: agent.skills_service.snapshot_for(),
+            guard_config=config,
         ),
     )
 

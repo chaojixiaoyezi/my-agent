@@ -78,17 +78,21 @@
 
 自学习功能由 `enable_self_learning` 控制，默认关闭。
 
-开启后也必须遵守：
-- 不直接修改正式 skill。
-- 先生成学习候选草稿，等待用户确认。
-- 学习候选要说明来源任务、触发原因、拟保存内容和适用场景。
-- 用户确认后，才允许写入正式 skill 目录。
-- 用户纠正过的内容优先作为学习信号，但不能覆盖用户未确认的长期偏好。
+用户 2026-09-26 决定：自学习不再逐条人工确认，由确定性的自动闸门代替（设计见 [docs/design/SKILL_AUTO_SUMMARY.md](docs/design/SKILL_AUTO_SUMMARY.md)）。开启后必须遵守：
+- 只写自学目录：自动总结的 Skill 只发布到 `<owner_home>/skills/learned/<name>/`，子代理经验提案只安装 `<owner_home>/skills/lesson-*`；内置、共享、插件、工作区和用户手写的 Skill 一律不碰。
+- 发布前必须全部通过自动闸门：输出合同、重名（含所有来源）、用户删过的名字、数量上限、脱敏、frontmatter 解析往返、`agent_generated` 安全扫描（不 force）。任何一项失败都不写 Skill。
+- 所有权结构化：自学 Skill 只由登记表 `<owner_home>/data/skill_learning/registry.json` 认定；磁盘内容 hash 与登记值不一致即视为用户修改，自动流程永不覆盖。
+- 更新只针对本轮真正读过（`skill_search get` 成功）的自学 Skill。
+- 每次写入都记账（`ledger.jsonl`）并保存版本全文，用户可随时 `my-agent skills learned revert/remove`；删过的名字不再自动新建。
+- 学习材料和账本不存密钥；账本不写 Skill 正文或对话内容。
+- 用户纠正过的内容优先作为学习信号，但不能覆盖用户的长期偏好（偏好归记忆系统）。
 
 建议目录：
 
 ```text
-<owner_home>/data/skill_proposals/<proposal_id>.json  # 自学习 Skill 提案（待用户 confirm 后才安装到 <owner_home>/skills/）；不得改用 learning_drafts，Curator 迁移会清理该名字的目录
+<owner_home>/data/skill_learning/                     # 自动总结 Skill 的请求队列、登记表、账本、版本全文与删除归档
+<owner_home>/skills/learned/<name>/SKILL.md           # 自动总结发布的 Skill（category=learned）
+<owner_home>/data/skill_proposals/<proposal_id>.json  # 子代理经验 Skill 提案（自学习开启时自动走确认链安装到 <owner_home>/skills/lesson-*）；不得改用 learning_drafts，Curator 迁移会清理该名字的目录
 agent_py_agent/skills/                        # 内置 skill，随仓库发布
 ~/.my-agent/skills/                           # 用户长期 skill，默认不进仓库
 <workspace>/.agent/skills/                    # 项目专属 skill
@@ -221,7 +225,7 @@ python3 scripts/check_clean_package.py .
 
 - 写文件、发网络请求、执行命令、自学习落盘都要能被用户理解和追踪。
 - 默认不要自动执行高风险操作。
-- 自学习草稿可以自动生成，但正式保存必须由用户确认。
+- 自学习开启后可以自动发布 Skill，但只能写自学目录、必须通过自动闸门、全程留账并可回滚（用户 2026-09-26 决定不逐条确认）。
 - 输出调试信息时不要打印完整 API Key；最多显示是否读取到和长度。
 
 ## 完成前检查清单

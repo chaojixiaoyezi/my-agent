@@ -53,7 +53,8 @@ class FinalizationService:
         self._agent = agent
 
     # LLM: Finalization archives run facts and only requests Curator after a typed task terminal state; it never writes dialogue to long-term.
-    # 函数用途: 收口一轮模型运行、写恢复事实并在任务完成时登记后台记忆提炼。
+    #   The same typed terminal state also submits one bounded skill-learning request (self-learning on only).
+    # 函数用途: 收口一轮模型运行、写恢复事实并在任务完成时登记后台记忆提炼与自动总结 Skill 请求。
     def finalize(self, ctx: FinalizeContext):
         assert ctx.final_response is not None
         if _conversation_turn_is_terminal(ctx):
@@ -107,6 +108,7 @@ class FinalizationService:
         finish_goal_turn_accounting(self._agent, ctx.task_attributes)
         if conversation_task_completed(ctx.task_attributes):
             _request_memory_curator(self._agent, "task_complete")
+            _request_skill_learning(self._agent, ctx)
         return result
 
     def _write_runtime_fact_source_if_needed(
@@ -381,6 +383,19 @@ def _request_memory_curator(agent: object, reason: str) -> None:
         return
     try:
         request(reason)
+    except Exception:
+        return
+
+
+# LLM: 只把收口上下文交给 agent.skill_learning 做结构化判定与有界入队；不在这里调用模型或写 Skill，
+#   自学习关闭（服务缺席）时什么都不做，任何异常都不能影响用户回复。
+# 函数用途: 任务完成后 best-effort 登记一次自动总结 Skill 请求。
+def _request_skill_learning(agent: object, ctx: FinalizeContext) -> None:
+    enqueue = getattr(getattr(agent, "skill_learning", None), "enqueue_from_finalize", None)
+    if not callable(enqueue):
+        return
+    try:
+        enqueue(ctx)
     except Exception:
         return
 

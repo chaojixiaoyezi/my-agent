@@ -1,8 +1,9 @@
 # LLM: 自学习 S1 的唯一 Skill 提案权威。只接受带精确 task/run 来源的子代理 lesson Candidate，按固定模板
-#   （不调用模型）渲染草稿，存为 <owner_home>/data/skill_proposals/<proposal_id>.json；正式 SKILL.md 只能由
-#   用户经 CLI confirm 后，在同一 owner 目录锁内复核提案版本、来源 hash、目标不存在、frontmatter 解析与
-#   agent_generated guard（从不 force）再原子安装。目录名不得改成 learning_drafts：Curator 每次持 lease 前的
-#   Memory 迁移会递归迁走并删除该名字的目录。不要为本模块注册任何模型可调用的确认工具。
+#   （不调用模型）渲染草稿，存为 <owner_home>/data/skill_proposals/<proposal_id>.json；正式 SKILL.md 只经 confirm
+#   写入：用户 CLI（actor=user）或自学习开启时 runner 结果链自动确认（actor=auto，用户 2026-09-26 决定不逐条审批），
+#   两者都在同一 owner 目录锁内复核提案版本、来源 hash、目标不存在、frontmatter 解析与 agent_generated guard
+#   （从不 force）再原子安装。目录名不得改成 learning_drafts：Curator 每次持 lease 前的 Memory 迁移会递归迁走并
+#   删除该名字的目录。不要为本模块注册任何模型可调用的确认工具。
 # 模块用途: 生成、列出、查看、确认或拒绝自学习 Skill 提案；任何确认失败都不写目标 Skill 并保持提案待确认。
 from __future__ import annotations
 
@@ -230,10 +231,11 @@ class SkillProposalService:
         with self._locked():
             return _read_proposal(path)
 
-    # LLM: 只供用户显式确认入口调用；必须带用户看到的 revision。成功时安装 Skill 并把提案标为 committed（revision+1）。
-    # 函数用途: 用户确认一条提案，复核全部前提后安装为正式 owner Skill。
-    def confirm(self, proposal_id: str, expected_revision: int) -> SkillProposalOutcome:
-        return self._resolve(proposal_id, expected_revision, self._commit_locked)
+    # LLM: 用户 CLI（actor=user）或自学习开启时 runner 结果链（actor=auto）调用；必须带确认方看到的 revision。
+    #   成功时安装 Skill 并把提案标为 committed（revision+1），回执 confirmed_by 记录确认方。
+    # 函数用途: 确认一条提案，复核全部前提后安装为正式 owner Skill。
+    def confirm(self, proposal_id: str, expected_revision: int, *, actor: str = "user") -> SkillProposalOutcome:
+        return self._resolve(proposal_id, expected_revision, lambda path, item: self._commit_locked(path, item, actor))
 
     # LLM: 拒绝只改提案状态（revision+1），从不读写 Skill 目录或 Candidate 账本。
     # 函数用途: 用户拒绝一条提案，之后同一候选内容不会再生成新提案。
@@ -260,7 +262,7 @@ class SkillProposalService:
     # LLM: 顺序固定：草稿 hash→来源 Candidate→目标不存在→临时目录写入并解析→guard→os.replace 安装→写 committed；
     #   写 committed 失败时删除刚安装的目标，保证失败不留下正式 Skill。副作用：写 skills/<name>/ 与提案文件。
     # 函数用途: 在锁内复核并安装一条待确认提案。
-    def _commit_locked(self, path: Path, proposal: SkillProposal) -> SkillProposalOutcome:
+    def _commit_locked(self, path: Path, proposal: SkillProposal, actor: str) -> SkillProposalOutcome:
         _verify_draft(proposal)
         _verify_source(CandidateService(self.candidates_path), proposal.source)
         target = self.skills_root / proposal.target.skill_name
@@ -269,7 +271,7 @@ class SkillProposalService:
         try:
             staged, scan = _stage_and_scan(stage, proposal, self.config)
             _install(staged, target)
-            committed = _committed_proposal(proposal, target, scan)
+            committed = _committed_proposal(proposal, target, scan, actor)
             try:
                 _write_record(path, committed)
             except SkillProposalError:
@@ -506,12 +508,13 @@ def _install(staged: Path, target: Path) -> None:
         raise SkillProposalError(CODE_INSTALL_FAILED, f"{type(exc).__name__}: {exc}") from exc
 
 
-# LLM: 回执记录安装路径、内容 hash 与 guard 结论；revision 加一让旧版本号的重复确认被拒。
+# LLM: 回执记录安装路径、内容 hash、guard 结论与确认方（user/auto）；revision 加一让旧版本号的重复确认被拒。
 # 函数用途: 生成已提交状态的新提案记录。
-def _committed_proposal(proposal: SkillProposal, target: Path, scan: SkillScanResult) -> SkillProposal:
+def _committed_proposal(proposal: SkillProposal, target: Path, scan: SkillScanResult, actor: str) -> SkillProposal:
     now = _utc_now()
     receipt = {
         "committed_at": now,
+        "confirmed_by": actor,
         "skill_path": str(target / "SKILL.md"),
         "skill_sha256": proposal.draft.sha256,
         "guard_verdict": scan.verdict,

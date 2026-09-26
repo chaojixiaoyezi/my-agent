@@ -746,8 +746,9 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
   `applies_when` 人类说明。
 - 自学习 S1：组合根仅在 `enable_self_learning` 开启时给 manager 注入 `skill_proposals`
   （`capability/skill_proposals.py`，否则为 None）。`runner_result_service._post_result_side_effects`
-  在记录候选之后调用 `_skill_proposal_note`，把本批 Candidate 交给提案服务；异常只写成工作日志的
-  `skill_proposals_error=<类型>`，不改结果保存、提交或父级通知。`subagents/` 不导入提案服务，也不确认或安装 Skill。
+  在记录候选之后调用 `_skill_proposal_note`，把本批 Candidate 交给提案服务，并对新提案以 `actor="auto"` 调用
+  服务自己的 `confirm`（2026-09-26 起，用户决定不逐条审批）；异常只写成工作日志的 `skill_proposals_error=<类型>`，
+  不改结果保存、提交或父级通知。`subagents/` 不导入提案服务，安装与全部复核仍只在 `capability/skill_proposals.py` 内完成。
 
 ## 2026-07-30 启动上下文必需字段
 

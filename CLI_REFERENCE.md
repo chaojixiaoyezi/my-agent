@@ -224,7 +224,7 @@ Ctrl+C
 | `run` | 运行一次智能体对话 | 默认写运行归档与恢复事实；不自动写正式长期记忆，可用 `--no-save` 关闭本次运行归档 | 是，除非配置 echo 后端 |
 | `remember` | 通过统一 Candidate/Promotion 主链保存用户明确确认的具体事实、事件或项目知识 | 是 | 否 |
 | `memory` | 统一管理 Candidate、后台 Curator、Retention、Doctor 与 Migration | 取决于子命令；list/status/plan 默认只读 | Curator run 可能调用后台模型 |
-| `skills` | 查看、确认或拒绝自学习生成的 Skill 提案；确认后才安装正式 owner Skill | list/show 只读；confirm 写 `skills/lesson-*` 与提案文件；reject 只写提案文件 | 否 |
+| `skills` | `learned` 查看、回滚或删除自动总结的 Skill；`proposals` 查看、确认或拒绝子代理经验 Skill 提案 | list/show 只读；learned revert/remove 写 `skills/learned/` 与 `data/skill_learning/`；proposals confirm 写 `skills/lesson-*` 与提案文件；reject 只写提案文件 | 否 |
 | `memory-list` | 列出最近记忆 | 否 | 否 |
 | `memory-search` | 搜索记忆 | 否 | 否 |
 | `home-status` | 查看 `~/.my-agent` 入口文件、关键目录和轻量计数 | 否 | 否 |
@@ -433,6 +433,10 @@ my-agent memory migrate --apply --json
 ## `skills`
 
 ```powershell
+my-agent skills learned list
+my-agent skills learned show <name> --json
+my-agent skills learned revert <name>
+my-agent skills learned remove <name>
 my-agent skills proposals list
 my-agent skills proposals list --status pending_confirmation --json
 my-agent skills proposals show <proposal_id>
@@ -440,10 +444,37 @@ my-agent skills proposals confirm <proposal_id> --expected-revision 1
 my-agent skills proposals reject <proposal_id> --expected-revision 1 --json
 ```
 
-自学习 Skill 提案的唯一用户确认入口。配置 `enable_self_learning: true` 后，带精确任务/运行来源的子代理 lesson
-会在当前 owner 的 `data/skill_proposals/<proposal_id>.json` 生成待确认提案；提案写明来源任务与运行、触发原因
-（`subagent_lesson_candidate`）、拟保存内容（完整 SKILL.md 草稿）和适用场景，但不会自动安装。开关只控制自动生成，
-已生成的提案在开关关闭后仍可查看、确认或拒绝。没有任何模型可调用的确认工具。
+### `skills learned`：自动总结的 Skill
+
+配置 `enable_self_learning: true` 后，主代理正常完成、且本轮工具轮数达到 `self_learning_min_tool_rounds`（默认 6）
+的任务，会在当前 owner 的 `data/skill_learning/requests/` 登记一条有界学习请求（用户输入与最终回复各截 3000 字并脱敏，
+工具轨迹最多 80 条）。Gateway 后台记忆整理车道用 owner 当前选定的模型判断是否值得沉淀：值得就新建或更新
+`skills/learned/<名字>/SKILL.md`，下一轮 Skill 快照即可看到 `owner:<名字>`（category `learned`）。
+不需要逐条确认（用户 2026-09-26 决定），发布前必须通过自动闸门：输出合同、与任何来源的 Skill 重名、删过的名字、
+数量上限 `self_learning_max_skills`、脱敏、frontmatter 解析往返、`agent_generated` 安全扫描；更新只针对本轮
+`skill_search get` 读过、登记在册且你没改过的自学 Skill。每天每个 owner 最多 `self_learning_daily_limit` 次总结调用。
+没有任何模型可调用的管理工具。
+
+| 子命令或参数 | 中文说明 |
+| --- | --- |
+| `list` | 列出自动总结的 Skill（名字、版本、状态、更新时间、路径），以及待处理请求数和今日调用次数。状态：`active` 生效中，`user_modified` 你改过（自动流程不再更新），`missing` 文件已不存在。 |
+| `show <name>` | 查看登记信息、来源运行和最近 20 条账本事件（`published`/`updated`/`skipped`/`rejected`/`failed`/`dropped`/`reverted`/`removed` 与结果码）。 |
+| `revert <name>` | 退回上一个版本（每个 Skill 保留最近 5 个版本全文）；只有第 1 版时等同 `remove`；你改过的 Skill 拒绝（`SKILL_LEARNING_USER_MODIFIED`）。 |
+| `remove <name>` | 把整个 `skills/learned/<name>/` 移到 `data/skill_learning/removed/` 归档，从登记表去掉，名字加入禁用名单，以后不再自动新建同名 Skill。 |
+| `--json` | 输出稳定机器字段：成功含 `code`，失败含 `error_code`（如 `SKILL_LEARNING_NOT_LEARNED`、`SKILL_LEARNING_USER_MODIFIED`、`SKILL_LEARNING_VERSION_MISSING`、`SKILL_LEARNING_REGISTRY_CORRUPT`）；退出码成功为 0、失败为 1。 |
+
+账本 `data/skill_learning/ledger.jsonl` 只记结构化字段与有界原因，不含 Skill 正文或对话内容；
+常见拒绝码：`SKILL_LEARNING_OUTPUT_INVALID`、`SKILL_LEARNING_NAME_TAKEN`、`SKILL_LEARNING_NAME_BLOCKED`、
+`SKILL_LEARNING_LIMIT_REACHED`、`SKILL_LEARNING_GUARD_BLOCKED`、`SKILL_LEARNING_TARGET_USER_OWNED`；
+发布时做过脱敏的事件带 `SKILL_LEARNING_REDACTED`。
+
+### `skills proposals`：子代理经验提案
+
+配置 `enable_self_learning: true` 后，带精确任务/运行来源的子代理 lesson 会在当前 owner 的
+`data/skill_proposals/<proposal_id>.json` 生成提案，并立即以 `confirmed_by=auto` 走下面 `confirm` 的同一复核链自动安装
+（用户 2026-09-26 决定不逐条审批）；复核被拒的提案保持待确认。提案写明来源任务与运行、触发原因
+（`subagent_lesson_candidate`）、拟保存内容（完整 SKILL.md 草稿）和适用场景。开关关闭后，遗留提案仍可查看、确认或拒绝。
+没有任何模型可调用的确认工具。
 
 | 子命令或参数 | 中文说明 |
 | --- | --- |

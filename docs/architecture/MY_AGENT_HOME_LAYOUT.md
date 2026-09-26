@@ -38,7 +38,9 @@ owners/<provider>/<owner>/
 |-- capability_requests/             # owner 级能力/工具/权限申请
 |-- temporary_grants/                # 临时授权账本
 |-- data/artifact_backups/v1/        # 前台 shell 真正改动 ready 产物时保留的 owner 私有恢复 blob
-|-- data/skill_proposals/<id>.json   # 自学习 Skill 提案；开关开启且首次生成时才创建，用户 confirm 后才安装到 skills/
+|-- data/skill_proposals/<id>.json   # 子代理经验 Skill 提案；开关开启且首次生成时才创建，自学习开启时自动走确认链安装到 skills/lesson-*
+|-- data/skill_learning/             # 自动总结 Skill：requests/ 待处理请求、registry.json 自学 Skill 登记表、ledger.jsonl 账本、versions/ 版本全文、removed/ 删除归档
+|-- skills/learned/<name>/SKILL.md   # 自动总结发布的 Skill（category=learned），只由 registry.json 认定归属
 |-- workspace/runtime/workspaces/    # LocalStore/gateway/conversation/collaboration
 |-- permissions.json                 # owner 权限
 |-- quota.json                       # owner 额度

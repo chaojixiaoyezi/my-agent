@@ -1,5 +1,10 @@
 # 子代理维护状态
 
+自学习 S1 改为自动确认（分支 `claude/skill-auto-summary`，2026-09-26，用户决定自学习不逐条审批）：`runner_result_service._skill_proposal_note`
+在生成提案后立即对每条新提案调用 `SkillProposalService.confirm(..., actor="auto")`，走原来的全部复核（版本、草稿 hash、来源 Candidate、
+目标不存在、解析、guard），回执记 `confirmed_by=auto`；被拒的提案保持待确认。工作日志改为 `skill_proposals=<新建数> skill_proposals_committed=<安装数>`，
+异常仍只写 `skill_proposals_error=<类型>`，不影响结果交付。manager 仍只在 `enable_self_learning` 开启时注入服务。
+
 子代理 lesson 结构化来源 `record_lesson`（2026-09-25，已合入 main `52e0190e1`；已端到端真实验收）：真实 TUI 发现子代理按提示自然回复、不出状态 JSON，`output.json` 的 `lessons` 永远为空，S1 提案无从触发。现在子代理可调用专属工具 `record_lesson`，填 title/when_to_use/procedure/applies_to 四个有界字段，写入本 run 的 `lessons.jsonl`。同 run 相同参数只记一次；每 run 最多 5 条、16 KiB，超限返回结构化拒绝；run/attempt/task 身份只取宿主上下文。结果收口读回账本，逐行复核后合并进 `lessons`，没有结构化输出也会记成带账本引用的 `subagent_lesson` 候选。候选失败只写工作日志（`memory_candidates_error=<类型>`），不再阻断结果交付。工具由注册表默认隐藏，只随子代理授权下发；Runner Contract 在有授权时多一条可选软引导。离线证据见 TESTS 顶部本节；真实验收未做。
 
 自学习 S1（2026-09-24，本地分支 `claude/self-learning-skill-proposals`，待审）：`enable_self_learning` 开启时，runner 结果记录 lesson Candidate 之后，会把本批候选交给 owner Skill 提案服务生成待用户确认的提案；提案失败只写工作日志（`skill_proposals_error=<类型>`），不影响结果交付。默认关闭时不注入服务、不建目录。确认只走 `my-agent skills proposals confirm`，子代理链不安装 Skill。证据见 TESTS 顶部自学习 S1 节。

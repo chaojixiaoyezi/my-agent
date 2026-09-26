@@ -1216,6 +1216,12 @@ audit Agent 为空而回退 daemon cwd。
   `owner_wake_discovery.py` 负责重启后重新发现 durable pending work。二者都不直接生成 Daily/Candidate。
 - Curator 的 provider/model、strict schema、lease、cursor、批提交和运行审计由 Memory 模块拥有；Gateway
   只提供生命周期触发和现有 owner maintenance 执行位置，因此聊天、飞书、本地入口不会形成不同记忆语义。
+- 自学习 S3（自动总结 Skill）复用同一条策展车道：`_BackgroundMainSupervisor._safe_run_curator` 先按原条件
+  （`_curator_run_allowed`：全局 `memory_curator_enabled`、owner 记忆总闸、紧急原因或当日配额）跑记忆整理，
+  再调 `_run_skill_learning` 处理 `agent.skill_learning` 最早的一条请求，两者异常互相隔离。准入
+  `_curator_candidate_is_admitted` 在原条件之外多认一个结构化事实：`skill_learning.has_pending()`；车道开关
+  `_background_curation_enabled` 为记忆整理或 `enable_self_learning` 任一开启。Gateway 不解析学习内容，
+  运行锁、前台让路、每日上限、闸门与账本都归 `capability/skill_learning*.py`。
 
 Gateway 负责把外部请求落成可审计队列，并由 worker 调用 SimpleAgent。它不负责模型业务决策。
 

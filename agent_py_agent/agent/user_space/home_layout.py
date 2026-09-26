@@ -102,6 +102,7 @@ class MyAgentHomePaths:
     owner_plugins_dir: Path
     owner_artifact_backups_dir: Path
     owner_skill_proposals_dir: Path
+    owner_skill_learning_dir: Path
     owner_scheduler_dir: Path
     owner_scheduler_store_json: Path
     owner_scheduler_history_jsonl: Path

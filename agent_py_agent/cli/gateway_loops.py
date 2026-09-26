@@ -835,7 +835,8 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
                 )
         return ensured
 
-    # LLM: 完成回收不受新任务节流影响；全局关闭策展时不得创建软 owner，运行中的 future 仍按原合同结束。
+    # LLM: 完成回收不受新任务节流影响；记忆策展与自学习都关闭时不得创建软 owner，运行中的 future 仍按原合同结束。
+    #   自学习开启时即使 memory_curator_enabled=false 也要运转本车道，自动总结 Skill 请求才会被处理。
     # 函数用途: 及时释放已完成的记忆整理实例，再按开关、有限 worker 和轮转游标调度到期工作。
     def _run_due_curators(self) -> None:
         """后台记忆策展唤醒:按有限 worker 轮转 base、硬 owner 与纯策展软 owner。
@@ -855,8 +856,7 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
         pool = getattr(self, "_owner_pool", None)
         _retire_finished_curators(self, soft_agent_ids, pool)
         now = time.monotonic()
-        if (not getattr(getattr(self._base_agent, "config", None), "memory_curator_enabled", True)
-                or now < self._next_curator_run_at):
+        if not _background_curation_enabled(self._base_agent) or now < self._next_curator_run_at:
             return
         self._next_curator_run_at = now + _positive_int_config(
             self._base_agent, "owner_maintenance_scan_interval_seconds", default=60
@@ -930,7 +930,17 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
             return False
         return bool(payload.get("pending_reasons") or payload.get("active_lease"))
 
+    # LLM: 记忆整理仍按原准入条件（记忆总闸、紧急原因或当日配额）决定是否运行；自动总结 Skill 在其后独立运行，
+    #   两者失败互不影响。准入可能只因为有学习请求，所以这里必须重算记忆整理条件，不能直接跑 run_if_due。
+    # 函数用途: 在策展车道里依次执行到期的记忆整理和待处理的自动总结 Skill。
     def _safe_run_curator(self, agent: object, label: str) -> object:
+        result = self._run_memory_curator(agent, label) if _curator_run_allowed(self, agent) else None
+        _run_skill_learning(agent, label)
+        return result
+
+    # LLM: 只有真正执行了一次 curator 事务才扣当日配额；异常只写诊断。
+    # 函数用途: 运行一次记忆整理并按结果记账。
+    def _run_memory_curator(self, agent: object, label: str) -> object:
         try:
             result = agent.memory_curator.run_if_due()
         except Exception as exc:
@@ -1043,10 +1053,10 @@ def _resolve_curator_candidate(
         return None, True
 
 
-# LLM: Admission reads only typed memory policy, pending reasons, quota, and
-# the exact in-flight map. Rejected soft candidates are evicted immediately;
-# no model prose or inferred task importance participates.
-# 函数用途: 判断一个 agent 本轮是否可提交记忆策展，并释放被策略跳过的软 agent。
+# LLM: Admission reads only typed memory policy, pending reasons, quota, the
+# durable skill-learning queue, and the exact in-flight map. Rejected soft
+# candidates are evicted immediately; no model prose or inferred task importance participates.
+# 函数用途: 判断一个 agent 本轮是否可提交策展车道（记忆整理或自动总结 Skill），并释放被策略跳过的软 agent。
 def _curator_candidate_is_admitted(
     supervisor: object,
     agent: object,
@@ -1057,16 +1067,52 @@ def _curator_candidate_is_admitted(
     key = id(agent)
     if key in supervisor._curator_inflight:
         return False
-    memory_enabled = _agent_memory_enabled(agent)
-    quota_available = (
-        supervisor._curator_has_pending_reason(agent)
-        or supervisor._curator_quota_available()
-    )
-    if memory_enabled and quota_available:
+    if _curator_run_allowed(supervisor, agent) or _skill_learning_pending(agent):
         return True
     if is_soft:
         _evict_soft_curator_agent(pool, key)
     return False
+
+
+# LLM: 原记忆整理准入条件原样保留：全局 memory_curator_enabled、owner 记忆总闸开启，且有紧急原因
+#   （pending reason/active lease）或当日配额。车道只因自学习运转时，这里让记忆整理保持不运行。
+# 函数用途: 判断这个 agent 现在能否运行记忆整理。
+def _curator_run_allowed(supervisor: object, agent: object) -> bool:
+    config = getattr(agent, "config", None)
+    if not getattr(config, "memory_curator_enabled", True) or not _agent_memory_enabled(agent):
+        return False
+    return bool(supervisor._curator_has_pending_reason(agent) or supervisor._curator_quota_available())
+
+
+# LLM: 只读 agent.skill_learning 的持久队列；服务缺席（自学习关闭）或检查异常都按没有请求处理。
+# 函数用途: 判断这个 agent 是否有待处理的自动总结 Skill 请求。
+def _skill_learning_pending(agent: object) -> bool:
+    has_pending = getattr(getattr(agent, "skill_learning", None), "has_pending", None)
+    if not callable(has_pending):
+        return False
+    try:
+        return bool(has_pending())
+    except Exception:
+        return False
+
+
+# LLM: 自动总结失败只写诊断，不影响同车道的记忆整理结果与其它 owner。
+# 函数用途: 处理这个 agent 最早的一条自动总结 Skill 请求。
+def _run_skill_learning(agent: object, label: str) -> None:
+    run_pending = getattr(getattr(agent, "skill_learning", None), "run_pending", None)
+    if not callable(run_pending):
+        return
+    try:
+        run_pending()
+    except Exception as exc:
+        _print_gateway_loop_error("gateway_skill_learning.iteration", label, exc)
+
+
+# LLM: 策展车道的全局开关：记忆整理或自学习任一开启即运转；两者都关时不实例化任何软 owner。
+# 函数用途: 判断后台策展车道是否需要运转。
+def _background_curation_enabled(agent: object) -> bool:
+    config = getattr(agent, "config", None)
+    return bool(getattr(config, "memory_curator_enabled", True) or getattr(config, "enable_self_learning", False))
 
 
 # LLM: Submission is the only helper that mutates the curator in-flight map.

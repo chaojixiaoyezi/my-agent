@@ -308,12 +308,28 @@ subagent_memory_delete_after_days: 0
 subagent_destroy_summary_required: true
 
 # 自学习（默认关闭）：
-# - false：子代理的 lesson 只进入统一记忆候选账本，不生成任何 Skill 提案，也不创建提案目录。
-# - true：带精确任务/运行来源的子代理 lesson 会在 owner 的 data/skill_proposals/ 下生成待确认的 Skill 提案；
-#   提案不会自动安装，必须由用户执行 `my-agent skills proposals confirm <提案ID> --expected-revision <版本>`，
-#   并通过来源复核与安全扫描后，才会安装到 owner 的 skills 目录；未确认前不修改任何正式 Skill。
-# - 开关只控制自动生成提案；已生成的提案仍可用 `my-agent skills proposals list/show/confirm/reject` 管理。
+# - false：不自动总结 Skill；子代理的 lesson 只进入统一记忆候选账本，不生成任何 Skill 提案，也不创建提案目录。
+# - true：
+#   1. 主代理正常完成、且本轮工具轮数达到 self_learning_min_tool_rounds 的任务，会在 owner 的 data/skill_learning/
+#      下登记一条有界学习请求；Gateway 后台记忆整理车道用 owner 当前选定的模型判断是否值得沉淀，
+#      值得就新建或更新 owner 的 skills/learned/<名字>/SKILL.md，下一轮自动可用。
+#   2. 不需要用户逐条确认：发布前必须通过自动闸门（输出格式、重名、数量上限、只改自己生成且用户没改过的 Skill、
+#      解析检查、明文密钥检查、安全扫描）；每次写入都记账并保存版本，可用
+#      `my-agent skills learned list/show/revert/remove` 查看、回滚或删除（删除后同名不再自动新建）。
+#   3. 带精确任务/运行来源的子代理 lesson 生成的 Skill 提案会立即走原确认链自动安装（回执标 confirmed_by=auto）；
+#      以前遗留的待确认提案仍可用 `my-agent skills proposals list/show/confirm/reject` 管理。
+# - 会额外消耗模型调用（受下面每日上限约束），并写 owner 的 skills 目录。
 enable_self_learning: false
+
+# 自动总结 Skill 的触发与预算（只在 enable_self_learning 为 true 时生效）：
+# - self_learning_min_tool_rounds：本轮工具轮数达到它才登记学习请求，最小 1。
+# - self_learning_daily_limit：每个 owner 每天最多发几次总结调用；0 表示不限。
+# - self_learning_max_skills：自动总结最多保留几个 Skill（只限制新建，更新不受限）；0 表示不限。
+# - self_learning_timeout_seconds：单次总结调用的超时秒数，最小 10。
+self_learning_min_tool_rounds: 6
+self_learning_daily_limit: 20
+self_learning_max_skills: 50
+self_learning_timeout_seconds: 180
 
 # 代理自助管理模型目录（默认开启）：
 # - true：主会话代理可用 manage_models 工具代替用户列出、新增、编辑、删除服务商和模型，切换当前会话或新会话默认模型，
