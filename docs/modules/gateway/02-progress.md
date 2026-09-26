@@ -273,3 +273,4 @@ TUI 媒体请求已接通：input_media refs 与 ask 执行选项及幂等指纹
 - 2026-09-25：实验授权回执 `request_experiment._receipt` 的可选字段改为显式关键字参数（`authorization_id`、`code`，非空才写入），回执形状不变。原先的 `**fields` 违反架构守卫 `test_product_code_has_no_var_keyword_service_interfaces`，是全仓回归发现的。
 - 2026-09-25：插件面板服务 `plugin_display_service` 按配置 `plugin_process_sandbox` 给面板连接的插件客户端带上同一沙箱开关（与业务连接、启用候选一致），默认关时行为不变；见[插件进程 OS 沙箱](../../design/PLUGIN_PROCESS_SANDBOX.md)。
 - 2026-09-25：Gateway 状态文件 `gateway_state.json` 与 `/status` 新增结构化 `runtime_prefix`（进程 `sys.prefix`），供 TUI 判断自己是否与 Gateway 同一安装并在空闲时自动重启到同版客户端；见 [TUI 交互规范](../../design/TUI_DESIGN.md)。发布工具切完 Gateway 后会检测并重启同机 IM 适配器守护进程（仓库外 claude-tools）。
+- 2026-09-26：owner 唤醒发现 `owner_wake_discovery._has_pending_memory_curator_work` 的失败退避改为与 Curator 自身同源的 `curator_failure_retry_seconds`。普通失败仍是 300 秒；`CURATOR_MODEL_NOT_CONFIGURED`（owner 没选模型）等一小时，发现层不再按维护周期反复种回登记表、重建 owner 实例（真机：两个未选模型的 owner 每约 7 分钟失败一次）。见 [memory 进度](../memory/02-progress.md)。

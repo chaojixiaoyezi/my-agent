@@ -77,7 +77,8 @@ def compact_request_tokens(request: AuxiliaryModelCallRequest, source: CompactMe
 # COMPACT_VISION_SUMMARY_FAILED，绝不转分段（分段不能承载图片，转分段等于同一请求内静默退回 A）。
 # 单次摘要设了 none 仍返回工具调用（2026-09-26 真机：MiniMax-M2.7 经 Anthropic 兼容协议带工具+none 仍回 tool_use）时，
 #   改走同一分段链（文本化来源、空工具、none，带原有纠正与确定性摘录），让模型重写而不是直接退成机械摘要；
-#   分段链因非文本来源或严格来源等 typed 原因失败时，交回原回复，由上层照旧做机械回退，不比原行为更差。
+#   分段链只因"来源不能文本化"或"严格来源不接受降级摘录"失败时，交回原回复，由上层照旧做机械回退，不比原行为更差；
+#   来源在分段期间变化等其它 typed 错误照常上抛，不能拿旧回复掩盖（2026-09-26 Codex 复核）。
 # 函数用途: 窗口够用时沿用单次摘要；不够时逐段覆盖全部历史，避免反复重发超大请求；随图摘要只允许单次请求。
 def generate_bounded_compact_response(
     request: AuxiliaryModelCallRequest,
@@ -116,8 +117,8 @@ def generate_bounded_compact_response(
     try:
         return _summarize_segments(request, budget, interrupt_check, source_progress, preserve_complete_fallback,
                                    message_source)
-    except ConversationCompactError:
-        if tool_call_reply is None:
+    except ConversationCompactError as exc:
+        if tool_call_reply is None or exc.code not in _TOOL_CALL_FALLBACK_CODES:
             raise
         return tool_call_reply
 
@@ -335,6 +336,10 @@ def _diagnostic_identity(request: object) -> dict[str, object]:
     return {"request_id": str(getattr(request, "request_id", "") or ""),
             "thread_id": str(getattr(request, "thread_id", "") or ""),
             "purpose": str(getattr(request, "purpose", "") or ""), "logged_at": round(time.time(), 3)}
+
+
+# 工具调用回复改走分段链后，只有这两种失败可以退回原回复（上层机械回退）；其余错误必须上抛。
+_TOOL_CALL_FALLBACK_CODES = frozenset({"COMPACT_SOURCE_NON_TEXT", "COMPACT_SEGMENT_SUMMARY_UNAVAILABLE"})
 
 
 # LLM: A degraded segment is explicit and byte-bounded: it names its failure reason and source range,

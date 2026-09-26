@@ -14,7 +14,7 @@
     - Codex 私有验收里的真机样本：MiniMax-M2.7 经 Anthropic 兼容协议，带工具加 `none` 仍返回 tool_use。
   - **修复**：
     - **不让模型选工具**：摘要请求保留工具定义以复用缓存前缀，选择设为 `none`；`tools_for_choice` 在 `none` 时不再清空工具，产品里只有 Compact 用到 `none`。
-    - **违规兜底**：单次摘要仍回工具调用时，改走原分段链重写（文本化来源、空工具、`none`，沿用原纠正与确定性摘录）。分段链因非文本或严格来源失败时，交回原回复，由上层照旧机械回退。
+    - **违规兜底**：单次摘要仍回工具调用时，改走原分段链重写（文本化来源、空工具、`none`，沿用原纠正与确定性摘录）。分段链只在非文本来源、严格来源不接受降级这两种原因下失败时，才交回原回复由上层机械回退；来源变化等其它错误照常上抛（Codex 复核后收窄）。
     - **诊断**：无正文的响应形状日志加上 `request_id`、`thread_id`、`purpose` 和 `logged_at`。
   - **未实施**：摘要生成来源写进 checkpoint，见 [Compact 摘要生成事实](docs/design/COMPACT_GENERATION_FACTS.md)；传输层记录实际发送的 `tool_choice` 与工具数，Codex 已指出接缝位置。
   - **顺带修复**：`test_gateway_compact_recovery*.py` 的 12 个用例自 `7a15c9c91`（/effort）起在 main 上失败，因为 `_payload` 改收请求面对象；测试已同步。详见 [会话上下文设计](docs/design/CONVERSATION_CONTEXT_DESIGN.md)。
@@ -27,7 +27,7 @@
     - **审计看不全**：`audit_records` 只读请求记录里的选模型与能力展示观察，其它点位即使调用了也看不到。
     - **观察模式拖慢回复**：选模型的观察同步等待 Jev，每轮多等 3–5 秒（请求记录里 `conversation_prep_ms` 约 5 秒），结果却不采用。
   - **修复**：
-    - **决策结果日志**：`decide()` 的每个返回按点位写一行到 `<owner_home>/data/decision/outcomes.jsonl`，这是 owner 规范路径 `owner_decision_outcomes_jsonl`。只记结构化字段，无正文，有上限。`audit_records` 的 decision 主题新增按点位的次数与最近几条。
+    - **决策结果日志**：`decide()` 的每个返回按点位写一行到 `<owner_home>/data/decision/outcomes.jsonl`，这是 owner 规范路径 `owner_decision_outcomes_jsonl`。只记结构化字段，无正文，有上限。`audit_records` 的 decision 主题新增按点位的次数与最近几条；`scope=current_thread` 时只统计当前会话，不混入其它会话和后台点位（Codex 复核发现后修正）。
     - **冷却分级**：超时只冷却本点位（`point_backoff`）；连接被拒、5xx、DNS、额度和配置错误仍冷却整条连接（`connection_backoff`）。成功时两类冷却一起清零。
     - 详见[接入设计](docs/design/DECISION_MODEL_INTEGRATION.md)。
   - **未改，属建议**：

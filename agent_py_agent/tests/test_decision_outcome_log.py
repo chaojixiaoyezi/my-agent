@@ -94,3 +94,22 @@ def test_decide_logs_success_timeout_and_point_backoff_and_audit_reports_points(
     query = AuditQuery(topic="decision", scope="owner", thread_id="", since=0.0, limit=20)
     report = _decision_owner_report("alice", env.host, [env.thread.thread_id], query)
     assert report["points"]["points"] == {"curator": {"deadline": 1, "cooldown": 1}, "skill_tool": {"success": 1}}
+    # 只看当前会话：与用量、观察同一可信范围，后台 curator 行没有会话编号，不混进来。
+    current = AuditQuery(topic="decision", scope="current_thread", thread_id=env.thread.thread_id, since=0.0, limit=20)
+    report = _decision_owner_report("alice", env.host, [env.thread.thread_id], current)
+    assert report["points"]["points"] == {"skill_tool": {"success": 1}}
+
+
+def test_summary_can_be_limited_to_trusted_threads_and_drops_background_rows(tmp_path):
+    path = tmp_path / "outcomes.jsonl"
+    rows = [{"thread_id": "thread-a", "point": "recall", "status": "success"},
+            {"thread_id": "thread-b", "point": "recall", "status": "deadline"},
+            {"thread_id": "", "point": "curator", "status": "success"}]
+    path.write_text("".join(json.dumps({"schema": SCHEMA, "created_at": time.time(), **row}) + "\n" for row in rows),
+                    encoding="utf-8")
+    home = SimpleNamespace(owner_decision_outcomes_jsonl=path)
+
+    # 当前会话范围只看自己的行：其它会话与没有会话编号的后台点位都不混入。
+    assert decision_outcome_summary(home, since=0, thread_ids=["thread-a"])["points"] == {"recall": {"success": 1}}
+    assert decision_outcome_summary(home, since=0)["points"] == {"recall": {"success": 1, "deadline": 1},
+                                                                  "curator": {"success": 1}}
