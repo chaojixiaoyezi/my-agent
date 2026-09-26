@@ -717,6 +717,7 @@ Skill选中/明确required名卡进入原动态推荐段，稳定区只保留固
 - `PreparedCompactRecovery.select` 在自动 noop 返回之后、调用摘要之前，解绑原参数的 `provider_history_messages`，并把 frozen 换成空历史（经主线 owner 同意用解绑而非原地清空）。
 - 4.2M 字符下，三宿主摘要入口驻留降约 8.3–8.5MB，摘要期峰值从 10.2–11.7MB 降到 1.7–3.3MB；建循环时的首次物化峰值不变。
 - 失败、取消、超限收尾不读已解绑的历史（用读取即报错的替身钉住），自动 noop 原样发送原请求。
+- 副作用（2026-09-26 集成方发现并修复）：解绑发生在“压缩前”计量之前。三个宿主对原请求视图都用冻结输入重量，于是 checkpoint 的 `projected_tokens_before` 和进度事件的 `before_tokens` 只剩系统提示和工具，真机记成 35,915（实际约 31.3 万），还比压后小。现在 `select` 在解绑前按自动判定同一口径（`_full_request_tokens`）量一次完整旧请求，transcript 与活动回合两条路径都用这个数。这个字段只进记录和进度事件，不参与是否压缩的判定，富 TUI 也不显示它。
 - 详见[容量审计](../tasks/DECISION_MODEL_CONTEXT_AUDIT.md#摘要期释放旧请求历史2b2026-09-24本地)。
 
 验收分别记录source/seed、首次完整预检、摘要驻留和首实际provider payload峰值。必要发送本身仍有完整材料成本，不能把未发送旧超大预检峰值归入必要出站成本；三宿主的scope、失败不提交、媒体和候选/实际payload逐值一致需相邻验证。详细证据与剩余边界见[容量审计](../tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。
