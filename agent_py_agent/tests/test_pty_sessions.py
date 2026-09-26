@@ -224,6 +224,8 @@ def test_terminal_session_carries_structured_write_roots_to_sandbox(
         read_roots=None,
         protected_write_paths=None,
         run_scope=None,
+        *,
+        private_root=None,
     ):
         captured.update(
             command=command,
@@ -233,6 +235,7 @@ def test_terminal_session_carries_structured_write_roots_to_sandbox(
             read_roots=read_roots,
             protected_write_paths=protected_write_paths,
             run_scope=run_scope,
+            private_root=private_root,
         )
         raise OSError("captured")
 
@@ -250,6 +253,8 @@ def test_terminal_session_carries_structured_write_roots_to_sandbox(
     assert result.error_code == "COMMAND_FAILED"
     assert captured["write_roots"] == (task_root.resolve(),)
     assert captured["read_roots"] == ((tmp_path / "shared").resolve(),)
+    # 终端会话与前台/后台命令一样，把 Shell 工具的 my-agent 根交给沙箱（未配置时为空）。
+    assert captured["private_root"] == ""
 
 
 def test_terminal_session_scope_rejects_other_task(tmp_path: Path) -> None:
@@ -417,3 +422,21 @@ def test_close_after_natural_exit_does_not_signal_reusable_pid(tmp_path, monkeyp
     monkeypatch.setattr(pty, "terminate_process_tree", lambda *a: pytest.fail("already exited PID"))
     pty_session_registry.close(session.session_id)
     assert session.termination.confirmed and session.termination.method == "already_exited"
+
+
+def test_pty_start_hands_the_private_root_to_the_sandbox(tmp_path: Path, monkeypatch) -> None:
+    from agent_py_agent.agent.tooling import pty_sessions
+
+    captured: dict[str, object] = {}
+
+    def fake_sandbox_exec(command, target, owner_home, **kwargs):
+        captured.update(kwargs, owner_home=owner_home)
+        raise OSError("captured")
+
+    monkeypatch.setattr(pty_sessions, "_sandbox_exec", fake_sandbox_exec)
+    with pytest.raises(OSError, match="captured"):
+        pty_session_registry.start("true", tmp_path, tmp_path, private_root=str(tmp_path / "home"))
+
+    # start 打包后交给 _spawn，再原样交给沙箱，不在途中丢掉私有根。
+    assert captured["owner_home"] == tmp_path
+    assert captured["private_root"] == str(tmp_path / "home")

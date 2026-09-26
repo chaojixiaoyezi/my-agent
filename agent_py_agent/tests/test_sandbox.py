@@ -474,7 +474,9 @@ def test_owner_scoped_shell_on_macos_says_host_paths_are_readable(tmp_path, monk
 
     # 回执文本与结构化事实同源：macOS 不能再声称宿主路径已隐藏，也不给工作区外的读取背书。
     assert "external_host_paths_hidden=false" in result.output
-    assert "当前平台的沙箱只限制写入，不隐藏宿主路径" in result.output
+    assert "当前平台的沙箱只限制写入，不隐藏宿主上的一般路径" in result.output
+    # 这个工具没有配置 my-agent 根，就不能声称私有目录读不到。
+    assert "读不到" not in result.output
     assert "不要读取或依赖它们" in result.output
     assert "隔离视图" not in result.output
     assert result.result_envelope["sandbox"] == {
@@ -482,6 +484,23 @@ def test_owner_scoped_shell_on_macos_says_host_paths_are_readable(tmp_path, monk
         "external_host_paths_hidden": False,
         "host_path_absence_proven": False,
     }
+
+
+def test_owner_scoped_shell_on_macos_names_the_private_dirs_when_denied(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("agent_py_agent.agent.tooling.shell.sandbox_hides_host_paths", lambda: False)
+    owner = tmp_path / "owner"
+    owner.mkdir()
+    tool = ShellTool(owner, options=ShellToolOptions(owner_scope_root=str(owner), host_private_root=str(tmp_path)))
+    monkeypatch.setattr(
+        tool,
+        "_run_command",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(args=["bash"], returncode=0, stdout="ok\n", stderr=""),
+    )
+
+    result = tool.execute({"command": "ls", "working_dir": str(owner)})
+
+    assert "其它 owner、配置、发布记录）读不到" in result.output
+    assert result.result_envelope["sandbox"]["external_host_paths_hidden"] is False
 
 
 def test_unscoped_shell_availability_tracks_attempt_sandbox(tmp_path, monkeypatch) -> None:

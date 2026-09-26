@@ -1,5 +1,19 @@
 # 测试与发布验收
 
+## macOS 沙箱拒绝读取 my-agent 私有目录（2026-09-26，分支 `claude/curator-budget`，基于 main `0624ab355`）
+
+- **起因**：macOS Seatbelt 规则只有写拒绝，owner 隔离的 Shell 能读到其它 owner 的数据和 `~/.my-agent/config`（含密钥）；Linux bwrap 本来就不挂载这些路径。
+- **规则语义实测**（本机 `sandbox-exec`）：后写覆盖先写。先拒绝根、再放行子目录时子目录可读；顺序颠倒时连本 owner 也读不到。
+- **新增/调整测试**（`test_attempt_sandbox.py` 7 项、`test_sandbox.py` 1 项、`test_pty_sessions.py` 1 项；另外给 4 个既有测试的替身补上新参数或属性，断言不变）：
+  - 规则顺序单元测试：先拒绝根，再放行本 owner、view、授权读根与写根，不放行其它 owner 与 config；Full Access 与未给根时不加读规则。
+  - 真实 `sandbox-exec`（仅 macOS）：本 owner 文件与授权读根可读；其它 owner 与 config 读不到；一般宿主路径仍可读；view 可写。
+  - 真实注册表装配（仅 macOS）：`ToolRegistryParams(host_private_root=…)` 构造出的 `run_command` 读不到 config 与其它 owner，本 owner 可读。
+  - 传递链：`_sandbox_exec` 只在 owner 隔离时带根；前台、后台、终端会话三条路径都把根交给沙箱（终端会话经 `_PtySandboxInputs` 打包后原样转交）；`SimpleAgent` 把自身 home 根接进 Shell 工具；macOS 回执在配置了根时说明其它 owner 与配置读不到，没配置时不这么说。
+- **变异验证**：11 种（不追加读规则、放行写在拒绝前、Full Access 也加规则、前台/后台/终端不传根、终端打包丢根、bootstrap 不传、core 不传、回执不看根、放行漏掉授权读根）全部使测试失败。
+- **代码尺寸**：按“标识 + 严重级别”与 main 比对。`_spawn` 加参后一度触发硬性超限，改为把沙箱输入收进 `_PtySandboxInputs`，参数反而从超软上限降到接近上限；沙箱类的读规则判断移到类外，类长度不变。
+- **回归**：工具注册、Shell、沙箱、终端会话相关 42 个测试文件 978 passed、9 skipped（按平台跳过）；构造 `SimpleAgent` 的 136 个测试文件 2670 passed、17 skipped、29 xfailed，另 2 个失败是 main 上既有问题：`test_background_first_request_compacts_after_complete_prepare` 两个协议，改动前同样失败，bisect 定位到 `f7029f54c`，下一个提交校准测试窗口。
+- **事故记录**：第一次跑这 136 个文件时，按关键字挑文件误把 `agent_py_agent/tests/run_tests.py` 交给了 pytest。它在导入时就对真实 `~/.my-agent` 执行了 `status`、一次真实模型调用的 `run --no-save`，以及一次因参数不合法失败的 `remember`，留下运行时工作区 `main-a4e68bb5ead1`、运行目录 `runs/2026-09-26/861790a7…` 和全局索引条目；长期记忆未写入。按既有规则不手删、已报告用户。测试文件列表必须经 `grep '/test_[^/]*\.py$'` 过滤。
+
 ## Shell 沙箱回执按平台如实说明（2026-09-26，分支 `claude/curator-budget`，基于 main `2b25e38b3`）
 
 - **起因**：Codex 验收 TUI-CAP06 发现，macOS 上 owner 隔离的 Shell 回执写 `external_host_paths_hidden=true`，而 Seatbelt 规则只拒绝写入、读取不受限，命令实际读得到宿主路径。

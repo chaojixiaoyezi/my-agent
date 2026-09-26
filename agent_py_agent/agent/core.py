@@ -844,6 +844,8 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
             owner_scope_root=owner_scope_root,
             owner_type=_tool_registry_owner_type(agent),
             protected_persona_root=_protected_persona_root(agent),
+            # 沙箱只在 owner 隔离时用它拒绝读取其它 owner 与配置；full access 视图不生效，所以这里无条件给出。
+            host_private_root=str(getattr(agent.home_paths, "root", "") or ""),
             owner_quota_max_bytes=(
                 max(0, int(getattr(agent.owner_policy, "max_disk_mb", 0))) * 1024 * 1024
                 if owner_scope_root

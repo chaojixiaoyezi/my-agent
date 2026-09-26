@@ -485,3 +485,152 @@ def test_build_argv_requires_ready(tmp_path):
     else:
         with pytest.raises(SandboxUnavailableError):
             sandbox.build_argv(["echo", "hi"])
+
+
+# 函数用途: 造一个带 my-agent 根、两个 owner、配置和共享只读包的真实目录，返回 (根, 本 owner 的 spec)。
+def _private_root_spec(tmp_path: Path, **changes) -> tuple[Path, AttemptSandboxSpec]:
+    root = (tmp_path / "my-agent-home").resolve()
+    owner = root / "owners" / "local" / "main"
+    view = owner / "workspace" / "task"
+    view.mkdir(parents=True)
+    (owner / "note.md").write_text("mine", encoding="utf-8")
+    other = root / "owners" / "providers" / "feishu" / "users" / "u-other"
+    other.mkdir(parents=True)
+    (other / "memory.md").write_text("other", encoding="utf-8")
+    (root / "config").mkdir()
+    (root / "config" / "desktop.yaml").write_text("secret: x", encoding="utf-8")
+    package = root / "shared" / "pkg"
+    package.mkdir(parents=True)
+    (package / "SKILL.md").write_text("pkg", encoding="utf-8")
+    values = dict(attempt_view=view, staging_root=view, shared_workspace=owner, owner_home=owner,
+                  extra_write_roots=(view,), public_read_roots=(package,), implicit_attempt_write_roots=False,
+                  private_read_root=root, macos_sandbox_exec="/usr/bin/sandbox-exec")
+    values.update(changes)
+    return root, AttemptSandboxSpec(**values)
+
+
+def test_private_read_rules_deny_the_root_first_then_allow_the_owner_view(tmp_path):
+    from agent_py_agent.agent.attempt.sandbox import _private_read_rules
+
+    root, spec = _private_root_spec(tmp_path)
+    rules = _private_read_rules(spec)
+
+    # Seatbelt 后写覆盖先写：拒绝根必须在最前，放行在后。
+    assert rules[0] == f'(deny file-read* (subpath "{root}"))'
+    allowed = rules[1:]
+    assert all(rule.startswith("(allow file-read* (subpath ") for rule in allowed)
+    for path in (spec.owner_home, spec.attempt_view, *spec.public_read_roots):
+        assert f'(allow file-read* (subpath "{path}"))' in allowed
+    assert not any("config" in rule or "u-other" in rule for rule in allowed)
+
+
+def test_macos_profile_adds_private_read_rules_only_for_owner_scope(tmp_path, monkeypatch):
+    monkeypatch.setattr(platform, "system", lambda: "Darwin")
+    _root, spec = _private_root_spec(tmp_path)
+    scoped = AttemptExecutionSandbox(spec)._macos_argv(["/bin/true"])[2]
+    full = AttemptExecutionSandbox(AttemptSandboxSpec(**{**spec.__dict__, "full_access": True}))._macos_argv(["/bin/true"])[2]
+    unset = AttemptExecutionSandbox(AttemptSandboxSpec(**{**spec.__dict__, "private_read_root": None}))._macos_argv(["/bin/true"])[2]
+
+    assert "(deny file-read*" in scoped
+    # Full Access 没有 owner 墙，也就没有私有目录读拒绝；未给根时保持原规则。
+    assert "file-read*" not in full
+    assert "file-read*" not in unset
+
+
+@needs_macos
+def test_macos_private_read_root_hides_other_owners_and_config(tmp_path):
+    root, spec = _private_root_spec(tmp_path)
+    (tmp_path / "outside.txt").write_text("host", encoding="utf-8")
+    sandbox = AttemptExecutionSandbox(spec)
+    if not _ready(sandbox):
+        pytest.skip("sandbox-exec 不可用")
+
+    def can_read(path: Path) -> bool:
+        return sandbox.run(["/bin/cat", str(path)], timeout=30).returncode == 0
+
+    assert can_read(spec.owner_home / "note.md")
+    assert can_read(root / "shared" / "pkg" / "SKILL.md")
+    assert not can_read(root / "owners" / "providers" / "feishu" / "users" / "u-other" / "memory.md")
+    assert not can_read(root / "config" / "desktop.yaml")
+    # 一般宿主路径仍可读（macOS 回执如实说明），写入仍只落写根。
+    assert can_read(tmp_path / "outside.txt")
+    write = sandbox.run(["/bin/sh", "-c", f"printf ok > {spec.attempt_view / 'out.txt'}"], timeout=30)
+    assert write.returncode == 0 and (spec.attempt_view / "out.txt").read_text(encoding="utf-8") == "ok"
+
+
+def test_shell_passes_the_private_root_only_for_owner_scope(tmp_path, monkeypatch):
+    from agent_py_agent.agent.attempt import sandbox as attempt_sandbox
+    from agent_py_agent.agent.tooling.shell import _sandbox_exec
+
+    captured = []
+
+    class _Capture:
+        def __init__(self, spec):
+            captured.append(spec)
+
+        def build_argv(self, argv):
+            return list(argv)
+
+    monkeypatch.setattr(attempt_sandbox, "AttemptExecutionSandbox", _Capture)
+    root = (tmp_path / "home").resolve()
+    owner = root / "owners" / "local" / "main"
+    owner.mkdir(parents=True)
+    _sandbox_exec("true", owner, owner, private_root=root)
+    _sandbox_exec("true", owner, "", private_root=root)
+
+    assert captured[0].private_read_root == root
+    assert captured[1].full_access is True and captured[1].private_read_root is None
+
+
+@needs_macos
+def test_registry_built_shell_cannot_read_other_owners_or_config_on_macos(tmp_path):
+    from agent_py_agent.agent.tooling.registry import ToolRegistry, ToolRegistryParams
+
+    root, spec = _private_root_spec(tmp_path)
+    owner = spec.owner_home
+    if not _ready(AttemptExecutionSandbox(spec)):
+        pytest.skip("sandbox-exec 不可用")
+    registry = ToolRegistry(ToolRegistryParams(
+        workspace_root=owner, max_chars=6000, max_entries=200, max_matches=50, web_max_chars=12000, http_timeout=30,
+        catalog_limit=20, retrieval_limit=3, vector_search_enabled=False, shell_tool_timeout=30,
+        owner_scope_root=str(owner), host_private_root=str(root),
+    ))
+    shell = registry.tools["run_command"]
+
+    def run(command: str):
+        return shell.execute({"command": command, "working_dir": str(owner)})
+
+    # 装配链：注册参数 → Shell 工具 → 沙箱；真实 sandbox-exec 下只剩本 owner 的范围可读。
+    assert run(f"cat {owner / 'note.md'}").ok
+    assert not run(f"cat {root / 'config' / 'desktop.yaml'}").ok
+    assert not run(f"cat {root / 'owners' / 'providers' / 'feishu' / 'users' / 'u-other' / 'memory.md'}").ok
+
+
+def test_background_command_carries_the_private_root(tmp_path, monkeypatch):
+    from agent_py_agent.agent.tooling import shell as shell_module
+    from agent_py_agent.agent.tooling.shell import ShellTool, ShellToolOptions
+
+    owner = (tmp_path / "home" / "owners" / "local" / "main").resolve()
+    owner.mkdir(parents=True)
+    captured = {}
+
+    def fake_argv(*args, **kwargs):
+        captured.update(kwargs)
+        raise OSError("captured")
+
+    monkeypatch.setattr(shell_module, "_background_command_argv", fake_argv)
+    tool = ShellTool(owner, options=ShellToolOptions(owner_scope_root=str(owner), host_private_root=str(tmp_path / "home")))
+    tool.execute({"command": "sleep 5", "run_in_background": True, "working_dir": str(owner)})
+
+    # 后台命令与前台、终端会话一样把 my-agent 根交给沙箱。
+    assert captured["private_root"] == str(tmp_path / "home")
+
+
+def test_agent_wires_its_home_root_into_the_shell_tool(tmp_path):
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings.config import AgentConfig
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False), tmp_path)
+    shell = agent.tools.tools["run_command"]
+
+    assert shell.host_private_root == str(agent.home_paths.root)

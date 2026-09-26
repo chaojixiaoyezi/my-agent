@@ -479,7 +479,7 @@ def test_pty_pending_start_reserves_last_slot(tmp_path, monkeypatch):
     registry = pty.PtySessionRegistry()
     entered, release = threading.Event(), threading.Event()
     monkeypatch.setattr(pty, "_MAX_SESSIONS", 1)
-    def spawn(*args):
+    def spawn(*args, **kwargs):
         entered.set()
         release.wait(1)
     monkeypatch.setattr(registry, "_spawn", spawn)

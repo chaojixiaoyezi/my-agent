@@ -121,6 +121,8 @@ class ShellToolOptions:
     max_output_chars: int = _DEFAULT_MAX_OUTPUT_CHARS
     # 后台服务声明 loopback 却绑到局域网地址时是否由 host 回收；False 只记 listener_warning。来自配置 background_process_listen_scope_enforce。
     listen_scope_enforce: bool = True
+    # my-agent 家目录根；owner 隔离时沙箱拒绝读取其中本 owner 以外的部分（full access 不生效）。空=不加读拒绝。
+    host_private_root: str = ""
 
 
 # LLM: This immutable request carries the exact ActionPolicy operation decision into shell recovery;
@@ -616,6 +618,8 @@ def _sandbox_exec(
     write_roots: tuple[Path, ...] | None = None,
     read_roots: tuple[Path, ...] | None = None,
     protected_write_paths: tuple[Path, ...] | None = None,
+    *,
+    private_root: object = None,
 ) -> tuple[Any, bool]:
     """把命令包进 attempt 沙箱（G6 接线）。
 
@@ -665,6 +669,12 @@ def _sandbox_exec(
         ),
         implicit_attempt_write_roots=write_roots is None,
         full_access=full_access,
+        # 只在 owner 隔离时生效：Full Access 没有 owner 墙，也就没有私有目录读拒绝。
+        private_read_root=(
+            Path(str(private_root)).expanduser().resolve(strict=False)
+            if owner_text and str(private_root or "").strip()
+            else None
+        ),
     )
     sandbox = AttemptExecutionSandbox(spec)
     # Attempt 网关的 SandboxUnavailableError 继承 SandboxUnavailable，
@@ -678,11 +688,12 @@ def _sandbox_exec(
 def _background_command_argv(
     command: str, target: Path, owner_home: object, protected_persona_root: object,
     write_roots: tuple[Path, ...] | None, read_roots: tuple[Path, ...] | None,
-    protected_write_paths: tuple[Path, ...] | None,
+    protected_write_paths: tuple[Path, ...] | None, *, private_root: object = None,
 ) -> list[str]:
     if owner_home or protected_persona_root or os.name == "posix":
         argv, use_shell = _sandbox_exec(command, target, owner_home, protected_persona_root,
-                                        write_roots, read_roots, protected_write_paths)
+                                        write_roots, read_roots, protected_write_paths,
+                                        private_root=private_root)
         if use_shell or not isinstance(argv, list):
             raise OSError("managed background sandbox must provide argv execution")
         return argv
@@ -882,6 +893,7 @@ class ShellTool(BaseTool):
         )
         self.access_mode = _normalize_access_mode(options.access_mode)
         self.protected_persona_root = str(options.protected_persona_root or "")
+        self.host_private_root = str(options.host_private_root or "")
         self.artifact_backup_root = (
             Path(options.artifact_backup_root).expanduser().resolve(strict=False)
             if options.artifact_backup_root is not None
@@ -1155,7 +1167,8 @@ class ShellTool(BaseTool):
     ) -> ToolHandlerOutcome:
         try:
             argv = _background_command_argv(command, target, self.path_access_policy.owner_scope_root,
-                                            self.protected_persona_root, *sandbox_roots)
+                                            self.protected_persona_root, *sandbox_roots,
+                                            private_root=self.host_private_root)
             jobs_dir = self.workspace_root / ".background_jobs"
             jobs_dir.mkdir(parents=True, exist_ok=True)
             log_path = jobs_dir / f"job-{time.time_ns()}.log"
@@ -1403,7 +1416,7 @@ def _postcheck_shell_artifacts(
 # LLM: 回执文本与 result_envelope.sandbox 必须同源（hidden 来自 sandbox_hides_host_paths），不能一处说隐藏、另一处说可读。
 #   macOS 版如实说明宿主路径读得到，同时写明工作区外的路径不在本任务授权内，不给读取背书。
 # 函数用途: 生成 owner 隔离模式下 Shell 输出末尾的沙箱范围说明。
-def _sandbox_scope_notice(hidden: bool) -> str:
+def _sandbox_scope_notice(hidden: bool, *, private_hidden: bool = False) -> str:
     if hidden:
         return (
             "[sandbox_scope] file_scope=owner_workspace_only "
@@ -1415,7 +1428,9 @@ def _sandbox_scope_notice(hidden: bool) -> str:
     return (
         "[sandbox_scope] file_scope=owner_workspace_only "
         "external_host_paths_hidden=false host_path_absence_proven=false\n"
-        "当前平台的沙箱只限制写入，不隐藏宿主路径：只有结构化授权写根内的写入会生效并持久化。"
+        "当前平台的沙箱只限制写入，不隐藏宿主上的一般路径"
+        + ("；my-agent 数据目录中本 owner 以外的部分（其它 owner、配置、发布记录）读不到" if private_hidden else "")
+        + "。只有结构化授权写根内的写入会生效并持久化。"
         "能读到工作区以外的路径不代表获得了授权，这些路径不在本任务范围内，不要读取或依赖它们。"
     )
 
@@ -1440,7 +1455,7 @@ def _build_protected_shell_outcome(
     # 只读隔离按平台沙箱的结构化事实如实投影：Linux 隐藏未挂载路径，macOS 只限写。
     hidden = owner_scoped and sandbox_hides_host_paths()
     if owner_scoped:
-        output = f"{output}\n{_sandbox_scope_notice(hidden)}"
+        output = f"{output}\n{_sandbox_scope_notice(hidden, private_hidden=bool(tool.host_private_root))}"
     result_envelope: dict[str, object] = {
         "artifact_protection": artifact_summary,
         "process": process_facts,
@@ -1874,6 +1889,7 @@ def _run_attempt_sandboxed_shell_command(
         sandbox_write_roots,
         sandbox_read_roots,
         sandbox_protected_paths,
+        private_root=tool.host_private_root,
     )
     try:
         proc = subprocess.Popen(

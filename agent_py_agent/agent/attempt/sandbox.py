@@ -75,6 +75,9 @@ class AttemptSandboxSpec:
     implicit_attempt_write_roots: bool = True
     # 整根只读形态（插件进程试点）：Linux 读范围与宿主相同、只写显式写根；macOS 非 full 形态本来就是读放行、写只落写根。
     read_only_root: bool = False
+    # my-agent 家目录根：owner 隔离形态下拒绝读取其中除本 owner home、attempt view、staging、授权读根、写根以外的部分
+    # （其它 owner、配置与密钥、发布记录）。Linux bwrap 本来就不挂载这些路径；macOS 由 Seatbelt 读拒绝实现。full_access 不生效。
+    private_read_root: Path | None = None
 
 
 class AttemptExecutionSandbox:
@@ -251,7 +254,7 @@ class AttemptExecutionSandbox:
             raise SandboxUnavailableError(
                 "SANDBOX_UNAVAILABLE: SEATBELT_NOT_FOUND: 缺少 sandbox-exec"
             )
-        profile = self._macos_profile(
+        profile = "\n".join([self._macos_profile(
             attempt_view=self.spec.attempt_view,
             staging=self.spec.staging_root,
             shared=self.spec.shared_workspace,
@@ -260,7 +263,7 @@ class AttemptExecutionSandbox:
             protected_write_paths=self.spec.protected_write_paths,
             implicit_attempt_write_roots=self.spec.implicit_attempt_write_roots,
             full_access=self.spec.full_access,
-        )
+        ), *_private_read_rules(self.spec)])
         return [sandbox_exec, "-p", profile, "--", *command_argv]
 
     # LLM: 同步批处理无 stdin 注入协议，必须返回 EOF；不改变 build_argv、显式 PTY 通道和超时回收契约。
@@ -366,8 +369,8 @@ class AttemptExecutionSandbox:
         lines.extend(_readonly_path_denies(protected_write_paths))
         persona_denies = _persona_file_literal_denies(protected_persona_root)
         if persona_denies:
-            # literal 比 subpath 精确，Seatbelt 同精确度取首条 → deny 优先于
-            # 更宽的写根 allow；persona 文件在可写区内也保持只读。
+            # Seatbelt 后写覆盖先写（本机实测 2026-09-26）：这些 deny 写在写根 allow 之后才生效，
+            # persona 文件在可写区内也保持只读。顺序不能调换。
             lines.extend(persona_denies)
         return "\n".join(lines)
 
@@ -383,6 +386,20 @@ class AttemptExecutionSandbox:
 # 函数用途: 判断当前平台的进程沙箱是否隐藏未授权的宿主路径。
 def sandbox_hides_host_paths(platform_name: str | None = None) -> bool:
     return (platform_name or platform.system()) == "Linux"
+
+
+# LLM: Seatbelt 规则“后写覆盖先写”（本机实测 2026-09-26：先拒绝根再放行子目录，子目录可读；顺序颠倒则子目录也被拒）。
+#   所以先写对 my-agent 根的读拒绝，再逐个放行本 owner 的可见范围；与 Linux 挂载视图对齐。只动 file-read*，
+#   写规则保持原样。改动须同步 test_attempt_sandbox.py 里的真实 sandbox-exec 用例。
+# 函数用途: 生成 owner 隔离形态下 my-agent 私有目录的读拒绝与放行规则；Full Access 或未给根时返回空列表。
+def _private_read_rules(spec: AttemptSandboxSpec) -> list[str]:
+    if spec.full_access or spec.private_read_root is None:
+        return []
+    root = json.dumps(str(Path(spec.private_read_root).resolve(strict=False)))
+    visible = (spec.owner_home, spec.shared_workspace, spec.attempt_view, spec.staging_root,
+               *spec.public_read_roots, *spec.extra_write_roots)
+    allowed = sorted({json.dumps(str(Path(path).resolve(strict=False))) for path in visible})
+    return [f"(deny file-read* (subpath {root}))", *(f"(allow file-read* (subpath {path}))" for path in allowed)]
 
 
 def _persona_file_literal_denies(protected_persona_root: Path | None) -> list[str]:
