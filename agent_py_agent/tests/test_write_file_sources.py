@@ -19,8 +19,8 @@ from agent_py_agent.agent.tooling.models import ApprovalPolicy
 from agent_py_agent.tests._tool_runtime_harness import execute_canonical_test_call
 
 
-# LLM: 替身只模拟已经授权的宿主 bytes transport，包授权/摘要在独立 resolver 测试覆盖；不能替代真实 TUI 验收。
-# 函数用途: 返回可统计调用次数的资源工具和精确输入引用。
+# LLM: 替身的两个字段由显式测试来源合同声明，与 resolver 成对装配；包身份在真实包测试覆盖，不能替代真实 TUI 验收。
+# 函数用途: 返回可统计调用次数的字节来源和原写工具，检验通用传输、权限与操作账。
 def source_tool(root, *, data=b"\x00exact\xff\r\n", access_options=None):
     reference = {"kind": "test_resource", "sha256": hashlib.sha256(data).hexdigest()}
     reads = []
@@ -29,7 +29,16 @@ def source_tool(root, *, data=b"\x00exact\xff\r\n", access_options=None):
         reads.append(dict(ref))
         return FileSourceContent(data, ref)
 
-    tool = WriteFileTool(root, options=WriteFileToolOptions(source_resolver=resolve, access_options=access_options))
+    schema = {
+        "type": "object",
+        "properties": {"kind": {"type": "string", "const": "test_resource"},
+                       "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}},
+        "required": ["kind", "sha256"],
+        "additionalProperties": False,
+    }
+    tool = WriteFileTool(root, options=WriteFileToolOptions(
+        source_resolver=resolve, source_ref_schema=schema, access_options=access_options,
+    ))
     return tool, reference, reads
 
 
@@ -65,6 +74,36 @@ def test_source_schema_is_absent_without_host_resolver(tmp_path):
     result = plain.execute({"path": "missing.bin", "source_ref": ref})
     assert not result.ok and result.effect_outcome == "not_started"
     assert result.error_code == "TOOL_UNAVAILABLE" and not (tmp_path / "missing.bin").exists()
+
+
+@pytest.mark.parametrize("missing", ["resolver", "schema"])
+def test_partial_source_host_configuration_is_rejected(tmp_path, missing):
+    resolver = None if missing == "resolver" else lambda ref: FileSourceContent(b"source", ref)
+    schema = None if missing == "schema" else {"type": "object"}
+    with pytest.raises(ValueError, match="解析器与引用 schema 必须同时配置"):
+        WriteFileTool(tmp_path, options=WriteFileToolOptions(source_resolver=resolver, source_ref_schema=schema))
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("schema", [{}, {"type": "string"}, {"type": "array"}])
+def test_source_host_schema_must_declare_a_reference_object(tmp_path, schema):
+    with pytest.raises(ValueError, match="schema 必须声明 object 类型"):
+        WriteFileTool(tmp_path, options=WriteFileToolOptions(
+            source_resolver=lambda ref: FileSourceContent(b"source", ref), source_ref_schema=schema,
+        ))
+
+
+def test_source_host_schema_is_copied_before_the_tool_is_published(tmp_path):
+    schema = {"type": "object", "properties": {"id": {"type": "string"}},
+              "required": ["id"], "additionalProperties": False}
+    tool = WriteFileTool(tmp_path, options=WriteFileToolOptions(
+        source_resolver=lambda ref: FileSourceContent(b"source", ref), source_ref_schema=schema,
+    ))
+    schema["properties"]["id"]["type"] = "integer"
+    schema["required"].clear()
+    bound = tool.model_spec.input_schema["properties"]["source_ref"]
+    assert bound["properties"]["id"]["type"] == "string" and bound["required"] == ["id"]
+    tool.model_spec.assert_schema_hash()
 
 
 @pytest.mark.parametrize("extra", [{"content": "text"}, {"content": None}, {"data_base64": "AA=="},

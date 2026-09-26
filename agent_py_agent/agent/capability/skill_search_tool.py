@@ -5,6 +5,7 @@
 #   ③category 过滤可选;④包内成员只在显式 package_id 下检索/读取，不进入全局 Skill。
 #   包正文读取由原 task pin 保存精确引用；大结果沿原归档保留可见来源和预览，不执行脚本。
 #   next_read/next_search 只投影同代显式调用参数；包命名空间仅指已声明成员，不从正文推断业务路径归属。
+#   search 显式携带 resource_path 时在快照读取前报参数错，不静默丢条件或改成 get。
 #   错选择器仍失败，只在当前可见包精确命中时建议重试，不自动读取或晋升。
 #   修改时同步检查 skill_tree、包发现、选择器恢复和原生归档后精确复制测试。
 # 模块用途: 模型的"技能书架检索台":说一句需求,给出最相关的几个技能和它们的
@@ -35,14 +36,15 @@ if TYPE_CHECKING:
     from ..core import SimpleAgent
 
 
-# LLM: 包范围是结构化参数；导航建议只给模型，不据正文路径、query 或错选择器扩权；action 默认须与 execute 一致。
-# 函数用途: 声明统一方法检索入口，同时区分公开 Skill 和能力包内按需资源。
+# LLM: 包范围与动作是结构化参数；resource_path 只接受显式 get，字段约束和 action 默认须与 execute 一致。
+# 函数用途: 声明统一方法检索入口和参数边界，不据正文路径、query 或错选择器扩权。
 def build_skill_search_model_spec() -> ToolModelSpec:
     return ToolModelSpec(
         name="skill_search",
         description=(
             "检索或读取当前轮可用 Skill 和能力包；任务明确匹配已列出的专业方法时，先读方法再开展工作。"
             "action=search 按需求返回公开 Skill 或能力包摘要；结果的 next_read 可原样作为本工具参数读取。"
+            "search 用 query 检索，不能传 resource_path，即使是空串。"
             "action=get 时，普通 Skill 使用 skill_id 读取 SKILL.md，能力包使用 package_id；两种选择器互斥。"
             "包的 stable_id 用于授权和任务引用，不能填入 skill_id。指定 package_id 后可检索内部资源，"
             "get 省略 resource_path 时读取包入口。错选择器仍失败；若返回 next_read，可发起新的显式调用。"
@@ -60,7 +62,7 @@ def build_skill_search_model_spec() -> ToolModelSpec:
                 "category": {"type": "string", "description": "可选，限定 Skill Categories 类目。"},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 20, "description": "最多返回几条，默认 5。"},
                 "package_id": {"type": "string", "description": "逐字复制能力包摘要的 package_id；与 skill_id 互斥。action=get 读取包入口或资源，action=search 检索包内资源；省略本字段时只检索公开摘要。"},
-                "resource_path": {"type": "string", "description": "包内 get 使用已声明的包根相对成员路径，不是宿主文件地址；从包内检索结果定位，省略读取入口文档。"},
+                "resource_path": {"type": "string", "description": "仅包内 action=get 可传；action=search 即使空串也不能传。使用已声明的包根相对成员路径，不是宿主地址；省略时读取入口。"},
                 "offset": {"type": "integer", "minimum": 0, "description": "包内检索的结果偏移，或正文读取的字符偏移。"},
                 "max_chars": {"type": "integer", "minimum": 1, "description": "包正文单页字符数，不超过原 tool_read_max_chars 配置。"},
                 "expected_package_sha256": {"type": "string", "description": "原样携带 next_read、next_search 或分页 continuation 中的包摘要，防止读到同名新版本。"},
@@ -104,10 +106,13 @@ class SkillSearchTool(BaseTool):
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
 
-    # LLM: 包参数只能进入明确包分支；不能把未声明资源路径交给全局 Skill 或文件工具兜底。
-    # 函数用途: 按结构化动作选择公开检索、原 Skill 读取或包内按需读取。
+    # LLM: search 的 resource_path 冲突在读取快照前拒绝，不能丢条件、转换动作或返回未授权成员建议；默认动作保持原合同。
+    # 函数用途: 先检查动作与路径参数，再选择公开检索、原 Skill 读取或包内读取，避免成功却查了另一件事。
     def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         action = str(params.get("action") or ("get" if params.get("skill_id") else "search")).strip()
+        if action == "search" and "resource_path" in params:
+            return _invalid("resource_path 仅允许在 action=get 时使用",
+                            hint="检索包资源请用 action=search、package_id 和 query；读取资源请显式使用 action=get 和 package_id。")
         if params.get("package_id"):
             return self._package_action(params, action)
         if params.get("resource_path"):

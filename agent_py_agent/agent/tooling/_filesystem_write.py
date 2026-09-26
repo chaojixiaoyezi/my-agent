@@ -1,5 +1,5 @@
-# LLM: 本模块是 write_file 的 canonical 原子写入；有精确来源时优先传原引用，宿主仅提供 bytes，不改变执行器、路径、配额或 artifact 合同。
-# 模块用途: 校验文本、二进制或精确来源内容并安全写入文件，同时返回可追踪的写入结果；来源读取不执行脚本。
+# LLM: 本模块是 write_file 的 canonical 原子写入；来源 resolver/schema 由宿主成对提供，原参数门执行声明，不改变执行器、权限或 artifact 合同。
+# 模块用途: 校验文本、二进制或精确来源并安全写文件；缺来源字段在原工具门反馈，来源读取不执行脚本。
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import os
 import shutil
 import tempfile
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -79,14 +80,30 @@ _WRITE_FILE_EXAMPLES = [
 ]
 
 
-# LLM: source_resolver 只能由宿主装配，调用时读取当前受限快照；它不随模型参数改变，也不提供额外写权限。
-# 类用途: 配置文件写工具的正文预算、访问范围和可选资源读取能力。
+# LLM: source_resolver 与 source_ref_schema 只能由宿主成对装配；来源语义归宿主，工具层不导入具体来源模块或增加权限。
+# 类用途: 配置正文预算、访问范围和可选资源读取合同，避免模型声明与解析器要求脱节。
 @dataclass(frozen=True)
 class WriteFileToolOptions:
     max_inline_content_chars: int | None = None
     access_options: FileSystemAccessOptions | None = None
     runtime_fact_roots: list[Path] = field(default_factory=list)
     source_resolver: Callable[[object], FileSourceContent] | None = None
+    source_ref_schema: dict[str, Any] | None = None
+
+
+# LLM: 缺少 resolver 或 schema 是宿主装配错误，不能退回宽泛 object；深拷贝后仍由原 ToolModelSpec 验证并固定整份 schema。
+# 函数用途: 为可用来源准备隔离的模型输入声明，不读取来源或写文件；未启用来源时保持原工具格式。
+def _source_ref_input_properties(options: WriteFileToolOptions) -> dict[str, Any]:
+    if (options.source_resolver is None) != (options.source_ref_schema is None):
+        raise ValueError("文件来源解析器与引用 schema 必须同时配置")
+    if options.source_resolver is None:
+        return {}
+    if not callable(options.source_resolver):
+        raise ValueError("文件来源解析器必须可调用")
+    schema = options.source_ref_schema
+    if not isinstance(schema, dict) or schema.get("type") != "object":
+        raise ValueError("文件来源引用 schema 必须声明 object 类型")
+    return {"source_ref": deepcopy(schema)}
 
 
 # LLM: source_content 是当前调用已解析的原字节及完整来源，只进入本次写入与原回执，不另建持久状态。
@@ -123,8 +140,8 @@ class WriteFileTool(FileSystemTool):
         mutates_workspace=True,
     )
 
-    # LLM: 未注入 resolver 时保持原模型合同；已启用时明确原样复制入口，不把可用性或示例当授权，联查 registry 和写工具测试。
-    # 函数用途: 初始化访问策略，区分生成新正文和按原引用复制，避免模型手抄现有脚本时丢失内容。
+    # LLM: 来源 resolver/schema 成对注入；未启用时保持原模型合同，已启用时原参数门消费准确字段声明，联查 core/registry 和写工具测试。
+    # 函数用途: 初始化访问策略与隔离的来源声明，区分新正文和原样复制；装配错误在工具可用前明确失败。
     def __init__(
         self,
         workspace_root: Path,
@@ -132,6 +149,7 @@ class WriteFileTool(FileSystemTool):
         options: WriteFileToolOptions | None = None,
     ):
         options = options or WriteFileToolOptions()
+        source_properties = _source_ref_input_properties(options)
         super().__init__(
             workspace_root,
             workspace_roots,
@@ -149,7 +167,7 @@ class WriteFileTool(FileSystemTool):
             input_schema={
                 "type": "object",
                 "properties": {
-                    **({"source_ref": {"type": "object", "description": "原样使用 skill_search 返回的完整 source_ref 对象，精确复制完整资源（不是正文预览）；不要自行拼字段或把归档地址当来源。只支持 overwrite，不授予脚本执行权。"}} if self.source_resolver else {}),
+                    **source_properties,
                     "expected_version": {"type": "string", "description": "基于 read_file 内容修改时，填它返回的 file_version；过期会拒绝覆盖，需重新读取合并。"},
                     "path": {
                         "type": "string",

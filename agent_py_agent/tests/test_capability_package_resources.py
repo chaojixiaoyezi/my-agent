@@ -10,9 +10,11 @@ from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsT
 from agent_py_agent.agent.capability.package_provider import enabled_capability_packages
 from agent_py_agent.agent.capability.package_resources import (
     package_resource_reference,
+    package_resource_reference_schema,
     resolve_package_resource,
 )
 from agent_py_agent.agent.capability.skill_snapshot import SkillSnapshot
+from agent_py_agent.agent.contracts.tool_input_schema import validate_tool_input
 from agent_py_agent.agent.plugin_activation import PluginActivationRequest
 from agent_py_agent.agent.runtime_context import (
     restore_current_subagent_context,
@@ -44,6 +46,32 @@ def test_resource_reference_transfers_binary_bytes_without_decoding_or_execution
     assert result.source_ref["resource_path"] == "私有/asset.bin"
     with pytest.raises(TypeError):
         result.source_ref["name"] = "other"
+
+
+def test_resource_schema_matches_produced_reference_and_is_an_isolated_host_value():
+    reads = []
+    package = package_fixture(reads=reads)
+    reference = package_resource_reference(package, "CAPABILITY.md")
+    schema = package_resource_reference_schema()
+    assert set(schema["properties"]) == set(schema["required"]) == set(reference)
+    assert schema["additionalProperties"] is False
+    assert validate_tool_input(reference, schema).ok
+    schema["properties"]["name"]["type"] = "integer"
+    schema["required"].remove("name")
+    fresh = package_resource_reference_schema()
+    assert fresh["properties"]["name"]["type"] == "string" and "name" in fresh["required"]
+    assert reads == []
+
+
+@pytest.mark.parametrize("field", tuple(package_resource_reference(package_fixture(), "CAPABILITY.md")))
+def test_direct_resource_resolution_preserves_every_required_field(field):
+    reads = []
+    package = package_fixture(reads=reads)
+    reference = package_resource_reference(package, "CAPABILITY.md")
+    del reference[field]
+    with pytest.raises(ValueError, match="CAPABILITY_RESOURCE_REFERENCE_INVALID"):
+        resolve_package_resource(_view(package), reference)
+    assert reads == []
 
 
 @pytest.mark.parametrize("change", [

@@ -1,10 +1,11 @@
-# LLM: 只验证原包检索/读取的地址投影和显式恢复；组件与原生替身不联网，不改样包、不替真实任务交付。
-# 模块用途: 守住包成员与业务文件的地址空间、同代导航和大结果的完整引用。
+# LLM: 只验证原包检索/读取的参数与地址投影；错误动作不得静默丢资源条件或查询身份，组件与原生替身不联网。
+# 模块用途: 守住包成员与业务文件的地址空间、同代导航和大结果引用，不替真实任务交付。
 from __future__ import annotations
 
 import json
 from copy import deepcopy
 from dataclasses import replace
+from unittest.mock import Mock
 
 import pytest
 
@@ -106,6 +107,36 @@ def test_ungranted_or_unknown_package_cannot_obtain_navigation(
     assert reads == pins == []
 
 
+@pytest.mark.parametrize("arguments", [
+    {"action": "search", "package_id": "visible", "resource_path": "方法/私有独门/SKILL.md"},
+    {"action": "search", "package_id": "visible", "resource_path": "missing.md"},
+    {"action": "search", "package_id": "visible", "resource_path": ""},
+    {"package_id": "visible", "resource_path": "方法/私有独门/SKILL.md"},
+    {"package_id": "visible", "resource_path": ""},
+    {"action": "search", "package_id": "hidden", "resource_path": "方法/私有独门/SKILL.md"},
+    {"action": "search", "package_id": "missing", "resource_path": "missing.md"},
+    {"action": "search", "query": "普通用户方法", "resource_path": ""},
+])
+def test_search_rejects_resource_path_before_snapshot_read_or_pin(
+    tmp_path, skill_catalog_factory, monkeypatch, arguments,
+):
+    reads = []
+    visible, hidden = package_fixture("visible", reads=reads), package_fixture("hidden", reads=reads)
+    _, snapshot, agent, tool = discovery_fixture(tmp_path, skill_catalog_factory, [visible, hidden])
+    selected = snapshot.restricted([visible.stable_id], expected_refs=[visible.to_ref()])
+    current_snapshot = Mock(return_value=selected)
+    agent.current_skill_snapshot = current_snapshot
+    pins = _observe_pins(monkeypatch)
+    original = deepcopy(arguments)
+    outcome = tool.execute(arguments)
+    assert not outcome.ok and outcome.error_code == "TOOL_INVALID_ARGUMENTS"
+    payload = json.loads(outcome.output)
+    assert set(payload) == {"error", "hint"}
+    assert "resource_path" in payload["error"] and "action=get" in payload["error"]
+    assert arguments == original and reads == pins == []
+    current_snapshot.assert_not_called()
+
+
 def test_no_package_keeps_ordinary_skill_get_bytes_and_public_search_contract(tmp_path, skill_catalog_factory):
     _, snapshot, _, tool = discovery_fixture(tmp_path, skill_catalog_factory, [])
     entry = snapshot.entries[0]
@@ -176,14 +207,16 @@ def test_native_read_retains_navigation_and_original_copy_reference(tmp_path, pr
     assert result.response == "已按原资源生成文件。" and target.read_bytes() == raw
 
 
-# LLM: 单次显式检索后只读下一轮真实模型输入，不调用恢复/成员读取，不产生业务文件或包 pin。
-# 类用途: 检查 search 的原生归档投影，零预览也能找到原结果与同代包。
+# LLM: 单次提交固定检索参数后只读下一轮真实模型输入，不调用恢复/成员读取，不产生业务文件或包 pin。
+# 类用途: 检查 search 的原生成功和错误投影，零预览也能找到原结果与同代包。
 class _ScopedSearchBackend(_TestNativeBackend):
-    # LLM: 模型替身只持有本测试的计数与输入，不共享代理运行状态。
-    # 函数用途: 初始化一轮搜索的观测容器。
-    def __init__(self):
+    # LLM: 模型替身复制本测试参数，不改变调用方字典或共享代理状态；省略参数保留原目录检索。
+    # 函数用途: 初始化一轮搜索的计数、结果和参数观测容器。
+    def __init__(self, parameters=None):
         self.calls = 0
         self.content = ""
+        self.result = {}
+        self.parameters = deepcopy(parameters) if parameters is not None else {"action": "search", "package_id": "story-a"}
 
     # LLM: 只输出一次结构化 search；后续检查 host 已投影的结果，不自行重构能力返回值。
     # 函数用途: 沿真实原生循环观察导航、预览完整性和原归档锚点。
@@ -191,11 +224,12 @@ class _ScopedSearchBackend(_TestNativeBackend):
         self.calls += 1
         if self.calls == 1:
             return ModelResponse(text="", backend="scope-fixture", tool_use_blocks=[{
-                "id": "search-members", "name": "skill_search", "input": {"action": "search", "package_id": "story-a"},
+                "id": "search-members", "name": "skill_search", "input": deepcopy(self.parameters),
             }])
         assert self.calls == 2
         block = next(b for row in kwargs["messages"] for b in row["content"]
                      if b["type"] == "tool_result" and b["tool_use_id"] == "search-members")
+        self.result = block
         self.content = block["content"]
         return ModelResponse(text="目录已收到。", backend="scope-fixture")
 
@@ -221,4 +255,26 @@ def test_native_search_archive_preserves_namespace_and_recovery_anchor(tmp_path,
         assert payload["matches_preview"] == [] and payload["matches_preview_complete"] is False
     else:
         assert len(payload.get("matches", payload.get("matches_preview"))) == 2
+    assert agent.conversation_store.tasks.list(thread.thread_id) == []
+
+
+@pytest.mark.parametrize("parameters", [
+    {"action": "search", "package_id": "story-a", "resource_path": "methods/SKILL.md"},
+    {"package_id": "story-a", "resource_path": ""},
+])
+def test_native_search_rejects_resource_path_without_promotion_or_pin(tmp_path, monkeypatch, parameters):
+    agent, _, _ = _agent(tmp_path)
+    backend = _ScopedSearchBackend(parameters)
+    agent.backend = backend
+    pins = _observe_pins(monkeypatch)
+    thread = agent.conversation_store.threads.get_or_create({
+        "canonical_user_id": "local/main", "channel": "cli", "channel_conversation_id": "scope-search-invalid",
+    })
+    agent.run("查询当前可用方法。", save=False, allowed_tools=["skill_search"],
+              task_attributes={"conversation_thread_id": thread.thread_id}, context_scope="conversation")
+    assert backend.calls == 2 and backend.result["is_error"] is True
+    assert "TOOL_INVALID_ARGUMENTS" in backend.content
+    payload, _ = json.JSONDecoder().raw_decode(backend.content[backend.content.index("{"):])
+    assert set(payload) == {"error", "hint"}
+    assert backend.parameters == parameters and pins == []
     assert agent.conversation_store.tasks.list(thread.thread_id) == []

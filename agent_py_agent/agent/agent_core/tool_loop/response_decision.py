@@ -1,5 +1,5 @@
-# LLM: 按结构化响应决定工具/有界续跑/结束；续跑前保存真实响应，不从思考内容推断完成。
-# 模块用途: 统一模型轮裁决和修复预算，保护无工具续跑历史；不会因长思考而强停任务。
+# LLM: 按结构化响应决定工具/有界续跑/结束；写恢复只认 provider 长度终态，保留其它 typed 错误。
+# 模块用途: 统一模型轮裁决和修复预算，保存真实响应原因与无工具续跑历史，不从正文推断完成。
 from __future__ import annotations
 
 import json
@@ -27,7 +27,6 @@ from ..runtime.guidance import (
     active_turn_user_reply_required,
     satisfy_active_turn_user_reply,
 )
-from ..tool_guard.call_guardrail import tool_guardrail_records
 from ..tool_guard.unresolved_runtime_issue import (
     has_unresolved_runtime_issues,
     unresolved_runtime_issue_context,
@@ -59,6 +58,10 @@ _ACTIVE_TURN_EMPTY_REPLY_NUDGE = (
 )
 
 
+# LLM: 各类修复预算只在当前工具循环累计；字段不代表工具执行记录或同目标连续失败，不得混用。
+# 类用途: 保存互相独立的纠偏次数，让每次裁决保留已用预算而不创建第二份失败账。
+# LLM: 本工具循环各类修复预算分别累计，不能从计数推断同一文件连续失败；修改须同步裁决与原生恢复测试。
+# 类用途: 保存本轮已经使用的纠偏次数，让不同恢复原因各守上限，不增加持久任务状态。
 @dataclass(frozen=True)
 class ToolLoopRepairCounters:
     __test__: ClassVar[bool] = False
@@ -67,7 +70,7 @@ class ToolLoopRepairCounters:
     unresolved_runtime_issue_redirects: int = 0
     protocol_repairs: int = 0
     empty_text_repairs: int = 0
-    # R232: 截断长内容写的分块纠偏次数，和协议修复分开计数，避免互相吃掉预算。
+    # 本工具循环累计的长度截断写纠偏次数，独立于协议修复；不是同一目标的连续失败次数。
     truncated_write_repairs: int = 0
     # R248: 最终答复被输出上限截断后的轮内续跑次数（不重启整轮，见 _truncated_final_resume）。
     truncated_output_repairs: int = 0
@@ -673,29 +676,37 @@ def _tool_calls_decision(
     return ToolLoopResponseDecision("run_tools", clean_response, calls, request.counters)
 
 
-# native 长 content 写被 max_tokens/SSE 截断 → 参数清空 → 同一截断空参 write_file 连续失败
-# 这么多次即认定死循环（反复重生成又截断），打硬出口而非无限重试。建议 3：给模型 1~2 次
-# 分块纠偏机会后仍截断就停，并把真实失败原因交给最终回复。
+# 同一工具循环累计收到第 3 次已确认的长度截断写响应时停止，最多给 2 次分块纠偏。
+# 坏 JSON、断流或过滤不是长度证据，不能消耗此预算或被改写为长度错误。
 _NATIVE_TRUNCATED_WRITE_LOOP_LIMIT = 3
-_TRUNCATED_WRITE_FAILURE_CLASS = "code:TOOL_PARAMETER_REQUIRED"
 # 长内容工具：被截断后需要"分块写"这类有界恢复，而不是通用格式纠偏。
 _TRUNCATED_LONG_CONTENT_TOOLS = frozenset({"write_file", "apply_patch"})
 
 
-# LLM: 未完成响应整轮零执行后，恢复入口只能来自供应商结构化事实 response.truncated_tool_names；
-# 命中长内容工具时先给一次有界分块纠偏，超过上限直接硬出口，绝不据此生成可执行调用。
-# 函数用途: 把截断的工具名接回长内容恢复，避免截断 write 退化成死循环或无声失败。
+# LLM: 未完成响应整轮零执行；恢复只消费 backend 已归一的长度终态与真实工具名，不执行探针。
+# 函数用途: 把已确认的长度截断接回有界写恢复，其它 typed 错误沿原终止路径返回。
 def _truncated_tool_recovery_decision(
     request: ToolLoopResponseDecisionRequest,
     names: list[str],
 ) -> ToolLoopResponseDecision | None:
     if not _native_tool_use_active(request.params):
         return None
-    if not bool(getattr(request.response, "truncated", False)):
+    if not _is_provider_length_truncated(request.response):
         return None
     if not any(name in _TRUNCATED_LONG_CONTENT_TOOLS for name in names):
         return None
     return _native_truncated_write_decision(request, _truncated_probe_calls(request, names))
+
+
+# LLM: response_completion 是 provider 原因的唯一归一层；不能将裸 truncated、正文或猜测 cap 当作长度事实。
+# 函数用途: 校验写恢复需要的既有 typed 终态，不重新解释各 provider 的 stop_reason 别名。
+def _is_provider_length_truncated(response: object) -> bool:
+    return (
+        getattr(response, "truncated", False) is True
+        and getattr(response, "runtime_status", "") == "unfinished"
+        and getattr(response, "runtime_reason", "") == "MODEL_RESPONSE_TRUNCATED"
+        and getattr(response, "runtime_source", "") == "model_provider"
+    )
 
 
 def _truncated_tool_names_from_response(response: object) -> list[str]:
@@ -748,29 +759,24 @@ def _truncated_probe_calls(
     return probes
 
 
+# LLM: native 写恢复只接受 backend 长度终态；探针永不执行，最多追加两次恢复上下文，不改变任务状态。
+# 函数用途: 按本工具循环累计预算决定分块纠偏或停止，保留正常调用、text 协议和非长度错误原路径。
 def _native_truncated_write_decision(
     request: ToolLoopResponseDecisionRequest,
     calls: list[ToolCall],
 ) -> ToolLoopResponseDecision | None:
-    """P0-2:native 写长文档被截断成空参时，激活长内容恢复（分块写），连续 N 次即硬 break。
-
-    只在 native 协议 + 本轮响应疑似截断（``response.truncated``）+ 存在缺参的 write_file 调用
-    时介入。正常多轮写大文档（未截断、参数完整）一律不进此分支，零误伤；text 协议另有
-    write_abort 路径，也不进。
-    """
     if not _native_tool_use_active(request.params):
         return None
-    if not bool(getattr(request.response, "truncated", False)):
+    if not _is_provider_length_truncated(request.response):
         return None
     if not _has_truncated_empty_write(calls):
         return None
-    # R232: 整轮零执行后不再产生 write_file 失败记录，上限必须按本轮已发生的分块纠偏次数计，
-    # 否则该出口永不可达，截断写会退回"反复重生成又截断"的死循环。
+    # 未完成响应整轮零执行，不会生成工具失败记录；预算只按本工具循环已追加的纠偏次数累计。
     attempts = int(request.counters.truncated_write_repairs) + 1
     if attempts >= _NATIVE_TRUNCATED_WRITE_LOOP_LIMIT:
         return ToolLoopResponseDecision(
             "break",
-            _native_truncated_write_loop_break_response(request.response.backend, attempts),
+            _native_truncated_write_loop_break_response(request.response, attempts),
             [],
             request.counters,
         )
@@ -792,25 +798,8 @@ def _has_truncated_empty_write(calls: list[ToolCall]) -> bool:
     return False
 
 
-def _consecutive_truncated_write_failures(agent: object) -> int:
-    """从 guardrail records 尾部数连续的 write_file + TOOL_PARAMETER_REQUIRED 失败。
-
-    复用既有 ``_tool_call_guardrail_records``（已按 tool_name/args_hash/failure_class 结构化）；
-    一旦尾部出现非该类记录（例如一次成功 write_file）即中断计数 → 正常写入会自然清零，
-    不会把历史失败累计到无关任务上。
-    """
-    count = 0
-    for record in reversed(tool_guardrail_records(agent)):
-        if str(record.get("tool_name") or "") != "write_file":
-            break
-        if record.get("failed") is not True:
-            break
-        if str(record.get("failure_class") or "") != _TRUNCATED_WRITE_FAILURE_CLASS:
-            break
-        count += 1
-    return count
-
-
+# LLM: 仅为已确认的长度截断追加分块软指导；本轮工具零执行，不能声称存在真实空参工具回执。
+# 函数用途: 复用既有长内容恢复指引，不猜输出 cap、不执行工具或写任务账。
 def _native_truncated_write_recovery_context(calls: list[ToolCall]) -> str:
     payload = next(
         (_tool_call_payload(call) for call in calls if _call_tool(call) == "write_file"),
@@ -828,22 +817,24 @@ def _native_truncated_write_recovery_context(calls: list[ToolCall]) -> str:
     )
     header = (
         "[tool-system]\n"
-        "上一轮 write_file 的参数 JSON 在流式生成时被截断（疑似 max_tokens/长度上限），"
-        "导致工具收到空参数而无法执行。请把正文拆成更小的块分多次写入，"
+        "供应商已确认上一轮 write_file 响应因达到输出长度上限而截断，本轮工具调用均未执行。"
+        "请把待写正文拆成更小的块分多次写入，"
         '第一块用 mode="overwrite" 重写目标文件，后续块用 mode="append"。'
     )
     return f"{header}\n{base}" if base else header
 
 
-def _native_truncated_write_loop_break_response(backend: str, attempts: int) -> ModelResponse:
-    return ModelResponse(
+# LLM: guard 只标记宿主恢复预算用尽，必须保留原 provider stop_reason、turn_end_reason、用量和未完成事实。
+# 函数用途: 在原响应上投影循环停止说明，不丢失长度原因、不制造同一目标连续失败或任务完成事实。
+def _native_truncated_write_loop_break_response(response: ModelResponse, attempts: int) -> ModelResponse:
+    return replace(
+        response,
         text=(
-            "系统已停止本次写入循环：write_file 的参数在流式生成时连续 "
-            f"{attempts} 次被截断（max_tokens/长度上限），分块纠偏后仍未成功闭合参数 JSON。\n"
-            "请不要再用单次大块 write_file 重试同一目标；改用显著更小的分块写入"
+            f"系统已停止本次写入循环：本工具循环累计收到 {attempts} 次达到供应商输出长度上限的 "
+            f"write_file 响应，已用完 {attempts - 1} 次分块纠偏预算。\n"
+            "后续续写请用显著更小的分块"
             "（每块正文更短，第一块 overwrite、后续 append），或先 task_progress 记录已写进度再续写。"
         ),
-        backend=backend,
         runtime_status="unfinished",
         runtime_reason="NATIVE_TRUNCATED_WRITE_LOOP",
         runtime_source="tool_loop",

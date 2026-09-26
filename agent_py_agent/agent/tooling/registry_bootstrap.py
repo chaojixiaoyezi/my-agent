@@ -1,5 +1,5 @@
-# LLM: 基础工具在此装配，可信 resolver 由 core 注入；构造不得读取私有资源或绕开逐调用执行策略。
-# 模块用途: 统一注册原文件、进程和检索工具，保持主代理与子代理同一权限接线。
+# LLM: 基础工具在此装配，可信 resolver/schema 由 core 成对注入；构造不得读取私有资源或绕开逐调用执行策略。
+# 模块用途: 统一注册原文件、进程和检索工具，让来源声明与解析器沿主代理和子代理同一权限链连接。
 from __future__ import annotations
 
 from typing import Any
@@ -51,8 +51,8 @@ def register_base_tools(registry: Any, params: Any) -> None:
 
 
 
-# LLM: 写文件的 source resolver 由可信宿主注入，逐调用仍由 Registry 裁剪目标和子代理权限；构造不读资源或写文件。
-# 函数用途: 装配共用路径、配额和输入传输策略的文件工具，保持原文本／二进制写入行为。
+# LLM: 写文件的 source resolver/schema 由可信宿主成对注入，逐调用仍由 Registry 裁剪目标和子代理权限；构造不读资源或写文件。
+# 函数用途: 装配共用路径、配额和同源输入声明的文件工具，保持原文本／二进制写入行为。
 def _register_filesystem_tools(registry: Any, params: Any) -> None:
     workspace_roots = registry.workspace_roots
     access_options = filesystem_access_options(
@@ -92,6 +92,7 @@ def _register_filesystem_tools(registry: Any, params: Any) -> None:
                 access_options=access_options,
                 runtime_fact_roots=_runtime_fact_roots(registry, params),
                 source_resolver=getattr(params, "file_source_resolver", None),
+                source_ref_schema=getattr(params, "file_source_ref_schema", None),
             ),
         )
     )

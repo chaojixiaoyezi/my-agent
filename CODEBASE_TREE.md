@@ -24,6 +24,7 @@
 |-- agent_py_agent/tests/test_capability_package_selector_recovery.py # 准确读取参数、错误恢复、受限隔离及换代拒绝
 |-- agent_py_agent/tests/test_capability_package_recommendations.py # 当轮候选软展示、配置开关及原生请求边界
 |-- agent_py_agent/tests/test_capability_package_resource_scope.py # 包成员地址空间、同代导航与大搜索完整卡片预览
+|-- agent_py_agent/tests/test_capability_resource_input_schema.py # 完整来源声明、原执行器缺字段门与同代原字节复制
 |-- agent_py_agent/tests/test_capability_package_compact.py # 原快照与安装事实的 Compact 续读及换代拒绝
 |-- agent_py_agent/tests/test_capability_package_catalog_scale.py # 包目录预算与大量私有成员不展开
 |-- agent_py_agent/tests/test_capability_package_main_scope.py # 失效包隔离、保留原版本与主任务正常收口
@@ -1132,6 +1133,7 @@ docs/
 - `docs/design/CAPABILITY_PACKS.md`：包级发现、私有方法、原安装与任务授权的边界。
 - `docs/design/CAPABILITY_MIGRATION.md`：固定来源、完整覆盖表、候选构建和原命令发布／回退的可执行步骤。
 - `agent_py_agent/tests/test_capability_package_resource_scope.py`：验证包成员和业务路径的区分、同代搜索导航、受限隔离，以及归档后原生消息保留完整资源引用。
+- `agent_py_agent/tests/test_capability_resource_input_schema.py`：验证模型完整来源schema、原执行器在handler前拒绝缺字段/类型错误，以及原身份/代次/摘要边界不变。
 - `docs/tasks/CAPABILITY_INTERNALIZATION_GOAL.md`：能力内化执行 Goal 与当前唯一 TODO。
 - `docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md`：固定来源版本与迁移范围、许可和测试证据矩阵。
 

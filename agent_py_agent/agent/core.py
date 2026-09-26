@@ -1,8 +1,8 @@
 """composition root for SimpleAgent runtime, tools, memory, gateway, and subagents."""
 
 # LLM: core.py 只装配 SimpleAgent 的当前主链；拆出的私有 helper 必须由所属
-# 模块直接导入，不在这里保留无人消费的旧 re-export 兼容面；显式派工后端注入也须隔离到线程。
-# 模块用途: 组装模型后端、工具、记忆、会话和子代理；owner 权限纯裁决与冷管理入口共用。
+# 模块直接导入，不保留无人消费的旧 re-export；来源 resolver/schema 成对绑定，显式派工后端注入也须隔离到线程。
+# 模块用途: 组装模型后端、同源工具声明、记忆、会话和子代理；owner 权限纯裁决与冷管理入口共用。
 
 from __future__ import annotations
 
@@ -812,8 +812,8 @@ def _effective_workspace_scope(agent: SimpleAgent, config: AgentConfig) -> tuple
     return workspace_root, workspace_roots
 
 
-# LLM: ToolRegistry 唯一装配入口；插件 owner 与资源 resolver 固定到可信主体，执行时仍取受限快照；构造不读包正文或启动插件。
-# 函数用途: 按身份、工作区和配置组合工具及可选精确资源读取能力，主代理与同进程子代理共用接线。
+# LLM: ToolRegistry 唯一装配入口；插件 owner 与资源 resolver/schema 固定到可信主体，执行时仍取受限快照；构造不读包正文或启动插件。
+# 函数用途: 按身份、工作区和配置组合工具及完整来源声明，主代理与同进程子代理共用解析和权限接线。
 def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistry:
     from functools import partial
 
@@ -832,10 +832,15 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
         access_mode=access_mode,
     )
     source_resolver = None
+    source_ref_schema = None
     if config.enable_plugins and config.enable_tools:
-        from .capability.package_resources import resolve_package_resource
+        from .capability.package_resources import (
+            package_resource_reference_schema,
+            resolve_package_resource,
+        )
 
         source_resolver = partial(resolve_package_resource, agent)
+        source_ref_schema = package_resource_reference_schema()
     return ToolRegistry(
         ToolRegistryParams(
             workspace_root=workspace_root,
@@ -877,6 +882,7 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
             access_mode=access_mode,
             tool_write_inline_max_chars=config.tool_write_inline_max_chars,
             file_source_resolver=source_resolver,
+            file_source_ref_schema=source_ref_schema,
             artifact_read_budget_window_seconds=config.tool_artifact_read_budget_window_seconds,
             artifact_read_budget_max_chars=config.tool_artifact_read_budget_max_chars,
             artifact_default_read_chars=config.memory_artifact_default_read_chars,

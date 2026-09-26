@@ -3421,4 +3421,55 @@ F02在首个get后立即停止，同字节包停用再启用；原Goal/task/thre
 这些分线结果不构成第四候选的统一严格gate或真实TUI通过凭据，本记录不宣称寻址、原脚本执行或交付质量问题已解决；未推送，线上CI未作为验收来源。
 
 第四候选最终统一27个相关文件/入口503项通过，0失败、0跳过；Ruff、doc sync、strict code-size、diff check和clean-package通过，新增行隐私检查无命中。
-clean-package初次发现新测试未跟踪，加入版本控制后复验通过，原失败日志保留。新样包/寻址的真实TUI效果仍待新候选验证；未推送，线上CI未作为验收来源。
+clean-package初次发现新测试未跟踪，加入版本控制后复验通过，原失败日志保留；未推送，线上CI未作为验收来源。
+
+### 第四轮真实 TUI 与独立记忆边界
+
+固定源码`ae2b1cae1a84`、A0.1.1和原B/C完成五个原冻结输入；官方MiniMax-M2.7来源和实际usage已核对，测试者没有代执行业务。
+CAP06原生get/search/归档续读→完整source_ref复制原脚本→原Shell执行与报告一致，10次HTTP/56.226秒，资源工程链通过。
+CAP01也原样复制原checker并在真实检查失败后自行改产物，原检查1→0；16次HTTP/206.670秒，但场次时长、场次数与语义质量未通过。
+CAP02三次写参数流被guard打断，12次HTTP/99.654秒，0成功写入、无交付；缺原provider终止原因/实际cap，不能按文案断定长度上限。
+CAP03入口读取后把resource_path传给search，成功返回索引未读取方法；6次HTTP/49.515秒，正文4组与最终称3组矛盾，去重失败。
+CAP04主和4孩子49次HTTP/333.6秒，共9次get并实际读取方法/模板，但最终33镜头、无效JSON、字段及引用账问题，长任务仍失败。
+所有原结果与逐项证据边界见[验收矩阵](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#第四候选真实-tui固定-ae2b1cae1a84)。
+
+五例主任务实际召回前轮L01记忆，计数为5/5/1/5/1；不能以新TUI或memory_resume标志宣称空记忆对照。
+保留历史和原失败，后续仅专用测试owner沿原memory-policy关闭召回，三包安装记录保持；以实际原生Related Memory和响应used_memories=0联合核验。
+A02/B02/C02/C03/N05/N03六个开发用例另开新会话一次提交，结果另记；保留集仍封存。
+
+通用search/resource_path契约：新增10项反例旧实现全红，修正后`test_capability_package_resource_scope.py`24项通过；
+两文件Ruff与diff检查通过。包含未知/受限包、空路径、默认action、0快照读取/0pin及原生错误入模，不新增自动读取或身份泄漏。
+此源码修正尚未进入候选4安装包，组件通过不改报旧C01的实际失败。
+
+记忆关闭臂六例已结算：原候选/原安装代次，全部实际Related Memory无历史记录且used_memories=0，输入未改。
+A02（13HTTP/98.617秒）核心双人/2场4镜/60秒及来源通过；少name导致原样复制被拒，改写副本仅删注释、AST一致，副本实检exit0，不记原字节链通过。
+B02（25HTTP/180.963秒）原source_ref复制/原checker实际执行成立，但两次exit1且来源ID被改错，业务失败。
+C02（6HTTP/46.538秒）引用关系正确，4处SHA从64误抄成62字符，完整业务失败；旧search/path行为导致方法未读。
+C03（2HTTP/22.697秒）正确报EV99缺失，无包采用，部分结论过强；N05（2HTTP/10.565秒）和N03（1HTTP/4.834秒）普通任务通过、无无关包使用。
+结束后无运行attempt/资源锁；全部官方M2.7，无测试者代执行。完整分层裁决见验收矩阵；不覆盖孙代理、Compact、新TUI同任务续接、运行依赖缺失或公共Skill实际调用。
+
+### 原生写恢复原因分类修正（本地）
+
+`test_native_truncated_write_recovery.py`新增真实SSE parser→原backend→原decision反例，旧实现7 failed/18 passed；
+修正后整文件25 passed，与`test_backends_native_tool_use.py`、`test_response_decision_native_tool_use.py`、
+`test_truncated_output_resume.py`联合74 passed。非长度的坏JSON/非对象参数/EOF/content_filter保留原错误响应且不消耗写恢复预算，
+真实长度截断仍最多两次纠偏，guard保留stop_reason/turn_end_reason/usage；正常native调用、text协议与原输出恢复保持。
+两文件Ruff/diff检查通过，未改provider、任务完成或持久账，未发真实模型请求；不能倒推旧B01历史原因。
+原长度guard测试增加`should_continue_task=false`和原Goal wake=0断言后25项仍通过；另一次无网络主宿主重放精确3请求/0工具，
+保留max-tokens不新增CLI/Goal续跑资格。旧非权威会话Compact有独立续接条件，保持原有边界，不概括为禁止任何重新运行。
+
+### 完整来源引用模型声明（本地）
+
+运行时要求9字段而模型只见object的缺口已修正，唯一properties同时派生required与原解析器字段集合；
+core/registry成对注入原resolver和schema，filesystem深拷贝声明，宿主缺配不退回宽泛object。
+新`test_capability_resource_input_schema.py`初次13 failed/6 passed，修正后加零安装包边界共20 passed；
+10个相关文件联合147 passed，包含原Executor逐字段缺失零handler、准确错误位置、额外字段/类型/摘要格式、
+原name/激活代次/内容摘要拒绝、完整二进制复制、provider声明传递、关闭插件及普通文件写入不变。
+定向Ruff/diff通过，实际安装仍为候选4；不回填A02失败，不把分线147与其它重叠测试累计成总gate数量。
+
+### 第五候选统一本地 gate
+
+上述三片统一26个相关测试文件，534 passed、0 failed、0 error、0 skipped；Ruff、doc sync、strict code-size、
+工作树与暂存diff检查、clean-package均通过，尺寸基线未改。独立只读末审核对来源schema至provider声明的消费链，未发现阻断缺陷。
+插件开启且零安装包时仍展示原source_ref入口，此次补充完整schema，不保证此条件下模型输入字节不变。
+实际安装切换和六席原生TUI另记；组件与本地gate不作为真实模型通过凭据，未推送，线上CI未作为验收来源。
