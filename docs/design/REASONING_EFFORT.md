@@ -1,6 +1,6 @@
 # 智能程度（推理强度）
 
-状态：已实施，本地分支 `claude/reasoning-effort`（2026-09-26），待合入与真实验收。本文是“智能程度”的唯一模块设计；`DESIGN_LEDGER.md` 只保留摘要和链接。
+状态：已合入 main `7a15c9c91` 并双机部署（运行时 `step12k-e5b2f8bc`，2026-09-26），隔离真实验收通过（结果见第 7 节与 TESTS.md 顶部）。本文是“智能程度”的唯一模块设计；`DESIGN_LEDGER.md` 只保留摘要和链接。
 
 ## 1. 背景
 
@@ -54,8 +54,13 @@
 - 不按模型名、回复正文或模型自述判断能力；已知表只按接口域名加协议。
 - 暂不在 TUI 底栏显示档位（`/effort` 可查看）；Responses 协议的 `reasoning.effort` 待接；Anthropic 官方模型开启思考时要求温度为 1，若显式声明 `budget` 又填了温度，可能被拒，届时再按协议处理。
 - 仓库默认 `model_reasoning_effort: auto`，不改变任何现有请求。
+- 关闭思考或调低档位会降低正确率：真实验收里 DeepSeek `off` 两次有一次答错；MiniMax M3 默认不思考时答错，声明 `budget` 并 `/effort high` 后答对。
 
 ## 7. 测试与验收
 
 - 单测 `test_reasoning_effort.py`：控制方式解析，档位与强制工具选择的优先级，两种协议的真实组包（fake 传输），DeepSeek 历史缺思考正文时去掉档位，已声明方式的未知域名也能真正关思考，线程档位与默认，公用函数与自动选模投影一致，子代理显式 / 继承 / 非法值 / 去重身份 / 线程初始化，`/effort` 回执，档案字段校验与解析，TUI 表单，配置规范化。
-- 真实验收（隔离 home + 回环 8432）：DeepSeek 官方 OpenAI 兼容模型上，比较 `/effort low` 与 `/effort max` 的真实请求字段和推理 token；子代理分别指定 low 与 max；不支持的模型回执如实。
+- 真实验收（2026-09-26，隔离 home + 回环 8432，运行时 `step12k-e5b2f8bc`，详见 TESTS.md 顶部）：
+  - DeepSeek 官方 OpenAI 兼容：出站请求按档位带 `reasoning_effort` 或 `thinking: disabled`，auto 不带字段；主模型输出 token 均值 max 约为 low 的 1.9 倍，off 最低，单题波动大。
+  - DeepSeek 官方 Anthropic 兼容与声明为 `budget` 的 MiniMax M3：以助手原生内容块为证，off / 默认不思考时没有思考块，开启后有；M3 开启后从答错变为答对。
+  - MiniMax M2.7：回执如实说明不支持调节，请求照常完成。
+  - 子代理：一次创建 low、max、不设三个子代理，子线程档位分别是 low、max、继承的 medium，逐条出站请求与各自档位一致；输出 token 为 low < medium < max。

@@ -9,11 +9,21 @@
 
 回滚边界：旧版运行时读不了 v3，回滚必须把运行时和数据成对核对并保留新账。详见[依赖拆分](docs/design/TOOL_LOOP_DEPENDENCY_SPLIT.md#两线合并后的来源身份与模型轮结果决策分支吸收-main2026-09-23)。
 
-- **智能程度（推理强度）：主会话 `/effort` 与子代理 `effort`**（2026-09-26，已实施：本地分支 `claude/reasoning-effort`，待合入与真实验收；详见[智能程度设计](docs/design/REASONING_EFFORT.md)）：
+- **智能程度（推理强度）：主会话 `/effort` 与子代理 `effort`**（2026-09-26，已合入 main `7a15c9c91` 并双机部署 `step12k-e5b2f8bc`，隔离真实验收通过；详见[智能程度设计](docs/design/REASONING_EFFORT.md)）：
   - **用户要求**：能设置模型的智能程度，包括给子代理单独设置，并实测。原 `/effort` 只是空壳，请求体从不发推理参数。
   - **实测结论**：DeepSeek 官方 OpenAI 兼容接口的 `reasoning_effort` 与思考开关都生效（low 推理 token 约减半）；其 Anthropic 兼容接口只有开关生效；OpenCode 中转与 MiniMax M2.7 都不生效；MiniMax M3 默认不思考、显式开启才思考。“被接受”不等于“生效”。
   - **做法**：档位 auto/off/low/medium/high/max 是会话线程属性（`/effort` 写主会话，`create_subagents.effort` 写子线程，省略继承父级实际档位，全局默认 `model_reasoning_effort`）；模型档案新增 `reasoning_control`（auto/effort/budget/none），auto 只对实测确认的 DeepSeek 官方接口给默认，其余 none，可在 `/model` 显式声明。真实请求与两处自动选模投影共用 `request_reasoning_options`，强制工具选择的关思考优先。
   - **边界**：不按模型名或正文判断能力；不支持的模型如实回执“不改变请求”；TUI 底栏暂不显示档位；Responses 协议暂不换算。
+  - **真实验收**：DeepSeek 两种接口、声明为 `budget` 的 MiniMax M3、MiniMax M2.7，以及一次创建 low/max/继承三个子代理，全部符合预期（详见 TESTS.md 顶部）。生产默认模型是 OpenCode 中转，按实测不支持调节，`/effort` 会如实提示；要生效需切到 DeepSeek 官方接口，或给支持的模型显式声明控制方式。
+- **Shell 读边界与回执表述不一致（macOS）**（2026-09-26 登记，未实施；Codex 能力内化验收 TUI-CAP06 中前台 `run_command` 发现，证据留在其私有线；归宿主执行/沙箱这条线）：
+  - **事实**：owner 隔离模式下，macOS Seatbelt 规则（`agent_py_agent/agent/attempt/sandbox.py` 的 `_macos_profile`）是 `allow default` 加 `deny file-write*` 再放开写根，只限制写、不限制读，命令能读到 owner 工作区外的宿主路径；`read_file` 的 owner 读墙更严。Shell 回执（`agent_py_agent/agent/tooling/shell.py` 的 `[sandbox_scope]` 文本与 `sandbox.external_host_paths_hidden`）在 owner 模式下一律写 `external_host_paths_hidden=true`，这只在 Linux 挂载隔离下成立，macOS 上与实际不符。
+  - **影响**：模型会以为宿主路径“看不到”，实际能读到；两条读路径的边界也不一致。不涉及越权写入。
+  - **待定方向**：先让回执按平台如实给出结构化事实（macOS 不再声称隐藏）；读边界是否收紧到与 `read_file` 一致要单独评估（会影响依赖读取宿主工具链的命令）。不为此改能力包的读写路径。
+- **记忆 Curator 生产持续失败：输入预算与结构化输出**（2026-09-26 登记，未实施；智能程度验收中发现）：
+  - **事实 1：输入预算**。生产 owner 的 Curator 运行记录里，9/25 的 180 次和 9/26（UTC）至今的 51 次全部是 `CURATOR_INPUT_BUDGET_EXCEEDED`，触发原因都是 `session_close`，`cursor_before` 始终同一个、每次处理 0 条；最后一次成功在 2026-09-24T15:28Z。原因是收集预算只给提示模板和正式记忆预留 7000 字符（`memory_store/curator.py` 的 `max_input_chars - 7_000 - formal_chars`），而空批次模板本身约 4981 字符；身份清单（最多 80 个消息编号加审计编号）和审计保底 1000 字符（`memory_store/curator_inputs.py` 的 `remaining_chars = max(1_000, …)`）都没算进去。积压一旦填满消息预算，组出的提示必然超过 40000，`memory_store/curator_backend.py` 直接报错，也不缩批，于是每次都卡在同一批上。
+  - **事实 2：结构化输出**。Curator 固定发 `response_format: json_schema`。DeepSeek 官方 OpenAI 兼容接口直接返回 400（“This response_format type is unavailable now”）；9/24 生产（运行记录只写了 openai_compatible 的 deepseek-v4-flash，当前默认是 OpenCode 中转）有 103 次 `CURATOR_SCHEMA_INVALID`，疑似中转不执行 schema，待探测确认。
+  - **影响**：自 9/24 起生产记忆提炼停摆。游标不前进，消息不会丢，但记忆不再更新。失败发生在调用模型之前，不耗 token。
+  - **待定方向**：输入侧按最终提示的实测长度缩批（与超时缩批同一机制），或把清单和审计保底算进收集预算；结构化输出按模型能力降级（例如 json_object 加提示内 schema，再做校验）。能力来自显式声明或结构化探测，不按模型名判断。
 
 - **自学习 S3：完成任务后自动总结 Skill，不要用户逐条审批**（2026-09-26，已合入 main 并双机部署，隔离真实验收通过：真实模型新建并更新了一个 Skill，验收中修了宿主会话绑定和“不记绕过拦截做法”两处；详见[自动总结 Skill 设计](docs/design/SKILL_AUTO_SUMMARY.md)与 TESTS 顶部）：
   - **用户决定**：要有“完成任务后自动总结 Skill”的能力，且“别让用户审批，这个用户没时间审批”。所以用确定性的自动闸门代替人工确认，`AGENTS.md` 自学习约束同步改写；`enable_self_learning` 仍默认关闭。

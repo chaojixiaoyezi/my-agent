@@ -1,6 +1,6 @@
 # 测试与发布验收
 
-## 智能程度（推理强度）：`/effort` 与子代理 `effort`（2026-09-26，分支 `claude/reasoning-effort`，基于 main `84d9e50ac`）
+## 智能程度（推理强度）：`/effort` 与子代理 `effort`（2026-09-26，已合入 main `7a15c9c91`，基于 `84d9e50ac`）
 
 - **新增** `test_reasoning_effort.py` 30 项（传输全为本地 fake）：
   - 换算：控制方式解析（显式声明优先；仅 DeepSeek 官方两种接口有默认；MiniMax、OpenCode、Responses、决策接口为 none）；档位与强制工具选择的优先级矩阵；两种协议的字段与思考预算夹紧。
@@ -12,6 +12,14 @@
 - **补充** `test_subagent_first_request_selection.py`：首轮自动换模的逐字比对改用同一 `request_reasoning_options` 计算期望载荷；新增用例在子线程档位 low、候选为 DeepSeek 官方接口时，断言确实采用候选模型且真实首轮请求带 `reasoning_effort: low`。
 - **变异验证**：22 种中 21 种使测试失败（强制工具优先、已知表、none 不发、预算夹紧、DeepSeek 被迫关思考时去档位、声明方式的 off、Anthropic 关思考优先、选项丢档位、网关投影丢档位、子代理继承、线程覆盖、去重身份、子线程初始化、/effort 写入、档案映射、auto 不写键、配置规范化、TUI 表单、非法子代理档位、工厂控制方式、决策模型拒绝）。存活的 1 种是子代理首轮选模投影不带档位：该投影只用于容量估算、不做逐字比对，属于行为等价，代码仍保持与真实请求一致。每次在 `PYTHONDONTWRITEBYTECODE=1` 子进程运行并按 sha256 还原。
 - **结果**：与改动直接相关的 39 个测试文件（含 `test_architecture_guardrails.py`）1074 passed；代码尺寸与 main 逐项对比无新增（`_do_backend_generate` 超软上限、`_payload` 参数两项消失）。
+- **真实验收**（2026-09-26，main `7a15c9c91`，运行时 `step12k-e5b2f8bc`；本机隔离 home + 回环 8432 单 Gateway，默认模型为 DeepSeek 官方 OpenAI 兼容 flash；测试者只发 `/effort`、`/model` 控制命令和每个会话一条任务。题目是“1 到 2000 中既是 3 的倍数、各位数字之和又能被 7 整除的整数个数”，答案 64。token 取用量账本 `purpose_breakdown.main`，排除 Jev 决策调用）：
+  - **DeepSeek 官方 OpenAI 兼容**：`/effort` 回执写明档位、来源和当前模型上的效果。出站请求：low/max 分别带 `reasoning_effort: low|max`，off 带 `thinking: {type: disabled}`，auto 不带任何字段；`/effort default` 清除后回到全局默认。主模型输出 token：low 4 次 1059–2185（均值约 1536），max 4 次 1494–5392（均值约 2847），auto 3 次 1234–5192，off 2 次 272 和 566。同一道题在完整主代理上下文里波动很大，只能看出 max 平均约为 low 的 1.9 倍，off 最低；off 两次中有一次答错。
+  - **DeepSeek 官方 Anthropic 兼容**（auto 解析为 budget）：off 时助手原生消息只有正文、没有思考块，推导写进了正文，答案正确；high 和 auto 都有思考块，答 64。Anthropic 协议没有出站诊断摘要，这里以原生内容块作结构化证据。
+  - **MiniMax M3**（在隔离目录里经产品 `save_model` 声明 `reasoning_control: budget`）：auto 没有思考块，答错；`/effort high` 后出现思考块（26713 字符），答对。输出 token 从 5609 升到 11999，用时从 21 s 升到 99 s。
+  - **MiniMax M2.7**（none）：`/effort high` 回执如实说明“不支持调节……本设置暂不改变请求”，请求照常完成。
+  - **子代理**：主会话先 `/effort medium`，再用一条任务让主代理一次创建三个子代理（effort=low、effort=max、不设）。子线程记录与任务宿主属性分别是 low、max、medium，不设的继承了父级 medium。出站请求逐条对上：low 子代理 4 轮都带 low，max 子代理 7 轮都带 max，继承的子代理 4 轮都带 medium；主会话前台 3 轮加后台续跑 5 轮都带 medium；3 次宿主能力探测不带档位。三个子代理都答 64，输出 token 为 low 1641 < medium 2373 < max 7305。
+  - **附带发现**（与本改动无关，已登记 DESIGN_LEDGER“记忆 Curator 生产持续失败”）：隔离环境的记忆 Curator 给 DeepSeek 官方 OpenAI 兼容接口发 `response_format: json_schema`，被 400 拒绝（“This response_format type is unavailable now”），记为 `CURATOR_MODEL_FAILED`。
+  - 证据在 `~/.my-agent/releases/reasoning-effort-acceptance-20260926/`，只含结构化摘要；隔离 home 与模型目录副本已删除。
 
 ## 自学习 S3：完成任务后自动总结 Skill（2026-09-26，分支 `claude/skill-auto-summary`，基于 main `839250728`）
 
