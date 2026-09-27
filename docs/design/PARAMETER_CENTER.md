@@ -140,12 +140,26 @@
     名字是凭据的 `名字=值` 遮值（docker 的 `-e GITHUB_TOKEN=…`），`--header`/`--env` 这类请求头/环境变量开关的值
     （`名字: 值`、`名字=值`）只留名字（mcp-remote 的 `--header "Authorization: Bearer …"`），`--开关=网址` 的网址照样处理；
     网址里的密码与名字是凭据的查询参数遮值（修改记录里带 YAML 引号的文本先剥引号）。返回同形副本，普通字典与列表照常显示。
-  - 已知边界：单字母开关（`-e`、`-H`）含义因程序而异，不按开关认，只靠 `名字=值` 与网址规则；名字不命中 `is_credential_key`
-    的环境变量写进 args（如 `-e DB_PASS=…`）不会遮，写在 env 映射里才一律遮住。
+  - 当时的已知边界（单字母开关不认、`-e DB_PASS=…` 不遮、libpq 关键字连接串不遮、顶层文本不拆 `名字=值`）已由下一条补齐。
   - 出口清单：登记表查看入口（user_config view 的 parameter/fact、search 的摘要）、聊天 `/settings` 的总览/查看/搜索/历史、
     set/reset/revert 回执（`previous`/`saved` 取自已脱敏的记录，`effective` 经 `mask_value`）、`parameter_changes` 记账
     （所有键都脱敏后才写；脱敏改动了值的记录标 `masked`，回滚拒绝，避免把 `***` 写回配置）、user_config 与 `/settings` 的
     历史回显（`displayed_change` 读出后再遮一次，旧记录也不漏；回滚内部仍读原记录）、命令行 `config-get`（改为传原始值）。
+- **脱敏边界补齐（2026-09-27，分支 `claude/be-masking-edges`，基于 `946a26783`）**：集成者定的方向是宁可多遮——显示上多遮一点
+  只损失一点可读性，漏遮就是泄露。
+  - 任意开关（含单字母 `-H`、`-e`）后面的一项，形状是“请求头行”（`名字: 值`，名字由 HTTP token 字符组成）或 `名字=值` 时只留名字；
+    形状是结构事实，不需要知道开关在各个程序里的含义。`:` 后紧跟 `//` 的是网址，交给网址规则。代价是 `-e LOG_LEVEL=debug`、
+    `--addr 127.0.0.1:8080`、`--config C:\…` 这类普通值也会被遮。
+  - 凭据名补常见写法 `pass`、`passwd`、`pwd`、`private_key`、`secret_key`、`access_key`、`auth`，仍按完整末尾片段认（`DB_PASS`、
+    `SSH_PRIVATE_KEY`、`BASIC_AUTH`）；名字里的 `.` 也当分隔符（`spring.datasource.password`）。`is_credential_key` 同时决定边界分类，
+    逐个核对登记表 389 项：没有新命中（`auth_enabled`、`access_mode` 不以它们结尾），脱敏和边界的数量都不变。
+  - 顶层文本、映射里的文本和列表项都拆空白分隔的 `名字=值`，名字是凭据的遮值：libpq 的 `host=… password=…` 会被遮住，
+    引号括起的值整段遮，引号里的连接串也拆开检查；文字中间夹的网址也逐个找出来遮密码。文本参数因此会被标 `masked`、不能回滚，
+    这是对的：本来就不该把 `***` 写回配置。
+  - 一项自身是 `名字=值` 且名字有角色时，整项都算值（`--password=带空格的值`、`--header=名字: 值`、`--env=名字=值`）。
+  - 凭据名下面是映射时（`auth: {type, token}`），保留键名、值逐个遮住，结构仍看得见。
+  - 仍未覆盖：`--headers 名字 值` 这种名字和值分成两项的写法（如 mcp-proxy），第二项不遮；不紧跟开关、名字又不像凭据的
+    单独一项 `名字=值`（如 `DB_HOST=…`）照常显示。
 - **阶段 3（迁移）**：按模块分批迁移常数并改名。每批开工前在协作文件贴出文件清单，避开 Codex 正在改的文件。
   - **第一批：同名常数（2026-09-27）**。盘点时 32 个常数名在多个文件各定义一份。
     - 删掉没有读取方的 `CONTEXT_WINDOW`（TUI 两份）与 `RECENT_ARCHIVE_FILE_LIMIT`（记忆诊断两份，实际读配置）。

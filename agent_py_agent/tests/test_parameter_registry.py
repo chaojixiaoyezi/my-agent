@@ -162,6 +162,11 @@ def test_numeric_knobs_with_pointer_like_names_are_free_and_shown_in_full(key):
     assert mask_value(key, 1600) == "1600"
 
 
+def test_new_credential_spellings_hit_no_registered_parameter():
+    # is_credential_key 同时决定边界分类：补写法后核对，登记表里脱敏的仍只有这 8 个真凭据，没有误伤普通参数
+    assert {key for key, spec in parameter_registry().items() if spec.masked} == set(_CREDENTIALS)
+
+
 @pytest.mark.parametrize("key", _CREDENTIALS)
 def test_real_credentials_stay_masked_boundary_everywhere(key):
     spec = parameter_registry()[key]
@@ -173,6 +178,11 @@ def test_credential_names_match_whole_trailing_segments_only():
     assert all(is_credential_key(key) for key in ("token", "new_service_api_key", "bot_token", "smtp_password", "x_cookies"))
     assert not any(is_credential_key(key) for key in ("max_tokens", "input_media_token_reserve", "token_budget",
                                                       "model_context_window_tokens", "keyboard_shortcuts", "api_keys_count"))
+    # 2026-09-27 补的常见写法，同样只认完整末尾片段
+    assert all(is_credential_key(key) for key in ("db_pass", "ftp_passwd", "mysql_pwd", "ssh_private_key", "aws_secret_key",
+                                                  "aws_secret_access_key", "basic_auth", "auth", "pass"))
+    assert not any(is_credential_key(key) for key in ("auth_enabled", "access_mode", "path_access_mode", "oauth", "bypass",
+                                                      "compass", "model_auth_ref", "aws_access_key_id", "pwd_hint"))
     # 凭据名即使是数字类型也仍是边界（不因“数字不指向任何东西”被放开）
     assert classify_safety("bot_token", "int") == SAFETY_BOUNDARY and classify_safety("bot_token_limit", "int") != SAFETY_BOUNDARY
 

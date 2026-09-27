@@ -1,5 +1,21 @@
 # 测试与发布验收
 
+## 脱敏边界补齐（2026-09-27，分支 `claude/be-masking-edges`，基于 `946a26783`）
+
+- **来源**：集成者对上一批四个已知边界的决定——都往“宁可多遮”的方向补。规则见 `docs/design/PARAMETER_CENTER.md` 的同名条目。
+- **测试**：`test_structured_masking.py` 增至 6 项，`test_parameter_registry.py` 加 1 项并扩充凭据名正反例，全部用假值：
+  - 列表：任意开关（含 `-H`、`-e`）后的“名字: 值”“名字=值”只留名字，开关后的网址不被当成请求头行；`--pass` 的值、`DB_PASS=…`、
+    嵌套的 `SSH_PRIVATE_KEY`/`BASIC_AUTH`、`auth` 映射（保留键名）、列表项里的 libpq 连接串、`--header=名字: 值`、
+    `--password=带空格的值`、`--headers` 后的 JSON 都遮住，并经 user_config、`/settings`、回执与记账、历史、`config-get` 各出口确认无明文。
+  - 自由文本：libpq 连接串、引号括起的值、引号里的连接串、修改记录的外层引号、文字中间的网址、点分隔的名字；没有凭据名的原样。
+  - 文本参数写入连接串：回执与账本无明文，标 `masked`，回滚被拒。
+  - 登记表：补写法后被脱敏的仍只有 8 个真凭据（逐个核对新写法没有误伤普通参数）。
+- **结果**：与上一批相同的相关测试集 575 passed；ruff、doc sync、strict code-size、`git diff --check`、clean-package 见提交前检查。
+- **变异验证**：39 个全部被抓出。上一批 20 个按新代码更新匹配文本（2 个随实现删除）；新增 19 个：任意开关后的形状规则、
+  开关后的网址被当成请求头行、没有开关也按形状遮、七个新凭据写法逐个去掉、点不当分隔符、文本不拆 `名字=值`、
+  非凭据的值不再检查、单引号与双引号括起的值、`名字=值` 从词中间开始、文本里的网址不遮、凭据名下的映射整个换成 `***`、
+  没有 `=` 的项也按角色处理。每个都在 `PYTHONDONTWRITEBYTECODE=1` 子进程里跑并逐字节恢复。
+
 ## 字典与列表参数的结构脱敏（2026-09-27，分支 `claude/be-structured-masking`，基于 `f824b6c10`）
 
 - **来源**：集成者派活。`mask_value` 只按顶层键名判断再整值 `str()`，`model_custom_headers`（Authorization、x-api-key 等）与
