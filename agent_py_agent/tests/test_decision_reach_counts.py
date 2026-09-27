@@ -167,3 +167,17 @@ def test_counted_material_counts_input_errors_but_not_privacy_skips(tmp_path):
     assert counts.counted_material(agent, "recall", lambda: "material") == "material"
     row = decision_reach_summary(agent.home_paths, since=0)["points"]["recall"]
     assert (row["reached"], [(item["reason"], item["count"]) for item in row["not_called"]]) == (1, [("bad_material", 1)])
+
+
+def test_summary_counts_only_hours_inside_the_window_and_ignores_foreign_schemas(tmp_path):
+    # 盘上保留 7 天，菜单只看近 24 小时：窗口外的小时桶不能混进“近24小时”；别的格式版本的文件按空处理。
+    agent = _agent(tmp_path)
+    path = agent.home_paths.owner_decision_reach_counts_json
+    path.parent.mkdir(parents=True)
+    now_hour = int(time.time() // 3600) * 3600
+    hours = {str(now_hour - 48 * 3600): {"planning": {"todo_count": 7}}, str(now_hour): {"planning": {"todo_count": 2}}}
+    path.write_text(json.dumps({"schema": counts.SCHEMA, "hours": hours}), encoding="utf-8")
+    row = decision_reach_summary(agent.home_paths, since=time.time() - 24 * 3600)["points"]["planning"]
+    assert (row["reached"], row["not_called"][0]["count"]) == (2, 2)
+    path.write_text(json.dumps({"schema": "decision_reach.v0", "hours": hours}), encoding="utf-8")
+    assert decision_reach_summary(agent.home_paths, since=0)["points"] == {}

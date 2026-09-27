@@ -23,6 +23,7 @@
   隐私跳过不计、decision_read 不附诊断、菜单把未接入点位显示成 0 次、审计不附诊断；资格不过也打开阶段（四个点位各一）、
   recall 点位关闭也报 unavailable、recall 输入不满足也建阶段。
 - **触发行为不变**：各点位原有测试全部原样通过（只把三处替身目标从 `_eligible` 改名为 `_miss_reason`）。
+- **集成复核补测**（集成者）：独立变异抽查 5 种，“汇总忽略时间窗（7 天数据冒充近 24 小时）”与“读取不校验格式版本”两种存活；补 `test_summary_counts_only_hours_inside_the_window_and_ignores_foreign_schemas` 后两种都被抓住。全仓 12 分片 22,234 passed、0 失败。
 
 ## Compact：带归档引用的工具回执可以移入摘要来源（2026-09-27，分支 `claude/compact-archived-refs`，基于 main `54a384147`）
 
