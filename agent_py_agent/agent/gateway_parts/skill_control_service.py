@@ -48,6 +48,10 @@ _FAILURE_HINTS = {
     CODE_NOT_PENDING: "这条提案已经不是待确认状态，无需再处理。",
     CODE_TARGET_EXISTS: "同名 Skill 已经存在，这条提案不能安装；可以用 /skills reject 拒绝它。",
 }
+# 会改提案或 Skill 的子命令：改动可能在异常前已经生效（例如删除后追加账本失败），回执不能承诺“没有改动”。
+_WRITE_OPERATIONS = frozenset({"confirm", "reject", "learned_revert", "learned_remove"})
+_READ_FAILURE = "技能提案或自动 Skill 暂时读不到，请稍后重试。"
+_WRITE_UNCONFIRMED = "这次操作的结果没能完整确认，可能已经生效；请先发 /skills 或 /skills learned 查看当前状态，再决定是否重试。"
 
 
 # LLM: 只携带已解析 owner 的路径投影与配置；也作审核顺序点的决策宿主（与 CLI 的 decision_host 同形状）。
@@ -64,7 +68,9 @@ class SkillControlError(Exception):
     pass
 
 
-# LLM: Gateway 控制分派入口；可预期失败给结构化失败回执，其它异常统一回“暂时读不到、原记录没有改动”，不泄露路径或堆栈。
+# LLM: Gateway 控制分派入口；可预期失败（都发生在改动之前）给结构化失败回执。其它异常不泄露路径或堆栈，按子命令是否写入
+#   选回执：只读子命令回“暂时读不到”；写子命令可能在改动生效后才失败（如 append_event 抛 OSError），只说结果没能完整确认、
+#   请先查当前状态，不承诺“没有改动”或直接重试。改动须同步 test_skill_chat_control.py 的提交后失败测试。
 # 函数用途: 执行一条已解析的 /skills 控制并返回给用户的中文回执（确认、拒绝、回滚、删除会写文件）。
 def execute_skill_control(base_agent: object, command: ConversationControlCommand, scope: object) -> ConversationControlResult:
     if not command.valid:
@@ -78,7 +84,8 @@ def execute_skill_control(base_agent: object, command: ConversationControlComman
     except (SkillLearningGateError, SkillLearningStoreError) as exc:
         return ConversationControlResult(_KIND, False, f"操作未完成（{getattr(exc, 'code', type(exc).__name__)}）。")
     except Exception:  # noqa: BLE001 - 控制回执不能带堆栈或本机路径。
-        return ConversationControlResult(_KIND, False, "技能提案或自动 Skill 暂时读不到，请稍后重试；原记录没有改动。")
+        return ConversationControlResult(
+            _KIND, False, _WRITE_UNCONFIRMED if command.operation in _WRITE_OPERATIONS else _READ_FAILURE)
     return ConversationControlResult(_KIND, True, text)
 
 

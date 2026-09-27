@@ -3,7 +3,9 @@
 ## 聊天 `/skills`：TUI 与 IM 里处理技能提案和自动总结的 Skill（2026-09-27，分支 `claude/skill-proposals-tui-im`，基于 main `4aa73d756`）
 
 - **来源**：用户要求“所有都能 TUI 和 IM 来”；技能提案与自动总结 Skill 原来只有命令行入口。
-- **新测试** `test_skill_chat_control.py`（23 项）：
+- **新测试** `test_skill_chat_control.py`（24 项）：
+  - 异常回执（`claude/skills-receipt-fix`，Codex 静态复核发现）：删除已生效后追加账本抛 OSError，回执不再说“原记录没有改动”，
+    而是提示结果没能完整确认、先查当前状态；只读子命令异常只说暂时读不到。变异验证：恢复旧文案、写操作也回只读文案，两种都被抓住。
   - 解析：提案编号前缀（6—24 位十六进制）、版本号（正整数）、Skill 名（生成合同的安全名字）都拒绝式校验，`../` 之类直接无效。
   - 命令目录把 `/skills` 交给 Gateway；TUI 文本还原后重新解析得到同一命令；TUI 本地模式明确拒绝，不落进停止分支。
   - Gateway 分派到技能服务，不走 steer/stop；无效命令回用法。
