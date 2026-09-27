@@ -1,5 +1,19 @@
 # 测试与发布验收
 
+## 进程停止：host 在停止期间自行退出不再误报 unknown（2026-09-27，Codex 全仓复现，集成者修）
+
+- **来源**：能力包全仓运行里 `test_process_sessions.py::test_background_session_outlives_one_shot_launcher_and_is_rehydrated`
+  失败过一次，单独复跑通过。当时记录是 host 写的 `killed`，child 回执也已确认，外层清理却留下 `identity_changed / confirmed=false`，
+  停止因此返回 unknown。原因是 host 在调用方“预检之后、采快照之前”按停止意图自行退出，出生身份读不到。
+- **修正**：`process_session_cleanup._host_exit_settled_receipts` 只在两条事实同时成立时，把这张回执改写成已确认的
+  `host_exited_during_stop`：①记录是 host 写的终态，且顶层回执已确认；②两级实例都按出生身份证明已消失。
+  身份核对不放宽，其它未确认回执照旧。
+- **新测试**（`test_process_session_retry_settles_unknown.py`，5 项）：
+  - 竞态收敛为确认，且改写后的回执能通过存储校验并落盘；
+  - host 回执未确认、child 仍在跑、非终态记录、信号后仍有残留，这四种都不确认、不改写。
+  - 用替身回执固定时序，Store 事务和实例判定走真实代码。
+- **变异**：7 个全部被抓住（去掉实例消失、终态、host 确认任一条件，放宽到任意未确认回执，丢观测数，不改写，返回原回执）。
+
 ## Compact 候选过大留下容量计量（2026-09-27，Codex G2 复验请求）
 
 - **来源**：G2 复验里第二代自动 Compact 报 `COMPACT_CANDIDATE_TOO_LARGE`。failed 进度只有 after_tokens=0（未计量默认值），

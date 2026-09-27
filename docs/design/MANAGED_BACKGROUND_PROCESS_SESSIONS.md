@@ -209,6 +209,23 @@ direct/local 控制在精确回合中断成功后，按 `operation=interrupt` �
 首次停止遇到已消失实例仍保持 `unknown`，不凭空确认；不解析 command/输出，不按 owner 或会话批量结清；
 回归见 `test_process_session_retry_settles_unknown.py`。
 
+### host 在停止期间自行退出（2026-09-27）
+
+**现象**：Codex 在能力包全仓运行里复现过一次。`stop_process_session` 先提交停止意图，再在 Store 锁外做两件事：先预检 host 还活着，再让终止原语采集进程树。host 自己也会读到停止意图，清理 child、写回 `status=killed` 和已确认的 child 回执（顶层 `termination.confirmed=true`），然后退出。
+如果 host 恰好在“预检之后、采快照之前”退出，出生身份就读不到。终止原语不向身份不符的进程发信号，只能回 `identity_changed`（未确认）。结果记录明明是 killed，整次停止却因这一张回执返回 unknown。
+
+**收敛规则**（`process_session_cleanup._host_exit_settled_receipts`）：下面两条独立事实同时成立时，才把这张 `identity_changed` 回执改写成已确认的 `host_exited_during_stop`：
+- 记录已是 host 写的终态，且顶层 `termination.confirmed=true`；
+- `instances_gone`：两级实例都已按出生身份证明消失（进程不存在、僵尸或出生标识确实不同；读不到不算消失）。
+
+这条规则的边界：
+- 改写只为保持存储不变式“cleanup 确认 ⇒ 每张回执确认”，来历记在 method 名里；
+- 身份核对不放宽，终止原语照旧不向身份不符的进程发信号；
+- 缺任一事实都保持原回执，停止仍是 unknown，包括 host 没确认、实例仍在、记录不是终态；
+- 其它未确认回执（例如信号后仍有残留）不适用。
+
+回归同样在 `test_process_session_retry_settles_unknown.py`：用替身回执固定这个时序，Store 事务和实例消失判定走真实代码。
+
 ### 整任务控制接线
 
 - 停止先锁定原 task/run/attempt，沿 RuntimeDB 的现有终态事务关闭执行权，再冻结后台 session 清单；

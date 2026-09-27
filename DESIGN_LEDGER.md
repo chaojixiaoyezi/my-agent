@@ -809,6 +809,11 @@ auth 表单取消和参数拒绝已验，官方设备码在两处环境被 HTTP 
 
 ## 当前待落地或待复验
 
+- 已实现（2026-09-27，Codex 全仓复现）：进程会话停止与 host 自行退出的并发收敛。
+  - 问题：host 读到停止意图后会自己清完 child、写回已确认回执并退出；调用方在锁外采快照时若 host 刚好退出，只能拿到未确认的 identity_changed，整次停止被误报成 unknown。
+  - 规则：记录已是 host 写的终态且顶层回执已确认、两级实例都按出生身份证明消失，这两条同时成立时，才把该回执改写为已确认的 `host_exited_during_stop`。
+  - 不变的部分：身份核对不放宽，其它未确认回执照旧。详见 `docs/design/MANAGED_BACKGROUND_PROCESS_SESSIONS.md`。
+
 - 已实现（2026-09-27，Codex G2 复验请求）：Compact 候选过大诊断。G2 第二代自动 Compact 报 `COMPACT_CANDIDATE_TOO_LARGE`
   时，failed 进度只有未计量的 after_tokens=0，无法判断是摘要过长还是固定开销太大。现在会话 transcript 和活动回合两条压缩链
   被输入上限拒掉候选时，错误带 `CompactCapacityFacts`：最小候选的完整下一请求 token、输入上限、摘要估算 token、保留条数、

@@ -73,6 +73,7 @@ class ProcessSessionCleanupError(RuntimeError):
 
 # LLM: 固定 v2/v3/v4 同一句柄，先落停止意图再发信号；完整 session 清理写 termination.cleanup，原命令终态及 child 回执不重写。
 # 记录已是 unknown（上一次停止未按期确认）时，重试若按出生身份证明两级实例都不存在，即确认清理并转 killed；首次停止仍要求终态或本次回执。
+# host 读到停止意图会自己清理 child、写回已确认回执并退出，与本函数锁外采集并发：见 _host_exit_settled_receipts。
 # 函数用途: 停止准确资源并持久保存完整退出确认，自然结束的命令也能留下清理证据；重试能结清实例已消失的旧未知记录。
 def stop_process_session(
     store: ProcessSessionStore,
@@ -117,13 +118,14 @@ def stop_process_session(
             retried_after_unknown = current["status"] == "unknown" and isinstance(
                 (current.get("termination") or {}).get("cleanup"), dict,
             )
+            settled = _host_exit_settled_receipts(receipts, current, instances_gone=instances_gone)
             confirmed = (
                 no_host_confirmed
                 or bool(current["pid"])
                 and child_known
                 and instances_gone
                 and (known_terminal or bool(receipts) or retried_after_unknown)
-                and all(receipt.confirmed for receipt in receipts)
+                and all(receipt.confirmed for receipt in settled)
             )
             if not known_terminal:
                 status = (
@@ -139,11 +141,42 @@ def stop_process_session(
                 }
             current = transaction.write({**current, "termination": {
                 **(current.get("termination") or {}),
-                "cleanup": {"confirmed": confirmed, "instances": [asdict(r) for r in receipts]},
+                "cleanup": {"confirmed": confirmed, "instances": [asdict(r) for r in settled]},
             }})
-            return ProcessSessionCleanup(current, confirmed, receipts)
+            return ProcessSessionCleanup(current, confirmed, settled)
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         raise ProcessSessionCleanupError(exc, frozen, receipts, committed) from exc
+
+
+# host 在本次停止期间自行退出：由终止原语的 identity_changed 回执加两条独立事实推出（见下方函数），不是原语自己的观测。
+_HOST_EXITED_DURING_STOP = "host_exited_during_stop"
+
+
+# LLM: 竞态来历：调用方预检时 host 还活着，采快照前 host 已按停止意图清完 child、写回已确认回执并自行退出，
+#   出生身份读不到，终止原语没发任何信号就回了 identity_changed（未确认）。改写只在两条独立事实同时成立时发生：
+#   ①记录已是 host 写的终态且顶层 termination.confirmed=True（host 自己确认清完 child 树）；②instances_gone，即两级
+#   实例都已按出生身份证明消失（进程不存在、僵尸或出生标识确实不同；读不到不算消失）。满足时把这张回执改写成已确认的
+#   host_exited_during_stop，保持存储不变式“cleanup 确认 ⇒ 每张回执确认”。身份核对不放宽：原语仍不向身份不符的进程发
+#   信号；其它未确认回执（信号后仍有残留等）原样保留，停止照旧是 unknown。只读入参，返回新元组，不写 Store。
+# 函数用途: 把“host 在停止期间自己正常退出”识别出来，避免它被误报成“停止结果未知”。
+def _host_exit_settled_receipts(
+    receipts: tuple[ProcessTerminationReceipt, ...],
+    record: dict[str, object],
+    *,
+    instances_gone: bool,
+) -> tuple[ProcessTerminationReceipt, ...]:
+    host_settled = (
+        instances_gone
+        and record["status"] in PROCESS_TERMINAL_STATUSES
+        and (record.get("termination") or {}).get("confirmed") is True
+    )
+    if not host_settled:
+        return receipts
+    return tuple(
+        ProcessTerminationReceipt(_HOST_EXITED_DURING_STOP, True, None, receipt.observed_processes)
+        if receipt.method == "identity_changed" and not receipt.confirmed else receipt
+        for receipt in receipts
+    )
 
 
 # LLM: 出生标识在终止原语采集快照后再次核对；旧 PID 不授予新树，启动者绝不在此列表里。
