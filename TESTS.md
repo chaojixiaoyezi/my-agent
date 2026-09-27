@@ -1,5 +1,16 @@
 # 测试与发布验收
 
+## B0.1.4字段映射资料纠正（2026-09-27）
+
+- 本地候选只修改B方法与来源说明，并将声明版本从0.1.3升为0.1.4；两个既有构建版本断言同步更新，没有新增测试、schema、校验规则或宿主逻辑。原安装版B0.1.3及G04业务文件保持。
+- 既有`test_capability_package_b_template.py`、`test_capability_package_drama_workflow_duration.py`及`test_samples_build_reproducibly_and_expose_only_one_package[drama-workflow-b]`共56项通过，0 failed/errors/skipped，8.260秒；源码指纹前后相同。输入为公开合成资料，未运行真实模型或业务检查器。
+- 两次原CLI构建逐字节一致，ZIP为35776字节，SHA256 `7b9b77c67f6b67e6133154d7d03f84b9cb9505a39b5e5e9c77b761a061e5edd5`。11份资源均与源码及声明摘要相符，全部为私有非执行资源；相对811bdc7d3仅`methods/workflow.md`和`PROVENANCE.md`变化，脚本、模板、示例和许可保持。
+- 独立静态窄审未发现阻断：保留一对多/多对一、每镜所属场次、阶段地址和结构/语义边界。报告`candidate-17-b014-content-review.json`摘要`07fe35cec4427423e38daf1cfe561d29146673dc5027eb2a785cbed0cebb1138`；本线另把README的源码候选与已安装版本表述分开，不改变包内容。
+- 私有证据为`candidate-17-b014-focused-01.json/.log/.xml`、`candidate-17-b014-build-verification.json`及上述窄审记录。未安装B0.1.4，不新增原生任务，也不补算G04或最终27次。
+- Ruff、doc-sync、strict code-size、diff-check、clean-package全部退出0，尺寸hard=0、blocked=False，既有非阻断发现保留。**本地严格gate已通过，线上CI未作为验收来源**；命令、退出码和日志摘要见`candidate-17-b014-strict-gates-01.json`。随后仅补本文和交接记录，重新核doc-sync与diff，不重复模型或56项组件。
+
+建议下一步：将固定补片交Claude合并；其Compact补片独立推进，root按固定组合准备原生复验。文案纠错不证明模型已正确采用，不扩展领域规则或重跑同一故事。
+
 ## C17能力包组合证据核对（2026-09-27）
 
 - 固定源码`51dac1b815acf74a76fa79ef7f93f2f4228b3d4b`，本线工作树与Claude组合工作树一致；本次只核已有日志，不重复运行全仓或发起模型请求。

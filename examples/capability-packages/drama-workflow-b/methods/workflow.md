@@ -40,7 +40,8 @@
 
 - `cast.id` 与 `characters.id` 显式对应；逐场核对 `character_ids`，不能只复制角色名字。
 - 原 `scenes.source_ids` 保留为来源依据清单，逐项回到原文核对；本包检查器不读取原文，不能替代来源检查，更不能把它们填进 `reference_ids`。
-- 原场次和镜头 ID 显式映射到本包 `scenes.id` 与 `shots.scene_id`；补齐本包需要的场次 `episode_id/location_id/character_ids/prop_ids`。
+- 原场次 `scenes[].id` 与本包场次 `scenes[].id`、原镜头 `shots[].id` 与本包镜头 `shots[].id` 分别建立显式对应，不要求转换前后的编号相同。一对多或多对一沿前述 `object_mappings` 分行记录，不拼接多个 ID。
+- 本包每个镜头的 `shots[].scene_id` 只填写其所属的本包场次 `scenes[].id`，不能填镜头自身 ID；补齐该场次的 `episode_id/location_id/character_ids/prop_ids`。
 - 原镜头动作需要明确整理成场次内 `beats`，分别填写 `id/kind/text`，对白增加 `character_id`；镜头的 `beat_ids` 逐项引用本场真实节拍。另一包没有这些字段时，不能只造一列节拍编号而没有正文。
 - 参考资料单独建立条目，逐镜核对 `reference_ids → references.id → subject_id`；镜头秒数在转换后重新按集汇总。
 
