@@ -16,6 +16,7 @@ from ._filesystem_helpers import (
     _internal_agent_status_ref,
     _readable_agent_final_report,
     _required_path,
+    path_resolution_error_outcome,
 )
 from .filesystem_artifact_guard import (
     ToolOutputArtifactRedirectError,
@@ -77,7 +78,7 @@ def execute_read_file(tool, params: dict[str, Any], max_chars: int) -> ToolHandl
             error_code="TOOL_OUTPUT_REQUIRES_READ_ARTIFACT",
         )
     except ValueError as exc:
-        return ToolHandlerOutcome("read_file", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
+        return path_resolution_error_outcome("read_file", exc)
     return _execute_read_file_request(ReadFileRequest(
         tool=tool,
         params=params,

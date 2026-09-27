@@ -24,6 +24,7 @@ from ._filesystem_helpers import (
     _FALLBACK_SCAN_MAX_SECONDS,
     _MAX_SEARCH_LINE_CHARS,
     _read_text_safe,
+    path_resolution_error_outcome,
 )
 from ._filesystem_read import (
     _COMMON_FILE_DISCOVERY_IGNORES,
@@ -230,9 +231,9 @@ class SearchTextTool(FileSystemTool):
             request = search_request_from_params(params, self.max_matches)
             target = self.resolve_path(request.raw_path)
         except ValueError as exc:
-            # 参数/路径解析失败→TOOL_INVALID_ARGUMENTS(改参可修)；漏码会兜底 UNKNOWN_ERROR
-            # (retryable=False)误导模型放弃。not-found 走下面 missing_path_result(PATH_NOT_FOUND)。
-            return ToolHandlerOutcome("search_text", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
+            # 参数/路径解析失败→TOOL_INVALID_ARGUMENTS(改参可修)；路径策略拒绝→原权限码+authorization。
+            # not-found 走下面 missing_path_result(PATH_NOT_FOUND)。
+            return path_resolution_error_outcome("search_text", exc)
         if not target.exists():
             return missing_path_result(MissingPathRequest(
                 tool_name="search_text",

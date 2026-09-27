@@ -366,8 +366,12 @@ IM 管理员身份与聊天内审批已在分支 `claude/admin-identity` 本地�
 设计见 [IM 管理员身份](design/ADMIN_CHANNEL_IDENTITY.md)。
 
 子代理可观测与授权失败即停已在分支 `claude/subagent-observability` 本地完成（见 COMPLETED 与 TESTS），待集成、部署与真实 TUI 复验。本次发现的后续缺口：
-- 父项目目录等“网关根”内的路径被 handler 按 owner 墙拒绝时报 `TOOL_INVALID_ARGUMENTS`（执行阶段），不触发授权阶段即停。解决问题：同类“读不到”在两个阶段报码不一，
-  子代理仍可能在这类路径上空转；需要先定这类拒绝的结构化阶段与错误码，再决定是否纳入同一即停规则。
+- ~~父项目目录等“网关根”内的路径被 handler 按 owner 墙拒绝时报 `TOOL_INVALID_ARGUMENTS`（执行阶段），不触发授权阶段即停。~~
+  **已修（2026-09-27，`_filesystem_helpers.path_resolution_error_outcome`）**：handler 层的路径拒绝改为读异常上的结构化
+  `access_code`，凡该码已在 `ERROR_CONTRACTS` 登记且 `category == "permission"`（owner 墙、跨 owner、管理员授权源、
+  危险根、凭据文件五个码），就按原码上报并带 `failure_stage="authorization"`；其余仍报 `TOOL_INVALID_ARGUMENTS`。
+  四个读类工具（read_file / list_files / find_files / search_text）共用同一个 helper，落在同一 (code, stage)，与路径门
+  的拒绝归入同一段连续失败。不解析消息文字，类型错误等真校验未放宽。
 - `read_file` 工具说明写着“可直接读任意绝对路径，包括 workspace 外……无需额外授权”，对只能访问 owner home 与 shared 区的子代理不准确。解决问题：
   模型据此反复重试墙外路径；说明应按调用方实际路径范围给出，改动涉及模型请求内容，需单独评估与开关。
 ## 能力包内化（2026-09-25，进行中）

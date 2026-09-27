@@ -86,8 +86,16 @@ class WriteScopeError(ValueError):
 
 # LLM: Preserve the distinction between an invalid path argument and a policy denial so mutating tools fail closed with WRITE_FORBIDDEN.
 # 类用途: 标记路径已成功解析、但被统一访问策略拒绝，供写工具转换成明确的权限错误。
+# LLM: 路径被拒时携带 PathAccessDecision.code，供上层区分权限拒绝与参数错误；消息文字不参与判断。
+# 类用途: 表示"路径解析成功但被访问策略拒绝"，并把策略给出的稳定错误码带上去。
 class PathAccessError(ValueError):
     """A resolved path was rejected by PathAccessPolicy."""
+
+    # LLM: access_code 只由 resolve_path 从 PathAccessDecision.code 写入；读取方不得从消息文字反推。
+    # 函数用途: 保存策略给出的错误码（可为空，空表示策略没给码）。
+    def __init__(self, message: str, access_code: str = "") -> None:
+        super().__init__(message)
+        self.access_code = str(access_code or "").strip()
 
 
 def owner_quota_error_result(tool_name: str, exc: BaseException) -> ToolHandlerOutcome:
@@ -188,7 +196,7 @@ class FileSystemTool(BaseTool):
             ):
                 raise ToolOutputArtifactRedirectError(hint)
             raise ValueError(hint)
-        raise PathAccessError(decision.message or "路径访问被拒绝。")
+        raise PathAccessError(decision.message or "路径访问被拒绝。", decision.code)
 
     # LLM: 只消费 registry 注入的墙外授权，裁决复用原路径策略；workspace_roots 不能自行产生权限，联测 owner/exact 读取边界。
     # 函数用途: 使用核心与插件共用的路径裁决，检查目标是否获准读取。

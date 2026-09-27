@@ -1,5 +1,28 @@
 # 测试与发布验收
 
+## handler 层路径拒绝改报权限码（2026-09-27，用户派活，my-agent 实现）
+
+- **来源**：dev 指出——父项目目录等路径先被路径门放行，再由工具自己的 `PathAccessPolicy` 拒绝，报的是
+  `TOOL_INVALID_ARGUMENTS`（execution 阶段），而“授权阶段连续失败即停”只统计 `authorization` 阶段的失败，
+  子代理因此会在这类路径上继续空转。记在 `docs/ROADMAP.md`。
+- **做法**：`PathAccessError` 增加结构化字段 `access_code`（`PathAccessError.__init__`），`resolve_path` 抛错时传入
+  `decision.code`；新增 `_filesystem_helpers.path_resolution_error_outcome(tool_name, exc)` —— 只读异常上的
+  `access_code`，码已登记在 `ERROR_CONTRACTS` 且 `category == "permission"` 时按原码上报并带
+  `failure_stage="authorization"`，其余仍报 `TOOL_INVALID_ARGUMENTS`。放 helpers 里是因为
+  `filesystem_read_file` 被 `_filesystem_read` 导入，放别处会循环导入。四个读类工具
+  （`filesystem_read_file` / `_filesystem_list` / `_filesystem_find` / `_filesystem_search`）包住 `resolve_path` 的
+  `except ValueError` 分支改调这个 helper；读窗口、正则等其他 `ValueError` 分支未动。
+- **新测试**（`tests/test_path_access_error_codes.py`，14 项）：
+  - helper 单测 7 项：登记的五种 permission 码原样上报且带 authorization；普通 `ValueError`、未登记的码、
+    已登记但非 permission 的码（`PATH_SYMLINK_ESCAPE_BLOCKED`）、完全没有 `access_code` 属性的异常，
+    四种都回落 `TOOL_INVALID_ARGUMENTS` 且不带阶段；错误消息原样保留。
+  - 真实工具端到端 7 项：用真实 owner 墙（owner A 读 owner B 的家）分别打四个工具，都报
+    `PATH_CROSS_OWNER_BLOCKED` + `authorization`；四个工具的 (code, stage) 集合必须完全一致（否则即停统计不到）；
+    自己家照常读到（改造没把合法读取弄坏）；真正的参数错误（path 传整数）仍报 `TOOL_INVALID_ARGUMENTS`。
+- **复现**：`cd agent_py_agent && python3 -m pytest tests/test_path_access_error_codes.py -q`。
+- **变异**：把 helper 里 `contract.category == "permission"` 判据改成恒假（等同改动前行为），9 项失败、5 项仍绿
+  （正是那些断言"回落"的用例），证明这批测试真的钉住了新行为而不是恒真。变异后已还原并复跑通过。
+
 ## 进程停止：host 在停止期间自行退出不再误报 unknown（2026-09-27，Codex 全仓复现，集成者修）
 
 - **来源**：能力包全仓运行里 `test_process_sessions.py::test_background_session_outlives_one_shot_launcher_and_is_rehydrated`

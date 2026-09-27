@@ -7,6 +7,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..contracts.error_taxonomy import ERROR_CONTRACTS
+from .models import ToolFailureStage, ToolHandlerOutcome
+
 _MAX_PATH_CHARS = 4096
 _MAX_SEARCH_QUERY_CHARS = 4000
 _MAX_SEARCH_LINE_CHARS = 500
@@ -62,6 +65,27 @@ def _optional_path(value: Any, *, default: str = ".") -> str:
     if value is None:
         return default
     return _required_path(value)
+
+
+# LLM: 只读异常上的结构化 access_code，绝不解析消息文字；码必须已在错误合同登记且属于 permission 才按原码上报。
+# 函数用途: 把路径解析失败的异常转成工具结果，权限类拒绝报原权限码并标 authorization，其余仍报参数错误。
+def path_resolution_error_outcome(tool_name: str, exc: BaseException) -> ToolHandlerOutcome:
+    code = str(getattr(exc, "access_code", "") or "").strip()
+    contract = ERROR_CONTRACTS.get(code) if code else None
+    if contract is not None and contract.category == "permission":
+        return ToolHandlerOutcome(
+            tool_name,
+            False,
+            str(exc),
+            error_code=code,
+            failure_stage=ToolFailureStage.AUTHORIZATION.value,
+        )
+    return ToolHandlerOutcome(
+        tool_name,
+        False,
+        str(exc),
+        error_code="TOOL_INVALID_ARGUMENTS",
+    )
 
 
 def _text_param(

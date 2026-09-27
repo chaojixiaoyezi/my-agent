@@ -23,6 +23,7 @@ from ._filesystem_helpers import (
     _int_param,
     _optional_path,
     _text_param,
+    path_resolution_error_outcome,
 )
 from ._filesystem_read import (
     _COMMON_FILE_DISCOVERY_IGNORES,
@@ -124,9 +125,8 @@ class FindFilesTool(FileSystemTool):
             request = _find_files_request_from_params(params, self.max_matches)
             target = self.resolve_path(request.raw_path)
         except ValueError as exc:
-            # 参数/路径解析失败→TOOL_INVALID_ARGUMENTS(改参可修)；漏码会兜底 UNKNOWN_ERROR
-            # (retryable=False)误导模型放弃而非按 schema 改参重试。
-            return ToolHandlerOutcome("find_files", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
+            # 参数/路径解析失败→TOOL_INVALID_ARGUMENTS(改参可修)；路径策略拒绝→原权限码+authorization。
+            return path_resolution_error_outcome("find_files", exc)
         if not target.exists():
             # 目标路径不存在是状态问题，应带 PATH_NOT_FOUND + candidate_paths(与 list/search 一致)，
             # 而非无码兜底 UNKNOWN_ERROR——后者让模型放弃，前者引导改用候选路径或先 list_files 定位。
