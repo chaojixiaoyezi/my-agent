@@ -33,14 +33,14 @@ _BOUNDARY_TOKENS = frozenset({
     "header", "headers", "webhook", "callback", "app", "provider", "prompt", "prompts", "instruction", "audit", "lock",
 })
 _SECRET_TOKENS = frozenset({"secret", "token", "password", "encrypt", "credential", "credentials", "cookie", "cookies"})
-# 记号规则覆盖不到、但会改变模型流量去向、请求协议、执行权威链、工具可用性、特权动作频率或桌面控制的键，
+# 记号规则覆盖不到、但会改变模型流量去向、请求协议、执行权威链、工具可用性、写入保护、特权动作频率或桌面控制的键，
 # 以及加载器写入的内部元数据（不是用户参数）。
 _BOUNDARY_NAMES = frozenset({
     "api_base", "api_key", "model_backend", "computer_use_enabled", "execution_mode", "user_id", "system_prompt",
     "enable_tools", "enable_gateway_restart_tool", "enable_model_profile_tool", "gateway_restart_cooldown_seconds",
     "result_check_execute_tests", "daemon_mutate_state", "daemon_start_runners", "external_knowledge_api_sources",
     "external_knowledge_database_sources", "external_knowledge_index_file_name",
-    "config_layers", "config_sources", "config_warnings", "memory_config_warnings",
+    "config_layers", "config_sources", "config_warnings", "memory_config_warnings", "protect_running_runtime",
 })
 _CATEGORIES = (
     (("max_tokens", "model_", "temperature", "top_p", "request_timeout", "stream_", "reasoning_", "anthropic_"), "模型请求"),

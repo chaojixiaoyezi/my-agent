@@ -20,6 +20,7 @@ from ..path_access_policy import inheritable_declared_work_roots
 from ..plugin_observation import observation_event_payload_from_envelope
 from ..tooling.runtime_contracts import tool_arguments_hash
 from .run_task_workspace_writer import current_run_tool_output_archive_root
+from .runtime_write_guards import attach_running_install_guard
 from .tool_guard.call_guardrail import tool_guardrail_policy, tool_guardrail_records
 
 
@@ -102,6 +103,7 @@ def _nonnegative_int(value: object) -> int:
 
 
 # LLM: 合并顺序必须保留调用方已有 boundary，再追加宿主账本和当前 run 的精确审批；任何临时批准都不能覆盖原安全范围。
+#   正在运行的安装目录保护最后写入独立键 runtime_install_roots（见 runtime_write_guards），不改原有写入范围。
 # 函数用途: 生成一次工具执行使用的完整结构化边界。
 def write_boundary_with_runtime_ledger(agent: object, params: object) -> dict[str, object] | None:
     boundary = getattr(params, "write_boundary", None)
@@ -121,6 +123,7 @@ def write_boundary_with_runtime_ledger(agent: object, params: object) -> dict[st
     _attach_transient_named_work_write_scope(merged, agent, params)
     _attach_owner_control_write_guards(merged, agent)
     _attach_granted_execution_workspace_roots(merged, agent, params)
+    attach_running_install_guard(merged, getattr(agent, "config", None))
     guardrail_rows = tool_guardrail_records(agent)
     if guardrail_rows:
         merged["tool_guardrail_records"] = _merged_tool_guardrail_rows(

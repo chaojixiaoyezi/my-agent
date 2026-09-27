@@ -32,7 +32,7 @@ from .runtime_boundary import (
 )
 from .workspace_read_scope import build_workspace_read_context
 from .workspace_write_scope import build_workspace_write_context
-from .write_boundary import WRITE_TOOL_NAMES, validate_write_boundary
+from .write_boundary import RUNTIME_INSTALL_ROOTS_KEY, WRITE_TOOL_NAMES, validate_write_boundary
 
 _MAX_EXCEPTION_MESSAGE_CHARS = 500
 _BOUNDARY_FILESYSTEM_TOOL_NAMES = WRITE_TOOL_NAMES | {
@@ -621,7 +621,8 @@ def execute_authorized_tool(request: AuthorizedToolDispatchRequest) -> ToolHandl
 
 
 # LLM: 内部运行参数只投影结构化 boundary；sandbox 写根的集合不变，但 task_work_dir 必须排在首位，
-# 供 Linux attempt 沙箱选择独立持久临时根，不能让 working_dir/项目目录承担临时缓存。
+# 供 Linux attempt 沙箱选择独立持久临时根，不能让 working_dir/项目目录承担临时缓存。只读保护路径 = forbidden_write_roots
+# 加 runtime_install_roots（正在运行的安装目录）。
 # 函数用途: 给已授权工具补充模型不可见的写根、读根、临时根顺序和其它运行边界参数。
 def _tool_params_with_runtime_boundary(request: AuthorizedToolDispatchRequest) -> dict[str, Any]:
     if not isinstance(request.write_boundary, dict):
@@ -635,10 +636,11 @@ def _tool_params_with_runtime_boundary(request: AuthorizedToolDispatchRequest) -
             str(root) for root in request.sandbox_read_roots
         ]
         if request.tool_name in {"run_command", "terminal_session"}:
-            params["__sandbox_protected_write_paths"] = _boundary_path_strings(
-                request.write_boundary,
-                "forbidden_write_roots",
-            )
+            # 禁止写根与正在运行的安装目录一起交给沙箱设为只读（Full Access 的 Seatbelt/bwrap 同样执行）。
+            params["__sandbox_protected_write_paths"] = list(dict.fromkeys([
+                *_boundary_path_strings(request.write_boundary, "forbidden_write_roots"),
+                *_boundary_path_strings(request.write_boundary, RUNTIME_INSTALL_ROOTS_KEY),
+            ]))
         raw_write_roots = request.write_boundary.get("allowed_write_roots")
         if isinstance(raw_write_roots, (list, tuple)):
             # 文件工具已有 validate_write_boundary；shell 内部的重定向/open/cp 无法从

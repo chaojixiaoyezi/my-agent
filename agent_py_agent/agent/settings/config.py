@@ -448,6 +448,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     additional_write_roots: list[str] = field(default_factory=list)
     # 管理员 Full Access 时提示词里给出的自身开发工作树（空=不启用）；只是工作约定，不授予写权限。
     self_dev_worktree: str = ""
+    # 正在运行的安装目录对所有工具只读（含 Full Access），部署是唯一更新方式；只在调试安装本身时关闭。
+    protect_running_runtime: bool = True
     enable_subagents: bool = True
     subagent_mode: str = "trusted_local_hardening"
     # 当前根会话树可同时保留的未结束子代理数；不同 TUI/根任务互不占槽。

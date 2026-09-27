@@ -24,6 +24,9 @@ WRITE_TOOL_ORDER = ("write_file", "edit_file", "apply_patch")
 WRITE_TOOL_NAMES = frozenset(WRITE_TOOL_ORDER)
 _MAX_BOUNDARY_PATH_CHARS = 4096
 _INTERNAL_OUTPUT_JSON_NAME = "output.json"
+# 正在运行的 my-agent 安装目录（宿主结构化事实，见 agent_core/runtime_write_guards）。它不属于写入范围键：
+# 只额外拒绝落在安装目录里的写入，不会把原本不限范围的调用变成“没有 allowed_write_roots 就全拒”。
+RUNTIME_INSTALL_ROOTS_KEY = "runtime_install_roots"
 _WRITE_SCOPE_BOUNDARY_KEYS = frozenset(
     {
         "allowed_write_roots",
@@ -93,6 +96,9 @@ def validate_write_boundary(
         access_decision = path_policy.check(target)
         if not access_decision.allowed:
             return f"写入被阻止: {access_decision.message}"
+        install_error = _runtime_install_error(target, write_boundary, workspace_root)
+        if install_error:
+            return install_error
         if not enforces_scope:
             continue
         allowed_error = _allowed_boundary_error(
@@ -235,6 +241,18 @@ def _forbidden_root_blocks_target(target: Path, root: Path, allowed_roots: list[
         return True
     allowed_specificity = max(len(aroot.parts) for aroot in matching_allowed)
     return len(root.parts) >= allowed_specificity
+
+
+# LLM: 安装目录保护与写入范围无关、也不受“更具体的允许目录胜出”影响：命中就拒，Full Access 同样生效。
+# 函数用途: 拒绝改写正在运行的 my-agent 安装目录，提示去开发工作树改代码。
+def _runtime_install_error(target: Path, write_boundary: dict[str, object], workspace_root: Path) -> str:
+    for root in _boundary_paths(write_boundary.get(RUNTIME_INSTALL_ROOTS_KEY), workspace_root):
+        if _is_relative_to(target, root):
+            return (
+                "写入被阻止: 目标位于正在运行的 my-agent 安装目录，部署会整体替换它，不能直接修改。"
+                f" target={_display_path(target, workspace_root)}；改自身代码请在配置的开发工作树里改。"
+            )
+    return ""
 
 
 def _locked_boundary_error(target: Path, write_boundary: dict[str, object], workspace_root: Path) -> str:

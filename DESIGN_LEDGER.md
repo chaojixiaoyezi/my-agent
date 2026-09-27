@@ -769,7 +769,8 @@ auth 表单取消和参数拒绝已验，官方设备码在两处环境被 HTTP 
   正式加载回读、修改记录与回滚）、`user_config` 工具 search/reset/history/revert、聊天 `/settings`（仅管理员）；修正工具只看从未设置的
   MY_AGENT_CONFIG 导致“找不到用户配置”。阶段 2b 已实现：写权限沿用 F4 Full Access（按 owner、仅管理员，早已存在），只新增
   `self_dev_worktree`（边界项）——管理员 Full Access 时提示词写明正在运行的代码位置与开发工作树，改完提交到该分支由集成者合并部署。
-  待做：阶段 3 分批迁移常数。
+  待做：阶段 3 分批迁移常数。运行中安装写保护已实现：边界开关 `protect_running_runtime`（默认开）让正在运行的安装目录对所有工具只读，
+  Full Access 也不例外（独立边界键 `runtime_install_roots`，见 gateway 结构文档 Full Access 一节）。
   详见 [参数中心](docs/design/PARAMETER_CENTER.md)。
 - 已实现并合入 main、待真实飞书验收（2026-09-26，用户决定）：IM 管理员身份与聊天内工具审批。
   以前管理员只有本机 local/main，飞书用户永远是自己的 owner，IM 客户端也无法确认工具，需要确认的操作一律被拒。

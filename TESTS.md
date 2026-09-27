@@ -1,5 +1,16 @@
 # 测试与发布验收
 
+## 正在运行的安装目录写保护（2026-09-27，分支 `claude/runtime-write-guard`，基于 main `fbf3ddfef`）
+
+- **来源**：用户问 my-agent 改自己代码会不会出事。Full Access 下文件工具与命令都能写本机任何位置，包括正在运行的安装目录。
+- **新测试** `test_runtime_write_guards.py`（7 项）：
+  - 安装目录只按进程事实认定：虚拟环境整体；site-packages 只保护包目录；源码检出不保护。
+  - 开关开/关。
+  - 文件工具命中安装目录就拒，更深的允许目录也不能穿过；只有这个键时不会把不限范围的写入变成全拒。
+  - Shell 与终端的沙箱只读路径包含安装目录。
+  - 端到端：本机管理员 Full Access 主会话仍能写外部开发工作树，写不了安装目录；关掉开关后可写。
+- **变异验证**：去掉文件工具检查、去掉 Shell 投影、忽略开关、改为借用 `forbidden_write_roots`（会让 Full Access 全部拒写），四种都被抓住。
+
 ## 参数中心阶段 3 第一批：同名常数收成一处（2026-09-27，分支 `claude/param-center-dup-constants`，基于 main `035f9f57b`）
 
 - **新测试** `test_constant_names_unique.py`：扫描 `agent_py_agent/agent` 与 `agent_py_agent/cli` 的模块级数值常数（导入不算定义），

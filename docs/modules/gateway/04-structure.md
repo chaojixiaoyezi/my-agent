@@ -983,6 +983,11 @@ Gateway 解析并校验会话 cwd，但不再把 `workspace_task.task_path` 覆�
 - 配置了 `self_dev_worktree`（边界项）且本片是 local/main + Full Access、该路径确是 git 工作树时，Owner Scope 追加
   “my-agent 自身代码”：正在运行的包目录（只读参考）、开发工作树、改完提交到当前分支交集成者合并。子代理继承时降为
   workspace-write，看不到这段；它同样只是软约束，不改变任何写边界。
+- 正在运行的 my-agent 安装目录（开关 `protect_running_runtime`，默认开）对任何代理、任何模式都只读，Full Access 也不例外，
+  部署是唯一更新方式。`agent_core/runtime_write_guards` 按进程事实认定（虚拟环境整体；装在 site-packages 时只保护包目录；
+  源码检出运行不保护），写入独立边界键 `runtime_install_roots`：文件工具在 `tooling/write_boundary` 里无条件先查，
+  更深的允许目录也不能穿过；`registry_invoke` 把它与 `forbidden_write_roots` 一起并入 Shell/终端沙箱只读路径。
+  不借用 `forbidden_write_roots` 本身：它是写入范围键，会让没有 `allowed_write_roots` 的 Full Access 调用变成全部拒写。
 - owner home 内用户文件可正常使用，但 `permissions/quota/retention/policy`、运行账本、Compact 与审计目录作为
   宿主控制面保持只读。每次工具调用复制 request-local handler/path policy，单 Gateway 多 TUI 不共享可变权限。
 
