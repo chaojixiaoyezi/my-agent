@@ -69,6 +69,7 @@ class CarriedToolCompactSource:
     retained_ir_history: tuple[object, ...] | None = None
 
     # LLM: 原archive及嵌套model_parameters以后可能改写；分区对象必须和入参完全隔离，且不新增持久权威。
+    #   原生来源的完整性复核用自身 source_records 写下的输出位置，与 partition_recovery_tool_source 同一判据。
     # 函数用途: 核对摘要素材与可覆盖refs完全一致并复制嵌套容器，防止未读工具获得覆盖权。
     def __post_init__(self) -> None:
         for name in ("source_records", "retained_records", "source_tool_refs", "retained_tool_refs", "source_ir_history"):
@@ -77,11 +78,16 @@ class CarriedToolCompactSource:
             object.__setattr__(self, "retained_ir_history", tuple(deepcopy(self.retained_ir_history)))
         ir_source_refs, ir_retained_refs = (), ()
         if self.source_ir_history or self.retained_ir_history is not None:
-            from ..agent_core.compact_tool_partition import recovery_ir_tool_refs
+            from ..agent_core.compact_tool_partition import (
+                archive_ref_values_by_key,
+                recovery_ir_tool_refs,
+            )
 
             if self.retained_ir_history is None:
                 raise ConversationCompactError("原生工具来源缺少保留区", code="COMPACT_TOOL_COVERAGE_UNKNOWN")
-            ir_source_refs = recovery_ir_tool_refs(self.source_ir_history, require_complete=True)
+            # 带引用回执须由同一来源里的原归档记录写下同一输出位置，与分区时同一判据。
+            ir_source_refs = recovery_ir_tool_refs(self.source_ir_history, require_complete=True,
+                                                   archive_refs=archive_ref_values_by_key(self.source_records))
             ir_retained_refs = recovery_ir_tool_refs(self.retained_ir_history)
         source_keys = [compact_tool_ref_key(item) for item in self.source_records]
         known_retained = [item for item in self.retained_records if compact_tool_ref_key(item) is not None]

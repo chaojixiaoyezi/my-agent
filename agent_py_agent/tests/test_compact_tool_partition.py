@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import replace
 
 import pytest
 
@@ -16,6 +17,7 @@ from agent_py_agent.agent.tooling.runtime_contracts import (
     ToolCall,
     ToolContentBlock,
     ToolResult,
+    ToolResultRef,
     ToolSuccessFacts,
 )
 
@@ -260,3 +262,95 @@ def test_complete_ir_refs_only_select_confirmed_pairs_from_mixed_retained_histor
     assert recovery_ir_tool_refs(history) == (_ref(safe), _ref(media), _ref(partial))
     with pytest.raises(ConversationCompactError):
         recovery_ir_tool_refs(history, require_complete=True)
+
+
+# LLM: 仿照 archive_tool_output_projection 的真实回执形状：正文（外置时是预览）+ 引用块 + typed ToolResultRef；
+#   引用上的 sha256/size_bytes 与生产一样取本次回执的值，判据只比对引用值本身。
+# 函数用途: 生成一条带引用的原生工具回执。
+def _ref_result(call: ToolCall, ref_value: str, *, text: str = "外置预览", mime_type: str = "",
+                extra_blocks: tuple[ToolContentBlock, ...] = ()) -> ToolResult:
+    ref = ToolResultRef(kind="tool_output", ref=ref_value, sha256="sha256:this-receipt", size_bytes=716,
+                        summary="complete raw tool output", mime_type=mime_type)
+    blocks = (ToolContentBlock("text", text=text), ToolContentBlock("ref", ref=ref_value), *extra_blocks)
+    return ToolResult.succeeded(call, facts=ToolSuccessFacts(content_blocks=blocks, refs=(ref,)))
+
+
+def test_text_result_whose_ref_is_its_archived_output_can_be_sourced():
+    # 2026-09-27 G02 最小复现：修复前任何带引用回执都判不完整，整组留在保留区、归档记录被连带排除，
+    # 分区返回 None，强制恢复在 compact_request_recovery 报 COMPACT_TOOL_COVERAGE_UNKNOWN。
+    call = _call("search", turn="turn-1")
+    path = "/owner/tool_outputs/search.json"
+    history = [AssistantTurn(tool_calls=[call]), _ref_result(call, path)]
+    record = {**_record(call), "output_externalized": True, "output_path": path, "artifact_ref": path}
+
+    source = partition_recovery_tool_source([record], history)
+
+    assert source is not None
+    assert source.source_tool_refs == (_ref(call),) and source.source_records == (record,)
+    assert source.source_ir_history == tuple(history)
+    assert source.retained_ir_history == () and source.retained_tool_refs == ()
+
+
+def test_read_artifact_source_ref_is_matched_by_its_recorded_value():
+    # read_artifact 的引用指向被读调用的逻辑引用（scoped_call_id），不是本次回执的全文；归档把它记在 source_artifact_ref。
+    reader = _call("reader", turn="turn-2")
+    scoped = "run-1:search"
+    history = [AssistantTurn(tool_calls=[reader]), _ref_result(reader, scoped, text='{"content": "完整读取回执"}')]
+    record = {**_record(reader), "reads_artifact_body": True, "source_artifact_ref": scoped,
+              "source_call_id": "search", "output_path": ""}
+
+    source = partition_recovery_tool_source([record], history)
+
+    assert source.source_tool_refs == (_ref(reader),)
+    assert source.source_ir_history == tuple(history)
+
+
+_UNSAFE_PATH = "/owner/tool_outputs/unsafe.json"
+
+
+def _recorded(call: ToolCall, **fields: object) -> list[dict[str, object]]:
+    return [{**_record(call), "output_path": _UNSAFE_PATH, **fields}]
+
+
+# 每种情形：(该调用的归档记录, 该调用的回执)。工具自报引用时顶层 tool_result_refs 只是回执引用的副本，归档并不为它保存内容。
+_RETAINED_CASES = {
+    "unrecorded": (lambda call: _recorded(call, output_path="/owner/tool_outputs/other.json"),
+                   lambda call: _ref_result(call, _UNSAFE_PATH)),
+    "handler_declared": (lambda call: [{**_record(call), "tool_result_refs": [{"kind": "artifact", "ref": _UNSAFE_PATH}],
+                                        "tool_result_envelope": {"tool_result_refs": [{"ref": _UNSAFE_PATH}]}}],
+                         lambda call: _ref_result(call, _UNSAFE_PATH)),
+    "media": (_recorded, lambda call: _ref_result(call, _UNSAFE_PATH, mime_type="image/png")),
+    "json_block": (_recorded, lambda call: _ref_result(
+        call, _UNSAFE_PATH, extra_blocks=(ToolContentBlock("json", data={"rows": 3}),))),
+    "text_with_data": (_recorded, lambda call: _ref_result(
+        call, _UNSAFE_PATH, extra_blocks=(ToolContentBlock("text", text="附带数据", data={"rows": 3}),))),
+    "no_archive": (lambda call: [], lambda call: _ref_result(call, _UNSAFE_PATH)),
+}
+
+
+@pytest.mark.parametrize("case", list(_RETAINED_CASES))
+def test_ref_results_outside_the_archive_own_fields_stay_retained(case):
+    records_for, result_for = _RETAINED_CASES[case]
+    call = _call("unsafe", turn="turn-1")
+    safe = _call("safe", turn="turn-2")
+    records = records_for(call)
+    history = [AssistantTurn(tool_calls=[call]), result_for(call),
+               AssistantTurn(tool_calls=[safe]), ToolResult.succeeded(safe, "可完整摘要")]
+
+    source = partition_recovery_tool_source([*records, _record(safe)], history)
+
+    assert source.source_tool_refs == (_ref(safe),)
+    assert source.retained_tool_refs == (_ref(call),)
+    assert source.retained_records == tuple(records)
+    assert source.retained_ir_history == tuple(history[:2])
+
+
+def test_carried_source_rechecks_ref_results_against_its_own_archive_records():
+    call = _call("search", turn="turn-1")
+    path = "/owner/tool_outputs/search.json"
+    record = {**_record(call), "output_path": path}
+    source = partition_recovery_tool_source([record], [AssistantTurn(tool_calls=[call]), _ref_result(call, path)])
+
+    with pytest.raises(ConversationCompactError, match="完整配对") as error:
+        replace(source, source_records=({**record, "output_path": "/owner/tool_outputs/other.json"},))
+    assert error.value.code == "COMPACT_TOOL_COVERAGE_UNKNOWN"

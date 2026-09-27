@@ -1,5 +1,22 @@
 # 测试与发布验收
 
+## Compact：带归档引用的工具回执可以移入摘要来源（2026-09-27，分支 `claude/compact-archived-refs`，基于 main `54a384147`）
+
+- **来源**：Codex G02 真实验收（通用能力包，65k 窗口）。五组工具往返各含外置输出或 read_artifact 的引用回执；分区把任何带引用回执都判为不完整，
+  整组留在保留区、同四元归档被连带排除，`partition_recovery_tool_source` 返回 None，强制恢复报 `COMPACT_TOOL_COVERAGE_UNKNOWN`。
+- **做法**：引用值等于同一四元身份原归档自己写下的输出位置（`output_path`/`artifact_ref`/`source_artifact_ref`）才算由归档保存；
+  其余引用（工具自报、媒体、未记录）和 json/数据块照旧整组保留；`CarriedToolCompactSource` 用自身 source_records 重算同一判据。
+- **新测试**：
+  - `test_compact_tool_partition.py` 新增 9 项：外置输出引用可移入；read_artifact 来源引用按值匹配；6 种保留情形（未记录、工具自报、媒体、
+    json 块、带数据的文本块、无归档记录）；来源对象按自身归档复核。
+  - 新文件 `test_compact_tool_ref_archive_chain.py`（4 项），零网络组合复现：沿真实外置/归档投影、与 executor 同形的回执、归档记录、
+    reducer 实时投影、原生 IR 记录器和真实 read_artifact 读取器。外置与内联同组、read_artifact 来源引用、恢复 attempt 的调用整组移入，
+    工具自报引用的组保留；摘要素材等于原 IR。同步用例钉住：投影给出的完整输出引用总是归档自有字段，工具自报引用从不属于这些字段。
+- **复现**：组合用例放到修复前的 `54a384147` 上运行，分区返回 None，与 G02 现场一致。
+- **变异验证**：12 个变异抓到 11 个（改回“有引用即不完整”、接受未记录引用、没有归档也接受、去掉媒体判断、去掉数据块判断、计入顶层
+  tool_result_refs、计入信封引用、去掉 source_artifact_ref、引用块不核对值、来源对象跳过归档复核、分区不用归档）。去掉 `artifact_ref`
+  字段的变异存活：真实记录里它总与 `output_path` 或 `source_artifact_ref` 同值出现，属等价变异。
+- **相关测试**：压缩、归档与投影相关的 34 个测试文件加新文件、架构守卫、常数名守卫，600 passed、4 xpassed（原有非严格 xfail）。
 ## 参数中心第二批：凭据脱敏与边界收紧、说明纠正、回执补全（2026-09-27，分支 `claude/be-param-descriptions` 第二个提交）
 
 - **来源**：集成者转来分类子代理的发现。`input_media_token_reserve` 等 8 个数量/上限参数因名字里有 token/prompt/path/owner/home/audit
