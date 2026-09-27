@@ -20,6 +20,8 @@ from .result_processors import _build_output_payload
 from .runner_result_state import RunnerResultFieldParams, apply_runner_result_fields
 
 
+# LLM: runner 结果写回的唯一参数包；新增字段必须带默认值，调用方按关键字构造；收口事实只来自 finalize 的结构化复算。
+# 类用途: 把一次子代理 runner 结果写回所需的结构化字段捆在一起，避免长参数列表。
 @dataclass
 class RecordRunnerResultParams:
     """Parameters for record_runner_result (18 fields replacing 18 positional params)."""
@@ -42,6 +44,8 @@ class RecordRunnerResultParams:
     # 系统级工具失败账本(A1):来自 archive_tool_calls 的 ok=False 摘要。
     # None=本轮拿不到系统数据(超时/worker 异常),[]=系统确认零工具失败。
     tool_failures: list[dict[str, str]] | None = None
+    # 本 attempt 因授权阶段同码连续失败收口时的结构化事实(原因码/工具/错误码/次数/参数名);None=未收口。
+    tool_failure_halt: dict[str, object] | None = None
     structured_repair_attempted: bool = False
     structured_repair_ok: bool = False
     structured_repair_error: str = ""

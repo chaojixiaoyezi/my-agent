@@ -35,6 +35,11 @@ from ..prompting_parts.builder import project_runtime_workspace_context
 from ..runtime_context import current_task_attributes
 from ..runtime_db.operations import exec_lock_scope
 from ..subagents.services.session_progress import record_runtime_subagent_tool_progress
+from ..subagents.tool_failure_ledger import (
+    REPEATED_TOOL_AUTHORIZATION_FAILURE,
+    archive_tool_call_facts,
+    authorization_failure_streak,
+)
 from ..tooling.operation_verification import render_current_turn_execution_facts
 from ..tooling.registry_workspace import effective_registry_cwd
 from ._runtime_params import ToolLoopExecuteParams
@@ -1858,15 +1863,13 @@ def _tool_step_or_limit(agent, request: _ToolStepRequest):
             request.current_prompt,
         ),
     )
-    # 这里只处理部署者显式开启的 hard_failure_halt。默认同类失败只会把
+    # 这里处理部署者显式开启的 hard_failure_halt，以及子代理授权阶段同码连续失败收口。默认同类失败只会把
     # 结构化错误和换路提示交还模型，不会设置 repeated_failure_halt。
     if request.params.repeated_failure_halt is not None:
-        final_prompt, final_response = _final_response_after_halt(
+        final_prompt, final_response = _final_response_after_repeated_failure(
             agent,
             request.params,
             next_round,
-            reason="repeated_failure_exhausted",
-            runtime_reason="REPEATED_TOOL_FAILURE_EXHAUSTED",
         )
         return final_prompt, final_response, next_round
     # unknown 副作用收口(T-USER-001):副作用结果不确定(单次即收口,对齐错误合同
@@ -2039,6 +2042,105 @@ def _clear_active_repeated_failure_halt(params: object, tool_name: str) -> None:
     object.__setattr__(params, "repeated_failure_halt_exhausted", False)
 
 
+# LLM: 只对 task_local 子代理 run 生效；连续段由本 run 已归档的工具事实加当前结果算出（与收口后 finalize
+#   从 archive 复算用同一函数、同一数据），阈值复用 repeated_failure_halt_threshold，≤0 时不收口。
+#   同批后到的任一成功撤销授权收口；主代理与非授权阶段失败继续走原返工提示，不受影响。
+# 函数用途: 子代理被授权门以同一原因连续拦下时停止新的工具调用，改为阻塞交直属父级，避免空转几十分钟。
+def _mark_authorization_failure_halt(record: ToolCallRecordParams) -> None:
+    params = record.params
+    if record.result.ok:
+        _clear_authorization_failure_halt(params)
+        return
+    if params.repeated_failure_halt is not None or not _is_subagent_task_local_run(params):
+        return
+    threshold = configured_repeated_failure_halt_threshold(params)
+    facts = archive_tool_call_facts([*params.archive_tool_calls, _current_call_archive_facts(record)])
+    streak = authorization_failure_streak(facts)
+    count = streak.get("consecutive_failures")
+    if threshold <= 0 or type(count) is not int or count < threshold:
+        return
+    object.__setattr__(params, "authorization_failure_halt", streak)
+    object.__setattr__(
+        params,
+        "repeated_failure_halt",
+        (record.call.tool_name, f"code:{streak.get('error_code') or ''}", count),
+    )
+    object.__setattr__(params, "repeated_failure_halt_exhausted", True)
+    params.tool_context.append(_authorization_halt_context(streak))
+
+
+# LLM: 与 _clear_active_repeated_failure_halt 同理：成功 ToolResult 是更晚的结构化事实，只撤销授权收口本身；
+#   已追加的提示保留在原上下文，不改其它 halt。本函数只改当前回合易失参数。
+# 函数用途: 同一批后面已有工具调用成功时，撤销前面写下的授权阶段收口。
+def _clear_authorization_failure_halt(params: object) -> None:
+    if getattr(params, "authorization_failure_halt", None) is None:
+        return
+    object.__setattr__(params, "authorization_failure_halt", None)
+    object.__setattr__(params, "repeated_failure_halt", None)
+    object.__setattr__(params, "repeated_failure_halt_exhausted", False)
+
+
+# LLM: task_local 是子代理 run_flow 写入的结构化作用域，也是子代理进度账本使用的同一判据；不看角色或正文。
+# 函数用途: 判断当前工具循环是否属于子代理执行。
+def _is_subagent_task_local_run(params: object) -> bool:
+    return str(getattr(params, "context_scope", "") or "").strip().lower() == "task_local"
+
+
+# LLM: 当前调用尚未归档，按 archive 记录的同名字段组装后交给同一事实适配器，保证与 finalize 复算口径一致；
+#   参数只交出键名所在的字典，事实层只保留键名。
+# 函数用途: 把本次工具结果整理成与归档记录同形的最小字典。
+def _current_call_archive_facts(record: ToolCallRecordParams) -> dict[str, object]:
+    return {
+        "tool": record.result.tool_name,
+        "ok": record.result.ok,
+        "error_code": record.result.error_code,
+        "failure_stage": record.result.failure_stage,
+        "handler_executed": record.result.handler_executed,
+        "parameters": dict(record.call.arguments),
+    }
+
+
+# LLM: 文案只由连续段的结构化字段拼出；它是给模型的收口说明，不是状态来源，状态由 runtime_status/reason 承担。
+# 函数用途: 告诉子代理为什么本轮停止调用工具、接下来该如实交代什么。
+def _authorization_halt_context(streak: dict[str, object]) -> str:
+    tools = "、".join(str(item) for item in streak.get("tools") or [streak.get("tool")] if item)
+    return (
+        "[tool-system]\n"
+        f"工具 {tools} 已在授权阶段以同一原因（{streak.get('error_code') or '未知错误码'}）"
+        f"连续 {streak.get('consecutive_failures')} 次被拦下，重试不会改变你的访问权限。"
+        "本轮停止新的工具调用，按阻塞状态交给直属父级处理；请只基于已有工具结果如实说明被拦下的操作、"
+        "已完成与未完成的工作，不要再尝试同类调用。"
+    )
+
+
+# LLM: 显式硬门沿原 unfinished + REPEATED_TOOL_FAILURE_EXHAUSTED；子代理授权阶段收口改为 blocked +
+#   REPEATED_TOOL_AUTHORIZATION_FAILURE，并由宿主显式写 turn_end_reason=blocked（收口回复即使被供应商截断也不改判成
+#   max-tokens→PENDING），使 runner 收成 BLOCKED 并经原生命周期事件通知直属父级，不再被立即重派。
+#   收口过程仍复用唯一的 _final_response_after_halt。
+# 函数用途: 按重复失败收口的原因生成最后一次交接回复。
+def _final_response_after_repeated_failure(
+    agent,
+    params: ToolLoopExecuteParams,
+    tool_rounds: int,
+):
+    if params.authorization_failure_halt is None:
+        return _final_response_after_halt(
+            agent,
+            params,
+            tool_rounds,
+            reason="repeated_failure_exhausted",
+            runtime_reason="REPEATED_TOOL_FAILURE_EXHAUSTED",
+        )
+    prompt, response = _final_response_after_halt(
+        agent,
+        params,
+        tool_rounds,
+        reason="repeated_authorization_failure",
+        runtime_reason=REPEATED_TOOL_AUTHORIZATION_FAILURE,
+    )
+    return prompt, replace(response, runtime_status="blocked", turn_end_reason="blocked")
+
+
 # LLM: 与持久 tool_operations 的 UNKNOWN 恢复规则一致，只读取 effect_outcome；
 # 不能凭调用次数或 TOOL_TIMEOUT 声称副作用已确定。已证实退出的超时由 shell 返回 failed。
 # 函数用途: 首次遇到真实未知执行结果时记录收口状态并追加一次说明，防止运行中放行、重启却失败。
@@ -2174,6 +2276,8 @@ def _record_tool_call(agent, record: ToolCallRecordParams) -> None:
         record.call,
         record.result,
     )
+    # 子代理授权阶段收口先判；命中后原重复失败机制按既有 halt 早退，不再追加相反的返工提示。
+    _mark_authorization_failure_halt(record)
     _mark_repeated_failure_halt(agent, record)
     _mark_unknown_outcome_halt(agent, record)
     if record.result.ok:

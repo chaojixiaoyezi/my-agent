@@ -32,6 +32,10 @@ from .orchestration.create_policy import (
     create_task_attributes,
     normalize_create_output_params,
 )
+from .orchestration.create_read_scope import (
+    INPUT_PATH_NOT_VISIBLE_ERROR_CODE,
+    input_read_scope_failure,
+)
 from .orchestration.decision_subagent import (
     SubagentModelInput,
     apply_subagent_model_decision,
@@ -122,10 +126,44 @@ def _prepare_child_creation(agent: object, params: dict, *, tool_name: str) -> H
     target_error = _hierarchy_target_error(agent, child_specs)
     if target_error:
         return _schedule_error(target_error, tool_name=tool_name)
+    if read_scope_error := _child_input_read_scope_error(agent, params, child_specs, tool_name):
+        return read_scope_error
     try:
         return _schedule_request(ScheduleRequestBuildParams(agent, parent_run_id, child_specs, params))
     except (IndexError, TypeError, ValueError) as exc:
         return _schedule_error(_schedule_validation_error_message(exc), tool_name=tool_name)
+
+
+# LLM: 与根创建同一预检；孙代理规范参数沿 _child_create_params 构造（与 _decision_children 同一算法），
+#   显式输入读原始 children 字典。父记录或参数构造出错时交给随后的原校验报告，这里不拦截。
+# 函数用途: 递归派工前拦下下一层子代理读不到的显式输入路径，整批不创建并提示父代理怎么修。
+def _child_input_read_scope_error(
+    agent: object,
+    raw_params: dict,
+    child_specs: list[HierarchyChildSpec],
+    tool_name: str,
+) -> ToolHandlerOutcome | None:
+    raw = _json_list_param(raw_params.get("children"))
+    try:
+        parent = agent.subagents.load(current_subagent_run_id(agent))
+        task_params = [
+            _child_create_params(parent, spec, sibling_index=len(parent.child_ids) + 1 + index)
+            for index, spec in enumerate(child_specs)
+        ]
+    except (FileNotFoundError, IndexError, TypeError, ValueError):
+        return None
+    if len(raw) != len(task_params):
+        return None
+    failure = input_read_scope_failure(agent, raw, task_params)
+    if failure is None:
+        return None
+    return ToolHandlerOutcome(
+        tool_name,
+        False,
+        json.dumps(failure, ensure_ascii=False, indent=2),
+        error_code=INPUT_PATH_NOT_VISIBLE_ERROR_CODE,
+        effect_outcome="not_started",
+    )
 
 
 # LLM: 复用原 scheduler 参数和持久查重；仅新项取得真实准备身份，网络后同对象重冻当前父权限，不能按目标文本猜身份或物化。

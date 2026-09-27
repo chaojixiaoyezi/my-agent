@@ -14,7 +14,7 @@ from typing import Any
 
 from ..common.cancellation import ToolCancelled, bind_cancellation_token
 from ..concurrency.interrupt import register_interrupt_callback
-from ..path_access_policy import PathAccessPolicy, inheritable_declared_work_roots
+from ..path_access_policy import PathAccessPolicy, granted_external_work_roots
 from .controlled_exec import ControlledExecToolRequest, execute_controlled_exec_tool
 from .models import (
     BaseTool,
@@ -221,7 +221,7 @@ def _invocation_context(request: RegistryToolInvokeRequest) -> ToolInvocationCon
         execution_authority_check=request.execution_authority_check,
         workspace_read_context=build_workspace_read_context(
             cwd=request.workspace_root, write_boundary=request.write_boundary, path_policy=policy,
-            granted_external_roots=_granted_external_work_roots(request, request.owner_scope_root),
+            granted_external_roots=granted_external_work_roots(request.write_boundary, request.owner_scope_root),
         ),
         workspace_write_context=build_workspace_write_context(
             cwd=request.workspace_root, write_boundary=request.write_boundary, path_policy=policy,
@@ -303,13 +303,13 @@ def _request_local_tool_for_invocation(
     #   墙外工作根"单独交给 handler，让它和中央路径门用同一份授权事实。
     # 人类: 只能由 registry 逐次下发，模型参数与 workspace_roots 都不能产生这个白名单。
     if hasattr(scoped, "granted_external_roots"):
-        scoped.granted_external_roots = _granted_external_work_roots(request, effective_owner_scope)
+        scoped.granted_external_roots = granted_external_work_roots(request.write_boundary, effective_owner_scope)
     if (
         request.tool_name == "terminal_session"
         and hasattr(scoped.shell_tool, "granted_external_roots")
     ):
-        scoped.shell_tool.granted_external_roots = _granted_external_work_roots(
-            request, effective_owner_scope
+        scoped.shell_tool.granted_external_roots = granted_external_work_roots(
+            request.write_boundary, effective_owner_scope
         )
     return scoped
 
@@ -492,41 +492,6 @@ def _execute_with_temporary_tool_context(
             tool.allowed_private_hosts = old_allowed_private_hosts
         if allow_private_resolution is not None and hasattr(tool, "allow_private_resolution"):
             tool.allow_private_resolution = old_allow_private_resolution
-
-
-# LLM: "墙外已授权工作根"是宿主事实：只从 write_boundary 的 allowed_write_roots /
-#   product_write_roots 派生，落在 owner 墙内的不算（墙内本来就走 owner 语义），
-#   系统根目录、宿主控制面、其它 owner 的家由 inheritable_declared_work_roots 过滤掉。
-#   handler 的 owner 墙逃生口只认这份列表，不认 workspace_roots，避免"改一个可变列表就放权"。
-# 函数用途: 给逐次调用的 handler 计算可以穿过 owner 墙的已授权工作根。
-def _granted_external_work_roots(
-    request: RegistryToolInvokeRequest,
-    owner_scope: str,
-) -> tuple[Path, ...]:
-    if not str(owner_scope or "").strip() or not isinstance(request.write_boundary, dict):
-        return ()
-    owner_root = Path(str(owner_scope)).expanduser().resolve(strict=False)
-    values: list[object] = []
-    for key in ("allowed_write_roots", "product_write_roots"):
-        raw = request.write_boundary.get(key)
-        if isinstance(raw, (list, tuple)):
-            values.extend(raw)
-    granted: list[Path] = []
-    for item in inheritable_declared_work_roots(values, owner_home=owner_root):
-        root = Path(str(item)).expanduser().resolve(strict=False)
-        if root == owner_root or _is_under(root, owner_root):
-            continue
-        if root not in granted:
-            granted.append(root)
-    return tuple(granted)
-
-
-def _is_under(path: Path, root: Path) -> bool:
-    try:
-        path.relative_to(root)
-        return True
-    except ValueError:
-        return False
 
 
 def _append_boundary_roots(roots: list[Path], value: object, workspace_root: Path) -> None:

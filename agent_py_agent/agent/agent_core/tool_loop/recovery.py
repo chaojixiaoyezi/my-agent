@@ -1,4 +1,6 @@
 
+# LLM: 工具循环收口与运行身份的恢复辅助；只按结构化 reason/身份字段分支，不解析模型正文。
+# 模块用途: 收口阶段剥离模型仍在请求的工具调用，并为归档和恢复计算当前 run 的身份范围。
 from __future__ import annotations
 
 from dataclasses import replace
@@ -18,6 +20,9 @@ from ..runtime.task_identity import durable_task_id
 from .round_execution import ToolCallRecordParams
 
 
+# LLM: reason 只取调用方给的结构化收口原因；收口回复里的工具请求一律不执行，只替换成对应的如实说明。
+#   新增原因需同步 _tool_loop_service 的收口分支与 closeout 回归。
+# 函数用途: 硬边界收口后模型若仍请求工具，丢弃这些请求并换成与收口原因一致的说明文字。
 def without_tool_call_after_limit(
     params: ToolLoopExecuteParams,
     response: ModelResponse,
@@ -49,6 +54,16 @@ def without_tool_call_after_limit(
                 "同类工具失败已连续达到阈值且多轮未能脱困，系统停止新的工具调用。"
                 "模型在收口阶段仍输出工具调用请求，后续工具请求不会被执行；"
                 "请基于已有工具结果如实说明已做与未做的工作，等待用户提供新思路。"
+            ),
+        )
+    if reason == "repeated_authorization_failure":
+        # 子代理授权阶段收口：交接对象是直属父级，不是用户；权限不会因重试改变。
+        return replace(
+            response,
+            text=(
+                "工具调用已在授权阶段以同一原因连续被拦下，系统停止新的工具调用。"
+                "模型在收口阶段仍输出工具调用请求，后续工具请求不会被执行；"
+                "本轮按阻塞状态交直属父级处理，请基于已有工具结果如实说明被拦下的操作与已做、未做的工作。"
             ),
         )
     if reason == "repeated_failure":

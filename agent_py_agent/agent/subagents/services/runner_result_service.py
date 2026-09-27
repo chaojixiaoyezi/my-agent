@@ -264,7 +264,8 @@ class SubAgentRunnerResultService:
 
         # 系统级工具失败账本(A1):在解析模型输出之前先落系统事实,
         # 后续 build/persist 链路会随任务一起落盘。None(超时/异常)不覆盖旧账本。
-        record_tool_failure_ledger(task, params.tool_failures, now)
+        # 授权阶段连续失败收口事实随同一账本写入,父级完成信封只从这里读取。
+        record_tool_failure_ledger(task, params.tool_failures, now, params.tool_failure_halt)
         extracted = self._extract_parsed_output(task, params.structured_output, now, params.actual_tools)
         output_payload, build_ctx = self._runner_result_build_context(
             _RunnerResultBuildParams(params, extracted, now),

@@ -9,10 +9,14 @@ from typing import Any
 from ...model_visible_refs import current_model_ref, current_model_ref_list, current_model_text
 from ...runtime_errors import runtime_error_report
 from ...subagents.models import TaskStatus, task_status_in, task_status_reason_code
+from ...subagents.tool_failure_ledger import recent_tool_failure
 from ...task_progress import progress_path, read_task_progress, task_progress_summary
 from ..runtime.owner_roots import runtime_owner_root
 
 
+# LLM: 节点只投影 kernel 快照与既有只读事实；recent_tool_failure 在读取时从 owner 权威 runtime_events 现算，
+#   不写回任务、不新增状态文件。修改须同步 model_view 白名单与 list_agents 回归。
+# 函数用途: 把一个子代理的运行快照整理成代理树节点，供 /status、TUI 和 list_agents 共用。
 def node_from_kernel_run(agent: object, row: object) -> dict[str, object]:
     payload = asdict(row)
     refs = _node_ref_values(payload)
@@ -24,7 +28,17 @@ def node_from_kernel_run(agent: object, row: object) -> dict[str, object]:
     node["guidance_layer"] = _guidance_layer(agent, str(node.get("run_id") or ""))
     # 增量结论账行数(结构化事实):>0 提示整合轮"这条 run 有已确认结论,取消/整合前先读账"。
     node["findings_recorded"] = _findings_recorded(payload)
+    # 最近工具失败段(结构化事实):让父级分清"被授权门反复拦下"和"模型还在慢慢想"。
+    if failure := _recent_tool_failure(agent, str(node.get("run_id") or "")):
+        node["recent_tool_failure"] = failure
     return node
+
+
+# LLM: 只读 agent.subagents.runtime_db 这一 owner 权威库；没有库（本地非托管）或 run 未登记时不输出该字段。
+# 函数用途: 取出子代理最近一次工具失败、错误码、失败阶段、同码连续次数和时间。
+def _recent_tool_failure(agent: object, run_id: str) -> dict[str, object]:
+    runtime_db = getattr(getattr(agent, "subagents", None), "runtime_db", None)
+    return recent_tool_failure(runtime_db, run_id)
 
 
 def _findings_recorded(payload: dict[str, object]) -> int:

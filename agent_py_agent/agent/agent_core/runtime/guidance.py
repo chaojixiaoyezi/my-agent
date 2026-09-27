@@ -5,7 +5,10 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from ...contracts.subagent_completion import completion_service_window_facts
+from ...contracts.subagent_completion import (
+    completion_service_window_facts,
+    completion_tool_failure_halt_facts,
+)
 from ...conversation.active_turn_input import append_active_turn_user_input, packet_from_guidance
 from ...conversation.authority import (
     CONVERSATION_BACKGROUND_WAKE_SIGNAL_IDS_ATTR,
@@ -832,8 +835,8 @@ def _render_task_events(events: list[WakeSignal]) -> str:
     )
 
 
-# LLM: 安全点确认事件前保留交接、诊断及宿主冻结窗口事实；不能只交付状态就确认已读。
-# 函数用途: 生成活动回合可见事件，窗口提示不改写生命周期或触发额外模型轮。
+# LLM: 安全点确认事件前保留交接、诊断、宿主冻结窗口事实及授权阶段连续失败收口事实；不能只交付状态就确认已读。
+# 函数用途: 生成活动回合可见事件，窗口提示与收口事实都不改写生命周期或触发额外模型轮。
 def _task_event_payload(event: WakeSignal) -> dict[str, object]:
     metadata = event.metadata if isinstance(event.metadata, dict) else {}
     return {
@@ -845,6 +848,8 @@ def _task_event_payload(event: WakeSignal) -> dict[str, object]:
         "task_id": str(metadata.get("task_id") or ""),
         "created_at": event.created_at,
         **completion_service_window_facts(metadata),
+        # 授权阶段同码连续失败收口的结构化事实（原因码/工具/错误码/次数/参数名），经合同投影裁剪。
+        **completion_tool_failure_halt_facts(metadata),
         **{key: metadata[key] for key in (
             "completion_message", "final_report_ref", "declared_output_refs", "artifact_refs",
             "turn_end_reason", "failure_type", "activity_diagnostic",

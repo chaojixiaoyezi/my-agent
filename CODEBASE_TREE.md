@@ -267,6 +267,7 @@ agent_py_agent/
 |   |   |-- orchestration/              # 创建、只读状态、消息、取消、授权五个递归直属工具与内部自动启动/恢复引擎；无兄弟 goal 广播，进展事件由宿主写入
 |   |   |   |-- decision_subagent.py # 原批次创建前模型建议，锁外请求、锁内复核，不另建任务账
 |   |   |   |-- create_context.py     # 显式资料与合同装配；已移除 work_scope.py 的自动 IO 身份，引用不合并派工
+|   |   |   |-- create_read_scope.py  # 创建前显式输入路径可见性预检：复用子代理运行时同一判定链，看不到整批 not_started
 |   |   |   |-- capacity.py           # 根/子/孙代理共用的会话树与 owner 容量事实；超限整批拒绝
 |   |   |   |-- coordinator_policy.py # 主代理/多层 coordinator 共用的 会话运行时 式派工后职责软合同
 |   |   |   |-- tools/list_agents.py  # 会话运行时 式只读代理树查询；复用 canonical 投影，不推进或取消下级
@@ -295,7 +296,7 @@ agent_py_agent/
 |   |   |-- runner_completion_payload.py # 完成正文、产物引用与父级交接信封的只读投影
 |   |   |-- runner_display_projection.py # 已裁决子代理状态到 TUI 活动标签的纯投影
 |   |   |-- runner_result_admission.py # exact run／attempt 的迟到与终态冲突准入、拒绝诊断
-|   |   |-- tool_failure_ledger.py      # 系统级工具失败账本：archive ok=False 摘要 -> attributes/对账投影
+|   |   |-- tool_failure_ledger.py      # 系统级工具失败账本：archive ok=False 摘要 -> attributes/对账投影；最近同码连续失败段（父级视图与授权收口共用）
 |   |   |-- result_registered_artifacts.py # 自然/结构化收口共用的 exact run 工具产物投影
 |   |   |-- lesson_ledger.py            # lessons.jsonl 账本唯一合同：四字段边界、固定渲染模板、幂等追加、每 run 上限与读回复核
 |   |   |-- services/                   # 子代理业务服务
@@ -1169,6 +1170,8 @@ docs/
 - `agent_py_agent/agent/subagents/lesson_ledger.py`：子代理经验账本 `lessons.jsonl` 的唯一合同。字段规范成单行且有界，id 取内容 hash（同 run 相同参数只记一次），每 run 最多 5 条、16 KiB，超限返回结构化结论；读回逐行复核版本、字段、id 与 run 归属。工具写入与 runner 结果收口共用，宿主从不解析模型回复正文。
 - `agent_py_agent/agent/agent_core/runtime_write_guards.py`：正在运行的 my-agent 安装目录写保护的唯一实现（开关 `protect_running_runtime`，默认开）。按进程事实认定安装目录（虚拟环境整体 / site-packages 包目录 / 源码运行不保护），写入独立边界键 `runtime_install_roots`：文件工具在 `tooling/write_boundary` 无条件拒写，Shell/终端并入沙箱只读路径，Full Access 同样生效。
 - `agent_py_agent/agent/agent_core/runtime/record_lesson_tool.py`：子代理专属 `record_lesson` 工具。run/attempt 取 runner 上下文、task 取任务记录，Schema 只含四个经验字段；注册表默认隐藏，随子代理 allowed_tools 下发，主线程调用返回 `TOOL_UNAVAILABLE`；所有拒绝都声明 `effect_outcome=not_started`。
+- `agent_py_agent/agent/agent_core/orchestration/create_read_scope.py`：创建子代理前的输入路径可见性预检。只读调用方显式输入字段（批量 item 在并入 goal 路径之前记下），经 `prepare_run` → runner 写边界 → `write_boundary_with_runtime_ledger`（task_local）→ `granted_external_work_roots` → `PathAccessPolicy.check_with_external_roots` 判定；看不到整批 `SUBAGENT_INPUT_PATH_NOT_VISIBLE` 拒绝，根与递归创建共用。
+- `agent_py_agent/tests/test_subagent_tool_failure_streak.py`、`test_subagent_authorization_failure_halt.py`、`test_create_subagents_input_read_scope.py`：子代理可观测三件事的离线合同（真实 owner 权威库与假模型，零网络）：父级 `recent_tool_failure`/如实 `last_progress_summary`；授权阶段同码连续失败 → BLOCKED + 结构化生命周期事件；创建前预检与子代理真实 read_file 裁决一致。
 - `agent_py_agent/tests/test_subagent_lesson_ledger.py`：record_lesson 链路的离线合同（只用假件）：身份与 Schema、字段/条数/字节上限、幂等、坏账本与符号链接、读回复核、合并进 output.json、`subagent_lesson` 候选与 S1 提案（含重放不重复）、候选失败不阻断交付、暴露面与 runner 提示。
 - `agent_py_agent/tests/test_skill_proposals.py`：自学习 S1 的默认关闭、幂等、忽略非法来源、Curator 迁移不碰提案目录、确认拒绝矩阵、安装/回执失败回滚、快照可见性、runner 结果隔离与真实 CLI 入口往返验证。
 - `agent_py_agent/agent/capability/decision_skill_proposal_review.py`：自学习 S2 的唯一审核顺序点 `skill_proposal_review`（owner_background，默认 off）；只读 `SkillProposalService.list`，外发别名、来源计数与经 `external_data/default` 投影的草稿摘要，采用前重读待确认提案核对版本与草稿 hash，只重排 CLI 展示并附宿主标签；关闭、observe 或任何失败都返回 None 保持原输出，取消上抛。

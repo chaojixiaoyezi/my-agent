@@ -9,7 +9,13 @@ turn_end_reason 映射，禁止解析模型正文、测试、产物或验收声�
 from dataclasses import dataclass
 
 from ...subagents.manager_runner_result_payload import RecordRunnerResultParams
-from ...subagents.tool_failure_ledger import tool_failures_from_archive
+from ...subagents.tool_failure_ledger import (
+    REPEATED_TOOL_AUTHORIZATION_FAILURE,
+    archive_tool_call_facts,
+    authorization_failure_streak,
+    tool_failure_halt,
+    tool_failures_from_archive,
+)
 from ...turn_end import infer_turn_end_reason, subagent_outcome_for_turn_end
 from .params import RecoverySnapshotParams, SubagentFinalizeParams
 
@@ -66,8 +72,20 @@ def record_finalized_runner_result(request: FinalizedRunnerRecordRequest):
             tool_failures=(
                 None if archive_calls is None else tool_failures_from_archive(archive_calls)
             ),
+            tool_failure_halt=_tool_failure_halt(params.result, archive_calls),
         )
     )
+
+
+# LLM: 只在结构化 runtime_reason 是授权阶段收口时，从本 run 的 archive 用同一连续段函数复算事实；
+#   其它结束原因、没有 archive 或连续段已不在授权阶段时返回 None，不从正文补造。
+# 函数用途: 把"同一错误码授权阶段连续失败而停下"的工具、错误码、次数和参数名交给结果账本。
+def _tool_failure_halt(result: object, archive_calls: object) -> dict[str, object] | None:
+    reason = str(getattr(result, "runtime_reason", "") or "").strip().upper()
+    if reason != REPEATED_TOOL_AUTHORIZATION_FAILURE or archive_calls is None:
+        return None
+    streak = authorization_failure_streak(archive_tool_call_facts(archive_calls))
+    return tool_failure_halt(streak, reason) or None
 
 
 # LLM: 只读取运行字段，不能摘要或判断 response 正文。

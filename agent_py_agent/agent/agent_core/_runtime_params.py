@@ -134,6 +134,9 @@ class ToolLoopExecuteParams:
     repeated_failure_halt: tuple[str, str, int] | None = None
     # 显式硬门真收口标记:True 时本轮不再自动续跑,等用户提供新思路。
     repeated_failure_halt_exhausted: bool = False
+    # 子代理(task_local)同一错误码在授权阶段连续失败达阈值时的连续段摘要；非空时本轮按
+    # blocked + REPEATED_TOOL_AUTHORIZATION_FAILURE 收口交直属父级，同批后到的任一成功会撤销它。
+    authorization_failure_halt: dict[str, object] | None = None
     # 当前 run 内已由交互审批确认的精确 ActionPolicy binding；不持久化、不按工具名泛化。
     runtime_approved_actions: list[dict[str, str]] = field(default_factory=list)
     # 同一宿主执行链共享的拒绝/取消指纹，跨自动续轮和 Compact 保留；不跨子代理或新调用。

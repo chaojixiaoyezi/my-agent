@@ -8,6 +8,8 @@ from ..contracts.subagent_completion import SUBAGENT_COMPLETION_SCHEMA_VERSION
 from ..memory_archive.tokens import estimate_tokens
 from ..model_visible_refs import current_model_ref, current_model_ref_list
 from .context_bundle_contracts import declared_output_refs
+from .models import TaskStatus
+from .tool_failure_ledger import ledger_tool_failure_halt
 
 _COMPLETION_MESSAGE_MAX_TOKENS = 1_000
 _COMPLETION_EVIDENCE_REF_LIMIT = 20
@@ -52,7 +54,19 @@ def completion_handoff_payload(
     if completion_truncated:
         payload["completion_message_truncated"] = True
         payload["completion_message_original_tokens"] = completion_tokens
+    if halt := _blocked_tool_failure_halt(task, selected_result):
+        payload["tool_failure_halt"] = halt
     return payload
+
+
+# LLM: 收口事实只读本 attempt 写入账本的结构化 halt，且仅在结果状态为 BLOCKED 时附带；
+#   后续 attempt 覆盖账本或状态变化后不会把旧事实带进新的完成通知。
+# 函数用途: 子代理因授权阶段同码连续失败被停下时，把原因码、工具、错误码、次数和参数名交给直属父级。
+def _blocked_tool_failure_halt(task: Any, result: Any) -> dict[str, object]:
+    status = str(getattr(result, "status", "") or getattr(task, "status", "") or "").strip().upper()
+    if status != TaskStatus.BLOCKED.value:
+        return {}
+    return ledger_tool_failure_halt(getattr(task, "attributes", {}) or {})
 
 
 # LLM: 宿主状态仍是完成权威；这里只限制交给父级的模型正文体积，不据正文推断任务终态。

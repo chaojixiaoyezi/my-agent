@@ -14,6 +14,7 @@ from ....common.value_parsing import sequence_strings
 from ....runtime_errors import runtime_error_report
 from ....tooling.write_boundary import WRITE_TOOL_NAMES
 from ...model_task import SubAgentTask
+from ...tool_failure_ledger import recent_tool_failure, tool_failure_progress_summary
 from .integrity import (
     artifact_integrity_progress,
     artifact_integrity_summary,
@@ -134,6 +135,9 @@ def _should_record(request: SubagentToolProgressRequest) -> bool:
     return bool(request.ok and isinstance(request.payload, dict) and progress_path(request))
 
 
+# LLM: 成功与失败都刷新 current_tool/心跳和最近轨迹；失败只改 last_progress_summary 为如实失败说明，
+#   不推进 last_progress_at 与 progress（失败不是进展）。失败次数只读 owner 权威 runtime_events 的同一投影。
+# 函数用途: 每次子代理工具调用后把运行状态写回 canonical 任务，让父级看到的最近进展不再停在更早的成功上。
 def _persist_runtime_status(agent: object, task: SubAgentTask, result: object, progress: dict[str, Any]) -> None:
     now = time.time()
     tool = _result_tool_name(result)
@@ -142,6 +146,8 @@ def _persist_runtime_status(agent: object, task: SubAgentTask, result: object, p
     task.heartbeat_at = now
     task.updated_at = now
     _append_recent_tool_trace(task, {"tool": tool, "ok": ok, "at": now, "progress": progress})
+    if not ok and tool:
+        task.last_progress_summary = _failed_call_summary(agent, task, result, tool)
     if ok and tool:
         summary = _progress_summary(tool, progress, ok=True)
         task.last_progress_at = now
@@ -160,6 +166,18 @@ def _persist_runtime_status(agent: object, task: SubAgentTask, result: object, p
             exc,
             context="subagent_tool_progress.subagents.save",
         )
+
+
+# LLM: 只在权威事件流的连续段仍在进行、且错误码与本次结果一致时才带次数；否则只写工具和错误码，
+#   次数未知不猜。错误码取 typed ToolResult.error_code，绝不解析输出正文。
+# 函数用途: 生成"最近一次工具调用失败：<工具>（<错误码>，连续 N 次）"写进 last_progress_summary。
+def _failed_call_summary(agent: object, task: SubAgentTask, result: object, tool: str) -> str:
+    code = str(getattr(result, "error_code", "") or "").strip().upper()
+    runtime_db = getattr(getattr(agent, "subagents", None), "runtime_db", None)
+    streak = recent_tool_failure(runtime_db, str(getattr(task, "id", "") or ""))
+    if streak.get("ongoing") is True and streak.get("error_code") == code and streak.get("tool") == tool:
+        return tool_failure_progress_summary(streak)
+    return tool_failure_progress_summary({"tool": tool, "error_code": code})
 
 
 # LLM: ToolResult 的权威字段是 tool_name；tool 只兼容少量测试桩和旧调用方，

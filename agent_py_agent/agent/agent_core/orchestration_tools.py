@@ -62,6 +62,10 @@ from .orchestration.create_policy import (
     create_run_params,
     prepare_audit_child_creation_scope,
 )
+from .orchestration.create_read_scope import (
+    INPUT_PATH_NOT_VISIBLE_ERROR_CODE,
+    input_read_scope_failure,
+)
 from .orchestration.decision_subagent import (
     SubagentModelInput,
     apply_subagent_model_decision,
@@ -467,6 +471,8 @@ def _prepare_create_subagents(agent: SimpleAgent, params: dict[str, object]) -> 
     task_params = [run_params]
     if invalid := _replacement_preflight_result(agent, task_params):
         return invalid
+    if invalid := _input_read_scope_result(agent, single_items, task_params):
+        return invalid
     return PreparedSubagentCreation(task_params, single_items, [allowed_tools], related_params)
 
 
@@ -609,6 +615,8 @@ def _prepare_items(
         return ToolHandlerOutcome("create_subagents", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS", effect_outcome="not_started")
     if invalid := _replacement_preflight_result(agent, task_params):
         return invalid
+    if invalid := _input_read_scope_result(agent, capped, task_params):
+        return invalid
     return PreparedSubagentCreation(task_params, capped, allowed_tool_values, request_params, batch=True)
 
 
@@ -712,6 +720,26 @@ def _replacement_preflight_result(
         False,
         json.dumps(payload, ensure_ascii=False, indent=2),
         error_code="SUBAGENT_REPLACEMENT_INVALID",
+        effect_outcome="not_started",
+    )
+
+
+# LLM: 在全部参数规范化之后、任何 run/工作区/权威行物化之前运行；只读显式输入字段，
+#   子代理读不到就整批 not_started 拒绝，与越界产物和无效接管的结构化拒绝同一约定。
+# 函数用途: 创建前拦下子代理根本读不到的输入路径，并用大白话告诉父代理先把文件放进工作区或写进任务。
+def _input_read_scope_result(
+    agent: SimpleAgent,
+    items: list[CreateSubagentItem],
+    task_params: list[CreateRunParams],
+) -> ToolHandlerOutcome | None:
+    failure = input_read_scope_failure(agent, [item.params for item in items], task_params)
+    if failure is None:
+        return None
+    return ToolHandlerOutcome(
+        "create_subagents",
+        False,
+        json.dumps(failure, ensure_ascii=False, indent=2),
+        error_code=INPUT_PATH_NOT_VISIBLE_ERROR_CODE,
         effect_outcome="not_started",
     )
 

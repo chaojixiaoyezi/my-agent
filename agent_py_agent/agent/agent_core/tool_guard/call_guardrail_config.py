@@ -72,8 +72,15 @@ def terminal_block_enabled(params: object) -> bool:
         )
 
 
+# LLM: 先读本工作片 task_attributes 的显式值，再读冻结的运行门配置；主代理只用于强返工提示，
+#   子代理授权阶段同码连续失败的阻塞收口也读同一阈值，调用方不得另设第二份阈值。
+# 函数用途: 返回强返工提示与子代理授权阶段收口共用的连续失败次数阈值。
 def repeated_failure_halt_threshold(params: object) -> int:
-    """强返工提示阈值；只有另行启用 hard gate 才会结束本轮。"""
+    """强返工提示阈值；只有另行启用 hard gate 才会结束本轮。
+
+    子代理（task_local）同一错误码在授权阶段连续失败达到该值时按阻塞收口并通知直属父级；
+    ≤0 时不做这项子代理收口。
+    """
     attrs = getattr(params, "task_attributes", None)
     if isinstance(attrs, dict):
         parsed = _int_value(attrs.get("repeated_failure_halt_threshold"))

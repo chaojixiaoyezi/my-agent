@@ -95,6 +95,38 @@
   未知键、覆盖层仍能按点位设期限；三个点位的“配置默认关闭”用例改为断言期限与模型字段不存在；curator_relation 用例同步。
 - **在用配置**：两台机器的配置里这 24 个键均为 0 处；两台机器都没有用户自己的能力配置文件。
 
+## 子代理工具失败对父级可见、授权阶段反复失败即停、创建前可见性预检（2026-09-27，分支 `claude/subagent-observability`，基于 main `eb7c639a1`）
+
+- **来源**：集成者派活。TUI 里 Full Access 的 my-agent 派 4 个只读子代理读 owner home 外的工作树，list_files/read_file/search_text
+  全在授权阶段 `PATH_OWNER_SCOPE_BLOCKED`（handler 未执行），各卡约 20 分钟，父代理只看到“最近成功调用工具: search_text”。
+- **新增测试（假模型、假工具、真实 owner 权威库，零网络）**：
+  - `test_subagent_tool_failure_streak.py` 10 项：连续段按 (错误码, 阶段) 计、跨工具累计、成功或不同原因打断、重复门拦截透明、
+    窗口打满标下限、文案只由结构化字段拼；经产品入口 `persist_tool_runtime_ledger` 写真实 RuntimeRepository 后，父代理 `list_agents`
+    节点与大树预览都带 `recent_tool_failure`（4 次、`ongoing=true`、工具列表）；`last_progress_summary` 在失败后写
+    “最近一次工具调用失败：read_file（PATH_OWNER_SCOPE_BLOCKED，连续 3 次）”且不刷新 `last_progress_at`，再成功后恢复；
+    没有权威库时不输出摘要、只写不带次数的失败说明。
+  - `test_subagent_authorization_failure_halt.py` 13 项：阈值内外、阈值 0 关闭、主代理与执行阶段失败不收口、成功/他码打断、
+    同批后到成功撤销、收口后不再追加相反返工提示；收口回复即使被供应商截断（`stop_reason=max_tokens`）也判 blocked，显式硬门仍走原 unfinished；finalize 只在 `REPEATED_TOOL_AUTHORIZATION_FAILURE` 时从 archive 复算收口事实；
+    合同投影拒绝旧版本/非正整数次数、不复制参数值；完成信封只在 BLOCKED 时带收口事实；前台事件、后台完成清单、递归父级行都保留它。
+    端到端：真实 SimpleAgent 子代理 runner + 每轮换墙外路径的假模型，3 次被拦 + 1 次收口共 4 次模型调用后落 `BLOCKED`，账本 `halt`
+    与根父级 wake 元数据一致、摘要含原因码与参数名、不含路径值，收口请求里没有“系统不会因此结束当前任务”。
+  - `test_create_subagents_input_read_scope.py` 7 项：真实 SimpleAgent + 真实 `CreateSubagentsTool`（`defer_start`）：
+    Full Access 父代理把墙外工作树作 `input_refs` 整批 `not_started` 拒绝、回执带大白话提示与可见根；工作区、shared、相对路径正常创建；
+    批量任一不可见整批不建（含 `input_files` 他人 home 与 `context_manifest.required_read_paths`）；只在 goal 正文里出现的路径单个与批量都不预检；
+    递归（孙代理）创建同样拦截；预检“看不到”与子代理真实 `read_file` 失败集合一致；宿主已声明的会话工作目录被继承为墙外已授权根，
+    预检放行且子代理真实可读，只有墙外工作树被拦。
+- **查明（写进文档，未改行为）**：父项目目录是子代理的网关根，路径门放行后由 handler 按 owner 墙拒绝，运行时报码是路径笔误提示的
+  `TOOL_INVALID_ARGUMENTS`（执行阶段），不会触发授权阶段即停；预检回执给出的是底层裁决码 `PATH_OWNER_SCOPE_BLOCKED`。
+- **变异验证（36 个全部被抓住，逐个在 `PYTHONDONTWRITEBYTECODE=1` 子进程里跑并逐字节还原、哈希核对）**：
+  - A 父级可见 8 个：连续段不按错误码断开、成功后仍标进行中、重复门拦截不透明、失败不改摘要、摘要永不带次数、节点丢字段、
+    模型视图白名单漏字段、事件丢 `failure_stage`。
+  - B 即停通知 17 个：主代理也收口、任意阶段收口、阈值差一、收口仍是 unfinished（两种写法）、截断的收口回复改判 max-tokens、
+    硬门分支走错、成功不撤销、两个判定调换顺序、连续段漏当前调用、finalize 丢收口事实、信封不带、信封不看状态、
+    前台事件/后台清单/递归父级行各自丢字段、wake 摘要不写。
+  - C 创建预检 11 个：永不拒绝、忽略合并前记下的显式输入、把 goal 路径记进显式输入、忽略墙外已授权根、相对路径按进程 cwd 解析、
+    批量/单个/递归入口各自不预检、漏读 manifest、原因码被抹平、有 owner 墙也跳过预检。
+- **code-size**：与 `eb7c639a1` 逐条比较 identity，新增 0。
+
 ## CI 工作流点名的测试文件必须存在（2026-09-27，集成分支 `claude/integrate-13v`）
 
 - **来源**：dsh-9b 的 CI 监视报告 main `8f73a512c` 的 Cross-platform guard 在 macOS 与 Windows 都失败：参数减量第 1 批删掉了

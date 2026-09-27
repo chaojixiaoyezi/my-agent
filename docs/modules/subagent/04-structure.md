@@ -2,6 +2,33 @@
 
 `agent_core/subagent/run_flow.py` 在overflow只读加载canonical来源，下一次原 `agent.run` 临时绑定公共恢复器；无来源仍先执行原active-turn归档CAS。`conversation/agent_thread.py::project_agent_thread_context` 是普通准备与候选共用的纯历史renderer，不写任务或消息。`agent_core/subagent/compact_recovery.py` 只按原第0注入位置重投影，不重跑上下文包/工具准备；成功的host_state回到原循环，异常退出清理scope。
 
+## 子代理可观测与授权失败即停（工具失败账本的两种投影）
+
+- `subagents/tool_failure_ledger.py` 是子代理工具失败事实的唯一模块：原 attempt 级账本之外，新增 `ToolCallFact` 与
+  `tool_failure_streak`（按 (error_code, failure_stage) 算最近连续失败段；成功或不同原因打断，`TOOL_GUARDRAIL_*` 未执行拒绝透明）。
+  两个数据入口：`event_tool_call_facts`（owner 权威 `runtime_events` 的 `tool_completed`）与 `archive_tool_call_facts`（本 run 的
+  archive 记录，只取参数名）。`recent_tool_failure(runtime_db, run_id)` 最多回看 200 条事件，窗口打满时标 `count_is_lower_bound`。
+- 写入端：`agent_core/tool_runtime_ledger.py::_append_runtime_event` 的 `tool_completed` 载荷补 `failure_stage`、`handler_executed`。
+  `services/session_progress::_persist_runtime_status` 失败时把 `last_progress_summary` 改成 `tool_failure_progress_summary`（次数只在
+  权威连续段仍在进行且错误码一致时写），不动 `last_progress_at`/`progress`。
+- 父级投影：`agent_core/agent_tree/node_rendering.py::node_from_kernel_run` 读取时附 `recent_tool_failure`；`model_view._NODE_FIELDS`
+  与大树预览都保留该字段。kernel 快照与任务记录不新增字段。
+- 收口判定：`agent_core/_tool_loop_service.py::_mark_authorization_failure_halt` 在 `_record_tool_call` 里先于原
+  `_mark_repeated_failure_halt` 运行；只对 `context_scope=task_local`，用本 run archive + 当前结果算 `authorization_failure_streak`，
+  达 `repeated_failure_halt_threshold` 写 `ToolLoopExecuteParams.authorization_failure_halt` 与原 `repeated_failure_halt`；同批后到的成功
+  由 `_clear_authorization_failure_halt` 撤销。`_final_response_after_repeated_failure` 复用唯一 `_final_response_after_halt`，把收口
+  回复改成 `runtime_status=blocked`、`runtime_reason=REPEATED_TOOL_AUTHORIZATION_FAILURE`；`tool_loop/recovery.py` 为该原因给出面向父级的替换文案。
+- 交给父级：`agent_core/subagent/finalize_helpers._tool_failure_halt` 只在上述原因时从 archive 复算 → `RecordRunnerResultParams.tool_failure_halt`
+  → `record_tool_failure_ledger(..., halt)` 写 `attributes.tool_failure_ledger.halt`（每 attempt 覆盖）。`runner_completion_payload.completion_handoff_payload`
+  只在 BLOCKED 时带 `tool_failure_halt`；`runner_completion_wake._summary` 追加一句结构化说明。合同与有界投影在
+  `contracts/subagent_completion.py::completion_tool_failure_halt_facts`（版本 `subagent-tool-failure-halt.v1`），前台 `runtime/guidance._task_event_payload`、
+  后台 `_subagent_completion_item`、递归父级 `runner/prompt_context_summary._direct_child_prompt_row` 共用。
+- 创建前预检：`agent_core/orchestration/create_read_scope.py` 的 `child_read_scope` 用 `prepare_run` 准备任务 → `runner_context.prepare_execution_context`
+  写边界 → `write_boundary_with_runtime_ledger`（task_local）→ `path_access_policy.granted_external_work_roots` → `PathAccessPolicy.check_with_external_roots`，
+  相对路径按同一 `effective_registry_cwd`。显式输入由 `runner/ref_fields.params_explicit_input_refs` 读字段值；批量 item 在
+  `create_payload._create_item_params` 并入 goal 路径之前记到 `_explicit_input_refs`。接入点：`orchestration_tools._prepare_create_subagents`/
+  `_prepare_items` 的 `_input_read_scope_result`，递归 `hierarchy_tools._child_input_read_scope_error`；错误码登记在 `contracts/error_taxonomy.py`。
+
 ## lesson 账本与 record_lesson（结构化经验通道）
 
 - `subagents/lesson_ledger.py` 是 `lessons.jsonl` 的唯一合同：定义四个字段的上限、单行规范化、内容 hash id、固定四行渲染模板，以及锁内的读判写追加（先查同 id，再查 5 条/16 KiB 上限，最后以 O_NOFOLLOW 追加）和逐行复核读回。坏行或符号链接一律拒绝追加。

@@ -327,6 +327,29 @@ def inheritable_declared_work_roots(
     return roots
 
 
+# LLM: "墙外已授权工作根"是宿主事实：只从写边界的 allowed_write_roots / product_write_roots 派生，
+#   落在 owner 墙内的不算（墙内本来就走 owner 语义），系统根目录、宿主控制面、其它 owner 的家由
+#   inheritable_declared_work_roots 过滤掉。工具 handler 的 owner 墙逃生口与创建子代理时的可见性预检共用这一份，
+#   不认 workspace_roots，避免"改一个可变列表就放权"。owner_scope 为空（无 owner 墙）时返回空。
+# 函数用途: 计算一次工具调用（或一个待创建子代理）可以穿过 owner 墙访问的已授权工作根。
+def granted_external_work_roots(write_boundary: object, owner_scope: object) -> tuple[Path, ...]:
+    if not str(owner_scope or "").strip() or not isinstance(write_boundary, dict):
+        return ()
+    owner_root = Path(str(owner_scope)).expanduser().resolve(strict=False)
+    values: list[object] = []
+    for key in ("allowed_write_roots", "product_write_roots"):
+        raw = write_boundary.get(key)
+        if isinstance(raw, (list, tuple)):
+            values.extend(raw)
+    granted: list[Path] = []
+    for item in inheritable_declared_work_roots(values, owner_home=owner_root):
+        root = Path(str(item)).expanduser().resolve(strict=False)
+        if root == owner_root or _is_relative_to(root, owner_root) or root in granted:
+            continue
+        granted.append(root)
+    return tuple(granted)
+
+
 # LLM: 唯一权威常量仍是 UNINHERITABLE_ROOT_DIRS；这里只补每个常量当前宿主上的解析形态，供归一化后的路径比对。
 # 函数用途: 返回根级目录的字面与解析后两套字符串，避免符号链接（/bin→/usr/bin）绕过排除。
 def _uninheritable_root_forms() -> frozenset[str]:
@@ -356,6 +379,7 @@ __all__ = [
     "PathAccessDecision",
     "PathAccessPolicy",
     "agent_home_root_for_owner",
+    "granted_external_work_roots",
     "inheritable_declared_work_roots",
     "normalize_path_access_mode",
 ]

@@ -29,6 +29,12 @@ create/list/guidance/cancel/resolve 五个直属下级控制入口；普通 leaf
   必须在父级 workspace 上界内。
 - `allowed_tools` 只是工具偏好提示，不是安全边界；基础读写工具由系统按角色和目标补齐。
 - 子代理自己的资料线索写到对应 item 的 `input_refs`，公共资料才放顶层。
+- 创建前可见性预检：调用方显式给出的输入路径（`input_refs`、`input_files`、`required_read_paths`、
+  `context_manifest.required_read_paths`）按子代理工具实际使用的同一 owner 路径判定检查。子代理只能访问
+  自己的工作区（owner home）、shared 区和宿主已授权给它的墙外工作根；有任一路径看不到就整批 `not_started`
+  拒绝，`SUBAGENT_INPUT_PATH_NOT_VISIBLE` 回执逐项列出 `invisible_inputs`（item 下标、路径、解析结果、
+  `reason_code`、子代理可见根），并提示“先把需要的文件放进工作区，或直接把内容写进任务”。goal 正文里
+  出现的路径不参与预检；递归（孙代理）创建走同一预检。
 - 普通 child 自动继承直接父级的结构化工作区上界。用户明确了产物路径时可写 `output_files`；批量派工
   可由每个负责写入的 item 分别声明。它负责交付身份、读取顺序和冲突提示，不是完整写集或普通 child 的
   权限来源；一旦同批声明则必须彼此不重叠。goal 或 output_files 都不能把写权扩大到父级 workspace 外。没有明确路径时
@@ -65,6 +71,9 @@ create/list/guidance/cancel/resolve 五个直属下级控制入口；普通 leaf
 有界 owner-scoped 快照；它不会创建、推动、等待、重试、取消或验收任务。子代理调用时仍由当前
 `run_id` 硬收窄到自己的子树，不能靠参数查看兄弟或其它 owner。正常运行的 child 自主继续，并用 lifecycle
 event 把进展、阻塞和结束通知直接父级；模型不能循环调用 `list_agents` 充当 wait。
+每个子代理节点可带 `recent_tool_failure`：最近一次工具失败的工具、错误码、失败阶段、同一原因的连续次数、
+最近失败时间与 `ongoing`，用来分清“被授权门反复拦下”和“还在慢慢想”；它从 owner 权威事件流现算，
+不是第二份状态，也不是等待或重试信号。
 
 子代理状态、进度、channel 状态和内部 refs 以这个内部 projection 为运维状态面。普通文件工具和
 shell 不应该读取或遍历 `work/agents/<run_id>/canonical_state.json`、`final_report.md`、

@@ -9,6 +9,20 @@
 
 回滚边界：旧版运行时读不了 v3，回滚必须把运行时和数据成对核对并保留新账。详见[依赖拆分](docs/design/TOOL_LOOP_DEPENDENCY_SPLIT.md#两线合并后的来源身份与模型轮结果决策分支吸收-main2026-09-23)。
 
+- **子代理工具失败对父级可见、授权阶段反复失败即停、创建前做可见性预检**（2026-09-27，分支 `claude/subagent-observability`，本地回归与变异通过，未部署，见 TESTS）：
+  - **起因**：Full Access 管理员父代理派 4 个只读子代理读 owner home 外的 git 工作树；子代理没有 Full Access（有意设计，不改），
+    读取全在授权阶段 `PATH_OWNER_SCOPE_BLOCKED`，各卡约 20 分钟；父代理的 `list_agents` 只见“最近成功调用工具”，看不出被拦。
+  - **查明的根因**：重复失败机制对子代理同样生效，但默认只返工提示、每 15 次清段；显式硬门默认关，即使打开也收成 unfinished→`PENDING`，
+    随后被孤儿恢复立即重派、计数清零，父级收不到任何事件（`PENDING` 不在唤醒状态集）。
+  - **做法（已落地）**：① `recent_tool_failure` 与如实的 `last_progress_summary`，从 owner 权威 `runtime_events` 现算，不新增状态；
+    ② `task_local` 子代理同一错误码授权阶段连续失败达 `repeated_failure_halt_threshold`（复用原配置，默认 15，≤0 关闭）即 blocked 收口，
+    runner 落 `BLOCKED`，`tool_failure_halt`（原因码/工具/错误码/次数/参数名）经原生命周期事件交直属父级；
+    ③ `create_subagents` 对显式输入路径用子代理运行时同一判定链预检，看不到整批 `not_started` 拒绝（`SUBAGENT_INPUT_PATH_NOT_VISIBLE`）。
+  - **拒绝而非警告**：沿用创建期结构化门的现有约定（越界 `output_files`、无效接管、已关闭 covers 都整批 `not_started` 拒绝，未知 covers 才警告）；
+    “子代理读不到显式输入”是权限墙给出的客观事实，属于铁律允许的硬门；创建即自动启动，只给警告会让子代理照样空跑一轮。goal 正文路径不参与。
+  - **边界**：执行阶段的同类失败（如父项目目录内的路径被 handler 以路径笔误提示 `TOOL_INVALID_ARGUMENTS` 拒绝）不触发即停；
+    交替插入成功调用的循环不算“连续”，仍只受原返工提示和轮数上限约束。
+  - 详见 [子代理结构](docs/modules/subagent/04-structure.md#子代理可观测与授权失败即停工具失败账本的两种投影) 与 [运行手册](docs/modules/subagent/SUBAGENT_RUNBOOK.md#状态与通知)。
 - **技能提案与自动总结 Skill 可在 TUI 和 IM 里处理：`/skills`**（2026-09-27，分支 `claude/skill-proposals-tui-im`，本地回归与变异通过，见 TESTS）：
   - **起因**：用户说“命令行几乎不会用，所以所有都能 TUI 和 IM 来”。这两类操作原来只有 `my-agent skills …` 命令行入口，
     自学习审核顺序点 skill_proposal_review 因此在 TUI/IM 里永远触发不了。

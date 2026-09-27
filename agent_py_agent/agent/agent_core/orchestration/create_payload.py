@@ -14,8 +14,10 @@ from ...model_visible_refs import current_model_ref, current_model_ref_list, cur
 from ...subagents.context_bundle_refs import execution_cwd
 from ...subagents.role_templates import role_template_snapshot_for_task
 from ..runner.ref_fields import (
+    EXPLICIT_INPUT_REFS_KEY,
     _file_refs_from_value,
     _normalize_file_ref,
+    params_explicit_input_refs,
     params_output_refs,
 )
 from .child_result_index import child_result_index
@@ -441,6 +443,8 @@ def _create_item(
     return CreateSubagentItem(goal=goal, params=merged)
 
 
+# LLM: item 字段覆盖顶层默认值；显式输入路径在合并 goal 路径之前记入内部键，后续参数整理只复制 params，不重算。
+# 函数用途: 生成一个批量 item 的完整派工参数，并保留调用方显式声明的输入路径供创建前预检。
 def _create_item_params(
     base_params: dict[str, object],
     raw: dict[str, object],
@@ -450,6 +454,8 @@ def _create_item_params(
     merged["_item_allowed_tools_explicit"] = "allowed_tools" in raw
     merged.update(raw)
     merged["goal"] = goal
+    # 并入 goal 文本扒出的路径之前先记下调用方显式声明的输入，创建前可见性预检只认这一份。
+    merged[EXPLICIT_INPUT_REFS_KEY] = params_explicit_input_refs(merged)
     _merge_item_required_read_paths(merged, base_params, goal)
     return merged
 

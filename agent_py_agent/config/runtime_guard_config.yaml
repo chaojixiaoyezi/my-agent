@@ -47,6 +47,9 @@ terminal_block_enabled: false
 # 同工具同类失败累计到这里时，给模型一次更强的换路提示并清掉本段计数；
 # 默认不会结束当前 turn。只有部署者显式打开 hard_failure_halt_enabled，且
 # 同类失败达到 hard_failure_halt_threshold，才按未完成硬收口等待人工介入。
+# 子代理例外：同一错误码在授权阶段（权限门拦下、工具没执行）连续失败达到本阈值时，
+# 重试改变不了权限，本轮按阻塞收口（BLOCKED，原因码 REPEATED_TOOL_AUTHORIZATION_FAILURE）
+# 并把原因码、工具和参数名通知直属父代理；主代理不受影响。设为 0 时不做这项子代理收口。
 repeated_failure_halt_threshold: 15
 hard_failure_halt_enabled: false
 hard_failure_halt_threshold: 15

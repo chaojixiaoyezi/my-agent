@@ -585,6 +585,17 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
             " replacement_for_run_ids 后整批重试。"
         ),
     ),
+    # 创建前可见性预检：显式输入路径不在子代理 owner 墙内可读范围，整批未创建。
+    "SUBAGENT_INPUT_PATH_NOT_VISIBLE": ErrorContract(
+        code="SUBAGENT_INPUT_PATH_NOT_VISIBLE",
+        category="orchestration",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint=(
+            "该路径不在子代理可见范围（只能访问你的工作区和 shared 区），请先把需要的文件放进工作区，"
+            "或直接把内容写进任务；本批没有创建任何子代理，修正 invisible_inputs 后整批重试。"
+        ),
+    ),
     "SUBAGENT_REPLACEMENT_RECORD_FAILED": ErrorContract(
         code="SUBAGENT_REPLACEMENT_RECORD_FAILED",
         category="orchestration",

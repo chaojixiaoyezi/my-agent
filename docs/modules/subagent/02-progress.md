@@ -1,5 +1,19 @@
 # 子代理维护状态
 
+子代理可观测与授权失败即停（分支 `claude/subagent-observability`，2026-09-27，本地回归与变异通过，未部署）：真实使用中
+4 个只读子代理读 owner home 外的工作树，list_files/read_file/search_text 全在授权阶段被 `PATH_OWNER_SCOPE_BLOCKED` 拦下，
+各卡约 20 分钟，父代理只看到“最近成功调用工具: search_text”。三处修复，全部读结构化事实：
+- 父级可见：代理树节点新增 `recent_tool_failure`（工具、错误码、失败阶段、同码连续次数、最近时间、`ongoing`），读取时从 owner
+  权威 `runtime_events` 的 `tool_completed` 现算，不另存状态；`tool_completed` 载荷补 `failure_stage`/`handler_executed`。
+  `last_progress_summary` 在最近一次调用失败时写“最近一次工具调用失败：<工具>（<错误码>，连续 N 次）”，失败不刷新 `last_progress_at`。
+- 授权阶段即停：查明原重复失败机制对子代理同样生效，但默认只返工提示、每 15 次清段；显式硬门默认关，即使打开也收成
+  unfinished→`PENDING` 并被立即重派、计数清零。现 `task_local` 子代理同一错误码在授权阶段连续失败达 `repeated_failure_halt_threshold`
+  即以 blocked + `REPEATED_TOOL_AUTHORIZATION_FAILURE` 收口，runner 落 `BLOCKED`；finalize 从同一 archive 复算收口事实写进工具失败账本
+  `halt`，完成信封 `tool_failure_halt` 经原生命周期事件交直属父级（原因码、工具、错误码、次数、参数名，不带参数值）。
+- 创建前预检：`create_subagents`（根与递归）对显式输入路径用子代理运行时同一判定链检查，看不到就整批 `not_started` 拒绝
+  （`SUBAGENT_INPUT_PATH_NOT_VISIBLE`），goal 正文路径不参与。handler 的墙外已授权根计算提升为 `path_access_policy.granted_external_work_roots`
+  供两处共用。细节见 04-structure 同名节，证据见 TESTS 顶部本节。
+
 参数减量第 1 批（分支 `claude/38-delete-dead-config`，2026-09-27）：`CreateRunParams` / `SubAgentManager.create_run` 去掉 `memory_retention_policy`、
 `memory_delete_after_days`、`destroy_summary_required` 三个只写不读的参数，对应配置 `subagent_memory_*` 与
 `subagent_destroy_summary_required` 一起删除；任务记录 `attributes.memory_scope` 升为 `subagent_memory_scope.v2`，只写 namespace 与

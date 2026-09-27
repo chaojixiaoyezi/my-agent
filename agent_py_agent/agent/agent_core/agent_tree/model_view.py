@@ -10,10 +10,12 @@ import json
 
 from ...subagents.models import TaskStatus
 
+# recent_tool_failure 是节点投影时从权威事件流现算的最近工具失败段，让父级分清"被拦下"与"在思考"。
 _NODE_FIELDS = (
     "run_id", "parent_run_id", "root_run_id", "agent_name", "role", "status",
     "failure_type", "current_tool", "updated_at", "seconds_since_progress",
     "not_done_reason", "goal_digest", "last_progress_summary", "blockers",
+    "recent_tool_failure",
 )
 _LIVE_CHARS = 12000
 
@@ -78,7 +80,8 @@ def agent_tree_model_preview(payload: dict[str, object]) -> str:
     preview["details_read_policy"] = "完整节点及产物引用请使用本次工具的 read_artifact_hint；不要拼接归档路径。"
     selected: list[dict[str, object]] = []
     for node in nodes:
-        row = _pick(node, ("run_id", "parent_run_id", "status", "failure_type", "current_tool", "readiness"))
+        row = _pick(node, ("run_id", "parent_run_id", "status", "failure_type", "current_tool", "readiness",
+                           "recent_tool_failure"))
         row["last_progress_summary"] = str(node.get("last_progress_summary") or "")[:160]
         refs = node.get("read_order")
         refs = refs if isinstance(refs, list) else []

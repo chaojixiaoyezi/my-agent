@@ -20,6 +20,7 @@ from .models import (
     task_status_in,
 )
 from .runner_completion_payload import completion_evidence_refs, completion_handoff_payload
+from .tool_failure_ledger import ledger_tool_failure_halt
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -280,6 +281,9 @@ def _raise_internal_audit_source_wake(
     )
 
 
+# LLM: 摘要只由宿主结构化字段拼出；授权阶段收口事实来自本 attempt 账本并只在 BLOCKED 时附带，
+#   完整字段仍在 metadata.tool_failure_halt，摘要文字不是状态来源。
+# 函数用途: 生成交给父代理的一句话终态说明，被授权门反复拦下时点明原因码、工具和参数名。
 def _summary(task: Any, result: Any, status: str) -> str:
     name = str(getattr(task, "agent_name", "") or getattr(task, "role", "") or "子代理")
     run_id = str(getattr(task, "id", "") or getattr(result, "run_id", "") or "")
@@ -289,12 +293,30 @@ def _summary(task: Any, result: Any, status: str) -> str:
         or "interrupted"
     )
     base = f"{name} {run_id} 本轮已结束：status={status}, reason={reason}。请父代理查看结果。"
+    base += _tool_failure_halt_summary(task, status)
     remaining = _service_window_remaining(task)
     if remaining <= 0:
         return base
     return base + (
         f"结构化事实：该 run 声明的 service window 还剩 {int(remaining)}s；"
         "此事实本身不指定接管、重派、复核或收口路线。"
+    )
+
+
+# LLM: 只读账本里经合同校验的 halt；参数只列名字不列值，工具与参数名均已有界。非 BLOCKED 不附带。
+# 函数用途: 把授权阶段连续失败收口的原因码、错误码、工具和参数名写成父代理能直接读懂的一句话。
+def _tool_failure_halt_summary(task: Any, status: str) -> str:
+    if str(status or "").strip().upper() != TaskStatus.BLOCKED.value:
+        return ""
+    halt = ledger_tool_failure_halt(getattr(task, "attributes", {}) or {})
+    if not halt:
+        return ""
+    tools = "、".join(halt.get("tools") or [str(halt.get("tool") or "")])
+    names = "、".join(halt.get("argument_names") or []) or "无"
+    return (
+        f"结构化事实：{halt.get('reason_code')}——工具 {tools} 在授权阶段以同一错误码"
+        f" {halt.get('error_code')} 连续 {halt.get('consecutive_failures')} 次被拦下（参数名：{names}），"
+        "子代理已停止重试，等待父代理调整输入或改派。"
     )
 
 

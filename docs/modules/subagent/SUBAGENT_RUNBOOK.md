@@ -75,6 +75,21 @@ refs。用户可以通过 `/status` 和 TUI 看，恢复器可以读，模型也
 状态面还会显示宿主观测到的短活动，例如“模型响应中”“正在使用工具：write_file”或“工具失败”；这些
 内容来自 typed 阶段和工具名，不是模型自报，也不会公开 prompt、response、工具输出或隐式思考正文。
 
+子代理最近的工具失败另有结构化摘要 `recent_tool_failure`（`/status`、TUI 与 `list_agents` 同一投影）：
+最近失败的工具、错误码、失败阶段、同一 (错误码, 阶段) 的连续次数、最近失败时间、涉及的工具名，以及
+`ongoing`（之后是否已有成功）。它在读取时从 owner 权威 `runtime_events` 的 `tool_completed` 事件现算，
+不另存状态；重复门自身的拦截既不计入也不打断连续段。`last_progress_summary` 在最近一次调用失败时写
+“最近一次工具调用失败：<工具>（<错误码>，连续 N 次）”，不再停在更早的成功上；失败不刷新
+`last_progress_at`，所以 `seconds_since_progress` 如实增长。
+
+子代理（`task_local`）同一错误码在**授权阶段**连续失败达到 `repeated_failure_halt_threshold`（默认 15，
+`≤0` 关闭）时，本轮停止新的工具调用，以 `runtime_status=blocked`、
+`runtime_reason=REPEATED_TOOL_AUTHORIZATION_FAILURE` 收口，runner 落 `BLOCKED`——不是 `PENDING`，
+不会被孤儿恢复立即重派。完成信封带 `tool_failure_halt`（原因码、工具、错误码、阶段、次数、参数名，
+不带参数值），经原生命周期事件交给直属父级：根父级的 wake 元数据与摘要、前台 `[RUNTIME_TASK_EVENTS]`、
+后台完成清单和递归父级的 `direct_children` 行共用同一合同投影。连续段按本 run 的工具归档现算：任何成功
+或不同原因都会打断，同批后到的成功会撤销收口。主代理和执行阶段失败仍按原返工提示处理，不受影响。
+
 ## capability 阻塞与续跑
 
 OPEN 或非法未闭合 capability request 是宿主掌握的结构化阻塞事实，优先于 provider 的普通

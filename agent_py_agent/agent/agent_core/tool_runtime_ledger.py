@@ -38,6 +38,9 @@ def persist_tool_runtime_ledger(agent: object, archive_record: dict[str, object]
     _append_runtime_event(agent, archive_record)
 
 
+# LLM: 载荷只取 archive 记录里的宿主 typed 字段（工具、ok、错误码、失败阶段、handler 是否执行、状态），
+#   不放参数值与输出正文；父级工具失败摘要与插件观察新鲜度都只读这条事件流。写入尽力而为，失败不打断工具循环。
+# 函数用途: 把一次工具调用完成写进 owner 权威 runtime_events，供审计、重建和父级状态面读取。
 def _append_runtime_event(agent: object, archive_record: dict[str, object]) -> None:
     """把「工具调用完成」追进权威 runtime_events（A.3/A.8 追到 attempt）。
 
@@ -63,6 +66,9 @@ def _append_runtime_event(agent: object, archive_record: dict[str, object]) -> N
         "tool": _text(archive_record.get("tool")),
         "ok": bool(archive_record.get("ok")),
         "error_code": _text(archive_record.get("error_code")),
+        # 失败阶段与 handler 是否执行来自同一条 archive 的 typed 结果；父级据此区分"授权门拦下"与"执行失败"。
+        "failure_stage": _text(archive_record.get("failure_stage")),
+        "handler_executed": archive_record.get("handler_executed") is True,
         "status": _completion_status(archive_record, runtime_gate),
         "idempotency_key": _text(archive_record.get("idempotency_key")),
     }

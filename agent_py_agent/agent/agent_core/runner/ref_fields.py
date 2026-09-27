@@ -49,6 +49,42 @@ def params_input_refs(params: dict[str, object]) -> list[str]:
     return _unique_refs(refs)
 
 
+# 批量 item 在并入 goal 文本扒出的路径之前记下的显式输入路径所在的内部键（与 _item_allowed_tools_explicit 同类）。
+EXPLICIT_INPUT_REFS_KEY = "_explicit_input_refs"
+
+
+# LLM: 只读调用方显式给出的输入字段值（input_refs / input_files / required_read_paths 与
+#   context_manifest.required_read_paths 列表），不对任何字段做正文正则提取，也不读 goal；URL 与空值跳过。
+# 函数用途: 返回调用方明确要求子代理读取的路径，供创建子代理前的可见性预检使用。
+def params_explicit_input_refs(params: dict[str, object]) -> list[str]:
+    manifest = params.get("context_manifest")
+    raw = manifest.get("required_read_paths") if isinstance(manifest, dict) else None
+    refs = _explicit_field_refs(raw) if isinstance(raw, list) else []
+    for field in sorted(_INPUT_REF_FIELDS):
+        refs.extend(_explicit_field_refs(params.get(field)))
+    return _explicit_unique_refs(refs)
+
+
+# LLM: 批量 item 已在合并 goal 路径之前记下显式输入时直接使用；单目标参数从不合并 goal 路径，现算即可。
+# 函数用途: 取一个子代理派工参数里调用方显式声明的输入路径。
+def explicit_input_refs(params: dict[str, object]) -> list[str]:
+    recorded = params.get(EXPLICIT_INPUT_REFS_KEY)
+    if isinstance(recorded, list):
+        return _explicit_unique_refs(recorded)
+    return params_explicit_input_refs(params)
+
+
+# LLM: 只做去重、去掉工具名前缀和跳过 URL，不做相对 ref 覆盖裁剪，保证每个显式输入都被逐一预检。
+# 函数用途: 把显式输入路径整理成去重后的干净列表。
+def _explicit_unique_refs(values: list[object]) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        text = _normalize_file_ref(value)
+        if text and "://" not in text and text not in result:
+            result.append(text)
+    return result
+
+
 def params_output_refs(params: dict[str, object]) -> list[str]:
     manifest = params.get("context_manifest")
     refs = list(_manifest_output_refs(manifest))

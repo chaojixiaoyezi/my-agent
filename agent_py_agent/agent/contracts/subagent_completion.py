@@ -1,7 +1,7 @@
 """Versioned contracts and neutral projections for child completion envelopes."""
 
-# LLM: 中性完成合同连接子代理发布方和前后台消费者；窗口字段只复制宿主事件的冻结事实，
-# 不重新计时或改变终态。字段变更须同步活动回合、后台预算投影与交接回归。
+# LLM: 中性完成合同连接子代理发布方和前后台消费者；窗口字段与授权阶段连续失败收口事实只复制宿主事件的冻结事实，
+# 不重新计时或改变终态。字段变更须同步活动回合、后台预算投影、递归父级快照与交接回归。
 # 模块用途: 统一子代理交接协议和可见事实，避免各条消费链丢字段或反向依赖子代理实现。
 
 SUBAGENT_COMPLETION_SCHEMA_VERSION = "subagent-completion.v1"
@@ -9,6 +9,13 @@ CONVERSATION_SUBAGENT_COMPLETIONS_SCHEMA_VERSION = (
     "conversation-subagent-completions.v1"
 )
 DEFAULT_VISIBLE_SUBAGENT_COMPLETIONS = 12
+# 子代理因同一错误码在授权阶段连续失败而收口时，随完成信封交给直属父级的结构化事实版本。
+TOOL_FAILURE_HALT_SCHEMA_VERSION = "subagent-tool-failure-halt.v1"
+# 收口事实只保留原因码、工具、错误码、阶段、次数和参数名；参数值与输出正文一律不进入事件。
+_TOOL_FAILURE_HALT_TEXT_FIELDS = ("reason_code", "tool", "error_code", "failure_stage")
+_TOOL_FAILURE_HALT_LIST_FIELDS = ("tools", "argument_names")
+_TOOL_FAILURE_HALT_TEXT_LIMIT = 120
+_TOOL_FAILURE_HALT_LIST_LIMIT = 8
 
 
 # LLM: Parent-facing completion context must be derived only from typed observation fields and
@@ -68,8 +75,8 @@ def subagent_completion_context_from_observations(
     }, tuple(issues)
 
 
-# LLM: 状态、归属和未满声明窗口均来自宿主事件；正文不参与裁决，私有 runner JSON 不外露。
-# 函数用途: 校验直属孩子身份后提取完成消息和冻结窗口事实，不从摘要推断是否完成。
+# LLM: 状态、归属、未满声明窗口和授权阶段收口事实均来自宿主事件；正文不参与裁决，私有 runner JSON 不外露。
+# 函数用途: 校验直属孩子身份后提取完成消息、冻结窗口与收口事实，不从摘要推断是否完成。
 def _subagent_completion_item(
     event: object,
     root_task_ids: set[str],
@@ -119,6 +126,7 @@ def _subagent_completion_item(
         ),
         "observed_at": observed_at,
         **completion_service_window_facts(metadata),
+        **completion_tool_failure_halt_facts(metadata),
     }
     if metadata.get("completion_message_truncated") is True:
         item["completion_message_truncated"] = True
@@ -141,6 +149,40 @@ def completion_service_window_facts(value: object) -> dict[str, object]:
         "service_window_incomplete": True,
         "service_window_remaining_seconds": remaining,
     }
+
+
+# LLM: 前台活动回合、后台完成清单和递归父级快照共用这一份有界投影；只接受当前版本、正整数次数和短文本，
+#   参数值、输出正文、路径值一律不复制。宿主状态仍是完成权威，本字段不改终态、不触发重派。
+# 函数用途: 从完成信封里取出“同一错误码在授权阶段连续失败而收口”的结构化事实，缺失或损坏时返回空。
+def completion_tool_failure_halt_facts(value: object) -> dict[str, object]:
+    halt = value.get("tool_failure_halt") if isinstance(value, dict) else None
+    if not isinstance(halt, dict) or halt.get("schema_version") != TOOL_FAILURE_HALT_SCHEMA_VERSION:
+        return {}
+    count = halt.get("consecutive_failures")
+    if type(count) is not int or count <= 0:
+        return {}
+    projected: dict[str, object] = {
+        "schema_version": TOOL_FAILURE_HALT_SCHEMA_VERSION,
+        "consecutive_failures": count,
+    }
+    for key in _TOOL_FAILURE_HALT_TEXT_FIELDS:
+        projected[key] = str(halt.get(key) or "").strip()[:_TOOL_FAILURE_HALT_TEXT_LIMIT]
+    for key in _TOOL_FAILURE_HALT_LIST_FIELDS:
+        projected[key] = _bounded_names(halt.get(key))
+    return {"tool_failure_halt": projected}
+
+
+# LLM: 名称列表只保留去重后的短字符串，最多八个；非列表输入视为空，不从字符串里切分。
+# 函数用途: 把工具名或参数名列表收成有界的干净列表。
+def _bounded_names(value: object) -> list[str]:
+    names: list[str] = []
+    for item in value if isinstance(value, list | tuple) else ():
+        name = str(item or "").strip()[:_TOOL_FAILURE_HALT_TEXT_LIMIT]
+        if name and name not in names:
+            names.append(name)
+        if len(names) >= _TOOL_FAILURE_HALT_LIST_LIMIT:
+            break
+    return names
 
 
 # LLM: Output refs are open-world scalar identifiers. Legacy artifact mappings may contribute
@@ -175,6 +217,8 @@ __all__ = [
     "CONVERSATION_SUBAGENT_COMPLETIONS_SCHEMA_VERSION",
     "DEFAULT_VISIBLE_SUBAGENT_COMPLETIONS",
     "SUBAGENT_COMPLETION_SCHEMA_VERSION",
+    "TOOL_FAILURE_HALT_SCHEMA_VERSION",
     "completion_service_window_facts",
+    "completion_tool_failure_halt_facts",
     "subagent_completion_context_from_observations",
 ]
