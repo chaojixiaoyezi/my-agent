@@ -223,11 +223,14 @@ class AuditQuery:
             for user, last_time in sorted_users[:limit]
         ]
 
+    # LLM: 审计保留期清理的唯一入口：删除早于 days 天的审计条目并原子替换文件（写文件副作用）。days <= 0 表示永久保留，
+    #   直接返回 0、不碰文件；旧实现的截止时间是“现在减 0 天”，会把全部审计删光（2026-09-27 修正）。
+    #   调用方：cli/audit_log_cmd 的 --cleanup（配置 cli_audit_cleanup_days 或 --days）；改动须同步 test_audit.py。
+    # 函数用途: 按保留天数清理旧审计记录，返回删除条数；保留期为 0 时一条都不删。
     def cleanup_old_entries(self, days: int = 90) -> int:
         """清理旧审计条目."""
         if days <= 0:
-            # LLM: 保留期 <= 0 按"永久保留"处理，不删除任何记录。
-            # 历史实现会让 cutoff = now - 0 天 == 现在，等价于清空全部审计，对安全边界配置来说太危险。
+            # 保留期 <= 0 按“永久保留”处理，不删除任何记录。
             return 0
         if not self._audit_file.exists():
             return 0

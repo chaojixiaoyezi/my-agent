@@ -99,6 +99,9 @@ def _print_audit_entry(entry) -> None:
         print(f"  详情: {json.dumps(entry.details, ensure_ascii=False)}", file=sys.stdout)
     print()
 
+# LLM: audit-log 命令入口：查询只读；--cleanup 调 AuditQuery.cleanup_old_entries（写文件副作用），天数取 --days 或
+#   配置 cli_audit_cleanup_days，保留期 <= 0 时如实回执“永久保留、未清理”。改动须同步 test_audit.py。
+# 函数用途: 查看或清理审计日志的命令行入口。
 def cmd_audit_log(args) -> int:
     from .common import DEFAULT_CONFIG, load_config, resolve_workspace_root
 
@@ -124,7 +127,7 @@ def cmd_audit_log(args) -> int:
             days = int(getattr(config, "cli_audit_cleanup_days", 90) or 0)
         count = query.cleanup_old_entries(days=days)
         if days <= 0:
-            # LLM: 保留期 <= 0 表示永久保留；清理层已不删任何记录，这里如实回执。
+            # 保留期 <= 0 表示永久保留；清理层已不删任何记录，这里如实回执。
             print("保留期设为 0（永久保留），未清理任何审计记录。", file=sys.stdout)
         else:
             print(f"已清理 {count} 条超过 {days} 天的审计记录。", file=sys.stdout)
