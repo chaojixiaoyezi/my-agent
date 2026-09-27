@@ -231,11 +231,13 @@ def test_timeout_keeps_original_output(tmp_path, monkeypatch, capsys):
     seeded(tmp_path, 3)
     config_path = config_at(tmp_path)
     configure(config_path, "apply", {f"points.{POINT}.timeout_seconds": 0.2})
-    sent = install_http(monkeypatch, {"proposal_3": "review_first"}, during=lambda: time.sleep(0.6))
+    # 假服务商拖 3 秒；点位超时 0.2 秒应让命令远早于 3 秒就按原样输出。上限给 2 秒：只证明“没有等服务商回来”，
+    # 不把整条命令的冷启动开销卡在几百毫秒里（原先 0.6 秒/0.55 秒在忙的机器上 3 次失败 2 次）。
+    sent = install_http(monkeypatch, {"proposal_3": "review_first"}, during=lambda: time.sleep(3.0))
     expected_json, _ = s1_outputs(cli_context(config_path))
     started = time.monotonic()
     assert cli(capsys, config_path, ("--json",)) == (0, expected_json)
-    assert len(sent) == 1 and time.monotonic() - started < 0.55
+    assert len(sent) == 1 and time.monotonic() - started < 2.0
 
 
 def test_interrupt_during_request_fails_the_command_without_listing(tmp_path, monkeypatch, capsys):
