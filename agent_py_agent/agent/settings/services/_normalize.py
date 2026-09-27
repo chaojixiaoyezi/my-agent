@@ -17,6 +17,7 @@ from ...backends.sampling import validate_top_p
 from ...backends.structured_output_mode import STRUCTURED_OUTPUT_MODES
 from ...path_access_policy import normalize_path_access_mode
 from ..defaults import default_agent_config
+from ..user_config_capability import is_credential_key
 from ._coercion import CoercionService
 from .runtime_tool_field_specs import TOOL_INT_FIELDS
 
@@ -27,6 +28,21 @@ from .runtime_tool_field_specs import TOOL_INT_FIELDS
 def _append_warning(warnings: list[str], warn: str | None) -> None:
     if warn:
         warnings.append(warn)
+
+
+# LLM: 告警会经 /settings 显示给用户（TUI 与飞书），原样回显配置值会泄露凭据；键在生成告警时本来就知道，
+#   所以在这里判类型而不是在展示层解析文字。凭据键不回显值，其他键截短。
+# 函数用途: 把要写进告警的配置值转成可安全展示的文字。
+_MAX_WARNING_VALUE_CHARS = 80
+
+
+def describe_raw_value(key: object, value: object) -> str:
+    if is_credential_key(key):
+        return "已隐藏（凭据不显示原值）"
+    text = repr(value)
+    if len(text) <= _MAX_WARNING_VALUE_CHARS:
+        return text
+    return text[:_MAX_WARNING_VALUE_CHARS] + "…（已截断）"
 
 
 def _apply_int_fields(
@@ -249,7 +265,7 @@ def _normalize_home_strings(out: dict[str, object], defaults: object) -> list[st
         out[key] = getattr(defaults, key)
         if not explicit and str(raw or "").strip() == "":
             continue
-        warnings.append(f"{key}: expected a non-empty string, got {raw!r}; using default")
+        warnings.append(f"{key}: expected a non-empty string, got {describe_raw_value(key, raw)}; using default")
     return warnings
 
 
@@ -303,7 +319,7 @@ def _normalize_user_id(out: dict[str, object], defaults: object, warnings: list[
         out["user_id"] = raw_user_id.strip()
         return
     out["user_id"] = defaults.user_id
-    warnings.append(f"user_id: expected a non-empty string, got {raw_user_id!r}; using default")
+    warnings.append(f"user_id: expected a non-empty string, got {describe_raw_value('user_id', raw_user_id)}; using default")
 
 
 def _normalize_user_auth(out: dict[str, object], defaults: object, warnings: list[str]) -> None:
@@ -423,7 +439,7 @@ def _normalize_path_access_fields(out: dict[str, object], defaults: object) -> l
     normalized_raw = str(raw_mode or "").strip().lower().replace("_", "-")
     known_values = {"normal", "full", ""}
     if normalized_raw not in known_values:
-        warnings.append(f"path_access_mode: unknown value {raw_mode!r}; using {mode!r}")
+        warnings.append(f"path_access_mode: unknown value {describe_raw_value('path_access_mode', raw_mode)}; using {mode!r}")
     out["path_access_mode"] = mode
     roots = _normalize_string_list(out.get("path_dangerous_roots", defaults.path_dangerous_roots))
     out["path_dangerous_roots"] = roots or list(defaults.path_dangerous_roots)
@@ -465,7 +481,7 @@ def _normalize_runner_timeout_by_role(value: object) -> tuple[dict[str, object],
         parsed = _timeout_mapping_from_list(value)
         if parsed is not None:
             return parsed, None
-    return {}, f"runner_timeout_by_role: expected dict or key=value list, got {value!r}; using default"
+    return {}, f"runner_timeout_by_role: expected dict or key=value list, got {describe_raw_value('runner_timeout_by_role', value)}; using default"
 
 
 def _normalize_runner_timeout_mapping(value: dict[object, object]) -> dict[str, object]:
@@ -623,7 +639,7 @@ def _normalize_runner_timeout_seconds(value: object, default: object) -> tuple[s
     if isinstance(value, (int, float)):
         if math.isfinite(float(value)) and value >= 0:
             return _format_timeout_number(value), None
-        return str(default), f"{key}: expected >= 0, got {value}; using default {default!r}"
+        return str(default), f"{key}: expected >= 0, got {describe_raw_value(key, value)}; using default {default!r}"
     if isinstance(value, str):
         stripped = value.strip().lower()
         if stripped in {"off", "auto"}:
@@ -631,7 +647,7 @@ def _normalize_runner_timeout_seconds(value: object, default: object) -> tuple[s
         parsed = _timeout_float(stripped)
         if parsed is not None and math.isfinite(parsed) and parsed >= 0:
             return _format_timeout_number(parsed), None
-    return str(default), f"{key}: expected 'off', 'auto', or a non-negative number, got {value!r}; using default {default!r}"
+    return str(default), f"{key}: expected 'off', 'auto', or a non-negative number, got {describe_raw_value(key, value)}; using default {default!r}"
 
 
 def _timeout_float(value: str) -> float | None:

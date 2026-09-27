@@ -1,5 +1,20 @@
 # 测试与发布验收
 
+## 配置告警不再回显凭据原值（2026-09-27，dev 审 a95746edc 时发现，my-agent 修）
+
+- **来源**：`/settings` 总览开始显示配置告警后，dev 指出 `settings/services/_normalize.py` 里几处告警把用户写的原始值
+  原样带进文字（`got {value!r}`）。用户把凭据类参数写成错误类型时，值就会经 `/settings` 显示出来，飞书上也能看到。
+- **做法**：新增 `settings/services/_normalize.py: describe_raw_value(key, value)`——**在源头**判类型（键在生成告警时
+  本来就知道，不在展示层解析告警文字）：键是凭据（`user_config_capability.is_credential_key`）时不回显值，写"已隐藏"；
+  其他键照旧回显但截到 80 字符并标"已截断"。四处回显值的地方改调它：`_normalize_home_strings`、
+  `_normalize_user_id`、`_normalize_path_access_fields`、`_normalize_runner_timeout_by_role`，以及
+  `_normalize_timeout_value` 的两条分支。
+- **新测试**（`tests/test_config_warning_no_credential_echo.py`，16 项）：helper 对每个凭据键都隐藏原值；
+  普通键照旧显示；超长值截短且标注、短值不加标注；再加真实端到端——用 `load_config` 加载一份含错误类型的用户配置，
+  走真实 `/settings` 总览，确认凭据原值不出现在回执里、普通键告警照旧出现。
+- **复现**：`cd agent_py_agent && python3 -m pytest tests/test_config_warning_no_credential_echo.py -q`。
+- **变异**：把 helper 里的凭据判断去掉，6 项"隐藏凭据"用例失败、其余仍绿。
+
 ## `/settings` 总览显示配置告警（2026-09-27，dev 派活，my-agent 实现）
 
 - **来源**：参数减量后，已删/未知的配置键会被忽略并记进 `AgentConfig.config_warnings` 或
