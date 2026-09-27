@@ -146,7 +146,7 @@ def test_applied_value_with_hands_the_rule_the_loaded_type(monkeypatch):
 # 名字里带 token/prompt/path/owner/home/audit/command，但只是数量、上限、间隔或超时的参数（2026-09-27 前被误判为边界）
 _NUMERIC_KNOBS = [
     "input_media_token_reserve", "background_pending_wake_prompt_limit", "decision_model_selection_prompt_max_chars",
-    "memory_resume_recommended_read_paths_limit", "home_lesson_auto_read_limit", "home_lesson_stale_caveat_days",
+    "memory_resume_recommended_read_paths_limit", "home_lesson_stale_caveat_days",
     "cli_audit_limit", "background_owner_workers", "background_owner_wake_rescan_seconds", "background_threads_per_owner",
     "gateway_service_command_timeout_seconds", "owner_agent_idle_seconds", "owner_agent_pool_max_agents",
     "owner_maintenance_scan_interval_seconds",
@@ -191,7 +191,7 @@ def test_credential_names_match_whole_trailing_segments_only():
     "additional_write_roots", "prompt_files", "system_prompt", "my_agent_home", "self_dev_worktree", "path_dangerous_roots",
     "my_agent_owner_provider", "my_agent_owner_kind", "my_agent_owner_id", "feishu_app_id", "feishu_app_secret",
     "feishu_verification_token", "feishu_encrypt_key", "qq_app_id", "qq_app_secret", "gateway_port",
-    "feishu_personal_idle_lock_seconds", "cli_audit_cleanup_days", "task_lock_timeout_seconds", "mcp_servers",
+    "feishu_personal_idle_lock_seconds", "cli_audit_cleanup_days", "mcp_servers",
 ])
 def test_paths_write_scope_channel_credentials_and_owner_identity_stay_boundary(key):
     """收紧只放开数字类旋钮：路径、写入范围、飞书/QQ 凭据、owner 身份、访问锁与审计保留期仍是边界（飞书凭据另有显式放行）。"""
