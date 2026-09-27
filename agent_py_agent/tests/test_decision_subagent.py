@@ -12,13 +12,17 @@ from agent_py_agent.agent.agent_core.orchestration.decision_subagent import (
 )
 from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
+from agent_py_agent.agent.backends.decision_protocol import DecisionInputError
 from agent_py_agent.agent.backends.errors import ProviderTransientError
 from agent_py_agent.agent.backends.typesafe_decision_wire import parse_typesafe_response
 from agent_py_agent.agent.conversation import decision_model_call as calls
+from agent_py_agent.agent.conversation import decision_service
 from agent_py_agent.agent.settings.model_profiles import execute_model_profile_operation
+from agent_py_agent.agent.settings.model_provider_schema import ModelProfileError
 from agent_py_agent.agent.settings.thread_model_selection import SUBAGENT_MODEL_ADVICE_KEY
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.tests.test_decision_model_profiles import decision
+from agent_py_agent.tests.test_decision_reach_counts import reach_counter
 from agent_py_agent.tests.test_decision_settings import host_at, patch
 from agent_py_agent.tests.test_model_profiles import add
 from agent_py_agent.tests.test_orchestration_create_subagents_items import _agent
@@ -306,22 +310,73 @@ def test_candidate_scope_change_before_request_skips_jev(prepared, monkeypatch):
     assert not seen
 
 
-def test_candidate_scope_check_propagates_user_cancel(prepared, monkeypatch):
+# LLM: 只替换被测步骤本身；抛出的异常类型决定走结构化原因码还是入口的“意外异常放弃”，不改其它步骤。
+# 函数用途: 生成一个固定抛出给定异常的替身，用于把某一步变成结构化失败或意外异常。
+def _raiser(error):
+    def raise_it(*_args, **_kwargs):
+        raise error
+    return raise_it
+
+
+def test_each_create_call_counts_one_reach_outcome(prepared, monkeypatch, tmp_path):
+    agent, (a, b), _ = prepared
+    monkeypatch.setattr(agent.config, "max_subagents", 20)
+    reasons = reach_counter(agent, monkeypatch, "subagent_model", tmp_path)
+    seen = provider(monkeypatch, prepared, {"0": a})
+    tool = CreateSubagentsTool(agent)
+    created(agent, tool.execute({"goal": "检查甲"}))
+    tool.execute({"goal": "预演", "dry_run": True})
+    assert tool.execute({"goal": " "}).error_code == "TOOL_INVALID_ARGUMENTS", "创建自身校验没过，不进入这个点位"
+    created(agent, tool.execute({"items": [{"goal": "检查乙", "model": a}]}))
+    stage_error = SimpleNamespace(error_code="settings_busy", enabled_points=(), deadline=0.0)
+    for target, name, replacement in [
+        (selection, "execute_decision_settings_operation", _raiser(ModelProfileError("设置读不出"))),
+        (decision_service, "begin_decision_stage", lambda *_args, **_kwargs: stage_error),
+        (selection, "_candidates", lambda *_args, **_kwargs: {}),
+        (selection, "_questions", lambda *_args: ({}, {})),
+        (selection, "_frozen_material", _raiser(DecisionInputError("整批材料超出协议上限"))),
+        (selection, "_candidates", _raiser(RuntimeError("意外故障"))),
+    ]:
+        with monkeypatch.context() as scoped:
+            scoped.setattr(target, name, replacement)
+            created(agent, tool.execute({"goal": f"检查{name}"}))
+    patch(agent, {"points.subagent_model.mode": "off"})
+    created(agent, tool.execute({"goal": "检查关闭"}))
+    patch(agent, {"points.subagent_model.mode": "apply"})
+    original = selection.decide_subagent_models
+
+    def changed_before_send(host, decision):
+        patch(host, {"points.subagent_model.candidate_profile_ids": [b]})
+        return original(host, decision)
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(orchestration_tools, "decide_subagent_models", changed_before_send)
+        created(agent, tool.execute({"goal": "检查范围变化"}))
+    assert len(seen) == 1, "只有第一次真正调用了决策模型"
+    assert reasons() == ({"models_given": 1, "configuration_unavailable": 1, "settings_busy": 1, "no_candidates": 1,
+                          "nothing_to_ask": 1, "bad_material": 1, "point_off": 1, "candidate_scope_changed": 1}, 1), \
+        "每次进入点位的创建只记一个结果；dry_run、校验没过与意外异常不计入"
+
+
+@pytest.mark.parametrize("stop_at", [1, 2], ids=["prepare_read", "scope_check_read"])
+def test_settings_reads_propagate_user_cancel(prepared, monkeypatch, tmp_path, stop_at):
     agent, (a, _), _ = prepared
+    reasons = reach_counter(agent, monkeypatch, "subagent_model", tmp_path)
     seen = provider(monkeypatch, prepared, {"0": a})
     original = selection.execute_decision_settings_operation
     reads = [0]
 
     def interrupted_read(*args, **kwargs):
         reads[0] += 1
-        if reads[0] == 2:
+        if reads[0] == stop_at:
             raise InterruptedError("user stop")
         return original(*args, **kwargs)
 
     monkeypatch.setattr(selection, "execute_decision_settings_operation", interrupted_read)
     with pytest.raises(InterruptedError):
         CreateSubagentsTool(agent).execute({"goal": "检查材料"})
-    assert reads[0] == 2 and not seen and not agent.subagents.list_runs()
+    assert reads[0] == stop_at and not seen and not agent.subagents.list_runs()
+    assert reasons() == ({}, 0), "用户停止是机制性退出，不记成设置读不出，也不计入到达"
 
 
 @pytest.mark.parametrize("mode", ["off", "observe"])

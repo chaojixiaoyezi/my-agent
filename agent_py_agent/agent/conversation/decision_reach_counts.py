@@ -30,7 +30,7 @@ CALLED = "called"
 # 本片接入到达计数的点位；其余点位展示时明确写“未统计”，不显示成 0 次。
 COVERED_POINTS = ("planning", "delivery_quality", "action_candidate", "external_material_order",
                   "skill_proposal_review", "pre_recall", "recall", "curator", "curator_relation", "model_selection",
-                  "skill_tool")
+                  "skill_tool", "subagent_model")
 # 点位的适用范围说明（宿主事实，不是原因码）：诊断里带出，审计与菜单照原样显示，免得把“这里本来就不判断”看成没接线。
 _POINT_NOTES = {"model_selection": "只在经 Gateway 的对话里判断，本机直连 TUI 不判断"}
 _FLUSH_SECONDS = 60.0
@@ -87,11 +87,15 @@ _LABELS = {
     "isolated_scope": "这是隔离或控制类的任务，不做工具推荐",
     "nothing_to_recommend": "没有可以推荐的工具或 Skill",
     "experiment_forbidden": "实验没有放行这个点位",
+    "models_given": "这批子任务都已指定模型（或是复用已有子代理），不用再选",
+    "nothing_to_ask": "这批子任务还没准备好编号，这次不问",
+    "candidate_scope_changed": "候选模型的范围刚被改过（或复核时读不出设置），这次先不问",
 }
 
 
 # LLM: 热路径只做进程内累加；到期才合并写盘（写失败只记日志并把计数放回，绝不影响点位本身的判断与结果）。
-#   开关 decision_skip_records_enabled 为假、或宿主没有规范路径时什么都不做。reason 只能是宿主原因码，CALLED 表示真的调用了。
+#   开关 decision_skip_records_enabled 为假、或宿主没有规范路径时什么都不做；只认 HomePaths 字段的真实 Path，替身/mock
+#   属性不算（否则会按 mock 的名字在当前目录写出垃圾文件）。reason 只能是宿主原因码，CALLED 表示真的调用了。
 #   flush=False 只在内存累加、本次绝不落盘，给有“零 I/O”合同的路径用（如选模型关闭时的请求钩子）；这些计数随同一 owner
 #   下一次到期的计数或 Gateway 正常停止一起写盘，读取时也会合并进来。
 # 函数用途: 记录一次“点位到达触发点”及其结果（调用了，或没调用的原因）。
@@ -99,7 +103,7 @@ def note_decision_reach(agent: object, point: str, reason: str, *, flush: bool =
     if not bool(getattr(getattr(agent, "config", None), "decision_skip_records_enabled", True)):
         return
     path = getattr(getattr(agent, "home_paths", None), "owner_decision_reach_counts_json", None)
-    if not path or not point:
+    if not isinstance(path, Path) or not point:
         return
     key = (int(time.time() // _HOUR) * _HOUR, str(point), str(reason or CALLED))
     with _LOCK:

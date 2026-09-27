@@ -32,7 +32,7 @@
     Gateway 正常停止收尾补写到达计数；数量类大白话改为从 `conversation/decision_point_limits.py` 现算。
   - **三点位计数**（口径已由集成方确认，分支 `claude/9b-three-point-reach`，每个点位单独提交）：model_selection 已接
     （关闭只在内存计数、保持零 I/O；诊断带适用范围说明 `note`）；skill_tool 已接（恢复与已评估不算，实验路径算同一次到达）；
-    subagent_model 跟进。
+    subagent_model 已接（拆开原来吞掉一切的 `except Exception: return None`，意外异常仍放弃但不计入）。12 个点位全部接入。
   - 详见 [决策审计与管控](docs/design/DECISION_AUDIT_AND_ADMIN_CONTROLS.md#每个点位最近为什么没触发2026-09-27)。
 - **决策点“触发了但被挡下”也留审计记录**（2026-09-27，分支 `claude/decision-skip-records`，本地回归与变异通过，见 TESTS）：
   - **起因**：my-agent 在真实 TUI 里测 Jev 点位，planning 等没有任何记录，就写出“宿主未接线”的开发需求。实际都已接线且开启；

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import time
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -20,6 +21,7 @@ from agent_py_agent.agent.conversation.decision_reach_counts import (
     note_decision_reach,
     stage_miss_reason,
 )
+from agent_py_agent.agent.settings.decision_settings_schema import POINTS
 
 
 @pytest.fixture(autouse=True)
@@ -78,7 +80,10 @@ def test_old_hours_are_pruned_and_broken_files_count_as_empty(tmp_path):
     assert decision_reach_summary(agent.home_paths, since=0)["points"] == {}
 
 
-def test_switch_off_or_missing_path_records_nothing(tmp_path):
+def test_switch_off_or_missing_path_records_nothing(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    note_decision_reach(MagicMock(), "planning", CALLED)
+    assert counts._PENDING == {} and not list(tmp_path.iterdir()), "mock 宿主的属性不是规范路径，不能在当前目录写文件"
     agent = _agent(tmp_path, enabled=False)
     note_decision_reach(agent, "planning", "todo_count")
     assert not agent.home_paths.owner_decision_reach_counts_json.exists()
@@ -123,11 +128,12 @@ def test_diagnostics_mark_uncovered_points_and_enabled_state(tmp_path):
     for reason in ("focus_count", "focus_count", "nothing_to_review", CALLED):
         note_decision_reach(agent, "delivery_quality", reason)
     reach = decision_reach_summary(agent.home_paths, since=0)
-    rows = decision_point_diagnostics(("delivery_quality", "subagent_model", "planning", "model_selection"),
-                                      {"delivery_quality": "apply", "subagent_model": "off"}, reach)
+    rows = decision_point_diagnostics(("delivery_quality", "future_point", "planning", "model_selection"),
+                                      {"delivery_quality": "apply", "future_point": "off"}, reach)
     assert rows["delivery_quality"]["enabled"] is True and rows["delivery_quality"]["reached"] == 4
     assert [item["reason"] for item in rows["delivery_quality"]["not_called"]] == ["focus_count", "nothing_to_review"]
-    assert rows["subagent_model"]["covered"] is False and rows["subagent_model"]["enabled"] is False
+    assert rows["future_point"]["covered"] is False and rows["future_point"]["enabled"] is False
+    assert set(counts.COVERED_POINTS) >= set(POINTS), "现有点位都已接入到达计数"
     assert rows["model_selection"]["covered"] is True and "Gateway" in rows["model_selection"]["note"]
     assert rows["delivery_quality"]["note"] == ""
     assert rows["planning"]["covered"] is True and rows["planning"]["reached"] == 0 and rows["planning"]["mode"] == "unknown"

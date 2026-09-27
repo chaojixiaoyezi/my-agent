@@ -15,6 +15,12 @@ from ...backends.decision_protocol import decision_json
 from ...contracts.idempotency import operation_id
 from ...conversation import decision_service
 from ...conversation.decision_policy import connection_revision
+from ...conversation.decision_reach_counts import (
+    CALLED,
+    counted_material,
+    note_decision_reach,
+    stage_miss_reason,
+)
 from ...settings.decision_settings import execute_decision_settings_operation
 from ...settings.model_profiles import (
     _resolved_profile,
@@ -24,7 +30,7 @@ from ...settings.model_profiles import (
     read_model_profiles,
     selected_model_config,
 )
-from ...settings.model_provider_schema import ModelProfileGeneration
+from ...settings.model_provider_schema import ModelProfileError, ModelProfileGeneration
 from ...settings.services.runtime_config_task import project_task_runtime_config_overlay
 from ...settings.thread_model_selection import PendingSubagentModelAdvice
 from ...tooling.models import ToolRuntimeSnapshot
@@ -148,52 +154,88 @@ def _candidate_request_limits(agent: object, child: SubagentModelInput, candidat
 
 
 # LLM: 关闭/显式/dry-run/复用不建议；新孩子可有未知容量，但只能产生 pending。候选窗口/cap/probe 缺口如实提供，不能据此改模型。
+#   到达计数：每次非 dry_run 的 create_subagents 算一次（整批一个决策），没准备成的结构化原因由 _prepare 交回并记一次；
+#   意外异常仍按原方案返回 None，不计入到达。
 # 函数用途: 在原创建锁内准备一批语义建议材料；首次请求仍须由未来真实 runner 验证。
 def prepare_subagent_model_decision(agent: object, raw_params: dict, children: Callable[[], list[SubagentModelInput]]) -> SubagentModelDecision | None:
     if raw_params.get("dry_run") or getattr(agent, "home_paths", None) is None:
         return None
+    try:
+        prepared, reason = _prepare(agent, raw_params, children)
+    except (InterruptedError, decision_service.ToolCancelled):
+        raise
+    except Exception:
+        return None
+    if reason:
+        note_decision_reach(agent, "subagent_model", reason)
+    return prepared
+
+
+# LLM: 与原先的整体判断一一对应，只把每个“放弃”换成结构化原因码：设置读不出 configuration_unavailable、关闭 point_off、
+#   孩子都自带模型或是复用 models_given、阶段原因码、no_candidates、没有可问的孩子 nothing_to_ask；材料不合格或超限经
+#   counted_material 记 bad_material 后上抛。其它异常原样上抛，由入口按原方案处理；用户停止（InterruptedError 是 OSError
+#   子类）必须先于 OSError 分支原样上抛，不能记成设置读不出。
+# 函数用途: 准备一批子代理的模型建议材料，不能准备时返回 (None, 原因码)。
+def _prepare(agent: object, raw_params: dict, children: Callable[[], list[SubagentModelInput]]) -> tuple[SubagentModelDecision | None, str]:
     params = getattr(agent, "_current_run_params", None)
     attrs = getattr(params, "task_attributes", {}) or {}
     thread_id = attrs.get("agent_thread_id") or attrs.get("conversation_thread_id") if isinstance(attrs, dict) else ""
     try:
         settings = execute_decision_settings_operation(agent, "read", {}, thread_id=thread_id, blocking=False)
-        point_settings = settings["effective"]["points"]["subagent_model"]
-        if point_settings["effective_mode"] == "off":
-            return None
-        candidate_profile_ids = tuple(point_settings["candidate_profile_ids"])
-        eligible = {str(index): child for index, child in enumerate(children()) if child.raw.get("model") is None and not child.reused}
-        if not eligible:
-            return None
-        stage = decision_service.begin_decision_stage(agent, params, operation_id=operation_id("create_subagents", {"params": raw_params}))
-        if stage.error_code or "subagent_model" not in stage.enabled_points:
-            return None
-        candidates = _candidates(agent, deadline=stage.deadline, candidate_profile_ids=candidate_profile_ids, initialize_generation=True)
-        if not candidates:
-            return None
-        questions, snapshots = {}, {}
-        for key, child in eligible.items():
-            limits = _candidate_request_limits(agent, child, candidates, deadline=stage.deadline)
-            needed = _input_budget(agent, params, child)
-            if child.canonical is None or not getattr(child.canonical, "id", ""):
-                continue
-            allowed = {ref: {**row, **limits[ref]} for ref, row in candidates.items()}
-            fingerprint = _child_fingerprint(child)
-            snapshots[key] = {"fingerprint": fingerprint, "candidates": list(allowed), "estimated_input_tokens": needed,
-                              "candidate_request_limits": limits}
-            questions[key] = {"type": "choice", "instructions": {"question": "为子任务建议一个候选模型；这是待验证建议，容量和工具支持尚未验证，不确定时保留原模型。部分候选带用户填写的用途标签 usage_tags，可用来判断与子任务的语义匹配，但不是能力或容量证明。", "goal": child.prepared.goal},
-                "criteria": {**{ref: {field: value for field, value in row.items() if field not in {"revision", "runtime_config_revision", "source_model_generation"}}
-                                for ref, row in allowed.items()}, **_RETAIN_CHOICES}}
-        if not questions:
-            return None
-        revision = hashlib.sha256(decision_json(candidates)).hexdigest()
-        state = {"children": snapshots, "selection_scope": "new_children_pending_validation"}
-        decision_json({"state": state, "questions": questions})
-        return SubagentModelDecision(stage, params, snapshots, candidates, revision, questions, state, candidate_profile_ids,
-                                     (settings["revision"]["owner"], settings["revision"]["thread"]))
-    except (InterruptedError, decision_service.ToolCancelled):
+    except InterruptedError:
         raise
-    except Exception:
-        return None
+    except (ModelProfileError, OSError):
+        return None, "configuration_unavailable"
+    point_settings = settings["effective"]["points"]["subagent_model"]
+    if point_settings["effective_mode"] == "off":
+        return None, "point_off"
+    candidate_profile_ids = tuple(point_settings["candidate_profile_ids"])
+    eligible = {str(index): child for index, child in enumerate(children()) if child.raw.get("model") is None and not child.reused}
+    if not eligible:
+        return None, "models_given"
+    stage = decision_service.begin_decision_stage(agent, params, operation_id=operation_id("create_subagents", {"params": raw_params}))
+    reason = stage_miss_reason(stage, "subagent_model")
+    if reason:
+        return None, reason
+    candidates = _candidates(agent, deadline=stage.deadline, candidate_profile_ids=candidate_profile_ids, initialize_generation=True)
+    if not candidates:
+        return None, "no_candidates"
+    questions, snapshots = _questions(agent, eligible, candidates, stage)
+    if not questions:
+        return None, "nothing_to_ask"
+    revision, state = counted_material(agent, "subagent_model", lambda: _frozen_material(candidates, snapshots, questions))
+    return SubagentModelDecision(stage, params, snapshots, candidates, revision, questions, state, candidate_profile_ids,
+                                 (settings["revision"]["owner"], settings["revision"]["thread"])), ""
+
+
+# LLM: 每个未指定模型的新孩子一道 choice 题；没有 canonical 编号的孩子跳过（还不能绑定建议）。候选窗口、cap 与工具支持缺口如实写进，
+#   宿主版本字段只留在本地快照，不外发。
+# 函数用途: 为这一批孩子生成题目和本地快照。
+def _questions(agent: object, eligible: dict, candidates: dict, stage: object) -> tuple[dict, dict]:
+    questions, snapshots = {}, {}
+    run_params = getattr(agent, "_current_run_params", None)
+    for key, child in eligible.items():
+        limits = _candidate_request_limits(agent, child, candidates, deadline=stage.deadline)
+        needed = _input_budget(agent, run_params, child)
+        if child.canonical is None or not getattr(child.canonical, "id", ""):
+            continue
+        allowed = {ref: {**row, **limits[ref]} for ref, row in candidates.items()}
+        fingerprint = _child_fingerprint(child)
+        snapshots[key] = {"fingerprint": fingerprint, "candidates": list(allowed), "estimated_input_tokens": needed,
+                          "candidate_request_limits": limits}
+        questions[key] = {"type": "choice", "instructions": {"question": "为子任务建议一个候选模型；这是待验证建议，容量和工具支持尚未验证，不确定时保留原模型。部分候选带用户填写的用途标签 usage_tags，可用来判断与子任务的语义匹配，但不是能力或容量证明。", "goal": child.prepared.goal},
+            "criteria": {**{ref: {field: value for field, value in row.items() if field not in {"revision", "runtime_config_revision", "source_model_generation"}}
+                            for ref, row in allowed.items()}, **_RETAIN_CHOICES}}
+    return questions, snapshots
+
+
+# LLM: 候选版本摘要与整批 state/题目的协议上限检查都在这里；超限时 decision_json 抛 DecisionInputError。
+# 函数用途: 冻结候选版本值并组出发送用的 state，同时确认整批材料不超出决策协议上限。
+def _frozen_material(candidates: dict, snapshots: dict, questions: dict) -> tuple[str, dict]:
+    revision = hashlib.sha256(decision_json(candidates)).hexdigest()
+    state = {"children": snapshots, "selection_scope": "new_children_pending_validation"}
+    decision_json({"state": state, "questions": questions})
+    return revision, state
 
 
 # LLM: 目录候选在创建锁内准备，锁外网络前复读用户范围/版本；变化后不为旧候选发请求或接纳建议，读取失败保持原派工。
@@ -211,10 +253,14 @@ def _candidate_scope_is_current(agent: object, prepared: SubagentModelDecision) 
 
 
 # LLM: 此函数是本模块唯一网络边界，调用方先释放 creation_guard；发网前复核本批范围，原服务仍拥有期限、取消、用量和配置复核。
+#   同一次到达的收尾计数在这里：复核不通过（范围变了，或按原方案把复核读取失败也当作范围失效）记 candidate_scope_changed，
+#   真正调用前记 called；复核时用户停止原样上抛，不计入。
 # 函数用途: 对整批未显式选择的孩子请求一次建议，设置变化或普通错误沿原创建方案。
 def decide_subagent_models(agent: object, prepared: SubagentModelDecision) -> decision_service.DecisionOutcome:
     if not _candidate_scope_is_current(agent, prepared):
+        note_decision_reach(agent, "subagent_model", "candidate_scope_changed")
         return decision_service.DecisionOutcome("off", "stale", reason="candidate_scope_changed")
+    note_decision_reach(agent, "subagent_model", CALLED)
     return decision_service.decide(agent, prepared.params, prepared.stage, point="subagent_model", state=prepared.state,
         questions=prepared.questions, candidates_revision=prepared.candidates_revision)
 

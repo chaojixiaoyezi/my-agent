@@ -138,6 +138,12 @@ my-agent 据此写出“这几个点位宿主代码未接线”的开发需求�
     恢复都不算。原因：`tools_disabled`、`isolated_scope`（隔离/控制面上下文）、`no_run_context`、阶段原因码/`point_off`、
     `nothing_to_recommend`、`bad_material`。普通模式关闭但实验放行时走只观察实验，这一次到达只记实验的结果：实验阶段拒绝记
     阶段码或 `experiment_forbidden`，否则同样是没有题或 `called`；一次到达最多一个 `called`。
+  - subagent_model：每次非 dry_run 的 create_subagents 算一次到达（整批一个决策、每个孩子一道题）；create_subagents 自身校验
+    没过（参数、容量）时直接返回，不进入这个点位。原来 `except Exception: return None` 把所有放弃压成 None，现按 `_prepare`
+    交回结构化原因：`configuration_unavailable`（设置读不出）、`point_off`、`models_given`（孩子都自带模型或是复用）、
+    阶段原因码、`no_candidates`、`nothing_to_ask`（没有可问的孩子）、`bad_material`；发送前复核不通过记
+    `candidate_scope_changed`（范围变了，或按原方案把复核读取失败也当作范围失效），真正调用前记 `called`。意外异常仍按原方案
+    放弃，用户停止原样上抛，都不计入到达。
 - 没登记的原因码照原样显示成“其它原因（码）”，不拒绝。
 - 开关复用 `decision_skip_records_enabled`，说明改为“决策点诊断记录”：关闭时跳过行与计数都不写。
 
@@ -151,7 +157,7 @@ my-agent 据此写出“这几个点位宿主代码未接线”的开发需求�
   `user_config` 与阶段内部的设置读取不附。
 
 **边界**：
-- subagent_model 还没接计数，`covered=false`，菜单写“未统计未触发原因”，不显示成 0 次。
+- 现有 12 个点位都已接入到达计数；以后新增的点位未接入时 `covered=false`，菜单写“未统计未触发原因”，不显示成 0 次。
 - 诊断每行另有 `note`（点位适用范围的宿主说明，放在 `decision_reach_counts._POINT_NOTES`）：model_selection 写明“只在经
   Gateway 的对话里判断，本机直连 TUI 不判断”，审计与菜单照原样显示，免得本机直连时的 0 次被看成没接线。
 - 进程内还没落盘的计数只在本进程可见：距上次合并不到 60 秒、之后又没有新到达的那部分。审计和菜单读取时会合并本进程

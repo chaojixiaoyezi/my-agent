@@ -1,5 +1,21 @@
 # 测试与发布验收
 
+## 到达计数接上子代理选模型（2026-09-27，分支 `claude/9b-three-point-reach` 第 3 个提交）
+
+- **口径**（集成方已确认）：每次非 dry_run 的 create_subagents 算一次到达（整批孩子一个决策）；create_subagents 自身校验
+  没过时直接返回，不进入点位。原来吞掉一切的 `except Exception: return None` 拆开：`_prepare` 交回结构化原因
+  （`configuration_unavailable`、`point_off`、`models_given`、阶段原因码、`no_candidates`、`nothing_to_ask`，材料经
+  `counted_material` 记 `bad_material`），发网前复核不通过记 `candidate_scope_changed`，真正调用前记 `called`；意外异常仍返回
+  None 不计入，用户停止原样上抛不计入（`InterruptedError` 是 `OSError` 子类，读设置处先单独上抛，不能记成设置读不出）。
+- **新测试**（`test_decision_subagent.py`）：`test_each_create_call_counts_one_reach_outcome` 一次跑遍 8 种原因和一次调用，
+  dry_run、校验没过、意外异常都不计；`test_settings_reads_propagate_user_cancel` 参数化两次读设置（准备时、发网前复核）被用户
+  停止都原样上抛、不建任务、不计数。审计与菜单测试断言 12 个点位都已统计。
+- **变异验证（16 种全部被抓住，逐个字节级还原，并核对每个失败都落在对应原因上）**：8 个原因各自不计、`called` 缺失、意外异常
+  误计、dry_run 误计、吞掉用户停止、准备时停止误计、复核时停止误计、校验没过误计、覆盖列表漏掉点位（展示口径）。
+- **顺带修掉的测试垃圾文件**：接上这个点位后，用 MagicMock 假宿主的编排测试会走到计数，`note_decision_reach` 把 mock 属性当路径，
+  在工作目录写出 `<MagicMock …>` 文件（clean-package 检查拦下 188 个）。现在只认 HomePaths 字段的真实 `Path`；
+  `test_switch_off_or_missing_path_records_nothing` 在临时目录里用 MagicMock 宿主断言不写文件（改回旧判断时该测试失败）。
+
 ## 到达计数接上技能工具推荐（2026-09-27，分支 `claude/9b-three-point-reach` 第 2 个提交）
 
 - **口径**（集成方已确认）：每次新评估算一次到达；本片已评估过、携带选择的恢复都不算。原因码：`tools_disabled`、

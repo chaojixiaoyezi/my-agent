@@ -183,12 +183,12 @@ def test_point_diagnosis_line_uses_host_labels_and_marks_uncounted_points():
         "recall": {"covered": True, "reached": 3, "called": 1, "not_called": [
             {"reason": "memory_count", "label": "这轮找到的普通记忆不到 2 条，不需要重新排序", "count": 2}]},
         "planning": {"covered": True, "reached": 0, "called": 0, "not_called": []},
-        "subagent_model": {"covered": False, "reached": 0, "called": 0, "not_called": []},
+        "future_point": {"covered": False, "reached": 0, "called": 0, "not_called": []},
         "model_selection": {"covered": True, "reached": 0, "called": 0, "not_called": [],
                             "note": "只在经 Gateway 的对话里判断，本机直连 TUI 不判断"}}}
     assert _diagnosis(view, "recall") == " · 近24小时检查3次、调用1次，最多是因为：这轮找到的普通记忆不到 2 条，不需要重新排序（2次）"
     assert _diagnosis(view, "planning") == " · 近24小时检查0次、调用0次"
-    assert _diagnosis(view, "subagent_model") == " · 近24小时：未统计未触发原因"
+    assert _diagnosis(view, "future_point") == " · 近24小时：未统计未触发原因"
     assert _diagnosis(view, "model_selection") == " · 近24小时检查0次、调用0次（只在经 Gateway 的对话里判断，本机直连 TUI 不判断）"
     assert _diagnosis({}, "recall") == "" and _diagnosis(view, "curator") == ""
 
@@ -217,7 +217,8 @@ def test_pipe_point_rows_show_recent_reach_from_the_real_decision_read(tmp_path,
             await choose(ui, 6)
             text = visible(ui.app)
             assert "近24小时检查3次、调用1次，最多是因为：这轮找到的普通记忆不到 2 条，不需要重新排序（2次）" in text
-            assert "近24小时：未统计未触发原因" in text
+            assert "近24小时：未统计未触发原因" not in text, "现有点位都已接入到达计数"
+            assert "只在经 Gateway 的对话里判断" in text
     asyncio.run(scenario())
 
 @pytest.mark.parametrize("stored,toggles,expected", [
