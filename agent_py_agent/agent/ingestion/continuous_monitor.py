@@ -11,9 +11,14 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from agent_py_agent.agent.ingestion import watch_state
 from agent_py_agent.agent.ingestion.harvester import ensure_harvester
 from agent_py_agent.agent.ingestion.source_http import SourceHttpRequest
-from agent_py_agent.agent.ingestion.watch_state import list_states, load_state
+from agent_py_agent.agent.ingestion.watch_state import (
+    list_states,
+    load_state,
+    refresh_scalars_from_disk,
+)
 from agent_py_agent.agent.ingestion.watch_tool import WatchStreamTool
 
 from ..common.json_io import jsonl_lines
@@ -52,6 +57,9 @@ def _owner_has_watch(owner_home: Path) -> bool:
     return any((owner_home / "watch_state").glob("ws-*.json"))
 
 
+# LLM: 恢复起的收割线程必须持有 registry 里的同一个状态对象：之后 pull 经 registry 取对象，ensure_harvester 只按
+#   watch_id 复用活线程，若这里另从盘上读一份，同一 watch 就有两份状态各自落盘。取出后按工具路径惯例先在锁内从盘上刷新。
+# 函数用途: Gateway 恢复循环为仍在运行的命名 Audit 数据源重新拉起收割线程，父任务不活跃时不拉起。
 def recover_active_audit_harvesters(agent: object) -> int:
     """Recover collectors only for durably active named Audit sources.
 
@@ -72,9 +80,11 @@ def recover_active_audit_harvesters(agent: object) -> int:
     for row in list_states(owner_home):
         if row.get("closed") or not bool(row.get("audit_guarantee")):
             continue
-        state = load_state(owner_home, str(row.get("watch_id") or ""))
+        state = watch_state.registry.get_or_load(owner_home, str(row.get("watch_id") or ""))
         if state is None:
             continue
+        with state.lock:
+            refresh_scalars_from_disk(state)
         from agent_py_agent.agent.ingestion.source_worker import (
             audit_parent_reconcile_state,
         )

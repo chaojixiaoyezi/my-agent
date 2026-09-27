@@ -74,7 +74,7 @@ def _bounded_text(value: str, limit: int) -> tuple[str, dict]:
 #   只删材料：摘要只带语义部分（去掉原文锚点段），摘要与当前消息按主配置字符上限截头，截断如实标注；候选公共声明只写一次。
 # 函数用途: 描述这一新主请求和当前冻结模型，不把不完整输入伪装成可自动切换的容量证明。
 def _observation_input(context: object, thread: object, captured: SelectedModelRead, candidates: dict) -> tuple[dict, dict]:
-    from .conversation.compact import semantic_summary_text
+    from .conversation.compact_landmarks import semantic_summary_text
 
     config = context.agent.config
     prompt, prompt_fact = _bounded_text(str(context.request.get("prompt") or context.request.get("goal") or "").strip(),

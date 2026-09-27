@@ -1,5 +1,13 @@
 # 测试与发布验收
 
+## 能力包第九候选组合固定558（2026-09-27，本地严格门通过／真实待验）
+
+组合本线三片固定`898e64634`与主线`558eb65df`，后者直接修复`72cbb0411`历史读取的owner越界。
+合入前在固定558源码快照独立跑会话原文读取/搜索两文件，Python3.14.4下36项通过；本轮未重跑原自定义ToolExecutor全链探针，不将它计为新版证据。
+仅测试记录和bool归一化列表出现文本冲突，保留双方完整记录及语法诊断、原文预算、原文回查三配置；新增3种带引号的真假组合，核对实际YAML加载后两个开关独立生效。
+冻结2978个源码、测试及包资源指纹后，48文件统一消费者focused为1301 passed（165.38秒），前后无源码漂移；Compact使用本线独有短临时路径。Ruff、doc-sync（898e64634基准）、strict-size、diff、clean-package均通过，本地严格gate已通过，strict hard=0。合入前977项和实施方4885项不相加、不替代本次组合结果。
+本轮私有运行仍f6，尚未安装新组合或发起新原生TUI；线上CI未作为本线验收来源。
+
 ## 能力包三片收口（2026-09-27，统一本地严格门通过／主线组合与真实待验）
 
 文件语法反馈六文件215项通过：独立注入`record/discard`普通异常的红例12失败已转绿，新增27个边界用例；独立窄复核39项通过，取消与真实partial保持。
@@ -18,6 +26,80 @@ B0.1.3交接检查四文件183项通过：快照改按原CLI Path绑定复用，
 压缩释放、原生IR、Gateway/子/后台/混合恢复、媒体预留、会话用量及输出预留十文件共140项通过，另以收集结果核对计数。
 Ruff、doc-sync（d00fde8基准）、strict-size、diff及clean-package通过；静态尺寸报告记录PreparedCompactRecovery退出原近阈值提示。
 当前私有运行仍`f6f93e4f3`，本片没有新真实模型调用；前述六席不能回填为新计量版本验收，未推送或部署日用环境。
+
+## 会话原文读取的 thread_id 越界修复（2026-09-27，分支 `claude/history-owner-scope`，基于 main `72cbb0411`）
+
+- **来源**：Codex 在 `72cbb0411` 的隔离副本里用两套合成 owner 数据复现。`session_history_read` 把模型给的 `thread_id` 直接交给 `by_id_report`，存储层按 `messages_dir / f"{thread_id}.jsonl"` 拼路径。绝对路径形态和 `../../../owner-b/conversation/messages/<thread>` 两种写法都能读到只在 owner-b 里的标记，动作策略放行（`thread_id` 当时不是声明的资源参数）；普通 owner-b 线程编号则返回 found=false。没有涉及真实用户数据。
+- **改动**：
+  - 工具入口 `_owned_thread`：显式 `thread_id` 先过 `validate_path_segment`（拒绝式，只允许字母、数字、`-`、`_`），再必须能在本 owner 线程登记里 `load_report` 到；任一不过都返回 `TOOL_INVALID_ARGUMENTS`，读错误返回 `TOOL_EXECUTION_FAILED`。
+  - 存储层 `_thread_stem`：`thread_path`、`message_path`、`observation_path` 对非空编号同样校验，不合法抛 `OpaqueIdError`；空编号保持原映射。
+  - `thread_id` 加入工具资源参数（logical），与 `message_id` 一致。
+  - 上线前核对：Mac 2148 个、测试机 849 个现存会话文件名全部符合校验格式。
+- **测试**：`test_session_history_read.py` 新增越界用例。对绝对路径、相对 `../` 跳转和普通 owner-b 编号三种输入，都要求拒绝且输出里没有 owner-b 标记；同 owner 其它会话照常可读；存储层对 `../`、绝对路径、`a/b`、`..`、`thread.x` 抛错，空编号仍读为空。
+- **红绿**：只退回工具层、只退回存储层、两层都退回，新用例都失败；还原后通过。
+- **回归**：引用会话存储、线程路径或 session_search 的全部测试文件加架构守卫，共 210 个文件，在 25 字符 basetemp 下 4885 passed、1 skipped、25 xfailed。
+
+## 原话备份改为“候选超目标就收缩”（2026-09-26，分支 `claude/curator-budget`，基于 main `fcd23952f`）
+
+- **来源**：dsh-9b 报告 main CI 每次都红（`527bcdd99` 的运行 36267438519、`fcd23952f` 的运行 36267615914，都是 3.11 失败，其余版本被 fail-fast 取消）。`test_mixed_compact_recovery.py::test_mixed_replacement_fits_when_transcript_only_exceeds_real_input_ceiling` 断言计量两次，实际只有一次。它按 basetemp 路径长度确定性失败：25、45 个字符失败，65 个字符以上通过；CI 是 30 个字符，本机 macOS 默认临时路径 100 多个字符，所以本机严格门能过。
+- **原因**：原规则只在收缩能改变判定时才缩小原话备份。这个用例的 1.6 万窗口里，第一次联合候选约 1.43 万 token，离输入上限 1.44 万只差约 100 token，临时路径的长短决定它越没越过上限：越过就收缩再计量，没越过就带着整段备份提交。后者还有产品问题：候选贴着上限提交，下一轮又要压缩。
+- **改动**：`_fit_landmarks_to_target` 改为候选超出恢复目标就按超出量缩小备份并重算一次；备份已是最小段、或缩到最小仍不低于上限时不重算。同一场景候选降到约 1.24 万；`test_background_first_request_compacts_after_complete_prepare`（1.95 万窗口）从 1.45 万降到 1.22 万。
+- **测试同步**：
+  - `test_compact_landmarks.py` 的收缩规则用例按新规则重写：新增“缩到最小也达不到目标仍收缩”；不重算的情况包括缩到最小仍超上限、已是最小段、没有备份段。
+  - `test_mixed_compact_recovery.py` 加前提断言：第一次候选远高于目标，所以两次计量是确定的。
+  - `test_background_compact_recovery.py` 的首请求用例改为两次候选计量，提交并发送更小的那份。
+  - `test_compact_source_lifetime.py` 的两候选用例原先按调用次序给大小，改为按候选身份给（第一候选保留两条近期问答），摘要失败改为在第一候选计量之后触发，计量次数改为 5/3。
+- **验证**：
+  - 改动涉及的 4 个文件在 basetemp 25、52、156 个字符和默认路径下都通过。
+  - 含 compact 字样的全部测试文件加原聚焦集，共 246 个文件，在 25 个字符的 basetemp 下 4762 passed、1 xfailed、4 xpassed。
+  - 变异：退回旧规则时，新规则用例和混合恢复用例（短路径）都失败；去掉“缩到最小仍超上限”判断、去掉“已是最小段”判断时，新规则用例都失败。
+
+## Gateway 恢复收割线程改用 registry 里的状态对象（2026-09-26，分支 `claude/watch-recovery-registry-state`，基于 `5bd163135`）
+
+- **来源**：只读调查 `test_watch_audit_guarantee` 偶发时发现，Gateway 恢复循环每 15 秒（`gateway_loops.py:829`）调用一次 `recover_active_audit_harvesters`，它用 `load_state()` 直接读盘，绕开 registry，拿这个对象起收割线程。之后 source worker 的 pull 从 registry 取另一个对象，而 `ensure_harvester` 只按 watch_id 复用活线程，于是同一进程里同一 watch 有两份状态对象、各自落盘。registry 本身不会淘汰状态，这是唯一的生产入口。
+- **改动（只改 `continuous_monitor.py`）**：改用 `watch_state.registry.get_or_load(owner_home, watch_id)`，恢复起的线程与工具共用同一个对象。取出后先在锁内 `refresh_scalars_from_disk`，保持原先 `load_state` 的盘上新鲜度，和工具路径 `get_or_load` 之后的做法一致。`ensure_harvester` 的对象告警按集成方决定不做。
+- **测试**：
+  - 新增 2 项：一是恢复循环交给 `ensure_harvester` 的就是 registry 里缓存的对象，并且游标已按盘上前进；二是真实 `ensure_harvester` 加上只记录状态对象的假收割循环，先由恢复循环起线程，再按 pull 入口的方式经 registry 取对象并 `ensure_harvester`，断言复用同一条线程，且线程持有的正是 pull 所用的对象。
+  - 原恢复用例改为替换 registry 供状态，断言不变。
+- **变异验证**：改回 `load_state` 时两条新测试都失败；去掉盘上刷新时第一条失败。每次都在 `PYTHONDONTWRITEBYTECODE=1` 下运行，结束后逐字节还原。
+
+## watch 审计重载用例：模拟重启前先停旧收割线程（2026-09-26，分支 `claude/watch-audit-reload-race`，基于 main `e6a46bdcc`）
+
+- **来源**：main `e6a46bdcc` 是纯文档提交，代码与全绿的 `892a7874a` 相同。它的 CI 3.11 上，`test_watch_audit_guarantee.py::test_contract_and_worker_binding_survive_registry_reload` 在第 4420 行拿到空候选。
+- **原因（机制）**：测试只替换了 `ws.registry` / `wt.registry`，而收割线程登记在 `hv.harvesters`。模拟重启后，新工具的 pull 会复用重启前那条仍持有旧状态对象的线程。用只读诊断插件看到 `reuse=True`、`same_state=False`，两份状态对象并存、各自落盘。真实重启时旧线程已随进程消失。
+- **改动（只改测试）**：第一次 pull 之后先确认旧线程还活着，再 `hv.stop_harvester(watch_id)`，join 到它退出，然后再换 registry。第二次 pull 之后加一条机制断言：当前收割线程必须不是重启前那条。
+- **验证**：修复版连跑 3 次都通过；去掉 stop/join 的变异连跑 3 次都在这条机制断言（第 4425 行）处失败，不依赖线程交错。
+- **未证实**：CI 上“候选为空”的具体交错，本机正常跑 6 次、后台 QoS 下 10 次、加收割或租约延迟都没有复现。所以只有机制证据，因果链最后一步没有实测证实。
+
+## browser-lite 关闭时先等本 profile 的子进程退出再清 profile（2026-09-26，分支 `claude/browser-lite-helper-exit`，基于 main `b2ee13f1c`）
+
+- **来源**：main `54f24ab94` 的 CI 3.11 上，`test_plugin_exit_closes_browser[eof]` 列出的残留是 `profile/Default` 和 `profile/Default/Network Persistent State`。这个文件由 Chrome 的网络服务写入，网络服务在单独的 utility 进程里运行。`BrowserProcess.stop()` 只等主进程退出就清 profile，网络服务随后落盘，和 `rmtree(ignore_errors=True)` 撞上后留下非空的 `Default/`。同一用例此前在 Linux runner 上还挂过 3 次。
+- **改动**（只动 `launcher.py` 的 stop 路径，浏览器仍留在插件进程组）：主进程退出后，最多等 5 秒，让 argv 带本 profile `--user-data-dir` 的进程退出；等待只看 argv，误匹配只会多等。到期仍在的进程，只有 argv 仍匹配、且 `/proc/<pid>/stat` 里的 pgrp（从最后一个 `)` 之后切，因为 comm 可能含空格和括号）等于插件 `os.getpgrp()` 时才发 SIGKILL；这两项都在发信号前现读，防止 pid 被复用。stat 读不到或进程组不同就只等不杀，这是有意的保守取舍：`grep -- --user-data-dir=<profile>`，或者用户 Chrome 的 profile 路径恰好是“本 profile 加空格再加别的”，都可能碰巧匹配 argv。之后最多再等 1 秒，然后才 `clear_profile`。读 `/proc/*/cmdline` 读不到或没权限就跳过；`/proc` 不存在（macOS）时不等待。
+- **匹配规则**：参数必须是 argv 里完整的一个元素，或者在以空格拼接的单串标题里作为以空格为界的完整一段出现；`<profile>2`、`<profile>/x` 这类前缀和别的 profile 都不算。之所以要认单串标题：按 Chromium 的 `base::SetProcessTitleFromCommandLine`，Linux 上 Chrome 进程会把整条命令行改写成一个用空格拼接的字符串，只比较完整元素就一个都匹配不上。这一点来自对源码的理解，没有在 Linux 上实测（testbox 没装 Chrome，磁盘占用 97%），真实 Linux 验收只能靠 CI。
+- **本机佐证**：macOS 上 headless Chrome 的 8 个进程（主进程、gpu、网络服务、存储服务、通知服务、3 个 renderer）命令行都带 `--user-data-dir=<profile>`，也都和主进程同一进程组；主进程退出后 1 秒内全部退出。
+- **新测试** `test_browser_lite_launcher.py` 3 项，用假 `/proc` 的 cmdline 和 stat：
+  - 网络服务晚于主进程退出并重建 `Default/` 写文件，另一个 argv 匹配但不在插件进程组的进程更晚退出：stop 会把两者都等完再清理，而且不发信号。
+  - 超时后只有两个同进程组的本 profile 进程（原始 argv 形式和单串标题形式各一个）各收到一次 SIGKILL。其中一个的 comm 含空格和括号，还伪造了一段 `S 1 999`。以下进程都不会被杀：不同进程组的、读不到 stat 的、`grep -- <参数>`、profile 路径为“本 profile 加空格再加别的”的用户 Chrome，以及前缀相同的别的 profile、用户自己的 Chrome、读不到的进程。
+  - 没有 `/proc` 时立即清理。
+- **变异验证**：6 种变异都被测试抓住——去掉等待、匹配改成子串、只比较完整元素、不等超时就直接杀、去掉进程组检查、stat 从第一个 `)` 之后切。每次都在 `PYTHONDONTWRITEBYTECODE=1` 下运行，结束后逐字节还原，删掉 `__pycache__` 再从干净字节码复跑，3 passed。审阅后按集成方要求补了进程组保护（SIGKILL 前核对 pgrp），以及相应的测试和最后两种变异。首版测试里的晚写线程没有重建 `Default/`，导致“去掉等待”时它照样通过；已改为先重建目录，与 CI 上的残留一致。
+
+## 压缩后查回原话与原话备份（2026-09-26，分支 `claude/curator-budget`，基于 main `e6a46bdcc`）
+
+- **新测试**：
+  - `test_session_history_read.py`（9 项）：长消息分段读回后逐字拼回；offset 与 max_chars 的边界；助手消息取给用户的回复正文；会话身份只认宿主（没有可信会话时拒绝，显式 thread_id 如实标注来源，current_thread 不接受模型自报的会话）；没有派生索引也能读原文；当前会话浏览只列可见消息、翻页不重不漏、无效游标拒绝；当前会话检索不混入其它会话、能命中长消息中段；会话过滤先于条数上限生效、LIKE 兜底同样生效；翻看模式每条限 2000 字并指向 message_id，且带 current_thread 时显式锚点仍优先；schema 上下限与模块常量一致。
+- **提交前复审补的四处边界**：跨代省略总数会缩水（超出 30 个的计数没继承）；机械回退附在备份段后的旧摘要与原文会被当成备份再继承；换行多的长消息刚好超预算时按原文折算、被整条丢掉；机械续接包带入整段旧摘要，备份标题落在包中间，收尾剥离时把原文摘录切掉。另把 `around_id` 调到 `current_thread` 之前（与代码注释一致）。
+- **变异验证**：13 种变异全部被抓住——会话过滤去掉、遇长消息立即截头尾、第二遍渲染全部行、总是重算、最小段按 0 估算、current_thread 接受模型会话、翻看不设上限、摘要指令去掉需求清单，以及上面四处边界各退回原实现、current_thread 压过锚点。均在 `PYTHONDONTWRITEBYTECODE=1` 下运行，结束后逐字节还原。
+  - `test_compact_landmarks.py`（12 项）：预算随窗口与配置上限变化；每条带编号，回查说明可选；短要求先整条放入、最新长消息保留头尾；省略编号按时间只列最近 30 个；新旧两种格式跨代继承、预算为 0 时编号全部转入省略行；没列出的省略数量逐代累加、只继承备份段本身（段后附带的原文与列表不继承）；换行多、刚好超预算的长消息保留头尾而不是整条丢掉；机械回退带上一代备份时续接包原文不被切掉；第二遍只按下标重读被选中的行；摘要指令单列全部需求与未完成请求；候选超目标就收缩（备份已最小或缩到最小仍超上限时不重算）；真实压缩链路收缩到目标、只多计量一次。
+- **测试同步**：原话备份改为带编号的格式（`test_gateway_conversation_compact.py` 四项、`test_goal_lifecycle_recovery.py` 一项改用新接口）；`test_compact_source_lifetime.py` 中超上限的候选先收缩备份再放弃（计量次数 3→4）；`test_mixed_compact_recovery.py` 的前提改看收缩前的首次计量。
+- **回归**：压缩、摘要、活动工具、上下文压力、辅助调用、恢复、会话检索、本地存储、配置相关测试文件，加 `test_agent_goals.py`、`test_goal_lifecycle_recovery.py`、`test_architecture_guardrails.py`，以及正文引用会话检索或原话备份的测试，共 139 个文件：1885 passed（复审修补后重跑）。另把两次真机验收提交的摘要原样再走一遍新的继承逻辑（不加新行、同样预算），备份段逐字不变（19,731、3,690 token）。严格门全部通过；code-size 总发现数 2196→2195，`_summarize` 97→84 行、`_build_compact_candidate` 78→67 行，没有新增发现。
+- **真机验收**（隔离 8432，本分支代码，DeepSeek 官方 deepseek-v4-flash，1M 窗口）：
+  - **接口层**：10 份合成需求，每份约 1.55 万字（服务商实测每份约 1.1 万 token，最后一轮输入 13.7 万）。`/compact` 后会话历史估算 165,443 → 30,401 token。
+    - 模型摘要 1,631 token，含全部 10 条规则和 10 个关键细节。
+    - 原话备份 19,731 token（上限 2 万）：第 10 份完整，第 9 份保留头尾，第 1–8 份列出编号，附回查说明。
+    - 问第 2 份第 13 节第一句（压缩后上下文里没有）：模型先在当前会话检索，再翻看，最后按编号读回全文，逐字答对“郑州的物流跟踪……345 条，24 小时”。
+    - 问第 7 份规则与第 10 份关键细节：均答对。
+  - **原生 TUI**：配置 `compact_landmark_max_tokens=4000`（同时验证配置生效），粘贴 3 份需求后 `/compact`（56,313 → 13,351），备份段 3,690 token：第 3 份保留头尾，第 1–2 份列出编号。问第 1 份第 13 节第一句：模型按编号分段读取（按 next_offset 续读），答对“武汉的报表合并……734 条，31 小时”；工具卡片与结果在 TUI 正常显示。
+  - 证据在 `~/.my-agent/releases/compact-recall-20260926/`（不进仓库）；隔离 home 与模型目录副本已删除，tmux 会话已关闭。
 
 ## Compact 强制恢复的“压缩前”计量改到解绑历史之前（2026-09-26，分支 `claude/curator-budget`，基于 main `04c339eb9`）
 
@@ -145,6 +227,10 @@ A02原脚本原字节物化与执行通过，但有未标创作事实；B01报�
 - **未解决**：`test_browser_lite_package::test_plugin_exit_closes_browser`，3 次，都在 Linux runner 上，插件退出后 profile 目录有残留。本机 macOS 跑 16 次没有复现：退出后没有带这个 profile 路径的 Chrome 进程，profile 3 秒后仍为空。疑似 Linux 上 Chrome 的子进程（例如 crashpad handler）在主进程退出后还在写 profile。本分支只让断言失败时列出残留条目，没有改产品；要在 Linux 上拿到残留文件名再定修法。
 - **基础设施**：2026-09-25 13:26Z 到 14:31Z 之间的运行在 3 到 8 秒内失败，注解是 "recent account payments have failed or your spending limit needs to be increased"，属于账单/额度问题。仓库公开后恢复，最近 24 小时没有再出现这类失败。
 - **验证**（变基后的最终树）：与改动直接相关的 40 个测试文件，含 `test_architecture_guardrails.py`、上面被连带的文件，以及 main 已修好的两个 compact 文件。用 3.10.20、3.11.15、3.12.13 各跑一遍，每个版本都是 712 passed；3.10 和 3.11 用 scratchpad 里的隔离 venv，依赖经本机代理安装。严格门的 6 条命令退出码全部为 0：pytest（3.12）、Ruff、doc sync、strict code-size（blocked=False，与 origin/main 按 identity 和 severity 逐项比对，3485 条一致、无新增）、`git diff --check`、clean-package。没有推送，线上 CI 未作为验收来源。
+- **合入后线上 CI 跟进**（分支 `claude/ci-fix-2`，基于 main `8419fb762`）：
+  - `a2604cb7f` 是第一个包含本修复的推送，它的 Test 3.10、3.11、3.12 全部通过。
+  - `54f24ab94` 的 3.11 只挂了 browser-lite 退出用例（3.10/3.12 被 fail-fast 取消）。断言列出的残留是 `profile/Default` 和 `profile/Default/Network Persistent State`，这个文件由 Chrome 的网络服务写入，网络服务在单独的 utility 进程里运行。`BrowserProcess.stop()` 只等主进程退出就清 profile，网络服务随后才落盘，和 `rmtree(ignore_errors=True)` 撞上后留下非空的 `Default/`。本机 macOS 上 Chrome 的 8 个进程（含网络服务）命令行都带 `--user-data-dir=<profile>`，也和主进程同一进程组，主进程退出后 1 秒内全部退出，所以本机复现不了。产品暂未改，修法待定。
+  - 修复前的 `a53ab52d7` 上，3.11 还出现过一次 `test_tui_prompt_toolkit_pipe` 鼠标协议用例偶发：固定 `sleep(0.08)` 之后读到的终端输出是空串。已改为有界轮询，直到预期序列出现（上限 5 秒）。临时插件让 pipe 输入晚 0.2 秒送达时，旧用例在 CI 同一行（267）失败，新用例通过。
 
 ## Compact 摘要请求禁止工具与违规兜底（2026-09-26，已合入 main `f230ab077` 并双机部署 `step12v-dff317e5`，基于 `756d4b9bb`）
 

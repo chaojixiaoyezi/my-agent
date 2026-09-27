@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -17,6 +18,8 @@ from pathlib import Path
 from .errors import UNAVAILABLE_MESSAGE, BrowserError
 
 _REVISION = re.compile(r"chromium-(\d+)")
+_PROC_ROOT = Path("/proc")
+_HELPER_EXIT_SECONDS = 5.0
 
 
 # LLM: 只按平台常见安装位置和 ms-playwright 缓存（按修订号从新到旧）列出候选，不下载、不执行探测命令。
@@ -136,7 +139,8 @@ class BrowserProcess:
         finally:
             connection.close()
 
-    # LLM: 幂等；有副作用：SIGTERM 后宽限 5 秒再 SIGKILL，并清空 profile 目录内容（保留目录本身，不跟随符号链接）。
+    # LLM: 幂等；有副作用：SIGTERM 后宽限 5 秒再 SIGKILL；主进程退出后再有界等待仍带本 profile 参数的浏览器子进程，
+    #   超时只对这些进程 SIGKILL；最后清空 profile 目录内容（保留目录本身，不跟随符号链接）。浏览器不脱离插件进程组。
     # 函数用途: 结束浏览器子进程并删除本次 profile 下的缓存。
     def stop(self) -> None:
         process, self.process = self.process, None
@@ -147,7 +151,91 @@ class BrowserProcess:
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=5)
+        # Linux 上网络服务等子进程会晚于主进程退出并继续写 profile（CI 实测残留 Default/Network Persistent State）。
+        _await_profile_helpers(_PROC_ROOT, f"--user-data-dir={self.profile}", _HELPER_EXIT_SECONDS)
         clear_profile(self.profile)
+
+
+# LLM: 等待只按 argv 识别本 profile 的进程（误匹配只会多等，无害）；/proc 不存在（macOS）时直接返回，不等待。
+#   有副作用：到期仍在的进程只在 argv 仍匹配且与插件同一进程组时各发一次 SIGKILL，再最多等 1 秒让它们消失。
+# 函数用途: 浏览器主进程退出后，等仍在用本 profile 的子进程退出，避免它们在清理之后又把文件写回去。
+def _await_profile_helpers(proc_root: Path, argument: str, timeout: float) -> None:
+    if _wait_profile_helpers_gone(proc_root, argument, timeout):
+        return
+    for pid in _profile_helper_pids(proc_root, argument):
+        _kill_profile_helper(proc_root, pid, argument)
+    _wait_profile_helpers_gone(proc_root, argument, 1.0)
+
+
+# LLM: 只读 /proc，每 50 ms 扫一次；返回 False 表示到期时仍有匹配进程。
+# 函数用途: 有界等待，直到没有任何进程的 argv 带本 profile 参数。
+def _wait_profile_helpers_gone(proc_root: Path, argument: str, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while _profile_helper_pids(proc_root, argument):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+    return True
+
+
+# LLM: 读不到 /proc 或单个进程（已退出、权限不足、内核线程、僵尸）一律跳过，不报错。
+# 函数用途: 列出 argv 里带本 profile 参数的进程号。
+def _profile_helper_pids(proc_root: Path, argument: str) -> list[int]:
+    try:
+        names = os.listdir(proc_root)
+    except OSError:
+        return []
+    token = os.fsencode(argument)
+    return [int(name) for name in names if name.isdigit() and _argv_uses_profile(_process_argv(proc_root, name), token)]
+
+
+# LLM: Linux 上 Chrome 会用 setproctitle 把整条命令行改写成一个以空格拼接的字符串，所以参数须作为以空格为界的
+#   完整一段出现（单独一个 argv 元素也满足）；<profile>2、<profile>/x 这类前缀和别的 profile 都不算。
+# 函数用途: 判断一个进程的 argv 是否属于本 profile 的浏览器。
+def _argv_uses_profile(argv: list[bytes], token: bytes) -> bool:
+    bounded = b" " + token + b" "
+    return any(bounded in b" " + item + b" " for item in argv)
+
+
+# LLM: cmdline 以 NUL 分隔；任何读取错误都当作空 argv（不匹配）。
+# 函数用途: 读取一个进程的 argv。
+def _process_argv(proc_root: Path, name: str) -> list[bytes]:
+    try:
+        return (proc_root / name / "cmdline").read_bytes().split(b"\0")
+    except OSError:
+        return []
+
+
+# LLM: 只对 argv 仍匹配、且 /proc/<pid>/stat 的 pgrp 等于插件 os.getpgrp() 的进程发 SIGKILL；两项都在发信号前现读，
+#   防止 pid 在扫描之后被复用。stat 读不到或进程组不同就不杀：若 Linux 上某些子进程不在插件进程组，只等不杀，
+#   这是有意的保守取舍——argv 文本可能被 grep 等进程或“本 profile 加空格再加别的”路径碰巧带上，进程组才能证明是本插件拉起的。
+# 函数用途: 强制结束一个超时仍在使用本 profile、且确属插件进程组的浏览器子进程。
+def _kill_profile_helper(proc_root: Path, pid: int, argument: str) -> None:
+    name = str(pid)
+    if not _argv_uses_profile(_process_argv(proc_root, name), os.fsencode(argument)):
+        return
+    if _process_group(proc_root, name) != os.getpgrp():
+        return
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        pass
+
+
+# LLM: stat 里 comm 在括号中，可能含空格和括号，所以从最后一个 ')' 之后按空格切，其后依次是 state、ppid、pgrp；
+#   读不到或格式不对返回 None，调用方据此不杀。
+# 函数用途: 读取一个进程所属的进程组号。
+def _process_group(proc_root: Path, name: str) -> int | None:
+    try:
+        data = (proc_root / name / "stat").read_bytes()
+    except OSError:
+        return None
+    end = data.rfind(b")")
+    fields = data[end + 1:].split() if end >= 0 else []
+    try:
+        return int(fields[2])
+    except (IndexError, ValueError):
+        return None
 
 
 # LLM: 只删 profile 目录里的条目；目录本身是符号链接或不存在时什么也不做。rmtree 不跟随子目录符号链接。

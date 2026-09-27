@@ -177,20 +177,24 @@ def test_two_candidates_commit_own_retained_snapshot_and_projection(tmp_path, mo
     before = store.storage.message_path(thread.thread_id).read_bytes()
     source = load_conversation_compact_source(agent, store, thread, scope=THREAD_COMPACT_SCOPE)
 
+    # 大小按候选身份给（第一候选保留两条近期问答），不按调用次序：候选超出目标时原话备份收缩会多计量一次。
     def project(view):
         views.append(view)
         materials.append(object())
-        tokens = source.policy.trigger_tokens - 1 if len(views) == 2 else source.policy.trigger_tokens + 1
+        first_candidate = view.is_candidate and len(view.messages) == len(tail)
+        tokens = source.policy.trigger_tokens - 1 if first_candidate else source.policy.trigger_tokens + 1
         return ConversationCompactProjection(tokens, materials[-1])
 
     def generate(_request):
-        if second == 'summary_failure' and len(views) == 2:
+        if second == 'summary_failure' and any(view.is_candidate for view in views):
             raise RuntimeError('第二候选摘要失败')
         return ModelResponse(text='第一候选仍保留近期问答。', backend='fake')
 
     monkeypatch.setattr(compact_request_budget, 'generate_auxiliary_model_response', generate)
     result = _prepare(agent, thread, source, force=False, request_projector=project)
-    assert len(views) == (3 if second == 'oversized' else 2)
+    # 压缩前 1 次；第一候选超目标，缩小原话备份再计量 1 次（替身大小不变，保留首次计量）；
+    # 超上限的第二候选同样先收缩再计量（仍超限）才放弃，摘要失败的第二候选没有计量。
+    assert len(views) == (5 if second == 'oversized' else 3)
     assert all(isinstance(view.messages, MessageSnapshotRows) for view in views[:2])
     assert result.messages == tuple(tail) and result.request_projection.material is materials[1]
     chain = committed_compact_checkpoint_chain(agent, result.thread)

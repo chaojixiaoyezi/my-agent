@@ -578,8 +578,9 @@ def test_compact_keeps_exact_user_and_final_answer_landmarks_when_model_omits_th
 
     assert summary.startswith("用户的暗号是紫藤")
     assert "Exact Conversation Landmarks (non-authoritative)" in summary
-    assert '- user: "请告诉我 Python 官网页面标题。"' in summary
-    assert '- assistant_final: "页面标题是 Welcome to Python.org。"' in summary
+    # 每条原话带消息编号，模型可用 session_search(message_id=...) 读回原文。
+    assert '- user [msg-user-title]: "请告诉我 Python 官网页面标题。"' in summary
+    assert '- assistant_final [msg-final-title]: "页面标题是 Welcome to Python.org。"' in summary
     assert "我正在抓取网页，请稍候" not in summary
 
 
@@ -647,12 +648,16 @@ def test_compact_landmarks_survive_later_generation_without_suffix_duplication()
     )
 
     assert second.count("## Exact Conversation Landmarks (non-authoritative)") == 1
-    assert second.count('- assistant_final: "Welcome to Python.org"') == 1
-    assert '- assistant_final: "第一行 first-line，第二行 second-line。"' in second
+    assert second.count('- assistant_final [msg-old-final]: "Welcome to Python.org"') == 1
+    assert '- assistant_final [msg-new-final]: "第一行 first-line，第二行 second-line。"' in second
 
 
 def test_long_final_answers_cannot_displace_short_user_requirements_from_landmarks():
-    from agent_py_agent.agent.conversation.compact import _summary_with_conversation_landmarks
+    from agent_py_agent.agent.conversation.compact_landmarks import (
+        LandmarkOptions,
+        summary_with_conversation_landmarks,
+    )
+    from agent_py_agent.agent.memory_archive import estimate_tokens
 
     rows = []
     for i in range(18):
@@ -663,24 +668,33 @@ def test_long_final_answers_cannot_displace_short_user_requirements_from_landmar
                             content=f"旧结论-{i}：" + "尚未验证的长篇分析。" * 180,
                             metadata={"assistant_part_id": "final"}),
         ])
-    first = _summary_with_conversation_landmarks("粗略摘要", "", rows, max_chars=6000)
-    assert len(first.split("\n\n", 1)[1]) <= 6000
-    assert all(f"用户要求-{i}：" in first for i in range(18))
-    assert "- omitted:" in first
-    second = _summary_with_conversation_landmarks("新摘要", first, [], max_chars=6000)
-    assert all(f"用户要求-{i}：" in second for i in range(18))
-    assert second.count("## Exact Conversation Landmarks") == 1
+    options = LandmarkOptions(max_tokens=2_000)
+    first = summary_with_conversation_landmarks("粗略摘要", "", rows, options=options)
+    assert first.used_tokens <= 2_000 and estimate_tokens(first.text.split("\n\n", 1)[1]) == first.used_tokens
+    # 用户原话先分预算：18 条短要求全部保留，长篇助手结论放不下；被省略的只有助手答复，不写用户省略行。
+    assert all(f"用户要求-{i}：" in first.text for i in range(18))
+    assert "旧结论-" not in first.text and "omitted_user_messages" not in first.text
+    second = summary_with_conversation_landmarks("新摘要", first.text, [], options=options)
+    assert all(f"用户要求-{i}：" in second.text for i in range(18))
+    assert second.text.count("## Exact Conversation Landmarks") == 1
 
 
 def test_landmark_user_overflow_prefers_recent_requests_without_growing_budget():
-    from agent_py_agent.agent.conversation.compact import _bounded_landmark_section
+    from agent_py_agent.agent.conversation.compact_landmarks import (
+        LandmarkOptions,
+        summary_with_conversation_landmarks,
+    )
+    from agent_py_agent.agent.memory_archive import estimate_tokens
 
-    entries = [f'- user: "request-{i} ' + "x" * 240 + '"' for i in range(20)]
-    selected = _bounded_landmark_section(entries, 800)
-    assert len(selected) <= 800
-    assert "request-19 " in selected
-    assert "request-0 " not in selected
-    assert "remain in the original transcript" in selected
+    rows = [MessageLogEntry(message_id=f"u{i}", thread_id="t", role="user", content=f"request-{i} " + "x" * 240)
+            for i in range(20)]
+    selected = summary_with_conversation_landmarks("", "", rows, options=LandmarkOptions(max_tokens=1_000))
+    assert selected.used_tokens <= 1_000 and estimate_tokens(selected.text) == selected.used_tokens
+    assert "request-19 " in selected.text
+    assert "request-0 " not in selected.text
+    # 放不下的旧要求以编号列出，可按编号读回原文。
+    omitted = next(line for line in selected.text.splitlines() if line.startswith("- omitted_user_messages: "))
+    assert omitted.split("[", 1)[1].split()[0] == "u0" and "u19" not in omitted
 
 
 def test_compact_progress_callback_reports_real_pipeline_stages(tmp_path) -> None:

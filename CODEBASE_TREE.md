@@ -507,6 +507,7 @@ agent_py_agent/
 |   |   |-- compact_text_source.py      # 只读两遍编码校验与当前字符窗口，消费后释放，不拥有覆盖
 |   |   |-- compact_message_source.py   # 可重放原生摘要消息与完整JSON数组编码，复用唯一token估算
 |   |   |-- compact_request_budget.py   # 按当前模型窗口顺序分段摘要，完整覆盖历史且失败不推进游标
+|   |   |-- compact_landmarks.py        # 压缩摘要末尾原话备份：按 token 随窗口放大、带消息编号、放不下保留头尾、省略列编号与回查说明
 |   |   |-- compact_tool_refs.py        # 从匹配原生工具往返保留原样路径线索，不靠模型摘要记忆目录
 |   |   |-- compact_guard.py            # 结构化完整回合选择、连续失败冷却与 typed compact 错误
 |   |   |-- compact_checkpoint_scan.py  # 同次固定EOF临时行地址与hash读取，不新增持久索引
@@ -673,7 +674,9 @@ agent_py_agent/
 |   |   |-- decision_skill_proposal_review.py # 自学习 S2：`skills proposals list` 的可选审核顺序点，只重排展示并加宿主标签，从不确认/拒绝/写入
 |   |   |-- persona_repository.py      # owner SOUL/USER/AGENTS 受控加载、版本/CAS/回滚唯一入口
 |   |   |-- model_profile_tool.py      # manage_models：主会话代理自助增删改切 owner 模型目录，复用唯一配置服务，回执不含密钥
-|   |   `-- channel_message_tool.py    # 当前 owner 的统一 send_message；登记产物经原生通道发送
+|   |   |-- channel_message_tool.py    # 当前 owner 的统一 send_message；登记产物经原生通道发送
+|   |   |-- session_search_tool.py     # session_search：本地历史检索/翻看/浏览，外加按 message_id 读原文与当前会话检索
+|   |   `-- session_history_read.py    # session_search 的会话原文读取：按消息编号分段读回、当前会话按页浏览，只读 canonical 消息文件
 |   |-- prompting_parts/               # prompt 构造
 |   |   |-- builder.py                 # 完整 prompt 与 native 三段追加式缓存布局构造
 |   |   |-- cache_layout.py            # typed 稳定 system/user、动态尾部与完整字符串投影
@@ -793,7 +796,9 @@ agent_py_agent/
 |   |-- test_conversation_history_seed.py # 具体种子与只读来源两边界逐项等价、冻结时刻与追加、互斥及改写/截短/替换/删除失败
 |   |-- test_host_history_seed_lifetime.py # 三宿主4.2M字符种子准备只驻留地址、解析后完整hash不变
 |   |-- test_host_summary_phase_lifetime.py # 三宿主4.2M字符全链：摘要期不驻留旧请求历史、覆盖完整
-|   |-- test_compact_recovery_release.py # 恢复宿主解绑旧历史：失败/取消/超限收尾不读、noop保留、tool_context共享合同
+|   |-- test_compact_recovery_release.py # 恢复宿主解绑旧历史：失败/取消/超限收尾不读、noop保留、tool_context共享合同、解绑前量压缩前大小
+|   |-- test_compact_landmarks.py   # 原话备份：预算随窗口、编号、头尾裁剪、省略编号、跨代继承、只重读选中行、候选超目标时收缩
+|   |-- test_session_history_read.py # session_search 读原文：长消息分段拼回、可信会话身份、当前会话浏览/检索不混入其它会话
 |   |-- test_compact_media_recovery.py  # 两协议媒体工具轮及溢出后原文保留、无摘要和无CAS
 |   |-- test_compact_transcript_media_partition.py # 文字前缀覆盖与媒体完整后缀、分段拒绝
 |   |-- test_media_compact_preflight.py # 媒体会话越过压缩点：off 只守窗口/越窗 NON_TEXT，auto 归档引用后按压缩点压缩
@@ -830,6 +835,7 @@ agent_py_agent/
 |   |-- test_typesafe_decision.py       # 原生请求、绝对期限及本地 HTTP 组合验收
 |   |-- test_gateway_strict_request.py  # 原 HTTP 严格请求的零重试、期限与正文上限回归
 |   |-- test_bounded_call.py            # 启动/取消/超时竞态、未退出资源与进程容量保护
+|   |-- test_browser_lite_launcher.py  # browser-lite 关闭时先等本 profile 子进程再清 profile：假 /proc 与 stat、晚退出网络服务、超时只 SIGKILL 同进程组的精确匹配
 |   |-- test_decision_call_resources.py # 有界调用与原模型准入的组合、普通模型保留名额
 |   |-- test_subagent_process_control.py # 公共进程树终止覆盖后代、升级、宿主保留及未确认回执
 |   |-- test_subagent_resource_stop.py  # 固定原子树、终态资源、恢复隔离及 Goal/creation 锁序
@@ -1008,7 +1014,7 @@ plugins/
 |       |-- declarations.py            # 读取同源声明并验证参数和设置（含字符串数组）
 |       |-- errors.py                  # 带稳定错误码的中文业务错误
 |       |-- access.py                  # 地址守卫：工作区 file:// 经读取上下文裁决，http(s) 只放行 allowed_hosts
-|       |-- launcher.py                # 浏览器探测、专属 profile 启动、调试端口读取与进程回收
+|       |-- launcher.py                # 浏览器探测、专属 profile 启动、调试端口读取与进程回收（Linux 先等本 profile 子进程退出再清 profile）
 |       |-- websocket.py               # 最小 WebSocket 客户端：握手、掩码帧编解码、分片、ping/pong、close
 |       |-- cdp.py                     # 页面级 CDP 命令/事件收发、请求拦截与崩溃检测
 |       |-- page.py                    # open/read/click/fill 页面脚本与结果结构
@@ -1237,7 +1243,7 @@ docs/
 - `plugins/desktop-lite/`：首个影响用户桌面的工具插件，文本只经 argv/stdin 交给系统程序，open 只开授权范围内的非可执行普通文件；`agent_py_agent/tests/test_desktop_lite_package.py` 为其实际包与 MCP 进程组件验收（假程序经设置注入）。
 - `plugins/image-text/`：本地 OCR 工具插件，只调用系统 tesseract、不调用模型；`agent_py_agent/tests/test_image_text_package.py` 为其实际包与 MCP 进程组件验收。
 - `plugins/design-lite/`：首个带随包 Skill（包描述 v3）的自有插件，生成与修改 HTML 设计文件都走写入上下文；`agent_py_agent/tests/test_design_lite_package.py` 为其实际包、Skill 打包与 MCP 进程组件验收。
-- `plugins/browser-lite/`：首个驱动外部进程的自有插件，浏览器不随包分发，专属 profile 在插件数据目录，地址经读取上下文与 allowed_hosts 双重裁决；`agent_py_agent/tests/test_browser_lite_package.py` 为其实际包、帧编解码与真实浏览器组件验收。
+- `plugins/browser-lite/`：首个驱动外部进程的自有插件，浏览器不随包分发，专属 profile 在插件数据目录，地址经读取上下文与 allowed_hosts 双重裁决；`agent_py_agent/tests/test_browser_lite_package.py` 为其实际包、帧编解码与真实浏览器组件验收；`agent_py_agent/tests/test_browser_lite_launcher.py` 用假 /proc 进程表覆盖关闭时等本 profile 子进程、超时只对同进程组的精确匹配 SIGKILL。
 - `plugins/savepoint-lite/`：首个写工作区的自有插件，快照只存宿主插件数据目录，恢复走写入上下文；`agent_py_agent/tests/test_savepoint_lite_package.py` 为其实际包与 MCP 进程组件验收。
 - `plugins/harness-console/`：首个界面型插件（宿主只读 API 样本），网页与桌面窗口共用一个只绑回环的服务，宿主令牌只留在插件服务端；`agent_py_agent/tests/test_harness_console_package.py` 为其实际包、假宿主 API 与 MCP 进程、真实 HTTP 访问的组件验收。
 - `plugins/web-board/`：网页界面型插件，插件进程内只绑回环的只读网页，按 serve 时冻结的读取上下文和 no-follow 读取限定目录；`agent_py_agent/tests/test_web_board_package.py` 为其实际包与 MCP 进程、真实 HTTP 访问的组件验收。
@@ -1454,6 +1460,8 @@ docs/
 - `agent/conversation/compact_text_source.py`：两遍长度/hash 校验与可释放顺序窗口；取消或来源变化时拒绝候选，不推进 canonical 游标。
 - `agent/backends/request_content.py`：摘要分段的纯文字可表示性判断，不读取媒体或推断供应商能力。
 - `agent/conversation/compact_request_budget.py`：当前模型窗口内的摘要请求预算和连续分段；不持有历史游标或另建状态源。
+- `agent/conversation/compact_landmarks.py`：压缩摘要末尾“原话备份”的唯一实现。预算按 token 随模型窗口放大（窗口 10%，上限 `compact_landmark_max_tokens`），用户原话优先、最新优先，放不下的那条保留头尾；每条带 message_id，省略的用户消息列编号，可选回查说明。两遍处理：第一遍流式只记编号与 token，第二遍按下标只重读被选中的行。
+- `agent/capability/session_history_read.py`：`session_search` 的会话原文读取。message_id 分段读回只读 canonical 消息文件；当前会话浏览/检索只认宿主可信会话，结果带 scope_resolution。
 - `agent_py_agent/vendor/bubblewrap/`：离线 bwrap 的第三方许可与对应源码材料；升级二进制时同步更新并验包。
 - `agent/common/text_file_window.py`：64 KiB 流式索引、有限检查点与页面 cookie；编码和字符坐标只保留一个实现。
 - `agent/common/file_version.py`：read_file 返回观察版本，write/edit/patch 明确携带前置条件；外部写入者不被强制纳管。
