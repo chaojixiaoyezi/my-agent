@@ -1,5 +1,27 @@
 # 测试与发布验收
 
+## C17能力包组合证据核对（2026-09-27）
+
+- 固定源码`51dac1b815acf74a76fa79ef7f93f2f4228b3d4b`，本线工作树与Claude组合工作树一致；本次只核已有日志，不重复运行全仓或发起模型请求。
+- 全仓递归收集1192个测试文件、12分片：23639 passed、0 failed、0 errors；另记21 skipped、32 xfailed、5 xpassed。核对各`out-*.txt`中的真实pytest汇总，未把某分片末尾的SDK退出噪音当pytest失败；`failed.txt`为空、`shards_rc=0`。
+- Ruff、doc-sync、strict code-size、diff-check、clean-package各退出0；尺寸报告hard=0且blocked=False，软告警仍在。线上CI未作为验收来源。
+- Claude已双机部署`runtime-step13w-f95e5d04`。本线核对部署日志的SWITCH_DONE及本机发行清单，源码SHA相同，wheel SHA256为`f95e5d04ca1cba46876b5e4bfd89623d9703178b6d795720fd90c7517503cb8b`；本轮未另做远端在线健康探测。
+- 随后私有环境已停稳、备份并安装固定51dac；新wheel摘要`e5a0069864fd36e5ba30ecf2fd465819cf60205b24e3cb610d10971549f8532d`，1430个包成员与固定源码及实际安装逐字节一致，pip check通过。仅移除4个未设值的旧配置键，其余13291个停止态文件保持；保留旧wheel及停止态备份。
+- 原始日志摘要、摘要哈希、分片计数及核对边界见私有`candidate-17-combined-evidence-verification.json`；保留先前62c全仓失败、各候选原生失败及0/36历史记录。
+
+### C17固定版原生开发对照
+
+- G02沿原输入和同一官方M2.7/65536 profile，只提交一次原普通需求。第1代自动Compact 77724→47484提交后，同代6次包资源get成功；第2代报`COMPACT_CANDIDATE_TOO_LARGE`，candidate_tokens=51342、input_ceiling_tokens=49152、summary_tokens=1091、retained_items=0、candidates_tried=1。request失败且线程仍generation1，无原checker物化/执行及业务输出，整体失败。130.619秒、9 HTTP/0重试、provider总236092 tokens；5 main及4 auxiliary含Compact，不能把辅助总量归给选包。
+- `retained_items=0`只说明plan中的工具归档保留记录为空，不代表完整候选只剩不可变字段；摘要单独估算与完整请求估算的差也不是已实测fixed_tokens。本次未持久第二代完整失败投影，不能用第1代checkpoint或最近preflight分项替代，重复投影与具体固定开销成因尚未确认。原生五字段及计量边界已交Claude；产品计量由其唯一实施。
+- G03/N05在原默认262144窗口终态done，空选、0 pins、无宿主私有入口、无包get/物化/执行，仅一次原输入read_file。三项行动和期限正确，但遗漏两位负责人，按冻结分工判据业务质量失败；不能用空选通过覆盖此结果。14.302秒、3 HTTP/0重试，选包辅助1132 tokens，总54419；没有off/无包同条件对照或完整最终请求投影，目录独占token及包机制净增开销未测。
+- G02/G03原输入、六份配置及安装表摘要保持；均属开发对照，不计最终保留集。原生证据分别冻结为私有`candidate-17-general-compact-observation.json`和`candidate-17-general-negative-review.json`。
+- G04在新原生CAP04、默认262144窗口只提交一次同类资源交接需求，275.085秒后request/task/run/attempt均done。19次包资源get、原生40对工具调用/结果；模型以source_ref复制原检查器，23750字节与固定包逐字节一致，并自行执行。两个输入、两包pins/selection、六份配置及安装表摘要保持。检查器rc1准确表示输入引用错误，原结果1 error/8 warnings得到忠实表达；两次命令失败仍保留在operation_verification=partial，不改判全操作成功。
+- G04保存的检查JSON与原stdout解析后相等，但1320字节与1429字节不同，不称原始输出逐字节保存。独立审阅确认交接存在A/B字段混淆、空数组规则绝对化及限制遗漏；B原方法也有镜头ID与场次外键的映射歧义，未认定全部是本轮模型或宿主新造。整体交接未全通过，业务产物未由观察者补写。
+- G04未触发Compact，generation0；最后上下文估算114457/262144，不能覆盖65k失败。21 HTTP/0重试（20 main+1 auxiliary），辅助1177 tokens，总1571471，包含1399718 cached input，不二次相加或推算净增成本。执行和内容证据分别为`candidate-17-general-default-long-observation.json`及`candidate-17-general-default-long-content-review.json`，摘要见[验收矩阵](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#c17固定发布与原生开发验收2026-09-27)。
+- 最终九例各三次的27次允许范围验收仍未启动，原0/36历史保持；其余九次按当前范围不启动。
+
+建议下一步：Claude先完成失败候选分项计量及通用Compact修复，root在固定版本上验连续压缩后执行，再推进27次最终矩阵。只读审阅可并行；默认窗口原资源执行已留证，不反复重跑挑选成功，不扩大领域功能范围，双方产品写入保持互斥。
+
 ## 进程停止：host 在停止期间自行退出不再误报 unknown（2026-09-27，Codex 全仓复现，集成者修）
 
 - **来源**：能力包全仓运行里 `test_process_sessions.py::test_background_session_outlives_one_shot_launcher_and_is_rehydrated`
