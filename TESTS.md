@@ -1,5 +1,16 @@
 # 测试与发布验收
 
+## C19原生三助手分项（2026-09-27）
+
+- 固定cb40cc4a8已私有安装，1430源码/wheel/安装成员一致，pip check通过。停止态14353份非`.DS_Store`文件保持；备份时10份目录显示缓存变化有原始失败与差异记录，未覆盖原快照。无日用环境或主线部署操作。
+- 新CAP02仅一次原普通需求；taskrun整体264.981秒、三子attempt重叠88.800秒、自然终态、父背景读回三记录。A/B两名显式授权孩子已get当前同代方法/模板并保存记录，包引用与父级相同。
+- 第三子没有包授权，两次search被拒后没有请求能力，转读旧源码A0.1.1/B0.1.0。实际只落三记录和B示例，父声称的汇总及A两示例不存在；整体交接未过。未触发未声明成员get纠错、父resolve或Compact，不把本轮计为这些分支的真实通过。
+- 原工具索引与canonical分别核对；首父response为43.631秒等待回复，不作为整个任务或最终回复。私有`candidate-19-general-delegation-observation.json`摘要`ed75515958ce38c4e561faec3469481594fe9c7b23a7985b56fe3db241c35190`保留父子身份/调用/文件/分线程用量。321旧文件、133旧绑定、六配置及安装账保持。
+- 独立审计`candidate-19-general-delegation-independent-audit.json`确认A/B分别9/4次同代get，B示例source_ref复制字节一致；A检查器首资源页及preview均未续读，不算完整阅读。三子原用量账辅助logical/HTTP均0，主HTTP分别13/8/12；真实结果仍以各分项和整体交付分别判定。
+- 本轮没有继续修改产品或新增测试；119项及严格gate属于已安装cb40补片的本地证据。最终0/27保持，原C18失败和当前部分成功分别记账，详见[当前验收](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#c19三助手资料交接2026-09-27分项通过整体未过)。
+
+建议下一步：保留当前候选，按通用机制与模型交付限制分别收口；Claude可并行完成Compact，收到固定修复后再验连续压缩及最终矩阵，不追加需求救本轮产物。
+
 ## C18包成员参数纠错（2026-09-27）
 
 - 原生C18失败保留；旧产品最小反例4/4失败，均把未声明成员报为`SKILL_SNAPSHOT_UNAVAILABLE`。真实ToolExecutor同样失败，红证据`candidate-18-resource-path-red-01`未改写；其中第三路径为当时的`../CAPABILITY.md`，最终覆盖改用`inputs/story.json`。中断吞异常是另一个静态发现，不冒充这4项的失败原因。

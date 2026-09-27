@@ -1,6 +1,6 @@
 # LLM_GUIDE
 
-当前私有运行def648397已含runner引用及显式包申请修复。C18随后暴露错成员路径误归快照失效；原读取工具现已本地修正参数分类与同代入口建议，6文件119项、独立末审和本地严格gate通过，待固定新版原生复验。旧失败不改判，最终0/27保持，当前四项收口见[唯一TODO](docs/tasks/CAPABILITY_INTERNALIZATION_GOAL.md#唯一-todo)。
+当前私有固定cb40cc4a8已含成员路径纠错，119项及严格gate通过。C19三助手并行、两名授权孩子当前包方法/模板get与父级读回已验；第三子读旧源码，父声称汇总未保存，整体交接未过，不能扩成三子当前包全通过。未命中参数恢复/父resolve，未触发Compact。后续按通用机制与模型交付限制分别记录，最终0/27保持，四项收口见[唯一TODO](docs/tasks/CAPABILITY_INTERNALIZATION_GOAL.md#唯一-todo)。
 
 当前开发切片是C17通用能力包验收：固定51dac1b81已由Claude组合发布并双机部署step13w，本线核对23639项全仓通过、0失败及本地严格gate；线上CI未作为验收来源。私有环境也已精确安装同版，发布与最终功能收口分别记录。Goal仍active，当前缺项以[唯一执行清单](docs/tasks/CAPABILITY_INTERNALIZATION_GOAL.md)为准。
 
