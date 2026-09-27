@@ -1,4 +1,8 @@
 
+# LLM: 能力配置的文件快照、agent 缓存读取和显式重载共用本模块；缓存须为 CapabilityConfig，失败不伪造配置。
+#   agent 读取会缓存快照，显式重载可能更新 router.config；改动须复核编排、Compact 与运行配置测试。
+# 模块用途: 读取并按文件版本重载能力配置，保持真实配置优先级，不让占位对象意外开启可选能力。
+
 from __future__ import annotations
 
 import hashlib

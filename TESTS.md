@@ -1,5 +1,17 @@
 # 测试与发布验收
 
+## C16全仓回归修复（2026-09-27，验证中）
+
+固定62c4d4478在Python 3.12全仓运行23288项，86 failures、0 errors、53 skipped，耗时2603.763秒，运行前后Python源码指纹相同。86项分为74项子代理创建、10项后台任务绑定、1项错误码登记及1项后台进程停止；不把它们描述为86个独立缺陷。原日志/JUnit和失败索引保留，旧529项定向通过不代表全仓通过。首次Python 3.14尝试因缺hypothesis/pyte而在collection结束，另列环境记录；没有安装依赖或改日用配置。
+
+配置补片6fae6e4af精确吸收为2e4b9f606，产品同字节核对后补模块说明。新增配置缓存反例及原选包失败恢复断言在修前11项中5项失败；修后19文件399项全部通过、0失败/跳过，相关源码前后摘要相同。覆盖原74项创建失败、真实typed配置的开/关和原磁盘读取、子入口/决策消费者、取消传播、选择失败恢复及错误码注册。证据为私有`candidate-16-regression-root-red-01`与`candidate-16-regression-root-focused-01`，各自命令、日志、JUnit、源码摘要单列。
+
+后台已有任务夹具改用真实TaskLink，保留旧任务身份/pins/marker。新定时运行在原claim后、模型前绑定；合法冻结回复优先使用原交付，定时claim直到原回复处置后按唯一终态映射结算。原14文件373项通过后，独立复核发现准入期间claim被接手、finish返回None仍把wake标为handled；新增两条真实repository替换过期claim的确定性反例在修前2/2失败，修后仅实际结算成功才返回stale，否则busy并保留pending。最终相同14文件**375 passed、0 failed、0 errors、0 skipped**，65.756秒，源码前后摘要相同。覆盖原回复拒收后再投只调用一次模型、external_sent只补canonical、取消抑制、无有效缓存终态结算、无法确认pending/状态保留待处理及原claim接手边界。证据为私有`candidate-16-admission-cas-red-01`和`candidate-16-regression-final-focused-02`；旧373与本次375不相加。
+
+本批最终字节的Ruff、doc-sync、strict code-size、diff和clean-package全部通过，本地严格gate已通过，线上CI未作为验收来源。独立只读末审关闭上述CAS发现，范围内未见其它确认阻断；报告SHA256为`20729f2f7ab4da3c945c99379fa6cfe934355dcc17dca497e0a116a14bcf55cf`，审阅与实际测试分别记账。
+
+原进程停止失败由Claude继续调查，孤立复跑不能替代全仓验证。两组399项/375项分别记账，固定组合仍须Claude重跑全仓与严格gate。私有运行仍9d5786952，新最终原生系列未启动；本批回归不修改保留集0/36、C16真实失败或发布状态。
+
 ## 第十六候选本线组合（2026-09-27，本地通过，原生部分通过）
 
 固定f824窄组合为8f53ee9b2，31个相关文件529 passed、0 failed/skipped，68.107秒；JUnit逐项核对，前后Python源码指纹一致。两产品/两测试文件与原提交同字节；真实归档/投影/reader/IR组合和三宿主恢复、包入口/版本接续分别验证，未运行真实模型。Ruff、doc-sync、strict-size、diff和clean-package全部rc0，本地严格gate已通过，线上CI未作为验收来源。原0545的951项、下述作者侧600项和本轮529项不累计；私有运行版未切换，G02失败仍待原生复验。完整命令/日志/JUnit在私有candidate-16证据中，见[验收边界](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#第十六候选compact归档引用修复组合2026-09-27本地通过)。

@@ -1,5 +1,7 @@
 # Gateway Structure
 
+`SchedulerService.claim_wake`核对wake与canonical run身份，在原repository领取后准确回读pending，再调用`_prepare_task_link`：原TaskStore任务锁内只为首次新运行建立链接，已有链接只读复核。合法冻结只保留原claim用于原回复交付；无冻结的active任务才标记running并交后台模型，无冻结终态按唯一既有映射结算。无法确认pending时释放claim并保留待处理；准入结算只有原CAS实际成功才返回stale，claim已被接手时返回busy，不能确认掉新持有者的wake。TaskStore仍唯一保存pins/选包marker，不新增调度专用任务账或Skill豁免。
+
 `goal_control_service._create_goal`复用`capability.package_selection_scope.new_task_capability_selection`为真正新建任务提供可选typed pending；原Goal存储、任务bind和wake顺序保持，入口选择在后续真实主业务请求前发生。
 
 `request_context._gateway_history_source` 把已裁决的来源行冻结为只读 `ConversationHistorySource`（地址视图加 `history_projection` 原单行选择与投影），`GatewayConversationContext.history_source` 是唯一历史载体，不再同时持有具体 history/canonical 副本。`request_prompt.gateway_conversation_history_seed` 把来源交给种子，恢复候选沿同一规则；只在原 native/text 准备边界解析，纯 `ToolLoopRequestInput` 投影不读盘。摘要期旧完整请求的释放属于 2b。
@@ -292,6 +294,7 @@ task workspace 摘要同步）同样改用它，避免"读时切开、写回落�
 
 ## R279 后台答复的 canonical 记录与外部投递解耦
 
+- **任务终态与交付分离**：pending筛选保留通过原`cached_owner_delivery`校验的冻结信封；执行入口先准确回读pending身份，再尝试冻结重投，普通过期任务判断只决定是否允许重新工作。能力预扫后的第二次回读及缓存识别仍保留；取消抑制和是否确认wake继续由原交付层读取当前任务与真实回执裁决。
 - **canonical 记录不再由渠道能力决定**：`conversation/background_delivery.py::record_background_response` 只要拿到模型产出的
   可交付正文（非空投影或附件），且该路线以本地权威会话为交付面（`transcript` 路线）或**本来就没有外发
   目标**（未注册渠道、无 target），就必须把 final 写进所属 thread。渠道能力只决定"能不能外发"，

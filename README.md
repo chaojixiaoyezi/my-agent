@@ -73,6 +73,14 @@ my-agent 把这些当成底座问题来解：
   `context-inspector`、`activity-line`、`status-pet`、`worktable-lite`、`web-board`；另有 `hello-go`、`hello-node` 两个跨语言示例。
 - 插件 SDK 与一致性测试套件见 [plugins/sdk](plugins/sdk/)，打包与生命周期见 [插件包](docs/design/PLUGIN_PACKAGES.md)、[任意语言插件](docs/design/PLUGIN_ANY_LANGUAGE.md)。
 
+### 能力包（开发候选）
+
+- 把外部项目的专业方法、流程、脚本和模板打成独立、可版本化的能力包；短剧等领域只是样例，通用功能面向不同任务。
+- 包内资源保持独立，不计入个人或公共 Skill 目录。模型先看到包级摘要，再按任务需要读取方法和资源；脚本沿现有工具链执行。
+- 通过已有 `/plugins` 命令安装、启用、停用、升级、回退和卸载；纯内容包不启动插件进程。来源、固定版本、迁移范围和验证记录随包维护。
+- 默认推荐包级摘要；可选的首轮选包与入口准备默认关闭，开启后会增加模型调用和任务记录。配置入口及生效方式见[使用与配置说明](docs/design/CAPABILITY_MIGRATION.md#6-通过原生-tui-安装启用和使用)。
+- 本功能仍在候选验收中，长任务和最终发布状态见[STATUS](STATUS.md)；构建与迁移见[迁移手册](docs/design/CAPABILITY_MIGRATION.md)，数据边界见[能力包合同](docs/design/CAPABILITY_PACKS.md)。
+
 ### 记忆、人格与技能
 
 - 长期记忆走“候选 → 晋升”链，代理用 `remember` 保存“需要时才想起”的具体事实。

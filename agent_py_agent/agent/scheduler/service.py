@@ -1,3 +1,6 @@
+# LLM: 定时运行只经原领取、会话任务绑定和完成协议进入后台；身份或版本不可证明时禁止采样，不补建旧任务。
+# 合法冻结交付复用原claim而不重开执行；终态映射由本模块统一提供给领取、等待对账和交付收口。
+# 模块用途: 把持久定时任务接入原会话唤醒队列，保持执行领取、TaskLink 与收口在同一条主链路。
 from __future__ import annotations
 
 """Bridge durable owner schedules into the existing same-thread wake queue."""
@@ -32,6 +35,12 @@ _TASK_STATUS_TO_RUN_STATUS = {
     "failed": "failed",
     "timeout": "failed",
 }
+
+
+# LLM: 原任务终态映射只有此查询入口；未知状态返回None，调用方不得猜为done或active，也不新增状态别名。
+# 函数用途: 为定时领取、等待对账和后台交付收口提供同一份任务到执行终态映射，无写入副作用。
+def scheduler_terminal_status_for_task(task_status: str) -> str | None:
+    return _TASK_STATUS_TO_RUN_STATUS.get(task_status)
 
 
 @dataclass(frozen=True)
@@ -115,6 +124,8 @@ class SchedulerRunHeartbeat:
                 return
 
 
+# LLM: 本服务只写原 scheduler/ConversationStore 事实；新执行准入可建原 TaskLink，已有 pins/marker 不得覆盖。
+# 类用途: 预留、领取和收口定时工作，把准确任务身份交给已有后台执行器，不另建权限或执行循环。
 class SchedulerService:
     """Reserve, publish, claim, and close scheduler runs using durable facts only."""
 
@@ -168,6 +179,8 @@ class SchedulerService:
                 self._fail_without_execution(run, "SCHEDULER_THREAD_UNAVAILABLE", now=current)
         return wake_ids
 
+    # LLM: 领取后准确回读pending并验证TaskLink；合法冻结仅保留交付claim，绑定异常结算，来源不明或结算CAS未成功均不消费。
+    # 函数用途: 领取原定时工作或欠发回复；不会重建旧任务或将终态重开为running，联测完整tick及历史收口。
     def claim_wake(
         self,
         signal: Any,
@@ -186,6 +199,11 @@ class SchedulerService:
         run = self.repository.get_active_run(run_id)
         if run is None or str(run.get("job_id") or "") != job_id:
             return SchedulerWakeClaimResult("stale")
+        if (
+            str(getattr(signal, "thread_id", "") or "") != str(run["thread_id"])
+            or str(getattr(signal, "root_task_id", "") or "") != run_id
+        ):
+            return SchedulerWakeClaimResult("stale")
         claimed = self.repository.claim_run(
             run_id,
             lease_seconds=max(1, int(lease_seconds or 1)),
@@ -198,8 +216,81 @@ class SchedulerService:
             claim_id=str(claimed["claim_id"]),
             run=claimed,
         )
-        self.repository.mark_run_running(run_id, claim.claim_id, now=now)
+        try:
+            pending_delivery = self._pending_delivery_for_claim(signal, claim)
+        except Exception:
+            self.release(claim, now=now)
+            raise
+        if pending_delivery is None:
+            self.release(claim, now=now)
+            return SchedulerWakeClaimResult("busy")
+        try:
+            task_status = self._prepare_task_link(claim, now=now)
+            terminal_status = scheduler_terminal_status_for_task(task_status)
+            if task_status != "active" and terminal_status is None:
+                raise ValueError("scheduled task link status is unknown")
+            if not terminal_status and not pending_delivery:
+                self.repository.mark_run_running(run_id, claim.claim_id, now=now)
+        except Exception as exc:
+            terminal = self.finish(
+                claim, status="failed", error_code="SCHEDULER_TASK_BINDING_INVALID",
+                error_message=f"定时任务绑定无法确认（{type(exc).__name__}）", now=now,
+            )
+            return SchedulerWakeClaimResult("stale" if terminal is not None else "busy")
+        if terminal_status and not pending_delivery:
+            terminal = self.finish(
+                claim, status=terminal_status,
+                error_code="" if terminal_status == "done" else f"SCHEDULED_TASK_{task_status.upper()}",
+                error_message="" if terminal_status == "done" else f"scheduled task ended as {task_status}",
+                now=now,
+            )
+            return SchedulerWakeClaimResult("stale" if terminal is not None else "busy")
         return SchedulerWakeClaimResult("claimed", claim)
+
+    # LLM: 只从原wake队列回读精确run/job/thread/task身份，再复用原冻结校验；None表示来源不可确认，不是已交付。
+    # 函数用途: 区分需要重投的原回复和普通定时工作，读取异常由领取入口释放claim后原样上抛。
+    def _pending_delivery_for_claim(self, signal: Any, claim: SchedulerRunClaim) -> bool | None:
+        from ..conversation.background_delivery import cached_owner_delivery
+
+        wake_id = str(getattr(signal, "wake_signal_id", "") or "")
+        current = self.conversation_store.wakes.pending_one(wake_id)
+        run = claim.run
+        if (
+            current is None
+            or current.wake_signal_id != wake_id
+            or current.wake_signal_id != str(run.get("wake_signal_id") or "")
+            or current.thread_id != str(run["thread_id"])
+            or current.root_task_id != claim.run_id
+            or current.reason != _SCHEDULER_WAKE_REASON
+        ):
+            return None
+        metadata = current.metadata if isinstance(current.metadata, dict) else {}
+        if (
+            str(metadata.get("scheduler_run_id") or "") != claim.run_id
+            or str(metadata.get("scheduler_job_id") or "") != str(run["job_id"])
+        ):
+            return None
+        return cached_owner_delivery(current) is not None
+
+    # LLM: 原任务锁内读/建准确 link；started_at 由原 repository 在首次运行时写入，不能从 queued 状态猜首次。
+    # 仅从未开始且没有 link 的新 run 可创建；已有记录原样保留，绑定失败由 claim_wake 收口，禁止补全局包或选择资格。
+    # 函数用途: 在后台首轮快照之前准备原 TaskStore 记录，避免新定时工作因缺少链接失败，同时守住旧任务恢复边界。
+    def _prepare_task_link(self, claim: SchedulerRunClaim, *, now: float | None) -> str:
+        tasks = self.conversation_store.tasks
+        with tasks.transition_guard(claim.run_id):
+            link, error = tasks.load_report(claim.run_id)
+            if error is not None:
+                raise ValueError("scheduled task link is unreadable")
+            if link is None:
+                if float(claim.run.get("started_at") or 0.0) != 0.0:
+                    raise ValueError("previously started scheduled task link is missing")
+                link = tasks.bind({
+                    "thread_id": str(claim.run["thread_id"]), "task_id": claim.run_id,
+                    "goal": str(claim.run["prompt"]), "status": "active", "now": now,
+                })
+            if link.task_id != claim.run_id or link.thread_id != str(claim.run["thread_id"]):
+                raise ValueError("scheduled task link identity differs from the claimed run")
+            return str(link.status)
 
     def heartbeat(
         self,
@@ -266,9 +357,8 @@ class SchedulerService:
         except (SchedulerConflictError, SchedulerNotFoundError):
             return None
 
-    # LLM: Reconciliation reads one exact conversation task link and closes only a matching
-    # waiting run. Missing, active, corrupt, or unknown task state stays fail-closed and active.
-    # 函数用途: 对账一条等待中的定时执行，在对应持久任务真正终结后才结算历史。
+    # LLM: 等待对账只读精确TaskLink并复用领取/交付同一终态映射；缺失、损坏、活动或未知状态不结算。
+    # 函数用途: 在对应持久任务真正终结后结算原waiting运行，不负责冻结回复重投或另建执行状态。
     def reconcile_waiting_run(
         self,
         run_id: str,
@@ -286,7 +376,7 @@ class SchedulerService:
         except Exception:  # noqa: BLE001 - unreadable task authority must keep the run active
             return None
         task_status = str(getattr(link, "status", "") or "").strip().lower()
-        terminal_status = _TASK_STATUS_TO_RUN_STATUS.get(task_status)
+        terminal_status = scheduler_terminal_status_for_task(task_status)
         if terminal_status is None:
             return None
         error_code = "" if terminal_status == "done" else f"SCHEDULED_TASK_{task_status.upper()}"
@@ -415,4 +505,5 @@ __all__ = [
     "SchedulerService",
     "SchedulerWakeClaimResult",
     "is_scheduler_wake",
+    "scheduler_terminal_status_for_task",
 ]

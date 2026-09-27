@@ -240,8 +240,16 @@ def test_selector_propagates_cancellation_but_types_optional_failures(error):
         with pytest.raises(type(error)):
             _selection().select_capability_packages(agent, material)
     else:
+        from agent_py_agent.agent.contracts.error_taxonomy import error_contract
+        from agent_py_agent.agent.contracts.recovery import RecoveryAction
+
         result = _selection().select_capability_packages(agent, material)
         assert result.outcome == "failed" and "private-key-like-text" not in repr(result)
+        contract = error_contract(result.error_code)
+        assert contract.code == "CAPABILITY_SELECTION_MODEL_FAILED"
+        assert contract.category == "model"
+        assert contract.retryable is False
+        assert contract.recommended_action == RecoveryAction.CONTINUE.value
 
 
 def test_selector_reports_multiple_http_usage_as_incomplete_without_fabricating_totals():
