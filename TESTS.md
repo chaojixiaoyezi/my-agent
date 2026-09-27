@@ -1,5 +1,17 @@
 # 测试与发布验收
 
+## 会话原文读取的 thread_id 越界修复（2026-09-27，分支 `claude/history-owner-scope`，基于 main `72cbb0411`）
+
+- **来源**：Codex 在 `72cbb0411` 的隔离副本里用两套合成 owner 数据复现。`session_history_read` 把模型给的 `thread_id` 直接交给 `by_id_report`，存储层按 `messages_dir / f"{thread_id}.jsonl"` 拼路径。绝对路径形态和 `../../../owner-b/conversation/messages/<thread>` 两种写法都能读到只在 owner-b 里的标记，动作策略放行（`thread_id` 当时不是声明的资源参数）；普通 owner-b 线程编号则返回 found=false。没有涉及真实用户数据。
+- **改动**：
+  - 工具入口 `_owned_thread`：显式 `thread_id` 先过 `validate_path_segment`（拒绝式，只允许字母、数字、`-`、`_`），再必须能在本 owner 线程登记里 `load_report` 到；任一不过都返回 `TOOL_INVALID_ARGUMENTS`，读错误返回 `TOOL_EXECUTION_FAILED`。
+  - 存储层 `_thread_stem`：`thread_path`、`message_path`、`observation_path` 对非空编号同样校验，不合法抛 `OpaqueIdError`；空编号保持原映射。
+  - `thread_id` 加入工具资源参数（logical），与 `message_id` 一致。
+  - 上线前核对：Mac 2148 个、测试机 849 个现存会话文件名全部符合校验格式。
+- **测试**：`test_session_history_read.py` 新增越界用例。对绝对路径、相对 `../` 跳转和普通 owner-b 编号三种输入，都要求拒绝且输出里没有 owner-b 标记；同 owner 其它会话照常可读；存储层对 `../`、绝对路径、`a/b`、`..`、`thread.x` 抛错，空编号仍读为空。
+- **红绿**：只退回工具层、只退回存储层、两层都退回，新用例都失败；还原后通过。
+- **回归**：引用会话存储、线程路径或 session_search 的全部测试文件加架构守卫，共 210 个文件，在 25 字符 basetemp 下 4885 passed、1 skipped、25 xfailed。
+
 ## 原话备份改为“候选超目标就收缩”（2026-09-26，分支 `claude/curator-budget`，基于 main `fcd23952f`）
 
 - **来源**：dsh-9b 报告 main CI 每次都红（`527bcdd99` 的运行 36267438519、`fcd23952f` 的运行 36267615914，都是 3.11 失败，其余版本被 fail-fast 取消）。`test_mixed_compact_recovery.py::test_mixed_replacement_fits_when_transcript_only_exceeds_real_input_ceiling` 断言计量两次，实际只有一次。它按 basetemp 路径长度确定性失败：25、45 个字符失败，65 个字符以上通过；CI 是 30 个字符，本机 macOS 默认临时路径 100 多个字符，所以本机严格门能过。

@@ -11,7 +11,7 @@
 
 - **压缩后可按编号查回原话，原话备份改为按 token 随窗口放大**（2026-09-26，分支 `claude/curator-budget`，本地回归与隔离真机验收通过，见 TESTS）：
   - **起因**：用户问“10 段各 1 万 token 的需求压缩后怎么办”。旧备份固定 6000 字、每条截开头 1200 字，只放得下约 4 段的开头；原始记录在磁盘但模型查不回。对照 Codex、Claude Code、Hermes、OpenClaw、Gemini CLI、opencode：没有一家把全部长需求原样留在上下文，成熟做法是“摘要记住有什么 + 需要细节时查回原文”。
-  - **查回原话**：复用 `session_search`，新增 `message_id` 分段读原文（只读 canonical 消息文件）和 `current_thread=true` 当前会话检索、按页浏览；会话身份只取宿主可信上下文；翻看模式每条正文限 2000 字。
+  - **查回原话**：复用 `session_search`，新增 `message_id` 分段读原文（只读 canonical 消息文件）和 `current_thread=true` 当前会话检索、按页浏览；会话身份只取宿主可信上下文；翻看模式每条正文限 2000 字。显式 `thread_id` 必须通过路径段校验并属于本 owner 线程登记（2026-09-27 修复 Codex 复现的跨 owner 路径越界，存储层同时加校验，见 TESTS）。
   - **原话备份**：预算 min(`compact_landmark_max_tokens`=20000, 窗口 10%) token；每条带编号；短要求先放、最新优先，放不下的最新一条保留头尾；省略的编号列出并可选附回查说明（`compact_recall_hint_enabled`）；两遍处理不让原文整份驻留。
   - **摘要指令**：要求单列“User requirements”和“Pending user requests”。
   - **容量保护**：候选超出恢复目标就按超出量缩小备份并重算一次（备份已最小、或缩到最小仍超上限时不算），备份只占目标以内的空间，不会让压缩失败或多触发一次摘要请求。最初只在收缩能改变判定时才缩，小窗口里候选会贴着上限提交，CI 随临时路径长度确定性失败，当天改为现规则（见 TESTS）。

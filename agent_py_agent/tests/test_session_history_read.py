@@ -8,8 +8,11 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from agent_py_agent.agent.capability.session_history_read import READ_MAX_CHARS, READ_MIN_CHARS
 from agent_py_agent.agent.capability.session_search_tool import (
@@ -97,6 +100,33 @@ def test_thread_identity_comes_from_the_host_and_explicit_threads_stay_in_the_ow
     # current_thread 只认宿主上下文，没有可信会话时拒绝，不接受模型自报会话。
     browse = SessionSearchTool(owner.agent).execute({"current_thread": True, "thread_id": owner.other.thread_id})
     assert browse.ok is False and browse.error_code == "TOOL_INVALID_ARGUMENTS"
+
+
+def test_explicit_thread_id_cannot_escape_the_owner_store(tmp_path):
+    # 2026-09-27 Codex 复现：模型给的 thread_id 直接拼进消息文件路径，绝对路径与 ../ 跳转能读到其它 owner 的会话。
+    owner = _owner(tmp_path / "owner-a")
+    other_store = ConversationStore(tmp_path / "owner-b" / "conversation")
+    other_thread = other_store.threads.get_or_create({"canonical_user_id": "owner-b", "channel": "tui",
+                                                      "channel_user_id": "owner-b", "channel_conversation_id": "conv-b",
+                                                      "now": 1})
+    secret = other_store.messages.append({"thread_id": other_thread.thread_id, "role": "user",
+                                          "content": "OWNER_B_ONLY_MARKER"})
+    target = other_store.storage.message_path(other_thread.thread_id).with_suffix("")
+    relative = os.path.relpath(target, owner.store.storage.messages_dir)
+    for thread_id in (str(target), relative, other_thread.thread_id):
+        result = SessionSearchTool(owner.agent).execute({"message_id": secret.message_id, "thread_id": thread_id})
+        assert result.ok is False and result.error_code == "TOOL_INVALID_ARGUMENTS", thread_id
+        assert "OWNER_B_ONLY_MARKER" not in str(result.output)
+    # 同一 owner 的其它会话照常可读。
+    same = _call(owner.agent, message_id=owner.rows[4].message_id, thread_id=owner.other.thread_id)
+    assert same["found"] and same["content"] == "别的会话也提到金额保留两位小数。"
+    # 存储层同样拒绝路径形态的会话编号（防御纵深）；空编号保持原来的“读不到”。
+    for bad in (relative, str(target), "a/b", "..", "thread.x"):
+        with pytest.raises(ValueError):
+            owner.store.messages.by_id_report(bad, secret.message_id)
+        with pytest.raises(ValueError):
+            owner.store.storage.thread_path(bad)
+    assert owner.store.messages.by_id_report("", secret.message_id) == (None, [])
 
 
 def test_reading_original_text_does_not_need_the_derived_index(tmp_path):

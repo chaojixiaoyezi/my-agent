@@ -174,7 +174,7 @@ stop/runtime/turn原因及truncated事实，不记录正文、思考内容、参
 - Gemini CLI、opencode：只保留最近原文，没有查回工具。
 
 **做法一：查回原话**（`capability/session_history_read.py`，复用既有 `session_search`，不另起工具）：
-- `message_id`：按字符游标分段读回一条消息原文（默认每次 6000 字、上限 2 万字，按 `next_offset` 续读）。只读 canonical 消息文件，不读派生索引。`thread_id` 只在读单条时可显式给出（落在同一 owner 会话库），默认取宿主可信会话，结果带 `scope_resolution`。
+- `message_id`：按字符游标分段读回一条消息原文（默认每次 6000 字、上限 2 万字，按 `next_offset` 续读）。只读 canonical 消息文件，不读派生索引。`thread_id` 只在读单条时可显式给出，默认取宿主可信会话，结果带 `scope_resolution`。显式 `thread_id` 是不可信的模型输入：先按 opaque ID 拒绝式校验（只允许字母、数字、`-`、`_`，拒绝斜杠、点段和绝对路径），再必须是本 owner 线程登记里已存在的会话，否则拒绝（`TOOL_INVALID_ARGUMENTS`），不回退到其它会话。存储层 `thread_path`/`message_path`/`observation_path` 也做同样的路径段校验，空编号保持原映射。2026-09-27 Codex 复现了修复前的越界：绝对路径形态或 `../` 跳转的 `thread_id` 能读到其它 owner 的会话。
 - `current_thread=true`：不带 query 时按页浏览当前会话的用户消息与最终答复（`older_cursor` 翻页，预览 160 字）；带 query 时只在当前会话内全文检索，会话条件在 SQL 里先于 LIMIT 生效（`local_storage.search_records_in_thread`）。
 - 翻看（`around_id`）每条正文上限 2000 字，超长标 `content_truncated` 并提示按 `message_id` 读全文，避免一次灌满上下文。
 - 形态优先级：`message_id` > `around_id` > `current_thread` > `query` > 浏览。显式锚点压过 `current_thread`，因为翻看本就限在锚点所属会话。

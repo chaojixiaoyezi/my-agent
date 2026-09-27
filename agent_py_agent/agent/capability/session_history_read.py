@@ -1,12 +1,14 @@
 # LLM: session_search 的会话原文读取部分，只读 owner ConversationStore 的 canonical 消息文件（唯一权威），不读派生索引。
-#   会话身份：thread_id 参数只在读取单条消息时可显式给出（同一 owner 的会话库内）；其余一律取宿主运行上下文里的可信会话，
-#   并在结果里用 scope_resolution 说明来源。长消息按字符游标分段返回，任何一次调用的输出都有上限。
+#   会话身份：thread_id 参数只在读取单条消息时可显式给出，它是不可信的模型输入：先按 opaque ID 拒绝式校验（不含路径
+#   分隔、点段或绝对路径），再必须是本 owner 会话库里已存在的会话，否则拒绝，绝不拼出指向其它 owner 的路径；
+#   其余一律取宿主运行上下文里的可信会话，并在结果里用 scope_resolution 说明来源。长消息按字符游标分段返回，任何一次调用的输出都有上限。
 #   新增字段或模式须同步 session_search_tool 的 schema、说明与 test_session_history_read.py。
 # 模块用途: 让模型在上下文被压缩后，按消息编号分段读回原话，或按页浏览当前会话的全部用户与助手消息。
 from __future__ import annotations
 
 from typing import Any
 
+from ..common.opaque_id import OpaqueIdError, validate_path_segment
 from ..conversation.channels import project_user_reply
 from ..conversation.display_checkpoint import is_display_checkpoint
 from ..conversation.models import MessageLogEntry, is_audit_background_transcript_entry
@@ -37,16 +39,35 @@ def trusted_thread(agent: object) -> tuple[str, str]:
     return _decision_thread_scope(agent)
 
 
-# LLM: 读取单条消息时允许显式 thread_id（来自检索结果，只能落在同一 owner 的会话库里）；否则只用可信当前会话。
+# LLM: 读取单条消息时允许显式 thread_id（来自检索结果），但必须通过 _owned_thread 校验落在本 owner 会话库里；
+#   否则只用可信当前会话。
 # 函数用途: 决定本次读取落在哪个会话，并给出 scope_resolution 结构化说明。
 def read_thread_scope(agent: object, params: dict[str, object]) -> tuple[str, dict[str, object]]:
     current, source = trusted_thread(agent)
     explicit = str(params.get("thread_id") or "").strip()
     if explicit:
-        return explicit, {"thread_source": "explicit_parameter", "current_thread_id": current,
-                          "same_as_current": explicit == current}
+        return _owned_thread(agent, explicit), {"thread_source": "explicit_parameter", "current_thread_id": current,
+                                                "same_as_current": explicit == current}
     return require_current_thread(current, source), {"thread_source": source, "current_thread_id": current,
                                                      "same_as_current": True}
+
+
+# LLM: 模型给的会话编号先做拒绝式路径段校验（绝对路径、../ 跳转、斜杠一律拒绝），再按结构化身份在本 owner 的
+#   线程登记里查存在性；两步都过才返回，失败不回退到当前会话或全库。只读，不创建线程。
+# 函数用途: 确认模型给出的会话编号只指向本人会话库里的一个真实会话。
+def _owned_thread(agent: object, thread_id: str) -> str:
+    try:
+        validate_path_segment(thread_id, kind="thread_id")
+    except OpaqueIdError:
+        raise SessionHistoryRefusal("TOOL_INVALID_ARGUMENTS", "thread_id 不是有效的会话编号",
+                                    "使用检索结果 scope 里的 thread_id，或不传 thread_id 读当前会话。") from None
+    thread, load_error = _conversation_store(agent).threads.load_report(thread_id)
+    if load_error:
+        raise SessionHistoryRefusal("TOOL_EXECUTION_FAILED", "会话记录读取失败", "可原样重试一次。")
+    if thread is None:
+        raise SessionHistoryRefusal("TOOL_INVALID_ARGUMENTS", "本人会话库里没有这个会话",
+                                    "使用检索结果 scope 里的 thread_id，或不传 thread_id 读当前会话。")
+    return thread_id
 
 
 # LLM: 空会话编号一律拒绝，不退化为全库或其它会话；source 只用于说明来源，不参与判定。

@@ -130,8 +130,8 @@ class SessionSearchTool(BaseTool):
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy("read_only"),
         concurrency_policy=ConcurrencyPolicy("parallel_safe"),
-        resource_scopes=ResourceScopePolicy(parameter_names=("around_id", "query", "message_id"),
-            parameter_kinds={"around_id": "logical", "query": "logical", "message_id": "logical"}),
+        resource_scopes=ResourceScopePolicy(parameter_names=("around_id", "query", "message_id", "thread_id"),
+            parameter_kinds={"around_id": "logical", "query": "logical", "message_id": "logical", "thread_id": "logical"}),
     )
 
     # 类用途: 把 LocalStore 的历史检索/翻看暴露成模型可调用的只读工具(三模式)。

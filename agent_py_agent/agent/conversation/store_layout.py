@@ -6,6 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 
+from ..common.opaque_id import validate_path_segment
 from .models import WakeSignal
 from .store_index import ScanIndexes
 from .store_io import safe_file_stem
@@ -15,6 +16,14 @@ from .store_io import safe_file_stem
 # 函数用途: 将结构化唤醒级别归到现有紧急或普通队列。
 def wake_urgency(value: str) -> str:
     return "urgent" if str(value or "").strip().lower() == "urgent" else "normal"
+
+
+# LLM: 线程 ID 会直接拼进会话文件名，可能来自模型参数等不可信输入：非空时按 opaque ID 拒绝式校验（不含斜杠、点段、
+#   绝对路径），不合法抛 OpaqueIdError（ValueError），绝不改写成别的名字；空值保持原映射（不存在的文件，读为空）。
+#   现存 Mac 与测试机的会话文件名全部符合该格式（2026-09-27 核对）。
+# 函数用途: 返回可安全拼进会话目录的线程文件名主干，挡住跨目录读取其它 owner 的会话。
+def _thread_stem(thread_id: str) -> str:
+    return validate_path_segment(thread_id, kind="thread_id") if thread_id else thread_id
 
 
 # LLM: 目录初始化和路径计算不拥有生命周期；各领域显式接收此上下文，不能另建 canonical 根。
@@ -82,15 +91,15 @@ class ConversationStorage:
             self.wake_handled_dir,
         )
 
-    # LLM: 线程 ID 的原路径映射保持，权限与存在性校验仍在调用领域。
+    # LLM: 线程 ID 的原路径映射保持，权限与存在性校验仍在调用领域；路径段本身在这里拒绝式校验（_thread_stem）。
     # 函数用途: 定位 canonical 线程 JSON，供身份校验和原子更新共用。
     def thread_path(self, thread_id: str) -> Path:
-        return self.threads_dir / f"{thread_id}.json"
+        return self.threads_dir / f"{_thread_stem(thread_id)}.json"
 
-    # LLM: 消息文件与原线程一一对应；历史读取和追加必须使用同一路径。
+    # LLM: 消息文件与原线程一一对应；历史读取和追加必须使用同一路径，路径段经 _thread_stem 校验。
     # 函数用途: 定位完整 transcript 的 JSONL 文件，不读取或裁剪内容。
     def message_path(self, thread_id: str) -> Path:
-        return self.messages_dir / f"{thread_id}.jsonl"
+        return self.messages_dir / f"{_thread_stem(thread_id)}.jsonl"
 
     # LLM: 任务链接仍以显式任务 ID 寻址，不按标题或提示词推断归属。
     # 函数用途: 定位线程关联的任务链接文件，事务锁沿用这个路径。
@@ -107,10 +116,10 @@ class ConversationStorage:
     def background_claim_path(self, thread_id: str) -> Path:
         return self.background_claims_dir / f"{safe_file_stem(thread_id)}.json"
 
-    # LLM: 观察事件沿原 thread ID 存储；路径定位不消费事件。
+    # LLM: 观察事件沿原 thread ID 存储；路径定位不消费事件，路径段经 _thread_stem 校验。
     # 函数用途: 定位本线程的观察 JSONL，供追加与未处理扫描共用。
     def observation_path(self, thread_id: str) -> Path:
-        return self.observations_dir / f"{thread_id}.jsonl"
+        return self.observations_dir / f"{_thread_stem(thread_id)}.jsonl"
 
     # LLM: 补充消息按显式目标类型和 ID 沿用原安全文件名，投递状态另读回执。
     # 函数用途: 定位一个接收目标的 guidance 队列，不改变消息状态。
