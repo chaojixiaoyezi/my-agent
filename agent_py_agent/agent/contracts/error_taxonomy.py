@@ -7,6 +7,7 @@
 #   资源停止未确认必须核对原回执，未知控制必须修正调用；两者均不得原样重放或扩大停止范围。
 #   插件管理超时须查询原请求；管理权限、配置禁用和执行准备失败分别呈现，不能因错误而再次安装。
 #   决策模型是可选增强；连接探测或响应失败保留普通模型主链，设置版本冲突则读取新版本后再修改。
+#   一次选包失败不重放已领取的辅助调用；定时任务绑定失效必须核对原任务记录，不能补造旧任务继续采样。
 #   入站附件无效是确定的用户输入失败：不能去掉附件改发纯文字，也不能原样重放，只能请用户重新添加。
 #   IM 管理员密码错误与失败锁定共用一个码，不暴露差别；没有待决审批时不得重复批准或替用户重试密码。
 # 模块用途: 给工具结果、恢复状态机和用户汇报提供一致的错误类别、重试性与处理建议。
@@ -1063,6 +1064,16 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.REPORT_BLOCKER.value,
         recovery_hint="当前请求没有可信会话绑定；不能猜测或新建目标会话。请从真实用户会话重新登记计划。",
     ),
+    "SCHEDULER_TASK_BINDING_INVALID": ErrorContract(
+        code="SCHEDULER_TASK_BINDING_INVALID",
+        category="state",
+        retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint=(
+            "定时运行无法确认准确的任务绑定，未进入模型；核对原 run/thread/task 记录及领取结算结果。"
+            "不要重建缺失的旧任务、覆盖损坏记录或原样重放。"
+        ),
+    ),
     "SCHEDULER_NOT_FOUND": ErrorContract(
         code="SCHEDULER_NOT_FOUND",
         category="state",
@@ -1569,6 +1580,16 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         retryable=True,
         recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
         recovery_hint="系统运行账本不能用普通文件写入工具覆盖；改用对应专用工具更新，例如 task_progress。",
+    ),
+    "CAPABILITY_SELECTION_MODEL_FAILED": ErrorContract(
+        code="CAPABILITY_SELECTION_MODEL_FAILED",
+        category="model",
+        retryable=False,
+        recommended_action=RecoveryAction.CONTINUE.value,
+        recovery_hint=(
+            "本任务的一次可选选包调用失败；保留已领取记录和警告，按原有能力继续普通业务。"
+            "不重放选择调用，不因此扩展权限或将整个业务判为失败。"
+        ),
     ),
     "MODEL_UPSTREAM_FAILED": ErrorContract(
         code="MODEL_UPSTREAM_FAILED",

@@ -4,6 +4,7 @@
 # Goal、投递地址、执行 claim 和恢复守卫各有窄能力组件；来源消费和能力预扫保留原编排位置。
 # 能力事件开始的工作片也可能完成任务，公开交付须读当前任务状态，不能仅凭原唤醒原因永久静默。
 # 原 wake 队列在预扫及领取后重查；历史失败不能绕过已接续子代理的当前状态与未读完成信封。
+# 合法冻结交付须先于普通终态工作过滤恢复；任务结束不确认欠发回复，取消抑制和去重仍归原交付层。
 # 模块用途: 编排后台唤醒和工作片，并组装执行、交付、路由、租约、恢复、策略及上下文。
 from __future__ import annotations
 
@@ -2420,16 +2421,14 @@ def _typed_audit_finding_signal(signal: WakeSignal) -> bool:
     )
 
 
+# LLM: 冻结交付与原typed事件继续存活；定时wake交原服务准确结算run，不赋予终态任务重新工作资格。
+# 函数用途: 保留未完成交付和定时收口，避免只消费wake而丢回复或留下反复举起唤醒的queued运行。
 def _wake_survives_inactive_root(signal: WakeSignal) -> bool:
-    """Keep committed owner-facing events durable past task settlement.
-
-    A child lifecycle notice is stale once its root task is no longer active.
-    A typed Audit finding is different: the durable finding already exists and
-    its evidence refs plus provider receipt form an outstanding delivery
-    obligation.  Task settlement must not silently acknowledge that obligation.
-    """
-
-    return _typed_audit_finding_signal(signal)
+    return (
+        _typed_audit_finding_signal(signal)
+        or _is_scheduler_wake_signal(signal)
+        or cached_owner_delivery(signal) is not None
+    )
 
 
 # LLM: 调度与交付共用精确来源判据，不能将解释性 refs 或模型文字变成已报告证据。
@@ -3527,8 +3526,8 @@ def _claim_scheduler_wake(
     return _WakeClaimState(claim=result.claim, heartbeat=heartbeat)
 
 
-# LLM: 预扫可能同步续跑孩子，前后都须读回原 pending 信封；领取后还会复核，冻结重投不调用模型。
-# 函数用途: 为仍待处理的精确信封执行清理、交付恢复或后台工作片，旧快照不能重开已经消费的事件。
+# LLM: 首次准确回读后优先恢复合法冻结交付，再判断普通工作资格；预扫前后回读及领取后复核仍保持。
+# 函数用途: 为原pending信封重投回复或执行工作片；重投只走既有交付层，不调用模型或重新预扫孩子。
 def _execute_wake_signal(
     scheduler: BackgroundMainAgentScheduler,
     signal: WakeSignal,
@@ -3544,6 +3543,9 @@ def _execute_wake_signal(
             scheduler.scheduler_service.release(claim, now=now)
         return _WakeExecution(terminal=True)
     signal = refreshed
+    redelivery = _redeliver_frozen_wake(scheduler, signal, now=now)
+    if redelivery is not None:
+        return redelivery
     if _wake_signal_should_skip(
         scheduler.runtime.agent,
         scheduler.store,
@@ -3566,19 +3568,9 @@ def _execute_wake_signal(
             scheduler.scheduler_service.release(claim, now=now)
         return _WakeExecution(terminal=True)
     signal = refreshed
-    cached = cached_owner_delivery(signal)
-    if cached is not None:
-        channel, target = resolve_background_route(
-            _background_route_dependencies(scheduler), signal.thread_id,
-        )
-        return _WakeExecution(
-            scheduler.runtime.redeliver_cached_wake(
-                signal,
-                channel=channel,
-                target=target,
-                now=now,
-            )
-        )
+    redelivery = _redeliver_frozen_wake(scheduler, signal, now=now)
+    if redelivery is not None:
+        return redelivery
     if _is_internal_audit_source_worker_lifecycle_signal(
         signal,
         scheduler.runtime.agent,
@@ -3614,6 +3606,21 @@ def _execute_wake_signal(
                 "wake_signal": signal,
             }
         )
+    )
+
+
+# LLM: 调用方须先准确回读原pending信封；只复用原缓存校验、地址解析和交付器，不创建第二份交付状态。
+# 函数用途: 对有效冻结回复执行外发或补落账，无有效缓存则返回None，取消抑制与去重由原交付层裁决。
+def _redeliver_frozen_wake(
+    scheduler: BackgroundMainAgentScheduler, signal: WakeSignal, *, now: float,
+) -> _WakeExecution | None:
+    if cached_owner_delivery(signal) is None:
+        return None
+    channel, target = resolve_background_route(
+        _background_route_dependencies(scheduler), signal.thread_id,
+    )
+    return _WakeExecution(
+        scheduler.runtime.redeliver_cached_wake(signal, channel=channel, target=target, now=now)
     )
 
 
@@ -3677,6 +3684,8 @@ def _handle_nonquota_wake_error(
     scheduler.store.wakes.mark_handled(signal.wake_signal_id, now=observed_at)
 
 
+# LLM: 原交付事实先决定是否释放；已交付仍按当前任务状态复用服务映射，未知不得猜done或确认wake。
+# 函数用途: 结算本次原定时claim并保留真实投递结果，活动任务继续waiting，取消和失败保留各自终态。
 def _finish_scheduler_wake_claim(
     scheduler: BackgroundMainAgentScheduler,
     signal: WakeSignal,
@@ -3694,7 +3703,8 @@ def _finish_scheduler_wake_claim(
         scheduler.scheduler_service.release(claim, now=time.time())
         scheduler._wake_retry_after[signal.wake_signal_id] = now + 30.0
         return None
-    if str(report.task_status or "").strip().lower() == "active":
+    task_status = str(report.task_status or "").strip().lower()
+    if task_status == "active":
         waiting = scheduler.scheduler_service.park_waiting(
             claim,
             response=report.response,
@@ -3703,12 +3713,21 @@ def _finish_scheduler_wake_claim(
             now=time.time(),
         )
         return report if waiting is not None else None
+    from ..scheduler.service import scheduler_terminal_status_for_task
+
+    terminal_status = scheduler_terminal_status_for_task(task_status)
+    if terminal_status is None:
+        scheduler.scheduler_service.release(claim, now=time.time())
+        scheduler._wake_retry_after[signal.wake_signal_id] = now + 30.0
+        return None
     terminal = scheduler.scheduler_service.finish(
         claim,
-        status="done",
+        status=terminal_status,
         response=report.response,
         delivery_status=report.delivery_status,
         delivery_reason=report.delivery_reason,
+        error_code="" if terminal_status == "done" else f"SCHEDULED_TASK_{task_status.upper()}",
+        error_message="" if terminal_status == "done" else f"scheduled task ended as {task_status}",
         now=time.time(),
     )
     return report if terminal is not None else None

@@ -6,17 +6,23 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
+import pytest
 
 from agent_py_agent.agent.agent_core.orchestration.dispatch.tool_helpers import (
     _dispatch_capability_config,
 )
 from agent_py_agent.agent.capability import CapabilityRouter
+from agent_py_agent.agent.capability.config import CapabilityConfig
 from agent_py_agent.agent.capability.runtime_config_models import (
     CapabilityConfigPatch,
     CapabilityConfigPatchRequest,
 )
 from agent_py_agent.agent.capability.runtime_config_patch import apply_capability_config_patch
 from agent_py_agent.agent.capability.runtime_config_reload import (
+    capability_config_for_agent,
     capability_config_version,
     load_capability_config_snapshot,
     reload_capability_config_if_changed,
@@ -41,6 +47,44 @@ def _write_config(path, *, run_timeout: int = 900, routing: bool = False) -> Non
         ),
         encoding="utf-8",
     )
+
+
+@pytest.mark.parametrize("selection_enabled", [False, True])
+def test_agent_capability_config_keeps_typed_cache_without_loading_file(tmp_path, selection_enabled):
+    config = CapabilityConfig(enable_capability_package_selection=selection_enabled)
+    snapshot = SimpleNamespace(config=config)
+    agent = SimpleNamespace(
+        _capability_config_runtime_snapshot=snapshot,
+        capability_config_path=tmp_path / "missing.yaml",
+    )
+
+    assert capability_config_for_agent(agent) is config
+    assert agent._capability_config_runtime_snapshot is snapshot
+
+
+@pytest.mark.parametrize("selection_enabled", [False, True])
+def test_agent_capability_config_ignores_mock_cache_and_uses_file(tmp_path, selection_enabled):
+    path = tmp_path / "capability_config.yaml"
+    path.write_text(
+        f"enable_capability_package_selection: {str(selection_enabled).lower()}\n",
+        encoding="utf-8",
+    )
+    agent = MagicMock()
+    agent.capability_config_path = path
+
+    config = capability_config_for_agent(agent)
+
+    assert isinstance(config, CapabilityConfig)
+    assert config.enable_capability_package_selection is selection_enabled
+    assert agent._capability_config_runtime_snapshot.config is config
+    assert agent._capability_config_runtime_snapshot.path == path
+
+
+def test_agent_capability_config_unreadable_file_does_not_accept_mock_cache(tmp_path):
+    agent = MagicMock()
+    agent.capability_config_path = tmp_path / "missing.yaml"
+
+    assert capability_config_for_agent(agent) is None
 
 
 def test_safe_patch_applies_with_audit(tmp_path):

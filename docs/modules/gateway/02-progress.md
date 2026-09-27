@@ -35,6 +35,8 @@ max_tokens，按模型窗口 ÷ 4 夹取）多一行“实际使用值”，按 
 修改写入当前加载的用户配置并记入 `settings-changes.jsonl`，重启 Gateway 后生效。TUI 本地模式明确拒绝，文本还原保留原值。
 测试见 `test_settings_chat_control.py`，设计见 `docs/design/PARAMETER_CENTER.md`。
 
+2026-09-27：新定时运行在原claim成功后、模型前准确绑定原TaskStore，旧任务/pins/marker保持。合法冻结回复经当前pending回读后优先走原交付；定时工作使用原终态映射，无法确认状态或结算CAS失败时不消费wake。独立复核发现的claim接手反例已复现并修复，最终14文件375项通过；完整组合全仓与原生验证仍待完成，见[回归记录](../../../TESTS.md#c16全仓回归修复2026-09-27验证中)。
+
 `/skills` 异常回执修正（分支 `claude/skills-receipt-fix`，2026-09-27，Codex 静态复核发现）：`execute_skill_control` 的普通异常
 原来一律回“原记录没有改动、请稍后重试”，但回滚/删除是先改目录和登记表、再追加账本，账本追加抛 OSError 时改动已经生效。
 现在按子命令是否写入选回执：写子命令（confirm/reject/learned_revert/learned_remove）只说结果没能完整确认、先查当前状态，

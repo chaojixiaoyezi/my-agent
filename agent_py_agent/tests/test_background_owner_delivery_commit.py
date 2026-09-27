@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import time
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -158,6 +159,9 @@ def test_unregistered_identity_route_still_records_reply_in_canonical_thread(tmp
             "channel_user_id": "owner-rv",
         }
     )
+    # 这是已有任务的后台续跑；夹具必须先建立与显式 task_id 一致的原任务事实。
+    store.tasks.bind({"thread_id": thread.thread_id, "task_id": "task-rv",
+                      "goal": "已有任务的后台汇报", "status": "active"})
     channels = DeliveryService(build_default_channel_registry(agent.config))
     runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=channels)
 
@@ -221,6 +225,9 @@ def test_undelivered_reply_stays_pending_and_redelivers_without_model_turn(tmp_p
             "now": 1.0,
         }
     )
+    # 这是已有任务的后台续跑；夹具必须先建立与显式 task_id 一致的原任务事实。
+    store.tasks.bind({"thread_id": thread.thread_id, "task_id": "task-im",
+                      "goal": "已有任务的后台汇报", "status": "active"})
     channels = _ScriptedDelivery(proactive=True, status="rejected")
     scheduler = BackgroundMainAgentScheduler(
         {
@@ -239,6 +246,7 @@ def test_undelivered_reply_stays_pending_and_redelivers_without_model_turn(tmp_p
 
     assert scheduler.tick(now=20.0) == []
     assert len(backend.prompts) == 1
+    assert store.tasks.load("task-im").status == "completed"
     pending = store.wakes.pending_one(signal.wake_signal_id)
     assert pending is not None
     frozen = pending.metadata["owner_delivery"]
@@ -253,6 +261,7 @@ def test_undelivered_reply_stays_pending_and_redelivers_without_model_turn(tmp_p
     channels.status = "sent"
     report = scheduler.tick(now=51.0)
     assert len(backend.prompts) == 1, "重投不得再花一次模型轮"
+    assert store.tasks.load("task-im").status == "completed"
     # 两次投递携带的是同一份冻结正文，证明重投没有重新生成内容。
     assert channels.sent == [frozen["content"], frozen["content"]]
     assert [item.delivery_status for item in report] == ["sent"]
@@ -441,6 +450,9 @@ def test_frozen_payload_survives_a_repeated_failure(tmp_path) -> None:
             "now": 1.0,
         }
     )
+    # 这是已有任务的后台续跑；夹具必须先建立与显式 task_id 一致的原任务事实。
+    store.tasks.bind({"thread_id": thread.thread_id, "task_id": "task-im",
+                      "goal": "已有任务的后台汇报", "status": "active"})
     channels = _ScriptedDelivery(proactive=True, status="rejected")
     scheduler = BackgroundMainAgentScheduler(
         {
@@ -458,7 +470,9 @@ def test_frozen_payload_survives_a_repeated_failure(tmp_path) -> None:
     )
 
     assert scheduler.tick(now=20.0) == []
+    assert store.tasks.load("task-im").status == "completed"
     assert scheduler.tick(now=51.0) == []
+    assert store.tasks.load("task-im").status == "completed"
     pending = store.wakes.pending_one(signal.wake_signal_id)
     assert pending is not None
     assert pending.metadata["owner_delivery"]["content"] == "阶段汇报：还需要一个子代理收口。"
@@ -499,6 +513,9 @@ def test_declared_transport_keeps_obligation_while_adapter_unavailable(tmp_path)
             "now": 1.0,
         }
     )
+    # 这是已有任务的后台续跑；夹具必须先建立与显式 task_id 一致的原任务事实。
+    store.tasks.bind({"thread_id": thread.thread_id, "task_id": "task-im",
+                      "goal": "已有任务的后台汇报", "status": "active"})
     # proactive=True 但适配器不可用（缺少凭据 → adapter_for() 返回 None）：
     # 投递服务会给出"声明过、但当前不可用"的回执，义务不能因此消失。
     channels = _ScriptedDelivery(proactive=True, status="rejected")
@@ -519,6 +536,7 @@ def test_declared_transport_keeps_obligation_while_adapter_unavailable(tmp_path)
 
     assert scheduler.tick(now=20.0) == []
     assert len(_backend.prompts) == 1, "首次唤醒会跑一片模型"
+    assert store.tasks.load("task-im").status == "completed"
     pending = store.wakes.pending_one(signal.wake_signal_id)
     assert pending is not None, "外发未完成时唤醒必须留在队列里"
     assert pending.metadata["owner_delivery"]["external_sent"] is False
@@ -528,6 +546,7 @@ def test_declared_transport_keeps_obligation_while_adapter_unavailable(tmp_path)
     channels.status = "sent"
     report = scheduler.tick(now=51.0)
     assert len(_backend.prompts) == 1, "重投不得再花一次模型轮"
+    assert store.tasks.load("task-im").status == "completed"
     assert [item.delivery_status for item in report] == ["sent"]
     assert report[0].wake_handled is True
     assert store.wakes.pending_one(signal.wake_signal_id) is None
@@ -768,6 +787,96 @@ def test_legacy_v1_frozen_payload_still_redelivers(tmp_path) -> None:
         "老版本冻结的正文。"
     ]
     assert BackgroundRunRequest is not None
+
+
+# LLM: 使用真实 TaskStore/wake 和现有冻结协议，仅在测试临时目录建账；模型与渠道仍为本文件的计数替身。
+# 函数用途: 准备已有冻结答复再发生任务终态的交叉场景，不用假 active 状态绕过调度入口。
+def _frozen_delivery_case(tmp_path, *, status="completed", payload_changes=None):
+    agent, backend = _agent(tmp_path)
+    store = agent.conversation_store
+    thread = store.threads.get_or_create({
+        "canonical_user_id": "owner-frozen", "channel": "feishu",
+        "channel_conversation_id": "chat-frozen", "channel_user_id": "owner-frozen",
+    })
+    task_id = "task-frozen"
+    store.tasks.bind({"thread_id": thread.thread_id, "task_id": task_id, "goal": "原任务"})
+    signal = store.wakes.raise_signal({
+        "thread_id": thread.thread_id, "root_task_id": task_id,
+        "reason": "scheduled_progress_report", "now": 2.0,
+    })
+    store.wakes.cache_delivery(signal.wake_signal_id, {
+        "schema_version": "wake-owner-delivery.v2", "task_id": task_id,
+        "reason": signal.reason, "content": "原模型已经生成的冻结答复。",
+        "external_sent": False, "receipt_id": "", "ownership": "external",
+        "message_metadata": {"conversation_request_id": "original-turn", "task_id": task_id},
+        **(payload_changes or {}),
+    })
+    store.tasks.update_status({"task_id": task_id, "status": status, "now": 3.0})
+    channels = _ScriptedDelivery(proactive=True, status="sent")
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=channels)
+    scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": store})
+    return SimpleNamespace(
+        store=store, thread=thread, task_id=task_id, channels=channels, backend=backend,
+        scheduler=scheduler, signal=store.wakes.pending_one(signal.wake_signal_id),
+    )
+
+
+@pytest.mark.parametrize("status", ["cancelled", "interrupted", "abandoned", "superseded"])
+def test_frozen_delivery_after_task_stop_uses_original_suppression(tmp_path, status) -> None:
+    case = _frozen_delivery_case(tmp_path, status=status)
+    assert delivery_module.cached_owner_delivery(case.signal) is not None
+
+    reports = case.scheduler.tick(now=20.0)
+
+    assert case.channels.sent == [] and case.backend.prompts == []
+    assert case.store.messages.recent(case.thread.thread_id, limit=0) == []
+    assert case.store.tasks.load(case.task_id).status == status
+    assert case.store.wakes.pending_one(case.signal.wake_signal_id) is None
+    assert [report.delivery_status for report in reports] == ["suppressed"]
+
+
+@pytest.mark.parametrize("invalid", ["handled", "wrong_task", "wrong_reason", "bad_schema", "empty", "stale_thread"])
+def test_invalid_frozen_delivery_cannot_send_or_restart_model(tmp_path, invalid) -> None:
+    changes = {
+        "wrong_task": {"task_id": "another-task"},
+        "wrong_reason": {"reason": "another-reason"},
+        "bad_schema": {"schema_version": "unknown.v9"},
+        "empty": {"content": "", "delivery_artifacts": []},
+    }
+    case = _frozen_delivery_case(tmp_path, payload_changes=changes.get(invalid))
+    if invalid == "handled":
+        case.store.wakes.mark_handled(case.signal.wake_signal_id, now=4.0)
+        assert case.scheduler._run_wake_signal(case.signal, now=20.0) is None
+    elif invalid == "stale_thread":
+        selected = replace(case.signal, thread_id="another-thread")
+        assert case.scheduler._run_wake_signal(selected, now=20.0) is None
+        assert case.store.wakes.pending_one(case.signal.wake_signal_id) == case.signal
+    else:
+        assert delivery_module.cached_owner_delivery(case.signal) is None
+        assert case.scheduler.tick(now=20.0) == []
+    assert case.backend.prompts == [] and case.channels.sent == []
+    assert case.store.messages.recent(case.thread.thread_id, limit=0) == []
+    assert case.store.tasks.load(case.task_id).status == "completed"
+
+
+def test_completed_frozen_sent_delivery_only_commits_once_through_scheduler(tmp_path) -> None:
+    case = _frozen_delivery_case(tmp_path, payload_changes={
+        "external_sent": True, "receipt_id": "original-receipt",
+    })
+
+    reports = case.scheduler.tick(now=20.0)
+
+    assert len(reports) == 1 and reports[0].wake_handled is True
+    assert reports[0].delivery_status == "sent"
+    assert case.channels.sent == [] and case.backend.prompts == []
+    rows = case.store.messages.recent(case.thread.thread_id, limit=0)
+    assert [row.content for row in rows] == ["原模型已经生成的冻结答复。"]
+    assert rows[0].metadata["conversation_request_id"] == "original-turn"
+    assert case.store.tasks.load(case.task_id).status == "completed"
+    assert case.store.wakes.pending_one(case.signal.wake_signal_id) is None
+    assert case.scheduler.tick(now=51.0) == []
+    assert case.store.messages.recent(case.thread.thread_id, limit=0) == rows
+    assert case.channels.sent == [] and case.backend.prompts == []
 
 
 # ---------------------------------------------------------------------------

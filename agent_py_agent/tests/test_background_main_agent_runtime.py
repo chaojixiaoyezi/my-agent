@@ -6901,6 +6901,9 @@ def test_background_internal_status_is_not_saved_as_ordinary_chat(tmp_path) -> N
         }
     )
 
+    # 这是已有任务的后台续跑；夹具必须先建立与显式 task_id 一致的原任务事实。
+    store.tasks.bind({"thread_id": thread.thread_id, "task_id": "task-1",
+                      "goal": "已有任务的后台汇报", "status": "active"})
     report = runtime.run_once(
         {
             "thread_id": thread.thread_id,
@@ -6936,6 +6939,9 @@ def test_scheduler_records_bad_progress_policy_without_blocking_due_policy(tmp_p
             "now": 10.0,
         }
     )
+    # 这是已有任务的后台续跑；夹具必须先建立与显式 task_id 一致的原任务事实。
+    store.tasks.bind({"thread_id": thread.thread_id, "task_id": "task-1",
+                      "goal": "已有任务的后台汇报", "status": "active"})
     store.progress.create(
         {
             "thread_id": thread.thread_id,
@@ -7682,6 +7688,9 @@ def test_urgent_wake_uses_full_background_tool_profile(tmp_path) -> None:
         }
     )
 
+    # 这是已有任务的后台续跑；夹具必须先建立与显式 task_id 一致的原任务事实。
+    store.tasks.bind({"thread_id": thread.thread_id, "task_id": "task-1",
+                      "goal": "已有任务的后台汇报", "status": "active"})
     runtime.run_once(
         {
             "thread_id": thread.thread_id,
@@ -7769,6 +7778,9 @@ def test_background_runtime_applies_owner_disabled_tools(tmp_path) -> None:
         }
     )
 
+    # 这是已有任务的后台续跑；夹具必须先建立与显式 task_id 一致的原任务事实。
+    store.tasks.bind({"thread_id": thread.thread_id, "task_id": "task-1",
+                      "goal": "已有任务的后台汇报", "status": "active"})
     runtime.run_once(
         {
             "thread_id": thread.thread_id,
@@ -7800,6 +7812,9 @@ def test_background_runtime_applies_wake_policy_snapshot(tmp_path) -> None:
         }
     )
 
+    # 这是已有任务的后台续跑；夹具必须先建立与显式 task_id 一致的原任务事实。
+    store.tasks.bind({"thread_id": thread.thread_id, "task_id": "task-1",
+                      "goal": "已有任务的后台汇报", "status": "active"})
     runtime.run_once(
         {
             "thread_id": thread.thread_id,
