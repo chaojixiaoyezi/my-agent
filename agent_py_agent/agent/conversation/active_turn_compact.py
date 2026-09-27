@@ -18,8 +18,10 @@ from .authority import (
 )
 from .compact_checkpoint import committed_live_tool_compact_source_refs
 from .compact_guard import (
+    CompactCapacityFacts,
     CompactInterruptCheck,
     ConversationCompactError,
+    compact_failure_progress_fields,
     raise_if_compact_interrupted,
 )
 from .compact_progress import (
@@ -328,7 +330,6 @@ def _execute_active_turn_compact(
     plan: _ActiveTurnArchiveCompactPlan,
     request: ActiveTurnArchiveCompactRequest,
 ) -> ActiveTurnArchiveCompactResult:
-    from .compact_guard import compact_exception_code
     from .live_tool_compact import record_live_tool_compact_failure
 
     callback = request.progress_callback
@@ -393,7 +394,7 @@ def _execute_active_turn_compact(
             phase="failed",
             stage="failed",
             percent=0,
-            error_code=compact_exception_code(exc),
+            failure=exc,
         )
         raise
     _emit_progress(
@@ -438,9 +439,15 @@ def _project_active_turn_request(
             or type(projection.projected_tokens) is not int
             or projection.projected_tokens < 0 or projection.material is None):
         raise ConversationCompactError("完整恢复请求投影不可用", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
-    if projection.projected_tokens >= _compact_request_input_ceiling(agent, plan.policy):
+    ceiling = _compact_request_input_ceiling(agent, plan.policy)
+    if projection.projected_tokens >= ceiling:
         raise ConversationCompactError(
             "完整恢复请求仍超出输入阈值或已知输出预留", code="COMPACT_CANDIDATE_TOO_LARGE",
+            capacity=CompactCapacityFacts(
+                candidate_tokens=projection.projected_tokens, input_ceiling_tokens=ceiling,
+                summary_tokens=estimate_tokens(replacement), retained_items=len(plan.retained_records),
+                candidates_tried=1,
+            ),
         )
     return projection
 
@@ -601,7 +608,7 @@ def _emit_progress(
     stage: str,
     percent: int,
     after_tokens: int = 0,
-    error_code: str = "",
+    failure: BaseException | None = None,
 ) -> None:
     if callback is None:
         return
@@ -612,8 +619,10 @@ def _emit_progress(
         "stage": str(stage),
         "percent": min(100, max(0, int(percent or 0))),
         "after_tokens": max(0, int(after_tokens or 0)),
-        "error_code": str(error_code or ""),
+        "error_code": "",
     }
+    if failure is not None:
+        payload.update(compact_failure_progress_fields(failure))
     try:
         callback(payload)
     except (InterruptedError, ToolCancelled):

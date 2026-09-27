@@ -35,6 +35,17 @@ CONVERSATION_COMPACT_PROGRESS_STAGES = frozenset(
         "failed",
     }
 )
+# 失败时可选的候选容量计量（非负整数），只在生产者给出时复制；旧事件和其他阶段没有这些字段。
+# 字段名与 compact_guard.CompactCapacityFacts 一一对应，由测试锁同步。
+COMPACT_CAPACITY_PROGRESS_FIELDS = (
+    "candidate_tokens",
+    "input_ceiling_tokens",
+    "summary_tokens",
+    "retained_items",
+    "candidates_tried",
+)
+# 只在生产者给出时才复制的可选计数：模型窗口，加上失败时的候选容量计量。
+_OPTIONAL_COUNT_FIELDS = ("context_window_tokens", *COMPACT_CAPACITY_PROGRESS_FIELDS)
 _COMPACT_SOURCE_AUTHORITY_PAIRS = frozenset(
     {
         (COMPACT_SOURCE_TRANSCRIPT, COMPACT_AUTHORITY_CONVERSATION),
@@ -47,6 +58,7 @@ _COMPACT_SOURCE_AUTHORITY_PAIRS = frozenset(
 
 # LLM: Historical v1 events predate source fields. Missing both fields maps to one
 # explicit legacy display pair; optional model window is copied, never inferred from a threshold.
+# 失败容量计量同样只在给出时复制，缺失不补零、不从 after_tokens 推断。
 # 函数用途: 把一条外部 Compact 进度整理成固定公开字段，拒绝未知来源与提交权限组合。
 def normalize_conversation_compact_progress(value: object) -> dict[str, object]:
     if not isinstance(value, Mapping):
@@ -91,8 +103,7 @@ def normalize_conversation_compact_progress(value: object) -> dict[str, object]:
     }
     if error_code:
         payload["error_code"] = error_code
-    if "context_window_tokens" in value:
-        payload["context_window_tokens"] = _nonnegative_int(value["context_window_tokens"])
+    payload.update({key: _nonnegative_int(value[key]) for key in _OPTIONAL_COUNT_FIELDS if key in value})
     return payload
 
 
@@ -108,6 +119,7 @@ def _nonnegative_int(value: object) -> int:
 
 __all__ = [
     "COMPACT_AUTHORITY_CONVERSATION",
+    "COMPACT_CAPACITY_PROGRESS_FIELDS",
     "COMPACT_AUTHORITY_LEGACY",
     "COMPACT_AUTHORITY_TURN_LOCAL",
     "COMPACT_SOURCE_ACTIVE_TURN",

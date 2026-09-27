@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, TypeAlias
 
 from ..runtime_errors import RecoverableRuntimeError
@@ -24,17 +25,31 @@ if TYPE_CHECKING:
 CompactInterruptCheck: TypeAlias = Callable[[], bool]
 
 
+# LLM: 只装候选容量的非负整数计量，字段名即公开进度字段名（与 compact_progress.COMPACT_CAPACITY_PROGRESS_FIELDS
+#   由测试锁同步）；不带摘要正文、消息或路径，也不写进线程记录。改字段要同步 normalizer、TUI 白名单和两处生产者。
+# 类用途: 说明“候选为什么装不下”：最小候选的完整下一请求多大、输入上限多少、其中摘要约占多少、保留了几条、试了几个候选。
+@dataclass(frozen=True)
+class CompactCapacityFacts:
+    candidate_tokens: int
+    input_ceiling_tokens: int
+    summary_tokens: int
+    retained_items: int
+    candidates_tried: int
+
+
 # LLM: Compact failures are typed runtime facts; callers must not infer a retry class from text.
+#   capacity 只是失败时的诊断计量，不参与重试、熔断或错误码判定。
 # 类用途: 表示摘要候选或 checkpoint 未通过，Gateway 会按可恢复运行时错误如实上报。
 class ConversationCompactError(RecoverableRuntimeError):
     category = "conversation_compact"
 
     # LLM: Keep the Compact-specific code and generic runtime error_code identical for Gateway propagation.
-    # 函数用途: 保留具体压缩失败原因，避免外围把窗口越界误报成会话文件损坏。
-    def __init__(self, message: str, *, code: str) -> None:
+    # 函数用途: 保留具体压缩失败原因，避免外围把窗口越界误报成会话文件损坏；容量类失败可附带候选计量。
+    def __init__(self, message: str, *, code: str, capacity: CompactCapacityFacts | None = None) -> None:
         super().__init__(message)
         self.code = str(code)
         self.error_code = self.code
+        self.capacity = capacity
 
 
 # LLM: This typed failure prevents repeated model calls while the persisted thread circuit cools.
@@ -206,12 +221,25 @@ def compact_exception_code(exc: BaseException) -> str:
     return f"COMPACT_{name or 'FAILED'}"
 
 
+# LLM: 两条压缩链（会话 transcript 与活动回合）的 failed 进度都从这里取失败字段：安全错误码，加上错误自带的
+#   容量计量（若有）。只读异常对象，不改熔断账；字段必须经 compact_progress 白名单才会外发。
+# 函数用途: 把一次压缩失败整理成进度事件要带的字段，让“候选过大”失败留下候选大小与上限。
+def compact_failure_progress_fields(exc: BaseException) -> dict[str, object]:
+    fields: dict[str, object] = {"error_code": compact_exception_code(exc)}
+    capacity = getattr(exc, "capacity", None)
+    if isinstance(capacity, CompactCapacityFacts):
+        fields.update(asdict(capacity))
+    return fields
+
+
 __all__ = [
+    "CompactCapacityFacts",
     "CompactInterruptCheck",
     "ConversationCompactCircuitOpenError",
     "ConversationCompactError",
     "compact_circuit_is_open",
     "compact_exception_code",
+    "compact_failure_progress_fields",
     "compact_partitions",
     "raise_if_compact_interrupted",
     "record_compact_failure",

@@ -1663,6 +1663,25 @@ def _thinking_live_fold_hint(
     )
 
 
+# LLM: 只读 block.metadata 里已经过 compact_progress 白名单的字段；容量数字只在失败事件真带了候选与上限时显示，
+#   缺字段不补零、不推断。改文案要同步 test_tui_block_renderer 的压缩失败用例。
+# 函数用途: 生成压缩中断/失败那一行红字；“候选过大”失败会附上候选大小、上限和摘要约占多少，方便判断是摘要太长还是固定开销太大。
+def _compact_terminal_label(block: TuiBlock) -> str:
+    if block.phase == "interrupted":
+        return "上下文压缩已中断"
+    label = "上下文压缩失败，原上下文已保留"
+    metadata = block.metadata
+    error_code = str(metadata.get("error_code") or "").strip()
+    if error_code:
+        label = f"{label} · {error_code}"
+    candidate, ceiling = metadata.get("candidate_tokens"), metadata.get("input_ceiling_tokens")
+    if type(candidate) is int and type(ceiling) is int:
+        label = f"{label} · 候选 {candidate:,} / 上限 {ceiling:,} tokens"
+        if type(metadata.get("summary_tokens")) is int:
+            label = f"{label}（摘要约 {metadata['summary_tokens']:,}）"
+    return label
+
+
 # LLM: Durable Compact renders provider-backed milestones only. Manual control operations cannot
 # stream server stages, so they use an explicitly indeterminate moving bar rather than a fake
 # percentage; renderer time never becomes compact authority.
@@ -1672,16 +1691,8 @@ def _render_compact_progress(
     context: TuiRenderContext,
 ) -> tuple[FormattedLine, ...]:
     if block.phase in {"failed", "interrupted"}:
-        label = (
-            "上下文压缩已中断"
-            if block.phase == "interrupted"
-            else "上下文压缩失败，原上下文已保留"
-        )
-        error_code = str(block.metadata.get("error_code") or "").strip()
-        if block.phase == "failed" and error_code:
-            label = f"{label} · {error_code}"
         return wrap_fragments(
-            (("class:tui-error", label),),
+            (("class:tui-error", _compact_terminal_label(block)),),
             width=context.width,
             first_prefix=(("class:tui-error", "! "),),
             continuation_prefix=(("class:tui-error", "  "),),

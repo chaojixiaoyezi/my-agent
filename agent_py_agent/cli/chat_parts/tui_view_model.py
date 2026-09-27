@@ -10,6 +10,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from ...agent.conversation.compact_progress import COMPACT_CAPACITY_PROGRESS_FIELDS
 from ...agent.conversation.model_metrics import newer_model_metrics
 from .tui_events import JournalAppendResult, TuiEvent, TuiEventJournal
 from .tui_identity_window import TuiIdentityWindow
@@ -1454,6 +1455,7 @@ def _public_metadata(payload: dict[str, Any]) -> dict[str, Any]:
         "stream_index",
         "received_chars",
         "history_incomplete",
+        *COMPACT_CAPACITY_PROGRESS_FIELDS,
     }
     metadata = {key: payload[key] for key in allowed if key in payload}
     if (

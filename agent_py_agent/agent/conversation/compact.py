@@ -19,11 +19,13 @@ from ..memory_archive import estimate_tokens
 from .channels import project_user_reply
 from .compact_checkpoint import CompactCheckpointRequest, write_compact_checkpoint
 from .compact_guard import (
+    CompactCapacityFacts,
     CompactInterruptCheck,
     ConversationCompactCircuitOpenError,
     ConversationCompactError,
     compact_circuit_is_open,
     compact_exception_code,
+    compact_failure_progress_fields,
     compact_partitions,
     raise_if_compact_interrupted,
     record_compact_failure,
@@ -553,7 +555,7 @@ def _execute_compact_request(request: _CompactRunRequest) -> ConversationCompact
             phase="failed",
             stage="failed",
             percent=0,
-            error_code=compact_exception_code(exc),
+            failure=exc,
         )
         raise
     finally:
@@ -747,6 +749,7 @@ def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
     )
     partition_count = max(1, len(partitions))
     trigger_fallback: _CompactCandidate | None = None
+    rejected = _RejectedCandidates()
     provider_surface = _resolved_provider_surface(request)
     for partition_index, (compact_rows, ordinary_tail) in enumerate(partitions):
         retained_tail = concatenate_message_rows((ordinary_tail, protected_suffix))
@@ -796,7 +799,7 @@ def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
             percent=measure_percent,
             after_tokens=candidate.projected_tokens_after,
         )
-        if candidate.projected_tokens_after >= _compact_request_input_ceiling(request.agent, request.policy):
+        if rejected.reject_if_over(candidate, _compact_request_input_ceiling(request.agent, request.policy)):
             candidate = None
             continue
         if candidate.projected_tokens_after <= request.policy.recovery_target_tokens:
@@ -813,7 +816,7 @@ def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
 
     error = ConversationCompactError(
         "conversation compact candidate did not fit the input trigger and known output reserve",
-        code="COMPACT_CANDIDATE_TOO_LARGE",
+        code="COMPACT_CANDIDATE_TOO_LARGE", capacity=rejected.capacity(),
     )
     record_compact_failure(
         request.store,
@@ -822,6 +825,38 @@ def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
         now=request.attempted_at,
     )
     raise error
+
+
+# LLM: 只在候选循环里累计被输入上限拒掉的候选，立即取出计量数字、不持有候选对象（其中的完整请求材料要随候选释放）；
+#   结果只进 COMPACT_CANDIDATE_TOO_LARGE 的容量诊断，不参与候选选择、回退或提交。
+# 类用途: 记住被上限拒掉的候选里最小那个的大小、摘要占比和保留条数，以及一共拒了几个，全部被拒时给失败事件留证据。
+@dataclass
+class _RejectedCandidates:
+    smallest: CompactCapacityFacts | None = None
+    count: int = 0
+
+    # LLM: 接受门与候选循环原判据一致：完整下一请求 ≥ 输入上限即拒绝。只读候选的计量与摘要文本；摘要 token 用与
+    #   会话估算同一 estimate_tokens 口径，是估算值。返回值决定候选是否被丢弃，改判据要同步 active_turn 的同一接受门。
+    # 函数用途: 判断候选是否超过输入上限；超过就记下来（只保留完整下一请求最小的那个的计量）并返回 True。
+    def reject_if_over(self, candidate: _CompactCandidate, ceiling: int) -> bool:
+        if candidate.projected_tokens_after < ceiling:
+            return False
+        self.count += 1
+        if self.smallest is not None and self.smallest.candidate_tokens <= candidate.projected_tokens_after:
+            return True
+        self.smallest = CompactCapacityFacts(
+            candidate_tokens=candidate.projected_tokens_after,
+            input_ceiling_tokens=ceiling,
+            summary_tokens=estimate_tokens(candidate.summary),
+            retained_items=len(candidate.retained_tail),
+            candidates_tried=0,
+        )
+        return True
+
+    # LLM: 只读累计结果，candidates_tried 取被拒总数；返回值只进 COMPACT_CANDIDATE_TOO_LARGE 的 capacity。
+    # 函数用途: 生成失败要带的容量计量；一个候选都没被拒过时返回 None。
+    def capacity(self) -> CompactCapacityFacts | None:
+        return None if self.smallest is None else replace(self.smallest, candidates_tried=self.count)
 
 
 # LLM: 宿主已备好的 provider_surface 原样沿用；只有给了 model_surface 才在此准备，准备失败先记原失败码再上抛，不进入候选循环。
@@ -1114,7 +1149,7 @@ def _emit_compact_progress(
     stage: str,
     percent: int,
     after_tokens: int = 0,
-    error_code: str = "",
+    failure: BaseException | None = None,
 ) -> None:
     callback = request.progress_callback
     if callback is None:
@@ -1133,8 +1168,10 @@ def _emit_compact_progress(
         "source_messages": len(request.pending),
         "source_kind": COMPACT_SOURCE_TRANSCRIPT,
         "commit_authority": COMPACT_AUTHORITY_CONVERSATION,
-        "error_code": str(error_code or "").strip(),
+        "error_code": "",
     }
+    if failure is not None:
+        payload.update(compact_failure_progress_fields(failure))
     try:
         callback(payload)
     except (InterruptedError, ToolCancelled):

@@ -761,6 +761,7 @@ agent_py_agent/
 |   |-- test_compact_source_lifetime.py # 全选真实JSONL到摘要提交的正文驻留、完整覆盖及峰值验证
 |   |-- test_model_selection_isolation.py # 双会话选模故障隔离、近窗口完整材料和连接校准失效组合
 |   |-- test_compact_output_reserve.py # 三宿主完整输入和原输出cap、容量拒绝无提交及Responses字段对照
+|   |-- test_compact_capacity_facts.py # 候选过大失败带出最小候选/上限/摘要占比/保留条数/候选数，白名单与TUI失败行
 |   |-- test_compact_retained_history.py # 三宿主完整保留行、媒体/工具回放和超容量不丢来源
 |   |-- test_conversation_history_seed.py # 具体种子与只读来源两边界逐项等价、冻结时刻与追加、互斥及改写/截短/替换/删除失败
 |   |-- test_host_history_seed_lifetime.py # 三宿主4.2M字符种子准备只驻留地址、解析后完整hash不变
@@ -1593,6 +1594,7 @@ docs/
 - `agent_py_agent/agent/conversation/compact_text_source.py`：原摘要循环的临时顺序字符源，EOF/hash验证后才能返回摘要；不落盘、不写检查点。
 - `agent_py_agent/tests/test_compact_text_source.py`：编码源完整性、有限窗口、取消与迭代器释放、纠正请求预算及大批消息峰值验证。
 
+- `agent_py_agent/tests/test_compact_capacity_facts.py`：两条压缩链候选过大时的容量计量，从错误对象、failed 进度、公开白名单一直到 TUI 失败行；包括选中最小候选、无候选或已接受时不带计量。
 - `agent_py_agent/tests/test_compact_output_reserve.py`：真实冻结请求与本地输出预留门组合，当前要求和工具schema保留，过界零业务发送/覆盖提交，Responses普通及OAuth未知上限分开验证。
 
 - `agent_py_agent/tests/test_model_selection_isolation.py`：复用原Gateway、线程CAS、模型目录与校准入口验证并发隔离和窗口变化；仅HTTP与决策回复为替身。

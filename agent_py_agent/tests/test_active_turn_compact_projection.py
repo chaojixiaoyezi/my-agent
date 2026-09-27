@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
+from dataclasses import asdict
 from types import SimpleNamespace
 
 import pytest
@@ -20,7 +21,11 @@ from agent_py_agent.agent.conversation.active_turn_compact import (
 )
 from agent_py_agent.agent.conversation.authority import CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR
 from agent_py_agent.agent.conversation.compact_checkpoint import committed_compact_checkpoint_chain
-from agent_py_agent.agent.conversation.compact_guard import ConversationCompactError
+from agent_py_agent.agent.conversation.compact_guard import (
+    CompactCapacityFacts,
+    ConversationCompactError,
+)
+from agent_py_agent.agent.conversation.compact_progress import COMPACT_CAPACITY_PROGRESS_FIELDS
 from agent_py_agent.agent.conversation.compact_projection import (
     ConversationCompactProjection,
     ConversationCompactSource,
@@ -200,11 +205,27 @@ def test_unknown_projection_never_falls_back_to_small_estimate(carried_case, tok
 @pytest.mark.parametrize("tokens", [9_000, 12_000])
 def test_complete_request_at_or_above_trigger_cannot_commit(carried_case, tokens):
     case = carried_case
+    projected = []
+
+    def project(summary, records, _generation):
+        projected.append((summary, list(records)))
+        return ConversationCompactProjection(tokens, object())
+
     with pytest.raises(ConversationCompactError) as error:
-        _compact(case, request_projector=lambda *_: ConversationCompactProjection(tokens, object()))
+        _compact(case, request_projector=project, progress_callback=case.progress.append)
     assert error.value.code == "COMPACT_CANDIDATE_TOO_LARGE"
     _assert_uncommitted(case)
     assert len(case.summaries) == 1 and not case.checkpoint_path.exists()
+    # 失败要留下容量计量：完整请求多大、输入上限（触发线 90%×10000）、摘要约占多少、保留几条、试了几个候选。
+    (summary, retained), = projected
+    expected = CompactCapacityFacts(
+        candidate_tokens=tokens, input_ceiling_tokens=9_000, summary_tokens=estimate_tokens(summary),
+        retained_items=len(retained), candidates_tried=1,
+    )
+    assert error.value.capacity == expected
+    failed, = [event for event in case.progress if event.get("phase") == "failed"]
+    assert failed["source_kind"] == "active_turn_tool_archive"
+    assert {key: failed[key] for key in COMPACT_CAPACITY_PROGRESS_FIELDS} == asdict(expected)
 
 
 @pytest.mark.parametrize("tokens,accepted", [(2_999, True), (3_000, False), (4_000, False)])

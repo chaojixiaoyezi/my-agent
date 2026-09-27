@@ -890,6 +890,9 @@ Gateway 解析并校验会话 cwd，但不再把 `workspace_task.task_path` 覆�
   后才进入 committing；TUI 不读日志文案猜进度。完成块收起后保留原有 content-free Compact 结果行；未提交
   但已恢复 IR 的候选发送 `superseded/candidate_discarded` 并静默收起，只有真实异常发送红色 `failed`。
   Gateway 和 TUI 都只允许有界字母数字错误码，异常 message、摘要和 prompt 不能穿过该边界。
+- 候选过大失败（`COMPACT_CANDIDATE_TOO_LARGE`）另带白名单里的整数容量计量：最小被拒候选的完整下一请求 token、
+  输入上限、摘要估算 token、保留条数、试过的候选数。计量来自 `ConversationCompactError.capacity`（`CompactCapacityFacts`），
+  字段名以 `compact_progress.COMPACT_CAPACITY_PROGRESS_FIELDS` 为准；TUI 失败行显示“候选 X / 上限 Y tokens（摘要约 Z）”。
 - 同 thread 前台与后台模型工作片共用 durable run claim，一次只执行一个真实 slice。用户普通输入命中 live
   foreground 时作为 typed steer 在最近 provider 安全点进入；父代理已经让出等待 child 时，新 foreground
   slice 不等待所有 child，最多等待正在执行的单个后台片释放 lane。

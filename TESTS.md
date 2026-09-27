@@ -1,5 +1,23 @@
 # 测试与发布验收
 
+## Compact 候选过大留下容量计量（2026-09-27，Codex G2 复验请求）
+
+- **来源**：G2 复验里第二代自动 Compact 报 `COMPACT_CANDIDATE_TOO_LARGE`。failed 进度只有 after_tokens=0（未计量默认值），
+  候选总量、输入上限、摘要占比都没留下，无法判断是摘要过长还是固定开销过大。
+- **做法**：会话 transcript（`compact._RejectedCandidates`，取最小被拒候选）和活动回合（`_project_active_turn_request`）
+  两条压缩链的错误带 `CompactCapacityFacts`。failed 进度经 `compact_failure_progress_fields` 取字段，再经
+  `COMPACT_CAPACITY_PROGRESS_FIELDS` 白名单外发。TUI 失败行显示“候选 X / 上限 Y tokens（摘要约 Z）”。
+- **新测试**：
+  - `test_compact_capacity_facts.py`（9 项）：
+    - 字段与白名单同步；
+    - 只有带计量的错误才出计量；
+    - normalizer 缺失不补零、负数夹 0；
+    - 两个候选按两种顺序都取最小的一个，含保留条数与摘要估算；
+    - 摘要失败、接受候选都不带计量；
+    - TUI 有计量才显示、无计量保持原文案。
+  - `test_active_turn_compact_projection.py` 的上限用例断言活动回合的计量与 failed 事件字段。
+- **复现**：`python -m pytest agent_py_agent/tests/test_compact_capacity_facts.py agent_py_agent/tests/test_active_turn_compact_projection.py -q`。
+
 ## 审计保留期 0 不再删光全部审计（2026-09-27，my-agent 提交 `c2d88a0b0`，集成者补注释）
 
 - **来源**：my-agent 补参数说明时核对 `cli_audit_cleanup_days` 的 0 语义：`agent/audit/query.py` 的截止时间是 `now - days*86400`，

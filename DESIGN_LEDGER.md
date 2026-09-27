@@ -795,6 +795,12 @@ auth 表单取消和参数拒绝已验，官方设备码在两处环境被 HTTP 
 
 ## 当前待落地或待复验
 
+- 已实现（2026-09-27，Codex G2 复验请求）：Compact 候选过大诊断。G2 第二代自动 Compact 报 `COMPACT_CANDIDATE_TOO_LARGE`
+  时，failed 进度只有未计量的 after_tokens=0，无法判断是摘要过长还是固定开销太大。现在会话 transcript 和活动回合两条压缩链
+  被输入上限拒掉候选时，错误带 `CompactCapacityFacts`：最小候选的完整下一请求 token、输入上限、摘要估算 token、保留条数、
+  试过的候选数。这组计量经 `conversation_compaction_progress.v1` 的可选白名单字段外发，TUI 失败行也会显示。
+  不改线程记录 schema、熔断和重试，也不参与候选选择。本轮工具 IR 压缩链不会抛这个错误，所以没有接入。
+
 - 进行中（2026-09-27，用户要求）：参数中心。用户指出参数和常数散落、同名不同义、改一个要猜含义，并希望 my-agent 能自助
   修改更多设置。方向：每个可调参数一个权威定义（默认值、范围、说明、安全等级、生效时机、读取方），YAML 与 AgentConfig 由测试
   核对；my-agent 可改全部非安全参数，权限、路径、凭据、宿主控制面继续结构性拒绝；每次修改记账、可回滚；TUI 与 IM 用 `/settings`。
