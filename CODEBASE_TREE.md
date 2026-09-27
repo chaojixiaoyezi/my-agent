@@ -393,6 +393,7 @@ agent_py_agent/
 |   |   |-- restart_service.py         # 安全重启唯一状态源：请求/合并、两段排空、完成标记、冷却防循环与发起方通知
 |   |   |-- restart_control.py         # /restart：管理员在 TUI/IM 里安排 Gateway 安全重启
 |   |   |-- admin_control_service.py   # /admin 绑定 IM 管理员身份，/approve、/deny 决定本会话唯一待决审批
+|   |   |-- skill_control_service.py   # 聊天 /skills：TUI 与 IM 里查看、确认、拒绝技能提案，查看、回滚、删除自动总结的 Skill
 |   |   `-- goal_control_service.py    # 同 thread 持续目标的创建/修改/暂停/恢复/清除
 |   |-- conversation/                  # 通道会话账本、权威 transcript、结构化任务关联/续接
 |   |   |-- store.py                    # 同源领域组件组装、跨领域上下文与账本维护
@@ -611,6 +612,7 @@ agent_py_agent/
 |   |   |-- skill_learning_prompt.py   # S3 提示词、严格 JSON schema 与输出解析（frontmatter 无损规范化）
 |   |   |-- skill_learning_publish.py  # S3 自动闸门与发布：重名/删过的名字/上限/所有权 hash/脱敏/解析/guard，回滚与删除
 |   |   |-- skill_learning_store.py    # S3 唯一落盘权威：请求队列、registry.json、ledger.jsonl、版本全文、removed 归档与锁
+|   |   |-- skill_learning_report.py   # 自动总结 Skill 的状态推导与用户回滚/删除，CLI 与聊天 /skills 共用
 |   |   |-- decision_skill_proposal_review.py # 自学习 S2：`skills proposals list` 的可选审核顺序点，只重排展示并加宿主标签，从不确认/拒绝/写入
 |   |   |-- persona_repository.py      # owner SOUL/USER/AGENTS 受控加载、版本/CAS/回滚唯一入口
 |   |   |-- model_profile_tool.py      # manage_models：主会话代理自助增删改切 owner 模型目录，复用唯一配置服务，回执不含密钥
@@ -652,6 +654,7 @@ agent_py_agent/
 |-- tests/                             # 单元、集成、真实链路回归
 |   |-- fixtures/decision/jev_capability_rounding.json # 合成材料真实Jev响应的脱敏概率舍入replay，不含凭据
 |   |-- test_skill_proposals.py         # 自学习 S1：默认关闭、幂等提案、迁移不碰、确认拒绝矩阵、快照可见、runner 自动确认与 CLI 往返
+|   |-- test_skill_chat_control.py     # 聊天 /skills：解析校验、Gateway 分派不落入 stop、TUI 文本还原与本地拒绝、提案确认版本、自动 Skill 回滚删除
 |   |-- test_skill_learning.py          # 自学习 S3：触发判据、请求有界脱敏、create/update/skip、各闸门拒绝码、上限、重试、忙时顺延、回滚删除
 |   |-- test_reasoning_effort.py        # 智能程度：换算与优先级、两种协议真实组包、线程档位、投影一致、子代理继承、/effort、档案字段与配置
 |   |-- test_structured_output_mode.py  # 结构化输出方式：方式解析、DeepSeek 用 json_object 且 schema 进提示、其余仍 json_schema、档案字段、缓存键、TUI 与配置
@@ -1397,6 +1400,8 @@ docs/
 - `agent/gateway_parts/restart_service.py`：Gateway 安全重启的唯一状态源；工具、`/restart` 只写请求，排空与换进程由服务循环经 `cli/gateway_restart_handover.py` 执行。
 - `agent/gateway_parts/turn_recovery_control.py`：`/recover` 只看当前 thread 工作任务的根主代理执行轮；查看只读，处置经唯一出口 `recover_attempt_unknown`，不重放旧操作。
 - `agent/gateway_parts/admin_control_service.py`：`/admin`、`/approve`、`/deny` 的唯一执行入口；只信任认证 scope 与结构化私聊类型，批准只写原 permission bridge 的精确决定文件。
+- `agent/gateway_parts/skill_control_service.py`：聊天 `/skills` 的唯一执行入口，TUI 与 IM 共用；按控制范围解析 owner（与 `/model` 同一解析），提案确认/拒绝必须带用户看到的版本号并由服务端锁内复核，列提案时调用审核顺序点；自动总结 Skill 走 `skill_learning_report`；回执不含本机路径，不暴露给模型。
+- `agent/capability/skill_learning_report.py`：自动总结 Skill 的状态推导（active/user_modified/missing）、列表、详情与用户回滚/删除，CLI `skills learned` 与聊天 `/skills learned` 共用。
 - `agent/user_space/admin_password.py` 与 `admin_channel_identity.py`：管理员密码（scrypt、节流）与 IM 身份绑定的唯一权威，位于 `config/`；owner 解析经 `request_worker.admin_channel_identity_for_request` 精确匹配。
 - `cli/admin_identity_commands.py`：本机管理员设置密码与管理绑定的唯一 CLI 入口；设计见 `docs/design/ADMIN_CHANNEL_IDENTITY.md`。
 - `agent/gateway_parts/owner_conversation_store.py`：沿原配置与 owner 路径组装模型菜单和插件管理共用的轻量会话 Store，不初始化完整 Agent。

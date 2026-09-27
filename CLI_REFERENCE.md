@@ -445,6 +445,10 @@ my-agent skills proposals confirm <proposal_id> --expected-revision 1
 my-agent skills proposals reject <proposal_id> --expected-revision 1 --json
 ```
 
+TUI 与 IM（飞书等）里用聊天命令做同样的事：`/skills`、`/skills proposals [all]`、`/skills show <提案编号>`、
+`/skills confirm <提案编号> <版本>`、`/skills reject <提案编号> <版本>`、`/skills learned`、`/skills learned show|revert|remove <名称>`。
+提案编号可用至少 6 位前缀；确认、拒绝必须带当前版本号。
+
 ### `skills learned`：自动总结的 Skill
 
 配置 `enable_self_learning: true` 后，主代理正常完成、且本轮工具轮数达到 `self_learning_min_tool_rounds`（默认 6）

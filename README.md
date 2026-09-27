@@ -218,6 +218,7 @@ my-agent subagents                        # 子代理红绿灯看板；不调用
 my-agent runtime-stale-attempts           # 列出无身份的悬挂运行轮，--settle 显式结清；不调用模型
 my-agent skills learned list              # 查看自动总结的 Skill、待处理请求和今日调用次数；不调用模型
 my-agent skills proposals list            # 查看子代理经验 Skill 提案；不调用模型
+# TUI 与飞书等 IM 里同样可用：发 /skills 查看待确认提案和自动总结的 Skill，按回执里给出的命令确认、拒绝、回滚或删除
 ```
 
 默认的长期数据都在当前用户的 owner home 下：

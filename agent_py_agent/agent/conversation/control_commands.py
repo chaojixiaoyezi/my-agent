@@ -42,6 +42,7 @@ ControlKind = Literal[
     "admin",
     "approve",
     "deny",
+    "skills",
     "unsupported",
 ]
 TaskCommandKind = Literal["audit_prepare", "decision_experiment"]
@@ -248,6 +249,8 @@ def parse_conversation_command(
         return _audit_command(raw)
     if name == "experiment":
         return _experiment_command(trailing)
+    if name == "skills":
+        return _skills_command(trailing)
     if name == "verbose":
         value = str(trailing or "").strip().lower()
         return ConversationControlCommand(
@@ -415,6 +418,40 @@ def _model_command(trailing: object) -> ConversationControlCommand:
     return ConversationControlCommand(
         "model", value=value, operation="select", valid=len(value.split()) == 1, usage=_MODEL_USAGE,
     )
+
+
+_SKILLS_USAGE = (
+    "用法：/skills 查看待确认的技能提案与自动总结的 Skill；/skills proposals [all] 列出提案；"
+    "/skills show <提案编号>；/skills confirm <提案编号> <版本>；/skills reject <提案编号> <版本>；"
+    "/skills learned 列出自动总结的 Skill；/skills learned show|revert|remove <名称>。"
+)
+# 提案编号是 24 位十六进制，聊天里允许用至少 6 位的前缀；自动总结 Skill 的名字沿用生成合同的安全名字规则。
+_SKILL_PROPOSAL_REF = re.compile(r"[0-9a-f]{6,24}")
+_LEARNED_SKILL_NAME = re.compile(r"[a-z0-9][a-z0-9-]{1,62}[a-z0-9]")
+_SKILLS_SIMPLE = {"": "overview", "help": "help", "proposals": "proposals", "learned": "learned"}
+
+
+# LLM: 只做词法解析：子命令、提案编号前缀（十六进制）、版本号（正整数）与 Skill 名（安全名字）都在这里拒绝式校验，
+#   不合规时 valid=False 并给出用法，绝不把任意文字当成编号或路径交给服务。value 保存规范化后的参数，TUI 据此还原命令文本。
+# 函数用途: 把 `/skills …` 解析成结构化的技能提案/自动 Skill 控制。
+def _skills_command(trailing: object) -> ConversationControlCommand:
+    # 参数统一小写：提案编号是十六进制、Skill 名按合同只含小写，子命令大小写不敏感。
+    tokens = str(trailing or "").casefold().split()
+    head, rest = (tokens[0] if tokens else ""), tokens[1:]
+    if head in _SKILLS_SIMPLE and not (head == "learned" and rest):
+        valid = not rest or (head == "proposals" and rest == ["all"])
+        return ConversationControlCommand("skills", value=" ".join(tokens), operation=_SKILLS_SIMPLE[head],
+                                          valid=valid, usage=_SKILLS_USAGE)
+    if head in {"show", "confirm", "reject"}:
+        ref_ok = bool(rest) and bool(_SKILL_PROPOSAL_REF.fullmatch(rest[0]))
+        shape_ok = len(rest) == 1 if head == "show" else len(rest) == 2 and rest[1].isdigit() and int(rest[1]) > 0
+        return ConversationControlCommand("skills", value=" ".join(tokens), operation=head,
+                                          valid=ref_ok and shape_ok, usage=_SKILLS_USAGE)
+    action = rest[0] if head == "learned" and rest else ""
+    known = action in {"show", "revert", "remove"}
+    valid = known and len(rest) == 2 and bool(_LEARNED_SKILL_NAME.fullmatch(rest[1]))
+    return ConversationControlCommand("skills", value=" ".join(tokens), operation=f"learned_{action}" if known else "unknown",
+                                      valid=valid, usage=_SKILLS_USAGE)
 
 
 _ADMIN_USAGE = "用法：/admin <管理员密码> 在 IM 私聊中验证管理员身份；/admin status 查看；/admin logout 解除。"

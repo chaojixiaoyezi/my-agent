@@ -9,6 +9,13 @@
 
 回滚边界：旧版运行时读不了 v3，回滚必须把运行时和数据成对核对并保留新账。详见[依赖拆分](docs/design/TOOL_LOOP_DEPENDENCY_SPLIT.md#两线合并后的来源身份与模型轮结果决策分支吸收-main2026-09-23)。
 
+- **技能提案与自动总结 Skill 可在 TUI 和 IM 里处理：`/skills`**（2026-09-27，分支 `claude/skill-proposals-tui-im`，本地回归与变异通过，见 TESTS）：
+  - **起因**：用户说“命令行几乎不会用，所以所有都能 TUI 和 IM 来”。这两类操作原来只有 `my-agent skills …` 命令行入口，
+    自学习审核顺序点 skill_proposal_review 因此在 TUI/IM 里永远触发不了。
+  - **做法**：新增聊天控制 `/skills`（查看/确认/拒绝提案，查看/回滚/删除自动总结 Skill），经 Gateway 控制通道执行，TUI 与 IM 共用；
+    确认、拒绝保留版本号复核；TUI 本地模式明确拒绝（未列出的控制会落进停止分支），文本还原带上参数。
+  - **原则**（长期）：面向用户的能力都要有 TUI 与 IM 入口，只有命令行入口的视为缺口；本机维护命令可以只留命令行。
+  - 详见 [自动总结 Skill 的用户入口](docs/design/SKILL_AUTO_SUMMARY.md#10-用户入口)。
 - **决策点“触发了但被挡下”也留审计记录**（2026-09-27，分支 `claude/decision-skip-records`，本地回归与变异通过，见 TESTS）：
   - **起因**：my-agent 在真实 TUI 里测 Jev 点位，planning 等没有任何记录，就写出“宿主未接线”的开发需求。实际都已接线且开启；
     planning 那一轮由 3186 字粘贴开启（后两条短消息是中途插话），原话超过 1024 字时按设计整点跳过，却什么都不写。
