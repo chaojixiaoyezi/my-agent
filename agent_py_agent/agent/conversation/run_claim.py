@@ -37,10 +37,13 @@ class ConversationRunLaneRequest:
     acquire_transition: Callable[[str, Callable], dict | None] | None = None
 
 
+# LLM: 续约间隔默认只由租约 TTL 推导（配置里已没有单独的心跳键，原 background_claim_heartbeat_interval_seconds
+#   已并入 background_claim_ttl_seconds）；configured_interval_seconds 只留给构造参数/测试显式覆盖，结果永远小于 TTL。
+# 函数用途: 按租约秒数算出执行权心跳续约的间隔。
 def claim_heartbeat_interval_seconds(
     *,
     ttl_seconds: int,
-    configured_interval_seconds: float | None,
+    configured_interval_seconds: float | None = None,
 ) -> float:
     """Normalize an explicit or automatic claim heartbeat interval."""
     ttl = max(1.0, float(ttl_seconds or 1))

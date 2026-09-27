@@ -1,24 +1,29 @@
-
+# LLM: 上下文窗口的唯一解析入口：填了 model_context_window_tokens 就用它，留空时依次看服务商元数据、后端配置窗口，
+#   最后兜底 128000。只读，不探测网络；压力预检与 Compact 都必须用这里的结果。
+# 模块用途: 算出当前模型真正按多大的上下文窗口来预检和压缩。
 from __future__ import annotations
 
 from collections.abc import Mapping
 
-DEFAULT_CONTEXT_WINDOW_TOKENS = 200_000
+from ...settings.defaults import (
+    DEFAULT_MODEL_CONTEXT_WINDOW_TOKENS,
+    configured_context_window_tokens,
+)
 
 
-# LLM: 用户显式窗口是配置权威，优先于可选 metadata；未显式配置时沿用 provider 优先，不额外探测。
+# LLM: model_context_window_tokens 填了正整数就是用户显式容量，优先于服务商元数据；留空时先用服务商元数据，
+#   再用后端自带的配置窗口，最后兜底 DEFAULT_MODEL_CONTEXT_WINDOW_TOKENS（128000）。不额外探测。
 # 函数用途: 给真实模型压力与 Compact 计算同一窗口，避免菜单配置只影响显示。
 def resolve_model_context_window_tokens(agent: object) -> int:
     backend = getattr(agent, "backend", None)
-    if bool(getattr(getattr(agent, "config", None), "model_context_window_explicit", False)):
-        configured = _configured_context_window(agent, backend)
-        if configured > 0:
-            return configured
+    explicit = configured_context_window_tokens(getattr(agent, "config", None))
+    if explicit > 0:
+        return explicit
     provider_window = _provider_context_window(backend)
     if provider_window > 0:
         return provider_window
-    configured = _configured_context_window(agent, backend)
-    return configured if configured > 0 else DEFAULT_CONTEXT_WINDOW_TOKENS
+    configured = _positive_int(getattr(backend, "configured_context_window_tokens", 0))
+    return configured if configured > 0 else DEFAULT_MODEL_CONTEXT_WINDOW_TOKENS
 
 
 def _provider_context_window(backend: object | None) -> int:
@@ -36,14 +41,6 @@ def _provider_context_window(backend: object | None) -> int:
         direct_values.append(getattr(backend, "context_window_tokens", 0))
     direct = _first_positive(direct_values)
     return direct if direct > 0 else _window_from_backend_metadata(backend)
-
-
-def _configured_context_window(agent: object, backend: object | None) -> int:
-    config = getattr(agent, "config", None)
-    configured = _positive_int(getattr(config, "model_context_window_tokens", 0))
-    if configured > 0:
-        return configured
-    return _positive_int(getattr(backend, "configured_context_window_tokens", 0))
 
 
 def _window_from_backend_metadata(backend: object) -> int:

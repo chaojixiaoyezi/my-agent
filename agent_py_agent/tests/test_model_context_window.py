@@ -15,23 +15,28 @@ def test_configured_context_window_is_used_without_backend() -> None:
     assert resolve_model_context_window_tokens(agent) == 200_000
 
 
-def test_provider_context_window_overrides_config_even_when_smaller() -> None:
+def test_filled_config_window_beats_provider_even_when_larger() -> None:
+    """参数减量第 2 批：填了数字就用这个数（原 model_context_window_explicit 已并入），不再被服务商元数据改掉。"""
     agent = _agent(
         SimpleNamespace(model_context_window_tokens=200_000),
         SimpleNamespace(context_window_tokens=128_000),
     )
 
-    assert resolve_model_context_window_tokens(agent) == 128_000
+    assert resolve_model_context_window_tokens(agent) == 200_000
+    blank = _agent(SimpleNamespace(model_context_window_tokens=None), SimpleNamespace(context_window_tokens=128_000))
+    assert resolve_model_context_window_tokens(blank) == 128_000
 
 
-def test_provider_context_window_overrides_config_when_larger() -> None:
+def test_blank_config_window_uses_the_provider_window() -> None:
     class Backend:
         def provider_context_window_tokens(self) -> int:
             return 320_000
 
-    agent = _agent(SimpleNamespace(model_context_window_tokens=200_000), Backend())
+    agent = _agent(SimpleNamespace(model_context_window_tokens=None), Backend())
 
     assert resolve_model_context_window_tokens(agent) == 320_000
+    filled = _agent(SimpleNamespace(model_context_window_tokens=200_000), Backend())
+    assert resolve_model_context_window_tokens(filled) == 200_000
 
 
 def test_missing_provider_window_falls_back_to_config() -> None:
@@ -79,13 +84,14 @@ def test_backend_metadata_method_window_is_used() -> None:
     assert resolve_model_context_window_tokens(_agent(SimpleNamespace(), MetadataBackend())) == 96_000
 
 
-def test_unknown_model_window_uses_generic_200k_fallback() -> None:
+def test_unknown_model_window_uses_128k_fallback() -> None:
+    """没填窗口、服务商也不报时按 128000 兜底，与合并前的默认配置值一致（原 200K 兜底实际走不到）。"""
     agent = _agent(SimpleNamespace(model_name="unknown", max_tokens=4096), SimpleNamespace())
 
-    assert resolve_model_context_window_tokens(agent) == 200_000
+    assert resolve_model_context_window_tokens(agent) == 128_000
 
 
-def test_http_backend_model_metadata_beats_config(monkeypatch) -> None:
+def test_http_backend_model_metadata_fills_a_blank_config_window(monkeypatch) -> None:
     from agent_py_agent.agent.backends.base import BackendOptions
     from agent_py_agent.agent.backends.openai_chat import OpenAICompatibleBackend
 
@@ -98,13 +104,14 @@ def test_http_backend_model_metadata_beats_config(monkeypatch) -> None:
             api_base="https://provider.example/v1",
             api_key="test-key",
             model_name="provider-model",
-            context_window_tokens=200_000,
         )
     )
-    agent = _agent(SimpleNamespace(model_context_window_tokens=200_000), backend)
+    agent = _agent(SimpleNamespace(model_context_window_tokens=None), backend)
 
     assert resolve_model_context_window_tokens(agent) == 128_000
     assert backend.provider_context_window_tokens() == 128_000
+    filled = _agent(SimpleNamespace(model_context_window_tokens=200_000), backend)
+    assert resolve_model_context_window_tokens(filled) == 200_000
 
 
 def test_http_backend_metadata_without_window_uses_config(monkeypatch) -> None:

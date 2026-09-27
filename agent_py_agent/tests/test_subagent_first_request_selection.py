@@ -176,7 +176,7 @@ def test_real_child_first_request_capture_matches_actual_provider_payload(tmp_pa
     agent = SimpleAgent(AgentConfig(
         model_backend=model_backend, model_name=model_name, api_base=api_base,
         api_key="fake-private-key", stream_enabled=False, enable_tools=enable_tools,
-        model_context_window_tokens=window, model_context_window_explicit=True, max_tool_rounds=1,
+        model_context_window_tokens=window, max_tool_rounds=1,
     ), tmp_path)
     params = CreateRunParams(goal="检查已提供的材料并给出结论", thought="", plan=[], allowed_tools=["read_file"])
     prepared = agent.subagents.base_service.prepare_run(params=params)
@@ -250,7 +250,7 @@ def _automatic_child(tmp_path, *, backend="anthropic_compatible", model="MiniMax
     agent = SimpleAgent(AgentConfig(
         model_backend="anthropic_compatible", model_name="inherited", api_base="https://inherited.test/anthropic",
         api_key="fake-key", stream_enabled=False, enable_tools=True, enable_subagents=True, max_subagents=10, max_tool_rounds=3,
-        max_tokens=output_limit, model_context_window_tokens=200_000, model_context_window_explicit=True,
+        max_tokens=output_limit, model_context_window_tokens=200_000,
     ), tmp_path)
     endpoint = endpoint or ("https://api.minimaxi.com/anthropic" if backend == "anthropic_compatible" else "https://opencode.ai/zen/go/v1")
     key, _ = add(agent, model_backend=backend, model_name=model, api_base=endpoint, model_context_window_tokens=window)

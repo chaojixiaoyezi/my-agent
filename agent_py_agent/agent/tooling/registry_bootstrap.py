@@ -1,3 +1,5 @@
+# LLM: 工具注册的装配点，按注册参数构造内置工具；只注册不执行，权限仍由原动作策略裁决。
+# 模块用途: 把文件、归档读取、命令、网页等内置工具注册进工具表。
 from __future__ import annotations
 
 from typing import Any
@@ -49,6 +51,8 @@ def register_base_tools(registry: Any, params: Any) -> None:
 
 
 
+# LLM: 文件类工具与归档读取工具在这里按注册参数构造；artifact 读取额度只传字符数（窗口固定在工具内），只注册不执行工具。
+# 函数用途: 把列目录、找文件、读写文件、搜索和归档读取等工具注册进工具表。
 def _register_filesystem_tools(registry: Any, params: Any) -> None:
     workspace_roots = registry.workspace_roots
     access_options = filesystem_access_options(
@@ -74,7 +78,6 @@ def _register_filesystem_tools(registry: Any, params: Any) -> None:
     registry.register(
         ReadArtifactTool(
             getattr(params, "artifact_root", None) or registry.workspace_root,
-            artifact_read_budget_window_seconds=params.artifact_read_budget_window_seconds,
             artifact_read_budget_max_chars=params.artifact_read_budget_max_chars,
             default_read_chars=params.artifact_default_read_chars,
         )

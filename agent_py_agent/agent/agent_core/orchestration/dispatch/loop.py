@@ -1,5 +1,5 @@
-
-
+# LLM: 多轮派工循环只组合单轮派工与统计；重跑次数、并发等数值都读各自唯一配置，不在循环里另设默认。
+# 模块用途: 按轮数上限反复执行子代理派工，直到没有待跑工作，并汇总每轮记录。
 from __future__ import annotations
 
 import logging
@@ -214,31 +214,21 @@ def dispatch_loop(
     return report
 
 
+# LLM: 用与正式派工同一个候选闸统计剩余 runner，重跑次数取配置 runner_failure_retry_limit；读账本失败要如实返回错误，
+#   不能伪装成“没有待跑任务”。只读，不启动 runner。
+# 函数用途: 派工循环结束后统计还有多少子代理 run 等着启动或重跑。
 def _final_pending_runner_count(agent) -> tuple[int, dict[str, object]]:
     try:
         from ...runner.dispatch import (
             RunnerCandidatePolicy,
             _dispatch_runner_candidates,
-            _runner_max_attempts,
-            _same_run_redispatch_limit,
+            runner_failure_retry_limit,
         )
 
-        runtime_policy = getattr(agent, "runtime_guard_policy", None)
-        runner_max_attempts = _runner_max_attempts(
-            agent.config.runner_failure_policy,
-            runtime_policy=runtime_policy,
-        )
-        same_run_limit = _same_run_redispatch_limit(
-            getattr(agent.config, "same_run_redispatch_limit", None),
-            runtime_policy=runtime_policy,
-        )
         candidates = _dispatch_runner_candidates(
             agent.subagents.list_runs(),
             max_runners=999,
-            policy=RunnerCandidatePolicy(
-                runner_max_attempts=runner_max_attempts,
-                same_run_redispatch_limit=same_run_limit,
-            ),
+            policy=RunnerCandidatePolicy(runner_retry_limit=runner_failure_retry_limit(agent.config)),
         )
         return len(candidates), {}
     except Exception as exc:

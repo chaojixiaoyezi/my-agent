@@ -60,9 +60,7 @@ def _probe(agent: object, data: dict, profile_id: str) -> dict:
 
     row = _resolved_profile(agent, data, profile_id)
     # 输出上限沿用正式请求的值（后端工厂按窗口夹取），短测才能发现供应商不接受这个上限的情况。
-    config = replace(agent.config, **row, api_key_env="", model_context_window_explicit=True, request_timeout=60,
-                     stream_enabled=True,
-                     model_temperature_explicit="temperature" in row or agent.config.model_temperature_explicit)
+    config = replace(agent.config, **row, api_key_env="", request_timeout=60, stream_enabled=True)
     backend = get_backend(config.model_backend, config)
     started = time.monotonic()
     response = backend.generate("你好，请简短回复一句问候。")

@@ -1,4 +1,5 @@
-
+# LLM: 候选挑选只用 runner/dispatch 的唯一候选闸；普通失败的重跑次数由调用方按配置 runner_failure_retry_limit 传入。只读。
+# 模块用途: 按派工上下文（显式 include、恢复指令或全部任务）挑出可以启动或重跑的子代理 run。
 from __future__ import annotations
 
 from ....subagents.models import (
@@ -19,16 +20,16 @@ from .params import DispatchContext
 from .runner_selection import requested_include_ids
 
 
+# LLM: runner_retry_limit 来自配置 runner_failure_retry_limit（普通失败后最多重跑几次，0 = 不重跑）；
+#   显式 include 的恢复派工另走恢复指令判定。只挑候选，不改任务、不启动 runner。
+# 函数用途: 按本次派工上下文挑出可以启动或重跑的子代理 run。
 def _runner_candidates_for_context(
     tasks: list,
     ctx: DispatchContext,
-    runner_max_attempts: int,
-    *,
-    same_run_redispatch_limit: int | None = None,
+    runner_retry_limit: int,
 ) -> list:
     policy = RunnerCandidatePolicy(
-        runner_max_attempts=runner_max_attempts,
-        same_run_redispatch_limit=same_run_redispatch_limit,
+        runner_retry_limit=runner_retry_limit,
         background_launch_id=ctx.background_launch_id,
     )
     if requested_include_ids(ctx):

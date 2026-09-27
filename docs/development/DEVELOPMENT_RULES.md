@@ -571,15 +571,13 @@ do_write()
   changes must update the matching project docs in the same patch. Do not leave
   behavior changes only in code or tests; future agents use the docs to avoid
   repeating old wrong designs.
-- Tool-call budget is per agent run, not per task tree and not per conversation.
-  Default policy is `tool_agent_budget_window_seconds=600` and
-  `tool_agent_budget_max_calls=200`, keyed by `run_id`. Calls without a `run_id`
-  are treated as ordinary main-agent chat and are not limited by this guard.
-- Artifact body reads have their own per-run character budget. Default policy is
-  `tool_artifact_read_budget_window_seconds=600` and
-  `tool_artifact_read_budget_max_chars=240000`, keyed by `run_id`; `0` disables
-  the budget. Read these two fields as one policy: "within this many seconds,
-  this run may read up to this many artifact body chars." Prefer
+- Tool-call budget is per agent instance (the main agent and each subagent have
+  their own window), not per task tree. The only knob is
+  `tool_agent_budget_max_calls` in `agent_config.yaml`; the window is fixed at
+  600 seconds and blank or `0` disables the guard, which is the default.
+- Artifact body reads have their own per-run character budget:
+  `tool_artifact_read_budget_max_chars=240000` within a fixed 600-second window,
+  keyed by `run_id`; `0` disables the budget. Prefer
   `read_artifact mode=search/head/tail` or small slices over full artifact reads.
   `read_file` may read registered task `work/blobs/tool_outputs/*.json` wrappers as
   artifact content.

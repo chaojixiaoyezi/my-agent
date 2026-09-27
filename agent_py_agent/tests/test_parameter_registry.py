@@ -89,10 +89,11 @@ def test_applied_value_with_uses_the_new_value_without_touching_the_config():
 
 
 def test_applied_value_uses_the_single_output_cap_formula():
-    """64K 在 128K 窗口模型上实际是 32768；窗口未知时等于配置值；没有派生规则的参数不给实际效果。"""
+    """64K 在 128K 窗口模型上实际是 32768；窗口没填（空或 0）按 128000 兜底；没有派生规则的参数不给实际效果。"""
     value, rule = applied_value("max_tokens", SimpleNamespace(max_tokens=65536, model_context_window_tokens=131072))
     assert value == 32768 and "窗口" in rule
-    assert applied_value("max_tokens", SimpleNamespace(max_tokens=65536, model_context_window_tokens=0))[0] == 65536
+    assert applied_value("max_tokens", SimpleNamespace(max_tokens=65536, model_context_window_tokens=0))[0] == 32000
+    assert applied_value("max_tokens", SimpleNamespace(max_tokens=65536, model_context_window_tokens=None))[0] == 32000
     assert applied_value("request_timeout", SimpleNamespace(request_timeout=300)) is None
     assert applied_value("max_tokens", None) is None
 

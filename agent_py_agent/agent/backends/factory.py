@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..settings.defaults import effective_max_output_tokens
+from ..settings.defaults import configured_context_window_tokens, effective_max_output_tokens
 from .anthropic import AnthropicCompatibleBackend
 from .base import BackendOptions, BaseBackend, EchoBackend, UnconfiguredBackend
 from .openai_chat import OpenAICompatibleBackend
@@ -20,6 +20,16 @@ def model_configuration_missing(name: str, config: Any | None = None) -> bool:
     return config is not None and name in {
         "openai_compatible", "openai_responses", "anthropic_compatible",
     } and not (str(config.model_name or "").strip() and str(config.api_base or "").strip())
+
+
+# LLM: temperature 是唯一采样温度旋钮（原 model_temperature_explicit 已并入）：空 = 不带温度字段，后端沿用供应商默认；
+#   填了数字 = 发送。后端内部的 temperature_explicit 只在这里按“是否填写”推导，不再有第二个配置来源。
+# 函数用途: 把配置里的温度换成后端构造参数，没填就返回空字典。
+def _temperature_options(config: Any) -> dict[str, Any]:
+    raw = getattr(config, "temperature", None)
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return {}
+    return {"temperature": float(raw), "temperature_explicit": True}
 
 
 # LLM: 只按显式协议构造后端；缺配置判据与后台准入共用，OAuth 引用附加认证层，不因失败换接口。
@@ -42,9 +52,8 @@ def get_backend(name: str, config: Any | None = None) -> BaseBackend:
         request_timeout=config.request_timeout,
         # 输出上限按已知窗口统一夹取（唯一权威见 effective_max_output_tokens），默认模型与模型档案走同一规则。
         max_tokens=effective_max_output_tokens(config),
-        context_window_tokens=getattr(config, "model_context_window_tokens", 0),
-        temperature=float(config.temperature),
-        temperature_explicit=getattr(config, "model_temperature_explicit", False),
+        context_window_tokens=configured_context_window_tokens(config),
+        **_temperature_options(config),
         top_p=getattr(config, "top_p", None),
         stream_enabled=getattr(config, "stream_enabled", True),
         prompt_cache_enabled=getattr(config, "anthropic_prompt_cache_enabled", True),

@@ -22,7 +22,7 @@ class TestPendingWorkState:
                 self._has_pending_work = False
                 self._consecutive_dispatch_rounds = 0
                 self.config = MagicMock()
-                self.config.runner_failure_policy = "auto"
+                self.config.runner_failure_retry_limit = 1
                 self.subagents = MagicMock()
 
                 # Mock list_runs 返回可调度的任务
@@ -51,7 +51,7 @@ class TestPendingWorkState:
                 self._has_pending_work = False
                 self._consecutive_dispatch_rounds = 0
                 self.config = MagicMock()
-                self.config.runner_failure_policy = "auto"
+                self.config.runner_failure_retry_limit = 1
                 self.subagents = MagicMock()
 
                 # Mock list_runs 返回空
@@ -74,7 +74,7 @@ class TestDispatchLoop:
 
         # Mock agent
         agent = MagicMock()
-        agent.config.runner_failure_policy = "auto"
+        agent.config.runner_failure_retry_limit = 1
         agent.has_pending_work = False
         agent.subagents.list_runs.return_value = []
 
@@ -100,7 +100,7 @@ class TestDispatchLoop:
         )
 
         agent = MagicMock()
-        agent.config.runner_failure_policy = "auto"
+        agent.config.runner_failure_retry_limit = 1
 
         # 跟踪调用次数
         call_count = [0]
@@ -137,7 +137,7 @@ class TestDispatchLoop:
         )
 
         agent = MagicMock()
-        agent.config.runner_failure_policy = "auto"
+        agent.config.runner_failure_retry_limit = 1
 
         # 每次都有任务，永远不空
         mock_report = MagicMock()
@@ -157,7 +157,7 @@ class TestDispatchLoop:
         from agent_py_agent.agent.agent_core.orchestration.dispatch.loop import dispatch_loop
 
         agent = MagicMock()
-        agent.config.runner_failure_policy = "auto"
+        agent.config.runner_failure_retry_limit = 1
         agent.subagents.list_runs.return_value = []
         mock_report = MagicMock()
         mock_report.records = [MagicMock()]
@@ -180,7 +180,7 @@ class TestDispatchLoop:
         from agent_py_agent.agent.agent_core.orchestration.dispatch.loop import dispatch_loop
 
         agent = MagicMock()
-        agent.config.runner_failure_policy = "auto"
+        agent.config.runner_failure_retry_limit = 1
         agent.subagents.list_runs.return_value = []
 
         def dispatch_side_effect(*args, **kwargs):
@@ -321,7 +321,7 @@ class TestFailureAutoTrigger:
                 self._has_pending_work = False
                 self._consecutive_dispatch_rounds = 0
                 self.config = MagicMock()
-                self.config.runner_failure_policy = "auto"
+                self.config.runner_failure_retry_limit = 1
                 self.subagents = MagicMock()
 
         agent = MockAgent()

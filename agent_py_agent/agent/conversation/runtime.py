@@ -4292,10 +4292,8 @@ class BackgroundMainAgentScheduler(
             "claim_ttl_seconds",
             _agent_config_int(agent_config, "background_claim_ttl_seconds"),
         )
-        heartbeat_interval = config.get(
-            "claim_heartbeat_interval_seconds",
-            _agent_config_int(agent_config, "background_claim_heartbeat_interval_seconds"),
-        )
+        # 心跳间隔只按 TTL 推导；构造参数里的 claim_heartbeat_interval_seconds 仅供测试显式加速。
+        heartbeat_interval = config.get("claim_heartbeat_interval_seconds")
         self.claim_ttl_seconds = max(1, int(claim_ttl or 1))
         self.claim_heartbeat_interval_seconds = claim_heartbeat_interval_seconds(
             ttl_seconds=self.claim_ttl_seconds,

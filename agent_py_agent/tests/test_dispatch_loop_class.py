@@ -18,7 +18,7 @@ class TestDispatchLoopClass:
         )
 
         agent = MagicMock()
-        agent.config.runner_failure_policy = "auto"
+        agent.config.runner_failure_retry_limit = 1
         agent.has_pending_work = False
         agent.subagents.list_runs.return_value = []
 
@@ -41,7 +41,7 @@ class TestDispatchLoopClass:
         )
 
         agent = MagicMock()
-        agent.config.runner_failure_policy = "auto"
+        agent.config.runner_failure_retry_limit = 1
 
         call_count = [0]
 
@@ -71,7 +71,7 @@ class TestDispatchLoopClass:
         )
 
         agent = MagicMock()
-        agent.config.runner_failure_policy = "auto"
+        agent.config.runner_failure_retry_limit = 1
 
         mock_report = MagicMock()
         mock_report.records = [MagicMock()]
@@ -93,7 +93,7 @@ class TestDispatchLoopClass:
         )
 
         agent = MagicMock()
-        agent.config.runner_failure_policy = "auto"
+        agent.config.runner_failure_retry_limit = 1
         agent.subagents.list_runs.return_value = []
         agent.has_pending_work = False
 
@@ -111,8 +111,7 @@ class TestDispatchLoopClass:
         from agent_py_agent.agent.agent_core.orchestration.dispatch.loop import dispatch_loop
 
         agent = MagicMock()
-        agent.config.runner_failure_policy = "auto"
-        agent.config.same_run_redispatch_limit = 0
+        agent.config.runner_failure_retry_limit = 1
         agent.has_pending_work = False
         mock_report = MagicMock()
         mock_report.records = []
@@ -137,7 +136,7 @@ class TestDispatchLoopClassRecords:
         )
 
         agent = MagicMock()
-        agent.config.runner_failure_policy = "auto"
+        agent.config.runner_failure_retry_limit = 1
 
         # 第一轮有2条记录，然后 _has_pending_work 变为 False，停止
         mock_report1 = MagicMock()
@@ -172,7 +171,7 @@ class TestDispatchLoopClassRecords:
         )
 
         agent = MagicMock()
-        agent.config.runner_failure_policy = "auto"
+        agent.config.runner_failure_retry_limit = 1
         agent.has_pending_work = False
 
         mock_report = MagicMock()
@@ -197,7 +196,7 @@ class TestDispatchLoopClassRecords:
         )
 
         agent = MagicMock()
-        agent.config.runner_failure_policy = "auto"
+        agent.config.runner_failure_retry_limit = 1
 
         mock_report = MagicMock()
         mock_report.records = [MagicMock()]
@@ -227,7 +226,7 @@ class TestDispatchLoopClassRecords:
         )
 
         agent = MagicMock()
-        agent.config.runner_failure_policy = "auto"
+        agent.config.runner_failure_retry_limit = 1
         agent.has_pending_work = False
 
         mock_report = MagicMock()

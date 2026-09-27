@@ -89,14 +89,14 @@ class TestNormalizeAgentConfig:
         """验证过高的 temperature 回退。"""
         data = {"temperature": "3.0"}
         normalized, warnings = normalize_agent_config(data)
-        assert normalized["temperature"] == "0.2"  # 默认值
+        assert normalized["temperature"] is None  # 默认留空 = 不发送温度
         assert len(warnings) > 0
 
     def test_normalize_temperature_negative(self):
         """验证负数 temperature 回退。"""
         data = {"temperature": "-1.0"}
         normalized, warnings = normalize_agent_config(data)
-        assert normalized["temperature"] == "0.2"  # 默认值
+        assert normalized["temperature"] is None  # 默认留空 = 不发送温度
         assert len(warnings) > 0
 
     def test_normalize_gateway_stale_seconds_valid(self):
@@ -165,7 +165,7 @@ class TestNormalizeSubagentAgentConfig:
         assert warnings == []
         assert normalized["max_subagents"] == 8
         assert normalized["subagent_hierarchy_max_children_per_tool_call"] == 0
-        assert normalized["runner_auto_concurrency"] == 8
+        assert normalized["runner_failure_retry_limit"] == 1
         assert normalized["subagent_allowed_tools"] == []
         assert normalized["subagent_role_template_dirs"] == []
 

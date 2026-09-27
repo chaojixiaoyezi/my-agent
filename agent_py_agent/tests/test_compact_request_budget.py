@@ -34,7 +34,7 @@ from agent_py_agent.tests._tool_runtime_harness import (
 def _request(text: str) -> AuxiliaryModelCallRequest:
     agent = SimpleNamespace(
         backend=SimpleNamespace(max_tokens=128),
-        config=SimpleNamespace(model_context_window_tokens=2000, model_context_window_explicit=True),
+        config=SimpleNamespace(model_context_window_tokens=2000),
     )
     return AuxiliaryModelCallRequest(
         agent=agent, prompt="请总结历史", system_instruction="稳定系统前缀",
@@ -199,7 +199,7 @@ def test_live_summary_bounds_complete_tool_arguments_results_and_reasoning(monke
     before = deepcopy(history)
     backend = SimpleNamespace(max_tokens=128, generate=lambda *_args, **_kwargs: None)
     agent = SimpleNamespace(backend=backend, config=SimpleNamespace(
-        model_context_window_tokens=8_000, model_context_window_explicit=True,
+        model_context_window_tokens=8_000,
     ))
     request = LiveToolHistorySummaryRequest(
         history=history, backend=backend, agent=agent, provider_history_messages=prior,

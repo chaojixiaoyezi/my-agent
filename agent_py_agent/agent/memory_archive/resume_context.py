@@ -1,4 +1,7 @@
 
+# LLM: 自动恢复上下文只看 memory_resume_auto_context_mode 一个配置（off/trigger/always，默认 off）；单次调用显式
+#   enabled=True 强制 always、enabled=False 强制关闭。只读归档与任务事实源，任何异常都不能打断用户请求。
+# 模块用途: 决定本轮要不要把恢复线索（Recovery Brief）注入提示，并在需要时从归档和任务事实里拼出这段线索。
 from __future__ import annotations
 
 """builds optional auto-injected recovery context from memory archive evidence.
@@ -48,6 +51,9 @@ class ResumeContextResult:
         return bool(self.context_block.strip())
 
 
+# LLM: enabled=None 时按配置 mode 判定；enabled=True 等于本次 always，enabled=False 本次关闭。reason 只作诊断，
+#   off/disabled/no_trigger/no_evidence/error 都返回空块；不写状态、不发请求。
+# 函数用途: 给一次运行算出要注入的恢复线索块；默认配置 off 时直接返回空结果，普通对话不做恢复检索。
 def build_auto_resume_context(
     agent: Any,
     user_prompt: str,
@@ -55,20 +61,13 @@ def build_auto_resume_context(
     enabled: bool | None = None,
 ) -> ResumeContextResult:
 
-    effective_enabled = (
-        bool(getattr(agent.config, "memory_resume_auto_context_enabled", False))
-        if enabled is None
-        else bool(enabled)
-    )
-    if not effective_enabled:
+    if enabled is False:
         return ResumeContextResult(reason="disabled")
-    mode = str(getattr(agent.config, "memory_resume_auto_context_mode", "trigger") or "trigger").strip().lower()
-    explicit_enabled = enabled is True
-    if explicit_enabled and mode == "off":
-        mode = "always"
+    configured = str(getattr(agent.config, "memory_resume_auto_context_mode", "off") or "off").strip().lower()
+    mode = "always" if enabled is True else configured
     if mode == "off":
         return ResumeContextResult(reason="off")
-    if not explicit_enabled and mode != "always" and not _has_resume_trigger(user_prompt):
+    if mode != "always" and not _has_resume_trigger(user_prompt):
         return ResumeContextResult(reason="no_trigger")
     try:
         return _build_resume_context(agent, user_prompt)

@@ -86,10 +86,11 @@ def _payload(backend: object, prompt: str, surface: _PayloadSurface) -> dict:
 
 
 # LLM: 原估算与完整 UTF-8 字节工程预算取大，再加实际 output cap；不是供应商精确上界，原 overflow/Compact 仍负责实际拒绝。
+#   窗口只认 model_context_window_tokens 显式填写的正整数（留空 = None = 容量未知，保留原模型）。
 # 函数用途: 用大幅余量保守筛选 text/tool 请求的 250K/1M 选择，未知模态在此前保留原模型。
 def _capacity(config: object, payload: dict) -> dict:
     window, cap = config.model_context_window_tokens, payload.get("max_tokens")
-    if not config.model_context_window_explicit or type(window) is not int or window <= 0 or type(cap) is not int or cap <= 0:
+    if type(window) is not int or window <= 0 or type(cap) is not int or cap <= 0:
         raise ValueError("request_capacity_unknown")
     count = estimate_tokens(payload)
     # UTF-8 每字节按一个 token 预留；额外协议余量覆盖常见模板/消息/工具条目，不宣称未知 provider 的数学证明。

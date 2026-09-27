@@ -86,62 +86,64 @@ def test_tool_rate_limit_boundary_policy_overrides_shared_defaults():
     assert policy.max_records == 64
 
 
-def test_runtime_guard_file_contains_tool_agent_budget_defaults():
-    from agent_py_agent.agent.agent_core.tool_guard.agent_budget import _budget_int
+def test_runtime_guard_file_no_longer_carries_agent_config_copies():
+    """参数减量第 2 批：工具轮上限、单代理工具预算、runner 重跑次数只在 AgentConfig 一个家；
+    守卫文件里这些副本在有 AgentConfig 时从来读不到，已删除。"""
     from agent_py_agent.agent.settings.config_io import load_simple_yaml
     from agent_py_agent.agent.settings.runtime_guard_config import (
         DEFAULT_RUNTIME_GUARD_CONFIG_PATH,
     )
-
-    class Config:
-        pass
 
     defaults = load_simple_yaml(DEFAULT_RUNTIME_GUARD_CONFIG_PATH)
 
-    assert _budget_int(Config(), "tool_agent_budget_window_seconds") == int(defaults["tool_agent_budget_window_seconds"])
-    assert _budget_int(Config(), "tool_agent_budget_max_calls") == int(defaults["tool_agent_budget_max_calls"])
+    for key in (
+        "max_tool_rounds",
+        "tool_agent_budget_window_seconds",
+        "tool_agent_budget_max_calls",
+        "runner_failure_retry_limit",
+        "same_run_redispatch_limit",
+    ):
+        assert key not in defaults
+    # 后台工作片预算与临时供应重派上限仍是守卫文件自己的概念。
+    assert defaults["background_max_tool_rounds"] == 5000
+    assert defaults["background_max_tool_calls_per_round"] == 4
+    assert defaults["provider_transient_redispatch_limit"] == 8
 
 
-def test_runtime_guard_file_contains_tool_loop_and_runner_defaults():
-    from agent_py_agent.agent.agent_core._tool_loop_service import _effective_max_tool_rounds
-    from agent_py_agent.agent.agent_core.runner.dispatch import (
-        _runner_max_attempts,
-        _same_run_redispatch_limit,
+def test_tool_rounds_and_agent_budget_ignore_patched_guard_yaml(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core._tool_loop_service import (
+        _DEFAULT_MAX_TOOL_ROUNDS,
+        _effective_max_tool_rounds,
     )
-    from agent_py_agent.agent.settings.config_io import load_simple_yaml
-    from agent_py_agent.agent.settings.runtime_guard_config import (
-        DEFAULT_RUNTIME_GUARD_CONFIG_PATH,
+    from agent_py_agent.agent.agent_core.tool_guard.agent_budget import (
+        ToolAgentBudgetRequest,
+        check_tool_agent_budget,
     )
+    from agent_py_agent.agent.settings import runtime_guard_config
 
-    class Agent:
-        class Config:
-            pass
+    config_path = tmp_path / "runtime_guard_config.yaml"
+    config_path.write_text("max_tool_rounds: 17\ntool_agent_budget_max_calls: 1\n", encoding="utf-8")
+    monkeypatch.setattr(runtime_guard_config, "DEFAULT_RUNTIME_GUARD_CONFIG_PATH", config_path)
 
-        config = Config()
+    agent = SimpleNamespace(config=SimpleNamespace())
+    params = SimpleNamespace(task_attributes={})
 
-    class Params:
-        task_attributes = {}
-
-    defaults = load_simple_yaml(DEFAULT_RUNTIME_GUARD_CONFIG_PATH)
-
-    assert _effective_max_tool_rounds(Agent(), Params()) == int(defaults["max_tool_rounds"])
-    assert _runner_max_attempts("auto") == int(defaults["runner_failure_retry_limit"])
-    assert _same_run_redispatch_limit(None) == int(defaults["same_run_redispatch_limit"])
+    assert _effective_max_tool_rounds(agent, params) == _DEFAULT_MAX_TOOL_ROUNDS
+    for index in range(3):
+        assert check_tool_agent_budget(ToolAgentBudgetRequest(agent, "run-1", "read_file", now=float(index))) is None
 
 
-def test_runner_retry_limit_only_uses_off_or_zero_to_disable():
-    from agent_py_agent.agent.agent_core.runner.dispatch import _runner_max_attempts
-    from agent_py_agent.agent.settings.config_io import load_simple_yaml
-    from agent_py_agent.agent.settings.runtime_guard_config import (
-        DEFAULT_RUNTIME_GUARD_CONFIG_PATH,
-    )
+def test_provider_supply_retry_limit_prefers_agent_policy_snapshot():
+    from agent_py_agent.agent.agent_core.runner.dispatch import _provider_supply_retry_limit
+    from agent_py_agent.agent.settings.runtime_guard_config import RuntimeGuardPolicy
 
-    default_limit = int(load_simple_yaml(DEFAULT_RUNTIME_GUARD_CONFIG_PATH)["runner_failure_retry_limit"])
+    policy = RuntimeGuardPolicy(values={"provider_transient_redispatch_limit": 5}, sources={})
 
-    assert _runner_max_attempts("off") == 0
-    assert _runner_max_attempts("0") == 0
-    for old_alias in ("none", "disabled", "false", "no"):
-        assert _runner_max_attempts(old_alias) == default_limit
+    assert _provider_supply_retry_limit("transient_error", runtime_policy=policy) == 5
+    assert _provider_supply_retry_limit("transient_error") == 8
+    assert _provider_supply_retry_limit("runner_error", runtime_policy=policy) == 0
 
 
 def test_agent_config_blank_tool_rounds_defaults_to_extreme_guard():
@@ -173,73 +175,6 @@ def test_agent_config_blank_tool_rounds_defaults_to_extreme_guard():
     assert _effective_max_tool_rounds(agent_explicit_10, params) == 10
     params_override = SimpleNamespace(task_attributes={"max_tool_rounds": 17})
     assert _effective_max_tool_rounds(agent, params_override) == 17
-
-
-def test_runtime_guard_readers_follow_the_same_patched_yaml(tmp_path, monkeypatch):
-    from types import SimpleNamespace
-
-    from agent_py_agent.agent.agent_core._tool_loop_service import _effective_max_tool_rounds
-    from agent_py_agent.agent.agent_core.runner.dispatch import (
-        _runner_max_attempts,
-        _same_run_redispatch_limit,
-    )
-    from agent_py_agent.agent.agent_core.tool_guard.agent_budget import _budget_int
-    from agent_py_agent.agent.settings import runtime_guard_config
-
-    config_path = tmp_path / "runtime_guard_config.yaml"
-    config_path.write_text(
-        "\n".join(
-            [
-                "max_tool_rounds: 17",
-                "runner_failure_retry_limit: 5",
-                "same_run_redispatch_limit: 4",
-                "tool_agent_budget_window_seconds: 33",
-                "tool_agent_budget_max_calls: 44",
-            ]
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(runtime_guard_config, "DEFAULT_RUNTIME_GUARD_CONFIG_PATH", config_path)
-
-    agent = SimpleNamespace(config=SimpleNamespace())
-    params = SimpleNamespace(task_attributes={})
-    config = SimpleNamespace()
-
-    assert _effective_max_tool_rounds(agent, params) == 17
-    assert _runner_max_attempts("auto") == 5
-    assert _same_run_redispatch_limit(None) == 4
-    assert _budget_int(config, "tool_agent_budget_window_seconds") == 33
-    assert _budget_int(config, "tool_agent_budget_max_calls") == 44
-
-
-def test_runtime_guard_readers_prefer_agent_policy_snapshot():
-    from types import SimpleNamespace
-
-    from agent_py_agent.agent.agent_core._tool_loop_service import _effective_max_tool_rounds
-    from agent_py_agent.agent.agent_core.runner.dispatch import (
-        _runner_max_attempts,
-        _same_run_redispatch_limit,
-    )
-    from agent_py_agent.agent.agent_core.tool_guard.agent_budget import _budget_int
-    from agent_py_agent.agent.settings.runtime_guard_config import RuntimeGuardPolicy
-
-    policy = RuntimeGuardPolicy(
-        values={
-            "max_tool_rounds": 21,
-            "runner_failure_retry_limit": 6,
-            "same_run_redispatch_limit": 5,
-            "tool_agent_budget_window_seconds": 77,
-        },
-        sources={},
-    )
-    agent = SimpleNamespace(config=SimpleNamespace(), runtime_guard_policy=policy)
-    params = SimpleNamespace(task_attributes={})
-    config = SimpleNamespace()
-
-    assert _effective_max_tool_rounds(agent, params) == 21
-    assert _runner_max_attempts("auto", runtime_policy=policy) == 6
-    assert _same_run_redispatch_limit(None, runtime_policy=policy) == 5
-    assert _budget_int(config, "tool_agent_budget_window_seconds", policy=policy) == 77
 
 
 def test_registry_runtime_gate_policy_uses_passed_runtime_policy():

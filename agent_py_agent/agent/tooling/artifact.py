@@ -31,6 +31,9 @@ from .models import (
     TrustedParameterBinding,
 )
 
+# artifact 正文读取预算的固定滚动窗口（10 分钟）；额度只由 tool_artifact_read_budget_max_chars 决定（原窗口配置已并入）。
+_ARTIFACT_READ_BUDGET_WINDOW_SECONDS = 600
+
 
 @dataclass(frozen=True)
 class ArtifactReadBudgetRequest:
@@ -139,11 +142,12 @@ class ReadArtifactTool(BaseTool):
         ),
     )
 
+    # LLM: 读取额度窗口固定 10 分钟，额度字符数来自 tool_artifact_read_budget_max_chars（0 = 不限制）；只建对象，不读盘。
+    # 函数用途: 创建归档正文读取工具，绑定归档根目录、默认读取长度和按 run 计的读取额度。
     def __init__(
         self,
         root: Path,
         *,
-        artifact_read_budget_window_seconds: int | None = None,
         artifact_read_budget_max_chars: int | None = None,
         default_read_chars: int | None = None,
     ):
@@ -197,10 +201,7 @@ class ReadArtifactTool(BaseTool):
             ),
         )
         self.read_budget = ArtifactReadBudget(
-            window_seconds=_config_int(
-                "tool_artifact_read_budget_window_seconds",
-                artifact_read_budget_window_seconds,
-            ),
+            window_seconds=_ARTIFACT_READ_BUDGET_WINDOW_SECONDS,
             max_chars=_config_int(
                 "tool_artifact_read_budget_max_chars", artifact_read_budget_max_chars
             ),

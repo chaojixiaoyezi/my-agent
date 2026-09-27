@@ -39,7 +39,6 @@ def formal_memory_agent(tmp_path: Path):
             owner_memory_routing_index_md=memory_root / "routing" / "INDEX.md",
         ),
         config=SimpleNamespace(
-            memory_rule_routing_enabled=True,
             memory_rule_routing_mode="soft",
             memory_rule_auto_read_limit=3,
             home_lesson_stale_caveat_days=7.0,

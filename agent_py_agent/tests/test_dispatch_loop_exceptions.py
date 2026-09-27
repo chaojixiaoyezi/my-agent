@@ -16,7 +16,7 @@ class TestDispatchLoopExceptions:
         )
 
         agent = MagicMock()
-        agent.config.runner_failure_policy = "auto"
+        agent.config.runner_failure_retry_limit = 1
 
         call_count = [0]
 
@@ -51,7 +51,7 @@ class TestDispatchLoopExceptions:
         )
 
         agent = MagicMock()
-        agent.config.runner_failure_policy = "auto"
+        agent.config.runner_failure_retry_limit = 1
 
         mock_report = MagicMock()
         # 所有任务都是暂停状态
@@ -68,7 +68,7 @@ class TestDispatchLoopExceptions:
         mock_task.runner_attempts = 1
         agent.subagents.list_runs.return_value = [mock_task]
 
-        # 设置 max_runners=1 且 runner_failure_policy 使暂停的任务不参与调度
+        # 设置 max_runners=1 且 runner_failure_retry_limit 使暂停的任务不参与调度
         result = dispatch_loop(agent, router=None, max_consecutive_rounds=20, max_runners=1)
         assert isinstance(result, DispatchLoopReport)
 
@@ -80,7 +80,7 @@ class TestDispatchLoopExceptions:
         )
 
         agent = MagicMock()
-        agent.config.runner_failure_policy = "auto"
+        agent.config.runner_failure_retry_limit = 1
 
         # 永远有候选任务
         mock_task = MagicMock()
@@ -105,7 +105,7 @@ class TestDispatchLoopExceptions:
         )
 
         agent = MagicMock()
-        agent.config.runner_failure_policy = "no_retry"
+        agent.config.runner_failure_retry_limit = 0
 
         mock_report = MagicMock()
         failed_record = MagicMock()
@@ -131,7 +131,7 @@ class TestDispatchLoopExceptions:
                 self._has_pending_work = False
                 self._consecutive_dispatch_rounds = 0
                 self.config = MagicMock()
-                self.config.runner_failure_policy = "auto"
+                self.config.runner_failure_retry_limit = 1
                 self.config.runner_concurrency = 1
                 self.config.runner_start_rate = None
                 self.config.runner_timeout_seconds = 120
@@ -176,7 +176,7 @@ class TestDispatchLoopExceptions:
         )
 
         agent = MagicMock()
-        agent.config.runner_failure_policy = "auto"
+        agent.config.runner_failure_retry_limit = 1
         agent.subagents.list_runs.return_value = []  # 无候选
         agent.has_pending_work = False
 
@@ -196,7 +196,7 @@ class TestDispatchLoopExceptions:
         )
 
         agent = MagicMock()
-        agent.config.runner_failure_policy = "auto"
+        agent.config.runner_failure_retry_limit = 1
 
         mock_report = MagicMock()
         mock_report.records = []

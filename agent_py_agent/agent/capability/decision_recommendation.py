@@ -17,6 +17,7 @@ from ..conversation.decision_service import (
     decision_outcome_is_current,
 )
 from ..settings.decision_settings import execute_decision_settings_operation
+from ..settings.defaults import context_window_or_default
 from .decision_candidates import (
     candidate_digest,
     capability_candidates,
@@ -233,7 +234,7 @@ def _presentation_revision(agent, params, snapshot, contract, skills, policy: di
         "required_tools": sorted(required_tools), "required_skills": list(required_skills),
         "model": str(getattr(agent.backend, "model_name", "")),
         "generation_connection": _generation_connection_revision(agent),
-        "window": getattr(agent.config, "model_context_window_tokens", None),
+        "window": context_window_or_default(agent.config),
         "protocol": [getattr(capability, key, None) for key in ("provider", "endpoint", "model", "native_supported")],
     })
 
@@ -316,7 +317,7 @@ def _material(agent, params, snapshot, skills, policy: dict, discoverable: bool)
              "candidates": rows, "context_scope": params.context_scope,
              "task_attributes_revision": candidate_digest(params.task_attributes or {}), "allowed_tools": params.allowed_tools,
              "model": str(getattr(agent.backend, "model_name", "")),
-             "context_window_tokens": getattr(agent.config, "model_context_window_tokens", None),
+             "context_window_tokens": context_window_or_default(agent.config),
              "tool_snapshot": snapshot.snapshot_hash, "skill_snapshot": skills.fingerprint, "policy": policy}
     questions = selection_questions(rows) if rows else {}
     return state, questions, candidate_digest({"state": state, "questions": questions})

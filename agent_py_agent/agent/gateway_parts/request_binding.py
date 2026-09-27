@@ -404,14 +404,8 @@ def gateway_conversation_execution_lane(context: request_context.GatewayAskRunCo
     store = agent.conversation_store
     config = getattr(agent, "config", None)
     ttl_seconds = max(1, int(getattr(config, "background_claim_ttl_seconds", 90) or 90))
-    interval_seconds = claim_heartbeat_interval_seconds(
-        ttl_seconds=ttl_seconds,
-        configured_interval_seconds=getattr(
-            config,
-            "background_claim_heartbeat_interval_seconds",
-            0,
-        ),
-    )
+    # 续约间隔只按 TTL 推导（约 1/3），不再读单独的心跳配置。
+    interval_seconds = claim_heartbeat_interval_seconds(ttl_seconds=ttl_seconds)
     return conversation_run_lane(
         ConversationRunLaneRequest(
             store=store,

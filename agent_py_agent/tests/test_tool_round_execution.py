@@ -1014,7 +1014,7 @@ def test_tool_round_does_not_limit_model_tool_calls_by_default():
 
     completed = execute_tool_round(
         _round_request(
-            agent=SimpleNamespace(config=SimpleNamespace(max_tool_calls_per_round=None)),
+            agent=SimpleNamespace(config=SimpleNamespace(max_parallel_tool_calls=None)),
             params=params,
             tool_rounds=1,
             response=ModelResponse(text="tool round", backend="test"),
@@ -1204,7 +1204,7 @@ def test_parallel_safe_readers_overlap_but_records_keep_provider_order():
     ["max_parallel_tool_calls", "max_tool_calls_per_round"],
 )
 def test_parallel_batch_limits_cap_segments_without_dropping_calls(limit_key):
-    """两个批大小配置都只削峰；全部调用仍执行且按 provider 顺序记录。"""
+    """任务属性 max_parallel_tool_calls 与后台工作片的 max_tool_calls_per_round 都只削峰；全部调用仍执行且按 provider 顺序记录。"""
     spec = make_test_model_spec(
         "read_probe",
         input_schema={
@@ -1313,6 +1313,55 @@ def test_parallel_limit_zero_means_unlimited():
     )
 
     assert records == [0, 1, 2, 3], "barrier(4) proves all four overlapped (0 = unlimited)"
+
+
+def _parallel_read_probe_snapshot():
+    spec = make_test_model_spec(
+        "read_probe",
+        input_schema={
+            "type": "object",
+            "properties": {"slot": {"type": "integer"}},
+            "required": ["slot"],
+            "additionalProperties": False,
+        },
+    )
+    policy = make_test_runtime_policy("read_only", concurrency_mode="parallel_safe", resource_parameters=("slot",))
+    return runtime_snapshot_for_model_specs((spec,), run_id=_ROUND_RUN_ID, policies={spec.name: policy})
+
+
+@pytest.mark.parametrize("configured", [12, 0])
+def test_configured_parallel_limit_above_eight_really_runs_concurrently(configured):
+    """参数减量第 2 批：配置 max_parallel_tool_calls 大于 8 或 0（不限制）必须真的生效。
+    原线程池写死 min(8, …)，12 个调用只能 8 个同时跑，屏障等不齐就超时失败。"""
+    snapshot = _parallel_read_probe_snapshot()
+    rendezvous = threading.Barrier(12, timeout=5)
+    records: list[int] = []
+
+    def execute_one(request):
+        slot = int(request.call.arguments["slot"])
+        rendezvous.wait()
+        return _success(request, f"read {slot}")
+
+    execute_tool_round(
+        _round_request(
+            agent=SimpleNamespace(config=SimpleNamespace(max_parallel_tool_calls=configured)),
+            params=SimpleNamespace(
+                task_attributes={},
+                tool_context=[],
+                tool_runtime_snapshot=snapshot,
+                cancellation_token=CancellationToken(),
+            ),
+            tool_rounds=1,
+            response=ModelResponse(text="", backend="test"),
+            calls=[
+                {"tool": "read_probe", "slot": idx} for idx in range(12)
+            ],
+            execute_one=execute_one,
+            record_one=lambda record: records.append(int(record.call.arguments["slot"])),
+        )
+    )
+
+    assert records == list(range(12)), "barrier(12) proves all twelve calls overlapped"
 
 
 def test_mutating_effect_is_a_barrier_even_if_manifest_marks_parallel_safe():

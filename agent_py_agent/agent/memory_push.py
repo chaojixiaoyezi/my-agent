@@ -143,6 +143,7 @@ def format_memories_for_injection(memories: list[MemoryRecord]) -> str:
 
 
 # LLM: 路由根和索引只能来自当前 owner home；工作区 legacy INDEX 不得作为 fallback。
+#   memory_rule_routing_mode 是唯一开关：off 直接关闭路由，不再把 off 当成非法模式报 finding。
 # 函数用途: 根据触发词和任务目标读取正式 lesson 路由小票。
 def _route_formal_lessons(agent: object, query: str, limit: int):
     root, index_path = runtime_route_root_and_index(agent)
@@ -151,13 +152,14 @@ def _route_formal_lessons(agent: object, query: str, limit: int):
         limit,
         max(0, int(getattr(config, "memory_rule_auto_read_limit", limit) or 0)),
     )
+    mode = str(getattr(config, "memory_rule_routing_mode", "soft") or "soft")
     return build_routed_memory_context(
         root,
         query,
         options=RouteContextOptions(
-            enabled=bool(getattr(config, "memory_rule_routing_enabled", True)),
+            enabled=mode != "off",
             index_path=index_path,
-            mode=str(getattr(config, "memory_rule_routing_mode", "soft") or "soft"),
+            mode=mode,
             auto_read_limit=auto_read_limit,
             limit=max(limit, auto_read_limit),
         ),

@@ -181,6 +181,29 @@
     （测试机 298 项是当年整份复制随包 YAML）。下一步先把测试机配置收成“只写与默认不同的项”，再对 386 个配置项逐项分类：
     删除（无用）、合并（总一起调）、降级（只对程序内部有意义，改回代码常数并移出配置）、常用（`/settings` 默认只列二三十个）、
     高级（可搜索但不刷屏）。目标约 100 项；每批不改任何生效值。
+  - **参数减量第 2 批：11 组重复参数合并（2026-09-27，集成者派活，分支 `claude/9a-merge-config`）**：同一个概念只留一个旋钮。
+    被吸收的键从 AgentConfig、随包 YAML、规范化、说明基线与测试里删除，不留别名、不自动转值；写在用户配置里只告警
+    “unknown config key”并忽略。默认行为全部保持；只有显式写过被吸收键、或写了原来不生效的值的配置会变（见各条）。
+    - `runner_concurrency` ← `runner_auto_concurrency`：auto/空 = 8，数字 = 上限，`0` = 不限制（原来 `"0"` 实际被夹成 1）。
+    - `background_claim_ttl_seconds` ← `background_claim_heartbeat_interval_seconds`：续约心跳始终按 TTL 推导（约 1/3）；
+      子代理 runner 会话心跳固定 5 秒（原来借用同一个键）。
+    - `max_parallel_tool_calls` ← `max_tool_calls_per_round`（配置）：空 = 8，`0` = 不限制，数字 = 上限。修掉两处不生效：
+      线程池写死 `min(8, …)`（大于 8 的设置和 0 都只跑 8 个），规范化最小值卡在 8（0 与 1–7 写不进去）。后台工作片仍按
+      守卫文件 `background_max_tool_calls_per_round` 写任务属性 `max_tool_calls_per_round`，与并发上限取小。
+    - `tool_agent_budget_max_calls` ← `tool_agent_budget_window_seconds`：窗口固定 600 秒；空/0 = 关闭，默认关闭（与原来空值
+      遮蔽守卫文件后的实际效果一致）。守卫文件里从来读不到的 `tool_agent_budget_*`、`max_tool_rounds` 副本删除。
+    - `tool_artifact_read_budget_max_chars` ← 窗口参数：窗口固定 600 秒，`0` = 不限制。
+    - `memory_archive_level` ← `memory_hook_archive_level`；`memory_rule_routing_mode` ← `memory_rule_routing_enabled`（false = off）；
+      `memory_resume_auto_context_mode` ← `memory_resume_auto_context_enabled`，默认改为 off，单次显式开启仍强制 always。
+    - `model_context_window_tokens` ← `model_context_window_explicit`：默认改为空。空 = 服务商元数据/探测，都没有按 128000
+      （`settings/defaults.DEFAULT_MODEL_CONTEXT_WINDOW_TOKENS`；原解析兜底 200000 在默认配置下走不到）；数字 = 显式容量。
+      构造期输出上限、Skill 索引预算、决策输入里的“当前窗口”在空时按 128000，与原默认值一致。
+    - `temperature` ← `model_temperature_explicit`：默认改为空；空 = 不发送，数字 = 发送；`/model` 档案带温度照旧发送。
+    - `runner_failure_retry_limit`（AgentConfig，唯一的家）← `runner_failure_policy` 与守卫文件的 `runner_failure_retry_limit`、
+      `same_run_redispatch_limit`：普通失败后最多重跑几次，默认 1（等于原来的实际效果：守卫 2 次被同 run 上限 1 压成 1 次），
+      `0` = 不重跑；临时供应失败仍按 `provider_transient_redispatch_limit` 取大。放 AgentConfig 而不是守卫文件：守卫文件只从
+      随包路径读、部署会覆盖、`/settings` 与 `user_config` 看不到。原来 `1` 被当成“不重跑”、`off`/`0` 实际还会重跑一次，现统一。
+    - YAML 里 `key:` 留空会读成 `[]`：整数旋钮与温度都按“没填”处理，不再每次启动告警。
 
 - **减量第一批（2026-09-27，分支 `claude/38-delete-dead-config`，待集成者审核）**：按分类结论逐项复核后删除 43 个没有产品读取方的配置项
   （只在 `settings/config.py`、随包 YAML、归一化表或字段规格表里出现，或只被孤儿模块/测试/离线验收入口读取）。同批处理：

@@ -360,20 +360,15 @@ class TestDispatchLoopIntegration:
         assert len(runnable_tasks) == 1
         assert runnable_tasks[0]["task_id"] == "filter-test-runnable"
 
-    def test_dispatch_with_runner_max_attempts(self, registry):
-        """测试带最大尝试次数的调度逻辑。
+    def test_dispatch_with_runner_failure_retry_limit(self, registry):
+        """调度读取唯一的重跑次数旋钮：默认 1，乱填回到默认。"""
+        from types import SimpleNamespace
 
-        验证 runner_max_attempts 参数返回值大于 0。
-        """
-        from agent_py_agent.agent.agent_core.runner.dispatch import _runner_max_attempts
+        from agent_py_agent.agent.agent_core.runner.dispatch import runner_failure_retry_limit
+        from agent_py_agent.agent.settings import AgentConfig
 
-        # auto 模式返回合理的重试次数
-        auto_max = _runner_max_attempts("auto")
-        assert auto_max >= 1
-
-        # manual 模式也返回合理的值
-        manual_max = _runner_max_attempts("manual")
-        assert manual_max >= 1
+        assert runner_failure_retry_limit(AgentConfig()) == 1
+        assert runner_failure_retry_limit(SimpleNamespace(runner_failure_retry_limit="manual")) == 1
 
 
 class TestConcurrencyDispatch:

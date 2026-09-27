@@ -135,7 +135,6 @@ class TestBuildArchiveDoctor:
 
         mock_config = MagicMock()
         mock_config.memory_hook_enabled = True
-        mock_config.memory_hook_archive_level = 3
         mock_config.memory_archive_level = 3
 
         result = _build_archive_doctor(tmp_path, mock_config)
@@ -194,8 +193,6 @@ class TestMemoryConfigPayload:
         mock_config = MagicMock()
         mock_config.memory_archive_level = 3
         mock_config.memory_hook_enabled = True
-        mock_config.memory_hook_archive_level = 3
-        mock_config.memory_rule_routing_enabled = True
         mock_config.memory_rule_routing_mode = "soft"
         mock_config.memory_rule_auto_read_limit = 3
 
@@ -203,7 +200,7 @@ class TestMemoryConfigPayload:
 
         assert result["memory_archive_level"] == 3
         assert result["memory_hook_enabled"] is True
-        assert result["memory_rule_routing_enabled"] is True
+        assert result["memory_rule_routing_mode"] == "soft"
 
 
 class TestIndexPayload:

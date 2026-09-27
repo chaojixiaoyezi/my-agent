@@ -150,7 +150,6 @@ def test_run_injects_only_formal_routed_lesson_in_memory_envelope(tmp_path):
     agent = SimpleAgent(
         AgentConfig(
             model_backend="echo",
-            memory_rule_routing_enabled=True,
             memory_rule_routing_mode="soft",
             memory_rule_auto_read_limit=1,
         ),
@@ -553,7 +552,7 @@ def test_auto_resume_context_is_disabled_by_default(tmp_path):
 def test_continue_inside_new_cli_task_does_not_resume_old_task(tmp_path):
     """LLM: Tests that ordinary 'continue working' phrasing does not leak old CLI task memory."""
     agent = SimpleAgent(
-        _test_config(tmp_path, model_backend="echo", memory_resume_auto_context_enabled=True),
+        _test_config(tmp_path, model_backend="echo", memory_resume_auto_context_mode="trigger"),
         tmp_path,
     )
     agent.run(
@@ -575,7 +574,6 @@ def test_auto_resume_context_injects_when_always_mode_enabled(tmp_path):
         _test_config(
             tmp_path,
             model_backend="echo",
-            memory_resume_auto_context_enabled=True,
             memory_resume_auto_context_mode="always",
             memory_resume_auto_context_limit=3,
         ),
@@ -609,7 +607,7 @@ def test_auto_resume_context_can_be_enabled_per_run(tmp_path):
 def test_auto_resume_context_can_be_disabled_per_run(tmp_path):
     """LLM: Tests that auto resume context can be disabled per-run with resume_context=False override."""
     agent = SimpleAgent(
-        _test_config(tmp_path, model_backend="echo", memory_resume_auto_context_enabled=True),
+        _test_config(tmp_path, model_backend="echo", memory_resume_auto_context_mode="trigger"),
         tmp_path,
     )
     agent.run("README 禁用恢复开关任务", save=True)

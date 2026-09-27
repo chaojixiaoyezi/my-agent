@@ -173,10 +173,7 @@ def test_persisted_incomplete_blocked_result_is_retryable_for_compatibility() ->
 
     assert _is_dispatch_runner_candidate(
         task,
-        policy=RunnerCandidatePolicy(
-            runner_max_attempts=2,
-            same_run_redispatch_limit=1,
-        ),
+        policy=RunnerCandidatePolicy(runner_retry_limit=1),
     ) is True
 
 
@@ -239,6 +236,6 @@ def test_explicit_recovery_dispatch_selects_the_same_user_stopped_run() -> None:
         recovery_mode="rerun_from_checkpoint",
     )
 
-    selected = _runner_candidates_for_context([task], ctx, runner_max_attempts=1)
+    selected = _runner_candidates_for_context([task], ctx, runner_retry_limit=0)
 
     assert [item.id for item in selected] == [task.id]

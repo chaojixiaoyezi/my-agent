@@ -1,5 +1,7 @@
 # Gateway 维护状态
 
+参数减量第 2 批（分支 `claude/9a-merge-config`，2026-09-27）：后台会话执行权只剩 `background_claim_ttl_seconds` 一个旋钮，续约心跳始终由 `run_claim.claim_heartbeat_interval_seconds(ttl_seconds=…)` 推导（90 秒时 30 秒）；手动 Compact 车道（`control_service._manual_compact_lane`）和前台请求车道（`request_binding`）不再读 `background_claim_heartbeat_interval_seconds`（已删除，旧键只告警并忽略），子代理 runner 会话心跳固定 5 秒。默认行为不变。
+
 `/settings` 回显的结构脱敏（分支 `claude/be-structured-masking`，2026-09-27）：`show`、`search`、总览经 `mask_value` 结构脱敏，请求头与 MCP 服务器 env 的值只留键名、args 里凭据开关的值、名字是凭据的 `名字=值`、`--header`/`--env` 的值与网址密码遮值；`history` 行先经 `parameter_changes.displayed_change` 再遮一次，旧记录也不漏明文。回归见 `test_structured_masking.py`。
 
 `/settings` 回执与脱敏补全（同一分支第二个提交，2026-09-27）：`show` 那一行由“实际使用值”改名为“实际效果”；`reset`、`revert`

@@ -116,9 +116,6 @@ class ToolRegistryParams:
     catalog_show_truncated_notice: bool = True
     tool_detail_max_chars: int = 0
     tool_write_inline_max_chars: int = MAX_INLINE_WRITE_CONTENT_CHARS
-    artifact_read_budget_window_seconds: int = field(
-        default_factory=lambda: _agent_config_int("tool_artifact_read_budget_window_seconds")
-    )
     artifact_read_budget_max_chars: int = field(
         default_factory=lambda: _agent_config_int("tool_artifact_read_budget_max_chars")
     )

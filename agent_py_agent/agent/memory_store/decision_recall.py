@@ -22,6 +22,7 @@ from ..conversation.decision_service import (
     decide,
     decision_outcome_is_current,
 )
+from ..settings.defaults import context_window_or_default
 
 _PRIORITIES = {"first": "优先参考", "normal": "按原相关性参考", "later": "稍后参考，不能删除或省略"}
 _NON_SELECTIONS = {
@@ -213,13 +214,13 @@ def _digest(value: object) -> str:
     return hashlib.sha256(decision_json(value)).hexdigest()
 
 
-# LLM: 只读实际 backend 名称/模型与原配置窗口，不发送或保存 API key、headers 或连接秘密。
+# LLM: 只读实际 backend 名称/模型与原配置窗口（留空按 128000，与合并前默认一致），不发送或保存 API key、headers 或连接秘密。
 # 函数用途: 记录本轮实际生成模型的非秘密能力身份，切换后不能复用旧排序。
 def _model_identity(agent: object) -> dict:
     backend = getattr(agent, "backend", None)
     return {"backend": str(getattr(backend, "name", "") or ""),
             "model": str(getattr(backend, "model_name", "") or ""),
-            "context_window_tokens": getattr(getattr(agent, "config", None), "model_context_window_tokens", None)}
+            "context_window_tokens": context_window_or_default(getattr(agent, "config", None))}
 
 
 # LLM: 用版本、范围和完整正文绑定原事实，不包含访问计数等检索副作用；不调用 record.to_json 避免其补时间写对象。

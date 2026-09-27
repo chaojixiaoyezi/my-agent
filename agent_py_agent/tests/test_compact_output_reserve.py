@@ -136,7 +136,7 @@ def test_responses_output_reserve_matches_actual_field_or_unknown(monkeypatch, o
     if oauth:
         backend.auth_ref = {"mode": "chatgpt"}
     agent = SimpleNamespace(backend=backend, config=SimpleNamespace(
-        model_context_window_explicit=True, model_context_window_tokens=WINDOW,
+        model_context_window_tokens=WINDOW,
     ))
     sent = []
 

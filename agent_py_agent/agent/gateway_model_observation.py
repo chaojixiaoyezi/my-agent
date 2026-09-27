@@ -21,6 +21,7 @@ from .gateway_parts.request_binding import (
     gateway_request_is_active_turn_recovery,
 )
 from .settings.decision_settings_projection import decision_point_mode_from_read
+from .settings.defaults import context_window_or_default
 from .settings.model_profiles import SelectedModelRead, execute_model_profile_operation
 
 _RETAIN_CHOICES = {
@@ -86,7 +87,7 @@ def _observation_input(context: object, thread: object, captured: SelectedModelR
         "conversation_summary": summary,
         "candidate_facts": dict(_CANDIDATE_FACTS),
         "current_model": {"profile_id": captured.profile_id, "model_name": config.model_name,
-                          "model_backend": config.model_backend, "context_window_tokens": config.model_context_window_tokens},
+                          "model_backend": config.model_backend, "context_window_tokens": context_window_or_default(config)},
         "observed_thread_selection": {"profile_id": thread.model_profile_id, "revision": thread.model_selection_revision},
         "input_completeness": {"prompt": prompt_fact, "conversation_summary": {**summary_fact, "landmarks": "omitted"},
                                "full_history": "unknown", "system_and_native_schemas": "unknown",

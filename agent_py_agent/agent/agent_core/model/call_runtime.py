@@ -1,4 +1,6 @@
-
+# LLM: 模型调用账本记录与输出上限估算都在这里；输出上限复用 settings/defaults 的唯一公式（窗口没填按 128000 兜底），
+#   不另写数值。记录函数会写调用账本（有副作用），估算函数只读。
+# 模块用途: 记录每次模型调用的开始、首包、结束、失败与超时，并给 compact 预算和超时估算提供输出上限。
 from __future__ import annotations
 
 import hashlib
@@ -21,7 +23,7 @@ from ...contracts.model_call_ledger import (
 from ...conversation.context_usage import record_model_context_usage
 from ...conversation.model_metrics import publish_model_metrics
 from ...memory_archive import estimate_tokens
-from ...settings.defaults import output_cap_for_window
+from ...settings.defaults import context_window_or_default, output_cap_for_window
 from ..tool_stream import ToolBoundaryChunkFilter
 from .call_monitor import (
     FirstTokenTimeoutOptions,
@@ -471,7 +473,7 @@ def max_output_tokens(agent: object) -> int:
         if raw is not None:
             return max(0, int(raw))
         configured = max(0, int(getattr(config, "max_tokens", 0) or 0))
-        window = int(getattr(backend, "context_window_tokens", 0) or getattr(config, "model_context_window_tokens", 0) or 0)
+        window = int(getattr(backend, "context_window_tokens", 0) or 0) or context_window_or_default(config)
     except (TypeError, ValueError):
         return 0
     return output_cap_for_window(configured, window) if configured else 0

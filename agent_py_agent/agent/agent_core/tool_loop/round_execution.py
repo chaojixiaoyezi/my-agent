@@ -686,19 +686,20 @@ def _describe_round_call_concurrency(
     )
 
 
-# LLM: 保持任务属性优先、缺省才读取对应配置的顺序；max_tool_calls_per_round 仅限制执行批，不能制造未执行 ToolResult。
-# 函数用途: 原位读取两项有效数值，再交给窄策略合并批上限，避免未使用的配置提前触发读取或异常。
+# LLM: 并发上限只有一个配置 max_parallel_tool_calls（原 max_tool_calls_per_round 配置已并入），任务属性同名键可单任务覆盖；
+#   任务属性 max_tool_calls_per_round 只由后台工作片按守卫文件 background_max_tool_calls_per_round 写入，这里只读任务属性、
+#   不再读同名配置。两者取小，只限制执行批，不能制造未执行 ToolResult。
+# 函数用途: 算出本轮一次最多并行执行几个工具（0 = 不限制），交给分段和线程池使用。
 def _effective_parallel_batch_limit(request: ToolRoundExecutionRequest) -> int:
     parallel_limit = _task_attribute_int(request, "max_parallel_tool_calls")
     if parallel_limit is None:
         parallel_limit = _agent_config_int(request.agent, "max_parallel_tool_calls")
     tool_batch_limit = _task_attribute_int(request, "max_tool_calls_per_round")
-    if tool_batch_limit is None:
-        tool_batch_limit = _agent_config_int(request.agent, "max_tool_calls_per_round")
     return resolve_parallel_batch_limit(parallel_limit, tool_batch_limit)
 
 
 # LLM: 每个并行工具都携带独立 Context 副本，继承本工作片模型/权限；线程本地 runner 身份仍走原桥，不共享可进入的 Context。
+#   段长已由 _effective_parallel_batch_limit 封顶（0 = 不限制），线程数等于段长，不能再另写一个固定上限让配置失效。
 # 函数用途: 并发执行一组工具并保持原顺序记账，避免模型切换或权限选择在工作线程里退回部署默认。
 def _execute_parallel_segment(
     request: ToolRoundExecutionRequest,
@@ -716,7 +717,7 @@ def _execute_parallel_segment(
     token = getattr(request.params, "cancellation_token", None)
     cancel = getattr(token, "cancel", None)
     callback = (lambda: cancel("interrupted")) if callable(cancel) else (lambda: None)
-    workers = min(8, len(scheduled))
+    workers = len(scheduled)
     with register_interrupt_callback(callback):
         with ThreadPoolExecutor(
             max_workers=workers,

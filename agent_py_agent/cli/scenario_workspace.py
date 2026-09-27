@@ -1,4 +1,5 @@
-
+# LLM: 只为场景测试写隔离的 fixture 与覆盖配置，生成的配置只能写现存的配置键。
+# 模块用途: 给 scenario-test 生成隔离的测试项目文件和覆盖配置。
 from __future__ import annotations
 
 """writes scenario fixture projects and isolated scenario config overrides.
@@ -78,7 +79,6 @@ daemon_mutate_state: false
 daemon_start_runners: false
 daemon_max_runners: 0
 daemon_interval: 1
-runner_failure_policy: "auto"
 max_tool_rounds: 0
 """
     if request.runner_concurrency is not None:

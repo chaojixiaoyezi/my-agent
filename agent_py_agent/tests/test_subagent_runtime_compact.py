@@ -302,7 +302,7 @@ def test_subagent_provider_overflow_compacts_unfinished_tool_archive_before_retr
         api_base="https://api.minimaxi.com/anthropic", api_key="fake-private-key",
         enable_tools=True, stream_enabled=False, my_agent_home=str(tmp_path / "home"),
         tool_context_ptl_retry_max=0, max_tool_rounds=0,
-        model_context_window_tokens=128_000, model_context_window_explicit=True,
+        model_context_window_tokens=128_000,
         memory_compact_auto_trigger_percent=90,
     ), tmp_path)
     task = agent.subagents.create_run(

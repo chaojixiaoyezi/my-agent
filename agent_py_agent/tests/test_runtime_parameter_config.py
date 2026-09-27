@@ -65,7 +65,7 @@ def test_runtime_parameter_knobs_are_normalized_from_agent_config() -> None:
 
     normalized, warnings = normalize_agent_config(
         {
-            "runner_auto_concurrency": "3",
+            "runner_failure_retry_limit": "3",
             "background_context_max_string_chars": "11",
             "background_context_max_list_items": "4",
             "background_context_max_dict_items": "5",
@@ -82,12 +82,11 @@ def test_runtime_parameter_knobs_are_normalized_from_agent_config() -> None:
             "skill_guard_max_files": "4",
             "skill_guard_max_size_kb": "5",
             "background_claim_ttl_seconds": "120",
-            "background_claim_heartbeat_interval_seconds": "30",
         }
     )
 
     assert warnings == []
-    assert normalized["runner_auto_concurrency"] == 3
+    assert normalized["runner_failure_retry_limit"] == 3
     assert normalized["background_context_max_string_chars"] == 11
     assert normalized["background_context_max_total_tokens"] == 8000
     assert normalized["conversation_pending_wake_limit"] == 7
@@ -144,7 +143,7 @@ def test_dispatch_loop_omitted_numbers_follow_agent_config() -> None:
 
     agent = SimpleNamespace(
         config=SimpleNamespace(
-            runner_failure_policy="auto",
+            runner_failure_retry_limit=1,
             dispatch_max_consecutive_rounds=1,
             dispatch_default_max_runners=3,
             dispatch_default_limit=44,
@@ -177,7 +176,7 @@ def test_dispatch_loop_explicit_numbers_override_config() -> None:
 
     agent = SimpleNamespace(
         config=SimpleNamespace(
-            runner_failure_policy="auto",
+            runner_failure_retry_limit=1,
             dispatch_max_consecutive_rounds=1,
             dispatch_default_max_runners=3,
             dispatch_default_limit=44,
@@ -206,11 +205,12 @@ def test_dispatch_loop_explicit_numbers_override_config() -> None:
     assert seen_params[0].limit == 11
 
 
-def test_runner_auto_concurrency_uses_configured_limit() -> None:
+def test_runner_concurrency_is_the_single_concurrency_knob() -> None:
     from agent_py_agent.agent.agent_core.runner.dispatch import _resolve_runner_concurrency
 
-    assert _resolve_runner_concurrency("auto", 20, auto_limit=3) == 3
-    assert _resolve_runner_concurrency("bad", 20, auto_limit=4) == 4
+    assert _resolve_runner_concurrency("auto", 20) == 8
+    assert _resolve_runner_concurrency("3", 20) == 3
+    assert _resolve_runner_concurrency("bad", 20) == 8
 
 
 def test_runner_timeout_defaults_to_no_total_deadline() -> None:

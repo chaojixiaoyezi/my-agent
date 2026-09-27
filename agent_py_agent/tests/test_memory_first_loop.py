@@ -218,7 +218,6 @@ def _runtime_context_capture_agent(captured: dict[str, object]):
         config = SimpleNamespace(
             enable_tools=False,
             memory_top_k=1,
-            memory_rule_routing_enabled=True,
             memory_rule_routing_mode="soft",
             memory_rule_auto_read_limit=2,
         )

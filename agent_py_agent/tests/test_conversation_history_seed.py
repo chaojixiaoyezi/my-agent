@@ -62,7 +62,7 @@ def _history(tmp_path):
         conversation_store=store, home_paths=SimpleNamespace(owner_compact_dir=tmp_path / "compact"),
         backend=SimpleNamespace(name="fake", model_name="fake", max_tokens=128),
         prompts=SimpleNamespace(build=lambda prompt, *_args, **_kwargs: prompt),
-        config=SimpleNamespace(model_context_window_tokens=20_000, model_context_window_explicit=True,
+        config=SimpleNamespace(model_context_window_tokens=20_000,
                                conversation_history_max_chars=1000),
     )
     identified = [

@@ -963,7 +963,6 @@ def test_tool_loop_enforces_per_agent_tool_budget_for_run_id():
             enable_tools=True,
             memory_path="memory.jsonl",
             max_tool_rounds=4,
-            tool_agent_budget_window_seconds=600,
             tool_agent_budget_max_calls=1,
         )
         agent = SimpleAgent(cfg, workspace)

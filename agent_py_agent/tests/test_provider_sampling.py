@@ -126,18 +126,18 @@ def test_three_protocols_explicit_top_p_reaches_wire(monkeypatch, protocol, top_
 
 
 @pytest.mark.parametrize("protocol", ["openai_compatible", "anthropic_compatible", "openai_responses"])
-@pytest.mark.parametrize("explicit", [False, True])
-@pytest.mark.parametrize("temperature", ["0", "0.2", "1", "2"])
-def test_three_protocols_temperature_requires_explicit_selection(monkeypatch, protocol, explicit, temperature):
+@pytest.mark.parametrize("temperature", [None, "0", "0.2", "1", "2"])
+def test_three_protocols_send_temperature_only_when_filled(monkeypatch, protocol, temperature):
+    """参数减量第 2 批：temperature 留空 = 不发送（原 model_temperature_explicit=false），填数字 = 发送。"""
     config = AgentConfig(model_backend=protocol, model_name="custom", api_base="https://example.test/v1",
-                         api_key="fake", stream_enabled=False, temperature=temperature,
-                         model_temperature_explicit=explicit)
+                         api_key="fake", stream_enabled=False, temperature=temperature)
     backend, payload = capture_payload(monkeypatch, config)
     assert backend.generate("hi").text == "ok"
-    assert ("temperature" in payload) is explicit
-    if explicit:
-        assert payload["temperature"] == float(temperature)
-    assert backend.temperature == float(temperature)
+    filled = temperature is not None
+    assert ("temperature" in payload) is filled
+    assert backend.temperature_explicit is filled
+    if filled:
+        assert payload["temperature"] == backend.temperature == float(temperature)
 
 
 def test_messages_request_temperature_override_is_local(monkeypatch):
@@ -158,7 +158,7 @@ def test_messages_request_temperature_override_is_local(monkeypatch):
 def test_chat_flash_default_preserves_explicit_temperature(monkeypatch, explicit):
     config = AgentConfig(model_backend="openai_compatible", model_name="deepseek-v4-flash",
                          api_base="https://opencode.ai/zen/go/v1", api_key="fake", stream_enabled=False,
-                         temperature="0.4", model_temperature_explicit=explicit)
+                         temperature="0.4" if explicit else None)
     backend, payload = capture_payload(monkeypatch, config)
     backend.generate("hi")
     assert payload["top_p"] == 0.95
@@ -242,16 +242,16 @@ def test_profile_scope_and_child_preserve_explicit_temperature(tmp_path, samplin
     attrs = {}
     explicit = "temperature" in sampling
     with selected_model_scope(host):
-        assert host.config.model_temperature_explicit is explicit
+        assert (host.config.temperature is not None) is explicit
         assert host.backend.temperature_explicit is explicit
         inherit_model_profile(attrs, host)
         op(host, "set_default", {"profile_id": "default"})
         assert host.backend.temperature_explicit is explicit
     child = inherited_model_config(host, SimpleNamespace(attributes=attrs))
-    assert child.model_temperature_explicit is explicit
+    assert (child.temperature is not None) is explicit
     if explicit:
         assert float(child.temperature) == sampling["temperature"]
-    assert host.config.model_temperature_explicit is False
+    assert host.config.temperature is None
 
 
 def test_task_overlay_does_not_replace_selected_sampling(tmp_path):

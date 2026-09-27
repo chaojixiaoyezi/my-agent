@@ -22,7 +22,6 @@ class TestLoadConfig:
         config_file = tmp_path / "test_config.yaml"
         config_file.write_text("""
 workspace_root: /tmp/test
-memory_rule_routing_enabled: true
 memory_rule_routing_mode: soft
 memory_rule_auto_read_limit: 5
 """, encoding="utf-8")
@@ -275,8 +274,6 @@ class TestConfigFields:
         config_file.write_text("""
 memory_archive_level: 3
 memory_hook_enabled: true
-memory_hook_archive_level: 3
-memory_rule_routing_enabled: true
 memory_rule_routing_mode: soft
 memory_rule_auto_read_limit: 3
 """, encoding="utf-8")
@@ -285,7 +282,6 @@ memory_rule_auto_read_limit: 3
 
         assert hasattr(config, "memory_archive_level")
         assert hasattr(config, "memory_hook_enabled")
-        assert hasattr(config, "memory_rule_routing_enabled")
         assert hasattr(config, "memory_rule_routing_mode")
         assert hasattr(config, "memory_rule_auto_read_limit")
 

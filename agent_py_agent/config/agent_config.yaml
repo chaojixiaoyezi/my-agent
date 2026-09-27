@@ -142,18 +142,9 @@ memory_embedding_api_key_env: ""  # embedding key 的环境变量名（生产用
 # Memory 新架构安全配置（第一版骨架）：
 # - 这些字段先定义“开关、等级、保留天数和规则路由模式”，具体 hook/routing 业务后续再接。
 # - 如果用户乱填 abcd、乱码、脚本片段、负数或越界数字，程序会自动回到默认值，不会崩溃。
-# - memory_archive_level 控制全量会话冷归档粒度：
-#   0: 尽量全量；1: 去掉重型工具展示数据；2: 摘要加关键事件；3: 最小恢复快照。
-# - memory_rule_routing_mode:
-#   off: 不做长期规则路由；soft: 命中后提示/自动读少量规则；strict: 强规则场景必须读权威文件。
 # - memory_rule_auto_read_limit 表示每轮最多自动读取多少条规则正文；0 表示不自动读取。
-# - memory_resume_auto_context_enabled 默认关闭，避免普通请求因为恢复检索变慢。
-# - memory_resume_auto_context_mode:
-#   off: 不注入恢复块；trigger: 只在用户消息里带 request/run/subagent/gwreq 等结构化恢复 ID 时触发；
-#     普通自然语言“继续、上次、昨天、恢复”等不会参与判断；需要人工明确恢复时用 --resume-context。
-#   always: 每轮都尝试注入恢复块，适合专门的恢复/排障会话。
 # - memory_resume_auto_context_limit 表示自动恢复最多拿多少条线索，范围 1-50。
-# - compact 提前提示优先读取当前模型后端暴露的真实上下文窗口；拿不到时按 200K 通用窗口估算。
+# - compact 提前提示优先读取当前模型后端暴露的真实上下文窗口；拿不到时按 128K 估算（见 model_context_window_tokens）。
 # - memory_compact_auto_trigger_percent 控制上下文使用到多少百分比时自动 compact：
 #   不写默认 90；0 表示 100；乱填回默认；大于100 => 100；小于50 => 50；50-100 => 按填写值。
 #   经 user_config 自助修改时只接受 50-100，恢复目标只接受 25-80，与运行时一致，接受的值一定原样生效。
@@ -164,14 +155,24 @@ memory_embedding_api_key_env: ""  # embedding key 的环境变量名（生产用
 # - 保存型运行默认执行非破坏性 apply + auto resume + guard；save=false 时只生成计划，不写入 compact apply。
 # - 自动 compact 续接有绝对深度硬顶（见下方 memory_compact_auto_continue_max_depth，防无限续跑 H2）；未达硬顶时只要 compact 包可恢复就继续同一任务，不会因普通任务缺少验收/测试备注而停车。
 # - 运行中 raw archive 和 runtime_fact 是 compact/resume 的基础事实源，随持久化运行默认启用，不提供单独关闭开关。
+
+# 会话存档记多细（0-3，默认 3）：每次运行结束、子代理收尾时都按这一个级别存档，供以后恢复和回查。
+# 3 = 只存最小恢复快照（最省磁盘，一般就用它）；2 = 摘要加关键事件；1 = 去掉大块工具展示数据；0 = 尽量全量。
+# 只有排查问题需要更完整的历史时才调小；乱填会退回 3。
 memory_archive_level: 3
 memory_hook_enabled: true
-memory_hook_archive_level: 3
-memory_rule_routing_enabled: true
+# 长期规则（教训）怎么用，默认 soft，一般不用改：
+# - soft：问题命中规则索引时提醒模型，并自动读少量规则正文（条数见 memory_rule_auto_read_limit）。
+# - strict：命中的规则必须先读原文件再动手，适合规则很关键、必须照做的场景。
+# - off：完全不做规则路由（旧键 memory_rule_routing_enabled: false 就等于这里写 off）。
 memory_rule_routing_mode: "soft"
 memory_rule_auto_read_limit: 3
-memory_resume_auto_context_enabled: false
-memory_resume_auto_context_mode: "trigger"
+# 要不要自动往本轮提示里加“恢复线索”（以前运行的归档和任务事实），默认 off：
+# - off：不自动加（默认），普通对话不会因为恢复检索变慢。
+# - trigger：只在消息里带 run/request/subagent/gwreq 这类结构化编号时才加；“继续、上次”这类说法不触发。
+# - always：每轮都尝试加，适合专门做恢复/排障的会话。
+# 偶尔需要时单次运行加 --resume-context 就行，不用改这里。
+memory_resume_auto_context_mode: "off"
 memory_resume_auto_context_limit: 5
 memory_compact_auto_trigger_percent: 90
 memory_compact_recovery_target_percent: 60
@@ -360,13 +361,15 @@ contract_status_recent_findings_limit: 20
 skill_guard_max_files: 50
 skill_guard_max_size_kb: 1024
 
-# runner_failure_policy 控制 runner 临时失败后的总尝试次数：
-# - "auto": 当前等价于最多 2 次，也就是首次失败后下一轮 dispatch 再试一次
-# - "off" 或 "0": 不自动重试，总尝试次数为 1
-# - "3" 这类数字字符串：最多尝试 3 次
-# 只重试 runner_error、structured_output_parse_error、tool_result_missing、provider_timeout
-# 这类“执行通道/格式/临时工具结果/模型服务临时超时”问题；能力缺口、验收失败、通道 BROKEN 不自动重跑。
-runner_failure_policy: "auto"
+# 子代理干活时出了临时问题（runner 出错或超时、输出格式解析失败、工具结果丢失、模型服务出错或超时）失败后，
+# 最多自动重跑几次，默认 1：
+# - 0 = 不自动重跑，失败后直接交给父代理决定；想多给几次机会就调大。
+# - 能力缺口、验收没过、通道断开这类问题不会自动重跑。
+# - 模型服务限流、断供这类临时供应问题另有更宽的重跑上限，不会因为这里设得小就被卡死。
+runner_failure_retry_limit: 1
+# 一次派工最多同时跑几个子代理，默认 auto = 8（和一个会话最多 8 个子代理对齐）：
+# - 写数字 = 最多同时跑这么多个，其余排队；0 = 不限制，这一批有多少就同时跑多少。
+# - 子代理、孙代理等各层都算在这一个上限里。机器或模型额度吃紧时调小，一般不用改。
 runner_concurrency: "auto"
 runner_start_rate: "auto"
 # create_subagents 会由宿主自动启动并恢复 runner，模型不轮询或手动推进。
@@ -379,10 +382,6 @@ runner_start_rate: "auto"
 runner_timeout_seconds: "off"
 runner_timeout_by_role: []
 
-# runner_concurrency 为 auto 时的并发上限。
-# - 这个值适用于当前 dispatch 批次里要跑的 runner：子代理、孙代理或更深层代理都走同一套 runner。
-# - 0 表示 auto 不额外设上限；默认 8 与单根会话的 8 个 child 槽位一致。
-runner_auto_concurrency: 8
 dynamic_timeout_safety_margin: 2.0
 # 主会话后台命令结束后主动通知，复用持久唤醒队列；关闭不影响 process_session 查询/长等待。
 background_process_notifications: true
@@ -559,8 +558,6 @@ conversation_workspace: ""
 # 长期会话读取和后台唤醒 prompt 预算：
 # - pending/context/recent 这些 limit 只控制一次读取多少条账本记录，不删除原始文件。
 # - background_context_* 只裁剪注入后台主代理 prompt 的副本，不改消息、observation、case 或 agent tree 原文。
-# - background_claim_ttl_seconds 是后台主代理一次唤醒的 lease 有效期；运行中会 heartbeat 续约。
-# - background_claim_heartbeat_interval_seconds=0 表示按 TTL 自动取安全间隔。
 conversation_pending_wake_limit: 100
 conversation_context_recent_limit: 20
 conversation_unhandled_observation_limit: 20
@@ -571,8 +568,11 @@ background_context_max_dict_items: 80
 background_context_max_depth: 6
 # 整份后台状态副本的总预算；0 才表示关闭总量约束。原始账本和产物不受影响。
 background_context_max_total_tokens: 8000
+# 后台会话（主代理被唤醒后继续干活）占着执行权的租约秒数，默认 90：
+# - 运行中会自动续约，续约间隔按它自动推导（约为三分之一，90 秒时每 30 秒续一次），不用另配。
+# - 进程意外退出后，最多过这么久别的进程才能接手这个会话。
+# - 一般不用改；机器很慢、经常看到租约过期被接手时才调大。最小 1。
 background_claim_ttl_seconds: 90
-background_claim_heartbeat_interval_seconds: 0
 # 多个成功子任务在很短时间内连续结束时，先合并完成信号再唤醒主代理；失败/阻塞不等待。
 background_completion_coalesce_seconds: 5
 # CLI 自动续跑/手动续跑的进程内轮数护栏（总代数上限，含首轮之外的续跑轮）。
@@ -680,25 +680,24 @@ request_timeout: 240
 # 所以窗口较小（如 128K）的模型调大本值会让压缩更早触发。
 max_tokens: 65536
 
-# 当前模型真实上下文窗口 token 数。compact/preflight 用它计算何时折叠。
-model_context_window_tokens: 128000
+# 当前模型一次最多能看多少 token（上下文窗口）；决定什么时候自动压缩对话，也限制单次输出最多占窗口的四分之一：
+# - 留空（默认）= 先用服务商报告的窗口，拿不到就按 128000 算。
+# - 填数字 = 就按这个数算，不再看服务商报告的值（/model 里给每个模型填的窗口就是这种）。
+# - 只有服务商报“超出上下文”、或压缩明显太早/太晚时才需要填。
+model_context_window_tokens:
 # 当前模型声明的输入模态（例如 [text, image]）。通常由 /model 档案的"输入模态"字段带入；留空表示未知，
 # 含图历史压缩时会用一次结构化视觉探针判断能否随图摘要，不按模型名猜。
 model_input_modalities: []
-# 是否把上述窗口视为显式总容量，不再由 provider metadata 覆盖。
-# /model 保存的各模型窗口自动采用此语义；部署默认 false 保持既有探测优先行为。
-model_context_window_explicit: false
 
-# 显式采样温度；仅 model_temperature_explicit=true 时发送。
-# /model 填写模型独立温度自动启用，留空继承部署是否覆盖；不按模型名称写死温度。
-temperature: 0.2
+# 采样温度（0 到 2，越高回答越发散）：
+# - 留空（默认）= 不发送，用服务商自己的默认值，大多数模型这样最稳。
+# - 填数字 = 每次请求都带上这个温度；/model 里给单个模型填的温度优先。
+# - 一般不用改；只有明确知道某个模型需要固定温度时才填。
+temperature:
 # 核采样概率，留空沿用供应商默认，显式值为 0 至 1。
 # 已核对官方/OpenCode Go/Zen 的 DeepSeek V4 Flash 思考模式默认 0.95，低于 0.95 按协议提升。
 # 其它模型/私有代理未填写时不发送；/model 可按单个模型覆盖。
 top_p: null
-# Chat、Messages、Responses 均默认不发送温度，沿用提供方默认；显式 true 才发送上述温度。
-# /model 每模型填写温度自动显式启用；false 不会用软件默认 0.2 干预兼容模型。
-model_temperature_explicit: false
 
 # 智能程度（推理强度）全局默认档位，会话里可用 /effort 单独设置，派子代理时可用 effort 单独指定：
 # - auto：不发任何推理参数，由服务商按默认方式思考（默认）。
@@ -751,18 +750,17 @@ stream_enabled: true
 #   unknown_command_budget(200 次/10 分钟)、compact 防抖负责有界保护。
 # - 显式正数仍可限制,显式 0 才是真正不限制;单任务临时覆盖由任务属性显式传入。
 max_tool_rounds:
-# 单次并发执行批次的工具数量；空值=不额外限制，正数=分批削峰，0=不限制。
-# 这个值不截断模型已经提交的调用；同一工具轮会分批全部执行后再采样模型。
-max_tool_calls_per_round:
-# 单轮内并行执行工具的数量上限（EXEC-01，默认 8）：
-# - 空值=用代码默认 8（对齐 工具运行时/会话运行时 常见并行度，防一次性工具过多烧上下文）。
-# - 显式正数=该上限；显式 0=不限制；单任务临时覆盖由任务属性显式传入。
-# - 并行段还会受工具并发契约（同写根互斥）与上下文预算约束，配置只是上限不是保证。
+# 模型一次提出多个工具调用时，最多同时执行几个，默认留空 = 8：
+# - 写数字 = 最多同时跑这么多个，多出来的排队接着跑，一个都不会丢；0 = 不限制，能并行的全部同时跑。
+# - 只有能安全并行的调用（比如只读、互不冲突的写）才会同时跑，这里只是上限。
+# - 一般不用改；工具慢又互不干扰时可以调大，机器吃紧时调小。
 max_parallel_tool_calls:
 # 协议违规的修复机会次数（默认 2 = 3 次尝试后才 break）。模型输出格式偶发抖动
 # （工具调用混进正文/代码块）时，多给两次机会能显著提高长任务成活率。
 max_protocol_repairs: 2
-tool_agent_budget_window_seconds:
+# 每个代理最近 10 分钟最多调用几次工具，默认留空 = 不限制：
+# - 写数字 = 超过就暂时拒绝新的工具调用，等时间窗口滚过去自动恢复；主代理、每个子代理各算各的。
+# - 留空或 0 = 不限制。只有想防止某个代理空转、狂调工具烧钱时才设，比如 200。
 tool_agent_budget_max_calls:
 
 # 后台调度器的周期性孤儿 supervision（reconcile 兜底，零 LLM 成本）：
@@ -782,10 +780,9 @@ orphan_supervision_interval_seconds: 60
 # - 0 表示关闭。
 tool_failure_channel_hint_threshold: 2
 
-# 单个代理滚动 artifact 正文读取预算（下面两个参数必须一起看）：
-# - window_seconds=600 + max_chars=240000 表示单个 run_id 最近 10 分钟最多读取 240000 字符正文。
-# - 任一配置为 0 表示关闭这个 artifact 正文读取预算。
-tool_artifact_read_budget_window_seconds: 600
+# 读取“已外置的大工具输出”（artifact 正文）的额度：同一个 run 最近 10 分钟最多读这么多字符，默认 240000：
+# - 超了就暂时拒绝，等时间窗口滚过去自动恢复，防止模型反复整段读大输出把上下文和费用撑爆。
+# - 0 = 不限制。一般不用改；确实需要一次读很多归档正文时再调大。
 tool_artifact_read_budget_max_chars: 240000
 
 # 工具输出归档和工具调用解析预算：

@@ -14,6 +14,7 @@ from ...conversation.compact_media_policy import configured_media_policy, media_
 from ...memory_archive import estimate_tokens
 from ...model_guidance import provider_system_instruction
 from ...prompting_parts.cache_layout import prompt_cache_layout
+from ...settings.defaults import configured_context_window_tokens
 from ..native_tool_protocol import (
     model_turn_tool_choice,
     native_tool_use_active,
@@ -230,7 +231,8 @@ def preflight_context_pressure_response(request: object) -> ModelResponse | None
     )
 
 
-# LLM: 只有内置 HTTP 后端的配置共享窗口与实际发送的正数输出上限同时可证时才预留；
+# LLM: 只有内置 HTTP 后端的配置共享窗口与实际发送的正数输出上限同时可证时才预留；“配置窗口可证”即
+# model_context_window_tokens 填了正整数（原 model_context_window_explicit 已并入）；
 # OAuth Responses 会移除 max_output_tokens，未知/仅 input limit 元数据不得当成共享窗口。
 # 函数用途: 读取本轮可证明会进入请求体的输出上限，无法证明时保持原输入预检。
 def _known_shared_window_output_reserve(agent: object) -> int:
@@ -240,22 +242,17 @@ def _known_shared_window_output_reserve(agent: object) -> int:
     config = getattr(agent, "config", None)
     if not isinstance(backend, HttpBackend):
         return 0
-    if not bool(getattr(config, "model_context_window_explicit", False)):
+    if configured_context_window_tokens(config) <= 0:
         return 0
     if str(getattr(backend, "name", "")) == "openai_responses":
         auth_ref = getattr(backend, "auth_ref", None)
         if isinstance(auth_ref, dict) and auth_ref.get("mode") == "chatgpt":
             return 0
     try:
-        configured_window = int(
-            getattr(config, "model_context_window_tokens", 0)
-            or getattr(backend, "configured_context_window_tokens", 0)
-            or 0
-        )
         requested_output = int(getattr(backend, "max_tokens", 0) or 0)
     except (TypeError, ValueError):
         return 0
-    return requested_output if configured_window > 0 and requested_output > 0 else 0
+    return max(0, requested_output)
 
 
 # LLM: 普通生成与 transcript 候选共用已知共享窗口及实际输出 cap；未知协议不猜预留，返回值不改变 Context 的输入占用显示。

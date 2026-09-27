@@ -233,7 +233,7 @@ def test_runtime_memory_routing_uses_home_index_when_project_index_missing(tmp_p
     root = tmp_path / "project"
     root.mkdir()
     agent = SimpleAgent(
-        AgentConfig(my_agent_home=str(home), memory_rule_routing_enabled=True, prompt_files=[]),
+        AgentConfig(my_agent_home=str(home), prompt_files=[]),
         root,
     )
     lesson = agent.home_paths.owner_memory_lessons_dir / "real-tests.md"

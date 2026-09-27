@@ -321,7 +321,7 @@ def test_preflight_checks_explicit_shared_window_against_sent_output_cap(monkeyp
     agent = SimpleNamespace(
         config=AgentConfig(
             auto_save_memory=True, model_context_window_tokens=1_000,
-            model_context_window_explicit=True, memory_compact_auto_trigger_percent=90,
+            memory_compact_auto_trigger_percent=90,
         ),
         backend=backend,
     )
@@ -358,7 +358,7 @@ def test_preflight_does_not_invent_output_reserve_without_wire_cap(monkeypatch) 
     agent = SimpleNamespace(
         config=AgentConfig(
             auto_save_memory=True, model_context_window_tokens=1_000,
-            model_context_window_explicit=True, memory_compact_auto_trigger_percent=90,
+            memory_compact_auto_trigger_percent=90,
         ),
         backend=backend,
     )
@@ -372,7 +372,7 @@ def test_preflight_does_not_invent_output_reserve_without_wire_cap(monkeypatch) 
         lambda _value: 700,
     )
     assert preflight_context_pressure_response(request) is None
-    agent.config.model_context_window_explicit = False
+    agent.config.model_context_window_tokens = None
     backend.auth_ref = {}
     assert preflight_context_pressure_response(request) is None
 
@@ -391,7 +391,7 @@ def test_configured_250k_and_1m_windows_admit_only_fitting_requests(monkeypatch)
         agent = SimpleNamespace(
             config=AgentConfig(
                 auto_save_memory=True, model_context_window_tokens=window,
-                model_context_window_explicit=True, memory_compact_auto_trigger_percent=90,
+                memory_compact_auto_trigger_percent=90,
             ),
             backend=backend,
         )

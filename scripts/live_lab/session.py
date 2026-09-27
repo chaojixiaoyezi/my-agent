@@ -147,7 +147,6 @@ daemon_apply: false
 daemon_execute_runners: false
 daemon_max_runners: 0
 daemon_interval: 1
-runner_failure_policy: "auto"
 # live lab keeps runner tool rounds unlimited unless a specific stress case overrides it
 max_tool_rounds: 0
 request_timeout: {request_timeout}

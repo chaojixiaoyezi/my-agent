@@ -183,10 +183,8 @@ class _ToolConfigFields:
     # 插件进程 OS 沙箱试点：开启后插件进程只可写自己的数据目录（读范围与网络不变）；沙箱不可用则不启动插件。
     plugin_process_sandbox: bool = False
     max_tool_rounds: int | None = None
-    # 历史字段名保留配置兼容；语义是一次并发执行批次大小，不是丢弃同轮尾部调用。
-    max_tool_calls_per_round: int | None = None
-    # 单轮内并行执行工具的数量上限(EXEC-01):空值=代码默认 8;正数=上限;
-    # 0=不限制(与 max_tool_rounds 显式 0 同约定)。任务属性可单任务覆盖。
+    # 一次最多同时执行几个工具（原 max_tool_calls_per_round 已并入）：空 = 8，正数 = 上限，0 = 不限制；
+    # 任务属性 max_parallel_tool_calls 可单任务覆盖，后台工作片另有 max_tool_calls_per_round 任务属性封顶。
     max_parallel_tool_calls: int | None = None
     # 模型输出格式偶发抖动（把工具调用写进正文/代码块/XML 标签）时，
     # 协议违规先给几次结构化修复机会再 break；1=只修一次就断（旧行为）。
@@ -201,9 +199,9 @@ class _ToolConfigFields:
     # 同一工具的明确网络/能力不可用回执去重后达到阈值，提示核对其它授权来源；
     # 命令非零、参数/状态/权限错误、取消与未知失败不计数。每工具一次，0=关闭。
     tool_failure_channel_hint_threshold: int = 2
-    tool_agent_budget_window_seconds: int | None = None
+    # 单个代理最近 10 分钟最多调用几次工具（窗口固定 600 秒）；空或 0 = 关闭，默认关闭。
     tool_agent_budget_max_calls: int | None = None
-    tool_artifact_read_budget_window_seconds: int = 600
+    # 单个 run 最近 10 分钟最多读取多少字符的归档正文（窗口固定 600 秒）；0 = 不限制。
     tool_artifact_read_budget_max_chars: int = 240_000
     tool_output_externalize_min_chars: int = 200_000
     tool_output_preview_chars: int = 4_000
@@ -265,6 +263,8 @@ class _ToolConfigFields:
     computer_use_enabled: bool = False
 
 
+# LLM: 运行预算类字段的默认值组；默认值须与随包 YAML 一致，改动同步规范化与参数登记表。
+# 类用途: 保存扫描、会话读取、后台租约等运行预算的默认值，构造本身不产生副作用。
 @dataclass
 class _RuntimeBudgetConfigFields:
     contract_status_max_scan_files: int = 1000
@@ -272,7 +272,6 @@ class _RuntimeBudgetConfigFields:
     contract_status_recent_findings_limit: int = 20
     skill_guard_max_files: int = 50
     skill_guard_max_size_kb: int = 1024
-    runner_auto_concurrency: int = 8
     conversation_pending_wake_limit: int = 100
     conversation_context_recent_limit: int = 20
     conversation_unhandled_observation_limit: int = 20
@@ -282,8 +281,8 @@ class _RuntimeBudgetConfigFields:
     background_context_max_dict_items: int = 80
     background_context_max_depth: int = 6
     background_context_max_total_tokens: int = 8000
+    # 后台会话执行权的租约秒数；续约心跳按它自动推导（原 background_claim_heartbeat_interval_seconds 已并入）。
     background_claim_ttl_seconds: int = 90
-    background_claim_heartbeat_interval_seconds: int = 0
     background_completion_coalesce_seconds: int = 5
     cli_resume_max_rounds: int = 8
     background_main_agent_allowed_tools: list[str] = field(default_factory=list)
@@ -363,12 +362,9 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     memory_embedding_api_key_env: str = ""  # embedding key 的环境变量名(生产用,免把密钥写进 yaml);空→回退聊天 key
     memory_archive_level: int = 3
     memory_hook_enabled: bool = True
-    memory_hook_archive_level: int = 3
-    memory_rule_routing_enabled: bool = True
     memory_rule_routing_mode: str = "soft"
     memory_rule_auto_read_limit: int = 3
-    memory_resume_auto_context_enabled: bool = False
-    memory_resume_auto_context_mode: str = "trigger"
+    memory_resume_auto_context_mode: str = "off"
     memory_resume_auto_context_limit: int = 5
     memory_compact_auto_trigger_percent: int = 90
     # 含图历史的压缩策略：auto 默认走归档引用（视觉能力事实接入后按事实选择随图摘要）；archived_refs 固定归档引用；off 保持从首个媒体回合起保护全部后缀。
@@ -489,7 +485,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     runner_start_rate: str = "auto"
     runner_timeout_seconds: str = "off"
     runner_timeout_by_role: dict[str, object] = field(default_factory=dict)
-    runner_failure_policy: str = "auto"
+    # 子代理 runner 普通失败后最多自动重跑几次（唯一的家；原 runner_failure_policy 与守卫文件的两个重派上限已并入）；0 = 不自动重跑。
+    runner_failure_retry_limit: int = 1
     gateway_workspace: str = ""
     gateway_heartbeat_interval: int = 5
     gateway_stale_seconds: int = 120
@@ -600,10 +597,10 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 单槽位/繁忙模型的额外排队预算，仅加到首事件等待；0 不额外等待，健康流仍无总墙钟限制。
     model_queue_wait_seconds: float = 0.0
     max_tokens: int = DEFAULT_MODEL_MAX_TOKENS
-    model_context_window_tokens: int = 128_000
-    # /model 保存的用户窗口为显式容量；默认部署仍保留原 provider metadata 优先策略。
-    model_context_window_explicit: bool = False
-    temperature: str = "0.2"
+    # 模型上下文窗口：空 = 用服务商元数据/探测，都拿不到按 128000；填数字 = 就用这个数（原 model_context_window_explicit 已并入）。
+    model_context_window_tokens: int | None = None
+    # 采样温度：空 = 不发送，用服务商默认；填数字 = 发送（原 model_temperature_explicit 已并入）。
+    temperature: str | None = None
     # top_p 留空不覆盖普通模型；已核对的 DeepSeek V4 Flash 使用供应商采样默认。
     top_p: float | None = None
     # 智能程度（推理强度）全局默认档位 auto/off/low/medium/high/max；会话 /effort 与子代理 effort 可覆盖。
@@ -612,8 +609,6 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     model_reasoning_control: str = "auto"
     # 当前模型的结构化输出方式 auto/native/json_object，通常由 /model 档案带入；auto 只对已核对供应商改用 json_object。
     model_structured_output: str = "auto"
-    # 三种接口均只发送显式温度；未启用沿用提供方默认，/model 填温度自动启用。
-    model_temperature_explicit: bool = False
     anthropic_version: str = "2023-06-01"
     # Anthropic-compatible 原生多轮工具请求是否写 cache_control 断点。仅影响 native
     # 工具循环；普通单次聊天不额外创建主动缓存，兼容端点不支持时可显式关闭。

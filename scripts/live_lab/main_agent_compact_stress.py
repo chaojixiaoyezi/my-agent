@@ -256,7 +256,6 @@ def _ensure_compact_stress_config(lab) -> None:
         {marker}
         enable_subagents: false
         max_tool_rounds: 0
-        max_tool_calls_per_round:
         model_context_window_tokens: 200000
         memory_compact_auto_trigger_percent: 70
         request_timeout: {max(600, int(lab.args.timeout))}

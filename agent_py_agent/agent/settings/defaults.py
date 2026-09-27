@@ -1,4 +1,5 @@
-
+# LLM: 跨模块共用的默认数值与派生公式（输出上限、上下文窗口兜底、决策请求字数）只在这里；读取方导入，不复制数值。
+# 模块用途: 提供配置默认值读取、输出上限与上下文窗口的换算函数。
 from __future__ import annotations
 
 from functools import lru_cache
@@ -10,6 +11,8 @@ DEFAULT_COMMAND_ACCESS_MODE = "workspace-write"
 DEFAULT_MODEL_MAX_TOKENS = 65_536
 # 输出上限最多占已知上下文窗口的几分之一：给输入留出至少四分之三窗口，避免输入加输出超窗被供应商拒绝。
 MODEL_OUTPUT_WINDOW_DIVISOR = 4
+# 上下文窗口没填（留空）、服务商也没报告时的兜底容量；随包 YAML 里 model_context_window_tokens 的说明必须同值。
+DEFAULT_MODEL_CONTEXT_WINDOW_TOKENS = 128_000
 # 规划/交付质量/动作候选三个决策点位发给决策模型的当前请求字数预算默认值：更长时自动取首尾节选并标注，不整点跳过。
 # 用户一般不用改（2026-09-27 用户：参数要默认就合理，99% 的人不会手动调）。
 DEFAULT_DECISION_REQUEST_MAX_CHARS = 2_000
@@ -36,9 +39,31 @@ def output_cap_for_window(configured: object, window: object) -> int:
     return max(1, min(cap, size // MODEL_OUTPUT_WINDOW_DIVISOR)) if size > 0 else cap
 
 
+# LLM: 构造期还拿不到服务商元数据，窗口按 context_window_or_default：填了用填的，留空按 128000，与合并前默认一致。
 # 函数用途: 按配置里的窗口算出输出上限（不改配置本身）。
 def effective_max_output_tokens(config: Any) -> int:
-    return output_cap_for_window(getattr(config, "max_tokens", 0), getattr(config, "model_context_window_tokens", 0))
+    return output_cap_for_window(getattr(config, "max_tokens", 0), context_window_or_default(config))
+
+
+# LLM: model_context_window_tokens 是唯一窗口旋钮（原 model_context_window_explicit 已并入）：正整数 = 用户显式容量，
+#   空、0、布尔、非整数 = 没填，返回 0。窗口解析、输出预留、模型切换容量比对都用它判断“是否显式”，不能再另设开关。
+# 函数用途: 读出用户显式填写的上下文窗口，没填返回 0。
+def configured_context_window_tokens(config: Any) -> int:
+    value = getattr(config, "model_context_window_tokens", None)
+    if isinstance(value, bool):
+        return 0
+    try:
+        parsed = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, parsed)
+
+
+# LLM: 只看配置、不看后端：显式值优先，否则兜底 DEFAULT_MODEL_CONTEXT_WINDOW_TOKENS。给构造期的输出上限、Skill 索引预算、
+#   决策输入里的“当前模型窗口”用；运行时真正的窗口以 agent_core/model/context_window 的解析结果为准。
+# 函数用途: 返回配置层面的上下文窗口，留空按 128000。
+def context_window_or_default(config: Any) -> int:
+    return configured_context_window_tokens(config) or DEFAULT_MODEL_CONTEXT_WINDOW_TOKENS
 
 
 @lru_cache(maxsize=1)

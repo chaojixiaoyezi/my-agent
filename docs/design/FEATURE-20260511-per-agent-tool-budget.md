@@ -29,11 +29,11 @@ Status: Implemented
 | ID | Description | Priority |
 |----|-------------|----------|
 | FR-001 | The budget shall be keyed by agent `run_id`. | Must |
-| FR-002 | The default budget shall be read from `runtime_guard_config.yaml` (`tool_agent_budget_window_seconds` / `tool_agent_budget_max_calls`). | Must |
+| FR-002 | The only knob is `tool_agent_budget_max_calls` in `agent_config.yaml`; the window is fixed at 600 s; blank or `0` disables the guard, which is the default. (Updated 2026-09-27: the window knob and the shadowed `runtime_guard_config.yaml` copies were removed.) | Must |
 | FR-003 | Calls without `run_id` shall not be limited by this guard. | Must |
 | FR-004 | Sibling agents shall not share or consume each other's budget. | Must |
 | FR-005 | Budget hits shall return a bounded self-check/handoff tool result. | Must |
-| FR-006 | Setting max calls or window seconds to `0` shall disable the guard. | Should |
+| FR-006 | Leaving max calls blank or setting it to `0` shall disable the guard. | Should |
 
 ## Constraints / 约束
 
@@ -98,4 +98,4 @@ Status: Implemented
 
 ## Rollback / 回滚方案
 
-把 `tool_agent_budget_max_calls` 或 `tool_agent_budget_window_seconds` 设为 `0` 即可关闭守卫；代码层如移除预算检查，也要同步删除配置、测试和文档。
+把 `tool_agent_budget_max_calls` 留空或设为 `0` 即可关闭守卫（默认就是关闭）；代码层如移除预算检查，也要同步删除配置、测试和文档。

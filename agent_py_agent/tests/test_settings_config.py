@@ -278,7 +278,7 @@ class TestNormalizeAgentConfig:
         """验证超出范围的 temperature 回退到默认值。"""
         data = {"temperature": "5.0"}
         normalized, warnings = normalize_agent_config(data)
-        assert normalized["temperature"] == "0.2"  # 默认值
+        assert normalized["temperature"] is None  # 默认留空 = 不发送温度
         assert len(warnings) > 0
 
     def test_normalize_agent_config_gateway_port_valid(self):
@@ -401,7 +401,8 @@ class TestAgentConfigDefaults:
         assert config.memory_top_k == 5
         assert config.max_subagents == 8
         assert config.subagent_hierarchy_max_children_per_tool_call == 0
-        assert config.runner_auto_concurrency == 8
+        assert config.runner_concurrency == "auto"
+        assert config.runner_failure_retry_limit == 1
         assert config.access_mode == "workspace-write"
         assert config.tui_mouse_capture_default is True
 

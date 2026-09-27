@@ -182,9 +182,18 @@ def test_task_overrides_do_not_read_unused_configuration():
     assert _effective_parallel_batch_limit(request) == 2
 
 
+def test_batch_size_config_copy_is_no_longer_read():
+    """参数减量第 2 批：max_tool_calls_per_round 只剩后台工作片写的任务属性，同名配置已并入 max_parallel_tool_calls。"""
+    request = SimpleNamespace(
+        agent=SimpleNamespace(config=SimpleNamespace(max_tool_calls_per_round=2)),
+        params=SimpleNamespace(task_attributes={}),
+    )
+    assert _effective_parallel_batch_limit(request) == 8
+
+
 def test_invalid_task_values_fall_back_without_turning_boolean_into_a_limit():
     request = SimpleNamespace(
-        agent=SimpleNamespace(config=SimpleNamespace(max_parallel_tool_calls=3, max_tool_calls_per_round=8)),
+        agent=SimpleNamespace(config=SimpleNamespace(max_parallel_tool_calls=3)),
         params=SimpleNamespace(task_attributes={"max_parallel_tool_calls": True, "max_tool_calls_per_round": "2"}),
     )
     assert _effective_parallel_batch_limit(request) == 2

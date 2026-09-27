@@ -1,4 +1,5 @@
-
+# LLM: runner 超时与并发数值只从配置换算，不启动 runner；并发语义见 runner/dispatch._resolve_runner_concurrency。
+# 模块用途: 算出子代理 runner 的外层超时、同时运行数和启动速率。
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
@@ -62,6 +63,9 @@ def get_task_timeout(task: SubAgentTask, runner_timeout_seconds: float, config: 
     return calculate_dynamic_timeout(config, estimated_input_tokens, estimated_output_tokens)
 
 
+# LLM: 三个 runner 调度数值都只从各自唯一配置读取：启动速率、并发（runner_concurrency，0 = 不限制）、外层超时；
+#   只算数，不启动 runner。改语义时同步 runner/dispatch.py 的解析函数与 test_runner_dispatch。
+# 函数用途: 按本批任务数算出 runner 外层超时、同时运行数和本切片启动数。
 def resolve_runner_config(config: Any, job_count: int) -> tuple[float, int, int]:
     from .dispatch import (
         _resolve_runner_concurrency,
@@ -72,11 +76,7 @@ def resolve_runner_config(config: Any, job_count: int) -> tuple[float, int, int]
     runner_start_rate = _resolve_runner_start_rate(config.runner_start_rate, job_count)
     if runner_start_rate and runner_start_rate < job_count:
         job_count = runner_start_rate
-    runner_concurrency = _resolve_runner_concurrency(
-        config.runner_concurrency,
-        job_count,
-        auto_limit=getattr(config, "runner_auto_concurrency", job_count),
-    )
+    runner_concurrency = _resolve_runner_concurrency(config.runner_concurrency, job_count)
     runner_timeout_seconds = _resolve_runner_timeout_seconds(config.runner_timeout_seconds)
     return runner_timeout_seconds, runner_concurrency, runner_start_rate
 

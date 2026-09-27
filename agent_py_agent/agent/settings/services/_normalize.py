@@ -109,16 +109,23 @@ def _normalize_string_list(value: object) -> list[str]:
 # temperature
 # ---------------------------------------------------------------------------
 
+# LLM: temperature 是唯一采样温度旋钮（原 model_temperature_explicit 已并入）：空 = None = 不发送，0.0-2.0 的数字按
+#   字符串保存并发送；乱填告警后回到默认（空，不发送），绝不悄悄换成某个软件温度。只改 out，不发请求。
+# 函数用途: 校验并规范化采样温度配置。
 def _normalize_temperature(out: dict[str, object], defaults: object) -> list[str]:
     raw_temp = out.get("temperature", defaults.temperature)
+    # YAML 里 `temperature:` 留空会读成 []，与空串、None 一样表示不发送。
+    if raw_temp is None or raw_temp == [] or (isinstance(raw_temp, str) and not raw_temp.strip()):
+        out["temperature"] = None
+        return []
     temp_val = _temperature_value(raw_temp)
     if temp_val is not None and 0.0 <= temp_val <= 2.0:
         out["temperature"] = raw_temp.strip() if isinstance(raw_temp, str) else str(temp_val)
         return []
     out["temperature"] = defaults.temperature
     if temp_val is None:
-        return [f"temperature: expected a float string, got {raw_temp!r}; using {defaults.temperature}"]
-    return [f"temperature: expected 0.0-2.0, got {temp_val}; using {defaults.temperature}"]
+        return [f"temperature: expected a number or blank, got {raw_temp!r}; not sending temperature"]
+    return [f"temperature: expected 0.0-2.0, got {temp_val}; not sending temperature"]
 
 
 def _temperature_value(raw_temp: object) -> float | None:
@@ -140,6 +147,7 @@ def _temperature_value(raw_temp: object) -> float | None:
 # 类用途: 检查模型连接、容量和请求选项的配置值。
 class ModelFieldsService:
     # LLM: 不发模型请求或改持久配置；top_p 与模型表单共用范围校验，智能程度档位/控制方式按枚举校验，非法 YAML 告警回默认。
+    #   上下文窗口和温度留空都是 None：窗口交给服务商元数据/探测，温度不发送。
     # 函数用途: 统一模型字段的类型和范围，供 YAML/overlay 共用；None 保留为不覆盖供应商采样。
     @staticmethod
     def normalize(data: dict[str, object], defaults: object) -> tuple[dict[str, object], list[str]]:
@@ -589,14 +597,13 @@ _TIMEOUT_INT_FIELDS = (
     ("memory_resume_archive_scan_limit", 0, None),
     ("memory_resume_recommended_read_paths_limit", 0, None),
     ("memory_doctor_recent_archive_file_limit", 0, None),
-    ("runner_auto_concurrency", 0, None),
+    ("runner_failure_retry_limit", 0, None),
     ("background_context_max_string_chars", 0, None),
     ("background_context_max_list_items", 0, None),
     ("background_context_max_dict_items", 0, None),
     ("background_context_max_depth", 0, None),
     ("background_context_max_total_tokens", 0, None),
     ("background_claim_ttl_seconds", 1, None),
-    ("background_claim_heartbeat_interval_seconds", 0, None),
     ("background_completion_coalesce_seconds", 0, None),
     ("conversation_pending_wake_limit", 0, None),
     ("conversation_context_recent_limit", 0, None),

@@ -1,4 +1,7 @@
 
+# LLM: 单代理工具预算只读 AgentConfig.tool_agent_budget_max_calls（窗口固定 10 分钟）；unknown 命令额度只读守卫文件。
+#   两道门都只拒绝本次调用、不结束任务；计数挂在代理实例上，进程内有效。
+# 模块用途: 给每个代理实例做工具调用和 unknown 命令的滚动窗口额度检查。
 from __future__ import annotations
 
 import time
@@ -7,6 +10,9 @@ from dataclasses import dataclass
 from ...contracts.gates.command_policy import analyze_command
 from ...settings.runtime_guard_config import runtime_guard_int
 from ...tooling.models import ToolHandlerOutcome
+
+# 单代理工具预算的固定滚动窗口（10 分钟）；次数只由 AgentConfig.tool_agent_budget_max_calls 决定（原窗口配置已并入）。
+_TOOL_AGENT_BUDGET_WINDOW_SECONDS = 600
 
 
 @dataclass(frozen=True)
@@ -17,6 +23,8 @@ class ToolAgentBudgetRequest:
     now: float | None = None
 
 
+# LLM: 次数上限空/0 = 关闭（默认），窗口固定 _TOOL_AGENT_BUDGET_WINDOW_SECONDS；超额返回拒绝结果并且不记这次调用。
+# 函数用途: 检查本代理最近 10 分钟的工具调用次数，超过上限就拒绝这一次调用。
 def check_tool_agent_budget(request: ToolAgentBudgetRequest) -> ToolHandlerOutcome | None:
     """Rolling-window tool budget scoped per agent instance (not per run_id).
 
@@ -24,12 +32,10 @@ def check_tool_agent_budget(request: ToolAgentBudgetRequest) -> ToolHandlerOutco
     1 个主代理与 4 个子代理各拥有自己的窗口额度，互不挤占；用户间也不共用。
     agent 实例本身即桶：主代理所有 run 共享该主代理的额度，每个子代理同理。
     """
-    config = getattr(request.agent, "config", None)
-    policy = getattr(request.agent, "runtime_guard_policy", None)
-    max_calls = _budget_int(config, "tool_agent_budget_max_calls", policy=policy)
-    window_seconds = _budget_int(config, "tool_agent_budget_window_seconds", policy=policy)
-    if max_calls <= 0 or window_seconds <= 0:
+    max_calls = _configured_max_calls(getattr(request.agent, "config", None))
+    if max_calls <= 0:
         return None
+    window_seconds = _TOOL_AGENT_BUDGET_WINDOW_SECONDS
 
     now = float(time.monotonic() if request.now is None else request.now)
     events = _agent_events(request.agent)
@@ -40,6 +46,9 @@ def check_tool_agent_budget(request: ToolAgentBudgetRequest) -> ToolHandlerOutco
     return None
 
 
+# LLM: 额度只读守卫文件的 unknown_command_*（按代理冻结的策略优先）；白名单内全部段免额度，0 = 关闭；
+#   超额只拒绝本次命令，不结束任务。
+# 函数用途: 检查本代理最近窗口内未声明（unknown）命令的次数，超过就暂时拒绝。
 def check_unknown_command_budget(
     agent: object,
     tool_name: str,
@@ -64,10 +73,8 @@ def check_unknown_command_budget(
     if executables and allowlist and all(item in allowlist for item in executables):
         return None
     policy = getattr(agent, "runtime_guard_policy", None)
-    max_calls = _budget_int(None, "unknown_command_max_calls", policy=policy, default=200)
-    window_seconds = _budget_int(
-        None, "unknown_command_window_seconds", policy=policy, default=600
-    )
+    max_calls = _guard_int("unknown_command_max_calls", policy=policy, default=200)
+    window_seconds = _guard_int("unknown_command_window_seconds", policy=policy, default=600)
     if max_calls <= 0 or window_seconds <= 0:
         return None
     stamp = float(time.monotonic() if now is None else now)
@@ -119,21 +126,18 @@ def _unknown_command_events(agent: object) -> list[float]:
     return created
 
 
-def _budget_int(
-    config: object,
-    key: str,
-    *,
-    policy: object = None,
-    default: int = 0,
-) -> int:
-    if config is not None and hasattr(config, key):
-        value = getattr(config, key, None)
-        if value is None:
-            return default
-        try:
-            return max(0, int(value or 0))
-        except (TypeError, ValueError):
-            return default
+# LLM: 唯一读取入口是 AgentConfig.tool_agent_budget_max_calls；空、0、非整数都表示关闭，守卫文件里不再有副本。
+# 函数用途: 读出单代理 10 分钟内最多允许的工具调用次数（0 = 不限制）。
+def _configured_max_calls(config: object) -> int:
+    try:
+        return max(0, int(getattr(config, "tool_agent_budget_max_calls", None) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+# LLM: unknown 命令额度只在守卫文件（按代理的冻结策略优先，其次读随包文件）；不读 AgentConfig。
+# 函数用途: 读取守卫文件里的一个非负整数额度。
+def _guard_int(key: str, *, policy: object = None, default: int = 0) -> int:
     if policy is not None and hasattr(policy, "int_value"):
         return policy.int_value(key, default)
     return max(0, runtime_guard_int(key, default))

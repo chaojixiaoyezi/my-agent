@@ -18,7 +18,7 @@ class TestEmptyInputCases:
         )
 
         agent = MagicMock()
-        agent.config.runner_failure_policy = "auto"
+        agent.config.runner_failure_retry_limit = 1
         agent.subagents.list_runs.return_value = []  # 空任务列表
         agent.has_pending_work = False
 
@@ -53,7 +53,7 @@ class TestEmptyInputCases:
         )
 
         agent = MagicMock()
-        agent.config.runner_failure_policy = "auto"
+        agent.config.runner_failure_retry_limit = 1
 
         # 创建一个空目标的任务
         mock_task = MagicMock()
@@ -130,7 +130,7 @@ class TestConcurrentStateTransitions:
                 self._has_pending_work = False
                 self._consecutive_dispatch_rounds = 0
                 self.config = MagicMock()
-                self.config.runner_failure_policy = "auto"
+                self.config.runner_failure_retry_limit = 1
                 self.subagents = MagicMock()
 
         agent = MockAgent()
@@ -157,7 +157,7 @@ class TestConcurrentStateTransitions:
             def __init__(self):
                 self._has_pending_work = False
                 self.config = MagicMock()
-                self.config.runner_failure_policy = "auto"
+                self.config.runner_failure_retry_limit = 1
                 self.subagents = MagicMock()
 
         agent = MockAgent()
@@ -177,7 +177,7 @@ class TestConcurrentStateTransitions:
         )
 
         agent = MagicMock()
-        agent.config.runner_failure_policy = "auto"
+        agent.config.runner_failure_retry_limit = 1
 
         call_count = [0]
 
@@ -250,7 +250,7 @@ class TestParameterBoundaryCases:
         from agent_py_agent.agent.agent_core.orchestration.dispatch.loop import dispatch_loop
 
         agent = MagicMock()
-        agent.config.runner_failure_policy = "auto"
+        agent.config.runner_failure_retry_limit = 1
         agent.has_pending_work = False
         agent.subagents.list_runs.return_value = []
 
@@ -270,7 +270,7 @@ class TestParameterBoundaryCases:
         )
 
         agent = MagicMock()
-        agent.config.runner_failure_policy = "auto"
+        agent.config.runner_failure_retry_limit = 1
 
         mock_report = MagicMock()
         mock_report.records = []
@@ -289,7 +289,7 @@ class TestParameterBoundaryCases:
         )
 
         agent = MagicMock()
-        agent.config.runner_failure_policy = "auto"
+        agent.config.runner_failure_retry_limit = 1
 
         mock_report = MagicMock()
         mock_report.records = []
@@ -333,7 +333,7 @@ class TestParameterBoundaryCases:
         )
 
         agent = MagicMock()
-        agent.config.runner_failure_policy = "auto"
+        agent.config.runner_failure_retry_limit = 1
 
         mock_report = MagicMock()
         mock_report.records = []

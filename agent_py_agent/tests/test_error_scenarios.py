@@ -18,7 +18,7 @@ class TestDispatchLoopExceptions:
         )
 
         agent = MagicMock()
-        agent.config.runner_failure_policy = "auto"
+        agent.config.runner_failure_retry_limit = 1
 
         # 模拟 load 抛出 FileNotFoundError
         def load_side_effect(task_id):
@@ -43,7 +43,7 @@ class TestDispatchLoopExceptions:
         )
 
         agent = MagicMock()
-        agent.config.runner_failure_policy = "auto"
+        agent.config.runner_failure_retry_limit = 1
 
         # 模拟 JSON 解析失败
         def load_side_effect(task_id):
@@ -129,7 +129,7 @@ class TestDispatchLoopExceptions:
         )
 
         agent = MagicMock()
-        agent.config.runner_failure_policy = "no_retry"  # 不重试策略
+        agent.config.runner_failure_retry_limit = 0  # 不重试策略
 
         mock_report = MagicMock()
         # 所有记录都是失败的

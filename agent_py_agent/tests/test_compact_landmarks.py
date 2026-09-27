@@ -53,7 +53,7 @@ def _lines(text: str, prefix: str) -> list[str]:
 def test_budget_scales_with_the_window_and_respects_the_config_cap():
     # 函数用途: 造一个只有窗口、配置和工具注册表的 agent。
     def agent(window: int, **config) -> SimpleNamespace:
-        values = {"model_context_window_tokens": window, "model_context_window_explicit": True, **config}
+        values = {"model_context_window_tokens": window, **config}
         return SimpleNamespace(config=SimpleNamespace(**values), backend=None,
                                tools=SimpleNamespace(tools={"session_search": object()}))
 
@@ -161,7 +161,7 @@ def test_a_newline_heavy_request_just_over_budget_is_clipped_not_dropped():
 def test_mechanical_fallback_keeps_its_transcript_when_the_previous_summary_has_landmarks():
     previous = "\n".join(["旧摘要：用户在整理三份需求。", "", LANDMARK_HEADING, "- authority: x", "- purpose: y",
                           '- user [msg-old]: "旧要求：金额保留两位小数。"'])
-    agent = SimpleNamespace(config=SimpleNamespace(model_context_window_tokens=100_000, model_context_window_explicit=True),
+    agent = SimpleNamespace(config=SimpleNamespace(model_context_window_tokens=100_000),
                             backend=None, tools=SimpleNamespace(tools={}))
     rows = [_user("msg-new", "新要求：日期写成 YYYY-MM-DD。")]
     summary = _finish_summary(_SummaryFinish(agent, previous, {}, rows, rows, "", "", _CompactSummaryCall()), "")
@@ -255,7 +255,7 @@ def test_real_compaction_shrinks_landmarks_to_the_target_with_one_extra_measurem
         conversation_store=store, home_paths=SimpleNamespace(owner_compact_dir=tmp_path / "compact"),
         backend=SimpleNamespace(name="fake", model_name="fake", max_tokens=128),
         prompts=SimpleNamespace(build=lambda prompt, *_args, **_kwargs: prompt),
-        config=SimpleNamespace(model_context_window_tokens=100_000, model_context_window_explicit=True),
+        config=SimpleNamespace(model_context_window_tokens=100_000),
     )
     monkeypatch.setattr(compact_request_budget, "generate_auxiliary_model_response",
                         lambda _request: ModelResponse(text="用户给了六份要求，尚未整理。", backend="fake"))

@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 from ..capability.persona_repository import PersonaRepository, PersonaRepositoryError
 from ..common import agent_time
 from ..settings import AgentConfig
+from ..settings.defaults import context_window_or_default
 from ..task_progress_guidance import (
     task_progress_closeout_guidance_enabled,
     task_progress_model_discipline,
@@ -549,11 +550,17 @@ def _skill_context_chunks(
     try:
         config = getattr(builder, "config", None)
         index = router.render_skill_metadata_index(
-            context_window_tokens=getattr(config, "model_context_window_tokens", 0),
+            context_window_tokens=_skill_index_window(config),
         )
         return [index] if index else []
     except Exception:
         return []
+
+
+# LLM: 窗口留空时按 128000 兜底（与合并前默认值一致），没有配置对象时返回 0 走字符预算；只算数，不读后端。
+# 函数用途: 给 Skill 名卡索引算预算用的上下文窗口。
+def _skill_index_window(config: object) -> int:
+    return context_window_or_default(config) if config is not None else 0
 
 
 # LLM: 名卡与原 scoped Router 相交；task_local 仅接受显式投影，isolated/control_plane 不新增，None 保持旧行为。
@@ -568,7 +575,7 @@ def _selected_skill_context(builder: PromptBuilder, request: PromptBuildRequest,
         return ""
     try:
         return router.render_skill_metadata_index(
-            context_window_tokens=getattr(builder.config, "model_context_window_tokens", 0),
+            context_window_tokens=_skill_index_window(builder.config),
             selected_skill_ids=tools.selected_skill_ids,
             required_skill_ids=tools.required_skill_ids,
         )

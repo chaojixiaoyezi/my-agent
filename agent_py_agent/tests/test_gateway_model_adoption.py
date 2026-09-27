@@ -298,8 +298,8 @@ def test_conservative_budget_rejects_utf8_even_when_old_estimator_underreads(mon
     payload = {"messages": [{"role": "user", "content": material}], "tools": [{"name": "large", "input_schema": {"description": material}}], "max_tokens": 4096}
     monkeypatch.setattr(model_adoption, "estimate_tokens", lambda _value: 1)
     with pytest.raises(ValueError, match="request_capacity_exceeded"):
-        model_adoption._capacity(SimpleNamespace(model_context_window_explicit=True, model_context_window_tokens=250_000), payload)
-    validation = model_adoption._capacity(SimpleNamespace(model_context_window_explicit=True, model_context_window_tokens=1_000_000), payload)
+        model_adoption._capacity(SimpleNamespace(model_context_window_tokens=250_000), payload)
+    validation = model_adoption._capacity(SimpleNamespace(model_context_window_tokens=1_000_000), payload)
     assert validation["estimated"] is True
     assert validation["conservative_input_bound"] > len(json.dumps(payload, ensure_ascii=False).encode())
 

@@ -1684,8 +1684,8 @@ per-owner Agent，也必须跟随基础 Gateway 的权威队列记录，不能�
   不作为调度或验收硬门。
 - worker 秒退、参数错、import 错要立即标记失败状态，不能伪装成 processing/planning。
 - 无限 gateway watch 没有 stop request 却返回时必须写 `GATEWAY_WATCH_UNEXPECTED_RETURN` 并返回非零；
-- 后台主代理 claim 默认 TTL 90 秒，`background_claim_heartbeat_interval_seconds=0` 表示按 TTL 自动取安全
-  间隔（默认 30 秒），不是 50ms 热写。同一进程域旧 owner 已死可立即接管；跨 Pod/旧 claim 无法证明时
+- 后台主代理 claim 默认 TTL 90 秒（`background_claim_ttl_seconds`），续约心跳始终按 TTL 自动取安全
+  间隔（默认 30 秒，2026-09-27 起不再有单独的心跳配置），不是 50ms 热写。同一进程域旧 owner 已死可立即接管；跨 Pod/旧 claim 无法证明时
   等待 TTL，保证 RWX 事实源上不会双执行。
   三个后台线程任一未在 drain deadline 内结束时写 `GATEWAY_DRAIN_INCOMPLETE`。计划停止与有限轮完成
   保持 exit 0，但 termination kind/reason 必须持久化。

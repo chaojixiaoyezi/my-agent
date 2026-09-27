@@ -1171,7 +1171,8 @@ def test_transcript_candidate_respects_output_reserve_before_target_or_fallback(
     from agent_py_agent.agent.conversation import compact as module
 
     agent = _agent(tmp_path, context_tokens=10_000)
-    agent.config.model_context_window_explicit = explicit
+    if not explicit:
+        agent.config.model_context_window_tokens = None
     agent.config.memory_compact_auto_trigger_percent = 90
     agent.config.memory_compact_recovery_target_percent = 60
     backend_type = OpenAIResponsesBackend if oauth else HttpBackend

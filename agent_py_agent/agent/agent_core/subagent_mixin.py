@@ -1,5 +1,5 @@
-
-
+# LLM: 子代理生命周期的主代理侧入口；恢复快照的归档级别只读 memory_archive_level，写快照、记录失败有副作用。
+# 模块用途: 给 SimpleAgent 提供子代理规划、试跑、探测、失败处理与收尾（含恢复快照）的实现。
 from __future__ import annotations
 
 import logging
@@ -489,6 +489,9 @@ def _subagent_recovery_snapshot_root(agent, task: SubAgentTask | None) -> Path:
     return runtime_owner_root(agent)
 
 
+# LLM: 子代理收尾快照与主运行归档共用 memory_archive_level 一个旋钮（原 memory_hook_archive_level 已并入）；
+#   这里只组装输入，不写文件，写入由调用方的恢复快照写入器负责。
+# 函数用途: 把子代理一次运行的结果、产物路径和下一步建议整理成恢复快照输入。
 def _recovery_snapshot_input(
     agent,
     snapshot: RecoverySnapshotParams,
@@ -512,7 +515,7 @@ def _recovery_snapshot_input(
         task_refs=[snapshot.run_id],
         content_paths=content_paths,
         next_actions=next_actions,
-        archive_level=int(getattr(agent.config, "memory_hook_archive_level", 3)),
+        archive_level=int(getattr(agent.config, "memory_archive_level", 3)),
     )
 
 

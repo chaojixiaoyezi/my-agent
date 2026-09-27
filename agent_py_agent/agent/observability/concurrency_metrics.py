@@ -1,3 +1,5 @@
+# LLM: 指标埋点全程异常隔离，不影响真实链路；runner 在飞数对应的上限是配置 runner_concurrency。
+# 模块用途: 登记并更新 Gateway、后台 tick、子代理 runner 与模型调用的并发占用指标。
 """并发占用探针(接手文档 §6-A"先量化再动手"的量化地基)。
 
 回答"1000 并发瓶颈在哪一层"的四个占用面 + 一个等待面,全部挂 default_registry(),
@@ -9,7 +11,7 @@ GET /metrics 一把读走(与既有 LLM RED/token/cost 指标同端点):
 - agent_gateway_admission_blocked:最近一次派发扫描里被限流挡在 pending 的请求数
   (>0=有请求在排队等坑,配合 queue_wait 分位定位"每人小坑满"还是"全局大坑满")。
 - agent_background_owner_ticks_inflight:后台整合/唤醒 tick 在飞数(池上限 8)。
-- agent_subagent_runners_inflight:子代理 runner 线程在飞数(单派工上限 runner_auto_concurrency)。
+- agent_subagent_runners_inflight:子代理 runner 线程在飞数(单派工上限 runner_concurrency)。
 - agent_llm_inflight:真正压在模型 API 上的并发调用数(§6-A2 的"扇出倍数"实测值)。
 
 铁律(同 llm_metrics):埋点全程异常隔离,发指标出错绝不冒泡、绝不影响真实链路;

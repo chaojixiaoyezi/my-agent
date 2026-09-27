@@ -216,7 +216,6 @@ def test_run_injects_only_formal_routed_lesson_in_memory_envelope(tmp_path):
     agent = SimpleAgent(
         AgentConfig(
             model_backend="echo",
-            memory_rule_routing_enabled=True,
             memory_rule_routing_mode="soft",
             memory_rule_auto_read_limit=1,
         ),
@@ -303,7 +302,6 @@ def test_auto_resume_context_injects_when_always_mode_enabled(tmp_path):
         _test_config(
             tmp_path,
             model_backend="echo",
-            memory_resume_auto_context_enabled=True,
             memory_resume_auto_context_mode="always",
             memory_resume_auto_context_limit=3,
         ),
@@ -335,7 +333,7 @@ def test_auto_resume_context_can_be_enabled_per_run(tmp_path):
 
 def test_auto_resume_context_can_be_disabled_per_run(tmp_path):
     agent = SimpleAgent(
-        _test_config(tmp_path, model_backend="echo", memory_resume_auto_context_enabled=True),
+        _test_config(tmp_path, model_backend="echo", memory_resume_auto_context_mode="trigger"),
         tmp_path,
     )
     agent.run("README 禁用恢复开关任务", save=True)
@@ -351,7 +349,6 @@ def test_auto_resume_context_recovers_cross_day_handoff_task(tmp_path):
         _test_config(
             tmp_path,
             model_backend="echo",
-            memory_resume_auto_context_enabled=True,
             memory_resume_auto_context_mode="always",
             memory_resume_auto_context_limit=5,
         ),
@@ -389,7 +386,6 @@ def test_auto_resume_context_recovers_cross_day_gateway_request(tmp_path):
         _test_config(
             tmp_path,
             model_backend="echo",
-            memory_resume_auto_context_enabled=True,
             memory_resume_auto_context_mode="always",
             memory_resume_auto_context_limit=5,
         ),

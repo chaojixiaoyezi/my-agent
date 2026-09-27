@@ -47,7 +47,7 @@ def _background(tmp_path, *, backend: str, detached: bool, with_history: bool = 
         model_backend=backend, model_name=model_name, api_base=api_base,
         api_key="fake-private-key", stream_enabled=False, enable_tools=False,
         my_agent_home=str(tmp_path / "home"),
-        model_context_window_tokens=200_000, model_context_window_explicit=True,
+        model_context_window_tokens=200_000,
         max_tool_rounds=1, tool_context_ptl_retry_max=0,
     ), tmp_path)
     store = agent.conversation_store

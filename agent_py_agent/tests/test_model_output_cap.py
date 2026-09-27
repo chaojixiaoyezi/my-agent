@@ -31,12 +31,13 @@ def test_packaged_yaml_dataclass_and_constant_agree_on_64k():
     assert int(load_simple_yaml(_PACKAGED)["max_tokens"]) == DEFAULT_MODEL_MAX_TOKENS
 
 
-@pytest.mark.parametrize("window,explicit,expected", [
-    (1_000_000, True, 65_536), (262_144, True, 65_536), (204_800, True, 51_200), (128_000, True, 32_000),
-    (32_768, True, 8_192), (128_000, False, 32_000), (64_000, False, 16_000), (0, True, 65_536),
+@pytest.mark.parametrize("window,expected", [
+    (1_000_000, 65_536), (262_144, 65_536), (204_800, 51_200), (128_000, 32_000),
+    (32_768, 8_192), (64_000, 16_000), (None, 32_000), (0, 32_000),
 ])
-def test_output_cap_is_clamped_by_any_known_window(window, explicit, expected):
-    config = replace(AgentConfig(), model_context_window_tokens=window, model_context_window_explicit=explicit)
+def test_output_cap_is_clamped_by_the_configured_window_or_128k_fallback(window, expected):
+    """参数减量第 2 批：窗口留空（None/0）按 128000 兜底，与合并前默认值 128000 的夹取结果一致。"""
+    config = replace(AgentConfig(), model_context_window_tokens=window)
     assert effective_max_output_tokens(config) == expected
 
 
@@ -45,7 +46,7 @@ def test_backend_factory_clamps_by_any_known_window():
                      api_key="test-key", model_name="m", model_context_window_tokens=128_000)
     backend = get_backend(config.model_backend, config)
     assert backend.max_tokens == 32_000 and max_output_tokens(SimpleNamespace(backend=backend, config=config)) == 32_000
-    assert get_backend(config.model_backend, replace(config, model_context_window_tokens=0)).max_tokens == 65_536
+    assert get_backend(config.model_backend, replace(config, model_context_window_tokens=None)).max_tokens == 32_000
 
 
 def test_output_estimate_for_other_backends_is_clamped_too():

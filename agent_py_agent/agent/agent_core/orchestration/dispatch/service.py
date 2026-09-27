@@ -1,5 +1,5 @@
-
-
+# LLM: 派工各阶段的记录组装与待跑判断；待跑判断与正式派工共用同一候选闸和重跑次数配置，不另写规则。
+# 模块用途: 为一次派工生成到期检查、动作执行、能力路由、补丁审阅等记录，并判断是否还有待跑工作。
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -232,30 +232,19 @@ def _patch_review_action(decision: object) -> str:
 # ---------------------------------------------------------------------------
 
 
+# LLM: 与正式派工同一个候选闸判断是否还有待跑工作，重跑次数取配置 runner_failure_retry_limit；只读，不启动 runner。
+# 函数用途: 告诉派工循环是否还有子代理 run 需要启动或重跑。
 def update_pending_work_state(agent) -> bool:
     from ...runner.dispatch import (
         RunnerCandidatePolicy,
         _dispatch_runner_candidates,
-        _runner_max_attempts,
-        _same_run_redispatch_limit,
+        runner_failure_retry_limit,
     )
 
-    runtime_policy = getattr(agent, "runtime_guard_policy", None)
-    runner_max_attempts = _runner_max_attempts(
-        agent.config.runner_failure_policy,
-        runtime_policy=runtime_policy,
-    )
-    same_run_limit = _same_run_redispatch_limit(
-        getattr(agent.config, "same_run_redispatch_limit", None),
-        runtime_policy=runtime_policy,
-    )
     candidates = _dispatch_runner_candidates(
         agent.subagents.list_runs(),
         max_runners=999,
-        policy=RunnerCandidatePolicy(
-            runner_max_attempts=runner_max_attempts,
-            same_run_redispatch_limit=same_run_limit,
-        ),
+        policy=RunnerCandidatePolicy(runner_retry_limit=runner_failure_retry_limit(agent.config)),
     )
     return len(candidates) > 0
 

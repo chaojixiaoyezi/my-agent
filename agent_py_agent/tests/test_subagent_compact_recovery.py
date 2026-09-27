@@ -30,7 +30,7 @@ def _child(tmp_path, *, backend: str, tools: bool):
     agent = SimpleAgent(AgentConfig(
         model_backend=backend, model_name=model_name, api_base=api_base,
         api_key="fake-private-key", stream_enabled=False, enable_tools=tools,
-        model_context_window_tokens=200_000, model_context_window_explicit=True,
+        model_context_window_tokens=200_000,
         max_tool_rounds=1, tool_context_ptl_retry_max=0,
     ), tmp_path)
     task = agent.subagents.create_run(goal="核对材料并给出结论", thought="", plan=[], allowed_tools=["read_file"])

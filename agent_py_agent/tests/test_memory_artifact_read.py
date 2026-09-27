@@ -244,7 +244,6 @@ def test_read_artifact_tool_enforces_per_run_artifact_read_budget(tmp_path: Path
             catalog_limit=20,
             retrieval_limit=10,
             vector_search_enabled=False,
-            artifact_read_budget_window_seconds=600,
             artifact_read_budget_max_chars=12,
         )
     )
@@ -285,7 +284,6 @@ def test_read_artifact_budget_blocks_unbounded_large_read_from_index(tmp_path: P
             catalog_limit=20,
             retrieval_limit=10,
             vector_search_enabled=False,
-            artifact_read_budget_window_seconds=600,
             artifact_read_budget_max_chars=12,
         )
     )

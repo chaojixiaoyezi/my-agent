@@ -29,23 +29,16 @@ class TestMemorySettingsDefaults:
         settings = MemorySettings()
         assert settings.memory_hook_enabled is True
 
-    def test_memory_hook_archive_level_default(self):
-        """验证 hook 归档级别默认值。"""
-        settings = MemorySettings()
-        assert settings.memory_hook_archive_level == 3
-
     def test_memory_routing_defaults(self):
         """验证路由默认值。"""
         settings = MemorySettings()
-        assert settings.memory_rule_routing_enabled is True
         assert settings.memory_rule_routing_mode == "soft"
         assert settings.memory_rule_auto_read_limit == 3
 
     def test_memory_resume_defaults(self):
         """验证恢复默认值。"""
         settings = MemorySettings()
-        assert settings.memory_resume_auto_context_enabled is False
-        assert settings.memory_resume_auto_context_mode == "trigger"
+        assert settings.memory_resume_auto_context_mode == "off"
         assert settings.memory_resume_auto_context_limit == 5
 
 
@@ -145,7 +138,7 @@ class TestNormalizeMemorySettings:
     def test_normalize_invalid_resume_mode(self):
         """验证无效的恢复模式回退。"""
         settings, warnings = normalize_memory_settings({"memory_resume_auto_context_mode": "never"})
-        assert settings.memory_resume_auto_context_mode == "trigger"  # 默认值
+        assert settings.memory_resume_auto_context_mode == "off"  # 默认值
         assert len(warnings) == 1
 
     def test_normalize_valid_resume_limit(self):

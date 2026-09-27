@@ -38,7 +38,7 @@ orphan reconciler、observation/wake 和代理树 projection
 默认同一 root 可保留 8 个未结束 child，终态会释放槽位；历史累计数量可以超过 8。批量
 `create_subagents` 默认不再另设“单次最多 4 个”，整批只按当前 root 可用槽位原子接受或拒绝。
 `subagent_hierarchy_max_children_per_tool_call` 仍可由部署方显式设置更小批次，`0` 表示不额外收紧；
-默认 `runner_auto_concurrency=8`，所以八个已创建 child 可以真正并行启动。
+默认 `runner_concurrency: auto`（即 8；写数字是上限，`0` 不限制），所以八个已创建 child 可以真正并行启动。
 这份容量不是根代理专属：child/coordinator 创建 grandchild 时也在同一 owner-local 创建事务里复用同一个
 session/owner/task/per-call 计算，任意一层超限都整批 `not_started`，不会截断成部分创建。runner 并发上限与
 创建容量仍是两件事，和 会话运行时 的 session registry / execution limiter 分工相同。

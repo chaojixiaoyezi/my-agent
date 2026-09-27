@@ -1,4 +1,5 @@
-
+# LLM: 记忆体检只读配置、路由索引与归档目录，不写任何记忆文件。
+# 模块用途: 记忆体检命令的配置、路由与归档部分的辅助函数。
 from __future__ import annotations
 
 """implements the memory-doctor CLI command and its supporting helpers.
@@ -78,6 +79,8 @@ def _build_routing_doctor(root: Path, index_path: Path) -> dict[str, Any]:
     return payload
 
 
+# LLM: 只读归档目录与配置，汇总保留策略与 hook/raw 目录状态；归档级别只有 memory_archive_level 一个。
+# 函数用途: 给记忆体检生成归档部分的结果。
 def _build_archive_doctor(root: Path, config: object) -> dict[str, Any]:
 
     hook_today_path = snapshot_path_for(root)
@@ -86,7 +89,6 @@ def _build_archive_doctor(root: Path, config: object) -> dict[str, Any]:
         # 参数减量第 1 批（2026-09-27）：memory_hook_retention_days 没有清理器读取，已从配置删除，不再回显。
         "retention": {
             "memory_hook_enabled": bool(getattr(config, "memory_hook_enabled", True)),
-            "memory_hook_archive_level": int(getattr(config, "memory_hook_archive_level", 3)),
             "memory_archive_level": int(getattr(config, "memory_archive_level", 3)),
         },
         "hook": _archive_dir_payload(hook_today_path.parent, hook_today_path, config=config),
@@ -128,15 +130,13 @@ def _archive_file_payload(path: Path) -> dict[str, Any]:
     }
 
 
-# LLM: 只回显 AgentConfig 上真实存在的 Memory 字段；字段名单与 settings/_memory_types.MemorySettings 同步删减。
+# LLM: 只回显 AgentConfig 上真实存在的 Memory 字段；字段名单与 settings/_memory_types.MemorySettings 同步删减；只读配置对象。
 # 函数用途: 把 doctor 展示的记忆配置生效值收成一个字典。
 def _memory_config_payload(config: object) -> dict[str, Any]:
 
     fields = [
         "memory_archive_level",
         "memory_hook_enabled",
-        "memory_hook_archive_level",
-        "memory_rule_routing_enabled",
         "memory_rule_routing_mode",
         "memory_rule_auto_read_limit",
     ]

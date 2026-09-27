@@ -11,6 +11,10 @@ Live Lab 是开发验收辅助，不是生产调度器，也不能替被测代�
 - 长文本压缩验证检查来源覆盖、压缩账本与后续恢复，不以模型声称“读完”作为通过证据。
 - fixture 标记只用于测试层，不进入生产的状态、权限、任务归属或完成判定。
 
+## 参数减量第 2 批（2026-09-27）
+
+Live Lab 生成的测试配置不再写已删除的键：`session.py` 去掉 `runner_failure_policy`（重跑次数改用默认的 `runner_failure_retry_limit`），`main_agent_compact_stress.py` 去掉留空的 `max_tool_calls_per_round`（并入 `max_parallel_tool_calls`，留空仍是 8）。只影响测试配置的生成，不改验收判据。
+
 ## 发布清理
 
 已移除旧批次稳定性脚本、机器现场配置和过时实验报告。常规测试以现有定向用例、脱敏回放及

@@ -34,7 +34,6 @@ from ..conversation.tool_context_window import window_tool_context_params
 from ..prompting_parts.builder import project_runtime_workspace_context
 from ..runtime_context import current_task_attributes
 from ..runtime_db.operations import exec_lock_scope
-from ..settings.runtime_guard_config import runtime_guard_int
 from ..subagents.services.session_progress import record_runtime_subagent_tool_progress
 from ..tooling.operation_verification import render_current_turn_execution_facts
 from ..tooling.registry_workspace import effective_registry_cwd
@@ -221,16 +220,11 @@ class _NativeCompactCommit:
     source_refs: tuple[dict[str, str], ...]
 
 
+# LLM: 工具轮上限只在 AgentConfig.max_tool_rounds（空 = _DEFAULT_MAX_TOOL_ROUNDS）；守卫文件里的副本在有 AgentConfig
+#   时从来读不到，已删除。任务属性 max_tool_rounds 可单任务覆盖；正数 = 上限，0 = 不限制。只读。
+# 函数用途: 算出本次工具循环最多跑多少个工具轮。
 def _effective_max_tool_rounds(agent, params: ToolLoopExecuteParams) -> int:
-    config = getattr(agent, "config", None)
-    if hasattr(config, "max_tool_rounds"):
-        effective = getattr(config, "max_tool_rounds", None)
-    else:
-        effective = runtime_guard_int(
-            "max_tool_rounds",
-            0,
-            policy=getattr(agent, "runtime_guard_policy", None),
-        )
+    effective = getattr(getattr(agent, "config", None), "max_tool_rounds", None)
     attrs_to_check = params.task_attributes or current_task_attributes(agent)
     if attrs_to_check and "max_tool_rounds" in attrs_to_check:
         effective = attrs_to_check["max_tool_rounds"]

@@ -38,7 +38,8 @@ def parallel_segment_end(
     return position
 
 
-# LLM: 输入已由装配点按任务属性优先于配置解析；并发负数/缺省仍用 8，批大小非正数不限制，两个正上限取小值。
+# LLM: 输入已由装配点按任务属性优先于配置解析；并发负数/缺省用 8、显式 0 不限制，后台批大小非正数不限制，两个正上限取小值。
+#   返回值同时决定段长和线程数，改默认值要同步 agent_config.yaml 的 max_parallel_tool_calls 说明。
 # 函数用途: 合并并发与每批数量限制，保留显式 0 不限制的既有合同，不限制整个 provider turn 的调用总数。
 def resolve_parallel_batch_limit(
     parallel_limit: int | None,

@@ -131,51 +131,27 @@ def test_runner_future_exception_records_structured_blocked_result() -> None:
     assert "worker process vanished" in recorded[0].message
 
 
-class TestRunnerMaxAttempts:
-    """测试 _runner_max_attempts() 函数。"""
+class TestRunnerFailureRetryLimit:
+    """runner_failure_retry_limit 是“普通失败后自动重跑几次”的唯一旋钮（参数减量第 2 批）。"""
 
-    def test_auto_policy_returns_2(self):
-        """auto 策略返回 2 次尝试。"""
-        from agent_py_agent.agent.agent_core.runner.dispatch import _runner_max_attempts
+    def test_reads_the_single_agent_config_knob(self):
+        from agent_py_agent.agent.agent_core.runner.dispatch import runner_failure_retry_limit
+        from agent_py_agent.agent.settings import AgentConfig
 
-        assert _runner_max_attempts("auto") == 2
-        assert _runner_max_attempts("Auto") == 2
-        assert _runner_max_attempts("AUTO") == 2
+        assert AgentConfig().runner_failure_retry_limit == 1
+        assert runner_failure_retry_limit(AgentConfig()) == 1
+        assert runner_failure_retry_limit(SimpleNamespace(runner_failure_retry_limit=3)) == 3
+        assert runner_failure_retry_limit(SimpleNamespace(runner_failure_retry_limit=0)) == 0
+        assert runner_failure_retry_limit(SimpleNamespace(runner_failure_retry_limit="2")) == 2
 
-    def test_empty_policy_returns_2(self):
-        """空策略返回 2 次尝试。"""
-        from agent_py_agent.agent.agent_core.runner.dispatch import _runner_max_attempts
+    def test_invalid_values_fall_back_to_the_default(self):
+        from agent_py_agent.agent.agent_core.runner.dispatch import runner_failure_retry_limit
 
-        assert _runner_max_attempts("") == 2
-        assert _runner_max_attempts(None) == 2
+        for value in (-1, "abc", None, True, 2.5j):
+            assert runner_failure_retry_limit(SimpleNamespace(runner_failure_retry_limit=value)) == 1
+        assert runner_failure_retry_limit(SimpleNamespace()) == 1
 
-    def test_off_policy_returns_1(self):
-        """只有 off/0 显式关闭补跑；旧别名不再改变机器语义。"""
-        from agent_py_agent.agent.agent_core.runner.dispatch import _runner_max_attempts
-
-        assert _runner_max_attempts("off") == 0
-        assert _runner_max_attempts("0") == 0
-        assert _runner_max_attempts("none") == 2
-        assert _runner_max_attempts("disabled") == 2
-
-    def test_numeric_policy_returns_value(self):
-        """数字策略返回对应失败后重试次数。"""
-        from agent_py_agent.agent.agent_core.runner.dispatch import _runner_max_attempts
-
-        assert _runner_max_attempts("3") == 3
-        assert _runner_max_attempts(3) == 3
-        assert _runner_max_attempts(1) == 1
-        assert _runner_max_attempts("0") == 0
-        assert _runner_max_attempts(0) == 0
-
-    def test_invalid_policy_returns_2(self):
-        """无效策略默认返回 2。"""
-        from agent_py_agent.agent.agent_core.runner.dispatch import _runner_max_attempts
-
-        assert _runner_max_attempts("invalid") == 2
-        assert _runner_max_attempts("abc") == 2
-
-    def test_zero_policy_keeps_retry_candidate_unlimited(self):
+    def test_zero_limit_means_no_automatic_retry(self):
         from agent_py_agent.agent.agent_core.runner.dispatch import _is_dispatch_runner_candidate
 
         task = SimpleNamespace(
@@ -185,12 +161,13 @@ class TestRunnerMaxAttempts:
             capability_requests=[],
             capability_gaps=[],
             failure_type="runner_error",
-            runner_attempts=99,
+            runner_attempts=1,
         )
 
-        assert _is_dispatch_runner_candidate(task, policy=RunnerCandidatePolicy(runner_max_attempts=0, same_run_redispatch_limit=0)) is True
+        assert _is_dispatch_runner_candidate(task, policy=RunnerCandidatePolicy(runner_retry_limit=0)) is False
+        assert _is_dispatch_runner_candidate(task) is False
 
-    def test_runner_failure_retry_limit_counts_retries_after_initial_attempt(self):
+    def test_limit_counts_retries_after_initial_attempt(self):
         from agent_py_agent.agent.agent_core.runner.dispatch import _is_dispatch_runner_candidate
 
         task = SimpleNamespace(
@@ -200,14 +177,19 @@ class TestRunnerMaxAttempts:
             capability_requests=[],
             capability_gaps=[],
             failure_type="runner_error",
-            runner_attempts=2,
+            runner_attempts=1,
         )
 
-        assert _is_dispatch_runner_candidate(task, policy=RunnerCandidatePolicy(runner_max_attempts=2, same_run_redispatch_limit=0)) is True
+        # 1 = 失败后正好再跑一次（原来 1 被当成“不重跑”的特例）。
+        assert _is_dispatch_runner_candidate(task, policy=RunnerCandidatePolicy(runner_retry_limit=1)) is True
+        task.runner_attempts = 2
+        assert _is_dispatch_runner_candidate(task, policy=RunnerCandidatePolicy(runner_retry_limit=1)) is False
+        assert _is_dispatch_runner_candidate(task, policy=RunnerCandidatePolicy(runner_retry_limit=2)) is True
         task.runner_attempts = 3
-        assert _is_dispatch_runner_candidate(task, policy=RunnerCandidatePolicy(runner_max_attempts=2, same_run_redispatch_limit=0)) is False
+        assert _is_dispatch_runner_candidate(task, policy=RunnerCandidatePolicy(runner_retry_limit=2)) is False
 
-    def test_same_run_redispatch_limit_blocks_repeating_same_run(self):
+    def test_limit_is_the_only_cap_on_same_run_retries(self):
+        """原守卫文件 same_run_redispatch_limit=1 会把任何大于 1 的设置压回 1 次；合并后设几次就是几次。"""
         from agent_py_agent.agent.agent_core.runner.dispatch import _is_dispatch_runner_candidate
 
         task = SimpleNamespace(
@@ -217,11 +199,29 @@ class TestRunnerMaxAttempts:
             capability_requests=[],
             capability_gaps=[],
             failure_type="runner_error",
-            runner_attempts=2,
+            runner_attempts=3,
         )
 
-        assert _is_dispatch_runner_candidate(task, policy=RunnerCandidatePolicy(runner_max_attempts=3, same_run_redispatch_limit=1)) is False
-        assert _is_dispatch_runner_candidate(task, policy=RunnerCandidatePolicy(runner_max_attempts=3, same_run_redispatch_limit=0)) is True
+        assert _is_dispatch_runner_candidate(task, policy=RunnerCandidatePolicy(runner_retry_limit=3)) is True
+        task.runner_attempts = 4
+        assert _is_dispatch_runner_candidate(task, policy=RunnerCandidatePolicy(runner_retry_limit=3)) is False
+
+    def test_provider_supply_failures_keep_their_own_wider_limit(self):
+        from agent_py_agent.agent.agent_core.runner.dispatch import _is_dispatch_runner_candidate
+
+        task = SimpleNamespace(
+            status="BLOCKED",
+            verification_status="UNVERIFIED",
+            channel_status="OK",
+            capability_requests=[],
+            capability_gaps=[],
+            failure_type="transient_error",
+            runner_attempts=5,
+        )
+
+        assert _is_dispatch_runner_candidate(task, policy=RunnerCandidatePolicy(runner_retry_limit=0)) is True
+        task.runner_attempts = 9
+        assert _is_dispatch_runner_candidate(task, policy=RunnerCandidatePolicy(runner_retry_limit=0)) is False
 
 
 class TestRunnerFailureType:
@@ -275,7 +275,7 @@ class TestRunnerCandidateCapabilityGrant:
             blockers=[],
         )
 
-        assert _is_dispatch_runner_candidate(task, policy=RunnerCandidatePolicy(runner_max_attempts=1)) is True
+        assert _is_dispatch_runner_candidate(task, policy=RunnerCandidatePolicy()) is True
 
     def test_open_request_still_blocks_runner_candidate(self):
         from agent_py_agent.agent.agent_core.runner.dispatch import _is_dispatch_runner_candidate
@@ -294,7 +294,7 @@ class TestRunnerCandidateCapabilityGrant:
             blockers=[],
         )
 
-        assert _is_dispatch_runner_candidate(task, policy=RunnerCandidatePolicy(runner_max_attempts=2)) is False
+        assert _is_dispatch_runner_candidate(task, policy=RunnerCandidatePolicy(runner_retry_limit=2)) is False
 
 
 class TestResolveRunnerConcurrency:
@@ -331,6 +331,16 @@ class TestResolveRunnerConcurrency:
         from agent_py_agent.agent.agent_core.runner.dispatch import _resolve_runner_concurrency
 
         assert _resolve_runner_concurrency(10, 3) == 3
+
+    def test_zero_means_unlimited_and_junk_means_auto(self):
+        """runner_concurrency 是唯一并发旋钮：0 = 不限制（原来 "0" 被夹成 1），乱填按 auto = 8。"""
+        from agent_py_agent.agent.agent_core.runner.dispatch import _resolve_runner_concurrency
+
+        assert _resolve_runner_concurrency(0, 20) == 20
+        assert _resolve_runner_concurrency("0", 20) == 20
+        assert _resolve_runner_concurrency("12", 20) == 12
+        for junk in ("-1", -3, "abc", None, True):
+            assert _resolve_runner_concurrency(junk, 20) == 8
 
 
 class TestResolveRunnerStartRate:

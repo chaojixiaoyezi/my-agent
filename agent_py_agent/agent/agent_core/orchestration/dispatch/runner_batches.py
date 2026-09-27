@@ -5,9 +5,8 @@ from __future__ import annotations
 """Runner candidate collection and batch execution for dispatch mixins."""
 
 from ...runner.dispatch import (
-    _runner_max_attempts,
     _runner_retry_reason,
-    _same_run_redispatch_limit,
+    runner_failure_retry_limit,
 )
 from ...runner.dispatch_record import RunnerDispatchRecordParams, runner_dispatch_record
 from ...runner.gate import (
@@ -71,9 +70,12 @@ def run_dispatch_runner_stage(
     return records
 
 
+# LLM: 普通失败的重跑次数只读配置 runner_failure_retry_limit（唯一的家）；候选接纳、协作请求合并与并发限流顺序不变，
+#   会预留 runner 启动并执行批次（有副作用）。
+# 函数用途: 挑出本次要跑的子代理 run 并按并发上限执行，返回派工记录。
 def execute_runner_jobs(agent, ctx: DispatchContext, batch: RunnerBatchContext) -> list:
     records = list(batch.records)
-    runner_max_attempts, same_run_limit = _runner_dispatch_limits(agent)
+    runner_retry_limit = runner_failure_retry_limit(agent.config)
     all_tasks = agent.subagents.list_runs()
     active_run_ids = remembered_orchestration_run_ids(agent)
     scoped_tasks = scoped_current_turn_runner_tasks(
@@ -85,12 +87,7 @@ def execute_runner_jobs(agent, ctx: DispatchContext, batch: RunnerBatchContext) 
     if selection_record is not None:
         records.append(selection_record)
         return records
-    runner_candidates = _runner_candidates_for_context(
-        scoped_tasks,
-        ctx,
-        runner_max_attempts,
-        same_run_redispatch_limit=same_run_limit,
-    )
+    runner_candidates = _runner_candidates_for_context(scoped_tasks, ctx, runner_retry_limit)
     collaboration_report = collaboration_request_runner_candidates_report(agent, scoped_tasks)
     collaboration_candidates = collaboration_report.candidates
     if collaboration_report.load_errors:
@@ -107,7 +104,7 @@ def execute_runner_jobs(agent, ctx: DispatchContext, batch: RunnerBatchContext) 
         limit=candidate_limit,
     )
     dry_records, pending_runner_jobs = collect_runner_candidates(
-        agent, ctx, runner_max_attempts, runner_candidates
+        agent, ctx, runner_retry_limit, runner_candidates
     )
     records.extend(dry_records)
     if not pending_runner_jobs:
@@ -115,17 +112,6 @@ def execute_runner_jobs(agent, ctx: DispatchContext, batch: RunnerBatchContext) 
     batch.records = records
     batch.pending_runner_jobs = pending_runner_jobs
     return _run_runner_jobs_with_limit(agent, ctx, batch)
-
-
-def _runner_dispatch_limits(agent) -> tuple[int, int]:
-    runtime_policy = getattr(agent, "runtime_guard_policy", None)
-    return (
-        _runner_max_attempts(agent.config.runner_failure_policy, runtime_policy=runtime_policy),
-        _same_run_redispatch_limit(
-            getattr(agent.config, "same_run_redispatch_limit", None),
-            runtime_policy=runtime_policy,
-        ),
-    )
 
 
 def _merge_runner_candidates(primary: list, secondary: list, *, limit: int) -> list:
@@ -144,7 +130,7 @@ def _merge_runner_candidates(primary: list, secondary: list, *, limit: int) -> l
 
 # LLM: 候选接纳只在 creation guard 内预留准确 pending；外部已冻结 map 缺项即拒绝，不重新领取。
 # 函数用途: 选出可执行的工作并固定轮次，线程池稍后启动仍使用同一身份。
-def collect_runner_candidates(agent, ctx: DispatchContext, runner_max_attempts: int, runner_candidates: list):
+def collect_runner_candidates(agent, ctx: DispatchContext, runner_retry_limit: int, runner_candidates: list):
     from ....subagents.runner_start import reserve_runner_start
 
     pending_runner_jobs, dry_records = [], []
@@ -166,7 +152,7 @@ def collect_runner_candidates(agent, ctx: DispatchContext, runner_max_attempts: 
             dry_records.append(conversation_lifecycle_gate_record(agent, ctx, task, decision))
             continue
         before = agent.subagents.load(task.id)
-        retry_reason = _runner_retry_reason(before, runner_max_attempts)
+        retry_reason = _runner_retry_reason(before, runner_retry_limit)
         if ctx.execution_plan.mutate_state:
             if ctx.should_start_runners:
                 expected = supplied_attempts[task.id] if supplied_attempts is not None else None

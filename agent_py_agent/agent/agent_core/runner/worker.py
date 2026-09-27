@@ -22,6 +22,8 @@ from .activity_diagnostics import observe_runner_activity
 from .session_pool import RunnerSessionPoolLease, runner_session_lease
 
 _LOGGER = logging.getLogger(__name__)
+# 子代理 runner 会话的固定心跳秒数：与后台会话租约无关（原来借用的 background_claim_heartbeat_interval_seconds 已删除）。
+_RUNNER_SESSION_HEARTBEAT_SECONDS = 5.0
 
 
 # LLM: expected_attempt_id 固定宿主接纳身份；None 只用于直接同步入口，后台已接纳路径必须显式传入。
@@ -74,7 +76,7 @@ def _run_subagent_worker(params: RunSubagentWorkerParams) -> SubAgentRunnerResul
                 manager=worker.subagents,
                 run_id=params.run_id,
                 worker_id=f"subagent-worker:{params.run_id}",
-                interval_seconds=_runner_session_heartbeat_interval(worker),
+                interval_seconds=_RUNNER_SESSION_HEARTBEAT_SECONDS,
                 activity_observer=partial(observe_runner_activity, worker, params.run_id),
                 attempt_id=attempt_id,
                 launch_id=launch_id,
@@ -243,14 +245,6 @@ def _record_effective_config_overlay(worker, run_id: str, task, *, attempt_id: s
         if runner_attempt_cancelled(worker.subagents, run_id, attempt_id):
             raise RuntimeConflictError("配置元数据的原执行权已关闭")
         worker.subagents.mutate(run_id, record)
-
-
-def _runner_session_heartbeat_interval(worker) -> float:
-    try:
-        value = float(getattr(worker.config, "background_claim_heartbeat_interval_seconds", 0) or 0)
-    except (TypeError, ValueError):
-        value = 0.0
-    return value if value > 0 else 5.0
 
 
 def _attach_worker_local_store(worker, local_store: object | None) -> None:

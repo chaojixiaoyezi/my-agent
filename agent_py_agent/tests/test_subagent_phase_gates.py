@@ -136,7 +136,7 @@ def test_explicit_run_ids_keep_mixed_worker_and_coordinator_targets():
         include_run_ids=["market", "competition", "strategy"],
     )
 
-    selected = _runner_candidates_for_context(tasks, ctx, runner_max_attempts=1)
+    selected = _runner_candidates_for_context(tasks, ctx, runner_retry_limit=0)
 
     assert [task.id for task in selected] == ["market", "competition", "strategy"]
 
@@ -149,7 +149,7 @@ def test_explicit_run_ids_do_not_wait_for_missing_input_refs(tmp_path):
     _attach_tmp_workspace(tmp_path, [data, report])
     ctx = _dispatch_ctx(["collect", "report"], max_runners=2)
 
-    selected = _runner_candidates_for_context([data, report], ctx, runner_max_attempts=1)
+    selected = _runner_candidates_for_context([data, report], ctx, runner_retry_limit=0)
 
     assert [task.id for task in selected] == ["collect", "report"]
 
@@ -175,6 +175,6 @@ def test_explicit_run_ids_keep_named_upstream_output_refs_in_same_wave(tmp_path)
     _attach_tmp_workspace(tmp_path, [collect, analysis, report])
     ctx = _dispatch_ctx(["report", "analysis", "collect"])
 
-    selected = _runner_candidates_for_context([report, analysis, collect], ctx, runner_max_attempts=1)
+    selected = _runner_candidates_for_context([report, analysis, collect], ctx, runner_retry_limit=0)
 
     assert [task.id for task in selected] == ["report", "analysis", "collect"]

@@ -18,6 +18,12 @@ child历史说明在不展示正文时不再提前读取完整来源或计算展
 
 Curator 与召回的可选决策入口直接导入 `common.cancellation` 的 `ToolCancelled` 和取消检查；这是与插件宿主共用的唯一进程内异常类型。已删除的 `tooling/cancellation.py` 不再作为兼容入口，记忆来源、游标和正式写入路径没有变化。
 
+## 记忆配置的单一旋钮（参数减量第 2 批）
+
+- 归档级别：`memory_archive_level`（0-3，默认 3）是运行归档（`_finalization_service`、`runtime/live_archive`）和子代理收尾恢复快照（`subagent_mixin._recovery_snapshot_input`）的共同来源，不再有 hook 专用级别。
+- 规则路由：`memory_rule_routing_mode`（off/soft/strict）。`runtime/loop_support._routed_memory_context_for_request` 与 `memory_push._route_formal_lessons` 都以 `mode != "off"` 作为开关；CLI `memory route` 的 `routing_enabled` 同样由它算出。
+- 恢复上下文：`memory_archive/resume_context.build_auto_resume_context` 只读 `memory_resume_auto_context_mode`（默认 off）；调用方显式 `enabled=True` 等于本次 always，`enabled=False` 本次关闭。
+
 ## 压缩熔断参数的唯一位置
 
 压缩连续失败熔断的阈值 `DEFAULT_COMPACT_FAILURE_THRESHOLD` 与冷却 `DEFAULT_COMPACT_COOLDOWN_SECONDS` 只在

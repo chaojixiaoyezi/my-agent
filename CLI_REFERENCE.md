@@ -351,7 +351,7 @@ my-agent run "总结这个项目" --no-save
 
 非完成收口（未完成/预算耗尽/不可续跑族）的任务不会死：用 `run --resume <任务 ID 或任务目录>` 从持久事实源恢复同一任务继续（与 会话运行时 resume / 轻量运行时 --continue 对齐），此时可省略 `prompt`。
 
-如果配置打开 `memory_resume_auto_context_enabled: true`，`run/chat/gateway` 会在“继续、刚刚、恢复、run_id/request_id”等恢复场景里尝试读取归档和任务事实源，并把一段短小 `Recovery Brief` 注入本轮 prompt。默认关闭，避免普通请求被恢复检索拖慢。
+如果把 `memory_resume_auto_context_mode` 设为 `trigger`（消息里带 run/request/subagent/gwreq 这类结构化编号时）或 `always`（每轮），`run/chat/gateway` 会尝试读取归档和任务事实源，并把一段短小 `Recovery Brief` 注入本轮 prompt。默认 `off`，避免普通请求被恢复检索拖慢；单次运行可加 `--resume-context` 临时打开。
 
 `run` 结束状态行会显示粗略 token 估算，例如 `prompt_tokens≈...`、`inject_tokens≈...`、`resume_tokens≈...`。这是保守估算，不是模型厂商 tokenizer 的精确计费值。
 
@@ -1097,7 +1097,7 @@ my-agent chat --gateway
 
 chat 内部命令仍在本地处理，例如 `/memory`、`/remember`、`/subagents`。普通自然语言消息才会进入模型；在 `--gateway` 模式下，这些普通消息会走 gateway request/response。
 
-chat 和 gateway 都复用 `SimpleAgent.run()` 的恢复上下文能力。也就是说，只有当主配置显式打开 `memory_resume_auto_context_enabled` 时，普通消息才会在恢复触发词场景里自动注入 `Recovery Brief`；默认不查、不注入。
+chat 和 gateway 都复用 `SimpleAgent.run()` 的恢复上下文能力。也就是说，只有当主配置把 `memory_resume_auto_context_mode` 设为 `trigger` 或 `always` 时，普通消息才会自动注入 `Recovery Brief`；默认 `off`，不查、不注入。
 
 普通自然语言进入模型后，主代理可以调用三个编排工具：
 
@@ -1554,7 +1554,7 @@ acceptance_test_timeout_seconds: 120
 runner_concurrency: "auto"
 runner_start_rate: "auto"
 runner_timeout_seconds: "auto"
-runner_failure_policy: "auto"
+runner_failure_retry_limit: 1
 
 # 前台 daemon 过渡期参数：0 是显式策略值，不表示“未设置”
 daemon_planner: true
@@ -1570,7 +1570,7 @@ daemon_reviewer: "parent-daemon"
 daemon_runner_instruction: ""
 ```
 
-`runner_failure_policy: "auto"` 当前表示 runner 临时失败后最多尝试 2 次。可以写 `"off"` 关闭自动重试，也可以写 `"3"` 这类数字字符串表示总尝试次数。自动重试只覆盖 runner 自身错误、结构化输出解析失败、工具结果丢失这类可恢复问题。
+`runner_failure_retry_limit: 1` 表示子代理 runner 临时失败后最多自动重跑 1 次；`0` 表示不自动重跑，写更大的数字就多给几次机会（2026-09-27 起这是唯一的重跑次数设置，原 `runner_failure_policy` 与守卫文件里的两个重派上限已并入）。自动重跑只覆盖 runner 自身错误、结构化输出解析失败、工具结果丢失、模型服务临时出错或超时这类可恢复问题；限流、断供这类临时供应问题另按 `runtime_guard_config.yaml` 的 `provider_transient_redispatch_limit` 取更大的上限。`runner_concurrency` 写数字是同时运行上限，`0` 表示不限制，`auto` 为 8。
 
 ## `scenario-test`
 
@@ -1796,8 +1796,7 @@ gateway_request_max_attempts: 2
 恢复上下文自动注入配置：
 
 ```yaml
-memory_resume_auto_context_enabled: false
-memory_resume_auto_context_mode: "trigger"  # off / trigger / always
+memory_resume_auto_context_mode: "off"      # off / trigger / always
 memory_resume_auto_context_limit: 5         # 1-50
 ```
 

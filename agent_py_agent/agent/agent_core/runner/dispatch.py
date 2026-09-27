@@ -1,4 +1,6 @@
-
+# LLM: runner 候选闸、重跑次数（配置 runner_failure_retry_limit）、并发（runner_concurrency）与启动速率的解析都只在这里；
+#   调用方传入数值，不在别处复制默认值。候选判断只读，worker 启动函数有副作用。
+# 模块用途: 决定哪些子代理 run 能启动或重跑、同时跑几个，并提供派工记录与 worker 启动入口。
 from __future__ import annotations
 
 """selects runner candidates, handles retry policy, creates dispatch records, and runs worker agents.
@@ -35,10 +37,12 @@ if TYPE_CHECKING:
     from ..core import SimpleAgent
 
 
+# LLM: runner_retry_limit 是普通失败后还能自动重跑几次（0 = 不重跑）；只有调度入口按配置
+#   runner_failure_retry_limit 传入，规划、能力清扫等默认策略只接续不重跑。临时供应失败另走独立上限。
+# 类用途: 一次挑选 runner 候选时用到的重跑上限和本次后台启动标识。
 @dataclass(frozen=True)
 class RunnerCandidatePolicy:
-    runner_max_attempts: int = 1
-    same_run_redispatch_limit: int | None = None
+    runner_retry_limit: int = 0
     background_launch_id: str = ""
 
 
@@ -58,6 +62,9 @@ def _runner_active_attempt_id(task: object) -> str:
         return ""
     return value.strip()
 
+
+# runner_concurrency 为 auto（或留空）时的并发上限，与单个根会话 8 个子代理槽位一致。
+_DEFAULT_RUNNER_CONCURRENCY = 8
 
 # launching→running 是秒级过渡;记录冻在 launching(或 running 而线程宿主已死)超过
 # 这个窗即视为宿主硬死亡残留,不再挡续派。比 supervision 周期(60s)宽,防误判慢启动。
@@ -105,28 +112,20 @@ def _background_start_record_stale(task: object, background: dict) -> bool:
     return (_time.time() - updated_at) > _BACKGROUND_START_STALE_SECONDS
 
 
-def _runner_max_attempts(policy: str, *, runtime_policy: object = None) -> int:
-
-    if policy is None or str(policy).strip().lower() in {"", "auto"}:
-        return runtime_guard_int("runner_failure_retry_limit", 2, policy=runtime_policy)
-    value = str(policy).strip().lower()
-    if value in {"", "auto"}:
-        return runtime_guard_int("runner_failure_retry_limit", 2, policy=runtime_policy)
-    if value in {"off", "0"}:
-        return 0
+# LLM: 唯一的家是 AgentConfig.runner_failure_retry_limit（原 runner_failure_policy 与守卫文件里的
+#   runner_failure_retry_limit / same_run_redispatch_limit 已并入）：正整数 = 最多重跑几次，0 = 不自动重跑；
+#   布尔、负数或乱填按 AgentConfig 默认值。只读配置，不改任务。
+# 函数用途: 读出子代理 runner 普通失败后最多自动重跑几次，交给调度入口组装候选策略。
+def runner_failure_retry_limit(config: object) -> int:
+    default = default_config_int("runner_failure_retry_limit")
+    value = getattr(config, "runner_failure_retry_limit", default)
+    if isinstance(value, bool):
+        return default
     try:
-        return max(0, int(value))
-    except ValueError:
-        return runtime_guard_int("runner_failure_retry_limit", 2, policy=runtime_policy)
-
-
-def _same_run_redispatch_limit(value: object = None, *, runtime_policy: object = None) -> int:
-    if value is None:
-        value = runtime_guard_int("same_run_redispatch_limit", 1, policy=runtime_policy)
-    try:
-        return max(0, int(value or 0))
+        parsed = int(value)
     except (TypeError, ValueError):
-        return runtime_guard_int("same_run_redispatch_limit", 1, policy=runtime_policy)
+        return default
+    return parsed if parsed >= 0 else default
 
 
 def _runner_failure_type(task: SubAgentTask) -> str:
@@ -135,8 +134,8 @@ def _runner_failure_type(task: SubAgentTask) -> str:
 
 
 # 临时供应类失败(模型 429 限流/断供/请求超时):环境故障
-#   不是任务失败,不烧任务失败重试预算。真机实锤:默认闸(runner_failure_retry_limit=2 +
-#   same_run_redispatch_limit=1)下,几分钟的额度断供把任务永久卡死 BLOCKED,额度恢复也不复活。
+#   不是任务失败,不烧任务失败重试预算。真机实锤:只按普通失败的重跑次数算时,
+#   几分钟的额度断供把任务永久卡死 BLOCKED,额度恢复也不复活。
 def _provider_supply_retry_limit(failure_type: str, *, runtime_policy: object = None) -> int:
     """供应类失败的独立同 run 重派上限(0=关闭特权,回归普通失败同闸)。只对供应类
     failure_type 解析配置——候选判定是每任务热路径,非供应任务零额外 IO。"""
@@ -145,14 +144,15 @@ def _provider_supply_retry_limit(failure_type: str, *, runtime_policy: object = 
     return runtime_guard_int("provider_transient_redispatch_limit", 8, policy=runtime_policy)
 
 
-def _runner_retry_reason(task: SubAgentTask, runner_max_attempts: int) -> str:
+# LLM: 这是同一 run 自动重跑的唯一计数闸：已重跑次数（runner_attempts - 1）达到上限即停；
+#   临时供应失败取 max(普通上限, provider_transient_redispatch_limit)。返回空串表示不重跑，非空串只作记录标签。
+# 函数用途: 判断一个失败的 run 还能不能自动再跑一次，能的话给出“第几次重跑”的说明。
+def _runner_retry_reason(task: SubAgentTask, runner_retry_limit: int) -> str:
 
     if user_stopped_run_is_resumable(task):
         return "reason_code=conversation_user_stop; mode=same_run_resume"
     failure_type = _runner_failure_type(task)
-    supply_limit = _provider_supply_retry_limit(failure_type)
-    if runner_max_attempts == 1 and supply_limit <= 0:
-        return ""
+    effective_max = max(max(0, int(runner_retry_limit or 0)), _provider_supply_retry_limit(failure_type))
     retryable_statuses = frozenset({
         TaskStatus.BLOCKED.value,
         TaskStatus.FAILED.value,
@@ -162,14 +162,10 @@ def _runner_retry_reason(task: SubAgentTask, runner_max_attempts: int) -> str:
         return ""
     if failure_type not in RETRYABLE_RUNNER_FAILURE_TYPES:
         return ""
-    attempts = max(0, int(task.runner_attempts or 0))
-    effective_max = runner_max_attempts
-    if supply_limit > 0 and runner_max_attempts > 0:
-        effective_max = max(runner_max_attempts, supply_limit)
-    if effective_max > 0 and _retry_count_after_initial_attempt(attempts) >= effective_max:
+    retries = _retry_count_after_initial_attempt(max(0, int(task.runner_attempts or 0)))
+    if retries >= effective_max:
         return ""
-    max_attempts_label = "unlimited" if effective_max <= 0 else f"+{effective_max}"
-    return f"failure_type={failure_type}; retry={_retry_count_after_initial_attempt(attempts) + 1}/{max_attempts_label}"
+    return f"failure_type={failure_type}; retry={retries + 1}/+{effective_max}"
 
 
 def _retry_count_after_initial_attempt(attempts: int) -> int:
@@ -194,37 +190,28 @@ def _task_has_runner_patches(task: SubAgentTask) -> bool:
     return isinstance(payload.get("patches"), list) and bool(payload.get("patches"))
 
 
-def _resolve_runner_concurrency(value: object, job_count: int, *, auto_limit: object = None) -> int:
+# LLM: runner_concurrency 是唯一并发旋钮（原 runner_auto_concurrency 已并入）：auto/空 = 默认 8，正整数 = 上限，
+#   0 = 不限制（本批全部同时跑）；布尔、负数或乱填按 auto。结果不超过本批任务数，只算数，不启动线程。
+# 函数用途: 算出本次调度批次最多同时跑几个 runner。
+def _resolve_runner_concurrency(value: object, job_count: int) -> int:
 
     if job_count <= 0:
         return 0
-    configured_auto_limit = _runner_auto_concurrency_limit(auto_limit, job_count)
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {"", "auto"}:
-            return configured_auto_limit
-        try:
-            parsed = int(normalized)
-        except ValueError:
-            return configured_auto_limit
-    else:
-        try:
-            parsed = int(value)
-        except (TypeError, ValueError):
-            return configured_auto_limit
-    return max(1, min(parsed, job_count))
+    limit = _runner_concurrency_setting(value)
+    return job_count if limit == 0 else min(limit, job_count)
 
 
-def _runner_auto_concurrency_limit(value: object, job_count: int) -> int:
-    if value is None:
-        value = default_config_int("runner_auto_concurrency")
+# LLM: 只解析数值，不看任务；非法值一律回到默认 8，不能把乱填解释成“不限制”。
+# 函数用途: 把 runner_concurrency 的配置值换成并发上限，0 表示不限制。
+def _runner_concurrency_setting(value: object) -> int:
+    text = "" if value is None or isinstance(value, bool) else str(value).strip().lower()
+    if text in {"", "auto"}:
+        return _DEFAULT_RUNNER_CONCURRENCY
     try:
-        limit = int(value)
-    except (TypeError, ValueError):
-        limit = job_count
-    if limit <= 0:
-        return job_count
-    return min(job_count, limit)
+        parsed = int(text)
+    except ValueError:
+        return _DEFAULT_RUNNER_CONCURRENCY
+    return parsed if parsed >= 0 else _DEFAULT_RUNNER_CONCURRENCY
 
 
 def _resolve_runner_start_rate(value: object, job_count: int) -> int:
@@ -328,17 +315,9 @@ def _is_dispatch_runner_candidate(
     if task_has_status(task, TaskStatus.BLOCKED):
         if _blocked_after_capability_grant(task):
             return True
-        return _can_retry_same_run(
-            task,
-            effective_policy.runner_max_attempts,
-            effective_policy.same_run_redispatch_limit,
-        )
+        return bool(_runner_retry_reason(task, effective_policy.runner_retry_limit))
     if task_status_in(task.status, {TaskStatus.FAILED.value, TaskStatus.TIMEOUT.value}):
-        return _can_retry_same_run(
-            task,
-            effective_policy.runner_max_attempts,
-            effective_policy.same_run_redispatch_limit,
-        )
+        return bool(_runner_retry_reason(task, effective_policy.runner_retry_limit))
     # 续派候选兜底：PLANNING/PENDING 同为"待启动 runner"的可派工态(对齐 state_machine.DISPATCHABLE_STATES)。
     # PENDING 是子代理被 background 启动后 runner 进程被回收(orphan)留下的停滞孤儿态——原先只认 PLANNING,
     # 导致这类孤儿永不被续派、多子代理任务死循环卡死。正在启动中的 PENDING 已被本函数开头的
@@ -366,24 +345,6 @@ def _source_worker_dispatch_allowed(task: object) -> bool:
         return source_worker_lifecycle_state(task) == "active"
     except Exception:
         return False
-
-
-def _can_retry_same_run(
-    task: SubAgentTask,
-    runner_max_attempts: int,
-    same_run_redispatch_limit: int | None,
-) -> bool:
-    reason = _runner_retry_reason(task, runner_max_attempts)
-    if not reason:
-        return False
-    limit = _same_run_redispatch_limit(same_run_redispatch_limit)
-    supply_limit = _provider_supply_retry_limit(_runner_failure_type(task))
-    if supply_limit > 0 and limit > 0:
-        limit = max(limit, supply_limit)
-    if limit <= 0:
-        return True
-    attempts = max(0, int(getattr(task, "runner_attempts", 0) or 0))
-    return _retry_count_after_initial_attempt(attempts) < limit
 
 
 def _blocked_after_capability_grant(task: SubAgentTask) -> bool:

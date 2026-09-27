@@ -982,6 +982,7 @@ def _manual_compact_lane(owner_agent: object, store: object, thread_id: str):
         int(getattr(config, "background_claim_ttl_seconds", 90) or 90),
     )
     deadline = time.monotonic() + 1.0
+    # 续约间隔只按租约 TTL 推导，配置里没有单独的心跳键（原 background_claim_heartbeat_interval_seconds 已并入 TTL）。
     return conversation_run_lane(
         ConversationRunLaneRequest(
             store=store,
@@ -989,14 +990,7 @@ def _manual_compact_lane(owner_agent: object, store: object, thread_id: str):
             claim_task_id=new_id("manual-compact"),
             reason="manual_conversation_compact",
             lease_seconds=ttl_seconds,
-            heartbeat_interval_seconds=claim_heartbeat_interval_seconds(
-                ttl_seconds=ttl_seconds,
-                configured_interval_seconds=getattr(
-                    config,
-                    "background_claim_heartbeat_interval_seconds",
-                    0,
-                ),
-            ),
+            heartbeat_interval_seconds=claim_heartbeat_interval_seconds(ttl_seconds=ttl_seconds),
             interrupt_check=lambda: is_interrupted() or time.monotonic() >= deadline,
             runtime_facts={"execution_source": "conversation_control"},
         )

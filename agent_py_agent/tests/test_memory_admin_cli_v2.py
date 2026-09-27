@@ -79,8 +79,6 @@ def _agent(tmp_path: Path) -> SimpleNamespace:
     config = SimpleNamespace(
         memory_archive_level=3,
         memory_hook_enabled=True,
-        memory_hook_archive_level=3,
-        memory_rule_routing_enabled=True,
         memory_rule_routing_mode="soft",
         memory_rule_auto_read_limit=3,
         memory_doctor_recent_archive_file_limit=5,

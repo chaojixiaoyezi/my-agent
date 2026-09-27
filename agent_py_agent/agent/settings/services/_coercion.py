@@ -1,3 +1,5 @@
+# LLM: 配置值的类型转换规则只在这里；空值按“没填”取默认，非法值告警后取默认，纯函数、不读写文件。
+# 模块用途: 把 YAML 里读出的原始值转成布尔、整数、小数或枚举，并给出告警文本。
 """Coercion service: type coercion helpers for config values."""
 
 
@@ -42,6 +44,8 @@ class CoercionService:
                 return False, None
         return default, f"{key}: expected a clear boolean, got {value!r}; using default {default}"
 
+    # LLM: 空值（None、YAML 留空读出的 []、空白字符串）按“没填”取默认且不告警；非整数或越界告警后取默认。纯函数。
+    # 函数用途: 把一个配置值转成整数并做范围检查，返回（值, 告警）。
     @staticmethod
     def coerce_int(
         key: str,
@@ -54,7 +58,8 @@ class CoercionService:
     ) -> tuple[int, str | None]:
         """Coerce a raw config value to int with optional range checks."""
         bounds = params or CoerceNumberParams(min_val, max_val)
-        if value is None:
+        # YAML 里 `key:` 留空会读成 []，`key: ""` 读成空串：都按“没填”取默认值，不告警（“空 = 默认”的旋钮靠它）。
+        if value is None or value == [] or (isinstance(value, str) and not value.strip()):
             return default, None
         number = _coerce_int_number(value)
         if number is None:

@@ -428,14 +428,11 @@ def _tool_runtime_for_context_bundle(
 
 # LLM: Routing reads only the owner formal index when formal recall is allowed;
 # missing/invalid authority disables this projection with a typed finding.
+# memory_rule_routing_mode 是唯一开关：off 即关闭（原 memory_rule_routing_enabled 已并入）。
 # 函数用途: 为当前请求构造 lesson 路由收据；隔离或记忆总闸关闭时不读取正式索引。
 def _routed_memory_context_for_request(agent, request: RuntimeContextRequest, *, skip_formal_recall: bool):
     route_mode = str(getattr(agent.config, "memory_rule_routing_mode", "soft") or "soft")
-    route_enabled = (
-        not skip_formal_recall
-        and bool(getattr(agent.config, "memory_rule_routing_enabled", True))
-        and route_mode != "off"
-    )
+    route_enabled = not skip_formal_recall and route_mode != "off"
     route_auto_read_limit = int(getattr(agent.config, "memory_rule_auto_read_limit", 3))
     if not route_enabled:
         return RoutedMemoryContext(enabled=False, index_path="")

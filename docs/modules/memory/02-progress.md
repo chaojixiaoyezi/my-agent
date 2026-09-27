@@ -1,5 +1,7 @@
 # 记忆与上下文维护状态
 
+参数减量第 2 批（分支 `claude/9a-merge-config`，2026-09-27）：记忆配置三组各只留一个旋钮。`memory_archive_level` 同时决定运行归档与子代理收尾快照的级别（原 `memory_hook_archive_level` 删除，子代理快照改读它）；`memory_rule_routing_mode` 的 `off` 是规则路由唯一开关（原 `memory_rule_routing_enabled` 删除；决策点召回在 `off` 下直接关闭路由，不再报“off 不是合法模式”的 finding）；`memory_resume_auto_context_mode` 默认改为 `off`（等于原默认 enabled=false），单次 `--resume-context` 仍强制 always。旧键写在用户配置里只告警并忽略；回归见 `test_merged_config_knobs.py`。
+
 参数减量第 1 批（分支 `claude/38-delete-dead-config`，2026-09-27）：`memory_hook_retention_days`、`memory_rule_receipt_enabled` 只被 memory doctor 回显，没有清理器或回执逻辑读取，
 已从 `MemorySettings`、`AgentConfig`、随包 YAML 和两处 doctor 字段名单删除；`memory_archive.enforce_retention` 仍保留为显式传参的函数，无产品调用方。
 同批删除的 `memory_query_default_limit/page_size` 只有归一化器认识。

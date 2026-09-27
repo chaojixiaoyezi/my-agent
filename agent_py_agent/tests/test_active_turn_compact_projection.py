@@ -51,7 +51,7 @@ _SUMMARY = (
 def carried_case(tmp_path, monkeypatch):
     config = AgentConfig(
         model_backend="echo", my_agent_home=str(tmp_path / "home"), prompt_files=[],
-        max_tokens=64, model_context_window_tokens=10_000, model_context_window_explicit=True,
+        max_tokens=64, model_context_window_tokens=10_000,
         memory_compact_auto_trigger_percent=90,
     )
     config.config_sources = {"model_context_window_tokens": {"source": "test"}}

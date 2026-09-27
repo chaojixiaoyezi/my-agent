@@ -1,13 +1,11 @@
-
+# LLM: 工具与会话类整数配置的范围表（键, 最小, 最大）；改动须同步 AgentConfig 默认值与随包 YAML。
+# 模块用途: 列出工具、会话历史与 CLI 列表类整数配置的合法范围，供规范化统一校验。
 from __future__ import annotations
 
 TOOL_INT_FIELDS = (
     ("max_tool_rounds", 0, None),
-    ("max_tool_calls_per_round", 0, None),
-    ("max_parallel_tool_calls", 8, None),
-    ("tool_agent_budget_window_seconds", 0, None),
+    ("max_parallel_tool_calls", 0, None),
     ("tool_agent_budget_max_calls", 0, None),
-    ("tool_artifact_read_budget_window_seconds", 0, None),
     ("tool_artifact_read_budget_max_chars", 0, None),
     ("tool_output_externalize_min_chars", 0, None),
     ("tool_output_preview_chars", 0, None),

@@ -156,7 +156,7 @@ def test_media_first_turn_has_no_checkpoint_or_coverage(media_case):
 def test_segmented_summary_rejects_nontext_before_serializing_or_calling_model(monkeypatch):
     agent = SimpleNamespace(
         backend=SimpleNamespace(max_tokens=128),
-        config=SimpleNamespace(model_context_window_tokens=2_000, model_context_window_explicit=True),
+        config=SimpleNamespace(model_context_window_tokens=2_000),
     )
     request = AuxiliaryModelCallRequest(
         agent=agent, prompt="请总结历史", system_instruction="稳定系统前缀", tools=[],

@@ -32,7 +32,6 @@ class TestCmdMemoryRoute:
         mock_agent = MagicMock()
         mock_agent.root = tmp_path
         mock_agent.config = MagicMock()
-        mock_agent.config.memory_rule_routing_enabled = True
         mock_agent.config.memory_rule_routing_mode = "soft"
         mock_agent.config.memory_rule_auto_read_limit = 3
         mock_agent.config.memory_config_warnings = []
@@ -58,7 +57,6 @@ class TestCmdMemoryRoute:
         mock_agent = MagicMock()
         mock_agent.root = tmp_path
         mock_agent.config = MagicMock()
-        mock_agent.config.memory_rule_routing_enabled = True
         mock_agent.config.memory_rule_routing_mode = "soft"
         mock_agent.config.memory_rule_auto_read_limit = 3
         mock_agent.config.memory_config_warnings = []
@@ -84,7 +82,6 @@ class TestCmdMemoryRoute:
         mock_agent = MagicMock()
         mock_agent.root = tmp_path
         mock_agent.config = MagicMock()
-        mock_agent.config.memory_rule_routing_enabled = False
         mock_agent.config.memory_rule_routing_mode = "off"
         mock_agent.config.memory_rule_auto_read_limit = 3
         mock_agent.config.memory_config_warnings = []
@@ -110,7 +107,6 @@ class TestCmdMemoryRoute:
         mock_agent = MagicMock()
         mock_agent.root = tmp_path
         mock_agent.config = MagicMock()
-        mock_agent.config.memory_rule_routing_enabled = True
         mock_agent.config.memory_rule_routing_mode = "soft"
         mock_agent.config.memory_rule_auto_read_limit = 3
         mock_agent.config.memory_config_warnings = []
@@ -137,8 +133,6 @@ class TestCmdMemoryDoctor:
         mock_agent.config = MagicMock()
         mock_agent.config.memory_archive_level = 3
         mock_agent.config.memory_hook_enabled = True
-        mock_agent.config.memory_hook_archive_level = 3
-        mock_agent.config.memory_rule_routing_enabled = True
         mock_agent.config.memory_rule_routing_mode = "soft"
         mock_agent.config.memory_rule_auto_read_limit = 3
         mock_agent.config.memory_config_warnings = []
@@ -161,8 +155,6 @@ class TestCmdMemoryDoctor:
         mock_agent.config = MagicMock()
         mock_agent.config.memory_archive_level = 3
         mock_agent.config.memory_hook_enabled = True
-        mock_agent.config.memory_hook_archive_level = 3
-        mock_agent.config.memory_rule_routing_enabled = True
         mock_agent.config.memory_rule_routing_mode = "soft"
         mock_agent.config.memory_rule_auto_read_limit = 3
         mock_agent.config.memory_config_warnings = []

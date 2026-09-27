@@ -886,7 +886,6 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
             path_dangerous_roots=config.path_dangerous_roots,
             access_mode=access_mode,
             tool_write_inline_max_chars=config.tool_write_inline_max_chars,
-            artifact_read_budget_window_seconds=config.tool_artifact_read_budget_window_seconds,
             artifact_read_budget_max_chars=config.tool_artifact_read_budget_max_chars,
             artifact_default_read_chars=config.memory_artifact_default_read_chars,
             disabled_tools=list(getattr(agent.owner_policy, "disabled_tools", ())),

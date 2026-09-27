@@ -192,7 +192,6 @@ def test_auto_resume_context_recovers_cross_day_handoff_task(tmp_path):
         AgentConfig(
             model_backend="echo",
             my_agent_home=str(tmp_path / "home"),
-            memory_resume_auto_context_enabled=True,
             memory_resume_auto_context_mode="always",
             memory_resume_auto_context_limit=5,
         ),
@@ -230,7 +229,6 @@ def test_auto_resume_context_recovers_cross_day_gateway_request(tmp_path):
         AgentConfig(
             model_backend="echo",
             my_agent_home=str(tmp_path / "home"),
-            memory_resume_auto_context_enabled=True,
             memory_resume_auto_context_mode="always",
             memory_resume_auto_context_limit=5,
         ),

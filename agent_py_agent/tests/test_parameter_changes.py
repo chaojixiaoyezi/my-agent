@@ -106,7 +106,7 @@ def test_tool_uses_the_loaded_config_file_and_exposes_the_parameter_center(tmp_p
     view = json.loads(tool.execute({"action": "view", "key": "max_tokens"}).output)
     assert view["user_config_path"] == str(path) and view["parameter"]["writable"] and view["parameter"]["running_value"] == "65536"
     assert "tunable" not in view["fact"]  # 能否修改只看登记表的 writable（旧白名单字段曾让模型误以为改不了）
-    assert view["parameter"]["applied_value"] == 65536  # 替身配置没有窗口，实际效果等于配置值
+    assert view["parameter"]["applied_value"] == 32000  # 替身配置没填窗口，按 128000 兜底夹取
     agent.config.model_context_window_tokens = 131072
     narrowed = json.loads(tool.execute({"action": "view", "key": "max_tokens"}).output)["parameter"]
     assert narrowed["running_value"] == "65536" and narrowed["applied_value"] == 32768

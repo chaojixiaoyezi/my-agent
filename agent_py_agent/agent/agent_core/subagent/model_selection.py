@@ -430,7 +430,8 @@ def _candidate_request_input(agent: object, params: object, preparation: Subagen
         window = config.model_context_window_tokens
         cap = payload.get("max_tokens") if isinstance(payload, dict) else None
         estimated = estimate_tokens(payload) if isinstance(payload, dict) else None
-        if (not config.model_context_window_explicit or type(window) is not int or window <= 0
+        # 窗口只认显式填写的正整数（留空 = None = 容量未知）；原 model_context_window_explicit 已并入。
+        if (type(window) is not int or window <= 0
                 or type(cap) is not int or cap <= 0 or estimated is None):
             raise _CandidateUnavailable("request_capacity_unknown")
         if estimated + cap >= window:

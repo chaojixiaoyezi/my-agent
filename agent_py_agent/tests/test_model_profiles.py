@@ -60,7 +60,7 @@ def test_private_profile_roundtrip_and_default(tmp_path):
     assert result["selected"] == key
     cfg = selected_model_config(host)
     assert cfg.model_name == "MiniMax-M2.7" and cfg.api_key_env == ""
-    assert cfg.api_key == "only-private-secret" and cfg.model_context_window_explicit
+    assert cfg.api_key == "only-private-secret"
     assert cfg.model_context_window_tokens == 96000
     assert stat.S_IMODE(model_profiles_path(host.home_paths).stat().st_mode) == 0o600
     assert stat.S_IMODE(model_profiles_path(host.home_paths).parent.stat().st_mode) == 0o700
@@ -362,7 +362,7 @@ def test_explicit_window_does_not_call_metadata():
     def forbidden():
         raise AssertionError("explicit window must not probe")
 
-    host = SimpleNamespace(config=AgentConfig(model_context_window_tokens=96000, model_context_window_explicit=True),
+    host = SimpleNamespace(config=AgentConfig(model_context_window_tokens=96000),
                            backend=SimpleNamespace(provider_context_window_tokens=forbidden))
     assert resolve_model_context_window_tokens(host) == 96000
 

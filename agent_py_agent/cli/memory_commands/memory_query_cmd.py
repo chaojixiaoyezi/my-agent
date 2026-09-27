@@ -118,6 +118,8 @@ def _execute_route_logic(request: RouteLogicRequest):
     return ok, routes, matches, required_read_paths, candidate_paths, diagnostics
 
 
+# LLM: --mode 只覆盖本次匹配；输出里的 routing_enabled 按配置 memory_rule_routing_mode 是否为 off 计算。只读索引，打印结果。
+# 函数用途: CLI `memory route`：按问题匹配规则路由索引并打印必须读和候选的规则文件。
 def cmd_memory_route(args) -> int:
     agent = _resolve_agent(args)
     if getattr(args, "limit", None) is None:
@@ -133,7 +135,8 @@ def cmd_memory_route(args) -> int:
         "ok": ok, "workspace_root": str(agent.root), "query": args.query,
         "validate": bool(getattr(args, "validate", False)),
         "mode": mode, "limit": args.limit, "auto_read_limit": auto_read_limit,
-        "routing_enabled": bool(getattr(agent.config, "memory_rule_routing_enabled", True)),
+        # 路由开关只看配置里的唯一旋钮 memory_rule_routing_mode（off 即关闭），不受本次 --mode 覆盖影响。
+        "routing_enabled": _resolve_route_mode(None, agent.config) != "off",
         "index": _index_payload(index_path),
         "warnings": diagnostics["config_warnings"],
         "routes": {"count": len(routes), "validation_warnings": diagnostics["route_warnings"]},

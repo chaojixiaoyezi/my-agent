@@ -28,7 +28,7 @@ class TestIsDispatchRunnerCandidate:
         mock_task.capability_requests = []
         mock_task.capability_gaps = []
 
-        assert _is_dispatch_runner_candidate(mock_task, policy=RunnerCandidatePolicy(runner_max_attempts=2)) is False
+        assert _is_dispatch_runner_candidate(mock_task, policy=RunnerCandidatePolicy(runner_retry_limit=2)) is False
 
     def test_done_status_not_candidate(self):
         """已完成任务不是候选。"""
@@ -149,7 +149,7 @@ class TestIsDispatchRunnerCandidate:
         mock_task.capability_requests = []
         mock_task.capability_gaps = []
 
-        assert _is_dispatch_runner_candidate(mock_task, policy=RunnerCandidatePolicy(runner_max_attempts=2)) is True
+        assert _is_dispatch_runner_candidate(mock_task, policy=RunnerCandidatePolicy(runner_retry_limit=2)) is True
 
     def test_non_retryable_failure_not_candidate(self):
         """不可重试失败类型的任务不是候选。"""
@@ -166,7 +166,7 @@ class TestIsDispatchRunnerCandidate:
         mock_task.capability_grants = []
 
         # capability_request 在 capability_grants 为空时不可重试
-        assert _is_dispatch_runner_candidate(mock_task, policy=RunnerCandidatePolicy(runner_max_attempts=2)) is False
+        assert _is_dispatch_runner_candidate(mock_task, policy=RunnerCandidatePolicy(runner_retry_limit=2)) is False
 
     def test_provider_timeout_blocked_task_is_retry_candidate(self):
         from agent_py_agent.agent.agent_core.runner.dispatch import _is_dispatch_runner_candidate
@@ -182,7 +182,7 @@ class TestIsDispatchRunnerCandidate:
             runner_attempts=1,
         )
 
-        assert _is_dispatch_runner_candidate(task, policy=RunnerCandidatePolicy(runner_max_attempts=2)) is True
+        assert _is_dispatch_runner_candidate(task, policy=RunnerCandidatePolicy(runner_retry_limit=2)) is True
 
 
 class TestDispatchRunnerCandidates:
@@ -295,7 +295,7 @@ class TestRetryableRunnerFailureTypes:
 class TestProviderSupplyRedispatch:
     """临时供应错(模型 429 断供,failure_type=transient_error)的独立重派上限。
 
-    真机实锤:默认闸(runner_failure_retry_limit=2 + same_run_redispatch_limit=1)下,
+    真机实锤:合并前默认闸(守卫文件重试上限 2 + 同 run 重派上限 1,实际只剩 1 次)下,
     几分钟的额度断供把重派预算烧穿,任务永久卡 BLOCKED,额度恢复也不复活(1.10 死透)。
     供应断供是环境故障不是任务失败,走 provider_transient_redispatch_limit(默认 8)。
     """
@@ -331,12 +331,12 @@ class TestProviderSupplyRedispatch:
         monkeypatch,
         failure_type: str,
     ):
-        """撤修复即 FAIL:429 或超时在默认闸(2/1)下会永久失格。"""
+        """撤修复即 FAIL:429 或超时在默认重跑次数(1 次)下会永久失格。"""
         from agent_py_agent.agent.agent_core.runner.dispatch import _is_dispatch_runner_candidate
 
         self._fixed_supply_limit(monkeypatch, 8)
         task = self._blocked_task(failure_type, attempts=2)
-        policy = RunnerCandidatePolicy(runner_max_attempts=2, same_run_redispatch_limit=1)
+        policy = RunnerCandidatePolicy(runner_retry_limit=1)
 
         assert _is_dispatch_runner_candidate(task, policy=policy) is True
 
@@ -345,18 +345,18 @@ class TestProviderSupplyRedispatch:
         from agent_py_agent.agent.agent_core.runner.dispatch import _is_dispatch_runner_candidate
 
         self._fixed_supply_limit(monkeypatch, 8)
-        policy = RunnerCandidatePolicy(runner_max_attempts=2, same_run_redispatch_limit=1)
+        policy = RunnerCandidatePolicy(runner_retry_limit=1)
 
         assert _is_dispatch_runner_candidate(self._blocked_task("transient_error", 8), policy=policy) is True
         assert _is_dispatch_runner_candidate(self._blocked_task("transient_error", 9), policy=policy) is False
 
     def test_non_supply_failure_keeps_original_gates(self, monkeypatch):
-        """不回归:普通失败(runner_error)仍走原闸,attempts=2 在 same_run_redispatch_limit=1 下失格。"""
+        """不回归:普通失败(runner_error)仍走原闸,attempts=2 在默认 runner_failure_retry_limit=1 下失格。"""
         from agent_py_agent.agent.agent_core.runner.dispatch import _is_dispatch_runner_candidate
 
         self._fixed_supply_limit(monkeypatch, 8)
         task = self._blocked_task("runner_error", attempts=2)
-        policy = RunnerCandidatePolicy(runner_max_attempts=2, same_run_redispatch_limit=1)
+        policy = RunnerCandidatePolicy(runner_retry_limit=1)
 
         assert _is_dispatch_runner_candidate(task, policy=policy) is False
 
@@ -366,16 +366,16 @@ class TestProviderSupplyRedispatch:
 
         self._fixed_supply_limit(monkeypatch, 0)
         task = self._blocked_task("transient_error", attempts=2)
-        policy = RunnerCandidatePolicy(runner_max_attempts=2, same_run_redispatch_limit=1)
+        policy = RunnerCandidatePolicy(runner_retry_limit=1)
 
         assert _is_dispatch_runner_candidate(task, policy=policy) is False
 
     def test_explicit_no_retry_policy_does_not_kill_supply_outage_recovery(self, monkeypatch):
-        """runner_max_attempts=1(不因任务失败重试)不掐死供应断供恢复:断供不是任务失败。"""
+        """runner_failure_retry_limit=0(不因任务失败重跑)不掐死供应断供恢复:断供不是任务失败。"""
         from agent_py_agent.agent.agent_core.runner.dispatch import _is_dispatch_runner_candidate
 
         self._fixed_supply_limit(monkeypatch, 8)
         task = self._blocked_task("transient_error", attempts=1)
-        policy = RunnerCandidatePolicy(runner_max_attempts=1, same_run_redispatch_limit=1)
+        policy = RunnerCandidatePolicy(runner_retry_limit=0)
 
         assert _is_dispatch_runner_candidate(task, policy=policy) is True

@@ -54,7 +54,7 @@ def _case(tmp_path, count=128):
         conversation_store=store, home_paths=SimpleNamespace(owner_compact_dir=tmp_path / 'compact'),
         backend=SimpleNamespace(name='fake', model_name='fake', max_tokens=128),
         prompts=SimpleNamespace(build=lambda prompt, *_args, **_kwargs: prompt),
-        config=SimpleNamespace(model_context_window_tokens=20_000, model_context_window_explicit=True),
+        config=SimpleNamespace(model_context_window_tokens=20_000),
     )
     return agent, thread, ids, expected.digest(), body_chars
 
