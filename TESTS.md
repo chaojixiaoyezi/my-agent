@@ -1,5 +1,16 @@
 # 测试与发布验收
 
+## 参数中心阶段 0：输出上限统一 64K、验证“未计入”说明（2026-09-27，分支 `claude/param-center-phase0`，基于 main `c71b1353d`）
+
+- **新测试** `test_model_output_cap.py`：常量、随包 YAML、AgentConfig 默认值同为 65536；窗口已明确时上限 = min(配置, 窗口 ÷ 4)，
+  未明确时按原值（7 组参数）；后端工厂对默认模型也夹取；`vision_*` 字段与 YAML 键已删除，用户配置残留时只告警。
+- **扩充** `test_verification_runtime.py`：接 `| tail`、用 `;`、`||` 或后台串联的 pytest 不计入证据但带 `verification_skipped`，
+  并出现在 `[runtime-verification-facts]`；非验证命令的管道、引号里的 `|`、未正常退出的命令都不给这条说明。
+- **真实短测**（上线前，主用户 15 个模型档案，新上限经后端工厂）：deepseek-v4-flash/pro/vision-exp、v4.1-flash、MiniMax-M2.7（26 万窗口）、
+  MiniMax-M3 全部正常回复；本机 127.0.0.1:8901 与 18881 两个本地端点未运行（与本改动无关）；Jev 决策后端不读 max_tokens。
+  opencode 类服务商要求绑定宿主会话，短测需在 `provider_session_scope` 内调用。
+- focused：60 个相关测试文件（配置、模型档案、后端、网关选模、输出预留、子代理选模、验证、交付质量、运行事实等）加架构守卫。
+
 ## 聊天 `/skills`：TUI 与 IM 里处理技能提案和自动总结的 Skill（2026-09-27，分支 `claude/skill-proposals-tui-im`，基于 main `4aa73d756`）
 
 - **来源**：用户要求“所有都能 TUI 和 IM 来”；技能提案与自动总结 Skill 原来只有命令行入口。

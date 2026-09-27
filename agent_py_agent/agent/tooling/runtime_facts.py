@@ -17,14 +17,16 @@ _TERMINATION_FIELDS = {
 }
 
 
-# LLM: 保留已有verification块的字节顺序（键排序输出，新增的 verification_evidence_chain 只在 && 串联通过时出现）；
+# LLM: 保留已有verification块的字节顺序（键排序输出，新增的 verification_evidence_chain 只在 && 串联通过时出现，
+#   verification_skipped 只在验证命令因管道、;、|| 或后台没有计入时出现）；
 #   process只取显式字段，不能用工具成功或空PID列表推断清理成功。
 # 函数用途: 生成模型可见的结构化事实区；仅返回文字，不访问Agent、文件、进程或任何持久账。
 def render_tool_runtime_facts(details: Mapping[str, object]) -> str:
     sections = []
     verification = {
         key: details[key]
-        for key in ("verification_evidence", "verification_evidence_chain", "verification_state")
+        for key in ("verification_evidence", "verification_evidence_chain", "verification_state",
+                    "verification_skipped")
         if key in details
     }
     if verification:

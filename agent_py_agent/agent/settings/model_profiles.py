@@ -345,7 +345,8 @@ def selected_model_config(agent: object, *, profile_id: str | None = None):
     row = _resolved_profile(agent, data, selected)
     config = replace(agent.config, **row, api_key_env="", model_context_window_explicit=True,
                      model_temperature_explicit="temperature" in row or agent.config.model_temperature_explicit)
-    config.max_tokens = min(config.max_tokens, int(row["model_context_window_tokens"]) // 4)
+    # 输出上限不在这里夹取（后端工厂按 effective_max_output_tokens 统一处理）；max_tokens 仍按模型档案优先级冻结，
+    # 任务级覆盖配置改不动它，与原行为一致。
     fields = {*row, "api_key_env", "model_context_window_explicit", "model_temperature_explicit", "max_tokens"}
     config.config_sources = {**config.config_sources, **{key: {
         "source": "owner_model_profile", "priority": 90, "profile_id": selected,

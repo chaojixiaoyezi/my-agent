@@ -18,14 +18,20 @@ from ..agent_core.runtime.task_identity import durable_task_id
 from ..runtime_context import current_subagent_run_id, current_task_attributes
 from ..tooling.runtime_contracts import ToolCall, ToolResult
 from ..tooling.write_boundary import WRITE_TOOL_NAMES, declared_write_paths
-from .project_facts import classify_verification_commands, project_facts_for
+from .project_facts import (
+    classify_verification_commands,
+    hidden_verification_commands,
+    project_facts_for,
+)
 from .repository import VerificationContext, VerificationEvidence, VerificationEvidenceRepository
 
 
 # LLM: this is the only runtime integration point for the evidence ledger.  Do
 # not add per-IM or per-tool prompt patches elsewhere.
 # run_command may prove several verifications at once (an `&&` chain that returns 0): the envelope keeps
-# the last event as `verification_evidence` and adds the ordered `verification_evidence_chain`.
+# the last event as `verification_evidence` and adds the ordered `verification_evidence_chain`. When a
+# verifier ran but a pipe, `;`, `||` or background `&` hid its exit status, nothing is written to the ledger
+# and the envelope carries `verification_skipped` so the model can rerun it in a countable form.
 # 函数用途: 根据一次真实工具结果，记录测试证据或让旧证据过期。
 def record_tool_verification(
     agent: object,
@@ -49,6 +55,9 @@ def record_tool_verification(
                 additions["verification_evidence"] = evidence[-1]
             if len(evidence) > 1:
                 additions["verification_evidence_chain"] = evidence
+            skipped = [] if evidence else _hidden_verification(agent, call, result)
+            if skipped:
+                additions["verification_skipped"] = _skipped_fact(skipped)
         if result.ok and call.tool_name in WRITE_TOOL_NAMES:
             states = _mark_writes(
                 repository,
@@ -113,6 +122,28 @@ def _record_command(
         _public_evidence(repository.record(context, VerificationEvidence(**asdict(item))))
         for item in classified
     ]
+
+
+# LLM: 只在命令真实退出、却因管道、;、|| 或后台没能计入时列出其中的验证命令；不写验证账，不改工具结果的成败。
+# 函数用途: 找出这次 run_command 里没有计入证据的验证命令，供工具结果如实说明。
+def _hidden_verification(agent: object, call: ToolCall, result: ToolResult) -> list[str]:
+    process = _handler_metadata(result).get("process")
+    if not isinstance(process, dict) or process.get("status") != "exited":
+        return []
+    command = str(call.arguments.get("command") or "").strip()
+    return hidden_verification_commands(command, cwd=_command_cwd(agent, call.arguments)) if command else []
+
+
+# LLM: 结构化字段（status/reason/canonical_commands）是事实；hint 只是给模型的软提示，不参与任何判断。
+# 函数用途: 生成“验证命令未计入”的公开事实。
+def _skipped_fact(canonical_commands: list[str]) -> dict[str, object]:
+    return {
+        "status": "not_recorded",
+        "reason": "exit_status_hidden",
+        "canonical_commands": canonical_commands,
+        "hint": "这条命令里的验证没有计入证据：管道、;、|| 或后台会让返回码不属于验证命令本身。"
+                "单独运行验证命令（可用 && 串联，不要接 | tail 或 | head，工具会自动截断过长输出）才会计入。",
+    }
 
 
 def _mark_writes(

@@ -1,5 +1,15 @@
 # Verification：开发推进
 
+## 2026-09-27 验证命令“未计入”说明（分支 `claude/param-center-phase0`）
+
+真机现象：delivery_quality 一次都没触发，验证账 `verification_events` 为 0 行。my-agent 判断是 run_command 缺 `return_code`，
+核对后不对——进程事实里有 `return_code`；真实原因是它跑的每条 pytest 都接了 `2>&1 | tail -N` 或用 `;` 串联，分类器按
+“一次返回码只能证明一条命令”拒绝整条命令，而且拒绝时什么都不说。现在 `project_facts.hidden_verification_commands` 在整条命令
+不能计入时，按带引号语义的 shell 记号在管道、后台、`;`、`||`、`&&` 处切段，列出其中真正执行检查的规范验证命令；
+`runtime.record_tool_verification` 在命令真实退出却没有证据时把它写进 `handler_details.verification_skipped`
+（status=not_recorded、reason=exit_status_hidden、canonical_commands，另附给模型的软提示），`[runtime-verification-facts]`
+随之可见。不写验证账、不改工具成败；run_command 说明补一句“测试不要接 tail/head 或用 ; 串联”。
+
 ## 2026-09-26 证据库连接显式关闭（分支 `claude/ci-fix`）
 
 `VerificationEvidenceRepository` 原来用 `with self._connect() as conn`，只提交不关闭。Python 3.11 起 sqlite3 连接要等循环 GC

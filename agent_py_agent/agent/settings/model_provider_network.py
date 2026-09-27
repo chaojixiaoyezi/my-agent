@@ -59,7 +59,9 @@ def _probe(agent: object, data: dict, profile_id: str) -> dict:
     from .model_profiles import _resolved_profile
 
     row = _resolved_profile(agent, data, profile_id)
-    config = replace(agent.config, **row, api_key_env="", max_tokens=1024, request_timeout=60, stream_enabled=True,
+    # 输出上限沿用正式请求的值（后端工厂按窗口夹取），短测才能发现供应商不接受这个上限的情况。
+    config = replace(agent.config, **row, api_key_env="", model_context_window_explicit=True, request_timeout=60,
+                     stream_enabled=True,
                      model_temperature_explicit="temperature" in row or agent.config.model_temperature_explicit)
     backend = get_backend(config.model_backend, config)
     started = time.monotonic()

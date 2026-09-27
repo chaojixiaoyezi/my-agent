@@ -164,3 +164,41 @@ def test_runtime_records_every_segment_of_a_passing_and_chain(tmp_path: Path):
     assert [row["canonical_command"] for row in chain] == ["make test", "make lint"]
     assert details["verification_evidence"] == chain[-1], "单条字段保持为最后一条，形状不变"
     assert len({row["id"] for row in chain}) == 2 and all(row["status"] == "passed" for row in chain)
+
+
+def test_piped_or_semicolon_test_runs_are_explained_but_never_recorded(tmp_path: Path):
+    # 2026-09-27 真实运行：my-agent 的每条 pytest 都接了 `2>&1 | tail -N` 或用 ; 串联，返回码不属于 pytest，
+    # 不能计入证据；但必须给出结构化“未计入”事实，模型才知道去掉管道重跑。
+    from agent_py_agent.agent.tooling.runtime_facts import render_tool_runtime_facts
+
+    agent, project, _owner_home = _agent(tmp_path)
+    for command in (
+        f"cd {project} && python3 -m pytest tests/test_a.py -q 2>&1 | tail -5",
+        "pytest -q; echo done",
+        "pytest -q || true",
+        "./scripts/other.sh && pytest -q & wait",
+    ):
+        call = _call("run_command", {"command": command, "working_dir": str(project)})
+        result = _success(call, "1 failed", {"process": {"status": "exited", "return_code": 0}})
+        details = record_tool_verification(agent, call, result).metadata["handler_details"]
+        assert "verification_evidence" not in details, command
+        skipped = details["verification_skipped"]
+        assert (skipped["status"], skipped["reason"], skipped["canonical_commands"]) == (
+            "not_recorded", "exit_status_hidden", ["pytest"]), command
+        assert "verification_skipped" in render_tool_runtime_facts(details)
+
+
+def test_skip_fact_only_names_verifiers_whose_exit_status_was_hidden(tmp_path: Path):
+    agent, project, _owner_home = _agent(tmp_path)
+    exited = {"process": {"status": "exited", "return_code": 0}}
+    for command in ("grep -rn foo . | head -5", "echo hi; ls"):
+        call = _call("run_command", {"command": command, "working_dir": str(project)})
+        details = record_tool_verification(agent, call, _success(call, "", exited)).metadata.get("handler_details", {})
+        assert "verification_skipped" not in details and "verification_evidence" not in details, command
+    quoted = _call("run_command", {"command": 'pytest -k "a|b" -q', "working_dir": str(project)})
+    details = record_tool_verification(agent, quoted, _success(quoted, "ok", exited)).metadata["handler_details"]
+    assert details["verification_evidence"]["status"] == "passed" and "verification_skipped" not in details
+    cancelled = _call("run_command", {"command": "pytest -q | tail -3", "working_dir": str(project)})
+    details = record_tool_verification(
+        agent, cancelled, _success(cancelled, "", {"process": {"status": "cancelled"}})).metadata["handler_details"]
+    assert "verification_skipped" not in details

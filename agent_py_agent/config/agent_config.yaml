@@ -743,8 +743,11 @@ model_name: ""
 # 首包等待会根据本轮输入量单独扩展，健康流式输出不会再被这个值当作整次总墙钟强杀。
 request_timeout: 240
 
-# 允许模型最多生成多少 token
-max_tokens: 16314
+# 模型单次回答最多生成多少 token（含推理内容），所有模型统一 64K。
+# 实际发送值 = min(本值, 模型上下文窗口 ÷ 4)：窗口已明确（模型档案或本文件写了 model_context_window_tokens）时
+# 由后端入口统一夹取，给输入留出至少四分之三窗口；窗口未知时按本值发送。输出上限也会从输入可用空间里预留，
+# 所以窗口较小（如 128K）的模型调大本值会让压缩更早触发。
+max_tokens: 65536
 
 # 当前模型真实上下文窗口 token 数。compact/preflight 用它计算何时折叠；
 # 不要和 chat_context_window_chars 混用，后者只是聊天界面的字符预算。
@@ -1060,25 +1063,6 @@ computer_use_enabled: false
 # client capabilities 只声明 my-agent 已实现的 diagnostics/hover/definition/references/documentSymbol。
 # 例：lsp_servers: {"python": {"command": "pyright-langserver", "args": ["--stdio"], "timeout": 20, "initialization_options": {}}}
 lsp_servers: {}
-
-# 视觉理解（短板6）：辅助视觉模型配置，让 analyze_image 工具能看图（分析图片内容）。
-# my-agent 主模型（MiniMax-M2.7）不一定支持视觉，所以走一个独立的 anthropic_compatible 视觉端点：
-# analyze_image 把图片（本地路径或 http/https URL）转成 anthropic image block 调它，返回内容分析。
-# - URL 取图复用 web_fetch/browser 同一套 SSRF 防护，默认拒私网/内网/云 metadata 地址。
-# - 仅识别真实 PNG/JPEG/WebP/GIF（按文件二进制头判定，与扩展名无关），有 10 MB 大小上限。
-# - 可选加法：vision_api_base 与 vision_model_name 都填了才算“已配”；二者任一为空 = 未配视觉模型，
-#   analyze_image 仍注册但调用时返回 TOOL_UNAVAILABLE（带配置指引），对现有流程零影响、不崩。
-# - vision_api_key 留空则复用上面的主模型 api_key（视觉模型与主模型常同源同一把 key）；
-#   vision_anthropic_version 留空则复用主模型 anthropic_version。
-# 例（MiniMax 视觉模型，和主模型同源时只需填 base + model_name）：
-#   vision_api_base: "https://api.minimaxi.com/anthropic"
-#   vision_model_name: "MiniMax-VL-01"
-vision_api_base: ""
-vision_api_key: ""
-vision_model_name: ""
-vision_anthropic_version: ""
-vision_request_timeout: 120
-vision_max_tokens: 1024
 
 # Chat / CLI 默认展示和读取预算：
 # - 这些配置控制命令默认显示多少、交互历史带多少、长文本折叠多少。

@@ -764,7 +764,10 @@ def _build_shell_tool_model_spec(
             "process, pass run_in_background=true and keep the command itself in foreground "
             "form; shell '&' backgrounding is rejected because it cannot return a managed session. "
             "The tool already returns the final exit code; do not append '; echo $?' or another "
-            "always-successful command because that masks an earlier failure."
+            "always-successful command because that masks an earlier failure. Long output is already "
+            "truncated for you, so run tests and checks on their own (&& chains are fine) instead of piping "
+            "them into tail/head or joining them with ';': otherwise the exit code is not theirs and the run "
+            "is not recorded as verification evidence."
         ),
         input_schema={
             "type": "object",

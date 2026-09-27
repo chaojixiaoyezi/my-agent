@@ -37,6 +37,8 @@ _VERIFY_TARGETS = ("test", "tests", "lint", "typecheck", "check", "build", "fmt"
 _CHAIN_SPLIT_RE = re.compile(r"\s*(&&|\|\||;)\s*")
 # 铁律：一次返回码只能证明一条命令。管道取末段返回码、后台立即返回 0，返回码都不再属于测试命令本身，一律不算证据。
 _EXIT_CODE_HIDING_TOKENS = frozenset({"|", "|&", "&"})
+# 说明“未计入”时切段用的全部 shell 连接符（shlex punctuation_chars 会把连续符号合成一个记号）。
+_SEGMENT_BREAK_TOKENS = _EXIT_CODE_HIDING_TOKENS | {";", "||", "&&"}
 # 同一铁律决定放行边界：只放行开头一个 `cd <目录> &&`。&& 在 cd 失败时短路，而目录存在且可进入由文件系统事实判定
 # （不解析输出），这时返回码只可能来自后一条命令；其余链式写法仍拒绝。
 _CD_PREFIX_RE = re.compile(r"^\s*cd\s+(?P<target>\"[^\"]*\"|'[^']*'|[^\s;&|]+)\s*&&\s*(?P<rest>.+)$", re.S)
@@ -262,6 +264,39 @@ def _cd_prefix(command: str, cwd: str | Path | None) -> tuple[str | Path | None,
     return directory, match.group("rest")
 
 
+# LLM: 只用于说明“为什么没计入”，从不产生证据：整条命令能按 && 规则计入时返回空；否则按带引号语义的 shell 记号，
+#   在管道、后台、;、||、&& 处切段，列出其中真正执行检查的规范验证命令（去重保序）。换行、cd 目标不可进入、
+#   不在项目里时同样返回空。不看输出、不给状态。调用方用它给模型一条“未计入”的结构化事实。
+# 函数用途: 找出因管道、;、|| 或后台而没有计入验证证据的验证命令。
+def hidden_verification_commands(command: str, *, cwd: str | Path | None) -> list[str]:
+    if not isinstance(command, str) or not command.strip() or "\n" in command.strip() or "\r" in command.strip():
+        return []
+    effective_cwd, body = _cd_prefix(command, cwd)
+    facts = project_facts_for(effective_cwd)
+    if facts is None or not facts.verify_commands or body is None or _command_segments(body):
+        return []
+    matches = (_canonical_match(tokens, facts.verify_commands) for tokens in _operator_segments(body) if tokens)
+    return list(dict.fromkeys(match[0] for match in matches if match and _runs_the_check(*match)))
+
+
+# LLM: 带引号语义切段，引号内的符号只是参数；引号不成对时返回空列表，不猜。
+# 函数用途: 在所有 shell 连接符（管道、后台、;、||、&&）处把命令切成记号段。
+def _operator_segments(body: str) -> list[list[str]]:
+    lexer = shlex.shlex(body, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    try:
+        tokens = list(lexer)
+    except ValueError:
+        return []
+    segments: list[list[str]] = [[]]
+    for token in tokens:
+        if token in _SEGMENT_BREAK_TOKENS:
+            segments.append([])
+        else:
+            segments[-1].append(token.removeprefix("./"))
+    return segments
+
+
 # LLM: 按带引号语义的 shell 记号判断；引号内的 | 或 & 只是参数，不算管道或后台。
 # 函数用途: 判断一段命令是否含有会让返回码不属于测试命令本身的管道或后台符号。
 def _hides_exit_code(raw: str) -> bool:
@@ -360,5 +395,6 @@ __all__ = [
     "ClassifiedVerification",
     "ProjectFacts",
     "classify_verification_commands",
+    "hidden_verification_commands",
     "project_facts_for",
 ]

@@ -38,6 +38,7 @@
 |-- docs/tasks/TUI_RESOURCE_HANDOFF.md  # 资源性能线的归属、验收、限制和主线整合交接
 `-- docs/design/
     |-- ADMIN_CHANNEL_IDENTITY.md       # IM 管理员身份：管理员密码、私聊精确绑定为 local/main、聊天内 /approve /deny 审批
+    |-- PARAMETER_CENTER.md             # 参数中心：一个参数一个权威定义、安全等级、my-agent 自助修改与回滚、分阶段迁移
     |-- SKILL_AUTO_SUMMARY.md           # 自学习 S3：完成任务后自动总结 Skill，自动闸门代替人工确认、登记表所有权、账本与回滚
     |-- REASONING_EFFORT.md             # 智能程度：各服务商实测、档位与控制方式、会话/子代理档位来源、/effort 与边界
     |-- MAINTAINABILITY_AND_JEV_REVIEW.md # 可维护性评估、渐进重构建议及 Computer Use/Jev 能力边界
@@ -654,6 +655,7 @@ agent_py_agent/
 |-- tests/                             # 单元、集成、真实链路回归
 |   |-- fixtures/decision/jev_capability_rounding.json # 合成材料真实Jev响应的脱敏概率舍入replay，不含凭据
 |   |-- test_skill_proposals.py         # 自学习 S1：默认关闭、幂等提案、迁移不碰、确认拒绝矩阵、快照可见、runner 自动确认与 CLI 往返
+|   |-- test_model_output_cap.py       # 输出上限统一 64K：常量/YAML/dataclass 同值、按已知窗口一处夹取、默认模型同规则、vision 死配置已删
 |   |-- test_skill_chat_control.py     # 聊天 /skills：解析校验、Gateway 分派不落入 stop、TUI 文本还原与本地拒绝、提案确认版本、自动 Skill 回滚删除
 |   |-- test_skill_learning.py          # 自学习 S3：触发判据、请求有界脱敏、create/update/skip、各闸门拒绝码、上限、重试、忙时顺延、回滚删除
 |   |-- test_reasoning_effort.py        # 智能程度：换算与优先级、两种协议真实组包、线程档位、投影一致、子代理继承、/effort、档案字段与配置
@@ -1136,6 +1138,7 @@ docs/
 - `agent_py_agent/agent/capability/skill_learning.py` 与 `skill_learning_{request,prompt,publish,store}.py`：自学习 S3 自动总结 Skill（设计见 `docs/design/SKILL_AUTO_SUMMARY.md`）。收口按结构化判据写有界请求；Gateway 记忆整理车道逐条处理：运行锁、前台让路、每日上限、复用 Curator backend 的无工具结构化调用；自动闸门代替人工确认后发布到 `<owner_home>/skills/learned/<name>/`，登记表 `registry.json` 是自学归属唯一权威，账本只记结构化字段。
 - `agent_py_agent/cli/skill_learning_commands.py`：`my-agent skills learned list/show/revert/remove`，只读写 `SkillLearningStore` 与 `skills/learned/`，不构造 Agent、不调模型。
 - `agent_py_agent/tests/test_skill_learning.py`、`test_skill_learning_integration.py`：S3 的离线合同（假 backend）与接线（组合根、收口 helper、Gateway 车道、CLI、S1 自动确认、配置）。
+- `docs/design/PARAMETER_CENTER.md`：参数中心的唯一模块设计：来源、目标、安全等级、修改与回滚、my-agent 开发工作树、阶段与验收。
 - `docs/design/SKILL_AUTO_SUMMARY.md`：自学习 S3 的唯一模块设计：用户决定、上游参考取舍、触发、材料、后台执行、输出合同、自动闸门、存储所有权、用户入口与边界。
 - `agent_py_agent/agent/subagents/lesson_ledger.py`：子代理经验账本 `lessons.jsonl` 的唯一合同。字段规范成单行且有界，id 取内容 hash（同 run 相同参数只记一次），每 run 最多 5 条、16 KiB，超限返回结构化结论；读回逐行复核版本、字段、id 与 run 归属。工具写入与 runner 结果收口共用，宿主从不解析模型回复正文。
 - `agent_py_agent/agent/agent_core/runtime/record_lesson_tool.py`：子代理专属 `record_lesson` 工具。run/attempt 取 runner 上下文、task 取任务记录，Schema 只含四个经验字段；注册表默认隐藏，随子代理 allowed_tools 下发，主线程调用返回 `TOOL_UNAVAILABLE`；所有拒绝都声明 `effect_outcome=not_started`。

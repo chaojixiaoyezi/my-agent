@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..settings.defaults import effective_max_output_tokens
 from .anthropic import AnthropicCompatibleBackend
 from .base import BackendOptions, BaseBackend, EchoBackend, UnconfiguredBackend
 from .openai_chat import OpenAICompatibleBackend
@@ -39,7 +40,8 @@ def get_backend(name: str, config: Any | None = None) -> BaseBackend:
         model_name=config.model_name,
         input_media_max_bytes=getattr(config, "input_media_max_bytes", 16 * 1024 * 1024),
         request_timeout=config.request_timeout,
-        max_tokens=config.max_tokens,
+        # 输出上限按已知窗口统一夹取（唯一权威见 effective_max_output_tokens），默认模型与模型档案走同一规则。
+        max_tokens=effective_max_output_tokens(config),
         context_window_tokens=getattr(config, "model_context_window_tokens", 0),
         temperature=float(config.temperature),
         temperature_explicit=getattr(config, "model_temperature_explicit", False),
