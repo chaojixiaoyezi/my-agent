@@ -50,7 +50,15 @@ execution_mode: ""
 # - 接飞书/微信/QQ 等 provider 时，适配器可以把它改成 provider/user/id 或 provider/group/id。
 # - 这只决定 audit/memory/compact/task 等 owner home 归属，不给子代理额外权限。
 my_agent_owner_provider: "local"
+# owner 身份的类别（例如本机主用户，或通道里的 user / group）。
+# 和 `my_agent_owner_provider`、`my_agent_owner_id` 一起决定用户空间归属，也会进入审计记录的通道字段。
+# 一般不用改，只有你要切换或自建一套用户空间归属时才调整；它还参与判断当前身份是否为本机管理员（关系到能否访问本机工作区之外的目录）。
+# （安全边界：只能由用户在配置文件里改，模型不能改）
 my_agent_owner_kind: "main"
+# 当前工作归属哪个 owner 的身份标识。
+# 决定审计、记忆、任务、压缩等数据放进哪个用户空间，以及审计记录里的用户身份；它本身不代表任何额外权限。
+# 一般不用改，只有你确实要在本机切换工作归属时才调整；接入飞书/QQ 等通道时，这条身份可能由通道适配器按通道信息改写。
+# （安全边界：只能由用户在配置文件里改，模型不能改）
 my_agent_owner_id: "main"
 
 # 家目录运行时开关：
@@ -61,6 +69,8 @@ my_agent_owner_id: "main"
 # - run_task_workspace_enabled: 保存宿主运行记录到用户 runs/日期/不透明ID；普通聊天不建运行，记录不改变工具 cwd。
 home_context_enabled: true
 home_lesson_stale_caveat_days: 7
+# 是否把每次运行的记录按日期归档成运行工作区。
+# 一般不用改；只有当你希望自己的空间完全不留下任何运行归档时才需要关掉它，关掉后代理照常工作、工具的工作目录也不变，只是不再保留这些记录和索引。
 run_task_workspace_enabled: true
 
 # 用户业务文件的整理建议（由 home_context_enabled 控制提示加载）：
@@ -89,7 +99,15 @@ memory_path: ""
 # - events.jsonl: 追加式流水账，方便排查“什么时候写了什么”，后续也适合上传同步。
 # 普通用户不需要改这里；高级用户可以把这组路径放到独立数据盘或同步目录。
 local_store_path: ""
+# 本地记忆库里正文和大附件的存放目录。
+# 这样正文放文件系统、数据库不会变胖，也方便你直接打开文件。
+# 一般不需要改，只有你想把这些内容放到独立数据盘或指定目录时才需要设；留空则用运行目录下的默认位置。
+# （安全边界：只能由用户在配置文件里改，模型不能改）
 local_store_files_dir: ""
+# 本地记忆库事件流水账文件的存放位置。
+# 用来记录「什么时候写了什么」方便排查。
+# 一般不需要改，只有你想把这份数据放到独立数据盘或指定目录时才需要设；留空则用运行目录下的默认位置。
+# （安全边界：只能由用户在配置文件里改，模型不能改）
 local_store_events_path: ""
 local_store_fts_enabled: true
 
@@ -114,14 +132,28 @@ memory_top_k: 5
 memory_curator_enabled: true
 memory_curator_provider: "auto"
 memory_curator_model: ""
+# 后台记忆整理隔多久自动触发一次（秒）。
+# 想让记忆更及时沉淀就调小，想减少后台模型调用、省资源就调大；需要注意的是，光到时间还不够，期间必须有过新对话才会真的触发。
 memory_curator_interval_seconds: 10800
+# 后台记忆整理按对话轮数触发的门槛。
+# 新对话累计到这么多用户轮次，就会整理一次记忆，不必等时间间隔。
+# 想让记忆更及时可以调小，想减少后台调用就调大；设为最小的 1 表示几乎每轮都会触发。
 memory_curator_turn_threshold: 10
 memory_curator_batch_message_limit: 80
+# 后台记忆整理单次交给提炼模型的对话与日志字符数上限。
+# 单次需要沉淀的内容特别多（例如长文档批量导入）时可以调大，让一批装得下更多；想省模型费用、或希望单次失败影响小一些就调小。
 memory_curator_max_input_chars: 40000
+# 后台记忆整理调用模型的基础超时秒数。
+# 输入越长，程序会自动按比例放宽等待时间，所以短输入按这个值走即可，长输入不用手动改；只有你的整理模型特别慢、经常超时失败时，才需要调大。
 memory_curator_timeout_seconds: 90
 memory_curator_max_retries: 1
+# 后台记忆整理最多同时处理几个任务。
+# 按用户空间分配名额，超出的整理任务排队留到下一轮再处理，不会抢占主会话。
+# 只有在后台整理明显积压、或你希望主动限制它占用的资源时才需要改。
 memory_curator_workers: 2
 memory_curator_daily_finalize_hour: 23
+# 后台记忆整理时是否自动晋升够格的候选记忆。
+# 如果你希望所有候选都等自己人工确认、不让程序自动写入长期记忆，就把它改成 `manual_only`；取值 `conservative_v1` 表示只自动晋升证据精确、没有冲突的新长期事实。
 memory_curator_auto_promotion_policy: "conservative_v1"
 memory_lesson_min_occurrences: 2
 memory_hot_min_occurrences: 3
@@ -156,12 +188,17 @@ memory_semantic_recall: false
 # 3 = 只存最小恢复快照（最省磁盘，一般就用它）；2 = 摘要加关键事件；1 = 去掉大块工具展示数据；0 = 尽量全量。
 # 只有排查问题需要更完整的历史时才调小；乱填会退回 3。
 memory_archive_level: 3
+# 子代理运行失败时是否自动留一份恢复快照。
+# 它用于事后排查和恢复任务上下文。
+# 如果你不希望这类快照占用磁盘，可以关掉；但关掉后子代理失败时就少了一份可回查的现场记录，后台归档与对话记录不受这个开关影响。
 memory_hook_enabled: true
 # 长期规则（教训）怎么用，默认 soft，一般不用改：
 # - soft：问题命中规则索引时提醒模型，并自动读少量规则正文（条数见 memory_rule_auto_read_limit）。
 # - strict：命中的规则必须先读原文件再动手，适合规则很关键、必须照做的场景。
 # - off：完全不做规则路由（旧键 memory_rule_routing_enabled: false 就等于这里写 off）。
 memory_rule_routing_mode: "soft"
+# 每轮最多自动读取几条长期规则或教训的正文。
+# 规则很多、上下文容易被占满时可以调小，希望模型拿到更多规则细节时可以调大；设为 0 表示完全不自动读取正文，只保留命中的提示。
 memory_rule_auto_read_limit: 3
 # 要不要自动往本轮提示里加“恢复线索”（以前运行的归档和任务事实），默认 off：
 # - off：不自动加（默认），普通对话不会因为恢复检索变慢。
@@ -170,7 +207,11 @@ memory_rule_auto_read_limit: 3
 # 偶尔需要时单次运行加 --resume-context 就行，不用改这里。
 memory_resume_auto_context_mode: "off"
 memory_resume_auto_context_limit: 5
+# 自动压缩对话上下文的触发线：用到这个程度就整理一次，把较早内容压成摘要。
+# 数字调小会压缩得更早、保留的原文更少，调大则更晚压缩、更容易顶到上限；如果你的对话经常被压缩打断，可以调大一点。
 memory_compact_auto_trigger_percent: 90
+# 自动压缩后的历史收缩目标百分比。
+# 只有当你的模型窗口特别大、或压缩后仍频繁再次触发压缩时，才需要调低它压得更狠；调高会更保守、保留更多历史，但可能很快又触发下一次压缩。
 memory_compact_recovery_target_percent: 60
 # 单次 run 内 compact→自动续跑的绝对深度硬顶（与「连续无工具进展」软顶并存）。达到即强制
 # return 当前结果，防止持续高于阈值且每轮都调工具的任务无限 compact/续跑（H2）。
@@ -267,6 +308,11 @@ task_max_subagents: 0
 # - 默认空值表示写入当前 owner home 的工作区运行目录。
 # - 用户明确填写路径时，按填写路径落盘。
 subagent_workspace: ""
+# 配置层给子代理预设的可用工具清单。
+# 用来收窄子代理能用的工具范围。
+# 一般留空即可，只有你想统一限制所有子代理只能用某几类工具时才需要填；留空或空列表表示不在配置层额外限制（运行时和预设仍会各自收口）。
+# 填写时可以写成一串用逗号分隔的工具名，也可以写成列表。
+# （安全边界：只能由用户在配置文件里改，模型不能改）
 subagent_allowed_tools: []
 
 # 子代理角色模板目录。
@@ -276,6 +322,10 @@ subagent_role_template_dirs: []
 # 0 表示不再设置一份重复的“单次创建”默认上限；实际批量仍受 max_subagents 可用槽位约束。
 # 部署方若要更小批次，可显式填写正整数。
 subagent_hierarchy_max_children_per_tool_call: 0
+# 一个运行被接管产生的链条最多能有多深。
+# 到达上限后系统会拒绝再创建新的接管运行。
+# 平时不用改；只有当你担心自动接管会一直往下套、想强制收口时才需要设一个正数。
+# 填 `0` 表示不设深度上限，也就是允许一直接管下去。
 subagent_takeover_chain_max_depth: 0
 
 # 子代理调试追踪等级。
@@ -304,8 +354,17 @@ enable_self_learning: false
 # - self_learning_max_skills：自动总结最多保留几个 Skill（只限制新建，更新不受限）；0 表示不限。
 # - self_learning_timeout_seconds：单次总结调用的超时秒数，最小 10。
 self_learning_min_tool_rounds: 6
+# 每天最多自动把任务总结成技能的模型调用次数。
+# 只有当你嫌它太费模型调用、或反过来觉得总结不够及时想放宽时才需要改。
+# 填 `0` 表示不限次数。
 self_learning_daily_limit: 20
+# 自动总结最多能新建出的自学技能数量上限。
+# 只有当你希望给自学技能的总数设个天花板、不让它无限增长时才需要改。
+# 填 `0` 表示不限；它只管新建、不算更新，已有技能的更新不受这个数影响。
 self_learning_max_skills: 50
+# 自动总结时单次调用模型最多等多少秒。
+# 超过就按这次调用失败处理。
+# 只有当你用的模型特别慢、总结经常卡到超时，或反过来想让它更快放弃时才需要调整，并且不能设得比最小允许值更低。
 self_learning_timeout_seconds: 180
 
 # 代理自助管理模型目录（默认开启）：
@@ -339,6 +398,9 @@ user_id: "admin"
 # - auth_enabled: 是否启用鉴权，默认开启；关闭后所有人都有 admin 权限（方便本地开发）
 # - admin_user_id: 管理员用户 ID，外部通道携带此 user_id 时也获得 admin 权限
 auth_enabled: true
+# 外部通道里被当作管理员的那个用户 ID。
+# 只有当你希望某个人在外部通道里也拥有管理员权限时，才需要改成那个人的用户 ID；留空会回落到内置的默认用户名。
+# （安全边界：只能由用户在配置文件里改，模型不能改）
 admin_user_id: "admin"
 
 # 合同/skill 的只读扫描预算：
@@ -347,7 +409,15 @@ admin_user_id: "admin"
 contract_status_max_scan_files: 1000
 contract_status_max_report_bytes: 2000000
 contract_status_recent_findings_limit: 20
+# 安全检查里一个技能目录最多允许放多少个文件的上限。
+# 超过就会被标记出来提醒你。
+# 只有当你确实要收录文件数很多的技能时才需要调大。
+# 填 `0` 表示不设这个文件数上限。
 skill_guard_max_files: 50
+# 安全检查里一个技能目录总体积最多多大的上限。
+# 按目录内所有文件加总计算，超过就会被标记出来提醒你。
+# 只有当你确实要收录体积较大的技能时才需要调大。
+# 填 `0` 表示不设这个体积上限。
 skill_guard_max_size_kb: 1024
 
 # 子代理干活时出了临时问题（runner 出错或超时、输出格式解析失败、工具结果丢失、模型服务出错或超时）失败后，
@@ -360,6 +430,8 @@ runner_failure_retry_limit: 1
 # - 写数字 = 最多同时跑这么多个，其余排队；0 = 不限制，这一批有多少就同时跑多少。
 # - 子代理、孙代理等各层都算在这一个上限里。机器或模型额度吃紧时调小，一般不用改。
 runner_concurrency: "auto"
+# 一次派工最多同时新启动几个后台子任务，已经在跑的也占名额。
+# `auto` 表示有多少任务就启动多少，`0` 表示不限制；机器资源紧张时才需要改成具体数字。
 runner_start_rate: "auto"
 # create_subagents 会由宿主自动启动并恢复 runner，模型不轮询或手动推进。
 # runner_start_rate 只限制每个调度切片启动多少个，剩余项由后台继续启动并以生命周期事件通知直接父级。
@@ -369,6 +441,9 @@ runner_start_rate: "auto"
 # - "auto": 按任务文本和角色动态计算超时，适合压测或需要自动抢救卡死 runner 的场景。
 # - "120" 这类数字字符串：固定 120 秒。
 runner_timeout_seconds: "off"
+# 给不同角色的运行分别设定最长允许跑多久的对照表。
+# 平时不用填；只有当某一类角色（比如 root 或某个 worker 角色）经常跑太久，你想单独给它一个时限或干脆关掉时限时才需要设置。
+# 留空表示不给任何角色单独设限，所有运行统一听 runner_timeout_seconds；某一角色可以填秒数、填 `off` 表示这一角色不限制时长、填 `auto` 表示交回系统自动判断。
 runner_timeout_by_role: []
 
 dynamic_timeout_safety_margin: 2.0
@@ -377,6 +452,8 @@ background_process_notifications: true
 # 保存无正文请求摘要，用于区分系统/工具/模型/历史前缀变化；不额外调用模型或截短上下文。
 cache_diagnostics_enabled: true
 dynamic_timeout_min: 30
+# 自动估算请求超时时允许的最大值（秒）。
+# 只有合法任务确实需要跑更久、却被超时打断时才需要调大。
 dynamic_timeout_max: 10800
 # 没有足够实测 probe 样本时使用的保守吞吐估计：
 # - prefill 只决定当前请求等待首个有效流事件的预算；
@@ -392,6 +469,10 @@ estimated_output_tokens_per_second: 20.0
 probe_min_samples: 2
 probe_window_samples: 5
 probe_outlier_trim: true
+# 「模型速度画像」文件的路径。
+# my-agent 用其中的实测速度数据来估算每次请求该给多长超时。
+# 一般不需要改，只有你手上有自定义的速度画像文件、或想让它固定指向某一份数据时才设；留空则用缓存目录下的默认位置并回退到内置的经验估算。
+# （安全边界：只能由用户在配置文件里改，模型不能改）
 model_speed_profile_path: ""
 
 # Gateway 本地控制面（第一版）：
@@ -403,6 +484,8 @@ model_speed_profile_path: ""
 gateway_workspace: ""
 gateway_heartbeat_interval: 5
 gateway_stale_seconds: 120
+# 停止后台服务时最多等它多久自己退出，超时就强制结束。
+# 任务都跑得比较久、希望停止时更温和，可以调大。
 gateway_stop_timeout: 20
 
 # gateway 本地消息入口。
@@ -427,8 +510,14 @@ gateway_request_poll_interval: 0.2
 # - gateway_request_max_attempts：processing 租约实际卡死的累计失败上限，默认 2 即首次重排、再次卡死归档 failed。
 #   服务重启接续同一回合不占失败次数；旧 attempts 只记执行代次。0 表示不卡死次数上限，未知副作用门不放宽。
 gateway_user_inflight_limit: 8
+# 后台服务同时最多处理多少个请求（所有会话加在一起）。
+# 一般远远用不到；只有在同一台机器上跑很多并发任务、或想限制资源占用时才需要调小。
 gateway_global_inflight_limit: 500
+# 一个请求开始处理之后，超过这个秒数还没结束就认为它卡住了（可以被重新安排）。
+# 正常请求远快于此；如果你有跑很久的合法任务被误判成卡住，可以调大。
 gateway_processing_timeout_seconds: 900
+# 一个请求失败后最多尝试几次（含第一次）。
+# 上游不稳定时可以调大，但重试也会消耗用量。
 gateway_request_max_attempts: 2
 # 后台会话全局线程池上限；不同 owner 和不同 thread 都可并发，同 thread
 # 仍由持久 run claim 保证单飞。超出的会话留在持久队列，不丢弃。
@@ -448,6 +537,8 @@ owner_agent_idle_seconds: 60.0
 # 历史仅保存引用；同一字节上限也约束每次模型请求，较旧附件超预算时只发归档引用。
 # 模型和接口仍须支持对应模态，不自动换模型。
 input_media_max_bytes: 16777216
+# 一条消息里最多能带几个图片或视频附件（TUI 里 `/attach` 或拖入）。
+# 一般不用改；单个文件的大小上限另由 input_media_max_bytes 控制。
 input_media_max_files: 8
 # 磁盘级 owner 唤醒发现间隔（秒，0=关）：后台循环周期性扫 owners/ 把「有 enabled 进度策略/
 # 待处理唤醒信号」的 owner 种回活跃登记表。治网关重启/LRU 逐出后 scoped owner 的到点唤醒
@@ -469,7 +560,13 @@ gateway_service_command_timeout_seconds: 30
 # - gateway_restart_cooldown_seconds：两次安全重启之间的最短间隔秒数，0 表示不限。
 #   另有固定防循环：同一会话 10 分钟内最多安排 3 次重启。
 gateway_restart_turn_wait_seconds: 300
+# 重启后台服务时最多等正在跑的任务多久，超过就先强制收尾。
+# 长任务多、希望重启更温和时可以调大。
 gateway_restart_drain_timeout_seconds: 600
+# 两次安全重启 Gateway 之间必须间隔的最少秒数。
+# 用来防止反复重启形成死循环；冷却期内提交的重启请求会被直接拒绝并提示正在冷却。
+# 只有你觉得重启太频繁或希望更快地连续重启时才需要调整；写成 `0` 表示不设冷却间隔。
+# （安全边界：只能由用户在配置文件里改，模型不能改）
 gateway_restart_cooldown_seconds: 30
 
 # HTTP 服务端口（gateway 守护进程用）
@@ -508,11 +605,36 @@ adapter_workspace: ""
 # - feishu_connection_mode: long_connection(默认,支持交互卡片且免公网) / webhook(需公网回调地址)
 # - feishu_ws_proxy: 长连可选代理(空=走 HTTPS_PROXY 环境变量;TUN/代理环境直连飞书 WS 网关是黑洞,需显式填代理)
 feishu_app_id: ""
+# 飞书自建应用的 App Secret，用于以你的飞书应用身份收发消息。
+# 在飞书开放平台（开发者后台）的「凭证与基础信息」里获取。
+# 只有首次接入飞书或更换应用时才需要填；可以写明文，也可以写成 `env:变量名` 或 `file:路径` 的间接引用，避免明文落到配置文件里。
+# （安全边界：只能由用户在配置文件里改，模型不能改）
 feishu_app_secret: ""
+# 飞书事件订阅的校验令牌（Verification Token）。
+# 在飞书开放平台「事件订阅」配置里获取。
+# 主要在 webhook 回调模式下用到；支持写成 `env:变量名` 或 `file:路径` 的间接引用，避免明文进配置文件。
+# （安全边界：只能由用户在配置文件里改，模型不能改）
 feishu_verification_token: ""
+# 飞书事件订阅的 Encrypt Key，用来校验并解密飞书推来的事件内容。
+# 只有你在飞书那边开启了加密回调时才需要填（可选）。
+# 在飞书开放平台「事件订阅」配置里获取。
+# 支持写成 `env:变量名` 或 `file:路径` 的间接引用，避免明文进配置文件。
+# （安全边界：只能由用户在配置文件里改，模型不能改）
 feishu_encrypt_key: ""
+# 飞书 webhook（回调）模式下本地回调服务监听的端口。
+# 飞书会把事件推到这个端口。
+# 只有你选择用 webhook 方式接入飞书时才需要它；这个端口会让本机对外监听，请确认它对外可达并做好防护，改完需要重启 Gateway 才生效。
+# （安全边界：只能由用户在配置文件里改，模型不能改）
 feishu_callback_port: 8421
+# 飞书机器人的接入方式：长连接或 webhook（本地回调服务）。
+# 长连接不需要公网地址、也支持交互卡片；webhook 需要公网能访问的地址，并配合 feishu_callback_port、feishu_verification_token、
+# feishu_encrypt_key 一起用。
+# 除非你有公网域名并想走回调模式，否则保持长连接即可。
 feishu_connection_mode: "long_connection"
+# 飞书长连接模式（WebSocket）出站时走的代理地址。
+# 只影响长连接、不影响 webhook 模式。
+# 留空时沿用系统里 `HTTPS_PROXY` 一类的环境变量；在 TUN/代理环境下直连飞书 WS 网关不通时，需要在这里显式填代理地址。
+# （安全边界：只能由用户在配置文件里改，模型不能改）
 feishu_ws_proxy: ""
 # 个人私聊会话锁：默认开启；首次私聊发设置卡但仍处理本条消息，设置后闲置 3 小时才要求解锁。
 feishu_session_lock_enabled: true
@@ -522,6 +644,10 @@ feishu_personal_idle_lock_seconds: 10800
 # QQ 机器人通道适配器配置
 # - qq_app_id / qq_app_secret: QQ 机器人应用凭证
 qq_app_id: ""
+# QQ 机器人应用的 App Secret，用于以你的机器人身份收发消息。
+# 在 QQ 开放平台（机器人后台）的应用凭证处获取。
+# 只有首次接入 QQ 或更换机器人应用时才需要填；也可以写成 `env:变量名` 或 `file:路径` 的间接引用，避免明文进配置文件。
+# （安全边界：只能由用户在配置文件里改，模型不能改）
 qq_app_secret: ""
 
 # 时区与周历（审计 #21，面向几十国用户按本地时区渲染日期/时间/本周范围）：
@@ -529,6 +655,8 @@ qq_app_secret: ""
 #   也可用环境变量 AGENT_TIMEZONE 覆盖（优先级最高）。非法时区串只告警并回退，不会崩。
 # - week_start: 周起始（monday/sunday/saturday）；美国/中东常用 sunday/saturday，影响“本周”范围计算。
 timezone: ""
+# 一周从星期几开始，影响我理解「本周」「这周」时算的日期范围。
+# 可选 monday（周一）或 sunday（周日）；如果你习惯按周日开始算一周，就改成 sunday。
 week_start: "monday"
 
 # 会话工作区：
@@ -590,6 +718,10 @@ collaboration_auto_dispatch_max_runners: 8
 # - audit_enabled: 是否启用审计日志
 # - audit_log_path: 审计日志存储路径
 audit_enabled: true
+# 审计日志落盘的目录或文件。
+# 一般不需要改，只有你打算把审计记录单独放到另一块数据盘或独立目录时才需要设；留空则使用默认位置。
+# 填入带扩展名的路径会当作单个日志文件，不带的则当作目录。
+# （安全边界：只能由用户在配置文件里改，模型不能改）
 audit_log_path: ""
 
 # 前台 daemon 默认策略（高级 / 过渡期）：
@@ -605,7 +737,16 @@ audit_log_path: ""
 #   daemon_max_cards=0 表示不限制能力卡数量
 #   daemon_interval=0 表示每轮之间不等待，通常只用于测试或单轮验证
 daemon_planner: true
+# 前台 daemon 是否真正改写状态的开关。
+# 开启时前台 daemon 允许真正改写状态；关闭时偏向只给建议、不落盘（类似 dry-run）。
+# 只有当你确定要让后台调度执行真实改动、而不是每次先人工确认时才需要调整。
+# 注意开启 `daemon_start_runners` 时必须同时允许改写状态；单次启动可以用命令行 `--apply` / `--dry-run` 覆盖。
+# （安全边界：只能由用户在配置文件里改，模型不能改）
 daemon_mutate_state: true
+# 前台 daemon 是否会真正启动 runner 执行任务的开关。
+# 开启时前台 daemon 会真正启动 runner 去执行任务；关闭时偏向只给建议、不实际执行。
+# 只有你确定要让后台调度自动跑起来时才需要开启，且开启时必须同时允许改写状态（见 `daemon_mutate_state`），单次启动可以用命令行 `--start-runners` 覆盖。
+# （安全边界：只能由用户在配置文件里改，模型不能改）
 daemon_start_runners: true
 daemon_interval: 30
 daemon_max_runners: "auto"
@@ -614,6 +755,10 @@ daemon_max_cycles: 0
 daemon_max_cards: 0
 daemon_probe: true
 daemon_reviewer: "parent-daemon"
+# 前台 daemon 自动派发 runner 时附加在任务上的额外指令文本。
+# 用来给每轮派发统一补充要求。
+# 只有你想让后台自动派发的任务都带上同样的额外说明时才需要填；留空表示不附加任何指令；单次启动可以用命令行 `--instruction` 覆盖。
+# （安全边界：只能由用户在配置文件里改，模型不能改）
 daemon_runner_instruction: ""
 
 # 审计来源采集 worker（/audit 保证档里负责采集来源的子代理）的时间上限，单位秒：
@@ -805,7 +950,12 @@ tool_artifact_read_budget_max_chars: 240000
 #   把上下文冲过窗口后压缩再也放不下（COMPACT_CANDIDATE_TOO_LARGE）。关掉则只按字符阈值外置。
 # - tool_payload_*: 只限制模型发来的单次工具调用 JSON 形状，防止坏 payload 撑爆上下文；不是业务字段枚举。
 tool_output_externalize_min_chars: 200000
+# 工具输出太长时会存成文件，对话里只留一段预览，需要时再按引用读全文。
+# 这个数就是预览保留的字符数，`0` 表示不留预览；一般不用改。
 tool_output_preview_chars: 4000
+# 工具输出快到自动压缩临界点时是否提前外置成存档。
+# 开启时能避免同一轮里好几条大结果把上下文挤爆；关掉后就只按固定的字符阈值来判断要不要外置，不再看剩余空间。
+# 一般不用改。
 tool_output_externalize_on_low_headroom: true
 
 # 工具上下文回溯回收（microcompact）：
@@ -981,6 +1131,8 @@ chat_history_max_turns: 20
 # Agent 模型使用的同会话历史预算，与上面的界面展示预览严格分开。
 # 总量不足时只整条淘汰最旧消息；普通用户/助手正文不做滑动头尾截断，达到阈值后统一 Compact。
 conversation_history_max_turns: 20
+# 每次请求最多带多长的对话历史（字符）。
+# 调大记得更多但更费 token，调小更省但更容易「忘事」；一般不用改。
 conversation_history_max_chars: 48000
 # 普通回合结束后，把本轮工具轨迹一次性写进 assistant metadata，供后续轮继续使用。
 # 这不是 Compact，不增加 compact 次数；metadata 只写一次，读取时按下面的热期选择固定投影。
@@ -990,6 +1142,11 @@ conversation_terminal_tool_fold_max_chars: 6000
 # 缓存仍可能有效时保留更完整的有界工具尾巴；过期后才切换成短折叠，避免一分钟内追问就主动破坏热前缀。
 # 0 表示立即短折叠。不同模型/网关缓存时长可能不同，应按 provider cache-read 账本校准，不按延迟猜测。
 conversation_terminal_tool_hot_tail_seconds: 300
+# 命令行清理旧审计记录时保留多少天。
+# 超过这个天数的审计条目会被删掉。
+# 调小会提前删除审计证据，所以只有在明确知道自己在放弃多久以前的记录时才改。
+# 写成 `0` 表示永久保留，清理时不删除任何记录；单次命令也可以用 `--days` 临时覆盖。
+# （安全边界：只能由用户在配置文件里改，模型不能改）
 cli_audit_cleanup_days: 90
 
 # Dispatch 闭环保证配置：

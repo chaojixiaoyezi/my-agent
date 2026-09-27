@@ -73,7 +73,7 @@ def test_empty_descriptions_only_come_from_the_reasoned_baseline():
 
 
 # 常用参数里暂时还没有说明的键：my-agent 正在补这批说明，补齐进 main 后收紧为空集（届时本测试会提示删掉）。
-_COMMON_KEYS_AWAITING_DESCRIPTION = {"memory_compact_auto_trigger_percent"}
+_COMMON_KEYS_AWAITING_DESCRIPTION: set[str] = set()
 
 
 def test_common_tier_is_a_closed_list_of_existing_non_boundary_parameters():
