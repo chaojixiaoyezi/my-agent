@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import gc
 import json
+import linecache
 import tracemalloc
 
 import pytest
@@ -44,6 +45,20 @@ def _seed_history(store, thread_id: str) -> list[str]:
     return ids
 
 
+# LLM: 解释器自己的字符串驻留表（sys.intern）在测量窗口内扩容时会一次性分配数 MB，与被测链路是否驻留旧历史无关；
+#   是否恰好在窗口内扩容取决于同一进程此前导入与运行过的测试（2026-09-27 全仓分片里技能扫描的 pathlib 驻留路径片段
+#   触发了一次 3.84MB 的扩容）。只扣除“由调用 sys.intern 的那一行分配”的记录，其余一律照算。
+# 函数用途: 统计摘要入口仍驻留、且属于被测链路的内存字节数。
+def _run_owned_bytes(snapshot: tracemalloc.Snapshot) -> int:
+    total = 0
+    for trace in snapshot.traces:
+        frame = trace.traceback[-1]
+        if "sys.intern(" in linecache.getline(frame.filename, frame.lineno):
+            continue
+        total += trace.size
+    return total
+
+
 # LLM: 只观测，不改变摘要结果：摘要辅助回复固定，业务 HTTP 只回一句完成并记录是否带当前任务。
 # 函数用途: 在第一次进入摘要时记录驻留内存与旧历史是否已解绑，并替换网络端。
 def _instrument(monkeypatch, host: str) -> dict:
@@ -52,7 +67,7 @@ def _instrument(monkeypatch, host: str) -> dict:
 
     def summarize(*args, **kwargs):
         if facts["entry_bytes"] is None:
-            facts["entry_bytes"] = tracemalloc.get_traced_memory()[0]
+            facts["entry_bytes"] = _run_owned_bytes(tracemalloc.take_snapshot())
             current = _HOST.get()
             recovery = getattr(current, "compact_recovery", current)
             facts["released"] = recovery.render_params.provider_history_messages == []
