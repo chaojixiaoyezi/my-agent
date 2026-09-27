@@ -70,6 +70,8 @@ class CapabilityConfig:
     skill_card_max_tokens: int = 0
     tool_card_max_tokens: int = 0
     skill_body_max_tokens: int = 0
+    # 加载时累积的告警（已删/未知键等）；只用于诊断展示，不参与路由判断。
+    config_warnings: list[str] = field(default_factory=list)
 
 
 def _coerce_bool(value: object, default: bool) -> bool:
@@ -110,9 +112,9 @@ def _coerce_capability_value(field_name: str, value: object) -> object:
 
 
 # LLM: 决策能力点严格校验，有限正秒数不沿用普通配额的零值约定；不授予新能力。
-# 函数用途: 加载原能力配置并拒绝未知字段或非法决策设置。
+# 函数用途: 加载原能力配置，已删/未知字段记告警并忽略，非法决策设置仍旧报错。
 def load_capability_config(config_path: str | Path) -> CapabilityConfig:
-    """加载能力路由配置；未知字段直接报错。"""
+    """加载能力路由配置；未知字段只记告警并忽略（与主配置一致），非法值仍报错。"""
 
     path = Path(config_path)
     if not path.exists():
@@ -122,8 +124,11 @@ def load_capability_config(config_path: str | Path) -> CapabilityConfig:
 
     raw.update(validate_config_decision_fields(raw, domain="capability"))
     allowed = set(CapabilityConfig.__dataclass_fields__.keys())
-    unknown = sorted(set(raw) - allowed)
-    if unknown:
-        raise ValueError(f"能力路由配置包含未知字段: {', '.join(unknown)}")
+    # 参数减量的约定：已删的键只告警、不迁移，也不能拦住加载；用户配置里残留旧键是常态。
+    config_warnings = [
+        f"unknown capability config key: {key!r}; ignored" for key in sorted(set(raw) - allowed)
+    ]
     clean = {key: _coerce_capability_value(key, value) for key, value in raw.items() if key in allowed}
-    return CapabilityConfig(**clean)
+    config = CapabilityConfig(**clean)
+    config.config_warnings = config_warnings
+    return config

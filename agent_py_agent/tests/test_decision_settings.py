@@ -384,10 +384,11 @@ def test_defaults_follow_original_config_domains_and_fractional_yaml(tmp_path):
     capability = tmp_path / "capability.yaml"
     capability.write_text("decision_skill_tool_mode: observe\n")
     assert load_capability_config(capability).decision_skill_tool_mode == "observe"
-    # 能力路由配置原本就拒绝未知字段；已删除的点位期限写在里面会被明确拒绝，而不是静默生效。
+    # 2026-09-27 起与主配置一致：已删除的点位期限写在能力配置里只告警并忽略，不再拒绝加载。
     capability.write_text("decision_skill_tool_timeout_seconds: 0.25\n")
-    with pytest.raises(ValueError, match="decision_skill_tool_timeout_seconds"):
-        load_capability_config(capability)
+    stale = load_capability_config(capability)
+    assert any("decision_skill_tool_timeout_seconds" in w for w in stale.config_warnings)
+    assert stale.decision_skill_tool_mode == "off"
     memory, _ = normalize_memory_settings({"memory_decision_curator_mode": "observe"})
     assert memory.memory_decision_curator_mode == "observe"
     # 按点位单独设期限只走用户长期设置覆盖层。

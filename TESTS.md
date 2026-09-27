@@ -1,5 +1,25 @@
 # 测试与发布验收
 
+## capability 配置遇到已删键只告警不拒绝（2026-09-27，用户插队派活，my-agent 实现）
+
+- **来源**：Codex 在私有环境发现——owner 的 `capability_config.yaml` 里只要还写着 13u 已删的决策点位键
+  （`*_timeout_seconds`、`*_profile_id`，即使值是空的），loader 就直接拒绝加载；而 agent 主配置对未知键只告警并忽略。
+  按参数减量的约定，已删的键应该"只告警、不迁移"，两边行为要一致。
+- **做法**：`agent/capability/config.py` 的 `load_capability_config` 不再对未知键 `raise ValueError`，改为把
+  `unknown capability config key: 'x'; ignored` 记进 `CapabilityConfig.config_warnings`（该 dataclass 新增
+  `config_warnings` 字段，只供诊断展示、不参与路由判断），已知键照常加载。**真校验没有放宽**：
+  `validate_config_decision_fields` 仍在过滤之前跑，仍是当前登记点位的字段值非法时照旧抛错；缺文件仍是
+  `FileNotFoundError`。已删键因不在当前点位登记表里，自然落进"未知键告警"这一条，两条路径互不越界。
+- **新测试**（`tests/test_capability_config_unknown_keys.py`，7 项）：已删决策键能加载且逐条告警（4 个键 → 4 条）；
+  已知键照常生效且不产生告警；已知+已删混写时各走各路；完全没见过的键也不拦加载；
+  仍是当前登记点位的字段值非法时照旧报错；已删键只走告警、不走点位校验；缺文件仍硬错误。
+- **改掉的旧用例**（3 处，均为"拒绝未知字段"的旧约定）：`test_capability_config.py`
+  `test_load_capability_config_unknown_fields_rejected`、`test_capability_config_class.py`
+  `test_load_capability_config_rejects_unknown_fields`（已改名为 `..._warns_on_unknown_fields`）、
+  `test_decision_settings.py` 里断言"已删点位期限会被明确拒绝"那段。现在断言告警并忽略。
+- **复现**：`cd agent_py_agent && python3 -m pytest tests/test_capability_config_unknown_keys.py -q`。
+- **变异**：把告警列表改回空（等同"吞掉不告警"），4 项告警用例失败，3 项回落/校验用例仍绿。
+
 ## handler 层路径拒绝改报权限码（2026-09-27，用户派活，my-agent 实现）
 
 - **来源**：dev 指出——父项目目录等路径先被路径门放行，再由工具自己的 `PathAccessPolicy` 拒绝，报的是

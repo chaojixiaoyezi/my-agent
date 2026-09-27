@@ -383,3 +383,9 @@ IM 管理员身份与聊天内审批已在分支 `claude/admin-identity` 本地�
 记忆关闭的12个保留例仅首轮完成，9领域例4例读包，自然稳定采用未达标；现有展示选择不等于自动加载正文，后续合同先评审。
 来源覆盖、许可、两个短剧包及异领域样包、官方模型多原生 TUI 与发布均按[唯一 TODO](tasks/CAPABILITY_INTERNALIZATION_GOAL.md)验收。
 不是修改模型权重；不宣称任意来源100%或自动融合。设计见[能力包合同](design/CAPABILITY_PACKS.md)。
+
+
+**capability 配置对已删键的处理已与主配置对齐（2026-09-27，`agent/capability/config.py`）**：原来 owner 的
+`capability_config.yaml` 里残留 13u 已删的决策点位键（`*_timeout_seconds`、`*_profile_id`，即使值为空）会让 loader
+直接拒绝加载；现在改为记进 `CapabilityConfig.config_warnings` 并忽略，已知键照常加载。真校验未放宽：仍是当前
+登记点位的字段值非法时照旧报错，缺文件仍 `FileNotFoundError`。

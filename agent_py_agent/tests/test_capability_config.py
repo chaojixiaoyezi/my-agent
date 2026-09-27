@@ -94,8 +94,10 @@ class TestLoadCapabilityConfig:
             path = Path(f.name)
 
         try:
-            with pytest.raises(ValueError, match="未知字段"):
-                load_capability_config(path)
+            # 2026-09-27 起与主配置一致：未知键只告警并忽略，不再拒绝加载（参数减量约定）。
+            config = load_capability_config(path)
+            assert any("unknown_field" in w for w in config.config_warnings)
+            assert config.enable_capability_routing is True
         finally:
             path.unlink()
 

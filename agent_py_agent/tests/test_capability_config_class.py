@@ -99,8 +99,8 @@ def test_load_capability_config_partial(tmp_path):
     assert config.capability_escalation_max_hops == 0
 
 
-def test_load_capability_config_rejects_unknown_fields(tmp_path):
-    """测试加载时拒绝未知字段。"""
+def test_load_capability_config_warns_on_unknown_fields(tmp_path):
+    """测试加载时未知字段只告警并忽略（2026-09-27 起与主配置一致）。"""
     config_file = tmp_path / "unknown.yaml"
     config_file.write_text(
         "enable_capability_routing: true\n"
@@ -109,8 +109,12 @@ def test_load_capability_config_rejects_unknown_fields(tmp_path):
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="未知字段"):
-        load_capability_config(config_file)
+    config = load_capability_config(config_file)
+
+    assert config.enable_capability_routing is True
+    assert {"unknown_field_xyz", "another_unknown"} == {
+        warning.split("'")[1] for warning in config.config_warnings
+    }
 
 
 def test_load_capability_config_empty_file(tmp_path):
