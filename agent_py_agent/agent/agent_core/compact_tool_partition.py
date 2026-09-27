@@ -165,6 +165,8 @@ def archive_ref_values_by_key(records: Iterable[Mapping[str, object]]) -> dict[o
     return result
 
 
+# LLM: 名字是 (call_id, 工具名) 二元组，只用来和孤儿回执、未知调用形状的名字比对，从而连带排除相关归档；它不是调用身份，
+#   不能代替四元键做来源选择或覆盖判断。工具名兼容归档的 tool / tool_name 两种字段；消费者只有本模块的分区与作证归档筛选。
 # 函数用途: 取原归档记录的 (call_id, 工具名)，供孤儿/未知调用名字比对。
 def _record_name(record: Mapping[str, object]) -> tuple[str, str]:
     return str(record.get("call_id") or ""), str(record.get("tool") or record.get("tool_name") or "")
