@@ -140,7 +140,7 @@ HTTP/IM/未知来源不能凭 rich transcript 获得私有路径展示，后台�
   命中时返回 base owner。控制作用域的两个 owner 解析入口经同一函数，所以请求与控制的结果一致。
 - 控制：`control_service` 把 `admin/approve/deny` 延迟分派给 `admin_control_service.py`，只用 base agent 的 home/config
   和 Gateway 队列，不构造 scoped Agent。`skills` 延迟分派给 `skill_control_service.py`（在 steer/stop 默认路径之前），
-  按 `resolve_gateway_scope_owner` 解析 owner，只读写该 owner 的技能提案与自动总结 Skill，回执不含本机路径。`settings` 延迟分派给 `settings_control_service.py`：同一 owner 解析，只有完整身份的本机 local/main（含已绑定管理员私聊）可用，读写走参数中心 `settings/parameter_registry.py` 与 `parameter_changes.py`，回执脱敏，普通异常不承诺“没有改动”；`show` 对登记了派生规则的参数（`applied_value`）按默认模型多给一行实际使用值，`set` 另附新值在默认模型上的实际效果（`applied_value_with`）。`control_operation_service.execute_gateway_control_operation` 在计算摘要、
+  按 `resolve_gateway_scope_owner` 解析 owner，只读写该 owner 的技能提案与自动总结 Skill，回执不含本机路径。`settings` 延迟分派给 `settings_control_service.py`：同一 owner 解析，只有完整身份的本机 local/main（含已绑定管理员私聊）可用，读写走参数中心 `settings/parameter_registry.py` 与 `parameter_changes.py`，回执脱敏，普通异常不承诺“没有改动”；`show` 对登记了派生规则的参数（`applied_value`）按默认模型多给一行“实际效果”，`set`/`reset`/`revert` 另附新值在默认模型上的实际效果（`parameter_changes.applied_after_change`）；回显脱敏只认 `is_credential_key`。`control_operation_service.execute_gateway_control_operation` 在计算摘要、
   写回执之前，用 `control_commands.persisted_control_command_text` 把密码换成 `******`；明文只随内存中的 command 交给执行服务。
 - 审批：`request_execution._gateway_request_interactive_approvals` 在客户端声明 `tool_approval`，或服务端核实为已绑定的
   管理员私聊且执行 owner 为本机管理员时，开启原 `StreamApproval`。`http_handlers._read_public_progress_events` 把

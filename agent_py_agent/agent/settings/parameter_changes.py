@@ -14,7 +14,7 @@ from uuid import uuid4
 
 from ..common.json_io import append_jsonl_capped, read_jsonl_objects_report
 from .config_io import set_simple_yaml_raw, unset_simple_yaml_value
-from .parameter_registry import ParameterSpec, parameter_registry
+from .parameter_registry import ParameterSpec, applied_value_with, parameter_registry
 from .user_config_capability import (
     BOUNDARY_KEYS,
     TUNABLE_KEYS,
@@ -215,6 +215,17 @@ def reset_parameter(key: object, *, user_path: Path | None, origin: ChangeOrigin
         return _failure(error)
     except (OSError, ValueError) as error:
         return _failure(ParameterChangeError("USER_CONFIG_WRITE_FAILED", f"写入失败：{error}"))
+
+
+# LLM: 只在回执 ok 且该参数登记了派生规则时给结果；新值取回执的 saved（恢复默认或回滚到默认时为 None，改用登记表默认值），
+#   交给 parameter_registry.applied_value_with 按同一派生规则算。config 决定按哪个模型算（调用方传）。只读。
+# 函数用途: 给修改、恢复默认、回滚的回执算出“新值在这个模型上的实际效果”。
+def applied_after_change(report: dict[str, object], config: object) -> tuple[object, str] | None:
+    spec = parameter_registry().get(str(report.get("key") or "")) if report.get("ok") else None
+    if spec is None:
+        return None
+    saved = report.get("saved")
+    return applied_value_with(spec.key, spec.default if saved is None else saved, config)
 
 
 # LLM: 坏行由 read_jsonl_objects_report 跳过；按时间倒序，key 为空时返回全部参数，limit 为 0 表示不限。只读。

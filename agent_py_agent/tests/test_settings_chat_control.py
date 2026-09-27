@@ -111,10 +111,10 @@ def test_show_reports_the_applied_output_cap_for_the_default_model(monkeypatch, 
     agent = SimpleNamespace(config=SimpleNamespace(
         config_path=str(user_config), max_tokens=65536, model_context_window_tokens=131072, request_timeout=300))
     shown = module.execute_settings_control(agent, _settings("/settings show max_tokens"), None)
-    assert shown.ok and "当前运行值：65536" in shown.message and "实际使用值：32768" in shown.message
+    assert shown.ok and "当前运行值：65536" in shown.message and "实际效果：32768" in shown.message
     assert "/model" in shown.message
     plain = module.execute_settings_control(agent, _settings("/settings show request_timeout"), None)
-    assert plain.ok and "实际使用值" not in plain.message
+    assert plain.ok and "实际效果" not in plain.message
 
 
 def test_boundary_and_unexpected_failures_are_reported_honestly(monkeypatch, user_config):
@@ -141,8 +141,14 @@ def test_set_and_show_tell_the_reasoning_effect_on_the_default_model(monkeypatch
     assert changed.ok and "已把 model_reasoning_effort 改为 max" in changed.message
     assert "按新值在默认模型上的实际效果：当前模型不支持调节" in changed.message and "/model" in changed.message
     shown = module.execute_settings_control(agent, _settings("/settings show model_reasoning_effort"), None)
-    assert "实际使用值：不额外发送推理参数" in shown.message  # 运行中的配置仍是 auto，重启后才按新值
+    assert "实际效果：不额外发送推理参数" in shown.message  # 运行中的配置仍是 auto，重启后才按新值
     capped = module.execute_settings_control(agent, _settings("/settings set max_tokens 32768"), None)
     assert "按新值在默认模型上的实际效果：32768" in capped.message
     plain = module.execute_settings_control(agent, _settings("/settings set request_timeout 200"), None)
     assert plain.ok and "实际效果" not in plain.message
+    reset = module.execute_settings_control(agent, _settings("/settings reset model_reasoning_effort"), None)
+    assert reset.ok and "按新值在默认模型上的实际效果：不额外发送推理参数" in reset.message
+    history = module.execute_settings_control(agent, _settings("/settings history model_reasoning_effort"), None)
+    change_id = history.message.splitlines()[1].split()[1]
+    reverted = module.execute_settings_control(agent, _settings(f"/settings revert {change_id}"), None)
+    assert reverted.ok and "现在是 max" in reverted.message and "实际效果：当前模型不支持调节" in reverted.message

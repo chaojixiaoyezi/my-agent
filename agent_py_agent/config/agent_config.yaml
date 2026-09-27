@@ -254,8 +254,10 @@ external_knowledge_directory_roots: []
 external_knowledge_api_sources: []
 external_knowledge_database_sources: []
 
-# 额外动态 prompt 文件
-additional_write_roots: []  # 沙箱额外可写根（任务 work/output 之外）；测试共享工作区等场景配置
+# 沙箱额外可写根（任务 work/output 之外），全局配置、对所有用户生效；测试共享工作区等场景配置。属于安全边界，模型不能改。
+additional_write_roots: []
+# 额外动态 prompt 文件：构建提示词时按顺序读取并拼进系统提示，builtin: 前缀指随包内置文件；隔离范围的子代理不读。
+# 会改变代理的指令，属于安全边界，模型不能改。
 prompt_files:
   - "builtin:prompts/default.md"
 
@@ -701,9 +703,10 @@ daemon_runner_instruction: ""
 
 # Gateway lease 心跳续期配置：
 # - lease_heartbeat_interval_seconds: worker 刷新一次 lease heartbeat 的间隔（默认 60 秒）。
-# - lease_stale_without_heartbeat_seconds: 超过此时间没有收到 heartbeat 就认为 lease 失效（默认 300 秒）。
-# - 这两个配置协同工作： heartbeat 定期刷新防止被误判为卡死，stale 检测确保真正卡死的请求能回收。
 lease_heartbeat_interval_seconds: 60
+# 审计来源采集 worker（/audit 保证档里负责采集来源的子代理）的时间上限，单位秒（默认 300）：
+# 单次模型尝试最多跑这么久（实际按 60～900 秒夹取），即使普通 runner 超时关闭也照样分片；
+# 同一值也是该 worker 租约文件的有效期（至少 30 秒），过期没续约就判定原 worker 已停、可以被接管。
 lease_stale_without_heartbeat_seconds: 300
 
 # 日志级别：重新加载配置后会应用到 agent_py_agent 包内 logger

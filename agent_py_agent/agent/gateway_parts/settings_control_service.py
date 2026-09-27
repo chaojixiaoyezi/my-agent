@@ -12,6 +12,7 @@ from ..conversation.control_commands import ConversationControlCommand, Conversa
 from ..settings.config_io import load_simple_yaml
 from ..settings.parameter_changes import (
     ChangeOrigin,
+    applied_after_change,
     parameter_history,
     reset_parameter,
     revert_change,
@@ -20,7 +21,6 @@ from ..settings.parameter_changes import (
 from ..settings.parameter_registry import (
     ParameterSpec,
     applied_value,
-    applied_value_with,
     parameter_registry,
     search_parameters,
 )
@@ -135,9 +135,9 @@ def _search(config: object, argument: str) -> str:
     return "\n".join(lines)
 
 
-# LLM: config 是 Gateway 启动配置，所以登记了派生规则的参数（如 max_tokens）按默认模型算实际使用值，并注明
+# LLM: config 是 Gateway 启动配置，所以登记了派生规则的参数（如 max_tokens、推理强度）按默认模型算实际效果，并注明
 #   /model 切换过的会话可能不同；派生公式只在参数中心 applied_value 背后的原权威位置。只读。
-# 函数用途: /settings show <参数名> —— 说明、默认值、当前运行值、实际使用值（有派生规则时）、用户配置里的值与能否修改。
+# 函数用途: /settings show <参数名> —— 说明、默认值、当前运行值、实际效果（有派生规则时）、用户配置里的值与能否修改。
 def _show(config: object, argument: str) -> str:
     spec = parameter_registry().get(argument)
     if spec is None:
@@ -148,7 +148,7 @@ def _show(config: object, argument: str) -> str:
     writable = (f"可以修改，{effect_text(spec.effect)}" if spec.writable
                 else f"不能在这里修改：{BOUNDARY_KEYS.get(spec.key, _BOUNDARY_TEXT)}")
     applied = applied_value(spec.key, config)
-    applied_line = ([f"实际使用值：{applied[0]}（{applied[1]}；按默认模型计算，用 /model 切换过的会话可能不同）"]
+    applied_line = ([f"实际效果：{applied[0]}（{applied[1]}；按默认模型计算，用 /model 切换过的会话可能不同）"]
                     if applied is not None else [])
     return "\n".join([
         f"{spec.key}（{spec.category}，{spec.value_type}）",
@@ -166,25 +166,29 @@ def _checked(report: dict[str, object]) -> dict[str, object]:
     return report
 
 
-# LLM: 登记了派生规则的参数再附一句“按新值在默认模型上的实际效果”（与 /settings show 同一口径：Gateway 启动配置即默认模型），
-#   让用户当下就知道改了是否真的起作用。有写文件副作用。
+# LLM: 与 /settings show 同一口径（Gateway 启动配置即默认模型）；只对登记了派生规则的参数有这句（applied_after_change）。只读。
+# 函数用途: 生成修改类回执末尾“按新值在默认模型上的实际效果”这一句，没有派生规则时为空串。
+def _applied_text(report: dict[str, object], config: object) -> str:
+    applied = applied_after_change(report, config)
+    return "" if applied is None else f"按新值在默认模型上的实际效果：{applied[0]}（{applied[1]}；用 /model 切换过的会话可能不同）"
+
+
+# LLM: 登记了派生规则的参数再附一句实际效果（_applied_text），让用户当下就知道改了是否真的起作用。有写文件副作用。
 # 函数用途: /settings set <参数名> <值> —— 修改一个参数并记账。
 def _set(config: object, argument: str) -> str:
     key, _, value = argument.partition(" ")
     report = _checked(set_parameter(key, value, user_path=_user_path(config), origin=_ORIGIN))
     previous = report.get("previous")
-    applied = applied_value_with(str(report["key"]), report.get("saved"), config)
-    applied_text = (f"按新值在默认模型上的实际效果：{applied[0]}（{applied[1]}；用 /model 切换过的会话可能不同）"
-                    if applied is not None else "")
     return (f"已把 {key} 改为 {report['saved']}（原来 {previous if previous is not None else '是默认值'}），"
-            f"记录编号 {str(report['change_id'])[:8]}。{report['effect_text']}{applied_text}")
+            f"记录编号 {str(report['change_id'])[:8]}。{report['effect_text']}{_applied_text(report, config)}")
 
 
-# 函数用途: /settings reset <参数名> —— 删除覆盖、恢复默认并记账。有写文件副作用。
+# LLM: 与 set 同一口径附实际效果（按默认值算）。有写文件副作用。
+# 函数用途: /settings reset <参数名> —— 删除覆盖、恢复默认并记账。
 def _reset(config: object, argument: str) -> str:
     report = _checked(reset_parameter(argument, user_path=_user_path(config), origin=_ORIGIN))
     return (f"已把 {argument} 恢复为默认值（原来 {report.get('previous')}），记录编号 {str(report['change_id'])[:8]}。"
-            f"{report['effect_text']}")
+            f"{report['effect_text']}{_applied_text(report, config)}")
 
 
 def _history_line(item: dict[str, object]) -> str:
@@ -203,11 +207,13 @@ def _history(config: object, argument: str) -> str:
                      + ["回滚一次修改：/settings revert <记录编号>"])
 
 
-# 函数用途: /settings revert <记录编号> —— 撤销一次修改并记账。有写文件副作用。
+# LLM: 与 set 同一口径附实际效果（按回滚后的值算，回到默认时按默认值）。有写文件副作用。
+# 函数用途: /settings revert <记录编号> —— 撤销一次修改并记账。
 def _revert(config: object, argument: str) -> str:
     report = _checked(revert_change(argument, user_path=_user_path(config), origin=_ORIGIN))
     now = report.get("saved") if report.get("saved") is not None else "默认值"
-    return f"已回滚记录 {argument}：{report['key']} 现在是 {now}，新记录编号 {str(report['change_id'])[:8]}。{report['effect_text']}"
+    return (f"已回滚记录 {argument}：{report['key']} 现在是 {now}，新记录编号 {str(report['change_id'])[:8]}。"
+            f"{report['effect_text']}{_applied_text(report, config)}")
 
 
 _HANDLERS: dict[str, Callable[[object, str], str]] = {

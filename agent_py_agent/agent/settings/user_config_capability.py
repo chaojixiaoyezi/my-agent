@@ -147,13 +147,23 @@ BOUNDARY_KEYS: dict[str, str] = {
     "my_agent_owner_id": "owner 身份解析，属于宿主控制面",
 }
 
-_SECRET_KEYS = frozenset({"feishu_app_secret", "feishu_verification_token", "feishu_encrypt_key"})
+# 凭据名只按键名最后的完整片段认：input_media_token_reserve 里的 token 是计数单位，max_tokens 是复数，都不是凭据
+_CREDENTIAL_SUFFIXES = ("api_key", "secret", "password", "token", "cookie", "cookies", "credential", "credentials", "encrypt_key")
 
 
-# 函数用途: 回显时对敏感项脱敏，不把明文写回终端、日志或模型上下文。
+# LLM: 参数中心登记表、聊天 /settings、user_config 与命令行 config-get 共用这一条凭据判定，不再各自维护名单；
+#   键名等于凭据名或以 `_凭据名` 结尾才算（完整片段，不按子串）。改规则须同步 test_parameter_registry 的脱敏用例。
+# 函数用途: 判断一个配置键是不是凭据（回显、记账都必须脱敏，也永远是安全边界）。
+def is_credential_key(key: object) -> bool:
+    text = str(key or "")
+    return any(text == name or text.endswith("_" + name) for name in _CREDENTIAL_SUFFIXES)
+
+
+# LLM: 只按 is_credential_key 判定；原先只认 3 个飞书键，api_key、gateway_auth_token 等会在 /settings 与 user_config 里明文回显。
+# 函数用途: 回显时对凭据脱敏，不把明文写回终端、日志或模型上下文。
 def mask_value(key: str, value: object) -> str:
     text = str(value or "")
-    if key in _SECRET_KEYS and text:
+    if is_credential_key(key) and text:
         return f"{text[:3]}***" if len(text) > 3 else "***"
     return text
 

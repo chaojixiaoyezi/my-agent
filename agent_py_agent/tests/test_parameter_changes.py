@@ -106,7 +106,7 @@ def test_tool_uses_the_loaded_config_file_and_exposes_the_parameter_center(tmp_p
     view = json.loads(tool.execute({"action": "view", "key": "max_tokens"}).output)
     assert view["user_config_path"] == str(path) and view["parameter"]["writable"] and view["parameter"]["running_value"] == "65536"
     assert "tunable" not in view["fact"]  # 能否修改只看登记表的 writable（旧白名单字段曾让模型误以为改不了）
-    assert view["parameter"]["applied_value"] == 65536  # 替身配置没有窗口，实际使用值等于配置值
+    assert view["parameter"]["applied_value"] == 65536  # 替身配置没有窗口，实际效果等于配置值
     agent.config.model_context_window_tokens = 131072
     narrowed = json.loads(tool.execute({"action": "view", "key": "max_tokens"}).output)["parameter"]
     assert narrowed["running_value"] == "65536" and narrowed["applied_value"] == 32768
@@ -135,5 +135,14 @@ def test_set_receipt_tells_the_new_value_effect_on_the_session_model(tmp_path, m
     agent.config.model_context_window_tokens = 131072
     capped = json.loads(tool.execute({"action": "set", "key": "max_tokens", "value": "65536"}).output)
     assert capped["applied_value"] == 32768
+    agent.config.model_context_window_tokens = 262144
+    tool.execute({"action": "set", "key": "max_tokens", "value": "16384"})
+    restored = json.loads(tool.execute({"action": "reset", "key": "max_tokens"}).output)
+    assert restored["saved"] is None and restored["applied_value"] == 65536  # 恢复默认按登记默认值 65536 计算
     plain = json.loads(tool.execute({"action": "set", "key": "request_timeout", "value": "200"}).output)
     assert plain["ok"] and "applied_value" not in plain
+    reset = json.loads(tool.execute({"action": "reset", "key": "model_reasoning_effort"}).output)
+    assert reset["saved"] is None and "不额外发送推理参数" in reset["applied_value"]  # 回到默认 auto
+    change_id = json.loads(tool.execute({"action": "history", "key": "model_reasoning_effort"}).output)["changes"][0]["id"]
+    reverted = json.loads(tool.execute({"action": "revert", "change_id": change_id}).output)
+    assert reverted["saved"] == "max" and "不改变请求" in reverted["applied_value"]  # 回滚这次恢复默认，回到 max

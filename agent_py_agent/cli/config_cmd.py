@@ -14,6 +14,7 @@ import argparse
 from pathlib import Path
 
 from agent_py_agent.agent.settings.config_io import load_simple_yaml, set_simple_yaml_value
+from agent_py_agent.agent.settings.user_config_capability import mask_value
 
 # 可自助设置的字段白名单:聚焦飞书通道接入。其他字段(尤其 path/access 等安全项)请手动编辑配置。
 _SETTABLE_KEYS = (
@@ -23,14 +24,6 @@ _SETTABLE_KEYS = (
     "feishu_encrypt_key",
     "feishu_callback_port",
 )
-# 回显需脱敏的敏感字段:别把凭证明文打回终端/日志。
-_SECRET_KEYS = ("feishu_app_secret", "feishu_verification_token", "feishu_encrypt_key")
-
-
-def _mask(key: str, value: str) -> str:
-    if key in _SECRET_KEYS and value:
-        return f"{value[:3]}***" if len(value) > 3 else "***"
-    return value
 
 
 def add_config_subcommands(sub: argparse._SubParsersAction) -> None:
@@ -58,8 +51,8 @@ def cmd_config_set(args) -> int:
     except ValueError as exc:
         print(f"❌ {exc}")
         return 1
-    before = _mask(key, (old or "").strip('"')) if old is not None else "(新增)"
-    print(f"✅ 已设置 {key}: {before} → {_mask(key, str(args.value))}\n   写入 {path}")
+    before = mask_value(key, (old or "").strip('"')) if old is not None else "(新增)"
+    print(f"✅ 已设置 {key}: {before} → {mask_value(key, str(args.value))}\n   写入 {path}")
     return 0
 
 
@@ -73,7 +66,7 @@ def cmd_config_get(args) -> int:
     if key not in data:
         print(f"(未设置) {key}")
         return 0
-    print(f"{key}: {_mask(key, str(data[key]))}")
+    print(f"{key}: {mask_value(key, str(data[key]))}")
     return 0
 
 

@@ -84,6 +84,10 @@ def test_cmd_config_get_masks_and_handles_missing(tmp_path, capsys) -> None:
     assert C.cmd_config_get(Namespace(key="feishu_app_secret", config=str(p))) == 0
     out = capsys.readouterr().out
     assert "abcdef123456" not in out and "abc***" in out  # get 也脱敏
+    set_simple_yaml_value(p, "api_key", "sk-fake-9876543210")
+    assert C.cmd_config_get(Namespace(key="api_key", config=str(p))) == 0
+    out = capsys.readouterr().out
+    assert "sk-fake-9876543210" not in out and "sk-***" in out  # 与参数中心同一凭据判定，原来只认 3 个飞书键
 
 
 def test_cmd_config_set_file_missing(tmp_path, capsys) -> None:

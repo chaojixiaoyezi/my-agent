@@ -1,5 +1,10 @@
 # Gateway 维护状态
 
+`/settings` 回执与脱敏补全（同一分支第二个提交，2026-09-27）：`show` 那一行由“实际使用值”改名为“实际效果”；`reset`、`revert`
+回执与 `set` 同一口径附“按新值在默认模型上的实际效果”（回到默认时按登记默认值算，`parameter_changes.applied_after_change`）；
+回显脱敏改用唯一的凭据判定 `user_config_capability.is_credential_key`，原先 `api_key`、`gateway_auth_token` 等 5 个凭据在
+`/settings show` 与 `search` 里是明文。回归见 `test_settings_chat_control.py`、`test_parameter_registry.py`。
+
 `/settings set` 附上新值的实际效果（分支 `claude/be-param-descriptions`，2026-09-27）：`settings_control_service._set` 对登记了派生规则的参数（`parameter_registry._APPLIED_RULES`：max_tokens、model_reasoning_effort）多一句“按新值在默认模型上的实际效果”，与 `show` 同一口径（Gateway 启动配置即默认模型，注明 /model 切换过的会话可能不同）；推理强度在不支持调节的模型上如实说“不改变请求”。计算经 `applied_value_with` 的只读新值视图，不另写判断；没有派生规则的参数回执不变。回归见 `test_settings_chat_control.py`。
 
 参数中心同名常数收敛（分支 `claude/param-center-dup-constants`，2026-09-27）：流式 chunk 单次读取上限只在

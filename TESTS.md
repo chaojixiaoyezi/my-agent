@@ -1,5 +1,25 @@
 # 测试与发布验收
 
+## 参数中心第二批：凭据脱敏与边界收紧、说明纠正、回执补全（2026-09-27，分支 `claude/be-param-descriptions` 第二个提交）
+
+- **来源**：集成者转来分类子代理的发现。`input_media_token_reserve` 等 8 个数量/上限参数因名字里有 token/prompt/path/owner/home/audit
+  被当成边界项（模型不能改），前者还被当成凭据（修改记录标脱敏、不能回滚）；`additional_write_roots` 拿到了 prompt_files 的说明；
+  `lease_stale_without_heartbeat_seconds` 的说明写成 Gateway 租约。复核时另发现：回显脱敏只认 3 个飞书键，`api_key`、
+  `gateway_auth_token`、`qq_app_secret`、两个 `*_embedding_api_key` 在 `/settings show`、user_config 查看与 `config-get` 里是明文。
+- **测试**：
+  - `test_parameter_registry.py`：14 个数字旋钮放开且显示真实值；8 个真凭据仍脱敏且是边界；凭据名只按完整末尾片段认；
+    名字像凭据的数字键仍是边界；路径、写入范围、飞书/QQ 凭据、owner 身份、访问锁、审计保留期等 20 个键仍是边界；
+    纠正后的三条说明与代码实际用途一致。
+  - `test_parameter_changes.py`：user_config 的 reset/revert 回执附实际效果，max_tokens 恢复默认按登记默认值算。
+  - `test_settings_chat_control.py`：标签改为“实际效果”，`/settings reset`、`revert` 回执附实际效果。
+  - `test_cli_config.py`：`config-get api_key` 脱敏。
+- **结果**：上述文件与 `test_reasoning_effort.py`、`test_architecture_guardrails.py`、`test_config_field_readers.py`、`test_user_config_*.py`、
+  `test_config_*.py`、`test_decision_audit_controls.py`、`test_admin_identity_*.py`、`test_gateway_status*.py` 等共 475 passed；
+  ruff、doc sync、strict code-size、`git diff --check`、clean-package 见提交前检查。
+- **变异验证**：本批 14 个全部被抓出（脱敏退回只认飞书键、凭据按子串认、指向类记号也拦数字、凭据不强制边界、“锁”降为指向类、
+  审计保留期移出名单、登记时不传值类型、`config-get` 不脱敏、prompt 注释放回错位、删掉审计 worker 说明、标签改回、
+  `/settings reset` 与 user_config reset/revert 不附效果、恢复默认用 None 算）；第一批 11 个在当前代码上重跑也全部被抓出。
+
 ## 参数中心：说明读行尾注释与推理强度如实生效值（2026-09-27，分支 `claude/be-param-descriptions`，基于 main `54a384147`）
 
 - **来源**：集成者派活。用户要求“不用猜参数是干啥的”，并按“把用户当什么都不懂来设计”：默认就合理，命令保留。

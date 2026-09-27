@@ -92,7 +92,8 @@
 - **查看补充（2026-09-27，来自 my-agent 在开发交流板的提问）**：
   - 配置值与实际使用值不同的参数，在登记表 `_APPLIED_RULES` 登记派生函数（max_tokens → `effective_max_output_tokens`；
     推理强度 `model_reasoning_effort` 见下一条），公式仍只在原处。`applied_value(key, config)` 给查看入口用：`user_config` 的 view/search 按本片会话模型给
-    `applied_value`/`applied_rule`，`/settings show` 按默认模型多一行“实际使用值”，并注明 /model 切换过的会话可能不同。
+    `applied_value`/`applied_rule`，`/settings show` 按默认模型多一行“实际效果”（原叫“实际使用值”，既显示数字也显示一句话，
+    2026-09-27 改名），并注明 /model 切换过的会话可能不同。
   - 删除 `read_config_fact` 里旧白名单遗留的 `tunable` 字段：模型同时看到 writable=true 与 tunable=false，误以为 max_tokens 改不了；
     能否修改只看登记表的 `writable`。
 - **说明与实际效果补充（2026-09-27，集成者派活，分支 `claude/be-param-descriptions`）**：
@@ -108,6 +109,27 @@
   - 修改回执：`applied_value_with(key, 新值, config)` 用只读视图把新值套进同一派生规则。`user_config` 的 set 回执多给
     `applied_value`/`applied_rule`/`applied_basis`（按本片会话模型），聊天 `/settings set` 多一句“按新值在默认模型上的实际效果”；
     只对 `_APPLIED_RULES` 里的键生效，没有专项分支。
+- **脱敏与边界收紧、说明纠正（2026-09-27，同一分支第二个提交，分类子代理发现、集成者派活）**：
+  - 凭据判定只有一处：`user_config_capability.is_credential_key`，键名等于凭据名或以 `_api_key/_secret/_password/_token/_cookie(s)/
+    _credential(s)/_encrypt_key` 结尾才算（完整片段，不按子串）。登记表 `is_masked`、`mask_value`（/settings、user_config 回显）与
+    命令行 `config-get` 都用它。复核时发现比误伤更严重的问题：原 `mask_value` 只认 3 个飞书键，`api_key`、`gateway_auth_token`、
+    `qq_app_secret`、两个 `*_embedding_api_key` 在 `/settings show` 与 user_config 查看里是明文；`config-get api_key` 也明文打印。
+    `input_media_token_reserve`（token 是计数单位）不再算凭据：原来它被判为边界，修改记录还标成凭据、不能回滚。
+  - 边界记号分两类：凭据、权限审批、管理员、访问与信任名单、网络与外部地址、端口、请求头回调、环境变量、锁仍对所有参数生效；
+    指向类记号（路径与目录、身份、服务与插件、提示词、审计、令牌与键）只对文本、列表、开关类参数生效——整数和小数只是上限、
+    超时、间隔或数量，不会指向任何东西。凭据键不论类型都是边界。`cli_audit_cleanup_days`（审计记录保留期，缩短会提前删掉审计证据）
+    显式列入边界名单；飞书私聊闲置锁定时长靠“锁”记号保持为边界。
+  - 前后差异：边界 107 → 93，移出 14 个数字旋钮（`background_owner_wake_rescan_seconds`、`background_owner_workers`、
+    `background_pending_wake_prompt_limit`、`background_threads_per_owner`、`cli_audit_limit`、`decision_model_selection_prompt_max_chars`、
+    `gateway_service_command_timeout_seconds`、`home_lesson_auto_read_limit`、`home_lesson_stale_caveat_days`、`input_media_token_reserve`、
+    `memory_resume_recommended_read_paths_limit`、`owner_agent_idle_seconds`、`owner_agent_pool_max_agents`、
+    `owner_maintenance_scan_interval_seconds`），没有新增；脱敏 9 → 8（只移出 `input_media_token_reserve`）；模型可改 287 → 301。
+    路径、写入范围、飞书/QQ 凭据、owner 身份、访问锁与审计保留期全部仍是边界，由测试逐项钉住。
+  - 说明纠正：“额外动态 prompt 文件”注释原先压在 `additional_write_roots` 上方，它拿到了 prompt_files 的说明、prompt_files 反而没有；
+    两个键各写对说明。`lease_stale_without_heartbeat_seconds` 原说明写成 Gateway 租约，实际管审计来源采集 worker：单次模型尝试
+    上限（夹在 60～900 秒）与 worker 租约有效期（至少 30 秒），按实际改写。空说明基线 177 → 175。
+  - 恢复默认与回滚的回执也附“按新值的实际效果”（`parameter_changes.applied_after_change`：回到默认时按登记默认值算），
+    与修改同一口径；`user_config` 的 reset/revert 回执同样多给 `applied_value/applied_rule/applied_basis`。
 - **阶段 3（迁移）**：按模块分批迁移常数并改名。每批开工前在协作文件贴出文件清单，避开 Codex 正在改的文件。
   - **第一批：同名常数（2026-09-27）**。盘点时 32 个常数名在多个文件各定义一份。
     - 删掉没有读取方的 `CONTEXT_WINDOW`（TUI 两份）与 `RECENT_ARCHIVE_FILE_LIMIT`（记忆诊断两份，实际读配置）。

@@ -1,6 +1,7 @@
 # LLM: 参数中心的只读登记表：每个 AgentConfig 字段一条（键、默认值、值类型、中文说明、分类、安全等级、是否脱敏、生效时机）。
 #   说明只取随包 agent_config.yaml：该键正上方的连续注释优先，没有再取该键的行尾注释（与加载器同一引号规则），不在代码里再写一份；
-#   说明为空的字段只允许留在 test_parameter_registry 的基线名单里。安全等级按显式名单与键名记号结构化判定，
+#   说明为空的字段只允许留在 test_parameter_registry 的基线名单里。安全等级按显式名单与键名记号结构化判定（指向类记号只对
+#   非数字参数生效，凭据按键名最后的完整片段认、与回显脱敏同一条规则），
 #   user_config_capability.TUNABLE_KEYS 可显式放行（如飞书凭据），BOUNDARY_KEYS 永远拒绝。分类只用于展示，未知前缀归“其它”，
 #   不参与任何放行判断。只读，不写文件、不调模型。改动须同步 parameter_changes.py、tooling/user_config_tool.py、
 #   gateway_parts/settings_control_service.py 与 test_parameter_registry.py。运行时还会按规则派生的参数（配置值不等于
@@ -20,30 +21,37 @@ from .user_config_capability import (
     BOUNDARY_KEYS,
     EFFECT_GATEWAY_RESTART,
     TUNABLE_KEYS,
+    is_credential_key,
     packaged_config_path,
 )
 
 SAFETY_FREE = "free"
 SAFETY_BOUNDARY = "boundary"
-# 键名按下划线切成记号，命中任一记号即为安全边界：凭据、权限与审批、身份、路径与目录、外部地址与端口、会起进程或加载代码的
-# 服务与插件、网络放行名单。宁可多拦：边界项只是模型不能改，用户仍可在宿主入口或配置文件里改。
+# 键名按下划线切成记号，命中任一记号即为安全边界：凭据、权限与审批、管理员、访问与信任名单、网络与外部地址、端口、
+# 请求头与回调、环境变量、锁（含飞书私聊闲置锁定这类访问控制时长）。宁可多拦：边界项只是模型不能改，用户仍可在宿主入口或配置文件里改。
 _BOUNDARY_TOKENS = frozenset({
-    "secret", "token", "password", "encrypt", "credential", "credentials", "cookie", "cookies", "key", "keys", "env",
-    "sandbox", "permission", "permissions", "approval", "approvals", "auth", "admin", "owner", "access", "trusted",
-    "dangerous", "allowed", "allow", "deny", "denied", "root", "roots", "dir", "dirs", "path", "paths", "home",
-    "workspace", "workspaces", "worktree", "worktrees", "command", "commands", "server", "servers", "plugin", "plugins", "extension",
-    "extensions", "proxy", "host", "hosts", "port", "endpoint", "url", "urls", "network", "egress", "expose", "listen",
-    "header", "headers", "webhook", "callback", "app", "provider", "prompt", "prompts", "instruction", "audit", "lock",
+    "secret", "password", "encrypt", "credential", "credentials", "cookie", "cookies", "env",
+    "sandbox", "permission", "permissions", "approval", "approvals", "auth", "admin", "access", "trusted",
+    "dangerous", "allowed", "allow", "deny", "denied", "proxy", "host", "hosts", "port", "endpoint", "url", "urls",
+    "network", "egress", "expose", "listen", "header", "headers", "webhook", "callback", "lock",
 })
-_SECRET_TOKENS = frozenset({"secret", "token", "password", "encrypt", "credential", "credentials", "cookie", "cookies"})
-# 记号规则覆盖不到、但会改变模型流量去向、请求协议、执行权威链、工具可用性、写入保护、特权动作频率或桌面控制的键，
-# 以及加载器写入的内部元数据（不是用户参数）。
+# 指向某处或某种能力的记号（路径与目录、身份、会起进程或加载代码的服务与插件、提示词、审计、令牌与键）：只对文本、列表、
+# 开关类参数算边界；整数和小数只是上限、超时、间隔或数量，不会指向任何东西，不因名字里有 path/owner/prompt/token 被拦
+# （原来 input_media_token_reserve、cli_audit_limit、background_owner_workers 等因此被误判为边界）。
+_TARGET_TOKENS = frozenset({
+    "token", "key", "keys", "root", "roots", "dir", "dirs", "path", "paths", "home", "workspace", "workspaces",
+    "worktree", "worktrees", "command", "commands", "server", "servers", "plugin", "plugins", "extension", "extensions",
+    "app", "provider", "prompt", "prompts", "instruction", "audit", "owner",
+})
+# 记号规则覆盖不到、但会改变模型流量去向、请求协议、执行权威链、工具可用性、写入保护、特权动作频率、审计记录保留期
+# （cli_audit_cleanup_days 缩短会提前删掉审计证据）或桌面控制的键，以及加载器写入的内部元数据（不是用户参数）。
 _BOUNDARY_NAMES = frozenset({
     "api_base", "api_key", "model_backend", "computer_use_enabled", "execution_mode", "user_id", "system_prompt",
     "enable_tools", "enable_gateway_restart_tool", "enable_model_profile_tool", "gateway_restart_cooldown_seconds",
     "result_check_execute_tests", "daemon_mutate_state", "daemon_start_runners", "external_knowledge_api_sources",
     "external_knowledge_database_sources", "external_knowledge_index_file_name",
     "config_layers", "config_sources", "config_warnings", "memory_config_warnings", "protect_running_runtime",
+    "cli_audit_cleanup_days",
 })
 _CATEGORIES = (
     (("max_tokens", "model_", "temperature", "top_p", "request_timeout", "stream_", "reasoning_", "anthropic_"), "模型请求"),
@@ -75,17 +83,22 @@ class ParameterSpec:
         return self.key not in BOUNDARY_KEYS and (self.safety == SAFETY_FREE or self.key in TUNABLE_KEYS)
 
 
-# LLM: 显式名单优先：BOUNDARY_KEYS 与 _BOUNDARY_NAMES 一定是边界；其余按键名记号判定。TUNABLE_KEYS 的放行在 writable 里处理。
+# LLM: 显式名单与凭据优先：BOUNDARY_KEYS、_BOUNDARY_NAMES、接口地址与凭据键（is_masked）一定是边界；其余按键名记号判定，
+#   _TARGET_TOKENS 只对非数字参数生效（value_type 为 int/float 时不按指向类记号拦），缺省按非数字处理（更严）。
+#   TUNABLE_KEYS 的放行在 writable 里处理。
 # 函数用途: 判定一个配置键的安全等级。
-def classify_safety(key: str) -> str:
-    if key in BOUNDARY_KEYS or key in _BOUNDARY_NAMES or key.endswith(("api_base", "_url")):
+def classify_safety(key: str, value_type: str = "") -> str:
+    if key in BOUNDARY_KEYS or key in _BOUNDARY_NAMES or key.endswith(("api_base", "_url")) or is_masked(key):
         return SAFETY_BOUNDARY
-    return SAFETY_BOUNDARY if set(key.split("_")) & _BOUNDARY_TOKENS else SAFETY_FREE
+    tokens = _BOUNDARY_TOKENS if value_type in {"int", "float"} else _BOUNDARY_TOKENS | _TARGET_TOKENS
+    return SAFETY_BOUNDARY if set(key.split("_")) & tokens else SAFETY_FREE
 
 
+# LLM: 与 /settings、user_config、命令行 config-get 的回显脱敏同一条判定（user_config_capability.is_credential_key），
+#   按完整片段认凭据名，不按子串。
 # 函数用途: 判断一个键的值在回显和账本里是否必须脱敏。
 def is_masked(key: str) -> bool:
-    return bool(set(key.split("_")) & _SECRET_TOKENS) or key.endswith("api_key")
+    return is_credential_key(key)
 
 
 # 函数用途: 按键名前缀给参数一个展示分类，未知前缀归“其它”。
@@ -135,10 +148,11 @@ def parameter_registry() -> dict[str, ParameterSpec]:
     for item in fields(AgentConfig):
         default = item.default if item.default is not MISSING else (
             item.default_factory() if item.default_factory is not MISSING else None)
+        value_type = _value_type(default, item.type)
         registry[item.name] = ParameterSpec(
-            key=item.name, default=default, value_type=_value_type(default, item.type),
+            key=item.name, default=default, value_type=value_type,
             description=descriptions.get(item.name, ""), category=category_for(item.name),
-            safety=classify_safety(item.name), masked=is_masked(item.name),
+            safety=classify_safety(item.name, value_type), masked=is_masked(item.name),
             effect=TUNABLE_KEYS[item.name].effect if item.name in TUNABLE_KEYS else EFFECT_GATEWAY_RESTART,
         )
     return registry

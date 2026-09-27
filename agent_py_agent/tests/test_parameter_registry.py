@@ -25,10 +25,16 @@ from agent_py_agent.agent.settings.parameter_registry import (
     _descriptions_from_lines,
     applied_value,
     applied_value_with,
+    classify_safety,
     parameter_registry,
     search_parameters,
 )
-from agent_py_agent.agent.settings.user_config_capability import BOUNDARY_KEYS, TUNABLE_KEYS
+from agent_py_agent.agent.settings.user_config_capability import (
+    BOUNDARY_KEYS,
+    TUNABLE_KEYS,
+    is_credential_key,
+    mask_value,
+)
 
 _BASELINE = Path(__file__).parent / "fixtures" / "parameter_description_baseline.json"
 _OPENCODE = {"api_base": "https://opencode.ai/zen/v1", "model_backend": "openai_compatible", "model_reasoning_control": "auto"}
@@ -83,7 +89,7 @@ def test_applied_value_with_uses_the_new_value_without_touching_the_config():
 
 
 def test_applied_value_uses_the_single_output_cap_formula():
-    """64K 在 128K 窗口模型上实际是 32768；窗口未知时等于配置值；没有派生规则的参数不给实际使用值。"""
+    """64K 在 128K 窗口模型上实际是 32768；窗口未知时等于配置值；没有派生规则的参数不给实际效果。"""
     value, rule = applied_value("max_tokens", SimpleNamespace(max_tokens=65536, model_context_window_tokens=131072))
     assert value == 32768 and "窗口" in rule
     assert applied_value("max_tokens", SimpleNamespace(max_tokens=65536, model_context_window_tokens=0))[0] == 65536
@@ -135,3 +141,61 @@ def test_applied_value_with_hands_the_rule_the_loaded_type(monkeypatch):
 
     monkeypatch.setitem(registry._APPLIED_RULES, "max_tokens", (lambda config: type(config.max_tokens).__name__, "类型"))
     assert applied_value_with("max_tokens", "65536", SimpleNamespace(max_tokens=1)) == ("int", "类型")
+
+
+# 名字里带 token/prompt/path/owner/home/audit/command，但只是数量、上限、间隔或超时的参数（2026-09-27 前被误判为边界）
+_NUMERIC_KNOBS = [
+    "input_media_token_reserve", "background_pending_wake_prompt_limit", "decision_model_selection_prompt_max_chars",
+    "memory_resume_recommended_read_paths_limit", "home_lesson_auto_read_limit", "home_lesson_stale_caveat_days",
+    "cli_audit_limit", "background_owner_workers", "background_owner_wake_rescan_seconds", "background_threads_per_owner",
+    "gateway_service_command_timeout_seconds", "owner_agent_idle_seconds", "owner_agent_pool_max_agents",
+    "owner_maintenance_scan_interval_seconds",
+]
+_CREDENTIALS = ["api_key", "memory_embedding_api_key", "tool_embedding_api_key", "gateway_auth_token", "feishu_app_secret",
+                "feishu_verification_token", "feishu_encrypt_key", "qq_app_secret"]
+
+
+@pytest.mark.parametrize("key", _NUMERIC_KNOBS)
+def test_numeric_knobs_with_pointer_like_names_are_free_and_shown_in_full(key):
+    spec = parameter_registry()[key]
+    assert spec.value_type in {"int", "float"} and spec.safety != SAFETY_BOUNDARY and spec.writable and not spec.masked
+    assert mask_value(key, 1600) == "1600"
+
+
+@pytest.mark.parametrize("key", _CREDENTIALS)
+def test_real_credentials_stay_masked_boundary_everywhere(key):
+    spec = parameter_registry()[key]
+    assert spec.masked and spec.safety == SAFETY_BOUNDARY and is_credential_key(key)
+    assert mask_value(key, "FAKE-1234567890") == "FAK***"  # 原来 api_key、gateway_auth_token 等在回显里是明文
+
+
+def test_credential_names_match_whole_trailing_segments_only():
+    assert all(is_credential_key(key) for key in ("token", "new_service_api_key", "bot_token", "smtp_password", "x_cookies"))
+    assert not any(is_credential_key(key) for key in ("max_tokens", "input_media_token_reserve", "token_budget",
+                                                      "model_context_window_tokens", "keyboard_shortcuts", "api_keys_count"))
+    # 凭据名即使是数字类型也仍是边界（不因“数字不指向任何东西”被放开）
+    assert classify_safety("bot_token", "int") == SAFETY_BOUNDARY and classify_safety("bot_token_limit", "int") != SAFETY_BOUNDARY
+
+
+@pytest.mark.parametrize("key", [
+    "additional_write_roots", "prompt_files", "system_prompt", "my_agent_home", "self_dev_worktree", "path_dangerous_roots",
+    "my_agent_owner_provider", "my_agent_owner_kind", "my_agent_owner_id", "feishu_app_id", "feishu_app_secret",
+    "feishu_verification_token", "feishu_encrypt_key", "qq_app_id", "qq_app_secret", "gateway_port",
+    "feishu_personal_idle_lock_seconds", "cli_audit_cleanup_days", "task_lock_timeout_seconds", "mcp_servers",
+])
+def test_paths_write_scope_channel_credentials_and_owner_identity_stay_boundary(key):
+    """收紧只放开数字类旋钮：路径、写入范围、飞书/QQ 凭据、owner 身份、访问锁与审计保留期仍是边界（飞书凭据另有显式放行）。"""
+    spec = parameter_registry()[key]
+    assert spec.safety == SAFETY_BOUNDARY
+    assert spec.writable is (key in TUNABLE_KEYS and key not in BOUNDARY_KEYS)
+
+
+
+def test_corrected_descriptions_say_what_the_code_does():
+    """注释错位曾让 additional_write_roots 拿到 prompt_files 的说明；lease_stale 实际管审计来源采集 worker，不是 Gateway 租约。"""
+    registry = parameter_registry()
+    roots = registry["additional_write_roots"].description
+    assert "可写根" in roots and "prompt" not in roots
+    assert "prompt 文件" in registry["prompt_files"].description
+    lease = registry["lease_stale_without_heartbeat_seconds"].description
+    assert "审计来源采集 worker" in lease and "租约" in lease and "Gateway" not in lease
