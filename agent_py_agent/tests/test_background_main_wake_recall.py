@@ -265,8 +265,6 @@ def test_supervisor_ticks_scoped_owner_wake_and_delivers(tmp_path) -> None:
         enable_tools=False,
         memory_path="memory.jsonl",
         gateway_per_user_owner_scoping=True,
-        gateway_request_poll_interval=1,
-        gateway_heartbeat_interval=5,
         my_agent_home=str(tmp_path / "home"),
     )
     base_agent = SimpleAgent(config, tmp_path)
@@ -315,7 +313,7 @@ def test_supervisor_single_owner_only_ticks_base(tmp_path) -> None:
     from agent_py_agent.cli.models import GatewayRunContext
 
     base_agent = SimpleAgent(
-        AgentConfig(enable_tools=False, memory_path="memory.jsonl", gateway_request_poll_interval=1, gateway_heartbeat_interval=5),
+        AgentConfig(enable_tools=False, memory_path="memory.jsonl"),
         tmp_path,
     )
     base_agent.backend = _CapturingBackend()

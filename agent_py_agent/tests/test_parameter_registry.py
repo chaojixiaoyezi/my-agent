@@ -173,8 +173,8 @@ def test_applied_value_with_hands_the_rule_the_loaded_type(monkeypatch):
 _NUMERIC_KNOBS = [
     "input_media_token_reserve", "decision_model_selection_prompt_max_chars",
     "memory_resume_recommended_read_paths_limit", "home_lesson_stale_caveat_days",
-    "background_owner_workers", "background_owner_wake_rescan_seconds", "background_threads_per_owner",
-    "gateway_service_command_timeout_seconds", "owner_agent_idle_seconds", "owner_agent_pool_max_agents",
+    "background_owner_workers", "background_threads_per_owner",
+    "owner_agent_idle_seconds", "owner_agent_pool_max_agents",
     "owner_maintenance_scan_interval_seconds",
 ]
 _CREDENTIALS = ["api_key", "embedding_api_key", "gateway_auth_token", "feishu_app_secret",

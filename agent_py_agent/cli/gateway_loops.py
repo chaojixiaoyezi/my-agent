@@ -29,6 +29,7 @@ from ..agent.gateway_parts import (
     write_json_file,
 )
 from ..agent.gateway_parts.input_delivery_service import reconcile_gateway_input_receipts
+from ..agent.gateway_parts.lease_service import GATEWAY_HEARTBEAT_INTERVAL_SECONDS
 from ..agent.gateway_parts.queue_service import GatewayClaim
 from ..agent.gateway_parts.recovery import repair_gateway_terminal_projections
 from ..agent.gateway_parts.request_worker import (
@@ -59,6 +60,12 @@ from ..agent.user_space.owner_resolver import (
 from .gateway_lane_retry import BackgroundLaneRetry
 from .models import GatewayRunContext
 
+# 参数减量第 3 批 B 组（2026-09-27）：后台车道的三个节奏不再是配置项（原 gateway_request_poll_interval /
+# background_main_error_backoff_seconds / background_owner_wake_rescan_seconds），值不变；心跳节奏见 lease_service。
+GATEWAY_REQUEST_POLL_INTERVAL_SECONDS = 0.2  # request worker 空闲时多久检查一次 pending
+BACKGROUND_MAIN_ERROR_BACKOFF_SECONDS = 30.0  # 后台普通宿主异常按 owner/thread 冷却多久再重试
+BACKGROUND_OWNER_WAKE_RESCAN_SECONDS = 120.0  # 磁盘级 owner 唤醒发现整轮扫完后休眠多久
+
 
 # LLM: GatewayRunContext owns the one long-lived base-agent composition root; every base-owner controller and request lane must reuse it, while owner-scoped isolation remains delegated to OwnerScopedAgentPool.
 # 函数用途: 取得 Gateway 启动时已经初始化好的基础智能体，禁止后台线程再次加载配置并构造整套智能体。
@@ -78,7 +85,7 @@ def _gateway_request_loop(context: GatewayRunContext, paths: GatewayPaths, stop_
     except Exception as exc:
         _print_gateway_loop_error("gateway_request_pool.initialize", "pool", exc)
         return
-    poll_interval = _gateway_request_poll_interval(dispatcher.bootstrap_agent)
+    poll_interval = GATEWAY_REQUEST_POLL_INTERVAL_SECONDS
     while not stop_event.is_set():
         if dispatcher.tick():
             continue
@@ -492,11 +499,9 @@ class _BackgroundThreadLaneSupervisorMixin:
             return False
 
     # LLM: 执行异常与恢复检查异常共用 typed 退避及脱敏日志，不修改持久 wake、claim 或 Goal。
-    # 函数用途: 记录精确失败车道和恢复条件，普通错误沿用用户配置的冷却时间。
+    # 函数用途: 记录精确失败车道和恢复条件，普通错误按代码常量 BACKGROUND_MAIN_ERROR_BACKOFF_SECONDS 冷却。
     def _record_thread_failure(self, label: str, thread_id: str, exc: Exception) -> None:
-        config = self._base_agent.config
-        delay = max(0.0, float(config.background_main_error_backoff_seconds))
-        self._lane_retry.failed(label, thread_id, exc, delay=delay)
+        self._lane_retry.failed(label, thread_id, exc, delay=BACKGROUND_MAIN_ERROR_BACKOFF_SECONDS)
         _print_gateway_loop_error(
             "gateway_background_main.iteration", f"background-main:{label}:{thread_id}", exc,
         )
@@ -606,7 +611,7 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
         self._base_agent = _gateway_agent_from_context(context)
         self._channels = self._base_agent.delivery_service
         self._base_scheduler = _build_background_scheduler(self._base_agent, self._channels)
-        self.poll_interval = _background_main_poll_interval(self._base_agent)
+        self.poll_interval = _background_main_poll_interval()
         self._registry = shared_active_owner_registry(context.agent)
         self._owner_pool: object | None = None
         self._owner_schedulers: dict[int, BackgroundMainAgentScheduler] = {}
@@ -623,7 +628,7 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
         # LRU 会逐出,且只有新入站请求才补记;长盯守非阻塞挂起期恰恰没有新请求 →
         # scoped owner 的到点 policy 从此无人消费。这里启动即扫一次、之后按间隔重扫,
         # 把磁盘上「有 enabled policy / 待处理唤醒信号」的 owner 种回登记表,重启自愈。
-        self._wake_rescan_interval = _wake_rescan_interval_seconds(self._base_agent)
+        self._wake_rescan_interval = BACKGROUND_OWNER_WAKE_RESCAN_SECONDS
         self._next_wake_rescan_at = 0.0
         self._wake_discovery_cursor: OwnerWakeCursor | None = None
         # Named Audit harvesters live inside the Gateway process. A clean
@@ -1270,7 +1275,7 @@ class _GatewaySchedulerDueController:
         self._due_index = due_index or SchedulerDueIndex(
             self._base_agent.home_paths.global_index_dir / "scheduler_due.sqlite3"
         )
-        self.interval = _background_main_poll_interval(self._base_agent)
+        self.interval = _background_main_poll_interval()
         pool_limit = _positive_int_config(
             self._base_agent,
             "owner_agent_pool_max_agents",
@@ -1596,11 +1601,6 @@ def _record_background_main_reports(agent: SimpleAgent, reports: list[object]) -
         )
 
 
-def _wake_rescan_interval_seconds(agent: SimpleAgent) -> float:
-    value = _float_config(agent, "background_owner_wake_rescan_seconds", default=120.0)
-    return max(0.0, value)
-
-
 # LLM: Pagination remains bounded per controller tick, while an unfinished discovery cycle must
 # not inherit the long steady-state rescan delay between adjacent pages.
 # 函数用途: 决定 owner 磁盘发现下一次运行时间；有后页就下个 tick 继续，整轮扫完才按配置休眠。
@@ -1621,14 +1621,11 @@ def _positive_int_config(agent: SimpleAgent, key: str, *, default: int) -> int:
     return parsed if parsed > 0 else default
 
 
-def _background_main_poll_interval(agent: SimpleAgent) -> float:
-    request_interval = _float_config(agent, "gateway_request_poll_interval", default=1.0)
-    heartbeat_interval = _float_config(agent, "gateway_heartbeat_interval", default=5.0)
-    return max(1.0, min(5.0, request_interval, heartbeat_interval))
-
-
-def _gateway_request_poll_interval(agent: SimpleAgent) -> float:
-    return max(0.05, _float_config(agent, "gateway_request_poll_interval", default=0.2))
+# LLM: 后台主循环与调度器唤醒控制器的 tick 节奏只由两个代码常量推导（请求轮询与心跳取小，夹在 1～5 秒），不再读配置；
+#   两处调用方都用它再推导 lease 秒数，改公式要一起看。
+# 函数用途: 算后台主循环每拍等多久（默认算出 1 秒）。
+def _background_main_poll_interval() -> float:
+    return max(1.0, min(5.0, GATEWAY_REQUEST_POLL_INTERVAL_SECONDS, GATEWAY_HEARTBEAT_INTERVAL_SECONDS))
 
 
 def _float_config(agent: SimpleAgent, key: str, *, default: float) -> float:
@@ -1657,6 +1654,9 @@ class _RecoverThrottle:
         return True
 
 
+# LLM: 心跳文件写入循环：节奏是 lease_service.GATEWAY_HEARTBEAT_INTERVAL_SECONDS（至少 1 秒），写失败只记日志不退出；
+#   载荷字段与代际锚点见 _write_gateway_heartbeat。
+# 函数用途: Gateway 主进程的心跳线程主体，stop_event 置位后退出。
 def _gateway_heartbeat_loop(context: GatewayRunContext, stop_event: threading.Event) -> None:
     paths = context.paths
     agent = context.agent
@@ -1667,7 +1667,7 @@ def _gateway_heartbeat_loop(context: GatewayRunContext, stop_event: threading.Ev
             _write_gateway_heartbeat(paths, agent, status="running", pid=os.getpid())
         except Exception as exc:
             _print_gateway_loop_error("gateway_heartbeat.write", "heartbeat", exc)
-        stop_event.wait(max(1, agent.config.gateway_heartbeat_interval))
+        stop_event.wait(max(1, GATEWAY_HEARTBEAT_INTERVAL_SECONDS))
 
 
 # LLM: 心跳是本代"HTTP 已 bind 并可服务"的发布信号，所以它必须带代际锚点 started_at（语义与 state 的

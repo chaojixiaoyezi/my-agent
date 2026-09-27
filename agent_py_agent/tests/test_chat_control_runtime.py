@@ -486,7 +486,7 @@ def test_local_verbose_is_system_control_without_model_call(tmp_path) -> None:
     agent.run.assert_not_called()
 
 
-def test_gateway_control_uses_configured_service_command_timeout(monkeypatch) -> None:
+def test_gateway_control_uses_the_service_command_timeout_constant(monkeypatch) -> None:
     response = MagicMock()
     response.__enter__.return_value.read.return_value = (
         b'{"ok": true, "message": "status", "request_id": ""}'
@@ -496,13 +496,11 @@ def test_gateway_control_uses_configured_service_command_timeout(monkeypatch) ->
         "agent_py_agent.cli.chat_parts.control_runtime.urllib.request.urlopen",
         urlopen,
     )
+    monkeypatch.setattr(
+        "agent_py_agent.cli.chat_parts.control_runtime.GATEWAY_SERVICE_COMMAND_TIMEOUT_SECONDS", 37.0
+    )
     execution = ChatControlExecution(
-        SimpleNamespace(
-            config=SimpleNamespace(
-                gateway_port=8420,
-                gateway_service_command_timeout_seconds=37,
-            )
-        ),
+        SimpleNamespace(config=SimpleNamespace(gateway_port=8420)),
         True,
         ChatControlState(False, 0, "", 0.0, "session-status"),
     )
@@ -527,10 +525,7 @@ def test_gateway_btw_carries_stable_identity_and_exact_turn(monkeypatch) -> None
     )
     execution = ChatControlExecution(
         SimpleNamespace(
-            config=SimpleNamespace(
-                gateway_port=8420,
-                gateway_service_command_timeout_seconds=37,
-            )
+            config=SimpleNamespace(gateway_port=8420)
         ),
         True,
         ChatControlState(
@@ -590,10 +585,7 @@ def test_scoped_gateway_tui_control_and_receipt_keep_owner_identity(
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
     client = GatewayChatClientAgent(
         SimpleNamespace(),
-        SimpleNamespace(
-            gateway_port=18420,
-            gateway_service_command_timeout_seconds=4,
-        ),
+        SimpleNamespace(gateway_port=18420),
         tmp_path,
         [tmp_path],
         SimpleNamespace(),
@@ -626,7 +618,7 @@ def test_scoped_gateway_tui_control_and_receipt_keep_owner_identity(
     assert post_headers["x-user-id"] == get_headers["x-user-id"] == "alice"
     assert post_headers["x-channel"] == get_headers["x-channel"] == "tui-test"
     assert get_headers["x-conversation-id"] == "same-session"
-    assert post_timeout == 10.0
+    assert post_timeout == 30.0
     assert get_timeout == 2.0
     assert submitted.ok is True
     assert reconciled.operation_id == "gwctl-owner"
@@ -647,11 +639,7 @@ def test_gateway_control_transport_retry_reuses_one_message_id(monkeypatch) -> N
     )
     execution = ChatControlExecution(
         SimpleNamespace(
-            config=SimpleNamespace(
-                gateway_port=8420,
-                gateway_service_command_timeout_seconds=2,
-                request_timeout=2,
-            )
+            config=SimpleNamespace(gateway_port=8420, request_timeout=2)
         ),
         True,
         ChatControlState(False, 0, "", 0.0, "session-retry"),
@@ -742,11 +730,7 @@ def test_gateway_manual_compact_timeout_covers_one_provider_call(monkeypatch) ->
     )
     execution = ChatControlExecution(
         SimpleNamespace(
-            config=SimpleNamespace(
-                gateway_port=8420,
-                gateway_service_command_timeout_seconds=37,
-                request_timeout=240,
-            )
+            config=SimpleNamespace(gateway_port=8420, request_timeout=240)
         ),
         True,
         ChatControlState(False, 0, "", 0.0, "session-compact"),

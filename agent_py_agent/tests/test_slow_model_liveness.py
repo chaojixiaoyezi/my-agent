@@ -33,6 +33,7 @@ from agent_py_agent.agent.agent_core.tool_model_generation import (
 )
 from agent_py_agent.agent.backends import ProviderTimeoutError
 from agent_py_agent.agent.concurrency.interrupt import set_interrupt
+from agent_py_agent.agent.gateway_parts import lease_service
 from agent_py_agent.agent.gateway_parts.lease_service import start_lease_heartbeat
 from agent_py_agent.cli.chat_parts.gateway_client import (
     GatewayChunkPollRequest,
@@ -272,7 +273,7 @@ def test_late_heartbeat_after_stall_does_not_resurrect_dead_wait(tmp_path) -> No
 # --------------------------------------------------------------------------------------
 # ③ 服务端租约心跳:静默期持续推进(进程存活不等于健康,但推进必须被看见)
 # --------------------------------------------------------------------------------------
-def test_lease_heartbeat_advances_without_display_activity(tmp_path) -> None:
+def test_lease_heartbeat_advances_without_display_activity(tmp_path, monkeypatch) -> None:
     request_path = tmp_path / "req.json"
     request_path.write_text(
         json.dumps(
@@ -286,12 +287,8 @@ def test_lease_heartbeat_advances_without_display_activity(tmp_path) -> None:
         ),
         encoding="utf-8",
     )
-    agent = SimpleNamespace(
-        config=SimpleNamespace(
-            gateway_heartbeat_interval=0.05,
-            gateway_processing_timeout_seconds=0,
-        )
-    )
+    monkeypatch.setattr(lease_service, "GATEWAY_HEARTBEAT_INTERVAL_SECONDS", 0.05)
+    agent = SimpleNamespace(config=SimpleNamespace(gateway_processing_timeout_seconds=0))
     stop, thread = start_lease_heartbeat(
         agent,
         request_path,

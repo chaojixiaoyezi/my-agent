@@ -29,7 +29,7 @@ def test_failed_thread_cools_down_without_blocking_healthy_thread(monkeypatch):
     from agent_py_agent.cli import gateway_loops
 
     supervisor = object.__new__(gateway_loops._BackgroundMainSupervisor)
-    supervisor._base_agent = SimpleNamespace(config=SimpleNamespace(background_main_error_backoff_seconds=30))
+    supervisor._base_agent = SimpleNamespace(config=SimpleNamespace())
     supervisor._inflight = {}
     supervisor._owner_schedulers = {}
     supervisor._lane_retry = gateway_loops.BackgroundLaneRetry()
@@ -104,9 +104,10 @@ def test_heartbeat_loop_survives_write_failure(monkeypatch) -> None:
         raise OSError("disk full")
 
     monkeypatch.setattr(gateway_loops, "_write_gateway_heartbeat", _failing_write)
+    monkeypatch.setattr(gateway_loops, "GATEWAY_HEARTBEAT_INTERVAL_SECONDS", 0)
     context = SimpleNamespace(
         paths=SimpleNamespace(),
-        agent=SimpleNamespace(config=SimpleNamespace(gateway_heartbeat_interval=0)),
+        agent=SimpleNamespace(config=SimpleNamespace()),
         options=SimpleNamespace(),
     )
 

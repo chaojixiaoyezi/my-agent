@@ -53,7 +53,6 @@ def mock_agent():
     """创建一个模拟的 SimpleAgent。"""
     agent = Mock()
     agent.config = Mock()
-    agent.config.gateway_stale_seconds = 120
     agent.root = Path("/tmp/test_agent")
     agent.subagents = Mock()
     agent.local_store = Mock()

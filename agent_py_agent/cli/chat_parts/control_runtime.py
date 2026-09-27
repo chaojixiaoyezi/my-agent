@@ -28,6 +28,10 @@ from ...agent.conversation.control_commands import (
 )
 from ...agent.conversation.models import new_id
 
+# 参数减量第 3 批 B 组（2026-09-27）：Gateway 控制命令（/status、/stop 等）的 HTTP 等待上限，不再是配置项
+# gateway_service_command_timeout_seconds；手动 /compact 另按供应商 request_timeout + 30 秒放宽（见 _gateway_control_timeout）。
+GATEWAY_SERVICE_COMMAND_TIMEOUT_SECONDS = 30.0
+
 
 # LLM: UI 状态只作展示；local_run 为原 worker 的临时控制句柄，资源归属必须经其发布绑定和 DB 校验。
 # 类用途: 把一刻的消息状态和精确本地控制目标交给命令执行端。
@@ -618,18 +622,14 @@ def _gateway_control_timeout(
     execution: ChatControlExecution,
     command: ConversationControlCommand,
 ) -> float:
-    config = getattr(execution.agent, "config", None)
-    service_timeout = max(
-        10.0,
-        float(getattr(config, "gateway_service_command_timeout_seconds", 30) or 30),
-    )
     if command.kind != "compact":
-        return service_timeout
+        return GATEWAY_SERVICE_COMMAND_TIMEOUT_SECONDS
+    config = getattr(execution.agent, "config", None)
     provider_timeout = max(
         0.0,
         float(getattr(config, "request_timeout", 0) or 0),
     )
-    return max(service_timeout, provider_timeout + 30.0)
+    return max(GATEWAY_SERVICE_COMMAND_TIMEOUT_SECONDS, provider_timeout + 30.0)
 
 
 def _duration_token(seconds: int) -> str:

@@ -1774,8 +1774,9 @@ per-owner Agent，也必须跟随基础 Gateway 的权威队列记录，不能�
 - gateway ask 请求 ID 由 `new_gateway_request_id()` 生成；所有 CLI/chat/adapter 入口都应走
   `submit_gateway_ask()` 或同一生成器，不能用时间戳截断值自行拼 ID。ID 是队列、response、
   chunk stream 和审计记录的结构化关联键。
-- gateway request worker 空闲轮询间隔由 `gateway_request_poll_interval` 控制，单位秒，可填小数；
-  默认 `0.2`，配置小于 `0.05` 会回到默认值。
+- gateway request worker 空闲轮询间隔是 `cli/gateway_loops.GATEWAY_REQUEST_POLL_INTERVAL_SECONDS`（0.2 秒；参数减量第 3 批起不再是配置项）；
+  心跳节奏 `lease_service.GATEWAY_HEARTBEAT_INTERVAL_SECONDS`（5 秒）与心跳陈旧判定 `status_rendering.GATEWAY_STALE_SECONDS`（120 秒）
+  同样是代码常量，后台主循环每拍取轮询与心跳的较小值并夹在 1～5 秒之间。
 - 多 chat/gateway client 共享同一队列时，本地 IO 不应成为瓶颈；慢点应主要来自模型或外部服务。
 - processing 目录只表示当前正在处理的 request；完成后的 request JSON 和 chunk stream 都必须进入
   done/failed 归档，便于多客户端观察和后续排障。

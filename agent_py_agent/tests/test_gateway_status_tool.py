@@ -22,7 +22,6 @@ from agent_py_agent.cli.models import GatewayRunContext, GatewayThreadsRequest
 def _agent(tmp_path: Path) -> SimpleNamespace:
     config = SimpleNamespace(
         gateway_workspace="gateway",
-        gateway_stale_seconds=30,
         gateway_bind_host="127.0.0.1",
         gateway_port=8420,
         model_name="MiniMax-M2.7",

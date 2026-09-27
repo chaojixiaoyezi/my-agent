@@ -20,7 +20,6 @@ from agent_py_agent.agent.gateway_parts import lease_service as lease_module
 def mock_agent(tmp_path):
     """创建模拟的 agent 配置。"""
     agent = MagicMock()
-    agent.config.gateway_heartbeat_interval = 5
     agent.config.gateway_processing_timeout_seconds = 900
     return agent
 
@@ -37,18 +36,17 @@ def request_path(tmp_path):
 
 def test_lease_interval_normal(mock_agent):
     """测试正常配置的租约间隔计算。"""
-    mock_agent.config.gateway_heartbeat_interval = 5
     mock_agent.config.gateway_processing_timeout_seconds = 900
 
     interval = lease_module._lease_interval(mock_agent)
 
-    # 5 秒间隔不应超过 processing_timeout/3 = 300 秒
+    # 心跳常量 5 秒不应超过 processing_timeout/3 = 300 秒
     assert interval == 5
 
 
-def test_lease_interval_short_timeout(mock_agent):
+def test_lease_interval_short_timeout(mock_agent, monkeypatch):
     """测试短超时时间限制间隔。"""
-    mock_agent.config.gateway_heartbeat_interval = 10
+    monkeypatch.setattr(lease_module, "GATEWAY_HEARTBEAT_INTERVAL_SECONDS", 10.0)
     mock_agent.config.gateway_processing_timeout_seconds = 30
 
     interval = lease_module._lease_interval(mock_agent)
@@ -59,18 +57,17 @@ def test_lease_interval_short_timeout(mock_agent):
 
 def test_lease_interval_very_long_timeout(mock_agent):
     """测试超长超时时间不影响短间隔。"""
-    mock_agent.config.gateway_heartbeat_interval = 5
     mock_agent.config.gateway_processing_timeout_seconds = 86400  # 24小时
 
     interval = lease_module._lease_interval(mock_agent)
 
-    # 间隔应保持 gateway_heartbeat_interval
+    # 间隔应保持心跳常量 GATEWAY_HEARTBEAT_INTERVAL_SECONDS
     assert interval == 5
 
 
-def test_lease_interval_minimum_enforced(mock_agent):
+def test_lease_interval_minimum_enforced(mock_agent, monkeypatch):
     """测试最小间隔 0.2 秒被强制执行。"""
-    mock_agent.config.gateway_heartbeat_interval = 0.1
+    monkeypatch.setattr(lease_module, "GATEWAY_HEARTBEAT_INTERVAL_SECONDS", 0.1)
     mock_agent.config.gateway_processing_timeout_seconds = 1
 
     interval = lease_module._lease_interval(mock_agent)
@@ -81,18 +78,16 @@ def test_lease_interval_minimum_enforced(mock_agent):
 
 def test_lease_interval_zero_values(mock_agent):
     """测试零值配置使用默认值。"""
-    mock_agent.config.gateway_heartbeat_interval = 0
     mock_agent.config.gateway_processing_timeout_seconds = 0
 
     interval = lease_module._lease_interval(mock_agent)
 
-    # 应使用默认值 5.0 和 900.0
+    # processing 超时零值回到默认 900，间隔保持心跳常量 5.0
     assert interval == 5.0
 
 
 def test_lease_interval_invalid_types(mock_agent):
     """测试无效类型配置使用默认值。"""
-    mock_agent.config.gateway_heartbeat_interval = "invalid"
     mock_agent.config.gateway_processing_timeout_seconds = None
 
     interval = lease_module._lease_interval(mock_agent)

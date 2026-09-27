@@ -45,26 +45,6 @@ export default function SettingsGateway() {
             error={errors["gw_port"]}
           />
           <NumberField
-            label="heartbeat_interval（心跳间隔）"
-            description="Gateway 心跳写入的频率"
-            value={gw.heartbeat_interval}
-            onChange={(v) => { setGw({ heartbeat_interval: v }); markDirty(); }}
-            min={1}
-            max={60}
-            unit="秒"
-            disabled={!isAdmin}
-          />
-          <NumberField
-            label="gateway_stale_seconds（过期判定秒数）"
-            description="多久无心跳视为节点过期"
-            value={gw.stale_seconds}
-            onChange={(v) => { setGw({ stale_seconds: v }); markDirty(); }}
-            min={5}
-            max={600}
-            unit="秒"
-            disabled={!isAdmin}
-          />
-          <NumberField
             label="gateway_stop_timeout（停止超时）"
             description="Gateway 优雅停止的最大等待时间"
             value={gw.stop_timeout}

@@ -264,7 +264,6 @@ class _RuntimeBudgetConfigFields:
     skill_guard_max_files: int = 50
     skill_guard_max_size_kb: int = 1024
     conversation_pending_wake_limit: int = 100
-    conversation_unhandled_observation_limit: int = 20
     background_context_max_total_tokens: int = 8000
     # 后台会话执行权的租约秒数；续约心跳按它自动推导（原 background_claim_heartbeat_interval_seconds 已并入）。
     background_claim_ttl_seconds: int = 90
@@ -446,11 +445,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 子代理 runner 普通失败后最多自动重跑几次（唯一的家；原 runner_failure_policy 与守卫文件的两个重派上限已并入）；0 = 不自动重跑。
     runner_failure_retry_limit: int = 1
     gateway_workspace: str = ""
-    gateway_heartbeat_interval: int = 5
-    gateway_stale_seconds: int = 120
     gateway_stop_timeout: int = 20
     gateway_request_timeout: int = 300
-    gateway_request_poll_interval: float = 0.2
     # 网关 ask 两层限流(取代原「全局总 10」单层总闸,接真实 /ask 链路):
     # 每用户「小坑」=单用户同时在飞上限(防一个用户独吞把别人饿死);
     # 全局「大坑」=总在飞上限(高天花板,超出留在 pending 排队、不拒不崩)。
@@ -462,8 +458,6 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     gateway_request_max_attempts: int = 2
     # 后台会话全局线程池上限；超出留在持久队列，同 thread 仍由 run claim 单飞。
     background_owner_workers: int = 8
-    # 后台普通宿主异常的重试间隔；本地缺模型等待配置恢复，保留持久事件，不影响前台或其它会话。
-    background_main_error_backoff_seconds: float = 30.0
     # 单 owner 同时可跑的独立后台会话数；调大会增加并发模型请求。
     background_threads_per_owner: int = 4
     # per-owner 作用域 agent 实例池上限(原 owner_scoped_pool.py 硬编码 64):有界 LRU,
@@ -473,10 +467,6 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     owner_agent_idle_seconds: float = 60.0
     input_media_max_bytes: int = 16 * 1024 * 1024
     input_media_max_files: int = 8
-    # 磁盘级 owner 唤醒发现间隔(秒,0=关):后台循环周期性扫 owners/ 把「有 enabled 进度
-    # 策略/待处理唤醒信号」的 owner 种回活跃登记表。治网关重启/LRU 逐出后 scoped owner 的
-    # 到点唤醒无人消费=盯守睡死(登记表是易失的进程内结构,只有新入站请求才补记)。
-    background_owner_wake_rescan_seconds: int = 120
     # owner retention 扫描控制器每拍只处理一个有界页，不创建 Agent、不调用 LLM。
     # 每个 owner 的 retention.json 另有日级执行节流；0 关闭网关自动扫描。
     owner_maintenance_scan_interval_seconds: int = 60
@@ -494,7 +484,6 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 否则降为匿名 USER。默认空=只靠回环 peer 信任(适配器/CLI 走 127.0.0.1)。
     gateway_auth_token: str = ""
     gateway_ready_timeout_seconds: int = 3
-    gateway_service_command_timeout_seconds: int = 30
     # 安全重启第一段：停领新请求后，等本进程在跑回合结束的上限秒数；超时后关闭工具关口，停在工具前的回合由接班进程续跑。
     gateway_restart_turn_wait_seconds: int = 300
     # 安全重启第二段：等执行中的副作用工具归零的上限秒数，0=不限；超时取消本次重启并恢复服务，不强杀。

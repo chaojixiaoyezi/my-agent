@@ -191,8 +191,6 @@ def test_gateway_due_controller_records_only_claimed_scoped_owners(monkeypatch, 
     registry = ActiveOwnerRegistry()
     base = SimpleNamespace(
         config=SimpleNamespace(
-            gateway_request_poll_interval=0.2,
-            gateway_heartbeat_interval=5,
             owner_agent_pool_max_agents=64,
             background_owner_workers=8,
         ),

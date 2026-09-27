@@ -76,7 +76,7 @@ def _stub_agent(tmp_path: Path) -> SimpleNamespace:
     return SimpleNamespace(
         subagents=SimpleNamespace(workspace=str(tmp_path / "sub")),
         local_store=_StubLocalStore(),
-        config=SimpleNamespace(gateway_heartbeat_interval=1.0),
+        config=SimpleNamespace(),
     )
 
 

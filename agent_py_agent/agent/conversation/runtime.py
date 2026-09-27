@@ -2882,7 +2882,13 @@ def _run_observation_batch(
     return report
 
 
-# LLM: 先按 task 隔离再计算限额，unknown 来源保留；原 supply guard 内调用观察编排，不提前查路由或重复确认来源。
+# 参数减量第 3 批 B 组（2026-09-27）：一次后台 tick 最多消费多少条需要主代理处理的观察，不再是配置项
+# conversation_unhandled_observation_limit；0 表示不限。
+CONVERSATION_UNHANDLED_OBSERVATION_LIMIT = 20
+
+
+# LLM: 先按 task 隔离再计算限额（上限是代码常量 CONVERSATION_UNHANDLED_OBSERVATION_LIMIT），unknown 来源保留；
+#   原 supply guard 内调用观察编排，不提前查路由或重复确认来源。
 # 函数用途: 消费没有可用 wake 的观察批次，经原会话 claim 运行并收集报告；正文仍由 canonical 消息流显示。
 def _consume_observation_batches(
     scheduler: BackgroundMainAgentScheduler,
@@ -2892,7 +2898,7 @@ def _consume_observation_batches(
     *,
     target_thread_id: str = "",
 ) -> None:
-    observation_limit = scheduler._config_limit("conversation_unhandled_observation_limit")
+    observation_limit = CONVERSATION_UNHANDLED_OBSERVATION_LIMIT
     pending_observations = scheduler.store.observations.unhandled_requiring_main(limit=0)
     pending_observations = [
         observation

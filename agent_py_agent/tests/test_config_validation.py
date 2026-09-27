@@ -20,8 +20,6 @@ def test_normalize_agent_config_valid():
         "request_timeout": "30",
         "max_tokens": "1024",
         "temperature": "0.7",
-        "gateway_heartbeat_interval": "10",
-        "gateway_stale_seconds": "120",
     }
     normalized, warnings = normalize_agent_config(data)
     assert warnings == []
@@ -29,8 +27,6 @@ def test_normalize_agent_config_valid():
     assert normalized["request_timeout"] == 30
     assert normalized["max_tokens"] == 1024
     assert normalized["temperature"] == "0.7"
-    assert normalized["gateway_heartbeat_interval"] == 10
-    assert normalized["gateway_stale_seconds"] == 120
 
 
 def test_agent_config_default_max_tokens_matches_shipped_config():
@@ -139,15 +135,11 @@ def test_normalize_agent_config_out_of_range():
     data = {
         "request_timeout": "0",
         "max_tokens": "-100",
-        "gateway_heartbeat_interval": "2",
-        "gateway_stale_seconds": "10",
     }
     normalized, warnings = normalize_agent_config(data)
-    assert len(warnings) == 4
+    assert len(warnings) == 2
     assert any("request_timeout" in w for w in warnings)
     assert any("max_tokens" in w for w in warnings)
-    assert any("gateway_heartbeat_interval" in w for w in warnings)
-    assert any("gateway_stale_seconds" in w for w in warnings)
     # 应该回退到默认值
     defaults_normalized, _ = normalize_agent_config({})
     assert normalized["request_timeout"] == defaults_normalized["request_timeout"]
@@ -197,8 +189,6 @@ def test_load_config_validates_and_keeps_warnings(tmp_path):
             "request_timeout: 30",
             "max_tokens: 1024",
             "temperature: 0.7",
-            "gateway_heartbeat_interval: 10",
-            "gateway_stale_seconds: 120",
         ],
     )
     config = load_config(config_path)

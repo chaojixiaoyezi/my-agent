@@ -38,7 +38,6 @@ def test_render_gateway_status_reports_bad_state_and_heartbeat(tmp_path: Path):
     paths.state.write_text("{bad state", encoding="utf-8")
     paths.heartbeat.write_text("[bad heartbeat]", encoding="utf-8")
     agent = MagicMock()
-    agent.config.gateway_stale_seconds = 60
 
     lines = render_gateway_status(agent, paths)
 
@@ -56,7 +55,6 @@ def test_render_gateway_status_reports_bad_pid_record(tmp_path: Path):
     paths.root.mkdir(parents=True)
     paths.pid.write_text("{bad pid", encoding="utf-8")
     agent = MagicMock()
-    agent.config.gateway_stale_seconds = 60
 
     lines = render_gateway_status(agent, paths)
 
@@ -90,7 +88,6 @@ def test_render_gateway_status_reports_processing_request_facts(tmp_path: Path, 
     chunk_path = gateway_chunk_path(paths, request_id)
     chunk_path.write_text('{"delta":"hello"}\n', encoding="utf-8")
     agent = MagicMock()
-    agent.config.gateway_stale_seconds = 60
 
     lines = render_gateway_status(agent, paths)
 
@@ -112,7 +109,6 @@ def test_render_gateway_status_reports_bad_processing_record(tmp_path: Path):
     paths.processing.mkdir(parents=True)
     (paths.processing / "bad.json").write_text("{bad processing", encoding="utf-8")
     agent = MagicMock()
-    agent.config.gateway_stale_seconds = 60
 
     lines = render_gateway_status(agent, paths)
 
@@ -148,7 +144,6 @@ def test_render_gateway_status_reports_unidentified_stale_attempts_only_when_pre
     paths = _gateway_paths(tmp_path)
     paths.root.mkdir(parents=True)
     agent = MagicMock()
-    agent.config.gateway_stale_seconds = 60
 
     paths.state.write_text(json.dumps({"status": "stopped", "unidentified_stale_attempts": 9}), encoding="utf-8")
     assert "gateway unidentified_stale_attempts=9" in render_gateway_status(agent, paths)

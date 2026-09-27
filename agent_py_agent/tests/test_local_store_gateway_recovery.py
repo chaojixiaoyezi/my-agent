@@ -331,7 +331,6 @@ def test_gateway_worker_refreshes_processing_lease_heartbeat_during_long_run():
         cfg = AgentConfig(
             model_backend="echo",
             gateway_workspace="gateway",
-            gateway_heartbeat_interval=1,
             gateway_processing_timeout_seconds=1,
             local_store_path="local_store/local.db",
             local_store_files_dir="local_store/files",

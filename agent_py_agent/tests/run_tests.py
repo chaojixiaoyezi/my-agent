@@ -37,8 +37,7 @@ TEST_CONFIG.write_text(
     + "daemon_planner: false\n"
     + "daemon_max_runners: 0\n"
     + "daemon_interval: 1\n"
-    + "gateway_request_timeout: 180\n"
-    + "gateway_request_poll_interval: 1\n",
+    + "gateway_request_timeout: 180\n",
     encoding="utf-8",
 )
 

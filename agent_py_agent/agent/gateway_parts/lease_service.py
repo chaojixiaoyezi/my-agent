@@ -27,6 +27,10 @@ from .paths import gateway_paths_from_root
 if TYPE_CHECKING:
     from ...core import SimpleAgent
 
+# 参数减量第 3 批 B 组（2026-09-27）：Gateway 心跳节奏不再是配置项 gateway_heartbeat_interval，这里是唯一定义；
+# 请求租约按它刷新（processing 超时更短时按超时的 1/3），cli/gateway_loops 的心跳文件循环与后台主循环节奏从这里 import。
+GATEWAY_HEARTBEAT_INTERVAL_SECONDS = 5.0
+
 
 # Tracks active heartbeat threads per request ID
 _active_heartbeat_request_ids: set[str] = set()
@@ -197,8 +201,10 @@ def _update_lease_payload(payload: dict, request_path: Path, worker_id: str) -> 
     payload["updated_at"] = now
 
 
+# LLM: 租约刷新节奏只由心跳常量与 gateway_processing_timeout_seconds 推导；改公式要同步看 test_lease 与 request_worker 的 stale 判定。
+# 函数用途: 算租约刷新间隔：默认按心跳常量，processing 超时更短时压到超时的 1/3，最小 0.2 秒。
 def _lease_interval(agent: SimpleAgent) -> float:
-    gateway_interval = _config_float(agent, "gateway_heartbeat_interval")
+    gateway_interval = GATEWAY_HEARTBEAT_INTERVAL_SECONDS
     processing_timeout = _config_float(agent, "gateway_processing_timeout_seconds")
     if processing_timeout > 0:
         gateway_interval = min(gateway_interval, max(0.2, processing_timeout / 3.0))

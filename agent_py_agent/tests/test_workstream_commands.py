@@ -85,7 +85,6 @@ class TestStatusCommandsForWorkstream:
         mock_agent = MagicMock()
         mock_agent.config.agent_name = "test_agent"
         mock_agent.root = tmp_path
-        mock_agent.config.gateway_stale_seconds = 300
         mock_agent.local_store.stats.return_value = {"record_count": 100, "event_count": 50, "fts5_enabled": True, "db_path": str(tmp_path / "store.db")}
         mock_agent.subagents.board.build_board.return_value = MagicMock(summary={"total": 0}, hot_list=[], recent=[])
         mock_agent.local_store.timeline.return_value = []
@@ -112,7 +111,6 @@ class TestStatusCommandsForWorkstream:
         mock_agent = MagicMock()
         mock_agent.config.agent_name = "test_agent"
         mock_agent.root = tmp_path
-        mock_agent.config.gateway_stale_seconds = 300
         mock_agent.local_store.stats.return_value = {"record_count": 100, "event_count": 50, "fts5_enabled": True, "db_path": str(tmp_path / "store.db")}
         mock_agent.subagents.board.build_board.return_value = MagicMock(summary={"total": 0}, hot_list=[], recent=[])
         mock_agent.local_store.timeline.return_value = []

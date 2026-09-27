@@ -19,7 +19,6 @@ def _make_agent(tmp_path):
         AgentConfig(
             model_backend="echo",
             gateway_workspace="gateway",
-            gateway_heartbeat_interval=5,
             gateway_processing_timeout_seconds=900,
             local_store_path="local_store/local.db",
             local_store_files_dir="local_store/files",

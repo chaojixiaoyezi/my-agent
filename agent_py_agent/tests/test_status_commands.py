@@ -40,7 +40,6 @@ def _status_mock_agent(tmp_path: Path) -> MagicMock:
     mock_agent = MagicMock()
     mock_agent.config.agent_name = "test_agent"
     mock_agent.root = tmp_path
-    mock_agent.config.gateway_stale_seconds = 300
     mock_agent.local_store.stats.return_value = {
         "record_count": 100,
         "event_count": 50,
@@ -68,7 +67,6 @@ class TestCmdStatus:
         mock_agent = MagicMock()
         mock_agent.config.agent_name = "test_agent"
         mock_agent.root = tmp_path
-        mock_agent.config.gateway_stale_seconds = 300
         mock_agent.local_store.stats.return_value = {"record_count": 100, "event_count": 50, "fts5_enabled": True, "db_path": str(tmp_path / "store.db")}
         mock_agent.subagents.board.build_board.return_value = MagicMock(summary={"total": 0}, hot_list=[], recent=[])
         mock_agent.local_store.timeline.return_value = []
@@ -94,7 +92,6 @@ class TestCmdStatus:
         mock_agent = MagicMock()
         mock_agent.config.agent_name = "test_agent"
         mock_agent.root = tmp_path
-        mock_agent.config.gateway_stale_seconds = 300
         mock_agent.local_store.stats.return_value = {
             "record_count": 100,
             "event_count": 50,
@@ -213,7 +210,6 @@ class TestCmdStatus:
         mock_agent = MagicMock()
         mock_agent.config.agent_name = "test_agent"
         mock_agent.root = tmp_path
-        mock_agent.config.gateway_stale_seconds = 300
         mock_agent.local_store.stats.return_value = {"record_count": 100, "event_count": 50, "fts5_enabled": True, "db_path": str(tmp_path / "store.db")}
         mock_agent.subagents.board.build_board.return_value = MagicMock(summary={"total": 1}, hot_list=[], recent=[mock_item])
         mock_agent.local_store.timeline.return_value = []

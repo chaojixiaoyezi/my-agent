@@ -4824,14 +4824,16 @@ def _record_unknown_main_run(agent, *, task_id: str, thread_id: str):
 
 
 def test_unknown_old_task_preserves_event_without_blocking_new_task_on_same_thread(
-    tmp_path,
+    tmp_path, monkeypatch,
 ) -> None:
+    from agent_py_agent.agent.conversation import runtime as runtime_module
+
+    monkeypatch.setattr(runtime_module, "CONVERSATION_UNHANDLED_OBSERVATION_LIMIT", 1)
     agent = SimpleAgent(
         AgentConfig(
             enable_tools=False,
             memory_path="memory.jsonl",
             orphan_supervision_interval_seconds=0,
-            conversation_unhandled_observation_limit=1,
         ),
         tmp_path,
     )

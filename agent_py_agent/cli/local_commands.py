@@ -22,6 +22,7 @@ from ..agent.gateway_parts import (
     recover_gateway_processing_requests,
 )
 from ..agent.gateway_parts.io import read_json_file, read_json_file_report
+from ..agent.gateway_parts.status_rendering import GATEWAY_STALE_SECONDS
 from ..agent.subagents.models import SubAgentBoardOptions
 from .common import format_local_time, int_arg_or_default, make_agent, resume_context_override
 from .delivery_contracts import delivery_contract_from_file
@@ -124,7 +125,7 @@ def _gateway_status_from_files(agent, paths, alive: bool) -> tuple[str, float, d
             alive=alive,
             gateway_state=gateway_state_report.payload,
             heartbeat=heartbeat_report.payload,
-            stale_seconds=agent.config.gateway_stale_seconds,
+            stale_seconds=GATEWAY_STALE_SECONDS,
             now=time.time(),
         )
     )

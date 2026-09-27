@@ -101,7 +101,7 @@ _SNAPSHOT_LOCK = threading.Lock()
 # 缓存只是投影:进程重启后为空;签名计算或读取异常一律回退现读,且绝不写缓存。
 # 兜底 TTL:只兜"签名没覆盖到的变化"(粗粒度时间戳文件系统上的同尺寸原地改写、改钟)。
 # 时间驱动的转变不靠它,而由判定时算出的最近边界收紧。取 600s 的理由:默认重扫间隔是
-# background_owner_wake_rescan_seconds=120s,TTL 若与之同量级则每两轮就现读一次、收益被抵消;
+# gateway_loops.BACKGROUND_OWNER_WAKE_RESCAN_SECONDS=120s,TTL 若与之同量级则每两轮就现读一次、收益被抵消;
 # 600s 下稳态每 5 轮重扫现读一次,同时把未建模风险的最大陈旧窗口钉死在 10 分钟内。
 _FACT_TTL_SECONDS = 600.0
 # 条目上界按"一页 owner 数 × 若干页"取:太小时大 owners 目录会 LRU 抖动(实测 500 owner/页

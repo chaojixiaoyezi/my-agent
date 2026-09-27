@@ -99,20 +99,6 @@ class TestNormalizeAgentConfig:
         assert normalized["temperature"] is None  # 默认留空 = 不发送温度
         assert len(warnings) > 0
 
-    def test_normalize_gateway_stale_seconds_valid(self):
-        """验证有效的 gateway_stale_seconds。"""
-        data = {"gateway_stale_seconds": 300}
-        normalized, warnings = normalize_agent_config(data)
-        assert normalized["gateway_stale_seconds"] == 300
-        assert len(warnings) == 0
-
-    def test_normalize_gateway_stale_seconds_too_low(self):
-        """验证过小的 gateway_stale_seconds 回退。"""
-        data = {"gateway_stale_seconds": 10}
-        normalized, warnings = normalize_agent_config(data)
-        assert normalized["gateway_stale_seconds"] == 120  # 默认值（最小30）
-        assert len(warnings) > 0
-
     def test_normalize_max_tool_rounds_valid(self):
         """验证有效的 max_tool_rounds。"""
         data = {"max_tool_rounds": 10}
@@ -211,20 +197,6 @@ class TestNormalizeSubagentAgentConfig:
         assert normalized["subagent_hierarchy_max_children_per_tool_call"] == 0
         assert normalized["subagent_takeover_chain_max_depth"] == 0
         assert warnings == []
-
-    def test_normalize_gateway_request_poll_interval_accepts_fractional_seconds(self):
-        """gateway 请求 worker 的空闲轮询间隔支持小数秒，避免配置写了不生效。"""
-        normalized, warnings = normalize_agent_config({"gateway_request_poll_interval": "0.2"})
-
-        assert normalized["gateway_request_poll_interval"] == 0.2
-        assert warnings == []
-
-    def test_normalize_gateway_request_poll_interval_rejects_too_small_values(self):
-        """过小轮询间隔回到默认值，避免误配造成本地空转。"""
-        normalized, warnings = normalize_agent_config({"gateway_request_poll_interval": 0.01})
-
-        assert normalized["gateway_request_poll_interval"] == AgentConfig().gateway_request_poll_interval
-        assert len(warnings) > 0
 
     def test_normalize_runtime_bool_strings(self):
         """验证运行期布尔开关里的字符串 false 不会在业务代码里变成真值。"""

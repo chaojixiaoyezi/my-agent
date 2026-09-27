@@ -139,7 +139,6 @@ gateway_workspace: ".my_agent/gateway"
 adapter_workspace: ".my_agent/adapters/file"
 max_subagents: {max(self.args.count, 1)}
 gateway_request_timeout: {gateway_timeout}
-gateway_request_poll_interval: 1
 gateway_processing_timeout_seconds: {processing_timeout}
 gateway_request_max_attempts: 2
 daemon_planner: false

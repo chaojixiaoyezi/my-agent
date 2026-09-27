@@ -238,7 +238,7 @@ def test_gateway_processing_recovery_zero_attempt_limit_is_unlimited():
 def test_gateway_worker_refreshes_processing_lease_heartbeat_during_long_run():
     """LLM: Verify gateway worker refreshes lease heartbeat during long agent runs."""
     root, agent, paths = _setup_agent_with_gateway(
-        {"gateway_heartbeat_interval": 1, "gateway_processing_timeout_seconds": 1}
+        {"gateway_processing_timeout_seconds": 1}
     )
     request_id, request_path, _ = submit_gateway_ask(
         paths, params=GatewayAskParams(prompt="长任务 lease heartbeat 测试", save=False)

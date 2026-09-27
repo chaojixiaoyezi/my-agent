@@ -51,8 +51,6 @@ def test_gateway_background_loop_runs_due_progress_policy(tmp_path) -> None:
         AgentConfig(
             enable_tools=False,
             memory_path="memory.jsonl",
-            gateway_request_poll_interval=1,
-            gateway_heartbeat_interval=5,
         ),
         tmp_path,
     )

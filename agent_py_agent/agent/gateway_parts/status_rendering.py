@@ -36,6 +36,10 @@ from .process_control import is_pid_alive
 if TYPE_CHECKING:
     from ...core import SimpleAgent
 
+# 参数减量第 3 批 B 组（2026-09-27）：活着的 Gateway 心跳多少秒没更新就判成 stale，不再是配置项 gateway_stale_seconds；
+# 状态载荷的 stale_after_seconds 与 cli/local_commands 的 status 判定都从这里 import。
+GATEWAY_STALE_SECONDS = 120
+
 
 @dataclass(frozen=True)
 class GatewayRunningReport:
@@ -234,10 +238,7 @@ def _gateway_runtime_base_snapshot(
         "heartbeat": {
             "updated_at": heartbeat_facts.updated_at or None,
             "age_seconds": round(heartbeat_facts.age_seconds, 3),
-            "stale_after_seconds": max(
-                0,
-                int(getattr(config, "gateway_stale_seconds", 0) or 0),
-            ),
+            "stale_after_seconds": GATEWAY_STALE_SECONDS,
         },
         "http": {
             "bind_host": bind_host,
@@ -671,6 +672,8 @@ def render_gateway_status(agent: SimpleAgent, paths: GatewayPaths) -> list[str]:
     return lines
 
 
+# LLM: 只读结构化事实：进程活着但心跳超过 GATEWAY_STALE_SECONDS 没更新才是 stale；不看文案、不读文件 mtime。
+# 函数用途: 把存活报告、state 与心跳年龄合成一个状态词（running / stale / 记录里的状态）。
 def _gateway_status(
     agent: SimpleAgent,
     running_report: GatewayRunningReport,
@@ -678,7 +681,7 @@ def _gateway_status(
     heartbeat: GatewayHeartbeatFacts,
 ) -> str:
     status = "running" if running_report.alive else state.get("status", "stopped")
-    if running_report.alive and heartbeat.updated_at and heartbeat.age_seconds > agent.config.gateway_stale_seconds:
+    if running_report.alive and heartbeat.updated_at and heartbeat.age_seconds > GATEWAY_STALE_SECONDS:
         return "stale"
     return status
 

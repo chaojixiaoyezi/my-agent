@@ -180,7 +180,6 @@ class TestCmdGatewayStatus:
 
         mock_agent = MagicMock()
         mock_agent.config = MagicMock()
-        mock_agent.config.gateway_stale_seconds = 300
         type(mock_agent.config).gateway_port = PropertyMock(return_value=0)
 
         mock_paths = MagicMock()

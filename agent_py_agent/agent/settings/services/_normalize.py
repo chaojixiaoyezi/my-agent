@@ -199,8 +199,6 @@ class ModelFieldsService:
 # 类用途: 统一队列、连接、实例寿命和媒体数量/字节预算的数值校验。
 class GatewayFieldsService:
     _INT_FIELD_SPECS = (
-        ("gateway_heartbeat_interval", 5, None),
-        ("gateway_stale_seconds", 30, None),
         ("gateway_stop_timeout", 1, None),
         ("gateway_request_timeout", 1, None),
         ("gateway_user_inflight_limit", 1, None),
@@ -211,8 +209,7 @@ class GatewayFieldsService:
         ("input_media_max_bytes", 1, None),
         ("input_media_max_files", 1, None),
     )
-    _FLOAT_FIELD_SPECS = (("gateway_request_poll_interval", 0.05, None),
-                         ("owner_agent_idle_seconds", 0.0, None))
+    _FLOAT_FIELD_SPECS = (("owner_agent_idle_seconds", 0.0, None),)
 
     @staticmethod
     def normalize(data: dict[str, object], defaults: object) -> tuple[dict[str, object], list[str]]:
@@ -585,7 +582,6 @@ class SubagentAdvancedFieldsService:
 _TIMEOUT_INT_FIELDS = (
     ("lease_stale_without_heartbeat_seconds", 30, None),
     ("gateway_ready_timeout_seconds", 1, None),
-    ("gateway_service_command_timeout_seconds", 1, None),
     ("gateway_restart_turn_wait_seconds", 0, None),
     ("gateway_restart_drain_timeout_seconds", 0, None),
     ("gateway_restart_cooldown_seconds", 0, None),
@@ -612,7 +608,6 @@ _TIMEOUT_INT_FIELDS = (
     ("background_claim_ttl_seconds", 1, None),
     ("background_completion_coalesce_seconds", 0, None),
     ("conversation_pending_wake_limit", 0, None),
-    ("conversation_unhandled_observation_limit", 0, None),
     ("skill_guard_max_files", 0, None),
     ("skill_guard_max_size_kb", 0, None),
     ("dispatch_default_max_runners", 0, None),

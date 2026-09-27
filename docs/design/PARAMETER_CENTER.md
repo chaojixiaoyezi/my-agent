@@ -280,6 +280,10 @@
     `subagent_hierarchy_default_max_depth`、`subagent_hierarchy_recovery_max_nodes`、`subagent_spawn_default_count`、`chat_collapse_preview_lines`、
     `chat_collapse_preview_chars`、`chat_history_assistant_preview_chars`、`chat_transcript_scroll_lines`、`memory_doctor_recent_archive_file_limit`、
     `tool_catalog_show_truncated_notice`。六份重复的 `_subagent_config_int`/`_config_int` 命令默认值 helper 收成 `cli/common.int_arg_or_default`。
+  - 已完成 B 组前半（7 项，分支 `claude/38-internal-constants-bd`，gateway/后台节奏）：`gateway_heartbeat_interval`（`gateway_parts/lease_service.GATEWAY_HEARTBEAT_INTERVAL_SECONDS`，心跳文件循环与后台主循环从这里 import）、`gateway_stale_seconds`（`gateway_parts/status_rendering.GATEWAY_STALE_SECONDS`，`cli/local_commands` import）、`gateway_request_poll_interval`、`background_main_error_backoff_seconds`、`background_owner_wake_rescan_seconds`（`cli/gateway_loops` 三个常量；后台主循环 tick 仍按
+    轮询与心跳取小再夹到 1～5 秒推导）、`gateway_service_command_timeout_seconds`（`cli/chat_parts/control_runtime`，
+    原“最小 10 秒”地板随配置项一起删除）、`conversation_unhandled_observation_limit`（`conversation/runtime`）。场景测试、Live Lab 与
+    `tests/run_tests.py` 生成的配置不再写 `gateway_request_poll_interval: 1`（这些测试 Gateway 改按默认 0.2 秒轮询）。
   - 用户可能真会调、保留为 advanced 不降级（集成者已同意）：`memory_curator_daily_finalize_hour`、`home_lesson_stale_caveat_days`、
     `memory_lesson_min_occurrences`、`memory_hot_min_occurrences`、`chat_history_max_turns`、`estimated_output_tokens_per_second`、
     `dynamic_timeout_min`、`local_store_fts_enabled`。
@@ -301,10 +305,10 @@
       参数搜索里隐藏（`parameter_registry.LOADER_METADATA_KEYS` + `listed_parameters()`，user_config 的可改数量同口径）；字段与
       登记表项不删，`/settings show` 仍可查看、仍是安全边界。
     - 回归见 `test_param_reduction_e_group.py` 与 `test_settings_chat_control.py`；原来通过配置对象改这些值的测试改为 patch 常量。
-  - 未完成：B 组（daemon_*、dispatch_default_*、gateway 轮询/心跳/陈旧判定、后台退避）、C 组（memory 归档预览/语义摘要/恢复/策展批次）、
+  - 未完成：B 组后半（daemon_*、dispatch_default_*）、C 组（memory 归档预览/语义摘要/恢复/策展批次）、
     D 组（动态超时探针、anthropic_version、媒体预留、微压缩、协议修复次数、决策选模字数）。
   - E 组范围外、分类为 internal 但未归入任何一组的：`tool_write_inline_max_chars`（写文件指引的软建议）、`conversation_pending_wake_limit`、
-    `conversation_unhandled_observation_limit`（runtime 里的账本批量读取）、`memory_artifact_default_read_chars`，留给集成者分派。
+    `memory_artifact_default_read_chars`，留给集成者分派（`conversation_unhandled_observation_limit` 已随 B 组前半降级）。
 
 ## 7. 验收
 

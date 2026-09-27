@@ -1709,11 +1709,8 @@ gateway 控制面配置：
 
 ```yaml
 gateway_workspace: "data/gateway"
-gateway_heartbeat_interval: 5
-gateway_stale_seconds: 120
 gateway_stop_timeout: 20
 gateway_request_timeout: 300
-gateway_request_poll_interval: 1
 gateway_processing_timeout_seconds: 900
 gateway_request_max_attempts: 2
 ```
