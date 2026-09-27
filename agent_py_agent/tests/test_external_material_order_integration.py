@@ -187,7 +187,10 @@ def test_config_defaults_and_original_agent_setting_tool_share_thread_override(t
     defaults = AgentConfig()
     for suffix in ("mode", "timeout_seconds", "profile_id"):
         name = f"decision_{module._POINT}_{suffix}"
-        assert getattr(config, name) == getattr(defaults, name) == ("off" if suffix == "mode" else None)
+        # 点位期限与模型引用只在决策设置覆盖层按点位设置，配置里没有字段（2026-09-27 参数减量）。
+        expected = ("off", "off") if suffix == "mode" else (None, None)
+        assert (getattr(config, name, None), getattr(defaults, name, None)) == expected
+        assert (suffix == "mode") == hasattr(defaults, name)
         assert decision_field_scopes()[f"points.{module._POINT}.{suffix}"] == ["owner", "thread"]
     host = host_at(tmp_path)
     key, _ = decision(host)
