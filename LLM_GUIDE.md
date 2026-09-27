@@ -1,5 +1,7 @@
 # LLM_GUIDE
 
+当前新增G05子任务用包缺口：长input_refs导致首次runner提示准备崩溃，已本地最小修复并通过65项定向和独立窄审，尚未安装；包授权申请被自动路由提前GAP另需修复。下一步先收口这两项，再与Claude的Compact固定补片组合验收；最终0/27保持，详见[唯一TODO](docs/tasks/CAPABILITY_INTERNALIZATION_GOAL.md#唯一-todo)。
+
 当前开发切片是C17通用能力包验收：固定51dac1b81已由Claude组合发布并双机部署step13w，本线核对23639项全仓通过、0失败及本地严格gate；线上CI未作为验收来源。私有环境也已精确安装同版，发布与最终功能收口分别记录。Goal仍active，当前缺项以[唯一执行清单](docs/tasks/CAPABILITY_INTERNALIZATION_GOAL.md)为准。
 
 能力包按用户2026-09-27澄清交付通用功能，领域只作样例。C17的65k对照第1代Compact提交后同代读取通过，第2代51342超过49152而失败；Claude负责容量计量和修复。默认262144窗口G04已完成原资源同字节复制与实际执行，但交接内容有字段及限制错误，且本轮未触发Compact；普通G03空选通过但漏负责人。最终27次允许范围验收尚未启动，不把这些开发分项拼成完整通过。详见[当前验收](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#c17固定发布与原生开发验收2026-09-27)。

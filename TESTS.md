@@ -1,5 +1,15 @@
 # 测试与发布验收
 
+## C17子代理资料路径异常隔离（2026-09-27）
+
+- G05首子请求被长input_refs的ENAMETOOLONG中断，原始失败及包授权缺项见[验收记录](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#c17并发资料交接与输入引用修复2026-09-27)。本地旧builder用临时文件及超长引用再次复现，没有真实模型或运行环境操作。
+- 生产仅修改`prompt_context_summary._resolve_read_paths`：逐候选隔离exists/resolve的OSError，沿原unresolved计数；保留其它根/引用并重抛InterruptedError。无新授权、状态、配置或依赖；expanduser和根目录规范化仍沿原行为，不宣称覆盖所有路径异常。
+- 新8例旧实现6失败/2通过，修后8通过：required/hint各覆盖exists/resolve异常、多根中的可用替代候选及中断传播。
+- 完整相关命令：`.venv/bin/python -m pytest agent_py_agent/tests/test_runner_prompts.py agent_py_agent/tests/test_orchestration_create_subagents_tool_workspace.py agent_py_agent/tests/test_create_subagents_input_read_scope.py agent_py_agent/tests/test_subagent_context_bundle.py -q --tb=short`，65项通过，7.054秒，两份变更源码前后指纹相同。实际使用原checkout的Python 3.12 venv执行，源码来自本能力分支。
+- 成熟参考仅核本地Hermes `agent/context_references.py`逐引用独立展开和异常警告；本仓复用原unresolved，仅捕获对应文件系统异常，不引入解析器或宽泛Exception捕获。
+- 私有`candidate-17-readrefs-focused-01.json/.log`保留命令、源码及日志摘要；日志SHA256 `55c823246eb78aa7433a1726dc60eafc4b2d57bcf5526ee5a7307de2bfb3651b`。独立窄审无阻断；最终Ruff、doc-sync、strict code-size（hard=0）、diff和clean-package全部通过，记录为candidate-17-readrefs-strict-02.json。首轮Ruff的长导入排版错误已修，测试AST与已测版本相同；首轮失败记录保留。线上CI未作为依据，私有Gateway仍51dac。
+- 建议下一步：固定本地补片交Claude，再补合法包申请链的确定性覆盖；原生复验绑定新固定版本，旧G05失败和最终0/27保持。
+
 ## B0.1.4字段映射资料纠正（2026-09-27）
 
 - 本地候选只修改B方法与来源说明，并将声明版本从0.1.3升为0.1.4；两个既有构建版本断言同步更新，没有新增测试、schema、校验规则或宿主逻辑。组件阶段原安装版B0.1.3及G04业务文件保持，随后原生更新另记如下。

@@ -149,6 +149,8 @@ ToolExecutor 对原 ToolCall 原地重试，不新造工具参数；拒绝/取�
 
 ## 路径与写权限
 
+runner对required_read_paths和hint_read_paths的exists/resolve查询仅生成资料线索投影。单候选的文件系统OSError归为未解析，仍检查其它根及其它引用；InterruptedError作为停止信号继续传播。该投影不读正文、不授予权限，实际工具和创建前可见性仍执行原判定；expanduser及可信根规范化的其它异常仍按原行为处理。
+
 普通 child 自动继承直接父级的结构化产品写区；孙代理继续逐层继承同一上界，不能扩大到父级之外。
 因此项目目录本来就在父级 workspace 内时，父级无需为 child 重复申请或声明权限。
 

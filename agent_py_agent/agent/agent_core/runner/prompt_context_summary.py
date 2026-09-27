@@ -1,6 +1,6 @@
 
-# LLM: runner 模型只消费有界的身份、cwd、恢复和产物投影，不把内部 output 目录当写入目的地。
-# 模块用途: 精简子代理启动与续跑上下文，保持工具路径与展示提示一致。
+# LLM: runner 模型只消费有界事实投影；资料路径探测失败不构成启动门，中断继续传播，改动同步核对 runner prompt 测试。
+# 模块用途: 精简子代理启动与续跑上下文，只读探测资料路径，不将内部 output 目录当写入目的地。
 from __future__ import annotations
 
 from pathlib import Path
@@ -397,13 +397,23 @@ def _read_roots(context: SubAgentExecutionContext) -> list[Path]:
     return _unique_paths([Path(item).expanduser().resolve(strict=False) for item in roots if str(item or "").strip()])
 
 
+# LLM: 逐候选只读查询路径，文件系统失败沿原 unresolved 投影；不得吞掉停止信号或把解析结果作为授权。
+# 函数用途: 保留仍可找到的资料引用，坏候选不妨碍其余目录和引用，供启动与恢复提示使用。
 def _resolve_read_paths(refs: list[str], roots: list[Path]) -> tuple[list[str], list[str]]:
     resolved: list[str] = []
     unresolved: list[str] = []
     for ref in refs:
         path = Path(ref).expanduser()
         candidates = [path] if path.is_absolute() else [root / path for root in roots]
-        existing = [str(item.resolve(strict=False)) for item in candidates if item.exists()]
+        existing: list[str] = []
+        for item in candidates:
+            try:
+                if item.exists():
+                    existing.append(str(item.resolve(strict=False)))
+            except InterruptedError:
+                raise
+            except OSError:
+                continue
         if existing:
             resolved.extend(existing)
         else:

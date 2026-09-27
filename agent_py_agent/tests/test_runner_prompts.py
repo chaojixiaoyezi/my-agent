@@ -4,6 +4,8 @@
 """
 from __future__ import annotations
 
+import errno
+import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -169,6 +171,85 @@ class TestBuildSubagentRunnerPrompt:
         assert str(workspace / "final_report.md") in prompt
         assert "不是启动前置条件" in prompt
         assert "input_contract" not in prompt
+
+    @pytest.mark.parametrize("read_field", ["required_read_paths", "hint_read_paths"])
+    @pytest.mark.parametrize("lookup", ["exists", "resolve"])
+    def test_prompt_keeps_valid_read_refs_after_path_error(self, tmp_path, monkeypatch, read_field, lookup):
+        from agent_py_agent.agent.agent_core.runner.prompts import prepare_subagent_runner_prompt
+        from agent_py_agent.agent.subagents.models import ContextManifest
+
+        (tmp_path / "unreadable.md").write_text("source", encoding="utf-8")
+        usable = tmp_path / "usable.md"
+        usable.write_text("usable", encoding="utf-8")
+        original = getattr(Path, lookup)
+
+        def failing_lookup(path, *args, **kwargs):
+            if path.name == "unreadable.md":
+                raise OSError(errno.ENAMETOOLONG, "reference cannot be resolved")
+            return original(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, lookup, failing_lookup)
+        context = self._make_context(
+            "run_read_error",
+            task_dir=str(tmp_path),
+            context_manifest=ContextManifest(**{read_field: ["unreadable.md", "usable.md"]}),
+            write_boundary={"product_write_roots": [str(tmp_path)]},
+        )
+        payload = json.loads(prepare_subagent_runner_prompt(context).context_json)
+        reads = payload["read_refs"]
+        if read_field == "required_read_paths":
+            assert reads["declared_read_path_count"] == 2
+            assert reads["unresolved_read_path_count"] == 1
+            assert reads["resolved_read_paths"] == [str(usable)]
+        else:
+            assert reads["hint_read_path_count"] == 2
+            assert reads["resolved_hint_read_paths"] == [str(usable)]
+        assert payload["permissions"]["allowed_skills"] == []
+
+    @pytest.mark.parametrize("lookup", ["exists", "resolve"])
+    def test_read_ref_keeps_usable_alternative_root_after_path_error(self, tmp_path, monkeypatch, lookup):
+        from agent_py_agent.agent.agent_core.runner.prompt_context_summary import (
+            _resolve_read_paths,
+        )
+
+        unavailable_root = tmp_path / "unavailable"
+        usable_root = tmp_path / "usable"
+        for root in (unavailable_root, usable_root):
+            root.mkdir()
+            (root / "source.md").write_text("source", encoding="utf-8")
+        original = getattr(Path, lookup)
+
+        def failing_lookup(path, *args, **kwargs):
+            if path.parent == unavailable_root:
+                raise PermissionError(errno.EACCES, "reference lookup denied")
+            return original(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, lookup, failing_lookup)
+        resolved, unresolved = _resolve_read_paths(["source.md"], [unavailable_root, usable_root])
+        assert resolved == [str(usable_root / "source.md")]
+        assert unresolved == []
+
+    @pytest.mark.parametrize("lookup", ["exists", "resolve"])
+    def test_read_ref_interruption_still_stops_prompt_preparation(self, tmp_path, monkeypatch, lookup):
+        from agent_py_agent.agent.agent_core.runner.prompts import prepare_subagent_runner_prompt
+        from agent_py_agent.agent.subagents.models import ContextManifest
+
+        (tmp_path / "interrupted.md").write_text("source", encoding="utf-8")
+        original = getattr(Path, lookup)
+
+        def interrupted_lookup(path, *args, **kwargs):
+            if path.name == "interrupted.md":
+                raise InterruptedError(errno.EINTR, "reference lookup interrupted")
+            return original(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, lookup, interrupted_lookup)
+        context = self._make_context(
+            "run_interrupted_read",
+            task_dir=str(tmp_path),
+            context_manifest=ContextManifest(required_read_paths=["interrupted.md"]),
+        )
+        with pytest.raises(InterruptedError):
+            prepare_subagent_runner_prompt(context)
 
     def test_prompt_filters_host_owned_closeout_refs_from_old_bundle(self):
         from agent_py_agent.agent.agent_core.runner.prompts import _build_subagent_runner_prompt

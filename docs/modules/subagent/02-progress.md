@@ -1,5 +1,7 @@
 # 子代理维护状态
 
+2026-09-27：G05暴露首次提示准备直接抛路径ENAMETOOLONG。现对单个资料候选exists/resolve的OSError沿原unresolved投影处理，保留其它引用及InterruptedError传播；新8例旧6红2绿、修后全绿，四文件65项通过，独立窄审无阻断。未改创建可见性或包授权，尚未安装；申请链及真实私有读取仍待收口，见[测试记录](../../../TESTS.md#c17子代理资料路径异常隔离2026-09-27)。
+
 子代理可观测与授权失败即停（分支 `claude/subagent-observability`，2026-09-27，本地回归与变异通过，未部署）：真实使用中
 4 个只读子代理读 owner home 外的工作树，list_files/read_file/search_text 全在授权阶段被 `PATH_OWNER_SCOPE_BLOCKED` 拦下，
 各卡约 20 分钟，父代理只看到“最近成功调用工具: search_text”。三处修复，全部读结构化事实：
