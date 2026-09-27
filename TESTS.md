@@ -1,5 +1,16 @@
 # 测试与发布验收
 
+## C18包成员参数纠错（2026-09-27）
+
+- 原生C18失败保留；旧产品最小反例4/4失败，均把未声明成员报为`SKILL_SNAPSHOT_UNAVAILABLE`。真实ToolExecutor同样失败，红证据`candidate-18-resource-path-red-01`未改写；其中第三路径为当时的`../CAPABILITY.md`，最终覆盖改用`inputs/story.json`。中断吞异常是另一个静态发现，不冒充这4项的失败原因。
+- 产品只改`skill_search_tool.py`：原包/代次核验之后按声明判成员，返回原参数错误及同代入口建议；保留原reader、任务pin与取消语义，明确重抛`InterruptedError`。无新增状态、配置、依赖、权限或模型循环。
+- `.venv/bin/python -B -m pytest agent_py_agent/tests/test_capability_package_resource_scope.py agent_py_agent/tests/test_capability_package_selector_recovery.py agent_py_agent/tests/test_capability_package_read.py agent_py_agent/tests/test_capability_package_discovery.py agent_py_agent/tests/test_capability_package_runtime_binding.py agent_py_agent/tests/test_capability_package_native_pipeline.py -q --tb=short`：119 passed，0失败/错误/跳过，6.083秒。实际使用原checkout的Python 3.12 venv、当前工作树源码、隔离MY_AGENT_HOME和临时目录，无真实模型/Gateway。
+- 新10例覆盖三个错成员路径、任意声明入口名、同代建议的显式重读、真实ToolExecutor恢复动作及原TaskStore pin、旧代拒绝、真实缺字节/摘要错误和取消。原未知/未授权例加强断言；不声称失败get不会沿原策略晋升任务。
+- 测试前后所有受核Python源码指纹一致，私有证据`candidate-18-resource-path-focused-01.json/.xml/.log`保留准确argv与摘要，日志SHA256 `3967a3470f7eac359388222b353644d0c76efe416477cf10067638da7e665570`。独立只读末审无阻断；成熟参考与边界记录在`candidate-18-resource-path-readonly-review.json`。
+- 本地严格gate已通过：Ruff、doc-sync、strict-size（hard=0）、diff和clean-package全部退出0，记录为`candidate-18-resource-path-strict-01.json`；生成尺寸报告已恢复原字节。随后只更新通过记录并复核doc-sync/diff，未重跑组件。线上CI未作为验收来源。无新增重要文件或配置，不改CODEBASE_TREE、YAML/dataclass；未改变子代理模块，模块四件套无需更新。当前私有运行仍def648397，真实模型纠错和委派待固定新版复验，最终0/27保持。
+
+建议下一步：固定补片交Claude集成，root在私有新版用新会话验证原需求；Claude可并行完成Compact，双方不同时写产品入口，不补救C18旧业务产物。
+
 ## C17显式包申请组件链（2026-09-27）
 
 - 真实隔离安装/创建/申请组件先证明旧产品5例4失败1通过：合法包申请在无候选及真实包卡命中时均提前GAP，未知包也提前GAP，混合申请只授工具却GRANTED；裸包名不会自动变成包授权。

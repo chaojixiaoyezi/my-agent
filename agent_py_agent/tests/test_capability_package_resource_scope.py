@@ -1,5 +1,5 @@
-# LLM: 只验证原包检索/读取的参数与地址投影；错误动作不得静默丢资源条件或查询身份，组件与原生替身不联网。
-# 模块用途: 守住包成员与业务文件的地址空间、同代导航和大结果引用，不替真实任务交付。
+# LLM: 验证原包检索/读取的地址与错误恢复；仅当前授权同代的未声明路径给入口建议，真实读取失败和取消不得降级，组件不联网。
+# 模块用途: 守住包成员的地址空间、同代导航和原任务引用，建议须再次显式读取，不替真实任务交付。
 from __future__ import annotations
 
 import json
@@ -10,6 +10,11 @@ from unittest.mock import Mock
 import pytest
 
 from agent_py_agent.agent.backends import ModelResponse
+from agent_py_agent.agent.common.cancellation import (
+    CancellationToken,
+    ToolCancelled,
+    bind_cancellation_token,
+)
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.user_space.owner_resolver import resolve_owner_home
 from agent_py_agent.tests.test_agent.backends import _TestNativeBackend
@@ -18,6 +23,7 @@ from agent_py_agent.tests.test_capability_package_discovery import (
     package_fixture,
 )
 from agent_py_agent.tests.test_capability_package_native_pipeline import _PackagePipelineBackend
+from agent_py_agent.tests.test_capability_package_runtime_binding import _execute, _unpromoted_turn
 from agent_py_agent.tests.test_capability_package_selector_recovery import _observe_pins
 from agent_py_agent.tests.test_capability_package_task_refs import _agent
 
@@ -101,10 +107,154 @@ def test_ungranted_or_unknown_package_cannot_obtain_navigation(
     agent.current_skill_snapshot = lambda: snapshot.restricted([visible.stable_id], expected_refs=[visible.to_ref()])
     pins = _observe_pins(monkeypatch)
     for package_id in ("hidden", "missing"):
-        outcome = tool.execute({"action": action, "package_id": package_id})
+        arguments = {"action": action, "package_id": package_id}
+        if action == "get":
+            arguments["resource_path"] = "SKILL.md"
+        original = deepcopy(arguments)
+        outcome = tool.execute(arguments)
         assert not outcome.ok
         assert json.loads(outcome.output) == {"error": "CAPABILITY_PACKAGE_NOT_AVAILABLE"}
+        assert outcome.error_code == "SKILL_SNAPSHOT_UNAVAILABLE" and arguments == original
     assert reads == pins == []
+
+
+@pytest.mark.parametrize("resource_path,entry_document,explicit_generation", [
+    ("SKILL.md", "CAPABILITY.md", False),
+    ("methods/missing.md", "docs/entry.txt", True),
+    ("inputs/story.json", "CAPABILITY.md", True),
+])
+def test_undeclared_member_suggests_only_same_generation_entry_without_read_or_pin(
+    tmp_path, skill_catalog_factory, monkeypatch, resource_path, entry_document, explicit_generation,
+):
+    reads = []
+    files = {"CAPABILITY.md": b"default entry", "docs/entry.txt": b"declared alternative entry",
+             "methods/private.md": b"private body"}
+    package = replace(package_fixture(files=files, reads=reads), entry_document=entry_document)
+    _, snapshot, agent, tool = discovery_fixture(tmp_path, skill_catalog_factory, [package])
+    agent.config = replace(agent.config, tool_read_max_chars=5000)
+    agent.current_skill_snapshot = lambda: snapshot.restricted(
+        [package.stable_id], expected_refs=[package.to_ref()],
+    )
+    pins = _observe_pins(monkeypatch)
+    expected = {"action": "get", "package_id": package.package_id,
+                "expected_package_sha256": package.package_sha256,
+                "expected_activation_id": package.activation_id}
+    arguments = {"action": "get", "package_id": package.package_id, "resource_path": resource_path}
+    if explicit_generation:
+        arguments.update(expected)
+    original = deepcopy(arguments)
+    failed = tool.execute(arguments)
+    assert not failed.ok and failed.error_code == "TOOL_INVALID_ARGUMENTS"
+    payload = json.loads(failed.output)
+    assert payload["error"] == "CAPABILITY_RESOURCE_NOT_AVAILABLE"
+    assert payload["next_read"] == expected and "resource_path" not in payload["next_read"]
+    assert "body" not in payload and "source_ref" not in payload and "matches" not in payload
+    assert arguments == original and reads == pins == []
+    retry = deepcopy(payload["next_read"])
+    read = tool.execute(retry)
+    assert read.ok, read.output
+    assert retry == expected and json.loads(read.output)["body"] == files[entry_document].decode()
+    assert reads == [entry_document] and pins == [package.to_ref()]
+
+
+def test_undeclared_member_executor_recovery_repairs_arguments_then_pins_original_task(tmp_path, monkeypatch):
+    agent, _store, _entries = _agent(tmp_path)
+    thread, params = _unpromoted_turn(agent)
+    package = agent.current_skill_snapshot().resolve_package("story-a")
+    reference = package.to_ref()
+    pins = _observe_pins(monkeypatch)
+    arguments = {"action": "get", "package_id": "story-a", "resource_path": "SKILL.md"}
+    original = deepcopy(arguments)
+    failed = _execute(agent, params, arguments, "wrong-package-member")
+    assert not failed.ok and failed.error_code == "TOOL_INVALID_ARGUMENTS"
+    assert failed.recommended_action == "repair_tool_arguments"
+    payload = json.loads(failed.output)
+    assert payload["error"] == "CAPABILITY_RESOURCE_NOT_AVAILABLE"
+    assert arguments == original and pins == []
+    # 失败 get 可以沿原策略晋升任务；本次只要求它不固定任何包引用。
+    assert all(not task.skill_snapshot_refs for task in agent.conversation_store.tasks.list(thread.thread_id))
+    retry = deepcopy(payload["next_read"])
+    expected = {"action": "get", "package_id": package.package_id,
+                "expected_package_sha256": package.package_sha256,
+                "expected_activation_id": package.activation_id}
+    assert retry == expected
+    read = _execute(agent, params, retry, "read-suggested-entry")
+    assert read.ok, read.output
+    result = json.loads(read.output)
+    assert result["body"] == "# story-a" and result["source_ref"]["resource_path"] == package.entry_document
+    assert retry == expected and pins == [reference]
+    task = agent.conversation_store.tasks.load(params.task_attributes["conversation_task_id"])
+    assert task.thread_id == thread.thread_id and task.skill_snapshot_refs == (reference,)
+
+
+@pytest.mark.parametrize("field", ["package_sha256", "activation_id"])
+def test_undeclared_member_with_old_generation_cannot_suggest_same_named_new_entry(
+    tmp_path, skill_catalog_factory, monkeypatch, field,
+):
+    reads = []
+    old = package_fixture(reads=reads)
+    _, snapshot, agent, tool = discovery_fixture(tmp_path, skill_catalog_factory, [old])
+    agent.current_skill_snapshot = lambda: replace(snapshot, packages=(replace(old, **{field: "0" * 64}),))
+    pins = _observe_pins(monkeypatch)
+    arguments = {"action": "get", "package_id": old.package_id, "resource_path": "SKILL.md",
+                 "expected_package_sha256": old.package_sha256, "expected_activation_id": old.activation_id}
+    original = deepcopy(arguments)
+    failed = tool.execute(arguments)
+    assert not failed.ok and failed.error_code == "SKILL_SNAPSHOT_UNAVAILABLE"
+    assert json.loads(failed.output) == {"error": "SKILL_SNAPSHOT_STALE"}
+    assert arguments == original and reads == pins == []
+
+
+@pytest.mark.parametrize("failure", ["missing_bytes", "wrong_digest"])
+def test_declared_member_reader_failure_is_not_wrong_path_recovery(
+    tmp_path, skill_catalog_factory, monkeypatch, failure,
+):
+    reader = (
+        Mock(side_effect=FileNotFoundError("declared member bytes missing"))
+        if failure == "missing_bytes" else Mock(return_value=b"changed")
+    )
+    package = replace(package_fixture(), reader=reader)
+    _, _, _, tool = discovery_fixture(tmp_path, skill_catalog_factory, [package])
+    pins = _observe_pins(monkeypatch)
+    arguments = {"action": "get", "package_id": package.package_id, "resource_path": package.entry_document}
+    original = deepcopy(arguments)
+    failed = tool.execute(arguments)
+    assert not failed.ok and failed.error_code == "SKILL_SNAPSHOT_UNAVAILABLE"
+    assert json.loads(failed.output) == {"error": f"CAPABILITY_RESOURCE_UNAVAILABLE package={package.package_id}"}
+    reader.assert_called_once_with(package.entry_document)
+    assert arguments == original and pins == []
+
+
+def test_package_reader_interruption_propagates_without_argument_recovery(
+    tmp_path, skill_catalog_factory, monkeypatch,
+):
+    interruption = InterruptedError("reader interrupted")
+    reader = Mock(side_effect=interruption)
+    package = replace(package_fixture(), reader=reader)
+    _, _, _, tool = discovery_fixture(tmp_path, skill_catalog_factory, [package])
+    pins = _observe_pins(monkeypatch)
+    arguments = {"action": "get", "package_id": package.package_id}
+    original = deepcopy(arguments)
+    with pytest.raises(InterruptedError) as caught:
+        tool.execute(arguments)
+    assert caught.value is interruption and arguments == original and pins == []
+    reader.assert_called_once_with(package.entry_document)
+
+
+def test_cancelled_undeclared_member_preserves_original_cancellation_without_read_or_pin(
+    tmp_path, skill_catalog_factory, monkeypatch,
+):
+    reads = []
+    package = package_fixture(reads=reads)
+    _, _, _, tool = discovery_fixture(tmp_path, skill_catalog_factory, [package])
+    pins = _observe_pins(monkeypatch)
+    token = CancellationToken()
+    token.cancel("cancelled-before-package-get")
+    arguments = {"action": "get", "package_id": package.package_id, "resource_path": "SKILL.md"}
+    original = deepcopy(arguments)
+    with bind_cancellation_token(token), pytest.raises(ToolCancelled, match="cancelled-before-package-get"):
+        tool.execute(arguments)
+    assert arguments == original and reads == pins == []
 
 
 @pytest.mark.parametrize("arguments", [

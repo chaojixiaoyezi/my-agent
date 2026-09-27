@@ -111,6 +111,14 @@ panels、skills、host_api；脚本文本是私有资源，读取不等于执行
 即使空串，也在读取快照前返回 `TOOL_INVALID_ARGUMENTS`；不能忽略它后返回成功、自动改成读取或查询词。
 参数错误只说明正确用法，不暴露未授权包身份、成员或正文，不改变当前任务引用。
 
+`get`的包可见性及预期代次核验后，若`package.resolve(resource_path)`未命中声明成员，
+沿既有`TOOL_INVALID_ARGUMENTS`返回`CAPABILITY_RESOURCE_NOT_AVAILABLE`及同代入口`next_read`，
+让原恢复合同选择`repair_tool_arguments`。入口名由包声明决定，建议省略成员路径并带准确摘要和activation；
+须再次显式调用才进入原reader并在成功后pin，错误本身不读取或改引用。原get任务晋升策略仍可先发生。
+未知/未授权包、预期代次不符及声明成员真实缺字节/摘要变化保持原快照错误；取消和中断继续传播。
+本片参考Free-Code固定`6b25ab68`的FileReadTool结构化缺文件回执、Codex固定`578c1b22`的精确资源身份读取；
+只复用本仓已有参数错误与`package_read_parameters`，不移植参考项目的自动重试或模糊路径猜测。
+
 成功的包范围 search/get 同时返回 `resource_namespace` 和限页的同代 `next_search`。
 命名空间只描述清单中已经声明的包根相对成员；正文提到的业务输入、交付路径不因此变成包成员。
 模型先检索声明，再使用匹配项 `next_read`，不能把虚拟成员当工作区文件或猜安装位置。

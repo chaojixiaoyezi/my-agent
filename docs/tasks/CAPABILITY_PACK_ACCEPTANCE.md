@@ -1,5 +1,21 @@
 # 能力内化：来源盘点与验收矩阵
 
+## C18错误资源路径与恢复分类（2026-09-27）
+
+私有运行已从51dac精确切为`def6483976a4392403a7a772d6bda93538ab4097`，含runner资料引用及显式包申请两片修复。源码、wheel及安装1430成员一致；wheel摘要`ceb106a53205795ced346156b1d430b990b57abd0631a5b1b6cb9e789f2be8b1`。安装过程14286份停机配置/数据文件保持，原Gateway正常停止后仍只有一个私有Gateway；没有切换日用环境。
+
+新CAP02继续使用同一A0.3.0/B0.1.4、官方MiniMax-M2.7默认262144窗口，仅提交一次原G05资料交接需求。请求`gwreq-1790530522-3cf1bfbe6a8242f2b7a71bab9419f565`在31.574秒后done，4 HTTP/0重试；业务失败、没有孩子或交接产物，generation0，不能据运行终态记验收通过。
+
+两次get均把`resource_path`猜成未声明的`SKILL.md`，实际两包声明入口为`CAPABILITY.md`。原生返回正文为`CAPABILITY_RESOURCE_NOT_AVAILABLE`，外层错误码却是`SKILL_SNAPSHOT_UNAVAILABLE`，原恢复合同因此建议重新授权。模型复述外层码并非凭空造错；真实缺口是成员参数错误与快照失效混在一起。一次选择empty、pins为空是观测事实，不是已证明的失败原因。两片委派修复尚未被本例执行到，仍须真实复验。
+
+321份旧验证文件、132份旧任务的pins/selection、六份配置和安装账保持；观察者没有补需求、修改授权、重装包或代写产物。私有`candidate-18-general-delegation-observation.json`摘要`125dc21c06cd2ae590cd30d5e8fbf51828fbde61127e8419b8ffe9d9f0f6fa85`，保留参数、原生工具结果、模型用量和终态。此例为开发验证，最终仍0/27。
+
+本地修复仅改原`skill_search_tool`：在受限包和预期代次核验后按声明判成员，未命中返回原`TOOL_INVALID_ARGUMENTS`及同代入口建议，原恢复动作为`repair_tool_arguments`。新显式调用才进入reader和pin；错误本身不读正文，取消/中断和实际读取失效仍保持。失败get仍可能沿原策略晋升任务，不能误报没有任何状态写入。
+
+旧实现最小4/4红已冻结；新10例覆盖任意入口、同代建议、实际ToolExecutor/TaskStore、旧代、读取损坏和取消。最终相关6文件119 passed，0失败/错误/跳过，6.083秒，源码指纹无漂移，独立末审无阻断；Ruff、doc-sync、strict-size、diff及clean-package全部通过，线上CI未作为依据。无新配置、权限账或重要文件结构，未改包内容/格式；组件证据不能改判C18或最终0/27。准确命令与日志摘要见[测试记录](../../TESTS.md#c18包成员参数纠错2026-09-27)。
+
+建议下一步：固定本地补片交接，以新运行候选复验委派；Claude的连续Compact修复可并行。保留C18原失败，不调整包内容或业务prompt。
+
 ## C17显式包申请回到原父级裁决（2026-09-27）
 
 G05后的独立组件复现确认：即便使用合法`capability:story-a`，语义无命中或真实包卡已命中都会提前GAP；混合write_file申请则仅授工具却GRANTED。5例旧4失败1通过；裸包名不转换为包引用的原行为保持。这不是原生G05的追加需求或替被测模型补授权。

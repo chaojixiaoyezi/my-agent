@@ -1,6 +1,6 @@
 # LLM_GUIDE
 
-当前G05两处通用缺口已有本地修复：资料路径查询异常隔离固定为0ef01a6c8，65项通过；显式包申请保留给原直属父级裁决，111项组件通过，未安装。下一步固定交接第二片，再与Claude的Compact补片组合做原生复验；最终0/27保持，详见[唯一TODO](docs/tasks/CAPABILITY_INTERNALIZATION_GOAL.md#唯一-todo)。
+当前私有运行def648397已含runner引用及显式包申请修复。C18随后暴露错成员路径误归快照失效；原读取工具现已本地修正参数分类与同代入口建议，6文件119项、独立末审和本地严格gate通过，待固定新版原生复验。旧失败不改判，最终0/27保持，当前四项收口见[唯一TODO](docs/tasks/CAPABILITY_INTERNALIZATION_GOAL.md#唯一-todo)。
 
 当前开发切片是C17通用能力包验收：固定51dac1b81已由Claude组合发布并双机部署step13w，本线核对23639项全仓通过、0失败及本地严格gate；线上CI未作为验收来源。私有环境也已精确安装同版，发布与最终功能收口分别记录。Goal仍active，当前缺项以[唯一执行清单](docs/tasks/CAPABILITY_INTERNALIZATION_GOAL.md)为准。
 
