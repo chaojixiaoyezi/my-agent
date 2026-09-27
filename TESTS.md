@@ -1,5 +1,13 @@
 # 测试与发布验收
 
+## 协作状态更新按 case 串行（2026-09-27，分支 `claude/collab-request-race`，基于 main `b7fe42a90`）
+
+- **来源**：12 分片全仓运行时 `test_concurrent_request_status_update_no_corruption` 偶发失败，终态停在 `open`。原因是请求状态
+  读改写没有锁：`rerouted` 不是协议状态，这类更新保留读到的状态，很早读到 `open` 的线程最后写入，就把已完成的请求写回 `open`。
+- **新测试**（`test_collaboration_concurrency.py`）：`test_stale_request_snapshot_cannot_overwrite_a_newer_status`、
+  `test_stale_case_snapshot_cannot_overwrite_a_newer_status` 用事件把慢线程卡在“已读未写”，确定性复现旧快照覆盖；
+  去掉锁两项都失败（终态回到 `open`），加锁后通过。
+
 ## 参数中心阶段 2b：管理员自身开发工作树约定（2026-09-27，分支 `claude/self-dev-worktree`，基于 main `c9142d09a`）
 
 - `test_prompting_builder.py` 新增 6 项：本机管理员 + Full Access + 真实 git 工作树时 Owner Scope 写明正在运行的包目录与开发工作树；

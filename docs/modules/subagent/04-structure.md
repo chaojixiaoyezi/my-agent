@@ -311,6 +311,18 @@ resume"的签名；该 attempt 不会再产出，runner 对**同一个 attempt**
 http 事件、takeover readiness、CLI resume、identity/daily memory。会按行重写文件的路径（审计清理、
 task workspace 摘要同步）同样改用它，避免"读时切开、写回落成 LF"的静默改写。
 
+## 协作状态更新按 case 串行（2026-09-27）
+
+协作请求与 case 的状态更新都是“读当前快照→改→写回”：请求读该 id 最新一行、追加新快照；case 读 JSON、改写回。
+追加本身有 JSONL 文件锁，但读和写之间原来没有锁：一个很早读到 `open` 的更新最后才写入，会把别人刚完成的请求或刚关闭的
+case 写回 `open`（非法状态文本保留读到的状态），也会丢掉别人刚写的改派目标和摘要。全仓 12 分片时
+`test_concurrent_request_status_update_no_corruption` 因此偶发失败。
+
+现在 `CollaborationBaseStore._case_update_lock(case_id)` 用 `common/json_io.locked_json_path` 在
+`cases/<case_id>.update.lock` 上加进程内与跨进程排他锁，`update_request_status`、`update_case_status` 的读改写都在锁内。
+锁文件与 JSONL/JSON 自己的写锁不同名，临界区里照常追加、原子写不会自锁；同一线程不能嵌套取这把锁（现有调用链没有嵌套）。
+先用 `load_case` 确认 case 存在再取锁，不按外部传入的 case_id 在别处建锁文件。只追加的写入（证据、参与者、决策、新请求）不受影响。
+
 ## R232 回收结果字段名
 
 `delete_policy.completion_requires` 是模型侧自查清单，字段名必须与 `controlled_exec` 的

@@ -1,5 +1,8 @@
 # 子代理维护状态
 
+协作状态更新按 case 串行（分支 `claude/collab-request-race`，2026-09-27）：请求与 case 的状态读改写改在按 case 的更新锁内，修掉“旧快照最后写入、
+把已完成的请求写回 open”的丢失更新；原全仓分片偶发失败有了确定性复现与回归用例。细节见 04-structure 同名节。
+
 自学习 S1 改为自动确认（分支 `claude/skill-auto-summary`，2026-09-26，用户决定自学习不逐条审批）：`runner_result_service._skill_proposal_note`
 在生成提案后立即对每条新提案调用 `SkillProposalService.confirm(..., actor="auto")`，走原来的全部复核（版本、草稿 hash、来源 Candidate、
 目标不存在、解析、guard），回执记 `confirmed_by=auto`；被拒的提案保持待确认。工作日志改为 `skill_proposals=<新建数> skill_proposals_committed=<安装数>`，

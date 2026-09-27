@@ -56,7 +56,9 @@ def test_concurrent_evidence_submission_no_loss(tmp_path) -> None:
 
 
 def test_concurrent_request_status_update_no_corruption(tmp_path) -> None:
-    """15 线程并发更新同一 request → 不崩、dedup 后仍 1 条、终态合法(last-write-wins 可接受)。"""
+    """15 线程并发更新同一 request → 不崩、dedup 后仍 1 条、终态合法。
+
+    rerouted 不是协议状态，这类更新保留读到的当前状态；按 case 串行后每次更新都基于上一次结果，终态不会回到 open。"""
     store = _store(tmp_path)
     case, request = _case_with_request(store)
     statuses = ["completed", "declined", "rerouted"]
@@ -75,6 +77,71 @@ def test_concurrent_request_status_update_no_corruption(tmp_path) -> None:
     reqs = store.case_requests(case.case_id)
     assert len(reqs) == 1  # dedup by id,仍 1 条(无半损坏的多条)
     assert reqs[0].status in statuses  # 终态是某个合法更新(JSONL 未损坏)
+
+
+def test_stale_request_snapshot_cannot_overwrite_a_newer_status(tmp_path, monkeypatch) -> None:
+    """复现 2026-09-27 全仓分片里的偶发失败：先读到 open 的更新最后才写入，把已完成的请求写回 open。
+
+    慢线程读到 open 后停在“算新快照”处；快线程随后提交 completed。按 case 串行时快线程必须等慢线程写完再读，
+    终态是 completed；没有串行时慢线程最后写入旧快照，终态回到 open。
+    """
+    store = _store(tmp_path)
+    case, request = _case_with_request(store)
+    slow_has_read, release_slow = threading.Event(), threading.Event()
+    original = store._updated_request_snapshot
+
+    def gated_snapshot(current, status_text, kwargs):
+        if status_text == "rerouted":
+            slow_has_read.set()
+            release_slow.wait(5)
+        return original(current, status_text, kwargs)
+
+    monkeypatch.setattr(store, "_updated_request_snapshot", gated_snapshot)
+
+    def update(status: str, index: int) -> None:
+        store.update_request_status({
+            "case_id": case.case_id, "request_id": request.request_id, "status": status,
+            "actor_agent_id": f"h-{index}", "now": float(10 + index),
+        })
+
+    slow = threading.Thread(target=update, args=("rerouted", 1))
+    slow.start()
+    assert slow_has_read.wait(5)
+    fast = threading.Thread(target=update, args=("completed", 2))
+    fast.start()
+    fast.join(0.5)  # 没有串行时快线程在这里已经写完；有串行时它还在等锁
+    release_slow.set()
+    slow.join(5)
+    fast.join(5)
+    assert not slow.is_alive() and not fast.is_alive()
+    assert store.case_requests(case.case_id)[0].status == "completed"
+
+
+def test_stale_case_snapshot_cannot_overwrite_a_newer_status(tmp_path, monkeypatch) -> None:
+    """case 状态同理：带非法状态文本的更新保留读到的 open，不能在别人关闭 case 之后把它写回 open。"""
+    store = _store(tmp_path)
+    case, _request = _case_with_request(store)
+    slow_has_read, release_slow = threading.Event(), threading.Event()
+    original = store._write_case
+
+    def gated_write(updated) -> None:
+        if updated.metadata.get("raw_case_status") == "archived":
+            slow_has_read.set()
+            release_slow.wait(5)
+        original(updated)
+
+    monkeypatch.setattr(store, "_write_case", gated_write)
+    slow = threading.Thread(target=store.update_case_status, args=(case.case_id,), kwargs={"status": "archived", "now": 5.0})
+    slow.start()
+    assert slow_has_read.wait(5)
+    fast = threading.Thread(target=store.update_case_status, args=(case.case_id,), kwargs={"status": "closed", "now": 6.0})
+    fast.start()
+    fast.join(0.5)
+    release_slow.set()
+    slow.join(5)
+    fast.join(5)
+    assert not slow.is_alive() and not fast.is_alive()
+    assert store.load_case(case.case_id).status == "closed"
 
 
 def test_concurrent_case_creation_all_persisted(tmp_path) -> None:

@@ -1,3 +1,7 @@
+# LLM: 协作账本的唯一读写入口：case 是 JSON 快照，请求/证据/参与者/决策是只追加 JSONL（同 id 取最后一行）。
+#   追加由 io.jsonl 的文件锁串行；“读当前快照→改→写回”的状态更新另由按 case 的更新锁串行（_case_update_lock），
+#   否则晚写入的旧快照会覆盖别人刚写的状态。改动须同步 test_collaboration_store*.py 与 test_collaboration_concurrency.py。
+# 模块用途: 保存多代理协作的 case、请求、证据、参与者、决策和能力登记，供协作工具与主代理汇总读取。
 """Collaboration store for cases, requests, evidence, participants,
 decisions, and agent capabilities.
 """
@@ -5,10 +9,12 @@ decisions, and agent capabilities.
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from ..common.json_io import locked_json_path
 from ..gateway_parts.io import read_json_file, update_json_file_atomic, write_json_file_atomic
 from ..io.jsonl import append_jsonl
 from ..runtime_errors import runtime_error_report
@@ -55,6 +61,8 @@ from .store_common import now as current_time
 # shared layout
 # ---------------------------------------------------------------------------
 
+# LLM: 目录布局与按 case 的更新锁都在这里定义，子类只能经这些路径读写，不另造位置或第二把状态锁。
+# 类用途: 协作账本的公共目录布局和共享工具，所有协作 store 子类都继承它。
 class CollaborationBaseStore:
     """Shared directory layout for case/request/evidence ledgers."""
 
@@ -83,6 +91,16 @@ class CollaborationBaseStore:
 
     def _case_path(self, case_id: str) -> Path:
         return self.cases_dir / f"{case_id}.json"
+
+    # LLM: 同一 case 的“读当前快照→改→写回”必须串行：2026-09-27 全仓并发测试里，一个很早读到 open 的请求更新最后才写入，
+    #   把已完成的请求写回 open（同理会丢掉别人刚写的改派目标、摘要）。锁文件 cases/<case_id>.update.lock 与 JSONL/JSON
+    #   自己的写锁不同名，临界区里照常调用 append_jsonl、write_json_file_atomic 不会自锁；同一线程不能嵌套取这把锁。
+    #   调用方必须先用 load_case 确认 case 存在，再取锁，避免按外部传入的 case_id 在别处建锁文件。
+    # 函数用途: 给一个 case 的状态更新加进程内与跨进程排他锁，保证每次更新都基于上一次的结果。
+    @contextmanager
+    def _case_update_lock(self, case_id: str):
+        with locked_json_path(self.cases_dir / f"{case_id}.update"):
+            yield
 
     def _requests_path(self, case_id: str) -> Path:
         return self.requests_dir / f"{case_id}.jsonl"
@@ -284,6 +302,8 @@ class CollaborationCaseStore(CollaborationCapabilityStore):
         cases.sort(key=lambda item: item.created_at)
         return cases
 
+    # LLM: 锁内重读 case 再改写，保证基于最新快照；非法状态文本保留当前状态并记协议错误元数据。只写 case JSON。
+    # 函数用途: 更新协作 case 的状态与元数据，供 record_case_status 和协作工具关闭/重开 case 时调用。
     def update_case_status(
         self,
         case_id: str,
@@ -291,6 +311,20 @@ class CollaborationCaseStore(CollaborationCapabilityStore):
         status: str,
         now: float | None = None,
         metadata: dict[str, Any] | None = None,
+    ) -> CollaborationCase:
+        self.load_case(case_id)
+        with self._case_update_lock(case_id):
+            return self._update_case_status_locked(case_id, status=status, now=now, metadata=metadata)
+
+    # LLM: 只能在 _case_update_lock 内调用；重读 case、按协议归一状态、合并元数据后原子写回 case JSON。
+    # 函数用途: update_case_status 的锁内实现，拆开是为了让加锁范围一眼可见。
+    def _update_case_status_locked(
+        self,
+        case_id: str,
+        *,
+        status: str,
+        now: float | None,
+        metadata: dict[str, Any] | None,
     ) -> CollaborationCase:
         case = self.load_case(case_id)
         next_metadata = dict(case.metadata)
@@ -480,9 +514,18 @@ class CollaborationRequestStore(CollaborationCaseStore):
 
 
 class CollaborationRequestStatusStore(CollaborationRequestStore):
+    # LLM: 请求状态更新 = 锁内读该请求最新一行→算新快照→追加一行；非法状态文本保留读到的当前状态。
+    #   副作用：追加请求行、改派时追加参与者、追加一条状态决策。锁见 _case_update_lock。
+    # 函数用途: 协作请求的完成、拒绝、阻塞、改派等状态变化都从这里写入账本。
     def update_request_status(self, request_data: dict) -> CollaborationRequest:
         case_id = str(request_data.get("case_id") or "")
         self.load_case(case_id)
+        with self._case_update_lock(case_id):
+            return self._update_request_status_locked(case_id, request_data)
+
+    # LLM: 只能在 _case_update_lock 内调用；校验顺序保持原样（先请求编号、再状态文本），读最新一行后追加新快照。
+    # 函数用途: update_request_status 的锁内实现，拆开是为了让加锁范围一眼可见。
+    def _update_request_status_locked(self, case_id: str, request_data: dict) -> CollaborationRequest:
         request_id = str(request_data.get("request_id") or "")
         request = self._request_by_id(case_id, request_id)
         status_text = str(request_data.get("status") or "").strip()
