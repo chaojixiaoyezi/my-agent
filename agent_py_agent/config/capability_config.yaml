@@ -50,8 +50,6 @@ subagent_stream_idle_notice_seconds: 180
 subagent_tool_wait_notice_seconds: 900
 # 决策能力点默认关闭；observe 也会发请求并产生用量；模式不授予执行权限。
 decision_subagent_model_mode: off
-decision_subagent_model_timeout_seconds: null  # 有限正秒数；留空继承通用前台期限，零不是无限
-decision_subagent_model_profile_id: null  # 留空继承通用 Decision 模型引用
 # 子代理执行模型候选的原模型目录 ID；[] 使用全部当前授权的 agentic 模型。可按用户长期或会话设置覆盖，不按名称猜服务商。
 decision_subagent_model_candidate_profile_ids: []
 # 总开关与本点仍默认关闭。采用时 metadata 只缩减名卡/推荐，progressive 还延迟可选类别的未选中工具。
@@ -60,8 +58,6 @@ decision_skill_tool_context_policy: progressive
 # 可额外收起的工具类别是开放字符串列表；[] 不额外收起。不会修改原 tool_catalog_deferred_categories。
 decision_skill_tool_optional_categories: ["plugins"]
 decision_skill_tool_mode: off
-decision_skill_tool_timeout_seconds: null  # 有限正秒数；留空继承通用前台期限
-decision_skill_tool_profile_id: null  # 留空继承通用 Decision 模型引用
 
 # my-agent 自己调决策等待时间的上下限（秒，整数）。
 # - 只约束 my-agent 通过 user_config 的 decision_patch 调整各 timeout_seconds 字段（通用前台/阶段/后台与各接入点）；

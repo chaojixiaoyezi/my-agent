@@ -365,23 +365,35 @@ def test_defaults_follow_original_config_domains_and_fractional_yaml(tmp_path):
     host = host_at(tmp_path)
     host.config = AgentConfig(decision_timeout_seconds=2.5, memory_decision_recall_mode="observe",
                               memory_decision_pre_recall_mode="apply")
-    host.capability_config = CapabilityConfig(decision_subagent_model_mode="apply", decision_subagent_model_timeout_seconds=0.75)
+    host.capability_config = CapabilityConfig(decision_subagent_model_mode="apply")
     result = execute(host, "read", {})
     assert result["effective"]["points"]["recall"]["mode"] == "observe"
     assert result["effective"]["points"]["pre_recall"]["mode"] == "apply"
-    assert result["effective"]["points"]["subagent_model"]["timeout_seconds"] == 0.75
+    # 点位期限与模型引用不再有配置字段：没有覆盖时继承通用值，来源写明继承。
+    assert result["effective"]["points"]["subagent_model"]["timeout_seconds"] == 2.5
+    assert result["sources"]["points.subagent_model.timeout_seconds"].startswith("inherit:timeout_seconds:")
     assert result["sources"]["points.subagent_model.mode"] == "capability_config.decision_subagent_model_mode"
     path = tmp_path / "agent.yaml"
-    path.write_text("decision_timeout_seconds: 0.75\nmemory_decision_recall_timeout_seconds: null\n"
-                    "memory_decision_pre_recall_timeout_seconds: null\n")
+    path.write_text("decision_timeout_seconds: 0.75\nmemory_decision_recall_timeout_seconds: 0.5\n"
+                    "decision_planning_profile_id: someone\n")
     config = load_config(path)
-    assert config.decision_timeout_seconds == 0.75 and config.memory_decision_recall_timeout_seconds is None
-    assert config.memory_decision_pre_recall_timeout_seconds is None
+    assert config.decision_timeout_seconds == 0.75
+    assert not hasattr(config, "memory_decision_recall_timeout_seconds")
+    assert {"memory_decision_recall_timeout_seconds", "decision_planning_profile_id"} <= {
+        warning.split("'")[1] for warning in config.config_warnings if "unknown config key" in warning}
     capability = tmp_path / "capability.yaml"
+    capability.write_text("decision_skill_tool_mode: observe\n")
+    assert load_capability_config(capability).decision_skill_tool_mode == "observe"
+    # 能力路由配置原本就拒绝未知字段；已删除的点位期限写在里面会被明确拒绝，而不是静默生效。
     capability.write_text("decision_skill_tool_timeout_seconds: 0.25\n")
-    assert load_capability_config(capability).decision_skill_tool_timeout_seconds == 0.25
-    memory, _ = normalize_memory_settings({"memory_decision_curator_timeout_seconds": 0.1})
-    assert memory.memory_decision_curator_timeout_seconds == 0.1
+    with pytest.raises(ValueError, match="decision_skill_tool_timeout_seconds"):
+        load_capability_config(capability)
+    memory, _ = normalize_memory_settings({"memory_decision_curator_mode": "observe"})
+    assert memory.memory_decision_curator_mode == "observe"
+    # 按点位单独设期限只走用户长期设置覆盖层。
+    view = patch(host, {"points.planning.timeout_seconds": 1.5})
+    assert view["effective"]["points"]["planning"]["timeout_seconds"] == 1.5
+    assert view["sources"]["points.planning.timeout_seconds"] == "owner"
 
 
 @pytest.mark.parametrize("value", ["true", "false", "0", "-1", "NaN", "Infinity", "1e400"])

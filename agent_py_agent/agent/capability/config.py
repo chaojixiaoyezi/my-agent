@@ -21,16 +21,12 @@ from ..settings.config import load_simple_yaml
 class CapabilityConfig:
     """能力路由与子代理运行配置总表。
 
-    既有额度数字项：0 表示不限制；决策等待只接受有限正秒数，None 表示继承。
+    既有额度数字项：0 表示不限制；点位决策等待与模型引用只在决策设置覆盖层按点位设置，默认继承通用值。
     决策关闭由 mode=off 表达，不把零解释为无限等待。"""
 
     decision_subagent_model_mode: str = "off"
-    decision_subagent_model_timeout_seconds: float | None = None
-    decision_subagent_model_profile_id: str | None = None
     decision_subagent_model_candidate_profile_ids: list[str] = field(default_factory=list)
     decision_skill_tool_mode: str = "off"
-    decision_skill_tool_timeout_seconds: float | None = None
-    decision_skill_tool_profile_id: str | None = None
     decision_skill_tool_context_policy: str = "progressive"
     decision_skill_tool_optional_categories: list[str] = field(default_factory=lambda: ["plugins"])
     # my-agent 经 user_config decision_patch 自调决策等待时间的上下限（整数秒）；0 表示该侧不限制，用户菜单修改不受限。

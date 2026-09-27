@@ -801,6 +801,8 @@ auth 表单取消和参数拒绝已验，官方设备码在两处环境被 HTTP 
   参数减量第 2 批（分支 `claude/9a-merge-config`，已合入 main `8f73a512c`，双机 step13s）：11 组重复参数各合并成一个旋钮（并发、租约、工具并行、单代理预算、
   artifact 读取预算、归档级别、规则路由、恢复上下文、上下文窗口、温度、runner 重跑次数），守卫文件里被遮蔽的副本删除，
   `max_parallel_tool_calls` 大于 8 与 0 真正生效，runner 重跑次数只剩 AgentConfig 一个家；默认行为不变。
+  决策点位参数收口（分支 `claude/decision-point-fields`，2026-09-27）：12 个点位在三份配置里各有的 `timeout_seconds`/`profile_id`
+  （24 个）删除，点位期限与模型只在用户长期设置、会话设置里按点位覆盖，默认继承通用值；详见 [决策模型接入](docs/design/DECISION_MODEL_INTEGRATION.md)。
   常用层级（分支 `claude/9a-settings-common-view`，已合入 main，随 step13t 部署）：`/settings` 默认只列 21 个常用参数并提示 `/settings all` 看全部，
   `user_config` 搜索结果标出常用；名单在 `parameter_registry.COMMON_KEYS`，是封闭的产品决策。
   详见 [参数中心](docs/design/PARAMETER_CENTER.md)。

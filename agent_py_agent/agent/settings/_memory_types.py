@@ -9,23 +9,16 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 
-# LLM: Curator 标签、关系与召回前/后各自默认关闭；可选时间和模型引用为 None 时继承通用策略，不改变记忆证据规则。
+# LLM: Curator 标签、关系与召回前/后各自默认关闭；点位的期限与模型引用只在决策设置覆盖层按点位设置，默认继承通用策略，
+#   不改变记忆证据规则。
 # 类用途: 保存校验后真正供 Memory 运行时使用的全部配置。
 @dataclass(frozen=True)
 class MemorySettings:
     """Effective memory config after validation and default normalization."""
     memory_decision_pre_recall_mode: str = "off"
-    memory_decision_pre_recall_timeout_seconds: float | None = None
-    memory_decision_pre_recall_profile_id: str | None = None
     memory_decision_recall_mode: str = "off"
-    memory_decision_recall_timeout_seconds: float | None = None
-    memory_decision_recall_profile_id: str | None = None
     memory_decision_curator_mode: str = "off"
-    memory_decision_curator_timeout_seconds: float | None = None
-    memory_decision_curator_profile_id: str | None = None
     memory_decision_curator_relation_mode: str = "off"
-    memory_decision_curator_relation_timeout_seconds: float | None = None
-    memory_decision_curator_relation_profile_id: str | None = None
     memory_archive_level: int = 3
     memory_hook_enabled: bool = True
     memory_rule_routing_mode: str = "soft"

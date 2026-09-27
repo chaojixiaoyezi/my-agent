@@ -222,6 +222,10 @@
   - 空说明基线 `parameter_description_baseline.json` 从 177 缩到 143：34 项删除，另有 2 项（`conversation_pending_wake_limit`、
     `lease_stale_without_heartbeat_seconds`）因上方注释块重新归属而有了说明。前端 `frontend/config/backend-config-catalog.json` 是由随包 YAML
     生成的目录，在本批之前已经过期，本批未重新生成；前端设置页仍有 12 个已删键的表单项，留给前端单独清理。
+  - **决策点位的期限与模型引用只留覆盖层（2026-09-27，集成者，分支 `claude/decision-point-fields`）**：12 个点位的
+    `timeout_seconds`/`profile_id` 原来在 agent/memory/capability 三份配置里各有一个字段（24 个），与用户长期设置、会话设置里
+    按点位覆盖是同一概念的两个家。现只保留覆盖层：配置里只有通用 `decision_timeout_seconds`、`decision_background_timeout_seconds`、
+    `decision_profile_id` 与各点位 `*_mode`，点位没有覆盖时继承通用值。默认值全是空（继承），两台机器在用配置均未设置，行为不变。
   - **常用层级（2026-09-27，集成者派活，分支 `claude/9a-settings-common-view`）**：用户说“把用户当傻瓜”，99% 的人不会手动调参数，
     但命令要保留。`parameter_registry.COMMON_KEYS` 登记配置分类里标 common 的 21 个键（封闭的产品决策名单，不是开放世界的类型识别），
     登记表对这些键给 `ParameterSpec.common = True`，只用于展示与推荐，不参与放行。`/settings` 不带参数只列常用参数（当前运行值、

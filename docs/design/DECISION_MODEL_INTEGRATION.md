@@ -179,6 +179,9 @@ N 按已报调用的平均输入外推到全部决策调用，一次都没报显
 本地文件事务不承诺强制抢占；没有新增后台结算器、配置文件或第二份调用账。
 
 配置读回新增 field_scopes；Curator 的 runtime_scope 固定 owner_background，只读 owner enabled/profile/后台预算。
+点位的 `timeout_seconds` 与 `profile_id` 只在 owner/thread 覆盖层按点位设置（TUI“逐接入点设置”、user_config 的 decision_patch）；
+agent/memory/capability 三份配置文件不再各有逐点字段（2026-09-27 参数减量删除 24 个），没有覆盖时继承通用
+`timeout_seconds`/`background_timeout_seconds` 与 `profile_id`，来源写 `inherit:...`。主配置里残留旧键只告警，能力配置按原合同拒绝未知键。
 线程不再允许新增 background_timeout_seconds 或 points.curator.*；历史覆盖仍可读，并能按原双层 CAS reset 清理。
 投影与服务共用 POINT_RUNTIME_SCOPES；错误 point/stage 范围不发请求。前台修改不延长原已开始阶段。
 菜单每次保存一字段，冲突后重读，不自动重放。my-agent 的测试动作仍走原工具权限，不开放凭据写入。

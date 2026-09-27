@@ -319,12 +319,10 @@ def test_owner_only_independent_settings_and_yaml_defaults(tmp_path):
     config = Path(__file__).parents[1] / "config" / "agent_config.yaml"
     for value in (load_config(config), AgentConfig(), normalize_memory_settings()[0]):
         assert value.memory_decision_curator_relation_mode == "off"
-        assert value.memory_decision_curator_relation_timeout_seconds is None
-        assert value.memory_decision_curator_relation_profile_id is None
+        assert not hasattr(value, "memory_decision_curator_relation_timeout_seconds")
     override = tmp_path / "settings.yaml"
-    override.write_text("memory_decision_curator_relation_mode: observe\nmemory_decision_curator_relation_timeout_seconds: 0.75\n")
+    override.write_text("memory_decision_curator_relation_mode: observe\n")
     assert load_config(override).memory_decision_curator_relation_mode == "observe"
-    assert load_config(override).memory_decision_curator_relation_timeout_seconds == 0.75
 
 
 @pytest.mark.parametrize("mode", ["observe", "apply"])

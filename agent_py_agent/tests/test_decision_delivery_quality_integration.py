@@ -177,7 +177,10 @@ def test_config_defaults_are_off_and_thread_scoped(tmp_path):
     defaults = AgentConfig()
     for suffix in ("mode", "timeout_seconds", "profile_id"):
         name = f"decision_{module._POINT}_{suffix}"
-        assert getattr(config, name) == getattr(defaults, name) == ("off" if suffix == "mode" else None)
+        # 点位期限与模型引用只在决策设置覆盖层按点位设置，配置里没有字段（2026-09-27 参数减量）。
+        expected = ("off", "off") if suffix == "mode" else (None, None)
+        assert (getattr(config, name, None), getattr(defaults, name, None)) == expected
+        assert (suffix == "mode") == hasattr(defaults, name)
         assert decision_field_scopes()[f"points.{module._POINT}.{suffix}"] == ["owner", "thread"]
     host = host_at(tmp_path)
     thread = host.conversation_store.threads.get_or_create({"canonical_user_id": "alice", "owner_id": "alice"})

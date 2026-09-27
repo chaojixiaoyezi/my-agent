@@ -1,5 +1,15 @@
 # 测试与发布验收
 
+## 决策点位的期限与模型引用只留覆盖层（2026-09-27，分支 `claude/decision-point-fields`）
+
+- **来源**：参数减量分类里的“决策点位 20 项”：12 个点位在 agent/memory/capability 三份配置里各有 `timeout_seconds`/`profile_id`
+  （共 24 个字段，默认全是空＝继承），与用户长期设置、会话设置里的按点位覆盖是同一概念的两个家。
+- **做法**：`decision_settings_defaults.decision_config_fields` 不再为点位的这两个字段映射配置字段（`_OVERRIDE_ONLY_POINT_FIELDS`），
+  删除 AgentConfig/MemorySettings/CapabilityConfig 字段与两份随包 YAML 条目；投影在没有覆盖时按通用值继承（原有逻辑）。
+- **测试**：`test_decision_settings` 改为断言点位期限继承通用值且来源为 `inherit:...`、主配置里残留旧键只告警、能力配置按原合同拒绝
+  未知键、覆盖层仍能按点位设期限；三个点位的“配置默认关闭”用例改为断言期限与模型字段不存在；curator_relation 用例同步。
+- **在用配置**：两台机器的配置里这 24 个键均为 0 处；两台机器都没有用户自己的能力配置文件。
+
 ## CI 工作流点名的测试文件必须存在（2026-09-27，集成分支 `claude/integrate-13v`）
 
 - **来源**：dsh-9b 的 CI 监视报告 main `8f73a512c` 的 Cross-platform guard 在 macOS 与 Windows 都失败：参数减量第 1 批删掉了
