@@ -172,23 +172,31 @@ def run_scenario_gateway_ask(
 ) -> dict[str, object]:
     env = _scenario_subprocess_env()
     try:
-        payload = _run_scenario_gateway_ask_unstopped(paths, prompt, env=env, timeout=timeout, save=save)
+        payload = _run_scenario_gateway_ask_unstopped(paths, _ScenarioAsk(prompt, timeout, save), env=env)
     finally:
         stop_facts = stop_scenario_gateway(paths, env=env)
     payload["gateway_stop"] = stop_facts
     return payload
 
 
+# LLM: 一次场景 ask 的请求参数（原话、超时、是否保存会话）；只读值对象，由 run_scenario_gateway_ask 构造。
+# 类用途: 把场景 ask 的三项参数收成一个对象，传给只负责 start -> ask 的内部函数。
+@dataclass(frozen=True)
+class _ScenarioAsk:
+    prompt: str
+    timeout: float
+    save: bool
+
+
 # LLM: 只负责 start -> ask -> 解析，不停 Gateway；停止由 run_scenario_gateway_ask 的 finally 兜底。
 # 函数用途: 启动场景 Gateway 并发送一条 ask，把 CLI 的 JSON 回复原样返回。
 def _run_scenario_gateway_ask_unstopped(
     paths: ScenarioPaths,
-    prompt: str,
+    ask_request: _ScenarioAsk,
     *,
     env: dict[str, str],
-    timeout: float,
-    save: bool,
 ) -> dict[str, object]:
+    prompt, timeout, save = ask_request.prompt, ask_request.timeout, ask_request.save
     ready_budget = scenario_gateway_ready_budget_seconds(timeout)
     start = run_scenario_subprocess(
         scenario_command(paths, "gateway", "start", "--force", "--ready-timeout", str(ready_budget)),
