@@ -1,5 +1,11 @@
 # 测试与发布验收
 
+## 第十二候选：普通工具结果逻辑引用（2026-09-27）
+
+最终冻结的reducer、对应单测和native包链测试共25项通过（4个测试文件的明确节点，未跑全仓pytest）。覆盖直接正文/live正文/通用外置摘要、canonical与业务refs不变、源逻辑引用、原生模型消息及原链read_artifact多窗口→source_ref复制。替身读完的是当前5000字符资源页，随后复制完整原字节，未读取整份长资源或调用真实模型。
+
+前一实现24项通过后，独立审阅发现总入口过滤会改变JSON摘要选择；新增普通next_tool_call JSON＋ref内容块回归先1 failed，过滤移到直接展示入口后最终25项通过。前后计数分别留证，不累加。本次未运行安全类测试或C任务。Ruff、doc-sync、strict code-size、diff、clean-package全部通过，独立末审无新增确认阻断；线上CI未作为验收来源。结果记录在[本轮验收](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#第十二候选模型引用投影2026-09-27)，此前真实质量失败和保留集0/36保持。
+
 ## A0.2.2作者修订方法候选（2026-09-27）
 
 只改A包已有方法/声明，原checker、分表和模板未变。选择已有A专用`test_samples_build_reproducibly_and_expose_only_one_package[drama-text-a]`，1 passed；两次真实builder CLI输出同字节，34881字节，SHA256 `fc053c1227727f47a7d7e511c61ba524e04de18d0c67ff91a824572bd91b1ca7`。14资源、入口2633字符，冻结源码无漂移。未运行其他样包或重跑未改脚本，原65项和343项不算本轮新通过数。

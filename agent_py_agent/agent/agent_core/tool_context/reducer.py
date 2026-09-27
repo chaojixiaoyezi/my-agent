@@ -1,5 +1,5 @@
-# LLM: 正文按原工具信任策略处理，执行事实只读canonical metadata并在统一脱敏前追加；文本与native共用此入口。
-# 模块用途: 将工具结果压成模型上下文；核验与进程事实复用 tooling 投影，和索引恢复同口径，不改原结果。
+# LLM: 文本与native共用此模型投影；只在临时副本移除本次归档物理ref，正文策略和canonical执行事实保持。
+# 模块用途: 将工具结果压成模型上下文，以原逻辑锚点续读；核验与进程事实复用 tooling，不改归档或原结果。
 
 from __future__ import annotations
 
@@ -23,8 +23,8 @@ from ..orchestration.context.live_summary import orchestration_live_summary
 from .action_summary import actionable_tool_result_summary
 
 
-# LLM: 所有长度分支共用事实投影和最终脱敏；不得将外部正文解析为宿主事实，调用方将同一字符串绑定native结果。
-# 函数用途: 整理本次工具的安全正文、恢复引用和执行事实，不修改原始结果。
+# LLM: 保持外置摘要选择原样，直接展示分支才省略自归档ref；原始refs供归档与Compact使用，同一投影字符串绑定native结果。
+# 函数用途: 整理本次工具正文、逻辑恢复引用和执行事实，只修改模型临时视图，不写原始结果。
 def render_tool_result_for_live_prompt(result: ToolResult, archive_record: dict[str, object]) -> str:
     live_output = _live_prompt_output(result)
     if live_output is not None:
@@ -52,6 +52,27 @@ def render_tool_result_for_live_prompt(result: ToolResult, archive_record: dict[
     return redact_tool_output_text(
         rendered,
         redaction=_output_redaction(result),
+    )
+
+
+# LLM: 仅精确匹配本次归档的typed tool_output引用；source_artifact_ref可能是reader的来源逻辑ref，不能滤掉。
+# 同步检查原生工具历史、归档登记和Compact消费者；不可原地改canonical结果，也不扫描替换正文中的路径。
+# 函数用途: 从模型临时副本去掉归档文件的重复展示，保留既有续读锚点、业务引用及原始审计数据。
+def _without_own_archive_refs(result: ToolResult, archive_record: dict[str, object]) -> ToolResult:
+    archive_paths = {
+        str(archive_record.get(key) or "").strip()
+        for key in ("output_path", "artifact_ref")
+    } - {""}
+    own_refs = {ref.ref for ref in result.refs
+                if ref.kind == "tool_output" and ref.ref in archive_paths}
+    if not own_refs:
+        return result
+    return replace(
+        result,
+        refs=tuple(ref for ref in result.refs
+                   if not (ref.kind == "tool_output" and ref.ref in own_refs)),
+        content_blocks=tuple(block for block in result.content_blocks
+                             if not (block.type == "ref" and block.ref in own_refs)),
     )
 
 
@@ -132,11 +153,10 @@ def _output_redaction(result: ToolResult) -> str:
     return result.output_redaction
 
 
-# LLM: read_artifact already returns its source logical ref and exact next_read window. Appending a
-# second anchor for the reader call creates recursive recovery and must be skipped.
-# 函数用途: 给普通内联工具结果补归档锚点；artifact 读取结果直接保留自己的分页合同。
+# LLM: 只在直接展示副本省略本次物理自归档ref，外置摘要选择不受影响；read_artifact继续原source ref，不能自读包装结果。
+# 函数用途: 给普通内联结果保留唯一逻辑续读锚点；artifact读取直接保留自己的分页合同，不改变原refs。
 def _inline_result_with_archive_anchor(result: ToolResult, archive_record: dict[str, object]) -> str:
-    rendered = result.render_for_prompt()
+    rendered = _without_own_archive_refs(result, archive_record).render_for_prompt()
     if result.tool_name == "read_artifact":
         return rendered
     artifact_ref = str(archive_record.get("artifact_ref") or archive_record.get("source_artifact_ref") or "").strip()

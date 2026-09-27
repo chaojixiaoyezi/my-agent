@@ -111,3 +111,84 @@ def test_externalized_package_page_exposes_exact_copy_reference_without_rewritin
     assert payload["has_more"] is True and payload["continuation"]["offset"] == 5000
     assert "output_scoped_call_id" in rendered
     assert "# final invariant" not in rendered
+
+
+# LLM: 替身只消费真实模型回执里的归档/续页参数；不读取宿主路径或自行调用reader，最后沿原source_ref物化。
+# 类用途: 在原生循环里取回截短的资源页，再复制原资源，核对读取引用和复制引用各自有效。
+class _PackageArchiveReadBackend(_PackagePipelineBackend):
+    # LLM: 状态只服务本地替身响应序列，不参与产品身份、归档或包授权。
+    # 函数用途: 保存模型实际取得的窗口与逻辑引用，供测试核对完整读取结果。
+    def __init__(self, target):
+        super().__init__(target)
+        self.archive_ref = ""
+        self.read_count = 0
+        self.page_parts = []
+        self.restored_page = None
+
+    # LLM: 所有读取/写入均返回结构化工具请求，由真实宿主执行；请求上限只防替身失控，不替产品补结果。
+    # 函数用途: 按工具提供的原锚点和next_read分页，完整读回当前资源页后再申请原样复制。
+    def generate(self, prompt, on_chunk=None, **kwargs):
+        self.requests.append(kwargs)
+        assert len(self.requests) <= 9
+        if len(self.requests) == 1:
+            return self._call("read-package", "skill_search", {
+                "action": "get", "package_id": "story-a", "resource_path": "methods/SKILL.md",
+            })
+        results = {block["tool_use_id"]: block for row in kwargs["messages"]
+                   for block in row["content"] if block["type"] == "tool_result"}
+        if "copy-package-resource" in results:
+            assert not results["copy-package-resource"]["is_error"]
+            return ModelResponse(text="已读回资源页并按原资源生成文件。", backend=self.name)
+        if len(self.requests) == 2:
+            content = results["read-package"]["content"]
+            payload, _ = json.JSONDecoder().raw_decode(content[content.index("{"):])
+            assert payload["body_preview_complete"] is False
+            assert "[tool-result-refs]" not in content
+            hint_line = next(line for line in content.splitlines() if line.startswith("- read_artifact_hint: "))
+            hint = json.loads(hint_line.split(": ", 1)[1])
+            assert hint.pop("tool") == "read_artifact"
+            self.archive_ref = hint["artifact_ref"]
+            self.source_ref = payload["source_ref"]
+        else:
+            result = results[f"archive-page-{self.read_count}"]
+            assert not result["is_error"], result["content"]
+            content = result["content"]
+            payload, _ = json.JSONDecoder().raw_decode(content[content.index("{"):])
+            assert payload["artifact_ref"] == self.archive_ref
+            assert "tool-output-archive-anchor" not in content
+            self.page_parts.append(payload["content"])
+            if not payload["has_more_after"]:
+                self.restored_page = json.loads("".join(self.page_parts))
+                assert self.restored_page["source_ref"] == self.source_ref
+                return self._call("copy-package-resource", "write_file", {
+                    "path": str(self.target), "source_ref": self.source_ref,
+                })
+            hint = payload["next_read"]
+        self.read_count += 1
+        return self._call(f"archive-page-{self.read_count}", "read_artifact", hint)
+
+
+def test_native_package_archive_anchor_recovers_page_then_materializes_original_bytes(tmp_path):
+    raw = b"# resource\r\n" + b"original_line = True\r\n" * 800 + b"# final bytes\r\n"
+    agent, _store, _entries = _agent(tmp_path, method_body=raw)
+    workspace = resolve_owner_home(agent.home_paths.root).workspace_dir / "archive-resource"
+    workspace.mkdir(parents=True)
+    agent = SimpleAgent(replace(agent.config, tool_output_externalize_min_chars=100,
+                                tool_output_preview_chars=200, tool_read_max_chars=5000), workspace)
+    target = agent.root / "original-resource.py"
+    backend = _PackageArchiveReadBackend(target)
+    agent.backend = backend
+    thread = agent.conversation_store.threads.get_or_create({
+        "canonical_user_id": "local/main", "channel": "cli", "channel_conversation_id": "archive-resource",
+    })
+
+    result = agent.run("读完现有资料，再把原文件整理到工作区。", save=False,
+                       allowed_tools=["skill_search", "read_artifact", "write_file"],
+                       task_attributes={"conversation_thread_id": thread.thread_id},
+                       context_scope="conversation")
+
+    assert result.response == "已读回资源页并按原资源生成文件。"
+    assert backend.read_count >= 2
+    assert backend.restored_page["body"] == raw.decode()[:5000]
+    assert backend.restored_page["has_more"] is True
+    assert target.read_bytes() == raw

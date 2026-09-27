@@ -1,5 +1,19 @@
 # 能力内化：来源盘点与验收矩阵
 
+## 第十二候选：模型引用投影（2026-09-27）
+
+- workstream：能力内化；branch：`codex/capability-internalization`；owner：root；基线：`ac938395aeed2eab88e194ab55611f5e9933f586`。
+- 本线目标与完成：修正直接展示工具结果时本次物理自归档ref与逻辑hint并列的接口不一致。只修改`agent_core/tool_context/reducer.py`、`test_tool_context_reducer.py`、`test_capability_package_native_pipeline.py`及对应文档；归档/reader/schema保持。
+- 独立复核修正：初版过滤位于总入口，会使原JSON＋ref内容块进入不同的外置action摘要；新增普通回归先1 failed，随后移至直接展示入口。此前24项是旧字节阶段结果，不能与最终25项相加。
+- 最终定向：4个测试文件明确节点共25 passed；命令为`python3 -m pytest -o addopts= <明确节点> -q --tb=short --basetemp=<独立临时目录>`，完整节点与前后相同源码摘要保存在私有`candidate-12-output-reference-final-focused.json`。证据SHA256：`e35f60a1f2dd71a479629d0791a68f93e293d4838fef2cbe89e6aee700c5f699`。
+- native替身沿真实工具链读取模型收到的hint及next_read，恢复当前5000字符包页，再用原source_ref复制完整CRLF字节。包页仍`has_more=true`，不能算整资源阅读全文；不是新真实模型证据。
+- 严格门与末审：Ruff、doc-sync、strict code-size、diff、clean-package全部通过，尺寸基线/报告正文无变化；三份源码/测试在检查前后同字节。私有严格门证据SHA256：`7423b1fb69b2674f2999999821731ce8ae2e16b8940b4250f5ea4963b91c036b`。独立最终静态复核无新增确认阻断，报告SHA256：`b1b4ea0761cc775e36fbe3b4d971aa184532bbd8114672c0451fed18ebf8641e`；审阅者未执行测试。线上CI未作为验收来源。
+- 影响与风险：只缩小直接展示的重复引用；外置摘要/操作事实等其他消费者未改。A22原本有正确hint，不能断定本片能让模型以后总正确使用，更不能替代短剧语义验收。未新增安全类测试、真实请求、包更新或Gateway重启。
+- 需要主线协调：Claude已确认reducer及直接测试无占用；收到固定提交后由其集成。Claude报告的`1bfd61862/49b169e3e`回归修复与双机部署另行核对，本线未借用其测试数。
+- 建议下一步：本片完成严格门和固定SHA交接后，单一包作者推进[可见人物依据迁移设计](../design/CAPABILITY_SOURCE_COVERAGE.md#44-成稿可见人物依据的下一迁移切片待设计实施)，只读审误报边界可并行；私有环境仍938，保留既有业务失败和最终保留集0/36。
+
+以下是此前原生及组件阶段记录。
+
 当前A0.2.2窄审、构建、本地严格gate及原生热更新已完成；新A02开发复验终态，结构通过但业务语义失败。私有宿主仍938，已启用A0.2.2/B0.1.3；旧失败保持，最终保留集0/36。下文各轮为历史证据，最新原生结果见末节。
 
 状态：固定第九候选`938d04aae`已精确安装私有环境，B0.1.3原生热更新通过。五席原需求复验B01业务通过，A02/X01/E01/L01失败；四孩子首次入口与JSON反馈纠错已有真实证据，B原样检查器执行未验。C本轮未跑，旧结果保持；当前保留集0/36，尚未发布，详见末节。
