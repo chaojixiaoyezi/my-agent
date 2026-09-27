@@ -204,8 +204,9 @@ COMMAND_CATALOG = (
     CommandSpec(
         "settings",
         "/settings",
-        "查看改过的参数与可改范围（管理员，IM 可用）",
+        "查看常用参数（管理员，IM 可用）",
         help_variants=(
+            ("/settings all", "查看全部参数、改过的参数与最近修改（管理员，IM 可用）"),
             ("/settings search <关键词>", "按参数名或中文说明找参数（管理员，IM 可用）"),
             ("/settings show <参数名>", "查看参数说明、默认值、当前值与能否修改（管理员，IM 可用）"),
             ("/settings set <参数名> <值>", "修改非安全参数，记入修改记录；重启 Gateway 后生效（管理员，IM 可用）"),

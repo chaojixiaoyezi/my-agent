@@ -1,5 +1,10 @@
 # Gateway 维护状态
 
+`/settings` 默认只看常用参数（分支 `claude/9a-settings-common-view`，2026-09-27）：`settings_control_service._overview` 只列参数中心
+常用层级（`parameter_registry.COMMON_KEYS`，21 项）的当前运行值、是否改过、说明第一句，改了没重启注明“发 /restart 后生效”，常用以外
+改过的只报个数；新子命令 `/settings all`（`_all`）是原总览加按分类的全部参数清单，［改过］［安全边界］标记。解析器 `all` 与不带参数同样
+不接受多余参数，TUI 文本还原为 `/settings all`，命令目录补了帮助条目；IM 长回执由飞书适配器按行分片。回执里的布尔与数字不再经
+`mask_value`（原来 False、0 显示成“（空）”）。回归见 `test_settings_chat_control.py`、`test_parameter_registry.py`。
 停止收尾补写决策点到达计数（分支 `claude/9b-owner-path-scope`，2026-09-27）：`_cmd_gateway_run_cleanup` 在结清在途模型调用、列出存活后台会话之后调用 `_flush_decision_reach_counts`，把 `conversation/decision_reach_counts` 里还没落盘的计数写出，部署重启不再丢最后一段；只接正常停止路径，不注册 atexit，出错只记 `gateway_decision_reach_flush_failed{error_type}`。原先内联的“取消在途决策”抽成 `_cancel_active_decisions`，行为与事件名不变。同分支修复 Gateway 用户读到本机主用户`memory_policy.json` 的作用域问题（`owner_resolver`）。回归见 `test_gateway_decision_shutdown_cancel.py`、`test_gateway_per_user_scoping.py`。
 参数减量第 2 批（分支 `claude/9a-merge-config`，2026-09-27）：后台会话执行权只剩 `background_claim_ttl_seconds` 一个旋钮，续约心跳始终由 `run_claim.claim_heartbeat_interval_seconds(ttl_seconds=…)` 推导（90 秒时 30 秒）；手动 Compact 车道（`control_service._manual_compact_lane`）和前台请求车道（`request_binding`）不再读 `background_claim_heartbeat_interval_seconds`（已删除，旧键只告警并忽略），子代理 runner 会话心跳固定 5 秒。默认行为不变。
 

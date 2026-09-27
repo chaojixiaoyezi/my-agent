@@ -217,6 +217,14 @@
   - 空说明基线 `parameter_description_baseline.json` 从 177 缩到 143：34 项删除，另有 2 项（`conversation_pending_wake_limit`、
     `lease_stale_without_heartbeat_seconds`）因上方注释块重新归属而有了说明。前端 `frontend/config/backend-config-catalog.json` 是由随包 YAML
     生成的目录，在本批之前已经过期，本批未重新生成；前端设置页仍有 12 个已删键的表单项，留给前端单独清理。
+  - **常用层级（2026-09-27，集成者派活，分支 `claude/9a-settings-common-view`）**：用户说“把用户当傻瓜”，99% 的人不会手动调参数，
+    但命令要保留。`parameter_registry.COMMON_KEYS` 登记配置分类里标 common 的 21 个键（封闭的产品决策名单，不是开放世界的类型识别），
+    登记表对这些键给 `ParameterSpec.common = True`，只用于展示与推荐，不参与放行。`/settings` 不带参数只列常用参数（当前运行值、
+    是否改过、说明第一句；改了没重启注明“发 /restart 后生效”），并用一句话说一共多少项、看全部发 `/settings all`；
+    `/settings all` 是原总览（总数、可改范围、用户配置位置、改过的个数、最近修改）加按分类的全部参数清单。search、show 不变。
+    `user_config` 的 search/view 结果多一个 `common` 字段，工具说明提示模型优先从常用参数里推荐。守卫（`test_parameter_registry`）：
+    名单里的键必须存在、不能是安全边界项；与空说明基线的交集只允许过渡项 `memory_compact_auto_trigger_percent`（my-agent 补齐说明后
+    收紧为空集）。`/settings` 回执里的布尔与数字不再经 `mask_value`（它把 False、0 当空，原来显示成“（空）”），布尔按 true/false 显示。
 
 ## 7. 验收
 

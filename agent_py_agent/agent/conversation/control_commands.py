@@ -448,7 +448,8 @@ def _skills_command(trailing: object) -> ConversationControlCommand:
 
 
 _SETTINGS_USAGE = (
-    "用法：/settings 查看改过的参数与可改范围；/settings search <关键词> 找参数；/settings show <参数名> 看说明与当前值；"
+    "用法：/settings 查看常用参数；/settings all 查看全部参数与改过的项；/settings search <关键词> 找参数；"
+    "/settings show <参数名> 看说明与当前值；"
     "/settings set <参数名> <值> 修改；/settings reset <参数名> 恢复默认；/settings history [参数名] 看修改记录；"
     "/settings revert <记录编号> 回滚一次修改。只有管理员可用，修改在重启 Gateway 后生效（发 /restart）。"
 )
@@ -460,12 +461,13 @@ _SETTING_VALUE_MAX = 500
 
 # LLM: 只做词法解析：子命令大小写不敏感，参数名与记录编号小写后拒绝式校验；set 的值保留原样（可含空格与中文），
 #   但不许换行、不超过 500 字。不合规时 valid=False 并给出用法。value 保存规范化后的完整参数，TUI 据此还原命令文本。
+#   不带参数是常用视图（overview），all 是全部参数视图，二者都不接受多余参数。
 # 函数用途: 把 `/settings …` 解析成结构化的参数查看/修改控制。
 def _settings_command(trailing: object) -> ConversationControlCommand:
     text = str(trailing or "").strip()
     head, _, rest = text.partition(" ")
     head, rest = head.casefold(), rest.strip()
-    if head in {"", "help"}:
+    if head in {"", "help", "all"}:
         return ConversationControlCommand("settings", value=head, operation=head or "overview", valid=not rest,
                                           usage=_SETTINGS_USAGE)
     if head == "set":

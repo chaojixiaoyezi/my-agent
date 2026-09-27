@@ -146,3 +146,15 @@ def test_set_receipt_tells_the_new_value_effect_on_the_session_model(tmp_path, m
     change_id = json.loads(tool.execute({"action": "history", "key": "model_reasoning_effort"}).output)["changes"][0]["id"]
     reverted = json.loads(tool.execute({"action": "revert", "change_id": change_id}).output)
     assert reverted["saved"] == "max" and "不改变请求" in reverted["applied_value"]  # 回滚这次恢复默认，回到 max
+
+
+def test_tool_search_and_view_mark_the_common_parameters(tmp_path, monkeypatch):
+    """user_config 的搜索和查看都标出是否常用（参数中心 COMMON_KEYS），方便模型先推荐常用参数。"""
+    monkeypatch.delenv("MY_AGENT_CONFIG", raising=False)
+    tool = UserConfigTool(_main_agent(_user(tmp_path)))
+    found = json.loads(tool.execute({"action": "search", "query": "max_tokens"}).output)["parameters"]
+    assert found[0]["key"] == "max_tokens" and found[0]["common"] is True
+    advanced = json.loads(tool.execute({"action": "search", "query": "max_protocol_repairs"}).output)["parameters"]
+    assert advanced[0]["key"] == "max_protocol_repairs" and advanced[0]["common"] is False
+    view = json.loads(tool.execute({"action": "view", "key": "request_timeout"}).output)
+    assert view["parameter"]["common"] is True

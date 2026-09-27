@@ -181,7 +181,8 @@ class UserConfigTool(BaseTool):
             "读取或修改本机用户级配置（参数中心：输出上限、超时、compact 百分比、各类预算与开关等两百多项）。"
             "用户问'这个参数能不能改/现在是多少/配置在哪'时必须先用本工具查结构化事实，"
             "不要凭感觉回答'我没有权限'，也不要把随包默认 YAML 当成用户配置。"
-            "action=search 按关键词（query）找参数名与中文说明；action=view 返回单个参数的说明、默认值、当前值、来源与能否修改；"
+            "action=search 按关键词（query）找参数名与中文说明，结果里 common=true 的是常用参数（聊天 /settings 默认列出的那些），"
+            "给用户推荐调哪个参数时优先从常用参数里选；action=view 返回单个参数的说明、默认值、当前值、来源与能否修改；"
             "action=set 修改非安全参数：按类型校验、写入当前加载的用户配置、用正式加载回读核对并记入修改记录；"
             "action=reset 删除覆盖恢复默认；action=history 查看修改记录；action=revert 按记录编号（change_id）回滚。"
             "修改在重启 Gateway 后生效（当前进程不会热加载）。安全边界（凭据、权限、身份、路径、外部地址、会运行代码的设置）永远不可写。"
@@ -418,13 +419,15 @@ def _with_applied_effect(report: dict[str, object], config: object) -> dict[str,
             "applied_basis": "按新值与当前会话模型计算；什么时候开始生效见 effect_text"}
 
 
-# LLM: 值一律经 mask_value 脱敏；brief 用于搜索列表，说明截到 160 字。登记了派生规则的参数另给 applied_value/applied_rule
+# LLM: 值一律经 mask_value 脱敏；brief 用于搜索列表，说明截到 160 字。common 标出参数中心的常用层级（COMMON_KEYS），
+#   只用于推荐，不影响能否修改。登记了派生规则的参数另给 applied_value/applied_rule
 #   （按传入 config 即本片会话模型计算，等于后端实际发送值的同一公式）。只读。
 # 函数用途: 把一条参数登记信息投影成给模型看的结构化事实。
 def _spec_view(spec: object, config: object, *, brief: bool = False) -> dict[str, object]:
     description = str(spec.description)
     view = {
-        "key": spec.key, "category": spec.category, "writable": spec.writable, "value_type": spec.value_type,
+        "key": spec.key, "category": spec.category, "writable": spec.writable, "common": spec.common,
+        "value_type": spec.value_type,
         "running_value": mask_value(spec.key, getattr(config, spec.key, "")) if config is not None else "",
         "default": mask_value(spec.key, spec.default),
         "description": description[:160] + ("…" if brief and len(description) > 160 else "") if brief else description,

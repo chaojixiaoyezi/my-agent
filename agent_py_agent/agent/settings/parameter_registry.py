@@ -6,7 +6,8 @@
 #   不参与任何放行判断。只读，不写文件、不调模型。改动须同步 parameter_changes.py、tooling/user_config_tool.py、
 #   gateway_parts/settings_control_service.py 与 test_parameter_registry.py。运行时还会按规则派生的参数（配置值不等于
 #   实际使用值，如 max_tokens 按窗口夹取、推理强度在不支持的模型上不发送）在 _APPLIED_RULES 登记派生函数，公式本身仍只在原权威位置；
-#   修改回执经 applied_value_with 按新值给出同一派生结果。
+#   修改回执经 applied_value_with 按新值给出同一派生结果。常用层级（COMMON_KEYS，/settings 默认只列这些）是封闭的产品决策名单，
+#   登记为 ParameterSpec.common；只影响展示与推荐顺序，不参与任何放行判断。
 # 模块用途: 回答“有哪些参数、各是什么意思、谁能改、改了什么时候生效、实际用的是多少”，是参数中心的唯一登记来源。
 from __future__ import annotations
 
@@ -52,6 +53,17 @@ _BOUNDARY_NAMES = frozenset({
     "config_layers", "config_sources", "config_warnings", "memory_config_warnings", "protect_running_runtime",
     "cli_audit_cleanup_days",
 })
+# 常用参数：/settings 默认只列这些，user_config 的搜索结果也标出来，方便先推荐。这是封闭的产品决策名单（2026-09-27 配置分类
+# 的 common 层：99% 的用户只会碰到它们），不是开放世界的类型识别；其余参数仍可用 /settings all、search、show 查到和修改。
+# 守卫见 test_parameter_registry：名单里的键必须存在、不能是安全边界项、必须有说明（过渡期例外单独登记）。顺序即展示顺序。
+COMMON_KEYS = (
+    "max_tokens", "request_timeout", "temperature", "model_reasoning_effort",
+    "memory_compact_auto_trigger_percent", "conversation_history_max_turns", "memory_top_k", "memory_curator_enabled",
+    "enable_self_learning", "enable_subagents", "max_subagents",
+    "tool_shell_timeout", "tool_shell_output_max_chars", "tool_read_max_chars", "tool_list_max_entries",
+    "tool_search_max_matches", "tool_web_max_chars", "tool_http_timeout", "tool_output_externalize_min_chars",
+    "timezone", "tui_mouse_capture_default",
+)
 _CATEGORIES = (
     (("max_tokens", "model_", "temperature", "top_p", "request_timeout", "stream_", "reasoning_", "anthropic_"), "模型请求"),
     (("memory_", "compact_"), "记忆与压缩"),
@@ -76,6 +88,8 @@ class ParameterSpec:
     safety: str
     masked: bool
     effect: str
+    # 是否属于常用层级（COMMON_KEYS）；只用于展示和推荐，不影响能否修改。
+    common: bool = False
 
     @property
     def writable(self) -> bool:
@@ -153,8 +167,16 @@ def parameter_registry() -> dict[str, ParameterSpec]:
             description=descriptions.get(item.name, ""), category=category_for(item.name),
             safety=classify_safety(item.name, value_type), masked=is_masked(item.name),
             effect=TUNABLE_KEYS[item.name].effect if item.name in TUNABLE_KEYS else EFFECT_GATEWAY_RESTART,
+            common=item.name in COMMON_KEYS,
         )
     return registry
+
+
+# LLM: 按 COMMON_KEYS 的顺序返回常用参数的登记信息；名单里不存在的键直接跳过（守卫测试会先失败），不猜替代项。只读。
+# 函数用途: 给 /settings 默认视图列出常用参数。
+def common_parameters() -> list[ParameterSpec]:
+    registry = parameter_registry()
+    return [registry[key] for key in COMMON_KEYS if key in registry]
 
 
 # LLM: 关键词同时匹配键名与说明（不区分大小写）；键名命中排前，其中完全相同、再以关键词开头、再短键名优先；只读，limit 为 0 不限。
@@ -239,6 +261,7 @@ def applied_value_with(key: str, value: object, config: object) -> tuple[object,
 
 
 __all__ = [
+    "COMMON_KEYS",
     "SAFETY_BOUNDARY",
     "SAFETY_FREE",
     "ParameterSpec",
@@ -246,6 +269,7 @@ __all__ = [
     "applied_value_with",
     "category_for",
     "classify_safety",
+    "common_parameters",
     "is_masked",
     "parameter_registry",
     "search_parameters",

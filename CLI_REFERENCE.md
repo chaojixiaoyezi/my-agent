@@ -453,13 +453,14 @@ TUI 与 IM（飞书等）里用聊天命令做同样的事：`/skills`、`/skill
 
 所有参数只在一个登记表里定义（说明取自随包 `agent_config.yaml` 的注释），修改写入当前加载的用户配置，重启 Gateway 后生效：
 
-- `/settings`：参数总数、可改范围、与默认值不同的参数和最近修改。
+- `/settings`：只列常用参数（21 项，平时要调的基本都在这里）的当前值、是否改过、一句说明；改了还没重启的注明“发 /restart 后生效”，常用以外改过的只报个数，并说明一共多少项、看全部用 `/settings all`。
+- `/settings all`：全部参数——总数、可改范围、用户配置位置、与默认值不同的个数、最近修改，再按分类列出每个参数的当前值，改过的标［改过］、不能在这里改的标［安全边界］。IM 里内容较长时会自动分成几条消息。
 - `/settings search <关键词>`：按参数名或中文说明找参数；`/settings show <参数名>`：说明、默认值、当前值、能否修改。
 - `/settings set <参数名> <值>`：修改非安全参数（按类型校验，写后用正式加载回读核对，不一致就恢复原文件），记入修改记录。
 - `/settings reset <参数名>`：删除覆盖恢复默认；`/settings history [参数名]`：修改记录；`/settings revert <记录编号>`：回滚一次修改。
 
 凭据、权限、身份、路径、外部地址、会运行代码的服务与插件等属于安全边界，不能在这里改；凭据类只记脱敏值、不能回滚。
-my-agent 通过 `user_config` 工具（search/view/set/reset/history/revert）使用同一套规则。
+my-agent 通过 `user_config` 工具（search/view/set/reset/history/revert）使用同一套规则；search 与 view 结果里的 `common` 标出常用参数。
 
 ### `skills learned`：自动总结的 Skill
 

@@ -21,11 +21,14 @@ from agent_py_agent.agent.backends.reasoning_control import (
 from agent_py_agent.agent.settings.config import AgentConfig
 from agent_py_agent.agent.settings.config_io import yaml_trailing_comment
 from agent_py_agent.agent.settings.parameter_registry import (
+    COMMON_KEYS,
     SAFETY_BOUNDARY,
+    SAFETY_FREE,
     _descriptions_from_lines,
     applied_value,
     applied_value_with,
     classify_safety,
+    common_parameters,
     parameter_registry,
     search_parameters,
 )
@@ -67,6 +70,33 @@ def test_empty_descriptions_only_come_from_the_reasoned_baseline():
     stale = sorted(set(listed) - empty)
     assert not stale, f"这些参数已有说明或已不存在，请从 {_BASELINE.name} 删掉：{stale}"
     assert registry["decision_timeout_seconds"].description == "前台单次等待；必须为有限正秒数"
+
+
+# 常用参数里暂时还没有说明的键：my-agent 正在补这批说明，补齐进 main 后收紧为空集（届时本测试会提示删掉）。
+_COMMON_KEYS_AWAITING_DESCRIPTION = {"memory_compact_auto_trigger_percent"}
+
+
+def test_common_tier_is_a_closed_list_of_existing_non_boundary_parameters():
+    """常用层级是封闭的产品决策名单：键必须存在、不能是安全边界项、不重复；登记表的 common 标记与名单一致。"""
+    registry = parameter_registry()
+    assert len(COMMON_KEYS) == len(set(COMMON_KEYS))
+    missing = [key for key in COMMON_KEYS if key not in registry]
+    assert not missing, f"常用名单里的键不存在：{missing}"
+    boundary = [key for key in COMMON_KEYS if registry[key].safety != SAFETY_FREE or not registry[key].writable]
+    assert not boundary, f"常用参数不能是安全边界项：{boundary}"
+    assert {key for key, spec in registry.items() if spec.common} == set(COMMON_KEYS)
+    assert [spec.key for spec in common_parameters()] == list(COMMON_KEYS)
+
+
+def test_common_parameters_have_descriptions_except_the_listed_transition():
+    """常用参数必须有中文说明；与空说明基线的交集只允许是过渡名单，名单里的键补上说明后也要从名单删掉。"""
+    groups = json.loads(_BASELINE.read_text(encoding="utf-8"))["groups"]
+    baseline = {key for group in groups for key in group["keys"]}
+    assert set(COMMON_KEYS) & baseline == _COMMON_KEYS_AWAITING_DESCRIPTION, (
+        "常用参数与空说明基线的交集变了：新加的常用参数要先写说明；过渡名单里的键有了说明就从 _COMMON_KEYS_AWAITING_DESCRIPTION 删掉")
+    registry = parameter_registry()
+    undocumented = {key for key in COMMON_KEYS if not registry[key].description}
+    assert undocumented == _COMMON_KEYS_AWAITING_DESCRIPTION
 
 
 def test_reasoning_effort_applied_value_says_whether_the_model_supports_it():

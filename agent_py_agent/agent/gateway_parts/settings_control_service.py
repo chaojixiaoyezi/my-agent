@@ -2,10 +2,11 @@
 #   本机 local/main（已绑定管理员身份的 IM 私聊也解析到这里），因为全局参数对整个 Gateway 生效且含本机路径。读写统一走参数中心
 #   （parameter_registry / parameter_changes），actor 记为 chat；回执经 mask_value 脱敏。普通异常不承诺“没有改动”。
 #   改动须同步 control_commands._settings_command、command_catalog 的 settings 条目、TUI control_runtime 的文本还原与本地拒绝，
-#   以及 test_settings_chat_control.py。
-# 模块用途: 让管理员在 TUI 和 IM 里查找、查看、修改、恢复默认、查看记录并回滚参数。
+#   以及 test_settings_chat_control.py。不带参数只列参数中心的常用层级（COMMON_KEYS），/settings all 才列全部。
+# 模块用途: 让管理员在 TUI 和 IM 里查看常用或全部参数，查找、查看、修改、恢复默认、查看记录并回滚参数。
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 
 from ..conversation.control_commands import ConversationControlCommand, ConversationControlResult
@@ -22,6 +23,7 @@ from ..settings.parameter_changes import (
 from ..settings.parameter_registry import (
     ParameterSpec,
     applied_value,
+    common_parameters,
     parameter_registry,
     search_parameters,
 )
@@ -41,6 +43,9 @@ _LIST_LIMIT = 20
 _NOT_ADMIN = "只有管理员能查看和修改全局参数（本机 TUI，或已用 /admin 绑定管理员身份的私聊）。"
 _UNCONFIRMED = "参数暂时读不到或这次操作没能完整确认；请先发 /settings history 查看当前状态，再决定是否重试。"
 _BOUNDARY_TEXT = "属于安全边界（凭据、权限、身份、路径、外部地址、会运行代码的设置等），只能由用户在宿主入口或配置文件里改"
+# 常用视图每项只取说明的第一句（遇到句号、分号、冒号或“ - ”列表开头就停），最多 40 字。
+_BRIEF_STOP = re.compile(r"[。；：:;\n]| - ")
+_BRIEF_MAX = 40
 
 
 # LLM: 只表示可预期的用户输入问题，消息直接给用户看。
@@ -99,28 +104,114 @@ def _user_path(config: object):
     return path
 
 
+# LLM: 非凭据的布尔与数字直接显示（布尔按配置文件写法 true/false，0 也照实显示）；其余值经 mask_value 结构脱敏，
+#   空值显示“（空）”。mask_value 把 False、0 当空，所以布尔与数字不能交给它。只读。
+# 函数用途: 把一个参数值排成回执里给人看的文字。
 def _value(spec: ParameterSpec, value: object) -> str:
+    if isinstance(value, bool) and not spec.masked:
+        return "true" if value else "false"
+    if isinstance(value, (int, float)) and not spec.masked:
+        return str(value)
     text = mask_value(spec.key, value)
     return text if text != "" else "（空）"
 
 
-# 函数用途: /settings —— 参数总数、可改范围、已改过的参数与最近修改。
+# LLM: 用户配置路径只来自 Gateway 启动配置（_user_path）；只读文件，不创建。
+# 函数用途: 读出当前加载的用户配置（没有文件时为空）；没有加载用户配置时报可预期错误。
+def _stored(config: object) -> dict:
+    path = _user_path(config)
+    return load_simple_yaml(path) if path.is_file() else {}
+
+
+# LLM: 用户配置里的空值（None、YAML 留空读成的 []、空串）都按“空”比较，不能把留空误判成“改过”。只读。
+# 函数用途: 把一个配置值换成判断“是否改过”用的比较文本。
+def _compare_text(value: object) -> str:
+    return "" if value is None or value == [] or value == "" else str(value).lower()
+
+
+# LLM: 用户配置里写了、且与默认值不同才算改过（与原总览同一判据）。只读。
+# 函数用途: 列出用户配置里改过的参数名。
+def _changed_keys(registry: dict[str, ParameterSpec], stored: dict) -> list[str]:
+    return [key for key, spec in registry.items()
+            if key in stored and _compare_text(stored[key]) != _compare_text(spec.default)]
+
+
+# LLM: 只做文字截取（遇到 _BRIEF_STOP 就停，超过 _BRIEF_MAX 加省略号），不改写说明内容。纯函数。
+# 函数用途: 取参数说明的第一句当大白话标签；没有说明时如实写“暂无说明”。
+def _brief(description: str) -> str:
+    head = _BRIEF_STOP.split(description.strip(), maxsplit=1)[0].strip()
+    if not head:
+        return "（暂无说明）"
+    return head if len(head) <= _BRIEF_MAX else head[:_BRIEF_MAX] + "…"
+
+
+# LLM: 显示 Gateway 启动配置里的当前运行值；用户配置改过就注明默认值，改了还没重启就注明“发 /restart 后生效”。
+#   值都经 mask_value 脱敏。只读。
+# 函数用途: 把一个常用参数排成一行中文。
+def _common_line(spec: ParameterSpec, config: object, stored: dict) -> str:
+    running = getattr(config, spec.key, spec.default)
+    marks = ""
+    if spec.key in stored and _compare_text(stored[spec.key]) != _compare_text(spec.default):
+        marks += f"（改过，默认 {_value(spec, spec.default)}）"
+    if spec.key in stored and _compare_text(stored[spec.key]) != _compare_text(running):
+        marks += f"（已改成 {_value(spec, stored[spec.key])}，发 /restart 后生效）"
+    return f"- {spec.key} = {_value(spec, running)}{marks}：{_brief(spec.description)}"
+
+
+# LLM: 默认视图只列参数中心的常用层级（COMMON_KEYS），再用一句大白话说总数和怎么看全部；常用以外改过的只报个数，
+#   详情在 /settings all。只读。
+# 函数用途: /settings —— 列出常用参数与当前值，提示用 /settings all 看全部。
 def _overview(config: object, _argument: str) -> str:
     registry = parameter_registry()
+    stored = _stored(config)
+    common = common_parameters()
+    lines = [f"常用参数（{len(common)} 项，平时要调的基本都在这里）："]
+    lines += [_common_line(spec, config, stored) for spec in common]
+    others = [key for key in _changed_keys(registry, stored) if not registry[key].common]
+    if others:
+        lines.append(f"另外你还改过 {len(others)} 个其它参数，发 /settings all 查看。")
+    lines.append(f"一共 {len(registry)} 项参数，这里只列常用的 {len(common)} 项，其余一般不用动；看全部发 /settings all。")
+    lines.append("找参数：/settings search <关键词>；看说明：/settings show <参数名>；"
+                 "修改：/settings set <参数名> <值>，改完发 /restart 重启 Gateway 后生效。")
+    return "\n".join(lines)
+
+
+# LLM: 全部视图 = 原总览（总数、可改范围、用户配置位置、改过的个数、最近修改）+ 按分类列出每个参数的当前运行值，
+#   改过的标［改过］，不能在这里改的标［安全边界］。值都经 mask_value 脱敏；IM 适配器会按行切成多条消息。只读。
+# 函数用途: /settings all —— 给管理员看全部参数。
+def _all(config: object, _argument: str) -> str:
+    registry = parameter_registry()
     path = _user_path(config)
-    stored = load_simple_yaml(path) if path.is_file() else {}
-    changed = [(spec, stored[key]) for key, spec in registry.items()
-               if key in stored and str(stored[key]).lower() != str(spec.default).lower()]
+    changed = set(_changed_keys(registry, _stored(config)))
     writable = sum(spec.writable for spec in registry.values())
-    lines = [f"参数中心：共 {len(registry)} 个参数，其中 {writable} 个可由 my-agent 或你在这里修改，其余属于安全边界。",
-             f"用户配置：{path}（修改在重启 Gateway 后生效，发 /restart）", f"与默认值不同的参数：{len(changed)} 个"]
-    lines += [f"- {spec.key} = {_value(spec, value)}（默认 {_value(spec, spec.default)}）" for spec, value in changed[:_LIST_LIMIT]]
-    if len(changed) > _LIST_LIMIT:
-        lines.append(f"……另有 {len(changed) - _LIST_LIMIT} 个，可用 /settings show <参数名> 逐个查看。")
+    lines = [f"全部参数：共 {len(registry)} 个，其中 {writable} 个可由 my-agent 或你在这里修改，其余属于安全边界。",
+             f"用户配置：{path}（修改在重启 Gateway 后生效，发 /restart）",
+             f"与默认值不同的参数：{len(changed)} 个（下面标［改过］）"]
     recent = parameter_history(user_path=path, limit=3)
     if recent:
         lines += ["最近修改："] + [_history_line(item) for item in recent]
-    return "\n".join(lines + ["发 /settings search <关键词> 找参数，/settings show <参数名> 看说明。"])
+    lines += _category_lines(registry, config, changed)
+    return "\n".join(lines + ["看说明发 /settings show <参数名>；只看常用参数发 /settings。"])
+
+
+# LLM: 分类沿用登记表的 category，按参数第一次出现的顺序排，“其它”放最后；每项一行当前运行值与标记。只读。
+# 函数用途: 按分类排出全部参数的清单行。
+def _category_lines(registry: dict[str, ParameterSpec], config: object, changed: set[str]) -> list[str]:
+    groups: dict[str, list[ParameterSpec]] = {}
+    for spec in registry.values():
+        groups.setdefault(spec.category, []).append(spec)
+    lines: list[str] = []
+    for category in sorted(groups, key=lambda name: name == "其它"):
+        lines.append(f"【{category}】{len(groups[category])} 项")
+        lines += [_all_line(spec, config, changed) for spec in groups[category]]
+    return lines
+
+
+# LLM: 值经 _value（凭据仍脱敏）；［安全边界］只看登记表的 writable，不按说明文字判断。只读。
+# 函数用途: 把一个参数排成全部视图里的一行：当前运行值，改过标［改过］，不能在这里改标［安全边界］。
+def _all_line(spec: ParameterSpec, config: object, changed: set[str]) -> str:
+    marks = ("［改过］" if spec.key in changed else "") + ("" if spec.writable else "［安全边界］")
+    return f"- {spec.key} = {_value(spec, getattr(config, spec.key, spec.default))}{marks}"
 
 
 # 函数用途: /settings search <关键词> —— 按参数名与中文说明找参数。
@@ -222,6 +313,7 @@ def _revert(config: object, argument: str) -> str:
 
 _HANDLERS: dict[str, Callable[[object, str], str]] = {
     "overview": _overview,
+    "all": _all,
     "search": _search,
     "show": _show,
     "set": _set,
