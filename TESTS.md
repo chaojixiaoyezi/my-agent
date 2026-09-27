@@ -2,6 +2,14 @@
 
 能力包验收按用户2026-09-27澄清，以通用功能为主，短剧等只是样例。通用机制、代表包真实迁移/执行、领域内容质量分栏保留证据；不得把组件通过当自然使用，也不得因情节质量问题持续扩展短剧专项功能。旧失败和0/36原始计数不改写，下一轮先补功能所需的证据缺口，详见[唯一Goal](docs/tasks/CAPABILITY_INTERNALIZATION_GOAL.md)。
 
+## 第十五候选受控自动 Compact（2026-09-27）
+
+产品仍0545，配置臂通过原生`/model`为新CAP06线程建立独立65536窗口profile、沿用官方MiniMax-M2.7 provider；原262144默认、其他profile及5份其他配置保持。只提交一次普通资源盘点并末阶段执行原checker的需求，没有手动Compact或测试者补任务。此臂只验证受控预算下的自动路径，不能算默认窗口自然长任务覆盖。
+
+G02共5次主模型及1次选择辅助HTTP、0重试，46.508秒后请求因`COMPACT_TOOL_COVERAGE_UNKNOWN`失败。generation0、checkpoint空、没有摘要HTTP或checker/产物；Task仍active，原A/B pins和marker不变。14对工具与12条索引差异来自有界reader原合同，不能判为丢记录。独立复核以真实归档/投影/IR/carry源码链解释refs整组保留及archive排除冲突，未捕获完整历史typed IR；小窗口是触发条件，不归因容量不足。
+
+观察汇总SHA256为`b260e10697d6257fa75f839cbd072790f2030344ac25099e6d59d23eab32e00c`，独立复核SHA256为`76d61b124ba8af01ee694a9a1007db83ec7a63055473098a8a312556048d92c9`，完整身份和引用角色见[验收记录](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#第十五候选受控自动-compact2026-09-27通用机制失败)。本轮产品未变，不重复此前951项，文档收尾运行doc-sync和diff检查。修复方应先用真实archiver/projection建立零网络组合用例，再验证carry后的来源选择，不能仅用无refs的手建ToolResult成功fixture代替本例。
+
 ## 第十四候选通用功能组合与真实资源消费（2026-09-27）
 
 固定0545源码的951项focused tests通过（0失败、0跳过，61.09秒）；Ruff、doc-sync、strict code-size、diff及clean-package全部通过，本地严格gate已通过，线上CI未作为验收来源。离线wheel1424成员与源码和实际安装一致，pip check及Python3.12导入通过；目录额外`.DS_Store`保留单列。测试/构建/安装证据不相互累计成全仓结果。

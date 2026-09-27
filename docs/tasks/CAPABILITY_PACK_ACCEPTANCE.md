@@ -1,5 +1,26 @@
 # 能力内化：来源盘点与验收矩阵
 
+## 第十五候选：受控自动 Compact（2026-09-27，通用机制失败）
+
+本轮继续验证通用能力包的长任务衔接，领域包只提供现有资源。产品仍为`0545e2db199cedf975be90b151ae6d137e90a6c7`，文档基线`856d98c67892df5070b341d06239c975338d0355`；candidate-15是配置测试臂编号，不是新产品版本。本轮无产品或样包改动。
+
+- 在原私有单一Gateway上，用原生`/model`新增并仅为CAP06新线程选用65536窗口profile，沿用既有官方MiniMax-M2.7 provider；原262144默认profile、provider和其他profile保持。原90%展示阈值为58982，输出上限受窗口四分之一16384约束，但未取得本次实际请求max_tokens，不能据此倒算精确触发值。该受控小窗口不代表默认262144窗口的自然长任务验收。
+- 新会话仅提交一次普通需求：盘点现有两包的方法、参考资料、模板和检查程序，整理交接说明，末阶段用包内原checker核对两份已有输入；不创作或修改输入。测试者没有补提示、手动Compact、恢复或代执行checker。
+- request/task为`gwreq-1790499189-9e2493d41c924fceab661d4465d3a375`，thread为`thread-fa06aac09a794298`，run目录标识为`b5a6396a1389bc59473e0cc2`。46.508秒后请求`failed/ok=false`，错误码`COMPACT_TOOL_COVERAGE_UNKNOWN`，原错误为“当前轮工具来源身份无法证明，原记录保持可见”。原Task仍为`active`，不能把请求终态写成Task完成。
+- 实际5次主模型HTTP及1次选包辅助HTTP，0重试；usage为MiniMax-M2.7/anthropic_compatible，与核对过的官方provider配置一致，未做历史HTTP端点抓包。没有摘要模型调用；generation仍0、checkpoint为空，没有自动提交，也未到checker和交付产物阶段。最后持久上下文计数46373发生在第五轮工具结果之前，不能用它宣称已经越过58982或收到provider长度截断。
+- 原生provider视图14对call/result完整：12次skill_search、2次read_artifact，分五轮。工具索引12条四元身份均完整且唯一，其中9条为真实输出归档、3条为无文件path的内联记录。成功有界read_artifact沿原合同不再入输出索引，不能把14对与12行的差异当作丢失执行记录。
+- A0.3.0/B0.1.3的两份版本pins及一次选择marker从初始到失败完全不变。两份输入、4092个受保护旧文件、安装表及5份其他配置保持；profiles仅新增本轮独立记录，原默认及已有记录保持。业务目录只有两份原输入，无测试者补产物。取证脚本首轮曾误把内联空path当文件读取，修正为只哈希非空归档路径后完整留存索引；这是观察器错误，没有引起产品写入。
+
+独立只读复核将七个相关生产文件与实际安装0545逐字节核对一致，定位到通用来源分区冲突：归档投影创建`ToolResult.refs`及ref内容块，`with_live_prompt_projection`保留原字段；`compact_tool_partition._result_blocks_text_complete`对任何refs判不完整，整轮留在retained，再由blocked_keys排除同四元的完整archive。实际五轮各有带ref结果，因而可解释无可选工具来源后在`PreparedCompactRecovery.select`抛错。未持久化完整typed IR，这个结论来自真实记录和精确构建链，不冒充历史内存抓包；不归因为包pin丢失、坏JSON或索引缺身份。小窗口是进入恢复的触发条件，不是这处分区冲突的原因。
+
+引用角色还须区分：本例read_artifact的ref指向源scoped_call_id，但ref.sha256/size_bytes描述716/736字节的读取回执，payload.sha256/size_bytes才描述6995/7070字节的源搜索归档。不能把来源引用和自归档引用当作同一种完整原文证明，也不能清空refs或把live preview当全文来取得“通过”。
+
+私有证据：`candidate-15-general-compact-frozen.json`、`candidate-15-native-profile.json`、`candidate-15-initial-native.json`、原生request/response/messages/usage/tool索引和9份归档；观察汇总`candidate-15-general-compact-observation.json` SHA256为`b260e10697d6257fa75f839cbd072790f2030344ac25099e6d59d23eab32e00c`，独立报告`candidate-15-general-compact-review.md` SHA256为`76d61b124ba8af01ee694a9a1007db83ec7a63055473098a8a312556048d92c9`。完整原始记录留在私有证据目录，不复制用户数据进仓库。
+
+**验收结论：自动恢复确已触发但失败；自动提交及提交后同代资源消费未覆盖。** 原G01资源复制执行通过、旧手动Compact/恢复通过和本次失败分别保留，不相互补算。产品未变，本轮不重复此前951项组合测试，仅按文档变更验证。
+
+建议下一步：Claude已于09:05:58 UTC确认独占分区、回执投影和恢复来源的通用修复；先沿真实archiver→projection→IR→carry做零网络组合复现，覆盖外置文本与内联结果同组、reader来源引用及恢复attempt，保留未知来源的既有规则。root在固定修复SHA和定向/严格gate证据后核差异、冻结私有候选并复验。只读引用审查可并行，产品写入归Claude、私有运行环境归root，主线发布仍归Claude；不追加领域方法或改写本次失败。
+
 ## 第十四候选：通用资源消费（2026-09-27）
 
 用户明确交付目标是通用能力包，短剧等仅为样例。本轮不新增领域方法或产品实现，先验证已有宿主修复组合，再用已有输入单独检查资源使用链；原A02内容失败和保留集0/36保持。

@@ -1,6 +1,6 @@
 # 当前状态
 
-当前主目标是通用能力包，短剧等仅为样例。第十四候选0545组合951项定向及本地严格gate通过，1424成员精确安装到原私有Gateway，旧文件/配置/安装表保持。G01真实任务已通过原source_ref复制同字节脚本并执行，准确检出输入错误且未改输入；最终文案把8条warning写成9条，报告准确性部分通过。自动Compact续用等仍待验，原业务失败与保留集0/36不改判，Goal active。Claude已回报主线111d32baa双机step13m部署及并发锁修复，本线未独立验生产。详见[本轮通用资源验收](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#第十四候选通用资源消费2026-09-27)。
+当前主目标是通用能力包，短剧等仅为样例，Goal active。G02使用原0545产品和新线程独立65k profile，自动恢复已触发但报`COMPACT_TOOL_COVERAGE_UNKNOWN`；6次HTTP/0重试、generation0、没有摘要调用或checker产物，两包pins保持。独立复核定位refs与工具来源分区的通用冲突，Claude已确认承接，root保留环境/证据并负责复验。此前G01原资源复制执行通过、报告计数部分通过及0545的951项/严格gate不改判；完整能力包未发布，未独立验生产。详见[当前证据与缺项](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#第十五候选受控自动-compact2026-09-27通用机制失败)。
 
 以下为各候选当时的历史状态，当前运行版本与下一片以上段及唯一Goal为准。
 
