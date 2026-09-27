@@ -99,6 +99,19 @@ def test_two_local_thin_tui_users_keep_tasks_memory_and_sessions_separate(tmp_pa
     assert bob.effective_workspace_roots == [bob.home_paths.owner_home_dir]
 
 
+
+def test_scoped_user_decision_records_stay_in_that_users_home(tmp_path) -> None:
+    """决策结果日志与到达计数若漏同步 owner_resolver，会留在基础 owner 目录里，变成跨用户写同一文件。"""
+    agent = _agent(tmp_path, scoping=True)
+    alice = _resolve_request_agent(agent, _req("alice", "feishu"))
+    bob = _resolve_request_agent(agent, _req("bob", "feishu"))
+    data = alice.home_paths.owner_home_dir / "data" / "decision"
+    assert alice.home_paths.owner_decision_outcomes_jsonl == data / "outcomes.jsonl"
+    assert alice.home_paths.owner_decision_reach_counts_json == data / "reach_counts.json"
+    assert alice.home_paths.owner_decision_reach_counts_json != bob.home_paths.owner_decision_reach_counts_json
+    assert agent.home_paths.owner_decision_reach_counts_json not in {
+        alice.home_paths.owner_decision_reach_counts_json, bob.home_paths.owner_decision_reach_counts_json}
+
 def test_local_thin_tui_group_uses_group_owner_scope(tmp_path) -> None:
     """本机群组测试身份沿用结构化 chat_id，不能误建成发件人个人目录。"""
     agent = _agent(tmp_path, scoping=True)

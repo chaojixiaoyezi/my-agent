@@ -441,6 +441,7 @@ agent_py_agent/
 |   |   |-- decision_service.py       # 可选决策阶段预算、设置/身份复核和建议返回，不执行业务动作
 |   |   |-- decision_policy.py        # 有界连接/点位冷却与同进程设置取消通知，不拥有 worker 或持久状态
 |   |   |-- decision_outcome_log.py   # 决策结果日志：每次 decide 的点位/状态/原因/耗时（无正文），有界落 owner data/decision，审计按点位汇总
+|   |   |-- decision_reach_counts.py  # 决策点到达/未触发原因计数：进程内按小时累加，节流合并落 owner data/decision/reach_counts.json，原因码配大白话
 |   |   |-- decision_model_call.py    # 实际决策 worker 复用原准入、身份头、HTTP 观察和唯一调用账；实验先算经验上界再预留
 |   |   |-- decision_experiment.py    # 实验准入/路由/在途复核：只读原授权、账本代次与 v2 上界口径
 |   |   |-- decision_experiment_evaluation.py # 只读证据评估：召回/节省/结算三项事实，决定 skill_tool off→apply 建议
@@ -688,6 +689,7 @@ agent_py_agent/
 |   |-- test_decision_audit_controls.py # 管理员控制存取/失败关闭/只许管理员写、审计工具范围与时间窗、观察白名单与跨用户许可
 |   |-- test_decision_fault_matrix.py   # 决策故障矩阵：断网/DNS/TLS/额度/计费/5xx/慢响应的冷却与恢复、同 owner 多会话并发
 |   |-- test_decision_outcome_log.py    # 决策结果日志：只记结构化字段、有界、按窗口汇总，decide 的成功/超时/点位冷却落日志，审计按点位报告
+|   |-- test_decision_reach_counts.py   # 到达计数：进程内累加、节流合并不覆盖、7 天修剪、开关与写失败、阶段原因与大白话；导出各点位测试共用的 reach_counter
 |   |-- test_capability_presentation_observation.py # 能力推荐观测进 Gateway 请求记录：一回合一条、采用/保留原因、失败码、写入上限与失败语义
 |   |-- test_decision_cooldown_backoff.py # 决策连接连续失败的冷却翻倍、并发同次故障不加级、成功/显式重试复位
 |   |-- test_decision_owner_scope.py    # 用户后台run/空thread、原身份冲突、后台期限与配置隔离
@@ -1252,7 +1254,7 @@ docs/
 - `docs/design/COMPACT_GENERATION_FACTS.md`：摘要来源与请求关联的设计（Codex 交接、集成方待实施），明确旧检查点未知和诊断不参与恢复权威。
 - `docs/design/DECISION_MODEL_INTEGRATION.md`：原生决策模型的实施合同，覆盖配置复用、2/4 秒预算、缺数据、记忆/派工/能力接入、缓存窗口、并行认领与验收。
 - `docs/design/DECISION_AUDIT_AND_ADMIN_CONTROLS.md`：2026-09-25 六项决策/审计要求的合同——接入点开启/观察模式、my-agent 自调等待时间上下限、选模型输入精简与评估、统计行约数、统一审计 `audit_records`、管理员 `admin_controls`。
-- `agent_py_agent/agent/tooling/audit_records_tool.py`、`agent_py_agent/agent/conversation/decision_audit.py`、`agent_py_agent/agent/gateway_parts/request_audit_records.py`：唯一审计入口及其决策主题的四类权威来源读取（设置、用量账本、决策结果日志 `conversation/decision_outcome_log.py`、请求记录观察），不 grep 日志、不读正文；新审计主题只加 topic，不另建工具。
+- `agent_py_agent/agent/tooling/audit_records_tool.py`、`agent_py_agent/agent/conversation/decision_audit.py`、`agent_py_agent/agent/gateway_parts/request_audit_records.py`：唯一审计入口及其决策主题的四类权威来源读取（设置、用量账本、决策结果日志 `conversation/decision_outcome_log.py`、请求记录观察），不 grep 日志、不读正文；新审计主题只加 topic，不另建工具。决策主题另附 `conversation/decision_reach_counts.py` 的每点位未触发原因诊断（`point_diagnostics`），TUI 决策菜单经 decision_read 读同一份。
 - `agent_py_agent/agent/tooling/admin_controls_tool.py`、`agent_py_agent/agent/user_space/owner_admin_controls.py`：管理员管控的唯一写入口与存取；Jev 禁用在 `conversation/decision_model_call.invoke_decision_model_call` 硬拦。
 - `agent_py_agent/tests/test_decision_model_profiles.py`：验证当前模型目录 v4 的用途隔离、显式迁移、凭据复用、共享撤销及主子代理选择不误用决策模型。
 - `agent_py_agent/agent/settings/decision_settings.py`：原设置界面和工具共用服务；原 owner 模型目录及线程字段保存覆盖，锁序 owner→thread，版本冲突拒绝覆写。

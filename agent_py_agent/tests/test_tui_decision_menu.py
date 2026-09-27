@@ -11,6 +11,7 @@ from prompt_toolkit.formatted_text import to_formatted_text
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 
+from agent_py_agent.agent.conversation import decision_reach_counts as reach_counts
 from agent_py_agent.agent.settings.decision_settings import (
     execute_decision_settings_operation as settings,
 )
@@ -20,6 +21,7 @@ from agent_py_agent.agent.settings.model_profiles import (
 )
 from agent_py_agent.cli.chat_parts.tui_decision_menu import (
     _POINTS,
+    _diagnosis,
     _field_text_value,
     _fields,
     _mode_control,
@@ -157,6 +159,46 @@ def point_index(gateway, point, *, thread=False):
             if thread else settings(gateway.host, "read", {}))
     return [key for key in _POINTS if f"points.{key}.mode" in _fields(view)].index(point)
 
+
+
+def test_point_diagnosis_line_uses_host_labels_and_marks_uncounted_points():
+    view = {"point_diagnostics": {
+        "recall": {"covered": True, "reached": 3, "called": 1, "not_called": [
+            {"reason": "memory_count", "label": "这轮找到的普通记忆不到 2 条，不需要重新排序", "count": 2}]},
+        "planning": {"covered": True, "reached": 0, "called": 0, "not_called": []},
+        "model_selection": {"covered": False, "reached": 0, "called": 0, "not_called": []}}}
+    assert _diagnosis(view, "recall") == " · 近24小时检查3次、调用1次，最多是因为：这轮找到的普通记忆不到 2 条，不需要重新排序（2次）"
+    assert _diagnosis(view, "planning") == " · 近24小时检查0次、调用0次"
+    assert _diagnosis(view, "model_selection") == " · 近24小时：未统计未触发原因"
+    assert _diagnosis({}, "recall") == "" and _diagnosis(view, "curator") == ""
+
+
+def test_pipe_point_rows_show_recent_reach_from_the_real_decision_read(tmp_path, monkeypatch):
+    monkeypatch.setattr(reach_counts, "_PENDING", {})
+    monkeypatch.setattr(reach_counts, "_LAST_FLUSH", {})
+
+    async def scenario():
+        gateway = Gateway(tmp_path)
+        gateway.host.home_paths.owner_decision_reach_counts_json = tmp_path / "decision" / "reach_counts.json"
+        for reason in ("memory_count", "memory_count", reach_counts.CALLED):
+            reach_counts.note_decision_reach(gateway.host, "recall", reason)
+        original = gateway.request_models
+
+        # 函数用途: 读取走原 execute_model_profile_operation（真实 TUI/Gateway 的 decision_read 口径），其余沿用 stub。
+        def request_models(*, session_id, operation, payload):
+            if operation == "decision_read":
+                gateway.calls.append((operation, payload))
+                return execute_model_profile_operation(gateway.host, operation, payload)
+            return original(session_id=session_id, operation=operation, payload=payload)
+
+        gateway.request_models = request_models
+        async with running(tmp_path, gateway) as ui:
+            await open_scope(ui)
+            await choose(ui, 6)
+            text = visible(ui.app)
+            assert "近24小时检查3次、调用1次，最多是因为：这轮找到的普通记忆不到 2 条，不需要重新排序（2次）" in text
+            assert "近24小时：未统计未触发原因" in text
+    asyncio.run(scenario())
 
 @pytest.mark.parametrize("stored,toggles,expected", [
     ("off", (), "off"), ("off", ("enabled",), "observe"), ("off", ("enabled", "observe"), "apply"),

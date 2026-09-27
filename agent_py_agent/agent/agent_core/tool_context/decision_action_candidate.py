@@ -17,6 +17,7 @@ from ...backends.decision_protocol import (
 from ...common.cancellation import ToolCancelled, bind_cancellation_token, raise_if_cancelled
 from ...concurrency.interrupt import is_interrupted
 from ...conversation.decision_outcome_log import material_or_skip
+from ...conversation.decision_reach_counts import CALLED, note_decision_reach, stage_miss_reason
 from ...conversation.decision_service import (
     begin_decision_stage,
     decide,
@@ -62,7 +63,7 @@ _INSTRUCTIONS = ("依据当前请求，从本次观察到的候选中选一个�
 
 
 # LLM: 仅在独立点注册后进入；同一阶段期限覆盖准备/发送/采用，真实停止传播，普通故障只返回空串且不影响已执行结果。
-# 函数用途: 调用原决策服务并返回临时操作建议；不保存状态、不执行工具，调用用量沿原账本登记。
+# 函数用途: 调用原决策服务并返回临时操作建议；不保存状态（只经 decision_reach_counts 记到达诊断计数）、不执行工具，调用用量沿原账本登记。
 def action_candidate_hint(agent: object, record: object, archive_record: dict) -> str:
     if _POINT not in POINT_RUNTIME_SCOPES:
         return ""
@@ -78,15 +79,17 @@ def action_candidate_hint(agent: object, record: object, archive_record: dict) -
         return ""
 
 
-# LLM: 资格与材料都只读结构化事实；采用前在配置复核之后再比对原来源/参数版本、观察新鲜度与同一绝对期限，任一变化都不采用。
+# LLM: 资格与材料都只读结构化事实；每次到达都在 decision_reach_counts 记一次结果（没调用的原因码，或真正调用前记 CALLED）。
+#   采用前在配置复核之后再比对原来源/参数版本、观察新鲜度与同一绝对期限，任一变化都不采用。
 # 函数用途: 完成一次“资格→阶段→材料→决策→复核→渲染”，调用方负责取消绑定和普通故障回退。
 def _advise(agent: object, record: object, archive: dict) -> str:
-    if not _eligible(agent, record, archive):
+    reason = _miss_reason(agent, record, archive)
+    stage = None if reason else begin_decision_stage(agent, record.params, operation_id=_operation_id(record))
+    reason = reason or stage_miss_reason(stage, _POINT, record.call.run_id)
+    if reason:
+        note_decision_reach(agent, _POINT, reason)
         return ""
     params = record.params
-    stage = begin_decision_stage(agent, params, operation_id=_operation_id(record))
-    if stage.error_code or _POINT not in stage.enabled_points or stage.run_id != record.call.run_id:
-        return ""
     # 资格检查已保证当前请求非空；长请求在材料里取首尾节选并标注，不再按长度整点跳过。
     limit = decision_request_max_chars(getattr(agent, "config", None))
     _check_interrupted()
@@ -96,6 +99,7 @@ def _advise(agent: object, record: object, archive: dict) -> str:
         return ""
     state, questions, revision = material
     frozen = (_context_revision(params), revision)
+    note_decision_reach(agent, _POINT, CALLED)
     outcome = decide(agent, params, stage, point=_POINT, state=state, questions=questions,
                      candidates_revision=revision, source_refs=(archive["scoped_call_id"],))
     _check_interrupted()
@@ -113,34 +117,56 @@ def _advise(agent: object, record: object, archive: dict) -> str:
 
 
 # LLM: 触发只看结构化事实：当前调用与归档配对、主代理、无收口标记、观察形状合规且 2—64 个候选、观察仍为当前、
-# 至少一个候选的动作工具在本轮快照中可用；不读工具输出正文或自然语言。
-# 函数用途: 判断这条工具回执能否进入可选操作建议；不满足时原展示不变且不发请求。
-def _eligible(agent: object, record: object, archive: dict) -> bool:
-    if not _current_record_matches(agent, record, archive):
-        return False
-    observation = _observation(archive)
+# 至少一个候选的动作工具在本轮快照中可用；不读工具输出正文或自然语言。返回宿主原因码，空串表示满足。
+#   观察形状不合规（DecisionInputError）记 bad_observation，与原先异常后放弃的结果一致。
+# 函数用途: 判断这条工具回执能否进入可选操作建议，不能时给出原因码；不满足时原展示不变且不发请求。
+def _miss_reason(agent: object, record: object, archive: dict) -> str:
+    reason = _record_miss_reason(agent, record, archive)
+    if reason:
+        return reason
+    try:
+        observation = _observation(archive)
+    except DecisionInputError:
+        return "bad_observation"
+    if len(observation["candidates"]) < _MIN_CANDIDATES:
+        return "few_candidates"
     available = _available_tools(record.params)
-    return (len(observation["candidates"]) >= _MIN_CANDIDATES
-            and any(set(candidate["actions"]) & available for candidate in observation["candidates"])
-            and _is_current(agent, record, observation))
+    if not any(set(candidate["actions"]) & available for candidate in observation["candidates"]):
+        return "no_available_action"
+    return "" if _is_current(agent, record, observation) else "stale_observation"
 
 
-# LLM: 原 ToolCall/ToolResult 与归档须在 tool/id/run/task/scoped_call_id 上一致，调用须成功执行；子代理、重复失败/
-# 未知副作用收口或空请求都直接放弃，不读取正文推断。长请求不再按长度放弃，由 _material 取首尾节选并标注。
-# 函数用途: 核对当前回执的身份、执行事实与归档配对，给观察读取提供可信的“当前调用”。
-def _current_record_matches(agent: object, record: object, archive: dict) -> bool:
+# LLM: 先看归档里有没有插件观察信封（没有就是本点不适用，最常见）；再要求原 ToolCall/ToolResult 与归档在
+# tool/id/run/task/scoped_call_id 上一致且调用成功执行；子代理、重复失败/未知副作用收口或空请求都直接放弃，不读取正文推断。
+# 长请求不再按长度放弃，由 _material 取首尾节选并标注。
+# 函数用途: 核对当前回执的身份、执行事实与归档配对，给观察读取提供可信的“当前调用”；不符时返回原因码。
+def _record_miss_reason(agent: object, record: object, archive: dict) -> str:
     call, result, params = getattr(record, "call", None), getattr(record, "result", None), getattr(record, "params", None)
-    if (not isinstance(call, ToolCall) or not isinstance(result, ToolResult)
-            or result.tool_name != call.tool_name or result.call_id != call.call_id
-            or result.handler_executed is not True or result.ok is not True
-            or current_subagent_run_id(agent) or getattr(params, "repeated_failure_halt", None) is not None
-            or getattr(params, "unknown_outcome_halt", None) is not None or not _has_request(params)):
-        return False
     envelope = archive.get("tool_result_envelope") if type(archive) is dict else None
-    return (type(envelope) is dict and type(envelope.get("observation")) is dict
-            and archive.get("tool") == call.tool_name and archive.get("id") == call.call_id
-            and archive.get("run_id") == call.run_id and archive.get("task_id") == getattr(params, "task_id", "")
-            and type(archive.get("scoped_call_id")) is str and bool(archive["scoped_call_id"]))
+    if type(envelope) is not dict or type(envelope.get("observation")) is not dict:
+        return "not_observation"
+    if (not isinstance(call, ToolCall) or not isinstance(result, ToolResult)
+            or result.tool_name != call.tool_name or result.call_id != call.call_id):
+        return "record_mismatch"
+    if result.handler_executed is not True or result.ok is not True:
+        return "failed_call"
+    reason = _run_state_miss_reason(agent, params)
+    if reason:
+        return reason
+    matches = (archive.get("tool") == call.tool_name and archive.get("id") == call.call_id
+               and archive.get("run_id") == call.run_id and archive.get("task_id") == getattr(params, "task_id", "")
+               and type(archive.get("scoped_call_id")) is str and bool(archive["scoped_call_id"]))
+    return "" if matches else "record_mismatch"
+
+
+# LLM: 只读运行上下文与 params 的结构化收口标记；子代理、已收口或没有当前请求都不进入可选操作建议。
+# 函数用途: 判断当前这一轮是否处在可以给操作建议的状态，不能时返回原因码。
+def _run_state_miss_reason(agent: object, params: object) -> str:
+    if current_subagent_run_id(agent):
+        return "subagent"
+    if getattr(params, "repeated_failure_halt", None) is not None or getattr(params, "unknown_outcome_halt", None) is not None:
+        return "halted"
+    return "" if _has_request(params) else "no_request"
 
 
 # LLM: 形状按设计稿第 6 节的归档字段逐项校验（schema 版本、宿主铸的观察/候选编号、manifest 规则的目标类型、本地目标事实与 1—64 个候选）；
@@ -246,7 +272,7 @@ def _safe_external(value: dict) -> str:
 # LLM: 等待前后都用同一函数取来源快照（含新鲜度权威）；不合格时返回空版本，调用方据此放弃采用。
 # 函数用途: 返回当前参数版本与材料版本，用于比较决策等待期间来源是否变化。
 def _current_sources(agent: object, record: object, archive: dict, limit: int) -> tuple[str, str]:
-    if not _eligible(agent, record, archive):
+    if _miss_reason(agent, record, archive):
         return "", ""
     return _context_revision(record.params), _material(record, archive, _observation(archive), limit)[2]
 

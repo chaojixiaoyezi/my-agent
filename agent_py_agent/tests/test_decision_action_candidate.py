@@ -47,6 +47,7 @@ from agent_py_agent.tests._tool_runtime_harness import (
 )
 from agent_py_agent.tests.test_decision_external_material_order import install as install_reading
 from agent_py_agent.tests.test_decision_external_material_order import isolate_recording
+from agent_py_agent.tests.test_decision_reach_counts import reach_counter
 from agent_py_agent.tests.test_decision_settings import host_at, patch
 from agent_py_agent.tests.test_tui_decision_menu import (
     Gateway,
@@ -239,11 +240,22 @@ _INELIGIBLE = {
     "label_query_url": set_candidate("label", "见 //shop.test/pay?session=private"),
     "no_available_action": only_tools(_READ),
 }
+# 每个不合格场景对应的宿主原因码（诊断计数）；新增场景必须在这里写明原因码。
+_MISS_REASONS = {
+    "single_candidate": "few_candidates", "no_observation": "not_observation", "failed_call": "failed_call",
+    "replayed": "failed_call", "repeated_halt": "halted", "unknown_halt": "halted", "empty_request": "no_request",
+    "request_query_url": "privacy_url", "label_query_url": "privacy_url", "no_available_action": "no_available_action",
+    **dict.fromkeys(("archive_id", "archive_run", "archive_task", "archive_scope", "archive_tool"), "record_mismatch"),
+    **dict.fromkeys(("sixty_five_candidates", "no_candidates", "candidates_not_list", "bad_observation_id",
+                     "wrong_schema", "bad_target_kind", "missing_target_ref", "missing_generation", "bad_candidate_id",
+                     "duplicate_candidate_id", "bad_role", "long_label", "empty_key", "empty_actions", "nine_actions",
+                     "blank_action"), "bad_observation"),
+}
 
 
 def test_unregistered_point_is_strict_noop(prepared, monkeypatch):
     monkeypatch.setattr(module, "POINT_RUNTIME_SCOPES", {})
-    monkeypatch.setattr(module, "_eligible", lambda *_args: pytest.fail("unregistered point cannot read sources"))
+    monkeypatch.setattr(module, "_miss_reason", lambda *_args: pytest.fail("unregistered point cannot read sources"))
     assert module.action_candidate_hint(*prepared) == ""
 
 
@@ -313,6 +325,41 @@ def test_ineligible_records_send_no_request(prepared, monkeypatch, scenario):
     record, archive = _INELIGIBLE[scenario](prepared[1], prepared[2])
     assert module.action_candidate_hint(prepared[0], record, archive) == "" and calls == []
 
+
+
+@pytest.mark.parametrize("scenario", _INELIGIBLE, ids=list(_INELIGIBLE))
+def test_each_ineligible_record_counts_one_host_reason(prepared, monkeypatch, scenario):
+    host = prepared[0]
+    reasons = reach_counter(host, monkeypatch, module._POINT, host.root)
+    calls = install(monkeypatch)
+    opened = []
+    operation_id = module._operation_id
+    monkeypatch.setattr(module, "_operation_id", lambda value: opened.append(value) or operation_id(value))
+    record, archive = _INELIGIBLE[scenario](prepared[1], prepared[2])
+    assert module.action_candidate_hint(host, record, archive) == "" and calls == []
+    assert reasons() == ({_MISS_REASONS[scenario]: 1}, 0)
+    # 资格不过时不读决策阶段（热路径）；只有过了资格、卡在材料隐私的场景才打开过阶段。
+    assert len(opened) == (_MISS_REASONS[scenario] == "privacy_url")
+
+
+def test_stage_freshness_subagent_and_calls_are_counted(prepared, monkeypatch):
+    host, record, archive = prepared
+    reasons = reach_counter(host, monkeypatch, module._POINT, host.root)
+    install(monkeypatch, mode="off")
+    module.action_candidate_hint(host, record, archive)
+    install(monkeypatch, stage_run_id="other-run")
+    module.action_candidate_hint(host, record, archive)
+    install_currency(monkeypatch, False)
+    module.action_candidate_hint(host, record, archive)
+    install_currency(monkeypatch)
+    token = set_current_subagent_context(host, run_id="child-run", task_attributes={"agent_thread_id": "thread-1"})
+    try:
+        module.action_candidate_hint(host, record, archive)
+    finally:
+        restore_current_subagent_context(host, token)
+    calls = install(monkeypatch, choice="c1")
+    assert module.action_candidate_hint(host, record, archive) == _HINT_C1 and len(calls) == 1
+    assert reasons() == ({"point_off": 1, "run_mismatch": 1, "stale_observation": 1, "subagent": 1}, 1)
 
 @pytest.mark.parametrize("prompt,reason", [("在 https://shop.test/cart?coupon=private-code 下单", "privacy_url")])
 def test_triggered_but_blocked_requests_leave_a_skipped_audit_row(prepared, monkeypatch, prompt, reason):

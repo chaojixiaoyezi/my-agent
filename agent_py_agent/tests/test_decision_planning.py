@@ -15,6 +15,7 @@ from agent_py_agent.agent.agent_core.task_progress_tool import TaskProgressTool
 from agent_py_agent.agent.backends.decision_protocol import (
     DecisionAnswer,
     DecisionBinding,
+    DecisionInputError,
     DecisionResponse,
 )
 from agent_py_agent.agent.common.cancellation import ToolCancelled
@@ -25,6 +26,7 @@ from agent_py_agent.agent.task_progress import (
     write_task_progress,
 )
 from agent_py_agent.cli.chat_parts.tui_decision_menu import _fields
+from agent_py_agent.tests.test_decision_reach_counts import reach_counter
 from agent_py_agent.tests.test_decision_settings import host_at, patch
 
 
@@ -225,6 +227,39 @@ def test_unproven_or_unhelpful_scope_does_not_call_jev(prepared, monkeypatch, ch
     assert result.ok and "planning_priority_hint" not in json.loads(result.output)
     assert not calls
 
+
+
+@pytest.mark.parametrize("change,reason", [("historical", "not_current_plan"), ("child", "subagent"),
+                                           ("no_plan", "not_current_plan"), ("single", "todo_count")])
+def test_each_unhelpful_scope_counts_one_host_reason(prepared, monkeypatch, change, reason):
+    agent, _, root = prepared
+    reasons = reach_counter(agent, monkeypatch, module._POINT, root)
+    monkeypatch.setattr(module, "_operation_id", lambda *_args: pytest.fail("资格不过时不能打开决策阶段"))
+    test_unproven_or_unhelpful_scope_does_not_call_jev(prepared, monkeypatch, change)
+    assert reasons() == ({reason: 1}, 0)
+
+
+def test_off_point_empty_request_bad_material_and_calls_are_counted(prepared, monkeypatch):
+    agent, params, root = prepared
+    reasons = reach_counter(agent, monkeypatch, module._POINT, root)
+    install(monkeypatch, mode="off")
+    _read(agent)
+    calls = install(monkeypatch)
+    _read(agent)
+    agent._current_user_prompt = ""
+    _read(agent)
+    agent._current_user_prompt = "请先处理最重要的待办"
+    params.context_scope = "background"
+    _read(agent)
+    params.context_scope = "default"
+
+    def broken(*_args):
+        raise DecisionInputError("材料超出上限")
+
+    monkeypatch.setattr(module, "_material", broken)
+    _read(agent)
+    assert len(calls) == 1
+    assert reasons() == ({"point_off": 1, "no_request": 1, "not_main_scope": 1, "bad_material": 1}, 1)
 
 @pytest.mark.parametrize("prompt_len,called", [(3186, True), (0, False)])
 def test_long_request_is_sent_as_a_labeled_excerpt(prepared, monkeypatch, prompt_len, called):

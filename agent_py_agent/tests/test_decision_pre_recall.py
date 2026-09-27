@@ -14,6 +14,7 @@ from agent_py_agent.agent.memory_store.recall import (
     MemoryRecallScope,
     long_term_record_matches_scope,
 )
+from agent_py_agent.tests.test_decision_reach_counts import reach_counter
 
 
 @pytest.fixture
@@ -58,6 +59,32 @@ def _run(prepared, monkeypatch, *, choice="query_1", mode="apply", budget=100, r
         remaining_chars=budget, refresh=refresh or (lambda: [original]),
     )
 
+
+
+def test_pre_recall_reach_reasons_are_counted(prepared, monkeypatch, tmp_path):
+    agent, request, stage, scope, original, _extra = prepared
+    reasons = reach_counter(agent, monkeypatch, "pre_recall", tmp_path)
+
+    def supplement(**changes):
+        kwargs = {"recall_scope": scope, "stage": stage, "queries": (("query_1", "Lyra deployment checklist"),),
+                  "slots": 1, "search_top_k": 5, "remaining_chars": 100, "refresh": lambda: [original], **changes}
+        return decision_recall.supplement_recalled_memories(agent, request, [original], **kwargs)
+
+    supplement(queries=())
+    supplement(slots=0)
+    supplement(remaining_chars=0)
+    closed = SimpleNamespace(error_code="admin_disabled", enabled_points=(), deadline=stage.deadline)
+    assert supplement(stage=closed)[1] == "memory_pre_recall_decision:unavailable"
+    supplement(stage=SimpleNamespace(error_code="", enabled_points=(), deadline=stage.deadline))
+    _run(prepared, monkeypatch)
+
+    def broken(_value):
+        raise decision_recall.DecisionInputError("材料超出上限")
+
+    monkeypatch.setattr(decision_recall, "_digest", broken)
+    assert supplement()[1] == "memory_pre_recall_decision:enhancement_failed"
+    assert reasons() == ({"no_query_fragments": 1, "no_free_slots": 1, "no_room": 1, "admin_disabled": 1,
+                          "point_off": 1, "bad_material": 1}, 1)
 
 def test_apply_appends_only_new_in_scope_record_and_confirms_access(prepared, monkeypatch):
     records, finding = _run(prepared, monkeypatch)

@@ -31,6 +31,7 @@ from agent_py_agent.tests._tool_runtime_harness import (
     make_test_protocol_snapshot,
     runtime_snapshot_for_model_specs,
 )
+from agent_py_agent.tests.test_decision_reach_counts import reach_counter
 
 
 # LLM: 使用真实不可变 call/result 与原 runtime 参数；页面和归档字段来自现行 extract 合同，不读取真实文件。
@@ -105,7 +106,7 @@ def install(monkeypatch, *, mode="apply", status="success", choices=None, mutate
 
 def test_unregistered_point_is_strict_noop(prepared, monkeypatch):
     monkeypatch.setattr(module, "POINT_RUNTIME_SCOPES", {})
-    monkeypatch.setattr(module, "_eligible", lambda *_args: pytest.fail("unregistered point cannot prepare"))
+    monkeypatch.setattr(module, "_miss_reason", lambda *_args: pytest.fail("unregistered point cannot prepare"))
     assert module.external_material_order_hint(*prepared) == ""
 
 
@@ -213,6 +214,37 @@ def test_unproven_candidates_do_not_call_decision(prepared, monkeypatch, change)
     calls, _ = install(monkeypatch)
     assert module.external_material_order_hint(host, record, archive) == ""
     assert not calls
+
+
+@pytest.mark.parametrize("change,reason", [
+    ("wrong_archive", "record_mismatch"), ("wrong_run", "run_mismatch"), ("wrong_task", "record_mismatch"),
+    ("single_page", "single_page"), ("missing_hash", "bad_material"), ("unknown_projection", "not_external_page"),
+    ("replayed", "fetch_failed"), ("failure", "fetch_failed"), ("raw_json_only", "not_extract"),
+])
+def test_each_unproven_candidate_counts_one_host_reason(prepared, monkeypatch, change, reason):
+    host, record, archive = prepared
+    reasons = reach_counter(host, monkeypatch, module._POINT, host.root)
+    opened = []
+    operation_id = module._operation_id
+    monkeypatch.setattr(module, "_operation_id", lambda value: opened.append(value) or operation_id(value))
+    test_unproven_candidates_do_not_call_decision(prepared, monkeypatch, change)
+    assert reasons() == ({reason: 1}, 0)
+    # 资格不过时不读决策阶段（热路径）；过了资格才会卡在阶段身份或材料上。
+    assert len(opened) == (reason in {"run_mismatch", "bad_material"})
+
+
+def test_other_tools_off_oversized_and_real_calls_are_counted(prepared, monkeypatch):
+    host, record, archive = prepared
+    reasons = reach_counter(host, monkeypatch, module._POINT, host.root)
+    other = replace(record, call=replace(record.call, tool_name="read_file"))
+    install(monkeypatch)
+    assert module.external_material_order_hint(host, other, archive) == ""
+    install(monkeypatch, mode="off")
+    assert module.external_material_order_hint(host, record, archive) == ""
+    calls, _ = install(monkeypatch, choices=("normal", "normal", "normal"))
+    assert module.external_material_order_hint(host, record, archive) == "" and len(calls) == 1
+    test_oversized_material_does_not_cut_or_read_sources(prepared, monkeypatch)
+    assert reasons() == ({"not_web_fetch": 1, "point_off": 1, "bad_material": 1}, 1)
 
 
 def test_oversized_material_does_not_cut_or_read_sources(prepared, monkeypatch):

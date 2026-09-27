@@ -10,6 +10,7 @@ from ...backends.decision_protocol import DecisionInputError, DecisionPrivacySki
 from ...common.cancellation import ToolCancelled, bind_cancellation_token, raise_if_cancelled
 from ...concurrency.interrupt import is_interrupted
 from ...conversation.decision_outcome_log import material_or_skip
+from ...conversation.decision_reach_counts import CALLED, note_decision_reach, stage_miss_reason
 from ...conversation.decision_service import (
     begin_decision_stage,
     decide,
@@ -28,17 +29,19 @@ _NON_SELECTIONS = {"not_needed": "无需额外建议", "no_match": "无法匹配
 
 
 # LLM: 只在独立点注册且启用后准备材料；原阶段期限覆盖准备/发送/消费，真实停止传播，普通故障不得影响已执行结果。
-# 函数用途: 调用原决策服务并返回临时阅读提示；不保存状态，不发起工具或读取 artifact，调用用量沿原账本登记。
+#   每次到达都在 decision_reach_counts 记一次结果（没调用的原因码，或真正调用前记 called）。
+# 函数用途: 调用原决策服务并返回临时阅读提示；不保存状态（只记到达诊断计数），不发起工具或读取 artifact，调用用量沿原账本登记。
 def external_material_order_hint(agent: object, record: object, archive_record: dict) -> str:
     if _POINT not in POINT_RUNTIME_SCOPES:
         return ""
     try:
-        if not _eligible(record, archive_record):
-            return ""
+        reason = _miss_reason(record, archive_record)
         params = record.params
         with bind_cancellation_token(getattr(params, "cancellation_token", None)):
-            stage = begin_decision_stage(agent, params, operation_id=_operation_id(record))
-            if stage.error_code or _POINT not in stage.enabled_points or stage.run_id != record.call.run_id:
+            stage = None if reason else begin_decision_stage(agent, params, operation_id=_operation_id(record))
+            reason = reason or stage_miss_reason(stage, _POINT, record.call.run_id)
+            if reason:
+                note_decision_reach(agent, _POINT, reason)
                 return ""
             _check_interrupted()
             material = material_or_skip(agent, stage, _POINT, lambda: _material(record, archive_record))
@@ -46,6 +49,7 @@ def external_material_order_hint(agent: object, record: object, archive_record: 
                 return ""
             state, questions, revision = material
             context_revision = _context_revision(params)
+            note_decision_reach(agent, _POINT, CALLED)
             outcome = decide(agent, params, stage, point=_POINT, state=state, questions=questions,
                              candidates_revision=revision, source_refs=(archive_record["scoped_call_id"],))
             _check_interrupted()
@@ -54,7 +58,7 @@ def external_material_order_hint(agent: object, record: object, archive_record: 
             deadline = min(stage.deadline, outcome.deadline)
             if (time.monotonic() >= deadline
                     or outcome.response.binding.candidates_revision != revision
-                    or not _eligible(record, archive_record)
+                    or _miss_reason(record, archive_record)
                     or _context_revision(params) != context_revision
                     or _material(record, archive_record)[2] != revision):
                 return ""
@@ -76,22 +80,29 @@ def external_material_order_hint(agent: object, record: object, archive_record: 
 
 
 # LLM: 只认原调用配对、成功执行、external_data/default 投影和已有归档摘要；任意 JSON 正文不是候选事实。
-# 函数用途: 在不编码正文的前提下判断回执能否进入独立增强，单页、失败和重放保持原路径。
-def _eligible(record: object, archive: dict) -> bool:
+#   返回宿主原因码，空串表示满足；各条件与原先的整体判断一一对应，不改变触发结果。
+# 函数用途: 在不编码正文的前提下判断回执能否进入独立增强，不能时给出原因码；单页、失败和重放保持原路径。
+def _miss_reason(record: object, archive: dict) -> str:
     call, result = record.call, record.result
-    if (not isinstance(call, ToolCall) or not isinstance(result, ToolResult)
-            or call.tool_name != "web_fetch" or result.tool_name != call.tool_name
-            or result.call_id != call.call_id or not result.ok or not result.handler_executed
-            or result.output_trust != "external_data" or result.output_redaction != "default"):
-        return False
+    if not isinstance(call, ToolCall) or call.tool_name != "web_fetch":
+        return "not_web_fetch"
+    if (not isinstance(result, ToolResult) or result.tool_name != call.tool_name
+            or result.call_id != call.call_id or not result.ok or not result.handler_executed):
+        return "fetch_failed"
+    if result.output_trust != "external_data" or result.output_redaction != "default":
+        return "not_external_page"
     details = result.metadata.get("handler_details")
     pages = details.get("pages") if type(details) is dict and details.get("mode") == "extract" else None
-    return (type(pages) is list and len(pages) > 1
-            and archive.get("tool") == call.tool_name and archive.get("id") == call.call_id
-            and archive.get("run_id") == call.run_id and bool(archive.get("scoped_call_id"))
-            and archive.get("task_id") == getattr(record.params, "task_id", "")
-            and bool(archive.get("output_hash"))
-            and archive.get("output_hash") == result.metadata.get("raw_output_sha256"))
+    if type(pages) is not list:
+        return "not_extract"
+    if len(pages) <= 1:
+        return "single_page"
+    matches = (archive.get("tool") == call.tool_name and archive.get("id") == call.call_id
+               and archive.get("run_id") == call.run_id and bool(archive.get("scoped_call_id"))
+               and archive.get("task_id") == getattr(record.params, "task_id", "")
+               and bool(archive.get("output_hash"))
+               and archive.get("output_hash") == result.metadata.get("raw_output_sha256"))
+    return "" if matches else "record_mismatch"
 
 
 # LLM: 原 call 身份决定一次建议的操作编号；不从正文或模型选项推断 owner/run/task，也不创建持久操作。

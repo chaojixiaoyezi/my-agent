@@ -20,9 +20,12 @@ from agent_py_agent.agent.contracts.model_call_ledger import (
     ModelCallStartedParams,
 )
 from agent_py_agent.agent.contracts.tool_manifest_contract import tool_manifest_payload
+from agent_py_agent.agent.conversation import decision_reach_counts as reach_counts
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.gateway_parts.request_binding import GatewayTaskBindingWriter
 from agent_py_agent.agent.settings.config import AgentConfig
+from agent_py_agent.agent.settings.decision_settings_schema import POINTS
+from agent_py_agent.agent.settings.thread_model_selection import execute_local_model_operation
 from agent_py_agent.agent.tooling.admin_controls_tool import AdminControlsTool
 from agent_py_agent.agent.user_space.owner_admin_controls import (
     OwnerAdminControlsError,
@@ -247,6 +250,31 @@ def test_audit_reads_own_usage_and_observations_within_the_window_only(tmp_path,
         refused, _ = _call(alice, "audit_records", bad)
         assert not refused.ok and refused.error_code == "TOOL_INVALID_ARGUMENTS"
 
+
+
+def test_audit_and_menu_read_explain_why_points_did_not_trigger(tmp_path, monkeypatch):
+    monkeypatch.setattr(reach_counts, "_PENDING", {})
+    monkeypatch.setattr(reach_counts, "_LAST_FLUSH", {})
+    alice = _agent(tmp_path, monkeypatch, ALICE_OWNER)
+    for reason in ("not_test_command", "not_test_command", "focus_count", reach_counts.CALLED):
+        reach_counts.note_decision_reach(alice, "delivery_quality", reason)
+    outcome, report = _call(alice, "audit_records", {"topic": "decision"})
+    assert outcome.ok, outcome.output
+    [owner] = report["owners"]
+    rows = owner["point_diagnostics"]
+    assert set(rows) == set(POINTS) and owner["diagnostics_scope"] == "owner"
+    quality = rows["delivery_quality"]
+    assert (quality["enabled"], quality["mode"], quality["covered"], quality["reached"], quality["called"]) == (
+        False, "off", True, 4, 1)
+    assert quality["not_called"] == [
+        {"reason": "not_test_command", "label": "这一步不是运行测试的命令", "count": 2},
+        {"reason": "focus_count", "label": reach_counts.miss_reason_label("focus_count"), "count": 1}]
+    assert rows["model_selection"]["covered"] is False and rows["planning"]["reached"] == 0
+    assert "decision_reach_counts" in report["sources"]
+    # TUI 决策菜单走的 decision_read 附同一份诊断（近 24 小时）。
+    read = execute_local_model_operation(alice, "local-session", "decision_read", {"decision": {"scope": "owner"}})
+    assert read["diagnostics_window_hours"] == 24
+    assert read["point_diagnostics"]["delivery_quality"]["not_called"] == quality["not_called"]
 
 def test_all_owners_scope_needs_admin_and_explicit_cross_owner_permission(tmp_path, monkeypatch):
     alice = _agent(tmp_path, monkeypatch, ALICE_OWNER)

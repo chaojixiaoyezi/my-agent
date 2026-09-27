@@ -7,6 +7,7 @@ from dataclasses import replace
 
 from ..backends.decision_protocol import DecisionInputError, decision_json
 from ..backends.gateway_request_limits import remaining_deadline_seconds
+from ..conversation.decision_reach_counts import CALLED, counted_material, note_decision_reach
 from ..conversation.decision_service import decide, decision_outcome_is_current
 from .curator_backend import curator_prompt
 from .curator_formal import _long_term_items
@@ -24,15 +25,20 @@ _RELATIONS = {
 
 
 # LLM: 本函数只读原 owner 仓库并走同一 decision_service/账本，不新建阶段或线程；异常由外层按取消与可选失败区分。
+#   到达结果（nothing_to_compare / memory_changed / bad_material / called）计入 decision_reach_counts，诊断计数副作用。
 # 函数用途: 核对本批完整材料，询问有限关系，并在采用前复核正式条目的原版本。
 def annotate_curator_relations(agent, batch: CuratorInputBatch, params, stage, *, max_input_chars: int):
     remaining_deadline_seconds(stage.deadline)
-    state, questions, pairs, revision, incomplete = _relation_material(batch)
+    state, questions, pairs, revision, incomplete = counted_material(
+        agent, "curator_relation", lambda: _relation_material(batch))
     warnings = ("memory_curator_relation:unknown:need_data",) if incomplete else ()
     if not questions:
+        note_decision_reach(agent, "curator_relation", "nothing_to_compare")
         return batch, warnings
     if not _formal_inputs_current(agent, pairs, stage.deadline):
+        note_decision_reach(agent, "curator_relation", "memory_changed")
         return batch, (*warnings, "memory_curator_relation:unknown:stale")
+    note_decision_reach(agent, "curator_relation", CALLED)
     outcome = decide(agent, params, stage, point="curator_relation", state=state, questions=questions,
                      candidates_revision=revision,
                      source_refs=tuple(dict.fromkeys(ref for source, formal in pairs for ref in (f"message:{source.message_id}", formal.authority_ref))))

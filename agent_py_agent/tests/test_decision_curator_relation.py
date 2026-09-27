@@ -28,6 +28,7 @@ from agent_py_agent.agent.settings.decision_settings import (
 from agent_py_agent.agent.settings.memory import normalize_memory_settings
 from agent_py_agent.agent.settings.model_provider_schema import ModelProfileError
 from agent_py_agent.cli.chat_parts.tui_decision_menu import _field_label, _fields
+from agent_py_agent.tests.test_decision_reach_counts import reach_counter
 from agent_py_agent.tests.test_decision_settings import host_at, patch
 
 
@@ -141,6 +142,21 @@ def test_missing_complete_material_never_sends_relation_request(prepared, monkey
     result, warnings = annotate(agent, batch)
     assert result is batch and not calls and warnings == ("memory_curator_relation:unknown:need_data",)
 
+
+
+def test_relation_reach_reasons_are_counted(prepared, monkeypatch, tmp_path):
+    agent, batch, record = prepared
+    reasons = reach_counter(agent, monkeypatch, "curator_relation", tmp_path)
+    calls, _ = install(monkeypatch)
+    annotate(agent, replace(batch, formal_memories=()))
+    annotate(agent, batch)
+    annotate(agent, replace(batch, messages=(batch.messages[0], batch.messages[0])))
+    agent.memory.replace(record.entry_id, "另一条正式内容。", expected_version=record.version)
+    annotate(agent, batch)
+    install(monkeypatch, points=())
+    annotate(agent, batch)
+    assert len(calls) == 1
+    assert reasons() == ({"nothing_to_compare": 1, "bad_material": 1, "memory_changed": 1, "point_off": 1}, 1)
 
 @pytest.mark.parametrize("phase", ["before", "during"])
 @pytest.mark.parametrize("change", ["replace", "same_body_version", "remove"])

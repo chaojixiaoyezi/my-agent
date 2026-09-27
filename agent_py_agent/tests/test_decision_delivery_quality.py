@@ -23,6 +23,7 @@ from agent_py_agent.agent.backends.decision_protocol import (
 )
 from agent_py_agent.agent.backends.message_adapter import AnthropicMessageAdapter
 from agent_py_agent.agent.common.cancellation import ToolCancelled
+from agent_py_agent.agent.conversation.decision_reach_counts import CALLED
 from agent_py_agent.agent.runtime_context import (
     restore_current_subagent_context,
     set_current_subagent_context,
@@ -37,6 +38,7 @@ from agent_py_agent.tests._tool_runtime_harness import (
 )
 from agent_py_agent.tests.test_decision_external_material_order import install as install_reading
 from agent_py_agent.tests.test_decision_external_material_order import isolate_recording
+from agent_py_agent.tests.test_decision_reach_counts import reach_counter
 
 _ROOT = "/private-owner/project-secret"
 _OTHER_ROOT = "/private-owner/other-secret"
@@ -238,9 +240,23 @@ _ELIGIBLE = {
 }
 
 
+# 每个不合格场景对应的宿主原因码（诊断计数）；新增场景必须在这里写明原因码。
+_MISS_REASONS = {
+    "single_focus": "focus_count", "all_passing": "nothing_to_review", "thirteen_focuses": "focus_count",
+    "other_tool": "not_test_command", "archive_id": "record_mismatch", "archive_run": "record_mismatch",
+    "archive_task": "record_mismatch", "archive_scope": "record_mismatch", "archive_evidence": "not_verification",
+    "not_archived": "record_mismatch", "archived_twice": "bad_verification", "other_run_sources": "focus_count",
+    "repeated_halt": "halted", "unknown_halt": "halted", "empty_request": "no_request",
+    "no_evidence": "not_verification", "replayed": "not_executed", "duplicate_event": "bad_verification",
+    "bool_event_id": "bad_verification", "malformed_kind": "bad_verification", "text_exit_code": "bad_verification",
+    "missing_root": "bad_verification", "malformed_state": "bad_verification", "stale_without_root": "bad_verification",
+    "non_stale_state": "nothing_to_review", "request_query_url": "privacy_url", "request_relative_query_url": "privacy_url",
+}
+
+
 def test_unregistered_point_is_strict_noop(prepared, monkeypatch):
     monkeypatch.setattr(module, "POINT_RUNTIME_SCOPES", {})
-    monkeypatch.setattr(module, "_eligible", lambda *_args: pytest.fail("unregistered point cannot read sources"))
+    monkeypatch.setattr(module, "_miss_reason", lambda *_args: pytest.fail("unregistered point cannot read sources"))
     assert module.delivery_quality_hint(*prepared) == ""
 
 
@@ -330,6 +346,54 @@ def test_mismatched_current_record_returns_before_scanning_the_archive(prepared,
     monkeypatch.setattr(module, "_scan", lambda *_args: pytest.fail("mismatched records cannot scan the run archive"))
     assert module.delivery_quality_hint(host, record, archive) == "" and not calls
 
+
+
+@pytest.mark.parametrize("change", sorted(_INELIGIBLE))
+def test_each_ineligible_source_counts_one_host_reason(prepared, monkeypatch, change):
+    host, record, archive = prepared
+    reasons = reach_counter(host, monkeypatch, module._POINT, host.root)
+    record, archive = _INELIGIBLE[change](record, archive)
+    calls = install(monkeypatch)
+    opened = []
+    operation_id = module._operation_id
+    monkeypatch.setattr(module, "_operation_id", lambda value: opened.append(value) or operation_id(value))
+    assert module.delivery_quality_hint(host, record, archive) == "" and not calls
+    assert reasons() == ({_MISS_REASONS[change]: 1}, 0)
+    # 资格不过时不读决策阶段（热路径）；只有过了资格、卡在材料隐私的场景才打开过阶段。
+    assert len(opened) == (_MISS_REASONS[change] == "privacy_url")
+
+
+@pytest.mark.parametrize("stage,expected", [
+    ({"mode": "off"}, ({"point_off": 1}, 0)),
+    ({"stage_error": "configuration_unavailable"}, ({"configuration_unavailable": 1}, 0)),
+    ({"stage_run_id": "other-run"}, ({"run_mismatch": 1}, 0)),
+    ({"choice": "not_needed"}, ({}, 1)),
+], ids=["off", "stage_error", "foreign_run", "called"])
+def test_stage_reasons_and_real_calls_are_counted_once(prepared, monkeypatch, stage, expected):
+    host, record, archive = prepared
+    reasons = reach_counter(host, monkeypatch, module._POINT, host.root)
+    calls = install(monkeypatch, **stage)
+    module.delivery_quality_hint(host, record, archive)
+    assert reasons() == expected and len(calls) == expected[1]
+    assert CALLED not in expected[0]
+
+
+def test_subagent_and_invalid_material_are_counted(prepared, monkeypatch):
+    host, record, archive = prepared
+    reasons = reach_counter(host, monkeypatch, module._POINT, host.root)
+    install(monkeypatch)
+    previous = set_current_subagent_context(host, run_id="child-run", task_attributes={"agent_thread_id": "thread-1"})
+    try:
+        module.delivery_quality_hint(host, record, archive)
+    finally:
+        restore_current_subagent_context(host, previous)
+
+    def broken(*_args):
+        raise DecisionInputError("材料超出上限")
+
+    monkeypatch.setattr(module, "_material", broken)
+    assert module.delivery_quality_hint(host, record, archive) == ""
+    assert reasons() == ({"subagent": 1, "bad_material": 1}, 0)
 
 def _outcome_rows(host, tmp_path):
     path = tmp_path / "decision-outcomes.jsonl"

@@ -19,6 +19,7 @@ from agent_py_agent.agent.common.cancellation import ToolCancelled
 from agent_py_agent.agent.memory_store import MemoryRecord
 from agent_py_agent.agent.memory_store import decision_recall as module
 from agent_py_agent.agent.memory_store.recall import MemoryRecallScope
+from agent_py_agent.tests.test_decision_reach_counts import reach_counter
 
 
 def test_supplemental_queries_are_finite_parts_of_the_original_prompt():
@@ -92,6 +93,29 @@ def test_off_never_prepares_material(prepared, monkeypatch):
     monkeypatch.setattr(module, "_material", lambda *_args: pytest.fail("disabled cannot encode records"))
     assert run(prepared)[0] is prepared[2]
 
+
+
+def test_recall_reach_reasons_are_counted(prepared, monkeypatch, tmp_path):
+    host, request, records, scope = prepared
+    reasons = reach_counter(host, monkeypatch, "recall", tmp_path)
+
+    def rerank(req=request, rows=records, stage=None):
+        return module.rerank_recalled_memories(host, req, rows, recall_scope=scope, refresh=lambda: list(rows), stage=stage)
+
+    calls = install(monkeypatch)
+    begin = module.begin_decision_stage
+    monkeypatch.setattr(module, "begin_decision_stage", lambda *_args, **_kwargs: pytest.fail("输入不满足时不能打开决策阶段"))
+    assert rerank(rows=records[:1]) == (records[:1], "")
+    assert rerank(req=replace(request, request_id="", run_id="")) == (records, "")
+    monkeypatch.setattr(module, "begin_decision_stage", begin)
+    assert rerank(stage=SimpleNamespace(error_code="settings_busy", enabled_points=()))[1] == "memory_recall_decision:unavailable"
+    rerank()
+    assert rerank(rows=[records[0], records[0], records[1]])[1] == "memory_recall_decision:enhancement_failed"
+    install(monkeypatch, mode="off")
+    assert rerank() == (records, "")
+    assert len(calls) == 1
+    assert reasons() == ({"memory_count": 1, "no_run_context": 1, "settings_busy": 1, "bad_material": 1,
+                          "point_off": 1}, 1)
 
 def test_apply_stable_sort_keeps_hot_lesson_slots_and_all_objects(prepared, monkeypatch):
     host, request, records, scope = prepared

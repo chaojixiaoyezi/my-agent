@@ -16,6 +16,20 @@
     确认、拒绝保留版本号复核；TUI 本地模式明确拒绝（未列出的控制会落进停止分支），文本还原带上参数。
   - **原则**（长期）：面向用户的能力都要有 TUI 与 IM 入口，只有命令行入口的视为缺口；本机维护命令可以只留命令行。
   - 详见 [自动总结 Skill 的用户入口](docs/design/SKILL_AUTO_SUMMARY.md#10-用户入口)。
+- **决策审计说清“每个点位最近为什么没触发”**（2026-09-27，分支 `claude/9b-decision-miss-reasons`，本地回归与变异通过，见 TESTS）：
+  - **起因**：审计里某个点位调用 0 次时，用户只看到“0 次”，分不清是没打开、没到触发点，还是每次都被条件挡下。
+  - **做法**：新增唯一来源 `conversation/decision_reach_counts.py`。9 个点位每次到达触发检查都记一次结果：没调用记宿主原因码，
+    真正交给决策模型前记 `called`。计数只在进程内累加，每个 owner 最多每 60 秒合并写一次
+    `<owner_home>/data/decision/reach_counts.json`（owner 规范路径 `owner_decision_reach_counts_json`，Gateway 按用户作用域重设），
+    保留 7 天，不逐次写盘。原因码都配了给不懂技术的用户看的大白话。开关复用 `decision_skip_records_enabled`
+    （说明改为“决策点诊断记录”），关闭时跳过行与计数都不写。触发行为不变。
+  - **展示**：`audit_records topic=decision` 每个 owner 附 `point_diagnostics`（是否开启、检查几次、调用几次、没调用的原因分布），
+    飞书等 IM 里由模型直接用大白话解释；TUI 决策菜单“逐接入点设置”每行末尾显示“近24小时检查N次、调用M次，最多是因为：……”。
+  - **边界**：model_selection、subagent_model、skill_tool 还没接计数，显示“未统计”而不是 0 次；距上次合并不到 60 秒、之后又没有
+    新到达的计数只在本进程可见，进程退出会丢；意外异常不计入。
+  - **待办（发现未改）**：`owner_resolver.home_paths_with_owner` 没有按作用域重设 `owner_memory_policy_json`，Gateway 里其它用户读到的是
+    基础 owner 的记忆策略文件，建议单独修并补全字段守卫测试。
+  - 详见 [决策审计与管控](docs/design/DECISION_AUDIT_AND_ADMIN_CONTROLS.md#每个点位最近为什么没触发2026-09-27)。
 - **决策点“触发了但被挡下”也留审计记录**（2026-09-27，分支 `claude/decision-skip-records`，本地回归与变异通过，见 TESTS）：
   - **起因**：my-agent 在真实 TUI 里测 Jev 点位，planning 等没有任何记录，就写出“宿主未接线”的开发需求。实际都已接线且开启；
     planning 那一轮由 3186 字粘贴开启（后两条短消息是中途插话），原话超过 1024 字时按设计整点跳过，却什么都不写。

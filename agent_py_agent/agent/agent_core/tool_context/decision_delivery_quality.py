@@ -16,6 +16,7 @@ from ...backends.decision_protocol import (
 from ...common.cancellation import ToolCancelled, bind_cancellation_token, raise_if_cancelled
 from ...concurrency.interrupt import is_interrupted
 from ...conversation.decision_outcome_log import material_or_skip
+from ...conversation.decision_reach_counts import CALLED, note_decision_reach, stage_miss_reason
 from ...conversation.decision_service import (
     begin_decision_stage,
     decide,
@@ -53,7 +54,7 @@ _INSTRUCTIONS = ("依据当前请求，从本轮已有验证焦点中选一个�
 
 
 # LLM: 仅在独立点注册后进入；同一阶段期限覆盖准备/发送/采用，真实停止传播，普通故障只返回空串且不影响已执行结果。
-# 函数用途: 调用原决策服务并返回临时复核提示；不保存状态、不执行工具，调用用量沿原账本登记。
+# 函数用途: 调用原决策服务并返回临时复核提示；不保存状态（只经 decision_reach_counts 记到达诊断计数）、不执行工具，调用用量沿原账本登记。
 def delivery_quality_hint(agent: object, record: object, archive_record: dict) -> str:
     if _POINT not in POINT_RUNTIME_SCOPES:
         return ""
@@ -69,15 +70,17 @@ def delivery_quality_hint(agent: object, record: object, archive_record: dict) -
         return ""
 
 
-# LLM: 资格与材料都只读结构化事实；采用前在配置复核之后再比对原来源/参数版本与同一绝对期限，任一变化都不采用。
+# LLM: 资格与材料都只读结构化事实；每次到达都在 decision_reach_counts 记一次结果（没调用的原因码，或真正调用前记 CALLED）。
+#   采用前在配置复核之后再比对原来源/参数版本与同一绝对期限，任一变化都不采用。
 # 函数用途: 完成一次“资格→阶段→材料→决策→复核→渲染”，调用方负责取消绑定和普通故障回退。
 def _advise(agent: object, record: object, archive: dict) -> str:
-    if not _eligible(agent, record, archive):
+    reason = _miss_reason(agent, record, archive)
+    stage = None if reason else begin_decision_stage(agent, record.params, operation_id=_operation_id(record))
+    reason = reason or stage_miss_reason(stage, _POINT, record.call.run_id)
+    if reason:
+        note_decision_reach(agent, _POINT, reason)
         return ""
     params = record.params
-    stage = begin_decision_stage(agent, params, operation_id=_operation_id(record))
-    if stage.error_code or _POINT not in stage.enabled_points or stage.run_id != record.call.run_id:
-        return ""
     # 资格检查已保证当前请求非空；长请求在材料里取首尾节选并标注，不再按长度整点跳过。
     limit = decision_request_max_chars(getattr(agent, "config", None))
     _check_interrupted()
@@ -86,6 +89,7 @@ def _advise(agent: object, record: object, archive: dict) -> str:
         return ""
     state, questions, revision = material
     frozen = (_context_revision(params), revision)
+    note_decision_reach(agent, _POINT, CALLED)
     outcome = decide(agent, params, stage, point=_POINT, state=state, questions=questions,
                      candidates_revision=revision, source_refs=(archive["scoped_call_id"],))
     _check_interrupted()
@@ -103,34 +107,60 @@ def _advise(agent: object, record: object, archive: dict) -> str:
 
 
 # LLM: 触发只看结构化事实：当前 run_command 的新验证事件、原调用/归档配对、主代理、无收口标记，
-# 同 run/task 的 2—12 个焦点且至少一个 failed 或其后有修改；不读输出正文或自然语言。
-# 函数用途: 判断这条工具回执能否进入可选复核建议；不满足时原展示不变且不发请求。
-def _eligible(agent: object, record: object, archive: dict) -> bool:
-    if not _current_record_matches(agent, record, archive):
-        return False
-    focuses = _focuses(record, archive)
-    return (_MIN_FOCUSES <= len(focuses) <= _MAX_FOCUSES and any(focus["current"] for focus in focuses)
-            and any(focus["status"] == "failed" or focus["edited_after"] for focus in focuses))
+# 同 run/task 的 2—12 个焦点且至少一个 failed 或其后有修改；不读输出正文或自然语言。返回宿主原因码，空串表示满足。
+#   验证来源形状不合规（DecisionInputError）记 bad_verification；当前归档不在本轮列表里记 record_mismatch，
+#   两者都与原先放弃的结果一致。
+# 函数用途: 判断这条工具回执能否进入可选复核建议，不能时给出原因码；不满足时原展示不变且不发请求。
+def _miss_reason(agent: object, record: object, archive: dict) -> str:
+    reason = _record_miss_reason(agent, record, archive)
+    if reason:
+        return reason
+    try:
+        focuses = _focuses(record, archive)
+    except DecisionInputError:
+        return "bad_verification"
+    if not _MIN_FOCUSES <= len(focuses) <= _MAX_FOCUSES:
+        return "focus_count"
+    if not any(focus["current"] for focus in focuses):
+        return "record_mismatch"
+    if not any(focus["status"] == "failed" or focus["edited_after"] for focus in focuses):
+        return "nothing_to_review"
+    return ""
 
 
 # LLM: 原 ToolCall/ToolResult 与归档须在 tool/id/run/task/scoped_call_id 和验证事件上一致；归档须以同一对象出现在
-# 本 run 列表中（由 _eligible 的 current 焦点保证）。非 run_command 在扫描归档前即返回；子代理、重复失败/未知副作用收口、
+# 本 run 列表中（由 _miss_reason 的 current 焦点保证）。非 run_command 在扫描归档前即返回；子代理、重复失败/未知副作用收口、
 # 重放或空请求都直接放弃，不读取正文推断。长请求不再按长度放弃，由 _material 取首尾节选并标注。
-# 函数用途: 核对当前回执的身份、执行事实与归档配对，给焦点扫描提供可信的“当前事件”。
-def _current_record_matches(agent: object, record: object, archive: dict) -> bool:
+# 函数用途: 核对当前回执的身份、执行事实与归档配对，给焦点扫描提供可信的“当前事件”；不符时返回原因码。
+def _record_miss_reason(agent: object, record: object, archive: dict) -> str:
     call, result, params = getattr(record, "call", None), getattr(record, "result", None), getattr(record, "params", None)
-    if (not isinstance(call, ToolCall) or not isinstance(result, ToolResult) or call.tool_name != _TOOL
-            or result.tool_name != call.tool_name or result.call_id != call.call_id or result.handler_executed is not True
-            or current_subagent_run_id(agent) or getattr(params, "repeated_failure_halt", None) is not None
-            or getattr(params, "unknown_outcome_halt", None) is not None or not _has_request(params)):
-        return False
+    if not isinstance(call, ToolCall) or call.tool_name != _TOOL:
+        return "not_test_command"
+    if (not isinstance(result, ToolResult) or result.tool_name != call.tool_name or result.call_id != call.call_id
+            or result.handler_executed is not True):
+        return "not_executed"
+    reason = _run_state_miss_reason(agent, params)
+    if reason:
+        return reason
     details = result.metadata.get("handler_details")
     evidence = details.get("verification_evidence") if type(details) is dict else None
     envelope = archive.get("tool_result_envelope") if type(archive) is dict else None
-    return (type(evidence) is dict and type(envelope) is dict and envelope.get("verification_evidence") == evidence
-            and archive.get("tool") == call.tool_name and archive.get("id") == call.call_id
-            and archive.get("run_id") == call.run_id and archive.get("task_id") == getattr(params, "task_id", "")
-            and type(archive.get("scoped_call_id")) is str and bool(archive["scoped_call_id"]))
+    if type(evidence) is not dict or type(envelope) is not dict or envelope.get("verification_evidence") != evidence:
+        return "not_verification"
+    matches = (archive.get("tool") == call.tool_name and archive.get("id") == call.call_id
+               and archive.get("run_id") == call.run_id and archive.get("task_id") == getattr(params, "task_id", "")
+               and type(archive.get("scoped_call_id")) is str and bool(archive["scoped_call_id"]))
+    return "" if matches else "record_mismatch"
+
+
+# LLM: 只读运行上下文与 params 的结构化收口标记；子代理、已收口或没有当前请求都不进入可选复核。
+# 函数用途: 判断当前这一轮是否处在可以给复核建议的状态，不能时返回原因码。
+def _run_state_miss_reason(agent: object, params: object) -> str:
+    if current_subagent_run_id(agent):
+        return "subagent"
+    if getattr(params, "repeated_failure_halt", None) is not None or getattr(params, "unknown_outcome_halt", None) is not None:
+        return "halted"
+    return "" if _has_request(params) else "no_request"
 
 
 # LLM: 当前请求取原 params.user_prompt；超出预算（调用方从配置 decision_request_max_chars 读出后传入，0 表示不截取）时
@@ -254,7 +284,7 @@ def _safe_request(text: str) -> str:
 # LLM: 等待前后都用同一函数取来源快照；不合格时返回空版本，调用方据此放弃采用。
 # 函数用途: 返回当前参数版本与材料版本，用于比较决策等待期间来源是否变化。
 def _current_sources(agent: object, record: object, archive: dict, limit: int) -> tuple[str, str]:
-    if not _eligible(agent, record, archive):
+    if _miss_reason(agent, record, archive):
         return "", ""
     return _context_revision(record.params), _material(record, archive, limit)[2]
 

@@ -10,6 +10,12 @@ from types import SimpleNamespace
 
 from ..backends.decision_protocol import DecisionInputError, decision_json
 from ..common.cancellation import ToolCancelled
+from ..conversation.decision_reach_counts import (
+    CALLED,
+    counted_material,
+    note_decision_reach,
+    stage_miss_reason,
+)
 from ..conversation.decision_service import (
     begin_decision_stage,
     decide,
@@ -32,11 +38,13 @@ _PRIORITIES = {"high": "建议优先核对", "normal": "按原顺序核对", "lo
 
 
 # LLM: 每个 lease 仅建一次阶段，两个独立开关共用绝对期限；后续建议不能延长前一结果的有效期，不创建新 Agent 或存储。
+#   阶段没放行某个点位时，经 _note_stage_misses 在 decision_reach_counts 记原因码（诊断计数副作用）。
 # 函数用途: 可选调用决策模型并返回附建议的原批次；所有普通增强失败只记无正文 warning，继续原提取。
 def annotate_curator_batch(agent: object, batch: CuratorInputBatch, run_id: str, *, max_input_chars: int, caller_deadline: float | None = None) -> tuple[CuratorInputBatch, tuple[str, ...]]:
     try:
         params = SimpleNamespace(request_id="", run_id=run_id, task_id="", thread_id="", task_attributes={})
         stage = begin_decision_stage(agent, params, operation_id=run_id, scope="owner_background", caller_deadline=caller_deadline)
+        _note_stage_misses(agent, stage)
         if stage.error_code:
             return batch, ("memory_curator_decision:unknown:stage_unavailable",)
     except (InterruptedError, ToolCancelled):
@@ -61,13 +69,25 @@ def annotate_curator_batch(agent: object, batch: CuratorInputBatch, run_id: str,
     return annotated, warnings
 
 
+# LLM: 一个 lease 只建一次阶段，Curator 两个点位共用；阶段错误或点位关闭时各记一次原因码（诊断计数副作用），不改变原流程。
+# 函数用途: 记下 curator 与 curator_relation 在阶段这一关没被放行的原因。
+def _note_stage_misses(agent: object, stage: object) -> None:
+    for point in ("curator", "curator_relation"):
+        reason = stage_miss_reason(stage, point)
+        if reason:
+            note_decision_reach(agent, point, reason)
+
+
 # LLM: 原标签/优先级协议和失败行为保持；仅将阶段由外层传入，并交回成功回执供后续等待后的失效复核。
+#   到达结果（nothing_to_label / bad_material / called）计入 decision_reach_counts，诊断计数副作用。
 # 函数用途: 给当前来源添加可选临时标注，普通增强失败不会阻断另一独立点或原提取。
 def _annotate_source_tags(agent, batch, params, stage, *, max_input_chars):
     try:
-        state, questions, sources, revision = _decision_material(batch)
+        state, questions, sources, revision = counted_material(agent, "curator", lambda: _decision_material(batch))
         if not questions:
+            note_decision_reach(agent, "curator", "nothing_to_label")
             return batch, (), None
+        note_decision_reach(agent, "curator", CALLED)
         outcome = decide(agent, params, stage, point="curator", state=state, questions=questions,
                          candidates_revision=revision, source_refs=tuple(sources))
         warning = f"memory_curator_decision:{outcome.mode}:{outcome.status}"

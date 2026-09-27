@@ -1124,10 +1124,10 @@ decision_experiment_enabled: false  # 仅实验能力开关；另需宿主显式
 decision_timeout_seconds: 2.0  # 前台单次等待；必须为有限正秒数
 decision_stage_timeout_seconds: 4.0  # 同一阶段累计等待；必须为有限正秒数
 decision_background_timeout_seconds: 4.0  # 后台单次等待；必须为有限正秒数
-# 决策点“已到触发点、该点也已开启，却被条件挡下”时是否在决策结果日志里记一条 skipped（带原因码，不含正文）：
-# - request_too_long：本轮用户原话超过 1024 字（planning / delivery_quality / action_candidate 不发截断片段）；
-# - privacy_url：要外发的材料含带查询串的 URL（external_material_order / delivery_quality / action_candidate）。
-# 只在触发点写、日志有界（最近 1000 条），用 audit_records 能看到“触发了但被挡下”，不会误判为没接线。关闭后只是不记。
+# 决策点诊断记录（被挡下的跳过行 + 到达/未触发原因计数），一个开关同时管两样，关闭后两样都不记。
+# 跳过行：已到触发点、该点也已开启，却被条件挡下时，在决策结果日志记一条 skipped（原因码 privacy_url：要外发的材料含带查询串的 URL），日志有界（最近 1000 条）。
+# 到达计数：每个点位每次检查的结果（真正调用了，或没调用的原因，如“这一步不是运行测试的命令”），只在进程内累加，每个用户最多每分钟合并写一次盘、保留 7 天。
+# audit_records 和 TUI 决策菜单据此用大白话说明“最近为什么没触发”，不会把 0 次误判为没接线。默认开着就好。
 decision_skip_records_enabled: true
 decision_profile_id: ""  # 原模型目录的 Decision 引用；空表示未绑定，不保存第二份凭据
 decision_model_selection_mode: off  # off 关闭 / observe 仅观察建议与输入 token / apply 采用合法建议；不计算决策模型价格

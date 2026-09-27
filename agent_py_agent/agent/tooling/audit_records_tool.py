@@ -74,10 +74,17 @@ def _owner_host(agent: object, home: object) -> SimpleNamespace:
 # LLM: 设置读取失败只记结构化原因（设置忙或配置不可读），不影响用量统计。points 取 owner 决策结果日志的按点位汇总，
 #   是判断某接入点是否被调用、被冷却/期限挡住的唯一来源；用量账只按用途汇总，不能拿它推断单个点位。
 #   scope=current_thread 时 points 与用量、观察一样只统计可信的当前会话（不含其它会话与后台点位）。
-# 函数用途: 汇总一个 owner 的决策设置、管理员控制、时间窗内的调用统计和各接入点的决策结果。
+#   point_diagnostics 取 decision_reach_counts：每个点位是否开启、检查几次、调用几次、没调用的原因（原因码 + 大白话）；
+#   它按 owner 统计（diagnostics_scope=owner），不随 current_thread 缩小。
+# 函数用途: 汇总一个 owner 的决策设置、管理员控制、时间窗内的调用统计、各接入点的决策结果与未触发原因。
 def _decision_owner_report(owner_id: str, host: object, thread_ids: list[str], query: AuditQuery) -> dict:
     from ..conversation.decision_audit import decision_settings_summary, decision_usage_summary
     from ..conversation.decision_outcome_log import decision_outcome_summary
+    from ..conversation.decision_reach_counts import (
+        decision_point_diagnostics,
+        decision_reach_summary,
+    )
+    from ..settings.decision_settings_schema import POINTS
     from ..user_space.owner_admin_controls import read_owner_admin_controls
 
     try:
@@ -87,10 +94,13 @@ def _decision_owner_report(owner_id: str, host: object, thread_ids: list[str], q
     except Exception:  # noqa: BLE001 设置读不到只影响这一段，审计其余部分照常输出
         settings = {"unavailable": "settings_unreadable"}
     controls = read_owner_admin_controls(host.home_paths)
+    reach = decision_reach_summary(host.home_paths, since=query.since)
     return {"owner_id": owner_id, "admin_controls": {key: controls[key] for key in ("decision_model_allowed", "audit_allowed")},
             "settings": settings, "usage": decision_usage_summary(host.conversation_store, thread_ids, since=query.since),
             "points": decision_outcome_summary(host.home_paths, since=query.since,
-                                               thread_ids=thread_ids if query.scope == "current_thread" else None)}
+                                               thread_ids=thread_ids if query.scope == "current_thread" else None),
+            "point_diagnostics": decision_point_diagnostics(POINTS, settings.get("points"), reach),
+            "diagnostics_scope": "owner", "diagnostics_coverage_since": reach.get("coverage_since")}
 
 
 # LLM: 请求记录只经宿主写入器读取（Gateway 运行时才有），读取器不存在即报告不可用，不改从日志或配置推导队列位置。
@@ -125,7 +135,8 @@ def _decision_topic(agent: object, query: AuditQuery) -> dict:
         owners.append(_decision_owner_report(owner_id, host, ids, query))
     return {"owners": owners, "owners_truncated": truncated, "unreadable_thread_records": unreadable_threads,
             "observations": _observations(agent, thread_owners, query),
-            "sources": ["decision_settings", "model_usage_ledger", "decision_outcome_log", "gateway_request_records"]}
+            "sources": ["decision_settings", "model_usage_ledger", "decision_outcome_log", "decision_reach_counts",
+                        "gateway_request_records"]}
 
 
 # LLM: requests 主题实现在 audit_requests_topic（延迟导入避免循环）；范围与许可已由 execute 裁决。
@@ -168,9 +179,11 @@ class AuditRecordsTool(BaseTool):
         description=(
             "统一审计入口：查询当前用户自己的结构化运行记录，回答'到底调没调用、成功失败几次、用了多少 token、设置是什么、为什么失败'。"
             "topic=decision 汇总决策模型（Jev）：有效设置与各接入点模式、会话用量账本里的调用次数/成功/失败/超时/已报输入 token、"
-            "各接入点的决策结果（成功/超时/冷却跳过等次数与最近几条；status=skipped 表示已到触发点但被条件挡下，reason 为原因码："
-            "request_too_long=本轮用户原话超过 1024 字，privacy_url=要外发的材料含带查询串的 URL；某点完全没出现只说明窗口内没到触发点，"
-            "不代表没接线），"
+            "各接入点的决策结果（成功/超时/冷却跳过等次数与最近几条；status=skipped 表示已到触发点但被条件挡下，"
+            "reason=privacy_url 指要外发的材料含带查询串的 URL），"
+            "以及 point_diagnostics：每个接入点是否开启（enabled）、最近检查了几次（reached）、真正调用几次（called）、"
+            "没调用的原因分布（not_called 的 label 是给用户看的大白话）。调用 0 次不代表没接线，向用户解释时请直接用这些 label"
+            "说明“最近为什么没触发”；covered=false 的点位表示还没统计未触发原因，不要说成 0 次。"
             "Gateway 请求记录里的选模型与能力推荐观察。topic=requests 列出 Gateway 请求结果：状态、错误码及处理建议、渠道、"
             "私聊/群聊、耗时和归属用户；用户说'飞书/IM/TUI 发消息报错、没回复'时先用它查，管理员调用时还附带管理员密码是否已设、"
             "哪些 IM 私聊已绑定管理员。scope=current_thread 只看当前会话，owner（默认）看本人全部会话，"

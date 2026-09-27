@@ -97,9 +97,52 @@ my-agent 据此写出“这几个点位宿主代码未接线”的开发需求�
     空原话仍在扫描归档之前放弃，不记。历史日志里的旧行保持原样。
   - `privacy_url`：要外发的材料含带查询串的 URL（external_material_order、delivery_quality、action_candidate）。材料准备抛
     `DecisionPrivacySkip`（`DecisionInputError` 的子类，带 `reason`），由 `material_or_skip` 记录后放弃。
-- 未开启的点位、阶段出错（如 `settings_busy`）都不记，避免刷屏；日志仍有界（最近 1000 条）。
+- 未开启的点位、阶段出错（如 `settings_busy`）都不写 skipped 行，避免刷屏（这类原因改由下一节的到达计数统计）；日志仍有界（最近 1000 条）。
 - 配置 `decision_skip_records_enabled`（默认开启）关闭后只是不记，决策行为不变。
 - `audit_records` 的说明写明 `skipped` 与原因码的含义，并强调“某点完全没出现只说明窗口内没到触发点，不代表没接线”。
+
+### 每个点位最近为什么没触发（2026-09-27）
+
+**起因**：审计里某个点位调用 0 次时，用户只看到“0 次”，分不清是没打开、没到触发点，还是每次都被条件挡下。
+
+**做法**：
+- 唯一来源 `conversation/decision_reach_counts.py`。点位每次到达触发检查都记一次结果：没调用就记宿主原因码，
+  真正交给 `decide()` 前记 `called`。计数只在进程内按 owner、小时、点位、原因累加，不逐次写盘；有新计数时每个 owner
+  最多每 60 秒持锁合并写一次 `<owner_home>/data/decision/reach_counts.json`（owner 规范路径 `owner_decision_reach_counts_json`，
+  Gateway 按用户作用域经 `owner_resolver` 重设），只保留最近 7 天的小时桶。写失败只记日志并把计数放回，不影响点位本身。
+- 原因码只来自各点位原有的结构化判定，按“资格条件 → 阶段 → 材料”的顺序取第一个没通过的；判定与原先的整体资格判断一一对应，
+  触发行为不变。资格检查仍先于阶段读取，所以关闭的点位多数到达记的是资格原因，是否开启看 `enabled`。
+- 共用原因码：阶段错误码原样记（`admin_disabled`、`settings_busy`、`configuration_unavailable`、`invalid_identity`）；
+  点位没开记 `point_off`（点位关闭与总开关关闭在阶段层分不开，共用一条说明）；阶段身份不符记 `run_mismatch`；
+  材料不合规或超出协议上限记 `bad_material`（`counted_material` 记完原样上抛）；材料含带查询串的 URL 记 `privacy_url`。
+- 各点位自己的原因码（中文说明见 `_LABELS`）：
+  - delivery_quality：`not_test_command`、`not_executed`、`not_verification`、`bad_verification`、`record_mismatch`、
+    `focus_count`、`nothing_to_review`，以及 `subagent`、`halted`、`no_request`；
+  - action_candidate：`not_observation`、`record_mismatch`、`failed_call`、`bad_observation`、`few_candidates`、
+    `no_available_action`、`stale_observation`，以及 `subagent`、`halted`、`no_request`；
+  - external_material_order：`not_web_fetch`、`fetch_failed`、`not_external_page`、`not_extract`、`single_page`、`record_mismatch`；
+  - planning：`no_run_context`、`subagent`、`ledger_unreadable`、`not_main_scope`、`not_current_plan`、`no_plan_version`、
+    `todo_count`、`no_request`；
+  - skill_proposal_review：`pending_count`；recall：`no_run_context`、`memory_count`；
+    pre_recall：`no_query_fragments`、`no_free_slots`、`no_room`；curator：`nothing_to_label`；
+    curator_relation：`nothing_to_compare`、`memory_changed`。
+- 没登记的原因码照原样显示成“其它原因（码）”，不拒绝。
+- 开关复用 `decision_skip_records_enabled`，说明改为“决策点诊断记录”：关闭时跳过行与计数都不写。
+
+**展示**：
+- `audit_records topic=decision`：每个 owner 附 `point_diagnostics`，每个点位一行，字段为 `enabled`、`mode`、`covered`、`reached`、
+  `called`、`not_called`（`reason`、`label`、`count`，按次数从多到少）。时间窗同 `since_hours`，按小时桶对齐。
+  按 owner 统计（`diagnostics_scope=owner`），不随 `current_thread` 缩小。飞书等 IM 里用户问“为什么没触发”时，
+  模型直接用 `label` 解释。
+- TUI 决策菜单“逐接入点设置”：每行末尾显示“近24小时检查N次、调用M次，最多是因为：……（K次）”。数据来自经
+  `execute_model_profile_operation` 的 `decision_read`（本地与 Gateway TUI 同一入口），附近 24 小时的 `point_diagnostics`；
+  `user_config` 与阶段内部的设置读取不附。
+
+**边界**：
+- model_selection、subagent_model、skill_tool 还没接计数，`covered=false`，菜单写“未统计未触发原因”，不显示成 0 次。
+- 进程内还没落盘的计数只在本进程可见：距上次合并不到 60 秒、之后又没有新到达的那部分，进程退出时会丢。
+  审计和菜单读取时会合并本进程未落盘的计数；一次性命令行运行可能少计。
+- 意外异常（比如新鲜度权威抛错）不计入到达次数，仍走各点位原有的失败回退。
 
 ### 主题 `requests`：请求成败（2026-09-26，用户要求“这种东西以后 my-agent 能帮我解决”）
 
@@ -156,6 +199,9 @@ my-agent 据此写出“这几个点位宿主代码未接线”的开发需求�
 - `test_gateway_model_observation.py`：选模型输入去锚点、按上限截断并如实标注、候选公共声明只写一次。
 - `test_decision_usage_metrics.py`：成功/失败计数、约数外推、全部缺报显示 `≈?`、旧账不计入。
 - `test_tui_decision_menu.py` 与各接入点集成测试：两个勾选到三种模式的换算与真实按键保存。
+- `test_decision_reach_counts.py`：进程内累加、节流合并写盘（跨进程不覆盖）、7 天修剪、坏文件按空、开关关闭不写、写失败放回、
+  阶段原因、大白话、`bad_material` 只记输入错误。各点位测试逐场景核对原因码与 `called`；`test_decision_audit_controls.py` 核对审计与
+  `decision_read` 附带的诊断；`test_tui_decision_menu.py` 在真实 pipe 里核对菜单行；`test_gateway_per_user_scoping.py` 核对按用户作用域的计数路径。
 
 ## 真实 TUI 验收（2026-09-25，本机隔离 home，Gateway 只绑 127.0.0.1:8431）
 

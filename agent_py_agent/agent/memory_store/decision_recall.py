@@ -11,6 +11,12 @@ from collections.abc import Callable
 from ..backends.decision_protocol import DecisionInputError, decision_json
 from ..common.cancellation import ToolCancelled, raise_if_cancelled
 from ..concurrency.interrupt import is_interrupted
+from ..conversation.decision_reach_counts import (
+    CALLED,
+    counted_material,
+    note_decision_reach,
+    stage_miss_reason,
+)
 from ..conversation.decision_service import (
     begin_decision_stage,
     decide,
@@ -45,22 +51,26 @@ def supplemental_query_candidates(prompt: object) -> tuple[tuple[str, str], ...]
 
 
 # LLM: 参数必须是原 RuntimeContextRequest；阶段只建一次且关闭不准备正文；结果只驻留原 PreparedRuntimeContext，不建持久缓存。
+#   每次到达都在 decision_reach_counts 记一次结果（没调用的原因码或 called，节流写盘的诊断计数副作用）。
 # 函数用途: 返回当前合法记忆及固定诊断，只有完整成功的建议才能在原长期事实槽位内排列。
 def rerank_recalled_memories(agent: object, request: object, records: list, *, recall_scope: object,
                             refresh: Callable[[], list], stage: object | None = None) -> tuple[list, str]:
     baseline = records
     try:
         operation = _operation_id(request)
-        if not operation or sum(record.kind not in _FIXED_KINDS for record in records) < 2:
-            return records, ""
-        stage = stage if stage is not None else begin_decision_stage(agent, request, operation_id=operation)
-        if stage.error_code:
-            return records, "memory_recall_decision:unavailable"
-        if "recall" not in stage.enabled_points:
-            return records, ""
+        reason = _recall_input_miss_reason(operation, records)
+        if not reason:
+            stage = stage if stage is not None else begin_decision_stage(agent, request, operation_id=operation)
+        # 只有输入满足、阶段本身出错时才报 unavailable；输入不满足或点位没开都静默保留原召回（与原口径一致）。
+        unavailable = not reason and bool(stage.error_code)
+        reason = reason or stage_miss_reason(stage, "recall")
+        if reason:
+            note_decision_reach(agent, "recall", reason)
+            return records, "memory_recall_decision:unavailable" if unavailable else ""
         backend = getattr(agent, "backend", None)
-        state, questions, revision = _material(agent, request, records, recall_scope)
+        state, questions, revision = counted_material(agent, "recall", lambda: _material(agent, request, records, recall_scope))
         attrs_revision = _digest(getattr(request, "task_attributes", None))
+        note_decision_reach(agent, "recall", CALLED)
         outcome = decide(agent, request, stage, point="recall", state=state, questions=questions,
                          candidates_revision=revision, source_refs=tuple(f"memory:{record.entry_id}" for record in records))
         finding = f"memory_recall_decision:{outcome.mode}:{outcome.status}"
@@ -94,17 +104,38 @@ def rerank_recalled_memories(agent: object, request: object, records: list, *, r
         return baseline, "memory_recall_decision:enhancement_failed"
 
 
+# LLM: 只看宿主操作编号与候选记录的结构化 kind；HOT/lesson 固定槽不参与重排，普通记忆不足 2 条就没有可排的。
+# 函数用途: 判断这次召回是否具备重排的输入条件，不具备时返回原因码（不建决策阶段）。
+def _recall_input_miss_reason(operation: str, records: list) -> str:
+    if not operation:
+        return "no_run_context"
+    return "" if sum(record.kind not in _FIXED_KINDS for record in records) >= 2 else "memory_count"
+
+
+# LLM: 与原先的整体判断一一对应：先看输入（可选查询、空余名额、剩余字数），再看阶段错误与点位开关。
+# 函数用途: 判断这次召回能否进入补充查询决策，不能时返回原因码。
+def _pre_recall_miss_reason(queries: tuple, slots: int, remaining_chars: int, stage: object) -> str:
+    if not queries:
+        return "no_query_fragments"
+    if slots <= 0:
+        return "no_free_slots"
+    if remaining_chars <= 0:
+        return "no_room"
+    return stage_miss_reason(stage, "pre_recall")
+
+
 # LLM: 原完整查询与已选正式材料先成立；此点只给不足的 long-term 槽位追加同 scope 的候选，不能删除/替换原记忆。
+#   每次到达都在 decision_reach_counts 记一次结果（没调用的原因码或 called，节流写盘的诊断计数副作用）。
 # 函数用途: 在同一召回阶段内消费有限查询建议，最终有效且能注入的补充记录才确认访问。
 def supplement_recalled_memories(
     agent: object, request: object, records: list, *, recall_scope: object, stage: object,
     queries: tuple[tuple[str, str], ...], slots: int, search_top_k: int, remaining_chars: int,
     refresh: Callable[[], list],
 ) -> tuple[list, str]:
-    if not queries or slots <= 0 or remaining_chars <= 0 or stage.error_code:
-        return records, "" if not stage.error_code else "memory_pre_recall_decision:unavailable"
-    if "pre_recall" not in stage.enabled_points:
-        return records, ""
+    reason = _pre_recall_miss_reason(queries, slots, remaining_chars, stage)
+    if reason:
+        note_decision_reach(agent, "pre_recall", reason)
+        return records, "memory_pre_recall_decision:unavailable" if stage.error_code else ""
     baseline = records
     try:
         bound = [_record_view(record) for record in records]
@@ -119,7 +150,9 @@ def supplement_recalled_memories(
         questions = {"supplemental_query": {"type": "choice",
                      "instructions": "仅从给定查询片段选择一个可补充原正式召回的检索文本；不建议跳过原结果。",
                      "criteria": criteria}}
-        revision = _digest({"state": state, "questions": questions, "selected_full": bound})
+        revision = counted_material(agent, "pre_recall", lambda: _digest({"state": state, "questions": questions,
+                                                                           "selected_full": bound}))
+        note_decision_reach(agent, "pre_recall", CALLED)
         outcome = decide(agent, request, stage, point="pre_recall", state=state, questions=questions,
                          candidates_revision=revision)
         finding = f"memory_pre_recall_decision:{outcome.mode}:{outcome.status}"

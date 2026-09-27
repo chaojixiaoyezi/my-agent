@@ -2,8 +2,8 @@
 #   结构化记录，只含点位、范围、模式、状态、原因、耗时和宿主身份编号，不含状态、题目、候选或回答正文。位置只认 owner 规范路径
 #   owner_decision_outcomes_jsonl，有界保留最近 _MAX_RECORDS 条；写失败只记日志，绝不影响决策本身。审计工具 audit_records 读取汇总。
 #   新增字段须同步 decision_outcome_row、decision_outcome_summary 与 test_decision_outcome_log.py。
-#   另有 status=skipped 行：可选决策点已到触发点、该点已开启，却被结构化条件挡下（原话超长、材料含 URL 查询串）时记录，
-#   reason 为宿主原因码；配置 decision_skip_records_enabled 关闭时不写。
+#   另有 status=skipped 行：可选决策点已到触发点、该点已开启，却被结构化条件挡下（材料含 URL 查询串）时记录，
+#   reason 为宿主原因码；配置 decision_skip_records_enabled 关闭时不写。“没满足触发条件”的原因归 decision_reach_counts 计数。
 # 模块用途: 让每个决策接入点"调用了没有、结果如何"有持久记录，不再只能从按用途汇总的用量账里猜某个点位是否接通。
 """Bounded per-point log of decision outcomes (structured facts only)."""
 
@@ -54,8 +54,8 @@ def append_decision_outcome(agent: object, row: dict[str, object]) -> None:
         _LOGGER.warning("决策结果日志写入失败：point=%s status=%s", row.get("point"), row.get("status"))
 
 
-# LLM: 只在可选决策点已到触发点时调用；阶段有错或该点未开启时不写（未开启的点没人关心为何跳过）。reason 只能是宿主
-#   原因码（request_too_long、privacy_url），不含正文。配置 decision_skip_records_enabled 为假时不写；写失败只记日志。
+# LLM: 只在可选决策点已到触发点时调用；阶段有错或该点未开启时不写（这类原因由 decision_reach_counts 计数）。reason 只能是
+#   宿主原因码（privacy_url），不含正文。配置 decision_skip_records_enabled 为假时不写；写失败只记日志。
 # 函数用途: 给“触发了但被条件挡下”的决策点追加一行 skipped 结果（写文件副作用），避免审计里看起来像从未接线。
 def record_decision_skip(agent: object, stage: object, point: str, reason: str) -> None:
     if not bool(getattr(getattr(agent, "config", None), "decision_skip_records_enabled", True)):
@@ -66,14 +66,18 @@ def record_decision_skip(agent: object, stage: object, point: str, reason: str) 
     append_decision_outcome(agent, decision_outcome_row(stage, point, skipped, 0.0))
 
 
-# LLM: build 只做材料准备（纯计算）；材料因隐私保护不能外发时记一条 skipped（原因码取异常的 reason）并返回 None，
-#   其它异常原样上抛，由调用方原有的放弃路径处理。
-# 函数用途: 准备决策材料；遇到隐私跳过时留下审计记录并告诉调用方放弃本次决策。
+# LLM: build 只做材料准备（纯计算）；材料因隐私保护不能外发时记一条 skipped（原因码取异常的 reason），同一原因码也计入
+#   decision_reach_counts 的未调用原因，然后返回 None；材料不合规或超限经 counted_material 计 bad_material 后原样上抛，
+#   其它异常也原样上抛，由调用方原有的放弃路径处理。
+# 函数用途: 准备决策材料；遇到隐私跳过时留下审计记录与诊断计数，并告诉调用方放弃本次决策。
 def material_or_skip(agent: object, stage: object, point: str, build: Callable[[], _T]) -> _T | None:
+    from .decision_reach_counts import counted_material, note_decision_reach
+
     try:
-        return build()
+        return counted_material(agent, point, build)
     except DecisionPrivacySkip as skip:
         record_decision_skip(agent, stage, point, skip.reason)
+        note_decision_reach(agent, point, skip.reason)
         return None
 
 

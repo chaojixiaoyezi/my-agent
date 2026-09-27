@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import tempfile
+import time
 from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
 from copy import deepcopy
@@ -240,6 +241,24 @@ def public_model_profiles(data: dict, config: object) -> dict:
     return {"ok": True, "selected": data["selected"], "profiles": rows, "providers": providers}
 
 
+# LLM: 只给经本入口的 decision_read（本地与 Gateway TUI 的决策菜单）附加近 24 小时的点位诊断；模型侧（含飞书等 IM 对话）
+#   看 audit_records topic=decision 的同一份 point_diagnostics。begin_decision_stage 与 user_config 的设置读取不走这里，
+#   决策热路径不多读文件。诊断只读 decision_reach_counts，读不到 effective 视图时原样返回。
+# 函数用途: 在决策设置读取结果上附加每个点位“最近检查几次、调用几次、为什么没触发”。
+def _with_point_diagnostics(agent: object, result: dict) -> dict:
+    if not isinstance(result, dict) or not isinstance(result.get("effective"), dict):
+        return result
+    from ..conversation.decision_reach_counts import (
+        decision_point_diagnostics,
+        decision_reach_summary,
+    )
+    from .decision_settings_schema import POINTS
+
+    reach = decision_reach_summary(getattr(agent, "home_paths", None), since=time.time() - 86400)
+    modes = {point: row.get("effective_mode") for point, row in (result["effective"].get("points") or {}).items()}
+    return {**result, "point_diagnostics": decision_point_diagnostics(POINTS, modes, reach), "diagnostics_window_hours": 24}
+
+
 # LLM: 目录写入锁内原子进行；select 只改 thread，set_default 只改未来默认，set_shared 只改管理员发布引用。
 # 函数用途: 管理模型与决策设置；决策操作不初始化生成选择，网络只在显式认证/目录/连接测试时发生，回执不含令牌。
 def execute_model_profile_operation(agent: object, operation: str, payload: dict, *, thread_id: str = "") -> dict:
@@ -247,7 +266,8 @@ def execute_model_profile_operation(agent: object, operation: str, payload: dict
     if operation in decision_operations:
         from .decision_settings import execute_decision_settings_operation
 
-        return execute_decision_settings_operation(agent, decision_operations[operation], payload.get("decision", {}), thread_id=thread_id)
+        result = execute_decision_settings_operation(agent, decision_operations[operation], payload.get("decision", {}), thread_id=thread_id)
+        return _with_point_diagnostics(agent, result) if operation == "decision_read" else result
     if operation == "decision_models":
         from .decision_settings import execute_decision_settings_operation
 

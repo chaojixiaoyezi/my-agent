@@ -16,6 +16,7 @@ from agent_py_agent.agent.memory_store.curator_backend import (
     shrink_batch_for_timeout,
 )
 from agent_py_agent.agent.memory_store.curator_inputs import CuratorInputBatch, CuratorMessageInput
+from agent_py_agent.tests.test_decision_reach_counts import reach_counter
 
 
 @pytest.fixture
@@ -64,6 +65,29 @@ def test_inactive_observe_or_failure_keeps_exact_original(batch, monkeypatch, mo
     assert result is batch and "decision_annotations" not in result.to_model_payload()
     assert (not warnings) == (status == "off")
 
+
+
+def test_stage_and_label_reasons_are_counted_for_both_curator_points(batch, monkeypatch, tmp_path):
+    host = SimpleNamespace()
+    tags = reach_counter(host, monkeypatch, "curator", tmp_path)
+    relations = reach_counter(host, monkeypatch, "curator_relation", tmp_path)
+
+    def run(value):
+        return module.annotate_curator_batch(host, value, "curator-run", max_input_chars=40_000)
+
+    install_decision(monkeypatch, mode="off")
+    run(batch)
+    observed = install_decision(monkeypatch)
+    run(batch)
+    run(replace(batch, messages=()))
+    assert run(replace(batch, messages=(batch.messages[0], batch.messages[0])))[1] == (
+        "memory_curator_decision:off:enhancement_failed",)
+    monkeypatch.setattr(module, "begin_decision_stage", lambda *_args, **_kwargs: SimpleNamespace(
+        error_code="configuration_unavailable", enabled_points=()))
+    run(batch)
+    assert len(observed) == 1
+    assert tags() == ({"point_off": 1, "nothing_to_label": 1, "bad_material": 1, "configuration_unavailable": 1}, 1)
+    assert relations() == ({"point_off": 4, "configuration_unavailable": 1}, 0)
 
 def test_apply_only_adds_temporary_hints_and_preserves_every_source(batch, monkeypatch):
     observed = install_decision(monkeypatch)

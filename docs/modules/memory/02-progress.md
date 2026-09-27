@@ -1,5 +1,7 @@
 # 记忆与上下文维护状态
 
+决策点未触发原因计数（分支 `claude/9b-decision-miss-reasons`，2026-09-27）：记忆侧四个决策点（recall、pre_recall、curator、curator_relation）每次到达都经 `conversation/decision_reach_counts` 记一次结果：没调用记宿主原因码（如 `memory_count`、`no_free_slots`、`nothing_to_label`、`memory_changed`、`point_off`、材料不合格的 `bad_material`），真正调用前记 `called`。只在进程内累加、按 owner 节流合并写盘，召回与整理的结果、警告码和游标都不变。见[决策审计与管控](../../design/DECISION_AUDIT_AND_ADMIN_CONTROLS.md#每个点位最近为什么没触发2026-09-27)。
+
 参数中心同名常数收敛（分支 `claude/param-center-dup-constants`，2026-09-27）：记忆诊断两处没有读取方的 `RECENT_ARCHIVE_FILE_LIMIT`
 删除（归档文件条数只读配置 `memory_doctor_recent_archive_file_limit`）；压缩失败熔断阈值与冷却只在 `memory_archive/compact_circuit_breaker`
 定义，`agent_core/runtime/context_compactor` 改为导入，不再保留同值副本。数值不变。

@@ -1,5 +1,29 @@
 # 测试与发布验收
 
+## 决策审计说清“每个点位最近为什么没触发”（2026-09-27，分支 `claude/9b-decision-miss-reasons`，基于 main `f824b6c10`）
+
+- **来源**：审计里某个点位调用 0 次时，用户只看到“0 次”，分不清是没打开、没到触发点，还是每次都被条件挡下。
+- **新测试** `test_decision_reach_counts.py`（9 项）：首次到达即落盘、60 秒内只在内存累加但读取时照样算进去；到期合并写盘不覆盖
+  另一进程已写的计数；超过 7 天的小时桶被修剪、坏文件按空；开关关闭或没有规范路径时不计；写失败把计数放回、下次补写；
+  阶段原因码；大白话与未登记原因码原样显示；未接入点位 `covered=false`；`counted_material` 只把输入错误记成 `bad_material`，
+  隐私跳过与意外异常不记。文件还导出各点位测试共用的 `reach_counter`。
+- **各点位**：delivery_quality 与 action_candidate 的全部不合格场景（27 个与 31 个）逐个核对“只记一个且是对的原因码、没有调用”；
+  external_material_order 9 个未证明场景加非抓取、关闭、材料超限；planning 4 个范围场景加关闭、空原话、非主对话、材料不合格；
+  skill_proposal_review、recall、pre_recall、curator、curator_relation 各一组原因加 `called`。
+  四个热路径点位（三个工具回执点位与 planning）和 recall 另核对“资格不过时不打开决策阶段”。
+- **展示**：`test_decision_audit_controls.py` 核对 `audit_records` 的 `point_diagnostics`（点位全集、是否开启、次数、大白话、未接入点位）
+  与 TUI 走的 `decision_read` 附同一份诊断；`test_tui_decision_menu.py` 核对菜单行文案，并在真实 prompt_toolkit pipe 里打开
+  “逐接入点设置”看到“近24小时检查3次、调用1次，最多是因为：……（2次）”和“未统计未触发原因”。
+- **作用域**：`test_gateway_per_user_scoping.py` 核对 Gateway 按用户作用域时，结果日志与到达计数都落在该用户自己的 home，
+  两个用户互不相同、也不是基础 owner 的文件（写这条时发现 `owner_resolver` 漏了新路径，已补）。
+- **变异验证（30 种全部被抓住，逐个字节级还原）**：开关失效、去掉节流、合并改覆盖、不修剪、读取不含未落盘计数、隐私也记成
+  `bad_material`、阶段不比 run、未接入点位当已接入、delivery_quality 不记 `called` / 数量原因记错 / 坏来源不计、
+  action_candidate 失败记成对不上、external_material_order 阶段原因不记、planning 空原话不计、skill_proposal_review 条数不计、
+  recall 材料不合格不计、pre_recall 名额记成字数、curator 阶段原因不记、curator_relation 记忆变更不计、作用域路径不重设、
+  隐私跳过不计、decision_read 不附诊断、菜单把未接入点位显示成 0 次、审计不附诊断；资格不过也打开阶段（四个点位各一）、
+  recall 点位关闭也报 unavailable、recall 输入不满足也建阶段。
+- **触发行为不变**：各点位原有测试全部原样通过（只把三处替身目标从 `_eligible` 改名为 `_miss_reason`）。
+
 ## Compact：带归档引用的工具回执可以移入摘要来源（2026-09-27，分支 `claude/compact-archived-refs`，基于 main `54a384147`）
 
 - **来源**：Codex G02 真实验收（通用能力包，65k 窗口）。五组工具往返各含外置输出或 read_artifact 的引用回执；分区把任何带引用回执都判为不完整，

@@ -15,6 +15,12 @@ from types import SimpleNamespace
 from ..backends.decision_protocol import DecisionInputError, decision_json
 from ..common.cancellation import ToolCancelled, raise_if_cancelled
 from ..concurrency.interrupt import is_interrupted
+from ..conversation.decision_reach_counts import (
+    CALLED,
+    counted_material,
+    note_decision_reach,
+    stage_miss_reason,
+)
 from ..conversation.decision_service import (
     begin_decision_stage,
     decide,
@@ -75,7 +81,8 @@ class SkillProposalReviewOrder:
                 "order": [asdict(entry) for entry in self.entries]}
 
 
-# LLM: 入口先按登记与待确认条数快退，不满足时零读取零请求；普通失败一律返回 None，取消/中断上抛。只读，不写任何文件。
+# LLM: 入口先按登记与待确认条数快退，不满足时零读取零请求；普通失败一律返回 None，取消/中断上抛。
+#   不写提案或 Skill；只经 decision_reach_counts 计一次到达结果（条数不符记 pending_count，诊断计数副作用）。
 # 函数用途: 为 CLI 列表计算可选审核顺序；返回 None 表示保持原输出。
 def skill_proposal_review_order(host: object, service: object,
                                 proposals: list[SkillProposal] | tuple[SkillProposal, ...]) -> SkillProposalReviewOrder | None:
@@ -83,6 +90,7 @@ def skill_proposal_review_order(host: object, service: object,
         return None
     pending = tuple(item for item in proposals if item.status == PROPOSAL_PENDING)
     if not _MIN_PENDING <= len(pending) <= _MAX_PENDING:
+        note_decision_reach(host, _POINT, "pending_count")
         return None
     try:
         return _review(host, service, tuple(proposals), pending)
@@ -95,15 +103,19 @@ def skill_proposal_review_order(host: object, service: object,
 
 # LLM: 顺序固定：阶段（关闭即返回）→材料→决策→逐题校验→配置/期限复核→重读待确认提案比对版本与草稿 hash→采用。
 #   observe 的 may_apply 为 False，请求照常记原调用账但不采用；只调用 service.list，从不调用 confirm/reject。
+#   阶段没放行、材料不合格或真正调用都在 decision_reach_counts 记一次（诊断计数副作用）。
 # 函数用途: 完成一次“阶段→材料→决策→复核→重排”，调用方负责普通故障回退。
 def _review(host: object, service: object, proposals: tuple, pending: tuple) -> SkillProposalReviewOrder | None:
     params = _background_params()
     stage = begin_decision_stage(host, params, operation_id=_operation_id(pending), scope="owner_background")
-    if stage.error_code or _POINT not in stage.enabled_points:
+    reason = stage_miss_reason(stage, _POINT)
+    if reason:
+        note_decision_reach(host, _POINT, reason)
         return None
     _check_interrupted()
     facts = _facts(pending)
-    state, questions, revision = _material(pending, facts)
+    state, questions, revision = counted_material(host, _POINT, lambda: _material(pending, facts))
+    note_decision_reach(host, _POINT, CALLED)
     outcome = decide(host, params, stage, point=_POINT, state=state, questions=questions, candidates_revision=revision,
                      source_refs=tuple(f"skill_proposal:{item.proposal_id}" for item in pending))
     _check_interrupted()

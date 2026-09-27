@@ -9,6 +9,12 @@ from pathlib import Path
 from ..backends.decision_protocol import decision_json, decision_request_excerpt
 from ..common.cancellation import ToolCancelled, raise_if_cancelled
 from ..concurrency.interrupt import is_interrupted
+from ..conversation.decision_reach_counts import (
+    CALLED,
+    counted_material,
+    note_decision_reach,
+    stage_miss_reason,
+)
 from ..conversation.decision_service import (
     begin_decision_stage,
     decide,
@@ -40,20 +46,20 @@ _NON_SELECTIONS = {
 # LLM: Read-only enhancement after the original task_progress read/reconciliation.
 # Only the current main run may receive a model-visible hint; observe/errors do
 # not alter the canonical result. Propagate user cancellation, not optional failures.
-# 函数用途: 对当前已存在的多项未完成 Todo 提议一个优先 ID，失败时原样交还回执。
+# Each reach is counted once in decision_reach_counts (host miss reason or called;
+# throttled owner-level write), which never changes the hint itself.
+# 函数用途: 对当前已存在的多项未完成 Todo 提议一个优先 ID，失败时原样交还回执；每次到达记一次诊断计数。
 def todo_priority_hint(agent: object, root: Path, run_id: str, payload: dict) -> dict | None:
     if _POINT not in POINT_RUNTIME_SCOPES:
         return None
     try:
         params = getattr(agent, "_current_run_params", None)
-        if not _eligible(agent, params, root, run_id, payload):
-            return None
-        stage = begin_decision_stage(agent, params, operation_id=_operation_id(params, run_id, payload))
-        # 短路：阶段正常且该点开启后才检查原话；长原话取首尾节选照常决策，不再整点跳过。
-        if stage.error_code or _POINT not in stage.enabled_points or not _request_excerpt(agent)[0]:
+        stage = _open_stage(agent, params, (root, run_id, payload))
+        if stage is None:
             return None
         _check_interrupted()
-        state, questions, revision = _material(agent, payload)
+        state, questions, revision = counted_material(agent, _POINT, lambda: _material(agent, payload))
+        note_decision_reach(agent, _POINT, CALLED)
         outcome = decide(
             agent, params, stage, point=_POINT, state=state, questions=questions,
             candidates_revision=revision,
@@ -69,7 +75,7 @@ def todo_priority_hint(agent: object, root: Path, run_id: str, payload: dict) ->
         if not selected:
             return None
         latest = read_task_progress(root, run_id)
-        if not _eligible(agent, params, root, run_id, latest) or _material(agent, latest)[2] != revision:
+        if _miss_reason(agent, params, (root, run_id, latest)) or _material(agent, latest)[2] != revision:
             return None
         if not decision_outcome_is_current(agent, params, stage, outcome):
             return None
@@ -91,24 +97,43 @@ def todo_priority_hint(agent: object, root: Path, run_id: str, payload: dict) ->
         return None
 
 
+# LLM: 资格 → 阶段 → 当前原话，按顺序取第一个没通过的原因码计入 decision_reach_counts；资格不过时不建阶段。
+#   短路：阶段正常且该点开启后才检查原话；长原话取首尾节选照常决策，不再整点跳过。
+# 函数用途: 为一次 Todo 读取打开决策阶段；不能调用决策模型时记下原因并返回 None（诊断计数副作用）。
+def _open_stage(agent: object, params: object, ledger: tuple[Path, str, dict]) -> object | None:
+    _root, run_id, payload = ledger
+    reason = _miss_reason(agent, params, ledger)
+    stage = None if reason else begin_decision_stage(agent, params, operation_id=_operation_id(params, run_id, payload))
+    reason = reason or stage_miss_reason(stage, _POINT) or ("" if _request_excerpt(agent)[0] else "no_request")
+    if reason:
+        note_decision_reach(agent, _POINT, reason)
+        return None
+    return stage
+
+
 # LLM: A read of a historical ledger or a child run cannot acquire planning
 # authority. The display generation/revision must come from the same ledger.
-# The current-request bound is checked after the stage (see todo_priority_hint) so an
-# over-long request leaves a skipped audit row instead of vanishing silently.
-# 函数用途: 只允许当前主代理的真实、有多项 open 项的计划进入可选分析。
-def _eligible(agent: object, params: object, root: Path, run_id: str, payload: dict) -> bool:
-    if params is None or current_subagent_run_id(agent) or not isinstance(payload, dict) or payload.get("load_error"):
-        return False
+# Whether a current request exists is checked after the stage (see _open_stage)
+# and counted as no_request; long requests are sent as labeled head/tail excerpts.
+#   ledger 是 (root, run_id, payload) 三元组；返回宿主原因码，空串表示满足，各条件与原先的整体判断一一对应。
+# 函数用途: 只允许当前主代理的真实、有多项 open 项的计划进入可选分析，不能时给出原因码。
+def _miss_reason(agent: object, params: object, ledger: tuple[Path, str, dict]) -> str:
+    root, run_id, payload = ledger
+    if params is None:
+        return "no_run_context"
+    if current_subagent_run_id(agent):
+        return "subagent"
+    if not isinstance(payload, dict) or payload.get("load_error"):
+        return "ledger_unreadable"
     if str(getattr(params, "context_scope", "default") or "default").lower() not in {"", "default", "conversation"}:
-        return False
+        return "not_main_scope"
     current_id = progress_ledger_id(agent, params)
     if not current_id or current_id != run_id or not progress_path(root, run_id).is_file():
-        return False
+        return "not_current_plan"
     generation, revision = task_progress_display_identity(payload)
     if not generation or revision <= 0:
-        return False
-    rows = _candidate_rows(agent, payload)
-    return 2 <= len(rows) <= _MAX_CANDIDATES
+        return "no_plan_version"
+    return "" if 2 <= len(_candidate_rows(agent, payload)) <= _MAX_CANDIDATES else "todo_count"
 
 
 # LLM: Reuse the dispatch contract's exact child IDs to omit generated roster

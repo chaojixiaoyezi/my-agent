@@ -150,12 +150,27 @@ async def _edit_point(app, agent, session: str, view: dict) -> str:
             continue
         row = view["effective"]["points"][point]
         connection = "配置可用；未测试网络" if row["connection"]["configured"] else "未绑定或配置不可用；仍可修改"
-        rows.append((point, f"{name} · 配置{_MODES[row['mode']]} / 当前{_MODES[row['effective_mode']]} · {connection}"))
+        rows.append((point, f"{name} · 配置{_MODES[row['mode']]} / 当前{_MODES[row['effective_mode']]} · {connection}"
+                            + _diagnosis(view, point)))
     point = await _choose(app, "决策接入点", rows)
     if point is None:
         return ""
     field = await _choose(app, _POINTS[point], [(f"points.{point}.{field}", _field_label(view, f"points.{point}.{field}")) for field in _POINT_FIELDS if f"points.{point}.{field}" in _fields(view)])
     return await _edit_field(app, agent, session, view, field) if field else ""
+
+
+# LLM: 只读 decision_read 附带的 point_diagnostics（近 24 小时、按 owner）；旧 Gateway 没有这块数据时不显示任何东西，
+#   未接入计数的点位明说“未统计”，不能显示成 0 次。label 是宿主给用户的大白话，菜单不再翻译原因码。
+# 函数用途: 把一个点位最近为什么没触发压成一句话，附在“逐接入点设置”列表的行尾。
+def _diagnosis(view: dict, point: str) -> str:
+    row = (view.get("point_diagnostics") or {}).get(point)
+    if not isinstance(row, dict):
+        return ""
+    if not row.get("covered"):
+        return " · 近24小时：未统计未触发原因"
+    missed = row.get("not_called") or []
+    top = f"，最多是因为：{missed[0].get('label')}（{missed[0].get('count')}次）" if missed else ""
+    return f" · 近24小时检查{int(row.get('reached') or 0)}次、调用{int(row.get('called') or 0)}次{top}"
 
 
 # LLM: 模型列表只读原脱敏目录的 decision 用途；不可用配置仍可绑定，保存验证和共享撤销仍由原服务执行。

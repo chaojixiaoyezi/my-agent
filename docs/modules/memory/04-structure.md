@@ -400,6 +400,8 @@ Curator 设置读回的 `runtime_scope=owner_background` 与实际服务一致�
 标签与关系共用绝对 caller deadline；后续关系等待结束后还会复核较早标签的配置与期限。
 `decision_curator_relation.py` 只消费当前批次，不新建候选 store、后台代理、提取入口或晋升动作。
 
+到达计数：`decision_recall`、`decision_curator`、`decision_curator_relation` 在每次到达时调用 `conversation/decision_reach_counts.note_decision_reach` 记原因码或 `called`，材料构建包在 `counted_material` 里（输入不合格记 `bad_material` 后原样上抛）。Curator 的阶段只建一次，`_note_stage_misses` 为两个点位各记一次阶段原因。计数不参与任何召回、标注或游标判断，开关 `decision_skip_records_enabled` 关闭时不记。
+
 - `CuratorFormalMemoryInput.authority_version/content_chars` 是宿主事实：long-term 版本取原 `MemoryRecord.version`，
   正文长度取原规范化全正文。原 `to_model` 不增加字段，因此增强关闭时原 Curator 输入字节不变。
 - 完整消息用原消息哈希校验；正式条目需 long_term、精确 ref/ID、正整数版本、完整长度及正文哈希匹配。

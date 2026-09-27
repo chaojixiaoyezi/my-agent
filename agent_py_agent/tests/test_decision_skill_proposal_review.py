@@ -28,6 +28,7 @@ from agent_py_agent.agent.memory_store.candidates import CandidateService
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.models import SubAgentTask
 from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+from agent_py_agent.tests.test_decision_reach_counts import reach_counter
 
 LESSON = "修改共享状态前先读取当前版本，再用精确版本做比较交换写入。"
 
@@ -309,6 +310,27 @@ def test_tampered_draft_is_never_sent(tmp_path, monkeypatch):
     assert run(ctx, ctx.service.list()) is None
     assert [name for name, _ in calls] == ["stage"]
 
+
+
+def test_pending_count_stage_tampered_material_and_calls_are_counted(tmp_path, monkeypatch):
+    ctx = seeded(tmp_path, 3)
+    host = SimpleNamespace(home_paths=ctx.home)
+    reasons = reach_counter(host, monkeypatch, module._POINT, tmp_path)
+
+    def review(proposals=None):
+        return module.skill_proposal_review_order(host, ctx.service, ctx.service.list() if proposals is None else proposals)
+
+    install(monkeypatch)
+    review(ctx.proposals[:1])
+    install(monkeypatch, fake=Fake(points=()))
+    review()
+    install(monkeypatch, fake=Fake(stage_error="configuration_unavailable"))
+    review()
+    calls = install(monkeypatch, {"proposal_3": "review_first"})
+    assert review() is not None and [name for name, _ in calls] == ["stage", "decide"]
+    change(ctx, "body_same_sha")()
+    assert review() is None
+    assert reasons() == ({"pending_count": 1, "point_off": 1, "configuration_unavailable": 1, "bad_material": 1}, 1)
 
 def test_material_is_aliased_redacted_and_carries_only_structured_counts(tmp_path, monkeypatch):
     secret = "sk-" + "A1b2C3d4E5f6G7h8I9j0"
