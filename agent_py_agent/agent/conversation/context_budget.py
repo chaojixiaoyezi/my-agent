@@ -2,13 +2,16 @@
 # 模块用途: 控制后台模型输入的大小，不修改持久账本、重新计时或以摘要裁决任务状态。
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from ..contracts.subagent_completion import completion_service_window_facts
 from ..memory_archive.tokens import estimate_tokens
 
 
+# LLM: 四个结构裁剪上限是代码常量（字段默认值），只有 max_total_tokens 经 background_context_budget_from_config 来自配置；
+#   只裁注入模型的副本，不改账本原文。改默认值要同步后台上下文测试。
+# 类用途: 限制一次后台唤醒往模型里内联多少账本内容。
 @dataclass(frozen=True)
 class BackgroundContextBudget:
     """Prompt budget knobs for durable background wakeups.
@@ -18,6 +21,8 @@ class BackgroundContextBudget:
     in the underlying message, observation, case, and artifact files.
     """
 
+    # 参数减量第 3 批 E 组：下面四个结构裁剪上限是代码常量（原 background_context_max_* 配置项已删除）；
+    # 只有 max_total_tokens 仍由 background_context_max_total_tokens 配置。
     max_string_chars: int = 1200
     max_list_items: int = 20
     max_dict_items: int = 80
@@ -41,20 +46,16 @@ class BackgroundContextPayloadRequest:
     budget: BackgroundContextBudget | None = None
 
 
+# LLM: 参数减量第 3 批 E 组：字符串/列表/字典/层级这四个结构裁剪上限固定用 BackgroundContextBudget 的默认值，
+#   不再是配置项（值不变）；只有总预算 background_context_max_total_tokens 仍从配置读。改默认值要同步后台上下文测试。
+# 函数用途: 生成一次后台唤醒要用的上下文预算。
 def background_context_budget_from_config(config: object | None) -> BackgroundContextBudget:
     defaults = DEFAULT_BACKGROUND_CONTEXT_BUDGET
     if config is None:
         return defaults
-    return BackgroundContextBudget(
-        max_string_chars=_config_int(config, "background_context_max_string_chars", defaults.max_string_chars),
-        max_list_items=_config_int(config, "background_context_max_list_items", defaults.max_list_items),
-        max_dict_items=_config_int(config, "background_context_max_dict_items", defaults.max_dict_items),
-        max_depth=_config_int(config, "background_context_max_depth", defaults.max_depth),
-        max_total_tokens=_config_int(
-            config,
-            "background_context_max_total_tokens",
-            defaults.max_total_tokens,
-        ),
+    return replace(
+        defaults,
+        max_total_tokens=_config_int(config, "background_context_max_total_tokens", defaults.max_total_tokens),
     )
 
 

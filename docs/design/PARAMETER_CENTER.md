@@ -279,9 +279,28 @@
   - 用户可能真会调、保留为 advanced 不降级（集成者已同意）：`memory_curator_daily_finalize_hour`、`home_lesson_stale_caveat_days`、
     `memory_lesson_min_occurrences`、`memory_hot_min_occurrences`、`chat_history_max_turns`、`estimated_output_tokens_per_second`、
     `dynamic_timeout_min`、`local_store_fts_enabled`。
+  - 已完成 E 组（14 项，分支 `claude/9a-batch3-e`，集成者派活）：
+    - 后台上下文预算：`background_context_max_string_chars/list_items/dict_items/max_depth` 固定用
+      `conversation/context_budget.BackgroundContextBudget` 的默认值（1200/20/80/6），`background_context_max_total_tokens` 仍可配置；
+      `conversation_context_recent_limit`、`background_pending_wake_prompt_limit` 成为 `background_context` 的
+      `CONVERSATION_CONTEXT_RECENT_LIMIT`、`BACKGROUND_PENDING_WAKE_PROMPT_LIMIT`（都是 20），runtime 的三处唤醒合批选择从这里 import。
+    - 终态工具折叠：`conversation_terminal_tool_fold_max_chars` 成为 `tool_context_window._TERMINAL_TOOL_FOLD_MAX_CHARS`（6000），
+      开关 `conversation_terminal_tool_fold_enabled` 与热期秒数不变。
+    - 工具目录/详情上限：`core.TOOL_CATALOG_LIMIT`（80）、`core.TOOL_DETAIL_MAX_CHARS`（4000）；目录单条截断与分页起点直接用
+      `ToolRegistryParams` 的默认值（700、0）。给模型的目录分页提示原来让它“调大 tool_catalog_limit 或 tool_catalog_offset”，
+      改为“其余工具可用 list_tools 查看完整清单”；截断标记由“已按 tool_detail_max_chars 截断”改为“已按 工具详情字数上限 截断”，
+      不再指向已删的配置键。这是降级带来的唯一模型可见文字变化。
+    - 合同状态扫描预算：`contract_status` 的 `CONTRACT_STATUS_RECENT_FINDINGS_LIMIT/MAX_SCAN_FILES/MAX_REPORT_BYTES`
+      （20/1000/2000000）；`ContractStatusScanRequest.config` 只为取这三个默认值而存在，一并删除；`contracts status` 的
+      `--limit/--max-files` 默认值引用同一常量，显式 flag 仍优先。
+    - 加载器元数据 `config_path/config_sources/config_layers/config_warnings/memory_config_warnings` 从 /settings 的列表、计数与
+      参数搜索里隐藏（`parameter_registry.LOADER_METADATA_KEYS` + `listed_parameters()`，user_config 的可改数量同口径）；字段与
+      登记表项不删，`/settings show` 仍可查看、仍是安全边界。
+    - 回归见 `test_param_reduction_e_group.py` 与 `test_settings_chat_control.py`；原来通过配置对象改这些值的测试改为 patch 常量。
   - 未完成：B 组（daemon_*、dispatch_default_*、gateway 轮询/心跳/陈旧判定、后台退避）、C 组（memory 归档预览/语义摘要/恢复/策展批次）、
-    D 组（动态超时探针、anthropic_version、媒体预留、微压缩、协议修复次数、决策选模字数）、E 组（后台上下文预算、终态工具折叠、
-    工具目录/详情上限、合同状态扫描预算）、以及 4 个 `config_*` + `memory_config_warnings` 只从 /settings 隐藏。用户额度告急，按集成者要求停在 A 组。
+    D 组（动态超时探针、anthropic_version、媒体预留、微压缩、协议修复次数、决策选模字数）。
+  - E 组范围外、分类为 internal 但未归入任何一组的：`tool_write_inline_max_chars`（写文件指引的软建议）、`conversation_pending_wake_limit`、
+    `conversation_unhandled_observation_limit`（runtime 里的账本批量读取）、`memory_artifact_default_read_chars`，留给集成者分派。
 
 ## 7. 验收
 

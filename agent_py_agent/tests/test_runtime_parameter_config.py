@@ -66,19 +66,10 @@ def test_runtime_parameter_knobs_are_normalized_from_agent_config() -> None:
     normalized, warnings = normalize_agent_config(
         {
             "runner_failure_retry_limit": "3",
-            "background_context_max_string_chars": "11",
-            "background_context_max_list_items": "4",
-            "background_context_max_dict_items": "5",
-            "background_context_max_depth": "2",
             "background_context_max_total_tokens": "8000",
             "conversation_pending_wake_limit": "7",
-            "conversation_context_recent_limit": "6",
-            "background_pending_wake_prompt_limit": "5",
             "tool_output_externalize_min_chars": "44",
             "tool_output_preview_chars": "12",
-            "contract_status_max_scan_files": "9",
-            "contract_status_max_report_bytes": "999",
-            "contract_status_recent_findings_limit": "3",
             "skill_guard_max_files": "4",
             "skill_guard_max_size_kb": "5",
             "background_claim_ttl_seconds": "120",
@@ -87,11 +78,9 @@ def test_runtime_parameter_knobs_are_normalized_from_agent_config() -> None:
 
     assert warnings == []
     assert normalized["runner_failure_retry_limit"] == 3
-    assert normalized["background_context_max_string_chars"] == 11
     assert normalized["background_context_max_total_tokens"] == 8000
     assert normalized["conversation_pending_wake_limit"] == 7
     assert normalized["tool_output_externalize_min_chars"] == 44
-    assert normalized["contract_status_max_scan_files"] == 9
     assert normalized["skill_guard_max_files"] == 4
     assert normalized["background_claim_ttl_seconds"] == 120
 
@@ -234,20 +223,22 @@ def test_runner_timeout_off_still_disables_total_deadline() -> None:
 
 def test_background_context_budget_uses_configured_values() -> None:
     from agent_py_agent.agent.conversation.context_budget import (
+        DEFAULT_BACKGROUND_CONTEXT_BUDGET,
+        BackgroundContextBudget,
         BackgroundContextPayloadRequest,
         background_context_budget_from_config,
         bounded_background_context_payload,
     )
 
-    budget = background_context_budget_from_config(
-        SimpleNamespace(
-            background_context_max_string_chars=5,
-            background_context_max_list_items=1,
-            background_context_max_dict_items=2,
-            background_context_max_depth=2,
-            background_context_max_total_tokens=8000,
-        )
+    # 参数减量第 3 批 E 组：四个结构裁剪上限是常量，旧键即使出现在配置对象上也不读；只有总预算仍可配置。
+    configured = background_context_budget_from_config(
+        SimpleNamespace(background_context_max_string_chars=5, background_context_max_total_tokens=3000)
     )
+    assert configured == BackgroundContextBudget(max_total_tokens=3000)
+    assert (DEFAULT_BACKGROUND_CONTEXT_BUDGET.max_string_chars, DEFAULT_BACKGROUND_CONTEXT_BUDGET.max_list_items,
+            DEFAULT_BACKGROUND_CONTEXT_BUDGET.max_dict_items, DEFAULT_BACKGROUND_CONTEXT_BUDGET.max_depth) == (1200, 20, 80, 6)
+    budget = BackgroundContextBudget(max_string_chars=5, max_list_items=1, max_dict_items=2, max_depth=2,
+                                     max_total_tokens=8000)
     payload = bounded_background_context_payload(
         BackgroundContextPayloadRequest(
             bundle={"thread": {"long": "abcdef", "other": "ok", "third": "hidden"}, "messages": [{"content": "abcdef"}]},
@@ -505,9 +496,10 @@ def test_tool_output_externalizer_default_keeps_few_kb_output_inline(tmp_path: P
     assert record["output_preview"] == output
 
 
-def test_contract_status_summary_can_read_scan_limits_from_config(tmp_path: Path) -> None:
+def test_contract_status_scan_limits_come_from_the_request_then_constants(tmp_path: Path) -> None:
     import json
 
+    from agent_py_agent.agent.contracts import contract_status
     from agent_py_agent.agent.contracts.contract_status import (
         ContractStatusScanRequest,
         summarize_contract_status,
@@ -521,14 +513,13 @@ def test_contract_status_summary_can_read_scan_limits_from_config(tmp_path: Path
 
     status = summarize_contract_status(
         tmp_path,
-        ContractStatusScanRequest(
-            config=SimpleNamespace(
-                contract_status_max_scan_files=2,
-                contract_status_max_report_bytes=2000,
-                contract_status_recent_findings_limit=1,
-            ),
-        ),
+        ContractStatusScanRequest(limit=1, max_files=2, max_file_bytes=2000),
     )
 
     assert status.scanned_files == 2
     assert len(status.recent_findings) == 1
+    # 请求没给就用扫描预算常量（参数减量第 3 批 E 组，原 contract_status_* 配置项）。
+    fallback = summarize_contract_status(tmp_path)
+    assert fallback.scanned_files == 3 and len(fallback.recent_findings) == 3
+    assert (contract_status.CONTRACT_STATUS_RECENT_FINDINGS_LIMIT, contract_status.CONTRACT_STATUS_MAX_SCAN_FILES,
+            contract_status.CONTRACT_STATUS_MAX_REPORT_BYTES) == (20, 1000, 2_000_000)

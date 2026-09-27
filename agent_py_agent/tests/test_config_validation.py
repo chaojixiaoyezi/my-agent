@@ -61,7 +61,6 @@ def test_card_and_prompt_defaults_match_shipped_config():
         "mcp",
     ]
     assert defaults.tool_catalog_include_examples is shipped.tool_catalog_include_examples is False
-    assert defaults.tool_catalog_entry_max_chars == shipped.tool_catalog_entry_max_chars == 700
     assert config_path.read_text(encoding="utf-8").count("gateway_per_user_owner_scoping:") == 1
 
 
@@ -92,11 +91,6 @@ def test_terminal_tool_fold_defaults_match_shipped_config() -> None:
         is True
     )
     assert (
-        defaults.conversation_terminal_tool_fold_max_chars
-        == shipped.conversation_terminal_tool_fold_max_chars
-        == 6_000
-    )
-    assert (
         defaults.conversation_terminal_tool_hot_tail_seconds
         == shipped.conversation_terminal_tool_hot_tail_seconds
         == 300
@@ -107,28 +101,20 @@ def test_terminal_tool_fold_config_is_normalized_and_bounded() -> None:
     normalized, warnings = normalize_agent_config(
         {
             "conversation_terminal_tool_fold_enabled": "false",
-            "conversation_terminal_tool_fold_max_chars": "2400",
             "conversation_terminal_tool_hot_tail_seconds": "120",
         }
     )
 
     assert warnings == []
     assert normalized["conversation_terminal_tool_fold_enabled"] is False
-    assert normalized["conversation_terminal_tool_fold_max_chars"] == 2_400
     assert normalized["conversation_terminal_tool_hot_tail_seconds"] == 120
 
     fallback, warnings = normalize_agent_config(
         {
-            "conversation_terminal_tool_fold_max_chars": "999999",
             "conversation_terminal_tool_hot_tail_seconds": "999999",
         }
     )
 
-    assert any("conversation_terminal_tool_fold_max_chars" in item for item in warnings)
-    assert (
-        fallback["conversation_terminal_tool_fold_max_chars"]
-        == AgentConfig().conversation_terminal_tool_fold_max_chars
-    )
     assert any("conversation_terminal_tool_hot_tail_seconds" in item for item in warnings)
     assert (
         fallback["conversation_terminal_tool_hot_tail_seconds"]

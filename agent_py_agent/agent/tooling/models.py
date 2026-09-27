@@ -147,6 +147,8 @@ class ToolModelSpec:
             if isinstance(value, dict)
         }
 
+    # LLM: 目录条目给模型看；超过 max_chars 截断并标注“已按 目录单条字数上限 截断”，不指向任何配置键。只读。
+    # 函数用途: 把一个工具渲染成提示词工具目录里的一条精简说明。
     def render_catalog_entry(
         self,
         *,
@@ -165,9 +167,11 @@ class ToolModelSpec:
         return _truncate_rendered_tool_entry(
             rendered,
             max_chars=max_chars,
-            label="tool_catalog_entry_max_chars",
+            label="目录单条字数上限",
         )
 
+    # LLM: Recommended Tools 里的详细条目；超过 max_chars 截断并标注“已按 工具详情字数上限 截断”。只读。
+    # 函数用途: 把一个推荐工具渲染成带参数说明的条目。
     def render_recommended_entry(self, *, max_chars: int = 0) -> str:
         params = (
             "\n".join(
@@ -180,9 +184,11 @@ class ToolModelSpec:
         return _truncate_rendered_tool_entry(
             rendered,
             max_chars=max_chars,
-            label="tool_detail_max_chars",
+            label="工具详情字数上限",
         )
 
+    # LLM: full 目录模式下的完整说明（用途、参数、示例、避免场景）；截断标注与推荐条目相同。只读。
+    # 函数用途: 把一个工具渲染成完整手册式条目。
     def render_detail_entry(self, *, max_chars: int = 0) -> str:
         params = (
             "\n".join(
@@ -206,7 +212,7 @@ class ToolModelSpec:
         return _truncate_rendered_tool_entry(
             rendered,
             max_chars=max_chars,
-            label="tool_detail_max_chars",
+            label="工具详情字数上限",
         )
 
 

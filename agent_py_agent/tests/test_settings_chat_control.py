@@ -17,7 +17,13 @@ from agent_py_agent.agent.conversation.control_commands import (
 )
 from agent_py_agent.agent.gateway_parts import settings_control_service as module
 from agent_py_agent.agent.settings.config import load_config
-from agent_py_agent.agent.settings.parameter_registry import COMMON_KEYS, parameter_registry
+from agent_py_agent.agent.settings.parameter_registry import (
+    COMMON_KEYS,
+    LOADER_METADATA_KEYS,
+    listed_parameters,
+    parameter_registry,
+    search_parameters,
+)
 from agent_py_agent.cli.chat_parts import control_runtime
 
 _ADMIN = SimpleNamespace(owner_provider="local", owner_kind="main", owner_id="main")
@@ -168,7 +174,7 @@ def test_default_view_lists_only_the_common_parameters(monkeypatch, user_config)
     assert shown.ok and listed == list(COMMON_KEYS)
     assert "- request_timeout = 300（改过，默认 240）：HTTP 基础超时秒数" in shown.message
     assert "max_protocol_repairs" not in shown.message and "另外你还改过 1 个其它参数" in shown.message
-    assert f"一共 {len(parameter_registry())} 项参数" in shown.message and "/settings all" in shown.message
+    assert f"一共 {len(listed_parameters())} 项参数" in shown.message and "/settings all" in shown.message
     assert "- memory_compact_auto_trigger_percent = 90：" in shown.message
     # 布尔值按配置文件写法显示，不能因为 False 是假值就显示成“（空）”。
     assert "- enable_self_learning = false：自学习（默认关闭）" in shown.message
@@ -186,9 +192,27 @@ def test_all_view_lists_every_parameter_with_changes_and_boundaries(monkeypatch,
     assert _run(monkeypatch, user_config, "/settings set max_protocol_repairs 3").ok
     shown = _run(monkeypatch, user_config, "/settings all")
     lines = shown.message.splitlines()
-    assert shown.ok and len([line for line in lines if line.startswith("- ")]) >= len(parameter_registry())
+    assert shown.ok and len([line for line in lines if line.startswith("- ")]) >= len(listed_parameters())
     assert str(user_config) in shown.message and "最近修改：" in shown.message and "与默认值不同的参数：2 个" in shown.message
     assert "- request_timeout = 300［改过］" in lines and "- max_protocol_repairs = 2［改过］" in lines
     assert any(line.startswith("- api_base = ") and line.endswith("［安全边界］") for line in lines)
     headers = [line for line in lines if line.startswith("【")]
     assert any(line.startswith("【模型请求】") for line in headers) and headers[-1].startswith("【其它】")
+
+
+def test_loader_metadata_is_hidden_from_lists_and_search_but_show_still_works(monkeypatch, user_config):
+    """配置路径、来源、分层、告警是加载器元数据，不是参数：列表、计数、搜索都不出现；字段仍在，show 仍能看。"""
+    from agent_py_agent.agent.settings.user_config_capability import capability_summary
+
+    registry = parameter_registry()
+    assert set(registry) >= LOADER_METADATA_KEYS and not LOADER_METADATA_KEYS & set(listed_parameters())
+    assert len(listed_parameters()) == len(registry) - len(LOADER_METADATA_KEYS)
+    summary = capability_summary()
+    assert summary["writable_count"] + summary["boundary_count"] == len(listed_parameters())
+    assert not LOADER_METADATA_KEYS & {spec.key for spec in search_parameters("config", limit=0)}
+    lines = _run(monkeypatch, user_config, "/settings all").message.splitlines()
+    assert not [line for line in lines if any(line.startswith(f"- {key} = ") for key in LOADER_METADATA_KEYS)]
+    found = _run(monkeypatch, user_config, "/settings search config_warnings").message
+    assert not any(f"- {key}［" in found for key in LOADER_METADATA_KEYS)
+    detail = _run(monkeypatch, user_config, "/settings show config_warnings")
+    assert detail.ok and detail.message.startswith("config_warnings（") and "不能在这里修改" in detail.message

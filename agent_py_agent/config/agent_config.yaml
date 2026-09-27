@@ -403,12 +403,6 @@ auth_enabled: true
 # （安全边界：只能由用户在配置文件里改，模型不能改）
 admin_user_id: "admin"
 
-# 合同/skill 的只读扫描预算：
-# - contract_status_* 只影响 `contracts status` 这类看板/汇总扫描，不会阻断任务。
-# - skill_guard_* 只影响单个 skill 目录扫描时的结构检查预算。
-contract_status_max_scan_files: 1000
-contract_status_max_report_bytes: 2000000
-contract_status_recent_findings_limit: 20
 # 安全检查里一个技能目录最多允许放多少个文件的上限。
 # 超过就会被标记出来提醒你。
 # 只有当你确实要收录文件数很多的技能时才需要调大。
@@ -676,13 +670,7 @@ conversation_workspace: ""
 # - pending/context/recent 这些 limit 只控制一次读取多少条账本记录，不删除原始文件。
 # - background_context_* 只裁剪注入后台主代理 prompt 的副本，不改消息、observation、case 或 agent tree 原文。
 conversation_pending_wake_limit: 100
-conversation_context_recent_limit: 20
 conversation_unhandled_observation_limit: 20
-background_pending_wake_prompt_limit: 20
-background_context_max_string_chars: 1200
-background_context_max_list_items: 20
-background_context_max_dict_items: 80
-background_context_max_depth: 6
 # 整份后台状态副本的总预算；0 才表示关闭总量约束。原始账本和产物不受影响。
 background_context_max_total_tokens: 8000
 # 后台会话（主代理被唤醒后继续干活）占着执行权的租约秒数，默认 90：
@@ -1051,21 +1039,12 @@ background_process_listen_scope_enforce: true
 #   Linux 的 bubblewrap 本来就不挂载家目录，也不受影响。修改后重启 Gateway 生效。
 shell_sandbox_hide_user_home: false
 
-# 工具目录里最多展示多少个工具条目
-# 这个值偏大也没问题，因为目录只放中等详细度信息，不会像完整手册那么占 prompt
-# 设为 30：随着进程管理(3)+浏览器自动化(5)等工具加入,默认工具总数已逼近 20;
-# 限额必须留出余量,否则尾部工具(如 list_tools/安全工具)会被分页挤出第一页不可见。
-tool_catalog_limit: 80
-
 # 工具目录展示模式：
 # - compact：给模型一份精简工具目录，默认推荐。
 # - full：给模型完整工具详情，适合调试模板/工具选择问题。
 # - retrieval_only：不铺完整目录，只靠 Recommended Tools 召回。
 # - off：关闭工具目录注入，通常只用于极限省 token 的实验。
 tool_catalog_mode: "compact"
-
-# 工具目录分页偏移；一般保持 0，调试目录分页时可和 tool_catalog_limit 配合。
-tool_catalog_offset: 0
 
 # 工具目录按类别过滤；空列表表示不过滤。
 # 例如 ["filesystem", "network"] 只展示文件和网络工具，但不改变真正授权。
@@ -1080,12 +1059,6 @@ tool_catalog_deferred_categories: ["collaboration", "web", "vision", "meta", "mc
 
 # 工具目录条目是否带示例；默认关闭以控制每轮上下文，完整示例仍可通过 list_tools/tool_search 读取。
 tool_catalog_include_examples: false
-
-# 单个工具目录条目的字符上限；0 表示不截断。
-tool_catalog_entry_max_chars: 700
-
-# Recommended Tools 单个详细工具说明字符上限；0 表示不截断。
-tool_detail_max_chars: 4000
 
 # 每次只把多少个最相关工具的“详细说明”注入 prompt
 # 这个值越小越省 token，但过小可能漏掉次优工具
@@ -1140,8 +1113,6 @@ conversation_history_max_chars: 48000
 # 普通回合结束后，把本轮工具轨迹一次性写进 assistant metadata，供后续轮继续使用。
 # 这不是 Compact，不增加 compact 次数；metadata 只写一次，读取时按下面的热期选择固定投影。
 conversation_terminal_tool_fold_enabled: true
-# 折叠只保留有界工具索引、最近结果和精确引用；完整输出继续留在 owner 工具归档中按需读取。
-conversation_terminal_tool_fold_max_chars: 6000
 # 缓存仍可能有效时保留更完整的有界工具尾巴；过期后才切换成短折叠，避免一分钟内追问就主动破坏热前缀。
 # 0 表示立即短折叠。不同模型/网关缓存时长可能不同，应按 provider cache-read 账本校准，不按延迟猜测。
 conversation_terminal_tool_hot_tail_seconds: 300

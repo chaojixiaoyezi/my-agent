@@ -228,21 +228,17 @@ class _ToolConfigFields:
     # macOS 上对非本机管理员的 owner 拒读用户家目录（本 owner 可见范围除外），并把其 Shell 的 HOME 指到 owner home。默认关闭。
     shell_sandbox_hide_user_home: bool = False
     stream_enabled: bool = True
-    tool_catalog_limit: int = 80
     tool_catalog_mode: str = "compact"
-    tool_catalog_offset: int = 0
     tool_catalog_categories: list[str] = field(default_factory=list)
     # Default prompt catalog stays compact: examples and long parameter notes
     # remain available through list_tools or the recommended-tool details.
     tool_catalog_include_examples: bool = False
-    tool_catalog_entry_max_chars: int = 700
     # 渐进式披露:这些 category 仍注册，但不进初始模型 schema；通过 tool_search 加载。
     # 递归代理和持续目标控制属于主链，orchestration/goal 默认首轮直出；显式 allowed_tools 的
     # 结构化后台/runner profile 仍保持全量直出。[] 恢复全量。
     tool_catalog_deferred_categories: list[str] = field(
         default_factory=lambda: ["collaboration", "web", "vision", "meta", "mcp"]
     )
-    tool_detail_max_chars: int = 4000
     # 推荐区和 tool_search 的检索容量；search 有 score>0 过滤，不相关不会凑数。
     tool_retrieval_limit: int = 12
     # 工具语义检索开关；向量来自与记忆语义召回共用的嵌入服务 embedding_*（没配模型时只走关键词）。
@@ -265,19 +261,10 @@ class _ToolConfigFields:
 # 类用途: 保存扫描、会话读取、后台租约等运行预算的默认值，构造本身不产生副作用。
 @dataclass
 class _RuntimeBudgetConfigFields:
-    contract_status_max_scan_files: int = 1000
-    contract_status_max_report_bytes: int = 2_000_000
-    contract_status_recent_findings_limit: int = 20
     skill_guard_max_files: int = 50
     skill_guard_max_size_kb: int = 1024
     conversation_pending_wake_limit: int = 100
-    conversation_context_recent_limit: int = 20
     conversation_unhandled_observation_limit: int = 20
-    background_pending_wake_prompt_limit: int = 20
-    background_context_max_string_chars: int = 1200
-    background_context_max_list_items: int = 20
-    background_context_max_dict_items: int = 80
-    background_context_max_depth: int = 6
     background_context_max_total_tokens: int = 8000
     # 后台会话执行权的租约秒数；续约心跳按它自动推导（原 background_claim_heartbeat_interval_seconds 已并入）。
     background_claim_ttl_seconds: int = 90
@@ -590,7 +577,6 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     conversation_history_max_turns: int = 20
     conversation_history_max_chars: int = 48_000
     conversation_terminal_tool_fold_enabled: bool = True
-    conversation_terminal_tool_fold_max_chars: int = 6_000
     # 已结束工具回合在这段缓存热期内保留更完整的有界投影，过期后才切换为短折叠。
     # 0 表示立即使用短折叠；不同 provider 的缓存寿命应通过真实 usage 账本校准。
     conversation_terminal_tool_hot_tail_seconds: int = 300

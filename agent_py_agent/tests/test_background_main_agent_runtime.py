@@ -142,8 +142,24 @@ def test_background_run_params_carry_structured_conversation_task_identity() -> 
     }
 
 
+# 参数减量第 3 批 E 组：近期记录窗口、待处理唤醒条数与结构裁剪上限已是代码常量，测试改为 patch 常量。
+def _patch_recent_limit(monkeypatch, value: int) -> None:
+    from agent_py_agent.agent.conversation import background_context
+
+    monkeypatch.setattr(background_context, "CONVERSATION_CONTEXT_RECENT_LIMIT", value)
+
+
+def _patch_pending_wake_prompt_limit(monkeypatch, value: int) -> None:
+    from agent_py_agent.agent.conversation import background_context
+    from agent_py_agent.agent.conversation import runtime as runtime_module
+
+    monkeypatch.setattr(background_context, "BACKGROUND_PENDING_WAKE_PROMPT_LIMIT", value)
+    monkeypatch.setattr(runtime_module, "BACKGROUND_PENDING_WAKE_PROMPT_LIMIT", value)
+
+
 def test_background_context_overflow_resumes_after_committed_recovery_same_slice(monkeypatch, tmp_path) -> None:
     """后台主代理只在恢复宿主宣告提交后同片续跑，并携带已完成工具。"""
+    _patch_recent_limit(monkeypatch, 0)
     from dataclasses import replace
 
     from agent_py_agent.agent.agent_core import runtime_mixin
@@ -161,7 +177,6 @@ def test_background_context_overflow_resumes_after_committed_recovery_same_slice
     class Agent:
         # 历史种子需要读会话范围配置；生产 AgentConfig 一直有这些字段，桩必须同样提供。
         config = SimpleNamespace(
-            conversation_context_recent_limit=0,
             background_context_max_total_tokens=8000,
         )
 
@@ -256,6 +271,7 @@ def test_background_context_overflow_resumes_after_committed_recovery_same_slice
 @pytest.mark.parametrize("initial_commit", [False, True])
 def test_background_compact_slice_yields_after_eight_progressful_generations(monkeypatch, tmp_path, initial_commit) -> None:
     """首次自动压缩无论是否提交，真实提交满八代便让出调度片。"""
+    _patch_recent_limit(monkeypatch, 0)
     from dataclasses import replace
 
     from agent_py_agent.agent.agent_core import runtime_mixin
@@ -273,7 +289,6 @@ def test_background_compact_slice_yields_after_eight_progressful_generations(mon
     class Agent:
         # 历史种子需要读会话范围配置；生产 AgentConfig 一直有这些字段，桩必须同样提供。
         config = SimpleNamespace(
-            conversation_context_recent_limit=0,
             background_context_max_total_tokens=8000,
         )
 
@@ -419,6 +434,7 @@ def test_background_empty_transcript_carries_active_turn_into_committed_recovery
     monkeypatch, tmp_path,
 ) -> None:
     """transcript 为空时活动工具必须进入恢复宿主，提交后才允许继续。"""
+    _patch_recent_limit(monkeypatch, 0)
 
     from dataclasses import replace
 
@@ -441,7 +457,6 @@ def test_background_empty_transcript_carries_active_turn_into_committed_recovery
     class Agent:
         # 历史种子需要读会话范围配置；生产 AgentConfig 一直有这些字段，桩必须同样提供。
         config = SimpleNamespace(
-            conversation_context_recent_limit=0,
             background_context_max_total_tokens=8000,
         )
 
@@ -5474,9 +5489,15 @@ def test_successful_sibling_completion_wakes_are_coalesced_before_one_llm_turn(
 
 
 def test_scheduled_continuation_keeps_direct_child_results_after_wakes_are_consumed(
-    tmp_path,
+    tmp_path, monkeypatch,
 ) -> None:
     """后续进度轮仍应拿到 exact child 结果，不能退回内部目录猜测。"""
+    from dataclasses import replace as _replace
+
+    from agent_py_agent.agent.conversation import context_budget
+
+    monkeypatch.setattr(context_budget, "DEFAULT_BACKGROUND_CONTEXT_BUDGET",
+                        _replace(context_budget.DEFAULT_BACKGROUND_CONTEXT_BUDGET, max_string_chars=240))
 
     from agent_py_agent.agent.conversation.background_context import context_markdown
     from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest
@@ -5486,7 +5507,6 @@ def test_scheduled_continuation_keeps_direct_child_results_after_wakes_are_consu
             enable_tools=False,
             memory_path="memory.jsonl",
             background_context_max_total_tokens=2200,
-            background_context_max_string_chars=240,
         ),
         tmp_path,
     )
@@ -5626,15 +5646,15 @@ def _seed_seven_completion_wakes(agent, store, thread_id: str) -> None:
         )
 
 
-def _seven_completion_mailbox_fixture(tmp_path):
+def _seven_completion_mailbox_fixture(tmp_path, monkeypatch):
     """建立七份长 completion 和一个 4k/5 条有界后台消费者。"""
+    _patch_pending_wake_prompt_limit(monkeypatch, 5)
     agent = SimpleAgent(
         AgentConfig(
             enable_tools=False,
             memory_path="memory.jsonl",
             orphan_supervision_interval_seconds=0,
             background_completion_coalesce_seconds=0,
-            background_pending_wake_prompt_limit=5,
             background_context_max_total_tokens=4096,
         ),
         tmp_path,
@@ -5663,10 +5683,10 @@ def _seven_completion_mailbox_fixture(tmp_path):
 
 
 def test_successful_completion_mailbox_drains_every_sibling_under_prompt_pressure(
-    tmp_path,
+    tmp_path, monkeypatch,
 ) -> None:
     """长结果可以分批，但没读完前不收口，最终每个 child 引用都必须交付。"""
-    backend, channels, store, scheduler = _seven_completion_mailbox_fixture(tmp_path)
+    backend, channels, store, scheduler = _seven_completion_mailbox_fixture(tmp_path, monkeypatch)
 
     reports = scheduler.tick(now=40.0)
 
@@ -6027,12 +6047,12 @@ def test_audit_finding_batch_honors_existing_wake_projection_limit(
 ) -> None:
     from agent_py_agent.agent.conversation.models import BackgroundMainAgentReport
 
+    _patch_pending_wake_prompt_limit(monkeypatch, 1)
     agent = SimpleAgent(
         AgentConfig(
             enable_tools=False,
             memory_path="memory.jsonl",
             orphan_supervision_interval_seconds=0,
-            background_pending_wake_prompt_limit=1,
         ),
         tmp_path,
     )

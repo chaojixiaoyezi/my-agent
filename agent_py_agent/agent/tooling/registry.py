@@ -109,6 +109,7 @@ class ToolRegistryParams:
     shell_tool_output_max_chars: int = 12_000
     background_process_listen_scope_enforce: bool = True
     catalog_mode: str = "compact"
+    # 参数减量第 3 批 E 组：分页起点与目录单条截断的默认值就是生产值，core.py 不再从配置传入。
     catalog_offset: int = 0
     catalog_categories: list[str] | None = None
     catalog_deferred_categories: list[str] | None = None
@@ -1154,11 +1155,13 @@ def _render_catalog_spec(spec: ToolModelSpec, config: CatalogRenderConfig) -> st
     )
 
 
+# LLM: 分页大小是代码常量（core.TOOL_CATALOG_LIMIT），模型改不了，所以提示指向 list_tools 看完整清单，不提配置键。只读。
+# 函数用途: 目录只列了一部分工具时，告诉模型总数、下一页位置和怎么看全部。
 def _catalog_page_notice(config: CatalogRenderConfig, *, total: int, returned: int) -> str:
     next_offset = config.offset + returned
     if total <= next_offset:
         return ""
     return (
         f"- more_tools：工具目录已分页，next_offset={next_offset} limit={config.limit} total={total}。"
-        " 如需更多工具，请调大 tool_catalog_limit 或 tool_catalog_offset。"
+        " 其余工具可用 list_tools 查看完整清单。"
     )

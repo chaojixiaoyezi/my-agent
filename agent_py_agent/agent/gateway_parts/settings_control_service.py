@@ -24,6 +24,7 @@ from ..settings.parameter_registry import (
     ParameterSpec,
     applied_value,
     common_parameters,
+    listed_parameters,
     parameter_registry,
     search_parameters,
 )
@@ -176,10 +177,10 @@ def _config_warning_lines(config: object) -> list[str]:
 
 
 # LLM: 默认视图只列参数中心的常用层级（COMMON_KEYS），再用一句大白话说总数和怎么看全部；常用以外改过的只报个数，
-#   详情在 /settings all。只读。
+#   详情在 /settings all。总数与改过的统计只算 listed_parameters（加载器元数据不列出）。只读。
 # 函数用途: /settings —— 列出常用参数与当前值，提示用 /settings all 看全部。
 def _overview(config: object, _argument: str) -> str:
-    registry = parameter_registry()
+    registry = listed_parameters()
     stored = _stored(config)
     common = common_parameters()
     lines = [f"常用参数（{len(common)} 项，平时要调的基本都在这里）："]
@@ -195,10 +196,11 @@ def _overview(config: object, _argument: str) -> str:
 
 
 # LLM: 全部视图 = 原总览（总数、可改范围、用户配置位置、改过的个数、最近修改）+ 按分类列出每个参数的当前运行值，
-#   改过的标［改过］，不能在这里改的标［安全边界］。值都经 mask_value 脱敏；IM 适配器会按行切成多条消息。只读。
+#   改过的标［改过］，不能在这里改的标［安全边界］。值都经 mask_value 脱敏；IM 适配器会按行切成多条消息。
+#   只列 listed_parameters：配置文件路径、来源、分层与告警这类加载器元数据不是参数，不出现在清单和总数里。只读。
 # 函数用途: /settings all —— 给管理员看全部参数。
 def _all(config: object, _argument: str) -> str:
-    registry = parameter_registry()
+    registry = listed_parameters()
     path = _user_path(config)
     changed = set(_changed_keys(registry, _stored(config)))
     writable = sum(spec.writable for spec in registry.values())

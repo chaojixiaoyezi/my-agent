@@ -409,11 +409,12 @@ def set_tunable_value(
 
 
 # LLM: 可写范围以参数中心登记表为准（两百多项，不整表塞进模型上下文）：给数量、查找方法、生效时机和永不可写的显式清单。
+#   数量与 /settings 同口径，只算 listed_parameters（不含加载器元数据）。
 # 函数用途: 生成给模型看的可改范围与安全边界摘要，让“能不能改”变成结构化事实而不是模型凭感觉断言。
 def capability_summary() -> dict[str, Any]:
-    from .parameter_registry import parameter_registry
+    from .parameter_registry import listed_parameters
 
-    registry = parameter_registry()
+    registry = listed_parameters()
     return {
         "writable_count": sum(spec.writable for spec in registry.values()),
         "boundary_count": sum(not spec.writable for spec in registry.values()),

@@ -15,7 +15,6 @@ from ..contracts.subagent_completion import (
     subagent_completion_context_from_observations,
 )
 from ..runtime_errors import runtime_error_report
-from ..settings.defaults import default_config_value
 from ..subagents.role_templates import active_model_subagent_tools
 from .background_tool_policy import (
     BackgroundToolPolicyRequest,
@@ -32,6 +31,11 @@ from .context_budget import (
 from .models import MODEL_HIDDEN_THREAD_FIELDS, ConversationThread
 from .store import ConversationStore
 from .task_runtime_state import task_runtime_state
+
+# 参数减量第 3 批 E 组：后台唤醒上下文的近期记录窗口、待处理唤醒条数上限不再是配置项（值不变）。
+# BACKGROUND_PENDING_WAKE_PROMPT_LIMIT 也被 runtime.py 的唤醒合批选择读取，只在这里定义。
+CONVERSATION_CONTEXT_RECENT_LIMIT = 20
+BACKGROUND_PENDING_WAKE_PROMPT_LIMIT = 20
 
 
 # LLM: 这是上下文准备的结构化读取接口，不保存状态、不要求生产请求继承；调用方提供已裁决的身份与唤醒。
@@ -419,14 +423,14 @@ def load_context_bundle(state: BackgroundContextLoad) -> dict[str, Any]:
             messages_deferred = bool(str(state.task_id or "").strip())
             bundle, load_errors = state.store.context_bundle_report(
                 state.thread.thread_id,
-                recent_limit=_config_int(state.config, "conversation_context_recent_limit"),
+                recent_limit=CONVERSATION_CONTEXT_RECENT_LIMIT,
                 **({"include_messages": False} if messages_deferred else {}),
             )
             state.load_errors.extend(load_errors)
         else:
             bundle = state.store.context_bundle(
                 state.thread.thread_id,
-                recent_limit=_config_int(state.config, "conversation_context_recent_limit"),
+                recent_limit=CONVERSATION_CONTEXT_RECENT_LIMIT,
             )
         return _task_scoped_operational_context(state, bundle, messages_deferred=messages_deferred)
     except Exception as exc:
@@ -490,7 +494,7 @@ def _task_scoped_operational_context(
     decision = task_scope_decision(state, bundle)
     if messages_deferred and not decision.detached:
         rows, errors = state.store.messages.recent_report(
-            state.thread.thread_id, limit=_config_int(state.config, "conversation_context_recent_limit"),
+            state.thread.thread_id, limit=CONVERSATION_CONTEXT_RECENT_LIMIT,
         )
         state.load_errors.extend(errors)
         bundle = {**bundle, "messages": [row.to_dict() for row in rows]}
@@ -586,7 +590,7 @@ def _detached_task_messages(
         selected = select_message_snapshot(
             state.store.messages, state.thread.thread_id,
             selector_factory=history_scope_selector_factory(decision),
-            retain_limit=_config_int(state.config, "conversation_context_recent_limit"),
+            retain_limit=CONVERSATION_CONTEXT_RECENT_LIMIT,
         )
         return [row.to_dict() for row in selected]
     except Exception as exc:
@@ -739,7 +743,7 @@ def _pending_wake_signals(state: BackgroundContextLoad) -> list[dict[str, Any]]:
     try:
         if callable(getattr(getattr(state.store, 'wakes', None), 'pending_report', None)):
             signals, load_errors = state.store.wakes.pending_report(
-                limit=_config_int(state.config, "background_pending_wake_prompt_limit"),
+                limit=BACKGROUND_PENDING_WAKE_PROMPT_LIMIT,
             )
             state.load_errors.extend(load_errors)
             payload = [
@@ -753,10 +757,7 @@ def _pending_wake_signals(state: BackgroundContextLoad) -> list[dict[str, Any]]:
                 for item in pending_wake_payload(
                     state.store,
                     state.thread.thread_id,
-                    limit=_config_int(
-                        state.config,
-                        "background_pending_wake_prompt_limit",
-                    ),
+                    limit=BACKGROUND_PENDING_WAKE_PROMPT_LIMIT,
                 )
             ]
         if not state.task_id:
@@ -843,17 +844,6 @@ def policy_snapshot_from_request(request: object) -> dict[str, Any]:
     if isinstance(wake, dict) and isinstance(wake.get("policy_snapshot"), dict):
         return dict(wake["policy_snapshot"])
     return {}
-
-
-# LLM: 有效配置与既有默认值仍为唯一来源，零值语义不变；类型错误才使用默认值。
-# 函数用途: 读取上下文条数上限，避免在投影函数中散落常量。
-def _config_int(config: object | None, key: str) -> int:
-    if config is None:
-        return max(0, int(default_config_value(key)))
-    try:
-        return max(0, int(getattr(config, key)))
-    except (TypeError, ValueError):
-        return max(0, int(default_config_value(key)))
 
 
 # LLM: 标题字段只来自宿主已裁决请求与线程；输出为模型上下文，不能反向承担机器授权。

@@ -18,7 +18,8 @@ from .authority import conversation_transcript_is_authoritative
 
 _DEFAULT_MAX_CHARS = 48_000
 _DEFAULT_ACTIVE_TURN_HANDOFF_MAX_CHARS = 12_000
-_DEFAULT_TERMINAL_TOOL_FOLD_MAX_CHARS = 6_000
+# 参数减量第 3 批 E 组：已结束回合的工具折叠字数上限不再是配置项（原 conversation_terminal_tool_fold_max_chars，值不变）。
+_TERMINAL_TOOL_FOLD_MAX_CHARS = 6_000
 _MAX_STORED_TERMINAL_TOOL_FOLD_CHARS = 48_000
 _CHARS_PER_TOKEN_WINDOW = 3
 _RECENT_REF_LIMIT = 8
@@ -166,20 +167,7 @@ def build_conversation_terminal_tool_fold(
     records = [item for item in list(archive_tool_calls or []) if isinstance(item, dict)]
     if not records:
         return {}
-    try:
-        configured_limit = int(
-            getattr(
-                config,
-                "conversation_terminal_tool_fold_max_chars",
-                _DEFAULT_TERMINAL_TOOL_FOLD_MAX_CHARS,
-            )
-        )
-    except (TypeError, ValueError):
-        configured_limit = _DEFAULT_TERMINAL_TOOL_FOLD_MAX_CHARS
-    limit = min(
-        _MAX_STORED_TERMINAL_TOOL_FOLD_CHARS,
-        max(1_000, configured_limit),
-    )
+    limit = _TERMINAL_TOOL_FOLD_MAX_CHARS
     succeeded = sum(1 for record in records if record.get("ok") is True)
     cold_text = _cold_terminal_tool_fold_text(records, succeeded=succeeded, limit=limit)
     hot_tail_seconds = _terminal_tool_hot_tail_seconds(config)

@@ -71,10 +71,12 @@ def test_carried_tool_index_keeps_latest_action_when_middle_is_omitted() -> None
     assert "parameter_keys=path,mode" in rendered
 
 
-def test_terminal_tool_fold_is_deterministic_bounded_and_redacted() -> None:
-    agent = SimpleNamespace(
-        config=AgentConfig(conversation_terminal_tool_fold_max_chars=1_400)
-    )
+def test_terminal_tool_fold_is_deterministic_bounded_and_redacted(monkeypatch) -> None:
+    from agent_py_agent.agent.conversation import tool_context_window
+
+    # 折叠字数上限已是常量（参数减量第 3 批 E 组），patch 常量钉住有界截断。
+    monkeypatch.setattr(tool_context_window, "_TERMINAL_TOOL_FOLD_MAX_CHARS", 1_400)
+    agent = SimpleNamespace(config=AgentConfig())
     records = [
         {
             "tool": "write_file" if index % 2 == 0 else "run_command",

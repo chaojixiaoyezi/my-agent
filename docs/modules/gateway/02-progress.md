@@ -1,5 +1,6 @@
 # Gateway 维护状态
 
+`/settings` 列表隐藏加载器元数据（分支 `claude/9a-batch3-e`，2026-09-27）：`settings_control_service._overview`、`_all` 改用`parameter_registry.listed_parameters()`，总数、“改过”统计与分类清单都不再包含 `config_path/config_sources/config_layers/config_warnings/memory_config_warnings`（加载器写进 AgentConfig 的元数据，不是参数）；参数搜索与 user_config 的可改数量同口径。字段与登记表项不删，`/settings show config_warnings` 仍可查看。回归见 `test_settings_chat_control.py`。
 宿主提示（分支 `claude/be-host-notices`，2026-09-27）：前台回合在用户消息落账后、模型执行前发布会话待送达的 `host_notice` 流事件；正常回复提交时按编号取走（提交即已读），写进最终消息元数据与 `channel_delivery.host_notices`，`/result` 白名单放行、`/progress` 不转发；停止或失败不取走。飞书在同一条回复正文前加“【提示】”，TUI 与同会话窗口画成灰色系统行，历史回放排在用户消息之后。设计见 `docs/design/HOST_NOTICES.md`，回归见 `test_host_notices.py`。
 
 `/settings` 值文字与其它回显出口统一（分支 `claude/9a-mask-value-display`，2026-09-27）：`settings_control_service._value` 删掉为绕开旧 `mask_value` 写的布尔、数字特判，值文字只由 `user_config_capability.mask_value` 给出（非凭据布尔 true/false、数字照实、None/空串/空列表/空映射为空串、凭据遮住），聊天里空值仍显示“（空）”。`mask_value` 根修后 user_config 的运行值/默认值/查看报告、改参回执的 `effective` 与命令行 `config get` 不再把 False、0 给成空串。回归见 `test_value_display_parity.py`。

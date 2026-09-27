@@ -8,7 +8,12 @@ from pathlib import Path
 from typing import Any
 
 from ..common.value_parsing import text_value as _text
-from ..settings.defaults import default_agent_config
+
+# 参数减量第 3 批 E 组：合同状态扫描预算不再是配置项（原 contract_status_* 三项，值不变）；
+# 请求里显式给的 limit/max_files/max_file_bytes（命令行 --limit、--max-files）仍优先。
+CONTRACT_STATUS_RECENT_FINDINGS_LIMIT = 20
+CONTRACT_STATUS_MAX_SCAN_FILES = 1000
+CONTRACT_STATUS_MAX_REPORT_BYTES = 2_000_000
 
 
 @dataclass(frozen=True)
@@ -48,12 +53,13 @@ class _StatusAccumulator:
     limit: int
 
 
+# LLM: 请求只带显式覆盖值，None 表示用本模块的扫描预算常量；原 config 字段随参数减量第 3 批 E 组删除，不再读配置。
+# 类用途: 一次 `contracts status` 扫描可选的条数、文件数与单文件字节上限。
 @dataclass(frozen=True)
 class ContractStatusScanRequest:
     limit: int | None = None
     max_files: int | None = None
     max_file_bytes: int | None = None
-    config: object | None = None
 
 
 def summarize_contract_status(
@@ -96,22 +102,19 @@ class _StatusScanLimits:
     max_file_bytes: int
 
 
+# LLM: 请求里显式给的值优先，没给就用本模块的扫描预算常量；非数字按 0 处理（与原口径一致）。只读。
+# 函数用途: 算出一次合同状态扫描实际用的最近 finding 条数、扫描文件数和单文件字节上限。
 def _status_scan_limits(request: ContractStatusScanRequest) -> _StatusScanLimits:
-    defaults = _contract_status_config_defaults(request.config)
     return _StatusScanLimits(
-        limit=_provided_or_config_int(request.limit, defaults.contract_status_recent_findings_limit),
-        max_files=_provided_or_config_int(request.max_files, defaults.contract_status_max_scan_files),
-        max_file_bytes=_provided_or_config_int(request.max_file_bytes, defaults.contract_status_max_report_bytes),
+        limit=_provided_or_default_int(request.limit, CONTRACT_STATUS_RECENT_FINDINGS_LIMIT),
+        max_files=_provided_or_default_int(request.max_files, CONTRACT_STATUS_MAX_SCAN_FILES),
+        max_file_bytes=_provided_or_default_int(request.max_file_bytes, CONTRACT_STATUS_MAX_REPORT_BYTES),
     )
 
 
-def _contract_status_config_defaults(config: object | None) -> object:
-    if config is not None:
-        return config
-    return default_agent_config()
-
-
-def _provided_or_config_int(value: int | None, default: object) -> int:
+# LLM: None 表示请求没给，用常量；负数夹到 0，非数字按 0。纯函数。
+# 函数用途: 取请求给的整数，没给就用默认常量。
+def _provided_or_default_int(value: int | None, default: object) -> int:
     source = default if value is None else value
     try:
         return max(0, int(source))

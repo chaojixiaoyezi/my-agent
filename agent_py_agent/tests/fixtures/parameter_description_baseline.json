@@ -15,14 +15,6 @@
     {
       "reason": "暂缺中文说明，等配置减量分类：多数将删除、合并或降级为代码常数，保留下来的再补说明",
       "keys": [
-        "background_context_max_depth",
-        "background_context_max_dict_items",
-        "background_context_max_list_items",
-        "background_context_max_string_chars",
-        "background_pending_wake_prompt_limit",
-        "contract_status_max_report_bytes",
-        "contract_status_recent_findings_limit",
-        "conversation_context_recent_limit",
         "conversation_unhandled_observation_limit",
         "daemon_interval",
         "daemon_limit",

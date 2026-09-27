@@ -173,6 +173,18 @@ def parameter_registry() -> dict[str, ParameterSpec]:
     return registry
 
 
+# 加载器写进 AgentConfig 的元数据（配置文件路径、来源、分层、告警），不是用户参数：/settings 的列表与计数、参数搜索都不列出。
+# 只是不显示——字段本身不删，登记表里仍保留（/settings show 仍能查看，仍是安全边界）。
+LOADER_METADATA_KEYS = frozenset({"config_path", "config_sources", "config_layers", "config_warnings", "memory_config_warnings"})
+
+
+# LLM: 列表视图（/settings 默认与全部视图的总数、分类清单，user_config 的可改数量，参数搜索）统一用这份：
+#   去掉 LOADER_METADATA_KEYS，其余与登记表同序同值。单个参数的查看、修改仍走 parameter_registry。只读。
+# 函数用途: 返回会在 /settings 列表和搜索里出现的参数（不含加载器元数据）。
+def listed_parameters() -> dict[str, ParameterSpec]:
+    return {key: spec for key, spec in parameter_registry().items() if key not in LOADER_METADATA_KEYS}
+
+
 # LLM: 按 COMMON_KEYS 的顺序返回常用参数的登记信息；名单里不存在的键直接跳过（守卫测试会先失败），不猜替代项。只读。
 # 函数用途: 给 /settings 默认视图列出常用参数。
 def common_parameters() -> list[ParameterSpec]:
@@ -181,10 +193,11 @@ def common_parameters() -> list[ParameterSpec]:
 
 
 # LLM: 关键词同时匹配键名与说明（不区分大小写）；键名命中排前，其中完全相同、再以关键词开头、再短键名优先；只读，limit 为 0 不限。
+#   只搜 listed_parameters（加载器元数据不出现在结果里）。
 # 函数用途: 按关键词查找参数，给用户和模型“这个参数叫什么、在哪”的答案。
 def search_parameters(query: str, *, limit: int = 20) -> list[ParameterSpec]:
     needle = str(query or "").strip().lower()
-    specs = list(parameter_registry().values())
+    specs = list(listed_parameters().values())
     if not needle:
         return specs[:limit] if limit else specs
     by_key = sorted((spec for spec in specs if needle in spec.key.lower()),

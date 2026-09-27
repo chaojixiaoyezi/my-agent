@@ -831,6 +831,12 @@ def _effective_workspace_scope(agent: SimpleAgent, config: AgentConfig) -> tuple
     return workspace_root, workspace_roots
 
 
+# 参数减量第 3 批 E 组：提示词工具目录每页条数、推荐区单个工具详情的截断字数不再是配置项（值不变）；
+# 目录单条截断与分页起点沿用 ToolRegistryParams 的默认值（700 字、从第一个工具开始）。
+TOOL_CATALOG_LIMIT = 80
+TOOL_DETAIL_MAX_CHARS = 4000
+
+
 # LLM: ToolRegistry 唯一装配入口；owner、来源合同和语法反馈开关取可信配置，执行仍取受限快照；联查文件诊断配置测试。
 # 函数用途: 按身份和工作区组合工具、来源声明及可选文件反馈，主代理与同进程子代理共用权限接线。
 def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistry:
@@ -886,14 +892,12 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
             max_matches=config.tool_search_max_matches,
             web_max_chars=config.tool_web_max_chars,
             http_timeout=config.tool_http_timeout,
-            catalog_limit=config.tool_catalog_limit,
+            catalog_limit=TOOL_CATALOG_LIMIT,
             catalog_mode=config.tool_catalog_mode,
-            catalog_offset=config.tool_catalog_offset,
             catalog_categories=config.tool_catalog_categories,
             catalog_deferred_categories=config.tool_catalog_deferred_categories,
             catalog_include_examples=config.tool_catalog_include_examples,
-            catalog_entry_max_chars=config.tool_catalog_entry_max_chars,
-            tool_detail_max_chars=config.tool_detail_max_chars,
+            tool_detail_max_chars=TOOL_DETAIL_MAX_CHARS,
             retrieval_limit=config.tool_retrieval_limit,
             vector_search_enabled=config.tool_vector_search_enabled,
             shell_tool_timeout=config.tool_shell_timeout,

@@ -739,6 +739,7 @@ agent_py_agent/
 |   |-- test_settings_chat_control.py  # 聊天 /settings：解析、Gateway 分派、TUI 还原与本地拒绝、仅管理员、常用/全部两种视图、完整修改与回滚流程
 |   |-- test_config_field_readers.py   # 每个 AgentConfig 字段都必须有读取方（属性访问、字符串键或决策设置映射），防止死配置
 |   |-- test_merged_config_knobs.py    # 参数减量第 2 批：11 组合并后的单一旋钮语义（空/0/数字）、旧键只告警不转值、随包 YAML 与默认值一致
+|   |-- test_param_reduction_e_group.py # 参数减量第 3 批 E 组：14 个内部参数降为常量（值不变）、旧键只告警、注册表用常量、模型可见提示不再指向已删的键
 |   |-- test_embedding_service.py      # 嵌入服务合并：记忆与工具共用 embedding_*（模型/端点/key 链同一条），两个开关各管各的，旧 tool_/memory_embedding_* 只告警不转值，登记表归“模型请求”
 |   |-- test_model_output_cap.py       # 输出上限统一 64K：常量/YAML/dataclass 同值、按已知窗口一处夹取、默认模型同规则、vision 死配置已删
 |   |-- test_constant_names_unique.py  # 同一数值常数名只在一个模块定义；确属不同含义的列白名单写原因，过期条目也失败

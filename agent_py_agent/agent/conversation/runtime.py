@@ -41,6 +41,7 @@ from .authority import (
     CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR,
 )
 from .background_context import (
+    BACKGROUND_PENDING_WAKE_PROMPT_LIMIT,
     is_narrow_audit_event,
     policy_snapshot_from_request,
 )
@@ -2507,7 +2508,7 @@ def _select_audit_finding_batch(
     if not _typed_audit_finding_signal(primary) or cached_owner_delivery(primary) is not None:
         return (primary,)
     config = getattr(getattr(scheduler.runtime, "agent", None), "config", None)
-    item_limit = _agent_config_int(config, "background_pending_wake_prompt_limit") or 20
+    item_limit = BACKGROUND_PENDING_WAKE_PROMPT_LIMIT
     context_tokens = _agent_config_int(config, "background_context_max_total_tokens") or 8000
     # Keep half the bounded background projection for the fixed prompt, exact
     # source/task facts, and the model-authored report.  Whole wake envelopes
@@ -2565,7 +2566,7 @@ def _select_successful_completion_batch(
     signals: list[WakeSignal],
 ) -> tuple[WakeSignal, ...]:
     config = getattr(getattr(scheduler.runtime, "agent", None), "config", None)
-    item_limit = _agent_config_int(config, "background_pending_wake_prompt_limit") or 20
+    item_limit = BACKGROUND_PENDING_WAKE_PROMPT_LIMIT
     context_tokens = _agent_config_int(config, "background_context_max_total_tokens") or 8000
     batch_token_budget = max(1536, (context_tokens * 3) // 4)
     from ..memory_archive.tokens import estimate_tokens
@@ -2608,6 +2609,9 @@ def _same_reason_wake_batch(primary: WakeSignal, sibling: WakeSignal) -> bool:
     return not _typed_audit_finding_signal(primary) and not _typed_audit_finding_signal(sibling)
 
 
+# LLM: 合批只收排在 primary 之后、同任务同原因的唤醒，条数上限 BACKGROUND_PENDING_WAKE_PROMPT_LIMIT（常量），
+#   token 预算取 background_context_max_total_tokens 的一半；每条唤醒仍单独持久，只在这一轮提交后才确认。只读。
+# 函数用途: 从待处理唤醒里选一批同原因的事件放进同一个后台模型回合，其余留在原队列。
 def _select_same_reason_wake_batch(
     scheduler: BackgroundMainAgentScheduler,
     primary: WakeSignal,
@@ -2621,7 +2625,7 @@ def _select_same_reason_wake_batch(
     """
 
     config = getattr(getattr(scheduler.runtime, "agent", None), "config", None)
-    item_limit = _agent_config_int(config, "background_pending_wake_prompt_limit") or 20
+    item_limit = BACKGROUND_PENDING_WAKE_PROMPT_LIMIT
     context_tokens = _agent_config_int(config, "background_context_max_total_tokens") or 8000
     batch_token_budget = max(1024, context_tokens // 2)
     from ..memory_archive.tokens import estimate_tokens

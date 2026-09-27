@@ -192,9 +192,10 @@ def test_guidance_without_message_ids_uses_original_time_boundary():
 
 @pytest.mark.parametrize("task_id", ["", "ordinary-task"])
 @pytest.mark.parametrize("limit", [0, 1])
-def test_deferred_bundle_keeps_ordinary_history_limit_semantics(conversation, task_id, limit):
+def test_deferred_bundle_keeps_ordinary_history_limit_semantics(conversation, task_id, limit, monkeypatch):
     from types import SimpleNamespace
 
+    from agent_py_agent.agent.conversation import background_context
     from agent_py_agent.agent.conversation.background_context import (
         BackgroundContextLoad,
         load_context_bundle,
@@ -203,16 +204,18 @@ def test_deferred_bundle_keeps_ordinary_history_limit_semantics(conversation, ta
     store, tid = conversation
     first = _append(store, tid, "第一条")
     last = _append(store, tid, "第二条")
-    config = SimpleNamespace(conversation_context_recent_limit=limit)
-    state = BackgroundContextLoad(SimpleNamespace(), store, store.threads.require(tid), task_id, config, None, [])
+    # 近期记录窗口已是常量（参数减量第 3 批 E 组），这里 patch 常量来钉 0=全部、N=最近 N 条的语义。
+    monkeypatch.setattr(background_context, "CONVERSATION_CONTEXT_RECENT_LIMIT", limit)
+    state = BackgroundContextLoad(SimpleNamespace(), store, store.threads.require(tid), task_id, SimpleNamespace(), None, [])
     bundle = load_context_bundle(state)
     assert not state.load_errors
     assert [row["message_id"] for row in bundle["messages"]] == ([first.message_id, last.message_id] if limit == 0 else [last.message_id])
 
 
-def test_bundle_message_deferral_does_not_suppress_later_canonical_error(conversation):
+def test_bundle_message_deferral_does_not_suppress_later_canonical_error(conversation, monkeypatch):
     from types import SimpleNamespace
 
+    from agent_py_agent.agent.conversation import background_context
     from agent_py_agent.agent.conversation.background_context import (
         BackgroundContextLoad,
         load_context_bundle,
@@ -225,8 +228,9 @@ def test_bundle_message_deferral_does_not_suppress_later_canonical_error(convers
         handle.write(b"broken\n")
     deferred, errors = store.context_bundle_report(tid, recent_limit=0, include_messages=False)
     assert deferred["messages"] == [] and not errors
+    monkeypatch.setattr(background_context, "CONVERSATION_CONTEXT_RECENT_LIMIT", 0)
     state = BackgroundContextLoad(SimpleNamespace(), store, store.threads.require(tid), "ordinary-task",
-                                  SimpleNamespace(conversation_context_recent_limit=0), None, [])
+                                  SimpleNamespace(), None, [])
     load_context_bundle(state)
     assert state.load_errors
 
