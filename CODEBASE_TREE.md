@@ -794,6 +794,7 @@ agent_py_agent/
 |   |-- test_gateway_child_compact_scope_application.py # Gateway和child共用view、交错游标及Audit范围隔离
 |   |-- test_compact_tool_source.py      # 同一纯来源分区、完整身份与未知保留、快照隔离
 |   |-- test_compact_tool_partition.py   # 原生完整配对、跨轮同名调用、未知/媒体/孤儿保留
+|   |-- test_compact_tool_ref_archive_chain.py # 真实归档、回执投影、原生IR与carry的引用来源组合回归
 |   |-- test_compact_native_ir_recovery.py # 真实读文件原生回执、恢复安全点、原CAS及候选HTTP对等
 |   |-- test_compact_text_source.py   # 顺序完整覆盖、源改写/取消、纠正预算与序列化峰值回归
 |   |-- test_compact_message_source.py # 可重放摘要消息的编码/估算等价及迭代关闭验证
@@ -1647,6 +1648,7 @@ docs/
 - `agent_py_agent/agent/conversation/compact_tool_summary.py`：完整渲染被选工具的原模型可见投影，供transcript和活动归档共用原分段摘要；不读外置全文，不将展示截断当作来源覆盖。
 
 - `agent_py_agent/agent/agent_core/compact_tool_partition.py`：复用原 ToolCall 四元身份与时序配对，冻结真实 IR/归档的共同来源及保留区；不读存储、不调用模型、不新增持久状态。
+- `agent_py_agent/tests/test_compact_tool_ref_archive_chain.py`：以真实归档/读取/投影链验证外置文本、同组内联结果、来源引用与恢复attempt的Compact分区；零模型/网络，摘要材料仍是原模型可见IR。
 - `agent/conversation/input_media.py`：入站媒体唯一文件/ref 合同；`cli/chat_parts/tui_media.py`、`tui_media_clipboard.py` 只处理输入动作。
 - `docs/design/TUI_INPUT_MEDIA.md`：新媒体能力、迁移、平台和供应商边界。
 - `agent_py_agent/tests/test_input_media.py`：字节、归属、历史恢复和媒体预算合同测试。
