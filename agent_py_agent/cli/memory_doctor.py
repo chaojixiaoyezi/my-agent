@@ -26,8 +26,6 @@ from ..agent.user_space.home_layout import DEFAULT_ROUTE_INDEX, resolve_route_in
 from ..agent.user_space.home_runtime_query import home_runtime_status
 from .common import make_agent
 
-RECENT_ARCHIVE_FILE_LIMIT = 5
-
 
 def cmd_memory_doctor(args) -> int:
 

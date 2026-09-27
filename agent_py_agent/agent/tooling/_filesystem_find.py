@@ -15,6 +15,8 @@ from typing import Any
 
 from ..common.cancellation import raise_if_cancelled, register_cancellation_callback
 from ._filesystem_helpers import (
+    _FALLBACK_SCAN_MAX_FILES,
+    _FALLBACK_SCAN_MAX_SECONDS,
     _bool_param,
     _discovery_result_envelope,
     _ignored_discovery_fallback_notice,
@@ -39,8 +41,6 @@ from .models import (
 )
 
 _LOGGER = logging.getLogger(__name__)
-_FALLBACK_SCAN_MAX_FILES = 20_000
-_FALLBACK_SCAN_MAX_SECONDS = 10.0
 
 
 def _build_find_files_model_spec() -> ToolModelSpec:

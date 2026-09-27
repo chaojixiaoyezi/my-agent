@@ -1,5 +1,12 @@
 # 测试与发布验收
 
+## 参数中心阶段 3 第一批：同名常数收成一处（2026-09-27，分支 `claude/param-center-dup-constants`，基于 main `035f9f57b`）
+
+- **新测试** `test_constant_names_unique.py`：扫描 `agent_py_agent/agent` 与 `agent_py_agent/cli` 的模块级数值常数（导入不算定义），
+  同名只允许一个模块定义；确属不同含义的 19 个名字列白名单并写原因，名单里的名字不再重复同样失败。
+- **变异验证**：在另一个模块补回一份同名常数、从白名单删掉仍在重复的名字、白名单多一个已不重复的名字，三种都失败。
+- **行为不变**：只删死常数、改为导入或按真实含义改名，所有数值不变；推送前全仓 12 分片。
+
 ## 参数查看显示实际使用值、去掉旧 tunable 字段（2026-09-27，分支 `claude/settings-view-facts`，基于 main `111d32baa`）
 
 - **来源**：my-agent 在开发交流板上提问：一是 `user_config view` 同时给出 writable=true 与 tunable=false，它以为 max_tokens 改不了；

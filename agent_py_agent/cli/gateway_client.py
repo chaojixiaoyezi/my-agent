@@ -29,7 +29,7 @@ from ..agent.gateway_parts import (
     wait_for_gateway_response,
     wait_for_gateway_running,
 )
-from ..agent.gateway_parts.io import read_complete_utf8_rows
+from ..agent.gateway_parts.io import STREAM_CHUNK_READ_MAX_BYTES, read_complete_utf8_rows
 from ..agent.gateway_parts.response_renderer import (
     GatewayResponsePollState,
     project_gateway_stream_chunk,
@@ -156,17 +156,15 @@ def _stream_chunk_lines(
     return chunks_printed
 
 
-# 单次读取上限:流式 chunk 文件可能很大,整体 f.read() 无上限会 MemoryError;
-# 按上限分块读,剩余部分下一拍轮询继续(state.chunk_offset 已推进)。
-_MAX_CHUNK_READ_BYTES = 8 * 1024 * 1024
-
-
+# LLM: 单次最多读 STREAM_CHUNK_READ_MAX_BYTES（gateway_parts/io 唯一定义，TUI 客户端共用）；只推进到完整行，
+#   剩余部分下一拍按 state.chunk_offset 续读，整体 f.read() 无上限会在大文件上 MemoryError。
+# 函数用途: 读取流式 chunk 文件新增的完整行并推进游标，坏编码只报类别不中断。
 def _read_stream_chunk_data(readable_chunk_path: Path, state: GatewayStreamState | None) -> str:
     offset = state.chunk_offset if state is not None else 0
     rows, next_offset, decode_error = read_complete_utf8_rows(
         readable_chunk_path,
         offset,
-        max_bytes=_MAX_CHUNK_READ_BYTES,
+        max_bytes=STREAM_CHUNK_READ_MAX_BYTES,
     )
     if decode_error:
         print("gateway stream chunk load_error category=utf8_decode", file=sys.stderr)

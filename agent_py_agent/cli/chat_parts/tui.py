@@ -60,10 +60,6 @@ class TuiLoopContext:
     pre_run: object | None = None
 
 
-CONTEXT_WINDOW = 200_000
-COLLAPSE_PREVIEW_CHARS = 900
-
-
 # LLM: rich TUI 展开只读已保存的完整回复；解析规则来自共享 slash parser，展示文案
 # 不得另造一套参数合同或英文 fallback。
 # 函数用途: 展开最后一条或指定编号的完整助手回复。
@@ -433,8 +429,6 @@ def _make_tui_app(*, params: MakeTuiAppParams):
 
 
 __all__ = [
-    "CONTEXT_WINDOW",
-    "COLLAPSE_PREVIEW_CHARS",
     "TuiExitRefs",
     "run_tui",
 ]

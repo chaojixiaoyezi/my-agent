@@ -32,7 +32,7 @@ from ..tooling.web import (
 )
 from ..tooling.web_fetch_runtime import FetchRawRequest, PinResult, fetch_raw_response
 from .config import tuning_from_params
-from .puller import DrainBudget
+from .puller import SOURCE_FETCH_TIMEOUT_SECONDS, DrainBudget
 from .source_http import (
     SourceHttpRequest,
     normalize_source_http_request,
@@ -79,7 +79,6 @@ from .watch_tool_spec import (
 )
 
 _TOOL_NAME = "watch_stream"
-_HTTP_TIMEOUT_SECONDS = 15
 _AUDIT_DEFAULT_BATCH_WAIT_SECONDS = 15.0
 # Before a source has one successful delivery, reserve enough output for the
 # opaque per-row token, classification, score and a useful reason.  Afterwards
@@ -557,7 +556,7 @@ def _drain_and_digest(
     budget = DrainBudget(
         max_events=max_events,
         page_limit=state.tuning.page_limit,
-        deadline=time.time() + _HTTP_TIMEOUT_SECONDS,
+        deadline=time.time() + SOURCE_FETCH_TIMEOUT_SECONDS,
     )
     drain = drain_watch_source(state, tool._fetch_json, budget)
     apply_cursor_page_feedback(state, drain)
@@ -719,7 +718,7 @@ def _fetch_json_pinned(
             method=request.method,
             headers=dict(request.headers),
             data=request.data,
-            timeout=_HTTP_TIMEOUT_SECONDS,
+            timeout=SOURCE_FETCH_TIMEOUT_SECONDS,
         ),
         format_http_error=_format_http_error,
         resolve_pin=lambda pin_url: tool._resolve_pin_with(

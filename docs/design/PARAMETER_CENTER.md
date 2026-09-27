@@ -93,6 +93,21 @@
   - 删除 `read_config_fact` 里旧白名单遗留的 `tunable` 字段：模型同时看到 writable=true 与 tunable=false，误以为 max_tokens 改不了；
     能否修改只看登记表的 `writable`。
 - **阶段 3（迁移）**：按模块分批迁移常数并改名。每批开工前在协作文件贴出文件清单，避开 Codex 正在改的文件。
+  - **第一批：同名常数（2026-09-27）**。盘点时 32 个常数名在多个文件各定义一份。
+    - 删掉没有读取方的 `CONTEXT_WINDOW`（TUI 两份）与 `RECENT_ARCHIVE_FILE_LIMIT`（记忆诊断两份，实际读配置）。
+    - 同一概念收成一处：聊天历史轮数/预览字数、折叠预览字数、后备扫描上限（`tooling/_filesystem_helpers`）、响应预览下限
+      （`web_http_helpers`）、源抓取时限（`ingestion/puller.SOURCE_FETCH_TIMEOUT_SECONDS`）、适配器领取时限（ingress 直接用
+      `GatewayClaimLeaseConfig` 默认）、策略失败退役次数（`conversation/store_progress`）、压缩失败熔断阈值与冷却
+      （`memory_archive/compact_circuit_breaker`，原 context_compactor 另有同值副本和不同名的冷却常数）、流式分块读取上限
+      （`gateway_parts/io.STREAM_CHUNK_READ_MAX_BYTES`）。
+    - 名不副实的改名：网页抓取里按字节用的 `_MAX_BODY_CHARS` 改为 `_MAX_BODY_BYTES`。
+    - 剩下 19 个同名常数确属不同含义或有意独立（如两套密码散列的 scrypt 参数、各持久格式版本号），列入
+      `test_constant_names_unique.py` 的白名单并写原因；以后新增同名数值常数即测试失败，白名单里的名字不再重复也失败。
+    - 不改任何数值，行为不变。
+  - **方向调整（用户 2026-09-27）**：“几百个参数是不是太多了，有些可以合并，有些可能没用了”。本机用户配置只改过 11 项
+    （测试机 298 项是当年整份复制随包 YAML）。下一步先把测试机配置收成“只写与默认不同的项”，再对 386 个配置项逐项分类：
+    删除（无用）、合并（总一起调）、降级（只对程序内部有意义，改回代码常数并移出配置）、常用（`/settings` 默认只列二三十个）、
+    高级（可搜索但不刷屏）。目标约 100 项；每批不改任何生效值。
 
 ## 7. 验收
 

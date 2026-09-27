@@ -663,6 +663,7 @@ agent_py_agent/
 |   |-- test_settings_chat_control.py  # 聊天 /settings：解析、Gateway 分派、TUI 还原与本地拒绝、仅管理员、完整修改与回滚流程
 |   |-- test_config_field_readers.py   # 每个 AgentConfig 字段都必须有读取方（属性访问、字符串键或决策设置映射），防止死配置
 |   |-- test_model_output_cap.py       # 输出上限统一 64K：常量/YAML/dataclass 同值、按已知窗口一处夹取、默认模型同规则、vision 死配置已删
+|   |-- test_constant_names_unique.py  # 同一数值常数名只在一个模块定义；确属不同含义的列白名单写原因，过期条目也失败
 |   |-- test_skill_chat_control.py     # 聊天 /skills：解析校验、Gateway 分派不落入 stop、TUI 文本还原与本地拒绝、提案确认版本、自动 Skill 回滚删除
 |   |-- test_skill_learning.py          # 自学习 S3：触发判据、请求有界脱敏、create/update/skip、各闸门拒绝码、上限、重试、忙时顺延、回滚删除
 |   |-- test_reasoning_effort.py        # 智能程度：换算与优先级、两种协议真实组包、线程档位、投影一致、子代理继承、/effort、档案字段与配置

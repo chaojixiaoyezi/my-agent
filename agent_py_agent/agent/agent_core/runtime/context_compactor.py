@@ -4,6 +4,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ...conversation.authority import conversation_transcript_is_authoritative
+from ...memory_archive.compact_circuit_breaker import (
+    DEFAULT_COMPACT_COOLDOWN_SECONDS,
+    DEFAULT_COMPACT_FAILURE_THRESHOLD,
+)
 from ..model.context_window import resolve_model_context_window_tokens
 
 # LLM: These defaults define one provider-neutral runtime compact policy shared by root and child
@@ -14,8 +18,6 @@ DEFAULT_COMPACT_RECOVERY_TARGET_PERCENT = 60
 DEFAULT_COMPACT_RECENT_TAIL_MAX_TURNS = 4
 DEFAULT_COMPACT_RECENT_TAIL_TOKEN_CAP = 20_000
 DEFAULT_COMPACT_RECENT_TAIL_PERCENT = 10
-DEFAULT_COMPACT_FAILURE_THRESHOLD = 3
-DEFAULT_COMPACT_FAILURE_COOLDOWN_SECONDS = 300.0
 
 
 # LLM: All compact callers consume this immutable resolved snapshot instead of recomputing limits.
@@ -79,7 +81,7 @@ def runtime_compact_policy(
         recent_tail_max_turns=DEFAULT_COMPACT_RECENT_TAIL_MAX_TURNS,
         recent_tail_tokens=recent_tail_tokens,
         failure_threshold=DEFAULT_COMPACT_FAILURE_THRESHOLD,
-        failure_cooldown_seconds=DEFAULT_COMPACT_FAILURE_COOLDOWN_SECONDS,
+        failure_cooldown_seconds=DEFAULT_COMPACT_COOLDOWN_SECONDS,
     )
 
 
@@ -148,8 +150,6 @@ def compact_recovery_target_tokens(
 __all__ = [
     "DEFAULT_COMPACT_TRIGGER_PERCENT",
     "DEFAULT_COMPACT_RECOVERY_TARGET_PERCENT",
-    "DEFAULT_COMPACT_FAILURE_COOLDOWN_SECONDS",
-    "DEFAULT_COMPACT_FAILURE_THRESHOLD",
     "DEFAULT_COMPACT_RECENT_TAIL_MAX_TURNS",
     "DEFAULT_COMPACT_RECENT_TAIL_PERCENT",
     "DEFAULT_COMPACT_RECENT_TAIL_TOKEN_CAP",

@@ -9,6 +9,8 @@ from typing import Any
 from .models import ToolHandlerOutcome
 
 MAX_BODY_CHARS = 1_000_000
+# 响应正文预览的下限（web 工具共用一份）：模型请求的 max_chars 不低于它，HTTP 错误正文也按它截取预览。
+MIN_RESPONSE_PREVIEW_CHARS = 256
 _MAX_HEADER_JSON_CHARS = 65536
 _MAX_HEADER_COUNT = 100
 _MAX_HEADER_NAME_CHARS = 128

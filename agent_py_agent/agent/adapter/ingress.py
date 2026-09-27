@@ -22,7 +22,6 @@ from .delivery import GatewayClaimLeaseConfig, GatewayReplyDeliveryWorker
 _LOGGER = logging.getLogger(__name__)
 _SCHEMA_VERSION = 2
 _TERMINAL_RETENTION_SECONDS = 7 * 24 * 60 * 60
-_DEFAULT_CLAIM_TTL_SECONDS = 120.0
 _INGRESS_STATES = frozenset(
     {"prepared", "payload_ready", "submitted", "placeholder_ready", "completed"}
 )
@@ -589,9 +588,7 @@ class GatewayAdapterDeliveryWorker:
         poll_interval: float = 1.0,
         lease: GatewayClaimLeaseConfig | None = None,
     ) -> None:
-        lease = lease or GatewayClaimLeaseConfig(
-            ttl_seconds=_DEFAULT_CLAIM_TTL_SECONDS
-        )
+        lease = lease or GatewayClaimLeaseConfig()
         self.store = store
         self.reply_worker = reply_worker
         self._prepare_payload = prepare_payload

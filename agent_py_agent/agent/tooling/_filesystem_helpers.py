@@ -11,6 +11,10 @@ _MAX_PATH_CHARS = 4096
 _MAX_SEARCH_QUERY_CHARS = 4000
 _MAX_SEARCH_LINE_CHARS = 500
 _MAX_WRITE_TEXT_CHARS = 1_000_000
+# 没有 ripgrep 等外部工具时，Python 后备遍历的存活上限（文件查找与内容搜索共用一份）：超过这么多候选文件或这么多秒就停，
+# 结果标为不完整，不能据此判定“没有匹配”；只保护单个 Gateway 不被大目录长期占住。
+_FALLBACK_SCAN_MAX_FILES = 20_000
+_FALLBACK_SCAN_MAX_SECONDS = 10.0
 _INTERNAL_AGENT_STATUS_FILES = frozenset(
     {
         "final_report.md",

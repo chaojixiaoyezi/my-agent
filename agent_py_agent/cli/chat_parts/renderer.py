@@ -18,7 +18,6 @@ BOLD = "\033[1m"
 
 COLLAPSE_PREVIEW_LINES = 12
 COLLAPSE_PREVIEW_CHARS = 900
-CONTEXT_WINDOW = 200_000
 _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
@@ -125,7 +124,6 @@ __all__ = [
     "YELLOW",
     "COLLAPSE_PREVIEW_CHARS",
     "COLLAPSE_PREVIEW_LINES",
-    "CONTEXT_WINDOW",
     "collapse_response_text",
     "color_text",
     "progress_bar",

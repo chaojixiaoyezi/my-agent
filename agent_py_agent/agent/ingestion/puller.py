@@ -11,6 +11,9 @@ from typing import Any
 
 from .source_http import render_source_http_request
 
+# 一轮源抓取的时间预算，同时也是 watch_stream 单次 HTTP 抓取的超时（watch_tool 与 harvester 共用这一份）。
+SOURCE_FETCH_TIMEOUT_SECONDS = 15
+
 
 @dataclass(frozen=True)
 class DrainBudget:

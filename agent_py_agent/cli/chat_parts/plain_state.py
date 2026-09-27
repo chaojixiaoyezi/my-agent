@@ -14,6 +14,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+# 历史轮数只在 history.py 定义一次（与配置 chat_history_max_turns 的默认值一致，由测试核对）。
+from .history import MAX_HISTORY_TURNS
+
 
 # LLM: worker 和输入端必须共享同一个 local_run_ref；句柄随 job 换代，不能从 agent 的线程局部参数猜身份。
 # 类用途: 集中普通终端 worker 的队列、运行快照和本地控制句柄。
@@ -122,8 +125,6 @@ _CHAT_RESPONSE_STYLE_INJECT = (
 )
 
 PLAIN_CHAT_PROMPT = "❯ "
-MAX_HISTORY_TURNS = 20
-ASSISTANT_PREVIEW_CHARS = 500
 
 
 def append_conversation_turn(

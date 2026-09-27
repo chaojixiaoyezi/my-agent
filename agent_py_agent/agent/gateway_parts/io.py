@@ -411,6 +411,11 @@ def _is_file_lock_contention(exc: OSError) -> bool:
     return getattr(exc, "winerror", None) in {33}
 
 
+# 流式 chunk 文件单次读取上限：整体 f.read() 无上限会 MemoryError，按上限分块读、剩余部分下一拍继续
+# （CLI 与 TUI 两个网关客户端共用这一份）。
+STREAM_CHUNK_READ_MAX_BYTES = 8 * 1024 * 1024
+
+
 # LLM: Streaming JSONL readers may observe a writer between payload bytes and its trailing newline.
 # Only newline-terminated rows advance the byte cursor; trailing partial UTF-8 stays for the next poll.
 # 函数用途: 从字节游标读取一批完整 UTF-8 行，保留尚未写完的最后一行而不误报或丢失。

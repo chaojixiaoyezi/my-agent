@@ -12,7 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from ...agent.gateway_parts.io import read_complete_utf8_rows
+from ...agent.gateway_parts.io import STREAM_CHUNK_READ_MAX_BYTES, read_complete_utf8_rows
 from ...agent.gateway_parts.paths import gateway_chunk_path, gateway_chunk_path_candidates
 from ...agent.gateway_parts.request_client import GatewayAskParams, submit_gateway_ask
 from ...agent.gateway_parts.response_renderer import (
@@ -282,10 +282,6 @@ def gateway_request_activity_paths(paths: object, request_id: str, chunk_path: P
     return tuple(candidates)
 
 
-# 单次读取上限:流式 chunk 文件可能很大,整体 f.read() 无上限会 MemoryError。
-_MAX_CHUNK_READ_BYTES = 8 * 1024 * 1024
-
-
 # LLM: 单次尾读只按 byte offset 推进；每个完整 JSONL row 先交 typed consumer，再按需走 legacy projector。
 # 函数用途: 读取 chunk 文件新增部分并返回累计行数、终态可见数和新游标。
 def _poll_chunk_file(request: ChunkFilePollRequest) -> tuple[int, int, int]:
@@ -299,7 +295,7 @@ def _poll_chunk_file(request: ChunkFilePollRequest) -> tuple[int, int, int]:
         rows, next_offset, decode_error = read_complete_utf8_rows(
             readable_chunk_path,
             chunk_offset,
-            max_bytes=_MAX_CHUNK_READ_BYTES,
+            max_bytes=STREAM_CHUNK_READ_MAX_BYTES,
         )
     except OSError as exc:
         print(f"gateway chat chunk load_error path={readable_chunk_path} message={exc}", file=sys.stderr)

@@ -24,10 +24,9 @@ from ..contracts.gates.network_safety import (
 from .models import ToolHandlerOutcome
 from .web_fetch_tools import WebFetchTool as _WebFetchTool
 from .web_fetch_tools import WebRuntimeDeps
-from .web_http_helpers import scalar_text
+from .web_http_helpers import MIN_RESPONSE_PREVIEW_CHARS, scalar_text
 
 _MAX_URL_CHARS = 4096
-_MIN_RESPONSE_PREVIEW_CHARS = 256
 
 
 def _has_control_chars(text: str) -> bool:
@@ -134,7 +133,7 @@ def _response_preview_chars(params: dict[str, Any], configured_max: int) -> int:
         requested = int(raw)
     except (TypeError, ValueError):
         return configured_max
-    return max(_MIN_RESPONSE_PREVIEW_CHARS, min(configured_max, requested))
+    return max(MIN_RESPONSE_PREVIEW_CHARS, min(configured_max, requested))
 
 
 class WebFetchTool(_WebFetchTool):

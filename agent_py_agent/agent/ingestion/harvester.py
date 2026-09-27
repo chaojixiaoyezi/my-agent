@@ -43,7 +43,7 @@ from ..common.json_io import (
     read_jsonl_objects_report,
     write_json_file_atomic_unlocked,
 )
-from .puller import DrainBudget, DrainResult
+from .puller import SOURCE_FETCH_TIMEOUT_SECONDS, DrainBudget, DrainResult
 from .watch_payloads import (
     build_audit_record,
     candidate_model_view,
@@ -62,7 +62,6 @@ from .watch_state import (
 
 _LOGGER = logging.getLogger(__name__)
 
-_HTTP_TIMEOUT_SECONDS = 15
 # 源连续失败时的最大退避(不放弃:源恢复即续,缺口由游标+账目如实体现)。
 _MAX_ERROR_BACKOFF_SECONDS = 10.0
 # 跨进程租约新鲜窗:超过即视为收割者已死,可接管。
@@ -868,7 +867,7 @@ def _harvest_cycle_transaction(
     budget = DrainBudget(
         max_events=_cycle_drain_events(state, content_mode),
         page_limit=state.tuning.page_limit,
-        deadline=time.time() + _HTTP_TIMEOUT_SECONDS,
+        deadline=time.time() + SOURCE_FETCH_TIMEOUT_SECONDS,
     )
     drain = drain_watch_source(
         state,

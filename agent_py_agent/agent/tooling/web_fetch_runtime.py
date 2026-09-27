@@ -27,10 +27,11 @@ from ..common.cancellation import (
 )
 from .models import ToolHandlerOutcome
 from .web_html_preview import is_html_response, visible_html_text
+from .web_http_helpers import MIN_RESPONSE_PREVIEW_CHARS
 from .web_markdown import html_to_markdown
 
-_MAX_BODY_CHARS = 1_000_000
-_MIN_RESPONSE_PREVIEW_CHARS = 256
+# 从网络读取的响应体上限（字节，含解压后）；给模型的字符上限另见 web_http_helpers.MAX_BODY_CHARS。
+_MAX_BODY_BYTES = 1_000_000
 _TEXTUAL_CONTENT_MARKERS = (
     "text/",
     "json",
@@ -57,7 +58,7 @@ class FetchRawRequest:
     headers: dict[str, str]
     data: bytes | None
     timeout: int
-    max_bytes: int = _MAX_BODY_CHARS
+    max_bytes: int = _MAX_BODY_BYTES
 
 
 @dataclass(frozen=True)
@@ -362,7 +363,7 @@ def _finalize_hop(hop: _HopReq, resp: Any, format_http_error) -> RawResponsePart
         )
     if resp.status >= 400:
         err = urllib.error.HTTPError(hop.url, resp.status, resp.reason or "", resp.headers, io.BytesIO(body))
-        return format_http_error(hop.request.tool, err, _MIN_RESPONSE_PREVIEW_CHARS)
+        return format_http_error(hop.request.tool, err, MIN_RESPONSE_PREVIEW_CHARS)
     return RawResponseParts(resp.status, resp.headers, body, hop.url)
 
 

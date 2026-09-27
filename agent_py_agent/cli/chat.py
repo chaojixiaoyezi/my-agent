@@ -14,7 +14,6 @@ from .chat_parts.renderer import (
     BOLD,
     COLLAPSE_PREVIEW_CHARS,
     COLLAPSE_PREVIEW_LINES,
-    CONTEXT_WINDOW,
     CYAN,
     GRAY,
     GREEN,
@@ -33,7 +32,6 @@ from .thinking_spinner import ThinkingSpinner
 # 模块用途: 编排聊天会话；Gateway TUI 使用轻量客户端快速首屏，普通终端和 direct 模式仍按需
 # 加载完整智能体。
 
-MAX_HISTORY_TURNS = 20
 PLAIN_CHAT_PROMPT = "user> "
 
 # Chat response style injected into CLI sessions.

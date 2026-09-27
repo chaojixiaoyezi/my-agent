@@ -1,5 +1,9 @@
 # Gateway 维护状态
 
+参数中心同名常数收敛（分支 `claude/param-center-dup-constants`，2026-09-27）：流式 chunk 单次读取上限只在
+`gateway_parts/io.STREAM_CHUNK_READ_MAX_BYTES` 定义（8 MiB），CLI 与 TUI 两个网关客户端改为导入；适配器入口不再另写领取时限，
+直接用 `GatewayClaimLeaseConfig` 的默认值。数值不变。
+
 `/settings show` 显示实际使用值（分支 `claude/settings-view-facts`，2026-09-27）：配置值会在运行时按规则派生的参数（目前只有
 max_tokens，按模型窗口 ÷ 4 夹取）多一行“实际使用值”，按 Gateway 启动配置即默认模型计算，并注明 /model 切换过的会话可能不同；
 派生函数来自参数中心 `parameter_registry.applied_value`。测试见 `test_settings_chat_control.py`。

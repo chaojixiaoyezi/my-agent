@@ -935,6 +935,11 @@ Gateway 解析并校验会话 cwd，但不再把 `workspace_task.task_path` 覆�
 - 这套投影不属于 tool protocol：只有完整 `content_block_stop` 后形成的既有 tool_use block 才能进入
   ToolCall、权限和 handler；字符数/ready 不参与任务状态、完成裁决、恢复、Compact、缓存或 timeout。
 
+## 流式读取上限的唯一位置
+
+`gateway_parts/io.read_complete_utf8_rows` 要求调用方显式给 `max_bytes`；流式 chunk 文件的上限统一用同文件的
+`STREAM_CHUNK_READ_MAX_BYTES`（CLI `cli/gateway_client.py` 与 TUI `cli/chat_parts/gateway_client.py` 共用），剩余部分下一拍按字节游标续读。
+
 ## Owner WorkspaceOnly 与管理员 Full Access
 
 - owner-scoped Shell 的结构化 cwd 先由 path policy 校验，命令正文仍交给 OS 沙箱，不解析重定向、管道或

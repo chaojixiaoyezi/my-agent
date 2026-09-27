@@ -16,7 +16,6 @@ from .renderer import (
     BOLD,
     COLLAPSE_PREVIEW_CHARS,
     COLLAPSE_PREVIEW_LINES,
-    CONTEXT_WINDOW,
     CYAN,
     GRAY,
     GREEN,

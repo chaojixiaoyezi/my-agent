@@ -97,6 +97,9 @@ from .models import (
 from .run_claim import claim_heartbeat_interval_seconds
 from .store import ConversationStore
 
+# 连续失败次数由原 Store 持久化；普通失败达阈值后停用策略（阈值只在 store_progress 定义一次）。
+from .store_progress import _POLICY_FAILURE_RETIRE_AFTER
+
 
 # Scheduled wakes resume the same Agent with typed state.  Runtime boundaries
 # are authoritative, but the model chooses the work plan and tool sequence.
@@ -2233,9 +2236,6 @@ _MAX_PROGRESS_POLICY_CATCHUP_INTERVALS = 4
 
 # 陈旧账本 gc 节奏:tick ~2 分钟一次,这里最多 6 小时跑一趟归档(问题8)。
 _LEDGER_GC_INTERVAL_SECONDS = 6 * 3600
-
-# 连续失败次数由原 Store 持久化；普通失败达阈值后停用策略，供应和配置错误另行退避。
-_POLICY_FAILURE_RETIRE_AFTER = 3
 
 
 # LLM: 只在 scheduler 构造时读取原配置并交付数值，Gateway/CLI 的实例寿命保持；联测供应冷却和就绪筛选。
