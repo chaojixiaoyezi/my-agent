@@ -1,6 +1,7 @@
 """能力包沿真实安装、任务与授权组件的版本固定；不启动模型、Gateway 或外部进程。"""
 from __future__ import annotations
 
+import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -8,8 +9,13 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent_py_agent.agent.agent_core.capability_request_tool import CapabilityRequestTool
+from agent_py_agent.agent.agent_core.orchestration.tools.capability import (
+    ResolveCapabilityRequestsTool,
+)
 from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
+from agent_py_agent.agent.capability.router import CapabilitySearchHit, from_capability_package
 from agent_py_agent.agent.capability.skill_search_tool import SkillSearchTool
 from agent_py_agent.agent.capability.skill_snapshot import SkillSnapshotError
 from agent_py_agent.agent.capability.task_references import (
@@ -203,3 +209,147 @@ def test_malformed_package_task_reference_is_not_silently_discarded(broken):
     task = SimpleNamespace(attributes={"skill_snapshot_refs": [broken]}, capability_grants=[])
     with pytest.raises(SkillSnapshotError):
         task_skill_references(task)
+
+
+# LLM: 经原创建与申请工具生成同一父子边和 OPEN 请求，仅向隔离 home 写 canonical/wake；不启动 runner 或模型。
+# 函数用途: 创建没有包授权的只读孩子，再以孩子的真实运行上下文申请指定包或混合能力。
+def _child_package_request(agent, reference, *, requested_tools=()):
+    _bind_main_task(agent)
+    created = CreateSubagentsTool(agent).execute({
+        "goal": "阅读已有方法并记录依据", "allowed_skills": [],
+        "tool_preset": "read_only", "defer_start": True,
+    })
+    assert created.ok, created.output
+    child = agent.subagents.list_runs()[0]
+    assert child.parent_id == "main-task"
+    assert child.allowed_skills == [] and task_skill_references(child) == []
+    previous = set_current_subagent_context(agent, run_id=child.id, task_attributes=child.attributes)
+    try:
+        result = CapabilityRequestTool(agent).execute({
+            "problem": "当前范围没有所需方法", "capability_type": "skill",
+            "requested_skills": [reference], "requested_tools": list(requested_tools),
+        })
+    finally:
+        restore_current_subagent_context(agent, previous)
+    assert result.ok, result.output
+    current = agent.subagents.load(child.id)
+    request = current.capability_requests[0]
+    assert json.loads(result.output)["request_id"] == request.id
+    assert request.status == "OPEN" and request.requested_skills == [reference]
+    assert current.allowed_skills == [] and current.capability_grants == []
+    return current, request
+
+
+@pytest.mark.parametrize("package_hit", [False, True], ids=["semantic-no-hit", "package-card-hit"])
+def test_package_request_routes_to_parent_then_reads_same_generation(tmp_path, monkeypatch, package_hit):
+    agent, _store, _entries = _agent(tmp_path)
+    reference = agent.current_skill_snapshot().resolve_reference("capability:story-a").to_ref()
+    child, request = _child_package_request(agent, "capability:story-a")
+    original_refs = child.attributes.get("skill_snapshot_refs")
+    package = agent.current_skill_snapshot().resolve_reference("capability:story-a")
+    hits = [CapabilitySearchHit(from_capability_package(package), 100.0, ["exact package fixture"])] if package_hit else []
+    searches = []
+
+    # LLM: 仅固定语义召回结果；包卡来自真实父快照，route、grant 和 get 均走原实现，不造授权引用。
+    # 函数用途: 分别证明“没有候选”和“真实包卡已命中”都不能替父级结清显式包申请。
+    def search(query, *, limit):
+        searches.append(query)
+        return hits
+
+    monkeypatch.setattr(agent.capability_router, "search", search)
+    report = agent.subagents.capability.route_capability_requests(
+        agent.capability_router, apply=True, run_ids=[child.id],
+    )
+    pending = agent.subagents.load(child.id)
+    assert len(searches) == 1
+    assert pending.capability_requests[0].status == "OPEN", report.records[0].status
+    assert report.records[0].status == "PARENT_RESOLUTION_REQUIRED"
+    assert pending.capability_grants == [] and pending.capability_gaps == []
+    assert pending.allowed_skills == [] and task_skill_references(pending) == []
+
+    params = {"run_id": child.id, "request_id": request.id, "decision": "grant", "reason": "授予本轮所需方法"}
+    granted = ResolveCapabilityRequestsTool(agent).execute(params)
+    assert granted.ok, granted.output
+    current = agent.subagents.load(child.id)
+    assert current.capability_requests[0].status == "GRANTED"
+    assert current.allowed_skills == ["capability:story-a"]
+    assert len(current.capability_grants) == 1
+    grant = current.capability_grants[0]
+    assert grant.request_id == request.id and grant.skills == ["capability:story-a"]
+    assert len(grant.capability_cards) == 1
+    assert normalize_skill_reference(grant.capability_cards[0]) == reference
+    assert len(reference) == 7
+    assert current.attributes.get("skill_snapshot_refs") == original_refs
+
+    previous = set_current_subagent_context(agent, run_id=child.id, task_attributes=child.attributes)
+    try:
+        snapshot = agent.current_skill_snapshot()
+        assert [entry.to_ref() for entry in snapshot.packages] == [reference]
+        result = SkillSearchTool(agent).execute({
+            "action": "get", "package_id": "story-a", "resource_path": "methods/SKILL.md",
+        })
+        assert result.ok, result.output
+        page = json.loads(result.output)
+        assert page["body"].encode() == b"story-a" and page["has_more"] is False
+        assert page["source_ref"] == {
+            **reference, "resource_path": "methods/SKILL.md",
+            "resource_sha256": hashlib.sha256(b"story-a").hexdigest(),
+        }
+        denied = SkillSearchTool(agent).execute({"action": "get", "package_id": "story-b"})
+        assert not denied.ok
+    finally:
+        restore_current_subagent_context(agent, previous)
+    repeated = ResolveCapabilityRequestsTool(agent).execute(params)
+    assert repeated.ok, repeated.output
+    assert json.loads(repeated.output)["resolved"] == []
+    assert [item.id for item in agent.subagents.load(child.id).capability_grants] == [grant.id]
+
+
+def test_package_request_mixed_with_tool_is_not_partially_auto_granted(tmp_path):
+    agent, _store, _entries = _agent(tmp_path)
+    child, request = _child_package_request(agent, "capability:story-a", requested_tools=["write_file"])
+    assert "write_file" not in child.allowed_tools
+    report = agent.subagents.capability.route_capability_requests(
+        agent.capability_router, apply=True, run_ids=[child.id],
+    )
+    pending = agent.subagents.load(child.id)
+    assert report.records[0].status == "PARENT_RESOLUTION_REQUIRED"
+    assert pending.capability_requests[0].id == request.id
+    assert pending.capability_requests[0].status == "OPEN"
+    assert pending.capability_grants == [] and pending.capability_gaps == []
+    assert pending.allowed_skills == [] and pending.allowed_tools == child.allowed_tools
+
+
+def test_unknown_package_request_can_be_denied_after_grant_is_rejected(tmp_path):
+    agent, _store, _entries = _agent(tmp_path)
+    child, request = _child_package_request(agent, "capability:missing")
+    report = agent.subagents.capability.route_capability_requests(
+        agent.capability_router, apply=True, run_ids=[child.id],
+    )
+    assert agent.subagents.load(child.id).capability_requests[0].status == "OPEN", report.records[0].status
+    params = {"run_id": child.id, "request_id": request.id, "decision": "grant", "reason": "核对当前可用方法"}
+    result = ResolveCapabilityRequestsTool(agent).execute(params)
+    assert not result.ok
+    assert json.loads(result.output)["resolved"] == []
+    current = agent.subagents.load(child.id)
+    assert current.capability_requests[0].status == "OPEN"
+    assert current.capability_grants == [] and current.allowed_skills == []
+    denied = ResolveCapabilityRequestsTool(agent).execute({**params, "decision": "deny", "reason": "当前没有这个包"})
+    assert denied.ok, denied.output
+    current = agent.subagents.load(child.id)
+    assert current.capability_requests[0].status == "CLOSED"
+    assert current.capability_grants == [] and current.allowed_skills == []
+
+
+def test_bare_package_name_is_not_implicitly_converted_to_package_grant(tmp_path):
+    agent, _store, _entries = _agent(tmp_path)
+    child, request = _child_package_request(agent, "story-a")
+    result = ResolveCapabilityRequestsTool(agent).execute({
+        "run_id": child.id, "request_id": request.id, "decision": "grant", "reason": "核对明确申请的身份",
+    })
+    assert not result.ok
+    current = agent.subagents.load(child.id)
+    assert current.capability_requests[0].requested_skills == ["story-a"]
+    assert current.capability_requests[0].status == "OPEN"
+    assert current.capability_grants == [] and current.allowed_skills == []
+    assert task_skill_references(current) == []

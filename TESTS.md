@@ -1,5 +1,14 @@
 # 测试与发布验收
 
+## C17显式包申请组件链（2026-09-27）
+
+- 真实隔离安装/创建/申请组件先证明旧产品5例4失败1通过：合法包申请在无候选及真实包卡命中时均提前GAP，未知包也提前GAP，混合申请只授工具却GRANTED；裸包名不会自动变成包授权。
+- 修复仅在原owner路径判断之后，将含`capability:`引用的请求保留OPEN/PARENT_RESOLUTION_REQUIRED；原父级resolve负责快照解析、完整ref与canonical grant。两个模型参数说明明确包stable_id和批量item.allowed_skills，不新增配置、权限账、首请求marker或兼容别名。
+- `.venv/bin/python -m pytest agent_py_agent/tests/test_capability_package_task_refs.py agent_py_agent/tests/test_agent/test_subagent_action_and_route.py agent_py_agent/tests/test_subagent_capability_request_tool.py agent_py_agent/tests/test_resolve_capability_requests_tool.py agent_py_agent/tests/test_capability_auto_grant.py agent_py_agent/tests/test_orchestration_tool_specs.py agent_py_agent/tests/test_manager_runner_capability_requests.py -q --tb=short`：最终111项通过，0失败/错误/跳过，15.315秒。使用原checkout的Python 3.12 venv、当前工作树源码与隔离home，无真实模型或Gateway。
+- 新合法链已走到父级grant、七字段引用、孩子同代私有方法get和重复resolve无重复授权；混合申请不局部结清，未知包批准失败后可deny关闭。测试前后源码指纹一致。
+- 私有`candidate-17-package-request-focused-02.json/.xml/.log`保留最终准确命令与指纹，日志SHA256为`e9e93bf6ce99e361311c2f70ba62d9ecf3e7ce0c72664f23da96aebf4f90392e`。旧红例及首轮绿验另存，不覆盖。独立末审无阻断，明确mixed仅验自动路由、原search仍运行、批量顶层默认值保持；澄清参数说明后重跑上述最终111项。严格gate首轮仅doc-sync要求补模块结构文档，补齐后通过；Ruff、strict-size（hard=0）、diff和clean-package通过，最终组合记录为candidate-17-package-request-strict-02.json，生成的size报告恢复原字节。线上CI未作为依据，原G05和最终0/27不改判。
+- 建议下一步：固定补片交Claude集成，与其Compact修复可并行；root在新固定运行版本做一次原生委派复验，再进入最终矩阵。
+
 ## C17子代理资料路径异常隔离（2026-09-27）
 
 - G05首子请求被长input_refs的ENAMETOOLONG中断，原始失败及包授权缺项见[验收记录](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#c17并发资料交接与输入引用修复2026-09-27)。本地旧builder用临时文件及超长引用再次复现，没有真实模型或运行环境操作。

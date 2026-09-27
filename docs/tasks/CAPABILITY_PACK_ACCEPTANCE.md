@@ -1,5 +1,19 @@
 # 能力内化：来源盘点与验收矩阵
 
+## C17显式包申请回到原父级裁决（2026-09-27）
+
+G05后的独立组件复现确认：即便使用合法`capability:story-a`，语义无命中或真实包卡已命中都会提前GAP；混合write_file申请则仅授工具却GRANTED。5例旧4失败1通过；裸包名不转换为包引用的原行为保持。这不是原生G05的追加需求或替被测模型补授权。
+
+产品在原owner路径判断之后保留含包引用的整条OPEN申请，复用PARENT_RESOLUTION_REQUIRED交原直属父级resolve。父级按当前快照生成原七字段引用并写canonical grant；未知包批准失败后可deny，混合申请不部分自动结清。schema同步明确包stable_id与批量item.allowed_skills，不改变安装账、快照持久化或首请求资格。
+
+完整7文件最终111项通过，0失败/错误/跳过，15.315秒，源码前后指纹相同；合法链已实际执行原创建、孩子申请、自动route、父级grant、同代私有get及重复resolve。私有最终证据为candidate-17-package-request-focused-02.json/.xml/.log，准确命令见[测试记录](../../TESTS.md#c17显式包申请组件链2026-09-27)。这是组件证据，无真实模型/Gateway；私有运行仍51dac，G05原失败和最终0/27保持。
+
+独立末审无阻断，三项边界保留：mixed用例只验证自动路由不部分结清，未动态覆盖混合授予后的执行；原search/选候选仍会运行；批量顶层allowed_skills仍可作为未单列项的默认值，说明已澄清。组件证据不代替真实父子唤醒闭环。
+
+本地严格gate已通过：首轮doc-sync缺模块结构文档，补齐后复核通过；其余Ruff、strict-size、diff和clean-package通过，线上CI未作为依据。无新配置或重要文件结构，故不改YAML/dataclass或CODEBASE_TREE。
+
+建议下一步：root固定提交交Claude；Claude的Compact修复可并行。组合固定版本后先做原生委派复验，再推进27次最终矩阵，主线推送部署由Claude唯一负责。
+
 ## C17并发资料交接与输入引用修复（2026-09-27）
 
 G05在固定51dac、A0.3.0/B0.1.4和默认262144窗口的新原生CAP02仅提交一次普通资料交接需求。请求`gwreq-1790525978-c5ad82927ef04546841a8e165c8990f1`约160.91秒结束，29 HTTP/0重试；父级先派三子，首检查程序子失败后自行替换一子。

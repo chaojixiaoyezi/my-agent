@@ -92,6 +92,8 @@ refs。用户可以通过 `/status` 和 TUI 看，恢复器可以读，模型也
 
 ## capability 阻塞与续跑
 
+`requested_skills`中的显式`capability:<package_id>`使用既有包命名域。自动路由完成原owner路径判断后，保持整条OPEN并返回PARENT_RESOLUTION_REQUIRED，等待原直属父级resolve；包含工具的混合申请也不能局部自动结清。父级当前快照与原grant持久化仍决定实际授权，前缀不是批准事实。未知包可拒绝收口，裸包名不自动转包引用，重复裁决不重复授予。创建时可通过各item.allowed_skills指定包，未单列项沿用顶层默认列表，goal/input_refs不产生权限。
+
 OPEN 或非法未闭合 capability request 是宿主掌握的结构化阻塞事实，优先于 provider 的普通
 `turn_end=completed`：本轮 child 必须保持 `BLOCKED/UNVERIFIED`，不能因为模型结束了这一轮就变成
 `DONE`。直属父级 grant 或 deny 后，宿主把同一个 run 重排为 `PENDING`、恢复 conversation link，并由

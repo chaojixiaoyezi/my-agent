@@ -1,5 +1,5 @@
-# LLM: 参数说明只补充工具级规则；嵌套 role 复用顶层索引，产物线索不是权限，不指定已废弃的固定输出目录。
-# 模块用途: 集中保存派工参数与示例；瘦身时保留 exact covers、模型选择、角色和工作区含义。
+# LLM: 参数说明只补充工具级规则；嵌套 role 复用顶层索引，包引用经 allowed_skills 解析，不从资料线索推断授权。
+# 模块用途: 集中保存派工参数与示例；保留 exact covers、模型、角色、工作区和显式包授权含义。
 
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ _CREATE_PARAMETERS = {
     "effort": "可选智能程度（推理强度）：auto 服务商默认、off 关闭思考、low/medium/high/max。省略继承当前会话的档位；只影响新建 child",
     "tool_preset": "工具预设；通常省略。有效值：coding/read_only/none",
     "allowed_tools": "工具偏好提示；通常省略，基础读写工具会自动补齐",
-    "allowed_skills": "可选；只把当前 owner Skill 快照中点名的技能授权给子代理",
+    "allowed_skills": "可选；把当前快照中点名的 Skill 或能力包授权给子代理；包用 capability:<package_id>",
     "plan": "子代理初始步骤",
     "input_refs": "交给子代理读取的文件、URL 或 artifact refs",
     "output_files": "可选目标产物，用于交付归属和协调提示；不是权限、完整写集或机器锁，提供时必须位于当前 workspace，同批可共享父级 task root",
@@ -60,7 +60,11 @@ _CREATE_PARAMETER_DETAILS = {
     "effort": "仅当用户要求或任务明显需要不同思考深度时填写（例如简单检索用 low、难题用 max）。宿主按模型实际支持的方式换算，模型不支持时按服务商默认运行；每个 item 可分别选择，子孙默认继承直接父级。",
     "tool_preset": "省略时自动；coding 给基础读写工具；read_only 只给读取/搜索/查看工具；none 只表示不覆盖自动策略。",
     "allowed_tools": "一般省略；不完整列表不会剥夺子代理基础读写能力。",
-    "allowed_skills": "可选 Skill 名称或 stable_id 列表；创建时会解析为不可变快照引用，未知或禁用项整批拒绝。",
+    "allowed_skills": (
+        "可选 Skill 名称或 stable_id 列表；能力包使用 capability:<package_id>。"
+        "批量派工可填各 item.allowed_skills，未单列时沿用顶层默认值；goal 或 input_refs 中提及包不等于授权。"
+        "创建时解析为不可变快照引用，未知或禁用项整批拒绝，包内资源仍按需私有读取。"
+    ),
     "input_refs": "这是交给子代理的资料线索；单个子代理自己的输入放在对应 item.input_refs。",
     "output_files": (
         "可选；用户明确保存路径时用于保留交付身份与协调线索。它不是权限、完整写集或创建前置条件，"
