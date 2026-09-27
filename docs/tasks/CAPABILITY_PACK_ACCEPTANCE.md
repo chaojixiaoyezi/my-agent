@@ -1,5 +1,33 @@
 # 能力内化：来源盘点与验收矩阵
 
+## C17固定发布与原生开发验收（2026-09-27）
+
+固定源码`51dac1b815acf74a76fa79ef7f93f2f4228b3d4b`已由Claude双机部署step13w。本线核对12份原始分片日志23639 passed、0 failed/0 errors（另21 skipped、32 xfailed、5 xpassed）及本地严格gate，通过部署日志和本机发行清单核对版本；线上CI未作为依据，本轮未另做远端在线健康探测。私有环境1430成员与固定源码/wheel/安装一致，安装和回退依据见[测试记录](../../TESTS.md#c17能力包组合证据核对2026-09-27)。
+
+以下三例均为开发对照，不计最终27次验收，不能跨例拼成同任务端到端通过。
+
+| 对照 | 已证实 | 失败或未覆盖 |
+| --- | --- | --- |
+| G02，65536窗口 | 自动第1代77724→47484提交，同代6次包资源get，pins/marker保持 | 第2代51342超过49152，`COMPACT_CANDIDATE_TOO_LARGE`；整体失败，未执行原checker |
+| G03，默认262144窗口 | 普通任务空选、无包pins/私有入口/资源消费；一次辅助选择1132 tokens | 三项行动和期限正确但漏两位负责人，业务质量失败；目录独占token及净增成本未测 |
+| G04，默认262144窗口 | 原程序经source_ref同字节复制并执行；输入、pins及配置保持；1 error/8 warnings忠实报告 | 交接字段与限制错误，保存JSON值相等但字节不等；generation0，未观察Compact |
+
+G02的summary_tokens=1091是摘要单独估算，retained_items=0只指工具归档保留记录；不能把完整候选减摘要当实测fixed_tokens，也不能从其它代次重建未持久的失败投影。Claude已确认该边界，负责真实固定请求及分项计量，后续固定修复按新候选复验。
+
+G04原生CAP04请求`gwreq-1790521474-88bbf0baf77b4a7091ad76b04891c266`、线程`thread-1d256df7181742b5`，一次普通需求后275.085秒自然终态；request/task/run/attempt均done。40对原生工具调用/结果含19次包资源get和10次内部read_artifact，后者不再写外层归档索引。原检查器23750字节，摘要`8a5948aec5cf3ad67057cd067ea43164c2be1dcc61df3758e9b2ba3007c07788`与固定包一致，真实rc1来自输入SH06.source_ids未知引用；不能把检测出错误误判成检查器未执行。operation_verification仍partial（2 failed、5 succeeded、0 unknown），没有改写命令结果。
+
+独立内容审阅确认：交接把B的reference_ids误当A源字段、将镜头人物字段写成场次character_ids、把所有空数组称为未填，并遗漏B部分运行限制。镜头ID与场次外键的映射歧义在B原方法也存在，不能全部归为本轮模型或宿主新造。原stdout1429字节、保存JSON1320字节，解析值相等但非逐字节原样。观察者未补写本次产物或执行业务检查器；领域内容缺项不转化为专项宿主门。
+
+G04的21 HTTP/0重试为20 main+1 auxiliary，辅助1177 tokens；总1571471含1399718 cached input，不二次相加或声称净增成本。最后上下文估算114457/262144，本轮无自动Compact，因此不能替代65k失败。官方模型配置和实际MiniMax-M2.7后端已核，没有逐次HTTP端点抓包证据。
+
+| 冻结证据（私有文件名） | SHA256 |
+| --- | --- |
+| candidate-17-general-default-long-observation.json | `13daf55b750b7fabeb1b1e49995fca170c66d7751a462442691680c528ea9a98` |
+| candidate-17-general-default-long-content-review.json | `6520859774b96ae57c8826ae41c0c8a6be9ce2a95e70eb303049c51210879177` |
+| candidate-17-general-default-long-content-review.md | `58f3fc44e262ad9c166157f72f3cbc8f123b193543a73604b9b2f86d227b905a` |
+
+建议下一步：Claude收口通用Compact计量和修复，root核固定版本、复验压缩后执行并推进最终27次允许范围验收；独立只读审阅可并行，主线部署由Claude负责。原0/36历史、当前0/27及全部旧失败保持，其余9次按当前范围不启动。以下历史节保留原版本与时点，不能以旧“待发布”覆盖当前发布事实。
+
 ## C16全仓回归修复（2026-09-27，本地组件通过）
 
 原62c全仓23288项中86 failures/0 errors/53 skipped保留，按74项创建、10项后台绑定、1项错误登记、1项进程停止分类。配置作者补片6fa精确吸收为2e4b9f606，其余补片在本线独占范围完成；本项不是全仓通过或能力包发布证明。

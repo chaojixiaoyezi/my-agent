@@ -5,7 +5,7 @@
 | 包 | 当前源码版本 | 特点 | 交付与边界 |
 | --- | --- | --- | --- |
 | `drama-text-a` | `0.3.0` | 原文改编及成稿人物依据回填 | 文本方案、来源/时长声明及具名覆盖警告；不判在场或媒体 |
-| `drama-workflow-b` | `0.1.3` | 五类制作资料的结构和交接 | 跨表关系、分集时长与静态报告；不具备上游全部报告交互 |
+| `drama-workflow-b` | `0.1.4` | 五类制作资料的结构和交接 | 跨表关系、分集时长与静态报告；不具备上游全部报告交互 |
 | `security-evidence` | `0.1.0` | 范围明确的既有证据整理 | 证据摘要、来源去重、发现引用和待复核报告；不扫描、不验证漏洞 |
 
 `CAPABILITY.md` 是包入口。`methods/`、`templates/`、`resources/`、`scripts/` 只属于本包；三个包都有 `methods/review.md`，内容各不相同，不能按裸文件名覆盖。
@@ -28,11 +28,11 @@
 ## 当前来源与交接检查候选
 
 A0.3.0 的交付/报告显式升为 `drama_text_delivery.v3` / `drama_text_check.v3`，保留逐镜依据/改编/未知，增加显式代称与可见/画外声明；只诊断成稿字面覆盖，不判原文语义、真实在场或持物因果。新脚本不自动补旧v1/v2。具体方法、预算与未检查语义见[人物依据](drama-text-a/methods/visible-characters.md)，来源改写和缺项见[来源说明](drama-text-a/PROVENANCE.md#030-修订范围)。
-B0.1.3 的交接格式为 `drama_workflow_handoff.v2`，使用明确的文件编号、JSON Pointer、对象编号及阶段范围。
+B0.1.4 沿用0.1.3的 `drama_workflow_handoff.v2`，使用明确的文件编号、JSON Pointer、对象编号及阶段范围；本次仅澄清场次/镜头自身 ID 与镜头场次外键的映射，脚本、格式和模板不变。
 `--handoff` 与重复的 `--input-file FILE_ID=PATH` 显式提供验证对象；交接文件中的路径不能自行触发文件读取。
 只有项目检查时，报告明确交接未检查；存在并有摘要不证明对象映射或故事连续性正确。
 
-上述版本已有私有原生安装记录，组件通过、入口采用、原脚本执行与领域质量仍分别记账；旧失败证据保持原版本，完整发布状态以验收矩阵为准。
+A0.3.0与B0.1.3已有私有原生使用记录；B0.1.4已通过原生TUI热更新安装启用，新版本的模型采用尚未验证。组件通过、安装管理、入口采用、原脚本执行与领域质量仍分别记账；旧失败证据保持原版本，完整发布状态以验收矩阵为准。
 
 ## 构建
 
@@ -40,7 +40,7 @@ B0.1.3 的交接格式为 `drama_workflow_handoff.v2`，使用明确的文件编
 
 ```bash
 python3 scripts/build_capability_package.py --declaration examples/capability-packages/drama-text-a/declaration.json --files-root examples/capability-packages/drama-text-a --output /tmp/drama-text-a-0.3.0.zip
-python3 scripts/build_capability_package.py --declaration examples/capability-packages/drama-workflow-b/declaration.json --files-root examples/capability-packages/drama-workflow-b --output /tmp/drama-workflow-b-0.1.3.zip
+python3 scripts/build_capability_package.py --declaration examples/capability-packages/drama-workflow-b/declaration.json --files-root examples/capability-packages/drama-workflow-b --output /tmp/drama-workflow-b-0.1.4.zip
 python3 scripts/build_capability_package.py --declaration examples/capability-packages/security-evidence/declaration.json --files-root examples/capability-packages/security-evidence --output /tmp/security-evidence.zip
 ```
 
