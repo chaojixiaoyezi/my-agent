@@ -446,6 +446,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 额外可写根（沙箱写边界扩展）：任务 work/output 之外的目录也允许模型写入。
     # 会话运行时 对应 sandbox_workspace_write.writable_roots；测试/用户可配置共享工作区。
     additional_write_roots: list[str] = field(default_factory=list)
+    # 管理员 Full Access 时提示词里给出的自身开发工作树（空=不启用）；只是工作约定，不授予写权限。
+    self_dev_worktree: str = ""
     enable_subagents: bool = True
     subagent_mode: str = "trusted_local_hardening"
     # 当前根会话树可同时保留的未结束子代理数；不同 TUI/根任务互不占槽。

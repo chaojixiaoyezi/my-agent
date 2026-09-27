@@ -1,5 +1,13 @@
 # 测试与发布验收
 
+## 参数中心阶段 2b：管理员自身开发工作树约定（2026-09-27，分支 `claude/self-dev-worktree`，基于 main `c9142d09a`）
+
+- `test_prompting_builder.py` 新增 6 项：本机管理员 + Full Access + 真实 git 工作树时 Owner Scope 写明正在运行的包目录与开发工作树；
+  非 Full Access、远程 owner、没有 `.git`、相对路径、未配置五种情况都不出现这段。
+- `test_parameter_registry.py`：`self_dev_worktree` 是边界项，模型不能改（键名记号新增 `worktree`）。
+- 变异验证：分别去掉 Full Access、管理员、`.git`、绝对路径四个条件，各自被对应用例抓住（相对路径用例把 cwd 切到临时目录，
+  否则会被 `.git` 检查顺带挡掉，测不到绝对路径条件）。
+
 ## 直接展示工具结果只保留逻辑续读锚点（移植自 Codex b496e1a0c，2026-09-27，基于 main `49b169e3e`）
 
 - 只移植 `agent_core/tool_context/reducer.py` 与 `test_tool_context_reducer.py`（及两份能干净应用的设计/结构文档）；能力包原生管线测试和包文档

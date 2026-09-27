@@ -176,6 +176,46 @@ class TestPromptBuilderInit:
         assert "默认优先只读" in rendered
         assert "只修改用户明确要求的范围" in rendered
         assert "不限制外部网络" in rendered
+        assert "# my-agent 自身代码" not in rendered
+
+    def test_full_access_admin_is_told_running_code_and_dev_worktree(self, tmp_path):
+        worktree = tmp_path / "my-agent-self"
+        worktree.mkdir()
+        (worktree / ".git").write_text("gitdir: /repo/.git/worktrees/my-agent-self\n", encoding="utf-8")
+        builder = PromptBuilder(
+            AgentConfig(prompt_files=[], access_mode="full-access", self_dev_worktree=str(worktree)),
+            tmp_path,
+            home_paths=SimpleNamespace(owner_provider="local", owner_kind="main", owner_id="main"),
+        )
+
+        rendered = builder.build(user_prompt="修一下你自己的 bug", memories=[])
+
+        assert "# my-agent 自身代码" in rendered
+        assert f"开发工作树: {worktree}（" in rendered
+        running = Path(__file__).resolve().parents[1]
+        assert f"正在运行的代码: {running}。" in rendered
+        assert "不推送远端" in rendered and "user_config" in rendered
+
+    @pytest.mark.parametrize("case", ["workspace_write", "remote_owner", "not_git", "relative", "unset"])
+    def test_dev_worktree_guide_needs_admin_full_access_and_real_worktree(self, tmp_path, monkeypatch, case):
+        monkeypatch.chdir(tmp_path)  # 相对路径能在 cwd 下找到 .git，只剩“必须是绝对路径”这一条能拒绝它。
+        worktree = tmp_path / "my-agent-self"
+        worktree.mkdir()
+        if case != "not_git":
+            (worktree / ".git").mkdir()
+        configured = {"relative": "my-agent-self", "unset": ""}.get(case, str(worktree))
+        access = "workspace-write" if case == "workspace_write" else "full-access"
+        provider = "feishu" if case == "remote_owner" else "local"
+        builder = PromptBuilder(
+            AgentConfig(prompt_files=[], access_mode=access, self_dev_worktree=configured),
+            tmp_path,
+            home_paths=SimpleNamespace(owner_provider=provider, owner_kind="main", owner_id="main"),
+        )
+
+        rendered = builder.build(user_prompt="继续", memories=[])
+
+        assert "# my-agent 自身代码" not in rendered
+        assert "开发工作树" not in rendered
 
 
 def test_strip_empty_markdown_sections_keeps_real_persona_entries() -> None:

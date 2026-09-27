@@ -25,7 +25,7 @@ _BOUNDARY_TOKENS = frozenset({
     "secret", "token", "password", "encrypt", "credential", "credentials", "cookie", "cookies", "key", "keys", "env",
     "sandbox", "permission", "permissions", "approval", "approvals", "auth", "admin", "owner", "access", "trusted",
     "dangerous", "allowed", "allow", "deny", "denied", "root", "roots", "dir", "dirs", "path", "paths", "home",
-    "workspace", "workspaces", "command", "commands", "server", "servers", "plugin", "plugins", "extension",
+    "workspace", "workspaces", "worktree", "worktrees", "command", "commands", "server", "servers", "plugin", "plugins", "extension",
     "extensions", "proxy", "host", "hosts", "port", "endpoint", "url", "urls", "network", "egress", "expose", "listen",
     "header", "headers", "webhook", "callback", "app", "provider", "prompt", "prompts", "instruction", "audit", "lock",
 })

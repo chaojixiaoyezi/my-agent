@@ -43,7 +43,15 @@
 
 ## 5. my-agent 改代码的权限（阶段 2）
 
-给 my-agent 一个专用开发工作树（独立分支），经 `additional_write_roots` 授权写入：它可以改代码、跑测试、提交到自己的分支；由集成者审核、合并、部署。推送主线与双机部署仍只由集成者负责，避免三方同时写主线。
+- **写权限不用新做**：按 owner 的管理员授权早已存在，就是 F4 的 Full Access（存于该 owner 的 `tool_policy.json`，只有结构化
+  local/main 能选；飞书私聊用 `/admin` 绑定后也按 local/main 运行）。它解除 owner 墙，子代理仍降回 WorkspaceOnly。
+  `additional_write_roots` 是全局配置，对所有 owner 生效，不用于这件事。
+- **缺的是“去哪改、改完交给谁”**：my-agent 曾把检出目录当成自己运行的代码，诊断连错三次。新配置 `self_dev_worktree`（边界项，
+  模型不能改）指向一个独立分支的 git 工作树；本机管理员处于 Full Access 且该目录确是 git 工作树时，Owner Scope 提示词追加
+  “my-agent 自身代码”一段：正在运行的代码位置（包目录，只读参考，部署整体替换）、开发工作树位置、改完跑相关测试并提交到当前分支、
+  告诉用户分支和提交号，由集成者审核合并部署，不推送远端、不切分支、不改其他检出目录；调参数用 `user_config`。这段只是工作约定，
+  不放宽也不收紧写权限（`prompting_parts/builder._self_development_guide`）。
+- 推送主线与双机部署仍只由集成者负责，避免三方同时写主线。
 
 ## 6. 阶段
 
@@ -75,8 +83,9 @@
     凭据类只记脱敏值、不可回滚。生效时机如实为“重启 Gateway 后”（压缩百分比与读文件上限原来误报“下一次会话”），管理员可发 `/restart`。
   - my-agent 的 `user_config` 工具新增 search/reset/history/revert，set 走同一写入口；聊天 `/settings`（TUI 与 IM，仅管理员）
     提供总览、搜索、详情、修改、恢复默认、记录与回滚。
-  - 待做（阶段 2b）：my-agent 开发工作树。`additional_write_roots` 是全局配置，会对所有 owner（包括飞书用户）生效，不能用来只给管理员
-    开写权限；需要按 owner 的结构化授权，再给管理员主代理一个独立分支的工作树，由集成者审核合并部署。
+- **阶段 2b（2026-09-27 已实现）**：开发工作树约定，见 §5。原计划“先做只给管理员的写入授权”核对后发现多余：F4 Full Access 就是
+  按 owner、仅管理员的结构化授权，本机管理员从 9-21 起一直开着。只新增 `self_dev_worktree` 配置与提示词一段；工作树由集成者建在
+  `~/my-agent-worktrees/my-agent-self`（分支 `my-agent/self-dev`，基于 main），本机用户配置填上该路径。
 - **阶段 3（迁移）**：按模块分批迁移常数并改名。每批开工前在协作文件贴出文件清单，避开 Codex 正在改的文件。
 
 ## 7. 验收

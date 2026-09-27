@@ -29,6 +29,7 @@ def test_registry_covers_every_config_field_with_yaml_descriptions():
     *sorted(BOUNDARY_KEYS), "api_base", "model_backend", "memory_embedding_api_base", "system_prompt", "prompt_files",
     "audit_enabled", "enable_tools", "enable_gateway_restart_tool", "additional_write_roots", "mcp_servers",
     "execution_mode", "computer_use_enabled", "concurrency_lock_enabled", "result_check_execute_tests", "config_sources",
+    "self_dev_worktree",
 ])
 def test_security_relevant_keys_are_never_model_writable(key):
     spec = parameter_registry()[key]

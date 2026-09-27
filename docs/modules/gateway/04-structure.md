@@ -975,6 +975,9 @@ Gateway 解析并校验会话 cwd，但不再把 `workspace_task.task_path` 覆�
   WorkspaceOnly；Full 主代理创建 child/grandchild 时重新加 owner 墙，并只保留结构化 task/product 写根。
 - Full 模式下的外部路径意图属于 prompt 软约束：用户明确指定外部目录或系统排障时才离开 owner home；涉及
   其他 owner 必须明确点名，默认先只读、尽量少改。自然语言永远不负责授权，真正裁决只读 owner/config/boundary。
+- 配置了 `self_dev_worktree`（边界项）且本片是 local/main + Full Access、该路径确是 git 工作树时，Owner Scope 追加
+  “my-agent 自身代码”：正在运行的包目录（只读参考）、开发工作树、改完提交到当前分支交集成者合并。子代理继承时降为
+  workspace-write，看不到这段；它同样只是软约束，不改变任何写边界。
 - owner home 内用户文件可正常使用，但 `permissions/quota/retention/policy`、运行账本、Compact 与审计目录作为
   宿主控制面保持只读。每次工具调用复制 request-local handler/path policy，单 Gateway 多 TUI 不共享可变权限。
 

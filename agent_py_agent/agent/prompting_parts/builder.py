@@ -27,6 +27,7 @@ from ..task_progress_guidance import (
     task_progress_closeout_guidance_enabled,
     task_progress_model_discipline,
 )
+from ..user_space.approval_mode import is_permission_admin
 from .cache_layout import CacheStructuredPrompt
 from .memory_context import memory_context_text
 
@@ -192,7 +193,8 @@ class PromptBuilder:
         )
         return render_prepared_prompt(self.prepare_render_input(request))
 
-    # LLM: 这是有读取行为的宿主准备层；保持文件、persona、Skill、时钟的原采集顺序，注入列表复制为元组，纯投影只消费返回值。
+    # LLM: 这是有读取行为的宿主准备层；保持文件、persona、Skill、时钟的原采集顺序（管理员自身开发约定会检查开发工作树是否存在），
+    #   注入列表复制为元组，纯投影只消费返回值。
     # 函数用途: 把原 build 材料和注入边界冻结成值对象，不发请求、不写状态，也不为缺失输入猜造子代理事实。
     def prepare_render_input(self, request: PromptBuildRequest) -> PromptRenderInput:
         _tools = request.tools or ToolSections()
@@ -202,6 +204,8 @@ class PromptBuilder:
         owner_scope = _owner_scope_text(self)
         if home_guide := _home_directory_guide(self):
             owner_scope += "\n\n" + home_guide
+        if self_development := _self_development_guide(self):
+            owner_scope += "\n\n" + self_development
         dynamic = _dynamic_prompt_text(self, request, task_local)
         injection_fragments = tuple(request.inject or ())
         workspace_context = (
@@ -487,6 +491,30 @@ def _home_directory_guide(builder: PromptBuilder) -> str:
         "通过记忆工具检索/维护，不拿运行日志代替长期记忆，也不把普通任务进度写进人格。\n"
         "- runs/、agents/、compact/、data/、logs/ 及权限配置是宿主控制记录，不是项目输出目录；"
         "不要编辑它们绕过运行时。目录用途只是软纪律，实际读写仍服从当前用户权限。"
+    )
+
+
+# LLM: 自身开发约定只给结构化本机管理员（local/main），且本片 access_mode 已由 permission_config 映射为 full-access；
+#   self_dev_worktree 必须是已存在的 git 工作树绝对路径（有 .git），任一不满足返回空串、提示词不变。这里只写工作约定，
+#   写权限仍由 Full Access 的结构化边界裁决，文字不放宽也不收紧；子代理继承时 access_mode 降为 workspace-write，看不到这段。
+#   属于准备层（会 stat 工作树）；改动须同步 agent_config.yaml 的 self_dev_worktree 注释与 test_prompting_builder.py。
+# 函数用途: 告诉管理员主代理正在运行的代码在哪（只读参考）、改自己代码去哪个开发工作树、改完怎么交接，避免读错源码目录。
+def _self_development_guide(builder: PromptBuilder) -> str:
+    config = getattr(builder, "config", None)
+    raw = str(getattr(config, "self_dev_worktree", "") or "").strip()
+    access = str(getattr(config, "access_mode", "") or "").strip().lower().replace("_", "-")
+    if not raw or access != "full-access" or not is_permission_admin(getattr(builder, "home_paths", None)):
+        return ""
+    worktree = Path(raw).expanduser()
+    if not worktree.is_absolute() or not (worktree / ".git").exists():
+        return ""
+    return (
+        "# my-agent 自身代码\n"
+        f"- 正在运行的代码: {_builtin_prompt_root()}。部署会整体替换它，只用来核对当前行为，不在这里改。\n"
+        f"- 开发工作树: {worktree}（独立分支的 git 工作树）。用户要你改 my-agent 自己的功能或修 bug 时在这里改："
+        "先读相关模块、合同和测试，改完跑相关测试（不接管道），提交到当前分支，把分支名和提交号告诉用户，"
+        "由集成者审核、合并和部署。不推送远端，不切换分支，不改其他检出目录。\n"
+        "- 只调参数时用 user_config 工具，不手改配置文件。"
     )
 
 
