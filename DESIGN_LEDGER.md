@@ -807,6 +807,10 @@ auth 表单取消和参数拒绝已验，官方设备码在两处环境被 HTTP 
   `user_config` 搜索结果标出常用；名单在 `parameter_registry.COMMON_KEYS`，是封闭的产品决策。
   回显值文字统一（分支 `claude/9a-mask-value-display`）：`mask_value` 一处根修，user_config 查看/搜索/改参回执、`/settings`、`config get`
   的布尔显示 true/false、数字照实（原来 False、0 给模型的是空串），`/settings` 的特判删除；`test_value_display_parity` 钉住各出口一致。
+  嵌入服务合并（分支 `claude/9a-embedding-merge`）：`tool_embedding_*` 删除、`memory_embedding_*` 改名为 `embedding_*`，记忆语义召回与
+  工具语义检索共用一个嵌入服务，两个开关各管各的；无产品调用方的 `build_embedder(dict)` 删除，`LocalHashingEmbedder` 移到测试 helper。
+  未落地方向：`/model` 目录的 embedding 用途改为引用档案（复用服务商凭据，取代 4 个平铺键）；向量库记录生成模型、不匹配视为不存在并
+  提供重新嵌入（方案待写，重点是没有模型身份的旧 `memory_vectors.json` 怎么处理）。
   详见 [参数中心](docs/design/PARAMETER_CENTER.md)。
 - 已实现并合入 main、待真实飞书验收（2026-09-26，用户决定）：IM 管理员身份与聊天内工具审批。
   以前管理员只有本机 local/main，飞书用户永远是自己的 owner，IM 客户端也无法确认工具，需要确认的操作一律被拒。

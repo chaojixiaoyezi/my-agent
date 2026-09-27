@@ -136,7 +136,7 @@ def test_registry_covers_every_config_field_with_yaml_descriptions():
 
 
 @pytest.mark.parametrize("key", [
-    *sorted(BOUNDARY_KEYS), "api_base", "model_backend", "memory_embedding_api_base", "system_prompt", "prompt_files",
+    *sorted(BOUNDARY_KEYS), "api_base", "model_backend", "embedding_api_base", "system_prompt", "prompt_files",
     "audit_enabled", "enable_tools", "enable_gateway_restart_tool", "additional_write_roots", "mcp_servers",
     "execution_mode", "computer_use_enabled", "config_sources",
     "self_dev_worktree", "protect_running_runtime",
@@ -182,7 +182,7 @@ _NUMERIC_KNOBS = [
     "gateway_service_command_timeout_seconds", "owner_agent_idle_seconds", "owner_agent_pool_max_agents",
     "owner_maintenance_scan_interval_seconds",
 ]
-_CREDENTIALS = ["api_key", "memory_embedding_api_key", "tool_embedding_api_key", "gateway_auth_token", "feishu_app_secret",
+_CREDENTIALS = ["api_key", "embedding_api_key", "gateway_auth_token", "feishu_app_secret",
                 "feishu_verification_token", "feishu_encrypt_key", "qq_app_secret"]
 
 

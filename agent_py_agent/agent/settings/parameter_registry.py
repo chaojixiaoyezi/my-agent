@@ -65,7 +65,8 @@ COMMON_KEYS = (
     "timezone", "tui_mouse_capture_default",
 )
 _CATEGORIES = (
-    (("max_tokens", "model_", "temperature", "top_p", "request_timeout", "stream_", "reasoning_", "anthropic_"), "模型请求"),
+    (("max_tokens", "model_", "temperature", "top_p", "request_timeout", "stream_", "reasoning_", "anthropic_", "embedding_"),
+     "模型请求"),
     (("memory_", "compact_"), "记忆与压缩"),
     (("decision_",), "决策模型 Jev"),
     (("tool_", "shell_", "web_", "read_", "write_"), "工具"),

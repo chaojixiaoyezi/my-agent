@@ -79,7 +79,7 @@ def test_search_at_scale_stays_correct_and_fast(tmp_path) -> None:
     """千级规模:暴力 cosine 仍把目标顶第一、延迟可接受——验证"百~千条够用,不必上 ANN"的设计判断。"""
     import time
 
-    from agent_py_agent.agent.retrieval.embedding import LocalHashingEmbedder
+    from agent_py_agent.tests._hashing_embedder import LocalHashingEmbedder
 
     emb = LocalHashingEmbedder(dim=256)
     vs = VectorStore(tmp_path / "v.json")

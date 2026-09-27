@@ -118,7 +118,7 @@
   - 凭据判定只有一处：`user_config_capability.is_credential_key`，键名等于凭据名或以 `_api_key/_secret/_password/_token/_cookie(s)/
     _credential(s)/_encrypt_key` 结尾才算（完整片段，不按子串）。登记表 `is_masked`、`mask_value`（/settings、user_config 回显）与
     命令行 `config-get` 都用它。复核时发现比误伤更严重的问题：原 `mask_value` 只认 3 个飞书键，`api_key`、`gateway_auth_token`、
-    `qq_app_secret`、两个 `*_embedding_api_key` 在 `/settings show` 与 user_config 查看里是明文；`config-get api_key` 也明文打印。
+    `qq_app_secret`、两个 `*_embedding_api_key`（现已合并为 `embedding_api_key`）在 `/settings show` 与 user_config 查看里是明文；`config-get api_key` 也明文打印。
     `input_media_token_reserve`（token 是计数单位）不再算凭据：原来它被判为边界，修改记录还标成凭据、不能回滚。
   - 边界记号分两类：凭据、权限审批、管理员、访问与信任名单、网络与外部地址、端口、请求头回调、环境变量、锁仍对所有参数生效；
     指向类记号（路径与目录、身份、服务与插件、提示词、审计、令牌与键）只对文本、列表、开关类参数生效——整数和小数只是上限、
@@ -220,6 +220,25 @@
       `0` = 不重跑；临时供应失败仍按 `provider_transient_redispatch_limit` 取大。放 AgentConfig 而不是守卫文件：守卫文件只从
       随包路径读、部署会覆盖、`/settings` 与 `user_config` 看不到。原来 `1` 被当成“不重跑”、`off`/`0` 实际还会重跑一次，现统一。
     - YAML 里 `key:` 留空会读成 `[]`：整数旋钮与温度都按“没填”处理，不再每次启动告警。
+  - **参数减量：嵌入服务合并与改名（2026-09-27，集成者派活，分支 `claude/9a-embedding-merge`）**：记忆语义召回与工具语义检索
+    共用一个嵌入服务。`tool_embedding_model/api_base/api_key/api_key_env` 删除；`memory_embedding_*` 改名为 `embedding_*`
+    （模型、端点、key、key 的环境变量名），参数中心归到“模型请求”，安全等级不变（模型可在聊天里改，端点、key、key 环境变量名是边界）。
+    两个功能开关保留、各管各的：`memory_semantic_recall` 只管记忆召回，`tool_vector_search_enabled`（默认开）只管工具检索。
+    旧键只告警并忽略，不留别名、不自动转值；错误码 `MEMORY_EMBEDDING_MODEL_MISSING/INIT_FAILED` 不改名（描述的是语义记忆功能的状态）。
+    - 读取链：`core._embedding_client` 是唯一构建入口（`embedding_model` 空 = 不建客户端、不发请求；`embedding_api_base` 空沿用
+      `api_base`；key 链 `embedding_api_key` > `embedding_api_key_env` 指向的环境变量 > 聊天 key）；`_build_memory_embedder` 与
+      `_build_tool_embedder` 只各自判断开关。原 `tool_embedding_*` 是逐字段覆盖、空则回落 `memory_*`，所以没配过它们的部署行为不变。
+    - 行为变化只有两种：配过 `tool_embedding_*` 且与记忆那组不同的，工具改用共享服务（工具向量只在进程内存里，重启即重建，无数据迁移）；
+      迁移时如果 `memory_semantic_recall` 已开而记忆模型为空（当前降级为关键词），把工具的模型搬进 `embedding_model` 后记忆召回会从降级
+      变成可用，并开始写 `memory_vectors.json`（集成者确认接受：用户本来就开了语义召回）。
+    - 部署迁移规则（每个实际加载的用户配置与运行时配置层文件）：`memory_embedding_X` 改名为 `embedding_X`、值原样搬；记忆召回在用
+      （开关开且模型非空）时以记忆的值为准，直接删 `tool_embedding_*`，不能把工具的模型搬进共享键——`memory_vectors.json` 不记录生成
+      模型、只有维度守卫，同维度换模型会静默混用向量空间；记忆召回没在用时，`tool_embedding_X` 非空就逐字段覆盖共享键再删。
+      2026-09-27 核查（只看计数）：本机与测试机在用配置都没设这 10 个键，本次部署无需迁移。
+    - 同批清理：`retrieval/embedding.build_embedder(dict)`、`_resolve_api_key` 没有产品调用方，删除；`LocalHashingEmbedder` 只被测试
+      当确定性替身，原样搬到 `tests/_hashing_embedder.py`。回归见 `test_embedding_service.py`（此前 `_build_tool_embedder` 没有测试）。
+    - 未落地方向：`/model` 目录已有 `embedding` 用途但没有运行时消费者，长期可改为引用档案（复用服务商凭据，4 个平铺键收成 1 个引用）；
+      向量库记录生成模型、不匹配的向量视为不存在并提供重新嵌入，方案另写。
 
 - **减量第一批（2026-09-27，分支 `claude/38-delete-dead-config`，已合入 main `8f73a512c`，双机 step13s）**：按分类结论逐项复核后删除 43 个没有产品读取方的配置项
   （只在 `settings/config.py`、随包 YAML、归一化表或字段规格表里出现，或只被孤儿模块/测试/离线验收入口读取）。同批处理：

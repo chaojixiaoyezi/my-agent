@@ -135,9 +135,6 @@
         "subagent_spawn_default_count",
         "subagent_takeover_chain_max_depth",
         "tool_context_microcompact_min_chars",
-        "tool_embedding_api_base",
-        "tool_embedding_api_key",
-        "tool_embedding_api_key_env",
         "tool_output_externalize_on_low_headroom",
         "tool_output_preview_chars",
         "week_start"

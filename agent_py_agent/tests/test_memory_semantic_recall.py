@@ -10,7 +10,7 @@ from __future__ import annotations
 import threading
 
 from agent_py_agent.agent.memory_store.jsonl import JsonlMemory
-from agent_py_agent.agent.retrieval.embedding import LocalHashingEmbedder
+from agent_py_agent.tests._hashing_embedder import LocalHashingEmbedder
 
 
 def test_no_embedder_is_pure_keyword(tmp_path) -> None:
@@ -136,7 +136,7 @@ def test_build_memory_embedder_gating(tmp_path) -> None:
     assert _build_memory_embedder(AgentConfig()) is None  # 默认关 → None
     assert _build_memory_embedder(AgentConfig(memory_semantic_recall=True)) is None  # 开但没配 model → None
     embedder = _build_memory_embedder(
-        AgentConfig(memory_semantic_recall=True, memory_embedding_model="text-embedding-3-small")
+        AgentConfig(memory_semantic_recall=True, embedding_model="text-embedding-3-small")
     )
     assert embedder is not None  # 开 + 配 model → 建出 embedder
 

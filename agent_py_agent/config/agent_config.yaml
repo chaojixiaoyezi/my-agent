@@ -132,12 +132,8 @@ memory_hot_min_occurrences: 3
 auto_save_memory: true
 # 记忆语义召回（检索拓宽 #1，默认 false=现状纯关键词）：开后记忆召回在关键词外加一路语义向量召回、
 # RRF 融合，治"换词就召不回"。向量只存各 owner 自己 home 本地文件（零依赖、不碰共享向量库、按用户隔离）。
-# 需配 memory_embedding_model（走 agent 同款 api 端点）；没配自动只走关键词，不崩不退化。
+# 需配嵌入服务 embedding_model（见“嵌入服务”一节，与工具语义检索共用）；没配自动只走关键词，不崩不退化。
 memory_semantic_recall: false
-memory_embedding_model: ""  # embedding 模型名；embo* 自动走 MiniMax 原生协议（texts/type/vectors）
-memory_embedding_api_base: ""  # embedding 端点 base，缺省沿用 api_base；MiniMax 填 https://api.minimaxi.com/v1
-memory_embedding_api_key: ""  # embedding 独立 key（直配）；空→读 _env 或回退聊天 key
-memory_embedding_api_key_env: ""  # embedding key 的环境变量名（生产用，免把密钥写进 yaml）；空→回退聊天 key
 
 # Memory 新架构安全配置（第一版骨架）：
 # - 这些字段先定义“开关、等级、保留天数和规则路由模式”，具体 hook/routing 业务后续再接。
@@ -725,6 +721,21 @@ reasoning_control_auto_probe: true
 # - json_object：只适用于 OpenAI 兼容接口；发 JSON 对象模式，并把 schema 写进提示，结果仍由程序严格校验。
 model_structured_output: auto
 
+# ===== 嵌入服务（记忆和工具共用）=====
+# 语义检索要先把文字变成向量，这件事由下面配置的“嵌入模型”来做。记忆的语义召回（memory_semantic_recall）
+# 和工具的语义检索（tool_vector_search_enabled）共用这一组设置，两个开关各管各的功能。
+
+# 嵌入模型的名字，例如 text-embedding-3-small；embo 开头的（如 MiniMax 的 embo-01）自动用 MiniMax 自己的格式。
+# 留空就是不用语义检索：记忆和工具都只按关键词找，不发任何嵌入请求。
+# 换成另一个模型后，已经存下的记忆向量不会自动重算，请只在确实需要时再改。
+embedding_model: ""
+# 嵌入服务的接口地址；留空就用聊天模型的 api_base。MiniMax 填 https://api.minimaxi.com/v1。
+embedding_api_base: ""
+# 嵌入服务单独用的 key，嵌入和聊天不是同一家时才需要填；留空就先看 embedding_api_key_env，再沿用聊天的 key。
+embedding_api_key: ""
+# 存放嵌入服务 key 的环境变量名，比把 key 直接写进这个文件更安全；留空就沿用聊天的 key。
+embedding_api_key_env: ""
+
 # Anthropic API 版本
 anthropic_version: "2023-06-01"
 
@@ -939,16 +950,9 @@ tool_detail_max_chars: 4000
 # 这个上限同时作为普通推荐的容量；检索结果要求 score>0，不会用无关工具凑数。
 tool_retrieval_limit: 12
 
-# 是否启用真实语义工具检索。开启但未配置 embedding model 时，语义通道明确标为
-# unconfigured 并只走关键词；端点故障时也降级关键词，错误可从 list_tools.tool_retrieval 查看。
+# 是否启用真实语义工具检索。向量来自“嵌入服务”一节的 embedding_*（与记忆语义召回共用）；没配 embedding_model 时
+# 语义通道明确标为 unconfigured 并只走关键词；端点故障时也降级关键词，错误可从 list_tools.tool_retrieval 查看。
 tool_vector_search_enabled: true
-
-# 工具语义检索 embedding。可独立配置；model 留空时复用 memory_embedding_*，两边都空则不发请求。
-# embo* 使用 MiniMax 原生协议，其余模型使用 OpenAI 兼容 /embeddings。
-tool_embedding_model: ""
-tool_embedding_api_base: ""
-tool_embedding_api_key: ""
-tool_embedding_api_key_env: ""
 
 # MCP 客户端（短板6）：连接外部 MCP server（Model Context Protocol，JSON-RPC over stdio），
 # 把社区现成工具（GitHub/数据库/Slack 等）动态注册成 mcp__<server>__<tool> 前缀的工具，

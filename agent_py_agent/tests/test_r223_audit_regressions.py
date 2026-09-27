@@ -288,7 +288,7 @@ def test_memory_embedder_init_failure_is_visible_without_secret(tmp_path, monkey
         raise RuntimeError("secret-not-for-logs")
     monkeypatch.setattr(embedding, "OpenAICompatibleEmbedder", broken)
     status = {}
-    assert _build_memory_embedder(AgentConfig(memory_semantic_recall=True, memory_embedding_model="test"), diagnostics=status) is None
+    assert _build_memory_embedder(AgentConfig(memory_semantic_recall=True, embedding_model="test"), diagnostics=status) is None
     assert status["error_code"] == "MEMORY_EMBEDDING_INIT_FAILED"
     memory = JsonlMemory(tmp_path / "memory.jsonl", semantic_status=status)
     memory.add("user", "保留正式事实", kind="fact")

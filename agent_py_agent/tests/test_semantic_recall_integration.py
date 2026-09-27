@@ -11,8 +11,9 @@ from __future__ import annotations
 from agent_py_agent.agent import core
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.gateway_parts.request_worker import _resolve_request_agent
-from agent_py_agent.agent.retrieval.embedding import LocalHashingEmbedder, MiniMaxEmbedder
+from agent_py_agent.agent.retrieval.embedding import MiniMaxEmbedder
 from agent_py_agent.agent.settings.config import AgentConfig
+from agent_py_agent.tests._hashing_embedder import LocalHashingEmbedder
 
 
 def _agent(tmp_path, *, scoping: bool = False, **kw) -> SimpleAgent:
@@ -37,8 +38,8 @@ def test_simpleagent_wires_embedder_from_config(tmp_path) -> None:
     agent = _agent(
         tmp_path,
         memory_semantic_recall=True,
-        memory_embedding_model="embo-01",
-        memory_embedding_api_base="https://api.minimaxi.com/v1",
+        embedding_model="embo-01",
+        embedding_api_base="https://api.minimaxi.com/v1",
     )
     assert isinstance(agent.memory._embedder, MiniMaxEmbedder)  # 配置真的接到 memory 层(生产接线打通,构造不上网)
 

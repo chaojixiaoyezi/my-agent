@@ -1,25 +1,25 @@
-"""Embedding 抽象 + 本地确定性 embedder + 可选语义端点(Phase 2)。
+"""Embedding 抽象 + 语义端点客户端(Phase 2)。
 
-综合三家:学 参考实现 memory/embedding.py(LocalHashingEmbedder 纯 Python 特征哈希 + cosine)
-+ 通道运行时 可插拔/可降级(配了 provider 才启用语义,否则降级词面)。
+综合三家:学 参考实现 memory/embedding.py(特征哈希 + cosine)+ 通道运行时 可插拔/可降级
+(配了嵌入模型才启用语义,否则降级词面)。
 
 自建优先:
-- ``LocalHashingEmbedder``:纯 Python、零依赖、确定性——signed feature hashing,默认/兜底/测试。
 - ``OpenAICompatibleEmbedder``:调 ``/embeddings`` 端点拿真语义向量。注意——这**不是引入库**,
-  只是个 stdlib ``urllib`` 写的 HTTP 客户端(my-agent 自建);密钥由调用方注入的 resolver 解析。
+  只是个 stdlib ``urllib`` 写的 HTTP 客户端(my-agent 自建);密钥由调用方传入。
   端点抖动抛 ``EmbeddingError``,调用方降级到 BM25,绝不让检索崩。
+- ``MiniMaxEmbedder``:MiniMax 原生协议(texts/type/vectors),同一协议可直接替换。
+
+产品里的嵌入客户端只由 ``core._embedding_client`` 按 ``embedding_*`` 配置创建(记忆语义召回与工具语义检索共用);
+测试用的确定性特征哈希 embedder 在 ``tests/_hashing_embedder.py``,不随产品发布。
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import urllib.error
 import urllib.request
-from typing import Any, Protocol, runtime_checkable
-
-from agent_py_agent.agent.retrieval.lexical import tokenize
+from typing import Protocol, runtime_checkable
 
 DEFAULT_EMBED_DIM = 256
 _EMBED_TIMEOUT = 30.0
@@ -79,44 +79,6 @@ def mean_center(
         return query_vec, doc_vecs
     mean = _column_mean(doc_vecs)
     return _subtract_mean(query_vec, mean), [_subtract_mean(v, mean) for v in doc_vecs]
-
-
-def _hash_bucket(token: str, dim: int) -> tuple[int, float]:
-    """稳定哈希(sha1,非进程内 salted hash)→ (桶下标, 符号),signed feature hashing。"""
-    digest = hashlib.sha1(token.encode("utf-8")).digest()
-    bucket = int.from_bytes(digest[:4], "big") % dim
-    sign = 1.0 if digest[4] & 1 else -1.0
-    return bucket, sign
-
-
-def _features(text: str) -> list[str]:
-    """特征:词/CJK-bigram(复用 lexical.tokenize)+ 字符 trigram(捕模糊/形近)。"""
-    low = text.lower()
-    feats = list(tokenize(low))
-    compact = "".join(low.split())
-    feats += [compact[i : i + 3] for i in range(len(compact) - 2)]
-    return feats or ["∅"]
-
-
-class LocalHashingEmbedder:
-    """确定性本地 embedder(默认/兜底/测试):特征哈希 → 定长向量,L2 归一。零依赖、可复现。"""
-
-    def __init__(self, dim: int = DEFAULT_EMBED_DIM) -> None:
-        self._dim = max(8, int(dim))
-
-    @property
-    def dim(self) -> int:
-        return self._dim
-
-    def embed(self, texts: list[str]) -> list[list[float]]:
-        return [self._embed_one(t) for t in texts]
-
-    def _embed_one(self, text: str) -> list[float]:
-        vec = [0.0] * self._dim
-        for token in _features(text):
-            bucket, sign = _hash_bucket(token, self._dim)
-            vec[bucket] += sign
-        return l2_normalize(vec)
 
 
 def _one_vector(v: object) -> list[float]:
@@ -214,40 +176,3 @@ class MiniMaxEmbedder:
         if (payload.get("base_resp") or {}).get("status_code") not in (0, None):
             raise EmbeddingError(f"MiniMax embedding 返回错误:{(payload.get('base_resp') or {}).get('status_msg')}")
         return _parse_vectors(payload.get("vectors"), len(texts))  # 守卫:数量/形状不符→EmbeddingError
-
-
-# LLM: embedding 不拥有密钥存储；只调用上层注入的 resolver，异常不得泄露
-# source 或密钥正文。
-# 函数用途: 把配置中的密钥引用解析成调用 embedding 端点所需的值。
-def _resolve_api_key(source: str, secret_resolver: Any) -> str:
-    """经调用方注入的 secret_resolver 解析密钥；失败或无解析器时返回空。"""
-    if not source or not callable(secret_resolver):
-        return ""
-    try:
-        return str(secret_resolver(source))
-    except Exception:
-        return ""
-
-
-def build_embedder(config: dict[str, Any] | None, *, secret_resolver: Any = None) -> EmbeddingProvider | None:
-    """按配置造 embedder。返回 None = 未配置 → 上层走纯 BM25 词面召回。
-
-    provider: ``local``(确定性本地,无需端点)| ``openai_compatible``(配 api_base/model/
-    api_key_source)。密钥经 secret_resolver 解析(by-ref/env,不落明文)。配置非法/缺字段 → None。
-    """
-    if not isinstance(config, dict):
-        return None
-    provider = str(config.get("provider") or "").strip().lower()
-    dim = int(config.get("dim") or DEFAULT_EMBED_DIM)
-    if provider == "local":
-        return LocalHashingEmbedder(dim=dim)
-    if provider not in ("openai_compatible", "openai", "http", "minimax"):
-        return None
-    api_base = str(config.get("api_base") or "").strip()
-    model = str(config.get("model") or "").strip()
-    if not api_base or not model:
-        return None
-    api_key = _resolve_api_key(str(config.get("api_key_source") or ""), secret_resolver)
-    if provider == "minimax":  # MiniMax 原生协议(texts/type/vectors),非 OpenAI 兼容
-        return MiniMaxEmbedder(api_base=api_base, model=model, api_key=api_key, dim=int(config.get("dim") or 1536))
-    return OpenAICompatibleEmbedder(api_base=api_base, model=model, api_key=api_key, dim=dim)

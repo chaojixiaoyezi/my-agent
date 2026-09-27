@@ -18,8 +18,8 @@ from agent_py_agent.agent.memory_store import JsonlMemory, MemoryRecord, MemoryS
 from agent_py_agent.agent.memory_store.candidate_models import CandidateObservation, MemoryScope
 from agent_py_agent.agent.memory_store.candidates import CandidateService
 from agent_py_agent.agent.prompting_parts.memory_context import memory_context_text
-from agent_py_agent.agent.retrieval.embedding import LocalHashingEmbedder
 from agent_py_agent.agent.settings.config import AgentConfig
+from agent_py_agent.tests._hashing_embedder import LocalHashingEmbedder
 
 
 def test_exact_normalized_memory_add_is_idempotent(tmp_path: Path) -> None:

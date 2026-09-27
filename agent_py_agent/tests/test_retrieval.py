@@ -6,9 +6,7 @@ from pathlib import Path
 
 from agent_py_agent.agent.retrieval import (
     HybridRetriever,
-    LocalHashingEmbedder,
     VectorStore,
-    build_embedder,
     cosine,
     l2_normalize,
     rank,
@@ -16,6 +14,7 @@ from agent_py_agent.agent.retrieval import (
     tokenize,
 )
 from agent_py_agent.agent.retrieval.embedding import EmbeddingError, EmbeddingProvider
+from agent_py_agent.tests._hashing_embedder import LocalHashingEmbedder
 
 
 # --- 词面 BM25 ---
@@ -155,26 +154,3 @@ def test_hybrid_degrades_to_bm25_on_embedding_error() -> None:
     docs = [("d1", "无关"), ("d2", "QQ 网关 scoped lock 部署")]
     out = r.rank("QQ 网关 部署", docs, top_k=2)
     assert out[0][0] == "d2"  # 端点挂了仍降级 BM25 正常返回
-
-
-# --- build_embedder 工厂 ---
-def test_build_embedder_local_and_none() -> None:
-    assert isinstance(build_embedder({"provider": "local", "dim": 64}), LocalHashingEmbedder)
-    assert build_embedder(None) is None
-    assert build_embedder({"provider": "unknown"}) is None
-    assert build_embedder({"provider": "openai_compatible"}) is None  # 缺 api_base/model
-
-
-def test_build_embedder_openai_compatible_resolves_secret() -> None:
-    seen = {}
-
-    def resolver(source: str) -> str:
-        seen["source"] = source
-        return "resolved-key"
-
-    emb = build_embedder(
-        {"provider": "openai_compatible", "api_base": "https://x/v1", "model": "embed-1", "api_key_source": "env:K"},
-        secret_resolver=resolver,
-    )
-    assert emb is not None
-    assert seen["source"] == "env:K"  # 密钥经 by-ref 解析(接 Phase 1)

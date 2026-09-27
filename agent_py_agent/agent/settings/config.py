@@ -244,11 +244,8 @@ class _ToolConfigFields:
     tool_detail_max_chars: int = 4000
     # 推荐区和 tool_search 的检索容量；search 有 score>0 过滤，不相关不会凑数。
     tool_retrieval_limit: int = 12
+    # 工具语义检索开关；向量来自与记忆语义召回共用的嵌入服务 embedding_*（没配模型时只走关键词）。
     tool_vector_search_enabled: bool = True
-    tool_embedding_model: str = ""
-    tool_embedding_api_base: str = ""
-    tool_embedding_api_key: str = ""
-    tool_embedding_api_key_env: str = ""
     # MCP 客户端(短板6)：声明要连接的外部 MCP server，把社区现成工具(GitHub/DB/Slack 等)
     # 动态注册成 mcp__<server>__<tool> 前缀的工具。结构：
     #   {server_name: {command: str, args: [..], env: {..}, timeout: int, connect_timeout: int,
@@ -333,13 +330,13 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     auto_save_memory: bool = True
     # 记忆语义召回(检索拓宽 #1,默认关=现状纯关键词):开后记忆召回在关键词(FTS5/BM25)外再加一路
     # 语义向量召回,RRF 融合,治"换词就召不回"。向量只存各 owner 自己 home 的本地文件(零外部依赖、
-    # 不碰共享向量库、per-用户隔离)。需配 memory_embedding_model(走 agent 同款 api);没配则自动只走
-    # 关键词(不崩不退化)。
+    # 不碰共享向量库、per-用户隔离)。需配 embedding_model;没配则自动只走关键词(不崩不退化)。
     memory_semantic_recall: bool = False
-    memory_embedding_model: str = ""  # 语义召回用的 embedding 模型名(空=不启用语义,仅关键词);embo* 走 MiniMax 原生协议
-    memory_embedding_api_base: str = ""  # embedding 端点 base(缺省沿用 api_base);MiniMax 填 https://api.minimaxi.com/v1
-    memory_embedding_api_key: str = ""  # embedding 独立 key(直配);空→读 _env 或回退聊天 key。让 embedding 能用与聊天不同厂的 key
-    memory_embedding_api_key_env: str = ""  # embedding key 的环境变量名(生产用,免把密钥写进 yaml);空→回退聊天 key
+    # 嵌入服务:记忆语义召回与工具语义检索共用这一组(2026-09-27 由 memory_embedding_* 改名并吸收 tool_embedding_*,旧键只告警)。
+    embedding_model: str = ""  # embedding 模型名(空=两边都不用语义,只走关键词);embo* 走 MiniMax 原生协议
+    embedding_api_base: str = ""  # embedding 端点 base(缺省沿用 api_base);MiniMax 填 https://api.minimaxi.com/v1
+    embedding_api_key: str = ""  # embedding 独立 key(直配);空→读 _env 或回退聊天 key。让 embedding 能用与聊天不同厂的 key
+    embedding_api_key_env: str = ""  # embedding key 的环境变量名(生产用,免把密钥写进 yaml);空→回退聊天 key
     memory_archive_level: int = 3
     memory_hook_enabled: bool = True
     memory_rule_routing_mode: str = "soft"
