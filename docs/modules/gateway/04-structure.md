@@ -142,7 +142,9 @@ HTTP/IM/未知来源不能凭 rich transcript 获得私有路径展示，后台�
   命中时返回 base owner。控制作用域的两个 owner 解析入口经同一函数，所以请求与控制的结果一致。
 - 控制：`control_service` 把 `admin/approve/deny` 延迟分派给 `admin_control_service.py`，只用 base agent 的 home/config
   和 Gateway 队列，不构造 scoped Agent。`skills` 延迟分派给 `skill_control_service.py`（在 steer/stop 默认路径之前），
-  按 `resolve_gateway_scope_owner` 解析 owner，只读写该 owner 的技能提案与自动总结 Skill，回执不含本机路径。`control_operation_service.execute_gateway_control_operation` 在计算摘要、
+  按 `resolve_gateway_scope_owner` 解析 owner，只读写该 owner 的技能提案与自动总结 Skill，回执不含本机路径。
+  `skill_control_service.execute_skill_control` 按结构化 operation 区分写入和查询的普通异常：confirm/reject/learned_revert/learned_remove 只报告结果未完整确认，提示先查当前状态；查询异常报告暂时读不到。写后追加事件失败不能据异常倒推出“没有改动”，此层不补偿、不自动重放，也不另建事务状态；原服务的可预期失败原因继续保留。
+  `control_operation_service.execute_gateway_control_operation` 在计算摘要、
   写回执之前，用 `control_commands.persisted_control_command_text` 把密码换成 `******`；明文只随内存中的 command 交给执行服务。
 - 审批：`request_execution._gateway_request_interactive_approvals` 在客户端声明 `tool_approval`，或服务端核实为已绑定的
   管理员私聊且执行 owner 为本机管理员时，开启原 `StreamApproval`。`http_handlers._read_public_progress_events` 把

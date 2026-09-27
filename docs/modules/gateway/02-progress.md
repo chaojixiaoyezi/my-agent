@@ -1,5 +1,10 @@
 # Gateway 维护状态
 
+`/skills` 异常回执修正（分支 `claude/skills-receipt-fix`，2026-09-27，Codex 静态复核发现）：`execute_skill_control` 的普通异常
+原来一律回“原记录没有改动、请稍后重试”，但回滚/删除是先改目录和登记表、再追加账本，账本追加抛 OSError 时改动已经生效。
+现在按子命令是否写入选回执：写子命令（confirm/reject/learned_revert/learned_remove）只说结果没能完整确认、先查当前状态，
+只读子命令只说暂时读不到；可预期失败的回执不变。不加事务或新状态层。测试见 `test_skill_chat_control.py` 的提交后失败用例。
+
 能力包第七候选：新Goal绑定任务时可初始化原TaskLink的一次选包pending（默认关闭）；只读当前owner的元数据资格，旧任务不补字段，不新增模型调用或Goal状态。组件与主流程组合验收中，未发布。
 
 聊天 `/skills`（分支 `claude/skill-proposals-tui-im`，2026-09-27）：用户几乎不用命令行，技能提案与自动总结 Skill 原来只有

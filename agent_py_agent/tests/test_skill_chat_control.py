@@ -3,7 +3,8 @@
 背景（2026-09-27）：用户几乎不用命令行，要求“所有都能 TUI 和 IM 来”。技能提案与自动总结 Skill 原来只有
 `my-agent skills …` 命令行入口，自学习审核顺序点（skill_proposal_review）因此在 TUI/IM 里永远触发不了。
 本测试锁定：解析拒绝式校验、命令目录走 Gateway、TUI 文本还原与本地模式拒绝（未列出的类型会落进停止分支）、
-Gateway 分派不落入 steer/stop、提案确认必须带当前版本号、自动 Skill 只按登记表里的名字操作。
+Gateway 分派不落入 steer/stop、提案确认必须带当前版本号、自动 Skill 只按登记表里的名字操作、
+写操作在改动生效后才失败时回执不承诺“没有改动”（Codex 静态复核发现，2026-09-27）。
 """
 from __future__ import annotations
 
@@ -11,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent_py_agent.agent.capability.skill_learning_store import SkillLearningStore
 from agent_py_agent.agent.capability.skill_proposals import PROPOSAL_COMMITTED, PROPOSAL_REJECTED
 from agent_py_agent.agent.command_catalog import match_conversation_command
 from agent_py_agent.agent.conversation.control_commands import (
@@ -140,3 +142,24 @@ def test_learned_skill_list_show_revert_and_remove_use_the_registry(tmp_path, mo
     removed = _run(monkeypatch, ctx.home, f"/skills learned remove {NAME}")
     assert removed.ok and "以后不再自动生成同名 Skill" in removed.message and not _learned_file(ctx).exists()
     assert "还没有自动总结的 Skill" in _run(monkeypatch, ctx.home, "/skills learned").message
+
+
+def test_a_failure_after_the_change_does_not_claim_nothing_changed(tmp_path, monkeypatch):
+    # 删除先归档目录、写登记表，再追加账本；账本追加失败时删除已经生效，回执不能说“没有改动”，要让用户先查当前状态。
+    ctx = _learning_runtime(tmp_path, _output())
+    _publish_first(ctx)
+
+    def _ledger_unwritable(_store, _event):
+        raise OSError("ledger unwritable")
+
+    monkeypatch.setattr(SkillLearningStore, "append_event", _ledger_unwritable)
+    failed = _run(monkeypatch, ctx.home, f"/skills learned remove {NAME}")
+    assert failed.ok is False and not _learned_file(ctx).exists()
+    assert "没能完整确认" in failed.message and "/skills learned" in failed.message and "没有改动" not in failed.message
+
+    def _registry_unreadable(*_args):
+        raise RuntimeError("registry unreadable")
+
+    monkeypatch.setattr(module, "learned_skills_report", _registry_unreadable)
+    unreadable = _run(monkeypatch, ctx.home, "/skills learned")
+    assert unreadable.ok is False and unreadable.message == "技能提案或自动 Skill 暂时读不到，请稍后重试。"
