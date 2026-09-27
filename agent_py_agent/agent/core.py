@@ -843,8 +843,8 @@ def _effective_workspace_scope(agent: SimpleAgent, config: AgentConfig) -> tuple
     return workspace_root, workspace_roots
 
 
-# LLM: ToolRegistry 唯一装配入口；插件 owner 与资源 resolver/schema 固定到可信主体，执行时仍取受限快照；构造不读包正文或启动插件。
-# 函数用途: 按身份、工作区和配置组合工具及完整来源声明，主代理与同进程子代理共用解析和权限接线。
+# LLM: ToolRegistry 唯一装配入口；owner、来源合同和语法反馈开关取可信配置，执行仍取受限快照；联查文件诊断配置测试。
+# 函数用途: 按身份和工作区组合工具、来源声明及可选文件反馈，主代理与同进程子代理共用权限接线。
 def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistry:
     from functools import partial
 
@@ -916,6 +916,7 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
             path_dangerous_roots=config.path_dangerous_roots,
             access_mode=access_mode,
             tool_write_inline_max_chars=config.tool_write_inline_max_chars,
+            enable_file_syntax_diagnostics=config.enable_file_syntax_diagnostics,
             file_source_resolver=source_resolver,
             file_source_ref_schema=source_ref_schema,
             artifact_read_budget_window_seconds=config.tool_artifact_read_budget_window_seconds,

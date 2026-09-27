@@ -1,5 +1,13 @@
 # Subagent Structure
 
+## 已授权能力包的首请求入口
+
+- `capability/subagent_entry_authority.py` 提供仅新建时使用的typed初始化材料，并按canonical run/attempt、原权限和同代引用核对读取范围，不另存状态。
+- 根与递归创建沿 `PreparedSubagentRun` 准备/重新冻结/正式创建传递材料；`agent_thread_store` 只在新建线程写原首请求marker，已有Jev标记保持。
+- `agent_core/subagent/model_selection.py` 沿原marker领取一次准备；`capability/subagent_package_entries.py` 在真实业务build/capture前，调用原共享reader并生成RuntimeFacts。
+- `package_selection_context.py` 仍统一入口预算和分页；子入口不跑选择模型、不修改pin，也不扩大父级未授予的包权限。
+- 原marker的CAS领取与pending advice采用资格分开；显式选模（含领取期间交错）保留合法包准备但取消自动采用。发送、Compact及恢复仍消费原链状态与历史，进度见同目录02-progress。
+
 `agent_core/subagent/run_flow.py` 在overflow只读加载canonical来源，下一次原 `agent.run` 临时绑定公共恢复器；无来源仍先执行原active-turn归档CAS。`conversation/agent_thread.py::project_agent_thread_context` 是普通准备与候选共用的纯历史renderer，不写任务或消息。`agent_core/subagent/compact_recovery.py` 只按原第0注入位置重投影，不重跑上下文包/工具准备；成功的host_state回到原循环，异常退出清理scope。
 
 ## lesson 账本与 record_lesson（结构化经验通道）

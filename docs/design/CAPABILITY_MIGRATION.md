@@ -24,8 +24,8 @@ git -C "<来源副本目录>" ls-files
 
 | 样包 | 当前源码版本 | 可参考的迁移方式 | 仍须单列的缺项 |
 | --- | --- | --- | --- |
-| [drama-text-a](../../examples/capability-packages/drama-text-a/PROVENANCE.md) | `0.1.2` | 原文依据、来源覆盖、场次/镜头及目标时长对账 | 真实媒体、完整导演规则和质量评估 |
-| [drama-workflow-b](../../examples/capability-packages/drama-workflow-b/PROVENANCE.md) | `0.1.1` | 制作资料关联与交接，逐集时长和连续性检查 | 上游全部交互报告、美术与生成链路 |
+| [drama-text-a](../../examples/capability-packages/drama-text-a/PROVENANCE.md) | `0.2.0` | 原文依据、镜头来源/新增声明及目标时长对账 | 真实媒体、完整导演规则和质量评估 |
+| [drama-workflow-b](../../examples/capability-packages/drama-workflow-b/PROVENANCE.md) | `0.1.3` | 制作资料关联、显式交接核对与逐集时长检查 | 上游全部交互报告、美术与生成链路 |
 | [security-evidence](../../examples/capability-packages/security-evidence/PROVENANCE.md) | `0.1.0` | 已有证据的范围、来源、去重和报告 | 实际授权证明、扫描及漏洞验证；不属于本切片 |
 
 A 的 `0.1.1` 只修订包内说明与模板的一致性：镜头和场次均要求正数 `seconds`，来源摘要明确取原输入文件字节，模板补完整条目形状，并区分结构检查已执行、待执行和未通过。原校验脚本及两份合成示例字节不变；不修改宿主读写规则，也不改变 B/C 的迁移范围。原 `0.1.0` 的 ZIP、失败与成功证据继续保留，不能用新文档替换旧结果。
@@ -149,7 +149,7 @@ python3 scripts/build_capability_package.py \
 python3 scripts/build_capability_package.py \
   --declaration examples/capability-packages/drama-text-a/declaration.json \
   --files-root examples/capability-packages/drama-text-a \
-  --output "$CAP_WORK/dist/drama-text-a-0.1.2.zip"
+  --output "$CAP_WORK/dist/drama-text-a-0.2.0.zip"
 ```
 
 构建会核对源文件、生成可重复的 ZIP 并用正式读取器复验，不安装、不执行资源。记录整个 ZIP 的 SHA256，并保留当时声明及源码版本；普通文件修改不会改变已安装包。
@@ -289,5 +289,10 @@ python3 -m pytest agent_py_agent/tests/test_capability_package_examples.py agent
 [固定上游能力清单](CAPABILITY_SOURCE_COVERAGE.md)列全A/B入口、工具及依赖，旧样包映射固定在`e72a1d337`；第4.1节单独记录本次A0.2.0/B0.1.2差异。组合69文件1661 passed、9 skipped仅证明本地组件，不回填旧样包能力或替代新版真实业务质量。
 
 组件先用公开合成例和坏引用反例；原生 TUI 在新包冻结后独立验收。原开发失败及当前候选保留集各 `0/3` 保持，不借旧候选成绩填充新版本。
+
+B0.1.3 候选进一步把交接清单升级为 `drama_workflow_handoff.v2`：每个映射、遗漏、新增及未决引用归到显式阶段，
+使用JSON Pointer定位对象或字段，不猜复合ID或自然语言字段名。只从命令行 `--input-file FILE_ID=PATH` 绑定读取资料，
+一次有界读取同时用于SHA和JSON解析；清单本身的路径不授予读权限。原 `--project` 功能保持，未传 `--handoff` 明确未检查交接。
+这是包内数据检查，不增加宿主任务状态或完成门；新增来源语义仍须独立阅读。当前实施与组件结果不能冒充新版原生TUI通过。
 
 建议下一步：先以三个现有样包在隔离 owner 跑通安装、自然召回、执行和移除，再验证长任务、多代理、Compact 与显式版本回退；这些事实齐全后再扩展完整覆盖表。个人 Skill 自动总结可以独立推进，交叉内容只通过明确候选与用户选择流转。

@@ -32,12 +32,18 @@
 |-- agent_py_agent/tests/test_capability_package_drama_text_basis.py # A包v2镜头来源、改编与未知声明及报告版本
 |-- agent_py_agent/tests/test_capability_package_drama_workflow_duration.py # B包分集镜头与明确目标对账
 |-- agent_py_agent/tests/test_capability_package_b_template.py # B完整模板、制作交接及原派工授权接口
+|-- agent_py_agent/tests/test_capability_package_drama_workflow_handoff.py # B交接绑定、原字节摘要、对象地址及路径别名缓存边界
+|-- agent_py_agent/tests/test_subagent_package_entries.py # 子代理同代包入口的首请求、显式选模、权限和恢复组合
+|-- agent_py_agent/tests/test_file_syntax_diagnostics.py # 有界语法观察、反馈与诊断异常隔离
+|-- agent_py_agent/tests/test_filesystem_syntax_feedback.py # 三文件入口的真实发布、部分提交与取消回归
+|-- agent_py_agent/tests/test_file_syntax_diagnostics_runtime.py # 配置到模型可见回执及修复选择的替身验证
 |-- scripts/build_capability_package.py   # 不执行代码的可重复内容包构建入口
 |-- examples/capability-packages/         # 来源独立的短剧与证据报告样包源码
 |   `-- drama-workflow-b/templates/handoff.json # 制作阶段输入与对象转换的待填写业务资料
 |-- docs/design/CAPABILITY_PACKS.md       # 能力包协议、生命周期、隔离召回和任务版本合同
 |-- docs/design/CAPABILITY_MIGRATION.md   # 从固定来源到候选、安装、验收、迭代和回退的操作流程
 |-- docs/design/CAPABILITY_SOURCE_COVERAGE.md # 固定上游入口、脚本、依赖与样包迁移缺口
+|-- docs/design/FILE_SYNTAX_DIAGNOSTICS.md # 文件原子发布的有界语法观察及工具反馈边界
 |-- agent_py_agent/tests/test_capability_package_native_pipeline.py # 模型替身沿原生循环读取和精确落盘
 |-- agent_py_agent/tests/test_capability_package_prompt_guidance.py # 包采用与资源复用软规则、空选择和旧提示不变
 |-- agent_py_agent/tests/test_capability_package_selector_recovery.py # 准确读取参数、错误恢复、受限隔离及换代拒绝
@@ -620,6 +626,7 @@ agent_py_agent/
 |   |   |-- workspace_write_scope.py  # 按原写入边界解析生成本次写入范围，无范围时只允许 cwd
 |   |   |-- capabilities_tool.py      # 从真实工具目录与唯一 channel registry 投影模型能力
 |   |   |-- _filesystem_display.py   # 文件工具共用的有界 diff/write 富终端展示事实构造器
+|   |   |-- file_syntax_diagnostics.py # 原子候选同源的有界语法观察及成功写入后的软反馈
 |   |   |-- _persona_write_guard.py   # SOUL/USER/AGENTS 统一强制走 update_persona
 |   |   |-- background_process_launch.py # v3 预留、原权威复查及 v4 日志/stdio 启动交接
 |   |   |-- background_process_host.py # 独立绑定 child、直接继承管道、检查寿命并提交真实终态
@@ -650,6 +657,8 @@ agent_py_agent/
 |   |   |-- package_selection_authority.py # 原策略门和精确执行轮复查
 |   |   |-- package_selection_context.py # 入口总预算、来源与续页装配
 |   |   |-- package_selection_runtime.py # 原主业务首轮的一次选择准备
+|   |   |-- subagent_package_entries.py # 子代理原首请求内的已授权同代包入口准备
+|   |   |-- subagent_entry_authority.py # 子入口新建材料及当前run/attempt的只读授权复核
 |   |   |-- decision_candidates.py     # 原能力快照候选、独立适用性题及必要引用，不读取Skill正文
 |   |   |-- decision_recommendation.py # 每工作片可选推荐及采用前复核，只改变展示不改授权
 |   |   |-- decision_experiment_sample.py # 只观察实验的对照条目：基线/候选名单、配置版本与原账结算视图
@@ -1177,6 +1186,9 @@ docs/
 - `agent_py_agent/agent/capability/task_references.py`：连接原任务 pins、授权 grants 和调度引用，不另建状态库。
 - `agent_py_agent/agent/capability/package_read.py`：原工具与宿主共用准确原字节、分页、来源与任务pin。
 - `agent_py_agent/agent/capability/package_selection_runtime.py`：原主业务准备的唯一选包接缝；scope、authority、context和纯selector分别负责资格、原门复核、总预算与模型选择。
+- `agent_py_agent/agent/capability/subagent_package_entries.py`：只消费子代理原首次请求资格与显式授权的同代引用，不再次选包或扩权。
+- `agent_py_agent/agent/capability/subagent_entry_authority.py`：首请求入口的宿主新建材料与当前执行身份检查，不形成第二份状态或授权。
+- `agent_py_agent/agent/tooling/file_syntax_diagnostics.py`：文件修改的有界纯语法观察；写入成功、当前语法与任务质量分开，禁止重新读取目标猜测已提交内容。
 - `agent_py_agent/agent/conversation/capability_selection_state.py`：原TaskLink的可选值类型和结果摘要，CAS与持久化仍归store.tasks。
 - `agent_py_agent/agent/capability/package_provider.py`：只从当前 owner 的原安装表取得已启用包，每次读取复查代次与摘要。
 - `scripts/build_capability_package.py`：把声明和私有资源构建为 v7 内容包，不导入或执行包内脚本。
@@ -1189,6 +1201,7 @@ docs/
 - `docs/design/CAPABILITY_PACKS.md`：包级发现、私有方法、原安装与任务授权的边界。
 - `docs/design/CAPABILITY_MIGRATION.md`：固定来源、完整覆盖表、候选构建和原命令发布／回退的可执行步骤。
 - `docs/design/CAPABILITY_SOURCE_COVERAGE.md`：两个固定短剧来源的全部入口、阅读深度、样包映射及未迁移项；索引覆盖不等于能力全部迁移。
+- `docs/design/FILE_SYNTAX_DIAGNOSTICS.md`：原生文件修改的语法反馈设计，区分写入成功、观察结果与任务质量。
 - `agent_py_agent/tests/test_capability_package_resource_scope.py`：验证包成员和业务路径的区分、同代搜索导航、受限隔离，以及归档后原生消息保留完整资源引用。
 - `agent_py_agent/tests/test_capability_resource_input_schema.py`：验证模型完整来源schema、原执行器在handler前拒绝缺字段/类型错误，以及原身份/代次/摘要边界不变。
 - `docs/tasks/CAPABILITY_INTERNALIZATION_GOAL.md`：能力内化执行 Goal 与当前唯一 TODO。

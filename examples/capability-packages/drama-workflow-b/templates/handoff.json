@@ -1,5 +1,5 @@
 {
-  "schema": "drama_workflow_handoff.v1",
+  "schema": "drama_workflow_handoff.v2",
   "files": [
     {"id": "", "path": "", "sha256": ""}
   ],
@@ -14,22 +14,19 @@
   ],
   "object_mappings": [
     {
-      "source_file_id": "",
-      "source_field": "",
-      "source_object_id": "",
-      "target_file_id": "",
-      "target_field": "",
-      "target_object_id": "",
+      "stage_id": "",
+      "source": {"file_id": "", "pointer": "", "object_id": ""},
+      "target": {"file_id": "", "pointer": "", "object_id": ""},
       "reason": ""
     }
   ],
   "omissions": [
-    {"source_file_id": "", "source_field": "", "source_object_id": "", "reason": ""}
+    {"stage_id": "", "source": {"file_id": "", "pointer": "", "object_id": ""}, "reason": ""}
   ],
   "additions": [
-    {"target_file_id": "", "target_field": "", "target_object_id": "", "reason": ""}
+    {"stage_id": "", "target": {"file_id": "", "pointer": "", "object_id": ""}, "reason": ""}
   ],
   "unresolved_differences": [
-    {"file_ids": [""], "object_ids": [""], "difference": "", "next_step": ""}
+    {"stage_id": "", "refs": [{"file_id": "", "pointer": "", "object_id": ""}], "difference": "", "next_step": ""}
   ]
 }

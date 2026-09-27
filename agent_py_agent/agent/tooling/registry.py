@@ -1,5 +1,5 @@
-# LLM: 原权限、Schema、搜索和执行共用快照；来源 resolver/schema 由宿主成对注入，展示投影不热改共享工具、注册身份或真实 loaded 状态。
-# 模块用途: 装配同源声明的工具并交给唯一执行器，沿原目录与搜索展示可找回的可选工具。
+# LLM: 权限、Schema、搜索和执行共用快照；来源合同与语法开关由宿主注入，展示投影不热改共享工具或身份。
+# 模块用途: 装配同源声明和可选反馈的工具并交给唯一执行器，沿原目录与搜索展示工具。
 from __future__ import annotations
 
 """Bind tools into one immutable runtime snapshot and delegate canonical calls.
@@ -79,8 +79,8 @@ class CatalogRenderConfig:
     deferred_categories: list[str] = field(default_factory=list)
 
 
-# LLM: ToolRegistry 的单一装配配置；审批、插件 owner 与成对资源 resolver/schema 由 core 绑定，不能从模型参数推导；联测 owner/worker。
-# 类用途: 汇总工作区、权限、工具上限和同源内容合同，构造时不读取包或启动服务。
+# LLM: ToolRegistry 单一装配配置；审批、来源合同和语法反馈开关由 core 绑定，不从模型参数推导；联测 owner/worker 和文件反馈。
+# 类用途: 汇总工作区、权限、工具上限和可选文件诊断，构造时不读取包或启动服务。
 @dataclass(frozen=True)
 class ToolRegistryParams:
     workspace_root: Path
@@ -117,6 +117,7 @@ class ToolRegistryParams:
     catalog_show_truncated_notice: bool = True
     tool_detail_max_chars: int = 0
     tool_write_inline_max_chars: int = MAX_INLINE_WRITE_CONTENT_CHARS
+    enable_file_syntax_diagnostics: bool = False
     # 仅由宿主成对装配解析器和其输入声明；文件工具不接受模型提供的读取回调或 owner 身份。
     file_source_resolver: Callable[[object], FileSourceContent] | None = None
     file_source_ref_schema: dict[str, Any] | None = None

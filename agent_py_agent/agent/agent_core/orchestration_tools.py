@@ -629,9 +629,18 @@ def _decision_children(agent: SimpleAgent, prepared: PreparedSubagentCreation) -
     return result
 
 
-# LLM: 这是原保存、替换、发布链的唯一物化出口；调用方必须持有 manager.creation_guard，迟到建议不得另建任务。
+# LLM: 唯一物化出口持原 creation_guard；开启包准备时给同一 canonical 对象传 typed 初始化材料，Jev off 不调用选择模型。
 # 函数用途: 把最终验证过的单项或批量规格沿原幂等和发布机制落盘。
 def _materialize_create_subagents(agent: SimpleAgent, prepared: PreparedSubagentCreation) -> ToolHandlerOutcome:
+    from ..capability.subagent_package_entries import (
+        prepare_subagent_entry_initialization,
+        subagent_entries_enabled,
+    )
+
+    if subagent_entries_enabled(agent):
+        _decision_children(agent, prepared)
+        prepared.prepared_runs[:] = [prepare_subagent_entry_initialization(agent, run) if run else None
+                                     for run in prepared.prepared_runs]
     resolutions = _resolve_task_params(agent, prepared.task_params, prepared.prepared_runs)
     if not prepared.batch:
         return _created_tasks_result(agent, resolutions, prepared.allowed_tools[0], prepared.request_params)

@@ -1,5 +1,5 @@
 # LLM: 入口正文是包参考资料，不是控制指令；只消费当前范围内选中 refs，沿共享 reader/policy/pins 装配，不能执行脚本或注册包内 Skill。
-# 模块用途: 在总预算内生成已读取入口及准确续页信息，供原主模型上下文一次装配。
+# 模块用途: 在总预算内生成原主选包或子授权包的已读入口及续页信息，供原请求上下文一次装配。
 from __future__ import annotations
 
 import json
@@ -34,7 +34,7 @@ class _EntryBudgetExceeded(ValueError):
     pass
 
 
-# LLM: 外层必须已 claim 并持活动回合事务，authority.check 可进入原 pin 锁；预算限制总回执，不用包正文进行机器路由。
+# LLM: 外层已领取原主选择/child首请求并持原活动事务或创建锁；authority.check 核当前执行，child pin 只验既有引用，不改授权。
 # 函数用途: 依次读取已选入口，把准入失败、读失败和预算不足保留为告警，不伪造成功页。
 def prepare_package_entry_context(agent, params, scope, references, *, authority, claim_id: str, max_tokens: int) -> PackageEntryContext:
     pages: list[dict] = []

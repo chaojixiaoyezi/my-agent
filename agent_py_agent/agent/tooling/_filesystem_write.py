@@ -1,5 +1,5 @@
-# LLM: 本模块是 write_file 的 canonical 原子写入；来源 resolver/schema 由宿主成对提供，原参数门执行声明，不改变执行器、权限或 artifact 合同。
-# 模块用途: 校验文本、二进制或精确来源并安全写文件；缺来源字段在原工具门反馈，来源读取不执行脚本。
+# LLM: canonical 原子写入共用候选 fd；诊断收集故障独立降级，不改变来源合同、权限或二进制门，联测三写入口。
+# 模块用途: 安全写入文本、二进制或精确来源，反馈有限语法信息，诊断普通异常不能把已写入报成失败。
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..common.cancellation import ToolCancelled
 from ..common.encoding_detect import encode_like_original
 from ..common.file_version import StaleFileVersionError, check_file_version, file_version
 from ..contracts.artifact_acceptance import ArtifactAcceptanceRequest, validate_artifact
@@ -51,6 +52,13 @@ from .content_transport_policy import (
     inline_write_content_limit,
     long_content_avoidance_rule,
     write_file_content_parameter_detail,
+)
+from .file_syntax_diagnostics import (
+    FileSyntaxDiagnostics,
+    FileSyntaxObservation,
+    attach_syntax_diagnostics,
+    unavailable_observation,
+    update_syntax_diagnostics,
 )
 from .models import (
     EffectResolverPolicy,
@@ -129,8 +137,8 @@ class WriteOutputRequest:
     mode: str
 
 
-# LLM: 三种内容输入共用同一 mutating/operation 合同；来源读取不能绕过原审批、版本锁、owner 墙或任务晋升。
-# 类用途: 在现有文件工具链中完成可追踪的原子写入。
+# LLM: 三种内容输入共用 mutating/operation 合同；可选语法观察不绕审批、版本、owner 墙或改变写入成功事实。
+# 类用途: 在原文件链完成可追踪的原子写入，并反馈本次候选的有限语法信息。
 class WriteFileTool(FileSystemTool):
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy("mutating"),
@@ -213,8 +221,8 @@ class WriteFileTool(FileSystemTool):
             ),
         )
 
-    # LLM: 来源错误必须在目标写入前拒绝，写入之后的异常仍保留原 UNKNOWN 语义；来源回执不授予执行权。
-    # 函数用途: 共用原路径与产物检查完成写入，返回版本、字节数、展示与可选来源摘要。
+    # LLM: 来源错误仍在写前拒绝；语法观察属于本次调用，发布成功才附回执，诊断失败不得改写原 effect。
+    # 函数用途: 共用原路径与产物检查完成写入，返回版本、字节数、来源和可选语法反馈。
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         try:
             request = _write_request(self, params)
@@ -271,7 +279,8 @@ class WriteFileTool(FileSystemTool):
             else None
         )
         target = _prepare_write_target(self, request.target)
-        write_error = _atomic_write_or_error(self, target, request)
+        diagnostics = FileSyntaxDiagnostics() if self.enable_file_syntax_diagnostics else None
+        write_error = _atomic_write_or_error(self, target, request, diagnostics)
         if write_error is not None:
             return write_error
         web_decision = check_web_project_post_write(target, self.workspace_root)
@@ -308,13 +317,16 @@ class WriteFileTool(FileSystemTool):
             )
         if feedback:
             result.result_envelope["soft_feedback"] = feedback
-        return result
+        return attach_syntax_diagnostics(result, diagnostics)
 
 
+# LLM: 发布成功后经统一诊断边界登记；普通收集异常不进入产物失败分类，取消继续传播，联查三入口和 source_ref。
+# 函数用途: 执行原子写入并保留原错误回执，成功后安全地汇集可选语法信息。
 def _atomic_write_or_error(
     tool: WriteFileTool,
     target: Path,
     request: WriteRequest,
+    diagnostics: FileSyntaxDiagnostics | None = None,
 ) -> ToolHandlerOutcome | None:
     """执行原子写入；失败返回 ToolHandlerOutcome，成功返回 None。从 execute 抽出以控行数。"""
     try:
@@ -324,7 +336,8 @@ def _atomic_write_or_error(
             append=request.mode == "append",
         )
         with tool.quota_changes([change]):
-            _atomic_write_bytes(target, request.data, mode=request.mode, expected_version=request.observed_version)
+            observation = _atomic_write_bytes(target, request.data, mode=request.mode,
+                                              expected_version=request.observed_version, diagnostics=diagnostics)
     except StaleFileVersionError as exc:
         return ToolHandlerOutcome("write_file", False, str(exc), error_code="STALE_VERSION", effect_outcome="not_started", retryable=True)
     except (OwnerQuotaExceeded, OwnerQuotaUnavailable) as exc:
@@ -345,6 +358,7 @@ def _atomic_write_or_error(
             f"写入失败: {exc}",
             error_code="TOOL_EXECUTION_FAILED",
         )
+    update_syntax_diagnostics(diagnostics, observation)
     return None
 
 
@@ -577,12 +591,13 @@ def _write_output(request: WriteOutputRequest) -> str:
     return "\n".join(notes)
 
 
-# LLM: 单文件发布保留普通权限但不继承提权位；create_only 通过原子 link 防止检查后并发覆盖。
-# 函数用途: 写临时文件、校验后发布；移动时继承源普通权限，新文件默认私有，失败清理临时文件。
+# LLM: 单文件发布保留原权限、二进制门及版本检查；诊断来自同一完整候选 fd，仅发布成功后返回，不构成发布门。
+# 函数用途: 写临时文件并原子发布，返回可选语法观察；失败清理候选，不用发布后读回猜测写入内容。
 def _atomic_write_bytes(
     target: Path, data: bytes, *, mode: str = "overwrite",
     create_only: bool = False, file_mode: int | None = None, expected_version: str | None = None,
-) -> None:
+    diagnostics: FileSyntaxDiagnostics | None = None,
+) -> FileSyntaxObservation | None:
     target.parent.mkdir(parents=True, exist_ok=True)
     check_file_version(target, expected_version)
     original_mode = file_mode if file_mode is not None else (target.stat().st_mode & 0o777 if target.exists() else None)
@@ -590,7 +605,7 @@ def _atomic_write_bytes(
         prefix=f".{target.name}.", suffix=_temp_suffix_for(target), dir=str(target.parent)
     )
     try:
-        _write_temp_bytes(fd, target, data, mode=mode)
+        observation = _write_temp_bytes(fd, target, data, mode=mode, diagnostics=diagnostics)
         _validate_final_artifact_candidate(Path(tmp_name), target)
         if original_mode is not None:
             os.chmod(tmp_name, original_mode & 0o777)
@@ -600,17 +615,31 @@ def _atomic_write_bytes(
             _unlink_temp_file(tmp_name)
         else:
             os.replace(tmp_name, target)
+        return observation
     except Exception:
         _unlink_temp_file(tmp_name)
         raise
 
 
-def _write_temp_bytes(fd: int, target: Path, data: bytes, *, mode: str) -> None:
-    with os.fdopen(fd, "wb") as file:
+# LLM: 诊断只读当前 mkstemp fd；关闭保留原写模式，普通诊断错误不拦发布，ToolCancelled 必须传播并清理候选。
+# 函数用途: 写入并同步候选字节，再按开关从同一描述符取得有限语法观察。
+def _write_temp_bytes(
+    fd: int, target: Path, data: bytes, *, mode: str,
+    diagnostics: FileSyntaxDiagnostics | None = None,
+) -> FileSyntaxObservation | None:
+    with os.fdopen(fd, "w+b" if diagnostics is not None else "wb") as file:
         _copy_existing_for_append(file, target, mode)
         file.write(data)
         file.flush()
         os.fsync(file.fileno())
+        if diagnostics is not None:
+            try:
+                return diagnostics.observe_candidate(target, file)
+            except ToolCancelled:
+                raise
+            except Exception:
+                return unavailable_observation(target)
+    return None
 
 
 def _copy_existing_for_append(file: object, target: Path, mode: str) -> None:

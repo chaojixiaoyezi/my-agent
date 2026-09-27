@@ -1,5 +1,5 @@
-# LLM: 基础工具在此装配，可信 resolver/schema 由 core 成对注入；构造不得读取私有资源或绕开逐调用执行策略。
-# 模块用途: 统一注册原文件、进程和检索工具，让来源声明与解析器沿主代理和子代理同一权限链连接。
+# LLM: 基础工具在此装配，可信来源合同和语法反馈开关由 core 注入；构造不读私有资源，仍服从逐调用执行策略。
+# 模块用途: 统一注册文件、进程和检索工具，让来源与可选诊断沿同一权限链连接。
 from __future__ import annotations
 
 from typing import Any
@@ -51,8 +51,8 @@ def register_base_tools(registry: Any, params: Any) -> None:
 
 
 
-# LLM: 写文件的 source resolver/schema 由可信宿主成对注入，逐调用仍由 Registry 裁剪目标和子代理权限；构造不读资源或写文件。
-# 函数用途: 装配共用路径、配额和同源输入声明的文件工具，保持原文本／二进制写入行为。
+# LLM: source resolver/schema 和语法开关只由宿主注入；三写入口共用配置，逐调用仍由 Registry 裁剪目标权限。
+# 函数用途: 装配路径、配额、同源输入及可选诊断，不读取资源或执行写入。
 def _register_filesystem_tools(registry: Any, params: Any) -> None:
     workspace_roots = registry.workspace_roots
     access_options = filesystem_access_options(
@@ -62,6 +62,7 @@ def _register_filesystem_tools(registry: Any, params: Any) -> None:
         protected_persona_root=params.protected_persona_root,
         owner_quota_max_bytes=getattr(params, "owner_quota_max_bytes", 0),
         owner_quota_policy_available=getattr(params, "owner_quota_policy_available", True),
+        enable_file_syntax_diagnostics=params.enable_file_syntax_diagnostics,
     )
     registry.register(
         ListFilesTool(registry.workspace_root, params.max_entries, workspace_roots, access_options)

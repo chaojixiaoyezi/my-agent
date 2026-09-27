@@ -204,6 +204,25 @@ claimed绑定实际请求/run/attempt与候选指纹；旧缺键、claimed、fin
 
 ## 主任务、子代理和长任务
 
+### 子代理首请求的已授权入口准备（2026-09-27，已实现／组件通过，组合与真实待验）
+
+最新长任务的四个孩子已有准确包名卡、next_read和同代引用，却没有读取包正文。现行“仅主任务自动入口”合同没有违约，
+但只让名卡可见不足以保证子任务方法可用。本片扩展原首请求准备，复用`enable_capability_package_selection`及原入口预算：
+
+- 只对新创建、具有原首请求资格的子线程装配。现有`host_subagent_first_request`的创建/领取/发送状态仍是唯一资格来源，
+  原宿主创建链传入`SubagentEntryInitialization`，只有无Jev advice的新资格增加包入口purpose；已有Jev标记逐字节保持。
+  不能从空历史、空工具账推断首次，不给旧无标记线程补资格。
+- 只读取canonical child的显式授权与精确包pins的交集；调用原policy、快照及共享reader，沿原RuntimeFacts进入实际build/capture。
+- 不运行选择模型、不改包pin、不复制父历史、不自动给权限；父有包而孩子无授权、旧代停用或不完整refs均不注入正文。
+- 一次领取绑定原run/attempt；取消或换attempt后迟到读取不提交。首发重试、Compact和resume沿原状态及已存历史，不重复准备。
+- 关闭开关保持原路径；Jev关闭也可有包入口准备，Jev开启的建议校验/采用规则保持。正文仍为不可信资料，具体方法按需读取。
+- 原marker单独证明首请求准备资格；pending advice只控制Jev自动采用。首请求前或领取时的显式选模不会消耗合法包入口资格，仍保留所选模型；关闭包开关时保持原advice CAS。
+
+共享首请求文件已由Jev负责人明确交接，单人实现后交回；已冻结L01失败不回填。25文件570项组件测试包含实际序列化正文、
+零新增模型选择、空授权/越范围/换代/取消、预算分页、重试/恢复和Jev两态；两项因果变异核对新资格有效且旧线程不回填。
+独立复核发现显式选模后漏入口的组合缺口，已补红绿及claim交错；相关十文件254项、独立11项/6组探针通过。claim结构整理后的新冻结源码三片35文件977项及本地严格gate通过；主线组合和真实使用另行验收。
+尚未安装真实运行版，不以pin存在或组件通过替代真实方法使用证据。
+
 沿用 `allowed_skills`、`skill_snapshot_refs` 及原 capability grants 作为权威授权与版本来源，
 其中允许包级 canonical ref；不另建一份 allowed_packages 账。
 同一 ref 行增加明确 kind、package ID、package digest 和 activation ID，完整性不能只核对正文。

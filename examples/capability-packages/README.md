@@ -4,8 +4,8 @@
 
 | 包 | 当前源码版本 | 特点 | 交付与边界 |
 | --- | --- | --- | --- |
-| `drama-text-a` | `0.1.2` | 先核对原文依据，再改编场次和镜头 | 文本方案、来源覆盖、逐场/总时长对账；不生成媒体 |
-| `drama-workflow-b` | `0.1.1` | 五类制作资料的结构和交接 | 跨表关系、分集时长与静态报告；不具备上游全部报告交互 |
+| `drama-text-a` | `0.2.0` | 先核对原文依据，再改编场次和镜头 | 文本方案、来源覆盖、逐场/总时长对账；不生成媒体 |
+| `drama-workflow-b` | `0.1.3` | 五类制作资料的结构和交接 | 跨表关系、分集时长与静态报告；不具备上游全部报告交互 |
 | `security-evidence` | `0.1.0` | 范围明确的既有证据整理 | 证据摘要、来源去重、发现引用和待复核报告；不扫描、不验证漏洞 |
 
 `CAPABILITY.md` 是包入口。`methods/`、`templates/`、`resources/`、`scripts/` 只属于本包；三个包都有 `methods/review.md`，内容各不相同，不能按裸文件名覆盖。
@@ -25,13 +25,22 @@
 
 当前为开发候选；新版本的组件、构建和真实 TUI 结果分别记账，旧候选结果不能直接继承。
 
+## 当前来源与交接检查候选
+
+A0.2.0 的交付格式为 `drama_text_delivery.v2`，镜头依据、改编新增和未决内容分别声明；检查器仍不判原文语义真伪。
+B0.1.3 的交接格式为 `drama_workflow_handoff.v2`，使用明确的文件编号、JSON Pointer、对象编号及阶段范围。
+`--handoff` 与重复的 `--input-file FILE_ID=PATH` 显式提供验证对象；交接文件中的路径不能自行触发文件读取。
+只有项目检查时，报告明确交接未检查；存在并有摘要不证明对象映射或故事连续性正确。
+
+上述为源码开发候选，组件和真实 TUI 验收结果分别记账；已安装旧包和旧失败证据保持原版本。
+
 ## 构建
 
 在仓库根目录运行，输出目录由操作者指定，目标文件必须不存在：
 
 ```bash
-python3 scripts/build_capability_package.py --declaration examples/capability-packages/drama-text-a/declaration.json --files-root examples/capability-packages/drama-text-a --output /tmp/drama-text-a-0.1.2.zip
-python3 scripts/build_capability_package.py --declaration examples/capability-packages/drama-workflow-b/declaration.json --files-root examples/capability-packages/drama-workflow-b --output /tmp/drama-workflow-b-0.1.1.zip
+python3 scripts/build_capability_package.py --declaration examples/capability-packages/drama-text-a/declaration.json --files-root examples/capability-packages/drama-text-a --output /tmp/drama-text-a-0.2.0.zip
+python3 scripts/build_capability_package.py --declaration examples/capability-packages/drama-workflow-b/declaration.json --files-root examples/capability-packages/drama-workflow-b --output /tmp/drama-workflow-b-0.1.3.zip
 python3 scripts/build_capability_package.py --declaration examples/capability-packages/security-evidence/declaration.json --files-root examples/capability-packages/security-evidence --output /tmp/security-evidence.zip
 ```
 

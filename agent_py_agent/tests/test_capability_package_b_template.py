@@ -75,7 +75,7 @@ def test_filled_template_passes_original_read_only_checker(tmp_path):
     assert result["metrics"]["shots"] == 3
     assert path.read_bytes() == before
     assert {item["code"] for item in result["warnings"]} == {
-        "reference_media_not_verified", "creative_quality_and_media_not_checked",
+        "reference_media_not_verified", "creative_quality_and_media_not_checked", "handoff_not_checked",
     }
 
 
@@ -133,45 +133,52 @@ def test_template_does_not_require_invented_props_or_reference_plans(check_proje
     assert {item["code"] for item in result["warnings"]} == {"creative_quality_and_media_not_checked"}
 
 
-def test_handoff_records_raw_files_and_explicit_mapping_without_claiming_validation(tmp_path, check_project):
+def test_handoff_template_maps_bound_raw_files_without_claiming_semantic_validation(tmp_path, check_project, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     handoff = json.loads((PACKAGE_ROOT / "templates/handoff.json").read_text(encoding="utf-8"))
+    assert handoff["schema"] == "drama_workflow_handoff.v2"
     source = tmp_path / "source.json"
     source.write_bytes(b'{\r\n  "cast": [{"id": "SRC-C01", "name": "actor"}, {"id": "SRC-C99", "name": "other"}]\r\n}\r\n')
     project = _filled_project()
     output = _write_json(tmp_path, "project.json", project)
+    before = {path: path.read_bytes() for path in (source, output)}
     file_shape = handoff["files"][0]
     handoff["files"] = [
         {field: values[field] for field in file_shape}
         for values in (
-            {"id": "input-1", "path": source.name, "sha256": hashlib.sha256(source.read_bytes()).hexdigest()},
-            {"id": "project-1", "path": output.name, "sha256": hashlib.sha256(output.read_bytes()).hexdigest()},
+            {"id": "input-1", "path": source.name, "sha256": hashlib.sha256(before[source]).hexdigest()},
+            {"id": "project-1", "path": output.name, "sha256": hashlib.sha256(before[output]).hexdigest()},
         )
     ]
-    mapping = {"source_file_id": "input-1", "source_field": "cast.id", "source_object_id": "SRC-C01",
-               "target_file_id": "project-1", "target_field": "characters.id", "target_object_id": "C01",
+    mapping = {"stage_id": "characters",
+               "source": {"file_id": "input-1", "pointer": "/cast/0", "object_id": "SRC-C01"},
+               "target": {"file_id": "project-1", "pointer": "/characters/0", "object_id": "C01"},
                "reason": "将来源角色编号对应到制作资料角色编号"}
     handoff["object_mappings"] = [{field: mapping[field] for field in handoff["object_mappings"][0]}]
     handoff["stages"][0].update(id="characters", scope="角色资料转换", input_file_ids=["input-1"],
                                  output_file_ids=["project-1"], review_notes="仅核对本条编号映射，其余语义尚未审阅")
-    omitted = {"source_file_id": "input-1", "source_field": "cast.id", "source_object_id": "SRC-C99",
+    omitted = {"stage_id": "characters", "source": {"file_id": "input-1", "pointer": "/cast/1", "object_id": "SRC-C99"},
                "reason": "本次合成场次没有采用此来源角色"}
-    added = {"target_file_id": "project-1", "target_field": "characters.id", "target_object_id": "C02",
+    added = {"stage_id": "characters", "target": {"file_id": "project-1", "pointer": "/characters/1", "object_id": "C02"},
              "reason": "公开合成示例中的另一角色，非该输入已提供事实"}
     handoff["omissions"] = [{field: omitted[field] for field in handoff["omissions"][0]}]
     handoff["additions"] = [{field: added[field] for field in handoff["additions"][0]}]
-    handoff["unresolved_differences"][0].update(file_ids=["input-1", "project-1"], object_ids=["C01"],
+    handoff["unresolved_differences"][0].update(stage_id="characters", refs=[mapping["source"], mapping["target"]],
                                                difference="来源未提供 visual_anchor", next_step="由制作方补充并审阅")
     saved = _write_json(tmp_path, "handoff.json", handoff)
     recovered = json.loads(saved.read_text(encoding="utf-8"))
+    checker = runpy.run_path(str(PACKAGE_ROOT / "scripts/check_continuity.py"))["check_handoff"]
+    result = checker(recovered, {"input-1": source, "project-1": output})
 
-    assert recovered["files"][0]["sha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
-    normalized = json.dumps(json.loads(source.read_bytes())).encode()
-    assert recovered["files"][0]["sha256"] != hashlib.sha256(normalized).hexdigest()
+    assert result["structure_valid"], result
+    assert {path: path.read_bytes() for path in before} == before
+    assert recovered["files"][0]["sha256"] != hashlib.sha256(json.dumps(json.loads(before[source])).encode()).hexdigest()
     assert recovered["object_mappings"][0] == mapping
     assert recovered["omissions"] == [omitted]
     assert recovered["additions"] == [added]
     assert recovered["stages"][0]["output_file_ids"] == ["project-1"]
-    assert recovered["unresolved_differences"][0]["object_ids"] == ["C01"]
+    assert recovered["unresolved_differences"][0]["refs"] == [mapping["source"], mapping["target"]]
+    assert "unresolved_differences_present" in {item["code"] for item in result["warnings"]}
     assert check_project(project)["structure_valid"]
     assert {"code": "unsupported_schema", "path": "schema"} in check_project(recovered)["errors"]
 
@@ -180,7 +187,7 @@ def test_handoff_and_complete_template_are_declared_private_resources(tmp_path):
     declaration = json.loads((PACKAGE_ROOT / "declaration.json").read_text(encoding="utf-8"))
     bundle = build_capability_package(declaration, PACKAGE_ROOT, tmp_path / "package.zip")
     manifest = inspect_plugin_package(bundle.read_bytes()).manifest
-    assert manifest.version == "0.1.2"
+    assert manifest.version == "0.1.3"
     assert manifest.is_content_only and not manifest.skills and not manifest.tools
     files = {member.path: member for member in manifest.files}
     with ZipFile(bundle) as archive:

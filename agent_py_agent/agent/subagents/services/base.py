@@ -22,6 +22,7 @@ from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import Any
 
+from ...capability.subagent_entry_authority import SubagentEntryInitialization
 from ...common.id_generator import new_id as _framework_new_id
 from ...settings.thread_model_selection import PendingSubagentModelAdvice
 from ..authorization_gate import (
@@ -77,7 +78,7 @@ class CreateRunParams:
     destroy_summary_required: bool = True
 
 
-# LLM: task 是原样提交的同一对象；model_advice 仅供新 thread 初始化，不进 task attrs、不赋予模型采用权，重冻须保留精确关联。
+# LLM: task 是同一待提交对象；模型建议和包入口初始化均为宿主 typed 材料，只供新 thread 使用，不进 attrs，不赋予权限。
 # 类用途: 保存原创建身份、参数和可选待验证建议，让只读投影与正式创建复用同一子代理。
 @dataclass(frozen=True)
 class PreparedSubagentRun:
@@ -87,6 +88,7 @@ class PreparedSubagentRun:
     created_at: float
     parent_revision: int | None
     model_advice: PendingSubagentModelAdvice | None = None
+    package_entry_initialization: SubagentEntryInitialization | None = None
 
 
 @dataclass(frozen=True)
@@ -453,8 +455,8 @@ class SubAgentBaseService:
         """Register a subagent role card."""
         self.manager.cards[card.name] = card
 
-    # LLM: 原创建锁串行线程/DB/canonical 发布但不提供跨存储回滚；准备结果锁内复核，同一对象的建议只初始化新 thread。
-    # 函数用途: 创建孩子及独立会话；复用只读准备时拒绝输入、父代次、权限或对象漂移，不重新生成身份。
+    # LLM: 原创建锁串行线程/DB/canonical 发布但不提供跨存储回滚；同一对象的建议和包首资格只初始化新 thread，锁内复核权限。
+    # 函数用途: 创建孩子及独立会话，传递宿主首次准备材料；复用准备时拒绝输入、父代次、权限或对象漂移。
     def create_run(
         self,
         *,
@@ -469,7 +471,8 @@ class SubAgentBaseService:
                 else self._validated_prepared_run(params, prepared)
             )
             task = prepared.task
-            self._materialize_agent_thread(task, model_advice=prepared.model_advice)
+            self._materialize_agent_thread(task, model_advice=prepared.model_advice,
+                                           package_entry_initialization=prepared.package_entry_initialization)
             self._write_authority_records(task, prepared.params)
             self._finalize_task(task, prepared.params.parent_id)
             return task
@@ -543,12 +546,14 @@ class SubAgentBaseService:
             return
         raise ValueError("子代理准备对象已经发布，不能重复创建。")
 
-    # LLM: 生命周期发布前沿原入口物化准确线程和显式 Goal；建议来自准备载体而非 attrs，已有 thread 不重植 pending。
+    # LLM: 生命周期发布前沿原入口物化准确线程和 Goal；建议及包资格只来自宿主 typed 准备，已有 thread 不重植 pending/首请求标记。
     # 函数用途: 建立孩子会话并只在新线程初始化待验证建议，实际模型保持原继承或用户显式选择。
-    def _materialize_agent_thread(self, task: SubAgentTask, *, model_advice: PendingSubagentModelAdvice | None = None) -> None:
+    def _materialize_agent_thread(self, task: SubAgentTask, *, model_advice: PendingSubagentModelAdvice | None = None,
+                                  package_entry_initialization: SubagentEntryInitialization | None = None) -> None:
         from ...conversation.agent_thread import ensure_subagent_thread
 
-        ensure_subagent_thread(self.manager, task, model_advice=model_advice)
+        ensure_subagent_thread(self.manager, task, model_advice=model_advice,
+                               package_entry_initialization=package_entry_initialization)
         from ...conversation.goal_delegation import seed_delegated_goal
 
         seed_delegated_goal(self.manager, task)

@@ -1,5 +1,10 @@
 # 子代理维护状态
 
+能力包子入口（2026-09-27，本地已实现，组合验收中）：新建child可复用原首请求marker准备已显式授权且同代pin的包入口，
+入口沿原RuntimeFacts进入业务请求，不新增辅助选包模型。旧无marker线程不回填，关闭配置不加载，方法仍按需读取。
+原25文件570项通过；显式选模令Jev建议retained后入口资格被错误跳过的缺口已修，marker CAS独立领取包准备，pending advice只约束建议采用，相关十文件254项及独立11项/6组探针通过。claim提取早返回helper后，新冻结源码的三片35文件977项再次通过，Ruff与严格尺寸通过。
+文档及最终组合由root负责；真实私有运行仍旧f6，原四子代理任务质量失败不回填。见[能力包合同](../../design/CAPABILITY_PACKS.md#主任务子代理和长任务)。
+
 自学习 S1 改为自动确认（分支 `claude/skill-auto-summary`，2026-09-26，用户决定自学习不逐条审批）：`runner_result_service._skill_proposal_note`
 在生成提案后立即对每条新提案调用 `SkillProposalService.confirm(..., actor="auto")`，走原来的全部复核（版本、草稿 hash、来源 Candidate、
 目标不存在、解析、guard），回执记 `confirmed_by=auto`；被拒的提案保持待确认。工作日志改为 `skill_proposals=<新建数> skill_proposals_committed=<安装数>`，
