@@ -128,7 +128,12 @@ my-agent 据此写出“这几个点位宿主代码未接线”的开发需求�
     `todo_count`、`no_request`；
   - skill_proposal_review：`pending_count`；recall：`no_run_context`、`memory_count`；
     pre_recall：`no_query_fragments`、`no_free_slots`、`no_room`；curator：`nothing_to_label`；
-    curator_relation：`nothing_to_compare`、`memory_changed`。
+    curator_relation：`nothing_to_compare`、`memory_changed`；
+  - model_selection（2026-09-27，分支 `claude/9b-three-point-reach`）：每个 Gateway ask 通过 `_eligible` 算一次到达，
+    之前的机制性退出（已调用、非 ask、恢复/续跑/系统任务、已有观察标记、系统斜杠命令、claim 不符）不算；模式关闭记
+    `point_off`，但只进内存（`note_decision_reach(..., flush=False)`，保持请求钩子关闭时零 I/O 的合同），随同一 owner
+    下一次到期的计数或 Gateway 正常停止一起写盘；阶段原因码、`no_candidates`、`bad_material`、`turn_closed`（提交时
+    轮次已关，照常抛出停止），真正调用前记 `called`；预留观察标记失败（同一请求重复）不算。
 - 没登记的原因码照原样显示成“其它原因（码）”，不拒绝。
 - 开关复用 `decision_skip_records_enabled`，说明改为“决策点诊断记录”：关闭时跳过行与计数都不写。
 
@@ -142,7 +147,9 @@ my-agent 据此写出“这几个点位宿主代码未接线”的开发需求�
   `user_config` 与阶段内部的设置读取不附。
 
 **边界**：
-- model_selection、subagent_model、skill_tool 还没接计数，`covered=false`，菜单写“未统计未触发原因”，不显示成 0 次。
+- subagent_model、skill_tool 还没接计数，`covered=false`，菜单写“未统计未触发原因”，不显示成 0 次。
+- 诊断每行另有 `note`（点位适用范围的宿主说明，放在 `decision_reach_counts._POINT_NOTES`）：model_selection 写明“只在经
+  Gateway 的对话里判断，本机直连 TUI 不判断”，审计与菜单照原样显示，免得本机直连时的 0 次被看成没接线。
 - 进程内还没落盘的计数只在本进程可见：距上次合并不到 60 秒、之后又没有新到达的那部分。审计和菜单读取时会合并本进程
   未落盘的计数；Gateway 正常停止时收尾会补写一次（`cli/gateway_process._flush_decision_reach_counts`），异常退出仍会丢
   这一段，一次性命令行运行可能少计。不注册 atexit，避免解释器退出（包括测试进程）时写盘。

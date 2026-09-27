@@ -29,7 +29,9 @@ SCHEMA = "decision_reach.v1"
 CALLED = "called"
 # 本片接入到达计数的点位；其余点位展示时明确写“未统计”，不显示成 0 次。
 COVERED_POINTS = ("planning", "delivery_quality", "action_candidate", "external_material_order",
-                  "skill_proposal_review", "pre_recall", "recall", "curator", "curator_relation")
+                  "skill_proposal_review", "pre_recall", "recall", "curator", "curator_relation", "model_selection")
+# 点位的适用范围说明（宿主事实，不是原因码）：诊断里带出，审计与菜单照原样显示，免得把“这里本来就不判断”看成没接线。
+_POINT_NOTES = {"model_selection": "只在经 Gateway 的对话里判断，本机直连 TUI 不判断"}
 _FLUSH_SECONDS = 60.0
 _RETAIN_SECONDS = 7 * 86400
 _HOUR = 3600
@@ -78,13 +80,17 @@ _LABELS = {
     "nothing_to_label": "这批要整理的记忆材料里没有能标注的内容",
     "nothing_to_compare": "这批材料里没有能和已有记忆对照的内容",
     "memory_changed": "已有记忆刚刚被改过，这次先不判断",
+    "no_candidates": "没有其它可以换用的模型",
+    "turn_closed": "这一轮在判断之前就已经结束了",
 }
 
 
 # LLM: 热路径只做进程内累加；到期才合并写盘（写失败只记日志并把计数放回，绝不影响点位本身的判断与结果）。
 #   开关 decision_skip_records_enabled 为假、或宿主没有规范路径时什么都不做。reason 只能是宿主原因码，CALLED 表示真的调用了。
+#   flush=False 只在内存累加、本次绝不落盘，给有“零 I/O”合同的路径用（如选模型关闭时的请求钩子）；这些计数随同一 owner
+#   下一次到期的计数或 Gateway 正常停止一起写盘，读取时也会合并进来。
 # 函数用途: 记录一次“点位到达触发点”及其结果（调用了，或没调用的原因）。
-def note_decision_reach(agent: object, point: str, reason: str) -> None:
+def note_decision_reach(agent: object, point: str, reason: str, *, flush: bool = True) -> None:
     if not bool(getattr(getattr(agent, "config", None), "decision_skip_records_enabled", True)):
         return
     path = getattr(getattr(agent, "home_paths", None), "owner_decision_reach_counts_json", None)
@@ -94,7 +100,7 @@ def note_decision_reach(agent: object, point: str, reason: str) -> None:
     with _LOCK:
         pending = _PENDING.setdefault(str(path), {})
         pending[key] = pending.get(key, 0) + 1
-        due = time.monotonic() - _LAST_FLUSH.get(str(path), float("-inf")) >= _FLUSH_SECONDS
+        due = flush and time.monotonic() - _LAST_FLUSH.get(str(path), float("-inf")) >= _FLUSH_SECONDS
     if due:
         _flush(str(path))
 
@@ -178,6 +184,7 @@ def decision_reach_summary(home_paths: object, *, since: float) -> dict[str, obj
 
 # LLM: 纯函数；modes 是设置摘要里的 {点位: effective_mode}（读不到时传 None），reach 是 decision_reach_summary 的结果。
 #   未接入计数的点位 covered=False 并写明“未统计”，不能显示成 0 次；点位全集来自调用方给的 points。
+#   note 是点位适用范围的宿主说明（没有则为空串），展示方照原样显示。
 # 函数用途: 生成每个点位一行的诊断：是否开启、检查次数、调用次数、没调用的原因（原因码 + 大白话 + 次数）。
 def decision_point_diagnostics(points: tuple[str, ...], modes: Mapping | None, reach: Mapping) -> dict[str, dict]:
     rows = {}
@@ -185,7 +192,7 @@ def decision_point_diagnostics(points: tuple[str, ...], modes: Mapping | None, r
         counts = (reach.get("points") or {}).get(point) or _point_row({})
         mode = str((modes or {}).get(point) or "") if modes is not None else ""
         rows[point] = {"enabled": bool(mode) and mode != "off", "mode": mode or "unknown",
-                       "covered": point in COVERED_POINTS, **counts}
+                       "covered": point in COVERED_POINTS, "note": _POINT_NOTES.get(point, ""), **counts}
     return rows
 
 

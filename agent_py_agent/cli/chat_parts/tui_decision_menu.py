@@ -160,7 +160,7 @@ async def _edit_point(app, agent, session: str, view: dict) -> str:
 
 
 # LLM: 只读 decision_read 附带的 point_diagnostics（近 24 小时、按 owner）；旧 Gateway 没有这块数据时不显示任何东西，
-#   未接入计数的点位明说“未统计”，不能显示成 0 次。label 是宿主给用户的大白话，菜单不再翻译原因码。
+#   未接入计数的点位明说“未统计”，不能显示成 0 次。label 与 note 都是宿主给用户的大白话，菜单照原样显示，不再翻译。
 # 函数用途: 把一个点位最近为什么没触发压成一句话，附在“逐接入点设置”列表的行尾。
 def _diagnosis(view: dict, point: str) -> str:
     row = (view.get("point_diagnostics") or {}).get(point)
@@ -170,7 +170,8 @@ def _diagnosis(view: dict, point: str) -> str:
         return " · 近24小时：未统计未触发原因"
     missed = row.get("not_called") or []
     top = f"，最多是因为：{missed[0].get('label')}（{missed[0].get('count')}次）" if missed else ""
-    return f" · 近24小时检查{int(row.get('reached') or 0)}次、调用{int(row.get('called') or 0)}次{top}"
+    note = f"（{row['note']}）" if row.get("note") else ""
+    return f" · 近24小时检查{int(row.get('reached') or 0)}次、调用{int(row.get('called') or 0)}次{top}{note}"
 
 
 # LLM: 模型列表只读原脱敏目录的 decision 用途；不可用配置仍可绑定，保存验证和共享撤销仍由原服务执行。

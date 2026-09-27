@@ -183,10 +183,13 @@ def test_point_diagnosis_line_uses_host_labels_and_marks_uncounted_points():
         "recall": {"covered": True, "reached": 3, "called": 1, "not_called": [
             {"reason": "memory_count", "label": "这轮找到的普通记忆不到 2 条，不需要重新排序", "count": 2}]},
         "planning": {"covered": True, "reached": 0, "called": 0, "not_called": []},
-        "model_selection": {"covered": False, "reached": 0, "called": 0, "not_called": []}}}
+        "skill_tool": {"covered": False, "reached": 0, "called": 0, "not_called": []},
+        "model_selection": {"covered": True, "reached": 0, "called": 0, "not_called": [],
+                            "note": "只在经 Gateway 的对话里判断，本机直连 TUI 不判断"}}}
     assert _diagnosis(view, "recall") == " · 近24小时检查3次、调用1次，最多是因为：这轮找到的普通记忆不到 2 条，不需要重新排序（2次）"
     assert _diagnosis(view, "planning") == " · 近24小时检查0次、调用0次"
-    assert _diagnosis(view, "model_selection") == " · 近24小时：未统计未触发原因"
+    assert _diagnosis(view, "skill_tool") == " · 近24小时：未统计未触发原因"
+    assert _diagnosis(view, "model_selection") == " · 近24小时检查0次、调用0次（只在经 Gateway 的对话里判断，本机直连 TUI 不判断）"
     assert _diagnosis({}, "recall") == "" and _diagnosis(view, "curator") == ""
 
 

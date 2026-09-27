@@ -123,11 +123,13 @@ def test_diagnostics_mark_uncovered_points_and_enabled_state(tmp_path):
     for reason in ("focus_count", "focus_count", "nothing_to_review", CALLED):
         note_decision_reach(agent, "delivery_quality", reason)
     reach = decision_reach_summary(agent.home_paths, since=0)
-    rows = decision_point_diagnostics(("delivery_quality", "model_selection", "planning"),
-                                      {"delivery_quality": "apply", "model_selection": "off"}, reach)
+    rows = decision_point_diagnostics(("delivery_quality", "skill_tool", "planning", "model_selection"),
+                                      {"delivery_quality": "apply", "skill_tool": "off"}, reach)
     assert rows["delivery_quality"]["enabled"] is True and rows["delivery_quality"]["reached"] == 4
     assert [item["reason"] for item in rows["delivery_quality"]["not_called"]] == ["focus_count", "nothing_to_review"]
-    assert rows["model_selection"]["covered"] is False and rows["model_selection"]["enabled"] is False
+    assert rows["skill_tool"]["covered"] is False and rows["skill_tool"]["enabled"] is False
+    assert rows["model_selection"]["covered"] is True and "Gateway" in rows["model_selection"]["note"]
+    assert rows["delivery_quality"]["note"] == ""
     assert rows["planning"]["covered"] is True and rows["planning"]["reached"] == 0 and rows["planning"]["mode"] == "unknown"
     unknown = decision_point_diagnostics(("planning",), None, reach)["planning"]
     assert unknown["enabled"] is False and unknown["mode"] == "unknown"
@@ -197,3 +199,14 @@ def test_threshold_labels_are_built_from_the_shared_limits(monkeypatch):
     for reason, (low, high) in uses.items():
         label = miss_reason_label(reason)
         assert f"不到 {numbers[low]} " in label and (high is None or f"超过 {numbers[high]} " in label), label
+
+
+def test_in_memory_reach_never_touches_disk_until_a_later_flush(tmp_path):
+    agent = _agent(tmp_path)
+    path = agent.home_paths.owner_decision_reach_counts_json
+    note_decision_reach(agent, "model_selection", "point_off", flush=False)
+    assert not path.exists(), "flush=False 的到达只进内存"
+    assert decision_reach_summary(agent.home_paths, since=0)["points"]["model_selection"]["reached"] == 1
+    note_decision_reach(agent, "planning", CALLED)
+    stored = json.loads(path.read_text(encoding="utf-8"))["hours"]
+    assert [sorted(points) for points in stored.values()] == [["model_selection", "planning"]]

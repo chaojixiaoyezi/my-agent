@@ -74,7 +74,7 @@ def _owner_host(agent: object, home: object) -> SimpleNamespace:
 # LLM: 设置读取失败只记结构化原因（设置忙或配置不可读），不影响用量统计。points 取 owner 决策结果日志的按点位汇总，
 #   是判断某接入点是否被调用、被冷却/期限挡住的唯一来源；用量账只按用途汇总，不能拿它推断单个点位。
 #   scope=current_thread 时 points 与用量、观察一样只统计可信的当前会话（不含其它会话与后台点位）。
-#   point_diagnostics 取 decision_reach_counts：每个点位是否开启、检查几次、调用几次、没调用的原因（原因码 + 大白话）；
+#   point_diagnostics 取 decision_reach_counts：每个点位是否开启、检查几次、调用几次、没调用的原因（原因码 + 大白话）与适用范围说明 note；
 #   它按 owner 统计（diagnostics_scope=owner），不随 current_thread 缩小。
 # 函数用途: 汇总一个 owner 的决策设置、管理员控制、时间窗内的调用统计、各接入点的决策结果与未触发原因。
 def _decision_owner_report(owner_id: str, host: object, thread_ids: list[str], query: AuditQuery) -> dict:
@@ -183,7 +183,8 @@ class AuditRecordsTool(BaseTool):
             "reason=privacy_url 指要外发的材料含带查询串的 URL），"
             "以及 point_diagnostics：每个接入点是否开启（enabled）、最近检查了几次（reached）、真正调用几次（called）、"
             "没调用的原因分布（not_called 的 label 是给用户看的大白话）。调用 0 次不代表没接线，向用户解释时请直接用这些 label"
-            "说明“最近为什么没触发”；covered=false 的点位表示还没统计未触发原因，不要说成 0 次。"
+            "说明“最近为什么没触发”；note 是点位适用范围（如选模型只在经 Gateway 的对话里判断）；"
+            "covered=false 的点位表示还没统计未触发原因，不要说成 0 次。"
             "Gateway 请求记录里的选模型与能力推荐观察。topic=requests 列出 Gateway 请求结果：状态、错误码及处理建议、渠道、"
             "私聊/群聊、耗时和归属用户；用户说'飞书/IM/TUI 发消息报错、没回复'时先用它查，管理员调用时还附带管理员密码是否已设、"
             "哪些 IM 私聊已绑定管理员。scope=current_thread 只看当前会话，owner（默认）看本人全部会话，"

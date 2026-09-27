@@ -13,8 +13,13 @@ import pytest
 from agent_py_agent.agent import gateway_model_observation as model_observation
 from agent_py_agent.agent.agent_core.model.call_runtime import model_call_summary
 from agent_py_agent.agent.backends import gateway_helpers
-from agent_py_agent.agent.backends.decision_protocol import DecisionAnswer, DecisionResponse
+from agent_py_agent.agent.backends.decision_protocol import (
+    DecisionAnswer,
+    DecisionInputError,
+    DecisionResponse,
+)
 from agent_py_agent.agent.conversation import decision_policy, decision_service
+from agent_py_agent.agent.conversation import decision_reach_counts as reach_counts
 from agent_py_agent.agent.conversation.history_seed import history_source_provider_messages
 from agent_py_agent.agent.gateway_parts import (
     request_binding,
@@ -109,6 +114,35 @@ def capture_main(monkeypatch):
     return calls
 
 
+
+# 函数用途: 读出本请求 owner 的选模型到达结果 ({原因: 次数}, 调用次数)，含本进程还没落盘的计数。
+def reach(fixture):
+    row = reach_counts.decision_reach_summary(fixture.agent.home_paths, since=0)["points"].get("model_selection")
+    row = row or {"not_called": [], "called": 0}
+    return {item["reason"]: item["count"] for item in row["not_called"]}, row["called"]
+
+
+@pytest.mark.parametrize("case,expected", [
+    ("called", ({}, 1)), ("no_candidates", ({"no_candidates": 1}, 0)),
+    ("stage_error", ({"settings_busy": 1}, 0)), ("bad_material", ({"bad_material": 1}, 0)),
+])
+def test_each_eligible_request_counts_one_reach_outcome(tmp_path, monkeypatch, case, expected):
+    fixture = prepared(tmp_path)
+    backend = install_backend(monkeypatch, fixture)
+    main = capture_main(monkeypatch)
+    if case == "no_candidates":
+        monkeypatch.setattr(model_observation, "_candidates", lambda *_args: {})
+    elif case == "stage_error":
+        monkeypatch.setattr(decision_service, "begin_decision_stage", lambda *_args, **_kwargs: SimpleNamespace(
+            error_code="settings_busy", enabled_points=(), deadline=0.0))
+    elif case == "bad_material":
+        def broken(*_args):
+            raise DecisionInputError("候选超出协议上限")
+
+        monkeypatch.setattr(model_observation, "_material", broken)
+    assert request_execution._run_gateway_ask(fixture.context) == "original-main" and len(main) == 1
+    assert len(backend.calls) == expected[1] and reach(fixture) == expected
+
 @pytest.mark.parametrize("mode", ["observe", "apply"])
 def test_lane_hook_observes_once_and_preserves_original_model_and_request(tmp_path, monkeypatch, mode):
     fixture = prepared(tmp_path, mode=mode)
@@ -172,6 +206,9 @@ def test_off_hook_needs_no_io_or_candidate_or_service_and_keeps_loaded_input(tmp
     observer(thread)
     assert observer.params is None and fixture.context.request_path.read_bytes() == before
     assert request_binding.MODEL_OBSERVATION_KEY not in fixture.context.request
+    # 关闭也算一次到达，但只进内存待写队列（flush=False），保持零 I/O。
+    pending = reach_counts._PENDING.get(str(fixture.agent.home_paths.owner_decision_reach_counts_json), {})
+    assert [(key[1], key[2], count) for key, count in pending.items()] == [("model_selection", "point_off", 1)]
 
 
 @pytest.mark.parametrize("initial,after,expected", [("off", "observe", 1), ("observe", "off", 0)])
@@ -236,7 +273,7 @@ def test_recovery_or_existing_marker_or_control_never_reobserves(tmp_path, monke
     capture_main(monkeypatch)
     backend = install_backend(monkeypatch, fixture)
     assert request_execution._run_gateway_ask(fixture.context) == "original-main"
-    assert not backend.calls
+    assert not backend.calls and reach(fixture) == ({}, 0), "机制性退出不算到达"
 
 
 def test_cancelled_exact_attempt_cannot_send_and_never_runs_main(tmp_path, monkeypatch):
@@ -255,6 +292,7 @@ def test_cancelled_exact_attempt_cannot_send_and_never_runs_main(tmp_path, monke
         request_execution._run_gateway_ask(fixture.context)
     assert not backend.calls and not main
     assert fixture.context.request[request_binding.MODEL_OBSERVATION_KEY]["status"] == "cancelled"
+    assert reach(fixture) == ({"turn_closed": 1}, 0)
 
 
 def test_preparation_failure_settles_original_decision_usage(tmp_path, monkeypatch):

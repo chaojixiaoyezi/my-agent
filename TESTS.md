@@ -1,5 +1,17 @@
 # 测试与发布验收
 
+## 到达计数接上选模型（2026-09-27，分支 `claude/9b-three-point-reach` 第 1 个提交，叠在 `7d0338bf5` 上）
+
+- **口径**（集成方已确认）：每个 Gateway ask 通过 `_eligible` 算一次到达，之前的机制性退出不算。模式关闭记 `point_off`，
+  但只进内存（`note_decision_reach(..., flush=False)`）：这个钩子每个请求都跑，原有测试要求关闭时零读写。
+  其余结果为阶段原因码、`no_candidates`、`bad_material`、`turn_closed`；真正调用前记 `called`。
+- **新测试**：
+  - `test_gateway_model_observation.py`：正常调用、没有候选、阶段出错、材料不合格各算一次且只记一个结果；关闭时 `point_off`
+    只进内存待写队列、仍然零 I/O；恢复/已有标记/控制命令等机制性退出不算；提交时轮次已关记 `turn_closed`。
+  - `test_decision_reach_counts.py`：`flush=False` 的计数不落盘，下一次到期计数时一起写出；诊断行带 `note`。
+  - 审计与菜单：model_selection 改为已统计并带适用范围说明，“未统计”的例子换成 skill_tool。
+- **变异验证（11 种全部被抓住，逐个字节级还原）**：关闭不计、关闭时落盘（被原零 I/O 测试拦下）、阶段原因不计、没有候选不计、
+  材料不合格不计、轮次已关不计、`called` 提到提交之前、机制性退出误计、诊断丢 `note`、菜单不显示 `note`、忽略 `flush` 参数。
 ## 宿主提示 host notices（2026-09-27，分支 `claude/be-host-notices`，基于 `eb7c639a1`）
 
 - **来源**：集成者派活（方案一，已读时机 B）。智能程度检测在后台跑完后，没有地方告诉用户结论。设计见 `docs/design/HOST_NOTICES.md`。

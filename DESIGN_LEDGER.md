@@ -30,7 +30,8 @@
   - **后续已做**（2026-09-27，分支 `claude/9b-owner-path-scope`）：`home_paths_with_owner` 按用户重设 `owner_memory_policy_json`
     （Gateway 里其它用户原先读的是本机主用户的记忆策略文件），并按字段全集守卫所有 owner_* 路径都在该用户 home 内；
     Gateway 正常停止收尾补写到达计数；数量类大白话改为从 `conversation/decision_point_limits.py` 现算。
-  - **待定**：model_selection、subagent_model、skill_tool 的“到达”口径先提给集成方确认，再接计数。
+  - **三点位计数**（口径已由集成方确认，分支 `claude/9b-three-point-reach`，每个点位单独提交）：model_selection 已接
+    （关闭只在内存计数、保持零 I/O；诊断带适用范围说明 `note`）；skill_tool、subagent_model 依次跟进。
   - 详见 [决策审计与管控](docs/design/DECISION_AUDIT_AND_ADMIN_CONTROLS.md#每个点位最近为什么没触发2026-09-27)。
 - **决策点“触发了但被挡下”也留审计记录**（2026-09-27，分支 `claude/decision-skip-records`，本地回归与变异通过，见 TESTS）：
   - **起因**：my-agent 在真实 TUI 里测 Jev 点位，planning 等没有任何记录，就写出“宿主未接线”的开发需求。实际都已接线且开启；

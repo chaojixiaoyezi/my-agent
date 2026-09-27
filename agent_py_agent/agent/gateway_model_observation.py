@@ -14,6 +14,12 @@ from .command_catalog import system_slash_command_name
 from .common.cancellation import ToolCancelled
 from .contracts.idempotency import operation_id
 from .conversation import decision_service
+from .conversation.decision_reach_counts import (
+    CALLED,
+    counted_material,
+    note_decision_reach,
+    stage_miss_reason,
+)
 from .gateway_parts.request_binding import (
     MODEL_OBSERVATION_KEY,
     GatewayActiveTurnTransition,
@@ -99,6 +105,14 @@ def _observation_input(context: object, thread: object, captured: SelectedModelR
         + _USAGE_TAGS_NOTE
     ), "criteria": {**candidates, **_RETAIN_CHOICES}}}
     return state, questions
+
+
+# LLM: 材料只由 _observation_input 与候选摘要组成；候选超出协议上限时 decision_json 抛 DecisionInputError，
+#   由调用方的 counted_material 记 bad_material 后原样上抛，走原普通失败回退。
+# 函数用途: 生成一次观察的 state、题目与候选版本值。
+def _material(context: object, thread: object, captured: SelectedModelRead, candidates: dict) -> tuple[dict, dict, str]:
+    state, questions = _observation_input(context, thread, captured, candidates)
+    return state, questions, hashlib.sha256(decision_json(candidates)).hexdigest()
 
 
 # LLM: 只接收原 service 已验回执的单题结构，错误不会改称无需选择；输出不是后续自动采用凭据。
@@ -198,6 +212,8 @@ class GatewayModelObservation:
         self.adoption.reject(agent, params)
 
     # LLM: 仅宿主 fresh thread 触发；off 只读内存，没有设置/候选/marker/账本 I/O。取消原样传播，普通增强错误不阻断原主链。
+    #   通过 _eligible 即算一次到达（decision_reach_counts）：off 只在内存记 point_off（flush=False，保持零 I/O），
+    #   之前的机制性退出（已调用、恢复、控制命令等）不算到达。
     # 函数用途: 在历史修复和 Compact 之前执行一次可选观察，排队期间的线程开关改动立即生效。
     def __call__(self, thread: object) -> None:
         if self.called:
@@ -209,6 +225,7 @@ class GatewayModelObservation:
             mode = decision_point_mode_from_read(self.context.agent.config, self.captured.decision_settings,
                                                 thread, point="model_selection")
             if mode == "off":
+                note_decision_reach(self.context.agent, "model_selection", "point_off", flush=False)
                 return
             self._observe(thread, mode)
         except (InterruptedError, ToolCancelled):
@@ -264,11 +281,15 @@ class GatewayModelObservation:
 
     # LLM: 原 service 复核设置/身份/连接；observe 仅记录，apply 也只创建临时候选，不能跳过首请求/发送检查。
     #   apply 的问题说明告诉决策模型容量与工具由宿主核对、应按语义挑最合适候选，并同样解释用途标签；采用仍走原验证门。
+    #   到达结果计入 decision_reach_counts：阶段原因、no_candidates、材料不合格（bad_material）、提交时轮次已关（turn_closed），
+    #   真正调用前记 called；预留标记失败（同一请求重复）不在这里，不算到达。
     # 函数用途: 建立一次原阶段并准备只读候选，超时或无候选时保留原模型。
     def _decide(self, thread: object, op: str, mode: str) -> dict:
         agent = self.context.agent
         stage = decision_service.begin_decision_stage(agent, self.params, operation_id=op)
-        if stage.error_code or "model_selection" not in stage.enabled_points:
+        reason = stage_miss_reason(stage, "model_selection")
+        if reason:
+            note_decision_reach(agent, "model_selection", reason)
             return {"status": "skipped", "reason": stage.error_code or "disabled"}
         candidates = _candidates(agent, stage.deadline)
         generations = {}
@@ -277,13 +298,14 @@ class GatewayModelObservation:
 
             candidates, generations = freeze_selection_candidates(agent, candidates, stage.deadline)
         if not candidates:
+            note_decision_reach(agent, "model_selection", "no_candidates")
             return {"status": "skipped", "reason": "no_candidates"}
-        state, questions = _observation_input(self.context, thread, self.captured, candidates)
+        state, questions, revision = counted_material(
+            agent, "model_selection", lambda: _material(self.context, thread, self.captured, candidates))
         if mode == "apply":
             questions["model"]["instructions"] = _APPLY_INSTRUCTIONS
-        revision = hashlib.sha256(decision_json(candidates)).hexdigest()
-        GatewayActiveTurnTransition(self.context.request_path, self.context.request_id,
-                                    self.context.request["execution_attempt_id"])("submit", lambda: None)
+        self._submit(agent)
+        note_decision_reach(agent, "model_selection", CALLED)
         outcome = decision_service.decide(agent, self.params, stage, point="model_selection", state=state,
                                          questions=questions, candidates_revision=revision, caller_deadline=stage.deadline)
         result = _observation_result(outcome, candidates)
@@ -293,6 +315,16 @@ class GatewayModelObservation:
 
             self.adoption = GatewayModelAdoption(self, thread, stage, outcome, generations[choice])
         return {**result, "candidates_revision": revision}
+
+    # LLM: 发送前在原活跃轮次上登记 submit；轮次已关闭时原样抛 InterruptedError（停止语义不变），并先记一次 turn_closed。
+    # 函数用途: 确认本轮还在进行后才发出决策请求，记下“判断前轮次已结束”的到达结果。
+    def _submit(self, agent: object) -> None:
+        try:
+            GatewayActiveTurnTransition(self.context.request_path, self.context.request_id,
+                                        self.context.request["execution_attempt_id"])("submit", lambda: None)
+        except InterruptedError:
+            note_decision_reach(agent, "model_selection", "turn_closed")
+            raise
 
     # LLM: 原 runner 发布 runtime authority 后由其 finalizer 收口；准备阶段失败尚无运行身份时只沿同一 finalizer 保存本次真实用量。
     # 函数用途: 防止观察后历史/Compact 准备失败丢失 token 统计；不创建第二账本或给 off 请求增加读写。
