@@ -84,6 +84,11 @@
     `MY_AGENT_CONFIG`，模型因此误报“没有用户级配置”）；布尔、数字不加引号，写后用正式 `load_config` 回读，类型或值不一致就恢复原文件；
     列表/映射、边界项、随包 YAML 拒绝；每次写入记入用户配置旁的 `settings-changes.jsonl`（最近 500 条），可按编号前缀回滚、可连续回滚；
     凭据类只记脱敏值、不可回滚。生效时机如实为“重启 Gateway 后”（压缩百分比与读文件上限原来误报“下一次会话”），管理员可发 `/restart`。
+  - 模型档案字段（2026-09-27，分支 `claude/be-effort-probe`）：同一写入口新增 `set_profile_field` / `revert_profile_change`，
+    只改白名单 `PROFILE_FIELDS`（目前只有 `reasoning_control`，供智能程度自动检测写入），只改当前用户自己的私有档案；在模型档案
+    文件锁内读改写整行、经 `validate_model` 校验，由 `model_profiles._save_profiles` 原子保存（与 `/model` 编辑同一入口）。记在该用户
+    档案旁的 `.changes.jsonl`：与配置账本同一格式、同一脱敏与回滚规则，另带 `target`（档案编号与模型名）；按编号前缀撤销只查本人账本。
+    下一轮对话起生效（每轮都会重新读取模型档案）。详见[智能程度](REASONING_EFFORT.md)第 8 节。
   - my-agent 的 `user_config` 工具新增 search/reset/history/revert，set 走同一写入口；聊天 `/settings`（TUI 与 IM，仅管理员）
     提供总览、搜索、详情、修改、恢复默认、记录与回滚。
 - **阶段 2b（2026-09-27 已实现）**：开发工作树约定，见 §5。原计划“先做只给管理员的写入授权”核对后发现多余：F4 Full Access 就是

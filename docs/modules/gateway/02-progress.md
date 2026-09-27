@@ -1,5 +1,6 @@
 # Gateway 维护状态
 
+`/effort` 智能程度检测（分支 `claude/be-effort-probe`，2026-09-27）：`_execute_effort_control` 在设置档位后调用 `settings/reasoning_probe.effort_probe_lines`（先执行再渲染回执）：档位设成 auto 以外、当前模型未声明且解析为不支持时后台自动检测一次；`/effort probe` 手动检测，`/effort revert <编号>` 撤销检测写入的档案修改，`/effort` 显示进度或结论。检测在后台线程跑，控制命令不等网络。回归见 `test_reasoning_probe.py`。
 `/settings` 默认只看常用参数（分支 `claude/9a-settings-common-view`，2026-09-27）：`settings_control_service._overview` 只列参数中心
 常用层级（`parameter_registry.COMMON_KEYS`，21 项）的当前运行值、是否改过、说明第一句，改了没重启注明“发 /restart 后生效”，常用以外
 改过的只报个数；新子命令 `/settings all`（`_all`）是原总览加按分类的全部参数清单，［改过］［安全边界］标记。解析器 `all` 与不带参数同样

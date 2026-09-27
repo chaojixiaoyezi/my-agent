@@ -712,6 +712,13 @@ model_reasoning_effort: auto
 # - budget：按思考预算发送（Anthropic 兼容接口写 thinking.budget_tokens；部分服务商只按开/关生效）。
 # - none：不支持调节，不发任何推理参数。
 model_reasoning_control: auto
+# 智能程度自动检测：用户把 /effort 设成 auto 以外的档位，而当前模型没有声明思考控制方式、又不在上面已核对的名单里时，
+# 宿主用已保存的凭据在后台检测一次：同一道短题按“低”“最高”和不带参数各发 3 次，比较用量里的推理 token
+# （接口不单独报告推理 token 时比较输出 token）。确认支持就把这个模型档案的思考控制改为 effort（可用 /effort revert 撤销），
+# 不支持就如实记录；凭据只在宿主内部使用，不进入模型上下文。每个模型只自动检测一次，会额外发 9 次请求、消耗少量 token。
+# - true：开启（默认）。
+# - false：不自动检测；仍可用 /effort probe 手动检测。
+reasoning_control_auto_probe: true
 # 当前模型的结构化输出方式（记忆整理、自动总结 Skill 等后台结构化调用使用），通常由 /model 档案的"结构化输出"字段带入：
 # - auto：只对实测确认过的服务商改用 json_object（DeepSeek 官方 OpenAI 兼容接口不接受 json_schema），其余用原生方式。
 # - native：用接口自带的严格方式（OpenAI 兼容接口发 json_schema，Anthropic 兼容接口用强制工具信封）。

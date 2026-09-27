@@ -164,6 +164,7 @@ class ModelFieldsService:
                 ("model_context_window_tokens", 1, None),
             ),
         ))
+        warnings.extend(_apply_bool_fields(out, defaults, ("reasoning_control_auto_probe",)))
         # 智能程度档位与控制方式取值与 backends/reasoning_control 一致；非法值告警并回默认。
         warnings.extend(_apply_choice_field(out, defaults, "model_reasoning_effort", REASONING_LEVELS))
         warnings.extend(_apply_choice_field(out, defaults, "model_reasoning_control", REASONING_CONTROLS))

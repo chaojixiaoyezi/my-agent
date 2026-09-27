@@ -1,5 +1,31 @@
 # 测试与发布验收
 
+## 智能程度自动检测（2026-09-27，分支 `claude/be-effort-probe`，基于 `946a26783`）
+
+- **来源**：集成者派活。my-agent 为确认 opencode.ai 是否支持 `reasoning_effort`，3 次把用户 API key 写进 `web_fetch` 请求头；
+  产品缺“用宿主保存的凭据检测模型能力”的入口。设计见 `docs/design/REASONING_EFFORT.md` 第 8 节。
+- **新增** `test_reasoning_probe.py` 27 项，全部假传输（真实 OpenAI 兼容后端只替换 `request_json`），零网络：
+  - 判定：用 2026-09-26 实测回放标定（DeepSeek 官方判支持；OpenCode 中转、MiniMax M2.7、完整主代理上下文的 DeepSeek 判不支持）；
+    阈值边界（正好 1.5 倍且多 200、1.44 倍、只多 199、不重叠、相等即重叠、低档为 0）；拒绝字段、全部失败、没有用量、全为 0、混合计量。
+  - token 提取：两种推理 token 位置、布尔与负数不算、输出 token。
+  - 自动检测：`/effort high` 触发一次，出站按 low / max / 不带字段交替各 3 次、只带固定题目、后端控制方式临时为 effort；
+    写入档案并记账（actor `reasoning_probe`、带 target）；`/effort` 显示中位数与撤销编号；`/effort revert` 恢复且回执反映撤销后状态；
+    已有记录不再检测。开关关、auto 档、显式 none、已知服务商、Responses 协议都不自动检测。
+  - 手动检测：显式 none 也能检测；不支持（输出 token 计量并注明）、有请求失败、拒绝字段三种结论都不改档案；Responses 协议说明无法检测；
+    已知服务商判支持但不重复写。
+  - 进行中只跑一个、显示 0/9 进度，跑完可再检测且重新计时；指纹变了、running 超时的记录失效；写不了记录就不开始、之后可重试；
+    共享模型只记录；两个档案的记录共存。
+  - 部署默认模型：管理员触发时写全局配置（重启生效、`/settings revert` 撤销），普通用户只提示请管理员写入。
+  - 解析与 TUI：`/effort probe`、`/effort revert <编号>`（至少 6 位字母数字、只一个编号）往返。
+  - 档案字段修改：白名单、档案不存在、非法值（都不记账）、原值为 none 时回滚恢复 none、5 位编号拒绝、同一配置目录下的另一用户查不到、
+    只有脱敏值的记录不能回滚。
+  - 开关：dataclass 与随包 YAML 默认开，非法值告警回默认。所有回执、检测记录与账本里都没有假密钥。
+- **结果**：推理强度、命令解析与 TUI 转发、Gateway 控制、参数中心与脱敏、配置、模型档案与会话选模、架构守卫等相关测试共 1058 passed；
+  ruff、doc sync、strict code-size（与 `946a26783` 逐条相同）、`git diff --check`、clean-package 见提交前检查。
+- **变异验证**：58 个全部被抓出：判定阈值与各条规则 17 个；自动触发条件、防重复、过期、指纹、出站字段与顺序、写入与管理员门槛、共享、
+  状态码、进度展示、撤销路由、记录合并、重新计时与失败释放 24 个；档案字段白名单、校验、原值、脱敏、编号长度、按用户账本 7 个；
+  解析、命令目录、TUI 转发 5 个；Gateway 先执行后渲染 2 个；开关规范化与默认值 3 个。每个都在 `PYTHONDONTWRITEBYTECODE=1`
+  子进程里跑并逐字节恢复。
 ## owner 路径按用户作用域、停机补写到达计数、数量界限统一（2026-09-27，分支 `claude/9b-owner-path-scope`，基于 main `946a26783`）
 
 - **来源**：9b 审查结论。`home_paths_with_owner` 没有按用户重设 `owner_memory_policy_json`，Gateway 里其它用户读到的是本机主用户的

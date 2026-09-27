@@ -95,6 +95,12 @@
   - **做法**：档位 auto/off/low/medium/high/max 是会话线程属性（`/effort` 写主会话，`create_subagents.effort` 写子线程，省略继承父级实际档位，全局默认 `model_reasoning_effort`）；模型档案新增 `reasoning_control`（auto/effort/budget/none），auto 只对实测确认的 DeepSeek 官方接口给默认，其余 none，可在 `/model` 显式声明。真实请求与两处自动选模投影共用 `request_reasoning_options`，强制工具选择的关思考优先。
   - **边界**：不按模型名或正文判断能力；不支持的模型如实回执“不改变请求”；TUI 底栏暂不显示档位；Responses 协议暂不换算。
   - **真实验收**：DeepSeek 两种接口、声明为 `budget` 的 MiniMax M3、MiniMax M2.7，以及一次创建 low/max/继承三个子代理，全部符合预期（详见 TESTS.md 顶部）。生产默认模型是 OpenCode 中转，按实测不支持调节，`/effort` 会如实提示；要生效需切到 DeepSeek 官方接口，或给支持的模型显式声明控制方式。
+  - **自动检测是否支持调节**（2026-09-27，分支 `claude/be-effort-probe`，待集成）：my-agent 曾为确认 opencode.ai 是否支持推理强度，
+    3 次把 API key 写进 `web_fetch` 请求头。现在由宿主用已保存的凭据检测：`/effort` 设成 auto 以外的档位、档案未声明且解析为不支持时
+    自动检测一次（开关 `reasoning_control_auto_probe`，默认开），`/effort probe` 手动检测；同一道短题按低 / 最高 / 不带字段各发 3 次，
+    只比较 usage 里的 token（优先推理 token），“最高”组中位数至少为“低”组 1.5 倍、多 200 且两组不重叠才算支持（按 09-26 实测回放标定）。
+    确认支持时经参数中心写 `reasoning_control: effort`（私有档案下一轮生效、`/effort revert` 撤销；部署默认模型仅管理员写全局配置；
+    共享模型只记录），不支持如实记录。凭据不进入模型上下文。未落地：结果主动推送、独立短题的真实验收。详见第 8 节。
 - **Shell 读边界与回执表述不一致（macOS）**（2026-09-26 登记；回执已修复；读边界第一步已上线 step12q，上层目录热修复 step12s；第二步已实施，开关默认关闭；Codex 能力内化验收 TUI-CAP06 中前台 `run_command` 发现，证据留在其私有线；归宿主执行/沙箱这条线）：
   - **事实**：owner 隔离模式下，macOS Seatbelt 规则（`agent_py_agent/agent/attempt/sandbox.py` 的 `_macos_profile`）是 `allow default` 加 `deny file-write*` 再放开写根，只限制写、不限制读，命令能读到 owner 工作区外的宿主路径；`read_file` 的 owner 读墙更严。Shell 回执（`agent_py_agent/agent/tooling/shell.py` 的 `[sandbox_scope]` 文本与 `sandbox.external_host_paths_hidden`）在 owner 模式下一律写 `external_host_paths_hidden=true`，这只在 Linux 挂载隔离下成立，macOS 上与实际不符。
   - **影响**：模型会以为宿主路径“看不到”，实际能读到；两条读路径的边界也不一致。不涉及越权写入，但 macOS 规则里没有任何读拒绝：owner 隔离的 Shell 能读到网关账号可读的一切，包括其它 owner 的数据和含密钥的配置目录。这是安全缺口，不只是表述问题。

@@ -202,17 +202,7 @@ def parse_conversation_command(
             usage="用法：/compact [可选的摘要要求]",
         )
     if name == "effort":
-        # 档位取值与 backends/reasoning_control.REASONING_LEVELS 一致；default 清除本会话设置。
-        value = str(trailing or "").strip().lower()
-        if value in {"current", "status"}:
-            value = ""
-        return ConversationControlCommand(
-            "effort",
-            value=value,
-            operation="set" if value and value != "help" else value or "view",
-            valid=not value or value in {"auto", "off", "low", "medium", "high", "max", "default", "help"},
-            usage="用法：/effort [auto|off|low|medium|high|max|default]",
-        )
+        return _effort_command(trailing)
     if name == "stop":
         return _argumentless_command("stop", trailing, "/stop")
     if name == "interrupt":
@@ -260,11 +250,7 @@ def parse_conversation_command(
             usage="用法：/btw 你的补充要求",
         )
     if raw.lower().startswith("/effort"):
-        return ConversationControlCommand(
-            "effort",
-            valid=False,
-            usage="用法：/effort [low|medium|high|max|auto]",
-        )
+        return ConversationControlCommand("effort", valid=False, usage=_EFFORT_USAGE)
     if reject_unknown_slash and (name := system_slash_command_name(raw)):
         plugin_result = plugin_command_response(raw)
         return ConversationControlCommand(
@@ -393,6 +379,25 @@ def _goal_command(trailing: object) -> ConversationControlCommand:
 
 
 _MODEL_USAGE = "用法：/model 查看可选模型；/model <编号> 选为本会话模型；/model default <编号> 设为新会话默认。"
+_EFFORT_USAGE = ("用法：/effort [auto|off|low|medium|high|max|default]；/effort probe 检测当前模型是否支持调节；"
+                 "/effort revert <编号> 撤销检测写入的档案修改。")
+_EFFORT_WORDS = frozenset({"auto", "off", "low", "medium", "high", "max", "default", "help", "probe"})
+
+
+# LLM: 档位取值与 backends/reasoning_control.REASONING_LEVELS 一致；default 清除本会话设置；probe 手动检测当前模型
+#   （settings/reasoning_probe）；revert 只接一个至少 6 位的字母数字编号。current/status 视同查看。
+# 函数用途: 把 `/effort` 的各种写法解析成结构化控制（查看、设置、帮助、检测、撤销）。
+def _effort_command(trailing: object) -> ConversationControlCommand:
+    value = str(trailing or "").strip().lower()
+    value = "" if value in {"current", "status"} else value
+    words = value.split()
+    if words[:1] == ["revert"]:
+        change_id = " ".join(words[1:])  # 多于一个词时含空格，校验不通过
+        return ConversationControlCommand("effort", value=change_id, operation="revert",
+                                          valid=len(change_id) >= 6 and change_id.isalnum(), usage=_EFFORT_USAGE)
+    operation = value if value in {"help", "probe"} else "set" if value else "view"
+    return ConversationControlCommand("effort", value=value, operation=operation,
+                                      valid=not value or value in _EFFORT_WORDS, usage=_EFFORT_USAGE)
 
 
 # LLM: 文字形式只做查看、会话选择和默认值三件事，目标是列表编号或精确配置编号；新增/密钥永远不走聊天。

@@ -536,6 +536,8 @@ agent_py_agent/
 |   |   |-- model_oauth_wire.py         # 设备码、兑换和刷新协议的有界无重定向 HTTP
 |   |   |-- thread_model_selection.py   # canonical 会话模型编号、默认初始化与逐工作片解析
 |   |   |-- reasoning_effort.py         # 会话/子代理智能程度档位：线程现读、全局默认、/effort 写入、子代理继承与请求选项
+|   |   |-- reasoning_probe.py          # 智能程度自动检测：/effort 自动与手动检测、后台 9 次短请求、按档案记录、确认支持后经参数中心写档案
+|   |   |-- reasoning_probe_judge.py    # 智能程度检测的判定规则（纯函数）：只读 usage 的 token 字段，按 09-26 实测标定
 |   |   |-- shared_model_catalog.py     # 管理员显式共享引用目录，不复制私有连接凭证
 |   |   |-- model_provider_schema.py    # provider/model v2 校验、v1 显式迁移与单份连接快照解析
 |   |   |-- model_provider_operations.py # 锁内服务商/模型管理，密钥保留与显式清除
@@ -673,6 +675,7 @@ agent_py_agent/
 |   |-- test_skill_chat_control.py     # 聊天 /skills：解析校验、Gateway 分派不落入 stop、TUI 文本还原与本地拒绝、提案确认版本、自动 Skill 回滚删除
 |   |-- test_skill_learning.py          # 自学习 S3：触发判据、请求有界脱敏、create/update/skip、各闸门拒绝码、上限、重试、忙时顺延、回滚删除
 |   |-- test_reasoning_effort.py        # 智能程度：换算与优先级、两种协议真实组包、线程档位、投影一致、子代理继承、/effort、档案字段与配置
+|   |-- test_reasoning_probe.py         # 智能程度检测：回放标定与阈值、自动触发条件、出站字段、写档案与撤销、管理员门槛、记录失效、凭据不外泄
 |   |-- test_structured_output_mode.py  # 结构化输出方式：方式解析、DeepSeek 用 json_object 且 schema 进提示、其余仍 json_schema、档案字段、缓存键、TUI 与配置
 |   |-- test_skill_learning_integration.py # 自学习 S3 接线：组合根装配、收口入队、Gateway 策展车道准入、learned CLI、S1 自动确认与配置
 |   |-- test_subagent_lesson_ledger.py  # record_lesson：身份与 Schema、字段/条数/字节上限、幂等、账本复核、结果合并、候选与 S1 提案、暴露面与提示
@@ -1442,7 +1445,7 @@ docs/
 - `agent/backends/cache_diagnostics.py`：真实 HTTP 请求的无正文摘要，不修改模型请求或记忆。
 - `agent/conversation/process_events.py`：原进程记录到原 wake 队列的耐久终态通知；不新增任务状态机。
 - `agent/backends/sampling.py`：YAML/profile/backend 共用 top_p 数值校验；已知 Flash 方言默认与任意端点显式覆盖分开。
-- `agent/backends/reasoning_control.py` 与 `agent/settings/reasoning_effort.py`：智能程度的换算与解析。档位是会话线程属性（`/effort`、子代理 `effort`、全局 `model_reasoning_effort`），模型档案 `reasoning_control` 决定怎样发送；真实请求与两处自动选模投影共用 `request_reasoning_options`。设计见 `docs/design/REASONING_EFFORT.md`，测试 `test_reasoning_effort.py`。
+- `agent/backends/reasoning_control.py` 与 `agent/settings/reasoning_effort.py`：智能程度的换算与解析。档位是会话线程属性（`/effort`、子代理 `effort`、全局 `model_reasoning_effort`），模型档案 `reasoning_control` 决定怎样发送；真实请求与两处自动选模投影共用 `request_reasoning_options`。设计见 `docs/design/REASONING_EFFORT.md`，测试 `test_reasoning_effort.py`。`agent/settings/reasoning_probe.py` 与 `reasoning_probe_judge.py`：宿主侧检测当前模型是否真的支持按档位调节（后台 9 次短请求，只比较 usage 的 token），确认支持后经参数中心写 `reasoning_control: effort`；设计见同文第 8 节，测试 `test_reasoning_probe.py`。
 - `agent/backends/structured_output_mode.py`：结构化输出方式的换算。模型档案 `structured_output`（auto/native/json_object）经 `model_structured_output` 进入后端，`openai_chat.generate_structured` 按它发 `json_schema` 或 JSON 对象模式（schema 写进提示）；记忆整理和自动总结 Skill 都走这里。测试 `test_structured_output_mode.py`。
 - `agent_py_agent/tests/test_gateway_main_activity.py`：前后台数值/阶段共享、任务晋升、跨会话拒绝、迟到关闭和显示故障验证。
 - `agent_py_agent/tests/test_shell_stdin.py`：使用独立宿主管道验证批处理 EOF、输入不串和显式管道，不读取真实用户输入。

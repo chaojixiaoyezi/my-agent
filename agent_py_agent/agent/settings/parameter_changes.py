@@ -1,18 +1,20 @@
-# LLM: 参数中心唯一的写入口：只写用户配置文件（当前进程实际加载的配置，见 user_config_capability.user_config_path），
-#   按登记表类型渲染值（布尔、数字不加引号），写后用正式 load_config 回读核对，不一致就恢复原文件并报错；每次写入追加一条
+# LLM: 参数中心唯一的写入口：写用户配置文件（当前进程实际加载的配置，见 user_config_capability.user_config_path），
+#   以及白名单里的模型档案字段（PROFILE_FIELDS，经 model_profiles 唯一的锁内保存入口，记在该用户档案旁的 .changes.jsonl，
+#   与配置账本同一格式、同一脱敏与回滚规则）。配置写入按登记表类型渲染值（布尔、数字不加引号），写后用正式 load_config
+#   回读核对，不一致就恢复原文件并报错；每次写入追加一条
 #   账本（用户配置旁的 settings-changes.jsonl，保留最近 500 条）。凭据类只记脱敏值、不可回滚；边界项、列表/映射类型、
 #   随包默认 YAML 一律拒绝。副作用：改写用户配置与账本。改动须同步 test_parameter_changes.py、tooling/user_config_tool.py、
-#   gateway_parts/settings_control_service.py 与 user_config_capability.set_tunable_value。
+#   gateway_parts/settings_control_service.py、user_config_capability.set_tunable_value 与 settings/reasoning_probe.py。
 # 模块用途: 让用户与 my-agent 修改参数、恢复默认、查看修改记录并按编号回滚。
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from ..common.json_io import append_jsonl_capped, read_jsonl_objects_report
+from ..common.json_io import append_jsonl_capped, locked_json_path, read_jsonl_objects_report
 from .config_io import set_simple_yaml_raw, unset_simple_yaml_value
 from .parameter_registry import ParameterSpec, applied_value_with, parameter_registry
 from .user_config_capability import (
@@ -29,6 +31,8 @@ _MAX_TEXT_CHARS = 500
 _TRUE_WORDS = frozenset({"true", "1", "yes", "on", "开", "开启", "是"})
 _FALSE_WORDS = frozenset({"false", "0", "no", "off", "关", "关闭", "否"})
 _BOUNDARY_REASON = "属于安全边界（凭据、权限、身份、路径、外部地址、会运行代码的服务或插件等），不能由模型或聊天命令修改"
+# 可经参数中心修改并记账的模型档案字段（其余字段只能在 /model 里编辑）；取值由档案 schema（validate_model）校验。
+PROFILE_FIELDS = frozenset({"reasoning_control"})
 
 
 # LLM: 谁发起、为什么；actor 用固定短标签（model / chat / cli / test），reason 只给人看、截断后记账，不参与任何判断。
@@ -40,6 +44,7 @@ class ChangeOrigin:
 
 
 # LLM: 账本里的一行在写入前的内容；previous/value 是配置文件里的原样标量文本（None 表示没有覆盖），凭据类由 _record 脱敏。
+#   target 只在修改对象不是用户配置文件时给出（模型档案：{kind, profile_id, model_name}），回滚据此写回原处。
 # 类用途: 一条待记账的参数修改。
 @dataclass(frozen=True)
 class _ChangeRow:
@@ -48,6 +53,16 @@ class _ChangeRow:
     value: str | None
     origin: ChangeOrigin
     reverts: str = ""
+    target: dict | None = None
+
+
+# LLM: 一次模型档案字段修改的目标；value 为 None 表示删掉这个字段、回到档案默认（reasoning_control 删掉即 auto）。
+# 类用途: 要修改哪个模型档案的哪个字段、改成什么。
+@dataclass(frozen=True)
+class ProfileFieldChange:
+    profile_id: str
+    field: str
+    value: str | None
 
 
 # LLM: 只携带稳定错误码与给人看的中文说明；调用方把它转成 ok=False 的回执，不带路径或堆栈之外的秘密。
@@ -144,22 +159,26 @@ def ledger_path(user_config: Path) -> Path:
     return Path(user_config).with_name(LEDGER_NAME)
 
 
-# LLM: 所有键的值都经 mask_value 结构脱敏后才记账（凭据、网址密码、请求头/环境变量等）；脱敏改动了值的记录标 masked，
-#   revert_change 据此拒绝回滚。reason 截断到 200 字。副作用：追加账本。
-# 函数用途: 追加一条参数修改记录并返回它。
+# 函数用途: 追加一条用户配置参数的修改记录（账本在用户配置旁）并返回它。副作用：追加账本。
 def _record(path: Path, spec: ParameterSpec, row: _ChangeRow) -> dict[str, object]:
-    previous, value = _ledger_text(spec.key, row.previous), _ledger_text(spec.key, row.value)
+    return _append_record(ledger_path(path), spec.key, row, spec.masked)
+
+
+# LLM: 配置参数与模型档案字段共用的记账：所有值都经 mask_value 结构脱敏后才写（凭据、网址密码、请求头/环境变量等）；
+#   脱敏改动了值的记录标 masked，回滚据此拒绝。reason 截断到 200 字，target 与 reverts 有值才写。副作用：追加 ledger。
+# 函数用途: 往指定账本追加一条修改记录并返回它。
+def _append_record(ledger: Path, key: str, row: _ChangeRow, masked: bool) -> dict[str, object]:
+    previous, value = _ledger_text(key, row.previous), _ledger_text(key, row.value)
     entry: dict[str, object] = {
         "id": uuid4().hex[:12], "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "key": spec.key, "action": row.action, "actor": str(row.origin.actor or "unknown")[:40],
+        "key": key, "action": row.action, "actor": str(row.origin.actor or "unknown")[:40],
         "reason": str(row.origin.reason or "")[:200],
         # 脱敏改动了任何一个值，这条记录就不能回滚（回滚会把 *** 写回配置）
-        "masked": spec.masked or previous != row.previous or value != row.value,
+        "masked": masked or previous != row.previous or value != row.value,
         "previous": previous, "value": value,
     }
-    if row.reverts:
-        entry["reverts"] = row.reverts
-    append_jsonl_capped(ledger_path(path), entry, max_records=_MAX_LEDGER_RECORDS)
+    entry.update({name: item for name, item in (("target", row.target), ("reverts", row.reverts)) if item})
+    append_jsonl_capped(ledger, entry, max_records=_MAX_LEDGER_RECORDS)
     return entry
 
 
@@ -259,13 +278,7 @@ def parameter_history(*, user_path: Path | None, key: str = "", limit: int = 20)
 def revert_change(change_id: str, *, user_path: Path | None, origin: ChangeOrigin) -> dict[str, object]:
     try:
         path = _target(user_path)
-        ref = str(change_id or "").strip().lower()
-        matches = [item for item in parameter_history(user_path=path, limit=0) if str(item.get("id", "")).startswith(ref)]
-        if len(ref) < 6 or not matches:
-            raise ParameterChangeError("CHANGE_NOT_FOUND", f"没有编号以 {ref} 开头的修改记录（至少输入 6 位）。")
-        if len(matches) > 1:
-            raise ParameterChangeError("CHANGE_AMBIGUOUS", f"编号 {ref} 对应多条修改记录，请多输入几位。")
-        entry = matches[0]
+        entry = _find_change(parameter_history(user_path=path, limit=0), change_id)
         spec = _writable_spec(str(entry.get("key") or ""))
         if entry.get("masked"):
             raise ParameterChangeError("CHANGE_MASKED", f"'{spec.key}' 是凭据类参数，记录里只有脱敏值，不能回滚；请重新设置。")
@@ -285,14 +298,114 @@ def revert_change(change_id: str, *, user_path: Path | None, origin: ChangeOrigi
         return _failure(ParameterChangeError("USER_CONFIG_WRITE_FAILED", f"写入失败：{error}"))
 
 
+# LLM: 编号至少 6 位前缀，在给定记录里找唯一一条；找不到或不唯一都拒绝。只读。
+# 函数用途: 按修改编号找到一条修改记录。
+def _find_change(records: list[dict[str, object]], change_id: str) -> dict[str, object]:
+    ref = str(change_id or "").strip().lower()
+    matches = [item for item in records if str(item.get("id", "")).startswith(ref)]
+    if len(ref) < 6 or not matches:
+        raise ParameterChangeError("CHANGE_NOT_FOUND", f"没有编号以 {ref} 开头的修改记录（至少输入 6 位）。")
+    if len(matches) > 1:
+        raise ParameterChangeError("CHANGE_AMBIGUOUS", f"编号 {ref} 对应多条修改记录，请多输入几位。")
+    return matches[0]
+
+
+# LLM: 每个用户一份，位置由可信 home 身份决定（与 model_profiles_path 同一摘要），不接受调用方指定路径。
+# 函数用途: 模型档案字段修改记录的位置：该用户模型档案文件旁的 .changes.jsonl。
+def profile_ledger_path(home_paths: object) -> Path:
+    from .model_profiles import model_profiles_path
+
+    return model_profiles_path(home_paths).with_suffix(".changes.jsonl")
+
+
+# LLM: 坏行由 read_jsonl_objects_report 跳过；按时间倒序。只读。
+# 函数用途: 读取当前用户的模型档案字段修改记录（最新在前）。
+def profile_change_history(home_paths: object) -> list[dict[str, object]]:
+    ledger = profile_ledger_path(home_paths)
+    if not ledger.is_file():
+        return []
+    return list(reversed(read_jsonl_objects_report(ledger, context="settings.profile_changes").records))
+
+
+# LLM: 只改 PROFILE_FIELDS 里的字段，只改当前用户自己的档案（部署默认与共享模型不在这里，按 PROFILE_NOT_FOUND 拒绝）；
+#   锁内读改写整行并经 validate_model 校验，再往该用户的档案账本追加一条带 target 的记录。副作用：改写模型档案文件与档案账本。
+# 函数用途: 修改一个模型档案字段并返回结构化回执（含修改编号，可用 revert_profile_change 撤销）。
+def set_profile_field(agent: object, change: ProfileFieldChange, *, origin: ChangeOrigin) -> dict[str, object]:
+    return _profile_change(agent, change, _ChangeRow("set", None, change.value, origin))
+
+
+# LLM: 按编号在当前用户的档案账本里找记录，把字段写回那次修改之前的值（None 即删掉字段）；回滚本身也记账、可再回滚。
+#   只能找到本人账本里的记录，碰不到其他用户的档案。副作用：改写模型档案文件与档案账本。
+# 函数用途: 撤销一次模型档案字段修改。
+def revert_profile_change(agent: object, change_id: str, *, origin: ChangeOrigin) -> dict[str, object]:
+    try:
+        entry = _find_change(profile_change_history(agent.home_paths), change_id)
+        if entry.get("masked"):
+            raise ParameterChangeError("CHANGE_MASKED", "这条记录里只有脱敏值，不能回滚；请重新设置。")
+        target = entry.get("target") if isinstance(entry.get("target"), dict) else {}
+        change = ProfileFieldChange(str(target.get("profile_id") or ""), str(entry.get("key") or ""), entry.get("previous"))
+        return _profile_change(agent, change, _ChangeRow("revert", None, change.value, origin, reverts=str(entry["id"])))
+    except ParameterChangeError as error:
+        return _failure(error)
+    except (OSError, ValueError) as error:
+        return _failure(ParameterChangeError("PROFILE_WRITE_FAILED", f"读取修改记录失败：{error}"))
+
+
+# LLM: 写档案与记账的共同部分；previous 以锁内读到的原值为准（不信调用方），写失败不记账。
+# 函数用途: 执行一次档案字段修改并记账，返回回执。
+def _profile_change(agent: object, change: ProfileFieldChange, row: _ChangeRow) -> dict[str, object]:
+    try:
+        previous, model_name = _write_profile_field(agent, change)
+        target = {"kind": "model_profile", "profile_id": change.profile_id, "model_name": model_name}
+        entry = _append_record(profile_ledger_path(agent.home_paths), change.field,
+                               replace(row, previous=previous, target=target), False)
+    except ParameterChangeError as error:
+        return _failure(error)
+    except (OSError, ValueError) as error:
+        return _failure(ParameterChangeError("PROFILE_WRITE_FAILED", f"写入失败：{error}"))
+    return {"ok": True, "key": change.field, "action": entry["action"], "change_id": entry["id"],
+            "profile_id": change.profile_id, "model_name": model_name, "previous": entry["previous"],
+            "saved": entry["value"], "effect_text": "下一轮对话起生效（每轮都会重新读取模型档案）。"}
+
+
+# LLM: 必须持模型档案文件锁完成读改写，保存走 model_profiles._save_profiles（原子替换并轮换代次，与 /model 编辑同一入口）；
+#   字段值由 validate_model 校验，档案不存在时报 PROFILE_NOT_FOUND。返回（原值, 模型名）。副作用：改写模型档案文件。
+# 函数用途: 在锁内修改当前用户某个模型档案的一个字段。
+def _write_profile_field(agent: object, change: ProfileFieldChange) -> tuple[str | None, str]:
+    from .model_profiles import _save_profiles, model_profiles_path, read_model_profiles
+    from .model_provider_schema import validate_model
+
+    if change.field not in PROFILE_FIELDS:
+        raise ParameterChangeError("PROFILE_FIELD_UNKNOWN", f"模型档案字段 '{change.field}' 不能经参数中心修改，请在 /model 里编辑。")
+    path = model_profiles_path(agent.home_paths)
+    missing = ParameterChangeError("PROFILE_NOT_FOUND", "当前用户没有这个模型档案（部署默认模型与共享模型不在个人档案里）。")
+    if not path.is_file():
+        raise missing
+    with locked_json_path(path):
+        data = read_model_profiles(path)
+        row = data["profiles"].get(change.profile_id)
+        if row is None:
+            raise missing
+        kept = {name: value for name, value in row.items() if name != change.field}
+        data["profiles"][change.profile_id] = validate_model({**kept, **({} if change.value is None else {change.field: change.value})})
+        _save_profiles(path, data)
+    return row.get(change.field), str(row.get("model_name") or "")
+
+
 __all__ = [
     "LEDGER_NAME",
+    "PROFILE_FIELDS",
     "ChangeOrigin",
     "ParameterChangeError",
+    "ProfileFieldChange",
     "displayed_change",
     "ledger_path",
     "parameter_history",
+    "profile_change_history",
+    "profile_ledger_path",
     "reset_parameter",
     "revert_change",
+    "revert_profile_change",
     "set_parameter",
+    "set_profile_field",
 ]

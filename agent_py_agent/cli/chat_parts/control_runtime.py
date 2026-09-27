@@ -551,7 +551,8 @@ def _cleanup_local_resources(request_id: str, resources: object | None) -> None:
     ).start()
 
 
-# LLM: 序列化显式控制操作，尤其不能将 interrupt 降级为暂停目标的 /stop；/recover 原样带结构化处置值，/model 保留 default 前缀。
+# LLM: 序列化显式控制操作，尤其不能将 interrupt 降级为暂停目标的 /stop；/recover 原样带结构化处置值，/model 保留 default 前缀，
+#   /effort revert 保留子命令（解析后 value 只剩编号）。
 # 函数用途: 将界面的结构化控制还原为服务端共用的命令协议，不发送给模型。
 def _command_text(command: ConversationControlCommand) -> str:
     if command.kind == "stop" and command.operation == "interrupt":
@@ -561,7 +562,8 @@ def _command_text(command: ConversationControlCommand) -> str:
     if command.kind == "compact":
         return f"/compact {command.value}".rstrip()
     if command.kind == "effort":
-        return f"/effort {command.value}".rstrip()
+        # revert 的 value 只是编号，要把子命令拼回去
+        return f"/effort {'revert ' if command.operation == 'revert' else ''}{command.value}".rstrip()
     if command.kind == "steer":
         return f"/btw {command.value}"
     if command.kind == "goal":

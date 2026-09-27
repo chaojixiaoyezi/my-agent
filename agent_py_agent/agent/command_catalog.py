@@ -103,10 +103,10 @@ COMMAND_CATALOG = (
     ),
     CommandSpec(
         "effort",
-        "/effort [auto|off|low|medium|high|max|default]",
-        "查看或设置本会话的智能程度（推理强度）",
+        "/effort [auto|off|low|medium|high|max|default|probe|revert <编号>]",
+        "查看或设置本会话的智能程度（推理强度），检测当前模型是否支持调节",
         submit_on_enter=True,
-        conversation_suffix=r"(?:\s+(\S+))?\s*$",
+        conversation_suffix=r"(?:\s+(\S+(?:\s+\S+)?))?\s*$",
     ),
     CommandSpec(
         "btw", "/btw <内容>", "向当前运行回合插入一条补充要求", conversation_suffix=r"(?:\s+(.*))?$"
