@@ -2527,12 +2527,27 @@ def _consume_gateway_turn_event(
         return True
     if kind == "turn_resumed":
         return _close_resumed_turn_generation(adapter, payload)
+    if kind == "host_notice":
+        return _publish_host_notice(adapter, payload)
     if kind == "permission_requested" and isinstance(payload.get("permission"), dict):
         adapter._permissions.open(ToolApprovalRequest.from_mapping(payload["permission"]))
         return True
     if kind == "permission_resolved":
         return adapter._permissions.accept_gateway_resolution(payload)
     return False
+
+
+# LLM: 只显示 Gateway 结构化 host_notice 事件里的宿主正文，画成灰色系统行（role=system）；块号带请求号与提示编号，
+#   重放同一事件不会多出一行。缺编号或正文时忽略，不从别的字段拼文案。
+# 函数用途: 在当前回合里显示一条宿主提示（如智能程度检测结论）。
+def _publish_host_notice(adapter: TuiTurnEventAdapter, payload: Mapping[str, object]) -> bool:
+    notice = payload.get("notice") if isinstance(payload.get("notice"), Mapping) else {}
+    text, notice_id = str(notice.get("text") or "").strip(), str(notice.get("notice_id") or "").strip()
+    if not text or not notice_id:
+        return False
+    adapter.runtime._publish("system_message", "completed", f"host-notice:{adapter.request_id}:{notice_id}",
+                             {"text": text}, request_id=adapter.request_id)
+    return True
 
 
 # LLM: turn_resumed 是 Gateway 在同一请求重新执行前写的结构化边界，只收口上一执行代次的显示：审批本地按 cancelled 关闭

@@ -41,6 +41,7 @@
     |-- PARAMETER_CENTER.md             # 参数中心：一个参数一个权威定义、安全等级、my-agent 自助修改与回滚、分阶段迁移
     |-- SKILL_AUTO_SUMMARY.md           # 自学习 S3：完成任务后自动总结 Skill，自动闸门代替人工确认、登记表所有权、账本与回滚
     |-- REASONING_EFFORT.md             # 智能程度：各服务商实测、档位与控制方式、会话/子代理档位来源、/effort 与边界
+    |-- HOST_NOTICES.md                 # 宿主提示：现有通道查证、线程待送达字段、提交即已读、飞书/TUI/历史显示与边界
     |-- MAINTAINABILITY_AND_JEV_REVIEW.md # 可维护性评估、渐进重构建议及 Computer Use/Jev 能力边界
     |-- DECISION_MODEL_INTEGRATION.md    # 可选决策模型的短期限、失败隔离、接入点、缓存与并行实施计划
     |-- DECISION_AUDIT_AND_ADMIN_CONTROLS.md # 决策点开关、超时自调上下限、选模型输入精简、统计行、统一审计与管理员管控
@@ -476,6 +477,7 @@ agent_py_agent/
 |   |   |-- history_projection.py       # 前后台共用完整历史行选择、范围过滤和原生 metadata 保留
 |   |   |-- history_seed.py             # 会话种子只读来源：冻结行加原单行投影，只在 native/text 准备边界解析
 |   |   |-- history_display.py          # 从 canonical 消息投影只读恢复事件，不把问答预览代替正文
+|   |   |-- host_notices.py             # 宿主提示：线程待送达提示的存取（同来源替换、按编号取走、按来源清除）与 IM 正文前渲染
 |   |   |-- input_media.py              # owner 内容寻址原件、验证、发送编码和媒体预算
 |   |   |-- history_order.py            # 按源记录恢复跨工作片顺序并去重插话显示副本
 |   |   |-- input_media.py              # owner 内容寻址原件、验证、发送编码和媒体预算
@@ -679,6 +681,7 @@ agent_py_agent/
 |   |-- test_skill_learning.py          # 自学习 S3：触发判据、请求有界脱敏、create/update/skip、各闸门拒绝码、上限、重试、忙时顺延、回滚删除
 |   |-- test_reasoning_effort.py        # 智能程度：换算与优先级、两种协议真实组包、线程档位、投影一致、子代理继承、/effort、档案字段与配置
 |   |-- test_reasoning_probe.py         # 智能程度检测：回放标定与阈值、自动触发条件、出站字段、写档案与撤销、管理员门槛、记录失效、凭据不外泄
+|   |-- test_host_notices.py            # 宿主提示：存取与清洗、模型看不到、Gateway 发布与提交即已读、失败保留、飞书正文前、TUI 灰行、历史回放、检测结论
 |   |-- test_structured_output_mode.py  # 结构化输出方式：方式解析、DeepSeek 用 json_object 且 schema 进提示、其余仍 json_schema、档案字段、缓存键、TUI 与配置
 |   |-- test_skill_learning_integration.py # 自学习 S3 接线：组合根装配、收口入队、Gateway 策展车道准入、learned CLI、S1 自动确认与配置
 |   |-- test_subagent_lesson_ledger.py  # record_lesson：身份与 Schema、字段/条数/字节上限、幂等、账本复核、结果合并、候选与 S1 提案、暴露面与提示
@@ -1448,7 +1451,7 @@ docs/
 - `agent/backends/cache_diagnostics.py`：真实 HTTP 请求的无正文摘要，不修改模型请求或记忆。
 - `agent/conversation/process_events.py`：原进程记录到原 wake 队列的耐久终态通知；不新增任务状态机。
 - `agent/backends/sampling.py`：YAML/profile/backend 共用 top_p 数值校验；已知 Flash 方言默认与任意端点显式覆盖分开。
-- `agent/backends/reasoning_control.py` 与 `agent/settings/reasoning_effort.py`：智能程度的换算与解析。档位是会话线程属性（`/effort`、子代理 `effort`、全局 `model_reasoning_effort`），模型档案 `reasoning_control` 决定怎样发送；真实请求与两处自动选模投影共用 `request_reasoning_options`。设计见 `docs/design/REASONING_EFFORT.md`，测试 `test_reasoning_effort.py`。`agent/settings/reasoning_probe.py` 与 `reasoning_probe_judge.py`：宿主侧检测当前模型是否真的支持按档位调节（后台 9 次短请求，只比较 usage 的 token），确认支持后经参数中心写 `reasoning_control: effort`；设计见同文第 8 节，测试 `test_reasoning_probe.py`。
+- `agent/backends/reasoning_control.py` 与 `agent/settings/reasoning_effort.py`：智能程度的换算与解析。档位是会话线程属性（`/effort`、子代理 `effort`、全局 `model_reasoning_effort`），模型档案 `reasoning_control` 决定怎样发送；真实请求与两处自动选模投影共用 `request_reasoning_options`。设计见 `docs/design/REASONING_EFFORT.md`，测试 `test_reasoning_effort.py`。`agent/settings/reasoning_probe.py` 与 `reasoning_probe_judge.py`：宿主侧检测当前模型是否真的支持按档位调节（后台 9 次短请求，只比较 usage 的 token），确认支持后经参数中心写 `reasoning_control: effort`；设计见同文第 8 节，测试 `test_reasoning_probe.py`。`agent/conversation/host_notices.py`：宿主提示的唯一存取点（线程 `pending_host_notices`），Gateway 前台回复提交时取走并随最终回复显示；设计见 `docs/design/HOST_NOTICES.md`，测试 `test_host_notices.py`。
 - `agent/backends/structured_output_mode.py`：结构化输出方式的换算。模型档案 `structured_output`（auto/native/json_object）经 `model_structured_output` 进入后端，`openai_chat.generate_structured` 按它发 `json_schema` 或 JSON 对象模式（schema 写进提示）；记忆整理和自动总结 Skill 都走这里。测试 `test_structured_output_mode.py`。
 - `agent_py_agent/tests/test_gateway_main_activity.py`：前后台数值/阶段共享、任务晋升、跨会话拒绝、迟到关闭和显示故障验证。
 - `agent_py_agent/tests/test_shell_stdin.py`：使用独立宿主管道验证批处理 EOF、输入不串和显式管道，不读取真实用户输入。

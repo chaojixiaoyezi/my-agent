@@ -64,6 +64,8 @@ Gateway overflow 通过内部 `GatewayConversationLoadRequest.defer_compact` 只
 `request_experiment_records.py` 是实验对照记录在请求记录里的唯一写入/读取点：能力观察出口拆出 `experiment_record` 追加进 `experiment_records.entries`（record_id 去重、最多 8 条、盖执行代次，回合关闭/停止时抛中断不写），`_execute_gateway_conversation_turn` 在模型回合正常返回后调用 `finish_decision_experiment_turn` 按结构化工具账补写实际用量；跨请求证据只沿授权回执指针回读原请求记录（最多 16 条、编号按文件名规则校验）。普通请求在观察与收尾处都零 I/O；
 `request_experiment_promotion.py` 只在本请求 apply 授权回执存在时由收尾调用：锁外只读评估，锁内复读设置核对授权/期限/revision/点模式后经原设置 patch 的完整 CAS 写 thread 覆盖，回执写在 `experiment_records.promotion`（先 promoting，已有即不再试）；
 `request_history.py` 负责正文投影、canonical 追加、request/part 去重和原样延迟 repair；
+宿主提示（`conversation/host_notices.py`）在这里按本轮发布过的编号取走（提交即已读），进最终元数据 `host_notices` 与 `channel_delivery.host_notices`，
+repair 沿同一 `GatewayAssistantTurn.metadata()` 带上；发布在 `request_execution._publish_gateway_host_notices`（用户消息落账后、模型执行前）；
 近期产物、追加去重与补写去重经 `MessageStore.recent_projection_report` 逐条倒读，与原 `recent_report` 同窗同错，只保留产物引用或 `_DedupeFacts`，不驻留正文；搜索索引经 `visit_all_report` 两遍正向流式扫描，有坏行时一条都不索引。
 `request_prompt.py` 只渲染已取得的事实，历史种子不重读磁盘；已结束历史与压缩摘要只经会话种子在 native/text 准备边界提供，`_conversation_prompt_section` 只渲染操作证据、子代理交付、近期产物和工作索引。
 共同的完整行窗口归 `conversation/history_projection.py`，后台历史种子也从会话领域直接调用。
@@ -71,7 +73,8 @@ Gateway overflow 通过内部 `GatewayConversationLoadRequest.defer_compact` 只
 
 ## 流式输出与请求编排
 
-`gateway_parts/stream_writer.py` 维护每请求的缓冲、候选分段及发布顺序；`stream_events.py` 清洗公开载荷，
+`gateway_parts/stream_writer.py` 维护每请求的缓冲、候选分段及发布顺序；`write_host_notice_events` 是类外的模块函数（类已近尺寸上限），
+只经同一事件出口发 `host_notice`，`/progress` 不转发这种 kind；`stream_events.py` 清洗公开载荷，
 长思考继续使用绑定 sink 的原归档；`stream_approval.py` 只引用 owner 缓存并沿原 permission bridge 等待。
 请求执行器负责绑定 owner/thread、控制和持久提交，流关闭不决定任务成功；结束后保留 chunk 供客户端补读。
 正常请求和恢复从 `paths.claimed_request_chunk_path` 取得同一队列路径，恢复不反向加载请求执行器。

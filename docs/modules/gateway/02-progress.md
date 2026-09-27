@@ -1,5 +1,7 @@
 # Gateway 维护状态
 
+宿主提示（分支 `claude/be-host-notices`，2026-09-27）：前台回合在用户消息落账后、模型执行前发布会话待送达的 `host_notice` 流事件；正常回复提交时按编号取走（提交即已读），写进最终消息元数据与 `channel_delivery.host_notices`，`/result` 白名单放行、`/progress` 不转发；停止或失败不取走。飞书在同一条回复正文前加“【提示】”，TUI 与同会话窗口画成灰色系统行，历史回放排在用户消息之后。设计见 `docs/design/HOST_NOTICES.md`，回归见 `test_host_notices.py`。
+
 `/settings` 值文字与其它回显出口统一（分支 `claude/9a-mask-value-display`，2026-09-27）：`settings_control_service._value` 删掉为绕开旧 `mask_value` 写的布尔、数字特判，值文字只由 `user_config_capability.mask_value` 给出（非凭据布尔 true/false、数字照实、None/空串/空列表/空映射为空串、凭据遮住），聊天里空值仍显示“（空）”。`mask_value` 根修后 user_config 的运行值/默认值/查看报告、改参回执的 `effective` 与命令行 `config get` 不再把 False、0 给成空串。回归见 `test_value_display_parity.py`。
 `/effort` 智能程度检测（分支 `claude/be-effort-probe`，2026-09-27）：`_execute_effort_control` 在设置档位后调用 `settings/reasoning_probe.effort_probe_lines`（先执行再渲染回执）：档位设成 auto 以外、当前模型未声明且解析为不支持时后台自动检测一次；`/effort probe` 手动检测，`/effort revert <编号>` 撤销检测写入的档案修改，`/effort` 显示进度或结论。检测在后台线程跑，控制命令不等网络。回归见 `test_reasoning_probe.py`。
 `/settings` 默认只看常用参数（分支 `claude/9a-settings-common-view`，2026-09-27）：`settings_control_service._overview` 只列参数中心

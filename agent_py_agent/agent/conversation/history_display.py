@@ -1,4 +1,4 @@
-# LLM: 本模块只把同 owner/thread 已保存的会话及 typed turn-end 投影为显示事件；不执行工具、不改变模型历史。
+# LLM: 本模块只把同 owner/thread 已保存的会话、typed turn-end 与宿主提示投影为显示事件；不执行工具、不改变模型历史。
 # 模块用途: 恢复已提交正文及逐块过程检查点；不重复同片快照，不把未保存终态的工具当完成。
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ from .background_transcript import public_background_transcript_text
 from .display_checkpoint import DISPLAY_CHECKPOINT_ROLE, display_checkpoint_events
 from .history_order import order_history_events
 from .history_page import history_group_identity
+from .host_notices import host_notices_from
 from .models import is_audit_background_transcript_entry
 from .native_history import canonical_native_messages_from_metadata
 
@@ -44,7 +45,7 @@ def conversation_history_display_events(
         gateway_id = next((value for row in group if (value := foreground_gateway_request_id(row))), "")
         if any(isinstance(getattr(row, "metadata", None), Mapping) and row.metadata.get("background_delivery_reason") for row in group):
             gateway_id = ""
-        projected = [*_turn_events(identity, group), *_turn_end_events(group)]
+        projected = [*_turn_events(identity, group), *_turn_end_events(group), *_host_notice_events(group)]
         events.extend({**event, **({"gateway_request_id": gateway_id} if gateway_id else {})} for event in projected)
     return order_history_events(rows, events)
 
@@ -75,6 +76,19 @@ def _turn_end_events(rows: list[object]) -> list[dict[str, object]]:
                 {"text": notice}, phase="failed",
             ))
     return events
+
+
+# LLM: 宿主提示只来自最终消息元数据 host_notices；带展示快照的最终消息里已含同一提示事件，不再重复。事件挂在同片用户消息
+#   那一行（history_order 按行位置排序），所以排在用户消息之后、回复之前；没有用户消息的片段不生成。只读。
+# 函数用途: 历史回放时在回复前面重建当时显示过的宿主提示（灰色系统行）。
+def _host_notice_events(rows: list[object]) -> list[dict[str, object]]:
+    user = next((row for row in rows if row.role == "user"), None)
+    finals = [row for row in rows if row.role == "assistant" and isinstance(getattr(row, "metadata", None), Mapping)
+              and not background_display_turn_from_row(row)]
+    if user is None:
+        return []
+    return [_event(f"history:{user.thread_id}:{user.message_id}", f"host-notice:{notice.notice_id}", "system_message",
+                   {"text": notice.text}) for row in finals for notice in host_notices_from(row.metadata.get("host_notices"))]
 
 
 # LLM: user/final 使用 canonical message ID；完整快照仅覆盖自己的检查点，无快照时优先公开检查点而非native副本。

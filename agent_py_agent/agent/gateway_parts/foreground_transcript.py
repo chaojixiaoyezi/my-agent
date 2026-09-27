@@ -56,6 +56,7 @@ class GatewayForegroundTranscriptSink(BackgroundTranscriptSink):
             "tool_input_progress": ("progress", self.write_tool_input_progress),
             "context_window_compacted": ("context_compaction", self.write_context_compaction),
             "conversation_compaction_progress": ("compact_progress", self.write_conversation_compact_progress),
+            "host_notice": ("notice", self.write_host_notice),
         }.get(kind)
         if structured is not None:
             value = event.get(structured[0])
@@ -105,6 +106,14 @@ class GatewayForegroundTranscriptSink(BackgroundTranscriptSink):
                 tuple(ids) if isinstance(ids, list) else (),
                 client_messages=tuple((row.get("message_id", ""), row.get("text", "")) for row in rows if isinstance(row, dict)) if isinstance(rows, list) else (),
             )
+
+    # LLM: 宿主提示只来自 Gateway 结构化 host_notice 事件；同会话其他窗口显示成灰色系统行，并随最终快照保存供历史回放
+    #   （有快照的回合，历史回放不再按元数据重复生成）。缺编号或正文时忽略。副作用：发布显示事件、写检查点。
+    # 函数用途: 把一条宿主提示同步给同会话窗口。
+    def write_host_notice(self, notice: dict[str, object]) -> None:
+        text, notice_id = str(notice.get("text") or "").strip(), str(notice.get("notice_id") or "").strip()
+        if text and notice_id:
+            self._event("system_message", "completed", f"{self.request_id}:host-notice:{notice_id}", {"text": text})
 
     # LLM: 增量已由 Gateway 清洗；不做 strip 破坏分片边界，不把候选块写进 canonical transcript。
     # 函数用途: 实时显示正在生成的候选回复；之后的真实工具边界或 canonical final 决定如何收口。

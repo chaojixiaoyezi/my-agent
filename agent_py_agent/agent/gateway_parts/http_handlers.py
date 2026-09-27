@@ -472,7 +472,8 @@ _PUBLIC_RESULT_FIELDS = (
 
 
 # LLM: USER 的 HTTP result 是对内部 response record 的白名单投影；新增运行字段
-# 默认不公开，但无正文的模型 token/cache 计数可供当前 owner 成本观测。
+# 默认不公开，但无正文的模型 token/cache 计数可供当前 owner 成本观测。channel_delivery.host_notices 是宿主写给
+# 本用户的提示（IM 适配层渲染在正文前），同样公开。
 # 函数用途: 保留客户端需要的状态/正文/计数，同时移除路径、lease、prompt 和内部错误细节。
 def _public_result(result: dict) -> dict[str, object]:
     # 操作核验只转发已清洗的公开投影，不在 HTTP 层重建 call、路径或副作用引用。
@@ -487,6 +488,7 @@ def _public_result(result: dict) -> dict[str, object]:
                 "internal_signal",
                 "projection_status",
                 "operation_verification",
+                "host_notices",
             )
             if key in delivery
         }

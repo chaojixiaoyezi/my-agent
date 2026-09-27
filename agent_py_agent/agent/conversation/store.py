@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .goal_clock import shared_goal_clocks
+from .models import MODEL_HIDDEN_THREAD_FIELDS
 from .store_audits import AuditStore
 from .store_claims import ClaimStore
 from .store_goals import GoalStore
@@ -97,7 +98,8 @@ class ConversationStore:
         return bundle
 
     # LLM: 模型上下文只投影运行事实；include_messages=False只延后正文读取，调用方须同次按任务范围补齐，不能当空历史。
-    # 函数用途: 读取会话上下文及加载错误，排除展示遥测，原持久 thread 完整保留。
+    #   线程字段按 models.MODEL_HIDDEN_THREAD_FIELDS 剔除（展示遥测、待送达的宿主提示），模型看不到只给用户的提示。
+    # 函数用途: 读取会话上下文及加载错误，排除展示遥测与宿主提示，原持久 thread 完整保留。
     def context_bundle_report(
         self,
         thread_id: str,
@@ -117,9 +119,7 @@ class ConversationStore:
             "thread", thread_id, limit=recent_limit
         )
         goals, goal_error = self.goals.list_report(thread_id)
-        thread_payload = thread.to_dict()
-        thread_payload.pop("model_context_usage", None)
-        thread_payload.pop("model_metrics", None)
+        thread_payload = {key: value for key, value in thread.to_dict().items() if key not in MODEL_HIDDEN_THREAD_FIELDS}
         return {
             "thread": thread_payload,
             "messages": [item.to_dict() for item in messages],

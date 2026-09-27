@@ -12,6 +12,8 @@ from ..backends.reasoning_control import normalize_reasoning_level
 from ..settings.decision_settings_schema import empty_decision_settings
 
 SCHEMA_VERSION = "conversation_thread.v10"
+# 线程记录里只给界面和宿主用、不进模型上下文的字段：状态条遥测与待送达的宿主提示。拼上下文包的地方都按它剔除。
+MODEL_HIDDEN_THREAD_FIELDS = ("model_context_usage", "model_metrics", "pending_host_notices")
 _MODEL_SELECTION_FIELDS = (
     "model_selection_revision", "model_selection_source", "model_selection_last_explicit_revision",
 )
@@ -412,6 +414,10 @@ class ConversationThread:
     #   主会话由 /effort 写入，子代理线程在创建时写入；换算与控制方式见 backends/reasoning_control.py。
     # 字段用途: 保存本会话的推理强度设置，多个窗口打开同一会话共享。
     reasoning_effort: str = ""
+    # LLM: 待送达的宿主提示（conversation/host_notices.HostNotice.to_dict），由同一会话下一次前台回复按编号取走；
+    #   不进入模型上下文（MODEL_HIDDEN_THREAD_FIELDS），同一来源只留最新一条，最多 HOST_NOTICE_LIMIT 条。
+    # 字段用途: 暂存要在下一条回复顶部告诉用户的宿主提示（如智能程度检测结论）。
+    pending_host_notices: tuple[dict[str, str], ...] = ()
     created_at: float = 0.0
     updated_at: float = 0.0
     channel_bindings: tuple[ChannelBinding, ...] = ()
@@ -510,6 +516,7 @@ class ConversationThread:
             ),
             verbose_level=_verbose_level(data.get("verbose_level")),
             reasoning_effort=normalize_reasoning_level(data.get("reasoning_effort")),
+            pending_host_notices=_pending_host_notices(data.get("pending_host_notices")),
             created_at=float(data.get("created_at") or 0.0),
             updated_at=float(data.get("updated_at") or 0.0),
             channel_bindings=tuple(
@@ -539,6 +546,15 @@ class ConversationThread:
             ),
             metadata=metadata if isinstance(metadata, dict) else {},
         )
+
+
+# LLM: 旧记录没有这个字段时为空；只保留四个键都是字符串的条目，内容的清洗与校验归 conversation/host_notices。
+# 函数用途: 读取线程记录里的待送达宿主提示。
+def _pending_host_notices(value: object) -> tuple[dict[str, str], ...]:
+    rows = value if isinstance(value, (list, tuple)) else ()
+    keys = ("notice_id", "source", "code", "text")
+    return tuple({key: row[key] for key in keys} for row in rows
+                 if isinstance(row, dict) and all(isinstance(row.get(key), str) for key in keys))
 
 
 def _verbose_level(value: object) -> str:

@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from ..command_catalog import sensitive_command_name
+from ..conversation.host_notices import with_host_notice_lines
 from ..delivery import ChannelAdapterRegistry, DeliveryContext, DeliveryService, ReplyEnvelope
 from .base import BaseChannelAdapter
 from .delivery import (
@@ -659,7 +660,7 @@ class _GatewayReplyPollClient:
             with urllib.request.urlopen(req, timeout=5) as resp:
                 body = json.loads(resp.read().decode("utf-8", "replace"))
             if resp.status == 200 and body.get("ok"):
-                return body.get("response", "")
+                return _reply_text_with_host_notices(body)
             if resp.status == 200 and "error" in body:
                 return f"错误: {body.get('error', 'unknown')}"
             time.sleep(interval)
@@ -674,6 +675,15 @@ class _GatewayReplyPollClient:
         except Exception:
             time.sleep(interval)
             return None
+
+
+# LLM: 宿主提示只从结果的 channel_delivery.host_notices 结构化字段取，渲染在同一条回复的正文前；没有提示或正文不是文本时
+#   原样返回。渲染后的整段正文进入适配层原有的持久回复记录，重试时一并重发。
+# 函数用途: 组装 IM 最终回复正文：宿主提示在前、模型回复在后。
+def _reply_text_with_host_notices(body: dict) -> object:
+    delivery = body.get("channel_delivery") if isinstance(body.get("channel_delivery"), dict) else {}
+    content = body.get("response", "")
+    return with_host_notice_lines(content, delivery.get("host_notices")) if isinstance(content, str) else content
 
 
 # LLM: Manager is the composition root for adapters and the single durable ingress/reply worker;

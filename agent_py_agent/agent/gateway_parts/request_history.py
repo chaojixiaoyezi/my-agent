@@ -21,6 +21,7 @@ from ..conversation.history_index import (
     ensure_thread_history_indexed,
     index_conversation_message,
 )
+from ..conversation.host_notices import HostNotice, take_host_notices
 from ..conversation.native_history import (
     CANONICAL_NATIVE_MESSAGES_METADATA_KEY,
     canonical_native_messages_envelope,
@@ -51,12 +52,14 @@ logger = logging.getLogger(__name__)
 
 
 # LLM: 这是同一结果的不可变传输包，不是第二份会话事实源；正常提交和 repair 必须使用相同投影。
-# 类用途: 将原生消息、结束原因与独立显示快照一起交给 final/repair，展示数据不进入模型历史。
+#   host_notices 是本轮随最终回复送出的宿主提示（HostNotice.to_dict），只进元数据供显示与回放，不拼进正文、不进模型历史。
+# 类用途: 将原生消息、结束原因、独立显示快照与宿主提示一起交给 final/repair，展示数据不进入模型历史。
 @dataclass(frozen=True)
 class GatewayAssistantTurn:
     native_messages: object = None
     end_reason: str = ""
     display_snapshot: dict | None = None
+    host_notices: tuple[dict[str, str], ...] = ()
 
     # LLM: 仅构建新的 metadata 字典；不改原生内容、不写文件、不推断缺失 reason。
     # 函数用途: 为正常落账与延迟补交生成同一份元数据；显示快照复制后传出，避免调用方污染原包。
@@ -69,15 +72,20 @@ class GatewayAssistantTurn:
         if self.display_snapshot:
             metadata["background_transcript_request_id"] = self.display_snapshot["request_id"]
             metadata["background_display_turn"] = copy.deepcopy(self.display_snapshot)
+        if self.host_notices:
+            metadata["host_notices"] = [dict(row) for row in self.host_notices]
         return metadata
 
 
 # LLM: 正常回复和 typed 停止都保留 native IR；停止只禁止正文投递，不禁止已有事实进入同一 canonical final。
+#   host_notices 是本轮开始时发布过的宿主提示：只在正常回复提交时按编号取走（提交即已读），放进最终元数据与
+#   channel_delivery.host_notices；停止与失败不取走，留给下一轮。
 # 函数用途: 保存回复或中断前的执行历史；空正文不伪装成模型答复，写失败沿原 repair 补交。
 def persist_gateway_assistant_result(
     context: request_context.GatewayAskRunContext,
     conversation: request_context.GatewayConversationContext,
     result: object,
+    host_notices: tuple[HostNotice, ...] = (),
 ):
     if is_silent_user_stop(result):
         persist_gateway_partial_result(context, conversation, result)
@@ -118,10 +126,14 @@ def persist_gateway_assistant_result(
     if not commentaries_persisted:
         result.conversation_persist_degraded = True
         result.conversation_persist_error = "assistant commentary append deferred for repair"
+    notices = tuple(notice.to_dict() for notice in _take_host_notices(context, conversation, host_notices))
+    if notices:
+        channel_delivery["host_notices"] = list(notices)
     assistant_turn = GatewayAssistantTurn(
         native_messages=getattr(result, "canonical_native_messages", None),
         end_reason=result_turn_end_reason(result),
         display_snapshot=context.on_chunk.prepare_display_history() if isinstance(context.on_chunk, BufferedChunkStreamWriter) else None,
+        host_notices=notices,
     )
     if not append_gateway_conversation_message(
         context.agent,
@@ -152,6 +164,18 @@ def persist_gateway_assistant_result(
         result.conversation_persist_degraded = True
         result.conversation_persist_error = "assistant transcript append deferred for repair"
     return result
+
+
+# LLM: 按本轮发布过的编号从线程里取走（本轮期间新到的留给下一轮）；没有线程或存储时不取。副作用：改写会话线程记录。
+# 函数用途: 取走本轮随最终回复送出的宿主提示。
+def _take_host_notices(
+    context: request_context.GatewayAskRunContext,
+    conversation: request_context.GatewayConversationContext,
+    notices: tuple[HostNotice, ...],
+) -> tuple[HostNotice, ...]:
+    store = getattr(context.agent, "conversation_store", None)
+    ids = [notice.notice_id for notice in notices]
+    return take_host_notices(store, conversation.thread_id, ids) if ids and conversation.thread_id else ()
 
 
 # LLM: 回调在异常栈退出前使用宿主冻结的 owner/thread/request；不重新取当前会话，不发频道消息，也不调模型。

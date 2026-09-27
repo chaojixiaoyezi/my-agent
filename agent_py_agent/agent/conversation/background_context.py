@@ -29,7 +29,7 @@ from .context_budget import (
     background_context_budget_from_config,
     bounded_background_context_payload,
 )
-from .models import ConversationThread
+from .models import MODEL_HIDDEN_THREAD_FIELDS, ConversationThread
 from .store import ConversationStore
 from .task_runtime_state import task_runtime_state
 
@@ -899,12 +899,11 @@ def _latest_thread_with_load_error(state: BackgroundContextLoad) -> Conversation
         return None
 
 
-# LLM: 精简模型上下文与完整上下文同样排除纯显示遥测，避免每次数字刷新破坏缓存前缀。
-# 函数用途: 构造无历史时的会话上下文，不把终端统计条传给模型。
+# LLM: 精简模型上下文与完整上下文同样按 MODEL_HIDDEN_THREAD_FIELDS 排除纯显示遥测与待送达的宿主提示，
+#   避免每次数字刷新破坏缓存前缀，也不让模型看到只给用户的提示。
+# 函数用途: 构造无历史时的会话上下文，不把终端统计条和宿主提示传给模型。
 def _minimal_context_bundle(thread: ConversationThread) -> dict[str, Any]:
-    thread_payload = thread.to_dict()
-    thread_payload.pop("model_context_usage", None)
-    thread_payload.pop("model_metrics", None)
+    thread_payload = {key: value for key, value in thread.to_dict().items() if key not in MODEL_HIDDEN_THREAD_FIELDS}
     return {
         "thread": thread_payload,
         "messages": [],

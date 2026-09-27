@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -519,3 +519,14 @@ def _stream_flush_due(latest_text: str, chars: int, last_flush_at: float, flush_
     if chars >= max(1, int(flush_chars)) or latest_text.endswith("\n"):
         return True
     return time.monotonic() - last_flush_at >= max(0.0, float(interval))
+
+
+# LLM: 宿主提示只由 Gateway 在用户消息落账后、模型执行前调用一次（request_execution._publish_gateway_host_notices）；事件只带
+#   HostNotice 的公开字段。IM /progress 不转发这种 kind（飞书从最终回复正文前拿），TUI 画成灰色系统行，同会话窗口经
+#   transcript sink 同步并进入最终快照。写在类外是尺寸治理（BufferedChunkStreamWriter 已接近上限）：只调用同模块的事件出口，
+#   不另建发送路径。副作用：追加 chunk 流事件。
+# 函数用途: 在前台流里发布本轮要告诉用户的宿主提示。
+def write_host_notice_events(writer: BufferedChunkStreamWriter, notices: Iterable[object]) -> None:
+    writer.flush()
+    for notice in notices:
+        writer._write_event({"kind": "host_notice", "notice": notice.to_dict()})

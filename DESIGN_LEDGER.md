@@ -100,7 +100,16 @@
     自动检测一次（开关 `reasoning_control_auto_probe`，默认开），`/effort probe` 手动检测；同一道短题按低 / 最高 / 不带字段各发 3 次，
     只比较 usage 里的 token（优先推理 token），“最高”组中位数至少为“低”组 1.5 倍、多 200 且两组不重叠才算支持（按 09-26 实测回放标定）。
     确认支持时经参数中心写 `reasoning_control: effort`（私有档案下一轮生效、`/effort revert` 撤销；部署默认模型仅管理员写全局配置；
-    共享模型只记录），不支持如实记录。凭据不进入模型上下文。未落地：结果主动推送、独立短题的真实验收。详见第 8 节。
+    共享模型只记录），不支持如实记录。凭据不进入模型上下文。未落地：独立短题的真实验收。详见第 8 节。
+    结论提示：检测结束后作为宿主提示在同一会话下一条回复顶部显示一次（分支 `claude/be-host-notices`，待集成，见下一条）。
+- **宿主提示（host notices）**（2026-09-27，分支 `claude/be-host-notices`，基于 `eb7c639a1`，待集成；详见[宿主提示设计](docs/design/HOST_NOTICES.md)）：
+  - **要求**：宿主要告诉用户的一行字（如检测结论）附在同一会话下一条回复顶部：模型看不到、飞书排在正文前、TUI 灰色系统行、只显示一次。
+  - **查证**：assistant_commentary 是模型内容；turn-end 是结束原因专用协议且排在回复后、飞书不用；`/progress` 最多投一次、没有送达确认；
+    只有最终回复可靠但缺字段。所以新增通用 `host_notices`。
+  - **做法**：待送达的提示存在线程 `pending_host_notices`（同来源替换、最多 5 条，`MODEL_HIDDEN_THREAD_FIELDS` 让上下文包剔除）；
+    用户消息落账后发布 `host_notice` 流事件，正常回复提交时按编号取走（提交即已读，集成者定的 B 口径），进最终元数据与
+    `channel_delivery.host_notices`；飞书适配层渲染在正文前，TUI 与同会话窗口画灰色系统行，历史回放由元数据或快照重建。
+  - **边界**：只附在前台回复上，后台回合不附；停止或失败不取走；没有“必须确认送达”的保证，将来需要时在同一字段上加确认。
 - **Shell 读边界与回执表述不一致（macOS）**（2026-09-26 登记；回执已修复；读边界第一步已上线 step12q，上层目录热修复 step12s；第二步已实施，开关默认关闭；Codex 能力内化验收 TUI-CAP06 中前台 `run_command` 发现，证据留在其私有线；归宿主执行/沙箱这条线）：
   - **事实**：owner 隔离模式下，macOS Seatbelt 规则（`agent_py_agent/agent/attempt/sandbox.py` 的 `_macos_profile`）是 `allow default` 加 `deny file-write*` 再放开写根，只限制写、不限制读，命令能读到 owner 工作区外的宿主路径；`read_file` 的 owner 读墙更严。Shell 回执（`agent_py_agent/agent/tooling/shell.py` 的 `[sandbox_scope]` 文本与 `sandbox.external_host_paths_hidden`）在 owner 模式下一律写 `external_host_paths_hidden=true`，这只在 Linux 挂载隔离下成立，macOS 上与实际不符。
   - **影响**：模型会以为宿主路径“看不到”，实际能读到；两条读路径的边界也不一致。不涉及越权写入，但 macOS 规则里没有任何读拒绝：owner 隔离的 Shell 能读到网关账号可读的一切，包括其它 owner 的数据和含密钥的配置目录。这是安全缺口，不只是表述问题。

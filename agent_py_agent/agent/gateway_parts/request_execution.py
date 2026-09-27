@@ -39,6 +39,7 @@ from ..conversation.authority import (
 )
 from ..conversation.compact_carry import compact_overflow_carry
 from ..conversation.control_commands import conversation_task_attributes
+from ..conversation.host_notices import HostNotice, host_notices_from, pending_host_notices
 from ..gateway_compact_context import build_gateway_compact_load_request
 from ..tooling.operation_verification import public_operation_verification
 from . import (
@@ -74,7 +75,7 @@ from .request_errors import (
     gateway_model_response_error_projection,
     gateway_request_load_error_response,
 )
-from .stream_writer import BufferedChunkStreamWriter, open_chunk_stream
+from .stream_writer import BufferedChunkStreamWriter, open_chunk_stream, write_host_notice_events
 
 if TYPE_CHECKING:
     from ...core import SimpleAgent
@@ -256,6 +257,8 @@ def _public_channel_delivery(value: dict[str, object]) -> dict[str, object]:
     verification = value.get("operation_verification")
     if isinstance(verification, dict):
         public["operation_verification"] = public_operation_verification(verification)
+    if notices := host_notices_from(value.get("host_notices")):
+        public["host_notices"] = [notice.to_dict() for notice in notices]
     return public
 
 
@@ -376,6 +379,7 @@ def _configure_gateway_main_activity(context: request_context.GatewayAskRunConte
 
 # LLM: 仅在车道内运行；observer只沿内部调用传入，恢复上下文须回到最终持久化；公共命令判据先于用户历史和模型。
 #   模型回合正常返回后先做决策实验收尾（补写实际工具用量、apply 授权内晋升检查），再持久化答复；收尾不改变结果。
+#   用户消息落账后先发布待送达的宿主提示，同一批提示在持久化答复时按编号取走。
 # 函数用途: 配置流和审批并执行会话；明确系统命令及历史写入失败均阻止模型副作用。
 def _execute_gateway_conversation_turn(
     context: request_context.GatewayAskRunContext,
@@ -402,6 +406,7 @@ def _execute_gateway_conversation_turn(
         content=prompt,
     ):
         raise ConversationPersistenceError("当前消息无法可靠写入会话记录，请稍后重试")
+    notices = _publish_gateway_host_notices(context, conversation)
     result, conversation = _run_gateway_turn_with_conversation_compact(
         context,
         prompt,
@@ -410,7 +415,21 @@ def _execute_gateway_conversation_turn(
     )
     # 实验收尾只在回合正常返回后执行；普通请求零 I/O，停止/失败不补写，任何异常都不改变本轮结果。
     request_experiment_records.finish_decision_experiment_turn(context, result)
-    return request_history.persist_gateway_assistant_result(context, conversation, result)
+    return request_history.persist_gateway_assistant_result(context, conversation, result, host_notices=notices)
+
+
+# LLM: 只发布本会话此刻待送达的宿主提示，不取走：真正取走在最终回复提交时按这批编号进行（提交即已读），回合失败就留给下一轮；
+#   没有事件流的 writer 只返回提示、不发布。读不到提示时返回空，不影响回合。副作用：追加 chunk 流事件。
+# 函数用途: 在用户消息落账后、模型执行前把待送达的宿主提示发到前台流，返回这批提示。
+def _publish_gateway_host_notices(
+    context: request_context.GatewayAskRunContext,
+    conversation: request_context.GatewayConversationContext,
+) -> tuple[HostNotice, ...]:
+    store = getattr(context.agent, "conversation_store", None)
+    notices = pending_host_notices(store, conversation.thread_id) if store is not None and conversation.thread_id else ()
+    if notices and isinstance(context.on_chunk, BufferedChunkStreamWriter):
+        write_host_notice_events(context.on_chunk, notices)
+    return notices
 
 
 # LLM: Approval scope must match the same canonical execution cwd passed to model/tool execution.

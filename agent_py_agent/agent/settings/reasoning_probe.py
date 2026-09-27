@@ -28,6 +28,7 @@ from ..backends.reasoning_control import (
     resolved_reasoning_control,
 )
 from ..common.json_io import locked_json_path, read_json_object, write_json_file_atomic_unlocked
+from ..conversation.host_notices import clear_host_notices, host_notice, queue_host_notice
 from .model_profiles import model_profiles_path, selected_model_config
 from .parameter_changes import (
     ChangeOrigin,
@@ -59,6 +60,8 @@ _RECORDS_SCHEMA = "reasoning_probe_records.v1"
 _REQUEST_TIMEOUT_SECONDS = 180
 _STALE_RUNNING_SECONDS = 3600
 _ACTOR = "reasoning_probe"
+# 检测结论作为宿主提示的来源名：同一会话只留最新一条，/effort 看过就清掉。
+_NOTICE_SOURCE = "reasoning_probe"
 _TOTAL_REQUESTS = PROBE_ROUNDS * len(PROBE_LEVELS)
 # 进程内登记：正在跑的检测（防同一档案重复检测）与各检测的开始时间。
 _RUNNING: set[str] = set()
@@ -66,12 +69,14 @@ _RUNNING_LOCK = threading.Lock()
 _STARTED: dict[str, float] = {}
 
 
-# LLM: profile_id 是会话选定的模型编号（"default"、私有 UUID 或 "shared:<UUID>"），config 是按它解析出的运行配置。
+# LLM: profile_id 是会话选定的模型编号（"default"、私有 UUID 或 "shared:<UUID>"），config 是按它解析出的运行配置；
+#   thread_id 是发起检测（或查看结论）的会话，检测结论作为宿主提示送回这个会话。
 # 类用途: 一次检测针对的模型档案。
 @dataclass(frozen=True)
 class ProbeTarget:
     profile_id: str
     config: object
+    thread_id: str = ""
 
 
 # LLM: admin 在触发时按已认证 owner 身份算好（后台线程里不再判断）；key 是进程内防重复检测的登记键。
@@ -120,7 +125,7 @@ def _probeable(config: object) -> bool:
 def _thread_target(agent: object, thread_id: str) -> ProbeTarget | None:
     try:
         profile_id = thread_model_profile_id(agent, thread_id)
-        return ProbeTarget(profile_id, selected_model_config(agent, profile_id=profile_id))
+        return ProbeTarget(profile_id, selected_model_config(agent, profile_id=profile_id), thread_id)
     except Exception:  # noqa: BLE001 - 模型解析失败只是不检测，档位设置照常回执。
         return None
 
@@ -192,7 +197,7 @@ def _manual_start(agent: object, target: ProbeTarget) -> str:
 
 
 # LLM: 同一用户同一档案同时只跑一个检测（进程内登记）；先写 running 记录再起线程，写失败就撤销登记。
-#   管理员身份在这里按已认证 owner 算好传给后台。副作用：写检测记录、启动后台线程。
+#   管理员身份在这里按已认证 owner 算好传给后台。副作用：写检测记录、清掉本会话旧结论的待送达提示、启动后台线程。
 # 函数用途: 登记并启动一次后台检测，返回给用户的说明。
 def _start(agent: object, target: ProbeTarget, trigger: str) -> str:
     from ..user_space.approval_mode import is_permission_admin
@@ -208,6 +213,7 @@ def _start(agent: object, target: ProbeTarget, trigger: str) -> str:
     except OSError:
         _release(key)
         return "检测记录暂时无法保存，这次没有开始检测，请稍后重试。"
+    clear_host_notices(getattr(agent, "conversation_store", None), target.thread_id, _NOTICE_SOURCE)  # 旧结论已作废
     _spawn(lambda: _run(job))
     head = "当前模型还没检测过是否支持调节智能程度，已" if trigger == "auto" else "已"
     return (f"{head}在后台开始检测：同一道短题按“低”“最高”和不带参数各发 {PROBE_ROUNDS} 次，共 {_TOTAL_REQUESTS} 次请求，"
@@ -256,14 +262,28 @@ def _run(job: _ProbeJob) -> None:
         _finish(job, record)
 
 
-# 函数用途: 写入最终记录并撤销登记（写失败也要撤销，允许之后重新检测）。
+# LLM: 写最终记录、撤销登记（写失败也撤销，允许之后重新检测），再把结论作为宿主提示送回发起检测的会话
+#   （记录写失败也送，结论本身仍然成立）。副作用：写检测记录、改写会话线程记录。
+# 函数用途: 结束一次检测：保存结论并通知发起会话。
 def _finish(job: _ProbeJob, record: dict) -> None:
+    final = {**record, "finished_at": time.time()}
     try:
-        _save_record(job.agent, job.target.profile_id, {**record, "finished_at": time.time()})
+        _save_record(job.agent, job.target.profile_id, final)
     except OSError:
         pass
     finally:
         _release(job.key)
+    _queue_verdict_notice(job, final)
+
+
+# LLM: 提示正文只由结构化结论生成（与 /effort 查看同一套文案），带模型名；同一会话只留最新一条（queue_host_notice 按来源替换）。
+#   写不进去只是少一行提示，不影响检测结果。副作用：改写会话线程记录。
+# 函数用途: 把检测结论排进发起会话的待送达宿主提示。
+def _queue_verdict_notice(job: _ProbeJob, record: dict) -> None:
+    applied = _applied_text(record.get("applied")) if isinstance(record.get("applied"), dict) else ""
+    text = f"模型 {record.get('model_name') or ''}：{_verdict_text(record)}{applied}"
+    notice = host_notice(_NOTICE_SOURCE, str(record.get("reason") or ""), text)
+    queue_host_notice(getattr(job.agent, "conversation_store", None), job.target.thread_id, notice)
 
 
 # 函数用途: 把判定结论转成记录字段。
@@ -328,6 +348,7 @@ def _applied_summary(report: dict, kind: str) -> dict:
     return {"kind": kind, **{key: report[key] for key in ("ok", "code", "error", "change_id") if key in report}}
 
 
+# LLM: 展示已有结论时顺带清掉本会话同来源的待送达提示（用户已经在这里看到了）；进行中只显示进度。副作用：改写会话线程记录。
 # 函数用途: 按记录生成 /effort 里展示的检测结果行；没有记录时不显示。
 def _record_lines(agent: object, target: ProbeTarget) -> list[str]:
     record = current_record(agent, target)
@@ -335,6 +356,7 @@ def _record_lines(agent: object, target: ProbeTarget) -> list[str]:
         return []
     if record.get("status") == "running":
         return [f"智能程度检测进行中：已完成 {record.get('completed_requests', 0)}/{_TOTAL_REQUESTS} 次请求，完成后再发 /effort 查看。"]
+    clear_host_notices(getattr(agent, "conversation_store", None), target.thread_id, _NOTICE_SOURCE)  # 这里已看到结论
     lines = [_verdict_text(record)]
     applied = _applied_text(record.get("applied")) if isinstance(record.get("applied"), dict) else ""
     return lines + ([applied] if applied else [])
