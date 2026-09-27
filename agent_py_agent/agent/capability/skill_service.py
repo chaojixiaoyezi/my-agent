@@ -1,8 +1,11 @@
+# LLM: 原全局 Skill 根与独立能力包分别装配到同一快照，不能把私有资源目录交给递归 Skill 扫描或名称去重。
+# 模块用途: 按 owner、工作区和当前有效安装构造可缓存的发现快照，包读取失败不吞掉无关普通 Skill。
 from __future__ import annotations
 
 """Single owner-scoped Skill discovery, policy, cache, and snapshot service."""
 
 import hashlib
+import json
 import threading
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -10,6 +13,7 @@ from pathlib import Path
 
 from ..contracts.gates.skill_guard import SkillGuardRequest, evaluate_skill_guard_gate
 from ..user_space.owner_policy import EffectiveOwnerPolicy
+from .package_snapshot import CapabilityPackageSnapshot
 from .skill_snapshot import (
     SkillLoadError,
     SkillSnapshot,
@@ -38,9 +42,13 @@ class SkillManifestItem:
     content_sha256: str
 
 
+# LLM: 一个服务是 prompt、工具与子代理的唯一快照来源；能力包提供者只给原安装事实的投影，不给私有扫描根。
+# 类用途: 汇集用户可用方法与能力包，固定逐轮身份并在来源变化后重建缓存。
 class SkillsService:
     """Owns the one Skill catalog used by prompts, tools, and subagents."""
 
+    # LLM: 两种 provider 每次快照重新取事实；插件 v3 roots 保持原优先级，内容包独立装配且不执行。
+    # 函数用途: 绑定 owner 策略、工作区和可选内容包发现来源。
     def __init__(
         self,
         *,
@@ -48,10 +56,12 @@ class SkillsService:
         workspace_root: str | Path,
         policy_provider: Callable[[], EffectiveOwnerPolicy],
         plugin_roots: Callable[[], Iterable[tuple[Path, str]]] | None = None,
+        package_provider: Callable[[], Iterable[CapabilityPackageSnapshot]] | None = None,
     ) -> None:
         self.home_paths = home_paths
         # 已启用插件自带的 Skill 目录（来源 plugin:<ID>）；每次快照都重新读取，停用后下一轮自然消失
         self.plugin_roots = plugin_roots
+        self.package_provider = package_provider
         self.workspace_root = Path(workspace_root).expanduser().resolve(strict=False)
         self.policy_provider = policy_provider
         self._extra_roots: tuple[Path, ...] = ()
@@ -72,6 +82,8 @@ class SkillsService:
         with self._lock:
             self._cache.clear()
 
+    # LLM: 包摘要和激活身份共同进入指纹；Skill 总闸关闭时两种发现都为空，不读取内容包正文。
+    # 函数用途: 创建或复用当前 owner 的逐轮快照，并单独报告能力包发现错误。
     def snapshot_for(
         self,
         workspace_root: str | Path | None = None,
@@ -85,17 +97,33 @@ class SkillsService:
             return _build_snapshot((), (), policy, workspace)
         roots = self._skill_roots(workspace, policy)
         manifest, discovery_errors = _build_manifest(roots)
-        fingerprint = _snapshot_fingerprint(manifest, discovery_errors, policy, workspace)
+        packages, package_errors = self._packages()
+        discovery_errors.extend(package_errors)
+        fingerprint = _snapshot_fingerprint(manifest, discovery_errors, policy, workspace, packages)
         cache_key = (policy.owner_id, str(workspace))
         if not force_reload:
             with self._lock:
                 cached = self._cache.get(cache_key)
             if cached is not None and cached.fingerprint == fingerprint:
                 return cached
-        snapshot = _build_snapshot(manifest, discovery_errors, policy, workspace)
+        snapshot = _build_snapshot(manifest, discovery_errors, policy, workspace, packages)
         with self._lock:
             self._cache[cache_key] = snapshot
         return snapshot
+
+    # LLM: provider 错误只清空内容包集合并进入 errors；普通 Skill 与旧插件 Skill 不因包账损坏而消失。
+    # 函数用途: 校验并冻结包提供者返回的元数据，防止重复包 ID 和可变伪快照混进本轮。
+    def _packages(self) -> tuple[tuple[CapabilityPackageSnapshot, ...], list[SkillLoadError]]:
+        if self.package_provider is None:
+            return (), []
+        try:
+            packages = tuple(self.package_provider())
+            if (any(not isinstance(package, CapabilityPackageSnapshot) for package in packages)
+                    or len({package.package_id for package in packages}) != len(packages)):
+                raise ValueError("能力包快照类型或身份无效")
+            return tuple(sorted(packages, key=lambda package: package.package_id)), []
+        except (OSError, ValueError, TypeError) as exc:
+            return (), [SkillLoadError("", "CAPABILITY_PACKAGE_DISCOVERY_FAILED", type(exc).__name__, "capability_package")]
 
     def _skill_roots(
         self,
@@ -166,11 +194,14 @@ def _manifest_item(
     return SkillManifestItem(root, resolved, text, skill_content_sha256(text)), None
 
 
+# LLM: 全局按名称优先级去重仅处理 Skill manifest；包集合独立按包 ID 固定，不参与该循环。
+# 函数用途: 将已扫描 Skill 与包摘要装到同一个不可变快照中。
 def _build_snapshot(
     manifest: list[SkillManifestItem],
     discovery_errors: list[SkillLoadError],
     policy: EffectiveOwnerPolicy,
     workspace_root: Path,
+    packages: tuple[CapabilityPackageSnapshot, ...] = (),
 ) -> SkillSnapshot:
     entries: dict[str, SkillSnapshotEntry] = {}
     errors = list(discovery_errors)
@@ -181,13 +212,14 @@ def _build_snapshot(
             continue
         if entry is not None and entry.name not in entries:
             entries[entry.name] = entry
-    fingerprint = _snapshot_fingerprint(manifest, discovery_errors, policy, workspace_root)
+    fingerprint = _snapshot_fingerprint(manifest, discovery_errors, policy, workspace_root, packages)
     return SkillSnapshot(
         entries=tuple(sorted(entries.values(), key=lambda entry: (entry.source, entry.name))),
         errors=tuple(errors),
         fingerprint=fingerprint,
         owner_id=policy.owner_id,
         workspace_root=str(workspace_root),
+        packages=packages,
     )
 
 
@@ -242,11 +274,14 @@ def _snapshot_entry(
     )
 
 
+# LLM: 无包时保持原指纹字节；包摘要覆盖全部私有资源，激活 ID 区分同字节卸载重装，不编码读取回调。
+# 函数用途: 为缓存与在途决策比较生成 owner、策略、公开方法及能力包版本摘要。
 def _snapshot_fingerprint(
     manifest: list[SkillManifestItem],
     errors: list[SkillLoadError],
     policy: EffectiveOwnerPolicy,
     workspace_root: Path,
+    packages: tuple[CapabilityPackageSnapshot, ...] = (),
 ) -> str:
     digest = hashlib.sha256()
     digest.update(str(workspace_root).encode("utf-8"))
@@ -264,6 +299,8 @@ def _snapshot_fingerprint(
         digest.update(f"{item.root.source}\0{item.path}\0{item.content_sha256}".encode())
     for error in errors:
         digest.update(repr(error).encode())
+    for package in packages:
+        digest.update(json.dumps(package.to_ref(), sort_keys=True, ensure_ascii=False).encode("utf-8"))
     return digest.hexdigest()
 
 

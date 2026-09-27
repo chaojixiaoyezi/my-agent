@@ -1640,22 +1640,27 @@ def _validate_name_prompt(name: str, prompt: str) -> tuple[str, str]:
     return normalized_name, normalized_prompt
 
 
+# LLM: 调度持久化沿原字段保存完整版本引用；公开 Skill 的旧两字段保持，包的类型和激活字段不可被投影丢弃。
+# 函数用途: 验证并去重选定能力，拒绝同 ID 的矛盾版本而不替换既有定时任务。
 def _normalize_skill_refs(raw: object) -> list[dict[str, str]]:
+    from ..capability.task_references import normalize_skill_reference
+
     rows = raw if isinstance(raw, list) else []
     if len(rows) > _MAX_SKILL_REFS:
         raise ScheduleValidationError(f"skill_refs exceeds {_MAX_SKILL_REFS} entries")
     normalized: list[dict[str, str]] = []
     seen: set[str] = set()
     for row in rows:
-        if not isinstance(row, dict):
-            raise ScheduleValidationError("skill_refs entries must be objects")
-        stable_id = str(row.get("stable_id") or "").strip()
-        sha = str(row.get("content_sha256") or "").strip().lower()
-        if not stable_id or not re_full_sha256(sha):
-            raise ScheduleValidationError("skill_refs require stable_id and SHA-256")
+        try:
+            reference = normalize_skill_reference(row)
+        except ValueError as exc:
+            raise ScheduleValidationError(str(exc)) from exc
+        stable_id = reference["stable_id"]
         if stable_id not in seen:
-            normalized.append({"stable_id": stable_id, "content_sha256": sha})
+            normalized.append(reference)
             seen.add(stable_id)
+        elif reference not in normalized:
+            raise ScheduleValidationError("skill_refs contains conflicting versions")
     return normalized
 
 

@@ -1,5 +1,5 @@
-# LLM: 每个 delegated run 使用原 ConversationThread/Compact；谱系不共享历史，模型建议仅由宿主参数初始化新 thread，读取/恢复不采用。
-# 模块用途: 为子孙代理建立独立会话、保存正文与建议；普通准备和完整恢复候选共用纯历史投影。
+# LLM: delegated run 使用原 ConversationThread/Compact；模型建议和包入口资格只由宿主 typed 材料初始化新线程，恢复不补资格。
+# 模块用途: 为子孙代理建立独立会话、保存正文与首请求材料；普通准备和完整恢复候选共用纯历史投影。
 
 from __future__ import annotations
 
@@ -29,6 +29,7 @@ from .tool_context_window import (
 )
 
 if TYPE_CHECKING:
+    from ..capability.subagent_entry_authority import SubagentEntryInitialization
     from .compact_provider_surface import ConversationCompactModelSurface
 
 _AGENT_THREAD_CHANNEL = "agent-runtime"
@@ -56,10 +57,10 @@ class AgentThreadTurnContext:
     compact_source: ConversationCompactSource | None = field(default=None, repr=False)
 
 
-# LLM: 谱系只读 canonical task/父；建议仅接受宿主准备载体的显式参数，绝不从 task attrs 恢复，既有线程不重植 pending。
-#   新线程同时写入创建时冻结的智能程度档位（host_reasoning_effort.v1），既有线程不改。
-# 函数用途: 物化或校验孩子独立会话，新线程可保存待验证模型建议与档位，读取/恢复不改其有效模型。
-def ensure_subagent_thread(manager: object, task: object, *, model_advice: PendingSubagentModelAdvice | None = None) -> ConversationThread | None:
+# LLM: 谱系只读 canonical task/父；模型建议与包资格仅接受宿主 typed 参数，绝不从 attrs 恢复；新线程冻结档位，既有线程不改。
+# 函数用途: 物化或校验孩子独立会话，透传同一个孩子的宿主初始化材料，读取/恢复不修改模型或首请求资格。
+def ensure_subagent_thread(manager: object, task: object, *, model_advice: PendingSubagentModelAdvice | None = None,
+                           package_entry_initialization: SubagentEntryInitialization | None = None) -> ConversationThread | None:
     store = getattr(manager, "conversation_store", None)
     if store is None:
         return None
@@ -125,6 +126,7 @@ def ensure_subagent_thread(manager: object, task: object, *, model_advice: Pendi
             "cwd": cwd,
             "runtime_workspace_roots": roots,
             "model_advice": model_advice,
+            "package_entry_initialization": package_entry_initialization,
         }
     )
 

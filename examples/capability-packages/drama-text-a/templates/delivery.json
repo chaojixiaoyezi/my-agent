@@ -1,0 +1,42 @@
+{
+  "schema": "drama_text_delivery.v3",
+  "source_sha256": "",
+  "brief": {
+    "premise": "",
+    "adaptation_note": ""
+  },
+  "cast": [
+    {
+      "id": "",
+      "name": "",
+      "text_names": [],
+      "text_match_skip_reason": ""
+    }
+  ],
+  "scenes": [
+    {
+      "id": "",
+      "source_ids": [],
+      "character_ids": [],
+      "seconds": null,
+      "summary": ""
+    }
+  ],
+  "shots": [
+    {
+      "id": "",
+      "scene_id": "",
+      "seconds": null,
+      "start_state": "",
+      "action": "",
+      "end_state": "",
+      "visible_character_ids": [],
+      "source_ids": [],
+      "adaptations": [],
+      "unresolved": [],
+      "offscreen_character_ids": []
+    }
+  ],
+  "omitted_passages": [],
+  "unresolved": []
+}

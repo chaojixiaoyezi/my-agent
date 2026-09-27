@@ -330,6 +330,8 @@ class SchedulerService:
     def runtime_snapshot(self) -> dict[str, object]:
         return self.repository.runtime_snapshot()
 
+    # LLM: 真正唤醒前核对原 refs；内容摘要相同但 activation 变化也必须拒绝，不通过重装恢复过期授权。
+    # 函数用途: 在模型或后台任务启动前判断所选公开 Skill／能力包是否仍为固定版本。
     def _skill_reference_error(self, run: dict[str, object]) -> str:
         refs = run.get("skill_refs")
         if not isinstance(refs, list) or not refs:
@@ -340,16 +342,26 @@ class SchedulerService:
             snapshot = self.skill_snapshot_provider()
         except Exception:
             return "SCHEDULER_SKILL_SNAPSHOT_UNAVAILABLE"
+        from ..capability.task_references import normalize_skill_reference
+
         for raw in refs:
-            if not isinstance(raw, dict):
+            try:
+                raw = normalize_skill_reference(raw)
+            except ValueError:
                 return "SCHEDULER_SKILL_REFERENCE_INVALID"
             stable_id = str(raw.get("stable_id") or "")
             expected_sha = str(raw.get("content_sha256") or "")
-            entry = snapshot.resolve(stable_id) if snapshot is not None else None
+            entry = snapshot.resolve_reference(stable_id) if snapshot is not None else None
             if entry is None:
                 return "SCHEDULER_SKILL_NOT_AVAILABLE"
             if str(getattr(entry, "content_sha256", "") or "") != expected_sha:
                 return "SCHEDULER_SKILL_SNAPSHOT_STALE"
+            if raw.get("kind") == "capability_package":
+                try:
+                    if normalize_skill_reference(entry.to_ref()) != normalize_skill_reference(raw):
+                        return "SCHEDULER_SKILL_SNAPSHOT_STALE"
+                except ValueError:
+                    return "SCHEDULER_SKILL_REFERENCE_INVALID"
         return ""
 
     def _fail_without_execution(

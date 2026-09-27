@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-from .config import load_capability_config
+from .config import CapabilityConfig, load_capability_config
 from .runtime_config_models import CapabilityConfigReloadResult, CapabilityConfigSnapshot
 
 
@@ -22,14 +22,16 @@ def default_capability_config_path(root: str | Path) -> Path:
 
 # LLM: "从 agent 对象取 capability 配置"的唯一权威入口：优先 agent 上的运行时快照
 #   _capability_config_runtime_snapshot，否则按 capability_config_path/默认路径加载并把
-#   快照缓存回 agent（副作用）。加载失败返回 None，调用方按"全部默认值"处理。
+#   快照缓存回 agent（副作用）。加载失败返回 None，调用方按"全部默认值"处理。缓存里不是 CapabilityConfig 的对象一律不认，
+#   改走文件加载，防止非配置对象的属性被当成开关（2026-09-27 能力包合入时发现）。
 #   消费方：runtime/context_compactor（compact 触发百分比）、orchestration/dispatch/mixin
 #   （失败自省自动拆分开关）。新增运行时读 capability 配置的地方应一律走这里。
 # 函数用途: 运行时想读 capability_config.yaml 里的开关时，从 agent 拿配置对象。
 def capability_config_for_agent(agent: object):
     snapshot = getattr(agent, "_capability_config_runtime_snapshot", None)
     config = getattr(snapshot, "config", None)
-    if config is not None:
+    # 只认真正的 CapabilityConfig：替身对象上自动生成的属性不是配置，不能让它的“真值”打开能力开关。
+    if isinstance(config, CapabilityConfig):
         return config
     path = Path(
         str(getattr(agent, "capability_config_path", "") or "")

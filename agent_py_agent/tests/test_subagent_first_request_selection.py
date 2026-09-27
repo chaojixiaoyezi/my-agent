@@ -641,7 +641,8 @@ def test_committed_selection_is_reused_by_next_canonical_scope(tmp_path, monkeyp
     assert agent.config.model_name == "inherited"
 
 
-def test_create_jev_advice_automatically_reaches_first_business_model(tmp_path, monkeypatch):
+@pytest.mark.parametrize("effort_mode", ["default", "explicit", "inherited"])
+def test_create_jev_advice_automatically_reaches_first_business_model(tmp_path, monkeypatch, effort_mode):
     import json
 
     from agent_py_agent.agent.agent_core import orchestration_tools
@@ -649,8 +650,39 @@ def test_create_jev_advice_automatically_reaches_first_business_model(tmp_path, 
     from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
     from agent_py_agent.agent.backends.typesafe_decision_wire import parse_typesafe_response
     from agent_py_agent.agent.conversation import decision_model_call
+    from agent_py_agent.agent.plugin_activation import PluginActivationRequest
+    from agent_py_agent.agent.plugin_content_activation import PluginContentActivation
+    from agent_py_agent.agent.plugin_install_store import PluginInstallStore
+    from agent_py_agent.agent.plugin_installation import PluginInstallRequest
+    from agent_py_agent.agent.plugin_package import inspect_plugin_package
+    from agent_py_agent.agent.settings.reasoning_effort import (
+        CHILD_ATTR,
+        set_thread_reasoning_level,
+    )
+    from agent_py_agent.agent.user_space.owner_resolver import resolve_owner_home
+    from agent_py_agent.tests.test_capability_package import content_bundle
 
-    agent, source, key = _automatic_child(tmp_path, persist_child=False)
+    model = "MiniMax-M3" if effort_mode == "default" else "deepseek-v4-flash"
+    options = {} if effort_mode == "default" else {
+        "backend": "openai_compatible", "model": model, "endpoint": "https://api.deepseek.com",
+    }
+    agent, source, key = _automatic_child(tmp_path, persist_child=False, **options)
+    request = {"goal": "读取材料给出结论", "allowed_tools": ["read_file"]}
+    package_ref = None
+    if effort_mode != "default":
+        # 包引用必须来自真实安装与逐轮目录；这里只授权，不把授权伪装成正文已经读取。
+        store = PluginInstallStore(resolve_owner_home(agent.home_paths.root))
+        installed = store.install(PluginInstallRequest(inspect_plugin_package(content_bundle()), "install", 0)).installation
+        activation = PluginContentActivation("enable", installed.manifest.plugin_id, installed.package_sha256,
+                                             installed.revision, installed.settings_revision)
+        store.change_activation(PluginActivationRequest("enable", installed.revision, activation))
+        package_ref = agent.current_skill_snapshot().resolve_reference("capability:story-content").to_ref()
+        set_thread_reasoning_level(agent.conversation_store, source.thread_id, "high")
+        request.update(allowed_skills=[package_ref["stable_id"]], attributes={
+            CHILD_ATTR: {"level": "max"}, "skill_snapshot_refs": [{"stable_id": "forged"}],
+        })
+        if effort_mode == "explicit":
+            request["effort"] = "low"
     agent.conversation_store.tasks.bind({"thread_id": source.thread_id, "task_id": "parent-task", "goal": "读取材料", "status": "active"})
     agent._current_run_params = RunParams(request_id="parent-request", task_id="parent-task", task_attributes={"conversation_thread_id": source.thread_id})
     monkeypatch.setattr(orchestration_tools, "publish_created_subagents", lambda _: SimpleNamespace(
@@ -668,19 +700,30 @@ def test_create_jev_advice_automatically_reaches_first_business_model(tmp_path, 
         }})
 
     monkeypatch.setattr(decision_model_call, "invoke_decision_model_call", choose)
-    created = CreateSubagentsTool(agent).execute({"goal": "读取材料给出结论", "allowed_tools": ["read_file"]})
+    created = CreateSubagentsTool(agent).execute(request)
     assert created.ok, created.output
     task = agent.subagents.load(json.loads(created.output)["created_run_ids"][0])
     assert len(decisions) == 1
     before = agent.conversation_store.threads.require(task.agent_thread_id)
     assert before.model_profile_id == "default" and before.metadata[SUBAGENT_MODEL_ADVICE_KEY]["status"] == "pending"
+    if package_ref is not None:
+        level = "low" if effort_mode == "explicit" else "high"
+        assert task.allowed_skills == [package_ref["stable_id"]]
+        assert task.attributes["skill_snapshot_refs"] == [package_ref]
+        assert task.attributes[CHILD_ATTR] == {"level": level}
+        assert before.reasoning_effort == level
     material = tmp_path / "material.txt"
     material.write_text("由原 child 执行器读取。", encoding="utf-8")
     calls, _ = _install_automatic_provider(monkeypatch, agent, task, material)
     result = agent.run_subagent(task.id, dry_run=False, probe=False)
     assert len(calls) == 2, result
-    assert {wire["model"] for wire, _ in calls} == {"MiniMax-M3"}, calls[0][1].metadata[SUBAGENT_MODEL_ADVICE_KEY]
+    assert {wire["model"] for wire, _ in calls} == {model}, calls[0][1].metadata[SUBAGENT_MODEL_ADVICE_KEY]
     assert calls[0][1].model_profile_id == key
+    if package_ref is not None:
+        # 原 provider helper 已逐值比较冻结投影与首 wire；再核对采用不改权限引用或线程档位。
+        assert calls[0][0]["reasoning_effort"] == level
+        assert calls[0][1].reasoning_effort == level
+        assert agent.subagents.load(task.id).attributes["skill_snapshot_refs"] == [package_ref]
     assert len(decisions) == 1
 
 

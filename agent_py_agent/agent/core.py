@@ -1,8 +1,8 @@
 """composition root for SimpleAgent runtime, tools, memory, gateway, and subagents."""
 
 # LLM: core.py 只装配 SimpleAgent 的当前主链；拆出的私有 helper 必须由所属
-# 模块直接导入，不在这里保留无人消费的旧 re-export 兼容面；显式派工后端注入也须隔离到线程。
-# 模块用途: 组装模型后端、工具、记忆、会话和子代理；owner 权限纯裁决与冷管理入口共用。
+# 模块直接导入，不保留无人消费的旧 re-export；来源 resolver/schema 成对绑定，显式派工后端注入也须隔离到线程。
+# 模块用途: 组装模型后端、同源工具声明、记忆、会话和子代理；owner 权限纯裁决与冷管理入口共用。
 
 from __future__ import annotations
 
@@ -53,6 +53,10 @@ from .capability.skill_learning_store import SkillLearningStore
 from .capability.skill_proposals import SkillProposalService
 from .capability.skill_search_tool import SkillSearchTool
 from .capability.skill_service import SkillsService
+from .capability.task_references import (
+    scope_main_task_references,
+    task_skill_references,
+)
 from .collaboration import CollaborationStore
 from .common.audit_activation import AUDIT_RUN_EPOCH_ATTR
 from .contracts.model_call_ledger import ModelCallLedger
@@ -383,6 +387,8 @@ class SimpleAgent(
     prompts = ModelScopedAttribute("prompts")
     tools = ModelScopedAttribute("tools")
 
+    # LLM: 所有持久服务仍按 canonical owner/workspace 装配；Skill 与内容包共享快照入口但根目录隔离，联测主子范围及旧插件。
+    # 函数用途: 初始化代理的模型、存储、工具和能力发现服务；可能初始化用户目录，不安装或执行能力包。
     def __init__(
         self,
         config: AgentConfig,
@@ -441,6 +447,7 @@ class SimpleAgent(
             workspace_root=self.effective_workspace_root,
             policy_provider=lambda: resolve_effective_owner_policy(self.home_paths),
             plugin_roots=self._plugin_skill_roots,
+            package_provider=self._capability_packages,
         )
         self.capability_router = CapabilityRouter(
             config=config,
@@ -502,6 +509,18 @@ class SimpleAgent(
 
         return enabled_plugin_skill_roots(resolve_owner_home(self.home_paths.root, owner_identity_from_config(config)))
 
+    # LLM: 与插件工具共用原 enable_plugins/enable_tools 边界及可信 owner；提供元数据不启动进程或注册内部 Skill。
+    # 函数用途: 为当前 owner 的逐轮快照装配已启用能力包，关闭任一总闸时返回空。
+    def _capability_packages(self):
+        if not (self.config.enable_plugins and self.config.enable_tools):
+            return ()
+        from .capability.package_provider import enabled_capability_packages
+
+        owner = resolve_owner_home(self.home_paths.root, owner_identity_from_config(self.config))
+        return enabled_capability_packages(owner)
+
+    # LLM: 活动轮优先使用已冻结的权限视图；无活动轮时按当前可信运行范围构造，不把包私有资源放入公开 Skill。
+    # 函数用途: 供检索、派工及授权读取当前轮的公开方法与能力包快照。
     def current_skill_snapshot(self):
         """Return the immutable Skill catalog bound to this worker turn."""
 
@@ -511,28 +530,29 @@ class SimpleAgent(
         workspace = getattr(self, "_current_run_task_workspace", "") or self.effective_workspace_root
         return self.skill_snapshot_for_run_scope(workspace)
 
+    # LLM: child/scheduler 严格按摘要与激活引用裁剪；main 从原任务 pins 剔除失效包并投影诊断，不重绑或停掉无关能力。
+    # 函数用途: 按唯一任务事实固定能力版本，让卸载后的主会话仍可回应并沿原任务生命周期收口。
     def skill_snapshot_for_run_scope(self, workspace_root):
-        """Bind the owner snapshot, then narrow delegated runners to explicit grants."""
-
         snapshot = self.skills_service.snapshot_for(workspace_root)
+        run_id = current_subagent_run_id(self)
+        if run_id:
+            task = self.subagents.load(run_id)
+            refs = task_skill_references(task)
+            expected: dict[str, str] = {}
+            _add_skill_snapshot_hashes(expected, refs)
+            return snapshot.restricted(task.allowed_skills, expected_sha256=expected, expected_refs=refs)
         current = getattr(self, "_current_run_params", None)
         attrs = getattr(current, "task_attributes", None) if current is not None else None
         refs = attrs.get("skill_snapshot_refs") if isinstance(attrs, dict) else None
         if isinstance(refs, list) and refs:
-            expected: dict[str, str] = {}
+            expected = {}
             references: list[str] = []
             _add_skill_snapshot_hashes(expected, refs)
             for row in refs:
                 if isinstance(row, dict) and str(row.get("stable_id") or "").strip():
                     references.append(str(row["stable_id"]).strip())
-            snapshot = snapshot.restricted(references, expected_sha256=expected)
-        run_id = current_subagent_run_id(self)
-        if not run_id:
-            return snapshot
-        task = self.subagents.load(run_id)
-        references = list(getattr(task, "allowed_skills", None) or [])
-        expected = _task_skill_snapshot_hashes(task)
-        return snapshot.restricted(references, expected_sha256=expected)
+            snapshot = snapshot.restricted(references, expected_sha256=expected, expected_refs=refs)
+        return scope_main_task_references(self, snapshot, attrs)
 
     # LLM: This is the composition-root query used by status and stop; request linkage comes
     # from typed task attributes, with current runtime roots only as a compatibility bridge.
@@ -811,8 +831,8 @@ def _effective_workspace_scope(agent: SimpleAgent, config: AgentConfig) -> tuple
     return workspace_root, workspace_roots
 
 
-# LLM: ToolRegistry 唯一装配入口；插件 owner 由既有 scoped config/resolver 固定，不能随权限墙或工作目录改变；构造不启动插件。
-# 函数用途: 按当前 Agent 的可信身份、工作区和配置组合工具，主代理与同进程子代理共用同一接线入口。
+# LLM: ToolRegistry 唯一装配入口；owner、来源合同和语法反馈开关取可信配置，执行仍取受限快照；联查文件诊断配置测试。
+# 函数用途: 按身份和工作区组合工具、来源声明及可选文件反馈，主代理与同进程子代理共用权限接线。
 def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistry:
     from functools import partial
 
@@ -830,6 +850,16 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
         is_local_admin=is_local_admin_owner(agent.home_paths),
         access_mode=access_mode,
     )
+    source_resolver = None
+    source_ref_schema = None
+    if config.enable_plugins and config.enable_tools:
+        from .capability.package_resources import (
+            package_resource_reference_schema,
+            resolve_package_resource,
+        )
+
+        source_resolver = partial(resolve_package_resource, agent)
+        source_ref_schema = package_resource_reference_schema()
     return ToolRegistry(
         ToolRegistryParams(
             workspace_root=workspace_root,
@@ -873,6 +903,9 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
             path_dangerous_roots=config.path_dangerous_roots,
             access_mode=access_mode,
             tool_write_inline_max_chars=config.tool_write_inline_max_chars,
+            enable_file_syntax_diagnostics=config.enable_file_syntax_diagnostics,
+            file_source_resolver=source_resolver,
+            file_source_ref_schema=source_ref_schema,
             artifact_read_budget_max_chars=config.tool_artifact_read_budget_max_chars,
             artifact_default_read_chars=config.memory_artifact_default_read_chars,
             disabled_tools=list(getattr(agent.owner_policy, "disabled_tools", ())),
@@ -966,16 +999,8 @@ def _protected_persona_root(agent: SimpleAgent) -> str:
     return str(getattr(getattr(agent, "home_paths", None), "owner_home_dir", "") or "")
 
 
-def _task_skill_snapshot_hashes(task: object) -> dict[str, str]:
-    hashes: dict[str, str] = {}
-    attrs = getattr(task, "attributes", None)
-    if isinstance(attrs, dict):
-        _add_skill_snapshot_hashes(hashes, attrs.get("skill_snapshot_refs"))
-    for grant in getattr(task, "capability_grants", None) or []:
-        _add_skill_snapshot_hashes(hashes, getattr(grant, "capability_cards", None))
-    return hashes
-
-
+# LLM: 哈希投影只来自持久引用行；包的 activation 验证另由 restricted(expected_refs) 执行，不能只比较该字典。
+# 函数用途: 从任务原引用收集公开正文或整包摘要，供同一快照裁剪检查。
 def _add_skill_snapshot_hashes(target: dict[str, str], value: object) -> None:
     if not isinstance(value, list):
         return

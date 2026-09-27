@@ -1,3 +1,5 @@
+# LLM: 本模块只投影原工具快照；条件晋升和效果边界都取原策略，不复制判断逻辑或生成新权限。
+# 模块用途: 为工具目录与归档提供可诊断的模型 schema、执行策略和任务绑定声明。
 from __future__ import annotations
 
 """Machine-readable projection of one immutable ``ToolRuntimeSnapshot``.
@@ -118,7 +120,7 @@ def _input_field_items(input_schema: dict[str, object]) -> list[dict[str, object
     ]
 
 
-# LLM: manifest 只能展开 canonical ToolRuntimePolicy，effect/sandbox 参数变体不得在此重新推断。
+# LLM: manifest 只能展开 canonical ToolRuntimePolicy，effect/sandbox/条件晋升变体不得在此重新推断。
 # 函数用途: 把一个工具的运行时策略投影成可诊断、可归档的机器清单。
 def _runtime_policy_item(policy: object) -> dict[str, object]:
     resolver = policy.effect_resolver
@@ -169,6 +171,10 @@ def _runtime_policy_item(policy: object) -> dict[str, object]:
         "availability_policy": {"mode": policy.availability_policy.mode},
         "input_policy": _input_policy_item(policy.input_policy),
         "promotes_task": policy.promotes_task,
+        "promotes_task_when": [
+            {"field": condition.field, "operator": condition.operator, "value": condition.value}
+            for condition in policy.promotes_task_when
+        ],
     }
 
 

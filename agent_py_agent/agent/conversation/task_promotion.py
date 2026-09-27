@@ -23,6 +23,24 @@ from .authority import (
 )
 
 
+# LLM: 原活动回合锁先于任务锁，覆盖晋升与本轮参数同步；不持锁调用模型，停止时沿原 InterruptedError 退出。
+# 函数用途: 为首个工作工具和能力入口准备提供同一任务晋升事务，防止停止后重新建立活动任务。
+def promote_conversation_task_for_run(agent: object, params: object):
+    # LLM: 只从外层 RunParams 同步到本轮投影，不接受模型内容或反向修改权威身份。
+    # 函数用途: 在同一活动回合事务内登记任务并刷新循环参数中的绑定。
+    def promote():
+        link = promote_current_conversation_task(agent)
+        authoritative = getattr(getattr(agent, "_current_run_params", None), "task_attributes", None)
+        projection = getattr(params, "task_attributes", None)
+        if link is not None and isinstance(authoritative, dict) and isinstance(projection, dict) and projection is not authoritative:
+            projection.clear()
+            projection.update(authoritative)
+        return link
+
+    transition = getattr(params, "active_turn_transition_callback", None)
+    return transition("task_promotion", promote) if callable(transition) else promote()
+
+
 # LLM: A thread's latest workspace projection is not a live-task capability. The first work tool
 # binds a fresh request unless exact request/Goal/active authority already selected a workspace.
 # 函数用途: 本轮真正工作时自动建立运行身份；只有结构化授权才复用旧目录，不让旧清单控制新一轮。
@@ -109,6 +127,9 @@ def promote_current_conversation_task(
         or getattr(current, "prompt", "")
         or task_id
     ).strip()
+    from ..capability.package_selection_scope import new_task_capability_selection
+
+    selection = new_task_capability_selection(agent, current)
     try:
         link = store.tasks.bind(
             {
@@ -122,7 +143,8 @@ def promote_current_conversation_task(
                 "cancellation_scope": str(
                     attrs.get(CONVERSATION_CANCELLATION_SCOPE_ATTR) or "foreground"
                 ),
-            }
+            },
+            **({"capability_selection": selection} if selection is not None else {}),
         )
     except Exception:
         return None
@@ -499,6 +521,8 @@ def _bound_goal_requires_in_place_resume(store: object, link: object) -> bool | 
     return False if status == "complete" else None
 
 
+# LLM: 原终态链接只贡献精确cwd，新执行代仍由原选择器分配；新链接可初始化选包pending，旧链接和原Goal不得被补写或复活。
+# 函数用途: 为明确续作建立幂等的新执行代，保持旧任务终态和原工作目录。
 def _continue_terminal_link_as_new_execution(agent: object, store: object, link: object):
     """Create one idempotent successor task over the bound terminal workspace."""
     current = getattr(agent, "_current_run_params", None)
@@ -537,6 +561,9 @@ def _continue_terminal_link_as_new_execution(agent: object, store: object, link:
     ).strip()
     if not current_goal:
         return None
+    from ..capability.package_selection_scope import new_task_capability_selection
+
+    selection = new_task_capability_selection(agent, current)
     try:
         successor = store.tasks.bind(
             {
@@ -545,7 +572,8 @@ def _continue_terminal_link_as_new_execution(agent: object, store: object, link:
                 "goal": current_goal,
                 "status": "active",
                 "task_path": str(getattr(link, "task_path", "") or ""),
-            }
+            },
+            **({"capability_selection": selection} if selection is not None else {}),
         )
     except Exception:
         return None

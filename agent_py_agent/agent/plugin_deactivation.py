@@ -6,6 +6,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, replace
 
 from .plugin_activation import PluginActivationRequest
+from .plugin_content_activation import PluginContentActivation
 from .plugin_install_store import PluginInstallStore
 from .plugin_installation import PluginInstallation, PluginInstallationError
 from .plugin_release import preparation_binding
@@ -23,8 +24,8 @@ class PluginDeactivationResult:
     report: dict
 
 
-# LLM: installation 来自已见目录；返回准确停用/释放记录，提交后错误不猜未发生，资源证据在这里不消费。
-# 函数用途: 停用固定插件代次，能确认原准备和资源都结束时删除环境并允许再次启用。
+# LLM: installation 来自已见目录；内容包明确无进程资源，进程包沿原清理链，提交后错误不能猜未发生。
+# 函数用途: 停用固定代次；内容直接释放，有进程时先确认原准备和资源退出，结果交原操作保存。
 def deactivate_plugin(owner, repository, installation: PluginInstallation, operation_id: str) -> PluginDeactivationResult:
     activation = installation.activation
     if activation is None:
@@ -35,6 +36,13 @@ def deactivate_plugin(owner, repository, installation: PluginInstallation, opera
     stopped = PluginInstallStore(owner).change_activation(PluginActivationRequest(
         operation_id, installation.revision, replace(activation, phase="revoked"),
     )).installation
+    if isinstance(activation, PluginContentActivation):
+        report = {"plugin_id": stopped.manifest.plugin_id, "enabled": False, "revision": stopped.revision,
+                  "activation_id": stopped.activation_id, "authority_revoked": True,
+                  "cleanup_required": False, "cleanup_confirmed": True, "released": False,
+                  "sessions": [], "errors": []}
+        stopped = _release_if_settled(owner, repository, stopped, operation_id, report)
+        return PluginDeactivationResult(stopped, report)
     scope = ProcessActivationScope(owner.owner_id, str(owner.home_dir),
                                    stopped.manifest.plugin_id, stopped.activation_id)
     store = ProcessSessionStore(process_session_store_root(owner.home_dir, owner.home_dir))

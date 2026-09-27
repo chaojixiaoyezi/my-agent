@@ -1,5 +1,14 @@
 # Verification：结构
 
+`tool_context/reducer.py::_inline_result_with_archive_anchor`仅对临时模型副本过滤本次`kind=tool_output`且精确匹配归档物理路径的refs及ref内容块。canonical结果和runtime facts仍从原数据读取；普通业务/来源引用保持，原reader返回源分页。外置摘要选择继续接收原结果，避免过滤改变JSON可解析性和选择行为；此片不改执行事实、权限或持久schema。
+
+`tool_call_runtime`继续按原ToolRuntimePolicy判断是否晋升，然后调用`promote_conversation_task_for_run`；该原会话入口承担T锁和权威参数单向同步，宿主选包准备共用同一事务。执行与工具账仍归原ToolExecutor，选包本身不进入工具账。
+
+能力包沿 `tooling/models.py` 的 `ToolParameterCondition` 声明条件晋升，
+`agent_core/tool_call_runtime.py` 在原晋升入口读取 typed 参数，`contracts/tool_manifest_contract.py` 投影同一策略。
+资源复制仍是 `write_file`，宿主注入 resolver 只提供校验后的原字节和精确来源；
+副作用、审批、操作幂等和未知结果继续由原 Executor/operation store 负责，无包专用执行账。
+
 `tool_call_archive_record.py` 两个外置输出入口均传原ToolCall的执行身份；`conversation/compact_tool_identity.py` 共用精确引用。native候选在摘要前捕获原IR配对身份，活动归档按同一四元键切分来源与保留区，裸call_id仅作展示。
 第8步索引恢复补齐：externalizer 保存有界 `tool_process`，carried reader 恢复原 process 信封；投影唯一位于 `tooling/runtime_facts.py`，旧索引不推定清理成功。组件验证与真实 TUI 分开。
 

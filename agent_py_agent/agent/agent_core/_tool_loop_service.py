@@ -1368,7 +1368,7 @@ def _text_conversation_history_section(seed: object, *, compact_context: object 
 # 在首次 HTTP 前抛出的 typed 拒绝可退回同一次尝试的原参数与原 prompt，之后错误原样上抛。返回具名结果，
 # params 是实际产出 response 的循环参数；不要把辅助回执当作业务工具声明已展示。
 # 同一次模型请求的瞬断重试若宿主已提交恢复候选，直接复用该候选，不在旧参数上 build、回收或注入插话；
-# 选模仍在每次尝试内重新进行。
+# 选模仍在每次尝试内重新进行。主选包与 child 已授权入口只在真实业务首轮 build/capture 前准备，不进入回执/预览或已提交恢复候选。
 # 函数用途: 选择本轮真正要发给模型的上下文与模型依赖，并把原请求、Compact和输入恢复能力交给模型请求周期。
 def next_tool_loop_model_response(
     agent, params: ToolLoopExecuteParams, tool_rounds: int,
@@ -1394,6 +1394,12 @@ def next_tool_loop_model_response(
                 agent, model_params, tool_rounds, consumes_task_tool_surface=False,
             )
             return ModelTurnRequest(prompt, response, params)
+        if tool_rounds == 0:
+            from ..capability.package_selection_runtime import prepare_capability_package_selection
+            from ..capability.subagent_package_entries import prepare_subagent_package_entries
+
+            prepare_capability_package_selection(agent, params)
+            prepare_subagent_package_entries(agent, params)
         prompt = build_tool_loop_prompt(agent, params)
         prepared, prompt = prepare_request_context(agent, params, prompt)
     baseline, baseline_prompt = select_first_request_model(agent, prepared, prompt)

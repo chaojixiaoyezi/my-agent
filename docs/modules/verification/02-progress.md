@@ -23,6 +23,18 @@ Codex 复核修正（同日）：原分类器用正则切 `;`，引号参数里�
 Codex 复核第二轮（同日）：posix shlex 去掉引号后，整个参数就是 `";"` 时记号值与外层分号相同，仍会误判。现在判断外层连接符前
 先把引号片段与反斜杠转义换成占位符（`_QUOTED_OR_ESCAPED`），`2>&1`、`&>` 这类重定向照旧不算后台。
 
+2026-09-27：reducer只在直接展示的临时副本省略本次物理自归档引用，原逻辑读锚点保留。原结果、执行事实和外置摘要分支选择不改；普通相邻分支及native替身25项通过，真实采用未验。详见[模型投影边界](../../design/TOOL_LOOP_DEPENDENCY_SPLIT.md#本次自归档引用的模型投影2026-09-27)。
+
+能力包第七候选将工作工具的任务晋升和参数投影同步收至原conversation.task_promotion共用事务，继续保持Gateway活动回合锁先于任务锁。新宿主入口读取复用原ActionPolicy只读准入，不注册假工具调用；组合回归进行中。
+
+## 2026-09-25 能力包的原工具链接线
+
+工具运行策略增加通用结构化参数条件；只有显式 `skill_search` 包 get 晋升任务，普通索引查询不建立任务。
+包引用随后在原 TaskStore 固定，`write_file.source_ref` 沿原 Executor、审批、版本、配额和原子写完成资源复制。
+两条路径复用现有操作回执；来源已撤销时写入前拒绝，写后异常和 UNKNOWN 不重放。
+条件晋升、真实 Registry、来源写入及相邻验证组件已定向通过；完整 native 替身链与真实 TUI 结果持续记录于
+[本轮验收](../../tasks/CAPABILITY_PACK_ACCEPTANCE.md)，当前不能称模型自然召回通过。
+
 ## 2026-09-26 证据库连接显式关闭（分支 `claude/ci-fix`）
 
 `VerificationEvidenceRepository` 原来用 `with self._connect() as conn`，只提交不关闭。Python 3.11 起 sqlite3 连接要等循环 GC

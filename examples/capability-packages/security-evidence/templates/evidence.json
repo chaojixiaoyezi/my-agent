@@ -1,0 +1,12 @@
+{
+  "schema": "security_evidence_input.v1",
+  "scope": {
+    "authorization_ref": "",
+    "asset_ids": [],
+    "allowed_operations": [
+      "review_existing_evidence"
+    ]
+  },
+  "evidence": [],
+  "findings": []
+}

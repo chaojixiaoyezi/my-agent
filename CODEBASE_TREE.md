@@ -8,6 +8,61 @@
 |-- STATUS.md                            # 当前能力、开放问题与证据边界
 |-- DESIGN_LEDGER.md                     # 当前架构决策及模块设计导航
 |-- TESTS.md                             # 开发测试、真实 TUI 与发布 gate
+|-- agent_py_agent/agent/capability_package_manifest.py # 独立能力内容声明与资源路径校验
+|-- agent_py_agent/agent/plugin_content_activation.py # 内容包无进程激活身份
+|-- agent_py_agent/agent/plugin_content_lifecycle.py # 原安装库中的内容激活迁移
+|-- agent_py_agent/agent/capability/package_snapshot.py # 包级快照及绑定内容与激活代次的读取参数
+|-- agent_py_agent/agent/capability/package_provider.py # 从原安装表发现并复核内容包
+|-- agent_py_agent/agent/capability/task_references.py # 主子任务与调度的准确包版本引用
+|-- agent_py_agent/agent/capability/package_resources.py # 原写文件工具的私有资源引用解析
+|-- agent_py_agent/agent/capability/package_read.py # 原工具与宿主共用的准确正文分页和任务pin
+|-- agent_py_agent/agent/capability/package_selection.py # 有界包名卡及一次结构化选择
+|-- agent_py_agent/agent/capability/package_selection_scope.py # 新主任务的元数据资格与pending初始化
+|-- agent_py_agent/agent/capability/package_selection_authority.py # 原只读准入与精确执行权复核
+|-- agent_py_agent/agent/capability/package_selection_context.py # 已读入口的总预算和准确续页
+|-- agent_py_agent/agent/capability/package_selection_runtime.py # 首个主业务请求前的一次领取和装配
+|-- agent_py_agent/tests/test_capability_selection_state.py # 原TaskLink严格标记、损坏隔离和CAS
+|-- agent_py_agent/tests/test_capability_selection_scope.py # 默认关闭、主子权限和配置资格
+|-- agent_py_agent/tests/test_capability_package_selection.py # 结构化选择、原调用账与响应隔离
+|-- agent_py_agent/tests/test_capability_package_read.py # 原页回执保持及读取和pin取消边界
+|-- agent_py_agent/tests/test_capability_selection_authority.py # 原执行权和只读准入组合验证
+|-- agent_py_agent/tests/test_capability_package_entry_context.py # 多入口总预算、分页和失败隔离
+|-- agent_py_agent/tests/test_capability_package_selection_runtime.py # 主请求一次准备及停止续跑组合
+|-- agent_py_agent/tests/test_capability_package_drama_text_duration.py # A包逐场镜头与来源目标时长对账
+|-- agent_py_agent/tests/test_capability_package_drama_text_basis.py # A包v3镜头来源、改编与未知声明及报告版本
+|-- agent_py_agent/tests/test_capability_package_drama_text_visibility.py # A包人物字面覆盖、画外声明及有界诊断
+|-- agent_py_agent/tests/test_capability_package_drama_workflow_duration.py # B包分集镜头与明确目标对账
+|-- agent_py_agent/tests/test_capability_package_b_template.py # B完整模板、制作交接及原派工授权接口
+|-- agent_py_agent/tests/test_capability_package_drama_workflow_handoff.py # B交接绑定、原字节摘要、对象地址及路径别名缓存边界
+|-- agent_py_agent/tests/test_subagent_package_entries.py # 子代理同代包入口的首请求、显式选模、权限和恢复组合
+|-- agent_py_agent/tests/test_file_syntax_diagnostics.py # 有界语法观察、反馈与诊断异常隔离
+|-- agent_py_agent/tests/test_filesystem_syntax_feedback.py # 三文件入口的真实发布、部分提交与取消回归
+|-- agent_py_agent/tests/test_file_syntax_diagnostics_runtime.py # 配置到模型可见回执及修复选择的替身验证
+|-- scripts/build_capability_package.py   # 不执行代码的可重复内容包构建入口
+|-- examples/capability-packages/         # 来源独立的短剧与证据报告样包源码
+|   |-- drama-text-a/methods/review-source.md # 原文与下游事实的成对证据审阅
+|   |-- drama-text-a/methods/review-continuity.md # 同镜、相邻镜与跨场接续的定向阅读
+|   |-- drama-text-a/methods/review-delivery.md # 实际合并产物、检查回执与拟对外陈述核对
+|   |-- drama-text-a/methods/visible-characters.md # 从成稿回填可见与画外人物，解释字面诊断边界
+|   |-- drama-text-a/templates/review.md # 人与模型使用的审阅反馈形状，不生成机器状态
+|   `-- drama-workflow-b/templates/handoff.json # 制作阶段输入与对象转换的待填写业务资料
+|-- docs/design/CAPABILITY_PACKS.md       # 能力包协议、生命周期、隔离召回和任务版本合同
+|-- docs/design/CAPABILITY_MIGRATION.md   # 从固定来源到候选、安装、验收、迭代和回退的操作流程
+|-- docs/design/CAPABILITY_SOURCE_COVERAGE.md # 固定上游入口、脚本、依赖与样包迁移缺口
+|-- docs/design/FILE_SYNTAX_DIAGNOSTICS.md # 文件原子发布的有界语法观察及工具反馈边界
+|-- agent_py_agent/tests/test_capability_package_native_pipeline.py # 模型替身沿原生循环读取和精确落盘
+|-- agent_py_agent/tests/test_capability_package_prompt_guidance.py # 包采用与资源复用软规则、空选择和旧提示不变
+|-- agent_py_agent/tests/test_capability_package_selector_recovery.py # 准确读取参数、错误恢复、受限隔离及换代拒绝
+|-- agent_py_agent/tests/test_capability_package_recommendations.py # 当轮候选软展示、配置开关及原生请求边界
+|-- agent_py_agent/tests/test_capability_package_resource_scope.py # 包成员地址空间、同代导航与大搜索完整卡片预览
+|-- agent_py_agent/tests/test_capability_resource_input_schema.py # 完整来源声明、原执行器缺字段门与同代原字节复制
+|-- agent_py_agent/tests/test_capability_package_compact.py # 原快照与安装事实的 Compact 续读及换代拒绝
+|-- agent_py_agent/tests/test_capability_package_catalog_scale.py # 包目录预算与大量私有成员不展开
+|-- agent_py_agent/tests/test_capability_package_main_scope.py # 失效包隔离、保留原版本与主任务正常收口
+|-- agent_py_agent/tests/test_write_file_sources.py # 来源物化复用原权限、审批和操作回执
+|-- agent_py_agent/tests/test_prompt_scope_failure.py # 准入失败和嵌套并发的线程上下文恢复
+|-- docs/tasks/CAPABILITY_INTERNALIZATION_GOAL.md # 能力内化的唯一 TODO、并行归属和收口要求
+|-- docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md # 能力迁移的来源、许可、覆盖矩阵和真实验收计划
 |-- docs/tasks/DECISION_MODEL_TAKEOVER_HANDOFF.md # 决策模型完整Goal、暂停状态、实际证据和接手范围
 |-- docs/tasks/DECISION_MODEL_CONTEXT_AUDIT.md # 决策容量、完整请求投影与 Compact 的源码证据和分片交接
 |-- docs/tasks/DECISION_MODEL_CHILD_COMPACT_HANDOFF.md # child完整恢复共享实现、验收与后台后续边界交接
@@ -49,6 +104,7 @@
     |-- COMPACT_GENERATION_FACTS.md      # 摘要生成来源、请求关联及旧检查点未知诊断边界（待实施）
     |-- COMPACT_MEDIA_POLICY.md          # 媒体会话压缩策略：归档引用主链、视觉摘要按结构化能力事实开启
     |-- TOOL_LOOP_DEPENDENCY_SPLIT.md   # 第8步模型响应、工具轮与Compact职责边界及参考核对
+    |-- COMPACT_GENERATION_FACTS.md    # 摘要生成来源、请求关联及旧检查点未知诊断边界
     |-- PLUGIN_LIFECYCLE.md              # 可装卸插件、动态命令、版本切换与故障回收的待实施方案
     |-- PLUGIN_PACKAGES.md               # 本地包静态校验与待接线的安装事实、隔离和撤销边界
     |-- PLUGIN_WORKSPACE_CONTEXT.md      # 逐次只读工作区协议、路径裁决与轻量 SDK 构建边界
@@ -410,6 +466,7 @@ agent_py_agent/
 |   |   |-- message_selection.py        # 固定EOF两遍来源校验与逐行范围/覆盖筛选，无第二消息存储
 |   |   |-- message_replay.py           # 固定原文件身份及行地址/hash的只读消息重放，切片不驻留正文
 |   |   |-- store_tasks.py              # 任务关联、活动索引、工作区状态投影及终态进度关闭
+|   |   |-- capability_selection_state.py # 原任务内的一次选包标记校验，不另建账
 |   |   |-- store_audits.py             # Audit 准备、发布修订、终态重开与运行代提交
 |   |   |-- store_guidance.py           # 插话入队、精确认领、权威回执查询与组件组装
 |   |   |-- store_guidance_records.py   # 插话回执格式、迁移构造与身份校验
@@ -588,6 +645,7 @@ agent_py_agent/
 |   |   |-- workspace_write_scope.py  # 按原写入边界解析生成本次写入范围，无范围时只允许 cwd
 |   |   |-- capabilities_tool.py      # 从真实工具目录与唯一 channel registry 投影模型能力
 |   |   |-- _filesystem_display.py   # 文件工具共用的有界 diff/write 富终端展示事实构造器
+|   |   |-- file_syntax_diagnostics.py # 原子候选同源的有界语法观察及成功写入后的软反馈
 |   |   |-- _persona_write_guard.py   # SOUL/USER/AGENTS 统一强制走 update_persona
 |   |   |-- background_process_launch.py # v3 预留、原权威复查及 v4 日志/stdio 启动交接
 |   |   |-- background_process_host.py # 独立绑定 child、直接继承管道、检查寿命并提交真实终态
@@ -612,6 +670,14 @@ agent_py_agent/
 |   |   |-- tool_input_completion.py # 明示安全默认值、可信上下文补参与脱敏 source/source_ref
 |   |   `-- sandbox.py                # bwrap 唯一策略、自检、worker/K8s readiness 硬门；含插件进程用的整根只读形态
 |   |-- capability/                    # 单一 SkillsService、逐轮 snapshot、能力路由与 capability tools
+|   |   |-- package_read.py            # 原工具与宿主共用正文分页、页验收和任务pin
+|   |   |-- package_selection.py       # 有界元数据与原后端的一次结构化选择
+|   |   |-- package_selection_scope.py # 新主任务选择资格和typed pending初值
+|   |   |-- package_selection_authority.py # 原策略门和精确执行轮复查
+|   |   |-- package_selection_context.py # 入口总预算、来源与续页装配
+|   |   |-- package_selection_runtime.py # 原主业务首轮的一次选择准备
+|   |   |-- subagent_package_entries.py # 子代理原首请求内的已授权同代包入口准备
+|   |   |-- subagent_entry_authority.py # 子入口新建材料及当前run/attempt的只读授权复核
 |   |   |-- decision_candidates.py     # 原能力快照候选、独立适用性题及必要引用，不读取Skill正文
 |   |   |-- decision_recommendation.py # 每工作片可选推荐及采用前复核，只改变展示不改授权
 |   |   |-- decision_experiment_sample.py # 只观察实验的对照条目：基线/候选名单、配置版本与原账结算视图
@@ -755,6 +821,7 @@ agent_py_agent/
 |   |-- test_gateway_child_compact_scope_application.py # Gateway和child共用view、交错游标及Audit范围隔离
 |   |-- test_compact_tool_source.py      # 同一纯来源分区、完整身份与未知保留、快照隔离
 |   |-- test_compact_tool_partition.py   # 原生完整配对、跨轮同名调用、未知/媒体/孤儿保留
+|   |-- test_compact_tool_ref_archive_chain.py # 真实归档、回执投影、原生IR与carry的引用来源组合回归
 |   |-- test_compact_native_ir_recovery.py # 真实读文件原生回执、恢复安全点、原CAS及候选HTTP对等
 |   |-- test_compact_text_source.py   # 顺序完整覆盖、源改写/取消、纠正预算与序列化峰值回归
 |   |-- test_compact_message_source.py # 可重放摘要消息的编码/估算等价及迭代关闭验证
@@ -1158,6 +1225,35 @@ docs/
 ## Current Storage Roots
 
 ### 关键文件说明
+
+- `docs/design/COMPACT_GENERATION_FACTS.md`：摘要来源与请求关联的交接设计，明确旧检查点未知和诊断不参与恢复权威。
+- `agent_py_agent/agent/capability/task_references.py`：连接原任务 pins、授权 grants 和调度引用，不另建状态库。
+- `agent_py_agent/agent/capability/package_read.py`：原工具与宿主共用准确原字节、分页、来源与任务pin。
+- `agent_py_agent/agent/capability/package_selection_runtime.py`：原主业务准备的唯一选包接缝；scope、authority、context和纯selector分别负责资格、原门复核、总预算与模型选择。
+- `agent_py_agent/agent/capability/subagent_package_entries.py`：只消费子代理原首次请求资格与显式授权的同代引用，不再次选包或扩权。
+- `agent_py_agent/agent/capability/subagent_entry_authority.py`：首请求入口的宿主新建材料与当前执行身份检查，不形成第二份状态或授权。
+- `agent_py_agent/agent/tooling/file_syntax_diagnostics.py`：文件修改的有界纯语法观察；写入成功、当前语法与任务质量分开，禁止重新读取目标猜测已提交内容。
+- `agent_py_agent/agent/conversation/capability_selection_state.py`：原TaskLink的可选值类型和结果摘要，CAS与持久化仍归store.tasks。
+- `agent_py_agent/agent/capability/package_provider.py`：只从当前 owner 的原安装表取得已启用包，每次读取复查代次与摘要。
+- `scripts/build_capability_package.py`：把声明和私有资源构建为 v7 内容包，不导入或执行包内脚本。
+- `examples/capability-packages/`：三个独立迁移切片与来源许可，组件测试不代表真实 TUI 通过。
+- `examples/capability-packages/drama-text-a/methods/review-source.md`、`review-continuity.md`、`review-delivery.md`：A0.2.1 的来源、接续、交付三份私有审阅分表；沿入口按需读取，不进入全局 Skill。
+- `examples/capability-packages/drama-text-a/templates/review.md`：可带回作者处理的 Markdown 证据反馈模板，不是第二份任务或验收状态。
+- `agent_py_agent/tests/test_capability_package_drama_text_duration.py` 与 `test_capability_package_drama_workflow_duration.py`：合成输入下验证样包原脚本的时长聚合、目标缺失/非法、浮点和溢出边界，不执行真实任务产物。
+- `agent_py_agent/tests/test_capability_package_drama_text_basis.py`：验证 A 包 v3 镜头声明、本场来源、失败回执版本和结构不代表语义的边界。
+- `agent_py_agent/tests/test_capability_package_drama_text_visibility.py`：以公开合成资料通过原 CLI 验证代称/退出、可见/画外、歧义与长短词、原位置及预算/裁剪计数；不修改真实产物。
+- `examples/capability-packages/drama-text-a/methods/visible-characters.md`：A0.3.0 人物依据回填的私有方法与v3诊断合同；只说明字面覆盖，不生成宿主完成状态。
+- `agent_py_agent/tests/test_capability_package_b_template.py`：用完整占位填写公开合成资料，核对 B 的原检查器、私有交接模板及真实隔离派工授权。
+- `examples/capability-packages/drama-workflow-b/templates/handoff.json`：制作阶段、输入字节摘要、对象转换、省略与新增的业务清单；不作为宿主状态或已验证证据。
+
+- `docs/design/CAPABILITY_PACKS.md`：包级发现、私有方法、原安装与任务授权的边界。
+- `docs/design/CAPABILITY_MIGRATION.md`：固定来源、完整覆盖表、候选构建和原命令发布／回退的可执行步骤。
+- `docs/design/CAPABILITY_SOURCE_COVERAGE.md`：两个固定短剧来源的全部入口、阅读深度、样包映射及未迁移项；索引覆盖不等于能力全部迁移。
+- `docs/design/FILE_SYNTAX_DIAGNOSTICS.md`：原生文件修改的语法反馈设计，区分写入成功、观察结果与任务质量。
+- `agent_py_agent/tests/test_capability_package_resource_scope.py`：验证包成员和业务路径的区分、同代搜索导航、受限隔离，以及归档后原生消息保留完整资源引用。
+- `agent_py_agent/tests/test_capability_resource_input_schema.py`：验证模型完整来源schema、原执行器在handler前拒绝缺字段/类型错误，以及原身份/代次/摘要边界不变。
+- `docs/tasks/CAPABILITY_INTERNALIZATION_GOAL.md`：能力内化执行 Goal 与当前唯一 TODO。
+- `docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md`：固定来源版本与迁移范围、许可和测试证据矩阵。
 
 - `agent_py_agent/agent/capability/skill_proposals.py`：自学习 Skill 提案唯一权威；只收 `subagent_lesson` 且带 task/run 来源的 Candidate，固定模板渲染、O_EXCL 幂等写 `<owner_home>/data/skill_proposals/`；confirm 在 owner 锁内复核版本、草稿 hash、来源 Candidate 与目标不存在，经 frontmatter 解析和 `agent_generated` guard（不 force）后 `os.replace` 安装，失败不写目标。
 - `agent_py_agent/cli/skill_proposal_commands.py`：`my-agent skills proposals list/show/confirm/reject` 的注册与输出，只委托上面的服务；确认必须带 `--expected-revision`，不提供模型工具。自学习开启时 runner 结果链以 `actor=auto` 调同一 confirm。
@@ -1585,6 +1681,7 @@ docs/
 - `agent_py_agent/agent/conversation/compact_tool_summary.py`：完整渲染被选工具的原模型可见投影，供transcript和活动归档共用原分段摘要；不读外置全文，不将展示截断当作来源覆盖。
 
 - `agent_py_agent/agent/agent_core/compact_tool_partition.py`：复用原 ToolCall 四元身份与时序配对，冻结真实 IR/归档的共同来源及保留区；不读存储、不调用模型、不新增持久状态。
+- `agent_py_agent/tests/test_compact_tool_ref_archive_chain.py`：以真实归档/读取/投影链验证外置文本、同组内联结果、来源引用与恢复attempt的Compact分区；零模型/网络，摘要材料仍是原模型可见IR。
 - `agent/conversation/input_media.py`：入站媒体唯一文件/ref 合同；`cli/chat_parts/tui_media.py`、`tui_media_clipboard.py` 只处理输入动作。
 - `docs/design/TUI_INPUT_MEDIA.md`：新媒体能力、迁移、平台和供应商边界。
 - `agent_py_agent/tests/test_input_media.py`：字节、归属、历史恢复和媒体预算合同测试。

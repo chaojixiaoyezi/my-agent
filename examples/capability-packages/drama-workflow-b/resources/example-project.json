@@ -1,0 +1,120 @@
+{
+  "schema": "drama_workflow_project.v1",
+  "title": "最后一班夜车",
+  "episodes": [
+    {
+      "id": "EP01",
+      "hook": "一件包裹被放错车。",
+      "ending": "包裹被交给等待的人。",
+      "target_seconds": 60
+    }
+  ],
+  "characters": [
+    {
+      "id": "C01",
+      "name": "站务员",
+      "visual_anchor": "蓝色制服"
+    },
+    {
+      "id": "C02",
+      "name": "乘客",
+      "visual_anchor": "绿色围巾"
+    }
+  ],
+  "locations": [
+    {
+      "id": "L01",
+      "name": "夜间站台",
+      "continuity_note": "同一站台灯光"
+    }
+  ],
+  "props": [
+    {
+      "id": "P01",
+      "name": "牛皮纸包裹",
+      "continuity_note": "一直使用红色绳结"
+    }
+  ],
+  "scenes": [
+    {
+      "id": "SC01",
+      "episode_id": "EP01",
+      "location_id": "L01",
+      "character_ids": [
+        "C01",
+        "C02"
+      ],
+      "prop_ids": [
+        "P01"
+      ],
+      "beats": [
+        {
+          "id": "B01",
+          "kind": "action",
+          "text": "站务员拦住即将关上的车门。"
+        },
+        {
+          "id": "B02",
+          "kind": "dialogue",
+          "character_id": "C01",
+          "text": "这件包裹不是这一班的。"
+        },
+        {
+          "id": "B03",
+          "kind": "action",
+          "text": "乘客接住包裹并点头。"
+        }
+      ]
+    }
+  ],
+  "shots": [
+    {
+      "id": "SH01",
+      "scene_id": "SC01",
+      "beat_ids": [
+        "B01"
+      ],
+      "seconds": 20,
+      "reference_ids": [
+        "REF-L01"
+      ]
+    },
+    {
+      "id": "SH02",
+      "scene_id": "SC01",
+      "beat_ids": [
+        "B02"
+      ],
+      "seconds": 20,
+      "reference_ids": [
+        "REF-C01",
+        "REF-L01"
+      ]
+    },
+    {
+      "id": "SH03",
+      "scene_id": "SC01",
+      "beat_ids": [
+        "B03"
+      ],
+      "seconds": 20,
+      "reference_ids": [
+        "REF-L01"
+      ]
+    }
+  ],
+  "references": [
+    {
+      "id": "REF-C01",
+      "kind": "character",
+      "subject_id": "C01",
+      "state": "planned"
+    },
+    {
+      "id": "REF-L01",
+      "kind": "location",
+      "subject_id": "L01",
+      "state": "planned"
+    }
+  ]
+}

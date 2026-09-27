@@ -1,0 +1,60 @@
+# 资料先对齐，再交接制作
+
+本方法参考 shuohao-skills 的分段资料与稳定 ID 设计，改写为独立内容包的小切片。它与 drama-text-a 的原文改编路径不同，不自动覆盖或融合。
+
+| 资料 | 关键字段 | 下游消费 |
+| --- | --- | --- |
+| 分集目标 | episodes.id/hook/ending/target_seconds | 场次引用 episode_id；按场次归集镜头秒数，与每集显式目标对账 |
+| 人物 | characters.id/name/visual_anchor | 场次 character_ids、对白 character_id、角色参考图 |
+| 美术 | locations 与 props 的 id/name/continuity_note | 场次 location_id/prop_ids、地点/道具参考图 |
+| 剧本 | scenes.id/episode_id/location_id/character_ids/prop_ids 与 beats.id/kind/text；对白另有 character_id | 每个动作/对白节拍有单独编号；说话人必须在场 |
+| 分镜 | shots.id/scene_id/beat_ids/seconds/reference_ids | 明确承接哪些节拍，不能只写一段通用视频提示词 |
+| 参考资料 | references.id/kind/subject_id/state | kind 为 character/location/prop，subject_id 指向对应表；镜头只引用 references.id |
+
+从 `templates/project.json` 复制所需数量的行并填写本次事实；空字符串、空引用及 null 是待填标记，不能原样交付。`beats` 的动作/对白两行展示各自字段，只保留实际存在的节拍。没有道具时可用 `props=[]`、场次 `prop_ids=[]`，不为占位行虚构道具。角色名和显示文字可以修改，资料引用继续使用 ID；修改上游 ID 或删除对象后，所有下游引用都要复查。
+每集 `target_seconds` 与每镜 `seconds` 都用有限正数。检查器以 `shots.scene_id → scenes.episode_id` 为唯一分集计量关系，不读取额外 `episodes.scene_ids` 或场次 `seconds` 来替代实际镜头合计。缺少目标记 `episode_target_missing` 警告，不猜目标；显式空值、布尔值、字符串、非有限数或非正数记错误。合计与目标使用 `rel_tol=1e-12, abs_tol=0.0` 消除相对数值舍入误差，不给极小的合法时长额外绝对误差额度，这不是“约若干秒”的创作容差。实际计划仍有偏差时，据实调整资料或列出差值，不伪改检查结果。
+
+没有参考条目时用 `references=[]` 和镜头 `reference_ids=[]`。确有参考制作计划但没有媒体时建立 `state=planned` 的条目；只有已有输入资料时才声明 `provided`，且仍需独立核对媒体。参考条目 ID、角色/道具 ID、来源段落 ID 是不同关系，不能互相代填。
+
+## 阶段与跨包交接
+
+在本次工作区填写 `templates/handoff.json` 的副本，使用明确升级的 `drama_workflow_handoff.v2`。v1 的自由字段不会被猜成 v2 地址；旧文件保留原结果，需要按新合同显式重新编写。列表按实际数量增减；没有映射、省略、新增或未决差异时用空列表，不留下空占位行。
+
+- `files`：为每份实际输入和阶段产物分配唯一资料 ID，写可定位的工作区文件路径与完整 64 位 `sha256`。摘要须来自该文件读取时的真实字节，不能用 `file_version`、包摘要或重新序列化 JSON 的摘要代替；资料修改后重新计算并保留本次交接对应版本。这里是业务文件路径，不是包内资源路径。
+- `stages`：记录唯一阶段 ID、`scope`、实际消费的 `input_file_ids`、实际产出的非空 `output_file_ids` 和 `review_notes`；文件 ID 指向 `files`，列表不重复。没有文件输入的原创阶段可用空输入列表，没有实际产物就不把计划列为已产出。填写这些字段不证明实际执行。
+- `object_mappings`：每行填写 `stage_id/source/target/reason`；source 只能引用该阶段输入文件，target 只能引用其输出。一对多或多对一用多行表示，不把多个 ID 拼成一个字符串。
+- `omissions` / `additions`：分别填写 `stage_id/source/reason` 或 `stage_id/target/reason`；新增内容不能冒充原输入已提供的事实。
+- `unresolved_differences`：填写 `stage_id/refs/difference/next_step`，非空 `refs` 只指向该阶段输入或输出，保留具体差异和下一步审阅动作；未决项是警告，不因结构通过而删除。
+
+`source/target/refs[]` 使用相同地址：`{"file_id":"F02","pointer":"/shots/0","object_id":"SH01"}`。`pointer` 是严格 JSON Pointer，按实际 JSON 字段和从零开始的数组下标定位；`~0` 表示键中的波浪号，`~1` 表示斜线，空字符串明确表示整份 JSON。不接受表达式、通配符、URI fragment、`-` 或 `01` 数组下标。若填写 `object_id`，目标必须是含相同 `id` 的对象；定位标量字段（例如 `/shots/0/seconds`）时省略 `object_id`，不能留下空占位。每个地址只指一个实际位置；理由可以说明合并、拆分或派生，但检查器不证明理由为真，也不假定来源值等于目标值。
+
+交接本身不授予读取其它文件的权限。运行脚本时逐一传入 `--input-file FILE_ID=PATH`；每个 `files.id` 必须恰有一项明确绑定，不能缺项、多余或重复。`files.path` 与绑定路径都按**本次命令 cwd**词法规范化后比较，不以 handoff 文件父目录为基准，不展开 `~` 或环境变量。正文路径只有比较作用，绝不拿来打开文件；不一致在读取绑定资料前拒绝。所有绑定文件须是普通 UTF-8 JSON 文件，拒绝叶子符号链接、FIFO 等特殊文件。命令行本身仍须服从本次任务已有工具权限，包不能借绑定扩大宿主授权。
+
+每份资料最多 4 MiB，最多 32 个绑定文件、交接文件总字节最多 32 MiB；每类交接列表最多 4096 行，JSON 嵌套最多 64 层，地址最多 2048 字符/64 段。输入摘要和 JSON 来自同一次有界读取，完全相同的绑定路径复用本次快照；不同路径表达各自读取，不能因词法折叠 `..` 看似相同而跳过不存在的目录或中间链接指向的实际文件。检查过程中检测文件身份与大小/改写时间变化，结果只描述这次取得的字节；它不是文件锁，不保证检查后文件不会再变。超限应拆分真实制作阶段，不能截断资料后谎称全量验证。未绑定/路径不符、不存在、权限不足、非普通文件、读取变化和格式错误有不同错误码；不读取错误信息中的任意路径来恢复。
+
+声明、地址语法和授权先全量检查，失败时不打开任何绑定资料。文件读取或摘要失败后停止后续绑定读取；`files_checked` 只计本次已取得且摘要相符的文件，少于 `files_declared` 时余项不能视为通过。解析失败等情形不能确定完整读取计量，不把缺报当零字节后继续消费预算。显式 project 和 handoff 文档自身也各受 4 MiB 限制，不能用绑定预算替代它们的上限。
+
+这仍是供模型/人审阅的制作资料，不是宿主 task、run、授权、pin 或完成账。检查器可验证字段、原字节 SHA、阶段输入输出范围及实际对象地址；不会自动判断阶段先后是否符合故事、所有应有映射是否已经声明、映射理由/来源忠实/道具语义是否正确，或阶段是否真的执行。未声明的语义遗漏仍须逐项回到原文核对，不能把机械通过称为交接全链质量通过。
+
+以文本改编资料转入本包为例：
+
+- `cast.id` 与 `characters.id` 显式对应；逐场核对 `character_ids`，不能只复制角色名字。
+- 原 `scenes.source_ids` 保留为来源依据清单，逐项回到原文核对；本包检查器不读取原文，不能替代来源检查，更不能把它们填进 `reference_ids`。
+- 原场次和镜头 ID 显式映射到本包 `scenes.id` 与 `shots.scene_id`；补齐本包需要的场次 `episode_id/location_id/character_ids/prop_ids`。
+- 原镜头动作需要明确整理成场次内 `beats`，分别填写 `id/kind/text`，对白增加 `character_id`；镜头的 `beat_ids` 逐项引用本场真实节拍。另一包没有这些字段时，不能只造一列节拍编号而没有正文。
+- 参考资料单独建立条目，逐镜核对 `reference_ids → references.id → subject_id`；镜头秒数在转换后重新按集汇总。
+
+完整制作资料形成后，用同代脚本资源的 `source_ref` 原样物化，通过现有执行工具运行：
+
+```text
+python3 scripts/check_continuity.py --project output/project.json
+python3 scripts/check_continuity.py --project output/project.json --handoff output/handoff.json --input-file F01=inputs/source.json --input-file F02=output/project.json
+```
+
+F01/F02 只是命令示例，必须对应本次交接清单并绑定全部文件；需要静态 HTML 时添加 `--format html`。入口仍是一个独立标准库脚本，不需要另取隐藏辅助文件。
+
+CLI 报告升级为 `drama_workflow_check.v2`：`checks.project` 与 `checks.handoff` 分别记录 `passed/failed`，未请求交接时后者为 `not_requested` 并有 `handoff_not_checked` 警告。顶层 `structure_valid` 仅汇总**本次请求的**机械检查，`errors/warnings` 用 `scope` 区分项目和交接；原分集计量仍在 `metrics`，交接计量在 `handoff_metrics`。原 `check_project()` 函数和项目 v1 格式的含义不变。任何请求检查失败退出 1，无错误退出 0；未决语义、创作与媒体限制继续作为警告展示，不变成宿主硬门。
+
+记录实际输出、退出码及所检文件版本。发现错误就修订资料后重算相关 SHA、重跑原脚本，不改弱检查器。未执行可以如实交付未验证资料；执行并无结构错误也只说明本脚本覆盖的客观项目，警告、创作与媒体审阅仍单列。
+
+这些是制作资料的方法，不是宿主执行合同。机械检查发现断链应提示修订；创作深度、镜头美感和节奏效果继续由模型/人审阅，不加入通用宿主硬门。

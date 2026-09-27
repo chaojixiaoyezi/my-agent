@@ -1,4 +1,4 @@
-# LLM: 能力决策材料只读原授权快照；短名单不授予执行权，不读取Skill正文，不按自然语言推断必要能力。
+# LLM: 能力决策材料只读原授权快照；包只提供公开摘要，私有资源不出题、不计入 Skill，也不预读正文或授予权限。
 # 模块用途: 为一次能力推荐准备可核对的候选和独立适用性题目，并将答案映射回原精确引用。
 from __future__ import annotations
 
@@ -37,8 +37,8 @@ def _tool_row(runtime) -> dict:
     return row
 
 
-# LLM: 工具取真实ToolRuntimeSnapshot，Skill取原scoped snapshot；不查另一注册表或从外部字符串扩权。
-# 函数用途: 提取指定可选类别的工具及可发现Skill名卡，保留所有候选、不预读正文。
+# LLM: 工具、Skill 与包摘要都取原 scoped snapshot；包内资源不进入候选，现有决策开关仍控制是否请求模型。
+# 函数用途: 提取公开可发现能力名卡，不预读方法或脚本正文。
 def capability_candidates(snapshot, skills, *, categories: list[str], skills_discoverable: bool,
                           allowed_tools: list[str] | None = None) -> list[dict]:
     rows = [_tool_row(runtime)
@@ -51,6 +51,11 @@ def capability_candidates(snapshot, skills, *, categories: list[str], skills_dis
                      "description": entry.description, "when_to_use": entry.when_to_use,
                      "version": entry.content_sha256, "tools_required": list(entry.tools_required)}
                     for entry in skills.enabled_entries())
+        rows.extend({"kind": "capability_package", "ref": package.stable_id,
+                     "name": package.package_id, "description": package.description,
+                     "when_to_use": package.summary, "keywords": list(package.keywords),
+                     "version": package.package_sha256, "tools_required": []}
+                    for package in skills.packages)
     return rows
 
 
@@ -112,15 +117,15 @@ def selected_capabilities(response, questions: dict, rows: list[dict]) -> tuple[
     return [rows[index] for index in sorted(indices)], ""
 
 
-# LLM: 必要引用只来自宿主合同和已授权Skill快照；未知ref不会获得名卡、schema或执行权。
-# 函数用途: 保留明确任务义务以及已授予子代理的技能，在缩短展示时不丢必需工具。
+# LLM: 必要引用只来自宿主合同与授权快照，包含包级引用但不展开私有资源，包不会隐式增加工具。
+# 函数用途: 在缩短展示时保留明确任务义务、子代理 Skill 与能力包摘要。
 def required_capabilities(params, contract, skills) -> tuple[set[str], tuple[str, ...]]:
     tools = {name for action in tuple(getattr(contract, "required_actions", ()) or ())
              if getattr(action, "status", "") == "open" for name in tuple(getattr(action, "allowed_tools", ()) or ())}
     attrs = getattr(params, "task_attributes", None) or {}
     refs = attrs.get("skill_snapshot_refs", [])
     required = {row.get("stable_id") for row in refs if isinstance(row, dict)} if isinstance(refs, list) else set()
-    entries = skills.enabled_entries() if skills is not None else ()
+    entries = skills.reference_entries() if skills is not None else ()
     if getattr(params, "context_scope", "default") == "task_local":
         required.update(entry.stable_id for entry in entries)
     retained = tuple(entry.stable_id for entry in entries if entry.stable_id in required)

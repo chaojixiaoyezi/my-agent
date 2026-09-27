@@ -1,0 +1,50 @@
+{
+  "plugin_id": "security-evidence",
+  "version": "0.1.0",
+  "summary": "整理授权范围内的已有安全证据",
+  "capability": {
+    "description": "只整理用户提供的授权资产范围、既有证据、发现引用和修复报告；不扫描、不联网、不验证漏洞。",
+    "keywords": [
+      "安全报告",
+      "证据整理",
+      "授权范围",
+      "证据去重",
+      "修复建议"
+    ],
+    "entry_document": "CAPABILITY.md"
+  },
+  "files": [
+    {
+      "path": "CAPABILITY.md"
+    },
+    {
+      "path": "LICENSE"
+    },
+    {
+      "path": "PROVENANCE.md"
+    },
+    {
+      "path": "licenses/PentestGPT-LICENSE"
+    },
+    {
+      "path": "methods/review.md"
+    },
+    {
+      "path": "methods/workflow.md"
+    },
+    {
+      "path": "resources/example-evidence.json"
+    },
+    {
+      "path": "scripts/summarize_evidence.py"
+    },
+    {
+      "path": "templates/evidence.json"
+    }
+  ],
+  "settings_schema": {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": false
+  }
+}

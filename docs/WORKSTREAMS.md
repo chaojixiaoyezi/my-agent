@@ -115,3 +115,11 @@ git -C ../my-agent-worktrees/memory diff main...HEAD
 - 小改动：写在 handoff 里，主线集成时重点复查。
 - 中等改动：先停下来，拆成新的 workstream 或交给对应线。
 - 大改动：回到主线讨论，先更新本文件，再动代码。
+
+## 当前能力包内化协作（2026-09-25）
+
+跨开发线继续使用独立分支／工作树；能力包线在 `codex/capability-internalization`。
+同一线内工具子代理共享该 checkout，以[当前 Goal](tasks/CAPABILITY_INTERNALIZATION_GOAL.md)的逐文件独占清单协作，
+不同时写同一文件或提交；主代理统一组合和交接。该约定不允许覆盖其它线未提交内容。
+能力包与自动总结个人 Skill 分线：前者由 Codex 负责，后者由 Claude 负责；交叉接口先明确归属。
+main 集成、推送、部署和默认 Gateway 重启由集成方单独操作；真实验收使用独立数据及一个测试 Gateway，多个 TUI 共用。

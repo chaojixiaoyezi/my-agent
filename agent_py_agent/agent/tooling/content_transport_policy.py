@@ -1,7 +1,10 @@
-
+# LLM: 内容传输只定义正文预算与宿主解析结果，不拥有能力授权或文件写入；精确引用仍须原工具执行器裁决。
+# 模块用途: 统一文本、二进制和宿主资源引用的传输合同，避免大文件经模型重写后丢失字节。
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 
 from ..settings.defaults import DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS
 
@@ -10,6 +13,30 @@ STREAMING_INLINE_WRITE_ABORT_CHARS = 32_000
 RECOMMENDED_WRITE_CHUNK_CHARS = "1500-2000"
 RECOVERY_WRITE_CHUNK_CHARS = 2000
 RECOVERY_STREAMING_INLINE_WRITE_ABORT_CHARS = STREAMING_INLINE_WRITE_ABORT_CHARS
+
+
+# LLM: 解析器只返回已校验字节和不可变来源，不返回路径权限或执行权；调用方必须继续原写入合同。
+# 类用途: 将宿主解析的文件内容交给 write_file，正文无需塞进模型工具参数。
+@dataclass(frozen=True)
+class FileSourceContent:
+    data: bytes
+    source_ref: Mapping[str, str]
+
+    # LLM: 结果在解析后不能被可变引用替换；领域身份和摘要由注入的 resolver 负责复核。
+    # 函数用途: 固定原始字节和扁平结构化来源，拒绝含可变对象的传输结果。
+    def __post_init__(self) -> None:
+        if not isinstance(self.data, bytes) or not isinstance(self.source_ref, Mapping):
+            raise ValueError("FILE_SOURCE_CONTENT_INVALID")
+        if not self.source_ref or any(not isinstance(key, str) or not isinstance(value, str)
+                                      for key, value in self.source_ref.items()):
+            raise ValueError("FILE_SOURCE_REFERENCE_INVALID")
+        object.__setattr__(self, "source_ref", MappingProxyType(dict(self.source_ref)))
+
+
+# LLM: 此异常只能在文件写入前报告来源不可用；写入开始后的故障仍走原 UNKNOWN 语义。
+# 类用途: 让宿主在来源已撤销、越权或完整性检查失败时明确拒绝落盘。
+class FileSourceUnavailableError(ValueError):
+    pass
 
 
 def filesystem_text_mutation_rule() -> str:

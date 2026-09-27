@@ -4,6 +4,7 @@ import json
 from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
+from agent_py_agent.agent.capability.skill_snapshot import SkillSnapshotEntry
 from agent_py_agent.agent.scheduler.repository import SchedulerRepository
 from agent_py_agent.agent.scheduler.tool import (
     ScheduleTool,
@@ -14,13 +15,12 @@ from agent_py_agent.agent.scheduler.tool import (
 
 class _Snapshot:
     def __init__(self) -> None:
-        self.entry = SimpleNamespace(
-            stable_id="shared:reporting",
-            name="reporting",
-            content_sha256="a" * 64,
+        self.entry = SkillSnapshotEntry(
+            stable_id="shared:reporting", name="reporting", description="日报方法",
+            path="", source="shared", category="", content_sha256="a" * 64,
         )
 
-    def resolve(self, reference: str):
+    def resolve_reference(self, reference: str):
         return self.entry if reference in {self.entry.stable_id, self.entry.name} else None
 
 

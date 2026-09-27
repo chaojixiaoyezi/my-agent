@@ -1,6 +1,6 @@
 # LLM: edit_file 默认精确且唯一匹配；空白容错只按 allow_fuzzy 显式启用，不能把字符串内空白视为无意义。
-#   与 write_file/apply_patch 共享权限、原编码、原子发布及乐观版本检查；不是跨所有写入者的内核 CAS。
-# 模块用途: 小范围修改已有文本，保留权限和原格式；匹配冲突返回文件事实和读取入口，不鼓励原样重试。
+#   与 write_file/apply_patch 共享原子发布和诊断故障边界；诊断不改写入结果，也不是内核 CAS。
+# 模块用途: 小范围修改文本并保留权限和原格式；反馈候选语法时隔离普通诊断异常。
 from __future__ import annotations
 
 import difflib
@@ -23,6 +23,11 @@ from ._filesystem_write import _atomic_write_bytes
 from ._persona_write_guard import (
     _persona_approval_write_error,
     _persona_injection_write_error,
+)
+from .file_syntax_diagnostics import (
+    FileSyntaxDiagnostics,
+    attach_syntax_diagnostics,
+    update_syntax_diagnostics,
 )
 from .filesystem_path_recovery import MissingPathRequest, missing_path_result
 from .models import (
@@ -87,8 +92,8 @@ class _EditMatchError(ValueError):
     pass
 
 
-# LLM: 写入仍共享原子发布和版本检查；失败的读取提示只反映当前文件，不拥有自动修复权限。
-# 类用途: 对已有文件执行精确修改，并把真实冲突交给调用方重新合并。
+# LLM: 写入共享原子发布、版本和诊断故障边界；语法反馈不决定成功，冲突提示不拥有自动修复权限。
+# 类用途: 精确修改已有文件，把真实冲突及可选观察交给模型，诊断失败保留提交事实。
 class EditFileTool(FileSystemTool):
     model_spec = _build_edit_file_model_spec()
     runtime_policy = ToolRuntimePolicy(
@@ -107,8 +112,8 @@ class EditFileTool(FileSystemTool):
     ):
         super().__init__(workspace_root, workspace_roots, access_options)
 
-    # LLM: 成功返回最新片段和 diff；定位冲突返回 state 类事实而非参数修复，绝不隐式模糊覆盖。
-    # 函数用途: 原子替换目标文本；冲突时不写入，提供当前片段和明确的重新读取入口。
+    # LLM: 定位冲突不写入；发布后统一隔离诊断登记普通异常，不把坏语法或诊断失败变成写失败，取消仍传播。
+    # 函数用途: 原子替换文本并返回片段、diff 和可选诊断，保留原冲突入口与真实提交结果。
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         try:
             target = self.resolve_write_path(
@@ -161,10 +166,11 @@ class EditFileTool(FileSystemTool):
         persona_error = _persona_injection_write_error(target, updated)  # 改 owner SOUL/USER/AGENTS 也过注入扫描
         if persona_error:
             return ToolHandlerOutcome("edit_file", False, persona_error, error_code="PERSONA_INJECTION_BLOCKED")
+        diagnostics = FileSyntaxDiagnostics() if self.enable_file_syntax_diagnostics else None
         try:
             updated_bytes = encode_like_original(updated, original)
             with self.quota_changes([OwnerQuotaChange(target, len(updated_bytes))]):
-                _atomic_write_bytes(target, updated_bytes, expected_version=observed_version)
+                observation = _atomic_write_bytes(target, updated_bytes, expected_version=observed_version, diagnostics=diagnostics)
         except StaleFileVersionError as exc:
             return ToolHandlerOutcome("edit_file", False, str(exc), error_code="STALE_VERSION", effect_outcome="not_started", retryable=True)
         except (OwnerQuotaExceeded, OwnerQuotaUnavailable) as exc:
@@ -180,7 +186,8 @@ class EditFileTool(FileSystemTool):
         # 让模型直接用它做下一次编辑, 无需读回确认。
         preview = _replaced_context_preview(content, updated, new, count)
         rendered = f"已编辑 {self.display_path(target)}：替换 {count} 处{note}\n{preview}"
-        return ToolHandlerOutcome(
+        update_syntax_diagnostics(diagnostics, observation)
+        return attach_syntax_diagnostics(ToolHandlerOutcome(
             "edit_file",
             True,
             rendered,
@@ -196,7 +203,7 @@ class EditFileTool(FileSystemTool):
                     updated,
                 ),
             },
-        )
+        ), diagnostics)
 
 
 # LLM: 默认必须精确匹配；allow_fuzzy 是显式工具参数，不从语言或文件类型推测可忽略的空白。

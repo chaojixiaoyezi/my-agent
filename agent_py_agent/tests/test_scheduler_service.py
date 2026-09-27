@@ -110,7 +110,7 @@ def test_stale_skill_snapshot_fails_before_model_execution(tmp_path) -> None:
         name="skill",
         skill_refs=[{"stable_id": "shared:skill", "content_sha256": "a" * 64}],
     )
-    snapshot = SimpleNamespace(resolve=lambda _reference: SimpleNamespace(content_sha256="b" * 64))
+    snapshot = SimpleNamespace(resolve_reference=lambda _reference: SimpleNamespace(content_sha256="b" * 64))
     service = SchedulerService(
         repository,
         conversation_store=store,

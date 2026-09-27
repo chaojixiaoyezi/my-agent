@@ -7,6 +7,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
+from ..capability.subagent_entry_authority import PACKAGE_ENTRY_PURPOSE, SubagentEntryInitialization
 from ..gateway_parts.io import locked_file_transition
 from ..runtime_errors import DataCorruptionError
 from ..settings.thread_model_selection import SUBAGENT_MODEL_ADVICE_KEY, PendingSubagentModelAdvice
@@ -16,7 +17,7 @@ from .store_threads import (
     normalized_runtime_workspace_roots,
 )
 
-# 仅真正新建且携带宿主建议的 child 获得资格；旧 thread / 旧 pending 绝不补发。
+# 仅真正新建且携带宿主建议或 typed 包入口材料的 child 获得资格；旧 thread / pending 绝不补发。
 SUBAGENT_FIRST_REQUEST_KEY = "host_subagent_first_request.v1"
 
 if TYPE_CHECKING:
@@ -26,7 +27,7 @@ if TYPE_CHECKING:
 # LLM: Agent threads use a host-generated exact id and no channel/user indexes. Existing
 # records are re-read under the original thread transaction before filling missing identity;
 # the transition lock only serializes materialization and cannot guard model/Compact updates.
-# LLM: typed advice 与首次请求资格仅初始化新 thread；existing 不重放 pending/资格；资格不等于尚未发送证明，发送须另走原子栅栏。
+# LLM: typed advice/包入口材料只初始化新 thread；原 advice marker 字节不变，existing 不重放资格，发送仍走原子栅栏。
 # 函数用途: 为确定运行物化独立线程及待验证建议，已有记录只在原线程锁内补缺失身份。
 def ensure_agent_thread_record(
     store: ThreadStore,
@@ -70,6 +71,10 @@ def ensure_agent_thread_record(
                 ),
             )
         advice = request.get("model_advice")
+        entry = request.get("package_entry_initialization")
+        if entry is not None and (not isinstance(entry, SubagentEntryInitialization)
+                                  or entry.run_id != agent_run_id or entry.thread_id != thread_id):
+            raise ValueError("subagent package entry requires an exact host preparation")
         if advice is not None:
             if not isinstance(advice, PendingSubagentModelAdvice):
                 raise ValueError("subagent model advice requires a host preparation")
@@ -78,6 +83,11 @@ def ensure_agent_thread_record(
                 "schema": SUBAGENT_FIRST_REQUEST_KEY, "status": "unsubmitted",
                 "operation_id": advice.operation_id, "child_run_id": agent_run_id,
                 "child_thread_id": thread_id,
+            }
+        elif entry is not None:
+            expected_metadata[SUBAGENT_FIRST_REQUEST_KEY] = {
+                "schema": SUBAGENT_FIRST_REQUEST_KEY, "status": "unsubmitted",
+                "child_run_id": agent_run_id, "child_thread_id": thread_id, "purpose": PACKAGE_ENTRY_PURPOSE,
             }
         thread = ConversationThread(
             thread_id=thread_id,

@@ -1,5 +1,7 @@
 # Gateway Structure
 
+`goal_control_service._create_goal`复用`capability.package_selection_scope.new_task_capability_selection`为真正新建任务提供可选typed pending；原Goal存储、任务bind和wake顺序保持，入口选择在后续真实主业务请求前发生。
+
 `request_context._gateway_history_source` 把已裁决的来源行冻结为只读 `ConversationHistorySource`（地址视图加 `history_projection` 原单行选择与投影），`GatewayConversationContext.history_source` 是唯一历史载体，不再同时持有具体 history/canonical 副本。`request_prompt.gateway_conversation_history_seed` 把来源交给种子，恢复候选沿同一规则；只在原 native/text 准备边界解析，纯 `ToolLoopRequestInput` 投影不读盘。摘要期旧完整请求的释放属于 2b。
 
 12.4保留历史完整投影已本地实现：Gateway、后台和child的Compact来源/候选不再套普通字符窗，完整材料统一进入原容量门；普通展示保持原规则。73项联合及416项相邻回归通过（含重叠，不累加），整项12.4及11/18不变。见[容量审计](../../tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。
@@ -144,6 +146,9 @@ HTTP/IM/未知来源不能凭 rich transcript 获得私有路径展示，后台�
 - 控制：`control_service` 把 `admin/approve/deny` 延迟分派给 `admin_control_service.py`，只用 base agent 的 home/config
   和 Gateway 队列，不构造 scoped Agent。`skills` 延迟分派给 `skill_control_service.py`（在 steer/stop 默认路径之前），
   按 `resolve_gateway_scope_owner` 解析 owner，只读写该 owner 的技能提案与自动总结 Skill，回执不含本机路径。`settings` 延迟分派给 `settings_control_service.py`（不带参数只列参数中心常用层级，`all` 列全部参数）：同一 owner 解析，只有完整身份的本机 local/main（含已绑定管理员私聊）可用，读写走参数中心 `settings/parameter_registry.py` 与 `parameter_changes.py`，回执脱敏，普通异常不承诺“没有改动”；`show` 对登记了派生规则的参数（`applied_value`）按默认模型多给一行“实际效果”，`set`/`reset`/`revert` 另附新值在默认模型上的实际效果（`parameter_changes.applied_after_change`）；回显脱敏走 `mask_value` 的结构脱敏（请求头与环境变量只留键名、凭据开关与网址密码遮值），值文字也只由它给出（布尔 true/false、数字照实，与 user_config、`config get` 同一口径，不另写特判；空值在聊天里显示“（空）”），历史行先经 `displayed_change`。`control_operation_service.execute_gateway_control_operation` 在计算摘要、
+  按 `resolve_gateway_scope_owner` 解析 owner，只读写该 owner 的技能提案与自动总结 Skill，回执不含本机路径。
+  `skill_control_service.execute_skill_control` 按结构化 operation 区分写入和查询的普通异常：confirm/reject/learned_revert/learned_remove 只报告结果未完整确认，提示先查当前状态；查询异常报告暂时读不到。写后追加事件失败不能据异常倒推出“没有改动”，此层不补偿、不自动重放，也不另建事务状态；原服务的可预期失败原因继续保留。
+  `settings` 延迟分派给 `settings_control_service.py`（不带参数只列参数中心常用层级，`all` 列全部参数）：同一 owner 解析，只有完整身份的本机 local/main（含已绑定管理员私聊）可用，读写走参数中心 `settings/parameter_registry.py` 与 `parameter_changes.py`，回执脱敏，普通异常不承诺“没有改动”；`show` 对登记了派生规则的参数（`applied_value`）按默认模型多给一行“实际效果”，`set`/`reset`/`revert` 另附新值在默认模型上的实际效果（`parameter_changes.applied_after_change`）；回显脱敏走 `mask_value` 的结构脱敏（请求头与环境变量只留键名、凭据开关与网址密码遮值），历史行先经 `displayed_change`。`control_operation_service.execute_gateway_control_operation` 在计算摘要、
   写回执之前，用 `control_commands.persisted_control_command_text` 把密码换成 `******`；明文只随内存中的 command 交给执行服务。
 - 审批：`request_execution._gateway_request_interactive_approvals` 在客户端声明 `tool_approval`，或服务端核实为已绑定的
   管理员私聊且执行 owner 为本机管理员时，开启原 `StreamApproval`。`http_handlers._read_public_progress_events` 把
@@ -1986,3 +1991,10 @@ GatewayModelObservation现承接render/prepare_request/select三个顺序点：�
   `AgentToolApprovalSinkMixin.request_permission` 做同样的预检与落盘。
 - 边界：会话级缓存（`approval_session.py`）仍然只是本 Gateway 进程内的一次授权复用，不会被扩成 owner 级；owner 级授权只来自用户在面板上的显式选择。
 - `cli/gateway_process._build_run_state` 写入 `runtime_prefix=sys.prefix`，`gateway_parts/http_handlers.handle_status` 原样投影；这是客户端比对安装的唯一结构化事实，不写版本文案（2026-09-25）。
+
+## 能力包的原任务状态接线（2026-09-25，首片）
+
+`scheduler/tool` 从当前快照选中 capability:<id>；`scheduler/repository` 规范和持久保存完整引用，
+`scheduler/service` 对同内容重装后的不同 activation_id 也拒绝自动启动。
+`conversation/models.ThreadTaskLink` 和 `store_tasks.TaskStore.pin_skill_reference` 是主任务包版本的唯一持久位置，
+不复制插件安装状态。`capability/task_references` 组合可信运行身份与原任务库；普通后台沿原任务链接恢复。
