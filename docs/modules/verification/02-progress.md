@@ -1,5 +1,11 @@
 # Verification：开发推进
 
+## 2026-09-27 直接展示工具结果只保留逻辑续读锚点（移植自 Codex b496e1a0c，分支 `claude/port-b496-reducer`）
+
+reducer 在直接展示分支里，从临时副本省略本次归档文件的物理 ref，模型只看到带 scoped call id 的逻辑锚点；原结果、执行事实和外置摘要选择不变。
+触发证据：能力包真实任务中模型把物理路径和逻辑引用拼错。main 上验证：reducer 直接测试与外置、headroom、消息适配、compact 引用、原生 IR
+相邻测试共 182 项通过，变异（恢复渲染完整结果）被抓住；能力包原生管线测试留在能力内化分支。详见 `docs/design/TOOL_LOOP_DEPENDENCY_SPLIT.md`。
+
 ## 2026-09-27 验证命令“未计入”说明（分支 `claude/param-center-phase0`）
 
 真机现象：delivery_quality 一次都没触发，验证账 `verification_events` 为 0 行。my-agent 判断是 run_command 缺 `return_code`，

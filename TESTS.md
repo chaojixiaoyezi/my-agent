@@ -1,5 +1,11 @@
 # 测试与发布验收
 
+## 直接展示工具结果只保留逻辑续读锚点（移植自 Codex b496e1a0c，2026-09-27，基于 main `49b169e3e`）
+
+- 只移植 `agent_core/tool_context/reducer.py` 与 `test_tool_context_reducer.py`（及两份能干净应用的设计/结构文档）；能力包原生管线测试和包文档
+  留在能力内化分支，随整线合并。main 上重跑：reducer 直接用例与外置/headroom/消息适配/compact 引用/原生 IR 相邻测试 182 项通过，
+  变异（恢复渲染完整结果）2 项失败被抓住；推送前全仓 12 分片。
+
 ## 输出上限回归修正：按任意已知窗口夹取（2026-09-27，分支 `claude/output-cap-regression`，基于 main `ea0b539cb`）
 
 - **来源**：dsh-9b 的 CI 监视发现 9207d54e5 起 8 个 compact 用例稳定失败（test_compact_native_ir_recovery 5 个、test_subagent_compact_recovery 2 个、

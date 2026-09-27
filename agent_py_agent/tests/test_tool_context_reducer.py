@@ -1,5 +1,6 @@
 import json
 from copy import deepcopy
+from dataclasses import replace
 
 import pytest
 
@@ -10,8 +11,10 @@ from agent_py_agent.agent.agent_core.orchestration.shared_context import (
 from agent_py_agent.agent.agent_core.tool_context.reducer import render_tool_result_for_live_prompt
 from agent_py_agent.agent.tooling.output_projection import project_tool_output_body
 from agent_py_agent.agent.tooling.runtime_contracts import (
+    ToolContentBlock,
     ToolFailureFacts,
     ToolResult,
+    ToolResultRef,
     ToolSuccessFacts,
 )
 from agent_py_agent.tests._tool_runtime_harness import canonical_history_call
@@ -106,6 +109,77 @@ def test_inline_result_without_artifact_does_not_offer_unreadable_archive_hint()
     assert "tool-output-archive-anchor" not in rendered
     assert "read_artifact_hint" not in rendered
     assert "output_scoped_call_id" not in rendered
+
+
+@pytest.mark.parametrize("surface", ["inline", "live_output", "externalized"])
+def test_model_output_uses_logical_archive_anchor_and_preserves_canonical_refs(surface):
+    archive_path = "/private/tool_outputs/read-notes-call-abc.json"
+    logical_ref = "run-notes:read-notes-call"
+    policy = {"live_prompt_output": "current page"} if surface == "live_output" else {}
+    result = _result("read_notes", True, "current page", result_envelope={"tool_output_policy": policy})
+    archive_ref = ToolResultRef(kind="tool_output", ref=archive_path, sha256="abc", size_bytes=9000)
+    business_ref = ToolResultRef(kind="document", ref="draft/notes.md")
+    result = replace(result, refs=(archive_ref, business_ref), content_blocks=(
+        *result.content_blocks, ToolContentBlock("ref", ref=archive_path),
+        ToolContentBlock("ref", ref=business_ref.ref),
+    ))
+    record = {"output_path": archive_path, "artifact_ref": archive_path, "scoped_call_id": logical_ref,
+              "output_externalized": surface == "externalized", "output_preview": "current page"}
+    before_result, before_record = result.to_dict(), deepcopy(record)
+
+    rendered = render_tool_result_for_live_prompt(result, record)
+
+    assert archive_path not in rendered
+    assert "current page" in rendered
+    assert f'"artifact_ref": "{logical_ref}"' in rendered
+    if surface != "externalized":
+        assert business_ref.ref in rendered
+    assert result.to_dict() == before_result
+    assert record == before_record
+
+
+def test_externalized_result_keeps_original_summary_selection_with_archive_ref_block():
+    path = "/archive/page.json"
+    output = json.dumps({"next_tool_call": {"tool": "read_file", "path": "draft/notes.md"}})
+    result = _result("read_notes", True, output)
+    result = replace(result, refs=(ToolResultRef(kind="tool_output", ref=path),),
+                     content_blocks=(*result.content_blocks, ToolContentBlock("ref", ref=path)))
+    record = {"output_path": path, "artifact_ref": path, "scoped_call_id": "run:read-notes",
+              "output_externalized": True, "output_preview": output}
+
+    rendered = render_tool_result_for_live_prompt(result, record)
+
+    assert "actionable_tool_result:" not in rendered
+    assert "read_artifact_hint" in rendered
+    assert path not in rendered
+
+
+def test_model_output_preserves_source_logical_ref_and_other_result_refs():
+    source_ref = "run-notes:read-notes-call"
+    other_ref = "/archive/another-output.json"
+    result = _result("read_artifact", True, json.dumps({"artifact_ref": source_ref, "content": "page"}))
+    result = replace(result, refs=(ToolResultRef(kind="tool_output", ref=source_ref),
+                                  ToolResultRef(kind="tool_output", ref=other_ref)),
+                     content_blocks=(*result.content_blocks, ToolContentBlock("ref", ref=source_ref)))
+
+    rendered = render_tool_result_for_live_prompt(result, {"source_artifact_ref": source_ref})
+
+    assert source_ref in rendered and other_ref in rendered
+    assert "tool-output-archive-anchor" not in rendered
+    assert "read_artifact_hint" not in rendered
+
+
+def test_model_output_does_not_rewrite_body_or_untyped_business_reference():
+    path = "/archive/example.json"
+    result = _result("read_notes", True, f"Example data mentions {path}")
+    result = replace(result, refs=(ToolResultRef(kind="document", ref=path),),
+                     content_blocks=(*result.content_blocks, ToolContentBlock("ref", ref=path)))
+    record = {"artifact_ref": path, "scoped_call_id": "run-notes:read-notes-call"}
+
+    rendered = render_tool_result_for_live_prompt(result, record)
+
+    assert result.output in rendered
+    assert '"kind": "document"' in rendered
 
 
 def test_preserved_result_keeps_full_body_even_when_archive_is_externalized():

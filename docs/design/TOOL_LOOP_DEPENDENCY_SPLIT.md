@@ -1,5 +1,34 @@
 # 模型与工具循环的职责拆分
 
+## 本次自归档引用的模型投影（2026-09-27）
+
+问题：`tool_call_archive_record._projection_refs`为完整原输出增加物理`tool_output`引用及ref内容块，
+`ToolResult.output/render_for_prompt`会展示两者；reducer随后又追加原scoped逻辑锚点。
+A0.2.2轨迹同时含两类引用，模型另拼错误ID。正确hint本已存在，因此这只是已确认的接口不一致，
+不能认定它是引用误用或短剧语义失败的唯一原因。
+
+实现仅在`_inline_result_with_archive_anchor`渲染前创建临时副本：精确匹配本次archive_record的
+`output_path/artifact_ref`与`kind=tool_output`，省略对应refs及ref内容块。原锚点和read参数保持；
+不按文件名反推ID，不替换正文文字、业务引用、其他输出引用或`source_artifact_ref`。
+`read_artifact`沿原来源的窗口/next_read，不追加读取其自身包装结果的锚点。旧缺少逻辑ID的记录
+保持既有无hint表现，不制造可读身份。
+
+原canonical结果继续交归档、artifact登记和Compact；text与native仍绑定同一模型投影。
+过滤不能前移到reducer总入口：移除ref内容块会改变`result.output`的JSON可解析性，继而改变
+外置action摘要分支选择。本片不修改那些摘要或operation facts，不声称所有上下文中的物理路径均已去除。
+
+定向成熟参考：固定Free-Code `6b25ab68b`的`src/utils/toolResultStorage.ts`（137–198、268–333）
+以及Bash/FileRead调用方，展示参数直接对应既有读取入口；固定Codex `578c1b223`的
+`codex-rs/core/src/tools/mod.rs`（78–112）、`context.rs`（414–469）、
+`handlers/unified_exec/write_stdin.rs`（72–81）区分正文与可直接消费的身份字段。
+它们只支持接口边界的局部对照，不能把其物理路径/session ID机制照搬为本仓归档合同。
+
+验证：普通refs/内容块、业务引用不变、原JSON摘要选择、原生适配及真实工具链替身共25项通过。
+native替身从实际hint和next_read读回当前5000字符包页，再用原source_ref复制全部CRLF字节；
+这不等于读完全部包资源，也不证明真实模型采用或业务质量。私有Gateway尚未安装本宿主改动。
+
+以下为此前循环拆分的阶段记录。
+
 状态：模型采纳／请求周期、有界历史及Compact候选已本地集成；工具事实和唯一循环入口组合随475c945a5集成，16文件349 passed／20既有xfail。跨请求工具编号误过滤正在修复；未推送部署，真实TUI待组合包。
 
 解决问题：主循环同时承担请求准备、Compact事务、模型响应采纳、用户插话确认、工具调用记录和结束裁决；修改一种行为必须检查太多共享状态。按实际副作用边界分离，并保持原执行链唯一。

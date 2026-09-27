@@ -7,6 +7,10 @@
 
 `tooling/runtime_facts.py`接canonical handler_details，输出原verification块和有界process字段；`reducer.py`统一脱敏，`tool_call_archive_record.py`保留同一有界process，`runtime/loop_support.py`恢复后同口径展示。它们不改变执行状态或持久schema。
 
+`tool_context/reducer.py::_inline_result_with_archive_anchor` 只对临时模型副本过滤本次 `kind=tool_output` 且精确匹配归档物理路径的 refs
+及 ref 内容块（移植自 Codex b496e1a0c，2026-09-27）：模型只看到一个逻辑续读锚点，不再同时看到物理路径。canonical 结果与 runtime facts
+仍读原数据，普通业务/来源引用保持，read_artifact 返回源分页；外置摘要选择继续接收原结果，不改执行事实、权限或持久 schema。
+
 ## 零工具续跑原生历史
 
 `backends.response_completion.has_reasoning_content` 区分有效 typed 思考与空包；适配器返回原内容和用量。

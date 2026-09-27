@@ -330,6 +330,9 @@ task workspace 摘要同步）同样改用它，避免"读时切开、写回落�
 
 ## Artifact 分页与大输出恢复
 
+- 直接展示工具结果时，reducer临时省略本次typed物理自归档refs及对应ref内容块，复用原scoped读锚点。
+  canonical refs、完整blob、索引、reader既有登记查询及Compact不变；正文/业务路径不做字符串清洗，
+  `source_artifact_ref`继续指向原来源。外置摘要选择保持原样，本片不声称所有投影均已删除物理引用。
 - 完整工具输出先交给唯一 externalizer 判定和归档，再产生模型 preview；工具可以用结构化
   `tool_output_policy.requires_recovery_artifact=true` 要求保留完整正文，但不能指定宿主路径。全局大小阈值
   和预览容量仍是另两条通用触发条件。
