@@ -65,18 +65,14 @@ def test_default_templates_have_single_authority():
     assert offenders == [], f"默认 thought 模板出现重复定义: {offenders}"
 
 
-def test_capability_config_rejects_unknown_fields(tmp_path):
-    """能力配置中的未知字段必须 fail-closed。"""
+def test_capability_config_warns_on_unknown_fields(tmp_path):
+    """能力配置中的未知字段只告警并忽略（2026-09-27 起与主配置一致）。"""
     from agent_py_agent.agent.capability.config import load_capability_config
 
     config_file = tmp_path / "capability_config.yaml"
     config_file.write_text("unknown_runtime_override: 60\n", encoding="utf-8")
-    try:
-        load_capability_config(config_file)
-    except ValueError as exc:
-        assert "未知字段" in str(exc)
-    else:
-        raise AssertionError("未知字段应当报错")
+    config = load_capability_config(config_file)
+    assert any("unknown_runtime_override" in w for w in config.config_warnings)
 
 
 def test_finalize_context_carries_context_scope_for_compact_policy():
