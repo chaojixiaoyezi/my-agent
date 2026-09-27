@@ -1,4 +1,6 @@
-
+# LLM: 场景框架的通用底座；Gateway 子进程生命周期只在 run_scenario_gateway_ask 内闭合（start 之后必停），
+#   停止只认场景 Gateway 工作区 pid 记录这一文件系统事实。改动 start/stop 顺序须同步 test_scenario_utils.py。
+# 模块用途: 场景测试的临时工作区、固定 prompt、Gateway 子进程起停和 summary 输出。
 from __future__ import annotations
 
 """provides scenario-test workspace setup, fixture writing, subprocess helpers, and summary output.
@@ -6,10 +8,12 @@ from __future__ import annotations
 给人看的解释：
 场景测试需要临时项目、隔离配置、固定 prompt、gateway 子进程和最终报告。
 这些通用小工具都放这里，具体测试 case 只描述自己要验证的行为。
+Gateway 一旦被场景启动，就绪超时、ask 失败或异常都会按 pid 把它停掉，不留后台进程。
 """
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -19,6 +23,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..agent.core import SimpleAgent
+from ..agent.gateway_parts import gateway_paths, is_pid_alive, terminate_pid, wait_for_pid_exit
+from ..agent.gateway_parts.daemon_control import get_running_pid
 from ..agent.subagents.models import SubAgentBoardOptions, SubAgentTask, TaskStatus
 from .common import ROOT, make_agent
 from .scenario_workspace import ScenarioConfigRequest, write_scenario_config, write_scenario_fixture
@@ -126,6 +132,37 @@ def scenario_command(paths: ScenarioPaths, *parts: str) -> list[str]:
     return [sys.executable, "-m", "agent_py_agent", "--config", str(paths.config), *parts]
 
 
+# 场景 Gateway 就绪等待预算：跟随本次 ask 超时换算，夹在 10-60 秒之间。全仓分片高负载时默认的 3 秒
+# 会把“还在起来”的 Gateway 报成启动失败（exit 2）；这里只决定等多久，就绪判据仍由 gateway start 自己裁决。
+_SCENARIO_GATEWAY_READY_MIN_SECONDS = 10.0
+_SCENARIO_GATEWAY_READY_MAX_SECONDS = 60.0
+# --force 会先停旧实例再冷启动，start 子进程自身的时限要在就绪预算之外再留出停止等待的余量。
+_SCENARIO_GATEWAY_START_EXTRA_SECONDS = 60.0
+# 正式 stop 停不掉时按 pid 升级终止：SIGTERM 后等这么久，仍活着再 SIGKILL 并再等一次。
+_SCENARIO_GATEWAY_STOP_GRACE_SECONDS = 5.0
+
+
+def _scenario_subprocess_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env.setdefault("PYTHONUTF8", "1")
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    return env
+
+
+# LLM: 预算只影响 gateway start 等多久，就绪判据不变；非法输入按 0 处理并落到下限。
+# 函数用途: 按本次 ask 超时换算 Gateway 就绪等待秒数，夹在 10-60 秒之间。
+def scenario_gateway_ready_budget_seconds(timeout: object) -> float:
+    try:
+        requested = float(timeout or 0)
+    except (TypeError, ValueError):
+        requested = 0.0
+    return max(_SCENARIO_GATEWAY_READY_MIN_SECONDS, min(_SCENARIO_GATEWAY_READY_MAX_SECONDS, requested))
+
+
+# LLM: Gateway 生命周期在本函数闭合：start 一经发出，就绪超时、ask 失败、子进程超时或任何异常都走 finally，
+#   由 stop_scenario_gateway 按 pid 停掉本次启动的 Gateway；停止事实以结构化字段 gateway_stop 附在返回值里，
+#   异常照常向上抛。调用方（scenario.py、gateway_cross_day_case.py）只看 ok/error/gateway_stop 字段。
+# 函数用途: 起一个隔离的后台 Gateway、发一条 ask 拿回 JSON 结果，最后保证 Gateway 进程不残留。
 def run_scenario_gateway_ask(
     paths: ScenarioPaths,
     prompt: str,
@@ -133,35 +170,103 @@ def run_scenario_gateway_ask(
     timeout: float,
     save: bool = False,
 ) -> dict[str, object]:
+    env = _scenario_subprocess_env()
+    try:
+        payload = _run_scenario_gateway_ask_unstopped(paths, prompt, env=env, timeout=timeout, save=save)
+    finally:
+        stop_facts = stop_scenario_gateway(paths, env=env)
+    payload["gateway_stop"] = stop_facts
+    return payload
 
-    env = os.environ.copy()
-    env.setdefault("PYTHONUTF8", "1")
-    env.setdefault("PYTHONIOENCODING", "utf-8")
-    start = run_scenario_subprocess(scenario_command(paths, "gateway", "start", "--force"), env=env, timeout=60)
+
+# LLM: 只负责 start -> ask -> 解析，不停 Gateway；停止由 run_scenario_gateway_ask 的 finally 兜底。
+# 函数用途: 启动场景 Gateway 并发送一条 ask，把 CLI 的 JSON 回复原样返回。
+def _run_scenario_gateway_ask_unstopped(
+    paths: ScenarioPaths,
+    prompt: str,
+    *,
+    env: dict[str, str],
+    timeout: float,
+    save: bool,
+) -> dict[str, object]:
+    ready_budget = scenario_gateway_ready_budget_seconds(timeout)
+    start = run_scenario_subprocess(
+        scenario_command(paths, "gateway", "start", "--force", "--ready-timeout", str(ready_budget)),
+        env=env,
+        timeout=ready_budget + _SCENARIO_GATEWAY_START_EXTRA_SECONDS,
+    )
     if start.returncode != 0:
         return {"ok": False, "error": "gateway start failed", "stdout": start.stdout, "stderr": start.stderr}
+    ask_command = scenario_command(paths, "gateway", "ask", prompt, "--timeout", str(timeout), "--json")
+    if not save:
+        ask_command.append("--no-save")
+    ask = run_scenario_subprocess(ask_command, env=env, timeout=timeout + 30)
+    if ask.returncode != 0:
+        return {"ok": False, "error": "gateway ask failed", "stdout": ask.stdout, "stderr": ask.stderr}
     try:
-        ask_command = scenario_command(paths, "gateway", "ask", prompt, "--timeout", str(timeout), "--json")
-        if not save:
-            ask_command.append("--no-save")
-        ask = run_scenario_subprocess(
-            ask_command,
-            env=env,
-            timeout=timeout + 30,
-        )
-        if ask.returncode != 0:
-            return {"ok": False, "error": "gateway ask failed", "stdout": ask.stdout, "stderr": ask.stderr}
-        try:
-            payload = json.loads(ask.stdout)
-        except json.JSONDecodeError as exc:
-            return {"ok": False, "error": f"gateway response was not JSON: {exc}", "stdout": ask.stdout}
-        return payload
-    finally:
-        run_scenario_subprocess(
+        payload = json.loads(ask.stdout)
+    except json.JSONDecodeError as exc:
+        return {"ok": False, "error": f"gateway response was not JSON: {exc}", "stdout": ask.stdout}
+    if not isinstance(payload, dict):
+        return {"ok": False, "error": "gateway response was not a JSON object", "stdout": ask.stdout}
+    return payload
+
+
+# LLM: 只认本次场景 Gateway 工作区 pid 记录里的活进程（文件系统事实，经 get_running_pid 核对代际），不解析 stdout。
+#   先走正式 `gateway stop --kill`；进程仍在（还没发布 running 的 Gateway 可能不处理停止请求）就按 pid 整棵升级终止。
+#   本函数不抛异常，所有结果作为结构化事实返回并打印一行 gateway_stop=…，供场景 summary 和人工核对。
+# 函数用途: 场景结束（含失败/超时/异常）时把自己启动的 Gateway 停干净，并给出可核对的停止事实。
+def stop_scenario_gateway(paths: ScenarioPaths, *, env: dict[str, str]) -> dict[str, object]:
+    pid, pid_error = _scenario_gateway_pid(paths)
+    facts: dict[str, object] = {
+        "pid": pid,
+        "stop_returncode": None,
+        "stop_error": "",
+        "terminated_by_pid": False,
+        "alive_after_stop": False,
+    }
+    if pid_error:
+        facts["pid_error"] = pid_error
+    try:
+        stop = run_scenario_subprocess(
             scenario_command(paths, "gateway", "stop", "--timeout", "10", "--kill", "--reason", "scenario-test done"),
             env=env,
             timeout=30,
         )
+        facts["stop_returncode"] = stop.returncode
+    except (OSError, subprocess.SubprocessError) as exc:
+        facts["stop_error"] = f"{type(exc).__name__}: {exc}"
+    if pid and is_pid_alive(pid):
+        facts["terminated_by_pid"] = True
+        facts["termination"] = _terminate_scenario_gateway_pid(pid)
+    facts["alive_after_stop"] = bool(pid) and is_pid_alive(pid)
+    print("gateway_stop=" + json.dumps(facts, ensure_ascii=False, sort_keys=True, default=str))
+    return facts
+
+
+# LLM: cli 层不能引用 agent.subagents/agent.tooling 的进程树终止器（import 边界），这里只用 gateway_parts 的
+#   进程原语：SIGTERM（Windows 即 TerminateProcess）等宽限，仍活着再 SIGKILL；只对本次记录的 pid 动手，不杀进程组。
+# 函数用途: 正式 stop 停不掉时按 pid 升级终止场景 Gateway，返回结构化终止回执。
+def _terminate_scenario_gateway_pid(pid: int) -> dict[str, object]:
+    terminate_pid(pid)
+    if wait_for_pid_exit(pid, _SCENARIO_GATEWAY_STOP_GRACE_SECONDS):
+        return {"method": "SIGTERM", "exited": True}
+    if os.name != "nt":
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+    return {"method": "SIGTERM->SIGKILL", "exited": wait_for_pid_exit(pid, _SCENARIO_GATEWAY_STOP_GRACE_SECONDS)}
+
+
+# LLM: pid 只来自场景配置解析出的 Gateway 工作区 pid 记录；读不到或配置坏了只返回错误事实，停止流程继续。
+# 函数用途: 找出本次场景启动的 Gateway 进程号。
+def _scenario_gateway_pid(paths: ScenarioPaths) -> tuple[int | None, str]:
+    try:
+        agent = load_scenario_agent(paths.config)
+        return get_running_pid(gateway_paths(agent).pid, cleanup_stale=False), ""
+    except Exception as exc:  # 配置或工作区异常不能让停止兜底跳过；错误只作为结构化事实返回
+        return None, f"{type(exc).__name__}: {exc}"
 
 
 def run_scenario_subprocess(cmd: list[str], *, env: dict[str, str], timeout: float) -> subprocess.CompletedProcess:

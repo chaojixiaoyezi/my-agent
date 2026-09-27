@@ -3914,6 +3914,16 @@ Audit/摄取不列入本轮新增验收；共享模块既有回归按改动影�
   扫描隔离 home 全部 431 个文件，测试密码明文零命中；控制回执为 `/admin ******`、`/approve ******`。
   证据在 `~/.my-agent/releases/admin-identity-acceptance-20260926/`（隔离 home 与模型目录副本已删除）。真实飞书客户端上的验收待部署后由用户操作。
 
+## 场景框架 Gateway 进程清理（2026-09-27）
+
+`cli/scenario_utils.run_scenario_gateway_ask` 把 Gateway 生命周期闭合在函数内：`gateway start --force` 一经发出，无论就绪超时（exit 2）、ask 失败、
+start 子进程超时还是其它异常，`finally` 都调用 `stop_scenario_gateway`——先走正式 `gateway stop --kill`，再按场景 Gateway 工作区 pid 记录核对，
+进程仍活着就按 pid 升级终止（SIGTERM 后仍存活再 SIGKILL，只动这一个 pid）；停止事实以结构化字段 `gateway_stop`（pid、stop_returncode、terminated_by_pid、alive_after_stop）附在返回值里并进入
+场景 summary。之前就绪超时会直接返回 `gateway start failed` 而不停进程，全仓分片高负载时残留后台 Gateway。就绪等待改为随 `--timeout` 换算的
+10-60 秒（显式 `--ready-timeout`），避免默认 3 秒把“还在起来”报成启动失败。
+回归：`test_scenario_utils.py` 用假的子进程入口模拟“就绪超时但进程已经起来”“start 子进程超时抛错”两条路径，断言 stop 被调用、按 pid 兜底后进程不再存活；
+只断言返回值里有 error 不算覆盖。
+
 ## 提交前严格 gate
 
 - **线上 CI runner 与 bwrap（2026-09-25）**：Actions 重新启用后 Test 工作流自 7 月以来一直失败，根因是 ubuntu-24.04 runner 预装 bwrap 但 AppArmor 禁止非特权用户命名空间，sandbox 自检 `BWRAP_ISOLATION_FAILED`（setting up uid map: permission denied）→ 全部 `run_command` 用例按设计 fail-closed。两个工作流增加

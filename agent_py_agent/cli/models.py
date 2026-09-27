@@ -230,17 +230,6 @@ class TaskSearchOptions:
 
 
 @dataclass(frozen=True)
-class SubagentsAcceptanceOptions:
-
-    run_ids: list[str] | None
-    apply: bool
-    reviewer: str | None
-    note: str
-    limit: int
-    test_timeout: float | None = None
-
-
-@dataclass(frozen=True)
 class SubagentsPatchOptions:
 
     action: str

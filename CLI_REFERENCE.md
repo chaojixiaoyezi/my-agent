@@ -271,11 +271,9 @@ Ctrl+C
 | `subagents-hierarchy` | 预览或显式创建 child/grandchild subagent run | `--apply` 时创建下一层任务 | 否 |
 | `subagents-recovery-tree` | 查询 root subagent 的多层恢复交接包 | 否，只输出 refs-only 恢复线索 | 否 |
 | `subagents-route-capabilities` | 路由 capability request | `--apply` 时写 grant/gap | 否 |
-| `subagents-acceptance` | 验收等待验收的 subagent | `--apply` 时写回状态和审计日志 | 否 |
-| `subagents-acceptance-plan` | 查看、审计或显式应用单个 subagent 的父级验收决策 | `--write` 写 dry-run 决策；`--apply` 只允许 `inspect_only` 进入普通验收 apply；`--next-action` 给上级动作建议；`--auto-policy` 写策略 dry-run 审计；`--execute-auto-tests` 只在 `--auto-execution` 下手动确认跑 tests | 否 |
 | `subagents-tests` | 查看或显式重跑单个 subagent 的真实测试执行记录 | `--re-run` 时写 `test_execution.json/md` | 否 |
 | `subagents-patches` | 审核或 apply runner 输出的 patch 记录 | 默认 review dry-run；`--review-apply` 只写审核状态；`--apply` 真正落文件 | 否 |
-| `subagents-dispatch` | 执行父代理调度 | dry-run 写报告；`--apply` 写回；`--execute-acceptance-tests` 只跑父级验收 tests | 只有 `--apply --start-runners` 会调用模型；`--execute-acceptance-tests` 会执行本地验收 tests |
+| `subagents-dispatch` | 执行父代理调度 | dry-run 写报告；`--apply` 写回 | 只有 `--apply --start-runners` 会调用模型 |
 | `background-main-agent` | 本地长期主代理线程、定时汇报和后台唤醒命令 | message/bind-task/observe 会写长期会话账本；tick/service 会唤醒后台主代理 | tick/service 可能调用模型 |
 | `collaboration` | 查看和推进通用多代理协作 case/request/evidence 状态 | update-status/update-request 会写协作账本 | 否 |
 | `daemon` | 按 `agent_config.yaml` 的 `daemon_*` 配置启动前台常驻调度 | 取决于配置 | 取决于配置 |
@@ -299,13 +297,9 @@ my-agent status --recent --limit 10
 my-agent status --json
 ```
 
-显示当前本地工作台总览：gateway 存活状态、gateway 队列数量、LocalStore 记录/事件数量、subagent summary、红灯任务、Shared Progress、Takeover View、Acceptance Plan、Acceptance Next Action、最近事件和建议下一步动作。它只读现有账本，不调用模型。
+显示当前本地工作台总览：gateway 存活状态、gateway 队列数量、LocalStore 记录/事件数量、subagent summary、红灯任务、Shared Progress、Takeover View、最近事件和建议下一步动作。它只读现有账本，不调用模型。
 
 `Takeover View` 会列出可接管 run、failure handoff ref、takeover readiness ref 和 recommended read order；它只读取恢复索引，不展开 artifact 正文。若 run 携带隔离元数据，还会显示 principal、conversation、memory namespace 和 config scope 摘要；这些字段只是审计线索，不代表员工长期记忆已启用，也不代表允许写全局配置。
-
-`Acceptance Plan` 会展示待验收、失败或阻塞 run 的父级验收 dry-run 决策，例如 `execute_tests`、`inspect_only`、`request_human` 或 `rescue`。它只显示摘要和 refs，不执行 tests、不写任务状态、不读取 artifact 正文。
-
-`Acceptance Next Action` 会展示同一批可见 run 的父级下一动作建议，例如 `run_tests`、`request_human_confirmation`、`plan_rescue` 或 `apply_acceptance`，并列出建议命令、原因、refs 和 `mutates_task_state`。它只显示建议，不执行命令、不写任务状态、不读取 artifact 正文。
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
@@ -1141,7 +1135,7 @@ my-agent subagents --limit 20
 | `--root-id <id>` | - | 按根任务 ID 过滤。 |
 | `--limit <n>` | `20` | 最多显示多少条。 |
 
-输出会包含 `Shared Progress`、`Takeover View`、`Acceptance Plan` 和 `Acceptance Next Action`：前者显示 root task 聚合计数，接管视图显示恢复入口 refs 和推荐读取顺序，验收计划显示父级 dry-run 决策，下一动作区块显示建议命令、原因、refs 和 `mutates_task_state`。完整 artifact 正文不会自动进入看板，也不会因为展示验收计划或下一动作建议而执行 tests、apply 或 rescue。
+输出会包含 `Shared Progress` 和 `Takeover View`：前者显示 root task 聚合计数，接管视图显示恢复入口 refs 和推荐读取顺序。完整 artifact 正文不会自动进入看板。
 
 ## `subagents-due-check`
 
@@ -1331,70 +1325,6 @@ my-agent subagents-route-capabilities --apply --skill-dir .\skills
 | `--skill-dir <path>` | - | 额外 skill 目录，可多次传入。 |
 | `--limit <n>` | `20` | 最多处理多少条 request。 |
 
-## `subagents-acceptance`
-
-```powershell
-my-agent subagents-acceptance --dry-run
-my-agent subagents-acceptance --apply --reviewer parent
-my-agent subagents-acceptance --execute-tests --test-timeout 120
-```
-
-| 参数 | 默认值 | 说明 |
-| --- | --- | --- |
-| `--dry-run` | 默认模式 | 只生成验收报告，不修改记录。 |
-| `--apply` | `false` | 验收通过时标记 `DONE/VERIFIED`，失败时标记 `BLOCKED/FAILED`。 |
-| `--run-id <id>` | - | 只验收指定子代理运行 ID，可多次传入。 |
-| `--limit <n>` | `20` | 最多处理多少条记录。 |
-| `--reviewer <name>` | `parent` | 验收者标识。 |
-| `--note <text>` | - | 写入验收记录的备注。 |
-| `--execute-tests` | 配置值 | 本次验收显式执行 `output.json.tests`，覆盖 `acceptance_execute_tests`。 |
-| `--no-execute-tests` | 配置值 | 本次验收显式不执行 tests，覆盖配置默认值。 |
-| `--test-timeout <seconds>` | `acceptance_test_timeout_seconds` | 本次真实执行 tests 的单条测试超时秒数。 |
-
-## `subagents-acceptance-plan`
-
-```powershell
-my-agent subagents-acceptance-plan <run_id>
-my-agent subagents-acceptance-plan <run_id> --json
-my-agent subagents-acceptance-plan <run_id> --write
-my-agent subagents-acceptance-plan <run_id> --apply
-my-agent subagents-acceptance-plan <run_id> --next-action
-my-agent subagents-acceptance-plan <run_id> --auto-policy
-my-agent subagents-acceptance-plan <run_id> --auto-execution
-my-agent subagents-acceptance-plan <run_id> --auto-execution --execute-auto-tests
-my-agent subagents-acceptance-plan <run_id> --followup
-my-agent subagents-acceptance-plan <run_id> --apply-followup
-```
-
-只读取该 run 的 `output.json`、`reports/test_execution.json` 和 handoff/readiness refs，展示父级下一步 dry-run 决策。输出可能是 `execute_tests`、`inspect_only`、`request_human` 或 `rescue`；默认不会执行 tests、不会读取 artifact 正文、不会写回 task 状态。显式传 `--write` 时会写入 `reports/parent_acceptance_decision.json` 审计文件，但这仍然不是 apply。
-
-显式传 `--apply` 时会先写入 `parent_acceptance_decision.json`，再写入 `parent_acceptance_apply.json`。当前第一版只允许 `inspect_only` 进入既有 `acceptance_review` apply 路径；`execute_tests`、`request_human` 和 `rescue` 会被拦截为未应用，并在 apply 审计文件里记录下一步需要显式执行测试、人工确认或救援接管。`--apply` 不会自动跑 tests，也不会自动 rescue。
-
-显式传 `--next-action` 时只生成父/上级代理可读的下一步建议，例如 `run_tests`、`request_human_confirmation`、`plan_rescue` 或 `apply_acceptance`。它会展示建议命令和 `parent_acceptance_decision.json` / `parent_acceptance_apply.json` refs，但不会执行建议命令、不会写 task 状态。
-
-显式传 `--auto-policy` 时会读取 next-action，写入 `reports/parent_acceptance_auto_policy.json`，并展示策略判断。第一版固定 dry-run：`run_tests` 可被标记为 `allow` / `would_execute=true`，但 `executed=false`；`request_human_confirmation`、`plan_rescue`、`apply_acceptance` 等不会自动执行。半自动计划会额外展示 `execution_mode=manual_only`、`automatic_execution_allowed=false`、`recommended_command` 和 `preflight_status`，意思是“这条命令可以给人或后续受控调度器参考，但当前代码不会自己运行”。`ready_for_automatic_execution` 第一版固定 false。
-
-显式传 `--auto-execution` 时会读取 auto-policy，写入 `reports/parent_acceptance_auto_execution.json`，并展示自动执行 dry-run 审计。默认固定 `execution_allowed=false`、`guard_status=blocked`、`executed=false`，只展示 recommended command、blockers 和 hard guard，不启动命令、不修改 task 状态。只有同时显式传 `--execute-auto-tests` 时，才会把 auto-policy 的 `run_tests` 建议转换为一次手动确认的测试执行，写入 `reports/test_execution.json/md`；随后会写 `reports/parent_acceptance_auto_followup.json`，把测试后的下一步归类为人工 apply、人工 rescue、人工确认或继续补测试。follow-up 仍只是审计和建议，不 apply、不 rescue、不修改 task 状态。
-
-显式传 `--followup` 时只读取 `parent_acceptance_auto_followup.json` 并展示受控下一步命令。显式传 `--apply-followup` 时才进入人工确认入口：`ready_for_manual_apply` 会复用父级 `inspect_only` apply 桥接；`needs_manual_rescue` 必须提供 `--take-over-by`，并复用 `takeover_or_reassign` action handler 的通道检查、接管审计和 readiness refs。坏 JSON、run_id 不匹配、测试报告引用不一致或过期测试报告都会被阻断。它不会因为 follow-up 存在就自动执行。
-
-| 参数 | 默认值 | 说明 |
-| --- | --- | --- |
-| `run_id` | - | 子代理运行 ID。 |
-| `--json` | `false` | 输出机器可读 JSON，仍保持 refs-only。 |
-| `--write` | `false` | 写入 refs-only 父级验收决策审计文件，不执行决策。 |
-| `--apply` | `false` | 显式应用低风险 `inspect_only` 决策；其它决策只写入拦截审计，不改 task。 |
-| `--next-action` | `false` | 查看父/上级代理下一步显式动作建议，不执行动作。 |
-| `--auto-policy` | `false` | 查看并写入父级自动策略 dry-run 审计，不执行动作。 |
-| `--auto-execution` | `false` | 查看并写入父级自动执行 dry-run 审计，不执行动作。 |
-| `--execute-auto-tests` | `false` | 只能配合 `--auto-execution` 使用；显式确认执行 auto-policy 允许的 `run_tests`，写测试报告但不 apply。 |
-| `--followup` | `false` | 查看测试后的 follow-up 下一步建议，不执行动作。 |
-| `--apply-followup` | `false` | 显式处理 follow-up：测试通过时 apply，测试失败时走受控接管入口。 |
-| `--take-over-by <name>` | `""` | `--apply-followup` 处理 rescue 时必填；复用 action apply 的 takeover 门。 |
-| `--locked-file <path>` | - | follow-up rescue 接管时锁定的文件，可多次传入。 |
-| `--reviewer <name>` | `parent` | `--apply` 进入普通验收路径时写入的 reviewer。 |
-| `--note <text>` | `""` | `--apply` 进入普通验收路径时写入的备注。 |
-
 ## `subagents-tests`
 
 ```powershell
@@ -1436,7 +1366,6 @@ my-agent subagents-patches --apply --run-id <run_id> --reviewer parent
 my-agent subagents-dispatch
 my-agent subagents-dispatch --apply
 my-agent subagents-dispatch --apply --start-runners
-my-agent subagents-dispatch --execute-acceptance-tests --max-runners 0
 my-agent subagents-dispatch --watch --planner --interval 30
 ```
 
@@ -1446,7 +1375,6 @@ my-agent subagents-dispatch --watch --planner --interval 30
 | `--dry-run` | 默认模式 | 只生成调度报告，不修改记录。 |
 | `--apply` | `false` | 执行低风险调度动作并写审计日志。 |
 | `--start-runners` | `false` | 配合 `--apply` 调用真实模型执行 runner；不能单独使用。 |
-| `--execute-acceptance-tests` | `false` | 显式执行父级验收 auto-policy 允许的 `run_tests`，写 `test_execution.json/md`，但不 apply、不 rescue、不修改 task 状态。 |
 | `--planner` | `false` | 有 active/pending/stalled/needs-intervention 事项时调用父代理 LLM planner；如果模型只回 `HEARTBEAT_OK`，会被 gate 标记为失败。 |
 | `--workflow-mode <off\|plan\|auto>` | `off` | dispatch 前对父任务执行 workflow 规划；`plan` 只写计划，`auto` 还会自动派出 workflow worker 子工单。 |
 | `--max-runners <n>` | `1` | 本轮最多推进多少个 runner；`0` 表示不执行 runner。 |
@@ -1474,8 +1402,6 @@ dispatch 输出位置：
 agent_py_agent/data/subagents/subagent_dispatch_report.json
 agent_py_agent/data/subagents/SUBAGENT_DISPATCH.md
 ```
-
-当本轮 dispatch 处理 `AWAITING_ACCEPTANCE` / `NEEDS_ACCEPTANCE` 的 run 时，acceptance 记录会带 parent acceptance auto-policy 的 refs-only 摘要：`parent_acceptance_policy_ref`、decision、action、would_execute 和 executed。默认只写 `reports/parent_acceptance_auto_policy.json` / `parent_acceptance_auto_execution.json` 审计并展示引用，不执行 tests、不 apply、不 rescue、不修改 task 状态。只有显式传 `--execute-acceptance-tests` 时，dispatch/watch 才会执行 auto-policy 允许的 `run_tests` 并写测试报告和 follow-up；任务仍停留在等待验收状态，后续必须另走 `subagents-acceptance-plan <run_id> --apply-followup` 或带 `--take-over-by` 的 rescue 入口。
 
 watch 输出位置：
 
@@ -1548,10 +1474,6 @@ max_subagents: 50
 subagent_workspace: "data/subagents"
 subagent_role_template_dirs: []
 subagent_debug_trace_level: 0
-
-# 父级验收默认不直接执行命令；需要真实跑测试时再显式打开。
-acceptance_execute_tests: false
-acceptance_test_timeout_seconds: 120
 
 # 未来 gateway 调度策略：auto 表示由主代理/调度器自适应
 runner_concurrency: "auto"

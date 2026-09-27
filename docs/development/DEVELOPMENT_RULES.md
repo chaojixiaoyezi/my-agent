@@ -521,8 +521,7 @@ do_write()
   `subagent-run --execute`, `subagents-dispatch --start-runners`, and
   planner paths that are clearly named as planner/model execution.
 - Explicit command execution must stay opt-in, such as
-  `subagents-tests --re-run`, `subagents-tests --execute-tests`, or
-  `subagents-dispatch --start-runners`.
+  `subagents-tests --re-run` or `subagents-dispatch --start-runners`.
 - Default lookup surfaces must be refs-only: show ids, status, summaries,
   counts, hashes, sizes, and file refs. Do not read or inline
   `logs/runner_prompt.md`, `logs/runner_response.md`, externalized tool
