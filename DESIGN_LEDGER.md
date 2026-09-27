@@ -95,7 +95,7 @@
   - **做法**：档位 auto/off/low/medium/high/max 是会话线程属性（`/effort` 写主会话，`create_subagents.effort` 写子线程，省略继承父级实际档位，全局默认 `model_reasoning_effort`）；模型档案新增 `reasoning_control`（auto/effort/budget/none），auto 只对实测确认的 DeepSeek 官方接口给默认，其余 none，可在 `/model` 显式声明。真实请求与两处自动选模投影共用 `request_reasoning_options`，强制工具选择的关思考优先。
   - **边界**：不按模型名或正文判断能力；不支持的模型如实回执“不改变请求”；TUI 底栏暂不显示档位；Responses 协议暂不换算。
   - **真实验收**：DeepSeek 两种接口、声明为 `budget` 的 MiniMax M3、MiniMax M2.7，以及一次创建 low/max/继承三个子代理，全部符合预期（详见 TESTS.md 顶部）。生产默认模型是 OpenCode 中转，按实测不支持调节，`/effort` 会如实提示；要生效需切到 DeepSeek 官方接口，或给支持的模型显式声明控制方式。
-  - **自动检测是否支持调节**（2026-09-27，分支 `claude/be-effort-probe`，待集成）：my-agent 曾为确认 opencode.ai 是否支持推理强度，
+  - **自动检测是否支持调节**（2026-09-27，分支 `claude/be-effort-probe`，已合入 main，随 step13t 部署；真实服务商验收待做）：my-agent 曾为确认 opencode.ai 是否支持推理强度，
     3 次把 API key 写进 `web_fetch` 请求头。现在由宿主用已保存的凭据检测：`/effort` 设成 auto 以外的档位、档案未声明且解析为不支持时
     自动检测一次（开关 `reasoning_control_auto_probe`，默认开），`/effort probe` 手动检测；同一道短题按低 / 最高 / 不带字段各发 3 次，
     只比较 usage 里的 token（优先推理 token），“最高”组中位数至少为“低”组 1.5 倍、多 200 且两组不重叠才算支持（按 09-26 实测回放标定）。
@@ -793,15 +793,15 @@ auth 表单取消和参数拒绝已验，官方设备码在两处环境被 HTTP 
   正式加载回读、修改记录与回滚）、`user_config` 工具 search/reset/history/revert、聊天 `/settings`（仅管理员）；修正工具只看从未设置的
   MY_AGENT_CONFIG 导致“找不到用户配置”。阶段 2b 已实现：写权限沿用 F4 Full Access（按 owner、仅管理员，早已存在），只新增
   `self_dev_worktree`（边界项）——管理员 Full Access 时提示词写明正在运行的代码位置与开发工作树，改完提交到该分支由集成者合并部署。
-  参数减量第 1 批已在分支 `claude/38-delete-dead-config` 完成（2026-09-27，待集成者审核合并）：按逐项分类删除 43 个没有产品读取方的配置项，
+  参数减量第 1 批已在分支 `claude/38-delete-dead-config` 完成（2026-09-27，已合入 main `8f73a512c`，双机 step13s）：按逐项分类删除 43 个没有产品读取方的配置项，
   连同只被测试引用的 `agent_core/watchdog.py`、`concurrency/task_lock.py`、`external_knowledge/` 模块；`tool_protocol` 改为代码常量 native，
   不再放行 text；子代理任务记录 `memory_scope` 升 v2。不改任何生效值；旧用户配置里残留的键只告警。细节见参数中心 §6。
   待做：阶段 3 分批迁移常数。运行中安装写保护已实现：边界开关 `protect_running_runtime`（默认开）让正在运行的安装目录对所有工具只读，
   Full Access 也不例外（独立边界键 `runtime_install_roots`，见 gateway 结构文档 Full Access 一节）。
-  参数减量第 2 批（分支 `claude/9a-merge-config`，待集成）：11 组重复参数各合并成一个旋钮（并发、租约、工具并行、单代理预算、
+  参数减量第 2 批（分支 `claude/9a-merge-config`，已合入 main `8f73a512c`，双机 step13s）：11 组重复参数各合并成一个旋钮（并发、租约、工具并行、单代理预算、
   artifact 读取预算、归档级别、规则路由、恢复上下文、上下文窗口、温度、runner 重跑次数），守卫文件里被遮蔽的副本删除，
   `max_parallel_tool_calls` 大于 8 与 0 真正生效，runner 重跑次数只剩 AgentConfig 一个家；默认行为不变。
-  常用层级（分支 `claude/9a-settings-common-view`，待集成）：`/settings` 默认只列 21 个常用参数并提示 `/settings all` 看全部，
+  常用层级（分支 `claude/9a-settings-common-view`，已合入 main，随 step13t 部署）：`/settings` 默认只列 21 个常用参数并提示 `/settings all` 看全部，
   `user_config` 搜索结果标出常用；名单在 `parameter_registry.COMMON_KEYS`，是封闭的产品决策。
   详见 [参数中心](docs/design/PARAMETER_CENTER.md)。
 - 已实现并合入 main、待真实飞书验收（2026-09-26，用户决定）：IM 管理员身份与聊天内工具审批。

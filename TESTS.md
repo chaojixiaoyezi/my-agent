@@ -1,5 +1,14 @@
 # 测试与发布验收
 
+## CI 工作流点名的测试文件必须存在（2026-09-27，集成分支 `claude/integrate-13v`）
+
+- **来源**：dsh-9b 的 CI 监视报告 main `8f73a512c` 的 Cross-platform guard 在 macOS 与 Windows 都失败：参数减量第 1 批删掉了
+  `test_watchdog.py`，但 `.github/workflows/cross-platform-guard.yml` 的测试清单还列着它，pytest 因文件不存在直接用法错误退出，
+  两个作业一个用例都没跑。本地全量分片按文件扫描，发现不了。
+- **修正**：从工作流清单删掉这一行；新增 `test_ci_workflow_paths.py`，工作流 YAML 里出现的每个 `agent_py_agent/tests/...py` 都必须存在
+  （不在源码检出里运行时跳过）。
+- **验证**：修正后通过；把那一行放回去，测试失败并点名 `cross-platform-guard.yml: agent_py_agent/tests/test_watchdog.py`。
+
 ## 智能程度自动检测（2026-09-27，分支 `claude/be-effort-probe`，基于 `946a26783`）
 
 - **来源**：集成者派活。my-agent 为确认 opencode.ai 是否支持 `reasoning_effort`，3 次把用户 API key 写进 `web_fetch` 请求头；

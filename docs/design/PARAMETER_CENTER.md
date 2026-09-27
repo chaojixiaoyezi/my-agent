@@ -210,7 +210,7 @@
       随包路径读、部署会覆盖、`/settings` 与 `user_config` 看不到。原来 `1` 被当成“不重跑”、`off`/`0` 实际还会重跑一次，现统一。
     - YAML 里 `key:` 留空会读成 `[]`：整数旋钮与温度都按“没填”处理，不再每次启动告警。
 
-- **减量第一批（2026-09-27，分支 `claude/38-delete-dead-config`，待集成者审核）**：按分类结论逐项复核后删除 43 个没有产品读取方的配置项
+- **减量第一批（2026-09-27，分支 `claude/38-delete-dead-config`，已合入 main `8f73a512c`，双机 step13s）**：按分类结论逐项复核后删除 43 个没有产品读取方的配置项
   （只在 `settings/config.py`、随包 YAML、归一化表或字段规格表里出现，或只被孤儿模块/测试/离线验收入口读取）。同批处理：
   - 孤儿模块及其专属测试一起删：`agent_core/watchdog.py`、`concurrency/task_lock.py`（含 `LockAcquisitionError`）、`external_knowledge/`。
   - `contracts/real_run_review.py` 与 `contracts/small_real_acceptance_gate.py` 保留，配置读取换成模块常量（5000000 / 1000000 / 900，数值不变）。

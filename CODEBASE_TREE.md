@@ -671,6 +671,7 @@ agent_py_agent/
 |   |-- test_merged_config_knobs.py    # 参数减量第 2 批：11 组合并后的单一旋钮语义（空/0/数字）、旧键只告警不转值、随包 YAML 与默认值一致
 |   |-- test_model_output_cap.py       # 输出上限统一 64K：常量/YAML/dataclass 同值、按已知窗口一处夹取、默认模型同规则、vision 死配置已删
 |   |-- test_constant_names_unique.py  # 同一数值常数名只在一个模块定义；确属不同含义的列白名单写原因，过期条目也失败
+|   |-- test_ci_workflow_paths.py      # CI 工作流里点名的测试文件必须存在，删除或改名测试时同批改工作流
 |   |-- test_runtime_write_guards.py   # 正在运行的安装目录写保护：按进程事实认定、开关、文件工具与 Shell 只读、Full Access 仍可写外部目录
 |   |-- test_skill_chat_control.py     # 聊天 /skills：解析校验、Gateway 分派不落入 stop、TUI 文本还原与本地拒绝、提案确认版本、自动 Skill 回滚删除
 |   |-- test_skill_learning.py          # 自学习 S3：触发判据、请求有界脱敏、create/update/skip、各闸门拒绝码、上限、重试、忙时顺延、回滚删除

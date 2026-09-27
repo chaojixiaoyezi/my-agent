@@ -44,7 +44,6 @@ jobs:
           agent_py_agent/tests/test_process_control.py
           agent_py_agent/tests/test_daemon_control.py
           agent_py_agent/tests/test_supervisor.py
-          agent_py_agent/tests/test_watchdog.py
           agent_py_agent/tests/test_dispatch_loop.py
           agent_py_agent/tests/test_policy_checks.py
           agent_py_agent/tests/test_subagent_policies.py
