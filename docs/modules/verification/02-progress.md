@@ -14,6 +14,9 @@ Codex 复核修正（同日）：原分类器用正则切 `;`，引号参数里�
 这时外层并没有管道或 `;`。现在只有按 shell 记号确认外层真有管道、后台、`;` 或 `||` 时才给 `exit_status_hidden`；只有 `&&` 串联或
 别的解析拒绝时不给，不能谎称返回码被掩盖。
 
+Codex 复核第二轮（同日）：posix shlex 去掉引号后，整个参数就是 `";"` 时记号值与外层分号相同，仍会误判。现在判断外层连接符前
+先把引号片段与反斜杠转义换成占位符（`_QUOTED_OR_ESCAPED`），`2>&1`、`&>` 这类重定向照旧不算后台。
+
 ## 2026-09-26 证据库连接显式关闭（分支 `claude/ci-fix`）
 
 `VerificationEvidenceRepository` 原来用 `with self._connect() as conn`，只提交不关闭。Python 3.11 起 sqlite3 连接要等循环 GC

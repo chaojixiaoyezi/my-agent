@@ -41,6 +41,8 @@ _EXIT_CODE_HIDING_TOKENS = frozenset({"|", "|&", "&"})
 _SEGMENT_BREAK_TOKENS = _EXIT_CODE_HIDING_TOKENS | {";", "||", "&&"}
 # 真正会让返回码不属于前一条命令的外层连接符；&& 在失败时短路，不算掩盖。
 _HIDING_OPERATORS = _EXIT_CODE_HIDING_TOKENS | {";", "||"}
+# 判断外层连接符前先把引号片段与反斜杠转义换成占位符：posix shlex 去掉引号后，`";"` 与真正的 ; 记号值相同，无法区分。
+_QUOTED_OR_ESCAPED = re.compile(r'"(?:\\.|[^"\\])*"|\'[^\']*\'|\\.')
 # 同一铁律决定放行边界：只放行开头一个 `cd <目录> &&`。&& 在 cd 失败时短路，而目录存在且可进入由文件系统事实判定
 # （不解析输出），这时返回码只可能来自后一条命令；其余链式写法仍拒绝。
 _CD_PREFIX_RE = re.compile(r"^\s*cd\s+(?P<target>\"[^\"]*\"|'[^']*'|[^\s;&|]+)\s*&&\s*(?P<rest>.+)$", re.S)
@@ -285,10 +287,11 @@ def hidden_verification_commands(command: str, *, cwd: str | Path | None) -> lis
     return list(dict.fromkeys(match[0] for match in matches if match and _runs_the_check(*match)))
 
 
-# LLM: 带引号语义切段，引号内的符号只是参数；引号不成对时返回空结果，不猜。同时返回命令外层实际出现的连接符。
-# 函数用途: 在所有 shell 连接符（管道、后台、;、||、&&）处把命令切成记号段，并给出出现过的连接符。
+# LLM: 先把引号片段与转义字符换成占位符再切段，所以只有未加引号、未转义的符号才算外层连接符（`pytest --junitxml ";"`
+#   里的 ; 是文件名参数）；被替换的参数在段里显示为占位符，只影响说明里的参数形状，不影响命令名匹配。引号不成对时返回空结果。
+# 函数用途: 在所有外层 shell 连接符（管道、后台、;、||、&&）处把命令切成记号段，并给出出现过的连接符。
 def _operator_segments(body: str) -> tuple[list[list[str]], set[str]]:
-    lexer = shlex.shlex(body, posix=True, punctuation_chars=True)
+    lexer = shlex.shlex(_QUOTED_OR_ESCAPED.sub("Q", body), posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
     try:
         tokens = list(lexer)

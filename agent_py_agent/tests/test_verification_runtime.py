@@ -216,3 +216,17 @@ def test_quoted_separators_are_not_reported_as_a_hidden_exit_status(tmp_path: Pa
     piped = _call("run_command", {"command": 'pytest --junitxml="a;b" -q | tail -3', "working_dir": str(project)})
     details = record_tool_verification(agent, piped, _success(piped, "ok", exited)).metadata["handler_details"]
     assert details["verification_skipped"]["canonical_commands"] == ["pytest"]
+
+
+def test_whole_quoted_or_escaped_separators_are_not_outer_operators(tmp_path: Path):
+    # Codex 复核第二轮（2026-09-27）：posix shlex 去掉引号后 `";"` 的记号值就是 ;，与外层分号无法区分；
+    # 判断前先遮住引号片段与转义字符。重定向 &> 也不是后台。
+    agent, project, _owner_home = _agent(tmp_path)
+    exited = {"process": {"status": "exited", "return_code": 0}}
+    for command in ('pytest --junitxml ";" -q', r"pytest -q \;", "pytest -q &> log.txt"):
+        call = _call("run_command", {"command": command, "working_dir": str(project)})
+        details = record_tool_verification(agent, call, _success(call, "ok", exited)).metadata.get("handler_details", {})
+        assert "verification_skipped" not in details, command
+    piped = _call("run_command", {"command": "pytest --junitxml ';' -q | tail -3", "working_dir": str(project)})
+    details = record_tool_verification(agent, piped, _success(piped, "ok", exited)).metadata["handler_details"]
+    assert details["verification_skipped"]["canonical_commands"] == ["pytest"]
