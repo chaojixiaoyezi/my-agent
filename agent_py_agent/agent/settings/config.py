@@ -328,6 +328,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 决策增强默认关闭；有限正秒数只作用后续请求，不重置已开始阶段的预算。
     decision_enabled: bool = False
     decision_experiment_enabled: bool = False
+    # 决策点已到触发点、已开启却被条件挡下（原话超长、材料含 URL 查询串）时，在结果日志记一条 skipped（原因码、无正文）。
+    decision_skip_records_enabled: bool = True
     decision_timeout_seconds: float = 2.0
     decision_stage_timeout_seconds: float = 4.0
     decision_background_timeout_seconds: float = 4.0

@@ -36,20 +36,25 @@ def test_shipped_yaml_and_dataclass_disable_observation():
     assert load_config(path).enable_file_syntax_diagnostics is False
 
 
-@pytest.mark.parametrize("syntax, recall, expected_syntax, expected_recall", [
-    ("false", "false", False, False),
-    ("true", "false", True, False),
-    ("false", "true", False, True),
+@pytest.mark.parametrize("syntax, recall, skipped, expected", [
+    ("false", "false", "false", (False, False, False)),
+    ("true", "false", "false", (True, False, False)),
+    ("false", "true", "false", (False, True, False)),
+    ("false", "false", "true", (False, False, True)),
 ])
-def test_file_and_compact_switches_are_independent_after_yaml_load(tmp_path, syntax, recall, expected_syntax, expected_recall):
+def test_observation_switches_are_independent_after_yaml_load(tmp_path, syntax, recall, skipped, expected):
     config_path = tmp_path / "agent.yaml"
     config_path.write_text(
         f'enable_file_syntax_diagnostics: "{syntax}"\ncompact_recall_hint_enabled: "{recall}"\n'
+        f'decision_skip_records_enabled: "{skipped}"\n'
         'compact_landmark_max_tokens: 1200\n', encoding="utf-8",
     )
     config = load_config(config_path)
-    assert config.enable_file_syntax_diagnostics is expected_syntax
-    assert config.compact_recall_hint_enabled is expected_recall
+    assert (config.enable_file_syntax_diagnostics, config.compact_recall_hint_enabled,
+            config.decision_skip_records_enabled) == expected
+    assert all(type(value) is bool for value in (
+        config.enable_file_syntax_diagnostics, config.compact_recall_hint_enabled, config.decision_skip_records_enabled,
+    ))
     assert config.compact_landmark_max_tokens == 1200
 
 

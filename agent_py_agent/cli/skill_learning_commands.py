@@ -12,19 +12,17 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from ..agent.capability.skill_learning_publish import (
-    CODE_NOT_LEARNED,
-    SkillLearningGateError,
-    remove_learned_skill,
-    revert_learned_skill,
+from ..agent.capability.skill_learning_publish import SkillLearningGateError
+from ..agent.capability.skill_learning_report import (
+    apply_learned_skill_action,
+    learned_skill_detail,
+    learned_skills_report,
 )
 from ..agent.capability.skill_learning_store import (
     EVENT_REMOVED,
-    LearnedSkill,
     SkillLearningStore,
     SkillLearningStoreError,
 )
-from ..agent.capability.skill_snapshot import skill_content_sha256
 from ..agent.settings import load_config
 from ..agent.settings.services.runtime_config_env import apply_runtime_config_environment
 from ..agent.user_space.home_layout import home_paths
@@ -121,60 +119,28 @@ def _owner_context(args: Any) -> _LearnedCommandContext:
     return _LearnedCommandContext(SkillLearningStore.for_home(scoped), owner.owner_id, config)
 
 
-# LLM: 状态只由登记 hash 与磁盘文件事实决定；今日调用数按 UTC 日期，与服务端计数同口径。
+# LLM: 事实推导在 skill_learning_report（与聊天 /skills learned 共用），这里只补 ok 与 owner。
 # 函数用途: 构造 list 的输出。
 def _list_payload(context: _LearnedCommandContext, args: Any) -> dict[str, object]:
-    store = context.store
-    registry = store.load_registry()
-    today = datetime.now(timezone.utc).date().isoformat()
-    return {
-        "ok": True,
-        "owner_id": context.owner_id,
-        "self_learning_enabled": bool(getattr(context.config, "enable_self_learning", False)),
-        "learned_root": str(store.learned_root),
-        "pending_requests": len(store.pending_requests()),
-        "calls_today": registry.daily_calls if registry.daily_date == today else 0,
-        "daily_limit": int(getattr(context.config, "self_learning_daily_limit", 0) or 0),
-        "blocked_names": sorted(set(registry.blocked_names)),
-        "count": len(registry.skills),
-        "skills": [_skill_row(store, registry.skills[name]) for name in sorted(registry.skills)],
-    }
+    return {"ok": True, "owner_id": context.owner_id, **learned_skills_report(context.store, context.config)}
 
 
-# LLM: 返回登记信息与最近 20 条账本事件；账本只含结构化字段与有界 reason。
+# LLM: 返回登记信息与最近 20 条账本事件；不在登记表里时抛 CODE_NOT_LEARNED。
 # 函数用途: 构造 show 的输出。
 def _show_payload(context: _LearnedCommandContext, args: Any) -> dict[str, object]:
-    record = context.store.load_registry().skills.get(args.name)
-    if record is None:
-        raise SkillLearningGateError(CODE_NOT_LEARNED, {"skill_name": args.name})
-    return {"ok": True, "skill": _skill_row(context.store, record), "events": context.store.events(args.name, 20)}
+    return {"ok": True, **learned_skill_detail(context.store, args.name)}
 
 
-# LLM: 回滚与删除共用闸门；成功后把事件写进账本再输出。
+# LLM: 回滚与删除共用闸门；成功后把事件写进账本再输出（skill_learning_report.apply_learned_skill_action）。
 # 函数用途: 构造 revert 的输出。
 def _revert_payload(context: _LearnedCommandContext, args: Any) -> dict[str, object]:
-    event = revert_learned_skill(context.store, args.name)
-    context.store.append_event(event)
-    return {"ok": True, "code": event.event, "skill_name": event.skill_name, "version": event.version}
+    return {"ok": True, **apply_learned_skill_action(context.store, args.name, "revert")}
 
 
-# LLM: 删除成功后事件写进账本。
+# LLM: 删除成功后事件写进账本（同一公共入口）。
 # 函数用途: 构造 remove 的输出。
 def _remove_payload(context: _LearnedCommandContext, args: Any) -> dict[str, object]:
-    event = remove_learned_skill(context.store, args.name)
-    context.store.append_event(event)
-    return {"ok": True, "code": event.event, "skill_name": event.skill_name, "version": event.version}
-
-
-# LLM: 行内容是登记记录加路径与状态；状态 active/user_modified/missing 只由文件事实推导。
-# 函数用途: 生成一个自学 Skill 的展示行。
-def _skill_row(store: SkillLearningStore, record: LearnedSkill) -> dict[str, object]:
-    path = store.skill_path(record.name)
-    if path.is_symlink() or not path.is_file():
-        state = "missing"
-    else:
-        state = "active" if skill_content_sha256(path.read_text(encoding="utf-8")) == record.sha256 else "user_modified"
-    return {**record.to_record(), "path": str(path), "state": state}
+    return {"ok": True, **apply_learned_skill_action(context.store, args.name, "remove")}
 
 
 # LLM: --json 输出稳定机器字段；普通输出只给人看，不作为任何机器判断依据。

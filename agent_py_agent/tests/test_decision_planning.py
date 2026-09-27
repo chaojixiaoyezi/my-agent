@@ -228,6 +228,21 @@ def test_unproven_or_unhelpful_scope_does_not_call_jev(prepared, monkeypatch, ch
     assert not calls
 
 
+@pytest.mark.parametrize("prompt,expected", [("长" * 1025, [("planning", "skipped", "request_too_long")]), ("", [])])
+def test_over_long_request_leaves_a_skipped_audit_row(prepared, monkeypatch, prompt, expected):
+    # 2026-09-27 真实 TUI：粘贴 3186 字后同一轮里 task_progress read 悄悄跳过，被误判为“planning 没接线”。
+    agent, _, root = prepared
+    outcomes = root / "decision-outcomes.jsonl"
+    agent.home_paths.owner_decision_outcomes_jsonl = outcomes
+    agent.config = SimpleNamespace(decision_skip_records_enabled=True)
+    calls = install(monkeypatch)
+    agent._current_user_prompt = prompt
+    assert "planning_priority_hint" not in _read(agent) and not calls
+    rows = [json.loads(line) for line in outcomes.read_text(encoding="utf-8").splitlines()] if outcomes.exists() else []
+    assert [(row["point"], row["status"], row["reason"]) for row in rows] == expected
+    assert "长长" not in json.dumps(rows, ensure_ascii=False)
+
+
 def test_optional_provider_error_retains_original_but_user_stop_propagates(prepared, monkeypatch):
     agent, _, _ = prepared
     install(monkeypatch, error=RuntimeError("provider unavailable"))

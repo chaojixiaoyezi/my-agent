@@ -6,9 +6,10 @@ import hashlib
 import re
 import time
 
-from ...backends.decision_protocol import DecisionInputError, decision_json
+from ...backends.decision_protocol import DecisionInputError, DecisionPrivacySkip, decision_json
 from ...common.cancellation import ToolCancelled, bind_cancellation_token, raise_if_cancelled
 from ...concurrency.interrupt import is_interrupted
+from ...conversation.decision_outcome_log import material_or_skip
 from ...conversation.decision_service import (
     begin_decision_stage,
     decide,
@@ -40,7 +41,10 @@ def external_material_order_hint(agent: object, record: object, archive_record: 
             if stage.error_code or _POINT not in stage.enabled_points or stage.run_id != record.call.run_id:
                 return ""
             _check_interrupted()
-            state, questions, revision = _material(record, archive_record)
+            material = material_or_skip(agent, stage, _POINT, lambda: _material(record, archive_record))
+            if material is None:
+                return ""
+            state, questions, revision = material
             context_revision = _context_revision(params)
             outcome = decide(agent, params, stage, point=_POINT, state=state, questions=questions,
                              candidates_revision=revision, source_refs=(archive_record["scoped_call_id"],))
@@ -133,12 +137,13 @@ def _page_sources(record: object) -> list[dict]:
     return pages
 
 
-# LLM: 复用原 external_data/default 脱敏和指令边界；URL 字段不进入输入，摘录内含完整或协议相对 URL 查询串时也放弃。
+# LLM: 复用原 external_data/default 脱敏和指令边界；URL 字段不进入输入，摘录内含完整或协议相对 URL 查询串时也放弃，
+#   抛 DecisionPrivacySkip（原因码 privacy_url），由 material_or_skip 留一条 skipped 审计记录。
 # 函数用途: 将页面摘录或当前问题投影成有界安全副本，无法确认安全或编码时交调用方保留原结果。
 def _safe_excerpt(value: dict) -> str:
     text = decision_json(value).decode("utf-8")
     if _URL_WITH_QUERY.search(text):
-        raise DecisionInputError("摘录含有不应转发的 URL 查询串。")
+        raise DecisionPrivacySkip("摘录含有不应转发的 URL 查询串。")
     return project_tool_output_body(tool="external_material_order", output=text,
                                     trust="external_data", redaction="default")
 

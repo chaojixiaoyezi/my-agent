@@ -2,6 +2,12 @@
 
 能力包第七候选：新Goal绑定任务时可初始化原TaskLink的一次选包pending（默认关闭）；只读当前owner的元数据资格，旧任务不补字段，不新增模型调用或Goal状态。组件与主流程组合验收中，未发布。
 
+聊天 `/skills`（分支 `claude/skill-proposals-tui-im`，2026-09-27）：用户几乎不用命令行，技能提案与自动总结 Skill 原来只有
+`my-agent skills …` 入口。`control_service.execute_gateway_conversation_control` 新增 `skills` 分派（在 steer/stop 默认路径之前），
+交给 `skill_control_service.execute_skill_control`：按控制范围解析 owner，提案确认/拒绝必须带用户看到的版本号并由服务端锁内复核，
+列提案时调用自学习审核顺序点，自动总结 Skill 走 `capability/skill_learning_report.py`（与 CLI 共用）。TUI 本地模式明确拒绝，
+文本还原带上参数。测试见 `test_skill_chat_control.py`，设计见 `docs/design/SKILL_AUTO_SUMMARY.md` 第 10 节。
+
 `/effort` 从空壳改为真实会话设置（分支 `claude/reasoning-effort`，2026-09-26）：`control_service._execute_effort_control`
 读写当前 thread 的 `reasoning_effort`（auto/off/low/medium/high/max，`default` 清除回全局默认），回执说明当前会话模型的实际效果；
 与 `/verbose` 共用新抽出的 `_settings_thread`（行为不变）。每轮请求在 `tool_model_generation._provider_request_options` 现读线程

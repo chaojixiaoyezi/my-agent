@@ -8,9 +8,10 @@ from __future__ import annotations
 import hashlib
 import time
 
-from ...backends.decision_protocol import DecisionInputError, decision_json
+from ...backends.decision_protocol import DecisionInputError, DecisionPrivacySkip, decision_json
 from ...common.cancellation import ToolCancelled, bind_cancellation_token, raise_if_cancelled
 from ...concurrency.interrupt import is_interrupted
+from ...conversation.decision_outcome_log import material_or_skip, record_decision_skip
 from ...conversation.decision_service import (
     begin_decision_stage,
     decide,
@@ -81,9 +82,16 @@ def _advise(agent: object, record: object, archive: dict) -> str:
     stage = begin_decision_stage(agent, params, operation_id=_operation_id(record))
     if stage.error_code or _POINT not in stage.enabled_points or stage.run_id != record.call.run_id:
         return ""
+    if not _request_text(params):
+        if _request_too_long(params):
+            record_decision_skip(agent, stage, _POINT, "request_too_long")
+        return ""
     _check_interrupted()
     observation = _observation(archive)
-    state, questions, revision = _material(record, archive, observation)
+    material = material_or_skip(agent, stage, _POINT, lambda: _material(record, archive, observation))
+    if material is None:
+        return ""
+    state, questions, revision = material
     frozen = (_context_revision(params), revision)
     outcome = decide(agent, params, stage, point=_POINT, state=state, questions=questions,
                      candidates_revision=revision, source_refs=(archive["scoped_call_id"],))
@@ -115,7 +123,7 @@ def _eligible(agent: object, record: object, archive: dict) -> bool:
 
 
 # LLM: 原 ToolCall/ToolResult 与归档须在 tool/id/run/task/scoped_call_id 上一致，调用须成功执行；子代理、重复失败/
-# 未知副作用收口或超长/空请求都直接放弃，不读取正文推断。
+# 未知副作用收口或空请求都直接放弃，不读取正文推断。当前请求的长度在阶段之后由 _advise 检查，超长时留 skipped 审计记录。
 # 函数用途: 核对当前回执的身份、执行事实与归档配对，给观察读取提供可信的“当前调用”。
 def _current_record_matches(agent: object, record: object, archive: dict) -> bool:
     call, result, params = getattr(record, "call", None), getattr(record, "result", None), getattr(record, "params", None)
@@ -123,7 +131,7 @@ def _current_record_matches(agent: object, record: object, archive: dict) -> boo
             or result.tool_name != call.tool_name or result.call_id != call.call_id
             or result.handler_executed is not True or result.ok is not True
             or current_subagent_run_id(agent) or getattr(params, "repeated_failure_halt", None) is not None
-            or getattr(params, "unknown_outcome_halt", None) is not None or not _request_text(params)):
+            or getattr(params, "unknown_outcome_halt", None) is not None or not _has_request(params)):
         return False
     envelope = archive.get("tool_result_envelope") if type(archive) is dict else None
     return (type(envelope) is dict and type(envelope.get("observation")) is dict
@@ -193,6 +201,20 @@ def _request_text(params: object) -> str:
     return value if type(value) is str and len(value) <= _MAX_REQUEST_CHARS else ""
 
 
+# LLM: 空请求（无当前用户原话）不是本点场景，在扫描任何归档之前放弃、不留记录；长度上限在阶段之后另查。
+# 函数用途: 判断当前请求是否存在（非空字符串）。
+def _has_request(params: object) -> bool:
+    value = getattr(params, "user_prompt", "")
+    return type(value) is str and bool(value)
+
+
+# LLM: 只看长度这一结构化事实；与 _request_text 同一上限。
+# 函数用途: 判断当前请求是否因超过上限而被跳过（用于写 skipped 审计记录）。
+def _request_too_long(params: object) -> bool:
+    value = getattr(params, "user_prompt", "")
+    return type(value) is str and len(value) > _MAX_REQUEST_CHARS
+
+
 # LLM: 外发只有脱敏当前请求、目标类型和候选别名/role/label（label 在同一个 external_data 块里）；候选编号、插件 key、
 #   目标引用、代次与动作名只进本地版本摘要。题目唯一，候选之外只有保留原结果的非选择项。
 # 函数用途: 冻结一次操作建议材料和单选题，并给等待后的来源复核生成版本值。
@@ -209,12 +231,13 @@ def _material(record: object, archive: dict, observation: dict) -> tuple[dict, d
     return state, questions, revision
 
 
-# LLM: 复用外部材料首片的 external_data/default 脱敏和指令边界；含完整或协议相对 URL 查询串时整点放弃。
+# LLM: 复用外部材料首片的 external_data/default 脱敏和指令边界；含完整或协议相对 URL 查询串时整点放弃，
+#   抛 DecisionPrivacySkip（原因码 privacy_url），由 _advise 经 material_or_skip 留一条 skipped 审计记录。
 # 函数用途: 把一段待外发数据投影成安全副本，无法确认安全时交调用方保留原结果。
 def _safe_external(value: dict) -> str:
     encoded = decision_json(value).decode("utf-8")
     if _URL_WITH_QUERY.search(encoded):
-        raise DecisionInputError("待外发数据含有不应转发的 URL 查询串。")
+        raise DecisionPrivacySkip("待外发数据含有不应转发的 URL 查询串。")
     return project_tool_output_body(tool=_POINT, output=encoded, trust="external_data", redaction="default")
 
 

@@ -136,6 +136,17 @@ skip 时其余字段可为空。宿主只按 `decision` 这个枚举分流；`re
 
 不给模型注册任何 learned 管理工具。
 
+**TUI 与 IM 入口（2026-09-27）**：用户几乎不用命令行，所以同样的操作也能在 TUI 和飞书等 IM 里用聊天命令完成，经 Gateway 控制通道执行，
+只作用于当前范围解析出的 owner（与 `/model` 同一解析），回执不含本机路径：
+
+- `/skills`：待确认的技能提案（有审核顺序建议时按其排列并标注）加自动总结 Skill 的数量；
+- `/skills proposals [all]`、`/skills show <提案编号>`、`/skills confirm <提案编号> <版本>`、`/skills reject <提案编号> <版本>`：
+  提案编号可用至少 6 位的前缀，不唯一时要求多输入几位；确认和拒绝必须带列表或详情里显示的当前版本，服务端锁内复核，对不上就拒绝；
+- `/skills learned`、`/skills learned show|revert|remove <名称>`：名字按生成合同的安全名字规则校验，先在登记表里精确查找，不用它拼路径。
+
+事实推导与回滚/删除抽到 `capability/skill_learning_report.py`，CLI 与聊天共用；执行入口 `gateway_parts/skill_control_service.py`。
+自学习审核顺序点（skill_proposal_review）也因此能在 TUI/IM 里触发：列出 2—30 条待确认提案时调用，与 CLI 同一入口。
+
 ## 11. 规则变化和 S1 的调整
 
 - `AGENTS.md`「自学习功能约束」改为：默认关闭；开启后自动总结的 Skill 经第 8 节闸门直接发布；只写 `skills/learned/` 和 S1 的 `lesson-*`；不修改非自学 Skill；每次变更留账、可回滚。依据是用户 2026-09-26 的决定。

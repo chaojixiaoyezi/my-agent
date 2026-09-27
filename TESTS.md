@@ -1,5 +1,12 @@
 # 测试与发布验收
 
+## 第十候选组合791（2026-09-27，定向通过／独立发现未关闭）
+
+组合A方法提交8645daced与固定main 791f5d14b，3处文本冲突保留双方文档历史及布尔字段。原YAML组合测试扩为4组，覆盖全部关闭及语法反馈、Compact回查、决策跳过记录各自单开，三个实际字段均为bool且预算字段不变。
+冻结2786个源码/测试/配置/包资源后，用独占短basetemp统一执行30个定向文件：决策点/结果记录5文件、skills聊天与原学习/提案消费者、聊天解析/Gateway/TUI控制、配置、包发现/选择/读/任务引用/首次入口/原生链/Compact等，**929 passed（50.85秒）**，结束后冻结指纹无差异。完整命令及JUnit留私有evidence/candidate-10-main-combine-frozen.json、candidate-10-focused.xml；不是新增真实模型请求，未运行C业务或自定义探针。
+绿数未覆盖的新发现：skill_control_service普通异常回“原记录没有改动”，但remove/revert在append_event之前已改文件和registry；追加日志I/O失败会把已生效事实误报成未改动。已交Claude原作者最小修复，静态调用顺序证据不冒充故障注入实测。未取得修复SHA前不宣称组合已验收，也不将旧938的1301项累加到本轮。
+同一冻结源码的Ruff、doc-sync、strict code-size、工作区及暂存区diff检查、clean-package均通过；尺寸报告只有生成时间变化，已还原该无意义差异。**本地严格gate已通过，独立发现仍未关闭**；线上CI未作为验收来源，929项不替代新版原生TUI验收。
+
 ## A0.2.1 方法候选验证（2026-09-27，本地组件）
 
 基线5cdf8eabdb，A候选0.2.1；只选择现有 `test_capability_package_examples.py::test_samples_build_reproducibly_and_expose_only_one_package[drama-text-a]` 及 `test_capability_package_drama_text_basis.py`、`test_capability_package_drama_text_duration.py`，共65项通过。未增加镜像实现的文本断言，也未运行其他样包测试或真实任务。
@@ -52,6 +59,28 @@ B0.1.3交接检查四文件183项通过：快照改按原CLI Path绑定复用，
 压缩释放、原生IR、Gateway/子/后台/混合恢复、媒体预留、会话用量及输出预留十文件共140项通过，另以收集结果核对计数。
 Ruff、doc-sync（d00fde8基准）、strict-size、diff及clean-package通过；静态尺寸报告记录PreparedCompactRecovery退出原近阈值提示。
 当前私有运行仍`f6f93e4f3`，本片没有新真实模型调用；前述六席不能回填为新计量版本验收，未推送或部署日用环境。
+
+## 聊天 `/skills`：TUI 与 IM 里处理技能提案和自动总结的 Skill（2026-09-27，分支 `claude/skill-proposals-tui-im`，基于 main `4aa73d756`）
+
+- **来源**：用户要求“所有都能 TUI 和 IM 来”；技能提案与自动总结 Skill 原来只有命令行入口。
+- **新测试** `test_skill_chat_control.py`（23 项）：
+  - 解析：提案编号前缀（6—24 位十六进制）、版本号（正整数）、Skill 名（生成合同的安全名字）都拒绝式校验，`../` 之类直接无效。
+  - 命令目录把 `/skills` 交给 Gateway；TUI 文本还原后重新解析得到同一命令；TUI 本地模式明确拒绝，不落进停止分支。
+  - Gateway 分派到技能服务，不走 steer/stop；无效命令回用法。
+  - 真实提案服务：列表只给待确认提案带版本的确认/拒绝命令、不含本机路径；版本号对不上时拒绝且提案仍待确认；带当前版本确认后安装并改为已确认；已处理的再操作提示“不是待确认”；前缀找不到、前缀对应多条都给出可操作的提示。
+  - 真实自动总结 Skill：列表、详情、登记表外的名字被拒、删除后不再列出。
+- **CLI 同步**：`skills learned` 的状态推导与回滚/删除抽到 `skill_learning_report.py`，CLI 输出不变；相关测试（技能提案、自动总结、审核顺序点共 150 项）全部通过。
+- **变异验证**：6 种变异全部被抓住——TUI 本地模式不拒绝（落进停止）、Gateway 不分派、文本还原丢参数、提案编号不校验、确认时忽略用户给的版本、前缀多条时取第一条。
+
+## 决策点“触发了但被挡下”也留审计记录（2026-09-27，分支 `claude/decision-skip-records`，基于 main `558eb65df`）
+
+- **来源**：用户真实 TUI 里 planning 等点位没有任何记录，被 my-agent 误判为“未接线”。结构化核对：那一轮由 3186 字粘贴开启，19:11:08 的 task_progress read（3 条待处理）因原话超过 1024 字整点跳过；同一轮 external_material_order 正常记录。隔离 Gateway（127.0.0.1:8432，复制同一份决策设置，600 权限，用后删除）里原话在上限以内时，同样的操作记下 `planning success`；观测启动器与记录在 `~/.my-agent/releases/planning-repro-20260927/`（只有结构化字段）。
+- **新测试**：
+  - `test_decision_outcome_log.py`：skipped 行只在点位开启、阶段正常、开关打开时写，只带原因码；`material_or_skip` 对隐私跳过返回 None 并记录，其它输入错误照常上抛。
+  - `test_decision_planning.py`：原话 1025 字时不调用 Jev、记一行 `request_too_long`；空原话不记。
+  - `test_decision_delivery_quality.py`、`test_decision_action_candidate.py`：超长原话与带查询串 URL 的原话分别记 `request_too_long`、`privacy_url`，不含正文；点位关闭或开关关闭时不写。空原话仍在扫描归档之前放弃（原“超长请求扫描前放弃”的用例改为只测空原话）。
+  - `test_decision_external_material_order.py`：页面标题、预览或原话含带查询串的 URL 时记 `privacy_url`，日志里没有 URL 内容。
+- **变异验证**：6 种变异全部被抓住——planning 不记跳过、delivery_quality 退回扫描前放弃、external_material_order 与 action_candidate 仍抛普通输入错误、跳过记录不查点位是否开启、配置开关不生效。
 
 ## 会话原文读取的 thread_id 越界修复（2026-09-27，分支 `claude/history-owner-scope`，基于 main `72cbb0411`）
 
