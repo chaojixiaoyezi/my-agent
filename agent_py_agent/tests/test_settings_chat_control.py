@@ -129,3 +129,20 @@ def test_boundary_and_unexpected_failures_are_reported_honestly(monkeypatch, use
     monkeypatch.setattr(module, "set_parameter", _broken)
     failed = _run(monkeypatch, user_config, "/settings set max_tokens 1024")
     assert failed.ok is False and "没能完整确认" in failed.message and "没有改动" not in failed.message
+
+
+def test_set_and_show_tell_the_reasoning_effect_on_the_default_model(monkeypatch, user_config):
+    """opencode.ai 不在已确认的推理参数名单里：/settings set 与 show 都如实说“不改变请求”，而不是只说写入成功。"""
+    monkeypatch.setattr(module, "_scoped_home", lambda _agent, _scope: _ADMIN)
+    agent = SimpleNamespace(config=SimpleNamespace(
+        config_path=str(user_config), max_tokens=65536, model_context_window_tokens=131072,
+        api_base="https://opencode.ai/zen/v1", model_backend="openai_compatible"))
+    changed = module.execute_settings_control(agent, _settings("/settings set model_reasoning_effort max"), None)
+    assert changed.ok and "已把 model_reasoning_effort 改为 max" in changed.message
+    assert "按新值在默认模型上的实际效果：当前模型不支持调节" in changed.message and "/model" in changed.message
+    shown = module.execute_settings_control(agent, _settings("/settings show model_reasoning_effort"), None)
+    assert "实际使用值：不额外发送推理参数" in shown.message  # 运行中的配置仍是 auto，重启后才按新值
+    capped = module.execute_settings_control(agent, _settings("/settings set max_tokens 32768"), None)
+    assert "按新值在默认模型上的实际效果：32768" in capped.message
+    plain = module.execute_settings_control(agent, _settings("/settings set request_timeout 200"), None)
+    assert plain.ok and "实际效果" not in plain.message

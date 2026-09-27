@@ -1,5 +1,7 @@
 # Gateway 维护状态
 
+`/settings set` 附上新值的实际效果（分支 `claude/be-param-descriptions`，2026-09-27）：`settings_control_service._set` 对登记了派生规则的参数（`parameter_registry._APPLIED_RULES`：max_tokens、model_reasoning_effort）多一句“按新值在默认模型上的实际效果”，与 `show` 同一口径（Gateway 启动配置即默认模型，注明 /model 切换过的会话可能不同）；推理强度在不支持调节的模型上如实说“不改变请求”。计算经 `applied_value_with` 的只读新值视图，不另写判断；没有派生规则的参数回执不变。回归见 `test_settings_chat_control.py`。
+
 参数中心同名常数收敛（分支 `claude/param-center-dup-constants`，2026-09-27）：流式 chunk 单次读取上限只在
 `gateway_parts/io.STREAM_CHUNK_READ_MAX_BYTES` 定义（8 MiB），CLI 与 TUI 两个网关客户端改为导入；适配器入口不再另写领取时限，
 直接用 `GatewayClaimLeaseConfig` 的默认值。数值不变。

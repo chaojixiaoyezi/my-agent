@@ -1,9 +1,11 @@
 # LLM: 参数中心的只读登记表：每个 AgentConfig 字段一条（键、默认值、值类型、中文说明、分类、安全等级、是否脱敏、生效时机）。
-#   说明只取随包 agent_config.yaml 里该键正上方的连续注释，不在代码里再写一份；安全等级按显式名单与键名记号结构化判定，
+#   说明只取随包 agent_config.yaml：该键正上方的连续注释优先，没有再取该键的行尾注释（与加载器同一引号规则），不在代码里再写一份；
+#   说明为空的字段只允许留在 test_parameter_registry 的基线名单里。安全等级按显式名单与键名记号结构化判定，
 #   user_config_capability.TUNABLE_KEYS 可显式放行（如飞书凭据），BOUNDARY_KEYS 永远拒绝。分类只用于展示，未知前缀归“其它”，
 #   不参与任何放行判断。只读，不写文件、不调模型。改动须同步 parameter_changes.py、tooling/user_config_tool.py、
 #   gateway_parts/settings_control_service.py 与 test_parameter_registry.py。运行时还会按规则派生的参数（配置值不等于
-#   实际使用值，如 max_tokens 按窗口夹取）在 _APPLIED_RULES 登记派生函数，公式本身仍只在原权威位置。
+#   实际使用值，如 max_tokens 按窗口夹取、推理强度在不支持的模型上不发送）在 _APPLIED_RULES 登记派生函数，公式本身仍只在原权威位置；
+#   修改回执经 applied_value_with 按新值给出同一派生结果。
 # 模块用途: 回答“有哪些参数、各是什么意思、谁能改、改了什么时候生效、实际用的是多少”，是参数中心的唯一登记来源。
 from __future__ import annotations
 
@@ -12,6 +14,7 @@ from dataclasses import MISSING, dataclass, fields
 from functools import lru_cache
 
 from .config import AgentConfig
+from .config_io import yaml_trailing_comment
 from .defaults import effective_max_output_tokens
 from .user_config_capability import (
     BOUNDARY_KEYS,
@@ -100,20 +103,27 @@ def _value_type(default: object, annotation: object) -> str:
     return next((name for name in ("bool", "int", "float", "str", "list", "dict") if text.startswith(name)), "other")
 
 
-# LLM: 只认顶层 `key:` 行正上方连续的 `#` 注释，遇空行或其它内容即止；同一注释块只归紧挨着的第一个键。只读。
-# 函数用途: 从随包 YAML 读出每个键的中文说明。
-def _yaml_descriptions() -> dict[str, str]:
+# LLM: 顶层 `key:` 行正上方连续的 `#` 注释优先（遇空行或其它内容即止，同一注释块只归紧挨着的第一个键）；
+#   没有正上方注释时取该行的行尾注释（yaml_trailing_comment，引号里的 # 不算）。同名键只取第一次出现。只读。
+# 函数用途: 从 YAML 文本行里读出每个键的中文说明。
+def _descriptions_from_lines(lines: list[str]) -> dict[str, str]:
     descriptions: dict[str, str] = {}
     block: list[str] = []
-    for raw in packaged_config_path().read_text(encoding="utf-8").splitlines():
+    for raw in lines:
         stripped = raw.strip()
         if stripped.startswith("#"):
             block.append(stripped.lstrip("#").strip())
             continue
         if not raw.startswith((" ", "\t")) and ":" in raw and stripped:
-            descriptions.setdefault(raw.split(":", 1)[0].strip(), " ".join(line for line in block if line))
+            above = " ".join(line for line in block if line)
+            descriptions.setdefault(raw.split(":", 1)[0].strip(), above or yaml_trailing_comment(raw))
         block = []
     return descriptions
+
+
+# 函数用途: 从随包 YAML 读出每个键的中文说明。
+def _yaml_descriptions() -> dict[str, str]:
+    return _descriptions_from_lines(packaged_config_path().read_text(encoding="utf-8").splitlines())
 
 
 # LLM: 进程内缓存一次；AgentConfig 字段或随包 YAML 变化只随新版本发布生效，不需要热刷新。
@@ -148,9 +158,28 @@ def search_parameters(query: str, *, limit: int = 20) -> list[ParameterSpec]:
     return found[:limit] if limit else found
 
 
+# LLM: 与 /effort 回执同一组合：控制方式只由 backends.reasoning_control.resolved_reasoning_control 按
+#   model_reasoning_control、api_base、model_backend 决定，说明只由 describe_reasoning_effect 生成，这里不另写支持判断；
+#   档位取配置里的全局默认（会话里用 /effort 单独设过的以会话为准，这里不读线程）。只读。
+# 函数用途: 说明全局推理强度档位在这个模型上实际会怎样发送，例如当前模型不支持调节时本设置不改变请求。
+def _reasoning_effect(config: object) -> str:
+    from ..backends.reasoning_control import describe_reasoning_effect, resolved_reasoning_control
+    from .reasoning_effort import configured_reasoning_level
+
+    control = resolved_reasoning_control(getattr(config, "model_reasoning_control", "auto"),
+                                         getattr(config, "api_base", ""), getattr(config, "model_backend", ""))
+    return describe_reasoning_effect(configured_reasoning_level(config), control)
+
+
 # 运行时按规则派生的参数：登记“由配置算出实际使用值”的唯一函数与一句中文规则；公式不在这里另写。
 _APPLIED_RULES: dict[str, tuple[Callable[[object], object], str]] = {
     "max_tokens": (effective_max_output_tokens, "按模型上下文窗口夹取：不超过窗口 ÷ 4，窗口未知时等于配置值"),
+    "model_reasoning_effort": (_reasoning_effect, "按当前模型的思考控制方式换算：不支持调节的模型不发送任何推理参数；"
+                                                  "会话里用 /effort 单独设过的以会话为准"),
+}
+# 修改回执里的新值是渲染后的文本；按登记类型转回，派生规则拿到的类型与重启后加载的一致
+_TEXT_TO_TYPE: dict[str, Callable[[str], object]] = {
+    "int": int, "float": float, "bool": lambda text: text.strip().lower() == "true",
 }
 
 
@@ -168,11 +197,40 @@ def applied_value(key: str, config: object) -> tuple[object, str] | None:
         return None
 
 
+# LLM: 只读视图：替换的那个键取给定值，其余属性原样取自底层配置；不复制、不校验、不写回。
+# 类用途: 让派生规则按“假设已经改成新值”的配置计算。
+class _ConfigWithValue:
+    # LLM: 三个内部属性在构造时直接写入实例，__getattr__ 只在找不到属性时才被调用，不会递归。
+    # 函数用途: 记住底层配置与要替换的一个键值。
+    def __init__(self, base: object, key: str, value: object) -> None:
+        self._base, self._key, self._value = base, key, value
+
+    # LLM: 只拦被替换的键；底层没有的属性照常抛 AttributeError，由派生规则自己的默认处理。
+    # 函数用途: 被替换的键返回新值，其余属性转给底层配置。
+    def __getattr__(self, name: str) -> object:
+        return self._value if name == self._key else getattr(self._base, name)
+
+
+# LLM: 只对 _APPLIED_RULES 登记的参数计算；新值按登记类型从回执文本转回，转不了返回 None，不猜。config 决定按哪个模型算
+#   （user_config 传本片会话模型的配置，/settings 传 Gateway 启动配置即默认模型）。只读，不写配置。
+# 函数用途: 给修改回执算出“按新值在这个模型上的实际效果”，让改了但当前模型不起作用的情况当下就能看见。
+def applied_value_with(key: str, value: object, config: object) -> tuple[object, str] | None:
+    spec = parameter_registry().get(key)
+    if key not in _APPLIED_RULES or spec is None or config is None:
+        return None
+    try:
+        typed = _TEXT_TO_TYPE.get(spec.value_type, str)(str(value))
+    except ValueError:
+        return None
+    return applied_value(key, _ConfigWithValue(config, key, typed))
+
+
 __all__ = [
     "SAFETY_BOUNDARY",
     "SAFETY_FREE",
     "ParameterSpec",
     "applied_value",
+    "applied_value_with",
     "category_for",
     "classify_safety",
     "is_masked",

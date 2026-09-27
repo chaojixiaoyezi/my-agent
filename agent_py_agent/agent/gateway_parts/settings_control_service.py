@@ -20,6 +20,7 @@ from ..settings.parameter_changes import (
 from ..settings.parameter_registry import (
     ParameterSpec,
     applied_value,
+    applied_value_with,
     parameter_registry,
     search_parameters,
 )
@@ -165,13 +166,18 @@ def _checked(report: dict[str, object]) -> dict[str, object]:
     return report
 
 
-# 函数用途: /settings set <参数名> <值> —— 修改一个参数并记账。有写文件副作用。
+# LLM: 登记了派生规则的参数再附一句“按新值在默认模型上的实际效果”（与 /settings show 同一口径：Gateway 启动配置即默认模型），
+#   让用户当下就知道改了是否真的起作用。有写文件副作用。
+# 函数用途: /settings set <参数名> <值> —— 修改一个参数并记账。
 def _set(config: object, argument: str) -> str:
     key, _, value = argument.partition(" ")
     report = _checked(set_parameter(key, value, user_path=_user_path(config), origin=_ORIGIN))
     previous = report.get("previous")
+    applied = applied_value_with(str(report["key"]), report.get("saved"), config)
+    applied_text = (f"按新值在默认模型上的实际效果：{applied[0]}（{applied[1]}；用 /model 切换过的会话可能不同）"
+                    if applied is not None else "")
     return (f"已把 {key} 改为 {report['saved']}（原来 {previous if previous is not None else '是默认值'}），"
-            f"记录编号 {str(report['change_id'])[:8]}。{report['effect_text']}")
+            f"记录编号 {str(report['change_id'])[:8]}。{report['effect_text']}{applied_text}")
 
 
 # 函数用途: /settings reset <参数名> —— 删除覆盖、恢复默认并记账。有写文件副作用。

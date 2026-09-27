@@ -1,5 +1,23 @@
 # 测试与发布验收
 
+## 参数中心：说明读行尾注释与推理强度如实生效值（2026-09-27，分支 `claude/be-param-descriptions`，基于 main `54a384147`）
+
+- **来源**：集成者派活。用户要求“不用猜参数是干啥的”，并按“把用户当什么都不懂来设计”：默认就合理，命令保留。
+  实测登记表 389 个字段里 216 个说明为空，其中 39 个其实写了行尾注释（`key: 值  # 说明`），只是没被读到；`/settings show` 与
+  `user_config view` 对它们只显示“（没有说明）”。另外用户的模型接口是 opencode.ai，不在推理参数已确认名单里，`model_reasoning_effort=max`
+  一个字段都不发，但 my-agent 经 `user_config` 修改时回执只说写入成功。
+- **测试**：
+  - `test_parameter_registry.py`：行尾注释取法 7 例（与加载器同一引号规则，引号里的 `#` 不算）；键正上方注释优先、空行隔断、同名键取第一次；
+    说明为空的字段只允许在 `tests/fixtures/parameter_description_baseline.json`（按原因分组）里，名单外新增或名单里的已有说明/已删除都失败；
+    推理强度实际效果与 `/effort` 回执同源（`resolved_reasoning_control` + `describe_reasoning_effect`）；新值视图不改原配置；新值按登记类型转换。
+  - `test_parameter_changes.py`：`user_config` 的 set 回执对推理强度与 max_tokens 附上新值在会话模型上的实际效果，普通参数不多给字段。
+  - `test_settings_chat_control.py`：`/settings set` 附“按新值在默认模型上的实际效果”，`/settings show` 如实说明。
+- **结果**：上述文件与 `test_reasoning_effort.py`、`test_architecture_guardrails.py`、`test_config_field_readers.py`、`test_user_config_*.py`、
+  配置加载相关、恢复码合同共 323 passed；ruff、doc sync、strict code-size、`git diff --check`、clean-package 见提交前检查。
+- **变异验证**：11 个全部被抓出（去掉行尾注释兜底、反转优先级、改用不认引号的切分、撤掉推理强度规则、绕过控制方式解析、新值视图不替换、
+  新值不按类型转换、`user_config` 回执不附效果、`/settings set` 不附效果、基线名单多一个已有说明的键、少一个空说明的键）；
+  每个都在 `PYTHONDONTWRITEBYTECODE=1` 子进程里跑并逐字节恢复。
+
 ## 决策点长原话改为首尾节选、不再整点跳过（2026-09-27，分支 `claude/integrate-self-dev`，接在 my-agent 的 1b69ce34b 之后）
 
 - **来源**：用户要求参数默认就合理、99% 的人不会手动调（“把用户当什么都不懂来设计”）。原来超出上限的原话让 planning 等三个点位整点跳过，

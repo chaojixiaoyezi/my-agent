@@ -84,6 +84,14 @@ def _strip_yaml_comment(line: str) -> str:
     return line.rstrip()
 
 
+# LLM: 与 _strip_yaml_comment 同一条引号规则（引号外的第一个 # 起算注释），保证“加载器当成注释丢掉的部分”就是这里取到的说明；
+#   没有注释或注释为空都返回空串。只读，不改行。
+# 函数用途: 取出一行 YAML 的行尾注释文字，供参数中心在键上方没有注释时当作说明。
+def yaml_trailing_comment(line: str) -> str:
+    rest = line[len(_strip_yaml_comment(line)):].strip()
+    return rest[1:].strip() if rest.startswith("#") else ""
+
+
 def load_simple_yaml(path: Path) -> dict[str, Any]:
     data: dict[str, Any] = {}
     current_key: str | None = None

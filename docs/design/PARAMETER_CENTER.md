@@ -77,7 +77,7 @@
   - 迁移批次按“用户最常问、最常调”的顺序排：模型请求（输出上限、超时、重试）→ compact 与上下文预算 → 工具输出与读取预算 →
     子代理与调度 → 记忆与检索 → 其余。每批先把常数收进登记表并证明读取方真的读到，再删原常数。
 - **阶段 2（基础设施，2026-09-27 已实现，开发工作树除外）**：
-  - 登记表 `settings/parameter_registry.py`：每个 `AgentConfig` 字段一条，说明取自随包 YAML 该键正上方的注释，类型取默认值的真实类型；
+  - 登记表 `settings/parameter_registry.py`：每个 `AgentConfig` 字段一条，说明取自随包 YAML 该键正上方的注释（没有再取行尾注释），类型取默认值的真实类型；
     安全等级按显式名单与键名记号判定（凭据、权限、身份、路径、外部地址、端口、服务/插件、提示词、审计、锁、执行权威链、内部元数据
     等为边界），`TUNABLE_KEYS` 可显式放行（飞书凭据，回显脱敏）。首轮结果：386 项中 286 项模型可改，其余为边界。
   - 写入口 `settings/parameter_changes.py`：只写当前进程实际加载的用户配置（`user_config_path(config)`；原来只看 Gateway 从不设置的
@@ -90,11 +90,24 @@
   按 owner、仅管理员的结构化授权，本机管理员从 9-21 起一直开着。只新增 `self_dev_worktree` 配置与提示词一段；工作树由集成者建在
   `~/my-agent-worktrees/my-agent-self`（分支 `my-agent/self-dev`，基于 main），本机用户配置填上该路径。
 - **查看补充（2026-09-27，来自 my-agent 在开发交流板的提问）**：
-  - 配置值与实际使用值不同的参数，在登记表 `_APPLIED_RULES` 登记派生函数（目前只有 max_tokens → `effective_max_output_tokens`，
-    公式仍只在原处）。`applied_value(key, config)` 给查看入口用：`user_config` 的 view/search 按本片会话模型给
+  - 配置值与实际使用值不同的参数，在登记表 `_APPLIED_RULES` 登记派生函数（max_tokens → `effective_max_output_tokens`；
+    推理强度 `model_reasoning_effort` 见下一条），公式仍只在原处。`applied_value(key, config)` 给查看入口用：`user_config` 的 view/search 按本片会话模型给
     `applied_value`/`applied_rule`，`/settings show` 按默认模型多一行“实际使用值”，并注明 /model 切换过的会话可能不同。
   - 删除 `read_config_fact` 里旧白名单遗留的 `tunable` 字段：模型同时看到 writable=true 与 tunable=false，误以为 max_tokens 改不了；
     能否修改只看登记表的 `writable`。
+- **说明与实际效果补充（2026-09-27，集成者派活，分支 `claude/be-param-descriptions`）**：
+  - 说明也读行尾注释：键正上方的注释优先，没有再取 `key: 值  # 说明` 的行尾部分；判断“什么是注释”复用加载器同一条引号规则
+    （`config_io.yaml_trailing_comment` 与 `_strip_yaml_comment` 同源），引号里的 `#` 不算。389 个字段里空说明从 216 降到 177，
+    其中 39 个是原来没读到的行尾注释。
+  - 守卫：说明为空的字段只允许出现在 `agent_py_agent/tests/fixtures/parameter_description_baseline.json`（按原因分组：5 个加载器元数据；
+    172 个等配置减量分类，多数将删除、合并或降级）。名单外新增空说明、或名单里的字段已有说明或已删除，`test_parameter_registry` 都失败，
+    名单只会越来越短。这一轮不补写那 172 个说明。
+  - 推理强度如实生效值：`model_reasoning_effort` 登记派生规则，读取函数与 `/effort` 回执同一组合——控制方式只由
+    `resolved_reasoning_control(model_reasoning_control, api_base, model_backend)` 决定，说明只由 `describe_reasoning_effect` 生成，
+    不另写支持判断。用户当前用的 opencode.ai 不在已确认名单里，查看时如实显示“当前模型不支持调节……本设置暂不改变请求”。
+  - 修改回执：`applied_value_with(key, 新值, config)` 用只读视图把新值套进同一派生规则。`user_config` 的 set 回执多给
+    `applied_value`/`applied_rule`/`applied_basis`（按本片会话模型），聊天 `/settings set` 多一句“按新值在默认模型上的实际效果”；
+    只对 `_APPLIED_RULES` 里的键生效，没有专项分支。
 - **阶段 3（迁移）**：按模块分批迁移常数并改名。每批开工前在协作文件贴出文件清单，避开 Codex 正在改的文件。
   - **第一批：同名常数（2026-09-27）**。盘点时 32 个常数名在多个文件各定义一份。
     - 删掉没有读取方的 `CONTEXT_WINDOW`（TUI 两份）与 `RECENT_ARCHIVE_FILE_LIMIT`（记忆诊断两份，实际读配置）。

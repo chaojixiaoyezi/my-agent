@@ -121,3 +121,19 @@ def test_tool_uses_the_loaded_config_file_and_exposes_the_parameter_center(tmp_p
     assert not denied.ok and denied.error_code == "TOOL_PERMISSION_DENIED"
     reverted = tool.execute({"action": "revert", "change_id": history[0]["id"]})
     assert reverted.ok and "max_tokens:" not in path.read_text(encoding="utf-8")
+
+
+def test_set_receipt_tells_the_new_value_effect_on_the_session_model(tmp_path, monkeypatch):
+    """推理强度在不支持调节的模型上写入成功但不改变请求：回执当下说清楚；没有派生规则的参数不多给字段。"""
+    monkeypatch.delenv("MY_AGENT_CONFIG", raising=False)
+    agent = _main_agent(_user(tmp_path))
+    agent.config.api_base, agent.config.model_backend = "https://opencode.ai/zen/v1", "openai_compatible"
+    tool = UserConfigTool(agent)
+    saved = json.loads(tool.execute({"action": "set", "key": "model_reasoning_effort", "value": "max"}).output)
+    assert saved["saved"] == "max" and "不改变请求" in saved["applied_value"] and "思考控制方式" in saved["applied_rule"]
+    assert "当前会话模型" in saved["applied_basis"]
+    agent.config.model_context_window_tokens = 131072
+    capped = json.loads(tool.execute({"action": "set", "key": "max_tokens", "value": "65536"}).output)
+    assert capped["applied_value"] == 32768
+    plain = json.loads(tool.execute({"action": "set", "key": "request_timeout", "value": "200"}).output)
+    assert plain["ok"] and "applied_value" not in plain

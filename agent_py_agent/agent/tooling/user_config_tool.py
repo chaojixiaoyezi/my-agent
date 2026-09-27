@@ -16,7 +16,12 @@ from ..settings.parameter_changes import (
     revert_change,
     set_parameter,
 )
-from ..settings.parameter_registry import applied_value, parameter_registry, search_parameters
+from ..settings.parameter_registry import (
+    applied_value,
+    applied_value_with,
+    parameter_registry,
+    search_parameters,
+)
 from ..settings.user_config_capability import (
     capability_summary,
     mask_value,
@@ -381,6 +386,7 @@ class UserConfigTool(BaseTool):
 
 
 # LLM: 只有主 owner 能走到这里（execute 已拦普通 owner）；写入统一交给参数中心，actor 记为 model。有写文件副作用。
+#   set 回执对登记了派生规则的参数附上新值在本片会话模型上的实际效果（_with_applied_effect）。
 # 函数用途: 执行参数中心的查找、修改、恢复默认、查看记录与回滚。
 def _parameter_action(agent: object, params: dict) -> dict[str, object]:
     action = str(params.get("action") or "").strip().lower()
@@ -397,7 +403,19 @@ def _parameter_action(agent: object, params: dict) -> dict[str, object]:
         return revert_change(str(params.get("change_id") or ""), user_path=user_path, origin=origin)
     if action == "reset":
         return reset_parameter(key, user_path=user_path, origin=origin)
-    return set_parameter(key, params.get("value"), user_path=user_path, origin=origin)
+    report = set_parameter(key, params.get("value"), user_path=user_path, origin=origin)
+    return _with_applied_effect(report, getattr(agent, "config", None))
+
+
+# LLM: 只在写入成功且该参数登记了派生规则时附加；按新值与本片会话模型计算（同 view 的 applied_value 口径），
+#   让模型当下就知道改了在当前模型上是否起作用（例如推理强度在不支持调节的模型上不改变请求）。只读，不改回执其它字段。
+# 函数用途: 给 set 回执附上新值在当前模型上的实际效果。
+def _with_applied_effect(report: dict[str, object], config: object) -> dict[str, object]:
+    applied = applied_value_with(str(report.get("key") or ""), report.get("saved"), config) if report.get("ok") else None
+    if applied is None:
+        return report
+    return {**report, "applied_value": applied[0], "applied_rule": applied[1],
+            "applied_basis": "按新值与当前会话模型计算；什么时候开始生效见 effect_text"}
 
 
 # LLM: 值一律经 mask_value 脱敏；brief 用于搜索列表，说明截到 160 字。登记了派生规则的参数另给 applied_value/applied_rule
