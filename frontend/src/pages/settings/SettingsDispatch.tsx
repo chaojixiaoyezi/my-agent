@@ -67,26 +67,6 @@ export default function SettingsDispatch() {
             unit="个"
             disabled={!isAdmin}
           />
-          <NumberField
-            label="dispatch_active_interval（活跃调度间隔）"
-            description="调度器活跃状态下的轮询间隔"
-            value={dispatch.active_interval}
-            onChange={(v) => { setDispatch({ active_interval: v }); markDirty(); }}
-            min={1}
-            max={60}
-            unit="秒"
-            disabled={!isAdmin}
-          />
-          <NumberField
-            label="dispatch_idle_interval（空闲调度间隔）"
-            description="调度器空闲状态下的轮询间隔"
-            value={dispatch.idle_interval}
-            onChange={(v) => { setDispatch({ idle_interval: v }); markDirty(); }}
-            min={1}
-            max={300}
-            unit="秒"
-            disabled={!isAdmin}
-          />
         </div>
       </AdminSection>
 
@@ -161,14 +141,6 @@ export default function SettingsDispatch() {
             min={60}
             max={7200}
             unit="秒"
-            disabled={!isAdmin}
-          />
-          <ChoiceField
-            label="runner_failure_policy（失败策略）"
-            description="runner 失败后的处理策略"
-            value={runner.failure_policy}
-            choices={["retry", "fail", "ignore", "escalate"]}
-            onChange={(v) => { setRunner({ failure_policy: v }); markDirty(); }}
             disabled={!isAdmin}
           />
         </div>

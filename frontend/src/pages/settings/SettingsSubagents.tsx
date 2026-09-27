@@ -90,16 +90,6 @@ export default function SettingsSubagents() {
         subtitle="任务拆分深度、并发限制与工作流目录"
       >
         <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
-          <NumberField
-            label="subagent_board_limit（看板限制）"
-            description="子代理看板最大任务卡片数"
-            value={sub.board_limit}
-            onChange={(v) => { setSub({ board_limit: v }); markDirty(); }}
-            min={10}
-            max={500}
-            unit="张"
-            disabled={!isAdmin}
-          />
           <ToggleField
             label="subagent_builtin_workflows（内置工作流）"
             description="是否启用内置工作流模板"
@@ -146,26 +136,6 @@ export default function SettingsSubagents() {
             min={0}
             max={1000}
             unit="个"
-            disabled={protectedDisabled}
-          />
-          <NumberField
-            label="max_auto_split_depth（自动拆分深度）"
-            description="任务自动拆分的最大递归深度"
-            value={sub.max_auto_split_depth}
-            onChange={(v) => { setSub({ max_auto_split_depth: v }); markDirty(); }}
-            min={0}
-            max={10}
-            unit="层"
-            disabled={protectedDisabled}
-          />
-          <NumberField
-            label="max_auto_retry_attempts（自动重试次数）"
-            description="子代理失败后的自动重试次数"
-            value={sub.max_auto_retry_attempts}
-            onChange={(v) => { setSub({ max_auto_retry_attempts: v }); markDirty(); }}
-            min={0}
-            max={10}
-            unit="次"
             disabled={protectedDisabled}
           />
         </div>

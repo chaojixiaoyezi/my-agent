@@ -4,7 +4,6 @@ import {
   AdminSection,
   NumberField,
   StringField,
-  ToggleField,
 } from "../../components/settings/SettingsFieldComponents";
 import { SettingsPageHeader } from "../../components/settings/SettingsPageHeader";
 import { useSettingsSection } from "../../components/settings/useSettingsSection";
@@ -100,13 +99,6 @@ export default function SettingsModel() {
             value={model.model_speed_profile_path}
             onChange={(v) => { setModel({ model_speed_profile_path: v }); markDirty(); }}
             placeholder="留空表示禁用"
-            disabled={!isAdmin}
-          />
-          <ToggleField
-            label="auto_bench_model_on_first_use（首次使用基准测试）"
-            description="首次调用模型时是否自动执行速度基准测试"
-            checked={model.auto_bench_model_on_first_use}
-            onChange={(v) => { setModel({ auto_bench_model_on_first_use: v }); markDirty(); }}
             disabled={!isAdmin}
           />
         </div>

@@ -252,6 +252,10 @@
   - 空说明基线 `parameter_description_baseline.json` 从 177 缩到 143：34 项删除，另有 2 项（`conversation_pending_wake_limit`、
     `lease_stale_without_heartbeat_seconds`）因上方注释块重新归属而有了说明。前端 `frontend/config/backend-config-catalog.json` 是由随包 YAML
     生成的目录，在本批之前已经过期，本批未重新生成；前端设置页仍有 12 个已删键的表单项，留给前端单独清理。
+    （2026-09-27 由分支 `claude/9a-batch3-e` 处理：目录按当前随包 YAML 重新生成为 313 项，`npm run check:config` 通过；设置页共清掉
+    24 个已删键的表单项——本批 12 个、第 2 批被吸收的 6 个、第 3 批 A/E 组降为常量的 6 个，看门狗整段一并删除。store 与
+    `frontend-runtime-config.json` 里这些字段的默认值暂留：它们经 `frontend/src/data/runtimeConfig.ts` 注入，而这个文件在
+    2026-09-09 的合并中丢失，前端要单独修一次。）
   - **决策点位的期限与模型引用只留覆盖层（2026-09-27，集成者，分支 `claude/decision-point-fields`）**：12 个点位的
     `timeout_seconds`/`profile_id` 原来在 agent/memory/capability 三份配置里各有一个字段（24 个），与用户长期设置、会话设置里
     按点位覆盖是同一概念的两个家。现只保留覆盖层：配置里只有通用 `decision_timeout_seconds`、`decision_background_timeout_seconds`、

@@ -17,10 +17,6 @@ export default function SettingsGateway() {
     s.gatewayParams);
   const setGw = useSettingsStore((s) =>
     s.setGatewayParams);
-  const wd = useSettingsStore((s) =>
-    s.watchdogParams);
-  const setWd = useSettingsStore((s) =>
-    s.setWatchdogParams);
   const errors = useSettingsStore((s) =>
     s.errors);
   const { dirty, saving, markDirty, handleSave } = useSettingsSection("网关参数");
@@ -99,16 +95,6 @@ export default function SettingsGateway() {
             disabled={!isAdmin}
           />
           <NumberField
-            label="lease_heartbeat_interval_seconds（租约心跳间隔）"
-            description="租约续期心跳的发送间隔"
-            value={gw.lease_heartbeat_interval_seconds}
-            onChange={(v) => { setGw({ lease_heartbeat_interval_seconds: v }); markDirty(); }}
-            min={1}
-            max={120}
-            unit="秒"
-            disabled={!isAdmin}
-          />
-          <NumberField
             label="lease_stale_without_heartbeat_seconds（租约过期秒数）"
             description="多久无租约心跳视为过期"
             value={gw.lease_stale_without_heartbeat_seconds}
@@ -123,53 +109,6 @@ export default function SettingsGateway() {
             description="是否启用 Gateway 进程看门狗监控"
             checked={gw.enable_watchdog}
             onChange={(v) => { setGw({ enable_watchdog: v }); markDirty(); }}
-            disabled={!isAdmin}
-          />
-        </div>
-      </AdminSection>
-
-      {/* Watchdog */}
-      <AdminSection
-        icon={Server}
-        title="看门狗（Watchdog）"
-        subtitle="进程监控与自动重启策略"
-      >
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-          <ToggleField
-            label="watchdog_enabled（启用看门狗）"
-            description="是否启用独立看门狗进程"
-            checked={wd.enabled}
-            onChange={(v) => { setWd({ enabled: v }); markDirty(); }}
-            disabled={!isAdmin}
-          />
-          <NumberField
-            label="watchdog_interval（检查间隔）"
-            description="看门狗检查进程健康的间隔"
-            value={wd.interval}
-            onChange={(v) => { setWd({ interval: v }); markDirty(); }}
-            min={5}
-            max={300}
-            unit="秒"
-            disabled={!isAdmin}
-          />
-          <NumberField
-            label="watchdog_max_restarts（最大重启次数）"
-            description="看门狗最多自动重启多少次"
-            value={wd.max_restarts}
-            onChange={(v) => { setWd({ max_restarts: v }); markDirty(); }}
-            min={1}
-            max={100}
-            unit="次"
-            disabled={!isAdmin}
-          />
-          <NumberField
-            label="watchdog_restart_delay（重启延迟）"
-            description="每次重启前的等待时间"
-            value={wd.restart_delay}
-            onChange={(v) => { setWd({ restart_delay: v }); markDirty(); }}
-            min={1}
-            max={300}
-            unit="秒"
             disabled={!isAdmin}
           />
         </div>

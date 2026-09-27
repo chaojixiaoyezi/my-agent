@@ -36,17 +36,6 @@ export default function SettingsTools() {
       >
         <div className="grid grid-cols-2 gap-4">
           <NumberField
-            label="tool_agent_budget_window_seconds（预算窗口）"
-            description="单个代理的滚动工具预算时间窗口"
-            value={budget.window_seconds}
-            onChange={(v) => { setBudget({ window_seconds: v }); markDirty(); }}
-            min={10}
-            max={3600}
-            unit="秒"
-            disabled={!isAdmin}
-            error={errors["tool_window"]}
-          />
-          <NumberField
             label="tool_agent_budget_max_calls（最大调用次数）"
             description="预算窗口内最多调用的工具次数"
             value={budget.max_calls}
@@ -56,16 +45,6 @@ export default function SettingsTools() {
             unit="次"
             disabled={!isAdmin}
             error={errors["tool_calls"]}
-          />
-          <NumberField
-            label="tool_artifact_read_budget_window_seconds（产物读取窗口）"
-            description="外置产物读取预算的滚动时间窗口"
-            value={budget.artifact_read_window_seconds}
-            onChange={(v) => { setBudget({ artifact_read_window_seconds: v }); markDirty(); }}
-            min={10}
-            max={3600}
-            unit="秒"
-            disabled={!isAdmin}
           />
           <NumberField
             label="tool_artifact_read_budget_max_chars（产物读取字符预算）"
@@ -171,32 +150,12 @@ export default function SettingsTools() {
             unit="字符"
             disabled={!isAdmin}
           />
-          <NumberField
-            label="tool_catalog_limit（目录限制）"
-            description="工具目录返回的最大条目数"
-            value={advanced.catalog_limit}
-            onChange={(v) => { setAdvanced({ catalog_limit: v }); markDirty(); }}
-            min={10}
-            max={500}
-            unit="条"
-            disabled={!isAdmin}
-          />
           <ChoiceField
             label="tool_catalog_mode（目录模式）"
             description="compact 精简、full 完整、retrieval_only 只靠召回、off 关闭目录"
             value={advanced.catalog_mode}
             choices={["compact", "full", "retrieval_only", "off"]}
             onChange={(v) => { setAdvanced({ catalog_mode: v }); markDirty(); }}
-            disabled={!isAdmin}
-          />
-          <NumberField
-            label="tool_catalog_offset（目录分页偏移）"
-            description="工具目录从第几个条目开始展示"
-            value={advanced.catalog_offset}
-            onChange={(v) => { setAdvanced({ catalog_offset: v }); markDirty(); }}
-            min={0}
-            max={500}
-            unit="条"
             disabled={!isAdmin}
           />
           <StringField
@@ -207,26 +166,6 @@ export default function SettingsTools() {
               setAdvanced({ catalog_categories: v.split(",").map((item) => item.trim()).filter(Boolean) });
               markDirty();
             }}
-            disabled={!isAdmin}
-          />
-          <NumberField
-            label="tool_catalog_entry_max_chars（单条目录上限）"
-            description="单个工具目录条目的最大字符数，0 表示不截断"
-            value={advanced.catalog_entry_max_chars}
-            onChange={(v) => { setAdvanced({ catalog_entry_max_chars: v }); markDirty(); }}
-            min={0}
-            max={10000}
-            unit="字符"
-            disabled={!isAdmin}
-          />
-          <NumberField
-            label="tool_detail_max_chars（工具详情上限）"
-            description="Recommended Tools 单个详细工具说明的最大字符数，0 表示不截断"
-            value={advanced.tool_detail_max_chars}
-            onChange={(v) => { setAdvanced({ tool_detail_max_chars: v }); markDirty(); }}
-            min={0}
-            max={20000}
-            unit="字符"
             disabled={!isAdmin}
           />
           <NumberField
@@ -251,13 +190,6 @@ export default function SettingsTools() {
             description="是否在工具目录中展示调用示例"
             checked={advanced.catalog_include_examples}
             onChange={(v) => { setAdvanced({ catalog_include_examples: v }); markDirty(); }}
-            disabled={!isAdmin}
-          />
-          <ToggleField
-            label="tool_catalog_show_truncated_notice（目录分页提示）"
-            description="目录分页或截断时是否提示 next_offset"
-            checked={advanced.catalog_show_truncated_notice}
-            onChange={(v) => { setAdvanced({ catalog_show_truncated_notice: v }); markDirty(); }}
             disabled={!isAdmin}
           />
         </div>

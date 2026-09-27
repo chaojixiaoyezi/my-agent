@@ -96,31 +96,6 @@ export default function SettingsMemory() {
             disabled={!isAdmin}
           />
           <ChoiceField
-            label="memory_hook_archive_level（Hook 归档级别）"
-            description="Hook 触发时归档的详细程度"
-            value={adv.hook_archive_level}
-            choices={["auto", "full", "summary", "none"]}
-            onChange={(v) => { setAdv({ hook_archive_level: v }); markDirty(); }}
-            disabled={!isAdmin}
-          />
-          <NumberField
-            label="memory_hook_retention_days（Hook 保留天数）"
-            description="Hook 记忆的保留天数"
-            value={adv.hook_retention_days}
-            onChange={(v) => { setAdv({ hook_retention_days: v }); markDirty(); }}
-            min={1}
-            max={365}
-            unit="天"
-            disabled={!isAdmin}
-          />
-          <ToggleField
-            label="memory_rule_routing_enabled（启用规则路由）"
-            description="是否启用基于规则的记忆路由"
-            checked={adv.rule_routing_enabled}
-            onChange={(v) => { setAdv({ rule_routing_enabled: v }); markDirty(); }}
-            disabled={!isAdmin}
-          />
-          <ChoiceField
             label="memory_rule_routing_mode（路由模式）"
             description="规则路由的匹配模式"
             value={adv.rule_routing_mode}
@@ -136,20 +111,6 @@ export default function SettingsMemory() {
             min={1}
             max={100}
             unit="条"
-            disabled={!isAdmin}
-          />
-          <ToggleField
-            label="memory_rule_receipt_enabled（启用回执）"
-            description="记忆操作是否发送回执确认"
-            checked={adv.rule_receipt_enabled}
-            onChange={(v) => { setAdv({ rule_receipt_enabled: v }); markDirty(); }}
-            disabled={!isAdmin}
-          />
-          <ToggleField
-            label="memory_resume_auto_context_enabled（自动上下文恢复）"
-            description="会话恢复时是否自动加载上下文"
-            checked={adv.resume_auto_context_enabled}
-            onChange={(v) => { setAdv({ resume_auto_context_enabled: v }); markDirty(); }}
             disabled={!isAdmin}
           />
           <ChoiceField
