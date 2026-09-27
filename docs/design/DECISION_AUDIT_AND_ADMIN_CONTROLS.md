@@ -134,6 +134,10 @@ my-agent 据此写出“这几个点位宿主代码未接线”的开发需求�
     `point_off`，但只进内存（`note_decision_reach(..., flush=False)`，保持请求钩子关闭时零 I/O 的合同），随同一 owner
     下一次到期的计数或 Gateway 正常停止一起写盘；阶段原因码、`no_candidates`、`bad_material`、`turn_closed`（提交时
     轮次已关，照常抛出停止），真正调用前记 `called`；预留观察标记失败（同一请求重复）不算。
+  - skill_tool：每次新评估算一次到达（Gateway 同一请求只首个尝试评估，本机直连 TUI 每轮评估）；本片已评估过、携带选择的
+    恢复都不算。原因：`tools_disabled`、`isolated_scope`（隔离/控制面上下文）、`no_run_context`、阶段原因码/`point_off`、
+    `nothing_to_recommend`、`bad_material`。普通模式关闭但实验放行时走只观察实验，这一次到达只记实验的结果：实验阶段拒绝记
+    阶段码或 `experiment_forbidden`，否则同样是没有题或 `called`；一次到达最多一个 `called`。
 - 没登记的原因码照原样显示成“其它原因（码）”，不拒绝。
 - 开关复用 `decision_skip_records_enabled`，说明改为“决策点诊断记录”：关闭时跳过行与计数都不写。
 
@@ -147,7 +151,7 @@ my-agent 据此写出“这几个点位宿主代码未接线”的开发需求�
   `user_config` 与阶段内部的设置读取不附。
 
 **边界**：
-- subagent_model、skill_tool 还没接计数，`covered=false`，菜单写“未统计未触发原因”，不显示成 0 次。
+- subagent_model 还没接计数，`covered=false`，菜单写“未统计未触发原因”，不显示成 0 次。
 - 诊断每行另有 `note`（点位适用范围的宿主说明，放在 `decision_reach_counts._POINT_NOTES`）：model_selection 写明“只在经
   Gateway 的对话里判断，本机直连 TUI 不判断”，审计与菜单照原样显示，免得本机直连时的 0 次被看成没接线。
 - 进程内还没落盘的计数只在本进程可见：距上次合并不到 60 秒、之后又没有新到达的那部分。审计和菜单读取时会合并本进程

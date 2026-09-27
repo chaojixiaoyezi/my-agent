@@ -11,7 +11,11 @@ from agent_py_agent.agent.agent_core.runtime.loop_models import (
     RuntimeToolLoopSeed,
 )
 from agent_py_agent.agent.agent_core.runtime.loop_support import _tool_loop_execute_params
-from agent_py_agent.agent.backends.decision_protocol import DecisionBinding, DecisionRequest
+from agent_py_agent.agent.backends.decision_protocol import (
+    DecisionBinding,
+    DecisionInputError,
+    DecisionRequest,
+)
 from agent_py_agent.agent.backends.typesafe_decision import TypesafeDecisionBackend
 from agent_py_agent.agent.backends.typesafe_decision_wire import (
     parse_typesafe_response,
@@ -22,6 +26,7 @@ from agent_py_agent.agent.capability.decision_candidates import selection_questi
 from agent_py_agent.agent.capability.skill_search_tool import SkillSearchTool
 from agent_py_agent.tests._tool_runtime_harness import make_test_protocol_snapshot
 from agent_py_agent.tests.test_decision_model_profiles import decision
+from agent_py_agent.tests.test_decision_reach_counts import reach_counter
 from agent_py_agent.tests.test_decision_settings import host_at, patch
 from agent_py_agent.tests.test_decision_skill_projection import setup_surface
 from agent_py_agent.tests.test_tool_presentation_projection import native_schema
@@ -346,6 +351,57 @@ def test_evaluated_without_selection_never_reopens_decision_stage(surface, monke
     with pytest.raises(InterruptedError):
         module.recommend_capabilities(surface.host, surface.params, surface.snapshot, surface.contract)
 
+
+
+def test_only_new_evaluations_count_one_reach_each(surface, monkeypatch, tmp_path):
+    reasons = reach_counter(surface.host, monkeypatch, "skill_tool", tmp_path)
+    calls = provider(monkeypatch)
+    params = surface.params
+
+    def run():
+        return module.recommend_capabilities(surface.host, params, surface.snapshot, surface.contract)
+
+    applied = run()
+    params.capability_presentation = applied.selection
+    assert run().selection is not None, "同片携带的是恢复，不算到达"
+    patch(surface.host, {"points.skill_tool.mode": "off"})
+    assert run().selection is None, "携带选择时点位被关掉：退回原展示，也不算新到达"
+    patch(surface.host, {"points.skill_tool.mode": "apply"})
+    params.capability_presentation, params.capability_presentation_evaluated = None, True
+    run()
+    params.capability_presentation_evaluated, params.context_scope = False, "isolated"
+    run()
+    params.context_scope, (request_id, run_id) = "default", (params.request_id, params.run_id)
+    params.request_id = params.run_id = ""
+    run()
+    params.request_id, params.run_id = request_id, run_id
+    monkeypatch.setattr(surface.host.config, "enable_tools", False)
+    run()
+    monkeypatch.setattr(surface.host.config, "enable_tools", True)
+    patch(surface.host, {"points.skill_tool.mode": "off"})
+    run()
+    patch(surface.host, {"points.skill_tool.mode": "apply"})
+    monkeypatch.setattr(module, "_material", lambda *_args: ({"candidates": []}, {}, "revision"))
+    run()
+
+    def broken(*_args):
+        raise DecisionInputError("候选材料超出协议上限")
+
+    monkeypatch.setattr(module, "_material", broken)
+    assert run().finding == "skill_tool_decision:enhancement_failed"
+    assert len(calls) == 1
+    assert reasons() == ({"isolated_scope": 1, "no_run_context": 1, "tools_disabled": 1, "point_off": 1,
+                          "nothing_to_recommend": 1, "bad_material": 1}, 1)
+
+
+def test_experiment_path_is_one_reach_with_its_own_reason(surface, monkeypatch, tmp_path):
+    reasons = reach_counter(surface.host, monkeypatch, "skill_tool", tmp_path)
+    stages = iter([SimpleNamespace(error_code="", enabled_points=(), experiment_available=True),
+                   SimpleNamespace(error_code="", enabled_points=(), experiment_available=False)])
+    monkeypatch.setattr(module, "begin_decision_stage", lambda *_args, **_kwargs: next(stages))
+    result = module.recommend_capabilities(surface.host, surface.params, surface.snapshot, surface.contract)
+    assert result.finding == "skill_tool_decision:experiment:experiment_point_forbidden"
+    assert reasons() == ({"experiment_forbidden": 1}, 0), "普通阶段没开时只记实验这一次的结果，不另记 point_off"
 
 def test_host_turn_survives_db_attempt_rotation_but_not_host_turn_change(surface, monkeypatch):
     calls = provider(monkeypatch)

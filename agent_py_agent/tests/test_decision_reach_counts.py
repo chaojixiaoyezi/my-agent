@@ -123,11 +123,11 @@ def test_diagnostics_mark_uncovered_points_and_enabled_state(tmp_path):
     for reason in ("focus_count", "focus_count", "nothing_to_review", CALLED):
         note_decision_reach(agent, "delivery_quality", reason)
     reach = decision_reach_summary(agent.home_paths, since=0)
-    rows = decision_point_diagnostics(("delivery_quality", "skill_tool", "planning", "model_selection"),
-                                      {"delivery_quality": "apply", "skill_tool": "off"}, reach)
+    rows = decision_point_diagnostics(("delivery_quality", "subagent_model", "planning", "model_selection"),
+                                      {"delivery_quality": "apply", "subagent_model": "off"}, reach)
     assert rows["delivery_quality"]["enabled"] is True and rows["delivery_quality"]["reached"] == 4
     assert [item["reason"] for item in rows["delivery_quality"]["not_called"]] == ["focus_count", "nothing_to_review"]
-    assert rows["skill_tool"]["covered"] is False and rows["skill_tool"]["enabled"] is False
+    assert rows["subagent_model"]["covered"] is False and rows["subagent_model"]["enabled"] is False
     assert rows["model_selection"]["covered"] is True and "Gateway" in rows["model_selection"]["note"]
     assert rows["delivery_quality"]["note"] == ""
     assert rows["planning"]["covered"] is True and rows["planning"]["reached"] == 0 and rows["planning"]["mode"] == "unknown"

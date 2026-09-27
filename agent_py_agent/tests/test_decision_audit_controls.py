@@ -269,7 +269,7 @@ def test_audit_and_menu_read_explain_why_points_did_not_trigger(tmp_path, monkey
     assert quality["not_called"] == [
         {"reason": "not_test_command", "label": "这一步不是运行测试的命令", "count": 2},
         {"reason": "focus_count", "label": reach_counts.miss_reason_label("focus_count"), "count": 1}]
-    assert rows["skill_tool"]["covered"] is False and rows["planning"]["reached"] == 0
+    assert rows["subagent_model"]["covered"] is False and rows["planning"]["reached"] == 0
     assert rows["model_selection"]["covered"] is True and rows["model_selection"]["note"]
     assert "decision_reach_counts" in report["sources"]
     # TUI 决策菜单走的 decision_read 附同一份诊断（近 24 小时）。

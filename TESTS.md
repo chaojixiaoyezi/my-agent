@@ -1,6 +1,19 @@
 # 测试与发布验收
 
-## 到达计数接上选模型（2026-09-27，分支 `claude/9b-three-point-reach` 第 1 个提交，叠在 `7d0338bf5` 上）
+## 到达计数接上技能工具推荐（2026-09-27，分支 `claude/9b-three-point-reach` 第 2 个提交）
+
+- **口径**（集成方已确认）：每次新评估算一次到达；本片已评估过、携带选择的恢复都不算。原因码：`tools_disabled`、
+  `isolated_scope`、`no_run_context`、阶段原因码/`point_off`、`nothing_to_recommend`、`bad_material`。普通模式关闭但实验放行时，
+  这一次到达只记实验的结果：实验阶段拒绝记阶段码或 `experiment_forbidden`，否则同样是没有题或 `called`。
+- **结构**：`recommend_capabilities` 原本 60 行（正好到软上限）。入口原因抽成 `_context_miss_reason`，返回点统一用
+  `_skip(original, agent, carried, reason)`（只在新评估时计数），已采用纯值的构造抽成 `_selection`，函数缩到 56 行，嵌套不加深。
+- **新测试**（`test_decision_capability_consumer.py`）：按顺序跑调用、携带恢复、携带时点位被关、已评估、隔离、没有编号、工具关闭、
+  点位关闭、没有可推荐、材料超限，核对每种新评估各记一次且恢复/已评估不记；实验路径被实验阶段拒绝时只记 `experiment_forbidden`，
+  不另记 `point_off`。
+- **变异验证（10 种全部被抓住，逐个字节级还原）**：恢复误计、已评估误计、上下文原因不计、阶段原因不计、没有可推荐不计、
+  材料不合格不计、普通路径漏记 `called`、实验拒绝不计、实验路径多记 `point_off`、`_selection` 里两个名单写反。
+
+## 到达计数接上选模型（2026-09-27，分支 `claude/9b-three-point-reach` 第 1 个提交，基于 main `eb7c639a1`）
 
 - **口径**（集成方已确认）：每个 Gateway ask 通过 `_eligible` 算一次到达，之前的机制性退出不算。模式关闭记 `point_off`，
   但只进内存（`note_decision_reach(..., flush=False)`）：这个钩子每个请求都跑，原有测试要求关闭时零读写。

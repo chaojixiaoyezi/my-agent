@@ -29,7 +29,8 @@ SCHEMA = "decision_reach.v1"
 CALLED = "called"
 # 本片接入到达计数的点位；其余点位展示时明确写“未统计”，不显示成 0 次。
 COVERED_POINTS = ("planning", "delivery_quality", "action_candidate", "external_material_order",
-                  "skill_proposal_review", "pre_recall", "recall", "curator", "curator_relation", "model_selection")
+                  "skill_proposal_review", "pre_recall", "recall", "curator", "curator_relation", "model_selection",
+                  "skill_tool")
 # 点位的适用范围说明（宿主事实，不是原因码）：诊断里带出，审计与菜单照原样显示，免得把“这里本来就不判断”看成没接线。
 _POINT_NOTES = {"model_selection": "只在经 Gateway 的对话里判断，本机直连 TUI 不判断"}
 _FLUSH_SECONDS = 60.0
@@ -82,6 +83,10 @@ _LABELS = {
     "memory_changed": "已有记忆刚刚被改过，这次先不判断",
     "no_candidates": "没有其它可以换用的模型",
     "turn_closed": "这一轮在判断之前就已经结束了",
+    "tools_disabled": "这次对话没开工具，不用挑工具和 Skill",
+    "isolated_scope": "这是隔离或控制类的任务，不做工具推荐",
+    "nothing_to_recommend": "没有可以推荐的工具或 Skill",
+    "experiment_forbidden": "实验没有放行这个点位",
 }
 
 

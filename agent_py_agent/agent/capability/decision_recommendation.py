@@ -10,6 +10,12 @@ from ..backends.decision_protocol import DecisionBinding
 from ..common.cancellation import ToolCancelled, raise_if_cancelled
 from ..concurrency.interrupt import is_interrupted
 from ..conversation.decision_policy import connection_revision
+from ..conversation.decision_reach_counts import (
+    CALLED,
+    counted_material,
+    note_decision_reach,
+    stage_miss_reason,
+)
 from ..conversation.decision_service import (
     _stale,
     begin_decision_stage,
@@ -77,6 +83,8 @@ class CapabilityPresentation:
 # LLM: 新建议仍受原总期限和采用门约束；已采用纯值只读复核，宿主标记本片已评估后不重发决策，取消继续抛出。
 #   真的发起过决策的每个返回点都附结构化 observation（采用或保留原因），供宿主落盘观察；未发起决策时为 None。
 # 普通模式为 off 且普通阶段提示可能有实验时才进入只观察实验，实验结果永不改变本片展示。
+#   到达计数（decision_reach_counts）：只有新评估（未携带选择、本片未评估过）算一次到达，恢复与已评估不算；
+#   没调用记原因码（经 _skip），普通或实验路径真正调用前记 called，一次到达最多一个 called。
 # 函数用途: 为原工作片取得或复用展示建议；关闭、失效携带和普通失败都保持当前原始输入。
 def recommend_capabilities(agent, params, snapshot, contract) -> CapabilityPresentation:
     original = CapabilityPresentation(snapshot)
@@ -86,27 +94,28 @@ def recommend_capabilities(agent, params, snapshot, contract) -> CapabilityPrese
         if carried is None and getattr(params, "capability_presentation_evaluated", False):
             _check_cancelled()
             return original
-        if (not getattr(agent.config, "enable_tools", True)
-                or getattr(params, "context_scope", "default") in {"isolated", "control_plane"}):
-            return original
         operation = getattr(params, "request_id", "") or getattr(params, "run_id", "")
-        if not operation:
-            return original
+        reason = _context_miss_reason(agent, params, operation)
+        if reason:
+            return _skip(original, agent, carried, reason)
         stage = begin_decision_stage(agent, params, operation_id="skill_tool:" + candidate_digest(operation))
         if stage.error_code or "skill_tool" not in stage.enabled_points:
-            return _experiment_observe(agent, params, snapshot, contract=contract) if _experiment_eligible(stage, carried) else original
+            return (_experiment_observe(agent, params, snapshot, contract=contract) if _experiment_eligible(stage, carried)
+                    else _skip(original, agent, carried, stage_miss_reason(stage, "skill_tool")))
         if carried is not None:
             return _restore_presentation(agent, params, snapshot, contract, stage, carried)
         policy = _policy(agent, stage.thread_id)
         skills = agent.current_skill_snapshot()
         discoverable = _skill_discoverable(agent, params, snapshot)
-        state, questions, revision = _material(agent, params, snapshot, skills, policy, discoverable)
+        state, questions, revision = counted_material(
+            agent, "skill_tool", lambda: _material(agent, params, snapshot, skills, policy, discoverable))
         if not questions:
-            return original
+            return _skip(original, agent, carried, "nothing_to_recommend")
         presentation_revision = _presentation_revision(agent, params, snapshot, contract, skills, policy)
         backend = agent.backend
         # 候选说明在各自独立题中只发一次，宿主state副本保留列表仅供版本和结果映射。
         wire_state = {key: value for key, value in state.items() if key != "candidates"}
+        note_decision_reach(agent, "skill_tool", CALLED)
         outcome = decide(agent, params, stage, point="skill_tool", state=wire_state, questions=questions,
                          candidates_revision=revision)
         base = _observation_base(stage, outcome, revision, len(questions))
@@ -124,12 +133,7 @@ def recommend_capabilities(agent, params, snapshot, contract) -> CapabilityPrese
                 or outcome.response.binding.candidates_revision != revision):
             return _observed(replace(fallback, finding="skill_tool_decision:stale"), base, "stale")
         projected = _project(params, snapshot, contract, fresh, selected, policy, discoverable)
-        selection = CapabilityPresentationSelection(
-            outcome.response.binding, outcome.connection_revision,
-            presentation_revision,
-            _presentation_turn_id(params), projected.selected_skill_ids, projected.required_skill_ids,
-            projected.tool_snapshot.presentation_deferred_names, projected.tool_snapshot.presentation_shortlist_names,
-        )
+        selection = _selection(outcome, presentation_revision, _presentation_turn_id(params), projected)
         _check_cancelled()
         if not decision_outcome_is_current(agent, params, stage, outcome) or time.monotonic() >= stage.deadline:
             return _observed(replace(fallback, finding="skill_tool_decision:stale"), base, "stale")
@@ -139,6 +143,35 @@ def recommend_capabilities(agent, params, snapshot, contract) -> CapabilityPrese
     except Exception:
         failed = replace(original, finding="skill_tool_decision:enhancement_failed")
         return _observed(failed, base, "enhancement_failed") if base is not None else failed
+
+
+# LLM: 只看宿主结构化事实：工具总开关、上下文范围和本次请求/运行编号；与原先的整体判断一一对应，不改变是否评估。
+# 函数用途: 判断这次能不能做工具与 Skill 推荐，不能时返回原因码。
+def _context_miss_reason(agent, params, operation: str) -> str:
+    if not getattr(agent.config, "enable_tools", True):
+        return "tools_disabled"
+    if getattr(params, "context_scope", "default") in {"isolated", "control_plane"}:
+        return "isolated_scope"
+    return "" if operation else "no_run_context"
+
+
+# LLM: 只有新评估（没有携带选择）才算一次到达并记原因码；携带选择的恢复不算到达。返回原展示，方便在返回点直接调用。
+# 函数用途: 记下这次没调用决策模型的原因（诊断计数副作用），再交回原展示。
+def _skip(original: CapabilityPresentation, agent, carried, reason: str) -> CapabilityPresentation:
+    if carried is None:
+        note_decision_reach(agent, "skill_tool", reason)
+    return original
+
+
+# LLM: 纯构造：只收已通过全部复核的原绑定、连接版本、展示版本、宿主回合编号与投影结果，不含响应正文或期限。
+# 函数用途: 生成同片可复用的已采用展示纯值。
+def _selection(outcome, presentation_revision: str, turn_id: str, projected) -> CapabilityPresentationSelection:
+    return CapabilityPresentationSelection(
+        outcome.response.binding, outcome.connection_revision,
+        presentation_revision,
+        turn_id, projected.selected_skill_ids, projected.required_skill_ids,
+        projected.tool_snapshot.presentation_deferred_names, projected.tool_snapshot.presentation_shortlist_names,
+    )
 
 
 # LLM: 观测只取宿主结构化事实：决策 outcome 的 mode/status/reason 码、阶段操作编号、候选版本摘要与题数；不含题目或回答正文。
@@ -174,6 +207,7 @@ def _experiment_eligible(stage, carried) -> bool:
 
 
 # LLM: 只在普通模式 off 时由宿主已授权的实验阶段调用；材料与普通路径同源，结果固定 observe，原快照原样返回。
+#   这是一次新评估的到达：实验阶段拒绝记阶段码或 experiment_forbidden，没有题记 nothing_to_recommend，调用前记 called。
 #   真正发起过实验决策时与普通路径一样附结构化 observation（不采用，保留原因即结果码），供宿主落盘核对；
 #   若调用进入过原账预留（outcome.experiment 有值），observation 另带 experiment_record（E2 对照记录），宿主拆出后写入请求记录。
 # 函数用途: 执行一次有预算的只观察实验，把结构化结果写入 finding，不改变模型可见的 prompt 或工具 schema。
@@ -182,14 +216,18 @@ def _experiment_observe(agent, params, snapshot, *, contract) -> CapabilityPrese
     operation = getattr(params, "request_id", "") or getattr(params, "run_id", "")
     stage = begin_decision_stage(agent, params, operation_id="skill_tool:" + candidate_digest(operation), experiment=True)
     if stage.error_code or "skill_tool" not in stage.enabled_points:
+        note_decision_reach(agent, "skill_tool", stage.error_code or "experiment_forbidden")
         return replace(original, finding="skill_tool_decision:experiment:" + (stage.error_code or "experiment_point_forbidden"))
     policy = _policy(agent, stage.thread_id)
     discoverable = _skill_discoverable(agent, params, snapshot)
     skills = agent.current_skill_snapshot()
-    state, questions, revision = _material(agent, params, snapshot, skills, policy, discoverable)
+    state, questions, revision = counted_material(
+        agent, "skill_tool", lambda: _material(agent, params, snapshot, skills, policy, discoverable))
     if not questions:
+        note_decision_reach(agent, "skill_tool", "nothing_to_recommend")
         return original
     wire_state = {key: value for key, value in state.items() if key != "candidates"}
+    note_decision_reach(agent, "skill_tool", CALLED)
     outcome = decide(agent, params, stage, point="skill_tool", state=wire_state, questions=questions,
                      candidates_revision=revision)
     code = outcome.reason or outcome.status
