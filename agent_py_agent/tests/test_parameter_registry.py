@@ -12,10 +12,22 @@ import pytest
 from agent_py_agent.agent.settings.config import AgentConfig
 from agent_py_agent.agent.settings.parameter_registry import (
     SAFETY_BOUNDARY,
+    applied_value,
     parameter_registry,
     search_parameters,
 )
 from agent_py_agent.agent.settings.user_config_capability import BOUNDARY_KEYS, TUNABLE_KEYS
+
+
+def test_applied_value_uses_the_single_output_cap_formula():
+    """64K 在 128K 窗口模型上实际是 32768；窗口未知时等于配置值；没有派生规则的参数不给实际使用值。"""
+    from types import SimpleNamespace
+
+    value, rule = applied_value("max_tokens", SimpleNamespace(max_tokens=65536, model_context_window_tokens=131072))
+    assert value == 32768 and "窗口" in rule
+    assert applied_value("max_tokens", SimpleNamespace(max_tokens=65536, model_context_window_tokens=0))[0] == 65536
+    assert applied_value("request_timeout", SimpleNamespace(request_timeout=300)) is None
+    assert applied_value("max_tokens", None) is None
 
 
 def test_registry_covers_every_config_field_with_yaml_descriptions():

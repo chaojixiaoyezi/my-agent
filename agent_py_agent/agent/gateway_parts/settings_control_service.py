@@ -17,7 +17,12 @@ from ..settings.parameter_changes import (
     revert_change,
     set_parameter,
 )
-from ..settings.parameter_registry import ParameterSpec, parameter_registry, search_parameters
+from ..settings.parameter_registry import (
+    ParameterSpec,
+    applied_value,
+    parameter_registry,
+    search_parameters,
+)
 from ..settings.user_config_capability import (
     BOUNDARY_KEYS,
     effect_text,
@@ -129,7 +134,9 @@ def _search(config: object, argument: str) -> str:
     return "\n".join(lines)
 
 
-# 函数用途: /settings show <参数名> —— 说明、默认值、当前运行值、用户配置里的值与能否修改。
+# LLM: config 是 Gateway 启动配置，所以登记了派生规则的参数（如 max_tokens）按默认模型算实际使用值，并注明
+#   /model 切换过的会话可能不同；派生公式只在参数中心 applied_value 背后的原权威位置。只读。
+# 函数用途: /settings show <参数名> —— 说明、默认值、当前运行值、实际使用值（有派生规则时）、用户配置里的值与能否修改。
 def _show(config: object, argument: str) -> str:
     spec = parameter_registry().get(argument)
     if spec is None:
@@ -139,11 +146,15 @@ def _show(config: object, argument: str) -> str:
     override = _value(spec, stored[spec.key]) if spec.key in stored else "未覆盖（用默认值）"
     writable = (f"可以修改，{effect_text(spec.effect)}" if spec.writable
                 else f"不能在这里修改：{BOUNDARY_KEYS.get(spec.key, _BOUNDARY_TEXT)}")
+    applied = applied_value(spec.key, config)
+    applied_line = ([f"实际使用值：{applied[0]}（{applied[1]}；按默认模型计算，用 /model 切换过的会话可能不同）"]
+                    if applied is not None else [])
     return "\n".join([
         f"{spec.key}（{spec.category}，{spec.value_type}）",
         f"说明：{spec.description or '（没有说明）'}",
         f"默认值：{_value(spec, spec.default)}；当前运行值：{_value(spec, getattr(config, spec.key, spec.default))}；"
         f"用户配置里：{override}",
+        *applied_line,
         f"能否修改：{writable}",
     ])
 

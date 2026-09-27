@@ -16,7 +16,7 @@ from ..settings.parameter_changes import (
     revert_change,
     set_parameter,
 )
-from ..settings.parameter_registry import parameter_registry, search_parameters
+from ..settings.parameter_registry import applied_value, parameter_registry, search_parameters
 from ..settings.user_config_capability import (
     capability_summary,
     mask_value,
@@ -400,7 +400,8 @@ def _parameter_action(agent: object, params: dict) -> dict[str, object]:
     return set_parameter(key, params.get("value"), user_path=user_path, origin=origin)
 
 
-# LLM: 值一律经 mask_value 脱敏；brief 用于搜索列表，说明截到 160 字。只读。
+# LLM: 值一律经 mask_value 脱敏；brief 用于搜索列表，说明截到 160 字。登记了派生规则的参数另给 applied_value/applied_rule
+#   （按传入 config 即本片会话模型计算，等于后端实际发送值的同一公式）。只读。
 # 函数用途: 把一条参数登记信息投影成给模型看的结构化事实。
 def _spec_view(spec: object, config: object, *, brief: bool = False) -> dict[str, object]:
     description = str(spec.description)
@@ -412,6 +413,9 @@ def _spec_view(spec: object, config: object, *, brief: bool = False) -> dict[str
     }
     if not brief:
         view.update({"safety": spec.safety, "effect_when": spec.effect})
+    applied = applied_value(spec.key, config)
+    if applied is not None:
+        view["applied_value"], view["applied_rule"] = applied
     return view
 
 

@@ -160,6 +160,8 @@ def mask_value(key: str, value: object) -> str:
 
 # LLM: 生效值＝用户配置文件里的值优先；没写才回落到随包默认 YAML。报告必须同时给出两者与来源，
 #   否则模型会把随包默认当成"用户配置"（真机：模型去读安装目录里的 agent_config.yaml 当答案）。
+#   能不能改只由参数中心登记表的 writable 回答；这里不再给旧白名单的 tunable 字段（09-27 模型见 writable=true、
+#   tunable=false 两个口径，误以为 max_tokens 改不了）。
 # 函数用途: 读取某个键的用户值与随包默认值，并给出当前生效值与来源。
 def read_config_fact(
     key: str, *, user_path: Path | None, default_path: Path
@@ -185,7 +187,6 @@ def read_config_fact(
         "user_config_path": str(user_path) if user_path is not None else "",
         "user_value": mask_value(name, user_value) if user_value is not None else None,
         "packaged_default": mask_value(name, default_value) if default_value is not None else None,
-        "tunable": name in TUNABLE_KEYS,
         "boundary_reason": BOUNDARY_KEYS.get(name, ""),
     }
 

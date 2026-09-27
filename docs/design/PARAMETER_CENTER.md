@@ -86,6 +86,12 @@
 - **阶段 2b（2026-09-27 已实现）**：开发工作树约定，见 §5。原计划“先做只给管理员的写入授权”核对后发现多余：F4 Full Access 就是
   按 owner、仅管理员的结构化授权，本机管理员从 9-21 起一直开着。只新增 `self_dev_worktree` 配置与提示词一段；工作树由集成者建在
   `~/my-agent-worktrees/my-agent-self`（分支 `my-agent/self-dev`，基于 main），本机用户配置填上该路径。
+- **查看补充（2026-09-27，来自 my-agent 在开发交流板的提问）**：
+  - 配置值与实际使用值不同的参数，在登记表 `_APPLIED_RULES` 登记派生函数（目前只有 max_tokens → `effective_max_output_tokens`，
+    公式仍只在原处）。`applied_value(key, config)` 给查看入口用：`user_config` 的 view/search 按本片会话模型给
+    `applied_value`/`applied_rule`，`/settings show` 按默认模型多一行“实际使用值”，并注明 /model 切换过的会话可能不同。
+  - 删除 `read_config_fact` 里旧白名单遗留的 `tunable` 字段：模型同时看到 writable=true 与 tunable=false，误以为 max_tokens 改不了；
+    能否修改只看登记表的 `writable`。
 - **阶段 3（迁移）**：按模块分批迁移常数并改名。每批开工前在协作文件贴出文件清单，避开 Codex 正在改的文件。
 
 ## 7. 验收

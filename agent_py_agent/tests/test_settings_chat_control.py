@@ -106,6 +106,17 @@ def test_admin_can_find_change_review_and_revert(monkeypatch, user_config):
     assert reverted.ok and "max_tokens:" not in user_config.read_text(encoding="utf-8")
 
 
+def test_show_reports_the_applied_output_cap_for_the_default_model(monkeypatch, user_config):
+    monkeypatch.setattr(module, "_scoped_home", lambda _agent, _scope: _ADMIN)
+    agent = SimpleNamespace(config=SimpleNamespace(
+        config_path=str(user_config), max_tokens=65536, model_context_window_tokens=131072, request_timeout=300))
+    shown = module.execute_settings_control(agent, _settings("/settings show max_tokens"), None)
+    assert shown.ok and "当前运行值：65536" in shown.message and "实际使用值：32768" in shown.message
+    assert "/model" in shown.message
+    plain = module.execute_settings_control(agent, _settings("/settings show request_timeout"), None)
+    assert plain.ok and "实际使用值" not in plain.message
+
+
 def test_boundary_and_unexpected_failures_are_reported_honestly(monkeypatch, user_config):
     boundary = _run(monkeypatch, user_config, "/settings set api_base http://evil.example")
     assert boundary.ok is False and "安全边界" in boundary.message

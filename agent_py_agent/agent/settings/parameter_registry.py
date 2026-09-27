@@ -2,14 +2,17 @@
 #   说明只取随包 agent_config.yaml 里该键正上方的连续注释，不在代码里再写一份；安全等级按显式名单与键名记号结构化判定，
 #   user_config_capability.TUNABLE_KEYS 可显式放行（如飞书凭据），BOUNDARY_KEYS 永远拒绝。分类只用于展示，未知前缀归“其它”，
 #   不参与任何放行判断。只读，不写文件、不调模型。改动须同步 parameter_changes.py、tooling/user_config_tool.py、
-#   gateway_parts/settings_control_service.py 与 test_parameter_registry.py。
-# 模块用途: 回答“有哪些参数、各是什么意思、谁能改、改了什么时候生效”，是参数中心的唯一登记来源。
+#   gateway_parts/settings_control_service.py 与 test_parameter_registry.py。运行时还会按规则派生的参数（配置值不等于
+#   实际使用值，如 max_tokens 按窗口夹取）在 _APPLIED_RULES 登记派生函数，公式本身仍只在原权威位置。
+# 模块用途: 回答“有哪些参数、各是什么意思、谁能改、改了什么时候生效、实际用的是多少”，是参数中心的唯一登记来源。
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import MISSING, dataclass, fields
 from functools import lru_cache
 
 from .config import AgentConfig
+from .defaults import effective_max_output_tokens
 from .user_config_capability import (
     BOUNDARY_KEYS,
     EFFECT_GATEWAY_RESTART,
@@ -145,10 +148,31 @@ def search_parameters(query: str, *, limit: int = 20) -> list[ParameterSpec]:
     return found[:limit] if limit else found
 
 
+# 运行时按规则派生的参数：登记“由配置算出实际使用值”的唯一函数与一句中文规则；公式不在这里另写。
+_APPLIED_RULES: dict[str, tuple[Callable[[object], object], str]] = {
+    "max_tokens": (effective_max_output_tokens, "按模型上下文窗口夹取：不超过窗口 ÷ 4，窗口未知时等于配置值"),
+}
+
+
+# LLM: 只对 _APPLIED_RULES 登记的参数返回 (实际使用值, 规则说明)，其余返回 None；config 决定按哪个模型的窗口算
+#   （user_config 工具传本片会话模型的配置，/settings 传 Gateway 启动配置即默认模型）。只读；派生失败返回 None，不猜值。
+# 函数用途: 给查看入口一个“配置值之外实际使用的值”，例如 64K 的 max_tokens 在 128K 窗口模型上实际是 32768。
+def applied_value(key: str, config: object) -> tuple[object, str] | None:
+    rule = _APPLIED_RULES.get(key)
+    if rule is None or config is None:
+        return None
+    reader, text = rule
+    try:
+        return reader(config), text
+    except (TypeError, ValueError):
+        return None
+
+
 __all__ = [
     "SAFETY_BOUNDARY",
     "SAFETY_FREE",
     "ParameterSpec",
+    "applied_value",
     "category_for",
     "classify_safety",
     "is_masked",

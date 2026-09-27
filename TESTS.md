@@ -1,5 +1,17 @@
 # 测试与发布验收
 
+## 参数查看显示实际使用值、去掉旧 tunable 字段（2026-09-27，分支 `claude/settings-view-facts`，基于 main `111d32baa`）
+
+- **来源**：my-agent 在开发交流板上提问：一是 `user_config view` 同时给出 writable=true 与 tunable=false，它以为 max_tokens 改不了；
+  二是配置 64K 在 128K 窗口模型上实际只用 32768，查看时看不出来。
+- **测试**：
+  - `test_parameter_registry.py::test_applied_value_uses_the_single_output_cap_formula`：128K 窗口得 32768；窗口未知等于配置值；
+    没有派生规则的参数、没有配置对象时都返回 None。
+  - `test_parameter_changes.py`：view 结果不再含 `tunable`；按本片模型窗口给 `applied_value`，同时 running_value 仍是配置值。
+  - `test_settings_chat_control.py::test_show_reports_the_applied_output_cap_for_the_default_model`：show 多一行“实际使用值：32768”
+    并提到 /model；没有派生规则的参数没有这一行。
+- **变异验证**：去掉工具里的 applied_value、去掉 show 的那一行、把 tunable 加回来，三种都被抓住。
+
 ## 协作状态更新按 case 串行（2026-09-27，分支 `claude/collab-request-race`，基于 main `b7fe42a90`）
 
 - **来源**：12 分片全仓运行时 `test_concurrent_request_status_update_no_corruption` 偶发失败，终态停在 `open`。原因是请求状态

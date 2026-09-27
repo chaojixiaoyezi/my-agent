@@ -1,5 +1,9 @@
 # Gateway 维护状态
 
+`/settings show` 显示实际使用值（分支 `claude/settings-view-facts`，2026-09-27）：配置值会在运行时按规则派生的参数（目前只有
+max_tokens，按模型窗口 ÷ 4 夹取）多一行“实际使用值”，按 Gateway 启动配置即默认模型计算，并注明 /model 切换过的会话可能不同；
+派生函数来自参数中心 `parameter_registry.applied_value`。测试见 `test_settings_chat_control.py`。
+
 聊天 `/settings`（参数中心阶段 2，分支 `claude/param-center-phase2`，2026-09-27）：用户希望 my-agent 与自己都能改更多参数、
 改错能回滚，且用户几乎不用命令行。`control_service` 新增 `settings` 分派（在 steer/stop 默认路径之前），交给
 `settings_control_service.execute_settings_control`：只有管理员可用；查找、查看、修改、恢复默认、修改记录与回滚都走参数中心，
