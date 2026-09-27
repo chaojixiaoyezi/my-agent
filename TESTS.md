@@ -1,5 +1,10 @@
 # 测试与发布验收
 
+## A0.2.2作者修订方法候选（2026-09-27）
+
+只改A包已有方法/声明，原checker、分表和模板未变。选择已有A专用`test_samples_build_reproducibly_and_expose_only_one_package[drama-text-a]`，1 passed；两次真实builder CLI输出同字节，34881字节，SHA256 `fc053c1227727f47a7d7e511c61ba524e04de18d0c67ff91a824572bd91b1ca7`。14资源、入口2633字符，冻结源码无漂移。未运行其他样包或重跑未改脚本，原65项和343项不算本轮新通过数。
+独立方法窄审无确认阻断，仍需真实任务验证效果；本地严格gate已通过（Ruff、doc-sync、strict code-size、diff、clean-package），线上CI未作为验收来源。详细证据见[验收记录](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#a022作者修订方法候选2026-09-27)，旧失败和保留集0/36保持。
+
 ## c71回执修复与A0.2.1独立方法复验（2026-09-27）
 
 本片本地严格gate已通过：343项定向测试、Ruff、doc-sync、strict code-size、工作区/暂存区diff和clean-package；线上CI未作为验收来源。doc-sync首次指出Gateway结构文档未同步，补明结构化读/写失败回执的责任后复查通过；未改变生产字节或重跑业务。旧尺寸报告仅生成时间变化，已保留原时间，不提交无意义报告差异。
