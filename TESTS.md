@@ -3,7 +3,7 @@
 ## A0.2.2作者修订方法候选（2026-09-27）
 
 只改A包已有方法/声明，原checker、分表和模板未变。选择已有A专用`test_samples_build_reproducibly_and_expose_only_one_package[drama-text-a]`，1 passed；两次真实builder CLI输出同字节，34881字节，SHA256 `fc053c1227727f47a7d7e511c61ba524e04de18d0c67ff91a824572bd91b1ca7`。14资源、入口2633字符，冻结源码无漂移。未运行其他样包或重跑未改脚本，原65项和343项不算本轮新通过数。
-独立方法窄审无确认阻断，仍需真实任务验证效果；本地严格gate已通过（Ruff、doc-sync、strict code-size、diff、clean-package），线上CI未作为验收来源。详细证据见[验收记录](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#a022作者修订方法候选2026-09-27)，旧失败和保留集0/36保持。
+独立方法窄审无确认阻断；本地严格gate已通过（Ruff、doc-sync、strict code-size、diff、clean-package），线上CI未作为验收来源。随后原938 Gateway的停用/更新/启用均成功；新原生A02只发一次原普通需求，最终6镜/1场/60秒结构通过，业务语义失败。模型取得完整workflow，修引用、完整回读当前稿后仍遗漏场次说明和人物动作矛盾；三分表未get，checker使用旧轮同字节副本，不算本轮source_ref物化通过。终态后4048个保护文件中4047字节不变，唯一变化为`runs/.DS_Store`目录元数据；旧业务产物/canonical记录与六份配置保持。详细证据见[本轮验收](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#a022原生开发复验2026-09-27)，旧失败和保留集0/36保持。
 
 ## c71回执修复与A0.2.1独立方法复验（2026-09-27）
 
