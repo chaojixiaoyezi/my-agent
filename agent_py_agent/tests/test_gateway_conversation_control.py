@@ -4538,6 +4538,9 @@ def test_input_queue_refuses_orphan_projection_without_canonical(tmp_path) -> No
 def test_manual_compact_reports_typed_failure_instead_of_generic_retry(tmp_path) -> None:
     class SummaryBackend:
         name = "summary-test"
+        # 显式声明一个没按窗口夹取的发送上限：后端上的 max_tokens 就是实际发送值，compact 预算原样使用它。
+        # 原来靠“替身没有 max_tokens 时回退到未夹取的配置值”造出这个形态，回退现已按窗口夹取。
+        max_tokens = 16_314
 
         def probe_tool_capability(self):
             return _native_test_capability(self.name, "local://manual-compact-typed-failure")

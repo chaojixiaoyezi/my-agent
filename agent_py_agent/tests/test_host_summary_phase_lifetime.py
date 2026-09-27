@@ -13,6 +13,7 @@ from agent_py_agent.agent.conversation import background_execution, compact, com
 from agent_py_agent.agent.conversation.compact_checkpoint import committed_compact_checkpoint_chain
 from agent_py_agent.agent.gateway_parts import request_execution
 from agent_py_agent.agent.model_request_selection import _HOST
+from agent_py_agent.agent.settings.defaults import effective_max_output_tokens
 from agent_py_agent.tests.test_background_compact_recovery import _background
 from agent_py_agent.tests.test_gateway_model_adoption import actual_request
 from agent_py_agent.tests.test_subagent_compact_recovery import _child
@@ -113,6 +114,8 @@ def _run_host(tmp_path, monkeypatch, host: str):
     agent.backend.context_window_tokens = 40_000
     agent.config.memory_compact_auto_trigger_percent = 50
     agent.config.max_tokens = 1024
+    # 构造后才缩窗口与输出上限：按同一公式重算后端的实际发送值，与生产中按该配置构造的后端一致。
+    agent.backend.max_tokens = effective_max_output_tokens(agent.config)
     ids = _seed_history(agent.conversation_store, thread_id)
     facts = _instrument(monkeypatch, host)
     gc.collect()

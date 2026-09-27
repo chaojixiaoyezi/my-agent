@@ -21,6 +21,7 @@ from ...contracts.model_call_ledger import (
 from ...conversation.context_usage import record_model_context_usage
 from ...conversation.model_metrics import publish_model_metrics
 from ...memory_archive import estimate_tokens
+from ...settings.defaults import output_cap_for_window
 from ..tool_stream import ToolBoundaryChunkFilter
 from .call_monitor import (
     FirstTokenTimeoutOptions,
@@ -458,14 +459,22 @@ def model_name(agent: object) -> str:
     return str(getattr(backend, "model_name", "") or getattr(config, "model_name", "") or getattr(config, "model", "") or "")
 
 
+# LLM: 与实际发送一致：后端上的 max_tokens 就是发送值（工厂已按窗口夹取），原样使用；没有这个属性的后端（测试替身、echo）
+#   按同一公式用当前窗口夹取配置值。未配置（0 或无法解析）时返回 0 表示没有估算，调用方据此跳过；compact 预算用
+#   “窗口×0.8−本值”，所以回退时不能返回未夹取的配置原值。
+# 函数用途: 返回本次模型调用的输出 token 上限，供 compact 预算与超时估算共用。
 def max_output_tokens(agent: object) -> int:
-    raw = getattr(getattr(agent, "backend", None), "max_tokens", None)
-    if raw is None:
-        raw = getattr(getattr(agent, "config", None), "max_tokens", 0)
+    backend = getattr(agent, "backend", None)
+    config = getattr(agent, "config", None)
+    raw = getattr(backend, "max_tokens", None)
     try:
-        return max(0, int(raw))
+        if raw is not None:
+            return max(0, int(raw))
+        configured = max(0, int(getattr(config, "max_tokens", 0) or 0))
+        window = int(getattr(backend, "context_window_tokens", 0) or getattr(config, "model_context_window_tokens", 0) or 0)
     except (TypeError, ValueError):
         return 0
+    return output_cap_for_window(configured, window) if configured else 0
 
 
 # LLM: Non-stream total budgeting may estimate full output time; stream liveness must not use this as a hidden wall clock.

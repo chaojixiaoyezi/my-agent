@@ -12,16 +12,20 @@ DEFAULT_MODEL_MAX_TOKENS = 65_536
 MODEL_OUTPUT_WINDOW_DIVISOR = 4
 
 
-# LLM: 输出上限夹取的唯一权威位置：窗口已明确（model_context_window_explicit 且窗口为正）时取
-#   min(max_tokens, 窗口 // MODEL_OUTPUT_WINDOW_DIVISOR)，否则按配置原值。后端工厂用它决定实际发送的上限，
-#   context_pressure 的输出预留读的也是后端上的这个值；不要在模型档案或别处再夹一次。
-# 函数用途: 算出一次模型请求实际使用的输出 token 上限（不改配置本身）。
+# LLM: 输出上限的唯一公式：已知窗口（>0，来自模型档案或配置里的 model_context_window_tokens，是否显式都算）时取
+#   min(配置值, 窗口 // MODEL_OUTPUT_WINDOW_DIVISOR)，窗口未知时按配置值。后端工厂构造时用它算出 backend.max_tokens，
+#   它就是实际发送值，请求体与输出预留直接读它，不在后端里再夹一次；没有 max_tokens 的后端由 call_runtime.max_output_tokens
+#   按同一公式估算。原来只夹显式窗口，64K 默认值让“窗口×0.8−输出上限”的 compact 预算在 8 万以下窗口变成 1。
+# 函数用途: 按给定窗口算出实际使用的输出 token 上限（配置值为 0 时按默认值）。
+def output_cap_for_window(configured: object, window: object) -> int:
+    cap = int(configured or 0) or DEFAULT_MODEL_MAX_TOKENS
+    size = int(window or 0)
+    return max(1, min(cap, size // MODEL_OUTPUT_WINDOW_DIVISOR)) if size > 0 else cap
+
+
+# 函数用途: 按配置里的窗口算出输出上限（不改配置本身）。
 def effective_max_output_tokens(config: Any) -> int:
-    configured = int(getattr(config, "max_tokens", DEFAULT_MODEL_MAX_TOKENS) or DEFAULT_MODEL_MAX_TOKENS)
-    window = int(getattr(config, "model_context_window_tokens", 0) or 0)
-    if not getattr(config, "model_context_window_explicit", False) or window <= 0:
-        return configured
-    return max(1, min(configured, window // MODEL_OUTPUT_WINDOW_DIVISOR))
+    return output_cap_for_window(getattr(config, "max_tokens", 0), getattr(config, "model_context_window_tokens", 0))
 
 
 @lru_cache(maxsize=1)
@@ -55,6 +59,7 @@ __all__ = [
     "DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS",
     "MODEL_OUTPUT_WINDOW_DIVISOR",
     "effective_max_output_tokens",
+    "output_cap_for_window",
     "default_agent_config",
     "default_config_bool",
     "default_config_float",

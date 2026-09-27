@@ -1,5 +1,19 @@
 # 测试与发布验收
 
+## 输出上限回归修正：按任意已知窗口夹取（2026-09-27，分支 `claude/output-cap-regression`，基于 main `ea0b539cb`）
+
+- **来源**：dsh-9b 的 CI 监视发现 9207d54e5 起 8 个 compact 用例稳定失败（test_compact_native_ir_recovery 5 个、test_subagent_compact_recovery 2 个、
+  test_subagent_runtime_compact 1 个）。原因：64K 默认值只夹显式窗口；没有 max_tokens 的替身估算回退到配置原值 65536；
+  `compact_request_budget` 用“窗口×0.8−输出上限”，8 万以下窗口时变成 1；两个夹具在构造后缩窗口却沿用大窗口的后端上限。
+- **修正**：`output_cap_for_window` 为唯一公式（已知窗口即夹取，不再要求显式）；工厂构造时用它算 `backend.max_tokens`（就是发送值）；
+  `call_runtime.max_output_tokens` 对没有 max_tokens 的后端按同一公式估算。三个构造后缩窗口的夹具（compact_native_ir_recovery、
+  subagent_compact_recovery、host_summary_phase_lifetime，后者在 main 上同样失败但不在 CI 清单里）按同一公式重算后端上限；
+  `test_manual_compact_reports_typed_failure_instead_of_generic_retry` 改为显式声明未夹取的替身上限（原来靠回退漏洞造出失败形态）。
+- **曾试过但放弃**：在后端每次发送时再按当前窗口夹取。全仓运行发现它打破“backend.max_tokens 就是发送值”的既有约定，
+  另有 9 个直接设置 backend.max_tokens 的预留/预算用例失败，于是改回构造时夹取。
+- **测试**：`test_model_output_cap.py` 14 项（任意已知窗口夹取、请求体等于后端上限、替身估算被夹取）；推送前按 12 个分片跑全仓 pytest
+  （约 2.1 万项；第一版只跑了 focused 测试，漏掉 compact 恢复与子代理预检），分片用短 basetemp（长路径会让 subagent_debug_trace 因文件名过长失败）。
+
 ## 参数中心阶段 2：登记表、唯一写入口、`/settings`（2026-09-27，分支 `claude/param-center-phase2`，基于 main `89af9bbd3`）
 
 - **新测试** `test_parameter_registry.py`：登记表覆盖全部字段、说明取自 YAML、安全相关键（凭据、端点、提示词、审计、工具开关、

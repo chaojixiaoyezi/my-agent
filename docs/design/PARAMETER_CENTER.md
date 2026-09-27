@@ -49,7 +49,10 @@
 
 - **阶段 0（已实现）**：
   - 输出上限统一 65536，常量、随包 YAML、`AgentConfig` 同值，由 `test_model_output_cap.py` 核对。
-  - 夹取规则只在 `settings.defaults.effective_max_output_tokens` 一处，后端工厂对默认模型与模型档案统一使用；窗口已明确时取 min(配置, 窗口 ÷ 4)，未明确时按配置原值。
+  - 夹取公式只在 `settings.defaults.output_cap_for_window` 一处：已知窗口（模型档案或配置写了窗口，是否显式都算）时取 min(配置, 窗口 ÷ 4)，未知时按配置值。
+    后端工厂构造时用它算出 `backend.max_tokens`，这就是实际发送值，请求体与输出预留直接读它；没有 max_tokens 的后端（测试替身、echo）
+    由 `call_runtime.max_output_tokens` 按同一公式估算。第一版（9207d54e5）只夹显式窗口，且替身估算回退到未夹取的 65536，
+    “窗口×0.8−输出上限”的 compact 预算在 8 万以下窗口变成 1，8 个 compact 用例回归（dsh-9b 的 CI 监视发现），已按上述规则修正。
   - 模型短测（`_probe`）改用正式上限，能发现供应商不接受该上限的情况。
   - 删除没有读取方的 `vision_*` 配置；用户配置残留时只告警。
   - 验证命令被管道、`;`、`||` 或后台掩盖返回码时，给出结构化“未计入”事实（见 `docs/modules/verification/02-progress.md`）。

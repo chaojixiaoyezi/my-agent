@@ -19,6 +19,7 @@ from agent_py_agent.agent.backends.errors import ProviderContextWindowError, Pro
 from agent_py_agent.agent.conversation import compact
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.agent.settings.defaults import effective_max_output_tokens
 
 
 # LLM: child、旧历史和 attempt 都由原 store/lifecycle 建立；只在 HTTP 层模拟供应商响应。
@@ -76,6 +77,8 @@ def test_child_first_request_auto_compact_uses_one_preparation_and_real_cas(tmp_
     agent.backend.context_window_tokens = 40_000
     agent.config.memory_compact_auto_trigger_percent = 50
     agent.config.max_tokens = 1024
+    # 构造后才缩窗口与输出上限：按同一公式重算后端的实际发送值，与生产中按该配置构造的后端一致。
+    agent.backend.max_tokens = effective_max_output_tokens(agent.config)
     for index in range(12):
         agent.conversation_store.messages.append({
             "thread_id": task.agent_thread_id, "role": "user" if index % 2 == 0 else "assistant",
