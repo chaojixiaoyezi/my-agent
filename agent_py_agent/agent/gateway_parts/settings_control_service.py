@@ -154,6 +154,25 @@ def _common_line(spec: ParameterSpec, config: object, stored: dict) -> str:
     return f"- {spec.key} = {_value(spec, running)}{marks}：{_brief(spec.description)}"
 
 
+# LLM: 未知/已删配置键只告警不生效，用户看不到就等于白配；这里把两个来源拼成给用户看的几行。只读，不解析消息文字。
+# 函数用途: 收集主配置与 capability 配置的告警，排成“配置告警 N 条”加逐条来源。
+def _config_warning_lines(config: object) -> list[str]:
+    entries: list[tuple[str, str]] = []
+    for source, holder, attr in (
+        ("agent 主配置", config, "config_warnings"),
+        ("capability 配置", getattr(config, "capability_config", None), "config_warnings"),
+    ):
+        for item in list(getattr(holder, attr, None) or []):
+            text = str(item).strip()
+            if text:
+                entries.append((source, text))
+    if not entries:
+        return []
+    return [f"配置告警 {len(entries)} 条（下面这些配置键没生效，只是被忽略了）："] + [
+        f"- [{source}] {text}" for source, text in entries
+    ]
+
+
 # LLM: 默认视图只列参数中心的常用层级（COMMON_KEYS），再用一句大白话说总数和怎么看全部；常用以外改过的只报个数，
 #   详情在 /settings all。只读。
 # 函数用途: /settings —— 列出常用参数与当前值，提示用 /settings all 看全部。
@@ -166,6 +185,7 @@ def _overview(config: object, _argument: str) -> str:
     others = [key for key in _changed_keys(registry, stored) if not registry[key].common]
     if others:
         lines.append(f"另外你还改过 {len(others)} 个其它参数，发 /settings all 查看。")
+    lines += _config_warning_lines(config)
     lines.append(f"一共 {len(registry)} 项参数，这里只列常用的 {len(common)} 项，其余一般不用动；看全部发 /settings all。")
     lines.append("找参数：/settings search <关键词>；看说明：/settings show <参数名>；"
                  "修改：/settings set <参数名> <值>，改完发 /restart 重启 Gateway 后生效。")
@@ -186,6 +206,7 @@ def _all(config: object, _argument: str) -> str:
     recent = parameter_history(user_path=path, limit=3)
     if recent:
         lines += ["最近修改："] + [_history_line(item) for item in recent]
+    lines += _config_warning_lines(config)
     lines += _category_lines(registry, config, changed)
     return "\n".join(lines + ["看说明发 /settings show <参数名>；只看常用参数发 /settings。"])
 

@@ -1,5 +1,21 @@
 # 测试与发布验收
 
+## `/settings` 总览显示配置告警（2026-09-27，dev 派活，my-agent 实现）
+
+- **来源**：参数减量后，已删/未知的配置键会被忽略并记进 `AgentConfig.config_warnings` 或
+  `CapabilityConfig.config_warnings`，但**两个都没有展示点**，用户看不到自己配置里哪些键没生效。
+- **做法**：`gateway_parts/settings_control_service.py` 新增 `_config_warning_lines(config)`，把两个来源的告警合并，
+  输出“配置告警 N 条（下面这些配置键没生效，只是被忽略了）：”加逐条 `- [来源] 告警`，来源写明是
+  `agent 主配置` 还是 `capability 配置`；`_overview`（`/settings`）与 `_all`（`/settings all`）各插一行，
+  **N 为 0 时不出现这一行**。只读字段，不解析消息文字；配置对象没有这些属性时照常出总览；
+  memory doctor 那几处只读 `memory_config_warnings` 的出口**未动**。
+- **新测试**（`tests/test_settings_config_warnings_display.py`，6 项）：两个来源的告警都出现且条数正确；
+  逐条能看出来源；0 条时不出这一行（`/settings` 和 `/settings all` 各一条）；`/settings all` 也显示；
+  老配置对象缺字段时不报错。
+- **复现**：`cd agent_py_agent && python3 -m pytest tests/test_settings_config_warnings_display.py -q`。
+- **变异**：把两处 `_config_warning_lines` 调用去掉（等同不展示），3 项“显示告警”用例失败，
+  3 项“0 条不显示”用例仍绿。
+
 ## capability 配置遇到已删键只告警不拒绝（2026-09-27，用户插队派活，my-agent 实现）
 
 - **来源**：Codex 在私有环境发现——owner 的 `capability_config.yaml` 里只要还写着 13u 已删的决策点位键
