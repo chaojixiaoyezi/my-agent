@@ -415,7 +415,6 @@ def test_preflight_native_counts_tool_schemas_before_first_tool_call(monkeypatch
         config=AgentConfig(
             auto_save_memory=True,
             enable_tools=True,
-            tool_protocol="native",
             model_name="native-test-model",
             memory_compact_auto_trigger_percent=90,
             model_context_window_tokens=1_000,
@@ -464,7 +463,6 @@ def test_live_context_snapshot_reuses_exact_total_and_exposes_no_content(monkeyp
         config=AgentConfig(
             auto_save_memory=True,
             enable_tools=True,
-            tool_protocol="native",
             memory_compact_auto_trigger_percent=90,
             model_context_window_tokens=128_000,
         ),

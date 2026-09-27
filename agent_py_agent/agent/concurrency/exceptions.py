@@ -13,14 +13,6 @@ class ConcurrencyConflictError(Exception):
         )
 
 
-class LockAcquisitionError(Exception):
-
-    def __init__(self, task_id: str, lock_type: str):
-        self.task_id = task_id
-        self.lock_type = lock_type
-        super().__init__(f"无法获取任务 {task_id} 的 {lock_type} 锁")
-
-
 class AuditLogError(Exception):
 
     pass
@@ -28,6 +20,5 @@ class AuditLogError(Exception):
 
 __all__ = [
     "ConcurrencyConflictError",
-    "LockAcquisitionError",
     "AuditLogError",
 ]

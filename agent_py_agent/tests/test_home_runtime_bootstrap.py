@@ -487,7 +487,6 @@ def test_prompt_builder_uses_only_recalled_memory_envelope(tmp_path: Path):
     cfg = AgentConfig(
         my_agent_home=str(home),
         prompt_files=[],
-        home_lesson_auto_read_limit=2,
     )
     agent = SimpleAgent(cfg, repo)
     agent.home_paths.owner_memory_md.write_text("记住：产物目录必须干净。\n", encoding="utf-8")

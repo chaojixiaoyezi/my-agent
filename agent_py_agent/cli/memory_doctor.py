@@ -83,8 +83,8 @@ def _build_archive_doctor(root: Path, config: object) -> dict[str, Any]:
     hook_today_path = snapshot_path_for(root)
     raw_today_path = raw_event_path_for(root)
     return {
+        # 参数减量第 1 批（2026-09-27）：memory_hook_retention_days 没有清理器读取，已从配置删除，不再回显。
         "retention": {
-            "memory_hook_retention_days": int(getattr(config, "memory_hook_retention_days", 7)),
             "memory_hook_enabled": bool(getattr(config, "memory_hook_enabled", True)),
             "memory_hook_archive_level": int(getattr(config, "memory_hook_archive_level", 3)),
             "memory_archive_level": int(getattr(config, "memory_archive_level", 3)),
@@ -128,17 +128,17 @@ def _archive_file_payload(path: Path) -> dict[str, Any]:
     }
 
 
+# LLM: 只回显 AgentConfig 上真实存在的 Memory 字段；字段名单与 settings/_memory_types.MemorySettings 同步删减。
+# 函数用途: 把 doctor 展示的记忆配置生效值收成一个字典。
 def _memory_config_payload(config: object) -> dict[str, Any]:
 
     fields = [
         "memory_archive_level",
         "memory_hook_enabled",
         "memory_hook_archive_level",
-        "memory_hook_retention_days",
         "memory_rule_routing_enabled",
         "memory_rule_routing_mode",
         "memory_rule_auto_read_limit",
-        "memory_rule_receipt_enabled",
     ]
     return {field: getattr(config, field) for field in fields}
 

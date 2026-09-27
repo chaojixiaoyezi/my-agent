@@ -174,8 +174,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ..settings.defaults import default_agent_config
-
 _MARKER_RE = re.compile(r"\[([A-Z][A-Z0-9_]+)\]")
 _REPORT_NAME_PARTS = ("report", "acceptance", "validation", "execution")
 _LOG_NAMES = {"stdout.txt", "stderr.txt", "events.jsonl"}
@@ -194,13 +192,16 @@ class ReviewScanLimits:
     max_log_bytes: int
 
 
-def review_scan_limits(config: object | None) -> ReviewScanLimits:
-    if config is None:
-        config = default_agent_config()
-    return ReviewScanLimits(
-        max_report_bytes=_config_int(config, "real_run_review_max_report_bytes"),
-        max_log_bytes=_config_int(config, "real_run_review_max_log_bytes"),
-    )
+# 参数减量第 1 批（2026-09-27）：real_run_review_max_report_bytes / real_run_review_max_log_bytes 只有离线复盘入口读取，
+# 已从 AgentConfig 删除，改为本模块常量；数值不变。0 表示不读取对应大文件。
+_REVIEW_MAX_REPORT_BYTES = 5_000_000
+_REVIEW_MAX_LOG_BYTES = 1_000_000
+
+
+# LLM: 复盘扫描上限只在本模块定义，不读 AgentConfig；调整数值只改上面两个常量。
+# 函数用途: 给出复盘时读取 report/log 文件的字节上限。
+def review_scan_limits() -> ReviewScanLimits:
+    return ReviewScanLimits(max_report_bytes=_REVIEW_MAX_REPORT_BYTES, max_log_bytes=_REVIEW_MAX_LOG_BYTES)
 
 
 def json_facts(root: Path, *, max_report_bytes: int) -> CollectedFacts:
@@ -342,13 +343,6 @@ def _ordered_unique(values: list[str] | tuple[str, ...]) -> tuple[str, ...]:
     return tuple(result)
 
 
-def _config_int(config: object, key: str) -> int:
-    try:
-        return max(0, int(getattr(config, key)))
-    except (TypeError, ValueError):
-        return 0
-
-
 def _rel(path: Path, root: Path) -> str:
     try:
         return str(path.resolve().relative_to(root.resolve()))
@@ -414,11 +408,10 @@ def review_real_run_tree(
     root: Path,
     *,
     run_glob: str = "*",
-    config: object | None = None,
 ) -> RealRunReview:
     run_dirs = tuple(path for path in sorted(Path(root).expanduser().glob(run_glob)) if path.is_dir())
     records = tuple(
-        review_real_run_directory(path, review_root=Path(root).expanduser(), config=config)
+        review_real_run_directory(path, review_root=Path(root).expanduser())
         for path in run_dirs
     )
     return RealRunReview(
@@ -432,11 +425,10 @@ def review_real_run_directory(
     run_dir: Path,
     *,
     review_root: Path | None = None,
-    config: object | None = None,
 ) -> RealRunRecord:
     root = Path(run_dir).expanduser()
     review_base = review_root or root.parent
-    limits = review_scan_limits(config)
+    limits = review_scan_limits()
     json_report_facts = json_facts(root, max_report_bytes=limits.max_report_bytes)
     marker_report_facts = marker_facts(root, max_log_bytes=limits.max_log_bytes)
     codes = _ordered_unique(json_report_facts.codes + marker_report_facts.codes)

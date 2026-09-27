@@ -48,7 +48,7 @@ def test_media_outside_transport_expansion_set_and_zero_reserve_do_not_count():
 def test_preflight_estimate_reads_configured_reserve_through_real_entry(monkeypatch):
     agent = SimpleNamespace(
         config=AgentConfig(
-            auto_save_memory=True, enable_tools=True, tool_protocol="native", model_name="native-test-model",
+            auto_save_memory=True, enable_tools=True, model_name="native-test-model",
             model_context_window_tokens=200_000, input_media_token_reserve=1600,
         ),
         backend=SimpleNamespace(context_window_tokens=200_000, name="anthropic_compatible"),

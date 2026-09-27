@@ -276,11 +276,9 @@ class TestConfigFields:
 memory_archive_level: 3
 memory_hook_enabled: true
 memory_hook_archive_level: 3
-memory_hook_retention_days: 7
 memory_rule_routing_enabled: true
 memory_rule_routing_mode: soft
 memory_rule_auto_read_limit: 3
-memory_rule_receipt_enabled: true
 """, encoding="utf-8")
 
         config = load_config(str(config_file))

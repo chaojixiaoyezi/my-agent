@@ -138,11 +138,9 @@ class TestCmdMemoryDoctor:
         mock_agent.config.memory_archive_level = 3
         mock_agent.config.memory_hook_enabled = True
         mock_agent.config.memory_hook_archive_level = 3
-        mock_agent.config.memory_hook_retention_days = 7
         mock_agent.config.memory_rule_routing_enabled = True
         mock_agent.config.memory_rule_routing_mode = "soft"
         mock_agent.config.memory_rule_auto_read_limit = 3
-        mock_agent.config.memory_rule_receipt_enabled = True
         mock_agent.config.memory_config_warnings = []
 
         with patch("agent_py_agent.cli.memory_commands.make_agent", return_value=mock_agent):
@@ -164,11 +162,9 @@ class TestCmdMemoryDoctor:
         mock_agent.config.memory_archive_level = 3
         mock_agent.config.memory_hook_enabled = True
         mock_agent.config.memory_hook_archive_level = 3
-        mock_agent.config.memory_hook_retention_days = 7
         mock_agent.config.memory_rule_routing_enabled = True
         mock_agent.config.memory_rule_routing_mode = "soft"
         mock_agent.config.memory_rule_auto_read_limit = 3
-        mock_agent.config.memory_rule_receipt_enabled = True
         mock_agent.config.memory_config_warnings = []
 
         with patch("agent_py_agent.cli.memory_commands.make_agent", return_value=mock_agent):

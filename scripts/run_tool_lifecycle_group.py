@@ -130,7 +130,6 @@ def _make_agent(
         workspace_root=str(workspace),
         my_agent_home=str(home),
         stream_enabled=not args.no_stream,
-        tool_protocol="native",
         enable_tools=True,
         enable_subagents=enable_subagents,
         auto_save_memory=False,

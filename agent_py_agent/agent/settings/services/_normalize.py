@@ -156,7 +156,6 @@ class ModelFieldsService:
                 ("model_context_window_tokens", 1, None),
             ),
         ))
-        warnings.extend(_apply_bool_fields(out, defaults, ("auto_bench_model_on_first_use",)))
         # 智能程度档位与控制方式取值与 backends/reasoning_control 一致；非法值告警并回默认。
         warnings.extend(_apply_choice_field(out, defaults, "model_reasoning_effort", REASONING_LEVELS))
         warnings.extend(_apply_choice_field(out, defaults, "model_reasoning_control", REASONING_CONTROLS))
@@ -179,7 +178,6 @@ class GatewayFieldsService:
         ("gateway_stale_seconds", 30, None),
         ("gateway_stop_timeout", 1, None),
         ("gateway_request_timeout", 1, None),
-        ("gateway_request_workers", 1, None),
         ("gateway_user_inflight_limit", 1, None),
         ("gateway_global_inflight_limit", 1, None),
         ("gateway_processing_timeout_seconds", 30, None),
@@ -223,18 +221,10 @@ class DaemonFieldsService:
 # Home layout (was _normalize_home_fields.py)
 # ---------------------------------------------------------------------------
 
+# 参数减量第 1 批（2026-09-27）：external_knowledge_* 与 home_lesson_auto_read_limit 没有读取方，已连同字段删除。
 _HOME_STRING_FIELDS = (
     "my_agent_home", "my_agent_owner_provider", "my_agent_owner_kind",
     "my_agent_owner_id", "workspace_task_path_template",
-    "external_knowledge_index_file_name",
-)
-_EXTERNAL_KNOWLEDGE_LIST_FIELDS = (
-    "external_knowledge_directory_roots",
-    "external_knowledge_api_sources",
-    "external_knowledge_database_sources",
-)
-_HOME_RUNTIME_INT_FIELDS = (
-    ("home_lesson_auto_read_limit", 0, 20),
 )
 _HOME_RUNTIME_BOOL_FIELDS = (
     "home_context_enabled", "run_task_workspace_enabled",
@@ -254,18 +244,11 @@ def _normalize_home_strings(out: dict[str, object], defaults: object) -> list[st
     return warnings
 
 
-def _normalize_external_knowledge_lists(out: dict[str, object], defaults: object) -> None:
-    for key in _EXTERNAL_KNOWLEDGE_LIST_FIELDS:
-        out[key] = _normalize_string_list(out.get(key, getattr(defaults, key)))
-
-
 class HomeLayoutFieldsService:
     @staticmethod
     def normalize(data: dict[str, object], defaults: object) -> tuple[dict[str, object], list[str]]:
         out = dict(data)
         warnings = _normalize_home_strings(out, defaults)
-        _normalize_external_knowledge_lists(out, defaults)
-        warnings.extend(_apply_int_fields(out, defaults, _HOME_RUNTIME_INT_FIELDS))
         warnings.extend(_apply_bool_fields(out, defaults, _HOME_RUNTIME_BOOL_FIELDS))
         return out, warnings
 
@@ -346,7 +329,7 @@ _RUNTIME_BOOL_FIELDS = (
     "auto_save_memory", "local_store_fts_enabled",
     "conversation_terminal_tool_fold_enabled", "compact_recall_hint_enabled", "decision_skip_records_enabled",
     "enable_subagents", "enable_self_learning",
-    "concurrency_lock_enabled", "audit_enabled", "watchdog_enabled",
+    "audit_enabled",
 )
 
 
@@ -411,12 +394,6 @@ def _normalize_tool_catalog_fields(out: dict[str, object], defaults: object) -> 
     )
     out["tool_catalog_mode"] = mode
     _append_warning(warnings, warn)
-    protocol, protocol_warn = CoercionService.coerce_choice(
-        "tool_protocol", out.get("tool_protocol"), defaults.tool_protocol,
-        choices=("text", "native"),
-    )
-    out["tool_protocol"] = protocol
-    _append_warning(warnings, protocol_warn)
     out["tool_catalog_categories"] = _normalize_string_list(
         out.get("tool_catalog_categories", defaults.tool_catalog_categories)
     )
@@ -532,10 +509,7 @@ class SubagentBasicFieldsService:
                 ("subagent_hierarchy_default_max_depth", 0, None),
                 ("subagent_hierarchy_recovery_max_nodes", 0, None),
                 ("subagent_hierarchy_max_children_per_tool_call", 0, None),
-                ("subagent_descendant_scan_limit", 1, None),
                 ("subagent_takeover_chain_max_depth", 0, None),
-                ("subagent_context_summary_inline_json_chars", 0, None),
-                ("subagent_context_summary_inline_text_chars", 0, None),
             ),
         )
         out["subagent_allowed_tools"] = _normalize_string_list(
@@ -544,12 +518,6 @@ class SubagentBasicFieldsService:
         out["subagent_role_template_dirs"] = _normalize_string_list(
             out.get("subagent_role_template_dirs", defaults.subagent_role_template_dirs)
         )
-        mode, warn = CoercionService.coerce_choice(
-            "subagent_mode", out.get("subagent_mode"), defaults.subagent_mode,
-            choices=("trusted_local_hardening", "balanced", "strict"),
-        )
-        out["subagent_mode"] = mode
-        _append_warning(warnings, warn)
         return out, warnings
 
 
@@ -561,25 +529,10 @@ class SubagentAdvancedFieldsService:
             out, defaults,
             (
                 ("subagent_debug_trace_level", 0, 5),
-                ("result_check_timeout_seconds", 1, 300),
                 ("dynamic_timeout_min", 10, None),
                 ("dynamic_timeout_max", 60, None),
-                ("max_auto_split_depth", 0, None),
-                ("max_auto_retry_attempts", 1, 10),
-                ("subagent_memory_delete_after_days", 0, None),
             ),
         )
-        warnings.extend(_apply_bool_fields(
-            out, defaults,
-            (
-                "result_check_execute_tests",
-                "subagent_destroy_summary_required",
-            ),
-        ))
-        retention_policy = _string_config_value(
-            out.get("subagent_memory_retention_policy", defaults.subagent_memory_retention_policy)
-        ).strip()
-        out["subagent_memory_retention_policy"] = retention_policy or defaults.subagent_memory_retention_policy
         value, warn = CoercionService.coerce_float(
             "dynamic_timeout_safety_margin", out.get("dynamic_timeout_safety_margin"),
             defaults.dynamic_timeout_safety_margin, min_val=1.0, max_val=10.0,
@@ -611,13 +564,9 @@ class SubagentAdvancedFieldsService:
 # ---------------------------------------------------------------------------
 
 _TIMEOUT_INT_FIELDS = (
-    ("lease_heartbeat_interval_seconds", 10, None),
     ("lease_stale_without_heartbeat_seconds", 30, None),
-    ("task_lock_timeout_seconds", 1, None),
-    ("gateway_worker_join_timeout_seconds", 0, None),
     ("gateway_ready_timeout_seconds", 1, None),
     ("gateway_service_command_timeout_seconds", 1, None),
-    ("gateway_service_stop_timeout_seconds", 1, None),
     ("gateway_restart_turn_wait_seconds", 0, None),
     ("gateway_restart_drain_timeout_seconds", 0, None),
     ("gateway_restart_cooldown_seconds", 0, None),
@@ -636,8 +585,6 @@ _TIMEOUT_INT_FIELDS = (
     ("memory_compact_semantic_summary_min_middle", 1, None),
     ("memory_compact_semantic_summary_max_input_chars", 0, None),
     ("memory_archive_search_file_limit", 0, None),
-    ("memory_query_default_limit", 0, None),
-    ("memory_query_default_page_size", 1, None),
     ("memory_query_content_preview_chars", 0, None),
     ("memory_resume_archive_scan_limit", 0, None),
     ("memory_resume_recommended_read_paths_limit", 0, None),
@@ -651,7 +598,6 @@ _TIMEOUT_INT_FIELDS = (
     ("background_claim_ttl_seconds", 1, None),
     ("background_claim_heartbeat_interval_seconds", 0, None),
     ("background_completion_coalesce_seconds", 0, None),
-    ("conversation_thread_list_limit", 0, None),
     ("conversation_pending_wake_limit", 0, None),
     ("conversation_context_recent_limit", 0, None),
     ("conversation_unhandled_observation_limit", 0, None),
@@ -661,47 +607,10 @@ _TIMEOUT_INT_FIELDS = (
     ("contract_status_recent_findings_limit", 0, None),
     ("skill_guard_max_files", 0, None),
     ("skill_guard_max_size_kb", 0, None),
-    ("small_real_acceptance_max_runtime_seconds", 0, None),
-    ("real_run_review_max_report_bytes", 0, None),
-    ("real_run_review_max_log_bytes", 0, None),
     ("dispatch_default_max_runners", 0, None),
     ("collaboration_auto_dispatch_max_runners", 0, None),
-    ("collaboration_default_deadline_seconds", 0, None),
     ("dispatch_default_limit", 0, None),
-    ("dispatch_pending_runner_scan_limit", 1, None),
-    ("watchdog_interval", 1, None),
-    ("watchdog_max_restarts", 0, None),
-    ("watchdog_restart_delay", 0, None),
 )
-
-
-def _normalize_subagent_watch_interval(value: object, default: int) -> tuple[int, str | None]:
-    key = "subagent_watch_interval_seconds"
-    if value is None:
-        return int(default), None
-    parsed = _watch_interval_int(value)
-    if parsed is None:
-        detail = "boolean" if isinstance(value, bool) else repr(value)
-        return 60, f"{key}: expected an integer, got {detail}; using 60"
-    if parsed < 60:
-        return 60, f"{key}: expected >= 60, got {parsed}; using 60"
-    if parsed > 7200:
-        return 7200, f"{key}: expected <= 7200, got {parsed}; using 7200"
-    return parsed, None
-
-
-def _watch_interval_int(value: object) -> int | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str):
-        stripped = value.strip()
-        if stripped.isdigit() or (stripped.startswith("-") and stripped[1:].isdigit()):
-            return int(stripped)
-    if isinstance(value, float) and value == int(value):
-        return int(value)
-    return None
 
 
 def _normalize_runner_timeout_seconds(value: object, default: object) -> tuple[str, str | None]:
@@ -752,13 +661,6 @@ class TimeoutFieldsService:
             out[key] = value
             if warn:
                 warnings.append(warn)
-        value, warn = _normalize_subagent_watch_interval(
-            out.get("subagent_watch_interval_seconds"),
-            defaults.subagent_watch_interval_seconds,
-        )
-        out["subagent_watch_interval_seconds"] = value
-        if warn:
-            warnings.append(warn)
         value, warn = _normalize_runner_timeout_seconds(
             out.get("runner_timeout_seconds"),
             defaults.runner_timeout_seconds,

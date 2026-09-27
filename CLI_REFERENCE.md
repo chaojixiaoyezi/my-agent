@@ -1541,7 +1541,6 @@ my-agent daemon --max-cycles 1 --interval 0 --no-planner
 # 子代理默认像“不同记忆/权限的主代理”一样工作。
 # 默认只保留少量用户能理解的入口，细节由系统和 LLM 判断。
 enable_subagents: true
-subagent_mode: "trusted_local_hardening"
 max_subagents: 50
 subagent_workspace: "data/subagents"
 subagent_role_template_dirs: []
@@ -1790,7 +1789,6 @@ gateway_stale_seconds: 120
 gateway_stop_timeout: 20
 gateway_request_timeout: 300
 gateway_request_poll_interval: 1
-gateway_request_workers: 1
 gateway_processing_timeout_seconds: 900
 gateway_request_max_attempts: 2
 ```

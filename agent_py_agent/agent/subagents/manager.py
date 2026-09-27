@@ -192,9 +192,6 @@ class SubAgentManager(SubagentKernelMixin):
         extra_write_roots: list[str] | None = None,
         attributes: dict[str, object] | None = None,
         parent_access_mode: str = "",
-        memory_retention_policy: str = "parent_review_or_cleanup",
-        memory_delete_after_days: int = 0,
-        destroy_summary_required: bool = True,
     ) -> SubAgentTask:
         params = params or _create_run_params_from_kwargs(locals())
         return self.base_service.create_run(params=params, prepared=prepared)
@@ -358,9 +355,6 @@ def _create_run_params_from_kwargs(values: dict[str, object]) -> CreateRunParams
         extra_write_roots=values.get("extra_write_roots"),
         attributes=values.get("attributes"),
         parent_access_mode=values.get("parent_access_mode"),
-        memory_retention_policy=values.get("memory_retention_policy"),
-        memory_delete_after_days=values.get("memory_delete_after_days"),
-        destroy_summary_required=values.get("destroy_summary_required"),
     )
 
 

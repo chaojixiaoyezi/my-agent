@@ -74,29 +74,21 @@ def test_owner_disabled_tool_remains_final_after_shell_dependency_closure(tmp_pa
     assert "process_session" not in context.allowed_tools
 
 
-def test_subagent_memory_scope_uses_create_params_policy(tmp_path) -> None:
-    """子代理记忆命名空间由系统生成，保留策略来自配置/创建参数。"""
+def test_subagent_memory_scope_is_system_generated(tmp_path) -> None:
+    """子代理记忆命名空间由系统生成；记录只含 namespace 与 auto_promote，无人读取的保留策略字段已随配置删除。"""
     manager = SubAgentManager(tmp_path)
     task = manager.create_run(
-        params=CreateRunParams(
-            goal="整理材料",
-            thought="按父级要求处理",
-            plan=["处理", "汇报"],
-            memory_retention_policy="delete_after_days",
-            memory_delete_after_days=3,
-            destroy_summary_required=False,
-        )
+        params=CreateRunParams(goal="整理材料", thought="按父级要求处理", plan=["处理", "汇报"])
     )
 
     loaded = manager.load(task.id)
-    memory_scope = loaded.attributes["memory_scope"]
 
     assert loaded.runtime_identity.memory_namespace == f"subagent:{loaded.root_id}:{loaded.id}"
-    assert memory_scope["namespace"] == loaded.runtime_identity.memory_namespace
-    assert memory_scope["retention_policy"] == "delete_after_days"
-    assert memory_scope["delete_after_days"] == 3
-    assert memory_scope["destroy_summary_required"] is False
-    assert memory_scope["auto_promote_to_parent_memory"] is False
+    assert loaded.attributes["memory_scope"] == {
+        "schema_version": "subagent_memory_scope.v2",
+        "namespace": loaded.runtime_identity.memory_namespace,
+        "auto_promote_to_parent_memory": False,
+    }
 
 
 def test_prepared_context_projection_is_read_only_with_canonical_paths(tmp_path, monkeypatch):

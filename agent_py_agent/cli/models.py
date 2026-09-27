@@ -237,7 +237,6 @@ class SubagentsAcceptanceOptions:
     reviewer: str | None
     note: str
     limit: int
-    execute_tests: bool | None = None
     test_timeout: float | None = None
 
 

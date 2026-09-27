@@ -29,11 +29,9 @@ class MemorySettings:
     memory_archive_level: int = 3
     memory_hook_enabled: bool = True
     memory_hook_archive_level: int = 3
-    memory_hook_retention_days: int = 7
     memory_rule_routing_enabled: bool = True
     memory_rule_routing_mode: str = "soft"
     memory_rule_auto_read_limit: int = 3
-    memory_rule_receipt_enabled: bool = True
     memory_resume_auto_context_enabled: bool = False
     memory_resume_auto_context_mode: str = "trigger"
     memory_resume_auto_context_limit: int = 5

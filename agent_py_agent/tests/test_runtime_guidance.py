@@ -1454,7 +1454,6 @@ def test_task_steer_stays_as_latest_native_user_turn_across_later_model_rounds(t
     agent = SimpleAgent(
         AgentConfig(
             model_backend="anthropic_compatible",
-            tool_protocol="native",
             subagent_workspace="subs",
         ),
         tmp_path,

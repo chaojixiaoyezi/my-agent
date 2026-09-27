@@ -1,5 +1,11 @@
 # 子代理维护状态
 
+参数减量第 1 批（分支 `claude/38-delete-dead-config`，2026-09-27）：`CreateRunParams` / `SubAgentManager.create_run` 去掉 `memory_retention_policy`、
+`memory_delete_after_days`、`destroy_summary_required` 三个只写不读的参数，对应配置 `subagent_memory_*` 与
+`subagent_destroy_summary_required` 一起删除；任务记录 `attributes.memory_scope` 升为 `subagent_memory_scope.v2`，只写 namespace 与
+auto_promote_to_parent_memory。旧记录里残留的三个键没有任何读取方（recall 只按 scope_type/scope_key 取，进度展示只读 namespace），
+也没有摘要、哈希或签名覆盖这份记录（决策选模的 `_child_fingerprint` 只在进程内比较，不落盘）。详见 04-structure “memory_scope 记录”。
+
 协作状态更新按 case 串行（分支 `claude/collab-request-race`，2026-09-27）：请求与 case 的状态读改写改在按 case 的更新锁内，修掉“旧快照最后写入、
 把已完成的请求写回 open”的丢失更新；原全仓分片偶发失败有了确定性复现与回归用例。细节见 04-structure 同名节。
 

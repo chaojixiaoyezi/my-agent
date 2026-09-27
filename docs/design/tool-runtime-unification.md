@@ -407,12 +407,12 @@ artifact/source refs 都从此对象投影。
 tool-choice modes、probe source 和 capability hash。能力在创建 ToolRuntimeSnapshot 前解析，整次 run
 不可变；provider 重试必须复用同一能力，不得因一轮没有 tool call 就切 text。
 
-当前仓库正式配置为 native，仓库内没有生产配置选择 text。运行规则已经收口为：
+协议不再是配置项：`tool_protocol` 字段已于 2026-09-27（参数减量第 1 批）从 AgentConfig 与随包 YAML 删除，运行时只认
+`agent_core/native_tool_protocol.py` 里的常量 native；旧配置里残留的 `tool_protocol` 键只触发“unknown config key”告警。运行规则已经收口为：
 
-- `tool_protocol: native` 必须由当前 provider + endpoint + model + stream 探测明确证明原生能力；否则
+- native 必须由当前 provider + endpoint + model + stream 探测明确证明原生能力；否则
   以 `TOOL_PROTOCOL_CAPABILITY_UNAVAILABLE` 失败关闭。
-- `tool_protocol: text` 只能由部署配置直接选择。旧的“native 再按模型名子串改成 text”字段已删除，
-  拼错协议也直接报错。
+- text 协议没有任何配置入口。旧的“native 再按模型名子串改成 text”字段和归一化器对 `text` 的放行都已删除。
 - `TextToolProtocolAdapter` 只接受整条 assistant 响应由一个或多个完整、顶层、裸 JSON
   `[TOOL_CALL]...[/TOOL_CALL]` 块组成。块前后夹正文、Markdown/反引号、坏 JSON、缺闭合标记或半截参数
   都产生一次 `PROTOCOL_VIOLATION`，调用数和 handler 执行数均为 0。

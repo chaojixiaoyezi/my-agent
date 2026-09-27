@@ -168,13 +168,6 @@ class TestNormalizeSubagentAgentConfig:
         assert normalized["runner_auto_concurrency"] == 8
         assert normalized["subagent_allowed_tools"] == []
         assert normalized["subagent_role_template_dirs"] == []
-        assert normalized["subagent_mode"] == "trusted_local_hardening"
-
-    def test_normalize_subagent_mode_invalid_falls_back(self):
-        """验证子代理模式只有少量稳定档位，非法值回退到本地硬化默认。"""
-        normalized, warnings = normalize_agent_config({"subagent_mode": "tiny_locked_down"})
-        assert normalized["subagent_mode"] == "trusted_local_hardening"
-        assert any("subagent_mode" in warning for warning in warnings)
 
     def test_default_config_exposes_current_subagent_runtime_knobs(self):
         """验证默认配置明示当前子代理运行参数，不靠隐藏兼容字段。"""
@@ -188,36 +181,24 @@ class TestNormalizeSubagentAgentConfig:
                 "enable_subagents",
                 "max_subagents",
                 "task_max_subagents",
-                "result_check_execute_tests",
-                "result_check_timeout_seconds",
             }
         }
         assert exposed == {
             "enable_subagents",
-            "subagent_mode",
             "subagent_allowed_tools",
             "subagent_board_limit",
             "subagent_cli_default_limit",
-            "subagent_context_summary_inline_json_chars",
-            "subagent_context_summary_inline_text_chars",
             "subagent_debug_trace_level",
-            "subagent_descendant_scan_limit",
-            "subagent_memory_retention_policy",
-            "subagent_memory_delete_after_days",
-            "subagent_destroy_summary_required",
             "subagent_hierarchy_default_max_depth",
             "subagent_hierarchy_max_children_per_tool_call",
             "subagent_hierarchy_recovery_max_nodes",
             "subagent_probe_default_limit",
-            "subagent_watch_interval_seconds",
             "subagent_spawn_default_count",
             "subagent_takeover_chain_max_depth",
             "max_subagents",
             "task_max_subagents",
             "subagent_workspace",
             "subagent_role_template_dirs",
-            "result_check_execute_tests",
-            "result_check_timeout_seconds",
         }
 
     def test_subagent_hierarchy_limits_default_to_unrestricted(self):
@@ -247,13 +228,6 @@ class TestNormalizeSubagentAgentConfig:
         assert normalized["subagent_board_limit"] == AgentConfig().subagent_board_limit
         assert len(warnings) > 0
 
-    def test_normalize_task_lock_timeout_seconds_invalid(self):
-        """验证无效的 task_lock_timeout_seconds 会回退，避免配置样例变成假字段。"""
-        data = {"task_lock_timeout_seconds": 0}
-        normalized, warnings = normalize_agent_config(data)
-        assert normalized["task_lock_timeout_seconds"] == AgentConfig().task_lock_timeout_seconds
-        assert len(warnings) > 0
-
     def test_normalize_gateway_request_poll_interval_accepts_fractional_seconds(self):
         """gateway 请求 worker 的空闲轮询间隔支持小数秒，避免配置写了不生效。"""
         normalized, warnings = normalize_agent_config({"gateway_request_poll_interval": "0.2"})
@@ -274,17 +248,13 @@ class TestNormalizeSubagentAgentConfig:
             "audit_enabled": "false",
             "auto_save_memory": "false",
             "enable_subagents": "false",
-            "watchdog_enabled": "true",
             "daemon_probe": "false",
-            "auto_bench_model_on_first_use": "false",
         }
         normalized, warnings = normalize_agent_config(data)
         assert normalized["audit_enabled"] is False
         assert normalized["auto_save_memory"] is False
         assert normalized["enable_subagents"] is False
-        assert normalized["watchdog_enabled"] is True
         assert normalized["daemon_probe"] is False
-        assert normalized["auto_bench_model_on_first_use"] is False
         assert warnings == []
 
     def test_normalize_home_provider_risk_fields(self):
@@ -292,13 +262,11 @@ class TestNormalizeSubagentAgentConfig:
         normalized, warnings = normalize_agent_config(
             {
                 "home_context_enabled": "false",
-                "home_lesson_auto_read_limit": "4",
                 "run_task_workspace_enabled": "false",
             }
         )
         assert warnings == []
         assert normalized["home_context_enabled"] is False
-        assert normalized["home_lesson_auto_read_limit"] == 4
         assert normalized["run_task_workspace_enabled"] is False
 
     def test_path_access_mode_only_accepts_current_values(self):
@@ -378,20 +346,3 @@ class TestConfigWarnings:
         data = {"model_backend": "bad"}
         normalized, warnings = normalize_agent_config(data)
         assert any("echo" in w for w in warnings)
-
-
-class TestNormalizeGatewayWorkers:
-    """R2 真实场景抓到的回归：worker 数下限误写成默认值 3，2 被静默钳回 3。"""
-
-    def test_normalize_gateway_request_workers_accepts_small_counts(self):
-        """1 和 2 都是合法 worker 数，不允许被钳到默认值。"""
-        for value in (1, 2):
-            normalized, warnings = normalize_agent_config({"gateway_request_workers": value})
-            assert normalized["gateway_request_workers"] == value
-            assert len(warnings) == 0
-
-    def test_normalize_gateway_request_workers_rejects_zero(self):
-        """0 个 worker 无法处理请求，回退默认并告警。"""
-        normalized, warnings = normalize_agent_config({"gateway_request_workers": 0})
-        assert normalized["gateway_request_workers"] == 10
-        assert len(warnings) > 0

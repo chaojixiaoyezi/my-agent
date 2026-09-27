@@ -409,12 +409,3 @@ class TestAgentConfigDefaults:
         """验证 dispatch 相关默认值。"""
         config = AgentConfig()
         assert config.dispatch_max_consecutive_rounds == 20
-        assert config.dispatch_active_interval == 5
-        assert config.dispatch_idle_interval == 30
-
-    def test_agent_config_watchdog_defaults(self):
-        """验证 watchdog 相关默认值。"""
-        config = AgentConfig()
-        assert config.watchdog_enabled is False
-        assert config.watchdog_interval == 60
-        assert config.watchdog_max_restarts == 3

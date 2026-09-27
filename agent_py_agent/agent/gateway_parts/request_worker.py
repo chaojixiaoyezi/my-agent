@@ -778,8 +778,8 @@ def _process_gateway_request_path(
     claim = claim_request(paths, request_path)
     if claim is None:
         return False
-    # §6-A 量化探针:worker 忙数 gauge(上限=gateway_request_workers)。贴着这个上限跑
-    # =顶层槽位饱和,第 4 个并发用户只能在 pending 里排队。
+    # §6-A 量化探针:worker 忙数 gauge(上限=gateway_global_inflight_limit 两层限流)。贴着这个上限跑
+    # =顶层槽位饱和,超出的并发用户只能在 pending 里排队。
     gateway_worker_busy(1)
     try:
         return _process_claimed_gateway_request_path(

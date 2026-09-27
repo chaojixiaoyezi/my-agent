@@ -128,7 +128,6 @@ def _make_agent(args: argparse.Namespace, run_root: Path, workspace: Path):
         workspace_root=str(workspace),
         my_agent_home=str(run_root / "my-agent-home"),
         stream_enabled=not args.no_stream,
-        tool_protocol="native",
         enable_tools=True,
         enable_subagents=False,
         auto_save_memory=False,

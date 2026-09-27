@@ -299,10 +299,10 @@ def test_pool_soft_eviction_preserves_concurrent_hard_promotion(tmp_path) -> Non
 # ---------- config owner 覆盖 ----------
 
 def test_config_with_owner_overrides_owner_keeps_rest(tmp_path) -> None:
-    base = AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), tool_protocol="native")
+    base = AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"))
     scoped = _config_with_owner(base, OwnerIdentity.provider_user("feishu", "alice"))
     assert scoped.my_agent_owner_provider == "feishu"
     assert scoped.my_agent_owner_kind == "user"
     assert scoped.my_agent_owner_id == "alice"
-    assert scoped.model_backend == "echo" and scoped.tool_protocol == "native"  # 其余配置继承
+    assert scoped.model_backend == "echo"  # 其余配置继承
     assert base.my_agent_owner_id == "main"  # 原 config 不被改(replace 返回新实例)

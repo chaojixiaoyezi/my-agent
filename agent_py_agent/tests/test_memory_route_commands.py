@@ -134,7 +134,6 @@ class TestBuildArchiveDoctor:
         from agent_py_agent.cli.memory_commands import _build_archive_doctor
 
         mock_config = MagicMock()
-        mock_config.memory_hook_retention_days = 7
         mock_config.memory_hook_enabled = True
         mock_config.memory_hook_archive_level = 3
         mock_config.memory_archive_level = 3
@@ -196,11 +195,9 @@ class TestMemoryConfigPayload:
         mock_config.memory_archive_level = 3
         mock_config.memory_hook_enabled = True
         mock_config.memory_hook_archive_level = 3
-        mock_config.memory_hook_retention_days = 7
         mock_config.memory_rule_routing_enabled = True
         mock_config.memory_rule_routing_mode = "soft"
         mock_config.memory_rule_auto_read_limit = 3
-        mock_config.memory_rule_receipt_enabled = True
 
         result = _memory_config_payload(mock_config)
 

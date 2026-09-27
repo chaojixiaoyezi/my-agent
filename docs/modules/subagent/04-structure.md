@@ -1063,6 +1063,15 @@ SimpleAgent orchestration tool
 - 层级继承状态写在 `attributes.inherited_parent_context`；`goal` 只承载给模型阅读的任务说明和
   父级边界摘要，不承担机器状态判断。
 
+## memory_scope 记录
+
+- `services/base.py::_memory_scope` 是任务记录 `attributes.memory_scope` 的唯一写入点，schema `subagent_memory_scope.v2`：
+  `namespace`（`runtime_identity.memory_namespace`）与 `auto_promote_to_parent_memory=False`。
+- 读取方只有 `memory_store/recall.py::_append_declared_scopes`（按 scope_type/scope_key 取，其余键忽略）和
+  `cli/shared_progress.py`（只展示 namespace）。v1 里的 `retention_policy` / `delete_after_days` / `destroy_summary_required`
+  从未被读取，2026-09-27 随 `subagent_memory_*` 配置删除；旧任务记录不迁移，残留键无人消费。
+- 没有摘要、哈希或签名覆盖此记录；`orchestration/decision_subagent._child_fingerprint` 虽把 `attributes` 算进指纹，但只在同一进程内准备与采用之间比较，不持久化。
+
 ## Services
 
 | Service | 负责什么 |

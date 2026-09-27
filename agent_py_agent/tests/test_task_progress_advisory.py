@@ -123,7 +123,6 @@ def _agent(tmp_path, **config_overrides) -> SimpleAgent:
         AgentConfig(
             model_backend="echo",
             my_agent_home=str(tmp_path / "home"),
-            tool_protocol="native",
             **config_overrides,
         ),
         tmp_path,

@@ -48,8 +48,7 @@ _TARGET_TOKENS = frozenset({
 _BOUNDARY_NAMES = frozenset({
     "api_base", "api_key", "model_backend", "computer_use_enabled", "execution_mode", "user_id", "system_prompt",
     "enable_tools", "enable_gateway_restart_tool", "enable_model_profile_tool", "gateway_restart_cooldown_seconds",
-    "result_check_execute_tests", "daemon_mutate_state", "daemon_start_runners", "external_knowledge_api_sources",
-    "external_knowledge_database_sources", "external_knowledge_index_file_name",
+    "daemon_mutate_state", "daemon_start_runners",
     "config_layers", "config_sources", "config_warnings", "memory_config_warnings", "protect_running_runtime",
     "cli_audit_cleanup_days",
 })
@@ -58,7 +57,7 @@ _CATEGORIES = (
     (("memory_", "compact_"), "记忆与压缩"),
     (("decision_",), "决策模型 Jev"),
     (("tool_", "shell_", "web_", "read_", "write_"), "工具"),
-    (("subagent", "max_subagents", "task_", "result_check_", "acceptance_"), "子代理与任务"),
+    (("subagent", "max_subagents", "task_", "acceptance_"), "子代理与任务"),
     (("gateway_", "daemon_", "runner_", "lease_", "scheduler_"), "Gateway 与调度"),
     (("feishu_", "qq_", "wechat_", "im_", "adapter_"), "IM 通道"),
     (("skill", "self_learning", "enable_self_learning", "capability_"), "技能与自学习"),

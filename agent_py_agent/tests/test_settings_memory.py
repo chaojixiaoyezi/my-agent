@@ -34,11 +34,6 @@ class TestMemorySettingsDefaults:
         settings = MemorySettings()
         assert settings.memory_hook_archive_level == 3
 
-    def test_memory_hook_retention_days_default(self):
-        """验证 hook 保留天数默认值。"""
-        settings = MemorySettings()
-        assert settings.memory_hook_retention_days == 7
-
     def test_memory_routing_defaults(self):
         """验证路由默认值。"""
         settings = MemorySettings()
@@ -134,18 +129,6 @@ class TestNormalizeMemorySettings:
         settings, warnings = normalize_memory_settings({"memory_rule_auto_read_limit": -1})
         assert settings.memory_rule_auto_read_limit == 3  # 默认值
         assert len(warnings) == 1
-
-    def test_normalize_valid_retention_days(self):
-        """验证有效的保留天数。"""
-        settings, warnings = normalize_memory_settings({"memory_hook_retention_days": 14})
-        assert settings.memory_hook_retention_days == 14
-        assert len(warnings) == 0
-
-    def test_normalize_zero_retention_days(self):
-        """验证 0 保留天数（不保留）。"""
-        settings, warnings = normalize_memory_settings({"memory_hook_retention_days": 0})
-        assert settings.memory_hook_retention_days == 0
-        assert len(warnings) == 0
 
     def test_normalize_valid_resume_mode_trigger(self):
         """验证有效的 trigger 恢复模式。"""

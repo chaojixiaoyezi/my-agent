@@ -1,5 +1,9 @@
 # 记忆与上下文维护状态
 
+参数减量第 1 批（分支 `claude/38-delete-dead-config`，2026-09-27）：`memory_hook_retention_days`、`memory_rule_receipt_enabled` 只被 memory doctor 回显，没有清理器或回执逻辑读取，
+已从 `MemorySettings`、`AgentConfig`、随包 YAML 和两处 doctor 字段名单删除；`memory_archive.enforce_retention` 仍保留为显式传参的函数，无产品调用方。
+同批删除的 `memory_query_default_limit/page_size` 只有归一化器认识。
+
 决策点未触发原因计数（分支 `claude/9b-decision-miss-reasons`，2026-09-27）：记忆侧四个决策点（recall、pre_recall、curator、curator_relation）每次到达都经 `conversation/decision_reach_counts` 记一次结果：没调用记宿主原因码（如 `memory_count`、`no_free_slots`、`nothing_to_label`、`memory_changed`、`point_off`、材料不合格的 `bad_material`），真正调用前记 `called`。只在进程内累加、按 owner 节流合并写盘，召回与整理的结果、警告码和游标都不变。见[决策审计与管控](../../design/DECISION_AUDIT_AND_ADMIN_CONTROLS.md#每个点位最近为什么没触发2026-09-27)。
 
 参数中心同名常数收敛（分支 `claude/param-center-dup-constants`，2026-09-27）：记忆诊断两处没有读取方的 `RECENT_ARCHIVE_FILE_LIMIT`

@@ -81,12 +81,8 @@ def test_runtime_parameter_knobs_are_normalized_from_agent_config() -> None:
             "contract_status_recent_findings_limit": "3",
             "skill_guard_max_files": "4",
             "skill_guard_max_size_kb": "5",
-            "small_real_acceptance_max_runtime_seconds": "60",
-            "real_run_review_max_report_bytes": "1234",
-            "real_run_review_max_log_bytes": "4321",
             "background_claim_ttl_seconds": "120",
             "background_claim_heartbeat_interval_seconds": "30",
-            "subagent_watch_interval_seconds": "240",
         }
     )
 
@@ -98,26 +94,7 @@ def test_runtime_parameter_knobs_are_normalized_from_agent_config() -> None:
     assert normalized["tool_output_externalize_min_chars"] == 44
     assert normalized["contract_status_max_scan_files"] == 9
     assert normalized["skill_guard_max_files"] == 4
-    assert normalized["small_real_acceptance_max_runtime_seconds"] == 60
-    assert normalized["real_run_review_max_report_bytes"] == 1234
-    assert normalized["real_run_review_max_log_bytes"] == 4321
     assert normalized["background_claim_ttl_seconds"] == 120
-    assert normalized["subagent_watch_interval_seconds"] == 240
-
-
-def test_subagent_watch_interval_config_clamps_bad_values() -> None:
-    from agent_py_agent.agent.settings.config import normalize_agent_config
-
-    low, low_warnings = normalize_agent_config({"subagent_watch_interval_seconds": "10"})
-    bad, bad_warnings = normalize_agent_config({"subagent_watch_interval_seconds": "soon"})
-    high, high_warnings = normalize_agent_config({"subagent_watch_interval_seconds": "99999"})
-
-    assert low["subagent_watch_interval_seconds"] == 60
-    assert bad["subagent_watch_interval_seconds"] == 60
-    assert high["subagent_watch_interval_seconds"] == 7200
-    assert low_warnings
-    assert bad_warnings
-    assert high_warnings
 
 
 def test_background_main_agent_allowed_tools_are_normalized() -> None:
@@ -149,18 +126,14 @@ def test_dispatch_runtime_policy_uses_agent_config_values() -> None:
     policy = DispatchRuntimePolicy.from_config(
         SimpleNamespace(
             dispatch_max_consecutive_rounds=7,
-            dispatch_active_interval=2,
-            dispatch_idle_interval=9,
             dispatch_default_max_runners=4,
             dispatch_default_limit=33,
             dispatch_default_watch_interval=6.5,
         )
     )
 
-    assert policy.snapshot()["schema_version"] == "dispatch_runtime_policy.v1"
+    assert policy.snapshot()["schema_version"] == "dispatch_runtime_policy.v2"
     assert policy.max_consecutive_rounds == 7
-    assert policy.active_interval == 2.0
-    assert policy.idle_interval == 9.0
     assert policy.default_max_runners == 4
     assert policy.default_limit == 33
     assert policy.default_watch_interval == 6.5

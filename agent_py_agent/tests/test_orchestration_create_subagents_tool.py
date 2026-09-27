@@ -800,9 +800,6 @@ class TestCreateSubagentsToolTemplatePolicy:
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
         mock_agent.config.access_mode = "full-access"
-        mock_agent.config.subagent_memory_retention_policy = "delete_after_days"
-        mock_agent.config.subagent_memory_delete_after_days = 7
-        mock_agent.config.subagent_destroy_summary_required = False
 
         mock_task = MagicMock()
         mock_task.id = "run_default"
@@ -826,9 +823,6 @@ class TestCreateSubagentsToolTemplatePolicy:
         assert "cancel_subagents" not in call_kwargs["params"].allowed_tools
         assert "resolve_capability_requests" not in call_kwargs["params"].allowed_tools
         assert call_kwargs["params"].parent_access_mode == "full-access"
-        assert call_kwargs["params"].memory_retention_policy == "delete_after_days"
-        assert call_kwargs["params"].memory_delete_after_days == 7
-        assert call_kwargs["params"].destroy_summary_required is False
         assert call_kwargs["params"].role == "worker"
         assert result.ok is True
 

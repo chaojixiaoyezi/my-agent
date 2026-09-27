@@ -182,6 +182,19 @@
     删除（无用）、合并（总一起调）、降级（只对程序内部有意义，改回代码常数并移出配置）、常用（`/settings` 默认只列二三十个）、
     高级（可搜索但不刷屏）。目标约 100 项；每批不改任何生效值。
 
+- **减量第一批（2026-09-27，分支 `claude/38-delete-dead-config`，待集成者审核）**：按分类结论逐项复核后删除 43 个没有产品读取方的配置项
+  （只在 `settings/config.py`、随包 YAML、归一化表或字段规格表里出现，或只被孤儿模块/测试/离线验收入口读取）。同批处理：
+  - 孤儿模块及其专属测试一起删：`agent_core/watchdog.py`、`concurrency/task_lock.py`（含 `LockAcquisitionError`）、`external_knowledge/`。
+  - `contracts/real_run_review.py` 与 `contracts/small_real_acceptance_gate.py` 保留，配置读取换成模块常量（5000000 / 1000000 / 900，数值不变）。
+  - `tool_protocol` 字段删除：运行时协议只由 `agent_core/native_tool_protocol._NATIVE_PROTOCOL` 决定，归一化器不再放行 `text`。
+  - `subagent_memory_retention_policy` / `subagent_memory_delete_after_days` / `subagent_destroy_summary_required` 删除后，任务记录
+    `attributes.memory_scope` 升为 `subagent_memory_scope.v2`（只写 namespace 与 auto_promote）；没有摘要、哈希或签名覆盖旧记录，残留键无读取方。
+  - `DispatchRuntimePolicy` 去掉只在 snapshot 回显的 `active_interval` / `idle_interval`，snapshot 升 `dispatch_runtime_policy.v2`。
+  - `cli/models.py::SubagentsAcceptanceOptions.execute_tests` 一并删除。加载器对旧配置里残留的键只告警（unknown config key），不阻断启动。
+  - 空说明基线 `parameter_description_baseline.json` 从 177 缩到 143：34 项删除，另有 2 项（`conversation_pending_wake_limit`、
+    `lease_stale_without_heartbeat_seconds`）因上方注释块重新归属而有了说明。前端 `frontend/config/backend-config-catalog.json` 是由随包 YAML
+    生成的目录，在本批之前已经过期，本批未重新生成；前端设置页仍有 12 个已删键的表单项，留给前端单独清理。
+
 ## 7. 验收
 
 - 每个迁入的参数：改用户配置后读取方确实拿到新值（测试证明，不只看配置文件）。

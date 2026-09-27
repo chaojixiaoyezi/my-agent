@@ -160,7 +160,6 @@ def test_build_archive_doctor_basic(tmp_path):
     root = tmp_path / "project"
     root.mkdir()
     mock_config = MagicMock()
-    mock_config.memory_hook_retention_days = 30
     mock_config.memory_hook_enabled = True
     mock_config.memory_hook_archive_level = 5
     mock_config.memory_archive_level = 3
@@ -170,7 +169,8 @@ def test_build_archive_doctor_basic(tmp_path):
     assert "retention" in result
     assert "hook" in result
     assert "raw" in result
-    assert result["retention"]["memory_hook_retention_days"] == 30
+    assert result["retention"]["memory_hook_enabled"] is True
+    assert "memory_hook_retention_days" not in result["retention"]
 
 
 def test_build_archive_doctor_missing_config_fields(tmp_path):
@@ -181,7 +181,6 @@ def test_build_archive_doctor_missing_config_fields(tmp_path):
 
     result = _build_archive_doctor(root, mock_config)
 
-    assert result["retention"]["memory_hook_retention_days"] == 7
     assert result["retention"]["memory_hook_enabled"] is True
 
 
@@ -253,11 +252,9 @@ def test_memory_config_payload_basic():
     mock_config.memory_archive_level = 3
     mock_config.memory_hook_enabled = True
     mock_config.memory_hook_archive_level = 5
-    mock_config.memory_hook_retention_days = 30
     mock_config.memory_rule_routing_enabled = True
     mock_config.memory_rule_routing_mode = "soft"
     mock_config.memory_rule_auto_read_limit = 3
-    mock_config.memory_rule_receipt_enabled = True
 
     result = _memory_config_payload(mock_config)
 

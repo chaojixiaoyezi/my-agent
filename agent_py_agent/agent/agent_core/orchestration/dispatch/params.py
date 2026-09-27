@@ -34,13 +34,14 @@ class DispatchExecutionPlan:
         )
 
 
+# LLM: 只保留真有读取方的字段；dispatch_active_interval / dispatch_idle_interval 已删除（参数减量第 1 批，2026-09-27），
+#   watch 循环的活跃/空闲间隔一律取 CLI 传入的 interval（见 services/watch_service.py），snapshot 不再回显它们。
+# 类用途: 从已加载配置冻结一份 dispatch 默认值，供 CLI 和调度循环共用。
 @dataclass(frozen=True)
 class DispatchRuntimePolicy:
     """Frozen dispatch defaults derived from the loaded agent config."""
 
     max_consecutive_rounds: int = 20
-    active_interval: float = 5.0
-    idle_interval: float = 30.0
     default_max_runners: int = 1
     default_limit: int = 20
     default_watch_interval: float = 30.0
@@ -52,8 +53,6 @@ class DispatchRuntimePolicy:
             return cls()
         return cls(
             max_consecutive_rounds=_non_negative_int_attr(config, "dispatch_max_consecutive_rounds", 20),
-            active_interval=_non_negative_float_attr(config, "dispatch_active_interval", 5.0),
-            idle_interval=_non_negative_float_attr(config, "dispatch_idle_interval", 30.0),
             default_max_runners=_non_negative_int_attr(config, "dispatch_default_max_runners", 1),
             default_limit=_non_negative_int_attr(config, "dispatch_default_limit", 20),
             default_watch_interval=_non_negative_float_attr(config, "dispatch_default_watch_interval", 30.0),
@@ -62,11 +61,9 @@ class DispatchRuntimePolicy:
 
     def snapshot(self) -> dict[str, object]:
         return {
-            "schema_version": "dispatch_runtime_policy.v1",
+            "schema_version": "dispatch_runtime_policy.v2",
             "source": self.source,
             "max_consecutive_rounds": self.max_consecutive_rounds,
-            "active_interval": self.active_interval,
-            "idle_interval": self.idle_interval,
             "default_max_runners": self.default_max_runners,
             "default_limit": self.default_limit,
             "default_watch_interval": self.default_watch_interval,

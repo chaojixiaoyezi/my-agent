@@ -785,6 +785,9 @@ auth 表单取消和参数拒绝已验，官方设备码在两处环境被 HTTP 
   正式加载回读、修改记录与回滚）、`user_config` 工具 search/reset/history/revert、聊天 `/settings`（仅管理员）；修正工具只看从未设置的
   MY_AGENT_CONFIG 导致“找不到用户配置”。阶段 2b 已实现：写权限沿用 F4 Full Access（按 owner、仅管理员，早已存在），只新增
   `self_dev_worktree`（边界项）——管理员 Full Access 时提示词写明正在运行的代码位置与开发工作树，改完提交到该分支由集成者合并部署。
+  参数减量第 1 批已在分支 `claude/38-delete-dead-config` 完成（2026-09-27，待集成者审核合并）：按逐项分类删除 43 个没有产品读取方的配置项，
+  连同只被测试引用的 `agent_core/watchdog.py`、`concurrency/task_lock.py`、`external_knowledge/` 模块；`tool_protocol` 改为代码常量 native，
+  不再放行 text；子代理任务记录 `memory_scope` 升 v2。不改任何生效值；旧用户配置里残留的键只告警。细节见参数中心 §6。
   待做：阶段 3 分批迁移常数。运行中安装写保护已实现：边界开关 `protect_running_runtime`（默认开）让正在运行的安装目录对所有工具只读，
   Full Access 也不例外（独立边界键 `runtime_install_roots`，见 gateway 结构文档 Full Access 一节）。
   详见 [参数中心](docs/design/PARAMETER_CENTER.md)。

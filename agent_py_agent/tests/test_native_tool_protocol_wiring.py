@@ -6,7 +6,6 @@ import pytest
 
 from agent_py_agent.agent.agent_core.native_tool_protocol import (
     ToolProtocolSelectionError,
-    native_tool_protocol_value,
     native_tool_use_active,
     resolve_native_tools,
     select_tool_protocol,
@@ -80,14 +79,12 @@ class _CapabilityBackend:
 
 def _agent(
     *,
-    protocol: str,
     native_supported: bool,
     enable_tools: bool = True,
     backend_name: str = "test",
 ):
     return SimpleNamespace(
         config=SimpleNamespace(
-            tool_protocol=protocol,
             enable_tools=enable_tools,
         ),
         backend=_CapabilityBackend(
@@ -98,7 +95,7 @@ def _agent(
 
 
 def test_selects_native_only_from_observed_capability():
-    agent = _agent(protocol="native", native_supported=True)
+    agent = _agent(native_supported=True)
     snapshot = select_tool_protocol(agent, run_id="run-native")
 
     assert snapshot.source_protocol == "native"
@@ -106,7 +103,7 @@ def test_selects_native_only_from_observed_capability():
 
 
 def test_runtime_response_history_cannot_override_configured_native_protocol():
-    agent = _agent(protocol="native", native_supported=True)
+    agent = _agent(native_supported=True)
     snapshot = select_tool_protocol(agent, run_id="run-fixed")
     # Older builds persisted this process-local marker after ordinary no-tool
     # replies. Protocol selection now belongs only to explicit configuration
@@ -116,22 +113,15 @@ def test_runtime_response_history_cannot_override_configured_native_protocol():
     assert native_tool_use_active(params) is True
 
 
-def test_text_protocol_config_is_rejected():
-    """EXEC-31b: 配置 text 直接 ValueError——不再有 text 快照/降级路径。"""
-    agent = _agent(protocol="text", native_supported=True)
-    with pytest.raises(ValueError, match="invalid tool protocol"):
-        select_tool_protocol(agent, run_id="run-explicit-text")
-
-
 def test_inactive_for_non_native_backend():
-    agent = _agent(protocol="native", native_supported=False)
+    agent = _agent(native_supported=False)
     with pytest.raises(ToolProtocolSelectionError):
         select_tool_protocol(agent, run_id="run-no-native")
 
 
 def test_tools_disabled_still_marks_native():
     """EXEC-31b: 工具整体关闭时协议仍标 native(工具列表为空), 不再有 text 降级。"""
-    agent = _agent(protocol="native", native_supported=True, enable_tools=False)
+    agent = _agent(native_supported=True, enable_tools=False)
     snapshot = select_tool_protocol(agent, run_id="run-tools-disabled")
     assert native_tool_use_active(SimpleNamespace(tool_protocol_snapshot=snapshot)) is True
     assert snapshot.capability.evidence == "tools_disabled_for_run"
@@ -139,18 +129,7 @@ def test_tools_disabled_still_marks_native():
 
 def test_missing_run_snapshot_is_not_inferred_from_backend_or_config():
     with pytest.raises(RuntimeError, match="snapshot is missing"):
-        native_tool_use_active(_agent(protocol="native", native_supported=True))
-
-
-def test_native_protocol_value_normalizes():
-    assert native_tool_protocol_value("native") == "native"
-    assert native_tool_protocol_value("NATIVE") == "native"
-    with pytest.raises(ValueError, match="invalid tool protocol"):
-        native_tool_protocol_value("text")
-    assert native_tool_protocol_value("") == "native"
-    assert native_tool_protocol_value(None) == "native"
-    with pytest.raises(ValueError, match="invalid tool protocol"):
-        native_tool_protocol_value("bogus")
+        native_tool_use_active(_agent(native_supported=True))
 
 
 # --- resolve_native_tools --------------------------------------------------
@@ -220,14 +199,14 @@ class _ProgressiveRegistry(_FakeRegistry):
         return specs
 
 
-def _agent_with_registry(*, protocol: str, native_supported: bool):
-    agent = _agent(protocol=protocol, native_supported=native_supported)
+def _agent_with_registry(*, native_supported: bool):
+    agent = _agent(native_supported=native_supported)
     agent.tools = _FakeRegistry()
     return agent
 
 
 def test_resolve_returns_anthropic_tools_schema_when_active():
-    agent = _agent_with_registry(protocol="native", native_supported=True)
+    agent = _agent_with_registry(native_supported=True)
     protocol_snapshot = select_tool_protocol(agent, run_id="run-resolve-native")
     params = SimpleNamespace(
         allowed_tools=["read_file"],
@@ -249,7 +228,7 @@ def test_resolve_returns_anthropic_tools_schema_when_active():
 def test_resolve_returns_none_when_registry_missing():
     """EXEC-31b: 不再有 text 快照; resolve 的 None 分支=agent 无 tools 注册表
     (快照缺失是 RuntimeError, 由 test_missing_run_snapshot 覆盖)。"""
-    agent = _agent(protocol="native", native_supported=True)
+    agent = _agent(native_supported=True)
     snapshot = select_tool_protocol(agent, run_id="run-resolve-noregistry")
     params = SimpleNamespace(
         allowed_tools=None,
@@ -261,7 +240,7 @@ def test_resolve_returns_none_when_registry_missing():
 
 
 def test_resolve_returns_none_when_no_specs():
-    agent = _agent(protocol="native", native_supported=True)
+    agent = _agent(native_supported=True)
 
     class _Empty:
         def model_visible_specs(self, **kwargs):
@@ -279,7 +258,7 @@ def test_resolve_returns_none_when_no_specs():
 
 
 def test_resolve_native_tools_uses_typed_discovery_state():
-    agent = _agent(protocol="native", native_supported=True)
+    agent = _agent(native_supported=True)
     agent.tools = _ProgressiveRegistry()
     params = SimpleNamespace(
         allowed_tools=None,
@@ -357,7 +336,7 @@ def _effect_guidance_snapshot() -> tuple[list[ToolModelSpec], ToolRuntimeSnapsho
 
 def test_resolve_native_tools_keeps_exact_specs_and_single_system_authorization():
     specs, snapshot = _effect_guidance_snapshot()
-    agent = _agent(protocol="native", native_supported=True)
+    agent = _agent(native_supported=True)
     agent.backend.supports_system_instructions = True
     agent.backend.supports_provider_request_options = True
     agent.tools = _SnapshotRegistry(snapshot)

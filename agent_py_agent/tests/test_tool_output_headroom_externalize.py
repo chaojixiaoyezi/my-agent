@@ -20,7 +20,7 @@ BIG_OUTPUT = "这是一段很长的报告正文，用来把上下文余量吃光
 
 def _agent(*, window: int, **overrides) -> SimpleNamespace:
     config = AgentConfig(
-        auto_save_memory=True, enable_tools=True, tool_protocol="native", model_name="native-test-model",
+        auto_save_memory=True, enable_tools=True, model_name="native-test-model",
         memory_compact_auto_trigger_percent=90, model_context_window_tokens=window,
         tool_output_externalize_min_chars=200_000, tool_output_preview_chars=200, **overrides,
     )

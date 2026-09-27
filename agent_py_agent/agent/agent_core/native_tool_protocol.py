@@ -1,4 +1,6 @@
 # LLM: 工具参数和本轮 ToolChoice 只来自宿主冻结事实；发送与容量共用选择规则，不更改运行时权限。
+#   协议只由本模块常量 _NATIVE_PROTOCOL 决定：`tool_protocol` 配置字段已删除（参数减量第 1 批，2026-09-27），
+#   不再读取 config，也不再放行 text。
 # 模块用途: 固定原生工具协议并渲染模型工具列表，避免工具说明重复堆叠系统提示。
 from __future__ import annotations
 
@@ -17,11 +19,12 @@ class ToolProtocolSelectionError(RuntimeError):
     error_code = "TOOL_PROTOCOL_CAPABILITY_UNAVAILABLE"
 
 
+# LLM: 只探测 backend 的原生能力，不读任何协议配置；enable_tools 关闭时直接给空工具的 native 快照。
+# 函数用途: 在 run 开始前冻结一次工具协议快照；模型不支持原生 tool_use 就报错，不做文本降级。
 def select_tool_protocol(agent: object, *, run_id: str) -> ToolProtocolSnapshot:
     """Probe once before the run; native is the only supported protocol."""
 
     config = getattr(agent, "config", None)
-    requested = native_tool_protocol_value(getattr(config, "tool_protocol", "native"))
     backend = getattr(agent, "backend", None)
     if not bool(getattr(config, "enable_tools", False)):
         # 工具整体关闭:协议标记 native(工具列表为空),不再有 text 降级。
@@ -31,8 +34,6 @@ def select_tool_protocol(agent: object, *, run_id: str) -> ToolProtocolSnapshot:
             evidence="tools_disabled_for_run",
         )
         return ToolProtocolSnapshot(run_id, _NATIVE_PROTOCOL, capability)
-    if requested != _NATIVE_PROTOCOL:
-        raise ValueError(f"invalid tool protocol: {requested}")
 
     probe = getattr(backend, "probe_tool_capability", None)
     capability = probe() if callable(probe) else _declared_capability(
@@ -83,13 +84,6 @@ def model_turn_tool_choice(params: object, tools: list[dict] | None) -> ToolChoi
     return candidate if isinstance(candidate, ToolChoice) else ToolChoice.auto("ordinary_tool_turn")
 
 
-def native_tool_protocol_value(tool_protocol: object) -> str:
-    value = str(tool_protocol or "").strip().lower()
-    if value in {"", _NATIVE_PROTOCOL}:
-        return _NATIVE_PROTOCOL
-    raise ValueError(f"invalid tool protocol: {value}")
-
-
 # LLM: 原生工具只投影同一快照；通用授权文字由 provider_system_instruction 唯一承载，不按工具重复追加，也不改执行权限。
 # 函数用途: 给模型生成本轮可用的原生工具和精确参数，避免每个工具再复制整段系统规则。
 def resolve_native_tools(agent: object, params: object) -> list[dict[str, Any]] | None:
@@ -137,7 +131,6 @@ def _declared_capability(
 __all__ = [
     "ToolProtocolSelectionError",
     "model_turn_tool_choice",
-    "native_tool_protocol_value",
     "native_tool_use_active",
     "resolve_native_tools",
     "select_tool_protocol",

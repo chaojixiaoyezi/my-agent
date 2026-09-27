@@ -18,5 +18,8 @@ Live Lab 是开发验收辅助，不是生产调度器，也不能替被测代�
 `bad_weather` 已移除停用结果块协议的 `structured-repair` 调用，保留 Gateway 恢复与 runner 重试。
 重试场景的已有收口断言失败仍保留，不能因删去失效场景就把整个 suite 记为通过。
 
+参数减量第 1 批（分支 `claude/38-delete-dead-config`，2026-09-27）：`session.py` 生成的测试 YAML 不再写已删除的 `gateway_request_workers`（网关限流只剩
+`gateway_user_inflight_limit` / `gateway_global_inflight_limit` 两层）。
+
 真实 TUI 需公布 tmux 名称，多个用户共用一个 Gateway，并区分短启动、连续任务、
 长上下文、多子代理、慢模型与故障恢复。开放问题以 [STATUS](../../../STATUS.md) 为准。

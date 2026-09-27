@@ -56,12 +56,10 @@ my_agent_owner_id: "main"
 # 家目录运行时开关：
 # - SimpleAgent 启动时固定创建 ~/.my-agent owner home 基础目录和 SOUL/USER/AGENTS/memory 入口文件。
 # - home_context_enabled: 每轮 prompt 允许读取轻量 home 上下文，例如 memory.md 和匹配 lesson。
-# - home_lesson_auto_read_limit: 每轮最多自动读取多少个匹配 lesson 文件；0 表示不自动读 lesson。
 # - home_lesson_stale_caveat_days: 召回的 lesson 超过多少天未更新就附加"记忆可能过期"提示；0 表示不加提示。
 #   防止把陈旧记忆当现状：记忆反映写入时的事实，与当前代码/状态冲突时以现状为准。
 # - run_task_workspace_enabled: 保存宿主运行记录到用户 runs/日期/不透明ID；普通聊天不建运行，记录不改变工具 cwd。
 home_context_enabled: true
-home_lesson_auto_read_limit: 3
 home_lesson_stale_caveat_days: 7
 run_task_workspace_enabled: true
 
@@ -146,7 +144,6 @@ memory_embedding_api_key_env: ""  # embedding key 的环境变量名（生产用
 # - 如果用户乱填 abcd、乱码、脚本片段、负数或越界数字，程序会自动回到默认值，不会崩溃。
 # - memory_archive_level 控制全量会话冷归档粒度：
 #   0: 尽量全量；1: 去掉重型工具展示数据；2: 摘要加关键事件；3: 最小恢复快照。
-# - memory_hook_retention_days 表示 hook 快照保留天数；0 表示不自动删除。
 # - memory_rule_routing_mode:
 #   off: 不做长期规则路由；soft: 命中后提示/自动读少量规则；strict: 强规则场景必须读权威文件。
 # - memory_rule_auto_read_limit 表示每轮最多自动读取多少条规则正文；0 表示不自动读取。
@@ -170,11 +167,9 @@ memory_embedding_api_key_env: ""  # embedding key 的环境变量名（生产用
 memory_archive_level: 3
 memory_hook_enabled: true
 memory_hook_archive_level: 3
-memory_hook_retention_days: 7
 memory_rule_routing_enabled: true
 memory_rule_routing_mode: "soft"
 memory_rule_auto_read_limit: 3
-memory_rule_receipt_enabled: true
 memory_resume_auto_context_enabled: false
 memory_resume_auto_context_mode: "trigger"
 memory_resume_auto_context_limit: 5
@@ -237,22 +232,10 @@ memory_archive_preview_level_2_chars: 512
 memory_archive_preview_level_3_chars: 160
 memory_archive_summary_chars: 96
 memory_archive_search_file_limit: 30
-memory_query_default_limit: 100
-memory_query_default_page_size: 100
 memory_query_content_preview_chars: 500
 memory_resume_archive_scan_limit: 0
 memory_resume_recommended_read_paths_limit: 20
 memory_doctor_recent_archive_file_limit: 5
-
-# 外部知识库配置：
-# - 默认全部为空，不会额外扫描，也不会拖慢普通聊天。
-# - index_file_name 是每个外部知识库目录里优先读取的索引文件名。
-# - directory_roots 是本地/挂载目录；api_sources 是查询接口；database_sources 是数据库连接或命名来源。
-# - 查询顺序固定为：目录 -> API -> 数据库，用户不需要再维护 query_order。
-external_knowledge_index_file_name: "MY_AGENT_INDEX.md"
-external_knowledge_directory_roots: []
-external_knowledge_api_sources: []
-external_knowledge_database_sources: []
 
 # 沙箱额外可写根（任务 work/output 之外），全局配置、对所有用户生效；测试共享工作区等场景配置。属于安全边界，模型不能改。
 additional_write_roots: []
@@ -276,12 +259,6 @@ protect_running_runtime: true
 # - 子代理默认应该像“不同职责的主代理”一样能独立干活。
 # - 角色模板只追加职责，不应该拿掉基础读写、汇报和任务目录内执行能力。
 enable_subagents: true
-
-# 子代理运行模式
-# - trusted_local_hardening: 默认本地硬化模式。保留系统安全底线，放宽流程型限制，优先把活干好。
-# - balanced: 后续用于更保守的日常默认。
-# - strict: 后续用于外部用户/高风险环境。
-subagent_mode: "trusted_local_hardening"
 
 # 同一根会话树同时最多保留多少个未结束子代理；不同 TUI/根任务互不占槽。
 # 对照 会话运行时 AgentControl：容量属于 root session，不由 owner 历史账本全局占用。
@@ -309,26 +286,13 @@ subagent_hierarchy_recovery_max_nodes: 200
 # 0 表示不再设置一份重复的“单次创建”默认上限；实际批量仍受 max_subagents 可用槽位约束。
 # 部署方若要更小批次，可显式填写正整数。
 subagent_hierarchy_max_children_per_tool_call: 0
-subagent_descendant_scan_limit: 128
 subagent_takeover_chain_max_depth: 0
-subagent_context_summary_inline_json_chars: 900
-subagent_context_summary_inline_text_chars: 500
 
 # 子代理调试追踪等级。
 # - 0: 默认关闭
 # - 1-2: 记录生命周期、调度、验收等 refs-only 信息
 # - 3-5: 逐步增加 prompt/tool/response 预览或完整细节，建议只在真实 E2E 排障时开启
 subagent_debug_trace_level: 0
-
-# 子代理记忆保留策略：
-# - subagent_memory_retention_policy 只是机器记录里的策略名，不做封闭枚举硬卡。
-#   默认 parent_review_or_cleanup 表示：子代理结束前写总结，是否提升到父级/长期记忆由父级或用户复核。
-#   也可以写 delete_after_days、keep_forever 或你自己的策略名，运行时会原样记录，方便后续清理器识别。
-# - subagent_memory_delete_after_days 只有清理器/后续维护任务会用；0 表示不按天数自动删除。
-# - subagent_destroy_summary_required 控制子代理销毁/归档前是否要求留下最终总结事实。
-subagent_memory_retention_policy: "parent_review_or_cleanup"
-subagent_memory_delete_after_days: 0
-subagent_destroy_summary_required: true
 
 # 自学习（默认关闭）：
 # - false：不自动总结 Skill；子代理的 lesson 只进入统一记忆候选账本，不生成任何 Skill 提案，也不创建提案目录。
@@ -387,30 +351,14 @@ user_id: "admin"
 auth_enabled: true
 admin_user_id: "admin"
 
-# 结果检查是否默认真实执行 runner 输出里的 tests：
-# - false: 保守默认，只检查 runner 填写的 tests 字段和证据，不自动跑命令。
-# - true: 普通收口默认执行 allowlist 内的 command/file/content 验证。
-# - 单次命令可用 `--execute-tests` / `--no-execute-tests` 覆盖这里。
-result_check_execute_tests: false
-
-# 结果检查真实执行 tests 时的单条测试超时秒数：
-# - 1 到 300 秒；超过范围会使用默认值。
-# - `subagents-tests --timeout` 可覆盖单次调用。
-result_check_timeout_seconds: 120
-
-# 合同/skill/小型真实验收的只读扫描预算：
+# 合同/skill 的只读扫描预算：
 # - contract_status_* 只影响 `contracts status` 这类看板/汇总扫描，不会阻断任务。
 # - skill_guard_* 只影响单个 skill 目录扫描时的结构检查预算。
-# - small_real_acceptance_max_runtime_seconds 是小型真实验收 case 的最大声明运行时间；0 表示不做这个上限判断。
-# - real_run_review_* 只影响真实运行复盘时读取多大的 report/log 文件；0 表示不读取对应大文件。
 contract_status_max_scan_files: 1000
 contract_status_max_report_bytes: 2000000
 contract_status_recent_findings_limit: 20
 skill_guard_max_files: 50
 skill_guard_max_size_kb: 1024
-small_real_acceptance_max_runtime_seconds: 900
-real_run_review_max_report_bytes: 5000000
-real_run_review_max_log_bytes: 1000000
 
 # runner_failure_policy 控制 runner 临时失败后的总尝试次数：
 # - "auto": 当前等价于最多 2 次，也就是首次失败后下一轮 dispatch 再试一次
@@ -456,10 +404,7 @@ estimated_output_tokens_per_second: 20.0
 probe_min_samples: 2
 probe_window_samples: 5
 probe_outlier_trim: true
-max_auto_split_depth: 2
-max_auto_retry_attempts: 3
 model_speed_profile_path: ""
-auto_bench_model_on_first_use: true
 
 # Gateway 本地控制面（第一版）：
 # - gateway 是后台常驻外壳，chat/TUI 后续会作为客户端 attach。
@@ -486,17 +431,15 @@ gateway_stop_timeout: 20
 # gateway_request_poll_interval 是后台 worker 空闲时多久检查一次 pending，单位秒，可填小数。
 gateway_request_timeout: 300
 gateway_request_poll_interval: 0.2
-# gateway ask 两层限流（取代原 gateway_request_workers 单层总闸）：
+# gateway ask 两层限流：
 # - gateway_user_inflight_limit：每用户同时在飞上限（"小坑"，防一个用户独吞把别人饿死）。
 # - gateway_global_inflight_limit：全局同时在飞上限（"大坑"，高天花板；超出的留在 pending
 #   排队，不拒不崩）。两个都是先设的限制值（不是吞吐目标），按机器/模型承载力调。
-# - gateway_request_workers 已废弃不再接线，保留只为兼容存量配置。
 # - gateway_processing_timeout_seconds 用来判断 processing 请求是否已经卡死。
 # - gateway_request_max_attempts：processing 租约实际卡死的累计失败上限，默认 2 即首次重排、再次卡死归档 failed。
 #   服务重启接续同一回合不占失败次数；旧 attempts 只记执行代次。0 表示不卡死次数上限，未知副作用门不放宽。
 gateway_user_inflight_limit: 8
 gateway_global_inflight_limit: 500
-gateway_request_workers: 10
 gateway_processing_timeout_seconds: 900
 gateway_request_max_attempts: 2
 # 后台会话全局线程池上限；不同 owner 和不同 thread 都可并发，同 thread
@@ -526,12 +469,10 @@ background_owner_wake_rescan_seconds: 120
 # 规范 owner home；每个 owner 仍由 retention.json 的 maintenance_interval_seconds 日级节流。
 # 该控制器只读结构化状态并执行清理，不创建 Agent、不调用 LLM。
 owner_maintenance_scan_interval_seconds: 60
-gateway_worker_join_timeout_seconds: 2
 # CLI/TUI 等待 Gateway 就绪的最长秒数。TUI 会先显示连接状态再后台探测；默认 3 秒，
 # 避免 Gateway 未启动时让用户面对长时间空白或无响应。
 gateway_ready_timeout_seconds: 3
 gateway_service_command_timeout_seconds: 30
-gateway_service_stop_timeout_seconds: 90
 # Gateway 安全重启（restart_gateway 工具、/restart）：
 # - gateway_restart_turn_wait_seconds：第一段，停领新请求后等在跑回合结束的上限秒数；超时后进入第二段，
 #   回合停在下一个副作用工具之前，由接班进程续跑。0 表示不等回合、直接进入第二段。
@@ -616,13 +557,10 @@ session_workspace: ""
 conversation_workspace: ""
 
 # 长期会话读取和后台唤醒 prompt 预算：
-# - thread/pending/context/recent 这些 limit 只控制一次读取多少条账本记录，不删除原始文件。
+# - pending/context/recent 这些 limit 只控制一次读取多少条账本记录，不删除原始文件。
 # - background_context_* 只裁剪注入后台主代理 prompt 的副本，不改消息、observation、case 或 agent tree 原文。
 # - background_claim_ttl_seconds 是后台主代理一次唤醒的 lease 有效期；运行中会 heartbeat 续约。
 # - background_claim_heartbeat_interval_seconds=0 表示按 TTL 自动取安全间隔。
-# - subagent_watch_interval_seconds 是 wait 工具登记“稍后查看子代理进度”的默认间隔；非精准闹钟，
-#   主代理忙或用户正在交互时会顺延到下一次后台 tick。非法或低于 60 会按 60 秒，最高 7200 秒。
-conversation_thread_list_limit: 100
 conversation_pending_wake_limit: 100
 conversation_context_recent_limit: 20
 conversation_unhandled_observation_limit: 20
@@ -640,7 +578,6 @@ background_completion_coalesce_seconds: 5
 # CLI 自动续跑/手动续跑的进程内轮数护栏（总代数上限，含首轮之外的续跑轮）。
 # 0/缺省按 8 处理；长任务无人值守部署可调大（默认防失控语义不变）。
 cli_resume_max_rounds: 8
-subagent_watch_interval_seconds: 120
 # 后台主代理唤醒时允许看到和调用的控制工具。
 # - 留空表示使用默认控制工具 profile，包含命令、后台进程与交互终端的完整操作入口。
 # - 写了列表就只暴露列表里的工具；执行参数和 prompt 说明共用这一份。
@@ -659,17 +596,6 @@ collaboration_workspace: ""
 # 等待多个代理响应时，才按这个上限一次推进多个 responder，避免协作证据串行排队。
 # 0 表示关闭自动放宽，完全按本轮 max_runners 执行。
 collaboration_auto_dispatch_max_runners: 8
-# 协作请求默认截止时间（秒）。
-# request_collaboration / raise_collaboration_event 如果没有显式传 deadline_at 或 deadline_seconds，
-# 系统会自动补这个相对 deadline，避免大规模协作因为少数 responder 慢/断网而无限等待。
-# 0 表示不自动补截止时间，只使用用户或模型显式给出的 deadline。
-collaboration_default_deadline_seconds: 120
-
-# 并发控制配置：
-# - concurrency_lock_enabled: 是否启用任务级读写锁，防止并发调度冲突
-# - task_lock_timeout_seconds: 获取任务锁超时时间（秒）
-concurrency_lock_enabled: true
-task_lock_timeout_seconds: 30
 
 # 审计日志配置：
 # - audit_enabled: 是否启用审计日志
@@ -701,10 +627,7 @@ daemon_probe: true
 daemon_reviewer: "parent-daemon"
 daemon_runner_instruction: ""
 
-# Gateway lease 心跳续期配置：
-# - lease_heartbeat_interval_seconds: worker 刷新一次 lease heartbeat 的间隔（默认 60 秒）。
-lease_heartbeat_interval_seconds: 60
-# 审计来源采集 worker（/audit 保证档里负责采集来源的子代理）的时间上限，单位秒（默认 300）：
+# 审计来源采集 worker（/audit 保证档里负责采集来源的子代理）的时间上限，单位秒：
 # 单次模型尝试最多跑这么久（实际按 60～900 秒夹取），即使普通 runner 超时关闭也照样分片；
 # 同一值也是该 worker 租约文件的有效期（至少 30 秒），过期没续约就判定原 worker 已停、可以被接管。
 lease_stale_without_heartbeat_seconds: 300
@@ -757,8 +680,7 @@ request_timeout: 240
 # 所以窗口较小（如 128K）的模型调大本值会让压缩更早触发。
 max_tokens: 65536
 
-# 当前模型真实上下文窗口 token 数。compact/preflight 用它计算何时折叠；
-# 不要和 chat_context_window_chars 混用，后者只是聊天界面的字符预算。
+# 当前模型真实上下文窗口 token 数。compact/preflight 用它计算何时折叠。
 model_context_window_tokens: 128000
 # 当前模型声明的输入模态（例如 [text, image]）。通常由 /model 档案的"输入模态"字段带入；留空表示未知，
 # 含图历史压缩时会用一次结构化视觉探针判断能否随图摘要，不按模型名猜。
@@ -1024,10 +946,6 @@ tool_embedding_api_base: ""
 tool_embedding_api_key: ""
 tool_embedding_api_key_env: ""
 
-# 工具调用协议固定 native（EXEC-31b：text 协议已删除——统一原生工具协议
-# 均只有 native 一种协议；不支持原生 tool_use 的模型会在 run 开始时报错，不做文本降级）。
-tool_protocol: "native"
-
 # MCP 客户端（短板6）：连接外部 MCP server（Model Context Protocol，JSON-RPC over stdio），
 # 把社区现成工具（GitHub/数据库/Slack 等）动态注册成 mcp__<server>__<tool> 前缀的工具，
 # 模型可像内置工具一样调用，调用时转发给对应 server 的 tools/call。
@@ -1077,10 +995,8 @@ conversation_terminal_tool_fold_max_chars: 6000
 # 缓存仍可能有效时保留更完整的有界工具尾巴；过期后才切换成短折叠，避免一分钟内追问就主动破坏热前缀。
 # 0 表示立即短折叠。不同模型/网关缓存时长可能不同，应按 provider cache-read 账本校准，不按延迟猜测。
 conversation_terminal_tool_hot_tail_seconds: 300
-chat_transcript_max_chars: 500000
 chat_collapse_preview_lines: 12
 chat_collapse_preview_chars: 900
-chat_context_window_chars: 200000
 chat_transcript_scroll_lines: 10
 cli_status_limit: 5
 cli_timeline_limit: 20
@@ -1099,25 +1015,10 @@ cli_audit_cleanup_days: 90
 
 # Dispatch 闭环保证配置：
 # - dispatch_max_consecutive_rounds: 最大连续调度轮数，防止无限循环
-# - dispatch_active_interval: 有任务变化时的调度间隔（秒）
-# - dispatch_idle_interval: 无任务变化时的调度间隔（秒）
 dispatch_max_consecutive_rounds: 20
-dispatch_active_interval: 5
-dispatch_idle_interval: 30
 dispatch_default_max_runners: 1
 dispatch_default_limit: 20
 dispatch_default_watch_interval: 30.0
-dispatch_pending_runner_scan_limit: 999
-
-# Watchdog 监控配置：
-# - watchdog_enabled: 是否启用 watchdog 监控 daemon 进程存活
-# - watchdog_interval: 检查间隔（秒）
-# - watchdog_max_restarts: 最多自动重启次数
-# - watchdog_restart_delay: 重启前等待时间（秒）
-watchdog_enabled: false
-watchdog_interval: 60
-watchdog_max_restarts: 3
-watchdog_restart_delay: 10
 # 决策增强：默认关闭；保存设置不发网络请求。修改时间只作用后续请求，不重置已开始阶段的预算。
 decision_enabled: false
 decision_experiment_enabled: false  # 仅实验能力开关；另需宿主显式有界授权，当前缺可靠输入上界时禁止实验联网

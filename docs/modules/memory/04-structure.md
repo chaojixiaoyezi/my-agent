@@ -1,5 +1,11 @@
 # Memory Structure
 
+## 记忆诊断回显的配置名单
+
+`cli/memory_doctor.py` 与 `cli/memory_commands/memory_doctor_cmd.py` 的 `_memory_config_payload` / `_build_archive_doctor` 只回显
+`AgentConfig` 上真实存在的 Memory 字段；名单与 `settings/_memory_types.MemorySettings` 同步删减（2026-09-27 去掉
+`memory_hook_retention_days`、`memory_rule_receipt_enabled`）。doctor 不是配置的读取方证据：只在这里出现的字段视为无读取方。
+
 child历史说明在不展示正文时不再提前读取完整来源或计算展示窗口，保留原线程说明及核验；三文件31项通过。三宿主seed物化峰值已定位，后续延后/释放尚未实施，12.4未完成。
 
 `tokens.py::estimate_tokens_from_json_parts`消费已序列化JSON片段，与原`estimate_tokens`共用长度/结构开销计算；调用者必须保持原JSON编码及原顶层结构，不能以Sequence的字符串表示计量。原`_payload_lengths`/有界小JSON判定不变；新增入口不计费、不写账、不引入第二tokenizer。Compact的可重放数组位于conversation模块，普通模型出站仍物化原协议消息。

@@ -167,13 +167,8 @@ class _HomeProviderConfigFields:
     # 仅向模型说明推荐的业务文件整理格式，不决定运行归档或文件权限。
     workspace_task_path_template: str = "tasks/{date}/{task_slug}"
     home_context_enabled: bool = True
-    home_lesson_auto_read_limit: int = 3
     home_lesson_stale_caveat_days: int = 7
     run_task_workspace_enabled: bool = True
-    external_knowledge_index_file_name: str = "MY_AGENT_INDEX.md"
-    external_knowledge_directory_roots: list[str] = field(default_factory=list)
-    external_knowledge_api_sources: list[str] = field(default_factory=list)
-    external_knowledge_database_sources: list[str] = field(default_factory=list)
     timezone: str = ""  # IANA 时区名(如 Asia/Shanghai、America/New_York);空=服务器本地(审计 #21)
     week_start: str = "monday"  # 周起始 locale:monday/sunday/saturday,影响"本周"范围计算
 
@@ -256,9 +251,6 @@ class _ToolConfigFields:
     tool_embedding_api_base: str = ""
     tool_embedding_api_key: str = ""
     tool_embedding_api_key_env: str = ""
-    # 工具调用协议固定 native（EXEC-31b: text 协议已删除——对照组 会话运行时/轻量运行时/
-    # 终端交互 均只有 native；不支持原生 tool_use 的模型直接报错，不做文本降级）。
-    tool_protocol: str = "native"
     # MCP 客户端(短板6)：声明要连接的外部 MCP server，把社区现成工具(GitHub/DB/Slack 等)
     # 动态注册成 mcp__<server>__<tool> 前缀的工具。结构：
     #   {server_name: {command: str, args: [..], env: {..}, timeout: int, connect_timeout: int,
@@ -280,11 +272,7 @@ class _RuntimeBudgetConfigFields:
     contract_status_recent_findings_limit: int = 20
     skill_guard_max_files: int = 50
     skill_guard_max_size_kb: int = 1024
-    small_real_acceptance_max_runtime_seconds: int = 900
-    real_run_review_max_report_bytes: int = 5_000_000
-    real_run_review_max_log_bytes: int = 1_000_000
     runner_auto_concurrency: int = 8
-    conversation_thread_list_limit: int = 100
     conversation_pending_wake_limit: int = 100
     conversation_context_recent_limit: int = 20
     conversation_unhandled_observation_limit: int = 20
@@ -298,7 +286,6 @@ class _RuntimeBudgetConfigFields:
     background_claim_heartbeat_interval_seconds: int = 0
     background_completion_coalesce_seconds: int = 5
     cli_resume_max_rounds: int = 8
-    subagent_watch_interval_seconds: int = 120
     background_main_agent_allowed_tools: list[str] = field(default_factory=list)
 
 
@@ -377,11 +364,9 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     memory_archive_level: int = 3
     memory_hook_enabled: bool = True
     memory_hook_archive_level: int = 3
-    memory_hook_retention_days: int = 7
     memory_rule_routing_enabled: bool = True
     memory_rule_routing_mode: str = "soft"
     memory_rule_auto_read_limit: int = 3
-    memory_rule_receipt_enabled: bool = True
     memory_resume_auto_context_enabled: bool = False
     memory_resume_auto_context_mode: str = "trigger"
     memory_resume_auto_context_limit: int = 5
@@ -434,8 +419,6 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     memory_archive_preview_level_3_chars: int = 160
     memory_archive_summary_chars: int = 96
     memory_archive_search_file_limit: int = 30
-    memory_query_default_limit: int = 100
-    memory_query_default_page_size: int = 100
     memory_query_content_preview_chars: int = 500
     memory_resume_archive_scan_limit: int = 0
     memory_resume_recommended_read_paths_limit: int = 20
@@ -454,7 +437,6 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 正在运行的安装目录对所有工具只读（含 Full Access），部署是唯一更新方式；只在调试安装本身时关闭。
     protect_running_runtime: bool = True
     enable_subagents: bool = True
-    subagent_mode: str = "trusted_local_hardening"
     # 当前根会话树可同时保留的未结束子代理数；不同 TUI/根任务互不占槽。
     max_subagents: int = 8
     subagent_board_limit: int = 5
@@ -468,14 +450,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     subagent_hierarchy_default_max_depth: int = 0
     subagent_hierarchy_recovery_max_nodes: int = 200
     subagent_hierarchy_max_children_per_tool_call: int = 0
-    subagent_descendant_scan_limit: int = 128
     subagent_takeover_chain_max_depth: int = 0
-    subagent_context_summary_inline_json_chars: int = 900
-    subagent_context_summary_inline_text_chars: int = 500
     subagent_debug_trace_level: int = 0
-    subagent_memory_retention_policy: str = "parent_review_or_cleanup"
-    subagent_memory_delete_after_days: int = 0
-    subagent_destroy_summary_required: bool = True
     # 自学习默认关闭；开启后主代理完成的多轮工具任务会在后台自动总结成 owner 的 skills/learned/ Skill（自动闸门代替人工确认），
     # 子代理 lesson 提案也会立即走原确认链自动安装。
     enable_self_learning: bool = False
@@ -490,8 +466,6 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     enable_gateway_restart_tool: bool = True
     # TUI 发现 Gateway 换了安装（runtime_prefix 不同）且自身空闲时在同一终端原地换成同版客户端（同会话、不退出全屏）；关闭后只在 footer 提示。
     tui_follow_gateway_upgrade: bool = True
-    result_check_execute_tests: bool = False
-    result_check_timeout_seconds: int = 120
     dynamic_timeout_safety_margin: float = 2.0
     # 主会话后台命令完成后进入既有持久唤醒队列；关闭后仍可主动查询或长等待。
     background_process_notifications: bool = True
@@ -506,10 +480,7 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     probe_min_samples: int = 2
     probe_window_samples: int = 5
     probe_outlier_trim: bool = True
-    max_auto_split_depth: int = 2
-    max_auto_retry_attempts: int = 3
     model_speed_profile_path: str = ""
-    auto_bench_model_on_first_use: bool = True
     user_id: str = "admin"
     # 多租户鉴权配置
     auth_enabled: bool = True
@@ -525,9 +496,6 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     gateway_stop_timeout: int = 20
     gateway_request_timeout: int = 300
     gateway_request_poll_interval: float = 0.2
-    # 【已废弃,不再接线】原网关 ask 单层总闸(全局工位数),已被下面的两层限流取代;
-    # 字段保留只为兼容存量配置文件不报错。
-    gateway_request_workers: int = 10
     # 网关 ask 两层限流(取代原「全局总 10」单层总闸,接真实 /ask 链路):
     # 每用户「小坑」=单用户同时在飞上限(防一个用户独吞把别人饿死);
     # 全局「大坑」=总在飞上限(高天花板,超出留在 pending 排队、不拒不崩)。
@@ -570,10 +538,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 网关局部信任 token(暴露部署用):非空时,非回环来源须带匹配的 X-Gateway-Token 才被信任,
     # 否则降为匿名 USER。默认空=只靠回环 peer 信任(适配器/CLI 走 127.0.0.1)。
     gateway_auth_token: str = ""
-    gateway_worker_join_timeout_seconds: int = 2
     gateway_ready_timeout_seconds: int = 3
     gateway_service_command_timeout_seconds: int = 30
-    gateway_service_stop_timeout_seconds: int = 90
     # 安全重启第一段：停领新请求后，等本进程在跑回合结束的上限秒数；超时后关闭工具关口，停在工具前的回合由接班进程续跑。
     gateway_restart_turn_wait_seconds: int = 300
     # 安全重启第二段：等执行中的副作用工具归零的上限秒数，0=不限；超时取消本次重启并恢复服务，不强杀。
@@ -605,12 +571,6 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 只有已有 collaboration request 等待多个代理响应时，才用这个上限减少串行等待。
     # 0 表示关闭自动放宽，完全按 dispatch/max_runners 原值执行。
     collaboration_auto_dispatch_max_runners: int = 8
-    # 协作请求默认截止时间。模型没有显式传 deadline_at/deadline_seconds 时，
-    # 系统会给 request 自动补一个相对 deadline，避免大规模协作无限等全员。
-    # 0 表示不自动补截止时间，只使用模型或用户显式给出的 deadline。
-    collaboration_default_deadline_seconds: int = 120
-    concurrency_lock_enabled: bool = True
-    task_lock_timeout_seconds: int = 30
     audit_enabled: bool = True
     audit_log_path: str = ""
     daemon_planner: bool = True
@@ -624,7 +584,6 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     daemon_probe: bool = True
     daemon_reviewer: str = "parent-daemon"
     daemon_runner_instruction: str = ""
-    lease_heartbeat_interval_seconds: int = 60
     lease_stale_without_heartbeat_seconds: int = 300
     log_level: str = "info"
     extension_plugins: list[str] = field(default_factory=list)
@@ -668,10 +627,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 已结束工具回合在这段缓存热期内保留更完整的有界投影，过期后才切换为短折叠。
     # 0 表示立即使用短折叠；不同 provider 的缓存寿命应通过真实 usage 账本校准。
     conversation_terminal_tool_hot_tail_seconds: int = 300
-    chat_transcript_max_chars: int = 500_000
     chat_collapse_preview_lines: int = 12
     chat_collapse_preview_chars: int = 900
-    chat_context_window_chars: int = 200_000
     chat_transcript_scroll_lines: int = 10
     cli_status_limit: int = 5
     cli_timeline_limit: int = 20
@@ -688,17 +645,9 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     cli_audit_cleanup_days: int = 90
     # Dispatch 闭环保证配置
     dispatch_max_consecutive_rounds: int = 20
-    dispatch_active_interval: int = 5
-    dispatch_idle_interval: int = 30
     dispatch_default_max_runners: int = 1
     dispatch_default_limit: int = 20
     dispatch_default_watch_interval: float = 30.0
-    dispatch_pending_runner_scan_limit: int = 999
-    # Watchdog 配置
-    watchdog_enabled: bool = False
-    watchdog_interval: int = 60
-    watchdog_max_restarts: int = 3
-    watchdog_restart_delay: int = 10
     config_warnings: list[str] = field(default_factory=list)
     config_path: str = ""
     config_sources: dict[str, dict[str, object]] = field(default_factory=dict)

@@ -318,15 +318,6 @@ def _create_run_params_from_build(request: CreateRunBuildRequest) -> CreateRunPa
         attributes=create_task_attributes(raw_params, request.agent),
         **_lineage_fields(raw_params, request.agent),
         parent_access_mode=_config_access_mode(request.agent),
-        memory_retention_policy=_config_string(
-            request.agent,
-            "subagent_memory_retention_policy",
-            "parent_review_or_cleanup",
-        ),
-        memory_delete_after_days=_config_int(request.agent, "subagent_memory_delete_after_days", 0),
-        destroy_summary_required=_config_bool(
-            request.agent, "subagent_destroy_summary_required", True
-        ),
     )
 
 
@@ -452,26 +443,6 @@ def _config_access_mode(agent) -> str:
     value = getattr(getattr(agent, "config", None), "access_mode", DEFAULT_COMMAND_ACCESS_MODE)
     text = str(value).strip() if isinstance(value, str) else ""
     return text or DEFAULT_COMMAND_ACCESS_MODE
-
-
-def _config_string(agent, key: str, default: str) -> str:
-    value = getattr(getattr(agent, "config", None), key, default)
-    text = str(value).strip() if isinstance(value, str) else ""
-    return text or default
-
-
-def _config_int(agent, key: str, default: int) -> int:
-    value = getattr(getattr(agent, "config", None), key, default)
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return default
-    return max(0, parsed)
-
-
-def _config_bool(agent, key: str, default: bool) -> bool:
-    value = getattr(getattr(agent, "config", None), key, default)
-    return bool_value(value, default=default)
 
 
 # LLM: 根/递归共用属性装配，宿主工具上限、模型引用和智能程度档位覆盖伪造值，决策与命名来源只能由宿主在准备后写入。

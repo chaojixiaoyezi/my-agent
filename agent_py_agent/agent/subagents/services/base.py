@@ -72,9 +72,6 @@ class CreateRunParams:
     normalize_role: bool = True
     attributes: dict[str, object] | None = None
     parent_access_mode: str = ""
-    memory_retention_policy: str = "parent_review_or_cleanup"
-    memory_delete_after_days: int = 0
-    destroy_summary_required: bool = True
 
 
 # LLM: task 是原样提交的同一对象；model_advice 仅供新 thread 初始化，不进 task attrs、不赋予模型采用权，重冻须保留精确关联。
@@ -240,19 +237,8 @@ def _string_items(value: object) -> list[str]:
     return [text] if text else []
 
 
-def _memory_retention_policy(value: object) -> str:
-    text = str(value or "").strip()
-    return text or "parent_review_or_cleanup"
-
-
-def _nonnegative_int(value: object) -> int:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return 0
-    return max(0, parsed)
-
-
+# LLM: 身份与记忆范围只由系统生成；memory_scope 记录见 _memory_scope，不承载任何模型或配置传入的策略。
+# 函数用途: 创建时给任务写 runtime_identity、config overlay 和 memory_scope/runtime_config_scope 属性。
 def _apply_runtime_identity_and_memory_scope(task: Any, params: CreateRunParams, *, parent_task: Any | None) -> None:
     owner_id = str(task.owner or params.owner or "").strip()
     task.runtime_identity.root_run_id = task.root_id or task.id
@@ -265,18 +251,19 @@ def _apply_runtime_identity_and_memory_scope(task: Any, params: CreateRunParams,
     apply_config_overlay_ref(task, params, parent_task=parent_task)
     task.attributes = {
         **dict(task.attributes or {}),
-        "memory_scope": _memory_scope(task, params),
+        "memory_scope": _memory_scope(task),
         "runtime_config_scope": runtime_config_scope(task),
     }
 
 
-def _memory_scope(task: Any, params: CreateRunParams) -> dict[str, object]:
+# LLM: 记录只写 namespace 与 auto_promote 两个真实读取方会看的事实。v1 里的 retention_policy /
+#   delete_after_days / destroy_summary_required 没有任何读取方（配置项已于参数减量第 1 批删除），
+#   旧任务记录里残留的这三个键不影响 recall / 进度展示；没有摘要、哈希或签名覆盖此记录。
+# 函数用途: 生成子代理任务的 memory_scope 属性。
+def _memory_scope(task: Any) -> dict[str, object]:
     return {
-        "schema_version": "subagent_memory_scope.v1",
+        "schema_version": "subagent_memory_scope.v2",
         "namespace": task.runtime_identity.memory_namespace,
-        "retention_policy": _memory_retention_policy(params.memory_retention_policy),
-        "delete_after_days": _nonnegative_int(params.memory_delete_after_days),
-        "destroy_summary_required": bool(params.destroy_summary_required),
         "auto_promote_to_parent_memory": False,
     }
 

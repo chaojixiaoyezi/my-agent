@@ -41,14 +41,12 @@ class _Backend:
 def _agent(
     *,
     native_supported: bool,
-    protocol: str = "native",
     enable_tools: bool = True,
     text_models: list[str] | None = None,
 ) -> SimpleNamespace:
     backend = _Backend(native_supported=native_supported)
     return SimpleNamespace(
         config=SimpleNamespace(
-            tool_protocol=protocol,
             enable_tools=enable_tools,
             tool_protocol_text_models=list(text_models or []),
         ),
@@ -77,14 +75,6 @@ def test_failed_native_capability_probe_does_not_silently_select_text() -> None:
         select_tool_protocol(agent, run_id="run-text")
 
     assert agent.backend.probes == 1
-
-
-def test_explicit_text_protocol_rejected_after_text_removal() -> None:
-    # EXEC-31b: text 协议已删除, 配置 text 直接报错
-    agent = _agent(native_supported=True, protocol="text")
-
-    with pytest.raises(ValueError, match="invalid tool protocol"):
-        select_tool_protocol(agent, run_id="run-explicit-text")
 
 
 def test_tools_disabled_selects_non_native_snapshot_without_probe() -> None:
@@ -129,12 +119,3 @@ def test_empty_text_models_leaves_native_probe_untouched() -> None:
 
     assert snapshot.source_protocol == "native"
     assert agent.backend.probes == 1
-
-
-def test_text_models_ignored_when_protocol_explicitly_text() -> None:
-    # EXEC-31b: text 协议已删除;显式 text 配置直接报错(不 probe)
-    agent = _agent(native_supported=True, protocol="text", text_models=["deepseek-v4-flash"])
-
-    with pytest.raises(ValueError, match="invalid tool protocol"):
-        select_tool_protocol(agent, run_id="run-text-explicit")
-    assert agent.backend.probes == 0

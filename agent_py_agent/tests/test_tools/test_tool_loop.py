@@ -61,9 +61,8 @@ from .backends import (
 
 
 def _text_agent_config(**kwargs) -> _AgentConfig:
-    """Make the legacy fake text backends explicit instead of relying on fallback."""
+    """Build the AgentConfig for the fake tool backends; the protocol is fixed native in code, not config."""
 
-    kwargs.setdefault("tool_protocol", "native")
     return _AgentConfig(**kwargs)
 
 
@@ -542,7 +541,6 @@ def test_tool_loop_and_prompt_transcript():
         (workspace / "notes.txt").write_text("hello tool world", encoding="utf-8")
         cfg = _text_agent_config(
             enable_tools=True,
-            tool_protocol="native",
             memory_path="memory.jsonl",
         )
         agent = SimpleAgent(cfg, workspace)
@@ -771,7 +769,7 @@ def test_runtime_tool_sections_only_collapse_catalog_when_native_is_effective(tm
     )
 
     agent = SimpleAgent(
-        _text_agent_config(enable_tools=True, tool_protocol="native", memory_path="memory.jsonl"),
+        _text_agent_config(enable_tools=True, memory_path="memory.jsonl"),
         tmp_path,
     )
     snapshot = agent.tools.runtime_snapshot()
@@ -937,7 +935,6 @@ def test_tool_loop_rejects_unclosed_write_then_executes_complete_repair():
         workspace = Path(td)
         cfg = _text_agent_config(
             enable_tools=True,
-            tool_protocol="native",
             memory_path="memory.jsonl",
         )
         agent = SimpleAgent(cfg, workspace)

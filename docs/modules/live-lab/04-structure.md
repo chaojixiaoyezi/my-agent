@@ -20,3 +20,4 @@ Live Lab 现在只作为真实链路验证辅助，不作为主架构来源。
 - `reporter.py` 在 `--real-llm` 下必须完成一次有界真实生成并验证非空响应，不能用环境变量存在代替模型可用性。
 - `main_agent_complex_case.py` 的 `tool-recovery` case 同时核对最终产物和受保护缺失输入没有被创建。
 - `log_analysis_replay.py`/`log_analysis_replay_stages.py` 已随 log_analysis 模块删除（2026-06-26）；Live Lab 不再含安全日志离线 replay case。
+- `session.py` 写出的测试配置只含当前 `AgentConfig` 真实存在的键；已删除的配置项（如 2026-09-27 删掉的 `gateway_request_workers`）不再写入，避免加载时的 unknown key 告警。
