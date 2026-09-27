@@ -117,6 +117,15 @@ for shared setup and `monkeypatch` for environment variables.
 **Fixtures** -- shared in `conftest.py`, test-specific in the test file.
 Keep fixtures minimal; prefer factory functions for complex objects.
 
+**等待异步结果 / Waiting for asynchronous effects** -- 按键、后台线程（`asyncio.to_thread`）、HTTP 或写文件之后，
+不要固定 `sleep` 再断言：CI 机器一慢就会读到还没发生的状态（2026-09-27 `test_tui_permissions_menu` 在线上读到 `ask`）。
+用有界的状态等待：条件满足立即返回，超时写明“在等什么”并附现场；TUI 测试复用
+`test_tui_decision_menu` 里的 `wait_ui(ui, predicate, what)` / `wait_app(app, predicate, what)`。
+prompt_toolkit 在每次重绘之后才登记新浮层的父子关系，浮层上的回车保存、Esc 取消要到那之后才生效（只有 RadioList
+自己的上下键一直能用）；所以对话框刚出现就发“↓回车”会丢掉回车，要用 `wait_dialog_ready(app, text, what)`
+等对话框文字出现且焦点窗口已登记父级再按键。要断言“某状态保持不变”时，先等一个表示动作已被处理的正向信号
+（对话框出现或关闭），再断言没变。修这类测试时，用人为延迟（给读写函数打补丁 sleep）证明旧写法会失败、新写法会通过。
+
 ---
 
 ## 6. Verification Commands / 验证命令

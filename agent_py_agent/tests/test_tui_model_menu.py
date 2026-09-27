@@ -2,6 +2,7 @@
 
 import asyncio
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -11,18 +12,33 @@ from prompt_toolkit.output import DummyOutput
 
 from agent_py_agent.agent.settings.model_profiles import model_profiles_path, read_model_profiles
 from agent_py_agent.agent.settings.thread_model_selection import execute_local_model_operation
+from agent_py_agent.cli.chat_parts import tui_model_menu
 from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
 from agent_py_agent.cli.chat_parts.tui_ui_setup import make_tui_app
 from agent_py_agent.tests.test_model_profiles import add
 from agent_py_agent.tests.test_thread_model_selection import host_with_store
+from agent_py_agent.tests.test_tui_decision_menu import visible, wait_app, wait_dialog_ready
 from agent_py_agent.tests.test_tui_prompt_toolkit_pipe import _app_params
 
 
-async def settle():
-    await asyncio.sleep(0.15)
+# LLM: 只在模型配置读写线程里多等 delay 秒，返回值不变；_request_data 按调用时的模块属性取 _request_data_sync。
+# 函数用途: 让模型菜单的读写变慢，证明测试按界面与落盘状态等待，而不是赌固定时长够用。
+def slow_model_requests(monkeypatch, delay):
+    if not delay:
+        return
+    original = tui_model_menu._request_data_sync
+
+    def slow(*args, **kwargs):
+        time.sleep(delay)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(tui_model_menu, "_request_data_sync", slow)
 
 
-def test_tui_menu_add_select_cancel_and_secret_history(tmp_path):
+@pytest.mark.parametrize("delay", [0.0, 0.5], ids=["fast", "slow_io"])
+def test_tui_menu_add_select_cancel_and_secret_history(tmp_path, monkeypatch, delay):
+    slow_model_requests(monkeypatch, delay)
+
     async def scenario():
         runtime = TuiRuntime("models")
         runtime.publish_session(version="0.3.0", model="deployment-model", workspace=str(tmp_path))
@@ -37,20 +53,21 @@ def test_tui_menu_add_select_cancel_and_secret_history(tmp_path):
                 app = make_tui_app(params)
                 runner = asyncio.create_task(app.run_async())
                 try:
-                    await settle()
+                    await wait_app(app, lambda: app.is_running, "TUI 启动")
                     pipe.send_text("/model\r")
-                    await settle()
+                    await wait_dialog_ready(app, "模型配置 /model", "/model 打开模型菜单")
                     assert app._my_agent_model_menu_active
                     assert len(app._my_agent_model_float_container.floats) == 1
                     pipe.send_bytes(b"\x1b[B\r")  # 新增
-                    await settle()
+                    await wait_dialog_ready(app, "新增模型 · 选择接口", "进入选择接口")
                     pipe.send_bytes(b"\x1b[B\r")  # Anthropic
-                    await settle()
+                    await wait_dialog_ready(app, "新增模型 · 填写配置", "进入填写配置")
                     pipe.send_text("MiniMax-M2.7\thttps://example.test/anthropic\tonly-private-secret\t")
-                    await settle()
+                    await wait_app(app, lambda: "only-private-secret" in visible(app), "三项配置都已填入")
                     pipe.send_bytes(b"\x01\x0b")
                     pipe.send_text("96000\t\r")  # 保存
-                    await settle()
+                    # 保存在线程里确认成功后才回到主菜单并显示结果，所以看到“保存成功”时配置必须已经落盘。
+                    await wait_dialog_ready(app, "保存成功。", "保存后回到模型菜单")
                     data = read_model_profiles(model_profiles_path(host.home_paths))
                     assert len(data["profiles"]) == 1
                     row = next(iter(data["profiles"].values()))
@@ -58,17 +75,16 @@ def test_tui_menu_add_select_cancel_and_secret_history(tmp_path):
                     assert row["model_context_window_tokens"] == 96000
                     assert runtime.store.snapshot().selected_model_name == "deployment-model"
                     pipe.send_bytes(b"\r")  # 选择已有模型
-                    await settle()
+                    await wait_dialog_ready(app, "当前会话模型 · 不影响其他 TUI / IM 会话", "打开当前会话模型列表")
                     pipe.send_bytes(b"\x1b[B\r")
-                    await settle()
+                    await wait_dialog_ready(app, "本会话已选择 MiniMax-M2.7", "选择后回到模型菜单")
                     data = read_model_profiles(model_profiles_path(host.home_paths))
                     assert data["selected"] == "default"
                     assert execute_local_model_operation(host, params.current_session_id, "list", {})["selected"] != "default"
                     assert runtime.store.snapshot().selected_model_name == "MiniMax-M2.7"
                     assert host.config.model_name == "deployment-model"
                     pipe.send_bytes(b"\x1b")
-                    await asyncio.sleep(0.3)
-                    assert not app._my_agent_model_menu_active
+                    await wait_app(app, lambda: not app._my_agent_model_menu_active, "Esc 关闭模型菜单")
                     assert params.jobs.empty() and not params.stop_event.is_set()
                     history_files = list(tmp_path.rglob("input_history"))
                     assert all("only-private-secret" not in path.read_text() for path in history_files)
@@ -200,10 +216,9 @@ def test_auth_escape_cancels_login_without_interrupting_agent(tmp_path, monkeypa
             app = make_tui_app(params)
             runner = asyncio.create_task(app.run_async())
             try:
-                await settle()
+                await wait_app(app, lambda: app.is_running, "TUI 启动")
                 login = asyncio.create_task(tui_model_auth._login(app, params.agent, "auth-cancel", "account"))
-                await settle()
-                assert app._my_agent_model_float_container.floats
+                await wait_dialog_ready(app, None, "登录对话框出现且可按键")
                 pipe.send_bytes(b"\x1b")
                 result = await asyncio.wait_for(login, 2)
                 assert "已取消" in result and calls == ["auth_start", "auth_cancel"]

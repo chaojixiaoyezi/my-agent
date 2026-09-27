@@ -15,6 +15,7 @@ from agent_py_agent.cli.chat_parts import plugin_command_client, plugin_command_
 from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
 from agent_py_agent.cli.chat_parts.tui_ui_setup import make_tui_app
 from agent_py_agent.tests.test_plugin_command_catalog import _plugin
+from agent_py_agent.tests.test_tui_decision_menu import wait_app
 from agent_py_agent.tests.test_tui_prompt_toolkit_pipe import _app_params
 
 
@@ -91,7 +92,9 @@ def test_native_keybindings_refresh_accept_stash_and_submit_original_revision(
                     else:
                         pipe.send_text("/plugins help")
                         pipe.send_bytes(b"\r")
-                    await asyncio.sleep(0.12)
+                    # /plugins help 在 asyncio.to_thread 里执行并刷新目录；按状态等，不赌固定时长。
+                    await wait_app(app, lambda: binding.client.snapshot() == current and buffer.text == "/plugins@sample ",
+                                   "插件目录刷新且草稿恢复")
                     assert binding.client.snapshot() == current
                     assert (
                         buffer.text == "/plugins@sample " and binding.revision == initial.revision

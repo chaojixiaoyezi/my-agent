@@ -88,14 +88,31 @@ def ready_state(app):
     return floats, visible(app)
 
 
-# LLM: 只轮询测试谓词，固定总截止时间；不重复发键、不改原 Future/handler，不将超时当成功。
-# 函数用途: 等待真实 UI 出现目标状态，超时直接附当前界面帮助定位。
-async def wait_ui(ui, predicate):
+# LLM: 只轮询测试谓词，固定总截止时间；不重复发键、不改原 Future/handler，不将超时当成功。其它 TUI 测试也复用本函数。
+# 函数用途: 等待真实 UI 出现目标状态，超时写明在等什么（what）并附当前界面帮助定位。
+async def wait_ui(ui, predicate, what="TUI 状态"):
     deadline = asyncio.get_running_loop().time() + 3
     while not predicate():
         if asyncio.get_running_loop().time() >= deadline:
-            raise AssertionError("等待 TUI 状态超时：\n" + visible(ui.app))
+            raise AssertionError(f"等待{what}超时（3 秒）：\n" + visible(ui.app))
         await asyncio.sleep(0.01)
+
+
+# 函数用途: 直接对 app 等待条件（不需要 running() 的 ui 包装），超时写明在等什么。
+async def wait_app(app, predicate, what):
+    await wait_ui(SimpleNamespace(app=app), predicate, what)
+
+
+# LLM: prompt_toolkit 在每次重绘之后才更新布局父子关系（Layout.update_parents_relations），合并键绑定时沿父级往上找；
+#   新浮层在第一次重绘前找不到父级，浮层上的回车保存、Esc 取消都不生效，只有 RadioList 自己的上下键能用。
+#   所以“能按键”要同时满足：对话框已出现，且焦点所在窗口已登记父级（不数重绘次数，免得错过已经发生的那次）。
+# 函数用途: 等对话框出现并且浮层上的按键已生效；text 给出对话框里独有的一段文字，None 表示只要有浮层。
+async def wait_dialog_ready(app, text, what):
+    def ready():
+        shown = bool(app._my_agent_model_float_container.floats) if text is None else text in visible(app)
+        return shown and app.layout.get_parent(app.layout.current_window) is not None
+
+    await wait_app(app, ready, what)
 
 
 # LLM: Enter/Esc 等新浮层已真实绘制再继续，避免布局已变但按键缓存未刷新；编辑键也等待对应控件绘制。
