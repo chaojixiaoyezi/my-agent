@@ -6,10 +6,9 @@ import hashlib
 import time
 from pathlib import Path
 
-from ..backends.decision_protocol import decision_json
+from ..backends.decision_protocol import decision_json, decision_request_excerpt
 from ..common.cancellation import ToolCancelled, raise_if_cancelled
 from ..concurrency.interrupt import is_interrupted
-from ..conversation.decision_outcome_log import record_decision_skip
 from ..conversation.decision_service import (
     begin_decision_stage,
     decide,
@@ -50,8 +49,8 @@ def todo_priority_hint(agent: object, root: Path, run_id: str, payload: dict) ->
         if not _eligible(agent, params, root, run_id, payload):
             return None
         stage = begin_decision_stage(agent, params, operation_id=_operation_id(params, run_id, payload))
-        # 短路：阶段正常且该点开启后才检查原话（超长时 _request_ready 留 skipped 审计记录）。
-        if stage.error_code or _POINT not in stage.enabled_points or not _request_ready(agent, stage):
+        # 短路：阶段正常且该点开启后才检查原话；长原话取首尾节选照常决策，不再整点跳过。
+        if stage.error_code or _POINT not in stage.enabled_points or not _request_excerpt(agent)[0]:
             return None
         _check_interrupted()
         state, questions, revision = _material(agent, payload)
@@ -133,45 +132,27 @@ def _candidate_rows(agent: object, payload: dict) -> list[dict]:
     return rows
 
 
-# LLM: Never send a partial current request; if it is too long, skip the
-# optional decision rather than giving Jev a misleading fragment.
-# 上限来自配置 decision_request_max_chars：0 表示不限制（仍受决策协议 256 KB 输入上限约束）。
-# 函数用途: 取出当前请求的有界原文，超长或缺失时保留原计划。
-def _request_text(agent: object) -> str:
-    limit = decision_request_max_chars(getattr(agent, "config", None))
+# LLM: 原话缺失（后台轮）返回空串，不是规划场景；超出配置 decision_request_max_chars 的预算时取首尾节选并附完整性标注，
+#   决策模型据标注知道是节选，信息不足时选 need_data；绝不把节选冒充完整原话。
+# 函数用途: 取出当前请求（必要时为首尾节选）与完整性标注，供规划建议使用。
+def _request_excerpt(agent: object) -> tuple[str, dict[str, object]]:
     value = getattr(agent, "_current_user_prompt", "")
     if type(value) is not str or not value:
-        return ""
-    return value if limit == 0 or len(value) <= limit else ""
-
-
-# LLM: 在阶段之后调用：原话缺失或超长时整点跳过；超长（已到触发点、该点已开启）留一条 skipped 审计记录，
-#   原话为空（后台轮）本就不是规划场景，不记。
-# 函数用途: 判断当前请求能否进入规划建议，超长时写跳过记录（写文件副作用）。
-def _request_ready(agent: object, stage: object) -> bool:
-    if _request_text(agent):
-        return True
-    if _request_too_long(agent):
-        record_decision_skip(agent, stage, _POINT, "request_too_long")
-    return False
-
-
-# LLM: 只看长度这一结构化事实，不读内容；与 _request_text 同一上限。
-# 函数用途: 判断当前请求是否因超过上限而被跳过（用于写 skipped 审计记录）。
-def _request_too_long(agent: object) -> bool:
-    limit = decision_request_max_chars(getattr(agent, "config", None))
-    value = getattr(agent, "_current_user_prompt", "")
-    return limit > 0 and type(value) is str and len(value) > limit
+        return "", {}
+    return decision_request_excerpt(value, decision_request_max_chars(getattr(agent, "config", None)))
 
 
 # LLM: Candidate keys are host-generated, not inferred from the model. The
 # digest includes exact IDs, order, titles, statuses and display revision.
+# 当前请求可能是首尾节选，current_request_completeness 如实标注，并随 state 一起进入版本摘要。
 # 函数用途: 将现有 Todo 编成有限选择题，并给等待后的原账本复核提供稳定摘要。
 def _material(agent: object, payload: dict) -> tuple[dict, dict, str]:
     rows = _candidate_rows(agent, payload)
     generation, plan_revision = task_progress_display_identity(payload)
+    request, completeness = _request_excerpt(agent)
     state = {
-        "current_request": _request_text(agent),
+        "current_request": request,
+        "current_request_completeness": completeness,
         "generation_id": generation,
         "plan_revision": plan_revision,
         "todos": [{"candidate": f"todo_{i}", **row} for i, row in enumerate(rows, 1)],
@@ -179,7 +160,9 @@ def _material(agent: object, payload: dict) -> tuple[dict, dict, str]:
     }
     criteria = {f"todo_{i}": {"item_id": row["id"], "title": row["title"], "status": row["status"]}
                 for i, row in enumerate(rows, 1)}
-    questions = {"priority": {"type": "choice", "instructions": "选一个当前最值得优先评估的已有 Todo；不能创造新项。",
+    questions = {"priority": {"type": "choice", "instructions": (
+        "选一个当前最值得优先评估的已有 Todo；不能创造新项。current_request 可能是首尾节选"
+        "（见 current_request_completeness），信息不足时选 need_data。"),
                               "criteria": {**criteria, **_NON_SELECTIONS}}}
     revision = hashlib.sha256(decision_json({"state": state, "questions": questions})).hexdigest()
     return state, questions, revision

@@ -108,7 +108,8 @@
       `test_constant_names_unique.py` 的白名单并写原因；以后新增同名数值常数即测试失败，白名单里的名字不再重复也失败。
     - 不改任何数值，行为不变。
   - **第二批：决策点请求字符上限（2026-09-27，my-agent 在分支 `my-agent/self-dev` 完成，集成者审核合并）**：三个决策点位共用的当前请求字符上限
-    `decision_request_max_chars`（默认 1024，`0` 表示不限制）。原 `_MAX_REQUEST_CHARS` 三份常量
+    `decision_request_max_chars`（集成时按用户要求改为：默认 2000，超出取首尾节选并标注、不再整点跳过，`0` 表示不截取；
+    一般用户不用改）。原 `_MAX_REQUEST_CHARS` 三份常量
     （`decision_planning.py`、`tool_context/decision_delivery_quality.py`、`tool_context/decision_action_candidate.py`）删除，
     统一由 `settings/defaults.py::decision_request_max_chars(config)` 读取；非整数、负数或缺字段回落默认值。
   - **方向调整（用户 2026-09-27）**：“几百个参数是不是太多了，有些可以合并，有些可能没用了”。本机用户配置只改过 11 项

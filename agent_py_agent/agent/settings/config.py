@@ -322,8 +322,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 选模型决策请求里对话摘要（只带语义部分，不带原文锚点段）与当前消息的字符上限；0 表示不截断，截断时如实标注
     decision_model_selection_summary_max_chars: int = 1500
     decision_model_selection_prompt_max_chars: int = 4000
-    # 规划/交付质量/动作候选三个决策点位的当前请求字符上限：超长时整点跳过并留 request_too_long，不截断；0 表示不限制
-    decision_request_max_chars: int = 1024
+    # 规划/交付质量/动作候选三个决策点位发给决策模型的当前请求字数预算：更长时取首尾节选并标注；0 表示不截取
+    decision_request_max_chars: int = 2000
     decision_external_material_order_mode: str = "off"
     decision_external_material_order_timeout_seconds: float | None = None
     decision_external_material_order_profile_id: str | None = None

@@ -21,7 +21,9 @@
     planning 那一轮由 3186 字粘贴开启（后两条短消息是中途插话），原话超过 1024 字时按设计整点跳过，却什么都不写。
   - **做法**：结果日志新增 `skipped` 行，只在已到触发点、该点已开启、却被条件挡下时写，原因码 `request_too_long` / `privacy_url`，
     不含正文；`decision_skip_records_enabled` 默认开启。未开启的点、阶段出错不记。
-  - **仍待用户使用反馈**：planning 等点位对超长原话“整点跳过”的设计是否要改成“不带原话也给建议”，等看到真实跳过记录再定。
+  - **已定（2026-09-27，用户：参数默认就要合理，99% 的人不会手动调，把用户当什么都不懂来设计）**：超长原话不再整点跳过，
+    改为首尾节选（开头约 2/3、结尾约 1/3，中间写明省略字数）并在 state 里如实标注 `current_request_completeness`，决策照常进行，
+    信息不足时由决策模型选 need_data；`request_too_long` 不再出现。预算 `decision_request_max_chars` 默认 2000，保留给极少数想调的人。
   - 详见 [决策审计与管控](docs/design/DECISION_AUDIT_AND_ADMIN_CONTROLS.md#决策点触发了但被挡下也留记录2026-09-27集成方)。
 - **压缩后可按编号查回原话，原话备份改为按 token 随窗口放大**（2026-09-26，分支 `claude/curator-budget`，本地回归与隔离真机验收通过，见 TESTS）：
   - **起因**：用户问“10 段各 1 万 token 的需求压缩后怎么办”。旧备份固定 6000 字、每条截开头 1200 字，只放得下约 4 段的开头；原始记录在磁盘但模型查不回。对照 Codex、Claude Code、Hermes、OpenClaw、Gemini CLI、opencode：没有一家把全部长需求原样留在上下文，成熟做法是“摘要记住有什么 + 需要细节时查回原文”。

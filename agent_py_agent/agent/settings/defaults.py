@@ -10,12 +10,14 @@ DEFAULT_COMMAND_ACCESS_MODE = "workspace-write"
 DEFAULT_MODEL_MAX_TOKENS = 65_536
 # 输出上限最多占已知上下文窗口的几分之一：给输入留出至少四分之三窗口，避免输入加输出超窗被供应商拒绝。
 MODEL_OUTPUT_WINDOW_DIVISOR = 4
-# 规划/交付质量/动作候选三个决策点位的当前请求字符上限默认值：超长整点跳过，绝不截断发送。
-DEFAULT_DECISION_REQUEST_MAX_CHARS = 1_024
+# 规划/交付质量/动作候选三个决策点位发给决策模型的当前请求字数预算默认值：更长时自动取首尾节选并标注，不整点跳过。
+# 用户一般不用改（2026-09-27 用户：参数要默认就合理，99% 的人不会手动调）。
+DEFAULT_DECISION_REQUEST_MAX_CHARS = 2_000
 
 
-# LLM: 三个决策点位的统一读取入口，非整数/负数/字段缺失一律回落默认值；0 表示不限制（仍受决策协议 256 KB 输入上限约束）。
-# 函数用途: 从配置里取当前请求字符上限，供规划、交付质量、动作候选共用，避免各写一份读取逻辑。
+# LLM: 三个决策点位的统一读取入口，非整数/负数/字段缺失一律回落默认值；0 表示不截取（仍受决策协议 256 KB 输入上限约束）。
+#   超出预算时由 backends/decision_protocol.decision_request_excerpt 取首尾节选，不再整点跳过。
+# 函数用途: 从配置里取当前请求字数预算，供规划、交付质量、动作候选共用，避免各写一份读取逻辑。
 def decision_request_max_chars(config: Any) -> int:
     value = getattr(config, "decision_request_max_chars", None)
     if type(value) is not int or value < 0:

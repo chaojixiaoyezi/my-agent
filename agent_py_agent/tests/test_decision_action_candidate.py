@@ -234,7 +234,6 @@ _INELIGIBLE = {
     "replayed": lambda record, archive: (replace(record, result=replace(record.result, handler_executed=False)), archive),
     "repeated_halt": set_params("repeated_failure_halt", (_READ, "code:TOOL_EXECUTION_FAILED", 3)),
     "unknown_halt": set_params("unknown_outcome_halt", (_READ, "", "unknown", True)),
-    "long_request": set_params("user_prompt", "x" * 1025),
     "empty_request": set_params("user_prompt", ""),
     "request_query_url": set_params("user_prompt", "打开 https://shop.test/order?custom_credential=private 下单"),
     "label_query_url": set_candidate("label", "见 //shop.test/pay?session=private"),
@@ -315,8 +314,7 @@ def test_ineligible_records_send_no_request(prepared, monkeypatch, scenario):
     assert module.action_candidate_hint(prepared[0], record, archive) == "" and calls == []
 
 
-@pytest.mark.parametrize("prompt,reason", [("x" * 1025, "request_too_long"),
-                                           ("在 https://shop.test/cart?coupon=private-code 下单", "privacy_url")])
+@pytest.mark.parametrize("prompt,reason", [("在 https://shop.test/cart?coupon=private-code 下单", "privacy_url")])
 def test_triggered_but_blocked_requests_leave_a_skipped_audit_row(prepared, monkeypatch, prompt, reason):
     host, record, archive = prepared
     outcomes = host.root / "decision-outcomes.jsonl"
@@ -329,26 +327,28 @@ def test_triggered_but_blocked_requests_leave_a_skipped_audit_row(prepared, monk
     assert "private-code" not in outcomes.read_text(encoding="utf-8")
 
 
-@pytest.mark.parametrize("configured,prompt_len,skipped", [
-    (2000, 1025, False),   # 上限调大后，原 1025 字不再超长
-    (2000, 2001, True),    # 仍超上限
-    (0, 5000, False),      # 0 表示不限制
-    ("bad", 1025, True),   # 非法值回落默认 1024
-    (-1, 1025, True),      # 负数回落默认 1024
-    (None, 1025, True),    # 缺字段回落默认 1024
+@pytest.mark.parametrize("configured,prompt_len,kept", [
+    (None, 2000, None),    # 默认预算 2000：刚好完整发送
+    (None, 3186, 2000),    # 2026-09-27 真实 TUI 的 3186 字粘贴：不再整点跳过，发首尾节选
+    (1000, 1500, 1000),    # 预算可调
+    (0, 5000, None),       # 0 表示不截取
+    ("bad", 3000, 2000),   # 非法值回落默认 2000
+    (-1, 3000, 2000),      # 负数回落默认 2000
 ])
-def test_configured_request_limit_controls_skip(prepared, monkeypatch, configured, prompt_len, skipped):
-    # 与 planning、delivery_quality 共用同一个上限配置 decision_request_max_chars；0 表示不限制，非法值回落默认 1024。
+def test_long_requests_reach_the_decision_as_labeled_excerpts(prepared, monkeypatch, configured, prompt_len, kept):
+    # 与其它两个决策点位共用 decision_request_max_chars；长请求照常发出决策，并如实标注是首尾节选。
     host, record, archive = prepared
-    outcomes = host.root / "decision-outcomes.jsonl"
-    host.home_paths = SimpleNamespace(owner_decision_outcomes_jsonl=outcomes)
-    host.config.decision_request_max_chars = configured
-    install(monkeypatch)
+    if configured is not None:
+        host.config.decision_request_max_chars = configured
     record, archive = set_params("user_prompt", "x" * prompt_len)(record, archive)
+    calls = install(monkeypatch, choice="not_needed")
     module.action_candidate_hint(host, record, archive)
-    rows = [json.loads(line) for line in outcomes.read_text(encoding="utf-8").splitlines()] if outcomes.exists() else []
-    reasons = [row["reason"] for row in rows]
-    assert ("request_too_long" in reasons) is skipped
+    assert len(calls) == 1
+    state = calls[0][2]["state"]
+    expected = ({"status": "complete", "chars": prompt_len} if kept is None
+                else {"status": "truncated", "chars": prompt_len, "kept_chars": kept})
+    assert state["current_request_completeness"] == expected
+    assert ("中间省略" in state["current_request"]) is (kept is not None)
 
 
 def test_two_and_sixty_four_candidates_are_eligible(prepared, monkeypatch):

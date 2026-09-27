@@ -92,8 +92,9 @@ my-agent 据此写出“这几个点位宿主代码未接线”的开发需求�
 - 结果日志新增 `status=skipped` 行：已到触发点、阶段正常且该点已开启，却被结构化条件挡下时记录，`reason` 只是宿主原因码，
   不含正文（`conversation/decision_outcome_log.py::record_decision_skip`）。
 - 原因码：
-  - `request_too_long`：本轮用户原话超过 1024 字（planning、delivery_quality、action_candidate）。这项检查从准入条件挪到阶段之后，
-    只有“本会触发”时才记；空原话仍在扫描归档之前放弃，不记。
+  - `request_too_long`：2026-09-27 起不再使用。planning、delivery_quality、action_candidate 对超出 `decision_request_max_chars`
+    （默认 2000）的原话改为首尾节选并标注 `current_request_completeness`，决策照常进行（`backends/decision_protocol.decision_request_excerpt`）；
+    空原话仍在扫描归档之前放弃，不记。历史日志里的旧行保持原样。
   - `privacy_url`：要外发的材料含带查询串的 URL（external_material_order、delivery_quality、action_candidate）。材料准备抛
     `DecisionPrivacySkip`（`DecisionInputError` 的子类，带 `reason`），由 `material_or_skip` 记录后放弃。
 - 未开启的点位、阶段出错（如 `settings_busy`）都不记，避免刷屏；日志仍有界（最近 1000 条）。

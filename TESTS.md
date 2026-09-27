@@ -1,5 +1,15 @@
 # 测试与发布验收
 
+## 决策点长原话改为首尾节选、不再整点跳过（2026-09-27，分支 `claude/integrate-self-dev`，接在 my-agent 的 1b69ce34b 之后）
+
+- **来源**：用户要求参数默认就合理、99% 的人不会手动调（“把用户当什么都不懂来设计”）。原来超出上限的原话让 planning 等三个点位整点跳过，
+  用户粘贴的 3186 字指令因此用不上这些决策。
+- **做法**：`backends/decision_protocol.decision_request_excerpt` 取首尾节选并返回完整性标注，三个点位把节选与
+  `current_request_completeness` 一起放进 state，指令说明节选时信息不足选 need_data；预算默认 2000（`decision_request_max_chars`）。
+- **测试**：三个决策测试文件的超长用例改为“决策照常发出、发出的是带标注的首尾节选”（含 3186 字真实长度），预算可调、`0` 不截取、
+  非法值回落默认 2000；原“超长不调用”的参数项删除；隐私用例允许新增的计数型标注键。
+- **变异验证**：改回超长就跳过、节选只留开头、去掉标注、预算写死，四种都被抓住。
+
 ## 决策请求字符上限收成参数 `decision_request_max_chars`（2026-09-27，分支 `my-agent/self-dev`，基于 main `111d32baa`，集成到 main `84c29b39d` 之上）
 
 - **来源**：planning、delivery_quality、action_candidate 三个决策点位各自写死一份 `_MAX_REQUEST_CHARS = 1024`，

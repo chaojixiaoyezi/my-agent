@@ -214,7 +214,6 @@ _INELIGIBLE = {
     "other_run_sources": lambda record, archive: row_at(2, task_id="other-task")(*row_at(0, run_id="other-run")(record, archive)),
     "repeated_halt": set_params("repeated_failure_halt", ("run_command", "code:COMMAND_FAILED", 3)),
     "unknown_halt": set_params("unknown_outcome_halt", ("run_command", "", "unknown", True)),
-    "long_request": set_params("user_prompt", "x" * 1025),
     "empty_request": set_params("user_prompt", ""),
     "no_evidence": lambda record, archive: (record.result.metadata["handler_details"].pop("verification_evidence"),
                                             (record, archive))[1],
@@ -286,7 +285,8 @@ def test_request_carries_only_redacted_request_and_focus_facts(prepared, monkeyp
     payload = json.dumps({"state": state, "questions": questions}, ensure_ascii=False)
     for secret in ("private-owner", "secret", "login.py", "pytest", "2026-09-24", "run-1", "cmd-", "changed_paths"):
         assert secret not in payload
-    assert set(state) == {"current_request", "focuses"} and set(questions) == {_Q}
+    assert set(state) == {"current_request", "current_request_completeness", "focuses"} and set(questions) == {_Q}
+    assert set(state["current_request_completeness"]) <= {"status", "chars", "kept_chars"}  # 只有计数，不带原文
     assert "<untrusted_tool_result" in state["current_request"] and "修复登录后再交付" in state["current_request"]
     assert state["focuses"] == [
         {"candidate": "focus_1", "project": "project_1", "order": 1, "edited_after": True, "exit_code": 1,
@@ -336,20 +336,19 @@ def _outcome_rows(host, tmp_path):
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
 
 
-@pytest.mark.parametrize("change,reason", [("long_request", "request_too_long"),
-                                           ("url_request", "privacy_url")])
+@pytest.mark.parametrize("change,reason", [("url_request", "privacy_url")])
 def test_triggered_but_blocked_requests_leave_a_skipped_audit_row(prepared, monkeypatch, change, reason):
-    # 2026-09-27 真实 TUI：原话超长时点位悄悄跳过、审计里一条都没有，被误判为“没接线”。现在已到触发点且该点开启时留一行。
+    # 已到触发点且该点开启、但请求带不应外发的 URL 查询串时留一行跳过记录（长请求不再跳过，改发首尾节选）。
     host, record, archive = prepared
     tmp_path = host.root
     host.home_paths = SimpleNamespace(owner_decision_outcomes_jsonl=tmp_path / "decision-outcomes.jsonl")
-    prompt = "x" * 1025 if change == "long_request" else "看看 https://example.com/a?token=1 的结果"
+    prompt = "看看 https://example.com/a?token=1 的结果"
     record, archive = set_params("user_prompt", prompt)(record, archive)
     calls = install(monkeypatch)
     assert module.delivery_quality_hint(host, record, archive) == "" and not calls
     rows = _outcome_rows(host, tmp_path)
     assert [(row["point"], row["status"], row["reason"]) for row in rows] == [(module._POINT, "skipped", reason)]
-    assert "token" not in json.dumps(rows) and "xxxx" not in json.dumps(rows)
+    assert "token" not in json.dumps(rows)
     # 点位关闭、或配置关闭跳过记录时都不写。
     (tmp_path / "decision-outcomes.jsonl").unlink()
     install(monkeypatch, mode="off")
@@ -565,22 +564,25 @@ def test_an_inconsistent_chain_gives_up_without_a_request(prepared, monkeypatch)
     assert module.delivery_quality_hint(host, record, archive) == "" and calls == []
 
 
-@pytest.mark.parametrize("configured,prompt_len,skipped", [
-    (2000, 1025, False),   # 上限调大后，原 1025 字不再超长
-    (2000, 2001, True),    # 仍超上限
-    (0, 5000, False),      # 0 表示不限制
-    ("bad", 1025, True),   # 非法值回落默认 1024
-    (-1, 1025, True),      # 负数回落默认 1024
-    (None, 1025, True),    # 缺字段回落默认 1024
+@pytest.mark.parametrize("configured,prompt_len,kept", [
+    (None, 2000, None),    # 默认预算 2000：刚好完整发送
+    (None, 3186, 2000),    # 2026-09-27 真实 TUI 的 3186 字粘贴：不再整点跳过，发首尾节选
+    (1000, 1500, 1000),    # 预算可调
+    (0, 5000, None),       # 0 表示不截取
+    ("bad", 3000, 2000),   # 非法值回落默认 2000
+    (-1, 3000, 2000),      # 负数回落默认 2000
 ])
-def test_configured_request_limit_controls_skip(prepared, monkeypatch, configured, prompt_len, skipped):
-    # 与 planning、action_candidate 共用同一个上限配置 decision_request_max_chars；0 表示不限制，非法值回落默认 1024。
+def test_long_requests_reach_the_decision_as_labeled_excerpts(prepared, monkeypatch, configured, prompt_len, kept):
+    # 与其它两个决策点位共用 decision_request_max_chars；长请求照常发出决策，并如实标注是首尾节选。
     host, record, archive = prepared
-    tmp_path = host.root
-    host.home_paths = SimpleNamespace(owner_decision_outcomes_jsonl=tmp_path / "decision-outcomes.jsonl")
-    host.config.decision_request_max_chars = configured
+    if configured is not None:
+        host.config.decision_request_max_chars = configured
     record, archive = set_params("user_prompt", "x" * prompt_len)(record, archive)
-    install(monkeypatch)
+    calls = install(monkeypatch, choice="not_needed")
     module.delivery_quality_hint(host, record, archive)
-    reasons = [row["reason"] for row in _outcome_rows(host, tmp_path)]
-    assert ("request_too_long" in reasons) is skipped
+    assert len(calls) == 1
+    state = calls[0][2]["state"]
+    expected = ({"status": "complete", "chars": prompt_len} if kept is None
+                else {"status": "truncated", "chars": prompt_len, "kept_chars": kept})
+    assert state["current_request_completeness"] == expected
+    assert ("中间省略" in state["current_request"]) is (kept is not None)

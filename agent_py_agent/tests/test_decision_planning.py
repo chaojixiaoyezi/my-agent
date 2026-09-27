@@ -199,7 +199,7 @@ def test_changed_canonical_plan_or_request_rejects_late_advice(prepared, monkeyp
     assert "planning_priority_hint" not in _read(agent)
 
 
-@pytest.mark.parametrize("change", ["historical", "child", "no_plan", "single", "oversized_request"])
+@pytest.mark.parametrize("change", ["historical", "child", "no_plan", "single"])
 def test_unproven_or_unhelpful_scope_does_not_call_jev(prepared, monkeypatch, change):
     agent, params, root = prepared
     calls = install(monkeypatch)
@@ -221,48 +221,46 @@ def test_unproven_or_unhelpful_scope_does_not_call_jev(prepared, monkeypatch, ch
         write_task_progress(root, target, with_task_progress_display_plan(
             {}, generation_id="req-2", item_ids=["todo-a"],
         ))
-    else:
-        agent._current_user_prompt = "长" * 1025
     result = TaskProgressTool(agent).execute({"action": "read", **({"run_id": target} if change == "historical" else {})})
     assert result.ok and "planning_priority_hint" not in json.loads(result.output)
     assert not calls
 
 
-@pytest.mark.parametrize("prompt,expected", [("长" * 1025, [("planning", "skipped", "request_too_long")]), ("", [])])
-def test_over_long_request_leaves_a_skipped_audit_row(prepared, monkeypatch, prompt, expected):
-    # 2026-09-27 真实 TUI：粘贴 3186 字后同一轮里 task_progress read 悄悄跳过，被误判为“planning 没接线”。
+@pytest.mark.parametrize("prompt_len,called", [(3186, True), (0, False)])
+def test_long_request_is_sent_as_a_labeled_excerpt(prepared, monkeypatch, prompt_len, called):
+    # 2026-09-27 真实 TUI：粘贴 3186 字后规划点位整点跳过。现在长原话取首尾节选并标注、决策照常；空原话（后台轮）仍不调用。
     agent, _, root = prepared
     outcomes = root / "decision-outcomes.jsonl"
     agent.home_paths.owner_decision_outcomes_jsonl = outcomes
     agent.config = SimpleNamespace(decision_skip_records_enabled=True)
     calls = install(monkeypatch)
-    agent._current_user_prompt = prompt
-    assert "planning_priority_hint" not in _read(agent) and not calls
-    rows = [json.loads(line) for line in outcomes.read_text(encoding="utf-8").splitlines()] if outcomes.exists() else []
-    assert [(row["point"], row["status"], row["reason"]) for row in rows] == expected
-    assert "长长" not in json.dumps(rows, ensure_ascii=False)
+    agent._current_user_prompt = "头" * 10 + "长" * (prompt_len - 20) + "尾" * 10 if prompt_len else ""
+    _read(agent)
+    assert bool(calls) is called and not outcomes.exists()
+    if called:
+        state = calls[0][1]["state"]
+        assert state["current_request_completeness"] == {"status": "truncated", "chars": 3186, "kept_chars": 2000}
+        assert state["current_request"].startswith("头" * 10) and state["current_request"].endswith("尾" * 10)
+        assert "中间省略 1186 字" in state["current_request"]
 
 
-@pytest.mark.parametrize("configured,prompt_len,skipped", [
-    (2000, 1025, False),   # 上限调大后，原 1025 字不再超长
-    (2000, 2001, True),    # 仍超上限
-    (0, 5000, False),      # 0 表示不限制
-    ("bad", 1025, True),   # 非法值回落默认 1024
-    (-1, 1025, True),      # 负数回落默认 1024
-    (None, 1025, True),    # 缺字段回落默认 1024
+@pytest.mark.parametrize("configured,prompt_len,kept", [
+    (None, 2000, None),    # 默认预算 2000：刚好完整发送
+    (1000, 1500, 1000),    # 预算可调：超出取首尾节选
+    (0, 5000, None),       # 0 表示不截取
+    ("bad", 3000, 2000),   # 非法值回落默认 2000
+    (-1, 3000, 2000),      # 负数回落默认 2000
 ])
-def test_configured_request_limit_controls_skip(prepared, monkeypatch, configured, prompt_len, skipped):
-    # 三个决策点位共用的上限：由配置 decision_request_max_chars 决定，0 表示不限制，非法值回落默认 1024。
-    agent, _, root = prepared
-    outcomes = root / "decision-outcomes.jsonl"
-    agent.home_paths.owner_decision_outcomes_jsonl = outcomes
-    agent.config = SimpleNamespace(decision_skip_records_enabled=True, decision_request_max_chars=configured)
+def test_configured_request_budget_controls_the_excerpt(prepared, monkeypatch, configured, prompt_len, kept):
+    # 三个决策点位共用 decision_request_max_chars：默认就合理、一般不用改；0 表示不截取，非法值回落默认 2000。
+    agent, _, _root = prepared
+    agent.config = SimpleNamespace(**({} if configured is None else {"decision_request_max_chars": configured}))
     calls = install(monkeypatch)
     agent._current_user_prompt = "长" * prompt_len
     _read(agent)
-    rows = [json.loads(line) for line in outcomes.read_text(encoding="utf-8").splitlines()] if outcomes.exists() else []
-    reasons = [row["reason"] for row in rows]
-    assert ("request_too_long" in reasons) is skipped
+    expected = ({"status": "complete", "chars": prompt_len} if kept is None
+                else {"status": "truncated", "chars": prompt_len, "kept_chars": kept})
+    assert calls[0][1]["state"]["current_request_completeness"] == expected
 
 
 def test_optional_provider_error_retains_original_but_user_stop_propagates(prepared, monkeypatch):

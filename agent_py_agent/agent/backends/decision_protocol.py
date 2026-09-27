@@ -56,6 +56,19 @@ def _scalar_characters(value: object) -> int:
     raise DecisionInputError("决策材料须为 JSON 数据。")
 
 
+# LLM: 当前请求超出字数预算时取首尾节选（开头约 2/3、结尾约 1/3，中间写明省略字数），并返回结构化完整性标注
+#   {status: complete|truncated, chars, kept_chars}；budget<=0 表示不截取（仍受 MAX_DECISION_INPUT_BYTES 约束）。
+#   只删不改，调用方必须把标注和节选一起放进 state，让决策模型知道这是节选、信息不足时选 need_data；不能把节选冒充完整原话。
+# 函数用途: 把用户当前请求压进决策输入预算，长指令也能得到决策，而不是整个点位被跳过。
+def decision_request_excerpt(text: str, budget: int) -> tuple[str, dict[str, object]]:
+    if budget <= 0 or len(text) <= budget:
+        return text, {"status": "complete", "chars": len(text)}
+    head = budget * 2 // 3
+    tail = budget - head
+    omitted = len(text) - head - tail
+    excerpt = f"{text[:head]}\n…（中间省略 {omitted} 字）…\n{text[len(text) - tail:]}"
+    return excerpt, {"status": "truncated", "chars": len(text), "kept_chars": head + tail}
+
 # LLM: 输入上限属于单次内存/解析防护，不代替目标模型 token 窗口；不得截断后冒充完整输入。
 # 函数用途: 检查 JSON 深度、节点和字节并生成独立快照，拒绝循环、非有限数与非 JSON 类型。
 def decision_json(value: object, *, limit: int = MAX_DECISION_INPUT_BYTES) -> bytes:
