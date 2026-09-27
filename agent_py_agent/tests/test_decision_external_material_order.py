@@ -225,6 +225,8 @@ def test_oversized_material_does_not_cut_or_read_sources(prepared, monkeypatch):
 @pytest.mark.parametrize("prefix", ["https://", "//"])
 def test_query_urls_inside_excerpts_also_remain_local(prepared, monkeypatch, field, prefix):
     host, record, archive = prepared
+    outcomes = host.root / "decision-outcomes.jsonl"
+    host.home_paths = SimpleNamespace(owner_decision_outcomes_jsonl=outcomes)
     text = "参考 " + prefix + "source.test/read?custom_credential=private-value"
     if field == "user_prompt":
         record = replace(record, params=replace(record.params, user_prompt=text))
@@ -232,6 +234,10 @@ def test_query_urls_inside_excerpts_also_remain_local(prepared, monkeypatch, fie
         record.result.metadata["handler_details"]["pages"][0][field] = text
     calls, _ = install(monkeypatch)
     assert module.external_material_order_hint(host, record, archive) == "" and not calls
+    # 已到触发点、该点开启时留一条 skipped（原因码 privacy_url），不含任何正文或 URL。
+    rows = [json.loads(line) for line in outcomes.read_text(encoding="utf-8").splitlines()]
+    assert [(row["point"], row["status"], row["reason"]) for row in rows] == [(module._POINT, "skipped", "privacy_url")]
+    assert "private-value" not in outcomes.read_text(encoding="utf-8")
 
 
 def test_unchanged_order_needs_no_extra_prompt(prepared, monkeypatch):

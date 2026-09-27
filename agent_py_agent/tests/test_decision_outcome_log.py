@@ -58,6 +58,56 @@ def test_append_writes_only_the_owner_path_and_stays_bounded(tmp_path, monkeypat
     assert [row["point"] for row in rows] == ["p2", "p3", "p4"]
 
 
+def test_skip_rows_need_an_open_point_and_the_switch_and_carry_only_a_reason_code(tmp_path):
+    from agent_py_agent.agent.backends.decision_protocol import (
+        DecisionInputError,
+        DecisionPrivacySkip,
+    )
+    from agent_py_agent.agent.conversation.decision_outcome_log import (
+        material_or_skip,
+        record_decision_skip,
+    )
+
+    path = tmp_path / "outcomes.jsonl"
+    agent = SimpleNamespace(home_paths=SimpleNamespace(owner_decision_outcomes_jsonl=path),
+                            config=SimpleNamespace(decision_skip_records_enabled=True))
+    stage = SimpleNamespace(error_code="", enabled_points=("planning",), scope="thread", thread_id="thread-1",
+                            run_id="run-1", task_id="task-1", experiment=False)
+
+    def rows():
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
+
+    record_decision_skip(agent, stage, "planning", "request_too_long")
+    assert [(row["point"], row["status"], row["reason"], row["thread_id"]) for row in rows()] == [
+        ("planning", "skipped", "request_too_long", "thread-1")]
+    # 点位未开启、阶段有错、或配置关闭时都不写。
+    record_decision_skip(agent, stage, "delivery_quality", "request_too_long")
+    record_decision_skip(agent, SimpleNamespace(**{**vars(stage), "error_code": "settings_busy"}), "planning", "x")
+    agent.config.decision_skip_records_enabled = False
+    record_decision_skip(agent, stage, "planning", "request_too_long")
+    assert len(rows()) == 1
+    agent.config.decision_skip_records_enabled = True
+    # 材料准备遇到隐私跳过：返回 None 并记原因码；其它输入错误照常上抛。
+    assert material_or_skip(agent, stage, "planning", lambda: ("state", "q", "rev")) == ("state", "q", "rev")
+
+    def private():
+        raise DecisionPrivacySkip("含 https://x.test/?k=secret-value")
+
+    assert material_or_skip(agent, stage, "planning", private) is None
+    assert rows()[-1]["reason"] == "privacy_url" and "secret-value" not in path.read_text(encoding="utf-8")
+
+    def broken():
+        raise DecisionInputError("坏材料")
+
+    try:
+        material_or_skip(agent, stage, "planning", broken)
+    except DecisionInputError:
+        pass
+    else:
+        raise AssertionError("non-privacy input errors must propagate")
+    assert len(rows()) == 2
+
+
 def test_summary_counts_by_point_inside_the_window_and_counts_bad_rows(tmp_path):
     path = tmp_path / "outcomes.jsonl"
     now = time.time()

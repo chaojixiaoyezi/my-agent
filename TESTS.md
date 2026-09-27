@@ -1,5 +1,15 @@
 # 测试与发布验收
 
+## 决策点“触发了但被挡下”也留审计记录（2026-09-27，分支 `claude/decision-skip-records`，基于 main `558eb65df`）
+
+- **来源**：用户真实 TUI 里 planning 等点位没有任何记录，被 my-agent 误判为“未接线”。结构化核对：那一轮由 3186 字粘贴开启，19:11:08 的 task_progress read（3 条待处理）因原话超过 1024 字整点跳过；同一轮 external_material_order 正常记录。隔离 Gateway（127.0.0.1:8432，复制同一份决策设置，600 权限，用后删除）里原话在上限以内时，同样的操作记下 `planning success`；观测启动器与记录在 `~/.my-agent/releases/planning-repro-20260927/`（只有结构化字段）。
+- **新测试**：
+  - `test_decision_outcome_log.py`：skipped 行只在点位开启、阶段正常、开关打开时写，只带原因码；`material_or_skip` 对隐私跳过返回 None 并记录，其它输入错误照常上抛。
+  - `test_decision_planning.py`：原话 1025 字时不调用 Jev、记一行 `request_too_long`；空原话不记。
+  - `test_decision_delivery_quality.py`、`test_decision_action_candidate.py`：超长原话与带查询串 URL 的原话分别记 `request_too_long`、`privacy_url`，不含正文；点位关闭或开关关闭时不写。空原话仍在扫描归档之前放弃（原“超长请求扫描前放弃”的用例改为只测空原话）。
+  - `test_decision_external_material_order.py`：页面标题、预览或原话含带查询串的 URL 时记 `privacy_url`，日志里没有 URL 内容。
+- **变异验证**：6 种变异全部被抓住——planning 不记跳过、delivery_quality 退回扫描前放弃、external_material_order 与 action_candidate 仍抛普通输入错误、跳过记录不查点位是否开启、配置开关不生效。
+
 ## 会话原文读取的 thread_id 越界修复（2026-09-27，分支 `claude/history-owner-scope`，基于 main `72cbb0411`）
 
 - **来源**：Codex 在 `72cbb0411` 的隔离副本里用两套合成 owner 数据复现。`session_history_read` 把模型给的 `thread_id` 直接交给 `by_id_report`，存储层按 `messages_dir / f"{thread_id}.jsonl"` 拼路径。绝对路径形态和 `../../../owner-b/conversation/messages/<thread>` 两种写法都能读到只在 owner-b 里的标记，动作策略放行（`thread_id` 当时不是声明的资源参数）；普通 owner-b 线程编号则返回 found=false。没有涉及真实用户数据。

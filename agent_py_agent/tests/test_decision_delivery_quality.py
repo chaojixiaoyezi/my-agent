@@ -322,13 +322,41 @@ def test_ineligible_sources_make_no_decision_call(prepared, monkeypatch, change)
 
 @pytest.mark.parametrize("change", ["other_tool", "replayed", "no_evidence", "archive_evidence", "archive_id",
                                     "archive_run", "archive_task", "archive_scope", "repeated_halt", "unknown_halt",
-                                    "long_request", "empty_request"])
+                                    "empty_request"])
 def test_mismatched_current_record_returns_before_scanning_the_archive(prepared, monkeypatch, change):
     host, record, archive = prepared
     record, archive = _INELIGIBLE[change](record, archive)
     calls = install(monkeypatch)
     monkeypatch.setattr(module, "_scan", lambda *_args: pytest.fail("mismatched records cannot scan the run archive"))
     assert module.delivery_quality_hint(host, record, archive) == "" and not calls
+
+
+def _outcome_rows(host, tmp_path):
+    path = tmp_path / "decision-outcomes.jsonl"
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
+
+
+@pytest.mark.parametrize("change,reason", [("long_request", "request_too_long"),
+                                           ("url_request", "privacy_url")])
+def test_triggered_but_blocked_requests_leave_a_skipped_audit_row(prepared, monkeypatch, change, reason):
+    # 2026-09-27 真实 TUI：原话超长时点位悄悄跳过、审计里一条都没有，被误判为“没接线”。现在已到触发点且该点开启时留一行。
+    host, record, archive = prepared
+    tmp_path = host.root
+    host.home_paths = SimpleNamespace(owner_decision_outcomes_jsonl=tmp_path / "decision-outcomes.jsonl")
+    prompt = "x" * 1025 if change == "long_request" else "看看 https://example.com/a?token=1 的结果"
+    record, archive = set_params("user_prompt", prompt)(record, archive)
+    calls = install(monkeypatch)
+    assert module.delivery_quality_hint(host, record, archive) == "" and not calls
+    rows = _outcome_rows(host, tmp_path)
+    assert [(row["point"], row["status"], row["reason"]) for row in rows] == [(module._POINT, "skipped", reason)]
+    assert "token" not in json.dumps(rows) and "xxxx" not in json.dumps(rows)
+    # 点位关闭、或配置关闭跳过记录时都不写。
+    (tmp_path / "decision-outcomes.jsonl").unlink()
+    install(monkeypatch, mode="off")
+    assert module.delivery_quality_hint(host, record, archive) == "" and not _outcome_rows(host, tmp_path)
+    install(monkeypatch)
+    host.config.decision_skip_records_enabled = False
+    assert module.delivery_quality_hint(host, record, archive) == "" and not _outcome_rows(host, tmp_path)
 
 
 def test_render_budget_drops_an_oversized_hint():

@@ -19,6 +19,17 @@ class DecisionInputError(ValueError):
     pass
 
 
+# LLM: 决策材料含不应外发的内容（如带查询串的 URL）时抛出；reason 是宿主定义的结构化跳过原因码，调用方据此记一条
+#   skipped 结果。它仍是 DecisionInputError：未专门处理的调用方照旧放弃本次可选决策、保留原结果。
+# 类用途: 可选决策因隐私保护被跳过时的输入错误，携带跳过原因码。
+class DecisionPrivacySkip(DecisionInputError):
+    # LLM: message 只供日志阅读，判定只看 reason 字段。
+    # 函数用途: 记录错误说明与结构化跳过原因码（默认 privacy_url）。
+    def __init__(self, message: str, reason: str = "privacy_url") -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
 # LLM: 只遍历已确认的原生 dict/list，字段名计入编码前预算，不接受可执行的自定义映射对象。
 # 函数用途: 取得 JSON 容器成员和字段名长度，供同一个迭代预算检查使用。
 def _json_members(value: dict | list):

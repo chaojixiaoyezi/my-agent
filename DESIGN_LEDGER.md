@@ -9,6 +9,13 @@
 
 回滚边界：旧版运行时读不了 v3，回滚必须把运行时和数据成对核对并保留新账。详见[依赖拆分](docs/design/TOOL_LOOP_DEPENDENCY_SPLIT.md#两线合并后的来源身份与模型轮结果决策分支吸收-main2026-09-23)。
 
+- **决策点“触发了但被挡下”也留审计记录**（2026-09-27，分支 `claude/decision-skip-records`，本地回归与变异通过，见 TESTS）：
+  - **起因**：my-agent 在真实 TUI 里测 Jev 点位，planning 等没有任何记录，就写出“宿主未接线”的开发需求。实际都已接线且开启；
+    planning 那一轮由 3186 字粘贴开启（后两条短消息是中途插话），原话超过 1024 字时按设计整点跳过，却什么都不写。
+  - **做法**：结果日志新增 `skipped` 行，只在已到触发点、该点已开启、却被条件挡下时写，原因码 `request_too_long` / `privacy_url`，
+    不含正文；`decision_skip_records_enabled` 默认开启。未开启的点、阶段出错不记。
+  - **仍待用户使用反馈**：planning 等点位对超长原话“整点跳过”的设计是否要改成“不带原话也给建议”，等看到真实跳过记录再定。
+  - 详见 [决策审计与管控](docs/design/DECISION_AUDIT_AND_ADMIN_CONTROLS.md#决策点触发了但被挡下也留记录2026-09-27集成方)。
 - **压缩后可按编号查回原话，原话备份改为按 token 随窗口放大**（2026-09-26，分支 `claude/curator-budget`，本地回归与隔离真机验收通过，见 TESTS）：
   - **起因**：用户问“10 段各 1 万 token 的需求压缩后怎么办”。旧备份固定 6000 字、每条截开头 1200 字，只放得下约 4 段的开头；原始记录在磁盘但模型查不回。对照 Codex、Claude Code、Hermes、OpenClaw、Gemini CLI、opencode：没有一家把全部长需求原样留在上下文，成熟做法是“摘要记住有什么 + 需要细节时查回原文”。
   - **查回原话**：复用 `session_search`，新增 `message_id` 分段读原文（只读 canonical 消息文件）和 `current_thread=true` 当前会话检索、按页浏览；会话身份只取宿主可信上下文；翻看模式每条正文限 2000 字。显式 `thread_id` 必须通过路径段校验并属于本 owner 线程登记（2026-09-27 修复 Codex 复现的跨 owner 路径越界，存储层同时加校验，见 TESTS）。

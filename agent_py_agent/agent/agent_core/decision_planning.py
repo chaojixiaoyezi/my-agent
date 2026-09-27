@@ -9,6 +9,7 @@ from pathlib import Path
 from ..backends.decision_protocol import decision_json
 from ..common.cancellation import ToolCancelled, raise_if_cancelled
 from ..concurrency.interrupt import is_interrupted
+from ..conversation.decision_outcome_log import record_decision_skip
 from ..conversation.decision_service import (
     begin_decision_stage,
     decide,
@@ -28,6 +29,7 @@ from .runtime.task_identity import progress_ledger_id
 
 _POINT = "planning"
 _MAX_CANDIDATES = 24
+_MAX_REQUEST_CHARS = 1024
 _NON_SELECTIONS = {
     "not_needed": "无需额外优先级建议，继续原计划",
     "no_match": "现有候选均不适合优先推荐",
@@ -48,7 +50,8 @@ def todo_priority_hint(agent: object, root: Path, run_id: str, payload: dict) ->
         if not _eligible(agent, params, root, run_id, payload):
             return None
         stage = begin_decision_stage(agent, params, operation_id=_operation_id(params, run_id, payload))
-        if stage.error_code or _POINT not in stage.enabled_points:
+        # 短路：阶段正常且该点开启后才检查原话（超长时 _request_ready 留 skipped 审计记录）。
+        if stage.error_code or _POINT not in stage.enabled_points or not _request_ready(agent, stage):
             return None
         _check_interrupted()
         state, questions, revision = _material(agent, payload)
@@ -91,6 +94,8 @@ def todo_priority_hint(agent: object, root: Path, run_id: str, payload: dict) ->
 
 # LLM: A read of a historical ledger or a child run cannot acquire planning
 # authority. The display generation/revision must come from the same ledger.
+# The current-request bound is checked after the stage (see todo_priority_hint) so an
+# over-long request leaves a skipped audit row instead of vanishing silently.
 # 函数用途: 只允许当前主代理的真实、有多项 open 项的计划进入可选分析。
 def _eligible(agent: object, params: object, root: Path, run_id: str, payload: dict) -> bool:
     if params is None or current_subagent_run_id(agent) or not isinstance(payload, dict) or payload.get("load_error"):
@@ -104,7 +109,7 @@ def _eligible(agent: object, params: object, root: Path, run_id: str, payload: d
     if not generation or revision <= 0:
         return False
     rows = _candidate_rows(agent, payload)
-    return 2 <= len(rows) <= _MAX_CANDIDATES and bool(_request_text(agent))
+    return 2 <= len(rows) <= _MAX_CANDIDATES
 
 
 # LLM: Reuse the dispatch contract's exact child IDs to omit generated roster
@@ -133,7 +138,25 @@ def _candidate_rows(agent: object, payload: dict) -> list[dict]:
 # 函数用途: 取出当前请求的有界原文，超长或缺失时保留原计划。
 def _request_text(agent: object) -> str:
     value = getattr(agent, "_current_user_prompt", "")
-    return value if type(value) is str and 0 < len(value) <= 1024 else ""
+    return value if type(value) is str and 0 < len(value) <= _MAX_REQUEST_CHARS else ""
+
+
+# LLM: 在阶段之后调用：原话缺失或超长时整点跳过；超长（已到触发点、该点已开启）留一条 skipped 审计记录，
+#   原话为空（后台轮）本就不是规划场景，不记。
+# 函数用途: 判断当前请求能否进入规划建议，超长时写跳过记录（写文件副作用）。
+def _request_ready(agent: object, stage: object) -> bool:
+    if _request_text(agent):
+        return True
+    if _request_too_long(agent):
+        record_decision_skip(agent, stage, _POINT, "request_too_long")
+    return False
+
+
+# LLM: 只看长度这一结构化事实，不读内容；与 _request_text 同一上限。
+# 函数用途: 判断当前请求是否因超过上限而被跳过（用于写 skipped 审计记录）。
+def _request_too_long(agent: object) -> bool:
+    value = getattr(agent, "_current_user_prompt", "")
+    return type(value) is str and len(value) > _MAX_REQUEST_CHARS
 
 
 # LLM: Candidate keys are host-generated, not inferred from the model. The

@@ -79,6 +79,27 @@
 - 实现：`tooling/audit_records_tool.py`、`conversation/decision_audit.py`、`gateway_parts/request_audit_records.py`。
 - 各主题收集器在返回值里自带 `sources`，工具不再写死来源。
 
+### 决策点“触发了但被挡下”也留记录（2026-09-27，集成方）
+
+**起因**：用户在真实 TUI 里让 my-agent 测 Jev 点位，planning、delivery_quality、action_candidate 等一直没有记录，
+my-agent 据此写出“这几个点位宿主代码未接线”的开发需求。核对后发现：
+- 这几个点位都接了，用户的开关也都是“开启·观察”；
+- planning 那次没触发，是因为那一轮由一条 3186 字的粘贴开启，后面两条短消息是同一轮里的中途插话，不开新一轮；
+  “本轮用户原话”超过 1024 字时 planning 按设计不发截断片段、整点跳过，而跳过之前什么都不写，审计里看起来像从未接线；
+- 隔离 Gateway（8432，同一份决策设置）里原话在上限以内时，同样的 task_progress read 正常调用 Jev、记下 `planning success`。
+
+**做法**：
+- 结果日志新增 `status=skipped` 行：已到触发点、阶段正常且该点已开启，却被结构化条件挡下时记录，`reason` 只是宿主原因码，
+  不含正文（`conversation/decision_outcome_log.py::record_decision_skip`）。
+- 原因码：
+  - `request_too_long`：本轮用户原话超过 1024 字（planning、delivery_quality、action_candidate）。这项检查从准入条件挪到阶段之后，
+    只有“本会触发”时才记；空原话仍在扫描归档之前放弃，不记。
+  - `privacy_url`：要外发的材料含带查询串的 URL（external_material_order、delivery_quality、action_candidate）。材料准备抛
+    `DecisionPrivacySkip`（`DecisionInputError` 的子类，带 `reason`），由 `material_or_skip` 记录后放弃。
+- 未开启的点位、阶段出错（如 `settings_busy`）都不记，避免刷屏；日志仍有界（最近 1000 条）。
+- 配置 `decision_skip_records_enabled`（默认开启）关闭后只是不记，决策行为不变。
+- `audit_records` 的说明写明 `skipped` 与原因码的含义，并强调“某点完全没出现只说明窗口内没到触发点，不代表没接线”。
+
 ### 主题 `requests`：请求成败（2026-09-26，用户要求“这种东西以后 my-agent 能帮我解决”）
 
 起因：管理员设好密码后没先 `/admin` 就在飞书私聊发消息，请求按飞书普通用户运行，全部 `MODEL_NOT_CONFIGURED`，

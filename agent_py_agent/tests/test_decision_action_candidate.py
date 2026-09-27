@@ -315,6 +315,20 @@ def test_ineligible_records_send_no_request(prepared, monkeypatch, scenario):
     assert module.action_candidate_hint(prepared[0], record, archive) == "" and calls == []
 
 
+@pytest.mark.parametrize("prompt,reason", [("x" * 1025, "request_too_long"),
+                                           ("在 https://shop.test/cart?coupon=private-code 下单", "privacy_url")])
+def test_triggered_but_blocked_requests_leave_a_skipped_audit_row(prepared, monkeypatch, prompt, reason):
+    host, record, archive = prepared
+    outcomes = host.root / "decision-outcomes.jsonl"
+    host.home_paths = SimpleNamespace(owner_decision_outcomes_jsonl=outcomes)
+    calls = install(monkeypatch)
+    record, archive = set_params("user_prompt", prompt)(record, archive)
+    assert module.action_candidate_hint(host, record, archive) == "" and calls == []
+    rows = [json.loads(line) for line in outcomes.read_text(encoding="utf-8").splitlines()]
+    assert [(row["point"], row["status"], row["reason"]) for row in rows] == [(module._POINT, "skipped", reason)]
+    assert "private-code" not in outcomes.read_text(encoding="utf-8")
+
+
 def test_two_and_sixty_four_candidates_are_eligible(prepared, monkeypatch):
     for count in (2, 64):
         calls = install(monkeypatch, choice="not_needed")
