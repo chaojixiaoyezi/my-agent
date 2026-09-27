@@ -6,7 +6,7 @@
 
 ## 1. 先固定来源，再讨论覆盖率
 
-每个来源先保留独立边界。例如 A、B、C 三个短剧项目先各成一包；同一任务可以选择多包，正式融合另做版本变更和对照验收。不要用融合后的一个总称掩盖不同来源的冲突与缺项。
+每个来源先保留独立边界。例如多个不同领域或同领域的项目先各成一包；同一任务可以选择多包，正式融合另做版本变更和对照验收。领域只是验证样例，交付目标是通用能力包功能；不要用融合后的一个总称掩盖不同来源的冲突与缺项。
 
 在普通工作区建立候选源码目录。`PROVENANCE.md` 记录公开项目 URL、固定 commit/tag、获取日期、实际核对的入口与文件、许可证位置、修改方式，以及未读或不可迁移部分。若只有压缩包没有 Git 信息，记录原始归档摘要及来源，不编造 commit。跟随 `main`、只保存项目名字或只读 README 都不能固定迁移范围。
 
@@ -24,7 +24,7 @@ git -C "<来源副本目录>" ls-files
 
 | 样包 | 当前源码版本 | 可参考的迁移方式 | 仍须单列的缺项 |
 | --- | --- | --- | --- |
-| [drama-text-a](../../examples/capability-packages/drama-text-a/PROVENANCE.md) | `0.2.1` | 原文依据、目标时长对账及来源/接续/交付的证据审阅方法 | 新方法真实采用、真实媒体、完整导演规则和质量评估 |
+| [drama-text-a](../../examples/capability-packages/drama-text-a/PROVENANCE.md) | `0.3.0` | 原文依据、目标时长、证据审阅及人物声明的字面诊断 | 语义审阅有效性、持物因果、真实媒体和完整上游功能；实际采用按独立轮次记录 |
 | [drama-workflow-b](../../examples/capability-packages/drama-workflow-b/PROVENANCE.md) | `0.1.3` | 制作资料关联、显式交接核对与逐集时长检查 | 上游全部交互报告、美术与生成链路 |
 | [security-evidence](../../examples/capability-packages/security-evidence/PROVENANCE.md) | `0.1.0` | 已有证据的范围、来源、去重和报告 | 实际授权证明、扫描及漏洞验证；不属于本切片 |
 
@@ -149,7 +149,7 @@ python3 scripts/build_capability_package.py \
 python3 scripts/build_capability_package.py \
   --declaration examples/capability-packages/drama-text-a/declaration.json \
   --files-root examples/capability-packages/drama-text-a \
-  --output "$CAP_WORK/dist/drama-text-a-0.2.2.zip"
+  --output "$CAP_WORK/dist/drama-text-a-0.3.0.zip"
 ```
 
 构建会核对源文件、生成可重复的 ZIP 并用正式读取器复验，不安装、不执行资源。记录整个 ZIP 的 SHA256，并保留当时声明及源码版本；普通文件修改不会改变已安装包。

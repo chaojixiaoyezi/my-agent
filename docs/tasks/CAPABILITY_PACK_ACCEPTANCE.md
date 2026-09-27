@@ -1,5 +1,23 @@
 # 能力内化：来源盘点与验收矩阵
 
+## 第十四候选：通用资源消费（2026-09-27）
+
+用户明确交付目标是通用能力包，短剧等仅为样例。本轮不新增领域方法或产品实现，先验证已有宿主修复组合，再用已有输入单独检查资源使用链；原A02内容失败和保留集0/36保持。
+
+- 固定源码`0545e2db199cedf975be90b151ae6d137e90a6c7`，包含既有b496/c71修复。**951项定向通过，0失败/0跳过**；测试前后源码摘要相同。Ruff、doc-sync、strict code-size、diff、clean-package通过，本地严格gate已通过，线上CI未作为验收来源。准确命令、JUnit与源码指纹在私有`candidate-14-combined-focused-*`证据中，不累计此前各轮测试数。
+- 离线构建wheel SHA256为`c3eed10847a9215a8bceb87830114aea2e0725aed5f5093ebac23f98f3b37464`，1424个声明成员逐个与固定源码及实际安装一致，Python3.12导入与pip check通过。原单一私有Gateway停稳、备份后切换，恢复至同一8433端口，PID16209；4092个旧文件、6份配置及安装表保持。旧wheel和停止态home/config备份保留，未执行回退；日用环境未改。
+- 首次目录集合核验因额外`.DS_Store`停止；它是未声明的目录元数据，已保留并单列，随后重新核对全部1424成员。不能称整个安装目录与wheel文件集合完全相等。两次只读观察器错误（误加status的`--json`、混淆activation ID与提交内容摘要）亦已更正并记录，未产生业务提交或包管理变更。
+- G01使用前轮两份原样输入，仅一次普通中文需求“检查并保存结果，不修改输入”。新原生CAP01经官方MiniMax-M2.7运行，request为`gwreq-1790497115-25dfa0e8307a45df84827b4f2e5f208f`，60.92秒、8次HTTP、0重试，自然终态`done/completed`。已核所选provider/base与实际回执backend，未另做逐次HTTP端点抓包。
+- A0.3.0原安装revision18及activation `00267b7b02796d6ec29add424001116810c118f08a218acd167e403509663ef9`保持。模型实际get入口和原脚本，通过完整`write_file.source_ref`复制**23750字节**，SHA256 `8a5948aec5cf3ad67057cd067ea43164c2be1dcc61df3758e9b2ba3007c07788`与包内原件完全相同，随后由原Shell工具执行；测试者未复制或执行checker。
+- 脚本正常报告旧输入的`SH06.source_ids`未知引用，`structure_valid=false`、退出码1、8条warning，人物字面诊断为`not_checked/structure_errors`。该退出码是检测出输入错误，不是原资源无法执行。模型保存的JSON保留原结构事实，额外添加一条解释detail，故不是stdout逐字节存档；最终文字正确报告结构未通过，却把8条warning写成9条。**原资源复制执行分项通过，最终报告准确性部分通过**；两输入及旧业务文件均未改。
+- 本轮没有`read_artifact`分页恢复或自动Compact，未重构完整model-facing请求；新需求与原A02不同，不能当成b496单变量因果验证、原A02修复、全部领域质量或保留矩阵通过。默认`enable_capability_package_selection=false`与私有开启臂继续分清。
+- 私有证据：`candidate-14-build.json`、`candidate-14-installed.json`、`candidate-14-runtime-binding.json`、`candidate-14-resource-consumption-frozen.json`、`candidate-14-resource-consumption-observation.json`、原生response/tool索引/完整stdout及独立只读报告。通用完成度审计另列已有生命周期/孙代理等事实和未覆盖恢复分支，不因缺少新轮而抹掉旧证据。
+- Claude于07:51 UTC回报main `111d32baaf8248e93ec540d3cfdfb86f8aedf834`已双机部署step13m，并修复先前并发状态锁问题；这些是集成方报告，本线未独立验生产，私有0545也未吸收其后续提交。此前“并发失败开放/部署进行中”为当时状态，不再作为当前阻塞；完整能力包发布仍未完成。
+
+建议下一步：补通用长任务实际自动Compact后的同代资源续用，先复用已有生命周期和主子孙证据，整理明确的发布范围；不继续打磨同一故事或重跑本例挑成功。只读资料/证据复核可并行，root独占私有环境，Claude独占main集成与发布。
+
+以下各节保留原轮次时点及失败，不表示当前运行版本。
+
 ## A0.3.0原生开发复验（2026-09-27）
 
 - 固定包源码`bcbf40e8fe5f85c7877266c584394b3443659a9c`及下节ZIP；私有唯一Gateway仍为`938d04aaee292aa5004d252af21122e5d97be7e3`，1422个安装成员重新核对一致，未安装b496或重启。实际选用官方MiniMax-M2.7配置及endpoint已核，终态回执后端匹配；未另取逐次HTTP端点抓包。
