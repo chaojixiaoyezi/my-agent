@@ -26,9 +26,11 @@
   - **展示**：`audit_records topic=decision` 每个 owner 附 `point_diagnostics`（是否开启、检查几次、调用几次、没调用的原因分布），
     飞书等 IM 里由模型直接用大白话解释；TUI 决策菜单“逐接入点设置”每行末尾显示“近24小时检查N次、调用M次，最多是因为：……”。
   - **边界**：model_selection、subagent_model、skill_tool 还没接计数，显示“未统计”而不是 0 次；距上次合并不到 60 秒、之后又没有
-    新到达的计数只在本进程可见，进程退出会丢；意外异常不计入。
-  - **待办（发现未改）**：`owner_resolver.home_paths_with_owner` 没有按作用域重设 `owner_memory_policy_json`，Gateway 里其它用户读到的是
-    基础 owner 的记忆策略文件，建议单独修并补全字段守卫测试。
+    新到达的计数只在本进程可见，Gateway 正常停止时补写，异常退出仍会丢；意外异常不计入。
+  - **后续已做**（2026-09-27，分支 `claude/9b-owner-path-scope`）：`home_paths_with_owner` 按用户重设 `owner_memory_policy_json`
+    （Gateway 里其它用户原先读的是本机主用户的记忆策略文件），并按字段全集守卫所有 owner_* 路径都在该用户 home 内；
+    Gateway 正常停止收尾补写到达计数；数量类大白话改为从 `conversation/decision_point_limits.py` 现算。
+  - **待定**：model_selection、subagent_model、skill_tool 的“到达”口径先提给集成方确认，再接计数。
   - 详见 [决策审计与管控](docs/design/DECISION_AUDIT_AND_ADMIN_CONTROLS.md#每个点位最近为什么没触发2026-09-27)。
 - **决策点“触发了但被挡下”也留审计记录**（2026-09-27，分支 `claude/decision-skip-records`，本地回归与变异通过，见 TESTS）：
   - **起因**：my-agent 在真实 TUI 里测 Jev 点位，planning 等没有任何记录，就写出“宿主未接线”的开发需求。实际都已接线且开启；

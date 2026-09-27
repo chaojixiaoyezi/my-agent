@@ -16,6 +16,8 @@ from agent_py_agent.agent.backends.decision_protocol import (
     DecisionResponse,
 )
 from agent_py_agent.agent.common.cancellation import ToolCancelled
+from agent_py_agent.agent.conversation import decision_point_limits as limits
+from agent_py_agent.agent.conversation.decision_reach_counts import miss_reason_label
 from agent_py_agent.agent.memory_store import MemoryRecord
 from agent_py_agent.agent.memory_store import decision_recall as module
 from agent_py_agent.agent.memory_store.recall import MemoryRecallScope
@@ -402,3 +404,13 @@ def test_non_selection_and_question_failure_reasons_remain_distinct(prepared, mo
     install(monkeypatch, mutate=partial)
     result, finding = run(prepared)
     assert result == prepared[2] and finding.endswith("retain_order:abstain,invalid_answer,need_data")
+
+
+def test_memory_floor_and_its_label_share_one_limit(prepared, monkeypatch, tmp_path):
+    host, request, records, scope = prepared
+    reasons = reach_counter(host, monkeypatch, "recall", tmp_path)
+    calls = install(monkeypatch)
+    monkeypatch.setattr(limits, "RECALL_MEMORIES_MIN", 4)
+    result = module.rerank_recalled_memories(host, request, records, recall_scope=scope, refresh=lambda: list(records))
+    assert result == (records, "") and not calls
+    assert reasons() == ({"memory_count": 1}, 0) and "不到 4 条" in miss_reason_label("memory_count")

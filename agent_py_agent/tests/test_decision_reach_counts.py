@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from agent_py_agent.agent.backends.decision_protocol import DecisionInputError, DecisionPrivacySkip
+from agent_py_agent.agent.conversation import decision_point_limits as limits
 from agent_py_agent.agent.conversation import decision_reach_counts as counts
 from agent_py_agent.agent.conversation.decision_reach_counts import (
     CALLED,
@@ -181,3 +182,18 @@ def test_summary_counts_only_hours_inside_the_window_and_ignores_foreign_schemas
     assert (row["reached"], row["not_called"][0]["count"]) == (2, 2)
     path.write_text(json.dumps({"schema": "decision_reach.v0", "hours": hours}), encoding="utf-8")
     assert decision_reach_summary(agent.home_paths, since=0)["points"] == {}
+
+
+def test_threshold_labels_are_built_from_the_shared_limits(monkeypatch):
+    # 每个原因码 → (下限常量, 上限常量或 None)；改成互不相同的数字后，下限必须出现在“不到”后、上限必须出现在“超过”后。
+    uses = {"focus_count": ("DELIVERY_FOCUSES_MIN", "DELIVERY_FOCUSES_MAX"), "few_candidates": ("ACTION_CANDIDATES_MIN", None),
+            "single_page": ("MATERIAL_PAGES_MIN", None), "todo_count": ("PLANNING_TODOS_MIN", "PLANNING_TODOS_MAX"),
+            "pending_count": ("SKILL_PROPOSALS_MIN", "SKILL_PROPOSALS_MAX"), "memory_count": ("RECALL_MEMORIES_MIN", None)}
+    assert not set(uses) & set(counts._LABELS), "带数量界限的说明不能写死在静态表里"
+    numbers = {}
+    for number, name in enumerate((name for pair in uses.values() for name in pair if name), 71):
+        monkeypatch.setattr(limits, name, number)
+        numbers[name] = number
+    for reason, (low, high) in uses.items():
+        label = miss_reason_label(reason)
+        assert f"不到 {numbers[low]} " in label and (high is None or f"超过 {numbers[high]} " in label), label

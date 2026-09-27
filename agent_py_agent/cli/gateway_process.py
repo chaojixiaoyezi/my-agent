@@ -510,27 +510,47 @@ def _settle_interrupted_model_calls(request: GatewayRunCleanupRequest, *, drain_
     return len(interrupted)
 
 
-# LLM: 停止收尾顺序固定：先置停止事件，再取消本进程在途决策，再停 HTTP 与收三条循环，排空窗口后把仍在途的模型调用
-#   记成被停机中断（只记结构化事实，不猜用量），最后清 pid/停止请求并写心跳与收尾事件；决策取消或账本结清出错只记
-#   异常类型事件，不能中断后续清理。改动须同步 test_gateway_decision_shutdown_cancel.py、
-#   test_gateway_model_call_shutdown_settlement.py 与 Gateway 停止相关回归。
-# 函数用途: Gateway 停止时收尾三条循环、结清在途模型调用、清理 pid/停止请求并写出是否完整排空的状态。
-def _cmd_gateway_run_cleanup(request: GatewayRunCleanupRequest) -> dict[str, object]:
-    """Drain the three gateway loops and persist whether shutdown was complete."""
-    request.stop_event.set()
-    # 决策线：只取消本进程内登记的在途决策句柄，让等待中的可选增强立即回到原方案；不读写任何持久状态。
+# LLM: 决策线停机第一步：只取消本进程内登记的在途决策句柄，让等待中的可选增强立即回到原方案；不读写任何持久状态。
+#   决策模块出错只记异常类型事件 gateway_decision_cancel_failed（不记异常正文），不能中断收尾。
+# 函数用途: Gateway 停止时取消本进程在途的决策请求。
+def _cancel_active_decisions(request: GatewayRunCleanupRequest) -> None:
     try:
         from ..agent.conversation.decision_policy import cancel_active_decisions_for_shutdown
 
         cancel_active_decisions_for_shutdown()
     except Exception as exc:  # noqa: BLE001 - 停止收尾不能因可选决策模块出错而中断
         log_gateway_event(request.context.agent, "gateway_decision_cancel_failed", {"error_type": type(exc).__name__})
+
+
+# LLM: 决策线停机收尾：排空之后把本进程还没落盘的决策点到达计数写出（平时每个 owner 最多每分钟合并一次，这里补上尾巴）。
+#   写盘失败由计数模块自己记日志并把计数放回；这里只挡模块级异常，记异常类型事件 gateway_decision_reach_flush_failed，
+#   不能中断收尾。只接在正常停止路径上，不注册 atexit：测试进程不受影响，异常退出仍会丢上次合并之后还没写盘的计数。
+# 函数用途: Gateway 正常停止时把决策点诊断计数的尾巴写盘（写文件副作用）。
+def _flush_decision_reach_counts(request: GatewayRunCleanupRequest) -> None:
+    try:
+        from ..agent.conversation.decision_reach_counts import flush_decision_reach_counts
+
+        flush_decision_reach_counts()
+    except Exception as exc:  # noqa: BLE001 - 停止收尾不能因诊断计数模块出错而中断
+        log_gateway_event(request.context.agent, "gateway_decision_reach_flush_failed", {"error_type": type(exc).__name__})
+
+
+# LLM: 停止收尾顺序固定：先置停止事件，再取消本进程在途决策，再停 HTTP 与收三条循环，排空窗口后把仍在途的模型调用
+#   记成被停机中断（只记结构化事实，不猜用量），再把决策点到达计数的尾巴落盘，最后清 pid/停止请求并写心跳与收尾事件；
+#   决策取消、账本结清或计数落盘出错只记异常类型事件，不能中断后续清理。改动须同步 test_gateway_decision_shutdown_cancel.py、
+#   test_gateway_model_call_shutdown_settlement.py 与 Gateway 停止相关回归。
+# 函数用途: Gateway 停止时收尾三条循环、结清在途模型调用、清理 pid/停止请求并写出是否完整排空的状态。
+def _cmd_gateway_run_cleanup(request: GatewayRunCleanupRequest) -> dict[str, object]:
+    """Drain the three gateway loops and persist whether shutdown was complete."""
+    request.stop_event.set()
+    _cancel_active_decisions(request)
     if request.http_server:
         request.http_server.stop()
     alive_threads = _join_gateway_loops(request)
     drain_complete = not alive_threads
     interrupted_model_calls = _settle_interrupted_model_calls(request, drain_complete=drain_complete)
     surviving_background_sessions = _record_surviving_background_sessions(request)
+    _flush_decision_reach_counts(request)
     paths = request.context.paths
     try:
         remove_pid_file_if_owned(paths.pid)

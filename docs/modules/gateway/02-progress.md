@@ -1,5 +1,6 @@
 # Gateway 维护状态
 
+停止收尾补写决策点到达计数（分支 `claude/9b-owner-path-scope`，2026-09-27）：`_cmd_gateway_run_cleanup` 在结清在途模型调用、列出存活后台会话之后调用 `_flush_decision_reach_counts`，把 `conversation/decision_reach_counts` 里还没落盘的计数写出，部署重启不再丢最后一段；只接正常停止路径，不注册 atexit，出错只记 `gateway_decision_reach_flush_failed{error_type}`。原先内联的“取消在途决策”抽成 `_cancel_active_decisions`，行为与事件名不变。同分支修复 Gateway 用户读到本机主用户`memory_policy.json` 的作用域问题（`owner_resolver`）。回归见 `test_gateway_decision_shutdown_cancel.py`、`test_gateway_per_user_scoping.py`。
 参数减量第 2 批（分支 `claude/9a-merge-config`，2026-09-27）：后台会话执行权只剩 `background_claim_ttl_seconds` 一个旋钮，续约心跳始终由 `run_claim.claim_heartbeat_interval_seconds(ttl_seconds=…)` 推导（90 秒时 30 秒）；手动 Compact 车道（`control_service._manual_compact_lane`）和前台请求车道（`request_binding`）不再读 `background_claim_heartbeat_interval_seconds`（已删除，旧键只告警并忽略），子代理 runner 会话心跳固定 5 秒。默认行为不变。
 
 `/settings` 回显的结构脱敏（分支 `claude/be-structured-masking`，2026-09-27）：`show`、`search`、总览经 `mask_value` 结构脱敏，请求头与 MCP 服务器 env 的值只留键名、args 里凭据开关的值、名字是凭据的 `名字=值`、`--header`/`--env` 的值与网址密码遮值；`history` 行先经 `parameter_changes.displayed_change` 再遮一次，旧记录也不漏明文。回归见 `test_structured_masking.py`。

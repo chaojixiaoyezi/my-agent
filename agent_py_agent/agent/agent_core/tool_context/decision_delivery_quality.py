@@ -15,6 +15,7 @@ from ...backends.decision_protocol import (
 )
 from ...common.cancellation import ToolCancelled, bind_cancellation_token, raise_if_cancelled
 from ...concurrency.interrupt import is_interrupted
+from ...conversation import decision_point_limits as limits
 from ...conversation.decision_outcome_log import material_or_skip
 from ...conversation.decision_reach_counts import CALLED, note_decision_reach, stage_miss_reason
 from ...conversation.decision_service import (
@@ -34,8 +35,6 @@ from .external_material_order import _URL_WITH_QUERY
 _POINT = "delivery_quality"
 _TOOL = "run_command"
 _QUESTION = "review_focus"
-_MIN_FOCUSES = 2
-_MAX_FOCUSES = 12
 _MAX_HINT_CHARS = 512
 _HINT_TAG = "[delivery-review-focus]"
 # 宿主分类值只按短标识校验，不是封闭枚举；形态异常时放弃增强，不猜测含义。
@@ -107,7 +106,7 @@ def _advise(agent: object, record: object, archive: dict) -> str:
 
 
 # LLM: 触发只看结构化事实：当前 run_command 的新验证事件、原调用/归档配对、主代理、无收口标记，
-# 同 run/task 的 2—12 个焦点且至少一个 failed 或其后有修改；不读输出正文或自然语言。返回宿主原因码，空串表示满足。
+# 同 run/task 的焦点个数在 decision_point_limits 的界限内且至少一个 failed 或其后有修改；不读输出正文或自然语言。返回宿主原因码，空串表示满足。
 #   验证来源形状不合规（DecisionInputError）记 bad_verification；当前归档不在本轮列表里记 record_mismatch，
 #   两者都与原先放弃的结果一致。
 # 函数用途: 判断这条工具回执能否进入可选复核建议，不能时给出原因码；不满足时原展示不变且不发请求。
@@ -119,7 +118,7 @@ def _miss_reason(agent: object, record: object, archive: dict) -> str:
         focuses = _focuses(record, archive)
     except DecisionInputError:
         return "bad_verification"
-    if not _MIN_FOCUSES <= len(focuses) <= _MAX_FOCUSES:
+    if not limits.DELIVERY_FOCUSES_MIN <= len(focuses) <= limits.DELIVERY_FOCUSES_MAX:
         return "focus_count"
     if not any(focus["current"] for focus in focuses):
         return "record_mismatch"

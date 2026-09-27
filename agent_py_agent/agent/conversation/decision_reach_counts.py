@@ -1,8 +1,10 @@
 # LLM: 决策点诊断计数属于 conversation 决策服务，是“到达触发点 / 实际调用 / 没调用的宿主原因码”的唯一来源。
 #   每次到达只在进程内按 owner、小时、点位、原因累加，不逐次写盘；有新计数时每个 owner 最多每 _FLUSH_SECONDS 秒持锁
-#   读-加-写合并一次到规范路径 owner_decision_reach_counts_json，保留 _RETAIN_SECONDS。原因码只来自各点位的结构化判定，
-#   不解析自然语言；未登记的码照原样展示，不拒绝。开关复用 decision_skip_records_enabled（关闭时不计数也不写盘）。
-#   新增原因码须同步 _LABELS、调用点与 test_decision_reach_counts.py；展示入口是 audit_records 与 decision_read。
+#   读-加-写合并一次到规范路径 owner_decision_reach_counts_json，保留 _RETAIN_SECONDS；Gateway 正常停止时再把尾巴补写一次。
+#   原因码只来自各点位的结构化判定，不解析自然语言；未登记的码照原样展示，不拒绝。
+#   开关复用 decision_skip_records_enabled（关闭时不计数也不写盘）。
+#   新增原因码须同步 _LABELS（带数量界限的写进 _limit_labels，数字只读 decision_point_limits）、调用点与
+#   test_decision_reach_counts.py；展示入口是 audit_records 与 decision_read。
 # 模块用途: 让用户看到每个 Jev 点位“最近检查了几次、真正问了几次决策模型、没问的原因是什么”，不再只看到 0 次就以为没接线。
 """Bounded per-point reach and miss-reason counters for optional decision points."""
 
@@ -21,6 +23,7 @@ from ..common.json_io import (
     read_json_object_report,
     write_json_file_atomic_unlocked,
 )
+from . import decision_point_limits as limits
 
 SCHEMA = "decision_reach.v1"
 CALLED = "called"
@@ -55,26 +58,20 @@ _LABELS = {
     "not_executed": "这条命令没有真正执行完",
     "not_verification": "这条命令没有留下可用的测试结果记录",
     "bad_verification": "这轮的测试结果记录格式不完整，为稳妥不做判断",
-    "focus_count": "这轮跑过的不同测试不到 2 组（或超过 12 组），不需要挑复核重点",
     "nothing_to_review": "测试都通过了，之后也没改过文件，没有需要复核的",
     "not_observation": "这一步没有产生可点选的页面操作（只有浏览器这类插件会产生）",
     "failed_call": "这一步执行失败了",
     "bad_observation": "页面操作清单不完整，为稳妥不做判断",
-    "few_candidates": "页面上可选的操作不到 2 个，不需要挑",
     "no_available_action": "候选操作需要的工具这一轮用不了",
     "stale_observation": "页面已经变了，这份操作清单过期了",
     "not_web_fetch": "这一步不是抓取网页",
     "fetch_failed": "网页抓取没有成功",
     "not_external_page": "抓回来的不是普通外部网页内容",
     "not_extract": "这次抓取不是摘录模式",
-    "single_page": "这次只抓了 1 个网页，不需要排阅读顺序",
     "ledger_unreadable": "待办清单读不出来",
     "not_main_scope": "这不是主对话里的任务",
     "not_current_plan": "查看的是别的任务或历史任务的清单",
     "no_plan_version": "待办清单还没有版本信息",
-    "todo_count": "未完成的待办不到 2 个（或超过 24 个），不需要排优先级",
-    "pending_count": "待确认的 Skill 提案不到 2 条（或超过 30 条），不需要排审核顺序",
-    "memory_count": "这轮找到的普通记忆不到 2 条，不需要重新排序",
     "no_query_fragments": "这轮的问题拆不出可以补充搜索的片段",
     "no_free_slots": "这轮能放进来的长期记忆名额已经满了",
     "no_room": "这轮能放记忆的字数已经用完了",
@@ -128,12 +125,29 @@ def stage_miss_reason(stage: object, point: str, run_id: str | None = None) -> s
     return ""
 
 
-# 函数用途: 把原因码翻成大白话；没登记的码原样带上，便于排查，不拒绝。
+# 函数用途: 把原因码翻成大白话；带数量界限的说明每次现算，没登记的码原样带上，便于排查，不拒绝。
 def miss_reason_label(reason: str) -> str:
-    return _LABELS.get(reason) or f"其它原因（{reason}）"
+    return _LABELS.get(reason) or _limit_labels().get(reason) or f"其它原因（{reason}）"
 
 
-# LLM: 立即把本进程所有未落盘计数写出（测试与可能的关停收尾用）；平时由 note_decision_reach 按节流自动写。
+# LLM: 数字只读 decision_point_limits（点位判定读的是同一处），调用时现算，常量一改标签随之变；不在这里写死任何界限。
+# 函数用途: 生成“数量不够或太多”这类原因的大白话。
+def _limit_labels() -> dict[str, str]:
+    return {
+        "focus_count": (f"这轮跑过的不同测试不到 {limits.DELIVERY_FOCUSES_MIN} 组"
+                        f"（或超过 {limits.DELIVERY_FOCUSES_MAX} 组），不需要挑复核重点"),
+        "few_candidates": f"页面上可选的操作不到 {limits.ACTION_CANDIDATES_MIN} 个，不需要挑",
+        "single_page": f"这次抓到的网页不到 {limits.MATERIAL_PAGES_MIN} 个，不需要排阅读顺序",
+        "todo_count": (f"未完成的待办不到 {limits.PLANNING_TODOS_MIN} 个"
+                       f"（或超过 {limits.PLANNING_TODOS_MAX} 个），不需要排优先级"),
+        "pending_count": (f"待确认的 Skill 提案不到 {limits.SKILL_PROPOSALS_MIN} 条"
+                          f"（或超过 {limits.SKILL_PROPOSALS_MAX} 条），不需要排审核顺序"),
+        "memory_count": f"这轮找到的普通记忆不到 {limits.RECALL_MEMORIES_MIN} 条，不需要重新排序",
+    }
+
+
+# LLM: 立即把本进程所有未落盘计数写出；平时由 note_decision_reach 按节流自动写。调用方是 Gateway 正常停止收尾
+#   （cli/gateway_process._flush_decision_reach_counts）与测试；不注册 atexit，异常退出仍会丢上次合并之后的计数。
 # 函数用途: 强制落盘本进程积攒的到达计数（写文件副作用）。
 def flush_decision_reach_counts() -> None:
     with _LOCK:

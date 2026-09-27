@@ -40,6 +40,19 @@ def _isolate_my_agent_home(tmp_path_factory, monkeypatch):
     monkeypatch.delenv("MY_AGENT_HOSTING_GATEWAY_PID", raising=False)
 
 
+
+@pytest.fixture(autouse=True)
+def _isolate_decision_reach_counts(monkeypatch):
+    """每个测试用自己的决策点到达计数待写队列，测完丢弃。
+
+    待写队列（conversation/decision_reach_counts）是进程级的；Gateway 收尾会真实落盘全部待写计数，
+    不隔离的话会把别的测试留下的计数写进它们（可能已删除的）临时 home。
+    """
+    from agent_py_agent.agent.conversation import decision_reach_counts
+
+    monkeypatch.setattr(decision_reach_counts, "_PENDING", {})
+    monkeypatch.setattr(decision_reach_counts, "_LAST_FLUSH", {})
+
 def _loopback_no_proxy(current: str) -> str:
     values = [item.strip() for item in str(current or "").split(",") if item.strip()]
     for item in ("127.0.0.1", "localhost", "::1"):

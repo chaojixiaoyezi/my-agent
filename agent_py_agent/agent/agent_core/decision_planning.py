@@ -9,6 +9,7 @@ from pathlib import Path
 from ..backends.decision_protocol import decision_json, decision_request_excerpt
 from ..common.cancellation import ToolCancelled, raise_if_cancelled
 from ..concurrency.interrupt import is_interrupted
+from ..conversation import decision_point_limits as limits
 from ..conversation.decision_reach_counts import (
     CALLED,
     counted_material,
@@ -34,7 +35,6 @@ from .orchestration.dispatch_progress_seed import _known_child_run_ids
 from .runtime.task_identity import progress_ledger_id
 
 _POINT = "planning"
-_MAX_CANDIDATES = 24
 _NON_SELECTIONS = {
     "not_needed": "无需额外优先级建议，继续原计划",
     "no_match": "现有候选均不适合优先推荐",
@@ -116,6 +116,7 @@ def _open_stage(agent: object, params: object, ledger: tuple[Path, str, dict]) -
 # Whether a current request exists is checked after the stage (see _open_stage)
 # and counted as no_request; long requests are sent as labeled head/tail excerpts.
 #   ledger 是 (root, run_id, payload) 三元组；返回宿主原因码，空串表示满足，各条件与原先的整体判断一一对应。
+#   待办个数界限读 decision_point_limits.PLANNING_TODOS_MIN/MAX（与诊断大白话共用，调用时现读）。
 # 函数用途: 只允许当前主代理的真实、有多项 open 项的计划进入可选分析，不能时给出原因码。
 def _miss_reason(agent: object, params: object, ledger: tuple[Path, str, dict]) -> str:
     root, run_id, payload = ledger
@@ -133,7 +134,8 @@ def _miss_reason(agent: object, params: object, ledger: tuple[Path, str, dict]) 
     generation, revision = task_progress_display_identity(payload)
     if not generation or revision <= 0:
         return "no_plan_version"
-    return "" if 2 <= len(_candidate_rows(agent, payload)) <= _MAX_CANDIDATES else "todo_count"
+    count = len(_candidate_rows(agent, payload))
+    return "" if limits.PLANNING_TODOS_MIN <= count <= limits.PLANNING_TODOS_MAX else "todo_count"
 
 
 # LLM: Reuse the dispatch contract's exact child IDs to omit generated roster

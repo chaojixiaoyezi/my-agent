@@ -3,7 +3,7 @@
 #   owner/候选/run 编号只进本地版本摘要。结果只重排 CLI 展示并附宿主固定标签，绝不确认、拒绝、改写提案或 Skill；
 #   关闭、observe、任何失败或来源变化都返回 None（调用方保持原输出），用户取消与中断照常上抛。
 #   同步检查 cli/skill_proposal_commands.py 的展示、decision_settings_schema 登记与 test_decision_skill_proposal_review*.py。
-# 模块用途: 在 `my-agent skills proposals list` 有 2—30 条待确认提案时，可选地请决策模型建议审核先后，只影响列表展示顺序。
+# 模块用途: 在 `my-agent skills proposals list` 列出的待确认提案条数落在 decision_point_limits 的界限内时，可选地请决策模型建议审核先后，只影响列表展示顺序。
 from __future__ import annotations
 
 import hashlib
@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from ..backends.decision_protocol import DecisionInputError, decision_json
 from ..common.cancellation import ToolCancelled, raise_if_cancelled
 from ..concurrency.interrupt import is_interrupted
+from ..conversation import decision_point_limits as limits
 from ..conversation.decision_reach_counts import (
     CALLED,
     counted_material,
@@ -32,8 +33,6 @@ from .skill_proposals import PROPOSAL_PENDING, SkillProposal, render_skill_markd
 from .skill_snapshot import skill_content_sha256
 
 _POINT = "skill_proposal_review"
-_MIN_PENDING = 2
-_MAX_PENDING = 30  # 本地延迟与输入保护：30 条最长草稿仍在 Jev 单题窗口门内；不是供应商题数上限。
 _LESSON_EXCERPT_CHARS = 240
 # 与 skill_proposals._BODY_TEMPLATE 的经验段标题一致；模板变动由 test_lesson_excerpt_matches_s1_template 拦住。
 _LESSON_START = "\n## 经验\n\n"
@@ -83,13 +82,14 @@ class SkillProposalReviewOrder:
 
 # LLM: 入口先按登记与待确认条数快退，不满足时零读取零请求；普通失败一律返回 None，取消/中断上抛。
 #   不写提案或 Skill；只经 decision_reach_counts 计一次到达结果（条数不符记 pending_count，诊断计数副作用）。
+#   条数界限读 decision_point_limits.SKILL_PROPOSALS_MIN/MAX（与诊断大白话共用，调用时现读）。
 # 函数用途: 为 CLI 列表计算可选审核顺序；返回 None 表示保持原输出。
 def skill_proposal_review_order(host: object, service: object,
                                 proposals: list[SkillProposal] | tuple[SkillProposal, ...]) -> SkillProposalReviewOrder | None:
     if _POINT not in POINT_RUNTIME_SCOPES:
         return None
     pending = tuple(item for item in proposals if item.status == PROPOSAL_PENDING)
-    if not _MIN_PENDING <= len(pending) <= _MAX_PENDING:
+    if not limits.SKILL_PROPOSALS_MIN <= len(pending) <= limits.SKILL_PROPOSALS_MAX:
         note_decision_reach(host, _POINT, "pending_count")
         return None
     try:

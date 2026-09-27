@@ -6,6 +6,9 @@
 
 from __future__ import annotations
 
+import dataclasses
+from pathlib import Path
+
 import pytest
 
 from agent_py_agent.agent.core import SimpleAgent
@@ -100,17 +103,20 @@ def test_two_local_thin_tui_users_keep_tasks_memory_and_sessions_separate(tmp_pa
 
 
 
-def test_scoped_user_decision_records_stay_in_that_users_home(tmp_path) -> None:
-    """决策结果日志与到达计数若漏同步 owner_resolver，会留在基础 owner 目录里，变成跨用户写同一文件。"""
+def test_every_owner_path_of_every_scope_stays_in_that_owners_home(tmp_path) -> None:
+    """按字段全集守卫：新增 owner_* 路径若漏同步 owner_resolver，会留在基础 owner 目录里，变成跨用户读写同一文件。"""
     agent = _agent(tmp_path, scoping=True)
-    alice = _resolve_request_agent(agent, _req("alice", "feishu"))
-    bob = _resolve_request_agent(agent, _req("bob", "feishu"))
-    data = alice.home_paths.owner_home_dir / "data" / "decision"
-    assert alice.home_paths.owner_decision_outcomes_jsonl == data / "outcomes.jsonl"
-    assert alice.home_paths.owner_decision_reach_counts_json == data / "reach_counts.json"
-    assert alice.home_paths.owner_decision_reach_counts_json != bob.home_paths.owner_decision_reach_counts_json
-    assert agent.home_paths.owner_decision_reach_counts_json not in {
-        alice.home_paths.owner_decision_reach_counts_json, bob.home_paths.owner_decision_reach_counts_json}
+    alice = _resolve_request_agent(agent, _req("alice", "feishu")).home_paths
+    bob = _resolve_request_agent(agent, _req("bob", "feishu")).home_paths
+    for paths in (agent.home_paths, alice, bob):
+        names = [field.name for field in dataclasses.fields(paths)
+                 if field.name.startswith("owner_") and isinstance(getattr(paths, field.name), Path)]
+        assert "owner_memory_policy_json" in names and "owner_decision_reach_counts_json" in names
+        outside = sorted(name for name in names if not getattr(paths, name).is_relative_to(paths.owner_home_dir))
+        assert outside == [], f"{paths.owner_id} 的这些路径不在自己的 home 里：{outside}"
+    assert alice.owner_home_dir != bob.owner_home_dir != agent.home_paths.owner_home_dir
+    assert alice.owner_decision_reach_counts_json == alice.owner_home_dir / "data" / "decision" / "reach_counts.json"
+
 
 def test_local_thin_tui_group_uses_group_owner_scope(tmp_path) -> None:
     """本机群组测试身份沿用结构化 chat_id，不能误建成发件人个人目录。"""

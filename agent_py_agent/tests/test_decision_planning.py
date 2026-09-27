@@ -19,6 +19,8 @@ from agent_py_agent.agent.backends.decision_protocol import (
     DecisionResponse,
 )
 from agent_py_agent.agent.common.cancellation import ToolCancelled
+from agent_py_agent.agent.conversation import decision_point_limits as limits
+from agent_py_agent.agent.conversation.decision_reach_counts import miss_reason_label
 from agent_py_agent.agent.settings.decision_settings import execute_decision_settings_operation
 from agent_py_agent.agent.task_progress import (
     read_task_progress,
@@ -306,3 +308,12 @@ def test_optional_provider_error_retains_original_but_user_stop_propagates(prepa
     install(monkeypatch, error=ToolCancelled("stopped"))
     with pytest.raises(ToolCancelled):
         _read(agent)
+
+
+def test_todo_bounds_and_their_label_share_one_limit(prepared, monkeypatch):
+    agent, _, root = prepared
+    reasons = reach_counter(agent, monkeypatch, module._POINT, root)
+    calls = install(monkeypatch)
+    monkeypatch.setattr(limits, "PLANNING_TODOS_MIN", 3)
+    assert "planning_priority_hint" not in _read(agent) and not calls
+    assert reasons() == ({"todo_count": 1}, 0) and "不到 3 个" in miss_reason_label("todo_count")

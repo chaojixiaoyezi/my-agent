@@ -26,6 +26,8 @@ from agent_py_agent.agent.backends.decision_protocol import (
 )
 from agent_py_agent.agent.backends.message_adapter import AnthropicMessageAdapter
 from agent_py_agent.agent.common.cancellation import ToolCancelled
+from agent_py_agent.agent.conversation import decision_point_limits as limits
+from agent_py_agent.agent.conversation.decision_reach_counts import miss_reason_label
 from agent_py_agent.agent.plugin_observation import OBSERVATION_SCHEMA
 from agent_py_agent.agent.runtime_context import (
     restore_current_subagent_context,
@@ -641,3 +643,12 @@ def test_real_freshness_authority_rejects_an_observation_replaced_for_the_same_t
     persist_observation(host, _payload(target={"ref": "tab-3", "generation": "18"}), operation_id="op-2", call_id="read-2")
     calls = install(monkeypatch)
     assert module.action_candidate_hint(host, record, archive) == "" and calls == [], "同一目标有了更新观察，旧候选不再提示"
+
+
+def test_candidate_floor_and_its_label_share_one_limit(prepared, monkeypatch):
+    host, record, archive = prepared
+    reasons = reach_counter(host, monkeypatch, module._POINT, host.root)
+    calls = install(monkeypatch)
+    monkeypatch.setattr(limits, "ACTION_CANDIDATES_MIN", 4)
+    assert module.action_candidate_hint(host, record, archive) == "" and calls == []
+    assert reasons() == ({"few_candidates": 1}, 0) and "不到 4 个" in miss_reason_label("few_candidates")

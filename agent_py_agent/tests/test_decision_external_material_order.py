@@ -23,6 +23,8 @@ from agent_py_agent.agent.backends.decision_protocol import (
 )
 from agent_py_agent.agent.backends.message_adapter import AnthropicMessageAdapter
 from agent_py_agent.agent.common.cancellation import ToolCancelled
+from agent_py_agent.agent.conversation import decision_point_limits as limits
+from agent_py_agent.agent.conversation.decision_reach_counts import miss_reason_label
 from agent_py_agent.agent.tooling.output_projection import project_tool_output_body
 from agent_py_agent.agent.tooling.runtime_contracts import ToolResult, ToolSuccessFacts
 from agent_py_agent.tests._tool_runtime_harness import (
@@ -360,3 +362,12 @@ def test_host_text_and_native_use_one_append_only_hint(prepared, monkeypatch, mo
     assert len(calls) == (0 if mode == "off" else 1)
     assert record.result.to_dict() == original_result and archive == original_archive
     assert ledger == [original_archive] and record.params.archive_tool_calls == [original_archive]
+
+
+def test_page_floor_and_its_label_share_one_limit(prepared, monkeypatch):
+    host, record, archive = prepared
+    reasons = reach_counter(host, monkeypatch, module._POINT, host.root)
+    calls, _ = install(monkeypatch)
+    monkeypatch.setattr(limits, "MATERIAL_PAGES_MIN", 4)
+    assert module.external_material_order_hint(host, record, archive) == "" and not calls
+    assert reasons() == ({"single_page": 1}, 0) and "不到 4 个" in miss_reason_label("single_page")

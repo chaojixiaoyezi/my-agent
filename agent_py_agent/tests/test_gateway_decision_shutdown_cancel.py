@@ -3,6 +3,7 @@
 # 模块用途: 验证 Gateway 停止时主动取消本进程在途决策（P4-F）：立即回原方案、不冒充用户停止、不进冷却、之后不再发新决策。
 from __future__ import annotations
 
+import json
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -12,7 +13,9 @@ import pytest
 
 from agent_py_agent.agent.agent_core.model.call_runtime import model_call_summary
 from agent_py_agent.agent.conversation import decision_policy
+from agent_py_agent.agent.conversation import decision_reach_counts as reach_counts
 from agent_py_agent.cli import gateway_process
+from agent_py_agent.tests.test_decision_reach_counts import reach_counter
 from agent_py_agent.tests.test_decision_service_http import configured, decide, server  # noqa: F401
 from agent_py_agent.tests.test_decision_settings import patch
 
@@ -135,4 +138,37 @@ def test_gateway_cleanup_survives_a_failing_decision_module(monkeypatch):
     report = gateway_process._cmd_gateway_run_cleanup(request)
     assert order[:2] == ["stop_event", "http_stop"] and "heartbeat" in order and report["drain_complete"]
     failed = [payload for name, payload in events if name == "gateway_decision_cancel_failed"]
+    assert failed == [{"error_type": "RuntimeError"}], "只记异常类型，不记异常正文"
+
+
+def test_gateway_cleanup_flushes_pending_reach_counts_after_draining(monkeypatch, tmp_path):
+    order = []
+    request, events = _cleanup_request(monkeypatch, order, cancel=lambda: 0)
+    host = SimpleNamespace()
+    reasons = reach_counter(host, monkeypatch, "planning", tmp_path)
+    for _ in range(3):
+        reach_counts.note_decision_reach(host, "planning", "todo_count")
+    path = host.home_paths.owner_decision_reach_counts_json
+    stored = json.loads(path.read_text(encoding="utf-8"))["hours"]
+    assert [row["planning"]["todo_count"] for row in stored.values()] == [1], "第一次到达立刻落盘，后两次还在内存里"
+    flush = reach_counts.flush_decision_reach_counts
+    monkeypatch.setattr(reach_counts, "flush_decision_reach_counts", lambda: order.append("flush_reach") or flush())
+    report = gateway_process._cmd_gateway_run_cleanup(request)
+    assert order.index("http_stop") < order.index("flush_reach") < order.index("heartbeat") and report["drain_complete"]
+    stored = json.loads(path.read_text(encoding="utf-8"))["hours"]
+    assert [row["planning"]["todo_count"] for row in stored.values()] == [3] and reasons() == ({"todo_count": 3}, 0)
+    assert [name for name, _payload in events] == ["gateway_run_cleanup"]
+
+
+def test_gateway_cleanup_survives_a_failing_reach_flush(monkeypatch):
+    order = []
+
+    def broken():
+        raise RuntimeError("secret detail that must not be logged")
+
+    request, events = _cleanup_request(monkeypatch, order, cancel=lambda: 0)
+    monkeypatch.setattr(reach_counts, "flush_decision_reach_counts", broken)
+    report = gateway_process._cmd_gateway_run_cleanup(request)
+    assert "heartbeat" in order and report["drain_complete"]
+    failed = [payload for name, payload in events if name == "gateway_decision_reach_flush_failed"]
     assert failed == [{"error_type": "RuntimeError"}], "只记异常类型，不记异常正文"

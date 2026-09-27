@@ -441,7 +441,8 @@ agent_py_agent/
 |   |   |-- decision_service.py       # 可选决策阶段预算、设置/身份复核和建议返回，不执行业务动作
 |   |   |-- decision_policy.py        # 有界连接/点位冷却与同进程设置取消通知，不拥有 worker 或持久状态
 |   |   |-- decision_outcome_log.py   # 决策结果日志：每次 decide 的点位/状态/原因/耗时（无正文），有界落 owner data/decision，审计按点位汇总
-|   |   |-- decision_reach_counts.py  # 决策点到达/未触发原因计数：进程内按小时累加，节流合并落 owner data/decision/reach_counts.json，原因码配大白话
+|   |   |-- decision_point_limits.py  # 决策点数量界限（焦点/候选/网页/待办/提案/记忆的上下限）：点位判定与诊断大白话共用的唯一定义
+|   |   |-- decision_reach_counts.py  # 决策点到达/未触发原因计数：进程内按小时累加，节流合并落 owner data/decision/reach_counts.json，原因码配大白话；Gateway 正常停止时补写尾巴
 |   |   |-- decision_model_call.py    # 实际决策 worker 复用原准入、身份头、HTTP 观察和唯一调用账；实验先算经验上界再预留
 |   |   |-- decision_experiment.py    # 实验准入/路由/在途复核：只读原授权、账本代次与 v2 上界口径
 |   |   |-- decision_experiment_evaluation.py # 只读证据评估：召回/节省/结算三项事实，决定 skill_tool off→apply 建议

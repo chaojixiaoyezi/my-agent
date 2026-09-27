@@ -130,7 +130,8 @@ def owner_identity_from_config(config: Any) -> OwnerIdentity:
     return OwnerIdentity.provider_user(provider, owner_id)
 
 
-# LLM: 替换所有 owner 作用域路径，不能沿用本地主用户的插件、会话或 Skill 提案目录；不写入状态。
+# LLM: 替换所有 owner 作用域路径，不能沿用本地主用户的插件、会话、策略或 Skill 提案目录；不写入状态。
+#   MyAgentHomePaths 新增 owner_* 路径必须在这里重设；test_gateway_per_user_scoping 按字段全集守卫，漏了就会失败。
 # 函数用途: 将基础宿主路径投影到指定可信 owner，供冷用户管理入口直接使用。
 def home_paths_with_owner(paths: MyAgentHomePaths, owner: OwnerHomeResult) -> MyAgentHomePaths:
     return replace(
@@ -151,6 +152,7 @@ def home_paths_with_owner(paths: MyAgentHomePaths, owner: OwnerHomeResult) -> My
         owner_permissions_json=owner.permissions_json,
         owner_quota_json=owner.quota_json,
         owner_retention_json=owner.retention_json,
+        owner_memory_policy_json=owner.memory_policy_json,
         owner_skill_policy_json=owner.skill_policy_json,
         owner_tool_policy_json=owner.tool_policy_json,
         owner_memory_daily_dir=owner.daily_memory_dir,

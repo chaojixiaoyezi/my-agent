@@ -16,6 +16,7 @@ from ...backends.decision_protocol import (
 )
 from ...common.cancellation import ToolCancelled, bind_cancellation_token, raise_if_cancelled
 from ...concurrency.interrupt import is_interrupted
+from ...conversation import decision_point_limits as limits
 from ...conversation.decision_outcome_log import material_or_skip
 from ...conversation.decision_reach_counts import CALLED, note_decision_reach, stage_miss_reason
 from ...conversation.decision_service import (
@@ -47,7 +48,6 @@ from .external_material_order import _URL_WITH_QUERY
 
 _POINT = "action_candidate"
 _QUESTION = "next_candidate"
-_MIN_CANDIDATES = 2
 _MAX_HINT_CHARS = 512
 _HINT_TAG = "[action-candidate]"
 _LOCAL_KEYS = ("activation_id", "target_ref_hash", "generation", "content_hash")
@@ -116,7 +116,7 @@ def _advise(agent: object, record: object, archive: dict) -> str:
     return hint if time.monotonic() < min(stage.deadline, outcome.deadline) else ""
 
 
-# LLM: 触发只看结构化事实：当前调用与归档配对、主代理、无收口标记、观察形状合规且 2—64 个候选、观察仍为当前、
+# LLM: 触发只看结构化事实：当前调用与归档配对、主代理、无收口标记、观察形状合规且候选数不少于 decision_point_limits 的下限、观察仍为当前、
 # 至少一个候选的动作工具在本轮快照中可用；不读工具输出正文或自然语言。返回宿主原因码，空串表示满足。
 #   观察形状不合规（DecisionInputError）记 bad_observation，与原先异常后放弃的结果一致。
 # 函数用途: 判断这条工具回执能否进入可选操作建议，不能时给出原因码；不满足时原展示不变且不发请求。
@@ -128,7 +128,7 @@ def _miss_reason(agent: object, record: object, archive: dict) -> str:
         observation = _observation(archive)
     except DecisionInputError:
         return "bad_observation"
-    if len(observation["candidates"]) < _MIN_CANDIDATES:
+    if len(observation["candidates"]) < limits.ACTION_CANDIDATES_MIN:
         return "few_candidates"
     available = _available_tools(record.params)
     if not any(set(candidate["actions"]) & available for candidate in observation["candidates"]):

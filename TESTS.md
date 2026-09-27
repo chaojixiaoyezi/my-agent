@@ -1,5 +1,22 @@
 # 测试与发布验收
 
+## owner 路径按用户作用域、停机补写到达计数、数量界限统一（2026-09-27，分支 `claude/9b-owner-path-scope`，基于 main `946a26783`）
+
+- **来源**：9b 审查结论。`home_paths_with_owner` 没有按用户重设 `owner_memory_policy_json`，Gateway 里其它用户读到的是本机主用户的
+  `memory_policy.json`；到达计数的尾巴在部署重启时会丢；todo_count 等大白话写死了 2/12/24/30 这些阈值，常量一改就过时。
+- **新测试**：
+  - `test_gateway_per_user_scoping.py::test_every_owner_path_of_every_scope_stays_in_that_owners_home`：按 `MyAgentHomePaths` 字段全集，
+    本机主用户与两个飞书用户各自的全部 owner_* 路径都必须在自己的 home 内，以后新加的字段也逃不掉（替换原先只查决策路径的那条）。
+  - `test_gateway_decision_shutdown_cancel.py`：停止收尾在停 HTTP 之后、写心跳之前把未落盘的到达计数写出（3 次到达，盘上从 1 变 3）；
+    落盘模块出错只记 `gateway_decision_reach_flush_failed{error_type}`，收尾照常完成。
+  - `test_decision_reach_counts.py::test_threshold_labels_are_built_from_the_shared_limits`：九个界限改成互不相同的数字，每个数量类标签
+    的下限必须出现在“不到”后、上限必须出现在“超过”后，且这些标签不在静态表里。
+  - 六个点位各一项“改一个界限，判定与标签同时变”：delivery_quality、action_candidate、external_material_order、planning、
+    skill_proposal_review、recall。
+  - `conftest.py` 新增自动夹具：每个测试用自己的到达计数待写队列，测完丢弃，Gateway 收尾测试里的真实落盘不会写别的测试的临时 home。
+- **变异验证（14 种全部被抓住，逐个字节级还原）**：作用域不重设 memory_policy、收尾不落盘、落盘提到停 HTTP 之前、落盘异常外泄、
+  去掉取消在途决策、标签写死上限、标签上下限写反、数量类标签放回静态表、六个点位各自写回本地数字。
+- **code-size**：`_cmd_gateway_run_cleanup` 抽出 `_cancel_active_decisions` 后从 54 行降到 50 行；和 main 比身份新增 0。
 ## TUI 权限/模型菜单测试改为按状态等待（2026-09-27，分支 `claude/9b-tui-permission-wait`，基于 main `946a26783`）
 
 - **来源**：线上 CI `723c424d6` 的 test(3.12) 里，`test_tui_permissions_menu.py::test_f4_menu_keeps_focus_while_tool_approval_is_pending`

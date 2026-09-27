@@ -23,7 +23,8 @@ from agent_py_agent.agent.backends.decision_protocol import (
 )
 from agent_py_agent.agent.backends.message_adapter import AnthropicMessageAdapter
 from agent_py_agent.agent.common.cancellation import ToolCancelled
-from agent_py_agent.agent.conversation.decision_reach_counts import CALLED
+from agent_py_agent.agent.conversation import decision_point_limits as limits
+from agent_py_agent.agent.conversation.decision_reach_counts import CALLED, miss_reason_label
 from agent_py_agent.agent.runtime_context import (
     restore_current_subagent_context,
     set_current_subagent_context,
@@ -650,3 +651,12 @@ def test_long_requests_reach_the_decision_as_labeled_excerpts(prepared, monkeypa
                 else {"status": "truncated", "chars": prompt_len, "kept_chars": kept})
     assert state["current_request_completeness"] == expected
     assert ("中间省略" in state["current_request"]) is (kept is not None)
+
+
+def test_focus_bounds_and_their_label_share_one_limit(prepared, monkeypatch):
+    host, record, archive = prepared
+    reasons = reach_counter(host, monkeypatch, module._POINT, host.root)
+    calls = install(monkeypatch)
+    monkeypatch.setattr(limits, "DELIVERY_FOCUSES_MAX", 2)
+    assert module.delivery_quality_hint(host, record, archive) == "" and not calls
+    assert reasons() == ({"focus_count": 1}, 0) and "超过 2 组" in miss_reason_label("focus_count")

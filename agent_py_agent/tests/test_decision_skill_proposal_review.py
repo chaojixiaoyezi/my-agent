@@ -24,6 +24,8 @@ from agent_py_agent.agent.common.cancellation import (
     ToolCancelled,
     bind_cancellation_token,
 )
+from agent_py_agent.agent.conversation import decision_point_limits as limits
+from agent_py_agent.agent.conversation.decision_reach_counts import miss_reason_label
 from agent_py_agent.agent.memory_store.candidates import CandidateService
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.models import SubAgentTask
@@ -437,3 +439,13 @@ def test_optional_error_returns_original_but_never_hides_cancellation(tmp_path, 
     install(monkeypatch, fake=Fake(during=cancel_then_fail))
     with bind_cancellation_token(token), pytest.raises(ToolCancelled):
         run(ctx)
+
+
+def test_pending_bounds_and_their_label_share_one_limit(tmp_path, monkeypatch):
+    ctx = seeded(tmp_path, 3)
+    host = SimpleNamespace(home_paths=ctx.home)
+    reasons = reach_counter(host, monkeypatch, module._POINT, tmp_path)
+    calls = install(monkeypatch)
+    monkeypatch.setattr(limits, "SKILL_PROPOSALS_MAX", 2)
+    assert module.skill_proposal_review_order(host, ctx.service, ctx.service.list()) is None and calls == []
+    assert reasons() == ({"pending_count": 1}, 0) and "超过 2 条" in miss_reason_label("pending_count")
