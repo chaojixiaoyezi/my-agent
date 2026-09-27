@@ -262,8 +262,12 @@
     是否改过、说明第一句；改了没重启注明“发 /restart 后生效”），并用一句话说一共多少项、看全部发 `/settings all`；
     `/settings all` 是原总览（总数、可改范围、用户配置位置、改过的个数、最近修改）加按分类的全部参数清单。search、show 不变。
     `user_config` 的 search/view 结果多一个 `common` 字段，工具说明提示模型优先从常用参数里推荐。守卫（`test_parameter_registry`）：
-    名单里的键必须存在、不能是安全边界项；与空说明基线的交集只允许过渡项 `memory_compact_auto_trigger_percent`（my-agent 补齐说明后
-    收紧为空集）。`/settings` 回执里的值文字只由 `mask_value` 给出（布尔 true/false、数字照实，见上文“回显值文字统一”）。
+    名单里的键必须存在、不能是安全边界项；常用参数必须都有说明、不能留在空说明基线里（原过渡项 `memory_compact_auto_trigger_percent`
+    已由下条补齐，过渡名单已删除）。`/settings` 回执里的值文字只由 `mask_value` 给出（布尔 true/false、数字照实，见上文“回显值文字统一”）。
+  - **补齐 50 个键的说明（2026-09-27，my-agent 在 `my-agent/self-dev` 完成，集成者审核后移植到新 main）**：随包 YAML 里 50 个空说明键
+    各加一段中文注释，按“做什么 / 什么时候改 / 特殊值含义”写，不写默认数字（参数中心自己显示）；安全边界键统一以“只能由用户在配置文件里
+    改，模型不能改”结尾。每条“0 表示……”都追到代码里比较的那一行，途中发现 `cli_audit_cleanup_days` 的 0 会删光审计，已另修为永久保留。
+    空说明基线相应删去这 50 个键；`test_parameter_registry` 的过渡名单随之删除，改为“常用参数必须都有说明”。
 
 - **减量第三批（2026-09-27，分支 `claude/38-internal-constants`，部分完成，待集成者审核）**：102 个只对程序内部有意义的字段降级为读取点旁边的
   具名常量（值不变），从 `AgentConfig`、随包 YAML、归一化表、字段规格表、说明基线和测试里删掉字段。规则：每个概念只定义一次
