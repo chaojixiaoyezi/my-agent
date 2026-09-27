@@ -97,7 +97,7 @@ my-agent 为了确认 opencode.ai 是否支持 `reasoning_effort`，先后 3 次
 
 ### 判定（`settings/reasoning_probe_judge.py`，纯函数，只读 usage 的结构化字段）
 
-- **计量**：优先比较推理 token（`completion_tokens_details.reasoning_tokens`，Responses 为 `output_tokens_details`）。只有所有成功样本都没有推理 token、但都有输出 token 时，才退回比较输出 token，并在回执里注明。第 2 节里中转接口的实测看的就是输出 token。
+- **计量**：优先比较推理 token（`completion_tokens_details.reasoning_tokens`，Responses 为 `output_tokens_details`）。只有所有成功样本都没有推理 token、但都有输出 token 时，才退回比较输出 token，回执写明“按输出 token 判定”（集成者 2026-09-27 同意此回退，以回执写明为前提）。第 2 节里中转接口的实测看的就是输出 token。
 - **支持**：三条同时满足：
   - “最高”组中位数至少是“低”组的 1.5 倍；
   - 至少多 200 个 token；

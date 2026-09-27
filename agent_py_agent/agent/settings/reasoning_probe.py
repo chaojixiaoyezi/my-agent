@@ -345,7 +345,7 @@ def _record_lines(agent: object, target: ProbeTarget) -> list[str]:
 def _verdict_text(record: dict) -> str:
     when = time.strftime("%m-%d %H:%M", time.localtime(float(record.get("finished_at") or record.get("started_at") or 0)))
     unit = "推理 token" if record.get("measure") == MEASURE_REASONING else "输出 token"
-    note = "" if record.get("measure") == MEASURE_REASONING else "（该接口不单独报告推理 token，改比较输出 token）"
+    note = "" if record.get("measure") == MEASURE_REASONING else "（该接口不单独报告推理 token，按输出 token 判定）"
     low, high, default = (record.get(key) for key in ("low_median", "max_median", "default_median"))
     texts = {
         "max_above_low": f"支持按档位调节——{unit} 中位数：“最高”档 {high}，“低”档 {low}，不带参数 {default}{note}。",

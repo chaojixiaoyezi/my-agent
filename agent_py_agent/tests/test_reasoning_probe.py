@@ -255,7 +255,7 @@ def test_auto_probe_needs_every_condition(tmp_path, monkeypatch, case):
 
 @pytest.mark.parametrize("case", [
     (_OPENCODE, _output, {}, "不支持调节——“低”和“最高”两档的输出 token 中位数分别是 2234 和 1100，没有明显差别"
-                             "（该接口不单独报告推理 token，改比较输出 token）"),
+                             "（该接口不单独报告推理 token，按输出 token 判定）"),
     (_DEEPSEEK, _reasoning, {"low": _HttpError(500)}, "没有得出结论——有请求失败"),
     (_DEEPSEEK, _reasoning, {"low": _HttpError(400), "max": _HttpError(400)}, "服务商拒绝了推理强度参数"),
 ])
