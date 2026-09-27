@@ -202,3 +202,17 @@ def test_skip_fact_only_names_verifiers_whose_exit_status_was_hidden(tmp_path: P
     details = record_tool_verification(
         agent, cancelled, _success(cancelled, "", {"process": {"status": "cancelled"}})).metadata["handler_details"]
     assert "verification_skipped" not in details
+
+
+def test_quoted_separators_are_not_reported_as_a_hidden_exit_status(tmp_path: Path):
+    # Codex 复核（2026-09-27）：原分类器用正则切 ;，引号参数里的 ; 也会让整条命令不计入；这时外层并没有管道或 ;，
+    # 不能谎称“返回码被掩盖”。只有 && 串联同样不算掩盖。
+    agent, project, _owner_home = _agent(tmp_path)
+    exited = {"process": {"status": "exited", "return_code": 0}}
+    for command in ('pytest --junitxml="checks;a.xml" -q', 'pytest --junitxml="a;b" -q && pytest -q'):
+        call = _call("run_command", {"command": command, "working_dir": str(project)})
+        details = record_tool_verification(agent, call, _success(call, "ok", exited)).metadata.get("handler_details", {})
+        assert "verification_skipped" not in details, command
+    piped = _call("run_command", {"command": 'pytest --junitxml="a;b" -q | tail -3', "working_dir": str(project)})
+    details = record_tool_verification(agent, piped, _success(piped, "ok", exited)).metadata["handler_details"]
+    assert details["verification_skipped"]["canonical_commands"] == ["pytest"]

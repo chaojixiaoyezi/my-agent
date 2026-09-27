@@ -10,6 +10,10 @@
 （status=not_recorded、reason=exit_status_hidden、canonical_commands，另附给模型的软提示），`[runtime-verification-facts]`
 随之可见。不写验证账、不改工具成败；run_command 说明补一句“测试不要接 tail/head 或用 ; 串联”。
 
+Codex 复核修正（同日）：原分类器用正则切 `;`，引号参数里的 `;`（如 `pytest --junitxml="a;b.xml"`）也会让整条命令不计入，
+这时外层并没有管道或 `;`。现在只有按 shell 记号确认外层真有管道、后台、`;` 或 `||` 时才给 `exit_status_hidden`；只有 `&&` 串联或
+别的解析拒绝时不给，不能谎称返回码被掩盖。
+
 ## 2026-09-26 证据库连接显式关闭（分支 `claude/ci-fix`）
 
 `VerificationEvidenceRepository` 原来用 `with self._connect() as conn`，只提交不关闭。Python 3.11 起 sqlite3 连接要等循环 GC
