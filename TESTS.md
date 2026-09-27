@@ -1,5 +1,12 @@
 # 测试与发布验收
 
+## 参数中心阶段 1：删除死配置并加读取方扫描（2026-09-27，分支 `claude/param-center-phase1`，基于 main `9207d54e5`）
+
+- **新测试** `test_config_field_readers.py`：扫描产品代码的属性名与字符串键（加决策设置映射），要求每个 AgentConfig 字段都有读取方；
+  0.3 秒。变异验证：临时加一个无人读取的字段，测试失败。
+- 删除 `lsp_servers`、`scheduler_mode`、`extensions_dir`、`continuation_reminder_seconds`、`task_max_grandchildren`（YAML、dataclass、
+  CLI_REFERENCE 示例、README 说明、`test_config_normalize.py` 的字段清单同步）；用户配置残留时只告警。
+
 ## 参数中心阶段 0：输出上限统一 64K、验证“未计入”说明（2026-09-27，分支 `claude/param-center-phase0`，基于 main `c71b1353d`）
 
 - **新测试** `test_model_output_cap.py`：常量、随包 YAML、AgentConfig 默认值同为 65536；窗口已明确时上限 = min(配置, 窗口 ÷ 4)，

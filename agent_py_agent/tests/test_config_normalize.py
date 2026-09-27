@@ -188,7 +188,6 @@ class TestNormalizeSubagentAgentConfig:
                 "enable_subagents",
                 "max_subagents",
                 "task_max_subagents",
-                "task_max_grandchildren",
                 "result_check_execute_tests",
                 "result_check_timeout_seconds",
             }
@@ -215,7 +214,6 @@ class TestNormalizeSubagentAgentConfig:
             "subagent_takeover_chain_max_depth",
             "max_subagents",
             "task_max_subagents",
-            "task_max_grandchildren",
             "subagent_workspace",
             "subagent_role_template_dirs",
             "result_check_execute_tests",

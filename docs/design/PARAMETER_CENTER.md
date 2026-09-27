@@ -53,7 +53,15 @@
   - 模型短测（`_probe`）改用正式上限，能发现供应商不接受该上限的情况。
   - 删除没有读取方的 `vision_*` 配置；用户配置残留时只告警。
   - 验证命令被管道、`;`、`||` 或后台掩盖返回码时，给出结构化“未计入”事实（见 `docs/modules/verification/02-progress.md`）。
-- **阶段 1（盘点）**：脚本列出全部 `AgentConfig` 字段与读取方、模块级数值常量、硬编码的超时/上限/预算，标出重复、同名不同义和无读取方的项，产出迁移清单与批次。
+- **阶段 1（盘点，2026-09-27 首轮已做）**：只读脚本扫描产品代码（不含测试），结果：
+  - `AgentConfig` 391 个字段，其中 11 个没有任何读取方：阶段 0 删了 `vision_*` 六项，这一轮再删 `lsp_servers`（LSP 工具已移除）、
+    `scheduler_mode`、`extensions_dir`（扩展改为按 `extension_plugins` 列表加载）、`continuation_reminder_seconds`（9-15 目标改为事件驱动后
+    定时续跑已删）、`task_max_grandchildren`（从未实现）。另有 36 个 Jev 决策字段由 `decision_config_fields()` 按名字映射读取，不算死配置。
+    新增 `test_config_field_readers.py`：每个字段都必须有读取方，以后不会再攒下死配置。
+  - 模块级数值常数 699 个，分布在 288 个文件：上限/预算类 455、超时类 152、比例/阈值 21、重试 11、其它 60；32 个常数名在多个文件各定义一份。
+  - 同名不同义：函数参数 `limit` 267 处、`timeout` 72 处、`max_chars` 69 处、`budget` 38 处、`max_tokens` 10 处，含义随模块变化。
+  - 迁移批次按“用户最常问、最常调”的顺序排：模型请求（输出上限、超时、重试）→ compact 与上下文预算 → 工具输出与读取预算 →
+    子代理与调度 → 记忆与检索 → 其余。每批先把常数收进登记表并证明读取方真的读到，再删原常数。
 - **阶段 2（基础设施）**：
   - 权威登记表 `settings/parameters.py`，以及 YAML/dataclass 一致性测试。
   - `user_config` 按安全等级开放，新增 `/settings` 的 TUI/IM 入口、修改账本与回滚。

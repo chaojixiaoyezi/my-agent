@@ -276,7 +276,6 @@ subagent_mode: "trusted_local_hardening"
 max_subagents: 8
 # 可选的更严格当前任务上限；0 表示不在 max_subagents 之外再收紧。
 task_max_subagents: 0
-task_max_grandchildren: 0
 
 # 子代理运行账本目录。
 # - 默认空值表示写入当前 owner home 的工作区运行目录。
@@ -407,7 +406,6 @@ real_run_review_max_log_bytes: 1000000
 # 只重试 runner_error、structured_output_parse_error、tool_result_missing、provider_timeout
 # 这类“执行通道/格式/临时工具结果/模型服务临时超时”问题；能力缺口、验收失败、通道 BROKEN 不自动重跑。
 runner_failure_policy: "auto"
-scheduler_mode: "auto"
 runner_concurrency: "auto"
 runner_start_rate: "auto"
 # create_subagents 会由宿主自动启动并恢复 runner，模型不轮询或手动推进。
@@ -700,10 +698,6 @@ lease_stale_without_heartbeat_seconds: 300
 # 日志级别：重新加载配置后会应用到 agent_py_agent 包内 logger
 log_level: "info"
 
-# 扩展目录（extensions_dir）：
-# - 只作为插件包/配置的工作目录约定；运行时绝不自动执行其中的 .py 文件。
-# - 大规模部署由管理员安装插件包，再在 extension_plugins 显式启用；普通用户没有审批弹窗。
-extensions_dir: "extensions"
 
 # 唯一正式插件加载链（按列表顺序）：
 # - entrypoint:<name>：从已安装包的 my_agent.plugins entry-point 组加载。
@@ -843,11 +837,6 @@ tool_agent_budget_max_calls:
 # - 0=关闭。
 orphan_supervision_interval_seconds: 60
 
-# 显式持续目标与普通任务软收口后的续跑间隔：
-# - 只用于同一主代理任务自身的续跑，不轮询、不催促、不验收子代理。
-# - 子代理真实进度、完成、阻塞和能力申请通过生命周期事件直接唤醒父级。
-# - 0 时续跑链使用内置 180 秒兜底。
-continuation_reminder_seconds: 180
 
 # 检索完备性软引导：
 # - 同一工具明确的网络/能力不可用回执按 call_id 去重后达到阈值，提示核对其它授权来源。
@@ -1056,13 +1045,6 @@ mcp_servers: {}
 # - Linux 复用 Gateway 当前 DISPLAY/WAYLAND/XAUTHORITY 会话；没有可用桌面会明确表现为工具不可用。
 computer_use_enabled: false
 
-# Language Server Protocol：管理员安装 server 后在这里显式配置，运行时按需惰性启动。
-# JSON-RPC 走 stdio；owner-scoped 用户的 server 同样必须进入 bwrap，缺 sandbox 时 fail-closed。
-# 不扫描 PATH 猜 server，也不允许普通用户在请求里改 command。精简 YAML 要使用单行 inline dict。
-# initialization_options 会原样放进 initialize.initializationOptions，适配需要管理员启动参数的 server；
-# client capabilities 只声明 my-agent 已实现的 diagnostics/hover/definition/references/documentSymbol。
-# 例：lsp_servers: {"python": {"command": "pyright-langserver", "args": ["--stdio"], "timeout": 20, "initialization_options": {}}}
-lsp_servers: {}
 
 # Chat / CLI 默认展示和读取预算：
 # - 这些配置控制命令默认显示多少、交互历史带多少、长文本折叠多少。

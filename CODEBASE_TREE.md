@@ -655,6 +655,7 @@ agent_py_agent/
 |-- tests/                             # 单元、集成、真实链路回归
 |   |-- fixtures/decision/jev_capability_rounding.json # 合成材料真实Jev响应的脱敏概率舍入replay，不含凭据
 |   |-- test_skill_proposals.py         # 自学习 S1：默认关闭、幂等提案、迁移不碰、确认拒绝矩阵、快照可见、runner 自动确认与 CLI 往返
+|   |-- test_config_field_readers.py   # 每个 AgentConfig 字段都必须有读取方（属性访问、字符串键或决策设置映射），防止死配置
 |   |-- test_model_output_cap.py       # 输出上限统一 64K：常量/YAML/dataclass 同值、按已知窗口一处夹取、默认模型同规则、vision 死配置已删
 |   |-- test_skill_chat_control.py     # 聊天 /skills：解析校验、Gateway 分派不落入 stop、TUI 文本还原与本地拒绝、提案确认版本、自动 Skill 回滚删除
 |   |-- test_skill_learning.py          # 自学习 S3：触发判据、请求有界脱敏、create/update/skip、各闸门拒绝码、上限、重试、忙时顺延、回滚删除

@@ -1540,7 +1540,6 @@ acceptance_execute_tests: false
 acceptance_test_timeout_seconds: 120
 
 # 未来 gateway 调度策略：auto 表示由主代理/调度器自适应
-scheduler_mode: "auto"
 runner_concurrency: "auto"
 runner_start_rate: "auto"
 runner_timeout_seconds: "auto"

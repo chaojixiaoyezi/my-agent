@@ -200,9 +200,6 @@ class _ToolConfigFields:
     # "盯守死岗补建接管 + durable 复活 PENDING/PLANNING 停滞孤儿"。事件唤醒覆盖不了
     # 静默死亡(SIGKILL/断电不发 wake),靠这里捡回;0=关闭。
     orphan_supervision_interval_seconds: int = 60
-    # 显式 /goal 与普通任务软收口后的续跑间隔；它不轮询或推动子代理。
-    # 子代理只通过真实生命周期事件唤醒直接父级。0 时仍使用内置 180 秒兜底。
-    continuation_reminder_seconds: int = 180
     # Todo 仍开放时，把 exact-id 收尾软提醒放进模型上下文；只提示模型在最终回复前
     # 自主核对，不自动打勾、不阻断最终回复，也不增加隐藏模型调用。
     task_progress_closeout_guidance_enabled: bool = True
@@ -274,7 +271,6 @@ class _ToolConfigFields:
     # Computer Use 复用 computer-control-mcp，不在本项目实现鼠标/键盘/OCR。只有 local/main
     # 管理员同时显式 full-access 时才注入；普通 owner 和 WorkspaceOnly 一律不可见。
     computer_use_enabled: bool = False
-    lsp_servers: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -459,7 +455,6 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     subagent_allowed_tools: list[str] = field(default_factory=list)
     subagent_role_template_dirs: list[str] = field(default_factory=list)
     task_max_subagents: int = 0
-    task_max_grandchildren: int = 0
     subagent_spawn_default_count: int = 3
     subagent_cli_default_limit: int = 20
     subagent_probe_default_limit: int = 20
@@ -512,7 +507,6 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 多租户鉴权配置
     auth_enabled: bool = True
     admin_user_id: str = "admin"
-    scheduler_mode: str = "auto"
     runner_concurrency: str = "auto"
     runner_start_rate: str = "auto"
     runner_timeout_seconds: str = "off"
@@ -626,7 +620,6 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     lease_heartbeat_interval_seconds: int = 60
     lease_stale_without_heartbeat_seconds: int = 300
     log_level: str = "info"
-    extensions_dir: str = "extensions"
     extension_plugins: list[str] = field(default_factory=list)
     api_base: str = ""
     api_key: str = ""
