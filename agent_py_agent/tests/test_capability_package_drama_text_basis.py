@@ -20,7 +20,7 @@ PACKAGE = Path(__file__).resolve().parents[2] / "examples/capability-packages/dr
 # 函数用途: 为来源关系反例准备可变的三场合成资料。
 def _delivery() -> dict:
     delivery = json.loads((PACKAGE / "resources/example-delivery.json").read_text(encoding="utf-8"))
-    delivery["schema"] = "drama_text_delivery.v2"
+    delivery["schema"] = "drama_text_delivery.v3"
     scenes = {row["id"]: row for row in delivery["scenes"]}
     for shot in delivery["shots"]:
         shot["source_ids"] = copy.deepcopy(scenes[shot["scene_id"]]["source_ids"])
@@ -59,15 +59,15 @@ def _invoke(tmp_path: Path, inputs: dict[str, bytes]) -> dict:
     return report
 
 
-def test_v2_accepts_declared_shot_sources_with_explicit_empty_notes(tmp_path):
+def test_v3_accepts_declared_shot_sources_with_explicit_empty_notes(tmp_path):
     report = _check(tmp_path, _delivery())
-    assert report["schema"] == "drama_text_check.v2"
+    assert report["schema"] == "drama_text_check.v3"
     assert report["structure_valid"], report["errors"]
     assert "creative_quality_and_media_not_checked" in {row["code"] for row in report["warnings"]}
 
 
 @pytest.mark.parametrize("field", ["source_ids", "adaptations", "unresolved"])
-def test_v2_does_not_silently_fill_missing_basis_fields(tmp_path, field):
+def test_v3_does_not_silently_fill_missing_basis_fields(tmp_path, field):
     delivery = _delivery()
     del delivery["shots"][0][field]
     report = _check(tmp_path, delivery)
@@ -76,7 +76,7 @@ def test_v2_does_not_silently_fill_missing_basis_fields(tmp_path, field):
 
 
 @pytest.mark.parametrize("source_ids", [["P02"], ["missing"], [False], [["P01"]], "P01"])
-def test_v2_rejects_cross_scene_unknown_or_malformed_shot_sources(tmp_path, source_ids):
+def test_v3_rejects_cross_scene_unknown_or_malformed_shot_sources(tmp_path, source_ids):
     delivery = _delivery()
     delivery["shots"][0]["source_ids"] = source_ids
     report = _check(tmp_path, delivery)
@@ -86,7 +86,7 @@ def test_v2_rejects_cross_scene_unknown_or_malformed_shot_sources(tmp_path, sour
 
 @pytest.mark.parametrize("field", ["adaptations", "unresolved"])
 @pytest.mark.parametrize("value", [None, "没有", [""], ["  "], [False], [{}]])
-def test_v2_notes_require_explicit_nonempty_text_entries(tmp_path, field, value):
+def test_v3_notes_require_explicit_nonempty_text_entries(tmp_path, field, value):
     delivery = _delivery()
     delivery["shots"][0][field] = value
     report = _check(tmp_path, delivery)
@@ -96,7 +96,7 @@ def test_v2_notes_require_explicit_nonempty_text_entries(tmp_path, field, value)
 
 @pytest.mark.parametrize("field,warning", [("adaptations", "shot_adaptations_need_review"),
                                           ("unresolved", "shot_basis_unresolved")])
-def test_v2_keeps_explicit_additions_and_unknowns_visible(tmp_path, field, warning):
+def test_v3_keeps_explicit_additions_and_unknowns_visible(tmp_path, field, warning):
     delivery = _delivery()
     delivery["shots"][0]["source_ids"] = []
     delivery["shots"][0][field] = ["新增停顿用于转场。" if field == "adaptations" else "原文未说明门是否打开。"]
@@ -105,7 +105,7 @@ def test_v2_keeps_explicit_additions_and_unknowns_visible(tmp_path, field, warni
     assert any(row["code"] == warning and row["path"] == f"SH01.{field}" for row in report["warnings"])
 
 
-def test_v2_allows_source_additions_and_unknowns_in_the_same_shot(tmp_path):
+def test_v3_allows_source_additions_and_unknowns_in_the_same_shot(tmp_path):
     delivery = _delivery()
     delivery["shots"][0]["adaptations"] = ["补写拾书动作以衔接后续装袋。"]
     delivery["shots"][0]["unresolved"] = ["原文未说明店门开合状态。"]
@@ -117,7 +117,7 @@ def test_v2_allows_source_additions_and_unknowns_in_the_same_shot(tmp_path):
     }
 
 
-def test_v2_rejects_a_shot_without_any_declared_basis(tmp_path):
+def test_v3_rejects_a_shot_without_any_declared_basis(tmp_path):
     delivery = _delivery()
     delivery["shots"][0]["source_ids"] = []
     report = _check(tmp_path, delivery)
@@ -125,7 +125,7 @@ def test_v2_rejects_a_shot_without_any_declared_basis(tmp_path):
     assert {"code": "shot_basis_required", "path": "SH01"} in report["errors"]
 
 
-def test_v2_only_checks_declared_links_and_does_not_claim_semantic_truth(tmp_path):
+def test_v3_only_checks_declared_links_and_does_not_claim_semantic_truth(tmp_path):
     delivery = _delivery()
     delivery["shots"][0]["action"] = "不存在于原文的事情，但声明的编号依然合法。"
     report = _check(tmp_path, delivery)
@@ -133,9 +133,10 @@ def test_v2_only_checks_declared_links_and_does_not_claim_semantic_truth(tmp_pat
     assert {"code": "creative_quality_and_media_not_checked"} in report["warnings"]
 
 
-def test_v2_requires_explicit_schema_instead_of_quietly_upgrading_v1(tmp_path):
+@pytest.mark.parametrize("old_version", ["v1", "v2"])
+def test_v3_requires_explicit_schema_instead_of_quietly_upgrading_old_versions(tmp_path, old_version):
     delivery = _delivery()
-    delivery["schema"] = "drama_text_delivery.v1"
+    delivery["schema"] = f"drama_text_delivery.{old_version}"
     report = _check(tmp_path, delivery)
     assert not report["structure_valid"]
     assert {"code": "unsupported_schema", "path": "schema"} in report["errors"]
@@ -147,13 +148,13 @@ def test_v2_requires_explicit_schema_instead_of_quietly_upgrading_v1(tmp_path):
     ("delivery.json", b"{", "invalid_input"),
     ("delivery.json", b'{"schema": "a", "schema": "b"}', "invalid_input"),
 ])
-def test_v2_failure_reports_keep_the_same_explicit_schema(tmp_path, name, raw, code):
+def test_v3_failure_reports_keep_the_same_explicit_schema(tmp_path, name, raw, code):
     source = (PACKAGE / "resources/example-source.json").read_bytes()
     delivery = _delivery()
     delivery["source_sha256"] = hashlib.sha256(source).hexdigest()
     inputs = {"source.json": source, "delivery.json": json.dumps(delivery).encode()}
     inputs[name] = raw
     report = _invoke(tmp_path, inputs)
-    assert report["schema"] == "drama_text_check.v2"
+    assert report["schema"] == "drama_text_check.v3"
     assert not report["structure_valid"]
     assert code in {row["code"] for row in report["errors"]}

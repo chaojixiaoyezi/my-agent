@@ -1,6 +1,6 @@
 {
   "plugin_id": "drama-text-a",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "summary": "从原文依据形成短剧文本和分镜资料",
   "capability": {
     "description": "适用于故事改编、单集剧本、场次与镜头设计；保留原文依据和省略说明，不生成媒体。",
@@ -41,6 +41,9 @@
     },
     {
       "path": "methods/workflow.md"
+    },
+    {
+      "path": "methods/visible-characters.md"
     },
     {
       "path": "resources/example-delivery.json"

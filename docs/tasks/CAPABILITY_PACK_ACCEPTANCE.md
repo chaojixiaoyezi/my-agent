@@ -1,5 +1,17 @@
 # 能力内化：来源盘点与验收矩阵
 
+## A0.3.0：人物依据与字面诊断（2026-09-27）
+
+- workstream：能力内化；branch：`codex/capability-internalization`；owner：root；基线：`b496e1a0c8f746f666bd4def9cc8e1aa713e93c0`。只改A包、直接组件测试和对应文档；无宿主实现/config变更。
+- 改动：包0.3.0、交付/报告v3、15私有资源；明确代称/退出、整镜可见/画外，从成稿回填后作字面覆盖/歧义warning。固定上游SHT-22人物子集，SHT-26镜头短引文、持物因果、语义真实性仍未迁入。旧v1/v2不自动升级；source v1原始字节保持。
+- 定向验证：三个A专用文件（visibility、basis、duration）及原examples中的A构建和全部`test_text_*`明确节点，**141 passed（5.88秒）**。命令用`python3 -m pytest -o addopts= <上述明确节点> -q --tb=short`，准确节点/原始stdout/JUnit及前后相同源摘要见私有`candidate-13-A030-final-focused.json`，证据SHA256 `e1c7e4ad2247af90f4c404d0d7b3312582553bc18005d0a8eafa6ec5085d1d8f`。未跑全仓pytest或其它样包；初轮较小集合不累计到本数。
+- 覆盖：显式新字段、旧schema拒绝、重复/越场人物、整镜画外、代称/退出、同词歧义、有效长名与无效长名不遮蔽、ASCII邻接、原Unicode位置、精确大小写/空白、引号/否定不推在场、字段不串接、预算未检/null及100警告裁剪后准确计数；原来源、摘要和时长定向保持。
+- 构建：实际builder CLI两次同字节，ZIP **42938字节**、SHA256 **`98e21e0accb101b1d4c3640a1d5cc5de0bad8bf58ae4f1b79e9ca7dc3b6fa68e`**；15成员逐个与源码相同，无全局Skill/tool/action。入口2824字符。构建证据SHA256 `ad197170b2d603bf579ba3312164a7fc61839f5e263386cd3c114cdc3739a56e`。
+- 独立合同审阅：实际读取固定上游合同与匹配函数，未运行上游。报告SHA256 `36b3f509380484ea955ad90c1b76b88e90dedb9499a62f706b6119c1d211fa02`；实现末审无确认阻断，报告SHA256 `62bb804aa55ebc30344f5ce0cac47dd3df5aa4ad3f5e7a492057571beaf1d5a4`；审阅者未执行测试。
+- 审阅修订与严格门：独立审阅指出100条后仍重复构造候选明细，已改为继续计数但仅保留条目才构造；修后141项复测与新ZIP单列，旧141和旧包不累计、不复用。Ruff（含包脚本）、doc-sync、strict code-size、工作区/暂存区diff及clean-package均通过；clean-package首次只报本片两份新文件未跟踪，加入索引后通过。生产/测试与包资源字节未漂移，尺寸基线/报告正文保持，仅还原无意义时间戳。最终结果见私有`candidate-13-A030-final-strict-gates.json`；线上CI未作为验收来源。
+- 限制：没有新真实模型、原生TUI、热更新或Gateway操作；私有已知安装版仍938+A0.2.2/B0.1.3。名字warning不证明人物在场、声明真实或接续合理。未改旧业务产物，旧失败和保留集0/36保持。
+- 建议下一步：固定此片源码与ZIP后，root协调一次普通原生任务验证完整方法采用、原资源物化/执行和实际修订；独立只读审阅可并行，Claude继续唯一负责main集成与发布，不能沿用141组件数作main或真实验收。
+
 ## 第十二候选：模型引用投影（2026-09-27）
 
 - workstream：能力内化；branch：`codex/capability-internalization`；owner：root；基线：`ac938395aeed2eab88e194ab55611f5e9933f586`。

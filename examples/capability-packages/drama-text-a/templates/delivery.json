@@ -1,5 +1,5 @@
 {
-  "schema": "drama_text_delivery.v2",
+  "schema": "drama_text_delivery.v3",
   "source_sha256": "",
   "brief": {
     "premise": "",
@@ -8,7 +8,9 @@
   "cast": [
     {
       "id": "",
-      "name": ""
+      "name": "",
+      "text_names": [],
+      "text_match_skip_reason": ""
     }
   ],
   "scenes": [
@@ -31,7 +33,8 @@
       "visible_character_ids": [],
       "source_ids": [],
       "adaptations": [],
-      "unresolved": []
+      "unresolved": [],
+      "offscreen_character_ids": []
     }
   ],
   "omitted_passages": [],

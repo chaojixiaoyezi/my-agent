@@ -1,5 +1,11 @@
 # 测试与发布验收
 
+## A0.3.0人物依据与字面诊断（2026-09-27）
+
+只运行A专用 `test_capability_package_drama_text_visibility.py`、`test_capability_package_drama_text_basis.py`、`test_capability_package_drama_text_duration.py`，以及examples中`test_samples_build_reproducibly_and_expose_only_one_package[drama-text-a]`和全部`test_text_*`明确节点：**141 passed，5.88秒**。通过原隔离CLI检查字节不变、引用、名字边界/歧义/退出、预算null与完整扫描后警告裁剪；未运行其它样包或全仓pytest，组件结果不代替模型采用/语义质量。
+
+两次真实builder CLI可重复，15资源逐字节/摘要一致，ZIP SHA256 `98e21e0accb101b1d4c3640a1d5cc5de0bad8bf58ae4f1b79e9ca7dc3b6fa68e`。定向源码前后同字节；精确节点、stdout、JUnit、构建与来源指纹保存在私有candidate-13证据，摘要见[本轮验收](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#a030人物依据与字面诊断2026-09-27)。独立末审及本地严格gate已通过（线上CI未作为验收来源），尚未安装或运行新原生任务。
+
 ## 第十二候选：普通工具结果逻辑引用（2026-09-27）
 
 最终冻结的reducer、对应单测和native包链测试共25项通过（4个测试文件的明确节点，未跑全仓pytest）。覆盖直接正文/live正文/通用外置摘要、canonical与业务refs不变、源逻辑引用、原生模型消息及原链read_artifact多窗口→source_ref复制。替身读完的是当前5000字符资源页，随后复制完整原字节，未读取整份长资源或调用真实模型。

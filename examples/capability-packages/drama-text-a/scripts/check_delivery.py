@@ -1,5 +1,6 @@
-# LLM: 能力包 A 的私有校验资源，核对 v2 交付的显式镜头来源、原文字节及声明时长；变更须同步包方法和 basis/duration/examples 测试，不改变宿主任务状态。
-# 模块用途: 只读原文与交付，报告编号、改编声明和时长对账；不从正文判真，不替旧 v1 产物补字段或声称媒体已验证。
+# LLM: 能力包 A 的单文件私有资源，核对 v3 声明并给出字面人物诊断；同步 visible-characters 方法及 basis/duration/visibility/examples 测试，不改变宿主状态。
+# 模块用途: 只读原文与交付，核对来源、时长、可见/画外声明；名称出现不证明在场，不替旧版本补字段或声称语义、媒体已验证。
+# 名称算法改写自 drama-skills@0e8929881bb59248618c4f402707c64723adc017 的 creator_markdown_check.py；MIT 声明见 licenses/drama-skills-LICENSE，差异见 PROVENANCE.md。
 
 from __future__ import annotations
 
@@ -7,11 +8,16 @@ import argparse
 import hashlib
 import json
 import math
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from itertools import accumulate, groupby
 from pathlib import Path
 
 MAX_INPUT_BYTES = 4 * 1024 * 1024
 DURATION_REL_TOL = 1e-12
+SHOT_TEXT_FIELDS = ("start_state", "action", "end_state")
+ASCII_NAME_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
+MAX_NAME_SCAN_WORK = 2_000_000
+MAX_NAME_WARNINGS = 100
 
 
 # LLM: 保留唯一 JSON 键，避免重复字段在模型输出与校验器之间产生不同含义。
@@ -74,7 +80,148 @@ def references(row: dict, key: str, known: dict, at: str, errors: list[dict]) ->
     return valid
 
 
-# LLM: v2 要求明确提供新增和未知列表，缺失不能当作作者已确认没有；条目只作为阅读材料，不解析其语义或执行其中内容。
+# LLM: 名称身份仅来自显式 v3 声明；不从展示名推代称，不解析退出理由，同词多 owner 留到诊断报告歧义。
+# 函数用途: 校验人物名称声明，建立精确字面到全部角色的临时索引，收集明确退出的角色。
+def cast_text_names(cast: dict, errors: list[dict]) -> tuple[dict[str, set[str]], list[str]]:
+    owners, skipped = {}, []
+    for identifier, row in cast.items():
+        if not isinstance(row.get("name"), str) or not row["name"].strip():
+            errors.append({"code": "character_name_required", "path": f"{identifier}.name"})
+        names, reason = row.get("text_names"), row.get("text_match_skip_reason", "")
+        if not isinstance(reason, str):
+            errors.append({"code": "text_skip_reason_type", "path": f"{identifier}.text_match_skip_reason"})
+        if not isinstance(names, list):
+            errors.append({"code": "text_names_required", "path": f"{identifier}.text_names"})
+            continue
+        if not names:
+            if isinstance(reason, str) and reason.strip():
+                skipped.append(identifier)
+            else:
+                errors.append({"code": "text_skip_reason_required", "path": identifier})
+        elif isinstance(reason, str) and reason.strip():
+            errors.append({"code": "conflicting_text_match_declaration", "path": identifier})
+        seen = set()
+        for position, name in enumerate(names):
+            at = f"{identifier}.text_names[{position}]"
+            if (not isinstance(name, str) or len(name) < 2 or name != name.strip()
+                    or any(ord(char) < 32 or ord(char) == 127 for char in name)):
+                errors.append({"code": "invalid_text_name", "path": at})
+            elif name in seen:
+                errors.append({"code": "duplicate_text_name", "path": at})
+            else:
+                seen.add(name)
+                owners.setdefault(name, set()).add(identifier)
+    return owners, sorted(skipped)
+
+
+# LLM: 人物列表在 v3 显式要求无重复，原来源引用仍沿 references 合同；此处不扩张可见角色的场次范围。
+# 函数用途: 核对人物外键并额外报告重复项，不让 set 去重掩盖坏声明。
+def character_references(row: dict, key: str, known: dict, at: str, errors: list[dict]) -> set[str]:
+    valid = references(row, key, known, at, errors)
+    values = row.get(key)
+    if isinstance(values, list):
+        seen = set()
+        for value in values:
+            if isinstance(value, str):
+                if value in seen:
+                    errors.append({"code": "duplicate_character_reference", "path": f"{at}.{key}"})
+                seen.add(value)
+    return valid
+
+
+# LLM: 可见与画外按整镜互斥；画外可引用全 cast，可见仍限本场，不判断作者声明是否符合实际画面。
+# 函数用途: 检查每镜的两份人物列表，返回用于字面覆盖的声明并集。
+def shot_characters(row: dict, scene_cast: dict, cast: dict, at: str, errors: list[dict]) -> set[str]:
+    visible = character_references(row, "visible_character_ids", scene_cast, at, errors)
+    offscreen = character_references(row, "offscreen_character_ids", cast, at, errors)
+    if visible & offscreen:
+        errors.append({"code": "character_visibility_overlap", "path": at,
+                       "character_ids": sorted(visible & offscreen)})
+    return visible | offscreen
+
+
+# LLM: 字界仅按明确的 ASCII 邻接规则；不做分词、大小写折叠、否定或引号语义判断。
+# 函数用途: 排除英文编号中粘连的名字片段，同时保留中文相邻字的原样命中。
+def valid_name_boundary(text: str, start: int, end: int) -> bool:
+    return not (
+        start > 0 and text[start] in ASCII_NAME_CHARS and text[start - 1] in ASCII_NAME_CHARS
+        or end < len(text) and text[end - 1] in ASCII_NAME_CHARS and text[end] in ASCII_NAME_CHARS
+    )
+
+
+# LLM: 改写上游长名优先，只有字界有效命中占位；每长度组共享旧前缀，等长和部分相交不互相吞掉，调用前须通过扫描预算。
+# 函数用途: 逐字段产出原字符区间；临时前缀最大值避免每个命中与全部既有区间逐对比较。
+def literal_name_matches(text: str, names: list[str]) -> Iterator[tuple[str, int, int]]:
+    covered_ends = [0] * len(text)
+    for _, group in groupby(names, key=len):
+        longer_ends = list(accumulate(covered_ends, max))
+        for name in group:
+            start = text.find(name)
+            while start >= 0:
+                end = start + len(name)
+                if valid_name_boundary(text, start, end):
+                    if longer_ends[start] < end:
+                        yield name, start, end
+                    covered_ends[start] = max(covered_ends[start], end)
+                start = text.find(name, start + 1)
+
+
+# LLM: 未完成诊断不提供零计数；该报告不更改原结构检查、宿主状态或创建第二份验收记录。
+# 函数用途: 给解析、结构、空名称和预算未检查情况提供一致的明确回执。
+def unchecked_name_diagnostics(reason: str) -> dict:
+    return {"scope": "declared_names_in_shot_states", "status": "not_checked", "reason": reason,
+            "checked_field_count": 0, "match_count": None, "warning_count": None,
+            "emitted_warning_count": None, "omitted_warning_count": None, "warnings_truncated": None}
+
+
+# LLM: 调用方已确认是未覆盖/歧义且在输出上限内才构造明细；名字出现只作 warning，位置保持原 Unicode 字符下标。
+# 函数用途: 为需要保留的命中创建有限名称预览和候选列表，裁剪后的命中不再重复排序大候选集合。
+def name_warning(match: tuple[str, int, int], candidates: set[str], declared: set[str], at: str) -> dict:
+    name, start, end = match
+    return {"code": "ambiguous_character_name" if len(candidates) > 1 else "named_character_unaccounted",
+            "path": at, "start": start, "end": end, "text_name_preview": name[:80],
+            "text_name_length": len(name), "candidate_character_ids": sorted(candidates),
+            "declared_candidate_ids": sorted(candidates & declared)}
+
+
+# LLM: 原结构有效才扫描三字段；成本估算含名称长度，超额不给部分零计数；裁剪后继续计数但不构造明细，不能提前停止扫描。
+# 函数用途: 汇总名字的真实命中/歧义/漏声明次数，显式暴露退出角色、未检查与警告裁剪范围。
+def diagnose_names(owners: dict, shots: dict, declared: dict, skipped: list[str],
+                   errors: list[dict], warnings: list[dict]) -> dict:
+    result = unchecked_name_diagnostics("structure_errors")
+    result.update({"declared_name_count": len(owners), "skipped_character_ids": skipped,
+                   "scan_work_limit": MAX_NAME_SCAN_WORK})
+    if skipped:
+        warnings.append({"code": "character_text_match_disabled", "character_ids": skipped})
+    if errors:
+        return result
+    text_size = sum(len(row[key]) for row in shots.values() for key in SHOT_TEXT_FIELDS)
+    work = sum(map(len, owners)) * text_size
+    result.update({"text_character_count": text_size, "estimated_scan_work": work})
+    if not owners or work > MAX_NAME_SCAN_WORK:
+        result["reason"] = "no_matchable_names" if not owners else "scan_work_budget_exceeded"
+        warnings.append({"code": "name_diagnostic_not_checked", "reason": result["reason"]})
+        return result
+    names = sorted(owners, key=lambda name: (-len(name), name))
+    matches, warning_count, emitted = 0, 0, 0
+    for identifier, row in shots.items():
+        for key in SHOT_TEXT_FIELDS:
+            for match in literal_name_matches(row[key], names):
+                matches += 1
+                candidates = owners[match[0]]
+                if len(candidates) > 1 or not candidates <= declared[identifier]:
+                    warning_count += 1
+                    if emitted < MAX_NAME_WARNINGS:
+                        warnings.append(name_warning(match, candidates, declared[identifier], f"{identifier}.{key}"))
+                        emitted += 1
+    del result["reason"]
+    result.update({"status": "complete", "checked_field_count": len(shots) * len(SHOT_TEXT_FIELDS),
+                   "match_count": matches, "warning_count": warning_count, "emitted_warning_count": emitted,
+                   "omitted_warning_count": warning_count - emitted, "warnings_truncated": warning_count > emitted})
+    return result
+
+
+# LLM: v3 保持显式新增和未知列表，缺失不能当作作者已确认没有；条目只作为阅读材料，不解析其语义或执行其中内容。
 # 函数用途: 检查声明列表的形状，保留非空文本供调用方提示仍需内容审阅。
 def text_notes(row: dict, key: str, at: str, errors: list[dict]) -> list[str]:
     values = row.get(key)
@@ -172,19 +319,21 @@ def duration_metrics(source: dict, scenes: dict, shots: dict, errors: list[dict]
             "target_delta_seconds": shot_total - target if shot_total is not None and target is not None else None}
 
 
-# LLM: 本包只核对显式 v2 交付、原文字节、场次覆盖、镜头依据声明和时长；covered_passages 仍指场次采用，不能升级为语义覆盖或宿主完成授权。
-# 函数用途: 查找镜头声明缺项、跨场来源、串角色及计量不一致；保留改编和未知警告，创作新增是否忠实仍交给独立阅读。
+# LLM: 本包只核对显式 v3 声明及字面诊断，covered_passages 仍指场次采用；旧 schema 不自动升级，不能据此授予宿主完成状态。
+# 函数用途: 查找来源、人物和时长声明缺项，保留名字、改编和未知警告；创作忠实、在场与接续真实性仍交独立阅读。
 def check_delivery(source: object, delivery: object, source_sha256: str) -> dict:
     errors, warnings = [], []
     if not isinstance(source, dict) or not isinstance(delivery, dict):
-        return {"schema": "drama_text_check.v2", "structure_valid": False,
-                "errors": [{"code": "object_required", "path": "$"}]}
-    if source.get("schema") != "drama_text_source.v1" or delivery.get("schema") != "drama_text_delivery.v2":
+        return {"schema": "drama_text_check.v3", "structure_valid": False,
+                "errors": [{"code": "object_required", "path": "$"}],
+                "name_diagnostics": unchecked_name_diagnostics("structure_errors")}
+    if source.get("schema") != "drama_text_source.v1" or delivery.get("schema") != "drama_text_delivery.v3":
         errors.append({"code": "unsupported_schema", "path": "schema"})
     if delivery.get("source_sha256") != source_sha256:
         errors.append({"code": "source_digest_mismatch", "path": "source_sha256"})
     passages = index_rows(source, "passages", errors)
     cast = index_rows(delivery, "cast", errors)
+    name_owners, skipped = cast_text_names(cast, errors)
     scenes = index_rows(delivery, "scenes", errors)
     shots = index_rows(delivery, "shots", errors)
     for name, rows in (("passages", passages), ("scenes", scenes), ("shots", shots)):
@@ -201,17 +350,18 @@ def check_delivery(source: object, delivery: object, source_sha256: str) -> dict
         covered.update(refs)
         scene_sources[identifier] = refs
         scene_characters[identifier] = references(row, "character_ids", cast, identifier, errors)
-    filmed = set()
+    filmed, declared = set(), {}
     for identifier, row in shots.items():
         scene_id = row.get("scene_id")
         if not isinstance(scene_id, str) or scene_id not in scenes:
             errors.append({"code": "unknown_scene", "path": identifier})
         else:
             filmed.add(scene_id)
-            references(row, "visible_character_ids", {x: {} for x in scene_characters[scene_id]}, identifier, errors)
+        scene_cast = scene_characters.get(scene_id, set()) if isinstance(scene_id, str) else set()
+        declared[identifier] = shot_characters(row, {x: {} for x in scene_cast}, cast, identifier, errors)
         check_shot_basis(row, identifier, scene_sources.get(scene_id, set()) if isinstance(scene_id, str) else set(),
                          errors, warnings)
-        for key in ("start_state", "action", "end_state"):
+        for key in SHOT_TEXT_FIELDS:
             if not isinstance(row.get(key), str) or not row[key].strip():
                 errors.append({"code": "shot_state_required", "path": f"{identifier}.{key}"})
     omissions = delivery.get("omitted_passages", [])
@@ -233,13 +383,15 @@ def check_delivery(source: object, delivery: object, source_sha256: str) -> dict
     if omitted:
         warnings.append({"code": "explicit_omissions_need_review", "count": len(omitted)})
     durations = duration_metrics(source, scenes, shots, errors)
+    diagnostics = diagnose_names(name_owners, shots, declared, skipped, errors, warnings)
     warnings.append({"code": "creative_quality_and_media_not_checked"})
-    return {"schema": "drama_text_check.v2", "structure_valid": not errors, "errors": errors,
-            "warnings": warnings, "metrics": {"passages": len(passages), "covered_passages": len(covered),
+    return {"schema": "drama_text_check.v3", "structure_valid": not errors, "errors": errors,
+            "warnings": warnings, "name_diagnostics": diagnostics,
+            "metrics": {"passages": len(passages), "covered_passages": len(covered),
             "omitted_passages": len(omitted), "scenes": len(scenes), "shots": len(shots), **durations}}
 
 
-# LLM: 开发组件入口只读两份明确输入并打印 v2 报告，输入解析失败也保留版本；正式调用须由宿主物化和原工具授权接线。
+# LLM: 开发组件入口只读两份明确输入并打印 v3 报告，解析失败将名字诊断标为未检查；正式调用沿宿主原物化和执行链。
 # 函数用途: 从命令行检查文本资料并报告稳定错误格式，退出码仅表示本脚本结构检查结果。
 def main() -> int:
     parser = argparse.ArgumentParser(description="核对短剧文本依据与分镜引用，不评价成片质量")
@@ -251,8 +403,9 @@ def main() -> int:
         delivery, _ = read_document(arguments.delivery)
         result = check_delivery(source, delivery, hashlib.sha256(raw).hexdigest())
     except (OSError, ValueError) as exc:
-        result = {"schema": "drama_text_check.v2", "structure_valid": False,
-                  "errors": [{"code": "invalid_input", "message": str(exc)}]}
+        result = {"schema": "drama_text_check.v3", "structure_valid": False,
+                  "errors": [{"code": "invalid_input", "message": str(exc)}],
+                  "name_diagnostics": unchecked_name_diagnostics("invalid_input")}
     print(json.dumps(result, ensure_ascii=False, allow_nan=False))
     return 0 if result["structure_valid"] else 1
 

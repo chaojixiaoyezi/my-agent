@@ -29,7 +29,8 @@
 |-- agent_py_agent/tests/test_capability_package_entry_context.py # 多入口总预算、分页和失败隔离
 |-- agent_py_agent/tests/test_capability_package_selection_runtime.py # 主请求一次准备及停止续跑组合
 |-- agent_py_agent/tests/test_capability_package_drama_text_duration.py # A包逐场镜头与来源目标时长对账
-|-- agent_py_agent/tests/test_capability_package_drama_text_basis.py # A包v2镜头来源、改编与未知声明及报告版本
+|-- agent_py_agent/tests/test_capability_package_drama_text_basis.py # A包v3镜头来源、改编与未知声明及报告版本
+|-- agent_py_agent/tests/test_capability_package_drama_text_visibility.py # A包人物字面覆盖、画外声明及有界诊断
 |-- agent_py_agent/tests/test_capability_package_drama_workflow_duration.py # B包分集镜头与明确目标对账
 |-- agent_py_agent/tests/test_capability_package_b_template.py # B完整模板、制作交接及原派工授权接口
 |-- agent_py_agent/tests/test_capability_package_drama_workflow_handoff.py # B交接绑定、原字节摘要、对象地址及路径别名缓存边界
@@ -42,6 +43,7 @@
 |   |-- drama-text-a/methods/review-source.md # 原文与下游事实的成对证据审阅
 |   |-- drama-text-a/methods/review-continuity.md # 同镜、相邻镜与跨场接续的定向阅读
 |   |-- drama-text-a/methods/review-delivery.md # 实际合并产物、检查回执与拟对外陈述核对
+|   |-- drama-text-a/methods/visible-characters.md # 从成稿回填可见与画外人物，解释字面诊断边界
 |   |-- drama-text-a/templates/review.md # 人与模型使用的审阅反馈形状，不生成机器状态
 |   `-- drama-workflow-b/templates/handoff.json # 制作阶段输入与对象转换的待填写业务资料
 |-- docs/design/CAPABILITY_PACKS.md       # 能力包协议、生命周期、隔离召回和任务版本合同
@@ -1209,7 +1211,9 @@ docs/
 - `examples/capability-packages/drama-text-a/methods/review-source.md`、`review-continuity.md`、`review-delivery.md`：A0.2.1 的来源、接续、交付三份私有审阅分表；沿入口按需读取，不进入全局 Skill。
 - `examples/capability-packages/drama-text-a/templates/review.md`：可带回作者处理的 Markdown 证据反馈模板，不是第二份任务或验收状态。
 - `agent_py_agent/tests/test_capability_package_drama_text_duration.py` 与 `test_capability_package_drama_workflow_duration.py`：合成输入下验证样包原脚本的时长聚合、目标缺失/非法、浮点和溢出边界，不执行真实任务产物。
-- `agent_py_agent/tests/test_capability_package_drama_text_basis.py`：验证 A 包 v2 镜头声明、本场来源、失败回执版本和结构不代表语义的边界。
+- `agent_py_agent/tests/test_capability_package_drama_text_basis.py`：验证 A 包 v3 镜头声明、本场来源、失败回执版本和结构不代表语义的边界。
+- `agent_py_agent/tests/test_capability_package_drama_text_visibility.py`：以公开合成资料通过原 CLI 验证代称/退出、可见/画外、歧义与长短词、原位置及预算/裁剪计数；不修改真实产物。
+- `examples/capability-packages/drama-text-a/methods/visible-characters.md`：A0.3.0 人物依据回填的私有方法与v3诊断合同；只说明字面覆盖，不生成宿主完成状态。
 - `agent_py_agent/tests/test_capability_package_b_template.py`：用完整占位填写公开合成资料，核对 B 的原检查器、私有交接模板及真实隔离派工授权。
 - `examples/capability-packages/drama-workflow-b/templates/handoff.json`：制作阶段、输入字节摘要、对象转换、省略与新增的业务清单；不作为宿主状态或已验证证据。
 
