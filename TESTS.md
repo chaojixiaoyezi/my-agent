@@ -1,10 +1,14 @@
 # 测试与发布验收
 
+## A0.3.0普通原生复验（2026-09-27）
+
+包源码固定bcbf40e8，宿主仍938（1422安装成员重新核对一致）。同一Gateway的三次原生管理写均成功；新CAP01一次原A02需求，19次HTTP、0重试、250.032秒，自然结束。原checker错误拼接JSON信封后执行失败，模型使用简化检查；独立审阅确认7镜60秒及人物字段的有限事实，同时判交接、取舍说明与跨场来源未过。运行时ok与业务失败分记，新字面诊断未成功执行，不借用下节141项或旧轮checker成功证明采用。4067旧文件及6配置无变化，测试者未补产物/代执行。详见[原生证据](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#a030原生开发复验2026-09-27)；本轮只补文档，按文档同步与diff检查收尾，不重跑未改产品测试，保留集0/36保持。
+
 ## A0.3.0人物依据与字面诊断（2026-09-27）
 
 只运行A专用 `test_capability_package_drama_text_visibility.py`、`test_capability_package_drama_text_basis.py`、`test_capability_package_drama_text_duration.py`，以及examples中`test_samples_build_reproducibly_and_expose_only_one_package[drama-text-a]`和全部`test_text_*`明确节点：**141 passed，5.88秒**。通过原隔离CLI检查字节不变、引用、名字边界/歧义/退出、预算null与完整扫描后警告裁剪；未运行其它样包或全仓pytest，组件结果不代替模型采用/语义质量。
 
-两次真实builder CLI可重复，15资源逐字节/摘要一致，ZIP SHA256 `98e21e0accb101b1d4c3640a1d5cc5de0bad8bf58ae4f1b79e9ca7dc3b6fa68e`。定向源码前后同字节；精确节点、stdout、JUnit、构建与来源指纹保存在私有candidate-13证据，摘要见[本轮验收](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#a030人物依据与字面诊断2026-09-27)。独立末审及本地严格gate已通过（线上CI未作为验收来源），尚未安装或运行新原生任务。
+两次真实builder CLI可重复，15资源逐字节/摘要一致，ZIP SHA256 `98e21e0accb101b1d4c3640a1d5cc5de0bad8bf58ae4f1b79e9ca7dc3b6fa68e`。定向源码前后同字节；精确节点、stdout、JUnit、构建与来源指纹保存在私有candidate-13证据，摘要见[本轮验收](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#a030人物依据与字面诊断2026-09-27)。独立末审及本地严格gate已通过（线上CI未作为验收来源）；随后原生热更新及业务失败见本页首节。
 
 ## 第十二候选：普通工具结果逻辑引用（2026-09-27）
 
