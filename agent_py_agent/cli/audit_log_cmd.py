@@ -7,12 +7,12 @@ import time
 
 from ..agent.audit import AuditAction, AuditQuery
 
+# 参数减量第 3 批：audit-log 默认条数不再是配置项，--limit 仍优先。
+_CLI_AUDIT_LIMIT = 100
+
 
 def _show_recent_users(query: AuditQuery, args) -> int:
-    limit = getattr(args, "limit", None)
-    if limit is None:
-        limit = int(getattr(query.config, "cli_audit_limit", 100) or 0)
-    users = query.recent_users(limit=limit)
+    users = query.recent_users(limit=_audit_limit(args))
 
     if not users:
         print("暂无活跃用户。", file=sys.stdout)
@@ -61,7 +61,7 @@ def _show_entries(query: AuditQuery, args) -> int:
         target_id=getattr(args, "target", None),
         target_type=getattr(args, "target_type", None),
         status=getattr(args, "status", None),
-        limit=_audit_limit(query, args),
+        limit=_audit_limit(args),
         offset=getattr(args, "offset", 0),
     )
 
@@ -134,11 +134,10 @@ def cmd_audit_log(args) -> int:
     return _show_entries(query, args)
 
 
-def _audit_limit(query: AuditQuery, args) -> int:
+# 函数用途: 取 --limit，没给时用代码默认条数。
+def _audit_limit(args) -> int:
     value = getattr(args, "limit", None)
-    if value is not None:
-        return int(value)
-    return int(getattr(query.config, "cli_audit_limit", 100) or 0)
+    return int(_CLI_AUDIT_LIMIT if value is None else value)
 
 
 __all__ = ["cmd_audit_log"]

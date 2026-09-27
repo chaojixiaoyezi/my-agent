@@ -119,12 +119,12 @@ def chat_history_max_turns(config) -> int:
     return _limit(config)
 
 
-# LLM: Compatibility wrapper for config-derived assistant preview size.
+# LLM: 兼容包装；预览字数自参数减量第 3 批起是 chat_parts.history 的常量，不再读配置。
 # 函数用途: 读取历史上下文中助手回复的最大预览字符数。
-def chat_assistant_preview_chars(config) -> int:
+def chat_assistant_preview_chars() -> int:
     from .chat_parts.history import chat_assistant_preview_chars as _limit
 
-    return _limit(config)
+    return _limit()
 
 
 # LLM: Explicit resume alone loads the ConversationStore history projection; new sessions skip it.
@@ -223,7 +223,7 @@ def _init_chat_state(agent):
             conversation_history,
             history_lock,
             max_turns=chat_history_max_turns(agent.config),
-            assistant_preview_chars=chat_assistant_preview_chars(agent.config),
+            assistant_preview_chars=chat_assistant_preview_chars(),
         )
 
     return state, _build_history_context
@@ -237,9 +237,14 @@ def _has_prompt_toolkit() -> bool:
         return False
 
 
-def _ensure_chat_memory_limit(args, agent) -> None:
+# 参数减量第 3 批：chat 默认带入的记忆条数不再是配置项，--memory-limit 仍优先。
+_CLI_CHAT_MEMORY_LIMIT = 5
+
+
+# 函数用途: 没给 --memory-limit 时补上代码默认条数。
+def _ensure_chat_memory_limit(args) -> None:
     if getattr(args, "memory_limit", None) is None:
-        args.memory_limit = int(getattr(agent.config, "cli_chat_memory_limit", 5) or 0)
+        args.memory_limit = _CLI_CHAT_MEMORY_LIMIT
 
 
 # 函数用途: 显式 resume <session_id> 只连接指定会话(owner seq1943 语义③ +
@@ -314,7 +319,7 @@ def cmd_chat(args) -> int:
             drop_handoff_screen()
     args._gateway_client_mode = bool(use_gateway and use_tui)
     agent = make_agent(args)
-    _ensure_chat_memory_limit(args, agent)
+    _ensure_chat_memory_limit(args)
     paths = gateway_paths(agent)
     if use_gateway and not use_tui:
         _, alive = wait_for_gateway_running(

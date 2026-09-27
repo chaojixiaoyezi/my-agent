@@ -7,15 +7,19 @@ import time
 from dataclasses import asdict, is_dataclass
 
 from ..agent.agent_core.subagent import SpawnSubagentsParams
+from ..agent.agent_core.subagent.spawn_flow import SUBAGENT_SPAWN_DEFAULT_COUNT
 from ..agent.common.display_width import display_width, truncate_display
 from ..agent.startup_recovery import is_recent_board_item
 from ..agent.subagents.models import SubAgentBoardOptions
-from .common import make_agent
+from .common import int_arg_or_default, make_agent
 from .shared_progress import (
     format_shared_progress_lines,
     format_takeover_view_lines,
     shared_progress_for_board,
 )
+
+# 参数减量第 3 批：子代理命令（board/plan-actions/patches/due-check…）的默认条数不再是配置项，--limit 仍优先。
+SUBAGENT_CLI_DEFAULT_LIMIT = 20
 
 _BOARD_GOAL_PREVIEW_CHARS = 180
 
@@ -38,7 +42,7 @@ def cmd_spawn(args) -> int:
     tasks = agent.spawn_subagents(
         params=SpawnSubagentsParams(
             goal=args.goal,
-            count=_subagent_config_int(agent, args, "count", "subagent_spawn_default_count"),
+            count=int_arg_or_default(args, "count", SUBAGENT_SPAWN_DEFAULT_COUNT),
             role=getattr(args, "role", "worker"),
             agent_name=getattr(args, "agent_name", ""),
         )
@@ -51,7 +55,7 @@ def cmd_spawn(args) -> int:
 def cmd_subagents(args) -> int:
 
     agent = make_agent(args)
-    limit = _subagent_config_int(agent, args, "limit", "subagent_cli_default_limit")
+    limit = int_arg_or_default(args, "limit", SUBAGENT_CLI_DEFAULT_LIMIT)
     board = agent.subagents.board.write_board(
         options=SubAgentBoardOptions(
             recent_limit=limit,
@@ -91,13 +95,6 @@ def _print_shared_progress(panels: list[dict]) -> None:
     print("Shared Progress")
     for line in format_shared_progress_lines(panels):
         print(line)
-
-
-def _subagent_config_int(agent, args, arg_name: str, config_name: str) -> int:
-    value = getattr(args, arg_name, None)
-    if value is not None:
-        return int(value)
-    return int(getattr(agent.config, config_name, 0) or 0)
 
 
 def _current_hot_items(items: list) -> list:

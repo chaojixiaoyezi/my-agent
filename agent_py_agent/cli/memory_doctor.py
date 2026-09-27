@@ -26,6 +26,7 @@ from ..agent.user_space.home_doctor import build_home_doctor_report
 from ..agent.user_space.home_layout import DEFAULT_ROUTE_INDEX, resolve_route_index_target
 from ..agent.user_space.home_runtime_query import home_runtime_status
 from .common import make_agent
+from .memory_commands.memory_doctor_cmd import MEMORY_DOCTOR_RECENT_ARCHIVE_FILE_LIMIT
 
 
 def cmd_memory_doctor(args) -> int:
@@ -110,13 +111,9 @@ def _archive_dir_payload(directory: Path, today_path: Path, *, config: object | 
         "today_path": str(today_path),
         "recent_files": [
             _archive_file_payload(path)
-            for path in files[: _recent_archive_file_limit(config)]
+            for path in files[:MEMORY_DOCTOR_RECENT_ARCHIVE_FILE_LIMIT]
         ],
     }
-
-
-def _recent_archive_file_limit(config: object | None) -> int:
-    return int(getattr(config, "memory_doctor_recent_archive_file_limit", 5) or 0)
 
 
 def _archive_file_payload(path: Path) -> dict[str, Any]:

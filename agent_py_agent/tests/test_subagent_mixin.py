@@ -42,19 +42,21 @@ class TestSubagentMixinSpawn:
         assert len(result) == 2
         mixin.subagents.split.assert_called_once()
 
-    def test_spawn_subagents_without_count_uses_configured_default(self) -> None:
-        """没有 count 时，工具调用本身就是明确创建意图，不再靠复杂度估算决定是否创建。"""
+    def test_spawn_subagents_without_count_uses_code_default(self) -> None:
+        """没有 count 时按代码默认数量创建（参数减量第 3 批后不再读配置），工具调用本身就是明确创建意图。"""
+        from agent_py_agent.agent.agent_core.subagent import spawn_flow
+
         mixin = SimpleAgentSubagentMixin()
         mixin.config = MagicMock()
         mixin.config.enable_subagents = True
         mixin.config.max_subagents = 10
-        mixin.config.subagent_spawn_default_count = 4
         mixin.config.subagent_allowed_tools = []
         mixin.subagents = MagicMock()
         mock_task = MagicMock()
         mixin.subagents.split.return_value = [mock_task, mock_task, mock_task, mock_task]
 
-        result = mixin.spawn_subagents("测试目标")
+        with patch.object(spawn_flow, "SUBAGENT_SPAWN_DEFAULT_COUNT", 4):
+            result = mixin.spawn_subagents("测试目标")
 
         assert len(result) == 4
         mixin.subagents.split.assert_called_once()

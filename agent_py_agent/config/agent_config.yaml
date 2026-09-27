@@ -232,7 +232,6 @@ memory_archive_search_file_limit: 30
 memory_query_content_preview_chars: 500
 memory_resume_archive_scan_limit: 0
 memory_resume_recommended_read_paths_limit: 20
-memory_doctor_recent_archive_file_limit: 5
 
 # 沙箱额外可写根（任务 work/output 之外），全局配置、对所有用户生效；测试共享工作区等场景配置。属于安全边界，模型不能改。
 additional_write_roots: []
@@ -268,18 +267,12 @@ task_max_subagents: 0
 # - 默认空值表示写入当前 owner home 的工作区运行目录。
 # - 用户明确填写路径时，按填写路径落盘。
 subagent_workspace: ""
-subagent_board_limit: 5
 subagent_allowed_tools: []
 
 # 子代理角色模板目录。
 # - [] 表示自动使用工作区 .agent/subagents/roles（如果存在）+ 内置模板。
 # - 模板只影响职责和检查重点，不应让代理失去基础读写/汇报能力。
 subagent_role_template_dirs: []
-subagent_spawn_default_count: 3
-subagent_cli_default_limit: 20
-subagent_probe_default_limit: 20
-subagent_hierarchy_default_max_depth: 0
-subagent_hierarchy_recovery_max_nodes: 200
 # 0 表示不再设置一份重复的“单次创建”默认上限；实际批量仍受 max_subagents 可用槽位约束。
 # 部署方若要更小批次，可显式填写正整数。
 subagent_hierarchy_max_children_per_tool_call: 0
@@ -938,9 +931,6 @@ tool_catalog_include_examples: false
 # 单个工具目录条目的字符上限；0 表示不截断。
 tool_catalog_entry_max_chars: 700
 
-# 工具目录分页/截断时是否提示 next_offset。
-tool_catalog_show_truncated_notice: true
-
 # Recommended Tools 单个详细工具说明字符上限；0 表示不截断。
 tool_detail_max_chars: 4000
 
@@ -986,11 +976,8 @@ mcp_servers: {}
 computer_use_enabled: false
 
 
-# Chat / CLI 默认展示和读取预算：
-# - 这些配置控制命令默认显示多少、交互历史带多少、长文本折叠多少。
-# - 后续前端配置页也应读取这些真实后端字段，而不是另写一套默认值。
+# Chat 界面交互历史带多少轮；模型使用的同会话历史预算见下面 conversation_history_*。
 chat_history_max_turns: 20
-chat_history_assistant_preview_chars: 500
 # Agent 模型使用的同会话历史预算，与上面的界面展示预览严格分开。
 # 总量不足时只整条淘汰最旧消息；普通用户/助手正文不做滑动头尾截断，达到阈值后统一 Compact。
 conversation_history_max_turns: 20
@@ -1003,22 +990,6 @@ conversation_terminal_tool_fold_max_chars: 6000
 # 缓存仍可能有效时保留更完整的有界工具尾巴；过期后才切换成短折叠，避免一分钟内追问就主动破坏热前缀。
 # 0 表示立即短折叠。不同模型/网关缓存时长可能不同，应按 provider cache-read 账本校准，不按延迟猜测。
 conversation_terminal_tool_hot_tail_seconds: 300
-chat_collapse_preview_lines: 12
-chat_collapse_preview_chars: 900
-chat_transcript_scroll_lines: 10
-cli_status_limit: 5
-cli_timeline_limit: 20
-cli_memory_list_limit: 20
-cli_memory_search_limit: 5
-cli_chat_memory_limit: 5
-cli_memory_archive_limit: 20
-# memory-compact 默认不截断当前 scope 的匹配记录；如需调试小范围 compact，可在命令行显式传 --limit。
-cli_memory_route_limit: 5
-cli_local_search_limit: 5
-cli_local_search_preview_chars: 500
-cli_local_doctor_limit: 20
-cli_task_list_limit: 50
-cli_audit_limit: 100
 cli_audit_cleanup_days: 90
 
 # Dispatch 闭环保证配置：

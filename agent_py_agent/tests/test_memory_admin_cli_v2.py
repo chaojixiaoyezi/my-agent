@@ -81,7 +81,6 @@ def _agent(tmp_path: Path) -> SimpleNamespace:
         memory_hook_enabled=True,
         memory_rule_routing_mode="soft",
         memory_rule_auto_read_limit=3,
-        memory_doctor_recent_archive_file_limit=5,
     )
     return SimpleNamespace(
         root=workspace,

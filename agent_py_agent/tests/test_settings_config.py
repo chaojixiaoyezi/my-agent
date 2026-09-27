@@ -239,7 +239,6 @@ class TestNormalizeAgentConfig:
             "tool_catalog_categories": ["filesystem", "shell"],
             "tool_catalog_include_examples": False,
             "tool_catalog_entry_max_chars": 900,
-            "tool_catalog_show_truncated_notice": False,
             "tool_detail_max_chars": 3000,
         }
         normalized, warnings = normalize_agent_config(data)
@@ -248,7 +247,6 @@ class TestNormalizeAgentConfig:
         assert normalized["tool_catalog_categories"] == ["filesystem", "shell"]
         assert normalized["tool_catalog_include_examples"] is False
         assert normalized["tool_catalog_entry_max_chars"] == 900
-        assert normalized["tool_catalog_show_truncated_notice"] is False
         assert normalized["tool_detail_max_chars"] == 3000
         assert warnings == []
 

@@ -227,8 +227,6 @@ def chat_history_max_turns(config: object) -> int:
         return MAX_HISTORY_TURNS
 
 
-def chat_assistant_preview_chars(config: object) -> int:
-    try:
-        return max(0, int(getattr(config, "chat_history_assistant_preview_chars", ASSISTANT_PREVIEW_CHARS) or 0))
-    except (TypeError, ValueError):
-        return ASSISTANT_PREVIEW_CHARS
+# 函数用途: 助手回复在历史上下文里的预览字数；参数减量第 3 批起固定为本模块常量，不再读配置。
+def chat_assistant_preview_chars() -> int:
+    return ASSISTANT_PREVIEW_CHARS

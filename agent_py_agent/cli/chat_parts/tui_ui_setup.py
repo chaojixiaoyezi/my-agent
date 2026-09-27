@@ -46,6 +46,8 @@ APP_REDRAW_INTERVAL_SECONDS = 1 / 20
 APP_RENDER_POSTPONE_SECONDS = 1 / 20
 ESCAPE_SEQUENCE_TIMEOUT_SECONDS = 0.1
 TERMINAL_ESCAPE_PREFIX_TIMEOUT_SECONDS = 0.05
+# 参数减量第 3 批：滚轮/翻页每次滚动的行数不再是配置项。
+CHAT_TRANSCRIPT_SCROLL_LINES = 10
 
 
 # LLM: 输入保留原 history 与补全；插件客户端只在显式 Tab/提交读取，候选原 revision 跟随输入框，不增加启动请求。
@@ -965,7 +967,7 @@ def _make_tui_keybindings(
             parts.transcript_state,
             parts.transcript_search_area,
             parts.permission_feedback_area,
-            int(getattr(app_config.agent.config, "chat_transcript_scroll_lines", 10) or 10),
+            CHAT_TRANSCRIPT_SCROLL_LINES,
             app_config.tui_runtime,
             agent_navigation=app_config.agent_navigation,
             local_run_ref=app_config.local_run_ref,

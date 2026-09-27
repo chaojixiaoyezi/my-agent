@@ -186,14 +186,8 @@ class TestNormalizeSubagentAgentConfig:
         assert exposed == {
             "enable_subagents",
             "subagent_allowed_tools",
-            "subagent_board_limit",
-            "subagent_cli_default_limit",
             "subagent_debug_trace_level",
-            "subagent_hierarchy_default_max_depth",
             "subagent_hierarchy_max_children_per_tool_call",
-            "subagent_hierarchy_recovery_max_nodes",
-            "subagent_probe_default_limit",
-            "subagent_spawn_default_count",
             "subagent_takeover_chain_max_depth",
             "max_subagents",
             "task_max_subagents",
@@ -207,26 +201,16 @@ class TestNormalizeSubagentAgentConfig:
 
         normalized, warnings = normalize_agent_config(
             {
-                "subagent_hierarchy_default_max_depth": 0,
                 "subagent_hierarchy_max_children_per_tool_call": 0,
                 "subagent_takeover_chain_max_depth": 0,
             }
         )
 
-        assert defaults.subagent_hierarchy_default_max_depth == 0
         assert defaults.subagent_hierarchy_max_children_per_tool_call == 0
         assert defaults.subagent_takeover_chain_max_depth == 0
-        assert normalized["subagent_hierarchy_default_max_depth"] == 0
         assert normalized["subagent_hierarchy_max_children_per_tool_call"] == 0
         assert normalized["subagent_takeover_chain_max_depth"] == 0
         assert warnings == []
-
-    def test_normalize_subagent_board_limit_invalid(self):
-        """验证无效的 subagent_board_limit 会回退。"""
-        data = {"subagent_board_limit": "many"}
-        normalized, warnings = normalize_agent_config(data)
-        assert normalized["subagent_board_limit"] == AgentConfig().subagent_board_limit
-        assert len(warnings) > 0
 
     def test_normalize_gateway_request_poll_interval_accepts_fractional_seconds(self):
         """gateway 请求 worker 的空闲轮询间隔支持小数秒，避免配置写了不生效。"""

@@ -31,6 +31,10 @@ from .plain_state import _CHAT_RESPONSE_STYLE_INJECT, resume_context_override
 from .plain_ui import _make_chunk_handler, _render_assistant_response
 from .rendering import GRAY, RESET, _cprint
 
+# 参数减量第 3 批：长输出折叠时保留的预览行数/字数不再是配置项。
+_CHAT_COLLAPSE_PREVIEW_LINES = 12
+_CHAT_COLLAPSE_PREVIEW_CHARS = 900
+
 
 # LLM: direct local_run 必须是 worker 事先发布的原句柄；Gateway 不携带本地运行权威。
 # 类用途: 汇总单条普通终端消息需要的依赖和运行绑定回调。
@@ -55,7 +59,7 @@ def _plain_gateway_handle(ctx: PlainJobContext) -> tuple[str, bool]:
     on_chunk, stream_started_ref = _make_chunk_handler(
         ctx.agent.config.agent_name,
         _next_message_id(ctx),
-        preview_chars=_chat_preview_chars(ctx),
+        preview_chars=_CHAT_COLLAPSE_PREVIEW_CHARS,
     )
     request_id, chunk_path, _response_path = submit_chat_request(
         ctx.paths,
@@ -111,7 +115,7 @@ def _plain_local_handle(ctx: PlainJobContext) -> tuple[str, bool]:
     on_chunk, stream_started_ref = _make_chunk_handler(
         ctx.agent.config.agent_name,
         _next_message_id(ctx),
-        preview_chars=_chat_preview_chars(ctx),
+        preview_chars=_CHAT_COLLAPSE_PREVIEW_CHARS,
     )
     with register_interruptible(conversation_request_interrupt_name(ctx.job.request_id)):
         ctx.local_run.check_admission()
@@ -172,24 +176,10 @@ def _render_if_needed(
                 text=response_text,
                 assistant_outputs=ctx.assistant_outputs,
                 agent_name=ctx.agent.config.agent_name,
-                preview_lines=_chat_preview_lines(ctx),
-                preview_chars=_chat_preview_chars(ctx),
+                preview_lines=_CHAT_COLLAPSE_PREVIEW_LINES,
+                preview_chars=_CHAT_COLLAPSE_PREVIEW_CHARS,
             )
         )
-
-
-def _chat_preview_lines(ctx: PlainJobContext) -> int:
-    try:
-        return max(0, int(getattr(ctx.agent.config, "chat_collapse_preview_lines", 12) or 0))
-    except (TypeError, ValueError):
-        return 12
-
-
-def _chat_preview_chars(ctx: PlainJobContext) -> int:
-    try:
-        return max(0, int(getattr(ctx.agent.config, "chat_collapse_preview_chars", 900) or 0))
-    except (TypeError, ValueError):
-        return 900
 
 
 def _print_gateway_timing(

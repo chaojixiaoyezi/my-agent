@@ -15,7 +15,8 @@ from ..agent.user_space.home_runtime_query import (
     list_task_workspaces,
     read_daily_memory_records_report,
 )
-from .common import make_agent
+from .common import int_arg_or_default, make_agent
+from .task_commands import CLI_TASK_LIST_LIMIT
 
 
 # LLM: Home runtime commands expose only canonical owner paths; Daily filters follow v2 actor/
@@ -82,7 +83,7 @@ def cmd_memory_daily_list(args) -> int:
         date_key=getattr(args, "date", None),
         actor=getattr(args, "actor", "") or "",
         event_type=getattr(args, "event_type", "") or "",
-        limit=_limit_from_args(agent, args),
+        limit=_limit_from_args(args),
     )
     report = read_daily_memory_records_report(agent.home_paths, request)
     payload = {
@@ -105,7 +106,7 @@ def cmd_task_workspace_list(args) -> int:
     request = TaskWorkspaceQuery(
         query=getattr(args, "query", "") or "",
         date_key=getattr(args, "date", None),
-        limit=_limit_from_args(agent, args),
+        limit=_limit_from_args(args),
     )
     payload = {
         "ok": True,
@@ -175,11 +176,9 @@ def cmd_runtime_stale_attempts(args) -> int:
     return 0
 
 
-def _limit_from_args(agent, args) -> int:
-    value = getattr(args, "limit", None)
-    if value is not None:
-        return int(value)
-    return int(getattr(agent.config, "cli_task_list_limit", 50) or 0)
+# 函数用途: 取 --limit，没给时用任务列表的代码默认条数。
+def _limit_from_args(args) -> int:
+    return int_arg_or_default(args, "limit", CLI_TASK_LIST_LIMIT)
 
 
 # LLM: Human output renders only bounded Daily v2 summaries and ordering IDs, never referenced

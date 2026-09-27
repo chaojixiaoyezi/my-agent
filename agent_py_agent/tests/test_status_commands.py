@@ -41,7 +41,6 @@ def _status_mock_agent(tmp_path: Path) -> MagicMock:
     mock_agent.config.agent_name = "test_agent"
     mock_agent.root = tmp_path
     mock_agent.config.gateway_stale_seconds = 300
-    mock_agent.config.subagent_board_limit = 5
     mock_agent.local_store.stats.return_value = {
         "record_count": 100,
         "event_count": 50,
@@ -96,7 +95,6 @@ class TestCmdStatus:
         mock_agent.config.agent_name = "test_agent"
         mock_agent.root = tmp_path
         mock_agent.config.gateway_stale_seconds = 300
-        mock_agent.config.subagent_board_limit = 5
         mock_agent.local_store.stats.return_value = {
             "record_count": 100,
             "event_count": 50,

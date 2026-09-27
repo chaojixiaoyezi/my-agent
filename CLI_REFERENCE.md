@@ -648,7 +648,7 @@ my-agent memory-daily-list --date 2026-05-13 --actor user --event-type conversat
 | `--date <YYYY-MM-DD>` | - | 只查看某一天的 daily memory 文件。 |
 | `--actor <actor>` | 空 | 按经历主体精确过滤：`user` 用户、`main_agent` 主代理、`subagent` 子代理、`tool` 工具、`system` 系统。 |
 | `--event-type <type>` | 空 | 按经历类型精确过滤：`conversation` 对话、`decision` 决定、`task_progress` 任务进展、`tool_result` 工具结果、`lesson` 教训、`todo` 待办、`summary` 摘要、`warning` 警告、`error` 错误。 |
-| `--limit <n>` | `50` | 最多显示多少条记录；未传时读 `cli_task_list_limit`。 |
+| `--limit <n>` | `50` | 最多显示多少条记录。 |
 | `--json` | `false` | 输出机器可读 JSON。 |
 
 ## `memory-route`
@@ -833,7 +833,7 @@ my-agent task-workspace-list "购物网站" --json
 | --- | --- | --- |
 | `query` | 空 | 可选关键词，可匹配 task_id、task_name、run_id、request_id 或目录 slug。 |
 | `--date <YYYY-MM-DD>` | - | 只查看某一天的任务目录。 |
-| `--limit <n>` | `50` | 最多显示多少个任务；未传时读 `cli_task_list_limit`。 |
+| `--limit <n>` | `50` | 最多显示多少个任务。 |
 | `--json` | `false` | 输出机器可读 JSON。 |
 
 ## `memory-artifact-read`

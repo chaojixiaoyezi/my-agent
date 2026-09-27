@@ -234,7 +234,6 @@ class _ToolConfigFields:
     # remain available through list_tools or the recommended-tool details.
     tool_catalog_include_examples: bool = False
     tool_catalog_entry_max_chars: int = 700
-    tool_catalog_show_truncated_notice: bool = True
     # 渐进式披露:这些 category 仍注册，但不进初始模型 schema；通过 tool_search 加载。
     # 递归代理和持续目标控制属于主链，orchestration/goal 默认首轮直出；显式 allowed_tools 的
     # 结构化后台/runner profile 仍保持全量直出。[] 恢复全量。
@@ -395,7 +394,6 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     memory_query_content_preview_chars: int = 500
     memory_resume_archive_scan_limit: int = 0
     memory_resume_recommended_read_paths_limit: int = 20
-    memory_doctor_recent_archive_file_limit: int = 5
     memory_config_warnings: list[dict[str, Any]] = field(default_factory=list)
     local_store_path: str = ""
     local_store_files_dir: str = ""
@@ -412,16 +410,10 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     enable_subagents: bool = True
     # 当前根会话树可同时保留的未结束子代理数；不同 TUI/根任务互不占槽。
     max_subagents: int = 8
-    subagent_board_limit: int = 5
     subagent_workspace: str = ""
     subagent_allowed_tools: list[str] = field(default_factory=list)
     subagent_role_template_dirs: list[str] = field(default_factory=list)
     task_max_subagents: int = 0
-    subagent_spawn_default_count: int = 3
-    subagent_cli_default_limit: int = 20
-    subagent_probe_default_limit: int = 20
-    subagent_hierarchy_default_max_depth: int = 0
-    subagent_hierarchy_recovery_max_nodes: int = 200
     subagent_hierarchy_max_children_per_tool_call: int = 0
     subagent_takeover_chain_max_depth: int = 0
     subagent_debug_trace_level: int = 0
@@ -593,7 +585,6 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 工具循环；普通单次聊天不额外创建主动缓存，兼容端点不支持时可显式关闭。
     anthropic_prompt_cache_enabled: bool = True
     chat_history_max_turns: int = 20
-    chat_history_assistant_preview_chars: int = 500
     conversation_history_max_turns: int = 20
     conversation_history_max_chars: int = 48_000
     conversation_terminal_tool_fold_enabled: bool = True
@@ -601,21 +592,6 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 已结束工具回合在这段缓存热期内保留更完整的有界投影，过期后才切换为短折叠。
     # 0 表示立即使用短折叠；不同 provider 的缓存寿命应通过真实 usage 账本校准。
     conversation_terminal_tool_hot_tail_seconds: int = 300
-    chat_collapse_preview_lines: int = 12
-    chat_collapse_preview_chars: int = 900
-    chat_transcript_scroll_lines: int = 10
-    cli_status_limit: int = 5
-    cli_timeline_limit: int = 20
-    cli_memory_list_limit: int = 20
-    cli_memory_search_limit: int = 5
-    cli_chat_memory_limit: int = 5
-    cli_memory_archive_limit: int = 20
-    cli_memory_route_limit: int = 5
-    cli_local_search_limit: int = 5
-    cli_local_search_preview_chars: int = 500
-    cli_local_doctor_limit: int = 20
-    cli_task_list_limit: int = 50
-    cli_audit_limit: int = 100
     cli_audit_cleanup_days: int = 90
     # Dispatch 闭环保证配置
     dispatch_max_consecutive_rounds: int = 20

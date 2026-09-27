@@ -10,7 +10,7 @@ Gateway 用户的记忆总闸按各自 home 生效（分支 `claude/9b-owner-pat
 决策点未触发原因计数（分支 `claude/9b-decision-miss-reasons`，2026-09-27）：记忆侧四个决策点（recall、pre_recall、curator、curator_relation）每次到达都经 `conversation/decision_reach_counts` 记一次结果：没调用记宿主原因码（如 `memory_count`、`no_free_slots`、`nothing_to_label`、`memory_changed`、`point_off`、材料不合格的 `bad_material`），真正调用前记 `called`。只在进程内累加、按 owner 节流合并写盘，召回与整理的结果、警告码和游标都不变。见[决策审计与管控](../../design/DECISION_AUDIT_AND_ADMIN_CONTROLS.md#每个点位最近为什么没触发2026-09-27)。
 
 参数中心同名常数收敛（分支 `claude/param-center-dup-constants`，2026-09-27）：记忆诊断两处没有读取方的 `RECENT_ARCHIVE_FILE_LIMIT`
-删除（归档文件条数只读配置 `memory_doctor_recent_archive_file_limit`）；压缩失败熔断阈值与冷却只在 `memory_archive/compact_circuit_breaker`
+删除（归档文件条数当时改为只读配置 `memory_doctor_recent_archive_file_limit`；参数减量第 3 批又把它降级为 `memory_doctor_cmd.MEMORY_DOCTOR_RECENT_ARCHIVE_FILE_LIMIT`，两处入口共用这一处定义）；压缩失败熔断阈值与冷却只在 `memory_archive/compact_circuit_breaker`
 定义，`agent_core/runtime/context_compactor` 改为导入，不再保留同值副本。数值不变。
 
 记忆整理输入预算缩批（分支 `claude/curator-budget`，2026-09-26）：生产本机 owner 自 9/24 15:39Z 起每次都是 `CURATOR_INPUT_BUDGET_EXCEEDED`、游标不动。收集只按条目估算，消息收满后审计仍按保底至少收一条，身份清单里的编号也不在预算内，最终提示超预算；提取前检查不缩批，同一批永远失败。现在在标注前按最终提示实测长度截尾（先消息后审计，各留一条），尾部下一轮重放；同时修复预算早退复用上一调用者尝试形状的诊断残留。DeepSeek 官方接口拒绝 `json_schema` 的问题随后修复：模型档案新增可选 `structured_output`，该接口默认改用 JSON 对象模式并把 schema 写进提示，结果仍由 Curator 严格解析（见 TESTS.md 顶部）。没配模型的 owner 也不再按维护周期反复失败：永久配置错误不原地重试，未配模型记 `CURATOR_MODEL_NOT_CONFIGURED` 并退避一小时（发现层与 Curator 同源）。

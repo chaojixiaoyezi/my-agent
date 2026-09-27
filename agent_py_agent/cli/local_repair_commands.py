@@ -16,16 +16,18 @@ from ..agent.gateway_parts import (
     gateway_paths,
     recover_gateway_processing_requests,
 )
-from .common import make_agent
+from .common import int_arg_or_default, make_agent
 from .local_doctor import build_local_doctor_report, rebuild_local_store
 from .models import LocalDoctorOptions, LocalRebuildOptions
+
+# 参数减量第 3 批：local-doctor 默认条数不再是配置项，--limit 仍优先。
+_CLI_LOCAL_DOCTOR_LIMIT = 20
 
 
 def cmd_local_doctor(args) -> int:
 
     agent = make_agent(args)
-    if getattr(args, "limit", None) is None:
-        args.limit = int(getattr(agent.config, "cli_local_doctor_limit", 20) or 0)
+    args.limit = int_arg_or_default(args, "limit", _CLI_LOCAL_DOCTOR_LIMIT)
     options = _local_doctor_options(args)
     if options.repair:
         recovery = recover_gateway_processing_requests(

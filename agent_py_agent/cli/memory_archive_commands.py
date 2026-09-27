@@ -29,7 +29,7 @@ from ..agent.memory_archive.query import (
     resume_local_query,
 )
 from ..agent.memory_archive.resume_brief import build_resume_brief
-from .common import make_agent
+from .common import int_arg_or_default, make_agent
 from .memory_archive_rendering import print_archive_list, print_archive_search, print_memory_resume
 from .memory_archive_roots import (
     ArchiveCollectRequest,
@@ -38,11 +38,14 @@ from .memory_archive_roots import (
 )
 from .memory_resume_compact_rendering import print_memory_resume_from_compact
 
+# 参数减量第 3 批：memory-archive 系列命令默认条数不再是配置项，--limit 仍优先。
+_CLI_MEMORY_ARCHIVE_LIMIT = 20
+
 
 def cmd_memory_archive_list(args) -> int:
 
     agent = make_agent(args)
-    _apply_archive_default_limit(agent, args)
+    _apply_archive_default_limit(args)
     roots = archive_roots(agent)
     records = collect_agent_archive_records(
         agent,
@@ -71,7 +74,7 @@ def cmd_memory_archive_list(args) -> int:
 def cmd_memory_archive_search(args) -> int:
 
     agent = make_agent(args)
-    _apply_archive_default_limit(agent, args)
+    _apply_archive_default_limit(args)
     roots = archive_roots(agent)
     records = collect_agent_archive_records(
         agent,
@@ -140,7 +143,7 @@ def _collect_resume_data(agent, args):
 
 def cmd_memory_resume(args) -> int:
     agent = make_agent(args)
-    _apply_archive_default_limit(agent, args)
+    _apply_archive_default_limit(args)
     if _from_compact_arg(args):
         return _cmd_memory_resume_from_compact(agent, args)
     filters, archive_roots, archive_matches, local_payloads, task_payloads, gateway_payloads = _collect_resume_data(
@@ -209,6 +212,5 @@ def _archive_search_file_limit(agent) -> int:
     return int(getattr(agent.config, "memory_archive_search_file_limit", 30) or 0)
 
 
-def _apply_archive_default_limit(agent, args) -> None:
-    if getattr(args, "limit", None) is None:
-        args.limit = int(getattr(agent.config, "cli_memory_archive_limit", 20) or 0)
+def _apply_archive_default_limit(args) -> None:
+    args.limit = int_arg_or_default(args, "limit", _CLI_MEMORY_ARCHIVE_LIMIT)

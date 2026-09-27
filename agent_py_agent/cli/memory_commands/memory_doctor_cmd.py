@@ -14,6 +14,9 @@ from ...agent.memory_archive import (
 )
 from ...agent.user_space.home_layout import DEFAULT_ROUTE_INDEX, resolve_route_index_target
 
+# 参数减量第 3 批：doctor 列出最近多少个归档文件不再是配置项；旧入口 cli/memory_doctor.py 从这里 import，只定义一次。
+MEMORY_DOCTOR_RECENT_ARCHIVE_FILE_LIMIT = 5
+
 
 def cmd_memory_doctor(args) -> int:
     # Access make_agent through the module to allow test patching
@@ -128,13 +131,9 @@ def _archive_dir_payload(directory: Path, today_path: Path, *, config: object | 
         "today_path": str(today_path),
         "recent_files": [
             _archive_file_payload(path)
-            for path in files[: _recent_archive_file_limit(config)]
+            for path in files[:MEMORY_DOCTOR_RECENT_ARCHIVE_FILE_LIMIT]
         ],
     }
-
-
-def _recent_archive_file_limit(config: object | None) -> int:
-    return int(getattr(config, "memory_doctor_recent_archive_file_limit", 5) or 0)
 
 
 def _archive_file_payload(path: Path) -> dict[str, Any]:
@@ -169,7 +168,7 @@ def _snapshot_dir_payload(directory: Path, *, config: object) -> dict[str, Any]:
         "invalid_json_files": invalid_json_files,
         "recent_files": [
             _archive_file_payload(path)
-            for path in files[: int(getattr(config, "memory_doctor_recent_archive_file_limit", 5) or 0)]
+            for path in files[:MEMORY_DOCTOR_RECENT_ARCHIVE_FILE_LIMIT]
         ],
     }
 

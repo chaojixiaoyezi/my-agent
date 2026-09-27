@@ -14,8 +14,11 @@ from ..agent.local_storage import LocalStore
 from ..agent.settings import load_config
 from ..agent.subagents.models import TaskStatus
 from ..agent.task_registry import TaskRegistry, format_task_list, get_task_summary
-from .common import ROOT, resolve_workspace_root
+from .common import ROOT, int_arg_or_default, resolve_workspace_root
 from .models import TaskIdOptions, TaskListOptions, TaskSearchOptions
+
+# 参数减量第 3 批：任务列表默认条数不再是配置项，--limit 仍优先；home 运行时命令共用同一常量。
+CLI_TASK_LIST_LIMIT = 50
 
 
 def _task_store(config_path: str):
@@ -148,12 +151,11 @@ def cmd_task_search(args) -> int:
 
 
 def _task_list_options(args) -> TaskListOptions:
-    config = load_config(args.config)
     return TaskListOptions(
         config=args.config,
         user_id=args.user_id,
         status=args.status,
-        limit=int(args.limit if args.limit is not None else getattr(config, "cli_task_list_limit", 50)),
+        limit=int_arg_or_default(args, "limit", CLI_TASK_LIST_LIMIT),
     )
 
 

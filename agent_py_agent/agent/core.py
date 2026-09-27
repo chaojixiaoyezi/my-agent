@@ -863,7 +863,6 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
             catalog_deferred_categories=config.tool_catalog_deferred_categories,
             catalog_include_examples=config.tool_catalog_include_examples,
             catalog_entry_max_chars=config.tool_catalog_entry_max_chars,
-            catalog_show_truncated_notice=config.tool_catalog_show_truncated_notice,
             tool_detail_max_chars=config.tool_detail_max_chars,
             retrieval_limit=config.tool_retrieval_limit,
             vector_search_enabled=config.tool_vector_search_enabled,

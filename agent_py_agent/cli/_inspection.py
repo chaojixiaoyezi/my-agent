@@ -8,8 +8,12 @@ from dataclasses import asdict
 from ..agent.capability.config import load_capability_config
 from ..agent.subagents.models import SubAgentChannelProbeOptions, SubAgentDueCheckOptions
 from ..agent.subagents.run_budget import SubagentRunBudgetRequest
-from .common import make_agent
+from ._board import SUBAGENT_CLI_DEFAULT_LIMIT
+from .common import int_arg_or_default, make_agent
 from .models import SubagentContextOptions, SubagentsDueCheckOptions, SubagentsProbeOptions
+
+# 参数减量第 3 批：channel probe 默认条数不再是配置项，--limit 仍优先。
+_SUBAGENT_PROBE_DEFAULT_LIMIT = 20
 
 
 def cmd_subagents_due_check(args) -> int:
@@ -111,7 +115,7 @@ def cmd_subagent_context(args) -> int:
 def _subagents_due_check_options(args, *, agent=None) -> SubagentsDueCheckOptions:
     return SubagentsDueCheckOptions(
         all=bool(args.all),
-        limit=_subagent_config_int(agent, args, "limit", "subagent_cli_default_limit"),
+        limit=int_arg_or_default(args, "limit", SUBAGENT_CLI_DEFAULT_LIMIT),
         root_id=str(getattr(args, "root_id", "") or ""),
     )
 
@@ -119,16 +123,9 @@ def _subagents_due_check_options(args, *, agent=None) -> SubagentsDueCheckOption
 def _subagents_probe_options(args, *, agent=None) -> SubagentsProbeOptions:
     return SubagentsProbeOptions(
         run_ids=args.run_id or None,
-        limit=_subagent_config_int(agent, args, "limit", "subagent_probe_default_limit"),
+        limit=int_arg_or_default(args, "limit", _SUBAGENT_PROBE_DEFAULT_LIMIT),
     )
 
 
 def _subagent_context_options(args) -> SubagentContextOptions:
     return SubagentContextOptions(run_id=args.run_id, max_cards=int(args.max_cards or 0))
-
-
-def _subagent_config_int(agent, args, arg_name: str, config_name: str) -> int:
-    value = getattr(args, arg_name, None)
-    if value is not None:
-        return int(value)
-    return int(getattr(getattr(agent, "config", None), config_name, 0) or 0)

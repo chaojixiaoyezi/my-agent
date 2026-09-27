@@ -90,3 +90,11 @@ def _memory_record_count(agent: SimpleAgent) -> int:
             file=sys.stderr,
         )
         return 0
+
+
+# LLM: 命令行显式参数优先；没给时用调用方传入的代码默认值。参数减量第 3 批（2026-09-27）起 cli_*/subagent_* 这类
+#   命令默认值不再是配置项，各命令模块在读取点旁边定义常量再传进来；本函数不读配置、不写文件。
+# 函数用途: 取命令行整数参数，缺省时用代码默认值。
+def int_arg_or_default(args, arg_name: str, default: int) -> int:
+    value = getattr(args, arg_name, None)
+    return int(default if value is None else value)

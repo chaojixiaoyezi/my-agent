@@ -321,7 +321,6 @@ class TestCreateSubagentsToolExecute:
         mock_agent = MagicMock()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
-        mock_agent.config.subagent_spawn_default_count = 4
         mock_task = MagicMock()
         mock_task.id = "run_1"
         mock_task.goal = ""

@@ -23,7 +23,7 @@ from ..agent.gateway_parts import (
 )
 from ..agent.gateway_parts.io import read_json_file, read_json_file_report
 from ..agent.subagents.models import SubAgentBoardOptions
-from .common import format_local_time, make_agent, resume_context_override
+from .common import format_local_time, int_arg_or_default, make_agent, resume_context_override
 from .delivery_contracts import delivery_contract_from_file
 from .local_doctor import build_status_suggestions
 from .local_repair_commands import (
@@ -48,11 +48,19 @@ from .run_output import (
 )
 from .thinking_spinner import ThinkingSpinner
 
+# 参数减量第 3 批（2026-09-27）：这些命令的默认条数/预览字数不再是配置项；命令行显式 --limit / --preview-chars 仍优先。
+_CLI_STATUS_LIMIT = 5
+_CLI_TIMELINE_LIMIT = 20
+_CLI_MEMORY_LIST_LIMIT = 20
+_CLI_MEMORY_SEARCH_LIMIT = 5
+_CLI_LOCAL_SEARCH_LIMIT = 5
+_CLI_LOCAL_SEARCH_PREVIEW_CHARS = 500
+
 
 def cmd_status(args) -> int:
 
     agent = make_agent(args)
-    limit = _config_int(agent, args, "limit", "cli_status_limit")
+    limit = int_arg_or_default(args, "limit", _CLI_STATUS_LIMIT)
     paths = gateway_paths(agent)
     local_stats = agent.local_store.stats()
     board = agent.subagents.board.build_board(
@@ -150,7 +158,7 @@ def _detect_active_work_summary(agent):
 def cmd_timeline(args) -> int:
 
     agent = make_agent(args)
-    _apply_default_arg_limit(args, agent, "cli_timeline_limit")
+    args.limit = int_arg_or_default(args, "limit", _CLI_TIMELINE_LIMIT)
     options = _timeline_options(args)
     items = agent.local_store.timeline(
         limit=options.limit,
@@ -304,7 +312,7 @@ def cmd_remember(args) -> int:
 def cmd_memory_list(args) -> int:
 
     agent = make_agent(args)
-    limit = _config_int(agent, args, "limit", "cli_memory_list_limit")
+    limit = int_arg_or_default(args, "limit", _CLI_MEMORY_LIST_LIMIT)
     records = agent.memory.all()[-limit:]
     for rec in records:
         print(json.dumps(rec.__dict__, ensure_ascii=False))
@@ -314,7 +322,7 @@ def cmd_memory_list(args) -> int:
 def cmd_memory_search(args) -> int:
 
     agent = make_agent(args)
-    limit = _config_int(agent, args, "limit", "cli_memory_search_limit")
+    limit = int_arg_or_default(args, "limit", _CLI_MEMORY_SEARCH_LIMIT)
     for rec in agent.recall(args.query, limit):
         print(json.dumps(rec.__dict__, ensure_ascii=False))
     return 0
@@ -330,9 +338,8 @@ def cmd_local_store_status(args) -> int:
 def cmd_local_search(args) -> int:
 
     agent = make_agent(args)
-    _apply_default_arg_limit(args, agent, "cli_local_search_limit")
-    if getattr(args, "preview_chars", None) is None:
-        args.preview_chars = int(getattr(agent.config, "cli_local_search_preview_chars", 500) or 0)
+    args.limit = int_arg_or_default(args, "limit", _CLI_LOCAL_SEARCH_LIMIT)
+    args.preview_chars = int_arg_or_default(args, "preview_chars", _CLI_LOCAL_SEARCH_PREVIEW_CHARS)
     options = _local_search_options(args)
     hits = agent.local_store.search(
         options.query,
@@ -374,18 +381,6 @@ def _timeline_options(args) -> TimelineOptions:
         json=bool(args.json),
         details=bool(args.details),
     )
-
-
-def _config_int(agent, args, arg_name: str, config_name: str) -> int:
-    value = getattr(args, arg_name, None)
-    if value is not None:
-        return int(value)
-    return int(getattr(agent.config, config_name, 0) or 0)
-
-
-def _apply_default_arg_limit(args, agent, config_name: str) -> None:
-    if getattr(args, "limit", None) is None:
-        args.limit = int(getattr(agent.config, config_name, 0) or 0)
 
 
 def _local_search_options(args) -> LocalSearchOptions:

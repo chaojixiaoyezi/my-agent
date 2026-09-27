@@ -19,6 +19,9 @@ from ...agent.memory_routing import (
 )
 from ...agent.user_space.home_layout import DEFAULT_ROUTE_INDEX, resolve_route_index_target
 
+# 参数减量第 3 批：memory-route 默认条数不再是配置项，--limit 仍优先。
+_CLI_MEMORY_ROUTE_LIMIT = 5
+
 
 @dataclass(frozen=True)
 class RouteLogicRequest:
@@ -123,7 +126,7 @@ def _execute_route_logic(request: RouteLogicRequest):
 def cmd_memory_route(args) -> int:
     agent = _resolve_agent(args)
     if getattr(args, "limit", None) is None:
-        args.limit = int(getattr(agent.config, "cli_memory_route_limit", 5) or 0)
+        args.limit = _CLI_MEMORY_ROUTE_LIMIT
     mode = _resolve_route_mode(args.mode, agent.config)
     auto_read_limit = _resolve_auto_read_limit(args.auto_read_limit, agent.config)
     index_target = resolve_route_index_target(agent.root, args.index, home_paths=agent.home_paths)

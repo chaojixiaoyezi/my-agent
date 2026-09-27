@@ -449,7 +449,6 @@ class TestChatCommandRuntime:
         )
         agent = MagicMock()
         agent.config.chat_history_max_turns = 20
-        agent.config.chat_history_assistant_preview_chars = 500
         captured: list[tuple[str, str]] = []
 
         def run_tui(*, params):
@@ -990,7 +989,6 @@ class TestChatSessionIdFailClosed:
         class _FakeAgent:
             config = SimpleNamespace(
                 gateway_workspace="/tmp/gw",
-                cli_chat_memory_limit=5,
                 gateway_ready_timeout_seconds=10,
                 user_id="u1",
                 session_workspace="/tmp/gw/sessions",

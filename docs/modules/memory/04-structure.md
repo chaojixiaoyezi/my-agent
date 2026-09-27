@@ -5,6 +5,8 @@
 `cli/memory_doctor.py` 与 `cli/memory_commands/memory_doctor_cmd.py` 的 `_memory_config_payload` / `_build_archive_doctor` 只回显
 `AgentConfig` 上真实存在的 Memory 字段；名单与 `settings/_memory_types.MemorySettings` 同步删减（2026-09-27 去掉
 `memory_hook_retention_days`、`memory_rule_receipt_enabled`）。doctor 不是配置的读取方证据：只在这里出现的字段视为无读取方。
+doctor 列出最近多少个归档文件自参数减量第 3 批（2026-09-27）起是 `memory_doctor_cmd.MEMORY_DOCTOR_RECENT_ARCHIVE_FILE_LIMIT`（5），
+旧入口 `cli/memory_doctor.py` 从那里 import，只定义一次；配置项 `memory_doctor_recent_archive_file_limit` 已删除。
 
 child历史说明在不展示正文时不再提前读取完整来源或计算展示窗口，保留原线程说明及核验；三文件31项通过。三宿主seed物化峰值已定位，后续延后/释放尚未实施，12.4未完成。
 

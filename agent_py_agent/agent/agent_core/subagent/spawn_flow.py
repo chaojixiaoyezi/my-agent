@@ -11,6 +11,9 @@ from ..spawn_role_seed import (
 )
 from .params import SpawnSubagentsParams
 
+# 参数减量第 3 批：没给 count 时默认创建的子代理数不再是配置项；cli/_board.py 的 spawn 命令共用同一常量。
+SUBAGENT_SPAWN_DEFAULT_COUNT = 3
+
 
 @dataclass(frozen=True)
 class SpawnSubagentsFlowRequest:
@@ -69,10 +72,7 @@ def _spawn_explicit_root_seed(request: SpawnSubagentsFlowRequest):
 def _spawn_default_count(request: SpawnSubagentsFlowRequest):
     return _split_for_max_subagents(
         request,
-        default_count=effective_max_subagents(
-            getattr(request.agent.config, "subagent_spawn_default_count", 3),
-            default=3,
-        ),
+        default_count=effective_max_subagents(SUBAGENT_SPAWN_DEFAULT_COUNT, default=SUBAGENT_SPAWN_DEFAULT_COUNT),
         allowed_tools=configured_subagent_allowed_tools(request.agent.config),
     )
 

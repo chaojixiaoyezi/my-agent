@@ -265,6 +265,20 @@
     名单里的键必须存在、不能是安全边界项；与空说明基线的交集只允许过渡项 `memory_compact_auto_trigger_percent`（my-agent 补齐说明后
     收紧为空集）。`/settings` 回执里的值文字只由 `mask_value` 给出（布尔 true/false、数字照实，见上文“回显值文字统一”）。
 
+- **减量第三批（2026-09-27，分支 `claude/38-internal-constants`，部分完成，待集成者审核）**：102 个只对程序内部有意义的字段降级为读取点旁边的
+  具名常量（值不变），从 `AgentConfig`、随包 YAML、归一化表、字段规格表、说明基线和测试里删掉字段。规则：每个概念只定义一次
+  （多读取点从定义处 import，遵守 `test_constant_names_unique` 与 import 边界），命令行显式 flag 仍优先于常量。
+  - 已完成 A 组（24 项，命令与展示默认值）：`cli_*` 12 项、`subagent_cli_default_limit`、`subagent_probe_default_limit`、`subagent_board_limit`、
+    `subagent_hierarchy_default_max_depth`、`subagent_hierarchy_recovery_max_nodes`、`subagent_spawn_default_count`、`chat_collapse_preview_lines`、
+    `chat_collapse_preview_chars`、`chat_history_assistant_preview_chars`、`chat_transcript_scroll_lines`、`memory_doctor_recent_archive_file_limit`、
+    `tool_catalog_show_truncated_notice`。六份重复的 `_subagent_config_int`/`_config_int` 命令默认值 helper 收成 `cli/common.int_arg_or_default`。
+  - 用户可能真会调、保留为 advanced 不降级（集成者已同意）：`memory_curator_daily_finalize_hour`、`home_lesson_stale_caveat_days`、
+    `memory_lesson_min_occurrences`、`memory_hot_min_occurrences`、`chat_history_max_turns`、`estimated_output_tokens_per_second`、
+    `dynamic_timeout_min`、`local_store_fts_enabled`。
+  - 未完成：B 组（daemon_*、dispatch_default_*、gateway 轮询/心跳/陈旧判定、后台退避）、C 组（memory 归档预览/语义摘要/恢复/策展批次）、
+    D 组（动态超时探针、anthropic_version、媒体预留、微压缩、协议修复次数、决策选模字数）、E 组（后台上下文预算、终态工具折叠、
+    工具目录/详情上限、合同状态扫描预算）、以及 4 个 `config_*` + `memory_config_warnings` 只从 /settings 隐藏。用户额度告急，按集成者要求停在 A 组。
+
 ## 7. 验收
 
 - 每个迁入的参数：改用户配置后读取方确实拿到新值（测试证明，不只看配置文件）。

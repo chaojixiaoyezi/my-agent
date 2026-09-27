@@ -113,6 +113,7 @@ class ToolRegistryParams:
     catalog_deferred_categories: list[str] | None = None
     catalog_include_examples: bool = False
     catalog_entry_max_chars: int = 700
+    # 参数减量第 3 批：目录分页/截断提示固定开启，原配置项 tool_catalog_show_truncated_notice 已删除。
     catalog_show_truncated_notice: bool = True
     tool_detail_max_chars: int = 0
     tool_write_inline_max_chars: int = MAX_INLINE_WRITE_CONTENT_CHARS
