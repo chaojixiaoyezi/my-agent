@@ -225,6 +225,10 @@ class AuditQuery:
 
     def cleanup_old_entries(self, days: int = 90) -> int:
         """清理旧审计条目."""
+        if days <= 0:
+            # LLM: 保留期 <= 0 按"永久保留"处理，不删除任何记录。
+            # 历史实现会让 cutoff = now - 0 天 == 现在，等价于清空全部审计，对安全边界配置来说太危险。
+            return 0
         if not self._audit_file.exists():
             return 0
         cutoff_time = time.time() - (days * 24 * 60 * 60)

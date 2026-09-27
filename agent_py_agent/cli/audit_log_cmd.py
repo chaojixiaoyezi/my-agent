@@ -123,7 +123,11 @@ def cmd_audit_log(args) -> int:
         if days is None:
             days = int(getattr(config, "cli_audit_cleanup_days", 90) or 0)
         count = query.cleanup_old_entries(days=days)
-        print(f"已清理 {count} 条超过 {days} 天的审计记录。", file=sys.stdout)
+        if days <= 0:
+            # LLM: 保留期 <= 0 表示永久保留；清理层已不删任何记录，这里如实回执。
+            print("保留期设为 0（永久保留），未清理任何审计记录。", file=sys.stdout)
+        else:
+            print(f"已清理 {count} 条超过 {days} 天的审计记录。", file=sys.stdout)
         return 0
 
     # 查询日志

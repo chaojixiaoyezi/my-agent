@@ -379,6 +379,55 @@ class TestAuditQuery(unittest.TestCase):
         result = query.query(limit=10)
         self.assertEqual(result.total_count, 4)  # 旧条目被删除
 
+    def test_cleanup_with_zero_or_negative_days_keeps_everything(self):
+        """0 / 负数天表示永久保留：不删除任何记录。"""
+        old_time = time.time() - 100000  # 超过一天
+        old_entry = {
+            "entry_id": "audit_old_keep",
+            "timestamp": old_time,
+            "action": "LOGIN",
+            "user_id": "old-user",
+            "channel": "chat",
+            "target_type": "session",
+            "target_id": "old-session",
+            "status": "success",
+            "details": {},
+        }
+        with open(self.audit_file, "a", encoding="utf-8") as f:
+            f.write(json.dumps(old_entry, ensure_ascii=False) + "\n")
+
+        query = AuditQuery(self.config)
+        before = query.query(limit=100).total_count
+
+        self.assertEqual(query.cleanup_old_entries(days=0), 0)
+        self.assertEqual(query.cleanup_old_entries(days=-5), 0)
+
+        # 一条都没少（旧条目也仍在）
+        self.assertEqual(query.query(limit=100).total_count, before)
+
+    def test_cleanup_default_days_keeps_recent_entries(self):
+        """不传天数时用默认保留期：一天前的条目不该被删。"""
+        old_time = time.time() - 100000  # 超过一天
+        old_entry = {
+            "entry_id": "audit_old_default",
+            "timestamp": old_time,
+            "action": "LOGIN",
+            "user_id": "old-user",
+            "channel": "chat",
+            "target_type": "session",
+            "target_id": "old-session",
+            "status": "success",
+            "details": {},
+        }
+        with open(self.audit_file, "a", encoding="utf-8") as f:
+            f.write(json.dumps(old_entry, ensure_ascii=False) + "\n")
+
+        query = AuditQuery(self.config)
+        before = query.query(limit=100).total_count
+
+        self.assertEqual(query.cleanup_old_entries(), 0)
+        self.assertEqual(query.query(limit=100).total_count, before)
+
     def test_empty_audit_file(self):
         """测试空审计文件。"""
         self.audit_file.write_text("")
