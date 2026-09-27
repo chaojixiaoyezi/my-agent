@@ -16,7 +16,7 @@ from agent_py_agent.agent.gateway_parts import settings_control_service as modul
 _ADMIN = SimpleNamespace(owner_provider="local", owner_kind="main", owner_id="main")
 
 
-def _run(monkeypatch, path, text: str, config, *, home=_ADMIN):
+def _run(monkeypatch, text: str, config, *, home=_ADMIN):
     monkeypatch.setattr(module, "_scoped_home", lambda _agent, _scope: home)
     agent = SimpleNamespace(config=config)
     result = module.execute_settings_control(agent, _command(text), None)
@@ -57,7 +57,7 @@ def test_overview_shows_both_warning_sources(monkeypatch, config_path) -> None:
         capability_warnings=["unknown capability config key: 'decision_x_timeout_seconds'; ignored"],
     )
 
-    text = _run(monkeypatch, config_path, "/settings", config)
+    text = _run(monkeypatch, "/settings", config)
 
     assert "配置告警 2 条" in text
     assert "old_key" in text
@@ -72,7 +72,7 @@ def test_overview_marks_the_source_of_each_warning(monkeypatch, config_path) -> 
         capability_warnings=["unknown capability config key: 'b'; ignored"],
     )
 
-    text = _run(monkeypatch, config_path, "/settings", config)
+    text = _run(monkeypatch, "/settings", config)
 
     lines = [line for line in text.splitlines() if "'a'" in line or "'b'" in line]
     assert len(lines) == 2
@@ -83,7 +83,7 @@ def test_overview_marks_the_source_of_each_warning(monkeypatch, config_path) -> 
 def test_overview_hides_the_line_when_there_are_no_warnings(monkeypatch, config_path) -> None:
     config = _config(config_path)
 
-    text = _run(monkeypatch, config_path, "/settings", config)
+    text = _run(monkeypatch, "/settings", config)
 
     assert "配置告警" not in text
 
@@ -91,7 +91,7 @@ def test_overview_hides_the_line_when_there_are_no_warnings(monkeypatch, config_
 def test_all_view_shows_warnings_too(monkeypatch, config_path) -> None:
     config = _config(config_path, agent_warnings=["unknown config key: 'stale'; ignored"])
 
-    text = _run(monkeypatch, config_path, "/settings all", config)
+    text = _run(monkeypatch, "/settings all", config)
 
     assert "配置告警 1 条" in text
     assert "stale" in text
@@ -100,7 +100,7 @@ def test_all_view_shows_warnings_too(monkeypatch, config_path) -> None:
 def test_all_view_hides_the_line_when_there_are_no_warnings(monkeypatch, config_path) -> None:
     config = _config(config_path)
 
-    text = _run(monkeypatch, config_path, "/settings all", config)
+    text = _run(monkeypatch, "/settings all", config)
 
     assert "配置告警" not in text
 
@@ -109,7 +109,7 @@ def test_missing_warning_attributes_do_not_break_the_overview(monkeypatch, confi
     """老配置对象没有这些字段时，总览照常出，不能因为取告警而报错。"""
     config = SimpleNamespace(config_path=str(config_path), max_tokens=65536, request_timeout=300)
 
-    text = _run(monkeypatch, config_path, "/settings", config)
+    text = _run(monkeypatch, "/settings", config)
 
     assert "常用参数" in text
     assert "配置告警" not in text

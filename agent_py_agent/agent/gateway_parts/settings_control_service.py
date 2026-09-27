@@ -155,17 +155,19 @@ def _common_line(spec: ParameterSpec, config: object, stored: dict) -> str:
 
 
 # LLM: 未知/已删配置键只告警不生效，用户看不到就等于白配；这里把两个来源拼成给用户看的几行。只读，不解析消息文字。
+#   两个来源先压成一层扁平列表，再过滤空项；项目约定新代码的嵌套不超过两层，所以不写 for→for→if 三层。
 # 函数用途: 收集主配置与 capability 配置的告警，排成“配置告警 N 条”加逐条来源。
 def _config_warning_lines(config: object) -> list[str]:
-    entries: list[tuple[str, str]] = []
-    for source, holder, attr in (
-        ("agent 主配置", config, "config_warnings"),
-        ("capability 配置", getattr(config, "capability_config", None), "config_warnings"),
-    ):
-        for item in list(getattr(holder, attr, None) or []):
-            text = str(item).strip()
-            if text:
-                entries.append((source, text))
+    sources = (
+        ("agent 主配置", config),
+        ("capability 配置", getattr(config, "capability_config", None)),
+    )
+    entries = [
+        (source, str(item).strip())
+        for source, holder in sources
+        for item in (getattr(holder, "config_warnings", None) or [])
+        if str(item).strip()
+    ]
     if not entries:
         return []
     return [f"配置告警 {len(entries)} 条（下面这些配置键没生效，只是被忽略了）："] + [
