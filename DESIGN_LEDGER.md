@@ -805,6 +805,8 @@ auth 表单取消和参数拒绝已验，官方设备码在两处环境被 HTTP 
   （24 个）删除，点位期限与模型只在用户长期设置、会话设置里按点位覆盖，默认继承通用值；详见 [决策模型接入](docs/design/DECISION_MODEL_INTEGRATION.md)。
   常用层级（分支 `claude/9a-settings-common-view`，已合入 main，随 step13t 部署）：`/settings` 默认只列 21 个常用参数并提示 `/settings all` 看全部，
   `user_config` 搜索结果标出常用；名单在 `parameter_registry.COMMON_KEYS`，是封闭的产品决策。
+  回显值文字统一（分支 `claude/9a-mask-value-display`）：`mask_value` 一处根修，user_config 查看/搜索/改参回执、`/settings`、`config get`
+  的布尔显示 true/false、数字照实（原来 False、0 给模型的是空串），`/settings` 的特判删除；`test_value_display_parity` 钉住各出口一致。
   详见 [参数中心](docs/design/PARAMETER_CENTER.md)。
 - 已实现并合入 main、待真实飞书验收（2026-09-26，用户决定）：IM 管理员身份与聊天内工具审批。
   以前管理员只有本机 local/main，飞书用户永远是自己的 owner，IM 客户端也无法确认工具，需要确认的操作一律被拒。

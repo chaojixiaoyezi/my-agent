@@ -165,6 +165,17 @@
   - 凭据名下面是映射时（`auth: {type, token}`），保留键名、值逐个遮住，结构仍看得见。
   - 仍未覆盖：`--headers 名字 值` 这种名字和值分成两项的写法（如 mcp-proxy），第二项不遮；不紧跟开关、名字又不像凭据的
     单独一项 `名字=值`（如 `DB_HOST=…`）照常显示。
+- **回显值文字统一（2026-09-27，分支 `claude/9a-mask-value-display`，基于 `eb7c639a1`）**：`mask_value` 是所有回显出口唯一的
+  值文字口径——非凭据的布尔按配置文件写法显示 true/false，数字照实显示（False、0 不是空值），None、空串、空列表、空映射显示空串，
+  凭据键整值遮住；聊天 `/settings` 把空串显示成“（空）”，这是唯一的界面差异，给模型的 JSON 仍是空串。
+  - 问题：原 `mask_value` 是 `str(x or "")`，简易 YAML 又把 `false`、`0` 解析成 False、0，于是 user_config 的运行值与默认值、
+    查看报告（`read_config_fact` 的 effective/user_value/packaged_default）、set/reset/revert 回执的 `effective`、命令行 `config get`
+    都把 False、0 给成空串（模型读到“没配”），True 显示成 Python 写法 `True`；`/settings` 另写了一份布尔、数字特判绕开它。
+  - 做法：一处根修 `mask_value`，删掉 `/settings` 的特判（同一概念只留一个实现）。修改记录记的是 YAML 原文字符串，`masked` 判定与
+    回滚不受影响。
+  - 守卫 `test_value_display_parity`：False、0、True、None、空串、空列表、空映射、凭据 8 种值 × user_config view 的 fact 与
+    parameter、search、改参回执、`/settings show` 的运行值与用户配置值、`config get` 7 个出口，全部走真实配置文件与 `load_config`；
+    走不到的 5 格（YAML 写不出 None；列表、映射不在聊天里改；凭据不能写）由测试核对确实走不到。
 - **阶段 3（迁移）**：按模块分批迁移常数并改名。每批开工前在协作文件贴出文件清单，避开 Codex 正在改的文件。
   - **第一批：同名常数（2026-09-27）**。盘点时 32 个常数名在多个文件各定义一份。
     - 删掉没有读取方的 `CONTEXT_WINDOW`（TUI 两份）与 `RECENT_ARCHIVE_FILE_LIMIT`（记忆诊断两份，实际读配置）。
@@ -233,7 +244,7 @@
     `/settings all` 是原总览（总数、可改范围、用户配置位置、改过的个数、最近修改）加按分类的全部参数清单。search、show 不变。
     `user_config` 的 search/view 结果多一个 `common` 字段，工具说明提示模型优先从常用参数里推荐。守卫（`test_parameter_registry`）：
     名单里的键必须存在、不能是安全边界项；与空说明基线的交集只允许过渡项 `memory_compact_auto_trigger_percent`（my-agent 补齐说明后
-    收紧为空集）。`/settings` 回执里的布尔与数字不再经 `mask_value`（它把 False、0 当空，原来显示成“（空）”），布尔按 true/false 显示。
+    收紧为空集）。`/settings` 回执里的值文字只由 `mask_value` 给出（布尔 true/false、数字照实，见上文“回显值文字统一”）。
 
 ## 7. 验收
 

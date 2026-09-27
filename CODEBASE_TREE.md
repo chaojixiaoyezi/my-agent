@@ -665,6 +665,7 @@ agent_py_agent/
 |   |-- test_parameter_registry.py     # 参数中心登记表：覆盖全部字段、YAML 说明（上方注释优先，其次行尾注释）、空说明基线、安全等级、凭据脱敏、搜索排序、派生实际效果、常用层级守卫
 |   |-- fixtures/parameter_description_baseline.json # 说明为空的参数基线名单（按原因分组）；名单外新增或名单里已有说明/已删除都让测试失败
 |   |-- test_structured_masking.py     # 字典/列表参数结构脱敏：请求头与环境变量只留键名，任意开关后的“名字: 值/名字=值”只留名字，凭据开关、连接串与网址密码遮值，各回显与记账出口无明文
+|   |-- test_value_display_parity.py   # 回显值文字一致：8 种值（False/0/True/None/空串/空列表/空映射/凭据）在 user_config 查看/搜索/改参回执、/settings show、config get 下显示相同，聊天空值显示“（空）”，走不到的格子核对原因
 |   |-- test_parameter_changes.py      # 参数中心写入：按类型写入并真正生效、拒绝不改文件、回读不一致回滚、记录与回滚链、user_config 工具
 |   |-- test_settings_chat_control.py  # 聊天 /settings：解析、Gateway 分派、TUI 还原与本地拒绝、仅管理员、常用/全部两种视图、完整修改与回滚流程
 |   |-- test_config_field_readers.py   # 每个 AgentConfig 字段都必须有读取方（属性访问、字符串键或决策设置映射），防止死配置

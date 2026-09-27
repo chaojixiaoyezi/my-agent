@@ -97,7 +97,7 @@ def test_masking_keeps_the_structure_and_hides_every_secret_position():
     assert mask_value("runner_timeout_by_role", {"coder": 600}) == "{'coder': 600}"
     assert mask_value("path_dangerous_roots", ["/etc", "/bin"]) == "['/etc', '/bin']"
     assert masked_structure("tool_catalog_deferred_categories", ("web", "mcp")) == ("web", "mcp")
-    assert mask_value("api_key", "sk-FAKE-9999") == "sk-***" and mask_value("max_tokens", 0) == ""
+    assert mask_value("api_key", "sk-FAKE-9999") == "sk-***" and mask_value("max_tokens", 0) == "0"  # 0 不是空值
     assert mask_value("agent_name", '"http://u:FAKE-PW-5@proxy:8080"') == '"http://u:***@proxy:8080"'
     assert mask_value("agent_name", "plain://text") == "plain://text"
 

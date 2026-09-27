@@ -104,14 +104,10 @@ def _user_path(config: object):
     return path
 
 
-# LLM: 非凭据的布尔与数字直接显示（布尔按配置文件写法 true/false，0 也照实显示）；其余值经 mask_value 结构脱敏，
-#   空值显示“（空）”。mask_value 把 False、0 当空，所以布尔与数字不能交给它。只读。
+# LLM: 值文字只由 mask_value 给出（布尔 true/false、数字照实、凭据遮住），与 user_config、config get 同一口径，
+#   这里不再另写布尔、数字特判；空值在聊天里显示“（空）”，这是本出口唯一的界面差异（test_value_display_parity 钉住）。只读。
 # 函数用途: 把一个参数值排成回执里给人看的文字。
 def _value(spec: ParameterSpec, value: object) -> str:
-    if isinstance(value, bool) and not spec.masked:
-        return "true" if value else "false"
-    if isinstance(value, (int, float)) and not spec.masked:
-        return str(value)
     text = mask_value(spec.key, value)
     return text if text != "" else "（空）"
 

@@ -326,11 +326,19 @@ def masked_structure(key: object, value: object) -> object:
     return _masked_leaf(value) if is_credential_key(_plain_name(key)) else _masked_node(str(key or ""), value)
 
 
-# LLM: 文本回显出口：结构脱敏后再转文本；空值（None、0、空串、空列表）沿原口径显示为空串。
+# LLM: 文本回显出口：结构脱敏后再转文本。user_config 的查看/搜索/改参回执、聊天 /settings、config get 共用这一处口径：
+#   非凭据的布尔按配置文件写法显示 true/false，数字照实显示（False、0 不是空值）；None、空串、空列表、空映射显示空串；
+#   凭据键整值遮住。原先 `str(x or "")` 把 False、0 也给成空串，模型读到的运行值与配置不符。
 #   原先只看顶层键名、再把整个值 str()，model_custom_headers、mcp_servers 的 env 会整段明文回显。
-# 函数用途: 回显时对凭据脱敏，不把明文写回终端、日志或模型上下文。
+#   改口径须同步 test_value_display_parity 与 test_structured_masking。
+# 函数用途: 回显时对凭据脱敏，并把配置值排成各出口一致的文字，不把明文写回终端、日志或模型上下文。
 def mask_value(key: str, value: object) -> str:
-    return str(masked_structure(key, value) or "")
+    masked = masked_structure(key, value)
+    if isinstance(masked, bool):
+        return "true" if masked else "false"
+    if isinstance(masked, (int, float)):
+        return str(masked)
+    return str(masked or "")
 
 
 # LLM: 生效值＝用户配置文件里的值优先；没写才回落到随包默认 YAML。报告必须同时给出两者与来源，
