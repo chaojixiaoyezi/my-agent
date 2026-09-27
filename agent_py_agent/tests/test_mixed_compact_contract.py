@@ -136,7 +136,9 @@ def test_mechanical_mixed_summary_keeps_every_tool_source_and_rejects_oversized_
         _compact(case, project)
 
     assert error.value.code == "COMPACT_CANDIDATE_TOO_LARGE"
-    assert len(sent) == 1 and len(views) == 2
+    # 视图序列：初始投影（is_candidate=False）+ 被拒候选 + 失败诊断用的固定开销实测（空摘要、无保留）。
+    assert len(sent) == 1 and len(views) == 3
+    assert not views[0].is_candidate and views[2].summary == "" and views[2].messages == ()
     supplied = sent[0].prompt + json.dumps(sources[0], ensure_ascii=False)
     candidate = views[1]
     fallback_messages = json.loads(candidate.summary.rsplit("\n\n", 1)[1])
@@ -181,9 +183,10 @@ def test_mixed_fallback_commits_its_own_complete_candidate(mixed_case, monkeypat
     assert view.messages and view.retained_tool_records is case.tool_source.retained_records
     assert view.summary == "候选阶段摘要-1"
     if second_result == "oversized":
-        assert len(projections) == 3 and result.request_projection is not projections[-1]
-        assert projections[-1].material["view"].messages == ()
-        assert projections[-1].material["view"].operation_evidence != view.operation_evidence
+        # 倒数第二个是被拒的候选投影（最后一个属于失败诊断的固定开销实测），提交的必须是更早那个自己的候选。
+        assert len(projections) == 4 and result.request_projection is not projections[-2]
+        assert projections[-2].material["view"].messages == ()
+        assert projections[-2].material["view"].operation_evidence != view.operation_evidence
     else:
         assert len(projections) == 2
     assert all(item[2].tool_source_records == case.tool_source.source_records for item in summaries)

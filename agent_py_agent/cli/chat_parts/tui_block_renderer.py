@@ -1664,8 +1664,10 @@ def _thinking_live_fold_hint(
 
 
 # LLM: 只读 block.metadata 里已经过 compact_progress 白名单的字段；容量数字只在失败事件真带了候选与上限时显示，
-#   缺字段不补零、不推断。改文案要同步 test_tui_block_renderer 的压缩失败用例。
-# 函数用途: 生成压缩中断/失败那一行红字；“候选过大”失败会附上候选大小、上限和摘要约占多少，方便判断是摘要太长还是固定开销太大。
+#   缺字段不补零、不推断；固定开销只在实测值大于 0 时追加，未知不写“约 0”。改文案要同步 test_tui_block_renderer
+#   的压缩失败用例。
+# 函数用途: 生成压缩中断/失败那一行红字；“候选过大”失败会附上候选大小、上限、摘要约占多少和实测固定开销，
+#   方便判断是摘要太长还是固定开销太大。
 def _compact_terminal_label(block: TuiBlock) -> str:
     if block.phase == "interrupted":
         return "上下文压缩已中断"
@@ -1679,6 +1681,9 @@ def _compact_terminal_label(block: TuiBlock) -> str:
         label = f"{label} · 候选 {candidate:,} / 上限 {ceiling:,} tokens"
         if type(metadata.get("summary_tokens")) is int:
             label = f"{label}（摘要约 {metadata['summary_tokens']:,}）"
+        fixed = metadata.get("fixed_tokens")
+        if type(fixed) is int and fixed > 0:
+            label = f"{label} · 固定开销约 {fixed:,}"
     return label
 
 

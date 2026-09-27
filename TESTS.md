@@ -1,5 +1,32 @@
 # 测试与发布验收
 
+## 压缩失败诊断增加实测"固定开销"与保留 IR 计量（2026-09-27，dev 派活，my-agent 实现）
+
+- **来源**：G2 复验里第二代自动 Compact 报 `COMPACT_CANDIDATE_TOO_LARGE` 时，只有候选总量、输入上限和摘要占比，
+  分不清"是摘要太长"还是"碰不到的固定部分太大"。dev 在本板派活（07:50 / 08:01 两条）要求补三个数：
+  实测固定开销、非工具归档保留 IR 的条数与 token，且**都不许用两个估算相减**，只在失败路径算。
+- **做法**：`CompactCapacityFacts` 增加 `fixed_tokens` / `retained_ir_items` / `retained_ir_tokens`，字段名同步进
+  `compact_progress.COMPACT_CAPACITY_PROGRESS_FIELDS`（旧事件缺这些字段时照旧不出现，不补零不推断）。
+  - `compact.py` 新增 `_fixed_request_tokens(request)`：用**同一投影器**把"空摘要、无任何保留"那一版完整下一请求再计量
+    一次（宿主没给投影器时走同一本地估算），结果缓存在 `_RejectedCandidates`；投影异常记 0 而不抛，
+    **绝不盖住原候选过大失败**（用户中断仍继续上抛）。
+  - `compact_tool_summary.py` 新增 `retained_ir_facts(ir_history)`：只读入参，返回条数与模型可见投影的 token 估算，
+    与只统计工具/会话保留的 `retained_items` 分开；空与缺失都返回 0。
+  - 活动回合链（`active_turn_compact.py`）：`_ActiveTurnArchiveCompactPlan` 只携带 `retained_ir_history` 供失败诊断，
+    不参与覆盖判定、不写 checkpoint；`_active_turn_fixed_tokens` 用同一 projector 的空摘要、无保留那一次实测。
+  - TUI（`tui_block_renderer.py`）：失败行在原有"候选 / 上限（摘要约 X）"后追加" · 固定开销约 X"，
+    **只在实测值大于 0 时**出现；缺字段保持旧文案。
+- **新测试**（`tests/test_compact_capacity_facts.py` 新增 5 项，并同步 normalizer 用例）：走真实
+  `prepare_conversation_context` 的端到端用例确认固定开销是一次实测投影（空摘要、无保留、不计入候选），
+  且只在失败路径多投一次；投影不可用时记 0 且错误码不变；`retained_ir_facts` 的三种入参；TUI 文案含固定开销。
+- **同步的旧用例**：`test_active_turn_compact_projection.py`、`test_compact_request_projection.py`、
+  `test_compact_source_lifetime.py`、`test_mixed_compact_contract.py` 按"失败路径多一次固定开销投影"更新
+  投影次数与视图序列断言（这是本改动必然带来的调用次数变化，不是放宽断言）。
+- **复现**：`cd agent_py_agent && python3 -m pytest tests/test_compact_capacity_facts.py -q`；
+  相关范围 `python3 -m pytest tests -q -k compact`（本机 `hypothesis`/`pyte` 缺失，需忽略 3 个收集失败文件）。
+- **变异**（3 次，都命中预期用例）：①`_fixed_request_tokens` 恒返回 0 → 4 项失败；
+  ②`retained_ir_facts` 恒返回 `(0, 0)` → 2 项失败；③TUI 不渲染固定开销 → 1 项失败。还原后补丁逐字一致。
+
 ## 配置告警不再回显凭据原值（2026-09-27，dev 审 a95746edc 时发现，my-agent 修）
 
 - **来源**：`/settings` 总览开始显示配置告警后，dev 指出 `settings/services/_normalize.py` 里几处告警把用户写的原始值

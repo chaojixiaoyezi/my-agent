@@ -36,12 +36,16 @@ CONVERSATION_COMPACT_PROGRESS_STAGES = frozenset(
     }
 )
 # 失败时可选的候选容量计量（非负整数），只在生产者给出时复制；旧事件和其他阶段没有这些字段。
-# 字段名与 compact_guard.CompactCapacityFacts 一一对应，由测试锁同步。
+# 字段名与 compact_guard.CompactCapacityFacts 一一对应，由测试锁同步；fixed_tokens 是实测固定开销，
+# retained_ir_items/retained_ir_tokens 是非工具归档保留 IR 的条数与估算，二者都只在失败路径出现。
 COMPACT_CAPACITY_PROGRESS_FIELDS = (
     "candidate_tokens",
     "input_ceiling_tokens",
     "summary_tokens",
+    "fixed_tokens",
     "retained_items",
+    "retained_ir_items",
+    "retained_ir_tokens",
     "candidates_tried",
 )
 # 只在生产者给出时才复制的可选计数：模型窗口，加上失败时的候选容量计量。

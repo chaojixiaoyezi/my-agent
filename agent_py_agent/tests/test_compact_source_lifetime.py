@@ -193,9 +193,12 @@ def test_two_candidates_commit_own_retained_snapshot_and_projection(tmp_path, mo
     monkeypatch.setattr(compact_request_budget, 'generate_auxiliary_model_response', generate)
     result = _prepare(agent, thread, source, force=False, request_projector=project)
     # 压缩前 1 次；第一候选超目标，缩小原话备份再计量 1 次（替身大小不变，保留首次计量）；
-    # 超上限的第二候选同样先收缩再计量（仍超限）才放弃，摘要失败的第二候选没有计量。
-    assert len(views) == (5 if second == 'oversized' else 3)
+    # 超上限的第二候选同样先收缩再计量（仍超限）才放弃，摘要失败的第二候选没有计量；
+    # 候选真被拒后还会多投一次失败诊断用的固定开销实测（空摘要、无保留），它不是候选。
+    assert len(views) == (6 if second == 'oversized' else 3)
     assert all(isinstance(view.messages, MessageSnapshotRows) for view in views[:2])
+    if second == 'oversized':
+        assert views[-1].is_candidate and views[-1].summary == "" and views[-1].messages == ()
     assert result.messages == tuple(tail) and result.request_projection.material is materials[1]
     chain = committed_compact_checkpoint_chain(agent, result.thread)
     assert result.thread.compact_generation == 1 and chain[0]['source_message_ids'] == ids

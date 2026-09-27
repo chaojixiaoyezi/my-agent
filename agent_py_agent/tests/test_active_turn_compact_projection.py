@@ -216,11 +216,15 @@ def test_complete_request_at_or_above_trigger_cannot_commit(carried_case, tokens
     assert error.value.code == "COMPACT_CANDIDATE_TOO_LARGE"
     _assert_uncommitted(case)
     assert len(case.summaries) == 1 and not case.checkpoint_path.exists()
-    # 失败要留下容量计量：完整请求多大、输入上限（触发线 90%×10000）、摘要约占多少、保留几条、试了几个候选。
-    (summary, retained), = projected
+    # 失败要留下容量计量：完整请求多大、输入上限（触发线 90%×10000）、摘要与固定开销各占多少、保留几条、试了几个候选。
+    (summary, retained), = [item for item in projected if item[0]]
+    overhead = [item for item in projected if not item[0]]
+    assert len(overhead) == 1 and overhead[0][1] == []
     expected = CompactCapacityFacts(
         candidate_tokens=tokens, input_ceiling_tokens=9_000, summary_tokens=estimate_tokens(summary),
-        retained_items=len(retained), candidates_tried=1,
+        # 本例投影器对空摘要那一版返回同一个 tokens；没有工具来源，保留 IR 保持 0。
+        fixed_tokens=tokens, retained_items=len(retained), retained_ir_items=0, retained_ir_tokens=0,
+        candidates_tried=1,
     )
     assert error.value.capacity == expected
     failed, = [event for event in case.progress if event.get("phase") == "failed"]

@@ -179,6 +179,8 @@ class _ActiveTurnArchiveCompactPlan:
     projected_tokens_before: int
     progress: dict[str, object]
     source_ir_history: tuple[object, ...] = ()
+    # LLM: 只用于失败诊断的保留 IR：它没进摘要、也不在 source 里，缺失即空，不授权覆盖、不写 checkpoint。
+    retained_ir_history: tuple[object, ...] = ()
 
 
 # LLM: Runtime authority keeps all records. Explicit context hides only its own view refs;
@@ -304,6 +306,7 @@ def _build_active_turn_compact_plan(
         visible_records=tuple(deepcopy(visible)),
         source_records=source.source_records,
         source_ir_history=source.source_ir_history,
+        retained_ir_history=source.retained_ir_history or (),
         source_call_ids=source_ids,
         source_tool_refs=source_refs,
         retained_records=source.retained_records,
@@ -441,15 +444,38 @@ def _project_active_turn_request(
         raise ConversationCompactError("完整恢复请求投影不可用", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
     ceiling = _compact_request_input_ceiling(agent, plan.policy)
     if projection.projected_tokens >= ceiling:
+        from .compact_tool_summary import retained_ir_facts
+
+        ir_items, ir_tokens = retained_ir_facts(plan.retained_ir_history)
         raise ConversationCompactError(
             "完整恢复请求仍超出输入阈值或已知输出预留", code="COMPACT_CANDIDATE_TOO_LARGE",
             capacity=CompactCapacityFacts(
                 candidate_tokens=projection.projected_tokens, input_ceiling_tokens=ceiling,
-                summary_tokens=estimate_tokens(replacement), retained_items=len(plan.retained_records),
-                candidates_tried=1,
+                summary_tokens=estimate_tokens(replacement), fixed_tokens=_active_turn_fixed_tokens(request, plan),
+                retained_items=len(plan.retained_records), retained_ir_items=ir_items,
+                retained_ir_tokens=ir_tokens, candidates_tried=1,
             ),
         )
     return projection
+
+
+# LLM: 固定开销是同一宿主投影器在“空摘要、无保留记录”形态下的实测值；只在失败诊断里算，投影异常记 0 不盖住原失败，
+#   但用户中断必须继续上抛。request_projector 已在调用点保证存在，这里不另造估算或相减。
+# 函数用途: 再投影一次没有替换摘要、没有保留工具的完整请求，量出与保留内容无关的固定部分。
+def _active_turn_fixed_tokens(
+    request: ActiveTurnArchiveCompactRequest,
+    plan: _ActiveTurnArchiveCompactPlan,
+) -> int:
+    try:
+        projection = request.request_projector("", (), max(0, int(plan.thread.compact_generation or 0)) + 1)
+    except (InterruptedError, ToolCancelled):
+        raise
+    except Exception:
+        return 0
+    if (not isinstance(projection, ConversationCompactProjection)
+            or type(projection.projected_tokens) is not int or projection.projected_tokens < 0):
+        return 0
+    return projection.projected_tokens
 
 
 # LLM: 摘要读取全部选中工具的原逐条模型投影，不使用截短handoff；scope/base与provider面保持，过长沿原分段器。

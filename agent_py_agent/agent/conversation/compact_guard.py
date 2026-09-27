@@ -27,13 +27,19 @@ CompactInterruptCheck: TypeAlias = Callable[[], bool]
 
 # LLM: 只装候选容量的非负整数计量，字段名即公开进度字段名（与 compact_progress.COMPACT_CAPACITY_PROGRESS_FIELDS
 #   由测试锁同步）；不带摘要正文、消息或路径，也不写进线程记录。改字段要同步 normalizer、TUI 白名单和两处生产者。
-# 类用途: 说明“候选为什么装不下”：最小候选的完整下一请求多大、输入上限多少、其中摘要约占多少、保留了几条、试了几个候选。
+#   fixed_tokens 是同一投影器在“空摘要、无保留”形态下的实测值；retained_ir_items/retained_ir_tokens 只统计
+#   没被摘要、仍留在请求里的原生 IR，与只算工具/会话保留条数的 retained_items 分开，三个数都不由估算相减得出。
+# 类用途: 说明“候选为什么装不下”：最小候选的完整下一请求多大、输入上限多少、其中摘要与固定开销各约占多少、
+#   保留了几条（工具/会话、原生 IR 分开）、试了几个候选。
 @dataclass(frozen=True)
 class CompactCapacityFacts:
     candidate_tokens: int
     input_ceiling_tokens: int
     summary_tokens: int
+    fixed_tokens: int
     retained_items: int
+    retained_ir_items: int
+    retained_ir_tokens: int
     candidates_tried: int
 
 

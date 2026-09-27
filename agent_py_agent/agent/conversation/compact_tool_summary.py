@@ -52,3 +52,14 @@ def compact_tool_summary_history(
 # 函数用途: 把摘要来源完整转换为模型可见JSON序列，供失败回退保留所有已选材料。
 def compact_tool_summary_text(history: Sequence[HistoryItem]) -> str:
     return json.dumps(AnthropicMessageAdapter().to_provider_messages(history), ensure_ascii=False, sort_keys=True)
+
+
+# LLM: 只读入参，把“没被摘要、仍留在请求里的原生 IR”换算成条数与模型可见投影的 token 估算；不复用候选摘要正文，
+#   也不与 retained_items（工具/会话保留条数）混算；空与缺失一律 0，不补造事实、不落盘。
+# 函数用途: 给压缩失败诊断提供非工具归档保留 IR 的条数和 token 估算。
+def retained_ir_facts(ir_history: Sequence[HistoryItem] | None) -> tuple[int, int]:
+    if not ir_history:
+        return 0, 0
+    from ..memory_archive import estimate_tokens
+
+    return len(ir_history), estimate_tokens(compact_tool_summary_text(compact_tool_summary_history((), ir_history)))
