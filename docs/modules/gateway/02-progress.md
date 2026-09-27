@@ -1,5 +1,11 @@
 # Gateway 维护状态
 
+聊天 `/settings`（参数中心阶段 2，分支 `claude/param-center-phase2`，2026-09-27）：用户希望 my-agent 与自己都能改更多参数、
+改错能回滚，且用户几乎不用命令行。`control_service` 新增 `settings` 分派（在 steer/stop 默认路径之前），交给
+`settings_control_service.execute_settings_control`：只有管理员可用；查找、查看、修改、恢复默认、修改记录与回滚都走参数中心，
+修改写入当前加载的用户配置并记入 `settings-changes.jsonl`，重启 Gateway 后生效。TUI 本地模式明确拒绝，文本还原保留原值。
+测试见 `test_settings_chat_control.py`，设计见 `docs/design/PARAMETER_CENTER.md`。
+
 `/skills` 异常回执修正（分支 `claude/skills-receipt-fix`，2026-09-27，Codex 静态复核发现）：`execute_skill_control` 的普通异常
 原来一律回“原记录没有改动、请稍后重试”，但回滚/删除是先改目录和登记表、再追加账本，账本追加抛 OSError 时改动已经生效。
 现在按子命令是否写入选回执：写子命令（confirm/reject/learned_revert/learned_remove）只说结果没能完整确认、先查当前状态，

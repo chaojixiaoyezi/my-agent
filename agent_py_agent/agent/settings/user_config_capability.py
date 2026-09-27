@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from ._memory_coercion import COMPACT_RECOVERY_PERCENT_RANGE, COMPACT_TRIGGER_PERCENT_RANGE
-from .config_io import load_simple_yaml, set_simple_yaml_value
+from .config_io import load_simple_yaml
 
 # 生效时机（如实报告，不夸大）
 EFFECT_NEXT_SESSION = "next_session"
@@ -20,8 +20,14 @@ EFFECT_GATEWAY_RESTART = "restart_gateway"
 
 _EFFECT_TEXT = {
     EFFECT_NEXT_SESSION: "保存后对**下一次新建会话**生效；当前正在跑的会话仍用已加载的值。",
-    EFFECT_GATEWAY_RESTART: "保存后需要重启 Gateway 才生效；当前进程不会热加载。",
+    EFFECT_GATEWAY_RESTART: ("保存后需要重启 Gateway 才生效（命令行会话下次启动时读取）；当前进程不会热加载。"
+                             "管理员可以发 /restart 或让 my-agent 安全重启 Gateway。"),
 }
+
+
+# 函数用途: 返回某个生效时机给人看的说明文字。
+def effect_text(effect: str) -> str:
+    return _EFFECT_TEXT.get(effect, "")
 
 
 # LLM: 一个可自助修改项＝键名 + 人类说明 + 纯函数校验 + 生效时机。校验只做区间/枚举等客观判断，
@@ -79,16 +85,19 @@ TUNABLE_KEYS: dict[str, TunableSpec] = {
         key="memory_compact_auto_trigger_percent",
         describe="上下文用到百分之多少时自动 compact（50~100，默认 90）",
         validate=_percent_within(COMPACT_TRIGGER_PERCENT_RANGE),
+        effect=EFFECT_GATEWAY_RESTART,
     ),
     "memory_compact_recovery_target_percent": TunableSpec(
         key="memory_compact_recovery_target_percent",
         describe="compact 之后的健康目标百分比（25~80，默认 60）",
         validate=_percent_within(COMPACT_RECOVERY_PERCENT_RANGE),
+        effect=EFFECT_GATEWAY_RESTART,
     ),
     "tool_read_max_chars": TunableSpec(
         key="tool_read_max_chars",
         describe="单次读文件返回的最大字符数",
         validate=_positive_int,
+        effect=EFFECT_GATEWAY_RESTART,
     ),
     "feishu_app_id": TunableSpec(
         key="feishu_app_id",
@@ -181,12 +190,16 @@ def read_config_fact(
     }
 
 
-# LLM: 用户配置＝进程级 MY_AGENT_CONFIG（本机部署指向 ~/.my-agent/config/desktop.yaml）；未设置时
-#   回到随包默认 YAML。两者的区别必须如实报告，不能把随包默认当成用户配置。
-# 函数用途: 返回用户配置文件路径（可能与随包默认是同一个文件）。
-def user_config_path() -> Path | None:
+# LLM: 用户配置＝当前进程实际加载的配置文件（config.config_path；Gateway 由 --config 指定，本机是
+#   ~/.my-agent/config/desktop.yaml）；没有或加载的就是随包默认 YAML 时才看进程级 MY_AGENT_CONFIG。
+#   原来只看环境变量，而 Gateway 从不设置它，模型因此误报“没有用户级配置”。两者的区别必须如实报告。
+# 函数用途: 返回用户配置文件路径；没有用户配置时返回 None。
+def user_config_path(config: object | None = None) -> Path | None:
     import os
 
+    loaded = str(getattr(config, "config_path", "") or "").strip()
+    if loaded and Path(loaded).expanduser().resolve() != packaged_config_path().resolve():
+        return Path(loaded).expanduser()
     configured = str(os.environ.get("MY_AGENT_CONFIG") or "").strip()
     return Path(configured).expanduser() if configured else None
 
@@ -196,70 +209,32 @@ def packaged_config_path() -> Path:
     return Path(__file__).resolve().parents[2] / "config" / "agent_config.yaml"
 
 
-# LLM: 写入只允许白名单键 + 通过校验的值，落盘走保留注释的原子写入；写完必须回读确认，并把
-#   "保存到哪里 / 什么时候生效 / 现在生效值是什么"作为结构化事实返回，不允许只说"改好了"。
-# 函数用途: 校验并写入一个用户可自助修改的配置项，返回结构化回执。
+# LLM: 兼容入口：写入统一走参数中心 parameter_changes.set_parameter（登记表判定可写、按类型渲染、正式 load_config 回读、
+#   写账本），这里不再维护第二套白名单写法。actor 固定为 model（只有模型工具调用它）。副作用：写用户配置与账本。
+# 函数用途: 校验并写入一个模型可修改的配置项，返回结构化回执。
 def set_tunable_value(
     key: object,
     value: object,
     *,
     user_path: Path | None = None,
 ) -> dict[str, object]:
-    name = str(key or "").strip()
-    if not name:
-        return {"ok": False, "error": "缺少配置键名"}
-    if name in BOUNDARY_KEYS:
-        return {
-            "ok": False,
-            "error": f"'{name}' 属于安全边界，不能由模型自行修改：{BOUNDARY_KEYS[name]}",
-            "boundary_reason": BOUNDARY_KEYS[name],
-        }
-    spec = TUNABLE_KEYS.get(name)
-    if spec is None:
-        return {
-            "ok": False,
-            "error": f"'{name}' 不在可自助修改白名单内",
-            "tunable_keys": sorted(TUNABLE_KEYS),
-        }
-    path = Path(user_path) if user_path is not None else user_config_path()
-    if path is None:
-        return {
-            "ok": False,
-            "error": (
-                "当前进程没有用户配置文件位置（环境变量 MY_AGENT_CONFIG 未设置），"
-                f"不能安全写入；请人工编辑随包默认配置：{packaged_config_path()}"
-            ),
-        }
-    if not path.exists():
-        return {"ok": False, "error": f"用户配置文件不存在：{path}"}
-    ok, error, normalized = spec.validate(value)
-    if not ok:
-        return {"ok": False, "error": f"'{name}' 取值不合法：{error}"}
-    try:
-        old_value, _line = set_simple_yaml_value(path, name, str(normalized))
-    except (OSError, ValueError) as exc:
-        return {"ok": False, "error": f"写入失败：{exc}"}
-    confirmed = load_simple_yaml(path).get(name)
-    return {
-        "ok": True,
-        "key": name,
-        "saved_to": str(path),
-        "previous": mask_value(name, old_value),
-        "saved": mask_value(name, confirmed),
-        "written_value_matches": str(confirmed) == str(normalized),
-        "effect_when": spec.effect,
-        "effect_text": _EFFECT_TEXT.get(spec.effect, ""),
-        "note": "当前进程仍在使用启动时加载的值，请按 effect_text 的时机生效。",
-    }
+    from .parameter_changes import ChangeOrigin, set_parameter
+
+    path = user_path if user_path is not None else user_config_path()
+    return set_parameter(key, value, user_path=path, origin=ChangeOrigin("model"))
 
 
-# 函数用途: 生成给模型看的白名单/边界清单，让"能不能改"变成结构化事实而不是模型凭感觉断言。
+# LLM: 可写范围以参数中心登记表为准（两百多项，不整表塞进模型上下文）：给数量、查找方法、生效时机和永不可写的显式清单。
+# 函数用途: 生成给模型看的可改范围与安全边界摘要，让“能不能改”变成结构化事实而不是模型凭感觉断言。
 def capability_summary() -> dict[str, Any]:
+    from .parameter_registry import parameter_registry
+
+    registry = parameter_registry()
     return {
-        "tunable": [
-            {"key": spec.key, "describe": spec.describe, "effect_when": spec.effect}
-            for spec in TUNABLE_KEYS.values()
-        ],
+        "writable_count": sum(spec.writable for spec in registry.values()),
+        "boundary_count": sum(not spec.writable for spec in registry.values()),
+        "how_to_find": "action=search 加 query 按关键词查参数；action=view 加 key 看单个参数的说明、默认值、当前值与能否修改。",
+        "effect_when": EFFECT_GATEWAY_RESTART,
         "not_model_writable": [
             {"key": key, "reason": reason} for key, reason in sorted(BOUNDARY_KEYS.items())
         ],
@@ -273,6 +248,7 @@ __all__ = [
     "TUNABLE_KEYS",
     "TunableSpec",
     "capability_summary",
+    "effect_text",
     "packaged_config_path",
     "user_config_path",
     "mask_value",

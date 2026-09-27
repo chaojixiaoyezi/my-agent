@@ -163,3 +163,59 @@ def set_simple_yaml_value(path: Path, key: str, value: str) -> tuple[str | None,
     tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
     tmp.replace(path)
     return old, new_line
+
+
+# LLM: 与 _replace_top_level_line 同一识别规则找首个顶层 `key:` 标量行；该行后面紧跟缩进行（多行列表/映射）时拒绝，
+#   只改一行会留下孤立子项把配置写坏。供参数中心的原样写入与删除覆盖共用。
+# 函数用途: 返回顶层标量键所在行号，没有这行返回 None，多行结构抛 ValueError。
+def _top_level_scalar_index(lines: list[str], key: str) -> int | None:
+    index = next((i for i, raw in enumerate(lines) if _is_top_level_key_line(raw, key)), None)
+    following = lines[index + 1] if index is not None and index + 1 < len(lines) else ""
+    if following.startswith((" ", "\t")) and following.strip():
+        raise ValueError(f"{key} 是多行结构，这套简化 yaml 写回不安全，请手动编辑配置文件。")
+    return index
+
+
+# 函数用途: 判断一行是否是给定键的顶层 `key:` 行（不看缩进行、注释与没有冒号的行）。
+def _is_top_level_key_line(raw: str, key: str) -> bool:
+    if raw.startswith((" ", "\t")) or raw.lstrip().startswith("#") or ":" not in raw:
+        return False
+    return raw.split(":", 1)[0].strip() == key
+
+
+# 函数用途: 同目录临时文件 + 原子替换写回配置，避免写一半把文件弄残。副作用：改写配置文件。
+def _write_config_lines(path: Path, lines: list[str]) -> None:
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+# LLM: 值由调用方按字段类型渲染成合法标量（布尔、数字不加引号，字符串已加引号），这里只拒绝换行与多行结构；
+#   参数中心写后必须用正式 load_config 回读核对。副作用：原子改写配置文件。
+# 函数用途: 把顶层 key 设为已渲染好的 YAML 标量文本，返回（旧值文本或 None，新行）；没有这个键时追加到末尾。
+def set_simple_yaml_raw(path: Path, key: str, rendered: str) -> tuple[str | None, str]:
+    if "\n" in rendered or "\r" in rendered:
+        raise ValueError("值含换行，这套简化 yaml 写回不安全，请手动编辑配置文件。")
+    new_line = f"{key}: {rendered}"
+    lines = path.read_text(encoding="utf-8-sig").splitlines()
+    index = _top_level_scalar_index(lines, key)
+    old = None if index is None else lines[index].split(":", 1)[1].strip()
+    if index is None:
+        lines.append(new_line)
+    else:
+        lines[index] = new_line
+    _write_config_lines(path, lines)
+    return old, new_line
+
+
+# LLM: 只删顶层标量行，不碰注释、缩进行与其它键；删除后该键回到随包默认值。没有这行时不写文件。
+# 函数用途: 删除一个顶层键的覆盖并返回其旧值文本（没有覆盖时返回 None）。副作用：原子改写配置文件。
+def unset_simple_yaml_value(path: Path, key: str) -> str | None:
+    lines = path.read_text(encoding="utf-8-sig").splitlines()
+    index = _top_level_scalar_index(lines, key)
+    if index is None:
+        return None
+    old = lines[index].split(":", 1)[1].strip()
+    del lines[index]
+    _write_config_lines(path, lines)
+    return old

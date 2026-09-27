@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from typing import Literal
 
@@ -43,6 +44,7 @@ ControlKind = Literal[
     "approve",
     "deny",
     "skills",
+    "settings",
     "unsupported",
 ]
 TaskCommandKind = Literal["audit_prepare", "decision_experiment"]
@@ -226,16 +228,11 @@ def parse_conversation_command(
             valid=bool(value),
             usage="用法：/btw 你的补充要求",
         )
-    if name == "goal":
-        return _goal_command(trailing)
-    if name == "recover":
-        return _recover_command(trailing)
+    parser = _TRAILING_PARSERS.get(name)
+    if parser is not None:
+        return parser(trailing)
     if name == "restart":
         return ConversationControlCommand("restart", value=str(trailing or "").strip()[:200], operation="apply")
-    if name == "model":
-        return _model_command(trailing)
-    if name == "admin":
-        return _admin_command(trailing)
     if name == "approve":
         password = str(trailing or "").strip()
         return ConversationControlCommand(
@@ -247,10 +244,6 @@ def parse_conversation_command(
         )
     if name == "audit":
         return _audit_command(raw)
-    if name == "experiment":
-        return _experiment_command(trailing)
-    if name == "skills":
-        return _skills_command(trailing)
     if name == "verbose":
         value = str(trailing or "").strip().lower()
         return ConversationControlCommand(
@@ -452,6 +445,47 @@ def _skills_command(trailing: object) -> ConversationControlCommand:
     valid = known and len(rest) == 2 and bool(_LEARNED_SKILL_NAME.fullmatch(rest[1]))
     return ConversationControlCommand("skills", value=" ".join(tokens), operation=f"learned_{action}" if known else "unknown",
                                       valid=valid, usage=_SKILLS_USAGE)
+
+
+_SETTINGS_USAGE = (
+    "用法：/settings 查看改过的参数与可改范围；/settings search <关键词> 找参数；/settings show <参数名> 看说明与当前值；"
+    "/settings set <参数名> <值> 修改；/settings reset <参数名> 恢复默认；/settings history [参数名] 看修改记录；"
+    "/settings revert <记录编号> 回滚一次修改。只有管理员可用，修改在重启 Gateway 后生效（发 /restart）。"
+)
+# 参数名沿用 AgentConfig 字段命名；修改记录编号是 12 位十六进制，聊天里允许用至少 6 位前缀。
+_SETTING_KEY = re.compile(r"[a-z][a-z0-9_]{1,79}")
+_SETTING_CHANGE_REF = re.compile(r"[0-9a-f]{6,12}")
+_SETTING_VALUE_MAX = 500
+
+
+# LLM: 只做词法解析：子命令大小写不敏感，参数名与记录编号小写后拒绝式校验；set 的值保留原样（可含空格与中文），
+#   但不许换行、不超过 500 字。不合规时 valid=False 并给出用法。value 保存规范化后的完整参数，TUI 据此还原命令文本。
+# 函数用途: 把 `/settings …` 解析成结构化的参数查看/修改控制。
+def _settings_command(trailing: object) -> ConversationControlCommand:
+    text = str(trailing or "").strip()
+    head, _, rest = text.partition(" ")
+    head, rest = head.casefold(), rest.strip()
+    if head in {"", "help"}:
+        return ConversationControlCommand("settings", value=head, operation=head or "overview", valid=not rest,
+                                          usage=_SETTINGS_USAGE)
+    if head == "set":
+        key, _, value = rest.partition(" ")
+        key, value = key.casefold(), value.strip()
+        valid = bool(_SETTING_KEY.fullmatch(key)) and 0 < len(value) <= _SETTING_VALUE_MAX and "\n" not in value
+        return ConversationControlCommand("settings", value=f"set {key} {value}", operation="set", valid=valid,
+                                          usage=_SETTINGS_USAGE)
+    argument = rest.casefold() if head != "search" else rest
+    checks = {
+        "search": lambda: 0 < len(argument) <= 80 and "\n" not in argument,
+        "show": lambda: bool(_SETTING_KEY.fullmatch(argument)),
+        "reset": lambda: bool(_SETTING_KEY.fullmatch(argument)),
+        "history": lambda: not argument or bool(_SETTING_KEY.fullmatch(argument)),
+        "revert": lambda: bool(_SETTING_CHANGE_REF.fullmatch(argument)),
+    }
+    check = checks.get(head)
+    return ConversationControlCommand("settings", value=f"{head} {argument}".strip(),
+                                      operation=head if check else "unknown", valid=bool(check and check()),
+                                      usage=_SETTINGS_USAGE)
 
 
 _ADMIN_USAGE = "用法：/admin <管理员密码> 在 IM 私聊中验证管理员身份；/admin status 查看；/admin logout 解除。"
@@ -712,6 +746,18 @@ def _duration_text(seconds: float) -> str:
 def _short_text(value: object, limit: int) -> str:
     text = " ".join(str(value or "").split())
     return text if len(text) <= limit else text[: max(0, limit - 1)] + "…"
+
+
+# 只把尾部参数交给专门解析函数的命令；名字互不重复，查表与原 if 链等价。新增这类命令时加在这里。
+_TRAILING_PARSERS: dict[str, Callable[[object], ConversationControlCommand | ConversationTaskCommand]] = {
+    "goal": _goal_command,
+    "recover": _recover_command,
+    "model": _model_command,
+    "admin": _admin_command,
+    "experiment": _experiment_command,
+    "skills": _skills_command,
+    "settings": _settings_command,
+}
 
 
 __all__ = [

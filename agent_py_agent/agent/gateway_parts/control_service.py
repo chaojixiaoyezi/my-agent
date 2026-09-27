@@ -370,6 +370,11 @@ def execute_gateway_conversation_control(
         from .skill_control_service import execute_skill_control
 
         return execute_skill_control(agent, command, scope)
+    if command.kind == "settings":
+        # settings_control_service 同样在导入期依赖本模块的 owner 解析，延迟导入以免循环引用。
+        from .settings_control_service import execute_settings_control
+
+        return execute_settings_control(agent, command, scope)
     steer_receipt: _SteerReceiptState | None = None
     if command.kind == "steer":
         try:

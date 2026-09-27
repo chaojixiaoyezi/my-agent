@@ -395,6 +395,7 @@ agent_py_agent/
 |   |   |-- restart_control.py         # /restart：管理员在 TUI/IM 里安排 Gateway 安全重启
 |   |   |-- admin_control_service.py   # /admin 绑定 IM 管理员身份，/approve、/deny 决定本会话唯一待决审批
 |   |   |-- skill_control_service.py   # 聊天 /skills：TUI 与 IM 里查看、确认、拒绝技能提案，查看、回滚、删除自动总结的 Skill
+|   |   |-- settings_control_service.py # 聊天 /settings（管理员）：TUI 与 IM 里查找、查看、修改、恢复默认、回滚参数
 |   |   `-- goal_control_service.py    # 同 thread 持续目标的创建/修改/暂停/恢复/清除
 |   |-- conversation/                  # 通道会话账本、权威 transcript、结构化任务关联/续接
 |   |   |-- store.py                    # 同源领域组件组装、跨领域上下文与账本维护
@@ -517,7 +518,9 @@ agent_py_agent/
 |   |   |-- delivery.py                # 通道 input_receipt/request_result 三态回送、CAS 与重启去重
 |   |   `-- ingress.py                 # POST 前 durable ingress、冲突隔离与单线程全链恢复
 |   |-- settings/                      # AgentConfig、加载、来源账本、runtime scope config
-|   |   |-- user_config_capability.py  # 用户可自助修改配置的唯一白名单/校验/生效时机；安全边界结构性拒绝
+|   |   |-- user_config_capability.py  # 用户配置路径（当前加载的配置文件）、显式白名单校验、边界名单与生效时机说明
+|   |   |-- parameter_registry.py     # 参数中心登记表：每个配置字段的说明（取自 YAML 注释）、类型、分类、安全等级、生效时机
+|   |   |-- parameter_changes.py      # 参数中心唯一写入口：按类型写入、正式加载回读核对、修改记录、恢复默认与回滚
 |   |   |-- model_profiles.py           # owner 私有模型配置唯一文件源、脱敏列表及子代理创建时引用
 |   |   |-- decision_probe.py           # 显式原生连接测试，共用后端/worker/账本，不改开关或聊天选择
 |   |   |-- decision_settings.py        # 原 owner/thread 决策覆盖共用读取、字段修改、恢复继承与双版本 CAS
@@ -655,6 +658,9 @@ agent_py_agent/
 |-- tests/                             # 单元、集成、真实链路回归
 |   |-- fixtures/decision/jev_capability_rounding.json # 合成材料真实Jev响应的脱敏概率舍入replay，不含凭据
 |   |-- test_skill_proposals.py         # 自学习 S1：默认关闭、幂等提案、迁移不碰、确认拒绝矩阵、快照可见、runner 自动确认与 CLI 往返
+|   |-- test_parameter_registry.py     # 参数中心登记表：覆盖全部字段、YAML 说明、安全等级、凭据脱敏、搜索排序
+|   |-- test_parameter_changes.py      # 参数中心写入：按类型写入并真正生效、拒绝不改文件、回读不一致回滚、记录与回滚链、user_config 工具
+|   |-- test_settings_chat_control.py  # 聊天 /settings：解析、Gateway 分派、TUI 还原与本地拒绝、仅管理员、完整修改与回滚流程
 |   |-- test_config_field_readers.py   # 每个 AgentConfig 字段都必须有读取方（属性访问、字符串键或决策设置映射），防止死配置
 |   |-- test_model_output_cap.py       # 输出上限统一 64K：常量/YAML/dataclass 同值、按已知窗口一处夹取、默认模型同规则、vision 死配置已删
 |   |-- test_skill_chat_control.py     # 聊天 /skills：解析校验、Gateway 分派不落入 stop、TUI 文本还原与本地拒绝、提案确认版本、自动 Skill 回滚删除
@@ -1139,6 +1145,7 @@ docs/
 - `agent_py_agent/agent/capability/skill_learning.py` 与 `skill_learning_{request,prompt,publish,store}.py`：自学习 S3 自动总结 Skill（设计见 `docs/design/SKILL_AUTO_SUMMARY.md`）。收口按结构化判据写有界请求；Gateway 记忆整理车道逐条处理：运行锁、前台让路、每日上限、复用 Curator backend 的无工具结构化调用；自动闸门代替人工确认后发布到 `<owner_home>/skills/learned/<name>/`，登记表 `registry.json` 是自学归属唯一权威，账本只记结构化字段。
 - `agent_py_agent/cli/skill_learning_commands.py`：`my-agent skills learned list/show/revert/remove`，只读写 `SkillLearningStore` 与 `skills/learned/`，不构造 Agent、不调模型。
 - `agent_py_agent/tests/test_skill_learning.py`、`test_skill_learning_integration.py`：S3 的离线合同（假 backend）与接线（组合根、收口 helper、Gateway 车道、CLI、S1 自动确认、配置）。
+- `agent/settings/parameter_registry.py` 与 `parameter_changes.py`：参数中心。登记表是“有哪些参数、什么意思、谁能改”的唯一来源；写入口是 my-agent 的 `user_config` 工具与聊天 `/settings` 共用的唯一修改路径（记录与回滚）。
 - `docs/design/PARAMETER_CENTER.md`：参数中心的唯一模块设计：来源、目标、安全等级、修改与回滚、my-agent 开发工作树、阶段与验收。
 - `docs/design/SKILL_AUTO_SUMMARY.md`：自学习 S3 的唯一模块设计：用户决定、上游参考取舍、触发、材料、后台执行、输出合同、自动闸门、存储所有权、用户入口与边界。
 - `agent_py_agent/agent/subagents/lesson_ledger.py`：子代理经验账本 `lessons.jsonl` 的唯一合同。字段规范成单行且有界，id 取内容 hash（同 run 相同参数只记一次），每 run 最多 5 条、16 KiB，超限返回结构化结论；读回逐行复核版本、字段、id 与 run 归属。工具写入与 runner 结果收口共用，宿主从不解析模型回复正文。

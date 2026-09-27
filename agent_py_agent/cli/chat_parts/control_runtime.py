@@ -364,7 +364,7 @@ def _http_error_body(exc: urllib.error.HTTPError) -> dict[str, object]:
 
 # LLM: 窗口只选择精确 request；停止委托原 worker 句柄和正式运行绑定，不能读另一线程的当前参数猜身份。
 # 函数用途: 在直接本地聊天里查询或控制当前回合，让单纯中断与任务资源停止保持不同边界。
-# context/compact/recover/effort、/model 文字形式与 /skills 依赖 Gateway 的 canonical 会话、运行库和 owner 解析，本地模式直接拒绝并提示改用 Gateway。
+# context/compact/recover/effort、/model 文字形式、/skills 与 /settings 依赖 Gateway 的 canonical 会话、运行库和 owner 解析，本地模式直接拒绝并提示改用 Gateway。
 # 未列出的类型会落到下面的停止分支，所以新增 Gateway 专用控制必须加进这个集合。
 def _execute_local_control(
     execution: ChatControlExecution,
@@ -372,7 +372,7 @@ def _execute_local_control(
 ) -> ConversationControlResult:
     state = execution.state
     request_id = str(state.request_id or "").strip()
-    if command.kind in {"context", "compact", "recover", "model", "effort", "skills"}:
+    if command.kind in {"context", "compact", "recover", "model", "effort", "skills", "settings"}:
         return ConversationControlResult(
             command.kind,
             False,
@@ -601,6 +601,9 @@ def _command_text(command: ConversationControlCommand) -> str:
     if command.kind == "skills":
         # value 是解析器规范化后的完整参数，Gateway 端按同一解析器重新解析。
         return f"/skills {command.value}".rstrip()
+    if command.kind == "settings":
+        # set 的值保留原样（可含空格与中文），Gateway 端按同一解析器重新解析。
+        return f"/settings {command.value}".rstrip()
     if command.kind == "unsupported":
         return f"/{command.operation or 'unsupported'}"
     return f"/{command.kind}"

@@ -1,0 +1,271 @@
+# LLM: 参数中心唯一的写入口：只写用户配置文件（当前进程实际加载的配置，见 user_config_capability.user_config_path），
+#   按登记表类型渲染值（布尔、数字不加引号），写后用正式 load_config 回读核对，不一致就恢复原文件并报错；每次写入追加一条
+#   账本（用户配置旁的 settings-changes.jsonl，保留最近 500 条）。凭据类只记脱敏值、不可回滚；边界项、列表/映射类型、
+#   随包默认 YAML 一律拒绝。副作用：改写用户配置与账本。改动须同步 test_parameter_changes.py、tooling/user_config_tool.py、
+#   gateway_parts/settings_control_service.py 与 user_config_capability.set_tunable_value。
+# 模块用途: 让用户与 my-agent 修改参数、恢复默认、查看修改记录并按编号回滚。
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from uuid import uuid4
+
+from ..common.json_io import append_jsonl_capped, read_jsonl_objects_report
+from .config_io import set_simple_yaml_raw, unset_simple_yaml_value
+from .parameter_registry import ParameterSpec, parameter_registry
+from .user_config_capability import (
+    BOUNDARY_KEYS,
+    TUNABLE_KEYS,
+    effect_text,
+    mask_value,
+    packaged_config_path,
+)
+
+LEDGER_NAME = "settings-changes.jsonl"
+_MAX_LEDGER_RECORDS = 500
+_MAX_TEXT_CHARS = 500
+_TRUE_WORDS = frozenset({"true", "1", "yes", "on", "开", "开启", "是"})
+_FALSE_WORDS = frozenset({"false", "0", "no", "off", "关", "关闭", "否"})
+_BOUNDARY_REASON = "属于安全边界（凭据、权限、身份、路径、外部地址、会运行代码的服务或插件等），不能由模型或聊天命令修改"
+
+
+# LLM: 谁发起、为什么；actor 用固定短标签（model / chat / cli / test），reason 只给人看、截断后记账，不参与任何判断。
+# 类用途: 一次参数修改的来源。
+@dataclass(frozen=True)
+class ChangeOrigin:
+    actor: str
+    reason: str = ""
+
+
+# LLM: 账本里的一行在写入前的内容；previous/value 是配置文件里的原样标量文本（None 表示没有覆盖），凭据类由 _record 脱敏。
+# 类用途: 一条待记账的参数修改。
+@dataclass(frozen=True)
+class _ChangeRow:
+    action: str
+    previous: str | None
+    value: str | None
+    origin: ChangeOrigin
+    reverts: str = ""
+
+
+# LLM: 只携带稳定错误码与给人看的中文说明；调用方把它转成 ok=False 的回执，不带路径或堆栈之外的秘密。
+# 类用途: 参数修改被拒绝或没能生效。
+class ParameterChangeError(Exception):
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+# LLM: 随包默认 YAML 不是用户配置；没有路径或文件不存在都拒绝写，不自动创建。
+# 函数用途: 确认写入目标是存在的用户配置文件。
+def _target(user_path: Path | None) -> Path:
+    if user_path is None:
+        raise ParameterChangeError("USER_CONFIG_MISSING", (
+            "当前进程没有用户配置文件位置（没有加载用户配置，环境变量 MY_AGENT_CONFIG 也未设置），"
+            f"不能安全写入；请人工编辑随包默认配置：{packaged_config_path()}"))
+    path = Path(user_path).expanduser()
+    if path.resolve() == packaged_config_path().resolve():
+        raise ParameterChangeError("USER_CONFIG_IS_PACKAGED", "当前加载的是随包默认配置，升级会被覆盖，不能写入；请用独立的用户配置文件。")
+    if not path.is_file():
+        raise ParameterChangeError("USER_CONFIG_MISSING", f"用户配置文件不存在：{path}")
+    return path
+
+
+# LLM: 先查登记表，再查边界：BOUNDARY_KEYS 给出原因原样回显；其余边界项给统一原因。
+# 函数用途: 取出一个可写参数的登记信息，不可写时拒绝。
+def _writable_spec(key: str) -> ParameterSpec:
+    spec = parameter_registry().get(str(key or "").strip())
+    if spec is None:
+        raise ParameterChangeError("PARAMETER_UNKNOWN", f"没有名为 '{key}' 的参数；可以先搜索参数名。")
+    if not spec.writable:
+        reason = BOUNDARY_KEYS.get(spec.key, _BOUNDARY_REASON)
+        raise ParameterChangeError("PARAMETER_BOUNDARY", f"'{spec.key}' 属于安全边界，不能由模型自行修改：{reason}")
+    return spec
+
+
+# LLM: 显式白名单项先用原校验（如百分比区间）；其余按字段类型解析：布尔认常见中英文词，整数/小数默认非负时拒绝负数，
+#   文本拒绝换行和引号且限 500 字；列表/映射不在聊天里改。返回（期望生效值，写入文本）。
+# 函数用途: 把用户给的值解析并渲染成可写入的 YAML 标量。
+def _render(spec: ParameterSpec, value: object) -> tuple[object, str]:
+    text = str(value if value is not None else "").strip()
+    if spec.key in TUNABLE_KEYS:
+        ok, error, normalized = TUNABLE_KEYS[spec.key].validate(value)
+        if not ok:
+            raise ParameterChangeError("PARAMETER_INVALID", f"'{spec.key}' 取值不合法：{error}")
+        text = str(normalized)
+    if spec.value_type == "bool":
+        word = text.lower()
+        if word not in _TRUE_WORDS | _FALSE_WORDS:
+            raise ParameterChangeError("PARAMETER_INVALID", f"'{spec.key}' 取值不合法：必须是 true 或 false")
+        return word in _TRUE_WORDS, "true" if word in _TRUE_WORDS else "false"
+    if spec.value_type in {"int", "float"}:
+        return _render_number(spec, text)
+    if spec.value_type == "str":
+        if len(text) > _MAX_TEXT_CHARS or any(mark in text for mark in ('"', "'", "\n", "\r")):
+            raise ParameterChangeError("PARAMETER_INVALID", f"'{spec.key}' 取值不合法：文本不能含引号或换行，且不超过 {_MAX_TEXT_CHARS} 字")
+        return text, f'"{text}"'
+    raise ParameterChangeError("PARAMETER_STRUCTURED", f"'{spec.key}' 是 {spec.value_type} 结构，请直接编辑用户配置文件。")
+
+
+# 函数用途: 解析整数或小数参数；默认值非负时拒绝负数，小数拒绝 NaN/无穷。
+def _render_number(spec: ParameterSpec, text: str) -> tuple[object, str]:
+    try:
+        number = int(text) if spec.value_type == "int" else float(text)
+    except ValueError:
+        raise ParameterChangeError("PARAMETER_INVALID", f"'{spec.key}' 取值不合法：必须是{'整数' if spec.value_type == 'int' else '数字'}") from None
+    if isinstance(number, float) and not math.isfinite(number):
+        raise ParameterChangeError("PARAMETER_INVALID", f"'{spec.key}' 取值不合法：必须是有限数字")
+    if isinstance(spec.default, (int, float)) and spec.default >= 0 and number < 0:
+        raise ParameterChangeError("PARAMETER_INVALID", f"'{spec.key}' 取值不合法：不能是负数")
+    return number, str(number)
+
+
+# LLM: 用正式 load_config 读出进程重启后会拿到的值；这是“改了是否真的生效”的唯一判据。
+# 函数用途: 读取用户配置经完整加载后的某个参数值。
+def _effective(path: Path, key: str) -> object:
+    from .config import load_config
+
+    return getattr(load_config(path), key)
+
+
+# LLM: 类型也必须一致：小数目标读回来必须真是数字（不能是 "0.9" 这样的字符串，否则供应商会收到字符串参数）。
+# 函数用途: 判断加载后的值是否就是想写入的值。
+def _same(expected: object, actual: object) -> bool:
+    if isinstance(expected, float):
+        numeric = isinstance(actual, (int, float)) and not isinstance(actual, bool)
+        return numeric and math.isclose(float(expected), float(actual), rel_tol=1e-9, abs_tol=1e-12)
+    return type(expected) is type(actual) and expected == actual
+
+
+# 函数用途: 账本路径：用户配置文件旁的 settings-changes.jsonl。
+def ledger_path(user_config: Path) -> Path:
+    return Path(user_config).with_name(LEDGER_NAME)
+
+
+# LLM: 凭据类键只记脱敏值；reason 截断到 200 字。副作用：追加账本。
+# 函数用途: 追加一条参数修改记录并返回它。
+def _record(path: Path, spec: ParameterSpec, row: _ChangeRow) -> dict[str, object]:
+    def shown(value: str | None) -> str | None:
+        return mask_value(spec.key, value) if spec.masked and value is not None else value
+
+    entry: dict[str, object] = {
+        "id": uuid4().hex[:12], "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "key": spec.key, "action": row.action, "actor": str(row.origin.actor or "unknown")[:40],
+        "reason": str(row.origin.reason or "")[:200], "masked": spec.masked,
+        "previous": shown(row.previous), "value": shown(row.value),
+    }
+    if row.reverts:
+        entry["reverts"] = row.reverts
+    append_jsonl_capped(ledger_path(path), entry, max_records=_MAX_LEDGER_RECORDS)
+    return entry
+
+
+def _receipt(path: Path, spec: ParameterSpec, entry: dict[str, object], actual: object) -> dict[str, object]:
+    saved = entry.get("value")
+    return {
+        "ok": True, "key": spec.key, "action": entry["action"], "change_id": entry["id"], "saved_to": str(path),
+        "previous": entry.get("previous"), "saved": saved if saved is None else str(saved).strip('"'),
+        "written_value_matches": True, "effective": mask_value(spec.key, actual), "effect_when": spec.effect,
+        "effect_text": effect_text(spec.effect), "note": "当前进程仍在使用启动时加载的值，请按 effect_text 的时机生效。",
+    }
+
+
+def _failure(error: ParameterChangeError) -> dict[str, object]:
+    report: dict[str, object] = {"ok": False, "code": error.code, "error": str(error)}
+    if error.code == "PARAMETER_BOUNDARY":
+        report["boundary_reason"] = str(error).split("：", 1)[-1]
+    return report
+
+
+# LLM: 写前保留原文，回读不一致即恢复并报 PARAMETER_NOT_EFFECTIVE（例如加载器又把值夹取成别的）。副作用：写用户配置与账本。
+# 函数用途: 修改一个参数并返回结构化回执。
+def set_parameter(key: object, value: object, *, user_path: Path | None, origin: ChangeOrigin) -> dict[str, object]:
+    try:
+        spec = _writable_spec(str(key or ""))
+        path = _target(user_path)
+        expected, rendered = _render(spec, value)
+        original = path.read_text(encoding="utf-8")
+        previous, _line = set_simple_yaml_raw(path, spec.key, rendered)
+        actual = _effective(path, spec.key)
+        if not _same(expected, actual):
+            path.write_text(original, encoding="utf-8")
+            raise ParameterChangeError("PARAMETER_NOT_EFFECTIVE",
+                                       f"'{spec.key}' 写入后加载得到的值与目标不一致，已恢复原文件，没有生效。")
+        return _receipt(path, spec, _record(path, spec, _ChangeRow("set", previous, rendered, origin)), actual)
+    except ParameterChangeError as error:
+        return _failure(error)
+    except (OSError, ValueError) as error:
+        return _failure(ParameterChangeError("USER_CONFIG_WRITE_FAILED", f"写入失败：{error}"))
+
+
+# LLM: 删除用户配置里的覆盖行，让参数回到随包默认；本来就没有覆盖时拒绝。副作用：写用户配置与账本。
+# 函数用途: 把一个参数恢复成默认值并返回结构化回执。
+def reset_parameter(key: object, *, user_path: Path | None, origin: ChangeOrigin) -> dict[str, object]:
+    try:
+        spec = _writable_spec(str(key or ""))
+        path = _target(user_path)
+        previous = unset_simple_yaml_value(path, spec.key)
+        if previous is None:
+            raise ParameterChangeError("PARAMETER_NOT_OVERRIDDEN", f"'{spec.key}' 没有用户覆盖，已经是默认值。")
+        actual = _effective(path, spec.key)
+        return _receipt(path, spec, _record(path, spec, _ChangeRow("reset", previous, None, origin)), actual)
+    except ParameterChangeError as error:
+        return _failure(error)
+    except (OSError, ValueError) as error:
+        return _failure(ParameterChangeError("USER_CONFIG_WRITE_FAILED", f"写入失败：{error}"))
+
+
+# LLM: 坏行由 read_jsonl_objects_report 跳过；按时间倒序，key 为空时返回全部参数，limit 为 0 表示不限。只读。
+# 函数用途: 读取参数修改记录（最新在前）。
+def parameter_history(*, user_path: Path | None, key: str = "", limit: int = 20) -> list[dict[str, object]]:
+    if user_path is None or not ledger_path(Path(user_path)).is_file():
+        return []
+    records = read_jsonl_objects_report(ledger_path(Path(user_path)), context="settings.changes").records
+    selected = [item for item in reversed(records) if not key or item.get("key") == key]
+    return selected[:limit] if limit else selected
+
+
+# LLM: 编号可用至少 6 位前缀，不唯一或找不到都拒绝；凭据类记录只有脱敏值，不能回滚。回滚本身也记账并可再回滚。
+#   写入沿用 set 的原文恢复规则：原值为空（原来没有覆盖）时删除覆盖行。副作用：写用户配置与账本。
+# 函数用途: 把某次修改撤销，恢复到那次修改之前的值。
+def revert_change(change_id: str, *, user_path: Path | None, origin: ChangeOrigin) -> dict[str, object]:
+    try:
+        path = _target(user_path)
+        ref = str(change_id or "").strip().lower()
+        matches = [item for item in parameter_history(user_path=path, limit=0) if str(item.get("id", "")).startswith(ref)]
+        if len(ref) < 6 or not matches:
+            raise ParameterChangeError("CHANGE_NOT_FOUND", f"没有编号以 {ref} 开头的修改记录（至少输入 6 位）。")
+        if len(matches) > 1:
+            raise ParameterChangeError("CHANGE_AMBIGUOUS", f"编号 {ref} 对应多条修改记录，请多输入几位。")
+        entry = matches[0]
+        spec = _writable_spec(str(entry.get("key") or ""))
+        if entry.get("masked"):
+            raise ParameterChangeError("CHANGE_MASKED", f"'{spec.key}' 是凭据类参数，记录里只有脱敏值，不能回滚；请重新设置。")
+        target = entry.get("previous")
+        original = path.read_text(encoding="utf-8")
+        current = unset_simple_yaml_value(path, spec.key) if target is None else set_simple_yaml_raw(path, spec.key, str(target))[0]
+        actual = _effective(path, spec.key)
+        if target is None and current is None:
+            path.write_text(original, encoding="utf-8")
+            raise ParameterChangeError("PARAMETER_NOT_OVERRIDDEN", f"'{spec.key}' 当前已经是默认值，无需回滚。")
+        row = _ChangeRow("revert", current, None if target is None else str(target), origin, reverts=str(entry["id"]))
+        entry_out = _record(path, spec, row)
+        return _receipt(path, spec, entry_out, actual)
+    except ParameterChangeError as error:
+        return _failure(error)
+    except (OSError, ValueError) as error:
+        return _failure(ParameterChangeError("USER_CONFIG_WRITE_FAILED", f"写入失败：{error}"))
+
+
+__all__ = [
+    "LEDGER_NAME",
+    "ChangeOrigin",
+    "ParameterChangeError",
+    "ledger_path",
+    "parameter_history",
+    "reset_parameter",
+    "revert_change",
+    "set_parameter",
+]

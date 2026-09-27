@@ -9,12 +9,19 @@ from __future__ import annotations
 # 模块用途: 让原获授权主代理读取/修改配置、列出决策模型或按用户要求测试连接，保留统一权限与失败事实。
 import json
 
+from ..settings.parameter_changes import (
+    ChangeOrigin,
+    parameter_history,
+    reset_parameter,
+    revert_change,
+    set_parameter,
+)
+from ..settings.parameter_registry import parameter_registry, search_parameters
 from ..settings.user_config_capability import (
-    TUNABLE_KEYS,
     capability_summary,
+    mask_value,
     packaged_config_path,
     read_config_fact,
-    set_tunable_value,
     user_config_path,
 )
 from ..user_space.owner_access import is_local_admin_owner
@@ -169,12 +176,13 @@ class UserConfigTool(BaseTool):
     model_spec = ToolModelSpec(
         name="user_config",
         description=(
-            "读取或修改本机用户级配置（如 compact 触发百分比）。"
+            "读取或修改本机用户级配置（参数中心：输出上限、超时、compact 百分比、各类预算与开关等两百多项）。"
             "用户问'这个参数能不能改/现在是多少/配置在哪'时必须先用本工具查结构化事实，"
             "不要凭感觉回答'我没有权限'，也不要把随包默认 YAML 当成用户配置。"
-            "action=view 返回生效值、来源、可自助修改清单与安全边界清单；"
-            "action=set 只接受白名单内的键，会校验取值、原子写入用户配置，并报告保存位置与生效时机"
-            "（当前进程不会热加载）。安全边界（权限模式、危险路径、凭据）永远不可写。"
+            "action=search 按关键词（query）找参数名与中文说明；action=view 返回单个参数的说明、默认值、当前值、来源与能否修改；"
+            "action=set 修改非安全参数：按类型校验、写入当前加载的用户配置、用正式加载回读核对并记入修改记录；"
+            "action=reset 删除覆盖恢复默认；action=history 查看修改记录；action=revert 按记录编号（change_id）回滚。"
+            "修改在重启 Gateway 后生效（当前进程不会热加载）。安全边界（凭据、权限、身份、路径、外部地址、会运行代码的设置）永远不可写。"
             "decision_read/decision_patch/decision_reset 读取、字段修改或恢复决策设置继承；"
             "decision_experiment_revoke 可用当前授权编号撤销本会话实验；本工具不能建立实验授权，能力开关不代表用户授权。"
             "先读 revision 再作为 expected_revision 提交。scope=owner 为长期设置，thread 仅当前可信会话；"
@@ -190,8 +198,8 @@ class UserConfigTool(BaseTool):
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["view", "set", "decision_read", "decision_patch", "decision_reset", "decision_experiment_revoke", "decision_models", "decision_probe"],
-                    "description": "view/set 管理本机配置；decision_read/patch/reset 管理覆盖，decision_models 只读目录，decision_probe 显式测试连接。",
+                    "enum": ["view", "search", "set", "reset", "history", "revert", "decision_read", "decision_patch", "decision_reset", "decision_experiment_revoke", "decision_models", "decision_probe"],
+                    "description": "view/search/set/reset/history/revert 管理本机配置；decision_read/patch/reset 管理覆盖，decision_models 只读目录，decision_probe 显式测试连接。",
                 },
                 "key": {
                     "type": "string",
@@ -199,8 +207,11 @@ class UserConfigTool(BaseTool):
                 },
                 "value": {
                     "type": "string",
-                    "description": "action=set 时的目标值（数字也用字符串传，服务端会校验区间）。",
+                    "description": "action=set 时的目标值（数字、布尔也用字符串传，服务端按类型校验）。",
                 },
+                "query": {"type": "string", "description": "action=search 的关键词，匹配参数名与中文说明。"},
+                "change_id": {"type": "string", "description": "action=revert 要回滚的修改记录编号（history 返回的 id，至少 6 位）。"},
+                "reason": {"type": "string", "description": "set/reset/revert 可选：这次修改的原因，记入修改记录。"},
                 "scope": {"type": "string", "enum": ["owner", "thread"], "description": "决策设置范围，默认 owner；thread 只指当前可信运行会话。"},
                 "expected_revision": {"type": "object", "properties": {"owner": {"type": "integer", "minimum": 0}, "thread": {"type": "integer", "minimum": 0}}, "required": ["owner", "thread"], "additionalProperties": False},
                 "changes": {"type": "object", "properties": _decision_change_properties(), "additionalProperties": False, "minProperties": 1},
@@ -259,14 +270,8 @@ class UserConfigTool(BaseTool):
         key = str(params.get("key") or "").strip()
         if action == "view":
             return self._view(key)
-        if action == "set":
-            report = set_tunable_value(key, params.get("value"))
-            if not report.get("ok"):
-                error = str(report.get("error") or "配置写入被拒绝")
-                return ToolHandlerOutcome("user_config", False, error, error_code="TOOL_INVALID_ARGUMENTS")
-            return ToolHandlerOutcome(
-                "user_config", True, json.dumps(report, ensure_ascii=False, sort_keys=True)
-            )
+        if action in {"search", "set", "reset", "history", "revert"}:
+            return _outcome(_parameter_action(self._agent, params))
         return ToolHandlerOutcome(
             "user_config",
             False,
@@ -354,9 +359,10 @@ class UserConfigTool(BaseTool):
                 error_code="TOOL_EXECUTION_FAILED", reported_error_code="DECISION_PROBE_FAILED", effect_outcome="unknown")
         return ToolHandlerOutcome("user_config", True, output, result_envelope={"decision_report": report})
 
-    # 函数用途: 组装读取结果：单键给生效值/来源，未给键则给白名单与安全边界清单。
+    # LLM: 用户配置路径取当前进程实际加载的配置文件（见 user_config_path）；参数事实来自参数中心登记表。
+    # 函数用途: 组装读取结果：单键给说明、默认值、当前运行值、来源与能否修改，未给键则给可改范围摘要。
     def _view(self, key: str) -> ToolHandlerOutcome:
-        user_path = user_config_path()
+        user_path = user_config_path(getattr(self._agent, "config", None))
         packaged = packaged_config_path()
         payload: dict[str, object] = {
             "user_config_path": str(user_path) if user_path is not None else "",
@@ -366,14 +372,55 @@ class UserConfigTool(BaseTool):
         }
         if key:
             payload["fact"] = read_config_fact(key, user_path=user_path, default_path=packaged)
-            spec = TUNABLE_KEYS.get(key)
-            payload["tunable"] = spec is not None
+            spec = parameter_registry().get(key)
             if spec is not None:
-                payload["describe"] = spec.describe
-                payload["effect_when"] = spec.effect
+                payload["parameter"] = _spec_view(spec, getattr(self._agent, "config", None))
         return ToolHandlerOutcome(
-            "user_config", True, json.dumps(payload, ensure_ascii=False, sort_keys=True)
+            "user_config", True, json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
         )
+
+
+# LLM: 只有主 owner 能走到这里（execute 已拦普通 owner）；写入统一交给参数中心，actor 记为 model。有写文件副作用。
+# 函数用途: 执行参数中心的查找、修改、恢复默认、查看记录与回滚。
+def _parameter_action(agent: object, params: dict) -> dict[str, object]:
+    action = str(params.get("action") or "").strip().lower()
+    key = str(params.get("key") or "").strip()
+    user_path = user_config_path(getattr(agent, "config", None))
+    origin = ChangeOrigin("model", str(params.get("reason") or ""))
+    if action == "search":
+        config = getattr(agent, "config", None)
+        found = search_parameters(str(params.get("query") or key), limit=20)
+        return {"ok": True, "parameters": [_spec_view(spec, config, brief=True) for spec in found]}
+    if action == "history":
+        return {"ok": True, "changes": parameter_history(user_path=user_path, key=key, limit=20)}
+    if action == "revert":
+        return revert_change(str(params.get("change_id") or ""), user_path=user_path, origin=origin)
+    if action == "reset":
+        return reset_parameter(key, user_path=user_path, origin=origin)
+    return set_parameter(key, params.get("value"), user_path=user_path, origin=origin)
+
+
+# LLM: 值一律经 mask_value 脱敏；brief 用于搜索列表，说明截到 160 字。只读。
+# 函数用途: 把一条参数登记信息投影成给模型看的结构化事实。
+def _spec_view(spec: object, config: object, *, brief: bool = False) -> dict[str, object]:
+    description = str(spec.description)
+    view = {
+        "key": spec.key, "category": spec.category, "writable": spec.writable, "value_type": spec.value_type,
+        "running_value": mask_value(spec.key, getattr(config, spec.key, "")) if config is not None else "",
+        "default": mask_value(spec.key, spec.default),
+        "description": description[:160] + ("…" if brief and len(description) > 160 else "") if brief else description,
+    }
+    if not brief:
+        view.update({"safety": spec.safety, "effect_when": spec.effect})
+    return view
+
+
+# 函数用途: 把参数中心的回执转成工具结果；边界拒绝报权限错误，其余拒绝报参数错误。
+def _outcome(report: dict[str, object]) -> ToolHandlerOutcome:
+    if report.get("ok"):
+        return ToolHandlerOutcome("user_config", True, json.dumps(report, ensure_ascii=False, sort_keys=True, default=str))
+    code = "TOOL_PERMISSION_DENIED" if report.get("code") == "PARAMETER_BOUNDARY" else "TOOL_INVALID_ARGUMENTS"
+    return ToolHandlerOutcome("user_config", False, str(report.get("error") or "配置修改被拒绝"), error_code=code)
 
 
 __all__ = ["UserConfigTool"]
