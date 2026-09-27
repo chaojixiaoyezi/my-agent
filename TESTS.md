@@ -1,5 +1,13 @@
 # 测试与发布验收
 
+## A0.2.1 方法候选验证（2026-09-27，本地组件）
+
+基线5cdf8eabdb，A候选0.2.1；只选择现有 `test_capability_package_examples.py::test_samples_build_reproducibly_and_expose_only_one_package[drama-text-a]` 及 `test_capability_package_drama_text_basis.py`、`test_capability_package_drama_text_duration.py`，共65项通过。未增加镜像实现的文本断言，也未运行其他样包测试或真实任务。
+官方builder两次构建字节相同：14资源、32484字节，ZIP SHA256 `de5fd3c4596331a79c7e063c2545d7f4e1f63ea32530def4ca73ac5c6d96722f`。入口2546字符，小于旧2915；入口/方法/模板的包内路径均有声明，原checker、JSON模板、两份合成资料及许可证与基线同字节。
+首次静态引用扫描误将PROVENANCE中的上游脚本路径算为包成员，已收窄到实际包内导航后通过；首次未构建或安装包。该观察脚本问题不算产品失败。候选未安装，原5例业务结论与最终保留集0/36保持；新版真实采用待验，旧938的1301项不作为本候选的新测试数。
+L01独立只读归因只核原生上下文/文件/现有代码，不执行旧业务检查器补证：模型已公开承认42镜525秒与目标的差距，随后只写交接而最终误报48/600；operation核验仍partial。宿主合同仅作文档校正。
+Ruff、doc-sync、strict code-size（hard=0）、diff和clean-package均通过，连同上述65项构成本候选的本地严格gate；线上CI未作为验收来源。clean-package首次只报告4个尚未暂存的新资源，精确登记后复查通过；未删除资源。独立方法审阅摘要`0e106ff06b680d4740952394fea86934604cb12a01f3838a4e235d022a457302`；本地验证记录摘要`be40a6ca1ff7bd6936bccc0c4e0406504947ad691f51b59061d72e2f44dd9ab5`。
+
 ## 能力包第九候选普通业务复验（2026-09-27，分项通过／质量未收口）
 
 固定`938d04aaee292aa5004d252af21122e5d97be7e3`的wheel SHA256为`51800d87874e68bb69ba9120b31b601ae99146ff9aeaf7b92820ead85fbac8b3`；1422个包成员与源码归档、wheel及私有安装逐项一致。先备份原私有环境后切换原唯一Gateway；默认环境未动。B0.1.3通过原生TUI停用、更新、启用，三次操作均一次成功，管理期间Gateway身份不变，231个旧业务文件、108份旧任务记录及A/C包保持。

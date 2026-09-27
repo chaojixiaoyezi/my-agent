@@ -39,3 +39,25 @@
 资料显式升级 `drama_text_delivery.v2`、报告升级 `drama_text_check.v2`；每镜增加 `source_ids`、`adaptations`、`unresolved`，原输入仍为 v1。脚本核对本场来源引用及三个列表，提示新增/未知需要审阅，不解析正文判断真实支持关系。`covered_passages` 的场次覆盖含义保持；顶层与镜头未决事项不混为一份。
 
 本次模板与公开合成交付同步升级，示例把原文未明说的拾书/指认动作标为改编；原始合成 source 字节不改。没有自动转换或兼容旧 v1 交付的旁路，旧包 ZIP 和既有真实结果保留。字段检查不能保证模型不漏标，也不提供道具状态推理、真实视觉生成或全部上游能力。组件与新版本真实 TUI 结果分别记录，尚未真实验收。
+
+## 0.2.1 修订范围
+
+固定来源仍为 `0e8929881bb59248618c4f402707c64723adc017`。本轮核对 `skills/short-drama-review/` 的当前入口、阶段合同与审阅方法，并定向读取原著分析、故事、视觉运动及资产审阅表；本地来源文件与固定 Git 对象一致，未联网更新。
+
+当前 `SKILL.md` 和 `references/stage-contract.md` 明确以 Markdown 保留问题、证据、影响、修订结果和作者职责，不建立 JSON/JSONL 裁决或另一份创作真源。同目录仍留存 `assets/finding-template.jsonl`、`assets/verdict-template.json` 和 `scripts/review_check.py`，它们核对声明形状而不打开证据正文；这些资源与当前入口描述不一致，不能据文件存在将它们当作当前主线，也不能推断其已正式废弃。本次不迁入这些留存模板/脚本，也不复制上游项目状态机。
+
+| 固定来源（均相对 `skills/short-drama-review/`） | 源文件 SHA-256 | 本包改写落点 |
+| --- | --- | --- |
+| `SKILL.md` | `251364f35886455bded0310ac980927a93dd7563dcad53bd5271f83ea211a7c9` | `methods/review.md` 的范围、作者/审者分工、定向阅读及 Markdown 反馈 |
+| `references/review-method.md` | `832cc8ac66920d485d3dc6495de363dba72e5c58f7d03b3caffab143bc08915c` | 成对证据、应恢复结果、保持项与受影响位置复核 |
+| `references/stage-contract.md` | `c08599a33866a131529c83e7ea0b1ca1e2d0f621fceeddfc7c54cf07feb66029` | 不建第二裁决状态，规则等级与当前范围分离 |
+| `references/rubric-source-analysis.md` | `dcb62babcd674acf8129839b693ae5e3f176b4b9ece8adcc2a812aaa15fc5809` | `methods/review-source.md` 的事实回查、指代与未知；上游章节工具未迁移 |
+| `references/rubric-story-script.md` | `4394c080da47ae6bbb45e0a8ada29ea71dc41721bab333befd3a2db227177338` | 场次承载与实际变化；不把创作默认变成通用配额 |
+| `references/rubric-visual-motion.md` | `3f594c34c003f7d81aee6cf80adedc6c04c7605703cbf156224b2d4e4cc38e37` | `methods/review-continuity.md` 的同镜/相邻镜/跨场接续；不声称已观察媒体 |
+| `references/rubric-assets-prompts.md` | `b313caf053d50a84abc099fae8589841739f9a2a315926ccfcc4c79747fb0695` | 物件身份、持有/位置/状态的阅读方向；媒体生成方法未迁移 |
+
+`methods/review-delivery.md` 将上游跨文档综合和修订后复读映射到本包已有字段，并新增“拟对外陈述与实际文件/计量对照”的明确操作。`templates/review.md` 是本包新编的 Markdown 反馈形状。以上均为保留 MIT 声明的中文改写，不是上游格式兼容实现；不将某个故事、目标秒数或固定镜头配额写进方法。
+
+入口和原工作流接入按需读取；14 个资源仍只在包内声明，不注册为全局 Skill。`drama_text_delivery.v2`、`drama_text_check.v2`、原检查器、JSON 模板及两份合成数据的字节保持。无新增依赖、设置、宿主规则或执行器；旧包与旧失败记录保留。
+
+这是方法迁移候选，不是模型已采用或语义质量已改善的证明。私有方法未读、独立审阅未发生、原脚本未执行及最终报告失真须继续分别记录；新版构建/组件验证和原生 TUI 结果单列。

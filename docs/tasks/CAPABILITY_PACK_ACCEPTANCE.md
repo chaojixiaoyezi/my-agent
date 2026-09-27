@@ -625,3 +625,26 @@ L的节奏孩子首次write真实成功并附JSON_INVALID（94行33列），自�
 私有观察证据SHA256 `c8a412a2a80c5156133e6b3d00f54b69a0cdb8135674394ec8e45da8ddb509a1`，人工语义复核`4405fc426b83382bd3ae08908c794c91fb6f75cc666a70f9aad6e31b843bef2d`；所有输入保持原摘要。未向模型发送判据、额外指导或修复后的替代产物。
 
 建议下一步：先审阅包方法、原检查器采用和既有closeout事实装配，对照成熟参考后再决定通用修复；来源语义与报告事实可以并行只读审阅，产品文件仍单写入者。暂不启动最终保留集，不加专项完成门或任务结束后的第二验收循环。
+
+
+## A0.2.1 方法候选与收尾归因（2026-09-27）
+
+候选基线5cdf8eabdb，分支`codex/capability-internalization`；本轮只改A包方法/声明及对应文档，宿主产品Python、checker、数据格式、B/C未改。目标是将简略审阅清单落实为有成对证据、作者修订和定向复读的实际工作单元，尚未安装或新增真实业务用例。
+
+L01只读独立审阅确认：最后原生信封41条，零基索引32的工具结果保留42镜525秒、目标600差75秒；模型随后公开承认差距，再只写交接Markdown和列文件，最终误报48镜600秒。宿主operation核验仍partial（5成功1失败）。这是持久化原生上下文证据，不是当时HTTP请求抓包；不能据此归咎工具结果丢失，也不能将自然结束当内容正确。
+现有代码、定向测试及固定Codex/Free-Code普通出口窄读未确认可解释该例的通用产品缺陷。另发现收尾文档的“两次泛化重审”与当前实现不符，已校正为保留partial和明确artifact_integrity blocker最多一次有界续轮；没有改产品语义。
+
+A0.2.1新增来源、连续性、交付事实三份私有方法及Markdown模板；7项固定上游SHA与MIT声明经独立复核，14声明路径齐全，入口2546字符低于旧2915。独立审阅未发现确认阻断，原checker、JSON模板、两份合成数据和许可证与基线同字节。构建不执行包内脚本，也没有新增全局Skill。
+
+验证命令：
+
+```bash
+python3 -m pytest 'agent_py_agent/tests/test_capability_package_examples.py::test_samples_build_reproducibly_and_expose_only_one_package[drama-text-a]' agent_py_agent/tests/test_capability_package_drama_text_basis.py agent_py_agent/tests/test_capability_package_drama_text_duration.py -q --tb=short
+```
+
+65项通过（1构建、31依据、33时长）。原builder两次ZIP字节相同，32484字节，SHA256 `de5fd3c4596331a79c7e063c2545d7f4e1f63ea32530def4ca73ac5c6d96722f`。首次静态导航检查把PROVENANCE的上游路径误纳入，限定实际入口/方法/模板导航后通过；首次没有构建或安装。构建/静态证据摘要`5cc9f5997b3a531d65e3c0ccc7362ee14905bf60a2acbb9ace6f1e6695915d98`，普通收尾独立审阅摘要`574ab7827526f02f67b90bb7d468c78700df898c845d0b1226383ae154438ac3`；原文件均留私有验证区。
+
+本轮不增加真实通过数：上一轮五例仍1通过4失败，最终保留集0/36，当前私有安装仍A0.2.0；不能由文档改写、组件绿数或两次同字节构建推断语义质量已提高。
+本候选65项及Ruff/doc-sync/strict-size/diff/clean-package全部通过；4个新增资源精确暂存后，clean-package的未跟踪提示消除。本地严格gate已通过，线上CI未作为验收来源。独立方法审阅摘要`0e106ff06b680d4740952394fea86934604cb12a01f3838a4e235d022a457302`，本地gate记录摘要`be40a6ca1ff7bd6936bccc0c4e0406504947ad691f51b59061d72e2f44dd9ab5`；它们不包含真实业务通过承诺。
+
+建议下一步：提交本候选后组合Claude固定main `791f5d14b`，重点核配置同段与聊天控制分派，再以原生TUI验证新包普通内容实际采用。独立语义审阅可并行，运行版/装卸/模型请求保持单负责人；main发布和默认双机部署由Claude执行，旧938测试数与新组合分开。

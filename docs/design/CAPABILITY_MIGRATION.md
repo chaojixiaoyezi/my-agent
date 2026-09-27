@@ -24,7 +24,7 @@ git -C "<来源副本目录>" ls-files
 
 | 样包 | 当前源码版本 | 可参考的迁移方式 | 仍须单列的缺项 |
 | --- | --- | --- | --- |
-| [drama-text-a](../../examples/capability-packages/drama-text-a/PROVENANCE.md) | `0.2.0` | 原文依据、镜头来源/新增声明及目标时长对账 | 真实媒体、完整导演规则和质量评估 |
+| [drama-text-a](../../examples/capability-packages/drama-text-a/PROVENANCE.md) | `0.2.1` | 原文依据、目标时长对账及来源/接续/交付的证据审阅方法 | 新方法真实采用、真实媒体、完整导演规则和质量评估 |
 | [drama-workflow-b](../../examples/capability-packages/drama-workflow-b/PROVENANCE.md) | `0.1.3` | 制作资料关联、显式交接核对与逐集时长检查 | 上游全部交互报告、美术与生成链路 |
 | [security-evidence](../../examples/capability-packages/security-evidence/PROVENANCE.md) | `0.1.0` | 已有证据的范围、来源、去重和报告 | 实际授权证明、扫描及漏洞验证；不属于本切片 |
 
@@ -149,7 +149,7 @@ python3 scripts/build_capability_package.py \
 python3 scripts/build_capability_package.py \
   --declaration examples/capability-packages/drama-text-a/declaration.json \
   --files-root examples/capability-packages/drama-text-a \
-  --output "$CAP_WORK/dist/drama-text-a-0.2.0.zip"
+  --output "$CAP_WORK/dist/drama-text-a-0.2.1.zip"
 ```
 
 构建会核对源文件、生成可重复的 ZIP 并用正式读取器复验，不安装、不执行资源。记录整个 ZIP 的 SHA256，并保留当时声明及源码版本；普通文件修改不会改变已安装包。
@@ -296,3 +296,12 @@ B0.1.3 候选进一步把交接清单升级为 `drama_workflow_handoff.v2`：每
 这是包内数据检查，不增加宿主任务状态或完成门；新增来源语义仍须独立阅读。当前实施与组件结果不能冒充新版原生TUI通过。
 
 建议下一步：先以三个现有样包在隔离 owner 跑通安装、自然召回、执行和移除，再验证长任务、多代理、Compact 与显式版本回退；这些事实齐全后再扩展完整覆盖表。个人 Skill 自动总结可以独立推进，交叉内容只通过明确候选与用户选择流转。
+
+
+## A0.2.1：审阅方法迁移与验收边界
+
+固定上游的当前审阅入口要求 Markdown 成对证据、修订结果和保持项；同目录留存 JSON 模板/脚本与入口描述不同，不能将目录存在性视为当前流程采用。先固定来源并标明差异，再改写为本包可执行的阅读步骤，具体映射见[来源清单4.2](CAPABILITY_SOURCE_COVERAGE.md#42-a021把审阅清单迁为实际工作单元本地候选)和包内 PROVENANCE。
+
+A0.2.1 增加来源、镜头接续、交付事实三份按需方法及 Markdown 反馈模板，入口与 workflow 接入导航；原检查器、v2数据合同和许可保持。审者读取实际输入/产物，给出成对事实、应恢复结果、保持项，作者在原授权内修订后重新读取受影响处；没有独立审者时明确自检，不额外建立确认轮或机器裁决。
+
+组件验证需覆盖声明、可重复构建及实际导航，记录入口预算；真实验证另看模型有没有读取和采用方法、原脚本有没有执行、内容与最终陈述是否准确。只发布一个带新方法的包不能证明后三项。当前65项组件通过、两次构建同字节，尚未安装；下一步先组合主线再少量普通内容复验，保留旧失败和未覆盖项。

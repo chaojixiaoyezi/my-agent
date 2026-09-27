@@ -39,6 +39,10 @@
 |-- agent_py_agent/tests/test_file_syntax_diagnostics_runtime.py # 配置到模型可见回执及修复选择的替身验证
 |-- scripts/build_capability_package.py   # 不执行代码的可重复内容包构建入口
 |-- examples/capability-packages/         # 来源独立的短剧与证据报告样包源码
+|   |-- drama-text-a/methods/review-source.md # 原文与下游事实的成对证据审阅
+|   |-- drama-text-a/methods/review-continuity.md # 同镜、相邻镜与跨场接续的定向阅读
+|   |-- drama-text-a/methods/review-delivery.md # 实际合并产物、检查回执与拟对外陈述核对
+|   |-- drama-text-a/templates/review.md # 人与模型使用的审阅反馈形状，不生成机器状态
 |   `-- drama-workflow-b/templates/handoff.json # 制作阶段输入与对象转换的待填写业务资料
 |-- docs/design/CAPABILITY_PACKS.md       # 能力包协议、生命周期、隔离召回和任务版本合同
 |-- docs/design/CAPABILITY_MIGRATION.md   # 从固定来源到候选、安装、验收、迭代和回退的操作流程
@@ -1199,6 +1203,8 @@ docs/
 - `agent_py_agent/agent/capability/package_provider.py`：只从当前 owner 的原安装表取得已启用包，每次读取复查代次与摘要。
 - `scripts/build_capability_package.py`：把声明和私有资源构建为 v7 内容包，不导入或执行包内脚本。
 - `examples/capability-packages/`：三个独立迁移切片与来源许可，组件测试不代表真实 TUI 通过。
+- `examples/capability-packages/drama-text-a/methods/review-source.md`、`review-continuity.md`、`review-delivery.md`：A0.2.1 的来源、接续、交付三份私有审阅分表；沿入口按需读取，不进入全局 Skill。
+- `examples/capability-packages/drama-text-a/templates/review.md`：可带回作者处理的 Markdown 证据反馈模板，不是第二份任务或验收状态。
 - `agent_py_agent/tests/test_capability_package_drama_text_duration.py` 与 `test_capability_package_drama_workflow_duration.py`：合成输入下验证样包原脚本的时长聚合、目标缺失/非法、浮点和溢出边界，不执行真实任务产物。
 - `agent_py_agent/tests/test_capability_package_drama_text_basis.py`：验证 A 包 v2 镜头声明、本场来源、失败回执版本和结构不代表语义的边界。
 - `agent_py_agent/tests/test_capability_package_b_template.py`：用完整占位填写公开合成资料，核对 B 的原检查器、私有交接模板及真实隔离派工授权。
