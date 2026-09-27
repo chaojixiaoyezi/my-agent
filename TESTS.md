@@ -1,5 +1,16 @@
 # 测试与发布验收
 
+## 决策请求字符上限收成参数 `decision_request_max_chars`（2026-09-27，分支 `my-agent/self-dev`，基于 main `111d32baa`，集成到 main `84c29b39d` 之上）
+
+- **来源**：planning、delivery_quality、action_candidate 三个决策点位各自写死一份 `_MAX_REQUEST_CHARS = 1024`，
+  参数中心阶段 3 要合并的同名常数；真实 TUI 里 3186 字粘贴会被整点跳过且只有一行 `request_too_long`。
+- **新测试**：三个模块的测试各加 `test_configured_request_limit_controls_skip`（6 组参数：上限 2000 时 1025 字不再超长、
+  2001 字仍跳过、`0` 表示不限制、非整数/负数/缺字段回落默认 1024）。原有 1025 字触发 `request_too_long` 的用例保持不变。
+- **变异验证**：把 `settings/defaults.py::decision_request_max_chars` 临时改回写死 1024，三个模块共 12 个新用例失败
+  （每模块 4 个：上限 2000 的两组和 `0` 那组），恢复实现后 24 项全过。
+- 相关模块：`agent_core/decision_planning.py`、`agent_core/tool_context/decision_delivery_quality.py`、
+  `agent_core/tool_context/decision_action_candidate.py`、`settings/defaults.py`、`settings/config.py`、`config/agent_config.yaml`。
+
 ## 正在运行的安装目录写保护（2026-09-27，分支 `claude/runtime-write-guard`，基于 main `fbf3ddfef`）
 
 - **来源**：用户问 my-agent 改自己代码会不会出事。Full Access 下文件工具与命令都能写本机任何位置，包括正在运行的安装目录。

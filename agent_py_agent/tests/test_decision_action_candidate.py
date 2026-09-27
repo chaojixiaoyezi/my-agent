@@ -329,6 +329,28 @@ def test_triggered_but_blocked_requests_leave_a_skipped_audit_row(prepared, monk
     assert "private-code" not in outcomes.read_text(encoding="utf-8")
 
 
+@pytest.mark.parametrize("configured,prompt_len,skipped", [
+    (2000, 1025, False),   # 上限调大后，原 1025 字不再超长
+    (2000, 2001, True),    # 仍超上限
+    (0, 5000, False),      # 0 表示不限制
+    ("bad", 1025, True),   # 非法值回落默认 1024
+    (-1, 1025, True),      # 负数回落默认 1024
+    (None, 1025, True),    # 缺字段回落默认 1024
+])
+def test_configured_request_limit_controls_skip(prepared, monkeypatch, configured, prompt_len, skipped):
+    # 与 planning、delivery_quality 共用同一个上限配置 decision_request_max_chars；0 表示不限制，非法值回落默认 1024。
+    host, record, archive = prepared
+    outcomes = host.root / "decision-outcomes.jsonl"
+    host.home_paths = SimpleNamespace(owner_decision_outcomes_jsonl=outcomes)
+    host.config.decision_request_max_chars = configured
+    install(monkeypatch)
+    record, archive = set_params("user_prompt", "x" * prompt_len)(record, archive)
+    module.action_candidate_hint(host, record, archive)
+    rows = [json.loads(line) for line in outcomes.read_text(encoding="utf-8").splitlines()] if outcomes.exists() else []
+    reasons = [row["reason"] for row in rows]
+    assert ("request_too_long" in reasons) is skipped
+
+
 def test_two_and_sixty_four_candidates_are_eligible(prepared, monkeypatch):
     for count in (2, 64):
         calls = install(monkeypatch, choice="not_needed")

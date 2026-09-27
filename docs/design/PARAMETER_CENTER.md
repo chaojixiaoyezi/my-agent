@@ -107,6 +107,10 @@
     - 剩下 19 个同名常数确属不同含义或有意独立（如两套密码散列的 scrypt 参数、各持久格式版本号），列入
       `test_constant_names_unique.py` 的白名单并写原因；以后新增同名数值常数即测试失败，白名单里的名字不再重复也失败。
     - 不改任何数值，行为不变。
+  - **第二批：决策点请求字符上限（2026-09-27，my-agent 在分支 `my-agent/self-dev` 完成，集成者审核合并）**：三个决策点位共用的当前请求字符上限
+    `decision_request_max_chars`（默认 1024，`0` 表示不限制）。原 `_MAX_REQUEST_CHARS` 三份常量
+    （`decision_planning.py`、`tool_context/decision_delivery_quality.py`、`tool_context/decision_action_candidate.py`）删除，
+    统一由 `settings/defaults.py::decision_request_max_chars(config)` 读取；非整数、负数或缺字段回落默认值。
   - **方向调整（用户 2026-09-27）**：“几百个参数是不是太多了，有些可以合并，有些可能没用了”。本机用户配置只改过 11 项
     （测试机 298 项是当年整份复制随包 YAML）。下一步先把测试机配置收成“只写与默认不同的项”，再对 386 个配置项逐项分类：
     删除（无用）、合并（总一起调）、降级（只对程序内部有意义，改回代码常数并移出配置）、常用（`/settings` 默认只列二三十个）、

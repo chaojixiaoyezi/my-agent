@@ -17,6 +17,7 @@ from ..conversation.decision_service import (
 )
 from ..runtime_context import current_subagent_run_id
 from ..settings.decision_settings_schema import POINT_RUNTIME_SCOPES
+from ..settings.defaults import decision_request_max_chars
 from ..task_progress import (
     progress_path,
     read_task_progress,
@@ -29,7 +30,6 @@ from .runtime.task_identity import progress_ledger_id
 
 _POINT = "planning"
 _MAX_CANDIDATES = 24
-_MAX_REQUEST_CHARS = 1024
 _NON_SELECTIONS = {
     "not_needed": "无需额外优先级建议，继续原计划",
     "no_match": "现有候选均不适合优先推荐",
@@ -135,10 +135,14 @@ def _candidate_rows(agent: object, payload: dict) -> list[dict]:
 
 # LLM: Never send a partial current request; if it is too long, skip the
 # optional decision rather than giving Jev a misleading fragment.
+# 上限来自配置 decision_request_max_chars：0 表示不限制（仍受决策协议 256 KB 输入上限约束）。
 # 函数用途: 取出当前请求的有界原文，超长或缺失时保留原计划。
 def _request_text(agent: object) -> str:
+    limit = decision_request_max_chars(getattr(agent, "config", None))
     value = getattr(agent, "_current_user_prompt", "")
-    return value if type(value) is str and 0 < len(value) <= _MAX_REQUEST_CHARS else ""
+    if type(value) is not str or not value:
+        return ""
+    return value if limit == 0 or len(value) <= limit else ""
 
 
 # LLM: 在阶段之后调用：原话缺失或超长时整点跳过；超长（已到触发点、该点已开启）留一条 skipped 审计记录，
@@ -155,8 +159,9 @@ def _request_ready(agent: object, stage: object) -> bool:
 # LLM: 只看长度这一结构化事实，不读内容；与 _request_text 同一上限。
 # 函数用途: 判断当前请求是否因超过上限而被跳过（用于写 skipped 审计记录）。
 def _request_too_long(agent: object) -> bool:
+    limit = decision_request_max_chars(getattr(agent, "config", None))
     value = getattr(agent, "_current_user_prompt", "")
-    return type(value) is str and len(value) > _MAX_REQUEST_CHARS
+    return limit > 0 and type(value) is str and len(value) > limit
 
 
 # LLM: Candidate keys are host-generated, not inferred from the model. The

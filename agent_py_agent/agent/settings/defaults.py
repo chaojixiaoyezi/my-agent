@@ -10,6 +10,17 @@ DEFAULT_COMMAND_ACCESS_MODE = "workspace-write"
 DEFAULT_MODEL_MAX_TOKENS = 65_536
 # 输出上限最多占已知上下文窗口的几分之一：给输入留出至少四分之三窗口，避免输入加输出超窗被供应商拒绝。
 MODEL_OUTPUT_WINDOW_DIVISOR = 4
+# 规划/交付质量/动作候选三个决策点位的当前请求字符上限默认值：超长整点跳过，绝不截断发送。
+DEFAULT_DECISION_REQUEST_MAX_CHARS = 1_024
+
+
+# LLM: 三个决策点位的统一读取入口，非整数/负数/字段缺失一律回落默认值；0 表示不限制（仍受决策协议 256 KB 输入上限约束）。
+# 函数用途: 从配置里取当前请求字符上限，供规划、交付质量、动作候选共用，避免各写一份读取逻辑。
+def decision_request_max_chars(config: Any) -> int:
+    value = getattr(config, "decision_request_max_chars", None)
+    if type(value) is not int or value < 0:
+        return DEFAULT_DECISION_REQUEST_MAX_CHARS
+    return value
 
 
 # LLM: 输出上限的唯一公式：已知窗口（>0，来自模型档案或配置里的 model_context_window_tokens，是否显式都算）时取

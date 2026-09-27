@@ -32,6 +32,7 @@ from ...plugin_observation import (
 )
 from ...runtime_context import current_subagent_run_id
 from ...settings.decision_settings_schema import POINT_RUNTIME_SCOPES
+from ...settings.defaults import decision_request_max_chars
 from ...tooling.output_projection import project_tool_output_body
 from ...tooling.runtime_contracts import ToolCall, ToolResult
 
@@ -41,7 +42,6 @@ from .external_material_order import _URL_WITH_QUERY
 _POINT = "action_candidate"
 _QUESTION = "next_candidate"
 _MIN_CANDIDATES = 2
-_MAX_REQUEST_CHARS = 1024
 _MAX_HINT_CHARS = 512
 _HINT_TAG = "[action-candidate]"
 _LOCAL_KEYS = ("activation_id", "target_ref_hash", "generation", "content_hash")
@@ -82,13 +82,14 @@ def _advise(agent: object, record: object, archive: dict) -> str:
     stage = begin_decision_stage(agent, params, operation_id=_operation_id(record))
     if stage.error_code or _POINT not in stage.enabled_points or stage.run_id != record.call.run_id:
         return ""
-    if not _request_text(params):
-        if _request_too_long(params):
+    limit = decision_request_max_chars(getattr(agent, "config", None))
+    if not _request_text(params, limit):
+        if _request_too_long(params, limit):
             record_decision_skip(agent, stage, _POINT, "request_too_long")
         return ""
     _check_interrupted()
     observation = _observation(archive)
-    material = material_or_skip(agent, stage, _POINT, lambda: _material(record, archive, observation))
+    material = material_or_skip(agent, stage, _POINT, lambda: _material(record, archive, observation, limit))
     if material is None:
         return ""
     state, questions, revision = material
@@ -104,7 +105,7 @@ def _advise(agent: object, record: object, archive: dict) -> str:
         return ""
     _check_interrupted()
     # 来源复核同时重问新鲜度权威：等待期间同一目标有了更新观察，旧候选就不再提示。
-    if _current_sources(agent, record, archive) != frozen:
+    if _current_sources(agent, record, archive, limit) != frozen:
         return ""
     return hint if time.monotonic() < min(stage.deadline, outcome.deadline) else ""
 
@@ -195,10 +196,13 @@ def _available_tools(params: object) -> frozenset[str]:
 
 
 # LLM: 当前请求只取原 params.user_prompt 完整原文；超过上限或为空时整点跳过（空串本身为假），绝不发送截断片段。
+#   上限由调用方从配置 decision_request_max_chars 读出后传入，0 表示不限制。
 # 函数用途: 返回可用的有界当前请求，不合格时返回空串。
-def _request_text(params: object) -> str:
+def _request_text(params: object, limit: int) -> str:
     value = getattr(params, "user_prompt", "")
-    return value if type(value) is str and len(value) <= _MAX_REQUEST_CHARS else ""
+    if type(value) is not str or not value:
+        return ""
+    return value if limit == 0 or len(value) <= limit else ""
 
 
 # LLM: 空请求（无当前用户原话）不是本点场景，在扫描任何归档之前放弃、不留记录；长度上限在阶段之后另查。
@@ -210,18 +214,18 @@ def _has_request(params: object) -> bool:
 
 # LLM: 只看长度这一结构化事实；与 _request_text 同一上限。
 # 函数用途: 判断当前请求是否因超过上限而被跳过（用于写 skipped 审计记录）。
-def _request_too_long(params: object) -> bool:
+def _request_too_long(params: object, limit: int) -> bool:
     value = getattr(params, "user_prompt", "")
-    return type(value) is str and len(value) > _MAX_REQUEST_CHARS
+    return limit > 0 and type(value) is str and len(value) > limit
 
 
 # LLM: 外发只有脱敏当前请求、目标类型和候选别名/role/label（label 在同一个 external_data 块里）；候选编号、插件 key、
 #   目标引用、代次与动作名只进本地版本摘要。题目唯一，候选之外只有保留原结果的非选择项。
 # 函数用途: 冻结一次操作建议材料和单选题，并给等待后的来源复核生成版本值。
-def _material(record: object, archive: dict, observation: dict) -> tuple[dict, dict, str]:
+def _material(record: object, archive: dict, observation: dict, limit: int) -> tuple[dict, dict, str]:
     rows = [{"candidate": f"c{order}", "role": candidate["role"], "label": candidate["label"]}
             for order, candidate in enumerate(observation["candidates"], 1)]
-    state = {"current_request": _safe_external({"current_request": _request_text(record.params)}),
+    state = {"current_request": _safe_external({"current_request": _request_text(record.params, limit)}),
              "target_kind": observation["target_kind"], "candidates": _safe_external({"candidates": rows})}
     criteria = {row["candidate"]: {"role": row["role"]} for row in rows}
     questions = {_QUESTION: {"type": "choice", "instructions": _INSTRUCTIONS,
@@ -243,10 +247,10 @@ def _safe_external(value: dict) -> str:
 
 # LLM: 等待前后都用同一函数取来源快照（含新鲜度权威）；不合格时返回空版本，调用方据此放弃采用。
 # 函数用途: 返回当前参数版本与材料版本，用于比较决策等待期间来源是否变化。
-def _current_sources(agent: object, record: object, archive: dict) -> tuple[str, str]:
+def _current_sources(agent: object, record: object, archive: dict, limit: int) -> tuple[str, str]:
     if not _eligible(agent, record, archive):
         return "", ""
-    return _context_revision(record.params), _material(record, archive, _observation(archive))[2]
+    return _context_revision(record.params), _material(record, archive, _observation(archive), limit)[2]
 
 
 # LLM: 只接受唯一题目的一次 choice 回答，且值必须是本次宿主生成的候选别名；缺项、多答、逐题错误或非选择都返回 None。

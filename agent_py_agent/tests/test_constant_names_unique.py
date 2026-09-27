@@ -28,7 +28,6 @@ _ALLOWED = {
     "MAX_INLINE_JSON": "工具动作摘要与编排实时摘要各自的内联 JSON 上限",
     "MAX_OWNERS": "管理员控制工具与审计记录工具各自一次列出的用户数上限",
     "MAX_RECORDS": "工具护栏记录与决策结果日志各自的保留条数",
-    "MAX_REQUEST_CHARS": "同一概念：my-agent 正在 my-agent/self-dev 上收成配置 decision_request_max_chars，合并后删掉本条",
     "POLL_SECONDS": "Gateway 重启等待、TUI 插件面板、升级跟随三种不同的轮询节奏",
     "PREVIEW_CHARS": "会话搜索结果预览与本地存储正文预览，用途不同",
     "PROBE_MAX_ATTEMPTS": "模型 HTTP 连接探测与看图能力探测各自的重试次数",

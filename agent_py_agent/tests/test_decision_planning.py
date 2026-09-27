@@ -243,6 +243,28 @@ def test_over_long_request_leaves_a_skipped_audit_row(prepared, monkeypatch, pro
     assert "长长" not in json.dumps(rows, ensure_ascii=False)
 
 
+@pytest.mark.parametrize("configured,prompt_len,skipped", [
+    (2000, 1025, False),   # 上限调大后，原 1025 字不再超长
+    (2000, 2001, True),    # 仍超上限
+    (0, 5000, False),      # 0 表示不限制
+    ("bad", 1025, True),   # 非法值回落默认 1024
+    (-1, 1025, True),      # 负数回落默认 1024
+    (None, 1025, True),    # 缺字段回落默认 1024
+])
+def test_configured_request_limit_controls_skip(prepared, monkeypatch, configured, prompt_len, skipped):
+    # 三个决策点位共用的上限：由配置 decision_request_max_chars 决定，0 表示不限制，非法值回落默认 1024。
+    agent, _, root = prepared
+    outcomes = root / "decision-outcomes.jsonl"
+    agent.home_paths.owner_decision_outcomes_jsonl = outcomes
+    agent.config = SimpleNamespace(decision_skip_records_enabled=True, decision_request_max_chars=configured)
+    calls = install(monkeypatch)
+    agent._current_user_prompt = "长" * prompt_len
+    _read(agent)
+    rows = [json.loads(line) for line in outcomes.read_text(encoding="utf-8").splitlines()] if outcomes.exists() else []
+    reasons = [row["reason"] for row in rows]
+    assert ("request_too_long" in reasons) is skipped
+
+
 def test_optional_provider_error_retains_original_but_user_stop_propagates(prepared, monkeypatch):
     agent, _, _ = prepared
     install(monkeypatch, error=RuntimeError("provider unavailable"))
