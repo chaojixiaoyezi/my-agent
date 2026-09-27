@@ -17,6 +17,7 @@ from types import SimpleNamespace
 from ...path_access_policy import (
     PathAccessDecision,
     PathAccessPolicy,
+    effective_owner_scope_root,
     granted_external_work_roots,
 )
 from ...subagents.context_bundle_refs import runtime_task_attributes
@@ -71,7 +72,7 @@ class ChildReadScope:
         return list(dict.fromkeys(roots))
 
 
-# LLM: owner 墙只来自 SubAgentManager.owner_scope_root（与运行时 _effective_owner_scope 对 task_local 的取值相同），
+# LLM: owner 墙只来自 SubAgentManager.owner_scope_root（经唯一权威 effective_owner_scope_root 按 task_local 取值，与运行时相同），
 #   非字符串或空值说明没有可判定的墙，返回 None；准备任务、写边界与路径模式全部走子代理运行时的同一函数。
 # 函数用途: 按一个待创建子代理的创建参数，算出它运行时真正能看到的读取范围。
 def child_read_scope(agent: object, run_params: object) -> ChildReadScope | None:
@@ -81,7 +82,7 @@ def child_read_scope(agent: object, run_params: object) -> ChildReadScope | None
         return None
     task = manager.base_service.prepare_run(params=run_params).task
     boundary = write_boundary_with_runtime_ledger(agent, _child_tool_call_params(manager, task))
-    scope_root = str(boundary.get("effective_owner_scope_root") or owner_scope)
+    scope_root = effective_owner_scope_root(agent, context_scope="task_local", write_boundary=boundary)
     config = permission_config(agent.config, agent.home_paths, inherited=True)
     policy = PathAccessPolicy.from_values(
         mode=getattr(config, "path_access_mode", "normal"),

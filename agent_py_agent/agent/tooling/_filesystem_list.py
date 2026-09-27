@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from ..common.cancellation import raise_if_cancelled
+from ..path_access_policy import PATH_SCOPE_FULL, PATH_SCOPE_NORMAL, PATH_SCOPE_OWNER_WALL
 from ._filesystem_helpers import (
     _bool_param,
     _discovery_result_envelope,
@@ -21,6 +22,7 @@ from ._filesystem_helpers import (
 )
 from ._filesystem_read import (
     _COMMON_FILE_DISCOVERY_IGNORES,
+    UNWALLED_NORMAL_EXCEPTIONS_NOTE,
     FileSystemAccessOptions,
     FileSystemTool,
 )
@@ -35,9 +37,26 @@ from .models import (
     ToolRuntimePolicy,
 )
 
+_LIST_FILES_DESCRIPTION_BASE = "列出目录中的文件和子目录，适合先摸清项目结构。"
+_LIST_FILES_FULL_NOTE = (
+    "可直接列任意绝对路径，包括 workspace 外、用户在任务里指定的输入目录，无需 shell 或额外授权——"
+    "不要为查看输入目录提 capability_request。"
+)
+# 说明末句按本 run 的读取范围给出，与 read_file 同一句式、与 PathAccessPolicy.check 一一对应（full 句即原说明）。
+_LIST_FILES_SCOPE_NOTES = {
+    PATH_SCOPE_OWNER_WALL: (
+        "只能列当前用户自己的数据目录、shared 公共区和本任务明确授权的外部工作目录；其它路径会在授权阶段被拒，"
+        "返回 PATH_OWNER_SCOPE_BLOCKED 等 PATH_*_BLOCKED 错误码，换写法重试同一位置不会成功——需要墙外的文件时如实说明缺哪个文件。"
+    ),
+    PATH_SCOPE_FULL: _LIST_FILES_FULL_NOTE,
+    PATH_SCOPE_NORMAL: _LIST_FILES_FULL_NOTE + UNWALLED_NORMAL_EXCEPTIONS_NOTE,
+}
+
 
 class ListFilesTool(FileSystemTool):
 
+    path_scope_description_base = _LIST_FILES_DESCRIPTION_BASE
+    path_scope_notes = _LIST_FILES_SCOPE_NOTES
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy("read_only"),
         concurrency_policy=ConcurrencyPolicy("parallel_safe"),
@@ -285,7 +304,7 @@ def build_list_files_model_spec() -> ToolModelSpec:
     details = _list_files_parameter_details()
     return ToolModelSpec(
         name="list_files",
-        description="列出目录中的文件和子目录，适合先摸清项目结构。可直接列任意绝对路径，包括 workspace 外、用户在任务里指定的输入目录，无需 shell 或额外授权——不要为查看输入目录提 capability_request。",
+        description=_LIST_FILES_DESCRIPTION_BASE + _LIST_FILES_FULL_NOTE,
         input_schema={
             "type": "object",
             "properties": {

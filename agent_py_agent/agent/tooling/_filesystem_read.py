@@ -4,11 +4,18 @@
 # 模块用途: 为内置文件工具装配配置、解析路径和检查读写边界，不拥有插件或任务状态。
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
-from ..path_access_policy import PathAccessDecision, PathAccessPolicy
+from ..path_access_policy import (
+    PATH_SCOPE_FULL,
+    PATH_SCOPE_NORMAL,
+    PATH_SCOPE_OWNER_WALL,
+    PathAccessDecision,
+    PathAccessPolicy,
+)
 from ..path_recovery_hints import suggest_workspace_typo_target
 from ..user_space.owner_quota import (
     OwnerQuotaChange,
@@ -64,6 +71,26 @@ _READ_FILE_PARAMETERS = {
     "end_line": "结束行号，可选",
     "offset": "字符偏移，可选；用于超大单行或按字符分块读取",
     "max_chars": "本次最多返回多少字符，可选；不会超过系统默认上限",
+}
+# 无 owner 墙的 normal 模式仍拦危险目录与凭据文件（PathAccessPolicy.check）；读、列两个工具的说明共用这一句。
+UNWALLED_NORMAL_EXCEPTIONS_NOTE = "危险目录和凭据文件除外（PATH_DANGEROUS_ROOT_BLOCKED / PATH_CREDENTIAL_FILE_BLOCKED）。"
+_READ_FILE_DESCRIPTION_BASE = (
+    "读取普通文本文件内容；已外置 tool-output 的包装文件只能用 read_artifact，不能用本工具。默认一次返回整个文件——"
+    "理解或复刻一个源码文件时直接读全文，不要自己分段反复读同一个文件；只有文件极大（几十万字符以上）或只需确认某几行时"
+    "才用 start_line/end_line/max_chars。"
+)
+_READ_FILE_FULL_NOTE = (
+    "可直接读任意绝对路径，包括 workspace 外、用户在任务里指定的输入目录/文件，无需 shell 或额外授权——"
+    "不要为读取输入文件提 capability_request。"
+)
+# 说明末句按本 run 的读取范围给出，三句与 PathAccessPolicy.check 的三种判定一一对应（full 句即原说明）。
+_READ_FILE_SCOPE_NOTES = {
+    PATH_SCOPE_OWNER_WALL: (
+        "只能读当前用户自己的数据目录、shared 公共区和本任务明确授权的外部工作目录；其它路径会在授权阶段被拒，"
+        "返回 PATH_OWNER_SCOPE_BLOCKED 等 PATH_*_BLOCKED 错误码，换写法重试同一位置不会成功——需要墙外的文件时如实说明缺哪个文件。"
+    ),
+    PATH_SCOPE_FULL: _READ_FILE_FULL_NOTE,
+    PATH_SCOPE_NORMAL: _READ_FILE_FULL_NOTE + UNWALLED_NORMAL_EXCEPTIONS_NOTE,
 }
 _READ_FILE_PARAMETER_DETAILS = {
     "path": "相对工作区的普通文本文件路径；已外置 tool-output 必须改用 read_artifact。",
@@ -126,6 +153,10 @@ def owner_quota_error_result(tool_name: str, exc: BaseException) -> ToolHandlerO
 # 类用途: 为内置读写工具提供路径解析、权限核对、诊断配置和输出路径展示。
 class FileSystemTool(BaseTool):
 
+    # 说明前半段与三种读取范围的末句；没有声明的文件工具说明不随范围变化。
+    path_scope_description_base: ClassVar[str] = ""
+    path_scope_notes: ClassVar[Mapping[str, str] | None] = None
+
     # LLM: 这里只固定宿主配置，不读取文件或创建每调用诊断状态；联查 registry 装配和关闭零反馈测试。
     # 函数用途: 初始化文件访问策略、配额和默认关闭的语法反馈开关。
     def __init__(
@@ -163,6 +194,14 @@ class FileSystemTool(BaseTool):
             if str(access.owner_scope_root or "").strip() and access.owner_quota_max_bytes > 0
             else None
         )
+
+    # LLM: 由 ToolRegistry 冻结快照时按本 run 的读取范围调用；只换说明末句，input_schema 原样，replace 会复核 schema_hash。
+    #   regime 只来自 path_access_policy.path_scope_regime 的结构化结果，不读模型参数或自然语言。
+    # 函数用途: 给出与本 run 路径门一致的工具说明；没有声明范围说明的工具原样返回自己的说明。
+    def model_spec_for_path_scope(self, regime: str) -> ToolModelSpec:
+        if not self.path_scope_notes:
+            return self.model_spec
+        return replace(self.model_spec, description=self.path_scope_description_base + self.path_scope_notes[regime])
 
     def quota_changes(self, changes: list[OwnerQuotaChange]):
         if self.owner_quota is None:
@@ -311,9 +350,11 @@ def filesystem_access_options(
 # 类用途: 提供普通文本文件读取能力，不直接读取底座保存的工具输出包装文件。
 class ReadFileTool(FileSystemTool):
 
+    path_scope_description_base = _READ_FILE_DESCRIPTION_BASE
+    path_scope_notes = _READ_FILE_SCOPE_NOTES
     model_spec = ToolModelSpec(
         name="read_file",
-        description="读取普通文本文件内容；已外置 tool-output 的包装文件只能用 read_artifact，不能用本工具。默认一次返回整个文件——理解或复刻一个源码文件时直接读全文，不要自己分段反复读同一个文件；只有文件极大（几十万字符以上）或只需确认某几行时才用 start_line/end_line/max_chars。可直接读任意绝对路径，包括 workspace 外、用户在任务里指定的输入目录/文件，无需 shell 或额外授权——不要为读取输入文件提 capability_request。",
+        description=_READ_FILE_DESCRIPTION_BASE + _READ_FILE_FULL_NOTE,
         input_schema={
             "type": "object",
             "properties": {

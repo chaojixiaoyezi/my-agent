@@ -16,7 +16,7 @@ from ..conversation.authority import (
     CONVERSATION_TRANSIENT_WORKSPACE_ATTR,
 )
 from ..local_storage import RuntimeGateLedgerRecord
-from ..path_access_policy import inheritable_declared_work_roots
+from ..path_access_policy import effective_owner_scope_root, inheritable_declared_work_roots
 from ..plugin_observation import observation_event_payload_from_envelope
 from ..tooling.runtime_contracts import tool_arguments_hash
 from .run_task_workspace_writer import current_run_tool_output_archive_root
@@ -212,13 +212,16 @@ def _attach_runtime_approved_actions(
 
 # LLM: A Full Access parent still creates WorkspaceOnly children. This per-run owner wall is a
 # host fact consumed by ToolExecutor and request-local handlers; it cannot come from model args.
+# The value comes only from path_access_policy.effective_owner_scope_root, the same authority the
+# execution gate and the run's tool-snapshot freeze call.
 # 函数用途: 把当前主/子代理真正生效的 owner 边界写进本轮不可变工具权限快照。
 def _attach_effective_owner_scope(
     boundary: dict[str, object],
     agent: object,
     params: object,
 ) -> None:
-    owner_scope = _effective_owner_scope(agent, params)
+    owner_scope = effective_owner_scope_root(
+        agent, context_scope=getattr(params, "context_scope", "default"), write_boundary=boundary)
     if owner_scope:
         boundary["effective_owner_scope_root"] = owner_scope
 
@@ -430,7 +433,7 @@ def _attach_owner_task_write_scope(
 ) -> None:
     """Apply owner-home scope without turning business folders into permission walls."""
 
-    owner_scope = _effective_owner_scope(agent, params)
+    owner_scope = effective_owner_scope_root(agent, context_scope=getattr(params, "context_scope", "default"))
     if not owner_scope:
         scope = _text(getattr(params, "context_scope", "default")).lower() or "default"
         if scope not in {"task_local", "control_plane"} and _is_local_full_access(agent):
@@ -543,18 +546,6 @@ def _attach_owner_control_write_guards(
     if protected:
         existing = _string_list(boundary.get("forbidden_write_roots"))
         boundary["forbidden_write_roots"] = list(dict.fromkeys([*existing, *protected]))
-
-
-# LLM: The registry's owner wall describes the main agent. Task-local descendants additionally
-# use SubAgentManager.owner_scope_root so an administrator's Full Access never leaks downward.
-# 函数用途: 返回当前工具调用真正生效的 owner home 边界，主代理可为空，子代理始终恢复自己的家目录墙。
-def _effective_owner_scope(agent: object, params: object) -> str:
-    scope = _text(getattr(params, "context_scope", "default")).lower() or "default"
-    if scope in {"task_local", "control_plane"}:
-        child_scope = _text(getattr(getattr(agent, "subagents", None), "owner_scope_root", ""))
-        if child_scope:
-            return child_scope
-    return _text(getattr(getattr(agent, "tools", None), "owner_scope_root", ""))
 
 
 # LLM: Full Access is a host configuration of the local/main identity, not the absence of a path

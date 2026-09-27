@@ -376,8 +376,12 @@ IM 管理员身份与聊天内审批已在分支 `claude/admin-identity` 本地�
   危险根、凭据文件五个码），就按原码上报并带 `failure_stage="authorization"`；其余仍报 `TOOL_INVALID_ARGUMENTS`。
   四个读类工具（read_file / list_files / find_files / search_text）共用同一个 helper，落在同一 (code, stage)，与路径门
   的拒绝归入同一段连续失败。不解析消息文字，类型错误等真校验未放宽。
-- `read_file` 工具说明写着“可直接读任意绝对路径，包括 workspace 外……无需额外授权”，对只能访问 owner home 与 shared 区的子代理不准确。解决问题：
-  模型据此反复重试墙外路径；说明应按调用方实际路径范围给出，改动涉及模型请求内容，需单独评估与开关。
+- ~~`read_file` 工具说明写着“可直接读任意绝对路径，包括 workspace 外……无需额外授权”，对只能访问 owner home 与 shared 区的子代理不准确。解决问题：
+  模型据此反复重试墙外路径；说明应按调用方实际路径范围给出，改动涉及模型请求内容，需单独评估与开关。~~
+  **已修（2026-09-27，分支 `claude/9b-read-file-scope`）**：read_file / list_files 的说明末句按本 run 的有效 owner 墙三选一
+  （有墙 / 无墙 full / 无墙 normal，与路径门一一对应），在冻结工具快照时选定；有效墙只由
+  `path_access_policy.effective_owner_scope_root` 算出，写边界、执行门、快照冻结共用。归为纯 bug fix / 文案修正，不加开关
+  （理由见 DESIGN_LEDGER）。
 ## 能力包内化（2026-09-25，进行中）
 
 解决问题：外部 Agent 的整套方法可在新会话自然找到，包内资源不进入膨胀的全局 Skill 库。

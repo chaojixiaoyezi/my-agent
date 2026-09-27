@@ -11,6 +11,7 @@ from ..agent_core.model.context_window import resolve_model_context_window_token
 from ..agent_core.tool_loop.recovery import runtime_run_scope
 from ..agent_core.tool_runtime_ledger import write_boundary_with_runtime_ledger
 from ..common.cancellation import ToolCancelled
+from ..path_access_policy import effective_owner_scope_root
 from ..runtime_context import current_subagent_run_id
 from ..runtime_db.managed_operation_store import (
     AuthorityContextMissing,
@@ -116,7 +117,7 @@ def package_entry_policy(agent: object, params: object, tools: object, arguments
         call=call, runtime_snapshot=tools, workspace_root=root,
         workspace_roots=_execution_workspace_roots(root, registry.workspace_roots, boundary),
         path_access_mode=registry.path_access_mode, path_dangerous_roots=tuple(registry.path_dangerous_roots),
-        owner_scope_root=str((boundary or {}).get("effective_owner_scope_root") or registry.owner_scope_root or ""),
+        owner_scope_root=effective_owner_scope_root(write_boundary=boundary, registry_scope=registry.owner_scope_root),
         write_boundary=boundary, runtime_guard_policy=registry.runtime_guard_policy, approval_mode=mode,
     ))
 

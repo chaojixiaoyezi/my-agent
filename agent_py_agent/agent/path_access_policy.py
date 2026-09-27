@@ -29,6 +29,13 @@ DEFAULT_DANGEROUS_PATH_ROOTS = (
     "~/.docker",
 )
 _VALID_MODES = {PATH_ACCESS_MODE_NORMAL, PATH_ACCESS_MODE_FULL}
+# 一次运行的读取范围只有这三种，与 PathAccessPolicy.check 的判定顺序一一对应：先看 owner 墙，再看 full，最后是 normal。
+# 常量用途: 给“按调用方实际路径范围渲染工具说明”这类展示用；它们是宿主策略的归类，不是授权本身。
+PATH_SCOPE_OWNER_WALL = "owner_wall"
+PATH_SCOPE_FULL = "full"
+PATH_SCOPE_NORMAL = "normal"
+# 这两类运行（子代理与控制面）受 SubAgentManager 的 owner 墙约束，即使父代理是管理员 Full Access。
+_CHILD_CONTEXT_SCOPES = frozenset({"task_local", "control_plane"})
 
 # 文件系统根级目录是操作系统本体而不是"工作目录"：管理员即使 full-access 也不把它自动
 # 继承给子代理或当成工具执行根。这是写死的少量常量，不是可扩张的名单，也不做任何危险判断；
@@ -242,6 +249,30 @@ def normalize_path_access_mode(value: object) -> str:
     return text if text in _VALID_MODES else PATH_ACCESS_MODE_NORMAL
 
 
+# LLM: 本 run 真正生效的 owner 墙只在这里算：子代理/控制面用 SubAgentManager 的墙，其次是 agent 当前工具视图自己的墙，
+#   再次是写边界里已冻结的值，最后是执行注册表自己的墙。写边界合并、执行门、快照冻结和子代理读取预检都调用它，
+#   不接受模型参数或自然语言；本机管理员 Full Access 的主 run 各项皆空，即没有 owner 墙。
+# 函数用途: 算出一次运行实际受哪道 owner 墙约束，返回墙的根路径；空串表示没有 owner 墙。
+def effective_owner_scope_root(agent: object = None, *, context_scope: object = "default",
+                               write_boundary: object = None, registry_scope: object = "") -> str:
+    candidates: list[object] = []
+    if (str(context_scope or "").strip().lower() or "default") in _CHILD_CONTEXT_SCOPES:
+        candidates.append(getattr(getattr(agent, "subagents", None), "owner_scope_root", ""))
+    candidates.append(getattr(getattr(agent, "tools", None), "owner_scope_root", ""))
+    if isinstance(write_boundary, dict):
+        candidates.append(write_boundary.get("effective_owner_scope_root"))
+    candidates.append(registry_scope)
+    return next((text for text in (str(item or "").strip() for item in candidates) if text), "")
+
+
+# LLM: 只把（有效 owner 墙, 路径模式）归成三种范围之一，顺序与 check 相同：有墙时 full 也越不过墙。
+# 函数用途: 告诉展示层这次运行属于哪种读取范围，好给出与路径门一致的说明。
+def path_scope_regime(owner_scope_root: object, path_access_mode: object) -> str:
+    if str(owner_scope_root or "").strip():
+        return PATH_SCOPE_OWNER_WALL
+    return PATH_SCOPE_FULL if normalize_path_access_mode(path_access_mode) == PATH_ACCESS_MODE_FULL else PATH_SCOPE_NORMAL
+
+
 def _normalized_root(value: object) -> Path | None:
     text = os.path.expandvars(str(value or "").strip())
     if not text:
@@ -375,11 +406,16 @@ __all__ = [
     "DEFAULT_PATH_ACCESS_MODE",
     "PATH_ACCESS_MODE_FULL",
     "PATH_ACCESS_MODE_NORMAL",
+    "PATH_SCOPE_FULL",
+    "PATH_SCOPE_NORMAL",
+    "PATH_SCOPE_OWNER_WALL",
     "UNINHERITABLE_ROOT_DIRS",
     "PathAccessDecision",
     "PathAccessPolicy",
     "agent_home_root_for_owner",
+    "effective_owner_scope_root",
     "granted_external_work_roots",
     "inheritable_declared_work_roots",
     "normalize_path_access_mode",
+    "path_scope_regime",
 ]

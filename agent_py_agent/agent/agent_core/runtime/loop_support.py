@@ -31,6 +31,7 @@ from ...memory_store import (
     long_term_record_matches_scope,
     routed_lesson_records,
 )
+from ...path_access_policy import effective_owner_scope_root
 from ...runtime_context import current_subagent_run_id
 from ...runtime_errors import runtime_error_report
 from ...settings.defaults import context_window_or_default
@@ -332,6 +333,18 @@ def _prepare_runtime_context(agent, request: RuntimeContextRequest):
     )
 
 
+# LLM: 本 run 的工具快照只在这里冻结：工具说明按唯一权威 effective_owner_scope_root 算出的有效 owner 墙渲染，与执行门
+#   读取的是同一个值（Full Access 父代理的 task_local 子代理也有墙）；子代理 compact 缓存面经 _tool_snapshots_for_run 走到这里。
+# 函数用途: 按本 run 允许的工具和实际路径范围冻结一次工具快照，供模型请求、工具搜索、清单和 compact 共用。
+def _frozen_tool_snapshot(agent: object, request: RuntimeContextRequest) -> object:
+    return agent.tools.runtime_snapshot(
+        allowed_tools=request.allowed_tools,
+        run_id=request.run_id,
+        owner_scope_root=effective_owner_scope_root(
+            agent, context_scope=request.context_scope, write_boundary=request.write_boundary),
+    )
+
+
 def _tool_snapshots_for_run(
     agent: object,
     request: RuntimeContextRequest,
@@ -343,10 +356,7 @@ def _tool_snapshots_for_run(
 
     protocol_snapshot = select_tool_protocol(agent, run_id=request.run_id)
     if agent.config.enable_tools:
-        runtime_snapshot = agent.tools.runtime_snapshot(
-            allowed_tools=request.allowed_tools,
-            run_id=request.run_id,
-        )
+        runtime_snapshot = _frozen_tool_snapshot(agent, request)
     else:
         runtime_snapshot = ToolRuntimeSnapshot(
             run_id=request.run_id,
@@ -439,10 +449,7 @@ def _tool_runtime_for_context_bundle(
     if isinstance(snapshot, ToolRuntimeSnapshot):
         return snapshot, []
     try:
-        return agent.tools.runtime_snapshot(
-            allowed_tools=request.allowed_tools,
-            run_id=request.run_id,
-        ), []
+        return _frozen_tool_snapshot(agent, request), []
     except Exception as exc:
         empty = ToolRuntimeSnapshot(
             run_id=request.run_id,

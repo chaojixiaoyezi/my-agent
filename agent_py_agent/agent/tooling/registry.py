@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..common.cancellation import CancellationToken
 from ..contracts.tool_manifest_contract import tool_manifest_payload
+from ..path_access_policy import effective_owner_scope_root, path_scope_regime
 from ..settings.defaults import default_config_int
 from .artifact import ReadArtifactTool
 from .content_transport_policy import (
@@ -487,14 +488,19 @@ class ToolRegistry:
         self.tools[name] = tool
 
     # LLM: 快照先做硬权限交集，再做无副作用可用性检查；检查异常按不可用 fail-closed。
+    #   owner_scope_root 是本 run 的有效 owner 墙（由 path_access_policy.effective_owner_scope_root 算出）；
+    #   不传时按注册表自己的墙。它只决定工具说明按哪种读取范围渲染，不改变 schema_hash、snapshot_hash 或任何授权。
     # 函数用途: 固定一次 Agent run 可见、可搜、可调用的工具事实，供全部工具表面复用。
     def runtime_snapshot(
         self,
         *,
         allowed_tools: list[str] | None = None,
         run_id: str = "",
+        owner_scope_root: str | None = None,
     ) -> ToolRuntimeSnapshot:
         allowed = allowed_tool_set(allowed_tools)
+        regime = path_scope_regime(self.owner_scope_root if owner_scope_root is None else owner_scope_root,
+                                   self.path_access_mode)
         runtimes: list[ToolRuntime] = []
         unavailable: list[tuple[str, str, str]] = []
         for name, tool in self.tools.items():
@@ -514,22 +520,7 @@ class ToolRegistry:
                     )
                 )
                 continue
-            model_spec = getattr(tool, "model_spec", None)
-            runtime_policy = getattr(tool, "runtime_policy", None)
-            if not isinstance(model_spec, ToolModelSpec) or not isinstance(
-                runtime_policy, ToolRuntimePolicy
-            ):
-                raise TypeError(
-                    f"registered tool must declare ToolModelSpec and ToolRuntimePolicy: {name}"
-                )
-            runtimes.append(
-                ToolRuntime(
-                    model_spec=model_spec,
-                    runtime_policy=runtime_policy,
-                    handler=tool,
-                    availability=availability,
-                )
-            )
+            runtimes.append(_snapshot_runtime(name, tool, availability, regime))
         return ToolRuntimeSnapshot(
             run_id=str(run_id or ""),
             runtimes=tuple(runtimes),
@@ -754,9 +745,7 @@ class ToolRegistry:
             write_boundary,
         )
         boundary = write_boundary if isinstance(write_boundary, dict) else {}
-        effective_owner_scope = str(
-            boundary.get("effective_owner_scope_root") or self.owner_scope_root or ""
-        ).strip()
+        effective_owner_scope = effective_owner_scope_root(write_boundary=boundary, registry_scope=self.owner_scope_root)
         try:
             approval_mode = self.approval_mode_reader() if self.approval_mode_reader else "ask"
         except (OSError, ValueError):
@@ -1010,6 +999,19 @@ def _render_recommended_tools(
 
 # LLM: readiness check 发生在已授权候选集内；实现异常不得让工具进入 Schema 或中断整个 Agent。
 # 函数用途: 安全调用工具的无副作用 availability 合同，并把异常归一为不可用。
+# LLM: 注册的工具必须声明 ToolModelSpec 与 ToolRuntimePolicy。类上定义了 model_spec_for_path_scope 的工具按本 run 的
+#   读取范围换一份同名、同 input_schema 的说明（schema_hash 不变，ToolModelSpec 构造时会复核）；只认类上真正定义的方法，
+#   替身/mock 的自动属性不算。范围只来自结构化 regime，不读模型参数或自然语言。
+# 函数用途: 为快照组装一个工具的运行时绑定，并让工具说明与本 run 的路径范围一致。
+def _snapshot_runtime(name: str, tool: object, availability: ToolAvailability, regime: str) -> ToolRuntime:
+    scoped = getattr(type(tool), "model_spec_for_path_scope", None)
+    model_spec = scoped(tool, regime) if callable(scoped) else getattr(tool, "model_spec", None)
+    runtime_policy = getattr(tool, "runtime_policy", None)
+    if not isinstance(model_spec, ToolModelSpec) or not isinstance(runtime_policy, ToolRuntimePolicy):
+        raise TypeError(f"registered tool must declare ToolModelSpec and ToolRuntimePolicy: {name}")
+    return ToolRuntime(model_spec=model_spec, runtime_policy=runtime_policy, handler=tool, availability=availability)
+
+
 def _safe_tool_availability(tool: BaseTool) -> ToolAvailability:
     try:
         return tool.availability()

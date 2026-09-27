@@ -27,6 +27,28 @@
 - **变异**（3 次，都命中预期用例）：①`_fixed_request_tokens` 恒返回 0 → 4 项失败；
   ②`retained_ir_facts` 恒返回 `(0, 0)` → 2 项失败；③TUI 不渲染固定开销 → 1 项失败。还原后补丁逐字一致。
 
+## 工具说明按调用方实际路径范围给出（2026-09-27，分支 `claude/9b-read-file-scope`，基于 `f3398da7c`）
+
+- **口径**：read_file / list_files 的说明末句按本 run 的有效 owner 墙三选一（有墙 / 无墙 full / 无墙 normal），
+  与 `PathAccessPolicy.check` 一一对应；有效墙只由 `path_access_policy.effective_owner_scope_root` 算出（写边界、执行门、
+  快照冻结共用）。说明在 `_tool_snapshots_for_run` 冻结快照时选定，`schema_hash` / `snapshot_hash` 不变。
+- **新测试**（`tests/test_tool_path_scope_descriptions.py`，6 项）：
+  - 三种末句：只换末句，full 与原说明逐字相同，有墙版本写出 PATH_OWNER_SCOPE_BLOCKED 且不提 capability_request，schema_hash 相同；
+  - 文本与路径门一致：对 owner home、shared、墙外、危险目录、凭据文件取样，门返回的每个拒绝码都写在对应范围的说明里；
+  - 权威函数的优先级（子代理墙 > 自身墙 > 冻结值 > 注册表墙）；
+  - 执行门：Full Access 父注册表上带冻结子代理墙的 read_file 在授权阶段被拒（PATH_OWNER_SCOPE_BLOCKED），不带墙的主 run 能读；
+  - 哈希不变，快照不传范围时按注册表自己的墙渲染；
+  - 事故回归（假 LLM）：Full Access 父代理的 task_local 子代理，线上发出的 tools 是墙内说明；子代理 compact 缓存面与模型轮
+    逐字一致、两次渲染字节相同；同一注册表的主 run（带“受限”字样的自然语言）仍是原句。
+- **变异验证（12 种，11 种被抓住，逐个字节级还原）**：快照改用注册表的墙、说明算进 schema_hash、有墙/full 文本互换、
+  normal 漏掉例外句、list_files 不按范围、compact 绕过冻结点、快照默认忽略注册表墙、权威函数把冻结值排到自身墙前、
+  丢掉 task_local 墙、执行门忽略冻结值（原有 15 个墙相关测试文件都没抓住，靠新增的执行门测试抓住）、写边界不看子代理上下文。
+  没抓住的 1 种是包入口读取判定忽略冻结值：该处只给 skill_search 用，现有参数里没有会碰墙的路径，属于原有覆盖缺口；
+  本次对它只是行为等价的替换。
+- **顺带发现（未改）**：写边界只带冻结墙、不授予外部工作目录时，子代理读取“工作区根目录下但在 owner home 外”的文件，
+  处理器的“路径疑似拼写错误”提示先触发，返回 TOOL_INVALID_ARGUMENTS，并建议用同一路径重试，与“墙外路径反复重试”
+  是同一类问题；生产中子代理是否总会继承父代理工作区授权尚未核实，建议另开切片确认。
+
 ## 配置告警不再回显凭据原值（2026-09-27，dev 审 a95746edc 时发现，my-agent 修）
 
 - **来源**：`/settings` 总览开始显示配置告警后，dev 指出 `settings/services/_normalize.py` 里几处告警把用户写的原始值

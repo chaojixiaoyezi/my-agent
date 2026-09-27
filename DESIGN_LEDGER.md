@@ -16,6 +16,14 @@ C18把猜错成员路径误归快照失效，原恢复因此要求重新授权�
 
 G05首次提示准备被长input_refs的路径查询异常中断。修复复用原read_refs/unresolved合同：每个候选exists/resolve的OSError仅影响该候选，InterruptedError继续传播，其它根和引用正常查找；不截短引用、不从说明猜路径、不增加授权或状态。参考仅核本地Hermes逐引用异常隔离，未引入其解析器。65项定向及独立窄审通过，原生失败和包申请自动路由缺口分别保留，见[当前验收](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#c17并发资料交接与输入引用修复2026-09-27)。
 
+## 工具说明按调用方实际路径范围给出（2026-09-27，分支 `claude/9b-read-file-scope`，本地验证通过，待集成）
+
+read_file / list_files 原说明“可直接读任意绝对路径……无需额外授权”对有 owner 墙的调用方不成立（所有子代理、远程/IM owner、非 Full Access 的本机主代理），87cf12677 现场的子代理据此反复重试墙外路径。现在说明末句按本 run 的读取范围三选一：有墙时写明只能读自己的数据目录、shared 公共区和本任务明确授权的外部工作目录，其它路径在授权阶段被拒并返回 PATH_OWNER_SCOPE_BLOCKED 等 PATH_*_BLOCKED 错误码；无墙 full 保持原句；无墙 normal 在原句后补危险目录与凭据文件的例外。三句与 `PathAccessPolicy.check` 一一对应，由测试钉住。
+
+有效 owner 墙只来自 `path_access_policy.effective_owner_scope_root`（子代理/控制面的墙 > agent 当前工具视图的墙 > 写边界已冻结的值 > 执行注册表的墙）：写边界合并、执行门、快照冻结都调用它，旧的私有 `_effective_owner_scope` 已删；子代理读取预检和包入口读取判定也改用它。说明在 `loop_support._tool_snapshots_for_run` 冻结快照时选定——Full Access 父代理的 task_local 子代理与父代理共用一张没有墙的注册表，墙是按 run 施加的，所以不能在工具构造时定；子代理 compact 缓存面走同一冻结点。`schema_hash` 只含 input_schema、`snapshot_hash` 只含名字/schema_hash/可用性/可见性，都不含顶层说明，二者不变。
+
+**不加开关的归类理由**：这是更正一句对有墙调用方不成立的说明，文本由执行门同一个结构化事实决定，属于 AGENTS.md 里“纯 bug fix、文案修正”一类，不带来新行为、联网、写盘或后台任务；再留一条发错说明的旧路径违背“确定不用的旧路径要删”。
+
 ## 能力包资料纠错沿显式版本发布（2026-09-27，B0.1.4私有更新已验）
 
 已确认B原方法把镜头自身ID与所属场次外键写得含混，现只澄清场次和镜头对象各自映射、每个目标镜头只引用目标场次，并沿既有object_mappings表达一对多/多对一。以B0.1.4候选记录两份内容资源的改变，原检查器、schema、模板、示例与许可字节保持；不加入转换器或专项宿主逻辑。56项已有组件及可重复构建通过，11资源与源码一致；随后同一私有Gateway的原生TUI完成热更新，281旧文件、127旧任务版本记录、6配置及其余两包保持。新版本模型采用尚未验证；G04其他字段/限制错误和65k失败继续保留，不能把资料纠错称为全链质量修复。详见[版本来源](examples/capability-packages/drama-workflow-b/PROVENANCE.md#本包-014-修订)和[验证记录](TESTS.md#b014字段映射资料纠正2026-09-27)。
