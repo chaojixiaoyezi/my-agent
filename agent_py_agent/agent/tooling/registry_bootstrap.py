@@ -1,5 +1,6 @@
-# LLM: 工具注册的装配点，按注册参数构造内置工具；只注册不执行，权限仍由原动作策略裁决。
-# 模块用途: 把文件、归档读取、命令、网页等内置工具注册进工具表。
+# LLM: 工具注册的装配点，按注册参数构造内置工具；可信来源合同和语法反馈开关由 core 注入，构造不读私有资源，
+#   只注册不执行，权限仍由原动作策略逐调用裁决。
+# 模块用途: 把文件、归档读取、命令、网页等内置工具注册进工具表，让来源与可选诊断沿同一权限链连接。
 from __future__ import annotations
 
 from typing import Any
@@ -51,8 +52,9 @@ def register_base_tools(registry: Any, params: Any) -> None:
 
 
 
-# LLM: 文件类工具与归档读取工具在这里按注册参数构造；artifact 读取额度只传字符数（窗口固定在工具内），只注册不执行工具。
-# 函数用途: 把列目录、找文件、读写文件、搜索和归档读取等工具注册进工具表。
+# LLM: 文件类工具与归档读取工具在这里按注册参数构造；source resolver/schema 和语法开关只由宿主注入，三写入口共用配置；
+#   artifact 读取额度只传字符数（窗口固定在工具内），只注册不执行，逐调用仍由 Registry 裁剪目标权限。
+# 函数用途: 把列目录、找文件、读写文件、搜索和归档读取等工具注册进工具表，装配路径、配额、同源输入及可选诊断。
 def _register_filesystem_tools(registry: Any, params: Any) -> None:
     workspace_roots = registry.workspace_roots
     access_options = filesystem_access_options(
@@ -62,6 +64,7 @@ def _register_filesystem_tools(registry: Any, params: Any) -> None:
         protected_persona_root=params.protected_persona_root,
         owner_quota_max_bytes=getattr(params, "owner_quota_max_bytes", 0),
         owner_quota_policy_available=getattr(params, "owner_quota_policy_available", True),
+        enable_file_syntax_diagnostics=params.enable_file_syntax_diagnostics,
     )
     registry.register(
         ListFilesTool(registry.workspace_root, params.max_entries, workspace_roots, access_options)
@@ -90,6 +93,8 @@ def _register_filesystem_tools(registry: Any, params: Any) -> None:
                 max_inline_content_chars=params.tool_write_inline_max_chars,
                 access_options=access_options,
                 runtime_fact_roots=_runtime_fact_roots(registry, params),
+                source_resolver=getattr(params, "file_source_resolver", None),
+                source_ref_schema=getattr(params, "file_source_ref_schema", None),
             ),
         )
     )

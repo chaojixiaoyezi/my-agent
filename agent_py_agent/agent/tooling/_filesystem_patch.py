@@ -1,6 +1,6 @@
 
-# LLM: canonical 补丁预检和原子变更复用精确路径；成功或部分提交把真实引用交给统一工具账本，展示 diff 不作权限依据。
-# 模块用途: 应用新增、更新、移动、删除文本文件的补丁，报告已提交文件与差异，不让父级丢失补丁产物。
+# LLM: canonical 补丁预检和原子变更复用精确路径；普通诊断收集故障不改变权限、执行顺序或部分提交事实。
+# 模块用途: 应用增改移删文本补丁，报告已提交引用、差异及可独立降级的有限语法反馈。
 
 from __future__ import annotations
 
@@ -21,6 +21,11 @@ from ._filesystem_read import (
 )
 from ._filesystem_write import _atomic_write_bytes
 from ._persona_write_guard import _persona_approval_write_error
+from .file_syntax_diagnostics import (
+    FileSyntaxDiagnostics,
+    attach_syntax_diagnostics,
+    update_syntax_diagnostics,
+)
 from .models import (
     EffectResolverPolicy,
     IdempotencyPolicy,
@@ -112,8 +117,8 @@ def _build_apply_patch_model_spec() -> ToolModelSpec:
     )
 
 
-# LLM: 权限和执行仍由统一工具链处理；回执须包含已提交文件的精确引用，供归档和子代理交接共用。
-# 类用途: 提供多文件补丁工具，连同部分失败事实一起报告，不另建文件交付通道。
+# LLM: 权限和执行仍由统一工具链处理；有限语法回执只含已提交地址，不能更改写入结果或建立另一验收通道。
+# 类用途: 提供多文件补丁工具，报告精确引用、部分失败及可选语法观察。
 class ApplyPatchTool(FileSystemTool):
     model_spec = _build_apply_patch_model_spec()
     runtime_policy = ToolRuntimePolicy(
@@ -165,9 +170,10 @@ class ApplyPatchTool(FileSystemTool):
                 roots.append(str(path.resolve()))
         return tuple(dict.fromkeys(roots))
 
-    # LLM: 仅已提交目标生成 artifact_refs；部分失败不宣称未触及目标有产物。路径来自预检，不解析输出正文。
-    # 函数用途: 应用文本补丁，返回真实文件交接、删除记录及终端差异；display 不参与权限和成功判断。
+    # LLM: artifact_refs 和语法观察只来自实际提交；诊断预算属于本次调用，部分失败保留原 effect，不解析输出正文。
+    # 函数用途: 应用补丁，返回引用、删除记录、差异及可选观察，展示不参与权限和成功判断。
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
+        diagnostics = FileSyntaxDiagnostics() if self.enable_file_syntax_diagnostics else None
         try:
             patch = _text_param(params.get("patch"), name="patch", max_chars=_MAX_WRITE_TEXT_CHARS)
             changes = _parse_simple_patch(patch)
@@ -181,19 +187,19 @@ class ApplyPatchTool(FileSystemTool):
                 )
             quota_changes, display = _preview_patch_quota_changes(changes, self)
             with self.quota_changes(quota_changes):
-                touched = _apply_simple_patch(changes, self, versions=versions)
+                touched = _apply_simple_patch(changes, self, versions=versions, diagnostics=diagnostics)
         except StaleFileVersionError as exc:
             return ToolHandlerOutcome("apply_patch", False, str(exc), error_code="STALE_VERSION", effect_outcome="not_started", retryable=True)
         except (OwnerQuotaExceeded, OwnerQuotaUnavailable) as exc:
             return owner_quota_error_result("apply_patch", exc)
         except PatchApplyError as exc:
-            return ToolHandlerOutcome(
+            return attach_syntax_diagnostics(ToolHandlerOutcome(
                 "apply_patch", False, f"补丁未全部完成，已提交 {len(exc.touched)} 个路径；失败目标 {exc.failed_path}: {exc}",
                 error_code=exc.error_code, effect_outcome="failed" if exc.touched else "not_started" if exc.error_code == "STALE_VERSION" else "unknown",
                 result_envelope={"files_modified": exc.touched, "failed_path": exc.failed_path,
                                  "artifact_refs": _patch_artifact_refs(self, exc.touched, versions),
                                  "partial_commit": bool(exc.touched), "failed_path_effect": "unknown"},
-            )
+            ), diagnostics)
         except PatchTargetMissingError as exc:
             # 目标文件不存在(Update/Delete)→PATH_NOT_FOUND(改路径/先定位)，而非
             # TOOL_INVALID_ARGUMENTS——后者会让模型反复重写补丁文本而非确认路径。
@@ -204,7 +210,7 @@ class ApplyPatchTool(FileSystemTool):
             return ToolHandlerOutcome("apply_patch", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
         except OSError as exc:
             return ToolHandlerOutcome("apply_patch", False, f"补丁写入失败: {exc}", error_code="TOOL_EXECUTION_FAILED")
-        return ToolHandlerOutcome(
+        return attach_syntax_diagnostics(ToolHandlerOutcome(
             "apply_patch",
             True,
             "已应用补丁: " + ", ".join(touched),
@@ -213,7 +219,7 @@ class ApplyPatchTool(FileSystemTool):
                 "artifact_refs": _patch_artifact_refs(self, touched, versions),
                 **({"display": display} if display else {}),
             },
-        )
+        ), diagnostics)
 
 
 # LLM: 只用预检路径及实际提交清单；保留删除墓碑供原 registry 更新，不重新猜 cwd 或扫描文件。
@@ -355,9 +361,10 @@ def _append_update_line(current: str, old: list[str], new: list[str]) -> None:
     )
 
 
-# LLM: 同份补丁的自有修改推进本地观察版本；外部版本变化必须报部分提交，不能回滚覆盖并发写入。
-# 函数用途: 按顺序执行预检过的补丁，每个目标提交前复核版本。
-def _apply_simple_patch(changes: list[dict[str, Any]], tool: FileSystemTool, *, versions: dict | None = None) -> list[str]:
+# LLM: 同份补丁共享局部诊断预算和版本；外部变化必须报部分提交，已提交观察保留，不回滚并发写入。
+# 函数用途: 顺序执行预检补丁，复核版本并透传本次调用的可选语法观察。
+def _apply_simple_patch(changes: list[dict[str, Any]], tool: FileSystemTool, *, versions: dict | None = None,
+                        diagnostics: FileSyntaxDiagnostics | None = None) -> list[str]:
     touched: list[str] = []
     for change in changes:
         target = tool.resolve_write_path(str(change["path"]))
@@ -365,7 +372,7 @@ def _apply_simple_patch(changes: list[dict[str, Any]], tool: FileSystemTool, *, 
         try:
             if versions is not None:
                 check_file_version(target, versions.get(target))
-            _apply_patch_change(change, target, tool, touched)
+            _apply_patch_change(change, target, tool, touched, diagnostics)
             if versions is not None:
                 changed = (tool.resolve_write_path(name) for name in touched[previous_count:])
                 versions.update((path, file_version(path)) for path in changed)
@@ -374,16 +381,17 @@ def _apply_simple_patch(changes: list[dict[str, Any]], tool: FileSystemTool, *, 
     return touched
 
 
-# LLM: 单目标分发不拥有版本或事务权威；调用方保存前置版本和已提交列表，失败不得隐藏部分副作用。
-# 函数用途: 执行已解析的增删改操作，成功写入路径追加到调用方的提交记录。
-def _apply_patch_change(change: dict, target: Path, tool: FileSystemTool, touched: list[str]) -> None:
+# LLM: 单目标分发不拥有版本或事务权威；调用方持有预算和提交列表，失败不得隐藏已发生的副作用。
+# 函数用途: 分发增删改操作，并传递同一份本次调用语法观察。
+def _apply_patch_change(change: dict, target: Path, tool: FileSystemTool, touched: list[str],
+                        diagnostics: FileSyntaxDiagnostics | None = None) -> None:
     kind = str(change["type"])
     if kind == "add":
-        _apply_add_patch(change, target, tool, touched)
+        _apply_add_patch(change, target, tool, touched, diagnostics)
     elif kind == "delete":
-        _apply_delete_patch(target, tool, touched)
+        _apply_delete_patch(target, tool, touched, diagnostics)
     elif kind == "update":
-        _apply_update_patch(change, target, tool, touched)
+        _apply_update_patch(change, target, tool, touched, diagnostics)
     else:
         raise ValueError(f"未知补丁类型: {kind}")
 
@@ -512,36 +520,43 @@ def _persona_patch_paths(changes: list[dict[str, Any]], tool: FileSystemTool) ->
             yield tool.resolve_write_path(move_to)
 
 
-# LLM: add 的发布使用原子“不存在才创建”；不能以提前 exists 检查充当并发保护。
-# 函数用途: 新增补丁文件并登记已落盘目标，保留其他调用并发创建的文件。
+# LLM: 新增仍用 create_only 防并发覆盖；发布和 touched 登记后隔离诊断收集普通异常，取消仍传播。
+# 函数用途: 创建补丁文件并汇集可选语法回执，诊断故障不制造部分写入失败。
 def _apply_add_patch(
     change: dict[str, Any],
     target: Path,
     tool: FileSystemTool,
     touched: list[str],
+    diagnostics: FileSyntaxDiagnostics | None = None,
 ) -> None:
     if target.exists():
         raise ValueError(f"新增文件已存在: {tool.display_path(target)}")
-    _atomic_write_bytes(target, str(change["content"]).encode("utf-8"), create_only=True)
+    observation = _atomic_write_bytes(target, str(change["content"]).encode("utf-8"), create_only=True, diagnostics=diagnostics)
     touched.append(tool.display_path(target))
+    update_syntax_diagnostics(diagnostics, observation)
 
 
-def _apply_delete_patch(target: Path, tool: FileSystemTool, touched: list[str]) -> None:
+# LLM: unlink 成功才记提交并移除观察；隔离 discard 普通异常，诊断不可用时不输出旧地址，取消仍传播。
+# 函数用途: 删除补丁文件并更新可选诊断，不因观察清理失败中止真实文件修改。
+def _apply_delete_patch(target: Path, tool: FileSystemTool, touched: list[str],
+                        diagnostics: FileSyntaxDiagnostics | None = None) -> None:
     if not target.exists():
         raise PatchTargetMissingError(f"删除文件不存在: {tool.display_path(target)}")
     if not target.is_file():
         raise ValueError(f"删除目标不是文件: {tool.display_path(target)}")
     target.unlink()
     touched.append(tool.display_path(target))
+    update_syntax_diagnostics(diagnostics, deleted_path=target)
 
 
-# LLM: 编辑使用原始字节格式；移动通过 create_only 发布，源删除前先登记目标以报告部分副作用。
-# 函数用途: 更新或移动补丁文件，保留编码和可执行位；目标已存在或并发出现时不覆盖。
+# LLM: 移动先登记目标再删除源；诊断收集统一隔离普通异常，真实发布或删除失败仍保留原部分提交语义。
+# 函数用途: 按原编码和权限更新或移动文件，诊断失败不阻断源删除，也不让旧观察残留到回执。
 def _apply_update_patch(
     change: dict[str, Any],
     target: Path,
     tool: FileSystemTool,
     touched: list[str],
+    diagnostics: FileSyntaxDiagnostics | None = None,
 ) -> None:
     if not target.exists():
         raise PatchTargetMissingError(f"更新文件不存在: {tool.display_path(target)}")
@@ -553,14 +568,16 @@ def _apply_update_patch(
     if destination != target and destination.exists():
         raise ValueError(f"移动目标已存在，未覆盖: {tool.display_path(destination)}")
     check_file_version(target, observed_version)
-    _atomic_write_bytes(destination, encode_like_original(updated, original),
+    observation = _atomic_write_bytes(destination, encode_like_original(updated, original),
                         create_only=destination != target, file_mode=target.stat().st_mode & 0o777,
-                        expected_version=observed_version if destination == target else "absent")
+                        expected_version=observed_version if destination == target else "absent", diagnostics=diagnostics)
     touched.append(tool.display_path(destination))
+    update_syntax_diagnostics(diagnostics, observation)
     if destination != target:
         check_file_version(target, observed_version)
         target.unlink()
         touched.append(tool.display_path(target))
+        update_syntax_diagnostics(diagnostics, deleted_path=target)
 
 
 # LLM: 先在原行数组定位各块、最后逆序应用；歧义必须要求更多上下文。

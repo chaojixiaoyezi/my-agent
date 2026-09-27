@@ -68,8 +68,8 @@ def execute_goal_control_operation(request: GoalControlRequest) -> ConversationC
         return handler(request, current)
 
 
-# LLM: Goal 绑定既有活动任务或新建根任务；只有通过冲突检查、且没有活动任务时才初始化空目录。
-# 函数用途: 给当前工作建立持续目标；空闲时建立一个根任务，已有未结束目标则提示修改。
+# LLM: Goal 沿原任务绑定；可选选包 pending 仅用于真正新链接，资格读取无模型/正文 I/O，不为旧任务补选。
+# 函数用途: 给当前工作建立持续目标；空闲时建立根任务，已有未结束目标则提示修改。
 def _create_goal(request: GoalControlRequest) -> ConversationControlResult:
     scope = request.scope
     if any(goal.status != "complete" for goal in request.store.goals.list(request.thread.thread_id)):
@@ -106,6 +106,9 @@ def _create_goal(request: GoalControlRequest) -> ConversationControlResult:
         )
     except ValueError as exc:
         return ConversationControlResult("goal", False, str(exc), error_code="GOAL_INVALID_REQUEST")
+    from ..capability.package_selection_scope import new_task_capability_selection
+
+    selection = new_task_capability_selection(request.owner_agent, workspace_root=(request.initial_cwd or None))
     request.store.tasks.bind(
         {
             "thread_id": request.thread.thread_id,
@@ -116,7 +119,8 @@ def _create_goal(request: GoalControlRequest) -> ConversationControlResult:
             "work_name": goal.name,
             "duration_seconds": goal.duration_seconds,
             "cancellation_scope": "foreground",
-        }
+        },
+        **({"capability_selection": selection} if selection is not None else {}),
     )
     request.owner_agent.local_store.task_registry.register_task(
         goal.task_id,

@@ -1,5 +1,5 @@
-# LLM: 原权限、Schema、搜索和执行共用快照；宿主展示投影只折叠本轮名称，不热改共享工具、注册身份或真实loaded状态。
-# 模块用途: 装配工具并交给唯一执行器，沿原目录与搜索展示可找回的可选工具。
+# LLM: 权限、Schema、搜索和执行共用快照；来源合同与语法开关由宿主注入，展示投影不热改共享工具或身份。
+# 模块用途: 装配同源声明和可选反馈的工具并交给唯一执行器，沿原目录与搜索展示工具。
 from __future__ import annotations
 
 """Bind tools into one immutable runtime snapshot and delegate canonical calls.
@@ -24,6 +24,7 @@ from ..settings.defaults import default_config_int
 from .artifact import ReadArtifactTool
 from .content_transport_policy import (
     MAX_INLINE_WRITE_CONTENT_CHARS,
+    FileSourceContent,
     tool_content_transport_protocol,
 )
 from .executor import ToolExecution, ToolExecutor, ToolExecutorRequest, ToolOutputProjection
@@ -78,8 +79,8 @@ class CatalogRenderConfig:
     deferred_categories: list[str] = field(default_factory=list)
 
 
-# LLM: ToolRegistry 的单一装配配置；审批读取器和可选插件 owner 由 core 绑定，不能从工作区或模型参数推导；联测 owner/worker。
-# 类用途: 汇总工作区、权限、工具上限和可信插件身份，未启用插件时不读安装表或启动服务。
+# LLM: ToolRegistry 单一装配配置；审批、来源合同和语法反馈开关由 core 绑定，不从模型参数推导；联测 owner/worker 和文件反馈。
+# 类用途: 汇总工作区、权限、工具上限和可选文件诊断，构造时不读取包或启动服务。
 @dataclass(frozen=True)
 class ToolRegistryParams:
     workspace_root: Path
@@ -116,6 +117,10 @@ class ToolRegistryParams:
     catalog_show_truncated_notice: bool = True
     tool_detail_max_chars: int = 0
     tool_write_inline_max_chars: int = MAX_INLINE_WRITE_CONTENT_CHARS
+    enable_file_syntax_diagnostics: bool = False
+    # 仅由宿主成对装配解析器和其输入声明；文件工具不接受模型提供的读取回调或 owner 身份。
+    file_source_resolver: Callable[[object], FileSourceContent] | None = None
+    file_source_ref_schema: dict[str, Any] | None = None
     artifact_read_budget_max_chars: int = field(
         default_factory=lambda: _agent_config_int("tool_artifact_read_budget_max_chars")
     )

@@ -1,5 +1,5 @@
 # LLM: 包描述是未授权的静态声明；不接受宿主身份、配置值或启用事实，命令和工具 schema 必须沿现有合同。
-# 模块用途: 校验本地插件的内容声明（Python 包或 v6 非 Python 包），提供无需导入插件的帮助信息及不可变包元数据。
+# 模块用途: 校验 Python、非 Python 与 v7 纯内容能力包，提供无需导入插件的帮助信息及不可变包元数据。
 
 from __future__ import annotations
 
@@ -8,6 +8,12 @@ import keyword
 import re
 from dataclasses import asdict, dataclass
 
+from .capability_package_manifest import (
+    CAPABILITY_PACKAGE_SCHEMA,
+    CapabilityDeclaration,
+    CapabilityFile,
+    validate_capability_files,
+)
 from .command_arguments import CommandActionSpec
 from .command_declarations import command_action_from_payload, declaration_list
 from .plugin_commands import PluginCommandSpec
@@ -173,11 +179,12 @@ class PluginManifest:
     host_api: tuple[str, ...] = ()
     # v6 非 Python 入口；为 None 时是 Python 包（entry_module/entry_wheel/wheels 生效）
     entry: PluginEntry | None = None
-    files: tuple[PluginFile, ...] = ()
+    files: tuple[PluginFile | CapabilityFile, ...] = ()
     platforms: tuple[str, ...] = ()
+    capability: CapabilityDeclaration | None = None
 
     # LLM: 直接构造与 JSON 读取共用约束；只开放工具动作和指向本包面板的展示动作，不接受包指定管理操作。
-    #   有面板的纯展示包可以没有工具；两者都没有则拒绝。
+    #   纯内容包没有入口或公开工具；旧可执行协议仍要求工具或面板，不能借新协议放宽旧声明。
     # 函数用途: 在包进入候选安装前拒绝重复身份、缺失入口及动作指向未声明的工具或面板。
     def __post_init__(self) -> None:
         _text(self.version)
@@ -195,7 +202,9 @@ class PluginManifest:
                 or any(not isinstance(name, str) or not _SKILL_NAME.fullmatch(name) for name in self.skills)):
             raise ValueError("随包 Skill 名单无效")
         # 入口校验排在 Skill 名单之后：v6 要拿已校验的 Skill 名单核对随包 SKILL.md
-        if self.entry is None:
+        if self.is_content_only:
+            self._validate_content_entry()
+        elif self.entry is None:
             self._validate_python_entry()
         else:
             self._validate_file_entry()
@@ -204,7 +213,7 @@ class PluginManifest:
             raise ValueError("宿主 API 权限名单无效")
         tool_names = {tool.name for tool in self.tools}
         panel_ids = {panel.id for panel in self.panels}
-        if len(tool_names) != len(self.tools) or not (tool_names or panel_ids):
+        if len(tool_names) != len(self.tools) or not (tool_names or panel_ids or self.is_content_only):
             raise ValueError("工具重名，或既没有工具也没有面板")
         _validate_observation_pairs(self.tools)
         for action in self.actions:
@@ -214,6 +223,20 @@ class PluginManifest:
         _ = self.command_spec
         canonical = canonicalize_tool_input_schema(json.loads(self.settings_schema_json))
         object.__setattr__(self, "settings_schema_json", _json(canonical))
+
+    # LLM: 类型由显式 v7 能力声明决定，不从文件名或缺少 MCP 入口猜测；调用方据此排除进程路径。
+    # 函数用途: 区分无需环境和服务的纯内容包。
+    @property
+    def is_content_only(self) -> bool:
+        return self.capability is not None
+
+    # LLM: 首版能力包不混入执行入口、公开 Skill 或宿主授权，内部脚本只作为内容；运行继续经过原工具链。
+    # 函数用途: 校验无进程能力包及其私有文件清单。
+    def _validate_content_entry(self) -> None:
+        if (self.entry is not None or self.entry_module or self.entry_wheel or self.wheels or self.platforms
+                or self.tools or self.actions or self.default_action or self.panels or self.skills or self.host_api):
+            raise ValueError("纯内容能力包不能声明执行入口或公开贡献")
+        validate_capability_files(self.capability, self.files)
 
     # LLM: Python 包（v1–v5）必须有合法模块入口和包含入口 wheel 的 wheel 集合，且不能夹带 v6 字段。
     # 函数用途: 校验 Python 入口与 wheel 声明一致。
@@ -292,6 +315,11 @@ class PluginManifest:
     # LLM: 输出只包含协议声明，不含私有运行字段；JSON 形态由命令 dataclass 和原 schema 投影产生。
     # 函数用途: 生成可复读的静态包描述。
     def to_payload(self) -> dict:
+        if self.is_content_only:
+            return {"schema_version": CAPABILITY_PACKAGE_SCHEMA, "package_kind": "capability",
+                    "plugin_id": self.plugin_id, "version": self.version, "summary": self.summary,
+                    "capability": self.capability.to_payload(), "files": [asdict(item) for item in self.files],
+                    "settings_schema": self.settings_schema}
         if self.entry is not None:
             return self._v6_payload()
         return json.loads(
@@ -329,6 +357,8 @@ class PluginManifest:
         try:
             _json(payload)
             version = payload.get("schema_version") if isinstance(payload, dict) else None
+            if version == CAPABILITY_PACKAGE_SCHEMA:
+                return cls._from_content(payload)
             if version == PLUGIN_PACKAGE_SCHEMA_V6:
                 return cls._from_v6(payload)
             if version not in _SCHEMA_FIELDS:
@@ -363,6 +393,20 @@ class PluginManifest:
             )
         except (ValueError, TypeError, KeyError, AttributeError, RecursionError) as exc:
             raise PluginPackageError("invalid_manifest", "插件包描述无效。") from exc
+
+    # LLM: v7 的 package_kind 必须显式为 capability；旧运行字段不能借空值混入新协议，缺省仅存在于内存投影。
+    # 函数用途: 恢复纯内容能力声明，不创建环境或 Skill 贡献。
+    @classmethod
+    def _from_content(cls, payload: dict) -> PluginManifest:
+        row = _fields(payload, "schema_version package_kind plugin_id version summary capability files settings_schema")
+        if row["package_kind"] != "capability":
+            raise ValueError("能力包类型无效")
+        return cls(plugin_id=row["plugin_id"], version=row["version"], summary=row["summary"],
+                   entry_module="", entry_wheel="", wheels=(), actions=(), default_action="", tools=(),
+                   settings_schema_json=_json(row["settings_schema"]),
+                   capability=CapabilityDeclaration.from_payload(row["capability"]),
+                   files=tuple(CapabilityFile(**_fields(item, "path sha256 executable"))
+                               for item in declaration_list(row["files"])))
 
     # LLM: v6 字段集合固定（面板、Skill、宿主 API 可为空列表）；Python 入口字段在 v6 里不存在，构造时置空。
     # 函数用途: 从 v6 JSON 恢复非 Python 包描述，错误由 from_payload 统一转为包描述无效。

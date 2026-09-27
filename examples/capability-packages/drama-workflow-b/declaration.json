@@ -1,0 +1,58 @@
+{
+  "plugin_id": "drama-workflow-b",
+  "version": "0.1.3",
+  "summary": "核对短剧制作资料的连续性与交接",
+  "capability": {
+    "description": "适用于人物、场景、道具、分集、对白节拍和分镜的结构化工作流与报告；参考图只作计划，媒体未验证。",
+    "keywords": [
+      "短剧",
+      "工作流",
+      "人物设定",
+      "道具",
+      "分镜",
+      "连续性",
+      "制作报告"
+    ],
+    "entry_document": "CAPABILITY.md"
+  },
+  "files": [
+    {
+      "path": "CAPABILITY.md"
+    },
+    {
+      "path": "LICENSE"
+    },
+    {
+      "path": "PROVENANCE.md"
+    },
+    {
+      "path": "licenses/shuohao-skills-LICENSE"
+    },
+    {
+      "path": "licenses/shuohao-skills-NOTICE"
+    },
+    {
+      "path": "methods/review.md"
+    },
+    {
+      "path": "methods/workflow.md"
+    },
+    {
+      "path": "resources/example-project.json"
+    },
+    {
+      "path": "scripts/check_continuity.py"
+    },
+    {
+      "path": "templates/handoff.json"
+    },
+    {
+      "path": "templates/project.json"
+    }
+  ],
+  "settings_schema": {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": false
+  }
+}

@@ -1,7 +1,8 @@
 
 # LLM: 本模块定义 canonical 会话状态；v10 模型选择三字段全缺时迁移为未知，部分或坏事实拒绝，不能伪造旧手动事件。
 # Compact提交命令可只推进原检查点head；局部摘要不成为ConversationThread的全线程投影，不新增持久任务摘要表。
-# 模块用途: 保存会话、消息、模型选择版本和独立数值快照；选择来源不代表自动采用授权或永久固定。
+# 可选一次能力选择仅由 TaskLink.to_dict/from_dict 保存；缺失不回填，坏 marker 不阻断主任务，其它身份/pins仍严格校验。
+# 模块用途: 保存会话、消息、模型版本与任务选择标记；选择来源不代表采用授权或永久固定。
 from __future__ import annotations
 
 import uuid
@@ -10,6 +11,13 @@ from typing import Any
 
 from ..backends.reasoning_control import normalize_reasoning_level
 from ..settings.decision_settings_schema import empty_decision_settings
+from .capability_selection_state import (
+    CAPABILITY_SELECTION_INVALID,
+    CAPABILITY_SELECTION_KEY,
+    InvalidTaskCapabilitySelection,
+    TaskCapabilitySelection,
+    decode_capability_selection,
+)
 
 SCHEMA_VERSION = "conversation_thread.v10"
 _MODEL_SELECTION_FIELDS = (
@@ -178,6 +186,9 @@ def is_audit_background_transcript_entry(entry: MessageLogEntry) -> bool:
     )
 
 
+# LLM: 任务链接是同 owner/thread 的唯一关联；pins 固定版本，一次选择 marker 只记领取/结果摘要，均不复制安装权限。
+# 序列化必须用 to_dict：缺 marker 不写键，坏 marker 保留原值并只禁用增强；同步 TaskStore CAS、晋升与 Goal 新建入口。
+# 类用途: 保存任务归属、生命周期、版本与一次选择事实，恢复仍读取此原记录。
 @dataclass(frozen=True)
 class ThreadTaskLink:
     thread_id: str
@@ -227,12 +238,35 @@ class ThreadTaskLink:
     # It is run-scoped execution context, not published source configuration:
     # on conflict the prepared ``goal`` remains authoritative.
     run_prompt: str = ""
+    # 能力包首次读取时固定的版本；只保存在当前任务链接，不能从会话摘要或名称推断。
+    skill_snapshot_refs: tuple[dict[str, str], ...] = ()
+    capability_selection: TaskCapabilitySelection | None = None
+    # 仅用于无损回写坏 marker；诊断只暴露固定代码，不能记录、展示或执行 raw 内容。
+    capability_selection_corruption: InvalidTaskCapabilitySelection | None = field(default=None, repr=False)
 
+    # LLM: None 完全省略选择键，保持旧序列化字节；损坏 marker 原值保留，不能因更新状态/pins 丢弃证据或重建 pending。
+    # 函数用途: 生成原任务 JSON，仅合法非空选择或已存在坏值使用 host_capability_selection.v1 键。
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        selection = payload.pop("capability_selection")
+        corruption = payload.pop("capability_selection_corruption")
+        if corruption is not None:
+            payload[CAPABILITY_SELECTION_KEY] = corruption["raw"]
+        elif selection is not None:
+            payload[CAPABILITY_SELECTION_KEY] = self.capability_selection.to_dict()
+        return payload
 
+    # LLM: 只提供 bounded 代码，原坏值不进入日志/模型；缺键与坏键必须区分且两者都不能作为待领取资格。
+    # 函数用途: 返回选择增强的非阻断诊断，不改变原任务的读取错误合同。
+    @property
+    def capability_selection_warning_codes(self) -> tuple[str, ...]:
+        return (CAPABILITY_SELECTION_INVALID,) if self.capability_selection_corruption is not None else ()
+
+    # LLM: pins 损坏仍严格拒绝；选择 marker 单独降为只跳过增强的诊断，旧缺键绝不补 pending，其余未知字段沿旧行为忽略。
+    # 函数用途: 恢复任务与版本，保留可选选择标记及原坏值供普通生命周期更新。
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ThreadTaskLink:
+        selection, corruption = decode_capability_selection(data)
         return cls(
             thread_id=str(data.get("thread_id") or ""),
             task_id=str(data.get("task_id") or ""),
@@ -279,7 +313,20 @@ class ThreadTaskLink:
             ),
             run_epoch=max(0, int(data.get("run_epoch") or 0)),
             run_prompt=str(data.get("run_prompt") or ""),
+            skill_snapshot_refs=tuple(_task_skill_refs(data.get("skill_snapshot_refs", []))),
+            capability_selection=selection,
+            capability_selection_corruption=corruption,
         )
+
+
+# LLM: 旧任务无字段时是空集合；新字段损坏必须暴露，不可过滤坏行后继续换用当前包。
+# 函数用途: 严格读回原任务保存的能力引用，不创建安装或授权事实。
+def _task_skill_refs(value: object) -> list[dict[str, str]]:
+    from ..capability.task_references import normalize_skill_reference
+
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("SKILL_TASK_REFERENCES_INVALID")
+    return [normalize_skill_reference(row) for row in value]
 
 
 def thread_task_run_started_at(link: object, *, fallback: float = 0.0) -> float:

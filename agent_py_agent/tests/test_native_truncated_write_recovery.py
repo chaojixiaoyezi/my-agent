@@ -1,25 +1,14 @@
-"""Bug #1 钉子:MiniMax(native) 写长文档 content 被 max_tokens/SSE 截断的修复链。
-
-复现根因:长 content 的 tool_use 参数 JSON 被截断 → 半截 JSON 被静默吞成 {} →
-write_file 收到空参 → TOOL_PARAMETER_REQUIRED → 主代理反复重生成又截断,死循环无恢复。
-
-三条断言(对应 BUG1_native_empty_args_analysis.md 验收 #2):
-  ① 截断不再被静默当成功:流式半截 input_json_delta(+stop_reason=max_tokens 或提前 EOF)
-     → ModelResponse.truncated=True(不再只是无声的 input={})。
-  ② 截断触发恢复:截断空参 write_file 激活长内容恢复(分块写)，不把正常的无工具回复
-     误判成协议不兼容。
-  ③ 有限轮后有终止出口:同一截断空参 write_file 连续失败到上限 → 决策给 break(带证据),
-     不无限重试。
-
-最高优先级零回归:完整闭合 tool_use(JSON 合法、stop_reason=tool_use/见 message_stop)
-必须 truncated=False、行为不变。
-"""
+# LLM: 通过真实 SSE parser、backend 归一和裁决验证 typed 恢复，网络入口为替身；不写业务文件。
+# 模块用途: 区分长度上限与坏参数、EOF、过滤，守住整轮零执行、两次恢复预算及正常调用边界。
 
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
 from agent_py_agent.agent.agent_core.tool_loop.response_decision import (
@@ -29,6 +18,8 @@ from agent_py_agent.agent.agent_core.tool_loop.response_decision import (
     tool_loop_response_decision,
 )
 from agent_py_agent.agent.backends import ModelResponse
+from agent_py_agent.agent.backends.anthropic import AnthropicCompatibleBackend
+from agent_py_agent.agent.backends.base import BackendOptions
 from agent_py_agent.agent.backends.stream_parsers import (
     StreamCompletion,
     anthropic_stream_events,
@@ -45,6 +36,7 @@ from agent_py_agent.agent.tooling.content_recovery_mode import (
     LongContentRecoveryRequest,
     long_content_recovery_context,
 )
+from agent_py_agent.agent.turn_end import should_continue_task
 from agent_py_agent.tests._tool_runtime_harness import (
     make_test_model_spec,
     make_test_protocol_snapshot,
@@ -101,6 +93,135 @@ def _complete_write_sse_lines() -> list[str]:
         json.dumps({"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 12}}),
         json.dumps({"type": "message_stop"}),
     ]
+
+
+# LLM: 只替换 HTTP 入口，保留生产 SSE parser、backend 终态归一和工具适配；不会联网或执行工具。
+# 函数用途: 提供可计数的流式后端，证明错误没有引起额外请求。
+def _stream_backend(lines: list[str]) -> tuple[AnthropicCompatibleBackend, list[dict]]:
+    backend = AnthropicCompatibleBackend(BackendOptions(
+        api_base="https://example.invalid", api_key="fake-unused", model_name="fake",
+        max_tokens=128, stream_enabled=True,
+    ))
+    requests = []
+
+    def request_stream(path, payload, headers):
+        requests.append(payload)
+        return iter(lines)
+
+    backend.request_stream = request_stream
+    return backend, requests
+
+
+# LLM: 构造供应商结构化事件，不用说明文字代替停止原因；保留 block 与 message 边界的独立性。
+# 函数用途: 从正常写调用生成坏 JSON、EOF 和过滤反例，供真实 backend 归一。
+def _write_stream_variant(
+    partial_json: str, stop_reason: str | None, *, close_block: bool = True,
+    message_stop: bool = True,
+) -> list[str]:
+    events = [json.loads(line) for line in _complete_write_sse_lines()]
+    events[2]["delta"]["partial_json"] = partial_json
+    if stop_reason is not None:
+        events[4]["delta"]["stop_reason"] = stop_reason
+    return [json.dumps(event) for event in events if not (
+        (event["type"] == "content_block_stop" and not close_block)
+        or (event["type"] == "message_delta" and stop_reason is None)
+        or (event["type"] == "message_stop" and not message_stop)
+    )]
+
+
+@pytest.mark.parametrize("partial_json,stop_reason,close_block,message_stop,expected_reason", [
+    ('{"path":"a.md",,"content":"x"}', "tool_use", True, True, "MODEL_TOOL_ARGUMENTS_INVALID"),
+    ('{"path":"a.md","content":"unfinished', "tool_use", True, True, "MODEL_TOOL_ARGUMENTS_INVALID"),
+    ('["a.md","x"]', "tool_use", True, True, "MODEL_TOOL_ARGUMENTS_INVALID"),
+    ('{"path":"a.md","content":"unfinished', None, False, False, "MODEL_TOOL_ARGUMENTS_INVALID"),
+    ('{"path":"a.md","content":"x"}', None, True, False, "MODEL_STREAM_INCOMPLETE"),
+    ('{"path":"a.md","content":"x"}', "content_filter", True, True, "MODEL_RESPONSE_CONTENT_FILTERED"),
+], ids=["bad-json", "unfinished-json", "non-object-json", "open-eof", "closed-eof", "content-filter"])
+def test_non_length_stream_error_keeps_typed_failure_without_recovery(
+    tmp_path, partial_json, stop_reason, close_block, message_stop, expected_reason,
+):
+    backend, requests = _stream_backend(_write_stream_variant(
+        partial_json, stop_reason, close_block=close_block, message_stop=message_stop,
+    ))
+    params = _params()
+    response = backend.generate("写入文件", tools=[{"name": "write_file", "input_schema": {"type": "object"}}])
+    assert response.runtime_reason == expected_reason
+    assert response.runtime_status == "error"
+    assert response.runtime_source == "model_provider"
+    assert response.truncated is True
+    assert response.truncated_tool_names == ["write_file"]
+    assert response.tool_use_blocks == []
+
+    decision = _decide(_decision_agent(tmp_path), response, params)
+
+    assert decision.action == "break"
+    assert decision.response is response
+    assert decision.response.stop_reason == (stop_reason or "")
+    assert decision.response.turn_end_reason == "error"
+    assert decision.calls == []
+    assert params.executed_tools == []
+    assert params.tool_context == []
+    assert decision.counters.truncated_write_repairs == 0
+    assert len(requests) == 1
+
+
+def test_real_length_stream_preserves_provider_facts_after_two_repairs(tmp_path, monkeypatch):
+    backend, requests = _stream_backend(_truncated_write_sse_lines())
+    params = _params()
+    counters = ToolLoopRepairCounters()
+    for attempt in range(_NATIVE_TRUNCATED_WRITE_LOOP_LIMIT):
+        response = backend.generate("写入文件", tools=[{"name": "write_file", "input_schema": {"type": "object"}}])
+        assert response.runtime_reason == "MODEL_RESPONSE_TRUNCATED"
+        decision = tool_loop_response_decision(ToolLoopResponseDecisionRequest(
+            agent=_decision_agent(tmp_path), params=params, response=response, counters=counters,
+        ))
+        assert decision.calls == []
+        assert params.executed_tools == []
+        if attempt < _NATIVE_TRUNCATED_WRITE_LOOP_LIMIT - 1:
+            assert decision.action == "continue"
+            counters = decision.counters
+        else:
+            assert decision.action == "break"
+    assert len(requests) == 3
+    assert len(params.tool_context) == 2
+    assert decision.counters.truncated_write_repairs == 2
+    assert decision.response.runtime_reason == "NATIVE_TRUNCATED_WRITE_LOOP"
+    assert decision.response.stop_reason == response.stop_reason == "max_tokens"
+    assert decision.response.turn_end_reason == response.turn_end_reason == "max-tokens"
+    assert decision.response.truncated is True
+    assert decision.response.usage == response.usage
+    assert decision.response.truncated_tool_names == response.truncated_tool_names
+    assert response.runtime_reason == "MODEL_RESPONSE_TRUNCATED"
+    assert should_continue_task(decision.response) == (False, "NATIVE_TRUNCATED_WRITE_LOOP")
+
+    # 复用原 Goal 收口夹具：保留 max-tokens 只保存结束事实，不能重新取得跨轮恢复预算。
+    from agent_py_agent.agent.agent_core._finalization_service import (
+        _schedule_typed_unfinished_continuation,
+    )
+    from agent_py_agent.tests.test_run_audit_terminal import _ctx, _patch_resume
+
+    goal = _patch_resume(monkeypatch)
+    _schedule_typed_unfinished_continuation(SimpleNamespace(), _ctx(
+        final_response=decision.response,
+        task_attributes={"thread_goal_id": "goal-1", "conversation_thread_id": "thread-1",
+                         "conversation_task_id": "task-1"},
+    ))
+    assert goal.calls == []
+
+
+def test_real_length_stream_does_not_enter_native_write_recovery_in_text_scope(tmp_path):
+    backend, requests = _stream_backend(_truncated_write_sse_lines())
+    response = backend.generate("写入文件")
+    params = replace(_params(), tool_protocol_snapshot=make_test_protocol_snapshot(
+        run_id="run-1", source_protocol="text",
+    ))
+    decision = _decide(_decision_agent(tmp_path), response, params)
+    assert decision.action == "break"
+    assert decision.response is response
+    assert decision.calls == []
+    assert decision.counters.truncated_write_repairs == 0
+    assert params.tool_context == []
+    assert len(requests) == 1
 
 
 # --------------------------------------------------------------------------- #
@@ -174,23 +295,23 @@ def test_stream_completion_truncated_property():
 
 
 # --------------------------------------------------------------------------- #
-# 断言②(恢复) + ③(终止出口):截断空参 write_file → 激活恢复;连续 N 次 → break。
+# 断言②(恢复) + ③(终止出口):确认长度截断后才恢复，按同一工具循环的累计预算停止。
 # --------------------------------------------------------------------------- #
 
 
-def _decision_agent(root: Path, guardrail_records: tuple = ()) -> SimpleNamespace:
+# LLM: 只提供裁决所需宿主信息；工具权限仍来自 _params 的冻结快照，没有实际执行器。
+# 函数用途: 构造最小裁决宿主，不伪造工具失败记录或 provider 终态。
+def _decision_agent(root: Path) -> SimpleNamespace:
     config = SimpleNamespace(
         enable_tools=True,
         tool_protocol="native",
         model_name="MiniMax-M2.7",
     )
-    agent = SimpleNamespace(
+    return SimpleNamespace(
         backend=SimpleNamespace(name="anthropic_compatible"),
         config=config,
         root=root,
     )
-    agent._tool_call_guardrail_records = guardrail_records
-    return agent
 
 
 def _params() -> ToolLoopExecuteParams:
@@ -247,19 +368,11 @@ def _decide(agent, response: ModelResponse, params: ToolLoopExecuteParams):
     )
 
 
+# LLM: 使用真实 backend 归一长度事实，不把裸 truncated=True 作为恢复许可。
+# 函数用途: 返回零执行、带原始 stop_reason 的长度截断响应，网络入口固定为替身。
 def _truncated_empty_write_response() -> ModelResponse:
-    # 截断响应：不提供可执行候选，只带真实工具名（R231 的安全边界 + R232 的恢复事实）。
-    return ModelResponse(
-        text="",
-        backend="anthropic_compatible",
-        tool_use_blocks=[],
-        truncated=True,
-        truncated_tool_names=["write_file"],
-    )
-
-
-def _failure_record() -> dict:
-    return {"tool_name": "write_file", "args_hash": "h", "failed": True, "failure_class": "code:TOOL_PARAMETER_REQUIRED"}
+    backend, _requests = _stream_backend(_truncated_write_sse_lines())
+    return backend.generate("写入文件")
 
 
 def test_truncated_empty_write_activates_recovery_continue(tmp_path: Path):
@@ -290,7 +403,7 @@ def test_truncated_empty_write_breaks_after_limit(tmp_path: Path):
         )
     )
 
-    assert decision.action == "break", "连续达到上限必须有真正的循环出口"
+    assert decision.action == "break", "累计纠偏达到上限必须有真正的循环出口"
     assert decision.response is not None
     assert decision.response.runtime_reason == "NATIVE_TRUNCATED_WRITE_LOOP"
     assert decision.response.runtime_status == "unfinished"
@@ -314,15 +427,13 @@ def test_complete_write_with_truncated_flag_not_hijacked(tmp_path: Path):
     # 未截断的完整写入不得被恢复分支抢走：不带 truncated_tool_names 时决策层只走常规工具路径。
     agent = _decision_agent(tmp_path)
     params = _params()
-    response = ModelResponse(
-        text="",
-        backend="anthropic_compatible",
-        tool_use_blocks=[{"id": "c", "name": "write_file", "input": {"path": "a.md", "content": "x"}}],
-    )
+    backend, requests = _stream_backend(_complete_write_sse_lines())
+    response = backend.generate("写入文件")
     decision = _decide(agent, response, params)
     assert decision.action == "run_tools"
-    assert decision.calls[0].arguments["path"] == "a.md"
+    assert decision.calls[0].arguments == {"path": "ok.md", "content": "done"}
     assert decision.calls[0].source_protocol == "native"
+    assert len(requests) == 1
 
 
 def test_complete_write_with_truncated_flag_stays_zero_execution(tmp_path: Path):
@@ -410,7 +521,7 @@ def test_anthropic_stream_events_returns_completion_via_stopiteration():
 
 
 # --------------------------------------------------------------------------- #
-# R232 端到端:真实 SSE → 适配器 → 决策，恢复链必须可达（不是只测手搓 ModelResponse）。
+# R232 端到端:真实 SSE → backend 归一 → 适配器 → 决策，确认长度恢复链可达。
 # --------------------------------------------------------------------------- #
 
 
@@ -418,17 +529,7 @@ def test_truncated_stream_reaches_recovery_through_real_adapter(tmp_path: Path):
     # LLM: 这条用例守的是 R231 合入时踩过的坑——适配器对不完整响应返回空 calls，
     # 若恢复只认 calls，截断写就永远进不了分块纠偏。必须走真实 SSE 解析与真实适配器。
     # 函数用途: 证明"截断 → 零执行 → 仍给分块恢复"这条链真的可达。
-    _text, _usage, _blocks, completion = collect_anthropic_stream_with_completion(
-        _truncated_write_sse_lines()
-    )
-    response = ModelResponse(
-        text="",
-        backend="anthropic_compatible",
-        tool_use_blocks=[],
-        truncated=completion.truncated,
-        stop_reason=completion.stop_reason,
-        truncated_tool_names=list(completion.tool_names),
-    )
+    response = _truncated_empty_write_response()
     agent = _decision_agent(tmp_path)
     params = _params()
 
@@ -453,18 +554,8 @@ def test_truncated_stream_reaches_recovery_through_real_adapter(tmp_path: Path):
 
 def test_truncated_stream_recovery_breaks_after_limit(tmp_path: Path):
     # LLM: 零执行流程不再产生 write_file 失败记录，上限改由本轮纠偏计数决定；这条守住硬出口。
-    # 函数用途: 证明连续截断最终会给出带证据的终止出口，而不是无限重试。
-    _text, _usage, _blocks, completion = collect_anthropic_stream_with_completion(
-        _truncated_write_sse_lines()
-    )
-    response = ModelResponse(
-        text="",
-        backend="anthropic_compatible",
-        tool_use_blocks=[],
-        truncated=True,
-        stop_reason=completion.stop_reason,
-        truncated_tool_names=list(completion.tool_names),
-    )
+    # 函数用途: 证明长度纠偏预算用尽后会给出带证据的终止出口，而不是无限重试。
+    response = _truncated_empty_write_response()
     params = _params()
     decision = tool_loop_response_decision(
         ToolLoopResponseDecisionRequest(

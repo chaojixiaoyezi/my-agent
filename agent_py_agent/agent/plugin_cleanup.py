@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import re
+
 from .plugin_disable_tool import PLUGIN_DISABLE_TOOL
 from .plugin_install_store import PluginInstallStore
 from .plugin_installation import PluginCommitReceipt
@@ -55,12 +57,20 @@ def _removal_receipt(report: dict, request) -> PluginCommitReceipt | None:
     return receipt
 
 
-# LLM: 原激活释放必须有原资源证明；无激活停用/卸载不创建进程账，引用验证仍交原事务。
+# LLM: 进程激活释放必须有原资源证明；显式内容释放没有资源引用，不能为纯内容包构造进程账。
 # 函数用途: 取出已持久保存的精确退出引用，缺证明时拒绝消费。
 def _cleanup_references(report: dict) -> tuple | None:
     release = report.get("release")
     if release is None:
         if report.get("activation_id"):
             raise ValueError("释放结果缺少原资源证明")
+        return None
+    if release.get("kind") == "content":
+        if (set(release) != {"kind", "activation_id", "package_sha256"}
+                or release["activation_id"] != report.get("activation_id")
+                or not isinstance(release["package_sha256"], str)
+                or not re.fullmatch(r"[0-9a-f]{64}", release["package_sha256"])
+                or report.get("cleanup_required") is not False):
+            raise ValueError("内容释放事实不完整")
         return None
     return tuple(release["resources"])

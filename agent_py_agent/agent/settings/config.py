@@ -1,8 +1,8 @@
 
 from __future__ import annotations
 
-# LLM: 默认值须与随包 YAML 一致；各决策点独立默认关闭，覆盖由原 owner/thread 保存，召回前建议和外部材料建议都不改变权限或终态。
-# 模块用途: 定义并加载 Agent 配置，统一显式采样、人格、持续执行、插件管理与用户确认口径。
+# LLM: 默认值须与随包 YAML 一致；语法诊断和各决策点默认关闭，覆盖由原 owner/thread 保存，建议不改变权限或终态。
+# 模块用途: 定义并加载 Agent 配置，统一显式采样、人格、工具反馈、插件管理与用户确认口径。
 """智能体配置加载工具。
 
 这个模块干的事情不复杂，但很关键：
@@ -173,8 +173,8 @@ class _HomeProviderConfigFields:
     week_start: str = "monday"  # 周起始 locale:monday/sunday/saturday,影响"本周"范围计算
 
 
-# LLM: 工具与显式插件管理的默认配置归此组；修改开关须同步 YAML、规范化和执行入口，不能用展示配置代替权限。
-# 类用途: 保存工具行为与管理开关的默认值，构造本身不加载插件或执行工具。
+# LLM: 工具、语法观察和显式插件管理默认归此组；开关同步 YAML、规范化和执行入口，不能用展示配置代替权限。
+# 类用途: 保存工具行为与可选诊断的默认值，构造本身不加载插件或执行工具。
 @dataclass
 class _ToolConfigFields:
     enable_tools: bool = True
@@ -212,6 +212,8 @@ class _ToolConfigFields:
     tool_context_ptl_retry_max: int = 3
     tool_read_max_chars: int = 16_000
     tool_write_inline_max_chars: int = DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS
+    # 三种原生文件修改工具反馈有界 JSON 语法观察；不拦分块写入，不决定任务完成。
+    enable_file_syntax_diagnostics: bool = False
     tool_list_max_entries: int = 200
     tool_search_max_matches: int = 50
     tool_web_max_chars: int = 100_000

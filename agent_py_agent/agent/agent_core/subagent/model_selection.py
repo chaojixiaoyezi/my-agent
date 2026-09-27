@@ -1,5 +1,5 @@
-# LLM: 新建标记只能被原真实 attempt 领取一次；候选探针在锁外，原目录/创建/线程锁内 CAS 后才采用，旧 pending/空账本不是首次证明。
-# 模块用途: 共用真实请求捕获自动验证子代理模型建议；未知保留原模型，发送栅栏先于 I/O，用户不用逐个确认。
+# LLM: 原首请求标记供包入口和可选 Jev 共用，只由真实 attempt 领取一次；选模仍须 advice，原 CAS/探针和发送栅栏保持。
+# 模块用途: 共用首次请求准备和实际请求捕获，包用途不选模型；旧 pending/空历史不是首次证明，发送前持久化意图。
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 
+from ...capability.subagent_entry_authority import PACKAGE_ENTRY_PURPOSE
 from ...concurrency.interrupt import is_interrupted
 from ...conversation.agent_thread_store import SUBAGENT_FIRST_REQUEST_KEY
 from ...prompting_parts.builder import (
@@ -24,7 +25,7 @@ from ..tool_request_projection import ToolLoopRequestInput
 _PREPARATION: ContextVar[SubagentFirstRequestPreparation | None] = ContextVar("subagent_first_request_preparation", default=None)
 
 
-# LLM: 仅真实 runner 范围内捕获首次请求的原生产输入；载体不是持久资格，也不因空历史/空账本自动认定首次。
+# LLM: 原 preparing 状态是唯一资格；临时载体分开包准备和可选选模，不从空历史判断首次，也不保存第二份采用账。
 # 类用途: 在精确 attempt 内传递宿主准备事实，跨模型工作线程复制上下文时保持同一对象，退出即失效。
 @dataclass
 class SubagentFirstRequestPreparation:
@@ -37,41 +38,58 @@ class SubagentFirstRequestPreparation:
     selection_reason: str = "request_validation_unavailable"
     selection_checked: bool = False
     submitted: bool = False
+    has_model_advice: bool = True
+    package_entries_prepared: bool = False
 
 
-# LLM: 原 attempt_executor 后只原子领取新线程未领取标记；准备中崩溃不复活资格，旧 thread/pending 不回填，真实模型尚未变更。
-# 函数用途: 把一次首请求验证绑定原执行轮；领取写 canonical thread，退出清理临时准备，不发网络。
-@contextmanager
-def subagent_first_request_scope(agent: object, run_id: str, attempt_id: str):
+# LLM: 仅原 marker 能证明首次；pending advice 只控制 Jev 采用。原线程 CAS 领取资格，取消/写失败传播，旧线程不补资格。
+# 函数用途: 复核首请求身份并持久化本轮领取；无资格或 CAS 失败返回 None，包读取仍须另过原权限门。
+def _claim_first_request_preparation(agent: object, run_id: str, attempt_id: str) -> SubagentFirstRequestPreparation | None:
+    from ...capability.subagent_package_entries import subagent_entries_enabled
+
     manager = getattr(agent, "subagents", None)
     store = getattr(manager, "conversation_store", None)
-    preparation = None
-    if store is not None:
-        task = manager.load(run_id)
-        thread = store.threads.load(str(task.agent_thread_id or ""))
-        marker, advice = _first_request_records(thread)
-        if (marker is not None and advice is not None and marker.get("schema") == SUBAGENT_FIRST_REQUEST_KEY
-                and marker.get("status") == "unsubmitted"
-                and marker.get("child_run_id") == run_id and marker.get("child_thread_id") == task.agent_thread_id
-                and marker.get("operation_id") == advice.get("operation_id")):
-            with manager.creation_guard():
-                _require_current_attempt(manager, SimpleNamespace(attempt_id=attempt_id), run_id)
-                won = False
-                # LLM: 从最新标记执行一次领取；旧读或另一个启动者不能共用未提交资格。
-                # 函数用途: 先持久化准备归属，使崩溃重启自动保留而非重放建议。
-                def claim(latest):
-                    nonlocal won
-                    latest_marker, latest_advice = _first_request_records(latest)
-                    if latest_marker != marker or latest_advice != advice:
-                        return latest
-                    won = True
-                    return replace(latest, metadata={**latest.metadata, SUBAGENT_FIRST_REQUEST_KEY: {
-                        **marker, "status": "preparing", "attempt_id": attempt_id,
-                    }})
+    if store is None:
+        return None
+    task = manager.load(run_id)
+    thread = store.threads.load(str(task.agent_thread_id or ""))
+    marker, advice = _first_request_records(thread)
+    if (marker is None or marker.get("schema") != SUBAGENT_FIRST_REQUEST_KEY
+            or marker.get("status") != "unsubmitted"
+            or marker.get("child_run_id") != run_id or marker.get("child_thread_id") != task.agent_thread_id):
+        return None
+    has_model_advice = advice is not None and marker.get("operation_id") == advice.get("operation_id")
+    package_eligible = subagent_entries_enabled(agent) and (
+        marker.get("purpose") == PACKAGE_ENTRY_PURPOSE
+        or isinstance(marker.get("operation_id"), str) and bool(marker["operation_id"])
+    )
+    if not has_model_advice and not package_eligible:
+        return None
+    won = False
+    with manager.creation_guard():
+        _require_current_attempt(manager, SimpleNamespace(attempt_id=attempt_id), run_id)
+        # LLM: marker CAS 仍是唯一领取权威；建议并发改变只取消自动采用，不取消开启的包准备，关闭则保持原 advice CAS。
+        # 函数用途: 原子保存本轮准备归属，尊重显式选模并防止另一个启动者重复消费首请求。
+        def claim(latest):
+            nonlocal won, has_model_advice
+            latest_marker, latest_advice = _first_request_records(latest)
+            if latest_marker != marker or (latest_advice != advice and not package_eligible):
+                return latest
+            has_model_advice = has_model_advice and latest_advice == advice
+            won = True
+            return replace(latest, metadata={**latest.metadata, SUBAGENT_FIRST_REQUEST_KEY: {
+                **marker, "status": "preparing", "attempt_id": attempt_id,
+            }})
 
-                store.threads.update_atomic(task.agent_thread_id, claim)
-            if won:
-                preparation = SubagentFirstRequestPreparation(agent, run_id, attempt_id)
+        store.threads.update_atomic(task.agent_thread_id, claim)
+    return SubagentFirstRequestPreparation(agent, run_id, attempt_id, has_model_advice=has_model_advice) if won else None
+
+
+# LLM: 只承接原一次领取结果与 ContextVar 生命周期；不另建资格或恢复入口，领取异常先于进入 scope 传播。
+# 函数用途: 将同一 attempt 的首请求准备供原模型/包入口共用，并在退出时恢复之前的执行上下文。
+@contextmanager
+def subagent_first_request_scope(agent: object, run_id: str, attempt_id: str):
+    preparation = _claim_first_request_preparation(agent, run_id, attempt_id)
     token = _PREPARATION.set(preparation)
     try:
         yield preparation
@@ -250,7 +268,7 @@ def _require_current_attempt(manager: object, params: object, run_id: str) -> st
     return attempt_id
 
 
-# LLM: 只在原首次完整 prompt 安全点验证一次；准备/探针失败自动 retain，取消传播；只有 CAS 之后才延长同批依赖到原收尾。
+# LLM: 仅有原 advice 才进入选模；包用途只共用首请求栅栏，不读取模型目录/决策设置或新增探针。原校验/CAS/取消保持。
 # 函数用途: 自动把一条 pending 建议变成经过完整请求验证的当前模型，或继续原模型；不向用户请求逐 child 操作。
 def select_first_request_model(agent: object, params: object, prompt: str) -> tuple[object, str]:
     from ...backends.bounded_call import BoundedCallTimeoutError
@@ -262,7 +280,7 @@ def select_first_request_model(agent: object, params: object, prompt: str) -> tu
     from ..native_tool_protocol import ToolProtocolSelectionError
 
     preparation = first_request_preparation(agent, params)
-    if preparation is None or preparation.selection_checked:
+    if preparation is None or not preparation.has_model_advice or preparation.selection_checked:
         return params, prompt
     preparation.selection_checked = True
     capture_first_request_input(agent, params, prompt)

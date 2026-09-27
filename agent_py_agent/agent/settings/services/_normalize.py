@@ -1,5 +1,5 @@
-# LLM: 各配置域共用默认和校验；工具及插件开关须归一为布尔值，采样不猜供应商，规范化不产生请求。
-# 模块用途: 将 YAML/覆盖配置转成运行字段，避免字符串 false 被当成开启，非法值告警并采用既有默认。
+# LLM: 各配置域共用默认和校验；文件语法反馈、Compact原文回查与决策跳过记录开关独立归一为布尔值，须同步各自配置加载测试；规范化不发请求或写日志。
+# 模块用途: 将 YAML/覆盖配置转成运行字段，避免字符串 false 意外启用工具反馈、回查提示或决策记录。
 """Domain-specific normalize services for config fields.
 
 Was split across _normalize_core_fields / _normalize_home_fields /
@@ -336,7 +336,8 @@ class UserFieldsService:
 # 带引号的 "false" 必须转成真实布尔值，否则会被当成真值打开开关（含自学习 enable_self_learning）。
 _RUNTIME_BOOL_FIELDS = (
     "auto_save_memory", "local_store_fts_enabled",
-    "conversation_terminal_tool_fold_enabled", "compact_recall_hint_enabled", "decision_skip_records_enabled",
+    "enable_file_syntax_diagnostics", "decision_skip_records_enabled",
+    "conversation_terminal_tool_fold_enabled", "compact_recall_hint_enabled",
     "enable_subagents", "enable_self_learning",
     "audit_enabled",
 )

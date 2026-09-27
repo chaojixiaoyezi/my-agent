@@ -1,5 +1,5 @@
-# LLM: 辅助生成与独立用量结算复用原模型账；响应形状仅提供有界诊断，不复制正文或另建持久账。
-# 模块用途: 记录 Compact 等辅助模型调用，投影无正文的失败形状并结算用量；诊断不裁定恢复行为。
+# LLM: 普通与结构化辅助生成共享原模型账；schema 分派不执行工具，观察回调只读原记录、不复制正文或另建账。
+# 模块用途: 记录 Compact 和结构化辅助调用，保留原载荷及统计，并返回无正文的调用观察。
 """统一记录 Compact 等非工具循环模型调用。"""
 
 from __future__ import annotations
@@ -9,7 +9,8 @@ import logging
 import re
 import time
 import uuid
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any
 
@@ -38,10 +39,16 @@ from ..tooling.runtime_contracts import ToolChoice
 # 模块用途: 让压缩等辅助请求进入统一消耗与成本统计，原快照去重允许迟到物理事实补记。
 
 
-# LLM: The host supplies exact request/run/task identity and a typed purpose; optional tools and
-# system guidance preserve a parent request's provider cache surface but this one-shot wrapper never
-# executes returned tool calls. Prompt/messages stay request-local and never enter ledger metadata.
-# 类用途: 描述一次没有工具执行权的辅助模型调用；Compact 可复用主请求的缓存前缀，并绑定到真实任务用量作用域。
+# LLM: 这里只投影精确 call_id 的原账；LRU 已移除该记录时次数为 None，不能编造零 HTTP。
+# 类用途: 向调用者提供不含提示词、响应或凭据的辅助调用定位和传输次数。
+@dataclass(frozen=True)
+class AuxiliaryModelCallObservation:
+    call_id: str
+    provider_http_attempt_count: int | None
+
+
+# LLM: 宿主提供真实身份；schema 交原 generate_structured，普通分支保留缓存面，二者都没有工具执行权。
+# 类用途: 描述一次辅助调用及可选只读观察者；正文留在请求内，原账按真实任务统计。
 @dataclass(frozen=True)
 class AuxiliaryModelCallRequest:
     agent: object
@@ -55,15 +62,17 @@ class AuxiliaryModelCallRequest:
     task_id: str = ""
     thread_id: str = ""
     purpose: str = "auxiliary"
+    response_schema: dict[str, Any] | None = None
+    on_observation: Callable[[AuxiliaryModelCallObservation], None] | None = field(default=None, repr=False, compare=False)
 
 
-# LLM: Every physical auxiliary request is appended to the same ModelCallLedger as normal turns.
-# Provider transport owns retry and timeout behavior; this wrapper never starts an orphan thread.
-# 函数用途: 调用一次辅助模型并记录 token、缓存、重试、耗时和费用；成功与失败共享已绑定的指标入口。
+# LLM: 只进行一次逻辑分派，后端仍拥有内部 schema/传输重试；不把一次分派宣称成一次 HTTP，旧 generate 不改。
+# 函数用途: 调用普通或结构化辅助模型并沿原账统计；失败与取消仍传播，观察者不能改变结果。
 def generate_auxiliary_model_response(request: AuxiliaryModelCallRequest) -> object:
     agent = request.agent
     backend = getattr(agent, "backend", None)
-    generate = getattr(backend, "generate", None)
+    method = "generate_structured" if request.response_schema is not None else "generate"
+    generate = getattr(backend, method, None)
     if not callable(generate):
         raise RuntimeError("auxiliary model backend is unavailable")
 
@@ -86,6 +95,9 @@ def generate_auxiliary_model_response(request: AuxiliaryModelCallRequest) -> obj
         except Exception:
             pass
         raise
+    finally:
+        if request.on_observation is not None:
+            _report_auxiliary_observation(request, ledger, call_id)
     try:
         record_llm_call(label, time.monotonic() - started_at, response, ok=True)
     except Exception:
@@ -94,8 +106,8 @@ def generate_auxiliary_model_response(request: AuxiliaryModelCallRequest) -> obj
     return response
 
 
-# LLM: 请求身份含宿主 thread/request/run/task；I/O 前冻结估算和编号，输入正文不进 metadata。
-# 函数用途: 为辅助请求建立唯一调用及归属，按原请求面估算输入，沿原账本用途分区累计。
+# LLM: I/O 前冻结真实身份和输入估算；仅结构化请求增加 schema，普通请求的估算对象保持原样，正文不进 metadata。
+# 函数用途: 为辅助请求登记调用及归属，把实际声明的 schema 成本纳入同一本账。
 def _start_auxiliary_call(
     request: AuxiliaryModelCallRequest,
     backend: object,
@@ -104,14 +116,13 @@ def _start_auxiliary_call(
     identity = uuid.uuid4().hex
     logical_call_id = f"auxiliary:{_purpose(request.purpose)}:{identity[:24]}"
     call_id = f"{logical_call_id}:attempt-1:{identity[24:32]}"
-    input_tokens = estimate_tokens(
-        {
-            "prompt": str(request.prompt or ""),
-            "messages": list(request.messages or []),
-            "tools": list(request.tools or []),
-            "system_instruction": str(request.system_instruction or ""),
-        }
-    )
+    material = {
+        "prompt": str(request.prompt or ""), "messages": list(request.messages or []),
+        "tools": list(request.tools or []), "system_instruction": str(request.system_instruction or ""),
+    }
+    if request.response_schema is not None:
+        material["response_schema"] = request.response_schema
+    input_tokens = estimate_tokens(material)
     ledger.started(
         ModelCallStartedParams(
             call_id=call_id,
@@ -134,9 +145,8 @@ def _start_auxiliary_call(
     return ledger, call_id
 
 
-# LLM: The one-shot provider call shares global admission and typed transport observations with the
-# main loop. Callbacks account only token counts/attempt facts and cannot expose summary bodies.
-# 函数用途: 绑定原 owner/thread 会话头，在全局并发槽执行辅助请求，并把流式活动和 HTTP 重试写入同一本模型账。
+# LLM: 两种生成共享原 admission、provider scope 和观察者；schema 不启动工具循环，取消与后端异常原样退出。
+# 函数用途: 在原并发槽调用已选方法，把实际流事件和 HTTP 尝试记入原模型账。
 def _invoke_auxiliary_generate(
     request: AuxiliaryModelCallRequest,
     generate: object,
@@ -148,6 +158,8 @@ def _invoke_auxiliary_generate(
 
     on_chunk = _auxiliary_chunk_observer(ledger, call_id)
 
+    # LLM: 只向当前 call_id 追加传输事实，不改请求或用量；消费者不得用此计数补猜 token。
+    # 函数用途: 把后端每次 HTTP 观察记入当前辅助调用。
     def _observe_provider_attempt(event: dict[str, object]) -> None:
         record_model_provider_attempt(ledger, call_id, event)
 
@@ -164,6 +176,7 @@ def _invoke_auxiliary_generate(
                     tools=request.tools,
                     tool_choice=request.tool_choice,
                     system_instruction=request.system_instruction,
+                    response_schema=request.response_schema,
                 )
             finally:
                 llm_inflight(-1)
@@ -199,10 +212,8 @@ def _auxiliary_chunk_observer(ledger: object, call_id: str) -> object:
     return _on_chunk
 
 
-# LLM: Signature inspection avoids retrying a TypeError after provider I/O may already have begun.
-# Cache-critical messages/tools/system are all-or-error when supplied; the wrapper deliberately has
-# no tool execution loop, so an auxiliary response can never gain the parent turn's tool authority.
-# 函数用途: 只传后端明确支持的参数；Compact 需要复用缓存面时强制保留原生历史、工具定义与 system 指令。
+# LLM: 发送前检查签名，不用 TypeError 重试；显式 schema/历史/工具/system 不支持就失败，不能静默丢掉声明。
+# 函数用途: 将通用辅助输入交给原后端方法，普通 Compact 的参数形态保持不变。
 def _call_backend(
     generate: object,
     prompt: str,
@@ -212,8 +223,13 @@ def _call_backend(
     tools: list[dict[str, Any]] | None,
     tool_choice: ToolChoice | None,
     system_instruction: str,
+    response_schema: dict[str, Any] | None = None,
 ) -> object:
     kwargs: dict[str, object] = {}
+    if response_schema is not None:
+        if not _accepts_keyword(generate, "response_schema"):
+            raise TypeError("auxiliary model backend does not accept response_schema")
+        kwargs["response_schema"] = response_schema
     if _accepts_keyword(generate, "on_chunk"):
         kwargs["on_chunk"] = on_chunk
     if messages is not None:
@@ -236,6 +252,18 @@ def _call_backend(
             system_instruction=str(system_instruction)
         )
     return generate(prompt, **kwargs)
+
+
+# LLM: 只读精确调用记录，观察者异常只留类型无关警告、不影响原模型结果；缺记录保持未知而非零请求。
+# 函数用途: 把原 HTTP 次数与调用编号交给宿主，用于诚实报告内部重试的统计边界。
+def _report_auxiliary_observation(request: AuxiliaryModelCallRequest, ledger: object, call_id: str) -> None:
+    try:
+        record = next((item for item in ledger.records() if item.call_id == call_id), None)
+        request.on_observation(AuxiliaryModelCallObservation(
+            call_id, record.provider_attempt_count if record is not None else None,
+        ))
+    except Exception:
+        logging.getLogger(__name__).warning("辅助模型调用观察暂不可用；原结果保持不变")
 
 
 # LLM: Callable signatures are inspected before network submission. Unknown built-in signatures
@@ -334,4 +362,4 @@ def _diagnostic_label(value: object) -> str:
     return label if not label or re.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", label) else "invalid_label"
 
 
-__all__ = ["AuxiliaryModelCallRequest", "auxiliary_response_shape", "generate_auxiliary_model_response", "settle_standalone_model_usage"]
+__all__ = ["AuxiliaryModelCallObservation", "AuxiliaryModelCallRequest", "auxiliary_response_shape", "generate_auxiliary_model_response", "settle_standalone_model_usage"]

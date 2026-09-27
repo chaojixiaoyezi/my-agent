@@ -16,6 +16,7 @@ from .common.nofollow_fs import (
 from .common.nofollow_tree import remove_tree_beneath
 from .plugin_activation import PluginActivationRequest, prepare_activation, prepare_release
 from .plugin_configuration import PluginConfigureRequest, prepare_configuration
+from .plugin_content_activation import PluginContentActivation
 from .plugin_installation import (
     PluginCommitReceipt,
     PluginInstallation,
@@ -142,8 +143,8 @@ class PluginInstallStore:
             reserve_quota=request.action != "revoke",
         )
 
-    # LLM: 原 executor 和资源证明必须来自原账；删除在锁外按固定计划进行，之后同表 CAS，失败保留 revoked 地址供继续收尾。
-    # 函数用途: 删除已确认退出的旧环境并释放同一安装代次，不接受外部清理成功标志或删除进程证据。
+    # LLM: 进程激活的退出证明必须来自原账；内容激活明确无需资源清理，同表 CAS 不调用进程账或删除假环境。
+    # 函数用途: 释放同一已撤销代次；有环境时先核对真实退出再删除，内容包直接释放读取权。
     def release_activation(self, owner: OwnerHomeResult, repository, expected: PluginInstallation,
                            operation_id: str) -> tuple[PluginMutationResult, dict]:
         if (owner.identity != self._owner or owner.plugins_dir != self.root
@@ -151,6 +152,11 @@ class PluginInstallStore:
             raise PluginInstallationError("owner_conflict", "插件释放用户与原安装存储不符。")
         # 先检查已见版本，耗时的递归删除不占原安装锁，真正提交时再次 CAS。
         prepare_release(operation_id, expected, self.snapshot())
+        if isinstance(expected.activation, PluginContentActivation):
+            result = self._write(lambda quota: self._update_locked(
+                quota, lambda entries: prepare_release(operation_id, expected, entries)), reserve_quota=False)
+            return result, {"kind": "content", "activation_id": expected.activation_id,
+                            "package_sha256": expected.package_sha256}
         evidence = plugin_release_evidence(owner, repository, expected)
         parts = (*self._parts, "environments", expected.activation.plan.environment_ref)
         try:

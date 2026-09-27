@@ -9,6 +9,11 @@ auto_promote_to_parent_memory。旧记录里残留的三个键没有任何读取
 协作状态更新按 case 串行（分支 `claude/collab-request-race`，2026-09-27）：请求与 case 的状态读改写改在按 case 的更新锁内，修掉“旧快照最后写入、
 把已完成的请求写回 open”的丢失更新；原全仓分片偶发失败有了确定性复现与回归用例。细节见 04-structure 同名节。
 
+能力包子入口（2026-09-27，本地已实现，组合验收中）：新建child可复用原首请求marker准备已显式授权且同代pin的包入口，
+入口沿原RuntimeFacts进入业务请求，不新增辅助选包模型。旧无marker线程不回填，关闭配置不加载，方法仍按需读取。
+原25文件570项通过；显式选模令Jev建议retained后入口资格被错误跳过的缺口已修，marker CAS独立领取包准备，pending advice只约束建议采用，相关十文件254项及独立11项/6组探针通过。claim提取早返回helper后，新冻结源码的三片35文件977项再次通过，Ruff与严格尺寸通过。
+文档及最终组合由root负责；真实私有运行仍旧f6，原四子代理任务质量失败不回填。见[能力包合同](../../design/CAPABILITY_PACKS.md#主任务子代理和长任务)。
+
 自学习 S1 改为自动确认（分支 `claude/skill-auto-summary`，2026-09-26，用户决定自学习不逐条审批）：`runner_result_service._skill_proposal_note`
 在生成提案后立即对每条新提案调用 `SkillProposalService.confirm(..., actor="auto")`，走原来的全部复核（版本、草稿 hash、来源 Candidate、
 目标不存在、解析、guard），回执记 `confirmed_by=auto`；被拒的提案保持待确认。工作日志改为 `skill_proposals=<新建数> skill_proposals_committed=<安装数>`，
@@ -219,3 +224,10 @@ OS 强制终止仍可能缺已完成的 native 信封，取消回执不证明历
 - 首次请求合同续片：新增 thread 的宿主 pending 才初始化首次发送资格，原 runner 激活后捕获真实 child 请求输入；
   provider I/O 前同一 thread 原子写发送意图，旧 pending 不补资格，取消/写入失败不发请求。原模型依赖 scope 与
   Anthropic/Chat 同源组包已验证实际出站等价；目录/设置撤销、工具或容量未知自动保留。M2.7、M3、DeepSeek 的 fake provider 首轮与后续工具轮自动采用已验，隔离真实服务验收仍待主线执行。
+
+## 2026-09-25 能力包引用接线（本地组件阶段）
+
+子代理创建与能力授予复用 allowed_skills／skill_snapshot_refs，把 capability:<id> 固定到整包摘要和激活代次。
+层级继承只取父任务 canonical attrs 和 grants，忽略 spec 自报引用；后授予能力不再被旧运行参数中的初始列表再次裁掉。
+本地定向测试已覆盖包内读取隔离、父子权限、伪造孙任务 refs、后授予接续；真实多 TUI 尚未开始。
+详见[能力包 Goal](../../tasks/CAPABILITY_INTERNALIZATION_GOAL.md)。

@@ -1,7 +1,7 @@
 
 
-# LLM: 文件读取逐项复用唯一 PathAccessPolicy，墙外授权仅来自宿主 registry；工作区提示不产生权限，联查文件工具和 owner 边界测试。
-# 模块用途: 为内置文件工具解析和展示路径、检查读写边界，不拥有插件或任务状态。
+# LLM: 文件工具逐项复用唯一 PathAccessPolicy；宿主注入的语法反馈开关不扩大权限，联查三写入口和 owner 边界测试。
+# 模块用途: 为内置文件工具装配配置、解析路径和检查读写边界，不拥有插件或任务状态。
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -114,10 +114,12 @@ def owner_quota_error_result(tool_name: str, exc: BaseException) -> ToolHandlerO
     )
 
 
-# LLM: 工作区和已授权外部根由 registry 逐次注入；路径决定共用 PathAccessPolicy，不从展示提示或模型参数生成权限。
-# 类用途: 为内置读写工具提供路径解析、权限核对和输出路径展示。
+# LLM: 工作区和已授权外部根由 registry 注入；路径决定共用 PathAccessPolicy，语法观察只读宿主开关，不从模型参数生成权限。
+# 类用途: 为内置读写工具提供路径解析、权限核对、诊断配置和输出路径展示。
 class FileSystemTool(BaseTool):
 
+    # LLM: 这里只固定宿主配置，不读取文件或创建每调用诊断状态；联查 registry 装配和关闭零反馈测试。
+    # 函数用途: 初始化文件访问策略、配额和默认关闭的语法反馈开关。
     def __init__(
         self,
         workspace_root: Path,
@@ -125,6 +127,7 @@ class FileSystemTool(BaseTool):
         access_options: FileSystemAccessOptions | None = None,
     ):
         access = access_options or FileSystemAccessOptions()
+        self.enable_file_syntax_diagnostics = access.enable_file_syntax_diagnostics is True
         self.workspace_root = workspace_root.resolve()
         self.workspace_roots = _normalized_workspace_roots(self.workspace_root, workspace_roots)
         # LLM: 只有宿主从结构化 write_boundary 下发的"墙外已授权根"才允许穿过 owner 墙；
@@ -250,6 +253,8 @@ def _workspace_typo_error(raw_path: str, workspace_root: Path, workspace_roots: 
     )
 
 
+# LLM: 配置仅由宿主装配；语法观察开关不属于可由模型设置的权限参数，默认关闭须与 AgentConfig 一致。
+# 类用途: 传递统一文件访问约束和可选的本地语法反馈配置。
 @dataclass(frozen=True)
 class FileSystemAccessOptions:
     path_access_mode: str = "normal"
@@ -258,6 +263,7 @@ class FileSystemAccessOptions:
     protected_persona_root: str = ""  # 当前 owner 人格根；不随 admin 文件访问豁免而消失
     owner_quota_max_bytes: int = 0
     owner_quota_policy_available: bool = True
+    enable_file_syntax_diagnostics: bool = False
 
 
 def _path_is_under(path: Path, root: Path) -> bool:
@@ -268,6 +274,8 @@ def _path_is_under(path: Path, root: Path) -> bool:
         return False
 
 
+# LLM: 归一化宿主文件配置；诊断只认布尔 True，不把字符串或自然语言当作启用授权。
+# 函数用途: 构建三种文件修改工具共用的配置，不读写文件。
 def filesystem_access_options(
     *,
     path_access_mode: str = "normal",
@@ -276,6 +284,7 @@ def filesystem_access_options(
     protected_persona_root: str = "",
     owner_quota_max_bytes: int = 0,
     owner_quota_policy_available: bool = True,
+    enable_file_syntax_diagnostics: bool = False,
 ) -> FileSystemAccessOptions:
     roots = list(path_dangerous_roots) if isinstance(path_dangerous_roots, list) else None
     return FileSystemAccessOptions(
@@ -285,6 +294,7 @@ def filesystem_access_options(
         protected_persona_root=str(protected_persona_root or ""),
         owner_quota_max_bytes=max(0, int(owner_quota_max_bytes or 0)),
         owner_quota_policy_available=bool(owner_quota_policy_available),
+        enable_file_syntax_diagnostics=enable_file_syntax_diagnostics is True,
     )
 
 

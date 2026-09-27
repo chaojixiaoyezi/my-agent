@@ -14,6 +14,7 @@ from ..tooling.models import (
     ToolFailureStage,
     ToolHandlerOutcome,
     apply_tool_execution_facts,
+    tool_promotes_task,
 )
 from ..tooling.runtime_contracts import ToolCall, ToolResult
 from .audit_dispatch import audit_privileged_tool_call
@@ -237,9 +238,8 @@ def _record_passive_verification(
     return record_tool_verification(agent, call, result)
 
 
-# LLM: Promotion is one active-turn mutation. Gateway callers must hold their exact turn
-# transition around the whole bind; local callers without that host capability execute directly.
-# 函数用途: 首个工作工具把普通对话晋升为持久任务；若用户已经停止则不产生任何续接任务。
+# LLM: 晋升条件仍只读原 ToolRuntimePolicy；实际晋升与参数同步复用 conversation.task_promotion 的活动回合事务，和宿主准备共用原身份。
+# 函数用途: 首个实际工作动作沿同一受保护事务绑定持久任务；检索不晋升，停止后不重建任务或反向覆盖权威参数。
 def _promote_conversation_task_for_work_tool(
     runtime_request: ToolCallRuntimeRequest,
 ) -> ToolHandlerOutcome | None:
@@ -247,7 +247,7 @@ def _promote_conversation_task_for_work_tool(
     tool_name = str(runtime_request.payload.get("tool") or "").strip()
     snapshot = runtime_request.request.params.tool_runtime_snapshot
     runtime = snapshot.runtime(tool_name) if snapshot is not None else None
-    if runtime is None or runtime.runtime_policy.promotes_task is not True:
+    if runtime is None or not tool_promotes_task(runtime.runtime_policy, runtime_request.call.arguments):
         return None
     from ..tooling._persona_write_guard import _persona_runtime_redirect_error
 
@@ -275,26 +275,10 @@ def _promote_conversation_task_for_work_tool(
         if isinstance(attrs, dict)
         else ""
     )
-    from ..conversation.task_promotion import promote_current_conversation_task
+    from ..conversation.task_promotion import promote_conversation_task_for_run
 
-    # Gateway 的 active-turn T 锁必须覆盖「检查仍在运行 -> 建立/续接 task link ->
-    # 把绑定写回热请求」整个晋升事务。否则 /stop 可在早期 cancellation 检查之后
-    # 把原任务置 interrupted，而本线程又紧接着建立一个 -continue- active link，
-    # 让已停止的主代理重新显示 Working。普通本地运行没有该 callback，保持原路径。
-    transition = getattr(
-        runtime_request.request.params,
-        "active_turn_transition_callback",
-        None,
-    )
     try:
-        promoted = (
-            transition(
-                "task_promotion",
-                lambda: promote_current_conversation_task(runtime_request.agent),
-            )
-            if callable(transition)
-            else promote_current_conversation_task(runtime_request.agent)
-        )
+        promoted = promote_conversation_task_for_run(runtime_request.agent, runtime_request.request.params)
     except InterruptedError:
         return ToolHandlerOutcome(
             tool_name or "conversation_task_binding",
@@ -304,10 +288,6 @@ def _promote_conversation_task_for_work_tool(
             effect_outcome="not_started",
         )
     if promoted is not None:
-        _synchronize_tool_task_attributes_after_promotion(
-            runtime_request.agent,
-            runtime_request.request.params,
-        )
         return None
     if not conversation_thread_id:
         return None
@@ -317,29 +297,6 @@ def _promote_conversation_task_for_work_tool(
         "CONVERSATION_TASK_BINDING_FAILED: 当前执行请求无法可靠绑定到持久任务，已阻止本次工作步骤。",
         error_code="CONVERSATION_TASK_BINDING_FAILED",
     )
-
-
-# LLM: The mutable outer RunParams owns conversation promotion, while ToolLoopExecuteParams is an
-# immutable run snapshot that may carry a distinct task_attributes projection.  After promotion,
-# replace only that projection's contents from the outer authority before cwd/boundary resolution;
-# never infer a task path from model arguments or copy in the opposite direction.
-# 函数用途: 同步刚登记的运行身份和归档引用，不改变工具请求的文件地址或执行目录。
-def _synchronize_tool_task_attributes_after_promotion(
-    agent: object,
-    tool_params: object,
-) -> None:
-    current = getattr(agent, "_current_run_params", None)
-    authoritative = getattr(current, "task_attributes", None)
-    projection = getattr(tool_params, "task_attributes", None)
-    if (
-        not isinstance(authoritative, dict)
-        or not isinstance(projection, dict)
-        or projection is authoritative
-    ):
-        return
-    projection.clear()
-    projection.update(authoritative)
-
 
 
 

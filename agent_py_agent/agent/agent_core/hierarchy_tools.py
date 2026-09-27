@@ -148,9 +148,18 @@ def _decision_children(agent: object, params: dict, prepared: HierarchyScheduleR
     return result
 
 
-# LLM: 这是原递归保存/发布出口，调用方持有原创建锁；模型建议不能绕过 scheduler 的最终父级和幂等判定。
+# LLM: 原递归保存出口持创建锁；包资格只给同一已授权准备对象，既有复用/调度判定及模型建议边界保持。
 # 函数用途: 沿原层级调度器物化已校验的孩子并发布启动回执。
 def _materialize_child_creation(agent: object, params: dict, prepared: HierarchyScheduleRequest, *, tool_name: str) -> ToolHandlerOutcome:
+    from ..capability.subagent_package_entries import (
+        prepare_subagent_entry_initialization,
+        subagent_entries_enabled,
+    )
+
+    if subagent_entries_enabled(agent):
+        _decision_children(agent, params, prepared)
+        prepared.prepared_runs[:] = [prepare_subagent_entry_initialization(agent, run) if run else None
+                                     for run in prepared.prepared_runs]
     try:
         result = agent.subagents.hierarchy.schedule_child_runs(params=prepared)
     except (IndexError, TypeError, ValueError) as exc:

@@ -9,6 +9,7 @@ text remains only the model-readable task handoff.
 
 from typing import TYPE_CHECKING
 
+from ....capability.task_references import task_skill_references
 from ...models import SubAgentTask
 
 if TYPE_CHECKING:
@@ -121,14 +122,21 @@ def _relevant_file_terms(parent: SubAgentTask, child_goal: str) -> list[str]:
     return _attribute_list(parent, "required_files")
 
 
+# LLM: 能力引用只继承 canonical 父任务及授权卡；忽略 spec 自报 refs，包激活不能被孙任务伪造或在继承时丢失。
+# 函数用途: 给层级子任务准备背景属性和精确能力版本，保留父级权限上界。
 def inherited_hierarchy_attributes(parent: SubAgentTask, spec: HierarchyChildSpec) -> dict[str, object]:
     attrs = dict(getattr(spec, "attributes", {}) or {})
+    attrs.pop("skill_snapshot_refs", None)
     parent_attrs = _task_attributes(parent)
     if parent.goal and _INHERITED_CONTEXT_ATTRIBUTE not in attrs:
         attrs[_INHERITED_CONTEXT_ATTRIBUTE] = True
     for field in _INHERITED_ATTRIBUTE_FIELDS:
-        if field not in attrs and parent_attrs.get(field) not in (None, "", [], {}):
+        if field != "skill_snapshot_refs" and field not in attrs and parent_attrs.get(field) not in (None, "", [], {}):
             attrs[field] = parent_attrs[field]
+    allowed = set(spec.allowed_skills or parent.allowed_skills)
+    refs = [row for row in task_skill_references(parent) if row.get("stable_id") in allowed]
+    if refs:
+        attrs["skill_snapshot_refs"] = refs
     return attrs
 
 
