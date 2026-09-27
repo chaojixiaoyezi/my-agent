@@ -206,6 +206,20 @@ def test_output_reserve_needs_a_filled_window():
     assert _known_shared_window_output_reserve(filled) == 2_000
 
 
+def test_default_model_row_shows_the_fallback_window_instead_of_none(tmp_path):
+    """/model 列表的“默认”行直接显示窗口数字；部署配置留空时显示兜底 128000，而不是 None tokens。"""
+    from agent_py_agent.agent.settings.model_profiles import (
+        public_model_profiles,
+        read_model_profiles,
+    )
+
+    config = AgentConfig(model_backend="openai_compatible", model_name="m", api_base="https://example.test/v1")
+    data = read_model_profiles(tmp_path / "absent.json")
+    assert public_model_profiles(data, config)["profiles"][0]["model_context_window_tokens"] == 128_000
+    config.model_context_window_tokens = 64_000
+    assert public_model_profiles(data, config)["profiles"][0]["model_context_window_tokens"] == 64_000
+
+
 @pytest.mark.parametrize("raw,expected,warned", [
     (None, None, False), ("", None, False), ("0.7", "0.7", False), (0, "0.0", False), ("abc", None, True), (3, None, True),
 ])

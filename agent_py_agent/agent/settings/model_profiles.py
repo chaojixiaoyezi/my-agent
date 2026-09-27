@@ -211,13 +211,14 @@ def model_profile_generation_guard(agent: object, expected: ModelProfileGenerati
 
 
 # LLM: available 保持聊天可选语义，available_for 显式声明用途；OAuth 不暴露 token，不能误选 decision。
+#   默认行的窗口按 context_window_or_default 展示：部署配置留空时显示兜底 128000，不把 None 交给 TUI/IM 列表。
 # 函数用途: 提供模型和服务商的脱敏列表；决策配置可管理，但不会进入普通聊天的可选集合。
 def public_model_profiles(data: dict, config: object) -> dict:
+    from .defaults import context_window_or_default
     from .model_oauth_schema import has_credential
 
-    default = {key: getattr(config, key, "") for key in (
-        "model_backend", "model_name", "model_context_window_tokens",
-    )}
+    default = {key: getattr(config, key, "") for key in ("model_backend", "model_name")}
+    default["model_context_window_tokens"] = context_window_or_default(config)
     configured = bool(default["model_backend"] and default["model_name"] and getattr(config, "api_base", ""))
     rows = []
     if configured or default["model_backend"] == "echo":
