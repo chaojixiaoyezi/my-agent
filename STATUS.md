@@ -1,6 +1,6 @@
 # 当前状态
 
-当前主目标是通用能力包，短剧等仅为样例，Goal active。G02使用原0545产品和新线程独立65k profile，自动恢复已触发但报`COMPACT_TOOL_COVERAGE_UNKNOWN`；6次HTTP/0重试、generation0、没有摘要调用或checker产物，两包pins保持。独立复核定位refs与工具来源分区的通用冲突，Claude已确认承接，root保留环境/证据并负责复验。此前G01原资源复制执行通过、报告计数部分通过及0545的951项/严格gate不改判；完整能力包未发布，未独立验生产。详见[当前证据与缺项](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#第十五候选受控自动-compact2026-09-27通用机制失败)。
+当前主目标是通用能力包，短剧等仅为样例，Goal active。固定9d5786952已精确安装私有环境，529项/本地严格gate通过；C16新原生任务自动Compact第1代67140→46998提交，同代7份包资源get成功、pins/marker不变。第2代完整候选报`COMPACT_CANDIDATE_TOO_LARGE`，整体需求失败，未执行原checker或生成交付；10 HTTP/0重试，原输入、6配置、安装账保持。原G02失败、G01分项、保留集0/36及未验范围保持，完整能力包发布未完成。详见[当前证据与缺项](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#c16原生自动提交与资源续读2026-09-27部分通过)。
 
 以下为各候选当时的历史状态，当前运行版本与下一片以上段及唯一Goal为准。
 
