@@ -1,5 +1,25 @@
 # 测试与发布验收
 
+## 字典与列表参数的结构脱敏（2026-09-27，分支 `claude/be-structured-masking`，基于 `f824b6c10`）
+
+- **来源**：集成者派活。`mask_value` 只按顶层键名判断再整值 `str()`，`model_custom_headers`（Authorization、x-api-key 等）与
+  `mcp_servers`（每个服务器的 env、args 里的令牌）在 `/settings show`、user_config view/search 里整段明文，模型经 user_config 就能看到。
+  这是早就存在的漏洞，不是上一批引入的。`model_auth_ref` 核对为引用，不含凭据。
+- **测试**：新增 `test_structured_masking.py` 5 项，全部用假值，覆盖以下几方面：
+  - 结构规则：请求头与环境变量只留键名，嵌套凭据键、`--凭据名 值`、`--凭据名=值`、docker 的 `-e 凭据名=值`、网址密码与凭据查询参数
+    都遮住，`--header`/`--env` 的值只留名字，`--开关=带密码网址` 也遮；普通字典、列表、元组、`LOG_LEVEL=debug` 与纯变量名照常；不改原值。
+  - user_config view/search 看不到明文，普通字典 `runner_timeout_by_role` 照常显示。
+  - `/settings` 总览、查看、搜索看不到明文。
+  - 修改回执、修改记录、user_config 与 `/settings` 的历史回显都看不到明文（含脱敏收紧前写下的明文旧记录），
+    脱敏过的记录回滚被拒绝，原记录不被改写。
+  - 命令行 `config-get` 看不到明文。
+- **结果**：新文件与参数中心、设置、命令行配置、推理强度、架构守卫、字段读取方、user_config、配置加载、审计控制、管理员身份、
+  MCP 注册与日志脱敏相关文件共 572 passed；ruff、doc sync、strict code-size、`git diff --check`、clean-package 见提交前检查。
+- **变异验证**：22 个全部被抓出（去掉请求头/环境变量容器、嵌套凭据键、`--凭据名 值`、`名字=值` 的角色判定、网址密码、凭据查询参数、
+  记录文本剥引号、`mask_value` 退回只看顶层、记账只遮凭据键、脱敏记录可回滚、user_config 历史不遮、`/settings` 历史不遮、
+  `config-get` 先 `str()`、遮挡函数原样返回、元组变列表、`--header`/`--env` 的值不遮、文本请求头原样保留、纯变量名被遮、
+  `名字=值` 不查名字形状、`--开关=网址` 不遮密码、下一项是开关也当值遮、去掉凭据开关角色），每个都在
+  `PYTHONDONTWRITEBYTECODE=1` 子进程里跑并逐字节恢复。
 ## 决策审计说清“每个点位最近为什么没触发”（2026-09-27，分支 `claude/9b-decision-miss-reasons`，基于 main `f824b6c10`）
 
 - **来源**：审计里某个点位调用 0 次时，用户只看到“0 次”，分不清是没打开、没到触发点，还是每次都被条件挡下。

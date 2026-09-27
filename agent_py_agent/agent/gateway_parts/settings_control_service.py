@@ -13,6 +13,7 @@ from ..settings.config_io import load_simple_yaml
 from ..settings.parameter_changes import (
     ChangeOrigin,
     applied_after_change,
+    displayed_change,
     parameter_history,
     reset_parameter,
     revert_change,
@@ -191,7 +192,10 @@ def _reset(config: object, argument: str) -> str:
             f"{report['effect_text']}{_applied_text(report, config)}")
 
 
+# LLM: 修改记录的回显出口，先经 displayed_change 脱敏（旧记录也可能含明文）。只读。
+# 函数用途: 把一条修改记录排成一行中文。
 def _history_line(item: dict[str, object]) -> str:
+    item = displayed_change(item)
     before = item.get("previous") if item.get("previous") is not None else "默认"
     after = item.get("value") if item.get("value") is not None else "默认"
     return (f"- {str(item.get('id', ''))[:8]} {str(item.get('at', ''))[:16].replace('T', ' ')} {item.get('key')} "

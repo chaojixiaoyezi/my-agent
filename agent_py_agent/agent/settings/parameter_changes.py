@@ -144,17 +144,18 @@ def ledger_path(user_config: Path) -> Path:
     return Path(user_config).with_name(LEDGER_NAME)
 
 
-# LLM: 凭据类键只记脱敏值；reason 截断到 200 字。副作用：追加账本。
+# LLM: 所有键的值都经 mask_value 结构脱敏后才记账（凭据、网址密码、请求头/环境变量等）；脱敏改动了值的记录标 masked，
+#   revert_change 据此拒绝回滚。reason 截断到 200 字。副作用：追加账本。
 # 函数用途: 追加一条参数修改记录并返回它。
 def _record(path: Path, spec: ParameterSpec, row: _ChangeRow) -> dict[str, object]:
-    def shown(value: str | None) -> str | None:
-        return mask_value(spec.key, value) if spec.masked and value is not None else value
-
+    previous, value = _ledger_text(spec.key, row.previous), _ledger_text(spec.key, row.value)
     entry: dict[str, object] = {
         "id": uuid4().hex[:12], "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "key": spec.key, "action": row.action, "actor": str(row.origin.actor or "unknown")[:40],
-        "reason": str(row.origin.reason or "")[:200], "masked": spec.masked,
-        "previous": shown(row.previous), "value": shown(row.value),
+        "reason": str(row.origin.reason or "")[:200],
+        # 脱敏改动了任何一个值，这条记录就不能回滚（回滚会把 *** 写回配置）
+        "masked": spec.masked or previous != row.previous or value != row.value,
+        "previous": previous, "value": value,
     }
     if row.reverts:
         entry["reverts"] = row.reverts
@@ -217,6 +218,20 @@ def reset_parameter(key: object, *, user_path: Path | None, origin: ChangeOrigin
         return _failure(ParameterChangeError("USER_CONFIG_WRITE_FAILED", f"写入失败：{error}"))
 
 
+# LLM: 记账用的文本：None 表示“默认值/没有覆盖”，原样保留；其余一律结构脱敏。
+# 函数用途: 把要写进修改记录的一个值脱敏。
+def _ledger_text(key: str, value: str | None) -> str | None:
+    return None if value is None else mask_value(key, value)
+
+
+# LLM: 历史记录的回显出口：previous/value 再过一遍 mask_value（旧记录可能写于脱敏收紧之前，脱敏对已遮住的值不再改变）。
+#   revert_change 内部读 parameter_history 的原记录，不经过这里。
+# 函数用途: 返回一条修改记录供展示的脱敏副本。
+def displayed_change(item: dict[str, object]) -> dict[str, object]:
+    key = str(item.get("key") or "")
+    return {**item, **{field: mask_value(key, item[field]) for field in ("previous", "value") if item.get(field) is not None}}
+
+
 # LLM: 只在回执 ok 且该参数登记了派生规则时给结果；新值取回执的 saved（恢复默认或回滚到默认时为 None，改用登记表默认值），
 #   交给 parameter_registry.applied_value_with 按同一派生规则算。config 决定按哪个模型算（调用方传）。只读。
 # 函数用途: 给修改、恢复默认、回滚的回执算出“新值在这个模型上的实际效果”。
@@ -274,6 +289,7 @@ __all__ = [
     "LEDGER_NAME",
     "ChangeOrigin",
     "ParameterChangeError",
+    "displayed_change",
     "ledger_path",
     "parameter_history",
     "reset_parameter",

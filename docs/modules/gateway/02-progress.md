@@ -1,5 +1,7 @@
 # Gateway 维护状态
 
+`/settings` 回显的结构脱敏（分支 `claude/be-structured-masking`，2026-09-27）：`show`、`search`、总览经 `mask_value` 结构脱敏，请求头与 MCP 服务器 env 的值只留键名、args 里凭据开关的值、名字是凭据的 `名字=值`、`--header`/`--env` 的值与网址密码遮值；`history` 行先经 `parameter_changes.displayed_change` 再遮一次，旧记录也不漏明文。回归见 `test_structured_masking.py`。
+
 `/settings` 回执与脱敏补全（同一分支第二个提交，2026-09-27）：`show` 那一行由“实际使用值”改名为“实际效果”；`reset`、`revert`
 回执与 `set` 同一口径附“按新值在默认模型上的实际效果”（回到默认时按登记默认值算，`parameter_changes.applied_after_change`）；
 回显脱敏改用唯一的凭据判定 `user_config_capability.is_credential_key`，原先 `api_key`、`gateway_auth_token` 等 5 个凭据在

@@ -66,7 +66,7 @@ def cmd_config_get(args) -> int:
     if key not in data:
         print(f"(未设置) {key}")
         return 0
-    print(f"{key}: {mask_value(key, str(data[key]))}")
+    print(f"{key}: {mask_value(key, data[key])}")  # 传原始值，映射和列表才能按结构脱敏
     return 0
 
 

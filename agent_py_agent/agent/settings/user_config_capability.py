@@ -6,10 +6,11 @@
 # 模块用途: 给用户与模型提供受控、可校验、能报告来源与生效时机的配置读写能力。
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from ._memory_coercion import COMPACT_RECOVERY_PERCENT_RANGE, COMPACT_TRIGGER_PERCENT_RANGE
 from .config_io import load_simple_yaml
@@ -159,13 +160,145 @@ def is_credential_key(key: object) -> bool:
     return any(text == name or text.endswith("_" + name) for name in _CREDENTIAL_SUFFIXES)
 
 
-# LLM: 只按 is_credential_key 判定；原先只认 3 个飞书键，api_key、gateway_auth_token 等会在 /settings 与 user_config 里明文回显。
+# 映射里“值一律遮住、只留键名”的容器：请求头与环境变量。按容器名的最后一个片段认（model_custom_headers、env），
+# 不按请求头名或变量名写死名单——名字是开放的，容器的角色才是结构事实。
+_SECRET_CONTAINERS = frozenset({"headers", "header", "env", "environ", "environment"})
+_MASK = "***"
+
+
+# LLM: 小写、连字符当下划线、去掉开头的下划线，让 X-Api-Key、--api-key 与 api_key 走同一条凭据判定。
+# 函数用途: 把键名、请求头名、命令行参数名规范成凭据判定用的形式。
+def _plain_name(value: object) -> str:
+    return str(value or "").strip().lower().replace("-", "_").lstrip("_")
+
+
+# LLM: 空值不算泄露，原样返回；文本保留前 3 个字符便于认出是哪个凭据（与原顶层凭据回显一致），其它类型整体换成 ***。
+# 函数用途: 把一个凭据位置上的值遮住。
+def _masked_leaf(value: object) -> object:
+    if value is None or value == "":
+        return value
+    if isinstance(value, str):
+        return f"{value[:3]}{_MASK}" if len(value) > 3 else _MASK
+    return _MASK
+
+
+# LLM: 只看查询参数名（规范化后按 is_credential_key 认），名字不是凭据或值为空时原样返回；由 _masked_url 逐对调用。
+# 函数用途: 查询参数名是凭据时（如 ?token=、&api_key=）遮住它的值。
+def _masked_query_pair(pair: str) -> str:
+    name, separator, value = pair.partition("=")
+    return f"{name}={_masked_leaf(value)}" if separator and value and is_credential_key(_plain_name(name)) else pair
+
+
+# LLM: 只动“scheme://用户:密码@主机”里的密码和名字是凭据的查询参数值；没有要遮的内容时原文返回（不重新拼接网址），
+#   解析失败也原文返回，不猜。修改记录里的文本值带 YAML 引号，先剥掉外层引号再处理。
+# 函数用途: 遮住网址里夹带的密码与令牌（如带密码的代理地址、带 ?token= 的回调地址）。
+def _masked_url(text: str) -> str:
+    if "://" not in text:
+        return text
+    if len(text) > 1 and text[0] == text[-1] and text[0] in "\"'":
+        return text[0] + _masked_url(text[1:-1]) + text[0]
+    try:
+        parts = urlsplit(text)
+        password = parts.password
+    except ValueError:
+        return text
+    pairs = parts.query.split("&") if parts.query else []
+    masked_pairs = [_masked_query_pair(pair) for pair in pairs]
+    if not password and masked_pairs == pairs:
+        return text
+    netloc = parts.netloc.replace(f":{password}@", f":{_MASK}@", 1) if password else parts.netloc
+    return urlunsplit(parts._replace(netloc=netloc, query="&".join(masked_pairs)))
+
+
+# LLM: 按规范化名字的最后一段认（headers/header/env/environ/environment），不按请求头名或变量名写死名单；映射与开关共用。
+# 函数用途: 判断一个键名或开关名是不是请求头/环境变量容器（model_custom_headers、env、--header、--env）。
+def _is_secret_container(name: object) -> bool:
+    return _plain_name(name).split("_")[-1] in _SECRET_CONTAINERS
+
+
+# LLM: 请求头、环境变量容器里的值一律遮住只留键名；其它映射里键名命中 is_credential_key 的值遮住，其余按键名递归。
+# 函数用途: 返回脱敏后的映射副本。
+def _masked_mapping(name: str, value: Mapping) -> dict:
+    hide_all = _is_secret_container(name)
+    return {key: _masked_leaf(item) if hide_all or is_credential_key(_plain_name(key)) else _masked_node(str(key), item)
+            for key, item in value.items()}
+
+
+# LLM: 请求头或环境变量写成一项文本（"Authorization: Bearer …"、"GITHUB_TOKEN=…"）时，从最早的 : 或 = 切开只留名字；
+#   没有分隔符说明这一项本身就是名字（docker 的 --env NAME 从宿主继承值），原样返回。
+# 函数用途: 把一条文本形式的请求头或环境变量遮到只剩名字。
+def _masked_entry(text: str) -> str:
+    cut = min((index for index in (text.find(":"), text.find("=")) if index > 0), default=-1)
+    return text if cut < 0 else f"{text[:cut + 1]}{_masked_leaf(text[cut + 1:])}"
+
+
+# LLM: 按开关名或“名字=值”里名字的角色遮值：凭据名（--api-key、GITHUB_TOKEN）遮整个值，请求头/环境变量容器（--header、--env）
+#   只留值里的名字；没有特殊角色返回 None，由调用方继续按网址处理。单字母开关（-e、-H）含义因程序而异，不猜。
+# 函数用途: 按名字的角色遮住它带的值。
+def _masked_by_role(name: str, value: str) -> str | None:
+    if is_credential_key(name):
+        return str(_masked_leaf(value))
+    return _masked_entry(value) if _is_secret_container(name) else None
+
+
+# LLM: 带 = 的开关（--token=…）规范化后是 token=…，既不是凭据名也不是容器名，不会误把下一项当值遮住。
+# 函数用途: 前一项是开关（以 - 开头）时返回规范化的开关名，否则返回空串。
+def _flag_name(value: object) -> str:
+    return _plain_name(value) if isinstance(value, str) and value.startswith("-") else ""
+
+
+# LLM: "名字=值"（--token=…、docker 的 GITHUB_TOKEN=…、--env=NAME=…）按名字的角色遮值，没有特殊角色时值仍按网址处理
+#   （--callback=https://用户:密码@主机 整项解析不出网址）；名字不像标识符（整段网址、带空格的文本）时整项按网址处理。
+# 函数用途: 对列表里一项文本按“名字=值”或网址脱敏。
+def _masked_pair(item: str) -> str:
+    name, separator, rest = item.partition("=")
+    if not (separator and rest and _plain_name(name).isidentifier()):
+        return _masked_url(item)
+    by_role = _masked_by_role(_plain_name(name), rest)
+    return f"{name}={_masked_url(rest) if by_role is None else by_role}"
+
+
+# LLM: 紧跟在凭据开关或请求头/环境变量开关后面、自身又不是开关的一项，按开关的角色遮值（--api-key 值、--header "名字: 值"）；
+#   其余文本交给 _masked_pair，非文本项按结构递归。
+# 函数用途: 按前一个参数决定列表里这一项怎么脱敏。
+def _masked_item(item: object, previous: object) -> object:
+    if not isinstance(item, str):
+        return _masked_node("", item)
+    by_flag = _masked_by_role("" if item.startswith("-") else _flag_name(previous), item)
+    return _masked_pair(item) if by_flag is None else by_flag
+
+
+# LLM: 列表按项脱敏（命令行参数里的凭据开关、--header/--env 的值、名字=值、网址、嵌套映射），保持原来是列表还是元组。
+# 函数用途: 返回脱敏后的列表副本（如 mcp_servers 的 args）。
+def _masked_sequence(items: Sequence) -> list | tuple:
+    masked = [_masked_item(item, items[index - 1] if index else None) for index, item in enumerate(items)]
+    return tuple(masked) if isinstance(items, tuple) else masked
+
+
+# LLM: 映射、列表递归，文本只处理网址里的密码与令牌，其它标量原样返回；name 是这个值所在的键名，用来认出请求头/环境变量容器。
+# 函数用途: 对一个非凭据位置的值做结构脱敏。
+def _masked_node(name: str, value: object) -> object:
+    if isinstance(value, Mapping):
+        return _masked_mapping(name, value)
+    if isinstance(value, (list, tuple)):
+        return _masked_sequence(value)
+    return _masked_url(value) if isinstance(value, str) else value
+
+
+# LLM: 所有回显与记账出口的唯一脱敏入口：顶层键是凭据就整值遮住；否则按结构递归——请求头/环境变量映射只留键名，
+#   嵌套键名是凭据的遮值，命令行里凭据开关的值与名字是凭据的“名字=值”遮值，--header/--env 的值只留名字，
+#   网址里的密码与凭据查询参数遮值。返回同形副本，不改原值。
+#   调用方必须传原始值（dict/list），先 str() 再传就看不见结构。改规则须同步 test_structured_masking。
+# 函数用途: 返回某个配置值脱敏后的同形副本。
+def masked_structure(key: object, value: object) -> object:
+    return _masked_leaf(value) if is_credential_key(_plain_name(key)) else _masked_node(str(key or ""), value)
+
+
+# LLM: 文本回显出口：结构脱敏后再转文本；空值（None、0、空串、空列表）沿原口径显示为空串。
+#   原先只看顶层键名、再把整个值 str()，model_custom_headers、mcp_servers 的 env 会整段明文回显。
 # 函数用途: 回显时对凭据脱敏，不把明文写回终端、日志或模型上下文。
 def mask_value(key: str, value: object) -> str:
-    text = str(value or "")
-    if is_credential_key(key) and text:
-        return f"{text[:3]}***" if len(text) > 3 else "***"
-    return text
+    return str(masked_structure(key, value) or "")
 
 
 # LLM: 生效值＝用户配置文件里的值优先；没写才回落到随包默认 YAML。报告必须同时给出两者与来源，

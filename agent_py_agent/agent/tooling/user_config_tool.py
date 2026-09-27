@@ -12,6 +12,7 @@ import json
 from ..settings.parameter_changes import (
     ChangeOrigin,
     applied_after_change,
+    displayed_change,
     parameter_history,
     reset_parameter,
     revert_change,
@@ -394,7 +395,8 @@ def _parameter_action(agent: object, params: dict) -> dict[str, object]:
         found = search_parameters(str(params.get("query") or key), limit=20)
         return {"ok": True, "parameters": [_spec_view(spec, config, brief=True) for spec in found]}
     if action == "history":
-        return {"ok": True, "changes": parameter_history(user_path=user_path, key=key, limit=20)}
+        changes = parameter_history(user_path=user_path, key=key, limit=20)
+        return {"ok": True, "changes": [displayed_change(item) for item in changes]}
     if action == "revert":
         report = revert_change(str(params.get("change_id") or ""), user_path=user_path, origin=origin)
     elif action == "reset":

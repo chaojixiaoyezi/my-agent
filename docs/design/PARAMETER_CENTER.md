@@ -130,6 +130,22 @@
     上限（夹在 60～900 秒）与 worker 租约有效期（至少 30 秒），按实际改写。空说明基线 177 → 175。
   - 恢复默认与回滚的回执也附“按新值的实际效果”（`parameter_changes.applied_after_change`：回到默认时按登记默认值算），
     与修改同一口径；`user_config` 的 reset/revert 回执同样多给 `applied_value/applied_rule/applied_basis`。
+- **字典与列表参数的结构脱敏（2026-09-27，分支 `claude/be-structured-masking`，基于 `f824b6c10`）**：
+  - 问题：`mask_value` 只看顶层键名，再把整个值 `str()`。`model_custom_headers`（可能放 Authorization、x-api-key）、`mcp_servers`
+    （每个服务器的 env 与 args 里可能有令牌）在 `/settings show`、user_config view/search 里整段明文，模型经 user_config 就能看到。
+    `model_auth_ref` 核对过：装的是引用（服务商编号、登录方式、代次、配置哈希与目录文件路径），不是凭据本身。
+  - 规则（`user_config_capability.masked_structure`，`mask_value` 是它的文本版，全部出口共用）：顶层键是凭据就整值遮住；
+    否则按结构递归——请求头与环境变量容器（按容器名最后一段是 headers/header/env/environ/environment 认，不按请求头名写死名单）
+    的值一律遮住、只留键名；嵌套映射里键名命中 `is_credential_key` 的遮值；列表里 `--凭据名=值` 遮值、`--凭据名 值` 遮下一项，
+    名字是凭据的 `名字=值` 遮值（docker 的 `-e GITHUB_TOKEN=…`），`--header`/`--env` 这类请求头/环境变量开关的值
+    （`名字: 值`、`名字=值`）只留名字（mcp-remote 的 `--header "Authorization: Bearer …"`），`--开关=网址` 的网址照样处理；
+    网址里的密码与名字是凭据的查询参数遮值（修改记录里带 YAML 引号的文本先剥引号）。返回同形副本，普通字典与列表照常显示。
+  - 已知边界：单字母开关（`-e`、`-H`）含义因程序而异，不按开关认，只靠 `名字=值` 与网址规则；名字不命中 `is_credential_key`
+    的环境变量写进 args（如 `-e DB_PASS=…`）不会遮，写在 env 映射里才一律遮住。
+  - 出口清单：登记表查看入口（user_config view 的 parameter/fact、search 的摘要）、聊天 `/settings` 的总览/查看/搜索/历史、
+    set/reset/revert 回执（`previous`/`saved` 取自已脱敏的记录，`effective` 经 `mask_value`）、`parameter_changes` 记账
+    （所有键都脱敏后才写；脱敏改动了值的记录标 `masked`，回滚拒绝，避免把 `***` 写回配置）、user_config 与 `/settings` 的
+    历史回显（`displayed_change` 读出后再遮一次，旧记录也不漏；回滚内部仍读原记录）、命令行 `config-get`（改为传原始值）。
 - **阶段 3（迁移）**：按模块分批迁移常数并改名。每批开工前在协作文件贴出文件清单，避开 Codex 正在改的文件。
   - **第一批：同名常数（2026-09-27）**。盘点时 32 个常数名在多个文件各定义一份。
     - 删掉没有读取方的 `CONTEXT_WINDOW`（TUI 两份）与 `RECENT_ARCHIVE_FILE_LIMIT`（记忆诊断两份，实际读配置）。
