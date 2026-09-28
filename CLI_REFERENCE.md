@@ -1712,7 +1712,6 @@ gateway_request_max_attempts: 2
 
 ```yaml
 memory_resume_auto_context_mode: "off"      # off / trigger / always
-memory_resume_auto_context_limit: 5         # 1-50
 ```
 
 默认文件：

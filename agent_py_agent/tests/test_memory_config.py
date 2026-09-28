@@ -35,7 +35,6 @@ def test_memory_settings_accepts_boundary_values():
             "memory_rule_routing_mode": "STRICT",
             "memory_rule_auto_read_limit": "0",
             "memory_resume_auto_context_mode": "ALWAYS",
-            "memory_resume_auto_context_limit": "1",
             "memory_compact_auto_trigger_percent": "70",
             "memory_compact_recovery_target_percent": "55",
         }
@@ -47,7 +46,6 @@ def test_memory_settings_accepts_boundary_values():
     assert settings.memory_rule_routing_mode == "strict"
     assert settings.memory_rule_auto_read_limit == 0
     assert settings.memory_resume_auto_context_mode == "always"
-    assert settings.memory_resume_auto_context_limit == 1
     assert settings.memory_compact_auto_trigger_percent == 70
     assert settings.memory_compact_recovery_target_percent == 55
 
@@ -60,7 +58,6 @@ def test_memory_settings_invalid_values_fall_back_with_warnings():
             "memory_rule_routing_mode": "strict; rm -rf /",
             "memory_rule_auto_read_limit": -5,
             "memory_resume_auto_context_mode": "always; rm -rf /",
-            "memory_resume_auto_context_limit": 999,
             "memory_compact_auto_trigger_percent": "abc",
             "memory_compact_recovery_target_percent": "abc",
         }
@@ -73,7 +70,6 @@ def test_memory_settings_invalid_values_fall_back_with_warnings():
         "memory_rule_routing_mode",
         "memory_rule_auto_read_limit",
         "memory_resume_auto_context_mode",
-        "memory_resume_auto_context_limit",
         "memory_compact_auto_trigger_percent",
         "memory_compact_recovery_target_percent",
     }
@@ -91,14 +87,12 @@ def test_load_config_normalizes_memory_values_and_keeps_warning_receipts(tmp_pat
     assert config.memory_rule_routing_mode == "off"
     assert config.memory_rule_auto_read_limit == 3
     assert config.memory_resume_auto_context_mode == "trigger"
-    assert config.memory_resume_auto_context_limit == 5
     assert config.memory_compact_auto_trigger_percent == 50
     assert config.memory_compact_recovery_target_percent == 80
     assert [item["field_name"] for item in config.memory_config_warnings] == [
         "memory_archive_level",
         "memory_hook_enabled",
         "memory_rule_auto_read_limit",
-        "memory_resume_auto_context_limit",
         "memory_compact_auto_trigger_percent",
         "memory_compact_recovery_target_percent",
     ]
@@ -111,7 +105,6 @@ def _memory_config_yaml_lines() -> list[str]:
         "memory_rule_routing_mode: off",
         "memory_rule_auto_read_limit: abcd",
         "memory_resume_auto_context_mode: trigger",
-        "memory_resume_auto_context_limit: 0",
         "memory_compact_auto_trigger_percent: 40",
         "memory_compact_recovery_target_percent: 99",
     ]

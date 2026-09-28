@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..memory_archive.artifact.read_modes import ARTIFACT_DEFAULT_READ_CHARS
 from ..memory_archive.artifact.reader import (
     ReadToolOutputArtifactRequest,
     estimate_tool_output_artifact_size,
@@ -152,9 +153,7 @@ class ReadArtifactTool(BaseTool):
         default_read_chars: int | None = None,
     ):
         self.root = Path(root)
-        self.default_read_chars = _config_int(
-            "memory_artifact_default_read_chars", default_read_chars
-        )
+        self.default_read_chars = _artifact_read_chars(default_read_chars)
         self.runtime_policy = ToolRuntimePolicy(
             effect_resolver=EffectResolverPolicy("read_only"),
             concurrency_policy=ConcurrencyPolicy("parallel_safe"),
@@ -327,6 +326,18 @@ def _artifact_read_root(root: Path, params: dict[str, Any]) -> Path:
         return Path(artifact_root).expanduser().resolve(strict=False)
     except OSError:
         return root
+
+
+# LLM: artifact 正文默认读取预算的唯一来源是 read_modes.ARTIFACT_DEFAULT_READ_CHARS（2026-09-28 参数减量 C 组）；
+#   这里只做“调用方显式值优先、非法值回落常量”的归一化，不要再退回读配置。
+# 函数用途: 决定一次 artifact 正文读取在调用方没给预算时读多少字符。
+def _artifact_read_chars(value: int | None) -> int:
+    if value is not None:
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            pass
+    return ARTIFACT_DEFAULT_READ_CHARS
 
 
 def _config_int(key: str, value: int | None) -> int:

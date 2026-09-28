@@ -17,7 +17,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from ..settings.defaults import default_config_int
 from .query import (
     ResumeGuidanceRequest,
     build_resume_guidance,
@@ -29,9 +28,19 @@ from .query import (
     local_hit_payload,
     resume_local_query,
 )
+from .query.archive_io import ARCHIVE_SEARCH_FILE_LIMIT
 from .resume_brief import build_resume_brief
 
 _ID_PATTERN = re.compile(r"(subagent-[A-Za-z0-9_.:-]+|gwreq-[A-Za-z0-9_.:-]+|request-[A-Za-z0-9_.:-]+)")
+
+# LLM: 恢复线索与归档检索的条数/预览预算，2026-09-28 参数减量 C 组后不再是用户参数；本模块与 memory-archive
+#   CLI 共用这一份定义，改值要一起发版，不要再退回成配置读取。
+# 函数用途: 给出自动恢复最多几条线索、恢复简报推荐几条读取路径、归档扫描与检索的文件上限、正文预览字符数。
+RESUME_AUTO_CONTEXT_LIMIT = 5
+RESUME_RECOMMENDED_READ_PATHS_LIMIT = 20
+# 归档扫描总条数上限：0 表示不限（下游按 records[:n] if n > 0 else records 处理）。
+RESUME_ARCHIVE_SCAN_LIMIT = 0
+QUERY_CONTENT_PREVIEW_CHARS = 500
 
 
 @dataclass(frozen=True)
@@ -77,7 +86,7 @@ def build_auto_resume_context(
 
 def _build_resume_context(agent: Any, user_prompt: str) -> ResumeContextResult:
 
-    limit = _config_int(agent, "memory_resume_auto_context_limit")
+    limit = RESUME_AUTO_CONTEXT_LIMIT
     records = _collect_resume_archive_records(agent)
     archive_matches, query = _first_archive_matches(records, user_prompt, limit=limit)
     args = _resume_args(query)
@@ -95,9 +104,7 @@ def _build_resume_context(agent: Any, user_prompt: str) -> ResumeContextResult:
             local_hits=local_payloads,
             task_payloads=task_payloads,
             gateway_payloads=gateway_payloads,
-            recommended_read_paths_limit=int(
-                getattr(agent.config, "memory_resume_recommended_read_paths_limit", 20) or 0
-            ),
+            recommended_read_paths_limit=RESUME_RECOMMENDED_READ_PATHS_LIMIT,
         )
     )
     brief = build_resume_brief(
@@ -119,8 +126,8 @@ def _build_resume_context(agent: Any, user_prompt: str) -> ResumeContextResult:
 
 def _collect_resume_archive_records(agent: Any) -> list[dict[str, Any]]:
     roots = _resume_archive_roots(agent)
-    scan_limit = _config_int(agent, "memory_resume_archive_scan_limit")
-    file_limit = _config_int(agent, "memory_archive_search_file_limit")
+    scan_limit = RESUME_ARCHIVE_SCAN_LIMIT
+    file_limit = ARCHIVE_SEARCH_FILE_LIMIT
     records: list[dict[str, Any]] = []
     seen: set[tuple[str, str, int]] = set()
     for root in roots:
@@ -162,7 +169,7 @@ def _resume_local_payloads(agent: Any, local_query: str, limit: int) -> list[dic
         if local_query
         else agent.local_store.list_recent(limit=limit)
     )
-    preview_chars = int(getattr(agent.config, "memory_query_content_preview_chars", 500) or 0)
+    preview_chars = QUERY_CONTENT_PREVIEW_CHARS
     return [local_hit_payload(hit, preview_chars=preview_chars) for hit in local_hits]
 
 
@@ -219,10 +226,3 @@ def _append(items: list[str], value: str) -> None:
     text = str(value or "").strip()
     if text and text not in items:
         items.append(text)
-
-
-def _config_int(agent: Any, key: str) -> int:
-    try:
-        return max(0, int(getattr(agent.config, key)))
-    except (AttributeError, TypeError, ValueError):
-        return default_config_int(key, minimum=0)

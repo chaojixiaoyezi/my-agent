@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+from ..agent.memory_archive.artifact.read_modes import ARTIFACT_DEFAULT_READ_CHARS
 from ..agent.memory_archive.artifact.reader import (
     ReadToolOutputArtifactRequest,
     read_tool_output_artifact,
@@ -32,7 +33,7 @@ def _memory_artifact_max_chars(agent, args) -> int:
     value = getattr(args, "max_chars", None)
     if value is not None:
         return int(value)
-    return int(getattr(agent.config, "memory_artifact_default_read_chars", 4000) or 0)
+    return ARTIFACT_DEFAULT_READ_CHARS
 
 
 def _print_memory_artifact_read(payload: dict, *, json_output: bool) -> None:

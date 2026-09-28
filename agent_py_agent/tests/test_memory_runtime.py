@@ -303,7 +303,6 @@ def test_auto_resume_context_injects_when_always_mode_enabled(tmp_path):
             tmp_path,
             model_backend="echo",
             memory_resume_auto_context_mode="always",
-            memory_resume_auto_context_limit=3,
         ),
         tmp_path,
     )
@@ -350,7 +349,6 @@ def test_auto_resume_context_recovers_cross_day_handoff_task(tmp_path):
             tmp_path,
             model_backend="echo",
             memory_resume_auto_context_mode="always",
-            memory_resume_auto_context_limit=5,
         ),
         tmp_path,
     )
@@ -387,7 +385,6 @@ def test_auto_resume_context_recovers_cross_day_gateway_request(tmp_path):
             tmp_path,
             model_backend="echo",
             memory_resume_auto_context_mode="always",
-            memory_resume_auto_context_limit=5,
         ),
         tmp_path,
     )

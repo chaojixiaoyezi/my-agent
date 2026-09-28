@@ -39,7 +39,6 @@ class TestMemorySettingsDefaults:
         """验证恢复默认值。"""
         settings = MemorySettings()
         assert settings.memory_resume_auto_context_mode == "off"
-        assert settings.memory_resume_auto_context_limit == 5
 
 
 class TestNormalizeMemorySettings:
@@ -139,24 +138,6 @@ class TestNormalizeMemorySettings:
         """验证无效的恢复模式回退。"""
         settings, warnings = normalize_memory_settings({"memory_resume_auto_context_mode": "never"})
         assert settings.memory_resume_auto_context_mode == "off"  # 默认值
-        assert len(warnings) == 1
-
-    def test_normalize_valid_resume_limit(self):
-        """验证有效的恢复限制。"""
-        settings, warnings = normalize_memory_settings({"memory_resume_auto_context_limit": 10})
-        assert settings.memory_resume_auto_context_limit == 10
-        assert len(warnings) == 0
-
-    def test_normalize_resume_limit_too_low(self):
-        """验证过低的恢复限制回退。"""
-        settings, warnings = normalize_memory_settings({"memory_resume_auto_context_limit": 0})
-        assert settings.memory_resume_auto_context_limit == 5  # 默认值（最小1）
-        assert len(warnings) == 1
-
-    def test_normalize_resume_limit_too_high(self):
-        """验证过高的恢复限制回退。"""
-        settings, warnings = normalize_memory_settings({"memory_resume_auto_context_limit": 100})
-        assert settings.memory_resume_auto_context_limit == 5  # 默认值（最大50）
         assert len(warnings) == 1
 
 

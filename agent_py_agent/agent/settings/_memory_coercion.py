@@ -64,7 +64,6 @@ _FIELDS = (
     _FieldSpec("memory_rule_routing_mode", "choice", choices={"off", "soft", "strict"}),
     _FieldSpec("memory_rule_auto_read_limit", "int", 0, None),
     _FieldSpec("memory_resume_auto_context_mode", "choice", choices={"off", "trigger", "always"}),
-    _FieldSpec("memory_resume_auto_context_limit", "int", 1, 50),
     _FieldSpec("memory_compact_auto_trigger_percent", "compact_trigger_percent"),
     _FieldSpec("memory_compact_recovery_target_percent", "compact_recovery_percent"),
     _FieldSpec("memory_curator_enabled", "bool"),

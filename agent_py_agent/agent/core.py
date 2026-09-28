@@ -75,6 +75,7 @@ from .extensions import load_extension_registry
 from .gateway_parts.channel_health import adapter_runtime_health
 from .ingestion.watch_tool import WatchStreamTool
 from .local_storage import LocalStore
+from .memory_archive.artifact.read_modes import ARTIFACT_DEFAULT_READ_CHARS
 from .memory_archive.control_plane import (
     MemoryControlPlaneQueryOptions,
     query_memory_control_plane,
@@ -910,7 +911,7 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
             file_source_resolver=source_resolver,
             file_source_ref_schema=source_ref_schema,
             artifact_read_budget_max_chars=config.tool_artifact_read_budget_max_chars,
-            artifact_default_read_chars=config.memory_artifact_default_read_chars,
+            artifact_default_read_chars=ARTIFACT_DEFAULT_READ_CHARS,
             disabled_tools=list(getattr(agent.owner_policy, "disabled_tools", ())),
             artifact_root=runtime_owner_root(agent),
             artifact_backup_root=agent.home_paths.owner_artifact_backups_dir,

@@ -1,5 +1,23 @@
 # 测试与发布验收
 
+## 参数减量 C 组第 2 批：恢复/归档 6 键降为常量（2026-09-28，分支 `my-agent/self-dev-2`）
+
+- **来源/做法**：dev 在 my-agent-2 开发交流板派的任务 1，做法照 main 上的 `87e025bb6`。6 键数值不变，降为读取点旁的具名常量：
+  `agent/memory_archive/resume_context.py` 的 `RESUME_AUTO_CONTEXT_LIMIT`(5)、`RESUME_RECOMMENDED_READ_PATHS_LIMIT`(20)、
+  `RESUME_ARCHIVE_SCAN_LIMIT`(0，0 表示不限)、`QUERY_CONTENT_PREVIEW_CHARS`(500)，`agent/memory_archive/artifact/read_modes.py` 的
+  `ARTIFACT_DEFAULT_READ_CHARS`(4000)；归档检索文件上限直接复用 `query/archive_io.py` 既有的 `ARCHIVE_SEARCH_FILE_LIMIT`(30)，
+  避免同一概念两份定义（`test_constant_names_unique` 会拦）。
+- **配置面同步删除**：`AgentConfig` 6 字段、随包 `agent_config.yaml` 6 行与相关说明注释、`services/_normalize.py` 6 条规格、
+  `_memory_types.MemorySettings` 与 `_memory_coercion` 里的 `memory_resume_auto_context_limit`、说明基线 5 个条目、
+  `CLI_REFERENCE.md` 的示例行；用户配置里残留旧键只按未知键告警，不迁移。
+- **测试改动**：`test_memory_config.py`、`test_settings_memory.py`、`test_memory_runtime{,_basics,_archive}.py`、`test_parameter_registry.py`
+  删除或改写旧键用例（这些键已不是参数，对应归一化/边界用例随之移除）。
+- **复现**：`cd agent_py_agent && python3 -m pytest tests/test_memory_*.py tests/test_artifact_*.py tests/test_settings*.py tests/test_config*.py -q --tb=short`
+  （1447 passed），另跑 `test_parameter_registry / test_config_field_readers / test_constant_names_unique / test_architecture_guardrails`；
+  仓库根跑 Ruff、`scripts/check_doc_sync.py`、`scripts/check_code_size.py --mode strict`、`git diff --check`、`scripts/check_clean_package.py .`。
+- **未包含**：`frontend/config/backend-config-catalog.json` 是随包 YAML 的生成物，本批没有重新生成（重新生成会带出 189/303 行与本批无关的历史差异）；
+  该目录在本基线上已 stale，前端线需单独跑 `npm run sync:config`。
+
 ## 前端 import 链恢复：补回 `frontend/src/data/runtimeConfig.ts` 与 `mockConfig.ts`（2026-09-28，分支 `claude/9a-frontend-runtimeconfig`，基于 `3e23d2da8`）
 
 - **根因（误删）**：2026-08-15 建独立仓库的初始化提交 `0b6252590` 没带 `frontend/src/data/` 两个文件，而同一提交里的
