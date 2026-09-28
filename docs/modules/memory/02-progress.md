@@ -152,3 +152,14 @@ Curator 的 interval、turn_threshold、max_input_chars、timeout、workers、da
 同批还降了 conversation/runtime 的待处理唤醒消费上限与成功完成合并窗口（见 subagent 模块进展）。定向测试与静态门禁见 TESTS。
 
 2026-09-28：Curator 的决策输入（point=curator）按 dev 裁决收口——候选释义/非选择/need_data 语义上移 `state.annotation_criteria`，每题只留身份引用与 `criteria_key`（wire 层 `criteria` 接受共享引用字符串）；audit 事件投影不再发送全行恒空的字段。另增窗口兜底：按本点位已授权决策连接的 `model_context_window_tokens` 按整条来源从尾部裁题面，被裁来源仍在 `state.batch` 原始快照里、留在原游标之后下一轮重放，裁掉时记固定码 `memory_curator_input_fitted:decision_window`；`curator` 纳入 `_JEV_BOUND_POINTS` 有界点位。此前 owner 侧 point=curator 的 7 条 `invalid_input`（5–9ms、从未联网）即由决策请求超模型窗口触发。本地四文件 83 项通过，真机 Gateway 未复验。
+
+2026-09-28 Jev 2（前台点位单一来源、缩小输入）第 1 步：`recall` 点位请求体去重。`state.memories` 改送
+`_decision_view` 投影（`entry_id`/`kind`/`content`/`attributes`），不再携带决策从不读取的 `source`/`role`/
+`created_at`/`updated_at`/`expires_at`；`attributes` **必须保留**——它参与本轮绑定校验，删掉会让 scope 变化
+不再被比对成 stale（实测 `test_current_candidate_and_model_binding_rejects_stale_suggestion` 会红，已在干净基线复核）。
+`need_data` 的长说明逐题相同，上移为 `state.need_data_note` 一份，题内只留必须逐题的 `required_refs`。
+`criteria` 的字段形状**未改**：它是决策协议的必需字段（模型与假 backend 都靠它选答案），把选项上提成共享引用
+会让 10 条既有用例红——curator 线做过同类上移，必须同时改 wire 层让 `criteria` 接受共享引用字符串，本片未做，
+留待 dev 裁决。实测收益（10 条 × 520 字符正文，JSON 字符数/4 估算）：整包 11445→9781（−14.5%），
+memories 7240→5920，其中元数据 2040→720（−65%），questions 3960→3570。正文 `content` 仍占请求 53%，
+是否按 pre_recall 先例（`content[:160]`）截断属决策质量取舍，未做，待 dev 定。定向 66 项通过。

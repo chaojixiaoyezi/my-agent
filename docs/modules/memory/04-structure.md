@@ -77,6 +77,10 @@ system/tools/messages 前缀，超窗时按原分段合同覆盖完整历史。�
 
 `memory_store/decision_recall.py` 经共用决策服务提供临时优先级与补充查询；唯一接线位于
 `agent_core/runtime/loop_support.py::_formal_memories_for_request` 原预算之后。
+发给决策模型的记忆条目走 `_decision_view` 最小投影（`entry_id`/`kind`/`content`/`attributes`）：时间戳与来源渠道
+不提供排序增量，不进请求；`attributes` 必须保留，它参与本轮绑定校验（scope 变化要能被比对成 stale）。
+`need_data` 的逐题相同说明放在 `state.need_data_note` 一份，题内只留指向本条记忆的 `required_refs`；
+`criteria` 的协议形状不变（模型与 backend 都靠它选答案）。本地一致性校验仍用完整的 `_record_view`。
 读取之前即检查原 `task_local`/`control_plane` 范围和 owner `memory_enabled`，不在禁用范围继续扫描正式项目记忆；
 原任务本地与控制材料仍按其自身来源准备，此门不删除历史或改变工具权限。
 当前选中集合完整保留，HOT/lesson 只绑定不参与排序。P3 排序的来源刷新只查原正式仓库并投影原 ID，不新增检索或访问计数；P5-A 补充查询至多一次，候选未确认前不记访问。
