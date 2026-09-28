@@ -2,6 +2,28 @@
 
 ## user_config 的 decision_patch 通道：多带字段时回执写明是哪个（2026-09-28，分支 `claude/be-decision-patch-fix`，基于 `fc494da3f`）
 
+## 会话间消息与派活第 3 片 B：TurnTrigger 新 kind + create_session_task 工具（2026-09-28，分支 `my-agent/self-dev-3`）
+
+- **来源**：第 3 片 B（管理员派任务），dev 要求功能完整（派任务 + 结果回报 + 取消 + 两侧可见）。
+- **做法**：
+  - `agent_core/runtime/turn_trigger.py` 新增第二种触发 kind `session_task`：
+    `session_task_trigger()`、`SESSION_TASK_FIRST_LINE`（写明"另一个会话派来一个任务，不是当前用户原话"）、
+    `SESSION_TASK_FACTS_SOURCE`、推荐短名单与理由；`current_turn_text()` 增加派活分支（**绝不让任务正文落在用户原话位置**）。
+    `turn_trigger_recommendation()` 改为支持两种 kind。**lifecycle_wake 行为保持字节不变**。
+  - 新增 `agent_core/orchestration/tools/create_session_task.py`：`CreateSessionTaskTool`。
+    - 与发消息**共用同一权限判定**（`kind=task`），并额外落一条 `SessionTaskStore` 权威记录。
+    - **正文只存一份**：先投 guidance（`origin_kind=session_task`）拿到 `guidance_id`，记录里只引用它。
+    - **链深守卫**：按 `origin_task_id` 结构化计算（读 `current_session_task_id`，不接收模型参数）；
+      达到 `session_task_max_chain_depth` 拒绝（0 表示不限制）。
+    - 目标 `status=active` 时 `wake.raise_signal`（`reason=session_task`）。
+  - `session_messaging.py` 新增常量 `SESSION_TASK_CHAIN_LIMIT` / `SESSION_TASK_RATE_LIMIT` / `SESSION_TASK_ORIGIN_KIND`；
+    `error_taxonomy` 登记前两个错误码；`core.py` 按 `session_task_tool_visible` **条件注册**。
+- **新测试**：`test_create_session_task_tool.py`（7 项）——缺参数、目标不存在越界、IM 目标拒绝、派活开关关闭、
+  成功建记录 + 投正文 + 唤醒、链深超限拒绝、链深 0 表示不限制。
+- **复现**：`python3 -m pytest agent_py_agent/tests/test_create_session_task_tool.py -q`（7 项）；
+  与前序共 98 项全绿（含 `test_lifecycle_wake_host_event` 回归 20 项）。
+- **未完成**：取消（C）、结果回报（D）、接收方 TUI 展示（E）、fake LLM 端到端（F）。
+
 ## 会话间消息与派活第 3 片 A：SessionTaskStore 权威存储（2026-09-28，分支 `my-agent/self-dev-3`）
 
 - **来源**：第 3 片（管理员派任务）。设计文档要求 task 状态只有**一个权威**、**单一写入方**，正文只存一份。

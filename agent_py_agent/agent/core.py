@@ -14,6 +14,7 @@ from pathlib import Path
 from .agent_core.capability_request_tool import CapabilityRequestTool
 from .agent_core.models import AgentRunResult
 from .agent_core.orchestration.dispatch.mixin import SimpleAgentDispatchMixin
+from .agent_core.orchestration.tools.create_session_task import CreateSessionTaskTool
 from .agent_core.orchestration.tools.send_session_message import SendSessionMessageTool
 from .agent_core.orchestration_tools import (
     CODING_SUBAGENT_TOOLS,
@@ -69,7 +70,10 @@ from .conversation.audit_tools import PublishAuditUpdateTool
 from .conversation.authority import CONVERSATION_REQUEST_ID_ATTR
 from .conversation.goal_tools import CreateGoalTool, GetGoalTool, UpdateGoalTool
 from .conversation.named_work import StopNamedWorkTool
-from .conversation.session_messaging import session_messaging_tool_visible
+from .conversation.session_messaging import (
+    session_messaging_tool_visible,
+    session_task_tool_visible,
+)
 from .delivery import (
     DeliveryContext,
     DeliveryService,
@@ -1078,6 +1082,9 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
     # 注册在 enable_subagents 门控之前,不因子代理总开关关闭而消失。
     if session_messaging_tool_visible(agent.home_paths, capability_config_for_agent(agent)):
         agent.tools.register(SendSessionMessageTool(agent))
+    # 会话间派活:第一期只开给管理员,并单独看派活开关;条件不满足时工具不进 registry。
+    if session_task_tool_visible(agent.home_paths, capability_config_for_agent(agent)):
+        agent.tools.register(CreateSessionTaskTool(agent))
     # 增量结论账(收尾一公里):确认一条结论就持久化一条到 findings.jsonl,收尾崩/重派/
     # 被取消都不丢;整合/收口层从账合并,最终报告只是汇总视图。子代理与主代理长任务共用。
     if not agent.config.enable_subagents:

@@ -24,6 +24,13 @@ SESSION_TARGET_CHANNEL_UNSUPPORTED = "SESSION_TARGET_CHANNEL_UNSUPPORTED"
 SESSION_IDENTITY_UNAVAILABLE = "SESSION_IDENTITY_UNAVAILABLE"
 # 当前上下文没有会话（独立命令等）。
 SESSION_NO_CURRENT_THREAD = "SESSION_NO_CURRENT_THREAD"
+# 派活链深度超限：由对端任务触发的任务沿 origin_task_id 链累计，超过上限拒绝。
+SESSION_TASK_CHAIN_LIMIT = "SESSION_TASK_CHAIN_LIMIT"
+# 每对会话每小时消息上限（回报消息也计入）。
+SESSION_TASK_RATE_LIMIT = "SESSION_TASK_RATE_LIMIT"
+
+# guidance metadata 里区分 task 正文的来源标记（与 session_message 并列）。
+SESSION_TASK_ORIGIN_KIND = "session_task"
 
 # 第一期允许的接收方渠道白名单：只允许本地渠道（TUI/CLI/本机）。这是**白名单**而非黑名单：
 # 任何不在名单里的渠道（包括以后新增的 IM 渠道）一律拒绝，fail closed，避免封闭枚举漏项。
@@ -181,6 +188,9 @@ __all__ = [
     "SESSION_TARGET_CHANNEL_UNSUPPORTED",
     "SESSION_IDENTITY_UNAVAILABLE",
     "SESSION_NO_CURRENT_THREAD",
+    "SESSION_TASK_CHAIN_LIMIT",
+    "SESSION_TASK_ORIGIN_KIND",
+    "SESSION_TASK_RATE_LIMIT",
     "LOCAL_TARGET_CHANNELS",
     "SESSION_TASK_NOT_ALLOWED",
     "SESSION_TASK_TARGET_SELF",

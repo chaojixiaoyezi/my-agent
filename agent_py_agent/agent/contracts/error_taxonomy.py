@@ -676,6 +676,26 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
             "不要默认成 main 或 local 再重试，先修好调用上下文。"
         ),
     ),
+    "SESSION_TASK_CHAIN_LIMIT": ErrorContract(
+        code="SESSION_TASK_CHAIN_LIMIT",
+        category="orchestration",
+        retryable=False,
+        recommended_action=RecoveryAction.STOP.value,
+        recovery_hint=(
+            "派活链深度达到上限：由对端任务触发的任务会沿着 origin_task_id 链累计。"
+            "不要继续往下派，改为在当前会话里自己完成或回报给上级。"
+        ),
+    ),
+    "SESSION_TASK_RATE_LIMIT": ErrorContract(
+        code="SESSION_TASK_RATE_LIMIT",
+        category="orchestration",
+        retryable=True,
+        recommended_action=RecoveryAction.WAIT.value,
+        recovery_hint=(
+            "这一对会话每小时的消息条数达到上限（任务回报消息也计入）。"
+            "先等窗口过去，不要立即重试同一对会话。"
+        ),
+    ),
     "SESSION_NO_CURRENT_THREAD": ErrorContract(
         code="SESSION_NO_CURRENT_THREAD",
         category="orchestration",
