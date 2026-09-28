@@ -4652,7 +4652,7 @@
           {
             "key": "session_pair_hourly_limit",
             "label": "session_pair_hourly_limit（session pair hourly limit）",
-            "description": "每对会话（发送会话, 接收会话）每小时的消息上限；task 完成后的回报消息也计入；0 表示不限制。",
+            "description": "每对会话（发送会话, 接收会话）每小时的消息上限；任务回报与取消通知也计入；0 表示不限制。",
             "type": "number",
             "defaultValue": 60,
             "currentValue": 60,
