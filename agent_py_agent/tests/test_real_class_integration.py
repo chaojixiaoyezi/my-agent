@@ -241,7 +241,6 @@ def _write_capability_config_yaml(tmp_path: Path, *, auto_split: bool) -> Path:
     """写一份真实 capability_config.yaml（覆盖 yaml→dataclass 字段解析路径）。"""
     path = tmp_path / "capability_config.yaml"
     path.write_text(
-        "enable_capability_routing: true\n"
         f"subagent_failure_auto_split_enabled: {'true' if auto_split else 'false'}\n"
         "subagent_failure_split_max_depth: 2\n",
         encoding="utf-8",

@@ -18,7 +18,8 @@ from .runtime_config_patch_io import (
 )
 from .runtime_config_reload import capability_config_version
 
-_MANUAL_ONLY_FIELDS = frozenset({"enable_capability_routing"})
+# 只能人工改、补丁只给建议不写文件的字段；目前没有。唯一成员 enable_capability_routing 是死开关，已于 2026-09-28 删除。
+_MANUAL_ONLY_FIELDS: frozenset[str] = frozenset()
 _SAFE_AUTO_FIELDS = frozenset(CapabilityConfig.__dataclass_fields__) - _MANUAL_ONLY_FIELDS
 
 

@@ -34,12 +34,12 @@ from agent_py_agent.agent.settings.services.runtime_config_task import (
 )
 
 
-def _write_config(path, *, run_timeout: int = 900, routing: bool = False) -> None:
+def _write_config(path, *, run_timeout: int = 900, selection: bool = False) -> None:
     path.write_text(
         "\n".join(
             [
                 "# runtime config fixture",
-                f"enable_capability_routing: {'true' if routing else 'false'}",
+                f"enable_capability_package_selection: {'true' if selection else 'false'}",
                 f"subagent_run_timeout: {run_timeout}",
                 "subagent_heartbeat_timeout: 180",
                 "",
@@ -127,15 +127,19 @@ def test_safe_patch_applies_with_audit(tmp_path):
     assert "subagent_run_timeout" in notice_path.read_text(encoding="utf-8")
 
 
-def test_manual_only_patch_returns_suggestion_without_mutating(tmp_path):
+def test_manual_only_patch_returns_suggestion_without_mutating(tmp_path, monkeypatch):
+    # 目前没有只能手改的字段；机制保留，登记进来的字段只给建议、不写文件。
+    from agent_py_agent.agent.capability import runtime_config_patch
+
+    monkeypatch.setattr(runtime_config_patch, "_MANUAL_ONLY_FIELDS", frozenset({"enable_capability_package_selection"}))
     config_path = tmp_path / "capability_config.yaml"
-    _write_config(config_path, routing=False)
+    _write_config(config_path, selection=False)
     before_text = config_path.read_text(encoding="utf-8")
 
     result = apply_capability_config_patch(
         CapabilityConfigPatchRequest(
             config_path=config_path,
-            patches=[CapabilityConfigPatch(field="enable_capability_routing", value=True)],
+            patches=[CapabilityConfigPatch(field="enable_capability_package_selection", value=True)],
             apply=True,
         )
     )
@@ -143,7 +147,7 @@ def test_manual_only_patch_returns_suggestion_without_mutating(tmp_path):
     assert result.ok is True
     assert result.applied is False
     assert result.changed_fields == []
-    assert result.suggestions[0]["field"] == "enable_capability_routing"
+    assert result.suggestions[0]["field"] == "enable_capability_package_selection"
     assert result.suggestions[0]["reason"] == "manual_approval_required"
     assert config_path.read_text(encoding="utf-8") == before_text
 

@@ -22,14 +22,14 @@ class TestCapabilityConfigDefaults:
     """测试 CapabilityConfig 默认值。"""
 
     def test_capability_config_default_enable(self):
-        """验证能力路由默认关闭。"""
+        """验证包推荐默认开启、一次选包默认关闭。"""
         config = CapabilityConfig()
-        assert config.enable_capability_routing is False
+        assert config.enable_capability_package_recommendations is True
+        assert config.enable_capability_package_selection is False
 
     def test_capability_config_default_timeouts(self):
         """验证子代理默认不设置系统级超时墙。"""
         config = CapabilityConfig()
-        assert config.capability_request_max_tokens == 600
         assert config.subagent_run_timeout == 0
         assert config.subagent_heartbeat_timeout == 0
 
@@ -37,7 +37,6 @@ class TestCapabilityConfigDefaults:
         """验证限制默认值。"""
         config = CapabilityConfig()
         assert config.capability_candidate_limit == 5
-        assert config.capability_alternative_max_attempts == 3
         assert config.subagent_no_progress_attempt_limit == 4
         assert config.subagent_stream_activity_projection_enabled is True
         assert config.subagent_stream_activity_interval_seconds == 15
@@ -45,7 +44,6 @@ class TestCapabilityConfigDefaults:
     def test_capability_config_zero_means_unlimited(self):
         """验证 0 表示不限制。"""
         config = CapabilityConfig()
-        assert config.capability_request_max_tried_items == 0
         assert config.capability_grant_max_skills == 0
         assert config.capability_grant_max_tools == 0
 
@@ -62,37 +60,37 @@ class TestLoadCapabilityConfig:
     def test_load_capability_config_valid_values(self):
         """验证加载有效配置。"""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-            f.write("enable_capability_routing: true\n")
-            f.write("capability_request_max_tokens: 800\n")
+            f.write("enable_capability_package_selection: true\n")
+            f.write("capability_package_selection_max_input_tokens: 800\n")
             f.flush()
             path = Path(f.name)
 
         try:
             config = load_capability_config(path)
-            assert config.enable_capability_routing is True
-            assert config.capability_request_max_tokens == 800
+            assert config.enable_capability_package_selection is True
+            assert config.capability_package_selection_max_input_tokens == 800
         finally:
             path.unlink()
 
     def test_load_capability_config_partial_values(self):
         """验证部分配置加载。"""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-            f.write("enable_capability_routing: true\n")
+            f.write("enable_capability_package_selection: true\n")
             f.flush()
             path = Path(f.name)
 
         try:
             config = load_capability_config(path)
-            assert config.enable_capability_routing is True
+            assert config.enable_capability_package_selection is True
             # 其他字段使用默认值
-            assert config.capability_request_max_tokens == 600
+            assert config.capability_package_selection_max_input_tokens == 3000
         finally:
             path.unlink()
 
     def test_load_capability_config_unknown_fields_rejected(self):
         """验证未知字段会直接报错。"""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-            f.write("enable_capability_routing: true\n")
+            f.write("enable_capability_package_selection: true\n")
             f.write("unknown_field: value\n")
             f.flush()
             path = Path(f.name)
@@ -101,7 +99,7 @@ class TestLoadCapabilityConfig:
             # 2026-09-27 起与主配置一致：未知键只告警并忽略，不再拒绝加载（参数减量约定）。
             config = load_capability_config(path)
             assert any("unknown_field" in w for w in config.config_warnings)
-            assert config.enable_capability_routing is True
+            assert config.enable_capability_package_selection is True
         finally:
             path.unlink()
 
@@ -115,30 +113,30 @@ class TestLoadCapabilityConfig:
         try:
             config = load_capability_config(path)
             # 所有字段应该使用默认值
-            assert config.enable_capability_routing is False
-            assert config.capability_request_max_tokens == 600
+            assert config.enable_capability_package_selection is False
+            assert config.capability_package_selection_max_input_tokens == 3000
         finally:
             path.unlink()
 
     def test_load_capability_config_with_integers(self):
         """验证整数类型配置项。"""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-            f.write("capability_escalation_max_hops: 6\n")
-            f.write("subagent_due_check_interval: 300\n")
+            f.write("subagent_failure_split_max_depth: 6\n")
+            f.write("subagent_heartbeat_timeout: 300\n")
             f.flush()
             path = Path(f.name)
 
         try:
             config = load_capability_config(path)
-            assert config.capability_escalation_max_hops == 6
-            assert config.subagent_due_check_interval == 300
+            assert config.subagent_failure_split_max_depth == 6
+            assert config.subagent_heartbeat_timeout == 300
         finally:
             path.unlink()
 
     def test_load_capability_config_with_booleans(self):
         """验证布尔类型配置项。"""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-            f.write("enable_capability_routing: true\n")
+            f.write("enable_capability_package_selection: true\n")
             f.write("capability_grant_expires_after_task: false\n")
             f.write("subagent_stream_activity_projection_enabled: false\n")
             f.flush()
@@ -146,7 +144,7 @@ class TestLoadCapabilityConfig:
 
         try:
             config = load_capability_config(path)
-            assert config.enable_capability_routing is True
+            assert config.enable_capability_package_selection is True
             assert config.capability_grant_expires_after_task is False
             assert config.subagent_stream_activity_projection_enabled is False
         finally:
@@ -159,20 +157,14 @@ class TestCapabilityConfigValidation:
     def test_capability_config_token_limits(self):
         """验证 token 限制字段。"""
         config = CapabilityConfig()
-        assert config.capability_request_max_tokens == 600
+        assert config.capability_package_selection_max_input_tokens == 3000
         assert config.capability_bundle_max_tokens == 3000
-        assert config.skill_card_max_tokens == 0  # 不限制
 
     def test_capability_config_timeout_hierarchy(self):
         """验证默认不靠超时层级限制子代理。"""
         config = CapabilityConfig()
         assert config.subagent_heartbeat_timeout == 0
         assert config.subagent_run_timeout == 0
-
-    def test_capability_config_evidence_requirements(self):
-        """验证证据要求字段。"""
-        config = CapabilityConfig()
-        assert config.subagent_min_evidence_for_done == 1
 
     def test_capability_config_grant_expiration(self):
         """验证授权过期设置。"""
@@ -186,29 +178,25 @@ class TestCapabilityConfigEdgeCases:
     def test_capability_config_all_zero_limits(self):
         """验证全 0 限制值。"""
         config = CapabilityConfig(
-            capability_request_max_tried_items=0,
-            capability_request_max_evidence_items=0,
-            capability_request_max_per_task=0,
             capability_grant_max_skills=0,
             capability_grant_max_tools=0,
-            skill_card_max_tokens=0,
-            tool_card_max_tokens=0,
-            skill_body_max_tokens=0,
+            capability_candidate_limit=0,
+            subagent_failure_split_max_depth=0,
         )
         # 全 0 表示不限制
-        assert config.capability_request_max_tried_items == 0
         assert config.capability_grant_max_skills == 0
+        assert config.capability_candidate_limit == 0
 
     def test_capability_config_custom_limits(self):
         """验证自定义限制值。"""
         config = CapabilityConfig(
             capability_candidate_limit=10,
             capability_bundle_max_tokens=5000,
-            capability_alternative_max_attempts=5,
+            subagent_no_progress_attempt_limit=5,
         )
         assert config.capability_candidate_limit == 10
         assert config.capability_bundle_max_tokens == 5000
-        assert config.capability_alternative_max_attempts == 5
+        assert config.subagent_no_progress_attempt_limit == 5
 
 
 # 函数用途: 列出 CapabilityConfig 里真正的配置键；config_warnings 是加载诊断，不是配置项。
@@ -233,3 +221,7 @@ class TestShippedCapabilityTemplate:
         mismatched = {key: (getattr(loaded, key), getattr(defaults, key))
                       for key in raw if getattr(loaded, key) != getattr(defaults, key)}
         assert mismatched == {}
+
+    def test_every_config_field_is_in_the_template(self):
+        """CapabilityConfig 的每个字段都必须写进模板（带中文注释），不能只藏在 dataclass 里；不用的字段直接删。"""
+        assert _config_field_names() - set(load_simple_yaml(SHIPPED_TEMPLATE)) == set()

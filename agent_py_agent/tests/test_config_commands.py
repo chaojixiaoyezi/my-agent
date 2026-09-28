@@ -214,14 +214,14 @@ class TestCapabilityConfig:
 
         config_file = tmp_path / "capability.yaml"
         config_file.write_text(
-            "enable_capability_routing: true\n"
-            "capability_request_max_tokens: 800\n",
+            "enable_capability_package_selection: true\n"
+            "capability_package_selection_max_input_tokens: 800\n",
             encoding="utf-8",
         )
 
         config = load_capability_config(str(config_file))
-        assert config.enable_capability_routing is True
-        assert config.capability_request_max_tokens == 800
+        assert config.enable_capability_package_selection is True
+        assert config.capability_package_selection_max_input_tokens == 800
 
     def test_load_capability_config_missing_file(self):
         """加载不存在的能力配置文件。"""

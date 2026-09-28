@@ -261,16 +261,17 @@ def _board_options(
     return SubAgentBoardOptions(recent_limit=recent_limit)
 
 
+# LLM: 巡检阈值只取自 CapabilityConfig 的三个在用字段；没有配置时心跳/运行超时按 0（关闭）、无进展熔断按 4。
+#   不要在这里读已删的完成证据数，改阈值来源须同步随包模板与 test_capability_config 的模板一致性测试。
+# 函数用途: 把能力配置换算成一次巡检用的阈值快照，供 due-check 和行动计划共用。
 def due_check_settings(config: Any, now: float) -> DueCheckSettings:
     heartbeat_timeout = config.subagent_heartbeat_timeout if config else 0
     run_timeout = config.subagent_run_timeout if config else 0
-    min_evidence = config.subagent_min_evidence_for_done if config else 0
     no_progress_attempt_limit = getattr(config, "subagent_no_progress_attempt_limit", 4) if config else 4
     return DueCheckSettings(
         now=now,
         heartbeat_timeout=heartbeat_timeout,
         run_timeout=run_timeout,
-        min_evidence=min_evidence,
         no_progress_attempt_limit=no_progress_attempt_limit,
     )
 

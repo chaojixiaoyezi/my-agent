@@ -254,7 +254,6 @@ def test_subagent_due_check_report():
             CapabilityConfig(
                 subagent_heartbeat_timeout=1,
                 subagent_run_timeout=1,
-                subagent_min_evidence_for_done=1,
             )
         )
         kinds = {issue.kind for issue in report.issues}

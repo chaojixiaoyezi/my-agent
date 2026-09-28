@@ -49,6 +49,8 @@ from ...policies import (
 from ..recovery.strategy import SubagentRecoveryStrategyRequest, build_subagent_recovery_strategy
 
 
+# LLM: 一次巡检的只读阈值快照；0 关闭对应检查。字段只增不猜：新增阈值要从 CapabilityConfig 在用字段经 due_check_settings 传入。
+# 类用途: 装心跳停滞、运行超时和无进展熔断三个阈值，外加本次巡检的时间点。
 @dataclass(frozen=True)
 class DueCheckSettings:
     """Runtime thresholds for one due-check pass."""
@@ -56,7 +58,6 @@ class DueCheckSettings:
     now: float
     heartbeat_timeout: float
     run_timeout: float
-    min_evidence: int
     no_progress_attempt_limit: int = 4
 
 

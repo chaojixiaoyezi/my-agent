@@ -165,8 +165,7 @@ def test_zero_limit_means_unlimited():
     with tempfile.TemporaryDirectory() as td:
         config_path = Path(td) / "capability_config.yaml"
         config_path.write_text(
-            "capability_candidate_limit: 0\n"
-            "capability_request_max_tokens: 0\n",
+            "capability_candidate_limit: 0\n",
             encoding="utf-8",
         )
         config = load_capability_config(config_path)
@@ -189,7 +188,6 @@ def test_zero_limit_means_unlimited():
     hits = router.search("文件")
 
     assert config.capability_candidate_limit == 0
-    assert config.capability_request_max_tokens == 0
     assert len(hits) > 1
 
 

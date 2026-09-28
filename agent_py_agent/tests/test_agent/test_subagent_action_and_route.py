@@ -105,7 +105,7 @@ def test_subagent_action_plan_dry_run():
         Path(broken.output_json).unlink()
         agent.subagents.channel_probe.probe_channel(broken.id)
 
-        cap = CapabilityConfig(subagent_heartbeat_timeout=1, subagent_run_timeout=1, subagent_min_evidence_for_done=1)
+        cap = CapabilityConfig(subagent_heartbeat_timeout=1, subagent_run_timeout=1)
         report = agent.subagents.board.write_action_plan(cap)
         actions = {(item.run_id, item.action): item for item in report.actions}
 

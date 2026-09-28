@@ -34,6 +34,21 @@
   rc=0（`@apply` 为既有 CSS 提示）；Bun TSX 转译器转译 `frontend/src` 下 47 个 TS/TSX 全部通过；静态门禁 ruff、doc_sync、
   strict code_size、diff --check、clean_package。
 
+## 能力配置随包模板与 dataclass 逐项一致，删除 12 个死字段（2026-09-28，分支 `claude/9a-lark-and-capcfg`）
+
+- **起因**：
+  - G07 验收发现，Gateway 只读 agent 根目录下的 `config/capability_config.yaml`（没有指定工作区时就是 owner home），找不到文件时用 dataclass 默认值；而 daemon、subagents 等 CLI 子命令默认读随包模板。
+  - 对齐前，模板比 dataclass 少 16 个字段，`enable_capability_routing` 在模板里是 true、在 dataclass 里是 False。
+- **改动**：
+  - 模板补上 5 个在用的键。
+  - 删除 12 个运行时没有效果的字段：10 个没有读取方；`enable_capability_routing` 不控制能力申请链路；`subagent_min_evidence_for_done` 只被透传进巡检快照，从未使用。
+  - 读取逻辑不变。
+- **测试**：
+  - `test_capability_config.py::TestShippedCapabilityTemplate` 锁定：模板里每个键都被认识，值等于 dataclass 默认值，加载无告警；dataclass 的每个字段都在模板里。
+  - `test_capability_config_unknown_keys.py` 对 12 个已删键做参数化：用户配置里残留时只告警、照常加载。
+  - 变异验证做了三个：改模板里的一个值、加一个未知键、给 dataclass 加一个模板里没有的字段。三个都被测试抓住。
+- **验证**：能力配置相关测试、`test_parameter_registry`、架构护栏、`constant_names_unique`，以及五项静态 gate，结果见交接回报。前端目录已用 `node frontend/scripts/sync-backend-config.mjs` 重新生成，`--check` 通过。
+
 ## 飞书启停用例改用 webhook，消除 shard-1 退出时的 lark ExpiringCache 回溯（2026-09-28，分支 `claude/9a-lark-and-capcfg`）
 
 - **原因**：

@@ -1,5 +1,15 @@
 # Subagent Structure
 
+## 巡检阈值来源（2026-09-28）
+
+- `services/board/service.py::due_check_settings` 从 `CapabilityConfig` 取三个在用字段，组成 `DueCheckSettings`（`services/board/due_checks.py`）：
+  - `subagent_heartbeat_timeout`：心跳停滞超过该秒数记为问题，超过 3 倍升为 P0；
+  - `subagent_run_timeout`：运行超时，记为 P0；
+  - `subagent_no_progress_attempt_limit`：无进展熔断，默认 4。
+- 0 关闭对应检查。没有配置对象时，前两个阈值按 0，熔断按 4。
+- 原来的 `min_evidence` 由 `subagent_min_evidence_for_done` 透传进快照，但没有任何检查读取，已随配置字段一起删除。
+  以后要新增巡检阈值，先在 `CapabilityConfig` 和随包模板里加在用字段，再经 `due_check_settings` 传入，不在检查函数里另读配置。
+
 ## 显式能力包申请的原裁决链
 
 - `agent_core/capability_request_tool.py` 用原`requested_skills`字段记录`capability:<package_id>`，不从包名或资源路径另建授权。

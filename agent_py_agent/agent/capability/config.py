@@ -43,19 +43,13 @@ class CapabilityConfig:
     session_task_max_chain_depth: int = 4
     # 每对会话（发送 thread, 接收 thread）每小时消息上限；0 表示不限制。
     session_pair_hourly_limit: int = 60
-    enable_capability_routing: bool = False
     enable_capability_package_recommendations: bool = True
     enable_capability_package_selection: bool = False
     capability_package_selection_max_input_tokens: int = 3000
-    capability_request_max_tokens: int = 600
-    capability_escalation_max_hops: int = 0
     capability_candidate_limit: int = 5
     capability_bundle_max_tokens: int = 3000
-    capability_alternative_max_attempts: int = 3
     subagent_heartbeat_timeout: int = 0
     subagent_run_timeout: int = 0
-    subagent_due_check_interval: int = 0
-    subagent_min_evidence_for_done: int = 1
     subagent_no_progress_attempt_limit: int = 4
     # 慢模型流式活动投影：只写时间、阶段和字符计数，不保存正文。
     subagent_stream_activity_projection_enabled: bool = True
@@ -72,15 +66,9 @@ class CapabilityConfig:
     subagent_failure_auto_split_enabled: bool = False
     # 失败自省自动拆分的最大深度；0 表示不限制（统一约定）。
     subagent_failure_split_max_depth: int = 2
-    capability_request_max_tried_items: int = 0
-    capability_request_max_evidence_items: int = 0
-    capability_request_max_per_task: int = 0
     capability_grant_max_skills: int = 0
     capability_grant_max_tools: int = 0
     capability_grant_expires_after_task: bool = True
-    skill_card_max_tokens: int = 0
-    tool_card_max_tokens: int = 0
-    skill_body_max_tokens: int = 0
     # 加载时累积的告警（已删/未知键等）；只用于诊断展示，不参与路由判断。
     config_warnings: list[str] = field(default_factory=list)
 

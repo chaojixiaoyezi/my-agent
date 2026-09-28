@@ -2,6 +2,12 @@
 
 2026-09-28：已结束子代理被显式接替时终态不再被静默还原（分支 `claude/ae-done-takeover-fix`，本地回归与变异通过，待集成）。G03 脚本模型端到端发现：接替 DONE 子代理时回执报 recorded、写了 TAKEOVER.md，权威状态却没变。现在已关闭来源只追加 `superseded_by` 与一条 TakeoverRecord、终态保持，未关闭来源照旧 TAKEN_OVER；落账入口与回执两道落盘核对，未落盘报 `not_persisted`；预检、接管 run 去重统一读 takeover_by／superseded_by，第二次接替被拒；代理树与 list_agents 节点带 `replaced_by`。结构见[04-structure](04-structure.md#接替关系的唯一落账入口2026-09-28)，测试见[测试记录](../../../TESTS.md)。
 
+2026-09-28（分支 `claude/9a-lark-and-capcfg`）：能力配置删除了 12 个运行时没有效果的字段。与子代理相关的有两个：
+- `subagent_due_check_interval`：没有任何读取方。
+- `subagent_min_evidence_for_done`：原先只被读进巡检阈值快照 `DueCheckSettings.min_evidence`，之后没有任何检查使用它。现在连同这个快照字段和 `due_check_settings` 里的透传一起删掉。
+
+心跳停滞、运行超时、无进展熔断三个阈值不变；随包模板现在把它们写全了。用户配置里残留旧键只告警、不报错。见 04-structure“巡检阈值来源”和 TESTS 顶部本节。
+
 2026-09-27：显式包申请不再被语义路由提前GAP或局部授予后结清。保留原owner路径判断，含capability:引用的请求整条交原直属父级grant/deny；不从前缀推断权限，不改包refs持久化或首请求marker。5例旧4红1绿，修后相关111项通过，已串联原创建/申请/父级授予/孩子私有方法读取及重复裁决；真实模型采用待验，见[测试记录](../../../TESTS.md#c17显式包申请组件链2026-09-27)。
 
 2026-09-27：G05暴露首次提示准备直接抛路径ENAMETOOLONG。现对单个资料候选exists/resolve的OSError沿原unresolved投影处理，保留其它引用及InterruptedError传播；新8例旧6红2绿、修后全绿，四文件65项通过，独立窄审无阻断。未改创建可见性或包授权，尚未安装；申请链及真实私有读取仍待收口，见[测试记录](../../../TESTS.md#c17子代理资料路径异常隔离2026-09-27)。

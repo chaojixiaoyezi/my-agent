@@ -71,6 +71,10 @@
   - `agent_py_agent/config/capability_config.yaml` 是默认模板。测试锁定：模板里每个键都被 `CapabilityConfig` 认识，值等于默认值，加载无告警。
   - 本次补上 5 个在用、但模板里缺失的键：2 个下发上限，3 个子代理巡检阈值。
   - 移除不生效的 `enable_capability_routing`：能力申请链路本来就不受它控制。
+- **删除死字段**（同分支第三个提交）：
+  - 删掉 12 个运行时没有效果的字段：10 个没有读取方；`enable_capability_routing` 不控制能力申请链路；`subagent_min_evidence_for_done` 只被透传进巡检快照，从未使用。
+  - 用户配置里残留这些键只告警、照常加载。
+  - 测试进一步锁定：dataclass 的每个字段都必须写进模板。不用的字段直接删，不在模板外保留。
 - **不变**：读取逻辑和路径解析都不变；Gateway 找不到文件时的行为也不变。
 
 ## 前端 import 链恢复（2026-09-28，分支 `claude/9a-frontend-runtimeconfig`，基于 `3e23d2da8`，本地验证通过，待集成）
