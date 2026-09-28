@@ -66,6 +66,9 @@ def _node_ref_values(payload: dict[str, object]) -> dict[str, list[object]]:
     }
 
 
+# LLM: 只搬运 kernel 快照里的身份、状态与接替关系（replaced_by 来自 takeover_by/superseded_by 权威字段），不重新查树、
+#   不推断完成。新增字段须同步 model_view 白名单与 list_agents 回归。
+# 函数用途: 生成代理树节点的身份、状态和进度摘要部分。
 def _node_identity(payload: dict[str, object]) -> dict[str, object]:
     timing = _timing(payload)
     return {
@@ -83,6 +86,8 @@ def _node_identity(payload: dict[str, object]) -> dict[str, object]:
         # 派工时的 goal 摘要:整合轮据此逐子代理核对"计划 vs 实交",缺的补建或如实标注。
         "goal_digest": current_model_text(payload.get("goal_digest", "")),
         "status": payload.get("status", ""),
+        # 已被接替时标出接替者与处置（superseded/taken_over），父级不要再把旧结果当成当前交付。
+        "replaced_by": _dict(payload.get("replaced_by")),
         "failure_type": payload.get("failure_type", ""),
         "progress": payload.get("progress", 0.0),
         "current_step": current_model_text(payload.get("current_step", "")),

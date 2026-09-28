@@ -295,6 +295,34 @@ def task_has_status(task: object, status: TaskStatus) -> bool:
     return task_status_in(getattr(task, "status", ""), {status.value})
 
 
+# 接替处置：未关闭来源转 TAKEN_OVER（taken_over）；已关闭来源终态不变、只记 superseded_by（superseded）。
+TAKEOVER_DISPOSITION_TAKEN_OVER = "taken_over"
+TAKEOVER_DISPOSITION_SUPERSEDED = "superseded"
+
+
+# LLM: “这个 run 已被谁接替”只读 takeover_by 与 superseded_by 这一组权威字段；接替预检、落账回执、接管 run 去重和
+#   父级视图都走这里，不看 goal、正文或文件。纯函数，改口径要同步 test_subagent_done_supersede。
+# 函数用途: 返回（接替者 run_id, 处置方式）；没有被接替时返回两个空串。
+def task_replacement_successor(task: object) -> tuple[str, str]:
+    takeover_by = str(getattr(task, "takeover_by", "") or "").strip()
+    if takeover_by:
+        return takeover_by, TAKEOVER_DISPOSITION_TAKEN_OVER
+    superseded_by = str(getattr(task, "superseded_by", "") or "").strip()
+    if superseded_by:
+        return superseded_by, TAKEOVER_DISPOSITION_SUPERSEDED
+    return "", ""
+
+
+# LLM: 与持久化边界 _restore_newer_closed_state 保护的已关闭集合同一口径：已关闭且还不是 TAKEN_OVER 的来源
+#   （DONE/ABANDONED/CANCELLED）被接替时终态不改写，只记 superseded；其余来源照旧转 TAKEN_OVER。纯函数。
+# 函数用途: 按来源当前状态决定这次接替是“标记已被取代”还是“转为已接管”。
+def task_takeover_disposition(task: object) -> str:
+    status = str(getattr(task, "status", "") or "").strip().upper()
+    if status in SUBAGENT_RECOVERY_CLOSED_STATUSES and status != TaskStatus.TAKEN_OVER.value:
+        return TAKEOVER_DISPOSITION_SUPERSEDED
+    return TAKEOVER_DISPOSITION_TAKEN_OVER
+
+
 # LLM: 子代理完成权只读 host-owned TaskStatus.DONE，verification_status 仅作历史展示。
 # 函数用途: 判断子代理是否已正常结束且不再需要续派。
 def task_is_completed(task: object) -> bool:
@@ -468,6 +496,8 @@ __all__ = [
     "SUBAGENT_REUSABLE_STATUSES",
     "SUBAGENT_TASK_STATUSES",
     "SUBAGENT_VERIFICATION_STATUSES",
+    "TAKEOVER_DISPOSITION_SUPERSEDED",
+    "TAKEOVER_DISPOSITION_TAKEN_OVER",
     "VerificationEvidence",
     "VerificationStatus",
     "WorkOrderValidation",
@@ -480,5 +510,7 @@ __all__ = [
     "task_is_completed",
     "task_is_handled_after_parent_timeout",
     "task_needs_continuation",
+    "task_replacement_successor",
     "task_status_in",
+    "task_takeover_disposition",
 ]

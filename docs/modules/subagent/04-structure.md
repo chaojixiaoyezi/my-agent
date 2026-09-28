@@ -17,6 +17,15 @@
 
 `agent_core/subagent/run_flow.py` 在overflow只读加载canonical来源，下一次原 `agent.run` 临时绑定公共恢复器；无来源仍先执行原active-turn归档CAS。`conversation/agent_thread.py::project_agent_thread_context` 是普通准备与候选共用的纯历史renderer，不写任务或消息。`agent_core/subagent/compact_recovery.py` 只按原第0注入位置重投影，不重跑上下文包/工具准备；成功的host_state回到原循环，异常退出清理scope。
 
+## 接替关系的唯一落账入口（2026-09-28）
+
+- `services/takeover/record.py::record_takeover_edge` 是接管／接替边的唯一落账入口；`SubAgentBaseService.record_takeover` 过授权门后转调，显式接替（`agent_core/orchestration/replacements.py`）、手动接管、领导权恢复与接管 run 共用，返回值仍是 TakeoverRecord。
+- 处置由 `models.task_takeover_disposition` 按来源状态裁决，与持久化边界保护的已关闭集合同一口径：已关闭且还不是 TAKEN_OVER（DONE／ABANDONED／CANCELLED）为 `superseded`，终态不改写，只写 `superseded_by` 与一条 TakeoverRecord；其余为 `taken_over`，保持原语义（TAKEN_OVER、takeover_by、final_owner、锁文件、runtime_config_scope）。
+- 权威读取只有 `models.task_replacement_successor`（takeover_by 优先，其次 superseded_by）：接替预检、落账回执、接管 run 幂等查找、kernel 节点 `replaced_by` 都走它，不看 goal、正文或文件。
+- 落盘核对分两道：落账入口保存后重读，接替者与处置不一致就抛 `TakeoverNotPersistedError`，不写 TAKEOVER.md；回执层 `_persisted_replacement_record` 再按重读结果给 `recorded`＋disposition 或 `not_persisted`。
+- 持久化边界：`_restore_newer_closed_state` 整份拷回已关闭记录时，只让 `_closed_record_appends` 白名单（superseded_by 从空到非空、TakeoverRecord 按 id 追加）继续落盘；`_merge_existing_takeover_state` 让同状态旧快照保住已落盘的 superseded_by 与接管记录。
+- 父级视图：`SubagentKernelRun.replaced_by` → 代理树节点 → list_agents 模型视图白名单（含大树预览）。
+
 ## 子代理可观测与授权失败即停（工具失败账本的两种投影）
 
 - `subagents/tool_failure_ledger.py` 是子代理工具失败事实的唯一模块：原 attempt 级账本之外，新增 `ToolCallFact` 与

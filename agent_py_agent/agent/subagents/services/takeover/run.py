@@ -8,7 +8,13 @@ from typing import Any
 
 from ....runtime_errors import runtime_error_report
 from ...authorization_gate import OperationRequest, authorize_operation
-from ...models import SUBAGENT_HANDLED_TERMINAL_STATUSES, FailureType, SubAgentTask, task_status_in
+from ...models import (
+    SUBAGENT_HANDLED_TERMINAL_STATUSES,
+    FailureType,
+    SubAgentTask,
+    task_replacement_successor,
+    task_status_in,
+)
 from .refs import (
     default_takeover_plan,
     source_handoff,
@@ -96,8 +102,11 @@ class SubAgentTakeoverRunService:
         )
 
 
+# LLM: 已有接替者只读 takeover_by/superseded_by 这组权威字段（已结束来源被接替后终态不变，只记 superseded_by）；
+#   读不到接替者时再按来源引用扫描。只读。
+# 函数用途: 找出这个来源已经对应的接管 run，保证重复发起接管时幂等。
 def _existing_takeover(manager: Any, source: SubAgentTask) -> tuple[SubAgentTask | None, dict[str, object]]:
-    takeover_id = str(source.takeover_by or "").strip()
+    takeover_id, _disposition = task_replacement_successor(source)
     if not takeover_id:
         return _existing_takeover_by_source_ref(manager, source.id)
     try:

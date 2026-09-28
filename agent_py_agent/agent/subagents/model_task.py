@@ -365,3 +365,7 @@ class SubAgentTask:
     # and must never be inferred from model text, timestamps, projection versions, or file mtimes.
     # 字段用途: 标记子代理权威状态版本，供并发裁决检测旧快照和记录提交先后；放在末尾保留旧位置参数兼容性。
     state_revision: int = 0
+    # LLM: 已关闭（DONE/ABANDONED/CANCELLED）的 run 被显式接替时只写这条关系，终态不改写；它与 takeover_by 是
+    #   “这个 run 已被谁接替”的同一组权威字段，只能从空写成非空。读取统一走 models.task_replacement_successor。
+    # 字段用途: 记下接替这个已结束子代理的新 run_id，供防重复接替和父级视图标出“已被取代”；放在末尾保留位置参数兼容性。
+    superseded_by: str = ""

@@ -1,5 +1,15 @@
 # 设计台账
 
+## 已结束子代理被接替：终态不改写，只追加接替关系（2026-09-28，分支 `claude/ae-done-takeover-fix`，基于 `53477806d`，本地验证通过，待集成）
+
+来源：G03 脚本模型端到端验证（9f88e4905）发现，接替一个已 DONE 的子代理时，create_subagents 回执报 `recorded`、也写了 TAKEOVER.md，但持久化边界 `_restore_newer_closed_state` 把 TAKEN_OVER 静默还原成 DONE，takeover_by 为空，回执与权威状态不符。语义由集成方定：
+- 终态不改写：已关闭来源（DONE/ABANDONED/CANCELLED）被接替时状态保持，只追加 `SubAgentTask.superseded_by` 与一条 TakeoverRecord；这两项列入已关闭记录的单调追加白名单（`_closed_record_appends`），同状态旧快照也冲不掉。未关闭来源（BLOCKED 等）照旧转 TAKEN_OVER。
+- 回执必须反映真实落盘：`recorded` 带 `disposition`（superseded／taken_over）。落账入口 `takeover/record.py` 保存后重读核对，未落盘抛 `TakeoverNotPersistedError`、不写 TAKEOVER.md；回执层再按重读结果给 `recorded` 或 `not_persisted`，后者让创建闸按 `SUBAGENT_REPLACEMENT_RECORD_FAILED` 取消未启动的新 child。
+- 防重复接替：接替预检、回执、接管 run 幂等查找统一读 `models.task_replacement_successor`（takeover_by／superseded_by），第二次接替同一来源得 `SUBAGENT_REPLACEMENT_INVALID`／`source_already_taken_over` 并带 disposition。
+- 父级视图：kernel 节点新增 `replaced_by`（接替者与处置），经代理树节点进入 list_agents 模型视图与大树预览；HISTORY_INCOMPLETE 的唯一出口（为已有 run 写 `replacement_for_run_ids`）接替 DONE run 保持可用。
+
+未做：TUI board 等其它展示面还没标 superseded；真实模型下的接替行为未验。模块细节见 [子代理结构](docs/modules/subagent/04-structure.md#接替关系的唯一落账入口2026-09-28)。
+
 ## 前端 import 链恢复（2026-09-28，分支 `claude/9a-frontend-runtimeconfig`，基于 `3e23d2da8`，本地验证通过，待集成）
 
 `frontend/src/data/runtimeConfig.ts`、`mockConfig.ts` 在 2026-08-15 建独立仓库（`0b6252590`）时被误删、引用方仍在用，按原结构补回最小版本：runtimeConfig 的类型改由 `frontend-runtime-config.json` 推导、不再手写字段清单，mockConfig 只从生成的配置目录派生；设置页表单项清理已在 main（`3af7c94df`），JSON 与 store 里对应已删后端键的旧字段等能跑 tsc 类型检查时再清（见 ROADMAP）。验证方式见 TESTS。

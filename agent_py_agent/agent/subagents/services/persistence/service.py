@@ -1013,7 +1013,9 @@ def _merge_capability_requests(
 # LLM: Canonical recovery-closed status is monotonic at the final shared persistence boundary.
 # A caller may explicitly reactivate only an exact structured same-run continuation or lifecycle
 # repair; ordinary stale progress/heartbeat/result snapshots must be replaced by canonical state.
-# 函数用途: 防止已完成、已取消、已放弃或已接管的子代理被旧线程写回运行中，同时让调用者立刻看到真实终态。
+# 已关闭记录整份拷回时，只有 _closed_record_appends 白名单里的接替关系（新的 superseded_by 及随它按 id 新增的
+# TakeoverRecord）可以单调追加并继续落盘；其余字段一律以磁盘上的已关闭状态为准。
+# 函数用途: 防止已完成、已取消、已放弃或已接管的子代理被旧线程写回运行中，同时让调用者立刻看到真实终态；返回 True 表示本次不写盘。
 def _restore_newer_closed_state(
     service: SubAgentPersistenceService,
     task: SubAgentTask,
@@ -1033,9 +1035,33 @@ def _restore_newer_closed_state(
         or incoming_status == existing_status
     ):
         return False
+    appends = _closed_record_appends(existing, task)
     for item in fields(task):
         setattr(task, item.name, copy.deepcopy(getattr(existing, item.name)))
-    return True
+    for name, value in appends.items():
+        setattr(task, name, value)
+    return not appends
+
+
+# LLM: 已关闭记录上允许单调追加的白名单：superseded_by 只能从空写成非空，TakeoverRecord 只随这条新关系按 id 追加，
+#   不能单独追加（输掉竞态的 TAKEN_OVER 写入不留悬空记录）；不改终态和其它字段。纯计算，返回需要叠加到拷回状态上的
+#   字段。改白名单须同步 test_subagent_done_supersede。
+# 函数用途: 从一次被拒写回的快照里挑出可以保留的新接替关系。
+def _closed_record_appends(existing: SubAgentTask, incoming: SubAgentTask) -> dict[str, object]:
+    if not incoming.superseded_by or existing.superseded_by:
+        return {}
+    return {
+        "superseded_by": incoming.superseded_by,
+        "takeover_records": _union_takeover_records(existing.takeover_records, incoming.takeover_records),
+    }
+
+
+# LLM: TakeoverRecord 按 id 去重合并，first 的顺序在前、second 里的新记录追加在后；返回深拷贝，不改入参。纯计算。
+# 函数用途: 合并两份接管记录列表，不丢记录也不重复。
+def _union_takeover_records(first: list[TakeoverRecord], second: list[TakeoverRecord]) -> list[TakeoverRecord]:
+    known = {record.id for record in first}
+    fresh = [record for record in second if record.id not in known]
+    return copy.deepcopy([*first, *fresh])
 
 
 # 函数用途: 读上一份落盘状态的 locked_files(锁变更账本的对比基准;首存返回 None)。
@@ -1047,11 +1073,17 @@ def _existing_locked_files(service: SubAgentPersistenceService, task: SubAgentTa
     return list(existing.locked_files or [])
 
 
+# LLM: 只在保留层级链接的保存路径上调用。同状态的旧快照（例如接替前读到的 DONE）不能冲掉已落盘的接替关系：
+#   superseded_by 与 TakeoverRecord 只增不减；已 TAKEN_OVER 的记录不被未接管快照写回。只改内存中的 task。
+# 函数用途: 保存前把磁盘上已有的接管/接替关系合并回本次要写的快照。
 def _merge_existing_takeover_state(service: SubAgentPersistenceService, task: SubAgentTask) -> None:
     try:
         existing = service.load(task.id)
     except (FileNotFoundError, json.JSONDecodeError, TypeError):
         return
+    if existing.superseded_by and not task.superseded_by:
+        task.superseded_by = existing.superseded_by
+    task.takeover_records = _union_takeover_records(existing.takeover_records, task.takeover_records)
     existing_taken = str(existing.status or "").upper() == "TAKEN_OVER" or bool(existing.takeover_by)
     incoming_taken = str(task.status or "").upper() == "TAKEN_OVER" or bool(task.takeover_by)
     if not existing_taken or incoming_taken:

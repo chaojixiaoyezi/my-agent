@@ -1,5 +1,39 @@
 # 测试与发布验收
 
+## 已结束子代理被接替时终态不改写（2026-09-28，分支 `claude/ae-done-takeover-fix`，基于 `53477806d`）
+
+- **来源**：G03 脚本模型端到端验证（9f88e4905）发现，接替 DONE 子代理时回执报 `recorded`、写了 TAKEOVER.md，但持久化边界把
+  TAKEN_OVER 静默还原，canonical 仍为 DONE、takeover_by 为空。语义由集成方定，见 DESIGN_LEDGER 同名条目。
+- **新增 `test_subagent_done_supersede.py`（13 项）**：
+  - DONE／CANCELLED／ABANDONED 来源被接替后状态不变，`superseded_by` 指向新 child，有一条 TakeoverRecord 和 TAKEOVER.md，
+    回执为 `recorded`＋`disposition=superseded`；
+  - BLOCKED 来源照旧 TAKEN_OVER，回执 `disposition=taken_over`；
+  - 保存被丢弃时，落账入口抛 `TakeoverNotPersistedError` 且不写 TAKEOVER.md；写入入口不报错却没落盘时，回执为 `not_persisted`，
+    新 child 被取消；
+  - 第二次接替同一来源（DONE 与 BLOCKED 各一例）被预检拒绝：`SUBAGENT_REPLACEMENT_INVALID`、`source_already_taken_over` 带
+    接替者与 disposition，不产生新 child；
+  - 已关闭记录被不同状态写回时，只保留白名单里新的 superseded_by 及随它追加的 TakeoverRecord；来源读到时还没关闭、
+    写入前已收口为 DONE 的接管（输掉竞态）不回报成功，不留悬空接管记录，也不写 TAKEOVER.md；同状态旧快照冲不掉已落盘的
+    接替关系；
+  - 接管 run 对 DONE 来源同样记 superseded，关掉按来源引用的全量扫描后，重复发起仍按 superseded_by 找回原接管 run；
+  - kernel 节点、代理树节点与 list_agents 模型视图都带 `replaced_by`。
+- **修改的测试**：
+  - `test_orchestration_create_subagents_tool.py`：显式接替回执断言补 `disposition=taken_over`；
+  - `test_lifecycle_wake_host_event.py`：场景可指定子代理状态；新增 1 项走真实后台链路的假模型回归。owner 根索引读不到时，
+    普通重派被 `TOOL_ONE_SHOT_HISTORY_INCOMPLETE` 拦下，随后写明 `replacement_for_run_ids` 接替 DONE 子代理的派工放行，
+    来源仍 DONE 且 `superseded_by` 指向新 child。测试只把后台启动换成桩，不真跑新 child。
+- **变异**：15 个变异全部变红，改动文件都按 sha256 逐字节还原，每次使用新的 PYTHONPYCACHEPREFIX。覆盖：
+  - 处置恒为 taken_over，以及恒为 superseded；
+  - 不写 superseded_by；
+  - 落账入口不核对落盘；回执不重读；
+  - 预检只读 takeover_by；预检不查接替者；
+  - 去掉已关闭记录白名单；白名单不带 superseded_by 也追加接管记录；同状态合并丢 superseded_by；同状态合并丢接管记录；
+  - kernel 不给 replaced_by；模型视图白名单漏 replaced_by；
+  - 接管 run 查找只读 takeover_by；
+  - 历史不完整门连接替出口也拦。
+- **回归**：定向 144 个文件：引用接管、接替、代理树、持久化与改动模块的 100 个文件，加上新文件、43 个全仓扫描类测试和 3 个读文档的测试。结果 2655 passed、1 skipped、5 xfailed，716.8 秒；没有跑全仓 pytest。
+- **门禁**：ruff、doc_sync、strict code-size（hard=0；`SubAgentBaseService` 从 264 行降到 239 行）、`git diff --check`、check_clean_package 全部退出 0。线上 CI 不作为验收来源。
+
 ## R16 跨 owner 隔离原生验收（2026-09-28，被测 `9f88e4905`，文档分支 `claude/9b-r16-acceptance`）
 
 - **范围**：CAPABILITY_PACK_ACCEPTANCE 第 6 组（G06）的跨 owner 部分：包、设置、task、偏好。同 owner 多 TUI 与子授权已有证据，

@@ -21,6 +21,7 @@ from .models import (
     SUBAGENT_FAILED_RESULT_STATUSES,
     SubAgentTask,
     TaskStatus,
+    task_replacement_successor,
     task_status_in,
 )
 from .protocol import build_task_address, build_task_envelope
@@ -39,6 +40,9 @@ class SubagentKernelQuery:
     conversation_thread_id: str = ""
 
 
+# LLM: kernel 节点只投影规范任务字段；replaced_by 只来自 takeover_by/superseded_by 权威字段。新增字段须同步
+#   node_rendering 与 model_view 白名单，避免界面和 list_agents 口径分叉。
+# 类用途: 描述代理树里一个子代理的只读快照，供 /status、TUI 和 list_agents 共用。
 @dataclass(frozen=True)
 class SubagentKernelRun:
     run_id: str = ""
@@ -83,6 +87,8 @@ class SubagentKernelRun:
     recent_tool_trace: list[dict[str, object]] = field(default_factory=list)
     background_start: dict[str, object] = field(default_factory=dict)
     resume_eligibility: dict[str, object] = field(default_factory=dict)
+    # 已被接替时的结构化关系 {"run_id", "disposition"}（taken_over/superseded），父级据此不再使用旧结果；否则为空。
+    replaced_by: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -293,7 +299,15 @@ def _task_to_kernel_run(
         recent_tool_trace=_recent_tool_trace(task) if include_refs else [],
         background_start=_background_start(task) if include_refs else {},
         resume_eligibility=user_stopped_resume_eligibility(task),
+        replaced_by=_replaced_by(task),
     )
+
+
+# LLM: 只读 models.task_replacement_successor 这一组权威字段；没被接替时返回空字典，不猜测、不看正文。纯函数。
+# 函数用途: 生成节点上的“已被谁接替”关系，供 list_agents 和代理树标出 superseded/taken_over。
+def _replaced_by(task: SubAgentTask) -> dict[str, str]:
+    successor, disposition = task_replacement_successor(task)
+    return {"run_id": successor, "disposition": disposition} if successor else {}
 
 
 def _recovery_refs(task: SubAgentTask) -> dict[str, str]:
