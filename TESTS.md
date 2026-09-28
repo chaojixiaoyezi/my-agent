@@ -100,6 +100,31 @@
 - **回归**：11 个文件，包括新测试、本地存储与 local_doctor 相关测试、test_architecture_guardrails 和 test_constant_names_unique；结果 146 passed。
 - **门禁**：ruff、doc_sync、strict code-size、`git diff --check`、check_clean_package 全部退出 0，CODE_SIZE_REPORT.md 在提交前已还原。
 
+## 会话间消息与派活第 2 片：TUI 命令 /tell 与 /sessions threads（2026-09-28，分支 `my-agent/self-dev-3`）
+
+- **来源**：开发交流板第 2 片（TUI 命令：列会话、发消息）。dev 指出 `/sessions`（SessionManager 的 CLI 恢复记录）
+  与会话消息目标 `ConversationThread` 不是同一套，需要处理映射。
+- **做法**：
+  - `command_catalog.py` 新增 `tell` 命令声明（`/tell <目标会话> <消息>`），并给 `/sessions` 加
+    `/sessions threads` 用法变体；帮助文案自动带上。
+  - `slash_commands.py` 新增 `_handle_tell_command` + `_tell_message` + `_thread_channel` + `_print_message_targets`；
+    注册进 `handlers` 元组。
+  - **映射处理**：`/sessions`（无参数）保持原样，仍列 SessionManager 的 CLI 恢复记录；
+    新增 `/sessions threads` 专门列 canonical `ConversationThread`（消息目标的权威），
+    两套记录不混用，也不再从会话正文猜标题。
+  - `/tell` 与模型工具**共用同一权限判定与投递语义**：读 `home_paths` 结构化身份 → 权限判定
+    → `guidance.append_once` 幂等入队 → 目标 active 时 `wake.raise_signal`；
+    失败返回带稳定错误码的文案（`SESSION_IDENTITY_UNAVAILABLE` / `SESSION_MESSAGING_DISABLED` /
+    `SESSION_TARGET_OUT_OF_SCOPE` / `SESSION_TARGET_CHANNEL_UNSUPPORTED`）。
+- **新测试**：`test_tell_command.py`（8 项）——命令已声明、缺参数给用法、身份缺失 fail closed、
+  开关关闭返回 DISABLED、目标不存在返回越界码、成功入队并唤醒、IM 目标拒绝、`/sessions threads` 列目标。
+- **复现**：`python3 -m pytest agent_py_agent/tests/test_tell_command.py agent_py_agent/tests/test_session_messaging_permissions.py agent_py_agent/tests/test_send_session_message_tool.py agent_py_agent/tests/test_session_message_rendering.py agent_py_agent/tests/test_recovery_code_policy.py -q`（66 项）。
+- **测试设计踩坑**：`capability_config_for_agent` 只认真正的 `CapabilityConfig` 实例，替身对象会被跳过并回落到
+  真实文件加载（于是测试改开关无效）；测试改用真正的 `CapabilityConfig` 后恢复正常。
+- **未完成**（如实标注）：dev 要求的"目标 TUI 显示收到的消息/任务及来源、发送方 TUI 显示投递与任务状态"
+  中，**显示部分只在 /tell 回执里做了发送方一侧**；接收方 TUI 的展示与任务状态显示要等第 3 片（派任务）一起做。
+- 五项静态 gate（ruff/doc_sync/strict code-size/diff --check）通过。
+
 ## 参数减量杂项批：compact 语义摘要 4 键 + 唤醒消费/合并窗口 2 键降为常量（2026-09-28，分支 `my-agent/self-dev-2`）
 
 - **来源/做法**：dev 在 my-agent-2 开发交流板派的任务 3（做法照 `87e025bb6`）。

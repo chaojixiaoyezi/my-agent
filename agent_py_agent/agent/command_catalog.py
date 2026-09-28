@@ -33,7 +33,20 @@ class CommandSpec:
 COMMAND_CATALOG = (
     CommandSpec("help", "/help", "查看帮助和可用命令", submit_on_enter=True),
     CommandSpec(
-        "sessions", "/sessions", "列出当前用户最近会话和精确恢复命令", submit_on_enter=True
+        "sessions",
+        "/sessions",
+        "列出当前用户最近会话和精确恢复命令",
+        help_variants=(
+            ("/sessions threads", "列出可接收会话消息的会话（ConversationThread）"),
+        ),
+        submit_on_enter=True,
+    ),
+    CommandSpec(
+        "tell",
+        '/tell "<目标会话> <消息>"',
+        "给同一用户下的另一个本地会话发消息（第一期仅管理员）",
+        submit_on_enter=True,
+        conversation_suffix=r"(?:\s+(.*))?$",
     ),
     CommandSpec(
         "status",

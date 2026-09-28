@@ -49,6 +49,7 @@ def handle_common_slash_command(
     handlers: tuple[SlashHandler, ...] = (
         _handle_help_command,
         _handle_sessions_command,
+        _handle_tell_command,
         _handle_permissions_command,
         _handle_plugin_command,
         _handle_control_command,
@@ -138,6 +139,8 @@ def _handle_sessions_command(
     include_plain_help: bool,
 ) -> bool | None:
     del include_plain_help
+    if user == "/sessions threads":
+        return _print_message_targets(ctx)
     if user != "/sessions":
         return None
     from ...agent.session.manager import SessionManager
@@ -164,10 +167,152 @@ def _handle_sessions_command(
         (
             "恢复旧会话：先输入 /exit 退出当前界面，再运行：",
             "my-agent resume <session_id>",
+            "要查看可接收会话消息的目标，输入：/sessions threads",
         )
     )
     ctx.print_line("\n".join(lines))
     return True
+
+
+# LLM: 会话消息目标是 canonical ConversationThread，与 /sessions 的 CLI 恢复记录（SessionManager）
+#   不是同一套；这里只投影本 owner 的 thread 列表，不推断标题、不跨 owner、不改状态。
+# 函数用途: 列出可接收会话消息的会话编号，供 /tell 使用。
+def _print_message_targets(ctx: SlashCommandContext) -> bool:
+    store = getattr(ctx.agent, "conversation_store", None)
+    threads = getattr(store, "threads", None)
+    if threads is None:
+        ctx.print_line("当前运行环境没有会话存储，无法列出会话目标。")
+        return True
+    items, load_errors = threads.list_report(limit=20)
+    if not items:
+        ctx.print_line("当前用户还没有可接收消息的会话。")
+        return True
+    lines = ["可接收会话消息的会话（仅当前用户）："]
+    for thread in items:
+        thread_id = str(getattr(thread, "thread_id", "") or "")
+        marker = "（当前）" if thread_id == ctx.conversation_id else ""
+        title = str(getattr(thread, "title", "") or "").strip() or "(无标题)"
+        status = str(getattr(thread, "status", "") or "active")
+        lines.append(f"- {thread_id}{marker}  [{status}]  {title}")
+    if load_errors:
+        lines.append(f"另有 {len(load_errors)} 条损坏会话记录未展示。")
+    lines.append("用法：/tell <会话编号> <消息>")
+    ctx.print_line("\n".join(lines))
+    return True
+
+
+# LLM: `/tell` 是会话间消息的 TUI 入口，与模型工具共用同一权限判定与投递语义（GuidanceStore + WakeStore）。
+#   身份只从 agent.home_paths 取；关闭或身份不可用时返回结构化错误文案，不静默失败。
+# 函数用途: 给同一用户下的另一个本地会话发一条消息。
+def _handle_tell_command(
+    user: str, ctx: SlashCommandContext, include_plain_help: bool
+) -> bool | None:
+    del include_plain_help
+    if not user.startswith("/tell"):
+        return None
+    rest = user[len("/tell"):].strip()
+    target_thread_id, _, message = rest.partition(" ")
+    target_thread_id = target_thread_id.strip()
+    message = message.strip()
+    if not target_thread_id or not message:
+        ctx.print_line("用法：/tell <会话编号> <消息>；会话编号可用 /sessions threads 查看。")
+        return True
+    ctx.print_line(_tell_message(ctx, target_thread_id, message))
+    return True
+
+
+# LLM: 投递语义与模型工具一致：先判权限（读结构化身份与开关），通过后 append_once 幂等入队，
+#   目标 active 时再唤醒。返回给用户的是人的可读文案；失败带稳定错误码。
+# 函数用途: 执行一次会话间发消息，返回给 TUI 显示的文案。
+def _tell_message(ctx: SlashCommandContext, target_thread_id: str, message: str) -> str:
+    from ...agent.capability.runtime_config_reload import capability_config_for_agent
+    from ...agent.conversation.session_messaging import (
+        SESSION_KIND_MESSAGE,
+        SessionMessagingRequest,
+        decide_session_messaging,
+        session_messaging_tool_visible,
+    )
+    from ...agent.user_space.owner_resolver import OwnerIdentity
+
+    agent = ctx.agent
+    home = getattr(agent, "home_paths", None)
+    provider = str(getattr(home, "owner_provider", "") or "").strip()
+    owner_kind = str(getattr(home, "owner_kind", "") or "").strip()
+    owner_id = str(getattr(home, "owner_id", "") or "").strip()
+    if not (provider and owner_kind and owner_id):
+        return "无法确定当前会话的 owner 身份；消息没有投递。（SESSION_IDENTITY_UNAVAILABLE）"
+    identity = OwnerIdentity(provider=provider, owner_kind=owner_kind, owner_id=owner_id)
+    config = capability_config_for_agent(agent)
+    if not session_messaging_tool_visible(home, config):
+        return "会话间消息当前对这类身份关闭。（SESSION_MESSAGING_DISABLED）"
+
+    store = getattr(agent, "conversation_store", None)
+    threads = getattr(store, "threads", None)
+    if threads is None:
+        return "当前运行环境没有会话存储，不能发送会话消息。"
+    try:
+        thread, load_error = threads.load_report(target_thread_id)
+    except Exception:
+        return "读取目标会话失败；消息没有投递。（TOOL_EXECUTION_FAILED）"
+    target_owner = identity if (load_error is None and thread is not None) else None
+    target_channel = _thread_channel(thread) if thread is not None else ""
+    decision = decide_session_messaging(
+        SessionMessagingRequest(
+            sender_identity=identity,
+            sender_thread_id=ctx.conversation_id,
+            target_thread_id=target_thread_id,
+            target_owner_identity=target_owner,
+            kind=SESSION_KIND_MESSAGE,
+            messaging_admin_enabled=bool(getattr(config, "session_messaging_admin_enabled", True)),
+            messaging_user_enabled=bool(getattr(config, "session_messaging_user_enabled", False)),
+            task_admin_enabled=bool(getattr(config, "session_task_admin_enabled", True)),
+            target_channel=target_channel,
+        )
+    )
+    if not decision.allowed:
+        return f"消息没有投递。（{decision.error_code}）"
+    try:
+        entry = store.guidance.append_once(
+            {
+                "target_type": "thread",
+                "target_id": target_thread_id,
+                "message": message,
+                "sender": ctx.conversation_id or "session",
+                "priority": "normal",
+                "delivery": "next_turn",
+                "metadata": {"origin_kind": "session_message", "origin_thread_id": ctx.conversation_id},
+            },
+            dedupe_key=f"session_message:{ctx.conversation_id}->{target_thread_id}",
+        )
+        wake_id = ""
+        if str(getattr(thread, "status", "") or "active").strip() == "active":
+            wakes = getattr(store, "wakes", None)
+            if wakes is not None:
+                signal = wakes.raise_signal(
+                    {
+                        "thread_id": target_thread_id,
+                        "urgency": "normal",
+                        "reason": "session_message",
+                        "summary": "收到来自另一个会话的消息",
+                        "metadata": {"origin_kind": "session_message", "origin_thread_id": ctx.conversation_id},
+                    }
+                )
+                wake_id = str(getattr(signal, "wake_signal_id", "") or "")
+    except Exception:
+        return "写入目标会话消息箱失败；消息没有投递。（TOOL_EXECUTION_FAILED）"
+    suffix = f"，已唤醒 {wake_id}" if wake_id else ""
+    return f"消息已耐久排队到 {target_thread_id}（{entry.guidance_id}）{suffix}。目标会在回合边界读取；这不代表已执行。"
+
+
+# LLM: 从 canonical thread 的 channel_bindings 取渠道；无绑定返回空串（本机会话）。
+# 函数用途: 判断目标会话渠道，供权限判定。
+def _thread_channel(thread: object) -> str:
+    bindings = getattr(thread, "channel_bindings", ()) or ()
+    for binding in bindings:
+        channel = str(getattr(binding, "channel", "") or "").strip()
+        if channel:
+            return channel
+    return ""
 
 
 def _handle_remember_command(
