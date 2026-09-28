@@ -88,7 +88,7 @@ Linux 状态已由 Claude 明确为**未部署（测试机下线）**：0c 和 9
 | G02 | 第四代提交后再 get／执行原资源 | C22 第二代后已真实 get、复制和执行原程序；第四代后只有最终答复。历史多代提交也没有后继原资源链。“必须第四代后执行”不是原 Goal 的独立次数门槛，保留未覆盖而不加任务凑数；65536 不补算生产规模 |
 | G03 | ONE_SHOT／历史不完整、BLOCKED 接替、后台续接后的前台新请求 | C23 只证明正常三子完成、一次原派工、两次后台续接及父级保存；原父自动选择为空。既有组件和正常路径不替代实际拒绝／接替分支，全文消费和资料准确性失败保持 |
 | G04 | Goal 暂停、回合中断、明确资源停止三类独立控制 | 已有 /stop 的组合状态、资源退出和 REOPEN03 同代续读，不能据此声称三类控制各自独立实测；R10 的原判据保持 |
-| G05 | 审批期撤销／迟到批准、在途读取切代、UNKNOWN 查原操作且零重放、非空设置不兼容、内容 SHA 变化后的旧任务续读 | 串行生命周期 unknown=0；F02 是同字节 activation 换代；F01 恢复后 get=0，仅旧 source_ref 物化拒绝命中。组件与这些局部分项不能拼为 R11/R12/R14 完整交错通过 |
+| G05 | 审批期撤销／迟到批准、在途读取切代、UNKNOWN 查原操作且零重放、非空设置不兼容、内容 SHA 变化后的旧任务续读 | 串行生命周期 unknown=0；F02 是同字节 activation 换代；F01 恢复后 get=0，仅旧 source_ref 物化拒绝命中。组件与这些局部分项不能拼为 R11/R12/R14 完整交错通过。五项已有[脚本模型端到端机制证据](#g05脚本模型端到端机制验证2026-09-28)，真实模型仍未覆盖 |
 | G06 | 不同 owner 的包、设置、task 和偏好隔离 | 同 owner 多 TUI 与显式子授权有真实证据；跨 owner 仍以组件为主，未找到后续原生关闭证据，不由一般权限代码推定 R16 通过 |
 | G07 | 当前版本旧 v3 随包全局 Skill 共存，以及开关关闭／单包／多包同输入成本对照 | 普通 builtin Skill、ZERO01 空表核心任务和既有回归各证明有限事实；目录规模夹具不等于完整模型性能。YAML/dataclass 的推荐默认开启、一次选择默认关闭，私有开启臂不是默认自动采用保证 |
 
@@ -110,6 +110,34 @@ Linux 状态已由 Claude 明确为**未部署（测试机下线）**：0c 和 9
 建议下一步：先由 Claude 核对并集成完整缺项文档，保持 Goal 未完成；未覆盖项先记录，不自动安排新运行或代用户豁免。只读核对可并行，产品、主线和发布由 Claude 独占。本轮无产品／测试／配置及文件树变更，不重复真实任务或全仓 pytest。
 
 以下各轮保留原时点；旧“最终 0/27／尚未开始”不覆盖本节状态。
+
+## G05脚本模型端到端机制验证（2026-09-28）
+
+结论：**脚本模型端到端机制已验，真实模型未覆盖。** G05 的五种恢复边界各跑一个场景，都使用脚本模型、真实 Gateway 和两个真实 TUI，按结构化事实判定全部通过。这只证明宿主机制。它不证明真实模型会自然走到这些分支，也不证明真实模型能读懂拒绝回执并据此恢复业务。G05 的真实模型验收、最终 27 次结果以及 R11/R12/R14 的真实 TUI 判据都不因此改判。
+
+- 被测源码 `9f88e4905`，与生产 step14w 同源。用 git archive 导出（tar SHA256 `041a0ce2…8468`），在独立 venv 中运行。Gateway 为 127.0.0.1:8438，脚本模型为 127.0.0.1:8448。所有进程都经 `env -i` 启动，HOME 指向测试根内的 fakehome，没有设置任何模型密钥。结束后 fakehome 为空，端口空闲。
+- 身份是隔离 home 的 local/main 管理员。TUI1 发需求并按 y 处理审批，TUI2 执行管理命令。8 个 v7 内容包用同源 `scripts/build_capability_package.py` 构建。安装、启停、更新和配置都经 TUI 的 `/plugins` 命令完成，没有直接改安装表或数据库。
+- 判定只读取结构化事实：安装表（activation_id 用产品的 `PluginContentActivation` 计算）；runtime.db（以 `mode=ro&immutable=1` 打开；S3 的查询在副本上调用产品的 `query_host_command`）；任务的 `skill_snapshot_refs`；工具回执的 status、error_code 和 effect_outcome。
+- 受控暂停点：Gateway 进程加载测试侧的 `sitecustomize`，只有一次性 armed 文件存在时才暂停。S2 停在 `read_capability_member` 前后两次安装核对之间；S3 停在内容启用的 `change_activation` 提交之后、handler 返回之前。暂停点不改变产品返回值。换代由真实的 `/plugins disable|enable` 完成，进程结束由对本测试 Gateway PID 的 SIGKILL 完成。
+
+| 情况 | 结果 | 结构化证据 |
+| --- | --- | --- |
+| 1 审批期间停用＋迟到批准 | 通过（边界见下） | 先 get re-s1-a 并 pin `de563a52…`。`admin_controls list`（审批策略 always）等待期间，TUI2 停用 A（安装 rev 4，activation 为空）。TUI1 按 y 之后：`write_file(source_ref=A)` 返回 `TOOL_UNAVAILABLE`、`effect_outcome=not_started`，目标文件不存在；再次 get A 返回 `SKILL_SNAPSHOT_UNAVAILABLE`；同轮 get re-s1-b 成功，activation 仍为 `d49a21a5…`；A 保持停用 |
+| 2 读取进行中切代 | 通过 | get re-s2-a 暂停在两次核对之间（工具耗时 17.9 s）。期间 disable→enable 使 activation 从 `ff1427ab…` 换为 `9e0f5cf7…`（同字节，rev 5）。这次 get 和同轮第二次 get 都返回 `SKILL_SNAPSHOT_UNAVAILABLE`、`not_started`，没有返回正文，该任务 pins 为空。下一个新任务 get 成功，pin 为 `9e0f5cf7…` |
+| 3 UNKNOWN 原操作查询零重放 | 通过 | `/plugins enable re-s3-a` 已提交（rev 2 active `dc7eca3b…`，操作行 EXECUTING）后 SIGKILL Gateway，TUI 给出原请求号。重启后两次 `/plugins status <原请求号>` 都显示“未能确认”，产品查询为 `state=outcome_unknown`。该操作仍只有 1 行（generation 1，未改写）、1 个 attempt（状态 unknown），handler 只进入 1 次；安装 rev 和 activation 不变。`/plugins list` 如实显示已启用。之后新发的 enable 请求返回 `outcome=unchanged`，没有再次提交 |
+| 4 非空设置不兼容 | 通过 | v1 配置为 `{"style":"dark"}`。停用后 update 到 0.2.0（声明要求 integer 类型的 `tone`），回执为 `outcome=updated`、`settings_restored=false`、`settings_reason=incompatible`，设置被清空，包保持停用。随后 enable 返回 `invalid_settings`、`not_committed`；用旧设置文件 configure 返回 `invalid_settings_source`。按新声明配置 `{"tone":3}` 后才启用成功（rev 11） |
+| 5 内容 SHA 变化后旧任务续读 | 通过（仅同轮） | 旧任务 get 读到 V1 正文，pin `09fbf6a2…`，包 SHA `ffad43d2…`。审批等待期间 TUI2 执行 disable→update 0.2.0→enable（包 SHA `427f3fec…`，activation `95d772f9…`）。批准后同一任务 get 返回 `SKILL_SNAPSHOT_UNAVAILABLE`、`not_started`，没有返回 V2，pin 仍是旧代。随后新任务读到 V2，pin 为新代 |
+
+边界：
+- 9f88 中，纯内容包的包相关动作都不经过审批。`skill_search get` 是只读；`write_file.source_ref` 是 mutating，审批策略为 dangerous，在 ask 和 auto 模式下直接执行（预跑已观察到未弹审批就写入）。所以情况 1 的“迟到批准”批的是同一回合里的另一个只读审批（`admin_controls list`），验证的是：审批等待跨过停用之后，本轮不能再用旧代。可执行插件工具的审批前和批准后复核不在本次范围。
+- 情况 5 只验证了同一回合内的旧任务续读。每个 TUI 需求都会新建 task，跨回合的 Goal 暂停再恢复后旧 pin 能否续读，本次没有覆盖。
+- 情况 2 的在途失效和普通停用对外返回同一个码（`SKILL_SNAPSHOT_UNAVAILABLE`，详情为 `CAPABILITY_RESOURCE_UNAVAILABLE`），产品内部原因 `activation_unavailable` 没有透出。这不影响拒绝和零 pin，只关系诊断粒度；是否细分由产品线决定。
+- 情况 3 验证的是管理操作（内容启用）的 UNKNOWN。模型工具操作（例如 source_ref 写入）在进程结束后的 UNKNOWN 和恢复查询，本次没有覆盖。
+- 两次预跑不计入结果：第一次是脚本模型没读到探测 nonce（测试脚本错误）；第二次确认 ask 模式下 source_ref 写入不弹审批，之后改用上述审批暂停。
+
+证据在 `~/.my-agent/decision-evidence/recovery-edges-9f88/`（仓库外）：汇总文件 `artifacts/recovery-edges-summary.json`（SHA256 `8682734c…f770`），以及脚本模型日志、hook 事件、每步的安装表和 runtime 快照、TUI 画面、最终 runtime.db 副本与任务链接、清理记录。本节只补文档，没有改产品代码、测试、配置或文件树。
+
+建议下一步：真实模型仍需覆盖 G05。优先补跨回合 Goal 恢复后的旧 pin 续读，以及模型工具操作的 UNKNOWN 查询；可执行插件的审批复核另行安排。
 
 ## C23三助手后台续接与交接（2026-09-28）
 
