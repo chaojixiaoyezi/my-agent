@@ -258,6 +258,32 @@ G04 的三类控制各做了一次独立的真实原生 TUI 实测，分别判�
 
 建议下一步：真实模型仍需覆盖 G05。优先补跨回合 Goal 恢复后的旧 pin 续读，以及模型工具操作的 UNKNOWN 查询；可执行插件的审批复核另行安排。
 
+## C25空选后能力包对主线程的可见性只读核对与脚本复现（2026-09-28）
+
+针对 [C24](#c24固定9f88的131072自然长任务两代压缩2026-09-28) 的观察①：包选择结果为空之后，已安装并启用的能力包对主线程是否仍可发现、可读取。方法是固定 `9f88e4905` 源码的只读核对、一份本地合同测试和一次 8435 脚本模型端到端；没有产品、测试或配置改动。`origin/main` `60f6f485a` 对 `skill_search_tool.py`、`skill_snapshot.py`、`package_provider.py` 的差异只是读取失败回执带结构化内部原因（`e4a3dba08`），不改下述路径。
+
+代码事实（行号按 `9f88e4905`）：
+
+- 快照来源：`agent_py_agent/agent/core.py:514-520` `_capability_packages` 调 `agent_py_agent/agent/capability/package_provider.py:14-19` `enabled_capability_packages(owner)`，列出本 owner 安装表里已启用且 content-only 的全部包；`agent_py_agent/agent/capability/skill_service.py:87-109` `snapshot_for` 把 provider 的包并入逐轮快照，指纹含包身份，不读取选择记录。
+- 主线程范围：`agent_py_agent/agent/core.py:531-555` `skill_snapshot_for_run_scope` 只在子代理 run 内按 `allowed_skills`/refs 裁剪；主线程只有 `task_attributes.skill_snapshot_refs` 非空才裁剪（该属性由派工继承写入，`agent_py_agent/agent/subagents/services/hierarchy/context.py:129-139`，主请求没有），随后 `agent_py_agent/agent/capability/task_references.py:85-115` `scope_main_task_references` 只把失效或换代的旧 pin 投影成不可用，没有 pin 时原样返回完整快照。
+- 空选的效果：`agent_py_agent/agent/capability/package_selection_runtime.py` 的 `_commit_selection` 在 `outcome=empty` 时 `context=None`，只写 finish 回执，不写 pins、不写入口上下文、不碰工具面或快照；`agent_py_agent/agent/capability/package_selection.py:25-28` 的选择指令明确允许一个都不选。空选唯一改变的是宿主不预读入口正文、不建 pins。
+- 检索与读取入口：`agent_py_agent/agent/capability/skill_search_tool.py:142-184` `_search` 经 `router.search(kinds={skill, capability_package})`，卡片来自同一快照（`router.py:195-205`）；`skill_search_tool.py:186-235` `_package_action` 用 `_snapshot_for(agent)`（即 `current_skill_snapshot`）`resolve_package`，没有 pin 或选择前置。读取走 `agent_py_agent/agent/capability/package_read.py:52-105` `read_package_page`，交付前由 `task_references.py:120-154` `pin_package_reference` 在有会话绑定时写任务 pin。
+- 提示面：`agent_py_agent/agent/prompting_parts/builder.py:550-566` 主线程（`selected_skill_ids` 为 None）渲染完整 Skill／包名卡索引；`agent_py_agent/agent/agent_core/runtime/loop_support.py:250-266` 的推荐块只看开关和 router，不看选择结果。
+
+合同测试（本地运行，不入仓，文件与输出在证据目录）：真实 `SimpleAgent` + `PluginInstallStore` 装两包，假 backend 返回 `{"selected_ids": []}`，经 `_commit_selection` 得 `outcome=empty`、`skill_snapshot_refs=()`；随后 `current_skill_snapshot()` 仍含两包，`skill_search` search 命中两包，按 `next_read` get 成功并写入 pin，pin 后另一包仍可见且可 get；不经 search 直接 get 同样成功并 pin。2 项通过。
+
+端到端（私有 8435、脚本模型、无密钥，被测 wheel `d3a6e0fd…`）：A0.3.0/B0.1.4 原生安装启用后，新会话只提交一次 `ES-1` 提示。request `gwreq-1790617192-014130033379444e8028de37fe327692`、thread `thread-f44abb37423e4c0d`，`done`。假模型日志：工具探针 → 选择请求（`response_format=json_schema`，正文含 `selected_ids`）答 `{"selected_ids": []}` → 任务记录 `status=finished, outcome=empty, selected_count=0, warning_codes=[]` → 主轮 `skill_search` search 命中 drama-workflow-b（45.5）、drama-text-a（7.0）及三个公开 Skill → 按 `next_read` get 读到 `CAPABILITY.md` 2651 字符，activation `8f3737ba…`、content `7b9b77c6…`、九字段 `source_ref` 与 `next_search` → 任务 `skill_snapshot_refs` 出现 drama-workflow-b pin（activation 一致）；工具账 `skill_search` 2/2 成功，runtime.db `tool_completed` 一致。首次尝试因假模型未回答运行前工具探针而失败（`TOOL_PROTOCOL_CAPABILITY_UNAVAILABLE`），修正脚本后重开会话只提交一次，失败请求保留在证据里。
+
+| 核对项 | 结论 | 依据 |
+| --- | --- | --- |
+| 空选后 skill_search list/search/get 能否看到本 owner 已启用的包 | 能 | 快照与选择无关；合同测试与端到端 search 均命中两包 |
+| `skill_snapshot_refs` 为空时按需 get 能否成功并建立 pin | 能 | 端到端 get 成功后任务出现 pin；合同测试同 |
+| 空选会不会把包从主线程工具面或索引里拿掉 | 不会 | `_commit_selection` 空选只写回执；提示面索引与推荐不看选择结果 |
+
+结论：(a) 空选后包仍可按需发现、读取并建立 pin，C24 里是模型自己没有去检索，属于模型行为，不是设计问题；未确认宿主缺陷，不改产品。证据在私有目录 `~/.my-agent/decision-evidence/empty-selection-visibility-9f88/`（`SUMMARY.json`、`sha256sums.txt`、假模型日志、原生任务/工具账、合同测试文件与输出）。收尾：TUI `/exit`、`gateway stop` 后 pid 消失、假模型按记录 pid 关闭，8435/18935 空闲。
+
+建议下一步：把本节与 C24 一起合入文档即可，不需要产品改动；后续自然任务若再出现空选，按模型行为记账，不为凑证据改提示；如需提高包被采用的概率，属提示/选择策略议题，由产品作者另行决定。只读复核可并行。
+
 ## C24固定9f88的131072自然长任务两代压缩（2026-09-28）
 
 被测源码 `9f88e4905`（与生产 step14w 产品代码相同），由 git archive 在 scratchpad 构建 wheel `d3a6e0fd42d4a8dea45a5b0a0c1c316bfd737de04e74d372626cb774d2402390` 并装进新建 Python 3.12.13 venv。隔离 `MY_AGENT_HOME`、owner local/main、私有 Gateway 仅监听 127.0.0.1:8435（pid 82376，16:42:17 UTC 启动），启动器 `env -i` 且经代理；生产 8420 与 Codex 的 8433 未碰。模型沿用 C21/C22 那份 owner catalog 的字节副本（600 权限、未打印、跑完删除），只由脚本把 `selected` 的 `d9607663` profile（官方 MiniMax-M2.7、`anthropic_compatible`）的 `model_context_window_tokens` 从 262144 改成 131072，其余 profile 与阈值未动；TUI 上下文条显示 131.1k、压缩点 90%（117964）。A0.3.0（`98e21e0a…`）/B0.1.4（`7b9b77c6…`）在独立的 staging TUI 用原生 `/plugins install` 与 `/plugins enable` 装入并启用（两包均未要求确认码），安装账本 `8b367fa3…` 运行前后一致；owner 级 capability 配置为产品默认加 `enable_capability_package_selection: true`，与 C21 的 owner 一致。
@@ -277,7 +303,7 @@ G04 的三类控制各做了一次独立的真实原生 TUI 实测，分别判�
 
 两代都在可见估算未越 90% 阈值时由活动轮工具归档溢出触发（峰值 89492 < 117964），与 C21 的触发类别相同；checkpoint 行的 `forced=true` 是候选标记，自动来源仍以进度事件 `trigger_source` 为准。进度事件共 12 条（每代 started/summarizing/measuring/checkpointing/committing/completed），`conversation_compacted` 2 条；压缩后上下文 39157/46017，终态 `current_context_token_estimate` 12649。工具索引 85 条（第 1 代前 39、两代之间 27、第 2 代后 19），runtime.db `tool_completed` 90 条（含 5 次 read_artifact）；`run_command` 17 次（12 成功、5 `COMMAND_FAILED`，含 `python` 不存在后改用 python3）、`edit_file` 失败 2、`task_progress` 参数错误 3。物理模型请求 86 次、HTTP 86/0 重试、0 失败/超时；累计输入 5451374（缓存 4941982）、输出 63371；model_usage 三段快照 31/30/25 次与总数一致。用例目录产物 37 个文件（README、handoff_cli.py、src 5 个模块、tests、demos），不据此判业务通过。
 
-平台观察，未确认为缺陷：包选择空选后任务没有 pins，模型全程没有检索包；这是模型决策还是空选后包对主线程不可见，只读结构化事实不能区分（本轮不读 prompt 正文），留给产品作者核对。`/plugins install` 的来源路径受 TUI 工作区路径策略约束：zip 放在工作区外时返回 `TOOL_INVALID_ARGUMENTS`（`tool_operations` 记 `plugin_install` FAILED 1 次），放进工作区后成功；这是既有硬门，记录以便接手者复现。本轮没有产品、测试或配置改动。
+平台观察，未确认为缺陷：包选择空选后任务没有 pins，模型全程没有检索包；这是模型决策还是空选后包对主线程不可见，只读结构化事实不能区分（本轮不读 prompt 正文）；已由 [C25](#c25空选后能力包对主线程的可见性只读核对与脚本复现2026-09-28) 只读核对并复现：空选后包仍可发现、读取并 pin，属模型行为。`/plugins install` 的来源路径受 TUI 工作区路径策略约束：zip 放在工作区外时返回 `TOOL_INVALID_ARGUMENTS`（`tool_operations` 记 `plugin_install` FAILED 1 次），放进工作区后成功；这是既有硬门，记录以便接手者复现。本轮没有产品、测试或配置改动。
 
 证据在私有目录 `~/.my-agent/decision-evidence/compact-131072-9f88/`：原生 request/response/chunks、checkpoint 账本、线程/任务/model_usage、工具索引、runtime.db 只读副本、安装账本、用例产物、harness 脚本（stage/drive/collect/analyze）与 pane 快照，`SUMMARY.json` 与 `sha256sums.txt` 为索引。收尾：TUI `/exit` 正常退出，`gateway stop` 后 pid 82376 消失、8435 空闲、私有 tmux 无会话；catalog 副本与 venv 已删除，wheel 与证据保留。
 
