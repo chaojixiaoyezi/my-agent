@@ -1,5 +1,28 @@
 # 测试与发布验收
 
+## TaskRun 收口允许静止但未终态的子 run（2026-09-28，分支 `claude/38-taskrun-settle`，基于 `d0318486e`）
+
+- **来源**：dsh-be 的 TaskRun 收口分析（集成方认可）：子代理 BLOCKED 后 `agent_runs.status` 停在 created 是设计，唯一受影响的是
+  `settle_task_run_if_agent_tree_terminal` 要求整棵树终态，父 TaskRun 永远不关，`open_task_runs` 只增不减。
+- **新测试** `test_task_run_settle_quiescent_children.py`，10 项，全部走真实 `RuntimeRepository`（子 run 按真实派工路径：登记 pending →
+  `create_attempt(reuse_pending=True)` 激活并持锁；BLOCKED 用 `settle_agent_attempt` 关 attempt、删锁）：
+  - 根 done + BLOCKED 子 run：TaskRun 关闭并写一条 `task_run.closed`，payload 带 `quiescent_agent_run_count=1` 与子 run ID，
+    `open_task_runs` 清空，子 run 本身仍是 created；
+  - 该子 run 随后 `create_attempt`：写 `task_run.reopened`（attempt/agent_run 绑定、previous_status/closed_at），再次收口返回
+    `agent_tree_active`，子 run 真终态后第二条 `task_run.closed` 的静止计数为 0；
+  - attempt 正在跑、attempt 已终态但执行锁还在、根未终态：三种都仍返回 `agent_tree_active`，不写事件；
+  - unknown 且锁已不在：仍 `agent_tree_active`（结果不明要等显式恢复，集成方定）；recovered 且锁已不在：算静止；
+    没有任何 attempt 的子 run 保持开放；
+  - 发现扫描 `unfinished_task_ids` 能把存量 open TaskRun 关掉，幂等，operator 记 `wake-discovery-task-run-reconcile`；
+  - pending 激活的 `agent_run.started` 事件 status 与 `agent_runs` 列一致（created），`agent_attempt.started` 仍记 running。
+- **先红后绿**：修复前 10 项中 6 项失败（含发现扫描与事件修正），另外 4 项（活跃形状、unknown 无锁、无 attempt 子 run）本来就绿。
+- **旧用例**：`test_run_audit_terminal.py`、`test_r103_ledger_selfheal.py`、`test_host_command_execution.py`、
+  `test_host_command_operation_replay.py`、`test_runtime_db.py`、`test_runtime_db_main_chain.py` 原样通过。
+- **变异验证**：13 个变异全部被抓出。每个都在 `PYTHONDONTWRITEBYTECODE=1`、独立 `PYTHONPYCACHEPREFIX` 的子进程里跑，
+  跑完逐字节恢复并核对哈希：去掉锁检查、去掉 attempt 结算检查、根按子 run 判、终态 run 不跳过、不记静止 ID、计数多一、
+  只认 done attempt、unknown 也算静止、活跃判定取反、锁 scope 不带前缀、活跃原因改名、run started 事件仍写 running、
+  无 attempt 也算静止。
+
 ## 凭据类字符串配置补类型校验（2026-09-28，分支 `claude/be-credential-types`，基于 `8ef68c5fd`）
 
 - **来源**：T3 真实 TUI 验收。凭据键写错类型时没有任何配置告警：`embedding_api_key` 写成列表会原样进入运行配置，

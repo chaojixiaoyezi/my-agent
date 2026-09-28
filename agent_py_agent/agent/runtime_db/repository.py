@@ -98,6 +98,38 @@ ROOT_CLAIM_CONFLICT = "ROOT_CLAIM_CONFLICT"
 # LLM: 主代理自动挂载与后台调度必须共用这个纯结构化闸；新增状态时同步检查
 # create_attempt 与 main_agent_recovery_block_for_task，禁止调用方解析异常文案。
 # 函数用途: 根据 run/attempt 的权威状态返回是否必须先人工恢复。
+#: 能让非终态子 run 算“已静止”的 attempt 状态：attempt 终态集去掉 unknown。unknown 是“结果不明”，必须等显式恢复
+#: （recovered）或结算，不能因为锁没了就默认已结束，否则 task_run.closed 会盖过一个没有定论的子结果；recovered 表示
+#: 恢复协议已经结算过，可以算。
+_QUIESCENT_ATTEMPT_STATUSES = _ATTEMPT_TERMINAL_STATUSES - {ATTEMPT_STATUS_UNKNOWN}
+
+
+# LLM: TaskRun 收口的树判定，只读 runtime 自己的表（agent_runs / agent_attempts / resource_locks），不读 canonical。
+#   run 终态直接算结束；非根 run 若 current attempt 在 _QUIESCENT_ATTEMPT_STATUSES（终态集去掉 unknown）且执行锁已不在，
+#   算“已静止”（BLOCKED/unfinished 只关 attempt、删锁、run 留 created 是设计）；根 run 必须终态，因为 TaskRun 状态取根。
+#   没有 attempt 的 run 和 unknown attempt 都证明不了静止。返回 None 表示树仍活跃；否则返回静止 run 的 ID 列表，供
+#   task_run.closed 留证。判定可逆：静止子 run 之后 create_attempt 会经 _reopen_task_run_for_attempt_conn 重开 TaskRun。
+#   改判据要同步 test_task_run_settle_quiescent_children。
+# 函数用途: 判断一棵代理树是否都已结束或静止，并列出靠“attempt 已结算且无锁”判定的子 run。
+def _quiescent_nonterminal_agent_runs(conn: sqlite3.Connection, agents: list[sqlite3.Row]) -> list[str] | None:
+    quiescent: list[str] = []
+    for row in agents:
+        if str(row["status"] or "") in AGENT_RUN_TERMINAL_STATUSES:
+            continue
+        if not str(row["parent_agent_run_id"] or ""):
+            return None
+        if str(row["attempt_status"] or "") not in _QUIESCENT_ATTEMPT_STATUSES:
+            return None
+        agent_run_id = str(row["agent_run_id"] or "")
+        lock = conn.execute(
+            "SELECT 1 FROM resource_locks WHERE canonical_scope = ?", (exec_lock_scope(agent_run_id),),
+        ).fetchone()
+        if lock is not None:
+            return None
+        quiescent.append(agent_run_id)
+    return quiescent
+
+
 def _main_agent_recovery_reason(run_status: str, attempt_status: str) -> str:
     normalized_run = str(run_status or "")
     if normalized_run not in RUN_STATUS_LEGACY_CREATED and \
@@ -1081,7 +1113,11 @@ class RuntimeRepository(
                 now,
             ),
         )
-        for event_type in ("agent_attempt.started", "agent_run.started"):
+        # 两个事件各记各的列：attempt 事件记 agent_attempts 列（pending → running），run 事件记 agent_runs 列（→ created）。
+        for event_type, previous_status, status in (
+            ("agent_attempt.started", ATTEMPT_STATUS_PENDING, "running"),
+            ("agent_run.started", str(run["status"] or ""), "created"),
+        ):
             self._append_event_conn(
                 conn,
                 event_type=event_type,
@@ -1089,8 +1125,8 @@ class RuntimeRepository(
                 agent_run_id=agent_run_id,
                 task_run_id=str(run["task_run_id"] or ""),
                 payload={
-                    "previous_status": ATTEMPT_STATUS_PENDING,
-                    "status": "running",
+                    "previous_status": previous_status,
+                    "status": status,
                     "attempt_generation": generation,
                 },
             )
@@ -2375,9 +2411,12 @@ class RuntimeRepository(
         return {"settled": True, "closed_at": now}
 
     # LLM: Conversation completion may close a TaskRun only after every AgentRun in its
-    # exact tree is terminal; the root AgentRun status supplies the execution outcome.
-    # This is lifecycle projection only and must never inspect model prose or task quality.
-    # 函数用途: 在普通会话任务已经结构化结束后，确认整棵代理树都结束再原子关闭本次执行。
+    # exact tree is terminal or quiescent; the root AgentRun status supplies the execution
+    # outcome and must itself be terminal. Quiescence is decided by
+    # _quiescent_nonterminal_agent_runs from runtime facts only (attempt terminal, no exec
+    # lock) and is reversible: a later create_attempt reopens the TaskRun via
+    # _reopen_task_run_for_attempt_conn. Never inspect canonical links, model prose or task quality here.
+    # 函数用途: 在普通会话任务已经结构化结束后，确认整棵代理树都已结束或静止，再原子关闭本次执行并留下静止子 run 证据。
     def settle_task_run_if_agent_tree_terminal(
         self,
         *,
@@ -2404,16 +2443,15 @@ class RuntimeRepository(
             if float(task_run["closed_at"] or 0.0) > 0:
                 return {"settled": False, "reason": "already_terminal"}
             agents = conn.execute(
-                "SELECT agent_run_id, parent_agent_run_id, status "
-                "FROM agent_runs WHERE task_run_id = ? ORDER BY created_at, agent_run_id",
+                "SELECT ar.agent_run_id, ar.parent_agent_run_id, ar.status, aa.status AS attempt_status "
+                "FROM agent_runs ar LEFT JOIN agent_attempts aa ON aa.attempt_id = ar.current_attempt_id "
+                "WHERE ar.task_run_id = ? ORDER BY ar.created_at, ar.agent_run_id",
                 (selected_run,),
             ).fetchall()
             if not agents:
                 return {"settled": False, "reason": "no_agent_runs"}
-            if any(
-                str(row["status"] or "") not in AGENT_RUN_TERMINAL_STATUSES
-                for row in agents
-            ):
+            quiescent = _quiescent_nonterminal_agent_runs(conn, agents)
+            if quiescent is None:
                 return {"settled": False, "reason": "agent_tree_active"}
             roots = [row for row in agents if not str(row["parent_agent_run_id"] or "")]
             if len(roots) != 1:
@@ -2439,6 +2477,9 @@ class RuntimeRepository(
                     "reason": str(reason or ""),
                     "root_agent_run_id": str(roots[0]["agent_run_id"] or ""),
                     "agent_run_count": len(agents),
+                    # 结构化证据：靠“attempt 终态且无执行锁”而不是 run 终态被算作结束的子 run。
+                    "quiescent_agent_run_count": len(quiescent),
+                    "quiescent_agent_run_ids": list(quiescent),
                 },
             )
         return {"settled": True, "closed_at": now, "status": root_status}

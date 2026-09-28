@@ -1,5 +1,15 @@
 # 设计台账
 
+## TaskRun 收口允许“静止但未终态”的子 run（2026-09-28，分支 `claude/38-taskrun-settle`，基于 `d0318486e`，本地验证通过，待集成）
+
+**问题**（dsh-be 分析，集成方认可）：子代理以 BLOCKED / unfinished 等非终态 runtime_status 结束时，设计上只关闭 attempt、删掉执行锁，`agent_runs.status` 停在 created（展示面读 canonical，不受影响）。`settle_task_run_if_agent_tree_terminal` 要求树上所有 AgentRun 终态，父 TaskRun 因此永远 `closed_at=0`、不写 `task_run.closed`；两个调用方（`runtime_mixin._settle_terminal_conversation_task_run`、`owner_wake_discovery._reconcile_terminal_conversation_task_runs`）忽略返回值，`open_task_runs` 只增不减，发现扫描每轮对这些行白跑一次。
+
+**规则**（只改这一处判定，`runtime_db/repository._quiescent_nonterminal_agent_runs`）：非根 run 满足任一即算已静止——状态终态；或 current attempt 已结算（`_QUIESCENT_ATTEMPT_STATUSES` = attempt 终态集去掉 unknown，即 done/failed/cancelled/recovered）且执行锁 `attempt-exec:{agent_run_id}` 已不在。unknown 是“结果不明”，必须等显式恢复或结算，锁没了也不算（集成方定：否则 `task_run.closed` 会盖过没有定论的子结果，违背“状态别名不隐式兼容”）；recovered 已由恢复协议结算过，可以算。根 run 仍必须终态（TaskRun 状态取根）。没有任何 attempt 的 run 证明不了静止，保持开放。只读 runtime 自己的表，不读 canonical。`task_run.closed` payload 新增 `quiescent_agent_run_count` / `quiescent_agent_run_ids` 作为结构化证据。判定可逆：静止子 run 之后 `create_attempt` 仍经 `_reopen_task_run_for_attempt_conn` 写 `task_run.reopened`。
+
+**顺手修正**：`_activate_pending_attempt_conn` 的 `agent_run.started` 事件原来写 attempt 的 `running`，与 `agent_runs` 列不一致；现按各自的列写（attempt 事件 pending→running，run 事件 →created）。产品侧没有消费方读这个字段。
+
+回归与变异见 `TESTS.md` 同日一节；结构说明见 [Gateway 结构](docs/modules/gateway/04-structure.md)“ConversationTaskLink 与 TaskRun 收口”。
+
 ## Compact 候选接受门与预检同一校准口径（2026-09-28，分支 `claude/38-compact-calibration`，基于 `59fdcabbf`，本地验证通过，待集成）
 
 **根因（压缩异常②）**：真机单回合多次 `read_file` 后，预检按供应商观测校准过的可见上下文越过触发线（本地估算比供应商实际高约 43%：242,207 对 169,217），恢复压缩却按未校准的本地投影量候选，候选被 `COMPACT_CANDIDATE_TOO_LARGE` 拒掉；压缩开始时 `_gateway_compact_progress_callback` 又把未校准的“压缩前”写成线程 `model_context_usage` 快照。两条链说的不是同一种数。
