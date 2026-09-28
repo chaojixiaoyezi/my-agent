@@ -33,6 +33,7 @@ from ....tooling.models import (
     ToolHandlerOutcome,
     ToolRuntimePolicy,
 )
+from ...orchestration.scope_resolution import UNMATCHED_RUN_SCOPE_CODE
 from ..create_policy import current_orchestration_requester_run_id
 from ..tool_specs import build_cancel_subagents_model_spec
 
@@ -158,6 +159,11 @@ def execute_cancel_subagents(
         )
     run_ids = run_ids_result.run_ids
     if not run_ids:
+        # LLM: 空解析结果要有结构化原因：显式给了 id 就用与 list_agents 相同的裁决码（不区分不存在/无权看），
+        #   什么都没给才是"参数不足"。两种情况都不静默。
+        if run_ids_result.error_payload:
+            payload = {"ok": False, **run_ids_result.error_payload}
+            return _cancel_failure(json.dumps(payload, ensure_ascii=False, indent=2), "TOOL_INVALID_ARGUMENTS")
         return _cancel_failure(
             "缺少 run_id/run_ids/root_id/status，未取消任何子代理。",
             "TOOL_PARAMETER_REQUIRED",
@@ -304,6 +310,20 @@ def _resolve_run_ids(agent: SimpleAgent, params: dict[str, object]) -> _ResolveR
             return _ResolveRunIdsResult(False, [], tasks_result.error_payload)
         tasks = tasks_result.tasks
         ids.extend(str(task.id) for task in tasks if task_status_in(task.status, status_filter))
+    if explicit:
+        # LLM: 显式点名的 id 必须真的在当前可见树里；解析阶段就判掉不可见目标，别让它走到取消执行层
+        #   变成 "programmer_b..." 这类无意义错误。用与 list_agents 相同的裁决码，不区分不存在/无权看。
+        tasks_result = _list_runs_for_cancel(agent)
+        if not tasks_result.ok:
+            return _ResolveRunIdsResult(False, [], tasks_result.error_payload)
+        visible = {str(task.id) for task in tasks_result.tasks}
+        unmatched = [item for item in explicit if item not in visible]
+        if unmatched:
+            return _ResolveRunIdsResult(True, [], {
+                "reason": UNMATCHED_RUN_SCOPE_CODE,
+                "requested_run_ids": unmatched,
+                "message": "这些 run_id 不在当前可见范围内（不存在或无权查看，两者答复相同）。",
+            })
     return _ResolveRunIdsResult(True, _dedupe(ids), {})
 
 
@@ -346,9 +366,11 @@ def _cancel_error_code(error_payload: dict[str, object]) -> str:
     """把 resolve/status 错误 payload 映射到准确分类码（避免无码兜底成 UNKNOWN_ERROR）。
 
     - invalid_status_filter：status 取值非法，改参数可修 → TOOL_INVALID_ARGUMENTS。
+    - requested_run_id_not_in_visible_scope：显式目标不在可见范围，改参数可修 → TOOL_INVALID_ARGUMENTS。
     - 其余（list_runs 抛错产出的 runtime_error_report）：运行时查询异常 → TOOL_EXECUTION_FAILED(可重试)。
     """
-    if str(error_payload.get("error") or "") == "invalid_status_filter":
+    error = str(error_payload.get("error") or "")
+    if error == "invalid_status_filter" or str(error_payload.get("reason") or "") == UNMATCHED_RUN_SCOPE_CODE:
         return "TOOL_INVALID_ARGUMENTS"
     return "TOOL_EXECUTION_FAILED"
 

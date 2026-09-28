@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..agent_core.orchestration.scope_resolution import UNMATCHED_RUN_SCOPE_CODE
 from ..runtime_context import current_subagent_run_id
 from ..task_progress import (
     invalid_coverage_statuses,
@@ -99,6 +100,9 @@ class TaskProgressTool(BaseTool):
         if not run_id:
             run_id = "main"
         root = runtime_owner_root(self.agent)
+        # LLM: 显式 run_id 不在可见范围时，读写都先给出结构化裁决：不新建账本、不落到别的账本上。
+        if explicit and (scope_denied := _unmatched_explicit_run_target(self.agent, root, run_id, params)):
+            return scope_denied
         if action == "update":
             if scope_error := _invalid_write_target(self.agent, root, run_id, params):
                 return scope_error
@@ -440,6 +444,46 @@ def _invalid_write_target(agent: object, root: Path, target: str, params: dict) 
     }
     return ToolHandlerOutcome("task_progress", False, json.dumps(payload, ensure_ascii=False),
                               error_code="TOOL_INVALID_ARGUMENTS", effect_outcome="not_started")
+
+# LLM: 显式 run_id 在当前 owner 可见账本里找不到对应行时的唯一裁决：不猜目标、不新建账本，直接把
+#   "请求的 id 不在可见范围"作为结构化事实返回；调用方据此换用当前账本或先 read 拿正确 id。
+#   判定只看宿主事实（当前身份、coverage 来源与磁盘上的账本文件），不解析自然语言、不按前缀猜。
+# 函数用途: 判断显式 run_id 是否不在可见范围，是则给出拒绝结果，否则返回 None 继续原链。
+def _unmatched_explicit_run_target(agent: object, root: Path, target: str, params: dict) -> ToolHandlerOutcome | None:
+    if not target:
+        return None
+    current = getattr(agent, "_current_run_params", None)
+    if current is not None and target in {
+        str(getattr(current, "run_id", "") or ""),
+        str(getattr(current, "task_id", "") or ""),
+        durable_task_id(current),
+        _target_run_id(agent, params, allow_explicit=False),
+    }:
+        return None
+    if progress_path(root, target).is_file():
+        return None
+    return _scope_rejection_outcome(target, detail="requested_run_id_not_in_visible_scope")
+
+
+# LLM: 拒绝回执只带结构化事实与可执行修法；requested 只留在 explicit，不写进 effective，避免把不可见 id 冒充成有效范围。
+# 函数用途: 生成"显式目标不在可见范围"的统一拒绝结果。
+def _scope_rejection_outcome(target: str, *, detail: str) -> ToolHandlerOutcome:
+    payload = {
+        "ok": False,
+        "reason": "task_progress_scope_mismatch",
+        "error": "目标账本不在当前代理可见范围内，没有读写它。",
+        "scope_resolution": {
+            "explicit": {"run_id": target},
+            "effective": {},
+            "decision": "denied",
+            "reasons": [UNMATCHED_RUN_SCOPE_CODE],
+        },
+        "scope_warnings": [UNMATCHED_RUN_SCOPE_CODE, detail],
+        "how_to_fix": "省略 run_id 写当前计划；要补充旧计划先用同一会话 read 拿回它返回的 run_id。",
+    }
+    return ToolHandlerOutcome("task_progress", False, json.dumps(payload, ensure_ascii=False),
+                              error_code="TOOL_INVALID_ARGUMENTS", effect_outcome="not_started")
+
 
 # LLM: 显式当前任务 ID 只是 canonical ledger 别名；真正历史目标保持精确，写入权限由调用方另行校验。
 # 函数用途: 解析读写账本编号，不从 prompt 或编号前缀猜目标，也不重新绑定任务。

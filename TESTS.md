@@ -30,6 +30,52 @@
   - 改善但未继续拆：`subagents/services/base.py::SubAgentBaseService` 今天从 soft（大于 250 行）降到 high-risk（239 行），属于改善；压到 200 行以下要移出约 40 行建 run 权威写入逻辑，本片不动。
 - **验证**：相关 33 个测试文件共 675 项通过，覆盖 agent_tree、插件管理与命令、artifact 读取、后台主代理、architecture_guardrails、constant_names_unique、code_size_script。五项静态 gate 全部通过。
 
+## task_progress / cancel_subagents 的范围裁决（2026-09-28，分支 `my-agent/self-dev-2`，基点 `ca756b5db`）
+
+- **来源/做法**：dev 派活任务 5。沿用 my-agent-4 在 list_agents 里定的裁决码（`30c3b98d4`），把两处遗留的静默行为补成结构化裁决。
+- **裁决码只有一份**：`agent_core/orchestration/scope_resolution.UNMATCHED_RUN_SCOPE_CODE
+  = "requested_run_id_not_in_visible_scope"`；`agent_tree/status.py` 从它导入，不再自带副本。
+- **task_progress**（`agent_core/task_progress_tool.py`）：新增 `_unmatched_explicit_run_target`，在 `TaskProgressTool.execute`
+  取到 run_id 之后立刻判定——显式 id 既不是当前身份（run/task/durable/当前账本键）也不是磁盘上已存在的账本时，
+  返回 `_scope_rejection_outcome`：`ok=false`、`error_code=TOOL_INVALID_ARGUMENTS`、`effect_outcome=not_started`，
+  `scope_resolution.explicit` 保留请求 id、`effective` 为空、`scope_warnings` 带裁决码。读和写都走这一关，**不新建账本**。
+- **cancel_subagents**（`agent_core/orchestration/tools/cancel.py`）：显式点名的 id 必须在当前可见树里；不在就
+  在解析阶段返回同一裁决码（不再一路带到取消执行层报成无意义的 programmer 错误）。`_cancel_error_code` 把该 payload
+  映射成 `TOOL_INVALID_ARGUMENTS`，不再兜底 `UNKNOWN_ERROR`；没给任何目标时仍是 `TOOL_PARAMETER_REQUIRED`。
+
+### 复现
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_tool_scope_resolution.py \
+  agent_py_agent/tests/test_list_agents_scope_resolution.py agent_py_agent/tests/test_agent_tree_model_view.py \
+  agent_py_agent/tests/test_agent_tree_three_layer_status.py agent_py_agent/tests/test_orchestration_tools.py -q
+```
+
+新增 12 条用例；连同 list_agents / 树视图 / 编排工具共 72 passed。
+
+### 变异验证（8/8 KILLED）
+
+| 变异体 | 结果 | 被杀它的用例 |
+|---|---|---|
+| task_progress 入口不做可见性裁决 | KILLED | `test_tool_progress_entry_point_returns_the_denial_not_a_silent_write` |
+| 只对写路径裁决、读路径放行 | KILLED | `test_tool_progress_entry_point_read_is_also_denied` |
+| 判据改成“永远不可见”（连当前账本也拒） | KILLED | `test_current_ledger_and_existing_ledger_are_not_denied` |
+| 拒绝回执丢掉裁决码 | KILLED | `test_scope_rejection_payload_names_the_shared_decision_code` |
+| 请求 id 冒充成 effective 范围 | KILLED | 同上 |
+| cancel 不校验显式目标可见性 | KILLED | `test_cancel_invisible_explicit_target_is_judged_at_resolution` |
+| cancel 去掉 unmatched 过滤 | KILLED | 同上 |
+| 错误码映射丢掉裁决码分支 | KILLED | `test_cancel_error_code_maps_scope_denial_to_invalid_arguments` |
+
+**一次真实迭代**：第一版没有 entry-point 接线用例，只测判定函数——把 `execute` 里那两行裁决改成 no-op，整批仍全绿（M1 存活）。
+补了走 `TaskProgressTool.execute` 的读/写两条端到端用例后才杀掉。**只测 helper 不算证明接线生效。**
+
+### 排查记录（供复用）
+
+- `cancel_subagents` 原来把不可见的显式 id 一路带到 `_filter_existing_targets`，最终以 `programmer_b...` 类错误收场；
+  只在“空列表”分支加说明是不够的，必须在解析阶段判定可见性。
+- 写 `pytest` 探针时注意：`agent_py_agent` 是 editable 安装的命名空间包，在仓库根目录外跑脚本会 import 到别处的安装包；
+  探针写成临时 `tests/test_*.py` 再跑，和现有测试同一环境。
+
 ## Jev observe 采样开关：成功满 6 次后本小时不再调用（2026-09-28，分支 `my-agent/self-dev-2`，基点 `ca756b5db`）
 
 - **来源/做法**：dev 派活任务 4（从 my-agent-1 队列转来）。背景是 11 个点位全 observe、48 小时 276 次调用只换来观察记录。

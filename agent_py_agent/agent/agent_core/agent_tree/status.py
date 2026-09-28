@@ -17,6 +17,7 @@ from ...subagents.kernel import SubagentKernelQuery
 from ..orchestration.child_result_index import child_result_index_from_nodes
 from ..orchestration.run_scope import remembered_orchestration_run_ids
 from ..orchestration.scope_resolution import (
+    UNMATCHED_RUN_SCOPE_CODE,
     ScopeResolution,
     scope_resolution_payload,
     tree_scope_resolution,
@@ -31,9 +32,9 @@ from .scope_filter import (
 
 _SCHEMA_VERSION = "agent_tree_status.v1"
 
-# LLM: 显式 run_id 在当前 owner 可见范围内没有任何匹配行时的唯一裁决码。它同时覆盖"这个 id 不存在"
-#   和"这个 id 不属于你可见范围"两种情况，两者必须给出完全相同的答复，绝不泄漏目标是否存在。
-_UNMATCHED_RUN_SCOPE_CODE = "requested_run_id_not_in_visible_scope"
+# LLM: 裁决码只有一份定义（orchestration/scope_resolution.UNMATCHED_RUN_SCOPE_CODE），本模块不再自带副本，
+#   下面这行只是给同模块旧引用保留的名字，值就是共用常量。
+_UNMATCHED_RUN_SCOPE_CODE = UNMATCHED_RUN_SCOPE_CODE
 
 
 # LLM: 从规范 kernel 生成一次只读快照，保留 owner/thread/run 范围及裁决，不驱动生命周期。
