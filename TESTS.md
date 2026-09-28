@@ -67,6 +67,15 @@
   `_restore_newer_closed_state` 把 TAKEN_OVER 静默还原为 DONE，takeover_by 为空。共复现两次。
 - **本轮验证**：只改 Markdown；运行 doc_sync、`git diff --check` 和 `check_clean_package`，没有跑 pytest。
 
+## 能力包 G05 恢复边界：脚本模型端到端（2026-09-28，被测 `9f88e4905`，仅文档）
+
+- **结论**：脚本模型端到端机制已验，真实模型未覆盖。五个场景全部通过：审批期间停用＋迟到批准、读取进行中切代、UNKNOWN 原操作查询零重放、非空设置不兼容、内容 SHA 变化后旧任务续读。结果表和边界见[验收记录](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#g05脚本模型端到端机制验证2026-09-28)。
+- **方法**：git archive 导出被测提交，在独立 venv 中运行。Gateway 用 8438，脚本 OpenAI 兼容模型用 8448（只在本机回环）。进程都经 `env -i` 启动，HOME 指向测试根内的空目录，不设模型密钥。两个真实 TUI：一个发需求并按 y/n 处理审批，一个执行 `/plugins` 管理命令。换代、更新和配置只走 `/plugins disable|enable|update|configure`，不改数据库。
+- **受控故障**：Gateway 进程加载测试侧 `sitecustomize`，暂停点由一次性 armed 文件开启，不改变产品返回值。读中切代暂停在包成员读取前后两次安装核对之间；UNKNOWN 场景暂停在内容启用提交之后，再 SIGKILL 本测试 Gateway 的 PID。
+- **判据**：只看结构化事实，包括工具回执的 status、error_code、effect_outcome，安装表的 revision、activation_id 和设置，任务 `skill_snapshot_refs`，runtime.db 的操作行数、generation 和 attempt（只读），以及在 runtime.db 副本上调用产品 `query_host_command` 得到的 `outcome_unknown`。不看模型文字。
+- **覆盖边界**：纯内容包的 source_ref 写入在 ask/auto 下不弹审批，所以审批场景用同一回合里另一个只读审批作为等待点。旧任务续读只验证了同一回合。管理操作以外的工具 UNKNOWN 没有覆盖。脚本与证据在 `~/.my-agent/decision-evidence/recovery-edges-9f88/`（仓库外）。
+- 本条只改文档，不涉及产品代码或测试，没有跑 pytest。
+
 ## 前端 import 链恢复：补回 `frontend/src/data/runtimeConfig.ts` 与 `mockConfig.ts`（2026-09-28，分支 `claude/9a-frontend-runtimeconfig`，基于 `3e23d2da8`）
 
 - **根因（误删）**：2026-08-15 建独立仓库的初始化提交 `0b6252590` 没带 `frontend/src/data/` 两个文件，而同一提交里的
